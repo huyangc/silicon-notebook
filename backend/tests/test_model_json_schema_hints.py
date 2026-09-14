@@ -24,7 +24,6 @@ import pytest
 
 from app.core.config import Settings
 from app.core.model_json import (
-    ModelJsonRepairError,
     parse_model_json_object,
     validate_model_json_shape,
 )
@@ -180,9 +179,14 @@ def _assert_blank_enums_are_accepted(hint: str) -> tuple[Any, list[tuple]]:
     return obj, enum_paths
 
 
-def _assert_bogus_enums_are_rejected(
+def _assert_bogus_enums_are_reported(
     hint: str, obj: Any, enum_paths: list[tuple]
 ) -> None:
+    """An off-enum value is DELIVERED and reported, never rejected.
+
+    Harness principle (2026-09-14): the domain parser already narrows every
+    enum it reads, so a bogus value costs that one field, not the reply.
+    """
     for path in enum_paths:
         # A field under list index > 0 is validated against the example's FIRST
         # item, whose value at that position may not be an enum at all.
@@ -191,9 +195,9 @@ def _assert_bogus_enums_are_rejected(
         bogus = json.dumps(
             _with_value(obj, path, "bogus"), ensure_ascii=False
         )
-        with pytest.raises(ModelJsonRepairError) as caught:
-            validate_model_json_shape(bogus, hint)
-        assert caught.value.reason == "invalid_enum", path
+        shape = validate_model_json_shape(bogus, hint)
+        assert shape.content == bogus, path
+        assert [d.reason for d in shape.deviations] == ["invalid_enum"], path
 
 
 def test_every_prompt_schema_hint_constant_is_covered():
@@ -219,7 +223,7 @@ def test_every_prompt_schema_hint_constant_is_covered():
 )
 def test_schema_hint_constants_accept_unused_enum_fields(name, hint):
     obj, enum_paths = _assert_blank_enums_are_accepted(hint)
-    _assert_bogus_enums_are_rejected(hint, obj, enum_paths)
+    _assert_bogus_enums_are_reported(hint, obj, enum_paths)
 
 
 @pytest.mark.parametrize(
@@ -230,7 +234,7 @@ def test_schema_hint_constants_accept_unused_enum_fields(name, hint):
 def test_reflect_schema_hint_gates_accept_unused_enum_fields(label, hint):
     obj, enum_paths = _assert_blank_enums_are_accepted(hint)
     assert enum_paths, label  # next_action is an enum in every combination
-    _assert_bogus_enums_are_rejected(hint, obj, enum_paths)
+    _assert_bogus_enums_are_reported(hint, obj, enum_paths)
 
 
 # The production hint for a run with both enumeration whitelists, chunk search
@@ -282,16 +286,17 @@ def test_enumeration_decisions_pass_the_real_shape_gate(decision, action):
     assert json.loads(parsed.content)["next_action"] == action
 
 
-def test_enumeration_decision_with_a_bogus_kind_is_still_rejected():
+def test_enumeration_decision_with_a_bogus_kind_is_delivered_with_a_report():
     bogus = json.loads(_CATALOG_DECISION)
     bogus["enumerate"]["kind"] = "bogus"
 
-    with pytest.raises(ModelJsonRepairError) as caught:
-        validate_model_json_shape(
-            json.dumps(bogus, ensure_ascii=False), _ENUMERATION_HINT
-        )
+    shape = validate_model_json_shape(
+        json.dumps(bogus, ensure_ascii=False), _ENUMERATION_HINT
+    )
 
-    assert caught.value.reason == "invalid_enum"
+    assert [(d.path, d.reason, d.fix) for d in shape.deviations] == [
+        ("enumerate.kind", "invalid_enum", ""),
+    ]
 
 
 class _EventLog:
@@ -365,7 +370,7 @@ def test_reasoning_chat_json_delivers_enumeration_decisions(decision, action):
     ] == []
 
 
-def test_reasoning_chat_json_still_rejects_a_bogus_enum_value():
+def test_reasoning_chat_json_delivers_a_bogus_enum_value_and_logs_the_drift():
     bogus = json.loads(_CATALOG_DECISION)
     bogus["enumerate"]["kind"] = "bogus"
     events = _EventLog()
@@ -373,37 +378,52 @@ def test_reasoning_chat_json_still_rejects_a_bogus_enum_value():
         json.dumps(bogus, ensure_ascii=False), events
     )
     try:
-        with pytest.raises(provider_mod.ModelInvocationError):
-            provider.chat("reasoning_agent").chat_json([], _ENUMERATION_HINT)
+        raw = provider.chat("reasoning_agent").chat_json([], _ENUMERATION_HINT)
     finally:
         provider.close()
 
-    rejected = [
+    # Delivered: the reflect parser narrows ``kind`` itself.
+    assert json.loads(raw)["enumerate"]["kind"] == "bogus"
+    assert [
         event for event in events.events
         if event.get("kind") == "model_json_repair"
         and event.get("status") == "rejected"
+    ] == []
+    [drift] = [
+        event for event in events.events
+        if event.get("kind") == "model_json_shape"
     ]
-    assert [event["reason"] for event in rejected] == ["invalid_enum"]
+    assert drift["status"] == "deviation"
+    assert drift["workload_id"] == "reasoning_agent"
+    assert drift["count"] == 1
+    assert drift["deviations"] == [
+        {"path": "enumerate.kind", "reason": "invalid_enum", "fix": ""},
+    ]
+    # Paths and reasons only — never the reply text.
+    assert "bogus" not in json.dumps(drift)
+    assert "列出" not in json.dumps(drift)
 
 
 @pytest.mark.parametrize("extra", [{"assessment": {}}, {"unadvertised": 1}])
-def test_legacy_schema_rejects_unadvertised_root_keys(extra):
+def test_unadvertised_root_keys_survive_repair(extra):
     hint = prompts.reflect_schema_hint(kg_actions=True)
     payload = json.dumps({"next_action": "answer", "sufficient": True,
                           "reason": "done", **extra})
-    with pytest.raises(ModelJsonRepairError) as caught:
-        parse_model_json_object(payload[:-1] + ",}", hint, allow_repair=True)
-    assert caught.value.reason == "unknown_key"
+    parsed = parse_model_json_object(payload[:-1] + ",}", hint, allow_repair=True)
+    assert parsed.repaired
+    assert json.loads(parsed.content) == json.loads(payload)
+    assert validate_model_json_shape(parsed.content, hint).deviations == ()
 
 
-def test_generic_open_objects_accept_json_null_without_accepting_scalars():
+def test_generic_open_objects_accept_json_null_and_report_scalars():
     hint = '{"payload": {}}'
     for raw in ('{"payload": null}', '{"payload": {"arbitrary": 1}}'):
         parsed = parse_model_json_object(raw, hint, allow_repair=True)
-        validate_model_json_shape(parsed.content, hint)
+        assert validate_model_json_shape(parsed.content, hint).deviations == ()
         repaired = parse_model_json_object(raw[:-1] + ",}", hint, allow_repair=True)
         assert repaired.repaired
-        validate_model_json_shape(repaired.content, hint)
-    with pytest.raises(ModelJsonRepairError) as caught:
-        validate_model_json_shape('{"payload": 7}', hint)
-    assert caught.value.reason == "invalid_type"
+        assert validate_model_json_shape(repaired.content, hint).deviations == ()
+    shape = validate_model_json_shape('{"payload": 7}', hint)
+    assert [(d.path, d.reason, d.fix) for d in shape.deviations] == [
+        ("payload", "invalid_type", ""),
+    ]

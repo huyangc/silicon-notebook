@@ -536,7 +536,11 @@ class SchemaRegistryService:
             now = self.knowledge.seams.now()
             with self.database.write() as db:
                 self.knowledge.lock_schema_registry(db)
-                for item in data.get("new_types") or []:
+                # The shape boundary delivers off-type containers (reported,
+                # not rejected); an ``int``/``str`` here must not become a
+                # TypeError inside the write transaction.
+                raw_new_types = data.get("new_types")
+                for item in (raw_new_types if isinstance(raw_new_types, list) else []):
                     if not isinstance(item, dict):
                         continue
                     try:
@@ -545,10 +549,11 @@ class SchemaRegistryService:
                         )
                     except ValueError:
                         continue
+                    raw_fields = item.get("fields")
                     fields = [
-                        str(f).strip()
-                        for f in (item.get("fields") or [])
-                        if str(f).strip()
+                        f.strip()
+                        for f in (raw_fields if isinstance(raw_fields, list) else [])
+                        if isinstance(f, str) and f.strip()
                     ]
                     if not object_type or object_type in existing or not fields:
                         continue

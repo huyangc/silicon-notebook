@@ -441,12 +441,10 @@ def test_an_empty_enum_string_is_accepted_by_the_validation_layer(repo):
                                                 "venue": ""}
 
 
-def test_a_non_empty_illegal_enum_value_is_refused_by_the_validation_layer(repo):
-    """如实记录**校验层**的行为:非空非法枚举值在到达解析器之前就被拒。
-
-    与 `enumerate.scope` 的同名用例是同一条规则(F1:空串永远合法、非空非法
-    仍拒),所以生产上这一轮走兜底,`plugin_rejected_arguments` 这条路根本走
-    不到——它是下面那条纵深防御用例的事。
+def test_a_non_empty_illegal_enum_value_passes_the_boundary_and_the_parser_clears_it(repo):
+    """校验层只报告、不拒收(harness 原则,2026-09-14):非法的是一个可选参数,
+    不是动作本身。生产上这一轮**不**走兜底——动作成立,非法值被解析器清成空串
+    并留在 `plugin_rejected_arguments`(与下面纵深防御用例走到同一个终点)。
     """
     decision, _ = _decide(
         repo,
@@ -455,8 +453,10 @@ def test_a_non_empty_illegal_enum_value_is_refused_by_the_validation_layer(repo)
         plugin_actions=(SEARCH_IEEE,),
     )
 
-    assert decision.fallback is True
-    assert decision.fallback_reason == "invalid_enum"
+    assert decision.fallback is False
+    assert decision.next_action == "search_ieee"
+    assert decision.plugin_action_arguments == {"query": "layout DRC", "venue": ""}
+    assert decision.plugin_rejected_arguments == {"venue": "workshop"}
 
 
 def test_an_illegal_enum_value_reaching_the_parser_is_cleared_and_recorded(repo):
@@ -552,18 +552,22 @@ def test_the_prompt_tells_the_model_to_write_every_key(repo):
 
 
 @pytest.mark.parametrize("arguments", [{}, {"unknown": "x"}])
-def test_an_argument_object_sharing_no_key_is_refused_by_the_validation_layer(
+def test_an_argument_object_sharing_no_key_is_delivered_with_empty_arguments(
     repo, arguments,
 ):
-    """空对象与「只有未知键」都拿不到兜底之外的结果——这就是那句模板的理由。"""
+    """空对象与「只有未知键」经校验层只记一条 missing_expected_key 漂移,回复
+    照常交付;解析器按描述符取键,每个参数都当没填——这仍是那句模板存在的
+    理由(让模型把每个键都写出来),只是失败模式从「整轮兜底」变成「空参调用」。"""
     decision, _ = _decide(
         repo,
         {"next_action": "ask_web", "reason": "转外部", "ask_web": arguments},
         plugin_actions=(ASK_WEB,),
     )
 
-    assert decision.fallback is True
-    assert decision.fallback_reason == "missing_expected_key"
+    assert decision.fallback is False
+    assert decision.next_action == "ask_web"
+    assert decision.plugin_action_arguments == {"query": "", "depth": ""}
+    assert decision.plugin_rejected_arguments == {}
 
 
 def test_a_known_key_carries_the_call_and_an_unknown_key_is_dropped(repo):
@@ -632,8 +636,10 @@ def test_fail_open_keeps_a_missing_required_argument_for_the_executor(repo):
     assert decision.plugin_action_arguments == {"query": "", "venue": "journal"}
 
 
-def test_an_unoffered_plugin_action_is_rejected_by_the_validation_layer(repo):
-    """未传 `plugin_actions` ⇒ 那个词根本不在 schema 的枚举串里。"""
+def test_an_unoffered_plugin_action_is_rejected_by_the_parser_behind_the_boundary(repo):
+    """未传 `plugin_actions` ⇒ 那个词根本不在 schema 的枚举串里。校验层只把它
+    记成 invalid_enum 漂移;拒收的是解析器的白名单(与 prompt/schema 同源),
+    所以经过校验层与绕过校验层落到同一个原因。"""
     decision, llm = _decide(
         repo,
         {"next_action": "search_ieee", "reason": "转外部"},
@@ -642,7 +648,7 @@ def test_an_unoffered_plugin_action_is_rejected_by_the_validation_layer(repo):
     assert "search_ieee" not in llm.schema_hints[0]
     assert "search_ieee" not in llm.prompts[0]
     assert decision.fallback is True
-    assert decision.fallback_reason == "invalid_enum"
+    assert decision.fallback_reason == "invalid_action:search_ieee"
 
 
 def test_an_unoffered_plugin_action_reaching_the_parser_is_an_invalid_action(repo):

@@ -1890,7 +1890,9 @@ def _sanitize_completion_response(
             item.get("suggestion_md"), _COMPLETION_SUGGESTION_CHAR_LIMIT
         )
         confidence = item.get("confidence")
-        if confidence not in _COMPLETION_CONFIDENCE:
+        # ``in`` on a set needs a hashable key: narrow to str first, so a
+        # delivered list/dict confidence degrades to "low" instead of raising.
+        if not isinstance(confidence, str) or confidence not in _COMPLETION_CONFIDENCE:
             confidence = "low"
         based_on_row_ids: list[str] = []
         raw_reference_ids = item.get("based_on_row_ids")

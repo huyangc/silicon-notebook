@@ -3260,7 +3260,14 @@ class ReasoningRetriever:
             if isinstance(nsq, dict) and str(nsq.get("query", "")).strip():
                 _nsq_types = nsq.get("types")
                 types = [t for t in (_nsq_types if isinstance(_nsq_types, list) else []) if t in KG_TYPES]
-                prefer = nsq.get("prefer") if nsq.get("prefer") in PREFER_WEIGHTS else "balanced"
+                # ``in`` on a dict needs a hashable key: a list/dict ``prefer``
+                # (delivered now that the shape boundary reports instead of
+                # rejecting) must fall back, not raise TypeError.
+                _prefer = nsq.get("prefer")
+                prefer = (
+                    _prefer if isinstance(_prefer, str) and _prefer in PREFER_WEIGHTS
+                    else "balanced"
+                )
                 d.new_sub_query = SubQuery(query=str(nsq["query"]).strip(),
                                            types=types, prefer=prefer,
                                            reason=str(nsq.get("reason", "")))

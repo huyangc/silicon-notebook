@@ -5227,15 +5227,16 @@ _BOGUS_CATALOG_DECISION = json.dumps({
 }, ensure_ascii=False)
 
 
-def test_reflect_fallback_reports_invalid_enum_through_the_real_provider(rrepo):
-    """校验层拒收 ⇒ 决定自证是兜底,原因是校验层给的那一格(不是「畸形」)。"""
+def test_reflect_delivers_a_bogus_enum_through_the_real_provider(rrepo):
+    """校验层只报告不拒收(harness 原则,2026-09-14):`kind: bogus` 经真实
+    provider 照常交付,解析器把非法 kind 收窄为空串——对「列文档目录」而言这正是
+    合法形状,动作成立、不走兜底。"""
     decision = _provider_reflect(rrepo, _BOGUS_CATALOG_DECISION)
 
-    assert decision.next_action == "answer"
-    assert decision.fallback is True
-    assert decision.fallback_reason == "invalid_enum"
-    # 标记绝不寄生在模型可控的 `reason` 上。
-    assert decision.reason == ""
+    assert decision.next_action == "enumerate_elements"
+    assert decision.fallback is False
+    assert decision.fallback_reason == ""
+    assert decision.reason == "先列出当前笔记本的文档目录"
 
 
 def test_reflect_fallback_reports_a_stable_code_for_a_transport_failure(rrepo):
@@ -5254,8 +5255,9 @@ def test_reflect_fallback_reports_a_stable_code_for_a_transport_failure(rrepo):
     assert offline.fallback_reason == "provider_unavailable"
 
 
-def test_run_records_the_fallback_reason_through_the_real_provider(rrepo):
-    """轨迹契约:reflect 步 summary 是中文整句,机器原因只进 `detail`。"""
+def test_run_delivers_a_bogus_enum_decision_through_the_real_provider(rrepo):
+    """轨迹契约:一个被校验层报告(而非拒收)的 enumerate 决定照常成为 reflect
+    步,没有 `fallback_reason`,summary 也不再是「校验拒绝」。"""
     retriever, provider = _provider_backed_retriever(
         rrepo, _BOGUS_CATALOG_DECISION)
     nb = _seed_two_nodes(rrepo)
@@ -5265,12 +5267,11 @@ def test_run_records_the_fallback_reason_through_the_real_provider(rrepo):
         provider.close()
 
     reflect_steps = [s for s in result.trace if s.step_type == "reflect"]
-    assert len(reflect_steps) == 1
-    assert reflect_steps[0].detail["fallback_reason"] == "invalid_enum"
-    assert reflect_steps[0].detail["next_action"] == "answer"
-    assert reflect_steps[0].summary == (
-        "反思结果无法采用（校验拒绝：invalid_enum），按直接作答处理"
-    )
+    assert reflect_steps
+    first = reflect_steps[0]
+    assert "fallback_reason" not in first.detail
+    assert first.detail["next_action"] == "enumerate_elements"
+    assert "校验拒绝" not in first.summary
 
 
 def test_run_reflect_summary_names_an_invocation_failure_in_chinese(rrepo):
@@ -5728,3 +5729,27 @@ def test_legacy_closing_rerank_adds_no_trace_step_or_clock_read(rrepo, monkeypat
         top_hits, _ = retriever._closing_rerank(
             nb.id, "RTL到GDSII流程", collected, queries, 2, None, {})
         assert top_hits
+
+
+def test_reflect_survives_an_off_type_prefer_in_a_delivered_reply(rrepo):
+    """The shape boundary delivers ``prefer: ["balanced"]`` (reported as
+    ``invalid_type``, no longer rejected); the parser must fall back to the
+    default instead of raising ``TypeError: unhashable type`` on the dict
+    membership test — which would have posed as a model failure."""
+    class _ListPrefer:
+        configured = True
+
+        def chat_json(self, *_args, **_kwargs):
+            return json.dumps({
+                "next_action": "add_subquery",
+                "new_sub_query": {"query": "MLA 的 KV 压缩", "prefer": ["balanced"]},
+                "reason": "换一个角度",
+            }, ensure_ascii=False)
+
+    decision = _reflect_once(rrepo, _ListPrefer())
+
+    assert decision.fallback is False
+    assert decision.next_action == "add_subquery"
+    assert decision.new_sub_query is not None
+    assert decision.new_sub_query.query == "MLA 的 KV 压缩"
+    assert decision.new_sub_query.prefer == "balanced"

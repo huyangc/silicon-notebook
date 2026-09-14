@@ -220,10 +220,10 @@ def _validate_reflect_parameter_values(
         )
     # TWO values minimum, checked last so the more specific failures above keep
     # naming themselves. A one-value enum renders as a schema example with no
-    # ``|`` in it -- and ``model_json._validate_against_example`` decides "this
+    # ``|`` in it -- and ``model_json._collect_shape_deviations`` decides "this
     # is an enum" by looking for exactly that character. So a single-value
     # parameter would be advertised to the model as a closed choice while the
-    # validation layer treated it as free text and accepted anything, which is
+    # shape walk treated it as free text and never reported it, which is
     # the one shape the projection's schema comment promises cannot happen. A
     # parameter with only one legal value is also not a choice: it belongs in
     # the action description, or the plugin should not ask for it at all.

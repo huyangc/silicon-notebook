@@ -22,6 +22,7 @@ from app.core.llm_logging import (
 )
 from app.core.model_json import (
     ModelJsonRepairError,
+    ShapeDeviation,
     parse_model_json_object,
     validate_model_json_shape,
 )
@@ -484,6 +485,25 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
         service = self._provider.registry.service_for(self._workload.id)
         return service.model if service is not None else ""
 
+    def _emit_json_shape_event(self, deviations: list[ShapeDeviation]) -> None:
+        """One ``model_json_shape`` event per delivered reply that drifted
+        from its hint. Paths and reasons only — never the reply text."""
+        try:
+            self._provider.event_log.emit({
+                "kind": "model_json_shape",
+                "status": "deviation",
+                "workload_id": self._workload.id,
+                "support_id": current_interaction_support_id(),
+                "count": len(deviations),
+                "deviations": [
+                    {"path": item.path, "reason": item.reason, "fix": item.fix}
+                    for item in deviations
+                ],
+            })
+        except Exception:
+            # Diagnostics must never change whether a model response succeeds.
+            pass
+
     def _emit_json_repair_event(self, *, status: str, reason: str) -> None:
         try:
             self._provider.event_log.emit({
@@ -592,7 +612,9 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                     response_schema_hint,
                     allow_repair=repair_mode in {"shadow", "on"},
                 )
-                validate_model_json_shape(parsed.content, response_schema_hint)
+                shape = validate_model_json_shape(
+                    parsed.content, response_schema_hint
+                )
             except ModelJsonRepairError as exc:
                 rejection_reason = exc.reason
                 if repair_mode in {"shadow", "on"}:
@@ -614,7 +636,14 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                 if repair_mode == "shadow":
                     rejection_reason = "repairable_shadow"
                     raise MalformedModelResponse(reason=rejection_reason)
-            return parsed.content
+            if shape.deviations:
+                # Field-level drift is absorbed or delivered to the consumer
+                # and logged here — the one place every workload passes
+                # through — so a prompt whose example no longer matches what
+                # the model writes shows up in events.jsonl without costing
+                # the caller its reply.
+                self._emit_json_shape_event(list(shape.deviations))
+            return shape.content
 
         call = self._submit(runtime, invoke, cancel_event=cancel_event)
         try:

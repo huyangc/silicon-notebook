@@ -437,7 +437,10 @@ def test_call_stats_is_forwarded_to_a_client_that_declares_it():
 
 
 def test_ask_contract_failure_archives_the_exact_request_and_response():
-    rejected = '{"answer":[],"grounded":true}'
+    # A reply naming none of the hint's fields is the one shape-level
+    # contract failure the boundary still rejects (field-level drift is
+    # delivered and logged instead; see test_model_json_repair).
+    rejected = '{"conclusion":"no answer field at all"}'
     records = []
     provider = _provider(
         chat=_Chat(rejected), malformed_response_sink=records.append
@@ -461,7 +464,7 @@ def test_ask_contract_failure_archives_the_exact_request_and_response():
     assert caught.value.code == "malformed_response"
     # The typed error carries WHY, in the same closed vocabulary the archive
     # records, so the Ask banner can name the phenomenon.
-    assert caught.value.detail == "invalid_type"
+    assert caught.value.detail == "missing_expected_key"
     [record] = records
     assert record.actor_id == "user-1"
     assert record.notebook_id == "nb-1"
@@ -469,7 +472,7 @@ def test_ask_contract_failure_archives_the_exact_request_and_response():
     assert record.question == "用户原始提问"
     assert record.messages == tuple(messages)
     assert record.response == rejected
-    assert record.reason == "invalid_type"
+    assert record.reason == "missing_expected_key"
     assert record.failure_kind == "schema_mismatch"
     assert record.model_area == "ask"
     assert record.workload_label == "问答回答"

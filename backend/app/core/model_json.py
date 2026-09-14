@@ -217,168 +217,275 @@ def _is_open_object(example: Any) -> bool:
     return isinstance(example, dict) and not example
 
 
-def _validate_against_example(
-    value: Any, example: Any,
-) -> None:
-    """Validate repaired JSON against the example-shaped schema hint.
+@dataclass(frozen=True)
+class ShapeDeviation:
+    """One advertised field whose reply value did not match the hint.
 
-    This layer owns SHAPE only — types, containers, and the advertised key set.
-    Semantic whitelisting stays with each domain parser, which already narrows
-    every enum field it reads (``kind if kind in ENUMERABLE_ELEMENT_KINDS else
-    ""``, ``direction`` falling back to ``"both"``, an unrecognised
-    ``next_action`` handled by the fail-closed/answer contract). A second,
-    stricter semantic gate here can only manufacture disagreements between the
-    prompt and the validator.
-
-    Hence the enum rule: a hint string containing ``|`` means "IF filled, it
-    must be one of these values". The empty string means "this run does not use
-    the field" and is always accepted; a non-empty value outside the set is
-    still ``invalid_enum``.
-
-    Root cause this rule fixes (2026-09-07): ``reflect_schema_hint`` spells
-    ``"kind":"formula|table|image|code_block"`` while the reflect prompt tells
-    the model to leave ``kind`` empty when listing the document roster
-    (``enumerate.collection="sources"``). Treating ``|`` as a closed set made
-    the model's prompt-conforming decision fail ``invalid_enum``, which showed
-    up as ``MalformedModelResponse`` and pushed ``reflect()`` into its fail-open
-    "answer" fallback — so the document-roster and ``enumerate_kg_objects``
-    actions were dead in production.
-
+    ``path`` is a dotted/indexed locator such as ``sub_queries[0].types``;
+    ``reason`` reuses the historical rejection vocabulary (``invalid_type`` /
+    ``invalid_boolean`` / ``invalid_enum`` / ``missing_expected_key``) so
+    dashboards and the analysis artifacts keep one set of words. ``fix`` says
+    what the boundary did about it: ``""`` (delivered as written — the
+    parser decides), ``"dropped"`` (a JSON null where the hint advertised a
+    value: the key is removed, absent and null mean the same thing to every
+    consumer), ``"coerced"`` (``"true"``/``"false"`` for a boolean hint, a
+    numeric string for a number hint), ``"wrapped"`` (one scalar where a
+    list of scalars was advertised becomes a one-item list).
     """
-    if example is None:
-        # Hints use null for optional scalar fields whose concrete value may be
-        # null or a string (for example an optional edge type).
-        if value is not None and not isinstance(value, str):
-            raise ModelJsonRepairError("invalid_type")
-        return
-    if isinstance(example, bool):
-        if not isinstance(value, bool):
-            raise ModelJsonRepairError("invalid_boolean")
-        return
-    if isinstance(example, str):
-        if not isinstance(value, str):
-            raise ModelJsonRepairError("invalid_type")
-        if "|" in example and value and value not in example.split("|"):
-            raise ModelJsonRepairError("invalid_enum")
-        return
-    if isinstance(example, int):
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise ModelJsonRepairError("invalid_type")
-        return
-    if isinstance(example, float):
-        if (
-            not isinstance(value, (int, float))
-            or isinstance(value, bool)
-            or not math.isfinite(float(value))
-        ):
-            raise ModelJsonRepairError("invalid_type")
-        return
-    if isinstance(example, list):
-        if not isinstance(value, list):
-            raise ModelJsonRepairError("invalid_type")
-        if example:
-            for item in value:
-                _validate_against_example(item, example[0])
-        return
-    if isinstance(example, dict):
-        if _is_open_object(example):
-            # Checked BEFORE the dict type check: an open object also accepts
-            # JSON null (see ``_is_open_object``).
-            if value is None or isinstance(value, dict):
-                return
-            raise ModelJsonRepairError("invalid_type")
-        if not isinstance(value, dict):
-            raise ModelJsonRepairError("invalid_type")
-        if not set(value).issubset(example):
-            raise ModelJsonRepairError("unknown_key")
-        for key, item in value.items():
-            if key in example:
-                _validate_against_example(item, example[key])
-        return
-    raise ModelJsonRepairError("invalid_type")
+
+    path: str
+    reason: str
+    fix: str = ""
 
 
-def _validate_known_shape(
+@dataclass(frozen=True)
+class ModelJsonShape:
+    """Outcome of the lenient shape walk over one delivered reply."""
+
+    content: str
+    deviations: tuple[ShapeDeviation, ...] = ()
+
+    @property
+    def normalised(self) -> bool:
+        return any(item.fix for item in self.deviations)
+
+
+# Cap on deviations one reply may report: the walk is bounded by the reply
+# size anyway, but a pathological list of thousands of wrong-typed items must
+# not turn a diagnostic event into a payload of its own. The walk itself
+# continues past the cap (normalisation must cover the whole reply); only
+# the report is truncated.
+SHAPE_DEVIATIONS_MAX = 32
+
+# Sentinel: "remove this key / item" — a JSON null the hint did not advertise.
+_DROP = object()
+
+_INT_STRING_RE = re.compile(r"-?(?:0|[1-9]\d*)\Z")
+_NUMBER_STRING_RE = re.compile(
+    r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?\Z"
+)
+
+
+def _join_path(path: str, key: str) -> str:
+    return f"{path}.{key}" if path else key
+
+
+def _normalise_shape(
     value: Any,
     example: Any,
     *,
+    path: str,
+    out: list[ShapeDeviation],
     field_name: str = "",
-) -> None:
-    """Validate fields described by a schema example without rejecting extras.
+) -> Any:
+    """Walk a reply against its example-shaped hint: absorb the deviations
+    every consumer would resolve the same way, report the rest, reject
+    nothing. Returns the (possibly normalised) value, or ``_DROP``.
 
-    Schema hints are examples rather than full JSON Schema documents.  Some
-    callers intentionally tolerate provider-added fields, but a named field
-    with the wrong container/scalar type is never usable by their parser.
+    Harness principle (2026-09-14, user decision): the prompt must be precise,
+    the shared boundary tolerates the deviations a model plausibly makes, and
+    only the domain parsers — which narrow every enum and coerce every scalar
+    they read — stay strict where being wrong would write bad data. Before
+    this change the same walk raised ``ModelJsonRepairError`` on the first
+    mismatch and the whole reply became a ``malformed_response``: one
+    hallucinated edge type discarded a whole KG extraction window, a
+    ``"year": null`` failed paper metadata for every non-paper source, and
+    every parser-side tolerance was dead code because the boundary rejected
+    the reply first.
+
+    What is absorbed here, and why here rather than in each parser: a null
+    where the hint advertised a value (``"markdown": null``) is the model
+    saying "nothing", and a bare ``str()`` downstream would turn it into the
+    literal text ``"None"`` — a non-empty string that slips past every
+    emptiness check and gets persisted as prose. ``"true"``/``"false"`` for a
+    boolean hint and ``"2017"`` for a number hint have one reading. One
+    scalar where a list of scalars was advertised (``"sub_queries": "如何降低
+    噪声"``) would otherwise be iterated character by character. Each fix is
+    still reported, so a drifting prompt stays visible in ``events.jsonl``.
+    Anything with more than one plausible reading — a list where a string
+    was advertised, an off-enum value, a scalar where an object was
+    advertised — is delivered as written and reported; the consumer decides.
+
+    Enum rule (unchanged in spirit): a hint string containing ``|`` means
+    "IF filled, one of these values"; the empty string always passes because
+    prompts use it for "this run does not use the field" (the 2026-09-07
+    reflect ``enumerate.kind`` incident).
     """
+
+    def note(reason: str, fix: str = "") -> None:
+        if len(out) < SHAPE_DEVIATIONS_MAX:
+            out.append(ShapeDeviation(path=path or "$", reason=reason, fix=fix))
+
     # A schema hint is prompt prose encoded as a JSON example, not JSON Schema.
-    # These two current workload contracts deliberately use values that the
-    # example cannot express: conflict review's payload is null or an object,
-    # and its winner placeholder explicitly permits JSON null.
+    # Two current workload contracts deliberately use values the example cannot
+    # express: conflict review's payload is null or an object, and its winner
+    # placeholder explicitly permits JSON null.
     if field_name == "resolved_payload" and (
         value is None or isinstance(value, dict)
     ):
-        return
+        return value
     if (
         value is None
         and isinstance(example, str)
         and example.startswith("<")
         and "null" in example.lower()
     ):
-        return
+        return value
+    if example is None:
+        # Hints use null for optional scalar fields whose concrete value may be
+        # null or a string (for example an optional edge type).
+        if value is not None and not isinstance(value, str):
+            note("invalid_type")
+        return value
+    if value is None:
+        if _is_open_object(example):
+            # An open object (``{}`` in the hint) explicitly accepts null.
+            return value
+        # Every remaining example advertises a value: null and absent mean the
+        # same thing to the consumer, so make it absent.
+        note("invalid_type" if not isinstance(example, bool) else "invalid_boolean", "dropped")
+        return _DROP
+    if isinstance(example, bool):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
+            note("invalid_boolean", "coerced")
+            return value.strip().lower() == "true"
+        note("invalid_boolean")
+        return value
+    if isinstance(example, str):
+        if not isinstance(value, str):
+            note("invalid_type")
+        elif "|" in example and value and value not in example.split("|"):
+            note("invalid_enum")
+        return value
+    if isinstance(example, int):
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        if isinstance(value, str) and _INT_STRING_RE.fullmatch(value.strip()):
+            note("invalid_type", "coerced")
+            return int(value.strip())
+        if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+            note("invalid_type", "coerced")
+            return int(value)
+        note("invalid_type")
+        return value
+    if isinstance(example, float):
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+        ):
+            return value
+        if isinstance(value, str) and _NUMBER_STRING_RE.fullmatch(value.strip()):
+            note("invalid_type", "coerced")
+            return float(value.strip())
+        note("invalid_type")
+        return value
+    if isinstance(example, list):
+        item_example = example[0] if example else None
+        if not isinstance(value, list):
+            if isinstance(value, (str, int, float)) and not isinstance(
+                item_example, (dict, list)
+            ):
+                # One scalar where a list of scalars was advertised.
+                note("invalid_type", "wrapped")
+                value = [value]
+            else:
+                note("invalid_type")
+                return value
+        if not example:
+            return value
+        items: list[Any] = []
+        for index, item in enumerate(value):
+            fixed = _normalise_shape(
+                item, item_example,
+                path=f"{path}[{index}]", out=out, field_name=field_name,
+            )
+            if fixed is not _DROP:
+                items.append(fixed)
+        return items
     if isinstance(example, dict):
         if _is_open_object(example):
-            # Same rule as the repair path, null included (see
-            # ``_is_open_object``). Spelled out rather than left implicit in
-            # the ``if example and ...`` below, so the two paths cannot drift
-            # apart again.
-            if value is None or isinstance(value, dict):
-                return
-            raise ModelJsonRepairError("invalid_type")
+            # An open object (``{}`` in the hint) describes no keys and also
+            # accepts JSON null; only a scalar or list is off-shape.
+            if not isinstance(value, dict):
+                note("invalid_type")
+            return value
         if not isinstance(value, dict):
-            raise ModelJsonRepairError("invalid_type")
+            note("invalid_type")
+            return value
         if field_name == "frame_assignments":
             # The hint's ``facet-id`` is a placeholder. Actual keys come from
             # the report frame and are checked against that frame downstream;
-            # this shared shape gate owns only the advertised value type.
+            # this shared walk owns only the advertised value type.
             item_example = next(iter(example.values()), "")
-            for item in value.values():
-                _validate_known_shape(item, item_example)
-            return
+            rebuilt: dict[str, Any] = {}
+            for key, item in value.items():
+                fixed = _normalise_shape(
+                    item, item_example, path=_join_path(path, key), out=out,
+                )
+                if fixed is not _DROP:
+                    rebuilt[key] = fixed
+            return rebuilt
         shared_keys = set(value).intersection(example)
-        # These named nested objects have entirely optional children in their
-        # downstream contracts. Other described nested objects still need at
-        # least one usable field, so an empty plan item remains a mismatch.
+        # A described nested object that shares no key with its example is
+        # unusable to the parser that reads it (an empty plan item, say);
+        # ``frame`` / ``validity_scope`` have entirely optional children and
+        # may legitimately be ``{}``. Extra keys are never a deviation: hints
+        # are examples, and providers add fields of their own.
         if example and not shared_keys and not (
             field_name in {"frame", "validity_scope"} and not value
         ):
-            raise ModelJsonRepairError("missing_expected_key")
-        for key in shared_keys:
-            _validate_known_shape(value[key], example[key], field_name=key)
-        return
-    if isinstance(example, list):
-        if not isinstance(value, list):
-            raise ModelJsonRepairError("invalid_type")
-        if example:
-            for item in value:
-                _validate_known_shape(item, example[0], field_name=field_name)
-        return
-    _validate_against_example(value, example)
+            note("missing_expected_key")
+            return value
+        rebuilt = {}
+        for key, item in value.items():
+            if key not in shared_keys:
+                rebuilt[key] = item
+                continue
+            fixed = _normalise_shape(
+                item, example[key],
+                path=_join_path(path, key), out=out, field_name=key,
+            )
+            if fixed is not _DROP:
+                rebuilt[key] = fixed
+        return rebuilt
+    note("invalid_type")
+    return value
 
 
-def validate_model_json_shape(content: str, schema_hint: str) -> None:
-    """Reject parseable objects whose advertised fields violate the hint.
+def validate_model_json_shape(content: str, schema_hint: str) -> ModelJsonShape:
+    """Gate a parseable object on usability; absorb or report field drift.
 
-    Missing all top-level advertised fields (including ``{}``) is a contract
-    failure.  Individual fields remain optional because the product's hints
-    are examples and several workloads deliberately omit optional members.
+    Raises ``ModelJsonRepairError("missing_expected_key")`` only when the
+    reply contains NONE of the hint's top-level fields (``{}`` included, and a
+    reply whose advertised fields were all JSON null): no consumer can use
+    such a reply, and delivering it would turn a model failure into a silent
+    empty result. Every other mismatch is handled by ``_normalise_shape`` —
+    absorbed when it has a single reading, delivered as written otherwise —
+    and reported in ``deviations`` for the caller to log. ``content`` is the
+    reply to deliver: byte-for-byte the input when nothing was absorbed, a
+    canonical re-serialisation when something was. Provider-added or
+    model-added extra fields are never deviations.
     """
     value = _strict_object(content)
     example = _schema_example(schema_hint)
     if not example:
-        return
+        return ModelJsonShape(content=content)
     if not set(value).intersection(example):
         raise ModelJsonRepairError("missing_expected_key")
-    _validate_known_shape(value, example)
+    deviations: list[ShapeDeviation] = []
+    fixed = _normalise_shape(value, example, path="", out=deviations)
+    if not any(item.fix for item in deviations):
+        return ModelJsonShape(content=content, deviations=tuple(deviations))
+    if not isinstance(fixed, dict) or not set(fixed).intersection(example):
+        # Every advertised field was null: nothing usable survived.
+        raise ModelJsonRepairError("missing_expected_key")
+    canonical = json.dumps(
+        fixed, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+    )
+    return ModelJsonShape(content=canonical, deviations=tuple(deviations))
 
 
 def _validate_repaired_shape(
@@ -386,12 +493,15 @@ def _validate_repaired_shape(
     value: dict[str, Any],
     schema_hint: str,
 ) -> None:
+    # The repaired object goes through ``validate_model_json_shape`` on its
+    # canonical serialisation right after this returns, so field-level shape
+    # is judged ONCE, by the same lenient walk as strict JSON. What stays here
+    # is what only the repair path can violate: the reply must still name at
+    # least one expected top-level field, and repair may restore delimiters
+    # but never author or alter semantic text.
     example = _schema_example(schema_hint)
-    if example:
-        expected_keys = set(example)
-        if not set(value).intersection(expected_keys):
-            raise ModelJsonRepairError("missing_expected_key")
-        _validate_against_example(value, example)
+    if example and not set(value).intersection(example):
+        raise ModelJsonRepairError("missing_expected_key")
 
     _validate_repair_surface(raw, value)
 
