@@ -177,7 +177,13 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # updated in the same write transaction as the existing 300s-throttled
 # auth_sessions touch and on login, and survives logout. No table, index, FK
 # or unique-surface change.
-SCHEMA_VERSION = 72
+# v73 adds wishes.status (TEXT NOT NULL DEFAULT 'open'), parity with
+# PostgreSQL 0053_wish_status.sql: the administrator-owned lifecycle of a
+# wish-wall item (open / in_progress / done / declined). The default is the
+# correct backfill -- every pre-existing row was "still open" -- so no data
+# pass runs. Allowed values are pinned by the API model, not a CHECK, the
+# same way ``kind`` already is. No table, index, FK or unique-surface change.
+SCHEMA_VERSION = 73
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3856,6 +3862,22 @@ class SqliteMigrator:
         """
         with self._connect() as db:
             self.add_column_if_missing(db, "users", "last_seen_at", "TEXT")
+
+    def _migration_73(self) -> None:
+        """Wish-wall lifecycle status, parity with PostgreSQL
+        0053_wish_status.sql. See SCHEMA_VERSION's docstring.
+
+        ``NOT NULL DEFAULT 'open'`` is the whole backfill: a wish that
+        predates this column is by definition still open. Administrators are
+        the only writer (``WishStore.set_wish_status``); the accepted value
+        set lives in ``app.models.wishes.WishStatus`` rather than a CHECK so
+        the two backends and the API stay pinned by one definition.
+        ``add_column_if_missing`` keeps the migration re-runnable.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "wishes", "status", "TEXT NOT NULL DEFAULT 'open'"
+            )
 
     def _reap_stale_derived_generations(self) -> None:
         """批 3·W2 启动恢复(sqlite 化身):先全局释放滞留在飞认领(启动这

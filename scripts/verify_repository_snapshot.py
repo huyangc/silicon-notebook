@@ -4206,6 +4206,52 @@ MIGRATION_MANIFEST[(71, 72)] = {
     "triggers": {},
     "views": {},
 }
+# v73 (wish-wall lifecycle status, parity with PostgreSQL
+# 0053_wish_status.sql): ``wishes.status`` TEXT NOT NULL DEFAULT 'open'. No
+# new table, index, trigger or view; the default is the backfill (every
+# pre-existing wish is still open).
+WISH_STATUS_COLUMNS = {
+    "wishes": {
+        "status": ("status", "TEXT", 1, "'open'", 0),
+    },
+}
+# A deployment older than v67 creates ``wishes`` in _migration_67 and then
+# ALTERs it in _migration_73; SQLite rewrites the stored CREATE TABLE text by
+# splicing the new column in front of the closing parenthesis, so the table
+# text such a span must expect is the spliced one, not v67's original.
+WISH_WALL_TABLES_V73 = {
+    **WISH_WALL_TABLES,
+    "wishes": WISH_WALL_TABLES["wishes"][:-len("\n                )")]
+    + "\n                , status TEXT NOT NULL DEFAULT 'open')",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 73, *key[2:]): {
+        **manifest,
+        "tables": {
+            **manifest["tables"],
+            **(
+                {"wishes": WISH_WALL_TABLES_V73["wishes"]}
+                if "wishes" in manifest["tables"]
+                else {}
+            ),
+        },
+        "columns": {
+            **manifest["columns"],
+            "wishes": {
+                **manifest["columns"].get("wishes", {}),
+                **WISH_STATUS_COLUMNS["wishes"],
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(72, 73)] = {
+    "tables": {},
+    "columns": WISH_STATUS_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
 
 
 if __name__ == "__main__":

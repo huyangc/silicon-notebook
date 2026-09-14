@@ -1,0 +1,14 @@
+-- Add wishes.status: the administrator-owned lifecycle of a wish-wall item
+-- (open / in_progress / done / declined). Mirrors SQLite v73 (_migration_73).
+--
+-- NOT NULL DEFAULT 'open': every pre-existing row is "still open" -- that is
+-- exactly what it was before this column existed, so a plain default is the
+-- correct backfill and no data pass is needed. The allowed values are pinned
+-- by the API model (app.models.wishes.WishStatus), not by a CHECK constraint,
+-- matching how ``kind`` is already handled on this table.
+--
+-- No index: the list query already scans by kind/created_at and sorts closed
+-- rows last in memory-sized pages; a status filter is an equality predicate
+-- on a small table and stays a sequential scan by design. No FK or unique
+-- surface change.
+ALTER TABLE wishes ADD COLUMN IF NOT EXISTS status text COLLATE "C" NOT NULL DEFAULT 'open';

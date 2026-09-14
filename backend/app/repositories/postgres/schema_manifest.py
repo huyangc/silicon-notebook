@@ -300,7 +300,12 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # transaction as the existing 300s-throttled auth_sessions touch and on
 # login, monotonically, and survives logout. No table, index, FK or
 # unique-surface change.
+# PostgreSQL v53 / SQLite v73 add wishes.status (text, NOT NULL DEFAULT
+# 'open') -- the administrator-owned lifecycle of a wish-wall item (open /
+# in_progress / done / declined). The default is the whole backfill; allowed
+# values are pinned by the API model rather than a CHECK, like ``kind``. No
+# table, index, FK or unique-surface change.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=72,
-    postgres_version=52,
+    sqlite_version=73,
+    postgres_version=53,
 )

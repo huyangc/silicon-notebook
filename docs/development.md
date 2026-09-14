@@ -57,8 +57,8 @@ at `SCHEMA_VERSION` still runs no migrations. The only supported way back is
 to restore the pre-upgrade backup, or redeploy a build whose `SCHEMA_VERSION`
 is at least the database's — there is no reverse migration.
 
-The current schema version is 72. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v72 and remains readable. Those migrations
+The current schema version is 73. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v73 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -677,8 +677,21 @@ transaction, reusing the same 300s throttle
 (`auth_session_touch_interval_seconds`) and staying monotonic; unlike
 `auth_sessions.last_seen_at`, this column survives logout/revocation. No
 table, index or foreign key is added — `list_user_usage`'s one-shot
-aggregate reads the column directly. The current pair is SQLite 72 /
-PostgreSQL 52 / epoch 1.
+aggregate reads the column directly.
+
+The wish-wall lifecycle batch (SQLite v73 / PostgreSQL 0053) adds
+`wishes.status` (`text NOT NULL DEFAULT 'open'`): the administrator-owned
+state of an item (`open` / `in_progress` / `done` / `declined`). The default
+is the whole backfill — every pre-existing wish is by definition still open —
+so no data pass runs. The accepted value set is pinned by the API model
+(`app.models.wishes.WishStatus`) rather than a CHECK constraint, the same way
+`kind` already is. `WishStorePort` grows `update_wish` (author or admin;
+promoting to `plan` stays admin-only), `delete_wish` (author or admin; votes
+are deleted in the same transaction) and `set_wish_status` (admin only), each
+deciding ownership under the row lock, plus a `status` filter on
+`list_wishes`; the `priority` order sinks done/declined rows below open ones.
+No table, index or foreign key is added. The current pair is SQLite 73 /
+PostgreSQL 53 / epoch 1.
 
 Run it only while application/background writers are stopped:
 

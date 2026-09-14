@@ -37,6 +37,26 @@
 .wish-kind-plan { color: #174ec8; background: #eaf1ff; }
 .wish-card h2 { margin: 10px 0 6px; font-size: 17px; }
 .wish-card p { margin: 0; color: #3d4855; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.wish-card-closed { background: #fafbfc; }
+.wish-card-closed h2, .wish-card-closed p { color: var(--muted); }
+.wish-status { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 999px; font-weight: 650; }
+.wish-status-in_progress { color: #174ec8; background: #eaf1ff; }
+.wish-status-done { color: #1f7a3a; background: #e8f7ec; }
+.wish-status-declined { color: #5b6470; background: #eef0f3; }
+.wish-toolbar-selects { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.wish-card-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; margin-top: 12px; font-size: 13px; }
+.wish-ghost { display: inline-flex; align-items: center; gap: 5px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--muted); font-size: 13px; }
+.wish-ghost:hover { background: var(--soft); color: var(--ink); }
+.wish-ghost.danger:hover { border-color: #f1aeb5; background: #fff1f3; color: #c22f48; }
+.wish-ghost:disabled { cursor: not-allowed; opacity: .55; }
+.wish-delete-confirm { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 4px 4px 4px 10px; border: 1px solid #f1aeb5; border-radius: 9px; background: #fff7f8; color: #9c2f2f; }
+.wish-status-control { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); white-space: nowrap; }
+.wish-status-control select { padding: 6px 26px 6px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); }
+.wish-status-control select:disabled { cursor: not-allowed; opacity: .6; }
+.wish-card-notice { color: var(--muted); }
+.wish-card-notice.ok { color: var(--green); }
+.wish-card-notice.error { color: var(--red); }
+.wish-edit { display: grid; gap: 12px; margin-top: 10px; }
 .wish-vote-area { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; min-width: 88px; }
 .wish-vote { display: grid; grid-template-columns: auto auto; align-items: center; justify-content: center; gap: 3px 6px; min-width: 82px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: #fff; color: var(--muted); }
 .wish-vote strong { grid-column: 1 / -1; color: var(--ink); font-size: 16px; font-variant-numeric: tabular-nums; }

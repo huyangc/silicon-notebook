@@ -166,6 +166,9 @@ def test_wish_wall_endpoints_have_a_domain_owner():
     expected = {
         "list_wishes": "app.api.wish_routes",
         "create_wish": "app.api.wish_routes",
+        "update_wish": "app.api.wish_routes",
+        "delete_wish": "app.api.wish_routes",
+        "set_wish_status": "app.api.wish_routes",
         "toggle_wish_vote": "app.api.wish_routes",
     }
     for endpoint, module in expected.items():
