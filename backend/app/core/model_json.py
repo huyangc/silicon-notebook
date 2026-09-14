@@ -484,6 +484,11 @@ def validate_model_json_shape(content: str, schema_hint: str) -> ModelJsonShape:
     model-added extra fields are never deviations.
     """
     value = _strict_object(content)
+    # ``json.loads`` accepts NaN / Infinity / overflowing exponents that JSON
+    # itself cannot carry; a confidence of +inf would clamp to 1.0 in every
+    # numeric consumer. Reject them here, once, on the strict path exactly
+    # as the repair path always has (codex #720 R7).
+    _assert_json_domain(value)
     example = _schema_example(schema_hint)
     if not example:
         return ModelJsonShape(content=content)
