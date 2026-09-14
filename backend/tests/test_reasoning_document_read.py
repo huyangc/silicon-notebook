@@ -446,6 +446,26 @@ def test_a_ledger_visible_collision_is_reported_as_ambiguity_not_silently_resolv
     assert [r.source_title for r in rr._resolve_roster_rows(rows, "丙")] == ["丙"]
 
 
+def test_a_literal_title_ending_in_the_marker_matches_as_typed_before_stripping():
+    """codex #724 R7:真标题以「(无摘要)」结尾时,先剥标记再比会把它匹配成没有
+    这个尾巴的另一篇。原样精确匹配优先;剥标记只是兜底。"""
+    from app.services import reasoning_retrieval as rr
+
+    class _Row:
+        def __init__(self, title):
+            self.source_title = title
+            self.summary = ""
+
+    mark = rr._ENUM_NOTE_NO_SUMMARY_MARK
+    both = [_Row("实验记录"), _Row(f"实验记录{mark}")]
+    assert [r.source_title for r in rr._resolve_roster_rows(both, f"实验记录{mark}")] == [f"实验记录{mark}"]
+    assert [r.source_title for r in rr._resolve_roster_rows(both, "实验记录")] == ["实验记录"]
+    only_marked = [_Row(f"实验记录{mark}")]
+    assert len(rr._resolve_roster_rows(only_marked, f"实验记录{mark}")) == 1
+    # 兜底仍在:模型把账目里「《实验记录》(无摘要)」的标记连着抄回来时,剥掉后命中。
+    assert [r.source_title for r in rr._resolve_roster_rows([_Row("实验记录")], f"实验记录{mark}")] == ["实验记录"]
+
+
 def test_many_unnamed_documents_occupy_one_ledger_slot_and_never_hide_a_named_one():
     """codex #724 R2:`titles` 存的是 (text, mark) 元组,占位串是否已占位要比
     text 分量;之前 `raw in titles` 恒假,20 篇无名文档会把占位串重复 20 遍、把

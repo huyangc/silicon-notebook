@@ -754,9 +754,10 @@ def _resolve_roster_rows(rows, requested: str) -> list:
     Every step is an EXACT comparison after one bounded, lossless-in-spirit
     rewrite of what the model typed; none of them approximates:
 
-    1. drop a copied ``(无摘要)`` ledger marker;
-    2. exact match on the roster display string (``source_title`` or the
-       unnamed placeholder, whitespace collapsed on both sides);
+    1. exact match on the roster display string as typed (``source_title`` or
+       the unnamed placeholder, whitespace collapsed on both sides);
+    2. drop a copied ``(无摘要)`` ledger marker and retry (only as a fallback:
+       a real title may end that way);
     3. drop ONE pair of book-title marks / quotes and retry;
     4. drop the ``标题 · 类型: 摘要`` tail of a copied preview line and retry;
     5. compare against the ledger's own bounded form (title cut to
@@ -766,8 +767,6 @@ def _resolve_roster_rows(rows, requested: str) -> list:
     the ambiguity; a title that equals none of these forms stays unresolved.
     """
     text = " ".join(str(requested or "").split())
-    if text.endswith(_ENUM_NOTE_NO_SUMMARY_MARK):
-        text = text[: -len(_ENUM_NOTE_NO_SUMMARY_MARK)].strip()
 
     def _exact(candidate: str) -> list:
         wanted = _normalized_title(candidate)
@@ -776,7 +775,12 @@ def _resolve_roster_rows(rows, requested: str) -> list:
         return [row for row in rows
                 if _normalized_title(" ".join(_roster_display_title(row).split())) == wanted]
 
+    # 先按模型给的**原样**精确匹配,剥 `(无摘要)` 标记只是兜底(codex #724 R7):
+    # 真标题就以「(无摘要)」结尾的文档,先剥再比会把它匹配成没有这个尾巴的另一篇。
     matches = _exact(text)
+    if not matches and text.endswith(_ENUM_NOTE_NO_SUMMARY_MARK):
+        text = text[: -len(_ENUM_NOTE_NO_SUMMARY_MARK)].strip()
+        matches = _exact(text)
     if not matches:
         unwrapped = _strip_title_wrapping(text)
         if unwrapped != text:
