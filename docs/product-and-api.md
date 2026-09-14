@@ -898,7 +898,7 @@ can therefore bootstrap regardless of how narrow the token is.
 The server rechecks scope, allowlist, token state, and notebook access on data calls;
 retrieved text is untrusted evidence, not executable Agent instructions.
 
-`ask_notebook`'s `mode` parameter admits `"chunk"`, `"reasoning"`, or any registered,
+`ask_notebook`'s `mode` parameter admits `"reasoning"` (the **default**; the same engine both web UI modes submit, which understands the question before retrieving, see below), `"chunk"`, or any registered,
 live-available deployment `ask.engine` mode id (see [Deployment Ask
 engines](#deployment-ask-engines-askengine)); it validates this the same way the tool
 validates `question`/`conversation_id` — with a plain, actionable message rather than an
