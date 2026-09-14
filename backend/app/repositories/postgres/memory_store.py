@@ -15,6 +15,7 @@ from app.models.memory import (
     PaginatedMemories,
 )
 from app.core.json_safety import strict_json_dumps
+from app.repositories.identity_errors import AgentTokenInactiveError
 from app.repositories.postgres._store_utils import (
     execute_many,
     iso_timestamp,
@@ -242,6 +243,58 @@ class MemoryStore:
             )
             if cursor.rowcount != 1:
                 raise KeyError(token_id)
+            row = db.execute(
+                "SELECT t.*,p.name AS profile_name FROM agent_access_tokens t "
+                "JOIN agent_profiles p ON p.id=t.agent_profile_id WHERE t.id=%s",
+                (token_id,),
+            ).fetchone()
+            notebooks = self._token_notebooks_on(db, token_id)
+        return self._token(row, notebooks)
+
+    def update_agent_token_access(
+        self,
+        token_id: str,
+        owner_id: str,
+        scopes: Sequence[str],
+        default_notebook_id: str,
+        notebook_ids: Sequence[str],
+        expires_at: str | None,
+    ) -> AgentTokenSummary:
+        # 一个写事务:``FOR UPDATE OF t`` 锁住 token 行,使下面的「读撤销/停用
+        # 状态」与「写新配置」之间不会被另一次并发撤销插入。
+        with self.database.write() as db:
+            row = db.execute(
+                "SELECT t.revoked_at,p.status AS profile_status FROM agent_access_tokens t "
+                "JOIN agent_profiles p ON p.id=t.agent_profile_id "
+                "WHERE t.id=%s AND p.owner_id=%s FOR UPDATE OF t",
+                (token_id, owner_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(token_id)
+            if row["revoked_at"] is not None:
+                raise AgentTokenInactiveError("revoked")
+            if row["profile_status"] != "active":
+                raise AgentTokenInactiveError("profile_disabled")
+            cursor = db.execute(
+                "UPDATE agent_access_tokens SET scopes_json=%s,default_notebook_id=%s,"
+                "expires_at=%s WHERE id=%s AND revoked_at IS NULL",
+                (
+                    jsonb(list(scopes)),
+                    default_notebook_id,
+                    normalize_timestamp(expires_at) if expires_at else None,
+                    token_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise AgentTokenInactiveError("revoked")
+            db.execute(
+                "DELETE FROM agent_token_notebooks WHERE token_id=%s", (token_id,)
+            )
+            execute_many(
+                db,
+                "INSERT INTO agent_token_notebooks (token_id,notebook_id) VALUES (%s,%s)",
+                [(token_id, notebook_id) for notebook_id in notebook_ids],
+            )
             row = db.execute(
                 "SELECT t.*,p.name AS profile_name FROM agent_access_tokens t "
                 "JOIN agent_profiles p ON p.id=t.agent_profile_id WHERE t.id=%s",

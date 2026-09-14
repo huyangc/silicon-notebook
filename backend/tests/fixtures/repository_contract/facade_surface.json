@@ -140,6 +140,12 @@
         "target": "SQLiteRepository"
       },
       {
+        "kind": "patch",
+        "path": "backend/tests/test_replay_retrieval.py",
+        "scope": "<module>.test_report_run_enters_report_generation_scope",
+        "target": "SQLiteRepository"
+      },
+      {
         "kind": "import",
         "path": "scripts/backfill_knowhow_md.py",
         "scope": "<module>",
@@ -188,6 +194,14 @@
         "kind": "patch",
         "path": "backend/tests/test_replay_retrieval.py",
         "scope": "<module>.test_record_run_requires_retrieval_query_embedding",
+        "target": "SQLiteRepository"
+      },
+      {
+        "base": "repository_module",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_replay_retrieval.py",
+        "scope": "<module>.test_report_run_enters_report_generation_scope",
         "target": "SQLiteRepository"
       }
     ],
@@ -602,6 +616,30 @@
         "path": "backend/tests/test_trackF_governance_promotion.py",
         "scope": "<module>.TestPromotionStateMachine.test_list_promotion_queue_batches_object_lookup_not_n_plus_1",
         "target": "_connect"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_scale_build_paging.py",
+        "scope": "<module>._primary_notebook",
+        "target": "_connect"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_scale_build_paging.py",
+        "scope": "<module>.cmd_drop",
+        "target": "_connect"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_scale_build_paging.py",
+        "scope": "<module>.cmd_evidence",
+        "target": "_connect"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_scale_build_paging.py",
+        "scope": "<module>.cmd_explain",
+        "target": "_connect"
       }
     ],
     "kind": "private_wrapper",
@@ -829,6 +867,12 @@
         "path": "backend/tests/test_notebook_share_copy.py",
         "scope": "<module>.test_copy_notebook_crash_midway_leaves_no_visible_notebook_and_self_heals",
         "target": "_insert_row"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_notebook_share_copy.py",
+        "scope": "<module>.test_half_copied_mount_edges_cannot_leak_past_compensation",
+        "target": "_insert_row"
       }
     ],
     "kind": "private_wrapper",
@@ -872,6 +916,14 @@
         "kind": "patch",
         "path": "backend/tests/test_notebook_share_copy.py",
         "scope": "<module>.test_copy_notebook_crash_midway_leaves_no_visible_notebook_and_self_heals",
+        "target": "_insert_row"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_notebook_share_copy.py",
+        "scope": "<module>.test_half_copied_mount_edges_cannot_leak_past_compensation",
         "target": "_insert_row"
       }
     ],
@@ -1059,7 +1111,7 @@
     "owner": "KgMutationCoordinator",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, db, notebook_id: 'str') -> 'int'"
+    "signature": "(self, db, notebook_id: 'str') -> \"'tuple[int, int]'\""
   },
   "_migrator": {
     "consumers": [
@@ -1475,6 +1527,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
+        "scope": "<module>.analysis_issue_repository",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
         "scope": "<module>.content_overview_service",
         "target": "_runtime"
       },
@@ -1535,6 +1593,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
+        "scope": "<module>.notebook_delete_repository",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
         "scope": "<module>.notebook_sharing_repository",
         "target": "_runtime"
       },
@@ -1542,6 +1606,12 @@
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
         "scope": "<module>.notebook_store_port",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
+        "scope": "<module>.wish_repository",
         "target": "_runtime"
       },
       {
@@ -4289,6 +4359,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.update_agent_token_access",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.update_knowhow_cell",
         "target": "_runtime"
       },
@@ -4501,6 +4577,24 @@
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.maintenance",
         "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_scale_build_paging.py",
+        "scope": "<module>._rss_child",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_scale_build_paging.py",
+        "scope": "<module>.cmd_evidence",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/verify_repository_snapshot.py",
+        "scope": "<module>.verify_snapshot",
+        "target": "_runtime"
       }
     ],
     "kind": "instance_attribute",
@@ -4596,6 +4690,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._begin_extraction_run",
+        "target": "_write"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_scale_build_paging.py",
+        "scope": "<module>._seed_notebook",
         "target": "_write"
       }
     ],
@@ -4748,6 +4848,12 @@
   },
   "all_visible_source_ids": {
     "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/admin_routes.py",
+        "scope": "<module>.get_admin_user_notebook_source",
+        "target": "all_visible_source_ids"
+      },
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
@@ -5076,6 +5182,12 @@
         "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_index_prints_stage_timings",
         "target": "build_scale_index"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_scale_build_paging.py",
+        "scope": "<module>.cmd_build",
+        "target": "build_scale_index"
       }
     ],
     "kind": "method",
@@ -5151,6 +5263,12 @@
         "path": "scripts/kg_product_smoke.py",
         "scope": "<module>.main",
         "target": "chat"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/reflect_shadow_rig.py",
+        "scope": "<module>._plan_intent",
+        "target": "chat"
       }
     ],
     "kind": "method",
@@ -5202,6 +5320,12 @@
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>.confirm_report_intent",
         "target": "claim_report_intent"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/reflect_shadow_rig.py",
+        "scope": "<module>._generate_report",
+        "target": "claim_report_intent"
       }
     ],
     "kind": "method",
@@ -5216,6 +5340,42 @@
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
         "scope": "<module>.shutdown_repository_if_initialized",
+        "target": "close"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_scale_build_paging.py",
+        "scope": "<module>._rss_child",
+        "target": "close"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_scale_build_paging.py",
+        "scope": "<module>.cmd_build",
+        "target": "close"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_scale_build_paging.py",
+        "scope": "<module>.cmd_drop",
+        "target": "close"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_scale_build_paging.py",
+        "scope": "<module>.cmd_evidence",
+        "target": "close"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_scale_build_paging.py",
+        "scope": "<module>.cmd_explain",
+        "target": "close"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_scale_build_paging.py",
+        "scope": "<module>.cmd_seed",
         "target": "close"
       }
     ],
@@ -5715,6 +5875,12 @@
       },
       {
         "kind": "attribute",
+        "path": "scripts/bench_scale_build_paging.py",
+        "scope": "<module>._seed_notebook",
+        "target": "create_notebook"
+      },
+      {
+        "kind": "attribute",
         "path": "scripts/bench_sqlite_writes.py",
         "scope": "<module>.main",
         "target": "create_notebook"
@@ -5799,6 +5965,12 @@
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>.create_report",
         "target": "create_report"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/reflect_shadow_rig.py",
+        "scope": "<module>._run_reports",
+        "target": "create_report"
       }
     ],
     "kind": "method",
@@ -5825,6 +5997,12 @@
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
         "scope": "<module>._validate_source_scope",
+        "target": "current_user"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.ask_stream._attach_ask_stream",
         "target": "current_user"
       },
       {
@@ -6050,6 +6228,12 @@
         "kind": "attribute",
         "path": "backend/app/eval/speed.py",
         "scope": "<module>._cleanup",
+        "target": "delete_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_scale_build_paging.py",
+        "scope": "<module>.cmd_drop",
         "target": "delete_notebook"
       }
     ],
@@ -6413,6 +6597,12 @@
         "target": "get_conversation"
       },
       {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/memory_context.py",
+        "scope": "<module>._reasoning_intent_history",
+        "target": "get_conversation"
+      },
+      {
         "kind": "patch",
         "path": "backend/tests/test_admin_user_activity_api.py",
         "scope": "<module>.test_ask_detail_does_not_load_full_conversation_history",
@@ -6724,7 +6914,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/memory_context.py",
-        "scope": "<module>.register_memory_context_tools.ask_notebook.run_ask",
+        "scope": "<module>._run_ask_notebook",
         "target": "get_notebook"
       },
       {
@@ -6824,9 +7014,21 @@
         "target": "get_notebook"
       },
       {
+        "kind": "patch",
+        "path": "backend/tests/test_notebook_delete_review_fixes.py",
+        "scope": "<module>.test_asset_recheck_survives_actor_access_loss",
+        "target": "get_notebook"
+      },
+      {
         "kind": "attribute",
         "path": "scripts/denoise_reextract_nb.py",
         "scope": "<module>.main",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/reflect_shadow_rig.py",
+        "scope": "<module>._search_corpus_facts",
         "target": "get_notebook"
       },
       {
@@ -6850,7 +7052,16 @@
     ],
     "kind": "method",
     "owner": "NotebookCatalogService",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_notebook_delete_review_fixes.py",
+        "scope": "<module>.test_asset_recheck_survives_actor_access_loss",
+        "target": "get_notebook"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'NotebookSummary'"
   },
@@ -6873,11 +7084,32 @@
         "path": "backend/app/services/knowhow/transfer.py",
         "scope": "<module>._remap",
         "target": "get_notebook_asset"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>._resolve_element_assets",
+        "target": "get_notebook_asset"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_source_ingestion_service.py",
+        "scope": "<module>.test_resolve_element_assets_skips_one_failing_row_and_keeps_the_rest",
+        "target": "get_notebook_asset"
       }
     ],
     "kind": "method",
     "owner": "KnowhowStore",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_source_ingestion_service.py",
+        "scope": "<module>.test_resolve_element_assets_skips_one_failing_row_and_keeps_the_rest",
+        "target": "get_notebook_asset"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, asset_id: 'str') -> 'Optional[dict]'"
   },
@@ -6897,6 +7129,18 @@
       },
       {
         "kind": "attribute",
+        "path": "scripts/reflect_shadow_rig.py",
+        "scope": "<module>._generate_report",
+        "target": "get_report"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/reflect_shadow_rig.py",
+        "scope": "<module>._report_rows",
+        "target": "get_report"
+      },
+      {
+        "kind": "attribute",
         "path": "scripts/verify_repository_snapshot.py",
         "scope": "<module>.exercise_reads",
         "target": "get_report"
@@ -6910,6 +7154,12 @@
   },
   "get_source": {
     "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/admin_routes.py",
+        "scope": "<module>.get_admin_user_notebook_source",
+        "target": "get_source"
+      },
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/sources.py",
@@ -7457,6 +7707,12 @@
         "path": "backend/app/api/admin_routes.py",
         "scope": "<module>.get_admin_user_notebook_sources",
         "target": "list_sources_page"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/sources.py",
+        "scope": "<module>.register_source_tools.list_sources.load",
+        "target": "list_sources_page"
       }
     ],
     "kind": "method",
@@ -7771,6 +8027,18 @@
         "kind": "attribute",
         "path": "scripts/kg_product_smoke.py",
         "scope": "<module>.main",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/reflect_shadow_rig.py",
+        "scope": "<module>._run_reports",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/reflect_shadow_rig.py",
+        "scope": "<module>._run_search",
         "target": "maintenance"
       },
       {
@@ -8142,11 +8410,26 @@
         "path": "backend/app/main.py",
         "scope": "<module>.create_app.<lambda>",
         "target": "pending_actions"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_query_canceled_handler.py",
+        "scope": "<module>.test_query_canceled_mid_stream_still_emits_the_query_timeout_event",
+        "target": "pending_actions"
       }
     ],
     "kind": "method",
     "owner": "PendingActionsService",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_query_canceled_handler.py",
+        "scope": "<module>.test_query_canceled_mid_stream_still_emits_the_query_timeout_event",
+        "target": "pending_actions"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, user_id: 'str') -> 'dict'"
   },
@@ -8234,6 +8517,12 @@
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.preview_ask_intent_stream.run_preview",
+        "target": "preview_reasoning_intent"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/memory_context.py",
+        "scope": "<module>._run_ask_notebook",
         "target": "preview_reasoning_intent"
       },
       {
@@ -8532,6 +8821,12 @@
       },
       {
         "kind": "attribute",
+        "path": "scripts/bench_scale_build_paging.py",
+        "scope": "<module>._seed_notebook",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "kind": "attribute",
         "path": "scripts/denoise_reextract_nb.py",
         "scope": "<module>.main",
         "target": "rebuild_unified_kg"
@@ -8810,6 +9105,12 @@
         "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>._launch_plan_job",
+        "target": "report_execution"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/reflect_shadow_rig.py",
+        "scope": "<module>._generate_report",
         "target": "report_execution"
       }
     ],
@@ -9461,6 +9762,12 @@
       },
       {
         "kind": "attribute",
+        "path": "scripts/reflect_shadow_rig.py",
+        "scope": "<module>._search_corpus_facts",
+        "target": "retrieval"
+      },
+      {
+        "kind": "attribute",
         "path": "scripts/replay_retrieval.py",
         "scope": "<module>.record_run",
         "target": "retrieval"
@@ -9980,13 +10287,19 @@
         "path": "backend/app/api/ask_routes.py",
         "scope": "<module>._stream_ask_events._start_ask_stream",
         "target": "start_ask_stream"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.ask_stream._attach_ask_stream",
+        "target": "start_ask_stream"
       }
     ],
     "kind": "method",
-    "owner": "AskExecutionCoordinator",
+    "owner": "AskService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', payload: 'AskRequest', mode, *, user_id: 'str')"
+    "signature": "(self, notebook_id: 'str', payload: 'AskRequest', mode, *, user_id: 'str', attach_only=False)"
   },
   "start_conflict_resolution": {
     "consumers": [
@@ -10068,6 +10381,12 @@
   },
   "store_kg": {
     "consumers": [
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_scale_build_paging.py",
+        "scope": "<module>._seed_notebook",
+        "target": "store_kg"
+      },
       {
         "kind": "attribute",
         "path": "scripts/bench_sqlite_writes.py",

@@ -44,8 +44,8 @@ Use a notebook the account can read. To test formal context retrieval, that note
 
 ## 3. Issue a Profile and token in the UI
 
-1. Open the account menu and choose **私有记忆** (Private Memory).
-2. Expand **Agent 接入** (Agent access).
+1. Open the account menu and choose **Agent 接入** (Agent access). It is a first-level entry that opens the `/agents` page; the global Memory page also links there.
+2. The page shows **Agent Profile**, **签发 Token** (issue token), and **已签发 Token** (issued tokens).
 3. Under **Agent Profile**, enter a stable name and a description of the client/environment, then choose **新建 Profile**.
 4. Under **签发 Token**, select that Profile and a default notebook. The UI also adds the default to the notebook allowlist; add only other notebooks the Agent truly needs.
 5. Select the smallest scope set:
@@ -378,8 +378,8 @@ A `401` at step 1 is a token problem. `400 Missing session ID` at step 3 means t
 | --- | --- |
 | `401 invalid or expired Agent token` | Token completeness, expiry/revocation, and whether the environment variable existed before the Agent process started. |
 | `select_notebook must be called before this tool` | Start every new session with `list_notebooks` and `select_notebook`. |
-| Notebook outside allowlist | Issue a new token whose explicit allowlist contains that notebook. |
-| Scope/permission error | Reissue a least-privilege token with the required scope; a client cannot elevate it. |
+| Notebook outside allowlist | In **Agent 接入 → 已签发 Token**, choose **修改权限** on that token and add the notebook to its allowlist (applies from the next tool call), or issue a new token for it. |
+| Scope/permission error | Add only the required scope with **修改权限** on the issued token, or issue a new least-privilege token; a client cannot elevate it. |
 | Codex cannot see the server | Run `codex mcp list`, export the token before starting Codex, and start a new session/restart the app or extension. |
 | `404`, or a refused connection, while configuring a client | Retry the endpoint the deployment publishes, exactly as the token receipt's onboarding instructions print it. Adding a trailing slash, or falling back to `<host>:8000/mcp/`, applies only to a confirmed backend-direct endpoint: a proxy may route only the published path, its backend port may be private, and reaching for that port can also drop the token to cleartext (§4). |
 | `307 Temporary Redirect` on `POST /mcp` | Expected — the MCP app is mounted at `/mcp` with its own root route. Configure `/mcp/` instead of relying on the client to follow the redirect. |
@@ -406,6 +406,8 @@ A `401` at step 1 is a token problem. `400 Missing session ID` at step 3 means t
 
 ## 10. Revoke and rotate
 
-Use **Private Memory → Agent access → issued tokens → revoke**. Every data tool rechecks live token state. Disabling a Profile invalidates all its tokens immediately.
+Use **Agent access → issued tokens → revoke**. Every data tool rechecks live token state. Disabling a Profile invalidates all its tokens immediately.
+
+To change what an existing token may do, choose **修改权限** (edit access) on it instead: scopes, default notebook, allowlist, and expiry are saved together and the Agent's next tool call sees them, with no reissue or client reconfiguration. Revoked tokens cannot be edited. Editing never reveals the plaintext again; if the token itself was lost or exposed, issue a new one and revoke the old one.
 
 For rotation, issue and verify a new short-lived token first, update the Agent environment, then revoke the old token. Do not reuse a token that appeared in logs, shell history, or plaintext client configuration.

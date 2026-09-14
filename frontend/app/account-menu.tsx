@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   BarChart3,
   Bookmark,
+  Bot,
   ChevronDown,
   KeyRound,
   LogOut,
@@ -128,6 +129,15 @@ export function AccountMenu({
             <Bookmark size={16} />
             <span>私有记忆</span>
           </button>
+          <a
+            className="user-logout"
+            role="menuitem"
+            href="/agents"
+            title="为 Claude Code、Codex 等客户端签发 MCP token，或修改已签发 token 的权限"
+          >
+            <Bot size={16} />
+            <span>Agent 接入</span>
+          </a>
           <a
             className="user-logout"
             role="menuitem"

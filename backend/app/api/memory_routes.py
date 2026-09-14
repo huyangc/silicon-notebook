@@ -16,16 +16,19 @@ from app.api.deps import (
     memory_service,
     notebook_access_repository,
     require_notebook_read,
+    user_error,
 )
 from app.models.identity import (
     AgentProfile,
     AgentProfileCreate,
     AgentProfileUpdate,
+    AgentTokenAccessUpdate,
     AgentTokenCreate,
     AgentTokenIssued,
     AgentTokenSummary,
     UserProfile,
 )
+from app.repositories.identity_errors import AgentTokenInactiveError
 from app.models.memory import (
     AnswerMemoryLinksRequest,
     AnswerMemoryLinksResponse,
@@ -178,6 +181,35 @@ async def revoke_agent_token(
         return await run_in_threadpool(service.revoke_agent_token, user.id, token_id)
     except KeyError:
         raise _not_found("Agent token not found")
+
+
+@memory_router.put("/agent-tokens/{token_id}/access", response_model=AgentTokenSummary)
+async def update_agent_token_access(
+    token_id: str,
+    payload: AgentTokenAccessUpdate,
+    user: UserProfile = Depends(get_current_user),
+    service: MemoryRepository = Depends(memory_service),
+) -> AgentTokenSummary:
+    try:
+        return await run_in_threadpool(
+            service.update_agent_token_access,
+            user.id,
+            token_id,
+            payload.scopes,
+            payload.default_notebook_id,
+            payload.notebook_ids,
+            payload.expires_at,
+        )
+    except KeyError:
+        raise user_error(404, "没有找到这个 Token，可能已被删除")
+    except AgentTokenInactiveError as exc:
+        if exc.reason == "revoked":
+            raise user_error(409, "这个 Token 已撤销，不能再修改权限")
+        raise user_error(409, "所属 Agent Profile 已停用，这个 Token 已失效")
+    except PermissionError:
+        raise user_error(422, "白名单里有你已无权访问的笔记本，请取消勾选后再保存")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
 
 def _not_found(detail: str = "Memory not found") -> HTTPException:

@@ -1,0 +1,12 @@
+.agent-access-page { max-width: 1120px; margin: 0 auto; padding: 30px 24px 56px; }
+.agent-access-hero { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 22px; }
+.agent-access-hero-icon { flex: 0 0 auto; display: grid; place-items: center; width: 46px; height: 46px; border-radius: 13px; background: #eaf1ff; color: var(--blue); }
+.agent-access-hero h1 { margin: 0; font-size: 26px; letter-spacing: -.02em; }
+.agent-access-hero p { margin: 6px 0 0; color: var(--muted); line-height: 1.6; }
+.agent-access-hero a { margin-left: 4px; color: var(--blue); font-weight: 600; }
+.agent-access-page-state { color: var(--muted); }
+.agent-access-page-state.error { color: var(--red); }
+
+@media (max-width: 560px) {
+  .agent-access-page { padding: 20px 16px 40px; }
+}

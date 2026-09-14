@@ -8,6 +8,7 @@
   "AgentProfile",
   "AgentProfileCreate",
   "AgentProfileUpdate",
+  "AgentTokenAccessUpdate",
   "AgentTokenCreate",
   "AgentTokenIssued",
   "AgentTokenSummary",

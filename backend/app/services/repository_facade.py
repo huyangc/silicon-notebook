@@ -1391,6 +1391,24 @@ class RepositoryFacade:
     ) -> AgentTokenSummary:
         return self._runtime.memory_service.revoke_agent_token(owner_id, token_id)
 
+    def update_agent_token_access(
+        self,
+        owner_id: str,
+        token_id: str,
+        scopes: List[str],
+        default_notebook_id: str,
+        notebook_ids: List[str],
+        expires_at: "str | None",
+    ) -> AgentTokenSummary:
+        return self._runtime.memory_service.update_agent_token_access(
+            owner_id,
+            token_id,
+            scopes,
+            default_notebook_id,
+            notebook_ids,
+            expires_at,
+        )
+
     def resolve_agent_token(self, raw_token: str) -> "AgentPrincipal | None":
         return self._runtime.memory_service.resolve_agent_token(raw_token)
 

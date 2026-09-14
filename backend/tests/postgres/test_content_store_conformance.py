@@ -14,6 +14,7 @@ import pytest
 from app.core.config import Settings
 from app.models.ask import AskRequest, AskResponse
 from app.models.memory import MemoryWrite
+from app.repositories.identity_errors import AgentTokenInactiveError
 from app.repositories.postgres.ask_state_store import AskStateStore as PostgresAskStateStore
 from app.repositories.postgres.knowhow_store import KnowhowStore as PostgresKnowhowStore
 from app.repositories.postgres.knowhow_transfer_store import (
@@ -2101,6 +2102,83 @@ def test_memory_agent_token_round_trip_uses_connection_cursor_batch(content_harn
     assert issued.notebook_ids == ["nb-content"]
     assert issued.scopes == ["knowledge:read", "memory:read"]
     assert store.list_agent_tokens("user-content") == [issued]
+
+
+def test_memory_agent_token_access_update_round_trip_and_rejects_when_inactive(
+    content_harness,
+):
+    """``update_agent_token_access`` replaces scopes/allowlist/expiry in one
+    write transaction (``FOR UPDATE OF t`` guarding the read-check-write
+    against a concurrent revoke), and refuses once the token can no longer
+    accept changes -- either because it was revoked itself, or because its
+    owning Agent Profile was disabled."""
+    store = content_harness.memory
+    profile = store.create_agent_profile(
+        "user-content", "MCP conformance update", "PostgreSQL token update"
+    )
+    issued = store.create_agent_token(
+        "agent-token-content-update",
+        "user-content",
+        profile.id,
+        "sha256-token-hash-update",
+        ["knowledge:read"],
+        "nb-content",
+        ["nb-content"],
+        None,
+    )
+
+    updated = store.update_agent_token_access(
+        issued.id,
+        "user-content",
+        ["memory:propose"],
+        "nb-content",
+        ["nb-content"],
+        "2027-01-01T00:00:00+00:00",
+    )
+    assert updated.id == issued.id
+    assert updated.agent_profile_id == profile.id
+    assert updated.scopes == ["memory:propose"]
+    assert updated.default_notebook_id == "nb-content"
+    assert updated.notebook_ids == ["nb-content"]
+    assert updated.expires_at is not None
+    assert store.list_agent_tokens("user-content") == [updated]
+
+    # A different owner's scoped lookup does not find this token.
+    with pytest.raises(KeyError):
+        store.update_agent_token_access(
+            issued.id, "user-other", ["memory:propose"], "nb-content",
+            ["nb-content"], None,
+        )
+
+    # Revoked: rejected, and the previously-saved config is left untouched.
+    store.revoke_agent_token(issued.id, "user-content")
+    with pytest.raises(AgentTokenInactiveError) as exc_info:
+        store.update_agent_token_access(
+            issued.id, "user-content", ["memory:read"], "nb-content",
+            ["nb-content"], None,
+        )
+    assert exc_info.value.reason == "revoked"
+    still = store.list_agent_tokens("user-content")[0]
+    assert still.scopes == ["memory:propose"]
+
+    # Profile disabled: rejected too, even though the token itself is live.
+    live_token = store.create_agent_token(
+        "agent-token-content-disabled",
+        "user-content",
+        profile.id,
+        "sha256-token-hash-disabled",
+        ["memory:read"],
+        "nb-content",
+        ["nb-content"],
+        None,
+    )
+    store.update_agent_profile(profile.id, "user-content", {"status": "revoked"})
+    with pytest.raises(AgentTokenInactiveError) as exc_info:
+        store.update_agent_token_access(
+            live_token.id, "user-content", ["memory:read"], "nb-content",
+            ["nb-content"], None,
+        )
+    assert exc_info.value.reason == "profile_disabled"
 
 
 @pytest.mark.postgres_integration
