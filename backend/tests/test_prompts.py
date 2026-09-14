@@ -5,6 +5,8 @@ from app.services.prompts import (
 )
 import json
 
+import pytest
+
 
 def test_answer_prompt_states_marker_and_inference_rules():
     p = answer_prompt("q?", "k1: [concept] Engram — def: ...")
@@ -309,6 +311,145 @@ def test_reflect_prompt_kg_actions_true_is_byte_identical_to_omitting_it():
 
     assert reflect_prompt("q", "c") == reflect_prompt("q", "c", kg_actions=True)
     assert reflect_schema_hint() == reflect_schema_hint(kg_actions=True)
+
+
+# ---------------------------------------------------------------------------
+# PR-A(`read_document`,按篇读取有界原文取样):两态 × 全门组合。
+#
+# 这一组是那把闸的**唯一**逐字节对账:关门必须回到接入前,开门必须让三处同时
+# 出现(schema 的 next_action 词、schema 的参数分支、prompt 的动作说明行)。三处
+# 里少任何一处,模型都会看到一个它调不动的动作,或反过来调一个没被告知的动作。
+
+
+_READ_DOCUMENT_GATE_COMBINATIONS = [
+    {},
+    {"kg_actions": False},
+    {"outline": True},
+    {"consult_memory": True},
+    {"search_chunks": True},
+    {"element_kinds": ("formula", "table"), "object_types": ("claim",)},
+    {"element_kinds": ("formula",), "object_types": ("claim",),
+     "outline": True, "consult_memory": True, "search_chunks": True,
+     "kg_actions": False},
+]
+
+
+@pytest.mark.parametrize("gates", _READ_DOCUMENT_GATE_COMBINATIONS)
+def test_read_document_closed_is_byte_identical_to_omitting_it(gates):
+    """关门 == 不传 == 接入这个动作之前,在每一种其他闸的组合下都成立。"""
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+
+    assert reflect_schema_hint(**gates) == reflect_schema_hint(
+        read_document=False, **gates)
+    assert reflect_prompt("q", "c", **gates) == reflect_prompt(
+        "q", "c", read_document=False, read_document_cap=4, **gates)
+    # 关门态里一个字节都不许留下这个动作的痕迹。
+    assert "read_document" not in reflect_schema_hint(**gates)
+    assert "read_document" not in reflect_prompt("q", "c", **gates)
+
+
+@pytest.mark.parametrize("gates", _READ_DOCUMENT_GATE_COMBINATIONS)
+def test_read_document_open_shows_up_in_all_three_projections(gates):
+    """开门 ⇒ schema 枚举词 + schema 参数分支 + prompt 动作行**同时**出现或同时缺席。
+
+    这把闸是**双条件**的:`read_document` 自己,加上「本 run 有枚举工具」。三处投影
+    读的必须是同一个合取式——服务端那把复合判据(`document_read_active`)本来就含
+    枚举闸,而 schema 若只吃前一半,一个手工传参的调用方就能造出「schema 里有这个
+    分支、prompt 里没有它的说明」的组合;模型照样会去填那个模板槽位,而它填出来的
+    每一次调用都会被服务端以「本轮还没有列出过来源清单」跳掉。
+    """
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+
+    has_enumeration = bool(gates.get("element_kinds") or gates.get("object_types"))
+    schema = json.loads(reflect_schema_hint(read_document=True, **gates))
+    assert ("read_document" in schema["next_action"].split("|")) is has_enumeration
+    assert ("read_document" in schema) is has_enumeration
+    if has_enumeration:
+        assert schema["read_document"] == {
+            "source": "", "coverage": "spread|opening"}
+
+    prompt = reflect_prompt("q", "c", read_document=True,
+                            read_document_cap=4, **gates)
+    assert ("- read_document: sample the ORIGINAL TEXT" in prompt) is has_enumeration
+    # 无枚举时这个动作在**两处投影里都**一个字节都不留(与关门态同形)。
+    if not has_enumeration:
+        assert "read_document" not in reflect_schema_hint(
+            read_document=True, **gates)
+        assert reflect_schema_hint(read_document=True, **gates) == (
+            reflect_schema_hint(**gates))
+
+
+def test_read_document_action_line_says_the_five_things_it_has_to_say():
+    """五条要点各钉一次:标题来源、首选目标、与 search_chunks 的分工、有界取样的
+    披露义务、coverage 两个取值。报出的次数就是调用方传进来的那个预算。"""
+    from app.services.prompts import reflect_prompt
+
+    prompt = reflect_prompt(
+        "q", "c", element_kinds=("formula",), object_types=("claim",),
+        read_document=True, read_document_cap=3)
+
+    assert "copied EXACTLY as the roster above listed it" in prompt
+    assert "if you have not listed the roster yet, do that FIRST" in prompt
+    assert "Prefer the rows the roster showed with NO stored summary" in prompt
+    assert "It is NOT search_chunks" in prompt
+    assert "never state or imply that you have read the document in full" in prompt
+    assert '"spread"' in prompt and '"opening"' in prompt
+    assert "at most 3 document(s)" in prompt
+
+
+def test_opening_the_gate_without_an_allowance_is_a_loud_error():
+    """⑪ `read_document=True` 配上缺省的 `read_document_cap=0` 会渲染「at most 0
+    document(s)」——一个自称存在、却一次都调不动的动作。两个参数说的是同一件事,
+    而 0 正是部署方用来表达「这个动作不存在」的写法(总闸要求次数上限非零),所以
+    这个组合是接线错误,必须响亮地失败而不是渲染出来。"""
+    from app.services.prompts import reflect_prompt
+
+    with pytest.raises(ValueError, match="read_document_cap"):
+        reflect_prompt("q", "c", element_kinds=("formula",),
+                       read_document=True)
+    with pytest.raises(ValueError, match="read_document_cap"):
+        reflect_prompt("q", "c", read_document=True, read_document_cap=0)
+    # 关门态照旧接受缺省的 0(那正是它的含义)。
+    assert reflect_prompt("q", "c", read_document=False) == reflect_prompt("q", "c")
+
+
+def test_the_roster_follow_up_sentence_forks_with_read_document():
+    """④ 清单动作的尾句必须与 `read_document` 同步分叉。
+
+    没有这个动作时,按标题 add_subquery 是唯一能往下走的路,尾句逐字节保持接入前;
+    有这个动作时,再教模型对一个「没有摘要」的行去做相关性检索,就是让它去检索一篇
+    它还描述不出来的文档——那正是 read_document 存在要补的那个缺口。
+    """
+    from app.services.prompts import reflect_prompt
+
+    kinds = {"element_kinds": ("formula",), "object_types": ("claim",)}
+    closed = reflect_prompt("q", "c", **kinds)
+    opened = reflect_prompt("q", "c", read_document=True,
+                            read_document_cap=4, **kinds)
+
+    assert ("then, for each document worth going deeper into, add_subquery "
+            "using that document's TITLE from the list.") in closed
+    assert "read_document" not in closed
+
+    tail = opened[opened.index("the document roster is the outline"):]
+    tail = tail[:tail.index("Relevance search cannot substitute")]
+    assert "for a row with NO stored summary, read_document that title" in tail
+    assert "add_subquery using that document's TITLE from the list" in tail
+
+
+def test_read_document_source_is_not_listed_among_the_scope_fields():
+    """`read_document.source` **不**进 scope 字段清单:那份清单管的是「别把范围词
+    写进检索串」,而这个字段填的是一个从清单里逐字复制的标题,不是检索串。"""
+    from app.services.prompts import reflect_prompt
+
+    prompt = reflect_prompt(
+        "q", "c", element_kinds=("formula",), object_types=("claim",),
+        read_document=True, read_document_cap=4)
+
+    rule = prompt[prompt.index("This applies to every retrieval field you fill"):]
+    rule = rule[:rule.index("\n")]
+    assert "read_document" not in rule
+    assert "new_sub_query.query" in rule
 
 
 def test_plan_prompt_neutral_opening_matches_expand_query_prompts_framing():

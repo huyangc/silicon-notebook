@@ -1493,10 +1493,20 @@ def test_source_titles_note_is_bounded_three_ways():
     assert capped.count("《") < 20        # 合计上界比条数上界先生效
     assert "more)" in capped
 
-    # 无名文档不占标题位,也不进 (+N more) 的分母。
+    # 无名文档按**显示口径**出现,且最多占一个标题位(PR-A)。
+    #
+    # 接入 `read_document` 之前这里是「无名文档不占标题位」:那时候标题的唯一
+    # 用途是 `add_subquery`,而对一篇没有标题的文档做按标题的相关性检索毫无意义。
+    # 现在标题还是 `read_document.source` 的句柄,漏掉它等于让那一篇在反思轮里
+    # 根本不存在——而没有标题的文档通常也没有摘要,正是这个动作要补的那一行。
+    # 口径与花名册预览行、结果卡、标题解析三处一致(`UNNAMED_SOURCE_LABEL`)。
+    #
+    # 只占一个位:占位串对每一篇无名文档都是同一个字面,重复 N 遍既挤掉真标题、
+    # 又不给模型任何新信息(两篇同名时这个动作按标题本来就区分不开)。
     mixed = [_Item("有名"), _Item(""), _Item("   ")]
-    assert rr._source_titles_note(mixed) == "，标题: 《有名》"
-    assert rr._source_titles_note([_Item(""), _Item("  ")]) == ""
+    assert rr._source_titles_note(mixed) == "，标题: 《有名》《未命名来源》"
+    assert rr._source_titles_note(
+        [_Item(""), _Item("  ")]) == "，标题: 《未命名来源》"
     assert rr._source_titles_note([]) == ""
 
 

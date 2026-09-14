@@ -751,6 +751,9 @@ context. `DOCUMENT_OVERVIEW_MAX_ELEMENTS` (default 64, minimum 2) bounds the num
 of original parsed elements sampled for one document, including the final position.
 This is a deployment cost/coverage budget, not a guarantee of complete chapter
 coverage. Library introductions reuse the existing request enumeration rails.
+This same knob now also bounds reasoning Ask's `read_document` action's
+per-document element sampling pool (see `REASONING_MAX_DOCUMENT_READS` below) —
+the two lanes share one deployment cost ceiling rather than each getting its own.
 
 ```text
 RETRIEVAL_TOP_N         # reasoning/report synthesis evidence-budget floor (default 20)
@@ -1086,6 +1089,8 @@ REPORT_HIGH_RISK_DOWNGRADE_ENABLED # deep-report citation audit may cap a ground
 REPORT_HIGH_RISK_UNSUPPORTED_RATIO # deep-report high-risk citation-audit threshold; the numeric contract is owned by docs/product-and-api.md
 REASONING_MAX_PPR_RETRIEVES / REASONING_MAX_EXACT_LOOKUPS / REASONING_MAX_FOLLOW_CHAIN_ACTIONS / REASONING_COMMUNITY_PEERS_CAP_FACTOR / REASONING_MAX_OUTLINE_UPDATES # centralized reasoning action/expansion rails; defaults preserve historical behavior, exact rails in product-and-api
 REASONING_MAX_CHUNK_SEARCHES # per-run call cap for reasoning Ask's search_chunks action (default 3, matching REASONING_MAX_PPR_RETRIEVES/REASONING_MAX_EXACT_LOOKUPS; ge=0; the no-graph first-round deterministic seed does not count against this cap)
+REASONING_DOCUMENT_READ_ENABLED # gates reasoning Ask's per-document bounded original-text sampling reflect action, read_document (default true; false removes the action from schema/prompt/allow-list, zero extra queries, byte-identical to pre-feature behavior); shares its gate with the collection-enumeration switch REASONING_ENUM_TOOLS_ENABLED — when enumeration is off, or the request has narrowed retrieval scope by source, this action disappears too even if its own switch is on, because it can only read a source roster the run already listed
+REASONING_MAX_DOCUMENT_READS # per-run call cap for reasoning Ask's read_document action (default 4; ge=0; zero is a second deployment-level kill switch); the element sampling pool reuses DOCUMENT_OVERVIEW_MAX_ELEMENTS above, and the character sampling pool is a quarter of the tier's chunk_context_chars — both are split as "remaining budget // reads still available", not independent per-request fields
 REASONING_MAX_TOKENS # per-call output ceiling for the reasoning plan (query expansion) and every reflect turn (default 16384; ge=1). This is the shared Legacy deployment budget; workload output, retry and timeout boundaries still apply independently.
 ```
 

@@ -680,6 +680,7 @@ def reflect_schema_hint(
     search_chunks: bool = False,
     kg_actions: bool = True,
     *,
+    read_document: bool = False,
     plugin_actions: Sequence[ReflectActionSpec] = (),
 ) -> str:
     """The reflect response schema, with the enumeration branch iff offered.
@@ -722,6 +723,21 @@ def reflect_schema_hint(
     (the default, and every pre-existing caller) is byte-for-byte the schema
     from before the gate existed.
 
+    ``read_document`` (PR-A) is a FIFTH gate on the same principle, and the one
+    that is COMPOSITE: the per-document bounded sampling action exists only when
+    the deployment switch, the caller's policy flag, the source port, the
+    enumeration tools and a non-zero per-run cap are ALL present (single
+    predicate: ``reasoning_retrieval.ReasoningRetriever.document_read_active``).
+    It adds one word to the ``next_action`` enum and one nested branch
+    (``read_document``, carrying ``source``/``coverage``), so False is once more
+    byte-for-byte the schema from before the action existed. Keyword-only
+    because it arrived after ``kg_actions``: it must not become reachable by
+    position inside that run of booleans. It is ALSO conditioned on the
+    enumeration whitelists here, exactly as ``reflect_prompt`` conditions the
+    action's own description — the server predicate already folds that in, but a
+    caller passing the flag by hand must not be able to produce a schema branch
+    whose prompt line does not exist.
+
     ``plugin_actions`` is the one parameter here that is NOT a gate: it is
     external injection. Each spec is one function a deployment plugin lends the
     retrieval agent (``ask.reflect_action``), and it contributes one word to the
@@ -733,6 +749,12 @@ def reflect_schema_hint(
     lives in ``project_reflect_actions`` because the prompt line, this branch
     and ``reflect``'s whitelist must come out of one description.
     """
+    # The SAME double gate ``reflect_prompt`` applies to the action's own prompt
+    # line: ``read_document and enumeration_tools``. The two projections must
+    # agree exactly — a schema that carries a branch the prompt never describes
+    # hands the model a template slot it will fill in anyway, and the server
+    # then skips every one of those calls with "no roster listed yet".
+    enumeration_tools = bool(element_kinds or object_types)
     actions = (
         "answer|expand_graph|add_subquery|"
         "search_elements|ppr_retrieve|expand_community|follow_chain|exact_lookup"
@@ -741,6 +763,8 @@ def reflect_schema_hint(
     )
     if search_chunks:
         actions += "|search_chunks"
+    if read_document and enumeration_tools:
+        actions += "|read_document"
     # Shown beside the other free-text retrieval fields in the tail group, and
     # only when the action exists — an unusable field in the template is a
     # field some model will fill in anyway.
@@ -797,6 +821,23 @@ def reflect_schema_hint(
             '"collection":"","scope":"all|current_notebook",'
             '"source_id":"","source_title":""},'
         )
+    # The per-document sampling branch (PR-A). It is spliced between the
+    # enumerate branch and the plugin projection because that is where it
+    # belongs in reading order: the model picks a document out of the roster
+    # the enumerate branch above produced.
+    #
+    # ``source`` is shown EMPTY for the same reason ``source_title`` is in the
+    # enumerate branch — a schema hint is a template and models copy templates
+    # field by field, so a spelled-out example title would travel into calls
+    # that meant a different document. ``coverage`` is a SELF-DESCRIBING STRING
+    # ENUM, never a boolean: see the ``scope`` comment in the enumerate branch
+    # for why a bool example costs the whole reflect turn when a model answers
+    # ``"true"``, while a string example inherits F1's "empty is accepted"
+    # tolerance.
+    read_document_branch = (
+        '"read_document":{"source":"","coverage":"spread|opening"},'
+        if read_document and enumeration_tools else ""
+    )
     if consult_memory:
         actions += "|consult_memory"
     outline_branch = ""
@@ -841,6 +882,7 @@ def reflect_schema_hint(
         '"prefer":"balanced","reason":""},'
         + chain_branch
         + enumerate_branch
+        + read_document_branch
         + plugin_projection.schema_branches
         + outline_branch
         + community_focal_field
@@ -865,6 +907,8 @@ def reflect_prompt(
     search_chunks: bool = False,
     kg_actions: bool = True,
     *,
+    read_document: bool = False,
+    read_document_cap: int = 0,
     plugin_actions: Sequence[ReflectActionSpec] = (),
 ) -> str:
     """Next-step decision prompt.
@@ -897,6 +941,26 @@ def reflect_prompt(
     advertises actions the schema and the whitelist will both reject. True (the
     default) is byte-for-byte the prompt from before this gate existed.
 
+    ``read_document`` True = the per-document bounded sampling action is offered
+    this run (composite gate, single predicate
+    ``ReasoningRetriever.document_read_active`` — deployment switch, caller
+    policy flag, source port, enumeration tools and a non-zero per-run cap, all
+    of them); False = it is not, and every byte of this prompt is what it was
+    before the action existed. It rides a SECOND gate on top of its own —
+    ``enumeration_tools`` — because the action can only name a document the
+    roster already listed: describing it in a run with no roster tool would be
+    describing a door with no room behind it. ``read_document_cap`` is the
+    per-run allowance that the description reports; it is the SAME number the
+    server's cap skip reports back, so the model is never told one budget and
+    then refused against another. Opening the gate with a cap below 1 raises
+    ``ValueError`` rather than rendering "at most 0 document(s)": the two
+    arguments describe one fact, a zero cap is precisely how the deployment
+    spells "this action does not exist" (``document_read_active`` requires a
+    non-zero cap), and a prompt that offers an action with no allowance behind
+    it burns a reflect turn on a guaranteed cap skip. The one production caller
+    derives both from the same predicate, so this can only fire on a wiring
+    mistake — which is exactly when it should be loud.
+
     ``plugin_actions`` is not a gate but external injection: one spec per
     function a deployment plugin lends the retrieval agent
     (``ask.reflect_action``). Each renders one action line after
@@ -909,6 +973,9 @@ def reflect_prompt(
     parameter descriptions come from the plugin; see
     ``project_reflect_actions``.
     """
+    if read_document and read_document_cap < 1:
+        raise ValueError(
+            "read_document_cap must be >= 1 when read_document is offered")
     enumeration_tools = bool(element_kinds or object_types)
     # Placed right after ``add_subquery`` so the three passage-shaped channels
     # read as a group. The last sentence is the whole reason the action needs a
@@ -1028,8 +1095,21 @@ def reflect_prompt(
         "document in scope with its type and stored summary, in the order the "
         "library shows them. Use it FIRST for that shape of question — the "
         "document roster is the outline the rest of the answer hangs on — and "
-        "then, for each document worth going deeper into, add_subquery using "
-        "that document's TITLE from the list. Relevance search cannot "
+        # The follow-up sentence FORKS with ``read_document``. Without that
+        # action, add_subquery by title is the only way to go deeper, and the
+        # sentence is byte-for-byte what it was before PR-A. With it, telling
+        # the model to reach for add_subquery on a summary-less row is telling
+        # it to run a relevance search for a document it cannot describe yet —
+        # the exact gap read_document exists to close — so the roster's own
+        # follow-up has to name the right tool for each case.
+        + ("then go deeper per document: for a row with NO stored summary, "
+           "read_document that title to sample its original text; for a "
+           "document you already know and want specific passages from, "
+           "add_subquery using that document's TITLE from the list."
+           if read_document else
+           "then, for each document worth going deeper into, add_subquery "
+           "using that document's TITLE from the list.")
+        + " Relevance search cannot "
         "substitute: it returns passages from whichever documents matched, "
         "never the roster.\n"
         # The roster's scope is the MODEL's decision, made here, in the same
@@ -1057,6 +1137,56 @@ def reflect_prompt(
         "be requested again — except a roster already listed at one "
         "enumerate.scope, which may be listed once at the other.\n"
         if enumeration_tools else ""
+    )
+    # The per-document bounded sampling action (PR-A), placed right after the
+    # roster description because that is the only place it can be read from:
+    # its one argument is a title the roster above produced.
+    #
+    # DOUBLE gate (``read_document and enumeration_tools``). The composite
+    # predicate on the server already includes the enumeration gate, so the
+    # second condition is belt-and-braces for a caller that passes the flag by
+    # hand — but it is also the honest reading of the text: every sentence below
+    # refers to "the roster you listed above", which does not exist without the
+    # enumerate actions.
+    #
+    # Five things have to be said or the action is worse than useless:
+    #   * WHERE the title comes from (the roster, copied verbatim) and what to
+    #     do when there is no roster yet — otherwise the model invents titles
+    #     and burns turns on unresolvable requests;
+    #   * WHICH document is worth it (the roster rows that showed no stored
+    #     summary) — that is the gap this action exists to close;
+    #   * that it is NOT search_chunks — a model holding a passage-search action
+    #     will otherwise never guess what a per-DOCUMENT read is for, and the
+    #     two answer different questions ("what is this document" vs "where is X
+    #     mentioned");
+    #   * that what comes back is a BOUNDED sample carrying its own coverage
+    #     note, so the answer may never claim the document was read in full;
+    #   * how to spend the knob: spread (evenly spaced, always including the
+    #     last element, because a document's conclusion usually carries its
+    #     verdict) or opening (the first elements only, the cheapest useful
+    #     reading). A STRING ENUM, never a boolean — same reason as
+    #     enumerate.scope, see ``reflect_schema_hint``.
+    read_document_action = (
+        "- read_document: sample the ORIGINAL TEXT of ONE document, in document "
+        "order, to learn what that document itself is about. Set "
+        "read_document.source to a document title copied EXACTLY as the roster "
+        "above listed it — this action can only open a document that a previous "
+        "enumerate call with enumerate.collection=\"sources\" already listed, so "
+        "if you have not listed the roster yet, do that FIRST and read "
+        "afterwards. Prefer the rows the roster showed with NO stored summary: "
+        "those are the documents nothing else in this run can describe. It is "
+        "NOT search_chunks: that one hunts passages matching a query across the "
+        "library, this one walks a single document and answers 'what is this "
+        "document', never 'where is X mentioned'. What comes back is a BOUNDED "
+        "SAMPLE with its own coverage note attached — quote it, but never state "
+        "or imply that you have read the document in full. Set "
+        "read_document.coverage to \"spread\" for evenly spaced sampling that "
+        "always includes the document's last element (its conclusion usually "
+        "carries the verdict), or \"opening\" to read only the beginning, which "
+        "is the cheapest useful reading; leave it empty to get \"spread\". You "
+        f"may read at most {read_document_cap} document(s) this way in this "
+        "run, so spend them on the documents the question actually needs.\n"
+        if read_document and enumeration_tools else ""
     )
     # The outline scratchpad (design doc §3.1).  Three things have to be said
     # here or the action is worse than useless:
@@ -1201,6 +1331,7 @@ def reflect_prompt(
         "and returns the whole manual section it heads, so a name you invent or "
         "paraphrase returns nothing.\n"
         f"{enumerate_actions}"
+        f"{read_document_action}"
         f"{outline_action}"
         f"{consult_memory_action}"
         f"{plugin_action_lines}"

@@ -4,7 +4,7 @@
 (``retrieval_experience_projection.py`` 消费这批 id 折成
 ``attributable``/``anchored_hits``)是 T3+T4 的地盘,这里不碰。
 
-写侧硬判据(见 ``reasoning_retrieval.py`` 里紧贴八个写点的注释、以及
+写侧硬判据(见 ``reasoning_retrieval.py`` 里紧贴那十一个写点的注释、以及
 ``ask_service.py`` 里紧贴 synthesis 步的注释):走到发起 I/O 的路径就无条件写
 ``result_ids``/``anchor_evidence_ids``(零命中写 ``[]``),``skip`` 分支一律不写;
 截断发生时补稀疏 ``result_ids_truncated``/``anchor_evidence_ids_truncated``
@@ -19,10 +19,12 @@ reasoning_retrieval.py 的候选池汇总 "answer" 步,以及 ``step_limit`` 截
 列表。``result_ids_truncated``/``anchor_ids_truncated`` 同理按键存在透传。
 ``project_trace_step`` 对这批新键一个字都不碰。
 
-八个写点(reasoning_retrieval.py,修复轮 spec①新增第⑧个):
+十一个写点(reasoning_retrieval.py;修复轮 spec①新增第⑧个,此后
+⑨/⑩/⑪ 随无图播种、search_chunks、read_document 三条通道各加一个):
   ① 初检索 retrieve 步  ② PPR seed  ③ 精确查找 seed  ④ 已确认方向补种
   (coverage)pass  ⑤ expand  ⑥ add_subquery 的 retrieve 步  ⑦ ppr 动作步
-  ⑧ exact_lookup 动作步
+  ⑧ exact_lookup 动作步  ⑨ 无图首轮的原文播种  ⑩ search_chunks 动作步
+  ⑪ read_document 动作步(PR-A;见证失败也是零命中的 I/O 步,不是 skip)
 外加 ask_service.py 的 synthesis 步(``anchor_evidence_ids``)。
 """
 from __future__ import annotations
@@ -62,8 +64,8 @@ from tests.test_reasoning_retrieval import (
 
 
 # --------------------------------------------------------------- write side
-# reasoning_retrieval.py's ten emit sites (修复轮 spec①新增第⑧个;
-# search_chunks 的播种与动作两处是第⑨/⑩个).
+# reasoning_retrieval.py's eleven emit sites (修复轮 spec①新增第⑧个;
+# search_chunks 的播种与动作两处是第⑨/⑩个;PR-A 的 read_document 动作是第⑪个).
 
 
 def test_initial_retrieve_step_carries_result_ids(rrepo):
@@ -480,6 +482,72 @@ def test_search_chunks_cap_skip_never_writes_result_ids(rrepo):
                 if t.step_type == "skip"
                 and t.detail.get("reason") == "chunk_search_cap")
     assert "result_ids" not in skip.detail
+
+
+def test_read_document_step_carries_result_ids_and_its_skips_do_not(rrepo):
+    """⑪ `read_document` 动作步(PR-A):内容 / 零命中 / skip 三种形状一次钉齐。
+
+    它是第十一个写点,而且是唯一一个「I/O 发起了但产物可能整个为空」的动作——
+    见证失败(读取期间文档重新解析)必须记成**零命中的 read_document 步**
+    (``result_ids: []`` 键在场),不是 skip;真正的 skip(未列清单/标题不唯一/
+    重复/上限/预算/闸关)一律零 I/O、不写这把键。
+
+    e2e 接入面在 ``test_reasoning_document_read``;这里只按本文件的口径复核那条
+    硬判据在新通道上同样成立。
+    """
+    from tests.test_reasoning_document_read import (
+        ANSWER, _enumerate_sources_action, _notebook_with_documents,
+        _read_action, _reader,
+    )
+    from tests.test_reasoning_enumeration_tools import _ValidatingLLM
+
+    nb = _notebook_with_documents(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(),
+        _read_action("无摘要文档"),
+        _read_action("清单里没有这个标题"),
+        ANSWER,
+    ], plan={"sub_queries": [{"query": "版图设计"}]})
+    res = _reader(rrepo, llm).run(nb.id, "这个库讲了什么", "")
+
+    step = next(t for t in res.trace if t.step_type == "read_document")
+    assert step.detail["result_ids"] == [
+        "s-empty-000", "s-empty-001", "s-empty-002"]
+    assert step.detail["found"] == len(step.detail["result_ids"])
+
+    skip = next(t for t in res.trace
+                if t.step_type == "skip"
+                and t.detail.get("reason") == "document_read_unresolved")
+    assert "result_ids" not in skip.detail
+
+
+def test_read_document_witness_failure_writes_an_empty_result_ids_list(rrepo):
+    """⑪ 的零命中形状:I/O 真的发起过 ⇒ 写 ``[]`` 而不是让这把键缺席。"""
+    from app.services import reasoning_retrieval as rr_module
+    from app.services.document_source_overview import SourceOverview
+    from tests.test_reasoning_document_read import (
+        ANSWER, _enumerate_sources_action, _notebook_with_documents,
+        _read_action, _reader,
+    )
+    from tests.test_reasoning_enumeration_tools import _ValidatingLLM
+
+    nb = _notebook_with_documents(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(), _read_action("无摘要文档"), ANSWER,
+    ], plan={"sub_queries": [{"query": "版图设计"}]})
+    rr = _reader(rrepo, llm)
+    with mock.patch.object(
+        rr_module, "prepare_source_overview",
+        return_value=SourceOverview("", {}, [], "读取期间文档重新解析,请重试。"),
+    ):
+        res = rr.run(nb.id, "这个库讲了什么", "")
+
+    step = next(t for t in res.trace if t.step_type == "read_document")
+    assert step.detail["found"] == 0
+    assert step.detail["result_ids"] == []
+    assert "result_ids" in step.detail
 
 
 def test_skip_branches_never_write_result_ids(rrepo):

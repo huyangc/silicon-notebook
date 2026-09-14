@@ -183,6 +183,11 @@ class ReasoningEvidenceSnapshot:
     # existing construction site (this envelope is built by ``from_result`` in
     # production and by hand in the stage-contract tests).
     external_evidence: tuple[object, ...] = ()
+    # ``reasoning_retrieval.DocumentReadOutcome`` -- one per ``read_document``
+    # reflect action, INCLUDING the empty-product ones a witness failure leaves
+    # behind (the run's feedback ledger needs those; synthesis drops them).
+    # Defaulted and appended last for the same reason as the field above.
+    document_reads: tuple[object, ...] = ()
 
     @classmethod
     def from_result(cls, result: object) -> "ReasoningEvidenceSnapshot":
@@ -205,6 +210,9 @@ class ReasoningEvidenceSnapshot:
             baseline_manifest=getattr(result, "baseline_manifest", None),
             external_evidence=tuple(
                 getattr(result, "external_evidence", ()) or ()
+            ),
+            document_reads=tuple(
+                getattr(result, "document_reads", ()) or ()
             ),
         )
 
@@ -265,6 +273,14 @@ class ResponseDraftInput:
     # orchestrator's is the only production one, but tests build this envelope
     # directly — stays valid and produces the pre-feature answer unchanged.
     external_evidence: tuple[object, ...] = ()
+    # ``reasoning_retrieval.DocumentReadOutcome`` items the ``read_document``
+    # reflect action produced during retrieval (PR-A).  Same ``object`` typing
+    # and same defaulted-tail rationale as ``external_evidence`` above, and the
+    # same reason for being on THIS envelope rather than filled after the draft:
+    # a bounded original-text sample is citable, so it has to be inside the
+    # drafted answer.  The empty-product outcomes ride along too; answer
+    # assembly filters them out (see ``document_read_answer``).
+    document_reads: tuple[object, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

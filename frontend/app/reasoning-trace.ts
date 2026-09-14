@@ -22,6 +22,13 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   // 两回事的步(一条是「回原文里找细节」的元素兜底,一条是「按语义/关键词检索
   // 原文段落」的一等检索动作)。
   search_chunks: "段落",
+  // read_document = 按篇读取有界原文取样(reflect 动作 read_document,PR-A)。⚠ 不用
+  // "原文"——那个词已经被上面的 fallback 兜底步占了;也不用"段落"——那个词已经
+  // 被上面的 search_chunks 一等检索动作占了。三者若同名,轨迹里会出现读起来一样、
+  // 说的却是三回事的步(fallback 是「回原文里找细节」的元素兜底,search_chunks 是
+  // 「按语义/关键词检索原文段落」的一等检索动作,read_document 是「整篇文档的有界
+  // 取样」)。
+  read_document: "取样",
   // outline = 大纲便签(update_outline reflect 动作写的那一步);仅 exhaustive 档
   // 且 REASONING_OUTLINE_ENABLED 开启时出现(设计文档 §3.1)。
   outline: "大纲",
@@ -68,24 +75,27 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
 
 // next_action 取值来自 backend/app/services/prompts.py 的状态机决策(reflect 步骤
 // next-step 提议),原样显示会把英文动作名泄漏给用户。
-// 全部 13 个真实取值见 reasoning_retrieval.py 的 next_action if/elif 分发链——从
+// 全部 14 个真实取值见 reasoning_retrieval.py 的 next_action if/elif 分发链——从
 // `decision.next_action == "answer" or decision.sufficient` 起,到
 // `elif decision.next_action == "expand_community":` 止(PR-2 在其中插入了
 // enumerate_elements/enumerate_kg_objects 两个,精确查找通道插入了 exact_lookup
 // 一个,O1 插入了 update_outline(`OUTLINE_ACTION`)一个,Agentic Memory P4 插入了
 // consult_memory(`CONSULT_MEMORY_ACTION`,仅 deep 及以上档且经验注入闸开启时
 // 出现)一个,T1 插入了 search_chunks(在原文段落里检索,无图时是唯一进入大预算
-// 分区的一等入口,有图 run 也可选)一个,原为 7 个)。按分支内容定位而非行号:
-// 本仓库的行号指针已知会随后续改动腐烂(见 test_architecture_documentation 一类
-// 语义化守卫的教训),这里不重蹈覆辙。用「下一步意图」措辞而非机制名(ppr/
-// community/chain/enumerate/exact_lookup/update_outline/consult_memory 这些是
-// 内部机制,不该摆给用户)。
+// 分区的一等入口,有图 run 也可选)一个,PR-A 插入了 read_document(按篇读取原文
+// 取样)一个,原为 7 个)。按分支内容定位而非行号:本仓库的行号指针已知会随后续
+// 改动腐烂(见 test_architecture_documentation 一类语义化守卫的教训),这里不
+// 重蹈覆辙。用「下一步意图」措辞而非机制名(ppr/community/chain/enumerate/
+// exact_lookup/update_outline/consult_memory/read_document 这些是内部机制,不该
+// 摆给用户)。
 //
 // PR-2.5 的来源清单刻意**不在**这张表里:它不是新增动作,而是 enumerate 动作的
 // 一个参数值(`enumerate.collection="sources"`),所以反思步的「下一步意图」仍是
 // 「列元素清单」,而真正发生的那一步由 enumerate 步自己的 summary 说清
 // (「枚举来源清单: …」——后端 `_collection_label` 拼的)。update_outline 则相反:
-// 它是货真价实的第 11 个动作 id(不是参数值),所以这张表要加一行。
+// 它是货真价实的第 11 个动作 id(不是参数值),所以这张表要加一行。read_document
+// (PR-A)同理是货真价实的第 14 个动作 id;它的 source/coverage 是这个动作自己的
+// 参数值,不因此再加别的行。
 const NEXT_ACTION: Record<string, string> = {
   answer: "开始作答",
   expand_graph: "顺着相关内容继续找",
@@ -100,6 +110,7 @@ const NEXT_ACTION: Record<string, string> = {
   exact_lookup: "按名称精确查找",
   update_outline: "整理大纲",
   consult_memory: "回想以往的查法",
+  read_document: "按篇读取原文取样",
 };
 
 export type ReasoningTraceSummary = {
@@ -340,6 +351,23 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
       return `${detail.returned_total} 条（总数未知）`;
     }
     return `${detail.returned_total}/${detail.total} 条`;
+  }
+  // read_document(PR-A):按篇读取有界原文取样。detail 除 found 外还带 source(文档
+  // 显示标题)与 coverage("spread"|"opening"),必须排在下面的通用 found 分支
+  // 之前——落到那条只剩「新增 N」,标题被吞掉,用户看不出读的是哪一篇。coverage
+  // 为 "opening" 时只取样了开头(不是等距覆盖全文),要说清楚,否则读者会误以为
+  // 整篇都被等距取样过。零命中(found: 0)时 detail 可能带 note(例如「读取期间
+  // 文档重新解析」)——此时显示 note 而不是空洞的「新增 0 段取样」,不然用户不
+  // 知道为什么这一步什么都没拿到。
+  if (step.step_type === "read_document") {
+    const title = typeof detail.source === "string" && detail.source ? `《${detail.source}》` : "";
+    const found = typeof detail.found === "number" ? detail.found : undefined;
+    if (found === 0 && typeof detail.note === "string" && detail.note) {
+      return [title, detail.note].filter(Boolean).join(" ");
+    }
+    if (found === undefined) return title;
+    const opening = detail.coverage === "opening" ? "（只读开头）" : "";
+    return [title, `新增 ${found} 段取样${opening}`].filter(Boolean).join(" ");
   }
   if (typeof detail.count === "number") return `${detail.count} 个候选`;
   if (typeof detail.found === "number") return `新增 ${detail.found}`;

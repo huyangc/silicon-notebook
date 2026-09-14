@@ -2118,6 +2118,13 @@ def complete_row(
         #      failure inside the seed pass propagates and escalates into a
         #      failure of the whole completion instead of a missing channel.
         reasoning_retriever.allow_search_chunks = False
+        # Per-document original-text sampling (the `read_document` action) is
+        # off here for reasons 1 and 3 above: the "query" is still that JSON
+        # envelope, and completion runs fail_closed. Explicit rather than
+        # inherited — completion never passes a `sources` port either, which
+        # alone keeps the action unreachable, but a policy this profile relies
+        # on must not depend on a wiring accident staying an accident.
+        reasoning_retriever.allow_document_read = False
         reasoning_retriever.untrusted_evidence = True
         # 显式带上补全专用的收束句。通用主体是缺省值,只翻开关会少掉「只围绕
         # 这次空格补全来规划与反思」那一句 —— 那句话对 Ask 是错的(它不在做

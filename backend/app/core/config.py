@@ -957,6 +957,13 @@ class Settings(BaseSettings):
     reasoning_max_chunk_searches: int = Field(
         3, ge=0, validation_alias="REASONING_MAX_CHUNK_SEARCHES"
     )
+    # reflect 动作 read_document(按篇读取有界原文取样,复用
+    # ``document_source_overview.prepare_source_overview``)的每 run 次数上限。
+    # 只在已经列过来源花名册(``enumerate.collection="sources"``)之后才提供,
+    # 用于摘要为空的文档——模型判断该读哪一篇、读多深,不是服务端替它挑。
+    reasoning_max_document_reads: int = Field(
+        4, ge=0, validation_alias="REASONING_MAX_DOCUMENT_READS"
+    )
     # Agentic Memory P4 (T5): reflect 动作 consult_memory 的总开关与 per-run 次数
     # 上限。仅在 deep 及以上档且 ``RETRIEVAL_EXPERIENCE_INJECT_ENABLED`` 也开着时
     # 才提供这个动作(见 ``reasoning_retrieval.consult_memory_active`` 的单点判定
@@ -1042,6 +1049,12 @@ class Settings(BaseSettings):
     # 总共只付一次。
     reasoning_chunk_search_enabled: bool = Field(
         True, validation_alias="REASONING_CHUNK_SEARCH_ENABLED")
+    # 逐步推理的按篇原文取样动作(reflect 动作 read_document)总开关。与上面那把
+    # chunk 检索闸同一「off 就是旧行为」契约:关掉即动作不进 prompt/schema/
+    # allowed_actions 三处,`REASONING_MAX_DOCUMENT_READS` 无消费者,逐字节回到
+    # 接入这个动作之前。
+    reasoning_document_read_enabled: bool = Field(
+        True, validation_alias="REASONING_DOCUMENT_READ_ENABLED")
     # 逐步推理的大纲便签(reflect 动作 update_outline)总开关。它**另外**受档位
     # 约束:只有用户把检索档位选到「穷尽」时才提供(设计文档 §3.1,用户拍板),
     # 因为按节合成的成本要由用户显式选择来承担。关掉即两处都回到接入前:prompt

@@ -72,7 +72,9 @@
       空间、早退收窄为零源、注册表与前端闸放行，已落地；② 无图首轮并入关键词臂 + 首轮后
       模型判定直接作答的成本契约（规格 `docs/superpowers/specs/2026-09-07-reasoning-chunk-parity-keyword-arm-design_zh.md`），
       ✅ 已合入 PR #693；③ ✅ 2026-09-14 用户裁决直接下线请求级 `auto` 选择器，简化界面固定
-      `reasoning` 标准档（本 PR），原「自动模式灰度」不再做；④ 退役 chunk 流水线，待立规格。
+      `reasoning` 标准档（本 PR），原「自动模式灰度」不再做；④ 前置：chunk 独有能力补进
+      reasoning——PR-A `read_document`（本 PR）；PR-B 引用卡 + 精确席位；PR-C 无 intent
+      跟进改写（待做）；④ 退役 chunk 流水线，待立规格。
       ④ 的硬前提：做 chunk/reasoning 对照前必须确认**界面路径的 chunk 向量检索基线已修复**
       （`docs/superpowers/specs/2026-09-07-scoped-chunk-vector-lane-design_zh.md`，已由 PR #697
       合入），否则两臂对比测的是一个坏掉的对照组；原「自动模式下 4 比 3 调用数」前提随
@@ -87,6 +89,19 @@
       周期性 / 方向三句式 + 一句对比题，无图库与有图库各跑一遍）未做。
 - [ ] **问答纠偏规则 12（限定词保真）人工 A/B**：仓库无问答质量评测台，放量前用「点名子部件 /
       周期性 / 方向」三句式各问一次验证；ledger 喂摘要未做。
+- [ ] **`read_document`（PR-A）已登记的延后项**：(a) `source_scope` 真正收窄了检索范围时，
+      整套枚举工具连同 `read_document` 一并不提供（与枚举同一道闸）——需要把来源清单本身做成
+      按选中来源可寻址（source-addressable）才能在收窄范围下继续工作；(b) 清单里**同名**的第二篇
+      文档无法按标题精确匹配（动作的参数就是标题），只能被跳过并提示模型改读别的文档，尚无第二个
+      消歧维度（如序号）；无标题文档已可按花名册占位串「未命名来源」读取，不再属于这一条。
+      (c) **取样通道的 I/O 放大**：`prepare_source_overview` 对每个元素调一次
+      `source_elements_page(offset, limit=1)`，而每次调用含「来源存在性检查 + `COUNT(*)` +
+      单行窗口」三条语句——standard 档一篇取 5 个元素即 15 条语句、加两次 generation 读约 17 条
+      往返，一个 run 读 4 篇约 70 条；exhaustive 档一篇 16 个元素约 50 条，一 run 约 200 条。
+      优化方向二选一：给 `SourceStorePort` 加「按一组 offsets 批量取元素」的原语，
+      或让首页之后的每次取页跳过存在性检查与计数（总数在首页已经拿到，执行体的
+      `stable_count` 只需要最后再核一次）。零锚点路径与目录补摘要通道共享同一份收益。
+      规模现状可接受（每次读取的元素数已由字符份额反推压到个位数），所以登记而不在 PR-A 内做。
 - [ ] **Prompt 三层化后的 per-notebook 定制与 self-evo**：接缝只有 `fragment_text()`；L1 片段分
       两类（A 类离线 GEPA + 人审，B 类只改示例槽位），尚未拍板开放。
 - [ ] **Agentic Memory 注入开闸与 A/B**：P1–P4 已合入，注入默认关闭，开闸是独立决定。

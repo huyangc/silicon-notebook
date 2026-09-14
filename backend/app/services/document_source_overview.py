@@ -26,6 +26,32 @@ def _safe_text(text: str) -> str:
     return re.sub(r"\[\s*k\d+\s*\]", lambda m: "［" + m[0][1:-1] + "］", text)
 
 
+def supplemental_excerpt_header(key: str, title: str) -> str:
+    """Build the wrapper header for a directory row's supplemental original excerpts.
+
+    ``key`` is the handle the document's own directory row already occupies in
+    the prompt (``k5001`` etc.), so "the row you listed" and "the text I sampled
+    out of it" are visibly the same document. An EMPTY ``key`` is the honest
+    degradation for a sample whose row never reached the preview (its budget
+    squeezed it out, or the enumeration block was dropped wholesale): the same
+    sentence, minus the claim that some listed row is this document. It never
+    invents a handle — a ``kN`` the evidence map does not carry would bind to
+    nothing and teach the model to cite a key that cannot be resolved.
+
+    Both shapes escape the title identically, which is why they live in one
+    function: the escaping is the security-relevant half (document text must not
+    be able to manufacture a handle belonging to this context), and a second
+    hand-copied renderer elsewhere is exactly how one of the two loses it.
+    """
+    subject = f"document {key}" if key else "the document named here"
+    return (
+        f"\n\n[Supplemental original excerpts for {subject}; bounded sampling, "
+        "not a full reading] "
+        + json.dumps(title, ensure_ascii=False).replace("[", "［").replace("]", "］")
+        + "\n"
+    )
+
+
 def prepare_source_overview(
     sources: SourceStorePort,
     source_item: SourceItem,
@@ -36,6 +62,7 @@ def prepare_source_overview(
     active_notebook_id: str,
     generation_reader: Callable[[str], str] | None = None,
     key_offset: int = 0,
+    coverage: str = "spread",
 ) -> SourceOverview:
     """Read evenly spaced elements, including the last source-detail position.
 
@@ -49,6 +76,15 @@ def prepare_source_overview(
     evidence.  A defaulted argument would let a caller forget it and echo the
     active notebook's own id back, which is exactly the badge bug the A1 guard
     (``tests/test_citation_notebook_id_guard.py``) exists to prevent.
+
+    ``coverage`` selects the sampling shape: ``"spread"`` (the default) takes
+    evenly spaced positions that always include the last element, since a
+    document's conclusion often carries its verdict. ``"opening"`` instead
+    reads only the first ``max_elements`` elements -- the cheapest useful
+    reading for "what is this document about" when the document has no
+    stored summary at all. Any other string is treated as ``"spread"``
+    (permissive, never raises). Both existing callers omit this argument, so
+    their output is byte-for-byte unchanged.
     """
     raise_if_cancelled(cancel_event)
     if budget_chars <= 0 or max_elements <= 0:
@@ -58,10 +94,13 @@ def prepare_source_overview(
     first = sources.source_elements_page(source_id, offset=0, limit=1)
     total = first.total_count
     count = min(total, max_elements)
-    offsets = (
-        [index * (total - 1) // (count - 1) for index in range(count)]
-        if count > 1 else ([0] if count else [])
-    )
+    if coverage == "opening":
+        offsets = list(range(count))
+    else:
+        offsets = (
+            [index * (total - 1) // (count - 1) for index in range(count)]
+            if count > 1 else ([0] if count else [])
+        )
     elements = []
     stable_count = True
     seen = set()
@@ -138,6 +177,19 @@ def prepare_source_overview(
         ))
     if not total:
         note = "这篇文档没有可读取的原文，请先完成文档解析。"
+    elif not lines:
+        # 文档有原文元素，但**一条都没落地**：每个元素分到的字符份额连它自己的
+        # 章节面包屑都装不下（`low <= len(_safe_text(section + "\n"))` 那道闸把它
+        # 整条丢掉）。极长的 section_path 配上极小的预算就是这个形状。
+        #
+        # 这一条必须与下面那条有界摘录分开说：那句话以「请仅依据这些原文介绍」
+        # 结尾，而这里**一个字的原文都没有**——把它交给模型，就是在请模型依据
+        # 一份空证据去介绍这篇文档，而那正是无依据编造的入口。两条读取通道
+        # （目录补摘要与按篇取样）共享这一份措辞。
+        note = (
+            f"本次字符预算放不下这篇文档的任何原文元素（{total} 个元素），未能取样；"
+            "请如实说明这一篇暂无依据。"
+        )
     elif len(lines) == total and complete_text and generation_reader and before:
         note = f"已读取全部 {total} 个原文元素，读取期间文档解析版本未变化。"
     else:

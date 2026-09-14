@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-import json
 from typing import Any
 
 from app.core.ask_retrieval_policy import AskRetrievalLimits
@@ -133,7 +132,10 @@ def supplement_missing_summaries(
     The directory remains the coverage authority; original excerpts never turn
     its stored summary or source card into a fabricated ingestion result.
     """
-    from app.services.document_source_overview import prepare_source_overview
+    from app.services.document_source_overview import (
+        prepare_source_overview,
+        supplemental_excerpt_header,
+    )
 
     preview_sources = {entry.get("source_id") for entry in catalog.id_map.values()}
     missing = [item for item in catalog.items
@@ -145,9 +147,7 @@ def supplement_missing_summaries(
         element_share = remaining_elements // remaining_rows
         directory_key = next(key for key, entry in catalog.id_map.items()
                              if entry.get("object_type") == "source" and entry.get("object_id") == item.source_id)
-        header = f"\n\n[Supplemental original excerpts for document {directory_key}; bounded sampling, not a full reading] " + json.dumps(
-            item.source_title, ensure_ascii=False,
-        ).replace("[", "［").replace("]", "］") + "\n"
+        header = supplemental_excerpt_header(directory_key, item.source_title)
         char_share = (budget_chars - len(catalog.context_block)) // remaining_rows - len(header)
         if element_share <= 0 or char_share <= 0:
             continue
