@@ -4596,10 +4596,21 @@ class AskService:
                 return structured_block, False
             combined = (f"{structured_block}\n\n{preview.text}"
                         if structured_block else preview.text)
+            from app.services.collection_enumeration_answer import (
+                COLLECTION_MAP_BLOCK_MAX_CHARS,
+            )
             shared_cap = (int(knowhow_block_len)
                           + (2 if knowhow_block_len else 0)
                           + int(chunk_context_chars) // 2)
-            if len(combined) > shared_cap:
+            # 再夹一层**分区总容量**(codex #724 R6):knowhow 块本身不受半预算约束,
+            # 它接近填满 chunk_context_chars 时共享上限会远大于分区,取样块虽过了
+            # 上限却装不进 `_answer_reasoning` 的分区——被 `_bounded_context_append`
+            # 按字符截掉、披露行却留着,还报 dropped=False。集合地图块与分隔符先于
+            # structured_block 占用同一分区,按它的硬上界预留。整块要么装进、要么
+            # 显式不装,不允许静默截断。
+            partition_cap = (int(chunk_context_chars)
+                             - COLLECTION_MAP_BLOCK_MAX_CHARS - 4)
+            if len(combined) > min(shared_cap, partition_cap):
                 return structured_block, True
             citation_updates = {
                 citation.element_id: citation for citation in preview.citations}
