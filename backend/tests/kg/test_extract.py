@@ -359,3 +359,15 @@ def test_scalar_collections_never_discard_the_extracted_nodes():
 
     assert [n.name for n in nodes] == ["analog signal"]
     assert edges == []
+
+
+def test_prompt_states_scalar_types_for_ids_labels_and_names():
+    """Prompt/parser alignment (audit A2): the parser keys nodes by a string
+    local_id and reads ev as an integer label; the prompt must say so instead
+    of leaving the shape to the model."""
+    prompt = _prompt("[0] text", "1 > 1.1", "textbook")
+    assert 'bare INTEGER label' in prompt
+    assert 'write 3, never "3", 3.0 or true' in prompt
+    assert '"local_id": a short STRING' in prompt
+    assert '"type" is exactly one\nof the four node-type words above, as a string' in prompt
+    assert "carries the node's text as\na single string" in prompt

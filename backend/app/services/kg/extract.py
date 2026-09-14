@@ -280,11 +280,14 @@ one edge. Prefer reasoning edges (supports/derived_from/depends_on); fall back t
 `about`.
 {base_rule}
 The passage is numbered elements, one per line, prefixed like [3]. Every node and
-edge MUST include "ev": the INTEGER label of the element that best contains it.
-Give each node a "local_id" reused in edges. "name" carries the node's text
-(Concept/Procedure name, Claim proposition, Formula expression). For an ordered
-multi-step Procedure emit ONE Procedure node with an ordered `steps` array, each
-{{"name":..,"ev":..}}. Skip narrative/filler.
+edge MUST include "ev": the bare INTEGER label of the element that best contains
+it (write 3, never "3", 3.0 or true). Give each node a "local_id": a short STRING
+(e.g. "n1") reused verbatim as an edge's "source"/"target". "type" is exactly one
+of the four node-type words above, as a string. "name" carries the node's text as
+a single string (Concept/Procedure name, Claim proposition, Formula expression).
+For an ordered multi-step Procedure emit ONE Procedure node with an ordered
+`steps` array, each {{"name":..,"ev":..}} with the same string/integer rules.
+Skip narrative/filler.
 
 Preserve entity/concept names, formula expressions and canonical labels EXACTLY
 as they appear in the source text, in their ORIGINAL LANGUAGE — do NOT translate

@@ -413,3 +413,15 @@ def test_container_valued_rationale_is_never_persisted_as_text():
     [decision] = review_conflict_candidates(_ListRationale(), [_item()])
     assert decision["rationale"] == ""
     assert decision["conflict_type"] == "temporal"
+
+
+def test_prompt_states_that_resolved_payload_is_an_object():
+    """Prompt/parser alignment (audit B4): the parser only applies a dict
+    payload, so the prompt must not invite a bare string ("append …")."""
+    llm = _FakeLLM(_verdict())
+    review_conflict_candidates(llm, [_item()])
+    prompt = llm.last_messages[0]["content"]
+    assert "resolved_payload is a JSON OBJECT" in prompt
+    assert 'e.g. {"name":' in prompt
+    assert "never a bare string" in prompt
+    assert "rationale: one short sentence, as a string" in prompt

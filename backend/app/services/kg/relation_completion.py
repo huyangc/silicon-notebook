@@ -252,14 +252,21 @@ def propose_batch(client: Any, candidates: Sequence[CompletionCandidate]) -> lis
         {"role": "system", "content": (
             "Select only direct relations explicitly stated by the supplied excerpts. "
             "Use only issued candidate/object/edge/element ids. Similarity or co-occurrence "
-            "alone is not a relation. Return an empty relations list when uncertain."
+            "alone is not a relation. Return an empty relations list when uncertain. "
+            "Output contract: a JSON object with one key, \"relations\", whose value is a "
+            "list; every relation carries EXACTLY these six keys and no others — "
+            "\"candidate_id\", \"source_object_id\", \"target_object_id\", \"edge_type\", "
+            "\"evidence_element_ids\" (a non-empty list of issued element ids, no "
+            "duplicates), \"confidence\" (a number 0..1). A relation with a missing or "
+            "extra key is discarded."
         )},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ], '{"relations":[{"candidate_id":"","source_object_id":"","target_object_id":"","edge_type":"","evidence_element_ids":[""],"confidence":0.0}]}')
     data = safe_json(raw)
-    if not isinstance(data, dict) or set(data) != {"relations"} or not isinstance(
-        data.get("relations"), list
-    ):
+    # The envelope must carry the advertised collection (a page without it is
+    # retried); extra top-level keys are tolerated like everywhere else, the
+    # per-relation key set below stays exact because every id is server-issued.
+    if not isinstance(data, dict) or not isinstance(data.get("relations"), list):
         raise ValueError("invalid relation completion proposal envelope")
     by_id = {candidate.candidate_id: candidate for candidate in candidates}
     proposals = []
@@ -308,7 +315,13 @@ def verify_batch(client: Any, proposals: Sequence[CompletionProposal]) -> list[C
     raw = client.chat_json([
         {"role": "system", "content": (
             "Verify whether each proposed directed relation is explicitly supported by its "
-            "excerpts. Reject mere co-occurrence, topical similarity, or inference."
+            "excerpts. Reject mere co-occurrence, topical similarity, or inference. "
+            "Output contract: a JSON object with one key, \"verdicts\", whose value is a "
+            "list with one entry per proposal; every verdict carries EXACTLY these three "
+            "keys — \"candidate_id\" (the issued id, as a string), \"valid\" (a JSON "
+            "boolean true/false, never a string), \"reason\" (a short string; use \"\" "
+            "when you have nothing to add — the key itself is required). A verdict "
+            "with a missing or extra key is discarded."
         )},
         {"role": "user", "content": json.dumps([
             {**_candidate_payload(proposal.candidate),
@@ -322,9 +335,7 @@ def verify_batch(client: Any, proposals: Sequence[CompletionProposal]) -> list[C
         ], ensure_ascii=False)},
     ], '{"verdicts":[{"candidate_id":"","valid":true,"reason":""}]}')
     data = safe_json(raw)
-    if not isinstance(data, dict) or set(data) != {"verdicts"} or not isinstance(
-        data.get("verdicts"), list
-    ):
+    if not isinstance(data, dict) or not isinstance(data.get("verdicts"), list):
         raise ValueError("invalid relation completion verifier envelope")
     valid_ids = {
         str(item.get("candidate_id") or "")
