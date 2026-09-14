@@ -1457,7 +1457,12 @@ def test_source_chain_note_feeds_back_the_titles(repo):
 
     note = llm.reflect_prompts[1]
     assert "「来源清单」已完整列出 2 条" in note
-    assert "标题: 《论文一》《论文二》" in note
+    # 两篇种子文档都没有已存摘要,所以每条标题后面跟着 (无摘要) 标记——这是
+    # read_document 的选读依据(codex #724 P2:账目只带标题不带摘要,模型没有
+    # 这个标记就无从知道该读哪几篇)。
+    from app.services import reasoning_retrieval as rr
+    mark = rr._ENUM_NOTE_NO_SUMMARY_MARK
+    assert f"标题: 《论文一》{mark}《论文二》{mark}" in note
     assert "(+" not in note              # 两条没超上限,不该出现省略尾巴
 
 
@@ -1508,6 +1513,23 @@ def test_source_titles_note_is_bounded_three_ways():
     assert rr._source_titles_note(
         [_Item(""), _Item("  ")]) == "，标题: 《未命名来源》"
     assert rr._source_titles_note([]) == ""
+
+    # 摘要可得性标记(codex #724 P2):账目只带标题不带摘要,模型没有这个标记就
+    # 无从知道该把有限的 read_document 次数花在哪几篇上。`summary` 属性存在且为
+    # 空串才标;属性缺席(上面的 `_Item`)不标——账目只报它确知的事。
+    class _Card:
+        def __init__(self, title, summary):
+            self.source_title = title
+            self.summary = summary
+
+    assert rr._source_titles_note(
+        [_Card("有摘要", "讲了点什么"), _Card("没摘要", ""), _Card("空白摘要", "  ")]
+    ) == f"，标题: 《有摘要》《没摘要》{rr._ENUM_NOTE_NO_SUMMARY_MARK}《空白摘要》{rr._ENUM_NOTE_NO_SUMMARY_MARK}"
+    # 标记字符计入合计上界:一串 60 字标题全部无摘要时,比全部有摘要时更早停。
+    marked = rr._source_titles_note([_Card("长" * 60, "") for _ in range(20)])
+    unmarked = rr._source_titles_note([_Card("长" * 60, "x") for _ in range(20)])
+    assert marked.count("《") < unmarked.count("《")
+    assert len(marked) <= rr._ENUM_NOTE_TITLES_TOTAL_CHARS + len("，标题: ") + 16
 
 
 def test_repeating_a_finished_collection_trips_the_stale_breaker(repo):

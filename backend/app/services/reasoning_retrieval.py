@@ -737,6 +737,61 @@ def _strip_title_wrapping(value: str) -> str:
     return text
 
 
+def _roster_note_form(row) -> str:
+    """The exact string ``_source_titles_note`` shows reflect for ``row``.
+
+    Internal whitespace collapsed and the title cut to ``_ENUM_NOTE_TITLE_CHARS``
+    -- the two transformations the ledger applies. ``_resolve_roster_rows``
+    accepts this form so a model that copied a listed title verbatim is never
+    told the title does not exist just because the stored title is longer.
+    """
+    return " ".join(_roster_display_title(row).split())[:_ENUM_NOTE_TITLE_CHARS]
+
+
+def _resolve_roster_rows(rows, requested: str) -> list:
+    """Deterministic title -> roster rows resolution for ``read_document``.
+
+    Every step is an EXACT comparison after one bounded, lossless-in-spirit
+    rewrite of what the model typed; none of them approximates:
+
+    1. drop a copied ``(无摘要)`` ledger marker;
+    2. exact match on the roster display string (``source_title`` or the
+       unnamed placeholder, whitespace collapsed on both sides);
+    3. drop ONE pair of book-title marks / quotes and retry;
+    4. drop the ``标题 · 类型: 摘要`` tail of a copied preview line and retry;
+    5. compare against the ledger's own bounded form (title cut to
+       ``_ENUM_NOTE_TITLE_CHARS``) -- what reflect actually saw.
+
+    Two rows sharing the same bounded form both match and the caller reports
+    the ambiguity; a title that equals none of these forms stays unresolved.
+    """
+    text = " ".join(str(requested or "").split())
+    if text.endswith(_ENUM_NOTE_NO_SUMMARY_MARK):
+        text = text[: -len(_ENUM_NOTE_NO_SUMMARY_MARK)].strip()
+
+    def _exact(candidate: str) -> list:
+        wanted = _normalized_title(candidate)
+        if not wanted:
+            return []
+        return [row for row in rows
+                if _normalized_title(" ".join(_roster_display_title(row).split())) == wanted]
+
+    matches = _exact(text)
+    if not matches:
+        unwrapped = _strip_title_wrapping(text)
+        if unwrapped != text:
+            text = unwrapped
+            matches = _exact(text)
+    if not matches and SOURCE_ROW_FIELD_SEPARATOR in text:
+        matches = _exact(text.split(SOURCE_ROW_FIELD_SEPARATOR, 1)[0])
+    if not matches:
+        wanted = _normalized_title(text)
+        if wanted:
+            matches = [row for row in rows
+                       if _normalized_title(_roster_note_form(row)) == wanted]
+    return matches
+
+
 def _roster_display_title(row) -> str:
     """一行花名册在**模型眼里**的标题。
 
@@ -1053,6 +1108,10 @@ _ENUM_NOTE_MAX_ITEMS = 8
 #     加块头),让「账目 + 地图」两段服务端小块在最坏情况下仍是常数级开销。
 _ENUM_NOTE_SOURCE_TITLES = 20
 _ENUM_NOTE_TITLE_CHARS = 60
+# 花名册账目里「这一行没有已存摘要」的标记。它是 read_document 的选读依据(账目只带
+# 标题不带摘要,模型没有它就无从知道该读哪几篇),也是模型可能连着标题一起抄回来
+# 的东西,`_resolve_roster_rows` 第一步就把它剥掉。
+_ENUM_NOTE_NO_SUMMARY_MARK = "(无摘要)"
 _ENUM_NOTE_TITLES_TOTAL_CHARS = 800
 
 
@@ -1098,11 +1157,16 @@ def _source_titles_note(items) -> str:
         if len(titles) >= _ENUM_NOTE_SOURCE_TITLES:
             break
         text = raw[:_ENUM_NOTE_TITLE_CHARS]
+        # 摘要可得性标记:`summary` 属性存在且为空串才标;属性缺席(测试替身、
+        # 非 SourceItem)不标——账目只报它确知的事。标记字符计入合计上界。
+        summary = getattr(item, "summary", None)
+        mark = (_ENUM_NOTE_NO_SUMMARY_MARK
+                if summary is not None and not str(summary).strip() else "")
         # +2 是《》的开销;先算再收,不能先塞进去再回头砍。
-        if used + len(text) + 2 > _ENUM_NOTE_TITLES_TOTAL_CHARS:
+        if used + len(text) + 2 + len(mark) > _ENUM_NOTE_TITLES_TOTAL_CHARS:
             break
-        titles.append(text)
-        used += len(text) + 2
+        titles.append((text, mark))
+        used += len(text) + 2 + len(mark)
     if not titles:
         return ""
     # 分母用「有名字的条目数」而不是 len(items):没有显示名的文档在这份清单里本来
@@ -1113,7 +1177,7 @@ def _source_titles_note(items) -> str:
     )
     omitted = max(0, nameable - len(titles))
     tail = f"(+{omitted} more)" if omitted else ""
-    return "，标题: " + "".join(f"《{text}》" for text in titles) + tail
+    return "，标题: " + "".join(f"《{text}》{mark}" for text, mark in titles) + tail
 
 
 def _enumeration_note(chains) -> str:
@@ -5145,37 +5209,9 @@ class ReasoningRetriever:
         # 却永远读不到,而它恰恰是这个动作最该覆盖的一行(没标题的文档通常也
         # 没摘要,别的通道一个字都描述不了它)。
         requested = str(decision.read_document_source or "")
-        wanted = _normalized_title(requested)
-        matches = ([row for row in roster.values()
-                    if _normalized_title(_roster_display_title(row)) == wanted]
-                   if wanted else [])
-        if not matches:
-            # 模型把标题包在一对书名号/引号里(`《部署手册.md》`)——真模型抽问里
-            # 第一次 unresolved 就是这个形状,而本文件的回喂账目自己就用书名号
-            # 括标题,不能怪它。只剥**一对**成对的包裹符再精确匹配一次;标题本身
-            # 就带书名号的文档在上面那次整串精确匹配里已经命中,走不到这里。
-            unwrapped = _strip_title_wrapping(requested)
-            if unwrapped != requested:
-                requested = unwrapped
-                wanted = _normalized_title(requested)
-                matches = ([row for row in roster.values()
-                            if _normalized_title(_roster_display_title(row)) == wanted]
-                           if wanted else [])
-        if not matches and SOURCE_ROW_FIELD_SEPARATOR in requested:
-            # 模型把**整行**抄了回来(预览行的形状是 `标题 · 类型: 摘要`,而指令
-            # 说的是「逐字复制标题」——两者差一步,模型会踩)。
-            #
-            # 兜底仍然是**确定性的精确匹配,不是猜**:按预览行自己的分隔符切掉
-            # 第一个 " · " 之后的部分,再原样精确匹配一次。切出来的前缀与真标题
-            # 不相等就照样 0 命中,不做任何模糊化——与 `_normalized_title` 那条
-            # 「只求活过空白与大小写,绝不近似匹配」的纪律一致。标题里本身含
-            # " · " 的文档不受影响:那种标题在上面那次整串精确匹配里就已经命中,
-            # 根本走不到这里。
-            head = _normalized_title(
-                requested.split(SOURCE_ROW_FIELD_SEPARATOR, 1)[0])
-            matches = ([row for row in roster.values()
-                        if _normalized_title(_roster_display_title(row)) == head]
-                       if head else [])
+        # 解析走 `_resolve_roster_rows`:每一步都是确定性的精确匹配,只是先把模型
+        # 抄来的形态(标记/书名号/整行/账目里的截断形)还原成花名册的显示串。
+        matches = _resolve_roster_rows(list(roster.values()), requested)
         if len(matches) != 1:
             # detail 只带模型自己给的标题(截断)与命中条数。内部 source_id 从不
             # 上屏,而这条 skip 的用途恰恰是让模型看懂「你给的标题在清单里找不到
