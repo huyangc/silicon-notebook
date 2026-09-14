@@ -1,6 +1,8 @@
 # 方案：插件提供的 reflect 动作（`ask.reflect_action` 扩展点 + 外部证据类）
 
-状态：设计定稿待实施（2026-09-13）。
+状态：已实现（2026-09-14）。T1–T6 见 PR #714；PR-B（arXiv 样例的 `search_arxiv` 动作）
+见 §十 的 PR-B 条目。开闸仍是部署决定：`REASONING_MAX_PLUGIN_ACTIONS=0` 即关闭，样例插件
+本身也出厂关闭。
 上游背景：插件化 X 路线 **X6**（「有真实消费者才重开扩展点」——`agent.tool_provider` 在
 #569 因零消费者删除）与 **PR-B v2**（#596 登记的下一步：把 `ask.gap_consult` 演化成模型
 自选的 reflect 动作）。本方案就是那个真实消费者：部署插件向检索 Agent 提供一个**函数**
@@ -493,10 +495,18 @@ location_label）都过 `domain.reflect_action.fold_control_characters`**：块�
   `test_reflect_action_docs_contract.py` 照 gap_consult guard 反射两组常量与表行。
   （`docs/deployment-extensions-sop*.md` §3.5 的表行与数词 eight/八 → nine/九 已在 T1 完成：
   导出新 `*_POINT` 的同一提交必须过既有 docs guard，拆不到 T6。）
-- **PR-B（独立 PR）**：`examples/extensions/arxiv-search/` 新增 `examples.arxiv_search.search`
-  动作（参数 `query` text 必填；复用 `client`/`atom`/节流与 egress 策略层），G1 零网络 e2e
-  + G2 `scripts/check_sample_plugin.sh` 通过，零补丁验收照 #596 的机器测试。这是 X6 要求
-  的真实消费者，与 T1–T6 同一里程碑内合入。
+- **PR-B（独立 PR）——已实现**：`examples/extensions/arxiv-search/` 新增
+  `examples.arxiv_search.reflect_search` contribution，动作名 `search_arxiv`（参数 `query`
+  text 必填；复用 `client`/`atom`/节流与 egress 策略层），G1 零网络单测 + e2e
+  （真 TOML → 冻结宿主 → 真 reflect 循环）+ G2 `scripts/check_sample_plugin.sh` 通过，
+  零补丁验收照 #596 的机器测试继续通过。这是 X6 要求的真实消费者，与 T1–T6 同一里程碑内
+  合入。实施偏离三处，都是收敛重复而不是改契约：动作名按 §四 的裸名规则定为
+  `search_arxiv`（不是本节原来随手写的 `examples.arxiv_search.search`，那个串带点号，过不了
+  `^[a-z][a-z0-9_]{2,31}$`）；样例插件的拉丁词抽取从 `consult.py` 抽成共用的 `terms.py`；
+  「最坏情况装不装得进 deadline」的算术从 `consult.py` 抽成 `settings.deadline_budget`，
+  常量随之由 `CONSULT_RETURN_MARGIN_SECONDS` 改名 `RETURN_MARGIN_SECONDS`。启用它需要两个
+  设置项（`reflect_search_enabled` 与一个 ≥ 13.25 秒的
+  `REASONING_PLUGIN_ACTION_TIMEOUT_SECONDS`），与缺口外扩同款。
 
 守卫与账目：`reasoning_retrieval.run`/`reflect` 的函数天花板零松弛——新增语句放尾注释
 之前，分支体在独立方法；架构守卫计数与 `RUNTIME_ATTRIBUTES` 在 PR 说明里给出前后值；

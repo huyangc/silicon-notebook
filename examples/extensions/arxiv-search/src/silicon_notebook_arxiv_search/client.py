@@ -12,11 +12,13 @@ deadline-bound context is the second argument: :func:`acquire_slot` never
 sleeps past the budget it was given.  If the wait needed to honour the interval
 would not fit, it releases the lock and answers ``False`` immediately — the
 caller then skips this round entirely rather than burning someone else's
-latency budget.  The two callers hand it very different budgets:
+latency budget.  The three callers hand it very different budgets:
 
 * an interactive search route can afford ``timeout + interval``;
 * gap consultation may only spend ``deadline − now − timeout``, and a refusal
-  there means "no suggestions this time", at a cost of zero network calls.
+  there means "no suggestions this time", at a cost of zero network calls;
+* the reflect search action spends the same remainder against a different core
+  deadline, and a refusal there means "no external material this turn".
 
 **Registered limitation — the throttle is per process.**  Production pins the
 backend to a single worker, so in that deployment it is a global throttle.  A
@@ -149,16 +151,17 @@ def build_query_url(
     validation) gets whatever value it passes, floored at 1 below.
 
     The ``[:MAX_QUERY_TERMS]`` slice below is defence in depth, not the
-    enforcement point, for either caller that reaches this function today.
+    enforcement point, for any caller that reaches this function today.
     User-edited data must not be silently truncated (repo rule: "数值上限与
     截断"), so the interactive ``/search`` route now rejects a query with
     more than ``MAX_QUERY_TERMS`` whitespace-split words with an explicit 400
     *before* calling here (``routes.py::search``) — the ninth word onward
-    used to vanish with no warning once this slice ran. Gap-consult's own
-    term extractor (``consult.py::_query_terms``) already returns at most
-    ``MAX_QUERY_TERMS`` terms on its own, because its query is a handful of
-    terms this plugin derived from the question and gap phrases, not
-    user-edited text passed straight through — bounding what it constructs is
+    used to vanish with no warning once this slice ran. The shared term
+    extractor both outbound contributions use (``terms.py::latin_terms``)
+    already returns at most ``MAX_QUERY_TERMS`` terms on its own, because its
+    query is a handful of terms this plugin derived from the question, the gap
+    phrases or the model's own argument, not user-edited text passed straight
+    through — bounding what it constructs is
     a *construction* ceiling, not a truncation of anything a person typed,
     the same distinction PR-A's egress minimisation draws for gap-consult's
     outbound query. This slice exists so a caller that reaches this function

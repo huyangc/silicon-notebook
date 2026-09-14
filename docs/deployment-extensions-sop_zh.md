@@ -742,7 +742,7 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 
 它同时干两件事：
 
-1. **本 SOP 的可运行范例。** 它用的就是第 3、4 节描述的那些接缝，顺序也一样：带设置模型与两道能力门的后端 bundle（3.1–3.3）、带 core 自己那套 notebook 门的 HTTP 路由（3.4）、一个 `GapConsultContributor`（3.5、3.6），以及一个扁平的、带一条 `workspace.side_panel` 入口的构建期 UI 包（第 4 节）。
+1. **本 SOP 的可运行范例。** 它用的就是第 3、4 节描述的那些接缝，顺序也一样：带设置模型与三道能力门的后端 bundle（3.1–3.3）、带 core 自己那套 notebook 门的 HTTP 路由（3.4）、一个 `GapConsultContributor` 与一个 `ReflectActionContributor`（3.5、3.6），以及一个扁平的、带一条 `workspace.side_panel` 入口的构建期 UI 包（第 4 节）。
 2. **「插件不需要给公网仓库打补丁」这句话的机器化证明。** `backend/tests/test_arxiv_sample_plugin_e2e.py::test_the_package_runs_from_outside_the_repository` 把整个包复制到一个临时目录，只把那份副本放上 `sys.path`，用一份点名它的 TOML 起一个真应用，并断言每个被 import 的模块的 `__file__` 都在副本目录之下。
 
 ### 它演示了什么
@@ -751,12 +751,13 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 | --- | --- | --- |
 | 人工检索导入 | 侧栏入口 → 弹窗 → 插件自己的 `POST /import` 路由 → core 的 URL 导入端口 | 插件路由把活交给一个自己对请求用户做授权判定的 core 端口 |
 | Agent 触发的缺口外扩 | core 的 `ask.gap_consult` 点向插件要笔记本之外的线索 | 硬 deadline 下的 `GapConsultContributor`，与侧栏入口分开门控 |
+| 模型自选的 reflect 动作 | core 的 `ask.reflect_action` 点把 `search_arxiv` 提供给检索 Agent | 推理宿主 deadline 下的 `ReflectActionContributor`，再由 `reflect_search_enabled` 单独门控 |
 
-**两道能力门刻意是两个不同的对象**，这也是这个样板关于 3.3 节最主要的教学点：`manifest.provides` 里的那个能力只门控侧栏入口（「这个插件配好了吗？」），而对外咨询由逐 contribution 的 `ExtensionContribution.availability` 单独门控（「这次部署同意让它去联系第三方吗？」）。关掉外扩，面板与导入路由一个字都不变。`manifest.requires` 是空的，样板自己的注释里写了为什么。
+**三道能力门刻意是三个不同的对象**，这也是这个样板关于 3.3 节最主要的教学点：`manifest.provides` 里的那个能力只门控侧栏入口（「这个插件配好了吗？」），而每一个对外功能都由逐 contribution 的 `ExtensionContribution.availability` 单独门控（「这次部署同意让它去联系第三方吗？」）——缺口外扩一道探针，reflect 动作另一道，因为它们是部署方分两次做的两个决定。关掉其中任何一个，面板、导入路由与另一个对外功能一个字都不变。`manifest.requires` 是空的，样板自己的注释里写了为什么。
 
 ### 它的数值登记在哪
 
-样板的私有上限——礼貌性间隔、每页条数、超时、检索词上限、导入批次上限、建议条数上限与外扩返回余量——登记在**它自己的 README 对**里，即 `examples/extensions/arxiv-search/README.md` / `README_zh.md`，**不在** `docs/product-and-api*.md`。那对文档登记的是 core 的数值上限；一个样板插件自己的数字不是 core 的上限，写进去等于宣称这次构建会强制它们。样板的「已登记局限」同样在那份 README 对里（进程内节流、socket 级超时、XML 实体扩展那一条，以及「启用缺口外扩需要两个设置项而不是一个」）。
+样板的私有上限——礼貌性间隔、每页条数、超时、检索词上限、导入批次上限、建议条数上限、reflect 动作条数上限与共用的返回余量——登记在**它自己的 README 对**里，即 `examples/extensions/arxiv-search/README.md` / `README_zh.md`，**不在** `docs/product-and-api*.md`。那对文档登记的是 core 的数值上限；一个样板插件自己的数字不是 core 的上限，写进去等于宣称这次构建会强制它们。样板的「已登记局限」同样在那份 README 对里（进程内节流、socket 级超时、XML 实体扩展那一条，以及「启用缺口外扩、或启用 reflect 动作，都需要两个设置项而不是一个」）。
 
 ### 它刻意与真正的仓库外插件不同的两处
 

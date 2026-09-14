@@ -75,3 +75,46 @@ consult_max_suggestions = 3
 # Refusing early is the intended behaviour, not a limitation to work around:
 # an answer that arrives after the deadline is read by nobody, so spending a
 # politeness slot and a round trip on one is pure waste.
+
+# ---------------------------------------------------------------------------
+# The reflect search action (off by default)
+# ---------------------------------------------------------------------------
+# Core can lend the reasoning-Ask retrieval agent a function from an installed
+# plugin. Enabling this one puts `search_arxiv` in front of the model, with its
+# description and its `query` parameter, once a run's in-library channels have
+# already come back empty; the model then decides for itself whether to call
+# it. What comes back is quoted in the answer and cited as external material,
+# which is a bigger commitment than a suggestion card beside it — so, like
+# consultation, it is a separate, explicit yes, and saying yes to one is not
+# saying yes to the other.
+reflect_search_enabled = false
+
+# Most papers one call may bring back, 1–5. Core caps the call and the run
+# separately (EXTERNAL_EVIDENCE_MAX_ITEMS_PER_CALL and
+# EXTERNAL_EVIDENCE_MAX_PER_RUN); the smallest of them wins.
+reflect_search_max_items = 3
+
+# ⚠ This one also takes TWO settings, and the second one is again not here.
+#
+# Core gives one reflect-action call a hard deadline —
+# `REASONING_PLUGIN_ACTION_TIMEOUT_SECONDS`, default 8.0 seconds, shared by the
+# availability probe and the call itself — because it too is spent out of a
+# reader's own answer latency. This plugin refuses to start a request it
+# cannot finish inside that deadline, and its worst case is the same
+# `politeness_interval_seconds + timeout_seconds` plus the same return margin.
+#
+# With the defaults above that is 13.25 seconds against an 8-second deadline,
+# so the action is not offered to the model at all — this plugin's availability
+# probe runs the same arithmetic and answers DISABLED with the reason code
+# `reflect_budget_too_small`, which core records on its own extension event.
+# (Offering a function that would then refuse every call would spend the
+# model's attention and a slot of the run's action budget for nothing.) A
+# deployment that wants it must also raise
+# `REASONING_PLUGIN_ACTION_TIMEOUT_SECONDS` past that worst case (the setting
+# declares no upper bound, unlike `ASK_GAP_CONSULT_TIMEOUT_SECONDS`'s 30 — but
+# every second of it is a second the reader waits), or lower `timeout_seconds`
+# / `politeness_interval_seconds` far enough to fit underneath it.
+#
+# `REASONING_MAX_PLUGIN_ACTIONS = 0` is core's own kill switch for the whole
+# point: at zero the action disappears from the prompt, the schema and the
+# whitelist together, whatever this file says.

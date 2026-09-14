@@ -81,7 +81,7 @@ const PACKAGE_DIR = path.join(
 const EXPECTED_CONTRIBUTION = Object.freeze({
   id: "examples.arxiv_search.panel",
   plugin_id: "examples.arxiv_search",
-  version: "0.1.0",
+  version: "0.2.0",
   capability: "examples.arxiv_search.available",
   slot: "workspace.side_panel",
   permission: "notebook:write",

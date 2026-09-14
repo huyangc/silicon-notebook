@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "silicon-notebook-arxiv-search"
-version = "0.1.0"
-description = "Sample deployment extension for Silicon Notebook: arXiv literature search and gap consultation"
+version = "0.2.0"
+description = "Sample deployment extension for Silicon Notebook: arXiv literature search, gap consultation and a model-callable reflect search action"
 requires-python = ">=3.13"
 
 # Deliberately nothing from this repository.  The extension SDK

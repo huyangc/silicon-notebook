@@ -500,3 +500,40 @@ V2 专用代码、配置、自评/终态消费及多臂探针随此次清理删�
 模型/事件日志关联、Legacy 影子检索与测试库的 Ask/Report 工具继续保留。
 既有持久化轨迹不迁移，导出保留其显式历史终态，不能重推为正常结束。
 本次清理的验证结果以 PR 对应提交的验证记录为准。
+
+## 33. 插件提供的 reflect 动作 `ask.reflect_action` 与首个真实消费者（2026-09-14）
+
+设计真源 `docs/superpowers/specs/2026-09-13-reflect-plugin-action-design_zh.md`。X6
+（「有真实消费者才重开扩展点」）自此收官：部署插件把一个**函数**借给逐步推理问答的检索
+Agent，函数名、说明与参数说明进 reflect 的提示词、schema hint 与 `allowed_actions`
+白名单三处；模型在库内通道空手之后自己决定要不要调、传什么参数；带回的材料作为**外部
+证据**进合成，可 `[k]` 引用，前端带「外部」标识与打开链接。分两个 PR：
+
+- **PR-A（#714，T1–T6）**：`domain/reflect_action.py`（含 `RESERVED_REFLECT_KEYS` 与两组
+  数值上限）、`extension_sdk/reflect_action.py`、registry freeze 期校验、投影与解析、
+  宿主 `extensions/reflect_action.py`、`_action_plugin` 与按轮事实闸、外部证据进合成与
+  引用、前端引用卡/徽章/轨迹、文档与 docs guard。
+- **PR-B（本轮）**：`examples/extensions/arxiv-search` 新增 `reflect_search.py` 的
+  `search_arxiv` 动作（`query` 一个必填 text 参数），`reflect_search_enabled` /
+  `reflect_search_max_items` 两个设置，bundle 第三条 contribution 与第三道独立探针，
+  版本 0.2.0；G1 零网络单测与 e2e（真 TOML → 冻结宿主 → 真 reflect 循环 → 外部证据），
+  G2 `scripts/check_sample_plugin.sh` 通过，零补丁用例继续通过。样例插件的 `_query_terms`
+  拉丁词抽取抽成 `terms.py`、deadline 最坏情况算术抽成 `settings.deadline_budget`，两条
+  对外贡献共用一份。
+
+已裁决、实施时不再讨论的点：进合成而不是只进 reflect；动作名裸名 + freeze 期冲突校验；
+首轮不提供且要求本 run 出现过库内空手（事实闸不是路由）；不加独立总开关，
+`REASONING_MAX_PLUGIN_ACTIONS=0` 即 kill switch；参数只有字符串与字符串枚举；
+descriptor 字符串超限或含控制字符是**启动失败**而不是静默夹取；插件声明的 `excerpt`
+就是引用卡上的引文，核心不二次摘要。
+
+刻意延后（登记不是遗漏）：报告与 Knowhow 补全不接这条通道（需要按节的外部调用预算）；
+公开分享页只输出 `is_external`、不输出 URL；参数抄候选的 n-gram 拦截不做，靠提示词红线
+加轨迹逐字披露；`ask.gap_consult` 与本点并存，是否退役等 arXiv 样例的 reflect 动作在真实
+部署跑过一轮之后再定；外部证据不进经验库。样例插件本身仍出厂关闭，且启用它需要两个
+设置项——`reflect_search_enabled = true` 与一个放得下
+`politeness + timeout + margin = 13.25` 秒的 `REASONING_PLUGIN_ACTION_TIMEOUT_SECONDS`
+（默认 8.0 秒装不下），这条与缺口外扩同款的「两个设置」规则由 TOML 里的算术与一条测试
+钉住。误配的判定落在**可用性探针**上而不是每次调用：探针拿同一份算术对核心 deadline
+判一次，答 DISABLED + `reflect_budget_too_small`，动作根本不会出现在模型的选项里，
+不烧 run 的动作预算。

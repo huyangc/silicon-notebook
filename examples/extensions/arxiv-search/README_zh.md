@@ -12,6 +12,12 @@
 本文档面向**启用它的运维方**，不是面向要在它基础上继续开发的人——那类需求请读源码里的
 注释和 SOP 本身。
 
+它现在演示**三个**后端扩展点，每一个各自单独门控：一个 HTTP 路由
+（`plugin.http_router`，即人工检索与导入面板）、一个缺口外扩贡献
+（`ask.gap_consult`），以及一个 reflect 动作（`ask.reflect_action`）——插件借给逐步
+推理问答检索 Agent 的一个函数，由模型自己在 run 中途决定要不要调用。后两个都会
+向站外发请求，也都出厂关闭；见 4.1 节与 4.7 节。
+
 ## 零、UI 样板形状
 
 这个样板面板现在连内容层也走 `frontend/features/extension-sdk/ui.tsx`
@@ -55,6 +61,8 @@
 | `user_agent` | `silicon-notebook-arxiv-sample/0.1 (+https://arxiv.org/help/api)` | 非空，不含控制字符；不满足则启动时 fail-fast |
 | `consult_enabled` | `false` | 布尔值 |
 | `consult_max_suggestions` | `3` | 整数，`1`–`5` |
+| `reflect_search_enabled` | `false` | 布尔值 |
+| `reflect_search_max_items` | `3` | 整数，`1`–`5` |
 
 `base_url` 与 `user_agent` 在启动时就会被校验（必须是绝对 `http(s)` 且无查询串/
 fragment；必须非空且不含控制字符）——这两个值都会跨过一道信任边界直接交给
@@ -84,7 +92,7 @@ fragment；必须非空且不含控制字符）——这两个值都会跨过一
 | `MAX_IMPORT_URLS` | 20 | `routes.py` | 单次 `/import` 请求 |
 | `MAX_URL_CHARS` | 2048 | `routes.py` | 导入批次里单个 URL 的长度 |
 | `START_MAX` | 10,000 | `routes.py` | 翻页上限 |
-| `CONSULT_RETURN_MARGIN_SECONDS` | 0.25 | `consult.py` | 见 4.1 节 |
+| `RETURN_MARGIN_SECONDS` | 0.25 | `settings.py` | 两个对外贡献共用，见 4.1 节与 4.7 节 |
 
 `TITLE_MAX_CHARS`/`SUMMARY_MAX_CHARS` 此前刻意与核心自己的
 `GAP_SUGGESTION_TITLE_MAX_CHARS`/`GAP_SUGGESTION_SUMMARY_MAX_CHARS`（200/400）取相同
@@ -104,10 +112,10 @@ fragment；必须非空且不含控制字符）——这两个值都会跨过一
 在触碰节流阀与 arXiv 之前就挡下；检索框里超过 8 个词时面板也会禁用检索按钮并给出
 同一句提示。第 9 个词起**不会**被静默丢弃：`build_query_url` 自己的
 `query.split()[:MAX_QUERY_TERMS]` 切片仍然存在，但只作为直接调用该函数的调用方的
-纵深防御——路由已经挡下了任何会被这个切片截断的输入，而缺口外扩自己的词项抽取器
-（`consult.py::_query_terms`）在调用进来之前就已经把自己限制在 `MAX_QUERY_TERMS`
-个词以内，因为它的查询是这个插件从问题与缺口短语里派生出的少量词，不是用户逐字
-输入后原样传递的文本。
+纵深防御——路由已经挡下了任何会被这个切片截断的输入，而两个对外功能共用的词项
+抽取器（`terms.py::latin_terms`）在调用进来之前就已经把自己限制在
+`MAX_QUERY_TERMS` 个词以内，因为它的查询是这个插件从问题、缺口短语或模型自己写的
+参数里派生出的少量词，不是用户逐字输入后原样传递的文本。
 
 **`QUERY_MAX_CHARS` 是同一个故事的前一层。** `routes.py::search` 先按**Unicode 码点**
 数检查检索词的长度，比词数检查还早一步，超过 200 个字符就以「检索关键词过长，请
@@ -136,7 +144,7 @@ fragment；必须非空且不含控制字符）——这两个值都会跨过一
 插件自己的默认值，它需要在这个 deadline 内完成的最坏情况耗时是：
 
 ```
-politeness_interval_seconds + timeout_seconds + CONSULT_RETURN_MARGIN_SECONDS
+politeness_interval_seconds + timeout_seconds + RETURN_MARGIN_SECONDS
 = 3.0 + 10.0 + 0.25 = 13.25 秒
 ```
 
@@ -150,7 +158,7 @@ politeness_interval_seconds + timeout_seconds + CONSULT_RETURN_MARGIN_SECONDS
 ### 4.2 中文问题下缺口外扩多半不会出建议
 
 抽取查询词这一步会把**问题措辞与全部缺口短语**一起扫描拉丁字母检索词
-（`consult.py::_query_terms`）。如果一个词都抽不出来，外扩会直接返回一个稳定
+（`consult.py::_query_terms`，底层是共用的 `terms.py::latin_terms`）。如果一个词都抽不出来，外扩会直接返回一个稳定
 代码（`arxiv_no_latin_terms`），**零网络调用、零占用节流锁**——连请求都不会尝试
 发起。理由是 arXiv 是一个拉丁关键词索引，一个纯中文的问题保证零命中；发过去只会
 白白消耗一次节流配额和一次往返，去确认一件本地就能确定的事。可见的后果是：
@@ -224,6 +232,43 @@ TOML 起一个真应用，经挂载好的路由跑通一次检索，并断言每
 第二条后缀规则——放宽成 `*.<镜像>` 会让调用方借着部署自己的配置把
 `<镜像>.evil.example` 也导进来，所以 `sub.<镜像>` 与其它冒充主机一样会被拒绝。
 
+### 4.7 reflect 检索动作同样需要两个设置项，不是一个
+
+只把 `reflect_search_enabled = true` 打开**并不够**，理由与 4.1 节完全一样，只是
+换了一组数字。核心给每一次 `ask.reflect_action` 调用设了一个硬 deadline，即
+`REASONING_PLUGIN_ACTION_TIMEOUT_SECONDS`（默认 **8.0** 秒，可用性探针与调用本身
+共用同一份预算），而这个插件拒绝发起一次它无法在这个 deadline 内完成的请求：
+
+```
+politeness_interval_seconds + timeout_seconds + RETURN_MARGIN_SECONDS
+= 3.0 + 10.0 + 0.25 = 13.25 秒
+```
+
+对着 8 秒的 deadline，这个动作**根本不会被提供给模型**：插件自己的可用性探针会拿
+同一份算术对核心的 deadline 做一次判断，答 DISABLED 并给出稳定代码
+`reflect_budget_too_small`，核心把它记进自己的扩展事件。这是刻意的——提供一个随后
+会拒掉每一次调用的函数，等于白白花掉模型的注意力和本 run 一格动作预算，去发现这条
+通道根本不可用。要真正启用，必须**同时**把 `REASONING_PLUGIN_ACTION_TIMEOUT_SECONDS`
+抬到 13.25 秒以上（这个设置项没有声明上限，不像 `ASK_GAP_CONSULT_TIMEOUT_SECONDS`
+封顶 30——但它的每一秒都是读者在答案中途等待的时间），或者把 `timeout_seconds` /
+`politeness_interval_seconds` 压低到最坏情况能塞进去。另外，
+`REASONING_MAX_PLUGIN_ACTIONS = 0` 是核心对整个扩展点的 kill switch，它压过这个
+插件 TOML 里的任何设置。
+
+### 4.8 reflect 动作只看模型写的 `query` 参数，不看问题原文
+
+模型调用 `search_arxiv` 时，这个插件向站外发出的文本**只有**模型自己写的 `query`
+参数。它**不会**回退到读者输入的问题原文——即使核心在同一份调用上下文里就把那个串
+递了过来：一旦回退，就等于插件替模型发出了模型没有选择发出的文本，而模型以为这次
+调用的范围是它自己划的。（核心会把这个参数逐字记进本 run 的 `plugin_action` 轨迹
+步，所以提问的人始终能看到到底有什么替他离开了部署。）
+
+后果与 4.2 节登记的拉丁索引后果是同一件事，只是发生在链路更前一步：一个不含任何
+拉丁字母词的 `query` 会以稳定代码 `arxiv_no_latin_terms` 被拒绝，不发任何网络请求、
+不占用节流配额。所以一个在中文笔记本里工作的模型如果写了中文 `query`，它拿到的是
+一条 skip 步；动作自己的描述里写明了要写英文关键词，但没有任何东西强制它这么做，
+这个插件也不会替它翻译。
+
 ## 五、其它已登记的局限
 
 - **XML 实体扩展攻击。** `xml.etree` 走的是 libexpat 解析器，自 libexpat 2.4 起
@@ -240,7 +285,7 @@ TOML 起一个真应用，经挂载好的路由跑通一次检索，并断言每
   的东西造一个设置键。一个真正需要凭证的插件该怎么引用密钥，见
   [SOP §3.2](../../../docs/deployment-extensions-sop_zh.md#32-settings可选) 的凭证惯例。
 
-## 六、两个入口分别演示了什么
+## 六、三个入口分别演示了什么
 
 1. **人工检索导入。** 侧栏入口 → 检索弹窗 → 勾选结果 → 走插件**自己的**
    `/import` 路由 → 核心的 URL 导入端口（这个端口自己会对当前请求用户在目标笔记本
@@ -248,11 +293,17 @@ TOML 起一个真应用，经挂载好的路由跑通一次检索，并断言每
 2. **Agent 触发的缺口外扩。** 一次逐步推理问答收尾时，核心的 `ask.gap_consult`
    扩展点会向已安装的插件询问笔记本之外的线索。回答卡上那个导入建议的按钮是
    **核心自己的界面，调用核心自己的端点**——完全不经过这个插件。
+3. **模型可以自己调用的一个函数。** 核心的 `ask.reflect_action` 扩展点会在一次 run
+   已经在库内空手之后，把 `search_arxiv`、它的描述与 `query` 参数投影进逐步推理
+   问答的 reflect 提示词、schema 与动作白名单。要不要调、写什么参数由模型自己决定；
+   拿回来的材料作为外部证据进入合成，可以用 `[k]` 引用，前端带「外部」标识、一个
+   打开链接的动作，以及与缺口建议同一个「导入为来源」按钮。
 
-**两道能力门是分开的两件事，不是一件。** `manifest.provides` 里的那个能力只门控
+**三道能力门是分开的三件事，不是一件。** `manifest.provides` 里的那个能力只门控
 侧栏入口本身（「这个插件配好了吗」）。缺口外扩单独由 `ArxivGapConsultContributor`
-自己的可用性探针门控（「这次部署是否同意让它自己去联系 arXiv」）。关掉外扩不影响
-检索面板与导入路由，它们照常可用。
+自己的可用性探针门控（「这次部署是否同意让它自己去联系 arXiv」），reflect 动作再由
+第三道自己的探针门控（`ArxivReflectSearchAction.reflect_search_enabled`）。关掉其中
+任何一个对外功能，都不影响检索面板、导入路由以及另一个对外功能。
 
 ## 七、G2 泳道与恢复命令
 
