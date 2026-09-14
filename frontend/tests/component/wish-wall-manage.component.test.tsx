@@ -645,6 +645,48 @@ test("删除一次只允许一个在途：另一张卡片的删除入口同时�
   expect(mocks.deleteWish).toHaveBeenCalledTimes(1);
 });
 
+test("被筛掉的卡片的迟到编辑响应作废了在途对齐时，同样重启对齐", async () => {
+  let resolveSave: (item: unknown) => void = () => {};
+  const bug1 = { ...feature, id: "wish-bug-1", kind: "bug" as const, title: "崩溃一", author_id: "user-3", vote_count: 5 };
+  const bug2 = { ...feature, id: "wish-bug-2", kind: "bug" as const, title: "崩溃二", author_id: "user-3", vote_count: 3 };
+  mocks.fetchMe.mockResolvedValue({ id: "admin", username: "管理员", role: "admin" });
+  mocks.listWishes.mockReset();
+  mocks.listWishes
+    .mockResolvedValueOnce({ items: [feature, quiet], total: 2, offset: 0, limit: 50 })
+    // 切到「问题反馈」筛选。
+    .mockResolvedValueOnce({ items: [bug1, bug2], total: 3, offset: 0, limit: 2 })
+    // bug1 改为已完成后的对齐：慢响应。
+    .mockImplementationOnce(() => new Promise(() => {}))
+    // 迟到的编辑响应作废上面那次后重启的对齐。
+    .mockResolvedValueOnce({ items: [bug2, { ...bug1, status: "done" }], total: 3, offset: 0, limit: 2 });
+  mocks.updateWish.mockImplementationOnce(() => new Promise((resolve) => { resolveSave = resolve; }));
+  mocks.setWishStatus.mockResolvedValue({ ...bug1, status: "done" });
+  const user = userEvent.setup();
+  render(<WishWallPage />);
+
+  await screen.findByText(feature.title);
+  const card = cardOf(feature.title);
+  await user.click(within(card).getByRole("button", { name: "编辑" }));
+  const titleInput = within(card).getByLabelText("修改标题");
+  await user.clear(titleInput);
+  await user.type(titleInput, "改了标题");
+  await user.click(within(card).getByRole("button", { name: "保存修改" }));
+  await waitFor(() => expect(mocks.updateWish).toHaveBeenCalledTimes(1));
+
+  await user.click(within(screen.getByRole("group", { name: "筛选许愿墙内容" })).getByRole("button", { name: "问题反馈" }));
+  await screen.findByText(bug1.title);
+  await user.selectOptions(within(cardOf(bug1.title)).getByRole("combobox", { name: "处理状态" }), "done");
+  await waitFor(() => expect(mocks.listWishes).toHaveBeenCalledTimes(3));
+
+  resolveSave({ ...feature, title: "改了标题" });
+  await waitFor(() => expect(mocks.listWishes).toHaveBeenCalledTimes(4));
+  expect(mocks.listWishes).toHaveBeenLastCalledWith({ kind: "bug", status: undefined, sort: "priority", offset: 0, limit: 2 });
+  await waitFor(() => expect(
+    screen.getAllByRole("heading", { level: 2 }).map((node) => node.textContent),
+  ).toEqual([bug2.title, bug1.title]));
+  expect(screen.getByRole("button", { name: "加载更多（还有 1 条）" })).toBeEnabled();
+});
+
 test("删除在途时切换筛选，删除落地后按当前筛选重启加载而不是停在加载态", async () => {
   let resolveDelete: () => void = () => {};
   mocks.listWishes.mockReset();

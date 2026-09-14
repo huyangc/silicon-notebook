@@ -304,7 +304,9 @@ export default function WishWallPage() {
     });
     if (current.kind !== "ready") return;
     if (absent) {
-      if (keep) void reloadPriorityWindow(updated.id, current.items.length || current.pageSize);
+      // 卡片已不在窗口：它匹配新筛选就重拉让它出现；即使不匹配，只要作废了一次在途/失败
+      // 的对齐，也要重启对齐，否则旧游标会带着别的卡片一起被跳过。
+      if (keep || realignPending) void reloadPriorityWindow(updated.id, current.items.length || current.pageSize);
       return;
     }
     // 优先级排序下影响排序的改动要对齐；任何排序下，只要有窗口替换在途被作废，都要重启它。
