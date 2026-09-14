@@ -83,7 +83,7 @@ def test_a_reply_with_none_of_the_expected_keys_is_rejected(raw):
             [("next_action", "invalid_enum", "")],
         ),
         (
-            '{"sub_queries": "not-a-list"}', PLAN_SCHEMA,
+            '{"sub_queries": {"query": "q"}}', PLAN_SCHEMA,
             [("sub_queries", "invalid_type", "")],
         ),
         (
@@ -470,3 +470,23 @@ def test_non_finite_numbers_are_rejected_on_the_strict_path(raw):
         validate_model_json_shape(raw, '{"score":0.0,"nested":{"x":[0.0]}}')
 
     assert caught.value.reason == "non_finite_number"
+
+
+@pytest.mark.parametrize("scalar", ["true", "7", '"text"', "1.5"])
+def test_a_scalar_where_a_list_of_objects_was_advertised_is_dropped(scalar):
+    # codex #720 R10: consumers iterate these collections; a scalar has no
+    # reading, so it is delivered as absent rather than as a TypeError.
+    raw = '{"nodes":[{"name":"a"}],"edges":' + scalar + '}'
+    shape = validate_model_json_shape(raw, '{"nodes":[{"name":""}],"edges":[{"type":""}]}')
+
+    assert json.loads(shape.content) == {"nodes": [{"name": "a"}]}
+    assert [(d.path, d.reason, d.fix) for d in shape.deviations] == [
+        ("edges", "invalid_type", "dropped"),
+    ]
+
+
+def test_a_scalar_for_the_only_advertised_collection_is_unusable():
+    with pytest.raises(ModelJsonRepairError) as caught:
+        validate_model_json_shape('{"sub_queries": "not-a-list"}', PLAN_SCHEMA)
+
+    assert caught.value.reason == "missing_expected_key"

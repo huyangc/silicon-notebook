@@ -53,6 +53,12 @@ def _evidence_index(value: Any) -> int:
     return -1
 
 
+def _list_items(value: Any) -> list:
+    """A model-supplied collection as a list; anything else is empty, so a
+    delivered scalar never becomes a TypeError inside the window loop."""
+    return value if isinstance(value, list) else []
+
+
 def _name_str(value: Any) -> str:
     """A node/step name as text, or "" when the field is not a string — a
     delivered ``[]`` must never be persisted as the knowledge object "[]"."""
@@ -425,7 +431,7 @@ def _glean_nodes(client: Any, elements: List[SourceElementQ], section_path: str,
         except Exception:
             return
         added = 0
-        for it in (data.get("nodes") or []):
+        for it in _list_items(data.get("nodes")):
             if not isinstance(it, dict) or not _typed_str(it.get("type"), NODE_TYPES):
                 continue
             name = _name_str(it.get("name"))
@@ -484,7 +490,7 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
     nodes: List[Node] = []
     by_local = {}
     type_by_node_id: Dict[str, str] = {}
-    for it in (data.get("nodes") or []):
+    for it in _list_items(data.get("nodes")):
         name = _name_str(it.get("name")) if isinstance(it, dict) else ""
         if not name or not _typed_str(it.get("type"), NODE_TYPES):
             continue
@@ -534,7 +540,7 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
         }
     edges: List[Edge] = []
     rejected_edges: Counter[tuple[str, str]] = Counter()
-    for it in (data.get("edges") or []):
+    for it in _list_items(data.get("edges")):
         if not isinstance(it, dict):
             continue
         if not _typed_str(it.get("type"), EDGE_TYPES):

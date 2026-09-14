@@ -752,3 +752,13 @@ def test_a_string_baseline_flag_does_not_admit_an_unconditioned_comparison():
         ledger, markdown=markdown, legal_anchor_keys={"k1"}, frame=None)
     assert status == "partial"
     assert [row["claim_id"] for row in claims] == ["c1"]
+
+
+def test_report_confidence_ignores_booleans_and_non_finite_values():
+    from app.services.report_synthesis import _confidence
+
+    for bogus in (True, False, "Infinity", "-inf", "NaN", float("inf"), float("nan"), None, "high"):
+        assert _confidence(bogus) == 0.0, bogus
+    assert _confidence(0.42) == 0.42
+    assert _confidence("0.9") == 0.9
+    assert _confidence(3) == 1.0

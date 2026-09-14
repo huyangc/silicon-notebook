@@ -71,10 +71,18 @@ def _strings(value: object, limit: int, chars: int) -> list[str]:
 
 
 def _confidence(value: object) -> float:
+    # Booleans and non-finite values read as 0.0: ``True`` is float 1.0 and
+    # "Infinity" clamps to the maximum, and the boundary delivers both now
+    # (codex #720 R10) — same rule as the merge/conflict confidence parsers.
+    if value is None or isinstance(value, bool):
+        return 0.0
     try:
-        return max(0.0, min(1.0, float(value or 0.0)))
+        number = float(value)
     except (TypeError, ValueError):
         return 0.0
+    if number != number or number in (float("inf"), float("-inf")):
+        return 0.0
+    return max(0.0, min(1.0, number))
 
 
 def normalize_report_frame(value: object, *, strict: bool = False) -> dict | None:
