@@ -525,7 +525,15 @@ class EvidenceContextService:
                 "tier": tiers.get(origin, "personal"),
                 "notebook_id": raw_origin,
                 "source_id": chunk.source_id,
-                "element_id": element_ids[0] if len(element_ids) == 1 else "",
+                # 多元素 chunk 也定位到它的**起始**元素,与 ask_service 的 chunk
+                # 引用(`c.element_ids[0]`)同一口径。此前只在恰好单元素时才填,
+                # 而 build_chunks 把碎元素合并成 ~600 字后多数 chunk 都跨多个元素,
+                # 引用弹层的「查看原文」拿到空 element_id 就只能把来源开在第一页
+                # 顶部,定位不到原文。起始元素是 chunk 在文档里的真实起点,详情窗按
+                # anchor_element_id 翻到那一页并高亮它。附图候选与 knowhow 定位不
+                # 走这个字段(前者按 object_id 反查完整 element_ids,后者只认单元素
+                # chunk,见下),它们的规则不变。
+                "element_id": element_ids[0] if element_ids else "",
                 "relevance": float(getattr(chunk, "relevance", 0.0) or 0.0),
                 "knowhow": None,
             }

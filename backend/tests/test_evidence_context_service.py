@@ -270,6 +270,32 @@ def test_evidence_context_chunk_golden_matches_master():
     assert evidence["k2"]["notebook_id"] == "base"
 
 
+def test_chunk_context_locates_a_multi_element_chunk_at_its_first_element():
+    """引用弹层「查看原文」靠 anchor.element_id 翻页定位。build_chunks 把碎元素
+    合并后多数 chunk 跨多个元素,若只在单元素时才填,这些引用就只能开到来源第一
+    页顶部。多元素 chunk 取起始元素(与 ask_service 的 chunk 引用同口径);knowhow
+    定位仍只认单元素 chunk(格子 chunk 恒为单元素,多元素文档 chunk 不可能是格子)。"""
+    chunks = [
+        RetrievedChunk(
+            chunk_id="c-multi", source_id="s1", source_title="Paper A",
+            section_path="1.1", text="multi text", relevance=0.9,
+            notebook_id="active", element_ids=["el-0007", "el-0008", "el-0009"],
+        ),
+        RetrievedChunk(
+            chunk_id="c-single", source_id="s1", source_title="Paper A",
+            section_path="1.2", text="single text", relevance=0.8,
+            notebook_id="active", element_ids=["el-0010"],
+        ),
+    ]
+    looked_up: list[list[str]] = []
+    service = _service()
+    service.knowhow_refs_for = lambda ids: (looked_up.append(sorted(ids)), {})[1]
+    _, evidence = service.chunk_context(chunks, notebook_id="active")
+    assert evidence["k1"]["element_id"] == "el-0007"
+    assert evidence["k2"]["element_id"] == "el-0010"
+    assert looked_up == [["el-0010"]]
+
+
 def test_chunk_context_duplicate_does_not_spend_the_character_budget():
     chunks = [
         RetrievedChunk(
