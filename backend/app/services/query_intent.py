@@ -245,9 +245,13 @@ def _result_scope(
     elif wants_complete:
         scope = "hybrid" if wants_analysis else "complete"
         source = "lexical"
-    elif _has_negated_scope_request(question):
-        # "不需要所有方法，只给最相关的几个": the user explicitly declined the
-        # full set, which outranks a model that still wants to enumerate.
+    elif (
+        _has_negated_scope_request(question)
+        or _clarification_scope_signal(question) == "ranked"
+    ):
+        # "不需要所有方法" / "只给最相关的几个": the user explicitly declined
+        # the full set or asked for the most relevant few, which outranks a
+        # model (or an earlier accepted scope) that still wants to enumerate.
         scope, source = "ranked", "lexical"
     elif model_scope and model_scope != "ranked":
         consistent = data.get("completeness_required") is True
@@ -264,6 +268,22 @@ def _result_scope(
         status["scope_source"] = source
     completeness_required = scope != "ranked"
     return scope, completeness_required
+
+
+def _accepted_scope(seed: dict) -> dict:
+    """The seed contract's scope re-expressed as an already-accepted model
+    decision, so confirmation-time recomputation keeps it unless the final
+    wording or a clarification answer overrides it (codex #725 R1).
+
+    Recomputing from ``{}`` silently reset a model-chosen complete/aggregate
+    scope to ranked whenever the user answered an unrelated clarification or
+    lightly edited the wording — the decision was accepted at plan time, so
+    it re-enters the rule set as consistent and confident.
+    """
+    scope = as_text(seed.get("result_scope")).lower()
+    if scope not in RESULT_SCOPES or scope == "ranked":
+        return {}
+    return {"result_scope": scope, "completeness_required": True, "confidence": 1.0}
 
 
 def _confidence_value(value: object) -> float:
@@ -613,12 +633,16 @@ def finalize_query_intent(
             # Answers are authoritative for collection scope, while the
             # confirmed wording still supplies analysis/aggregation context.
             result_scope, completeness_required = _result_scope(
-                {}, f"{resolved}\n{answer_text}"
+                _accepted_scope(seed), f"{resolved}\n{answer_text}"
             )
         else:
-            result_scope, completeness_required = _result_scope({}, resolved)
+            result_scope, completeness_required = _result_scope(
+                _accepted_scope(seed), resolved
+            )
     elif wording_changed:
-        result_scope, completeness_required = _result_scope({}, resolved)
+        result_scope, completeness_required = _result_scope(
+            _accepted_scope(seed), resolved
+        )
     else:
         result_scope = str(seed.get("result_scope") or "ranked")
         completeness_required = bool(seed.get("completeness_required"))
