@@ -1488,15 +1488,19 @@ def test_an_unbound_exact_hit_is_appended_to_every_section():
         exact_reserve=4,
     )
     assert skipped == []
-    # 本节绑定的块在前,席位块追加在尾部。
-    assert [chunk.chunk_id for chunk in slices[0].chunks] == ["c1", "x1"]
-    assert [chunk.chunk_id for chunk in slices[1].chunks] == ["c2", "x1"]
+    # 绑定的块留在 `chunks`,席位块单独进 `exact_chunks` —— 两格不混流,因为
+    # `_answer_reasoning` 把后者装在前者(以及元素段)之后、只吃剩余预算。
+    assert [chunk.chunk_id for chunk in slices[0].chunks] == ["c1"]
+    assert [chunk.chunk_id for chunk in slices[1].chunks] == ["c2"]
+    assert [chunk.chunk_id for chunk in slices[0].exact_chunks] == ["x1"]
+    assert [chunk.chunk_id for chunk in slices[1].exact_chunks] == ["x1"]
     # 注入的是不带席位标记的副本,按节各一份:原对象仍带标记,副本之间也不共享。
-    injected = [item.chunks[-1] for item in slices]
+    injected = [item.exact_chunks[-1] for item in slices]
     assert all(copy.exact_lookup is False for copy in injected)
     assert injected[0] is not injected[1]
-    assert injected[0] == injected[1] == slices[0].chunks[-1]
-    assert [item.evidence_count for item in slices] == [2, 2]
+    assert injected[0] == injected[1] == slices[0].exact_chunks[-1]
+    # 注入不是证据:`evidence_count` 只数本节绑定的那一条。
+    assert [item.evidence_count for item in slices] == [1, 1]
     # 注入不改动池子里的原对象:`chunk_by_id` 那份仍带标记,身份也没被替换。
     # 缺了这条,「副本」这件事只在切片内部成立,池子本身悄悄被改也测不出来。
     assert chunk_by_id["x1"].exact_lookup is True
@@ -1540,6 +1544,7 @@ def test_a_zero_reserve_leaves_every_slice_byte_for_byte_as_before():
         assert [c.chunk_id for c in after.chunks] == [
             c.chunk_id for c in before.chunks]
         assert after.evidence_count == before.evidence_count
+        assert after.exact_chunks == before.exact_chunks == []
     # 断言不是空转的:同一份池子在 reserve>0 时**确实**会变。
     promoted, _ = plan_outline_sections(outline, **pools, exact_reserve=2)
     assert promoted != baseline
@@ -1557,8 +1562,10 @@ def test_the_reserve_caps_how_many_exact_hits_each_section_receives():
         },
         exact_reserve=2,
     )
-    assert [chunk.chunk_id for chunk in slices[0].chunks] == ["c1", "x1", "x2"]
-    assert [chunk.chunk_id for chunk in slices[1].chunks] == ["c2", "x1", "x2"]
+    assert [chunk.chunk_id for chunk in slices[0].chunks] == ["c1"]
+    assert [chunk.chunk_id for chunk in slices[1].chunks] == ["c2"]
+    assert [c.chunk_id for c in slices[0].exact_chunks] == ["x1", "x2"]
+    assert [c.chunk_id for c in slices[1].exact_chunks] == ["x1", "x2"]
 
 
 def test_an_exact_hit_bound_to_one_section_is_not_copied_into_the_others():
@@ -1575,6 +1582,7 @@ def test_an_exact_hit_bound_to_one_section_is_not_copied_into_the_others():
     )
     assert [chunk.chunk_id for chunk in slices[0].chunks] == ["x1"]
     assert [chunk.chunk_id for chunk in slices[1].chunks] == ["c2"]
+    assert [item.exact_chunks for item in slices] == [[], []]
 
 
 def test_an_empty_section_is_not_revived_by_the_injected_exact_hit():
@@ -1610,6 +1618,7 @@ def test_an_unbound_chunk_without_the_exact_mark_is_not_injected():
     )
     assert [chunk.chunk_id for chunk in slices[0].chunks] == ["c1"]
     assert [chunk.chunk_id for chunk in slices[1].chunks] == ["c2"]
+    assert [item.exact_chunks for item in slices] == [[], []]
 
 
 # --- e2e:待 `_draft_reasoning_response` 的调用点接上 exact_reserve 后才会绿 ---
@@ -1631,6 +1640,62 @@ def test_each_section_prompt_carries_the_unbound_exact_hit(repo, monkeypatch):
     for prompt in llm.prompts:
         assert SECTIONED_EXACT_TEXT in prompt
     assert response.answer.startswith("## 第一节")
+
+
+def test_the_injected_hit_is_assembled_after_the_sections_own_evidence(
+    repo, monkeypatch
+):
+    """位置合同:注入块自成一段「Exact-lookup passages」,排在本节绑定的
+    「Retrieved chunks」与「Direct source elements」**之后**。
+
+    只断言「prompt 里有这段原文」不够——注入块的相关度常为 1.0,混进 chunks 段
+    后会按相关度排到本节绑定块之前、吃掉整份预算;绑到 element 的节也一样,因为
+    chunk 段先于 element 段装配。位置本身就是这条修复的可观测面。
+    """
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result(
+        chunks=[_chunk("c1", "本节绑定的原文"),
+                _exact_chunk("x1", SECTIONED_EXACT_TEXT)],
+        outline=[_section("s1", "第一节", "c1", "e1"),
+                 _section("s2", "第二节", "e2")],
+    ))
+    llm = _CaptureAnswerLLM()
+    _ask(repo, notebook, llm)
+
+    first = llm.prompts[0]
+    assert "[Retrieved chunks]" in first and "[Direct source elements]" in first
+    heading = first.index("[Exact-lookup passages]")
+    assert heading > first.index("[Retrieved chunks]")
+    assert heading > first.index("[Direct source elements]")
+    assert first.index(SECTIONED_EXACT_TEXT) > heading
+    assert first.index("本节绑定的原文") < heading
+
+
+def test_a_section_that_only_cites_the_injected_hit_is_still_grounded(
+    repo, monkeypatch
+):
+    """注入块进了本节的 prompt、拿了本节号段里的 `[k]`,所以它也必须进本节的
+    证据池(`section_evidence`)。漏掉的话 `classify_evidence` 会把这条锚点当成
+    「引了不存在的对象」——该节判成 ungrounded,再由节级封顶把整篇答案压到
+    overview,而模型引的其实是一段真真切切喂给它的原文。
+    """
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result(
+        chunks=[_exact_chunk("x1", SECTIONED_EXACT_TEXT)],
+    ))
+    # 本节没有绑定 chunk,所以注入段从本节号段的 k1 起编号。
+    llm = _CaptureAnswerLLM(answers=[
+        {"answer": "第一节只引注入块 [k1]。", "grounded": True},
+        {"answer": f"第二节引自己的元素 [k{AskService._ELEMENT_KEY_BASE + 1 + OUTLINE_SECTION_KEY_STRIDE}]。",
+         "grounded": True},
+    ])
+    response = _ask(repo, notebook, llm)
+
+    detail = _synthesis_detail(response)
+    assert "x1" in {anchor.object_id for anchor in response.anchors}
+    assert [item["grounded"] for item in detail["section_grounded"]] == [
+        True, True]
+    assert detail["ungrounded_sections"] == []
 
 
 def test_a_zero_reserve_keeps_the_unbound_exact_hit_out_of_every_section(

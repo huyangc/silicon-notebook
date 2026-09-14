@@ -2370,6 +2370,8 @@ class AskService:
         style_block: str = "",
         external_evidence=(),
         external_sink: set | None = None,
+        *,
+        trailing_chunks=(),
     ):
         """Synthesise the reasoning-mode answer. When PPR chunks are present they
         become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
@@ -2409,6 +2411,16 @@ class AskService:
         ``external_sink``:调用方传入的集合,本次**真的装进了 prompt** 的那批
         ``ExternalEvidence.key`` 会被 update 进去。引用侧据此过滤——被预算丢掉
         的条目模型从没见过,不给它发引用(设计文档 §6.3)。
+
+        ``trailing_chunks``:**不属于本节绑定证据**的兜底原文段(按节合成里由
+        ``outline_synthesis`` 注入的未绑定精确命中,见
+        ``OutlineSectionSlice.exact_chunks``)。它们单独成一段
+        「Exact-lookup passages」,装在本节绑定的原文段与元素**之后**,只用这两
+        段吃完后剩余的那点预算;不排序(保持注入序)、不走前缀席位。缺省空元组,
+        此时上下文块、id_map 与 counts 逐字节等于接这个参数之前。**为什么必须
+        排在后面**:``chunks`` 段按相关度排序,而精确命中的相关度常为 1.0、本节
+        绑定块可能更低——同一段里混装等于让模型没绑进本节的原文按构造吃掉整份
+        预算,绑到 source element 的节也一样(chunk 段先于 element 段装配)。
 
         """
         raise_if_cancelled(cancel_event)
@@ -2467,6 +2479,8 @@ class AskService:
             # 救不了的第三种形态:structured_block / collection_map_block 先于
             # 原文段消费同一份预算,整表够大时原文段拿到 0 字符——已登记
             # fangan_todo「结构化块挤空 reasoning 原文段」,本处不夹下限。
+            # 按节合成注入的未绑定精确块**不**走这里:它们不在 `chunks` 里,而是
+            # 经 `trailing_chunks` 单独成段装在本节全部绑定证据之后。
             ordered = promote_bounded_prefix(
                 ordered,
                 lambda chunk: getattr(chunk, "exact_lookup", False),
@@ -2500,12 +2514,36 @@ class AskService:
                 admission_sink=baseline_admission,
             )
 
+        # 兜底原文段(未被本节绑定的精确命中)。装在绑定 chunk 段与 element 段
+        # **之后**、只吃它们剩下的预算:本节绑定的证据是模型自己的判断,注入的
+        # 材料不许跟它竞争,更不许按相关度排到它前面(理由见 docstring 的
+        # ``trailing_chunks`` 一段)。不排序——注入序就是 `outline_synthesis` 给
+        # 的顺序;不走 `promote_bounded_prefix`——前缀席位是另一条路径的机制,
+        # 这一段整体已经在最后了。号段接在绑定 chunk 段之后(见 id_offset),
+        # 两段合计 ≤144+reserve ≪ `_MIX_KG_KEY_BASE`。
+        if trailing_chunks and len(source_context) < chunk_budget:
+            trailing_block, trailing_id_map = self._chunk_answer_context(
+                list(trailing_chunks), notebook_id=notebook_id,
+                id_offset=key_offset + len(chunks or ()),
+                budget_chars=max(0, chunk_budget - len(source_context)),
+            )
+            source_context, source_map = self._bounded_context_append(
+                source_context, source_map, trailing_block, trailing_id_map,
+                budget_chars=chunk_budget, heading="Exact-lookup passages",
+                admission_sink=baseline_admission,
+            )
+
         # Reserve the inter-partition separator inside the KG budget so the
         # final evidence block never exceeds kg_context_chars+chunk_context_chars.
         effective_kg_budget = max(0, kg_budget - (2 if source_context else 0))
         kg_context, kg_map = self._answer_context(
             notebook_id, top_hits,
-            id_offset=key_offset + (self._MIX_KG_KEY_BASE if chunks else 0),
+            # `trailing_chunks` 同样占用低号段,所以它单独出现时 KG 也必须让到
+            # 1001+:只看 `chunks` 的话,一个没有绑定 chunk、只有注入块的节会让
+            # KG 段从 k1 重新开始,两段撞号、锚点误绑。
+            id_offset=key_offset + (
+                self._MIX_KG_KEY_BASE if (chunks or trailing_chunks) else 0
+            ),
             budget_chars=effective_kg_budget,
         )
         if kg_context == "(none)":
@@ -2728,6 +2766,12 @@ class AskService:
         ≪ ``OUTLINE_SECTION_KEY_STRIDE``),互不相交。``external_sink`` 收各节
         装入键的**并集**——同一条材料进了三节仍然只发一条引用。
 
+        ``OutlineSectionSlice.exact_chunks``(未被任何节绑定的精确命中)同样是
+        「每一节都装同一份」,但它经 ``trailing_chunks`` 单独成段,装在本节绑定的
+        原文段与元素**之后**、只吃剩余预算:它不是本节的证据,而是兜底材料,按
+        相关度与绑定块同段竞争的话,精确命中那条常为 1.0 的相关度会直接吃掉整份
+        chunk 预算,把模型亲自绑上的证据挤出 prompt。
+
         """
         from app.services.outline_synthesis import outline_answer_text
 
@@ -2773,6 +2817,7 @@ class AskService:
                     style_block=style_block,
                     external_evidence=external_evidence,
                     external_sink=admitted_external,
+                    trailing_chunks=item.exact_chunks,
                 )
                 return text_, grounded_, anchors_
 
@@ -2785,6 +2830,10 @@ class AskService:
             # 分节判定必须在本节自己的证据池与锚点上完成。只留模型自报会绕过
             # classify_evidence 这道真实门;拿合并后的锚点回算又会把另一节的高分
             # 证据借给本节。这个逐节结果驱动全局确定性降级。
+            # 注入的精确块(``exact_chunks``)也要进这个池子:它们真的进了本节的
+            # prompt、真的拿到了本节号段里的 ``[k]``,漏掉的话模型引用它们时
+            # ``classify_evidence`` 会判成「引了不存在的对象」而把这一节判成
+            # ungrounded,再由节级封顶把整篇答案压到 overview。
             from types import SimpleNamespace
             section_evidence = list(item.hits) + list(item.chunks) + [
                 SimpleNamespace(
@@ -2792,7 +2841,7 @@ class AskService:
                     relevance=float(element.score or 0.0),
                 )
                 for element in item.elements
-            ]
+            ] + list(item.exact_chunks)
             # 外部证据走的是**非排序**那道门(`exact_evidence_keys`),库内命中
             # 走 `evidence_pool`——两道门缺一道,一个只引站外材料的节就会被判成
             # 「引了不存在的东西」而 ungrounded,再由下面的节级封顶把整篇答案压到

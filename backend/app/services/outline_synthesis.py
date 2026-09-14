@@ -44,9 +44,15 @@ class OutlineSectionSlice:
     hits: list = field(default_factory=list)        # RetrievedKnowledge
     elements: list = field(default_factory=list)    # RetrievedElement
     chunks: list = field(default_factory=list)      # RetrievedChunk
+    # 未被任何节绑定、由 ``exact_reserve`` 注入的精确命中副本。**刻意与
+    # ``chunks`` 分开**:它们不是本节的证据,只是兜底材料,装配位置也不同
+    # (见 ``plan_outline_sections`` docstring 末段)。
+    exact_chunks: list = field(default_factory=list)  # RetrievedChunk
 
     @property
     def evidence_count(self) -> int:
+        # 只数绑定证据。注入块不是证据(没有任何节「要」过它们),把它们计进来
+        # 会让一节的证据规模凭空虚报 reserve 条。
         return len(self.hits) + len(self.elements) + len(self.chunks)
 
 
@@ -109,9 +115,10 @@ def plan_outline_sections(
     这三处会各说各的 —— 模型被告知在写第 2 节,读者却在第 4 个标题下读到它。
 
     ``exact_reserve``:**未被任何节绑定**的精确命中(用户在问题里逐字点名的那些
-    段落,``RetrievedChunk.exact_lookup``)按 ``chunk_by_id`` 迭代序取前 N 条,追加
-    到**每一节**切片的 chunks 尾部。缺省 0 = 不注入,此时切片内容、顺序、
-    ``evidence_count`` 与 ``skipped`` 逐字节等于接这个参数之前。
+    段落,``RetrievedChunk.exact_lookup``)按 ``chunk_by_id`` 迭代序取前 N 条,放进
+    **每一节**切片的 ``exact_chunks``。缺省 0 = 不注入,此时 ``exact_chunks`` 为
+    空,切片其余内容、顺序、``evidence_count`` 与 ``skipped`` 逐字节等于接这个
+    参数之前。
 
     **为什么镜像外部证据的规则**:``_answer_reasoning_sections`` 已经立了同形的先例
     ——外部材料不由大纲绑定,却是本轮唯一「库里查不到」的东西,于是每一节都装同一
@@ -140,10 +147,17 @@ def plan_outline_sections(
     ``_answer_reasoning`` 会把带标记的块提到该节字符预算的最前(前缀席位),而那把
     席位是为单次合成路径与上百个候选竞争时设计的。在节内,绑定关系是模型的判断;
     带着标记注入等于让一段模型没绑进本节的原文按构造排在模型亲自绑上的块之前——
-    预算吃满的节会因此丢掉自己绑定的证据。去掉标记后,注入块按相关度稳定排序:与
-    本节绑定块同分时排在它们之后,预算不够就是它被切掉,而不是绑定块。已绑定到某
-    节的精确块仍是原对象、仍带标记,在那一节里照常拿席位。副本按节各建一份,任何
-    节内的就地修改都不会串到别的节或 ``stage.chunks``。
+    预算吃满的节会因此丢掉自己绑定的证据。已绑定到某节的精确块仍是原对象、仍带
+    标记,在那一节里照常拿席位。副本按节各建一份,任何节内的就地修改都不会串到别
+    的节或 ``stage.chunks``。
+
+    **注入块单独成段**(``exact_chunks``,不混进 ``chunks``):``_answer_reasoning``
+    把它们装在本节绑定的原文段与元素**之后**,只用这两段吃完后剩余的预算准入。
+    去掉标记只解掉前缀席位那一半;``_answer_reasoning`` 仍按相关度排序,而精确
+    命中的相关度常是 1.0、本节绑定块可能更低,于是不带标记的副本照样能排到绑定
+    块之前、吃掉整份 chunk 预算。绑到 source element 的节同样中招——chunk 段在
+    element 段之前装配。单独成段之后,注入块拿到的永远是剩余预算,绝不挤占模型
+    亲自绑定的证据。
     """
     kept: list[Any] = []
     evidence: dict[int, tuple[list, list, list]] = {}
@@ -183,19 +197,18 @@ def plan_outline_sections(
     slices: list[OutlineSectionSlice] = []
     for section, parent_id in _document_order(kept):
         hits, elements, chunks = evidence[id(section)]
-        if reserved:
-            # 本节绑定的块在前,注入块在后:``_answer_reasoning`` 随后按相关度
-            # 稳定排序,同分时保留的正是这个插入序。副本去掉席位标记,理由见
-            # docstring 末段。
-            chunks = chunks + [
-                replace(chunk, exact_lookup=False) for chunk in reserved
-            ]
+        # 注入块进自己的那格,不与本节绑定的 chunks 合流:装配位置与准入预算
+        # 都不同,理由见 docstring 末段。副本去掉席位标记,按节各建一份。
+        exact_chunks = [
+            replace(chunk, exact_lookup=False) for chunk in reserved
+        ]
         slices.append(OutlineSectionSlice(
             section=section,
             index=len(slices),
             key_offset=len(slices) * OUTLINE_SECTION_KEY_STRIDE,
             parent_id=parent_id,
             hits=hits, elements=elements, chunks=chunks,
+            exact_chunks=exact_chunks,
         ))
     return slices, skipped
 
