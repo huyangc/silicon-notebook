@@ -9,10 +9,10 @@ citation_images_for`），经新增的 `attach_reference_images` 就地填上
 1. **报告的 references 是 dict，不是 Citation/AnswerAnchor 模型**——批量装配
    因此以每条 reference 的 ``key``（"k1"、"k2"…）为候选映射的键，而不是
    `attach_citation_images` 那种"以 target 对象本身为键"的写法。
-2. **chunk 引用的候选需要 chunk 的完整 element_ids**——`chunk_context` 只在
-   恰好单元素的 chunk 上填 ``element_id``，多元素 chunk（"一段正文 + 一张
-   配图"）被跳过；`_draft_section` 必须把该 chunk 的完整 `element_ids` 补写进
-   `chunk_map` 的 ctx，`_assemble` 才有候选可用。
+2. **chunk 引用的候选需要 chunk 的完整 element_ids**——`chunk_context` 填的
+   ``element_id`` 是 chunk 的**起始**元素（引用跳转用的定位点），多元素 chunk
+   （"一段正文 + 一张配图"）的配图通常不是起始元素；`_draft_section` 必须把该
+   chunk 的完整 `element_ids` 补写进 `chunk_map` 的 ctx，`_assemble` 才有候选可用。
 3. **一份报告只发一次批量点查**——不管报告有多少节、多少条引用。
 """
 from __future__ import annotations
@@ -352,7 +352,8 @@ def _spy_on_image_asset_rows(repo, monkeypatch) -> list:
 
 def test_draft_section_carries_the_chunks_full_element_ids_into_chunk_map(repo):
     """T6 wiring 1/2:`_draft_section` 必须把 chunk 的完整 element_ids 补写进
-    `chunk_map`（`chunk_context` 单看 element_id 会因多元素 chunk 而漏图）。"""
+    `chunk_map`（`chunk_context` 的 element_id 只是 chunk 的起始元素，单看它会
+    漏掉排在后面的配图）。"""
     from app.services.reasoning_retrieval import ReasoningResult
     from app.services.retrieval import RetrievedChunk
 
@@ -376,8 +377,8 @@ def test_draft_section_carries_the_chunks_full_element_ids_into_chunk_map(repo):
         nb.id, {"title": "A", "scope": "sa", "sub_queries": ["qa"]}, "q", result,
     )
     assert out["id_map"]["k1"]["object_id"] == "chunk-1"
-    # element_id 单看仍是空的(多元素 chunk),但补写的 element_ids 带出完整候选。
-    assert out["id_map"]["k1"]["element_id"] == ""
+    # element_id 是 chunk 的起始元素(正文,不是配图),补写的 element_ids 才带出完整候选。
+    assert out["id_map"]["k1"]["element_id"] == text_eid
     assert sorted(out["id_map"]["k1"]["element_ids"]) == sorted([text_eid, fig_eid])
 
 

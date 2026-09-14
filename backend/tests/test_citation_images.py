@@ -256,9 +256,10 @@ def test_citation_images_for_dedupes_and_skips_the_store_call_when_every_id_is_f
 def test_chunk_anchor_finds_the_figure_through_the_chunks_element_ids():
     """本特性要救的主场景：一段正文 + 一张配图组成的多元素 chunk。
 
-    `chunk_context` 只在 chunk 恰好单元素时才填 `anchor.element_id`，所以这里
-    锚点自身的 element_id 是空的——只看它的话一张图都出不来，必须按 object_id
-    反查 chunk 的整个 `element_ids`。
+    `chunk_context` 填的 `anchor.element_id` 是 chunk 的起始元素（这里是正文
+    el-0001，配图排在它后面）；只看它一张图都出不来，必须按 object_id 反查
+    chunk 的整个 `element_ids`。这里的锚点连 element_id 都不带，钉的是同一条
+    规则的下界：候选绝不依赖 element_id。
     """
     sources = _SpySources({
         "el-0001": _row("paragraph", {}),

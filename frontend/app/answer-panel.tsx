@@ -886,6 +886,10 @@ function referenceLocation(reference: AnswerReference): string {
 // 正文接同一条内联图片管线，两个面必须共用同一份 alt/标签取值规则）。
 
 function directlyReferencesImageElement(reference: AnswerReference): boolean {
+  // chunk 锚点的 element_id 只是该 chunk 的**起始**元素(翻页定位用),证据本身
+  // 是整个 chunk:起始元素恰好是图时,摘录仍是含后续正文的 chunk 文本,不能按
+  // 「引用本身就是图片元素」把它藏掉。
+  if (reference.anchor?.object_type === "chunk") return false;
   const elementId = reference.anchor?.element_id || reference.citation?.element_id || "";
   return Boolean(elementId) && referenceImages(reference)
     .some((image) => image.element_id === elementId);

@@ -688,6 +688,29 @@ def test_image_reference_flag_compares_internal_ids_but_exposes_only_a_boolean()
     assert "NEARBY-IMAGE-ELEMENT" not in _all_strings(nearby)
 
 
+def test_public_reference_chunk_anchor_starting_with_a_figure_keeps_its_excerpt():
+    """A chunk anchor's element_id is only the chunk's first element (the
+    view-source locator); the excerpt is the whole chunk's text, so a chunk
+    that merely starts with a figure is not an image-only reference."""
+    chunk = public_turn(_turn("q", {
+        "answer": "图后正文 [k1]。",
+        "anchors": [_anchor(
+            "k1",
+            object_type="chunk",
+            element_id="FIRST-IMAGE-ELEMENT",
+            images=[{
+                "element_id": "FIRST-IMAGE-ELEMENT",
+                "asset_id": "FIRST-ASSET",
+                "caption": "图注",
+            }],
+        )],
+        "citations": [],
+    }))["references"][0]
+
+    assert chunk["is_image_reference"] is False
+    assert "FIRST-IMAGE-ELEMENT" not in _all_strings(chunk)
+
+
 def test_reference_list_is_bounded():
     anchors = [_anchor(f"k{i}") for i in range(1, MAX_REFERENCES + 5)]
     body = " ".join(f"[k{i}]" for i in range(1, MAX_REFERENCES + 5))

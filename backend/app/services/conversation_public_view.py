@@ -375,7 +375,10 @@ def public_reference(key: str, reference: Any) -> dict[str, Any]:
         row.get("source_file_name"), MAX_REFERENCE_TITLE_CHARS
     )
     element_id = str(row.get("element_id") or "")
-    is_image_reference = bool(element_id) and any(
+    # A chunk anchor's element_id is only the chunk's FIRST element (the
+    # locator "view source" pages to); the evidence is the whole chunk, so a
+    # chunk that merely starts with a figure keeps its real excerpt.
+    is_image_reference = bool(element_id) and row.get("object_type") != "chunk" and any(
         isinstance(image, dict) and str(image.get("element_id") or "") == element_id
         for image in _as_list(row.get("images"))
     )
