@@ -346,6 +346,32 @@ def test_knowhow_content_does_not_count_against_the_roster_and_sample_half(repo)
     assert dropped2 is True and block2 == structured_block
 
 
+def test_a_knowhow_block_that_nearly_fills_the_partition_still_drops_the_sample_whole(repo):  # noqa: F811
+    """codex #724 R6:knowhow 块本身不受半预算约束,29000 字 knowhow + 2000 字取样在
+    30000 字预算下按共享上限(44002)会被放行,却装不进分区——被字符截断而披露行
+    留着、还报 dropped=False。准入再夹一层分区总容量:整块要么装进、要么显式不装。
+    """
+    from app.services.collection_enumeration_answer import COLLECTION_MAP_BLOCK_MAX_CHARS
+
+    service = repo._runtime.ask_service()
+    structured_map = {"k5001": {"object_type": "source", "object_id": "s1"}}
+    knowhow = "K" * 29000
+    outcome = _sampled_outcome(body_chars=2000)
+
+    block, dropped = service._assemble_document_read_block(
+        [outcome], knowhow, dict(structured_map), {},
+        _AnswerClient(), 30000, len(knowhow))
+    assert dropped is True and block == knowhow
+
+    # 分区确实留得下(knowhow 小)时照常装进——夹的是分区容量,不是一刀切。
+    small = "K" * 1000
+    block2, dropped2 = service._assemble_document_read_block(
+        [outcome], small, dict(structured_map), {},
+        _AnswerClient(), 30000, len(small))
+    assert dropped2 is False and "k7001" in block2
+    assert len(block2) <= 30000 - COLLECTION_MAP_BLOCK_MAX_CHARS - 4
+
+
 def test_the_introduction_shape_is_conditional_on_the_question():
     """codex #724 R4:`read_document` 对任意问题都可用;逐篇导读与「逐一点名缺证据
     文档」只在问题问「这些文档分别讲什么」时适用,聚焦型问题(比较两篇里的某个
