@@ -393,3 +393,23 @@ def test_confidence_from_a_non_number_never_reaches_the_auto_apply_threshold():
     assert _confidence("0.97") == 0.97
     assert _confidence(7) == 1.0
     assert _confidence(-3) == 0.0
+
+
+def test_container_valued_rationale_is_never_persisted_as_text():
+    """codex #720 R13: a delivered ``rationale: []`` must read as "" rather
+    than the adjudication explanation "[]"."""
+    from app.services.kg.conflict_review import review_conflict_candidates
+
+    class _ListRationale:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return json.dumps({
+                "conflict_type": "temporal", "resolution": "keep",
+                "winner_ref": None, "resolved_payload": None,
+                "confidence": 0.5, "rationale": ["新旧版本"],
+            })
+
+    [decision] = review_conflict_candidates(_ListRationale(), [_item()])
+    assert decision["rationale"] == ""
+    assert decision["conflict_type"] == "temporal"
