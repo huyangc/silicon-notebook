@@ -63,7 +63,7 @@ def test_chunk_fts_timeout_cannot_exceed_pool_statement_timeout():
 
 
 def test_chunk_fts_timeout_default_and_env(monkeypatch):
-    assert Settings(_env_file=None).postgres_chunk_fts_timeout_seconds == 1.0
+    assert Settings(_env_file=None).postgres_chunk_fts_timeout_seconds == 3.0
     monkeypatch.setenv("POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS", "0.75")
     assert Settings(_env_file=None).postgres_chunk_fts_timeout_seconds == 0.75
 

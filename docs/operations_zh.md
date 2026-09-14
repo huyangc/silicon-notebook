@@ -462,7 +462,8 @@ FROM pg_stat_progress_create_index;
 上面的复合 chunk GIN 仍是普通 Ask、精确定位/回退、notebook 搜索和质量回滚路径的必需索引。
 反复 FTS 超时时不要把全局 `POSTGRES_STATEMENT_TIMEOUT_SECONDS` 调大：那只会让每个失败探针
 等待更久。PostgreSQL 通用 chunk 词法调用使用自己的 savepoint 级
-`POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS` 预算（默认 1 秒）；`QueryCanceled` 时只回滚到该
+`POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS` 预算（默认 3 秒；2026-09-14 之前是 1 秒，正压在语料门控后
+7k chunk 探针实测 0.96s 的尾部上，生产一周 283 次探针超时 34 次）；`QueryCanceled` 时只回滚到该
 savepoint，首次超时会为当前 retrieval run 的该 notebook 打开熔断，后续通用调用不再发数据库
 语句，已经在飞的调用不做强制取消。精确短语/标识符定位是独立通道，绝不进入该熔断。
 
