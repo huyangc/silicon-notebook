@@ -97,6 +97,11 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // 有规则。className 字符串没有类型检查，jsdom 也量不出「挂了不存在的类」这种视觉
   // 退化；文本因此是唯一诚实输入。对 `ui.tsx` 的 className 采集仍走 semantic-source。
   "tests/guards/extension-ui-kit-style-guard.test.mjs",
+  // 同上,只读 memory-panel.css 与 agent-access.css:断言三个模块 `<label>` 上的勾选框
+  // class 在各自实际加载的样式表里有规则。这条守卫存在的理由是一个真实回归——Agent 接入
+  // 迁出记忆页时 `.agent-check` 被一并搬走,首页三处勾选框静默丢了样式。样式表没有可
+  // 消费的 AST,jsdom 不做级联;className 采集仍走 semantic-source 的语义解析。
+  "tests/guards/agent-check-style-guard.test.mjs",
   // 构建期装载仓库外 UI 插件的同步脚本：在临时目录里造插件包夹具、跑真同步、
   // 再读回自己刚生成的产物。读的全是测试自己写出来的临时文件，加上后端契约
   // 生成器里那一行排序键声明——没有一处是对生产源码的位置/顺序查询。
