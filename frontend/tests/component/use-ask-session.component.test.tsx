@@ -436,34 +436,249 @@ test("T4: 声明 requires_kg 的插件模式在无图笔记本上仍被知识图
   expect(api.runAskStream).not.toHaveBeenCalled();
 });
 
-test("simplified mode submits the backend auto selector without intent preview", async () => {
+test("simplified mode submits reasoning at the standard effort through the intent preview", async () => {
   const simplifiedPolicy: AskPolicy = { ...DEFAULT_POLICY, advanced: false };
+  api.previewAskIntent.mockResolvedValue(contractFor("请判断这个问题需要怎样分析", false));
   api.runAskStream.mockResolvedValue({
-    ...answer("conversation-auto"),
-    mode: "chunk",
+    ...answer("conversation-simplified"),
+    mode: "reasoning",
   });
   render(<Harness policy={simplifiedPolicy} />);
   beginOwnedNotebook();
 
-  // A stale advanced-mode choice must neither leak into the request nor be
-  // destroyed; the hidden surface delegates this turn to the backend. The
-  // mocked response resolves to a DIFFERENT mode ("chunk") than the one
-  // selected ("reasoning") specifically so this proves value.mode still
-  // reflects the user's own selection instead of being silently overwritten
-  // by response.mode.
-  act(() => value!.selectMode("reasoning"));
+  // A stale advanced-mode choice ("chunk") must neither leak into the request
+  // nor be overwritten; the simplified surface has no engine control, so the
+  // submission convergence point always sends the built-in SIMPLIFIED_ASK_MODE
+  // ("reasoning") at the standard retrieval effort, through the same intent
+  // preview flow the advanced surface uses. The mocked response carries the
+  // mode that really comes back here ("reasoning"), which DIFFERS from the
+  // user's selection ("chunk"): if the answer landing ever copied
+  // response.mode into the selector, the final assertion on value.mode would
+  // fail.
+  act(() => value!.selectMode("chunk"));
   await act(async () => {
     await value!.submit("请判断这个问题需要怎样分析");
   });
 
-  expect(api.previewAskIntent).not.toHaveBeenCalled();
+  expect(api.previewAskIntent).toHaveBeenCalledTimes(1);
   expect(api.runAskStream).toHaveBeenCalledTimes(1);
   expect(api.runAskStream.mock.calls[0]?.[1]).toMatchObject({
     question: "请判断这个问题需要怎样分析",
-    mode: "auto",
+    mode: "reasoning",
+    retrieval_effort: "standard",
+    intent: expect.anything(),
   });
+  expect(value!.mode).toBe("chunk");
+  expect(value!.turns[0]?.response.mode).toBe("reasoning");
+});
+
+// T2b defect A. The simplified surface has no engine control, so `mode` still
+// holds whatever the user last named in the advanced surface ("chunk"). The
+// confirmation gate used to compare that visible value against "reasoning",
+// which made EVERY clarification in the simplified surface take the bail
+// branch: no request, no draft handed back, just "问题上下文已经变化" — the
+// question silently lost. The gate must compare the engine the submission
+// actually uses (submissionAskMode), not the hidden selector.
+test("simplified mode confirms a clarification instead of bailing on the hidden engine selector", async () => {
+  const simplifiedPolicy: AskPolicy = { ...DEFAULT_POLICY, advanced: false };
+  const contract = contractFor("这个问题有歧义", true);
+  api.previewAskIntent.mockResolvedValue(contract);
+  api.runAskStream.mockResolvedValue({
+    ...answer("conversation-simplified-clarified"),
+    mode: "reasoning",
+  });
+  render(<Harness policy={simplifiedPolicy} />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("chunk"));
+
+  await act(async () => {
+    await value!.submit("这个问题有歧义");
+  });
+  expect(value!.intentReview?.contract).toBe(contract);
+
+  await act(async () => {
+    await value!.confirmIntent({
+      contract,
+      resolved_question: "这个问题有歧义，已澄清",
+      answers: [{ id: "which", answer: "那一个" }],
+    });
+  });
+
+  expect(effects.notify).not.toHaveBeenCalledWith("问题上下文已经变化，请重新提交");
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  expect(api.runAskStream.mock.calls[0]?.[1]).toMatchObject({
+    question: "这个问题有歧义",
+    mode: "reasoning",
+    retrieval_effort: "standard",
+    intent: expect.anything(),
+  });
+  expect(value!.intentReview).toBeNull();
+  expect(value!.question).toBe("");
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["这个问题有歧义"]);
+  // The hidden selector was not rewritten: switching back to the advanced
+  // surface must still honour the user's earlier named choice.
+  expect(value!.mode).toBe("chunk");
+});
+
+// T2c defect, the confirmation gate. The avatar menu is clickable at any time,
+// so the surface can flip while a review card is on screen. Judging the gate by
+// the surface the user is in AT CONFIRM TIME made this exact sequence bail: the
+// question and the clarification answers thrown away at the last step, nothing
+// handed back to the input. The criterion is the surface FROZEN ON THE RUN.
+test("a simplified-surface clarification still confirms after a switch to the advanced surface", async () => {
+  const simplifiedPolicy: AskPolicy = { ...DEFAULT_POLICY, advanced: false };
+  const contract = contractFor("切界面前留下的歧义问题", true);
+  api.previewAskIntent.mockResolvedValue(contract);
+  api.runAskStream.mockResolvedValue({
+    ...answer("conversation-surface-switch"),
+    mode: "reasoning",
+  });
+  const view = render(<Harness policy={simplifiedPolicy} />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("chunk"));
+  // A stale advanced-surface effort choice: the simplified submission freezes
+  // `standard` on the run regardless of it.
+  act(() => value!.selectRetrievalEffort("deep"));
+
+  await act(async () => {
+    await value!.submit("切界面前留下的歧义问题");
+  });
+  expect(value!.intentReview?.contract).toBe(contract);
+
+  // The user switches to the advanced surface with the card still open. The
+  // engine control becomes visible again, so the selector is normalised onto
+  // this run's engine instead of sitting there naming another one.
+  view.rerender(<Harness />);
+  expect(value!.intentReview?.contract).toBe(contract);
   expect(value!.mode).toBe("reasoning");
-  expect(value!.turns[0]?.response.mode).toBe("chunk");
+  // The effort chip that just became visible reads the effort this run froze,
+  // not whatever the advanced surface last selected.
+  expect(value!.retrievalEffort).toBe("standard");
+
+  // And even when they then name another engine in that newly visible control,
+  // the run in front of them keeps the surface it was submitted in.
+  act(() => value!.selectMode("chunk"));
+  expect(value!.intentReview?.contract).toBe(contract);
+
+  await act(async () => {
+    await value!.confirmIntent({
+      contract,
+      resolved_question: "切界面前留下的歧义问题，已澄清",
+      answers: [{ id: "which", answer: "那一个" }],
+    });
+  });
+
+  expect(effects.notify).not.toHaveBeenCalledWith("问题上下文已经变化，请重新提交");
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  expect(api.runAskStream.mock.calls[0]?.[1]).toMatchObject({
+    question: "切界面前留下的歧义问题",
+    mode: "reasoning",
+    retrieval_effort: "standard",
+    intent: expect.anything(),
+  });
+  expect(value!.question).toBe("");
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["切界面前留下的歧义问题"]);
+});
+
+// The other half of the switch rule: with nothing on screen, the named choice
+// the user left in the advanced surface stands. Dropping the visible-run guard
+// would silently rewrite it to reasoning on every switch.
+test("a switch to the advanced surface with no intent run on screen leaves the named engine alone", async () => {
+  const view = render(<Harness policy={{ ...DEFAULT_POLICY, advanced: false }} />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("chunk"));
+  act(() => value!.selectRetrievalEffort("deep"));
+
+  view.rerender(<Harness />);
+
+  expect(value!.intentReview).toBeNull();
+  expect(value!.mode).toBe("chunk");
+  expect(value!.retrievalEffort).toBe("deep");
+  expect(api.previewAskIntent).not.toHaveBeenCalled();
+});
+
+// T2c defect, the same root cause on the mid-preview abandon effect. Once the
+// surface has flipped to advanced, EVERY visible-mode write reaches that effect
+// as a change of `mode` with the conversation unchanged — the engine control the
+// user can now see, `attachDetachedRun`/`applySessionDetail` backfilling the
+// last turn's engine, the Ask-mode projection. Judged by the current surface
+// they all aborted a preview the simplified surface owns.
+test("a simplified-surface preview survives a visible engine write after a switch to the advanced surface", async () => {
+  const simplifiedPolicy: AskPolicy = { ...DEFAULT_POLICY, advanced: false };
+  const preview = deferred<QueryIntentContract>();
+  api.previewAskIntent.mockReturnValue(preview.promise);
+  api.runAskStream.mockResolvedValue({
+    ...answer("conversation-surface-switch-preview"),
+    mode: "reasoning",
+  });
+  const view = render(<Harness policy={simplifiedPolicy} />);
+  beginOwnedNotebook();
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("简化界面在途的问题理解");
+  });
+  await settleSubmit();
+  expect(value!.intentChecking).toBe(true);
+  const signal = api.previewAskIntent.mock.calls[0]?.[3] as AbortSignal;
+
+  view.rerender(<Harness />);
+  expect(value!.mode).toBe("reasoning");
+  expect(signal.aborted).toBe(false);
+
+  act(() => value!.selectMode("chunk"));
+  expect(signal.aborted).toBe(false);
+  expect(value!.intentChecking).toBe(true);
+  expect(value!.pendingQuestion).toBe("简化界面在途的问题理解");
+
+  preview.resolve(contractFor("简化界面在途的问题理解", false));
+  await act(async () => submitting);
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  expect(api.runAskStream.mock.calls[0]?.[1]).toMatchObject({
+    question: "简化界面在途的问题理解",
+    mode: "reasoning",
+    retrieval_effort: "standard",
+  });
+});
+
+// T2c, the switch effect. "Advanced -> simplified cancels everything and clears
+// the store" was written when only the advanced surface could leave a record.
+// It now has to spare the simplified surface's own work, or a simplified ->
+// advanced -> simplified round trip (one avatar-menu misclick and back) eats
+// the user's own question.
+test("a simplified-surface record survives a round trip through the advanced surface", async () => {
+  const simplifiedPolicy: AskPolicy = { ...DEFAULT_POLICY, advanced: false };
+  const contract = contractFor("往返切换要保住的问题", true);
+  api.previewAskIntent.mockResolvedValue(contract);
+  api.listConversations.mockResolvedValue([]);
+  const view = render(<Harness policy={simplifiedPolicy} />);
+  beginOwnedNotebook();
+  await act(async () => {
+    await value!.submit("往返切换要保住的问题");
+  });
+  expect(value!.intentReview?.contract).toBe(contract);
+  expect(pendingIntentStore()).toHaveLength(1);
+
+  view.rerender(<Harness />);
+  view.rerender(<Harness policy={simplifiedPolicy} />);
+
+  // Still on screen, never reported as "已切换到自动模式 … 已取消", still mirrored.
+  expect(value!.intentReview?.question).toBe("往返切换要保住的问题");
+  expect(effects.reportError).not.toHaveBeenCalled();
+  expect(pendingIntentStore()).toHaveLength(1);
+  expect((pendingIntentStore()[0] as { advanced: boolean }).advanced).toBe(false);
+
+  // And the mirror still resumes after a reload, without another model call.
+  view.unmount();
+  api.previewAskIntent.mockReset();
+  render(<Harness policy={simplifiedPolicy} />);
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.intentReview?.question).toBe("往返切换要保住的问题");
+  expect(api.previewAskIntent).not.toHaveBeenCalled();
+  expect(api.runAskStream).not.toHaveBeenCalled();
 });
 
 test("a failed Ask-mode projection retries on the next committed workspace", async () => {
@@ -3443,6 +3658,34 @@ function pendingIntentStore(): unknown[] {
   return raw ? (JSON.parse(raw) as unknown[]) : [];
 }
 
+// A clarification record exactly as the hook mirrors one, for the cases that
+// need a tab to start with storage the current mount did not write.
+function persistedReview(overrides: Record<string, unknown> = {}) {
+  return {
+    version: 2,
+    id: "run-stored",
+    savedAt: 1,
+    actorId: "user-a",
+    notebookId: "notebook-a",
+    advanced: true,
+    conversationIdAtStart: null,
+    question: "stored question",
+    askedAt: "2026-09-02T00:00:00Z",
+    retrievalEffort: "standard",
+    sourceScope: { mode: "exclude", source_ids: [] },
+    baseScope: { mode: "exclude", notebook_ids: [] },
+    phase: "review",
+    contract: contractFor("stored question", true),
+    understandingMs: 12,
+    confirmation: null,
+    ...overrides,
+  };
+}
+
+function seedPendingIntentStore(records: unknown[]) {
+  window.sessionStorage.setItem("silicon_notebook_pending_intent", JSON.stringify(records));
+}
+
 test("a reasoning preview interrupted by a reload is re-issued and resumed on the next mount", async () => {
   const firstPreview = deferred<QueryIntentContract>();
   api.previewAskIntent.mockReturnValueOnce(firstPreview.promise);
@@ -3820,6 +4063,171 @@ test("automatic mode on reload drops persisted reasoning work instead of resumin
   expect(api.previewAskIntent).not.toHaveBeenCalled();
   expect(api.runAskStream).not.toHaveBeenCalled();
   expect(pendingIntentStore()).toEqual([]);
+});
+
+// T2b defect B. The simplified surface now submits through the same reasoning
+// intent preview, so it produces mirror records of its own — "there is a
+// record" no longer means "the advanced surface left it". The old rule
+// (simplified mount → clear the whole store, resume nothing) therefore ate the
+// question whenever a reload landed mid-understanding.
+test("a simplified-surface preview interrupted by a reload is re-issued and resumed on the next mount", async () => {
+  const simplifiedPolicy: AskPolicy = { ...DEFAULT_POLICY, advanced: false };
+  const firstPreview = deferred<QueryIntentContract>();
+  api.previewAskIntent.mockReturnValueOnce(firstPreview.promise);
+  api.listConversations.mockResolvedValue([summary("conversation-older")]);
+  api.getConversation.mockResolvedValue(detail("conversation-older"));
+  const view = render(<Harness policy={simplifiedPolicy} />);
+  beginOwnedNotebook();
+  // A stale advanced-surface choice that the simplified surface cannot change.
+  act(() => value!.selectMode("chunk"));
+  act(() => {
+    void value!.submit("simplified before reload");
+  });
+  expect(value!.intentChecking).toBe(true);
+  await settleSubmit();
+  expect(pendingIntentStore()).toHaveLength(1);
+  expect((pendingIntentStore()[0] as { advanced: boolean }).advanced).toBe(false);
+
+  // Reload: React state is gone, the tab's sessionStorage is not.
+  view.unmount();
+  api.previewAskIntent.mockResolvedValueOnce(contractFor("simplified before reload", false));
+  api.runAskStream.mockResolvedValue({ ...answer("conversation-resumed"), mode: "reasoning" });
+  render(<Harness policy={simplifiedPolicy} />);
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(api.getConversation).not.toHaveBeenCalled();
+  expect(api.previewAskIntent).toHaveBeenCalledTimes(2);
+  expect(api.previewAskIntent.mock.calls[1]?.[1]).toBe("simplified before reload");
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  expect(api.runAskStream.mock.calls[0]?.[1]).toMatchObject({
+    question: "simplified before reload",
+    mode: "reasoning",
+    retrieval_effort: "standard",
+  });
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["simplified before reload"]);
+  expect(pendingIntentStore()).toEqual([]);
+});
+
+// T2b defect B, the hand-off window: between the POST and `started` the mirror
+// is the only copy of the question in the simplified surface too, so a reload
+// there must re-send it under the same idempotency key instead of dropping it.
+test("a simplified-surface hand-off interrupted by a reload is re-sent under the same key", async () => {
+  const simplifiedPolicy: AskPolicy = { ...DEFAULT_POLICY, advanced: false };
+  const streams: Array<ReturnType<typeof deferred<AskResponse>>> = [];
+  const starts: Array<(jobId: string, conversationId: string) => void | Promise<void>> = [];
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    const stream = deferred<AskResponse>();
+    streams.push(stream);
+    if (nextOnStart) starts.push(nextOnStart);
+    return stream.promise;
+  });
+  api.previewAskIntent.mockResolvedValue(contractFor("simplified hand-off", false));
+  api.listConversations.mockResolvedValue([]);
+  const view = render(<Harness policy={simplifiedPolicy} />);
+  beginOwnedNotebook();
+  await act(async () => {
+    void value!.submit("simplified hand-off");
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  const [mirror] = pendingIntentStore() as Array<{
+    id: string; phase: string; advanced: boolean; confirmation: unknown;
+  }>;
+  expect(mirror.phase).toBe("handoff");
+  expect(mirror.advanced).toBe(false);
+
+  view.unmount();
+  api.previewAskIntent.mockReset();
+  render(<Harness policy={simplifiedPolicy} />);
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  await settleSubmit();
+  // No second understanding pass: the confirmed intent travelled in the mirror.
+  expect(api.previewAskIntent).not.toHaveBeenCalled();
+  expect(api.runAskStream).toHaveBeenCalledTimes(2);
+  expect(api.runAskStream.mock.calls[1]?.[1]).toMatchObject({
+    question: "simplified hand-off",
+    mode: "reasoning",
+    retrieval_effort: "standard",
+    client_request_id: mirror.id,
+    intent: mirror.confirmation,
+  });
+  expect(value!.pendingQuestion).toBe("simplified hand-off");
+  expect(value!.question).toBe("");
+  expect(pendingIntentStore()).toHaveLength(1);
+
+  await act(async () => {
+    await starts[1]!("job-simplified", "conversation-simplified");
+  });
+  expect(pendingIntentStore()).toEqual([]);
+});
+
+// T2b defect B, the other half of the rule: the decision is PER RECORD, not per
+// store. A record the advanced surface left may carry a scope the user narrowed
+// where the simplified surface cannot see it, so the simplified surface drops
+// that one — but it keeps resuming its own, even when the advanced record is
+// the newer of the two.
+test("a stored intent record is judged per surface, not by clearing the whole store", async () => {
+  const simplifiedPolicy: AskPolicy = { ...DEFAULT_POLICY, advanced: false };
+  seedPendingIntentStore([
+    persistedReview({
+      id: "run-from-simplified",
+      savedAt: 1,
+      advanced: false,
+      question: "从简化界面留下的问题",
+      contract: contractFor("从简化界面留下的问题", true),
+    }),
+    persistedReview({
+      id: "run-from-advanced",
+      savedAt: 2,
+      advanced: true,
+      question: "从高级界面留下的问题",
+      contract: contractFor("从高级界面留下的问题", true),
+    }),
+  ]);
+  api.listConversations.mockResolvedValue([]);
+  const view = render(<Harness policy={simplifiedPolicy} />);
+  const owner = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+
+  // The newer advanced record is skipped and deleted; the simplified one behind
+  // it re-opens its review without another model call.
+  expect(value!.intentReview?.question).toBe("从简化界面留下的问题");
+  expect(api.previewAskIntent).not.toHaveBeenCalled();
+  expect(api.runAskStream).not.toHaveBeenCalled();
+  expect((pendingIntentStore() as Array<{ id: string }>).map((item) => item.id))
+    .toEqual(["run-from-simplified"]);
+
+  // And the advanced surface resumes a simplified record just as normally.
+  view.unmount();
+  render(<Harness />);
+  const advancedOwner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(advancedOwner);
+    value!.finishNotebookTransition(advancedOwner);
+  });
+  expect(value!.intentReview?.question).toBe("从简化界面留下的问题");
+  expect(api.previewAskIntent).not.toHaveBeenCalled();
 });
 
 // codex #664 r3 P2: the mirror is written only after the originating tab owns

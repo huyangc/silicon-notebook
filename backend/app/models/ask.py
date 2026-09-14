@@ -328,9 +328,10 @@ class AskRequest(BaseModel):
     asked_at: str = Field(default="", max_length=64)
     scenario: Dict[str, str] = Field(default_factory=dict)
     conversation_id: Optional[str] = None
-    # ``auto`` is a request-only backend selector resolved to chunk/reasoning
-    # before durable state; it is never a persisted engine id.
-    mode: str = "chunk"       # "chunk"(默认) | "reasoning" | "auto" | retired aliases(fast/global/graph)
+    # Only registry ids dispatch. Retired-but-once-legal ids are normalized by
+    # ``resolve_mode`` before any durable state exists, so a stale tab never
+    # 422s and ``ask_jobs.mode`` is always the engine that actually answered.
+    mode: str = "chunk"       # "chunk"(默认) | "reasoning" | retired aliases(fast/global/graph→chunk, auto→reasoning)
     # User-controlled resource level.  It selects immutable hard ceilings from
     # ask_retrieval_policy; the model may stop early but cannot increase them.
     retrieval_effort: RetrievalEffort = DEFAULT_RETRIEVAL_EFFORT

@@ -61,6 +61,9 @@ def test_resolve_known_default_and_unknown():
     assert resolve_mode("") is ASK_MODES[DEFAULT_MODE]
     # 退役别名(与 fast/global 同款):graph 不再是注册表条目,resolve 到 chunk。
     assert resolve_mode("graph") is ASK_MODES["chunk"]
+    # 退役别名的映射目标不必都是 chunk:``auto`` 曾是简化界面的请求级选择器,
+    # 该界面现在直接提交 reasoning,所以这个别名映射 reasoning。
+    assert resolve_mode("auto") is ASK_MODES["reasoning"]
     with pytest.raises(UnknownAskMode) as exc:
         resolve_mode("bogus")
     assert exc.value.mode == "bogus"

@@ -431,8 +431,9 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 不必连带关掉笔记本理解巡固）映射到物理服务。多个 workload
 可以共用一个服务，它们也会共用该服务唯一的调度器和并发预算。`max_concurrency`
 是唯一的模型容量参数；来源作业数、窗口大小、batch 大小与本地 ANN 线程都不会再创建模型 gate。
-自动界面的 Ask 后台路由复用 `reasoning_agent` 做一次 corpus-blind 问题理解；未绑定该 workload
-或调用失败时，自动路由保守落到通用问答，不会新增另一套模型服务配置。
+自动模式（简化界面）固定使用逐步推理（`reasoning`）标准档，与高级界面选择 `reasoning` 时走同一条
+`/ask/intent` 意图预检（复用 `reasoning_agent` workload），不涉及额外的模型服务配置。该 workload
+未绑定或调用失败时，问题理解 fail-open 为空合同、按清晰问题继续以逐步推理执行，不再有通用问答兜底。
 
 可选的 `[thinking]` 表按 **chat workload** 控制思考模式，值只能是 `enabled`、
 `disabled` 或 `provider_default`。策略按 workload 而非物理服务配置，因为同一个 chat

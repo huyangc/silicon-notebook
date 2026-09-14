@@ -5830,18 +5830,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
-        "scope": "<module>.ask",
-        "target": "current_user"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/ask_routes.py",
-        "scope": "<module>.ask_stream.prepare_ask_stream",
-        "target": "current_user"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.cancel_ask_job",
         "target": "current_user"
       },
@@ -8239,12 +8227,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
-        "scope": "<module>._resolve_auto_ask_request",
-        "target": "preview_reasoning_intent"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.preview_ask_intent.run_preview",
         "target": "preview_reasoning_intent"
       },
@@ -8257,7 +8239,7 @@
       {
         "kind": "patch",
         "path": "backend/tests/test_ask_modes_api.py",
-        "scope": "<module>.test_auto_mode_is_resolved_by_backend_before_durable_job",
+        "scope": "<module>.test_auto_is_a_retired_alias_for_reasoning",
         "target": "preview_reasoning_intent"
       }
     ],
@@ -8269,7 +8251,7 @@
         "compatibility": "test-only",
         "kind": "patch",
         "path": "backend/tests/test_ask_modes_api.py",
-        "scope": "<module>.test_auto_mode_is_resolved_by_backend_before_durable_job",
+        "scope": "<module>.test_auto_is_a_retired_alias_for_reasoning",
         "target": "preview_reasoning_intent"
       }
     ],

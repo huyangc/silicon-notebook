@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   PENDING_INTENT_STORAGE_KEY,
   claimIntentRun,
+  clearAdvancedPersistedIntentRuns,
   clearPersistedIntentRuns,
   findPersistedIntentRuns,
   isPersistedIntentRun,
@@ -51,11 +52,12 @@ let counter = 0;
 function run(overrides = {}) {
   counter += 1;
   return {
-    version: 1,
+    version: 2,
     id: `run-${counter}`,
     savedAt: counter,
     actorId: "user-a",
     notebookId: "notebook-a",
+    advanced: true,
     conversationIdAtStart: null,
     question: "question",
     askedAt: "2026-09-02T00:00:00Z",
@@ -136,7 +138,15 @@ test("review entries need a well-formed contract; malformed entries are dropped 
   assert.equal(isPersistedIntentRun(run({ phase: "review", contract: null })), false);
   assert.equal(isPersistedIntentRun(run({ phase: "review", contract: { objective: "q" } })), false);
   assert.equal(isPersistedIntentRun(run({ question: "   " })), false);
-  assert.equal(isPersistedIntentRun(run({ version: 2 })), false);
+  assert.equal(isPersistedIntentRun(run({ version: 3 })), false);
+  // version 1 预日期于 `advanced` 字段:它说不出自己出自哪个界面,而恢复规则完全
+  // 依赖这一点,所以读到即丢弃。sessionStorage 短命,且 version 1 只可能是高级界面
+  // 留下的——简化界面本来就会丢掉它,行为与旧版一致。
+  const { advanced: _dropped, ...legacy } = run();
+  assert.equal(isPersistedIntentRun({ ...legacy, version: 1 }), false);
+  assert.equal(isPersistedIntentRun(run({ advanced: undefined })), false);
+  assert.equal(isPersistedIntentRun(run({ advanced: "yes" })), false);
+  assert.equal(isPersistedIntentRun(run({ advanced: false })), true);
   assert.equal(isPersistedIntentRun(run({ id: "" })), false);
   assert.equal(isPersistedIntentRun(run({ savedAt: "now" })), false);
   assert.equal(isPersistedIntentRun(run({ sourceScope: { mode: "all" } })), false);
@@ -148,7 +158,7 @@ test("review entries need a well-formed contract; malformed entries are dropped 
 test("corrupt or foreign storage content reads as empty instead of throwing", () => {
   assert.deepEqual(readPersistedIntentRuns(fakeStorage({ [PENDING_INTENT_STORAGE_KEY]: "{not json" })), []);
   assert.deepEqual(readPersistedIntentRuns(fakeStorage({ [PENDING_INTENT_STORAGE_KEY]: "{\"a\":1}" })), []);
-  const mixed = JSON.stringify([run(), { version: 1, actorId: "x" }]);
+  const mixed = JSON.stringify([run(), { version: 2, actorId: "x" }]);
   assert.equal(readPersistedIntentRuns(fakeStorage({ [PENDING_INTENT_STORAGE_KEY]: mixed })).length, 1);
   // No storage at all (private mode / disabled): every operation is a no-op.
   assert.deepEqual(readPersistedIntentRuns(null), []);
@@ -179,6 +189,34 @@ test("clearPersistedIntentRuns forgets only the given actor", () => {
   const left = readPersistedIntentRuns(store);
   assert.equal(left.length, 1);
   assert.equal(left[0].actorId, "user-b");
+});
+
+
+// 切到简化界面（「自动模式」）时用的是这一把，不是上面那把：简化界面自己也会留记录，
+// 整个 actor 清空会把用户自己那条问题吃掉（简化 → 高级 → 简化 一趟往返即可复现）。
+test("clearAdvancedPersistedIntentRuns 只清掉该 actor 在高级界面留下的条目", () => {
+  const store = fakeStorage();
+  savePersistedIntentRun(run({ id: "a-advanced", advanced: true }), store);
+  savePersistedIntentRun(run({ id: "a-simplified", advanced: false }), store);
+  savePersistedIntentRun(run({ id: "b-advanced", actorId: "user-b", advanced: true }), store);
+  savePersistedIntentRun(run({ id: "b-simplified", actorId: "user-b", advanced: false }), store);
+
+  clearAdvancedPersistedIntentRuns("user-a", store);
+
+  assert.deepEqual(
+    readPersistedIntentRuns(store).map((item) => item.id).sort(),
+    ["a-simplified", "b-advanced", "b-simplified"],
+  );
+});
+
+
+test("clearAdvancedPersistedIntentRuns 没有可清的条目时不写 storage", () => {
+  const store = fakeStorage();
+  savePersistedIntentRun(run({ id: "only-simplified", advanced: false }), store);
+  const before = store.getItem(PENDING_INTENT_STORAGE_KEY);
+  clearAdvancedPersistedIntentRuns("user-a", store);
+  assert.equal(store.getItem(PENDING_INTENT_STORAGE_KEY), before);
+  assert.equal(readPersistedIntentRuns(store).length, 1);
 });
 
 
