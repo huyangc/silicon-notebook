@@ -75,13 +75,65 @@ const answer = {
 
 test("renders safe dynamic names, support ids, and deduplicates failures", () => {
   renderAnswer(answer);
-  expect(screen.getAllByText("推理服务 runtime-reasoner 调用失败，本次回答可能不完整。"))
+  expect(screen.getAllByText("推理服务 runtime-reasoner（逐步推理）调用失败：连接未通过。"))
     .toHaveLength(1);
-  expect(screen.getByText("模型服务 runtime-embed 调用失败，本次回答可能不完整。"))
+  expect(screen.getByText("模型服务 runtime-embed（来源向量化）调用失败：连接未通过。"))
     .toBeInTheDocument();
   expect(screen.getByText("支持编号：")).toBeInTheDocument();
   expect(screen.getByText("mdl-ask_789")).toBeInTheDocument();
   expect(screen.queryByText(/reasoner-next|embed-next/)).not.toBeInTheDocument();
+});
+
+
+test("names the phenomenon of a rejected reply and keeps distinct phenomena apart", () => {
+  const twoPhenomena = {
+    ...answer,
+    model_errors: [
+      {
+        service_id: "reasoner-next",
+        service_name: "推理服务",
+        workload_id: "ask_answer",
+        workload_label: "问答回答",
+        stage: "answer",
+        model: "runtime-reasoner",
+        message: "malformed_response",
+        support_id: "mdl-ask_790",
+        detail: "empty",
+        finish_reason: "length",
+      },
+      {
+        service_id: "reasoner-next",
+        service_name: "推理服务",
+        workload_id: "ask_answer",
+        workload_label: "问答回答",
+        stage: "answer",
+        model: "runtime-reasoner",
+        message: "malformed_response",
+        support_id: "mdl-ask_790",
+        detail: "missing_expected_key",
+        finish_reason: "",
+      },
+      {
+        service_id: "",
+        service_name: "",
+        workload_id: "",
+        workload_label: "",
+        stage: "answer",
+        model: "",
+        message: "missing_config",
+        support_id: "",
+      },
+    ],
+  } as AskResponse;
+  renderAnswer(twoPhenomena);
+  expect(screen.getByText(
+    "推理服务 runtime-reasoner（问答回答）调用失败：模型没有返回任何内容（输出达到长度上限被截断）。",
+  )).toBeInTheDocument();
+  expect(screen.getByText(
+    "推理服务 runtime-reasoner（问答回答）调用失败：返回内容缺少要求的字段。",
+  )).toBeInTheDocument();
+  expect(screen.getByText("模型服务尚未配置。")).toBeInTheDocument();
+  expect(screen.queryByText(/malformed_response|missing_expected_key|length/)).not.toBeInTheDocument();
 });
 
 

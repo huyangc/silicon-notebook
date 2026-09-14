@@ -459,6 +459,9 @@ def test_ask_contract_failure_archives_the_exact_request_and_response():
         provider.close()
 
     assert caught.value.code == "malformed_response"
+    # The typed error carries WHY, in the same closed vocabulary the archive
+    # records, so the Ask banner can name the phenomenon.
+    assert caught.value.detail == "invalid_type"
     [record] = records
     assert record.actor_id == "user-1"
     assert record.notebook_id == "nb-1"
@@ -1383,3 +1386,112 @@ def test_close_and_submit_share_one_atomic_provider_admission_boundary():
     finally:
         allow_stop.set()
         executor.shutdown()
+
+
+# ── Failure phenomenon in the Ask payload ─────────────────────────────────
+# ``note_model_error`` used to flatten every rejected reply to the bare
+# ``malformed_response`` code and every consumer-side verdict to
+# ``upstream_error`` with no service identity, so the banner could only say
+# "model X call failed". These pin the three facts the banner now renders:
+# WHICH physical service, WHAT the reply did (closed-set ``detail``), and the
+# provider's ``finish_reason`` when the transport reported one.
+
+
+def _noted_rows(provider, stage, error, workload_id):
+    from app.core.ask_context import _ASK_MODEL_ERRORS
+
+    sink: list = []
+    token = _ASK_MODEL_ERRORS.set(sink)
+    try:
+        provider.note_model_error(stage, error, workload_id=workload_id)
+    finally:
+        _ASK_MODEL_ERRORS.reset(token)
+    return sink
+
+
+def test_rejected_reply_reason_reaches_the_ask_payload_as_detail():
+    class LengthStats(_Chat):
+        supports_call_stats = True
+
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            sink = kwargs.get(provider_mod.CALL_STATS_KWARG)
+            if isinstance(sink, dict):
+                sink["finish_reason"] = "length"
+            return ""
+
+    provider = _provider(chat=LengthStats())
+    try:
+        stats: dict = {}
+        with pytest.raises(provider_mod.ModelInvocationError) as caught:
+            provider.chat("ask_answer").chat_json(
+                [], '{"answer":"","grounded":true}', call_stats=stats,
+            )
+        [row] = _noted_rows(provider, "answer", caught.value, "ask_answer")
+    finally:
+        provider.close()
+
+    assert caught.value.detail == "empty"
+    assert caught.value.finish_reason == "length"
+    assert row["service_id"] == "chat"
+    assert row["service_name"] == "安全服务-chat"
+    assert row["model"] == "safe-chat"
+    assert row["message"] == "malformed_response"
+    assert row["detail"] == "empty"
+    assert row["finish_reason"] == "length"
+
+
+def test_consumer_side_malformed_verdict_names_the_bound_service():
+    from app.services.model_work import MalformedModelResponse
+
+    provider = _provider(registry=_registry(chat_model="gateway-alias"))
+    try:
+        [row] = _noted_rows(
+            provider, "answer",
+            MalformedModelResponse("empty after retry", reason="empty_answer"),
+            "ask_answer",
+        )
+        # A workload nothing is bound to keeps a blank identity — never
+        # invented from a caller hint.
+        [unbound] = _noted_rows(
+            provider, "answer",
+            MalformedModelResponse("empty after retry", reason="empty_answer"),
+            "reasoning_agent",
+        )
+    finally:
+        provider.close()
+
+    assert (row["service_id"], row["service_name"], row["model"]) == (
+        "chat", "安全服务-chat", "gateway-alias"
+    )
+    assert (row["message"], row["detail"]) == ("malformed_response", "empty_answer")
+    assert (unbound["service_id"], unbound["service_name"], unbound["model"]) == (
+        "", "", ""
+    )
+    assert (unbound["message"], unbound["detail"]) == (
+        "malformed_response", "empty_answer"
+    )
+
+
+def test_untyped_failures_carry_no_detail_and_deployment_codes_survive():
+    class Rejecting(_Chat):
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            error = RuntimeError("model 'x' does not exist")
+            error.code = "model_not_found"
+            raise error
+
+    provider = _provider(chat=Rejecting())
+    try:
+        with pytest.raises(provider_mod.ModelInvocationError) as caught:
+            provider.chat("ask_answer").chat_json([], "{}")
+        [typed_row] = _noted_rows(provider, "answer", caught.value, "ask_answer")
+        [raw_row] = _noted_rows(
+            provider, "answer", RuntimeError("upstream 503"), "ask_answer"
+        )
+    finally:
+        provider.close()
+
+    assert typed_row["message"] == "model_not_found"
+    assert (typed_row["detail"], typed_row["finish_reason"]) == ("", "")
+    assert raw_row["message"] == "upstream_error"
+    assert (raw_row["detail"], raw_row["finish_reason"]) == ("", "")
+    assert raw_row["service_id"] == "chat"

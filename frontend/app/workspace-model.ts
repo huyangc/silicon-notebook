@@ -664,6 +664,10 @@ export type AskResponse = {
     model: string;
     message: string;
     support_id: string;
+    /** `malformed_response` 的具体现象（闭集）；历史回答与旧镜像可能缺席。 */
+    detail?: string;
+    /** 上游 finish_reason；历史回答与旧镜像可能缺席。 */
+    finish_reason?: string;
   }[];
   index_required?: boolean;
 };

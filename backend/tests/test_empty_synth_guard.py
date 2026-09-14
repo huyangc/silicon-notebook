@@ -51,6 +51,10 @@ def test_retry_all_empty_returns_not_ok_and_notes_error(repo):
         _ASK_MODEL_ERRORS.reset(tok)
     assert ok is False and ans == "" and len(calls) == 2       # 重试一次后仍空
     assert sink and sink[0]["stage"] == "answer"               # 静默失败补记 model_error
+    # 终态报警说清现象:不是「连接未通过」,是「合规 JSON 但 answer 两次都空」。
+    assert (sink[0]["message"], sink[0]["detail"]) == (
+        "malformed_response", "empty_answer"
+    )
 
 
 def test_retry_recovers_after_exception(repo):
@@ -188,6 +192,10 @@ def test_two_failures_keep_every_alarm_including_the_terminal_one(repo):
     assert ok is False
     assert len(sink) == 3, "两次尝试各一条 + 终态那条"
     assert {row["stage"] for row in sink} == {"answer"}
+    # 两次都是抛异常收场:终态那条不冒充「答空」——现象已由前两条按异常记下,
+    # empty_answer 只在最后一次没抛却答空时出现。
+    assert sink[-1]["message"] == "upstream_error"
+    assert sink[-1]["detail"] == ""
 
     def empty():
         return ("", False, [])

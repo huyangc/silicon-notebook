@@ -1,4 +1,10 @@
 import { requestJson } from "./api-client.ts";
+import {
+  label,
+  MODEL_FINISH_REASON,
+  MODEL_RESPONSE_DETAIL,
+  MODEL_SERVICE_STATUS_ERROR,
+} from "./vocabulary.ts";
 
 
 export type ModelServiceStatusItem = {
@@ -30,6 +36,10 @@ export type ModelFailure = {
   model?: string;
   message?: string;
   support_id?: string;
+  /** `malformed_response` 的具体现象（闭集 code）；其它 message 下为空。 */
+  detail?: string;
+  /** 上游 finish_reason（length / stop / …），传输层没报就为空。 */
+  finish_reason?: string;
 };
 
 export type ModelServicesSummary = {
@@ -177,12 +187,56 @@ export function modelServiceDisplayName(
   return safeDisplayName(item.display_name) || "模型服务";
 }
 
+// 稳定 code 的形状(后端 model_safety 各闭集都是小写蛇形);不匹配的值不查表,
+// 直接当作「未知」——label() 兜底本身已经不会上屏原值,这一层只是让 detail /
+// finish_reason 这种可选字段在被篡改时连查表都不进。
+const STABLE_CODE = /^[a-z][a-z_]{0,39}$/;
+
+function safeCode(value: unknown): string {
+  return typeof value === "string" && STABLE_CODE.test(value) ? value : "";
+}
+
+/**
+ * 一条模型失败「是什么现象」的中文短句（不含主语、含句号）。
+ *
+ * - 非 `malformed_response`：直接用状态词表（连接未通过 / 上游服务限流 / 模型
+ *   名称不存在 …）。
+ * - `malformed_response` 带 `detail`：只说现象本身（「模型没有返回任何内容」
+ *   「返回内容缺少要求的字段」…），不再叠一层笼统的「返回格式异常」；上游报了
+ *   finish_reason=length 时括注「输出达到长度上限被截断」，这是用户能动手改的
+ *   那一项（调大输出预算）。
+ * - 没有 code（旧回答、流式镜像缺字段）：中性的「调用未成功」。
+ */
+export function modelFailurePhenomenon(error: Pick<ModelFailure, "message" | "detail" | "finish_reason">): string {
+  const code = safeCode(error.message);
+  if (!code) return "调用未成功。";
+  const base = label(MODEL_SERVICE_STATUS_ERROR, code, "调用未成功");
+  if (code !== "malformed_response") return `${base}。`;
+  const detail = safeCode(error.detail);
+  const detailText = detail ? label(MODEL_RESPONSE_DETAIL, detail, "返回内容不符合要求") : "";
+  const finish = safeCode(error.finish_reason);
+  const finishText = finish ? label(MODEL_FINISH_REASON, finish, "") : "";
+  const body = detailText || base;
+  return finishText ? `${body}（${finishText}）。` : `${body}。`;
+}
+
+/**
+ * 横幅里的一整行：「谁」+「怎么了」。
+ *
+ * 主语 = 服务显示名 + 实际模型名 + （工作负载）,三段都是后端已净化的动态数据,
+ * 缺哪段就省哪段,绝不用 service_id 顶替。「本次回答可能不完整」由横幅标题统一
+ * 说,每行不再重复。未配置的服务不叫「调用失败」——它根本没被调用。
+ */
 export function modelFailureText(error: ModelFailure): string {
   const serviceName = safeDisplayName(error.service_name) || "模型服务";
   const model = safeModel(error.model);
-  return model
-    ? `${serviceName} ${model} 调用失败，本次回答可能不完整。`
-    : `${serviceName}调用失败，本次回答可能不完整。`;
+  const workload = safeDisplayName(error.workload_label);
+  const subject = `${serviceName}${model ? ` ${model}` : ""}${workload ? `（${workload}）` : ""}`;
+  const code = safeCode(error.message);
+  if (code === "missing_config" || code === "model_not_configured") {
+    return `${subject}尚未配置。`;
+  }
+  return `${subject}调用失败：${modelFailurePhenomenon(error)}`;
 }
 
 export function summarizeModelServices(services: ModelServiceStatusItem[]): ModelServicesSummary {

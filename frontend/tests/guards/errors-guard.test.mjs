@@ -88,6 +88,26 @@ const APPROVED_MESSAGE_READS = Object.freeze({
     count: 1,
     reason: "validated source-cleanup guidance is copied into its typed error",
   },
+  // ModelFailure.message 不是异常文本,是后端 model_safety 闭集里的稳定 code
+  // (upstream_error / malformed_response / …)。三处读取都只把它当查表键:先过
+  // STABLE_CODE 形状闸,再经 label() 映射成词表里的中文,未知值退中性短语;
+  // 原值从不上屏。
+  "answer-panel.tsx|<module>.ModelErrorPanel|property|message": {
+    count: 1,
+    reason: "the dedupe/React key reads the stable ModelFailure.message code so two "
+      + "phenomena of one service stay distinct rows; the key is never rendered as text",
+  },
+  "model-services.ts|<module>.modelFailurePhenomenon|property|message": {
+    count: 1,
+    reason: "reads the closed-set ModelFailure.message code as a label-table key behind "
+      + "a shape gate; label() maps it to vocabulary copy and unknown codes fall back to "
+      + "a neutral phrase, so the raw code never reaches the screen",
+  },
+  "model-services.ts|<module>.modelFailureText|property|message": {
+    count: 1,
+    reason: "reads the same closed-set code only to pick the not-configured wording "
+      + "(missing_config / model_not_configured) before delegating to modelFailurePhenomenon",
+  },
   "page.tsx|<module>.Home|property|message": {
     count: 1,
     reason: "application-owned information modal state is not exception text",

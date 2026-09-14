@@ -308,6 +308,8 @@
             "mode": "reasoning",
             "model_errors": [
               {
+                "detail": "",
+                "finish_reason": "",
                 "message": "upstream_error",
                 "model": "fixture-rerank",
                 "service_id": "",

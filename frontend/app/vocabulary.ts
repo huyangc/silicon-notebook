@@ -162,6 +162,55 @@ export const MODEL_SERVICE_STATUS_ERROR: Record<string, string> = {
   provider_error: "上游调用失败",
   malformed_response: "返回格式异常",
   model_not_configured: "系统未配置",
+  // 部署形态的拒绝(后端 model_provider._stable_error_code 已分类,现在原样透传):
+  // 模型名配错、端点协议不对、模型不支持所需能力,各自要改的地方不同,不能都叫
+  // 「连接未通过」。
+  unknown_model: "模型名称不存在",
+  model_not_found: "模型名称不存在",
+  model_rejected: "上游拒绝了该模型",
+  protocol_mismatch: "接口协议不匹配",
+  unsupported_protocol: "接口协议不匹配",
+  capability_mismatch: "模型不支持所需能力",
+  unsupported_capability: "模型不支持所需能力",
+};
+
+/**
+ * `malformed_response` 的具体现象（`model_errors[].detail`，后端
+ * `model_safety._MODEL_ERROR_DETAILS` 的闭集）。每一条都是可独立成句的短语，
+ * 横幅里直接跟在「调用失败：」后面；未知值由 label() 兜底成中性短语，绝不上屏原值。
+ */
+export const MODEL_RESPONSE_DETAIL: Record<string, string> = {
+  empty: "模型没有返回任何内容",
+  empty_answer: "模型两次尝试都没有给出答案正文",
+  invalid_json: "返回内容不是合法的 JSON",
+  non_object: "返回内容不是 JSON 对象",
+  incomplete_object: "返回内容不完整，像是被截断了",
+  unsupported_syntax: "返回内容的写法无法安全修复",
+  repair_failed: "返回内容的写法无法安全修复",
+  string_changed: "返回内容的写法无法安全修复",
+  serialization_failed: "返回内容的写法无法安全修复",
+  non_finite_number: "返回内容含有非法数值",
+  non_string_key: "返回内容含有非法字段名",
+  non_json_value: "返回内容含有无法表示的值",
+  missing_expected_key: "返回内容缺少要求的字段",
+  invalid_type: "返回字段的类型不符合要求",
+  invalid_boolean: "返回字段应为是/否值",
+  invalid_enum: "返回字段的取值不在允许范围内",
+  unknown_key: "返回内容含有未定义的字段",
+  repairable_shadow: "返回内容需要修复，当前设置不接受",
+  invalid_rerank_rows: "重排结果的行格式不符合要求",
+};
+
+/**
+ * 上游 finish_reason（`model_errors[].finish_reason`）里值得告诉用户的那几个；
+ * 其余（stop / tool_calls…）对用户没有额外信息，映射为空串后不渲染。
+ */
+export const MODEL_FINISH_REASON: Record<string, string> = {
+  stop: "",
+  length: "输出达到长度上限被截断",
+  content_filter: "输出被上游内容过滤拦截",
+  tool_calls: "",
+  function_call: "",
 };
 
 // 流水线体检(P2)的内部代号 → 界面词。/checkup 响应体是内部契约(code=H2..H8、

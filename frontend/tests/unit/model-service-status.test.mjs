@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   fetchModelServiceStatus,
   mergeModelServiceStatus,
+  modelFailurePhenomenon,
   modelFailureText,
   modelServiceDisplayName,
   summarizeModelServices,
@@ -59,11 +60,59 @@ test("friendly labels never fall back to a raw service id", () => {
   assert.equal(modelServiceDisplayName(status("private-provider-id", "ok", { display_name: "  系统推理服务  " })), "系统推理服务");
   assert.equal(
     modelFailureText({ service_id: "private-provider-id", service_name: "", model: "" }),
-    "模型服务调用失败，本次回答可能不完整。",
+    "模型服务调用失败：调用未成功。",
   );
   assert.doesNotMatch(
     modelFailureText({ service_id: "private-provider-id", service_name: "", model: "" }),
     /private-provider-id/,
+  );
+});
+
+
+test("failure rows say which model and what the reply did", () => {
+  const base = {
+    service_id: "chat-a", service_name: "推理服务", model: "deepseek-reasoner",
+    workload_label: "问答回答",
+  };
+  assert.equal(
+    modelFailureText({ ...base, message: "provider_rate_limited" }),
+    "推理服务 deepseek-reasoner（问答回答）调用失败：上游服务限流。",
+  );
+  assert.equal(
+    modelFailureText({ ...base, message: "model_not_found" }),
+    "推理服务 deepseek-reasoner（问答回答）调用失败：模型名称不存在。",
+  );
+  assert.equal(
+    modelFailureText({ ...base, message: "malformed_response" }),
+    "推理服务 deepseek-reasoner（问答回答）调用失败：返回格式异常。",
+  );
+  assert.equal(
+    modelFailureText({ ...base, message: "malformed_response", detail: "empty_answer" }),
+    "推理服务 deepseek-reasoner（问答回答）调用失败：模型两次尝试都没有给出答案正文。",
+  );
+  assert.equal(
+    modelFailureText({
+      ...base, message: "malformed_response", detail: "invalid_enum", finish_reason: "stop",
+    }),
+    "推理服务 deepseek-reasoner（问答回答）调用失败：返回字段的取值不在允许范围内。",
+  );
+  assert.equal(
+    modelFailurePhenomenon({ message: "malformed_response", detail: "incomplete_object", finish_reason: "length" }),
+    "返回内容不完整，像是被截断了（输出达到长度上限被截断）。",
+  );
+  // Unknown or tampered codes never reach the screen as raw text.
+  assert.equal(
+    modelFailurePhenomenon({ message: "malformed_response", detail: "Traceback: sk-secret" }),
+    "返回格式异常。",
+  );
+  assert.equal(
+    modelFailurePhenomenon({ message: "malformed_response", detail: "future_reason" }),
+    "返回内容不符合要求。",
+  );
+  assert.equal(modelFailurePhenomenon({ message: "future_code" }), "调用未成功。");
+  assert.equal(
+    modelFailureText({ service_id: "", service_name: "推理服务", message: "missing_config" }),
+    "推理服务尚未配置。",
   );
 });
 

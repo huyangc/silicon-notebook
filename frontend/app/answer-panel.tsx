@@ -1341,12 +1341,16 @@ function ModelErrorPanel({
 }) {
   const uniqueErrors = useMemo(() => {
     const seen = new Set<string>();
-    return errors.map((error) => ({
-      error,
-      serviceId: sanitizeModelServiceId(error.service_id),
-      supportId: sanitizeModelSupportId(error.support_id),
-    })).filter(({ error, serviceId, supportId }) => {
-      const key = `${serviceId}\0${error.model}\0${supportId}`;
+    return errors.map((error) => {
+      const serviceId = sanitizeModelServiceId(error.service_id);
+      const supportId = sanitizeModelSupportId(error.support_id);
+      // 同一服务、同一次调用(support_id)的重复报警只留一条;但同一服务在同一轮里
+      // 出现两种不同现象(例如先答空、再连接失败)必须分别可见,故现象也进键。
+      // 这个键同时充当 React key:去重键与渲染键必须是同一个,否则两条现象不同
+      // 的行会在这里被保留、却在列表里撞 key。
+      const key = `${serviceId}\0${error.model}\0${supportId}\0${error.message ?? ""}\0${error.detail ?? ""}`;
+      return { error, serviceId, supportId, key };
+    }).filter(({ key }) => {
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -1377,12 +1381,12 @@ function ModelErrorPanel({
     <section className="answer-model-error" aria-label="模型服务异常">
       <div className="answer-model-error-heading">⚠️ 本次回答可能不完整</div>
       <ul className="answer-model-error-list">
-        {uniqueErrors.map(({ error, serviceId, supportId }) => {
+        {uniqueErrors.map(({ error, serviceId, supportId, key }) => {
           const isTesting = testingAllModels
             || Boolean(testingModelServices[serviceId])
             || Boolean(testing[serviceId]);
           return (
-            <li key={`${serviceId}\0${error.model}\0${supportId}`}>
+            <li key={key}>
               <span>{modelFailureText(error)}</span>
               <div className="answer-model-error-actions">
                 {onTestModel && serviceId && (

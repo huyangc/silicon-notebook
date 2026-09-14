@@ -22,6 +22,8 @@ from app.core.internal_observability import public_trace_steps
 from app.core.model_safety import (
     safe_model_display_name,
     safe_model_error_code,
+    safe_model_error_detail,
+    safe_model_finish_reason,
     safe_model_metadata_id,
     safe_model_error_stage,
     safe_model_label,
@@ -441,6 +443,12 @@ class ModelError(BaseModel):
     model: str = ""
     message: str
     support_id: str = ""
+    # Why a ``malformed_response`` was rejected (closed set, see
+    # ``model_safety._MODEL_ERROR_DETAILS``) and the provider's own
+    # finish_reason when the transport reported one. Both are "" for every
+    # other code and for rows persisted before they existed.
+    detail: str = ""
+    finish_reason: str = ""
 
     @model_validator(mode="before")
     @classmethod
@@ -456,6 +464,8 @@ class ModelError(BaseModel):
             "workload_id": value.get("workload_id", ""),
             "workload_label": value.get("workload_label", ""),
             "support_id": value.get("support_id", ""),
+            "detail": value.get("detail", ""),
+            "finish_reason": value.get("finish_reason", ""),
         }
 
     @field_validator("service_id", "workload_id", mode="before")
@@ -487,6 +497,16 @@ class ModelError(BaseModel):
     @classmethod
     def validate_support_id(cls, value: object) -> str:
         return safe_model_support_id(value)
+
+    @field_validator("detail", mode="before")
+    @classmethod
+    def validate_detail(cls, value: object) -> str:
+        return safe_model_error_detail(value)
+
+    @field_validator("finish_reason", mode="before")
+    @classmethod
+    def validate_finish_reason(cls, value: object) -> str:
+        return safe_model_finish_reason(value)
 
 
 class StructuredResultColumn(BaseModel):
