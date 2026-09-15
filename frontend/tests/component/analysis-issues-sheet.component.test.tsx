@@ -258,6 +258,34 @@ test("翻页请求在途时换了筛选条件，晚到的旧页响应不会盖�
   expect(screen.queryByText("CODE_50")).not.toBeInTheDocument();
 });
 
+test("下一页加载失败时仍标着屏上那一页，再点下一页会重试同一页", async () => {
+  // codex #734 R1 P2:失败后屏上还是第 1 页的行,翻页控件却已说「51–100」、还能直接翻到
+  // 第 3 页,失败的那一页就被跳过去了。
+  window.history.replaceState({}, "", "/admin/usage?sheet=issues");
+  let failSecondPage = true;
+  mocks.fetchAnalysisIssues.mockReset();
+  mocks.fetchAnalysisIssues.mockImplementation(async ({ offset = 0 }: { offset?: number }) => {
+    if (offset === 50 && failSecondPage) throw new Error("boom");
+    return { total: 120, items: Array.from({ length: Math.min(50, 120 - offset) }, (_, i) => issueRow(offset + i)) };
+  });
+  const user = userEvent.setup();
+  render(<AnalysisIssuesSheet users={[]} />);
+  expect(await screen.findByText("CODE_0")).toBeInTheDocument();
+
+  const pager = () => screen.getByRole("navigation", { name: "解析问题分页" });
+  await user.click(within(pager()).getByRole("button", { name: "下一页" }));
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  expect(screen.getByText("CODE_0")).toBeInTheDocument();
+  expect(within(pager()).getByText("1–50 / 120")).toBeInTheDocument();
+  expect(within(pager()).getByRole("button", { name: "上一页" })).toBeDisabled();
+
+  failSecondPage = false;
+  await user.click(within(pager()).getByRole("button", { name: "下一页" }));
+  expect(await screen.findByText("CODE_50")).toBeInTheDocument();
+  expect(within(pager()).getByText("51–100 / 120")).toBeInTheDocument();
+  expect(mocks.fetchAnalysisIssues).toHaveBeenLastCalledWith(expect.objectContaining({ offset: 50 }));
+});
+
 test("刷新时当前页的记录已被清理，退回最后一个有内容的页且不闪空态", async () => {
   window.history.replaceState({}, "", "/admin/usage?sheet=issues");
   let total = 60;

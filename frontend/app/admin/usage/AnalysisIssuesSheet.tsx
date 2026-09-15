@@ -44,9 +44,19 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
     "" | "source_parse" | "spreadsheet_analysis" | "model_output"
   >("");
   const [modelArea, setModelArea] = useState<"" | ModelAnalysisArea>("");
-  const [items, setItems] = useState<AnalysisIssue[]>([]);
-  const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(0);
+  // 屏上的行、总数与它们所属的页只在一次**成功**的加载里一起更新。请求的页单独存:
+  // 第 2 页加载失败时屏上仍是第 1 页的行,翻页控件也必须仍说「第 1 页」——否则会把
+  // 第 1 页的记录标成 51–100,还能直接翻到第 3 页、把失败的那页跳过去。
+  const [shown, setShown] = useState<{ items: AnalysisIssue[]; total: number; page: number }>(
+    { items: [], total: 0, page: 0 },
+  );
+  // `seq` 让「再请求一次同一页」也是一次状态变化:失败后点同一个「下一页」要能重试。
+  const [pageRequest, setPageRequest] = useState({ page: 0, seq: 0 });
+  const page = pageRequest.page;
+  const requestPage = useCallback(
+    (next: number) => setPageRequest((current) => ({ page: next, seq: current.seq + 1 })),
+    [],
+  );
   const [loading, setLoading] = useState(false);
   const [failure, setFailure] = useState("");
   const [selectedId, setSelectedId] = useState("");
@@ -85,11 +95,10 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
       const lastPage = Math.max(0, Math.ceil(result.total / ANALYSIS_ISSUE_PAGE_SIZE) - 1);
       if (result.items.length === 0 && page > lastPage) {
         listRequest.current += 1;
-        setPage(lastPage);
+        requestPage(lastPage);
         return;
       }
-      setItems(result.items);
-      setTotal(result.total);
+      setShown({ items: result.items, total: result.total, page });
     } catch (cause) {
       if (listRequest.current === requestId) {
         setFailure(toUserMessage(cause, "解析问题加载失败，请重试"));
@@ -97,7 +106,7 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
     } finally {
       if (listRequest.current === requestId) setLoading(false);
     }
-  }, [category, modelArea, ownerId, page, status]);
+  }, [category, modelArea, ownerId, page, pageRequest.seq, requestPage, status]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -127,7 +136,7 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
 
   function selectOwner(value: string) {
     setOwnerId(value);
-    setPage(0);
+    requestPage(0);
     const params = new URLSearchParams(window.location.search);
     params.set("sheet", "issues");
     if (value) params.set("owner", value);
@@ -148,7 +157,7 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
         <label>
           模型功能
           {/* 换筛选条件与回到第一页在同一次事件里提交,只触发一次加载。 */}
-          <select value={modelArea} onChange={(event) => { setModelArea(event.target.value as typeof modelArea); setPage(0); }}>
+          <select value={modelArea} onChange={(event) => { setModelArea(event.target.value as typeof modelArea); requestPage(0); }}>
             <option value="">全部功能</option>
             {Object.entries(MODEL_AREA_LABELS).map(([value, label]) => (
               <option value={value} key={value}>{label}</option>
@@ -157,7 +166,7 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
         </label>
         <label>
           状态
-          <select value={status} onChange={(event) => { setStatus(event.target.value as typeof status); setPage(0); }}>
+          <select value={status} onChange={(event) => { setStatus(event.target.value as typeof status); requestPage(0); }}>
             <option value="open">未解决</option>
             <option value="resolved">已解决</option>
             <option value="">全部</option>
@@ -165,7 +174,7 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
         </label>
         <label>
           类型
-          <select value={category} onChange={(event) => { setCategory(event.target.value as typeof category); setPage(0); }}>
+          <select value={category} onChange={(event) => { setCategory(event.target.value as typeof category); requestPage(0); }}>
             <option value="">全部</option>
             <option value="source_parse">文档解析</option>
             <option value="spreadsheet_analysis">Excel 专业分析</option>
@@ -188,10 +197,10 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
             </tr>
           </thead>
           <tbody>
-            {!loading && items.length === 0 && (
+            {!loading && !failure && shown.items.length === 0 && (
               <tr><td colSpan={8} className="usage-analysis-empty">当前筛选范围内没有解析问题。</td></tr>
             )}
-            {items.map((item) => (
+            {shown.items.map((item) => (
               <Fragment key={item.id}>
               <tr>
                 <td><span className={`usage-issue-status usage-issue-status-${item.status}`}>{item.status === "open" ? "未解决" : "已解决"}</span></td>
@@ -261,11 +270,11 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
         </table>
       </div>
       <Pagination
-        page={page}
+        page={shown.page}
         pageSize={ANALYSIS_ISSUE_PAGE_SIZE}
-        total={total}
+        total={shown.total}
         busy={loading}
-        onPage={setPage}
+        onPage={requestPage}
         label="解析问题分页"
       />
     </section>
