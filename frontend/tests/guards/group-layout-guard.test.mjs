@@ -1,26 +1,44 @@
 // 群组界面的版式守卫。
 //
-// 钉的是一条**只在浏览器里才看得出来、组件测试永远发现不了**的退化:群组弹窗与
+// 钉的是一条**只在浏览器里才看得出来、组件测试永远发现不了**的退化:群组管理界面与
 // 「共享给群组」的每一行,原来都写成块级的 `.checklist-row` 加内联
 // `style={{ alignItems: "center", gap: 8 }}` —— 这两个属性在块级盒子上一个字都不
 // 生效,于是整行连成一条没有间距的文字(真机形态:「notebook项目1 人组管理员 已展开」)。
 // testing-library 只看 DOM 与可访问名字,这种「样式静默无效」在它眼里完全正常。
 //
-// 覆盖边界(如实说明):本文件只覆盖下面这两个文件里的四条形态判据,不声称覆盖群组
-// 特性的全部界面,也不检查具体的间距数值(那属于设计取舍,不是不变量)。
+// 覆盖边界(如实说明):本文件只覆盖下面这两个文件里的四条形态判据(第四条只看独立
+// 群组页),不声称覆盖群组特性的全部界面,也不检查具体的间距数值(那属于设计取舍,
+// 不是不变量)。独立群组页的 class 存在性与页面级版式另由 group-page-style-guard 守。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import ts from "typescript";
+
 import { jsxElements, parseModule } from "../../test-support/semantic-source.mjs";
 
-/** 群组界面的两个渲染面:弹窗本体,以及分享弹窗里的「共享给群组」一节。 */
-const GROUP_VIEWS = ["groups-panel.tsx", "notebook-group-share.tsx"];
+/** 群组界面的两个渲染面:独立群组页,以及分享弹窗里的「共享给群组」一节。 */
+const GROUP_VIEWS = ["groups-page.tsx", "notebook-group-share.tsx"];
 
-/** 这两个文件里出现过的全部 JSX 标签(新增标签时补进来即可)。 */
-const TAGS = ["div", "span", "p", "label", "button", "input", "select", "textarea", "h3", "h4", "section"];
+/** 一个文件里出现过的全部原生 JSX 标签。从语法树里收,不手写清单:手写清单漏掉的
+ *  标签(`header` / `aside` / `strong` …)会静默逃出下面每一条判据。 */
+function intrinsicTags(sourceFile) {
+  const tags = new Set();
+  function visit(node) {
+    if (
+      (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node))
+      && ts.isIdentifier(node.tagName)
+      && /^[a-z]/.test(node.tagName.text)
+    ) {
+      tags.add(node.tagName.text);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  return [...tags];
+}
 
 const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../app");
 const CSS = await readFile(path.join(APP_DIR, "globals.css"), "utf8");
@@ -58,8 +76,31 @@ function ruleBody(selector) {
 
 async function elementsOf(view) {
   const source = await parseModule(view);
-  return TAGS.flatMap((tag) =>
+  return intrinsicTags(source).flatMap((tag) =>
     jsxElements(source, tag).map((element) => ({ tag, ...element })));
+}
+
+/** 以 `{detail.name}` 作为直接子节点渲染组名的元素的标签名。按语法树结构认,不比源码文本。 */
+function tagsRenderingDetailName(sourceFile) {
+  const isDetailName = (expression) =>
+    expression !== undefined
+    && ts.isPropertyAccessExpression(expression)
+    && ts.isIdentifier(expression.expression)
+    && expression.expression.text === "detail"
+    && expression.name.text === "name";
+  const tags = [];
+  function visit(node) {
+    if (
+      ts.isJsxElement(node)
+      && node.children.some((child) => ts.isJsxExpression(child) && isDetailName(child.expression))
+      && ts.isIdentifier(node.openingElement.tagName)
+    ) {
+      tags.push(node.openingElement.tagName.text);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  return tags;
 }
 
 /** className 可能是静态字符串,也可能是模板/三元(那时落在 bindings 上)。 */
@@ -105,16 +146,20 @@ test("只读标签用 .group-chip,不用主按钮的 .new-pill 冒充", async ()
 });
 
 test("详情标题是标题元素,不是会把组名大写的 .section-title", async () => {
-  const panel = await parseModule("groups-panel.tsx");
-  // .section-title 带 text-transform:uppercase,而这里的标题紧挨着用户内容(组名),
-  // 同一条规则会把「notebook」渲染成「NOTEBOOK」。
+  // .section-title 带 text-transform:uppercase,而群组页的标题紧挨着、甚至就是用户内容
+  // (组名),同一条规则会把「notebook」渲染成「NOTEBOOK」。「共享给群组」一节不在此列:
+  // 它的 .section-title 只挂在固定的中文小节名上,组名走 .group-row-name。
   assert.match(ruleBody(".section-title"), /text-transform:\s*uppercase/);
-  for (const element of TAGS.flatMap((tag) => jsxElements(panel, tag))) {
+  for (const element of await elementsOf("groups-page.tsx")) {
     assert.ok(
       !classText(element).includes("section-title"),
-      "groups-panel.tsx 又用回了 .section-title —— 组名会被整块大写",
+      "groups-page.tsx 用上了 .section-title —— 组名会被整块大写",
     );
   }
-  assert.equal(jsxElements(panel, "h3").length, 2, "小节标题与详情标题各一处 h3");
-  ruleBody(".group-detail-title h3");
+  const page = await parseModule("groups-page.tsx");
+  assert.ok(
+    tagsRenderingDetailName(page).includes("h2"),
+    "群组详情页头的组名不再是 h2 标题 —— 页面里已经没有 h1,组名就是详情区的标题层级",
+  );
+  ruleBody(".group-page-title-row h2");
 });
