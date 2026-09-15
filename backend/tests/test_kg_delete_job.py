@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -63,16 +64,17 @@ def api(tmp_path, monkeypatch):
     return client, real_repo, submitted
 
 
-def _seed_graph(repo, notebook_id: str) -> None:
-    """One user document with TWO KG objects and one relation, and one hidden
-    Memory projection source with its own object + relation. The document's
-    object and relation counts differ on purpose, so a swapped counter mapping
-    cannot pass."""
+def _seed_graph(repo, notebook_id: str, *, with_memory: bool = True) -> None:
+    """One user document with TWO KG objects and one relation, and (unless
+    ``with_memory`` is False) one hidden Memory projection source with its own
+    object + relation. The document's object and relation counts differ on
+    purpose, so a swapped counter mapping cannot pass."""
     now = _now()
+    sources = [("src-doc", "markdown")]
+    if with_memory:
+        sources.append(("src-mem", "memory"))
     with repo._write() as db:
-        for source_id, source_type in (
-            ("src-doc", "markdown"), ("src-mem", "memory"),
-        ):
+        for source_id, source_type in sources:
             db.execute(
                 "INSERT INTO sources (id,notebook_id,title,source_type,status,"
                 "parse_status,file_name,file_path,file_size,file_hash,summary,"
@@ -528,6 +530,117 @@ def test_notebook_delete_landing_mid_job_fails_the_job_and_frees_the_slot(
 
     assert repo.kg_delete_status(nb)["status"] == "failed"
     assert repo._runtime._notebook_kg_maintenance_running(nb) is False
+
+
+# ---------------------------------------------------------------------------
+# Graph-view preview artifact: the first read after a delete must be correct
+# ---------------------------------------------------------------------------
+
+
+def _published_preview(repo, notebook_id: str, monkeypatch):
+    """Publish the standalone graph-view preview and warm it with the exact
+    read the frontend sends. Background refresh spawns are recorded, never
+    run, so a test sees what the read itself served."""
+    scale = repo._runtime.scale_artifacts
+    spawned: list[str] = []
+    monkeypatch.setattr(
+        scale, "_start_daemon", lambda name, _target: spawned.append(name)
+    )
+    assert scale.build_viz(notebook_id) is not None
+    warm = repo.unified_graph(notebook_id, level="object", limit=80)
+    live = Path(str(repo._runtime.scale_artifact_store.viz_dir(notebook_id)))
+    assert (live / "manifest.json").exists()
+    return scale, warm, live, spawned
+
+
+def _run_delete(repo, notebook_id: str) -> dict:
+    job = repo.start_kg_delete(notebook_id)
+    return repo.run_kg_delete_job(notebook_id, job["job_id"])
+
+
+def test_first_object_read_after_delete_does_not_repaint_deleted_nodes(
+    repo, monkeypatch
+):
+    """Mutation anchor: drop the post-delete preview refresh and this first
+    read serves the stale preview (the two deleted nodes) while it spawns the
+    refresh that would only fix the NEXT read."""
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    _seed_graph(repo, nb, with_memory=False)
+    scale, warm, live, spawned = _published_preview(repo, nb, monkeypatch)
+    assert warm["total_nodes"] == 2
+    version_before = scale.version(nb)
+
+    assert _run_delete(repo, nb) == {"objects_deleted": 2, "relations_deleted": 1}
+
+    first = repo.unified_graph(nb, level="object", limit=80)
+    assert first["nodes"] == [] and first["total_nodes"] == 0
+    assert not live.exists()
+    assert spawned == []
+    # The scale-EMBEDDED preview needs no refresh: it is served only through
+    # load()'s exact version match, and the delete moved the version.
+    assert scale.version(nb) != version_before
+
+
+def test_delete_republishes_the_preview_for_hidden_objects_that_remain(
+    repo, monkeypatch
+):
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    _seed_graph(repo, nb)
+    scale, warm, live, spawned = _published_preview(repo, nb, monkeypatch)
+    assert warm["total_nodes"] == 3
+
+    _run_delete(repo, nb)
+
+    first = repo.unified_graph(nb, level="object", limit=80)
+    assert [node["id"] for node in first["nodes"]] == ["ko-src-mem"]
+    assert (live / "manifest.json").exists()
+    assert spawned == []
+
+
+def test_over_budget_delete_retires_the_preview_without_building(
+    repo, monkeypatch
+):
+    """Over the in-process viz budget the refresh must not materialise the
+    remaining graph here; it retires the stale preview so the view reports
+    "no preview yet" rather than the deleted nodes."""
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    _seed_graph(repo, nb)
+    scale, _warm, live, _spawned = _published_preview(repo, nb, monkeypatch)
+    monkeypatch.setattr(scale.settings, "viz_sync_build_max_objects", 0)
+
+    def _no_build(_notebook_id):
+        raise AssertionError("an over-budget viz build ran in-process")
+
+    monkeypatch.setattr(scale.builder, "build_viz", _no_build)
+
+    _run_delete(repo, nb)
+
+    assert not live.exists()
+    first = repo.unified_graph(nb, level="object", limit=80)
+    assert first["nodes"] == []
+
+
+def test_preview_refresh_held_elsewhere_or_failing_does_not_fail_the_delete(
+    repo, monkeypatch
+):
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    _seed_graph(repo, nb, with_memory=False)
+    scale, _warm, live, _spawned = _published_preview(repo, nb, monkeypatch)
+    # "Provably held by somebody else" (a CLI import, another replica).
+    monkeypatch.setattr(scale, "_scale_build_lock", lambda _nb: None)
+
+    assert _run_delete(repo, nb) == {"objects_deleted": 2, "relations_deleted": 1}
+    assert repo.kg_delete_status(nb)["status"] == "succeeded"
+    # Registered residual: the old root stays until a later refresh succeeds.
+    assert (live / "manifest.json").exists()
+
+    def _broken(_notebook_id):
+        raise RuntimeError("preview store unavailable")
+
+    monkeypatch.setattr(scale, "refresh_viz_after_graph_reset", _broken)
+    _run_delete(repo, nb)
+    assert repo.kg_delete_status(nb)["status"] == "succeeded"
+    assert repo._runtime.knowledge_lifecycle.kg_maintenance.active_kind(nb) is None
 
 
 # ---------------------------------------------------------------------------

@@ -677,7 +677,23 @@ class KnowledgeLifecycleService:
         """
         self.get_notebook(notebook_id)
         self.kg_build_jobs.clear_terminal_jobs(notebook_id)
-        return self._delete_notebook_kg_fenced(notebook_id)
+        counts = self._delete_notebook_kg_fenced(notebook_id)
+        # The graph view's standalone preview artifact still describes the
+        # deleted graph and would be served (stale) on the very next read.
+        # Refresh or retire it now, synchronously, outside any in-memory lock.
+        # Fail-open: the graph rows are already committed, so a preview that
+        # cannot be refreshed here (claim held elsewhere, IO error) must not
+        # turn the delete into a reported failure — the old preview then keeps
+        # serving until a later refresh succeeds (a graph read's own background
+        # refresh within the viz budget, the next scale index build over it).
+        try:
+            self.scale_artifacts.refresh_viz_after_graph_reset(notebook_id)
+        except Exception:  # noqa: BLE001 - auxiliary refresh is fail-open
+            self.event_log.logger.exception(
+                "delete_notebook_kg: graph-view preview refresh failed for %s",
+                notebook_id,
+            )
+        return counts
 
     def _delete_notebook_kg_fenced(self, notebook_id: str) -> dict:
         """``delete_notebook_kg``'s body, run under the kg_building fence or,
