@@ -276,6 +276,13 @@ idempotent and never demotes an existing admin. An unknown, revoked, rotated, or
 group-deleted token has the same 404 response. The link has no automatic expiry,
 so admins must treat it as a bearer credential and revoke or rotate it when its
 audience should change. Owner transfer and group deletion are separate confirmed settings actions.
+The group name and description fields, in the create form and in Settings, stop
+input at the registered limits below and stay silent until the last tenth of
+the limit. From there a hint under the field states how many characters remain,
+and once the field is full, including when a paste was clipped to fit, it says
+`已达上限 N 个字`, so a clip is never silent. The fields count UTF-16 code units,
+so text containing emoji stops short of the server's code-point limit rather
+than past it.
 The page reuses the collection shell, typography, controls, spacing, colors, and
 responsive breakpoints; its group/tab selection is addressable in the URL hash.
 
