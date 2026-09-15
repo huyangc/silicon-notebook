@@ -19,7 +19,9 @@ class _Reports:
     def __init__(self, calls: list) -> None:
         self.calls = calls
 
-    def create_report(self, notebook_id: str, question: str, depth: int = 2) -> str:
+    def create_report(
+        self, notebook_id: str, question: str, depth: int = 2, *, submitted_via: str = ""
+    ) -> str:
         self.calls.append(("store", notebook_id, question, depth))
         return "rep-created"
 

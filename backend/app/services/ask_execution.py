@@ -188,6 +188,7 @@ class AskExecutionCoordinator:
         mode: "AskMode | None",
         *,
         user_id: str,
+        submitted_via: str = "",
     ) -> "queue.Queue[dict[str, Any] | None]":
         """启动一次脱离连接的流式 ask,返回交付队列(None 哨兵收尾)。
 
@@ -241,7 +242,8 @@ class AskExecutionCoordinator:
             try:
                 job_id, conversation_id, attached = (
                     self.ask_state.begin_or_attach_durable_job(
-                        notebook_id, payload, mode_id, user_id))
+                        notebook_id, payload, mode_id, user_id,
+                        submitted_via=submitted_via))
             except AskRequestKeyConflict:
                 self._put_key_conflict(events)
                 return events
@@ -249,7 +251,8 @@ class AskExecutionCoordinator:
                 return self._follow(events, job_id, conversation_id)
         else:
             job_id, conversation_id = self.ask_state.begin_durable_job(
-                notebook_id, payload, mode_id, user_id)
+                notebook_id, payload, mode_id, user_id,
+                submitted_via=submitted_via)
         self.cancellations.register(job_id, cancel_event)
         # conversation_id is durable before this event is delivered.  The UI
         # can therefore publish/reopen a first-turn session immediately,

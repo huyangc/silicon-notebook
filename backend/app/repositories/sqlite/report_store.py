@@ -38,15 +38,22 @@ class ReportStore:
         self.now = now
         self.current_user_id = current_user_id
 
-    def create_report(self, notebook_id: str, question: str, depth: int = 2) -> str:
+    def create_report(
+        self,
+        notebook_id: str,
+        question: str,
+        depth: int = 2,
+        *,
+        submitted_via: str = "",
+    ) -> str:
         report_id = self.new_id("rep")
         now = self.now()
         with self.database.write() as db:
             db.execute(
-                "INSERT INTO reports(id, notebook_id, question, depth, created_by, created_at, updated_at)"
-                " VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO reports(id, notebook_id, question, depth, created_by, created_at, updated_at, submitted_via)"
+                " VALUES(?,?,?,?,?,?,?,?)",
                 (report_id, notebook_id, question, depth,
-                 self.current_user_id(), now, now))
+                 self.current_user_id(), now, now, submitted_via))
         return report_id
 
     def update_report(self, notebook_id: str, report_id: str, *, status=None,

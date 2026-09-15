@@ -79,6 +79,7 @@
         "notebook_id": "<nb-id-1>",
         "question": "Why is fixture gain stable?",
         "status": "done",
+        "submitted_via": "",
         "trace_json": "",
         "updated_at": "<timestamp>"
       }
@@ -642,6 +643,7 @@
         "notebook_id": "<nb-id-1>",
         "question": "Why is fixture gain stable?",
         "status": "done",
+        "submitted_via": "",
         "trace_json": "",
         "updated_at": "<timestamp>"
       }
@@ -968,6 +970,7 @@
         "share_token": null,
         "shared_at": null,
         "status": "done",
+        "submitted_via": "",
         "understanding_json": {},
         "updated_at": "<timestamp>"
       }
@@ -1894,7 +1897,7 @@
       },
       {
         "name": "ask_jobs",
-        "sql_sha256": "0ba3c3ddb787e0e721404cc43c8eff50c16856b12a4e930c1489b34d2f884536",
+        "sql_sha256": "c7a53be1d9c66e24d6670f1fe1394aadcd4b54dc1cf9de384085fe5ba76a75cf",
         "type": "table"
       },
       {
@@ -2319,12 +2322,12 @@
       },
       {
         "name": "reports",
-        "sql_sha256": "5cb5a56615971133c133bdac2e3564c2b02caef477f88b30788e0da08b2fd588",
+        "sql_sha256": "a1d25ad6b74f44806e6eb146b22806bc190b0fa554a11f2a04f3500adb565c15",
         "type": "table"
       },
       {
         "name": "retained_user_activity",
-        "sql_sha256": "2925d941c655daa8fb31e4684af4503b630aee8c936eb4a7ce5f5de006e6a2a7",
+        "sql_sha256": "e501763b8d2ee5ae2627ef64fbea5599eb93ce9c6c1d3b7697f8edc249c38f62",
         "type": "table"
       },
       {
@@ -2413,6 +2416,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 73
+    "user_version": 74
   }
 }

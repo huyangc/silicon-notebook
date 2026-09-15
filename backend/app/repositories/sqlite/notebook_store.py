@@ -560,7 +560,7 @@ class NotebookStore:
             "notebook_name,created_at,updated_at,asked_at,conversation_id,"
             "question,mode,status,display_title,file_name,source_type,"
             "parse_status,parse_failed,depth,generation_started_at,deleted_at,"
-            "expires_at"
+            "expires_at,submitted_via"
         )
         refresh_on_conflict = (
             " ON CONFLICT(activity_type,record_id) DO UPDATE SET "
@@ -574,7 +574,7 @@ class NotebookStore:
             "SELECT 'ask',j.id,j.created_by,j.notebook_id,n.created_by,n.name,"
             "j.created_at,j.updated_at,j.asked_at,j.conversation_id,"
             "COALESCE(NULLIF(a.question,''),j.question),"
-            "j.mode,j.status,'','','','',0,0,'',?,? "
+            "j.mode,j.status,'','','','',0,0,'',?,?,j.submitted_via "
             "FROM ask_jobs j JOIN notebooks n ON n.id=j.notebook_id "
             "LEFT JOIN answers a ON a.id=j.answer_id "
             "WHERE j.notebook_id=?" + refresh_on_conflict,
@@ -603,7 +603,7 @@ class NotebookStore:
                     "", "", "", "", row["status"], source_display_title(row),
                     row["file_name"], row["source_type"], row["parse_status"],
                     int(row["parse_status"] == "failed"), 0, "", deleted_text,
-                    expires_text,
+                    expires_text, "",
                 )
                 for row in source_rows
             ],
@@ -614,7 +614,7 @@ class NotebookStore:
             "r.created_at,r.updated_at,'','',r.question,'',r.status,'','','','',"
             "0,r.depth,COALESCE(json_extract(CASE "
             "WHEN json_valid(r.understanding_json) THEN r.understanding_json "
-            "ELSE '{}' END,'$._generation_started_at'),''),?,? FROM reports r "
+            "ELSE '{}' END,'$._generation_started_at'),''),?,?,r.submitted_via FROM reports r "
             "JOIN notebooks n ON n.id=r.notebook_id WHERE r.notebook_id=?"
             + refresh_on_conflict,
             (deleted_text, expires_text, notebook_id),

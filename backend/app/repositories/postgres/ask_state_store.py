@@ -231,6 +231,8 @@ class AskStateStore:
         payload: AskRequest,
         mode: str,
         user_id: str,
+        *,
+        submitted_via: str = "",
     ) -> tuple[str, str]:
         """建/接续会话 + 插入 running 的 ask_jobs 行,一个写事务原子提交。
         就地把解析出的 conversation_id 写回 payload(与基线同一时点——在事务内、
@@ -248,21 +250,22 @@ class AskStateStore:
             # SQLite store): only begin_or_attach_durable_job honours it.
             self._insert_job_row(
                 db, job_id, notebook_id, conversation_id, user_id, mode, payload, now,
-                client_request_id=None)
+                client_request_id=None, submitted_via=submitted_via)
         return job_id, conversation_id
 
     @staticmethod
     def _insert_job_row(
         db, job_id: str, notebook_id: str, conversation_id: str, user_id: str,
         mode: str, payload: AskRequest, now: str, *, client_request_id: "str | None",
+        submitted_via: str = "",
     ) -> None:
         db.execute(
             "INSERT INTO ask_jobs (id,notebook_id,conversation_id,created_by,mode,question,"
             "asked_at,client_request_id,status,trace_json,answer_id,error,created_at,"
-            "updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s, 'running',%s,'','',%s,%s)",
+            "updated_at,submitted_via) VALUES (%s,%s,%s,%s,%s,%s,%s,%s, 'running',%s,'','',%s,%s,%s)",
             (job_id, notebook_id, conversation_id, user_id, mode,
              payload.question.strip(), payload.asked_at, client_request_id,
-             jsonb([]), now, now))
+             jsonb([]), now, now, submitted_via))
 
     def find_job_for_client_request(
         self, user_id: str, client_request_id: str,
@@ -281,6 +284,8 @@ class AskStateStore:
         payload: AskRequest,
         mode: str,
         user_id: str,
+        *,
+        submitted_via: str = "",
     ) -> tuple[str, str, bool]:
         """See the SQLite store for the contract. The concurrent-duplicate race
         is closed by ``idx_ask_jobs_client_request``: a losing INSERT raises
@@ -290,7 +295,7 @@ class AskStateStore:
         key = payload.client_request_id
         if not key:
             job_id, conversation_id = self.begin_durable_job(
-                notebook_id, payload, mode, user_id)
+                notebook_id, payload, mode, user_id, submitted_via=submitted_via)
             return job_id, conversation_id, False
         question = payload.question.strip()
         now = normalize_timestamp(self.seams.now())
@@ -305,7 +310,7 @@ class AskStateStore:
                 payload.conversation_id = conversation_id
                 self._insert_job_row(
                     db, job_id, notebook_id, conversation_id, user_id, mode, payload, now,
-                    client_request_id=key)
+                    client_request_id=key, submitted_via=submitted_via)
         except errors.UniqueViolation:
             with self.database.connect() as db:
                 existing = self._job_for_client_request(db, user_id, key)

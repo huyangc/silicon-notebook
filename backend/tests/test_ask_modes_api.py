@@ -189,6 +189,49 @@ def test_ask_stream_runs_through_the_runtime_ask_service(tmp_path, monkeypatch):
     assert seen["user_id"] == repo.current_user().id
 
 
+def test_ask_sync_and_stream_record_web_submission_channel(tmp_path, monkeypatch):
+    """网页的两个提交面 -- 同步 /ask 与流式 /ask/stream -- 都必须把建出的
+    ask_jobs 行记成 submitted_via == "web"，与 MCP ask_notebook 记的 "mcp"
+    (见 test_memory_mcp.py) 和未记录的 "" 区分开。"""
+    import json
+
+    from app.api.ask_routes import repository
+
+    client = _client(tmp_path, monkeypatch)
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    repo = repository()
+    seed_ask_evidence(repo, nb)
+
+    def _submitted_via(job_id: str) -> str:
+        with repo._connect() as db:
+            row = db.execute(
+                "SELECT submitted_via FROM ask_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+        return row["submitted_via"]
+
+    def _ask_job_ids() -> set:
+        with repo._connect() as db:
+            return {row["id"] for row in db.execute("SELECT id FROM ask_jobs")}
+
+    streamed = client.post(
+        f"/api/notebooks/{nb}/ask/stream",
+        json={"question": "网页流式提问", "mode": "chunk"},
+    )
+    assert streamed.status_code == 200
+    events = [json.loads(l) for l in streamed.text.splitlines() if l.strip()]
+    assert _submitted_via(events[0]["job_id"]) == "web"
+
+    before = _ask_job_ids()
+    synchronous = client.post(
+        f"/api/notebooks/{nb}/ask",
+        json={"question": "网页同步提问", "mode": "chunk"},
+    )
+    assert synchronous.status_code == 200
+    new_ids = _ask_job_ids() - before
+    assert len(new_ids) == 1
+    assert _submitted_via(next(iter(new_ids))) == "web"
+
+
 def test_ask_refuses_an_over_length_question(tmp_path, monkeypatch):
     """提问必须在**提交**这一刻就有界。
 

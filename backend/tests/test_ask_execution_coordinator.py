@@ -56,7 +56,7 @@ class RecordingAskState:
         self.calls = calls
         self.fail_trace = fail_trace
 
-    def begin_durable_job(self, notebook_id, payload, mode, user_id):
+    def begin_durable_job(self, notebook_id, payload, mode, user_id, *, submitted_via=""):
         self.calls.append(("begin", notebook_id, mode, user_id))
         payload.conversation_id = "conv-t23"
         return "askjob-t23", "conv-t23"
@@ -235,7 +235,7 @@ def test_begin_mutates_payload_in_place_and_coordinator_never_mutates_again():
     calls = []
 
     class DecoyReturnState(RecordingAskState):
-        def begin_durable_job(self, notebook_id, payload, mode, user_id):
+        def begin_durable_job(self, notebook_id, payload, mode, user_id, *, submitted_via=""):
             self.calls.append(("begin", notebook_id, mode, user_id))
             payload.conversation_id = "conv-t23"     # 事务体内就地写回(基线时点)
             return "askjob-t23", "conv-returned"     # 返回值≠payload 值:二次改写会被抓
@@ -530,7 +530,7 @@ class AttachingAskState(RecordingAskState):
         return {"job_id": self.existing[0], "notebook_id": self.existing_notebook,
                 "conversation_id": self.existing[1]}
 
-    def begin_or_attach_durable_job(self, notebook_id, payload, mode, user_id):
+    def begin_or_attach_durable_job(self, notebook_id, payload, mode, user_id, *, submitted_via=""):
         from app.repositories.ports import AskRequestKeyConflict
 
         self.calls.append(("begin_or_attach", notebook_id, mode, user_id,

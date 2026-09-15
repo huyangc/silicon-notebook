@@ -328,6 +328,18 @@ class AskIntentConfirmation(BaseModel):
     )
 
 
+# Which submission surface created an ask_jobs/reports row: the web app's
+# session-authenticated HTTP surface, or the MCP tool ``ask_notebook``. Only
+# the server-side entry points (ask_routes.py, report_routes.py,
+# mcp_tools/memory_context.py) may choose a literal here -- it is a
+# keyword-only argument threaded explicitly through the service/store layers,
+# deliberately NOT a field on any client-writable request model (that would
+# let a browser claim "mcp"). "" ("not recorded") is not part of this alias:
+# every store/service signature below defaults to the plain string "" rather
+# than this type, so a caller that skips the keyword compiles without one.
+SubmittedVia = Literal["web", "mcp"]
+
+
 class AskRequest(BaseModel):
     # No `min_length`: an empty question already reaches the engine today and is
     # handled downstream, so adding one here would change behaviour at every

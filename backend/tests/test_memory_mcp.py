@@ -464,6 +464,16 @@ async def test_ask_tool_reuses_formal_ask_and_rejects_retired_graph_alias(mcp_en
         # non-empty on success) and anchors/citations project the fields the
         # frontend needs to jump straight to the backing element/knowhow row.
         assert answer["conversation_id"]
+        # submitted_via records this row as an MCP submission (ask_notebook's
+        # _ask_actionable passes the literal), distinguishing it from the web
+        # app's own /ask and /ask/stream routes.
+        with repo._connect() as db:
+            job_row = db.execute(
+                "SELECT submitted_via FROM ask_jobs WHERE conversation_id=? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (answer["conversation_id"],),
+            ).fetchone()
+        assert job_row["submitted_via"] == "mcp"
         assert answer["anchors"]
         assert all(
             "source_id" in anchor and "element_id" in anchor
@@ -950,7 +960,7 @@ async def test_ask_notebook_reasoning_resubmits_the_answered_contract(
     )
     seen: list = []
 
-    def capturing_ask(_notebook_id, payload):
+    def capturing_ask(_notebook_id, payload, **_kwargs):
         seen.append(payload)
         return SimpleNamespace(
             answer_id="ans-clarified", answer="ok", conclusion="ok",
@@ -1150,7 +1160,7 @@ async def test_ask_notebook_reasoning_clarifies_a_topic_rich_contract_by_handle(
     )
     seen: list = []
 
-    def capturing_ask(_notebook_id, payload):
+    def capturing_ask(_notebook_id, payload, **_kwargs):
         seen.append(payload)
         return SimpleNamespace(
             answer_id="ans-huge", answer="ok", conclusion="ok", grounded=True,
@@ -1208,7 +1218,7 @@ async def test_ask_notebook_reasoning_delivers_every_required_row_of_a_maximal_c
     )
     seen: list = []
 
-    def capturing_ask(_notebook_id, payload):
+    def capturing_ask(_notebook_id, payload, **_kwargs):
         seen.append(payload)
         return SimpleNamespace(
             answer_id="ans-max", answer="ok", conclusion="ok", grounded=True,
@@ -1294,7 +1304,7 @@ async def test_ask_notebook_reasoning_handles_long_questions_without_a_model(
     )
     seen: list = []
 
-    def capturing_ask(_notebook_id, payload):
+    def capturing_ask(_notebook_id, payload, **_kwargs):
         seen.append(payload)
         return SimpleNamespace(
             answer_id="ans-long", answer="ok", conclusion="ok", grounded=True,
@@ -1336,7 +1346,7 @@ async def test_ask_notebook_reasoning_clamps_a_runaway_understanding_clock(
     )
     seen: list = []
 
-    def capturing_ask(_notebook_id, payload):
+    def capturing_ask(_notebook_id, payload, **_kwargs):
         seen.append(payload)
         return SimpleNamespace(
             answer_id="ans-slow", answer="ok", conclusion="ok", grounded=True,
@@ -1408,7 +1418,7 @@ async def test_ask_notebook_reasoning_auto_confirms_a_clear_question(
     )
     seen: list = []
 
-    def capturing_ask(_notebook_id, payload):
+    def capturing_ask(_notebook_id, payload, **_kwargs):
         seen.append(payload)
         return SimpleNamespace(
             answer_id="ans-reasoning-clear", answer="ok", conclusion="ok",
@@ -1457,7 +1467,7 @@ async def test_ask_notebook_defaults_to_reasoning_when_mode_is_omitted(
     )
     seen: list = []
 
-    def capturing_ask(_notebook_id, payload):
+    def capturing_ask(_notebook_id, payload, **_kwargs):
         seen.append(payload)
         return SimpleNamespace(
             answer_id="ans-default-mode", answer="ok", conclusion="ok",

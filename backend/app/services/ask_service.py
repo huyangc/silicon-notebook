@@ -955,7 +955,9 @@ class AskService:
                     cancel_event=cancel_event,
                 )
 
-    def ask_current(self, notebook_id: str, payload: AskRequest) -> AskResponse:
+    def ask_current(
+        self, notebook_id: str, payload: AskRequest, *, submitted_via: str = ""
+    ) -> AskResponse:
         """Run the synchronous Ask surface through the durable job lifecycle.
 
         Streaming and synchronous callers now share the same state-store
@@ -968,7 +970,7 @@ class AskService:
         self.validate_reasoning_submission(notebook_id, payload)
         cancel_event = threading.Event()
         job_id, _conversation_id = self.begin_job_current(
-            notebook_id, payload, mode.id, cancel_event
+            notebook_id, payload, mode.id, cancel_event, submitted_via=submitted_via
         )
         # 待确认中心的「进行中的提问」:起点一次、终点一次,中间不推(同步路径没有
         # 进度点)。`finally` 覆盖全部四个终态出口——三条抛出的和一条正常返回的——
@@ -1063,11 +1065,13 @@ class AskService:
         )
 
     def begin_job_current(
-        self, notebook_id: str, payload, mode: str, cancel_event
+        self, notebook_id: str, payload, mode: str, cancel_event,
+        *, submitted_via: str = "",
     ) -> tuple[str, str]:
         self.notebooks.get_notebook(notebook_id)
         job_id, conversation_id = self.ask_state.begin_durable_job(
-            notebook_id, payload, mode, self.current_user_id()
+            notebook_id, payload, mode, self.current_user_id(),
+            submitted_via=submitted_via,
         )
         self.cancellations.register(job_id, cancel_event)
         return job_id, conversation_id

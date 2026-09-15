@@ -40,6 +40,13 @@ def test_begin_creates_running_job_and_conversation(repo):
     assert st["status"] == "running" and st["conversation_id"] == conv_id
     assert st["created_by"] == repo.current_user().id
     assert repo._ask_cancel_events.get(job_id) is ev   # 注册表登记
+    # begin_ask_job(冻结签名,不接 submitted_via)不经网页/MCP 任一入口——
+    # 未记录的进程内调用统一落 ""(不回填、不猜)。
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT submitted_via FROM ask_jobs WHERE id=?", (job_id,)
+        ).fetchone()
+    assert row["submitted_via"] == ""
 
 
 def test_begin_preserves_full_valid_question(repo):
@@ -186,8 +193,8 @@ def test_cancel_endpoint_wins_before_final_answer_save_atomically(tmp_path, monk
     real_begin = store.begin_durable_job
     real_save = store.save_answer_for_job
 
-    def capture_begin(notebook_id, payload, mode, user_id):
-        result = real_begin(notebook_id, payload, mode, user_id)
+    def capture_begin(notebook_id, payload, mode, user_id, *, submitted_via=""):
+        result = real_begin(notebook_id, payload, mode, user_id, submitted_via=submitted_via)
         captured["job_id"], captured["conversation_id"] = result
         job_started.set()
         return result
@@ -251,8 +258,8 @@ def test_sync_ask_cancel_endpoint_returns_no_final_answer_or_empty_conversation(
     real_begin = store.begin_durable_job
     real_save = store.save_answer_for_job
 
-    def capture_begin(notebook_id, payload, mode, user_id):
-        result = real_begin(notebook_id, payload, mode, user_id)
+    def capture_begin(notebook_id, payload, mode, user_id, *, submitted_via=""):
+        result = real_begin(notebook_id, payload, mode, user_id, submitted_via=submitted_via)
         captured["job_id"], captured["conversation_id"] = result
         job_started.set()
         return result
@@ -310,9 +317,9 @@ def test_begin_and_finish_delegate_persistence_to_runtime_ask_state(repo, monkey
     store = repo._runtime.ask_state
     real_begin, real_finish = store.begin_durable_job, store.finish_job
 
-    def spy_begin(notebook_id, payload, mode, user_id):
+    def spy_begin(notebook_id, payload, mode, user_id, *, submitted_via=""):
         seen.append(("begin", user_id))
-        return real_begin(notebook_id, payload, mode, user_id)
+        return real_begin(notebook_id, payload, mode, user_id, submitted_via=submitted_via)
 
     def spy_finish(job_id, status, *, answer_id="", error=""):
         seen.append(("finish", status))

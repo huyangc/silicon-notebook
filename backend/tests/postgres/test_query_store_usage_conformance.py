@@ -130,7 +130,7 @@ def _insert_group_member(connection, group_id, user_id) -> None:
 
 @pytest.fixture
 def store(postgres_database, postgres_settings):
-    assert PostgresMigrator(postgres_database).migrate() == 53
+    assert PostgresMigrator(postgres_database).migrate() == 54
     return PostgresQueryStore(postgres_database, postgres_settings)
 
 

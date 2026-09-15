@@ -188,6 +188,10 @@ class ActivityAsk(BaseModel):
     answer_id: str = ""
     # 失败原文只给管理员;本人自助读取恒为空串(admin_routes._activity_failure_text)。
     error: str = ""
+    # Which submission surface created this row -- "" means "not recorded"
+    # (a pre-migration row, or an in-process caller that skipped the
+    # keyword). See app.models.ask.SubmittedVia for the write-side vocabulary.
+    submitted_via: Literal["", "web", "mcp"] = ""
     notebook_name: str = ""
     notebook_deleted_at: str = ""
     retained_until: str = ""
@@ -235,6 +239,7 @@ class ActivityReport(BaseModel):
     depth: int = 0
     status: str = ""
     generation_started_at: str = ""
+    submitted_via: Literal["", "web", "mcp"] = ""
     notebook_name: str = ""
     notebook_deleted_at: str = ""
     retained_until: str = ""
@@ -271,6 +276,7 @@ class AdminQuestionItem(BaseModel):
     question: str
     status: str
     created_at: str
+    submitted_via: Literal["", "web", "mcp"] = ""
 
 
 class AdminQuestionStats(BaseModel):

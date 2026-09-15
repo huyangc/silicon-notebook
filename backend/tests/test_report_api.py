@@ -36,6 +36,13 @@ def test_report_endpoints_lifecycle(client, monkeypatch):
     r = client.post(f"/api/notebooks/{nb['id']}/reports", json={"question": "为什么?", "depth": 8})
     assert r.status_code == 200
     rid = r.json()["report_id"]
+    # POST /reports 走网页的唯一提交面 -- 建出的行必须记 submitted_via == "web"。
+    from app.api.deps import repository as _repository
+    with _repository()._connect() as db:
+        row = db.execute(
+            "SELECT submitted_via FROM reports WHERE id=?", (rid,)
+        ).fetchone()
+    assert row["submitted_via"] == "web"
     lst = client.get(f"/api/notebooks/{nb['id']}/reports").json()
     assert lst[0]["id"] == rid and lst[0]["status"] == "pending"
     assert lst[0]["created_at"] and lst[0]["updated_at"]

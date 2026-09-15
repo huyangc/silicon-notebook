@@ -145,8 +145,10 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # generation 列 + unified_kg_state 代次控制块 + 三条索引整改（四列唯一取代
     # 三列唯一、两条覆盖索引带 generation 尾键），以及 v72 用户总览最近上线
     # users.last_seen_at（可空，无回填），以及 v73 许愿墙处理状态
-    # wishes.status（NOT NULL DEFAULT 'open'，默认值即回填），合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 73
+    # wishes.status（NOT NULL DEFAULT 'open'，默认值即回填），以及 v74 提问调用方式
+    # ask_jobs/reports/retained_user_activity.submitted_via（NOT NULL DEFAULT
+    # ''，不回填，历史行留空串），合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 74
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

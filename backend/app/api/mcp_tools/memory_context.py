@@ -163,7 +163,7 @@ def _ask_actionable(repo: Any, notebook_id: str, payload: AskRequest) -> Any:
     ``AskCancelled`` and every other exception pass through untouched.
     """
     try:
-        return repo.ask(notebook_id, payload)
+        return repo.ask(notebook_id, payload, submitted_via="mcp")
     except UnknownAskMode:
         # Availability flipped between _validate_ask_mode and dispatch; same
         # wording as the pre-dispatch "registered but unavailable" rejection.

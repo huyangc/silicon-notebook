@@ -4252,6 +4252,76 @@ MIGRATION_MANIFEST[(72, 73)] = {
     "triggers": {},
     "views": {},
 }
+# v74 (question submission channel, parity with PostgreSQL
+# 0054_question_submitted_via.sql): ``submitted_via`` TEXT NOT NULL
+# DEFAULT '' on ask_jobs, reports and retained_user_activity. No new table,
+# index, trigger or view; the default is the whole backfill ('' means "not
+# recorded" and stays that way for every pre-existing row).
+QUESTION_SUBMITTED_VIA_COLUMNS = {
+    "ask_jobs": {
+        "submitted_via": ("submitted_via", "TEXT", 1, "''", 0),
+    },
+    "reports": {
+        "submitted_via": ("submitted_via", "TEXT", 1, "''", 0),
+    },
+    "retained_user_activity": {
+        "submitted_via": ("submitted_via", "TEXT", 1, "''", 0),
+    },
+}
+# retained_user_activity is created (with a full CREATE TABLE text tracked
+# from v65 onward) by RETAINED_USER_ACTIVITY_TABLES; a deployment older than
+# v65 creates it in _migration_65 and then ALTERs it in _migration_74. Unlike
+# WISH_WALL_TABLES_V73 (whose table has no trailing constraint, so the splice
+# lands right before the closing parenthesis), this table ends with a
+# PRIMARY KEY table constraint: SQLite's ALTER TABLE ADD COLUMN inserts the
+# new column definition right after the last real column definition and
+# BEFORE that constraint clause, not before the closing paren. Verified
+# against a live-migrated fixture rather than assumed.
+RETAINED_USER_ACTIVITY_TABLES_V74 = {
+    **RETAINED_USER_ACTIVITY_TABLES,
+    "retained_user_activity": RETAINED_USER_ACTIVITY_TABLES[
+        "retained_user_activity"
+    ].replace(
+        "expires_at TEXT NOT NULL,\n                  PRIMARY KEY",
+        "expires_at TEXT NOT NULL, submitted_via TEXT NOT NULL DEFAULT '',\n"
+        "                  PRIMARY KEY",
+    ),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 74, *key[2:]): {
+        **manifest,
+        "tables": {
+            **manifest["tables"],
+            **(
+                {
+                    "retained_user_activity": RETAINED_USER_ACTIVITY_TABLES_V74[
+                        "retained_user_activity"
+                    ]
+                }
+                if "retained_user_activity" in manifest["tables"]
+                else {}
+            ),
+        },
+        "columns": {
+            **manifest["columns"],
+            **{
+                table: {
+                    **manifest["columns"].get(table, {}),
+                    **columns,
+                }
+                for table, columns in QUESTION_SUBMITTED_VIA_COLUMNS.items()
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(73, 74)] = {
+    "tables": {},
+    "columns": QUESTION_SUBMITTED_VIA_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
 
 
 if __name__ == "__main__":

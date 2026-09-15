@@ -362,6 +362,7 @@ def list_admin_questions(
     limit: int = Query(
         ADMIN_QUESTIONS_DEFAULT_LIMIT, ge=1, le=ADMIN_QUESTIONS_MAX_LIMIT
     ),
+    submitted_via: Optional[Literal["web", "mcp"]] = Query(None),
     user: UserProfile = Depends(get_current_user),
 ) -> AdminQuestionsResponse:
     """Cross-user question overview spanning Ask and Deep Report."""
@@ -374,6 +375,7 @@ def list_admin_questions(
         query=q,
         offset=offset,
         limit=limit,
+        submitted_via=submitted_via,
     )
     return AdminQuestionsResponse(
         items=[AdminQuestionItem(**item) for item in result["items"]],

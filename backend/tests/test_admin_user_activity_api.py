@@ -109,13 +109,15 @@ def _insert_paper_meta(db, source_id, notebook_id, paper_title, *, is_paper=1) -
 
 def _insert_ask_job(db, job_id, notebook_id, created_by, created_at, *,
                      conversation_id="", question="q?", mode="chunk",
-                     status="completed", asked_at="", answer_id="", error="") -> None:
+                     status="completed", asked_at="", answer_id="", error="",
+                     submitted_via="") -> None:
     db.execute(
         "INSERT INTO ask_jobs "
         "(id,notebook_id,conversation_id,created_by,mode,question,status,asked_at,"
-        "answer_id,error,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        "answer_id,error,created_at,updated_at,submitted_via) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (job_id, notebook_id, conversation_id, created_by, mode, question, status,
-         asked_at, answer_id, error, created_at, created_at),
+         asked_at, answer_id, error, created_at, created_at, submitted_via),
     )
 
 
@@ -323,6 +325,8 @@ def test_activity_type_query_returns_only_questions(client):
     body = resp.json()
     assert [item["id"] for item in body["items"]] == ["ask-focus"]
     assert body["items"][0]["question"] == "用户现在关注什么？"
+    # 没显式传 submitted_via 的历史行 -> 默认 "" (未记录)。
+    assert body["items"][0]["submitted_via"] == ""
 
 
 def test_activity_type_query_rejects_unknown_value(client):
@@ -937,7 +941,7 @@ def test_admin_activity_survives_notebook_delete_without_answer_or_trace(client)
             conversation_id="conv-retained", question="保留这个问题？",
             mode="reasoning", status="done",
             asked_at="2026-08-01T13:00:00+00:00", answer_id="ans-retained",
-            error="不能保留的错误诊断",
+            error="不能保留的错误诊断", submitted_via="mcp",
         )
         _insert_source(
             db, "source-retained", notebook_id, "2026-08-01T12:59:00+00:00",
@@ -945,12 +949,12 @@ def test_admin_activity_survives_notebook_delete_without_answer_or_trace(client)
         )
         db.execute(
             "INSERT INTO reports "
-            "(id,notebook_id,question,depth,status,created_by,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
+            "(id,notebook_id,question,depth,status,created_by,created_at,updated_at,"
+            "submitted_via) VALUES (?,?,?,?,?,?,?,?,?)",
             (
                 "report-retained", notebook_id, "留存报告提示", 2, "done",
                 owner_id, "2026-08-01T12:58:00+00:00",
-                "2026-08-01T13:02:00+00:00",
+                "2026-08-01T13:02:00+00:00", "web",
             ),
         )
         db.execute(
@@ -1002,6 +1006,16 @@ def test_admin_activity_survives_notebook_delete_without_answer_or_trace(client)
     assert item["notebook_name"] == "即将删除的笔记本"
     assert item["notebook_deleted_at"]
     assert item["retained_until"]
+    # 笔记本删除后转投 retained_user_activity 的 ask/report 行必须原样保留
+    # submitted_via,不因迁移到保留投影而丢失或清零。
+    assert item["submitted_via"] == "mcp"
+    report_activity = client.get(
+        f"/api/admin/users/{owner_id}/activity?activity_type=report", headers=admin,
+    )
+    assert report_activity.status_code == 200
+    report_item = report_activity.json()["items"][0]
+    assert report_item["id"] == "report-retained"
+    assert report_item["submitted_via"] == "web"
 
     detail = client.get(
         f"/api/admin/users/{owner_id}/asks/job-retained", headers=admin,
