@@ -57,8 +57,8 @@ at `SCHEMA_VERSION` still runs no migrations. The only supported way back is
 to restore the pre-upgrade backup, or redeploy a build whose `SCHEMA_VERSION`
 is at least the database's — there is no reverse migration.
 
-The current schema version is 73. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v73 and remains readable. Those migrations
+The current schema version is 74. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v74 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -690,8 +690,23 @@ promoting to `plan` stays admin-only), `delete_wish` (author or admin; votes
 are deleted in the same transaction) and `set_wish_status` (admin only), each
 deciding ownership under the row lock, plus a `status` filter on
 `list_wishes`; the `priority` order sinks done/declined rows below open ones.
-No table, index or foreign key is added. The current pair is SQLite 73 /
-PostgreSQL 53 / epoch 1.
+No table, index or foreign key is added.
+
+The question submission-surface batch (SQLite v74 / PostgreSQL 0054) adds
+`submitted_via` (`text NOT NULL DEFAULT ''`) to `ask_jobs`, `reports` and
+`retained_user_activity`. The value is decided only by the server entry point
+that created the row and is passed down as an explicit keyword argument, never
+read from a client request model or ambient request context: the
+session-authenticated `/ask`, `/ask/stream` and `/reports` routes pass `web`,
+and MCP `ask_notebook` passes `mcp`. The empty string means "not recorded" and
+is also the whole backfill: pre-existing rows carry no reliable signal about
+their entry point, so none is inferred. In-process callers that pass nothing
+(for example `app/eval/inference.py`) also record `''`. Notebook deletion copies
+the value into the retained projection. The accepted set is pinned by the API
+model (`app.models.ask.SubmittedVia`) rather than a CHECK constraint. No table,
+index or foreign key is added; the administrator question overview's equality
+filter runs over the same three-way `UNION ALL` scan it already performs. The
+current pair is SQLite 74 / PostgreSQL 54 / epoch 1.
 
 Run it only while application/background writers are stopped:
 
