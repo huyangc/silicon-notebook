@@ -5,18 +5,12 @@ import { Pagination } from "./Pagination";
 import { useClientPagination } from "./use-client-pagination.ts";
 import type { ConversationSummary } from "./workspace-model";
 
-/** 「其余清单」共用的页大小(20)——接口整份返回、契约上不分页,分页只发生在界面。 */
+/** 会话清单整份返回,界面每页显示的会话数。 */
 const ASK_SESSION_HISTORY_PAGE_SIZE = 20;
 
 /**
- * Ask 会话管理弹窗里的历史会话清单 + 分页。单独抽成组件,让分页状态随弹窗一起
- * 挂载/卸载——弹窗只在 `chatMode === "ask" && sessionPanelOpen` 时才渲染这个组件,
- * 关闭时它从树上卸载、状态随之丢弃,下次重新打开自然落在第一页,不需要额外的
- * resetKey。
- *
- * 单独成文件是 Next.js App Router 的硬约束:`app/page.tsx` 是路由文件,只能有
- * `default` 等少数几个白名单导出,多导出一个具名组件会让 `next build` 的类型检查
- * (`.next/types/app/page.ts`)报错——这个组件需要被组件测试直接渲染,只能挪出来。
+ * 历史会话弹窗里的会话清单 + 分页。弹窗只在 `chatMode === "ask" && sessionPanelOpen`
+ * 时渲染它,关闭即卸载,所以每次重新打开都从第一页开始,不需要 resetKey。
  */
 export function AskSessionHistoryList({
   sessions,

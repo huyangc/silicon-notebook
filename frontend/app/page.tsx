@@ -46,7 +46,7 @@ import {
 } from "./knowhow-navigation";
 import { KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import { KgGraphView } from "./kg-graph-view";
-import { fieldLabel, KgOccurrenceCard, KgProcedureStepCard, kgNodeName } from "./kg-object-cards";
+import { fieldLabel, KgOccurrenceList, KgProcedureStepCard, kgNodeName } from "./kg-object-cards";
 import { formatRelativeTime } from "./relative-time.ts";
 import { KgAnalysisView } from "./kg-analysis-view";
 import { AgentProfilePanel } from "./agent-profile-panel";
@@ -315,15 +315,10 @@ const LEGACY_OFFICE_EXTENSIONS = ["doc", "ppt"];
 
 const KG_TYPE_ORDER = ["concept", "claim", "formula", "procedure"];
 
-// 前端分页的页大小常量(接口整份返回、契约上不分页,分页只发生在界面——见
-// use-client-pagination.ts 的说明与 groups-page.tsx 的先例)。笔记本卡片/列表行的
-// 页大小(24)随 NotebookCollectionSection 一起搬进了 notebook-collection-section.tsx;
-// 这里只剩「已分享」弹窗清单自己的页大小,其余清单同一档,统一叫 20。
-const LIST_PAGE_SIZE = 20;
+// 「已分享」弹窗:清单整份返回,界面每页显示的条数。
+const SHARED_BY_ME_PAGE_SIZE = 20;
 
-// 稳定的空清单引用:某个 owner 不可见时给分页 hook 的兜底值必须是同一个数组实例,
-// 否则每次渲染都传一个新 [],会让依赖它的 effect/useMemo 误判成清单变了
-// (参见 use-notebook-collection.ts 的 NO_ROWS 同款说明)。
+// 清单尚未取回时给分页 hook 的稳定空引用(每次渲染新建 [] 会让 useMemo 白算)。
 const NO_ITEMS: never[] = [];
 
 type InfoModal = {
@@ -4838,7 +4833,7 @@ export default function Home() {
   // 重新打开都该看到第一页,不该停在上次关闭前翻到的那一页。
   const sharedByMePage = useClientPagination(
     sharedByMeList ?? NO_ITEMS,
-    LIST_PAGE_SIZE,
+    SHARED_BY_ME_PAGE_SIZE,
     rootModals.view("shared-by-me").open,
   );
 
@@ -6177,7 +6172,7 @@ export default function Home() {
                     </article>
                   ))}
                 </div>
-                <Pagination page={sharedByMePage.page} pageSize={LIST_PAGE_SIZE} total={sharedByMePage.total} onPage={sharedByMePage.setPage} label="已分享笔记本分页" />
+                <Pagination page={sharedByMePage.page} pageSize={SHARED_BY_ME_PAGE_SIZE} total={sharedByMePage.total} onPage={sharedByMePage.setPage} label="已分享笔记本分页" />
                 </>
               )}
             </div>
@@ -7890,9 +7885,7 @@ function KnowledgeBrowser({
                     ))}</>
                   )}
                   {(contexts[item.id].occurrences ?? []).length > 0 && (
-                    <><p className="section-title">原文出处</p>{(contexts[item.id].occurrences ?? []).slice(0, 5).map((o, i) => (
-                      <KgOccurrenceCard occurrence={o} index={i} key={`${o.source_title || o.source_id}-${i}`} />
-                    ))}</>
+                    <><p className="section-title">原文出处</p><KgOccurrenceList occurrences={contexts[item.id].occurrences ?? []} /></>
                   )}
                 </>
               )}

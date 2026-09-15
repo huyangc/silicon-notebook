@@ -136,6 +136,52 @@ Every user carries a persisted `user_profiles.ui_mode` preference, `"auto"` (the
 
 Source-list search submits through the Search button or Enter and trims surrounding whitespace. An empty or whitespace-only submission clears the search filter and input, reloads the unfiltered first page, and refreshes the visible source total. It preserves the retrieval-scope checkboxes. The search button shows a disabled busy state while loading; completion or failure releases it so an empty submission cannot leave the control stuck.
 
+### List pagination
+
+Every list whose length grows with user data is paged; no row is reachable only by
+scrolling an unbounded page, and none is silently cut off. There are three shapes.
+
+**Server-paged** lists request one page at a time: the notebook source list (50),
+the Knowledge browser (50), Memory (20), admin Question analysis (50), the Parsing
+issues sheet (50, `offset` + `total`), and source-detail elements (40). Load-more
+lists append the next page: the `/dev/logs` Activity stream and a Scope-column
+notebook's sources (50 each), the Wish wall, Agent profiles and tokens, command
+catalog candidates, a hub concept's members, and Knowhow table history.
+
+**Client-paged** lists page over a complete API response whose endpoint is
+deliberately unpaginated. They use one shared control (`frontend/app/Pagination.tsx`
+over `use-client-pagination.ts`): it renders only when there is more than one page,
+shows the row range and total, previous/next, and jump-to-page, and carries an
+accessible name naming its list. The requested page is clamped to the current
+length, so removing the only row on the last page shows the previous page instead
+of an empty one. Page sizes:
+
+| Surface | Per page | Returns to page 1 when |
+| --- | --- | --- |
+| Home collection — 我的笔记本 and 群组 sections (grid and list, each section independent) | 24 | filter tab, search query, sort, or view mode changes |
+| 已分享 modal — shared notebooks; each notebook's read-only link members | 20 | the modal reopens |
+| Ask conversation history | 20 | the panel reopens |
+| Knowledge browser — duplicate groups | 20 | the object type tab changes |
+| Knowledge object occurrences (Knowledge browser item context and Knowledge Graph detail; numbering continues across pages) | 10 | another node is selected |
+| Knowledge Graph — pending merges; a selected node's adjacent relations | 20 | another node is selected (relations) |
+| Deep report list | 20 | the notebook changes; an opened report on a later page turns the list to that page |
+| Promotion (content review) queue | 20 | the modal reopens |
+| Knowhow table cards | 24 | the status filter changes |
+| Group page — group rail, libraries, add-library candidates, members, review queue, own requests | 20 | the group changes (see [Group workspace](#group-workspace)) |
+| Admin user usage — expanded per-user notebooks | 20 | another user row is expanded |
+| `/dev/logs` Scope column — notebooks | 20 | the viewed user changes; a selected notebook turns to its page |
+
+The admin user table keeps its own sort-then-page control with 20/50/100 rows.
+
+**Deliberately not paged:** the Ask conversation transcript and its turn navigation
+(one continuous thread); the Knowhow table row grid and row-management list, where
+row-title merged cells span physical rows and rows are reordered, so a page boundary
+would split a group; pickers and filter dropdowns; and lists that are bounded by a
+disclosed cap — public report/conversation share pages, an answer's structured result
+cards, the edge-review queue (a priority-ranked page whose title states the queue
+total), Knowhow cell history (a disclosed most-recent cap), and Agent call/observation
+samples.
+
 ## Group knowledge sharing
 
 Three real situations — a **project** team sharing one knowledge base, a
