@@ -28,9 +28,11 @@
 .questions-table tbody tr:hover { background: #fafbfc; }
 .questions-table tbody tr:last-child td { border-bottom: 0; }
 .questions-table .questions-question { min-width: 300px; max-width: 520px; white-space: normal; line-height: 1.5; overflow-wrap: anywhere; color: var(--ink); }
-.questions-kind, .questions-status { display: inline-flex; padding: 3px 8px; border-radius: 999px; font-size: 11px; }
+.questions-kind, .questions-status, .questions-via { display: inline-flex; padding: 3px 8px; border-radius: 999px; font-size: 11px; }
 .questions-kind-ask { color: #174ec8; background: #eaf1ff; }
 .questions-kind-report { color: #705000; background: #fff4d4; }
+.questions-via { color: var(--muted); background: var(--soft); }
+.questions-via-mcp { color: #5b2bb5; background: #f1eaff; }
 .questions-status { color: var(--muted); background: var(--soft); }
 .questions-time { color: var(--muted); font-variant-numeric: tabular-nums; }
 .questions-empty, .questions-state { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 8px; min-height: 160px; padding: 24px; color: var(--muted); }

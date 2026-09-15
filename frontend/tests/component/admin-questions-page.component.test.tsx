@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -86,6 +86,53 @@ test("筛选只重新加载提问，不重复获取用户目录", async () => {
     offset: 0,
   }));
   expect(mocks.fetchMe).toHaveBeenCalledTimes(1);
+  expect(mocks.fetchAdminUsers).toHaveBeenCalledTimes(1);
+});
+
+test("每条提问标出调用方式，历史行显示未记录", async () => {
+  mocks.fetchAdminQuestions.mockResolvedValue({
+    ...page,
+    items: [
+      { ...page.items[0], id: "ask-mcp", submitted_via: "mcp" },
+      { ...page.items[1], id: "report-web", submitted_via: "web" },
+      { ...page.items[0], id: "ask-legacy", submitted_via: "" },
+    ],
+    total: 3,
+  });
+  render(<AdminQuestionsPage />);
+
+  const table = await screen.findByRole("table");
+  expect(within(table).getByRole("columnheader", { name: "调用方式" })).toBeInTheDocument();
+  const rows = within(table).getAllByRole("row").slice(1);
+  expect(within(rows[0]).getByText("MCP")).toBeInTheDocument();
+  expect(within(rows[1]).getByText("网页")).toBeInTheDocument();
+  expect(within(rows[2]).getByText("未记录")).toBeInTheDocument();
+});
+
+test("按调用方式筛选时带参重新加载并回到第一页", async () => {
+  mocks.fetchAdminQuestions.mockResolvedValue({ ...page, total: 120 });
+  const user = userEvent.setup();
+  render(<AdminQuestionsPage />);
+  await screen.findByText("这个市场的主要竞争者是谁？");
+
+  await user.click(screen.getByRole("button", { name: "下一页" }));
+  await waitFor(() => expect(mocks.fetchAdminQuestions).toHaveBeenLastCalledWith(
+    expect.objectContaining({ offset: 50 }),
+  ));
+
+  await user.selectOptions(screen.getByLabelText("调用方式"), "mcp");
+  await waitFor(() => expect(mocks.fetchAdminQuestions).toHaveBeenLastCalledWith({
+    kind: undefined,
+    submittedVia: "mcp",
+    userId: undefined,
+    query: "",
+    offset: 0,
+  }));
+
+  await user.selectOptions(screen.getByLabelText("调用方式"), "");
+  await waitFor(() => expect(mocks.fetchAdminQuestions).toHaveBeenLastCalledWith(
+    expect.objectContaining({ submittedVia: undefined, offset: 0 }),
+  ));
   expect(mocks.fetchAdminUsers).toHaveBeenCalledTimes(1);
 });
 

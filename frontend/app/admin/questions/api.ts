@@ -1,4 +1,5 @@
 import { requestJson } from "../../api-client.ts";
+import type { SubmittedVia } from "../../submitted-via.ts";
 
 // Mirrors the named protocol rails in backend/app/models/admin.py.
 export const ADMIN_QUESTIONS_QUERY_MAX_CHARS = 200;
@@ -7,8 +8,11 @@ export const ADMIN_QUESTIONS_MAX_LIMIT = 200;
 
 export type AdminQuestionKind = "ask" | "report";
 
+export type AdminQuestionSubmittedVia = SubmittedVia;
+
 export type AdminQuestionItem = {
   type: AdminQuestionKind;
+  submitted_via: "" | SubmittedVia;
   id: string;
   user_id: string;
   username: string;
@@ -36,6 +40,7 @@ export type AdminQuestionsPage = {
 
 export async function fetchAdminQuestions(filters: {
   kind?: AdminQuestionKind;
+  submittedVia?: AdminQuestionSubmittedVia;
   userId?: string;
   query?: string;
   offset?: number;
@@ -50,6 +55,7 @@ export async function fetchAdminQuestions(filters: {
     limit: String(limit),
   });
   if (filters.kind) query.set("kind", filters.kind);
+  if (filters.submittedVia) query.set("submitted_via", filters.submittedVia);
   if (filters.userId) query.set("user_id", filters.userId);
   if (filters.query) query.set("q", filters.query);
   return requestJson<AdminQuestionsPage>(`/admin/questions?${query.toString()}`, {

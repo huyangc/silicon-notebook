@@ -6,12 +6,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchMe } from "../../auth.ts";
 import { PageHeader } from "../../components/PageHeader.tsx";
 import { toUserMessage } from "../../errors.ts";
+import { submittedViaLabel } from "../../submitted-via.ts";
 import { fetchSystemConfiguration } from "../../system-api.ts";
 import { fetchAdminUsers, type AdminUserUsage } from "../usage/api.ts";
 import {
   ADMIN_QUESTIONS_QUERY_MAX_CHARS,
   fetchAdminQuestions,
   type AdminQuestionKind,
+  type AdminQuestionSubmittedVia,
   type AdminQuestionsPage,
 } from "./api.ts";
 import "./questions.css";
@@ -51,6 +53,7 @@ export default function AdminQuestionsPage() {
   const [authorized, setAuthorized] = useState<boolean | null>(null);
   const [users, setUsers] = useState<AdminUserUsage[]>([]);
   const [kind, setKind] = useState<AdminQuestionKind | "">("");
+  const [submittedVia, setSubmittedVia] = useState<AdminQuestionSubmittedVia | "">("");
   const [userId, setUserId] = useState("");
   const [searchDraft, setSearchDraft] = useState("");
   const [searchNotice, setSearchNotice] = useState("");
@@ -88,6 +91,7 @@ export default function AdminQuestionsPage() {
     try {
       const page = await fetchAdminQuestions({
         kind: kind || undefined,
+        submittedVia: submittedVia || undefined,
         userId: userId || undefined,
         query,
         offset,
@@ -98,7 +102,7 @@ export default function AdminQuestionsPage() {
       if (generation !== requestGeneration.current) return;
       setState({ kind: "error", notice: toUserMessage(error, "提问分析加载失败，请重试") });
     }
-  }, [authorized, kind, userId, query, offset]);
+  }, [authorized, kind, submittedVia, userId, query, offset]);
 
   useEffect(() => { void initialize(); }, [initialize]);
   useEffect(() => { void load(); }, [load]);
@@ -121,6 +125,13 @@ export default function AdminQuestionsPage() {
     ++requestGeneration.current;
     setOffset(0);
     setKind(next);
+  }
+
+  function changeSubmittedVia(next: AdminQuestionSubmittedVia | "") {
+    if (next === submittedVia) return;
+    ++requestGeneration.current;
+    setOffset(0);
+    setSubmittedVia(next);
   }
 
   function changeUser(next: string) {
@@ -158,6 +169,13 @@ export default function AdminQuestionsPage() {
               <button type="button" className={kind === "ask" ? "active" : ""} onClick={() => changeKind("ask")}>问答</button>
               <button type="button" className={kind === "report" ? "active" : ""} onClick={() => changeKind("report")}>深度报告</button>
             </div>
+            <label>调用方式
+              <select value={submittedVia} onChange={(event) => changeSubmittedVia(event.target.value as AdminQuestionSubmittedVia | "")}>
+                <option value="">全部</option>
+                <option value="web">网页</option>
+                <option value="mcp">MCP</option>
+              </select>
+            </label>
             <label>用户
               <select value={userId} onChange={(event) => changeUser(event.target.value)}>
                 <option value="">全部用户</option>
@@ -190,11 +208,12 @@ export default function AdminQuestionsPage() {
               ) : (
                 <div className="questions-table-wrap">
                   <table className="questions-table">
-                    <thead><tr><th>来源</th><th>提问内容</th><th>用户</th><th>笔记本</th><th>状态</th><th>时间</th></tr></thead>
+                    <thead><tr><th>来源</th><th>调用方式</th><th>提问内容</th><th>用户</th><th>笔记本</th><th>状态</th><th>时间</th></tr></thead>
                     <tbody>
                       {state.page.items.map((item) => (
                         <tr key={`${item.type}-${item.id}`}>
                           <td><span className={`questions-kind questions-kind-${item.type}`}>{item.type === "ask" ? "问答" : "深度报告"}</span></td>
+                          <td><span className={`questions-via questions-via-${item.submitted_via || "unknown"}`}>{submittedViaLabel(item.submitted_via)}</span></td>
                           <td className="questions-question">{item.question}</td>
                           <td>{item.username}</td>
                           <td>{item.notebook_name || "已删除的笔记本"}</td>

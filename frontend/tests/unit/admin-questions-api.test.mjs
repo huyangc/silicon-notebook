@@ -18,3 +18,27 @@ test("管理员提问分页 rail 与后端协议同名且 API 层拒绝越界值
   await assert.rejects(fetchAdminQuestions({ limit: 0 }), { name: "RangeError" });
   await assert.rejects(fetchAdminQuestions({ limit: 1.5 }), { name: "RangeError" });
 });
+
+
+test("调用方式筛选以 submitted_via 查询参数发出，未选时不带该参数", async () => {
+  const originalFetch = globalThis.fetch;
+  const urls = [];
+  globalThis.fetch = async (url) => {
+    urls.push(new URL(String(url), "http://localhost"));
+    return new Response(JSON.stringify({
+      items: [], stats: { total: 0, asks: 0, reports: 0, active_users: 0 },
+      total: 0, offset: 0, limit: 50,
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    await fetchAdminQuestions({ submittedVia: "mcp", kind: "ask" });
+    await fetchAdminQuestions({});
+    assert.equal(urls.length, 2);
+    assert.ok(urls[0].pathname.endsWith("/admin/questions"), urls[0].pathname);
+    assert.equal(urls[0].searchParams.get("submitted_via"), "mcp");
+    assert.equal(urls[0].searchParams.get("kind"), "ask");
+    assert.equal(urls[1].searchParams.has("submitted_via"), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

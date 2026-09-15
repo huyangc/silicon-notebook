@@ -9,6 +9,7 @@
 // 来源清单响应沿用既有 `GET /notebooks/{id}/sources` 的分页形状——不重新声明
 // 一份,`SourceSummary`/`PaginatedSources` 的真源是 workspace-model.ts。
 export type { SourceSummary, PaginatedSources } from "../../../workspace-model.ts";
+import type { SubmittedVia } from "../../../submitted-via.ts";
 
 // 报告详情的 `references` 字段与 ReportDetailT["references"]（report-model.ts）
 // 同形——后端 ReportActivityDetail.references 原样来自 references_json,不重新声明
@@ -32,6 +33,8 @@ export type ActivityAsk = {
   status: string;
   answer_id: string;
   error: string;
+  /** 提交入口；空串表示未记录，界面文案见 submitted-via.ts。 */
+  submitted_via?: "" | SubmittedVia;
   notebook_name?: string;
   notebook_deleted_at?: string;
   retained_until?: string;
@@ -76,6 +79,7 @@ export type ActivityReport = {
   depth: number;
   status: string;
   generation_started_at: string;
+  submitted_via?: "" | SubmittedVia;
   notebook_name?: string;
   notebook_deleted_at?: string;
   retained_until?: string;
