@@ -135,7 +135,7 @@ test("a terminal status is reported only for the expected job; unobserved termin
   assert.match(poll, /mismatchStreak < MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK/);
   assert.match(
     poll,
-    /await settle\(settlement === "report"\s*\? outcome\s*: settlement === "mismatch" \? KG_DELETE_JOB_MISMATCH : KG_DELETE_UNOBSERVED\)/,
+    /await settle\(settlement === "report"\s*\? outcome\s*: settlement === "mismatch" \? KG_DELETE_JOB_MISMATCH : kgDeleteUnobservedOutcome\(status\)\)/,
   );
   // Timeout with nothing ever expected is silent too.
   assert.match(
@@ -180,6 +180,12 @@ test("delete refresh clears search and selection through their request sequences
     "setNodeContext(null)",
   ]) assert.ok(refresh.includes(clear), `refreshAfterDelete lacks ${clear}`);
   assert.equal(refresh.includes("refreshAfterRebuild"), false, "rebuild's refresh re-fetches the deleted selection");
+  // In-flight range / open reads are invalidated too; the graph commit holds its own range id.
+  assert.match(refresh, /graphOpenRequestRef\.current \+= 1/);
+  assert.match(refresh, /const rangeRequestId = \+\+graphRangeRequestRef\.current/);
+  assert.match(refresh, /setRangeBusy\(false\)/);
+  assert.match(refresh, /if \(rangeRequestId !== graphRangeRequestRef\.current\) return;\s*setUnifiedGraph\(graph\)/);
+  assert.match(body("changeRange"), /requestId === graphRangeRequestRef\.current\) \{\s*setUnifiedGraph\(graph\)/);
   assert.match(refresh, /fetchUnifiedGraph\(owner\.notebookId, rangeLimitRef\.current\)/);
   assert.match(refresh, /fetchPendingMerges\(owner\.notebookId\)/);
   assert.match(refresh, /effectsRef\.current\.refreshNotebook\(owner\.notebookId, guard\)/);

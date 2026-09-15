@@ -13,6 +13,7 @@ import {
   KG_DELETE_UNOBSERVED,
   kgDeletePollOutcome,
   kgDeleteTerminalSettlement,
+  kgDeleteUnobservedOutcome,
 } from "../../features/kg-maintenance/kg-delete-status.ts";
 
 const base = {
@@ -88,6 +89,19 @@ test("终态回执只有 job_id 正是期望的那个才以它的名义结算", 
 
 test("静默收工：放掉忙碌位，但不刷新、不给结果", () => {
   assert.deepEqual(KG_DELETE_UNOBSERVED, { done: true, refresh: false, result: null });
+});
+
+test("没期望过的终态：确有删除跑完（非空 job_id 的 succeeded/failed）才刷新，仍不给结果；idle 是纯释放", () => {
+  for (const status of ["succeeded", "failed"]) {
+    assert.deepEqual(
+      kgDeleteUnobservedOutcome({ job_id: "kdj-other-tab", status }),
+      { done: true, refresh: true, result: null },
+      status,
+    );
+  }
+  assert.deepEqual(kgDeleteUnobservedOutcome({ job_id: "", status: "idle" }), KG_DELETE_UNOBSERVED);
+  // 防御：空 job_id 的终态说明不了任何一次具体的删除。
+  assert.deepEqual(kgDeleteUnobservedOutcome({ job_id: "", status: "succeeded" }), KG_DELETE_UNOBSERVED);
 });
 
 test("轮询尝试上限有界，超限回执中性（任务可能仍在跑，不说它失败了）", () => {

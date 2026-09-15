@@ -625,11 +625,10 @@ test("rebuild also re-claims its slot before a retry POST that follows an all-id
   expect(value!.graph.rebuilding).toBe(true);
 });
 
-test("an unknown adoption verdict never reports a stale succeeded from an earlier delete, and keeps the 409 text", async () => {
+async function refusedDeleteWithUnknownAdoption() {
   render(<Harness />);
   await waitFor(() => expect(kgApi.fetchKgDeleteStatus).toHaveBeenCalledOnce());
   vi.useFakeTimers();
-  const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
   kgApi.deleteKg.mockRejectedValueOnce(httpConflict());
   // 领养时删除状态探测偶发失败 → verdict unknown，本标签页什么都没开始、也没见过在跑的删除。
   kgApi.fetchKgDeleteStatus.mockRejectedValueOnce(new Error("probe down"));
@@ -638,6 +637,11 @@ test("an unknown adoption verdict never reports a stale succeeded from an earlie
   expect(kgApi.deleteKg).toHaveBeenCalledOnce();
   expect(value!.graph.deleting).toBe(true);
   expect(value!.graph.deleteResult).toEqual({ tone: "neutral", text: KG_DELETE_BUSY_MESSAGE });
+}
+
+test("an unknown adoption verdict never reports a stale succeeded's counts or overwrites the 409 text, but refreshes because a delete did run", async () => {
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+  await refusedDeleteWithUnknownAdoption();
 
   kgApi.fetchKgDeleteStatus.mockResolvedValue(deleteStatus("succeeded", {
     job_id: "delete-earlier-click", objects_deleted: 120,
@@ -646,9 +650,75 @@ test("an unknown adoption verdict never reports a stale succeeded from an earlie
   expect(value!.graph.deleting).toBe(false);
   expect(value!.graph.deleteResult).toEqual({ tone: "neutral", text: KG_DELETE_BUSY_MESSAGE });
   expect(notify.mock.calls.flat().some((message) => String(message).includes("已删除"))).toBe(false);
+  // 非空 job_id 的终态证明确有一次删除跑完（例如另一个标签页）：图谱变过，照删除后的样子刷新。
+  expect(kgApi.fetchUnifiedGraph).toHaveBeenCalledWith("notebook-a", 80);
+  expect(refreshAfterKgDelete).toHaveBeenCalledWith("notebook-a", expect.any(Function));
+  consoleError.mockRestore();
+});
+
+test("an unknown adoption verdict followed by idle is a pure release: no refresh, no result change", async () => {
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+  await refusedDeleteWithUnknownAdoption();
+
+  kgApi.fetchKgDeleteStatus.mockResolvedValue(deleteStatus("idle"));
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(value!.graph.deleting).toBe(false);
+  expect(value!.graph.deleteResult).toEqual({ tone: "neutral", text: KG_DELETE_BUSY_MESSAGE });
   expect(refreshAfterKgDelete).not.toHaveBeenCalled();
   expect(kgApi.fetchUnifiedGraph).not.toHaveBeenCalled();
+  expect(refreshNotebook).not.toHaveBeenCalled();
   consoleError.mockRestore();
+});
+
+test("the delete terminal refresh invalidates a slower in-flight range request so it cannot repaint the old graph", async () => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchKgDeleteStatus).toHaveBeenCalledOnce());
+  await act(async () => value!.openGraph());
+  vi.useFakeTimers();
+  const staleGraph: UnifiedGraphResp = {
+    nodes: [{ id: "deleted-node", object_type: "concept", payload: { name: "已删除" } }],
+    edges: [],
+  } as unknown as UnifiedGraphResp;
+  const rangePending = deferred<UnifiedGraphResp>();
+  kgApi.fetchUnifiedGraph.mockReturnValueOnce(rangePending.promise);
+  let changing!: Promise<void>;
+  act(() => { changing = value!.changeRange(0); });
+  expect(value!.graph.rangeBusy).toBe(true);
+
+  const freshGraph = graph();
+  kgApi.fetchUnifiedGraph.mockResolvedValueOnce(freshGraph);
+  kgApi.fetchKgDeleteStatus.mockResolvedValue(deleteStatus("succeeded", {
+    job_id: "delete-a", objects_deleted: 1,
+  }));
+  await act(async () => value!.startKgDelete("notebook-a"));
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(value!.graph.deleting).toBe(false);
+  expect(value!.graph.graph).toBe(freshGraph);
+  expect(value!.graph.rangeBusy).toBe(false);
+
+  await act(async () => rangePending.resolve(staleGraph));
+  await changing;
+  expect(value!.graph.graph).toBe(freshGraph);
+  expect(value!.graph.rangeBusy).toBe(false);
+});
+
+test("re-entering Knowledge right after an invalidation reloads with the status filter the dropdown still shows", async () => {
+  render(<Harness />);
+  await act(async () => value!.enterKnowledge());
+  await act(async () => { value!.selectKnowledgeStatus("draft"); });
+  await waitFor(() => expect(knowledgeApi.listKnowledge).toHaveBeenLastCalledWith(
+    "notebook-a", "concept", "draft", 0, 50,
+  ));
+  const listCalls = knowledgeApi.listKnowledge.mock.calls.length;
+
+  // 与删除知识图谱后的依赖刷新同一顺序：同一拍里先作废、再重新进入。
+  await act(async () => {
+    value!.invalidateKnowledge();
+    await value!.enterKnowledge();
+  });
+  expect(knowledgeApi.listKnowledge).toHaveBeenCalledTimes(listCalls + 1);
+  expect(knowledgeApi.listKnowledge).toHaveBeenLastCalledWith("notebook-a", "concept", "draft", 0, 50);
+  expect(value!.knowledge.statusFilter).toBe("draft");
 });
 
 test("a terminal status for a different job than the one submitted settles as unknown, never with its counts", async () => {
