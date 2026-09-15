@@ -414,6 +414,10 @@ class KnowledgeLifecycleService:
         # (从不中止)保持每一个直接构造本服务的既有测试字节不变——只有生产
         # wiring(RepositoryRuntime.wire_knowledge_lifecycle)传真实实现。
         notebook_deleting: Callable[[str], bool] = lambda _notebook_id: False,
+        # 维护任务状态轮询的廉价存在性检查:活着的笔记本行(缺失/墓碑即
+        # KeyError)。默认 None 退回 get_notebook(语义相同、更贵),生产
+        # wiring 传 notebook_store.get_row。
+        notebook_live_row: Callable[[str], Any] | None = None,
     ) -> None:
         self.settings = settings
         # batch-3-W1 T-5a (codex #663 R3 P2): the drain's row budget — one
@@ -503,7 +507,13 @@ class KnowledgeLifecycleService:
             # prepare_notebook_kg_job / standalone delete 侧。
             kg_build_active=lambda notebook_id: self._kg_build_active(
                 notebook_id),
+            # 删除知识图谱的准入另查持久 running 分析行(别的进程建的作业
+            # 看不见进程内标记)。
+            durable_build_running=lambda notebook_id: (
+                self.kg_build_jobs.has_running(notebook_id)
+            ),
             cross_admission_lock=self.kg_cross_admission_lock,
+            require_notebook=notebook_live_row,
         )
         # Private aliases remain for compatibility with characterization and
         # operational probes that inspect the shared registry by identity.
@@ -520,6 +530,7 @@ class KnowledgeLifecycleService:
             resolve_notebook_conflicts=lambda notebook_id: (
                 self.governance.resolve_notebook_conflicts(notebook_id)
             ),
+            require_notebook=notebook_live_row,
         )
 
     # ------------------------------------------------------------------

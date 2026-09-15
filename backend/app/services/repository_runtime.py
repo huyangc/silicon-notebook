@@ -2059,6 +2059,11 @@ class RepositoryRuntime:
                 lambda notebook_id: self.notebook_store.status_of(notebook_id)
                 in ("deleting", None)
             ),
+            # 维护任务状态轮询只需「活着的笔记本行在不在」:一次主键点查,
+            # 与 get_notebook 同一个活库谓词,缺失/墓碑同样 KeyError→404。
+            notebook_live_row=lambda notebook_id: self.notebook_store.get_row(
+                notebook_id
+            ),
         )
         self.scale_artifacts.lifecycle = self.knowledge_lifecycle
         # 批 3·W1 PR-3 Phase A: the delete-job runner needs BOTH legs of the

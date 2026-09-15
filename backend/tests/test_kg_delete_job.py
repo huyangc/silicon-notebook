@@ -64,8 +64,10 @@ def api(tmp_path, monkeypatch):
 
 
 def _seed_graph(repo, notebook_id: str) -> None:
-    """One user document with a KG object + relation and one hidden Memory
-    projection source with its own object + relation."""
+    """One user document with TWO KG objects and one relation, and one hidden
+    Memory projection source with its own object + relation. The document's
+    object and relation counts differ on purpose, so a swapped counter mapping
+    cannot pass."""
     now = _now()
     with repo._write() as db:
         for source_id, source_type in (
@@ -99,6 +101,13 @@ def _seed_graph(repo, notebook_id: str) -> None:
                 (f"rel-{source_id}", notebook_id, source_id,
                  f"ko-{source_id}", f"ko-{source_id}", now),
             )
+        db.execute(
+            "INSERT INTO knowledge_objects (id,notebook_id,object_type,"
+            "status,owner,payload,evidence,source_candidate_id,source_id,"
+            "created_at,updated_at) "
+            "VALUES (?,?,'concept','approved','','{}','[]',NULL,?,?,?)",
+            ("ko-src-doc-2", notebook_id, "src-doc", now, now),
+        )
 
 
 def _count(repo, sql: str, params: tuple) -> int:
@@ -155,12 +164,12 @@ def test_delete_removes_document_graph_keeps_sources_and_clears_build_summary(ap
     done = client.get(f"/api/notebooks/{nb}/kg/delete/status").json()
     assert done == {
         "job_id": body["job_id"], "notebook_id": nb, "status": "succeeded",
-        "running": False, "objects_deleted": 1, "relations_deleted": 1,
+        "running": False, "objects_deleted": 2, "relations_deleted": 1,
     }
     # Document-derived graph gone; Memory projection graph, sources and
     # parsed elements kept.
-    assert _count(repo, "SELECT COUNT(*) FROM knowledge_objects WHERE id=?",
-                  ("ko-src-doc",)) == 0
+    assert _count(repo, "SELECT COUNT(*) FROM knowledge_objects WHERE id "
+                  "IN ('ko-src-doc','ko-src-doc-2')", ()) == 0
     assert _count(repo, "SELECT COUNT(*) FROM knowledge_relations WHERE id=?",
                   ("rel-src-doc",)) == 0
     assert _count(repo, "SELECT COUNT(*) FROM knowledge_objects WHERE id=?",
@@ -318,6 +327,78 @@ def test_analysis_started_during_delete_is_refused_with_holder_delete(api):
                   (nb,)) == 0
 
 
+def test_durable_analysis_row_from_another_process_refuses_delete(api):
+    """A running ``kg_build_jobs`` row with no in-process marker — e.g. a
+    ``batch_ingest`` CLI analysis run alongside the backend — must refuse the
+    delete with the build 409 instead of draining what it is extracting. The
+    refused claim frees the slot and leaves the previous terminal delete
+    readable."""
+    client, repo, submitted = api
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    lifecycle = repo._runtime.knowledge_lifecycle
+    assert client.post(f"/api/notebooks/{nb}/kg/delete").status_code == 200
+    fn, args, _kwargs = submitted[0]
+    fn(*args)
+    finished = client.get(f"/api/notebooks/{nb}/kg/delete/status").json()
+    assert finished["status"] == "succeeded"
+
+    other_process_row = repo._runtime.kg_build_jobs.create_job(
+        nb, "", "incremental", 0
+    )
+    assert not lifecycle._kg_build_active(nb)
+
+    refused = client.post(f"/api/notebooks/{nb}/kg/delete")
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == "当前笔记本已有知识图谱分析任务正在运行"
+    assert len(submitted) == 1
+    assert lifecycle.kg_maintenance.active_kind(nb) is None
+    assert client.get(f"/api/notebooks/{nb}/kg/delete/status").json() == finished
+
+    assert repo._runtime.kg_build_jobs.finish(other_process_row["id"], "succeeded")
+    assert client.post(f"/api/notebooks/{nb}/kg/delete").status_code == 200
+
+
+def test_failing_durable_probe_revokes_the_claim(repo, monkeypatch):
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    lifecycle = repo._runtime.knowledge_lifecycle
+
+    def _unavailable(_notebook_id):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(repo._runtime.kg_build_jobs, "has_running", _unavailable)
+    with pytest.raises(RuntimeError):
+        repo.start_kg_delete(nb)
+    assert lifecycle.kg_maintenance.active_kind(nb) is None
+    assert repo.kg_delete_status(nb)["status"] == "idle"
+
+
+def test_maintenance_status_polls_check_the_live_row_not_the_full_summary(
+    repo, monkeypatch
+):
+    """Status views are polled (the delete poll every few seconds, and opening
+    a notebook reads three of them); each must not assemble a whole
+    NotebookSummary, yet a missing or tombstoned notebook still raises
+    KeyError (the routes' 404)."""
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+
+    def _summary_forbidden(_notebook_id):
+        raise AssertionError("a status poll built a NotebookSummary")
+
+    monkeypatch.setattr(repo._runtime.catalog, "get_notebook", _summary_forbidden)
+    for status in (
+        repo.kg_delete_status,
+        repo.notebook_relink_status,
+        repo.unified_kg_rebuild_status,
+    ):
+        assert status(nb)["status"] == "idle"
+    with pytest.raises(KeyError):
+        repo.kg_delete_status("nb-missing")
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET status='deleting' WHERE id=?", (nb,))
+    with pytest.raises(KeyError):
+        repo.kg_delete_status(nb)
+
+
 # ---------------------------------------------------------------------------
 # Worker body: fence, ordering and every exit path
 # ---------------------------------------------------------------------------
@@ -401,11 +482,11 @@ def test_successful_delete_emits_counts_only_event(repo, monkeypatch):
     job = repo.start_kg_delete(nb)
 
     assert repo.run_kg_delete_job(nb, job["job_id"]) == {
-        "objects_deleted": 1, "relations_deleted": 1,
+        "objects_deleted": 2, "relations_deleted": 1,
     }
     assert [e for e in events if e.get("kind") == "kg_deleted"] == [{
         "kind": "kg_deleted", "notebook_id": nb,
-        "objects_deleted": 1, "relations_deleted": 1,
+        "objects_deleted": 2, "relations_deleted": 1,
     }]
 
 
