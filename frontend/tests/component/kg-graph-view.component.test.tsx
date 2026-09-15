@@ -36,6 +36,8 @@ function graphView(overrides: Partial<Props["kgGraph"]> = {}): Props["kgGraph"] 
     conceptMembersLoadError: false,
     conceptMembersLoadingMore: false,
     decidingMerge: null,
+    deleteResult: null,
+    deleting: false,
     graph: null,
     merged: null,
     nodeContext: null,
@@ -76,6 +78,7 @@ function renderView(overrides: Partial<Props> = {}) {
     kgDetailRef: { current: null },
     readOnlyWorkspace: false,
     currentNotebookId: "nb-1",
+    kgReady: true,
     baseKgAvailable: false,
     scaleIndexStatus: null,
     openKgAnalysis: noop,
@@ -84,6 +87,7 @@ function renderView(overrides: Partial<Props> = {}) {
     relinkFromKgView: noop,
     confirmRefreshUnifiedKg: noop,
     startKgRebuild: noop,
+    confirmDeleteKg: noop,
     handleKgSearchChange: noop,
     changeKgRange: noop,
     toggleKgType: noop,
@@ -215,11 +219,81 @@ test("只读工作区看不到图谱处理、自动判重与逐行合并决定",
 
   expect(screen.queryByText("图谱处理")).toBeNull();
   expect(screen.queryByRole("button", { name: "补上关联" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "删除知识图谱" })).toBeNull();
   expect(screen.queryByRole("button", { name: "自动判重" })).toBeNull();
   expect(screen.queryByRole("button", { name: "全部自动判重" })).toBeNull();
   // 候选本身仍然看得见（只读成员可以知道有待确认项），只是没有决定入口。
   expect(screen.getByText(/A ↔ B/)).toBeTruthy();
   expect(screen.queryByRole("button", { name: "合并" })).toBeNull();
+});
+
+
+test("「删除知识图谱」排在「全部重新分析」之后，空闲时可点并交回注入的确认命令", async () => {
+  const confirmDeleteKg = vi.fn();
+  renderView({ confirmDeleteKg });
+
+  const actions = screen.getByText("图谱处理").parentElement!;
+  const labels = within(actions).getAllByRole("button").map((button) => button.textContent);
+  expect(labels).toEqual(["补上关联", "重新合并", "全部重新分析", "删除知识图谱"]);
+
+  const button = screen.getByRole("button", { name: "删除知识图谱" });
+  expect(button).toBeEnabled();
+  expect(button.className).toContain("kg-action-danger");
+  expect(button.getAttribute("title")).toBe("删除从来源分析出的知识图谱（来源保留，之后可重新整理；会先确认）");
+  await userEvent.click(button);
+  expect(confirmDeleteKg).toHaveBeenCalledTimes(1);
+  // 空闲、没有结果时按钮旁不留一行空的状态。
+  expect(screen.queryByRole("status")).toBeNull();
+});
+
+
+test("没有知识图谱时无可删除；任一维护/整理任务在跑时删除按钮禁用", () => {
+  const { unmount } = renderView({ kgReady: false });
+  expect(screen.getByRole("button", { name: "删除知识图谱" })).toBeDisabled();
+  unmount();
+
+  for (const busy of ["relinking", "rebuilding", "buildingKg"] as const) {
+    const view = renderView({ kgGraph: graphView({ [busy]: true }) });
+    expect(screen.getByRole("button", { name: "删除知识图谱" }), busy).toBeDisabled();
+    view.unmount();
+  }
+});
+
+
+test("删除在飞：按钮换成「删除中…」并禁用，同一维护槽的其余三颗也一并禁用", () => {
+  renderView({ kgGraph: graphView({ deleting: true }) });
+
+  expect(screen.queryByRole("button", { name: "删除知识图谱" })).toBeNull();
+  expect(screen.getByRole("button", { name: "删除中…" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "补上关联" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "重新合并" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "全部重新分析" })).toBeDisabled();
+});
+
+
+test("删除期间待确认合并的逐行决定也禁用（候选正被一并清掉）", () => {
+  const candidate: PendingMerge = { id: "m-1", canonical_a: "K-A", canonical_b: "K-B", score: 0.91, status: "pending" };
+  renderView({ kgGraph: graphView({ pendingMerges: [candidate], deleting: true }) });
+  const row = screen.getByText(/A ↔ B/).closest(".kg-merge-row") as HTMLElement;
+  expect(within(row).getByRole("button", { name: "合并" })).toBeDisabled();
+  expect(within(row).getByRole("button", { name: "拒绝" })).toBeDisabled();
+});
+
+
+test("删除结果画在按钮紧挨着的下一行（role=status），成功/失败/中性各自原样显示", () => {
+  const cases = [
+    { tone: "success", text: "已删除 12 个知识对象" },
+    { tone: "failed", text: "删除没有完成，请重试" },
+    { tone: "neutral", text: "删除状态未知，请刷新后查看" },
+  ] as const;
+  for (const result of cases) {
+    const view = renderView({ kgGraph: graphView({ deleteResult: result }) });
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent(result.text);
+    // 结果紧邻被按下的那颗按钮，而不是落在页面别处的横幅里。
+    expect(status.previousElementSibling).toBe(screen.getByRole("button", { name: "删除知识图谱" }));
+    view.unmount();
+  }
 });
 
 

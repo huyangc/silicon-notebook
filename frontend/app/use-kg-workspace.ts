@@ -12,7 +12,7 @@ import type { NotebookSummary } from "./workspace-model";
 // in three independently testable domain owners — `use-kg-knowledge.ts`
 // (rows / types / filter / paging / duplicates / context), `use-kg-schema.ts`
 // (graph object-type registry view + mutations) and `use-kg-graph.ts`
-// (unified graph, pending-merge review, durable build/relink/rebuild
+// (unified graph, pending-merge review, durable build/relink/rebuild/delete
 // tracking) — over the one shared actor + notebook + generation gate in
 // `use-kg-owner.ts`.
 //
@@ -35,6 +35,7 @@ type KgWorkspaceEffects = {
   reportError: (error: unknown) => void;
   refreshCollection: (guard: () => boolean) => Promise<void>;
   refreshNotebook: (notebookId: string, guard: () => boolean) => Promise<NotebookSummary>;
+  refreshAfterKgDelete: (notebookId: string, guard: () => boolean) => Promise<void>;
   focusGraphNode: (nodeId: string) => void;
 };
 
@@ -151,6 +152,7 @@ export function useKgWorkspace({
     decideMerge: graph.decideMerge,
     startRelink: graph.startRelink,
     startRebuild: graph.startRebuild,
+    startKgDelete: graph.startKgDelete,
     startKgBuild: graph.startKgBuild,
     observeNotebook: graph.observeNotebook,
     observeKgBuild: graph.observeKgBuild,

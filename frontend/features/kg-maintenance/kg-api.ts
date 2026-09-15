@@ -1,5 +1,6 @@
 import { requestJson } from "../../app/api-client.ts";
 import type { UnifiedKgRebuildStatus } from "./kg-rebuild-status.ts";
+import type { KgDeleteStatus } from "./kg-delete-status.ts";
 import type { RelinkStatus } from "./kg-relink-status.ts";
 import type { ScaleIndexStatus } from "../../app/scale-index.ts";
 import type {
@@ -70,6 +71,17 @@ export const relinkKg = (nb: string) =>
 
 export const fetchRelinkStatus = (nb: string) =>
   requestJson<RelinkStatus>(`/notebooks/${nb}/kg/relink/status`, options);
+
+// 「删除知识图谱」同样是后台任务,与「补上关联」「重新合并」共用一个维护槽:POST 只认领
+// 任务槽并返回 job_id(`status: "deleting"`),删了多少要等 delete/status 报出终态。
+export const deleteKg = (nb: string) =>
+  requestJson<KgBuildStartResponse>(
+    `/notebooks/${nb}/kg/delete`,
+    { ...options, method: "POST" },
+  );
+
+export const fetchKgDeleteStatus = (nb: string) =>
+  requestJson<KgDeleteStatus>(`/notebooks/${nb}/kg/delete/status`, options);
 
 export const rebuildScaleIndex = (
   nb: string,
