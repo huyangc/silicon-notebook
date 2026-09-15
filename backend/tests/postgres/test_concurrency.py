@@ -5,6 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -644,6 +645,229 @@ def test_guarded_report_detail_locks_group_read_authority_postgres(
         report_id, actor_id=reader, reader_id=None
     ) as snapshot:
         assert snapshot["content_md"] == "group protected report"
+
+
+def _patient_postgres_database(postgres_settings):
+    """A second pool whose timeouts outlast a deliberate lock-wait pause.
+
+    The shared fixture caps ``lock_timeout`` at one second. The root-order
+    probes below keep a detail call parked on the notebook row while a third
+    connection probes the child row, so the parked statement must not time
+    out underneath that orchestration on a loaded runner.
+    """
+    from app.repositories.postgres.database import PostgresDatabase
+
+    return PostgresDatabase(
+        postgres_settings.model_copy(
+            update={
+                "postgres_pool_acquire_timeout_seconds": 5,
+                "postgres_statement_timeout_seconds": 15,
+                "postgres_lock_timeout_seconds": 15,
+            }
+        ),
+        Path(__file__).resolve().parents[3],
+    )
+
+
+def _wait_for_notebook_root_wait(inspector, blocker_pid: int, future) -> None:
+    """Wait until some backend is parked on ``blocker_pid``'s notebook row lock.
+
+    Observable in both catalogs: ``pg_stat_activity`` shows the root-lease
+    statement waiting on a lock held by the blocker, and ``pg_locks`` shows
+    the waiter holding the heavyweight tuple lock on a ``notebooks`` row (the
+    lock a row-lock waiter takes before it waits on the holder's xid).
+    """
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if future.done():
+            raise AssertionError(
+                "detail finished without waiting on the notebook root lease: "
+                f"{future.result()!r}"
+            )
+        waiter = inspector.execute(
+            "SELECT pid, query FROM pg_stat_activity "
+            "WHERE wait_event_type='Lock' AND state='active' "
+            "AND %s = ANY(pg_blocking_pids(pid))",
+            (blocker_pid,),
+        ).fetchone()
+        if waiter is not None:
+            assert "FROM notebooks" in waiter["query"], waiter["query"]
+            assert "FOR KEY SHARE" in waiter["query"], waiter["query"]
+            assert inspector.execute(
+                "SELECT 1 FROM pg_locks WHERE pid=%s AND locktype='tuple' "
+                "AND relation='notebooks'::regclass",
+                (waiter["pid"],),
+            ).fetchone() is not None, "waiter holds no notebooks tuple lock"
+            return
+        time.sleep(0.01)
+    raise AssertionError("detail never waited on the notebook root lease")
+
+
+def _park_detail_on_root_and_probe_child_row(
+    postgres_database,
+    *,
+    notebook_id: str,
+    child_row_sql: str,
+    child_row_id: str,
+    read_detail,
+):
+    """Prove a guarded detail leases the notebook root before its child row.
+
+    Whole-notebook deletion locks ``notebooks FOR UPDATE`` and only then the
+    child rows (``ask_jobs``/``reports``) ``FOR UPDATE``. A detail that took
+    any lock on its child row before the root lease would, racing that delete,
+    hold the child while waiting for the root the deleter holds while waiting
+    for the child: ``DeadlockDetected``. The snapshot-time tests above stay
+    green under that inversion because they only observe locks held after
+    the snapshot is yielded, so this pins the acquisition order itself.
+
+    A blocker plays the deleter's first step (root ``FOR UPDATE``) and stops.
+    The detail must park on the ``notebooks`` row, and right then a third
+    connection's ``FOR UPDATE NOWAIT`` on the child row -- the deleter's second
+    step -- must succeed. Releasing the blocker lets the detail complete.
+    """
+    import psycopg
+    from psycopg.rows import dict_row
+
+    url = postgres_database._database_url
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with psycopg.connect(url, row_factory=dict_row) as blocker, psycopg.connect(
+            url, row_factory=dict_row
+        ) as prober, psycopg.connect(
+            url, autocommit=True, row_factory=dict_row
+        ) as inspector:
+            assert blocker.execute(
+                "SELECT id FROM notebooks WHERE id=%s FOR UPDATE", (notebook_id,)
+            ).fetchone() is not None
+            detail_future = executor.submit(read_detail)
+            try:
+                _wait_for_notebook_root_wait(
+                    inspector, blocker.info.backend_pid, detail_future
+                )
+                try:
+                    probed = prober.execute(
+                        f"{child_row_sql} FOR UPDATE NOWAIT", (child_row_id,)
+                    ).fetchone()
+                except psycopg.errors.LockNotAvailable as exc:
+                    raise AssertionError(
+                        "detail locked its child row before the notebook root "
+                        "lease; a concurrent notebook delete would deadlock"
+                    ) from exc
+                assert probed is not None
+                prober.rollback()
+            finally:
+                blocker.rollback()
+        return detail_future.result(timeout=15)
+
+
+@pytest.mark.postgres_integration
+def test_guarded_report_detail_leases_root_before_report_row_postgres(
+    postgres_database, postgres_settings
+):
+    from app.repositories.postgres.report_store import ReportStore
+
+    assert PostgresMigrator(postgres_database).migrate() == 53
+    seeding, report_id, owner, now = _guard_report_fixture(
+        postgres_database, prefix="guard-report-order", reader=False
+    )
+    seeding.update_report(
+        "guard-report-order-nb", report_id, content_md="ordered report body"
+    )
+    patient = _patient_postgres_database(postgres_settings)
+    try:
+        reports = ReportStore(
+            patient,
+            new_id=lambda kind: f"{kind}-guard-report-order-unused",
+            now=lambda: now,
+            current_user_id=lambda: owner,
+        )
+
+        def read_detail():
+            with reports.guarded_report_detail(
+                report_id, actor_id=owner, reader_id=None
+            ) as snapshot:
+                return snapshot["report_id"], snapshot["content_md"]
+
+        result = _park_detail_on_root_and_probe_child_row(
+            postgres_database,
+            notebook_id="guard-report-order-nb",
+            child_row_sql="SELECT id FROM reports WHERE id=%s",
+            child_row_id=report_id,
+            read_detail=read_detail,
+        )
+    finally:
+        patient.close()
+    assert result == (report_id, "ordered report body")
+
+
+@pytest.mark.postgres_integration
+def test_guarded_ask_detail_leases_root_before_job_row_postgres(
+    postgres_database, postgres_settings
+):
+    assert PostgresMigrator(postgres_database).migrate() == 53
+    now = "2026-08-31T12:00:00+00:00"
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
+            "VALUES ('ask-order-owner','ask-order@x','Ask Order','user',%s,%s)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_by,status,created_at,updated_at) "
+            "VALUES ('ask-order-nb','Ask Order','ask-order-owner','ready',%s,%s)",
+            (now, now),
+        )
+
+    counter = iter(range(1, 20))
+    patient = _patient_postgres_database(postgres_settings)
+    try:
+        asks = AskStateStore(
+            patient,
+            RepositoryCompatibilitySeams(
+                new_id=lambda prefix: f"{prefix}-ask-order-{next(counter)}",
+                now=lambda: now,
+                copy_chunk_size=lambda: 100,
+                remap_json_ids=lambda value, _mapping: value,
+                in_chunk_size=lambda: 100,
+            ),
+        )
+        request = AskRequest(question="root before job row")
+        job_id, conversation_id = asks.begin_durable_job(
+            "ask-order-nb", request, "chunk", "ask-order-owner"
+        )
+        assert asks.save_answer_for_job(
+            job_id,
+            "ask-order-nb",
+            conversation_id,
+            request.question,
+            AskResponse(
+                answer="ordered answer",
+                conclusion="ordered answer",
+                citations=[],
+                anchors=[],
+            ),
+            "ask-order-owner",
+        )
+
+        def read_detail():
+            with asks.guarded_ask_detail(
+                job_id, actor_id="ask-order-owner", reader_id=None
+            ) as snapshot:
+                return (
+                    snapshot["job"]["job_id"],
+                    snapshot["answer_detail"]["payload"]["answer"],
+                )
+
+        result = _park_detail_on_root_and_probe_child_row(
+            postgres_database,
+            notebook_id="ask-order-nb",
+            child_row_sql="SELECT id FROM ask_jobs WHERE id=%s",
+            child_row_id=job_id,
+            read_detail=read_detail,
+        )
+    finally:
+        patient.close()
+    assert result == (job_id, "ordered answer")
 
 
 @pytest.mark.postgres_integration

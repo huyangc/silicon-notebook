@@ -1207,9 +1207,11 @@ class QueryStore:
                         r["source_id"], r["error_message"] or ""
                     )
 
-            # 3. 报告:与提问同口径(created_by + 自有笔记本)。understanding_json 一并
-            # 带出仅用于 Python 侧提取 generation_started_at(镜像 ReportStore.
-            # row_to_dict 同一套 jsonb 提取,不发明第二套写法),本身不作为返回字段。
+            # 3. 报告:混合流与显式选库 owner-only;无 notebook_id 的只看报告按
+            # created_by(本人叠加实时读权,管理员不叠加),与提问概览同口径。
+            # understanding_json 一并带出仅用于 Python 侧提取 generation_started_at
+            # (镜像 ReportStore.row_to_dict 同一套 jsonb 提取,不发明第二套写法),
+            # 本身不作为返回字段。
             report_rows = []
             if activity_type in (None, "report") and (
                 all_report_submissions or owned_notebook_ids
