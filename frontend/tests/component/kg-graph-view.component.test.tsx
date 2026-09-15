@@ -129,10 +129,21 @@ test("画布四态各渲染自己的曲面，只有 graph 态才挂 ForceGraph2D
   expect(screen.queryByTestId("force-graph")).toBeNull();
   unavailable.unmount();
 
+  // empty 态按成因分三句：只有真在搜索时才提示「清空搜索」；删除知识图谱或从没整理过
+  // 的库既没搜索也没过滤，那句提示永远兑现不了。
   const empty = renderView({ kgCanvas: "empty" });
-  expect(screen.getByText("没有匹配的节点。清空搜索后可查看完整图谱。")).toBeTruthy();
+  expect(screen.getByText("还没有知识图谱内容。整理来源后会显示在这里。")).toBeTruthy();
+  expect(screen.queryByText("没有匹配的节点。清空搜索后可查看完整图谱。")).toBeNull();
   expect(screen.queryByTestId("force-graph")).toBeNull();
   empty.unmount();
+
+  const emptySearch = renderView({ kgCanvas: "empty", kgSearching: true });
+  expect(screen.getByText("没有匹配的节点。清空搜索后可查看完整图谱。")).toBeTruthy();
+  emptySearch.unmount();
+
+  const emptyFiltered = renderView({ kgCanvas: "empty", kgGraph: graphView({ selectedTypes: ["claim"] }) });
+  expect(screen.getByText("当前类型过滤下没有节点。清除过滤后可查看完整图谱。")).toBeTruthy();
+  emptyFiltered.unmount();
 
   renderView({ kgCanvas: "graph" });
   expect(screen.getByTestId("force-graph")).toBeTruthy();

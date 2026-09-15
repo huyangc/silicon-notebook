@@ -584,7 +584,15 @@ export function KgGraphView({
             <p style={{ marginTop: 6 }}>这一次打开不会在后台生成预览；其余功能不受影响</p>
           </div>
         ) : kgCanvas === "empty" ? (
-          <p className="tool-hint kg-canvas-empty">没有匹配的节点。清空搜索后可查看完整图谱。</p>
+          // 零可见节点有三种成因，文案只说此刻真实的那一个：「清空搜索」只在确有搜索时
+          // 才兑现得了——删除知识图谱之后、或从没整理过的库，这句话永远做不到。
+          <p className="tool-hint kg-canvas-empty">
+            {kgSearching
+              ? "没有匹配的节点。清空搜索后可查看完整图谱。"
+              : kgGraph.selectedTypes.length > 0
+                ? "当前类型过滤下没有节点。清除过滤后可查看完整图谱。"
+                : "还没有知识图谱内容。整理来源后会显示在这里。"}
+          </p>
         ) : (
           <ForceGraph2D
             ref={kgGraphRef}
