@@ -525,7 +525,7 @@ def _guard_report_fixture(postgres_database, *, prefix: str, reader: bool):
 def test_guarded_report_detail_holds_root_lease_through_projection_postgres(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 53
+    assert PostgresMigrator(postgres_database).migrate() == 54
     reports, report_id, owner, now = _guard_report_fixture(
         postgres_database, prefix="guard-report", reader=False
     )
@@ -569,7 +569,7 @@ def test_guarded_report_detail_holds_root_lease_through_projection_postgres(
 def test_guarded_report_detail_freezes_report_row_through_projection_postgres(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 53
+    assert PostgresMigrator(postgres_database).migrate() == 54
     reports, report_id, owner, _now = _guard_report_fixture(
         postgres_database, prefix="guard-report-row", reader=False
     )
@@ -609,7 +609,7 @@ def test_guarded_report_detail_freezes_report_row_through_projection_postgres(
 def test_guarded_report_detail_locks_group_read_authority_postgres(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 53
+    assert PostgresMigrator(postgres_database).migrate() == 54
     reports, report_id, reader, _now = _guard_report_fixture(
         postgres_database, prefix="guard-report-access", reader=True
     )
@@ -766,7 +766,7 @@ def test_guarded_report_detail_leases_root_before_report_row_postgres(
 ):
     from app.repositories.postgres.report_store import ReportStore
 
-    assert PostgresMigrator(postgres_database).migrate() == 53
+    assert PostgresMigrator(postgres_database).migrate() == 54
     seeding, report_id, owner, now = _guard_report_fixture(
         postgres_database, prefix="guard-report-order", reader=False
     )
@@ -804,7 +804,7 @@ def test_guarded_report_detail_leases_root_before_report_row_postgres(
 def test_guarded_ask_detail_leases_root_before_job_row_postgres(
     postgres_database, postgres_settings
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 53
+    assert PostgresMigrator(postgres_database).migrate() == 54
     now = "2026-08-31T12:00:00+00:00"
     with postgres_database.write() as connection:
         connection.execute(
