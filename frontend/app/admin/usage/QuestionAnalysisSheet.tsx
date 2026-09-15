@@ -6,10 +6,12 @@ import { ActivityView } from "../../dev/logs/activity/ActivityView.tsx";
 import type { ActivityTypeOption } from "../../dev/logs/activity/ActivityStream.tsx";
 import type { AdminUserUsage } from "./api.ts";
 
-// 模块级常量:引用必须稳定——ActivityView 只在**挂载**时读它算初始 activityType,
-// 若在这里写成内联字面量,ownerId/users 变化触发的每次重渲染都会传入一个新数组,
-// 与「点击「深度报告」后状态保持」并不冲突(ActivityView 不再按引用订阅这个 prop
-// 变化),但避免不必要的重建仍是更干净的写法。
+// 模块级常量:不是因为引用必须稳定——ActivityView 用 useState 的惰性初始值只在
+// **挂载**那一刻读一次 activityTypeOptions 算初始 activityType(见其
+// `useState(() => initialActivityType(activityTypeOptions))`),此后 ownerId/users
+// 变化触发的重渲染即便传入一个新数组引用,也不会被那次挂载后的重渲染重新读取,
+// 「点击「深度报告」后状态保持」因此不依赖这里的引用是否稳定。放在模块级只是
+// 省掉每次渲染重新分配这个字面量数组。
 const QUESTION_ANALYSIS_ACTIVITY_TYPES: ActivityTypeOption[] = [
   { value: "ask", label: "问答" },
   { value: "report", label: "深度报告" },

@@ -119,7 +119,6 @@ export function ActivityStream({
   loading,
   identityErrored,
   now,
-  showTypeFilter = true,
   typeOptions = DEFAULT_ACTIVITY_TYPE_OPTIONS,
 }: {
   items: ActivityItem[];
@@ -136,7 +135,6 @@ export function ActivityStream({
    *  不能断言这个范围里没有活动记录，错误已经在页面顶部显示。 */
   identityErrored?: boolean;
   now?: Date;
-  showTypeFilter?: boolean;
   /** 允许的活动类型子集(每项含 value/label)。省略时用默认四选一(含「全部」)。 */
   typeOptions?: ActivityTypeOption[];
 }) {
@@ -146,7 +144,7 @@ export function ActivityStream({
         <div className="activity-col-head">
           {activityType === "ask" ? "提问概览" : activityType === "report" ? "报告概览" : "活动"}
         </div>
-        {showTypeFilter && <div className="activity-type-filter" aria-label="按活动类型筛选" role="group">
+        <div className="activity-type-filter" aria-label="按活动类型筛选" role="group">
           {typeOptions.map((option) => (
             <button
               aria-pressed={activityType === option.value}
@@ -159,7 +157,7 @@ export function ActivityStream({
               {option.label}
             </button>
           ))}
-        </div>}
+        </div>
         {activityFailure ? (
           <div className="activity-type-feedback" role="alert">
             <span>{activityFailure}</span>

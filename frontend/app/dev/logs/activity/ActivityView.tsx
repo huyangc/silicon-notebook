@@ -134,6 +134,18 @@ export function ActivityView({
   const [error, setError] = useState("");
 
   const [selected, setSelected] = useState<ActivityItem | null>(null);
+  // 选中项被选中**那一刻**的 owner——不是当前 `userId`。换用户与「点某一行」是两个
+  // 独立的状态更新源,同一次 commit 里可能出现 userId 已经是新用户、但 `selected`
+  // 仍是旧用户那一项的窗口(reload() 里的 setSelected(null) 要等下一轮渲染才生效)。
+  // 下面两个详情 effect 靠这个字段而不是 `userId` 本身来判断"这次选中到底是不是
+  // 冲着当前用户来的",避免在这个窗口期把旧项的 id 发给新用户的详情端点。
+  const [selectedOwnerId, setSelectedOwnerId] = useState("");
+  // 重新点同一行必须能重试:selectItem 传回的是同一个对象引用时 React 会按
+  // Object.is 拦掉这次 setSelected,下面两个详情 effect 的依赖数组因此不会变化、
+  // 不会重新发请求——而错误文案写的正是"请重试"。这个计数器只在"重新点的还是当前
+  // 选中项、且它已经有一条详情错误"时才递增,逼 effect 重跑;成功态下重复点击
+  // 不受影响(不产生多余请求)。
+  const [detailAttempt, setDetailAttempt] = useState(0);
   const [askDetail, setAskDetail] = useState<AskDetail | null>(null);
   const [askDetailLoading, setAskDetailLoading] = useState(false);
   const [askDetailError, setAskDetailError] = useState("");
@@ -153,10 +165,16 @@ export function ActivityView({
   const userIdRef = useRef(userId);
   const expandedRef = useRef(expanded);
   const sourcesRef = useRef(sources);
+  const selectedRef = useRef(selected);
+  const askDetailErrorRef = useRef(askDetailError);
+  const reportDetailErrorRef = useRef(reportDetailError);
   streamScopeRef.current = streamScopeKey;
   userIdRef.current = userId;
   expandedRef.current = expanded;
   sourcesRef.current = sources;
+  selectedRef.current = selected;
+  askDetailErrorRef.current = askDetailError;
+  reportDetailErrorRef.current = reportDetailError;
 
   const streamGenerationRef = useRef(0);
   const detailGenerationRef = useRef(0);
@@ -219,6 +237,7 @@ export function ActivityView({
     setCursor(null);
     setHasMore(false);
     setSelected(null);
+    setSelectedOwnerId("");
     setAskDetail(null);
     setAskDetailError("");
     setAskDetailLoading(false);
@@ -432,7 +451,19 @@ export function ActivityView({
   }, []);
 
   const selectItem = useCallback((item: ActivityItem) => {
+    const previous = selectedRef.current;
+    const reselecting = previous != null && activityKey(previous) === activityKey(item);
+    const hasExistingError = item.type === "ask" ? Boolean(askDetailErrorRef.current)
+      : item.type === "report" ? Boolean(reportDetailErrorRef.current)
+      : false;
+    // 重新点同一行、且它已经带着一条详情错误:这个 setSelected 传的是同一个对象
+    // 引用,下面两个详情 effect 不会因为 `selected` 变化而重跑,只能靠这个计数器
+    // 逼它们重跑,不然错误文案里的"请重试"没法兑现。
+    if (reselecting && hasExistingError) {
+      setDetailAttempt((count) => count + 1);
+    }
     setSelected(item);
+    setSelectedOwnerId(userIdRef.current);
   }, []);
 
   // 左栏与中栏选中的是同一种形状（source-view.tsx::toActivitySource 收敛），右栏因此
@@ -440,6 +471,7 @@ export function ActivityView({
   // 入口显示两种时间格式、乃至两个日期。
   const selectSource = useCallback((source: ActivitySource) => {
     setSelected(source);
+    setSelectedOwnerId(userIdRef.current);
   }, []);
 
   useEffect(() => {
@@ -493,6 +525,7 @@ export function ActivityView({
         if (!fresh()) return;
         sourceTargetFailedRef.current = false;
         setSelected(source);
+        setSelectedOwnerId(userId);
       })
       .catch((cause) => {
         if (!fresh()) return;
@@ -510,7 +543,11 @@ export function ActivityView({
   }, [reload]);
 
   useEffect(() => {
-    if (!selected || selected.type !== "ask" || !userId) {
+    // selectedOwnerId !== userId:选中项是在切换用户前选的,这一次 commit 里
+    // `selected` 还没被 reload() 清掉,但它属于上一个用户——绝不能把它的 id
+    // 发给新用户的详情端点(会白占一次后端写锁,见 ActivityView 顶部这个 effect
+    // 对应改动的提交说明)。
+    if (!selected || selected.type !== "ask" || !userId || selectedOwnerId !== userId) {
       setAskDetail(null);
       setAskDetailLoading(false);
       setAskDetailError("");
@@ -541,13 +578,18 @@ export function ActivityView({
         if (!fresh()) return;
         setAskDetailLoading(false);
       });
-  }, [selected, userId]);
+    // detailAttempt:重新点同一条已失败的提问必须重新发请求(selectItem 里的
+    // 计数器逼这里重跑,见其注释)。
+  }, [selected, userId, selectedOwnerId, detailAttempt]);
 
   // 与上面的提问详情同一套竞态守卫(detailGenerationRef + streamScopeRef):换选中项/
   // 换用户/换类型/换笔记本都会让 requestedScopeKey 或 generation 失配,迟到的响应
   // 被这里的 fresh() 挡住,不会覆盖新范围下已经渲染的内容。
   useEffect(() => {
-    if (!selected || selected.type !== "report" || !userId) {
+    // 与上面提问详情 effect 同一条理由:selectedOwnerId 与 userId 不一致说明
+    // `selected` 还是切换用户前选的那一项,这次 commit 绝不能拿它的 id 去请求
+    // 新用户的报告详情端点。
+    if (!selected || selected.type !== "report" || !userId || selectedOwnerId !== userId) {
       setReportDetail(null);
       setReportDetailLoading(false);
       setReportDetailError("");
@@ -578,7 +620,9 @@ export function ActivityView({
         if (!fresh()) return;
         setReportDetailLoading(false);
       });
-  }, [selected, userId]);
+    // detailAttempt:重新点同一条已失败的报告必须重新发请求(selectItem 里的
+    // 计数器逼这里重跑,见其注释)。
+  }, [selected, userId, selectedOwnerId, detailAttempt]);
 
   const selectedKey = selected ? activityKey(selected) : "";
 
