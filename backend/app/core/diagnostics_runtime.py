@@ -124,6 +124,8 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("kg", "rebuild"),
     ("kg", "relink"),
     ("kg", "relink", "status"),
+    ("kg", "delete"),
+    ("kg", "delete", "status"),
     ("kg", "conflicts", "resolve"),
     ("kg", "conflicts", "pending"),
     ("kg", "conflicts", None, "confirm"),

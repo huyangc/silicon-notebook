@@ -188,6 +188,28 @@ class KgBuildJobStore:
             )
         return cursor.rowcount == 1
 
+    def clear_terminal_jobs(self, notebook_id: str) -> int:
+        """Mark this notebook's finished jobs as describing a deleted graph.
+
+        Called by the 「删除知识图谱」 maintenance job before it drains the
+        graph, so the notebook summary stops narrating the previous build's
+        result (``notebook_catalog.kg_build_status`` projects a ``cleared``
+        latest row as "no build"). Rows are kept — admin usage counts them —
+        and only ``stage`` / ``updated_at`` change. A ``running`` row is never
+        touched: every job-store CAS carries ``status='running'`` and owns
+        that row until it settles. Because those CAS writes never match a
+        terminal row, the mark is permanent; already-cleared rows are skipped
+        so a repeated delete only rewrites newer history. Returns the number of
+        rows marked."""
+        with self.database.write() as connection:
+            cursor = connection.execute(
+                "UPDATE kg_build_jobs SET stage='cleared',updated_at=%s "
+                "WHERE notebook_id=%s AND status<>'running' "
+                "AND stage<>'cleared'",
+                (self.now(), notebook_id),
+            )
+        return int(cursor.rowcount)
+
     @staticmethod
     def _source_snapshot(connection, notebook_id: str, *, lock: bool) -> list[dict]:
         rows = connection.execute(

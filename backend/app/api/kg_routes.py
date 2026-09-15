@@ -38,10 +38,11 @@ from app.services.knowledge_contracts import (
 router = APIRouter()
 
 
-# 「补上关联」与「重新合并」共用一个 per-notebook 单飞槽(两者都重写派生的聚类/板块
-# 产物,见 KgMaintenanceAlreadyRunning)。409 必须点名**真正占着槽**的那个动作,否则
+# 「补上关联」「重新合并」「删除知识图谱」共用一个 per-notebook 单飞槽(前两者重写
+# 派生的聚类/板块产物,第三个删掉它们读的整张图,见 KgMaintenanceAlreadyRunning)。
+# 409 必须点名**真正占着槽**的那个动作,否则
 # 用户会盯着自己没点过的按钮等——所以文案按 holder 分支,而不是按被拒的那个端点写死。
-# 用词与按钮上的界面词逐字一致;三条都是中文字面量而不是查一张表,好让
+# 用词与按钮上的界面词逐字一致;每条都是中文字面量而不是查一张表,好让
 # test_user_error 的 AST 守卫能直接看见它们(动态实参那条路要登记进 allowlist,
 # 为省三行重复而换来一条豁免不划算)。
 def _kg_maintenance_busy(exc: KgMaintenanceAlreadyRunning) -> HTTPException:
@@ -49,6 +50,8 @@ def _kg_maintenance_busy(exc: KgMaintenanceAlreadyRunning) -> HTTPException:
         return user_error(409, "当前笔记本正在重新合并，请等它完成")
     if exc.holder == "relink":
         return user_error(409, "当前笔记本正在补上关联，请等它完成")
+    if exc.holder == "delete":
+        return user_error(409, "当前笔记本正在删除知识图谱，请等它完成")
     if exc.holder == "buildkg":
         # 批 3·W2 §2.1:维护动作被在飞的分析作业闸住——文案与 build 侧
         # 409 逐字同款,用户等的是同一件事。
@@ -206,6 +209,66 @@ def relink_kg_status(notebook_id: str) -> dict:
     """
     try:
         return repository().notebook_relink_status(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.post("/notebooks/{notebook_id}/kg/delete", dependencies=[Depends(require_notebook_capability("kg:write"))])
+def delete_kg(notebook_id: str) -> dict:
+    """「删除知识图谱」(background thread). Same shape as kg/relink above.
+
+    Deletes the notebook's source-derived KG (objects, relations, concept
+    merges, KG analysis) while keeping sources and their parsed elements, so the
+    notebook can be analysed again later. It runs off the request thread because
+    the delete drains the graph in bounded pages — proportional to the notebook,
+    not to the click. No LLM gate: deleting needs no model. Single flight is the
+    KG-maintenance slot shared with relink and 重新合并 (409 naming the holder,
+    see `_kg_maintenance_busy`); a running analysis job refuses it with the
+    build-vocabulary 409, and an analysis started while it runs is refused with
+    holder "delete".
+    """
+    repo = repository()
+    try:
+        repo.get_notebook(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    try:
+        job = repo.start_kg_delete(notebook_id)
+    except KgMaintenanceAlreadyRunning as exc:
+        raise _kg_maintenance_busy(exc)
+    try:
+        background_jobs.submit(
+            repo.run_kg_delete_job,
+            notebook_id,
+            job["job_id"],
+            name=f"deletekg-{notebook_id}",
+        )
+    except Exception:
+        repo.fail_kg_delete_submission(notebook_id, job["job_id"])
+        raise
+    return {
+        "status": "deleting",
+        "notebook_id": notebook_id,
+        "job_id": job["job_id"],
+    }
+
+
+@router.get(
+    "/notebooks/{notebook_id}/kg/delete/status",
+    dependencies=[Depends(require_notebook_read)],
+)
+def delete_kg_status(notebook_id: str) -> dict:
+    """Latest KG-delete state for this notebook — the browser's completion signal.
+
+    Returns `{job_id, notebook_id, status, running, objects_deleted,
+    relations_deleted}`; ``status`` is one of running / succeeded / failed /
+    idle, where ``idle`` covers "never ran here", "the process restarted" and
+    "the shared slot is held by another maintenance kind", so a bounded poll
+    always terminates. Counters are zero until a run succeeds. No error text
+    crosses this boundary — diagnostics stay in the event log.
+    """
+    try:
+        return repository().kg_delete_status(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 

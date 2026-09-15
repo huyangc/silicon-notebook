@@ -2136,8 +2136,8 @@ class RepositoryRuntime:
             runtime.building.discard(notebook_id)
 
     def _notebook_kg_maintenance_running(self, notebook_id: str) -> bool:
-        """Quiesce leg B (§T-3.3): true while EITHER the relink/rebuild slot
-        or the conflict-detection slot's ``KgMaintenanceJobs.jobs`` dict
+        """Quiesce leg B (§T-3.3): true while EITHER the relink/rebuild/KG-delete
+        slot or the conflict-detection slot's ``KgMaintenanceJobs.jobs`` dict
         reports a 'running' entry for this notebook. Process-local by design
         -- see ``services/kg/maintenance_jobs.py``'s own module docstring
         for the "production runs one worker" deployment contract this leg

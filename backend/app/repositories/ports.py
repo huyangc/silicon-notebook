@@ -208,10 +208,12 @@ class KgMaintenanceAlreadyRunning(RuntimeError):
     rewrites ``concept_clusters`` and the community partition wholesale while
     relink appends edges to the very graph that clustering reads. Letting them
     overlap does not just double the cost, it lets one pass publish over inputs
-    the other is still consuming. ``holder`` says which kind currently owns the
+    the other is still consuming. The editor-facing whole-notebook KG delete
+    (「删除知识图谱」) is a third kind in the same slot: it removes the graph both
+    passes read and rewrite. ``holder`` says which kind currently owns the
     slot so the 409 can name the action the user actually has to wait for; the
-    two status views each report only their own kind and answer ``idle``
-    otherwise, so neither poll can be parked on the other's job.
+    status views each report only their own kind and answer ``idle``
+    otherwise, so no poll can be parked on another kind's job.
 
     In-process rather than durable on purpose: neither pass has an LLM precondition
     deterministic work, so they do not belong in ``kg_build_jobs`` (whose
@@ -222,7 +224,8 @@ class KgMaintenanceAlreadyRunning(RuntimeError):
     def __init__(self, notebook_id: str, holder: str) -> None:
         super().__init__(notebook_id)
         self.notebook_id = notebook_id
-        # "relink" | "rebuild" — the kind of pass currently holding the slot.
+        # "relink" | "rebuild" | "delete" — the kind of pass currently holding
+        # the slot ("buildkg" when an analysis job refused a maintenance claim).
         # Required, not defaulted: a default would let a future raise site tell
         # the user to wait on an action that is not the one running.
         self.holder = holder
@@ -1114,6 +1117,12 @@ class KgBuildJobStorePort(Protocol):
         error_code: str = "",
         error_message: str = "",
     ) -> bool: ...
+    def clear_terminal_jobs(self, notebook_id: str) -> int:
+        """把该笔记本所有非 running 且尚未 cleared 的作业行标成
+        ``stage='cleared'``(只改 stage/updated_at,不删行——管理员用量按行计数),
+        返回标记行数。「删除知识图谱」在排空图之前调用,使笔记本摘要不再复述
+        上一次分析的结果;running 行永不触碰。"""
+        ...
     def begin_indexing_pipeline_stage(
         self,
         job_id: str,
