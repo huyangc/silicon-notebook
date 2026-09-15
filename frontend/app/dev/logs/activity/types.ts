@@ -34,7 +34,7 @@ export type ActivityAsk = {
   answer_id: string;
   error: string;
   /** 提交入口；空串表示未记录，界面文案见 submitted-via.ts。 */
-  submitted_via?: "" | SubmittedVia;
+  submitted_via: "" | SubmittedVia;
   notebook_name?: string;
   notebook_deleted_at?: string;
   retained_until?: string;
@@ -79,7 +79,7 @@ export type ActivityReport = {
   depth: number;
   status: string;
   generation_started_at: string;
-  submitted_via?: "" | SubmittedVia;
+  submitted_via: "" | SubmittedVia;
   notebook_name?: string;
   notebook_deleted_at?: string;
   retained_until?: string;

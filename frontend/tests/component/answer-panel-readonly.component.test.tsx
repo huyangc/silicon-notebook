@@ -33,6 +33,7 @@ const ITEM: ActivityAsk = {
   status: "done",
   answer_id: "ans-1",
   error: "",
+  submitted_via: "",
 };
 
 // ⚠ 刻意用 `as unknown as AskResponse`：线上 wire 里 anchor/citation 命中 knowhow
