@@ -24,7 +24,9 @@ const knowledgeApi = vi.hoisted(() => ({
 const kgApi = vi.hoisted(() => ({
   buildKg: vi.fn(),
   confirmMerge: vi.fn(),
+  deleteKg: vi.fn(),
   fetchConceptDetail: vi.fn(),
+  fetchKgDeleteStatus: vi.fn(),
   fetchKgNeighbors: vi.fn(),
   fetchKgSearch: vi.fn(),
   fetchMergeReviewJob: vi.fn(),
@@ -54,6 +56,13 @@ vi.mock("../../features/kg-maintenance/kg-api.ts", async (importOriginal) => ({
 
 import { useKgWorkspace } from "../../app/use-kg-workspace";
 import {
+  KG_DELETE_BUSY_MESSAGE,
+  KG_DELETE_FAILED_MESSAGE,
+  KG_DELETE_RESULT_HOLD_MS,
+  type KgDeleteRunStatus,
+  type KgDeleteStatus,
+} from "../../features/kg-maintenance/kg-delete-status";
+import {
   REBUILD_POLL_MAX_ATTEMPTS,
   REBUILD_POLL_TIMED_OUT,
 } from "../../features/kg-maintenance/kg-rebuild-status";
@@ -70,6 +79,7 @@ const writablePolicy: HookOptions["policy"] = {
 };
 
 const refreshNotebook = vi.fn();
+const refreshAfterKgDelete = vi.fn<(notebookId: string, guard: () => boolean) => Promise<void>>();
 const notify = vi.fn<(message: string) => void>();
 
 const effects: HookOptions["effects"] = {
@@ -77,6 +87,7 @@ const effects: HookOptions["effects"] = {
   reportError: vi.fn(),
   refreshCollection: vi.fn().mockResolvedValue(undefined),
   refreshNotebook,
+  refreshAfterKgDelete,
   focusGraphNode: vi.fn(),
 };
 
@@ -117,6 +128,21 @@ function httpConflict(): Error {
     value: 409,
   });
   return error;
+}
+
+function deleteStatus(
+  status: KgDeleteRunStatus,
+  overrides: Partial<KgDeleteStatus> = {},
+): KgDeleteStatus {
+  return {
+    job_id: "",
+    notebook_id: "notebook-a",
+    status,
+    running: status === "running",
+    objects_deleted: 0,
+    relations_deleted: 0,
+    ...overrides,
+  };
 }
 
 function graph(vizBuilding = false): UnifiedGraphResp {
@@ -224,6 +250,9 @@ beforeEach(() => {
   kgApi.rebuildKg.mockResolvedValue({ status: "running", notebook_id: "notebook-a", job_id: "build-a" });
   kgApi.rebuildUnifiedKg.mockResolvedValue({ status: "running", notebook_id: "notebook-a", job_id: "rebuild-a" });
   kgApi.relinkKg.mockResolvedValue({ status: "running", notebook_id: "notebook-a", job_id: "relink-a" });
+  kgApi.fetchKgDeleteStatus.mockResolvedValue(deleteStatus("idle"));
+  kgApi.deleteKg.mockResolvedValue({ status: "deleting", notebook_id: "notebook-a", job_id: "delete-a" });
+  refreshAfterKgDelete.mockResolvedValue(undefined);
   kgApi.reviewMerges.mockResolvedValue({ reviewed: 0, confirmed: 0, rejected: 0, unsure: 0 });
   kgApi.reviewAllMerges.mockResolvedValue({ status: "running" });
   kgApi.confirmMerge.mockResolvedValue({ ok: true });
@@ -359,12 +388,14 @@ test("read-only policy neither restores review work nor admits write commands", 
     value!.reviewAllMerges();
     value!.startRelink();
     value!.startRebuild();
+    value!.startKgDelete("notebook-a");
     value!.startKgBuild();
     value!.updateKnowledge("knowledge-a", { status: "approved" });
   });
   expect(kgApi.reviewMerges).not.toHaveBeenCalled();
   expect(kgApi.reviewAllMerges).not.toHaveBeenCalled();
   expect(kgApi.relinkKg).not.toHaveBeenCalled();
+  expect(kgApi.deleteKg).not.toHaveBeenCalled();
   expect(kgApi.rebuildUnifiedKg).not.toHaveBeenCalled();
   expect(kgApi.buildKg).not.toHaveBeenCalled();
   expect(knowledgeApi.updateKnowledge).not.toHaveBeenCalled();
@@ -458,6 +489,130 @@ test("synchronous rebuild commands stay single-flight and release authority afte
   await waitFor(() => expect(value!.graph.rebuilding).toBe(false));
   await act(async () => value!.startRebuild());
   expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(2);
+});
+
+test("KG delete claims before POST, blocks sibling entries, then settles with a refreshed, notebook-scoped timed result", async () => {
+  const { rerender } = render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchKgDeleteStatus).toHaveBeenCalledOnce());
+  vi.useFakeTimers();
+  const deletePending = deferred<Awaited<ReturnType<typeof kgApi.deleteKg>>>();
+  kgApi.deleteKg.mockReturnValueOnce(deletePending.promise);
+
+  // 确认弹窗打开时是另一本：点「确定」时绝不能删到当前这本上。
+  await act(async () => value!.startKgDelete("notebook-b"));
+  expect(kgApi.deleteKg).not.toHaveBeenCalled();
+  expect(value!.graph.deleting).toBe(false);
+
+  let deleting!: Promise<void>;
+  act(() => { deleting = value!.startKgDelete("notebook-a"); });
+  expect(kgApi.deleteKg).toHaveBeenCalledOnce();
+  expect(value!.graph.deleting).toBe(true);
+
+  // 任一忙碌位为真即忙：同一维护槽与整理入口在删除期间都不发请求。
+  await act(async () => {
+    await value!.startKgDelete("notebook-a");
+    await value!.startRelink();
+    await value!.startRebuild();
+    await value!.startKgBuild();
+  });
+  expect(kgApi.deleteKg).toHaveBeenCalledOnce();
+  expect(kgApi.relinkKg).not.toHaveBeenCalled();
+  expect(kgApi.rebuildUnifiedKg).not.toHaveBeenCalled();
+  expect(kgApi.buildKg).not.toHaveBeenCalled();
+
+  await act(async () => deletePending.resolve({
+    status: "deleting", notebook_id: "notebook-a", job_id: "delete-a",
+  }));
+  await deleting;
+  expect(notify).toHaveBeenCalledWith("已开始删除知识图谱；完成后会自动更新");
+
+  kgApi.fetchKgDeleteStatus
+    .mockResolvedValueOnce(deleteStatus("running", { job_id: "delete-a" }))
+    .mockResolvedValue(deleteStatus("succeeded", {
+      job_id: "delete-a", objects_deleted: 12, relations_deleted: 30,
+    }));
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(value!.graph.deleting).toBe(true);
+  expect(value!.graph.deleteResult).toBeNull();
+  expect(refreshAfterKgDelete).not.toHaveBeenCalled();
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(value!.graph.deleting).toBe(false);
+  expect(value!.graph.deleteResult).toEqual({ tone: "success", text: "已删除 12 个知识对象" });
+  expect(kgApi.fetchUnifiedGraph).toHaveBeenCalledWith("notebook-a", 80);
+  expect(kgApi.fetchPendingMerges).toHaveBeenCalledWith("notebook-a");
+  expect(refreshNotebook).toHaveBeenCalledWith("notebook-a", expect.any(Function));
+  expect(refreshAfterKgDelete).toHaveBeenCalledWith("notebook-a", expect.any(Function));
+
+  // 结果按笔记本分格：B 既看不到 A 的结果，也不被 A 的删除置灰。
+  let transition!: ReturnType<HookValue["beginNotebookTransition"]>;
+  act(() => { transition = value!.beginNotebookTransition(); });
+  rerender(<Harness notebookId="notebook-b" />);
+  act(() => value!.finishNotebookTransition(transition, notebook("notebook-b")));
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  expect(value!.graph.deleteResult).toBeNull();
+  expect(value!.graph.deleting).toBe(false);
+
+  act(() => { transition = value!.beginNotebookTransition(); });
+  rerender(<Harness notebookId="notebook-a" />);
+  act(() => value!.finishNotebookTransition(transition, notebook("notebook-a")));
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  expect(value!.graph.deleteResult?.text).toBe("已删除 12 个知识对象");
+
+  // 结果按自己的计时器消失。
+  await act(async () => { await vi.advanceTimersByTimeAsync(KG_DELETE_RESULT_HOLD_MS); });
+  expect(value!.graph.deleteResult).toBeNull();
+});
+
+test("opening a notebook re-claims a KG delete the server is still running", async () => {
+  kgApi.fetchKgDeleteStatus.mockResolvedValue(deleteStatus("running", { job_id: "delete-other-tab" }));
+  render(<Harness />);
+  await waitFor(() => expect(value!.graph.deleting).toBe(true));
+  await act(async () => value!.startRelink());
+  expect(kgApi.relinkKg).not.toHaveBeenCalled();
+});
+
+test("a 409 delete adopts the running relink and explains the refusal beside the button", async () => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchKgDeleteStatus).toHaveBeenCalledOnce());
+  // 夹具的 409 不是后端 user_error 的可展示文案，兜底路径会打一条诊断——静音它。
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+  kgApi.deleteKg.mockRejectedValueOnce(httpConflict());
+  kgApi.fetchRelinkStatus.mockResolvedValueOnce({
+    job_id: "relink-other-tab",
+    notebook_id: "notebook-a",
+    status: "running",
+    running: true,
+    isolated_before: 0,
+    edges_added: 0,
+    isolated_after: 0,
+  });
+
+  await act(async () => value!.startKgDelete("notebook-a"));
+  expect(kgApi.deleteKg).toHaveBeenCalledOnce();
+  expect(value!.graph.deleting).toBe(false);
+  expect(value!.graph.relinking).toBe(true);
+  expect(value!.graph.deleteResult).toEqual({ tone: "neutral", text: KG_DELETE_BUSY_MESSAGE });
+  expect(effects.reportError).not.toHaveBeenCalled();
+  consoleError.mockRestore();
+});
+
+test("a failed delete POST reports, lands a failure beside the button, and releases authority", async () => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchKgDeleteStatus).toHaveBeenCalledOnce());
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+  kgApi.deleteKg.mockRejectedValueOnce(new Error("network down"));
+
+  await act(async () => value!.startKgDelete("notebook-a"));
+  expect(effects.reportError).toHaveBeenCalledOnce();
+  expect(value!.graph.deleting).toBe(false);
+  expect(value!.graph.deleteResult).toEqual({ tone: "failed", text: KG_DELETE_FAILED_MESSAGE });
+
+  await act(async () => value!.startKgDelete("notebook-a"));
+  expect(kgApi.deleteKg).toHaveBeenCalledTimes(2);
+  // 新的一次认领先让出同一格的旧结果。
+  expect(value!.graph.deleteResult).toBeNull();
+  consoleError.mockRestore();
 });
 
 test("Knowledge context reads are latest-wins and invalidated by a kind change", async () => {

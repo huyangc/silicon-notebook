@@ -156,7 +156,8 @@ test("owner recovery adopts server-running rebuild without inferring pending wor
 test("presentation disables both maintenance actions while either shared task is busy", () => {
   // 判据一条不减，只是分居两个模块：早退守卫是 page.tsx 的命令编排
   // (confirmRefreshUnifiedKg / confirmGenerateKgAnalysis)，按钮的 disabled 随知识图谱
-  // 视图 JSX 搬到了 kg-graph-view.tsx。两处的「三个忙碌位或起来」逐字保持不变。
-  assert.match(page.getFullText(), /if \(kgGraph\.rebuilding \|\| kgGraph\.relinking \|\| kgGraph\.buildingKg\) return/);
-  assert.match(kgGraphView.getFullText(), /disabled=\{kgGraph\.rebuilding \|\| kgGraph\.relinking \|\| kgGraph\.buildingKg\}/);
+  // 视图 JSX 搬到了 kg-graph-view.tsx。两处的忙碌位或起来逐字保持不变，只在末尾加上
+  // 同一维护槽的第三种任务「删除知识图谱」的忙碌位。
+  assert.match(page.getFullText(), /if \(kgGraph\.rebuilding \|\| kgGraph\.relinking \|\| kgGraph\.buildingKg \|\| kgGraph\.deleting\) return/);
+  assert.match(kgGraphView.getFullText(), /disabled=\{kgGraph\.rebuilding \|\| kgGraph\.relinking \|\| kgGraph\.buildingKg \|\| kgGraph\.deleting\}/);
 });

@@ -965,6 +965,24 @@ export default function Home() {
         }
         return refreshed;
       },
+      // 删除知识图谱之后,KG 领域之外读着旧图谱事实的两块:来源列表的已分析/待分析徽标,
+      // 以及看板开着时「索引与构建」那几行。守卫同时认 KG owner 与当前笔记本。
+      refreshAfterKgDelete: async (targetNotebookId, guard) => {
+        const stillCurrent = () => guard() && activeNotebookIdRef.current === targetNotebookId;
+        await Promise.all([
+          loadSourcesPage(targetNotebookId, {
+            ...sourceLibrary.currentPageRequest(),
+            guard: stillCurrent,
+          }).catch(() => {}),
+          analytics
+            ? fetchIndexStatus(targetNotebookId).then((status) => {
+              if (!stillCurrent()) return;
+              setIndexStatus(status);
+              setScaleIndexStatus(status.scale_index);
+            }).catch(() => {})
+            : Promise.resolve(),
+        ]);
+      },
       focusGraphNode: (nodeId) => focusKgGraphNode(nodeId),
     },
   });
@@ -3992,17 +4010,33 @@ export default function Home() {
   // 「重新合并」唯一入口(看板「索引与构建」面板 + 知识图谱视图共用):先统一确认再重建。
   // codex R4 P2(B):同样认「任一忙碌位为真即忙」，与 refreshUnifiedKg 的早退同口径。
   function confirmRefreshUnifiedKg() {
-    if (kgGraph.rebuilding || kgGraph.relinking || kgGraph.buildingKg) return;
+    if (kgGraph.rebuilding || kgGraph.relinking || kgGraph.buildingKg || kgGraph.deleting) return;
     confirmIndexAction("重新合并知识图谱？\n\n将重算跨文档概念聚类并刷新图谱索引（不重新分析来源）。后台进行，完成后自动更新。", () => refreshUnifiedKg());
   }
 
   // 图谱分析页的动作与「重新合并」复用同一条后台任务，只把用户目标说成报告生成，
   // 避免让人自己猜“尚未生成”的五份数据究竟由哪个维护动作产出。
   function confirmGenerateKgAnalysis() {
-    if (kgGraph.rebuilding || kgGraph.relinking || kgGraph.buildingKg) return;
+    if (kgGraph.rebuilding || kgGraph.relinking || kgGraph.buildingKg || kgGraph.deleting) return;
     confirmIndexAction(
       "生成或更新图谱分析？\n\n将重算跨文档概念合并、主题板块和质量统计（不重新分析来源）。后台进行，完成后分析页会自动刷新。",
       () => refreshUnifiedKg(),
+    );
+  }
+
+  // 「删除知识图谱」(知识图谱视图「图谱处理」):破坏性后台任务，先经统一确认。与重新合并/
+  // 补上关联共用服务端同一个维护槽，早退同样认「任一忙碌位为真即忙」。确认是异步的：
+  // 记下打开弹窗时的笔记本，点「确定」时仍是它才交给 hook(hook 自己再核对一次 owner)，
+  // 绝不能让删除落到弹窗打开后才切换过去的另一本上。
+  function confirmDeleteKg() {
+    if (kgGraph.deleting || kgGraph.rebuilding || kgGraph.relinking || kgGraph.buildingKg) return;
+    const nb = currentNotebookId;
+    if (!nb) return;
+    confirmIndexAction(
+      "删除知识图谱？\n\n将删除从来源分析出的知识对象、关联、概念合并结果和图谱分析，无法撤销。来源及其解析内容会保留，之后可以重新整理。记忆和 Knowhow 表格生成的知识不受影响；把本笔记本当作参考库的笔记本也将检索不到这些知识。后台进行，完成后自动更新。",
+      () => {
+        if (activeNotebookIdRef.current === nb) void kgWorkspace.startKgDelete(nb);
+      },
     );
   }
 
@@ -5278,7 +5312,7 @@ export default function Home() {
                               <button
                                 type="button"
                                 className="add-source-button"
-                                disabled={kgGraph.buildingKg}
+                                disabled={kgGraph.buildingKg || kgGraph.deleting}
                                 title="有新增来源尚未分析，点击分析新增内容并合并进知识图谱"
                                 onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                               >
@@ -5302,7 +5336,7 @@ export default function Home() {
                         <button
                           type="button"
                           className="add-source-button"
-                          disabled={kgGraph.buildingKg}
+                          disabled={kgGraph.buildingKg || kgGraph.deleting}
                           title={currentNotebook?.base_kg_available
                             ? `本笔记本尚未整理知识图谱，${strictLabel}会借用已挂载的参考库；点击为本笔记本单独整理`
                             : `本笔记本尚未整理知识图谱，也没挂参考库；整理知识图谱可增强${strictLabel}效果；也可挂一个已整理的参考库`}
@@ -5327,7 +5361,7 @@ export default function Home() {
                     <span>{currentKgBuildView.detail}</span>
                     {canContinueKgBuild(
                       currentKgBuildView.actionLabel,
-                      kgGraph.buildingKg,
+                      kgGraph.buildingKg || kgGraph.deleting,
                       readOnlyWorkspace,
                     ) && (
                       <button
@@ -5865,7 +5899,7 @@ export default function Home() {
                             type="button"
                             className="mode-engine"
                             style={{ marginLeft: 6 }}
-                            disabled={kgGraph.buildingKg || asking || sessionLoading}
+                            disabled={kgGraph.buildingKg || kgGraph.deleting || asking || sessionLoading}
                             onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                           >
                             {kgGraph.buildingKg ? "整理中…" : "整理知识图谱"}
@@ -7070,10 +7104,12 @@ export default function Home() {
                           </div>
                           {!readOnlyWorkspace && (
                             <div className="index-ctas">
+                              {/* extract_kg 走 startKgBuild,删除知识图谱期间它会早退——按钮同口径
+                                  禁用(文案仍由 repairing 决定:删除不是这一组的修复在跑)。 */}
                               <button
                                 type="button"
                                 className="index-cta primary"
-                                disabled={repairing}
+                                disabled={repairing || (g.fix === "extract_kg" && kgGraph.deleting)}
                                 onClick={() => { void runFix(); }}
                               >
                                 {repairing
@@ -7127,9 +7163,12 @@ export default function Home() {
                       kg.pending_sources,
                       kg.ready,
                     );
+                    // 「删除知识图谱」在跑时这一行的整理/重新分析/补上关联都会撞同一个维护槽,
+                    // 与构建中同样整排收起。
                     const busy = kg.job?.status === "running"
                       || kg.building
-                      || kgGraph.buildingKg;
+                      || kgGraph.buildingKg
+                      || kgGraph.deleting;
                     const tone = view.tone === "success"
                       ? "ok"
                       : view.tone === "neutral"
@@ -7226,7 +7265,7 @@ export default function Home() {
                             <button
                               type="button"
                               className={`index-cta${uk.dirty ? " primary" : ""}`}
-                              disabled={kgGraph.relinking}
+                              disabled={kgGraph.relinking || kgGraph.deleting}
                               onClick={confirmRefreshUnifiedKg}
                             >
                               重新合并
@@ -7444,6 +7483,7 @@ export default function Home() {
           kgDetailRef={kgDetailRef}
           readOnlyWorkspace={readOnlyWorkspace}
           currentNotebookId={currentNotebookId}
+          kgReady={Boolean(currentNotebook?.kg_ready)}
           baseKgAvailable={Boolean(currentNotebook?.base_kg_available)}
           scaleIndexStatus={scaleIndexStatus}
           openKgAnalysis={openKgAnalysis}
@@ -7452,6 +7492,7 @@ export default function Home() {
           relinkFromKgView={relinkFromKgView}
           confirmRefreshUnifiedKg={confirmRefreshUnifiedKg}
           startKgRebuild={startKgRebuild}
+          confirmDeleteKg={confirmDeleteKg}
           handleKgSearchChange={handleKgSearchChange}
           changeKgRange={changeKgRange}
           toggleKgType={toggleKgType}
@@ -7470,7 +7511,7 @@ export default function Home() {
               notebookId={currentNotebookId}
               canAnalyze={!readOnlyWorkspace}
               analysisRunning={kgGraph.rebuilding}
-              analysisBlocked={kgGraph.relinking || kgGraph.buildingKg}
+              analysisBlocked={kgGraph.relinking || kgGraph.buildingKg || kgGraph.deleting}
               interactive={rootModals.view("kg-analysis").topmost}
               zIndex={rootModals.view("kg-analysis").zIndex}
               onAnalyze={confirmGenerateKgAnalysis}

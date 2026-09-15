@@ -188,8 +188,8 @@ function drawKgLinkLabel(link: FgLink, ctx: CanvasRenderingContext2D, globalScal
  * - state / ref / useMemo 派生 / effects / 命令编排全部留在 page.tsx 与
  *   use-kg-graph.ts；这里只呈现，写动作一律经显式回调交回去。
  * - props 刻意与 page.tsx 里原局部变量**同名**，这样搬过来的 JSX 逐字不变——
- *   `disabled={kgGraph.relinking || kgGraph.rebuilding || kgGraph.buildingKg}` 这类
- *   正是 kg-relink / kg-rebuild 两个守卫的判据文本，改名等于悄悄让守卫失去目标。
+ *   `disabled={kgGraph.relinking || kgGraph.rebuilding || kgGraph.buildingKg || kgGraph.deleting}`
+ *   这类正是 kg-relink / kg-rebuild / kg-delete 三个守卫的判据文本，改名等于悄悄让守卫失去目标。
  * - `kgGraph` 用 `Pick<>` 收窄到 JSX 真正读的字段，hook 的命令面一个都不进来。
  * - `reportError` 不进组件：需要吞错的两条（加载更多成员 / 总览列表选点）由 page 侧
  *   包好 `.catch(reportError)` 再传进来。
@@ -214,6 +214,7 @@ export function KgGraphView({
   kgDetailRef,
   readOnlyWorkspace,
   currentNotebookId,
+  kgReady,
   baseKgAvailable,
   scaleIndexStatus,
   openKgAnalysis,
@@ -222,6 +223,7 @@ export function KgGraphView({
   relinkFromKgView,
   confirmRefreshUnifiedKg,
   startKgRebuild,
+  confirmDeleteKg,
   handleKgSearchChange,
   changeKgRange,
   toggleKgType,
@@ -244,6 +246,8 @@ export function KgGraphView({
     | "conceptMembersLoadError"
     | "conceptMembersLoadingMore"
     | "decidingMerge"
+    | "deleteResult"
+    | "deleting"
     | "graph"
     | "merged"
     | "nodeContext"
@@ -285,6 +289,8 @@ export function KgGraphView({
   kgDetailRef: React.RefObject<HTMLElement | null>;
   readOnlyWorkspace: boolean;
   currentNotebookId: string | null;
+  /** 当前笔记本是否已有知识图谱(NotebookSummary.kg_ready);没有就没有可删的东西。 */
+  kgReady: boolean;
   baseKgAvailable: boolean;
   scaleIndexStatus: ScaleIndexStatus | null;
   openKgAnalysis: () => void;
@@ -293,6 +299,7 @@ export function KgGraphView({
   relinkFromKgView: () => void;
   confirmRefreshUnifiedKg: () => void;
   startKgRebuild: (notebookId: string) => void;
+  confirmDeleteKg: () => void;
   handleKgSearchChange: (value: string) => void;
   changeKgRange: (limit: number) => void;
   toggleKgType: (type: string) => void;
@@ -351,13 +358,13 @@ export function KgGraphView({
         <div className="kg-rail-section">
           <h3>图谱处理</h3>
           <div className="kg-action-stack">
-            {/* codex R4 P2(B):「重新合并」与「补上关联」共用服务端同一把按笔记本
-                单飞锁，disabled 必须认「任一忙碌位为真即忙」——否则占槽的那一件事
+            {/* codex R4 P2(B):「重新合并」「补上关联」「删除知识图谱」共用服务端同一把
+                按笔记本单飞锁，disabled 必须认「任一忙碌位为真即忙」——否则占槽的那一件事
                 在跑时，另一颗按钮仍可点，点了也只会撞 409。各自的进行态文案不变。 */}
             <button
               type="button"
               className="sort-button"
-              disabled={kgGraph.relinking || kgGraph.rebuilding || kgGraph.buildingKg}
+              disabled={kgGraph.relinking || kgGraph.rebuilding || kgGraph.buildingKg || kgGraph.deleting}
               title="为没建立关联的内容补上关联（快速、确定性，不覆盖现有图）"
               onClick={relinkFromKgView}
             >
@@ -366,7 +373,7 @@ export function KgGraphView({
             <button
               type="button"
               className="sort-button"
-              disabled={kgGraph.rebuilding || kgGraph.relinking || kgGraph.buildingKg}
+              disabled={kgGraph.rebuilding || kgGraph.relinking || kgGraph.buildingKg || kgGraph.deleting}
               title="对现有概念重新聚类 / 跨文档合并并刷新（不重新分析来源，会先确认）"
               onClick={confirmRefreshUnifiedKg}
             >
@@ -375,12 +382,40 @@ export function KgGraphView({
             <button
               type="button"
               className="sort-button kg-action-danger"
-              disabled={kgGraph.buildingKg}
+              disabled={kgGraph.buildingKg || kgGraph.deleting}
               title="清空现有知识图谱并重新分析全部来源（后台任务，可能数分钟）"
               onClick={() => { if (currentNotebookId) startKgRebuild(currentNotebookId); }}
             >
               {kgGraph.buildingKg ? "分析中…" : "全部重新分析"}
             </button>
+            {/* 删除是后台任务：在飞期间换成「删除中…」并禁用；终态结果画在紧挨着的下一行
+                并按自己的计时器消失（AGENTS.md Interactive feedback）。结果与忙碌位都按
+                当前笔记本分格，切到别的笔记本不会看到这里的结果。没有知识图谱时无可删除。 */}
+            <button
+              type="button"
+              className="sort-button kg-action-danger"
+              disabled={kgGraph.deleting || kgGraph.relinking || kgGraph.rebuilding || kgGraph.buildingKg || !kgReady}
+              title="删除从来源分析出的知识图谱（来源保留，之后可重新整理；会先确认）"
+              onClick={confirmDeleteKg}
+            >
+              {kgGraph.deleting ? "删除中…" : "删除知识图谱"}
+            </button>
+            {kgGraph.deleteResult && (
+              <p
+                className="tool-hint"
+                role="status"
+                style={{
+                  margin: "0 2px",
+                  color: kgGraph.deleteResult.tone === "success"
+                    ? "var(--color-ok, #1a7f5a)"
+                    : kgGraph.deleteResult.tone === "failed"
+                      ? "var(--color-danger, #b42318)"
+                      : undefined,
+                }}
+              >
+                {kgGraph.deleteResult.text}
+              </p>
+            )}
           </div>
         </div>
         )}
@@ -516,10 +551,10 @@ export function KgGraphView({
               {!readOnlyWorkspace && <span className="kg-merge-actions">
                 {/* 确认会连带跑一次全量概念合并重建；重建完成前锁住整列，避免新决定
                     与正在发布的旧候选代次竞态。拒绝不重建，但提交期间同样防重复点。 */}
-                <button disabled={kgGraph.decidingMerge !== null || kgGraph.rebuilding} onClick={() => decideMerge(m, true)}>
+                <button disabled={kgGraph.decidingMerge !== null || kgGraph.rebuilding || kgGraph.deleting} onClick={() => decideMerge(m, true)}>
                   {kgGraph.decidingMerge?.id === m.id && kgGraph.decidingMerge.confirm ? "合并中…" : "合并"}
                 </button>
-                <button disabled={kgGraph.decidingMerge !== null || kgGraph.rebuilding} onClick={() => decideMerge(m, false)}>
+                <button disabled={kgGraph.decidingMerge !== null || kgGraph.rebuilding || kgGraph.deleting} onClick={() => decideMerge(m, false)}>
                   {kgGraph.decidingMerge?.id === m.id && !kgGraph.decidingMerge.confirm ? "分开中…" : "拒绝"}
                 </button>
               </span>}

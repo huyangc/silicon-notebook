@@ -19,7 +19,9 @@ import { shouldResumeReviewAll } from "./in-progress-resume";
 import {
   buildKg,
   confirmMerge,
+  deleteKg,
   fetchConceptDetail,
+  fetchKgDeleteStatus,
   fetchKgNeighbors,
   fetchKgSearch,
   fetchMergeReviewJob,
@@ -50,6 +52,16 @@ import {
   relinkPollOutcome,
 } from "../features/kg-maintenance/kg-relink-status";
 import {
+  KG_DELETE_BUSY_MESSAGE,
+  KG_DELETE_FAILED_MESSAGE,
+  KG_DELETE_JOB_MISMATCH,
+  KG_DELETE_POLL_MAX_ATTEMPTS,
+  KG_DELETE_POLL_TIMED_OUT,
+  KG_DELETE_RESULT_HOLD_MS,
+  kgDeletePollOutcome,
+  type KgDeleteResult,
+} from "../features/kg-maintenance/kg-delete-status";
+import {
   kgBuildTerminalToast,
   reconcileTrackedKgPoll,
 } from "./kg-build-status";
@@ -70,7 +82,7 @@ import type {
 
 // Unified graph view (open/range/search/node selection), pending-merge review
 // with its actor+notebook tombstones, and the durable KG build / relink /
-// rebuild trackers. One of the three KG domain owners; the shared actor +
+// rebuild / delete trackers. One of the three KG domain owners; the shared actor +
 // notebook + generation gate arrives as `authority` (see `use-kg-owner.ts`).
 type KgGraphPolicy = {
   canWriteKg: boolean;
@@ -81,6 +93,12 @@ type KgGraphEffects = {
   notify: (message: string) => void;
   reportError: (error: unknown) => void;
   refreshNotebook: (notebookId: string, guard: () => boolean) => Promise<NotebookSummary>;
+  /**
+   * 「删除知识图谱」终态之后,KG 领域之外还读着旧图谱事实的那几块(来源列表的
+   * 已分析/待分析徽标、看板「索引与构建」的状态)由 page 自己重拉。KG 领域不认识
+   * 那些 owner,只在终态时按笔记本 + 守卫把这件事交出去。
+   */
+  refreshAfterKgDelete: (notebookId: string, guard: () => boolean) => Promise<void>;
   focusGraphNode: (nodeId: string) => void;
 };
 
@@ -205,6 +223,11 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
   const [reviewAllRunning, setReviewAllRunning] = useState(false);
   const [rebuildingNotebookIds, setRebuildingNotebookIds] = useState<Set<string>>(new Set());
   const [relinkingNotebookIds, setRelinkingNotebookIds] = useState<Set<string>>(new Set());
+  const [deletingNotebookIds, setDeletingNotebookIds] = useState<Set<string>>(new Set());
+  // 「删除知识图谱」的结果按 actor+notebook 分格保存,和忙碌位同一把键:切到 B 看不到 A 的
+  // 结果,A→B→A 在保留期内回来仍能看到。每格自带计时器,到点只清自己那一格。
+  const [deleteResults, setDeleteResults] = useState<Map<string, KgDeleteResult>>(new Map());
+  const deleteResultTimersRef = useRef(new Map<string, number>());
   const [buildingKg, setBuildingKg] = useState(false);
   const [trackedKgJobId, setTrackedKgJobId] = useState<string | null>(null);
   const trackedKgJobIdRef = useRef<string | null>(null);
@@ -289,8 +312,8 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
   // The maintenance-state recovery probe the owner authority hands to this
   // domain the moment a new owner is established: adopt the notebook
   // snapshot frozen by `finishNotebookTransition`, resume a running
-  // review-all job (write-capable members only), and re-claim a rebuild or
-  // relink the server is still running. Deliberately no Knowledge / schema /
+  // review-all job (write-capable members only), and re-claim a rebuild,
+  // relink or KG delete the server is still running. Deliberately no Knowledge / schema /
   // unified-graph read — opening a notebook must not fetch content.
   const adoptOwner = (owner: KgWorkspaceOwner, notebookSnapshot: NotebookSummary | null) => {
     if (notebookSnapshot?.id === owner.notebookId && notebookSnapshot.kg_build?.status === "running") {
@@ -309,13 +332,17 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     void Promise.all([
       fetchUnifiedKgRebuildStatus(owner.notebookId).catch(() => null),
       fetchRelinkStatus(owner.notebookId).catch(() => null),
-    ]).then(([rebuild, relink]) => {
+      fetchKgDeleteStatus(owner.notebookId).catch(() => null),
+    ]).then(([rebuild, relink, deletion]) => {
       if (!owns(owner)) return;
       if (rebuild && (rebuild.running || rebuild.status === "running")) {
         setRebuildingNotebookIds((current) => claimNotebookSlot(current, ownerKey(owner)));
       }
       if (relink && (relink.running || relink.status === "running")) {
         setRelinkingNotebookIds((current) => claimNotebookSlot(current, ownerKey(owner)));
+      }
+      if (deletion && (deletion.running || deletion.status === "running")) {
+        setDeletingNotebookIds((current) => claimNotebookSlot(current, ownerKey(owner)));
       }
     });
   };
@@ -756,8 +783,11 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
 
   const decideMerge = async (candidate: PendingMerge, confirm: boolean) => {
     const owner = currentOwner();
+    // 删除期间待确认合并正被一并清掉:此刻落决定只会对着正在消失的候选写,且确认分支
+    // 连带的重新合并必然撞同一个维护槽。
     if (!owner || !policyRef.current.canWriteKg || decidingMerge
-      || rebuildingNotebookIds.has(ownerKey(owner))) return;
+      || rebuildingNotebookIds.has(ownerKey(owner))
+      || deletingNotebookIds.has(ownerKey(owner))) return;
     const operation = beginOperation("merge-decision");
     setDecidingMerge({ id: candidate.id, confirm });
     try {
@@ -848,19 +878,69 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     }
   };
 
+  // 删除之后图谱、待确认合并、合并状态与选中节点都要按当前范围重拉(和重新合并同一套,
+  // 含选中概念的首页重置),另外笔记本摘要(kg_ready / kg_build)与 KG 领域外那几块
+  // (来源徽标、看板状态)也读着旧事实——三件并行,各自吞自己的错,谁都不拖住释放忙碌位。
+  const refreshAfterDelete = async (owner: KgWorkspaceOwner) => {
+    const guard = () => owns(owner);
+    await Promise.all([
+      refreshAfterRebuild(),
+      effectsRef.current.refreshNotebook(owner.notebookId, guard).catch(() => null),
+      effectsRef.current.refreshAfterKgDelete(owner.notebookId, guard).catch(() => {}),
+    ]);
+  };
+
+  const clearDeleteResult = (key: string) => {
+    const timer = deleteResultTimersRef.current.get(key);
+    if (timer !== undefined) window.clearTimeout(timer);
+    deleteResultTimersRef.current.delete(key);
+    setDeleteResults((current) => {
+      if (!current.has(key)) return current;
+      const next = new Map(current);
+      next.delete(key);
+      return next;
+    });
+  };
+
+  // 结果落在按钮旁,并按自己的计时器复原(AGENTS.md Interactive feedback)。计时器按格
+  // 保存:同一格的新结果先撤掉旧计时器,旧计时器到点不会把新结果提前清掉。
+  const showDeleteResult = (key: string, result: KgDeleteResult) => {
+    const previous = deleteResultTimersRef.current.get(key);
+    if (previous !== undefined) window.clearTimeout(previous);
+    setDeleteResults((current) => new Map(current).set(key, result));
+    deleteResultTimersRef.current.set(key, window.setTimeout(() => {
+      deleteResultTimersRef.current.delete(key);
+      setDeleteResults((current) => {
+        if (current.get(key) !== result) return current;
+        const next = new Map(current);
+        next.delete(key);
+        return next;
+      });
+    }, KG_DELETE_RESULT_HOLD_MS));
+  };
+
+  useEffect(() => {
+    const timers = deleteResultTimersRef.current;
+    return () => {
+      for (const timer of timers.values()) window.clearTimeout(timer);
+      timers.clear();
+    };
+  }, []);
+
   const maintenanceOwnerKey = (owner: Pick<KgWorkspaceOwner, "actorId" | "notebookId">) =>
     ownerKey(owner);
   const maintenanceJobKey = (
     owner: Pick<KgWorkspaceOwner, "actorId" | "notebookId">,
-    kind: "rebuild" | "relink",
+    kind: "rebuild" | "relink" | "delete",
   ) => `${maintenanceOwnerKey(owner)}\0${kind}`;
 
   const adoptRunningMaintenance = async (
     owner: KgWorkspaceOwner,
   ): Promise<"adopted" | "idle" | "unknown"> => {
-    const [rebuildResult, relinkResult] = await Promise.allSettled([
+    const [rebuildResult, relinkResult, deletionResult] = await Promise.allSettled([
       fetchUnifiedKgRebuildStatus(owner.notebookId),
       fetchRelinkStatus(owner.notebookId),
+      fetchKgDeleteStatus(owner.notebookId),
     ]);
     if (!ownsIdentity(owner)) return "unknown";
     const key = maintenanceOwnerKey(owner);
@@ -882,8 +962,18 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
         ? claimNotebookSlot(current, key)
         : releaseNotebookClaim(current, key));
     }
-    if (rebuildRunning || relinkRunning) return "adopted";
-    if (rebuildResult.status === "rejected" || relinkResult.status === "rejected") return "unknown";
+    let deleteRunning = false;
+    if (deletionResult.status === "fulfilled") {
+      deleteRunning = Boolean(
+        deletionResult.value.running || deletionResult.value.status === "running",
+      );
+      setDeletingNotebookIds((current) => deleteRunning
+        ? claimNotebookSlot(current, key)
+        : releaseNotebookClaim(current, key));
+    }
+    if (rebuildRunning || relinkRunning || deleteRunning) return "adopted";
+    if (rebuildResult.status === "rejected" || relinkResult.status === "rejected"
+      || deletionResult.status === "rejected") return "unknown";
     return "idle";
   };
 
@@ -893,6 +983,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     const key = maintenanceOwnerKey(owner);
     const jobKey = maintenanceJobKey(owner, "relink");
     if (relinkingNotebookIds.has(key) || rebuildingNotebookIds.has(key) || buildingKg
+      || deletingNotebookIds.has(key)
       || submittingMaintenanceRef.current.has(jobKey)) return;
     setRelinkingNotebookIds((current) => claimNotebookSlot(current, key));
     expectedMaintenanceJobRef.current.delete(jobKey);
@@ -938,6 +1029,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     const jobKey = maintenanceJobKey(owner, "rebuild");
     if (!options.allowClaimed
       && (rebuildingNotebookIds.has(key) || relinkingNotebookIds.has(key) || buildingKg
+        || deletingNotebookIds.has(key)
         || submittingMaintenanceRef.current.has(jobKey))) return "failed";
     setRebuildingNotebookIds((current) => claimNotebookSlot(current, key));
     expectedMaintenanceJobRef.current.delete(jobKey);
@@ -1000,6 +1092,73 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     await launchRebuild(owner);
   };
 
+  // 「删除知识图谱」:破坏性后台任务,与补上关联/重新合并共用服务端一个维护槽。形态逐项
+  // 镜像 startRelink——POST 之前先认领 actor+notebook 那一格(长任务按钮红线)、按种类
+  // 记提交中标记与期望 job_id、409 只做一次有界的领养重试——只多两件事:
+  // ① `notebookId` 是确认弹窗打开那一刻的笔记本。确认是异步的,点「确定」时当前 owner
+  //    若已不是它,绝不能把删除落到另一本上。
+  // ② 没能开始的原因也画在按钮旁(不只走横幅):被占槽时转述服务端点名占用者的 409 文案,
+  //    其余失败说没完成;同一格的旧结果在认领时先让出。
+  const startKgDelete = async (notebookId: string) => {
+    const owner = currentOwner();
+    if (!owner || !policyRef.current.canWriteKg || owner.notebookId !== notebookId) return;
+    const key = maintenanceOwnerKey(owner);
+    const jobKey = maintenanceJobKey(owner, "delete");
+    if (deletingNotebookIds.has(key) || relinkingNotebookIds.has(key) || rebuildingNotebookIds.has(key)
+      || buildingKg || submittingMaintenanceRef.current.has(jobKey)) return;
+    setDeletingNotebookIds((current) => claimNotebookSlot(current, key));
+    clearDeleteResult(key);
+    expectedMaintenanceJobRef.current.delete(jobKey);
+    for (const attempt of [0, 1]) {
+      if (!owns(owner) || !policyRef.current.canWriteKg) {
+        setDeletingNotebookIds((current) => releaseNotebookClaim(current, key));
+        return;
+      }
+      submittingMaintenanceRef.current.add(jobKey);
+      try {
+        const started = await deleteKg(owner.notebookId);
+        expectedMaintenanceJobRef.current.set(jobKey, started.job_id);
+        if (owns(owner)) effectsRef.current.notify("已开始删除知识图谱；完成后会自动更新");
+        return;
+      } catch (error) {
+        if (httpErrorStatus(error) === 409) {
+          if (!owns(owner) || !policyRef.current.canWriteKg) {
+            setDeletingNotebookIds((current) => releaseNotebookClaim(current, key));
+            return;
+          }
+          const verdict = await adoptRunningMaintenance(owner);
+          if (verdict === "idle" && attempt === 0) continue;
+          // 这次点击没有开始删除。领养到了正在跑的那件事(可能正是另一个标签页发起的删除,
+          // 那时它的终态结果稍后会覆盖这一行),或者三种维护状态都说没在跑、服务端仍回 409
+          // (占着的是维护槽之外的分析任务)。两种情形都转述服务端点名占用者的 409 文案,
+          // 不说「刚结束、再点一次」;只有后一种要自己放掉认领——前一种领养已经按服务端
+          // 真相认领或释放过了。
+          if (verdict === "idle") {
+            setDeletingNotebookIds((current) => releaseNotebookClaim(current, key));
+          }
+          if (owns(owner)) {
+            showDeleteResult(key, {
+              tone: "neutral",
+              text: toUserMessage(error, KG_DELETE_BUSY_MESSAGE),
+            });
+          }
+          return;
+        }
+        if (owns(owner) && policyRef.current.canWriteKg) {
+          effectsRef.current.reportError(error);
+          showDeleteResult(key, {
+            tone: "failed",
+            text: toUserMessage(error, KG_DELETE_FAILED_MESSAGE),
+          });
+        }
+        setDeletingNotebookIds((current) => releaseNotebookClaim(current, key));
+        return;
+      } finally {
+        submittingMaintenanceRef.current.delete(jobKey);
+      }
+    }
+  };
+
   useEffect(() => {
     const owner = currentOwner();
     if (!owner) return;
@@ -1046,6 +1205,58 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     }, KG_MAINTENANCE_POLL_MS);
     return () => { stopped = true; window.clearInterval(timer); };
   }, [relinkingNotebookIds, ownerVersion]);
+
+  // 删除的有界轮询,逐项镜像上面那条 relink 轮询(单飞、身份感知、提交窗口内不结算、
+  // job_id 连续对不上才收工、先刷新后释放)。差别只在结算:结果先写进按钮旁那一格,
+  // 且 job_id 对不上时的那份统计不是我们的,只能说不知道。
+  useEffect(() => {
+    const owner = currentOwner();
+    if (!owner) return;
+    const key = maintenanceOwnerKey(owner);
+    if (!deletingNotebookIds.has(key)) return;
+    let stopped = false;
+    let settled = false;
+    let inFlight = false;
+    let attempts = 0;
+    let mismatchStreak = 0;
+    const settle = async (outcome: ReturnType<typeof kgDeletePollOutcome>) => {
+      if (outcome.result && owns(owner)) effectsRef.current.notify(outcome.result.text);
+      if (outcome.refresh && owns(owner)) await refreshAfterDelete(owner);
+      expectedMaintenanceJobRef.current.delete(maintenanceJobKey(owner, "delete"));
+      if (outcome.result) showDeleteResult(key, outcome.result);
+      setDeletingNotebookIds((current) => releaseNotebookClaim(current, key));
+    };
+    const timer = window.setInterval(async () => {
+      if (stopped || settled || inFlight) return;
+      attempts += 1;
+      if (attempts > KG_DELETE_POLL_MAX_ATTEMPTS) {
+        settled = true;
+        window.clearInterval(timer);
+        await settle(KG_DELETE_POLL_TIMED_OUT);
+        return;
+      }
+      inFlight = true;
+      try {
+        const status = await fetchKgDeleteStatus(owner.notebookId);
+        if (stopped || settled || !ownsIdentity(owner)) return;
+        const outcome = kgDeletePollOutcome(status);
+        if (!outcome.done) { mismatchStreak = 0; return; }
+        const jobKey = maintenanceJobKey(owner, "delete");
+        if (submittingMaintenanceRef.current.has(jobKey)) return;
+        const expected = expectedMaintenanceJobRef.current.get(jobKey);
+        const mismatched = Boolean(expected && status.job_id !== expected);
+        if (mismatched) {
+          mismatchStreak += 1;
+          if (mismatchStreak < MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK) return;
+        }
+        settled = true;
+        window.clearInterval(timer);
+        await settle(mismatched ? KG_DELETE_JOB_MISMATCH : outcome);
+      } catch { /* transient status error; retain the claim */ }
+      finally { inFlight = false; }
+    }, KG_MAINTENANCE_POLL_MS);
+    return () => { stopped = true; window.clearInterval(timer); };
+  }, [deletingNotebookIds, ownerVersion]);
 
   useEffect(() => {
     const owner = currentOwner();
@@ -1140,7 +1351,9 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
 
   const startKgBuild = async (rebuild = false) => {
     const owner = currentOwner();
-    if (!owner || !policyRef.current.canWriteKg || buildingKg) return;
+    // 删除期间服务端必然以「正在删除知识图谱」拒绝整理;调用方的按钮同口径禁用。
+    if (!owner || !policyRef.current.canWriteKg || buildingKg
+      || deletingNotebookIds.has(ownerKey(owner))) return;
     const operation = beginOperation("kg-build");
     setBuildingKg(true);
     try {
@@ -1227,6 +1440,11 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
         && busyForNotebook(rebuildingNotebookIds, maintenanceOwnerKey(currentOwner()!))),
       relinking: visible && Boolean(currentOwner()
         && busyForNotebook(relinkingNotebookIds, maintenanceOwnerKey(currentOwner()!))),
+      deleting: visible && Boolean(currentOwner()
+        && busyForNotebook(deletingNotebookIds, maintenanceOwnerKey(currentOwner()!))),
+      deleteResult: visible
+        ? deleteResults.get(maintenanceOwnerKey(currentOwner()!)) ?? null
+        : null,
       buildingKg: visible && buildingKg,
       trackedKgJobId: visible ? trackedKgJobId : null,
     },
@@ -1248,6 +1466,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     decideMerge,
     startRelink,
     startRebuild,
+    startKgDelete,
     startKgBuild,
     observeNotebook,
     observeKgBuild,

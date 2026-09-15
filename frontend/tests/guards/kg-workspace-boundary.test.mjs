@@ -198,6 +198,8 @@ test("page composes one KG workspace owner and no longer owns Knowledge or graph
     "rejectMerge",
     "rebuildUnifiedKg",
     "relinkKg",
+    "deleteKg",
+    "fetchKgDeleteStatus",
     "buildKg",
     "rebuildKg",
   ]) assert.equal(callCount(page, name), 0, name);
@@ -246,6 +248,7 @@ test("every KG file has a positive dependency allowlist and no cross-workspace o
       "../features/kg-maintenance/kg-api",
       "../features/kg-maintenance/kg-rebuild-status",
       "../features/kg-maintenance/kg-relink-status",
+      "../features/kg-maintenance/kg-delete-status",
       "./kg-build-status",
       "./use-kg-owner",
       "./workspace-model",
@@ -535,7 +538,7 @@ test("visible commits compare live actor and notebook before exact owner generat
 test("read-only review recovery and every provider-side write are policy gated", () => {
   const text = graph.getText(graph);
   assert.match(text, /if \(policyRef\.current\.canWriteKg\) \{[\s\S]{0,180}fetchMergeReviewJob/);
-  for (const name of ["reviewPendingMerges", "reviewAllMerges", "decideMerge", "startRelink", "launchRebuild", "startKgBuild"]) {
+  for (const name of ["reviewPendingMerges", "reviewAllMerges", "decideMerge", "startRelink", "launchRebuild", "startKgDelete", "startKgBuild"]) {
     const at = text.indexOf(`const ${name}`);
     assert.ok(at >= 0, name);
     assert.match(text.slice(at, at + 900), /policyRef\.current\.canWriteKg/);

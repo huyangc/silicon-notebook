@@ -107,10 +107,11 @@ test("owner recovery adopts a server-running relink under the actor+notebook key
   assert.match(adopt, /claimNotebookSlot\(current, ownerKey\(owner\)\)/);
 });
 
-test("presentation delegates relink to the hook and disables it during either maintenance kind", () => {
+test("presentation delegates relink to the hook and disables it during any maintenance kind", () => {
   // 判据一条不减，只是分居两个模块：委派函数 relinkFromKgView 留在 page.tsx，
   // 「补上关联」按钮的 disabled 随知识图谱视图 JSX 搬到了 kg-graph-view.tsx。
+  // 「删除知识图谱」是同一个维护槽的第三种任务，按钮同样认它的忙碌位。
   assert.match(body("startRelink"), /policyRef\.current\.canWriteKg/);
   assert.match(page.getFullText(), /async function relinkFromKgView\(\)[\s\S]{0,120}kgWorkspace\.startRelink\(\)/);
-  assert.match(kgGraphView.getFullText(), /disabled=\{kgGraph\.relinking \|\| kgGraph\.rebuilding \|\| kgGraph\.buildingKg\}/);
+  assert.match(kgGraphView.getFullText(), /disabled=\{kgGraph\.relinking \|\| kgGraph\.rebuilding \|\| kgGraph\.buildingKg \|\| kgGraph\.deleting\}/);
 });

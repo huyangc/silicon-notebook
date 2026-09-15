@@ -33,6 +33,7 @@ function effects() {
     notify: vi.fn(),
     reportError: vi.fn(),
     refreshNotebook: vi.fn(),
+    refreshAfterKgDelete: vi.fn(),
     focusGraphNode: vi.fn(),
   };
 }
