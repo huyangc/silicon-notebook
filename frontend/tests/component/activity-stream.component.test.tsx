@@ -19,6 +19,7 @@ function ask(overrides: Partial<ActivityAsk> = {}): ActivityAsk {
     status: "done",
     answer_id: "ans-1",
     error: "",
+    submitted_via: "",
     ...overrides,
   };
 }
@@ -53,6 +54,7 @@ function report(overrides: Partial<ActivityReport> = {}): ActivityReport {
     depth: 4,
     status: "done",
     generation_started_at: "2026-08-04T10:05:00",
+    submitted_via: "",
     ...overrides,
   };
 }

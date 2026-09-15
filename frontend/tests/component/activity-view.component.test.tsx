@@ -74,6 +74,7 @@ function ask(id: string, question: string, notebookId = "nb-1"): ActivityAsk {
     status: "done",
     answer_id: `ans-${id}`,
     error: "",
+    submitted_via: "",
   };
 }
 
