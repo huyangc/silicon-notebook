@@ -11,25 +11,36 @@ import {
   fetchUserAskDetail,
   fetchUserNotebookSource,
   fetchUserNotebookSources,
+  fetchUserReportDetail,
 } from "./api.ts";
 import { mergeActivityPages } from "./format.ts";
 import { ActivityDetail } from "./ActivityDetail.tsx";
 import { ActivityScopePanel, ALL_NOTEBOOKS, type SourceListState } from "./ActivityScopePanel.tsx";
-import { ActivityStream, activityKey } from "./ActivityStream.tsx";
+import { ActivityStream, activityKey, type ActivityTypeOption } from "./ActivityStream.tsx";
 import type {
   ActivityCursor,
   ActivityItem,
   ActivitySource,
   ActivityTypeFilter,
   AskDetail,
+  ReportDetail,
 } from "./types";
 
 const PAGE = 50;
 const SOURCE_PAGE = 50;
 
-function initialActivityType(): ActivityTypeFilter {
-  if (typeof window === "undefined") return "";
+// `allowed` 为空(未嵌入子集页)时行为与原先逐字相同:四选一(含「全部」)按 URL
+// 回填,否则「全部」。传了子集时:URL 里的值若在子集内就用它,否则取子集第一项
+// ——不落到「全部」,因为子集页(如提问分析)压根不提供「全部」这个选项。
+function initialActivityType(allowed?: ActivityTypeOption[]): ActivityTypeFilter {
+  if (typeof window === "undefined") {
+    return allowed && allowed.length > 0 ? allowed[0].value : "";
+  }
   const value = new URLSearchParams(window.location.search).get("activity_type");
+  if (allowed && allowed.length > 0) {
+    const match = allowed.find((option) => option.value === value);
+    return match ? match.value : allowed[0].value;
+  }
   return value === "ask" || value === "source" || value === "report" ? value : "";
 }
 
@@ -72,7 +83,7 @@ export function ActivityView({
   since,
   until,
   now,
-  fixedActivityType,
+  activityTypeOptions,
 }: {
   /** 已解析成具体 id 的被查看用户（顶部范围条选「我自己」时是当前用户自己的 id）。 */
   userId: string;
@@ -88,8 +99,13 @@ export function ActivityView({
   until?: string;
   /** 只为测试注入确定的“现在”；生产不传，时间格式化件各自用 new Date()。 */
   now?: Date;
-  /** 嵌入专用分析页时固定类型，并隐藏会把用户带离该页用途的类型切换。 */
-  fixedActivityType?: Exclude<ActivityTypeFilter, "">;
+  /**
+   * 嵌入专用分析页（如 QuestionAnalysisSheet）时传入「允许的活动类型子集」，
+   * 只渲染这些选项（仍走 ActivityStream 既有的按钮组/aria-pressed/失败重试）。
+   * 初始类型取 URL `activity_type`（若在子集内），否则子集第一项。不传时行为
+   * 与 `/dev/logs` 完全一致（四选一，含「全部」）。
+   */
+  activityTypeOptions?: ActivityTypeOption[];
 }) {
   const [notebooks, setNotebooks] = useState<AdminUserNotebook[]>([]);
   const [notebooksLoading, setNotebooksLoading] = useState(false);
@@ -100,7 +116,7 @@ export function ActivityView({
   const [forbidden, setForbidden] = useState(false);
   const [notebookId, setNotebookId] = useState(ALL_NOTEBOOKS);
   const [activityType, setActivityType] = useState<ActivityTypeFilter>(
-    fixedActivityType ?? initialActivityType,
+    () => initialActivityType(activityTypeOptions),
   );
   const sourceTarget = useMemo(initialSourceTarget, []);
   const sourceTargetKeyRef = useRef("");
@@ -121,6 +137,9 @@ export function ActivityView({
   const [askDetail, setAskDetail] = useState<AskDetail | null>(null);
   const [askDetailLoading, setAskDetailLoading] = useState(false);
   const [askDetailError, setAskDetailError] = useState("");
+  const [reportDetail, setReportDetail] = useState<ReportDetail | null>(null);
+  const [reportDetailLoading, setReportDetailLoading] = useState(false);
+  const [reportDetailError, setReportDetailError] = useState("");
 
   // 请求范围键。**notebook_id 与视图 tab 都在里面**（后者随页面传进来的 scopeKey
   // 带上）：mergeActivityPages 是纯函数，看不见 scope，也就不会替我们拦住迟到的
@@ -158,10 +177,6 @@ export function ActivityView({
     setForbidden(false);
     sourcesGenerationRef.current = {};
   }, [userId]);
-
-  useEffect(() => {
-    if (fixedActivityType) setActivityType(fixedActivityType);
-  }, [fixedActivityType]);
 
   const loadNotebooks = useCallback(() => {
     if (!userId) {
@@ -207,6 +222,9 @@ export function ActivityView({
     setAskDetail(null);
     setAskDetailError("");
     setAskDetailLoading(false);
+    setReportDetail(null);
+    setReportDetailError("");
+    setReportDetailLoading(false);
     setError("");
     if (!userId) {
       setLoading(false);
@@ -525,6 +543,43 @@ export function ActivityView({
       });
   }, [selected, userId]);
 
+  // 与上面的提问详情同一套竞态守卫(detailGenerationRef + streamScopeRef):换选中项/
+  // 换用户/换类型/换笔记本都会让 requestedScopeKey 或 generation 失配,迟到的响应
+  // 被这里的 fresh() 挡住,不会覆盖新范围下已经渲染的内容。
+  useEffect(() => {
+    if (!selected || selected.type !== "report" || !userId) {
+      setReportDetail(null);
+      setReportDetailLoading(false);
+      setReportDetailError("");
+      return;
+    }
+    const generation = ++detailGenerationRef.current;
+    const requestedScopeKey = streamScopeRef.current;
+    const reportId = selected.id;
+    setReportDetail(null);
+    setReportDetailError("");
+    setReportDetailLoading(true);
+    const fresh = () => generation === detailGenerationRef.current
+      && requestedScopeKey === streamScopeRef.current;
+    fetchUserReportDetail(userId, reportId)
+      .then((detail) => {
+        if (!fresh()) return;
+        setReportDetail(detail);
+      })
+      .catch((cause) => {
+        if (!fresh()) return;
+        if (isForbidden(cause)) {
+          setForbidden(true);
+          return;
+        }
+        setReportDetailError(toUserMessage(cause, "报告详情加载失败，请重试"));
+      })
+      .finally(() => {
+        if (!fresh()) return;
+        setReportDetailLoading(false);
+      });
+  }, [selected, userId]);
+
   const selectedKey = selected ? activityKey(selected) : "";
 
   if (forbidden) {
@@ -545,7 +600,11 @@ export function ActivityView({
       {userError ? <div className="errorbar">{userError}</div> : null}
       <div className="logview-body logview-activity-body">
         <ActivityScopePanel
-          allNotebooksLabel={activityType === "ask" ? "全部提问（含共享笔记本）" : undefined}
+          allNotebooksLabel={
+            activityType === "ask" ? "全部提问（含共享笔记本）"
+              : activityType === "report" ? "全部报告（含共享笔记本）"
+              : undefined
+          }
           expanded={expanded}
           failure={notebooksFailure}
           identityErrored={identityErrored}
@@ -573,7 +632,7 @@ export function ActivityView({
           onActivityTypeChange={selectActivityType}
           onSelect={selectItem}
           selectedKey={selectedKey}
-          showTypeFilter={!fixedActivityType}
+          typeOptions={activityTypeOptions}
         />
         <ActivityDetail
           askDetail={askDetail}
@@ -582,6 +641,9 @@ export function ActivityView({
           item={selected}
           notebookNames={notebookNames}
           now={now}
+          reportDetail={reportDetail}
+          reportDetailError={reportDetailError}
+          reportDetailLoading={reportDetailLoading}
         />
       </div>
     </>

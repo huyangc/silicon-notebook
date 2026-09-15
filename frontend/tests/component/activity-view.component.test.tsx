@@ -5,6 +5,7 @@ import { expect, test, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   fetchUserActivity: vi.fn(),
   fetchUserAskDetail: vi.fn(),
+  fetchUserReportDetail: vi.fn(),
   fetchUserNotebookSource: vi.fn(),
   fetchUserNotebookSources: vi.fn(),
   fetchUserNotebooks: vi.fn(),
@@ -14,6 +15,7 @@ vi.mock("../../app/dev/logs/activity/api.ts", () => ({
   FORBIDDEN_SENTINEL: "forbidden",
   fetchUserActivity: mocks.fetchUserActivity,
   fetchUserAskDetail: mocks.fetchUserAskDetail,
+  fetchUserReportDetail: mocks.fetchUserReportDetail,
   fetchUserNotebookSource: mocks.fetchUserNotebookSource,
   fetchUserNotebookSources: mocks.fetchUserNotebookSources,
 }));
@@ -23,7 +25,13 @@ vi.mock("../../app/admin/usage/notebooks.ts", () => ({
 }));
 
 import { ActivityView } from "../../app/dev/logs/activity/ActivityView";
-import type { ActivityAsk, ActivityItem, ActivitySource } from "../../app/dev/logs/activity/types";
+import type {
+  ActivityAsk,
+  ActivityItem,
+  ActivityReport,
+  ActivitySource,
+  ReportDetail,
+} from "../../app/dev/logs/activity/types";
 
 const NOW = new Date(2026, 7, 4, 12, 0);
 
@@ -65,6 +73,39 @@ function ask(id: string, question: string, notebookId = "nb-1"): ActivityAsk {
     status: "done",
     answer_id: `ans-${id}`,
     error: "",
+  };
+}
+
+function report(id: string, question: string, notebookId = "nb-1"): ActivityReport {
+  return {
+    type: "report",
+    id,
+    notebook_id: notebookId,
+    created_at: "2026-08-04T10:30:00",
+    updated_at: "2026-08-04T10:40:00",
+    question,
+    depth: 4,
+    status: "done",
+    generation_started_at: "2026-08-04T10:31:00",
+  };
+}
+
+// fetchUserReportDetail 的成功响应,字段逐字对应后端 ReportActivityDetail
+// （types.ts::ReportDetail）。测试各自用 `{ ...reportDetail(...), 字段: 值 }` 覆盖。
+function reportDetail(overrides: Partial<ReportDetail> = {}): ReportDetail {
+  return {
+    report_id: "r1",
+    notebook_id: "nb-1",
+    question: "这次报告问了什么",
+    depth: 4,
+    status: "done",
+    created_at: "2026-08-04T10:30:00",
+    updated_at: "2026-08-04T10:40:00",
+    generation_started_at: "2026-08-04T10:31:00",
+    error: "",
+    content_md: "",
+    references: [],
+    ...overrides,
   };
 }
 
@@ -227,12 +268,24 @@ test("左栏列出该用户的笔记本与界面词计数（提问用 questions�
   expect(row.textContent).toContain("报告 0");
 });
 
-test("嵌入提问分析页时固定为提问且隐藏活动类型切换", async () => {
+// F3:提问分析页签用「允许的活动类型子集」(activityTypeOptions)取代此前固定死的
+// fixedActivityType="ask"——只出现两个按钮(不是默认四选一),点「深度报告」按新
+// 类型重新取数并把 activity_type 写回 URL。
+test("嵌入提问分析页时只渲染子集里的活动类型按钮，点击后按新类型重新取数", async () => {
+  const user = userEvent.setup();
   mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
-  mocks.fetchUserActivity.mockResolvedValue(page([ask("ask-1", "分析问题")]))
+  mocks.fetchUserActivity.mockImplementation((_userId, params) => (
+    params.activityType === "report"
+      ? Promise.resolve(page([report("r1", "分析报告")]))
+      : Promise.resolve(page([ask("ask-1", "分析问题")]))
+  ));
+  window.history.replaceState(null, "", "/admin/usage?sheet=questions");
   render(
     <ActivityView
-      fixedActivityType="ask"
+      activityTypeOptions={[
+        { value: "ask", label: "问答" },
+        { value: "report", label: "深度报告" },
+      ]}
       now={NOW}
       scopeKey='["admin-usage-questions","user-1"]'
       userId="user-1"
@@ -243,7 +296,19 @@ test("嵌入提问分析页时固定为提问且隐藏活动类型切换", async
   expect(mocks.fetchUserActivity).toHaveBeenCalledWith(
     "user-1", expect.objectContaining({ activityType: "ask" }),
   );
-  expect(screen.queryByRole("group", { name: "按活动类型筛选" })).not.toBeInTheDocument();
+  const filter = screen.getByRole("group", { name: "按活动类型筛选" });
+  expect(within(filter).getAllByRole("button")).toHaveLength(2);
+  expect(within(filter).getByRole("button", { name: "问答" })).toBeInTheDocument();
+  expect(within(filter).getByRole("button", { name: "深度报告" })).toBeInTheDocument();
+
+  await user.click(within(filter).getByRole("button", { name: "深度报告" }));
+
+  expect(await screen.findByText("分析报告")).toBeInTheDocument();
+  expect(mocks.fetchUserActivity).toHaveBeenLastCalledWith(
+    "user-1", expect.objectContaining({ activityType: "report" }),
+  );
+  expect(window.location.search).toContain("activity_type=report");
+  window.history.replaceState({}, "", "/dev/logs");
 });
 
 
@@ -614,6 +679,121 @@ test("选中一条提问时取回它的详情，并复用既有推理轨迹面�
   });
   expect(await screen.findByText("找到 2 条相关记忆")).toBeInTheDocument();
   expect(container.querySelector(".reasoning-trace-panel")).not.toBeNull();
+});
+
+
+// F2:选中一条报告时取回它的只读详情正文,复用 report-view.tsx 的 ReportMarkdown。
+test("选中一条报告时取回它的详情，报告正文渲染出来", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([report("r1", "这次报告问了什么")]));
+  mocks.fetchUserReportDetail.mockResolvedValue(reportDetail({
+    content_md: "这是报告正文内容。",
+  }));
+  view();
+
+  await user.click(await screen.findByText("这次报告问了什么"));
+
+  await waitFor(() => {
+    expect(mocks.fetchUserReportDetail).toHaveBeenCalledWith("user-1", "r1");
+  });
+  expect(await screen.findByText("这是报告正文内容。")).toBeInTheDocument();
+});
+
+
+test("报告详情 403 落到固定的无权限态，不给重试暗示", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([report("r1", "这次报告问了什么")]));
+  mocks.fetchUserReportDetail.mockRejectedValue(new Error("forbidden"));
+  view();
+
+  await user.click(await screen.findByText("这次报告问了什么"));
+
+  expect(await screen.findByText("没有权限查看这位用户的活动记录。")).toBeInTheDocument();
+  expect(screen.queryByText(/请重试/)).not.toBeInTheDocument();
+});
+
+
+test("报告详情加载失败时右栏显示错误文案", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([report("r1", "这次报告问了什么")]));
+  mocks.fetchUserReportDetail.mockRejectedValue(new Error("boom"));
+  view();
+
+  await user.click(await screen.findByText("这次报告问了什么"));
+
+  expect(await screen.findByText("报告详情加载失败，请重试")).toBeInTheDocument();
+});
+
+
+test("报告还没有生成正文时右栏显示空态文案", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([report("r1", "这次报告问了什么")]));
+  mocks.fetchUserReportDetail.mockResolvedValue(reportDetail({ status: "running" }));
+  view();
+
+  await user.click(await screen.findByText("这次报告问了什么"));
+
+  expect(await screen.findByText("这份报告还没有生成正文")).toBeInTheDocument();
+});
+
+
+// 与 AskDetailPane 同一条规则:详情端点的 notebook_deleted_at 是权威,合并进
+// RetainedActivityNotice;此时不再显示「还没有生成正文」的空态(避免两句互相矛盾)。
+test("报告所在笔记本已删除时右栏显示留存说明，不再显示空态文案", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([report("r1", "这次报告问了什么")]));
+  mocks.fetchUserReportDetail.mockResolvedValue(reportDetail({
+    content_md: "",
+    notebook_name: "笔记本一",
+    notebook_deleted_at: "2026-08-10T00:00:00",
+    retained_until: "2026-09-10T00:00:00",
+  }));
+  view();
+
+  await user.click(await screen.findByText("这次报告问了什么"));
+
+  expect(await screen.findByText(/原笔记本《笔记本一》已删除/)).toBeInTheDocument();
+  expect(screen.queryByText("这份报告还没有生成正文")).not.toBeInTheDocument();
+});
+
+
+// 竞态红线:报告详情与 ask 详情共用同一套 detailGenerationRef + streamScopeRef。
+// 选中第一份报告后(请求进行中)切到第二份报告,第一份的迟到响应绝不能覆盖已经
+// 换到的第二份报告的正文。
+test("切换选中的报告后，上一条报告的迟到详情不会覆盖新选中报告的正文", async () => {
+  const user = userEvent.setup();
+  const stale = deferred<ReportDetail>();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([
+    report("r1", "第一份报告"),
+    report("r2", "第二份报告"),
+  ]));
+  mocks.fetchUserReportDetail
+    .mockReturnValueOnce(stale.promise)
+    .mockResolvedValueOnce(reportDetail({
+      report_id: "r2",
+      question: "第二份报告",
+      content_md: "第二份报告的正文",
+    }));
+  view();
+
+  await user.click(await screen.findByText("第一份报告"));
+  await waitFor(() => expect(mocks.fetchUserReportDetail).toHaveBeenCalledTimes(1));
+
+  await user.click(screen.getByText("第二份报告"));
+  expect(await screen.findByText("第二份报告的正文")).toBeInTheDocument();
+
+  stale.resolve(reportDetail({ content_md: "迟到的报告正文" }));
+
+  await waitFor(() => {
+    expect(screen.getByText("第二份报告的正文")).toBeInTheDocument();
+  });
+  expect(screen.queryByText("迟到的报告正文")).not.toBeInTheDocument();
 });
 
 

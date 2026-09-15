@@ -10,6 +10,11 @@
 // 一份,`SourceSummary`/`PaginatedSources` 的真源是 workspace-model.ts。
 export type { SourceSummary, PaginatedSources } from "../../../workspace-model.ts";
 
+// 报告详情的 `references` 字段与 ReportDetailT["references"]（report-model.ts）
+// 同形——后端 ReportActivityDetail.references 原样来自 references_json,不重新声明
+// 一份形状。
+import type { ReportDetailT } from "../../../report-model.ts";
+
 export type ActivityCursor = { ts: string; id: string };
 
 /** 空串表示混合活动；其余值与后端 activity_type 查询参数逐字对应。 */
@@ -101,6 +106,26 @@ export type AskDetail = {
   trace: unknown[];
   // `unknown` 已经包含 null,`unknown | null` 是多余的联合。
   answer: unknown;
+  notebook_name?: string;
+  notebook_deleted_at?: string;
+  retained_until?: string;
+};
+
+// 右栏「选中报告」详情。字段与后端 ReportActivityDetail（backend/app/models/admin.py，
+// 紧挨 AskDetail 的镜像模型）逐字对应。正文渲染复用 report-view.tsx 的
+// ReportMarkdown,这里刻意不重新声明 references 的形状。
+export type ReportDetail = {
+  report_id: string;
+  notebook_id: string;
+  question: string;
+  depth: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  generation_started_at: string;
+  error: string;
+  content_md: string;
+  references: ReportDetailT["references"];
   notebook_name?: string;
   notebook_deleted_at?: string;
   retained_until?: string;

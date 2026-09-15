@@ -129,6 +129,9 @@ test("只读活动详情里不出现任何点了没反应的控件", async () =>
       item={ITEM}
       notebookNames={{}}
       now={NOW}
+      reportDetail={null}
+      reportDetailError=""
+      reportDetailLoading={false}
     />,
   );
 
@@ -232,6 +235,9 @@ test("删除笔记本后的提问详情说明留存边界且不冒充答案缺�
       item={deletedItem}
       notebookNames={{}}
       now={NOW}
+      reportDetail={null}
+      reportDetailError=""
+      reportDetailLoading={false}
     />,
   );
 
@@ -259,6 +265,9 @@ test("详情请求与删除竞态时以详情返回的留存状态为准", () =>
       item={ITEM}
       notebookNames={{}}
       now={NOW}
+      reportDetail={null}
+      reportDetailError=""
+      reportDetailLoading={false}
     />,
   );
 
