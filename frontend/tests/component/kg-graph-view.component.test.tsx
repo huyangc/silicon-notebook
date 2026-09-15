@@ -47,6 +47,7 @@ function graphView(overrides: Partial<Props["kgGraph"]> = {}): Props["kgGraph"] 
     rebuilding: false,
     relinking: false,
     reviewAllJob: null,
+    reviewAllRunning: false,
     reviewAllStarting: false,
     reviewBusy: false,
     search: "",
@@ -129,19 +130,51 @@ test("画布四态各渲染自己的曲面，只有 graph 态才挂 ForceGraph2D
   expect(screen.queryByTestId("force-graph")).toBeNull();
   unavailable.unmount();
 
-  // empty 态按成因分三句：只有真在搜索时才提示「清空搜索」；删除知识图谱或从没整理过
-  // 的库既没搜索也没过滤，那句提示永远兑现不了。
+  // empty 态按成因各说一句，且**先看图本身是不是空的**：删除知识图谱或从没整理过的库
+  // 既没搜索也没过滤；即便还有一个搜索词挂着，「清空搜索」也兑现不了。
   const empty = renderView({ kgCanvas: "empty" });
   expect(screen.getByText("还没有知识图谱内容。整理来源后会显示在这里。")).toBeTruthy();
   expect(screen.queryByText("没有匹配的节点。清空搜索后可查看完整图谱。")).toBeNull();
   expect(screen.queryByTestId("force-graph")).toBeNull();
   empty.unmount();
 
-  const emptySearch = renderView({ kgCanvas: "empty", kgSearching: true });
+  const emptyGraphWhileSearching = renderView({
+    kgCanvas: "empty",
+    kgSearching: true,
+    kgGraph: graphView({ graph: { nodes: [], edges: [] }, merged: { nodes: [], edges: [] }, selectedTypes: ["claim"] }),
+  });
+  expect(screen.getByText("还没有知识图谱内容。整理来源后会显示在这里。")).toBeTruthy();
+  expect(screen.queryByText("没有匹配的节点。清空搜索后可查看完整图谱。")).toBeNull();
+  emptyGraphWhileSearching.unmount();
+
+  // 构建轮询 20 分钟封顶后 vizBuilding 已归位、响应里的 viz_building 仍为 true：画布与
+  // 封顶那句 toast 说同一句话，而不是说「还没有内容」。
+  const cappedBuild = renderView({
+    kgCanvas: "empty",
+    kgGraph: graphView({
+      graph: { nodes: [], edges: [], viz_building: true },
+      merged: { nodes: [], edges: [], viz_building: true },
+    }),
+  });
+  expect(screen.getByText("图谱索引仍在后台构建，请稍后重新打开查看")).toBeTruthy();
+  cappedBuild.unmount();
+
+  const nonEmptyGraph = {
+    nodes: [{ id: "K-1", object_type: "concept", payload: { name: "阈值" } }],
+    edges: [],
+  };
+  const emptySearch = renderView({
+    kgCanvas: "empty",
+    kgSearching: true,
+    kgGraph: graphView({ graph: nonEmptyGraph, merged: nonEmptyGraph }),
+  });
   expect(screen.getByText("没有匹配的节点。清空搜索后可查看完整图谱。")).toBeTruthy();
   emptySearch.unmount();
 
-  const emptyFiltered = renderView({ kgCanvas: "empty", kgGraph: graphView({ selectedTypes: ["claim"] }) });
+  const emptyFiltered = renderView({
+    kgCanvas: "empty",
+    kgGraph: graphView({ graph: nonEmptyGraph, merged: nonEmptyGraph, selectedTypes: ["claim"] }),
+  });
   expect(screen.getByText("当前类型过滤下没有节点。清除过滤后可查看完整图谱。")).toBeTruthy();
   emptyFiltered.unmount();
 
@@ -263,11 +296,28 @@ test("没有知识图谱时无可删除；任一维护/整理任务在跑时删�
   expect(screen.getByRole("button", { name: "删除知识图谱" })).toBeDisabled();
   unmount();
 
-  for (const busy of ["relinking", "rebuilding", "buildingKg"] as const) {
+  for (const busy of ["relinking", "rebuilding", "buildingKg", "reviewBusy", "reviewAllStarting", "reviewAllRunning"] as const) {
     const view = renderView({ kgGraph: graphView({ [busy]: true }) });
     expect(screen.getByRole("button", { name: "删除知识图谱" }), busy).toBeDisabled();
     view.unmount();
   }
+  // 合并决定在飞：删除会把正在决定的那个候选一并清掉。
+  const deciding = renderView({ kgGraph: graphView({ decidingMerge: { id: "m-1", confirm: false } }) });
+  expect(screen.getByRole("button", { name: "删除知识图谱" })).toBeDisabled();
+  deciding.unmount();
+});
+
+
+test("删除在飞：自动判重与全部自动判重同样禁用（删除会清掉待确认合并）", () => {
+  const candidate: PendingMerge = { id: "m-1", canonical_a: "K-A", canonical_b: "K-B", score: 0.91, status: "pending" };
+  const idle = renderView({ kgGraph: graphView({ pendingMerges: [candidate] }) });
+  expect(screen.getByRole("button", { name: "自动判重" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "全部自动判重" })).toBeEnabled();
+  idle.unmount();
+
+  renderView({ kgGraph: graphView({ pendingMerges: [candidate], deleting: true }) });
+  expect(screen.getByRole("button", { name: "自动判重" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "全部自动判重" })).toBeDisabled();
 });
 
 

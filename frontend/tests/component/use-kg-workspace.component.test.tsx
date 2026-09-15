@@ -58,7 +58,10 @@ import { useKgWorkspace } from "../../app/use-kg-workspace";
 import {
   KG_DELETE_BUSY_MESSAGE,
   KG_DELETE_FAILED_MESSAGE,
+  KG_DELETE_POLL_MAX_ATTEMPTS,
   KG_DELETE_RESULT_HOLD_MS,
+  KG_DELETE_TIMEOUT_MESSAGE,
+  KG_DELETE_UNKNOWN_MESSAGE,
   type KgDeleteRunStatus,
   type KgDeleteStatus,
 } from "../../features/kg-maintenance/kg-delete-status";
@@ -564,12 +567,230 @@ test("KG delete claims before POST, blocks sibling entries, then settles with a 
   expect(value!.graph.deleteResult).toBeNull();
 });
 
-test("opening a notebook re-claims a KG delete the server is still running", async () => {
-  kgApi.fetchKgDeleteStatus.mockResolvedValue(deleteStatus("running", { job_id: "delete-other-tab" }));
+test("opening a notebook re-claims a running KG delete and reports that observed job's own result", async () => {
+  vi.useFakeTimers();
+  kgApi.fetchKgDeleteStatus
+    .mockResolvedValueOnce(deleteStatus("running", { job_id: "delete-other-tab" }))
+    .mockResolvedValue(deleteStatus("succeeded", { job_id: "delete-other-tab", objects_deleted: 7 }));
   render(<Harness />);
-  await waitFor(() => expect(value!.graph.deleting).toBe(true));
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  expect(value!.graph.deleting).toBe(true);
   await act(async () => value!.startRelink());
   expect(kgApi.relinkKg).not.toHaveBeenCalled();
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(value!.graph.deleting).toBe(false);
+  expect(value!.graph.deleteResult).toEqual({ tone: "success", text: "已删除 7 个知识对象" });
+});
+
+test("a 409 delete whose adoption finds every kind idle re-claims before the retry POST and polls the retried job", async () => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchKgDeleteStatus).toHaveBeenCalledOnce());
+  vi.useFakeTimers();
+  kgApi.deleteKg
+    .mockRejectedValueOnce(httpConflict())
+    .mockResolvedValueOnce({ status: "deleting", notebook_id: "notebook-a", job_id: "delete-retry" });
+
+  await act(async () => value!.startKgDelete("notebook-a"));
+  expect(kgApi.deleteKg).toHaveBeenCalledTimes(2);
+  expect(value!.graph.deleting).toBe(true);
+
+  kgApi.fetchKgDeleteStatus.mockResolvedValue(deleteStatus("succeeded", {
+    job_id: "delete-retry", objects_deleted: 4,
+  }));
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(value!.graph.deleting).toBe(false);
+  expect(value!.graph.deleteResult).toEqual({ tone: "success", text: "已删除 4 个知识对象" });
+});
+
+test("relink also re-claims its slot before a retry POST that follows an all-idle adoption", async () => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchRelinkStatus).toHaveBeenCalledOnce());
+  kgApi.relinkKg
+    .mockRejectedValueOnce(httpConflict())
+    .mockResolvedValueOnce({ status: "running", notebook_id: "notebook-a", job_id: "relink-retry" });
+  await act(async () => value!.startRelink());
+  expect(kgApi.relinkKg).toHaveBeenCalledTimes(2);
+  expect(value!.graph.relinking).toBe(true);
+});
+
+test("rebuild also re-claims its slot before a retry POST that follows an all-idle adoption", async () => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledOnce());
+  kgApi.rebuildUnifiedKg
+    .mockRejectedValueOnce(httpConflict())
+    .mockResolvedValueOnce({ status: "running", notebook_id: "notebook-a", job_id: "rebuild-retry" });
+  await act(async () => value!.startRebuild());
+  expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(2);
+  expect(value!.graph.rebuilding).toBe(true);
+});
+
+test("an unknown adoption verdict never reports a stale succeeded from an earlier delete, and keeps the 409 text", async () => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchKgDeleteStatus).toHaveBeenCalledOnce());
+  vi.useFakeTimers();
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+  kgApi.deleteKg.mockRejectedValueOnce(httpConflict());
+  // 领养时删除状态探测偶发失败 → verdict unknown，本标签页什么都没开始、也没见过在跑的删除。
+  kgApi.fetchKgDeleteStatus.mockRejectedValueOnce(new Error("probe down"));
+
+  await act(async () => value!.startKgDelete("notebook-a"));
+  expect(kgApi.deleteKg).toHaveBeenCalledOnce();
+  expect(value!.graph.deleting).toBe(true);
+  expect(value!.graph.deleteResult).toEqual({ tone: "neutral", text: KG_DELETE_BUSY_MESSAGE });
+
+  kgApi.fetchKgDeleteStatus.mockResolvedValue(deleteStatus("succeeded", {
+    job_id: "delete-earlier-click", objects_deleted: 120,
+  }));
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(value!.graph.deleting).toBe(false);
+  expect(value!.graph.deleteResult).toEqual({ tone: "neutral", text: KG_DELETE_BUSY_MESSAGE });
+  expect(notify.mock.calls.flat().some((message) => String(message).includes("已删除"))).toBe(false);
+  expect(refreshAfterKgDelete).not.toHaveBeenCalled();
+  expect(kgApi.fetchUnifiedGraph).not.toHaveBeenCalled();
+  consoleError.mockRestore();
+});
+
+test("a terminal status for a different job than the one submitted settles as unknown, never with its counts", async () => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchKgDeleteStatus).toHaveBeenCalledOnce());
+  vi.useFakeTimers();
+  await act(async () => value!.startKgDelete("notebook-a"));
+  kgApi.fetchKgDeleteStatus.mockResolvedValue(deleteStatus("succeeded", {
+    job_id: "delete-someone-else", objects_deleted: 50,
+  }));
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(value!.graph.deleting).toBe(true);
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(value!.graph.deleting).toBe(false);
+  expect(value!.graph.deleteResult).toEqual({ tone: "neutral", text: KG_DELETE_UNKNOWN_MESSAGE });
+  expect(notify.mock.calls.flat().some((message) => String(message).includes("50"))).toBe(false);
+  // 我们确实开始过一次删除，图谱可能已经变了：仍然刷新。
+  expect(refreshAfterKgDelete).toHaveBeenCalledWith("notebook-a", expect.any(Function));
+});
+
+test("an idle status after our submitted delete (process restarted) settles as unknown and refreshes", async () => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchKgDeleteStatus).toHaveBeenCalledOnce());
+  vi.useFakeTimers();
+  await act(async () => value!.startKgDelete("notebook-a"));
+  kgApi.fetchKgDeleteStatus.mockResolvedValue(deleteStatus("idle"));
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(6_000); });
+  expect(value!.graph.deleting).toBe(false);
+  expect(value!.graph.deleteResult).toEqual({ tone: "neutral", text: KG_DELETE_UNKNOWN_MESSAGE });
+  expect(refreshAfterKgDelete).toHaveBeenCalledOnce();
+});
+
+test("a delete that never reaches a terminal status unlocks at the poll cap and says it may still be running", async () => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchKgDeleteStatus).toHaveBeenCalledOnce());
+  vi.useFakeTimers();
+  await act(async () => value!.startKgDelete("notebook-a"));
+  kgApi.fetchKgDeleteStatus.mockResolvedValue(deleteStatus("running", { job_id: "delete-a" }));
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync((KG_DELETE_POLL_MAX_ATTEMPTS + 1) * 3_000);
+  });
+  expect(value!.graph.deleting).toBe(false);
+  expect(value!.graph.deleteResult).toEqual({ tone: "neutral", text: KG_DELETE_TIMEOUT_MESSAGE });
+});
+
+test("the delete result lands only after the refresh completes, and its timer is cleared on unmount", async () => {
+  const { unmount } = render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchKgDeleteStatus).toHaveBeenCalledOnce());
+  vi.useFakeTimers();
+  await act(async () => value!.startKgDelete("notebook-a"));
+  const graphPending = deferred<UnifiedGraphResp>();
+  kgApi.fetchUnifiedGraph.mockReturnValueOnce(graphPending.promise);
+  kgApi.fetchKgDeleteStatus.mockResolvedValue(deleteStatus("succeeded", {
+    job_id: "delete-a", objects_deleted: 2,
+  }));
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(kgApi.fetchUnifiedGraph).toHaveBeenCalledWith("notebook-a", 80);
+  expect(value!.graph.deleting).toBe(true);
+  expect(value!.graph.deleteResult).toBeNull();
+  expect(notify).not.toHaveBeenCalledWith("已删除 2 个知识对象");
+
+  await act(async () => graphPending.resolve(graph()));
+  expect(notify).toHaveBeenCalledWith("已删除 2 个知识对象");
+  expect(value!.graph.deleteResult).toEqual({ tone: "success", text: "已删除 2 个知识对象" });
+  expect(value!.graph.deleting).toBe(false);
+
+  // 此刻挂着的计时器里有结果那一格的保留计时器；卸载必须把它撤掉，不能留一个到点还去
+  // 改已卸载组件状态的回调。
+  const pendingTimers = vi.getTimerCount();
+  expect(pendingTimers).toBeGreaterThan(0);
+  unmount();
+  expect(vi.getTimerCount()).toBeLessThan(pendingTimers);
+});
+
+test("the delete terminal refresh clears search hits, an in-flight search, and the selected node", async () => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchKgDeleteStatus).toHaveBeenCalledOnce());
+  await act(async () => value!.openGraph());
+  vi.useFakeTimers();
+  await act(async () => value!.selectNode("node-a"));
+  expect(value!.graph.selectedNodeId).toBe("node-a");
+
+  const hit = { object_id: "node-a", name: "A", object_type: "concept", score: 1, match: "A" };
+  kgApi.fetchKgSearch.mockResolvedValueOnce({ query: "A", hits: [hit] });
+  act(() => value!.updateGraphSearch("A"));
+  await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+  expect(value!.graph.searchHits).toHaveLength(1);
+
+  const lateSearch = deferred<{ query: string; hits: typeof hit[] }>();
+  kgApi.fetchKgSearch.mockReturnValueOnce(lateSearch.promise);
+  act(() => value!.updateGraphSearch("AB"));
+  await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+  expect(value!.graph.searchBusy).toBe(true);
+
+  kgApi.fetchKgDeleteStatus.mockResolvedValue(deleteStatus("succeeded", {
+    job_id: "delete-a", objects_deleted: 3,
+  }));
+  await act(async () => value!.startKgDelete("notebook-a"));
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(value!.graph.deleting).toBe(false);
+  expect(value!.graph.search).toBe("");
+  expect(value!.graph.searchHits).toEqual([]);
+  expect(value!.graph.searchBusy).toBe(false);
+  expect(value!.graph.selectedNodeId).toBeNull();
+  expect(value!.graph.nodeContext).toBeNull();
+
+  await act(async () => lateSearch.resolve({ query: "AB", hits: [hit] }));
+  expect(value!.graph.searchHits).toEqual([]);
+});
+
+test("review commands refuse while a delete runs, and a delete refuses while a review is in flight", async () => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchKgDeleteStatus).toHaveBeenCalledOnce());
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+  const deletePending = deferred<Awaited<ReturnType<typeof kgApi.deleteKg>>>();
+  kgApi.deleteKg.mockReturnValueOnce(deletePending.promise);
+  let deleting!: Promise<void>;
+  act(() => { deleting = value!.startKgDelete("notebook-a"); });
+  await act(async () => {
+    await value!.reviewPendingMerges();
+    await value!.reviewAllMerges();
+  });
+  expect(kgApi.reviewMerges).not.toHaveBeenCalled();
+  expect(kgApi.reviewAllMerges).not.toHaveBeenCalled();
+  await act(async () => deletePending.reject(new Error("network down")));
+  await deleting;
+  expect(value!.graph.deleting).toBe(false);
+
+  const reviewPending = deferred<Awaited<ReturnType<typeof kgApi.reviewMerges>>>();
+  kgApi.reviewMerges.mockReturnValueOnce(reviewPending.promise);
+  let reviewing!: Promise<void>;
+  act(() => { reviewing = value!.reviewPendingMerges(); });
+  expect(value!.graph.reviewBusy).toBe(true);
+  await act(async () => value!.startKgDelete("notebook-a"));
+  expect(kgApi.deleteKg).toHaveBeenCalledTimes(1);
+  await act(async () => reviewPending.resolve({ reviewed: 0, confirmed: 0, rejected: 0, unsure: 0 }));
+  await reviewing;
+  consoleError.mockRestore();
 });
 
 test("a 409 delete adopts the running relink and explains the refusal beside the button", async () => {

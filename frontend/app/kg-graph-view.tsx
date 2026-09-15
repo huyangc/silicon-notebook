@@ -257,6 +257,7 @@ export function KgGraphView({
     | "rebuilding"
     | "relinking"
     | "reviewAllJob"
+    | "reviewAllRunning"
     | "reviewAllStarting"
     | "reviewBusy"
     | "search"
@@ -390,11 +391,15 @@ export function KgGraphView({
             </button>
             {/* 删除是后台任务：在飞期间换成「删除中…」并禁用；终态结果画在紧挨着的下一行
                 并按自己的计时器消失（AGENTS.md Interactive feedback）。结果与忙碌位都按
-                当前笔记本分格，切到别的笔记本不会看到这里的结果。没有知识图谱时无可删除。 */}
+                当前笔记本分格，切到别的笔记本不会看到这里的结果。没有知识图谱时无可删除；
+                自动判重（单批 / 全部）或合并决定在飞时也不删——删除会把它们正在处理的候选
+                一并清掉。 */}
             <button
               type="button"
               className="sort-button kg-action-danger"
-              disabled={kgGraph.deleting || kgGraph.relinking || kgGraph.rebuilding || kgGraph.buildingKg || !kgReady}
+              disabled={kgGraph.deleting || kgGraph.relinking || kgGraph.rebuilding || kgGraph.buildingKg || !kgReady
+                || kgGraph.reviewBusy || kgGraph.reviewAllStarting || kgGraph.reviewAllRunning
+                || kgGraph.decidingMerge !== null}
               title="删除从来源分析出的知识图谱（来源保留，之后可重新整理；会先确认）"
               onClick={confirmDeleteKg}
             >
@@ -529,13 +534,13 @@ export function KgGraphView({
           <h3>待确认合并 ({kgGraph.pendingMerges.length})</h3>
           {!readOnlyWorkspace && (
             <>
-              <button className="ghost-button" onClick={reviewPendingMerges} disabled={!kgGraph.pendingMerges.length || kgGraph.reviewBusy}>
+              <button className="ghost-button" onClick={reviewPendingMerges} disabled={!kgGraph.pendingMerges.length || kgGraph.reviewBusy || kgGraph.deleting}>
                 {kgGraph.reviewBusy ? "判重中…" : "自动判重"}
               </button>
               <button
                 className="ghost-button"
                 onClick={reviewAllMerges}
-                disabled={!kgGraph.pendingMerges.length || kgGraph.reviewAllStarting || kgGraph.reviewAllJob?.status === "running"}
+                disabled={!kgGraph.pendingMerges.length || kgGraph.reviewAllStarting || kgGraph.reviewAllJob?.status === "running" || kgGraph.deleting}
               >
                 {kgGraph.reviewAllJob?.status === "running"
                   ? `全部判重中… ${kgGraph.reviewAllJob.done}/${kgGraph.reviewAllJob.total}`
@@ -584,14 +589,21 @@ export function KgGraphView({
             <p style={{ marginTop: 6 }}>这一次打开不会在后台生成预览；其余功能不受影响</p>
           </div>
         ) : kgCanvas === "empty" ? (
-          // 零可见节点有三种成因，文案只说此刻真实的那一个：「清空搜索」只在确有搜索时
-          // 才兑现得了——删除知识图谱之后、或从没整理过的库，这句话永远做不到。
+          // 零可见节点有几种成因，文案只说此刻真实的那一个，且**先看图本身是不是空的**：
+          // 图里一个节点都没有时，「清空搜索 / 清除过滤」都兑现不了（删除知识图谱之后、或
+          // 从没整理过的库）。其中图谱索引构建轮询 20 分钟封顶后 vizBuilding 已归位、而
+          // 响应里的 viz_building 仍为 true（kg-workspace-model.ts 的 kgCanvasState 登记的
+          // 那个角落），这时与封顶那句 toast 说同一句话。图不空才轮到搜索 / 过滤两种成因。
           <p className="tool-hint kg-canvas-empty">
-            {kgSearching
-              ? "没有匹配的节点。清空搜索后可查看完整图谱。"
-              : kgGraph.selectedTypes.length > 0
-                ? "当前类型过滤下没有节点。清除过滤后可查看完整图谱。"
-                : "还没有知识图谱内容。整理来源后会显示在这里。"}
+            {(kgGraph.merged?.nodes.length ?? 0) === 0
+              ? kgGraph.graph?.viz_building
+                ? "图谱索引仍在后台构建，请稍后重新打开查看"
+                : "还没有知识图谱内容。整理来源后会显示在这里。"
+              : kgSearching
+                ? "没有匹配的节点。清空搜索后可查看完整图谱。"
+                : kgGraph.selectedTypes.length > 0
+                  ? "当前类型过滤下没有节点。清除过滤后可查看完整图谱。"
+                  : "还没有知识图谱内容。整理来源后会显示在这里。"}
           </p>
         ) : (
           <ForceGraph2D

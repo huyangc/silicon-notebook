@@ -8,8 +8,11 @@ import {
   KG_DELETE_POLL_MAX_ATTEMPTS,
   KG_DELETE_POLL_TIMED_OUT,
   KG_DELETE_RESULT_HOLD_MS,
+  KG_DELETE_TIMEOUT_MESSAGE,
   KG_DELETE_UNKNOWN_MESSAGE,
+  KG_DELETE_UNOBSERVED,
   kgDeletePollOutcome,
+  kgDeleteTerminalSettlement,
 } from "../../features/kg-maintenance/kg-delete-status.ts";
 
 const base = {
@@ -71,12 +74,30 @@ test("job_id 对不上时的收工回执不带任何数字", () => {
   assert.ok(!/\d/.test(KG_DELETE_JOB_MISMATCH.result?.text ?? "0"));
 });
 
+test("终态回执只有 job_id 正是期望的那个才以它的名义结算", () => {
+  const succeeded = { ...base, status: "succeeded", running: false, objects_deleted: 120 };
+  assert.equal(kgDeleteTerminalSettlement(succeeded, "kdj-1"), "report");
+  assert.equal(kgDeleteTerminalSettlement(succeeded, "kdj-2"), "mismatch");
+  // 进程重启后的 idle 恒为空 job_id：期望过某个任务却只剩 idle，也是对不上。
+  assert.equal(kgDeleteTerminalSettlement({ job_id: "" }, "kdj-1"), "mismatch");
+  // 没期望过任何任务（本标签页没提交成功、也没见过它在跑）：同进程更早一次删除的
+  // succeeded 与这次点击无关，一律静默。
+  assert.equal(kgDeleteTerminalSettlement(succeeded, undefined), "unobserved");
+  assert.equal(kgDeleteTerminalSettlement(succeeded, ""), "unobserved");
+});
+
+test("静默收工：放掉忙碌位，但不刷新、不给结果", () => {
+  assert.deepEqual(KG_DELETE_UNOBSERVED, { done: true, refresh: false, result: null });
+});
+
 test("轮询尝试上限有界，超限回执中性（任务可能仍在跑，不说它失败了）", () => {
   assert.ok(Number.isInteger(KG_DELETE_POLL_MAX_ATTEMPTS));
   assert.ok(KG_DELETE_POLL_MAX_ATTEMPTS > 0 && KG_DELETE_POLL_MAX_ATTEMPTS <= 5000);
   assert.equal(KG_DELETE_POLL_TIMED_OUT.done, true, "超限必须解除忙碌位，否则按钮永久卡死");
   assert.equal(KG_DELETE_POLL_TIMED_OUT.refresh, true);
   assert.equal(KG_DELETE_POLL_TIMED_OUT.result?.tone, "neutral");
+  assert.equal(KG_DELETE_POLL_TIMED_OUT.result?.text, KG_DELETE_TIMEOUT_MESSAGE);
+  assert.equal(KG_DELETE_TIMEOUT_MESSAGE, "删除可能仍在进行，稍后重新打开知识图谱查看");
   for (const word of ["失败", "错误", "job", "KG"]) {
     assert.ok(
       !KG_DELETE_POLL_TIMED_OUT.result.text.includes(word),
@@ -97,6 +118,7 @@ test("结果与兜底文案里没有内部黑话", () => {
     kgDeletePollOutcome({ ...base, status: "failed", running: false }).result.text,
     kgDeletePollOutcome({ ...base, status: "idle", running: false }).result.text,
     KG_DELETE_BUSY_MESSAGE,
+    KG_DELETE_TIMEOUT_MESSAGE,
   ];
   for (const text of texts) {
     assert.ok(/[一-龥]/.test(text), `结果文案必须是中文：${text}`);

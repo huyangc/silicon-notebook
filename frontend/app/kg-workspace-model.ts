@@ -44,16 +44,18 @@ export type KgCanvasState = "loading" | "building" | "unavailable" | "empty" | "
  *    提示，用户看到的是叠加出的局部图，而不是全库预览；
  * 4. 后端说没有预览且没人在建，且此刻一个可见节点都没有 → 不可用；
  * 5. 剩下才是「渲染出来是空的」。`visibleNodeCount` 是**过滤/搜索之后**的节点数，
- *    所以 `empty` 保留它原来的含义（搜到空集）。
+ *    所以 `empty` 只说「画布上一个可见节点都没有」，不说为什么。成因（图本身就空——
+ *    从没整理过或刚删除了知识图谱；搜到空集；类型过滤滤空）由 `kg-graph-view.tsx`
+ *    的 empty 分支按「先看图本身是不是空的」逐一区分，各说一句此刻兑现得了的话。
  *
  * 已知角落（T-W4-3b 顺修 3，只登记不重构）：`use-kg-graph` 的构建轮询在
  * `KG_BACKGROUND_POLL_CAP_MS`（20 分钟）封顶时会 `setVizBuilding(false)` 并弹一句
  * 「图谱索引仍在后台构建，请稍后重新打开查看」，但它**不**回写 `unifiedGraph`
  * （轮询只在响应不再 `viz_building` 时才 setUnifiedGraph），所以此刻
  * `graph.viz_building` 仍是 true 而参数 `vizBuilding` 已是 false。此函数按参数走，
- * 于是封顶后零可见节点的画布落进 `empty`，显示的是「没有匹配的节点。清空搜索后可
- * 查看完整图谱」——与那句 toast 不一致。判据不改读 `graph.viz_building`：那会让
- * 封顶失效（画布永远停在「构建中」），而封顶本身是有意的。现状文案以 toast 为准。
+ * 于是封顶后零可见节点的画布落进 `empty`。判据不改读 `graph.viz_building`：那会让
+ * 封顶失效（画布永远停在「构建中」），而封顶本身是有意的。改由 empty 分支的文案兜住：
+ * 图里零节点且 `graph.viz_building` 仍为 true 时，画布说的正是那句 toast。
  */
 export const kgCanvasState = (
   graph: UnifiedGraphResp | null,

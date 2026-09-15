@@ -62,12 +62,15 @@ export const KG_DELETE_BUSY_MESSAGE = "当前有其他整理任务在进行，�
  */
 export const KG_DELETE_RESULT_HOLD_MS = 8000;
 
+/** 等到轮询上限仍未见终态:任务可能还在跑,只说「可能仍在进行」,不说失败也不说不知道。 */
+export const KG_DELETE_TIMEOUT_MESSAGE = "删除可能仍在进行，稍后重新打开知识图谱查看";
+
 /**
  * 轮询的尝试上限(3 秒一次 ⇒ 约 30 分钟)。
  *
  * 后端只在**进程内**记这件事,所以「进程还活着但任务卡死」这一种是 idle 兜不住的:
  * status 会一直如实回报 running,轮询就一直转。上限让按钮一定能解锁。它不取消后台任务
- * (删除没有取消入口),只是不再等了,所以结果是中性的「不知道」,不说它失败了。
+ * (删除没有取消入口),只是不再等了,所以结果是中性的,不说它失败了。
  */
 export const KG_DELETE_POLL_MAX_ATTEMPTS = 600;
 
@@ -77,21 +80,50 @@ const UNKNOWN_OUTCOME: KgDeletePollOutcome = {
   result: { tone: "neutral", text: KG_DELETE_UNKNOWN_MESSAGE },
 };
 
-/** 等到上限仍未见终态时的收工回执。 */
-export const KG_DELETE_POLL_TIMED_OUT: KgDeletePollOutcome = UNKNOWN_OUTCOME;
+/** 等到上限仍未见终态时的收工回执(只用于本标签页确实提交过或亲眼见过在跑的删除)。 */
+export const KG_DELETE_POLL_TIMED_OUT: KgDeletePollOutcome = {
+  done: true,
+  refresh: true,
+  result: { tone: "neutral", text: KG_DELETE_TIMEOUT_MESSAGE },
+};
 
 /**
- * 轮询看到的终态不属于我们提交的那个任务(job_id 连续对不上)时的收工回执:那份统计是
- * 别人的,不能拿来说「已删除 N 个」,只能如实说不知道,并刷新让界面对齐服务端。
+ * 轮询看到的终态不属于我们期望的那个任务(job_id 连续对不上;进程重启后的 idle 也是空
+ * job_id)时的收工回执:那份统计是别人的,不能拿来说「已删除 N 个」,只能如实说不知道,
+ * 并刷新让界面对齐服务端——我们确实开始过一次删除,图谱可能已经变了。
  */
 export const KG_DELETE_JOB_MISMATCH: KgDeletePollOutcome = UNKNOWN_OUTCOME;
 
 /**
- * 一次轮询回执 → 该做什么。
+ * 本标签页既没有提交成功、也没有亲眼见过在跑的删除(例如 409 之后领养探测失败,或探测
+ * 在切换笔记本期间落空)时的收工回执:**静默**。只放掉忙碌位——不刷新(删除之后的刷新
+ * 会清掉搜索与选中,那是替一次并未发生的删除收拾现场),不弹提示,也不覆盖按钮旁已有的
+ * 那一行(例如服务端点名占用者的 409 文案)。同进程里更早一次删除留下的 `succeeded`
+ * 回执就是在这里被拦下的:它的数字与这次点击无关。
+ */
+export const KG_DELETE_UNOBSERVED: KgDeletePollOutcome = { done: true, refresh: false, result: null };
+
+/**
+ * 一条已结束的回执能不能以它自己的名义结算:
+ * - `unobserved`:没有期望的 job_id(本标签页没提交成功、也没见过它在跑)——静默收工;
+ * - `report`:job_id 正是期望的那个——按回执报数字 / 失败;
+ * - `mismatch`:期望过某个任务,回执却是另一个(含重启后的空 job_id)——连续几次后说不知道。
+ */
+export function kgDeleteTerminalSettlement(
+  status: Pick<KgDeleteStatus, "job_id">,
+  expectedJobId: string | undefined,
+): "report" | "mismatch" | "unobserved" {
+  if (!expectedJobId) return "unobserved";
+  return status.job_id === expectedJobId ? "report" : "mismatch";
+}
+
+/**
+ * 一次轮询回执 → 该做什么(只看回执本身;它属不属于我们由 `kgDeleteTerminalSettlement` 判)。
  *
  * `idle` 是**终态**而不是「还没开始」:服务端只在进程内记这件事,重启后就回 idle;槽被
  * 「补上关联」「重新合并」占着时也回 idle。删除分页提交,重启可能留下删了一半的图,所以
- * 这里收工并刷新,结果说「不知道」而不是编一个数字。
+ * 这里收工并刷新,结果说「不知道」而不是编一个数字。idle 的 job_id 恒为空,所以在轮询里
+ * 它总是走 `mismatch`/`unobserved` 那两条,这一支只是让映射保持完整。
  */
 export function kgDeletePollOutcome(
   status: KgDeleteStatus | null | undefined,

@@ -129,6 +129,7 @@ import {
   type RootModalSlot,
 } from "./use-root-modal-coordinator.ts";
 import { KG_RANGE_DEFAULT, kgCanvasState } from "./kg-workspace-model.ts";
+import { refreshKgDeleteDependents } from "./kg-delete-dependents.ts";
 import { API_BASE } from "./api-config";
 import { clearToken, getToken } from "./auth-session";
 import { copyTextSafely } from "./copy-text";
@@ -965,24 +966,26 @@ export default function Home() {
         }
         return refreshed;
       },
-      // 删除知识图谱之后,KG 领域之外读着旧图谱事实的两块:来源列表的已分析/待分析徽标,
-      // 以及看板开着时「索引与构建」那几行。守卫同时认 KG owner 与当前笔记本。
-      refreshAfterKgDelete: async (targetNotebookId, guard) => {
-        const stillCurrent = () => guard() && activeNotebookIdRef.current === targetNotebookId;
-        await Promise.all([
-          loadSourcesPage(targetNotebookId, {
-            ...sourceLibrary.currentPageRequest(),
-            guard: stillCurrent,
-          }).catch(() => {}),
-          analytics
-            ? fetchIndexStatus(targetNotebookId).then((status) => {
-              if (!stillCurrent()) return;
-              setIndexStatus(status);
-              setScaleIndexStatus(status.scale_index);
-            }).catch(() => {})
-            : Promise.resolve(),
-        ]);
-      },
+      // 删除知识图谱之后,KG 图谱领域之外读着旧图谱事实的几块:来源列表的已分析/待分析
+      // 徽标、Knowledge 浏览器(与删除来源同一条作废路径,开着就重新进入)、看板开着时
+      // 「索引与构建」那几行。守卫同时认 KG owner 与此刻真正打开的笔记本(编排与守卫在
+      // kg-delete-dependents.ts,那里有单测)。
+      refreshAfterKgDelete: (targetNotebookId, guard) => refreshKgDeleteDependents(targetNotebookId, guard, {
+        activeNotebookId: () => activeNotebookIdRef.current,
+        reloadSources: (notebookId, stillCurrent) => loadSourcesPage(notebookId, {
+          ...sourceLibrary.currentPageRequest(),
+          guard: stillCurrent,
+        }),
+        invalidateKnowledge: () => kgWorkspace.invalidateKnowledge(),
+        knowledgeBrowserOpen: () => chatMode === "rules",
+        reenterKnowledge: () => kgWorkspace.enterKnowledge(),
+        indexPanelOpen: () => analytics !== null,
+        fetchIndexStatus: (notebookId) => fetchIndexStatus(notebookId),
+        applyIndexStatus: (status) => {
+          setIndexStatus(status);
+          setScaleIndexStatus(status.scale_index);
+        },
+      }),
       focusGraphNode: (nodeId) => focusKgGraphNode(nodeId),
     },
   });
@@ -4030,6 +4033,9 @@ export default function Home() {
   // 绝不能让删除落到弹窗打开后才切换过去的另一本上。
   function confirmDeleteKg() {
     if (kgGraph.deleting || kgGraph.rebuilding || kgGraph.relinking || kgGraph.buildingKg) return;
+    // 自动判重与合并决定正在处理的候选会被删除一并清掉:它们在飞时同样不删。
+    if (kgGraph.reviewBusy || kgGraph.reviewAllStarting || kgGraph.reviewAllRunning
+      || kgGraph.decidingMerge !== null) return;
     const nb = currentNotebookId;
     if (!nb) return;
     confirmIndexAction(
@@ -7169,13 +7175,17 @@ export default function Home() {
                       || kg.building
                       || kgGraph.buildingKg
                       || kgGraph.deleting;
-                    const tone = view.tone === "success"
-                      ? "ok"
-                      : view.tone === "neutral"
-                        ? "muted"
-                        : view.tone === "error"
-                          ? "error"
-                          : "warn";
+                    // 删除在跑时 indexStatus.kg 里还是上一次整理的状态(「已完成」之类),照着
+                    // 显示就是在描述一张正在被删掉的图——这段时间如实说正在删除。
+                    const tone = kgGraph.deleting
+                      ? "warn"
+                      : view.tone === "success"
+                        ? "ok"
+                        : view.tone === "neutral"
+                          ? "muted"
+                          : view.tone === "error"
+                            ? "error"
+                            : "warn";
                     const color = tone === "ok"
                       ? "var(--color-ok, #1a7f5a)"
                       : tone === "error"
@@ -7189,9 +7199,13 @@ export default function Home() {
                         <div className="index-main">
                           <div className="tag-row" style={{ alignItems: "center" }}>
                             <span className="index-state">知识图谱</span>
-                            <span className="tag" style={{ color }}>{view.label}</span>
+                            <span className="tag" style={{ color }}>
+                              {kgGraph.deleting ? "正在删除知识图谱…" : view.label}
+                            </span>
                           </div>
-                          <div className="index-sub">{view.detail}</div>
+                          <div className="index-sub">
+                            {kgGraph.deleting ? "后台进行，完成后自动更新" : view.detail}
+                          </div>
                         </div>
                         {!busy && !readOnlyWorkspace && (
                           <div className="index-ctas">
@@ -7512,6 +7526,7 @@ export default function Home() {
               canAnalyze={!readOnlyWorkspace}
               analysisRunning={kgGraph.rebuilding}
               analysisBlocked={kgGraph.relinking || kgGraph.buildingKg || kgGraph.deleting}
+              dataInvalidating={kgGraph.deleting}
               interactive={rootModals.view("kg-analysis").topmost}
               zIndex={rootModals.view("kg-analysis").zIndex}
               onAnalyze={confirmGenerateKgAnalysis}
