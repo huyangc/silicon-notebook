@@ -9,7 +9,12 @@ class NotebookGuard(Protocol):
 
 class ReportCreator(Protocol):
     def create_report(
-        self, notebook_id: str, question: str, depth: int = 2
+        self,
+        notebook_id: str,
+        question: str,
+        depth: int = 2,
+        *,
+        submitted_via: str = "",
     ) -> str: ...
 
 
@@ -21,10 +26,17 @@ class ReportApplicationService:
         self.reports = reports
 
     def create_report(
-        self, notebook_id: str, question: str, depth: int = 2
+        self,
+        notebook_id: str,
+        question: str,
+        depth: int = 2,
+        *,
+        submitted_via: str = "",
     ) -> str:
         self.notebooks.get_notebook(notebook_id)
-        return self.reports.create_report(notebook_id, question, depth)
+        return self.reports.create_report(
+            notebook_id, question, depth, submitted_via=submitted_via
+        )
 
 
 __all__ = ["ReportApplicationService"]

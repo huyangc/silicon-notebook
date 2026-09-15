@@ -103,6 +103,16 @@
               "title": "Status",
               "type": "string"
             },
+            "submitted_via": {
+              "default": "",
+              "enum": [
+                "",
+                "web",
+                "mcp"
+              ],
+              "title": "Submitted Via",
+              "type": "string"
+            },
             "type": {
               "const": "ask",
               "default": "ask",
@@ -184,6 +194,16 @@
             "status": {
               "default": "",
               "title": "Status",
+              "type": "string"
+            },
+            "submitted_via": {
+              "default": "",
+              "enum": [
+                "",
+                "web",
+                "mcp"
+              ],
+              "title": "Submitted Via",
               "type": "string"
             },
             "type": {
@@ -635,6 +655,16 @@
             },
             "status": {
               "title": "Status",
+              "type": "string"
+            },
+            "submitted_via": {
+              "default": "",
+              "enum": [
+                "",
+                "web",
+                "mcp"
+              ],
+              "title": "Submitted Via",
               "type": "string"
             },
             "type": {
@@ -12984,6 +13014,26 @@
                 "minimum": 1,
                 "title": "Limit",
                 "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "submitted_via",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "web",
+                      "mcp"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Submitted Via"
               }
             }
           ],

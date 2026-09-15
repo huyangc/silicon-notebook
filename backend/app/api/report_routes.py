@@ -215,7 +215,9 @@ def create_report(notebook_id: str, payload: ReportCreate) -> dict:
     _require_non_empty_scope(notebook, resolved_source_scope, resolved_base_scope)
     depth = max(1, min(16, int(payload.depth)))
     try:
-        rid = repo.create_report(notebook_id, payload.question.strip(), depth=depth)
+        rid = repo.create_report(
+            notebook_id, payload.question.strip(), depth=depth, submitted_via="web"
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
     scope_payload = (

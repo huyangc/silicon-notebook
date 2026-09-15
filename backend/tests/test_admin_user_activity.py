@@ -72,13 +72,13 @@ def _insert_member(db, notebook_id: str, user_id: str) -> None:
 
 def _insert_ask(db, job_id, notebook_id, created_by, created_at, *,
                  question="q?", mode="chunk", status="completed", asked_at="",
-                 answer_id="", error="") -> None:
+                 answer_id="", error="", submitted_via="") -> None:
     db.execute(
         "INSERT INTO ask_jobs "
         "(id,notebook_id,created_by,mode,question,status,asked_at,answer_id,error,"
-        "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "created_at,updated_at,submitted_via) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (job_id, notebook_id, created_by, mode, question, status, asked_at,
-         answer_id, error, created_at, created_at),
+         answer_id, error, created_at, created_at, submitted_via),
     )
 
 
@@ -119,7 +119,7 @@ def _insert_extraction_run(db, run_id, notebook_id, source_id, error_message,
 
 def _insert_report(db, report_id, notebook_id, created_by, created_at, *,
                     question="report?", depth=2, status="done",
-                    generation_started_at=None) -> None:
+                    generation_started_at=None, submitted_via="") -> None:
     understanding = (
         json.dumps({"_generation_started_at": generation_started_at})
         if generation_started_at is not None else "{}"
@@ -127,9 +127,9 @@ def _insert_report(db, report_id, notebook_id, created_by, created_at, *,
     db.execute(
         "INSERT INTO reports "
         "(id,notebook_id,question,depth,status,created_by,understanding_json,"
-        "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        "created_at,updated_at,submitted_via) VALUES (?,?,?,?,?,?,?,?,?,?)",
         (report_id, notebook_id, question, depth, status, created_by,
-         understanding, created_at, created_at),
+         understanding, created_at, created_at, submitted_via),
     )
 
 
@@ -305,11 +305,12 @@ def test_ask_field_shape_and_ordering_uses_created_at_not_asked_at(repo):
             db, "ask-1", "n1", "u1", "2026-08-01T10:00:00",
             question="first?", mode="reasoning", status="running",
             asked_at="2026-08-01T09:55:00", answer_id="", error="",
+            submitted_via="web",
         )
         _insert_ask(
             db, "ask-2", "n1", "u1", "2026-08-01T11:00:00",
             question="second?", mode="chunk", status="failed",
-            asked_at="", answer_id="ans-2", error="boom",
+            asked_at="", answer_id="ans-2", error="boom", submitted_via="mcp",
         )
 
     result = repo.list_user_activity("u1", limit=50)
@@ -324,8 +325,10 @@ def test_ask_field_shape_and_ordering_uses_created_at_not_asked_at(repo):
     assert first["answer_id"] == "ans-2"
     assert first["error"] == "boom"
     assert first["asked_at"] == ""
+    assert first["submitted_via"] == "mcp"
     second = items[1]
     assert second["asked_at"] == "2026-08-01T09:55:00"
+    assert second["submitted_via"] == "web"
 
 
 def test_source_hides_memory_and_knowhow_and_carries_paper_meta(repo):
@@ -618,7 +621,8 @@ def test_report_generation_started_at_present_and_missing(repo):
         _insert_user(db, "u1", "a00000001")
         _insert_notebook(db, "n1", "u1")
         _insert_report(db, "rep-with-start", "n1", "u1", "2026-08-01T10:00:00",
-                        generation_started_at="2026-08-01T10:05:00")
+                        generation_started_at="2026-08-01T10:05:00",
+                        submitted_via="web")
         _insert_report(db, "rep-without-start", "n1", "u1", "2026-08-01T09:00:00")
 
     result = repo.list_user_activity("u1", limit=50)
@@ -627,6 +631,9 @@ def test_report_generation_started_at_present_and_missing(repo):
     # Old report missing the timestamp must return an empty string — never a
     # fabricated value and never a fallback to created_at/updated_at.
     assert by_id["rep-without-start"]["generation_started_at"] == ""
+    assert by_id["rep-with-start"]["submitted_via"] == "web"
+    # 没显式传 submitted_via 的历史行 -> 默认 "" (未记录)。
+    assert by_id["rep-without-start"]["submitted_via"] == ""
 
 
 def test_since_and_until_half_open_interval(repo):

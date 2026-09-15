@@ -183,7 +183,17 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # correct backfill -- every pre-existing row was "still open" -- so no data
 # pass runs. Allowed values are pinned by the API model, not a CHECK, the
 # same way ``kind`` already is. No table, index, FK or unique-surface change.
-SCHEMA_VERSION = 73
+# v74 adds submitted_via (TEXT NOT NULL DEFAULT '') to ask_jobs, reports and
+# retained_user_activity, parity with PostgreSQL
+# 0054_question_submitted_via.sql: whether a question/report was submitted
+# from the web app ("web") or the MCP tool ask_notebook ("mcp"); "" means
+# "not recorded" (every pre-existing row, and any in-process caller that
+# does not pass the keyword). No backfill -- historical rows have no
+# reliable signal to reconstruct this from, so they stay "". Allowed values
+# are pinned by the API model (app.models.ask.SubmittedVia), not a CHECK,
+# the same way wishes.status already is. No table, index, FK or
+# unique-surface change.
+SCHEMA_VERSION = 74
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3877,6 +3887,34 @@ class SqliteMigrator:
         with self._connect() as db:
             self.add_column_if_missing(
                 db, "wishes", "status", "TEXT NOT NULL DEFAULT 'open'"
+            )
+
+    def _migration_74(self) -> None:
+        """Question submission channel, parity with PostgreSQL
+        0054_question_submitted_via.sql. See SCHEMA_VERSION's docstring.
+
+        ``NOT NULL DEFAULT ''`` is deliberately not a backfill: historical
+        rows (and any in-process caller that skips the keyword, e.g.
+        ``app.eval.inference``) have no reliable signal to reconstruct
+        "web" vs "mcp" from, so they stay "" ("not recorded") forever.
+        Only the two HTTP submission routes and the MCP ``ask_notebook``
+        tool pass a literal. The accepted value set lives in
+        ``app.models.ask.SubmittedVia`` rather than a CHECK, the same way
+        ``wishes.status`` already is. ``add_column_if_missing`` keeps the
+        migration re-runnable.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "ask_jobs", "submitted_via", "TEXT NOT NULL DEFAULT ''"
+            )
+            self.add_column_if_missing(
+                db, "reports", "submitted_via", "TEXT NOT NULL DEFAULT ''"
+            )
+            self.add_column_if_missing(
+                db,
+                "retained_user_activity",
+                "submitted_via",
+                "TEXT NOT NULL DEFAULT ''",
             )
 
     def _reap_stale_derived_generations(self) -> None:

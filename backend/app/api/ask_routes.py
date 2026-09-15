@@ -726,7 +726,7 @@ def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
         with followup_resolution_context(followup), retrieval_scope_receipt_context(
             _scope_receipt(notebook, resolved_source_scope, resolved_base_scope)
         ):
-            return repo.ask(notebook_id, payload)
+            return repo.ask(notebook_id, payload, submitted_via="web")
     except UnknownAskMode as exc:
         raise HTTPException(status_code=422, detail={
             "error": "unknown ask mode", "mode": exc.mode,
@@ -812,6 +812,7 @@ async def _stream_ask_events(
             return repo.start_ask_stream(
                 notebook_id, payload, spec,
                 user_id=repo.current_user().id,
+                submitted_via="web",
             )
 
         events = await asyncio.to_thread(_start_ask_stream)

@@ -51,7 +51,7 @@ class _Reports:
         if report_id in self.rows:
             self.rows[report_id].update(applied)
 
-    def create_report(self, notebook_id, question, depth=2):
+    def create_report(self, notebook_id, question, depth=2, *, submitted_via=""):
         return self.seed(notebook_id, question, depth=depth)
 
     def claim_report_generation(self, notebook_id, report_id):

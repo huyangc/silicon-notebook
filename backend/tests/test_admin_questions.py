@@ -100,3 +100,76 @@ def test_admin_questions_combines_ask_and_report_with_filters(client):
         f"/api/admin/questions?q={'😀' * 201}", headers=admin
     ).status_code == 422
     assert client.get("/api/admin/questions?limit=201", headers=admin).status_code == 422
+    # 未过滤时每条 item 都带 submitted_via;两条历史行都没写这一列 -> 默认 ""。
+    assert all(item["submitted_via"] == "" for item in body["items"])
+
+
+def test_admin_questions_filters_by_submitted_via(client):
+    """submitted_via 过滤 web/mcp 生效、随过滤变的 stats、非法值 422、笔记本
+    删除后 retained 行保留原值(不因迁移到 retained_user_activity 而丢失)。"""
+    user_headers, user_id = _register(client, "d00000005")
+    notebook = client.post(
+        "/api/notebooks", headers=user_headers, json={"name": "调用方式"}
+    ).json()
+    from app.api.deps import repository
+
+    now = "2026-09-15T08:00:00+00:00"
+    with repository()._write() as db:
+        db.execute(
+            "INSERT INTO ask_jobs(id,notebook_id,conversation_id,created_by,mode,"
+            "question,status,created_at,updated_at,submitted_via) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("ask-web", notebook["id"], "", user_id, "chunk",
+             "网页提交的问题", "completed", now, now, "web"),
+        )
+        db.execute(
+            "INSERT INTO ask_jobs(id,notebook_id,conversation_id,created_by,mode,"
+            "question,status,created_at,updated_at,submitted_via) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("ask-mcp", notebook["id"], "", user_id, "chunk",
+             "MCP 提交的问题", "completed", now, now, "mcp"),
+        )
+        db.execute(
+            "INSERT INTO reports(id,notebook_id,question,created_by,status,"
+            "created_at,updated_at,submitted_via) VALUES (?,?,?,?,?,?,?,?)",
+            ("report-mcp", notebook["id"], "MCP 提交的报告", user_id, "done",
+             now, now, "mcp"),
+        )
+
+    admin = _admin(client)
+
+    web_only = client.get(
+        "/api/admin/questions?submitted_via=web", headers=admin
+    ).json()
+    assert web_only["stats"] == {"total": 1, "asks": 1, "reports": 0, "active_users": 1}
+    assert [item["id"] for item in web_only["items"]] == ["ask-web"]
+    assert web_only["items"][0]["submitted_via"] == "web"
+
+    mcp_only = client.get(
+        "/api/admin/questions?submitted_via=mcp", headers=admin
+    ).json()
+    assert mcp_only["stats"] == {"total": 2, "asks": 1, "reports": 1, "active_users": 1}
+    assert {item["id"] for item in mcp_only["items"]} == {"ask-mcp", "report-mcp"}
+    assert all(item["submitted_via"] == "mcp" for item in mcp_only["items"])
+
+    assert client.get(
+        "/api/admin/questions?submitted_via=bogus", headers=admin
+    ).status_code == 422
+
+    # 笔记本删除后,retained_user_activity 行必须保留原 submitted_via,不能
+    # 在迁移到保留投影时丢失或被清空。
+    assert client.delete(
+        f"/api/notebooks/{notebook['id']}", headers=user_headers
+    ).status_code == 202
+    from app.services import background_jobs
+    background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
+    retained_mcp = client.get(
+        "/api/admin/questions?submitted_via=mcp", headers=admin
+    ).json()
+    assert {item["id"] for item in retained_mcp["items"]} == {"ask-mcp", "report-mcp"}
+    assert all(item["submitted_via"] == "mcp" for item in retained_mcp["items"])
+    retained_web = client.get(
+        "/api/admin/questions?submitted_via=web", headers=admin
+    ).json()
+    assert [item["id"] for item in retained_web["items"]] == ["ask-web"]
+    assert retained_web["items"][0]["submitted_via"] == "web"

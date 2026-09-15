@@ -24,7 +24,7 @@ class _StubAskState:
         self.finished = []
         self.done = threading.Event()
 
-    def begin_durable_job(self, notebook_id, payload, mode, user_id):
+    def begin_durable_job(self, notebook_id, payload, mode, user_id, *, submitted_via=""):
         payload.conversation_id = "conv-1"
         return "askjob-1", "conv-1"
 
@@ -76,9 +76,9 @@ def test_disconnect_does_not_cancel_worker_runs_to_completion():
         def current_user(self):
             return SimpleNamespace(id="user-x")
 
-        def start_ask_stream(self, notebook_id, payload, mode, *, user_id):
+        def start_ask_stream(self, notebook_id, payload, mode, *, user_id, submitted_via=""):
             return coordinator.start(
-                notebook_id, payload, mode, user_id=user_id
+                notebook_id, payload, mode, user_id=user_id, submitted_via=submitted_via
             )
 
     async def drive():

@@ -1047,6 +1047,7 @@ class QueryStore:
         query: str = "",
         offset: int = 0,
         limit: int = ADMIN_QUESTIONS_DEFAULT_LIMIT,
+        submitted_via: str | None = None,
     ) -> dict[str, Any]:
         """Cross-user Ask/Deep-Report question overview for administrators."""
         cte = (
@@ -1055,7 +1056,7 @@ class QueryStore:
             "COALESCE(NULLIF(u.username,''),a.created_by) AS username,"
             "a.notebook_id,COALESCE(n.name,'') AS notebook_name,"
             "COALESCE(NULLIF(ans.question,''),a.question) AS question,"
-            "a.status,a.created_at FROM ask_jobs a "
+            "a.status,a.created_at,a.submitted_via FROM ask_jobs a "
             "JOIN users u ON u.id=a.created_by "
             "LEFT JOIN answers ans ON ans.id=a.answer_id "
             "LEFT JOIN notebooks n ON n.id=a.notebook_id "
@@ -1063,13 +1064,14 @@ class QueryStore:
             "SELECT 'report' AS type,r.id,r.created_by AS user_id,"
             "COALESCE(NULLIF(u.username,''),r.created_by) AS username,"
             "r.notebook_id,COALESCE(n.name,'') AS notebook_name,r.question,"
-            "r.status,r.created_at FROM reports r "
+            "r.status,r.created_at,r.submitted_via FROM reports r "
             "JOIN users u ON u.id=r.created_by "
             "LEFT JOIN notebooks n ON n.id=r.notebook_id "
             "UNION ALL "
             "SELECT h.activity_type AS type,h.record_id AS id,h.actor_id AS user_id,"
             "COALESCE(NULLIF(u.username,''),h.actor_id) AS username,"
-            "h.notebook_id,h.notebook_name,h.question,h.status,h.created_at "
+            "h.notebook_id,h.notebook_name,h.question,h.status,h.created_at,"
+            "h.submitted_via "
             "FROM retained_user_activity h "
             "LEFT JOIN users u ON u.id=h.actor_id "
             "WHERE h.activity_type IN ('ask','report') "
@@ -1085,6 +1087,9 @@ class QueryStore:
         if user_id is not None:
             where += " AND user_id=?"
             params.append(user_id)
+        if submitted_via is not None:
+            where += " AND submitted_via=?"
+            params.append(submitted_via)
         needle = query.strip()
         if needle:
             where += " AND question LIKE ? ESCAPE '\\' COLLATE NOCASE"
@@ -1102,7 +1107,7 @@ class QueryStore:
             rows = db.execute(
                 cte
                 + "SELECT type,id,user_id,username,notebook_id,notebook_name,"
-                "question,status,created_at FROM questions "
+                "question,status,created_at,submitted_via FROM questions "
                 + where
                 + f" ORDER BY {_absolute_instant('created_at')} DESC,id DESC LIMIT ? OFFSET ?",
                 [*params, limit, offset],
@@ -1354,7 +1359,7 @@ class QueryStore:
                 ask_params.extend(ask_range_params)
                 ask_rows = db.execute(
                     "SELECT id, notebook_id, created_at, asked_at, conversation_id, "
-                    "question, mode, status, answer_id, error, "
+                    "question, mode, status, answer_id, error, submitted_via, "
                     f"{_absolute_instant('created_at')} AS sort_instant FROM ask_jobs "
                     f"WHERE created_by = ?{ask_notebook_clause}"
                     f"{ask_range_clause} "
@@ -1434,7 +1439,7 @@ class QueryStore:
                 report_params.extend(report_range_params)
                 report_rows = db.execute(
                     "SELECT id, notebook_id, created_at, updated_at, question, depth, "
-                    "status, understanding_json, "
+                    "status, understanding_json, submitted_via, "
                     f"{_absolute_instant('created_at')} AS sort_instant FROM reports "
                     f"WHERE created_by = ?{report_notebook_clause}"
                     f"{report_range_clause} "
@@ -1506,6 +1511,7 @@ class QueryStore:
                     "status": row["status"],
                     "answer_id": row["answer_id"],
                     "error": row["error"],
+                    "submitted_via": row["submitted_via"],
                 })
             )
         for row in source_rows:
@@ -1556,6 +1562,7 @@ class QueryStore:
                     "depth": int(row["depth"]),
                     "status": row["status"],
                     "generation_started_at": generation_started_at,
+                    "submitted_via": row["submitted_via"],
                 })
             )
         for row in retained_rows:
@@ -1578,6 +1585,7 @@ class QueryStore:
                     "mode": row["mode"],
                     "answer_id": "",
                     "error": "",
+                    "submitted_via": row["submitted_via"],
                 }
             elif row["activity_type"] == "source":
                 item = {
@@ -1598,6 +1606,7 @@ class QueryStore:
                     "question": row["question"],
                     "depth": int(row["depth"]),
                     "generation_started_at": row["generation_started_at"],
+                    "submitted_via": row["submitted_via"],
                 }
             pool.append((row["sort_instant"], row["record_id"], item))
 

@@ -545,7 +545,7 @@ def test_stream_route_helper_uses_ask_stream_port_without_runtime():
         def current_user(self):
             return SimpleNamespace(id="user-1")
 
-        def start_ask_stream(self, notebook_id, payload, mode, *, user_id):
+        def start_ask_stream(self, notebook_id, payload, mode, *, user_id, submitted_via=""):
             self.started = (notebook_id, payload.question, mode.id, user_id)
             events = queue.Queue()
             events.put({"type": "started", "job_id": "job-1"})

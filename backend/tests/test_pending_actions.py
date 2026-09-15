@@ -528,7 +528,7 @@ class _FakeSyncAsk:
     def validate_reasoning_submission(self, notebook_id, payload):
         return None
 
-    def begin_job_current(self, notebook_id, payload, mode, cancel_event):
+    def begin_job_current(self, notebook_id, payload, mode, cancel_event, *, submitted_via=""):
         self.calls.append(("begin", notebook_id, mode))
         return "askjob-sync", "conv-sync"
 

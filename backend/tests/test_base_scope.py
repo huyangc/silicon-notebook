@@ -1155,7 +1155,7 @@ def test_sync_ask_route_carries_the_receipt_into_the_service(monkeypatch):
         def hidden_source_ids(self, _notebook_id, _owner_id):
             return []
 
-        def ask(self, _notebook_id, _payload):
+        def ask(self, _notebook_id, _payload, *, submitted_via=""):
             seen.append(current_retrieval_scope_receipt())
             return AskResponse(conclusion="c")
 
@@ -1203,7 +1203,7 @@ def test_streaming_receipt_reaches_the_detached_worker():
     done = threading.Event()
 
     class _State:
-        def begin_durable_job(self, notebook_id, payload, mode, user_id):
+        def begin_durable_job(self, notebook_id, payload, mode, user_id, *, submitted_via=""):
             payload.conversation_id = "conv-1"
             return "askjob-1", "conv-1"
 
@@ -1235,8 +1235,10 @@ def test_streaming_receipt_reaches_the_detached_worker():
         def current_user(self):
             return SimpleNamespace(id="user-x")
 
-        def start_ask_stream(self, notebook_id, payload, mode, *, user_id):
-            return coordinator.start(notebook_id, payload, mode, user_id=user_id)
+        def start_ask_stream(self, notebook_id, payload, mode, *, user_id, submitted_via=""):
+            return coordinator.start(
+                notebook_id, payload, mode, user_id=user_id, submitted_via=submitted_via
+            )
 
     class _Disconnected:
         async def is_disconnected(self):

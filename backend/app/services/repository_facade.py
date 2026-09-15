@@ -3722,14 +3722,18 @@ class RepositoryFacade:
         return self._runtime.ask_component.ask_chunk_current(
             notebook_id, payload, cancel_event)
 
-    def ask(self, notebook_id: str, payload: AskRequest) -> AskResponse:
+    def ask(
+        self, notebook_id: str, payload: AskRequest, *, submitted_via: str = ""
+    ) -> AskResponse:
         """Dispatch to the retrieval handler named by payload.mode, resolved
         through the ask_modes registry. Unknown modes raise UnknownAskMode (the
         API layer returns 422) — never a silent fall-through to the legacy
         path. The blocking surface uses the same internal durable-job and
         atomic-final-save lifecycle as the streaming coordinator; its job id
         is not added to the AskResponse protocol."""
-        return self._runtime.ask_component.ask_current(notebook_id, payload)
+        return self._runtime.ask_component.ask_current(
+            notebook_id, payload, submitted_via=submitted_via
+        )
 
     def preview_reasoning_intent(
         self, notebook_id: str, question: str, history: str = "",
@@ -4115,9 +4119,16 @@ class RepositoryFacade:
     # Task 25: reports 表行级持久化移入 runtime 所有的 ReportStore;此处保持
     # 冻结签名委托(notebook 存在性守卫留在 create_report 委托里)。脱离连接
     # 执行编排见 report_execution 属性(ReportExecutionCoordinator)。
-    def create_report(self, notebook_id: str, question: str, depth: int = 2) -> str:
+    def create_report(
+        self,
+        notebook_id: str,
+        question: str,
+        depth: int = 2,
+        *,
+        submitted_via: str = "",
+    ) -> str:
         return self._runtime.report_application.create_report(
-            notebook_id, question, depth
+            notebook_id, question, depth, submitted_via=submitted_via
         )
 
     def update_report(self, notebook_id: str, report_id: str, *, status=None,
@@ -4281,7 +4292,7 @@ class RepositoryFacade:
         self._runtime.notebook_languages = value
 
     def start_ask_stream(self, notebook_id: str, payload: AskRequest, mode,
-                         *, user_id: str, attach_only=False):
+                         *, user_id: str, attach_only=False, submitted_via: str = ""):
         """Start detached Ask execution through the runtime-owned coordinator.
 
         ``attach_only`` (a keyed re-submission probe): only attach to the job
@@ -4292,7 +4303,7 @@ class RepositoryFacade:
                 notebook_id, payload, user_id
             )
         return self._runtime.ask_execution.start(
-            notebook_id, payload, mode, user_id=user_id
+            notebook_id, payload, mode, user_id=user_id, submitted_via=submitted_via
         )
 
     # --- knowhow-tables PR-1 Task 2: one-hop delegates onto the runtime-

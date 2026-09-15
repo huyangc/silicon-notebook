@@ -305,7 +305,14 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # in_progress / done / declined). The default is the whole backfill; allowed
 # values are pinned by the API model rather than a CHECK, like ``kind``. No
 # table, index, FK or unique-surface change.
+# PostgreSQL v54 / SQLite v74 add submitted_via (text, NOT NULL DEFAULT '')
+# to ask_jobs, reports and retained_user_activity -- which submission
+# surface created the row ("web" or "mcp"; '' means "not recorded"). No
+# backfill: historical rows have no reliable signal to reconstruct this
+# from. Allowed values are pinned by the API model
+# (app.models.ask.SubmittedVia), not a CHECK, like ``wishes.status``. No
+# table, index, FK or unique-surface change.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=73,
-    postgres_version=53,
+    sqlite_version=74,
+    postgres_version=54,
 )
