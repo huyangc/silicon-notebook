@@ -703,7 +703,11 @@ is also the whole backfill: pre-existing rows carry no reliable signal about
 their entry point, so none is inferred. In-process callers that pass nothing
 (for example `app/eval/inference.py`) also record `''`. Notebook deletion copies
 the value into the retained projection. The accepted set is pinned by the API
-model (`app.models.ask.SubmittedVia`) rather than a CHECK constraint. No table,
+model (`app.models.ask.StoredSubmittedVia`, which extends the entry-point
+literals `SubmittedVia` with `''`) rather than a CHECK constraint; response
+models, the admin query parameter and every write signature reference those
+two aliases, and a static test requires each HTTP/MCP entry point to pass a
+literal value. No table,
 index or foreign key is added; the administrator question overview's equality
 filter runs over the same three-way `UNION ALL` scan it already performs. The
 current pair is SQLite 74 / PostgreSQL 54 / epoch 1.
