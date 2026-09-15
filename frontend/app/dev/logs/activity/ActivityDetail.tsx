@@ -67,6 +67,14 @@ function RetainedActivityNotice({
   );
 }
 
+// 没有失败原文可给（本人自助读取）时，异常终态只说发生了什么，不猜原因。
+// interrupted 来自启动恢复把重启时仍在跑的 job 结算成中断（措辞同问答面板）。
+function askEndedWithoutTextCopy(status: string): string {
+  if (status === "failed") return "这次提问没有成功完成。";
+  if (status === "interrupted") return "这次提问因服务重启中断。";
+  return "";
+}
+
 function AskDetailPane({
   item,
   detail,
@@ -89,9 +97,12 @@ function AskDetailPane({
   const showPersistedTrace = persistedTrace.length > 0
     && (answer?.reasoning_trace ?? []).length === 0;
   // 失败原文只有管理员能拿到（后端 _activity_failure_text）；本人自助读取时 error
-  // 恒为空串，失败状态改给固定文案，绝不猜原因。
+  // 恒为空串，失败/中断状态改给固定文案，绝不猜原因。
   const failure = detail?.error ?? "";
-  const failedWithoutText = Boolean(detail) && !failure && detail?.status === "failed";
+  const endedWithoutTextCopy = detail && !failure ? askEndedWithoutTextCopy(detail.status) : "";
+  // 详情到达后状态徽章以详情为准：活动流条目是取列表那一刻的快照，不这样做会出现
+  // 徽章写「完成」、下面却说「没有成功完成」的矛盾（ReportDetailPane 同一条规则）。
+  const statusItem = detail ? { ...item, status: detail.status } : item;
   // The stream item may still describe a live notebook when deletion races
   // with the detail request. In that case the detail endpoint is authoritative:
   // it falls back to the retained row after the live ask has cascaded away.
@@ -106,7 +117,7 @@ function AskDetailPane({
   return (
     <div className="activity-detail-body">
       <div className="activity-detail-head">
-        <span className={`badge ${activityTone(item)}`}>{activityStatusLabel(item)}</span>
+        <span className={`badge ${activityTone(statusItem)}`}>{activityStatusLabel(statusItem)}</span>
         {userFacingModeLabel(item.mode) ? (
           <span className="activity-chip">{userFacingModeLabel(item.mode)}</span>
         ) : null}
@@ -124,8 +135,8 @@ function AskDetailPane({
           {failure}
         </div>
       ) : null}
-      {!loading && !error && failedWithoutText ? (
-        <div className="detail-error">这次提问没有成功完成。</div>
+      {!loading && !error && endedWithoutTextCopy ? (
+        <div className="detail-error">{endedWithoutTextCopy}</div>
       ) : null}
       {showPersistedTrace ? <ReasoningTracePanel steps={persistedTrace} /> : null}
       {answer ? (
@@ -148,7 +159,7 @@ function AskDetailPane({
           />
         </div>
       ) : null}
-      {!loading && !error && !answer && !failure && !failedWithoutText
+      {!loading && !error && !answer && !failure && !endedWithoutTextCopy
         && !retentionItem.notebook_deleted_at ? (
         <div className="empty">这次提问没有留下答案</div>
       ) : null}

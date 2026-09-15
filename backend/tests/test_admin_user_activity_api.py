@@ -884,6 +884,19 @@ def test_raw_failure_text_is_admin_only_across_feed_and_details(client):
         assert self_body["error"] == ""
         assert admin_body["error"] == raw
 
+    # 判据是「调用者是管理员」，不是「在看别人」：管理员读自己的失败提问同样拿原文。
+    admin_id = _me(client, admin)
+    admin_nb = _create_notebook(client, admin, "NB-admin-own-failure")
+    with _repo()._write() as db:
+        _insert_ask_job(
+            db, "job-admin-own-failure", admin_nb, admin_id, "2026-08-01T12:00:00",
+            status="failed", error=raw,
+        )
+    own = client.get(
+        f"/api/admin/users/{admin_id}/asks/job-admin-own-failure", headers=admin
+    ).json()
+    assert own["error"] == raw
+
 
 def test_ask_answer_detail_backfills_answered_at_from_created_at(client):
     """``answered_at`` 回填口径:payload 里没有该键时落

@@ -937,12 +937,30 @@ test("提问失败但没有失败原文（本人自助读取）时显示固定�
   expect(await screen.findByText("这次提问没有成功完成。")).toBeInTheDocument();
   expect(screen.queryByText("失败原因：")).not.toBeInTheDocument();
   expect(screen.queryByText("这次提问没有留下答案")).not.toBeInTheDocument();
+  // 活动流条目快照是「完成」、详情是「失败」：徽章以详情为准，不与固定文案矛盾。
+  expect(screen.getAllByText("失败").length).toBeGreaterThan(0);
 });
 
 
-// 回归门:失败原因区块的显示条件与下面空态的显示条件曾经不互补——「状态还没推进
+test("服务重启中断的提问在没有失败原文时说明中断，徽章显示已中断", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([ask("a1", "这次问了什么")]));
+  mocks.fetchUserAskDetail.mockResolvedValue({ ...failedAskDetail(""), status: "interrupted" });
+  view();
+
+  await user.click(await screen.findByText("这次问了什么"));
+
+  expect(await screen.findByText("这次提问因服务重启中断。")).toBeInTheDocument();
+  expect(screen.getAllByText("已中断").length).toBeGreaterThan(0);
+  expect(screen.queryByText("这次提问没有留下答案")).not.toBeInTheDocument();
+});
+
+
+// 回归门:失败区块的显示条件与下面空态的显示条件曾经不互补——「状态还没推进
 // 到 failed,但已经带着一条错误原文」这种边界会让两边条件都不满足,右栏空白一片。
-// 现在两者按 `!(failed && failure)` 互补,这种边界必须落到空态,而不是两边都不显示。
+// 现在失败区块只看 failed(有原文显示原文，否则固定文案)，空态排除它，这种边界
+// 必须落到空态,而不是两边都不显示。
 test("报告状态非 failed 但带错误原文时，右栏落到空态而不是两边都空白", async () => {
   const user = userEvent.setup();
   mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
