@@ -378,7 +378,8 @@ def test_maintenance_status_polls_check_the_live_row_not_the_full_summary(
     """Status views are polled (the delete poll every few seconds, and opening
     a notebook reads three of them); each must not assemble a whole
     NotebookSummary, yet a missing or tombstoned notebook still raises
-    KeyError (the routes' 404)."""
+    KeyError (the routes' 404). The slot claim is held to the same probe —
+    the route already built one full summary before it."""
     nb = repo.create_notebook(NotebookCreate(name="nb")).id
 
     def _summary_forbidden(_notebook_id):
@@ -391,6 +392,11 @@ def test_maintenance_status_polls_check_the_live_row_not_the_full_summary(
         repo.unified_kg_rebuild_status,
     ):
         assert status(nb)["status"] == "idle"
+    claimed = repo.start_kg_delete(nb)
+    repo.fail_kg_delete_submission(nb, claimed["job_id"])
+    assert repo.kg_delete_status(nb)["status"] == "failed"
+    with pytest.raises(KeyError):
+        repo.start_kg_delete("nb-missing")
     with pytest.raises(KeyError):
         repo.kg_delete_status("nb-missing")
     with repo._write() as db:

@@ -61,11 +61,11 @@ class KgMaintenanceJobs:
         # entry it was not wired with is a programming error, not a runtime mode.
         self.event_log = event_log
         self.get_notebook = get_notebook
-        # status() 的存在性检查:只需「活着的笔记本行在不在」(缺失/墓碑即
-        # KeyError→404),不需要 get_notebook 拼出的整份 NotebookSummary——
-        # 打开笔记本会连发几条状态 GET,删除进行中还按秒级轮询。未接线时退回
-        # get_notebook,语义相同只是更贵。claim 仍走 get_notebook(一次点击
-        # 一次,不在轮询路径上)。
+        # status() 与 claim() 的存在性检查:只需「活着的笔记本行在不在」(缺失/
+        # 墓碑即 KeyError→404),不需要 get_notebook 拼出的整份 NotebookSummary——
+        # 打开笔记本会连发几条状态 GET,删除进行中还按秒级轮询;点击路径上路由
+        # 在 claim 之前也已经拼过一次整份摘要。未接线时退回 get_notebook,语义
+        # 相同只是更贵。
         self._require_notebook = require_notebook or get_notebook
         self._new_id = new_id
         self._relink_notebook_kg = relink_notebook_kg
@@ -119,7 +119,7 @@ class KgMaintenanceJobs:
         holder="buildkg" 拒绝;探测本身抛错同样先撤销再上抛。探测之后才
         落地的持久行(另一进程在这之后建的作业)不在此列——与槽本身一样
         只是进程内保证。"""
-        self.get_notebook(notebook_id)
+        self._require_notebook(notebook_id)
         from contextlib import nullcontext
         arbitration = self._cross_admission_lock or nullcontext()
         with arbitration:
