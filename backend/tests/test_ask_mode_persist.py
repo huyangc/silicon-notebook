@@ -40,3 +40,16 @@ def test_browser_question_time_round_trips_without_becoming_answer_time(
     assert resp.asked_at == asked_at
     assert turn.asked_at == asked_at
     assert turn.created_at != asked_at
+
+
+def test_ask_without_submitted_via_persists_as_not_recorded(tmp_path, monkeypatch):
+    """facade ``repo.ask(notebook_id, payload)`` 不传 submitted_via 关键字时,
+    建出的 ask_jobs 行取 ""(未记录)—— 与网页/MCP 两个真实入口区分开。只有
+    ask_routes.py/mcp_tools/memory_context.py 这两处显式传字面量,in-process
+    调用(如 eval/inference)刻意不传,靠这条默认值兜底。"""
+    repo = _repo(tmp_path, monkeypatch)
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.ask(nb.id, AskRequest(question="q", mode="chunk"))
+    with repo._connect() as db:
+        rows = db.execute("SELECT submitted_via FROM ask_jobs").fetchall()
+    assert [row["submitted_via"] for row in rows] == [""]

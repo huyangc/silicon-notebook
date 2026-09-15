@@ -13,6 +13,7 @@ from app.models.ask import (
     SEARCH_HIT_CAP,
     NotebookSearchResponse,
     SearchHit,
+    StoredSubmittedVia,
 )
 from app.core.activity_time import (
     UNRESOLVED_INSTANT_ISO,
@@ -1047,7 +1048,7 @@ class QueryStore:
         query: str = "",
         offset: int = 0,
         limit: int = ADMIN_QUESTIONS_DEFAULT_LIMIT,
-        submitted_via: str | None = None,
+        submitted_via: StoredSubmittedVia | None = None,
     ) -> dict[str, Any]:
         """Cross-user Ask/Deep-Report question overview for administrators."""
         cte = (

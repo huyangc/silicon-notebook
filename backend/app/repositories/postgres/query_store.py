@@ -17,6 +17,7 @@ from app.models.ask import (
     SEARCH_HIT_CAP,
     NotebookSearchResponse,
     SearchHit,
+    StoredSubmittedVia,
 )
 from app.models.sources import (
     extraction_warning_text,
@@ -854,7 +855,7 @@ class QueryStore:
         query: str = "",
         offset: int = 0,
         limit: int = ADMIN_QUESTIONS_DEFAULT_LIMIT,
-        submitted_via: str | None = None,
+        submitted_via: StoredSubmittedVia | None = None,
     ) -> dict[str, Any]:
         """PostgreSQL twin of SQLite's cross-user question overview."""
         cte = (

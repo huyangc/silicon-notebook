@@ -86,6 +86,7 @@ from app.models.ask import (
     AnswerAnchor, AskRequest, AskResponse, Citation, ConversationDetail,
     ConversationBulkDeleteResult, ConversationSummary, FeedbackRequest,
     FeedbackResponse, NotebookSearchResponse, QueryIntentContract, RuleCard,
+    StoredSubmittedVia,
 )
 from app.models.knowledge import (
     DuplicateGroup, KnowledgeGraph, KnowledgeTypeCount, KnowledgeUpdate, MergeRequest,
@@ -919,7 +920,7 @@ class ReportRepository(Protocol):
         question: str,
         depth: int = 2,
         *,
-        submitted_via: str = "",
+        submitted_via: StoredSubmittedVia = "",
     ) -> str: ...
     def update_report(self, notebook_id: str, report_id: str, *, status=None, progress=None, error=None, outline=None, sections=None, gaps=None, references=None, content_md=None, section_status=None, understanding=None) -> None: ...
     def claim_report_intent(self, notebook_id: str, report_id: str, understanding: dict) -> bool: ...
@@ -968,7 +969,7 @@ class AdminQueryRepository(Protocol):
         query: str = "",
         offset: int = 0,
         limit: int = ADMIN_QUESTIONS_DEFAULT_LIMIT,
-        submitted_via: str | None = None,
+        submitted_via: StoredSubmittedVia | None = None,
     ) -> dict[str, Any]: ...
     def list_user_notebooks(self, user_id: str) -> list[dict[str, Any]]: ...
     def notebook_exists_for_owner(self, notebook_id: str, user_id: str) -> bool: ...
@@ -1012,7 +1013,7 @@ class AskExecutionPort(Protocol):
         self, notebook_id: str, payload: AskRequest
     ) -> "FollowupResolution": ...
     def ask(
-        self, notebook_id: str, payload: AskRequest, *, submitted_via: str = ""
+        self, notebook_id: str, payload: AskRequest, *, submitted_via: StoredSubmittedVia = ""
     ) -> AskResponse: ...
     def ask_chunk(self, notebook_id: str, payload: AskRequest, cancel_event: CancelEvent = None) -> AskResponse: ...
     def ask_reasoning(self, notebook_id: str, payload: AskRequest, on_trace: Callable[[Any], None] | None = None, cancel_event: CancelEvent = None) -> AskResponse: ...
@@ -3121,7 +3122,7 @@ class AskStreamPort(Protocol):
         *,
         user_id: str,
         attach_only: bool = False,
-        submitted_via: str = "",
+        submitted_via: StoredSubmittedVia = "",
     ) -> "queue.Queue[dict[str, object] | None] | None": ...
 
 
@@ -3459,7 +3460,7 @@ class AskStateStorePort(Protocol):
         mode: str,
         user_id: str,
         *,
-        submitted_via: str = "",
+        submitted_via: StoredSubmittedVia = "",
     ) -> tuple[str, str]: ...
     def begin_or_attach_durable_job(
         self,
@@ -3468,7 +3469,7 @@ class AskStateStorePort(Protocol):
         mode: str,
         user_id: str,
         *,
-        submitted_via: str = "",
+        submitted_via: StoredSubmittedVia = "",
     ) -> tuple[str, str, bool]: ...
     def find_job_for_client_request(
         self, user_id: str, client_request_id: str,

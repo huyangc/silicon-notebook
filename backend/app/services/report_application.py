@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from app.models.ask import StoredSubmittedVia
+
 
 class NotebookGuard(Protocol):
     def get_notebook(self, notebook_id: str): ...
@@ -14,7 +16,7 @@ class ReportCreator(Protocol):
         question: str,
         depth: int = 2,
         *,
-        submitted_via: str = "",
+        submitted_via: StoredSubmittedVia = "",
     ) -> str: ...
 
 
@@ -31,7 +33,7 @@ class ReportApplicationService:
         question: str,
         depth: int = 2,
         *,
-        submitted_via: str = "",
+        submitted_via: StoredSubmittedVia = "",
     ) -> str:
         self.notebooks.get_notebook(notebook_id)
         return self.reports.create_report(

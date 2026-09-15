@@ -8,7 +8,7 @@
 -- reconstruct "web" vs "mcp" from -- mixing an inferred value with a
 -- recorded one would make the column unexplainable -- so they stay ''
 -- ("not recorded") forever. The allowed values are pinned by the API model
--- (app.models.ask.SubmittedVia), not a CHECK constraint, matching how
+-- (app.models.ask.StoredSubmittedVia), not a CHECK constraint, matching how
 -- ``wishes.status`` is already handled.
 --
 -- No index: the admin questions CTE already does a three-way UNION full

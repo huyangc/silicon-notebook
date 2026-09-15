@@ -83,6 +83,7 @@ from app.models.ask import (
     NotebookSearchResponse,
     QueryIntentContract,
     RuleCard,
+    StoredSubmittedVia,
 )
 from app.models.knowledge import (
     DuplicateGroup,
@@ -3723,7 +3724,7 @@ class RepositoryFacade:
             notebook_id, payload, cancel_event)
 
     def ask(
-        self, notebook_id: str, payload: AskRequest, *, submitted_via: str = ""
+        self, notebook_id: str, payload: AskRequest, *, submitted_via: StoredSubmittedVia = ""
     ) -> AskResponse:
         """Dispatch to the retrieval handler named by payload.mode, resolved
         through the ask_modes registry. Unknown modes raise UnknownAskMode (the
@@ -4125,7 +4126,7 @@ class RepositoryFacade:
         question: str,
         depth: int = 2,
         *,
-        submitted_via: str = "",
+        submitted_via: StoredSubmittedVia = "",
     ) -> str:
         return self._runtime.report_application.create_report(
             notebook_id, question, depth, submitted_via=submitted_via
@@ -4292,7 +4293,8 @@ class RepositoryFacade:
         self._runtime.notebook_languages = value
 
     def start_ask_stream(self, notebook_id: str, payload: AskRequest, mode,
-                         *, user_id: str, attach_only=False, submitted_via: str = ""):
+                         *, user_id: str, attach_only=False,
+                         submitted_via: StoredSubmittedVia = ""):
         """Start detached Ask execution through the runtime-owned coordinator.
 
         ``attach_only`` (a keyed re-submission probe): only attach to the job

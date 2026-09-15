@@ -12,6 +12,7 @@ from app.repositories.postgres._store_utils import (
 )
 from app.core.capability_tokens import new_capability_token
 from app.domain.report_export import ReportExportSource
+from app.models.ask import StoredSubmittedVia
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.read_authority_lock import lock_reader_access_on
 from app.core.internal_observability import public_report_sections
@@ -36,7 +37,7 @@ class ReportStore:
         question: str,
         depth: int = 2,
         *,
-        submitted_via: str = "",
+        submitted_via: StoredSubmittedVia = "",
     ) -> str:
         report_id = self.new_id("rep")
         now = normalize_timestamp(self.now())

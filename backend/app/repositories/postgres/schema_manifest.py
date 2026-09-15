@@ -310,8 +310,8 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # surface created the row ("web" or "mcp"; '' means "not recorded"). No
 # backfill: historical rows have no reliable signal to reconstruct this
 # from. Allowed values are pinned by the API model
-# (app.models.ask.SubmittedVia), not a CHECK, like ``wishes.status``. No
-# table, index, FK or unique-surface change.
+# (app.models.ask.StoredSubmittedVia), not a CHECK, like ``wishes.status``.
+# No table, index, FK or unique-surface change.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
     sqlite_version=74,
     postgres_version=54,

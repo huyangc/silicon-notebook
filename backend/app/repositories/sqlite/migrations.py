@@ -190,7 +190,8 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # "not recorded" (every pre-existing row, and any in-process caller that
 # does not pass the keyword). No backfill -- historical rows have no
 # reliable signal to reconstruct this from, so they stay "". Allowed values
-# are pinned by the API model (app.models.ask.SubmittedVia), not a CHECK,
+# are pinned by the API model (app.models.ask.StoredSubmittedVia -- the ""
+# entry-point-skipped alongside SubmittedVia's two literals), not a CHECK,
 # the same way wishes.status already is. No table, index, FK or
 # unique-surface change.
 SCHEMA_VERSION = 74
@@ -3899,8 +3900,8 @@ class SqliteMigrator:
         "web" vs "mcp" from, so they stay "" ("not recorded") forever.
         Only the two HTTP submission routes and the MCP ``ask_notebook``
         tool pass a literal. The accepted value set lives in
-        ``app.models.ask.SubmittedVia`` rather than a CHECK, the same way
-        ``wishes.status`` already is. ``add_column_if_missing`` keeps the
+        ``app.models.ask.StoredSubmittedVia`` rather than a CHECK, the same
+        way ``wishes.status`` already is. ``add_column_if_missing`` keeps the
         migration re-runnable.
         """
         with self._connect() as db:

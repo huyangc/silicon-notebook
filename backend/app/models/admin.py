@@ -3,6 +3,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.internal_observability import public_trace_steps, sanitize_answer_payload
+from app.models.ask import StoredSubmittedVia
 from app.models.common import Evidence
 
 
@@ -191,7 +192,7 @@ class ActivityAsk(BaseModel):
     # Which submission surface created this row -- "" means "not recorded"
     # (a pre-migration row, or an in-process caller that skipped the
     # keyword). See app.models.ask.SubmittedVia for the write-side vocabulary.
-    submitted_via: Literal["", "web", "mcp"] = ""
+    submitted_via: StoredSubmittedVia = ""
     notebook_name: str = ""
     notebook_deleted_at: str = ""
     retained_until: str = ""
@@ -239,7 +240,7 @@ class ActivityReport(BaseModel):
     depth: int = 0
     status: str = ""
     generation_started_at: str = ""
-    submitted_via: Literal["", "web", "mcp"] = ""
+    submitted_via: StoredSubmittedVia = ""
     notebook_name: str = ""
     notebook_deleted_at: str = ""
     retained_until: str = ""
@@ -276,7 +277,7 @@ class AdminQuestionItem(BaseModel):
     question: str
     status: str
     created_at: str
-    submitted_via: Literal["", "web", "mcp"] = ""
+    submitted_via: StoredSubmittedVia = ""
 
 
 class AdminQuestionStats(BaseModel):

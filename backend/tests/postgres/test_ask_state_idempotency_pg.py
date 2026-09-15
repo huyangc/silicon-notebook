@@ -46,6 +46,49 @@ def _count(repository, sql: str, params=()) -> int:
         return db.execute(sql, params).fetchone()["n"]
 
 
+def _submitted_via(repository, job_id: str) -> str:
+    with repository._runtime.database.connect() as db:
+        row = db.execute(
+            "SELECT submitted_via FROM ask_jobs WHERE id=%s", (job_id,)
+        ).fetchone()
+    return row["submitted_via"]
+
+
+def test_keyed_begin_records_submitted_via_and_reattach_does_not_overwrite_it(
+    postgres_repository,
+):
+    """PG 侧带键建行(``_insert_job_row`` 的 keyed 分支)必须真的落
+    ``submitted_via``(评审 P0:这一处漏传曾经存活)。同键再提交传别的值时接回
+    既有行 —— ``_attach_existing`` 根本不碰这一列,已经记的取值不应该被改写。
+    无键 ``begin_durable_job`` 传值与不传值(默认 "")各自独立成立。"""
+    repo = postgres_repository
+    store = repo._runtime.ask_state
+    uid = repo.current_user().id
+    nb = repo.create_notebook(NotebookCreate(name="subvia-idem")).id
+
+    keyed = AskRequest(question="Q?", mode="chunk", client_request_id="subvia-key-1")
+    job_id, conv_id, attached = store.begin_or_attach_durable_job(
+        nb, keyed, "chunk", uid, submitted_via="web")
+    assert not attached
+    assert _submitted_via(repo, job_id) == "web"
+
+    again = AskRequest(question="Q?", mode="chunk", client_request_id="subvia-key-1")
+    reattached = store.begin_or_attach_durable_job(
+        nb, again, "chunk", uid, submitted_via="mcp")
+    assert reattached == (job_id, conv_id, True)
+    # 接回既有行(attached=True),不改写它建行那一刻已经记的取值。
+    assert _submitted_via(repo, job_id) == "web"
+
+    unkeyed_job_id, _ = store.begin_durable_job(
+        nb, AskRequest(question="Q?", mode="chunk"), "chunk", uid,
+        submitted_via="mcp")
+    assert _submitted_via(repo, unkeyed_job_id) == "mcp"
+
+    default_job_id, _ = store.begin_durable_job(
+        nb, AskRequest(question="Q?", mode="chunk"), "chunk", uid)
+    assert _submitted_via(repo, default_job_id) == ""
+
+
 def test_repeated_key_attaches_and_other_notebook_conflicts(postgres_repository):
     repo = postgres_repository
     store = repo._runtime.ask_state

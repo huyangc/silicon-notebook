@@ -53,6 +53,7 @@ from app.models.ask import (
     ConversationTurn,
     FeedbackRequest,
     FeedbackResponse,
+    StoredSubmittedVia,
 )
 from app.repositories.ports import (
     AskRequestKeyConflict,
@@ -286,7 +287,7 @@ class AskStateStore:
         mode: str,
         user_id: str,
         *,
-        submitted_via: str = "",
+        submitted_via: StoredSubmittedVia = "",
     ) -> tuple[str, str]:
         """建/接续会话 + 插入 running 的 ask_jobs 行,一个写事务原子提交。
         就地把解析出的 conversation_id 写回 payload(与基线同一时点——在事务内、
@@ -325,7 +326,7 @@ class AskStateStore:
         now: str,
         *,
         client_request_id: "str | None",
-        submitted_via: str = "",
+        submitted_via: StoredSubmittedVia,
     ) -> None:
         db.execute(
             "INSERT INTO ask_jobs (id,notebook_id,conversation_id,created_by,mode,question,"
@@ -356,7 +357,7 @@ class AskStateStore:
         mode: str,
         user_id: str,
         *,
-        submitted_via: str = "",
+        submitted_via: StoredSubmittedVia = "",
     ) -> tuple[str, str, bool]:
         """``begin_durable_job`` with the submission's idempotency key honoured.
 

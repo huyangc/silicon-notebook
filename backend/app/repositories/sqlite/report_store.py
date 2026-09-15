@@ -19,6 +19,7 @@ from typing import Callable, Iterator
 
 from app.core.capability_tokens import new_capability_token
 from app.domain.report_export import ReportExportSource
+from app.models.ask import StoredSubmittedVia
 from app.repositories.sqlite.access_sql import NOTEBOOK_READ_SQL, read_access_params
 from app.repositories.sqlite.database import SqliteDatabase
 from app.core.internal_observability import public_report_sections
@@ -44,7 +45,7 @@ class ReportStore:
         question: str,
         depth: int = 2,
         *,
-        submitted_via: str = "",
+        submitted_via: StoredSubmittedVia = "",
     ) -> str:
         report_id = self.new_id("rep")
         now = self.now()
