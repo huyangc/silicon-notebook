@@ -26,6 +26,9 @@ from tests.activity_parity_cases import (
     LOCAL_DAY_SINCE,
     LOCAL_DAY_UNTIL,
     MALFORMED_BOUNDS,
+    REPORT_SCOPE_AFTER_SHARED_DELETE_CASES,
+    REPORT_SCOPE_CASES,
+    REPORT_SCOPE_REPORTS,
 )
 
 
@@ -376,6 +379,158 @@ def test_question_overview_enforces_live_read_access_unless_admin_audit(
         )
     revoked_view = store.list_user_activity("u1", activity_type="ask")
     assert [item["id"] for item in revoked_view["items"]] == ["ask-mine"]
+
+
+def _seed_report_scope_rows(connection) -> None:
+    _insert_user(connection, "u1")
+    _insert_user(connection, "u2")
+    _insert_notebook(connection, "n1", "u1")
+    _insert_notebook(connection, "n2", "u2")
+    _insert_member(connection, "n2", "u1")
+    for report_id, notebook_id, created_by, created_at in REPORT_SCOPE_REPORTS:
+        _insert_report(
+            connection, report_id, notebook_id, created_by,
+            datetime.fromisoformat(created_at),
+        )
+
+
+def _delete_notebook_now(postgres_database, notebook_id: str) -> None:
+    from app.repositories.postgres.notebook_store import NotebookStore
+
+    NotebookStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: datetime.now(timezone.utc),
+        activity_retention_days=180,
+    ).delete_row_and_orphan_embeddings(notebook_id)
+
+
+def test_report_overview_follows_submitter_like_question_overview(
+    postgres_database, store
+):
+    """与 SQLite 侧同名测试跑**同一张** REPORT_SCOPE_CASES 场景表。"""
+    with postgres_database.write() as connection:
+        _seed_report_scope_rows(connection)
+    for label, kwargs, expected, _revoked in REPORT_SCOPE_CASES:
+        result = store.list_user_activity("u1", limit=50, **kwargs)
+        assert [item["id"] for item in result["items"]] == expected, label
+
+    with postgres_database.write() as connection:
+        connection.execute(
+            "DELETE FROM notebook_members WHERE notebook_id=%s AND user_id=%s",
+            ("n2", "u1"),
+        )
+    for label, kwargs, _member, expected in REPORT_SCOPE_CASES:
+        result = store.list_user_activity("u1", limit=50, **kwargs)
+        assert [item["id"] for item in result["items"]] == expected, label
+
+    _delete_notebook_now(postgres_database, "n2")
+    for label, kwargs, expected, retained in REPORT_SCOPE_AFTER_SHARED_DELETE_CASES:
+        result = store.list_user_activity("u1", limit=50, **kwargs)
+        assert [item["id"] for item in result["items"]] == expected, label
+        assert {
+            item["id"] for item in result["items"] if item.get("notebook_deleted_at")
+        } == retained, label
+
+
+def test_guarded_report_detail_live_revoked_and_retained_states_postgres(
+    postgres_database, store
+):
+    """与 SQLite 侧 ``test_guarded_report_detail_live_revoked_and_retained_states``
+    同形:存活投影正文、自助失权 fail closed、删除后仅管理员读留存摘要。"""
+    from app.repositories.postgres.report_store import ReportStore
+
+    references = [{"index": 1, "source_id": "src-x", "title": "引用一"}]
+    with postgres_database.write() as connection:
+        _seed_report_scope_rows(connection)
+        connection.execute(
+            "UPDATE reports SET content_md=%s, references_json=%s, "
+            "understanding_json=%s, depth=4 WHERE id='rep-shared'",
+            (
+                "# 共享库报告正文",
+                jsonb(references),
+                jsonb({"_generation_started_at": "2026-08-01T11:00:05+00:00"}),
+            ),
+        )
+    reports = ReportStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: NOW.isoformat(),
+        current_user_id=lambda: "u1",
+    )
+
+    with reports.guarded_report_detail(
+        "rep-shared", actor_id="u1", reader_id="u1"
+    ) as snapshot:
+        live = dict(snapshot)
+    created = datetime(2026, 8, 1, 11, tzinfo=timezone.utc)
+    assert live == {
+        "report_id": "rep-shared",
+        "notebook_id": "n2",
+        "question": "report?",
+        "depth": 4,
+        "status": "done",
+        "created_at": created.isoformat(),
+        "updated_at": created.isoformat(),
+        "generation_started_at": "2026-08-01T11:00:05+00:00",
+        "error": "",
+        "content_md": "# 共享库报告正文",
+        "references": references,
+        "notebook_name": "NB-n2",
+        "notebook_deleted_at": "",
+        "retained_until": "",
+    }
+    with pytest.raises(KeyError):
+        with reports.guarded_report_detail(
+            "rep-other", actor_id="u1", reader_id=None
+        ):
+            pass
+
+    with postgres_database.write() as connection:
+        connection.execute(
+            "DELETE FROM notebook_members WHERE notebook_id=%s AND user_id=%s",
+            ("n2", "u1"),
+        )
+    with pytest.raises(KeyError):
+        with reports.guarded_report_detail(
+            "rep-shared", actor_id="u1", reader_id="u1"
+        ):
+            pass
+    with reports.guarded_report_detail(
+        "rep-shared", actor_id="u1", reader_id=None
+    ) as snapshot:
+        assert snapshot["content_md"] == "# 共享库报告正文"
+
+    _delete_notebook_now(postgres_database, "n2")
+    with pytest.raises(KeyError):
+        with reports.guarded_report_detail(
+            "rep-shared", actor_id="u1", reader_id="u1"
+        ):
+            pass
+    with reports.guarded_report_detail(
+        "rep-shared", actor_id="u1", reader_id=None
+    ) as snapshot:
+        retained = dict(snapshot)
+    assert retained["notebook_deleted_at"]
+    assert retained["retained_until"]
+    assert retained["notebook_name"] == "NB-n2"
+    assert retained["depth"] == 4
+    assert retained["created_at"] == created.isoformat()
+    assert retained["generation_started_at"] == "2026-08-01T11:00:05+00:00"
+    assert retained["content_md"] == ""
+    assert retained["references"] == []
+    assert retained["error"] == ""
+
+    with postgres_database.write() as connection:
+        connection.execute(
+            "UPDATE retained_user_activity "
+            "SET expires_at=CURRENT_TIMESTAMP - INTERVAL '1 second'"
+        )
+    with pytest.raises(KeyError):
+        with reports.guarded_report_detail(
+            "rep-shared", actor_id="u1", reader_id=None
+        ):
+            pass
 
 
 def test_source_hides_memory_and_knowhow_and_carries_paper_meta(postgres_database, store):

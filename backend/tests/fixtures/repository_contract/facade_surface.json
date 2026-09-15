@@ -3411,6 +3411,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.guarded_report_detail",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.hidden_source_ids",
         "target": "_runtime"
       },
@@ -7246,6 +7252,36 @@
     ],
     "scope": "facade",
     "signature": "(self, job_id: 'str', *, actor_id: 'str', reader_id: \"'str | None'\")"
+  },
+  "guarded_report_detail": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/admin_routes.py",
+        "scope": "<module>.get_admin_user_report_detail",
+        "target": "guarded_report_detail"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_admin_user_activity_api.py",
+        "scope": "<module>.test_admin_report_detail_delete_before_guard_returns_retained",
+        "target": "guarded_report_detail"
+      }
+    ],
+    "kind": "method",
+    "owner": "ReportStore",
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_admin_user_activity_api.py",
+        "scope": "<module>.test_admin_report_detail_delete_before_guard_returns_retained",
+        "target": "guarded_report_detail"
+      }
+    ],
+    "scope": "facade",
+    "signature": "(self, report_id: 'str', *, actor_id: 'str', reader_id: \"'str | None'\")"
   },
   "hidden_source_ids": {
     "consumers": [

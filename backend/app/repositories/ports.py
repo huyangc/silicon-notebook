@@ -924,6 +924,14 @@ class ReportRepository(Protocol):
     ) -> bool: ...
     def complete_report_generation(self, notebook_id: str, report_id: str, *, sections: list, content_md: str, gaps: list, references: list) -> bool: ...
     def get_report(self, notebook_id: str, report_id: str) -> dict: ...
+    # Admin read-only detail (GET /admin/users/{user_id}/reports/{report_id}).
+    # Same fence contract as `guarded_ask_detail`: `actor_id` pins the report's
+    # creator, `reader_id` is None for administrators and the caller's id for
+    # self-service (live read authority re-checked inside the fence); the
+    # snapshot's locks are held until the caller leaves the context.
+    def guarded_report_detail(
+        self, report_id: str, *, actor_id: str, reader_id: str | None
+    ) -> ContextManager[dict]: ...
     # `created_by` is keyword-only and required on both listing reads (P1 group
     # sharing): reports inside a shared notebook are private to whoever created
     # them, so every call site must state which creator it means. `None` is the

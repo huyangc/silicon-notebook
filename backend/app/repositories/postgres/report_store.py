@@ -1,6 +1,7 @@
 """PostgreSQL reports-table row persistence."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Callable, Iterator
 
 from app.repositories.postgres._store_utils import (
@@ -12,6 +13,7 @@ from app.repositories.postgres._store_utils import (
 from app.core.capability_tokens import new_capability_token
 from app.domain.report_export import ReportExportSource
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.read_authority_lock import lock_reader_access_on
 from app.core.internal_observability import public_report_sections
 
 
@@ -220,6 +222,105 @@ class ReportStore:
         if row is None:
             raise KeyError(report_id)
         return self.row_to_dict(row, full=True)
+
+    @contextmanager
+    def guarded_report_detail(
+        self,
+        report_id: str,
+        *,
+        actor_id: str,
+        reader_id: str | None,
+    ) -> Iterator[dict]:
+        """Yield one self-consistent admin report snapshot under the root lease.
+
+        Mirrors ``AskStateStore.guarded_ask_detail``: the notebook
+        ``FOR KEY SHARE`` lease conflicts with whole-notebook deletion's
+        ``FOR UPDATE`` lease, the shared reader chain keeps self-service
+        authority from being revoked mid-projection, and the report
+        ``FOR SHARE`` lease freezes a running→terminal transition while its
+        body and references are projected. All remain held until the API has
+        assembled its response object. A deleted notebook falls back to the
+        content-minimal retained summary, which only an administrator
+        (``reader_id is None``) may read.
+        """
+        with self.database.write() as db:
+            row = db.execute(
+                "SELECT notebook_id FROM reports WHERE id=%s AND created_by=%s",
+                (report_id, actor_id),
+            ).fetchone()
+            if row is not None:
+                notebook_id = row["notebook_id"]
+                root = db.execute(
+                    "SELECT created_by,name FROM notebooks WHERE id=%s FOR KEY SHARE",
+                    (notebook_id,),
+                ).fetchone()
+                if root is not None:
+                    if reader_id is not None and not lock_reader_access_on(
+                        db,
+                        notebook_id,
+                        reader_id,
+                        notebook_owner_id=root["created_by"],
+                    ):
+                        raise KeyError(report_id)
+                    row = db.execute(
+                        "SELECT id,notebook_id,question,depth,status,error,"
+                        "content_md,references_json,understanding_json,"
+                        "created_at,updated_at FROM reports "
+                        "WHERE id=%s AND notebook_id=%s AND created_by=%s FOR SHARE",
+                        (report_id, notebook_id, actor_id),
+                    ).fetchone()
+                    if row is None:
+                        raise KeyError(report_id)
+                    understanding = json_value(row["understanding_json"], {})
+                    yield {
+                        "report_id": row["id"],
+                        "notebook_id": row["notebook_id"],
+                        "question": row["question"],
+                        "depth": int(row["depth"]),
+                        "status": row["status"],
+                        "created_at": iso_timestamp(row["created_at"]),
+                        "updated_at": iso_timestamp(row["updated_at"]),
+                        "generation_started_at": str(
+                            understanding.get("_generation_started_at", "") or ""
+                        ),
+                        "error": row["error"] or "",
+                        "content_md": row["content_md"] or "",
+                        "references": json_value(row["references_json"], []),
+                        "notebook_name": root["name"] or "",
+                        "notebook_deleted_at": "",
+                        "retained_until": "",
+                    }
+                    return
+
+            retained = db.execute(
+                "SELECT record_id,notebook_id,notebook_name,question,depth,status,"
+                "created_at,updated_at,generation_started_at,deleted_at,"
+                "expires_at FROM retained_user_activity "
+                "WHERE activity_type='report' AND record_id=%s "
+                "AND actor_id=%s "
+                "AND expires_at>CURRENT_TIMESTAMP "
+                "AND NOT EXISTS(SELECT 1 FROM notebooks live "
+                "WHERE live.id=retained_user_activity.notebook_id)",
+                (report_id, actor_id),
+            ).fetchone()
+            if retained is None or reader_id is not None:
+                raise KeyError(report_id)
+            yield {
+                "report_id": retained["record_id"],
+                "notebook_id": retained["notebook_id"],
+                "question": retained["question"],
+                "depth": int(retained["depth"]),
+                "status": retained["status"],
+                "created_at": iso_timestamp(retained["created_at"]),
+                "updated_at": iso_timestamp(retained["updated_at"]),
+                "generation_started_at": retained["generation_started_at"] or "",
+                "error": "",
+                "content_md": "",
+                "references": [],
+                "notebook_name": retained["notebook_name"],
+                "notebook_deleted_at": iso_timestamp(retained["deleted_at"]),
+                "retained_until": iso_timestamp(retained["expires_at"]),
+            }
 
     def list_reports(self, notebook_id: str, *, created_by: str | None) -> list:
         """Mirror of the SQLite store — see its docstring for why ``created_by``

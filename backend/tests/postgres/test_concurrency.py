@@ -472,6 +472,180 @@ def test_guarded_ask_detail_locks_group_read_authority_postgres(
             pass
 
 
+def _guard_report_fixture(postgres_database, *, prefix: str, reader: bool):
+    """One owner notebook (+ optional group-granted reader) and a PG ReportStore
+    whose ``current_user_id`` is the report creator."""
+    from app.repositories.postgres.report_store import ReportStore
+
+    now = "2026-08-31T12:00:00+00:00"
+    owner = f"{prefix}-owner"
+    creator = f"{prefix}-reader" if reader else owner
+    with postgres_database.write() as connection:
+        for user_id in dict.fromkeys((owner, creator)):
+            connection.execute(
+                "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
+                "VALUES (%s,%s,%s,'user',%s,%s)",
+                (user_id, f"{user_id}@x", user_id, now, now),
+            )
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_by,status,created_at,updated_at) "
+            "VALUES (%s,%s,%s,'ready',%s,%s)",
+            (f"{prefix}-nb", f"{prefix} notebook", owner, now, now),
+        )
+        if reader:
+            connection.execute(
+                "INSERT INTO groups(id,name,kind,description,created_by,"
+                "created_at,updated_at) VALUES (%s,%s,'project','',%s,%s,%s)",
+                (f"{prefix}-group", f"{prefix} group", owner, now, now),
+            )
+            connection.execute(
+                "INSERT INTO group_members(group_id,user_id,role,added_at,added_by) "
+                "VALUES (%s,%s,'reader',%s,%s)",
+                (f"{prefix}-group", creator, now, owner),
+            )
+            connection.execute(
+                "INSERT INTO notebook_grants"
+                "(id,notebook_id,principal_type,principal_id,role,created_by,"
+                "created_at) VALUES (%s,%s,'group',%s,'reader',%s,%s)",
+                (f"{prefix}-grant", f"{prefix}-nb", f"{prefix}-group", owner, now),
+            )
+    counter = iter(range(1, 20))
+    reports = ReportStore(
+        postgres_database,
+        new_id=lambda kind: f"{kind}-{prefix}-{next(counter)}",
+        now=lambda: now,
+        current_user_id=lambda: creator,
+    )
+    report_id = reports.create_report(f"{prefix}-nb", "guarded report", 3)
+    return reports, report_id, creator, now
+
+
+@pytest.mark.postgres_integration
+def test_guarded_report_detail_holds_root_lease_through_projection_postgres(
+    postgres_database,
+):
+    assert PostgresMigrator(postgres_database).migrate() == 53
+    reports, report_id, owner, now = _guard_report_fixture(
+        postgres_database, prefix="guard-report", reader=False
+    )
+    reports.update_report(
+        "guard-report-nb", report_id, content_md="protected report body"
+    )
+    notebooks = NotebookStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: now,
+        activity_retention_days=180,
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with reports.guarded_report_detail(
+            report_id, actor_id=owner, reader_id=None
+        ) as snapshot:
+            assert snapshot["content_md"] == "protected report body"
+            delete_future = executor.submit(
+                notebooks.delete_row_and_orphan_embeddings, "guard-report-nb"
+            )
+            _wait_for_lock_wait(
+                postgres_database, "SELECT id FROM notebooks", delete_future
+            )
+        assert delete_future.result(timeout=5) == []
+
+    with reports.guarded_report_detail(
+        report_id, actor_id=owner, reader_id=None
+    ) as snapshot:
+        assert snapshot["notebook_deleted_at"]
+        assert snapshot["content_md"] == ""
+        assert snapshot["references"] == []
+    with pytest.raises(KeyError):
+        with reports.guarded_report_detail(
+            report_id, actor_id=owner, reader_id=owner
+        ):
+            pass
+
+
+@pytest.mark.postgres_integration
+def test_guarded_report_detail_freezes_report_row_through_projection_postgres(
+    postgres_database,
+):
+    assert PostgresMigrator(postgres_database).migrate() == 53
+    reports, report_id, owner, _now = _guard_report_fixture(
+        postgres_database, prefix="guard-report-row", reader=False
+    )
+    with postgres_database.write() as connection:
+        connection.execute(
+            "UPDATE reports SET status='generating' WHERE id=%s", (report_id,)
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with reports.guarded_report_detail(
+            report_id, actor_id=owner, reader_id=None
+        ) as snapshot:
+            assert snapshot["status"] == "generating"
+            assert snapshot["content_md"] == ""
+            finish_future = executor.submit(
+                reports.complete_report_generation,
+                "guard-report-row-nb",
+                report_id,
+                sections=[],
+                content_md="finished body",
+                gaps=[],
+                references=[],
+            )
+            _wait_for_lock_wait(
+                postgres_database, "UPDATE reports SET sections_json", finish_future
+            )
+        assert finish_future.result(timeout=5) is True
+
+    with reports.guarded_report_detail(
+        report_id, actor_id=owner, reader_id=None
+    ) as snapshot:
+        assert snapshot["status"] == "done"
+        assert snapshot["content_md"] == "finished body"
+
+
+@pytest.mark.postgres_integration
+def test_guarded_report_detail_locks_group_read_authority_postgres(
+    postgres_database,
+):
+    assert PostgresMigrator(postgres_database).migrate() == 53
+    reports, report_id, reader, _now = _guard_report_fixture(
+        postgres_database, prefix="guard-report-access", reader=True
+    )
+    reports.update_report(
+        "guard-report-access-nb", report_id, content_md="group protected report"
+    )
+
+    def revoke_group_membership() -> None:
+        with postgres_database.write() as connection:
+            connection.execute(
+                "DELETE FROM group_members "
+                "WHERE group_id='guard-report-access-group' AND user_id=%s",
+                (reader,),
+            )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with reports.guarded_report_detail(
+            report_id, actor_id=reader, reader_id=reader
+        ) as snapshot:
+            assert snapshot["content_md"] == "group protected report"
+            revoke_future = executor.submit(revoke_group_membership)
+            _wait_for_lock_wait(
+                postgres_database, "DELETE FROM group_members", revoke_future
+            )
+        revoke_future.result(timeout=5)
+
+    with pytest.raises(KeyError):
+        with reports.guarded_report_detail(
+            report_id, actor_id=reader, reader_id=reader
+        ):
+            pass
+    with reports.guarded_report_detail(
+        report_id, actor_id=reader, reader_id=None
+    ) as snapshot:
+        assert snapshot["content_md"] == "group protected report"
+
+
 @pytest.mark.postgres_integration
 def test_final_answer_and_notebook_delete_share_root_first_lock_order(
     postgres_database, monkeypatch

@@ -1231,11 +1231,12 @@ class QueryStore:
         可能与 SQL 口径分叉。复合游标谓词按 (绝对时刻, id) 的严格字典序比较,避免并列
         时间戳下只比 ts 跳行。
 
-        混合流与按来源/报告过滤时都按**该用户自有的笔记本**收窄(owner-only),与
-        sources 侧同口径。只有无 notebook_id 的 ask-only「提问概览」跟用户总览的
-        questions 合计对齐，按 created_by 纳入该用户在共享库里的提交；本人查看时
-        仍叠加当前实时读权，管理员审计可显式纳入已经失权的历史提交。显式选某库仍
-        只接受左栏列出的自有笔记本。
+        混合流与按来源过滤时都按**该用户自有的笔记本**收窄(owner-only),与
+        sources 侧同口径。无 notebook_id 的 ask-only「提问概览」与 report-only
+        「报告概览」分别跟用户总览的 questions / reports 合计对齐，按 created_by
+        纳入该用户在共享库里的提交；本人查看时仍叠加当前实时读权，管理员审计
+        (``include_inaccessible_questions=True``，名字沿用提问、同样覆盖只看报告)
+        可显式纳入已经失权的历史提交。显式选某库仍只接受左栏列出的自有笔记本。
 
         ``activity_type`` 可把读取收窄到 ask/source/report 中的一类；筛选发生在各表
         的 LIMIT 之前，因此「只看提问」仍能完整翻页，不会被较新的来源或报告挤出窗口。
@@ -1323,6 +1324,7 @@ class QueryStore:
                     ).fetchall()
                 ]
             all_question_submissions = activity_type == "ask" and notebook_id is None
+            all_report_submissions = activity_type == "report" and notebook_id is None
             owned_placeholders = ",".join("?" for _ in owned_notebook_ids)
 
             # 1. 提问:created_by 之外还收窄到自有笔记本(owner-only,同 sources)。
@@ -1407,15 +1409,33 @@ class QueryStore:
             # row_to_dict 同一个 "$._generation_started_at" 表达式,不发明第二套提取
             # 写法),understanding_json 本身不作为返回字段。
             report_rows = []
-            if activity_type in (None, "report") and owned_notebook_ids:
-                report_params: list[Any] = [user_id, *owned_notebook_ids]
+            if activity_type in (None, "report") and (
+                all_report_submissions or owned_notebook_ids
+            ):
+                # 只看报告与只看提问同形：无 notebook_id 时按 created_by 覆盖该用户在
+                # 自有库和共享库里建的全部报告，与用户总览的 reports 合计同口径；本人
+                # 查看叠加实时读权，管理员审计纳入已失权共享库里的历史报告。混合流与
+                # 显式选中左栏某库仍保持 owner-only。
+                report_notebook_clause = ""
+                report_params: list[Any] = [user_id]
+                if all_report_submissions and not include_inaccessible_questions:
+                    report_notebook_clause = (
+                        " AND "
+                        + access_sql.read_access_exists_clause("reports")
+                    )
+                    report_params.extend(access_sql.read_access_params(user_id))
+                elif not all_report_submissions:
+                    report_notebook_clause = (
+                        f" AND notebook_id IN ({owned_placeholders})"
+                    )
+                    report_params.extend(owned_notebook_ids)
                 report_range_clause, report_range_params = _range_and_cursor_clause("")
                 report_params.extend(report_range_params)
                 report_rows = db.execute(
                     "SELECT id, notebook_id, created_at, updated_at, question, depth, "
                     "status, understanding_json, "
                     f"{_absolute_instant('created_at')} AS sort_instant FROM reports "
-                    f"WHERE created_by = ? AND notebook_id IN ({owned_placeholders})"
+                    f"WHERE created_by = ?{report_notebook_clause}"
                     f"{report_range_clause} "
                     f"ORDER BY {_absolute_instant('created_at')} DESC, id DESC LIMIT ?",
                     [*report_params, fetch_limit],
@@ -1425,6 +1445,8 @@ class QueryStore:
             # expires_at 是强读闸：物理 GC 即使稍后执行，过期行也不会再返回。
             # 普通用户的 self-service 视图仍要求实时 notebook 读权，因此删除
             # 后的快照只进入管理员审计（include_inaccessible_questions=True）。
+            # 只看提问 / 只看报告按提交者 actor_id 取（含共享库里的提交，与上面
+            # 两条 live 分支同口径）；混合流仍要求当时的 notebook_owner_id。
             retained_rows = []
             if notebook_id is None and include_inaccessible_questions:
                 retained_params: list[Any] = []
@@ -1437,11 +1459,8 @@ class QueryStore:
                     )
                     retained_params.append(user_id)
                 elif activity_type == "report":
-                    retained_scope = (
-                        "a.activity_type='report' AND a.actor_id=? "
-                        "AND a.notebook_owner_id=?"
-                    )
-                    retained_params.extend([user_id, user_id])
+                    retained_scope = "a.activity_type='report' AND a.actor_id=?"
+                    retained_params.append(user_id)
                 else:
                     retained_scope = (
                         "((a.activity_type='ask' AND a.actor_id=? "

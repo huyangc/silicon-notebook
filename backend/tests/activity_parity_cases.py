@@ -80,6 +80,59 @@ LOCAL_DAY_ROWS = (
 LOCAL_DAY_EXPECTED = {"day-open", "day-early", "day-late"}
 
 
+# ----------------------------------------------------- 只看报告按提交者口径(B1)
+#
+# 用户总览的「报告」合计按 reports.created_by 统计(含共享库),活动流的只看报告
+# 必须与它同口径,否则从用户总览点进去列表与计数对不上。混合流与显式 notebook_id
+# 保持 owner-only。场景同时喂 SQLite 与 PostgreSQL 两份实现,期望逐位一致。
+#
+# 夹具:u1 自有 n1、u2 自有 n2;u1 起初是 n2 的只读成员。
+REPORT_SCOPE_REPORTS = (
+    # (report_id, notebook_id, created_by, created_at)
+    ("rep-own", "n1", "u1", "2026-08-01T12:00:00+00:00"),
+    ("rep-shared", "n2", "u1", "2026-08-01T11:00:00+00:00"),
+    # 别人的报告:任何 u1 视图都不许出现(created_by 谓词本身)。
+    ("rep-other", "n2", "u2", "2026-08-01T10:00:00+00:00"),
+)
+
+# (说明, list_user_activity("u1", **kwargs), 仍是成员时的期望序, 撤掉成员后的期望序)
+REPORT_SCOPE_CASES = (
+    ("self report-only follows submitter and live access",
+     {"activity_type": "report"},
+     ["rep-own", "rep-shared"], ["rep-own"]),
+    ("admin report-only keeps revoked shared-library reports",
+     {"activity_type": "report", "include_inaccessible_questions": True},
+     ["rep-own", "rep-shared"], ["rep-own", "rep-shared"]),
+    ("self mixed stream stays owner-only",
+     {},
+     ["rep-own"], ["rep-own"]),
+    ("admin mixed stream stays owner-only",
+     {"include_inaccessible_questions": True},
+     ["rep-own"], ["rep-own"]),
+    ("explicit shared notebook_id is not owned",
+     {"activity_type": "report", "notebook_id": "n2",
+      "include_inaccessible_questions": True},
+     [], []),
+    ("explicit own notebook_id stays owner-only",
+     {"activity_type": "report", "notebook_id": "n1"},
+     ["rep-own"], ["rep-own"]),
+)
+
+# 删除共享库 n2 之后:只剩最小留存摘要,且只有管理员视图读得到。
+# (说明, kwargs, 期望序, 其中带 notebook_deleted_at 的 id 集合)
+REPORT_SCOPE_AFTER_SHARED_DELETE_CASES = (
+    ("self report-only hides retained snapshots",
+     {"activity_type": "report"},
+     ["rep-own"], set()),
+    ("admin report-only includes the shared-library retained report",
+     {"activity_type": "report", "include_inaccessible_questions": True},
+     ["rep-own", "rep-shared"], {"rep-shared"}),
+    ("admin mixed retained scope still needs the notebook owner",
+     {"include_inaccessible_questions": True},
+     ["rep-own"], set()),
+)
+
+
 # 畸形边界:两个后端必须抛同一种异常(ValueError),不许一个静默返回一页、另一个 500。
 MALFORMED_BOUNDS = (
     "not-a-date",

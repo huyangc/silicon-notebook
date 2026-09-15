@@ -15,7 +15,9 @@
 * `postgres/sharing_store.py`:`user_can_access_notebook`(写权)、
   `user_can_admin_notebook`(管理权)、`user_can_read_notebook`(读权)、
   `is_member`(成员探测)。
-* `postgres/ask_state_store.py::guarded_ask_detail`:先锁 notebook root，再用
+* `postgres/read_authority_lock.py::lock_reader_access_on`(被
+  `ask_state_store.py::guarded_ask_detail` 与 `report_store.py::guarded_report_detail`
+  共用的唯一执行顺序):调用方先锁 notebook root，再用
   `MEMBER_PROBE_FOR_SHARE_SQL` 或本文件的 direct/group grant-chain probe 锁住一条
   当前有效的 self-service 读权链，直到详情响应对象组装完。
 * `postgres/memory_store.py`:`_read_access_clause`、`_answer_save_scope_exists`、
@@ -355,8 +357,9 @@ def admin_grant_group_chain_params(notebook_id: str, user_id: str) -> tuple[str,
     return (user_id, notebook_id)
 
 
-# Ask admin-detail reads return answer/trace content, so their self-service
-# authority must remain valid through response projection. These two probes
+# Ask and report admin-detail reads return answer/trace or report-body content,
+# so their self-service authority must remain valid through response
+# projection (executed in one order by ``read_authority_lock``). These two probes
 # lock one complete currently-valid grant chain. Direct-user/everyone grants
 # have one row; group grants require both the edge and the membership row.
 READ_GRANT_DIRECT_FOR_SHARE_SQL = (

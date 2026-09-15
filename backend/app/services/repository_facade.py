@@ -4157,6 +4157,14 @@ class RepositoryFacade:
     def get_report(self, notebook_id: str, report_id: str) -> dict:
         return self._runtime.report_store.get_report(notebook_id, report_id)
 
+    def guarded_report_detail(
+        self, report_id: str, *, actor_id: str, reader_id: "str | None"
+    ):
+        """Keep the notebook deletion fence through API response assembly."""
+        return self._runtime.report_store.guarded_report_detail(
+            report_id, actor_id=actor_id, reader_id=reader_id
+        )
+
     def list_reports(self, notebook_id: str, *, created_by: str | None) -> list:
         return self._runtime.report_store.list_reports(
             notebook_id, created_by=created_by
