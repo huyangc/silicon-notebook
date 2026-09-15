@@ -169,7 +169,10 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
       knowledgeContextRequestsRef.current.clear();
       await loadKnowledgeFor(owner, { kind: nextKind, status: "all", page: 0 });
     } else if (knowledgeRef.current[currentKind] == null) {
-      await loadKnowledgeFor(owner, { kind: currentKind, status: "all", page: 0 });
+      // 类型还在时状态筛选不会被复位(复位只发生在上面换类型那一支),所以重拉必须按当前
+      // 筛选:作废之后(删除来源 / 删除知识图谱)重新进入,下拉仍写着「待审核」,列表却按
+      // 「全部」拉回来,两者当着用户的面对不上。
+      await loadKnowledgeFor(owner, { kind: currentKind, status: statusFilterRef.current, page: 0 });
     }
   };
 
@@ -216,6 +219,9 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
     knowledgeRequestRef.current += 1;
     typeRequestRef.current += 1;
     duplicateRequestRef.current += 1;
+    // 引用同步清空:紧跟着的 enterKnowledge 判「这一类还没加载」读的是这个 ref,等不到
+    // 下一次渲染——类型请求很快时,它会看到作废前的旧行而跳过重拉。
+    knowledgeRef.current = EMPTY_KNOWLEDGE;
     setKnowledge(EMPTY_KNOWLEDGE);
     setKnowledgeTypes([]);
     setKnowledgeTotal({});

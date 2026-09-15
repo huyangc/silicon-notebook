@@ -61,6 +61,7 @@ import {
   KG_DELETE_UNOBSERVED,
   kgDeletePollOutcome,
   kgDeleteTerminalSettlement,
+  kgDeleteUnobservedOutcome,
   type KgDeleteResult,
 } from "../features/kg-maintenance/kg-delete-status";
 import {
@@ -894,11 +895,19 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
   // 不走它:选中的对象此刻恰恰是被删掉的那批。笔记本摘要(kg_ready / kg_build)与 KG 领域
   // 外那几块(来源徽标、Knowledge 浏览器、看板状态)也读着旧事实——三件并行,各自吞自己的
   // 错,谁都不拖住释放忙碌位。调用方已核对过 owner 仍可见。
+  // 图谱本身的读取同样要作废在途的那几条:删除期间「范围」下拉照常可用,一条比这次重拉
+  // 更慢的范围响应(或恰在此刻发出的打开请求)会在刷新之后把删了一半的图重新画上去。所以
+  // 范围与打开两个序号都 +1(它们各自的提交本来就核对序号),重拉图谱自己也占一个范围序号:
+  // 用户在重拉途中换了范围,落地的是换范围那一次。被作废的范围请求不会再清自己的忙碌位,
+  // 这里代它清掉。
   const refreshAfterDelete = async (owner: KgWorkspaceOwner) => {
     const guard = () => owns(owner);
     clearSearchTimer();
     graphSearchRequestRef.current += 1;
     graphNodeRequestRef.current += 1;
+    graphOpenRequestRef.current += 1;
+    const rangeRequestId = ++graphRangeRequestRef.current;
+    setRangeBusy(false);
     setSearch("");
     setSearchHits([]);
     setSearchBusy(false);
@@ -917,9 +926,11 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
           fetchUnifiedKgStatus(owner.notebookId),
         ]);
         if (!owns(owner)) return;
-        setUnifiedGraph(graph);
+        // 待确认合并与合并状态不随范围变化,照落;只有图谱本身让位给更晚的范围请求。
         setPendingMerges(filterPendingMerges(owner, merges));
         setUnifiedStatus(status);
+        if (rangeRequestId !== graphRangeRequestRef.current) return;
+        setUnifiedGraph(graph);
         setVizBuilding(Boolean(graph.viz_building));
       } catch (error) {
         publishError(owner, error);
@@ -1268,8 +1279,10 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
   // 删除的有界轮询,逐项镜像上面那条 relink 轮询(单飞、身份感知、提交窗口内不结算、
   // job_id 连续对不上才收工、先刷新后释放)。差别在结算,且因为这是破坏性动作而更严:
   // 终态回执只有 job_id 正是本标签页提交成功或亲眼见过在跑的那一个,才以它的名义报数字
-  // (kgDeleteTerminalSettlement)。一个都没期望过就静默收工——不刷新、不提示、不覆盖按钮
-  // 旁已有的那一行;期望过却对不上才说不知道。结果与提示在刷新完成之后才落地,让「已删除
+  // (kgDeleteTerminalSettlement)。一个都没期望过就静默收工——不报数字、不提示、不覆盖按钮
+  // 旁已有的那一行;只有回执本身证明确有一次删除跑完(非空 job_id 的 succeeded / failed)
+  // 才照删除后的样子刷新,idle 是纯释放(kgDeleteUnobservedOutcome)。期望过却对不上才说
+  // 不知道。结果与提示在刷新完成之后才落地,让「已删除
   // N 个」出现时画布与来源列表已经是删除后的样子。
   useEffect(() => {
     const owner = currentOwner();
@@ -1328,7 +1341,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
         window.clearInterval(timer);
         await settle(settlement === "report"
           ? outcome
-          : settlement === "mismatch" ? KG_DELETE_JOB_MISMATCH : KG_DELETE_UNOBSERVED);
+          : settlement === "mismatch" ? KG_DELETE_JOB_MISMATCH : kgDeleteUnobservedOutcome(status));
       } catch { /* transient status error; retain the claim */ }
       finally { inFlight = false; }
     }, KG_MAINTENANCE_POLL_MS);

@@ -96,12 +96,29 @@ export const KG_DELETE_JOB_MISMATCH: KgDeletePollOutcome = UNKNOWN_OUTCOME;
 
 /**
  * 本标签页既没有提交成功、也没有亲眼见过在跑的删除(例如 409 之后领养探测失败,或探测
- * 在切换笔记本期间落空)时的收工回执:**静默**。只放掉忙碌位——不刷新(删除之后的刷新
- * 会清掉搜索与选中,那是替一次并未发生的删除收拾现场),不弹提示,也不覆盖按钮旁已有的
- * 那一行(例如服务端点名占用者的 409 文案)。同进程里更早一次删除留下的 `succeeded`
- * 回执就是在这里被拦下的:它的数字与这次点击无关。
+ * 在切换笔记本期间落空)、且回执也证明不了有删除跑过(idle、或到了轮询上限)时的收工回执:
+ * **静默**。只放掉忙碌位——不刷新(删除之后的刷新会清掉搜索与选中,那是替一次并未发生的
+ * 删除收拾现场),不弹提示,也不覆盖按钮旁已有的那一行(例如服务端点名占用者的 409 文案)。
+ * 同进程里更早一次删除留下的 `succeeded` 回执也不报数字:它与这次点击无关(但它证明图谱
+ * 变过,所以走下面的 `KG_DELETE_UNOBSERVED_RAN` 刷新)。
  */
 export const KG_DELETE_UNOBSERVED: KgDeletePollOutcome = { done: true, refresh: false, result: null };
+
+/**
+ * 没期望过、但回执本身证明**确有一次删除跑完了**(非空 job_id 且 succeeded / failed,例如
+ * 另一个标签页发起的):图谱确实变了,所以照删除后的样子刷新(清搜索与选中、重拉图谱与
+ * 依赖),其余仍守静默规则——不报数字、不弹成功提示、不覆盖按钮旁已有的那一行。
+ */
+export const KG_DELETE_UNOBSERVED_RAN: KgDeletePollOutcome = { done: true, refresh: true, result: null };
+
+/** 没期望过的终态回执 → 纯释放,还是释放并刷新(见上两条)。idle 的空 job_id 永远是纯释放。 */
+export function kgDeleteUnobservedOutcome(
+  status: Pick<KgDeleteStatus, "job_id" | "status">,
+): KgDeletePollOutcome {
+  return status.job_id && (status.status === "succeeded" || status.status === "failed")
+    ? KG_DELETE_UNOBSERVED_RAN
+    : KG_DELETE_UNOBSERVED;
+}
 
 /**
  * 一条已结束的回执能不能以它自己的名义结算:
