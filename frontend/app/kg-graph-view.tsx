@@ -531,6 +531,7 @@ export function KgGraphView({
             total={mergesPage.total}
             onPage={mergesPage.setPage}
             label="待确认合并分页"
+            compact
           /></>}
         </div>
       </aside>

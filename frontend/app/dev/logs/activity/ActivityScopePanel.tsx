@@ -192,6 +192,7 @@ export function ActivityScopePanel({
           total={notebookPage.total}
           onPage={notebookPage.setPage}
           label="笔记本清单分页"
+          compact
         />
       </div>
     </div>
