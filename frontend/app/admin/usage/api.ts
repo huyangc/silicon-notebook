@@ -122,17 +122,27 @@ export async function fetchAdminUsers(): Promise<AdminUserUsage[]> {
   return res.json();
 }
 
+export type AnalysisIssuePage = {
+  items: AnalysisIssue[];
+  /** 同一组筛选条件下的全部匹配数——翻页控件据此算页数。 */
+  total: number;
+};
+
 export async function fetchAnalysisIssues(filters: {
   ownerId?: string;
   status?: "open" | "resolved" | "";
   category?: "source_parse" | "spreadsheet_analysis" | "model_output" | "";
   modelArea?: ModelAnalysisArea | "";
-} = {}): Promise<AnalysisIssue[]> {
+  offset?: number;
+  limit?: number;
+} = {}): Promise<AnalysisIssuePage> {
   const params = new URLSearchParams();
   if (filters.ownerId) params.set("owner_id", filters.ownerId);
   if (filters.status) params.set("status", filters.status);
   if (filters.category) params.set("category", filters.category);
   if (filters.modelArea) params.set("model_area", filters.modelArea);
+  if (filters.offset) params.set("offset", String(filters.offset));
+  if (filters.limit) params.set("limit", String(filters.limit));
   const query = params.toString();
   const res = await performApiRequest(
     `/admin/analysis-issues${query ? `?${query}` : ""}`,
@@ -140,8 +150,7 @@ export async function fetchAnalysisIssues(filters: {
   );
   if (res.status === 403) await throwForbiddenSentinel(res);
   if (!res.ok) await throwHumanizedHttpError(res, "admin");
-  const data = (await res.json()) as { items: AnalysisIssue[] };
-  return data.items;
+  return res.json() as Promise<AnalysisIssuePage>;
 }
 
 export async function fetchAnalysisIssueModelArtifact(

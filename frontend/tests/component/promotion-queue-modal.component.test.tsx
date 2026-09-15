@@ -185,6 +185,88 @@ test("「×」报 button、点背景报 backdrop、点卡片内部不关", async
   expect(onRequestClose).toHaveBeenLastCalledWith("backdrop");
 });
 
+// 待审核贡献分页：接口一次性整份返回队列（GET /promotion-queue 不分页），界面每页 20 条。
+function manyCandidates(count: number): PromotionCandidate[] {
+  return Array.from({ length: count }, (_, index) =>
+    candidate({ id: `cand-${String(index + 1).padStart(2, "0")}`, payload: { name: `候选${String(index + 1).padStart(2, "0")}` } }));
+}
+
+test("候选超过一页时分页展示，翻页后显示下一批候选", async () => {
+  const user = userEvent.setup();
+  render(
+    <PromotionQueueModal
+      candidates={manyCandidates(25)}
+      busy={false}
+      lookupNotebookName={noName}
+      onRequestClose={noop}
+      onApprove={noop}
+      onReject={noop}
+    />,
+  );
+
+  expect(screen.getAllByRole("heading", { level: 3 })).toHaveLength(20);
+  expect(screen.getByRole("heading", { name: "候选01" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "候选21" })).not.toBeInTheDocument();
+  const pager = screen.getByRole("navigation", { name: "待审核贡献分页" });
+  expect(within(pager).getByText("1–20 / 25")).toBeInTheDocument();
+
+  await user.click(within(pager).getByRole("button", { name: "下一页" }));
+  expect(screen.getAllByRole("heading", { level: 3 })).toHaveLength(5);
+  expect(screen.getByRole("heading", { name: "候选21" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "候选25" })).toBeInTheDocument();
+  expect(within(pager).getByRole("button", { name: "下一页" })).toBeDisabled();
+});
+
+test("一页放得下时不显示待审核贡献分页控件", () => {
+  render(
+    <PromotionQueueModal
+      candidates={manyCandidates(20)}
+      busy={false}
+      lookupNotebookName={noName}
+      onRequestClose={noop}
+      onApprove={noop}
+      onReject={noop}
+    />,
+  );
+
+  expect(screen.getAllByRole("heading", { level: 3 })).toHaveLength(20);
+  expect(screen.queryByRole("navigation", { name: "待审核贡献分页" })).not.toBeInTheDocument();
+});
+
+test("处理掉最后一页唯一的候选后退回上一页，而不是停在空页", async () => {
+  const user = userEvent.setup();
+  const { rerender } = render(
+    <PromotionQueueModal
+      candidates={manyCandidates(21)}
+      busy={false}
+      lookupNotebookName={noName}
+      onRequestClose={noop}
+      onApprove={noop}
+      onReject={noop}
+    />,
+  );
+
+  const pager = screen.getByRole("navigation", { name: "待审核贡献分页" });
+  await user.click(within(pager).getByRole("button", { name: "下一页" }));
+  expect(screen.getByRole("heading", { name: "候选21" })).toBeInTheDocument();
+
+  // 模拟这条候选被批准/拒绝后从队列消失：调用方按新队列重渲染（弹窗本身不发请求）。
+  rerender(
+    <PromotionQueueModal
+      candidates={manyCandidates(20)}
+      busy={false}
+      lookupNotebookName={noName}
+      onRequestClose={noop}
+      onApprove={noop}
+      onReject={noop}
+    />,
+  );
+
+  await screen.findByRole("heading", { name: "候选20" });
+  expect(screen.getAllByRole("heading", { level: 3 })).toHaveLength(20);
+  expect(screen.queryByRole("navigation", { name: "待审核贡献分页" })).not.toBeInTheDocument();
+});
+
 test("被别的弹窗盖住时整体退出交互树（aria-hidden + inert）", () => {
   const { container, rerender } = render(
     <PromotionQueueModal

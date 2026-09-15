@@ -271,27 +271,43 @@ test("两个只读入口都由 notebook-reader-actions 提供,page 不自己再�
   );
 });
 
-test("笔记本列表有独立的「群组」分区,且那一区的角色列不写「所有者」", () => {
+test("笔记本列表有独立的「群组」分区,且那一区的角色列不写「所有者」", async () => {
   assert.deepEqual(
     importsFrom(page, "./group-api").map((item) => item.imported).sort(),
     [
       "GroupPageTab",
-      "grantedViaLabel",
       "groupsHash",
-      "isGroupGranted",
       "joinGroupInvite",
       "parseGroupInviteToken",
       "parseGroupsHash",
       "partitionByGrant",
     ],
   );
-  const lists = jsxElements(page, "NotebookList");
-  assert.equal(lists.length, 2, "列表视图应当分成两段:自有/只读共享 与 群组");
-  const entries = lists.map((element) => element.bindings.entries);
+  // 分页改造把两个分区的卡片/列表渲染抽进了 NotebookCollectionSection(page.tsx 是
+  // Next.js App Router 的路由文件,不能有除 default 外的具名导出,组件测试要渲染它
+  // 就只能挪出去——见 notebook-collection-section.tsx 开头的说明)。「两个分区各自
+  // 独立」这条不变量现在得跨两个文件验证:
+  //   ① page.tsx 里 NotebookCollectionSection 恰好用了两次,entries 分别指向
+  //      personal/group,group 那次带 roleText="群组成员"(grantedViaLabel/
+  //      isGroupGranted 也跟着搬走了,不再在 page.tsx 的导入列表里)。
+  //   ② notebook-collection-section.tsx 内部把 roleText 原样转给 NotebookList,
+  //      否则①传对了也到不了真正渲染角色列的地方。
+  const sections = jsxElements(page, "NotebookCollectionSection");
+  assert.equal(sections.length, 2, "笔记本集合应当分成两段:自有/只读共享 与 群组");
+  const entries = sections.map((element) => element.bindings.entries);
   assert.ok(entries.includes("notebookPartition.personal"));
   assert.ok(entries.includes("notebookPartition.group"));
-  const groupList = lists.find((element) => element.bindings.entries === "notebookPartition.group");
-  assert.equal(groupList.attributes.roleText, "群组成员");
+  const groupSection = sections.find((element) => element.bindings.entries === "notebookPartition.group");
+  assert.equal(groupSection.attributes.roleText, "群组成员");
+
+  const collectionSectionModule = await parseModule("notebook-collection-section.tsx");
+  const lists = jsxElements(collectionSectionModule, "NotebookList");
+  assert.equal(lists.length, 1, "NotebookCollectionSection 内部应当只有一处 NotebookList");
+  assert.equal(
+    lists[0].bindings.roleText, "roleText",
+    "NotebookCollectionSection 没有把 roleText 原样转给 NotebookList —— "
+    + "「群组成员」传对了也显示不出来",
+  );
 });
 
 test("邀请兑换成功后集合刷新失败也必须进入群组,不能误报兑换失败", () => {

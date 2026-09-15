@@ -1086,6 +1086,34 @@ def test_issue_archive_resolves_redacts_and_expires(tmp_path):
     assert not (store.root / "issues" / "redacted").exists()
 
 
+def test_issue_pages_reach_every_match_and_report_the_filtered_total(tmp_path):
+    store = AnalysisArtifactStore(tmp_path, retention_days=30)
+    for index in range(5):
+        store.record_issue(
+            notebook_id=f"nb-{index}",
+            notebook_name="Notebook",
+            owner_id="user-1" if index != 4 else "user-2",
+            source_id=f"src-{index}",
+            source_title=f"Source {index}",
+            file_name=f"source-{index}.pdf",
+            source_type="pdf",
+            category="source_parse",
+            code="SOURCE_PARSE_FAILED",
+            summary="safe",
+            occurred_at=f"2026-08-29T00:0{index}:00+00:00",
+        )
+    now = datetime(2026, 8, 30, tzinfo=timezone.utc)
+
+    first, total = store.page_issues(owner_id="user-1", offset=0, limit=3, now=now)
+    second, second_total = store.page_issues(owner_id="user-1", offset=3, limit=3, now=now)
+
+    assert total == second_total == 4
+    assert [item["source_id"] for item in first] == ["src-3", "src-2", "src-1"]
+    assert [item["source_id"] for item in second] == ["src-0"]
+    assert store.page_issues(owner_id="user-1", offset=9, limit=3, now=now) == ([], 4)
+    assert store.list_issues(owner_id="user-1", limit=3, now=now) == first
+
+
 def test_model_output_issue_keeps_content_out_of_list_and_serves_one_artifact(
     tmp_path,
 ):

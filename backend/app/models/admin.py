@@ -319,6 +319,8 @@ class AnalysisIssue(BaseModel):
 
 class AnalysisIssueResponse(BaseModel):
     items: List[AnalysisIssue] = Field(default_factory=list)
+    # Full match count under the same filters, so a client can page past `limit`.
+    total: int = 0
 
 
 class AnalysisIssueModelMessage(BaseModel):

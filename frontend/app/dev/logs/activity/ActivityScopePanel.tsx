@@ -3,8 +3,11 @@
 // 纯展示组件——取数、竞态与选中态都在 ActivityView 里。
 
 import { ChevronDown, ChevronRight } from "lucide-react";
+import { useEffect } from "react";
 
 import type { AdminUserNotebook } from "../../../admin/usage/notebooks.ts";
+import { Pagination } from "../../../Pagination";
+import { useClientPagination } from "../../../use-client-pagination.ts";
 import type { SourceSummary } from "../../../workspace-model.ts";
 import { activityStatusLabel, activityTitle, activityTone } from "./format.ts";
 import { SourceAnomalies, toActivitySource } from "./source-view.tsx";
@@ -16,9 +19,16 @@ export type SourceListState = {
   loading: boolean;
   /** 已经过 toUserMessage 的人话文案（不是后端诊断原文），字段名刻意避开 `error`。 */
   failure: string;
+  /** 「加载更多来源」进行中：首页已在屏上，只禁用那颗按钮，不清空已取回的清单。 */
+  loadingMore?: boolean;
+  /** 追加页自己的失败文案；与首页失败分开——已经列出来的来源不该因此消失。 */
+  moreFailure?: string;
 };
 
 export const ALL_NOTEBOOKS = "";
+
+/** 笔记本清单整份取回(一个用户的笔记本数没有上限),左栏每页显示的条数。 */
+const SCOPE_NOTEBOOK_PAGE_SIZE = 20;
 
 export function ActivityScopePanel({
   notebooks,
@@ -31,6 +41,7 @@ export function ActivityScopePanel({
   onSelectNotebook,
   expanded,
   onToggleExpand,
+  onLoadMoreSources,
   sources,
   selectedKey,
   onSelectSource,
@@ -52,6 +63,8 @@ export function ActivityScopePanel({
   onSelectNotebook: (id: string) => void;
   expanded: string[];
   onToggleExpand: (id: string) => void;
+  /** 取该笔记本来源清单的下一页，追加在已显示的来源之后。 */
+  onLoadMoreSources: (id: string) => void;
   sources: Record<string, SourceListState>;
   selectedKey: string;
   /** ⚠ 只交出 `toActivitySource()` 折好的条目，**不再**附带服务端算好的
@@ -59,6 +72,16 @@ export function ActivityScopePanel({
    *  多一个覆盖口就是多一种时间格式（见 source-view.tsx 顶部说明）。 */
   onSelectSource: (source: ActivitySource) => void;
 }) {
+  const notebookPage = useClientPagination(notebooks, SCOPE_NOTEBOOK_PAGE_SIZE);
+  // 选中的笔记本(包括解析问题深链直接选中的那个)要落在当前页上;只跟随选中项与清单
+  // 取回完成,不跟随用户自己翻页。换用户时清单先清空,页码随之夹紧回第一页。
+  const { setPage: setNotebookPage } = notebookPage;
+  const notebooksLoaded = notebooks.length > 0;
+  useEffect(() => {
+    const index = notebooks.findIndex((notebook) => notebook.id === notebookId);
+    if (index >= 0) setNotebookPage(Math.floor(index / SCOPE_NOTEBOOK_PAGE_SIZE));
+  }, [notebookId, notebooksLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <div className="activity-scope">
       <div className="activity-col-head">范围</div>
@@ -82,7 +105,7 @@ export function ActivityScopePanel({
         {!loading && !failure && !identityErrored && notebooks.length === 0 ? (
           <div className="empty">这位用户还没有建过笔记本</div>
         ) : null}
-        {notebooks.map((notebook) => {
+        {notebookPage.pageItems.map((notebook) => {
           const open = expanded.includes(notebook.id);
           const list = sources[notebook.id];
           return (
@@ -142,9 +165,20 @@ export function ActivityScopePanel({
                       </div>
                     );
                   })}
-                  {list && list.items.length < list.total ? (
+                  {list && !list.loading && !list.failure && list.items.length < list.total ? (
                     <div className="activity-src-more">
-                      已显示 {list.items.length} / {list.total} 个来源
+                      <span>已显示 {list.items.length} / {list.total} 个来源</span>
+                      <button
+                        className="loadmore"
+                        disabled={list.loadingMore}
+                        onClick={() => onLoadMoreSources(notebook.id)}
+                        type="button"
+                      >
+                        {list.loadingMore ? "加载中…" : "加载更多来源"}
+                      </button>
+                      {list.moreFailure ? (
+                        <span className="activity-src-error" role="alert">{list.moreFailure}</span>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
@@ -152,6 +186,13 @@ export function ActivityScopePanel({
             </div>
           );
         })}
+        <Pagination
+          page={notebookPage.page}
+          pageSize={SCOPE_NOTEBOOK_PAGE_SIZE}
+          total={notebookPage.total}
+          onPage={notebookPage.setPage}
+          label="笔记本清单分页"
+        />
       </div>
     </div>
   );

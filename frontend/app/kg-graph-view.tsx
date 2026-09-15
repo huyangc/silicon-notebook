@@ -9,7 +9,9 @@ import { KgEvidenceList } from "./kg-evidence-list";
 import { fieldLabel, KgOccurrenceCard, KgProcedureStepCard, kgNodeName } from "./kg-object-cards";
 import { KG_TYPE_STYLE, KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import { KG_RANGE_STEPS } from "./kg-workspace-model.ts";
+import { Pagination } from "./Pagination";
 import { formatRelativeTime } from "./relative-time.ts";
+import { useClientPagination } from "./use-client-pagination.ts";
 import {
   describeScaleIndex,
   queuedScheduleHint,
@@ -65,6 +67,13 @@ const RELATION_LABELS: Record<string, string> = {
 function relationLabel(edgeType: string): string {
   return label(RELATION_LABELS, edgeType, "关联");
 }
+
+// 三份清单接口一次性整份返回(待确认合并、相邻关系、出处此前各自被硬 slice 到
+// 24/10 条,超出部分静默丢弃),分页只发生在界面。
+const KG_PENDING_MERGE_PAGE_SIZE = 20;
+const KG_RELATION_PAGE_SIZE = 20;
+const KG_OCCURRENCE_PAGE_SIZE = 10;
+const NO_OCCURRENCES: never[] = [];
 
 function truncateKgLabel(label: string, max = 34): string {
   return label.length > max ? `${label.slice(0, max - 1)}…` : label;
@@ -306,6 +315,15 @@ export function KgGraphView({
   onSelectOverviewNode: (nodeId: string) => void;
   children?: ReactNode;
 }) {
+  const mergesPage = useClientPagination(kgGraph.pendingMerges, KG_PENDING_MERGE_PAGE_SIZE);
+  // 相邻关系 / 出处都是「选中节点」的详情,resetKey 用选中节点 id:换一个节点必须
+  // 回到第一页,不然新节点的详情会从上一个节点翻到的那一页开始显示。
+  const relationsPage = useClientPagination(selectedKgEdges, KG_RELATION_PAGE_SIZE, selectedKgNode?.id);
+  const occurrencesPage = useClientPagination(
+    kgGraph.nodeContext?.occurrences ?? NO_OCCURRENCES,
+    KG_OCCURRENCE_PAGE_SIZE,
+    selectedKgNode?.id,
+  );
   return (
   <section className="kg-view" role="dialog" aria-modal="true">
     <div className="kg-view-header">
@@ -499,7 +517,7 @@ export function KgGraphView({
               </button>
             </>
           )}
-          {kgGraph.pendingMerges.length === 0 ? <p className="tool-hint">无</p> : kgGraph.pendingMerges.map((m) => (
+          {kgGraph.pendingMerges.length === 0 ? <p className="tool-hint">无</p> : <>{mergesPage.pageItems.map((m) => (
             <div className="kg-merge-row" key={m.id}>
               <span>{m.canonical_a.replace(/^K-/, "")} ↔ {m.canonical_b.replace(/^K-/, "")} <em>({m.score.toFixed(2)})</em></span>
               {!readOnlyWorkspace && <span className="kg-merge-actions">
@@ -514,6 +532,13 @@ export function KgGraphView({
               </span>}
             </div>
           ))}
+          <Pagination
+            page={mergesPage.page}
+            pageSize={KG_PENDING_MERGE_PAGE_SIZE}
+            total={mergesPage.total}
+            onPage={mergesPage.setPage}
+            label="待确认合并分页"
+          /></>}
         </div>
       </aside>
       <div className="kg-canvas" ref={kgCanvasRef}>
@@ -606,7 +631,7 @@ export function KgGraphView({
               {selectedKgEdges.length > 0 && (
                 <>
                   <h4>相邻关系</h4>
-                  {selectedKgEdges.slice(0, 24).map((edge, index) => (
+                  {relationsPage.pageItems.map((edge, index) => (
                     <div className="kg-relation-row" key={`${edge.source_object_id}-${edge.target_object_id}-${index}`}>
                       <span className="kg-relation-node"><KgTypeMark type={edge.sourceType} /><span>{truncateKgLabel(edge.sourceName, 28)}</span></span>
                       {edge.source_count && edge.source_count >= 2 ? (
@@ -620,6 +645,13 @@ export function KgGraphView({
                       <span className="kg-relation-node"><KgTypeMark type={edge.targetType} /><span>{truncateKgLabel(edge.targetName, 28)}</span></span>
                     </div>
                   ))}
+                  <Pagination
+                    page={relationsPage.page}
+                    pageSize={KG_RELATION_PAGE_SIZE}
+                    total={relationsPage.total}
+                    onPage={relationsPage.setPage}
+                    label="相邻关系分页"
+                  />
                 </>
               )}
               {kgGraph.nodeContext?.definition && (<><h4>定义</h4><p className="kg-text-card">{kgGraph.nodeContext.definition}</p></>)}
@@ -666,9 +698,21 @@ export function KgGraphView({
                 </>
               )}
               {!kgGraph.conceptDetail && kgGraph.nodeContext && (kgGraph.nodeContext.occurrences ?? []).length > 0 && (
-                <><h4>出处</h4>{(kgGraph.nodeContext.occurrences ?? []).slice(0, 10).map((o, i) => (
-                  <KgOccurrenceCard occurrence={o} index={i} key={`${o.source_title || o.source_id}-${i}`} />
-                ))}</>
+                <>
+                  <h4>出处</h4>
+                  {/* 序号接着前面的页往下数:第 2 页第一条是「11」,不是又从「1」开始。 */}
+                  {occurrencesPage.pageItems.map((o, i) => {
+                    const index = occurrencesPage.page * KG_OCCURRENCE_PAGE_SIZE + i;
+                    return <KgOccurrenceCard occurrence={o} index={index} key={`${o.source_title || o.source_id}-${index}`} />;
+                  })}
+                  <Pagination
+                    page={occurrencesPage.page}
+                    pageSize={KG_OCCURRENCE_PAGE_SIZE}
+                    total={occurrencesPage.total}
+                    onPage={occurrencesPage.setPage}
+                    label="出处分页"
+                  />
+                </>
               )}
             </div>
           )}

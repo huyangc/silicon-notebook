@@ -72,6 +72,8 @@ import { requestBlob } from "./api-client.ts";
 import { fetchModelServiceStatus } from "./model-services.ts";
 import { modeLabel } from "./ask-modes.ts";
 import { ReasoningTracePanel } from "./answer-panel.tsx";
+import { Pagination } from "./Pagination";
+import { useClientPagination } from "./use-client-pagination.ts";
 import { useFloatingWindow } from "./use-floating-window.ts";
 import {
   ROLE_LABELS,
@@ -4114,6 +4116,10 @@ export function KnowhowPanel({
 // Layer 1 — 表列表
 // ---------------------------------------------------------------------------
 
+/** Knowhow 表卡片清单每页条数。接口一次性返回整份清单(GET /notebooks/{id}/knowhow
+ * 不分页),分页只发生在界面。 */
+const KNOWHOW_TABLE_PAGE_SIZE = 24;
+
 function KnowhowTableList({
   tables,
   hasUnfilteredTables,
@@ -4139,6 +4145,7 @@ function KnowhowTableList({
   onImportClick: () => void;
   onCreateClick: () => void;
 }) {
+  const tablePage = useClientPagination(tables, KNOWHOW_TABLE_PAGE_SIZE, healthFilter);
   return (
     <>
       <div className="knowhow-toolbar">
@@ -4185,21 +4192,30 @@ function KnowhowTableList({
           )}
         </div>
       ) : (
-        <div className="knowhow-table-cards">
-          {tables.map((table) => (
-            <button
-              type="button"
-              key={table.id}
-              className="knowhow-table-card"
-              aria-label={`打开表格：${table.title}`}
-              onClick={() => onOpen(table.id)}
-            >
-              <strong title={table.title}>{table.title}</strong>
-              {table.description && <p>{table.description}</p>}
-              <span className="knowhow-table-card-meta">{table.rowCount} 行</span>
-            </button>
-          ))}
-        </div>
+        <>
+          <div className="knowhow-table-cards">
+            {tablePage.pageItems.map((table) => (
+              <button
+                type="button"
+                key={table.id}
+                className="knowhow-table-card"
+                aria-label={`打开表格：${table.title}`}
+                onClick={() => onOpen(table.id)}
+              >
+                <strong title={table.title}>{table.title}</strong>
+                {table.description && <p>{table.description}</p>}
+                <span className="knowhow-table-card-meta">{table.rowCount} 行</span>
+              </button>
+            ))}
+          </div>
+          <Pagination
+            page={tablePage.page}
+            pageSize={KNOWHOW_TABLE_PAGE_SIZE}
+            total={tablePage.total}
+            onPage={tablePage.setPage}
+            label="Knowhow 表分页"
+          />
+        </>
       )}
     </>
   );

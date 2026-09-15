@@ -1,4 +1,5 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 
 vi.mock("../../app/waiting-wish-carousel", () => ({
@@ -6,6 +7,7 @@ vi.mock("../../app/waiting-wish-carousel", () => ({
 }));
 
 import { downloadReportArchive, ReportsPanel, type ReportDetailT } from "../../app/report-view";
+import type { ReportSummaryT } from "../../app/report-model";
 import { reportWorkspaceFixture } from "./report-workspace-fixture";
 
 afterEach(cleanup);
@@ -109,4 +111,105 @@ test("深度报告生成等待态挂载许愿轮播，终态不挂载", () => {
     />,
   );
   expect(screen.queryByLabelText("测试许愿轮播")).not.toBeInTheDocument();
+});
+
+// 深度报告清单分页：接口一次性整份返回（GET /notebooks/{id}/reports 不分页），
+// 界面每页 20 条。
+function reportSummaries(count: number): ReportSummaryT[] {
+  return Array.from({ length: count }, (_, index) => ({
+    id: `report-${String(index + 1).padStart(2, "0")}`,
+    question: `问题${String(index + 1).padStart(2, "0")}`,
+    status: "done",
+    progress: "",
+    section_count: 2,
+    created_at: "2026-08-01T00:00:00Z",
+    created_by: "user-1",
+  }));
+}
+
+function reportQuestions(): string[] {
+  return Array.from(document.querySelectorAll(".report-list .chat-session-card-main > span"))
+    .map((node) => node.textContent ?? "");
+}
+
+function reportDetail(summary: ReportSummaryT): ReportDetailT {
+  return {
+    ...summary,
+    outline: [],
+    sections: [],
+    section_status: [],
+    gaps: [],
+    content_md: "",
+    references: [],
+    error: "",
+    understanding: {},
+  };
+}
+
+test("深度报告超过一页时分页展示，翻页后显示下一批报告", async () => {
+  const user = userEvent.setup();
+  render(
+    <ReportsPanel
+      notebookId="nb-1"
+      workspace={reportWorkspaceFixture({ reports: reportSummaries(25) })}
+      setToast={vi.fn()}
+    />,
+  );
+
+  expect(reportQuestions()).toHaveLength(20);
+  expect(reportQuestions()[0]).toBe("问题01");
+  const pager = screen.getByRole("navigation", { name: "深度报告分页" });
+  expect(within(pager).getByText("1–20 / 25")).toBeInTheDocument();
+
+  await user.click(within(pager).getByRole("button", { name: "下一页" }));
+  expect(reportQuestions()).toEqual(["问题21", "问题22", "问题23", "问题24", "问题25"]);
+  expect(within(pager).getByRole("button", { name: "下一页" })).toBeDisabled();
+});
+
+test("一页放得下时不显示深度报告分页控件", () => {
+  render(
+    <ReportsPanel
+      notebookId="nb-1"
+      workspace={reportWorkspaceFixture({ reports: reportSummaries(20) })}
+      setToast={vi.fn()}
+    />,
+  );
+
+  expect(reportQuestions()).toHaveLength(20);
+  expect(screen.queryByRole("navigation", { name: "深度报告分页" })).not.toBeInTheDocument();
+});
+
+test("打开落在后面一页的报告、再返回列表时，列表自动翻到它所在的页", async () => {
+  const summaries = reportSummaries(25);
+  const target = summaries[22]; // report-23，落在第二页（21–25）
+  const { rerender } = render(
+    <ReportsPanel
+      notebookId="nb-1"
+      workspace={reportWorkspaceFixture({ reports: summaries })}
+      setToast={vi.fn()}
+    />,
+  );
+  expect(reportQuestions()[0]).toBe("问题01");
+
+  // 打开该报告：active 变为这份报告（详情视图取代列表，列表分页状态在背后跟随）。
+  rerender(
+    <ReportsPanel
+      notebookId="nb-1"
+      workspace={reportWorkspaceFixture({ reports: summaries, active: reportDetail(target) })}
+      setToast={vi.fn()}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "返回列表" })).toBeInTheDocument();
+
+  // 返回列表：active 清空，列表应当已经翻到 report-23 所在的那一页，而不是回到第一页。
+  rerender(
+    <ReportsPanel
+      notebookId="nb-1"
+      workspace={reportWorkspaceFixture({ reports: summaries, active: null })}
+      setToast={vi.fn()}
+    />,
+  );
+  await waitFor(() => expect(reportQuestions()).toContain("问题23"));
+  const pager = screen.getByRole("navigation", { name: "深度报告分页" });
+  expect(within(pager).getByText("21–25 / 25")).toBeInTheDocument();
 });

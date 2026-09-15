@@ -14,10 +14,17 @@
  */
 
 import { FloatingModalCard } from "./floating-modal-card";
+import { Pagination } from "./Pagination";
 import { PromotionCandidateActions } from "./promotion-candidate-actions";
 import type { PromotionCandidate } from "./promotion-queue";
 import { promotionReviewSections } from "./promotion-review";
+import { useClientPagination } from "./use-client-pagination.ts";
 import { label, PROMOTION_STATUS } from "./vocabulary";
+
+/** 待审核贡献清单每页条数。接口一次性返回整份队列(GET /promotion-queue 不分页),
+ * 分页只发生在界面。弹窗按 `open &&` 整体挂载/卸载(见 page.tsx),每次重新打开都是
+ * 全新实例,不需要额外的 resetKey。 */
+const PROMOTION_QUEUE_PAGE_SIZE = 20;
 
 export function PromotionQueueModal({
   candidates,
@@ -43,6 +50,7 @@ export function PromotionQueueModal({
   onApprove: (candidateId: string) => void;
   onReject: (candidateId: string) => void;
 }) {
+  const queuePage = useClientPagination(candidates, PROMOTION_QUEUE_PAGE_SIZE);
   return (
     <section
       className="utility-modal"
@@ -67,7 +75,7 @@ export function PromotionQueueModal({
             <p className="tool-hint">暂无待审核的收录申请。</p>
           ) : (
             <div className="stack">
-              {candidates.map((cand) => {
+              {queuePage.pageItems.map((cand) => {
                 const review = promotionReviewSections(cand);
                 return (
                 <article className="item" key={cand.id}>
@@ -139,6 +147,13 @@ export function PromotionQueueModal({
               })}
             </div>
           )}
+          <Pagination
+            page={queuePage.page}
+            pageSize={PROMOTION_QUEUE_PAGE_SIZE}
+            total={queuePage.total}
+            onPage={queuePage.setPage}
+            label="待审核贡献分页"
+          />
         </div>
         </>)}
       </FloatingModalCard>
