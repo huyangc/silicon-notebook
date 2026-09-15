@@ -2,6 +2,8 @@
 
 import { KgEvidenceBody } from "./kg-evidence-body";
 import { kgConfidenceLabel } from "./kg-evidence-list";
+import { Pagination } from "./Pagination";
+import { useClientPagination } from "./use-client-pagination.ts";
 import { ELEMENT_TYPE, label } from "./vocabulary";
 import type { KgOccurrence, KgProcedureStep, UnifiedConceptNode } from "./workspace-model.ts";
 
@@ -44,6 +46,36 @@ export function KgOccurrenceCard({ occurrence, index }: { occurrence: KgOccurren
         text={occurrence.element_text || occurrence.quoted_span}
       />
     </article>
+  );
+}
+
+/** 出处清单整份返回,界面每页显示的条数。 */
+const KG_OCCURRENCE_PAGE_SIZE = 10;
+
+/**
+ * 一个知识对象的出处清单 + 分页。图谱视图与知识浏览器此前各自硬截到前 10 / 前 5 条,
+ * 超出部分无从查看;两处共用这一份,序号跨页连续(第 2 页从 11 开始)。
+ * `resetKey` 给「同一个组件实例换了一个对象」的场景(图谱视图换选中节点)用。
+ */
+export function KgOccurrenceList({ occurrences, resetKey }: {
+  occurrences: readonly KgOccurrence[];
+  resetKey?: string;
+}) {
+  const { page, pageItems, total, setPage } = useClientPagination(occurrences, KG_OCCURRENCE_PAGE_SIZE, resetKey);
+  return (
+    <>
+      {pageItems.map((occurrence, offset) => {
+        const index = page * KG_OCCURRENCE_PAGE_SIZE + offset;
+        return (
+          <KgOccurrenceCard
+            occurrence={occurrence}
+            index={index}
+            key={`${occurrence.source_title || occurrence.source_id}-${index}`}
+          />
+        );
+      })}
+      <Pagination page={page} pageSize={KG_OCCURRENCE_PAGE_SIZE} total={total} onPage={setPage} label="出处分页" />
+    </>
   );
 }
 

@@ -106,13 +106,7 @@ function NotebookList({
 
 /**
  * 笔记本集合页一个分区(「我的笔记本」或「群组」)的卡片/列表渲染 + 分页。两个分区共用
- * 同一种卡片,原先靠 page.tsx 的 Home() 里 renderNotebookCard 闭包函数避免复制 JSX;
- * 抽成组件后顺带让分页状态天然独立——两次调用各自一份 useClientPagination,互不影响
- * 对方的页码。
- *
- * 单独成文件是 Next.js App Router 的硬约束:`app/page.tsx` 是路由文件,只能有
- * `default` 等少数几个白名单导出,多导出一个具名组件会让 `next build` 的类型检查
- * (`.next/types/app/page.ts`)报错——这个组件需要被组件测试直接渲染,只能挪出来。
+ * 同一种卡片(复制一份 JSX 必然分叉),各自一份页码状态,互不影响对方翻到的页。
  */
 export function NotebookCollectionSection({
   entries,
