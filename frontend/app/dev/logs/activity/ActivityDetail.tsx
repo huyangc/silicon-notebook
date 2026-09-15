@@ -207,41 +207,55 @@ function ReportDetailPane({
   now?: Date;
 }) {
   const failure = detail?.error ?? "";
-  const failed = (detail?.status ?? item.status) === "failed";
-  // 与 AskDetailPane 同一条规则:详情端点的 notebook_deleted_at 是权威——活动流条目
-  // 可能在删除笔记本与详情请求赛跑时仍描述一个存活笔记本,详情端点会在级联删除后
-  // 落到留存回落投影。
-  const retentionItem = detail?.notebook_deleted_at
+  // 详情到达后,状态徽章/深度 chip/耗时行一律以详情为准——它是权威:活动流条目是
+  // 取列表那一刻的快照,报告状态可能在那之后已经推进。详情还没到达(仍在加载/
+  // 请求失败)时退回活动流条目兜底,不能空着。notebook_deleted_at 同理是权威:
+  // 活动流条目可能在删除笔记本与详情请求赛跑时仍描述一个存活笔记本,详情端点会
+  // 在级联删除后落到留存回落投影(与 AskDetailPane 同一条规则)。
+  const displayItem: ActivityReport = detail
     ? {
         ...item,
-        notebook_name: detail.notebook_name || item.notebook_name,
-        notebook_deleted_at: detail.notebook_deleted_at,
-        retained_until: detail.retained_until || item.retained_until,
+        status: detail.status,
+        depth: detail.depth,
+        created_at: detail.created_at,
+        updated_at: detail.updated_at,
+        generation_started_at: detail.generation_started_at,
+        ...(detail.notebook_deleted_at
+          ? {
+              notebook_name: detail.notebook_name || item.notebook_name,
+              notebook_deleted_at: detail.notebook_deleted_at,
+              retained_until: detail.retained_until || item.retained_until,
+            }
+          : {}),
       }
     : item;
+  const failed = displayItem.status === "failed";
+  // 失败原因区块与下面的空态互补(空态排除 showFailure):少了这一条,「非 failed
+  // 但有 error、无正文」这种边界会两边条件都不满足,右栏空白一片而不是给出点什么。
+  const showFailure = failed && Boolean(failure);
   return (
     <div className="activity-detail-body">
       <div className="activity-detail-head">
-        <span className={`badge ${activityTone(item)}`}>{activityStatusLabel(item)}</span>
+        <span className={`badge ${activityTone(displayItem)}`}>{activityStatusLabel(displayItem)}</span>
         <span className="activity-chip">
-          {label(REPORT_DEPTH, String(item.depth), "自定义深度")}
+          {label(REPORT_DEPTH, String(displayItem.depth), "自定义深度")}
         </span>
       </div>
       <h2 className="activity-detail-title">{activityTitle(item)}</h2>
-      <RetainedActivityNotice item={retentionItem} now={now} />
+      <RetainedActivityNotice item={displayItem} now={now} />
       {/* 与活动流行上同一条规则：耗时只能来自 generation_started_at → updated_at。 */}
       <p className="activity-detail-time">
         {formatReportTiming(
-          item.status,
-          item.created_at,
-          item.updated_at,
-          item.generation_started_at,
+          displayItem.status,
+          displayItem.created_at,
+          displayItem.updated_at,
+          displayItem.generation_started_at,
           now,
         )}
       </p>
       {error ? <div className="errorbar">{error}</div> : null}
       {loading ? <div className="empty">加载中…</div> : null}
-      {!loading && !error && failed && failure ? (
+      {!loading && !error && showFailure ? (
         <div className="detail-error">
           <strong>失败原因：</strong>
           {failure}
@@ -252,11 +266,15 @@ function ReportDetailPane({
           {/* 只读排障视图:不传 notebookId/onPreviewImage——管理员不在对方笔记本的
               participant 集内,附图资产请求必 404(理由同上方 AnswerView 调用点的
               notebookId={null} 注释)。ReportMarkdown 在两者缺省时整段附图不渲染,
-              与「无图」等价,不是渲染失败。 */}
-          <ReportMarkdown markdown={detail.content_md} references={detail.references} />
+              与「无图」等价,不是渲染失败。key=detail.report_id:切换选中报告时
+              item 引用未必变(只是 detail 换了),ReportMarkdown 内部的引用选中态
+              不会跟着自动清零——不加这个 key,上一份报告点开的引用详情卡会带着
+              旧 selectedRefKey 在切到新报告后继续渲染(同 report-view.tsx 里
+              ReportsPanel::ReportMarkdown 的 key={active.id} 一个理由)。 */}
+          <ReportMarkdown key={detail.report_id} markdown={detail.content_md} references={detail.references} />
         </div>
       ) : null}
-      {!loading && !error && !detail?.content_md && !failure && !retentionItem.notebook_deleted_at ? (
+      {!loading && !error && !detail?.content_md && !showFailure && !displayItem.notebook_deleted_at ? (
         <div className="empty">这份报告还没有生成正文</div>
       ) : null}
     </div>

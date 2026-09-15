@@ -148,6 +148,13 @@
 .activity-detail-body .reasoning-trace-panel { margin-top: 14px; }
 .activity-answer { margin-top: 14px; }
 .activity-report-body { margin-top: 14px; }
+/* 与 globals.css 的 `.public-report .report-markdown` 同一条理由:引用出处段落里
+   写的是原始上传文件名,可能是一整串没有断点的长词(MinerU_markdown_…md),窄栏
+   (这里比分享页更窄——中间还夹着左右两栏)不设 overflow-wrap 会顶出卡片边框；
+   `> *` 的 min-width:0 解开 grid item 默认的 min-width:auto,否则同一段超长文本
+   会把 .activity-detail-body 连同整个右栏撑宽。 */
+.activity-report-body .report-markdown { overflow-wrap: anywhere; }
+.activity-report-body .report-markdown > * { min-width: 0; }
 /* ⚠ 这里刻意**没有**任何隐藏交互控件的规则。只读排障视图不给 AnswerView 传那些
    回调，缺省即不渲染（见 ActivityDetail.tsx 顶部注释）——用 CSS 盖住控件曾让引用
    浮层里的三颗按钮以启用态活了下来，点了没反应。样式表不是控件可用性的判据。 */

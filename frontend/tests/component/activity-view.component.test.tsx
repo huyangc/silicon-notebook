@@ -312,6 +312,70 @@ test("嵌入提问分析页时只渲染子集里的活动类型按钮，点击�
 });
 
 
+// 子集页深链:URL 的 activity_type 在子集内就直接采用。
+test("嵌入子集页时，URL activity_type 若在子集内则首个请求就用它", async () => {
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockImplementation((_userId, params) => (
+    params.activityType === "report"
+      ? Promise.resolve(page([report("r1", "分析报告")]))
+      : Promise.resolve(page([ask("ask-1", "分析问题")]))
+  ));
+  window.history.replaceState(null, "", "/admin/usage?sheet=questions&activity_type=report");
+  render(
+    <ActivityView
+      activityTypeOptions={[
+        { value: "ask", label: "问答" },
+        { value: "report", label: "深度报告" },
+      ]}
+      now={NOW}
+      scopeKey='["admin-usage-questions","user-1"]'
+      userId="user-1"
+    />,
+  );
+
+  expect(await screen.findByText("分析报告")).toBeInTheDocument();
+  expect(mocks.fetchUserActivity).toHaveBeenCalledTimes(1);
+  expect(mocks.fetchUserActivity).toHaveBeenCalledWith(
+    "user-1", expect.objectContaining({ activityType: "report" }),
+  );
+  const filter = screen.getByRole("group", { name: "按活动类型筛选" });
+  expect(within(filter).getByRole("button", { name: "深度报告" })).toHaveAttribute("aria-pressed", "true");
+  window.history.replaceState({}, "", "/dev/logs");
+});
+
+
+// 子集页深链的另一半:URL 的 activity_type 不在子集内时(这里是子集页压根不提供
+// 的 "source"),退回子集第一项,不落到「全部」——子集页本来就不给「全部」这个选项。
+test("嵌入子集页时，URL activity_type 若不在子集内则退回子集第一项", async () => {
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockImplementation((_userId, params) => (
+    params.activityType === "report"
+      ? Promise.resolve(page([report("r1", "分析报告")]))
+      : Promise.resolve(page([ask("ask-1", "分析问题")]))
+  ));
+  window.history.replaceState(null, "", "/admin/usage?sheet=questions&activity_type=source");
+  render(
+    <ActivityView
+      activityTypeOptions={[
+        { value: "ask", label: "问答" },
+        { value: "report", label: "深度报告" },
+      ]}
+      now={NOW}
+      scopeKey='["admin-usage-questions","user-1"]'
+      userId="user-1"
+    />,
+  );
+
+  expect(await screen.findByText("分析问题")).toBeInTheDocument();
+  expect(mocks.fetchUserActivity).toHaveBeenCalledWith(
+    "user-1", expect.objectContaining({ activityType: "ask" }),
+  );
+  const filter = screen.getByRole("group", { name: "按活动类型筛选" });
+  expect(within(filter).getByRole("button", { name: "问答" })).toHaveAttribute("aria-pressed", "true");
+  window.history.replaceState({}, "", "/dev/logs");
+});
+
+
 test("展开笔记本取回该库的来源清单，异常小字同样经 AnomalyBadge 渲染", async () => {
   const user = userEvent.setup();
   mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
@@ -517,6 +581,35 @@ test("切换笔记本后，上一个笔记本的迟到分页不被拼进列表",
 });
 
 
+// reload() 的 finally 靠 generation + scopeKey 双重校验才清 loading:旧范围的响应
+// 迟到时,它自己的 finally 必须认出自己已经过期,不能提前把新范围仍在进行的加载态
+// 清掉(那会让类型筛选按钮在新请求还没回来时就被误判为"可点")。
+test("切换笔记本时，上一个笔记本迟到的响应不会提前清掉新笔记本仍在进行的加载态", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  const first = deferred<ReturnType<typeof page>>();
+  const second = deferred<ReturnType<typeof page>>();
+  mocks.fetchUserActivity
+    .mockReturnValueOnce(first.promise)
+    .mockReturnValueOnce(second.promise);
+  view();
+
+  await waitFor(() => expect(mocks.fetchUserActivity).toHaveBeenCalledTimes(1));
+  await user.click(await screen.findByRole("button", { name: /^笔记本二/ }));
+  await waitFor(() => expect(mocks.fetchUserActivity).toHaveBeenCalledTimes(2));
+  const sourceFilter = screen.getByRole("button", { name: "来源" });
+  expect(sourceFilter).toBeDisabled();
+
+  // 笔记本一(已经切走的旧范围)这时才姗姗来迟地返回。
+  first.resolve(page([ask("a1", "笔记本一的迟到提问")]));
+  await waitFor(() => expect(sourceFilter).toBeDisabled());
+  expect(screen.queryByText("笔记本一的迟到提问")).not.toBeInTheDocument();
+
+  second.resolve(page([]));
+  await waitFor(() => expect(sourceFilter).toBeEnabled());
+});
+
+
 test("切换笔记本会把 notebook_id 下推给活动流端点", async () => {
   const user = userEvent.setup();
   mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
@@ -586,6 +679,39 @@ test("提问概览把筛选下推给服务端，并保留完整问题文本", as
   });
   expect(window.location.search).toContain("activity_type=ask");
   expect(screen.getByRole("group", { name: "按活动类型筛选" })).toBeInTheDocument();
+  window.history.replaceState(null, "", "/dev/logs");
+});
+
+
+// F3:report 分支复用同一套中栏标题/全部笔记本文案覆盖——与上面 ask 分支对称。
+test("报告概览把筛选下推给服务端，中栏标题与全部笔记本文案随之切换", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockImplementation((_userId, params) => (
+    params.activityType === "report"
+      ? Promise.resolve(page([report("report-1", "这份报告问了什么")]))
+      : Promise.resolve(page([]))
+  ));
+  window.history.replaceState(null, "", "/dev/logs");
+  view();
+
+  await user.click(screen.getByRole("button", { name: "报告" }));
+
+  expect(await screen.findByText("这份报告问了什么")).toBeInTheDocument();
+  expect(screen.getByText("报告概览")).toBeInTheDocument();
+  expect(screen.getByText("全部报告（含共享笔记本）")).toBeInTheDocument();
+  // 「提问」类型专属的聚焦提示不该串到「报告」分支。
+  expect(screen.queryByText("集中查看用户提出的问题，了解当前关注点。")).not.toBeInTheDocument();
+  await waitFor(() => {
+    expect(mocks.fetchUserActivity).toHaveBeenLastCalledWith("user-1", {
+      activityType: "report",
+      notebookId: undefined,
+      since: undefined,
+      until: undefined,
+      limit: 50,
+    });
+  });
+  expect(window.location.search).toContain("activity_type=report");
   window.history.replaceState(null, "", "/dev/logs");
 });
 
@@ -728,6 +854,46 @@ test("报告详情加载失败时右栏显示错误文案", async () => {
 });
 
 
+// 失败原因区块与下面的空态互补:failed 且有错误原文才显示「失败原因：」。
+test("报告状态为 failed 且有错误原文时显示失败原因", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([report("r1", "这次报告问了什么")]));
+  mocks.fetchUserReportDetail.mockResolvedValue(reportDetail({
+    status: "failed",
+    error: "模型服务超时",
+  }));
+  view();
+
+  await user.click(await screen.findByText("这次报告问了什么"));
+
+  expect(await screen.findByText("失败原因：")).toBeInTheDocument();
+  expect(screen.getByText("模型服务超时")).toBeInTheDocument();
+  expect(screen.queryByText("这份报告还没有生成正文")).not.toBeInTheDocument();
+});
+
+
+// 回归门:失败原因区块的显示条件与下面空态的显示条件曾经不互补——「状态还没推进
+// 到 failed,但已经带着一条错误原文」这种边界会让两边条件都不满足,右栏空白一片。
+// 现在两者按 `!(failed && failure)` 互补,这种边界必须落到空态,而不是两边都不显示。
+test("报告状态非 failed 但带错误原文时，右栏落到空态而不是两边都空白", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([report("r1", "这次报告问了什么")]));
+  mocks.fetchUserReportDetail.mockResolvedValue(reportDetail({
+    status: "running",
+    error: "残留的错误原文",
+  }));
+  view();
+
+  await user.click(await screen.findByText("这次报告问了什么"));
+
+  expect(await screen.findByText("这份报告还没有生成正文")).toBeInTheDocument();
+  expect(screen.queryByText("失败原因：")).not.toBeInTheDocument();
+  expect(screen.queryByText("残留的错误原文")).not.toBeInTheDocument();
+});
+
+
 test("报告还没有生成正文时右栏显示空态文案", async () => {
   const user = userEvent.setup();
   mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
@@ -794,6 +960,98 @@ test("切换选中的报告后，上一条报告的迟到详情不会覆盖新�
     expect(screen.getByText("第二份报告的正文")).toBeInTheDocument();
   });
   expect(screen.queryByText("迟到的报告正文")).not.toBeInTheDocument();
+});
+
+
+// selectItem 传回的是 items 数组里同一个对象引用:重新点同一行时 React 按 Object.is
+// 拦掉这次 setSelected,详情 effect 不会因为 `selected` 变化而重跑——但错误文案写的
+// 正是「请重试」,不能点了没反应。
+test("报告详情加载失败后，再次点击同一行会重新发起请求", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([report("r1", "这次报告问了什么")]));
+  mocks.fetchUserReportDetail
+    .mockRejectedValueOnce(new Error("boom"))
+    .mockResolvedValueOnce(reportDetail({ content_md: "重试后的报告正文" }));
+  view();
+
+  const row = await screen.findByText("这次报告问了什么");
+  await user.click(row);
+  expect(await screen.findByText("报告详情加载失败，请重试")).toBeInTheDocument();
+
+  await user.click(row);
+
+  expect(await screen.findByText("重试后的报告正文")).toBeInTheDocument();
+  expect(mocks.fetchUserReportDetail).toHaveBeenCalledTimes(2);
+});
+
+
+// 同一条规则也适用于提问详情(与上面报告详情共用 detailAttempt 计数器)。
+test("提问详情加载失败后，再次点击同一行会重新发起请求", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([ask("a1", "这次问了什么")]));
+  mocks.fetchUserAskDetail
+    .mockRejectedValueOnce(new Error("boom"))
+    .mockResolvedValueOnce({
+      job_id: "a1",
+      notebook_id: "nb-1",
+      conversation_id: "conv-a1",
+      question: "这次问了什么",
+      mode: "reasoning",
+      status: "done",
+      asked_at: "2026-08-04T10:29:00",
+      answered_at: "2026-08-04T10:31:00",
+      error: "",
+      trace: [],
+      answer: null,
+    });
+  view();
+
+  const row = await screen.findByText("这次问了什么");
+  await user.click(row);
+  expect(await screen.findByText("问答详情加载失败，请重试")).toBeInTheDocument();
+
+  await user.click(row);
+
+  await waitFor(() => {
+    expect(mocks.fetchUserAskDetail).toHaveBeenCalledTimes(2);
+  });
+  expect(screen.queryByText("问答详情加载失败，请重试")).not.toBeInTheDocument();
+});
+
+
+// 换用户与「点某一行」是两个独立的状态更新源:同一次 commit 里可能出现 userId 已经
+// 是新用户、但 `selected` 仍是旧用户那一项的窗口(reload() 里 setSelected(null) 要
+// 等下一轮渲染才生效)。这里必须靠 selectedOwnerId 挡住,不能把旧项的 id 发给新
+// 用户的详情端点——报告端点在 SQLite 上还会白占一次写锁。
+test("换用户后不会用旧选中项的 id 请求新用户的报告详情", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([report("r1", "这次报告问了什么")]));
+  mocks.fetchUserReportDetail.mockResolvedValue(reportDetail({ content_md: "user-1 的报告正文" }));
+  const { rerender } = render(
+    <ActivityView now={NOW} scopeKey='["activity","user-1",""]' userId="user-1" />,
+  );
+
+  await user.click(await screen.findByText("这次报告问了什么"));
+  await waitFor(() => {
+    expect(mocks.fetchUserReportDetail).toHaveBeenCalledWith("user-1", "r1");
+  });
+  mocks.fetchUserReportDetail.mockClear();
+
+  rerender(
+    <ActivityView now={NOW} scopeKey='["activity","user-2",""]' userId="user-2" />,
+  );
+
+  await waitFor(() => {
+    expect(mocks.fetchUserActivity).toHaveBeenLastCalledWith(
+      "user-2", expect.objectContaining({ notebookId: undefined }),
+    );
+  });
+  // "r1" 是 user-1 选中的报告,绝不能拿它的 id 去请求 user-2 的报告详情端点。
+  expect(mocks.fetchUserReportDetail).not.toHaveBeenCalled();
+  expect(screen.queryByText("user-1 的报告正文")).not.toBeInTheDocument();
 });
 
 

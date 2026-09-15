@@ -733,8 +733,9 @@ export default function AdminUsagePage() {
     if (next === "users") params.delete("sheet");
     else params.set("sheet", next);
     // 离开提问分析页签回到用户列表时,连 activity_type(问答/深度报告的类型筛选)
-    // 一起清掉——它和 owner 一样是提问分析页签范围内的参数,留在 URL 里会在下次
-    // 直接打开 /admin/usage?sheet=questions... 之外的场景造成误解。
+    // 一起清掉——它和 owner 一样只在提问分析页签内有意义。不清的话它会留在 URL 里:
+    // 以后不是经由点「提问分析」页签、而是直接拿这个链接打开页面时,会带着一个跟
+    // 当前页签不相干的筛选值,造成误解。
     if (next === "users") {
       params.delete("owner");
       params.delete("activity_type");
