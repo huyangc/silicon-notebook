@@ -1049,12 +1049,15 @@ class QueryStore:
         ``activity_type`` is applied before each table's LIMIT, matching the
         SQLite twin, so a one-type feed remains complete across pages.
 
-        Mixed activity and source/report filters are owner-only, matching the
-        SQLite twin. The unscoped ask-only question overview is the deliberate
-        exception: it follows the usage total's ``created_by`` attribution and
-        includes the viewed user's submissions in shared notebooks. Self-service
-        reads retain the canonical live notebook-read predicate; administrators
-        may explicitly include historical submissions after access revocation.
+        Mixed activity and source filters are owner-only, matching the SQLite
+        twin. The unscoped ask-only question overview and report-only report
+        overview are the deliberate exceptions: they follow the usage totals'
+        ``created_by`` attribution and include the viewed user's submissions in
+        shared notebooks. Self-service reads retain the canonical live
+        notebook-read predicate; administrators
+        (``include_inaccessible_questions=True`` -- the name predates reports and
+        covers both one-type overviews) may explicitly include historical
+        submissions after access revocation.
         """
         limit = max(1, min(200, int(limit)))
         fetch_limit = limit + 1
@@ -1127,6 +1130,7 @@ class QueryStore:
                     ).fetchall()
                 ]
             all_question_submissions = activity_type == "ask" and notebook_id is None
+            all_report_submissions = activity_type == "report" and notebook_id is None
             owned_placeholders = ",".join("%s" for _ in owned_notebook_ids)
 
             # 1. 提问:created_by 之外还收窄到自有笔记本(owner-only,理由同 SQLite 侧)。
@@ -1207,14 +1211,30 @@ class QueryStore:
             # 带出仅用于 Python 侧提取 generation_started_at(镜像 ReportStore.
             # row_to_dict 同一套 jsonb 提取,不发明第二套写法),本身不作为返回字段。
             report_rows = []
-            if activity_type in (None, "report") and owned_notebook_ids:
-                report_params: list[Any] = [user_id, *owned_notebook_ids]
+            if activity_type in (None, "report") and (
+                all_report_submissions or owned_notebook_ids
+            ):
+                # 只看报告与只看提问同形(理由同 SQLite 侧):无 notebook_id 时按
+                # created_by 纳入共享库报告；本人叠加实时读权，管理员不叠加。
+                report_notebook_clause = ""
+                report_params: list[Any] = [user_id]
+                if all_report_submissions and not include_inaccessible_questions:
+                    report_notebook_clause = (
+                        " AND "
+                        + access_sql.read_access_exists_clause("reports")
+                    )
+                    report_params.extend(access_sql.read_access_params(user_id))
+                elif not all_report_submissions:
+                    report_notebook_clause = (
+                        f" AND notebook_id IN ({owned_placeholders})"
+                    )
+                    report_params.extend(owned_notebook_ids)
                 report_range_clause, report_range_params = _range_and_cursor_clause("")
                 report_params.extend(report_range_params)
                 report_rows = db.execute(
                     "SELECT id, notebook_id, created_at, updated_at, question, depth, "
                     "status, understanding_json FROM reports "
-                    f"WHERE created_by = %s AND notebook_id IN ({owned_placeholders})"
+                    f"WHERE created_by = %s{report_notebook_clause}"
                     f"{report_range_clause} "
                     f"ORDER BY {_absolute_instant('created_at')} DESC, "
                     "id COLLATE \"C\" DESC LIMIT %s",
@@ -1233,11 +1253,8 @@ class QueryStore:
                     )
                     retained_params.append(user_id)
                 elif activity_type == "report":
-                    retained_scope = (
-                        "a.activity_type='report' AND a.actor_id=%s "
-                        "AND a.notebook_owner_id=%s"
-                    )
-                    retained_params.extend([user_id, user_id])
+                    retained_scope = "a.activity_type='report' AND a.actor_id=%s"
+                    retained_params.append(user_id)
                 else:
                     retained_scope = (
                         "((a.activity_type='ask' AND a.actor_id=%s "

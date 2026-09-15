@@ -36,14 +36,8 @@ from app.repositories.postgres._store_utils import (
     iso_timestamp,
     normalize_timestamp,
 )
-from app.repositories.postgres.access_sql import (
-    MEMBER_PROBE_FOR_SHARE_SQL,
-    NOTEBOOK_LIVE_SQL,
-    READ_GRANT_DIRECT_FOR_SHARE_SQL,
-    READ_GRANT_GROUP_CHAIN_FOR_SHARE_SQL,
-    read_grant_direct_params,
-    read_grant_group_chain_params,
-)
+from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
+from app.repositories.postgres.read_authority_lock import lock_reader_access_on
 from app.core.capability_tokens import new_capability_token
 from app.core.internal_observability import (
     public_trace_steps,
@@ -759,7 +753,7 @@ class AskStateStore:
                     (notebook_id,),
                 ).fetchone()
                 if root is not None:
-                    if reader_id is not None and not self._lock_reader_access_on(
+                    if reader_id is not None and not lock_reader_access_on(
                         db,
                         notebook_id,
                         reader_id,
@@ -845,31 +839,6 @@ class AskStateStore:
                 },
                 "answer_detail": None,
             }
-
-    @staticmethod
-    def _lock_reader_access_on(
-        db,
-        notebook_id: str,
-        reader_id: str,
-        *,
-        notebook_owner_id: str,
-    ) -> bool:
-        """Lock one complete live read-authority chain, root already leased."""
-        if notebook_owner_id == reader_id:
-            return True
-        if db.execute(
-            MEMBER_PROBE_FOR_SHARE_SQL, (notebook_id, reader_id)
-        ).fetchone() is not None:
-            return True
-        if db.execute(
-            READ_GRANT_DIRECT_FOR_SHARE_SQL,
-            read_grant_direct_params(notebook_id, reader_id),
-        ).fetchone() is not None:
-            return True
-        return db.execute(
-            READ_GRANT_GROUP_CHAIN_FOR_SHARE_SQL,
-            read_grant_group_chain_params(notebook_id, reader_id),
-        ).fetchone() is not None
 
     # ------------------------------------------------------------------
     # answers

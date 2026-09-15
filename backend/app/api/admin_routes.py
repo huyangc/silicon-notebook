@@ -47,6 +47,7 @@ from app.models.admin import (
     PromotionApproveResult,
     PromotionCandidate,
     PromotionRejectRequest,
+    ReportActivityDetail,
     UploadLimitDefaultResult,
     UploadLimitDefaultUpdate,
     UploadLimitUpdate,
@@ -635,6 +636,54 @@ def get_admin_user_ask_detail(
             )
     except KeyError:
         raise HTTPException(status_code=404, detail="ask job not found")
+
+
+@router.get(
+    "/admin/users/{user_id}/reports/{report_id}",
+    response_model=ReportActivityDetail,
+)
+def get_admin_user_report_detail(
+    user_id: str,
+    report_id: str,
+    user: UserProfile = Depends(get_current_user),
+) -> ReportActivityDetail:
+    """右栏「选中报告」只读详情。存活笔记本返回报告正文与引用；删除后的
+    未到期活动只返回最小摘要。自己或 admin 可查；report_id 不属于该用户时 404。
+
+    ``guarded_report_detail`` 与 ``guarded_ask_detail`` 同一套围栏：在 adapter
+    的删除协调事务内同时复核提交者、实时 notebook 读权（仅本人自助时），并一次
+    投影报告行；生命周期与有效授权链的锁保持到本响应对象组装完成，不会把删除前
+    或撤权前读到的正文带过提交边界。旧报告缺 generation_started_at 时保持空，
+    不编造。
+    """
+    _require_activity_enabled()
+    _require_self_or_admin(user, user_id)
+    repo = repository()
+
+    try:
+        with repo.guarded_report_detail(
+            report_id,
+            actor_id=user_id,
+            reader_id=None if user.role == "admin" else user.id,
+        ) as snapshot:
+            return ReportActivityDetail(
+                report_id=snapshot["report_id"],
+                notebook_id=snapshot["notebook_id"],
+                question=snapshot["question"],
+                depth=snapshot["depth"],
+                status=snapshot["status"],
+                created_at=snapshot.get("created_at") or "",
+                updated_at=snapshot.get("updated_at") or "",
+                generation_started_at=snapshot.get("generation_started_at") or "",
+                error=snapshot.get("error") or "",
+                content_md=snapshot.get("content_md") or "",
+                references=snapshot.get("references") or [],
+                notebook_name=snapshot.get("notebook_name") or "",
+                notebook_deleted_at=snapshot.get("notebook_deleted_at") or "",
+                retained_until=snapshot.get("retained_until") or "",
+            )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="report not found")
 
 
 @router.get("/admin/online")

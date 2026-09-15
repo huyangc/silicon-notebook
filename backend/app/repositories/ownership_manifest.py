@@ -946,6 +946,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.get_source', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.global_document_limit_default', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.guarded_ask_detail', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.guarded_report_detail', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.hidden_source_ids', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.import_sources', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.incremental_fuse_source', kind='attribute', target='_runtime'),
@@ -2259,6 +2260,18 @@ SURFACE_MEMBERS = (
         patches=(
             ConsumerSite(path='backend/tests/test_admin_user_activity_api.py', scope='<module>.test_admin_ask_detail_delete_before_guard_returns_retained', kind='patch', target='guarded_ask_detail'),
             ConsumerSite(path='backend/tests/test_admin_user_activity_api.py', scope='<module>.test_admin_unanswered_ask_detail_delete_before_guard_returns_retained', kind='patch', target='guarded_ask_detail'),
+        ),
+    ),
+    SurfaceMember(
+        name='guarded_report_detail',
+        owner='ReportStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/admin_routes.py', scope='<module>.get_admin_user_report_detail', kind='attribute', target='guarded_report_detail'),
+            ConsumerSite(path='backend/tests/test_admin_user_activity_api.py', scope='<module>.test_admin_report_detail_delete_before_guard_returns_retained', kind='patch', target='guarded_report_detail'),
+        ),
+        patches=(
+            ConsumerSite(path='backend/tests/test_admin_user_activity_api.py', scope='<module>.test_admin_report_detail_delete_before_guard_returns_retained', kind='patch', target='guarded_report_detail'),
         ),
     ),
     SurfaceMember(

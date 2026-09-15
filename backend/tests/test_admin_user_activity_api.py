@@ -3,6 +3,7 @@
   GET /admin/users/{user_id}/activity
   GET /admin/users/{user_id}/notebooks/{notebook_id}/sources
   GET /admin/users/{user_id}/asks/{job_id}
+  GET /admin/users/{user_id}/reports/{report_id}
 
 These exercise the full HTTP stack (auth, permission gate, response-model
 field names) — the repository-layer merge/pagination semantics of
@@ -123,6 +124,32 @@ def _insert_conversation(db, conversation_id, notebook_id, created_by, updated_a
         "INSERT INTO conversations (id,notebook_id,title,created_by,created_at,updated_at) "
         "VALUES (?,?,?,?,?,?)",
         (conversation_id, notebook_id, "", created_by, updated_at, updated_at),
+    )
+
+
+def _insert_report(db, report_id, notebook_id, created_by, created_at, *,
+                    question="report?", depth=2, status="done", content_md="",
+                    references=None, error="", generation_started_at=None) -> None:
+    understanding = (
+        {"_generation_started_at": generation_started_at}
+        if generation_started_at is not None else {}
+    )
+    db.execute(
+        "INSERT INTO reports "
+        "(id,notebook_id,question,depth,status,created_by,content_md,"
+        "references_json,understanding_json,error,created_at,updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (report_id, notebook_id, question, depth, status, created_by, content_md,
+         json.dumps(references or [], ensure_ascii=False),
+         json.dumps(understanding), error, created_at, created_at),
+    )
+
+
+def _insert_member(db, notebook_id, user_id) -> None:
+    db.execute(
+        "INSERT INTO notebook_members (notebook_id,user_id,role,added_at) "
+        "VALUES (?,?,?,?)",
+        (notebook_id, user_id, "viewer", "2026-08-01T09:00:00"),
     )
 
 
@@ -1247,6 +1274,394 @@ def test_guarded_ask_detail_holds_member_authority_until_snapshot_released(clien
     assert response.status_code == 404
 
 
+# --- GET /admin/users/{user_id}/reports/{report_id} -------------------------
+
+_REPORT_REFERENCES = [
+    {"index": 1, "source_id": "src-ref", "title": "引用来源", "snippet": "片段"},
+]
+
+
+def test_report_detail_forbidden_for_other_regular_user(client):
+    a = _auth(client, 70)
+    b = _auth(client, 71)
+    uid_b = _me(client, b)
+    notebook_id = _create_notebook(client, b, "NB-report-403")
+    with _repo()._write() as db:
+        _insert_report(db, "rep-403", notebook_id, uid_b, "2026-08-01T10:00:00")
+    resp = client.get(f"/api/admin/users/{uid_b}/reports/rep-403", headers=a)
+    assert resp.status_code == 403
+
+
+def test_report_detail_allowed_for_self_and_admin_with_body(client):
+    owner = _auth(client, 72)
+    owner_id = _me(client, owner)
+    notebook_id = _create_notebook(client, owner, "NB-report-body")
+    with _repo()._write() as db:
+        _insert_report(
+            db, "rep-body", notebook_id, owner_id, "2026-08-01T10:00:00+00:00",
+            question="分析放大器稳定性", depth=3, content_md="# 结论\n\n稳定[1]",
+            references=_REPORT_REFERENCES,
+            generation_started_at="2026-08-01T10:00:05+00:00",
+        )
+        _insert_report(
+            db, "rep-legacy", notebook_id, owner_id, "2026-08-01T09:00:00+00:00",
+            status="failed", error="模型服务调用失败",
+        )
+
+    for headers in (owner, _auth_admin(client)):
+        resp = client.get(
+            f"/api/admin/users/{owner_id}/reports/rep-body", headers=headers
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "report_id": "rep-body",
+            "notebook_id": notebook_id,
+            "question": "分析放大器稳定性",
+            "depth": 3,
+            "status": "done",
+            "created_at": "2026-08-01T10:00:00+00:00",
+            "updated_at": "2026-08-01T10:00:00+00:00",
+            "generation_started_at": "2026-08-01T10:00:05+00:00",
+            "error": "",
+            "content_md": "# 结论\n\n稳定[1]",
+            "references": _REPORT_REFERENCES,
+            "notebook_name": "NB-report-body",
+            "notebook_deleted_at": "",
+            "retained_until": "",
+        }
+
+    legacy = client.get(
+        f"/api/admin/users/{owner_id}/reports/rep-legacy", headers=owner
+    )
+    assert legacy.status_code == 200
+    body = legacy.json()
+    # 旧报告没有开始戳:保持空串，不编造。
+    assert body["generation_started_at"] == ""
+    assert body["status"] == "failed"
+    assert body["error"] == "模型服务调用失败"
+    assert body["content_md"] == ""
+    assert body["references"] == []
+
+
+def test_report_detail_not_owned_by_target_user_404(client):
+    a = _auth(client, 73)
+    b = _auth(client, 74)
+    uid_a = _me(client, a)
+    uid_b = _me(client, b)
+    notebook_id = _create_notebook(client, b, "NB-report-404")
+    with _repo()._write() as db:
+        _insert_report(db, "rep-of-b", notebook_id, uid_b, "2026-08-01T10:00:00")
+
+    # a 查「自己」是被允许的，但这份报告不是他的——必须 404，不能顺手读别人的报告。
+    assert client.get(
+        f"/api/admin/users/{uid_a}/reports/rep-of-b", headers=a
+    ).status_code == 404
+    # 管理员也不能拿错的 user_id 读到它：提交者是围栏的一部分。
+    assert client.get(
+        f"/api/admin/users/{uid_a}/reports/rep-of-b", headers=_auth_admin(client)
+    ).status_code == 404
+    assert client.get(
+        f"/api/admin/users/{uid_a}/reports/does-not-exist", headers=a
+    ).status_code == 404
+    assert client.get(
+        f"/api/admin/users/{uid_b}/reports/rep-of-b", headers=b
+    ).status_code == 200
+
+
+def test_revoked_shared_report_is_admin_only_in_overview_and_detail(client):
+    member = _auth(client, 75)
+    owner = _auth(client, 76)
+    member_id = _me(client, member)
+    notebook_id = _create_notebook(client, owner, "NB-revoked-report")
+    with _repo()._write() as db:
+        _insert_member(db, notebook_id, member_id)
+        _insert_report(
+            db, "rep-shared", notebook_id, member_id, "2026-08-01T10:00:00",
+            question="共享库里建的报告", content_md="共享库报告正文",
+        )
+
+    shared_overview = client.get(
+        f"/api/admin/users/{member_id}/activity",
+        params={"activity_type": "report"},
+        headers=member,
+    )
+    assert [item["id"] for item in shared_overview.json()["items"]] == [
+        "rep-shared"
+    ]
+    # 混合流仍 owner-only:成员没有自有库，这条报告不进混合流。
+    assert client.get(
+        f"/api/admin/users/{member_id}/activity", headers=member
+    ).json()["items"] == []
+    shared_detail = client.get(
+        f"/api/admin/users/{member_id}/reports/rep-shared", headers=member
+    )
+    assert shared_detail.status_code == 200
+    assert shared_detail.json()["content_md"] == "共享库报告正文"
+
+    with _repo()._write() as db:
+        db.execute(
+            "DELETE FROM notebook_members WHERE notebook_id=? AND user_id=?",
+            (notebook_id, member_id),
+        )
+
+    self_overview = client.get(
+        f"/api/admin/users/{member_id}/activity",
+        params={"activity_type": "report"},
+        headers=member,
+    )
+    assert self_overview.status_code == 200
+    assert self_overview.json()["items"] == []
+    assert client.get(
+        f"/api/admin/users/{member_id}/reports/rep-shared", headers=member
+    ).status_code == 404
+
+    admin = _auth_admin(client)
+    admin_overview = client.get(
+        f"/api/admin/users/{member_id}/activity",
+        params={"activity_type": "report"},
+        headers=admin,
+    )
+    assert [item["id"] for item in admin_overview.json()["items"]] == [
+        "rep-shared"
+    ]
+    admin_detail = client.get(
+        f"/api/admin/users/{member_id}/reports/rep-shared", headers=admin
+    )
+    assert admin_detail.status_code == 200
+    assert admin_detail.json()["question"] == "共享库里建的报告"
+    assert admin_detail.json()["content_md"] == "共享库报告正文"
+
+
+def test_admin_report_detail_survives_notebook_delete_as_summary(client):
+    owner = _auth(client, 77)
+    owner_id = _me(client, owner)
+    notebook_id = _create_notebook(client, owner, "即将删除的报告库")
+    with _repo()._write() as db:
+        _insert_report(
+            db, "rep-retained", notebook_id, owner_id, "2026-08-01T12:58:00+00:00",
+            question="留存报告提示", depth=4, content_md="不能保留的报告正文",
+            references=_REPORT_REFERENCES, error="不能保留的错误诊断",
+            status="failed", generation_started_at="2026-08-01T12:58:02+00:00",
+        )
+
+    assert client.delete(
+        f"/api/notebooks/{notebook_id}", headers=owner
+    ).status_code == 202
+    from app.services import background_jobs
+    background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
+
+    assert client.get(
+        f"/api/admin/users/{owner_id}/reports/rep-retained", headers=owner
+    ).status_code == 404
+
+    admin = _auth_admin(client)
+    activity = client.get(
+        f"/api/admin/users/{owner_id}/activity",
+        params={"activity_type": "report"},
+        headers=admin,
+    )
+    assert [item["id"] for item in activity.json()["items"]] == ["rep-retained"]
+    detail = client.get(
+        f"/api/admin/users/{owner_id}/reports/rep-retained", headers=admin
+    )
+    assert detail.status_code == 200
+    body = detail.json()
+    assert body["question"] == "留存报告提示"
+    assert body["depth"] == 4
+    assert body["status"] == "failed"
+    assert body["generation_started_at"] == "2026-08-01T12:58:02+00:00"
+    assert body["notebook_name"] == "即将删除的报告库"
+    assert body["notebook_deleted_at"]
+    assert body["retained_until"]
+    assert body["content_md"] == ""
+    assert body["references"] == []
+    assert body["error"] == ""
+    serialized = json.dumps(body, ensure_ascii=False)
+    assert "不能保留的报告正文" not in serialized
+    assert "不能保留的错误诊断" not in serialized
+
+
+def test_admin_report_detail_delete_before_guard_returns_retained(
+    client, monkeypatch
+):
+    owner = _auth(client, 78)
+    owner_id = _me(client, owner)
+    notebook_id = _create_notebook(client, owner, "报告详情删除竞态")
+    with _repo()._write() as db:
+        _insert_report(
+            db, "rep-detail-race", notebook_id, owner_id,
+            "2026-08-01T14:00:00+00:00", question="竞态报告？",
+            content_md="即将删除的报告正文",
+        )
+
+    repo = _repo()
+    original_guard = repo.guarded_report_detail
+    triggered = False
+
+    @contextmanager
+    def delete_before_guard(report_id, **kwargs):
+        nonlocal triggered
+        if not triggered:
+            triggered = True
+            repo._runtime.notebook_store.delete_row_and_orphan_embeddings(notebook_id)
+        with original_guard(report_id, **kwargs) as snapshot:
+            yield snapshot
+
+    monkeypatch.setattr(repo, "guarded_report_detail", delete_before_guard)
+    response = client.get(
+        f"/api/admin/users/{owner_id}/reports/rep-detail-race",
+        headers=_auth_admin(client),
+    )
+    assert triggered is True
+    assert response.status_code == 200
+    body = response.json()
+    assert body["question"] == "竞态报告？"
+    assert body["content_md"] == ""
+    assert body["notebook_deleted_at"]
+    assert body["retained_until"]
+
+
+def test_guarded_report_detail_holds_delete_until_snapshot_released(client):
+    owner = _auth(client, 79)
+    owner_id = _me(client, owner)
+    notebook_id = _create_notebook(client, owner, "报告详情删除锁")
+    with _repo()._write() as db:
+        _insert_report(
+            db, "rep-guarded-delete", notebook_id, owner_id,
+            "2026-08-01T16:00:00+00:00", content_md="受保护的报告正文",
+        )
+
+    repo = _repo()
+    second_database = _independent_database(repo)
+    second_notebooks = type(repo._runtime.notebook_store)(
+        second_database,
+        new_id=repo._runtime.notebook_store.new_id,
+        now=repo._runtime.notebook_store.now,
+        activity_retention_days=(
+            repo._runtime.notebook_store.activity_retention_days
+        ),
+    )
+    delete_started = threading.Event()
+    delete_finished = threading.Event()
+
+    def delete_notebook():
+        delete_started.set()
+        try:
+            second_notebooks.delete_row_and_orphan_embeddings(notebook_id)
+        finally:
+            delete_finished.set()
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with repo.guarded_report_detail(
+                "rep-guarded-delete", actor_id=owner_id, reader_id=None
+            ) as snapshot:
+                assert snapshot["content_md"] == "受保护的报告正文"
+                future = executor.submit(delete_notebook)
+                assert delete_started.wait(timeout=2)
+                assert not delete_finished.wait(timeout=0.1)
+            future.result(timeout=5)
+    finally:
+        second_database.close()
+    assert delete_finished.is_set()
+    with repo.guarded_report_detail(
+        "rep-guarded-delete", actor_id=owner_id, reader_id=None
+    ) as snapshot:
+        assert snapshot["notebook_deleted_at"]
+        assert snapshot["content_md"] == ""
+
+
+def test_guarded_report_detail_freezes_generating_to_done_snapshot(client):
+    owner = _auth(client, 80)
+    owner_id = _me(client, owner)
+    notebook_id = _create_notebook(client, owner, "报告详情正常完成竞态")
+    with _repo()._write() as db:
+        _insert_report(
+            db, "rep-finish-race", notebook_id, owner_id,
+            "2026-08-01T17:00:00+00:00", status="generating",
+        )
+
+    repo = _repo()
+    second_database = _independent_database(repo)
+    finish_started = threading.Event()
+    finish_done = threading.Event()
+
+    def finish_report():
+        finish_started.set()
+        try:
+            with second_database.write(operation="test.report_finish") as db:
+                db.execute(
+                    "UPDATE reports SET status='done', content_md=? WHERE id=?",
+                    ("刚刚完成的正文", "rep-finish-race"),
+                )
+        finally:
+            finish_done.set()
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with repo.guarded_report_detail(
+                "rep-finish-race", actor_id=owner_id, reader_id=None
+            ) as snapshot:
+                assert snapshot["status"] == "generating"
+                assert snapshot["content_md"] == ""
+                future = executor.submit(finish_report)
+                assert finish_started.wait(timeout=2)
+                assert not finish_done.wait(timeout=0.1)
+            future.result(timeout=5)
+    finally:
+        second_database.close()
+    assert repo.get_report(notebook_id, "rep-finish-race")["status"] == "done"
+
+
+def test_guarded_report_detail_holds_member_authority_until_snapshot_released(
+    client,
+):
+    owner = _auth(client, 81)
+    reader = _auth(client, 82)
+    reader_id = _me(client, reader)
+    notebook_id = _create_notebook(client, owner, "报告详情权限撤销竞态")
+    with _repo()._write() as db:
+        _insert_member(db, notebook_id, reader_id)
+        _insert_report(
+            db, "rep-access-race", notebook_id, reader_id,
+            "2026-08-01T18:00:00+00:00", content_md="受权限保护的报告正文",
+        )
+
+    repo = _repo()
+    second_database = _independent_database(repo)
+    revoke_started = threading.Event()
+    revoke_finished = threading.Event()
+
+    def revoke_member():
+        revoke_started.set()
+        try:
+            with second_database.write(operation="test.revoke_member") as db:
+                db.execute(
+                    "DELETE FROM notebook_members WHERE notebook_id=? AND user_id=?",
+                    (notebook_id, reader_id),
+                )
+        finally:
+            revoke_finished.set()
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with repo.guarded_report_detail(
+                "rep-access-race", actor_id=reader_id, reader_id=reader_id
+            ) as snapshot:
+                assert snapshot["content_md"] == "受权限保护的报告正文"
+                future = executor.submit(revoke_member)
+                assert revoke_started.wait(timeout=2)
+                assert not revoke_finished.wait(timeout=0.1)
+            future.result(timeout=5)
+    finally:
+        second_database.close()
+
+    response = client.get(
+        f"/api/admin/users/{reader_id}/reports/rep-access-race", headers=reader
+    )
+    assert response.status_code == 404
+
+
 # --- 部署开关 -------------------------------------------------------------
 
 def test_activity_endpoints_404_when_activity_view_disabled(tmp_path, monkeypatch):
@@ -1272,6 +1687,8 @@ def test_activity_endpoints_404_when_activity_view_disabled(tmp_path, monkeypatc
     with _repo()._write() as db:
         _insert_ask_job(db, "job-gated", nb_id, uid, "2026-08-01T10:00:00",
                         question="开关关闭时这句问题也不该读得到")
+        _insert_report(db, "rep-gated", nb_id, uid, "2026-08-01T10:00:00",
+                       content_md="开关关闭时这份报告正文也不该读得到")
 
     assert client.get(f"/api/admin/users/{uid}/activity", headers=admin).status_code == 404
     assert client.get(
@@ -1280,6 +1697,10 @@ def test_activity_endpoints_404_when_activity_view_disabled(tmp_path, monkeypatc
     # 存在且归属正确的 job:开关是它 404 的唯一理由。
     assert client.get(
         f"/api/admin/users/{uid}/asks/job-gated", headers=admin
+    ).status_code == 404
+    # 报告详情同理:报告真实存在、提交者就是 uid。
+    assert client.get(
+        f"/api/admin/users/{uid}/reports/rep-gated", headers=admin
     ).status_code == 404
 
     # 同一部署下既有的 admin 总览**不**受这个开关影响(它不暴露问答正文),

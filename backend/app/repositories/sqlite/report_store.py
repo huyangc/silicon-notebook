@@ -7,14 +7,19 @@ moved verbatim from the frozen facade methods: zero-row UPDATE/DELETE stay
 silent no-ops, ``get_report`` raises KeyError, list order is
 ``created_at DESC, id`` and export selection keeps the done-only/input-order/
 IN-batched semantics; the connection-free core exporter owns filenames.
+The one exception to "row-level only" is ``guarded_report_detail``, the admin
+read-only detail: like ``AskStateStore.guarded_ask_detail`` it must re-check
+the notebook lifecycle and live read authority inside its own deletion fence.
 """
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from typing import Callable, Iterator
 
 from app.core.capability_tokens import new_capability_token
 from app.domain.report_export import ReportExportSource
+from app.repositories.sqlite.access_sql import NOTEBOOK_READ_SQL, read_access_params
 from app.repositories.sqlite.database import SqliteDatabase
 from app.core.internal_observability import public_report_sections
 
@@ -206,6 +211,97 @@ class ReportStore:
         if row is None:
             raise KeyError(report_id)
         return self.row_to_dict(row, full=True)
+
+    @contextmanager
+    def guarded_report_detail(
+        self,
+        report_id: str,
+        *,
+        actor_id: str,
+        reader_id: str | None,
+    ) -> Iterator[dict]:
+        """Yield an admin report snapshot while notebook deletion is excluded.
+
+        Mirrors ``AskStateStore.guarded_ask_detail``: ``BEGIN IMMEDIATE``
+        extends the database's cross-process writer fence to this otherwise
+        read-only projection, the process-local write lock supplies the same
+        ordering for sibling repository calls, and the fence is held until the
+        API has assembled its response object. A self-service reader
+        (``reader_id`` set) must still pass ``NOTEBOOK_READ_SQL`` inside the
+        fence; a deleted notebook falls back to the content-minimal retained
+        summary, which only an administrator (``reader_id is None``) may read.
+        """
+        with self.database.write(operation="admin.report_detail") as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT id,notebook_id,question,depth,status,error,content_md,"
+                "references_json,understanding_json,created_at,updated_at "
+                "FROM reports WHERE id=? AND created_by=?",
+                (report_id, actor_id),
+            ).fetchone()
+            notebook = (
+                db.execute(
+                    "SELECT name FROM notebooks WHERE id=?", (row["notebook_id"],)
+                ).fetchone()
+                if row is not None
+                else None
+            )
+            if notebook is not None:
+                if reader_id is not None and db.execute(
+                    NOTEBOOK_READ_SQL,
+                    (row["notebook_id"], *read_access_params(reader_id)),
+                ).fetchone() is None:
+                    raise KeyError(report_id)
+                understanding = json.loads(row["understanding_json"] or "{}")
+                yield {
+                    "report_id": row["id"],
+                    "notebook_id": row["notebook_id"],
+                    "question": row["question"],
+                    "depth": int(row["depth"]),
+                    "status": row["status"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "generation_started_at": str(
+                        understanding.get("_generation_started_at", "") or ""
+                    ),
+                    "error": row["error"] or "",
+                    "content_md": row["content_md"] or "",
+                    "references": json.loads(row["references_json"] or "[]"),
+                    "notebook_name": notebook["name"] or "",
+                    "notebook_deleted_at": "",
+                    "retained_until": "",
+                }
+                return
+
+            retained = db.execute(
+                "SELECT record_id,notebook_id,notebook_name,question,depth,status,"
+                "created_at,updated_at,generation_started_at,deleted_at,"
+                "expires_at FROM retained_user_activity "
+                "WHERE activity_type='report' AND record_id=? "
+                "AND actor_id=? "
+                "AND julianday(expires_at)>julianday('now') "
+                "AND NOT EXISTS(SELECT 1 FROM notebooks live "
+                "WHERE live.id=retained_user_activity.notebook_id)",
+                (report_id, actor_id),
+            ).fetchone()
+            if retained is None or reader_id is not None:
+                raise KeyError(report_id)
+            yield {
+                "report_id": retained["record_id"],
+                "notebook_id": retained["notebook_id"],
+                "question": retained["question"],
+                "depth": int(retained["depth"]),
+                "status": retained["status"],
+                "created_at": retained["created_at"],
+                "updated_at": retained["updated_at"],
+                "generation_started_at": retained["generation_started_at"] or "",
+                "error": "",
+                "content_md": "",
+                "references": [],
+                "notebook_name": retained["notebook_name"],
+                "notebook_deleted_at": retained["deleted_at"],
+                "retained_until": retained["expires_at"],
+            }
 
     def list_reports(self, notebook_id: str, *, created_by: str | None) -> list:
         """Rows for one notebook, optionally narrowed to one creator.

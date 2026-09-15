@@ -23,6 +23,9 @@ from tests.activity_parity_cases import (
     LOCAL_DAY_SINCE,
     LOCAL_DAY_UNTIL,
     MALFORMED_BOUNDS,
+    REPORT_SCOPE_AFTER_SHARED_DELETE_CASES,
+    REPORT_SCOPE_CASES,
+    REPORT_SCOPE_REPORTS,
 )
 
 
@@ -218,6 +221,61 @@ def test_question_overview_enforces_live_read_access_unless_admin_audit(repo):
         )
     revoked_view = repo.list_user_activity("u1", activity_type="ask")
     assert [item["id"] for item in revoked_view["items"]] == ["ask-mine"]
+
+
+def _seed_report_scope_rows(repo) -> None:
+    with repo._write() as db:
+        _insert_user(db, "u1", "a00000001")
+        _insert_user(db, "u2", "b00000002")
+        _insert_notebook(db, "n1", "u1")
+        _insert_notebook(db, "n2", "u2")
+        _insert_member(db, "n2", "u1")
+        for report_id, notebook_id, created_by, created_at in REPORT_SCOPE_REPORTS:
+            _insert_report(db, report_id, notebook_id, created_by, created_at)
+
+
+def test_report_overview_follows_submitter_like_question_overview(repo):
+    """只看报告与用户总览的 reports 合计同口径(PostgreSQL 侧跑同一张场景表)。"""
+    _seed_report_scope_rows(repo)
+    for label, kwargs, expected, _revoked in REPORT_SCOPE_CASES:
+        result = repo.list_user_activity("u1", limit=50, **kwargs)
+        assert [item["id"] for item in result["items"]] == expected, label
+
+    with repo._write() as db:
+        db.execute(
+            "DELETE FROM notebook_members WHERE notebook_id=? AND user_id=?",
+            ("n2", "u1"),
+        )
+    for label, kwargs, _member, expected in REPORT_SCOPE_CASES:
+        result = repo.list_user_activity("u1", limit=50, **kwargs)
+        assert [item["id"] for item in result["items"]] == expected, label
+
+    repo._runtime.notebook_store.delete_row_and_orphan_embeddings("n2")
+    for label, kwargs, expected, retained in REPORT_SCOPE_AFTER_SHARED_DELETE_CASES:
+        result = repo.list_user_activity("u1", limit=50, **kwargs)
+        assert [item["id"] for item in result["items"]] == expected, label
+        assert {
+            item["id"] for item in result["items"] if item.get("notebook_deleted_at")
+        } == retained, label
+
+
+def test_report_overview_paginates_shared_library_reports(repo):
+    """只看报告的筛选同样发生在 LIMIT 之前，共享库报告翻页不丢不重。"""
+    _seed_report_scope_rows(repo)
+    with repo._write() as db:
+        _insert_source(db, "src-newest", "n1", "2026-08-01T13:00:00+00:00")
+    first = repo.list_user_activity("u1", activity_type="report", limit=1)
+    assert [item["id"] for item in first["items"]] == ["rep-own"]
+    assert first["has_more"] is True
+    second = repo.list_user_activity(
+        "u1",
+        activity_type="report",
+        before_ts=first["next_cursor"]["ts"],
+        before_id=first["next_cursor"]["id"],
+        limit=1,
+    )
+    assert [item["id"] for item in second["items"]] == ["rep-shared"]
+    assert second["has_more"] is False
 
 
 def test_creator_wide_question_overview_uses_activity_keyset_index(repo):
@@ -1035,6 +1093,92 @@ def test_deleted_notebook_keeps_only_expiring_activity_metadata(repo):
     repo._migrator.recover_interrupted_jobs()
     with repo._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM retained_user_activity").fetchone()[0] == 0
+
+
+def test_guarded_report_detail_live_revoked_and_retained_states(repo):
+    """报告只读详情的三态:存活投影正文、自助失权 fail closed、删除后仅管理员读留存。"""
+    references = [{"index": 1, "source_id": "src-x", "title": "引用一"}]
+    _seed_report_scope_rows(repo)
+    with repo._write() as db:
+        db.execute(
+            "UPDATE reports SET content_md=?, references_json=?, "
+            "understanding_json=?, error=?, depth=4 WHERE id='rep-shared'",
+            (
+                "# 共享库报告正文",
+                json.dumps(references, ensure_ascii=False),
+                json.dumps({"_generation_started_at": "2026-08-01T11:00:05+00:00"}),
+                "",
+            ),
+        )
+
+    with repo.guarded_report_detail(
+        "rep-shared", actor_id="u1", reader_id="u1"
+    ) as snapshot:
+        assert snapshot == {
+            "report_id": "rep-shared",
+            "notebook_id": "n2",
+            "question": "report?",
+            "depth": 4,
+            "status": "done",
+            "created_at": "2026-08-01T11:00:00+00:00",
+            "updated_at": "2026-08-01T11:00:00+00:00",
+            "generation_started_at": "2026-08-01T11:00:05+00:00",
+            "error": "",
+            "content_md": "# 共享库报告正文",
+            "references": references,
+            "notebook_name": "NB-n2",
+            "notebook_deleted_at": "",
+            "retained_until": "",
+        }
+    # The creator pin is part of the fence, not a route-side check.
+    with pytest.raises(KeyError):
+        with repo.guarded_report_detail("rep-other", actor_id="u1", reader_id=None):
+            pass
+
+    with repo._write() as db:
+        db.execute(
+            "DELETE FROM notebook_members WHERE notebook_id=? AND user_id=?",
+            ("n2", "u1"),
+        )
+    with pytest.raises(KeyError):
+        with repo.guarded_report_detail(
+            "rep-shared", actor_id="u1", reader_id="u1"
+        ):
+            pass
+    with repo.guarded_report_detail(
+        "rep-shared", actor_id="u1", reader_id=None
+    ) as snapshot:
+        assert snapshot["content_md"] == "# 共享库报告正文"
+
+    repo._runtime.notebook_store.delete_row_and_orphan_embeddings("n2")
+    with pytest.raises(KeyError):
+        with repo.guarded_report_detail(
+            "rep-shared", actor_id="u1", reader_id="u1"
+        ):
+            pass
+    with repo.guarded_report_detail(
+        "rep-shared", actor_id="u1", reader_id=None
+    ) as snapshot:
+        retained = dict(snapshot)
+    assert retained["notebook_deleted_at"]
+    assert retained["retained_until"]
+    assert retained["notebook_name"] == "NB-n2"
+    assert retained["depth"] == 4
+    assert retained["generation_started_at"] == "2026-08-01T11:00:05+00:00"
+    assert retained["content_md"] == ""
+    assert retained["references"] == []
+    assert retained["error"] == ""
+    assert "共享库报告正文" not in json.dumps(retained, ensure_ascii=False)
+
+    with repo._write() as db:
+        db.execute(
+            "UPDATE retained_user_activity SET expires_at='2000-01-01T00:00:00+00:00'"
+        )
+    with pytest.raises(KeyError):
+        with repo.guarded_report_detail(
+            "rep-shared", actor_id="u1", reader_id=None
+        ):
+            pass
 
 
 def test_deleted_shared_upload_keeps_actor_and_owner_accounting_separate(repo):

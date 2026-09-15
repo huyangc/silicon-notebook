@@ -384,6 +384,33 @@ class AskDetail(BaseModel):
         return sanitize_answer_payload(value)
 
 
+class ReportActivityDetail(BaseModel):
+    """右栏「选中报告」只读详情:GET /admin/users/{user_id}/reports/{report_id}
+    的响应,与 frontend/app/dev/logs/activity/types.ts 的 ``ReportDetail`` 逐字对应。
+
+    存活笔记本返回报告正文 ``content_md`` 与引用 ``references``(原样来自
+    ``references_json``,与 ``ReportDetail.references`` 同形);笔记本删除后的
+    未到期留存只返回最小摘要,正文/引用/错误一律为空。``generation_started_at``
+    取自 understanding_json 的 ``_generation_started_at``,旧报告缺它时为空串,
+    不编造。
+    """
+
+    report_id: str
+    notebook_id: str
+    question: str
+    depth: int
+    status: str
+    created_at: str
+    updated_at: str
+    generation_started_at: str = ""
+    error: str = ""
+    content_md: str = ""
+    references: List[dict] = Field(default_factory=list)
+    notebook_name: str = ""
+    notebook_deleted_at: str = ""
+    retained_until: str = ""
+
+
 class CacheStats(BaseModel):
     """内容寻址缓存的当前状况（admin 只读）。
 

@@ -9200,6 +9200,88 @@
           "title": "ReparseSourcesRequest",
           "type": "object"
         },
+        "ReportActivityDetail": {
+          "description": "右栏「选中报告」只读详情:GET /admin/users/{user_id}/reports/{report_id}\n的响应,与 frontend/app/dev/logs/activity/types.ts 的 ``ReportDetail`` 逐字对应。\n\n存活笔记本返回报告正文 ``content_md`` 与引用 ``references``(原样来自\n``references_json``,与 ``ReportDetail.references`` 同形);笔记本删除后的\n未到期留存只返回最小摘要,正文/引用/错误一律为空。``generation_started_at``\n取自 understanding_json 的 ``_generation_started_at``,旧报告缺它时为空串,\n不编造。",
+          "properties": {
+            "content_md": {
+              "default": "",
+              "title": "Content Md",
+              "type": "string"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "depth": {
+              "title": "Depth",
+              "type": "integer"
+            },
+            "error": {
+              "default": "",
+              "title": "Error",
+              "type": "string"
+            },
+            "generation_started_at": {
+              "default": "",
+              "title": "Generation Started At",
+              "type": "string"
+            },
+            "notebook_deleted_at": {
+              "default": "",
+              "title": "Notebook Deleted At",
+              "type": "string"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "notebook_name": {
+              "default": "",
+              "title": "Notebook Name",
+              "type": "string"
+            },
+            "question": {
+              "title": "Question",
+              "type": "string"
+            },
+            "references": {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "title": "References",
+              "type": "array"
+            },
+            "report_id": {
+              "title": "Report Id",
+              "type": "string"
+            },
+            "retained_until": {
+              "default": "",
+              "title": "Retained Until",
+              "type": "string"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "report_id",
+            "notebook_id",
+            "question",
+            "depth",
+            "status",
+            "created_at",
+            "updated_at"
+          ],
+          "title": "ReportActivityDetail",
+          "type": "object"
+        },
         "ReportClarificationAnswer": {
           "properties": {
             "answer": {
@@ -13383,6 +13465,55 @@
             }
           },
           "summary": "Get Admin User Notebook Source"
+        }
+      },
+      "/api/admin/users/{user_id}/reports/{report_id}": {
+        "get": {
+          "description": "右栏「选中报告」只读详情。存活笔记本返回报告正文与引用；删除后的\n未到期活动只返回最小摘要。自己或 admin 可查；report_id 不属于该用户时 404。\n\n``guarded_report_detail`` 与 ``guarded_ask_detail`` 同一套围栏：在 adapter\n的删除协调事务内同时复核提交者、实时 notebook 读权（仅本人自助时），并一次\n投影报告行；生命周期与有效授权链的锁保持到本响应对象组装完成，不会把删除前\n或撤权前读到的正文带过提交边界。旧报告缺 generation_started_at 时保持空，\n不编造。",
+          "operationId": "get_admin_user_report_detail_api_admin_users__user_id__reports__report_id__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "report_id",
+              "required": true,
+              "schema": {
+                "title": "Report Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ReportActivityDetail"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Admin User Report Detail"
         }
       },
       "/api/admin/users/{user_id}/reset-password": {
