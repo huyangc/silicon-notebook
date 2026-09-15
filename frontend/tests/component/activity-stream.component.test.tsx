@@ -164,6 +164,26 @@ test("认不出的问答模式不把内部代号上屏", () => {
 });
 
 
+test("提问与报告标出调用方式；未记录与认不出的值不挂标签", () => {
+  const { container } = stream([
+    ask({ id: "ask-mcp", submitted_via: "mcp" }),
+    report({ id: "rep-web", submitted_via: "web" }),
+    ask({ id: "ask-legacy", submitted_via: "" }),
+    ask({ id: "ask-bogus", submitted_via: "cli" as never }),
+  ]);
+  const rows = container.querySelectorAll(".activity-row");
+  const chips = (row: Element) =>
+    Array.from(row.querySelectorAll(".activity-chip")).map((chip) => chip.textContent);
+
+  expect(chips(rows[0])).toContain("MCP");
+  expect(chips(rows[1])).toContain("网页");
+  expect(chips(rows[2])).not.toContain("未记录");
+  expect(chips(rows[2])).not.toContain("网页");
+  expect(chips(rows[2])).not.toContain("MCP");
+  expect(rows[3].textContent).not.toContain("cli");
+});
+
+
 test("空标题渲染占位符，不回落到文件名", () => {
   stream([source({ display_title: "   ", file_name: "q3-report.pdf" })]);
   expect(screen.getByText("（无标题）")).toBeInTheDocument();

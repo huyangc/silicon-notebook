@@ -5,6 +5,7 @@
 import { formatQuestionTime } from "../../../chat-question-time.ts";
 import { formatReportTiming } from "../../../report-time.ts";
 import { ASK_MODES, modeLabel, type AskModeId } from "../../../ask-modes.ts";
+import { recordedSubmittedViaLabel } from "../../../submitted-via.ts";
 import { REPORT_DEPTH, label } from "../../../vocabulary.ts";
 import {
   activityKindLabel,
@@ -51,6 +52,8 @@ function ActivityRow({
   now?: Date;
 }) {
   const title = activityTitle(item);
+  // 未记录（历史行）不显示标签，避免每条旧提问都挂一个「未记录」。
+  const via = item.type === "source" ? "" : recordedSubmittedViaLabel(item.submitted_via);
   return (
     <button
       className={`logrow activity-row${selected ? " selected" : ""}`}
@@ -71,6 +74,7 @@ function ActivityRow({
             {label(REPORT_DEPTH, String(item.depth), "自定义深度")}
           </span>
         ) : null}
+        {via ? <span className="activity-chip">{via}</span> : null}
         {item.notebook_deleted_at ? (
           <span className="activity-chip">原笔记本已删除</span>
         ) : null}
