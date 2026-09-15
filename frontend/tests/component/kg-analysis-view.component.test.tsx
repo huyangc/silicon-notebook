@@ -469,6 +469,46 @@ test("可编辑成员能从分析页生成或更新；后台完成后自动重�
   expect(vi.mocked(fetchKgAnalysis).mock.calls.length).toBeGreaterThan(reportCalls);
 });
 
+test("删除知识图谱这类让分析失效的任务结束后同样重取报告，期间不假装在生成分析", async () => {
+  const view = render(
+    <KgAnalysisView
+      notebookId="nb-1"
+      canAnalyze
+      onAnalyze={() => undefined}
+      onClose={() => undefined}
+    />,
+  );
+  await screen.findByRole("heading", { name: "先看结论", level: 3 });
+  const reportCalls = vi.mocked(fetchKgAnalysis).mock.calls.length;
+  const sourceCalls = vi.mocked(fetchKgAnalysisSources).mock.calls.length;
+
+  view.rerender(
+    <KgAnalysisView
+      notebookId="nb-1"
+      canAnalyze
+      analysisBlocked
+      dataInvalidating
+      onAnalyze={() => undefined}
+      onClose={() => undefined}
+    />,
+  );
+  // 删除在跑：按钮因 analysisBlocked 禁用，但不是「正在生成…」，也还不重取。
+  expect(screen.queryByRole("button", { name: "正在生成…" })).toBeNull();
+  expect(screen.getByRole("button", { name: "更新分析" })).toBeDisabled();
+  expect(vi.mocked(fetchKgAnalysis).mock.calls.length).toBe(reportCalls);
+
+  view.rerender(
+    <KgAnalysisView
+      notebookId="nb-1"
+      canAnalyze
+      onAnalyze={() => undefined}
+      onClose={() => undefined}
+    />,
+  );
+  expect(vi.mocked(fetchKgAnalysis).mock.calls.length).toBeGreaterThan(reportCalls);
+  expect(vi.mocked(fetchKgAnalysisSources).mock.calls.length).toBeGreaterThan(sourceCalls);
+});
+
 // ------------------------------------------------------------------ 单位渲染
 
 test("计数的单位从响应的 units 读——换一张单位表，上屏文案跟着变", async () => {

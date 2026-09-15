@@ -169,6 +169,7 @@ export function KgAnalysisView({
   canAnalyze = false,
   analysisRunning = false,
   analysisBlocked = false,
+  dataInvalidating = false,
   interactive = true,
   zIndex,
   onAnalyze,
@@ -178,6 +179,12 @@ export function KgAnalysisView({
   canAnalyze?: boolean;
   analysisRunning?: boolean;
   analysisBlocked?: boolean;
+  /**
+   * 一件会让现有分析产物失效、但**不是**在生成分析的后台任务正在跑(例如删除知识图谱)。
+   * 它不点亮「正在生成…」,也不单独禁用按钮(那是 `analysisBlocked` 的事);只在它由真转假
+   * 时像 `analysisRunning` 结束一样重取报告,免得弹窗里继续摆着已被删掉的数字。
+   */
+  dataInvalidating?: boolean;
   interactive?: boolean;
   zIndex?: number;
   onAnalyze?: () => void;
@@ -310,12 +317,14 @@ export function KgAnalysisView({
   }, []);
 
   // 后台任务完成时自动取回新产物。这里只观察父层已经可靠配对 job_id 的忙碌态，
-  // 不在报告弹窗里再造一套轮询与竞态处理。
-  const previousAnalysisRunning = useRef(analysisRunning);
+  // 不在报告弹窗里再造一套轮询与竞态处理。生成分析与让分析失效的任务(删除知识图谱)
+  // 共用同一个服务端维护槽、不会同时在跑,所以把两者或起来观察同一个「由真转假」。
+  const backgroundChanging = analysisRunning || dataInvalidating;
+  const previousBackgroundChanging = useRef(backgroundChanging);
   useEffect(() => {
-    if (previousAnalysisRunning.current && !analysisRunning) refresh();
-    previousAnalysisRunning.current = analysisRunning;
-  }, [analysisRunning, refresh]);
+    if (previousBackgroundChanging.current && !backgroundChanging) refresh();
+    previousBackgroundChanging.current = backgroundChanging;
+  }, [backgroundChanging, refresh]);
 
   const changeOrder = useCallback((next: KgSourceOrder) => {
     setOrder(next);

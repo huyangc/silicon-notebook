@@ -58,7 +58,9 @@ import {
   KG_DELETE_POLL_MAX_ATTEMPTS,
   KG_DELETE_POLL_TIMED_OUT,
   KG_DELETE_RESULT_HOLD_MS,
+  KG_DELETE_UNOBSERVED,
   kgDeletePollOutcome,
+  kgDeleteTerminalSettlement,
   type KgDeleteResult,
 } from "../features/kg-maintenance/kg-delete-status";
 import {
@@ -342,6 +344,9 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
         setRelinkingNotebookIds((current) => claimNotebookSlot(current, ownerKey(owner)));
       }
       if (deletion && (deletion.running || deletion.status === "running")) {
+        // 亲眼见到在跑的那个删除就是这一格要等的任务:记下它的 job_id,终态回执只有对得上
+        // 才报数字(同进程更早一次删除的 succeeded 不算)。
+        expectedMaintenanceJobRef.current.set(maintenanceJobKey(owner, "delete"), deletion.job_id);
         setDeletingNotebookIds((current) => claimNotebookSlot(current, ownerKey(owner)));
       }
     });
@@ -725,9 +730,12 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     };
   }, [reviewAllRunning, ownerVersion, policy.canWriteKg]);
 
+  // 自动判重与删除互斥:删除会一并清掉待确认合并,判重期间删除则会把正在判的候选抽走。
+  // 两侧各自早退(删除那侧见 startKgDelete),按钮同口径禁用。
   const reviewPendingMerges = async () => {
     const owner = currentOwner();
-    if (!owner || !policyRef.current.canWriteKg || reviewBusy) return;
+    if (!owner || !policyRef.current.canWriteKg || reviewBusy
+      || deletingNotebookIds.has(ownerKey(owner))) return;
     const operation = beginOperation("review");
     setReviewBusy(true);
     effectsRef.current.notify("正在自动判重（约 1 分钟，请稍候）…");
@@ -755,7 +763,8 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
 
   const reviewAllMerges = async () => {
     const owner = currentOwner();
-    if (!owner || !policyRef.current.canWriteKg || reviewAllStarting || reviewAllRunning) return;
+    if (!owner || !policyRef.current.canWriteKg || reviewAllStarting || reviewAllRunning
+      || deletingNotebookIds.has(ownerKey(owner))) return;
     const operation = beginOperation("review-all");
     setReviewAllStarting(true);
     try {
@@ -878,13 +887,46 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     }
   };
 
-  // 删除之后图谱、待确认合并、合并状态与选中节点都要按当前范围重拉(和重新合并同一套,
-  // 含选中概念的首页重置),另外笔记本摘要(kg_ready / kg_build)与 KG 领域外那几块
-  // (来源徽标、看板状态)也读着旧事实——三件并行,各自吞自己的错,谁都不拖住释放忙碌位。
+  // 删除之后,画布上还挂着的一切都指向已不存在的对象:搜索命中(画布在搜索模式下直接画
+  // 命中节点,点一下就报错)、选中节点与它的概念详情/上下文、类型过滤、展开的邻域。先按
+  // 各自既有的清理路径作废(搜索与选点的请求序号 +1,迟到的响应一律丢弃),再按当前范围
+  // 重拉图谱、待确认合并与合并状态。重新合并那条刷新会替仍在图里的选中概念重取详情,删除
+  // 不走它:选中的对象此刻恰恰是被删掉的那批。笔记本摘要(kg_ready / kg_build)与 KG 领域
+  // 外那几块(来源徽标、Knowledge 浏览器、看板状态)也读着旧事实——三件并行,各自吞自己的
+  // 错,谁都不拖住释放忙碌位。调用方已核对过 owner 仍可见。
   const refreshAfterDelete = async (owner: KgWorkspaceOwner) => {
     const guard = () => owns(owner);
+    clearSearchTimer();
+    graphSearchRequestRef.current += 1;
+    graphNodeRequestRef.current += 1;
+    setSearch("");
+    setSearchHits([]);
+    setSearchBusy(false);
+    setSelectedTypes([]);
+    setSelectedNodeId(null);
+    setPendingFocusId(null);
+    setConceptDetailFirstPage(null, null);
+    setNodeContext(null);
+    setExpandedNodes([]);
+    setExpandedEdges([]);
+    const reloadGraph = async () => {
+      try {
+        const [graph, merges, status] = await Promise.all([
+          fetchUnifiedGraph(owner.notebookId, rangeLimitRef.current),
+          fetchPendingMerges(owner.notebookId),
+          fetchUnifiedKgStatus(owner.notebookId),
+        ]);
+        if (!owns(owner)) return;
+        setUnifiedGraph(graph);
+        setPendingMerges(filterPendingMerges(owner, merges));
+        setUnifiedStatus(status);
+        setVizBuilding(Boolean(graph.viz_building));
+      } catch (error) {
+        publishError(owner, error);
+      }
+    };
     await Promise.all([
-      refreshAfterRebuild(),
+      reloadGraph(),
       effectsRef.current.refreshNotebook(owner.notebookId, guard).catch(() => null),
       effectsRef.current.refreshAfterKgDelete(owner.notebookId, guard).catch(() => {}),
     ]);
@@ -967,6 +1009,12 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       deleteRunning = Boolean(
         deletionResult.value.running || deletionResult.value.status === "running",
       );
+      // 领养到的删除,期望的就是亲眼见到在跑的这一个 job_id(见 kgDeleteTerminalSettlement)。
+      if (deleteRunning) {
+        expectedMaintenanceJobRef.current.set(
+          maintenanceJobKey(owner, "delete"), deletionResult.value.job_id,
+        );
+      }
       setDeletingNotebookIds((current) => deleteRunning
         ? claimNotebookSlot(current, key)
         : releaseNotebookClaim(current, key));
@@ -992,6 +1040,9 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
         setRelinkingNotebookIds((current) => releaseNotebookClaim(current, key));
         return;
       }
+      // 409 之后领养探测若说「都没在跑」,会按服务端真相放掉这一格;重试的 POST 之前必须
+      // 认领回来,否则重试成功时按钮既不忙碌、也没有轮询去等它的终态。
+      if (attempt > 0) setRelinkingNotebookIds((current) => claimNotebookSlot(current, key));
       submittingMaintenanceRef.current.add(jobKey);
       try {
         const started = await relinkKg(owner.notebookId);
@@ -1038,6 +1089,8 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
         setRebuildingNotebookIds((current) => releaseNotebookClaim(current, key));
         return "denied";
       }
+      // 同 startRelink:领养探测「都没在跑」时已放掉这一格,重试的 POST 之前认领回来。
+      if (attempt > 0) setRebuildingNotebookIds((current) => claimNotebookSlot(current, key));
       submittingMaintenanceRef.current.add(jobKey);
       try {
         const started = await rebuildUnifiedKg(owner.notebookId);
@@ -1099,13 +1152,16 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
   //    若已不是它,绝不能把删除落到另一本上。
   // ② 没能开始的原因也画在按钮旁(不只走横幅):被占槽时转述服务端点名占用者的 409 文案,
   //    其余失败说没完成;同一格的旧结果在认领时先让出。
+  // 自动判重(单批 / 全部)与待确认合并的决定在飞时同样不删:删除会把它们正在处理的候选
+  // 一并清掉。
   const startKgDelete = async (notebookId: string) => {
     const owner = currentOwner();
     if (!owner || !policyRef.current.canWriteKg || owner.notebookId !== notebookId) return;
     const key = maintenanceOwnerKey(owner);
     const jobKey = maintenanceJobKey(owner, "delete");
     if (deletingNotebookIds.has(key) || relinkingNotebookIds.has(key) || rebuildingNotebookIds.has(key)
-      || buildingKg || submittingMaintenanceRef.current.has(jobKey)) return;
+      || buildingKg || submittingMaintenanceRef.current.has(jobKey)
+      || reviewBusy || reviewAllStarting || reviewAllRunning || decidingMerge !== null) return;
     setDeletingNotebookIds((current) => claimNotebookSlot(current, key));
     clearDeleteResult(key);
     expectedMaintenanceJobRef.current.delete(jobKey);
@@ -1114,6 +1170,9 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
         setDeletingNotebookIds((current) => releaseNotebookClaim(current, key));
         return;
       }
+      // 409 之后领养探测若说「都没在跑」,会放掉这一格;重试的 POST 之前认领回来,否则重试
+      // 成功时服务端在删、按钮却重新可点,也没有轮询去等它的结果。
+      if (attempt > 0) setDeletingNotebookIds((current) => claimNotebookSlot(current, key));
       submittingMaintenanceRef.current.add(jobKey);
       try {
         const started = await deleteKg(owner.notebookId);
@@ -1207,23 +1266,29 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
   }, [relinkingNotebookIds, ownerVersion]);
 
   // 删除的有界轮询,逐项镜像上面那条 relink 轮询(单飞、身份感知、提交窗口内不结算、
-  // job_id 连续对不上才收工、先刷新后释放)。差别只在结算:结果先写进按钮旁那一格,
-  // 且 job_id 对不上时的那份统计不是我们的,只能说不知道。
+  // job_id 连续对不上才收工、先刷新后释放)。差别在结算,且因为这是破坏性动作而更严:
+  // 终态回执只有 job_id 正是本标签页提交成功或亲眼见过在跑的那一个,才以它的名义报数字
+  // (kgDeleteTerminalSettlement)。一个都没期望过就静默收工——不刷新、不提示、不覆盖按钮
+  // 旁已有的那一行;期望过却对不上才说不知道。结果与提示在刷新完成之后才落地,让「已删除
+  // N 个」出现时画布与来源列表已经是删除后的样子。
   useEffect(() => {
     const owner = currentOwner();
     if (!owner) return;
     const key = maintenanceOwnerKey(owner);
     if (!deletingNotebookIds.has(key)) return;
+    const jobKey = maintenanceJobKey(owner, "delete");
     let stopped = false;
     let settled = false;
     let inFlight = false;
     let attempts = 0;
     let mismatchStreak = 0;
     const settle = async (outcome: ReturnType<typeof kgDeletePollOutcome>) => {
-      if (outcome.result && owns(owner)) effectsRef.current.notify(outcome.result.text);
       if (outcome.refresh && owns(owner)) await refreshAfterDelete(owner);
-      expectedMaintenanceJobRef.current.delete(maintenanceJobKey(owner, "delete"));
-      if (outcome.result) showDeleteResult(key, outcome.result);
+      expectedMaintenanceJobRef.current.delete(jobKey);
+      if (outcome.result) {
+        if (owns(owner)) effectsRef.current.notify(outcome.result.text);
+        showDeleteResult(key, outcome.result);
+      }
       setDeletingNotebookIds((current) => releaseNotebookClaim(current, key));
     };
     const timer = window.setInterval(async () => {
@@ -1232,7 +1297,9 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       if (attempts > KG_DELETE_POLL_MAX_ATTEMPTS) {
         settled = true;
         window.clearInterval(timer);
-        await settle(KG_DELETE_POLL_TIMED_OUT);
+        await settle(expectedMaintenanceJobRef.current.get(jobKey)
+          ? KG_DELETE_POLL_TIMED_OUT
+          : KG_DELETE_UNOBSERVED);
         return;
       }
       inFlight = true;
@@ -1240,18 +1307,28 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
         const status = await fetchKgDeleteStatus(owner.notebookId);
         if (stopped || settled || !ownsIdentity(owner)) return;
         const outcome = kgDeletePollOutcome(status);
-        if (!outcome.done) { mismatchStreak = 0; return; }
-        const jobKey = maintenanceJobKey(owner, "delete");
+        if (!outcome.done) {
+          mismatchStreak = 0;
+          // 领养探测失败而保留下来的认领没有期望 job_id;此刻亲眼见到在跑的删除就是要等的那个。
+          if (status.job_id && !submittingMaintenanceRef.current.has(jobKey)
+            && !expectedMaintenanceJobRef.current.get(jobKey)) {
+            expectedMaintenanceJobRef.current.set(jobKey, status.job_id);
+          }
+          return;
+        }
         if (submittingMaintenanceRef.current.has(jobKey)) return;
-        const expected = expectedMaintenanceJobRef.current.get(jobKey);
-        const mismatched = Boolean(expected && status.job_id !== expected);
-        if (mismatched) {
+        const settlement = kgDeleteTerminalSettlement(
+          status, expectedMaintenanceJobRef.current.get(jobKey),
+        );
+        if (settlement === "mismatch") {
           mismatchStreak += 1;
           if (mismatchStreak < MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK) return;
         }
         settled = true;
         window.clearInterval(timer);
-        await settle(mismatched ? KG_DELETE_JOB_MISMATCH : outcome);
+        await settle(settlement === "report"
+          ? outcome
+          : settlement === "mismatch" ? KG_DELETE_JOB_MISMATCH : KG_DELETE_UNOBSERVED);
       } catch { /* transient status error; retain the claim */ }
       finally { inFlight = false; }
     }, KG_MAINTENANCE_POLL_MS);

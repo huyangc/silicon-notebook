@@ -29,22 +29,30 @@ import { CHECKUP_FIX, CHECKUP_FIX_BUSY } from "../../app/vocabulary.ts";
 // `requires` 是给**复合** disabled 表达式用的加固:光断言「disabled 非平凡」拦不住
 // 「保留了别的条件、只把在飞那一项摘掉」——那种改动 disabled 仍然非平凡,守卫会假绿
 // (实测:把 `reviewAllStarting ||` 删掉,只有 requires 这条能抓到)。所以凡是 disabled
-// 由多个条件或起来的入口,都必须把那个**在飞标志**的名字钉在这里。
+// 由多个条件或起来的入口,都必须把那个**在飞标志**的名字钉在这里。它也可以是一组名字:
+// 与别的长任务共用同一资源、必须互斥的入口(知识图谱维护槽、待确认合并候选),把对方的
+// 忙碌位一并点名,摘掉任何一项都会报红。
 //
 // `module` 是这个入口的 JSX 现在住在哪个模块（缺省 page.tsx）。知识图谱视图整块搬进
 // `kg-graph-view.tsx`（PR-5 分片 3）之后，若不带这一维，表里那三项会在 page.tsx 上
 // 匹配到 0 个按钮——而「匹配 0 即失败」的响亮语义正是靠**指对模块**才有意义。
 const LONG_TASK_BUTTONS = [
   { match: "runFix(", why: "体检修复 CTA(补齐向量/重新解析/分析新增):后端无单飞,重复点=重复排活" },
-  { match: "relinkFromKgView", module: "kg-graph-view.tsx", why: "补上关联:后台任务,忙碌位由 relink/status 轮询解除,期间不能再点", requires: "kgGraph.relinking" },
-  { match: "confirmDeleteKg", module: "kg-graph-view.tsx", why: "删除知识图谱:破坏性后台任务,忙碌位由 delete/status 轮询解除,期间不能再点", requires: "kgGraph.deleting" },
+  { match: "relinkFromKgView", module: "kg-graph-view.tsx", why: "补上关联:后台任务,忙碌位由 relink/status 轮询解除,期间不能再点;删除知识图谱占着同一个维护槽", requires: ["kgGraph.relinking", "kgGraph.deleting"] },
+  {
+    match: "confirmDeleteKg",
+    module: "kg-graph-view.tsx",
+    why: "删除知识图谱:破坏性后台任务,忙碌位由 delete/status 轮询解除,期间不能再点;自动判重与合并决定在飞时也不删(候选会被一并清掉)",
+    requires: ["kgGraph.deleting", "kgGraph.reviewBusy", "kgGraph.reviewAllStarting", "kgGraph.reviewAllRunning", "kgGraph.decidingMerge"],
+  },
+  { match: "reviewPendingMerges", module: "kg-graph-view.tsx", why: "自动判重:同步等一批判完;删除知识图谱在跑时候选正被清掉", requires: ["kgGraph.reviewBusy", "kgGraph.deleting"] },
   { match: 'runScaleIndexOp("rebuild", bumpCheckupRepairPoll)', why: "H8 损坏态重建索引:该格常驻显示,不走「忙碌换取消」" },
   { match: "confirmUpload(", why: "上传:multipart 传大文件期间不能重复提交", requires: "uploadBusy" },
   { match: "reparseSource(", why: "来源重新解析:同步等完,大 PDF 可能数分钟" },
-  { match: "decideMerge(", module: "kg-graph-view.tsx", why: "待确认合并落决定:确认分支连带跑全量重建,两颗按钮都需防重复提交", requires: "kgGraph.rebuilding" },
+  { match: "decideMerge(", module: "kg-graph-view.tsx", why: "待确认合并落决定:确认分支连带跑全量重建,两颗按钮都需防重复提交;删除知识图谱在跑时候选正被清掉", requires: ["kgGraph.rebuilding", "kgGraph.deleting"] },
   { match: "runFindDuplicates(", why: "查重:全库归一化比对,大库不是瞬时的" },
   { match: "onMerge(", module: "duplicate-group-list.tsx", why: "重复条目合并:连带重拉列表/类型统计并重跑一次查重", requires: "mergingId" },
-  { match: "reviewAllMerges", module: "kg-graph-view.tsx", why: "全部自动判重:POST 在飞期间也不能再点(job id 还没回来)", requires: "kgGraph.reviewAllStarting" },
+  { match: "reviewAllMerges", module: "kg-graph-view.tsx", why: "全部自动判重:POST 在飞期间也不能再点(job id 还没回来);删除知识图谱在跑时候选正被清掉", requires: ["kgGraph.reviewAllStarting", "kgGraph.deleting"] },
   { match: "retryIndexingPipelineRebuild(", why: "索引管线重试重建:排全库重建 job,成功后按钮随投影翻 pending 卸载,失败态可再点是合法重试", requires: "editor?.busy" },
   { match: "revertIndexingPipelineToBuiltin(", why: "切回内建索引管线:同上,排全库重建 job", requires: "editor?.busy" },
   // 打开笔记本:大库的 load 相位(getNotebook + listSources)在后端要跑数秒,期间不禁用
@@ -119,8 +127,14 @@ test("工作区的长任务按钮都带非平凡的 disabled(点完不能再点)
         offenders.push(`${entry.match}：缺 disabled —— ${entry.why}`);
       } else if (TRIVIALLY_FALSE.has(expression)) {
         offenders.push(`${entry.match}：disabled=${disabled} 恒假，等于没写 —— ${entry.why}`);
-      } else if (entry.requires && !resolved.includes(entry.requires)) {
-        offenders.push(`${entry.match}：disabled=${disabled} 里没有在飞标志 ${entry.requires} —— ${entry.why}`);
+      } else if (entry.requires) {
+        // requires 可以是一个或多个标志:自己的在飞位之外,共用同一资源的互斥忙碌位
+        // (例如删除知识图谱与维护/判重)同样只能靠逐个点名防「只摘掉其中一项」。
+        for (const flag of [entry.requires].flat()) {
+          if (!resolved.includes(flag)) {
+            offenders.push(`${entry.match}：disabled=${disabled} 里没有在飞标志 ${flag} —— ${entry.why}`);
+          }
+        }
       }
     }
   }
