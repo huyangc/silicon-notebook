@@ -193,6 +193,57 @@ test("普通成员仍可查看群组知识库，但不加载审批队列且设�
   expect(screen.queryByRole("button", { name: "转让群组" })).not.toBeInTheDocument();
 });
 
+// 组名 120 / 组说明 1000(GROUP_INPUT_LIMITS)。余量提示在剩最后一成时才出现。
+const LENGTH_HINT = /还可输入|已达上限/;
+
+test("新建群组：还早时不出声，快到上限给余量，粘贴超长被 maxLength 截满时明说已达上限", async () => {
+  const user = userEvent.setup();
+  renderPage();
+
+  await screen.findByRole("heading", { name: "先进封装项目" });
+  await user.click(screen.getByRole("button", { name: "新建群组" }));
+
+  const name = screen.getByRole("textbox", { name: "群组名称" });
+  await user.click(name);
+  await user.paste("组".repeat(100));
+  expect(screen.queryByText(LENGTH_HINT)).not.toBeInTheDocument();
+
+  await user.paste("组".repeat(10));
+  expect(screen.getByRole("status")).toHaveTextContent("群组名称还可输入 10 个字");
+
+  // 粘贴会被 maxLength 当场截短、浏览器不给任何反馈:提示必须替它把截断说出来。
+  await user.clear(name);
+  await user.paste("组".repeat(130));
+  expect(name).toHaveValue("组".repeat(120));
+  expect(screen.getByRole("status")).toHaveTextContent("群组名称已达上限 120 个字");
+
+  const description = screen.getByRole("textbox", { name: "新群组的说明" });
+  await user.click(description);
+  await user.paste("述".repeat(1200));
+  expect(description).toHaveValue("述".repeat(1000));
+  expect(screen.getByText("群组说明已达上限 1000 个字")).toBeInTheDocument();
+});
+
+test("群组设置：改名与改说明同样给出余量提示，还早时不出声", async () => {
+  const user = userEvent.setup();
+  renderPage();
+
+  await screen.findByRole("heading", { name: "先进封装项目" });
+  await user.click(screen.getByRole("button", { name: "设置" }));
+  expect(screen.queryByText(LENGTH_HINT)).not.toBeInTheDocument();
+
+  const name = screen.getByLabelText("群组名称");
+  await user.clear(name);
+  await user.paste("组".repeat(112));
+  expect(screen.getByRole("status")).toHaveTextContent("群组名称还可输入 8 个字");
+
+  const description = screen.getByLabelText("群组说明");
+  await user.clear(description);
+  await user.paste("述".repeat(1001));
+  expect(description).toHaveValue("述".repeat(1000));
+  expect(screen.getByText("群组说明已达上限 1000 个字")).toBeInTheDocument();
+});
+
 test("退出后更新 hash 并自动选择剩余群组", async () => {
   const user = userEvent.setup();
   const memberDetail: GroupDetail = { ...OWNER_DETAIL, owner_id: "u2", my_role: "member" };

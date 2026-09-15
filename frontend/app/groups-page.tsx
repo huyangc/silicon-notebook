@@ -31,6 +31,7 @@ import {
   grantGroupAdminsManage,
   GROUP_INPUT_LIMITS,
   groupKindLabel,
+  groupLengthHint,
   groupRoleLabel,
   isGroupAdmin,
   leaveGroup,
@@ -91,6 +92,16 @@ function EmptyState({ icon, title, children }: { icon: ReactNode; title: string;
       <p>{children}</p>
     </div>
   );
+}
+
+/** 快到长度上限时才出声的余量提示;还早的时候一个字都不渲染(不给常驻的计数噪音)。
+ *
+ *  它不是装饰:`maxLength` 会把粘贴进来的超长文本当场截掉、不给任何反馈,而组名/组说明
+ *  是用户编辑的数据,不得静默截断。框被截满时这里说「已达上限」,截断才看得见;快到时
+ *  先出声,也不必等提交吃一个 400 才知道边界在哪。 */
+function LengthHint({ value, max, label }: { value: string; max: number; label: string }) {
+  const hint = groupLengthHint(value, max);
+  return hint ? <span className="group-length-hint" role="status">{label}{hint}</span> : null;
 }
 
 function memberLabel(member: GroupDetail["members"][number]): string {
@@ -333,6 +344,8 @@ export function GroupsPage({
                 {kinds.map((kind) => <option value={kind} key={kind}>{groupKindLabel(kind)}</option>)}
               </select>
             )}
+            {/* 排在分类下拉之后:它占满一整行,放在名称与下拉之间会把下拉挤到下一行。 */}
+            <LengthHint value={newName} max={GROUP_INPUT_LIMITS.nameMaxChars} label="群组名称" />
             <textarea
               value={newDescription}
               maxLength={GROUP_INPUT_LIMITS.descriptionMaxChars}
@@ -341,6 +354,7 @@ export function GroupsPage({
               aria-label="新群组的说明"
               onChange={(event) => setNewDescription(event.target.value)}
             />
+            <LengthHint value={newDescription} max={GROUP_INPUT_LIMITS.descriptionMaxChars} label="群组说明" />
             <div className="group-page-create-actions">
               <button className="sort-button" onClick={() => setCreating(false)}>取消</button>
               <button className="new-pill" disabled={Boolean(busy) || !newName.trim()}
@@ -621,7 +635,9 @@ export function GroupsPage({
                   </div>
                 </div>
                 {canManage ? <section className="group-settings-card"><h4>基本信息</h4><label>群组名称<input value={renameDraft} maxLength={GROUP_INPUT_LIMITS.nameMaxChars} onChange={(event) => setRenameDraft(event.target.value)} /></label>
+                  <LengthHint value={renameDraft} max={GROUP_INPUT_LIMITS.nameMaxChars} label="群组名称" />
                   <label>群组说明<textarea rows={3} value={descriptionDraft} maxLength={GROUP_INPUT_LIMITS.descriptionMaxChars} onChange={(event) => setDescriptionDraft(event.target.value)} /></label>
+                  <LengthHint value={descriptionDraft} max={GROUP_INPUT_LIMITS.descriptionMaxChars} label="群组说明" />
                   <div className="group-settings-actions"><button className="new-pill" disabled={Boolean(busy) || !renameDraft.trim()} onClick={() => { void run("save", async () => {
                     const updated = await updateGroup(detail.id, renameDraft.trim(), descriptionDraft); setDetail(updated); await refreshGroups(scope); onChanged(); setNotice("群组信息已保存。");
                   }, "保存群组信息失败"); }}>保存群组信息</button></div></section> : <p className="tool-hint">只有 owner 和组管理员可以编辑群组信息。</p>}

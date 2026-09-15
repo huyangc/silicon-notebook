@@ -12556,6 +12556,10 @@ select.group-input {
 
 .group-page-create-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 8px; }
 
+/* 组名/组说明快到长度上限时的余量提示(新建表单与设置卡共用)。占满一整行;负的上外边距
+   把它拉回所属的输入框下方,不然两个网格的行间距会让它看起来属于下一个字段。 */
+.group-length-hint { grid-column: 1 / -1; margin-top: -4px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+
 /* 两栏工作台。 */
 .group-page-shell {
   display: grid;
