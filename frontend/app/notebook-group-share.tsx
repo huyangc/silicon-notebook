@@ -26,6 +26,12 @@ import {
   type GroupSummary,
   type ShareRequest,
 } from "./group-api.ts";
+import { Pagination } from "./Pagination";
+import { useClientPagination } from "./use-client-pagination.ts";
+
+/** 「已共享给群组」与「我的共享申请」每页显示的条数。 */
+const GROUP_SHARE_PAGE_SIZE = 20;
+const NO_ENTRIES: GroupShareEntry[] = [];
 
 /** `busySlot` 里代表「正在发出共享」的那一格 —— 它不是任何一个组的 id。 */
 const SHARE_SLOT = "__share__";
@@ -162,6 +168,9 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
   const requestOptions = requestableGroups(groups, entries ?? [], requests);
   const pendingAndRejected = visibleMyShareRequests(requests);
   const busy = busySlot !== "";
+  // 两份清单都整份返回(`GET .../grants`、`GET .../share-requests` 契约上不分页),界面分页。
+  const entryPage = useClientPagination(entries ?? NO_ENTRIES, GROUP_SHARE_PAGE_SIZE, notebookId);
+  const requestPage = useClientPagination(pendingAndRejected, GROUP_SHARE_PAGE_SIZE, notebookId);
 
   return (
     <div className="stack">
@@ -177,8 +186,8 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
         <p className="tool-hint">加载中…</p>
       ) : entries.length === 0 ? (
         <p className="tool-hint">还没有共享给任何群组。</p>
-      ) : (
-        entries.map((entry) => (
+      ) : (<>
+        {entryPage.pageItems.map((entry) => (
           <div className="group-row" key={entry.groupId}>
             <div className="group-row-main">
               <span className="group-row-name">
@@ -236,8 +245,9 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
             >{busySlot === entry.groupId ? "撤销中…" : "撤销共享"}</button>
             </div>
           </div>
-        ))
-      )}
+        ))}
+        <Pagination page={entryPage.page} pageSize={GROUP_SHARE_PAGE_SIZE} total={entryPage.total} onPage={entryPage.setPage} label="已共享群组分页" />
+      </>)}
 
       {options.length > 0 ? (<>
         {/* 未共享门的提示挨着**将要触发它的那个按钮**(设计文档 §6.1)。 */}
@@ -326,7 +336,7 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
       {pendingAndRejected.length > 0 && (
         <div className="stack" style={{ gap: 8 }}>
           <span className="section-title">我的共享申请</span>
-          {pendingAndRejected.map((req) => (
+          {requestPage.pageItems.map((req) => (
             <div className="group-row" key={req.id}>
               <div className="group-row-main">
                 <span className="group-row-name">{req.group_name || "群组"}</span>
@@ -347,6 +357,7 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
               )}
             </div>
           ))}
+          <Pagination page={requestPage.page} pageSize={GROUP_SHARE_PAGE_SIZE} total={requestPage.total} onPage={requestPage.setPage} label="我的共享申请分页" />
         </div>
       )}
     </div>

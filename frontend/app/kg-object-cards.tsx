@@ -55,11 +55,13 @@ const KG_OCCURRENCE_PAGE_SIZE = 10;
 /**
  * 一个知识对象的出处清单 + 分页。图谱视图与知识浏览器此前各自硬截到前 10 / 前 5 条,
  * 超出部分无从查看;两处共用这一份,序号跨页连续(第 2 页从 11 开始)。
- * `resetKey` 给「同一个组件实例换了一个对象」的场景(图谱视图换选中节点)用。
+ * `resetKey` 给「同一个组件实例换了一个对象」的场景(图谱视图换选中节点)用;`label`
+ * 要能区分同屏的几份出处清单(知识浏览器可以同时展开多条)。
  */
-export function KgOccurrenceList({ occurrences, resetKey }: {
+export function KgOccurrenceList({ occurrences, resetKey, label: pagerLabel }: {
   occurrences: readonly KgOccurrence[];
   resetKey?: string;
+  label: string;
 }) {
   const { page, pageItems, total, setPage } = useClientPagination(occurrences, KG_OCCURRENCE_PAGE_SIZE, resetKey);
   return (
@@ -74,7 +76,7 @@ export function KgOccurrenceList({ occurrences, resetKey }: {
           />
         );
       })}
-      <Pagination page={page} pageSize={KG_OCCURRENCE_PAGE_SIZE} total={total} onPage={setPage} label="出处分页" />
+      <Pagination page={page} pageSize={KG_OCCURRENCE_PAGE_SIZE} total={total} onPage={setPage} label={pagerLabel} />
     </>
   );
 }

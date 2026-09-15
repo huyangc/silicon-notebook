@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -350,4 +350,44 @@ test("已驳回的申请只读回显,没有撤回按钮", async () => {
   await screen.findByText("我的共享申请");
   expect(screen.getByText("已驳回")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "撤回申请" })).not.toBeInTheDocument();
+});
+
+// 两份清单的端点契约上不分页(整份返回),界面每页 20 条。
+test("已共享的群组超过一页时分页展示", async () => {
+  const user = userEvent.setup();
+  vi.mocked(listGroups).mockResolvedValue([]);
+  vi.mocked(listNotebookGrants).mockResolvedValue(Array.from({ length: 25 }, (_, index) => grant({
+    id: `gr${index + 1}`,
+    principal_id: `g${index + 1}`,
+    principal_name: `群组${String(index + 1).padStart(2, "0")}`,
+  })));
+  renderSection();
+
+  expect(await screen.findByText("群组01")).toBeInTheDocument();
+  expect(screen.getByText("群组20")).toBeInTheDocument();
+  expect(screen.queryByText("群组21")).not.toBeInTheDocument();
+
+  const pager = screen.getByRole("navigation", { name: "已共享群组分页" });
+  await user.click(within(pager).getByRole("button", { name: "下一页" }));
+  expect(screen.getByText("群组25")).toBeInTheDocument();
+  expect(screen.queryByText("群组01")).not.toBeInTheDocument();
+});
+
+test("我的共享申请超过一页时分页展示", async () => {
+  const user = userEvent.setup();
+  vi.mocked(listGroups).mockResolvedValue([]);
+  vi.mocked(listMyShareRequests).mockResolvedValue(Array.from({ length: 22 }, (_, index) => shareRequest({
+    id: `sr${index + 1}`,
+    group_id: `g${index + 1}`,
+    group_name: `申请组${String(index + 1).padStart(2, "0")}`,
+  })));
+  renderSection();
+
+  expect(await screen.findByText("申请组01")).toBeInTheDocument();
+  expect(screen.queryByText("申请组21")).not.toBeInTheDocument();
+
+  const pager = screen.getByRole("navigation", { name: "我的共享申请分页" });
+  await user.click(within(pager).getByRole("button", { name: "下一页" }));
+  expect(screen.getByText("申请组22")).toBeInTheDocument();
+  expect(screen.queryByText("申请组01")).not.toBeInTheDocument();
 });

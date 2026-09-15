@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
@@ -217,4 +217,65 @@ test("解析问题超过一页时按 offset 翻页，换筛选条件回到第一
   expect(mocks.fetchAnalysisIssues).toHaveBeenLastCalledWith(
     expect.objectContaining({ category: "source_parse", offset: 0 }),
   );
+});
+
+function issueRow(index: number) {
+  return {
+    id: `issue-${index}`, category: "source_parse" as const, status: "open" as const,
+    code: `CODE_${index}`, summary: "摘要", owner_id: "system", notebook_id: "", notebook_name: "",
+    source_id: "", source_title: "", file_name: "", source_type: "", workload_id: "",
+    workload_label: "", model_area: "", failure_kind: "", support_id: "", parent_id: "",
+    created_at: "2026-08-31T01:00:00+00:00", updated_at: "2026-08-31T01:00:00+00:00",
+    resolved_at: "", expires_at: "2026-09-30T01:00:00+00:00", artifact_available: false,
+    source_deleted: false, notebook_deleted: false,
+  };
+}
+
+test("翻页请求在途时换了筛选条件，晚到的旧页响应不会盖掉新结果", async () => {
+  // 翻页控件在加载中禁用,连点翻页进不来;筛选下拉框不禁用,这是乱序响应真正的来路。
+  window.history.replaceState({}, "", "/admin/usage?sheet=issues");
+  let releaseSecondPage!: (value: unknown) => void;
+  mocks.fetchAnalysisIssues.mockReset();
+  mocks.fetchAnalysisIssues.mockImplementation(({ offset = 0, category = "" }: { offset?: number; category?: string }) => {
+    if (category) {
+      return Promise.resolve({ total: 1, items: [{ ...issueRow(900), code: "FILTERED" }] });
+    }
+    if (offset === 50) return new Promise((resolve) => { releaseSecondPage = resolve; });
+    return Promise.resolve({ total: 120, items: Array.from({ length: 50 }, (_, i) => issueRow(i)) });
+  });
+  const user = userEvent.setup();
+  render(<AnalysisIssuesSheet users={[]} />);
+  expect(await screen.findByText("CODE_0")).toBeInTheDocument();
+
+  await user.click(within(screen.getByRole("navigation", { name: "解析问题分页" })).getByRole("button", { name: "下一页" }));
+  await waitFor(() => expect(releaseSecondPage).toBeTypeOf("function"));
+  await user.selectOptions(screen.getByRole("combobox", { name: "类型" }), "source_parse");
+  expect(await screen.findByText("FILTERED")).toBeInTheDocument();
+
+  releaseSecondPage({ total: 120, items: Array.from({ length: 50 }, (_, i) => issueRow(50 + i)) });
+  await new Promise((settle) => setTimeout(settle, 0));
+  expect(screen.getByText("FILTERED")).toBeInTheDocument();
+  expect(screen.queryByText("CODE_50")).not.toBeInTheDocument();
+});
+
+test("刷新时当前页的记录已被清理，退回最后一个有内容的页且不闪空态", async () => {
+  window.history.replaceState({}, "", "/admin/usage?sheet=issues");
+  let total = 60;
+  mocks.fetchAnalysisIssues.mockReset();
+  mocks.fetchAnalysisIssues.mockImplementation(async ({ offset = 0 }: { offset?: number }) => ({
+    total,
+    items: Array.from({ length: Math.max(0, Math.min(50, total - offset)) }, (_, i) => issueRow(offset + i)),
+  }));
+  const user = userEvent.setup();
+  render(<AnalysisIssuesSheet users={[]} />);
+  expect(await screen.findByText("CODE_0")).toBeInTheDocument();
+  await user.click(within(screen.getByRole("navigation", { name: "解析问题分页" })).getByRole("button", { name: "下一页" }));
+  expect(await screen.findByText("CODE_50")).toBeInTheDocument();
+
+  total = 30; // 第二页的记录都过期了
+  await user.click(screen.getByRole("button", { name: "刷新" }));
+
+  expect(await screen.findByText("CODE_29")).toBeInTheDocument();
+  expect(screen.queryByText("当前筛选范围内没有解析问题。")).not.toBeInTheDocument();
+  expect(mocks.fetchAnalysisIssues).toHaveBeenLastCalledWith(expect.objectContaining({ offset: 0 }));
 });

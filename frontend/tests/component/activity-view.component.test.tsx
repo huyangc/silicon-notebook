@@ -293,6 +293,30 @@ test("来源清单超过一页时「加载更多来源」按已取回条数取�
   expect(screen.queryByText(/已显示/)).not.toBeInTheDocument();
 });
 
+test("追加页在途时换了被查看用户，迟到的追加页被丢弃", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([]));
+  const late = deferred<ReturnType<typeof sourcePage>>();
+  mocks.fetchUserNotebookSources
+    .mockResolvedValueOnce(sourcePage([failedSource()]))
+    .mockReturnValueOnce(late.promise)
+    .mockResolvedValue(sourcePage([failedSource()], 1));
+  const { rerender } = view();
+
+  await user.click(await screen.findByRole("button", { name: "展开《笔记本一》的来源" }));
+  await screen.findByText("季度报告");
+  await user.click(screen.getByRole("button", { name: "加载更多来源" }));
+
+  rerender(<ActivityView now={NOW} scopeKey='["activity","user-2",""]' userId="user-2" />);
+  await user.click(await screen.findByRole("button", { name: "展开《笔记本一》的来源" }));
+  expect(await screen.findByText("季度报告")).toBeInTheDocument();
+
+  late.resolve(sourcePage([{ ...failedSource(), id: "src-late", title: "上一位用户的来源", display_title: "上一位用户的来源" }]));
+  await new Promise((settle) => setTimeout(settle, 0));
+  expect(screen.queryByText("上一位用户的来源")).not.toBeInTheDocument();
+});
+
 test("追加页失败只在按钮旁报错，已列出的来源保留且可以重试", async () => {
   const user = userEvent.setup();
   mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);

@@ -42,7 +42,7 @@ const LONG_TASK_BUTTONS = [
   { match: "reparseSource(", why: "来源重新解析:同步等完,大 PDF 可能数分钟" },
   { match: "decideMerge(", module: "kg-graph-view.tsx", why: "待确认合并落决定:确认分支连带跑全量重建,两颗按钮都需防重复提交", requires: "kgGraph.rebuilding" },
   { match: "runFindDuplicates(", why: "查重:全库归一化比对,大库不是瞬时的" },
-  { match: "onMerge(", module: "duplicate-group-list.tsx", why: "重复条目合并:连带重拉列表/类型统计并重跑一次查重(分页改造把这颗按钮连同重复组清单一起搬进了 duplicate-group-list.tsx——page.tsx 是 Next.js App Router 的路由文件,不能有除 default 外的具名导出)" },
+  { match: "onMerge(", module: "duplicate-group-list.tsx", why: "重复条目合并:连带重拉列表/类型统计并重跑一次查重", requires: "mergingId" },
   { match: "reviewAllMerges", module: "kg-graph-view.tsx", why: "全部自动判重:POST 在飞期间也不能再点(job id 还没回来)", requires: "kgGraph.reviewAllStarting" },
   { match: "retryIndexingPipelineRebuild(", why: "索引管线重试重建:排全库重建 job,成功后按钮随投影翻 pending 卸载,失败态可再点是合法重试", requires: "editor?.busy" },
   { match: "revertIndexingPipelineToBuiltin(", why: "切回内建索引管线:同上,排全库重建 job", requires: "editor?.busy" },
@@ -51,9 +51,8 @@ const LONG_TASK_BUTTONS = [
   // (`.notebook-card-main`)与列表行里同一个动作的四个单元格(标题 + 来源/日期/角色),
   // 因为它们的 onClick 都以 `openNotebook(notebook.id)` 起头——「⋮ 菜单」
   // (openNotebookMenu)与「N 条记忆」(openNotebookMemory)是**另外的动作**,函数名不同,
-  // 天然不匹配,也确实不该禁用。分页改造把这五颗按钮连同笔记本集合的卡片/列表渲染
-  // 一起搬进了 notebook-collection-section.tsx(page.tsx 是 Next.js App Router 的
-  // 路由文件,不能有除 default 外的具名导出)。
+  // 天然不匹配,也确实不该禁用。这五颗按钮住在 notebook-collection-section.tsx;
+  // page.tsx 有没有把真正的在飞状态传进去,由下一条测试钉。
   { match: "openNotebook(notebook.id)", module: "notebook-collection-section.tsx", why: "打开笔记本:load 相位数秒,连点会叠出多组并行请求(网格卡片 + 列表行四格)", requires: "openingNotebookId" },
 ];
 
@@ -126,6 +125,29 @@ test("工作区的长任务按钮都带非平凡的 disabled(点完不能再点)
   }
 
   assert.deepEqual(offenders, []);
+});
+
+test("搬出 page.tsx 的长任务按钮:page.tsx 传进去的是真正的在飞状态", async () => {
+  // 上一条只钉组件内部「disabled 读了 prop」。prop 在 page.tsx 被传成 null,类型照过、
+  // 组件测试本来就传 null,守卫也全绿——按钮却永远不禁用。所以接线这一侧单独钉。
+  const page = await parseModule("page.tsx");
+
+  const sections = jsxElements(page, "NotebookCollectionSection");
+  assert.equal(sections.length, 2, "page.tsx 应当恰好挂两处 NotebookCollectionSection(自有 / 群组)");
+  for (const section of sections) {
+    assert.equal(
+      section.bindings.openingNotebookId, "openingNotebookId",
+      "NotebookCollectionSection 的 openingNotebookId 没有接到真正的打开中状态——打开按钮连点会叠出并行请求",
+    );
+  }
+
+  const duplicates = jsxElements(page, "DuplicateGroupList");
+  assert.equal(duplicates.length, 1, "page.tsx 应当恰好挂一处 DuplicateGroupList");
+  assert.equal(
+    duplicates[0].bindings.mergingId, "mergingId",
+    "DuplicateGroupList 的 mergingId 没有接到真正的合并中状态——合并按钮连点会重复合并",
+  );
+  assert.match(duplicates[0].bindings.onMerge ?? "", /runMerge\(/, "DuplicateGroupList 的 onMerge 没有接到 runMerge");
 });
 
 test("page.tsx 的长任务 file input 也带非平凡的 disabled，且表达式里含在飞标志", async () => {
