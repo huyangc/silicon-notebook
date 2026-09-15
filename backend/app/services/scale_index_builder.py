@@ -1124,6 +1124,11 @@ class ScaleIndexBuilder:
         cseq = int(self.projections.version_signal(notebook_id)[1])
         full = self._derive_object_graph_lite(notebook_id)
         if not full["nodes"]:
+            # An EMPTY graph publishes nothing — but a live root left over from
+            # when the graph was non-empty (the notebook's KG was deleted) would
+            # otherwise keep describing it forever: every later read judges it
+            # stale and lands right back here. Retire it instead.
+            self.retire_viz(notebook_id)
             return None
         viz_ids, viz_adj, viz_deg, viz_types, viz_names, viz_payload = (
             viz_index_module.arrays_from_graph(full)
@@ -1158,3 +1163,26 @@ class ScaleIndexBuilder:
         )
         self.cache_viz(notebook_id, self.artifacts.load_viz(notebook_id))
         return manifest
+
+    def retire_viz(self, notebook_id: str) -> bool:
+        """Publish "no standalone viz" for this notebook; True when a live root
+        was retired, False when there was none (nothing touched).
+
+        Same store primitives and claim discipline as ``save_viz``'s swap: the
+        rename to ``.old`` and the ``.old`` cleanup each re-verify the claim
+        (``ScaleBuildLockLost`` propagates, nothing renamed/deleted at that
+        step), and the claim is whichever one ``ScaleArtifactRuntime`` holds
+        for this notebook — a builder used directly verifies trivially.
+
+        No cache write is needed: once both the live root and its ``.old`` are
+        gone, ``ScaleArtifactRuntime.viz_index``'s disk probe reads
+        ``MANIFEST_ABSENT`` and drops the warm entry before serving anything.
+        """
+        live = self.artifacts.viz_dir(notebook_id)
+
+        def verify() -> bool:
+            return self.verify_scale_build_lock(notebook_id)
+
+        preserved = self.artifacts.retire_live_directory(live, verify_held=verify)
+        self.artifacts.finalize_swap(live, preserved, verify_held=verify)
+        return bool(preserved)

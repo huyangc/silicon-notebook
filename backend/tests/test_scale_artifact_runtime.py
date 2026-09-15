@@ -684,6 +684,46 @@ def _replace_viz_root_out_of_band(repo, notebook_id):
     staged.rename(live)
 
 
+def test_an_emptied_graph_retires_the_standalone_viz_it_left_behind(
+    repo, monkeypatch
+):
+    """A graph emptied under a live standalone viz (the standalone
+    ``delete_notebook_kg`` here, which does not refresh the preview itself)
+    used to keep that root forever: ``build_viz`` returned ``None`` for the
+    empty graph without touching the artifact, so every later read judged it
+    stale, served it, and spawned another no-op build. The rebuild now retires
+    the root, and the warm cache entry cannot outlive it.
+
+    Mutation anchor: restore the bare ``return None`` on the empty graph and
+    the root is still on disk (and the object-level read repaints the deleted
+    node)."""
+    notebook, scale, first = _warm_standalone_viz(repo)
+    assert first.viz_ids, "precondition: a non-empty preview is warm"
+    live = Path(str(repo._runtime.scale_artifact_store.viz_dir(notebook.id)))
+    assert (live / "manifest.json").exists()
+    spawned: list[str] = []
+    monkeypatch.setattr(
+        scale, "_start_daemon", lambda name, _target: spawned.append(name)
+    )
+
+    repo.delete_notebook_kg(notebook.id)
+    assert scale.build_viz(notebook.id) is None
+
+    assert not live.exists()
+    assert not Path(f"{live}.old").exists()
+    assert notebook.id in scale.viz_cache, (
+        "precondition for the cache half: the stale entry is still warm"
+    )
+    assert scale.viz_index(notebook.id) is None
+    assert notebook.id not in scale.viz_cache
+    graph = repo.unified_graph(notebook.id, level="object", limit=80)
+    assert graph["nodes"] == [] and graph["total_nodes"] == 0
+    assert spawned == []
+    # No artifact at all is still a pure no-op.
+    assert scale.build_viz(notebook.id) is None
+    assert not live.exists()
+
+
 def test_a_same_version_viz_republish_is_picked_up_without_a_restart(repo):
     """P2, codex PR#643 R18. ``_viz_manifest_fresh``'s two gates
     (``version``/``cluster_seq``) are database-derived, so a cross-process

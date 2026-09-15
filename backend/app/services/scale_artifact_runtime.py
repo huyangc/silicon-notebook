@@ -1385,6 +1385,68 @@ class ScaleArtifactRuntime:
                 )
                 return None
 
+    def retire_viz(self, notebook_id: str) -> bool:
+        """Retire the standalone viz root under the same cross-process claim
+        ``build_viz`` takes, without deriving anything. True when a live root
+        was retired; a refused or lost claim logs and returns False with the
+        root untouched (the same "not this time" ``build_viz`` answers)."""
+        with self._claim_viz_build(notebook_id) as claimed:
+            if not claimed:
+                self._log_viz_retire_skipped(
+                    notebook_id,
+                    "the scale build claim is held elsewhere or could not "
+                    "be evaluated",
+                )
+                return False
+            try:
+                return self.builder.retire_viz(notebook_id)
+            except ScaleBuildLockLost:
+                self._log_viz_retire_skipped(
+                    notebook_id,
+                    "the scale build claim was lost before the retirement",
+                )
+                return False
+
+    def _log_viz_retire_skipped(self, notebook_id: str, why: str) -> None:
+        try:
+            self.event_log.logger.info(
+                "viz index retirement for %s skipped: %s; the previous "
+                "standalone viz root was left in place",
+                notebook_id,
+                why,
+            )
+        except Exception:  # noqa: BLE001 - logging must never fail the caller
+            pass
+
+    def refresh_viz_after_graph_reset(self, notebook_id: str) -> None:
+        """Bring the standalone viz in line with a graph that was just reset
+        (「删除知识图谱」), so the first graph-view read after it is correct.
+
+        The reset advanced ``kg_reset_epoch``, so the old standalone root is
+        stale — and a stale root is still SERVED (``_serve_stale_viz``) until a
+        refresh publishes over it. Within the in-process build budget this runs
+        ``build_viz``: remaining hidden Memory/Knowhow objects get a fresh root,
+        an empty graph retires the old one. Over the budget it only retires —
+        the same refusal to materialise a large graph in this process that
+        ``_viz_lazy_build_refused`` and the rebuild tail apply; the graph view
+        then reports "no preview yet" until the scale index build publishes
+        one, instead of repainting deleted nodes.
+
+        The scale-EMBEDDED viz needs nothing here: ``viz_index`` serves it only
+        through ``load()``'s exact version match, and the reset's epoch is part
+        of ``version()``.
+
+        Claim-guarded through ``build_viz``/``retire_viz``: when the claim is
+        held elsewhere nothing changes here, and the old root keeps being
+        served stale until a later refresh succeeds (``_serve_stale_viz``'s
+        background build within the budget, the scale index build over it).
+        Callers treat this as fail-open."""
+        count = int(self.projections.effective_object_count(notebook_id))
+        if count <= self.settings.viz_sync_build_max_objects:
+            self.build_viz(notebook_id)
+        else:
+            self.retire_viz(notebook_id)
+
     # ------------------------------ status and scheduling
 
     def state_signature(self, notebook_id: str) -> tuple:
