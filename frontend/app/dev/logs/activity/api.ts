@@ -9,6 +9,7 @@ import type {
   ActivityTypeFilter,
   AskDetail,
   PaginatedSources,
+  ReportDetail,
 } from "./types";
 
 const TAG = "admin-activity";
@@ -99,5 +100,12 @@ export function fetchUserNotebookSource(
 export function fetchUserAskDetail(userId: string, jobId: string): Promise<AskDetail> {
   return get<AskDetail>(
     `/admin/users/${encodeURIComponent(userId)}/asks/${encodeURIComponent(jobId)}`,
+  );
+}
+
+// GET /admin/users/{user_id}/reports/{report_id}
+export function fetchUserReportDetail(userId: string, reportId: string): Promise<ReportDetail> {
+  return get<ReportDetail>(
+    `/admin/users/${encodeURIComponent(userId)}/reports/${encodeURIComponent(reportId)}`,
   );
 }

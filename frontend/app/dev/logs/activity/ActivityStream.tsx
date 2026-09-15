@@ -15,7 +15,12 @@ import {
 import { SourceAnomalies } from "./source-view.tsx";
 import type { ActivityItem, ActivityTypeFilter } from "./types";
 
-const ACTIVITY_TYPE_OPTIONS: Array<{ value: ActivityTypeFilter; label: string }> = [
+export type ActivityTypeOption = { value: ActivityTypeFilter; label: string };
+
+// 默认的四选一(含「全部」)。嵌入专用分析页(如 QuestionAnalysisSheet)按「允许的
+// 活动类型子集」传入自己的 `typeOptions`(见 ActivityView 的 activityTypeOptions),
+// 覆盖这份默认列表——按钮组、aria-pressed、失败重试等既有逻辑不变。
+const DEFAULT_ACTIVITY_TYPE_OPTIONS: ActivityTypeOption[] = [
   { value: "", label: "全部" },
   { value: "ask", label: "提问" },
   { value: "source", label: "来源" },
@@ -115,6 +120,7 @@ export function ActivityStream({
   identityErrored,
   now,
   showTypeFilter = true,
+  typeOptions = DEFAULT_ACTIVITY_TYPE_OPTIONS,
 }: {
   items: ActivityItem[];
   activityType?: ActivityTypeFilter;
@@ -131,15 +137,17 @@ export function ActivityStream({
   identityErrored?: boolean;
   now?: Date;
   showTypeFilter?: boolean;
+  /** 允许的活动类型子集(每项含 value/label)。省略时用默认四选一(含「全部」)。 */
+  typeOptions?: ActivityTypeOption[];
 }) {
   return (
-    <div className={`activity-stream${activityType === "ask" ? " activity-stream-question-overview" : ""}`}>
+    <div className={`activity-stream${activityType === "ask" || activityType === "report" ? " activity-stream-question-overview" : ""}`}>
       <div className="activity-stream-head">
         <div className="activity-col-head">
-          {activityType === "ask" ? "提问概览" : "活动"}
+          {activityType === "ask" ? "提问概览" : activityType === "report" ? "报告概览" : "活动"}
         </div>
         {showTypeFilter && <div className="activity-type-filter" aria-label="按活动类型筛选" role="group">
-          {ACTIVITY_TYPE_OPTIONS.map((option) => (
+          {typeOptions.map((option) => (
             <button
               aria-pressed={activityType === option.value}
               className={`activity-type-button${activityType === option.value ? " active" : ""}`}

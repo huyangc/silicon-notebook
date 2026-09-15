@@ -165,6 +165,30 @@ test("用户总览用两个新页签承载只读分析，不给用户列表增�
   expect(window.location.search).toContain("sheet=issues");
 });
 
+// F3:提问分析页签里的问答/深度报告类型筛选把 activity_type 写进 URL(QuestionAnalysisSheet
+// 内的 ActivityView 负责写入,这里只 mock 掉它的内容)。离开提问分析页签回到用户列表时,
+// 它必须跟 owner 一样被清掉,不能作为死参数留在 URL 上。
+test("切回用户列表时 URL 不再带 activity_type", async () => {
+  primeCommonMocks();
+  const user = userEvent.setup();
+  window.history.replaceState(
+    {}, "", "/admin/usage?sheet=questions&owner=user-target&activity_type=report",
+  );
+
+  render(<AdminUsagePage />);
+  // 页面在 sheet=questions 下渲染的是(mock 过的)QuestionAnalysisSheet,不是用户表——
+  // 用它站住等页面就绪,而不是 targetRow()(那要等的是用户表那行,这里根本没渲染)。
+  expect(await screen.findByText("提问分析内容")).toBeInTheDocument();
+  expect(window.location.search).toContain("activity_type=report");
+
+  await user.click(screen.getByRole("button", { name: "用户列表" }));
+
+  await targetRow();
+  expect(window.location.search).not.toContain("activity_type");
+  expect(window.location.search).not.toContain("owner");
+  expect(window.location.search).not.toContain("sheet");
+});
+
 test("用户列表同时保留提问分析与该用户的 LLM 日志入口", async () => {
   primeCommonMocks();
   render(<AdminUsagePage />);

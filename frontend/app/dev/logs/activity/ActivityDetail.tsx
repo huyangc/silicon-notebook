@@ -4,12 +4,14 @@
 // 三类详情共用既有渲染件，不另造一套：
 //   · 推理轨迹 → answer-panel.tsx 的 ReasoningTracePanel（与 knowhow-panel 同一用法）
 //   · 答案正文 → 同文件的 AnswerView
+//   · 报告正文 → report-view.tsx 的 ReportMarkdown
 //   · 来源异常小字 → AnomalyBadge + sourceAnomalies()（经 source-view.tsx）
 //   · 提问时间 → chat-question-time.ts；报告耗时 → report-time.ts
 
 import { AnswerView, ReasoningTracePanel } from "../../../answer-panel.tsx";
 import type { ReasoningTraceStep } from "../../../ask-stream.ts";
 import { formatQuestionTime } from "../../../chat-question-time.ts";
+import { ReportMarkdown } from "../../../report-view.tsx";
 import { formatReportTiming } from "../../../report-time.ts";
 import { ASK_MODES, modeLabel, type AskModeId } from "../../../ask-modes.ts";
 import { REPORT_DEPTH, label } from "../../../vocabulary.ts";
@@ -17,11 +19,14 @@ import type { AskResponse } from "../../../workspace-model.ts";
 import { ActivityDetailBoundary } from "./DetailBoundary.tsx";
 import { activityStatusLabel, activityTitle, activityTone } from "./format.ts";
 import { SourceAnomalies } from "./source-view.tsx";
-import type { ActivityItem, ActivityReport, ActivitySource, AskDetail } from "./types";
+import type { ActivityItem, ActivityReport, ActivitySource, AskDetail, ReportDetail } from "./types";
 
 // 这是一个只读的排障视图：AnswerView 的交互回调在这里都没有承接方，所以**一个都不传**
 // ——它们全是可选 prop，缺省即那颗按钮不渲染（onSaveMemory / onFeedback /
 // onOpenKnowledgeGraph / onOpenKnowhowRow / onBuildScaleIndex / onOpenSource）。
+// ReportMarkdown 同理：不传 notebookId / onPreviewImage，正文里的附图整段不渲染
+// （与「这段没有附图」等价，不是渲染失败）——管理员不在对方笔记本的 participant
+// 集内，传一个真 notebookId 只会让附图资产请求必 404。
 //
 // ⚠ 曾经的做法是传空实现、再由 logs.css 隐藏，那条路是错的：CSS 只盖住了
 // `.answer-feedback` 与索引横幅的按钮，引用浮层里的「知识图谱」/「在表格中查看」
@@ -190,11 +195,30 @@ function SourceDetailPane({
 
 function ReportDetailPane({
   item,
+  detail,
+  loading,
+  error,
   now,
 }: {
   item: ActivityReport;
+  detail: ReportDetail | null;
+  loading: boolean;
+  error: string;
   now?: Date;
 }) {
+  const failure = detail?.error ?? "";
+  const failed = (detail?.status ?? item.status) === "failed";
+  // 与 AskDetailPane 同一条规则:详情端点的 notebook_deleted_at 是权威——活动流条目
+  // 可能在删除笔记本与详情请求赛跑时仍描述一个存活笔记本,详情端点会在级联删除后
+  // 落到留存回落投影。
+  const retentionItem = detail?.notebook_deleted_at
+    ? {
+        ...item,
+        notebook_name: detail.notebook_name || item.notebook_name,
+        notebook_deleted_at: detail.notebook_deleted_at,
+        retained_until: detail.retained_until || item.retained_until,
+      }
+    : item;
   return (
     <div className="activity-detail-body">
       <div className="activity-detail-head">
@@ -204,7 +228,7 @@ function ReportDetailPane({
         </span>
       </div>
       <h2 className="activity-detail-title">{activityTitle(item)}</h2>
-      <RetainedActivityNotice item={item} now={now} />
+      <RetainedActivityNotice item={retentionItem} now={now} />
       {/* 与活动流行上同一条规则：耗时只能来自 generation_started_at → updated_at。 */}
       <p className="activity-detail-time">
         {formatReportTiming(
@@ -215,6 +239,26 @@ function ReportDetailPane({
           now,
         )}
       </p>
+      {error ? <div className="errorbar">{error}</div> : null}
+      {loading ? <div className="empty">加载中…</div> : null}
+      {!loading && !error && failed && failure ? (
+        <div className="detail-error">
+          <strong>失败原因：</strong>
+          {failure}
+        </div>
+      ) : null}
+      {!loading && !error && detail?.content_md ? (
+        <div className="activity-report-body">
+          {/* 只读排障视图:不传 notebookId/onPreviewImage——管理员不在对方笔记本的
+              participant 集内,附图资产请求必 404(理由同上方 AnswerView 调用点的
+              notebookId={null} 注释)。ReportMarkdown 在两者缺省时整段附图不渲染,
+              与「无图」等价,不是渲染失败。 */}
+          <ReportMarkdown markdown={detail.content_md} references={detail.references} />
+        </div>
+      ) : null}
+      {!loading && !error && !detail?.content_md && !failure && !retentionItem.notebook_deleted_at ? (
+        <div className="empty">这份报告还没有生成正文</div>
+      ) : null}
     </div>
   );
 }
@@ -224,6 +268,9 @@ export function ActivityDetail({
   askDetail,
   askDetailLoading,
   askDetailError,
+  reportDetail,
+  reportDetailLoading,
+  reportDetailError,
   notebookNames,
   now,
 }: {
@@ -231,6 +278,9 @@ export function ActivityDetail({
   askDetail: AskDetail | null;
   askDetailLoading: boolean;
   askDetailError: string;
+  reportDetail: ReportDetail | null;
+  reportDetailLoading: boolean;
+  reportDetailError: string;
   notebookNames: Record<string, string>;
   now?: Date;
 }) {
@@ -254,7 +304,13 @@ export function ActivityDetail({
         ) : item.type === "source" ? (
           <SourceDetailPane item={item} now={now} />
         ) : (
-          <ReportDetailPane item={item} now={now} />
+          <ReportDetailPane
+            detail={reportDetail}
+            error={reportDetailError}
+            item={item}
+            loading={reportDetailLoading}
+            now={now}
+          />
         )}
       </ActivityDetailBoundary>
     </div>

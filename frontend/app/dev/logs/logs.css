@@ -147,6 +147,7 @@
 .activity-detail-facts dd { margin: 0; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .activity-detail-body .reasoning-trace-panel { margin-top: 14px; }
 .activity-answer { margin-top: 14px; }
+.activity-report-body { margin-top: 14px; }
 /* ⚠ 这里刻意**没有**任何隐藏交互控件的规则。只读排障视图不给 AnswerView 传那些
    回调，缺省即不渲染（见 ActivityDetail.tsx 顶部注释）——用 CSS 盖住控件曾让引用
    浮层里的三颗按钮以启用态活了下来，点了没反应。样式表不是控件可用性的判据。 */

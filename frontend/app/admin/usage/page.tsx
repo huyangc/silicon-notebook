@@ -732,7 +732,13 @@ export default function AdminUsagePage() {
     const params = new URLSearchParams(window.location.search);
     if (next === "users") params.delete("sheet");
     else params.set("sheet", next);
-    if (next === "users") params.delete("owner");
+    // 离开提问分析页签回到用户列表时,连 activity_type(问答/深度报告的类型筛选)
+    // 一起清掉——它和 owner 一样是提问分析页签范围内的参数,留在 URL 里会在下次
+    // 直接打开 /admin/usage?sheet=questions... 之外的场景造成误解。
+    if (next === "users") {
+      params.delete("owner");
+      params.delete("activity_type");
+    }
     const query = params.toString();
     window.history.replaceState(null, "", query ? `?${query}` : window.location.pathname);
   }

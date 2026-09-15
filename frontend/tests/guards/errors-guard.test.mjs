@@ -129,6 +129,12 @@ const APPROVED_DIAGNOSTIC_READS = Object.freeze({
     count: 1,
     reason: "owner-only developer activity detail intentionally renders the raw ask failure",
   },
+  "dev/logs/activity/ActivityDetail.tsx|<module>.ReportDetailPane|diagnostic|error": {
+    count: 1,
+    reason: "same posture as AskDetailPane above: owner-only developer activity detail "
+      + "intentionally renders the raw report failure (backend ReportActivityDetail.error, "
+      + "not a caught exception)",
+  },
   // 来源解析诊断原文**不再**经过活动视图：那串异常可能带服务端绝对路径，而管理员
   // 看的是别人的活动流（与 ScopedSourceDetail 同一条披露边界）。契约改成
   // `parse_failed` 布尔之后，SourceDetailPane 与 toActivitySource 两条 error_message
