@@ -686,7 +686,7 @@ class NotebookDeleteJobRunner:
     def _phase_quiesce(self, job_id: str, notebook_id: str, lease_token: str) -> bool:
         """Wait for both quiesce legs to clear (§T-3.3): leg A (durable
         ``kg_build_jobs``, covers buildkg-/rebuildkg-) and leg B (in-process
-        ``KgMaintenanceJobs``, covers relinkkg-/unifiedkg-). Returns True on
+        ``KgMaintenanceJobs``, covers relinkkg-/unifiedkg-/deletekg-). Returns True on
         success (both legs clear), False on timeout (the job is left
         'waiting' for the sweep to resume later — NEVER forced into
         phase 3)."""

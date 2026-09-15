@@ -52,6 +52,7 @@ _SAFE_JOB_PREFIXES = (
     ("rebuildkg-", "rebuildkg"),
     ("relinkkg-", "relinkkg"),
     ("unifiedkg-", "unifiedkg"),
+    ("deletekg-", "deletekg"),
     ("papermeta-", "papermeta"),
     ("buildkg-", "buildkg"),
     ("index-pipeline-", "index-pipeline"),
@@ -85,6 +86,10 @@ _HEAVY_MAINTENANCE_OPERATIONS = frozenset({
     "rebuildkg",
     "relinkkg",
     "unifiedkg",
+    # 「删除知识图谱」与 relinkkg/unifiedkg 同占一个维护槽,同池。刻意不进下面
+    # 容量为 1 的删除池:删除笔记本的 deletenb 在 quiesce 里等的正是这个维护槽,
+    # 同池排在它身后的 deletekg 要等 quiesce 超时让出池位才轮得到。
+    "deletekg",
     "conflictresolve",
     "mergereview",
     # `set_indexing_pipeline` 切换分块/索引管线时提交的整库重建

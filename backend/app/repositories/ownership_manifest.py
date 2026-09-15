@@ -924,6 +924,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.export_reports', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.extract_source', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.fail_conflict_resolution_submission', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.fail_kg_delete_submission', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.fail_notebook_kg_job_submission', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.fail_notebook_relink_submission', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.fail_unified_kg_rebuild_submission', kind='attribute', target='_runtime'),
@@ -959,6 +960,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.kg_analysis', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.kg_cluster_size_histogram', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.kg_community_overview', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.kg_delete_status', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.kg_largest_clusters', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.kg_neighbors', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.kg_relation_provenance_counts', kind='attribute', target='_runtime'),
@@ -1061,6 +1063,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.review_queue_page', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.revoke_agent_token', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.run_conflict_resolution_job', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.run_kg_delete_job', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.run_merge_review_job', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.run_notebook_relink_job', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.run_unified_kg_rebuild_job', kind='attribute', target='_runtime'),
@@ -1091,6 +1094,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.sources_missing_paper_meta', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.start_ask_stream', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.start_conflict_resolution', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.start_kg_delete', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.start_notebook_relink', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.start_unified_kg_rebuild', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.storage_dir', kind='attribute', target='_runtime'),
@@ -2030,6 +2034,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='fail_kg_delete_submission',
+        owner='KnowledgeLifecycleService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.delete_kg', kind='attribute', target='fail_kg_delete_submission'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='fail_notebook_kg_job_submission',
         owner='KnowledgeLifecycleService',
         kind='method',
@@ -2171,6 +2185,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.preview_ask_intent.prepare_preview', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.preview_ask_intent_stream.prepare_preview', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='get_notebook'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.delete_kg', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_unified_kg', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.relink_kg', kind='attribute', target='get_notebook'),
@@ -2311,6 +2326,16 @@ SURFACE_MEMBERS = (
         kind='property',
         consumers=(
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.kg_analysis_service', kind='attribute', target='kg_analysis'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='kg_delete_status',
+        owner='KnowledgeLifecycleService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.delete_kg_status', kind='attribute', target='kg_delete_status'),
         ),
         patches=(
         ),
@@ -3263,6 +3288,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='run_kg_delete_job',
+        owner='KnowledgeLifecycleService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.delete_kg', kind='attribute', target='run_kg_delete_job'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='run_merge_review_job',
         owner='KnowledgeGovernanceService',
         kind='method',
@@ -3499,6 +3534,16 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.resolve_conflicts', kind='attribute', target='start_conflict_resolution'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='start_kg_delete',
+        owner='KnowledgeLifecycleService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.delete_kg', kind='attribute', target='start_kg_delete'),
         ),
         patches=(
         ),

@@ -103,6 +103,7 @@
         "export_reports",
         "extract_source",
         "fail_conflict_resolution_submission",
+        "fail_kg_delete_submission",
         "fail_notebook_kg_job_submission",
         "fail_notebook_relink_submission",
         "fail_unified_kg_rebuild_submission",
@@ -140,6 +141,7 @@
         "kg_analysis",
         "kg_cluster_size_histogram",
         "kg_community_overview",
+        "kg_delete_status",
         "kg_largest_clusters",
         "kg_neighbors",
         "kg_relation_provenance_counts",
@@ -245,6 +247,7 @@
         "revoke_agent_token",
         "root_dir",
         "run_conflict_resolution_job",
+        "run_kg_delete_job",
         "run_merge_review_job",
         "run_notebook_relink_job",
         "run_unified_kg_rebuild_job",
@@ -277,6 +280,7 @@
         "sources_missing_paper_meta",
         "start_ask_stream",
         "start_conflict_resolution",
+        "start_kg_delete",
         "start_notebook_relink",
         "start_unified_kg_rebuild",
         "storage_dir",
@@ -343,7 +347,7 @@
   "core_models_service_imports": {
     "allowed": []
   },
-  "ports_protocol_method_count": 958,
+  "ports_protocol_method_count": 959,
   "function_length_ceiling": {
     "backend/app/api/mcp_tools/memory_context.py::register_memory_context_tools.ask_notebook": 142,
     "backend/app/extensions/ask.py::AskCompletedObserverHost.observe_application": 160,

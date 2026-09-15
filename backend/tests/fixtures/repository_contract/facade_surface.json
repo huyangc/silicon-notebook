@@ -3279,6 +3279,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.fail_kg_delete_submission",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.fail_notebook_kg_job_submission",
         "target": "_runtime"
       },
@@ -3484,6 +3490,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.kg_community_overview",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.kg_delete_status",
         "target": "_runtime"
       },
       {
@@ -4101,6 +4113,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.run_kg_delete_job",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.run_merge_review_job",
         "target": "_runtime"
       },
@@ -4276,6 +4294,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.start_conflict_resolution",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.start_kg_delete",
         "target": "_runtime"
       },
       {
@@ -4946,7 +4970,7 @@
     "owner": "AskService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', payload: 'AskRequest') -> 'AskResponse'"
+    "signature": "(self, notebook_id: 'str', payload: 'AskRequest', *, submitted_via: 'StoredSubmittedVia' = '') -> 'AskResponse'"
   },
   "ask_chunk": {
     "consumers": [
@@ -5989,7 +6013,7 @@
     "owner": "ReportApplicationService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', question: 'str', depth: 'int' = 2) -> 'str'"
+    "signature": "(self, notebook_id: 'str', question: 'str', depth: 'int' = 2, *, submitted_via: 'StoredSubmittedVia' = '') -> 'str'"
   },
   "current_user": {
     "consumers": [
@@ -6516,6 +6540,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', job_id: 'str') -> 'None'"
   },
+  "fail_kg_delete_submission": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.delete_kg",
+        "target": "fail_kg_delete_submission"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', job_id: 'str') -> 'None'"
+  },
   "fail_notebook_kg_job_submission": {
     "consumers": [
       {
@@ -6891,6 +6930,12 @@
         "kind": "attribute",
         "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.build_kg",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.delete_kg",
         "target": "get_notebook"
       },
       {
@@ -7348,6 +7393,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self)"
+  },
+  "kg_delete_status": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.delete_kg_status",
+        "target": "kg_delete_status"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str') -> 'dict'"
   },
   "kg_neighbors": {
     "consumers": [
@@ -9896,6 +9956,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', job_id: 'str') -> 'dict'"
   },
+  "run_kg_delete_job": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.delete_kg",
+        "target": "run_kg_delete_job"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', job_id: 'str') -> 'dict'"
+  },
   "run_merge_review_job": {
     "consumers": [
       {
@@ -10341,7 +10416,7 @@
     "owner": "AskService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', payload: 'AskRequest', mode, *, user_id: 'str', attach_only=False)"
+    "signature": "(self, notebook_id: 'str', payload: 'AskRequest', mode, *, user_id: 'str', attach_only=False, submitted_via: 'StoredSubmittedVia' = '')"
   },
   "start_conflict_resolution": {
     "consumers": [
@@ -10354,6 +10429,21 @@
     ],
     "kind": "method",
     "owner": "KnowledgeGovernanceService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str') -> 'dict'"
+  },
+  "start_kg_delete": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.delete_kg",
+        "target": "start_kg_delete"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'dict'"

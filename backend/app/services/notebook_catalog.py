@@ -121,7 +121,10 @@ def _delete_notebook_source_files_dir(storage_dir: Path, notebook_id: str) -> No
 
 
 def kg_build_status(row) -> KgBuildJobStatus | None:
-    if row is None:
+    # ``stage='cleared'``:「删除知识图谱」把此前的终态作业标成已清除——那次
+    # 分析描述的图已经删掉,摘要如实回报「没有分析记录」,而不是复述旧结果。
+    # 清除行因此永远到不了 KgBuildJobStatus(其 stage Literal 不含它)。
+    if row is None or row["stage"] == "cleared":
         return None
     return KgBuildJobStatus(
         job_id=row["id"],

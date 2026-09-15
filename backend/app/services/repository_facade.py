@@ -2976,6 +2976,28 @@ class RepositoryFacade:
             notebook_id, job_id
         )
 
+    # 「删除知识图谱」不走 require_indexing_pipeline_write:那道闸拦的是「会产出
+    # 新索引产物」的写,删除一件都不产出;管线不可用时反而正是需要能删的时候。
+    def start_kg_delete(self, notebook_id: str) -> dict:
+        """Claim the shared KG-maintenance slot for a KG delete (409 source)."""
+        return self._runtime.knowledge_lifecycle.start_kg_delete(notebook_id)
+
+    def kg_delete_status(self, notebook_id: str) -> dict:
+        """Latest KG-delete state for this notebook."""
+        return self._runtime.knowledge_lifecycle.kg_delete_status(notebook_id)
+
+    def run_kg_delete_job(self, notebook_id: str, job_id: str) -> dict:
+        """Background KG-delete entry point (settles on every exit)."""
+        return self._runtime.knowledge_lifecycle.run_kg_delete_job(
+            notebook_id, job_id
+        )
+
+    def fail_kg_delete_submission(self, notebook_id: str, job_id: str) -> None:
+        """Release the KG-delete claim when the worker never started."""
+        return self._runtime.knowledge_lifecycle.fail_kg_delete_submission(
+            notebook_id, job_id
+        )
+
     def rebuild_canonical_relations(self, notebook_id: str, force: bool = False) -> int:
         """canonical_relations 全量重写(seq 闸) — KnowledgeLifecycleService owns
         the orchestration (Task 15); frozen-signature delegate."""

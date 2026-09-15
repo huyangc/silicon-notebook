@@ -339,6 +339,7 @@ HEAVY_JOB_NAMES = (
     "rebuildkg-nb-a",
     "relinkkg-nb-a",
     "unifiedkg-nb-a",
+    "deletekg-nb-a",
     "conflictresolve-nb-a",
     "mergereview-nb-a",
     "index-pipeline-nb-a",
@@ -488,6 +489,21 @@ def test_delete_jobs_are_not_starved_by_a_saturated_heavy_pool(gate_capacity):
     release.set()
     heavy.join(timeout=5)
     delete_job.join(timeout=5)
+
+
+def test_kg_delete_is_not_queued_behind_a_notebook_delete(gate_capacity):
+    """「删除知识图谱」(deletekg-)与 relinkkg-/unifiedkg- 同池,不进删除池。
+    删除笔记本的 deletenb- 在 quiesce 里等的正是 deletekg- 占着的维护槽——
+    同池时 deletekg- 排在 deletenb- 身后,要等 quiesce 超时让出池位才轮得到。
+    变异钉:把 `deletekg` 挪进 `_DELETE_OPERATIONS`,本用例变红。"""
+    notebook_delete, release = _occupy_one_slot("deletenb-nb-a")
+    ran = threading.Event()
+    kg_delete = background_jobs.submit(ran.set, name="deletekg-nb-a")
+    assert ran.wait(timeout=5)
+
+    release.set()
+    notebook_delete.join(timeout=5)
+    kg_delete.join(timeout=5)
 
 
 def test_heavy_jobs_are_not_blocked_by_a_saturated_delete_pool(gate_capacity):

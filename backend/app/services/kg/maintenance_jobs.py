@@ -2,7 +2,9 @@
 
 One INSTANCE owns one per-notebook slot; which job kinds contend for that slot is
 decided by which callables the instance is wired with.  Relink and unified
-rebuild share one instance because they mutate the same derived graph products.
+rebuild share one instance because they mutate the same derived graph products;
+the editor-facing whole-notebook KG delete joins that same instance because it
+removes exactly the graph those two passes read and rewrite.
 Conflict detection gets its OWN instance: it writes the conflict review queue,
 not those products, so making it wait behind a rebuild (or vice versa) would be
 an invented, unhelpful exclusion — it only needs single-flight against itself.
@@ -29,6 +31,7 @@ class KgMaintenanceJobs:
         "isolated_after": 0,
     }
     REBUILD_COUNTERS = {"clusters": 0}
+    DELETE_COUNTERS = {"objects_deleted": 0, "relations_deleted": 0}
     # No "truncated" counter: nothing polls this job's counters (conflict
     # detection has no status endpoint), and the truncation figures are already
     # carried by the run's return value and its counts-only event.
@@ -47,6 +50,7 @@ class KgMaintenanceJobs:
         relink_notebook_kg: Callable[[str], dict] | None = None,
         rebuild_unified_kg: Callable[[str], int] | None = None,
         resolve_notebook_conflicts: Callable[[str], dict] | None = None,
+        delete_notebook_kg: Callable[[str], dict] | None = None,
         kg_build_active: Callable[[str], bool] | None = None,
         cross_admission_lock: "threading.Lock | None" = None,
     ) -> None:
@@ -59,6 +63,9 @@ class KgMaintenanceJobs:
         self._relink_notebook_kg = relink_notebook_kg
         self._rebuild_unified_kg = rebuild_unified_kg
         self._resolve_notebook_conflicts = resolve_notebook_conflicts
+        # 删除知识图谱的算法入口(返回 {表名: 删除行数})。只接给 relink/rebuild
+        # 共用槽的实例:删的正是那两趟要读、要重写的图。
+        self._delete_notebook_kg = delete_notebook_kg
         # 批 3·W2 §2.1(buildkg- × unifiedkg-/relinkkg- 交叉检查):探测
         # 「该笔记本是否有 buildkg-/rebuildkg- 作业在飞」。只接给
         # relink/rebuild 共用槽的实例——冲突检测不碰派生簇/板块产物,与
@@ -71,7 +78,8 @@ class KgMaintenanceJobs:
         self._cross_admission_lock = cross_admission_lock
 
         # Terminal entries remain available for the browser's next bounded poll.
-        # Both kinds intentionally share this registry and lock. This stays
+        # Every kind wired into this instance intentionally shares this registry
+        # and lock. This stays
         # separate from durable kg_build_jobs: relink/rebuild are maintenance
         # passes, and publishing them as extraction jobs would claim the wrong
         # single-flight domain and expose false 0/0 analysis progress. Production
@@ -271,6 +279,56 @@ class KgMaintenanceJobs:
     def fail_unified_kg_rebuild_submission(
         self, notebook_id: str, job_id: str
     ) -> None:
+        self.settle(notebook_id, job_id, "failed")
+
+    # --- whole-notebook KG delete (same slot as relink/rebuild) ---------------
+
+    def start_kg_delete(self, notebook_id: str) -> dict:
+        # 不带 exempt_build_marker:删除没有「自己的 build 收尾」这回事,
+        # 分析在飞一律按 holder="buildkg" 拒绝。
+        return self.claim(
+            notebook_id, "delete", "kdj", dict(self.DELETE_COUNTERS)
+        )
+
+    def kg_delete_status(self, notebook_id: str) -> dict:
+        return self.status(notebook_id, "delete", dict(self.DELETE_COUNTERS))
+
+    def run_kg_delete_job(self, notebook_id: str, job_id: str) -> dict:
+        """Run the KG delete and settle on every exit, including ``BaseException``.
+
+        The stats published to the status view are counts only, mapped from the
+        delete's ``{table: rows_deleted}`` return; a table the delete did not
+        report counts as zero."""
+        try:
+            counts = self._delete_notebook_kg(notebook_id)
+        except Exception:
+            self.settle(notebook_id, job_id, "failed")
+            self.event_log.logger.exception(
+                "delete_notebook_kg failed for %s", notebook_id
+            )
+            self.event_log.emit({
+                "kind": "kg_delete_failed",
+                "notebook_id": notebook_id,
+            })
+            raise
+        except BaseException:
+            self.settle(notebook_id, job_id, "failed")
+            raise
+        stats = {
+            "objects_deleted": int((counts or {}).get("knowledge_objects", 0)),
+            "relations_deleted": int(
+                (counts or {}).get("knowledge_relations", 0)
+            ),
+        }
+        self.settle(notebook_id, job_id, "succeeded", stats)
+        self.event_log.emit({
+            "kind": "kg_deleted",
+            "notebook_id": notebook_id,
+            **stats,
+        })
+        return stats
+
+    def fail_kg_delete_submission(self, notebook_id: str, job_id: str) -> None:
         self.settle(notebook_id, job_id, "failed")
 
     # --- conflict detection (its OWN instance's slot — see module docstring) --

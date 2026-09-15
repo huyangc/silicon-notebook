@@ -268,6 +268,10 @@ def test_lifecycle_public_maintenance_surface_is_one_hop(repo, monkeypatch):
         ("unified_kg_rebuild_status", ("nb",), {"status": "idle"}),
         ("run_unified_kg_rebuild_job", ("nb", "ukj-1"), 3),
         ("fail_unified_kg_rebuild_submission", ("nb", "ukj-1"), None),
+        ("start_kg_delete", ("nb",), {"started": "delete"}),
+        ("kg_delete_status", ("nb",), {"status": "idle"}),
+        ("run_kg_delete_job", ("nb", "kdj-1"), {"objects_deleted": 4}),
+        ("fail_kg_delete_submission", ("nb", "kdj-1"), None),
     )
     for name, args, expected in cases:
         def _delegate(*actual, _name=name, _expected=expected, **kw):

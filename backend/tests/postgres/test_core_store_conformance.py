@@ -5098,6 +5098,47 @@ def test_kg_build_single_flight_conditional_updates_and_latest_ordinal(
     assert core_stores.jobs.latest(notebook_id)["id"] == second["id"]
 
 
+def test_kg_build_clear_terminal_jobs_skips_running_and_cleared_rows(
+    core_stores: CoreStores,
+):
+    """「删除知识图谱」的作业历史清除(SQLite 孪生钉在 test_kg_delete_job.py):
+    只标终态行、不删行、running 行一个字不动,重复调用只数新增的终态行。"""
+    from app.services.notebook_catalog import kg_build_status
+
+    owner = core_stores.identity.create_user("c00123456", "password-13")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Cleared"), owner.id
+    )
+    other_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Other"), owner.id
+    )
+    finished = core_stores.jobs.create_job(notebook_id, owner.id, "incremental", 1)
+    assert core_stores.jobs.finish(finished["id"], "failed", error_code="x")
+    other = core_stores.jobs.create_job(other_id, owner.id, "incremental", 1)
+    assert core_stores.jobs.finish(other["id"], "succeeded")
+    running = core_stores.jobs.create_job(notebook_id, owner.id, "rebuild", 0)
+
+    assert core_stores.jobs.clear_terminal_jobs(notebook_id) == 1
+    assert core_stores.jobs.clear_terminal_jobs(notebook_id) == 0
+    cleared = core_stores.jobs.get(finished["id"])
+    assert (cleared["status"], cleared["stage"]) == ("failed", "cleared")
+    assert cleared["error_code"] == "x"
+    untouched = core_stores.jobs.get(running["id"])
+    assert (untouched["status"], untouched["stage"]) == ("running", "probing")
+    assert core_stores.jobs.get(other["id"])["stage"] == "finished"
+
+    assert core_stores.jobs.finish(running["id"], "succeeded")
+    assert core_stores.jobs.clear_terminal_jobs(notebook_id) == 1
+    latest = core_stores.jobs.latest(notebook_id)
+    assert latest["id"] == running["id"] and latest["stage"] == "cleared"
+    assert kg_build_status(latest) is None
+    assert _fetch_one(
+        core_stores,
+        "SELECT COUNT(*) AS c FROM kg_build_jobs WHERE notebook_id=%s",
+        (notebook_id,),
+    )["c"] == 2
+
+
 def test_kg_build_single_flight_is_atomic_across_two_connections(
     core_stores: CoreStores,
 ):

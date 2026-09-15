@@ -18888,6 +18888,90 @@
           "summary": "Reject Conflict"
         }
       },
+      "/api/notebooks/{notebook_id}/kg/delete": {
+        "post": {
+          "description": "「删除知识图谱」(background thread). Same shape as kg/relink above.\n\nDeletes the notebook's source-derived KG (objects, relations, concept\nmerges, KG analysis) while keeping sources and their parsed elements, so the\nnotebook can be analysed again later. It runs off the request thread because\nthe delete drains the graph in bounded pages — proportional to the notebook,\nnot to the click. No LLM gate: deleting needs no model. Single flight is the\nKG-maintenance slot shared with relink and 重新合并 (409 naming the holder,\nsee `_kg_maintenance_busy`); a running analysis job refuses it with the\nbuild-vocabulary 409, and an analysis started while it runs is refused with\nholder \"delete\".",
+          "operationId": "delete_kg_api_notebooks__notebook_id__kg_delete_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Delete Kg Api Notebooks  Notebook Id  Kg Delete Post",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Delete Kg"
+        }
+      },
+      "/api/notebooks/{notebook_id}/kg/delete/status": {
+        "get": {
+          "description": "Latest KG-delete state for this notebook — the browser's completion signal.\n\nReturns `{job_id, notebook_id, status, running, objects_deleted,\nrelations_deleted}`; ``status`` is one of running / succeeded / failed /\nidle, where ``idle`` covers \"never ran here\", \"the process restarted\" and\n\"the shared slot is held by another maintenance kind\", so a bounded poll\nalways terminates. Counters are zero until a run succeeds. No error text\ncrosses this boundary — diagnostics stay in the event log.",
+          "operationId": "delete_kg_status_api_notebooks__notebook_id__kg_delete_status_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Delete Kg Status Api Notebooks  Notebook Id  Kg Delete Status Get",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Delete Kg Status"
+        }
+      },
       "/api/notebooks/{notebook_id}/kg/rebuild": {
         "post": {
           "description": "Full re-extract: clears all KG artefacts then re-extracts ALL sources\n(background thread). Requires LLM configured (409 if not), 404 if notebook\nmissing — same guards as build_kg.",

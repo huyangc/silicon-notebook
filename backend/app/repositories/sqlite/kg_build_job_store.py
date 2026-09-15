@@ -207,6 +207,18 @@ class KgBuildJobStore:
             )
         return cursor.rowcount == 1
 
+    def clear_terminal_jobs(self, notebook_id: str) -> int:
+        """Mark this notebook's finished jobs as describing a deleted graph.
+        PostgreSQL twin's docstring carries the contract."""
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE kg_build_jobs SET stage='cleared', updated_at=? "
+                "WHERE notebook_id=? AND status<>'running' "
+                "AND stage<>'cleared'",
+                (self.now(), notebook_id),
+            )
+        return int(cursor.rowcount)
+
     def begin_indexing_pipeline_stage(
         self,
         job_id: str,

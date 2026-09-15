@@ -493,6 +493,11 @@ class KnowledgeLifecycleService:
             rebuild_unified_kg=lambda notebook_id: self.rebuild_unified_kg(
                 notebook_id, force=False
             ),
+            # 「删除知识图谱」:同槽第三种维护动作。围栏论证见
+            # _delete_notebook_kg_for_maintenance 的 docstring。
+            delete_notebook_kg=lambda notebook_id: (
+                self._delete_notebook_kg_for_maintenance(notebook_id)
+            ),
             # 批 3·W2 §2.1:buildkg- 在飞探测(kg_building 是 build 作业的
             # 真准入闸,T-5a 起)。锁下读,write-then-check 的另一半在
             # prepare_notebook_kg_job / standalone delete 侧。
@@ -598,6 +603,14 @@ class KnowledgeLifecycleService:
         # marker already held by someone else is a refusal
         # (KgBuildAlreadyRunning), not a licence to drain alongside the
         # actual owner.
+        # A THIRD caller enters the fenced body without this method: the
+        # editor-facing 「删除知识图谱」 maintenance job
+        # (``_delete_notebook_kg_for_maintenance``). Its fence is the shared
+        # KG-maintenance slot instead of the marker — the slot's claim checks
+        # the marker under ``kg_cross_admission_lock``, and build admission
+        # refuses under the same lock while the slot is held (holder
+        # "delete"). It must not come through here: this path would refuse on
+        # that job's own slot entry.
         if held_by_kg_job:
             return self._delete_notebook_kg_fenced(notebook_id)
         # 批 3·W2 §2.1:standalone delete 的认领同样查实例 A 的维护槽
@@ -620,9 +633,46 @@ class KnowledgeLifecycleService:
             with self.kg_building_lock:
                 self.kg_building.discard(notebook_id)
 
+    def _delete_notebook_kg_for_maintenance(self, notebook_id: str) -> dict:
+        """Worker body of the 「删除知识图谱」 maintenance job
+        (``KgMaintenanceJobs.run_kg_delete_job``), run while that job holds
+        the shared relink/rebuild/delete slot.
+
+        The fence is the slot, NOT the ``kg_building`` marker, and this
+        deliberately does not call the standalone ``delete_notebook_kg``
+        (which would refuse on this job's own slot entry):
+
+        · The slot's claim ran ``_kg_build_active`` under
+          ``kg_cross_admission_lock``, so no build/rebuild/indexing-pipeline
+          job was admitted when it was taken; from then on
+          ``prepare_notebook_kg_job`` checks ``kg_maintenance.active_kind``
+          under the SAME lock and refuses with holder ``"delete"``. Build
+          admission is therefore excluded for this job's whole span exactly
+          as the marker would exclude it.
+        · Taking the marker as well would make a build click during deletion
+          raise ``KgBuildAlreadyRunning`` — the misleading 「分析任务正在运行」
+          409 — instead of the truthful holder-``"delete"`` copy, and would
+          make ``NotebookSummary.kg_building`` (meaning "analysis running")
+          light up for a deletion.
+
+        The notebook's terminal ``kg_build_jobs`` history is marked cleared
+        BEFORE draining: drain pages commit incrementally, so from the first
+        page the previous build result no longer describes the graph (a
+        failed delete keeps that history cleared, since committed pages may
+        already have changed the graph). Rows are never deleted: admin usage counts
+        them. A notebook delete landing meanwhile surfaces from the fenced
+        body as ``NotebookDeletingAbortsMaintenanceError`` and simply fails
+        this job; quiesce leg B waits for this slot, so there is no deadlock.
+        """
+        self.get_notebook(notebook_id)
+        self.kg_build_jobs.clear_terminal_jobs(notebook_id)
+        return self._delete_notebook_kg_fenced(notebook_id)
+
     def _delete_notebook_kg_fenced(self, notebook_id: str) -> dict:
-        """``delete_notebook_kg``'s body, run under the kg_building fence
-        (its docstring carries the full contract)."""
+        """``delete_notebook_kg``'s body, run under the kg_building fence or,
+        for the 「删除知识图谱」 job, under the KG-maintenance slot (see
+        ``_delete_notebook_kg_for_maintenance``); ``delete_notebook_kg``'s
+        docstring carries the full contract."""
         # codex #663 R16 P1a: snapshot the reverse-index completeness
         # certificate BEFORE the drain. (R17 P1a, registered rebuttal: a
         # FORCED source-index backfill cannot race this snapshot in a
@@ -2030,6 +2080,22 @@ class KnowledgeLifecycleService:
         self, notebook_id: str, job_id: str
     ) -> None:
         return self.kg_maintenance.fail_unified_kg_rebuild_submission(
+            notebook_id, job_id
+        )
+
+    # --- whole-notebook KG delete background job (same slot as relink) ------
+
+    def start_kg_delete(self, notebook_id: str) -> dict:
+        return self.kg_maintenance.start_kg_delete(notebook_id)
+
+    def kg_delete_status(self, notebook_id: str) -> dict:
+        return self.kg_maintenance.kg_delete_status(notebook_id)
+
+    def run_kg_delete_job(self, notebook_id: str, job_id: str) -> dict:
+        return self.kg_maintenance.run_kg_delete_job(notebook_id, job_id)
+
+    def fail_kg_delete_submission(self, notebook_id: str, job_id: str) -> None:
+        return self.kg_maintenance.fail_kg_delete_submission(
             notebook_id, job_id
         )
 
