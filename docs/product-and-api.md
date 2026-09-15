@@ -138,8 +138,9 @@ Source-list search submits through the Search button or Enter and trims surround
 
 ### List pagination
 
-Every list whose length grows with user data is paged; no row is reachable only by
-scrolling an unbounded page, and none is silently cut off. There are three shapes.
+Every list whose length grows with user data is paged, so no row is reachable only
+by scrolling an unbounded page; the few exceptions are enumerated under
+**Deliberately not paged** below. There are three shapes.
 
 **Server-paged** lists request one page at a time: the notebook source list (50),
 the Knowledge browser (50), Memory (20), admin Question analysis (50), the Parsing
@@ -164,23 +165,29 @@ of an empty one. Page sizes:
 | Knowledge browser — duplicate groups | 20 | the object type tab changes |
 | Knowledge object occurrences (Knowledge browser item context and Knowledge Graph detail; numbering continues across pages) | 10 | another node is selected |
 | Knowledge Graph — pending merges; a selected node's adjacent relations | 20 | another node is selected (relations) |
-| Deep report list | 20 | the notebook changes; an opened report on a later page turns the list to that page |
+| Deep report list | 20 | the notebook changes or a new report is submitted; an opened report on a later page turns the list to that page |
 | Promotion (content review) queue | 20 | the modal reopens |
 | Knowhow table cards | 24 | the status filter changes |
-| Group page — group rail, libraries, add-library candidates, members, review queue, own requests | 20 | the group changes (see [Group workspace](#group-workspace)) |
+| Group page — libraries, add-library candidates, members, review queue, own requests | 20 | the group changes; the candidates also when the search changes (see [Group workspace](#group-workspace)) |
+| Group page — group rail | 20 | the mine/all scope changes; a selected group turns the rail to its page |
+| Notebook 共享给群组 dialog — groups shared with; my share requests | 20 | the notebook changes |
 | Admin user usage — expanded per-user notebooks | 20 | another user row is expanded |
 | `/dev/logs` Scope column — notebooks | 20 | the viewed user changes; a selected notebook turns to its page |
 
-The admin user table keeps its own sort-then-page control with 20/50/100 rows.
+The admin user table keeps its own sort-then-page control with 20/50/100 rows. Leaving
+a view unmounts its lists, so returning to it starts every client-paged list on page 1.
 
 **Deliberately not paged:** the Ask conversation transcript and its turn navigation
 (one continuous thread); the Knowhow table row grid and row-management list, where
 row-title merged cells span physical rows and rows are reordered, so a page boundary
-would split a group; pickers and filter dropdowns; and lists that are bounded by a
-disclosed cap — public report/conversation share pages, an answer's structured result
-cards, the edge-review queue (a priority-ranked page whose title states the queue
-total), Knowhow cell history (a disclosed most-recent cap), and Agent call/observation
-samples.
+would split a group; the Knowledge Graph node overview, which lists the same nodes the
+canvas draws and is bounded by the view's range selector; pickers and filter dropdowns;
+lists bounded by a disclosed cap — public report/conversation share pages, an answer's
+structured result cards, the edge-review queue (a priority-ranked page whose title
+states the queue total), Knowhow cell history (a disclosed most-recent cap), and Agent
+call/observation samples; and two fixed-size summaries — the analysis dashboard's
+newest 10 low-rated questions, and a shared-notebook preview's first 50 source titles
+shown beside the full source count.
 
 ## Group knowledge sharing
 
@@ -333,10 +340,12 @@ The page reuses the collection shell, typography, controls, spacing, colors, and
 responsive breakpoints; its group/tab selection is addressable in the URL hash.
 Every list on the page — the group rail, a group's libraries, the add-library
 candidates, members, the pending review queue, and the viewer's own requests — shows
-20 entries per page over the complete API response. Switching group returns each
-list to its first page; removing the only entry on the last page falls back to the
-previous page; a selected group that sits on a later rail page (deep link, a newly
-created group, reselection after leaving) turns the rail to that page. Notebook
+20 entries per page over the complete API response. Switching group returns the
+group's own lists to their first page (the add-library candidates also when their
+search changes); removing the only entry on the last page falls back to the previous
+page. The rail returns to its first page when the mine/all scope changes, and a
+selected group that sits on a later rail page (deep link, a newly created group,
+reselection after leaving) turns the rail to that page. Notebook
 selections in the add-library list persist across its pages.
 
 ### Endpoints

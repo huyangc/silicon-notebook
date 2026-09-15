@@ -694,7 +694,7 @@ export function KgGraphView({
               {!kgGraph.conceptDetail && kgGraph.nodeContext && (kgGraph.nodeContext.occurrences ?? []).length > 0 && (
                 <>
                   <h4>出处</h4>
-                  <KgOccurrenceList occurrences={kgGraph.nodeContext.occurrences ?? []} resetKey={selectedKgNode?.id} />
+                  <KgOccurrenceList occurrences={kgGraph.nodeContext.occurrences ?? []} resetKey={selectedKgNode?.id} label="出处分页" />
                 </>
               )}
             </div>

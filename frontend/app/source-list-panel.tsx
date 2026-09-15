@@ -205,6 +205,7 @@ export function SourceListPanel({
           total={sourcesTotal}
           busy={sourcesPageLoading}
           onPage={onPage}
+          label="来源分页"
         />
       </div>
     </>

@@ -4,7 +4,7 @@ import { User } from "lucide-react";
 import { grantedViaLabel, isGroupGranted } from "./group-api";
 import { notebookRoleText } from "./workspace-transitions";
 import { Pagination } from "./Pagination";
-import { useClientPagination } from "./use-client-pagination.ts";
+import { useClientPagination, type PaginationResetKey } from "./use-client-pagination.ts";
 import type { NotebookSummary, SearchHit } from "./workspace-model";
 
 /** 笔记本卡片/列表行每页的条数。接口一次性返回整份笔记本清单,分页只发生在界面
@@ -134,7 +134,7 @@ export function NotebookCollectionSection({
   openNotebook: (id: string) => void;
   openMemory: (id: string) => void;
   openMenu: (id: string, event: MouseEvent<HTMLButtonElement>) => void;
-  resetKey?: unknown;
+  resetKey?: PaginationResetKey;
 }) {
   const page = useClientPagination(entries, NOTEBOOK_COLLECTION_PAGE_SIZE, resetKey);
   return (

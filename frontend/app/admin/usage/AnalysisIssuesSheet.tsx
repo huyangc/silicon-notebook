@@ -80,11 +80,16 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
         limit: ANALYSIS_ISSUE_PAGE_SIZE,
       });
       if (listRequest.current !== requestId) return;
+      // 刷新时记录可能已过期被清理:当前页整页落空但前面还有,退回最后一个有内容的页。
+      // 这一次的结果不上屏、加载态也不收——否则在重取之前会闪一帧「没有解析问题」。
+      const lastPage = Math.max(0, Math.ceil(result.total / ANALYSIS_ISSUE_PAGE_SIZE) - 1);
+      if (result.items.length === 0 && page > lastPage) {
+        listRequest.current += 1;
+        setPage(lastPage);
+        return;
+      }
       setItems(result.items);
       setTotal(result.total);
-      // 刷新时记录可能已过期被清理:当前页整页落空但前面还有,退回最后一个有内容的页。
-      const lastPage = Math.max(0, Math.ceil(result.total / ANALYSIS_ISSUE_PAGE_SIZE) - 1);
-      if (result.items.length === 0 && page > lastPage) setPage(lastPage);
     } catch (cause) {
       if (listRequest.current === requestId) {
         setFailure(toUserMessage(cause, "解析问题加载失败，请重试"));

@@ -12,11 +12,14 @@ import { slicePage } from "./pagination-logic.mjs";
  *   夹紧后的页码同时写回状态——否则清单再变长时,视图会跳回那个早已离开的旧页码。
  * - `resetKey` 变化(换了一个群组、改了筛选词)时回到第一页——同一个组件实例被复用给
  *   另一份清单时,停在上一份清单的第 N 页没有意义。重置在渲染期完成,不会先闪一帧旧页。
+ *   只收原始值:按 `Object.is` 比较,内联对象/数组每次渲染都「变了」,会无限重置。
  */
+export type PaginationResetKey = string | number | boolean | null | undefined;
+
 export function useClientPagination<T>(
   items: readonly T[],
   pageSize: number,
-  resetKey?: unknown,
+  resetKey?: PaginationResetKey,
 ): {
   page: number;
   pageSize: number;

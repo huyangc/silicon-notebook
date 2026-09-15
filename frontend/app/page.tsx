@@ -7885,7 +7885,7 @@ function KnowledgeBrowser({
                     ))}</>
                   )}
                   {(contexts[item.id].occurrences ?? []).length > 0 && (
-                    <><p className="section-title">原文出处</p><KgOccurrenceList occurrences={contexts[item.id].occurrences ?? []} /></>
+                    <><p className="section-title">原文出处</p><KgOccurrenceList occurrences={contexts[item.id].occurrences ?? []} label={`《${knowledgeHeadline(kind, item)}》的出处分页`} /></>
                   )}
                 </>
               )}
@@ -7893,7 +7893,7 @@ function KnowledgeBrowser({
           ))}
         </div>
       )}
-      <Pagination page={page} pageSize={50} total={total} onPage={onPage} />
+      <Pagination page={page} pageSize={50} total={total} onPage={onPage} label="知识条目分页" />
     </div>
   );
 }

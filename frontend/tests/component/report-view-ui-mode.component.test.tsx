@@ -166,6 +166,25 @@ test("深度报告超过一页时分页展示，翻页后显示下一批报告",
   expect(within(pager).getByRole("button", { name: "下一页" })).toBeDisabled();
 });
 
+test("停在后面一页时提交新报告，列表翻回第一页（新报告按创建时间倒序排在最前）", async () => {
+  const user = userEvent.setup();
+  const submitCreate = vi.fn();
+  render(
+    <ReportsPanel
+      notebookId="nb-1"
+      workspace={reportWorkspaceFixture({ reports: reportSummaries(25), question: "新的研究问题", submitCreate })}
+      setToast={vi.fn()}
+    />,
+  );
+  const pager = screen.getByRole("navigation", { name: "深度报告分页" });
+  await user.click(within(pager).getByRole("button", { name: "下一页" }));
+  expect(reportQuestions()[0]).toBe("问题21");
+
+  await user.click(screen.getByRole("button", { name: "生成深度报告" }));
+  expect(submitCreate).toHaveBeenCalledOnce();
+  expect(reportQuestions()[0]).toBe("问题01");
+});
+
 test("一页放得下时不显示深度报告分页控件", () => {
   render(
     <ReportsPanel

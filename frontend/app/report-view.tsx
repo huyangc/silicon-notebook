@@ -1417,9 +1417,9 @@ export function ReportsPanel({
   // 唯一的信号(换 token 必经 shared:false),在它上面清掉结果。
   useEffect(() => { copyResult.reset(); }, [shared, copyResult.reset]);
   const reportsPage = useClientPagination(reports ?? NO_REPORTS, REPORT_LIST_PAGE_SIZE, notebookId);
-  // 打开的报告要落在列表当前页上:新建报告(排在最前)或深链打开某一份都可能落在
-  // 别的页。只跟随 active id 变化与清单(重新)加载完成,不跟随原地刷新——见
-  // groups-page.tsx「选中的群组要落在侧栏当前页上」的同一处理。
+  // 打开的报告要落在列表当前页上:返回列表时停在它所在的页。只跟随 active id 变化与
+  // 清单(重新)加载完成,不跟随原地刷新——见 groups-page.tsx「选中的群组要落在侧栏
+  // 当前页上」的同一处理。新建报告不经过这里(不设 active),由提交按钮直接翻回第一页。
   const { setPage: setReportListPage } = reportsPage;
   const reportsLoaded = reports !== null;
   useEffect(() => {
@@ -1702,7 +1702,11 @@ export function ReportsPanel({
               className="button"
               type="button"
               disabled={creating || creationDisabled || !question.trim() || questionTooLong}
-              onClick={() => void submitCreate()}
+              onClick={() => {
+                // 清单按创建时间倒序,新报告会出现在第一页:停在后面的页就看不到它。
+                setReportListPage(0);
+                void submitCreate();
+              }}
             >
               {creating ? "提交中…" : "生成深度报告"}
             </button>

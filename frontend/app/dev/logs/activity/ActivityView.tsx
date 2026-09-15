@@ -378,7 +378,9 @@ export function ActivityView({
         setSources((previous) => {
           const entry = previous[id];
           if (!entry) return previous;
-          // 两页之间有新来源插入时 offset 会错位一格：按 id 去重，不让同一来源列两次。
+          // 按 id 去重只是防御：清单按 (created_at, id) 升序，新来源排在末尾，不会让已取回
+          // 的前缀错位。两页之间若有来源被删，offset 会跳过一行——那一行要到重新取首页
+          // （换用户或刷新页面）才回来，去重救不了它。
           const seen = new Set(entry.items.map((source) => source.id));
           return {
             ...previous,

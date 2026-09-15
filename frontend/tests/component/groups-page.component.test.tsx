@@ -330,6 +330,95 @@ test("群组清单超过一页时侧栏分页，深链到后面一页的群组�
   expect(screen.queryByRole("button", { name: /群组01/ })).not.toBeInTheDocument();
 });
 
+test("群组知识库与可添加的笔记本分页；勾选跨页保留", async () => {
+  const user = userEvent.setup();
+  vi.mocked(listGroupSharedNotebooks).mockResolvedValue(Array.from({ length: 23 }, (_, index) => ({
+    notebook_id: `nb-shared-${index + 1}`,
+    name: `共享库${String(index + 1).padStart(2, "0")}`,
+    owner_username: "carol",
+    roles: ["viewer"],
+  })));
+  const candidates: NotebookSummary[] = Array.from({ length: 22 }, (_, index) => ({
+    ...NOTEBOOKS[0],
+    id: `nb-own-${index + 1}`,
+    name: `我的库${String(index + 1).padStart(2, "0")}`,
+  }));
+  vi.mocked(listGroups).mockResolvedValue([OWNER_DETAIL]);
+  vi.mocked(getGroup).mockResolvedValue(OWNER_DETAIL);
+  vi.mocked(shareNotebookToGroup).mockResolvedValue({
+    id: "grant-1", principal_type: "group", principal_id: "g1", role: "viewer",
+    principal_name: "先进封装项目", principal_kind: "project", created_at: "",
+  });
+  render(
+    <GroupsPage
+      currentUserId="u1"
+      isSystemAdmin={false}
+      notebooks={candidates}
+      initialGroupId="g1"
+      onBack={vi.fn()}
+      onChanged={vi.fn()}
+      openingNotebookId={null}
+      onOpenNotebook={vi.fn()}
+      onNavigate={vi.fn()}
+    />,
+  );
+
+  expect(await screen.findByText("共享库01")).toBeInTheDocument();
+  expect(screen.queryByText("共享库21")).not.toBeInTheDocument();
+  await user.click(within(screen.getByRole("navigation", { name: "群组知识库分页" })).getByRole("button", { name: "下一页" }));
+  expect(screen.getByText("共享库23")).toBeInTheDocument();
+  expect(screen.queryByText("共享库01")).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("checkbox", { name: /我的库01/ }));
+  expect(screen.queryByRole("checkbox", { name: /我的库21/ })).not.toBeInTheDocument();
+  await user.click(within(screen.getByRole("navigation", { name: "可添加笔记本分页" })).getByRole("button", { name: "下一页" }));
+  await user.click(screen.getByRole("checkbox", { name: /我的库22/ }));
+  // 第一页勾的那本不在屏上,仍计入「添加已选」。
+  await user.click(screen.getByRole("button", { name: "添加已选（2）" }));
+  await waitFor(() => expect(shareNotebookToGroup).toHaveBeenCalledTimes(2));
+  expect(shareNotebookToGroup).toHaveBeenCalledWith("nb-own-1", "g1", { manage: false });
+  expect(shareNotebookToGroup).toHaveBeenCalledWith("nb-own-22", "g1", { manage: false });
+});
+
+test("待审批申请与我发起的申请分页", async () => {
+  const user = userEvent.setup();
+  const request = (index: number, prefix: string) => ({
+    id: `${prefix}-${index}`, notebook_id: `nb-${prefix}-${index}`,
+    notebook_name: `${prefix}${String(index).padStart(2, "0")}`, group_id: "g1", group_name: "先进封装项目",
+    requested_by: "u2", requested_by_username: "bob", status: "pending",
+    decided_by: null, decided_at: null, created_at: "",
+  });
+  vi.mocked(listGroupShareRequests).mockResolvedValue(Array.from({ length: 21 }, (_, i) => request(i + 1, "待审库")));
+  vi.mocked(listMyPendingShareRequests).mockResolvedValue(Array.from({ length: 24 }, (_, i) => request(i + 1, "我申请库")));
+  vi.mocked(listGroups).mockResolvedValue([OWNER_DETAIL]);
+  vi.mocked(getGroup).mockResolvedValue(OWNER_DETAIL);
+  render(
+    <GroupsPage
+      currentUserId="u1"
+      isSystemAdmin={false}
+      notebooks={NOTEBOOKS}
+      initialGroupId="g1"
+      initialTab="requests"
+      onBack={vi.fn()}
+      onChanged={vi.fn()}
+      openingNotebookId={null}
+      onOpenNotebook={vi.fn()}
+      onNavigate={vi.fn()}
+    />,
+  );
+
+  expect(await screen.findByText("待审库01")).toBeInTheDocument();
+  expect(screen.queryByText("待审库21")).not.toBeInTheDocument();
+  await user.click(within(screen.getByRole("navigation", { name: "待审批申请分页" })).getByRole("button", { name: "下一页" }));
+  expect(screen.getByText("待审库21")).toBeInTheDocument();
+
+  expect(screen.getByText("我申请库01")).toBeInTheDocument();
+  expect(screen.queryByText("我申请库21")).not.toBeInTheDocument();
+  await user.click(within(screen.getByRole("navigation", { name: "我发起的申请分页" })).getByRole("button", { name: "下一页" }));
+  expect(screen.getByText("我申请库24")).toBeInTheDocument();
+  expect(screen.queryByText("我申请库01")).not.toBeInTheDocument();
+});
+
 test("普通成员仍可查看群组知识库，但不加载审批队列且设置中只能退出", async () => {
   const user = userEvent.setup();
   const memberDetail: GroupDetail = { ...OWNER_DETAIL, owner_id: "u2", my_role: "member" };

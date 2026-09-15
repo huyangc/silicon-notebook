@@ -1001,7 +1001,7 @@ export function MemoryPanel({
           })}
         </div>
       )}
-      <Pagination page={page} pageSize={MEMORY_PAGE_SIZE} total={total} busy={loading} onPage={setPage} />
+      <Pagination page={page} pageSize={MEMORY_PAGE_SIZE} total={total} busy={loading} onPage={setPage} label="记忆分页" />
       {pendingDelete && (
         <div className="utility-modal utility-modal-top" role="dialog" aria-modal="true" aria-label="确认删除">
           <FloatingModalCard storageKey="memory.delete.window" className="utility-modal-card memory-confirm-card">

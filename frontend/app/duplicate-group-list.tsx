@@ -1,6 +1,6 @@
 import { LatexText } from "./answer-panel";
 import { Pagination } from "./Pagination";
-import { useClientPagination } from "./use-client-pagination.ts";
+import { useClientPagination, type PaginationResetKey } from "./use-client-pagination.ts";
 import { label, KNOWLEDGE_STATUS } from "./vocabulary";
 import type { DuplicateGroup } from "./workspace-model";
 
@@ -22,7 +22,7 @@ export function DuplicateGroupList({
   readOnly?: boolean;
   mergingId: string | null;
   onMerge: (sourceId: string, intoId: string) => void;
-  resetKey?: unknown;
+  resetKey?: PaginationResetKey;
 }) {
   const page = useClientPagination(duplicates, DUPLICATE_GROUP_PAGE_SIZE, resetKey);
   return (
