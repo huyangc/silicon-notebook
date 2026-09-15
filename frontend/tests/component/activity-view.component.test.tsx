@@ -89,6 +89,7 @@ function report(id: string, question: string, notebookId = "nb-1"): ActivityRepo
     depth: 4,
     status: "done",
     generation_started_at: "2026-08-04T10:31:00",
+    submitted_via: "",
   };
 }
 
