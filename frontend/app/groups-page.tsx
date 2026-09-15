@@ -430,7 +430,7 @@ export function GroupsPage({
               </button>
             ))}
           </div>
-          <Pagination page={groupPage.page} pageSize={GROUP_PAGE_SIZE} total={groupPage.total} onPage={groupPage.setPage} label="群组清单分页" />
+          <Pagination page={groupPage.page} pageSize={GROUP_PAGE_SIZE} total={groupPage.total} onPage={groupPage.setPage} label="群组清单分页" compact />
         </aside>
 
         <div className="group-page-workspace">
