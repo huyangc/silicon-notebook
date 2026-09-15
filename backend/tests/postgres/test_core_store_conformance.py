@@ -5127,7 +5127,13 @@ def test_kg_build_clear_terminal_jobs_skips_running_and_cleared_rows(
     assert (untouched["status"], untouched["stage"]) == ("running", "probing")
     assert core_stores.jobs.get(other["id"])["stage"] == "finished"
 
+    # The durable probe 删除知识图谱 admission uses against another process's
+    # analysis job: true only while a running row exists, per notebook.
+    assert core_stores.jobs.has_running(notebook_id) is True
+    assert core_stores.jobs.has_running(other_id) is False
+
     assert core_stores.jobs.finish(running["id"], "succeeded")
+    assert core_stores.jobs.has_running(notebook_id) is False
     assert core_stores.jobs.clear_terminal_jobs(notebook_id) == 1
     latest = core_stores.jobs.latest(notebook_id)
     assert latest["id"] == running["id"] and latest["stage"] == "cleared"
