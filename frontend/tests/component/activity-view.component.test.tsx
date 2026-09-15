@@ -30,6 +30,7 @@ import type {
   ActivityItem,
   ActivityReport,
   ActivitySource,
+  AskDetail,
   ReportDetail,
 } from "../../app/dev/logs/activity/types";
 
@@ -869,7 +870,73 @@ test("报告状态为 failed 且有错误原文时显示失败原因", async () 
 
   expect(await screen.findByText("失败原因：")).toBeInTheDocument();
   expect(screen.getByText("模型服务超时")).toBeInTheDocument();
+  expect(screen.queryByText("这份报告没有成功生成。")).not.toBeInTheDocument();
   expect(screen.queryByText("这份报告还没有生成正文")).not.toBeInTheDocument();
+});
+
+
+// 失败原文只给管理员（后端 _activity_failure_text）：本人自助读取拿到空 error，
+// 失败状态只给固定文案，不出现「失败原因：」标签，也不落到「还没有生成正文」空态。
+test("报告失败但没有失败原文时显示固定文案", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([report("r1", "这次报告问了什么")]));
+  mocks.fetchUserReportDetail.mockResolvedValue(reportDetail({ status: "failed", error: "" }));
+  view();
+
+  await user.click(await screen.findByText("这次报告问了什么"));
+
+  expect(await screen.findByText("这份报告没有成功生成。")).toBeInTheDocument();
+  expect(screen.queryByText("失败原因：")).not.toBeInTheDocument();
+  expect(screen.queryByText("这份报告还没有生成正文")).not.toBeInTheDocument();
+});
+
+
+function failedAskDetail(error: string): AskDetail {
+  return {
+    job_id: "a1",
+    notebook_id: "nb-1",
+    conversation_id: "conv-a1",
+    question: "这次问了什么",
+    mode: "reasoning",
+    status: "failed",
+    asked_at: "2026-08-04T10:29:00",
+    answered_at: "",
+    error,
+    trace: [],
+    answer: null,
+  };
+}
+
+
+test("提问失败且带失败原文（管理员读取）时显示失败原因", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([ask("a1", "这次问了什么")]));
+  mocks.fetchUserAskDetail.mockResolvedValue(failedAskDetail("模型服务超时"));
+  view();
+
+  await user.click(await screen.findByText("这次问了什么"));
+
+  expect(await screen.findByText("失败原因：")).toBeInTheDocument();
+  expect(screen.getByText("模型服务超时")).toBeInTheDocument();
+  expect(screen.queryByText("这次提问没有成功完成。")).not.toBeInTheDocument();
+  expect(screen.queryByText("这次提问没有留下答案")).not.toBeInTheDocument();
+});
+
+
+test("提问失败但没有失败原文（本人自助读取）时显示固定文案", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([ask("a1", "这次问了什么")]));
+  mocks.fetchUserAskDetail.mockResolvedValue(failedAskDetail(""));
+  view();
+
+  await user.click(await screen.findByText("这次问了什么"));
+
+  expect(await screen.findByText("这次提问没有成功完成。")).toBeInTheDocument();
+  expect(screen.queryByText("失败原因：")).not.toBeInTheDocument();
+  expect(screen.queryByText("这次提问没有留下答案")).not.toBeInTheDocument();
 });
 
 

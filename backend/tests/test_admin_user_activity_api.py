@@ -830,10 +830,59 @@ def test_ask_detail_failed_job_surfaces_asked_at_without_answer(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "failed"
-    assert body["error"] == "boom"
+    # 失败原文只给管理员（_activity_failure_text）；本人自助读取拿空串。
+    assert body["error"] == ""
     assert body["asked_at"] == "2026-08-01T11:00:00+08:00"
     assert body["answered_at"] == ""
     assert body["answer"] is None
+
+    admin_body = client.get(
+        f"/api/admin/users/{uid_a}/asks/job-failed", headers=_auth_admin(client)
+    ).json()
+    assert admin_body["status"] == "failed"
+    assert admin_body["error"] == "boom"
+
+
+def test_raw_failure_text_is_admin_only_across_feed_and_details(client):
+    """提问/报告失败原文的披露规则在活动流与两个详情端点上逐处一致：管理员拿原文，
+    本人自助（包括管理员以外的提交者本人）一律拿空串，状态本身照常返回。"""
+    owner = _auth(client, 26)
+    owner_id = _me(client, owner)
+    admin = _auth_admin(client)
+    nb_id = _create_notebook(client, owner, "NB-failure-disclosure")
+    raw = "OperationalError: connection to server at 10.0.0.5 failed"
+    with _repo()._write() as db:
+        _insert_ask_job(
+            db, "job-raw-failure", nb_id, owner_id, "2026-08-01T11:00:00",
+            question="为什么失败？", status="failed", error=raw,
+        )
+        _insert_report(
+            db, "rep-raw-failure", nb_id, owner_id, "2026-08-01T10:00:00+00:00",
+            status="failed", error=raw,
+        )
+
+    def feed_ask_errors(headers):
+        body = client.get(
+            f"/api/admin/users/{owner_id}/activity", headers=headers
+        ).json()
+        return {
+            item["id"]: item.get("error")
+            for item in body["items"]
+            if item["type"] == "ask"
+        }
+
+    assert feed_ask_errors(owner) == {"job-raw-failure": ""}
+    assert feed_ask_errors(admin) == {"job-raw-failure": raw}
+
+    for path in (
+        f"/api/admin/users/{owner_id}/asks/job-raw-failure",
+        f"/api/admin/users/{owner_id}/reports/rep-raw-failure",
+    ):
+        self_body = client.get(path, headers=owner).json()
+        admin_body = client.get(path, headers=admin).json()
+        assert self_body["status"] == admin_body["status"] == "failed"
+        assert self_body["error"] == ""
+        assert admin_body["error"] == raw
 
 
 def test_ask_answer_detail_backfills_answered_at_from_created_at(client):
@@ -1338,9 +1387,15 @@ def test_report_detail_allowed_for_self_and_admin_with_body(client):
     # 旧报告没有开始戳:保持空串，不编造。
     assert body["generation_started_at"] == ""
     assert body["status"] == "failed"
-    assert body["error"] == "模型服务调用失败"
+    # 失败原文只给管理员;本人自助读取拿空串。
+    assert body["error"] == ""
     assert body["content_md"] == ""
     assert body["references"] == []
+    admin_legacy = client.get(
+        f"/api/admin/users/{owner_id}/reports/rep-legacy",
+        headers=_auth_admin(client),
+    ).json()
+    assert admin_legacy["error"] == "模型服务调用失败"
 
 
 def test_report_detail_not_owned_by_target_user_404(client):

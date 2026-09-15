@@ -186,6 +186,7 @@ class ActivityAsk(BaseModel):
     mode: str = ""
     status: str = ""
     answer_id: str = ""
+    # 失败原文只给管理员;本人自助读取恒为空串(admin_routes._activity_failure_text)。
     error: str = ""
     notebook_name: str = ""
     notebook_deleted_at: str = ""
@@ -366,6 +367,7 @@ class AskDetail(BaseModel):
     status: str = ""
     asked_at: str = ""
     answered_at: str = ""
+    # 失败原文只给管理员;本人自助读取恒为空串(admin_routes._activity_failure_text)。
     error: str = ""
     trace: List[dict] = Field(default_factory=list)
     answer: Optional[Dict[str, Any]] = None
@@ -403,6 +405,7 @@ class ReportActivityDetail(BaseModel):
     created_at: str
     updated_at: str
     generation_started_at: str = ""
+    # 失败原文只给管理员;本人自助读取恒为空串(admin_routes._activity_failure_text)。
     error: str = ""
     content_md: str = ""
     references: List[dict] = Field(default_factory=list)

@@ -127,22 +127,21 @@ const APPROVED_DIAGNOSTIC_READS = Object.freeze({
   },
   "dev/logs/activity/ActivityDetail.tsx|<module>.AskDetailPane|diagnostic|error": {
     count: 1,
-    reason: "the persisted server-side failure string the ask job's own processing wrote "
-      + "into the ask_jobs row (a caught exception's text, not thrown again here) is shown "
-      + "read-only in this troubleshooting activity detail — the reader is the viewing admin "
-      + "or the job's own submitter (get_admin_user_ask_detail's _require_self_or_admin), "
-      + "same posture as ReportDetailPane below; admins can already read this user's raw "
-      + "model-call logs by user",
+    reason: "administrator-only diagnostic: the persisted server-side failure string the ask "
+      + "job's own processing wrote into the ask_jobs row (a caught exception's text, not "
+      + "thrown again here). The API returns it only when the caller is an administrator "
+      + "(admin_routes._activity_failure_text); a self-service read receives an empty string "
+      + "and this pane shows fixed copy instead. Admins can already read this user's raw "
+      + "model-call logs by user. Same rule as ReportDetailPane below",
   },
   "dev/logs/activity/ActivityDetail.tsx|<module>.ReportDetailPane|diagnostic|error": {
     count: 1,
-    reason: "same posture as AskDetailPane above: the persisted server-side failure string "
-      + "report_execution/report_engine wrote into the report row (backend "
-      + "ReportActivityDetail.error, a caught exception's str(), not thrown again here) is "
-      + "shown read-only in this troubleshooting activity detail — the reader is the viewing "
-      + "admin or the report's own submitter (get_admin_user_report_detail's "
-      + "_require_self_or_admin); admins can already read this user's raw model-call logs "
-      + "by user",
+    reason: "same rule as AskDetailPane above — administrator-only diagnostic: the persisted "
+      + "server-side failure string report_execution/report_engine wrote into the report row "
+      + "(backend ReportActivityDetail.error, a caught exception's str(), not thrown again "
+      + "here). The API returns it only when the caller is an administrator "
+      + "(admin_routes._activity_failure_text); a self-service read receives an empty string "
+      + "and this pane shows fixed copy instead",
   },
   // 来源解析诊断原文**不再**经过活动视图：那串异常可能带服务端绝对路径，而管理员
   // 看的是别人的活动流（与 ScopedSourceDetail 同一条披露边界）。契约改成

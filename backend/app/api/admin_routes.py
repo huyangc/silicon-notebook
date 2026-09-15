@@ -416,10 +416,25 @@ def _activity_source_item(row: dict) -> ActivitySource:
     )
 
 
-def _activity_item_from_row(row: dict):
+def _activity_failure_text(viewer: UserProfile, raw: object) -> str:
+    """提问/报告失败原文的唯一披露判定:只给管理员。
+
+    ``ask_jobs.error`` / ``reports.error`` 是执行路径捕获异常后原样落库的串
+    (``f"{type(exc).__name__}: {exc}"`` 或 ``str(exc)[:500]``),可能带内部模型
+    网关地址或服务端路径。管理员把它当排障诊断读(本就能按用户看模型调用日志
+    原文);本人自助读取一律拿空串,前端对失败状态给固定文案——与来源条目把
+    ``error_message`` 收成 ``parse_failed`` 布尔、普通报告页只用固定文案同一方向。
+    活动流的提问条目与两个详情端点共用这一处,不各写一份。
+    """
+    return str(raw or "") if viewer.role == "admin" else ""
+
+
+def _activity_item_from_row(row: dict, viewer: UserProfile):
     kind = row["type"]
     if kind == "ask":
-        return ActivityAsk(**row)
+        return ActivityAsk(
+            **{**row, "error": _activity_failure_text(viewer, row.get("error"))}
+        )
     if kind == "source":
         return _activity_source_item(row)
     if kind == "report":
@@ -467,7 +482,7 @@ def get_admin_user_activity(
         # 走 user_error 打 X-User-Message 头(红线:后端中文用户文案的唯一出口)。
         raise user_error(400, "时间范围或翻页位置不是有效的时间，请重新选择日期") from exc
     return ActivityResponse(
-        items=[_activity_item_from_row(row) for row in raw["items"]],
+        items=[_activity_item_from_row(row, user) for row in raw["items"]],
         has_more=raw["has_more"],
         next_cursor=raw["next_cursor"],
     )
@@ -627,7 +642,7 @@ def get_admin_user_ask_detail(
                 status=job["status"],
                 asked_at=job.get("asked_at") or "",
                 answered_at=answered_at,
-                error=job["error"],
+                error=_activity_failure_text(user, job["error"]),
                 trace=job["trace"],
                 answer=answer,
                 notebook_name=job.get("notebook_name") or "",
@@ -675,7 +690,7 @@ def get_admin_user_report_detail(
                 created_at=snapshot.get("created_at") or "",
                 updated_at=snapshot.get("updated_at") or "",
                 generation_started_at=snapshot.get("generation_started_at") or "",
-                error=snapshot.get("error") or "",
+                error=_activity_failure_text(user, snapshot.get("error")),
                 content_md=snapshot.get("content_md") or "",
                 references=snapshot.get("references") or [],
                 notebook_name=snapshot.get("notebook_name") or "",
