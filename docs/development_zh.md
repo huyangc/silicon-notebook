@@ -333,7 +333,9 @@ NULL DEFAULT 'open'`):由管理员掌握的内容状态(`open` / `in_progress` /
 路由传 `web`,MCP `ask_notebook` 传 `mcp`。空串表示「未记录」,也就是全部回填——
 迁移前的行没有可靠信号能说明它从哪个入口进来,所以不做推断;不传参的进程内调用方
 (例如 `app/eval/inference.py`)同样记 `''`。删除笔记本时该值随留存投影一并复制。
-取值集合钉在 API 模型(`app.models.ask.SubmittedVia`)而不是 CHECK 约束。不加表、
+取值集合钉在 API 模型(`app.models.ask.StoredSubmittedVia`,即入口字面量
+`SubmittedVia` 加上 `''`)而不是 CHECK 约束;响应模型、管理员查询参数与全部写入
+签名都引用这两个别名,并有一条静态测试要求每个 HTTP/MCP 入口传字面量取值。不加表、
 不加索引、不加外键;管理员提问分析的等值筛选沿用它本来就在做的三路 `UNION ALL`
 全扫。当前配对为 SQLite 74 / PostgreSQL 54 / epoch 1。
 
