@@ -134,15 +134,17 @@ export const REPORT_DEPTH: Record<string, string> = {
   "16": "穷尽",
 };
 
-// ask_jobs.status 的取值集 {running, done, cancelled, failed}——真源见
-// backend/app/services/ask_execution.py 的 `_finish()` 落终态三选一,以及
-// backend/app/repositories/sqlite/ask_state_store.py 的初始态 'running'。
+// ask_jobs.status 的取值集 {running, done, cancelled, failed, interrupted}——真源见
+// backend/app/services/ask_execution.py 的 `_finish()` 落终态三选一、
+// backend/app/repositories/sqlite/ask_state_store.py 的初始态 'running',以及启动恢复
+// (migrations.py `_recover_interrupted_jobs`)把重启时仍在跑的 job 结算成 'interrupted'。
 // 措辞与上面 REPORT_STATUS 的同名状态对齐(完成/失败/已取消/生成中)。
 export const ASK_STATUS: Record<string, string> = {
   running: "生成中",
   done: "完成",
   failed: "失败",
   cancelled: "已取消",
+  interrupted: "已中断",
 };
 
 /**
