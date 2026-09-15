@@ -16,6 +16,7 @@ vi.mock("../../app/group-api.ts", async (importOriginal) => {
     shareNotebookToGroup: vi.fn(),
     transferGroupOwner: vi.fn(),
     leaveGroup: vi.fn(),
+    removeGroupMember: vi.fn(),
   };
 });
 
@@ -28,6 +29,7 @@ import {
   listGroups,
   listMyPendingShareRequests,
   leaveGroup,
+  removeGroupMember,
   shareNotebookToGroup,
   transferGroupOwner,
   type GroupDetail,
@@ -177,6 +179,155 @@ test("组管理员可在成员页生成邀请链接", async () => {
 
   await waitFor(() => expect(createGroupInvite).toHaveBeenCalledWith("g1"));
   expect(screen.getByDisplayValue(/group_invite=gri_test-token/)).toBeInTheDocument();
+});
+
+// 成员清单分页:接口整份返回(契约上不分页),界面每页 20 人。
+function withMembers(count: number, base: GroupDetail = OWNER_DETAIL): GroupDetail {
+  const members = Array.from({ length: count }, (_, index) => ({
+    id: `u${index + 1}`,
+    username: `user${String(index + 1).padStart(2, "0")}`,
+    display_name: "",
+    role: index === 0 ? "admin" : "member",
+  }));
+  return { ...base, member_count: count, members };
+}
+
+function memberNames(): string[] {
+  return Array.from(document.querySelectorAll(".group-member-row .group-member-copy strong"))
+    .map((node) => node.textContent ?? "");
+}
+
+test("成员超过一页时分页展示，翻页后显示下一批成员", async () => {
+  const user = userEvent.setup();
+  renderPage(withMembers(45));
+
+  await screen.findByRole("heading", { name: "先进封装项目" });
+  await user.click(screen.getByRole("button", { name: "成员" }));
+
+  expect(memberNames()).toHaveLength(20);
+  expect(memberNames()[0]).toBe("user01");
+  const pager = screen.getByRole("navigation", { name: "成员分页" });
+  expect(within(pager).getByText("1–20 / 45")).toBeInTheDocument();
+
+  await user.click(within(pager).getByRole("button", { name: "下一页" }));
+  expect(memberNames()[0]).toBe("user21");
+  expect(memberNames()).toHaveLength(20);
+
+  await user.click(within(pager).getByRole("button", { name: "下一页" }));
+  expect(memberNames()).toEqual(["user41", "user42", "user43", "user44", "user45"]);
+  expect(within(pager).getByRole("button", { name: "下一页" })).toBeDisabled();
+});
+
+test("一页放得下时不显示成员分页控件", async () => {
+  const user = userEvent.setup();
+  renderPage(withMembers(20));
+
+  await screen.findByRole("heading", { name: "先进封装项目" });
+  await user.click(screen.getByRole("button", { name: "成员" }));
+
+  expect(memberNames()).toHaveLength(20);
+  expect(screen.queryByRole("navigation", { name: "成员分页" })).not.toBeInTheDocument();
+});
+
+test("移出最后一页唯一的成员后退回上一页，而不是停在空页", async () => {
+  const user = userEvent.setup();
+  const before = withMembers(41);
+  const after = withMembers(40);
+  vi.mocked(listGroups).mockResolvedValue([before]);
+  vi.mocked(getGroup).mockResolvedValue(before);
+  vi.mocked(removeGroupMember).mockResolvedValue(undefined);
+  // 真实页面里 onNavigate 会把 tab 写进 hash;这里 onNavigate 是桩,直接以成员页进入,
+  // 否则移出后的群组清单刷新会让 hash effect 把页签拽回默认的「知识库」。
+  render(
+    <GroupsPage
+      currentUserId="u1"
+      isSystemAdmin={false}
+      notebooks={NOTEBOOKS}
+      initialGroupId="g1"
+      initialTab="members"
+      onBack={vi.fn()}
+      onChanged={vi.fn()}
+      openingNotebookId={null}
+      onOpenNotebook={vi.fn()}
+      onNavigate={vi.fn()}
+    />,
+  );
+
+  await screen.findByRole("heading", { name: "先进封装项目" });
+  const pager = screen.getByRole("navigation", { name: "成员分页" });
+  await user.click(within(pager).getByRole("button", { name: "下一页" }));
+  await user.click(within(pager).getByRole("button", { name: "下一页" }));
+  expect(memberNames()).toEqual(["user41"]);
+
+  vi.mocked(getGroup).mockResolvedValue(after);
+  vi.mocked(listGroups).mockResolvedValue([after]);
+  await user.click(screen.getByRole("button", { name: "移出" }));
+  await user.click(screen.getByRole("button", { name: "确认移出" }));
+
+  await waitFor(() => expect(memberNames()[0]).toBe("user21"));
+  expect(memberNames()).toHaveLength(20);
+  expect(within(screen.getByRole("navigation", { name: "成员分页" })).getByText("21–40 / 40")).toBeInTheDocument();
+});
+
+test("切换到另一个群组时成员分页回到第一页", async () => {
+  const user = userEvent.setup();
+  const first = withMembers(45);
+  const second = withMembers(30, { ...OWNER_DETAIL, id: "g2", name: "另一个群组" });
+  vi.mocked(listGroups).mockResolvedValue([first, second]);
+  vi.mocked(getGroup).mockImplementation(async (id: string) => (id === "g2" ? second : first));
+  // 不传 initialGroupId,原因同下方「剪贴板挂着时切了群组」那条用例。
+  render(
+    <GroupsPage
+      currentUserId="u1"
+      isSystemAdmin={false}
+      notebooks={NOTEBOOKS}
+      onBack={vi.fn()}
+      onChanged={vi.fn()}
+      openingNotebookId={null}
+      onOpenNotebook={vi.fn()}
+      onNavigate={vi.fn()}
+    />,
+  );
+
+  await screen.findByRole("heading", { name: "先进封装项目" });
+  await user.click(screen.getByRole("button", { name: "成员" }));
+  await user.click(within(screen.getByRole("navigation", { name: "成员分页" })).getByRole("button", { name: "下一页" }));
+  expect(memberNames()[0]).toBe("user21");
+
+  await user.click(screen.getByRole("button", { name: /另一个群组/ }));
+  await screen.findByRole("heading", { name: "另一个群组" });
+  await user.click(screen.getByRole("button", { name: "成员" }));
+  expect(memberNames()[0]).toBe("user01");
+  expect(within(screen.getByRole("navigation", { name: "成员分页" })).getByText("1–20 / 30")).toBeInTheDocument();
+});
+
+test("群组清单超过一页时侧栏分页，深链到后面一页的群组会自动翻到它所在的页", async () => {
+  const groups = Array.from({ length: 25 }, (_, index) => ({
+    ...OWNER_DETAIL,
+    id: `g${index + 1}`,
+    name: `群组${String(index + 1).padStart(2, "0")}`,
+  }));
+  vi.mocked(listGroups).mockResolvedValue(groups);
+  vi.mocked(getGroup).mockImplementation(async (id: string) => groups.find((group) => group.id === id)!);
+  render(
+    <GroupsPage
+      currentUserId="u1"
+      isSystemAdmin={false}
+      notebooks={NOTEBOOKS}
+      initialGroupId="g23"
+      onBack={vi.fn()}
+      onChanged={vi.fn()}
+      openingNotebookId={null}
+      onOpenNotebook={vi.fn()}
+      onNavigate={vi.fn()}
+    />,
+  );
+
+  await screen.findByRole("heading", { name: "群组23" });
+  const pager = await screen.findByRole("navigation", { name: "群组清单分页" });
+  await waitFor(() => expect(within(pager).getByText("21–25 / 25")).toBeInTheDocument());
+  expect(screen.getByRole("button", { name: /群组23/ })).toHaveClass("active");
+  expect(screen.queryByRole("button", { name: /群组01/ })).not.toBeInTheDocument();
 });
 
 test("普通成员仍可查看群组知识库，但不加载审批队列且设置中只能退出", async () => {

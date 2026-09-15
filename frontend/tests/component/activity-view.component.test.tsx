@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
@@ -262,6 +262,98 @@ test("展开笔记本取回该库的来源清单，异常小字同样经 Anomaly
   expect(badge).toHaveClass("anomaly-badge--integrity");
   // 只取回了 2 个里的 1 个,清单必须如实说出边界而不是假装列全了。
   expect(screen.getByText("已显示 1 / 2 个来源")).toBeInTheDocument();
+});
+
+test("来源清单超过一页时「加载更多来源」按已取回条数取下一页并追加", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([]));
+  const second = { ...failedSource(), id: "src-2", title: "年度报告", display_title: "年度报告" };
+  const more = deferred<ReturnType<typeof sourcePage>>();
+  mocks.fetchUserNotebookSources
+    .mockResolvedValueOnce(sourcePage([failedSource()]))
+    .mockReturnValueOnce(more.promise);
+  view();
+
+  await user.click(await screen.findByRole("button", { name: "展开《笔记本一》的来源" }));
+  expect(await screen.findByText("季度报告")).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "加载更多来源" }));
+  expect(mocks.fetchUserNotebookSources).toHaveBeenLastCalledWith(
+    "user-1", "nb-1", { offset: 1, limit: 50 },
+  );
+  // 追加页在途:按钮禁用防连点,已列出的来源不被清掉。
+  expect(screen.getByRole("button", { name: "加载中…" })).toBeDisabled();
+  expect(screen.getByText("季度报告")).toBeInTheDocument();
+
+  more.resolve(sourcePage([second]));
+  expect(await screen.findByText("年度报告")).toBeInTheDocument();
+  expect(screen.getByText("季度报告")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "加载更多来源" })).not.toBeInTheDocument();
+  expect(screen.queryByText(/已显示/)).not.toBeInTheDocument();
+});
+
+test("追加页失败只在按钮旁报错，已列出的来源保留且可以重试", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([]));
+  mocks.fetchUserNotebookSources
+    .mockResolvedValueOnce(sourcePage([failedSource()]))
+    .mockRejectedValueOnce(new Error("boom"));
+  view();
+
+  await user.click(await screen.findByRole("button", { name: "展开《笔记本一》的来源" }));
+  await screen.findByText("季度报告");
+  await user.click(screen.getByRole("button", { name: "加载更多来源" }));
+
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  expect(screen.getByText("季度报告")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "加载更多来源" })).toBeEnabled();
+});
+
+function manyNotebooks(count: number) {
+  return Array.from({ length: count }, (_, index) => ({
+    ...NOTEBOOKS[0],
+    id: `nb-${index + 1}`,
+    name: `笔记本${String(index + 1).padStart(2, "0")}`,
+  }));
+}
+
+test("深链选中的笔记本在左栏后面一页时，左栏翻到它所在的页", async () => {
+  window.history.replaceState(
+    {},
+    "",
+    "/dev/logs?view=activity&owner=user-1&activity_type=source&notebook_id=nb-23&source_id=src-1",
+  );
+  mocks.fetchUserNotebooks.mockResolvedValue(manyNotebooks(25));
+  mocks.fetchUserActivity.mockResolvedValue(page([]));
+  mocks.fetchUserNotebookSource.mockResolvedValue({ ...streamSource(), notebook_id: "nb-23" });
+  try {
+    view();
+
+    const selected = await screen.findByRole("button", { name: /^笔记本23/ });
+    expect(selected).toHaveClass("selected");
+    expect(screen.getByRole("navigation", { name: "笔记本清单分页" })).toHaveTextContent("21–25 / 25");
+    expect(screen.queryByRole("button", { name: /^笔记本01/ })).not.toBeInTheDocument();
+  } finally {
+    window.history.replaceState({}, "", "/dev/logs");
+  }
+});
+
+test("笔记本超过一页时左栏分页", async () => {
+  const user = userEvent.setup();
+  mocks.fetchUserNotebooks.mockResolvedValue(manyNotebooks(25));
+  mocks.fetchUserActivity.mockResolvedValue(page([]));
+  view();
+
+  expect(await screen.findByRole("button", { name: /^笔记本01/ })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /^笔记本21/ })).not.toBeInTheDocument();
+  const pager = screen.getByRole("navigation", { name: "笔记本清单分页" });
+  expect(pager).toHaveTextContent("1–20 / 25");
+
+  await user.click(within(pager).getByRole("button", { name: "下一页" }));
+  expect(screen.getByRole("button", { name: /^笔记本23/ })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /^笔记本01/ })).not.toBeInTheDocument();
 });
 
 

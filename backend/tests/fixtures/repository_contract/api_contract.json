@@ -1755,6 +1755,11 @@
               },
               "title": "Items",
               "type": "array"
+            },
+            "total": {
+              "default": 0,
+              "title": "Total",
+              "type": "integer"
             }
           },
           "title": "AnalysisIssueResponse",
@@ -12528,6 +12533,17 @@
                 ],
                 "title": "Model Area",
                 "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "offset",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Offset",
+                "type": "integer"
               }
             },
             {

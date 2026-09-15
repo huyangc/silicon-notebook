@@ -496,6 +496,31 @@ test("笔记本明细仍在加载(甚至永不完成)时,用户摘要两行照�
   expect(screen.getByText("加载中…")).toBeInTheDocument();
 });
 
+test("展开行的笔记本明细超过一页时分页展示", async () => {
+  // `GET /admin/users/{id}/notebooks` 整份返回,一个用户的笔记本数没有上限。
+  primeCommonMocks();
+  mocks.fetchUserNotebooks.mockResolvedValue(Array.from({ length: 23 }, (_, index) => ({
+    id: `nb-${index + 1}`, name: `笔记本 ${String(index + 1).padStart(2, "0")}`, status: "ready",
+    sources: 0, conversations: 0, questions: 0, reports: 0,
+    created_at: "2026-07-02T00:00:00", updated_at: "2026-07-03T00:00:00",
+  })));
+  const user = userEvent.setup();
+  render(<AdminUsagePage />);
+  const target = await targetRow();
+
+  await user.click(target.getByRole("button", { name: "展开用户详情" }));
+  expect(await screen.findByText("笔记本 01")).toBeInTheDocument();
+  expect(screen.getByText("笔记本 20")).toBeInTheDocument();
+  expect(screen.queryByText("笔记本 21")).toBeNull();
+
+  const pager = screen.getByRole("navigation", { name: "a00123456 的笔记本分页" });
+  await user.click(within(pager).getByRole("button", { name: "下一页" }));
+  expect(screen.getByText("笔记本 23")).toBeInTheDocument();
+  expect(screen.queryByText("笔记本 01")).toBeNull();
+  // 主表自己的分页条不受子表翻页影响。
+  expect(screen.getByText("第 1 / 1 页，共 2 位用户")).toBeInTheDocument();
+});
+
 test("展开区新增用户摘要不改变主表列头数量与文案", async () => {
   primeCommonMocks();
   mocks.fetchUserNotebooks.mockResolvedValue([

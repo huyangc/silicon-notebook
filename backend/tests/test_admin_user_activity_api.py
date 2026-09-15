@@ -207,8 +207,16 @@ def test_analysis_issue_log_is_admin_only_read_only_and_content_minimal(
         headers=admin,
     )
     assert response.status_code == 200
+    assert response.json()["total"] == 1
     [item] = response.json()["items"]
     assert item["owner_id"] == user_id
+    past_end = client.get(
+        "/api/admin/analysis-issues",
+        params={"owner_id": user_id, "status": "open", "offset": 1},
+        headers=admin,
+    )
+    assert past_end.status_code == 200
+    assert past_end.json() == {"items": [], "total": 1}
     assert item["artifact_available"] is True
     assert item["code"] == "SPREADSHEET_INVALID_OOXML"
     assert "source_path" not in item

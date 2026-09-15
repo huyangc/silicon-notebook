@@ -482,6 +482,7 @@ def list_admin_analysis_issues(
     model_area: Literal[
         "", "ask", "report", "source", "knowledge", "memory", "knowhow", "retrieval"
     ] = Query(""),
+    offset: int = Query(0, ge=0),
     limit: int = Query(200, ge=1, le=500),
     user: UserProfile = Depends(get_current_user),
     issue_store: Any = Depends(analysis_issue_repository),
@@ -489,14 +490,17 @@ def list_admin_analysis_issues(
     """Automatic parse, analysis, and model-output failures; admin read-only."""
     if user.role != "admin":
         raise user_error(403, "仅管理员可查看解析问题")
-    items = issue_store.list_issues(
+    items, total = issue_store.page_issues(
         owner_id=owner_id,
         status=status,
         category=category,
         model_area=model_area,
+        offset=offset,
         limit=limit,
     )
-    return AnalysisIssueResponse(items=[AnalysisIssue(**item) for item in items])
+    return AnalysisIssueResponse(
+        items=[AnalysisIssue(**item) for item in items], total=total
+    )
 
 
 @router.get(

@@ -687,6 +687,34 @@ class AnalysisArtifactStore:
         limit: int = 200,
         now: datetime | None = None,
     ) -> list[dict[str, Any]]:
+        items, _total = self.page_issues(
+            owner_id=owner_id,
+            status=status,
+            category=category,
+            model_area=model_area,
+            offset=0,
+            limit=limit,
+            now=now,
+        )
+        return items
+
+    def page_issues(
+        self,
+        *,
+        owner_id: str = "",
+        status: str = "",
+        category: str = "",
+        model_area: str = "",
+        offset: int = 0,
+        limit: int = 200,
+        now: datetime | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """One page of matching issues plus the full match count.
+
+        The total is what lets the admin sheet page past the first ``limit`` rows
+        instead of silently dropping them; it counts after the same filters and
+        expiry sweep as the page itself.
+        """
         if status and status not in ISSUE_STATUSES:
             raise ValueError("unsupported analysis issue status")
         if category and category not in ISSUE_CATEGORIES:
@@ -697,7 +725,7 @@ class AnalysisArtifactStore:
         rows: list[dict[str, Any]] = []
         issue_root = self.root / "issues"
         if not issue_root.is_dir():
-            return rows
+            return rows, 0
         for metadata_path in list(issue_root.glob("*/*/*/issue.json")):
             try:
                 item = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -725,7 +753,8 @@ class AnalysisArtifactStore:
             key=lambda item: (str(item.get("updated_at") or ""), str(item.get("id") or "")),
             reverse=True,
         )
-        return rows[: max(1, min(int(limit), 500))]
+        start = max(0, int(offset))
+        return rows[start : start + max(1, min(int(limit), 500))], len(rows)
 
     @staticmethod
     def _delete_payload(issue_dir: Path) -> None:

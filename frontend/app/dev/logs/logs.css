@@ -123,7 +123,9 @@
 .activity-src-error { padding: 6px 10px 6px 26px; font-size: 12px; color: var(--red); }
 .activity-scope-failure { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 12px 14px; font-size: 12px; color: var(--red); }
 .activity-scope-failure .copy-btn { margin-left: 0; }
-.activity-src-more { padding: 6px 10px 8px 26px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.activity-src-more { display: grid; gap: 6px; padding: 6px 10px 8px 26px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.activity-src-more .loadmore { border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font-size: 12px; }
+.activity-src-more .activity-src-error { padding: 0; }
 
 /* 中栏 · 活动流 */
 .activity-row .logrow-head { flex-wrap: wrap; row-gap: 4px; }

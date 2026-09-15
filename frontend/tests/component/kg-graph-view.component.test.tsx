@@ -9,7 +9,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
-import type { PendingMerge } from "../../app/workspace-model";
+import type { KgOccurrence, PendingMerge } from "../../app/workspace-model";
 
 const dynamicOptions: unknown[] = [];
 const forceGraphProps: Array<Record<string, unknown>> = [];
@@ -325,6 +325,111 @@ test("头部两个只读诊断入口与关闭按钮各自交回注入命令", as
   expect(openKgAnalysis).toHaveBeenCalledTimes(1);
   expect(openKgSchemas).toHaveBeenCalledTimes(1);
   expect(closeKgView).toHaveBeenCalledTimes(1);
+});
+
+
+// 待确认合并 / 相邻关系 / 出处三份清单接口一次性整份返回（无 LIMIT），此前各自被
+// 硬 slice 到 24/10 条（相邻关系）或压根没有上限却随全量渲染，界面改为分页展示。
+function manyPendingMerges(count: number): PendingMerge[] {
+  return Array.from({ length: count }, (_, index) => ({
+    id: `m-${index + 1}`,
+    canonical_a: `A${String(index + 1).padStart(2, "0")}`,
+    canonical_b: `B${String(index + 1).padStart(2, "0")}`,
+    score: 0.5,
+    status: "pending",
+  }));
+}
+
+function manyKgEdges(count: number, prefix = "边"): Props["selectedKgEdges"] {
+  return Array.from({ length: count }, (_, index) => ({
+    source_object_id: `s-${prefix}-${index}`,
+    target_object_id: `t-${prefix}-${index}`,
+    edge_type: "about",
+    sourceName: `${prefix}源${String(index + 1).padStart(2, "0")}`,
+    sourceType: "concept",
+    targetName: `${prefix}目标${String(index + 1).padStart(2, "0")}`,
+    targetType: "concept",
+  }));
+}
+
+function manyKgOccurrences(count: number): KgOccurrence[] {
+  return Array.from({ length: count }, (_, index) => ({
+    source_title: `来源${String(index + 1).padStart(2, "0")}`,
+    element_text: `内容${index + 1}`,
+    // 补上 element_type：缺它时 vocabulary 的 label() 会在开发期打印
+    // 「未映射的枚举值」，那是夹具噪音，不是被测行为（同上方既有用例的注释）。
+    element_type: "paragraph",
+  }));
+}
+
+test("待确认合并超过一页时分页展示，翻页后显示下一批候选", async () => {
+  const user = userEvent.setup();
+  renderView({ kgGraph: graphView({ pendingMerges: manyPendingMerges(25) }) });
+
+  expect(document.querySelectorAll(".kg-merge-row")).toHaveLength(20);
+  const pager = screen.getByRole("navigation", { name: "待确认合并分页" });
+  expect(within(pager).getByText("1–20 / 25")).toBeInTheDocument();
+
+  await user.click(within(pager).getByRole("button", { name: "下一页" }));
+  expect(document.querySelectorAll(".kg-merge-row")).toHaveLength(5);
+  expect(within(pager).getByRole("button", { name: "下一页" })).toBeDisabled();
+});
+
+test("相邻关系超过一页时分页展示，切换选中节点时回到第一页", async () => {
+  const user = userEvent.setup();
+  const { rerender, props } = renderView({
+    selectedKgNode: { id: "K-1", object_type: "concept", payload: { name: "阈值" } },
+    selectedKgEdges: manyKgEdges(25, "一"),
+  });
+
+  expect(document.querySelectorAll(".kg-relation-row")).toHaveLength(20);
+  const pager = screen.getByRole("navigation", { name: "相邻关系分页" });
+  expect(within(pager).getByText("1–20 / 25")).toBeInTheDocument();
+
+  await user.click(within(pager).getByRole("button", { name: "下一页" }));
+  expect(document.querySelectorAll(".kg-relation-row")).toHaveLength(5);
+
+  // 切到另一个节点：即便新节点的相邻关系同样超过一页，也必须从第一页开始看，
+  // 不能停在上一个节点翻到的那一页——那会让用户第一眼看到的是错位的关系。
+  rerender(
+    <KgGraphView
+      {...props}
+      selectedKgNode={{ id: "K-2", object_type: "concept", payload: { name: "另一个" } }}
+      selectedKgEdges={manyKgEdges(25, "二")}
+    />,
+  );
+  expect(document.querySelectorAll(".kg-relation-row")).toHaveLength(20);
+  expect(within(pager).getByText("1–20 / 25")).toBeInTheDocument();
+});
+
+test("出处超过一页时分页展示，翻页后显示下一批", async () => {
+  const user = userEvent.setup();
+  renderView({
+    selectedKgNode: { id: "K-1", object_type: "concept", payload: { name: "阈值" } },
+    kgGraph: graphView({
+      selectedNodeId: "K-1",
+      nodeContext: {
+        id: "K-1",
+        object_type: "concept",
+        name: "阈值",
+        section_path: "",
+        occurrences: manyKgOccurrences(15),
+        definition: null,
+        steps: null,
+      },
+    }),
+  });
+
+  expect(document.querySelectorAll(".kg-evidence-card")).toHaveLength(10);
+  const pager = screen.getByRole("navigation", { name: "出处分页" });
+  expect(within(pager).getByText("1–10 / 15")).toBeInTheDocument();
+
+  await user.click(within(pager).getByRole("button", { name: "下一页" }));
+  expect(document.querySelectorAll(".kg-evidence-card")).toHaveLength(5);
+  expect(within(pager).getByRole("button", { name: "下一页" })).toBeDisabled();
+  // 序号跨页连续:第 2 页从 11 数到 15。
+  expect(Array.from(document.querySelectorAll(".kg-evidence-index")).map((node) => node.textContent))
+    .toEqual(["11", "12", "13", "14", "15"]);
 });
 
 

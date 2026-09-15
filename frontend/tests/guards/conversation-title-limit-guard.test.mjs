@@ -2,7 +2,10 @@
 //
 // 纯函数那一半（`conversationTitleLimitHint` 的尺子与「不裁剪」）由
 // `tests/unit/ask-input-limits.test.mjs` 钉住；这里钉的是它有没有真的接上去——
-// 重命名 UI 在 `page.tsx` 里，没有可单独渲染的组件接缝，所以按**源码语义**钉。
+// 重命名 UI 原来在 `page.tsx` 里、没有可单独渲染的组件接缝，所以按**源码语义**钉。
+// 分页改造（page.tsx 是 Next.js App Router 的路由文件，不能有除 default 外的具名
+// 导出）把这段 UI 连同分页一起搬进了 `ask-session-history-list.tsx`，源码语义扫描
+// 跟着改扫那个文件——UI 本身与判据都原样未动。
 //
 // 为什么这几条值得单独钉：
 //
@@ -26,8 +29,8 @@ import { findFunction, jsxElements, parseModule } from "../../test-support/seman
 const GATE = "sessionTitleOverLimit";
 
 async function renameInput() {
-  const page = await parseModule("page.tsx");
-  const inputs = jsxElements(page, "input").filter(
+  const mod = await parseModule("ask-session-history-list.tsx");
+  const inputs = jsxElements(mod, "input").filter(
     (el) => (el.bindings || {}).value === "sessionTitleDraft",
   );
   assert.equal(
@@ -35,7 +38,7 @@ async function renameInput() {
     "找不到（或找到多个）会话重命名输入框——它的 value 绑定应当是 sessionTitleDraft。"
     + "改了名字就把这个守卫一起改，别让它空转",
   );
-  return { page, input: inputs[0] };
+  return { page: mod, input: inputs[0] };
 }
 
 test("重命名输入框不得用 maxLength 当护栏（尺子不对 + 静默裁剪）", async () => {
@@ -58,15 +61,34 @@ test("Enter 与保存键两条提交路都读同一个超限判据", async () =>
     `重命名输入框的 onKeyDown 没有读 ${GATE}：只 gate 保存键的话，超长标题照样能`
     + "从键盘按 Enter 存进去",
   );
+  // 两条提交路必须调同一个函数(onCommitRename 这个 prop),不能各喊各的——否则
+  // 「同一个判据」只是巧合,下一次改动很容易让其中一条悄悄绕开。
+  assert.ok(
+    onKeyDown.includes("onCommitRename"),
+    "重命名输入框的 onKeyDown 没有调 onCommitRename:Enter 提交必须走与保存键相同的入口",
+  );
 
   const saveButtons = jsxElements(page, "button").filter(
     (el) => (el.attributes || {}).title === "保存"
-      && ((el.bindings || {}).onClick || "").includes("commitRenameSession"),
+      && ((el.bindings || {}).onClick || "").includes("onCommitRename"),
   );
   assert.equal(saveButtons.length, 1, "找不到（或找到多个）会话重命名的保存键");
   assert.ok(
     ((saveButtons[0].bindings || {}).disabled || "").includes(GATE),
     `重命名保存键的 disabled 没有读 ${GATE}：超限时它必须点不动，否则用户只会吃一个 422`,
+  );
+
+  // ask-session-history-list.tsx 里的 onCommitRename 只是个 prop 名字——真正的判据
+  // 生效与否,取决于 page.tsx 有没有把它接到真正的 askSession.commitRenameSession。
+  // 只钉组件内部会漏掉「prop 传了个空函数」这类断线。
+  const pageModule = await parseModule("page.tsx");
+  const usages = jsxElements(pageModule, "AskSessionHistoryList");
+  assert.equal(usages.length, 1, "AskSessionHistoryList 没有在 page.tsx 里恰好挂载一次");
+  assert.match(
+    usages[0].bindings.onCommitRename || "",
+    /commitRenameSession/,
+    "page.tsx 传给 AskSessionHistoryList 的 onCommitRename 没有接到"
+    + " askSession.commitRenameSession —— 保存键/Enter 会变成摆设",
   );
 });
 

@@ -35,7 +35,9 @@ import {
   referenceImages,
   resolveCitationImageRows,
 } from "./inline-citation-images";
+import { Pagination } from "./Pagination";
 import { quotedPhraseHint } from "./query-syntax";
+import { useClientPagination } from "./use-client-pagination.ts";
 import {
   CITATION_IMAGE_SLOT_ATTRIBUTE,
   citationImageSlotItems,
@@ -1329,6 +1331,11 @@ export function OutlineEditor({
 // ReportsPanel
 // ---------------------------------------------------------------------------
 
+/** 深度报告清单每页条数。接口一次性返回整份清单(GET /notebooks/{id}/reports 不分页),
+ * 分页只发生在界面。 */
+const REPORT_LIST_PAGE_SIZE = 20;
+const NO_REPORTS: never[] = [];
+
 export interface ReportsPanelProps {
   notebookId: string;
   workspace: ReportWorkspace;
@@ -1409,6 +1416,16 @@ export function ReportsPanel({
   // 自动复制还失败了,按钮就在说反话(codex #612 R5 P2)。`shared` 翻面是「链接身份换了」
   // 唯一的信号(换 token 必经 shared:false),在它上面清掉结果。
   useEffect(() => { copyResult.reset(); }, [shared, copyResult.reset]);
+  const reportsPage = useClientPagination(reports ?? NO_REPORTS, REPORT_LIST_PAGE_SIZE, notebookId);
+  // 打开的报告要落在列表当前页上:新建报告(排在最前)或深链打开某一份都可能落在
+  // 别的页。只跟随 active id 变化与清单(重新)加载完成,不跟随原地刷新——见
+  // groups-page.tsx「选中的群组要落在侧栏当前页上」的同一处理。
+  const { setPage: setReportListPage } = reportsPage;
+  const reportsLoaded = reports !== null;
+  useEffect(() => {
+    const index = reports?.findIndex((r) => r.id === active?.id) ?? -1;
+    if (index >= 0) setReportListPage(Math.floor(index / REPORT_LIST_PAGE_SIZE));
+  }, [active?.id, reportsLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
   // ---- 详情视图 ----
   if (active) {
     const displayQuestion = active.understanding?.confirmed
@@ -1733,7 +1750,7 @@ export function ReportsPanel({
             );
           })()}
           <div className="report-list">
-            {reports.map((r) => {
+            {reportsPage.pageItems.map((r) => {
               const isDone = r.status === "done";
               const checked = selectedIds.has(r.id);
               return (
@@ -1826,6 +1843,13 @@ export function ReportsPanel({
               );
             })}
           </div>
+          <Pagination
+            page={reportsPage.page}
+            pageSize={REPORT_LIST_PAGE_SIZE}
+            total={reportsPage.total}
+            onPage={reportsPage.setPage}
+            label="深度报告分页"
+          />
         </>
       )}
     </div>

@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, GitMerge, LayoutDashboard, LayoutGrid, Link2, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, Users, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, GitMerge, LayoutDashboard, LayoutGrid, Link2, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, Users, X } from "lucide-react";
 import "katex/dist/katex.min.css";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
 import { AuthedImage } from "./authed-image";
@@ -188,9 +188,7 @@ import { GroupsPage } from "./groups-page";
 import { NotebookGroupShare, BORROWED_BASE_SHARE_WARNING } from "./notebook-group-share";
 import {
   joinGroupInvite,
-  grantedViaLabel,
   groupsHash,
-  isGroupGranted,
   parseGroupsHash,
   parseGroupInviteToken,
   partitionByGrant,
@@ -215,6 +213,11 @@ import { ChatQuestion } from "./chat-question";
 import { ChatAnswer } from "./chat-answer";
 import { WaitingWishCarousel } from "./waiting-wish-carousel";
 import { Pagination } from "./Pagination";
+import { useClientPagination } from "./use-client-pagination.ts";
+import { NotebookCollectionSection } from "./notebook-collection-section.tsx";
+import { AskSessionHistoryList } from "./ask-session-history-list.tsx";
+import { ShareOverviewMembers } from "./share-overview-members.tsx";
+import { DuplicateGroupList } from "./duplicate-group-list.tsx";
 import { downloadReportArchive, downloadReportMarkdown, ReportsPanel } from "./report-view";
 import {
   DEFAULT_REPORT_MAX_SECTIONS,
@@ -261,7 +264,6 @@ import {
   doneItemDestination,
   historyModeForTransition,
   NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING,
-  notebookRoleText,
   openMemoryDeepLink,
   workspaceCapabilities,
   workspaceRequestIsCurrent,
@@ -290,7 +292,6 @@ import {
   type NotebookContentOverview,
   type NotebookSummary,
   type PendingMerge,
-  type SearchHit,
   type SourceElement,
   type SourceSummary,
   type UnifiedConceptNode,
@@ -313,6 +314,17 @@ const LEGACY_OFFICE_EXTENSIONS = ["doc", "ppt"];
 
 
 const KG_TYPE_ORDER = ["concept", "claim", "formula", "procedure"];
+
+// 前端分页的页大小常量(接口整份返回、契约上不分页,分页只发生在界面——见
+// use-client-pagination.ts 的说明与 groups-page.tsx 的先例)。笔记本卡片/列表行的
+// 页大小(24)随 NotebookCollectionSection 一起搬进了 notebook-collection-section.tsx;
+// 这里只剩「已分享」弹窗清单自己的页大小,其余清单同一档,统一叫 20。
+const LIST_PAGE_SIZE = 20;
+
+// 稳定的空清单引用:某个 owner 不可见时给分页 hook 的兜底值必须是同一个数组实例,
+// 否则每次渲染都传一个新 [],会让依赖它的 effect/useMemo 误判成清单变了
+// (参见 use-notebook-collection.ts 的 NO_ROWS 同款说明)。
+const NO_ITEMS: never[] = [];
 
 type InfoModal = {
   title: string;
@@ -585,15 +597,6 @@ function kgTypeBandForce(width: number, height: number, activeTypes: string[]) {
   return force;
 }
 
-
-function cardTone(index: number): string {
-  return ["tone-green", "tone-cream", "tone-lavender", "tone-rose", "tone-cream", "tone-blue"][index % 6];
-}
-
-function cardIcon(index: number, notebook: NotebookSummary): string {
-  if (notebook.primary_domain.toLowerCase().includes("esd")) return "▣";
-  return ["◇", "📒", "📈", "▤", "▧"][index % 5];
-}
 
 function accountInitials(username: string): string {
   const compact = username.trim().replace(/[^a-z0-9]/gi, "");
@@ -4825,52 +4828,18 @@ export default function Home() {
   // 授权边一点作用都没有),两者必须分开。
   const notebookPartition = partitionByGrant(notebookCollection.visibleRows);
 
-  // 两个分区渲染的是同一种卡片,所以抽成一个函数 —— 复制一份 JSX 必然分叉。
-  const renderNotebookCard = (
-    { notebook, hits }: { notebook: NotebookSummary; hits: SearchHit[] },
-    index: number,
-  ) => (
-    <article key={notebook.id} className={`notebook-card ${cardTone(index)}`}>
-      <button className="card-menu" onClick={(event) => openNotebookMenu(notebook.id, event)} title="笔记本操作">⋮</button>
-      {/* 动作发出后立即禁用 + 忙碌指示(docs/development.md「长任务控件」硬约束)。
-          禁用后基线 :active 反馈按设计不再适用——spinner + 「打开中…」就是反馈。
-          ⋮ 菜单与「N 条记忆」是另外的动作,不在这颗按钮里,照旧可点。 */}
-      <button
-        className={`notebook-card-main${openingNotebookId === notebook.id ? " is-opening" : ""}`}
-        aria-busy={openingNotebookId === notebook.id || undefined}
-        disabled={openingNotebookId === notebook.id}
-        onClick={() => openNotebook(notebook.id).catch(reportError)}
-      >
-        <div className="card-icon">{cardIcon(index, notebook)}</div>
-        <div>
-          <h2>{notebook.name}</h2>
-          <p>{notebook.purpose || "No purpose set yet."}</p>
-          {openingNotebookId === notebook.id && (
-            <p className="notebook-card-open-status">
-              <span className="notebook-card-open-spinner" aria-hidden="true" />
-              打开中…
-            </p>
-          )}
-          {isGroupGranted(notebook) && (
-            <p className="notebook-card-meta">{grantedViaLabel(notebook)}</p>
-          )}
-        </div>
-        <SearchHits hits={hits} compact={false} />
-      </button>
-      <div className="notebook-card-footer">
-        <p className="notebook-card-meta">{notebook.created_label} · {notebook.counts.sources ?? 0} 个来源</p>
-        <div className="notebook-card-footer-actions">
-          {notebook.access !== "reader" && notebook.is_shared && (
-            <span className="notebook-shared-badge" title="已分享" aria-label="已分享"><User size={14} /></span>
-          )}
-          <button
-            type="button"
-            className="notebook-memory-link"
-            onClick={() => openNotebookMemory(notebook.id).catch(reportError)}
-          >{notebook.counts.memories ?? 0} 条记忆</button>
-        </div>
-      </div>
-    </article>
+  // 「我的笔记本」「群组」两个分区各自独立分页(NotebookCollectionSection 内部各
+  // 一份 useClientPagination),但筛选 tab/搜索词/排序/视图模式改变时要一起回到第一页——
+  // 这四项任一变化都意味着两个分区的内容已经整体换过一轮。
+  const notebookCollectionResetKey =
+    `${notebookCollection.filter}|${notebookCollection.searchQuery}|${notebookCollection.sortMode}|${notebookCollection.viewMode}`;
+
+  // 「已分享」弹窗的清单分页。resetKey 传弹窗的 open 状态本身(而不是留空):每次
+  // 重新打开都该看到第一页,不该停在上次关闭前翻到的那一页。
+  const sharedByMePage = useClientPagination(
+    sharedByMeList ?? NO_ITEMS,
+    LIST_PAGE_SIZE,
+    rootModals.view("shared-by-me").open,
   );
 
   // 启动就绪门:在认证/加载分支之前拦截。未就绪时只展示启动屏,绝不露出登录表单或空白挂起。
@@ -5021,33 +4990,28 @@ export default function Home() {
             {notebookCollection.searchQuery && <p>{notebookCollection.visibleRows.length} 个笔记本，搜索 “{notebookCollection.searchQuery}”</p>}
           </section>
 
-          <section className={`notebook-grid view-${notebookCollection.viewMode}`}>
-            {notebookCollection.viewMode === "list" ? (
-              <NotebookList
-                entries={notebookPartition.personal}
-                openingNotebookId={openingNotebookId}
-                openNotebook={(id) => openNotebook(id).catch(reportError)}
-                openMemory={(id) => openNotebookMemory(id).catch(reportError)}
-                openMenu={openNotebookMenu}
-              />
-            ) : (
-              <>
-                {!notebookCollection.searchQuery && notebookCollection.filter !== "featured" && (
-                  <button className="notebook-card create-card" disabled={notebookCollection.creating} onClick={() => { void notebookCollection.createDefaultNotebook(); }}>
-                    <div className="create-circle">＋</div>
-                    <h2>新建笔记本</h2>
-                  </button>
-                )}
-                {notebookPartition.personal.map(renderNotebookCard)}
-              </>
-            )}
-            {notebookCollection.visibleRows.length === 0 && (
+          <NotebookCollectionSection
+            entries={notebookPartition.personal}
+            viewMode={notebookCollection.viewMode}
+            label="我的笔记本分页"
+            resetKey={notebookCollectionResetKey}
+            leadingCard={!notebookCollection.searchQuery && notebookCollection.filter !== "featured" ? (
+              <button className="notebook-card create-card" disabled={notebookCollection.creating} onClick={() => { void notebookCollection.createDefaultNotebook(); }}>
+                <div className="create-circle">＋</div>
+                <h2>新建笔记本</h2>
+              </button>
+            ) : null}
+            trailingGridItem={notebookCollection.visibleRows.length === 0 ? (
               <article className="empty-state">
                 <strong>没有找到笔记本</strong>
                 <p>换一个关键词，或回到“我的笔记本”创建新的笔记本。</p>
               </article>
-            )}
-          </section>
+            ) : null}
+            openingNotebookId={openingNotebookId}
+            openNotebook={(id) => openNotebook(id).catch(reportError)}
+            openMemory={(id) => openNotebookMemory(id).catch(reportError)}
+            openMenu={openNotebookMenu}
+          />
 
           {/* 「群组」分区(设计决策 10)。经群组共享进来的库单独成一区,而不是混进
               上面那批——它们不是「我的」,也没有「退出共享」这个自己能按的出口。 */}
@@ -5057,20 +5021,17 @@ export default function Home() {
                 <h1>群组</h1>
                 <p>经群组共享给你的知识库。可以打开、提问、写自己的深度报告，也可以挂为参考库；由组管理员管理。</p>
               </section>
-              <section className={`notebook-grid view-${notebookCollection.viewMode}`}>
-                {notebookCollection.viewMode === "list" ? (
-                  <NotebookList
-                    entries={notebookPartition.group}
-                    roleText="群组成员"
-                    openingNotebookId={openingNotebookId}
-                    openNotebook={(id) => openNotebook(id).catch(reportError)}
-                    openMemory={(id) => openNotebookMemory(id).catch(reportError)}
-                    openMenu={openNotebookMenu}
-                  />
-                ) : (
-                  notebookPartition.group.map(renderNotebookCard)
-                )}
-              </section>
+              <NotebookCollectionSection
+                entries={notebookPartition.group}
+                viewMode={notebookCollection.viewMode}
+                roleText="群组成员"
+                label="群组笔记本分页"
+                resetKey={notebookCollectionResetKey}
+                openingNotebookId={openingNotebookId}
+                openNotebook={(id) => openNotebook(id).catch(reportError)}
+                openMemory={(id) => openNotebookMemory(id).catch(reportError)}
+                openMenu={openNotebookMenu}
+              />
             </>
           )}
         </main>
@@ -5635,51 +5596,21 @@ export default function Home() {
                       <span>新会话</span>
                       <small>从一个新的问题开始</small>
                     </button>
-                    {sessions.length === 0 ? (
-                      <div className="chat-session-empty">还没有历史会话。</div>
-                    ) : sessions.map((session) => (
-                      <article className={`chat-session-card ${session.id === conversationId ? "active" : ""}`} key={session.id}>
-                        {renamingSessionId === session.id ? (
-                          <div className="chat-session-rename">
-                            {/* 刻意没有 maxLength:那把尺数的是 UTF-16 code unit,与后端
-                                Pydantic 的码点口径对不上,而且它是**静默裁剪**——两条都
-                                是红线(codex #525 R2/R3)。超限时输入框保持可编辑,用户
-                                正要做的就是把它改短。 */}
-                            <input
-                              autoFocus
-                              value={sessionTitleDraft}
-                              aria-invalid={sessionTitleOverLimit !== null}
-                              onChange={(event) => askSession.updateSessionTitleDraft(event.target.value)}
-                              onKeyDown={(event) => {
-                                if (event.key === "Enter" && !sessionTitleOverLimit) askSession.commitRenameSession(session.id).catch(reportError);
-                                if (event.key === "Escape") askSession.cancelRenameSession();
-                              }}
-                            />
-                            <button type="button" title="保存" disabled={sessionTitleOverLimit !== null} onClick={() => askSession.commitRenameSession(session.id).catch(reportError)}><Check size={15} /></button>
-                            <button type="button" title="取消" onClick={askSession.cancelRenameSession}><X size={15} /></button>
-                            {/* 此刻唯一挡着保存键的东西,不写出来用户只看到按钮变灰。 */}
-                            {sessionTitleOverLimit && (
-                              <span className="chat-session-rename-hint">{sessionTitleOverLimit}</span>
-                            )}
-                          </div>
-                        ) : (
-                          <>
-                            <button className="chat-session-card-main" type="button" onClick={() => openAskSession(session.id).catch(reportError)}>
-                              <span>{session.title || "未命名会话"}</span>
-                              <small>
-                                {formatRelativeTime(session.updated_at)} · {session.turn_count} 轮
-                                {session.used_reasoning && <span className="chat-session-reasoning-badge">{`✦ ${strictLabel}`}</span>}
-                              </small>
-                            </button>
-                            <div className="chat-session-card-actions">
-                              <button type="button" title="分享" onClick={() => openConversationShare({ id: session.id, title: session.title || "", throughAnswerId: "" })}><Share2 size={14} /></button>
-                              <button type="button" title="重命名" onClick={() => askSession.beginRenameSession(session)}><Edit3 size={14} /></button>
-                              <button type="button" title="删除" onClick={() => requestDeleteSession(session)}><Trash2 size={14} /></button>
-                            </div>
-                          </>
-                        )}
-                      </article>
-                    ))}
+                    <AskSessionHistoryList
+                      sessions={sessions}
+                      conversationId={conversationId}
+                      renamingSessionId={renamingSessionId}
+                      sessionTitleDraft={sessionTitleDraft}
+                      sessionTitleOverLimit={sessionTitleOverLimit}
+                      strictLabel={strictLabel}
+                      onUpdateTitleDraft={askSession.updateSessionTitleDraft}
+                      onCommitRename={(id) => askSession.commitRenameSession(id).catch(reportError)}
+                      onCancelRename={askSession.cancelRenameSession}
+                      onOpenSession={(id) => openAskSession(id).catch(reportError)}
+                      onBeginRename={askSession.beginRenameSession}
+                      onShare={(session) => openConversationShare({ id: session.id, title: session.title || "", throughAnswerId: "" })}
+                      onDelete={requestDeleteSession}
+                    />
                   </div>
                 </div>
               )}
@@ -6162,8 +6093,9 @@ export default function Home() {
                   <p>在笔记本里点「分享」，可以发一条链接给具体的人，或共享给一个群组。</p>
                 </article>
               ) : (
+                <>
                 <div className="share-overview">
-                  {sharedByMeList.map((item) => (
+                  {sharedByMePage.pageItems.map((item) => (
                     <article className="share-overview-item" key={item.id}>
                       <header className="share-overview-head">
                         <h3 className="share-overview-name">{item.name}</h3>
@@ -6217,9 +6149,7 @@ export default function Home() {
                           {item.mode === "readonly" && (item.members.length > 0 ? (
                             <div className="share-overview-members">
                               <span className="share-overview-members-label">已加入 {item.members.length} 人</span>
-                              {item.members.map((member) => (
-                                <span className="share-member-chip" key={member.username}>{member.username}</span>
-                              ))}
+                              <ShareOverviewMembers members={item.members} notebookName={item.name} />
                             </div>
                           ) : (
                             <p className="share-overview-note">还没有人通过这条链接加入。</p>
@@ -6247,6 +6177,8 @@ export default function Home() {
                     </article>
                   ))}
                 </div>
+                <Pagination page={sharedByMePage.page} pageSize={LIST_PAGE_SIZE} total={sharedByMePage.total} onPage={sharedByMePage.setPage} label="已分享笔记本分页" />
+                </>
               )}
             </div>
             <div className="share-overview-footer">
@@ -7637,89 +7569,6 @@ export default function Home() {
     </div>
   );
 }
-function NotebookList({
-  entries,
-  roleText,
-  openingNotebookId,
-  openNotebook,
-  openMemory,
-  openMenu
-}: {
-  entries: Array<{ notebook: NotebookSummary; index: number; hits: SearchHit[] }>;
-  /** 覆盖「角色」列的文案。「群组」分区传「群组成员」;省略时按每行的 access 判。 */
-  roleText?: string;
-  /**
-   * 正在打开的笔记本 id。列表视图与网格卡片是同一个动作的两种外观,忙碌反馈必须
-   * 同权:命中行的四个「打开」单元格立刻禁用并显示旋转指示,否则用户在列表里连点
-   * 依旧会叠出多组并行请求(网格那边已经挡住了,这边没挡就是同一个缺陷的另一半)。
-   */
-  openingNotebookId: string | null;
-  openNotebook: (id: string) => void;
-  openMemory: (id: string) => void;
-  openMenu: (id: string, event: MouseEvent<HTMLButtonElement>) => void;
-}) {
-  // 全部库都落在「群组」分区时,主区一行都没有——只剩一排孤零零的表头,读起来像
-  // 「这里本该有东西但没加载出来」。没有行就整段不渲染。
-  if (entries.length === 0) return null;
-  return (
-    <section className="notebook-list">
-      <div className="notebook-list-header">
-        <span>标题</span><span>来源</span><span>记忆</span><span>创建日期</span><span>角色</span><span />
-      </div>
-      {entries.map(({ notebook, index, hits }) => {
-        const opening = openingNotebookId === notebook.id;
-        return (
-        <article className="notebook-list-row" key={notebook.id}>
-          <button
-            className={`notebook-list-title${opening ? " is-opening" : ""}`}
-            aria-busy={opening || undefined}
-            disabled={opening}
-            onClick={() => openNotebook(notebook.id)}
-          >
-            <span className="list-icon">{cardIcon(index, notebook)}</span>
-            <span>
-              <strong>{notebook.name}</strong>
-              {opening && (
-                <small className="notebook-list-open-status">
-                  <span className="notebook-card-open-spinner" aria-hidden="true" />
-                  打开中…
-                </small>
-              )}
-              {isGroupGranted(notebook) && <small>{grantedViaLabel(notebook)}</small>}
-              <SearchHits hits={hits} compact />
-            </span>
-          </button>
-          {/* 三个数据格与标题同一个动作(打开这本库),所以同禁用。⋮ 菜单与「N 条记忆」
-              是另外的动作,不禁用。 */}
-          <button className="notebook-list-cell" disabled={opening} onClick={() => openNotebook(notebook.id)}>{notebook.counts.sources ?? 0} 个来源</button>
-          <button className="notebook-list-cell notebook-memory-link" onClick={() => openMemory(notebook.id)}>{notebook.counts.memories ?? 0} 条</button>
-          <button className="notebook-list-cell" disabled={opening} onClick={() => openNotebook(notebook.id)}>{notebook.created_label}</button>
-          <button className="notebook-list-cell role-cell" disabled={opening} onClick={() => openNotebook(notebook.id)}>{notebookRoleText(notebook, roleText)}</button>
-          <button className="list-row-menu" onClick={(event) => openMenu(notebook.id, event)} title="笔记本操作">⋮</button>
-        </article>
-        );
-      })}
-    </section>
-  );
-}
-
-function SearchHits({ hits, compact }: { hits: SearchHit[]; compact: boolean }) {
-  if (!hits.length) return null;
-  if (compact) {
-    const hit = hits[0];
-    return <small>{hit.scope} · {hit.text}</small>;
-  }
-  return (
-    <div className="card-search-hits">
-      {hits.slice(0, 3).map((hit, index) => (
-        <div key={`${hit.scope}-${index}`}>
-          <span>{hit.scope}</span>
-          <p>{hit.text}</p>
-        </div>
-      ))}
-    </div>
-  );
-}
 
 // Keep only static table markup; drop scripts/styles and any event handlers.
 function sanitizeTableHtml(html: string): string {
@@ -7840,13 +7689,10 @@ function EvidenceLine({ evidence }: { evidence: Evidence[] }) {
   );
 }
 
-
-
 function knowledgeHeadline(_kind: KnowledgeKind, item: KnowledgeItem): string {
   if (item.headline) return item.headline;
   return item.title || item.id;
 }
-
 
 function genericBody(item: KnowledgeItem) {
   const fields = (item.fields ?? []).filter((f) => f.value && f.value !== item.headline);
@@ -7966,25 +7812,15 @@ function KnowledgeBrowser({
           <p className="section-title">重复组（规范名归一化后相同）</p>
           {duplicates.length === 0 ? (
             <p className="tool-hint">未发现重复。</p>
-          ) : duplicates.map((group, index) => (
-            <article className="item" key={`dup-${index}`}>
-              <div className="tag-row"><span className="tag">similarity {group.similarity}</span></div>
-              {group.members.map((member, memberIndex) => (
-                <div className="dup-member" key={member.id}>
-                  <span><LatexText text={member.headline} isFormula={(member.object_type || group.object_type) === "formula"} /> <span className="tag">{label(KNOWLEDGE_STATUS, member.status, "其他")}</span></span>
-                  {!readOnly && memberIndex > 0 && (
-                    <button
-                      className="sort-button"
-                      disabled={mergingId !== null}
-                      onClick={() => { void runMerge(member.id, group.members[0].id); }}
-                    >
-                      {mergingId === member.id ? "合并中…" : "合并到第 1 条"}
-                    </button>
-                  )}
-                </div>
-              ))}
-            </article>
-          ))}
+          ) : (
+            <DuplicateGroupList
+              duplicates={duplicates}
+              readOnly={readOnly}
+              mergingId={mergingId}
+              onMerge={(sourceId, intoId) => { void runMerge(sourceId, intoId); }}
+              resetKey={kind}
+            />
+          )}
         </div>
       )}
       {items === null ? (

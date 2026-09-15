@@ -8,6 +8,8 @@ import { fetchMe } from "../../auth.ts";
 import { clampPopoverLeft } from "../../effort-picker-logic";
 import { PageHeader } from "../../components/PageHeader.tsx";
 import { toUserMessage } from "../../errors.ts";
+import { Pagination } from "../../Pagination";
+import { useClientPagination } from "../../use-client-pagination.ts";
 import {
   fetchAdminUsers,
   fetchOnlineIds,
@@ -387,6 +389,49 @@ function ResetPasswordCell({
       </div>
       {!editing && notice && <CellFeedback notice={notice} />}
     </div>
+  );
+}
+
+// 展开行里的笔记本清单:`GET /admin/users/{id}/notebooks` 整份返回(一个用户的笔记本数
+// 没有上限),界面每页 USER_NOTEBOOK_PAGE_SIZE 本。
+const USER_NOTEBOOK_PAGE_SIZE = 20;
+
+function UserNotebookSubtable({ username, notebooks }: { username: string; notebooks: AdminUserNotebook[] }) {
+  const { page, pageItems, total, setPage } = useClientPagination(notebooks, USER_NOTEBOOK_PAGE_SIZE);
+  return (
+    <>
+      <table className="usage-subtable">
+        <thead>
+          <tr>
+            <th>笔记本</th><th>状态</th>
+            <th className="usage-col-num">来源</th>
+            <th className="usage-col-num">提问</th>
+            <th className="usage-col-num">报告</th>
+            <th>创建</th><th>最近更新</th>
+          </tr>
+        </thead>
+        <tbody>
+          {pageItems.map((nb) => (
+            <tr key={nb.id}>
+              <td>{nb.name}</td>
+              <td>{notebookStatusLabel(nb.status)}</td>
+              <td className="usage-col-num">{nb.sources}</td>
+              <td className="usage-col-num">{nb.questions}</td>
+              <td className="usage-col-num">{nb.reports}</td>
+              <td className="usage-col-time">{formatLastActive(nb.created_at)}</td>
+              <td className="usage-col-time">{formatLastActive(nb.updated_at)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <Pagination
+        page={page}
+        pageSize={USER_NOTEBOOK_PAGE_SIZE}
+        total={total}
+        onPage={setPage}
+        label={`${username} 的笔记本分页`}
+      />
+    </>
   );
 }
 
@@ -957,30 +1002,7 @@ export default function AdminUsagePage() {
                         <div className="usage-subtable-status">该用户暂无笔记本。</div>
                       )}
                       {Array.isArray(entry) && entry.length > 0 && (
-                        <table className="usage-subtable">
-                          <thead>
-                            <tr>
-                              <th>笔记本</th><th>状态</th>
-                              <th className="usage-col-num">来源</th>
-                              <th className="usage-col-num">提问</th>
-                              <th className="usage-col-num">报告</th>
-                              <th>创建</th><th>最近更新</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {entry.map((nb) => (
-                              <tr key={nb.id}>
-                                <td>{nb.name}</td>
-                                <td>{notebookStatusLabel(nb.status)}</td>
-                                <td className="usage-col-num">{nb.sources}</td>
-                                <td className="usage-col-num">{nb.questions}</td>
-                                <td className="usage-col-num">{nb.reports}</td>
-                                <td className="usage-col-time">{formatLastActive(nb.created_at)}</td>
-                                <td className="usage-col-time">{formatLastActive(nb.updated_at)}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                        <UserNotebookSubtable key={u.id} username={u.username} notebooks={entry} />
                       )}
                     </td>
                   </tr>

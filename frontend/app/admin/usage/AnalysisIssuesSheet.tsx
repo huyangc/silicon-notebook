@@ -3,6 +3,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { toUserMessage } from "../../errors.ts";
+import { Pagination } from "../../Pagination";
 import {
   fetchAnalysisIssues,
   fetchAnalysisIssueModelArtifact,
@@ -28,6 +29,9 @@ const MODEL_AREA_LABELS: Record<ModelAnalysisArea, string> = {
   retrieval: "检索优化",
 };
 
+/** 每页条数。接口按 offset/limit 分页并回传筛选后的总数,超过一页的记录靠翻页取到。 */
+const ANALYSIS_ISSUE_PAGE_SIZE = 50;
+
 export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
   const requestedOwner = useMemo(() => {
     if (typeof window === "undefined") return "";
@@ -41,6 +45,8 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
   >("");
   const [modelArea, setModelArea] = useState<"" | ModelAnalysisArea>("");
   const [items, setItems] = useState<AnalysisIssue[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(false);
   const [failure, setFailure] = useState("");
   const [selectedId, setSelectedId] = useState("");
@@ -48,12 +54,15 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
   const [artifactLoading, setArtifactLoading] = useState(false);
   const [artifactFailure, setArtifactFailure] = useState("");
   const artifactRequest = useRef(0);
+  const listRequest = useRef(0);
   const usernames = useMemo(
     () => Object.fromEntries(users.map((user) => [user.id, user.username])),
     [users],
   );
 
   const load = useCallback(async () => {
+    // 连点翻页/换筛选时只认最后一次请求:晚到的旧页不许盖掉新页。
+    const requestId = ++listRequest.current;
     artifactRequest.current += 1;
     setSelectedId("");
     setArtifact(null);
@@ -62,13 +71,28 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
     setLoading(true);
     setFailure("");
     try {
-      setItems(await fetchAnalysisIssues({ ownerId, status, category, modelArea }));
+      const result = await fetchAnalysisIssues({
+        ownerId,
+        status,
+        category,
+        modelArea,
+        offset: page * ANALYSIS_ISSUE_PAGE_SIZE,
+        limit: ANALYSIS_ISSUE_PAGE_SIZE,
+      });
+      if (listRequest.current !== requestId) return;
+      setItems(result.items);
+      setTotal(result.total);
+      // 刷新时记录可能已过期被清理:当前页整页落空但前面还有,退回最后一个有内容的页。
+      const lastPage = Math.max(0, Math.ceil(result.total / ANALYSIS_ISSUE_PAGE_SIZE) - 1);
+      if (result.items.length === 0 && page > lastPage) setPage(lastPage);
     } catch (cause) {
-      setFailure(toUserMessage(cause, "解析问题加载失败，请重试"));
+      if (listRequest.current === requestId) {
+        setFailure(toUserMessage(cause, "解析问题加载失败，请重试"));
+      }
     } finally {
-      setLoading(false);
+      if (listRequest.current === requestId) setLoading(false);
     }
-  }, [category, modelArea, ownerId, status]);
+  }, [category, modelArea, ownerId, page, status]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -98,6 +122,7 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
 
   function selectOwner(value: string) {
     setOwnerId(value);
+    setPage(0);
     const params = new URLSearchParams(window.location.search);
     params.set("sheet", "issues");
     if (value) params.set("owner", value);
@@ -117,7 +142,8 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
         </label>
         <label>
           模型功能
-          <select value={modelArea} onChange={(event) => setModelArea(event.target.value as typeof modelArea)}>
+          {/* 换筛选条件与回到第一页在同一次事件里提交,只触发一次加载。 */}
+          <select value={modelArea} onChange={(event) => { setModelArea(event.target.value as typeof modelArea); setPage(0); }}>
             <option value="">全部功能</option>
             {Object.entries(MODEL_AREA_LABELS).map(([value, label]) => (
               <option value={value} key={value}>{label}</option>
@@ -126,7 +152,7 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
         </label>
         <label>
           状态
-          <select value={status} onChange={(event) => setStatus(event.target.value as typeof status)}>
+          <select value={status} onChange={(event) => { setStatus(event.target.value as typeof status); setPage(0); }}>
             <option value="open">未解决</option>
             <option value="resolved">已解决</option>
             <option value="">全部</option>
@@ -134,7 +160,7 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
         </label>
         <label>
           类型
-          <select value={category} onChange={(event) => setCategory(event.target.value as typeof category)}>
+          <select value={category} onChange={(event) => { setCategory(event.target.value as typeof category); setPage(0); }}>
             <option value="">全部</option>
             <option value="source_parse">文档解析</option>
             <option value="spreadsheet_analysis">Excel 专业分析</option>
@@ -229,6 +255,14 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
           </tbody>
         </table>
       </div>
+      <Pagination
+        page={page}
+        pageSize={ANALYSIS_ISSUE_PAGE_SIZE}
+        total={total}
+        busy={loading}
+        onPage={setPage}
+        label="解析问题分页"
+      />
     </section>
   );
 }

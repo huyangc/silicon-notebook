@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
@@ -37,7 +37,7 @@ const USAGE_SUMMARY_DEFAULTS = {
 
 test("模型格式问题按需显示完整提问和原始回答", async () => {
   window.history.replaceState({}, "", "/admin/usage?sheet=issues");
-  mocks.fetchAnalysisIssues.mockResolvedValue([{
+  mocks.fetchAnalysisIssues.mockResolvedValue({ total: 1, items: [{
     id: "analysis-model-case-1",
     category: "model_output",
     status: "open",
@@ -63,7 +63,7 @@ test("模型格式问题按需显示完整提问和原始回答", async () => {
     artifact_available: true,
     source_deleted: false,
     notebook_deleted: false,
-  }]);
+  }] });
   mocks.fetchAnalysisIssueModelArtifact.mockResolvedValue({
     issue_id: "analysis-model-case-1",
     question: "原始问题",
@@ -105,7 +105,7 @@ test("模型格式问题按需显示完整提问和原始回答", async () => {
 
 test("存活解析问题链接到管理员只读来源详情而非普通用户工作区", async () => {
   window.history.replaceState({}, "", "/admin/usage?sheet=issues");
-  mocks.fetchAnalysisIssues.mockResolvedValue([{
+  mocks.fetchAnalysisIssues.mockResolvedValue({ total: 1, items: [{
     id: "issue-1",
     category: "spreadsheet_analysis",
     status: "open",
@@ -131,7 +131,7 @@ test("存活解析问题链接到管理员只读来源详情而非普通用户�
     artifact_available: true,
     source_deleted: false,
     notebook_deleted: false,
-  }]);
+  }] });
   const users: AdminUserUsage[] = [{
     id: "user-1",
     username: "a12345678",
@@ -156,5 +156,65 @@ test("存活解析问题链接到管理员只读来源详情而非普通用户�
   expect(link).toHaveAttribute(
     "href",
     "/dev/logs?view=activity&owner=user-1&activity_type=source&notebook_id=nb-1&source_id=src-1",
+  );
+});
+
+test("解析问题超过一页时按 offset 翻页，换筛选条件回到第一页", async () => {
+  // 此前接口只收 limit(默认 200)、不回总数,第 201 条起被静默丢掉,管理员无从得知。
+  window.history.replaceState({}, "", "/admin/usage?sheet=issues");
+  const issue = (index: number) => ({
+    id: `issue-${index}`,
+    category: "source_parse" as const,
+    status: "open" as const,
+    code: `CODE_${index}`,
+    summary: "摘要",
+    owner_id: "system",
+    notebook_id: "",
+    notebook_name: "",
+    source_id: "",
+    source_title: `来源 ${index}`,
+    file_name: "",
+    source_type: "",
+    workload_id: "",
+    workload_label: "",
+    model_area: "",
+    failure_kind: "",
+    support_id: "",
+    parent_id: "",
+    created_at: "2026-08-31T01:00:00+00:00",
+    updated_at: "2026-08-31T01:00:00+00:00",
+    resolved_at: "",
+    expires_at: "2026-09-30T01:00:00+00:00",
+    artifact_available: false,
+    source_deleted: false,
+    notebook_deleted: false,
+  });
+  mocks.fetchAnalysisIssues.mockReset();
+  mocks.fetchAnalysisIssues.mockImplementation(async ({ offset = 0 }: { offset?: number }) => ({
+    total: 120,
+    items: Array.from({ length: Math.min(50, 120 - offset) }, (_, i) => issue(offset + i)),
+  }));
+  const user = userEvent.setup();
+
+  render(<AnalysisIssuesSheet users={[]} />);
+
+  expect(await screen.findByText("CODE_0")).toBeInTheDocument();
+  expect(mocks.fetchAnalysisIssues).toHaveBeenLastCalledWith(
+    expect.objectContaining({ offset: 0, limit: 50 }),
+  );
+  const pager = screen.getByRole("navigation", { name: "解析问题分页" });
+  expect(within(pager).getByText("1–50 / 120")).toBeInTheDocument();
+
+  await user.click(within(pager).getByRole("button", { name: "下一页" }));
+  expect(await screen.findByText("CODE_50")).toBeInTheDocument();
+  expect(screen.queryByText("CODE_0")).not.toBeInTheDocument();
+  expect(mocks.fetchAnalysisIssues).toHaveBeenLastCalledWith(
+    expect.objectContaining({ offset: 50, limit: 50 }),
+  );
+
+  await user.selectOptions(screen.getByRole("combobox", { name: "类型" }), "source_parse");
+  expect(await screen.findByText("CODE_0")).toBeInTheDocument();
+  expect(mocks.fetchAnalysisIssues).toHaveBeenLastCalledWith(
+    expect.objectContaining({ category: "source_parse", offset: 0 }),
   );
 });

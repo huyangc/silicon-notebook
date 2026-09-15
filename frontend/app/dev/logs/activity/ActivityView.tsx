@@ -356,6 +356,61 @@ export function ActivityView({
       });
   }, []);
 
+  // 来源清单的下一页（offset = 已取回条数），追加在已显示的来源之后。与首页共用同一个
+  // generation：换用户或重新取首页都会让迟到的追加页作废，不会拼进另一份清单。
+  const loadMoreSources = useCallback((id: string) => {
+    const current = sourcesRef.current[id];
+    if (!current || current.loading || current.loadingMore || current.failure) return;
+    if (!userIdRef.current) return;
+    const requestedUserId = userIdRef.current;
+    const generation = sourcesGenerationRef.current[id] ?? 0;
+    const fresh = () => sourcesGenerationRef.current[id] === generation
+      && requestedUserId === userIdRef.current;
+    setSources((previous) => (previous[id]
+      ? { ...previous, [id]: { ...previous[id], loadingMore: true, moreFailure: "" } }
+      : previous));
+    fetchUserNotebookSources(requestedUserId, id, {
+      offset: current.items.length,
+      limit: SOURCE_PAGE,
+    })
+      .then((page) => {
+        if (!fresh()) return;
+        setSources((previous) => {
+          const entry = previous[id];
+          if (!entry) return previous;
+          // 两页之间有新来源插入时 offset 会错位一格：按 id 去重，不让同一来源列两次。
+          const seen = new Set(entry.items.map((source) => source.id));
+          return {
+            ...previous,
+            [id]: {
+              ...entry,
+              items: [...entry.items, ...page.items.filter((source) => !seen.has(source.id))],
+              total: page.total_count,
+              loadingMore: false,
+              moreFailure: "",
+            },
+          };
+        });
+      })
+      .catch((cause) => {
+        if (!fresh()) return;
+        if (isForbidden(cause)) {
+          setForbidden(true);
+          return;
+        }
+        setSources((previous) => (previous[id]
+          ? {
+            ...previous,
+            [id]: {
+              ...previous[id],
+              loadingMore: false,
+              moreFailure: toUserMessage(cause, "更多来源加载失败，请重试"),
+            },
+          }
+          : previous));
+      });
+  }, []);
+
   const selectItem = useCallback((item: ActivityItem) => {
     setSelected(item);
   }, []);
@@ -499,6 +554,7 @@ export function ActivityView({
           onSelectNotebook={setNotebookId}
           onSelectSource={selectSource}
           onToggleExpand={toggleExpand}
+          onLoadMoreSources={loadMoreSources}
           selectedKey={selectedKey}
           sources={sources}
         />

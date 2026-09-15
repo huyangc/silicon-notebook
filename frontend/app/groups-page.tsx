@@ -60,6 +60,8 @@ import {
   type GroupPageTab,
   type ShareRequest,
 } from "./group-api.ts";
+import { Pagination } from "./Pagination";
+import { useClientPagination } from "./use-client-pagination.ts";
 import type { NotebookSummary } from "./workspace-model.ts";
 
 type GroupsPageProps = {
@@ -83,6 +85,11 @@ const TABS: Array<{ id: GroupPageTab; label: string; icon: typeof BookOpen }> = 
   { id: "requests", label: "共享申请", icon: Inbox },
   { id: "settings", label: "设置", icon: Settings },
 ];
+
+/** 本页每份清单(群组、知识库、候选笔记本、成员、申请)每页的条数。接口整份返回、
+ * 契约上不分页(见 docs/product-and-api.md「Registered limits」),分页只发生在界面。 */
+const GROUP_PAGE_SIZE = 20;
+const NO_ITEMS: never[] = [];
 
 function EmptyState({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
   return (
@@ -306,6 +313,27 @@ export function GroupsPage({
 
   const ownerMember = detail?.members.find((member) => member.id === detail.owner_id);
   const pendingCount = requests?.length ?? 0;
+  const myGroupRequests = useMemo(
+    () => myRequests.filter((request) => request.group_id === detail?.id),
+    [myRequests, detail?.id],
+  );
+
+  const groupPage = useClientPagination(groups ?? NO_ITEMS, GROUP_PAGE_SIZE, scope);
+  const sharedPage = useClientPagination(shared ?? NO_ITEMS, GROUP_PAGE_SIZE, detail?.id);
+  const candidatePage = useClientPagination(candidates, GROUP_PAGE_SIZE, `${detail?.id ?? ""}|${notebookQuery}`);
+  const memberPage = useClientPagination(detail?.members ?? NO_ITEMS, GROUP_PAGE_SIZE, detail?.id);
+  const requestPage = useClientPagination(requests ?? NO_ITEMS, GROUP_PAGE_SIZE, detail?.id);
+  const myRequestPage = useClientPagination(myGroupRequests, GROUP_PAGE_SIZE, detail?.id);
+
+  // 选中的群组要落在侧栏当前页上:深链、新建(排在最后)或删除后改选时,它可能在别的页。
+  // 只跟随选中项变化与清单(重新)加载完成(切换范围会先置空再取回),不跟随原地刷新——
+  // 否则用户翻侧栏时任何一次角色修改后的刷新都会把页码拽回来。
+  const { setPage: setGroupListPage } = groupPage;
+  const groupsLoaded = groups !== null;
+  useEffect(() => {
+    const index = groups?.findIndex((group) => group.id === detail?.id) ?? -1;
+    if (index >= 0) setGroupListPage(Math.floor(index / GROUP_PAGE_SIZE));
+  }, [detail?.id, groupsLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <main className="page group-page">
@@ -390,7 +418,7 @@ export function GroupsPage({
             {groups?.length === 0 && (
               <EmptyState icon={<Users size={20} />} title="还没有群组">新建一个项目群组，或等待管理员邀请。</EmptyState>
             )}
-            {groups?.map((group) => (
+            {groupPage.pageItems.map((group) => (
               <button key={group.id} className={`group-page-group-card ${detail?.id === group.id ? "active" : ""}`}
                 onClick={() => chooseGroup(group.id)}>
                 <span className="group-page-group-icon">{group.name.trim().slice(0, 1).toUpperCase() || "G"}</span>
@@ -402,6 +430,7 @@ export function GroupsPage({
               </button>
             ))}
           </div>
+          <Pagination page={groupPage.page} pageSize={GROUP_PAGE_SIZE} total={groupPage.total} onPage={groupPage.setPage} label="群组清单分页" />
         </aside>
 
         <div className="group-page-workspace">
@@ -457,7 +486,7 @@ export function GroupsPage({
                 </div>
                 {shared === null ? <p className="tool-hint">加载中…</p> : shared.length === 0 ? (
                   <EmptyState icon={<BookOpen size={22} />} title="还没有群组知识库">{canManage ? "从下方选择你有权管理的笔记本。" : "等待群组管理员添加知识库。"}</EmptyState>
-                ) : <div className="group-notebook-grid">{shared.map((item) => {
+                ) : <><div className="group-notebook-grid">{sharedPage.pageItems.map((item) => {
                   const adminsManage = item.roles.includes("admin");
                   const ICanManageNotebook = manageableById.has(item.notebook_id);
                   const opening = openingNotebookId === item.notebook_id;
@@ -506,7 +535,8 @@ export function GroupsPage({
                       </> : <button className="sort-button danger-text" onClick={() => setConfirming(`revoke:${item.notebook_id}`)}>撤销</button>)}
                     </div>
                   </article>;
-                })}</div>}
+                })}</div>
+                <Pagination page={sharedPage.page} pageSize={GROUP_PAGE_SIZE} total={sharedPage.total} onPage={sharedPage.setPage} label="群组知识库分页" /></>}
 
                 {canManage && <section className="group-add-notebooks">
                   <div className="group-page-section-head compact">
@@ -517,14 +547,16 @@ export function GroupsPage({
                   </div>
                   <label className="group-page-search"><Search size={16} /><input value={notebookQuery} placeholder="搜索可添加的笔记本"
                     onChange={(event) => setNotebookQuery(event.target.value)} /></label>
-                  {candidates.length === 0 ? <p className="group-inline-empty">没有符合条件的笔记本。</p> : <div className="group-candidate-list">
-                    {candidates.map((item) => <label className="group-candidate-row" key={item.id}>
+                  {candidates.length === 0 ? <p className="group-inline-empty">没有符合条件的笔记本。</p> : <><div className="group-candidate-list">
+                    {candidatePage.pageItems.map((item) => <label className="group-candidate-row" key={item.id}>
                       <input type="checkbox" checked={pickedNotebooks.has(item.id)} onChange={(event) => {
                         setPickedNotebooks((current) => { const next = new Set(current); if (event.target.checked) next.add(item.id); else next.delete(item.id); return next; });
                       }} />
                       <span><strong>{item.name}</strong><small>{item.primary_domain || item.purpose || "未填写说明"}</small></span>
                     </label>)}
-                  </div>}
+                  </div>
+                  {/* 勾选存在 pickedNotebooks 里,与页码无关:翻页后已勾选的仍计入「添加已选」。 */}
+                  <Pagination page={candidatePage.page} pageSize={GROUP_PAGE_SIZE} total={candidatePage.total} onPage={candidatePage.setPage} label="可添加笔记本分页" /></>}
                   <div className="group-add-actions">
                     <label><input type="checkbox" checked={grantManage} onChange={(event) => setGrantManage(event.target.checked)} /> 同时允许组管理员管理内容</label>
                     <button className="new-pill" disabled={Boolean(busy) || pickedNotebooks.size === 0}
@@ -578,7 +610,7 @@ export function GroupsPage({
                     setInvite(await createGroupInvite(detail.id)); setNotice("邀请链接已生成。");
                   }, "生成邀请链接失败"); }}>生成邀请链接</button></div>}
                 </section>}
-                <div className="group-member-list">{detail.members.map((member) => {
+                <div className="group-member-list">{memberPage.pageItems.map((member) => {
                   const owner = member.id === detail.owner_id;
                   return <div className="group-member-row" key={member.id}>
                     <span className="group-member-avatar">{member.username.slice(0, 1).toUpperCase()}</span>
@@ -594,6 +626,7 @@ export function GroupsPage({
                     </div> : <button className="sort-button danger-text" onClick={() => setConfirming(`remove:${member.id}`)}>移出</button>)}
                   </div>;
                 })}</div>
+                <Pagination page={memberPage.page} pageSize={GROUP_PAGE_SIZE} total={memberPage.total} onPage={memberPage.setPage} label="成员分页" />
                 {canManage && <div className="group-add-member"><input value={memberName} placeholder="输入完整用户名" aria-label="要添加的用户名"
                   onChange={(event) => setMemberName(event.target.value)} /><button className="new-pill" disabled={Boolean(busy) || !memberName.trim()}
                   onClick={() => { void run("add-member", async () => { const user = await resolveUser(memberName.trim()); setDetail(await putGroupMember(detail.id, user.id, "member")); setMemberName(""); await refreshGroups(scope); onChanged(); }, "添加成员失败"); }}>添加成员</button></div>}
@@ -609,7 +642,7 @@ export function GroupsPage({
                 </div>
                 {!canManage ? <EmptyState icon={<Inbox size={22} />} title="没有审批权限">只有 owner 和组管理员可以处理贡献申请。</EmptyState>
                   : requests === null ? <p className="tool-hint">加载中…</p> : requests.length === 0 ? <EmptyState icon={<Inbox size={22} />} title="没有待审批申请">新的成员贡献申请会出现在这里。</EmptyState>
-                    : <div className="group-request-list">{requests.map((request) => <div className="group-request-row" key={request.id}>
+                    : <><div className="group-request-list">{requestPage.pageItems.map((request) => <div className="group-request-row" key={request.id}>
                       <span className="group-request-mark"><BookOpen size={17} /></span>
                       <span className="group-request-copy"><strong>{request.notebook_name || "知识库"}</strong><small>申请人 {request.requested_by_username}</small></span>
                       <div><button className="new-pill" disabled={Boolean(busy)} onClick={() => { void run(`approve:${request.id}`, async () => {
@@ -617,14 +650,16 @@ export function GroupsPage({
                       }, "批准申请失败"); }}>批准</button><button className="sort-button" disabled={Boolean(busy)} onClick={() => { void run(`reject:${request.id}`, async () => {
                         await rejectShareRequest(detail.id, request.id); setRequests(await listGroupShareRequests(detail.id));
                       }, "驳回申请失败"); }}>驳回</button></div>
-                    </div>)}</div>}
-                {myRequests.filter((request) => request.group_id === detail.id).length > 0 && <section className="group-my-requests"><h3>我发起的申请</h3>{myRequests.filter((request) => request.group_id === detail.id).map((request) => <div className="group-request-row" key={request.id}>
+                    </div>)}</div>
+                    <Pagination page={requestPage.page} pageSize={GROUP_PAGE_SIZE} total={requestPage.total} onPage={requestPage.setPage} label="待审批申请分页" /></>}
+                {myGroupRequests.length > 0 && <section className="group-my-requests"><h3>我发起的申请</h3>{myRequestPage.pageItems.map((request) => <div className="group-request-row" key={request.id}>
                   <span className="group-request-mark"><BookOpen size={17} /></span>
                   <span className="group-request-copy"><strong>{request.notebook_name || "名称不再显示的知识库"}</strong><small>等待群组管理员审批</small></span>
                   <button className="sort-button" disabled={Boolean(busy)} onClick={() => { void run(`withdraw:${request.id}`, async () => {
                     await withdrawShareRequest(request.notebook_id, request.id); setMyRequests((items) => items.filter((item) => item.id !== request.id));
                   }, "撤回申请失败"); }}>撤回</button>
-                </div>)}</section>}
+                </div>)}
+                <Pagination page={myRequestPage.page} pageSize={GROUP_PAGE_SIZE} total={myRequestPage.total} onPage={myRequestPage.setPage} label="我发起的申请分页" /></section>}
               </>)}
 
               {tab === "settings" && (<>
