@@ -88,7 +88,10 @@ function AskDetailPane({
   // 面板只会让人以为跑了两轮，所以负载里有轨迹时这里不再重复渲染持久化的那份。
   const showPersistedTrace = persistedTrace.length > 0
     && (answer?.reasoning_trace ?? []).length === 0;
+  // 失败原文只有管理员能拿到（后端 _activity_failure_text）；本人自助读取时 error
+  // 恒为空串，失败状态改给固定文案，绝不猜原因。
   const failure = detail?.error ?? "";
+  const failedWithoutText = Boolean(detail) && !failure && detail?.status === "failed";
   // The stream item may still describe a live notebook when deletion races
   // with the detail request. In that case the detail endpoint is authoritative:
   // it falls back to the retained row after the live ask has cascaded away.
@@ -121,6 +124,9 @@ function AskDetailPane({
           {failure}
         </div>
       ) : null}
+      {!loading && !error && failedWithoutText ? (
+        <div className="detail-error">这次提问没有成功完成。</div>
+      ) : null}
       {showPersistedTrace ? <ReasoningTracePanel steps={persistedTrace} /> : null}
       {answer ? (
         <div className="activity-answer">
@@ -142,7 +148,8 @@ function AskDetailPane({
           />
         </div>
       ) : null}
-      {!loading && !error && !answer && !failure && !retentionItem.notebook_deleted_at ? (
+      {!loading && !error && !answer && !failure && !failedWithoutText
+        && !retentionItem.notebook_deleted_at ? (
         <div className="empty">这次提问没有留下答案</div>
       ) : null}
     </div>
@@ -230,9 +237,11 @@ function ReportDetailPane({
       }
     : item;
   const failed = displayItem.status === "failed";
-  // 失败原因区块与下面的空态互补(空态排除 showFailure):少了这一条,「非 failed
+  // 失败区块与下面的空态互补(空态排除 showFailure):少了这一条,「非 failed
   // 但有 error、无正文」这种边界会两边条件都不满足,右栏空白一片而不是给出点什么。
-  const showFailure = failed && Boolean(failure);
+  // 失败原文只有管理员能拿到(后端 _activity_failure_text);本人自助读取时 error
+  // 恒为空串,失败状态改给固定文案,绝不猜原因。
+  const showFailure = failed && Boolean(detail);
   return (
     <div className="activity-detail-body">
       <div className="activity-detail-head">
@@ -257,8 +266,12 @@ function ReportDetailPane({
       {loading ? <div className="empty">加载中…</div> : null}
       {!loading && !error && showFailure ? (
         <div className="detail-error">
-          <strong>失败原因：</strong>
-          {failure}
+          {failure ? (
+            <>
+              <strong>失败原因：</strong>
+              {failure}
+            </>
+          ) : "这份报告没有成功生成。"}
         </div>
       ) : null}
       {!loading && !error && detail?.content_md ? (
