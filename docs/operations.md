@@ -1716,20 +1716,20 @@ probe per table rather than the multi-minute cascade a direct `DELETE FROM
 notebooks` used to pay on a large library).
 
 **Deployment contract: production runs `--workers 1`.** Quiesce's leg B
-(waiting for an in-flight `relinkkg-`/`unifiedkg-`/`conflictresolve-` pass
-to stop) reads a purely in-process registry (`KgMaintenanceJobs.jobs`, no
-`kg_build_jobs` row is ever written for these three job kinds) — it can only
+(waiting for an in-flight `relinkkg-`/`unifiedkg-`/`deletekg-`/`conflictresolve-`
+pass to stop) reads a purely in-process registry (`KgMaintenanceJobs.jobs`, no
+`kg_build_jobs` row is ever written for these job kinds) — it can only
 see work happening in the SAME process. This is not a new dependency this
 feature introduces: `services/kg/maintenance_jobs.py`'s own module
 docstring already registers "production runs one worker, so process-local
-ownership is the deployment contract" as the precondition these three job
+ownership is the deployment contract" as the precondition these job
 kinds' single-flight mechanism itself rests on (the same precondition
 `checkup`'s H4/H5 lease suppression and caching build on). Delete's phase 2
 quiesce leg B, and phase 3-5's SQLite in-process claim registration (both
 above), simply reuse that same existing contract — they do not strengthen
 or weaken it. If this deployment ever runs more than one worker, BOTH
 mechanisms silently stop providing cross-worker exclusion (a delete could
-proceed while a `relinkkg-`/`unifiedkg-` pass on a DIFFERENT worker is still
+proceed while a `relinkkg-`/`unifiedkg-`/`deletekg-` pass on a DIFFERENT worker is still
 writing, and two workers' scale builds/deletes on the same SQLite notebook
 could race) — the correct fix at that point is promoting these job kinds'
 claims to durable rows (merged into `kg_build_jobs` or a new table), not
@@ -1830,7 +1830,7 @@ nothing would otherwise have no lead at all on why deletion has stalled.
 still blocking it: `durable(kg_build_jobs)` (a `buildkg-`/`rebuildkg-` job
 is still running; check `SELECT * FROM kg_build_jobs WHERE notebook_id='<id>'
 AND status='running'`) or `in-process(kg_maintenance)` (a `relinkkg-`/
-`unifiedkg-` pass, which is tracked only in the serving process's memory,
+`unifiedkg-`/`deletekg-` pass, which is tracked only in the serving process's memory,
 not any table — restarting that process is one way to clear a wedged one if
 it never settles on its own; see "Deployment contract: production runs
 `--workers 1`" above for why this leg can only see work in the SAME

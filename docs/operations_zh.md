@@ -1439,16 +1439,16 @@ CONCURRENCY`，默认 1，独立于维护池与轻活池——见「部署与配
 的级联对每张表只是一次零命中探查，不再是大库上曾经的多分钟级联）。
 
 **部署契约：生产跑 `--workers 1`。** quiesce 的腿 B（等一个在跑的
-`relinkkg-`/`unifiedkg-`/`conflictresolve-` pass 停下）读的是纯进程内
-登记表（`KgMaintenanceJobs.jobs`，这三类作业从不写 `kg_build_jobs`
+`relinkkg-`/`unifiedkg-`/`deletekg-`/`conflictresolve-` pass 停下）读的是纯进程内
+登记表（`KgMaintenanceJobs.jobs`，这几类作业从不写 `kg_build_jobs`
 行）——它只看得见**同一个进程**里发生的事。这不是本特性新引入的依赖：
 `services/kg/maintenance_jobs.py` 自己的模块 docstring 早就把「生产单
-worker，进程内所有权即部署契约」登记为这三类作业单飞机制本身的前提
+worker，进程内所有权即部署契约」登记为这几类作业单飞机制本身的前提
 （checkup 的 H4/H5 租约抑制与缓存也建在同一前提上）。删除作业相位 2 的
 quiesce 腿 B、以及相位 3-5 在 SQLite 上的进程内 claim 登记（见下），都只是
 复用这个既有前提，不加强也不削弱。若这套部署将来上多 worker，两套机制会
 同时悄悄失去跨 worker 互斥（一次删除可能在另一个 worker 上的
-`relinkkg-`/`unifiedkg-` pass 仍在写入时就跑过去；两个 worker 也可能对
+`relinkkg-`/`unifiedkg-`/`deletekg-` pass 仍在写入时就跑过去；两个 worker 也可能对
 同一个 SQLite 笔记本的 scale 构建/删除产生竞态）——正解是把这几类作业的
 claim 提升为持久化行（并入 `kg_build_jobs` 或新建表），而不是给删除单独
 加锁；这已在 design 文档里登记为残余债，本特性不解这道题。
@@ -1524,7 +1524,7 @@ KG 重建还没停」——没出问题,等就是了（或者去查那个重建�
 会点名 quiesce 闸的哪一条腿还在挡：`durable(kg_build_jobs)`（还有一个
 `buildkg-`/`rebuildkg-` 作业在跑；用
 `SELECT * FROM kg_build_jobs WHERE notebook_id='<id>' AND status='running'`
-核实）或 `in-process(kg_maintenance)`（一个 `relinkkg-`/`unifiedkg-`
+核实）或 `in-process(kg_maintenance)`（一个 `relinkkg-`/`unifiedkg-`/`deletekg-`
 pass——只记在承载它的服务进程内存里，不落在任何表；如果它一直不自行
 结束，重启那个进程是清掉一个卡死实例的办法之一；这条腿为什么只看得见
 同一个进程内的工作，见上文「部署契约：生产跑 `--workers 1`」）。
