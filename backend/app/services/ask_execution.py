@@ -47,7 +47,7 @@ from app.services.pending_bus import publish_snapshot
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.core.event_logging import EventLogger
-    from app.models.ask import AskRequest, AskResponse
+    from app.models.ask import AskRequest, AskResponse, StoredSubmittedVia
     from app.repositories.ports import AskStateStorePort
     from app.services.ask_modes import AskMode
 
@@ -188,7 +188,7 @@ class AskExecutionCoordinator:
         mode: "AskMode | None",
         *,
         user_id: str,
-        submitted_via: str = "",
+        submitted_via: "StoredSubmittedVia" = "",
     ) -> "queue.Queue[dict[str, Any] | None]":
         """启动一次脱离连接的流式 ask,返回交付队列(None 哨兵收尾)。
 

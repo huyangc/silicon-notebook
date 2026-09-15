@@ -66,14 +66,14 @@ def _insert_ask(connection, job_id, notebook_id, created_by, created_at, **kw) -
     connection.execute(
         "INSERT INTO ask_jobs "
         "(id,notebook_id,conversation_id,created_by,mode,question,status,asked_at,"
-        "answer_id,error,created_at,updated_at) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        "answer_id,error,created_at,updated_at,submitted_via) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
         (
             job_id, notebook_id, kw.get("conversation_id", ""), created_by,
             kw.get("mode", "chunk"), kw.get("question", "q?"),
             kw.get("status", "completed"), kw.get("asked_at", ""),
             kw.get("answer_id", ""), kw.get("error", ""),
-            created_at, created_at,
+            created_at, created_at, kw.get("submitted_via", ""),
         ),
     )
 
@@ -123,11 +123,11 @@ def _insert_report(connection, report_id, notebook_id, created_by, created_at, *
     connection.execute(
         "INSERT INTO reports "
         "(id,notebook_id,question,depth,status,created_by,understanding_json,"
-        "created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        "created_at,updated_at,submitted_via) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
         (
             report_id, notebook_id, kw.get("question", "report?"),
             kw.get("depth", 2), kw.get("status", "done"), created_by,
-            understanding, created_at, created_at,
+            understanding, created_at, created_at, kw.get("submitted_via", ""),
         ),
     )
 
@@ -296,6 +296,71 @@ def test_admin_question_overview_combines_ask_and_report(postgres_database, stor
     assert [item["id"] for item in retained["items"]] == [
         "report-global", "ask-global",
     ]
+
+
+def test_admin_question_overview_submitted_via_filter_and_stats(
+    postgres_database, store
+):
+    """`submitted_via` 既要随行带出，也要能作为过滤条件收窄 stats 与 items——
+    两处分别对应 admin CTE 里的投影列和 WHERE 子句，任一处退化成常量都必须让
+    这条用例先红（评审 P0：这两处 6 个变异原先全部存活）。"""
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u1")
+        _insert_notebook(connection, "n1", "u1")
+        _insert_ask(
+            connection, "ask-web", "n1", "u1", NOW,
+            question="网页提问", submitted_via="web",
+        )
+        _insert_ask(
+            connection, "ask-mcp", "n1", "u1", NOW,
+            question="MCP提问", submitted_via="mcp",
+        )
+        _insert_ask(
+            connection, "ask-legacy", "n1", "u1", NOW,
+            question="历史提问",
+        )
+        _insert_report(
+            connection, "report-web", "n1", "u1", NOW,
+            question="网页报告", submitted_via="web",
+        )
+        # 笔记本已不存活的 retained 提问(mcp):不能出现在别的取值过滤里,但要
+        # 出现在 mcp 过滤与无过滤两处。
+        connection.execute(
+            "INSERT INTO retained_user_activity "
+            "(activity_type,record_id,actor_id,notebook_id,notebook_name,question,"
+            "status,created_at,deleted_at,expires_at,submitted_via) VALUES "
+            "('ask','ask-retained-mcp','u1','n-retained','NB-retained',"
+            "'留存的MCP提问','completed',%s,CURRENT_TIMESTAMP,"
+            "CURRENT_TIMESTAMP + INTERVAL '1 day','mcp')",
+            (NOW,),
+        )
+
+    everything = store.list_admin_questions(limit=50)
+    assert everything["stats"] == {
+        "total": 5, "asks": 4, "reports": 1, "active_users": 1,
+    }
+    by_id = {item["id"]: item for item in everything["items"]}
+    assert by_id["ask-web"]["submitted_via"] == "web"
+    assert by_id["ask-mcp"]["submitted_via"] == "mcp"
+    assert by_id["ask-legacy"]["submitted_via"] == ""
+    assert by_id["report-web"]["submitted_via"] == "web"
+    assert by_id["ask-retained-mcp"]["submitted_via"] == "mcp"
+
+    mcp_only = store.list_admin_questions(submitted_via="mcp", limit=50)
+    assert mcp_only["stats"] == {
+        "total": 2, "asks": 2, "reports": 0, "active_users": 1,
+    }
+    assert {item["id"] for item in mcp_only["items"]} == {
+        "ask-mcp", "ask-retained-mcp",
+    }
+
+    web_only = store.list_admin_questions(submitted_via="web", limit=50)
+    assert web_only["stats"] == {
+        "total": 2, "asks": 1, "reports": 1, "active_users": 1,
+    }
+    assert {item["id"] for item in web_only["items"]} == {
+        "ask-web", "report-web",
+    }
 
 
 def test_activity_type_filter_applies_before_limit_and_paginates_all_questions(
@@ -1102,6 +1167,50 @@ def test_deleted_notebook_activity_projection_matches_sqlite(
         row for row in store.list_user_usage() if row["id"] == "u-retained"
     )
     assert expired_usage["last_active"] is None
+
+
+def test_list_user_activity_carries_submitted_via_live_and_retained(
+    postgres_database, store
+):
+    """live 与 retained 的 ask/report 条目都要带出正确 submitted_via —— retained
+    半边必须走真实 PG 删除收尾路径(NotebookStore.delete_row_and_orphan_embeddings
+    -> ``_retain_user_activity_before_delete``),不能只在内存里手造 retained 行,
+    否则盖不住那条方法自己的 INSERT ... SELECT 里 ``j.submitted_via``/
+    ``r.submitted_via`` 被改写成常量 ``''`` 的变异(评审 P0:这两处原先都存活)。"""
+    from app.repositories.postgres.notebook_store import NotebookStore
+
+    created_at = datetime.now(timezone.utc).replace(microsecond=0)
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u-subvia")
+        _insert_notebook(connection, "n-subvia", "u-subvia")
+        _insert_ask(
+            connection, "ask-subvia", "n-subvia", "u-subvia", created_at,
+            question="web的提问", submitted_via="web",
+        )
+        _insert_report(
+            connection, "rep-subvia", "n-subvia", "u-subvia", created_at,
+            question="mcp的报告", submitted_via="mcp",
+        )
+
+    live = store.list_user_activity("u-subvia", notebook_id="n-subvia", limit=50)
+    live_by_id = {item["id"]: item for item in live["items"]}
+    assert live_by_id["ask-subvia"]["submitted_via"] == "web"
+    assert live_by_id["rep-subvia"]["submitted_via"] == "mcp"
+
+    notebooks = NotebookStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: datetime.now(timezone.utc),
+        activity_retention_days=180,
+    )
+    notebooks.delete_row_and_orphan_embeddings("n-subvia")
+
+    retained = store.list_user_activity(
+        "u-subvia", include_inaccessible_questions=True, limit=50,
+    )
+    retained_by_id = {item["id"]: item for item in retained["items"]}
+    assert retained_by_id["ask-subvia"]["submitted_via"] == "web"
+    assert retained_by_id["rep-subvia"]["submitted_via"] == "mcp"
 
 
 def test_deletion_refreshes_merged_retained_snapshot_and_expiry_postgres(

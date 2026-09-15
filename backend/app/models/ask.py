@@ -339,6 +339,17 @@ class AskIntentConfirmation(BaseModel):
 # than this type, so a caller that skips the keyword compiles without one.
 SubmittedVia = Literal["web", "mcp"]
 
+# The stored-value vocabulary: every ask_jobs/reports/retained_user_activity
+# row is one of "" ("not recorded" -- a pre-migration row, or an in-process
+# caller that intentionally skips the keyword, e.g. eval/inference), or one of
+# SubmittedVia's two entry-point literals. This is the single source of truth
+# every store/service/facade/port write signature below annotates its
+# `submitted_via` parameter with (the plain-string default keeps a caller that
+# skips the keyword compiling, same as before this type existed). Nested
+# Literals flatten per PEP 586, so this is exactly `Literal["", "web", "mcp"]`
+# -- `typing.get_args(StoredSubmittedVia) == ("", *typing.get_args(SubmittedVia))`.
+StoredSubmittedVia = Literal["", SubmittedVia]
+
 
 class AskRequest(BaseModel):
     # No `min_length`: an empty question already reaches the engine today and is

@@ -511,6 +511,28 @@ def test_ask_and_report_state_shapes_match_persisted_golden(content_harness):
     assert completed["content_md"] == "# State"
 
 
+def test_create_report_records_submitted_via(content_harness):
+    """PG ``ReportStore.create_report`` 必须把 ``submitted_via`` 真的写进
+    ``reports`` 行,而不是像评审揪出的那样写死 ``''``——不传时仍落默认值 ""。"""
+    report_id = content_harness.report.create_report(
+        "nb-content", "SubVia report", 2, submitted_via="web"
+    )
+    with content_harness.database.connect() as connection:
+        row = connection.execute(
+            "SELECT submitted_via FROM reports WHERE id=%s", (report_id,)
+        ).fetchone()
+    assert row["submitted_via"] == "web"
+
+    default_report_id = content_harness.report.create_report(
+        "nb-content", "SubVia report default", 2
+    )
+    with content_harness.database.connect() as connection:
+        default_row = connection.execute(
+            "SELECT submitted_via FROM reports WHERE id=%s", (default_report_id,)
+        ).fetchone()
+    assert default_row["submitted_via"] == ""
+
+
 def test_recent_user_ask_traces_scopes_to_the_reading_member(content_harness):
     """Agentic Memory P1 (T5): the overlay chain's ONE read, on PostgreSQL.
 

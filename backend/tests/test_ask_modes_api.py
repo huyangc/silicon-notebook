@@ -232,6 +232,42 @@ def test_ask_sync_and_stream_record_web_submission_channel(tmp_path, monkeypatch
     assert _submitted_via(next(iter(new_ids))) == "web"
 
 
+def test_ask_stream_with_client_request_id_records_web_submission_channel(
+    tmp_path, monkeypatch
+):
+    """网页每次提交实际都带幂等键(client_request_id)—— 上一条用例的无键
+    /ask/stream 提交不是浏览器的真实主路径。补一条带键的提交,确认
+    begin_or_attach_durable_job 的建行分支同样落 submitted_via == "web"
+    (评审 P0:6 处 PG 变异里就有一个专挑 keyed INSERT 漏传这个关键字)。"""
+    import json
+
+    from app.api.ask_routes import repository
+
+    client = _client(tmp_path, monkeypatch)
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    repo = repository()
+    seed_ask_evidence(repo, nb)
+
+    def _submitted_via(job_id: str) -> str:
+        with repo._connect() as db:
+            row = db.execute(
+                "SELECT submitted_via FROM ask_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+        return row["submitted_via"]
+
+    keyed = client.post(
+        f"/api/notebooks/{nb}/ask/stream",
+        json={
+            "question": "带幂等键的网页提问",
+            "mode": "chunk",
+            "client_request_id": "web-key-1",
+        },
+    )
+    assert keyed.status_code == 200
+    events = [json.loads(l) for l in keyed.text.splitlines() if l.strip()]
+    assert _submitted_via(events[0]["job_id"]) == "web"
+
+
 def test_ask_refuses_an_over_length_question(tmp_path, monkeypatch):
     """提问必须在**提交**这一刻就有界。
 

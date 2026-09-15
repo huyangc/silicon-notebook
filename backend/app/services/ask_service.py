@@ -67,6 +67,7 @@ from app.models.ask import (
     ConversationBulkDeleteResult,
     ModelError,
     QueryIntentContract,
+    StoredSubmittedVia,
     TraceStep,
 )
 from app.models.knowledge import (
@@ -956,7 +957,7 @@ class AskService:
                 )
 
     def ask_current(
-        self, notebook_id: str, payload: AskRequest, *, submitted_via: str = ""
+        self, notebook_id: str, payload: AskRequest, *, submitted_via: StoredSubmittedVia = ""
     ) -> AskResponse:
         """Run the synchronous Ask surface through the durable job lifecycle.
 
@@ -1066,7 +1067,7 @@ class AskService:
 
     def begin_job_current(
         self, notebook_id: str, payload, mode: str, cancel_event,
-        *, submitted_via: str = "",
+        *, submitted_via: StoredSubmittedVia = "",
     ) -> tuple[str, str]:
         self.notebooks.get_notebook(notebook_id)
         job_id, conversation_id = self.ask_state.begin_durable_job(

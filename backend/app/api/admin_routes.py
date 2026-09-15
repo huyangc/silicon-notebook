@@ -58,6 +58,7 @@ from app.models.admin import (
     ADMIN_QUESTIONS_MAX_LIMIT,
     ADMIN_QUESTIONS_QUERY_MAX_CHARS,
 )
+from app.models.ask import SubmittedVia
 from app.models.identity import UserProfile
 from app.models.model_services import ModelServiceStatusItem, ModelServicesStatus
 from app.models.sources import PaginatedSources
@@ -362,7 +363,7 @@ def list_admin_questions(
     limit: int = Query(
         ADMIN_QUESTIONS_DEFAULT_LIMIT, ge=1, le=ADMIN_QUESTIONS_MAX_LIMIT
     ),
-    submitted_via: Optional[Literal["web", "mcp"]] = Query(None),
+    submitted_via: Optional[SubmittedVia] = Query(None),
     user: UserProfile = Depends(get_current_user),
 ) -> AdminQuestionsResponse:
     """Cross-user question overview spanning Ask and Deep Report."""
