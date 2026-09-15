@@ -9389,10 +9389,9 @@ button.tag:hover {
 
 /* 「AI 对这个库的理解」面板(Agentic Memory P1-T7 / P3-T5)。
    ——————————————————————————————————————————————————————————————————————
-   三档内容(共享理解 / 我的检索心得 / Agent 记录)各自是一张带头部的卡。骨架抄
-   `.group-detail` / `.group-detail-head`(浅蓝头部带 + 白色主体 + overflow hidden
-   收圆角),不另起一套视觉语言;全部 namespaced 到 `.understanding-*`,一条共享规则
-   都不改。理由写在 agent-profile-panel.tsx 顶部的模块注释里(为什么平铺不行)。 */
+   三档内容(共享理解 / 我的检索心得 / Agent 记录)各自是一张带头部的卡。骨架是
+   浅蓝头部带 + 白色主体 + overflow hidden 收圆角,不另起一套视觉语言;全部
+   namespaced 到 `.understanding-*`,一条共享规则都不改。理由写在 agent-profile-panel.tsx 顶部的模块注释里(为什么平铺不行)。 */
 .understanding-panel {
   display: grid;
   gap: 14px;
@@ -9675,7 +9674,7 @@ button.tag:hover {
   background: var(--danger-bg);
 }
 
-/* 空态:一条虚线框比一句灰字更像「这里本该有内容」(与 .group-empty 同一条口径)。 */
+/* 空态:一条虚线框比一句灰字更像「这里本该有内容」。 */
 .understanding-empty {
   margin: 0;
   border: 1px dashed var(--line);
@@ -9695,8 +9694,7 @@ button.tag:hover {
 }
 
 /* 「Agent 记录」里的两个小节(调用记录 / Agent 写下的线索)。卡内的小节标题比
-   模块头再轻一档,免得卡里卡外两级标题看起来一样重(与 .group-block > h4 同一
-   条口径)。 */
+   模块头再轻一档,免得卡里卡外两级标题看起来一样重。 */
 .understanding-subsection {
   display: grid;
   gap: 8px;
@@ -12303,47 +12301,6 @@ button.tag:hover {
    「notebook项目1 人组管理员 已展开」）。行的横向布局是这套界面的地基，必须由类
    本身给出，不能留给调用点的内联样式。 */
 
-.group-body {
-  gap: 22px;
-}
-
-/* 一节 = 小标题 + 内容。小标题刻意不复用 .section-title：它带 text-transform:uppercase，
-   而这里的标题旁边就挨着用户内容（组名），同一条规则会把「notebook」渲染成「NOTEBOOK」。 */
-.group-section {
-  display: grid;
-  gap: 10px;
-}
-
-.group-section-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 4px 12px;
-  padding-bottom: 7px;
-  border-bottom: 1px solid var(--line);
-}
-
-.group-section-head h3 {
-  margin: 0;
-  color: var(--ink);
-  font-size: 13px;
-  font-weight: 750;
-  letter-spacing: 0.02em;
-}
-
-.group-section-head .tool-hint {
-  margin: 0;
-  font-size: 12px;
-}
-
-/* 表单：名称与分类同排，说明另起一行，提交按钮右对齐收在末行。原来「创建群组」紧贴
-   名称输入框、说明反而排在按钮**下面**，读起来像是说明不属于这次创建。 */
-.group-form {
-  display: grid;
-  gap: 8px;
-}
-
 .group-form-row {
   display: flex;
   align-items: center;
@@ -12354,12 +12311,6 @@ button.tag:hover {
 .group-form-row .group-input {
   flex: 1 1 220px;
   min-width: 0;
-}
-
-.group-form-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
 }
 
 /* 输入控件与笔记本设置表单同款（1px 线框 + 10px 圆角）。原来是浏览器默认外观：
@@ -12388,11 +12339,6 @@ button.tag:hover {
   cursor: default;
 }
 
-textarea.group-input {
-  line-height: 1.5;
-  resize: vertical;
-}
-
 select.group-input {
   flex: 0 0 auto;
   width: auto;
@@ -12401,11 +12347,6 @@ select.group-input {
 }
 
 /* 行清单。 */
-.group-list {
-  display: grid;
-  gap: 8px;
-}
-
 .group-row {
   display: flex;
   align-items: center;
@@ -12418,13 +12359,6 @@ select.group-input {
   background: #fbfcfe;
   font-size: 13px;
   line-height: 1.45;
-}
-
-/* 展开中的那一行。清单与详情之间原来只有按钮文案（查看／已展开）这一处联系，在详情里
-   改完名字之后很难看出改的是清单里的哪一条。 */
-.group-row.is-active {
-  border-color: #b9ccff;
-  background: #f1f5ff;
 }
 
 .group-row-main {
@@ -12480,24 +12414,10 @@ select.group-input {
 /* 行内动作比页面主 CTA 小一号（对齐 .catalog-card-actions 的既有做法）：42px 的按钮
    会把每一行撑成两倍高，而这些都是局部动作。 */
 .group-row-actions .sort-button,
-.group-row-actions .new-pill,
-.group-form-actions .new-pill,
-.group-form-row .sort-button,
-.group-form-row .new-pill,
-.group-detail-head .sort-button,
-.group-danger-zone .sort-button,
-.group-danger-zone .new-pill {
+.group-form-row .new-pill {
   min-height: 34px;
   padding: 0 14px;
   font-size: 14px;
-}
-
-/* 行内的下拉（成员角色）：比表单里的输入框再紧一档，不然一行会被撑高。 */
-.group-row .group-input {
-  flex: 0 0 auto;
-  width: auto;
-  padding: 6px 8px;
-  font-size: 13px;
 }
 
 /* 静态标签（分类／待审批）。原来用的是 .new-pill —— 那是 42px 高的实心黑主按钮，
@@ -12524,92 +12444,6 @@ select.group-input {
   border-color: var(--danger-border);
   color: var(--danger);
   background: var(--danger-bg);
-}
-
-/* 详情不是清单之后的又一节，而是「清单里被展开的那一条」。原来它平铺在清单下面、与
-   「新建群组」同级，读起来像页面又长出一段无主的表单。包成一张卡并给它自己的标题栏，
-   这条从属关系才看得出来。 */
-.group-detail {
-  border: 1px solid #cfd9ee;
-  border-radius: 12px;
-  background: #fff;
-  overflow: hidden;
-}
-
-.group-detail-head {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px 10px;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--line);
-  background: #f4f7ff;
-}
-
-.group-detail-title {
-  flex: 1 1 200px;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.group-detail-title h3 {
-  margin: 0;
-  min-width: 0;
-  color: #1b2430;
-  font-size: 16px;
-  font-weight: 650;
-  word-break: break-word;
-}
-
-.group-detail-body {
-  display: grid;
-  gap: 16px;
-  padding: 14px;
-}
-
-/* 卡内的小节标题比外层再轻一档，免得卡里卡外两级标题看起来一样重。 */
-.group-block {
-  display: grid;
-  gap: 8px;
-}
-
-.group-block > h4 {
-  margin: 0;
-  color: #4f5663;
-  font-size: 12px;
-  font-weight: 750;
-  letter-spacing: 0.02em;
-}
-
-/* 危险动作（退出／删除）与上面的日常管理动作之间划一条线：删组会连带收回全部共享
-   授权，不该和「添加成员」挨在一起像是同一档动作。 */
-.group-danger-zone {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding-top: 12px;
-  border-top: 1px solid var(--line);
-}
-
-.group-danger-zone .tool-hint {
-  flex: 1 1 200px;
-  margin: 0;
-  font-size: 12px;
-}
-
-/* 空态：一条虚线框比一句灰字更像「这里本该有内容」。 */
-.group-empty {
-  margin: 0;
-  border: 1px dashed var(--line);
-  border-radius: 10px;
-  padding: 13px 12px;
-  color: var(--muted);
-  font-size: 13px;
-  text-align: center;
 }
 
 /* ── 独立群组工作台 ──────────────────────────────────────────────────────────

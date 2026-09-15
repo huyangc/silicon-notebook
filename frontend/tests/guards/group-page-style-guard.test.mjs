@@ -1,8 +1,8 @@
 // 独立群组页的样式守卫。
 //
 // 钉的是一类**只在浏览器里才看得出来、组件测试永远发现不了**的退化,与
-// group-layout-guard 同源但对象不同(那个盯 groups-panel/notebook-group-share 的
-// 行布局,这个盯独立页 groups-page.tsx)。
+// group-layout-guard 同源但对象不同(那个盯 notebook-group-share 与 groups-page 共有的
+// 行/标签/标题形态判据,这个盯独立页 groups-page.tsx 的 class 存在性与页面级版式)。
 //
 // 第一条来自真实缺陷:页面上 7 处 `<span className="eyebrow">GROUP WORKSPACE</span>`
 // 这类装饰性小标题,而 globals.css 里**从来没有** `.eyebrow` 规则 —— 于是它们以
@@ -60,7 +60,7 @@ const CSS = (await readFile(path.join(APP_DIR, "globals.css"), "utf8"))
 
 /** 收集 className 上出现的每一个静态 class token。
  *
- *  刻意不按标签名枚举(group-layout-guard 那份 TAGS 清单会让新标签静默逃逸):这里
+ *  刻意不按标签名枚举(手写的标签清单会让新标签静默逃逸):这里
  *  走整棵 AST 找 `className` 属性,模板串取它的固定片段、三元取两个分支的字面量,
  *  动态拼出来的部分本来就无从检查、直接跳过。 */
 function classTokens(sourceFile) {
