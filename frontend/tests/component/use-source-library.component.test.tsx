@@ -91,8 +91,10 @@ test.each(["", "   ", "\t　 "])("blank source search %j restores all sources an
     value!.setSourceQuery("match");
   });
   api.listSources.mockResolvedValueOnce({ items: [all[0]], total_count: 1, offset: 0, limit: 50 });
+  const contentRevision = value!.contentRevision;
   await act(async () => value!.searchSources());
   expect(value!.sources).toEqual([all[0]]);
+  expect(value!.contentRevision).toBe(contentRevision);
 
   const reset = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
   api.listSources.mockReturnValueOnce(reset.promise);
@@ -113,6 +115,32 @@ test.each(["", "   ", "\t　 "])("blank source search %j restores all sources an
   expect(value!.sourcesPageLoading).toBe(false);
   expect(value!.currentPageRequest()).toEqual({ page: 0, q: "" });
   expect(value!.sourceScopeSelection.ids.has("other")).toBe(true);
+  expect(value!.contentRevision).toBe(contentRevision);
+});
+
+test("content refresh token ignores pagination but changes for updated source content and uploads", async () => {
+  render(<Harness />);
+  act(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a", notebookId: "notebook-a", workspaceEpoch: 1,
+      page: { items: [source("first", "notebook-a")], total_count: 100, offset: 0, limit: 50 },
+    });
+  });
+  const initial = value!.contentRevision;
+  const second = source("second", "notebook-a");
+  api.listSources.mockResolvedValueOnce({ items: [second], total_count: 100, offset: 50, limit: 50 });
+  await act(async () => value!.loadSourcesPage({ page: 1 }));
+  expect(value!.contentRevision).toBe(initial);
+  api.listSources.mockResolvedValueOnce({ items: [{ ...second, summary: "更新摘要" }], total_count: 100, offset: 50, limit: 50 });
+  await act(async () => value!.loadSourcesPage({ page: 1 }));
+  expect(value!.contentRevision).toBeGreaterThan(initial);
+  const updated = value!.contentRevision;
+  api.listSources.mockResolvedValueOnce({ items: [source("replacement", "notebook-a")], total_count: 100, offset: 50, limit: 50 });
+  await act(async () => value!.loadSourcesPage({ page: 1 }));
+  expect(value!.contentRevision).toBeGreaterThan(updated);
+  const refreshed = value!.contentRevision;
+  act(() => { value!.commitUploadedSources(value!.captureOwner(), [source("new", "notebook-a")], 1); });
+  expect(value!.contentRevision).toBeGreaterThan(refreshed);
 });
 
 test("late upload and URL results cannot commit across notebook or actor transitions", () => {

@@ -108,6 +108,14 @@ created_at, id)` 索引，供有界、按类型的集合枚举（公式/表格/�
 
 ### 2.3 API、模型与领域服务
 
+问答欢迎页的候选问题由独立 `notebook_question_suggestions` 服务拥有，通过
+notebook 路由上的只读授权 POST 按需生成，不进入 Ask 会话状态。运行时注入
+SQLite/PostgreSQL 来源 store 的有界快照读取与模型客户端；store 拥有 SQL，
+服务拥有提示词、输出校验、内容/模型指纹、有界 LRU 与并发合并。生成前后均
+复核来源版本，模型调用期间不持有数据库连接或事务。输入只取本库可见文档，
+不含私有 Memory、隐藏 Knowhow 来源或参考库。生成失败回退模板，人工预期
+问题始终优先；缓存与输入预算见配对产品/API 和部署参考。
+
 Legacy 的 `prompts.reflect_prompt` 在原 user 消息内先输出固定指令，再输出问题专属引号说明、完整问题与原候选摘要。它仅调整文本位置，不拥有检索策略、候选选取或任何状态；不引入证据历史账本或布局开关。模型行为与实际缓存收益需分别通过回归和实测确认，不能由前缀变长推导。
 
 - `backend/app/api/routes.py` composes the domain FastAPI routers；aggregate 只负责组合顺序，不承载产品 endpoint body，也不提供兼容导出。边界契约直接检查各 domain router 的 endpoint 所有权，并以语义 AST 固定 aggregate 的组合清单与 `include_router` 调用；不依赖框架是否把子路由平铺（新版 FastAPI 会保留 lazy included-router 节点）。`system_routes.py`、`notebook_routes.py`、`source_routes.py`、`knowhow_routes.py`、`knowledge_routes.py`、`ask_routes.py`、`report_routes.py`、`kg_routes.py` 与 `admin_routes.py` 各自拥有领域 endpoint；`memory_routes.py`、`auth_routes.py`、`content_overview_routes.py`、`debug_logs.py` 与 Agent Knowhow router 保持独立。`mcp_server.py` 提供默认二十四个 core 工具（七个 Memory/context、四个 knowhow、一个引用点查、七个来源、三个构建与两个库理解）的 scoped Streamable HTTP 面；`CORE_TOOLS` 是默认二十四个内建前缀；`PUBLIC_TOOLS`、静态 guard 与默认 server-local discovery 均来自同一冻结组合目录；`deps.py` 承载访问控制依赖。
@@ -125,6 +133,9 @@ Legacy 的 `prompts.reflect_prompt` 在原 user 消息内先输出固定指令�
 `frontend/app/page.tsx` 是 collection/workspace 编排器，不再是所有模型与面板实现的唯一所有者：
 
 - `workspace-model.ts` 保存共享 API/视图类型与常量。
+- `notebook-question-suggestions.tsx` 仅在问答欢迎态读取模型问题建议，立即保留
+  模板并隔离用户/笔记本/工作区代次；`useSourceLibrary.contentRevision` 提供与
+  搜索、分页无关的内容刷新信号。生成建议不拥有 Ask 草稿或会话状态。
 - `answer-panel.tsx` 保存答案、引用与 reasoning trace UI。
 - `frontend/app/admin/usage/` 拥有用户总览及其只读「提问分析」（问答 / 深度报告）「解析问题」页签；它只消费管理员 GET projection，不拥有解析、重试或隔离文件 mutation。解析问题列表可按 7 类模型功能筛选，模型正文只在展开一行时经单案例 GET 读取，不随列表批量下发。`page.tsx` 的 workspace hash 可带一个来源 id，只负责打开仍获授权的笔记本和来源详情。
 - `kg-type-model.ts` 保存内置知识类型文案/样式；`kg-type-mark.tsx` 消费并 re-export 该模型，保存答案与图谱共用的类型标记渲染。

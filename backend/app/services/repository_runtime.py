@@ -62,6 +62,7 @@ from app.services.kg import scheduler as kg_scheduler
 from app.services.collection_catalog import CollectionCatalogService
 from app.services.collection_enumeration import CollectionEnumerationService
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
+from app.services.notebook_question_suggestions import NotebookQuestionSuggestionsService
 from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
 from app.services.report_execution import (
     REPORT_CANCELLATIONS,
@@ -421,6 +422,7 @@ class _NotebookDomain:
     analysis_artifacts: AnalysisArtifactStore
     spreadsheet_analysis: SpreadsheetAnalysisService
     catalog: NotebookCatalogService
+    question_suggestions: NotebookQuestionSuggestionsService
     # Finished by wire_sharing(): its collaborators (facade _insert_row seat,
     # notebook_copy_stats memo, storage_dir) are facade-bound seams that only
     # exist once the facade constructor reaches them.
@@ -483,6 +485,11 @@ def _build_notebook_domain(
         source_files=source_files,
         analysis_artifacts=analysis_artifacts,
         spreadsheet_analysis=spreadsheet_analysis,
+        question_suggestions=NotebookQuestionSuggestionsService(
+            settings=foundation.settings, models=foundation.models,
+            notebook=seats.notebook_store.get_row,
+            snapshot=seats.source_store.question_suggestion_snapshot,
+        ),
         catalog=NotebookCatalogService(
             store=seats.notebook_store,
             summaries=summaries,
@@ -1019,8 +1026,7 @@ class RepositoryRuntime:
         reflect_action_host: ReflectActionHostPort | None = None,
     ) -> None:
         """Call domain builders in order; their call order is the dependency topology."""
-        foundation = _build_process_foundation(
-            settings, root_dir, seams, model_provider,
+        foundation = _build_process_foundation(settings, root_dir, seams, model_provider,
             retrieval_contributor_host=retrieval_contributor_host,
             ask_completed_observer_host=ask_completed_observer_host,
             report_completed_observer_host=report_completed_observer_host,
@@ -1086,6 +1092,7 @@ class RepositoryRuntime:
         self.analysis_artifacts = notebook.analysis_artifacts
         self.spreadsheet_analysis = notebook.spreadsheet_analysis
         self.catalog = notebook.catalog
+        self.question_suggestions = notebook.question_suggestions
         self.notebook_copies = notebook.notebook_copies
         self.sharing = notebook.sharing
         pipeline = _build_source_pipeline(foundation, seats)

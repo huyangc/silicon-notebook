@@ -43,6 +43,9 @@ def analysis_issue_repository():
 def notebook_catalog_repository() -> NotebookCatalogRepository:
     return repository()._runtime.catalog  # type: ignore[attr-defined]
 
+def notebook_question_suggestions_service():
+    return repository()._runtime.question_suggestions  # type: ignore[attr-defined]
+
 def notebook_delete_repository():
     """批 3·W1 PR-3 §T-2 的删除 tombstone + 后台作业入口；不进
     `NotebookCatalogRepository` Protocol——`delete_notebook`（同步、

@@ -979,6 +979,24 @@ NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS  # max TOTAL rows a deep copy would materialise 
                                  # the notebook is offered as a read-only share (default 200000)
 ```
 
+**Welcome question suggestions:**
+
+The empty Ask welcome view reuses the `notebook_metadata` workload's configured
+model service. No additional provider credentials are needed. An unavailable
+service or generation failure preserves the existing template questions.
+Suggestion results use a bounded in-process LRU per application runtime, shared
+by sessions reading the same notebook; they are regenerated after eviction or
+restart. The source/content and model/prompt fingerprint controls invalidation.
+The input is explicitly a partial document projection, not a full-library read.
+Each source field/excerpt also obeys the existing `EMBED_TRUNCATE_CHARS` budget.
+
+```text
+NOTEBOOK_QUESTION_SOURCE_LIMIT    # sampled local documents (default 20; range 1–200)
+NOTEBOOK_QUESTION_INPUT_CHARS     # aggregate source JSON input budget (default 12000; range 1000–100000)
+NOTEBOOK_QUESTION_CACHE_ENTRIES   # cached notebook generations per runtime (default 128; range 1–4096)
+NOTEBOOK_QUESTION_RETRY_SECONDS   # failed-generation retry cooldown (default 60; range 1–3600)
+```
+
 **Content-addressed cache (LLM + embedding calls):**
 
 Repeat calls with identical content — same model, same prompt or text — reuse the
