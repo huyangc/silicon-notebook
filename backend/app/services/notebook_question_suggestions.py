@@ -55,6 +55,29 @@ def _valid_response(raw: str) -> bool:
         return False
 
 
+def _project_source(source: dict, budget: int) -> str | None:
+    """Pack a valid JSON excerpt inside the remaining shared input budget.
+
+    Store projections already obey EMBED_TRUNCATE_CHARS. A smaller total
+    prompt budget may further shorten these explicitly sampled copies; it
+    never changes authored data or introduces another per-source setting.
+    Binary search accounts for JSON escaping as well as content characters.
+    """
+    fields = {key: source[key].strip() for key in ("title", "summary", "excerpt")}
+    low, high, block = 0, max(map(len, fields.values())), None
+    while low <= high:
+        bound = (low + high) // 2
+        projection = {key: value[:bound] for key, value in fields.items()}
+        candidate = json.dumps(projection, ensure_ascii=False)
+        if len(candidate) <= budget:
+            if projection["summary"] or projection["excerpt"]:
+                block = candidate
+            low = bound + 1
+        else:
+            high = bound - 1
+    return block
+
+
 class NotebookQuestionSuggestionsService:
     def __init__(self, *, settings: Settings, models, notebook: Callable,
                  snapshot: Callable, clock: Callable = monotonic) -> None:
@@ -154,12 +177,11 @@ class NotebookQuestionSuggestionsService:
         for source in snapshot["sources"]:
             if not source.get("summary") and not source.get("excerpt"):
                 continue
-            block = json.dumps({key: source[key] for key in ("title", "summary", "excerpt")}, ensure_ascii=False)
-            cost = len(block) + bool(blocks)
-            if cost > remaining:
-                break
+            block = _project_source(source, remaining - bool(blocks))
+            if block is None:
+                continue
             blocks.append(block)
-            remaining -= cost
+            remaining -= len(block) + (len(blocks) > 1)
         if not blocks:
             return result
         try:

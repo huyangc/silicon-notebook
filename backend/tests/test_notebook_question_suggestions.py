@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.models.notebooks import NotebookCreate
+from app.repositories.ports import SourceElementWrite
 from app.services.notebook_question_suggestions import (
     NotebookQuestionSuggestionsService, _validated_questions,
 )
@@ -169,11 +170,27 @@ def test_cache_is_bounded_and_input_projection_disclosed(setup):
     snapshot["source_count"] = 5
     snapshot["sources"].append({"title": "大文档", "summary": "文" * 1000, "excerpt": "正文"})
     result = service.suggest("a")
-    assert result.sampled and result.source_count == 5 and result.sampled_source_count == 1
+    assert result.sampled and result.source_count == 5 and result.sampled_source_count == 2
     assert len(model.calls[0][1]["content"]) <= 1000
     service.suggest("b")
     service.suggest("a")
     assert len(model.calls) == 3 and len(service._cache) == 1
+
+
+@pytest.mark.parametrize("text", ["论证正文" * 500, '含有"引号"和\\反斜线\n' * 200])
+def test_long_first_source_fits_small_supported_input_budget(setup, text):
+    service, model, _, snapshot, _ = setup
+    service.settings.notebook_question_input_chars = 1000
+    snapshot["sources"][0].update(summary=text, excerpt=text)
+    original = copy.deepcopy(snapshot)
+    result = service.suggest("nb")
+    assert result.status == "ready" and result.sampled and result.sampled_source_count == 1
+    payload = model.calls[0][1]["content"]
+    assert len(payload) <= service.settings.notebook_question_input_chars
+    projection = json.loads(payload)
+    assert projection["excerpt"] and text.startswith(projection["excerpt"])
+    assert projection["summary"] and text.startswith(projection["summary"])
+    assert snapshot == original
 
 
 def test_sqlite_snapshot_excludes_private_sources_and_tracks_outside_sample(tmp_path):
@@ -184,9 +201,9 @@ def test_sqlite_snapshot_excludes_private_sources_and_tracks_outside_sample(tmp_
     with repo._write() as db:
         for source_id, kind in [("a", "document"), ("b", "document"), ("memory", "memory"), ("knowhow", "knowhow")]:
             db.execute(
-                "INSERT INTO sources(id,notebook_id,title,summary,source_type,file_name,file_path,file_size,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (source_id, notebook.id, source_id, "摘要", kind, "a.md", "", 0, "2026-01-01", "2026-01-01"),
+                "INSERT INTO sources(id,notebook_id,title,summary,source_type,parse_status,file_name,file_path,file_size,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (source_id, notebook.id, source_id, "摘要", kind, "parsed", "a.md", "", 0, "2026-01-01", "2026-01-01"),
             )
             db.execute(
                 "INSERT INTO source_elements(id,source_id,element_type,location_label,text,metadata,created_at) VALUES(?,?,?,?,?,?,?)",
@@ -214,7 +231,9 @@ def test_sqlite_snapshot_excludes_private_sources_and_tracks_outside_sample(tmp_
     assert snapshot()["revision"] != second["revision"]
     before_reparse = snapshot()
     with repo._write() as db:
-        store.replace_elements(db, "a", [], created_at="2028-01-01")
+        store.replace_elements(db, "a", [SourceElementWrite(
+            id="a-reparsed", element_type="text", text="重新解析的正文", location_label="1", metadata={},
+        )], created_at="2028-01-01")
     assert snapshot()["revision"] != before_reparse["revision"]
     model = Model()
     def invoke():
@@ -226,6 +245,50 @@ def test_sqlite_snapshot_excludes_private_sources_and_tracks_outside_sample(tmp_
         snapshot=store.question_suggestion_snapshot,
     )
     assert service.suggest(notebook.id).status == "ready"
+
+
+@pytest.mark.parametrize("valid_status", ["parsed", "extracting", "extracted"])
+def test_sqlite_samples_usable_documents_before_limit_and_ignores_operational_summaries(tmp_path, valid_status):
+    settings = Settings(_env_file=None, database_url=f"sqlite:///{tmp_path / 'db.sqlite'}",
+                        storage_dir=str(tmp_path / "storage"), event_log_enabled=False)
+    repo = SQLiteRepository(settings)
+    notebook = repo.create_notebook(NotebookCreate(name="Depth"))
+    with repo._write() as db:
+        for source_id, status, summary, text in (
+            ("a", "queued", "Uploaded; parsing is queued.", "上代遗留内容"),
+            ("b", "failed", "Parsing failed; see source error.", "上代遗留内容"),
+            ("c", "parsing", "Uploaded; parsing is queued.", "尚未发布的新代内容"),
+            ("d", "parsed", "不含正文", " \n\t\r "),
+            ("e", valid_status, "论文真实摘要", "论文真实正文"),
+        ):
+            db.execute(
+                "INSERT INTO sources(id,notebook_id,title,summary,source_type,parse_status,file_name,file_path,file_size,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (source_id, notebook.id, source_id, summary, "document", status, "a.md", "", 0, "2026-01-01", "2026-01-01"),
+            )
+            db.execute(
+                "INSERT INTO source_elements(id,source_id,element_type,location_label,text,metadata,created_at) VALUES(?,?,?,?,?,?,?)",
+                (source_id + "-e", source_id, "text", "1", text, "{}", "2026-01-01"),
+            )
+    store = repo._runtime.source_store
+    first = store.question_suggestion_snapshot(notebook.id, source_limit=1, text_chars=settings.embed_truncate_chars)
+    assert first["source_count"] == 5
+    assert [source["id"] for source in first["sources"]] == ["e"]
+    model = Model()
+    service = NotebookQuestionSuggestionsService(
+        settings=settings, models=model, notebook=repo._runtime.notebook_store.get_row,
+        snapshot=store.question_suggestion_snapshot,
+    )
+    assert service.suggest(notebook.id).status == "ready"
+    content = model.calls[0][1]["content"]
+    assert "论文真实正文" in content
+    assert "Uploaded" not in content and "Parsing failed" not in content
+    with repo._write() as db:
+        db.execute("DELETE FROM sources WHERE id='e'")
+    only_placeholders = store.question_suggestion_snapshot(notebook.id, source_limit=1, text_chars=settings.embed_truncate_chars)
+    assert only_placeholders["source_count"] == 4 and only_placeholders["sources"] == []
+    assert service.suggest(notebook.id).status == "fallback"
+    assert len(model.calls) == 1
 
 
 def test_endpoint_requires_read_access_and_rechecks_after_generation(monkeypatch):
