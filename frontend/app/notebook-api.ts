@@ -45,6 +45,24 @@ export const createNotebook = (payload: unknown) =>
 export const getNotebook = (id: string) =>
   requestJson<NotebookSummary>(`/notebooks/${id}`, options);
 
+export type NotebookQuestionSuggestion = Readonly<{
+  label: string;
+  question: string;
+}>;
+
+export type NotebookQuestionSuggestions = Readonly<{
+  status: "ready" | "fallback";
+  questions: NotebookQuestionSuggestion[];
+  sampled: boolean;
+}>;
+
+export const fetchNotebookQuestionSuggestions = (id: string, signal: AbortSignal) =>
+  requestJson<NotebookQuestionSuggestions>(`/notebooks/${id}/question-suggestions`, {
+    ...options,
+    method: "POST",
+    signal,
+  });
+
 export const updateNotebook = (id: string, patch: unknown) =>
   requestJson<NotebookSummary>(`/notebooks/${id}`, {
     ...options,

@@ -13,6 +13,7 @@ import {
 import { MemoryPanel, MemorySaveDialog } from "./memory-panel";
 import { KnowhowPanel } from "./knowhow-panel";
 import { ContentOverviewCards } from "./content-overview-cards";
+import { NotebookQuestionSuggestions } from "./notebook-question-suggestions";
 import { AnalyticsLoadScope, startAnalyticsLoads } from "./analytics-loaders";
 import { sourceAnomalies } from "./anomaly-severity";
 import {
@@ -5656,11 +5657,15 @@ export default function Home() {
                     <h2>{welcomeCopy.title}</h2>
                     <p>{welcomeCopy.description}</p>
                     {welcomeCopy.prompts.length > 0 && (
-                      <div className="prompt-chips">
-                        {welcomeCopy.prompts.map(([label, prompt]) => (
-                          <button key={label} onClick={() => askSession.submit(prompt).catch(reportError)}>{label}</button>
-                        ))}
-                      </div>
+                      <NotebookQuestionSuggestions
+                        actorId={currentUser?.id ?? null}
+                        workspaceEpoch={workspaceEpochRef.current}
+                        notebook={currentNotebook}
+                        contentRevision={sourceLibrary.contentRevision}
+                        sourceTotal={notebookSourceTotal}
+                        fallbackPrompts={welcomeCopy.prompts}
+                        onSubmit={(prompt) => { askSession.submit(prompt).catch(reportError); }}
+                      />
                     )}
                   </div>
                 ) : (

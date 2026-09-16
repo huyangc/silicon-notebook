@@ -5,6 +5,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.api.deps import (
     get_current_user,
     notebook_catalog_repository,
+    notebook_question_suggestions_service,
+    notebook_access_repository,
     notebook_delete_repository,
     notebook_sharing_repository,
     repository,
@@ -22,6 +24,7 @@ from app.domain.indexing_pipeline import (
     IndexingPipelineUnavailableError,
 )
 from app.models.identity import UserProfile
+from app.models.question_suggestions import QuestionSuggestionsResponse
 from app.models.notebooks import (
     MountableNotebook,
     MountedBase,
@@ -48,6 +51,24 @@ from app.repositories.ports import (
 
 
 router = APIRouter()
+
+
+@router.post(
+    "/notebooks/{notebook_id}/question-suggestions",
+    response_model=QuestionSuggestionsResponse,
+    dependencies=[Depends(require_notebook_read)],
+)
+def question_suggestions(
+    notebook_id: str, user: UserProfile = Depends(get_current_user),
+) -> QuestionSuggestionsResponse:
+    try:
+        result = notebook_question_suggestions_service().suggest(notebook_id)
+        # A model call may outlive a sharing grant; never publish after revoke.
+        if not notebook_access_repository().user_can_read_notebook(notebook_id, user.id):
+            raise KeyError(notebook_id)
+        return result
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
 
 
 @router.get("/notebooks", response_model=List[NotebookSummary])

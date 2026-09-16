@@ -157,6 +157,19 @@ class Settings(BaseSettings):
         validation_alias="EXTENSION_ADMISSION_REFRESH_SECONDS",
     )
 
+    notebook_question_source_limit: int = Field(
+        20, ge=1, le=200, validation_alias="NOTEBOOK_QUESTION_SOURCE_LIMIT",
+    )
+    notebook_question_input_chars: int = Field(
+        12000, ge=1000, le=100000, validation_alias="NOTEBOOK_QUESTION_INPUT_CHARS",
+    )
+    notebook_question_cache_entries: int = Field(
+        128, ge=1, le=4096, validation_alias="NOTEBOOK_QUESTION_CACHE_ENTRIES",
+    )
+    notebook_question_retry_seconds: float = Field(
+        60, ge=1, le=3600, validation_alias="NOTEBOOK_QUESTION_RETRY_SECONDS",
+    )
+
     openai_compat_timeout_seconds: int = Field(
         60,
         validation_alias="OPENAI_COMPAT_TIMEOUT_SECONDS",

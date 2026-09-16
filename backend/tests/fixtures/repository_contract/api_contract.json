@@ -9159,6 +9159,67 @@
           "title": "QueryIntentTopic",
           "type": "object"
         },
+        "QuestionSuggestion": {
+          "additionalProperties": false,
+          "properties": {
+            "label": {
+              "maxLength": 32,
+              "minLength": 1,
+              "title": "Label",
+              "type": "string"
+            },
+            "question": {
+              "maxLength": 300,
+              "minLength": 1,
+              "title": "Question",
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "question"
+          ],
+          "title": "QuestionSuggestion",
+          "type": "object"
+        },
+        "QuestionSuggestionsResponse": {
+          "properties": {
+            "questions": {
+              "items": {
+                "$ref": "#/components/schemas/QuestionSuggestion"
+              },
+              "maxItems": 4,
+              "title": "Questions",
+              "type": "array"
+            },
+            "sampled": {
+              "default": false,
+              "title": "Sampled",
+              "type": "boolean"
+            },
+            "sampled_source_count": {
+              "default": 0,
+              "title": "Sampled Source Count",
+              "type": "integer"
+            },
+            "source_count": {
+              "default": 0,
+              "title": "Source Count",
+              "type": "integer"
+            },
+            "status": {
+              "default": "fallback",
+              "enum": [
+                "ready",
+                "fallback"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "title": "QuestionSuggestionsResponse",
+          "type": "object"
+        },
         "RebuildScaleIndexRequest": {
           "properties": {
             "mode": {
@@ -22010,6 +22071,45 @@
             }
           },
           "summary": "Backfill Paper Metadata"
+        }
+      },
+      "/api/notebooks/{notebook_id}/question-suggestions": {
+        "post": {
+          "operationId": "question_suggestions_api_notebooks__notebook_id__question_suggestions_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/QuestionSuggestionsResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Question Suggestions"
         }
       },
       "/api/notebooks/{notebook_id}/relations/{rel_id}/review": {

@@ -111,6 +111,9 @@ export function useSourceLibrary({
   const [sourceElementsLoading, setSourceElementsLoading] = useState(false);
   const [highlightedElementId, setHighlightedElementId] = useState("");
   const [ownerSerial, setOwnerSerial] = useState(0);
+  // Content consumers revalidate after mutations, independently of list search
+  // and pagination. This is a browser refresh token, not a server content hash.
+  const [contentRevision, setContentRevision] = useState(0);
 
   const effectsRef = useRef(effects);
   effectsRef.current = effects;
@@ -123,6 +126,7 @@ export function useSourceLibrary({
   const sourceDetailRef = useRef<SourceSummary | null>(sourceDetail);
   const sourcesPageRef = useRef(sourcesPage);
   const sourceQueryRef = useRef(sourceQuery);
+  const committedListWindowRef = useRef<{ page: number; q: string } | null>(null);
   const pageRequestRef = useRef(0);
   // Holds the AbortController for whichever `listSources` call is currently
   // in flight, so a superseding request (or an owner/actor transition that
@@ -190,6 +194,7 @@ export function useSourceLibrary({
   };
 
   function resetVisibleState() {
+    committedListWindowRef.current = null;
     setSources([]);
     setSourceScopeSelection(defaultSourceScopeSelection());
     setSourcesTotal(0);
@@ -255,6 +260,8 @@ export function useSourceLibrary({
     const deleted = deletedIdsRef.current.get(ownerKey(input.actorId, input.notebookId));
     const filtered = filterDeletedSourceItems(input.page.items, deleted);
     const visibleTotal = Math.max(0, input.page.total_count - filtered.removedCount);
+    committedListWindowRef.current = { page: 0, q: "" };
+    setContentRevision((value) => value + 1);
     setSources(filtered.items);
     setSourceScopeSelection(defaultSourceScopeSelection());
     setSourcesTotal(visibleTotal);
@@ -432,6 +439,18 @@ export function useSourceLibrary({
     const deleted = deletedIdsRef.current.get(ownerKey(owner.actorId, notebookId));
     const filtered = filterDeletedSourceItems(result.items, deleted);
     const visibleTotal = Math.max(0, result.total_count - filtered.removedCount);
+    const previousById = new Map(sourcesRef.current.map((source) => [source.id, source]));
+    const previousWindow = committedListWindowRef.current;
+    const membershipChanged = previousWindow?.page === pageNum && previousWindow.q === q
+      && (previousById.size !== filtered.items.length || filtered.items.some((source) => !previousById.has(source.id)));
+    if (membershipChanged || filtered.items.some((source) => {
+      const previous = previousById.get(source.id);
+      return previous && (
+        previous.title !== source.title || previous.summary !== source.summary
+        || previous.parse_status !== source.parse_status || previous.element_count !== source.element_count
+      );
+    })) setContentRevision((value) => value + 1);
+    committedListWindowRef.current = { page: pageNum, q };
     setSources(filtered.items);
     setSourcesTotal(visibleTotal);
     if (!q) setNotebookSourceTotal(visibleTotal);
@@ -473,6 +492,7 @@ export function useSourceLibrary({
     addedCount: number,
   ): boolean {
     if (!owner || !owns(owner)) return false;
+    setContentRevision((value) => value + 1);
     setSources((previous) => [
       ...previous.filter((source) => !uploaded.some((item) => item.id === source.id)),
       ...uploaded,
@@ -487,6 +507,7 @@ export function useSourceLibrary({
     created: readonly SourceSummary[],
   ): boolean {
     if (!owner || !owns(owner)) return false;
+    setContentRevision((value) => value + 1);
     setSources((previous) => [
       ...previous.filter((source) => !created.some((item) => item.id === source.id)),
       ...created,
@@ -585,6 +606,7 @@ export function useSourceLibrary({
     try {
       const updated = await parseSource(detail.id);
       if (!owns(owner)) return;
+      setContentRevision((value) => value + 1);
       setSources((previous) => previous.map((source) => (
         source.id === updated.id ? updated : source
       )));
@@ -648,6 +670,7 @@ export function useSourceLibrary({
         );
       };
       const wasVisible = sourcesRef.current.some((item) => item.id === source.id);
+      setContentRevision((value) => value + 1);
       setSources((previous) => previous.filter((item) => item.id !== source.id));
       setSourceScopeSelection((previous) => removeSourceFromSelection(previous, source.id));
       if (wasVisible) setSourcesTotal((total) => Math.max(0, total - 1));
@@ -753,6 +776,9 @@ export function useSourceLibrary({
             && previous.parse_status !== "failed"
             && item.parse_status === "failed";
         });
+        if (updated.some((item) => pending.find((source) => source.id === item.id)?.parse_status !== item.parse_status)) {
+          setContentRevision((value) => value + 1);
+        }
         let changed = false;
         setSources((previous) => {
           const next = previous.map((source) => {
@@ -809,6 +835,7 @@ export function useSourceLibrary({
 
   return {
     sources: visibleSources,
+    contentRevision: ownerIsActive ? contentRevision : 0,
     sourceScopeSelection: ownerIsActive
       ? sourceScopeSelection
       : inactiveScopeSelectionRef.current,

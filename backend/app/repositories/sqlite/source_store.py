@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
@@ -21,6 +22,7 @@ from app.models.sources import (
     paper_meta_status,
 )
 from app.domain.source_display import summary_display_title
+from app.models.question_suggestions import QUESTION_SUGGESTION_REVISION_PAGE_SIZE
 from app.repositories.ports import (
     SOURCE_PAPER_META_UNSET,
     DocumentCapacityExceeded,
@@ -802,6 +804,61 @@ class SourceStore:
                     ).fetchall()
                 )
         return out
+
+    def question_suggestion_snapshot(
+        self, notebook_id: str, *, source_limit: int, text_chars: int
+    ) -> dict:
+        """Bounded public-document projection, excluding all private synthetic sources.
+
+        The identity digest detects corpus membership/lifecycle changes even
+        outside the sampled prefix. Each selected row is clipped in SQL; no
+        whole source text or library roster is hydrated.
+        """
+        with self.database.connect() as db:
+            # Exact corpus identity in bounded keyset pages; an unchanged
+            # MAX(timestamp) alone cannot detect a delete/add pair.
+            digest = hashlib.sha256()
+            source_count = 0
+            after = None
+            while True:
+                lower = "AND (created_at,id)>(?,?) " if after else ""
+                params = (notebook_id, *(after or ()), QUESTION_SUGGESTION_REVISION_PAGE_SIZE)
+                page = db.execute(
+                    "SELECT id,created_at,updated_at,parse_status,chunked_at FROM sources "
+                    "WHERE notebook_id=? AND source_type NOT IN ('memory','knowhow') "
+                    + lower + "ORDER BY created_at,id LIMIT ?",
+                    params,
+                ).fetchall()
+                if not page:
+                    break
+                source_count += len(page)
+                for row in page:
+                    digest.update(json.dumps(
+                        [str(row[key] or "") for key in
+                         ("id", "updated_at", "parse_status", "chunked_at")],
+                        ensure_ascii=False,
+                    ).encode())
+                after = (page[-1]["created_at"], page[-1]["id"])
+            revision = digest.hexdigest()
+            rows = db.execute(
+                "SELECT s.id,s.updated_at,s.parse_status,s.chunked_at,"
+                "substr(s.title,1,?) AS title,substr(s.summary,1,?) AS summary,"
+                "(SELECT substr(e.text,1,?) FROM source_elements e "
+                "WHERE e.source_id=s.id ORDER BY e.created_at,e.id LIMIT 1) AS excerpt "
+                "FROM sources s WHERE s.notebook_id=? "
+                "AND s.source_type NOT IN ('memory','knowhow') "
+                "ORDER BY s.created_at,s.id LIMIT ?",
+                (text_chars, text_chars, text_chars, notebook_id, source_limit),
+            ).fetchall()
+        values = [dict(row) for row in rows]
+        return {
+            "source_count": source_count,
+            "revision": revision,
+            "sources": [
+                {key: str(value or "") for key, value in row.items()}
+                for row in values
+            ],
+        }
 
     def source_listing_rows(
         self, db: sqlite3.Connection, source_ids: Sequence[str]

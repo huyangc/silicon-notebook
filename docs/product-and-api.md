@@ -193,6 +193,43 @@ call/observation samples; and two fixed-size summaries — the analysis dashboar
 newest 10 low-rated questions, and a shared-notebook preview's first 50 source titles
 shown beside the full source count.
 
+### Welcome question suggestions
+
+An empty Ask session shows up to four question chips. Nonblank notebook
+`expected_questions` take priority, preserving the full authored question when
+clicked. Otherwise the welcome view immediately shows the existing source-topic
+templates and asynchronously requests `POST /notebooks/{notebook_id}/question-suggestions`
+(no body, authenticated notebook read access). A successful model result replaces
+the templates; unavailable models, invalid output, request failures or missing
+usable documents leave the templates available. An Ask-blocked notebook shows
+no chips and makes no suggestion request. Clicking a chip submits its full
+question through the ordinary Ask workflow, without creating a session during
+suggestion generation.
+
+The response contains `status` (`ready` or `fallback`), `questions` (objects with
+`label` and `question`), `sampled`, `source_count` and `sampled_source_count`.
+Generated output admits at most four distinct questions, with a nonblank label
+of at most 32 characters and a full question of at most 300 characters; malformed,
+over-limit or duplicate output falls back as a whole. Model input is a bounded
+projection of local visible imported documents: titles, summaries and representative
+text excerpts. It excludes private Memory, hidden Knowhow projections and mounted
+libraries, and does not follow the source panel's search or pagination. Suggestions
+are notebook-level starting points; the actual Ask still honors the selected
+retrieval scope. The `sampled` flag discloses partial input through “根据部分来源内容推荐”;
+this feature does not claim to have read every document in full or modify source
+content. Model instructions require Chinese questions supported by the supplied
+material and treat source text as untrusted data.
+
+The backend reuses the `notebook_metadata` model workload and caches validated
+results within the application runtime. New sessions reuse the cache; notebook
+profile, source content/version, model configuration or prompt-version changes
+invalidate it. Concurrent requests for the same generation share one model call,
+failed generations use a bounded retry cooldown, and a content change during
+generation discards that result. Cache eviction or a server restart may require
+regeneration. The frontend cancels obsolete reads and prevents results from an
+old actor, notebook or workspace generation from appearing in the current welcome
+view. See the paired deployment reference for configurable sampling/cache budgets.
+
 ## Group knowledge sharing
 
 Three real situations — a **project** team sharing one knowledge base, a
