@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   BookmarkPlus,
@@ -1258,6 +1258,50 @@ function PluginActionArguments({ step }: { step: ReasoningTraceStep }) {
 }
 
 
+function ReasoningTraceDetail({ text }: { text: string }) {
+  const id = useId();
+  const textRef = useRef<HTMLElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+
+  useLayoutEffect(() => {
+    const element = textRef.current;
+    // Keep the collapse control while reading; measure the two-line preview
+    // again on collapse. Observe width changes from both window and panel resize.
+    if (!element || expanded) return;
+    const measure = () => setOverflowing(element.scrollHeight > element.clientHeight);
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(element);
+    return () => observer?.disconnect();
+  }, [text, expanded]);
+
+  return (
+    <div className="reasoning-trace-detail">
+      <small
+        ref={textRef}
+        id={id}
+        className={`reasoning-trace-detail-text${expanded ? " expanded" : ""}`}
+        tabIndex={expanded ? 0 : undefined}
+      >
+        {text}
+      </small>
+      {overflowing && (
+        <button
+          type="button"
+          className="link-button reasoning-trace-detail-toggle"
+          aria-expanded={expanded}
+          aria-controls={id}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? "收起" : "查看完整内容"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+
 export function ReasoningTracePanel({
   steps,
   live = false,
@@ -1301,7 +1345,7 @@ export function ReasoningTracePanel({
                 <strong>{step.summary}</strong>
                 {(detail || hasTime) && (
                   <div className="reasoning-trace-meta">
-                    {detail && <small>{detail}</small>}
+                    {detail && <ReasoningTraceDetail key={detail} text={detail} />}
                     {hasTime && (
                       <time className={`reasoning-trace-time ${(step.duration_ms ?? 0) >= 10000 ? "slow" : ""}`}>
                         {formatDuration(step.duration_ms ?? 0)}

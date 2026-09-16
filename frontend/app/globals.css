@@ -4078,6 +4078,7 @@ button.chat-session-card {
   display: grid;
   gap: 8px;
   width: 100%;
+  min-width: 0;
 }
 
 .reasoning-trace-summary {
@@ -4120,6 +4121,7 @@ button.chat-session-card {
   color: #475569;
   font-size: 12px;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .reasoning-trace-chip.empty {
@@ -4154,11 +4156,12 @@ button.chat-session-card {
   gap: 7px;
   margin: 0;
   padding: 0;
+  min-width: 0;
 }
 
 .reasoning-trace-list li {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) auto;
+  grid-template-columns: 48px minmax(0, 1fr) fit-content(42%);
   align-items: center;
   gap: 8px;
   min-height: 28px;
@@ -4193,7 +4196,6 @@ button.chat-session-card {
 
 .reasoning-trace-list li small {
   color: var(--muted);
-  white-space: nowrap;
 }
 
 /* 第三列:描述 + 每步耗时并排(右对齐),耗时用等宽数字,慢步(≥10s)加暖色强调 */
@@ -4204,6 +4206,70 @@ button.chat-session-card {
   gap: 8px;
   min-width: 0;
   white-space: nowrap;
+}
+
+.reasoning-trace-detail {
+  min-width: 0;
+  text-align: right;
+}
+
+.reasoning-trace-detail-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  line-height: 1.5;
+}
+
+.reasoning-trace-detail-text.expanded {
+  display: block;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  max-height: 12rem;
+  overflow: auto;
+  text-align: left;
+}
+
+.reasoning-trace-detail .reasoning-trace-detail-toggle {
+  margin-top: 2px;
+  color: #2f6f73;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.reasoning-trace-detail-toggle:focus-visible,
+.reasoning-trace-detail-text:focus-visible {
+  outline: 2px solid #2f6f73;
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+@media (max-width: 640px) {
+  .reasoning-trace-summary {
+    grid-template-columns: 18px minmax(0, 1fr) auto auto 16px;
+    gap: 6px;
+  }
+
+  .reasoning-trace-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .reasoning-trace-summary strong,
+  .reasoning-trace-summary small {
+    display: none;
+  }
+
+  .reasoning-trace-list li {
+    grid-template-columns: 48px minmax(0, 1fr);
+  }
+
+  .reasoning-trace-list li .reasoning-trace-meta {
+    grid-column: 2 / -1;
+  }
 }
 
 /* plugin_action 步展开态的完整参数披露:自成一行、跨满三列(48px 徽章列容不下
@@ -4247,6 +4313,7 @@ button.chat-session-card {
 }
 
 .reasoning-trace-time {
+  flex-shrink: 0;
   color: #64748b;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
