@@ -214,6 +214,10 @@ over-limit or duplicate output falls back as a whole. Model input is a bounded
 projection of local visible imported documents: titles, summaries and representative
 text excerpts. It excludes private Memory, hidden Knowhow projections and mounted
 libraries, and does not follow the source panel's search or pagination. Suggestions
+use parsed document content; ingestion progress and failure messages are not
+evidence and do not consume the document sampling allowance. Long excerpts may
+be reduced further to fit the aggregate input budget, with the same partial-input
+disclosure and without modifying the original documents. Suggestions
 are notebook-level starting points; the actual Ask still honors the selected
 retrieval scope. The `sampled` flag discloses partial input through “根据部分来源内容推荐”;
 this feature does not claim to have read every document in full or modify source

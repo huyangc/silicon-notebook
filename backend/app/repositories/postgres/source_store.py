@@ -852,13 +852,21 @@ class SourceStore:
                     ).encode())
                 after = (page[-1]["created_at"], page[-1]["id"])
             revision = digest.hexdigest()
+            # Admission precedes LIMIT: queued/failed operational summaries
+            # and stale elements from an unsuccessful reparse are not evidence.
+            # Keep those sources in the identity above so recovery invalidates
+            # an earlier fallback; sample only successfully parsed text here.
             rows = db.execute(
                 "SELECT s.id,s.updated_at,s.parse_status,s.chunked_at,"
                 "substr(s.title,1,%s) AS title,substr(s.summary,1,%s) AS summary,"
                 "(SELECT substr(e.text,1,%s) FROM source_elements e "
-                "WHERE e.source_id=s.id ORDER BY e.created_at,e.id LIMIT 1) AS excerpt "
+                "WHERE e.source_id=s.id AND btrim(e.text, chr(32)||chr(9)||chr(10)||chr(13))<>'' "
+                "ORDER BY e.created_at,e.id LIMIT 1) AS excerpt "
                 "FROM sources s WHERE s.notebook_id=%s "
                 "AND s.source_type NOT IN ('memory','knowhow') "
+                "AND s.parse_status IN ('parsed','extracting','extracted') "
+                "AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id=s.id "
+                "AND btrim(e.text, chr(32)||chr(9)||chr(10)||chr(13))<>'') "
                 "ORDER BY s.created_at,s.id LIMIT %s",
                 (text_chars, text_chars, text_chars, notebook_id, source_limit),
             ).fetchall()
