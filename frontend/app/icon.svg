@@ -3,5 +3,7 @@
   <rect x="17" y="10" width="37" height="44" rx="5" fill="#fff"/>
   <path d="M25 10v44" stroke="#d8dee6" stroke-width="2"/>
   <path d="M11 20h11M11 32h11M11 44h11" fill="none" stroke="#17202a" stroke-linecap="round" stroke-width="4"/>
-  <path d="M32 22h15M32 31h15M32 40h11" fill="none" stroke="#1f5eff" stroke-linecap="round" stroke-width="3"/>
+  <path d="M29 26h4M29 32h4M29 38h4M47 26h4M47 32h4M47 38h4" fill="none" stroke="#17202a" stroke-linecap="round" stroke-width="3"/>
+  <rect x="33" y="22" width="14" height="20" rx="2" fill="#17202a"/>
+  <rect x="37" y="27" width="6" height="10" rx="1" fill="#fff"/>
 </svg>
