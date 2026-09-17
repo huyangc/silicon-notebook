@@ -11,6 +11,7 @@
 - **深度报告检索耗时护栏：** 每个覆盖率/充分性阶段仍为各逻辑主题/章节保留自己的有序 first-N query 窗口，随后把相同 query 合并成一次检索，KG/element 叶子对在共享 `REPORT_RETRIEVAL_FANOUT` 预算内并行，聚合输出仍按逻辑输入顺序。PostgreSQL 每次通用 chunk 词法调用都在私有 savepoint 中使用独立的 `POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS` deadline（默认 `3.0`，`0 < 值 <= min(10, POSTGRES_STATEMENT_TIMEOUT_SECONDS)`）；首次超时会为本 retrieval run 的该 notebook 打开熔断，后续调用不再发数据库语句、直接返回无词法补充，已经在飞的并发调用允许安全收束。该 fail-open 熔断绝不覆盖精确短语/标识符定位。source sidecar 完整覆盖冻结报告范围的 chunk ANN 默认 ANN-only；普通 Ask 仍保留 ANN∪FTS。等待 fold 且确有 chunk 的来源只为 sidecar 未覆盖且已授权的那部分恢复有界 FTS，空来源不会触发；没有 producer scope 的报告调用会在所有 ANN/回退 producer 之前每库每 run 只解析并冻结一次该 actor 的授权来源全集，索引 reload 不能扩大它。`CHUNK_FTS_WITH_ANN_ENABLED=true` 是报告质量回滚闸。
 - Python FastAPI 后端；SQLite 持久化路径 `.local/silicon_notebook.db`
 - `frontend/` 下的 Next.js / React / TypeScript 前端
+- 浏览器标签页使用应用蓝色系的笔记本图标。
 - 由部署者统一管理 OpenAI-compatible chat、embedding 与 rerank 服务；workload 绑定及每服务 `max_concurrency` 集中写入一个 TOML
 - 未配置 LLM/embedder 时全管线可离线运行（deterministic fallback）
 - 干净起点：全新数据库只初始化本机用户，不预置 demo 笔记本或合成来源
