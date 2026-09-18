@@ -1770,8 +1770,8 @@ def test_completeness_unavailable_suppressed_for_nonaggregate_nonempty_card(arep
     )
 
     assert any(row.kind == "collection" for row in resp.result_sets)
-    assert "当前精确完整枚举支持" not in resp.conclusion
-    assert "当前精确完整枚举支持" not in resp.answer
+    assert "不能视为全部结果" not in resp.conclusion
+    assert "不能视为全部结果" not in resp.answer
 
 
 def test_completeness_unavailable_kept_for_aggregate_scope_even_with_a_card(arepo):
@@ -1791,7 +1791,8 @@ def test_completeness_unavailable_kept_for_aggregate_scope_even_with_a_card(arep
     )
 
     assert any(row.kind == "collection" for row in resp.result_sets)
-    assert "当前精确完整枚举支持" in resp.conclusion
+    assert resp.conclusion.endswith("本次回答未验证完整性，不能视为全部结果。")
+    assert resp.answer.endswith("> 本次回答未验证完整性，不能视为全部结果。")
 
 
 def test_completeness_unavailable_kept_when_card_is_empty(arepo):
@@ -1813,7 +1814,7 @@ def test_completeness_unavailable_kept_when_card_is_empty(arepo):
     collection_rows = [row for row in resp.result_sets if row.kind == "collection"]
     # 空集合仍然算一次枚举(0 条也是诚实的清单结果),只是不足以背书完整性。
     assert collection_rows and collection_rows[0].coverage.returned_total == 0
-    assert "当前精确完整枚举支持" in resp.conclusion
+    assert "不能视为全部结果" in resp.conclusion
 
 
 @pytest.mark.parametrize("field", ["constraints", "excluded_topics", "assumptions"])
@@ -1840,7 +1841,7 @@ def test_completeness_unavailable_kept_when_the_request_carries_a_predicate(
 
     collection_rows = [row for row in resp.result_sets if row.kind == "collection"]
     assert collection_rows and collection_rows[0].coverage.complete is True
-    assert "当前精确完整枚举支持" in resp.conclusion
+    assert "不能视为全部结果" in resp.conclusion
 
 
 def test_completeness_unavailable_kept_when_every_card_is_partial(arepo):
@@ -1864,16 +1865,11 @@ def test_completeness_unavailable_kept_when_every_card_is_partial(arepo):
     assert collection_rows, resp.result_sets
     assert collection_rows[0].coverage.returned_total == 100
     assert collection_rows[0].coverage.complete is False
-    assert "当前精确完整枚举支持" in resp.conclusion
+    assert "不能视为全部结果" in resp.conclusion
 
 
 def test_completeness_unavailable_shown_without_enumeration(arepo):
-    """同样的 completeness_required=True 笔记本,但本轮 reflect 从未调用枚举
-    动作(直接 answer)——没有清单结果卡背书,免责声明必须出现,且措辞提到
-    新增的元素/知识对象/来源清单能力(不再说成「仅支持 Knowhow」)。
-
-    三个集合都必须在这句话里点到名:免责声明是在告诉用户「精确完整这件事目前覆盖
-    到哪」,漏掉一个就是把已经交付的能力说小了,而用户会据此决定要不要换个问法。"""
+    """完整性请求未拿到清单卡时，在答案末尾提示本轮结果未验证完整性。"""
     nb = _seed(arepo, formulas=2)
     llm = _SeqLLM(
         plan={"sub_queries": [{"query": "版图设计要点"}]},
@@ -1885,9 +1881,10 @@ def test_completeness_unavailable_shown_without_enumeration(arepo):
     resp = arepo.ask(nb.id, _completeness_required_payload("库里有哪些公式"))
 
     assert not any(row.kind == "collection" for row in resp.result_sets)
-    assert "当前精确完整枚举支持 Knowhow 整表物理行清单与直接行计数" in resp.conclusion
-    for listing in ("元素清单", "知识对象清单", "来源清单"):
-        assert listing in resp.conclusion, listing
+    assert resp.conclusion.startswith("简单回答")
+    assert resp.conclusion.endswith("本次回答未验证完整性，不能视为全部结果。")
+    assert resp.answer.endswith("> 本次回答未验证完整性，不能视为全部结果。")
+    assert "当前精确完整枚举支持" not in resp.conclusion
 
 
 def test_enumeration_block_shares_chunk_budget_with_knowhow_and_stays_bounded(arepo):
