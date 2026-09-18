@@ -86,6 +86,11 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
+    notebook_metadata_batch_chars: int = Field(
+        12000, ge=4096, le=100000,
+        validation_alias="NOTEBOOK_METADATA_BATCH_CHARS",
+    )
+
     environment: str = Field("development", validation_alias="SILICON_NOTEBOOK_ENV")
     single_user_email: str = Field(
         "local-user@silicon-notebook.dev",

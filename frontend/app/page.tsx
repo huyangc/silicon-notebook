@@ -122,6 +122,7 @@ import { useAskSession } from "./use-ask-session.ts";
 import { useReportWorkspace } from "./use-report-workspace.ts";
 import { useKgWorkspace } from "./use-kg-workspace.ts";
 import { useNotebookCollection, type NotebookEditorPatch } from "./use-notebook-collection.ts";
+import { useNotebookTitleDraft } from "./use-notebook-title-draft.ts";
 import {
   useRootModalCoordinator,
   type RootModalCloseReason,
@@ -887,7 +888,7 @@ export default function Home() {
     services: {}, all: false,
   });
   const [statusText, setStatusText] = useState("连接中");
-  const [titleDraft, setTitleDraft] = useState("");
+  const [titleDraft, setTitleDraft] = useNotebookTitleDraft(currentNotebook);
   const [titleSaveInFlight, setTitleSaveInFlight] = useState(false);
   const titleSaveOperationRef = useRef<object | null>(null);
   const [memoryAnswerId, setMemoryAnswerId] = useState<string | null>(null);

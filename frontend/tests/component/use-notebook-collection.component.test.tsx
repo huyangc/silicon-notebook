@@ -624,6 +624,46 @@ test("editor open is latest-wins and an explicit permission downgrade survives l
   expect(value!.editor).toBeNull();
 });
 
+test("saving unrelated settings preserves metadata refreshed while the editor was open", async () => {
+  const original = { ...notebook("a"), name: "原自动标题", purpose: "原自动描述" };
+  const refreshed = { ...original, name: "新自动标题", purpose: "新自动描述" };
+  render(<Harness />);
+  publish([original]);
+  await act(async () => value!.openEditor("a"));
+  publish([refreshed]);
+  notebookApi.getNotebook.mockResolvedValueOnce(refreshed);
+
+  await act(async () => value!.saveEditor({
+    ...editorPatch,
+    name: original.name,
+    purpose: original.purpose,
+    primary_domain: "修改后的领域",
+  }));
+
+  const submitted = notebookApi.updateNotebook.mock.calls[0][1];
+  expect(submitted).not.toHaveProperty("name");
+  expect(submitted).not.toHaveProperty("purpose");
+  expect(submitted).toHaveProperty("primary_domain", "修改后的领域");
+  expect(effects.onNotebookUpdated).toHaveBeenCalledWith(refreshed, []);
+});
+
+test.each([
+  { name: "手动标题", purpose: "原自动描述", expected: { name: "手动标题" }, omitted: "purpose" },
+  { name: "原自动标题", purpose: "手动描述", expected: { purpose: "手动描述" }, omitted: "name" },
+  { name: "原自动标题", purpose: "", expected: { purpose: "" }, omitted: "name" },
+  { name: "未命名笔记本", purpose: "原自动描述", expected: { name: "未命名笔记本" }, omitted: "purpose" },
+])("saving edited metadata submits only the edited field: $expected", async ({ name, purpose, expected, omitted }) => {
+  render(<Harness />);
+  publish([{ ...notebook("a"), name: "原自动标题", purpose: "原自动描述" }]);
+  await act(async () => value!.openEditor("a"));
+
+  await act(async () => value!.saveEditor({ ...editorPatch, name, purpose }));
+
+  const submitted = notebookApi.updateNotebook.mock.calls[0][1];
+  expect(submitted).toMatchObject(expected);
+  expect(submitted).not.toHaveProperty(omitted);
+});
+
 test("a reauthorized editor can retry after the denied attempt itself fails", async () => {
   const firstUpdate = deferred<NotebookSummary>();
   notebookApi.updateNotebook.mockReturnValueOnce(firstUpdate.promise);

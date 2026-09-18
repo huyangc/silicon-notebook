@@ -84,12 +84,18 @@ const NOT_A_VIEW_OWNER = new Map([
 ]);
 
 // Hooks that DO own a view, but whose own `return {...}` object literal is
-// entirely shorthand properties (`{ x, y }`, no `field: value` pairs) — so
+// entirely shorthand properties (`{ x, y }`, no `field: value` pairs), or
+// a state tuple rather than a view object — so
 // `scannedFields` legitimately lands on zero for this hook. Each entry
 // exists so a hook that *should* have scannable fields can't quietly
 // regress to zero without this guard noticing (see the per-file assertion
 // below); it is not a way to suppress the check.
-const EXPECTED_NO_VIEW_FIELDS = new Set(["use-root-modal-coordinator.ts"]);
+const EXPECTED_NO_VIEW_FIELDS = new Set([
+  "use-root-modal-coordinator.ts",
+  // Returns only the title string and stable React state setter as a tuple;
+  // no returned view-object fields or collection-valued hidden fallback.
+  "use-notebook-title-draft.ts",
+]);
 
 // Parameters here are deliberately *not* named `node` (this repo's
 // static-source-policy guard treats an "ast-node"-named parameter's

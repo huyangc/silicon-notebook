@@ -4324,5 +4324,34 @@ MIGRATION_MANIFEST[(73, 74)] = {
 }
 
 
+# v75: field-level metadata ownership and refresh publication generation.
+NOTEBOOK_METADATA_COLUMNS = {
+    "notebooks": {
+        "name_auto": ("name_auto", "INTEGER", 1, "0", 0),
+        "metadata_generation": ("metadata_generation", "INTEGER", 1, "0", 0),
+    },
+}
+MIGRATION_MANIFEST = {
+    (key[0], 75, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "notebooks": {
+                **manifest["columns"].get("notebooks", {}),
+                **NOTEBOOK_METADATA_COLUMNS["notebooks"],
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(74, 75)] = {
+    "tables": {},
+    "columns": NOTEBOOK_METADATA_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

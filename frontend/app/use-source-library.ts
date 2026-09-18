@@ -796,11 +796,11 @@ export function useSourceLibrary({
             `来源处理失败：${justFailed.file_name || justFailed.title}${failureHint ? ` — ${failureHint}` : ""}`,
           );
         }
-        if (reachedExtracted) {
+        if (reachedExtracted || justFailed) {
           const guard = () => owns(owner);
           await effectsRef.current.refreshCollection(guard);
           await effectsRef.current.refreshNotebook(owner.notebookId, guard);
-          if (owns(owner)) {
+          if (reachedExtracted && owns(owner)) {
             try {
               void Promise.resolve(
                 effectsRef.current.refreshCheckup(owner.notebookId, guard),

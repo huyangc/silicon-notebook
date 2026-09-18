@@ -897,7 +897,9 @@
         "indexing_pipeline_job_id": "",
         "indexing_pipeline_version": "builtin.chunk.v1",
         "is_shared": 1,
+        "metadata_generation": 0,
         "name": "Repository contract fixture",
+        "name_auto": 0,
         "primary_domain": "Analog IC",
         "purpose": "Freeze schema-v9 repository composition behavior.",
         "purpose_auto": 0,
@@ -2302,7 +2304,7 @@
       },
       {
         "name": "notebooks",
-        "sql_sha256": "c46eab0ea63914cf5c936ed4a458e96e84860ea8173dbe87b3ebb539921dbca4",
+        "sql_sha256": "5a750c7a829872cc38b5d1f2bce4bd8f280828ac7d7e4836717b19736c341b04",
         "type": "table"
       },
       {
@@ -2416,6 +2418,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 74
+    "user_version": 75
   }
 }

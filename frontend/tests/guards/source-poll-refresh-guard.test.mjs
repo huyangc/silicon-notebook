@@ -12,7 +12,7 @@
 // 翻真,由来源处理轮询重拉 currentNotebook 自动解禁(page.tsx 的 reachedExtracted
 // 分支)」。这里按源码语义钉三条:
 //
-//   ① reachedExtracted 分支存在,且里面真的有 setCurrentNotebook + reloadCheckup
+//   ① 成功或失败终态的刷新分支存在，重拉 notebook；体检仍只在成功分支刷新
 //      (anti-vacuous:分支被整个删掉/改名时守卫要红,不能空转);
 //   ② 分支内不出现 `cancelled`——effect 清理与「用户切库」在闭包里不可区分,
 //      按它做闸就是本 bug 本身;
@@ -33,16 +33,19 @@ const printer = ts.createPrinter({
   removeComments: true,
 });
 
-/** source-library hook 里条件含 reachedExtracted 的 if 分支。 */
-function reachedExtractedBranches(sourceFile) {
+/** Identify the terminal transition by its logical operands, not every mention
+ * of reachedExtracted (the success-only checkup has a nested condition). */
+function terminalRefreshBranches(sourceFile) {
   const branches = [];
   const visit = (node) => {
-    if (ts.isIfStatement(node) && node.expression.getText(sourceFile).includes("reachedExtracted")) {
-      branches.push(
-        printer
-          .printNode(ts.EmitHint.Unspecified, node.thenStatement, sourceFile)
-          .replace(/\s+/g, " "),
-      );
+    if (ts.isIfStatement(node) && ts.isBinaryExpression(node.expression)
+      && node.expression.operatorToken.kind === ts.SyntaxKind.BarBarToken) {
+      const operands = [node.expression.left, node.expression.right];
+      if (operands.every(ts.isIdentifier)
+        && new Set(operands.map((operand) => operand.text)).has("reachedExtracted")
+        && new Set(operands.map((operand) => operand.text)).has("justFailed")) {
+        branches.push(node.thenStatement);
+      }
     }
     ts.forEachChild(node, visit);
   };
@@ -50,15 +53,32 @@ function reachedExtractedBranches(sourceFile) {
   return branches;
 }
 
-test("reachedExtracted 分支重拉 currentNotebook,且不被 effect 清理位挡住", async () => {
+test("来源成功或失败终态重拉 currentNotebook,且不被 effect 清理位挡住", async () => {
   const hook = await parseModule("use-source-library.ts");
-  const branches = reachedExtractedBranches(hook);
+  const branches = terminalRefreshBranches(hook);
 
   // ① anti-vacuous:分支必须存在且承担解禁职责。
-  assert.equal(branches.length, 1, "source library hook 应恰有一个 reachedExtracted 分支");
-  const branch = branches[0];
+  assert.equal(branches.length, 1, "source library hook 应恰有一个成功或失败终态刷新分支");
+  const terminalBranch = branches[0];
+  const branch = printer.printNode(ts.EmitHint.Unspecified, terminalBranch, hook).replace(/\s+/g, " ");
+  assert.ok(branch.includes("refreshCollection("), "分支内必须重拉笔记本列表");
   assert.ok(branch.includes("refreshNotebook("), "分支内必须重拉并写回 currentNotebook");
   assert.ok(branch.includes("refreshCheckup("), "分支内必须刷新体检");
+
+  const checkupBranches = [];
+  const visit = (node) => {
+    if (ts.isIfStatement(node) && ts.isBinaryExpression(node.expression)
+      && node.expression.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+      && [node.expression.left, node.expression.right].some(
+        (operand) => ts.isIdentifier(operand) && operand.text === "reachedExtracted",
+      )) {
+      checkupBranches.push(printer.printNode(ts.EmitHint.Unspecified, node.thenStatement, hook));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(terminalBranch);
+  assert.equal(checkupBranches.length, 1, "体检必须保留单独的成功终态分支");
+  assert.ok(checkupBranches[0].includes("refreshCheckup("), "成功终态分支必须刷新体检");
 
   // ② 不得用 cancelled 做闸:hasPending 翻 false 会先清理 effect,网络响应后到,
   //    按 cancelled 判就会在「新库首个文档解析完成」时跳过解禁。

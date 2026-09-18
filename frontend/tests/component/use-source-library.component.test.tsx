@@ -312,9 +312,9 @@ test("a slow or failing checkup refresh does not delay terminal poll scheduling"
   expect(effects.reportError).not.toHaveBeenCalled();
 });
 
-test("terminal polling refresh survives the hasPending cleanup but remains owner-bound", async () => {
+test.each(["extracted", "failed"])("terminal polling refresh for %s survives the hasPending cleanup but remains owner-bound", async (terminalStatus) => {
   vi.useFakeTimers();
-  api.getSource.mockResolvedValue(source("pending", "notebook-a", "extracted"));
+  api.getSource.mockResolvedValue(source("pending", "notebook-a", terminalStatus));
   render(<Harness />);
   act(() => {
     value!.commitNotebookSnapshot({
@@ -337,8 +337,13 @@ test("terminal polling refresh survives the hasPending cleanup but remains owner
   expect(api.getSource).toHaveBeenCalledTimes(1);
   expect(effects.refreshCollection).toHaveBeenCalledTimes(1);
   expect(effects.refreshNotebook).toHaveBeenCalledWith("notebook-a", expect.any(Function));
-  expect(effects.refreshCheckup).toHaveBeenCalledWith("notebook-a", expect.any(Function));
-  expect(value!.sources[0]?.parse_status).toBe("extracted");
+  if (terminalStatus === "extracted") {
+    expect(effects.refreshCheckup).toHaveBeenCalledWith("notebook-a", expect.any(Function));
+  } else {
+    expect(effects.refreshCheckup).not.toHaveBeenCalled();
+    expect(effects.setStatusText).toHaveBeenCalledWith("来源处理失败：pending.md");
+  }
+  expect(value!.sources[0]?.parse_status).toBe(terminalStatus);
 });
 
 test("a detail response cannot cross a notebook transition", async () => {

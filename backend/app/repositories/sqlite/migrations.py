@@ -194,7 +194,10 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # entry-point-skipped alongside SubmittedVia's two literals), not a CHECK,
 # the same way wishes.status already is. No table, index, FK or
 # unique-surface change.
-SCHEMA_VERSION = 74
+# v75 adds notebook title ownership and metadata publication generations,
+# paired with PostgreSQL 0055_notebook_metadata.sql. Legacy non-placeholder
+# titles remain manual because their provenance is ambiguous.
+SCHEMA_VERSION = 75
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3916,6 +3919,23 @@ class SqliteMigrator:
                 "retained_user_activity",
                 "submitted_via",
                 "TEXT NOT NULL DEFAULT ''",
+            )
+
+    def _migration_75(self) -> None:
+        """Notebook title ownership and monotonic metadata refresh generations."""
+        with self._connect() as db:
+            # Backfill only once: a future user may deliberately choose a placeholder.
+            columns = {row[1] for row in db.execute("PRAGMA table_info(notebooks)")}
+            if "name_auto" not in columns:
+                self.add_column_if_missing(
+                    db, "notebooks", "name_auto", "INTEGER NOT NULL DEFAULT 0"
+                )
+                db.execute(
+                    "UPDATE notebooks SET name_auto=1 "
+                    "WHERE trim(name) IN ('','未命名笔记本','Untitled notebook')"
+                )
+            self.add_column_if_missing(
+                db, "notebooks", "metadata_generation", "INTEGER NOT NULL DEFAULT 0"
             )
 
     def _reap_stale_derived_generations(self) -> None:

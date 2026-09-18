@@ -69,7 +69,9 @@ from app.services.parser_chain_execution import (
     PARSER_FALLBACK_WARNING_CODE,
     ParserChainExecution,
 )
-from app.services.prompts import NOTEBOOK_META_SCHEMA_HINT, notebook_meta_prompt
+from app.services.notebook_metadata import (
+    MetadataRefreshCoordinator, fallback_metadata, synthesize_metadata,
+)
 from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
 from app.services.source_element_enrichment import enrich_source_elements
@@ -302,6 +304,7 @@ class SourceIngestionService:
         self.notebook_meta_row = notebook_meta_row
         self.notebook_meta_sources = notebook_meta_sources
         self.apply_notebook_meta = apply_notebook_meta
+        self._metadata_refresh = MetadataRefreshCoordinator()
         self.maybe_enqueue_scale_fold = maybe_enqueue_scale_fold
         self.invalidate_knowledge_counts = invalidate_knowledge_counts
         self.invalidate_copy_stats = invalidate_copy_stats
@@ -875,6 +878,7 @@ class SourceIngestionService:
             # incoming_doc_type 已 normalize,直接喂 predicate。幂等:无元数据行则 no-op。
             if not paper_meta_doc_type_eligible(incoming_doc_type):
                 self.sources.clear_paper_meta(source_id)
+            self._try_augment_notebook_metadata(hooks, summary)
 
         if summary.parse_status == "failed":
             # 失败源重试：解析产物本来就不可信（失败），重跑整条流水线。
@@ -1465,6 +1469,12 @@ class SourceIngestionService:
         ):
             hooks.augment_notebook_metadata(source.notebook_id, source.id)
 
+    def _try_augment_notebook_metadata(self, hooks: SourcePipelineHooks, source) -> None:
+        try:
+            self._augment_notebook_metadata_scoped(hooks, source)
+        except Exception:
+            self.event_log.logger.warning("notebook metadata refresh unavailable")
+
     def process_source(
         self, source_id: str, hooks: SourcePipelineHooks
     ) -> SourceSummary:
@@ -1786,20 +1796,13 @@ class SourceIngestionService:
                 for message in (fallback_hint, empty_hint, chunk_fallback_hint)
                 if message
             )
-            # Auto-fill notebook name/description from sources (only while name is a
-            # default placeholder / purpose is still auto). Persist BEFORE the
+            # Refresh independently automatic name/description. Persist BEFORE the
             # terminal 'extracted' mark so the frontend's extracted-triggered
             # refetch shows the fresh name/description live. It reads source
-            # metadata (title/summary/doc_type), never KG objects, and this source
-            # is counted via pending_source_id whether it is 'parsed' or
-            # 'extracting' — so running it before extraction gives the same input.
+            # metadata (title/summary/doc_type), never KG objects. Every visible
+            # source contributes; sources still parsing contribute their titles.
             # Best-effort: never fail the pipeline.
-            try:
-                self._augment_notebook_metadata_scoped(hooks, source)
-            except Exception:
-                self.event_log.logger.exception(
-                    "notebook meta augmentation failed for %s", source_id
-                )
+            self._try_augment_notebook_metadata(hooks, source)
 
             # parse -> extract hand-off: flip 'parsed' -> 'extracting'. Emitted before
             # the background embed thread starts, so the event order stays
@@ -1884,6 +1887,7 @@ class SourceIngestionService:
         except Exception as exc:
             stage("pipeline", "error", pipeline_started, error=f"{type(exc).__name__}: {exc}")
             self.event_log.logger.exception("process_source failed for %s", source_id)
+            self._try_augment_notebook_metadata(hooks, source)
             self.set_source_status(
                 source_id,
                 "failed",
@@ -1963,68 +1967,59 @@ class SourceIngestionService:
     def augment_notebook_metadata(
         self, notebook_id: str, pending_source_id: str = ""
     ) -> None:
-        """Auto-fill the notebook name (while it is still a default placeholder)
-        and/or description (while purpose_auto=1) from its processed sources.
-        No-op for fields the user has set. `pending_source_id` is the source whose
-        pipeline is finishing (still 'extracting'); it is counted so the FIRST
-        source already produces a name/description."""
+        """Refresh independently automatic fields from every visible source.
+
+        Reserve a generation before coalescing: even a pending request must
+        invalidate older model responses. Manual writes remain authoritative
+        through the store's field-specific flags at publication time.
+        """
         meta = self.notebook_meta_row(notebook_id)
-        if meta is None:
+        if meta is None or not (meta["name_auto"] or meta["purpose_auto"]):
             return
-        cur_name = (meta["name"] or "").strip()
-        need_name = cur_name in self.default_notebook_names
-        need_desc = meta["purpose_auto"]
-        if not (need_name or need_desc):
-            return
+
+        def refresh() -> None:
+            try:
+                self._refresh_notebook_metadata(notebook_id, pending_source_id, meta)
+            except Exception as exc:
+                # Source ingestion/deletion must succeed even if metadata cannot
+                # be refreshed. Do not log source content or exception text.
+                self.event_log.logger.warning(
+                    "notebook metadata refresh failed (%s)", type(exc).__name__
+                )
+
+        self._metadata_refresh.run(notebook_id, meta["generation"], refresh)
+
+    def _refresh_notebook_metadata(
+        self, notebook_id: str, pending_source_id: str, meta: dict
+    ) -> None:
         rows = self.notebook_meta_sources(notebook_id, pending_source_id)
-        if not rows:
-            return
         titles = [r["title"] for r in rows]
         labels = []
+        records = []
         for r in rows:
             profile = PROFILES.get(self.normalize_doc_type(r["doc_type"]))
             label = profile.label if profile else "自动检测"
             if label not in labels:
                 labels.append(label)
+            records.append(f"- {r['title']} [{label}] {r['summary'] or ''}")
 
-        name_val, desc_val = "", ""
+        name_val, desc_val = fallback_metadata(titles, labels)
         llm_client = self.model_clients.chat("notebook_metadata")
-        if llm_client.configured:
-            block = "\n".join(
-                f"- {r['title']} "
-                f"[{(PROFILES.get(self.normalize_doc_type(r['doc_type'])) or get_profile('academic_paper')).label}] "
-                f"{(r['summary'] or '')[:200]}"
-                for r in rows[:20]
-            )
+        if records and llm_client.configured:
             try:
-                raw = llm_client.chat_json(
-                    [{"role": "user", "content": notebook_meta_prompt(block)}],
-                    NOTEBOOK_META_SCHEMA_HINT,
+                name_val, desc_val = synthesize_metadata(
+                    llm_client, records,
+                    batch_chars=self.settings.notebook_metadata_batch_chars,
                 )
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict):
-                    raw_name, raw_desc = parsed.get("name"), parsed.get("description")
-                    name_val = raw_name.strip() if isinstance(raw_name, str) else ""
-                    desc_val = raw_desc.strip() if isinstance(raw_desc, str) else ""
             except Exception:
-                name_val, desc_val = "", ""
+                pass  # A failed batch cannot publish a partial corpus summary.
 
-        # Deterministic fallbacks (LLM off or failed).
-        if need_desc and not desc_val:
-            shown = "、".join(titles[:5]) + ("等" if len(titles) > 5 else "")
-            desc_val = f"本笔记本收录了 {len(titles)} 个来源：{shown}。"
-            if labels:
-                desc_val += f"文档类型涵盖 {'、'.join(labels)}。"
-        if need_name and not name_val:
-            name_val = (titles[0] or "").strip()[:40]
-
-        # Optimistic guard rides guard_name: only overwrite while the name is
-        # still the placeholder we read (no clobber of a concurrent rename).
         self.apply_notebook_meta(
             notebook_id,
             guard_name=meta["name"],
-            name=(name_val[:120] if need_name and name_val else ""),
-            purpose=(desc_val[:1000] if need_desc and desc_val else ""),
+            guard_generation=meta["generation"],
+            name=name_val if meta["name_auto"] else "",
+            purpose=desc_val if meta["purpose_auto"] else "",
         )
 
     def delete_source(self, source_id: str, hooks: SourcePipelineHooks) -> None:
@@ -2106,6 +2101,8 @@ class SourceIngestionService:
             # (outside the existence guard), exactly as the post-commit call
             # was: this change moves the bump's time point, never its count.
             self.kg_mutations.mark_unified_kg_dirty_in_tx(db, source.notebook_id)
+        if source.type not in HIDDEN_SYNTHETIC_SOURCE_TYPES:
+            self._try_augment_notebook_metadata(hooks, source)
         if self.analysis_artifacts is not None:
             try:
                 self.analysis_artifacts.redact_source(
