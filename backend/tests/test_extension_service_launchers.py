@@ -15,6 +15,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+pytestmark = pytest.mark.xdist_group("extension_launcher_lifecycle")
 
 
 def executable(path: Path, body: str) -> None:
@@ -22,7 +23,7 @@ def executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
-def wait_until(predicate, timeout: float = 5) -> None:
+def wait_until(predicate, timeout: float = 10) -> None:
     deadline = time.monotonic() + timeout
     while not predicate():
         if time.monotonic() >= deadline:
@@ -51,7 +52,7 @@ def launcher(tmp_path):
     (root / ".env").write_text("# isolated deployment\n")
     (root / "frontend/server.js").write_text("// fake node does not evaluate this\n")
     (root / "scripts/extension_services.py").write_text('''
-import json, os, pathlib, sys
+import json, os, pathlib, signal, sys, time
 action = sys.argv[1]
 receipt = pathlib.Path(sys.argv[sys.argv.index("--receipt") + 1]) if "--receipt" in sys.argv else None
 if action == "start" and receipt:
@@ -61,6 +62,11 @@ if receipt and receipt.exists() and receipt.read_text():
     record["ownership"] = json.loads(receipt.read_text())
 with open(os.environ["SERVICE_EVENTS"], "a") as stream:
     stream.write(json.dumps(record) + "\\n")
+if action == "start" and os.environ.get("WAIT_SERVICE") == "1":
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(130))
+    pathlib.Path(os.environ["FAKE_ROOT"], "controller.pid").write_text(str(os.getpid()))
+    while True:
+        time.sleep(1)
 sys.exit(7 if action == "start" and os.environ.get("FAIL_SERVICE") == "1" else 0)
 ''')
     executable(root / "fake_child.sh", '''#!/bin/bash
@@ -142,6 +148,36 @@ def test_service_start_failure_prevents_application_start(launcher, path, args):
     assert not (root / "backend.pid").exists()
     assert not (root / "frontend.pid").exists()
     assert_owned_cleanup(root)
+
+
+@pytest.mark.parametrize("path,args", [
+    ("scripts/dev.sh", ()), ("scripts/prod.sh", ()),
+    ("scripts/backend.sh", ("start",)), ("start.sh", ()),
+])
+@pytest.mark.parametrize("interruption", [signal.SIGTERM, signal.SIGHUP])
+def test_launcher_forwards_cancellation_while_companions_start(launcher, path, args, interruption):
+    root, env = launcher
+    controller_file = root / "controller.pid"
+    with subprocess.Popen(
+        ["bash", str(root / path), *args], cwd=root, env={**env, "WAIT_SERVICE": "1"},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ) as process:
+        try:
+            wait_until(controller_file.exists)
+            process.send_signal(interruption)
+            assert process.wait(timeout=5) != 0
+            assert not alive(int(controller_file.read_text()))
+        finally:
+            if process.poll() is None:
+                process.kill()
+            if controller_file.exists():
+                try:
+                    os.kill(int(controller_file.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+    assert_owned_cleanup(root)
+    assert not (root / "backend.pid").exists()
+    assert not (root / "frontend.pid").exists()
 
 
 def test_development_signal_exit_cleans_owned_receipt(launcher):

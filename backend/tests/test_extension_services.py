@@ -323,3 +323,32 @@ def test_cancellation_at_spawn_return_still_rolls_back(directory, tmp_path, monk
     with pytest.raises(KeyboardInterrupt):
         manager.start(directory, [service(tmp_path)], "cancelled", None)
     assert not runtime.running(directory)
+
+
+@pytest.mark.parametrize("killed_member", ["guard", "witness"])
+def test_guard_pair_failure_reaps_real_service_tree_before_releasing_lease(directory, tmp_path, killed_member):
+    parent_heartbeat = tmp_path / "parent-heartbeat"
+    child_heartbeat = tmp_path / "child-heartbeat"
+    heartbeat = "import pathlib,signal,sys,time\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\np=pathlib.Path(sys.argv[1])\nwhile True:\n p.write_text(str(time.monotonic()))\n time.sleep(.02)"
+    parent = "import pathlib,signal,subprocess,sys,time\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\nsubprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[3]])\np=pathlib.Path(sys.argv[2])\nwhile True:\n p.write_text(str(time.monotonic()))\n time.sleep(.02)"
+    item = service(tmp_path, command=[sys.executable, "-c", parent, heartbeat, str(parent_heartbeat), str(child_heartbeat)])
+    item["shutdown_timeout_seconds"] = 0.7
+    manager.start(directory, [item], "guard-failure", None)
+    eventually(lambda: parent_heartbeat.exists() and child_heartbeat.exists())
+    state = runtime.read_json(directory / "state.json")
+    worker_state = directory / (state["run_id"] + "-0.json")
+    worker_lease = worker_state.with_suffix(".lock")
+    target = state["services"]["demo/main"]["pid"] if killed_member == "guard" else runtime.read_json(worker_state)["witness_pid"]
+    # Test-only fault injection into a process created by this test session.
+    os.kill(target, signal.SIGKILL)
+    eventually(lambda: manager.status(directory)["state"] == "stopping")
+    assert runtime.running(directory, worker_lease.name)
+    assert runtime.running(directory)
+    with pytest.raises(runtime.ServiceError, match="configuration_changed"):
+        manager.start(directory, [item], "guard-failure", None)
+    eventually(lambda: not runtime.running(directory))
+    assert manager.status(directory)["state"] == "failed"
+    before = (parent_heartbeat.read_text(), child_heartbeat.read_text())
+    time.sleep(0.15)
+    assert (parent_heartbeat.read_text(), child_heartbeat.read_text()) == before
+    assert manager.start(directory, [service(tmp_path)], "replacement", None)["state"] == "ready"

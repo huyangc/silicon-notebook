@@ -79,6 +79,10 @@ stop/start. The comparison includes the inherited environment except shell
 bookkeeping (`_`, `SHLVL`, `PWD`, `OLDPWD`): npm-added variables or a different
 `PATH` may therefore prevent reusing a session first started directly through CLI.
 Use the same entry/environment consistently, or stop the old session first.
+Reuse rechecks every required service, including external dependencies, without
+blocking another terminal's stop command. A failed recheck leaves the existing
+session under its original ownership. Launchers forward cancellation while waiting
+for companion startup, so interruption does not wait for the full readiness timeout.
 A failed attempt rolls back only its own new processes, never a previously reused
 session or an external service. `stop` runs in reverse dependency order, verifies
 the saved process ownership, and uses graceful termination before forced cleanup.
