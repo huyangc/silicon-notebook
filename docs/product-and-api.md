@@ -16,7 +16,9 @@ workspace title follows automatic updates without replacing an in-progress edit.
 
 Source type corrections refresh automatic fields as well. Source parsing/reparsing refreshes automatic fields after the source summary is
 stored; a failed parse also refreshes, using that source's title without its error
-text. Deletion refreshes after the source row is removed, before returning. The
+text. Failure handling clears any previously stored summary without changing
+the current processing state, refreshes metadata, then publishes terminal failure
+so polling readers observe the final metadata. Deletion refreshes after the source row is removed, before returning. The
 input includes every visible local source's title, document type and available
 summary, in stable creation order; hidden Memory/Knowhow projections and mounted
 reference libraries are excluded. Pending sources contribute titles until their

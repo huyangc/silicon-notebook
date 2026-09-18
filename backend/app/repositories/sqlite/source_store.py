@@ -1368,16 +1368,20 @@ class SourceStore:
     def set_status(
         self,
         source_id: str,
-        status: str,
+        status: "str | None",
         *,
         summary: "str | None" = None,
         error_message: str = "",
     ) -> None:
-        fields = ["status = ?", "parse_status = ?", "error_message = ?", "updated_at = ?"]
-        params: List[object] = [status, status, error_message, self.now()]
+        # None updates metadata without publishing or regressing a lifecycle state.
+        fields = ["updated_at = ?"]
+        params: List[object] = [self.now()]
+        if status is not None:
+            fields.extend(("status = ?", "parse_status = ?", "error_message = ?"))
+            params.extend((status, status, error_message))
         if summary is not None:
-            fields.insert(2, "summary = ?")
-            params.insert(2, summary)
+            fields.append("summary = ?")
+            params.append(summary)
         with self.database.write() as db:
             db.execute(
                 f"UPDATE sources SET {', '.join(fields)} WHERE id = ?",
