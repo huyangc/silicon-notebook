@@ -420,7 +420,9 @@ def plan_query_intent(
     # "它/这个/that" is the model's to resolve from the question and history.
     # The two wording rules below only stand in when no usable understanding
     # exists (unconfigured, failed or malformed model output), which includes
-    # every ``client=None`` gate on the direct-compatibility path.
+    # every ``client=None`` gate on the direct-compatibility path. A malformed
+    # ambiguity row cannot silence a model that asked: needs_clarification=true
+    # with no usable row still gets the generic required row below.
     if not understanding_succeeded:
         normalized_candidate = as_text(data.get("normalized_question"))
         context_for_referent = f"{question}\n{history}".casefold()
