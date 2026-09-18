@@ -107,9 +107,10 @@ def _has_unresolved_reference(text: str) -> bool:
 def _understanding_response_is_valid(data: object) -> bool:
     """Require the fields that let the model alone decide whether to ask.
 
-    Every ambiguity row must carry a question: a row the parser would drop is
-    malformed output, and it must fall back to the wording rules instead of
-    silently clearing the request.
+    Every ambiguity row must carry a question and the list must fit the
+    contract's row ceiling: a row the parser would drop is malformed output,
+    and it must fall back to the wording rules instead of silently clearing
+    the request.
     """
     if not isinstance(data, dict):
         return False
@@ -123,6 +124,7 @@ def _understanding_response_is_valid(data: object) -> bool:
         and isinstance(data.get("completeness_required"), bool)
         and isinstance(data.get("mandatory_topics"), list)
         and isinstance(ambiguities, list)
+        and len(ambiguities) <= AMBIGUITY_ROWS_MAX
         and all(
             isinstance(row, dict) and bool(as_text(row.get("question")))
             for row in ambiguities
@@ -471,14 +473,24 @@ def plan_query_intent(
         # important row instead: the server's own finding is inserted first and
         # must survive.
         del ambiguities[AMBIGUITY_ROWS_MAX:]
-    if data.get("needs_clarification") is True and not ambiguities:
-        ambiguities.append({
-            "id": "ambiguity-1",
+    # The model's explicit "ask" verdict stands even when every row it gave is
+    # optional; with the wording rules no longer overriding a valid
+    # understanding, nothing else would pause such a request.
+    if data.get("needs_clarification") is True and not any(
+        row["required"] for row in ambiguities
+    ):
+        taken = {row["id"] for row in ambiguities}
+        index = 1
+        while f"ambiguity-{index}" in taken:
+            index += 1
+        ambiguities.insert(0, {
+            "id": f"ambiguity-{index}",
             "question": "为了准确检索，还需要补充哪项会改变问题方向的关键信息？",
             "reason": "问题理解模型判断当前请求仍存在会改变检索主题的歧义。",
             "required": True,
             "options": [],
         })
+        del ambiguities[AMBIGUITY_ROWS_MAX:]
 
     try:
         confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))

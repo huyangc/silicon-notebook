@@ -490,6 +490,44 @@ def test_ambiguity_row_without_question_is_malformed_and_falls_back(needs):
     assert [row["id"] for row in contract["ambiguities"]] == ["ambiguity-input"]
 
 
+def test_ambiguity_list_beyond_the_ceiling_is_malformed():
+    rows = [{"question": f"第 {index} 点？", "required": False} for index in range(9)]
+    status: dict[str, bool] = {}
+
+    contract = plan_query_intent(
+        _ValidUnderstandingClient("它的锁定时间是多少？", [], rows, needs=False),
+        "它的锁定时间是多少？",
+        status=status,
+    )
+
+    assert status["understanding_succeeded"] is False
+    assert contract["ambiguities"][0]["id"] == "ambiguity-input"
+    assert len(contract["ambiguities"]) == 8
+
+
+@pytest.mark.parametrize("optional_rows", [1, 8])
+def test_model_ask_verdict_stands_when_every_row_is_optional(optional_rows):
+    rows = [
+        {"question": f"要不要按第 {index} 种方式分组？", "required": False}
+        for index in range(optional_rows)
+    ]
+    status: dict[str, bool] = {}
+
+    contract = plan_query_intent(
+        _ValidUnderstandingClient("比较 PLL A 与 PLL B", ["PLL A"], rows, needs=True),
+        "比较 PLL A 与 PLL B",
+        status=status,
+    )
+
+    assert status["understanding_succeeded"] is True
+    assert contract["needs_clarification"] is True
+    first = contract["ambiguities"][0]
+    assert first["required"] is True
+    ids = [row["id"] for row in contract["ambiguities"]]
+    assert len(ids) == len(set(ids)) == min(optional_rows + 1, 8)
+    assert QueryIntentContract(**contract).needs_clarification is True
+
+
 def test_confirmed_answers_are_frozen_into_authoritative_research_question():
     seed = plan_query_intent(None, "帮我分析一下这个问题")
     seed["assumptions"] = ["环路已正常上电"]
@@ -879,7 +917,10 @@ def test_confirmation_keeps_a_model_chosen_scope_unless_wording_overrides_it():
                 "mandatory_topics": [],
                 "ambiguities": [{"id": "ambiguity-topic", "question": "关注哪个主题？",
                                  "required": False, "options": []}],
-                "needs_clarification": True,
+                # Optional-only rows: a consistent model reports False here
+                # (an explicit True now always asks, see
+                # test_model_ask_verdict_stands_when_every_row_is_optional).
+                "needs_clarification": False,
             })
 
     seed = plan_query_intent(_CompleteWithClarification(), "当前笔记本有哪几篇文章")
