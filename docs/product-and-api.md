@@ -2221,6 +2221,8 @@ The same line also reaches the model that writes the final answer, as a short se
 
 The response's optional `completeness_notice` carries this server-written text for the Ask panel to render outside the model's Markdown, so an unclosed code fence cannot absorb it. Copying the answer still includes the notice. Responses without a notice omit the field.
 
+The public conversation projection carries the same notice when present and renders it outside the shared answer Markdown too; its `answer_md` remains the stored answer text for reference selection and older clients.
+
 Set `REASONING_ENUM_TOOLS_ENABLED=false` to disable the whole family entirely: no map is built, neither action nor the sources parameter is offered, the no-knowledge-graph early return applies again, and reasoning Ask returns to its pre-tool behavior at zero extra query cost.
 
 ### Notebook understanding blocks

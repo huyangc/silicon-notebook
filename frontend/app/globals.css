@@ -4345,7 +4345,8 @@ button.chat-session-card {
   min-width: 0;
 }
 
-.answer-completeness-notice {
+.answer-completeness-notice,
+.answer-markdown p.answer-completeness-notice {
   margin: 0;
   padding-left: 10px;
   border-left: 3px solid #d7a547;

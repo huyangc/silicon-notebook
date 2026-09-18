@@ -427,9 +427,11 @@ def public_turn(
     # truncation can still be disclosed.
     answer_md, selected, total = _turn_body_and_references(payload)
     visible = [public_reference(key, reference) for key, reference in selected]
+    notice = payload.get("completeness_notice")
     return {
         "question": _question_text(row.get("question")),
         "answer_md": answer_md,
+        **({"completeness_notice": notice} if isinstance(notice, str) and notice else {}),
         "asked_at": _text(payload.get("asked_at"), 64),
         "answered_at": _text(payload.get("answered_at"), 64),
         # Pessimistic default matches AskResponse.evidence_level for legacy

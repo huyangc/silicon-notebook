@@ -195,6 +195,15 @@ def test_answer_md_prefers_answer_then_conclusion():
         "answer_md"] == "只有结论"
 
 
+def test_completeness_notice_crosses_public_boundary_only_when_present():
+    notice = "本次回答未验证完整性，不能视为全部结果。"
+    turn = public_turn(_turn("q", {
+        "answer": f"正文\n\n> {notice}", "completeness_notice": notice,
+    }))
+    assert turn["completeness_notice"] == notice
+    assert "completeness_notice" not in public_turn(_turn("q", {"answer": "正文"}))
+
+
 # ---- 承重 ①:无 id 跨界 -------------------------------------------------
 
 

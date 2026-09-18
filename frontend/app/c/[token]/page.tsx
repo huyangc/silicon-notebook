@@ -22,6 +22,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 
 import { remarkCitations } from "../../answer-citations";
+import { answerBodyWithoutCompletenessNotice } from "../../answer-completeness";
 import { remarkAnswerInference } from "../../answer-inference";
 import { normalizeInferenceListMarkers } from "../../inference-list-markers";
 import { remarkGfmPlugin } from "../../markdown-gfm";
@@ -379,9 +380,11 @@ function PublicTurnView({
       urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
       components={PUBLIC_MARKDOWN_COMPONENTS}
     >
-      {normalizeInferenceListMarkers(normalizeMathMarkdown(turn.answer_md))}
+      {normalizeInferenceListMarkers(normalizeMathMarkdown(
+        answerBodyWithoutCompletenessNotice(turn.answer_md, turn.completeness_notice),
+      ))}
     </ReactMarkdown>
-  ), [turn.answer_md, markdownCitationRefs, imageIdsByCitationKey, citationImageOrder]);
+  ), [turn.answer_md, turn.completeness_notice, markdownCitationRefs, imageIdsByCitationKey, citationImageOrder]);
 
   const evidenceLabel = EVIDENCE_LABELS[turn.evidence_level];
 
@@ -415,6 +418,9 @@ function PublicTurnView({
         }}>
           {markdownTree}
         </PublicTurnRenderContext.Provider>
+        {turn.completeness_notice && (
+          <p className="answer-completeness-notice">{turn.completeness_notice}</p>
+        )}
       </article>
 
       {/* Compatibility for snapshots produced before reference_keys existed:

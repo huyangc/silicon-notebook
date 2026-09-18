@@ -3048,10 +3048,12 @@ class AskService:
         作为 final 事件替换掉在途 turn,不带轨迹就等于把用户刚看着走过的几步
         当场抹掉,历史里也留不下。"""
         msg = "系统未配置当前问答所需的模型服务，请联系维护人员"
+        notice = "本次请求未完成，不能视为全部结果。" if completeness_unavailable else ""
         if completeness_unavailable:
-            msg += "\n\n本次请求未完成，不能视为全部结果。"
+            msg += f"\n\n{notice}"
         response = AskResponse(
             answer_id="", conclusion=msg, conversation_id=conversation_id,
+            completeness_notice=notice,
             retrieval_query=retrieval_query or question, llm_mode="deterministic",
             intent=intent, retrieval_effort=retrieval_effort,
             reasoning_trace=reasoning_trace or None)
@@ -4427,8 +4429,8 @@ class AskService:
         no_usable_kg = not memory_hits and not kg_in_scope_for(
             self.retrieval, notebook_id)
         if no_usable_kg and not self._no_kg_scope_admits_run(notebook_id):
-            coverage_prefix = ""
-            coverage_answer = ""
+            coverage_prefix, coverage_answer = "", ""
+            notice = "本次请求未完成，不能视为全部结果。" if completeness_unavailable else ""
             if structured_batch is not None:
                 from app.services.structured_retrieval import render_structured_answer
                 coverage_prefix, coverage_answer = render_structured_answer(
@@ -4443,10 +4445,10 @@ class AskService:
                     (f"{coverage_prefix}\n\n" if coverage_prefix else "")
                     + "当前笔记本没有可检索的来源；请先添加来源，或挂载/整理一个"
                     "已建知识图谱的参考库。"
-                    + ("\n\n本次请求未完成，不能视为全部结果。"
-                       if completeness_unavailable else "")
+                    + (f"\n\n{notice}" if notice else "")
                 ),
                 answer=coverage_answer,
+                completeness_notice=notice,
                 grounded=bool(structured_batch and structured_batch.complete),
                 evidence_level=(
                     "grounded"

@@ -54,6 +54,7 @@ export type PublicImageT = {
 export type PublicTurnT = {
   question: string;
   answer_md: string;
+  completeness_notice?: string;
   asked_at: string;
   answered_at: string;
   evidence_level: string;
