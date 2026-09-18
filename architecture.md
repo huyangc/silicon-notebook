@@ -2,7 +2,7 @@
 
 更新日期：2026-08-22
 
-本文记录当前已经由代码与绿色回归测试固定的运行时边界。部署与环境变量全集以 `docs/deployment-and-configuration.md` / `_zh.md` 和 `.env.example` 为准，产品操作说明以 `docs/product-and-api.md` / `_zh.md` 为准；协作约束由 `AGENTS.md` 路由到对应权威文档。架构整改采用 contract-first strangler，不用文档中的目标结构反向描述尚未发生的迁移。
+本文记录当前已经由代码与绿色回归测试固定的运行时边界。部署配置说明以 `docs/deployment-and-configuration.md` / `_zh.md` 为准，默认值与校验由 `backend/app/core/config.py` 拥有；`.env.example` 只提供常用部署模板。产品操作说明以 `docs/product-and-api.md` / `_zh.md` 为准；协作约束由 `AGENTS.md` 路由到对应权威文档。架构整改采用 contract-first strangler，不用文档中的目标结构反向描述尚未发生的迁移。
 
 ## 1. 真实行为与验证
 
@@ -160,7 +160,7 @@ notebook 内页采用来源栏 + 主区域的两列 workspace，主区域提供 
 
 ### 2.5 配置边界
 
-系统模型配置由部署者统一管理，用户侧没有保存、编辑或测试草稿配置的能力。`.env.example` 是普通运行参数和密钥槽位真源，`model-services.example.toml` 是服务/绑定/容量模板；MinerU 单独按解析模式选择远端服务、隔离子进程或 PyMuPDF4LLM 回退：
+系统模型配置由部署者统一管理，用户侧没有保存、编辑或测试草稿配置的能力。`.env.example` 提供常用运行参数和密钥槽位模板，高级覆盖值按部署文档配置，未显式设置时沿用 `Settings` 默认值；`model-services.example.toml` 是服务/绑定/容量模板。MinerU 单独按解析模式选择远端服务、隔离子进程或 PyMuPDF4LLM 回退：
 
 - 数据与认证：`DATABASE_URL`、`SILICON_NOTEBOOK_STORAGE_DIR`、`SILICON_NOTEBOOK_ADMIN_PASSWORD`、`SILICON_NOTEBOOK_AUTH_OPTIONAL`。
 - 模型服务：`MODEL_SERVICES_CONFIG` 指向部署 TOML；`[services]` 声明服务种类、协议、URL、模型、`api_key_env` 和唯一容量参数 `max_concurrency`，`[bindings]` 把稳定 workload 映射到同种类服务。密钥只从 `.env` 中被 `api_key_env` 引用的变量读取；空路径是显式离线模式，非空但无效则启动失败。

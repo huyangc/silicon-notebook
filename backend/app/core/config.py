@@ -79,6 +79,12 @@ class _InvalidDatabaseUrl(str):
 
 
 class Settings(BaseSettings):
+    """Runtime defaults and validation for common and advanced overrides.
+
+    The curated .env.example intentionally exposes only common deployment
+    choices; advanced settings are documented in the deployment reference.
+    """
+
     model_config = SettingsConfigDict(
         env_file=_ENV_FILE,
         case_sensitive=False,
@@ -677,10 +683,11 @@ class Settings(BaseSettings):
     kg_relation_completion_batch_chars: int = Field(
         48_000, ge=512, validation_alias="KG_RELATION_COMPLETION_BATCH_CHARS"
     )
-    # embedding：每条截断长度、每条 API 批大小、落库分块大小。
+    # embedding：每条截断长度、每条 API 批大小、提交批次预算。
     embed_truncate_chars: int = Field(2000, validation_alias="EMBED_TRUNCATE_CHARS")
     embed_batch_size: int = Field(10, validation_alias="EMBED_BATCH_SIZE")
     embed_commit_batches: int = Field(50, validation_alias="EMBED_COMMIT_BATCHES")
+    # Accepted for compatibility only; no production consumer remains.
     embed_persist_chunk: int = Field(200, validation_alias="EMBED_PERSIST_CHUNK")
     # embedding 限流（429）退避重试：批量摄取易瞬时超 QPS，退避到窗口恢复而非丢批。
     embed_rate_limit_retries: int = Field(5, validation_alias="EMBED_RATE_LIMIT_RETRIES")
@@ -948,12 +955,13 @@ class Settings(BaseSettings):
     # 全图跑,改对「度数 top-K 诱导子图」算(见 sqlite_repository._edge_centrality_map)。
     edge_centrality_max_nodes: int = Field(20000, validation_alias="EDGE_CENTRALITY_MAX_NODES")
     answer_context_budget_chars: int = Field(6000, validation_alias="ANSWER_CONTEXT_BUDGET_CHARS")
+    # Accepted for compatibility only; context packing no longer reads it.
     answer_context_min_items: int = Field(3, validation_alias="ANSWER_CONTEXT_MIN_ITEMS")
     # grounded 三档阈值（作用于融合相关度 .relevance ∈[0,1]）。
     # 注意：现有 grounded 测试要求 tau_high ≤ 0.4（纯关键词命中融合分=0.4）。
     evidence_tau_low: float = Field(0.18, validation_alias="EVIDENCE_TAU_LOW")
     evidence_tau_high: float = Field(0.35, validation_alias="EVIDENCE_TAU_HIGH")
-    # 流程类问题 top-N 至少保底召回的 procedure 条数。
+    # Accepted for compatibility only; retrieval no longer reads this quota.
     proc_min: int = Field(2, validation_alias="PROC_MIN")
     # 推理模式(mode=reasoning)护栏: Reflect 循环总步数 circuit breaker。
     reasoning_max_steps: int = Field(50, validation_alias="REASONING_MAX_STEPS")
@@ -1176,7 +1184,7 @@ class Settings(BaseSettings):
     # 只会让一次误配静默退回 8192。
     reasoning_max_tokens: int = Field(
         16384, ge=1, validation_alias="REASONING_MAX_TOKENS")
-    # Global 问答:map-reduce 时纳入的社区报告上限(按 size 取前 N)。
+    # Accepted for compatibility only; retired global mode aliases chunk.
     global_max_communities: int = Field(20, validation_alias="GLOBAL_MAX_COMMUNITIES")
     # 问题感知证据精炼: 默认开启(隔离 eval: 正确性 1.57→1.73 且伪引用全层→0%;
     # 代价每 ask 多 1 次 LLM)。答题前对已装配证据按问题抽"相关要点"前置,聚焦答题。设 false 关。
