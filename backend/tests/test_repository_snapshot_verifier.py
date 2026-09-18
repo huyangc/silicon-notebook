@@ -48,12 +48,18 @@ FIXTURE_SECRETS = (
 )
 
 
+def _rollback_v75(db: sqlite3.Connection) -> None:
+    db.execute("ALTER TABLE notebooks DROP COLUMN name_auto")
+    db.execute("ALTER TABLE notebooks DROP COLUMN metadata_generation")
+
+
 def _rollback_v74(db: sqlite3.Connection) -> None:
     """Undo _migration_74 (submitted_via on ask_jobs, reports and
     retained_user_activity, parity with PostgreSQL
     0054_question_submitted_via.sql) before forging any older deployed
     schema: three pure column additions, no index to drop -- same shape as
     _rollback_v73."""
+    _rollback_v75(db)
     db.execute("ALTER TABLE ask_jobs DROP COLUMN submitted_via")
     db.execute("ALTER TABLE reports DROP COLUMN submitted_via")
     db.execute("ALTER TABLE retained_user_activity DROP COLUMN submitted_via")
@@ -1891,6 +1897,23 @@ def test_deployed_v50_database_verifies_agent_profile_tables(tmp_path):
     assert result.changed_tables == []
 
 
+def test_deployed_v74_database_verifies_metadata_ownership(tmp_path):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as rollback:
+        _rollback_v75(rollback)
+        rollback.execute("UPDATE notebooks SET name='未命名笔记本'")
+        rollback.execute("PRAGMA user_version = 74")
+    result = module.verify_snapshot(database, storage)
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 74
+    assert result.final_user_version == module.SCHEMA_VERSION == 75
+
+
 def test_deployed_v73_database_verifies_question_submitted_via(tmp_path):
     """A deployed v73 database is missing exactly _migration_74's addition:
     ``submitted_via`` on ask_jobs, reports and retained_user_activity (NOT
@@ -1912,7 +1935,7 @@ def test_deployed_v73_database_verifies_question_submitted_via(tmp_path):
 
     assert result.ok, result.discrepancies
     assert result.source_user_version == 73
-    assert result.final_user_version == module.SCHEMA_VERSION == 74
+    assert result.final_user_version == module.SCHEMA_VERSION == 75
 
 
 def test_deployed_v72_database_verifies_wish_status(tmp_path):

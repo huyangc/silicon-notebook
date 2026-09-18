@@ -233,7 +233,7 @@ class NotebookStore:
             connection.execute(
                 "INSERT INTO notebooks"
                 "(id,name,purpose,primary_domain,status,created_by,created_at,updated_at,"
-                "purpose_auto) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "purpose_auto,name_auto) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     notebook_id,
                     payload.name,
@@ -244,6 +244,7 @@ class NotebookStore:
                     now,
                     now,
                     0 if purpose else 1,
+                    int(payload.name.strip() in ("", "未命名笔记本", "Untitled notebook")),
                 ),
             )
             # Empty is a complete provenance index.  Online KG mutations keep
@@ -276,6 +277,8 @@ class NotebookStore:
         if payload.name is not None:
             updates.append("name=%s")
             values.append(payload.name.strip() or "Untitled notebook")
+            updates.append("name_auto=%s")
+            values.append(0)
         if payload.purpose is not None:
             updates.extend(("purpose=%s", "purpose_auto=%s"))
             values.extend((payload.purpose.strip(), 0))
@@ -590,11 +593,16 @@ class NotebookStore:
     @staticmethod
     def meta_row(connection, notebook_id: str) -> dict | None:
         row = connection.execute(
-            "SELECT name,purpose_auto FROM notebooks WHERE id=%s", (notebook_id,)
+            "SELECT name,name_auto,purpose_auto,metadata_generation "
+            "FROM notebooks WHERE id=%s", (notebook_id,)
         ).fetchone()
         if row is None:
             return None
-        return {"name": row["name"], "purpose_auto": row["purpose_auto"] == 1}
+        return {
+            "name": row["name"], "name_auto": row["name_auto"] == 1,
+            "purpose_auto": row["purpose_auto"] == 1,
+            "generation": row["metadata_generation"],
+        }
 
     def apply_meta(
         self,
@@ -602,19 +610,21 @@ class NotebookStore:
         notebook_id: str,
         *,
         guard_name: str,
+        guard_generation: int,
         name: str,
         purpose: str,
     ) -> None:
         if name:
             connection.execute(
-                "UPDATE notebooks SET name=%s,updated_at=%s WHERE id=%s AND name=%s",
-                (name, self.now(), notebook_id, guard_name),
+                "UPDATE notebooks SET name=%s,updated_at=%s WHERE id=%s AND name=%s "
+                "AND name_auto=1 AND metadata_generation=%s",
+                (name, self.now(), notebook_id, guard_name, guard_generation),
             )
         if purpose:
             connection.execute(
                 "UPDATE notebooks SET purpose=%s,updated_at=%s "
-                "WHERE id=%s AND purpose_auto=1",
-                (purpose, self.now(), notebook_id),
+                "WHERE id=%s AND purpose_auto=1 AND metadata_generation=%s",
+                (purpose, self.now(), notebook_id, guard_generation),
             )
 
     @staticmethod
@@ -625,17 +635,23 @@ class NotebookStore:
         return str(row["tier"]) if row and row["tier"] else ""
 
     def meta_for_notebook(self, notebook_id: str) -> dict | None:
-        with self.database.connect() as connection:
+        with self.database.write() as connection:
+            connection.execute(
+                "UPDATE notebooks SET metadata_generation=metadata_generation+1 "
+                "WHERE id=%s", (notebook_id,),
+            )
             return self.meta_row(connection, notebook_id)
 
     def apply_meta_for_notebook(
-        self, notebook_id: str, *, guard_name: str, name: str, purpose: str
+        self, notebook_id: str, *, guard_name: str, guard_generation: int,
+        name: str, purpose: str
     ) -> None:
         with self.database.write() as connection:
             self.apply_meta(
                 connection,
                 notebook_id,
                 guard_name=guard_name,
+                guard_generation=guard_generation,
                 name=name,
                 purpose=purpose,
             )

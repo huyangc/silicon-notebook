@@ -57,8 +57,8 @@ at `SCHEMA_VERSION` still runs no migrations. The only supported way back is
 to restore the pre-upgrade backup, or redeploy a build whose `SCHEMA_VERSION`
 is at least the database's — there is no reverse migration.
 
-The current schema version is 74. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v74 and remains readable. Those migrations
+The current schema version is 75. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v75 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -710,7 +710,17 @@ two aliases, and a static test requires each HTTP/MCP entry point to pass a
 literal value. No table,
 index or foreign key is added; the administrator question overview's equality
 filter runs over the same three-way `UNION ALL` scan it already performs. The
-current pair is SQLite 74 / PostgreSQL 54 / epoch 1.
+pair for that batch is SQLite 74 / PostgreSQL 54 / epoch 1.
+
+Notebook metadata refresh (SQLite v75 / PostgreSQL 0055) adds `notebooks.name_auto`
+and `metadata_generation`. Title and description ownership are independent:
+an explicit edit clears that field's auto flag, including a placeholder title
+or an empty description. Metadata refresh reserves an increasing generation in
+a short transaction and publishes only while its generation is current and the
+target field is still automatic. Legacy placeholder titles become automatic;
+all other old titles remain manual because their authorship cannot be recovered.
+Existing `purpose_auto` values are preserved. The current pair is SQLite 75 /
+PostgreSQL 55 / epoch 1.
 
 Run it only while application/background writers are stopped:
 

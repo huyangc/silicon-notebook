@@ -4,6 +4,49 @@
 
 This document preserves the detailed product behavior and HTTP/MCP contracts. The root README is the short project entry point; runtime architecture lives in [architecture.md](../architecture.md), while [AGENTS.md](../AGENTS.md) only routes coding agents to the owning references.
 
+## Notebook titles and descriptions
+
+Notebook `name` and `purpose` have independent automatic/manual ownership. A
+new notebook with a placeholder name and empty description starts with both
+fields automatic. Supplying a custom name or nonempty description at creation
+makes that field manual. An explicit PATCH of either field makes only that field
+manual, including clearing a description or setting a placeholder name; automatic
+refresh never overwrites it. The settings form omits untouched fields, and the
+workspace title follows automatic updates without replacing an in-progress edit.
+
+Source type corrections refresh automatic fields as well. Source parsing/reparsing refreshes automatic fields after the source summary is
+stored; a failed parse also refreshes, using that source's title without its error
+text. Deletion refreshes after the source row is removed, before returning. The
+input includes every visible local source's title, document type and available
+summary, in stable creation order; hidden Memory/Knowhow projections and mounted
+reference libraries are excluded. Pending sources contribute titles until their
+summaries become available. This is synthesis of source metadata, not full-text
+reading: source-summary generation retains its existing document projection.
+
+All source metadata participates, including summaries beyond the old prefix and
+sources beyond the old first-source window. Large inputs use bounded batches and
+recursive summary merging; no source-count cutoff applies. Concurrent requests
+within one runtime coalesce, and participating ingestion/deletion calls wait for
+the final refresh before their completion response. A database generation plus
+field ownership guards rejects superseded responses and concurrent manual edits.
+Unavailable/failed model calls use a deterministic count/type description; a
+multi-source fallback title describes the collection instead of its first source.
+Deleting the last source resets only automatic fields to the empty-library text.
+
+Metadata generation rails (do not apply to user-authored fields):
+
+| Rail | Value |
+| --- | --- |
+| `NOTEBOOK_METADATA_BATCH_CHARS` | default 12000, range 4096–100000; source/partial-summary characters per model input batch, excluding the fixed prompt |
+| `NOTEBOOK_AUTO_NAME_MAX_CHARS` | 120; longer model output rejects the pass instead of silently truncating |
+| `NOTEBOOK_AUTO_DESCRIPTION_MAX_CHARS` | 1000; longer model output rejects the pass instead of silently truncating |
+
+SQLite v75 / PostgreSQL 0055 conservatively preserves all legacy non-placeholder
+titles because older databases did not record title ownership; only legacy
+placeholder titles become automatic. Existing description ownership is retained.
+There is no inferred reclassification or startup model backfill. Copies preserve
+field ownership, except an explicitly supplied copy name becomes manual.
+
 ## Current Scope
 
 This repository targets a local real-team beta loop built around a KG-native pipeline:

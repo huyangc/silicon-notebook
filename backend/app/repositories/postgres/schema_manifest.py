@@ -313,6 +313,6 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # (app.models.ask.StoredSubmittedVia), not a CHECK, like ``wishes.status``.
 # No table, index, FK or unique-surface change.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=74,
-    postgres_version=54,
+    sqlite_version=75,
+    postgres_version=55,
 )

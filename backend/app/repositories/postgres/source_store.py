@@ -1689,11 +1689,11 @@ class SourceStore:
         connection, notebook_id: str, pending_source_id: str = ""
     ) -> list[dict]:
         rows = connection.execute(
-            "SELECT title,doc_type,summary FROM sources WHERE notebook_id=%s "
+            "SELECT title,doc_type,CASE WHEN status IN ('parsed','extracting','extracted') "
+            "THEN summary ELSE '' END AS summary FROM sources WHERE notebook_id=%s "
             "AND source_type NOT IN ('memory','knowhow') "
-            "AND (status='extracted' OR id=%s) "
             "ORDER BY created_at,id COLLATE \"C\"",
-            (notebook_id, pending_source_id),
+            (notebook_id,),
         ).fetchall()
         return [
             {"title": row["title"], "doc_type": row["doc_type"], "summary": row["summary"]}

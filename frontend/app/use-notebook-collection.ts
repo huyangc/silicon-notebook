@@ -867,7 +867,15 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     let committedWrite = false;
     let completed = false;
     try {
-      const { indexing_pipeline_id: indexingPipelineId, ...notebookPatch } = patch;
+      const { indexing_pipeline_id: indexingPipelineId, name, purpose, ...settingsPatch } = patch;
+      // Compare with the values displayed when this editor opened. Background
+      // source processing may have refreshed the collection since then; sending
+      // untouched fields would overwrite that result and mark them as manual.
+      const notebookPatch = {
+        ...settingsPatch,
+        ...(name !== current.target.name ? { name } : {}),
+        ...(purpose !== (current.target.purpose ?? "") ? { purpose } : {}),
+      };
       await updateNotebook(current.target.id, notebookPatch);
       committedWrite = true;
       if (!editorOperationMayContinue(owner, operation, current.target.id)) return;

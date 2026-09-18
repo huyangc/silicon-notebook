@@ -981,6 +981,13 @@ NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS  # max TOTAL rows a deep copy would materialise 
 
 **Welcome question suggestions:**
 
+Automatic notebook titles/descriptions also use the `notebook_metadata` workload.
+`NOTEBOOK_METADATA_BATCH_CHARS` controls the per-batch source-metadata input
+budget; larger libraries are merged hierarchically so every source participates.
+It does not change the source-summary model's own input selection. Exact ranges
+and output rails live in [the product reference](./product-and-api.md#notebook-titles-and-descriptions).
+No extra credentials or workload binding is required.
+
 The empty Ask welcome view reuses the `notebook_metadata` workload's configured
 model service. No additional provider credentials are needed. An unavailable
 service or generation failure preserves the existing template questions.

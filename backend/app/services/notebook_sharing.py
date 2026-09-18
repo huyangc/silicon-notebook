@@ -57,6 +57,7 @@ def _reset_copied_notebook_row(
     name: str,
     new_owner_id: str,
     now: str,
+    manual_name: bool = False,
 ) -> None:
     """Rewrite the copied notebooks row's identity/lifecycle/authority columns.
 
@@ -78,6 +79,8 @@ def _reset_copied_notebook_row(
     需要给副本造 unified_kg_state 行（与 chunk_elements 标记语义的既有红线冲突）；
     强制先重建再可写等于让每一次插件库拷贝都先付一轮全库模型钱。
     """
+    if manual_name:
+        notebook_row["name_auto"] = 0
     notebook_row.update(
         id=new_id,
         name=name,
@@ -92,6 +95,7 @@ def _reset_copied_notebook_row(
         indexing_pipeline_version=BUILTIN_INDEXING_PIPELINE_VERSION,
         indexing_pipeline_generation="",
         indexing_pipeline_job_id="",
+        metadata_generation=0,
     )
 
 
@@ -285,7 +289,6 @@ class NotebookCopyService:
         source_notebook = self._catalog.get_notebook(source_notebook_id)
         new_id = self._seams.new_id("nb")
         now = self._seams.now()
-        name = new_name or f"{source_notebook.name} (副本)"
         chunk_size = self._seams.copy_chunk_size()
 
         def remapped_id(old: str) -> str:
@@ -320,9 +323,10 @@ class NotebookCopyService:
             _reset_copied_notebook_row(
                 notebook_row,
                 new_id=new_id,
-                name=name,
+                name=new_name or f"{source_notebook.name} (副本)",
                 new_owner_id=new_owner_id,
                 now=now,
+                manual_name=bool(new_name),
             )
             # 哨兵行必须先**提交**（不只是"已插入"）：下一步的挂载有效性判定跑在
             # store 的另一条连接上，还要 join 目的地这一行取 created_by。

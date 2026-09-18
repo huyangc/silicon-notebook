@@ -793,10 +793,8 @@ class RepositoryFacade:
             notebook_meta_sources=lambda notebook_id, pending_source_id: (
                 self._notebook_meta_sources(notebook_id, pending_source_id)
             ),
-            apply_notebook_meta=lambda notebook_id, guard_name, name, purpose: (
-                self._apply_notebook_meta(
-                    notebook_id, guard_name=guard_name, name=name, purpose=purpose
-                )
+            apply_notebook_meta=lambda notebook_id, **values: (
+                self._apply_notebook_meta(notebook_id, **values)
             ),
             make_persist_image=lambda notebook_id, source_id, created_by: (
                 _make_persist_image(self, notebook_id, source_id, created_by)
@@ -2052,10 +2050,11 @@ class RepositoryFacade:
         return self._runtime.source_store.meta_sources(notebook_id, pending_source_id)
 
     def _apply_notebook_meta(
-        self, notebook_id: str, *, guard_name, name: str, purpose: str
+        self, notebook_id: str, *, guard_name, guard_generation: int, name: str, purpose: str
     ) -> None:
         return self._runtime.notebook_store.apply_meta_for_notebook(
-            notebook_id, guard_name=guard_name, name=name, purpose=purpose
+            notebook_id, guard_name=guard_name, guard_generation=guard_generation,
+            name=name, purpose=purpose
         )
 
     def source_elements(self, source_id: str) -> List[SourceElement]:

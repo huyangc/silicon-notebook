@@ -1944,18 +1944,13 @@ class SourceStore:
     def meta_source_rows(
         db: sqlite3.Connection, notebook_id: str, pending_source_id: str = ""
     ) -> List[dict]:
-        """Title/doc_type/summary rows feeding notebook metadata augmentation
-        (Task 26: moved verbatim from the facade's `_notebook_meta_sources`).
-        Excludes source_type IN ('memory', 'knowhow') so a hidden Memory- or
-        knowhow-projection-derived source never contributes its title or
-        inflates the count baked into the auto-generated notebook
-        name/description."""
+        """All visible source identities, with summaries only for parsed sources."""
         rows = db.execute(
-            "SELECT title, doc_type, summary FROM sources WHERE notebook_id = ? "
+            "SELECT title, doc_type, CASE WHEN status IN ('parsed','extracting','extracted') "
+            "THEN summary ELSE '' END AS summary FROM sources WHERE notebook_id = ? "
             "AND source_type NOT IN ('memory', 'knowhow') "
-            "AND (status = 'extracted' OR id = ?) "
-            "ORDER BY created_at ASC",
-            (notebook_id, pending_source_id),
+            "ORDER BY created_at, id",
+            (notebook_id,),
         ).fetchall()
         return [
             {"title": r["title"], "doc_type": r["doc_type"], "summary": r["summary"]}

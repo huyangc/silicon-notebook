@@ -232,9 +232,7 @@ class NotebookStore:
                 )
 
     def create_row(self, payload: NotebookCreate, created_by: str) -> str:
-        """Minimal creation: only name + description (purpose). When the user
-        leaves the description blank it is flagged auto (purpose_auto=1) and
-        later derived from the first batch of uploaded sources."""
+        """Track title and description ownership independently at creation."""
         notebook_id = self.new_id("nb")
         now = self.now()
         purpose = (payload.purpose or "").strip()
@@ -244,8 +242,8 @@ class NotebookStore:
                 """
                 INSERT INTO notebooks
                 (id, name, purpose, primary_domain, status, created_by, created_at, updated_at,
-                 purpose_auto)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 purpose_auto, name_auto)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     notebook_id,
@@ -257,6 +255,7 @@ class NotebookStore:
                     now,
                     now,
                     purpose_auto,
+                    int(payload.name.strip() in ("", "未命名笔记本", "Untitled notebook")),
                 ),
             )
             # A brand-new notebook has an empty, therefore complete, KG
@@ -292,6 +291,8 @@ class NotebookStore:
         if payload.name is not None:
             updates.append("name = ?")
             values.append(payload.name.strip() or "Untitled notebook")
+            updates.append("name_auto = ?")
+            values.append(0)
         if payload.purpose is not None:
             updates.append("purpose = ?")
             values.append(payload.purpose.strip())
@@ -623,36 +624,36 @@ class NotebookStore:
     # ------------------------------------------------- Task 26 primitives
     @staticmethod
     def meta_row(db: sqlite3.Connection, notebook_id: str) -> "dict | None":
-        """Name + purpose_auto flag for the metadata-augmentation guard
-        (moved verbatim from the facade's `_notebook_meta_row`)."""
+        """Read field ownership and the current metadata generation."""
         row = db.execute(
-            "SELECT name, purpose_auto FROM notebooks WHERE id = ?", (notebook_id,)
+            "SELECT name, name_auto, purpose_auto, metadata_generation "
+            "FROM notebooks WHERE id = ?", (notebook_id,)
         ).fetchone()
         if row is None:
             return None
         return {
             "name": row["name"],
-            "purpose_auto": ("purpose_auto" in row.keys() and row["purpose_auto"] == 1),
+            "name_auto": row["name_auto"] == 1,
+            "purpose_auto": row["purpose_auto"] == 1,
+            "generation": row["metadata_generation"],
         }
 
     def apply_meta(
         self, db: sqlite3.Connection, notebook_id: str, *,
-        guard_name: str, name: str, purpose: str,
+        guard_name: str, guard_generation: int, name: str, purpose: str,
     ) -> None:
-        """Optimistically apply auto-derived notebook metadata: the name only
-        overwrites the placeholder we read (no clobber of a concurrent
-        rename); the purpose only lands while purpose_auto=1. The caller owns
-        the ONE write transaction; the clock rides the compatibility seam."""
+        """Publish only the latest request and only fields still owned by automation."""
         if name:
             db.execute(
-                "UPDATE notebooks SET name = ?, updated_at = ? WHERE id = ? AND name = ?",
-                (name, self.now(), notebook_id, guard_name),
+                "UPDATE notebooks SET name = ?, updated_at = ? WHERE id = ? AND name = ? "
+                "AND name_auto = 1 AND metadata_generation = ?",
+                (name, self.now(), notebook_id, guard_name, guard_generation),
             )
         if purpose:
             db.execute(
                 "UPDATE notebooks SET purpose = ?, updated_at = ? "
-                "WHERE id = ? AND purpose_auto = 1",
-                (purpose, self.now(), notebook_id),
+                "WHERE id = ? AND purpose_auto = 1 AND metadata_generation = ?",
+                (purpose, self.now(), notebook_id, guard_generation),
             )
 
     @staticmethod
@@ -663,15 +664,21 @@ class NotebookStore:
         return str(row["tier"]) if row is not None and row["tier"] else ""
 
     def meta_for_notebook(self, notebook_id: str) -> "dict | None":
-        with self.database.connect() as db:
+        with self.database.write() as db:
+            db.execute(
+                "UPDATE notebooks SET metadata_generation = metadata_generation + 1 "
+                "WHERE id = ?", (notebook_id,),
+            )
             return self.meta_row(db, notebook_id)
 
     def apply_meta_for_notebook(
-        self, notebook_id: str, *, guard_name: str, name: str, purpose: str
+        self, notebook_id: str, *, guard_name: str, guard_generation: int,
+        name: str, purpose: str
     ) -> None:
         with self.database.write() as db:
             self.apply_meta(
-                db, notebook_id, guard_name=guard_name, name=name, purpose=purpose
+                db, notebook_id, guard_name=guard_name, guard_generation=guard_generation,
+                name=name, purpose=purpose
             )
 
     def tier(self, notebook_id: str) -> str:
