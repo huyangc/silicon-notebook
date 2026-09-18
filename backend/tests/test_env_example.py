@@ -39,14 +39,16 @@ def test_env_example_has_the_same_values_in_shell_and_dotenv():
     assert json.loads(result.stdout) == expected
 
 
-def test_env_example_uses_runtime_defaults_except_explicit_model_registry():
+def test_env_example_uses_postgres_deployment_and_explicit_model_registry():
     # No developer .env, ambient service configuration, or network is used.
     with patch.dict(os.environ, {}, clear=True):
         defaults = Settings(_env_file=None)
         example = Settings(_env_file=EXAMPLE)
     assert example.model_services_config == str(ROOT / ".local/model-services.toml")
-    assert example.model_dump(exclude={"model_services_config"}) == (
-        defaults.model_dump(exclude={"model_services_config"})
+    assert example.database_url.startswith("postgresql://")
+    assert defaults.database_url.startswith("sqlite:///")
+    assert example.model_dump(exclude={"model_services_config", "database_url"}) == (
+        defaults.model_dump(exclude={"model_services_config", "database_url"})
     )
 
 

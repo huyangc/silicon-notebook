@@ -4,7 +4,7 @@
 
 `silicon-notebook` is a source-grounded knowledge notebook for semiconductor engineering teams. It turns PDF, Markdown, DOCX, PPTX, CSV, XLSX, and XLS material into searchable source elements, cited answers, structured knowledge, private Memory, knowhow tables, and deep reports.
 
-The project is a local-team beta built with FastAPI and Next.js. SQLite works out of the box without Docker, a GPU, or external model services; PostgreSQL and OpenAI-compatible model or MinerU services are optional.
+The project is a local-team beta built with FastAPI and Next.js. PostgreSQL is the default deployment choice and is used in both the current development and production environments. SQLite remains a supported alternative; OpenAI-compatible model and MinerU services are optional.
 
 ## Highlights
 
@@ -26,6 +26,7 @@ The interface starts in auto mode for upload-and-ask use. Advanced mode exposes 
 - Python 3.13+
 - Node.js 20+ and npm
 - git
+- An accessible PostgreSQL 16 database for the default deployment
 
 ### Install
 
@@ -48,7 +49,7 @@ cp .env.example .env
 mkdir -p .local
 ```
 
-Before starting, choose one model setup:
+Before starting, set `DATABASE_URL` in `.env` to your PostgreSQL database with its actual connection settings. Then choose one model setup:
 
 - For deterministic/offline fallbacks, set `MODEL_SERVICES_CONFIG=` in `.env`.
 - For model-backed features, copy `model-services.example.toml` to `.local/model-services.toml`, configure its services, and fill the referenced secrets in `.env`.
@@ -63,7 +64,7 @@ Open <http://127.0.0.1:3000>. The API listens on <http://127.0.0.1:8000>.
 
 A fresh local database creates `admin` / `admin`. Change it before exposing the service. Non-loopback binding requires a non-default `SILICON_NOTEBOOK_ADMIN_PASSWORD`.
 
-SQLite is the default; set `DATABASE_URL` to a prepared PostgreSQL 16 database when needed. See [Deployment and configuration](./docs/deployment-and-configuration.md) for the complete settings and security guidance.
+Development and production both use PostgreSQL. See [Deployment and configuration](./docs/deployment-and-configuration.md) for database prerequisites, the optional SQLite backend, and security guidance.
 
 ### Production
 
@@ -99,7 +100,7 @@ Browser
   → Next.js frontend
   → FastAPI /api and Streamable HTTP /mcp
   → application services and repository ports
-  → SQLite or PostgreSQL + local source/index/log storage
+  → PostgreSQL (default deployment) or SQLite + local source/index/log storage
 
 Optional services
   → OpenAI-compatible chat / embedding / rerank
@@ -129,7 +130,7 @@ Chinese counterparts are linked from the top of each split document.
 
 ## Current boundaries
 
-- SQLite is the shipped default; PostgreSQL 16 is a supported alternative. Switching databases does not copy or synchronize existing data.
+- PostgreSQL 16 is the default deployment choice for development and production; SQLite remains supported. Switching databases does not copy or synchronize existing data.
 - Highest-fidelity scanned-PDF, formula, and image extraction requires MinerU; local parsers provide deterministic fallbacks.
 - Model-backed answers and knowledge extraction require matching workload bindings; offline mode remains useful for ingestion and deterministic workflows.
 - Graph Ask is opt-in and experimental; the default Ask mode is `chunk`. Generated-question recall is deployment opt-in and defaults to `off`.

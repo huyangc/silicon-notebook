@@ -7,8 +7,9 @@
 ## 部署
 
 silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端——并由 `DATABASE_URL`
-选择唯一 repository。发行默认 SQLite **无需 GPU、无需数据库服务、无需本地模型服务**；
-准备好可访问的服务后，也可直接使用 PostgreSQL 16。LLM、嵌入和 rerank 仍只通过 URL 服务访问；MinerU 则独立支持
+选择唯一 repository。PostgreSQL 16 是默认部署选项，当前开发和生产环境均使用 PostgreSQL；
+部署前准备可访问的数据库，并显式设置 `DATABASE_URL`。SQLite 仍作为无需数据库服务的可选后端受支持。
+两种后端均不要求 GPU 或本地模型服务。LLM、嵌入和 rerank 仍只通过 URL 服务访问；MinerU 则独立支持
 远端 HTTP（`MINERU_MODE=http`）、同机隔离子进程（`MINERU_MODE=cli`）或 PyMuPDF4LLM 回退
 （`MINERU_MODE=off`）。未配置模型服务或 MinerU parser 时，整条管线以确定性回退离线运行。
 
@@ -19,6 +20,7 @@ silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端—�
   重现（见 `backend/app/repositories/sqlite/database.py`）。
 - **Node.js ≥ 20** 与 npm
 - **git**
+- 默认部署需要可访问的 **PostgreSQL 16** 数据库；扩展前置条件见 3.1 节。
 - C/C++ 工具链*仅作兜底*——`numpy`、`rustworkx`、`hnswlib` 在常见平台都有预编译 wheel;
   仅当 pip 不得不从源码编译时,才需装 Xcode Command Line Tools(macOS)或
   `build-essential`(Debian/Ubuntu)。
@@ -237,15 +239,19 @@ migration 或 warmup 失败都 fail closed，不会回落到另一数据库。`S
 不会选择 active backend，单独设置也不会启动同步；只有显式 forward-shadow CLI 会读取它。
 
 ```dotenv
-# 发行默认
-DATABASE_URL=sqlite:///.local/silicon_notebook.db
-
-# 直接使用 PostgreSQL 16
+# 开发和生产的默认部署；替换为实际连接信息
 DATABASE_URL=postgresql://silicon_app:change-me@127.0.0.1:5432/silicon_notebook
+
+# 可选 SQLite 后端；替换上面的 PostgreSQL URL
+# DATABASE_URL=sqlite:///.local/silicon_notebook.db
 
 # DATABASE_URL 仍为 SQLite 时可选的单向影子目标
 # SHADOW_DATABASE_URL=postgresql://silicon_shadow:change-me@127.0.0.1:5432/silicon_notebook_shadow
 ```
+
+默认部署选项与未配置时的代码兜底不同：完全省略 `DATABASE_URL` 时，`Settings` 仍使用
+`sqlite:///.local/silicon_notebook.db`。开发和生产环境显式配置 PostgreSQL；`.env.example`
+也采用这一部署选项。
 
 PostgreSQL 必须使用 UTF-8，并把 `pg_trgm` 安装在 `public`。数据库 owner 可让 migration
 0001 创建，也可由 DBA 预装；同名扩展位于其他 schema 时会被拒绝。自 schema v42 起，
@@ -609,7 +615,7 @@ DB_WRITE_LOCK_STATS         # 开启进程级 SQLite 写锁 wait/hold 观测（�
 DB_WRITE_LOCK_WARN_MS       # wait/hold 超过此毫秒数即记一条限流的 db_write_lock_slow 事件（默认 200）
 DB_WRITE_LOCK_FLUSH_SECONDS # 周期性 db_write_lock_stats 快照的发出间隔（秒），也是 db_write_lock_slow 按调用点的限流窗口（默认 60）
 SQLITE_CACHE_SIZE_KB    # 每连接 SQLite 页缓存(KB,负值=KB)。连接按线程复用,总内存≈线程数×|值|（默认 -16384）
-DATABASE_URL            # SQLite 路径（默认 .local/silicon_notebook.db）
+DATABASE_URL            # 当前数据库 URL；开发/生产使用 PostgreSQL；未配置兜底：sqlite:///.local/silicon_notebook.db
 SILICON_NOTEBOOK_STORAGE_DIR   # 上传文件存储目录（默认 .local/storage）
 ```
 

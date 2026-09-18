@@ -47,7 +47,7 @@ SQLite v75／PostgreSQL 0055 保守保留旧库中全部非占位标题，因为
 当前仓库已进入以 KG-native 管线为核心的本机真实 beta 闭环：
 
 - **深度报告检索耗时护栏：** 每个覆盖率/充分性阶段仍为各逻辑主题/章节保留自己的有序 first-N query 窗口，随后把相同 query 合并成一次检索，KG/element 叶子对在共享 `REPORT_RETRIEVAL_FANOUT` 预算内并行，聚合输出仍按逻辑输入顺序。PostgreSQL 每次通用 chunk 词法调用都在私有 savepoint 中使用独立的 `POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS` deadline（默认 `3.0`，`0 < 值 <= min(10, POSTGRES_STATEMENT_TIMEOUT_SECONDS)`）；首次超时会为本 retrieval run 的该 notebook 打开熔断，后续调用不再发数据库语句、直接返回无词法补充，已经在飞的并发调用允许安全收束。该 fail-open 熔断绝不覆盖精确短语/标识符定位。source sidecar 完整覆盖冻结报告范围的 chunk ANN 默认 ANN-only；普通 Ask 仍保留 ANN∪FTS。等待 fold 且确有 chunk 的来源只为 sidecar 未覆盖且已授权的那部分恢复有界 FTS，空来源不会触发；没有 producer scope 的报告调用会在所有 ANN/回退 producer 之前每库每 run 只解析并冻结一次该 actor 的授权来源全集，索引 reload 不能扩大它。`CHUNK_FTS_WITH_ANN_ENABLED=true` 是报告质量回滚闸。
-- Python FastAPI 后端；SQLite 持久化路径 `.local/silicon_notebook.db`
+- Python FastAPI 后端；开发和生产均默认部署 PostgreSQL，SQLite 保留为可选后端。
 - `frontend/` 下的 Next.js / React / TypeScript 前端
 - 浏览器标签页使用蓝色笔记本图标，内页带芯片图案。
 - 由部署者统一管理 OpenAI-compatible chat、embedding 与 rerank 服务；workload 绑定及每服务 `max_concurrency` 集中写入一个 TOML
@@ -2526,7 +2526,7 @@ workload 做有界规划，不引入 Anthropic SDK 一类通用 Agent。模型�
 - KG 抽取需要在系统模型 TOML 中绑定 `kg_extract` workload；离线 smoke 在需要验证检索/治理时会显式写入 KG 对象。
 - 两层联合检索尚属早期：把 notebook 标为 `base`/`personal`（经 `POST /notebooks/{id}/tier`）、边可信审核队列、晋升（个人→基准）现都已有专属前端控件（在分析工具栏）；把一个 notebook 发布为公共知识库只是让它可被挂载——tier 感知联合检索与 base 优先冲突规则只对显式把它挂为参考库的笔记本生效。
 - Notebook 分享有三种形态：链接复制、只读成员、共享给群组——都不是实时协同编辑。群组成员可以提问、写自己的深度报告；内容管理（来源、图谱、授权边）仍归 owner，组管理员的写权限是 P2。
-- SQLite 与 PostgreSQL 都可由唯一 repository factory 原子选择，发行默认仍是 SQLite。只改 `DATABASE_URL` 不会同步既有行；存量切换/回滚必须停写、验证备份，必要时执行外部数据迁移，并在启动后做一致性检查。PostgreSQL 向量存 `bytea`，不要求 pgvector。
+- PostgreSQL 是默认部署选项，当前开发和生产环境均使用 PostgreSQL；SQLite 仍作为可选后端，可与 PostgreSQL 一样由唯一 repository factory 原子选择。只改 `DATABASE_URL` 不会同步既有行；存量切换/回滚必须停写、验证备份，必要时执行外部数据迁移，并在启动后做一致性检查。PostgreSQL 向量存 `bytea`，不要求 pgvector。未配置时的 SQLite 代码兜底见部署文档，不代表当前环境的部署配置。
 - `off` 模式 PDF 回退用 PyMuPDF4LLM 的分页 Markdown，保留标题、多栏阅读顺序和重建表格；只有该解析器缺失或报错时才最后回退 pypdf。公式、图片和复杂扫描件的权威高保真路径仍是 MinerU。URL/上传文件的云解析在重试后仍失败时也走同一本地回退，并以 `extracted` + `parse_quality_warning=true` 返回；来源详情会说明风险并提供重新解析/删除入口，后续 MinerU 重解析成功会清掉警告。见[用 MinerU 解析 PDF](./operations_zh.md#用-mineru-解析-pdf)。
 - 用户记忆保持手动 opt-in，当前没有自动记忆行为。
 - PostgreSQL 查询取消（`psycopg.errors.QueryCanceled`——语句超时或运维主动取消）在**非流式**响应上冒泡到请求栈顶层时，返回结构化 `503`（`detail` 加机器可读的 `code: "query_timeout"`），并发出一条 `query_timeout` 事件（带与配对 `kind=http` 行相同的请求 id、method/path，路由带 notebook 维度时一并携带）——而不再是裸的、不可观测的 `500`。**流式**响应一旦已开始就无法改写状态码——流会中断，但同一条 `query_timeout` 事件（标 `streaming: true`）仍由最外层 ASGI 观察者发出。前端仍显示既有通用 5xx「服务暂时不可用」文案（不新增用户可见文案；`frontend/app/errors.ts` 对所有 5xx 都刻意泛化）。既有的 savepoint 有界探测（例如 `knowledge_store.py` 的 chunk 词法召回预算）不受影响——它们在自己的调用点就已捕获并转换为领域异常，QueryCanceled 到不了这个 handler。
