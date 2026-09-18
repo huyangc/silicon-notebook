@@ -473,11 +473,14 @@ def plan_query_intent(
         # important row instead: the server's own finding is inserted first and
         # must survive.
         del ambiguities[AMBIGUITY_ROWS_MAX:]
-    # The model's explicit "ask" verdict stands even when every row it gave is
-    # optional; with the wording rules no longer overriding a valid
-    # understanding, nothing else would pause such a request.
-    if data.get("needs_clarification") is True and not any(
-        row["required"] for row in ambiguities
+    # A valid understanding's explicit "ask" verdict stands even when every row
+    # it gave is optional; with the wording rules no longer overriding it,
+    # nothing else would pause such a request. A malformed response's verdict
+    # is not trusted: the wording rules above already decided for it.
+    if (
+        understanding_succeeded
+        and data.get("needs_clarification") is True
+        and not any(row["required"] for row in ambiguities)
     ):
         taken = {row["id"] for row in ambiguities}
         index = 1

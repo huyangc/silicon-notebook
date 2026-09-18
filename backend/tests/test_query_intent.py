@@ -528,6 +528,25 @@ def test_model_ask_verdict_stands_when_every_row_is_optional(optional_rows):
     assert QueryIntentContract(**contract).needs_clarification is True
 
 
+@pytest.mark.parametrize("rows", [[], [{"question": "要不要分组？", "required": False}]])
+def test_malformed_response_ask_verdict_defers_to_wording_rules(rows):
+    class _NoScope(_ValidUnderstandingClient):
+        def chat_json(self, *args, **kwargs):
+            data = json.loads(super().chat_json(*args, **kwargs))
+            del data["result_scope"]
+            return json.dumps(data)
+
+    status: dict[str, bool] = {}
+    contract = plan_query_intent(
+        _NoScope("比较 PLL A 与 PLL B", ["PLL A"], rows, needs=True),
+        "比较 PLL A 与 PLL B",
+        status=status,
+    )
+
+    assert status["understanding_succeeded"] is False
+    assert contract["needs_clarification"] is False
+
+
 def test_confirmed_answers_are_frozen_into_authoritative_research_question():
     seed = plan_query_intent(None, "帮我分析一下这个问题")
     seed["assumptions"] = ["环路已正常上电"]
