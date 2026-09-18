@@ -1475,6 +1475,18 @@ class SourceIngestionService:
         except Exception:
             self.event_log.logger.warning("notebook metadata refresh unavailable")
 
+    def _record_source_failure(self, hooks: SourcePipelineHooks, source, message: str) -> None:
+        # Remove the summary before refreshing so ALL coalesced workers see the
+        # same title-only input that a failed source exposes. Keep its current
+        # state until metadata settles: polling clients stop at the terminal row.
+        self.sources.set_status(source.id, None, summary="")
+        self._try_augment_notebook_metadata(hooks, source)
+        self.set_source_status(
+            source.id, "failed", summary="Parsing failed; see source error.",
+            error_message=message,
+        )
+        self._archive_source_parse_issue(source)
+
     def process_source(
         self, source_id: str, hooks: SourcePipelineHooks
     ) -> SourceSummary:
@@ -1887,14 +1899,7 @@ class SourceIngestionService:
         except Exception as exc:
             stage("pipeline", "error", pipeline_started, error=f"{type(exc).__name__}: {exc}")
             self.event_log.logger.exception("process_source failed for %s", source_id)
-            self._try_augment_notebook_metadata(hooks, source)
-            self.set_source_status(
-                source_id,
-                "failed",
-                summary="Parsing failed; see source error.",
-                error_message=str(exc),
-            )
-            self._archive_source_parse_issue(source)
+            self._record_source_failure(hooks, source, str(exc))
         finally:
             # 覆盖 try 的所有出口——成功 return、上面的 except 落 'failed'(KgBuildAborted
             # 等 Exception 子类都被它兜住)、以及未被 except 捕获而向上传出的

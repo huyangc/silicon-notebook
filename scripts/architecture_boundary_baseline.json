@@ -368,7 +368,7 @@
     "backend/app/services/report_engine.py::ReportEngine._draft_section": 317,
     "backend/app/services/repository_facade.py::RepositoryFacade.__init__": 477,
     "backend/app/services/repository_runtime.py::RepositoryRuntime.__init__": 145,
-    "backend/app/services/source_ingestion.py::SourceIngestionService._process_source_scoped": 359,
+    "backend/app/services/source_ingestion.py::SourceIngestionService._process_source_scoped": 352,
     "backend/app/services/source_ingestion.py::SourceIngestionService.process_source": 17
   }
 }

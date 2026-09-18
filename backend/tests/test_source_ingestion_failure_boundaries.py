@@ -151,6 +151,38 @@ def test_extraction_failure_sets_failed_and_persists_error_message(repo, monkeyp
     assert src.summary == "Parsing failed; see source error."
 
 
+def test_failed_source_summary_is_removed_before_metadata_and_terminal_status(repo, monkeypatch):
+    import json
+
+    _patch_parse(monkeypatch, [_element("subject-that-must-disappear")])
+    repo.settings.kg_auto_extract = True
+    nb = repo.create_notebook(NotebookCreate())
+    sid = _seed_queued_source(repo, nb.id)
+    prompts = []
+
+    class Metadata:
+        configured = True
+
+        def chat_json(self, messages, *args, **kwargs):
+            prompts.append(messages[0]["content"])
+            assert repo.get_source(sid).parse_status != "failed"
+            return json.dumps({"name": f"refresh-{len(prompts)}", "description": "当前资料"})
+
+    def boom(source_id, **kwargs):
+        assert "subject-that-must-disappear" in repo.get_source(source_id).summary
+        raise RuntimeError("extract boom")
+
+    bind_chat_client(repo, "notebook_metadata", Metadata())
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", boom)
+    result = repo.process_source(sid)
+    assert len(prompts) == 2
+    assert "subject-that-must-disappear" in prompts[0]
+    assert "subject-that-must-disappear" not in prompts[1]
+    assert result.parse_status == "failed"
+    assert repo.get_notebook(nb.id).name == "refresh-2"
+    assert repo._notebook_meta_sources(nb.id)[0]["summary"] == ""
+
+
 def test_delete_commits_db_cleanup_before_file_delete(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     out = repo.upload_sources(
