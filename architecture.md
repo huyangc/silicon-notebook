@@ -21,9 +21,19 @@
 
 本地 beta 保持 FastAPI + Next.js 的双进程形态，repository backend 由 `DATABASE_URL` 在 SQLite 与 PostgreSQL 之间选择；发行默认 SQLite 快速启动不要求 PostgreSQL、pgvector、Docker、GPU 或本地模型服务器。生产启动固定为一个 FastAPI/Uvicorn worker，保证进程内的系统模型服务调度器就是部署全局容量边界。chat、embedding 与 reranker 仍只通过 URL 服务访问。MinerU 是独立的解析适配器：`MINERU_MODE=http` 调用远端 `mineru-api`，`MINERU_MODE=cli` 在隔离子进程运行 MinerU Python API，`MINERU_MODE=off` 使用 PyMuPDF4LLM 版面/Markdown 回退（pypdf 仅最后兜底）。未配置服务时使用离线、确定性的回退路径。全新数据库不创建 demo notebook 或合成来源。
 
+运维 CLI 的公开目录由 `scripts/cli.py` 显式注册并按用途分组，`scripts/cli.sh` 只选择解释器并转交；旧脚本与 `app.scripts` 实现继续持有参数、业务流程和锁合同。应用类 CLI 与服务启动共用不依赖 `app` 的 `scripts/python_env.py`，在 exec 目标 Python 前准备 dotenv 和模块搜索路径；需要在自身参数解析后才能选环境的 reflect `report`/`search` 则在脚本启动层调用同一模块同步当前进程路径，不在 Settings、插件 configure 或应用业务 workflow 中修改 `sys.path`。独立诊断/显式环境工具保留自身配置策略。分发层不构造 repository、不启动插件配套服务；`extensions check` 只调用现有 discovery 检查导入与设置，运行时拓扑和管理员 admission 仍由既有组合根负责。命令与环境细节分别归 `docs/operations*.md`、`docs/deployment-and-configuration*.md` 所有。
+
 ## 2. 运行时组件
 
 ### 2.1 进程与持久化
+
+部署插件的配套服务配置由无副作用的 `app.extensions.service_config` 解析，discovery 与
+`scripts/extension_services.py` 共用校验。只有显式 `extensions services` 命令及服务启动
+脚本进入进程管理层，普通 CLI、Settings 和插件 configure 不启动进程。管理器按依赖排序
+启动、检查就绪、逆序关闭；私有运行目录与锁记录归属，启动凭据区分本次创建和复用。
+独立 supervisor 持有子进程，worker guard 保持进程组归属至清理结束；应用运行时注册表
+和管理员 admission 开关不管理操作系统进程。外部托管服务只检查就绪，绝不由此终止。
+服务异常退出会停止本次服务会话，不自动重启；主应用进程保持既有启动脚本的管理边界。
 
 - `backend/app/main.py` 创建 FastAPI 应用，挂载认证、请求上下文、CORS、日志中间件和 `/api` 路由；生产拓扑固定单 Uvicorn worker，不允许用多进程复制模型容量。
 - `frontend/` 是唯一前端；Next.js/React/TypeScript 负责 notebook collection 与 notebook workspace。

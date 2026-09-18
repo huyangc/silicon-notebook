@@ -17,6 +17,8 @@ The project is a local-team beta built with FastAPI and Next.js. SQLite works ou
 
 Backend deployment plugins are trusted same-process code loaded only from the TOML named by `EXTENSIONS_CONFIG`; config changes require a restart, and their API extensions mount only below `/api/extensions/{plugin_id}`. Private UI packages are injected separately at frontend build time through `SILICON_NOTEBOOK_UI_PLUGINS` and require a rebuild.
 
+Plugins can declare companion services in the same TOML. Development, production, backend, and packaged launchers start them and wait for readiness before launching the app; matching stop commands clean them up. See the [service authoring example](./examples/extensions/managed-service/README.md) and use `bash scripts/cli.sh extensions services status` for status.
+
 The interface starts in auto mode for upload-and-ask use. Advanced mode exposes retrieval effort, report depth, and source/reference-library scope controls.
 
 ## Quick start
@@ -75,6 +77,11 @@ npm run stop
 Production uses one backend worker because model scheduling and cancellation state are process-local. Logs are written under `.local/logs/`; verify `/api/ready` after startup. For offline deployment bundles, run `bash scripts/pack.sh` and follow [packaging/DEPLOY.md](./packaging/DEPLOY.md).
 
 ### Verify
+
+For command-line operations, start with `bash scripts/cli.sh --help` (or
+`npm run cli -- --help`). The grouped entry covers batch ingestion, indexes,
+maintenance, diagnostics, migrations, and plugin checks while retaining the old
+script commands. See [the command index](./scripts/README.md#统一-cli-入口).
 
 ```bash
 curl -s http://127.0.0.1:8000/api/health

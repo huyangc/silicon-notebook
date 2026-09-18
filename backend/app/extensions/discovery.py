@@ -30,8 +30,9 @@ core-owned decisions, so a plugin can never mint a name that looks like one of
 them.  (The conflict checks in ``capability_decisions_from_bundles`` are the
 enforcement; the reserved separator is what keeps the two namespaces legible.)
 
-Import boundary: this module imports only ``app.extension_sdk``, third-party
-packages, and the standard library.  It must never reach into services,
+Import boundary: this module imports only ``app.extension_sdk``, the pure
+companion-service configuration parser, third-party packages, and the standard
+library.  It must never reach into services,
 repositories, the API layer, or ``app.core`` — deployment plugins are wired by
 ``app.extensions.bootstrap``, which owns the (lazy) Settings read.
 """
@@ -41,7 +42,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import importlib
 import logging
-import re
 import tomllib
 
 from pydantic import BaseModel
@@ -50,6 +50,12 @@ from app.extension_sdk import (
     EXTENSION_API_VERSION,
     AvailabilityProbe,
     ExtensionManifest,
+)
+from app.extensions.service_config import (
+    EXTENSION_ENTRY_KEYS,
+    STABLE_ID,
+    ServiceConfigError,
+    parse_service_document,
 )
 
 
@@ -63,9 +69,9 @@ DISCOVERY_LOGGER = logging.getLogger("silicon_notebook.extensions")
 # Same stable-metadata-id shape the registry enforces on manifest ids: all
 # accepted values are URL-path-segment safe.  Note it excludes ``:`` — see the
 # capability-naming paragraph in the module docstring.
-_STABLE_ID = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
+_STABLE_ID = STABLE_ID
 _TOP_LEVEL_KEYS = frozenset({"extensions"})
-_ENTRY_KEYS = frozenset({"bundle", "enabled", "settings"})
+_ENTRY_KEYS = EXTENSION_ENTRY_KEYS
 
 
 class ExtensionDiscoveryError(RuntimeError):
@@ -142,8 +148,9 @@ def discover_deployment_extensions(
     An empty path means "no deployment plugins" and the frozen topology stays
     byte-identical to the built-in tuple.  The checks below run in the order
     written, and that order *is* the failure priority: a malformed file is
-    reported before a malformed entry, an entry's shape before its import, its
-    import before its identity, and its identity before its settings — so the
+    reported before malformed entries and companion-service declarations;
+    those shapes are checked before any bundle import, and each import before
+    its identity and settings binding — so the
     first thing an operator sees is the outermost thing that is wrong.
     """
 
@@ -174,7 +181,7 @@ def discover_deployment_extensions(
             "", "config_extensions_not_a_table"
         ) from None
 
-    discovered: list[DiscoveredExtension] = []
+    enabled_entries: list[tuple[str, dict]] = []
     for plugin_id in sorted(entries):
         entry = entries[plugin_id]
         if type(plugin_id) is not str or not _STABLE_ID.fullmatch(plugin_id):
@@ -200,6 +207,17 @@ def discover_deployment_extensions(
             ) from None
         if not enabled:
             continue
+        enabled_entries.append((plugin_id, entry))
+
+    # Validate companion-service declarations before importing any bundle.
+    # Parsing is pure: only the explicit process launcher owns their lifecycle.
+    try:
+        parse_service_document(document, path)
+    except ServiceConfigError as exc:
+        raise ExtensionDiscoveryError(exc.plugin_id, exc.reason) from None
+
+    discovered: list[DiscoveredExtension] = []
+    for plugin_id, entry in enabled_entries:
         bundle = _load_bundle(plugin_id, entry)
         settings = _bind_settings(plugin_id, bundle, entry.get("settings", {}))
         discovered.append(DiscoveredExtension(plugin_id, bundle, settings))

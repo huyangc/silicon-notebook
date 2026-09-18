@@ -31,3 +31,4 @@ for name in frontend backend; do
 done
 
 [[ "$stopped" == 1 ]] || echo "没有正在运行的进程。"
+"$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/scripts/extension_services.py" stop

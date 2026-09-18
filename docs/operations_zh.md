@@ -4,6 +4,80 @@
 
 本文覆盖日志、线上诊断、MinerU、离线摄取、检索回放、迁移与回填。按脚本查找的速查入口另见 [scripts/README.md](../scripts/README.md)。
 
+## 统一命令入口
+
+用 `bash scripts/cli.sh --help` 或 `npm run cli -- --help` 查看按用途分组的运维命令。
+`batch` 接受原 `batch_ingest.py` 的全部阶段和参数，`batch-ingest` 是兼容别名。例如：
+
+```bash
+bash scripts/cli.sh batch ingest --input-dir ./papers --notebook-name "资料库"
+bash scripts/cli.sh scale inspect --notebook nb-xxx
+bash scripts/cli.sh extensions check
+bash scripts/cli.sh diag incident
+```
+
+其他分组见[命令索引](../scripts/README.md#统一-cli-入口)。旧脚本继续支持，尾部参数、
+退出码、锁、确认标志和信号处理均保持原意。Shell/Python 入口保留调用目录，输入/输出
+参数中的相对路径含义不变（npm 按项目根运行）。普通应用命令不自动启动插件配套服务；
+显式的 `extensions services start` 负责启动。
+`extensions check` 只检查配置中的模块导入与设置，不构造 repository，也不代表服务
+已就绪或管理员运行时开关已开启。
+
+应用类命令使用[统一 Python 启动环境](./deployment-and-configuration_zh.md#统一-python-启动环境)。
+独立工具保留既有环境策略：`diag`、独立日志/进程诊断、显式 trace 导出，以及自己管理
+`--env-file` 的工具（MinerU 批量解析、selected-source 准备和 reflect shadow rig），
+不会被入口预先加载根 `.env`；操作显式输入的模型环境迁移、Markdown 图片内嵌、来源
+事实审计和 trace 文件分析也采用此策略，仍由自身解析器决定配置来源。顶层/分组帮助不读取部署
+配置、不导入应用/插件；叶子命令帮助复用原参数解析器，旧位置参数维护命令则在打开
+repository 前直接显示安全的用法说明。
+Selected-source 准备和非 dry-run 的 reflect `report`/`search` 会额外合并自身选定文件中的
+`PYTHONPATH`，其余环境值仍由原配置逻辑负责。Reflect 在自身参数解析后准备这些路径，
+其他操作不预加载部署路径。Reflect 的子后端通过共享启动器读取实际
+选定的文件，包括 restart 从保存状态恢复的环境文件。
+
+合并发生在公开入口和环境层：重建分块与补缺向量不同，强制重抽/去噪与可恢复摄取不同，
+在线 scale 构建保留自己的每库锁，不改用离线 batch 索引的维护锁。开发 gate、示例、
+基准测试和硬编码目标的历史脚本不纳入运维目录。
+
+## 插件配套服务
+
+开发、生产、仅后端和离线包的启动入口先准备统一 Python 环境，再启动显式配置的
+插件配套服务，等待就绪后启动主应用。停止/退出路径回收自身管理的进程。服务在
+`EXTENSIONS_CONFIG` 中声明，字段见[配置参考](./deployment-and-configuration_zh.md#配套服务配置)；
+未配置服务就不会产生配套进程。
+
+配套服务就绪不替代主应用既有就绪契约：`npm run start` 仍是后台启动主应用，不等待
+后端 readiness。后台交接后才发生的应用故障需要执行正常停止命令，不属于配套服务
+启动尝试失败。
+
+```bash
+bash scripts/cli.sh extensions services validate
+bash scripts/cli.sh extensions services start
+bash scripts/cli.sh extensions services status
+bash scripts/cli.sh extensions services logs
+bash scripts/cli.sh extensions services stop
+```
+
+`validate` 校验服务配置、可执行入口、环境引用以及插件导入/设置，不启动配套服务、
+不连接数据库。`start` 先执行相同检查，再串行化生命周期变更，先依赖后被依赖服务，
+就绪后才返回。配置和有效启动环境相同且健康的会话可复用；环境比较包含继承变量，
+仅排除 Shell 记账变量（`_`、`SHLVL`、`PWD`、`OLDPWD`）。因此 npm 新增变量或不同
+`PATH` 可能阻止复用先由 CLI 启动的会话；应持续使用相同入口/环境，或先停止旧会话。
+配置或有效启动环境改变则必须显式 stop/start。失败只回收本次新建进程，不影响先前复用
+的会话或外部服务。`stop` 按依赖反序停止，核对已保存的进程归属，先优雅终止，再
+强制清理；不按占用端口或单独一个 PID 识别目标。
+
+`status`、`logs`、`stop` 使用保存的运行状态，所以当前 TOML 被修复或删除后，旧
+会话仍可管理。`logs` 只显示安全的生命周期事件，不包含子进程原始输出、探测响应、
+命令参数、路径或环境值；业务日志由服务自己负责配置并脱敏。受管进程意外退出时，
+会话标记失败并停止剩余受管服务；不自动重启，也不降级为可选服务。
+
+排障先查看 `extensions services status` 和 `logs`，再校验当前配置。检查可执行文件
+是否安装、工作目录是否按配置目录解析、引用的环境变量是否存在、就绪探测是否正常、
+依赖是否有效。修复原因后执行 stop/start。`extensions check` 是独立的模块导入/设置
+诊断，不代表服务就绪。批量摄取不隐式启动服务，应先显式启动服务或启动完整应用；
+管理员插件开关只影响访问。
+
 ## 可观测性 / 日志
 
 后端通过统一的 `EventLogger`（`app/core/event_logging.py`）输出结构化日志：每条事件一行 JSONL 写入 `.local/logs/`，并附控制台简要行。写日志是 best-effort，绝不影响它所观测的请求或管线；未配置模型时 LLM 通道为 no-op。

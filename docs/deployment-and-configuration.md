@@ -1406,6 +1406,43 @@ reopen the completed conversation after a disconnect.
 
 When the required chat workloads are unbound, summaries and answers fall back to deterministic behavior. Source parsing still completes offline, and KG extraction records a completed `no-llm` run without generating synthetic knowledge.
 
+### Shared Python launch environment
+
+`bash scripts/cli.sh ...` (also `npm run cli -- ...`) prepares the environment before
+executing the selected Python command. The backend launches in `dev.sh`, `prod.sh`,
+`backend.sh`, and packaged `start.sh` share `scripts/python_env.py` for Python module
+paths. This fixes a distinction between reading `.env` as application settings after
+Python has started and making its `PYTHONPATH` effective at interpreter startup.
+
+The helper places the absolute repository `backend` first, then merges the process
+`PYTHONPATH` and the selected dotenv file's `PYTHONPATH`, removes duplicates and empty
+entries, and anchors relative entries to the repository root. Thus an inherited
+`PYTHONPATH=backend` no longer discards dotenv plugin paths. It preserves the caller's
+working directory and arguments. Dotenv uses python-dotenv syntax/interpolation, never
+shell evaluation; ordinary process variables override file values. Existing shell
+launchers still load their shell environment before invoking the helper; their prior
+non-Python shell-setting precedence is unchanged, and already shell-expanded plugin
+paths are retained alongside inherited paths. Use `${NAME}` syntax for dotenv variable
+references shared with CLI; bare `$NAME` expansion is a shell-only convention.
+
+The default file is repository `.env`; `SILICON_NOTEBOOK_ENV_FILE` selects another file
+(relative overrides are anchored to the repository root), and an empty value disables
+dotenv loading. Missing default files are tolerated by the helper; explicit missing or
+unreadable files fail with a sanitized error. The existing full-stack `.env` preflight
+is unchanged. Interpreter selection for `cli.sh` is explicit `PYTHON_BIN`, repository
+`.venv/bin/python`, then `python3` on PATH; an invalid explicit interpreter fails.
+Use `python scripts/cli.py ...` to select an interpreter directly.
+
+Launchers never install plugins. Ordinary CLI commands do not start companion services;
+service launchers start only the explicit `services` declarations described below. CLI tools
+with independent environment contracts bypass dotenv preparation; see
+[Operations → Unified command entry](./operations.md#unified-command-entry).
+Direct legacy script calls retain their original environment requirements. For a
+source-tree plugin, keep `PYTHONPATH=/path/to/plugin/src` in `.env` and use the unified
+entry; alternatively install the plugin into the backend interpreter with
+`python -m pip install -e /path/to/plugin`. Check configured plugin imports and settings
+with `bash scripts/cli.sh extensions check`; this is not a service-readiness check.
+
 ### Deployment extensions (EXTENSIONS_CONFIG)
 
 An unset `EXTENSIONS_CONFIG` means zero deployment plugins; the loaded topology is byte-identical to the built-in composition. Set but unreadable or unparseable (missing file, bad TOML, an unknown key, a malformed entry) is a **startup failure** — the process refuses to start, it never degrades. Offline CLI tools (`batch_ingest.py` and friends) load the same plugin topology, so the fix is changing the config, never clearing the variable — clearing it silently swaps in a different discovery/registry composition rather than restoring pre-plugin behavior.
@@ -1421,6 +1458,54 @@ enabled = true
 Three rules govern every entry: only a **named**, not `enabled = false`, plugin is ever imported — nothing here scans a directory, reads entry points, or consults a second environment variable; a plugin's own pydantic `settings_model` rejects an unknown key or a type error as a startup failure (core derives the accepted key set from the model rather than trusting `extra="forbid"`; a field carrying an `alias` is accepted **by its alias only**, matching pydantic's own default, unless the model sets `populate_by_name`/`validate_by_name`), so a secret should be referenced (e.g. by an env-var name field, mirroring `model-services.toml`'s `api_key_env`) rather than embedded as a raw value, and no settings value ever reaches a log, an event, or `GET /api/admin/extensions`; and the plugin package installs into the same `PYTHON_BIN` environment as the backend, not a separate interpreter. A plugin's `configure()` must be cheap and side-effect-free — no threads, no network/database connections, no blocking I/O; do that lazily on first use. A plugin capability name uses dot/underscore/hyphen separators only (`:` is reserved for core's own `point:name` capabilities). Editing this TOML — adding or removing an entry, changing `bundle`/`settings`, or flipping `enabled` in the file — always means a process restart; there is no hot reload for the loaded *topology*. That is a separate question from the runtime on/off switch an admin can flip for an already-loaded plugin without a restart — see "Runtime enable/disable" below.
 
 An operator self-checks a deployment's live plugin topology against the paired frontend build with `EXTENSIONS_CONFIG=/etc/silicon/extensions.toml PYTHONPATH=backend python3 scripts/check_deployment_extension_parity.py --frontend-contract frontend/.local/ui-extension-contract.json` (exit `0` parity, `1` drift, `2` usage/environment error). A plugin package should run `python3 scripts/check_ui_vocabulary.py --extra-root <plugin-source-dir>` against its own source for the same Chinese-UI-copy guarantee core enforces on itself. `scripts/generate_ui_extension_contract.py` must be regenerated with `EXTENSIONS_CONFIG` empty — the committed fixture reflects the built-in topology only, never a site's deployment plugins. Step-by-step development, integration and operations procedure: [`docs/deployment-extensions-sop.md`](deployment-extensions-sop.md).
+
+#### Companion-service configuration
+
+Each plugin may add `services` alongside `bundle`, `enabled`, and `settings`.
+This is deployment lifecycle configuration, not a value passed to `configure()`.
+Only explicitly configured services run; the launcher never discovers arbitrary
+scripts. Existing configurations without this table need no changes.
+
+```toml
+[extensions."corp.ieee_search".services.worker]
+mode = "managed"
+cwd = "./plugins/ieee-search"
+command = ["./.venv/bin/python", "-m", "corp_ieee_search.server"]
+healthcheck_url = "http://127.0.0.1:9100/health"
+
+[extensions."corp.ieee_search".services.worker.env]
+SERVICE_MODE = "production"
+
+[extensions."corp.ieee_search".services.worker.env_from]
+API_KEY = "CORP_IEEE_API_KEY"
+```
+
+`mode` defaults to `managed`; it requires explicit `cwd` and a nonempty argv
+`command`. Relative `cwd` resolves against the TOML directory; relative executables
+with a path resolve from that working directory. There is no implicit shell or
+shell expansion. The child inherits the shared launch environment (including
+merged Python paths); `env` adds literal strings and `env_from` maps destination
+names to existing source environment names. The two maps cannot overlap. Reference
+secrets through `env_from`, not command arguments or literal TOML values. Plugin
+bundles still install in the backend interpreter; a companion executable may use
+its own separately installed environment.
+
+Declare exactly one `healthcheck_url` (HTTP/HTTPS, success is 2xx; no credentials,
+query string, or fragment) or
+`healthcheck_command` (argv, success is exit zero). `depends_on` is an optional
+array of `plugin_id/service_id` references. Missing, disabled, self, and cyclic
+dependencies fail validation. `startup_timeout_seconds`, `shutdown_timeout_seconds`,
+and `healthcheck_timeout_seconds` use the defaults and accepted bounds in the
+[product/API service rails](./product-and-api.md#deployment-extensions); unknown
+keys and malformed values fail validation. Every enabled service is required.
+
+For a service managed by systemd, a container platform, or another operator, set
+`mode = "external"`, supply a readiness probe, and omit `command`, `cwd`, `env`,
+and `env_from` (these are rejected in external mode). The launcher does not take
+ownership of that process. Disabling the whole plugin with `enabled=false` omits
+its service definitions. The runtime admin access toggle does not change processes.
+See the [runnable example](../examples/extensions/managed-service/README.md) and
+[service operations](./operations.md#plugin-companion-services).
 
 **Runtime enable/disable:**
 

@@ -13,6 +13,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+source "$ROOT_DIR/scripts/extension_services.sh"
 
 # 与 prod.sh 对齐:source 根 .env 以拿到其中可能配置的 PORT / FRONTEND_PORT。
 # 停止侧对缺 .env 保持宽容(能停就停),不像启动侧那样硬报错退出。
@@ -87,3 +89,4 @@ stop_service() {
 
 stop_service "backend " "$BACKEND_PORT"
 stop_service "frontend" "$FRONTEND_PORT"
+extension_services_stop

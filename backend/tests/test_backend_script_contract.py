@@ -4,12 +4,13 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import shutil
+import tempfile
 
 import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "scripts" / "backend.sh"
 pytestmark = pytest.mark.xdist_group("backend_script_contract")
 
 
@@ -39,15 +40,21 @@ def _env(tmp_path: Path) -> dict[str, str]:
 def _run(
     command: str, env: dict[str, str], *, timeout: float = 8
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [str(SCRIPT), command],
-        cwd=ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        check=False,
-    )
+    # Backend diagnostics must not inspect or stop a developer's real plugin
+    # session. Companion lifecycle itself has isolated integration coverage.
+    with tempfile.TemporaryDirectory(prefix="backend-launch-contract-") as temporary:
+        root = Path(temporary)
+        scripts = root / "scripts"
+        scripts.mkdir()
+        (root / "backend").symlink_to(ROOT / "backend", target_is_directory=True)
+        for name in ("backend.sh", "python_env.py", "extension_services.sh"):
+            shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        (scripts / "extension_services.py").write_text('print(\'{"state":"stopped"}\')\n')
+        return subprocess.run(
+            [str(scripts / "backend.sh"), command],
+            cwd=ROOT, env=env, text=True, capture_output=True,
+            timeout=timeout, check=False,
+        )
 
 
 def test_backend_start_timeout_terminates_the_exact_launched_process(tmp_path):
@@ -61,7 +68,8 @@ def test_backend_start_timeout_terminates_the_exact_launched_process(tmp_path):
     _write_executable(
         wrapper,
         "#!/bin/sh\n"
-        "if [ \"$1\" = \"-c\" ]; then exec \"$REAL_PYTHON\" \"$@\"; fi\n"
+        "case \"$1\" in */extension_services.py) exec \"$REAL_PYTHON\" \"$@\";; esac\n"
+        "if [ \"$1\" = \"-c\" ] || [ \"$2\" = \"-c\" ]; then exec \"$REAL_PYTHON\" \"$@\"; fi\n"
         "printf '%s\\n' \"$$\" > \"$FAKE_PID_FILE\"\n"
         "exec sleep 60\n",
     )

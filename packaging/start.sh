@@ -5,6 +5,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INHERITED_PYTHONPATH="${PYTHONPATH-}"
 cd "$SCRIPT_DIR"
 
 VENV_PY="$SCRIPT_DIR/.venv/bin/python"
@@ -79,13 +80,47 @@ for name in backend frontend; do
   rm -f "$pf"
 done
 
+ROOT_DIR="$SCRIPT_DIR"
+PYTHON_BIN="$VENV_PY"
+START_CLEANUP_GRACE_SECONDS="${START_CLEANUP_GRACE_SECONDS:-10}"
+START_CLEANUP_POLL_SECONDS=0.1
+[[ "$START_CLEANUP_GRACE_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "START_CLEANUP_GRACE_SECONDS 必须是正整数。"
+source "$SCRIPT_DIR/scripts/extension_services.sh"
+cleanup_start() {
+  local status=$? pid
+  trap - EXIT INT TERM HUP
+  for pid in "${BACKEND_PID:-}" "${FRONTEND_PID:-}"; do
+    [[ -n "$pid" ]] || continue
+    kill "$pid" 2>/dev/null || true
+  done
+  # These are this launch's children, so waiting cannot target a stale pidfile.
+  local deadline=$((SECONDS + START_CLEANUP_GRACE_SECONDS))
+  for pid in "${BACKEND_PID:-}" "${FRONTEND_PID:-}"; do
+    [[ -n "$pid" ]] || continue
+    while kill -0 "$pid" 2>/dev/null && [[ "$SECONDS" -lt "$deadline" ]]; do sleep "$START_CLEANUP_POLL_SECONDS"; done
+    if kill -0 "$pid" 2>/dev/null; then kill -9 "$pid" 2>/dev/null || true; fi
+    wait "$pid" 2>/dev/null || true
+  done
+  [[ -z "${BACKEND_PID:-}" ]] || rm -f "$RUN_DIR/backend.pid"
+  [[ -z "${FRONTEND_PID:-}" ]] || rm -f "$RUN_DIR/frontend.pid"
+  extension_services_cleanup || status=1
+  exit "$status"
+}
+trap cleanup_start EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+extension_services_start
+
 # --- 起后端(venv 的 uvicorn;--workers 1 与 prod.sh 一致,进程内缓存不跨 worker 共享) ---
 (
   cd "$SCRIPT_DIR/backend"
-  exec "$VENV_PY" -m uvicorn app.main:app \
+  export PYTHONPATH="$INHERITED_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}"
+  exec "$VENV_PY" "$SCRIPT_DIR/scripts/python_env.py" -m uvicorn app.main:app \
     --host "$BACKEND_HOST" --port "$BACKEND_PORT" --workers 1
 ) >>"$LOG_DIR/backend.log" 2>&1 &
-echo $! > "$RUN_DIR/backend.pid"
+BACKEND_PID=$!
+echo "$BACKEND_PID" > "$RUN_DIR/backend.pid"
 
 # --- 起前端(便携 node 跑 standalone server.js) ---
 # ⚠ standalone 用 process.env.HOSTNAME 作绑定地址;Linux 上 HOSTNAME 常被设成主机名,
@@ -98,7 +133,8 @@ echo $! > "$RUN_DIR/backend.pid"
   export PORT="$FRONTEND_PORT"
   exec "$NODE_BIN" server.js
 ) >>"$LOG_DIR/frontend.log" 2>&1 &
-echo $! > "$RUN_DIR/frontend.pid"
+FRONTEND_PID=$!
+echo "$FRONTEND_PID" > "$RUN_DIR/frontend.pid"
 
 # --- 启动健康检查:等 2s,确认两进程都还活着(否则打印其日志尾并失败) ---
 sleep 2
@@ -112,7 +148,10 @@ for name in backend frontend; do
     ok=0
   fi
 done
-[[ "$ok" == 1 ]] || die "启动失败;必要时 ./stop.sh 收尾另一进程。"
+[[ "$ok" == 1 ]] || die "启动失败；正在清理本次启动的进程。"
+
+extension_services_handoff
+trap - EXIT INT TERM HUP
 
 echo "backend  : http://${BACKEND_HOST}:${BACKEND_PORT}   (PID $(cat "$RUN_DIR/backend.pid"), log $LOG_DIR/backend.log)"
 echo "frontend : http://${FRONTEND_HOST}:${FRONTEND_PORT}  (PID $(cat "$RUN_DIR/frontend.pid"), log $LOG_DIR/frontend.log)"

@@ -4,6 +4,101 @@
 
 This runbook covers logs, live diagnostics, MinerU, offline ingestion, retrieval replay, migrations, and backfills. Script-oriented shortcuts are also indexed in [scripts/README.md](../scripts/README.md).
 
+## Unified command entry
+
+Use `bash scripts/cli.sh --help` or `npm run cli -- --help` to discover the grouped
+operator commands. `batch` accepts every existing `batch_ingest.py` phase and option;
+`batch-ingest` is an alias. For example:
+
+```bash
+bash scripts/cli.sh batch ingest --input-dir ./papers --notebook-name Papers
+bash scripts/cli.sh scale inspect --notebook nb-xxx
+bash scripts/cli.sh extensions check
+bash scripts/cli.sh diag incident
+```
+
+The [command index](../scripts/README.md#统一-cli-入口) maps the other groups.
+Existing scripts remain supported; their trailing arguments, exit codes, locking,
+confirmation flags and signal handling are retained. The shell/Python entry keeps
+the caller's working directory, so relative input/output arguments keep their meaning
+(npm runs from the project root). Ordinary application commands do not automatically
+start plugin services; the explicit `extensions services start` command does.
+`extensions check` checks the configured imports and settings without constructing
+a repository; it does not establish service readiness or inspect runtime admin toggles.
+
+Deployment-aware commands use the [shared Python launch environment](./deployment-and-configuration.md#shared-python-launch-environment).
+The independent tools retain their existing environment policies: `diag`, standalone
+log/process diagnostics, explicit trace export, and tools owning `--env-file`
+(MinerU batch parsing, selected-source preparation, and the reflect shadow rig)
+do not receive an implicit root-dotenv preload. The same applies to model-env migration,
+Markdown image embedding, source-fact auditing and trace-file analysis, which operate
+on explicit inputs. Their own parsers and environment selection remain authoritative.
+Top-level/group help does not read deployment settings
+or import application/plugin code. Leaf help uses the existing parser; positional
+legacy maintenance commands receive safe usage help before opening any repository.
+Selected-source preparation and non-dry-run reflect `report`/`search` additionally merge only
+`PYTHONPATH` from their selected file, leaving all other environment values to their
+original configuration owners. Reflect selects these paths after its own argument parser;
+other reflect operations do not preload deployment paths. Its child backend uses the shared launcher with
+the actual selected file, including a file restored from saved restart state.
+
+Consolidation is at the public entry and environment layer. In particular, rebuilding
+chunks is different from filling missing vectors, forced re-extraction/denoising is
+different from resumable ingestion, and online scale builds keep their own per-notebook
+lock instead of the offline batch-index maintenance lock. Developer gates, examples,
+benchmarks and hardcoded historical scripts remain outside the operator catalog.
+
+## Plugin companion services
+
+The development, production, backend-only, and packaged startup entries prepare
+the shared Python environment, start explicitly configured companion services,
+wait for readiness, then start the application. Their stop/exit paths release
+the managed processes they own. Declare services in `EXTENSIONS_CONFIG` using the
+[configuration reference](./deployment-and-configuration.md#companion-service-configuration).
+No configured services means no companion processes.
+
+Companion readiness does not replace the main application's existing readiness
+contract: `npm run start` still launches the application in the background without
+waiting for backend readiness. An application failure after that handoff requires
+the ordinary stop command; it is not a failed companion-start attempt.
+
+```bash
+bash scripts/cli.sh extensions services validate
+bash scripts/cli.sh extensions services start
+bash scripts/cli.sh extensions services status
+bash scripts/cli.sh extensions services logs
+bash scripts/cli.sh extensions services stop
+```
+
+`validate` checks service configuration, executable entries, environment references,
+and plugin imports/settings without starting services or connecting to a database.
+`start` performs the same preflight, serializes lifecycle changes, starts dependencies before
+dependents, and returns only after readiness. A matching healthy session can be
+reused; a changed configuration or effective launch environment requires explicit
+stop/start. The comparison includes the inherited environment except shell
+bookkeeping (`_`, `SHLVL`, `PWD`, `OLDPWD`): npm-added variables or a different
+`PATH` may therefore prevent reusing a session first started directly through CLI.
+Use the same entry/environment consistently, or stop the old session first.
+A failed attempt rolls back only its own new processes, never a previously reused
+session or an external service. `stop` runs in reverse dependency order, verifies
+the saved process ownership, and uses graceful termination before forced cleanup.
+It does not identify targets by occupied ports or a PID alone.
+
+`status`, `logs`, and `stop` use stored run state, so repairing/removing the current
+TOML does not make an older run unmanageable. `logs` shows safe lifecycle events,
+not raw child output, probe bodies, command arguments, paths, or environment values.
+The service must separately own any sanitized application log it needs. Unexpected
+managed-process exit marks the session failed and stops its remaining managed
+services; there is no automatic restart or optional-service degradation.
+
+For troubleshooting, first run `extensions services status` and `logs`, then
+validate the current configuration. Check installed executables, config-relative
+working directories, required environment references, readiness behavior, and
+dependency references. Correct the cause and perform stop/start. `extensions check`
+is a separate import/settings diagnostic and cannot prove a service is ready.
+Batch ingestion never starts services implicitly; start them explicitly or use
+the full application launcher first. The admin plugin switch affects access only.
+
 ## Observability
 
 The backend emits structured logs through a single `EventLogger` (`app/core/event_logging.py`): one JSONL line per event under `.local/logs/` plus a brief console line. Logging is best-effort — it never breaks the request or pipeline it observes — and is a no-op for the LLM channel when no model is configured.

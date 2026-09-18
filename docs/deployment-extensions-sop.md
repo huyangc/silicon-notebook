@@ -139,7 +139,7 @@ class CorpSearchBundle:
 
 *Core does for you:* computes the accepted key set from `model_fields` itself (plus plain string aliases) rather than trusting you to set `extra="forbid"`, validates the TOML table into one instance, and calls `configure` with it **before** `register`. A rejection carries the offending key *names* and an exception *class* name — never a value, because pydantic's `ValidationError` echoes the input it rejected.
 
-*You cannot:* start a thread or background task, open a network or database connection, or perform blocking I/O inside `configure`. It runs inside startup composition, before the registry is frozen and before the service is ready. Do that work lazily, on the first request that needs it.
+*You cannot:* start a thread or background task, open a network or database connection, or perform blocking I/O inside `configure`. It runs inside startup composition, before the registry is frozen and before the service is ready. Open outbound connections lazily on first use; independently running companion services belong to the [explicit launch contract](#companion-service-delivery-contract), not request-time startup.
 
 Reference a secret by env-var name (mirroring `model-services.toml`'s `api_key_env`) instead of embedding it. Nothing in core ever prints a settings value, but a raw key in a config file is one `cat` away from a chat log.
 
@@ -454,6 +454,17 @@ Point the backend at it with `EXTENSIONS_CONFIG` (a relative path is anchored to
 EXTENSIONS_CONFIG=/path/to/extensions.local.toml npm run dev
 ```
 
+For CLI operations, use `bash scripts/cli.sh batch ...` rather than replacing the
+search path with `PYTHONPATH=backend`. The shared launcher merges a plugin `src/`
+path written in repository `.env` with the backend and exported paths **before**
+starting the command's interpreter. Relative search paths are repository-root-relative.
+Check the installed/configured bundle with `bash scripts/cli.sh extensions check`;
+use `bash scripts/cli.sh extensions parity --frontend-contract frontend/.local/ui-extension-contract.json`
+for the frontend/backend deployment comparison. Neither command starts auxiliary
+plugin services. Do not comment out `EXTENSIONS_CONFIG` to make an import error disappear:
+that would change the CLI's plugin composition. The full selection and precedence
+rules live in [Shared Python launch environment](./deployment-and-configuration.md#shared-python-launch-environment).
+
 ### 5.2 Frontend
 
 ```bash
@@ -506,6 +517,47 @@ npm run lint
 3. Open it, run your action, import one document; the source list refreshes.
 4. Open `/admin/extensions` as a system administrator — your plugin is listed with its version, trust `部署装入`, its server contributions and its UI contributions.
 5. Check the event log: your records carry only `kind`, `plugin_id`, and the whitelisted counters.
+
+### Companion-service delivery contract
+
+A plugin that needs its own process must ship a stable foreground command or
+script, plus an explicit `services` TOML fragment. Core does not infer a launch
+command from a directory, package manifest, or module import. The complete schema
+and environment rules live in [deployment configuration](./deployment-and-configuration.md#companion-service-configuration),
+and timeout defaults/bounds live in [product/API](./product-and-api.md#deployment-extensions).
+
+- Ship the executable entry with the plugin release, document its interpreter and
+  dependencies, and install these before startup. Startup must not install packages,
+  prompt interactively, or mutate the host's dependency environment.
+- Keep the service in the foreground. A shell wrapper must end with `exec ...`;
+  do not use `nohup`, `&`, daemonization, or detach children from the owned process
+  group. Handle SIGTERM and release resources before the configured stop deadline.
+- Provide an HTTP readiness endpoint or a command probe. Readiness means the
+  service can actually serve its work after initialization, not merely that its
+  PID exists. Non-2xx responses, nonzero probe exits, and timeouts mean not ready.
+- Declare stable service IDs and dependencies (`plugin_id/service_id`), working
+  directory, required environment variable names, and a config-relative path
+  example. Use `env_from` for secrets; never put credentials in argv, URLs, or logs.
+- Keep bundle import, `register()`, `configure()`, and availability probes free of
+  service startup side effects. The launch scripts own processes; CLI batch jobs
+  only load the same plugin composition and connect to services already running.
+- If the deployment already operates the service, ship an `external` configuration
+  option with a readiness probe. Core never starts or stops external processes.
+- Supervisor logs contain lifecycle metadata only and discard child stdout/stderr.
+  If the service needs application diagnostics, it must own a separately configured
+  sanitized logging destination; never rely on printing secrets or source content.
+
+The [managed-service example](../examples/extensions/managed-service/README.md)
+contains an installable Python package, a foreground HTTP health service, a bundle
+that starts nothing on import, and a TOML fragment whose working directory is
+relative to the config. Its tests exercise responses and termination with fakes,
+without opening a host port. It intentionally contributes no UI or retrieval feature.
+
+Validate the config with `bash scripts/cli.sh extensions services validate`, and
+validate plugin imports separately with `bash scripts/cli.sh extensions check`.
+Then use the ordinary development/production launcher for the complete application,
+or the explicit service-only commands in the [operations runbook](./operations.md#plugin-companion-services).
+Changing the admin access switch does not start or stop these processes.
 
 ## 6. Step four — package and hand over
 

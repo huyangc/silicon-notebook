@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
+import shutil
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -47,6 +50,139 @@ def _load(name: str):
 analyze = _load("analyze_reasoning_trace")
 export = _load("export_reasoning_traces")
 rig = _load("reflect_shadow_rig")
+
+
+def test_rig_backend_launch_reads_plugins_from_selected_environment(tmp_path, monkeypatch):
+    root = tmp_path / "rig"
+    scripts = root / "scripts"
+    backend = root / "backend"
+    plugin_dir = tmp_path / "plugin source"
+    for directory in (scripts, backend, plugin_dir):
+        directory.mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "python_env.py", scripts / "python_env.py")
+    (plugin_dir / "rig_plugin.py").write_text('VALUE="configured-plugin"\n')
+    (backend / "uvicorn.py").write_text("import rig_plugin; print(rig_plugin.VALUE)\n")
+    selected = tmp_path / "saved-environment.env"
+    selected.write_text(f'PYTHONPATH="{plugin_dir}"\n')
+    monkeypatch.setattr(rig, "ROOT", root)
+    result = subprocess.run(
+        rig._backend_command(types.SimpleNamespace(port=8011)), cwd=root,
+        env={**os.environ, "SILICON_NOTEBOOK_ENV_FILE": str(selected), "PYTHONPATH": ""},
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "configured-plugin"
+
+
+@pytest.mark.parametrize("command", ["report", "search"])
+def test_rig_inprocess_command_uses_selected_plugin_without_injecting_settings(tmp_path, monkeypatch, command):
+    root = tmp_path / "rig"
+    plugins = root / "plugins"
+    plugins.mkdir(parents=True)
+    plugin_name = f"rig_selected_{command}_plugin"
+    (plugins / f"{plugin_name}.py").write_text("VALUE = 'selected-plugin'\n")
+    selected = tmp_path / "selected.env"
+    selected.write_text(
+        "PYTHONPATH=plugins\nDATABASE_URL=wrong-file-db\n"
+        "EXTENSIONS_CONFIG=wrong-file-config\nSILICON_NOTEBOOK_ENV_FILE=wrong-file\n",
+    )
+    (root / ".env").write_text("PYTHONPATH=wrong-directory\n")
+    monkeypatch.setattr(rig, "ROOT", root)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    monkeypatch.setenv("PYTHONPATH", "")
+    monkeypatch.setenv("DATABASE_URL", "exported-db")
+    monkeypatch.setenv("EXTENSIONS_CONFIG", "exported-config")
+    monkeypatch.setenv("SILICON_NOTEBOOK_ENV_FILE", "ambient.env")
+
+    def handler(args, runner):
+        plugin = __import__(plugin_name)
+        assert plugin.VALUE == "selected-plugin"
+        assert os.environ["DATABASE_URL"] == "exported-db"
+        assert os.environ["EXTENSIONS_CONFIG"] == "exported-config"
+        assert os.environ["SILICON_NOTEBOOK_ENV_FILE"] == "ambient.env"
+        assert str(plugins) in os.environ["PYTHONPATH"].split(os.pathsep)
+        assert str(root / "wrong-directory") not in sys.path
+        return 17
+
+    monkeypatch.setattr(rig, f"cmd_{command}", handler)
+    assert rig.main([command, "--env", str(selected)]) == 17
+
+
+@pytest.mark.parametrize("ambient", [None, "chosen.env", "", "  "])
+def test_rig_inprocess_paths_respect_ambient_selection(monkeypatch, tmp_path, ambient):
+    import python_env
+
+    monkeypatch.chdir(tmp_path)
+    if ambient is None:
+        monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
+    else:
+        monkeypatch.setenv("SILICON_NOTEBOOK_ENV_FILE", ambient)
+    calls = []
+    monkeypatch.setattr(python_env, "prepare_python_path", lambda **kwargs: calls.append(kwargs))
+    rig._prepare_inprocess_plugin_paths(types.SimpleNamespace(env_file=None))
+    expected = ROOT / ".env" if ambient is None else (tmp_path / ambient if ambient.strip() else None)
+    assert calls == [{"root": ROOT, "path_env_file": expected}]
+
+
+def test_rig_env_selection_stays_caller_relative_when_backend_changes_directory(monkeypatch, tmp_path):
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    monkeypatch.chdir(caller)
+    args = rig.apply_shared_arg_defaults(rig.build_parser().parse_args([
+        "seed", "--env-file", "chosen.env",
+    ]))
+    assert args.env_file == str(caller / "chosen.env")
+    monkeypatch.chdir(ROOT)
+    assert rig.backend_env(args)["SILICON_NOTEBOOK_ENV_FILE"] == str(caller / "chosen.env")
+
+
+def test_rig_restart_imports_saved_plugin_instead_of_current_deployment(monkeypatch, tmp_path):
+    root = tmp_path / "rig"
+    for directory in (root / "scripts", root / "backend", root / "current", root / "saved"):
+        directory.mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "python_env.py", root / "scripts/python_env.py")
+    (root / "current/restart_plugin.py").write_text("VALUE = 'wrong-current-plugin'\n")
+    (root / "saved/restart_plugin.py").write_text("VALUE = 'saved-plugin'\n")
+    (root / "backend/uvicorn.py").write_text("import restart_plugin; print(restart_plugin.VALUE)\n")
+    current_file = root / ".env"
+    current_file.write_text("PYTHONPATH=current\n")
+    saved_file = root / "saved.env"
+    saved_file.write_text("PYTHONPATH=saved\n")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "rig-state.json").write_text(json.dumps({"env_file": str(saved_file)}))
+    monkeypatch.setattr(rig, "ROOT", root)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    monkeypatch.setenv("PYTHONPATH", "")
+    monkeypatch.setattr(rig, "_process_identity", lambda pid: "test-process")
+
+    def start_backend(args):
+        result = subprocess.run(
+            rig._backend_command(args), cwd=root, capture_output=True, text=True,
+            env={**os.environ, **rig.backend_env(args)}, timeout=15,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "saved-plugin"
+        return types.SimpleNamespace(pid=123456789)
+
+    monkeypatch.setattr(rig, "_start_backend", start_backend)
+    assert rig.main(["restart", "--out-dir", str(out), "--env-file", str(current_file)]) == 0
+
+
+@pytest.mark.parametrize("command, dry_run", [
+    ("seed", False), ("restart", False), ("ask", False),
+    ("export", False), ("teardown", False), ("report", True), ("search", True),
+])
+def test_rig_does_not_preload_current_deployment_for_remote_or_dry_commands(monkeypatch, command, dry_run):
+    def forbidden(args):
+        pytest.fail("this command must not read dotenv or preload plugin paths")
+
+    monkeypatch.setattr(rig, "_prepare_inprocess_plugin_paths", forbidden)
+    monkeypatch.setattr(rig, f"cmd_{command}", lambda args, runner: 0)
+    argv = [command, "--env-file", "/must-not-be-read.env"]
+    if dry_run:
+        argv.append("--dry-run")
+    assert rig.main(argv) == 0
 
 
 # --- client_request_id 编码是一份双向合同 ------------------------------------
