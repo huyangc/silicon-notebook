@@ -4345,6 +4345,15 @@ button.chat-session-card {
   min-width: 0;
 }
 
+.answer-completeness-notice {
+  margin: 0;
+  padding-left: 10px;
+  border-left: 3px solid #d7a547;
+  color: #805923;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .answer-markdown p,
 .answer-markdown ul,
 .answer-markdown ol {

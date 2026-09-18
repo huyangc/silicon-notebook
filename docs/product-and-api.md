@@ -2219,6 +2219,8 @@ The same line also reaches the model that writes the final answer, as a short se
 
 **When the incomplete-result notice is omitted.** A completeness request that no executor can serve exactly ends with a brief notice that this answer has not been verified as complete; the answer does not lead with a catalog of supported collection types. The notice is suppressed only when four deterministic conditions hold together: the intent scope is not `aggregate`, the intent contract records no constraints, exclusions, or assumptions, at least one collection result card returned rows, and that card's coverage is `complete`. Anything else keeps the notice. The bias is intentionally toward warning too often: a card's coverage proves one physical collection was walked end to end, never that the physical collection is the filtered/grouped/deduplicated subset the question actually asked for — and there is no deterministic test for the latter, only a guess.
 
+The response's optional `completeness_notice` carries this server-written text for the Ask panel to render outside the model's Markdown, so an unclosed code fence cannot absorb it. Copying the answer still includes the notice. Responses without a notice omit the field.
+
 Set `REASONING_ENUM_TOOLS_ENABLED=false` to disable the whole family entirely: no map is built, neither action nor the sources parameter is offered, the no-knowledge-graph early return applies again, and reasoning Ask returns to its pre-tool behavior at zero extra query cost.
 
 ### Notebook understanding blocks

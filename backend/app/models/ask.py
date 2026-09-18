@@ -784,6 +784,8 @@ class AskResponse(BaseModel):
     answered_at: str = Field(default="", exclude_if=lambda value: not value)
     conclusion: str
     answer: str = ""
+    # 服务端完整性披露；网页端在模型 Markdown 正文外单独渲染。
+    completeness_notice: str = Field(default="", exclude_if=lambda value: not value)
     grounded: bool = False
     # 相关度感知证据分档：grounded(有据) | overview(概述) | inferred(推断)
     evidence_level: str = "inferred"

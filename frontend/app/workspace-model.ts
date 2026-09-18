@@ -627,6 +627,8 @@ export type AskResponse = {
   conversation_id: string;
   conclusion: string;
   answer: string;
+  /** 服务端完整性提示；在模型 Markdown 正文之外渲染。 */
+  completeness_notice?: string;
   grounded: boolean;
   anchors: AnswerAnchor[];
   related_knowledge: KnowledgeRecord[];

@@ -5447,6 +5447,7 @@ class AskService:
             and not has_scoping_predicate
             and has_complete_collection_result
         )
+        warning = ""
         if completeness_unavailable and not suppress_completeness_warning:
             warning = "本次回答未验证完整性，不能视为全部结果。"
             conclusion = f"{conclusion}\n\n{warning}"
@@ -5469,7 +5470,8 @@ class AskService:
             answer = f"> {coverage_line}\n\n{answer}" if answer else coverage_line
 
         response = AskResponse(
-            answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
+            answer_id="", conclusion=conclusion, answer=answer,
+            completeness_notice=warning, grounded=grounded,
             evidence_level=evidence_level, anchors=anchors,
             related_knowledge=related_knowledge, citations=citations,
             llm_mode=llm_mode, conversation_id=conversation_id,
@@ -5480,9 +5482,7 @@ class AskService:
             result_sets=self._reasoning_result_sets(
                 structured_batch, typed_collection_result_sets, spreadsheet_results
             ),
-            result_coverage=(
-                structured_batch.coverage() if structured_batch else None
-            ),
+            result_coverage=structured_batch.coverage() if structured_batch else None,
             # 走到这里说明这一轮真的跑了检索与作答,但「本笔记本还没有知识
             # 图谱」这件事没有因此变成假的:旗标继续如实上报,前端的建图提示
             # 与答案并存。它只是不再是一道闸。
