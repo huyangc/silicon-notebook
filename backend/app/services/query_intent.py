@@ -413,27 +413,33 @@ def plan_query_intent(
                 "options": _bounded_strings(item.get("options"), 4, 200),
             })
 
-    normalized_candidate = as_text(data.get("normalized_question"))
     entities = _bounded_strings(data.get("entities"))
-    context_for_referent = f"{question}\n{history}".casefold()
-    has_verified_referent = any(
-        entity.casefold() in context_for_referent for entity in entities
-    )
     deterministic_question = ""
     deterministic_reason = ""
-    if (
-        _has_unresolved_reference(question)
-        and (
-            not normalized_candidate
-            or _has_unresolved_reference(normalized_candidate)
-            or not has_verified_referent
+    # A valid model understanding alone decides whether to ask: wording such as
+    # "它/这个/that" is the model's to resolve from the question and history.
+    # The two wording rules below only stand in when no usable understanding
+    # exists (unconfigured, failed or malformed model output), which includes
+    # every ``client=None`` gate on the direct-compatibility path.
+    if not understanding_succeeded:
+        normalized_candidate = as_text(data.get("normalized_question"))
+        context_for_referent = f"{question}\n{history}".casefold()
+        has_verified_referent = any(
+            entity.casefold() in context_for_referent for entity in entities
         )
-    ):
-        deterministic_question = "你提到的对象具体是什么？请给出名称或简要背景。"
-        deterministic_reason = "问题包含无法从当前会话上下文解析的指代。"
-    elif _GENERIC_REQUEST.fullmatch(question):
-        deterministic_question = "你希望分析的具体对象和最关心的问题是什么？"
-        deterministic_reason = "当前输入缺少可确定检索主题的对象或目标。"
+        if (
+            _has_unresolved_reference(question)
+            and (
+                not normalized_candidate
+                or _has_unresolved_reference(normalized_candidate)
+                or not has_verified_referent
+            )
+        ):
+            deterministic_question = "你提到的对象具体是什么？请给出名称或简要背景。"
+            deterministic_reason = "问题包含无法从当前会话上下文解析的指代。"
+        elif _GENERIC_REQUEST.fullmatch(question):
+            deterministic_question = "你希望分析的具体对象和最关心的问题是什么？"
+            deterministic_reason = "当前输入缺少可确定检索主题的对象或目标。"
     if deterministic_question and not any(
         row["question"] == deterministic_question for row in ambiguities
     ):
@@ -445,8 +451,10 @@ def plan_query_intent(
             "options": [],
         })
         # ``QueryIntentContract.ambiguities`` has a hard ceiling of eight rows.
-        # The model may legitimately return eight of its own, so inserting the
-        # deterministic row unconditionally can produce a ninth and make the
+        # A malformed model response may still carry eight rows of its own
+        # (they are kept above even when the response fails validation), so
+        # inserting the deterministic row unconditionally can produce a ninth
+        # and make the
         # contract unconstructable — a pydantic ValidationError on an ordinary
         # unresolved-referent question, i.e. exactly the deterministic failure
         # this whole area is supposed to avoid.  Drop the model's least

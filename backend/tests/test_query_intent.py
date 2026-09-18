@@ -394,6 +394,79 @@ def test_model_reported_missing_comparison_side_still_requires_an_answer():
         finalize_query_intent(contract)
 
 
+class _ValidUnderstandingClient:
+    """A schema-valid understanding; whether to ask is entirely its own call."""
+
+    configured = True
+
+    def __init__(self, normalized, entities, ambiguities=()):
+        self.normalized = normalized
+        self.entities = list(entities)
+        self.ambiguities = list(ambiguities)
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        return json.dumps({
+            "normalized_question": self.normalized,
+            "intent_type": "explain",
+            "result_scope": "ranked",
+            "completeness_required": False,
+            "entities": self.entities,
+            "mandatory_topics": [],
+            "ambiguities": self.ambiguities,
+            "confidence": 0.9,
+            "needs_clarification": bool(self.ambiguities),
+        })
+
+
+@pytest.mark.parametrize("question, history, normalized, entities", [
+    # 指代由历史解析;模型给出的研究对象不必逐字出现在原问题或历史里。
+    ("它的锁定时间是多少？", "User: 比较两个 PLL", "锁相环的锁定时间是多少？", ["锁相环"]),
+    # 英文连词 that 不是指代,改写后仍保留它也不该被拦。
+    (
+        "Explain why the results show that leakage rises", "",
+        "Explain why the results show that leakage rises", ["leakage"],
+    ),
+    # 纯泛化措辞同样交给模型判断。
+    ("分析一下", "User: 锁相环为什么失锁", "分析锁相环失锁的原因", ["锁相环"]),
+])
+def test_valid_model_understanding_alone_decides_whether_to_ask(
+    question, history, normalized, entities,
+):
+    status: dict[str, bool] = {}
+    contract = plan_query_intent(
+        _ValidUnderstandingClient(normalized, entities),
+        question,
+        history,
+        status=status,
+    )
+
+    assert status["understanding_succeeded"] is True
+    assert contract["needs_clarification"] is False
+    assert contract["ambiguities"] == []
+    assert finalize_query_intent(contract)["clarification_answers"] == []
+
+
+def test_valid_model_clarification_is_not_augmented_by_wording_rules():
+    client = _ValidUnderstandingClient(
+        "它的锁定时间是多少？",
+        [],
+        [{
+            "question": "你说的「它」是 PLL A 还是 PLL B？",
+            "required": True,
+            "options": ["PLL A", "PLL B"],
+        }],
+    )
+
+    contract = plan_query_intent(
+        client, "它的锁定时间是多少？", "User: 比较 PLL A 与 PLL B",
+    )
+
+    assert contract["needs_clarification"] is True
+    assert [row["question"] for row in contract["ambiguities"]] == [
+        "你说的「它」是 PLL A 还是 PLL B？",
+    ]
+
+
 def test_confirmed_answers_are_frozen_into_authoritative_research_question():
     seed = plan_query_intent(None, "帮我分析一下这个问题")
     seed["assumptions"] = ["环路已正常上电"]
@@ -545,11 +618,12 @@ def test_clear_auto_confirm_keeps_user_wording_authoritative_over_model_rewrite(
 def test_deterministic_ambiguity_row_cannot_exceed_the_contract_ceiling():
     """一个含无法解析指代的普通问题不能因为条数上限而彻底失败。
 
-    模型可以合法返回 8 条 ambiguity,而服务端还会为「指代无法解析」再插一条
-    确定性的。两者相加是 9 条,超过 QueryIntentContract.ambiguities 的
-    max_length=8 —— 契约构造不出来,`/ask/intent` 就以 pydantic ValidationError
-    收场(它是 ValueError 子类,英文原文不该给用户看,更不该变成 500)。
-    服务端自己那条排在最前、必须留下,被挤掉的应当是模型的最后一条。
+    模型回答校验失败(这里缺 result_scope)时确定性规则兜底,但回答里的 8 条
+    ambiguity 仍被保留,服务端还会为「指代无法解析」再插一条确定性的。两者相加
+    是 9 条,超过 QueryIntentContract.ambiguities 的 max_length=8 —— 契约构造
+    不出来,`/ask/intent` 就以 pydantic ValidationError 收场(它是 ValueError
+    子类,英文原文不该给用户看,更不该变成 500)。服务端自己那条排在最前、必须
+    留下,被挤掉的应当是模型的最后一条。
     """
     class _Client:
         configured = True
@@ -558,7 +632,6 @@ def test_deterministic_ambiguity_row_cannot_exceed_the_contract_ceiling():
             return json.dumps({
                 "normalized_question": "这个方案的优点是什么？",
                 "intent_type": "explain",
-                "result_scope": "ranked",
                 "completeness_required": False,
                 "entities": [],
                 "mandatory_topics": [],
