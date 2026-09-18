@@ -1772,6 +1772,7 @@ def test_completeness_unavailable_suppressed_for_nonaggregate_nonempty_card(arep
     assert any(row.kind == "collection" for row in resp.result_sets)
     assert "不能视为全部结果" not in resp.conclusion
     assert "不能视为全部结果" not in resp.answer
+    assert not resp.completeness_notice
 
 
 def test_completeness_unavailable_kept_for_aggregate_scope_even_with_a_card(arepo):
@@ -1791,6 +1792,7 @@ def test_completeness_unavailable_kept_for_aggregate_scope_even_with_a_card(arep
     )
 
     assert any(row.kind == "collection" for row in resp.result_sets)
+    assert resp.completeness_notice == "本次回答未验证完整性，不能视为全部结果。"
     assert resp.conclusion.endswith("本次回答未验证完整性，不能视为全部结果。")
     assert resp.answer.endswith("> 本次回答未验证完整性，不能视为全部结果。")
 

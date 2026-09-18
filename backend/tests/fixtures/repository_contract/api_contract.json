@@ -2346,6 +2346,11 @@
               "title": "Citations",
               "type": "array"
             },
+            "completeness_notice": {
+              "default": "",
+              "title": "Completeness Notice",
+              "type": "string"
+            },
             "conclusion": {
               "title": "Conclusion",
               "type": "string"

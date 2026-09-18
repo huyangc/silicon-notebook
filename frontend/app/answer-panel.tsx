@@ -1550,6 +1550,13 @@ export function AnswerView({
     rect: DOMRect;
   } | null>(null);
   const answerText = answer.answer || answer.conclusion || "";
+  // 后端把完整性提示附在答案末尾。模型正文可能以未闭合的 Markdown 代码围栏
+  // 结束；把已知的服务端提示单独渲染，避免它被吞进代码块。复制仍使用原文。
+  const completenessNotice = answer.completeness_notice ?? "";
+  const noticeSuffix = `\n\n> ${completenessNotice}`;
+  const renderedAnswerText = completenessNotice && answerText.endsWith(noticeSuffix)
+    ? answerText.slice(0, -noticeSuffix.length)
+    : answerText === completenessNotice ? "" : answerText;
   const scaleIndexQueued = scaleIndexStatus?.state === "queued"
     && !scaleIndexStatus.building;
   const references = useMemo(
@@ -1712,7 +1719,7 @@ export function AnswerView({
         );
       })()}
       <AnswerMarkdown
-        answer={answerText}
+        answer={renderedAnswerText}
         anchors={answer.anchors}
         citations={answer.citations}
         selectedReferenceId={citePopover?.reference.id ?? null}
@@ -1723,6 +1730,9 @@ export function AnswerView({
         renderCitationImages={renderCitationImages}
         citationImageOrder={citationImageOrder}
       />
+      {completenessNotice && (
+        <p className="answer-completeness-notice">{completenessNotice}</p>
+      )}
       <KnowhowResultSets
         resultSets={answer.result_sets}
         batchCoverage={answer.result_coverage}
