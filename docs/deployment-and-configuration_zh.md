@@ -786,9 +786,12 @@ NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS  # 深拷贝将物化的「所有表」总行数
 **欢迎页候选问题：**
 
 笔记本自动标题／描述也使用 `notebook_metadata` 调用类型。
-`NOTEBOOK_METADATA_BATCH_CHARS` 控制每批来源信息的输入预算；较大资料集分层合并，
+`NOTEBOOK_METADATA_BATCH_CHARS` 控制每批来源信息的输入预算，
+`NOTEBOOK_METADATA_BATCH_SOURCES` 控制稳定分组大小；较大资料集分层合并，
 确保每个来源参与。该设置不改变单篇来源摘要模型原有的输入选择。精确范围及输出
 护栏见[产品参考](./product-and-api_zh.md#笔记本标题与描述)，无需新增凭据或模型绑定。
+校验通过的分组摘要复用已有 `LLM_CACHE_ENABLED` 缓存；关闭缓存不会改变覆盖范围，
+但连续来源完成时无法复用之前的摘要，会增加模型工作量。
 
 空白问答欢迎页复用 `notebook_metadata` 调用类型绑定的模型服务，无需额外的
 模型凭据。服务不可用或生成失败时保留现有模板问题。建议结果使用每个应用

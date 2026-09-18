@@ -24,7 +24,7 @@ class FakeLLMMeta:
         self._name = name
         self._description = description
 
-    def chat_json(self, messages, schema_hint):
+    def chat_json(self, messages, schema_hint, *, response_validator=None):
         return json.dumps({"name": self._name, "description": self._description})
 
 
@@ -33,7 +33,7 @@ class FakeLLMOff:
 
     configured = False
 
-    def chat_json(self, messages, schema_hint):
+    def chat_json(self, messages, schema_hint, *, response_validator=None):
         raise RuntimeError("LLM not configured — should never be called")
 
 
@@ -194,7 +194,7 @@ def test_all_sources_and_summary_tails_reach_model(repo):
     seen = []
 
     class Capture(FakeLLMMeta):
-        def chat_json(self, messages, schema_hint):
+        def chat_json(self, messages, schema_hint, *, response_validator=None):
             seen.append(messages[0]["content"])
             return super().chat_json(messages, schema_hint)
 
@@ -217,7 +217,7 @@ def test_large_inputs_reduce_all_batches_without_truncating(repo):
     seen = []
 
     class Summaries(FakeLLMMeta):
-        def chat_json(self, messages, schema_hint):
+        def chat_json(self, messages, schema_hint, *, response_validator=None):
             block = messages[0]["content"].split("Sources:\n", 1)[1]
             assert len(block) <= 4096
             seen.append(block)
@@ -255,7 +255,7 @@ def test_concurrent_refresh_coalesces_and_does_not_publish_old_response(repo):
     calls = []
 
     class Slow(FakeLLMMeta):
-        def chat_json(self, messages, schema_hint):
+        def chat_json(self, messages, schema_hint, *, response_validator=None):
             calls.append(caller.get())
             if len(calls) == 1:
                 entered.set()
@@ -290,7 +290,7 @@ def test_manual_edit_during_model_call_wins_and_other_field_updates(repo):
     _insert_source(repo, nb.id)
 
     class EditWhileGenerating(FakeLLMMeta):
-        def chat_json(self, messages, schema_hint):
+        def chat_json(self, messages, schema_hint, *, response_validator=None):
             repo.update_notebook(nb.id, NotebookUpdate(name="手动标题"))
             return super().chat_json(messages, schema_hint)
 

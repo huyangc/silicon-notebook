@@ -25,7 +25,12 @@ reading: source-summary generation retains its existing document projection.
 
 All source metadata participates, including summaries beyond the old prefix and
 sources beyond the old first-source window. Large inputs use bounded batches and
-recursive summary merging; no source-count cutoff applies. Concurrent requests
+recursive summary merging; no source-count cutoff applies. Stable source groups
+opt into the existing LLM response cache with the same strict output validator
+used at publication. An append or a newly ready summary reuses unchanged groups
+and recomputes affected ancestors; cache entries retain the shared cache's
+endpoint/model/parameter/prompt keys, size and expiry policy. Disabling or evicting
+that cache increases model work but does not change corpus coverage. Concurrent requests
 within one runtime coalesce, and participating ingestion/deletion calls wait for
 the final refresh before their completion response. A database generation plus
 field ownership guards rejects superseded responses and concurrent manual edits.
@@ -38,6 +43,7 @@ Metadata generation rails (do not apply to user-authored fields):
 | Rail | Value |
 | --- | --- |
 | `NOTEBOOK_METADATA_BATCH_CHARS` | default 12000, range 4096–100000; source/partial-summary characters per model input batch, excluding the fixed prompt |
+| `NOTEBOOK_METADATA_BATCH_SOURCES` | default 16, range 2–128; stable group size for recursive merging, not a corpus source-count limit |
 | `NOTEBOOK_AUTO_NAME_MAX_CHARS` | 120; longer model output rejects the pass instead of silently truncating |
 | `NOTEBOOK_AUTO_DESCRIPTION_MAX_CHARS` | 1000; longer model output rejects the pass instead of silently truncating |
 

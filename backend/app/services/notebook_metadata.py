@@ -88,32 +88,65 @@ def _batches(records: Iterable[str], max_chars: int) -> Iterable[str]:
         yield current
 
 
-def synthesize_metadata(client, records: list[str], *, batch_chars: int) -> tuple[str, str]:
+def _parse_metadata(raw: str) -> tuple[str, str]:
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("invalid notebook metadata")
+    name, description = parsed.get("name"), parsed.get("description")
+    if not isinstance(name, str) or not isinstance(description, str):
+        raise ValueError("invalid notebook metadata fields")
+    name, description = name.strip(), description.strip()
+    if not (name and description):
+        raise ValueError("empty notebook metadata")
+    if (len(name) > NOTEBOOK_AUTO_NAME_MAX_CHARS
+            or len(description) > NOTEBOOK_AUTO_DESCRIPTION_MAX_CHARS):
+        raise ValueError("oversized notebook metadata")
+    return name, description
+
+
+def validate_metadata_response(raw: str) -> bool:
+    """Opt into the shared model cache only for complete, usable summaries."""
+    try:
+        _parse_metadata(raw)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def synthesize_metadata(
+    client, records: list[str], *, batch_chars: int, batch_sources: int
+) -> tuple[str, str]:
     """Hierarchically combine every record; invalid output fails the whole pass.
 
-    The validated input budget always fits at least two maximum-sized output
-    records, so every reduction round makes progress without a depth cutoff.
+    Stable groups keep an appended source or a newly ready summary from moving
+    unrelated sources between prompts. The existing validated model cache can
+    therefore reuse unchanged groups and their ancestors. No private cache or
+    corpus-dependent cutoff is introduced. Cache disablement/eviction follows
+    the deployment's ordinary model cache policy.
+
+    The validated character budget fits at least two maximum-sized output
+    records, and the source group budget is at least two: both reductions make
+    progress without a depth cutoff.
     """
     while True:
+        if len(records) > batch_sources:
+            groups = [
+                synthesize_metadata(
+                    client, records[offset:offset + batch_sources],
+                    batch_chars=batch_chars, batch_sources=batch_sources,
+                )
+                for offset in range(0, len(records), batch_sources)
+            ]
+            records = [f"- {name}: {description}" for name, description in groups]
+            continue
         outputs = []
         for block in _batches(records, batch_chars):
             raw = client.chat_json(
                 [{"role": "user", "content": notebook_meta_prompt(block)}],
                 NOTEBOOK_META_SCHEMA_HINT,
+                response_validator=validate_metadata_response,
             )
-            parsed = json.loads(raw)
-            if not isinstance(parsed, dict):
-                raise ValueError("invalid notebook metadata")
-            name, description = parsed.get("name"), parsed.get("description")
-            if not isinstance(name, str) or not isinstance(description, str):
-                raise ValueError("invalid notebook metadata fields")
-            name, description = name.strip(), description.strip()
-            if not (name and description):
-                raise ValueError("empty notebook metadata")
-            if (len(name) > NOTEBOOK_AUTO_NAME_MAX_CHARS
-                    or len(description) > NOTEBOOK_AUTO_DESCRIPTION_MAX_CHARS):
-                raise ValueError("oversized notebook metadata")
-            outputs.append((name, description))
+            outputs.append(_parse_metadata(raw))
         if len(outputs) == 1:
             return outputs[0]
         if not outputs:
