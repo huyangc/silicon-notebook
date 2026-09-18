@@ -90,6 +90,10 @@ class Settings(BaseSettings):
         12000, ge=4096, le=100000,
         validation_alias="NOTEBOOK_METADATA_BATCH_CHARS",
     )
+    notebook_metadata_batch_sources: int = Field(
+        16, ge=2, le=128,
+        validation_alias="NOTEBOOK_METADATA_BATCH_SOURCES",
+    )
 
     environment: str = Field("development", validation_alias="SILICON_NOTEBOOK_ENV")
     single_user_email: str = Field(

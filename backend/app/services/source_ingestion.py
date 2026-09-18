@@ -2011,6 +2011,7 @@ class SourceIngestionService:
                     name_val, desc_val = synthesize_metadata(
                         llm_client, records,
                         batch_chars=self.settings.notebook_metadata_batch_chars,
+                        batch_sources=self.settings.notebook_metadata_batch_sources,
                     )
             except Exception:
                 pass  # A failed batch cannot publish a partial corpus summary.
