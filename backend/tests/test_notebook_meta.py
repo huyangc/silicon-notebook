@@ -328,3 +328,29 @@ def test_explicit_copy_name_becomes_manual(repo):
     repo._augment_notebook_meta(copied.id)
     assert repo.get_notebook(copied.id).name == "手动副本"
     assert repo.get_notebook(copied.id).purpose == "覆盖 Innovus 实现流程。"
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_metadata_fallback_survives_client_initialization_failure(repo, monkeypatch, empty):
+    nb = repo.create_notebook(NotebookCreate())
+    source_id = _insert_source(repo, nb.id)
+    repo._augment_notebook_meta(nb.id)
+    calls = []
+
+    class BrokenProvider:
+        def chat(self, workload):
+            calls.append(workload)
+            raise RuntimeError("client initialization failed")
+
+    monkeypatch.setattr(repo._runtime.source_ingestion, "model_clients", BrokenProvider())
+    if empty:
+        repo.delete_source(source_id)
+        assert calls == []
+        assert repo.get_notebook(nb.id).name == "未命名笔记本"
+        assert repo.get_notebook(nb.id).purpose == "尚未添加来源。"
+    else:
+        _insert_source(repo, nb.id, title="New subject")
+        repo._augment_notebook_meta(nb.id)
+        assert calls == ["notebook_metadata"]
+        assert repo.get_notebook(nb.id).name == "资料集（2 个来源）"
+        assert "2 个来源" in repo.get_notebook(nb.id).purpose
