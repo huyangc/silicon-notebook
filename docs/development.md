@@ -1018,6 +1018,22 @@ A pull request must be reviewed by codex before it is merged, and **every round'
 
 ## Documentation Maintenance
 
+Configuration changes must identify their intended operator and owning reference. Keep
+`.env.example` a curated starter for common deployment choices (connections, credentials,
+model compatibility, capacity, and usage/retention policy), not a mirror of every
+`Settings` field. Show optional default overrides as commented assignments so copied
+environments can inherit improved code defaults. Advanced tuning, recovery controls,
+experimental rollouts, and extension budgets belong in the paired deployment/operations
+references; standalone tool settings belong in `scripts/README.md`. Settings defaults and
+validation remain owned by `backend/app/core/config.py`; invariant protocol bounds use
+named constants. On additions, changes, and removals, update the relevant reference and
+only update the starter when that common deployment surface changes. Mark accepted but
+unused compatibility fields explicitly and omit them from active configuration guidance.
+Tests must check parsing/behavior and the owning reference, not demand full starter-field
+parity. Quote empty values when adding inline comments (`KEY="" # explanation`) so shell
+and dotenv readers agree. Never rewrite an existing deployment's `.env` as part of template
+maintenance.
+
 Update every canonical document whose owned surface actually changes; one change may affect product, deployment, operations, and development surfaces together. Maintain English/Chinese pairs together: `product-and-api`, `deployment-and-configuration`, `operations`, or `development`. Update the root README pair only when its quick start, high-level current boundaries, or navigation changes. Update `AGENTS.md` only for repository-wide agent workflow/routing rules and `CLAUDE.md` only for Claude Code-specific resident rules. Tests must validate each canonical owner rather than requiring detailed facts to be duplicated in entry files.
 
 Because Claude Code auto-loads `CLAUDE.md`, `scripts/check_claude_md_budget.py` pins its total character count and longest line as exact baselines in the G1 contracts lane. Any size change must update those baselines in the same PR so no unaccounted headroom accumulates. Keep feature-level contracts in their canonical documents; change `CLAUDE.md` only when its Claude-specific resident rules or routing change.

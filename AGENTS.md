@@ -137,6 +137,9 @@ carrier they name; neither entry point is a second product or architecture sourc
 - Keep detailed behavior in the canonical references; links and short summaries are preferred
   to duplicated prose. Tests must validate the owning document, not force details back into
   entry-point files.
+- Classify configuration changes using `docs/development.md` before updating examples:
+  `.env.example` covers common deployment choices; advanced tuning and tool settings belong
+  in their owning references. Do not require every `Settings` field in the starter.
 - When a feature from `silicon_notebook_fangan.md` is genuinely complete, update the matching
   entry in `fangan_done.md`, remove it from the unfinished list, cite the spec section, and state
   only verified behavior. Do this only after the applicable standard gate passes.

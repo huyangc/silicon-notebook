@@ -16,7 +16,8 @@ two numeric sources of truth:
    ``app.core.config.Settings`` -- read via ``Settings.model_fields[...]``,
    never re-typed -- must have their *default* documented the same way, AND
    their env var name (the field's ``validation_alias``) must appear in
-   ``docs/deployment-and-configuration.md``, ``_zh.md``, and ``.env.example``.
+   ``docs/deployment-and-configuration.md`` and ``_zh.md``. Advanced extension
+   budgets do not have to appear in the curated ``.env.example`` starter.
 
 Both guards reconcile the full set every run, not just whichever constant or
 field this PR happened to touch.
@@ -169,7 +170,6 @@ def test_settings_env_names_are_documented_in_deployment_reference():
     for relative in (
         "docs/deployment-and-configuration.md",
         "docs/deployment-and-configuration_zh.md",
-        ".env.example",
     ):
         text = _read(relative)
         missing = sorted(

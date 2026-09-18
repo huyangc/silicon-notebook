@@ -125,9 +125,10 @@ requires a restart because the watched path itself is selected at startup.
   `allowlist`, stable-hash `rollout`, and `on` additionally use the configured trusted
   attestation path and fail closed on any mismatch. Ask and Deep Report share this gate.
 
-`.env.example` is the authoritative, fully-commented list of non-service variables and
-secret slots; `model-services.example.toml` is the service/binding/capacity template.
-[Configuration](#configuration) groups the common ones.
+`.env.example` is a curated starter for common deployment choices and secret slots;
+`model-services.example.toml` is the service/binding/capacity template. Advanced
+overrides remain supported without appearing in the starter. See
+[Configuration](#configuration) for their ownership and use.
 
 #### Upgrading an old role-based `.env`
 
@@ -493,6 +494,42 @@ target-side details.
 
 All model services are reached over URL endpoints — no local model servers are started.
 
+### Which settings belong in `.env`
+
+Copy [`.env.example`](../.env.example) as a starting point, then keep the assignments
+your deployment needs. It deliberately does not enumerate every `Settings` field.
+The backend's accepted environment names, executable defaults, and validation are
+defined in [`Settings`](../backend/app/core/config.py); this reference owns deployment
+meaning, and the [Product and API reference](./product-and-api.md) owns exact product
+limits. Frontend and standalone-script variables are documented by their consumers.
+
+| Category | Where to configure it |
+| --- | --- |
+| Common deployment choices | The starter includes service/database addresses, credentials, model dimension and output budgets, main concurrency and memory budgets, uploads, logging/retention, and optional external-service entry points. |
+| Advanced tuning, recovery, and extensions | Add only the overrides needed for an evaluated change or a documented operation. Retrieval/PPR/MMR, action budgets, experimental rollout, plugin bounds, spreadsheet detail, and maintenance intervals belong in their sections below or the linked operating procedure. |
+| Fixed internal rules | Protocol and structural constants stay in code, with their public contract in the product reference; they are not deployment environment variables. |
+| Inactive compatibility settings | Accepted legacy names with no production consumer are listed below for migration clarity and are omitted from the starter. |
+
+Omitting a supported setting from `.env.example` does not remove its environment
+override or change its default. Leaving an advanced assignment out of a local `.env`
+lets it follow the current release's defaults; copying every default pins old tuning
+across upgrades. Changes to the starter do not rewrite an existing `.env`. For an
+empty value followed by a comment, use `KEY="" # explanation`, or put the comment on
+its own line, so dotenv does not interpret the comment as the value.
+
+**Compatibility and initial identity.** `EMBED_PERSIST_CHUNK`,
+`ANSWER_CONTEXT_MIN_ITEMS`, `PROC_MIN`, and `GLOBAL_MAX_COMMUNITIES` are still accepted
+by `Settings` for compatibility but have no production consumer. Changing them has no
+runtime effect; do not use them for tuning. In particular, the retired `global` mode
+is a `chunk` alias and does not use a community-count budget.
+
+`SILICON_NOTEBOOK_SINGLE_USER_EMAIL` and `SILICON_NOTEBOOK_SINGLE_USER_NAME` only
+supply the initial `user-local` row. SQLite inserts with `INSERT OR IGNORE` and
+PostgreSQL with `ON CONFLICT DO NOTHING`; changing these variables does not update an
+existing user's email or display name. They remain supported for initialization but
+are omitted from the common starter. `SILICON_NOTEBOOK_ENV` still selects the runtime
+environment; administrator authentication is configured separately.
+
 ### System model services, scheduling, and diagnostics
 
 Model endpoints, protocols, models, workload bindings, and service capacity are
@@ -573,9 +610,9 @@ zero-cost default; deployment rollout semantics and all numeric rails live in th
 Deployment Ask engines use the interactive chat workload `plugin_engine`. The checked-in
 example binds it to `general` and disables provider thinking because the plugin owns its
 prompting loop. Its completion output budget deliberately inherits the bound model
-client's ordinary answer cap; the independent `ASK_PLUGIN_ENGINE_*` settings in
-`.env.example` bound retrieval calls, evidence and prompt size, model calls, and trace
-shape. Exact defaults and valid ranges live only in the
+client's ordinary answer cap. The advanced `ASK_PLUGIN_ENGINE_*` settings bound
+retrieval calls, evidence and prompt size, model calls, and trace shape; add an override
+to `.env` only when the deployed engine needs one. Exact defaults and valid ranges live in the
 [Product and API reference](./product-and-api.md#deployment-ask-engines-askengine).
 
 Deployment indexing pipelines do not add a separate model workload in PR-1. A plugin may
@@ -670,6 +707,34 @@ parallelism remains `KG_JOB_CONCURRENCY`, and adaptive extraction windows use
 the `kg_extract` service capacity; neither setting overrides service
 `max_concurrency`.
 
+`OPENAI_COMPAT_MAX_TOKENS` supplies the default completion cap for generation calls
+without a workload override; zero omits `max_tokens` on those calls and lets the
+provider decide. `ANSWER_MAX_TOKENS` caps final answers and `KG_EXTRACT_MAX_TOKENS`
+caps extraction output. A non-positive value for either omits that workload override
+and falls back to the global cap. `REASONING_MAX_TOKENS` caps planning and reflection;
+`REPORT_SECTION_MAX_TOKENS`, `REPORT_SYNTHESIS_MAX_TOKENS`, and
+`REPORT_SUMMARY_MAX_TOKENS` cap section drafting, the report-wide evidence blueprint,
+and final editing respectively. These reasoning/report caps must be positive. For
+every workload, input plus requested completion must fit the bound model's context
+window; model service concurrency is independent of these budgets.
+
+Advanced retry controls are `OPENAI_COMPAT_MAX_RETRIES` for ordinary chat and
+`KG_LLM_MAX_RETRIES` for KG calls, alongside their respective
+`OPENAI_COMPAT_TIMEOUT_SECONDS` and `KG_LLM_TIMEOUT_SECONDS` deadlines.
+`EMBED_RATE_LIMIT_RETRIES` and `EMBED_RATE_LIMIT_BASE_DELAY` bound embedding
+rate-limit retries and their exponential backoff. Raising retries increases potential
+latency as well as resilience; adjust them for the endpoint's measured behavior.
+
+Extraction tuning uses `KG_WINDOW_TARGET_CHARS` (zero selects adaptive sizing, positive
+values select a fixed target), `KG_WINDOW_MIN_CHARS`, `KG_WINDOW_MAX_CHARS`, and
+`KG_WINDOW_OVERLAP_CHARS`. `KG_WINDOW_WARN_THRESHOLD` only reports a large window count;
+it never truncates the document. `KG_RELINK_ENABLED` controls deterministic isolated-node
+relinking, `KG_INCREMENTAL_FUSION_ENABLED` controls incremental graph fusion, and
+`KG_CONFLICT_RESOLUTION_ENABLED` enables model conflict adjudication. Merge pre-review
+uses separate confidence thresholds, `KG_MERGE_CONFIRM_THRESHOLD` for confirming a
+merge and `KG_MERGE_SEPARATE_THRESHOLD` for keeping candidates separate. These quality
+and cost choices belong in evaluated advanced overrides, not every deployment's `.env`.
+
 **Core-aware autotune:** local CPU-bound work may scale with the machine:
 
 ```text
@@ -679,8 +744,16 @@ KG_CLUSTER_ANN_THREADS   # hnswlib concept-clustering threads;
 
 `scripts/dev.sh` and `scripts/prod.sh` source `scripts/autotune.sh` for
 local OMP/BLAS threads. This does not change any model-service capacity.
+Set the launch-script variable `AUTOTUNE=0` to disable that automatic behavior.
 
 **Database:**
+
+PostgreSQL pool sizing uses `POSTGRES_POOL_MIN_SIZE` / `POSTGRES_POOL_MAX_SIZE`,
+with `POSTGRES_POOL_ACQUIRE_TIMEOUT_SECONDS` bounding the wait for a connection.
+`POSTGRES_STATEMENT_TIMEOUT_SECONDS` and `POSTGRES_LOCK_TIMEOUT_SECONDS` bound one
+statement and database-lock waits respectively. Tune these advanced PostgreSQL-only
+settings together with database resources and concurrent workloads; the migration-only
+role of `SHADOW_DATABASE_URL` is described in backend selection above.
 
 ```text
 DB_BUSY_TIMEOUT_MS      # SQLite busy_timeout in ms (default 30000)
@@ -757,6 +830,17 @@ discovery, and contributor calls share `ASK_GAP_CONSULT_TIMEOUT_SECONDS`
 (default 4 seconds, `0 < x ≤ 30`), rather than receiving separate budgets.
 
 **Retrieval:**
+
+Advanced ranking controls include `PPR_DAMPING`, `PPR_TOL`, `PPR_TOP_CHUNKS`, and
+`PPR_VARIANT_EDGE_WEIGHT` for graph propagation, convergence, selection, and alias-edge
+weighting; `PPR_EMB_SYNONYM_ENABLED`, `PPR_EMB_SYNONYM_THRESHOLD`,
+`PPR_EMB_SYNONYM_TOPK`, and `PPR_EMB_SYNONYM_MAX_ENTITIES` control synthetic synonym
+edges and their construction cost. `CHUNK_MMR_LAMBDA` balances chunk relevance and
+diversity, while `EVIDENCE_TAU_LOW` / `EVIDENCE_TAU_HIGH` govern grounding thresholds.
+Keep these out of the common starter and evaluate quality and cost before overriding
+them; the active retrieval route determines which settings apply.
+`KG_ISOLATED_RANK_PENALTY` lowers an isolated node's ranking score without changing its
+relevance value; `QUERY_REWRITE_ENABLED` controls pre-answer query rewriting/expansion.
 
 General-Q&A document introductions reuse `CHUNK_ANSWER_BUDGET_CHARS` for evidence
 context. `DOCUMENT_OVERVIEW_MAX_ELEMENTS` (default 64, minimum 2) bounds the number
@@ -1073,12 +1157,10 @@ KG_GLEANING_ROUNDS           # gleaning rounds when enabled (default 1)
 KG_CONCEPT_DESC_ENABLED      # LLM-fuse cross-doc concept-cluster descriptions (default true)
 KG_COMMUNITY_SUMMARY_ENABLED # LLM community reports during rebuild (community layer; default false)
 ANSWER_CONTEXT_BUDGET_CHARS  # answer-context assembly char budget (default 6000; not read by a deep report's sections — see the retrieval behaviour-change note)
-ANSWER_CONTEXT_MIN_ITEMS     # keep >= N items regardless of budget (default 3)
 RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF ranking vs keyword+semantic fusion (default false)
 RETRIEVAL_RRF_K              # reciprocal-rank-fusion k (default 60)
 KG_QUERY_REFINE_ENABLED      # question-aware evidence refinement before answering (default true)
 QUERY_REFINE_MAX_CHARS       # max chars of evidence fed to refinement (default 4000)
-GLOBAL_MAX_COMMUNITIES       # accepted for compatibility; the retired `global` mode is a `chunk` alias, so this is currently unused (default 20)
 RELATION_RETRIEVAL_ENABLED   # relation-vector retrieval for graph/reasoning seeds (default false, opt-in pending eval)
 RELATION_SEED_TOP_N          # top relation/node hits fed as graph seeds when enabled (default 8)
 KG_CANONICAL_FOLD_ENABLED    # fold same-canonical fragmented KG nodes at retrieval (default false)
@@ -1191,6 +1273,15 @@ MINERU_MAX_IMAGE_BYTES  # max size per embedded image (default 5MB; larger image
 MINERU_MAX_IMAGES_PER_SOURCE # max embedded images per source (default 200)
 ```
 
+The optional mineru.net cloud path uses `MINERU_API_TOKEN` and `MINERU_API_BASE`.
+Advanced cloud controls are `MINERU_CLOUD_MODEL_VERSION`, `MINERU_CLOUD_LANGUAGE`,
+`MINERU_CLOUD_FORMULA_ENABLE`, and `MINERU_CLOUD_TABLE_ENABLE` for parsing choices,
+plus `MINERU_CLOUD_TIMEOUT_SECONDS` and `MINERU_CLOUD_POLL_INTERVAL_SECONDS` for the
+completion deadline and polling cadence. They do not enable cloud fallback when a
+self-hosted path is configured. The independent `MINERU_BATCH_*` variables are consumed
+only by `scripts/mineru_batch_parse.py`; its complete optional configuration is in
+the [script reference](../scripts/README.md#mineru_batch_parsepy--批量-pdf-转-markdown).
+
 **Source element enrichment (`source.element_enricher`, deployment plugin point):**
 
 ```text
@@ -1210,6 +1301,29 @@ system-configuration response. It always prefers a configured self-hosted MinerU
 then permits public cloud only when no self-hosted path is configured, and retains the
 built-in parser as the format-specific fallback. The browser receives only capability,
 execution-boundary, availability, and fixed reason enums—never endpoints or credentials.
+
+**Selected-source graph rollout:** advanced deployments may add the following group
+when preparing or evaluating the selected-source lane. The default shadow example
+does not activate user-visible graph enrichment. Before changing to an active mode,
+provide a trusted attestation and matching corpus/model pins using the
+[evaluation procedure](./operations.md#selected-source-graph-quality-gate-scriptseval_selected_source_graphpy).
+An empty pin fails closed for active modes.
+
+```dotenv
+SELECTED_SOURCE_GRAPH_ROLLOUT_MODE=shadow
+SELECTED_SOURCE_GRAPH_ATTESTATION_PATH="" # trusted evaluation artifact
+SELECTED_SOURCE_GRAPH_EXPECTED_CORPUS_SIGNATURE=""
+SELECTED_SOURCE_GRAPH_EXPECTED_MODEL_JSON=""
+SELECTED_SOURCE_GRAPH_NOTEBOOK_ALLOWLIST="" # comma-separated notebook ids for allowlist
+SELECTED_SOURCE_GRAPH_ROLLOUT_PERCENT=0
+SELECTED_SOURCE_GRAPH_ENRICHMENT_TOKENS=4000
+```
+
+The separate `SOURCE_SUBGRAPH_PPR_ENABLED`, `SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED`,
+and `SOURCE_PARTITIONED_PPR_ENABLED` switches govern the snapshot producer, companion
+publication, and companion reader described in deployment setup above.
+`SOURCE_PARTITIONED_PPR_MAX_ITERATIONS` limits sparse passes; the rollout's enrichment
+budget cannot evict historical baseline evidence. Evaluate these settings as a group.
 
 **Generated-question rollout (optional retrieval supplement):**
 
@@ -1252,15 +1366,12 @@ SLOW_REQUEST_MS         # requests slower than this (ms) are flagged SLOW (defau
 SILICON_NOTEBOOK_CORS_ORIGINS
 ```
 
-`.env.example` is the authoritative, complete list of non-service variables and secret
-slots; `model-services.example.toml` is the service/binding/capacity template. The groups
-above highlight the common settings. A dedicated reasoning model is selected by binding
+The sections above include advanced overrides intentionally absent from `.env.example`.
+A dedicated reasoning model is selected by binding
 `reasoning_agent` to a separate service in TOML, while its guardrails remain
-`REASONING_MAX_STEPS`, `REASONING_MAX_SUBQUERIES`, `REASONING_TIMEOUT_SECONDS`, `REASONING_MAX_RETRIES`, and `REASONING_MAX_TOKENS`;
-retrieval/grounding tuning (`PROC_MIN`, `EVIDENCE_TAU_LOW`,
-`EVIDENCE_TAU_HIGH`), the opt-in debug log viewer (`DEBUG_LOGS_ENABLED`), and runtime
-identity (`SILICON_NOTEBOOK_ENV`, `SILICON_NOTEBOOK_SINGLE_USER_EMAIL`,
-`SILICON_NOTEBOOK_SINGLE_USER_NAME`).
+`REASONING_MAX_STEPS`, `REASONING_MAX_SUBQUERIES`, `REASONING_TIMEOUT_SECONDS`,
+`REASONING_MAX_RETRIES`, and `REASONING_MAX_TOKENS`. `DEBUG_LOGS_ENABLED` controls the
+optional debug log viewer.
 
 `USER_ACTIVITY_RETENTION_DAYS` controls how long the content-minimal user-analysis
 projection survives after its notebook is deleted (default 180, accepted range 1–3650).

@@ -101,8 +101,8 @@ observer，不借用 Ask 预算。其语义同样是协作式：已开始 callba
   它不进入公开 API payload、轨迹、stream 或 UI，也是唯一可以没有批准 attestation 的模式。`allowlist`、稳定 hash
   `rollout` 与 `on` 都从受信路径读取证明，任何不匹配 fail closed。Ask 与深度报告共用此门。
 
-`.env.example` 是非服务变量与密钥槽位的权威清单；`model-services.example.toml` 是
-服务、绑定与容量模板；[配置](#配置)按组列出常用项。
+`.env.example` 是常用部署选项与密钥槽位的精简起点；`model-services.example.toml` 是
+服务、绑定与容量模板。未列入示例的高级覆盖项仍然受支持；分类与使用方式见下方[配置](#配置)。
 
 #### 从旧版逐角色 `.env` 升级
 
@@ -412,6 +412,35 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 
 所有模型服务均通过 URL 端点接入，不启动本地模型服务。
 
+### 哪些参数需要写入 `.env`
+
+从 [`.env.example`](../.env.example) 起步，仅保留部署需要的赋值。示例有意不枚举全部
+`Settings` 字段。后端接受的环境变量名、实际默认值和校验规则由
+[`Settings`](../backend/app/core/config.py) 定义；本参考负责部署语义，
+[产品与 API 参考](./product-and-api_zh.md) 负责精确产品限制。前端与独立脚本使用的变量
+由各自的使用说明解释。
+
+| 分类 | 配置位置 |
+| --- | --- |
+| 常用部署选项 | 示例包含服务/数据库地址、凭证、模型维度与输出预算、主要并发与内存预算、上传、日志/留存，以及可选外部服务的入口。 |
+| 高级调优、恢复与扩展 | 仅在经过评测的调整或有文档说明的操作需要时添加覆盖。检索/PPR/MMR、动作预算、实验灰度、插件边界、表格分析细节与维护间隔见下方所属小节或链接的操作流程。 |
+| 固定内部规则 | 协议与结构常量留在代码中，对外合同由产品参考说明；它们不是部署环境变量。 |
+| 无效兼容项 | 仍可接受但没有生产消费者的旧变量集中列在下方，便于迁移辨认，不进入常用示例。 |
+
+某项不在 `.env.example` 中，不代表删除了环境变量覆盖能力或修改默认值。高级项未写入本地
+`.env` 时会跟随当前版本默认值；复制全部默认值则会在升级后持续固定旧调优参数。
+修改示例不会自动重写已有 `.env`。空值后需要注释时，写成 `KEY="" # 说明`，或把注释放在
+独立一行，避免 dotenv 把注释当成配置值。
+
+**兼容项与初始化身份。** `EMBED_PERSIST_CHUNK`、`ANSWER_CONTEXT_MIN_ITEMS`、`PROC_MIN`
+和 `GLOBAL_MAX_COMMUNITIES` 为兼容旧配置仍由 `Settings` 接受，但没有生产消费者，修改它们
+不会改变运行行为，不能用来调优。其中退役的 `global` mode 是 `chunk` 别名，不使用社区数量预算。
+
+`SILICON_NOTEBOOK_SINGLE_USER_EMAIL` 与 `SILICON_NOTEBOOK_SINGLE_USER_NAME` 只提供初始
+`user-local` 行的值。SQLite 使用 `INSERT OR IGNORE`，PostgreSQL 使用
+`ON CONFLICT DO NOTHING`；修改这两个变量不会更新已有用户的邮箱或显示名。初始化时仍可覆盖，
+常用示例不再列出。`SILICON_NOTEBOOK_ENV` 仍用于选择运行环境；管理员认证使用独立配置。
+
 ### 系统模型服务、调度与诊断
 
 模型 endpoint、协议、模型名、工作负载绑定与服务容量都由部署者统一管理，不再由用户配置。
@@ -466,8 +495,8 @@ chat 健康检查不进入 workload 策略：无论模型名是什么，它都�
 
 部署问答引擎使用 interactive chat workload `plugin_engine`。仓库示例把它绑定到
 `general` 并关闭 provider thinking，因为提示与调用循环由插件掌控。它的 completion
-输出预算有意继承所绑定模型客户端的普通回答上限；`.env.example` 中独立的
-`ASK_PLUGIN_ENGINE_*` 设置限制检索次数、证据与 prompt 大小、模型调用次数和轨迹形态。
+输出预算有意继承所绑定模型客户端的普通回答上限；高级项 `ASK_PLUGIN_ENGINE_*`
+限制检索次数、证据与 prompt 大小、模型调用次数和轨迹形态，仅在部署的引擎需要时写入 `.env` 覆盖。
 精确默认值与合法范围只登记在
 [产品与 API 参考](./product-and-api_zh.md#部署问答引擎-askengine)中。
 
@@ -537,6 +566,26 @@ Ask / 模型错误会尽量携带物理服务、workload、安全模型名与 `s
 embedding 模型输出维度一致。KG 来源级并行仍由 `KG_JOB_CONCURRENCY` 控制，自适应抽取窗口使用
 `kg_extract` 所绑定服务的容量；两者都不能覆盖服务 `max_concurrency`。
 
+`OPENAI_COMPAT_MAX_TOKENS` 是没有工作负载专用覆盖时的生成输出上限；设为零时，这些调用
+不传 `max_tokens`，由服务端决定。`ANSWER_MAX_TOKENS` 限制最终答案，
+`KG_EXTRACT_MAX_TOKENS` 限制抽取输出；两者设为非正数时，只是不传专用覆盖，仍沿用全局上限。
+`REASONING_MAX_TOKENS` 限制规划与反思；`REPORT_SECTION_MAX_TOKENS`、
+`REPORT_SYNTHESIS_MAX_TOKENS`、`REPORT_SUMMARY_MAX_TOKENS` 分别限制报告节起草、全篇证据蓝图
+与最终编辑。这些推理/报告上限必须为正数。每个工作负载的输入与请求输出之和都必须适配绑定模型的
+上下文窗口；这些预算与模型服务并发容量相互独立。
+
+高级重试项 `OPENAI_COMPAT_MAX_RETRIES` 用于普通 chat，`KG_LLM_MAX_RETRIES` 用于 KG 调用，
+对应超时分别是 `OPENAI_COMPAT_TIMEOUT_SECONDS` 与 `KG_LLM_TIMEOUT_SECONDS`。
+`EMBED_RATE_LIMIT_RETRIES` 与 `EMBED_RATE_LIMIT_BASE_DELAY` 控制 embedding 限流重试次数和
+指数退避。增加重试也会增加潜在等待时间，应按端点的实际表现调整。
+
+抽取调优使用 `KG_WINDOW_TARGET_CHARS`（零为自适应，正数为固定目标）、`KG_WINDOW_MIN_CHARS`、
+`KG_WINDOW_MAX_CHARS` 与 `KG_WINDOW_OVERLAP_CHARS`。`KG_WINDOW_WARN_THRESHOLD` 只报告窗口数
+偏多，不截断文档。`KG_RELINK_ENABLED` 控制确定性孤立节点补连，`KG_INCREMENTAL_FUSION_ENABLED`
+控制增量图融合，`KG_CONFLICT_RESOLUTION_ENABLED` 启用模型冲突裁决。合并预审分别使用
+`KG_MERGE_CONFIRM_THRESHOLD` 判断自动确认合并、`KG_MERGE_SEPARATE_THRESHOLD` 判断保持分开。
+这些效果与成本选择应在评测后作为高级覆盖添加，无需写进每份部署的 `.env`。
+
 **按核数自动调参：** 本地 CPU 工作仍可按机器缩放：
 
 ```text
@@ -544,9 +593,15 @@ KG_CLUSTER_ANN_THREADS   # 概念聚类 hnswlib 线程；0（默认）= min(cpu�
 ```
 
 `scripts/dev.sh` / `scripts/prod.sh` 会通过 `scripts/autotune.sh` 调整本地 OMP/BLAS
-线程，但不会改变任何模型服务容量。
+线程，但不会改变任何模型服务容量。启动脚本的 `AUTOTUNE=0` 可关闭这项自动行为。
 
 **数据库：**
+
+PostgreSQL 连接池使用 `POSTGRES_POOL_MIN_SIZE` / `POSTGRES_POOL_MAX_SIZE` 配置大小，
+`POSTGRES_POOL_ACQUIRE_TIMEOUT_SECONDS` 限制等待连接的时间；
+`POSTGRES_STATEMENT_TIMEOUT_SECONDS` 与 `POSTGRES_LOCK_TIMEOUT_SECONDS` 分别限制单条语句和
+数据库锁等待。按数据库资源与并发工作负载联合调整；这些高级项只用于 PostgreSQL，
+`SHADOW_DATABASE_URL` 的迁移用途见前面的后端选择说明。
 
 ```text
 DB_BUSY_TIMEOUT_MS      # SQLite busy_timeout（毫秒，默认 30000）
@@ -606,6 +661,15 @@ origin 写进此名单后 URL 导入才能触达。每项必须带 `http://` 或
 `0 < x ≤ 30`），各阶段没有独立预算。
 
 **检索：**
+
+高级排序项中，`PPR_DAMPING`、`PPR_TOL`、`PPR_TOP_CHUNKS`、`PPR_VARIANT_EDGE_WEIGHT`
+分别控制图传播、收敛、结果选择与别名边权重；`PPR_EMB_SYNONYM_ENABLED`、
+`PPR_EMB_SYNONYM_THRESHOLD`、`PPR_EMB_SYNONYM_TOPK`、`PPR_EMB_SYNONYM_MAX_ENTITIES`
+控制合成同义边及其构建成本。`CHUNK_MMR_LAMBDA` 平衡文本块相关度与多样性，
+`EVIDENCE_TAU_LOW` / `EVIDENCE_TAU_HIGH` 控制接地阈值。这些项不进入常用示例，覆盖前应
+评测效果与成本；实际检索路径决定哪些参数生效。
+`KG_ISOLATED_RANK_PENALTY` 降低孤立节点的排序分数，不改变其相关度值；
+`QUERY_REWRITE_ENABLED` 控制问答前的查询改写/扩展。
 
 通用问答的文档介绍复用 `CHUNK_ANSWER_BUDGET_CHARS` 限制证据上下文。
 `DOCUMENT_OVERVIEW_MAX_ELEMENTS`（默认 64，最小 2）限制单篇文档读取的原始解析元素数，
@@ -863,12 +927,10 @@ KG_GLEANING_ROUNDS           # 开启时的 gleaning 轮数（默认 1）
 KG_CONCEPT_DESC_ENABLED      # LLM 融合跨文档概念簇描述（默认 true）
 KG_COMMUNITY_SUMMARY_ENABLED # rebuild 期生成 LLM 社区报告（社区层；默认 false）
 ANSWER_CONTEXT_BUDGET_CHARS  # 答案上下文装配字符预算（默认 6000；深度报告的节不再读取，见检索段的行为变化说明）
-ANSWER_CONTEXT_MIN_ITEMS     # 不论预算至少保留 N 条（默认 3）
 RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF 排序，替代关键词+语义融合（默认 false）
 RETRIEVAL_RRF_K              # RRF 的 k（默认 60）
 KG_QUERY_REFINE_ENABLED      # 答题前做问题感知证据精炼（默认 true）
 QUERY_REFINE_MAX_CHARS       # 喂给精炼的证据最大字符数（默认 4000）
-GLOBAL_MAX_COMMUNITIES       # 兼容保留；退役的 `global` mode 已是 `chunk` 别名，此值当前不被消费（默认 20）
 RELATION_RETRIEVAL_ENABLED   # 图/推理种子的关系向量检索（默认 false，按需开启待评测）
 RELATION_SEED_TOP_N          # 开启时喂入图种子的关系/节点命中数（默认 8）
 KG_CANONICAL_FOLD_ENABLED    # 检索时折叠同 canonical 的碎片化 KG 节点（默认 false）
@@ -974,6 +1036,13 @@ MINERU_MAX_IMAGE_BYTES  # 单张内嵌图片大小上限（默认 5MB，超出�
 MINERU_MAX_IMAGES_PER_SOURCE # 每个来源最多保留的内嵌图片张数（默认 200）
 ```
 
+可选 mineru.net 云端路径使用 `MINERU_API_TOKEN` 与 `MINERU_API_BASE`。高级云端解析选项为
+`MINERU_CLOUD_MODEL_VERSION`、`MINERU_CLOUD_LANGUAGE`、`MINERU_CLOUD_FORMULA_ENABLE` 与
+`MINERU_CLOUD_TABLE_ENABLE`；`MINERU_CLOUD_TIMEOUT_SECONDS` 和
+`MINERU_CLOUD_POLL_INTERVAL_SECONDS` 分别控制完成期限与轮询间隔。已有自托管配置时，这些项
+不会开启云端回退。独立的 `MINERU_BATCH_*` 变量仅由 `scripts/mineru_batch_parse.py` 读取，
+完整可选配置见[脚本说明](../scripts/README.md#mineru_batch_parsepy--批量-pdf-转-markdown)。
+
 **来源元素补全（`source.element_enricher`，部署插件扩展点）：**
 
 ```text
@@ -990,6 +1059,26 @@ SOURCE_ELEMENT_ENRICHER_MAX_DESCRIPTION_CHARS # 单条候选说明文字的字�
 解析路由由后端唯一注册表声明，并经登录后的系统配置响应投影。顺序固定为：优先已配置的
 自托管 MinerU；只有没有自托管路径时才允许公共云；内置解析器保留为按格式兜底。浏览器只会
 收到能力、执行边界、可用状态与固定原因枚举，绝不收到 endpoint 或凭证。
+
+**所选来源图灰度：** 高级部署可在准备或评估所选来源通道时添加以下整组配置。默认 shadow
+示例不会启用用户可见的图补充。改成 active 模式前，按
+[评估流程](./operations_zh.md#所选来源图质量门scriptseval_selected_source_graphpy)
+提供受信证明与匹配的语料/模型 pin；active 模式遇到空 pin 会 fail closed。
+
+```dotenv
+SELECTED_SOURCE_GRAPH_ROLLOUT_MODE=shadow
+SELECTED_SOURCE_GRAPH_ATTESTATION_PATH="" # 受信的评估工件
+SELECTED_SOURCE_GRAPH_EXPECTED_CORPUS_SIGNATURE=""
+SELECTED_SOURCE_GRAPH_EXPECTED_MODEL_JSON=""
+SELECTED_SOURCE_GRAPH_NOTEBOOK_ALLOWLIST="" # allowlist 模式的 notebook id，逗号分隔
+SELECTED_SOURCE_GRAPH_ROLLOUT_PERCENT=0
+SELECTED_SOURCE_GRAPH_ENRICHMENT_TOKENS=4000
+```
+
+独立开关 `SOURCE_SUBGRAPH_PPR_ENABLED`、`SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED` 与
+`SOURCE_PARTITIONED_PPR_ENABLED` 分别控制部署准备部分说明的 snapshot producer、伴生产物发布
+与读取；`SOURCE_PARTITIONED_PPR_MAX_ITERATIONS` 限制稀疏迭代次数。灰度的补充预算不能挤掉
+历史基线证据，应按整组设置评估。
 
 **生成问题 rollout（可选检索补充）：**
 
@@ -1027,7 +1116,10 @@ SLOW_REQUEST_MS         # 超过该毫秒数的请求标记 SLOW（默认 3000�
 SILICON_NOTEBOOK_CORS_ORIGINS
 ```
 
-`.env.example` 是非服务变量与密钥槽位的权威清单，`model-services.example.toml` 是服务、绑定与容量模板；上面分组只列常用项。推理专用模型通过 TOML 把 `reasoning_agent` 绑定到独立服务，其护栏仍是 `REASONING_MAX_STEPS`、`REASONING_MAX_SUBQUERIES`、`REASONING_TIMEOUT_SECONDS`、`REASONING_MAX_RETRIES`、`REASONING_MAX_TOKENS`。其余可调项还包括检索/接地参数（`PROC_MIN`、`EVIDENCE_TAU_LOW`、`EVIDENCE_TAU_HIGH`）、可选调试日志查看器（`DEBUG_LOGS_ENABLED`）和运行身份（`SILICON_NOTEBOOK_ENV`、`SILICON_NOTEBOOK_SINGLE_USER_EMAIL`、`SILICON_NOTEBOOK_SINGLE_USER_NAME`）。
+上方小节包含有意不放入 `.env.example` 的高级覆盖项。推理专用模型通过 TOML 把
+`reasoning_agent` 绑定到独立服务，其护栏仍是 `REASONING_MAX_STEPS`、
+`REASONING_MAX_SUBQUERIES`、`REASONING_TIMEOUT_SECONDS`、`REASONING_MAX_RETRIES`、
+`REASONING_MAX_TOKENS`。`DEBUG_LOGS_ENABLED` 控制可选的调试日志查看器。
 
 `USER_ACTIVITY_RETENTION_DAYS` 控制笔记本删除后最小用户分析摘要的留存天数（默认
 180，可取 1–3650）。它不会延长答案/来源/报告正文、引用或推理轨迹的生命周期。该值在

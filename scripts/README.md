@@ -148,6 +148,44 @@ PYTHONPATH=backend python scripts/build_hotpath_indexes.py --apply
 没有生产流量的库，迁移本身已经够用，先跑本脚本是可选项。完整运维步骤见
 `docs/deployment-and-configuration_zh.md` 的热路径索引一节。
 
+### `mineru_batch_parse.py` —— 批量 PDF 转 Markdown
+
+独立部署工具，通过 MinerU server 的异步 `/tasks` API 把 PDF 目录批量转成 Markdown，
+可使用多台服务，并从各服务 `/health` 的 `max_concurrent_requests` 自动取得并发容量。
+输出目录之后可交给 `batch_ingest.py` 摄取；本工具不连接笔记本数据库。
+
+```bash
+python scripts/mineru_batch_parse.py --src /path/to/pdf/books --out /path/to/output
+# 使用独立配置文件；命令行 > 已导出的环境变量 > 配置文件 > 内置默认值
+python scripts/mineru_batch_parse.py --env-file .local/mineru-batch.env
+# 预览分配计划（仍会查询服务 /health，但不提交 PDF）
+python scripts/mineru_batch_parse.py --env-file .local/mineru-batch.env --dry-run
+```
+
+以下是独立脚本的完整可选配置示例。按实际服务器与目录保存到未提交的
+`.local/mineru-batch.env`，或按需加入根 `.env`；不指定 `--env-file` 时读取当前目录的 `.env`。
+它们不属于后端 `Settings`，不需要加入常用 `.env.example`。
+
+```dotenv
+MINERU_BATCH_SERVERS=http://mineru-host:8000,http://mineru-host:8001
+MINERU_BATCH_SRC_DIR=/path/to/pdf/books
+MINERU_BATCH_OUT_DIR=/path/to/output
+MINERU_BATCH_BACKEND=pipeline
+MINERU_BATCH_LANG=ch
+MINERU_BATCH_FORMULA_ENABLE=true
+MINERU_BATCH_TABLE_ENABLE=true
+MINERU_BATCH_CONCURRENCY_PER_SERVER=0 # 0 = 使用各服务 /health 返回的容量
+MINERU_BATCH_POLL_INTERVAL=10
+MINERU_BATCH_MAX_POLL_SECONDS=1800
+MINERU_BATCH_RETRY_MAX=3
+MINERU_BATCH_SUBMIT_TIMEOUT=120
+MINERU_BATCH_RESULT_TIMEOUT=120
+MINERU_BATCH_MANIFEST="" # 空值使用输出目录下的 _manifest.jsonl
+```
+
+`--only-failed` 只重跑 manifest 中记录失败的文件；`--list` 接受每行一个 PDF 路径的清单，
+`--limit` 可限制本次处理数量。更多参数见 `python scripts/mineru_batch_parse.py --help`。
+
 ### `batch_ingest.py` —— SQLite / PostgreSQL 离线批处理
 
 `ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`question-index`、`reparse`、

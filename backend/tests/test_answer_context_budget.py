@@ -32,11 +32,9 @@ def test_answer_context_respects_char_budget(repo, monkeypatch):
                          "section_path": "1"}],
         "definition": long_def, "steps": None})
     repo.settings.answer_context_budget_chars = 1000
-    repo.settings.answer_context_min_items = 2
     block, id_map = repo._answer_context(nb.id, [_hit(i) for i in range(5)])
     assert len(block) <= 1000 + 500       # tight bound: per-line def cap is 300
-    assert len(id_map) >= 2               # min_items honored
-    assert len(id_map) < 5                # not all 5 packed in
+    assert 2 <= len(id_map) < 5          # compact evidence fits, but not all hits
 
 
 def test_answer_context_keeps_all_when_small(repo, monkeypatch):
