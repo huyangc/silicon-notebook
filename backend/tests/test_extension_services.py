@@ -288,6 +288,38 @@ def test_configuration_searches_relative_path_from_service_cwd(tmp_path, monkeyp
     assert services[0]["env"]["PATH"] == "bin"
 
 
+@pytest.mark.parametrize("file_key,environment_key", [
+    (None, "extensions_config"), (None, "ExTeNsIoNs_CoNfIg"),
+    ("extensions_config", None), ("EXTENSIONS_CONFIG", "extensions_config"),
+    ("extensions_config", "EXTENSIONS_CONFIG"),
+])
+def test_configuration_matches_settings_case_insensitive_selection(
+    tmp_path, monkeypatch, file_key, environment_key,
+):
+    from types import SimpleNamespace
+    from app.core.config import Settings
+
+    for name in list(os.environ):
+        if name.lower() == "extensions_config":
+            monkeypatch.delenv(name)
+    config = tmp_path / "extensions.toml"
+    config.write_text(
+        '[extensions.demo]\nbundle="unused:BUNDLE"\n'
+        '[extensions.demo.services.main]\nmode="external"\n'
+        f'healthcheck_command={json.dumps([sys.executable, "-c", "pass"])}\n'
+    )
+    dotenv = tmp_path / ".env"
+    file_value = str(config) if environment_key is None else str(tmp_path / "not-selected.toml")
+    dotenv.write_text(f'{file_key}={json.dumps(file_value)}\n' if file_key else "")
+    monkeypatch.setenv("SILICON_NOTEBOOK_ENV_FILE", str(dotenv))
+    if environment_key:
+        monkeypatch.setenv(environment_key, str(config))
+    monkeypatch.setattr(manager.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0))
+    assert Settings(_env_file=dotenv).extensions_config == str(config)
+    services, _ = manager.configuration(manager.ROOT)
+    assert [item["key"] for item in services] == ["demo/main"]
+
+
 @pytest.mark.parametrize("interruption", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
 def test_interrupted_launcher_rolls_back_its_unready_session(directory, tmp_path, interruption):
     item = service(tmp_path, probe=[sys.executable, "-c", "raise SystemExit(1)"])

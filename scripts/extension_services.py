@@ -28,7 +28,9 @@ def configuration(root: Path) -> tuple[list[dict], str]:
     from python_env import build_python_environment
 
     environment = build_python_environment(root=root)
-    config = environment.get("EXTENSIONS_CONFIG", "").strip()
+    # Settings normalizes environment names case-insensitively. Preserve the
+    # prepared environment's iteration precedence when aliases differ by case.
+    config = {name.lower(): value for name, value in environment.items()}.get("extensions_config", "").strip()
     if not config:
         return [], ""
     # No application/bootstrap imports: the parser is deployment-only.
