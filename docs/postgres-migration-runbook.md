@@ -2,8 +2,8 @@
 
 > **本文件是「怎么做」的执行清单,给按步骤驱动的 Agent 或运维用。**
 > 「为什么这么设计」「有哪些限制」的真源是
-> [docs/operations.md](operations.md#sqlite--postgresql-cutover-and-rollback)
-> (中文:[docs/operations_zh.md](operations_zh.md#sqlite--postgresql-切换与回滚))。
+> [docs/operations.md](operations.md#sqlite--postgresql-stopped-snapshot-migration-and-cutover)
+> (中文:[docs/operations_zh.md](operations_zh.md#sqlite--postgresql-停写快照迁移与切换))。
 > **两者冲突时以 operations 那一节为准**,并回来订正本文件。
 > 迁移是一次性单向导入:只搬数据库里的数据,不搬文件,不做持续同步,不能反向回放。
 

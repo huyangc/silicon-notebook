@@ -6,44 +6,50 @@
 
 ## 前提
 
-- `workers=1`(`scripts/prod.sh`),进程内 `_scale_building` 去重有效。
+- 使用部署规定的进程拓扑；SQLite 保持单进程，PostgreSQL 的在线/离线构建共用每库跨进程构建锁。切换期间避免并行发起同一库的构建。
 - `EMBED_DIM` = 库内向量的**存储/原生维**(生产 4096),**切换期一个字都不动**。
   改小 `EMBED_DIM` 会让存量向量被当异维残留丢光(全库静默失忆)—— 启动校验会拦 `EMBED_RUNTIME_DIM > EMBED_DIM`,但不拦「误改小 EMBED_DIM」,故靠此禁令。
-- 已跑过 MRL 截断 spike(`python -m app.eval.mrl_truncation`)确认目标维质量可接受。
+- 已用代表性数据完成 MRL 截断质量评估，确认目标维可接受。下列 `app.eval.mrl_truncation` 命令只支持 SQLite；PostgreSQL 部署需先通过适用的离线评估确认质量，不能直接把 PostgreSQL URL 传给该工具。
 
 ## 切换序列
 
-1. **切换前基线**(留档,便于事后对照):
+1. **切换前基线**(留档,便于事后对照；以下命令均从仓库根目录执行):
    ```bash
-   cd backend && python -m app.eval.mrl_truncation --tables knowledge,chunk,relation --sample-rows 50000
+   PYTHONPATH=backend python -m app.eval.mrl_truncation --tables knowledge,chunk,relation --sample-rows 50000
    # embed 端点在线时再记 gold 基线:
-   cd backend && python -m app.eval.mrl_truncation --gold app/eval/recall_gold.yaml --notebook <大库id>
+   PYTHONPATH=backend python -m app.eval.mrl_truncation --gold backend/app/eval/recall_gold.yaml --notebook <大库id>
    ```
-2. **备份现有索引**(决定回滚成本 —— full rebuild 原地覆盖工件,非 tmp+rename):
+   记录切换前 `EMBED_RUNTIME_DIM` 与 `SCALE_AUTO_FOLD_ON_ADD` 的有效值，供完成或回滚时恢复。
+2. **备份现有索引并检查磁盘余量**：在维护窗口等待在途构建结束，再停止服务及离线构建者，保持停止到第 4 步，避免备份期间索引换代；备份目录应为本次切换新建。
    ```bash
    cp -r <storage_dir>/kg_index <storage_dir>/kg_index.bak-native
    ```
-3. **临时关 auto-fold**(双保险;代码已让 dim 失配的 fold 拒绝+转 full,此步只是避免夜间 idle 窗抢跑):
-   `.env` 加 `SCALE_AUTO_FOLD_ON_ADD=false`。
-4. **开截断**:`.env` 加 `EMBED_RUNTIME_DIM=1024`(**EMBED_DIM=4096 不动**)→ `scripts/backend.sh restart`。
+   full rebuild 与 fold 都先写入每次构建独有的 `.tmp-<claim_token>`，再经 `live → .old`、`temporary → live` 两次 rename 发布；成功后 `.old` 会被清理，不能当作长期回滚备份。
+   容量预算应包含现有索引、独立备份、正在构建的新索引暂存空间及增长余量；逐库构建按最大单库预留暂存空间，并发构建则累加。发布前失败保留旧索引；中断后的 `.old` / `.tmp-*` 按[运维恢复说明](./operations_zh.md#old--tmp-claim_token-残留与人工恢复)检查处理。
+3. **关闭 auto-fold**：`.env` 设置 `SCALE_AUTO_FOLD_ON_ADD=false`，在下一步启动时生效。
+4. **开截断**：`.env` 加 `EMBED_RUNTIME_DIM=1024`（**EMBED_DIM=4096 不动**），按部署方式启动服务（使用仓库后端脚本时执行 `scripts/backend.sh start`），确认 `/api/ready` 就绪后继续。
    - 重启后即时:暴力面(小库矩阵、element、delta 补召回)经统一 helper 立即在 1024 空间自洽;
    - 三条持久 ANN(kg/chunk/relation)manifest 仍是旧维 → `scale_index_status` 报 `state=stale, stale_reason=dim_mismatch`,查询侧守卫降级(等同重建前,不更糟)并发 `dim_mismatch` 事件。
 5. **逐库全量重建**(把 ANN 建到新空间):
    ```bash
    # 对每个有 manifest 的库(全部 base + 已索引大个人库):
-   curl -XPOST .../api/notebooks/<nb>/scale-index/rebuild -d '{"when":"now","mode":"full"}'
+   curl --config '<私有 curl 认证配置文件>' --fail-with-body \
+     -X POST '<部署地址>/api/notebooks/<nb>/scale-index/rebuild' \
+     -H 'Content-Type: application/json' \
+     -d '{"when":"now","mode":"full"}'
    ```
+   认证文件仅本人可读，内含 `header = "Authorization: Bearer <登录会话 token>"`，会话须有该笔记本 `kg:write` 权限；每库检查 `/api/notebooks/<nb>/scale-index/status`，等待构建成功并确认新 manifest 的维度后再继续，提交请求成功不等于构建完成。
    - **务必 mode=full**(dim 失配下 auto 也会解析为 full,但显式写死,与「大库绝不能 auto/fold」教训同源);
    - 覆盖清单:`ls <storage_dir>/kg_index/` 下**所有** manifest.json 的库,漏任一 base → federated 对它永久 `ann_sources_skipped`;
    - 「刷新图谱」(`/unified-kg/rebuild`)只重聚类不产 ANN,**不是**切换动作;
    - 预估(16C,未实测,先对最大库用 `when=idle` 试跑读 `scale_index_build` 9 段校准):87万 KG + 80万 relation + 21万 chunk @1024,单大库约 20–60min,RSS 峰值 6–9GB(逐行截断进预分配矩阵,峰值才 ÷4);建议低峰/idle 窗。
-6. **重建后**:build 收尾已 pop 进程缓存(理论上立即可见);保守起见验收前再 `backend.sh restart` 一次。恢复 `SCALE_AUTO_FOLD_ON_ADD=true`。
+6. **重建后**：服务通过 manifest 磁盘签名识别新一代索引，后续请求自动加载。完成下方验收后，把 `SCALE_AUTO_FOLD_ON_ADD` 恢复为切换前的值，再按部署方式重启使配置生效，并确认 `/api/ready` 就绪。
 7. 切换窗口若在持续摄取:新向量照旧 4096 落库(安全);未 fold 的 delta 对查询只 FTS 可见(`SCALE_SEARCH_INCLUDE_DELTA` 默认 false),下次 full rebuild 一并收进。
 
 ## 回滚
 
-- **有备份**:`.env` 删 `EMBED_RUNTIME_DIM` → 还原 `kg_index.bak-native` → restart。分钟级。
-- **无备份**:删配置 + restart + 每大库再 `mode=full` 重建。**4096 原向量永在 DB,任何方向重建无损** —— 这是本方案的安全底座。
+- **有备份**：先停止所有服务进程及离线构建者，保留当前索引用于排查，再还原独立备份；将 `EMBED_RUNTIME_DIM` 和 `SCALE_AUTO_FOLD_ON_ADD` 恢复为切换前的值，随后启动并检查 `/api/ready`、各库状态与检索。备份之后的新增内容仍需 fold / full rebuild 才能进入持久 ANN。
+- **无备份**：恢复原 `EMBED_RUNTIME_DIM`，保持 auto-fold 关闭，重启后逐库 `mode=full` 重建并验收，最后恢复原 auto-fold 配置。原生向量未被本次截断改写，可据此重建；构建时长取决于库规模。
 
 ## 验收清单
 
