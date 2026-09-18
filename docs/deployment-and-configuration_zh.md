@@ -498,14 +498,14 @@ chat 健康检查不进入 workload 策略：无论模型名是什么，它都�
 输出预算有意继承所绑定模型客户端的普通回答上限；高级项 `ASK_PLUGIN_ENGINE_*`
 限制检索次数、证据与 prompt 大小、模型调用次数和轨迹形态，仅在部署的引擎需要时写入 `.env` 覆盖。
 精确默认值与合法范围只登记在
-[产品与 API 参考](./product-and-api_zh.md#部署问答引擎-askengine)中。
+[产品与 API 参考](./product-and-api_zh.md#部署问答引擎askengine)中。
 
 部署索引管线在 PR-1 不新增独立模型 workload。插件可通过 `indexing.pipeline`
 贡献按笔记本选择的分块/索引策略；parser 路由仍是自动的。浏览器里的笔记本设置会把
 当前管线只读展示给纯 reader，对 owner 与组内容管理员提供带“将重建全库索引”明确
 确认的切换入口，同时继续把参考库挂载管理保持为 owner-only。`pending` /
 `missing` / `unavailable` 的语义与净化后的 API 面只在
-[产品与 API 参考](./product-and-api_zh.md#部署索引管线-indexingpipeline)登记。
+[产品与 API 参考](./product-and-api_zh.md#部署索引管线indexingpipeline)登记。
 运维可调 `INDEXING_PIPELINE_MAX_PROPOSALS_PER_SOURCE`、
 `INDEXING_PIPELINE_MAX_TEXT_CHARS`、`INDEXING_PIPELINE_MAX_ELEMENT_REFS`、
 `INDEXING_PIPELINE_REBUILD_MAX_PROPOSALS` 与

@@ -807,7 +807,7 @@ audit。只有拷贝真的缩无可缩时才整次拒绝，不会返回被静默
 不可信 evidence，不是可执行的 Agent 指令。
 
 `ask_notebook` 的 `mode` 参数接受 `"reasoning"`（**默认**；与网页端两种界面同一引擎，先理解问题再检索，见下）、`"chunk"`，或任何已注册且实时可用的部署
-`ask.engine` mode id（详见[部署问答引擎](#部署问答引擎-askengine)一节）；校验方式与
+`ask.engine` mode id（详见[部署问答引擎](#部署问答引擎askengine)一节）；校验方式与
 `question`/`conversation_id` 相同——给一句直白可操作的文案，而不是抛一个不可读的
 `ValidationError` 转储。传一个未注册的 mode 会收到列出当前合法 mode id 的报错；传一个
 已注册但暂不可用的 mode（例如插件密钥未配置）会收到独立的文案，不与前者混同；调用过程中
