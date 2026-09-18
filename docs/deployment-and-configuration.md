@@ -7,9 +7,11 @@ This is the detailed source-checkout deployment and configuration reference. For
 ## Deployment
 
 silicon-notebook runs as two processes — a FastAPI backend and a Next.js frontend — over
-one repository selected by `DATABASE_URL`. The shipped SQLite default requires **no GPU,
-no database server, and no local model server**. PostgreSQL 16 is also a supported direct
-backend when an accessible server is provisioned. LLM, embeddings, and rerank stay URL-based; MinerU separately supports remote
+one repository selected by `DATABASE_URL`. PostgreSQL 16 is the default deployment choice;
+both the current development and production environments use PostgreSQL. Provision an
+accessible database and set `DATABASE_URL` explicitly. SQLite remains a supported alternative
+without a database server. Neither backend requires a GPU or local model server.
+LLM, embeddings, and rerank stay URL-based; MinerU separately supports remote
 HTTP (`MINERU_MODE=http`), an isolated same-host subprocess (`MINERU_MODE=cli`), or the
 PyMuPDF4LLM fallback (`MINERU_MODE=off`, with pypdf as last resort). The pipeline runs offline with deterministic fallbacks
 when no model service or MinerU parser is configured.
@@ -21,6 +23,7 @@ when no model service or MinerU parser is configured.
   writer starvation (see `backend/app/repositories/sqlite/database.py`).
 - **Node.js ≥ 20** and npm
 - **git**
+- An accessible **PostgreSQL 16** database for the default deployment; extension prerequisites are listed in section 3.1.
 - A C/C++ toolchain is needed *only as a fallback* — `numpy`, `rustworkx`, and `hnswlib`
   ship prebuilt wheels for common platforms; install Xcode Command Line Tools (macOS) or
   `build-essential` (Debian/Ubuntu) only if pip has to build one from source.
@@ -284,15 +287,19 @@ back to another database. `SHADOW_DATABASE_URL` never selects the active backend
 it alone starts no synchronization; it is consumed only by the explicit forward-shadow CLI.
 
 ```dotenv
-# Shipped default
-DATABASE_URL=sqlite:///.local/silicon_notebook.db
-
-# Direct PostgreSQL 16 backend
+# Default deployment for development and production; replace connection settings
 DATABASE_URL=postgresql://silicon_app:change-me@127.0.0.1:5432/silicon_notebook
+
+# Optional SQLite backend; replace the PostgreSQL URL above
+# DATABASE_URL=sqlite:///.local/silicon_notebook.db
 
 # Optional one-way shadow target while DATABASE_URL remains SQLite
 # SHADOW_DATABASE_URL=postgresql://silicon_shadow:change-me@127.0.0.1:5432/silicon_notebook_shadow
 ```
+
+The deployment default is distinct from the unset-setting fallback: if `DATABASE_URL` is
+omitted entirely, `Settings` still uses `sqlite:///.local/silicon_notebook.db`. Development
+and production explicitly configure PostgreSQL; `.env.example` follows that deployment choice.
 
 PostgreSQL must use UTF-8 and have `pg_trgm` installed in `public`. The database owner may
 let migration 0001 create it, or a DBA may preinstall it. An extension of that name in
@@ -761,7 +768,7 @@ DB_WRITE_LOCK_STATS         # enable process-wide SQLite write-lock wait/hold in
 DB_WRITE_LOCK_WARN_MS       # wait/hold threshold in ms that logs a rate-limited db_write_lock_slow event (default 200)
 DB_WRITE_LOCK_FLUSH_SECONDS # interval in seconds for the periodic db_write_lock_stats snapshot, and the per-call-site rate-limit window for db_write_lock_slow (default 60)
 SQLITE_CACHE_SIZE_KB    # Per-connection SQLite page cache in KB (negative = KB). Connections are reused per-thread; total memory ≈ threads × |value| (default -16384)
-DATABASE_URL            # SQLite path (default .local/silicon_notebook.db)
+DATABASE_URL            # Active database URL; PostgreSQL for development/production; unset fallback: sqlite:///.local/silicon_notebook.db
 SILICON_NOTEBOOK_STORAGE_DIR   # uploaded file storage directory (default .local/storage)
 ```
 

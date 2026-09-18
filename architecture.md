@@ -19,7 +19,7 @@
 - notebook 内页是来源栏 + 主区域的两列 workspace，主区域有 问答 (Ask) / 知识库 (Knowledge) / 记忆 (Memory) / 深度报告 (Deep Report) 四个 tab；没有固定 Studio 右栏。
 - Memory 独立于 source/chunk/KG，始终绑定创建者和一个 notebook；Agent candidate 与 confirmed-only notebook 正式检索是两个隔离平面。
 
-本地 beta 保持 FastAPI + Next.js 的双进程形态，repository backend 由 `DATABASE_URL` 在 SQLite 与 PostgreSQL 之间选择；发行默认 SQLite 快速启动不要求 PostgreSQL、pgvector、Docker、GPU 或本地模型服务器。生产启动固定为一个 FastAPI/Uvicorn worker，保证进程内的系统模型服务调度器就是部署全局容量边界。chat、embedding 与 reranker 仍只通过 URL 服务访问。MinerU 是独立的解析适配器：`MINERU_MODE=http` 调用远端 `mineru-api`，`MINERU_MODE=cli` 在隔离子进程运行 MinerU Python API，`MINERU_MODE=off` 使用 PyMuPDF4LLM 版面/Markdown 回退（pypdf 仅最后兜底）。未配置服务时使用离线、确定性的回退路径。全新数据库不创建 demo notebook 或合成来源。
+本地 beta 保持 FastAPI + Next.js 的双进程形态，repository backend 由 `DATABASE_URL` 在 PostgreSQL 与 SQLite 之间选择；PostgreSQL 是默认部署选项，当前开发和生产环境均使用 PostgreSQL，不要求 pgvector、Docker、GPU 或本地模型服务器。SQLite 仍作为可选后端受支持。生产启动固定为一个 FastAPI/Uvicorn worker，保证进程内的系统模型服务调度器就是部署全局容量边界。chat、embedding 与 reranker 仍只通过 URL 服务访问。MinerU 是独立的解析适配器：`MINERU_MODE=http` 调用远端 `mineru-api`，`MINERU_MODE=cli` 在隔离子进程运行 MinerU Python API，`MINERU_MODE=off` 使用 PyMuPDF4LLM 版面/Markdown 回退（pypdf 仅最后兜底）。未配置服务时使用离线、确定性的回退路径。全新数据库不创建 demo notebook 或合成来源。
 
 运维 CLI 的公开目录由 `scripts/cli.py` 显式注册并按用途分组，`scripts/cli.sh` 只选择解释器并转交；旧脚本与 `app.scripts` 实现继续持有参数、业务流程和锁合同。应用类 CLI 与服务启动共用不依赖 `app` 的 `scripts/python_env.py`，在 exec 目标 Python 前准备 dotenv 和模块搜索路径；需要在自身参数解析后才能选环境的 reflect `report`/`search` 则在脚本启动层调用同一模块同步当前进程路径，不在 Settings、插件 configure 或应用业务 workflow 中修改 `sys.path`。独立诊断/显式环境工具保留自身配置策略。分发层不构造 repository、不启动插件配套服务；`extensions check` 只调用现有 discovery 检查导入与设置，运行时拓扑和管理员 admission 仍由既有组合根负责。命令与环境细节分别归 `docs/operations*.md`、`docs/deployment-and-configuration*.md` 所有。
 
@@ -38,7 +38,7 @@
 
 - `backend/app/main.py` 创建 FastAPI 应用，挂载认证、请求上下文、CORS、日志中间件和 `/api` 路由；生产拓扑固定单 Uvicorn worker，不允许用多进程复制模型容量。
 - `frontend/` 是唯一前端；Next.js/React/TypeScript 负责 notebook collection 与 notebook workspace。
-- SQLite 默认位于 `.local/silicon_notebook.db`，原始来源文件默认位于 `.local/storage`。DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。SQLite 和 PostgreSQL 都是可直接启动的后端；发行默认值仍是 SQLite。`SHADOW_DATABASE_URL` 不选择 active backend，单独设置也不启动同步；只有临时 `migration/shadow` 运维组合根会把它作为 PostgreSQL target 读取。
+- 开发和生产环境通过 `DATABASE_URL` 显式选择 PostgreSQL；完全未配置该项时，代码仍以 `.local/silicon_notebook.db` 的 SQLite 数据库兜底。原始来源文件默认位于 `.local/storage`。DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。PostgreSQL 是默认部署选项，SQLite 仍受支持。`SHADOW_DATABASE_URL` 不选择 active backend，单独设置也不启动同步；只有临时 `migration/shadow` 运维组合根会把它作为 PostgreSQL target 读取。
 - SQLite 使用标准库 `sqlite3`、WAL 与 `busy_timeout`，模型向量存 float32 BLOB。PostgreSQL 使用有界 Psycopg pool、数据库事务/row/advisory lock 支持跨进程访问，向量存 float32 `bytea`；不安装也不需要 pgvector。
 
 ### 2.2 Repository 组合与兼容 facade

@@ -4,7 +4,7 @@
 
 `silicon-notebook` 是面向半导体工程团队、强调来源可追溯的知识笔记本。它把 PDF、Markdown、DOCX、PPTX、CSV、XLSX 和 XLS 材料转成可搜索的来源元素、带引用回答、结构化知识、私有 Memory、knowhow 表和深度报告。
 
-项目目前定位为本地团队 beta，采用 FastAPI 与 Next.js。默认 SQLite 启动不需要 Docker、GPU 或外部模型服务；PostgreSQL、OpenAI 兼容模型服务和 MinerU 均为可选集成。
+项目目前定位为本地团队 beta，采用 FastAPI 与 Next.js。PostgreSQL 是默认部署选项，当前开发和生产环境均使用 PostgreSQL。SQLite 仍作为可选后端受支持；OpenAI 兼容模型服务和 MinerU 均为可选集成。
 
 ## 核心能力
 
@@ -28,6 +28,7 @@
 - Python 3.13+
 - Node.js 20+ 与 npm
 - git
+- 默认部署需要可访问的 PostgreSQL 16 数据库
 
 ### 安装
 
@@ -50,7 +51,7 @@ cp .env.example .env
 mkdir -p .local
 ```
 
-启动前必须二选一配置模型：
+启动前先在 `.env` 中将 `DATABASE_URL` 设置为实际 PostgreSQL 数据库连接，再二选一配置模型：
 
 - 使用确定性/离线降级时，在 `.env` 中设置 `MODEL_SERVICES_CONFIG=`。
 - 使用模型能力时，把 `model-services.example.toml` 复制到 `.local/model-services.toml`，配置服务，并在 `.env` 中填写其引用的密钥。
@@ -65,7 +66,7 @@ npm run dev
 
 全新本地数据库会创建 `admin` / `admin`。对外提供服务前必须修改密码；绑定非 loopback 地址时，必须设置非默认的 `SILICON_NOTEBOOK_ADMIN_PASSWORD`。
 
-默认数据库是 SQLite；需要时可把 `DATABASE_URL` 指向准备好的 PostgreSQL 16 数据库。完整设置与安全说明见[部署与配置](./docs/deployment-and-configuration_zh.md)。
+开发和生产环境均使用 PostgreSQL。数据库前置条件、可选 SQLite 后端及安全说明见[部署与配置](./docs/deployment-and-configuration_zh.md)。
 
 ### 生产运行
 
@@ -105,7 +106,7 @@ CI 各 lane 时长仅作观察；门禁本身仍是通过/失败契约。
   → Next.js 前端
   → FastAPI /api 与 Streamable HTTP /mcp
   → 应用服务与 repository ports
-  → SQLite 或 PostgreSQL + 本地来源/索引/日志存储
+  → PostgreSQL（默认部署）或 SQLite + 本地来源/索引/日志存储
 
 可选服务
   → OpenAI 兼容 chat / embedding / rerank
@@ -135,7 +136,7 @@ Extension SDK 的 baseline-preserving retrieval host 会执行实时 capability 
 
 ## 当前边界
 
-- SQLite 是发行默认数据库，PostgreSQL 16 是受支持的替代后端；切换数据库不会自动复制或同步既有数据。
+- PostgreSQL 16 是开发和生产的默认部署选项，SQLite 仍受支持；切换数据库不会自动复制或同步既有数据。
 - 扫描 PDF、公式和图片的最高保真解析需要 MinerU；本地解析器提供确定性降级。
 - 模型回答和知识抽取需要对应工作负载绑定；离线模式仍可完成导入与确定性流程。
 - Graph Ask 是 opt-in 的实验能力，默认 Ask 模式为 `chunk`；generated-question recall 由部署方显式开启且默认 `off`。
