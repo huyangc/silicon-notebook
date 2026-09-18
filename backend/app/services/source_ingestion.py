@@ -701,8 +701,9 @@ class SourceIngestionService:
         agent_profile_id: str = "",
         trusted_proxy_origins: "frozenset[str] | None" = None,
     ) -> AddUrlSourcesResult:
-        """逐 URL 初筛(空白跳过;非 PDF/不可达→rejected,不建来源);通过的建 source_url
-        来源并交由现有 process_source(有 scheduler 则后台,否则同步)。未配置 token→报错。
+        """逐 URL 初筛(空白跳过;非 PDF/非受信 Markdown/不可达→rejected,不建来源);通过的建 source_url
+        来源并交由现有 process_source(有 scheduler 则后台,否则同步)。未配置 PDF 解析
+        服务时仍可处理受信代理 Markdown；PDF 不能导入。
 
         capacity_limit 是「每笔记本文档数量上限」的**绝对上限**(None=不限,如 admin
         笔记本),由 store 在每条 INSERT 自己的写事务内重新计数并强制(SQLite BEGIN
@@ -716,18 +717,18 @@ class SourceIngestionService:
 
         trusted_proxy_origins 是部署配置的受信代理 origin 白名单(已经
         trusted_proxy_origin_set 归一)。origin 精确命中(_origin_of(url) 相等)的
-        URL 在探测时跳过 SSRF 公网地址检查(probe_pdf(allow_private=True));未命中
-        或名单为 None/空集 → 恒 False,行为逐位不变。只有插件端口适配器
-        (extension_routes._UrlSourceImportAdapter)会传它——浏览器路由与 MCP 工具
-        恒不传,故 probe 半程的豁免只对插件端口可达;请求级输入在任何路径上都
-        改不了名单本身。解析下载半程的豁免另由部署 settings 决定(见
+        URL 在探测时跳过 SSRF 公网地址检查并可接受 text/markdown；未命中
+        或名单为 None/空集 → 恒 False，仍只接受 PDF。名单只从部署 settings
+        注入，浏览器和插件请求都不能改变它；MCP 工具不传名单。
+        解析下载半程的豁免另由部署 settings 决定(见
         _parser_trusted_proxy_origins),不随本参数。"""
         self.notebooks.get_row(notebook_id)  # KeyError if missing
         self.require_indexing_write(notebook_id)
-        # 本地 MinerU 或云端任一可用即可；本地优先（内网场景数据不出网）。
-        if not (
+        # PDF 需要本地或云端 MinerU；受信代理的 Markdown 快照由内置解析器处理。
+        parser_configured = (
             self.mineru_client().configured or self.mineru_cloud_client().configured
-        ):
+        )
+        if not parser_configured and not trusted_proxy_origins:
             raise MinerUCloudNotConfigured(
                 "未配置 PDF 解析服务（本地 MINERU_MODE=http/cli 或云端 MINERU_API_TOKEN）"
             )
@@ -743,11 +744,22 @@ class SourceIngestionService:
             url = (raw or "").strip()
             if not url:
                 continue
+            trusted_url = _origin_of(url) in trusted
+            if not parser_configured and not trusted_url:
+                rejected.append(
+                    RejectedUrl(url=url, reason="未配置 PDF 解析服务，无法导入该链接")
+                )
+                continue
             probe = remote_sources.probe_pdf(
-                url, allow_private=_origin_of(url) in trusted
+                url, allow_private=trusted_url
             )
             if not probe.ok:
                 rejected.append(RejectedUrl(url=url, reason=probe.reason))
+                continue
+            if not parser_configured and self.source_type(probe.display_name) != "markdown":
+                rejected.append(
+                    RejectedUrl(url=url, reason="未配置 PDF 解析服务，无法导入 PDF")
+                )
                 continue
             if capacity_exhausted:
                 rejected.append(
@@ -792,7 +804,7 @@ class SourceIngestionService:
             source_id=source_id,
             notebook_id=notebook_id,
             title=probe.display_name,
-            source_type="pdf",
+            source_type=self.source_type(probe.display_name),
             status="queued",
             parse_status="queued",
             file_name=probe.display_name,

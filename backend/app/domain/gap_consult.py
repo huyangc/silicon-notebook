@@ -8,12 +8,14 @@ not cited, not bound to an anchor, and never enters answer synthesis.
 Two properties are structural rather than documented-and-hoped-for:
 
 * **The egress surface is one object.**  Everything a plugin can ever see about
-  the request is :class:`GapConsultQuery` — a bounded question string and at
-  most :data:`GAP_CONSULT_MAX_GAP_PHRASES` short gap phrases.  Auditing "what
+  the request is :class:`GapConsultQuery` — a bounded question string, at most
+  :data:`GAP_CONSULT_MAX_GAP_PHRASES` short gap phrases, and selected source
+  queries.  Auditing "what
   leaves the deployment" is therefore reading one dataclass, not tracing a
-  call graph.  :class:`GapConsultCallContext` deliberately holds no notebook
-  id, actor id, source id, evidence, or scope: privacy here is guaranteed by
-  the field set, not by a filter someone has to remember to apply.
+  call graph.  The core-only :class:`GapConsultCallContext` records selected
+  outside source IDs, but no notebook id, actor id, notebook source id,
+  evidence, or scope: privacy here is guaranteed by the field set, not by a
+  filter someone has to remember to apply.
 
 * **The port has no terminal semantics.**  ``consult`` takes a call context and
   answers suggestions.  Nothing in this signature says "called once, at the end
@@ -37,13 +39,33 @@ from typing import Any, Protocol
 # egress rail, not a budget: each phrase is text the deployment sends outward.
 GAP_CONSULT_MAX_GAP_PHRASES = 2
 # The most suggestions one run may accept, across every contributor together.
-GAP_CONSULT_MAX_SUGGESTIONS = 5
+GAP_CONSULT_MAX_SUGGESTIONS = 8
+GAP_CONSULT_MAX_QUERY_SOURCES = 4
+GAP_CONSULT_MAX_QUERIES_PER_SOURCE = 2
+GAP_SOURCE_DISPLAY_NAME_MAX_CHARS = 40
+GAP_SOURCE_LANGUAGES_MAX = 4
+GAP_SOURCE_LANGUAGE_MAX_CHARS = 20
+GAP_SOURCE_CONTENT_TYPE_MAX_CHARS = 80
+GAP_SOURCE_QUERY_ADVICE_MAX_CHARS = 200
 GAP_CONSULT_QUESTION_MAX_CHARS = 300
 GAP_CONSULT_PHRASE_MAX_CHARS = 60
 GAP_SUGGESTION_TITLE_MAX_CHARS = 200
 GAP_SUGGESTION_SUMMARY_MAX_CHARS = 400
 GAP_SUGGESTION_SOURCE_LABEL_MAX_CHARS = 40
 GAP_SUGGESTION_URL_MAX_CHARS = 2048
+GAP_SUGGESTION_ACTUAL_QUERY_MAX_CHARS = 300
+
+
+@dataclass(frozen=True, slots=True)
+class GapSourceDescription:
+    """Core-owned provenance for one source offered by a contributor."""
+
+    contribution_id: str
+    source_id: str
+    display_name: str
+    languages: tuple[str, ...] = ()
+    content_type: str = ""
+    query_advice: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,13 +75,15 @@ class GapConsultQuery:
     question: str
     gaps: tuple[str, ...]
     max_suggestions: int
+    source_queries: dict[str, tuple[str, ...]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class GapSuggestion:
     """One pointer to material outside the notebook.
 
-    Four fields on purpose.  A date field would be the fifth, and a plugin's
+    The query receipt is plugin-reported; it is not a verified provider log.
+    A publication date remains excluded, because a plugin's
     idea of "published on" is unverifiable here — the core never fetches the
     URL — so it would render as authority the core cannot stand behind.
     """
@@ -68,26 +92,36 @@ class GapSuggestion:
     url: str
     summary: str = ""
     source_label: str = ""
+    actual_query: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class GapConsultCallContext:
     """Core-only call state.
 
-    Note what is absent: no notebook, actor, source, evidence, or frozen
-    retrieval scope.  A plugin cannot be handed identity it was never given.
+    Note what is absent: no notebook, actor, notebook source, evidence, or
+    frozen retrieval scope.  ``selected_sources`` names only outside search
+    sources and stays core-owned.  A plugin cannot be handed private identity
+    it was never given.
     """
 
     query: GapConsultQuery
     cancellation: Any
     connection_probe: Any
     deadline_monotonic: float
+    selected_sources: tuple[GapSourceDescription, ...] = ()
+    attempted_source_ids: Any = None
 
 
 class GapConsultHostPort(Protocol):
     """The application-facing view of the frozen gap-consult host."""
 
     def has_contributions(self) -> bool: ...
+
+    def describe_sources(
+        self, deadline_monotonic: float, *, cancellation: Any = None,
+        connection_probe: Any = None,
+    ) -> tuple[GapSourceDescription, ...]: ...
 
     def consult(
         self,
@@ -125,15 +159,24 @@ def gap_consult_host_is_dormant(host: object) -> bool:
 __all__ = [
     "GAP_CONSULT_MAX_GAP_PHRASES",
     "GAP_CONSULT_MAX_SUGGESTIONS",
+    "GAP_CONSULT_MAX_QUERY_SOURCES",
+    "GAP_CONSULT_MAX_QUERIES_PER_SOURCE",
     "GAP_CONSULT_PHRASE_MAX_CHARS",
     "GAP_CONSULT_QUESTION_MAX_CHARS",
+    "GAP_SOURCE_DISPLAY_NAME_MAX_CHARS",
+    "GAP_SOURCE_LANGUAGES_MAX",
+    "GAP_SOURCE_LANGUAGE_MAX_CHARS",
+    "GAP_SOURCE_CONTENT_TYPE_MAX_CHARS",
+    "GAP_SOURCE_QUERY_ADVICE_MAX_CHARS",
     "GAP_SUGGESTION_SOURCE_LABEL_MAX_CHARS",
     "GAP_SUGGESTION_SUMMARY_MAX_CHARS",
     "GAP_SUGGESTION_TITLE_MAX_CHARS",
     "GAP_SUGGESTION_URL_MAX_CHARS",
+    "GAP_SUGGESTION_ACTUAL_QUERY_MAX_CHARS",
     "GapConsultCallContext",
     "GapConsultHostPort",
     "GapConsultQuery",
+    "GapSourceDescription",
     "GapSuggestion",
     "gap_consult_host_is_dormant",
 ]

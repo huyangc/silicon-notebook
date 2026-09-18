@@ -354,10 +354,10 @@ def import_url_sources(
       而不是请求开始时算好的剩余额度——当前数由 store 在每条 INSERT 自己的写事务内
       重新 COUNT(冻结的剩余额度正是并发双请求都能花掉同一个名额的 TOCTOU)。
     * **admin 豁免**:owner 是 admin 的笔记本 ``capacity_limit=None``(不限)。
-    * **未配置解析服务 → 400**,且 ``detail`` 是服务层原文(``str(exc)``)而**不是**
-      ``user_error()``:它带的是「本地 MINERU_MODE 或云端 MINERU_API_TOKEN」这类部署
-      配置措辞,不是给终端用户看的中文文案,所以刻意不打 ``X-User-Message``。这条
-      行为在抽取前后逐字不变——插件路由得到的映射与浏览器端点完全一致。
+    * **未配置 PDF 解析服务**且没有受信代理名单时 → 400；有受信代理名单时，
+      仅其 Markdown 快照可通过，PDF 逐条拒绝。400 的 ``detail`` 是服务层原文
+      (``str(exc)``)而**不是** ``user_error()``:它带的是「本地 MINERU_MODE 或云端
+      MINERU_API_TOKEN」这类部署配置措辞,不打 ``X-User-Message``。
 
     ``notebook_id`` 的授权由**调用方**负责:这个函数只做容量与调度,不判权限。浏览器
     端点靠 ``sources:write`` 装饰器守卫;插件路由靠
@@ -367,10 +367,9 @@ def import_url_sources(
     个名字)。
 
     ``trusted_proxy_origins`` 是部署配置的受信代理 origin 白名单(SSRF 公网地址
-    检查的豁免面,详见 ``source_ingestion.add_url_sources``),**只由插件端口适配器
-    注入**——浏览器端点(下面的 ``add_url_sources`` 路由)刻意不传,恒 ``None``,
-    故导入探测半程的豁免只对插件端口可达;请求级输入在任何路径上都改不了名单
-    本身(解析下载半程按部署 settings 判定,见
+    检查的豁免面,详见 ``source_ingestion.add_url_sources``)，由调用方从部署
+    settings 注入。浏览器端点和插件端口均可导入受信代理的 Markdown 快照；
+    请求级输入在任何路径上都改不了名单本身。解析下载半程按部署 settings 判定,见
     ``source_ingestion._parser_trusted_proxy_origins``)。
     """
     repo = source_repository()
@@ -395,7 +394,15 @@ def add_url_sources(
     notebook_id: str,
     payload: AddUrlSourcesRequest,
 ) -> AddUrlSourcesResult:
-    return import_url_sources(notebook_id, payload.urls)
+    from app.services.source_ingestion import trusted_proxy_origin_set
+
+    return import_url_sources(
+        notebook_id,
+        payload.urls,
+        trusted_proxy_origins=trusted_proxy_origin_set(
+            get_settings().url_import_trusted_proxy_hosts
+        ),
+    )
 
 
 # response_model 是 SourceSummary 的子类：字段只增不减（多一个 reused），旧客户端

@@ -1,7 +1,7 @@
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services import remote_sources
-from app.services.remote_sources import PdfProbe
+from app.services.remote_sources import FetchResult, PdfProbe
 from app.services.sqlite_repository import SQLiteRepository
 
 
@@ -47,6 +47,62 @@ def test_endpoint_partial_created_and_rejected(tmp_path, monkeypatch):
     assert body["created"][0]["source_url"] == "https://a/d.pdf"
     assert len(body["rejected"]) == 1
     assert "不是 PDF" in body["rejected"][0]["reason"]
+
+
+def test_endpoint_imports_only_configured_proxy_markdown(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch, token="tok")
+    monkeypatch.setenv("URL_IMPORT_TRUSTED_PROXY_HOSTS", "http://127.0.0.1:8100")
+    settings = Settings()
+    repo = SQLiteRepository(settings)
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    import app.api.source_routes as source_routes_mod
+
+    monkeypatch.setattr(source_routes_mod, "get_settings", lambda: settings)
+    seen = []
+
+    def fake_fetch(url, timeout, *, allow_private=False):
+        seen.append((url, allow_private))
+        return FetchResult(200, "text/markdown", 9, b"# Snapshot")
+
+    monkeypatch.setattr(remote_sources, "_default_fetch", fake_fetch)
+    client = _client(repo, monkeypatch)
+    trusted = "http://127.0.0.1:8100/export/snapshot.md"
+    other = "http://127.0.0.1:8200/export/snapshot.md"
+    response = client.post(
+        f"/api/notebooks/{nb.id}/sources/url", json={"urls": [trusted, other]}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert [row["source_url"] for row in body["created"]] == [trusted]
+    assert body["created"][0]["type"] == "markdown"
+    assert [row["url"] for row in body["rejected"]] == [other]
+    assert seen == [(trusted, True), (other, False)]
+
+
+def test_endpoint_trusted_markdown_without_mineru(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch, token=None)
+    monkeypatch.setenv("MINERU_MODE", "off")
+    monkeypatch.setenv("URL_IMPORT_TRUSTED_PROXY_HOSTS", "http://127.0.0.1:8100")
+    settings = Settings()
+    repo = SQLiteRepository(settings)
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    import app.api.source_routes as source_routes_mod
+
+    monkeypatch.setattr(source_routes_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        remote_sources,
+        "_default_fetch",
+        lambda url, timeout, *, allow_private=False: FetchResult(
+            200, "text/markdown", 11, b"# Snapshot\n"
+        ),
+    )
+    client = _client(repo, monkeypatch)
+    response = client.post(
+        f"/api/notebooks/{nb.id}/sources/url",
+        json={"urls": ["http://127.0.0.1:8100/export/snapshot.md"]},
+    )
+    assert response.status_code == 200
+    assert response.json()["created"][0]["type"] == "markdown"
 
 
 def test_endpoint_no_token_returns_400(tmp_path, monkeypatch):

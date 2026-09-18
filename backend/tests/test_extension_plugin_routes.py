@@ -2158,7 +2158,7 @@ def test_url_import_maps_unconfigured_parser_to_400(
 
 def _trusted_proxy_probe_client(tmp_path, monkeypatch):
     """One app with the trusted-proxy env set, plus a probe spy and a quiet
-    scheduler. Shared by the injection test and its browser-route negative so
+    scheduler. Shared by the plugin and browser route tests so
     the two assert against the SAME deployment configuration."""
 
     import app.api.source_routes as source_routes_module
@@ -2216,24 +2216,27 @@ def test_url_import_injects_the_deployment_trusted_proxy_whitelist(
     ]
 
 
-def test_browser_url_route_never_receives_the_trusted_proxy_whitelist(
+def test_browser_url_route_uses_only_configured_trusted_proxy_origins(
     tmp_path, monkeypatch, frozen_runtime_reset
 ):
-    """红线守卫的另一半：同一部署（同一环境变量）下，浏览器的
-    `POST /api/notebooks/{id}/sources/url` 不注入白名单——probe 恒收
-    `allow_private=False`。将来有人为「两个半程对称」把白名单接到浏览器路由上
-    （下载半程读 settings，这个诱惑是现成的），这条立刻红。"""
+    """浏览器导入受信代理快照时只豁免部署名单精确命中的 origin。"""
 
     client, probes = _trusted_proxy_probe_client(tmp_path, monkeypatch)
     headers = _auth(client, "z00155015")
     notebook_id = _notebook(client, headers)
     response = client.post(
         f"/api/notebooks/{notebook_id}/sources/url",
-        json={"urls": ["http://127.0.0.1:8100/export/a.pdf"]},
+        json={"urls": [
+            "http://127.0.0.1:8100/export/a.pdf",
+            "http://127.0.0.1:8200/export/b.pdf",
+        ]},
         headers=headers,
     )
     assert response.status_code == 200, response.text
-    assert probes == [("http://127.0.0.1:8100/export/a.pdf", False)]
+    assert probes == [
+        ("http://127.0.0.1:8100/export/a.pdf", True),
+        ("http://127.0.0.1:8200/export/b.pdf", False),
+    ]
 
 
 # --------------------------------------------------------------------------

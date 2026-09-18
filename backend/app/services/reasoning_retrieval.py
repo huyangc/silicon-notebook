@@ -5437,7 +5437,7 @@ class ReasoningRetriever:
     ) -> "Dict[str, Any]":
         """本轮到底提不提供插件动作(设计文档 §3.1 的按轮事实闸)。
 
-        返回 `{}` 或 `{"plugin_actions": specs}` 而不是裸元组,是沿用同一段里
+        返回 `{}` 或插件动作及核心引导文案,而不是裸元组,是沿用同一段里
         `outline`/`consult_memory`/`kg_actions` 那条「可选参数有才传」的纪律:
         关闭态下 `reflect()` 的调用形状与接入这个扩展点之前逐字相同,既有的
         reflect 测试替身不必为一个它收不到的参数改签名。
@@ -5473,7 +5473,27 @@ class ReasoningRetriever:
         ):
             return {}
         state.plugin_actions_offered = state.plugin_specs
-        return {"plugin_actions": state.plugin_specs}
+        return {
+            "plugin_actions": state.plugin_specs,
+            "plugin_actions_nudge": (
+                "（系统提示:库内检索已无新证据。若问题可能依赖站外/近期信息,"
+                "可调用上方列出的站外检索动作获取外部证据(可[k]引用);"
+                "只有确认外部检索也不适用时才直接 answer。）"
+            ),
+        }
+
+    def _add_plugin_reflect_context(
+        self, state: "_ReasoningRunState", summary: str,
+        reflect_kwargs: Dict[str, Any], no_progress: bool, stale: int,
+        can_consume_result: bool,
+    ) -> str:
+        """Offer actions and append their core nudge only if another turn can use them."""
+        plugin_kwargs = self._plugin_action_kwargs(state, no_progress, stale)
+        plugin_nudge = plugin_kwargs.pop("plugin_actions_nudge", None)
+        reflect_kwargs.update(plugin_kwargs)
+        if plugin_nudge and can_consume_result:
+            return summary + plugin_nudge
+        return summary
 
     def _action_plugin(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
@@ -6731,8 +6751,8 @@ class ReasoningRetriever:
                 reflect_kwargs["outline"] = True
             if consult_memory_flag:
                 reflect_kwargs["consult_memory"] = True
-            reflect_kwargs |= self._plugin_action_kwargs(
-                state, no_progress, stale)
+            summary = self._add_plugin_reflect_context(
+                state, summary, reflect_kwargs, no_progress, stale, steps < max_steps)
             decision = self.reflect(question, summary, **reflect_kwargs)
             raise_if_cancelled(self.cancel_event)
             # 这一轮的大纲提交算不算「溢出纠错」:提前算与原地算等价(四个输入只由

@@ -1,7 +1,8 @@
 """The ``ask.gap_consult`` contributor: arXiv pointers when a run came up thin.
 
 What core hands this contributor is one bounded :class:`GapConsultQuery` — a
-question string and at most two gap phrases — and a monotonic deadline.  What
+question string, at most two gap phrases, and queries selected for arXiv —
+plus a monotonic deadline.  What
 it may not assume is anything about the thread it runs on: core runs the
 availability probe and :meth:`ArxivGapConsultContributor.consult` together on a
 private daemon thread with no copied context, so ``ContextVar`` and
@@ -15,7 +16,7 @@ not a politeness slot, not a round trip, not a term scan.  In order:
 1. not configured / ``consult_enabled`` false;
 2. already cancelled;
 3. no suggestion slots left for this call;
-4. no Latin search terms in the question or the gap phrases;
+4. no Latin search terms in the selected source phrases;
 5. not enough of the deadline left to finish inside it;
 6. the request itself.
 
@@ -51,9 +52,11 @@ from app.extension_sdk import (
     ExtensionResultStatus,
     GAP_SUGGESTION_SUMMARY_MAX_CHARS,
     GAP_SUGGESTION_TITLE_MAX_CHARS,
+    GAP_SUGGESTION_ACTUAL_QUERY_MAX_CHARS,
     GapConsultExtensionContext,
     GapConsultQuery,
     GapSuggestion,
+    SourceDescriptor,
 )
 
 from . import client as arxiv_client
@@ -65,6 +68,9 @@ from .settings import (
     search_kwargs,
 )
 from .terms import latin_terms
+
+
+ARXIV_SOURCE_ID = "arxiv"
 
 
 class ArxivGapConsultContributor:
@@ -102,6 +108,17 @@ class ArxivGapConsultContributor:
         settings = self.settings()
         return settings is not None and settings.consult_enabled
 
+    def describe_sources(self) -> tuple[SourceDescriptor, ...]:
+        """Offer the arXiv index to core's source-selection model."""
+
+        return (SourceDescriptor(
+            source_id=ARXIV_SOURCE_ID,
+            display_name=SOURCE_LABEL,
+            languages=("en",),
+            content_type="research papers",
+            query_advice="Use English scientific terms suited to arXiv papers.",
+        ),)
+
     # -- the contribution ---------------------------------------------------
 
     def consult(
@@ -130,13 +147,10 @@ class ArxivGapConsultContributor:
             )
 
         terms = _query_terms(context.query)
-        if not terms:
-            # arXiv is a Latin-keyword index.  A question written entirely in
-            # Chinese, with gap phrases to match, would return nothing at all —
-            # so sending it would spend a politeness slot and a round trip to
-            # learn what is already known here.  Both the question wording and
-            # every gap phrase are scanned, because a gap phrase is often the
-            # technical term the question itself paraphrased away.
+        search_query = _search_query(terms)
+        if not search_query:
+            # arXiv is a Latin-keyword index.  A selected query with no Latin
+            # terms would spend a politeness slot and a round trip for nothing.
             return _unavailable(
                 ExtensionFailureKind.UNAVAILABLE, "arxiv_no_latin_terms"
             )
@@ -151,7 +165,7 @@ class ArxivGapConsultContributor:
 
         try:
             papers = arxiv_client.search(
-                " ".join(terms),
+                search_query,
                 **search_kwargs(settings, limit=limit, budget_seconds=budget),
             )
         except arxiv_client.ArxivThrottled:
@@ -164,7 +178,7 @@ class ArxivGapConsultContributor:
             )
 
         suggestions = tuple(
-            _suggestion(paper)
+            _suggestion(paper, actual_query=search_query)
             for paper in papers
             if egress_allowed(paper.pdf_url, settings.base_url)
         )
@@ -185,8 +199,8 @@ def _unavailable(
     )
 
 
-def _suggestion(paper: ArxivPaper) -> GapSuggestion:
-    """Map one record onto core's four-field suggestion.
+def _suggestion(paper: ArxivPaper, *, actual_query: str = "") -> GapSuggestion:
+    """Map one record onto core's bounded suggestion fields.
 
     ``url`` is the PDF direct link, never the abstract page: core does not
     fetch the URL to find out what it is, and the import endpoint a reader
@@ -217,17 +231,15 @@ def _suggestion(paper: ArxivPaper) -> GapSuggestion:
         url=paper.pdf_url,
         summary=paper.summary[:GAP_SUGGESTION_SUMMARY_MAX_CHARS],
         source_label=SOURCE_LABEL,
+        actual_query=actual_query,
     )
 
 
 def _query_terms(query: GapConsultQuery) -> tuple[str, ...]:
-    """Latin search terms from the question *and* every gap phrase.
+    """Latin terms from selected arXiv phrases, or legacy direct-call input.
 
-    Both halves are scanned because they fail in opposite directions: a
-    question can be entirely in Chinese while its gap phrase is the English
-    term of art the retrieval never covered, and a question full of ordinary
-    English words can be carried by a single gap phrase naming the method.
-    Dropping either half throws away the case the other one cannot serve.
+    New host calls carry source-specific phrases.  Direct SDK calls that omit
+    ``source_queries`` retain the previous question-plus-gaps behavior.
 
     Which strings to scan is this contributor's decision and stays here; *how*
     a string yields terms belongs to :func:`.terms.latin_terms`, shared with
@@ -235,4 +247,20 @@ def _query_terms(query: GapConsultQuery) -> tuple[str, ...]:
     must not exist twice.
     """
 
+    if query.source_queries is not None:
+        return latin_terms(*query.source_queries.get(ARXIV_SOURCE_ID, ()))
     return latin_terms(query.question, *query.gaps)
+
+
+def _search_query(terms: tuple[str, ...]) -> str:
+    """Keep the plugin-reported phrase identical to its actual search input."""
+
+    selected: list[str] = []
+    length = 0
+    for term in terms:
+        extra = len(term) + bool(selected)
+        if length + extra > GAP_SUGGESTION_ACTUAL_QUERY_MAX_CHARS:
+            break
+        selected.append(term)
+        length += extra
+    return " ".join(selected)

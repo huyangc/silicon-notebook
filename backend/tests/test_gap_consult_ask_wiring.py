@@ -41,6 +41,7 @@ from app.domain.gap_consult import (
     GAP_CONSULT_MAX_SUGGESTIONS,
     GAP_CONSULT_PHRASE_MAX_CHARS,
     GAP_CONSULT_QUESTION_MAX_CHARS,
+    GapSourceDescription,
     GapSuggestion,
 )
 from app.extension_sdk import (
@@ -54,8 +55,10 @@ from app.extension_sdk import (
     ExtensionRegistrar,
     ExtensionResultStatus,
 )
+from app.extension_sdk.gap_consult import SourceDescriptor
 from app.extensions.bootstrap import build_extension_runtime
 from app.models.ask import (
+    AskGapSuggestion,
     AskIntentConfirmation,
     AskRequest,
     QueryIntentContract,
@@ -92,6 +95,18 @@ def _bundle(implementation: object, contribution_id: str = "corp.gap") -> _Bundl
     declaration = ContributionDeclaration(
         contribution_id, ASK_GAP_CONSULT_POINT, ContributionKind.CONTRIBUTOR
     )
+    if (not callable(getattr(implementation, "describe_sources", None))
+            and callable(getattr(implementation, "consult", None))):
+        original = implementation
+
+        class _Described:
+            def consult(self, context):
+                return original.consult(context)
+
+            def describe_sources(self):
+                return (SourceDescriptor("corp_source", "测试站外来源"),)
+
+        implementation = _Described()
     return _Bundle(
         ExtensionManifest(
             id=contribution_id,
@@ -108,13 +123,21 @@ def _bundle(implementation: object, contribution_id: str = "corp.gap") -> _Bundl
 class _Recorder:
     """Records every context it is handed and answers a canned result."""
 
-    def __init__(self, *items: GapSuggestion) -> None:
+    def __init__(
+        self, *items: GapSuggestion, source_id: str = "corp_source",
+        display_name: str = "测试站外来源",
+    ) -> None:
         self.items = items
+        self.source_id = source_id
+        self.display_name = display_name
         self.contexts: list[object] = []
 
     def consult(self, context):
         self.contexts.append(context)
         return ContributorResult(self.items, ExtensionResultStatus.AVAILABLE)
+
+    def describe_sources(self):
+        return (SourceDescriptor(self.source_id, self.display_name),)
 
     @property
     def queries(self) -> list[object]:
@@ -140,6 +163,8 @@ class _SeqLLM:
 
     def chat_json(self, messages, schema_hint, **kwargs):
         self.prompts.append(messages[-1]["content"])
+        if "source_queries" in schema_hint:
+            return json.dumps({"source_queries": {"corp_source": [QUESTION]}})
         if "sub_queries" in schema_hint:
             return json.dumps({"sub_queries": [{"query": "RTL 到 GDSII"}]})
         if "next_action" in schema_hint:
@@ -181,7 +206,8 @@ def make_repo(tmp_path, monkeypatch):
         bind_all_embedding_clients(repo, FakeEmbedder(dim=16))
         repo.settings.graph_ppr_enabled = False
         for workload_id in ("reasoning_agent", "evidence_refine", "ask_answer",
-                            "query_rewrite", "knowhow_complete"):
+                            "query_rewrite", "knowhow_complete",
+                            "gap_consult_query"):
             bind_chat_client(repo, workload_id, llm or _SeqLLM())
         made.append(repo)
         return repo
@@ -322,6 +348,175 @@ def test_trigger_on_uncovered_directions(make_repo):
     assert response.gap_suggestions[0].url == SUGGESTION.url
 
 
+def test_model_selection_calls_only_the_named_source_and_records_actual_attempts(make_repo):
+    class SelectOne(_SeqLLM):
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "source_queries" in schema_hint:
+                return json.dumps({"source_queries": {"selected": ["RTL implementation flow"]}})
+            return super().chat_json(messages, schema_hint, **kwargs)
+
+    selected = _Recorder(
+        GapSuggestion("Selected", "https://example.org/selected.pdf", "summary", "A",
+                      "RTL implementation flow"),
+        source_id="selected", display_name="Selected source",
+    )
+    omitted = _Recorder(
+        GapSuggestion("Omitted", "https://example.org/omitted.pdf"),
+        source_id="omitted", display_name="Omitted source",
+    )
+    repo = make_repo(
+        _bundle(selected, "corp.selected"),
+        _bundle(omitted, "corp.omitted"), llm=SelectOne(),
+    )
+    response = _ask(repo, _seed(repo))
+
+    assert len(selected.contexts) == 1
+    assert omitted.contexts == []
+    assert selected.queries[0].source_queries == {
+        "selected": ("RTL implementation flow",),
+    }
+    assert response.gap_egress == {
+        "query": QUESTION,
+        "sources": ["Selected source"],
+        "source_queries": {"Selected source": ["RTL implementation flow"]},
+    }
+    assert response.gap_suggestions[0].actual_query == "RTL implementation flow"
+
+
+def test_egress_receipt_keeps_each_source_when_display_labels_collide(make_repo):
+    class SelectThree(_SeqLLM):
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "source_queries" in schema_hint:
+                return json.dumps({"source_queries": {
+                    "s1": ["first"], "s2": ["second"], "s3": ["third"],
+                }})
+            return super().chat_json(messages, schema_hint, **kwargs)
+
+    plugins = (
+        _bundle(_Recorder(source_id="s1", display_name="A (s3)"), "corp.first"),
+        _bundle(_Recorder(source_id="s2", display_name="A"), "corp.second"),
+        _bundle(_Recorder(source_id="s3", display_name="A"), "corp.third"),
+    )
+    repo = make_repo(*plugins, llm=SelectThree())
+    receipt = _ask(repo, _seed(repo)).gap_egress
+    assert receipt is not None
+    assert receipt["sources"] == ["A (s3)", "A", "A (s3 #2)"]
+    assert receipt["source_queries"] == {
+        "A (s3)": ["first"], "A": ["second"], "A (s3 #2)": ["third"],
+    }
+
+
+def test_empty_model_selection_makes_no_external_call(make_repo):
+    class SelectNone(_SeqLLM):
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "source_queries" in schema_hint:
+                return '{"source_queries": {}}'
+            return super().chat_json(messages, schema_hint, **kwargs)
+
+    plugin = _Recorder(SUGGESTION)
+    repo = make_repo(_bundle(plugin), llm=SelectNone())
+    response = _ask(repo, _seed(repo))
+    assert plugin.contexts == []
+    assert response.gap_egress is None
+    assert response.gap_suggestions == []
+    assert _gap_step(response) is None
+
+
+def test_query_client_lookup_failure_leaves_answer_and_sources_untouched(
+    make_repo, monkeypatch,
+):
+    plugin = _Recorder(SUGGESTION)
+    repo = make_repo(_bundle(plugin))
+    service = repo._runtime.ask_service()
+    original_chat = service.model_clients.chat
+
+    def broken_lookup(workload_id):
+        if workload_id == "gap_consult_query":
+            raise RuntimeError("model catalog changed")
+        return original_chat(workload_id)
+
+    monkeypatch.setattr(service.model_clients, "chat", broken_lookup)
+    response = _ask(repo, _seed(repo))
+    assert response.answer
+    assert plugin.contexts == []
+    assert response.gap_suggestions == []
+    assert response.gap_egress is None
+
+
+def test_query_model_wait_cannot_exceed_shared_gap_deadline(make_repo):
+    class SlowSelection(_SeqLLM):
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "source_queries" in schema_hint:
+                time.sleep(0.4)  # provider ignores its cancellation/timeout
+                return json.dumps({"source_queries": {"corp_source": [QUESTION]}})
+            return super().chat_json(messages, schema_hint, **kwargs)
+
+    plugin = _Recorder(SUGGESTION)
+    repo = make_repo(_bundle(plugin), llm=SlowSelection())
+    repo.settings.ask_gap_consult_timeout_seconds = 0.1
+    service = repo._runtime.ask_service()
+    started = time.monotonic()
+    suggestions, egress = service._consult_gap_sources(
+        _PreparedStub(), ask_retrieval_limits("standard"), [],
+        top_hits=[], chunks=[], elements=[], cancellation=None,
+        sink=[], on_step=None,
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.3, elapsed
+    assert plugin.contexts == []
+    assert suggestions == () and egress is None
+
+
+def test_external_summary_is_separate_from_the_original_answer(make_repo):
+    class Supplement:
+        configured = True
+
+        def chat_json(self, *_args, **_kwargs):
+            return json.dumps({
+                "text": "站外摘要提出另一种流程 [X1]。",
+                "conflicts": [{
+                    "kb_says": "库内流程先验证",
+                    "external_says": "站外摘要说先布局",
+                    "note": "需进一步核对",
+                }],
+            })
+
+    baseline = _answer_without_plugin(make_repo)
+    plugin = _Recorder(SUGGESTION)
+    repo = make_repo(_bundle(plugin))
+    bind_chat_client(repo, "external_evidence_answer", Supplement())
+    response = _ask(repo, _seed(repo))
+
+    assert response.answer == baseline["answer"]
+    assert response.conclusion == baseline["conclusion"]
+    assert response.external_evidence is not None
+    assert "[X1]" in response.external_evidence.text
+    assert len(response.external_evidence.conflicts) == 1
+    assert any(step.step_type == "external_evidence"
+               for step in response.reasoning_trace or [])
+
+
+def test_supplement_client_lookup_failure_is_optional(make_repo, monkeypatch):
+    repo = make_repo()
+    service = repo._runtime.ask_service()
+    original_chat = service.model_clients.chat
+
+    def broken_lookup(workload_id):
+        if workload_id == "external_evidence_answer":
+            raise RuntimeError("model catalog changed")
+        return original_chat(workload_id)
+
+    monkeypatch.setattr(service.model_clients, "chat", broken_lookup)
+    suggestion = AskGapSuggestion(
+        title=SUGGESTION.title, url=SUGGESTION.url,
+        summary=SUGGESTION.summary, source_label=SUGGESTION.source_label,
+    )
+    assert service._draft_external_evidence_section(
+        (suggestion,), (), (), cancel_event=None,
+        deadline=time.monotonic() + 1,
+    ) is None
+
+
 def test_trigger_on_thin_evidence_below_the_tier_floor(make_repo):
     """The thin-evidence trigger reads THIS effort tier's own floor.
 
@@ -341,10 +536,10 @@ def test_trigger_on_thin_evidence_below_the_tier_floor(make_repo):
     assert service._consult_gap_sources(
         prepared, overview, [], top_hits=covered, chunks=[], elements=[],
         cancellation=None, sink=[], on_step=None,
-    ) == ()
+    ) == ((), None)
     assert plugin.contexts == []
 
-    admitted = service._consult_gap_sources(
+    admitted, _egress = service._consult_gap_sources(
         prepared, standard, [], top_hits=covered, chunks=[], elements=[],
         cancellation=None, sink=[], on_step=None,
     )
@@ -356,7 +551,7 @@ def test_trigger_on_thin_evidence_below_the_tier_floor(make_repo):
         prepared, overview, [],
         top_hits=covered[:4], chunks=covered[:4], elements=covered[:4],
         cancellation=None, sink=[], on_step=None,
-    ) == ()
+    ) == ((), None)
     assert plugin.contexts == []
 
 
@@ -375,7 +570,7 @@ def test_no_trigger_when_covered_and_above_floor(make_repo):
         _PreparedStub(), ask_retrieval_limits("overview"), trace,
         top_hits=[object()] * 30, chunks=[], elements=[],
         cancellation=None, sink=trace, on_step=None,
-    ) == ()
+    ) == ((), None)
     assert plugin.contexts == []
     assert trace == []
 
@@ -427,7 +622,7 @@ def test_egress_payload_carries_nothing_else(make_repo):
 
     (query,) = plugin.queries
     assert set(type(query).__dataclass_fields__) == {
-        "question", "gaps", "max_suggestions",
+        "question", "gaps", "max_suggestions", "source_queries",
     }
     assert query.max_suggestions == GAP_CONSULT_MAX_SUGGESTIONS
     rendered = repr(query)
@@ -709,6 +904,11 @@ def test_plugin_raises_leaves_the_answer_verbatim(make_repo):
     step = _gap_step(response)
     assert step is not None, "宿主/插件抛异常不能让披露步一并消失——外扩确实发生过"
     assert step.detail["count"] == 0
+    assert response.gap_egress == {
+        "query": QUESTION,
+        "sources": ["测试站外来源"],
+        "source_queries": {"测试站外来源": [QUESTION]},
+    }
     # Cause-agnostic wording (see the step's own comment): it must read the
     # same "已向站外来源询问…得到 0 条建议" it would on a thin-evidence run
     # that never touched a raising plugin, never a failure/error word.
@@ -736,6 +936,9 @@ def test_a_misbehaving_host_still_leaves_the_answer_verbatim(make_repo):
     class BrokenHost:
         def has_contributions(self):
             return True
+
+        def describe_sources(self, *_args, **_kwargs):
+            return (GapSourceDescription("corp.gap", "corp_source", "测试站外来源"),)
 
         def consult(self, _call_context, **_kwargs):
             raise RuntimeError("host itself is broken")
@@ -793,6 +996,9 @@ def test_a_host_answering_the_wrong_shape_is_dropped_as_a_batch(
     class _WrongShape:
         def has_contributions(self):
             return True
+
+        def describe_sources(self, *_args, **_kwargs):
+            return (GapSourceDescription("corp.gap", "corp_source", "测试站外来源"),)
 
         def consult(self, _call_context, **_kwargs):
             return answer

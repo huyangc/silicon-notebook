@@ -31,15 +31,24 @@ from typing import Callable
 from app.domain.cancellation import AskCancelled
 from app.domain.gap_consult import (
     GAP_CONSULT_MAX_GAP_PHRASES,
+    GAP_CONSULT_MAX_QUERY_SOURCES,
+    GAP_CONSULT_MAX_QUERIES_PER_SOURCE,
     GAP_CONSULT_MAX_SUGGESTIONS,
     GAP_CONSULT_PHRASE_MAX_CHARS,
     GAP_CONSULT_QUESTION_MAX_CHARS,
+    GAP_SOURCE_CONTENT_TYPE_MAX_CHARS,
+    GAP_SOURCE_DISPLAY_NAME_MAX_CHARS,
+    GAP_SOURCE_LANGUAGE_MAX_CHARS,
+    GAP_SOURCE_LANGUAGES_MAX,
+    GAP_SOURCE_QUERY_ADVICE_MAX_CHARS,
     GAP_SUGGESTION_SOURCE_LABEL_MAX_CHARS,
     GAP_SUGGESTION_SUMMARY_MAX_CHARS,
     GAP_SUGGESTION_TITLE_MAX_CHARS,
     GAP_SUGGESTION_URL_MAX_CHARS,
+    GAP_SUGGESTION_ACTUAL_QUERY_MAX_CHARS,
     GapConsultCallContext,
     GapConsultQuery,
+    GapSourceDescription,
     GapSuggestion,
 )
 from app.extension_sdk import (
@@ -54,6 +63,7 @@ from app.extension_sdk.gap_consult import (
     ASK_GAP_CONSULT_POINT,
     GapConsultAvailabilityContext,
     GapConsultExtensionContext,
+    SourceDescriptor,
 )
 from app.extensions.host_admission import (
     ADMISSION_CANCEL_STRIDE as _ADMISSION_CANCEL_STRIDE,
@@ -154,6 +164,107 @@ class GapConsultHost:
 
         return bool(self._contributors)
 
+    def describe_sources(
+        self, deadline_monotonic: float, *, cancellation: object = None,
+        connection_probe: object = None,
+    ) -> tuple[GapSourceDescription, ...]:
+        """Offer only live, well-formed source descriptions within the run budget."""
+        if not self._contributors or not _valid_deadline(deadline_monotonic):
+            return ()
+        if connection_probe is not None and not _connection_clear(connection_probe):
+            return ()
+        offered: list[GapSourceDescription] = []
+        seen: set[str] = set()
+        for item in self._contributors:
+            _raise_if_cancelled(cancellation)
+            if len(offered) >= GAP_CONSULT_MAX_QUERY_SOURCES:
+                break
+            if not _deadline_open(_safe_clock(self._clock), deadline_monotonic):
+                break
+            implementation = item.contribution.implementation
+            try:
+                describe = getattr(implementation, "describe_sources", None)
+            except Exception:  # noqa: BLE001 — one broken plugin stays local
+                continue
+            if not callable(describe):
+                continue
+            cell = _WorkerCell()
+
+            def _target() -> None:
+                try:
+                    contribution_id = item.contribution.declaration.id
+                    availability = self._registry.availability(
+                        contribution_id,
+                        GapConsultAvailabilityContext(
+                            contribution_id, deadline_monotonic
+                        ),
+                    )
+                    if (availability.status is AvailabilityStatus.AVAILABLE
+                            and (connection_probe is None
+                                 or _connection_clear(connection_probe))
+                            and not cell.abandoned
+                            and not _is_cancelled(cancellation)
+                            and _deadline_open(_safe_clock(self._clock), deadline_monotonic)):
+                        cell.result = describe()
+                except BaseException:  # noqa: BLE001 — optional handshake
+                    cell.failed = True
+                finally:
+                    cell.done = True
+
+            worker = threading.Thread(target=_target, daemon=True)
+            worker.start()
+            while worker.is_alive():
+                now = _safe_clock(self._clock)
+                worker.join(
+                    _JOIN_SLICE_SECONDS if now is None else
+                    max(0.0, min(_JOIN_SLICE_SECONDS, deadline_monotonic - now))
+                )
+                if _is_cancelled(cancellation):
+                    cell.abandoned = True
+                    raise AskCancelled()
+                if not _deadline_open(_safe_clock(self._clock), deadline_monotonic):
+                    cell.abandoned = True
+                    return tuple(offered)
+            if _is_cancelled(cancellation):
+                raise AskCancelled()
+            if not _deadline_open(_safe_clock(self._clock), deadline_monotonic):
+                return tuple(offered)
+            if cell.failed or not cell.done or type(cell.result) is not tuple:
+                continue
+            for descriptor in cell.result[:GAP_CONSULT_MAX_QUERY_SOURCES]:
+                if type(descriptor) is not SourceDescriptor:
+                    continue
+                source_id = descriptor.source_id
+                if not _stable_code(source_id) or source_id in seen:
+                    continue
+                display_name = _clean_text(
+                    descriptor.display_name, GAP_SOURCE_DISPLAY_NAME_MAX_CHARS,
+                )
+                if not display_name:
+                    continue
+                if type(descriptor.languages) is not tuple:
+                    continue
+                languages = tuple(
+                    _clean_text(language, GAP_SOURCE_LANGUAGE_MAX_CHARS) or ""
+                    for language in descriptor.languages[:GAP_SOURCE_LANGUAGES_MAX]
+                )
+                content_type = _clean_text(
+                    descriptor.content_type, GAP_SOURCE_CONTENT_TYPE_MAX_CHARS,
+                )
+                query_advice = _clean_text(
+                    descriptor.query_advice, GAP_SOURCE_QUERY_ADVICE_MAX_CHARS,
+                )
+                if content_type is None or query_advice is None:
+                    continue
+                seen.add(source_id)
+                offered.append(GapSourceDescription(
+                    item.contribution.declaration.id, source_id, display_name,
+                    languages, content_type, query_advice,
+                ))
+                if len(offered) >= GAP_CONSULT_MAX_QUERY_SOURCES:
+                    break
+        return tuple(offered)
+
     def consult(
         self,
         call_context: GapConsultCallContext,
@@ -171,6 +282,11 @@ class GapConsultHost:
         # The host does not trust its caller either: an out-of-contract query
         # would otherwise be forwarded verbatim to a third party.
         if not _valid_query(query):
+            return ()
+        if not query.source_queries or not call_context.selected_sources:
+            return ()
+        if any(type(source) is not GapSourceDescription
+               for source in call_context.selected_sources):
             return ()
         if not _valid_deadline(call_context.deadline_monotonic):
             return ()
@@ -190,6 +306,18 @@ class GapConsultHost:
                 break
             _raise_if_cancelled(call_context.cancellation)
             contribution_id = item.contribution.declaration.id
+            selected = tuple(
+                source for source in call_context.selected_sources
+                if source.contribution_id == contribution_id
+                and source.source_id in query.source_queries
+            )
+            if not selected:
+                continue
+            contributor_query = GapConsultQuery(
+                query.question, query.gaps, query.max_suggestions,
+                {source.source_id: query.source_queries[source.source_id]
+                 for source in selected},
+            )
             plugin_id = item.plugin_id
             started = _safe_clock(self._clock)
             if not _deadline_open(started, call_context.deadline_monotonic):
@@ -203,7 +331,8 @@ class GapConsultHost:
                 )
                 break
             attempt = self._execute(
-                item, call_context, query.max_suggestions - len(accepted)
+                item, call_context, contributor_query, selected,
+                query.max_suggestions - len(accepted)
             )
             if attempt.reason is not None:
                 _emit(
@@ -268,6 +397,8 @@ class GapConsultHost:
         self,
         item: RegisteredContribution,
         call_context: GapConsultCallContext,
+        contributor_query: GapConsultQuery,
+        selected: tuple[GapSourceDescription, ...],
         remaining: int,
     ) -> _Attempt:
         """Decide availability and run one contributor on one daemon thread.
@@ -302,6 +433,10 @@ class GapConsultHost:
         implementation = item.contribution.implementation
         deadline = call_context.deadline_monotonic
         cell = _WorkerCell()
+        # Serialize the handoff mark with abandonment.  Once the caller has
+        # timed out and taken its receipt snapshot, the worker may no longer
+        # start an unrecorded contributor call.
+        start_lock = threading.Lock()
 
         def _target() -> None:
             try:
@@ -316,17 +451,37 @@ class GapConsultHost:
                     cell.ends_budget = True
                 elif availability.status is not AvailabilityStatus.AVAILABLE:
                     cell.reason = availability.reason_code
+                elif (
+                    cell.abandoned or _is_cancelled(call_context.cancellation)
+                    or not _deadline_open(_safe_clock(self._clock), deadline)
+                ):
+                    cell.reason = "gap_consult_timeout"
+                    cell.ends_budget = True
                 else:
-                    cell.result = implementation.consult(
-                        GapConsultExtensionContext(
-                            call_context.query,
-                            # The SDK face, not the raw event: a compliant
-                            # plugin may call ``raise_if_cancelled()``.
-                            _SdkCancellation(call_context.cancellation),
-                            remaining,
-                            deadline,
+                    with start_lock:
+                        if (
+                            cell.abandoned or _is_cancelled(call_context.cancellation)
+                            or not _deadline_open(_safe_clock(self._clock), deadline)
+                        ):
+                            cell.reason = "gap_consult_timeout"
+                            cell.ends_budget = True
+                            permitted = False
+                        else:
+                            attempts = call_context.attempted_source_ids
+                            if type(attempts) is list:
+                                attempts.extend(source.source_id for source in selected)
+                            permitted = True
+                    if permitted:
+                        cell.result = implementation.consult(
+                            GapConsultExtensionContext(
+                                contributor_query,
+                                # The SDK face, not the raw event: a compliant
+                                # plugin may call ``raise_if_cancelled()``.
+                                _SdkCancellation(call_context.cancellation),
+                                remaining,
+                                deadline,
+                            )
                         )
-                    )
             except BaseException:  # noqa: BLE001 — a plugin fault is fail-open
                 cell.failed = True
             finally:
@@ -356,10 +511,12 @@ class GapConsultHost:
             # and abandoned when it did not.  "Past the deadline" is a fact
             # about the clock, not about which slice noticed.
             if _is_cancelled(call_context.cancellation):
-                cell.abandoned = True
+                with start_lock:
+                    cell.abandoned = True
                 raise AskCancelled()
             if not _deadline_open(_safe_clock(self._clock), deadline):
-                cell.abandoned = True
+                with start_lock:
+                    cell.abandoned = True
                 return _Attempt("gap_consult_timeout", ends_budget=True)
             if finished:
                 break
@@ -387,6 +544,18 @@ def _valid_query(value: object) -> bool:
         )
         and type(value.max_suggestions) is int
         and 1 <= value.max_suggestions <= GAP_CONSULT_MAX_SUGGESTIONS
+        and (value.source_queries is None or (
+            type(value.source_queries) is dict
+            and len(value.source_queries) <= GAP_CONSULT_MAX_QUERY_SOURCES
+            and all(
+                _stable_code(source_id)
+                and type(queries) is tuple
+                and 0 < len(queries) <= GAP_CONSULT_MAX_QUERIES_PER_SOURCE
+                and all(type(phrase) is str and 0 < len(phrase) <= GAP_CONSULT_QUESTION_MAX_CHARS
+                        for phrase in queries)
+                for source_id, queries in value.source_queries.items()
+            )
+        ))
     )
 
 
@@ -458,10 +627,18 @@ def _sanitized(
         source_label = _clean_text(
             item.source_label, GAP_SUGGESTION_SOURCE_LABEL_MAX_CHARS
         )
-        if summary is None or source_label is None:
+        # This field claims to report the exact phrase the contributor used.
+        # Shortening or trimming it would turn a receipt into a different query.
+        actual_query = item.actual_query
+        if (
+            summary is None or source_label is None
+            or type(actual_query) is not str
+            or len(actual_query) > GAP_SUGGESTION_ACTUAL_QUERY_MAX_CHARS
+            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in actual_query)
+        ):
             continue
         seen_urls.add(url)
-        admitted.append(GapSuggestion(title, url, summary, source_label))
+        admitted.append(GapSuggestion(title, url, summary, source_label, actual_query))
     return tuple(admitted)
 
 

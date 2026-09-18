@@ -159,18 +159,18 @@ class ParserChainExecution:
         # 已归一);只影响 URL 来源在 _local_path 的下载是否豁免公网地址检查。
         self._trusted_proxy_origins = frozenset(trusted_proxy_origins or ())
         self.cancellation = _NeverCancelled()
-        suffix = ".pdf" if source_kind == "url" else Path(file_name).suffix.lower()
+        suffix = Path(file_name).suffix.lower() or (".pdf" if source_kind == "url" else "")
         self.source = ParserSourceDescriptor(source_kind, suffix)
         self._self_hosted_configured = bool(
             getattr(mineru_client, "configured", False)
         )
         self._cloud_configured = bool(getattr(cloud_client, "configured", False))
         self._self_hosted_capable = (
-            source_kind == "url"
+            (source_kind == "url" and suffix == ".pdf")
             or engine_supports_file("mineru_self_hosted", file_name)
         )
         self._cloud_capable = (
-            source_kind == "url"
+            (source_kind == "url" and suffix == ".pdf")
             or engine_supports_file("mineru_cloud", file_name)
         )
         self._self_hosted_allowed = (
@@ -378,7 +378,7 @@ class ParserChainExecution:
                 effective_file_name = self.file_name or ""
                 if (
                     self.source.kind == "url"
-                    and Path(effective_file_name).suffix.lower() != ".pdf"
+                    and Path(effective_file_name).suffix.lower() not in (".pdf", ".md")
                 ):
                     effective_file_name = f"{effective_file_name or 'source'}.pdf"
                 elements = parse_builtin_source_file(
@@ -457,7 +457,7 @@ class ParserChainExecution:
         if self.source.kind == "file":
             return Path(self.file_path)
         if self._temp_path is None:
-            fd, tmp = tempfile.mkstemp(suffix=".pdf")
+            fd, tmp = tempfile.mkstemp(suffix=self.source.suffix)
             os.close(fd)
             self._temp_path = Path(tmp)
             remote_sources.download_pdf(

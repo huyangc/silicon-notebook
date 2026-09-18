@@ -618,6 +618,24 @@ export type GapSuggestion = {
   url: string;
   summary?: string;
   source_label?: string;
+  /** The search phrase actually used by the contributor for this result. */
+  actual_query?: string;
+};
+
+/** Sources and phrases attempted during this run, including zero-result attempts. */
+export type GapEgress = {
+  query: string;
+  sources: string[];
+  source_queries?: Record<string, string[]>;
+};
+
+export type ExternalEvidenceSection = {
+  text: string;
+  conflicts: {
+    kb_says: string;
+    external_says: string;
+    note: string;
+  }[];
 };
 
 export type AskResponse = {
@@ -657,6 +675,10 @@ export type AskResponse = {
   /** 站外来源建议（``ask.gap_consult``）：不是证据，缺席时后端按 `exclude_if`
    *  惯例整键缺席（零插件部署与历史回答因此逐字节相同）。 */
   gap_suggestions?: GapSuggestion[];
+  /** A separate, unverified supplement based on external result summaries. */
+  external_evidence?: ExternalEvidenceSection | null;
+  /** Actual external targets and phrases attempted, even if none returned a result. */
+  gap_egress?: GapEgress | null;
   model_errors?: {
     service_id: string;
     service_name: string;

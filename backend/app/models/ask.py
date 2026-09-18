@@ -31,6 +31,7 @@ from app.core.model_safety import (
     safe_model_support_id,
 )
 from app.domain.gap_consult import (
+    GAP_SUGGESTION_ACTUAL_QUERY_MAX_CHARS,
     GAP_SUGGESTION_SOURCE_LABEL_MAX_CHARS,
     GAP_SUGGESTION_SUMMARY_MAX_CHARS,
     GAP_SUGGESTION_TITLE_MAX_CHARS,
@@ -773,6 +774,22 @@ class AskGapSuggestion(BaseModel):
     source_label: str = Field(
         default="", max_length=GAP_SUGGESTION_SOURCE_LABEL_MAX_CHARS
     )
+    actual_query: str = Field(
+        default="", max_length=GAP_SUGGESTION_ACTUAL_QUERY_MAX_CHARS
+    )
+
+
+class ExternalEvidenceConflict(BaseModel):
+    kb_says: str = Field(max_length=400)
+    external_says: str = Field(max_length=400)
+    note: str = Field(default="", max_length=300)
+
+
+class ExternalEvidenceSection(BaseModel):
+    """Clearly labelled, unverified supplement from outside summaries."""
+
+    text: str = Field(max_length=2000)
+    conflicts: List[ExternalEvidenceConflict] = Field(default_factory=list)
 
 
 class AskResponse(BaseModel):
@@ -860,6 +877,12 @@ class AskResponse(BaseModel):
     # payload and a reopened legacy turn simply has none.
     gap_suggestions: List[AskGapSuggestion] = Field(
         default_factory=list, exclude_if=lambda value: not value
+    )
+    external_evidence: Optional[ExternalEvidenceSection] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    gap_egress: Optional[Dict[str, Any]] = Field(
+        default=None, exclude_if=lambda value: value is None
     )
     model_errors: List[ModelError] = Field(default_factory=list)
 

@@ -737,12 +737,24 @@ default ports normalized — a different port is a different origin), and a matc
 skips only the public-address check in the import probe and the parse-time
 download; scheme/credential/port shape checks still apply. The list comes from
 this deployment configuration only — request input can never alter it. The
-probe-side exemption is injected by the plugin route adapter only (browser and
-MCP URL imports never receive it); the parse-time download applies the list to
-every URL source whose origin matches, reparse included — so a whitelisted
-origin that is publicly resolvable also exempts browser-created sources of that
-origin during the parse download, redirect chain included. Only list origins you
-trust to that extent.
+probe checks the initial URL against this deployment list for both browser and
+plugin-port imports; an origin match exempts redirects only while each target
+remains on that same normalized origin. Cross-origin redirects must pass the
+public-address check, even if their destination is also listed. The parse-time
+download applies the list to every matching
+URL source, reparse included. A matching proxy may return `text/markdown` as a
+snapshot: it is imported as `.md` through the builtin Markdown parser without
+MinerU, including from the ordinary UI import button. Other origins remain
+direct-PDF-only. Only list origins you trust to that extent.
+
+Reasoning Ask's optional gap consultation uses `gap_consult_query` to select
+described external sources and prepare per-source queries, then uses
+`external_evidence_answer` for a separate unverified supplement when snippets
+are available. The example binds both to `general` with thinking disabled.
+An unbound or failed query workload calls no external contributor; an unbound
+supplement workload leaves the drafted answer intact. Both phases, source
+discovery, and contributor calls share `ASK_GAP_CONSULT_TIMEOUT_SECONDS`
+(default 4 seconds, `0 < x ≤ 30`), rather than receiving separate budgets.
 
 **Retrieval:**
 
