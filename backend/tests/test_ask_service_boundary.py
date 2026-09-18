@@ -437,6 +437,7 @@ def test_reasoning_conditional_complete_query_does_not_claim_full_table():
     assert response.result_sets == []
     assert response.result_coverage is None
     assert "不能视为全部结果" in response.conclusion
+    assert response.completeness_notice == "本次请求未完成，不能视为全部结果。"
     assert service.knowhow_store.catalog_calls == 1
 
 

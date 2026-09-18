@@ -1073,6 +1073,7 @@ class PublicTurn(BaseModel):
 
     question: str = ""
     answer_md: str = ""
+    completeness_notice: str = Field(default="", exclude_if=lambda value: not value)
     asked_at: str = ""
     answered_at: str = ""
     # grounded / overview / inferred (答案可信度分档).

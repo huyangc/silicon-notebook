@@ -1511,11 +1511,12 @@ def test_notebook_without_a_kg_and_without_collections_keeps_the_early_return(ar
     )
     _bind_reasoning(arepo, llm)
 
-    resp = arepo.ask(nb.id, AskRequest(question="库里有哪些公式", mode="reasoning"))
+    resp = arepo.ask(nb.id, _completeness_required_payload("库里有哪些公式"))
 
     assert resp.kg_required is True
     assert resp.llm_mode == "deterministic"
     assert "当前笔记本没有可检索的来源" in resp.conclusion
+    assert resp.completeness_notice == "本次请求未完成，不能视为全部结果。"
     assert not llm.answer_prompts
 
 

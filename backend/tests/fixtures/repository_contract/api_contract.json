@@ -8887,6 +8887,11 @@
               "title": "Asked At",
               "type": "string"
             },
+            "completeness_notice": {
+              "default": "",
+              "title": "Completeness Notice",
+              "type": "string"
+            },
             "evidence_level": {
               "default": "inferred",
               "title": "Evidence Level",

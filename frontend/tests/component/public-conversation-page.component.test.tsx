@@ -99,6 +99,27 @@ test("多轮问答竖排渲染，每轮的问题与答案都在", async () => {
   expect(screen.getByText("3 轮问答")).toBeInTheDocument();
 });
 
+test("公开分享中完整性提示不会被未闭合的代码围栏吞掉", async () => {
+  const notice = "本次回答未验证完整性，不能视为全部结果。";
+  mocks.fetchPublicConversation.mockResolvedValue({
+    ...CONVERSATION,
+    turns: [{
+      ...CONVERSATION.turns[0],
+      answer_md: `示例\n\n\`\`\`text\n未闭合\n\n> ${notice}`,
+      completeness_notice: notice,
+      references: [],
+      images: [],
+    }],
+  });
+  const { container } = render(<PublicConversationPage />);
+
+  const visibleNotice = await screen.findByText(notice);
+  const code = container.querySelector(".public-turn-answer pre code");
+  expect(code).toHaveTextContent("未闭合");
+  expect(code).not.toHaveTextContent(notice);
+  expect(visibleNotice).toHaveClass("answer-completeness-notice");
+});
+
 test("正文 [k] 标记编号取自 key 的序号，且每轮号段互相隔离", async () => {
   const { container } = render(<PublicConversationPage />);
 

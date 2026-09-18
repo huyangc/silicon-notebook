@@ -27,6 +27,7 @@ import {
   type AnswerReference,
 } from "./answer-formatting";
 import { AnswerMarkdown } from "./answer-markdown";
+import { answerBodyWithoutCompletenessNotice } from "./answer-completeness";
 import type { CitationImageOrder, CitationImageSlotItem } from "./rehype-citation-images";
 import { GapSuggestionsPanel } from "./answer-gap-suggestions";
 import { AuthedImage } from "./authed-image";
@@ -1553,10 +1554,7 @@ export function AnswerView({
   // 后端把完整性提示附在答案末尾。模型正文可能以未闭合的 Markdown 代码围栏
   // 结束；把已知的服务端提示单独渲染，避免它被吞进代码块。复制仍使用原文。
   const completenessNotice = answer.completeness_notice ?? "";
-  const noticeSuffix = `\n\n> ${completenessNotice}`;
-  const renderedAnswerText = completenessNotice && answerText.endsWith(noticeSuffix)
-    ? answerText.slice(0, -noticeSuffix.length)
-    : answerText === completenessNotice ? "" : answerText;
+  const renderedAnswerText = answerBodyWithoutCompletenessNotice(answerText, completenessNotice);
   const scaleIndexQueued = scaleIndexStatus?.state === "queued"
     && !scaleIndexStatus.building;
   const references = useMemo(
