@@ -399,10 +399,11 @@ class _ValidUnderstandingClient:
 
     configured = True
 
-    def __init__(self, normalized, entities, ambiguities=()):
+    def __init__(self, normalized, entities, ambiguities=(), needs=None):
         self.normalized = normalized
         self.entities = list(entities)
         self.ambiguities = list(ambiguities)
+        self.needs = bool(self.ambiguities) if needs is None else needs
 
     def chat_json(self, messages, schema_hint, **kwargs):
         return json.dumps({
@@ -414,7 +415,7 @@ class _ValidUnderstandingClient:
             "mandatory_topics": [],
             "ambiguities": self.ambiguities,
             "confidence": 0.9,
-            "needs_clarification": bool(self.ambiguities),
+            "needs_clarification": self.needs,
         })
 
 
@@ -467,17 +468,26 @@ def test_valid_model_clarification_is_not_augmented_by_wording_rules():
     ]
 
 
-def test_malformed_row_does_not_silence_a_model_that_asked():
-    # 顶层形状合法、但唯一一条歧义行缺 question:该行被丢弃,措辞规则也不再
-    # 兜底;模型「要追问」的决定仍须保住,由通用必答行承接。
+@pytest.mark.parametrize("needs", [True, False])
+def test_ambiguity_row_without_question_is_malformed_and_falls_back(needs):
+    # 顶层字段齐全、但歧义行缺 question:解析器会丢掉这行,若仍算理解成功,
+    # needs=False 时问题就不经追问直接放行。这类输出按理解失败处理,由措辞
+    # 规则兜底。
     client = _ValidUnderstandingClient(
-        "它的锁定时间是多少？", [], [{"reason": "指代不明", "required": True}],
+        "它的锁定时间是多少？",
+        [],
+        [{"reason": "指代不明", "required": True}],
+        needs=needs,
+    )
+    status: dict[str, bool] = {}
+
+    contract = plan_query_intent(
+        client, "它的锁定时间是多少？", status=status,
     )
 
-    contract = plan_query_intent(client, "它的锁定时间是多少？")
-
+    assert status["understanding_succeeded"] is False
     assert contract["needs_clarification"] is True
-    assert [row["id"] for row in contract["ambiguities"]] == ["ambiguity-1"]
+    assert [row["id"] for row in contract["ambiguities"]] == ["ambiguity-input"]
 
 
 def test_confirmed_answers_are_frozen_into_authoritative_research_question():

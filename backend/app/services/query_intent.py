@@ -105,9 +105,15 @@ def _has_unresolved_reference(text: str) -> bool:
 
 
 def _understanding_response_is_valid(data: object) -> bool:
-    """Require the classifier fields that make automatic dispatch trustworthy."""
+    """Require the fields that let the model alone decide whether to ask.
+
+    Every ambiguity row must carry a question: a row the parser would drop is
+    malformed output, and it must fall back to the wording rules instead of
+    silently clearing the request.
+    """
     if not isinstance(data, dict):
         return False
+    ambiguities = data.get("ambiguities")
     return (
         isinstance(data.get("normalized_question"), str)
         and bool(data["normalized_question"].strip())
@@ -116,7 +122,11 @@ def _understanding_response_is_valid(data: object) -> bool:
         in RESULT_SCOPES
         and isinstance(data.get("completeness_required"), bool)
         and isinstance(data.get("mandatory_topics"), list)
-        and isinstance(data.get("ambiguities"), list)
+        and isinstance(ambiguities, list)
+        and all(
+            isinstance(row, dict) and bool(as_text(row.get("question")))
+            for row in ambiguities
+        )
         and isinstance(data.get("needs_clarification"), bool)
     )
 
@@ -420,9 +430,7 @@ def plan_query_intent(
     # "它/这个/that" is the model's to resolve from the question and history.
     # The two wording rules below only stand in when no usable understanding
     # exists (unconfigured, failed or malformed model output), which includes
-    # every ``client=None`` gate on the direct-compatibility path. A malformed
-    # ambiguity row cannot silence a model that asked: needs_clarification=true
-    # with no usable row still gets the generic required row below.
+    # every ``client=None`` gate on the direct-compatibility path.
     if not understanding_succeeded:
         normalized_candidate = as_text(data.get("normalized_question"))
         context_for_referent = f"{question}\n{history}".casefold()
