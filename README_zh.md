@@ -17,6 +17,8 @@
 
 后端部署插件只从 `EXTENSIONS_CONFIG` 指向的 TOML 装载，其 `trust` 为 `deployment`；配置变更需要重启，插件自己的 API extensions 只挂载在 `/api/extensions/{plugin_id}` 下。私有 UI 包另由 `SILICON_NOTEBOOK_UI_PLUGINS` 在前端构建期注入，变更后需要重新构建。
 
+插件可在同一 TOML 中声明配套服务。开发、生产、后端及打包启动入口会先拉起服务并等待就绪，再启动应用；对应停止命令负责清理。参见[服务编写示例](./examples/extensions/managed-service/README_zh.md)，可用 `bash scripts/cli.sh extensions services status` 查看状态。
+
 界面默认使用自动模式，适合直接上传和提问；高级模式会开放检索力度、报告深度及来源/参考库范围控制。
 
 ## 快速开始
@@ -75,6 +77,10 @@ npm run stop
 生产模式使用单个后端 worker，因为模型调度与取消状态位于进程内。日志写入 `.local/logs/`，启动后应检查 `/api/ready`。离线部署可先运行 `bash scripts/pack.sh`，再按 [packaging/DEPLOY.md](./packaging/DEPLOY.md) 操作。
 
 ### 验证
+
+命令行操作从 `bash scripts/cli.sh --help`（或 `npm run cli -- --help`）开始。
+统一入口按用途组织批处理、索引、维护、诊断、迁移与插件检查，同时保留旧脚本命令。
+详见[命令索引](./scripts/README.md#统一-cli-入口)。
 
 ```bash
 curl -s http://127.0.0.1:8000/api/health

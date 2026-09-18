@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -42,6 +43,8 @@ def _prepare_launcher(tmp_path: Path) -> tuple[Path, Path, Path, Path, dict[str,
         encoding="utf-8",
     )
     (scripts / "autotune.sh").write_text("# test stub\n", encoding="utf-8")
+    for name in ("python_env.py", "extension_services.sh", "extension_services.py", "extension_service_runtime.py", "extension_service_worker.py"):
+        shutil.copy2(repository_root / "scripts" / name, scripts / name)
     (root / ".env").write_text("# test env\n", encoding="utf-8")
     (backend / "requirements.txt").write_text("# test requirements\n", encoding="utf-8")
 
@@ -52,7 +55,7 @@ if [[ "${1:-}" == "-m" && "${2:-}" == "pip" ]]; then
   printf 'python %s\n' "$*" >>"$INSTALL_CALLS_FILE"
   exit 0
 fi
-if [[ "${1:-}" == "-c" ]]; then
+if [[ "${1:-}" == "-c" || "${1:-}" == */extension_services.py ]]; then
   exec "$REAL_PYTHON" "$@"
 fi
 exec sleep 30

@@ -623,7 +623,8 @@ def _apply_process_env(args: argparse.Namespace) -> None:
 
 def _backend_command(args: argparse.Namespace) -> list[str]:
     return [
-        "uvicorn", "app.main:app", "--port", str(args.port),
+        sys.executable, str(ROOT / "scripts" / "python_env.py"),
+        "-m", "uvicorn", "app.main:app", "--port", str(args.port),
         "--app-dir", str(ROOT / "backend"),
     ]
 
@@ -2963,6 +2964,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def apply_shared_arg_defaults(args: argparse.Namespace) -> argparse.Namespace:
+    if args.env_file:
+        args.env_file = str(Path(args.env_file).expanduser().resolve())
     args.concurrency = max(1, int(args.concurrency or 1))
     args.base_url = args.base_url or f"http://127.0.0.1:{args.port}"
     args.database_url_explicit = args.database_url is not None
@@ -2970,8 +2973,31 @@ def apply_shared_arg_defaults(args: argparse.Namespace) -> argparse.Namespace:
     return args
 
 
+def _prepare_inprocess_plugin_paths(args: argparse.Namespace) -> None:
+    """Prepare only in-process model commands after the rig's own parsing.
+
+    Seed/restart choose their backend environment later, including restart's
+    saved-state selection. Preloading paths here for those commands could let a
+    different deployment's plugin shadow the saved backend's plugin.
+    """
+    from python_env import prepare_python_path
+
+    if args.env_file:
+        env_file = Path(args.env_file).expanduser().resolve()
+    else:
+        ambient = os.environ.get("SILICON_NOTEBOOK_ENV_FILE")
+        env_file = (
+            ROOT / ".env" if ambient is None
+            else Path(ambient.strip()).resolve() if ambient.strip()
+            else None
+        )
+    prepare_python_path(root=ROOT, path_env_file=env_file)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = apply_shared_arg_defaults(build_parser().parse_args(argv))
+    if not args.dry_run and args.command in {"report", "search"}:
+        _prepare_inprocess_plugin_paths(args)
     runner = Runner(dry_run=args.dry_run, out_dir=Path(args.out_dir))
     handlers = {"seed": cmd_seed, "ask": cmd_ask, "report": cmd_report,
                 "search": cmd_search, "restart": cmd_restart,

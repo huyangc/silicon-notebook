@@ -1,0 +1,10 @@
+[extensions."examples.managed_service"]
+bundle = "silicon_notebook_managed_service.bundle:BUNDLE"
+enabled = true
+
+[extensions."examples.managed_service".services.health]
+mode = "managed"
+# Relative to this TOML file. Use the same activated interpreter as the backend.
+cwd = "."
+command = ["python3", "-m", "silicon_notebook_managed_service.server", "--port", "9100"]
+healthcheck_url = "http://127.0.0.1:9100/health"

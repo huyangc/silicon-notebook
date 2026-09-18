@@ -19,6 +19,21 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEFAULT_PYTHON="/opt/homebrew/Caskroom/miniconda/base/bin/python"
 PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
 [[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="$(command -v python3 || command -v python)"
+source "$ROOT_DIR/scripts/extension_services.sh"
+
+cleanup_start() {
+  local status=$?
+  trap - EXIT INT TERM HUP
+  if [[ -n "${STARTING_BACKEND_PID:-}" ]]; then
+    terminate_launched_pid "$STARTING_BACKEND_PID" || true
+  fi
+  extension_services_cleanup || status=1
+  exit "$status"
+}
+trap cleanup_start EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8000}"
@@ -49,7 +64,7 @@ ready_summary() { curl -s -m 3 "http://$HOST:$PORT/api/ready" 2>/dev/null \
 is_sn()       { [[ "$(svc_title)" == "silicon-notebook API" && "$(ready_state)" != "missing" ]]; }
 is_sn_ready() { [[ "$(svc_title)" == "silicon-notebook API" && "$(ready_state)" == "true" ]]; }
 database_status() {
-  ( cd "$ROOT_DIR/backend" && PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" -c \
+  ( cd "$ROOT_DIR/backend" && "$PYTHON_BIN" "$ROOT_DIR/scripts/python_env.py" -c \
       "from app.core.config import Settings; from app.core.database_url import database_status; print(database_status(Settings().database_url))" )
 }
 DATABASE_STATUS=""
@@ -78,7 +93,7 @@ terminate_launched_pid() {
 }
 
 cmd_status() {
-  load_database_status
+  load_database_status || return $?
   echo "● $DATABASE_STATUS"
   local pid; pid="$(port_pid)"
   if [[ -z "$pid" ]]; then echo "● :$PORT 空闲 —— 没有服务在跑。"; return 0; fi
@@ -96,7 +111,7 @@ cmd_status() {
 }
 
 cmd_stop() {
-  load_database_status
+  load_database_status || return $?
   local pid; pid="$(port_pid)"
   if [[ -z "$pid" ]]; then echo "✓ :$PORT 本来就没服务,无需停止。"; return 0; fi
   local title; title="$(is_sn && echo silicon-notebook || svc_title)"
@@ -111,11 +126,16 @@ cmd_start() {
   load_database_status
   local pid; pid="$(port_pid)"
   if [[ -n "$pid" ]]; then
-    if is_sn_ready; then echo "✓ silicon-notebook 已在 :$PORT 运行(PID $pid),ready=true。无需重复启动。"; return 0; fi
+    if is_sn_ready; then
+      extension_services_start
+      extension_services_handoff
+      echo "✓ silicon-notebook 已在 :$PORT 运行(PID $pid),ready=true。无需重复启动。"; return 0
+    fi
     if is_sn; then echo "✗ silicon-notebook 已占用 :$PORT(PID $pid),但尚未就绪；请看日志。"; return 1; fi
     echo "✗ :$PORT 已被别的服务占用(\"$(svc_title)\", PID $pid)。"
     echo "  先跑 '$0 stop'(会停掉它)再 start,或换端口:PORT=8001 $0 start"; return 1
   fi
+  extension_services_start
   mkdir -p "$(dirname "$LOG_FILE")"
   echo "启动 silicon-notebook 后端…"
   echo "  python = $PYTHON_BIN"
@@ -123,12 +143,18 @@ cmd_start() {
   echo "  $DATABASE_STATUS"
   echo "  listen = http://$HOST:$PORT   日志 = $LOG_FILE"
   local launched_pid
-  ( cd "$ROOT_DIR/backend" && exec nohup "$PYTHON_BIN" -m uvicorn "$APP" --host "$HOST" --port "$PORT" ) >>"$LOG_FILE" 2>&1 &
+  ( cd "$ROOT_DIR/backend" && exec nohup "$PYTHON_BIN" "$ROOT_DIR/scripts/python_env.py" \
+      -m uvicorn "$APP" --host "$HOST" --port "$PORT" ) >>"$LOG_FILE" 2>&1 &
   launched_pid="$!"
+  STARTING_BACKEND_PID="$launched_pid"
   echo "  等待就绪（最长 ${START_TIMEOUT_SECONDS}s）"
   local last_summary=""
   for _ in $(seq 1 "$START_TIMEOUT_SECONDS"); do
-    if is_sn_ready; then echo " ok"; echo "✅ 启动成功(PID $(port_pid)):ready=true。"; return 0; fi
+    if is_sn_ready; then
+      extension_services_handoff
+      unset STARTING_BACKEND_PID
+      echo " ok"; echo "✅ 启动成功(PID $(port_pid)):ready=true。"; return 0
+    fi
     if ! kill -0 "$launched_pid" 2>/dev/null; then
       echo " 失败"; echo "✗ 后端进程提前退出,看日志排错:tail -50 $LOG_FILE"
       terminate_launched_pid "$launched_pid" || true
@@ -154,9 +180,13 @@ cmd_start() {
 
 case "${1:-}" in
   start)   cmd_start ;;
-  stop)    cmd_stop ;;
-  restart) cmd_stop; cmd_start ;;
-  status)  cmd_status ;;
+  stop)
+    if cmd_stop; then extension_services_stop
+    else extension_services_stop >/dev/null 2>&1 || true; exit 1; fi ;;
+  restart) cmd_stop; extension_services_stop; cmd_start ;;
+  status)
+    if cmd_status; then "$PYTHON_BIN" "$ROOT_DIR/scripts/extension_services.py" status
+    else "$PYTHON_BIN" "$ROOT_DIR/scripts/extension_services.py" status 2>/dev/null || true; exit 1; fi ;;
   *)
     cat >&2 <<EOF
 用法: $0 {start|stop|restart|status}

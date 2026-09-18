@@ -2,23 +2,33 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+INHERITED_PYTHONPATH="${PYTHONPATH-}"
 DEFAULT_PYTHON="/opt/homebrew/Caskroom/miniconda/base/bin/python"
 PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   PYTHON_BIN="python3"
 fi
+source "$ROOT_DIR/scripts/extension_services.sh"
+LAUNCH_MONITOR_POLL_SECONDS=0.2
 
 cleanup() {
+  local status=$?
+  trap - EXIT INT TERM HUP
   if [[ -n "${BACKEND_PID:-}" ]]; then
     kill "$BACKEND_PID" 2>/dev/null || true
   fi
   if [[ -n "${FRONTEND_PID:-}" ]]; then
     kill "$FRONTEND_PID" 2>/dev/null || true
   fi
+  extension_services_cleanup || status=1
+  exit "$status"
 }
 
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # Load the repo-root .env so BOTH processes see the same vars. The backend reads
 # it via pydantic regardless, but the Next.js frontend only reads frontend/.env*
@@ -54,19 +64,29 @@ fi
 # shellcheck source=scripts/autotune.sh
 source "$ROOT_DIR/scripts/autotune.sh"
 
-# BACKEND_HOST=0.0.0.0 to expose the API beyond localhost (e.g. server deploys).
-# Paths (db/storage/env_file) are anchored to the repo root in code (Settings), not to
-# the launch directory — the `cd` below is only so Python resolves the `app` package.
-cd "$ROOT_DIR/backend"
-"$PYTHON_BIN" -m uvicorn app.main:app --host "${BACKEND_HOST:-127.0.0.1}" --port 8000 &
-BACKEND_PID=$!
-
 if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
   echo "frontend/node_modules not found; run 'npm install' in frontend/ first" >&2
   exit 1
 fi
+extension_services_start
+
+# BACKEND_HOST=0.0.0.0 to expose the API beyond localhost (e.g. server deploys).
+# Paths (db/storage/env_file) are anchored to the repo root in code (Settings), not to
+# the launch directory — the `cd` below is only so Python resolves the `app` package.
+cd "$ROOT_DIR/backend"
+PYTHONPATH="$INHERITED_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" "$ROOT_DIR/scripts/python_env.py" \
+  -m uvicorn app.main:app --host "${BACKEND_HOST:-127.0.0.1}" --port 8000 &
+BACKEND_PID=$!
+
 cd "$ROOT_DIR/frontend"
 npm run dev &
 FRONTEND_PID=$!
 
-wait "$BACKEND_PID" "$FRONTEND_PID"
+while kill -0 "$BACKEND_PID" 2>/dev/null && kill -0 "$FRONTEND_PID" 2>/dev/null; do
+  sleep "$LAUNCH_MONITOR_POLL_SECONDS"
+done
+if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+  wait "$BACKEND_PID"
+else
+  wait "$FRONTEND_PID"
+fi

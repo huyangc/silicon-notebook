@@ -10,13 +10,16 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+INHERITED_PYTHONPATH="${PYTHONPATH-}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+source "$ROOT_DIR/scripts/extension_services.sh"
 
 cleanup() {
   local status=$? pid alive deadline polls=0
   trap - EXIT INT TERM HUP
 
   if [[ -z "${BACKEND_PID:-}" && -z "${FRONTEND_PID:-}" ]]; then
+    extension_services_cleanup || status=1
     exit "$status"
   fi
 
@@ -55,6 +58,7 @@ cleanup() {
     [[ -n "$pid" ]] || continue
     wait "$pid" 2>/dev/null || true
   done
+  extension_services_cleanup || status=1
   exit "$status"
 }
 
@@ -186,12 +190,15 @@ else
   echo "SKIP_BUILD=1 — skipping 'npm run build' (expecting a prebuilt frontend/.next)"
 fi
 
+extension_services_start
+
 # 默认只监听 loopback；显式 BACKEND_HOST=0.0.0.0 才对外暴露，并触发上面的密码预检。
 # --workers 1: process-internal caches and dedup sets (e.g. VectorCache, extraction
 # pools) are per-process and NOT shared across workers — N workers would mean N×
 # memory and N independent (inconsistent) caches, not more throughput.
 cd "$ROOT_DIR/backend"
-( exec nohup "$PYTHON_BIN" -m uvicorn app.main:app \
+( export PYTHONPATH="$INHERITED_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}"
+  exec nohup "$PYTHON_BIN" "$ROOT_DIR/scripts/python_env.py" -m uvicorn app.main:app \
   --host "$BACKEND_HOST" \
   --port "$BACKEND_PORT" \
   --workers 1 </dev/null ) \
@@ -207,6 +214,7 @@ FRONTEND_PID=$!
 echo "backend  : http://${BACKEND_HOST}:${BACKEND_PORT}   (PID $BACKEND_PID, log $BACKEND_LOG)"
 echo "frontend : http://0.0.0.0:${FRONTEND_PORT}   (PID $FRONTEND_PID, log $FRONTEND_LOG)"
 echo "(the backend's first log line prints the resolved absolute db/storage/log paths — check it if unsure which .local a launch is using)"
+extension_services_handoff
 trap - EXIT INT TERM HUP
 echo "silicon-notebook background processes were launched; readiness is not checked by this command."
 echo "stop them with: npm run stop"

@@ -2880,6 +2880,36 @@ The current persistence/API contract is the `reports` table and `/reports` APIs;
 
 ### Deployment extensions
 
+Deployment companion services are explicitly declared under
+`extensions.<plugin_id>.services.<service_id>` in `EXTENSIONS_CONFIG`. An absent
+`services` table preserves existing behavior; `enabled=false` omits that plugin's
+services. `managed` services have a foreground argv command and working directory;
+`external` services are readiness-checked but never started or stopped by core.
+Each enabled service is required and declares exactly one HTTP or command readiness
+probe. Dependency references use `plugin_id/service_id`, must name enabled services,
+and must form an acyclic graph. Startup waits for dependencies and readiness before
+starting the application; companion startup failure rolls back the processes created by that
+attempt. Shutdown reverses dependency order. There is no optional-service degraded
+mode or automatic restart.
+
+Service lifecycle belongs to the launch scripts and the explicit
+`extensions services` CLI group. Plugin import, discovery, `configure()`, ordinary
+CLI/batch jobs, and the admin access toggle never spawn or terminate companion
+processes. Configuration/environment changes require stop/start. Status and stop
+operate on the saved run identity, including after the configuration is edited or
+removed. Lifecycle output contains safe metadata only; commands, environment values,
+probe responses, paths, and plugin stdout/stderr are not exposed through the admin
+API or copied into supervisor logs. Author and operator instructions are in the
+[extension SOP](./deployment-extensions-sop.md#companion-service-delivery-contract).
+
+Companion-service numeric rails (seconds, finite positive numbers; booleans rejected):
+
+| Configuration key | Default | Inclusive range |
+| --- | --- | --- |
+| `startup_timeout_seconds` | 60 | 0.1–3600 |
+| `shutdown_timeout_seconds` | 15 | 0.1–300 |
+| `healthcheck_timeout_seconds` | 2 | 0.1–30 |
+
 `GET /api/admin/extensions` is system-admin-only and returns a whitelist projection of the startup-frozen registry topology: six topology whitelist fields per extension — `id`, `version`, `trust`, `display_name`, `contributions[{id,point,kind}]`, `ui_contributions[{id,slot,capability}]` (the three runtime-toggle fields are covered in the next paragraph) — never a module path, file path, settings value, internal capability reason, or exception text; a plugin entry the deployment marked `enabled=false` never registers and so never appears here. `GET /api/system/extensions` (any authenticated user, live availability only) is unchanged.
 
 Runtime toggle is an admin gate layered on top of that loaded topology, not a second discovery mechanism: only a loaded plugin with `trust="deployment"` can be switched, and builtin rows stay read-only forever. `GET /api/admin/extensions` adds three fields to every topology row — `runtime_enabled` (`bool | null`), `runtime_updated_by` (`str | null`), `runtime_updated_at` (`str | null`, ISO timestamp). Builtin rows are always `null, null, null`. A deployment row with no database row yet (no admin has ever touched it) reads `true, null, null` — no row means enabled — otherwise it reports the last write and who made it. `PATCH /api/admin/extensions/{plugin_id}` (body `{"enabled": bool}`) is admin-only, and a non-admin caller gets 403 with "仅管理员可管理扩展运行时开关"; it accepts only a plugin id this process currently has loaded with `trust="deployment"` — an unloaded id, a builtin id, or a typo all 404 with "该扩展不存在或不支持运行时开关". A successful write takes effect immediately in the process that handled the request (every registry evaluation in that process from then on sees the new value) and returns the written `{plugin_id, runtime_enabled, runtime_updated_by, runtime_updated_at}`; if the in-process publish that follows the write fails, the response still succeeds (2xx) — the write itself is durable, and that process converges on its next background refresh tick. Once disabled, every retrieval/parsing/UI capability the plugin contributes is unavailable to every request: `GET /api/system/extensions`'s `unavailable_reason` keeps its existing closed vocabulary — `"disabled"` now covers both an admin's runtime switch and the plugin's own probe returning `DISABLED`, indistinguishably on the wire — or `"unavailable"`; and the plugin's own HTTP routes under `/api/extensions/{plugin_id}/` return 403 with "该扩展已被管理员停用" for every request while the gate is on. Convergence is layered, not instantaneous everywhere: the process that performed the write sees it at once; other serving processes in the same deployment (additional replicas) catch up on their own low-frequency refresh tick (default interval and bounds are registered in the deployment reference); offline CLI and batch processes read the value once, at startup composition, and never again during that run. If the disabled plugin happens to be a notebook's currently selected indexing pipeline, the notebook reuses the existing missing-plugin degradation: `GET /api/notebooks/{id}/indexing-pipeline`'s `available` turns `false`, the UI offers a revert-to-builtin path, and ordinary reads of previously published artifacts are unaffected.

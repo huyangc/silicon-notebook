@@ -139,7 +139,7 @@ class CorpSearchBundle:
 
 *core 替你做的：* 自己从 `model_fields`（外加纯字符串 alias）算出可接受的键集合，而不是指望你写 `extra="forbid"`；把 TOML 表校验成一个实例；在 `register` **之前**用它调 `configure`。拒绝信息只带出错的键**名**与异常**类名**——绝不带取值，因为 pydantic 的 `ValidationError` 会把被拒的输入原样回显。
 
-*你不能：* 在 `configure` 里起线程或后台任务、开网络/数据库连接、做阻塞 I/O。它跑在启动组合期，registry 还没冻结、服务还没 ready。这些工作挪到第一次真正需要它的请求里惰性做。
+*你不能：* 在 `configure` 里起线程或后台任务、开网络/数据库连接、做阻塞 I/O。它跑在启动组合期，registry 还没冻结、服务还没 ready。出站连接在首次使用时惰性创建；独立运行的配套服务遵守[显式启动契约](#配套服务交付契约)，不在请求期间启动。
 
 密钥按环境变量名引用（镜像 `model-services.toml` 的 `api_key_env`），不要内嵌。core 从不打印任何 settings 值，但配置文件里的明文密钥离一次 `cat` 进聊天记录只差一步。
 
@@ -453,6 +453,15 @@ timeout_seconds = 20
 EXTENSIONS_CONFIG=/path/to/extensions.local.toml npm run dev
 ```
 
+CLI 操作使用 `bash scripts/cli.sh batch ...`，不要用 `PYTHONPATH=backend` 覆盖
+搜索路径。共享启动器在启动命令解释器**之前**，合并仓库 `.env` 中插件的 `src/` 路径、
+后端路径和已导出的路径；相对搜索路径统一相对于仓库根。运行
+`bash scripts/cli.sh extensions check` 检查已安装/配置的 bundle，运行
+`bash scripts/cli.sh extensions parity --frontend-contract frontend/.local/ui-extension-contract.json`
+检查前后端部署对等。这两条命令都不启动插件配套服务。不要靠注释 `EXTENSIONS_CONFIG`
+消除导入错误，否则会改变 CLI 的插件组合。文件选择和优先级详见
+[统一 Python 启动环境](./deployment-and-configuration_zh.md#统一-python-启动环境)。
+
 ### 5.2 前端
 
 ```bash
@@ -505,6 +514,37 @@ npm run lint
 3. 打开它、跑一次你的动作、导入一篇；来源列表随之刷新。
 4. 用系统管理员打开 `/admin/extensions`——你的插件在列表里，带版本、信任档「部署装入」、服务端接入与界面接入。
 5. 看事件日志：你的记录只有 `kind`、`plugin_id` 与白名单里的计数。
+
+### 配套服务交付契约
+
+需要独立进程的插件必须随版本交付稳定的前台命令或脚本，以及显式的 `services`
+TOML 片段。Core 不会从目录、包清单或模块导入推断启动命令。完整字段与环境规则见
+[部署配置](./deployment-and-configuration_zh.md#配套服务配置)，超时默认值及边界见
+[产品/API](./product-and-api_zh.md#部署插件)。
+
+- 随插件版本交付可执行入口，注明解释器和依赖，并在启动前安装完成。启动不得安装
+  软件包、交互提问或修改宿主依赖环境。
+- 服务保持前台运行。Shell 包装脚本末尾使用 `exec ...`；不使用 `nohup`、`&`、
+  daemon 化，也不让子进程脱离受管进程组。处理 SIGTERM，并在停止期限内释放资源。
+- 提供 HTTP 就绪端点或命令探测。就绪代表初始化完成且确实能够处理业务，不只是
+  PID 存在。非 2xx、非零探测退出码和超时均代表尚未就绪。
+- 声明稳定的服务 ID、依赖（`plugin_id/service_id`）、工作目录、所需环境变量名，
+  并提供相对于配置文件的路径示例。密钥使用 `env_from`，不写入 argv、URL 或日志。
+- Bundle 导入、`register()`、`configure()` 和可用性探测不得有启动服务的副作用。
+  启动脚本负责进程，CLI 批处理只装载相同的插件组合并连接已运行的服务。
+- 已由部署方管理的服务应提供 `external` 配置选项及就绪探测；core 不启动或停止外部进程。
+- 管理器日志仅记录生命周期元信息，并丢弃子进程 stdout/stderr。需要业务诊断时，
+  插件负责单独配置经过脱敏的日志目的地，不打印密钥或来源正文。
+
+[managed-service 示例](../examples/extensions/managed-service/README_zh.md)包含可安装的
+Python 包、前台 HTTP 健康服务、导入时不启动任何进程的 bundle，以及按配置目录解析
+工作目录的 TOML 片段。测试使用 fake 验证响应和停止行为，不占用宿主端口；示例刻意
+不提供 UI 或检索功能。
+
+用 `bash scripts/cli.sh extensions services validate` 校验服务配置，再用
+`bash scripts/cli.sh extensions check` 单独校验插件导入。完整应用使用正常的开发或
+生产启动入口；只操作配套服务时使用[运维手册](./operations_zh.md#插件配套服务)中的
+显式命令。管理员访问开关不负责启动或停止这些进程。
 
 ## 6. 第四步：打包与交付
 

@@ -3,11 +3,81 @@
 仓库运维 / 开发 / 评测脚本。**除非特别说明,都在仓库根目录运行**,Python 用装好
 `backend/requirements.txt` 依赖的解释器(激活对应环境,或用 `PYTHON_BIN=...` 覆盖脚本默认)。
 
+## 统一 CLI 入口
+
+推荐从统一目录选择命令，不再为日常操作手动拼 `PYTHONPATH=backend`：
+
+```bash
+bash scripts/cli.sh --help
+bash scripts/cli.sh batch --help
+bash scripts/cli.sh batch ingest --input-dir ./papers --notebook-name "资料库"
+bash scripts/cli.sh scale inspect --notebook nb-xxx
+bash scripts/cli.sh diag incident
+bash scripts/cli.sh extensions check
+bash scripts/cli.sh extensions services status
+# npm 等价入口（npm 自身按项目根运行）：
+npm run cli -- batch ingest --input-dir ./papers --notebook-name "资料库"
+```
+
+| 命令组 | 收拢的现有功能 |
+| --- | --- |
+| `batch`（兼容名 `batch-ingest`） | 原 `batch_ingest.py` 的所有阶段和参数 |
+| `scale` | 原 `build_scale_index.py` 的 inspect/build/export/import |
+| `kg` | 原 `app.scripts` 中的 build/recluster/reembed/backfill-relations |
+| `maintain` | chunks、kg-embeddings、reextract、denoise、knowhow、promotion-targets、delete-leftovers、selected-source |
+| `database` | migrate-postgres、shadow、merge、retrieval-indexes、hotpath-indexes |
+| `diag` / `diagnose` | 原统一只读诊断；另有 postgres、retrieval、mineru 专项诊断 |
+| `source` | mineru-batch、embed-images |
+| `audit` | source-facts、kg-edges、kg-quality |
+| `eval` | replay、selected-source、trace-export、trace-analyze、shadow |
+| `migrate` | model-env 配置迁移 |
+| `extensions` | check 导入/配置预检；parity 部署前后端插件对等检查；services 配套服务管理 |
+
+解释器优先取显式 `PYTHON_BIN`，其次仓库 `.venv/bin/python`，否则 PATH 中的
+`python3`。显式解释器无效时直接报错，不悄悄换环境。也可直接运行
+`python scripts/cli.py ...`。Shell/Python 入口保留调用者工作目录、后续参数、退出码和
+信号语义；数据参数中的相对路径仍相对于调用目录。完整参数继续由原命令的 `--help`
+维护，顶层/分组帮助不加载应用、插件或 `.env`。
+
+应用类命令通过共享启动器在 Python 启动前合并仓库 `backend`、进程和 `.env` 中的
+`PYTHONPATH`，具体优先级见[部署配置](../docs/deployment-and-configuration_zh.md#统一-python-启动环境)。
+`diag` 等离线诊断，以及自行管理 `--env-file`/显式数据库参数的工具保留原配置策略，
+不会被统一入口预先灌入根 `.env`；详见[运维约定](../docs/operations_zh.md#统一命令入口)。
+
+原 `.py` / `python -m app.scripts...` 路径和参数继续可用，但直接调用仍遵守原来的
+环境准备要求；需要自动读取插件路径时使用统一入口。`extensions check` 使用正式插件
+发现器检查导入与设置，不构造数据库、不启动配套服务；它不证明远端服务就绪或管理员
+运行时开关状态。不得靠清空 `EXTENSIONS_CONFIG` 或跳过失败插件使批处理继续。
+
+本次合并的是公开命令目录和启动环境，内部实现仍按职责分文件。`maintain chunks`
+会重建分块，`batch embed` 只补缺失向量；`maintain kg-embeddings` 有专用的多轮补缺；
+`maintain reextract` / `denoise` 保留强制重做或删除的原有行为；`scale` 的在线并存锁与
+`batch index` 的停服锁也不互换。开发检查、fixture 生成、基准测试、示例和带硬编码目标的
+历史一次性脚本不自动注册到运维菜单。
+
 ---
 
 ## 一、服务启停(最常用)
 
-### `backend.sh` —— 只启停后端 + 健康自检
+`dev.sh`、`prod.sh`、`backend.sh start/restart` 和离线包 `start.sh` 会先启动
+`EXTENSIONS_CONFIG` 声明的配套服务，按依赖顺序检查就绪，再启动主应用。开发启动退出
+会清理本次创建的服务；后台启动交接后由 `stop.sh` / `backend.sh stop` 停止。
+已复用的服务不会被另一次失败启动的回滚误停。生产启动仍只负责拉起主应用，后端就绪
+由 `/api/ready` 验证；它不承诺主应用后续退出时自动停止插件服务。
+
+```bash
+bash scripts/cli.sh extensions services validate
+bash scripts/cli.sh extensions services start
+bash scripts/cli.sh extensions services status
+bash scripts/cli.sh extensions services logs
+bash scripts/cli.sh extensions services stop
+```
+
+`validate` 检查服务配置、命令和插件导入；`logs` 仅显示无内容生命周期事件。
+普通批处理不会自动启动服务。插件作者需提供前台命令及就绪检查，完整配置与可运行示例见
+[部署扩展 SOP](../docs/deployment-extensions-sop_zh.md)。
+
+### `backend.sh` —— 后端及插件配套服务启停 + 健康自检
 ```bash
 scripts/backend.sh status     # 看 :8000 现在跑的是什么 + notebook 数
 scripts/backend.sh start      # 后台启动后端到 :8000(日志落 .local/logs/backend.log)

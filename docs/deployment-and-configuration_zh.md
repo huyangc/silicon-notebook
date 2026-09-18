@@ -1148,6 +1148,35 @@ idle timeout。CDN/负载均衡若设置了总请求时长硬上限，部署者�
 
 所需 chat workload 未绑定时，摘要和回答退化为 deterministic 行为；source 解析仍会完整执行，KG 抽取阶段记录完成的 `no-llm` run，不生成合成知识。
 
+### 统一 Python 启动环境
+
+`bash scripts/cli.sh ...`（也可用 `npm run cli -- ...`）在执行所选 Python 命令前准备
+环境。`dev.sh`、`prod.sh`、`backend.sh` 和离线包 `start.sh` 的后端启动共用
+`scripts/python_env.py` 处理模块路径，解决“Python 启动后读取应用 `.env`”与
+“解释器启动时让 `PYTHONPATH` 生效”的差异。
+
+启动器先放入仓库 `backend` 的绝对路径，再合并进程和选定 dotenv 文件里的
+`PYTHONPATH`，去重、剔除空项，相对项统一锚定仓库根。因此继承的 `PYTHONPATH=backend`
+不再覆盖文件中的插件路径。调用目录和参数保持不变。Dotenv 使用 python-dotenv 语法与
+变量插值，不执行 Shell 内容；普通配置项以进程环境优先。现有 Shell 启动脚本仍先加载
+自己的 Shell 环境，其原有非 Python Shell 设置优先级不变；已经过 Shell 展开的插件
+路径也与继承路径一并保留。服务与 CLI 共用的 dotenv 变量引用应写 `${NAME}`，裸
+`$NAME` 展开仅属于 Shell 语法。
+
+默认读取仓库 `.env`；`SILICON_NOTEBOOK_ENV_FILE` 可选择其他文件（相对覆盖路径锚定
+仓库根），空值禁用 dotenv。启动器允许默认文件缺失，但显式指定的文件不存在或不可读
+时以脱敏错误拒绝。原全栈启动脚本的 `.env` 预检保持不变。`cli.sh` 的解释器顺序是显式
+`PYTHON_BIN`、仓库 `.venv/bin/python`、PATH 中的 `python3`；显式解释器无效时直接报错。
+也可用 `python scripts/cli.py ...` 直接指定解释器。
+
+启动器不会安装插件；普通 CLI 命令不启动配套服务，服务启动入口仅拉起下文显式
+声明的 `services`。有独立环境合同的工具绕过 dotenv 预加载，见
+[运维 → 统一命令入口](./operations_zh.md#统一命令入口)。直接调用旧脚本仍需按原要求
+准备环境。源码方式接入插件时可将 `PYTHONPATH=/path/to/plugin/src` 留在 `.env`，使用
+统一入口执行；也可以通过后端解释器的 `python -m pip install -e /path/to/plugin`
+安装插件。`bash scripts/cli.sh extensions check` 检查配置中的插件导入与设置，不代表
+配套服务已就绪。
+
 ### 部署插件（EXTENSIONS_CONFIG）
 
 `EXTENSIONS_CONFIG` 未设置＝零部署插件，装载出的拓扑与内建组合逐字一致。设置了但不可读或解析不了（文件缺失、TOML 语法错误、未知键、条目格式非法）是**启动失败**——进程直接不起，绝不降级。离线 CLI（`batch_ingest.py` 等）装载的是同一套插件拓扑，所以修复办法是改配置本身,绝不是清空变量——清空只会静默换成另一套发现/注册组合,而不是恢复接入插件之前的行为。
@@ -1163,6 +1192,46 @@ enabled = true
 每条配置遵守三条铁律：只加载**点名列表里、且未 `enabled = false`** 的插件——不扫描目录、不读 entry points、不看第二个环境变量；插件自带的 pydantic `settings_model` 会把未知键或类型错误判为启动失败（可接受键集合由 core 自己从模型算出，不指望插件写 `extra="forbid"`；带 `alias` 的字段**只按 alias** 接受，与 pydantic 自身的默认行为一致，除非模型设了 `populate_by_name`/`validate_by_name`），所以密钥应该经一个环境变量名字段引用（同 `model-services.toml` 的 `api_key_env` 约定），而不是把明文值直接写进配置,任何 settings 值都不会进日志、事件或 `GET /api/admin/extensions`;插件包装进与后端**同一个** `PYTHON_BIN` 环境,不是独立解释器。插件的 `configure()` 必须廉价且无副作用——不起线程、不开网络/数据库连接、不做阻塞 I/O,这类工作留到首次真正用到时再惰性执行。插件 capability 名只能用点/下划线/短横线分隔(`:` 留给 core 自己的 `point:name` capability)。改这份 TOML——新增/删除条目、改 `bundle`/`settings`、把文件里的 `enabled` 改成 `false`——一律靠重启进程生效，没有热加载；这管的是「装不装载」这一层拓扑。已经装载的 deployment 插件另有一层不需要重启的运行时开关，见下文「运行时启停」。
 
 运维方用下面这条命令自查某次部署的实时插件拓扑是否与配套前端构建一致:`EXTENSIONS_CONFIG=/etc/silicon/extensions.toml PYTHONPATH=backend python3 scripts/check_deployment_extension_parity.py --frontend-contract frontend/.local/ui-extension-contract.json`(退出码 `0` 对等 / `1` 漂移 / `2` 用法或环境错误)。插件包应对自己的源码跑一次 `python3 scripts/check_ui_vocabulary.py --extra-root <插件源码目录>`,拿到与 core 自己同等的中文界面文案保证。重新生成 `scripts/generate_ui_extension_contract.py` 时必须清空 `EXTENSIONS_CONFIG`——它提交的 fixture 只反映内建拓扑,绝不能带上某次部署的插件。 逐步的开发、联调与运维流程见 [`docs/deployment-extensions-sop_zh.md`](deployment-extensions-sop_zh.md)。
+
+#### 配套服务配置
+
+每个插件可在 `bundle`、`enabled`、`settings` 旁增加 `services`。这是部署生命周期
+配置，不会传给 `configure()`。只运行显式声明的服务，不自动发现任意启动脚本；
+没有这张表的旧配置无需修改。
+
+```toml
+[extensions."corp.ieee_search".services.worker]
+mode = "managed"
+cwd = "./plugins/ieee-search"
+command = ["./.venv/bin/python", "-m", "corp_ieee_search.server"]
+healthcheck_url = "http://127.0.0.1:9100/health"
+
+[extensions."corp.ieee_search".services.worker.env]
+SERVICE_MODE = "production"
+
+[extensions."corp.ieee_search".services.worker.env_from]
+API_KEY = "CORP_IEEE_API_KEY"
+```
+
+`mode` 默认 `managed`，必须显式提供 `cwd` 和非空 argv `command`。相对 `cwd`
+按 TOML 所在目录解析，带路径的相对可执行文件按该工作目录解析；没有隐式 Shell
+或 Shell 展开。子进程继承统一启动环境（含合并后的 Python 路径），`env` 添加字面
+字符串，`env_from` 把目标变量名映射到已有的来源环境变量名；两组目标键不能重叠。
+密钥通过 `env_from` 引用，不放在命令参数或 TOML 明文值里。插件 bundle 仍安装在
+后端解释器中，配套可执行程序可以使用自己预先安装好的独立环境。
+
+必须恰好声明一种 `healthcheck_url`（HTTP/HTTPS，2xx 为成功，不带凭据、查询串或 fragment）或
+`healthcheck_command`（argv，退出码零为成功）。`depends_on` 是可选的
+`plugin_id/service_id` 引用数组；引用缺失、已禁用、自身或循环依赖均校验失败。
+`startup_timeout_seconds`、`shutdown_timeout_seconds`、`healthcheck_timeout_seconds`
+的默认值及范围由[产品/API 服务边界](./product-and-api_zh.md#部署插件)统一定义；
+未知键和格式错误均校验失败。所有启用的服务都是必需服务。
+
+由 systemd、容器平台或其他运维入口管理的服务设为 `mode = "external"`，提供就绪
+探测，并省略 `command`、`cwd`、`env`、`env_from`（external 模式拒绝这些字段）。
+启动器不会取得该进程的管理权。整个插件 `enabled=false` 时不纳入其服务定义；
+管理员运行时访问开关不改变进程。另见[可运行示例](../examples/extensions/managed-service/README_zh.md)
+与[服务运维](./operations_zh.md#插件配套服务)。
 
 **运行时启停：**
 

@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "cli": "bash scripts/cli.sh",
     "dev": "bash scripts/dev.sh",
     "start": "bash scripts/prod.sh",
     "stop": "bash scripts/stop.sh",

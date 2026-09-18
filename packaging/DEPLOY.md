@@ -40,6 +40,15 @@ vi .env                 # 这里只填写 api_key_env 所引用的密钥；endpo
 
 浏览器打开前端地址即可。停止用 `./stop.sh`。
 
+插件需要独立配套服务时，在 `EXTENSIONS_CONFIG` 指向的 TOML 中声明 `services`。
+`start.sh` 会先按依赖启动并等待服务就绪，失败时回收本次创建的进程；`stop.sh` 同时停止
+受管插件服务。插件包及其依赖仍需部署到目标机；启动命令必须保持前台运行并提供就绪
+检查。`mode="external"` 只做就绪检查，不接管外部进程。
+
+包内可用 `.venv/bin/python scripts/extension_services.py status` 查询，或将 `status`
+替换为 `validate`、`start`、`stop`、`logs`。停止和查询读取保存的运行状态，无需重新加载
+已修改的插件配置。完整编写规范见仓库 `docs/deployment-extensions-sop_zh.md`。
+
 `install.sh` 在 `.local/model-services.toml` 缺失时从无密钥模板生成它；文件已存在时
 原样保留。`.env.example` 默认令 `MODEL_SERVICES_CONFIG=.local/model-services.toml`，因此
 默认路径在安装后一定存在。若部署明确不使用任何模型服务，可在 `.env` 留空：
@@ -101,6 +110,7 @@ TOML 与新的密钥槽位。推算出的并发容量仅是迁移初值，应用
 | `SOURCE_UPLOAD_MAX_MB` | `50` | 单个来源文件上限；前端从后端动态读取同一值，整数 1–1024 |
 | `SILICON_NOTEBOOK_ADMIN_PASSWORD` | — | 对外暴露(非 loopback)时**必须**设为非默认值,否则拒绝启动 |
 | `ALLOW_NO_ENV_FILE` | `0` | 设 `1` 则允许无 `.env`、仅用系统环境变量启动 |
+| `START_CLEANUP_GRACE_SECONDS` | `10` | 主应用启动失败时等待本次子进程优雅退出的秒数，须为正整数 |
 
 ## SQLite / PostgreSQL 直接选择与生产切换
 

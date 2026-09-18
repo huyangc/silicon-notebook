@@ -107,6 +107,10 @@ find "$STAGE/backend" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/de
 find "$STAGE/backend" -type f -name '*.py[co]' -delete 2>/dev/null || true
 mkdir -p "$STAGE/scripts"
 cp "$ROOT_DIR/scripts/autotune.sh" "$STAGE/scripts/autotune.sh"
+cp "$ROOT_DIR/scripts/python_env.py" "$STAGE/scripts/python_env.py"
+for helper in extension_services.sh extension_services.py extension_service_runtime.py extension_service_worker.py check_cli_extensions.py; do
+  cp "$ROOT_DIR/scripts/$helper" "$STAGE/scripts/$helper"
+done
 cp "$ROOT_DIR/scripts/migrate_legacy_model_env.py" \
    "$STAGE/scripts/migrate_legacy_model_env.py"
 

@@ -2217,6 +2217,29 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 ### 部署插件
 
+插件配套服务须显式声明在 `EXTENSIONS_CONFIG` 的
+`extensions.<plugin_id>.services.<service_id>` 中。不提供 `services` 表保持原行为；
+`enabled=false` 的插件不纳入服务计划。`managed` 服务声明前台 argv 命令和工作目录；
+`external` 服务只检查就绪，core 不负责启动或停止。所有启用的服务均为必需服务，
+且必须恰好声明一种 HTTP 或命令就绪探测。依赖用 `plugin_id/service_id` 引用，
+必须指向启用的服务并构成无环图。启动器等待依赖和服务就绪后才启动主应用；
+配套服务启动失败时回收本次尝试创建的进程，停止按依赖反序执行。没有可选服务降级模式或自动重启。
+
+进程生命周期由启动脚本和显式的 `extensions services` CLI 分组负责。
+插件导入、发现、`configure()`、普通 CLI/批处理以及管理员访问开关均不启动或终止
+配套进程。修改配置或环境需要 stop/start。状态和停止操作依据已保存的运行身份，
+即使配置已被修改或删除也可执行。生命周期输出仅含安全元信息；命令、环境值、
+探测响应、路径以及插件标准输出/错误不会经管理员 API 暴露或复制进管理器日志。
+交付与操作说明见[扩展 SOP](./deployment-extensions-sop_zh.md#配套服务交付契约)。
+
+配套服务数值边界（单位为秒，要求有限正数，不接受布尔值）：
+
+| 配置键 | 默认值 | 闭区间 |
+| --- | --- | --- |
+| `startup_timeout_seconds` | 60 | 0.1–3600 |
+| `shutdown_timeout_seconds` | 15 | 0.1–300 |
+| `healthcheck_timeout_seconds` | 2 | 0.1–30 |
+
 `GET /api/admin/extensions` 仅系统管理员可读，返回启动时冻结的 registry 拓扑的白名单投影：每个插件 6 个拓扑白名单字段——`id`、`version`、`trust`、`display_name`、`contributions[{id,point,kind}]`、`ui_contributions[{id,slot,capability}]`（运行时开关的三个字段见下段）——绝不返回模块路径、文件路径、settings 值、内部 capability reason 或异常文本；部署把某个插件条目标为 `enabled=false` 时它从不注册，因此也不会出现在这里。`GET /api/system/extensions`（任意已登录用户，只给实时可用性）不变。
 
 运行时开关是叠在这份装载拓扑之上的一道管理员闸，不是第二套发现机制：只有已装载且 `trust="deployment"` 的插件可以开关，builtin 行永远只读。`GET /api/admin/extensions` 在每个拓扑行上补三个字段——`runtime_enabled`（`bool | null`）、`runtime_updated_by`（`str | null`）、`runtime_updated_at`（`str | null`，ISO 时间戳）。builtin 行恒为 `null, null, null`；deployment 行若数据库里从未有过对应行（没有任何管理员动过它）读到 `true, null, null`——无行即启用——否则如实返回上一次写入的值与操作者。`PATCH /api/admin/extensions/{plugin_id}`（body `{"enabled": bool}`）仅管理员可调，非管理员返回 403「仅管理员可管理扩展运行时开关」；`plugin_id` 只接受这个进程当前已装载、`trust="deployment"` 的插件——未装载的 id、builtin 的 id 或拼错的 id 一律 404「该扩展不存在或不支持运行时开关」。写入成功后立即在处理该请求的这个进程内生效（该进程此后每一次 registry 判定都看到新值），返回写入后的 `{plugin_id, runtime_enabled, runtime_updated_by, runtime_updated_at}`；如果写入之后的本进程发布这一步失败，响应仍然是 2xx——写库本身已经成功，这个进程会在下一轮后台刷新时收敛。关闭之后，该插件贡献的每一项检索/解析/UI 能力对所有请求都不可用：`GET /api/system/extensions` 的 `unavailable_reason` 仍只用既有的封闭取值——`"disabled"` 现在同时覆盖管理员的运行时开关与插件自身探测返回 `DISABLED` 这两种情形、wire 上不可区分——或 `"unavailable"`；该插件自己挂在 `/api/extensions/{plugin_id}/` 下的 HTTP 路由在闸生效期间对所有请求返回 403「该扩展已被管理员停用」。收敛是分层的，不是处处即时：发起写入的进程立即看到新值；同一部署里的其它服务进程（例如多副本）在各自的低频后台刷新下一轮追上（默认间隔与上下限登记在部署参考文档）；离线 CLI 与批处理进程只在启动组合时读取一次这个值，运行期间不会再变。若被关闭的插件恰好是某个笔记本当前选中的索引管线，该笔记本复用既有的「插件缺席」降级语义：`GET /api/notebooks/{id}/indexing-pipeline` 的 `available` 变为 `false`，界面给出切回内建的恢复路径，对已发布产物的普通读取不受影响。
