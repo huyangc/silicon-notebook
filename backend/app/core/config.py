@@ -219,11 +219,9 @@ class Settings(BaseSettings):
     )
     # Unlike the two budgets above, this one is spent BEFORE the user has an
     # answer: gap consultation runs inside the answer's latency, so every
-    # second here is a second the reader waits.  Hence the much smaller default
-    # and the much tighter ceiling.  It is also a hard deadline rather than a
-    # cooperative one, and it covers the whole call — a contribution's
-    # availability probe as well as its consult — because a plugin at this
-    # point supplies both halves and either can hang.
+    # second here is a second the reader waits. The one hard wall deadline
+    # covers source discovery, query planning, selected contributors' probes
+    # and consult calls, and the optional external supplement model call.
     ask_gap_consult_timeout_seconds: float = Field(
         4.0,
         gt=0,

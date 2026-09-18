@@ -2202,10 +2202,12 @@ def _consult_context(
     max_suggestions: int = 3,
     cancellation: object | None = None,
     deadline_offset: float = 30.0,
+    source_queries: dict[str, tuple[str, ...]] | None = None,
 ) -> GapConsultExtensionContext:
     return GapConsultExtensionContext(
         query=GapConsultQuery(
-            question=question, gaps=gaps, max_suggestions=max_suggestions
+            question=question, gaps=gaps, max_suggestions=max_suggestions,
+            source_queries=source_queries,
         ),
         cancellation=cancellation,
         max_suggestions=max_suggestions,
@@ -2340,6 +2342,31 @@ def test_consult_maps_papers_to_pdf_direct_links(monkeypatch, sample_feed):
         assert suggestion.url.startswith("https://arxiv.org/pdf/")
         assert suggestion.source_label == "arXiv"
         assert suggestion.title
+
+
+def test_consult_uses_selected_source_phrase_and_reports_sent_query(
+    monkeypatch, sample_feed,
+):
+    seen: list[str] = []
+
+    def stub(url, timeout, user_agent):
+        seen.append(parse_qs(urlsplit(url).query)["search_query"][0])
+        return sample_feed
+
+    monkeypatch.setattr(arxiv_client, "_fetch", stub)
+    result = _contributor().consult(_consult_context(
+        question="private notebook wording",
+        gaps=("private gap phrase",),
+        source_queries={"arxiv": ("retrieval augmented generation",)},
+    ))
+
+    assert result.status is ExtensionResultStatus.AVAILABLE
+    assert len(seen) == 1
+    assert "private" not in seen[0]
+    assert {item.actual_query for item in result.items} == {
+        "retrieval augmented generation"
+    }
+    assert "all:retrieval" in seen[0]
 
 
 def test_consult_truncates_title_and_summary_to_cores_gap_suggestion_limits(
@@ -3189,4 +3216,3 @@ def test_both_outbound_features_send_the_same_query_for_the_same_text(monkeypatc
     # Vacuity guard: it really did carry the terms, rather than both being the
     # same empty string.
     assert "generation" in seen[0]
-

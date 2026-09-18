@@ -29,7 +29,7 @@ import {
 import { AnswerMarkdown } from "./answer-markdown";
 import { answerBodyWithoutCompletenessNotice } from "./answer-completeness";
 import type { CitationImageOrder, CitationImageSlotItem } from "./rehype-citation-images";
-import { GapSuggestionsPanel } from "./answer-gap-suggestions";
+import { ExternalEvidenceSection, GapSuggestionsPanel } from "./answer-gap-suggestions";
 import { AuthedImage } from "./authed-image";
 import { API_BASE } from "./api-config";
 import { type ReasoningTraceStep } from "./ask-stream";
@@ -1739,8 +1739,13 @@ export function AnswerView({
         notebookNames={notebookNames}
         onOpenSource={onOpenSource}
       />
+      <ExternalEvidenceSection
+        section={answer.external_evidence}
+        suggestions={answer.gap_suggestions ?? []}
+      />
       <GapSuggestionsPanel
         suggestions={answer.gap_suggestions ?? []}
+        egress={answer.gap_egress}
         controller={importController}
       />
       {answer.reasoning_trace && answer.reasoning_trace.length > 0 && (

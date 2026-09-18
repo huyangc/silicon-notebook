@@ -7,9 +7,9 @@
  * `backend/app/models/ask.py AskGapSuggestion` / `AskResponse.gap_suggestions`.
  *
  * Three things this block deliberately is NOT, and must keep reading as:
- *   - not evidence — it never touches `buildAnswerReferences`/
+ *   - not notebook evidence — it never touches `buildAnswerReferences`/
  *     `computeSourceTierCounts`, takes no `[k]` key, and cannot move a word
- *     of the answer above it;
+ *     of the answer above it. A separate supplement can refer to it as [Xn];
  *   - not silent about that — the disclaimer line says so before any link is
  *     shown, and the block is visually distinct from cited content (a plain
  *     list under a collapsed <details>, not a citation card);
@@ -50,15 +50,75 @@ import {
   type ImportOutcome,
   type ImportRowController,
 } from "./import-row-state";
-import type { GapSuggestion } from "./workspace-model";
+import type { ExternalEvidenceSection as ExternalEvidenceSectionData, GapEgress, GapSuggestion } from "./workspace-model";
+
+function ExternalReferenceText({ text, suggestions }: { text: string; suggestions: GapSuggestion[] }) {
+  return <>{text.split(/(\[X[1-9]\d*\])/g).map((part, index) => {
+    const match = /^\[X([1-9]\d*)\]$/.exec(part);
+    const suggestion = match ? suggestions[Number(match[1]) - 1] : undefined;
+    if (!suggestion || !/^https?:\/\//i.test(suggestion.url)) return part;
+    return <a key={index} href={suggestion.url} target="_blank" rel="noopener noreferrer" title={suggestion.title}>{part}</a>;
+  })}</>;
+}
+
+export function ExternalEvidenceSection({ section, suggestions }: {
+  section: ExternalEvidenceSectionData | null | undefined;
+  suggestions: GapSuggestion[];
+}) {
+  if (!section?.text?.trim()) return null;
+  return (
+    <section className="answer-external-evidence" aria-label="根据外部来源补充">
+      <h3>根据外部来源补充</h3>
+      <p className="answer-external-evidence-warning">以下内容基于站外来源的摘要生成，尚未经过笔记本核验，不计入本次回答的引用与覆盖率。</p>
+      <div className="answer-external-evidence-text">
+        <ExternalReferenceText text={section.text} suggestions={suggestions} />
+      </div>
+      {section.conflicts?.length > 0 && (
+        <div className="answer-external-evidence-conflicts">
+          <h4>与笔记本内容不一致</h4>
+          <ul>{section.conflicts.map((conflict, index) => (
+            <li key={index}>
+              <p><strong>笔记本：</strong><ExternalReferenceText text={conflict.kb_says} suggestions={suggestions} /></p>
+              <p><strong>站外来源：</strong><ExternalReferenceText text={conflict.external_says} suggestions={suggestions} /></p>
+              {conflict.note && <p><strong>说明：</strong><ExternalReferenceText text={conflict.note} suggestions={suggestions} /></p>}
+            </li>
+          ))}</ul>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function GapEgressReceipt({ egress }: { egress: GapEgress }) {
+  const sourceQueries = egress.source_queries ?? {};
+  return (
+    <div className="answer-gap-consult-egress" aria-label="本轮站外检索记录">
+      <strong>本轮实际尝试：</strong>
+      {egress.sources.length > 0 ? (
+        <ul>{egress.sources.map((source, index) => {
+          const sourceValue = Object.hasOwn(sourceQueries, source) ? sourceQueries[source] : undefined;
+          const queries = Array.isArray(sourceValue)
+            ? sourceValue.filter((query) => typeof query === "string" && query.trim())
+            : [];
+          return <li key={`${source}#${index}`}>
+            <span>{source}</span>
+            <span> · 检索词：{queries.length > 0 ? queries.join("、") : egress.query}</span>
+          </li>;
+        })}</ul>
+      ) : <span>没有调用站外来源。</span>}
+    </div>
+  );
+}
 
 export function GapSuggestionsPanel({
   suggestions,
+  egress,
   controller,
   onImport,
   importDisabledReason,
 }: {
   suggestions: GapSuggestion[];
+  egress?: GapEgress | null;
   /** 生产调用点（AnswerView）传的**共享** controller：同一个 URL 在这份清单与外部
    *  证据引用卡之间共用一格「已导入」终态（见 import-row-state.tsx 顶部）。传了它
    *  就以它为准，`onImport`/`importDisabledReason` 不再参与——那两个是给独立渲染
@@ -81,7 +141,7 @@ export function GapSuggestionsPanel({
   const ownController = useImportRowController(onImport, importDisabledReason);
   const importController = controller ?? ownController;
 
-  if (suggestions.length === 0) return null;
+  if (suggestions.length === 0 && !egress) return null;
 
   return (
     <details className="answer-gap-consult">
@@ -90,9 +150,12 @@ export function GapSuggestionsPanel({
         站外来源建议 · {suggestions.length} 条
       </summary>
       <p className="answer-gap-consult-disclaimer">
-        以下结果来自笔记本之外，没有参与本次回答，也不会被引用。导入后才会进入这个笔记本。
+        {suggestions.length > 0
+          ? "以下结果来自笔记本之外，没有参与本次回答，也不计入正文引用。导入后才会进入这个笔记本。"
+          : "本轮站外检索没有返回建议；以下记录显示实际尝试的来源与检索词。"}
       </p>
-      <ul className="answer-gap-consult-list">
+      {egress && <GapEgressReceipt egress={egress} />}
+      {suggestions.length > 0 && <ul className="answer-gap-consult-list">
         {suggestions.map((suggestion, index) => (
           <li className="answer-gap-consult-item" key={`${suggestion.url}#${index}`}>
             <div className="answer-gap-consult-item-head">
@@ -104,6 +167,9 @@ export function GapSuggestionsPanel({
                 <span className="answer-gap-consult-source">{suggestion.source_label}</span>
               )}
             </div>
+            {suggestion.actual_query?.trim() && (
+              <p className="answer-gap-consult-query">检索词：{suggestion.actual_query.trim()}</p>
+            )}
             {suggestion.summary && (
               <p className="answer-gap-consult-summary">{suggestion.summary}</p>
             )}
@@ -117,7 +183,7 @@ export function GapSuggestionsPanel({
             />
           </li>
         ))}
-      </ul>
+      </ul>}
     </details>
   );
 }

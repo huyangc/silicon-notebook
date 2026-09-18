@@ -1,3 +1,4 @@
+import io
 from pathlib import Path
 
 import pytest
@@ -6,7 +7,7 @@ from app.extensions import default_extension_runtime
 from app.models.schemas import NotebookCreate
 from app.models.sources import ScopedSourceDetail, SourceElement
 from app.services import remote_sources
-from app.services.remote_sources import PdfProbe
+from app.services.remote_sources import FetchResult, PdfProbe
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.sqlite_repository import SQLiteRepository
 
@@ -58,6 +59,15 @@ def local_trusted_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("MINERU_API_TOKEN", "")
     monkeypatch.setenv("MINERU_MODE", "http")
     monkeypatch.setenv("MINERU_API_URL", "http://localhost:8888")
+    monkeypatch.setenv("URL_IMPORT_TRUSTED_PROXY_HOSTS", "http://127.0.0.1:8100")
+    return _repository(Settings())
+
+
+@pytest.fixture
+def no_parser_trusted_repo(tmp_path, monkeypatch):
+    _base_env(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINERU_API_TOKEN", "")
+    monkeypatch.setenv("MINERU_MODE", "off")
     monkeypatch.setenv("URL_IMPORT_TRUSTED_PROXY_HOSTS", "http://127.0.0.1:8100")
     return _repository(Settings())
 
@@ -423,3 +433,85 @@ def test_process_source_download_defaults_to_no_exemption(local_repo, monkeypatc
     )
     local_repo.process_source(sid)
     assert downloads == [("https://a/doc.pdf", False)]
+
+
+def test_trusted_markdown_url_uses_builtin_markdown_parser(local_trusted_repo, monkeypatch):
+    repo = local_trusted_repo
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    url = "http://127.0.0.1:8100/export/snapshot.md"
+    markdown = b"# Snapshot\n\nA passage from the web snapshot.\n"
+    fetches = []
+    downloads = []
+
+    def fake_fetch(url_arg, timeout, *, allow_private=False):
+        fetches.append((url_arg, allow_private))
+        return FetchResult(200, "text/markdown; charset=utf-8", len(markdown), markdown)
+
+    def fake_opener(url_arg, timeout, *, allow_private=False):
+        downloads.append((url_arg, allow_private))
+        return io.BytesIO(markdown)
+
+    monkeypatch.setattr(remote_sources, "_default_fetch", fake_fetch)
+    monkeypatch.setattr(remote_sources, "_default_opener", fake_opener)
+    monkeypatch.setattr(
+        repo.mineru_client,
+        "parse_with_images",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("Markdown must not be sent to MinerU")
+        ),
+    )
+    result = repo.add_url_sources(
+        nb.id,
+        [url],
+        scheduler=lambda sid: None,
+        trusted_proxy_origins=frozenset({"http://127.0.0.1:8100"}),
+    )
+    assert not result.rejected
+    source = result.created[0]
+    assert source.type == "markdown"
+    assert source.title == "snapshot.md"
+
+    repo.process_source(source.id)
+    detail = repo.get_source(source.id)
+    assert detail.parse_status == "extracted"
+    assert any(
+        "A passage from the web snapshot" in element.text
+        for element in repo.source_elements(source.id)
+    )
+    assert fetches == [(url, True)]
+    assert downloads == [(url, True)]
+
+
+def test_trusted_markdown_needs_no_pdf_parser(no_parser_trusted_repo, monkeypatch):
+    repo = no_parser_trusted_repo
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    markdown_url = "http://127.0.0.1:8100/export/snapshot.md"
+    pdf_url = "http://127.0.0.1:8100/export/paper.pdf"
+    untrusted_url = "http://127.0.0.1:8200/export/snapshot.md"
+    seen = []
+
+    def fake_fetch(url, timeout, *, allow_private=False):
+        seen.append((url, allow_private))
+        if url == pdf_url:
+            return FetchResult(200, "application/pdf", 8, b"%PDF-1.7")
+        return FetchResult(200, "text/markdown", 12, b"# Snapshot\n")
+
+    monkeypatch.setattr(remote_sources, "_default_fetch", fake_fetch)
+    monkeypatch.setattr(
+        remote_sources,
+        "_default_opener",
+        lambda url, timeout, *, allow_private=False: io.BytesIO(b"# Snapshot\n"),
+    )
+    result = repo.add_url_sources(
+        nb.id,
+        [markdown_url, pdf_url, untrusted_url],
+        scheduler=lambda sid: None,
+        trusted_proxy_origins=frozenset({"http://127.0.0.1:8100"}),
+    )
+    assert [source.source_url for source in result.created] == [markdown_url]
+    assert result.created[0].type == "markdown"
+    assert [item.url for item in result.rejected] == [pdf_url, untrusted_url]
+    assert all("未配置 PDF 解析服务" in item.reason for item in result.rejected)
+    assert seen == [(markdown_url, True), (pdf_url, True)]
+    repo.process_source(result.created[0].id)
+    assert repo.get_source(result.created[0].id).parse_status == "extracted"

@@ -33,6 +33,23 @@ def test_html_rejected():
     assert not p.ok and "不是 PDF" in p.reason
 
 
+def test_trusted_proxy_markdown_probe_and_pdf_magic_priority():
+    markdown = FetchResult(200, "text/markdown; charset=utf-8", 42, b"# Snapshot")
+    url = "http://127.0.0.1:8100/export/page.pdf"
+    trusted = probe_pdf(url, fetch=_fetch(markdown), allow_private=True)
+    assert trusted == PdfProbe(True, "", 42, "page.md")
+    rejected = probe_pdf(url, fetch=_fetch(markdown))
+    assert not rejected.ok
+    assert "不是 PDF" in rejected.reason
+
+    pdf = probe_pdf(
+        url,
+        fetch=_fetch(FetchResult(200, "text/markdown", 42, b"%PDF-1.7")),
+        allow_private=True,
+    )
+    assert pdf.display_name == "page.pdf"
+
+
 def test_http_error_rejected():
     p = probe_pdf("https://a/missing.pdf",
                   fetch=_fetch(FetchResult(404, "", 0, b"")))

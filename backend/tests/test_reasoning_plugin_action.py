@@ -224,6 +224,7 @@ def test_the_first_reflect_turn_never_offers_a_plugin_action(repo):
 
     assert "search_papers" not in llm.schema_hints[0]
     assert "search_papers" not in llm.reflect_prompts[0]
+    assert "系统提示:库内检索已无新证据" not in llm.reflect_prompts[0]
     assert host.calls == []
 
 
@@ -236,7 +237,30 @@ def test_an_empty_in_library_turn_opens_the_gate_on_the_next_one(repo):
 
     assert "search_papers" in llm.schema_hints[1]
     assert "search_papers" in llm.reflect_prompts[1]
+    assert "系统提示:库内检索已无新证据" in llm.reflect_prompts[1]
+    assert "只有确认外部检索也不适用时才直接 answer" in llm.reflect_prompts[1]
     assert len(host.calls) == 1
+
+
+@pytest.mark.parametrize(("no_progress", "stale", "zero_hits"), [
+    (True, 0, {}),
+    (False, 1, {}),
+    (False, 0, {"ppr": 1}),
+])
+def test_each_plugin_fact_opens_the_same_core_nudge(
+    repo, no_progress, stale, zero_hits,
+):
+    llm = _ValidatingLLM([])
+    retriever, limits = _retriever(repo, llm, host=_FakeHost())
+    state = retriever._new_run_state(
+        _seed(repo).id, QUESTION, "", None,
+        max_steps=4, intent_queries=None, limits=limits, intent_detail=None)
+    state.zero_hit_by_action.update(zero_hits)
+
+    offered = retriever._plugin_action_kwargs(state, no_progress, stale)
+
+    assert offered["plugin_actions"] == state.plugin_specs
+    assert "系统提示:库内检索已无新证据" in offered["plugin_actions_nudge"]
 
 
 @pytest.mark.parametrize("closure", [
@@ -424,6 +448,7 @@ def test_the_last_turn_refuses_a_call_nobody_could_read(repo):
 
     assert host.calls == []
     assert "plugin_action_last_turn" in _skips(result)
+    assert "系统提示:库内检索已无新证据" not in llm.reflect_prompts[1]
 
 
 def test_a_host_failure_is_one_skip_step_carrying_its_code(repo):
@@ -866,8 +891,9 @@ def test_closing_the_gate_mid_run_clears_what_the_last_turn_offered(repo):
         _seed(repo).id, QUESTION, "", None,
         max_steps=4, intent_queries=None, limits=limits, intent_detail=None)
 
-    assert retriever._plugin_action_kwargs(state, True, 0) == {
-        "plugin_actions": state.plugin_specs}
+    offered = retriever._plugin_action_kwargs(state, True, 0)
+    assert offered["plugin_actions"] == state.plugin_specs
+    assert "系统提示:库内检索已无新证据" in offered["plugin_actions_nudge"]
     assert state.plugin_actions_offered == state.plugin_specs
 
     # The deployment kill switch flips between two turns of the same run.

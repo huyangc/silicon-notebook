@@ -245,14 +245,13 @@ class _UrlSourceImportAdapter:
     into the domain dataclasses so a plugin never has to import
     ``app.models.sources``.
 
-    **Trusted-proxy SSRF exemption.** This adapter is the ONE place the
-    deployment's ``URL_IMPORT_TRUSTED_PROXY_HOSTS`` origin whitelist is
-    injected into the import *probe*: URLs whose origin exactly matches skip
-    only the SSRF public-address check. The whitelist is read from deployment
-    settings at call time — never from anything the plugin (or the request)
-    passes in — and the browser endpoint and MCP tools never pass it, so the
-    probe-side exemption is reachable through this port alone. The parse-time
-    download reads the same deployment whitelist itself (see
+    **Trusted-proxy SSRF exemption.** This adapter applies the deployment's
+    ``URL_IMPORT_TRUSTED_PROXY_HOSTS`` origin whitelist to the import *probe*:
+    Matching URLs skip only the SSRF public-address check. The whitelist is
+    read from deployment settings at call time, never from the plugin or the
+    request. The browser endpoint also reads this same deployment list for
+    its probe, so its import button can accept a trusted proxy's Markdown
+    snapshot. The parse-time download reads the same whitelist itself (see
     ``source_ingestion._parser_trusted_proxy_origins``), so it covers reparse
     of every matching URL source. With an empty whitelist (the default)
     behaviour is bit-for-bit the historical one.

@@ -17,6 +17,8 @@ _EXPECTED_WORKLOADS = {
     "plugin_engine": ("chat", "interactive", "扩展问答引擎"),
     "reasoning_agent": ("chat", "interactive", "逐步推理"),
     "query_rewrite": ("chat", "interactive", "查询改写"),
+    "gap_consult_query": ("chat", "interactive", "站外来源检索词规划"),
+    "external_evidence_answer": ("chat", "interactive", "站外摘要补充"),
     "evidence_refine": ("chat", "interactive", "证据筛选"),
     "report_outline": ("chat", "report", "报告提纲"),
     "report_sufficiency": ("chat", "report", "报告充分性判断"),
@@ -121,6 +123,8 @@ def test_chat_workloads_have_an_exhaustive_analysis_area():
             "plugin_engine",
             "reasoning_agent",
             "query_rewrite",
+            "gap_consult_query",
+            "external_evidence_answer",
             "evidence_refine",
         },
         "report": {

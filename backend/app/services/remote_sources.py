@@ -1,7 +1,8 @@
-"""公开 PDF 直链的轻量初筛：判定 URL 是否指向可解析的 PDF。
+"""公开 PDF 直链及受信代理 Markdown 快照的轻量初筛。
 
 网络 I/O 经一个可注入的 `fetch` 回调完成，因此单测无需真打网络。判定规则：
 Content-Type 以 application/pdf 开头，或响应首字节为 %PDF-，即视为 PDF。
+仅受信代理路径接受 text/markdown；其余 URL 仍须为 PDF。
 """
 from __future__ import annotations
 
@@ -35,10 +36,9 @@ def validate_public_http_url(
     ``allow_private=True`` skips ONLY the public-address rule (returning before
     the resolver runs — a trusted proxy host may not resolve at all); the URL
     shape checks (scheme / host / credentials / port validity) still apply. It
-    disables the SSRF guard for the whole request chain, redirects the remote
-    server answers included, so it may only ever be passed down the
-    deployment-configured trusted-proxy origin whitelist path — never from
-    anything reachable by browser or MCP request input.
+    applies only to the initial trusted origin. Redirects to that exact origin
+    retain the exemption; every other redirect target must resolve publicly.
+    The caller may enable it only after matching the deployment whitelist.
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
@@ -73,13 +73,36 @@ def validate_public_http_url(
 class _PublicOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Re-apply the public-address policy to every redirect target."""
 
-    def __init__(self, *, allow_private: bool = False) -> None:
+    def __init__(
+        self, *, allow_private: bool = False, initial_url: str = "",
+    ) -> None:
         super().__init__()
-        self._allow_private = allow_private
+        self._trusted_origin = _origin_key(initial_url) if allow_private else None
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        validate_public_http_url(newurl, allow_private=self._allow_private)
+        validate_public_http_url(
+            newurl,
+            allow_private=(
+                self._trusted_origin is not None
+                and _origin_key(newurl) == self._trusted_origin
+            ),
+        )
         return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _origin_key(url: str) -> tuple[str, str, int] | None:
+    """Normalize one URL origin for redirect-scoped proxy trust."""
+
+    try:
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").lower()
+        if scheme not in {"http", "https"} or not host:
+            return None
+        port = parsed.port or (443 if scheme == "https" else 80)
+    except ValueError:
+        return None
+    return (scheme, host, port)
 
 
 def _safe_urlopen(
@@ -87,7 +110,9 @@ def _safe_urlopen(
 ):
     validate_public_http_url(request.full_url, allow_private=allow_private)
     opener = urllib.request.build_opener(
-        _PublicOnlyRedirectHandler(allow_private=allow_private)
+        _PublicOnlyRedirectHandler(
+            allow_private=allow_private, initial_url=request.full_url,
+        )
     )
     return opener.open(request, timeout=timeout)
 
@@ -114,7 +139,7 @@ def probe_pdf(
     fetch: Optional[Callable[[str, float], FetchResult]] = None,
     allow_private: bool = False,
 ) -> PdfProbe:
-    """初筛 URL 是否指向可解析的 PDF（规则见模块 docstring）。
+    """初筛 URL 是否指向可解析的 PDF 或受信代理 Markdown 快照。
 
     ``allow_private`` 只作用于默认网络层（透传 ``_safe_urlopen`` 的 SSRF 检查，
     语义见 ``validate_public_http_url``）；注入了 ``fetch`` 时它不参与——网络
@@ -137,9 +162,14 @@ def probe_pdf(
         result.content_type.lower().startswith("application/pdf")
         or result.head.startswith(b"%PDF-")
     )
-    if not is_pdf:
+    is_markdown = allow_private and result.content_type.lower().startswith(
+        "text/markdown"
+    )
+    if not is_pdf and not is_markdown:
         ct = result.content_type or "未知"
         return PdfProbe(False, f"URL 不是 PDF（Content-Type={ct}）", result.content_length, display)
+    if not is_pdf and is_markdown:
+        display = _display_name(parsed, suffix=".md")
     return PdfProbe(True, "", result.content_length, display)
 
 
@@ -188,10 +218,12 @@ def _default_opener(url: str, timeout: float, *, allow_private: bool = False):
     return _safe_urlopen(request, timeout, allow_private=allow_private)
 
 
-def _display_name(parsed: ParseResult) -> str:
+def _display_name(parsed: ParseResult, *, suffix: str = ".pdf") -> str:
     base = os.path.basename(parsed.path) or parsed.netloc or "source"
-    if not base.lower().endswith(".pdf"):
-        base = f"{base}.pdf"
+    if suffix == ".md" and base.lower().endswith(".pdf"):
+        base = f"{base[:-4]}.md"
+    elif not base.lower().endswith(suffix):
+        base = f"{base}{suffix}"
     return base
 
 

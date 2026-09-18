@@ -88,7 +88,7 @@ test("默认折叠，展开后能看到免责句", async () => {
 
   await user.click(summary);
   const disclaimer = screen.getByText(
-    "以下结果来自笔记本之外，没有参与本次回答，也不会被引用。导入后才会进入这个笔记本。",
+    "以下结果来自笔记本之外，没有参与本次回答，也不计入正文引用。导入后才会进入这个笔记本。",
   );
   expect(disclaimer).toBeVisible();
 
@@ -251,4 +251,56 @@ test("持久化(JSON 往返)的历史回答重新打开时同样渲染这份披�
   const summary = screen.getByText("站外来源建议 · 1 条");
   await user.click(summary);
   expect(screen.getByText("站外相关文档")).toBeVisible();
+});
+
+test("外部补充独立展示，[Xn] 指向原始建议位置并提示标题", () => {
+  const answer = baseAnswer({
+    gap_suggestions: [
+      suggestion({ title: "无摘要结果", summary: "", url: "https://example.com/empty" }),
+      suggestion({ title: "有摘要结果", url: "https://example.com/result" }),
+    ],
+    external_evidence: {
+      text: "站外摘要支持这一点 [X2]，另一个标记 [X9] 无来源。",
+      conflicts: [{ kb_says: "笔记本主张", external_says: "站外主张 [X2]", note: "需要进一步核验" }],
+    },
+  });
+  const { container } = renderAnswerView(answer);
+  const section = container.querySelector(".answer-external-evidence");
+  expect(section).toHaveTextContent("根据外部来源补充");
+  expect(section).toHaveTextContent("尚未经过笔记本核验");
+  expect(section).toHaveTextContent("笔记本主张");
+  expect(section).toHaveTextContent("站外主张");
+  expect(section).toHaveTextContent("[X9]");
+  const links = section?.querySelectorAll('a[href="https://example.com/result"]');
+  expect(links).toHaveLength(2);
+  expect(links?.[0]).toHaveTextContent("[X2]");
+  expect(links?.[0]).toHaveAttribute("title", "有摘要结果");
+  expect(screen.getByText(/来源 · 个人 1/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "[2]" })).not.toBeInTheDocument();
+  expect(container.querySelector(".answer-markdown")).not.toHaveTextContent("站外摘要支持这一点");
+});
+
+test("零建议也披露实际尝试的目标与专属检索词", async () => {
+  const user = userEvent.setup();
+  render(<GapSuggestionsPanel suggestions={[]} egress={{
+    query: "原始问题",
+    sources: ["期刊甲", "搜索乙"],
+    source_queries: { "期刊甲": ["甲词一", "甲词二"], "搜索乙": ["乙词"] },
+  }} />);
+  await user.click(screen.getByText("站外来源建议 · 0 条"));
+  expect(screen.getByText("本轮站外检索没有返回建议；以下记录显示实际尝试的来源与检索词。")).toBeVisible();
+  const receipt = screen.getByLabelText("本轮站外检索记录");
+  expect(receipt).toHaveTextContent("期刊甲 · 检索词：甲词一、甲词二");
+  expect(receipt).toHaveTextContent("搜索乙 · 检索词：乙词");
+});
+
+test("每条建议显示实际检索词；缺失时不显示", async () => {
+  const user = userEvent.setup();
+  render(<GapSuggestionsPanel suggestions={[
+    suggestion({ actual_query: "  实际提交的词  " }),
+    suggestion({ title: "第二条", url: "https://example.com/second", actual_query: " " }),
+  ]} />);
+  await user.click(screen.getByText("站外来源建议 · 2 条"));
+  expect(screen.getByText("检索词：实际提交的词")).toBeVisible();
+  expect(screen.getAllByText(/检索词：/)).toHaveLength(1);
 });

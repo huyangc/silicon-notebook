@@ -7,8 +7,9 @@ import — and both are what an in-house variant replaces wholesale when it
 points at a different upstream.
 
 It lives in its own module rather than in either contributor because **two**
-contributions now need it and they must not disagree: :mod:`.consult` scans a
-question plus its gap phrases, :mod:`.reflect_search` scans the one argument
+contributions now need it and they must not disagree: :mod:`.consult` scans
+selected source phrases (or the question and gaps for older direct SDK calls),
+while :mod:`.reflect_search` scans the one argument
 the model wrote.  A second hand-written copy of the same scan would drift the
 day one of them learned about a new identifier shape — and the two would then
 send arXiv different queries for the same words, which is exactly the class of

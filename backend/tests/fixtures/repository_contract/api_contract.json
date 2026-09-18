@@ -2096,6 +2096,12 @@
         "AskGapSuggestion": {
           "description": "One pointer to material OUTSIDE this notebook.\n\nNot evidence, and the field set says so: there is no ``source_id``, no\n``element_id``, no relevance score and no citation key, because nothing\nhere was retrieved, cited, anchored, or shown to the answering model.  A\nreader who wants it has to import the URL first, which is an ordinary\nsource add with its own parsing and its own permissions.\n\nThe ``max_length`` values are imported from ``app.domain.gap_consult`` —\nthe same constants the host truncates with — so the wire rail and the\nadmission rail cannot drift apart.",
           "properties": {
+            "actual_query": {
+              "default": "",
+              "maxLength": 300,
+              "title": "Actual Query",
+              "type": "string"
+            },
             "source_label": {
               "default": "",
               "maxLength": 40,
@@ -2364,6 +2370,28 @@
               "default": "inferred",
               "title": "Evidence Level",
               "type": "string"
+            },
+            "external_evidence": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ExternalEvidenceSection"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "gap_egress": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Gap Egress"
             },
             "gap_suggestions": {
               "items": {
@@ -4070,6 +4098,54 @@
             "confidence"
           ],
           "title": "Evidence",
+          "type": "object"
+        },
+        "ExternalEvidenceConflict": {
+          "properties": {
+            "external_says": {
+              "maxLength": 400,
+              "title": "External Says",
+              "type": "string"
+            },
+            "kb_says": {
+              "maxLength": 400,
+              "title": "Kb Says",
+              "type": "string"
+            },
+            "note": {
+              "default": "",
+              "maxLength": 300,
+              "title": "Note",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kb_says",
+            "external_says"
+          ],
+          "title": "ExternalEvidenceConflict",
+          "type": "object"
+        },
+        "ExternalEvidenceSection": {
+          "description": "Clearly labelled, unverified supplement from outside summaries.",
+          "properties": {
+            "conflicts": {
+              "items": {
+                "$ref": "#/components/schemas/ExternalEvidenceConflict"
+              },
+              "title": "Conflicts",
+              "type": "array"
+            },
+            "text": {
+              "maxLength": 2000,
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "title": "ExternalEvidenceSection",
           "type": "object"
         },
         "FeedbackRequest": {

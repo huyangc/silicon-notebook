@@ -17,12 +17,20 @@ from typing import Protocol
 from app.domain.gap_consult import (
     GAP_CONSULT_MAX_GAP_PHRASES,
     GAP_CONSULT_MAX_SUGGESTIONS,
+    GAP_CONSULT_MAX_QUERY_SOURCES,
+    GAP_CONSULT_MAX_QUERIES_PER_SOURCE,
     GAP_CONSULT_PHRASE_MAX_CHARS,
     GAP_CONSULT_QUESTION_MAX_CHARS,
+    GAP_SOURCE_DISPLAY_NAME_MAX_CHARS,
+    GAP_SOURCE_LANGUAGES_MAX,
+    GAP_SOURCE_LANGUAGE_MAX_CHARS,
+    GAP_SOURCE_CONTENT_TYPE_MAX_CHARS,
+    GAP_SOURCE_QUERY_ADVICE_MAX_CHARS,
     GAP_SUGGESTION_SOURCE_LABEL_MAX_CHARS,
     GAP_SUGGESTION_SUMMARY_MAX_CHARS,
     GAP_SUGGESTION_TITLE_MAX_CHARS,
     GAP_SUGGESTION_URL_MAX_CHARS,
+    GAP_SUGGESTION_ACTUAL_QUERY_MAX_CHARS,
     GapConsultQuery,
     GapSuggestion,
 )
@@ -33,6 +41,17 @@ from app.extension_sdk.contracts import (
 
 
 ASK_GAP_CONSULT_POINT = "ask.gap_consult"
+
+
+@dataclass(frozen=True, slots=True)
+class SourceDescriptor:
+    """A plugin-owned source the query model may select for consultation."""
+
+    source_id: str
+    display_name: str
+    languages: tuple[str, ...] = ()
+    content_type: str = ""
+    query_advice: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,8 +66,8 @@ class GapConsultAvailabilityContext:
 class GapConsultExtensionContext:
     """Per-contribution projection.
 
-    ``query`` is the frozen egress surface — identical for every contributor
-    and identical to what an audit of this run would show was sent outward.
+    ``query`` is the contributor-specific projection of the frozen egress
+    surface: each contributor sees only its own selected source phrases.
     ``max_suggestions`` is this call's *remaining* budget and therefore may be
     smaller than ``query.max_suggestions``, which records what the run as a
     whole was willing to accept.
@@ -65,6 +84,10 @@ class GapConsultExtensionContext:
 
 
 class GapConsultContributor(Protocol):
+    # Optional at runtime: contributors without this method are not offered to
+    # the source-selection model and are not consulted.
+    def describe_sources(self) -> tuple[SourceDescriptor, ...]: ...
+
     def consult(
         self, context: GapConsultExtensionContext
     ) -> ContributorResult[GapSuggestion]: ...
@@ -74,15 +97,24 @@ __all__ = [
     "ASK_GAP_CONSULT_POINT",
     "GAP_CONSULT_MAX_GAP_PHRASES",
     "GAP_CONSULT_MAX_SUGGESTIONS",
+    "GAP_CONSULT_MAX_QUERY_SOURCES",
+    "GAP_CONSULT_MAX_QUERIES_PER_SOURCE",
     "GAP_CONSULT_PHRASE_MAX_CHARS",
     "GAP_CONSULT_QUESTION_MAX_CHARS",
+    "GAP_SOURCE_DISPLAY_NAME_MAX_CHARS",
+    "GAP_SOURCE_LANGUAGES_MAX",
+    "GAP_SOURCE_LANGUAGE_MAX_CHARS",
+    "GAP_SOURCE_CONTENT_TYPE_MAX_CHARS",
+    "GAP_SOURCE_QUERY_ADVICE_MAX_CHARS",
     "GAP_SUGGESTION_SOURCE_LABEL_MAX_CHARS",
     "GAP_SUGGESTION_SUMMARY_MAX_CHARS",
     "GAP_SUGGESTION_TITLE_MAX_CHARS",
     "GAP_SUGGESTION_URL_MAX_CHARS",
+    "GAP_SUGGESTION_ACTUAL_QUERY_MAX_CHARS",
     "GapConsultAvailabilityContext",
     "GapConsultContributor",
     "GapConsultExtensionContext",
     "GapConsultQuery",
     "GapSuggestion",
+    "SourceDescriptor",
 ]

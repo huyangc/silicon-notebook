@@ -591,10 +591,19 @@ origin 写进此名单后 URL 导入才能触达。每项必须带 `http://` 或
 裸 `host:port` 会被整项静默忽略。匹配按 origin 精确进行（`scheme://host:port`，
 统一小写、默认端口显式归一——不同端口就是不同 origin），命中只跳过导入探测与解析
 下载中的「公网地址」检查；协议/凭证/端口形态检查照常生效。名单只来自本部署配置——
-请求输入永远改不了它。探测半程的豁免只由插件路由适配器注入（浏览器与 MCP 的 URL
-导入拿不到）；解析下载半程则按名单对所有 origin 命中的 URL 来源生效、含 reparse——
-名单里公网可解析的 origin 因此也会让浏览器建的同 origin 来源在解析下载（含重定向链）
-获得豁免。只把你信任到这个程度的 origin 写进名单。
+请求输入永远改不了它。浏览器和插件端口导入的探测都会用部署名单检查初始 URL；
+命中 origin 后，只有仍指向同一归一化 origin 的重定向继续享有内网豁免；跨 origin
+跳转即使目标也在名单内，仍须通过公网地址检查。解析下载半程也按名单对
+所有匹配的 URL 来源生效，含重解析。受信代理可返回 `text/markdown` 快照：普通界面
+「导入」按钮也能将其作为 `.md` 来源交给内建 Markdown 解析器，不经过 MinerU；
+其它 origin 仍只接受 PDF 直链。只把你信任到这个程度的 origin 写进名单。
+
+逐步推理 Ask 的可选外扩先用 `gap_consult_query` 选择已描述的站外来源并为每源准备
+检索词，有摘要时再用 `external_evidence_answer` 生成独立、未经核验的补充段。示例
+把两项都绑定到 `general`，关闭 thinking。查询 workload 未绑定或失败时不会调用
+站外 contributor；补充 workload 未绑定时已草拟正文保持原样。来源描述、两次可选
+模型阶段和 contributor 调用共用 `ASK_GAP_CONSULT_TIMEOUT_SECONDS`（默认 4 秒，
+`0 < x ≤ 30`），各阶段没有独立预算。
 
 **检索：**
 

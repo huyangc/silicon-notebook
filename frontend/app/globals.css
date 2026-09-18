@@ -7049,6 +7049,79 @@ button.tag:hover {
   font-weight: 400;
 }
 
+.answer-gap-consult-egress {
+  margin: 0 12px 10px 30px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.answer-gap-consult-egress ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.answer-gap-consult-query {
+  margin: 0;
+  color: #8a94a6;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.answer-external-evidence {
+  margin: 10px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--blue);
+  border-radius: 8px;
+  background: var(--soft);
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.answer-external-evidence h3,
+.answer-external-evidence h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.answer-external-evidence-warning {
+  margin: 0 0 10px;
+  color: var(--muted);
+}
+
+.answer-external-evidence-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+
+.answer-external-evidence a {
+  color: var(--blue);
+  text-decoration: underline;
+}
+
+.answer-external-evidence-conflicts {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.answer-external-evidence-conflicts ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.answer-external-evidence-conflicts p {
+  margin: 0 0 4px;
+  overflow-wrap: anywhere;
+}
+
 .answer-gap-consult-list {
   display: grid;
   gap: 8px;

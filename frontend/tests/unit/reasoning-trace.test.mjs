@@ -733,6 +733,10 @@ test("gap_consult 有自己的短标签,且与 memory 不同名,detail 说清带
   );
 });
 
+test("外部补充步骤使用独立标签", () => {
+  assert.equal(getTraceStepLabel({ step_type: "external_evidence", summary: "", detail: {} }), "外部补充");
+});
+
 // 分支顺序守卫(同 profile/experience/consult_memory 的理由):gap_consult 必须
 // 排在通用 `detail.count` 分支之前——它们读的恰好是同一个键名 `count`,但含义
 // 完全不同(站外建议数 vs 笔记本内候选数),顺序颠倒会让两者的措辞互相顶替而

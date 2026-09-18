@@ -17,8 +17,10 @@ from app.domain.gap_consult import (
     GAP_SUGGESTION_SUMMARY_MAX_CHARS,
     GAP_SUGGESTION_TITLE_MAX_CHARS,
     GAP_SUGGESTION_URL_MAX_CHARS,
+    GAP_SUGGESTION_ACTUAL_QUERY_MAX_CHARS,
     GapConsultCallContext,
     GapConsultQuery,
+    GapSourceDescription,
     GapSuggestion,
     gap_consult_host_is_dormant,
 )
@@ -39,6 +41,7 @@ from app.extension_sdk import (
     ExtensionResultStatus,
     GapConsultAvailabilityContext,
     GapConsultExtensionContext,
+    SourceDescriptor,
 )
 from app.extensions.bootstrap import build_extension_runtime
 
@@ -126,6 +129,18 @@ class _Plugin:
         return self.result
 
 
+# Existing host tests exercise deadline/admission with every contributor
+# selected.  The test builder records that selection explicitly; selection
+# behavior itself is covered by the focused tests below.
+_test_selected_sources: tuple[GapSourceDescription, ...] = ()
+
+
+@pytest.fixture(autouse=True)
+def _clear_selected_test_sources():
+    global _test_selected_sources
+    _test_selected_sources = ()
+
+
 def _suggestions(*items: GapSuggestion) -> ContributorResult[GapSuggestion]:
     return ContributorResult(items, ExtensionResultStatus.AVAILABLE)
 
@@ -144,16 +159,34 @@ def _call(
     probe: object | None = None,
     cancellation: object | None = None,
     deadline: float | None = None,
+    selected_sources: tuple[GapSourceDescription, ...] | None = None,
 ) -> GapConsultCallContext:
+    selected = (_test_selected_sources if selected_sources is None
+                else selected_sources)
+    resolved_query = query if query is not None else _query()
+    if resolved_query.source_queries is None:
+        resolved_query = replace(resolved_query, source_queries={
+            source.source_id: ("shaping loss",) for source in selected
+        })
     return GapConsultCallContext(
-        query if query is not None else _query(),
+        resolved_query,
         cancellation if cancellation is not None else _Cancellation(),
         probe if probe is not None else _ConnectionProbe(),
         deadline if deadline is not None else time.monotonic() + 60.0,
+        selected,
     )
 
 
 def _host(*bundles, event_sink=None, capability_decisions=None):
+    global _test_selected_sources
+    _test_selected_sources = tuple(
+        GapSourceDescription(
+            bundle.contribution.declaration.id,
+            f"source_{index}",
+            bundle.contribution.declaration.id,
+        )
+        for index, bundle in enumerate(bundles)
+    )
     return build_extension_runtime(
         bundles,
         event_sink=event_sink,
@@ -210,13 +243,14 @@ def test_query_is_the_whole_egress_surface():
     # Freezing the field sets is the audit: privacy at this point is a
     # property of what these three objects CAN hold, not of a filter.
     assert set(GapConsultQuery.__dataclass_fields__) == {
-        "question", "gaps", "max_suggestions",
+        "question", "gaps", "max_suggestions", "source_queries",
     }
     assert set(GapSuggestion.__dataclass_fields__) == {
-        "title", "url", "summary", "source_label",
+        "title", "url", "summary", "source_label", "actual_query",
     }
     assert set(GapConsultCallContext.__dataclass_fields__) == {
         "query", "cancellation", "connection_probe", "deadline_monotonic",
+        "selected_sources", "attempted_source_ids",
     }
     assert set(GapConsultExtensionContext.__dataclass_fields__) == {
         "query", "cancellation", "max_suggestions", "deadline_monotonic",
@@ -240,6 +274,98 @@ def test_plugin_receives_no_core_port():
         assert not hasattr(context, forbidden), forbidden
     assert context.query is not None
     assert context.query.question == _query().question
+
+
+def test_only_described_and_selected_sources_are_consulted():
+    class Described(_Plugin):
+        def __init__(self, result, source_id):
+            super().__init__(result)
+            self.source_id = source_id
+
+        def describe_sources(self):
+            return (SourceDescriptor(self.source_id, self.source_id),)
+
+    chosen = Described(_suggestions(
+        GapSuggestion("chosen", "https://example.org/chosen")), "source_chosen")
+    unselected = Described(_suggestions(
+        GapSuggestion("unselected", "https://example.org/unselected")),
+        "source_unselected")
+    omitted = _Plugin(_suggestions(
+        GapSuggestion("omitted", "https://example.org/omitted")))
+    host = _host(
+        _bundle("corp.a_chosen", chosen),
+        _bundle("corp.b_unselected", unselected),
+        _bundle("corp.c_omitted", omitted),
+    )
+    described = host.describe_sources(time.monotonic() + 60.0)
+    assert {source.source_id for source in described} == {
+        "source_chosen", "source_unselected"}
+    selected = tuple(source for source in described
+                     if source.source_id == "source_chosen")
+    call = _call(
+        query=replace(_query(), source_queries={
+            "source_chosen": ("chosen query",),
+            "source_unselected": ("unselected query",),
+            "source_omitted": ("omitted query",),
+        }),
+        selected_sources=selected,
+    )
+
+    assert host.consult(call) == (
+        GapSuggestion("chosen", "https://example.org/chosen"),
+    )
+    assert len(chosen.contexts) == 1
+    assert unselected.contexts == []
+    assert omitted.contexts == []
+
+
+def test_each_selected_contributor_receives_only_its_own_queries():
+    class Described(_Plugin):
+        def __init__(self, source_id):
+            super().__init__(_suggestions())
+            self.source_id = source_id
+
+        def describe_sources(self):
+            return (SourceDescriptor(self.source_id, self.source_id),)
+
+    first = Described("source_first")
+    second = Described("source_second")
+    host = _host(
+        _bundle("corp.a_first", first),
+        _bundle("corp.b_second", second),
+    )
+    selected = host.describe_sources(time.monotonic() + 60.0)
+    queries = {
+        "source_first": ("first query", "first followup"),
+        "source_second": ("second query",),
+    }
+
+    assert host.consult(_call(
+        query=replace(_query(), source_queries=queries),
+        selected_sources=selected,
+    )) == ()
+    assert first.contexts[0].query.source_queries == {
+        "source_first": queries["source_first"]}
+    assert second.contexts[0].query.source_queries == {
+        "source_second": queries["source_second"]}
+
+
+def test_bad_descriptor_property_does_not_hide_later_sources():
+    class Broken(_Plugin):
+        @property
+        def describe_sources(self):
+            raise RuntimeError("broken descriptor getter")
+
+    class Healthy(_Plugin):
+        def describe_sources(self):
+            return (SourceDescriptor("healthy", "Healthy"),)
+
+    host = _host(
+        _bundle("corp.broken", Broken(_suggestions())),
+        _bundle("corp.healthy", Healthy(_suggestions())),
+    )
+    described = host.describe_sources(time.monotonic() + 1)
+    assert [item.source_id for item in described] == ["healthy"]
 
 
 def test_budget_caps_suggestions_and_phrases():
@@ -366,12 +492,13 @@ def test_admission_examines_only_a_bounded_prefix():
     """
     reject = GapSuggestion("no scheme", "example.org/nope")
     good = GapSuggestion("good", "https://example.org/good")
-    one_slot = _call(query=_query(max_suggestions=1))
 
     buried = ContributorResult(
         (reject,) * 1_000_000 + (good,), ExtensionResultStatus.AVAILABLE
     )
-    assert _host(_bundle("corp.gap", _Plugin(buried))).consult(one_slot) == ()
+    buried_host = _host(_bundle("corp.gap", _Plugin(buried)))
+    one_slot = _call(query=_query(max_suggestions=1))
+    assert buried_host.consult(one_slot) == ()
 
     reachable = ContributorResult(
         (reject,) * 8 + (good,), ExtensionResultStatus.AVAILABLE
@@ -437,6 +564,21 @@ def test_admission_re_reads_cancellation():
         raise AssertionError("admission must not swallow cancellation")
     except AskCancelled:
         pass
+
+
+def test_actual_query_receipt_is_never_silently_shortened():
+    from app.extensions.gap_consult import _sanitized
+
+    too_long = GapSuggestion(
+        "misleading", "https://example.org/long",
+        actual_query="q" * (GAP_SUGGESTION_ACTUAL_QUERY_MAX_CHARS + 1),
+    )
+    exact = GapSuggestion(
+        "exact", "https://example.org/exact", actual_query="term one",
+    )
+    assert _sanitized(
+        (too_long, exact), limit=2, seen_urls=set(), cancellation=None,
+    ) == (exact,)
 
 
 def test_an_unavailable_result_contributes_nothing():

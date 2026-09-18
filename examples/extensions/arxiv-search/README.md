@@ -141,7 +141,8 @@ depth for a caller that reaches it directly — the route already refused any
 input the slice would have had to truncate, and the shared term extractor both
 outbound features use (`terms.py::latin_terms`) already bounds itself to
 `MAX_QUERY_TERMS` terms before calling in, because its query is a handful of
-terms this plugin derived from the question, the gap phrases or the model's own
+terms this plugin derived from selected source phrases (or legacy direct-call
+question/gaps) or the reflect model's own
 argument, not user-edited text passed straight through.
 
 **`QUERY_MAX_CHARS` is the same story, one layer earlier (P2-3).**
@@ -187,25 +188,24 @@ politeness_interval_seconds + timeout_seconds + RETURN_MARGIN_SECONDS
 That is longer than the 4-second deadline, so the plugin refuses to even
 start a request — it never fires, however many times you flip
 `consult_enabled`. To actually enable outbound consultation you must **also**
-raise `ASK_GAP_CONSULT_TIMEOUT_SECONDS` past 13.25 seconds (e.g. `15.0`; the
-core-side ceiling is 30), or lower `timeout_seconds` far enough that the
-worst case fits under the deployment's existing deadline. This is
+raise `ASK_GAP_CONSULT_TIMEOUT_SECONDS` past 13.25 seconds (the core-side
+ceiling is 30), with enough additional room for source discovery and query
+planning, or lower `timeout_seconds` far enough that the whole sequence fits.
+The supplement, when requested, uses whatever time remains. This is
 deliberate: an answer that arrives after core's deadline is read by nobody,
 so starting a request that cannot possibly finish in time is pure waste.
 
-### 4.2 Gap consultation goes silent on a Chinese-only question
+### 4.2 Gap consultation needs Latin search terms
 
-The term-extraction pass scans the **question wording plus every gap
-phrase** together for Latin-alphabet search terms
-(`consult.py::_query_terms`, over the shared `terms.py::latin_terms`). If none can be found at all, consultation
+The term-extraction pass scans the **selected arXiv-specific phrases** for
+Latin-alphabet search terms (`consult.py::_query_terms`, over the shared
+`terms.py::latin_terms`). If none can be found at all, consultation
 returns a stable code (`arxiv_no_latin_terms`) with **zero network calls and
 zero politeness-slot usage** — never even attempting a request. The
-reasoning is that arXiv is a Latin-keyword index, so a question written
-entirely in Chinese is guaranteed to return nothing; sending it would only
-spend a politeness slot and a round trip to learn what is already knowable
-here. The visible consequence: **on a mostly-Chinese notebook, gap
-consultation will rarely if ever produce a suggestion.** This is the
-plugin's designed behaviour, not a bug to work around.
+reasoning is that arXiv is a Latin-keyword index; sending a query with no
+Latin terms would spend a politeness slot and a round trip for no result.
+The selection model may translate a Chinese question into English search
+phrases, so the original question's language alone does not close this path.
 
 ### 4.3 The politeness throttle has no per-call wall-clock ceiling
 
@@ -377,8 +377,10 @@ behalf.
    `sources:write` on the target notebook — the plugin route does not do
    this itself).
 2. **Agent-triggered gap consultation.** At the end of a step-by-step
-   reasoning answer, core's `ask.gap_consult` extension point asks
-   installed plugins for pointers outside the notebook. The import button
+   reasoning answer, core's `ask.gap_consult` extension point asks described,
+   model-selected plugin sources for pointers outside the notebook. This plugin
+   describes its arXiv index, uses the selected phrases, and reports the phrase
+   sent upstream in each suggestion's `actual_query`. The import button
    on the resulting suggestion card is **core's own UI, calling core's own
    endpoint** — it does not go through this plugin at all.
 3. **A function the model may call.** Core's `ask.reflect_action` point

@@ -99,11 +99,38 @@ def test_redirect_handler_default_rejects_private_redirect_target():
 
 
 def test_redirect_handler_allow_private_instance_follows_private_redirect():
-    """allow_private=True 的实例整链豁免：私网 newurl 照常构造重定向请求。"""
-    handler = _PublicOnlyRedirectHandler(allow_private=True)
+    """The trusted origin may redirect to another path on the same origin."""
+    handler = _PublicOnlyRedirectHandler(
+        allow_private=True, initial_url="http://127.0.0.1:8100/a.pdf",
+    )
     request = urllib.request.Request("http://127.0.0.1:8100/a.pdf")
     redirected = handler.redirect_request(
         request, None, 302, "Found", {}, "http://127.0.0.1:8100/b.pdf"
     )
     assert redirected is not None
     assert redirected.full_url == "http://127.0.0.1:8100/b.pdf"
+
+
+@pytest.mark.parametrize("destination", [
+    "http://127.0.0.1:8101/internal.pdf",
+    "http://10.0.0.8/internal.pdf",
+    "https://127.0.0.1:8100/internal.pdf",
+])
+def test_trusted_proxy_redirect_cannot_exempt_a_different_private_origin(destination):
+    handler = _PublicOnlyRedirectHandler(
+        allow_private=True, initial_url="http://127.0.0.1:8100/a.pdf",
+    )
+    request = urllib.request.Request("http://127.0.0.1:8100/a.pdf")
+    with pytest.raises(UnsafeRemoteSourceURL, match="内网"):
+        handler.redirect_request(request, None, 302, "Found", {}, destination)
+
+
+def test_trusted_proxy_redirect_may_continue_to_a_public_origin():
+    handler = _PublicOnlyRedirectHandler(
+        allow_private=True, initial_url="http://127.0.0.1:8100/a.pdf",
+    )
+    request = urllib.request.Request("http://127.0.0.1:8100/a.pdf")
+    redirected = handler.redirect_request(
+        request, None, 302, "Found", {}, "https://93.184.216.34/b.pdf",
+    )
+    assert redirected is not None

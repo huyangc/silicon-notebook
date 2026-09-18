@@ -63,6 +63,7 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   // consult_memory 都是不同的东西——那三步问的是"这个库/这类问题以前怎么样",
   // 这一步问的是"这个库以外还有什么"。零插件部署一步都不产生(见宿主 no-op)。
   gap_consult: "外扩",
+  external_evidence: "外部补充",
   plugin: "扩展",
   // plugin_action = 模型在 reflect 循环里自己选调的一个**插件提供的检索函数**
   // (ask.reflect_action,设计文档 §五)。⚠ 与上面两步都不同,三者不能同名:

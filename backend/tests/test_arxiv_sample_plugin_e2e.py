@@ -49,6 +49,7 @@ import sys
 import textwrap
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -525,12 +526,22 @@ def test_gap_consult_chain_yields_suggestions_from_the_frozen_host(
     spy = _install_fetch_spy(monkeypatch, _SAMPLE_FEED.read_bytes())
     events: list[dict[str, object]] = []
 
+    context = _gap_context(
+        question="检索增强生成在长文档上的效果如何？",
+        gaps=("retrieval augmented generation",),
+    )
+    described = host.describe_sources(
+        context.deadline_monotonic, cancellation=context.cancellation,
+        connection_probe=context.connection_probe,
+    )
+    assert [item.source_id for item in described] == ["arxiv"]
+    selected_query = "retrieval augmented generation"
     suggestions = host.consult(
-        _gap_context(
-            question="检索增强生成在长文档上的效果如何？",
-            gaps=("retrieval augmented generation",),
-        ),
-        event_sink=events.append,
+        replace(
+            context,
+            query=replace(context.query, source_queries={"arxiv": (selected_query,)}),
+            selected_sources=described,
+        ), event_sink=events.append,
     )
 
     assert [item.title for item in suggestions] == [
@@ -538,6 +549,7 @@ def test_gap_consult_chain_yields_suggestions_from_the_frozen_host(
         "Graph Reasoning Without a Graph",
     ]
     assert {item.source_label for item in suggestions} == {"arXiv"}
+    assert {item.actual_query for item in suggestions} == {selected_query}
     assert all(item.url.startswith("https://arxiv.org/pdf/") for item in suggestions)
     assert len(spy.calls) == 1
 
@@ -567,20 +579,19 @@ def test_gap_consult_is_silent_when_consult_is_disabled(
     spy = _install_fetch_spy(monkeypatch, _SAMPLE_FEED.read_bytes())
     events: list[dict[str, object]] = []
 
-    suggestions = host.consult(
-        _gap_context(
-            question="检索增强生成在长文档上的效果如何？",
-            gaps=("retrieval augmented generation",),
-        ),
-        event_sink=events.append,
+    context = _gap_context(
+        question="检索增强生成在长文档上的效果如何？",
+        gaps=("retrieval augmented generation",),
     )
+    assert host.describe_sources(
+        context.deadline_monotonic, cancellation=context.cancellation,
+        connection_probe=context.connection_probe,
+    ) == ()
+    suggestions = host.consult(context, event_sink=events.append)
 
     assert suggestions == ()
     assert spy.calls == []
-    assert len(events) == 1
-    assert events[0]["status"] == "unavailable"
-    assert events[0]["reason_code"] == "consult_disabled"
-    assert events[0]["count"] == 0
+    assert events == []
 
     # Loaded, not absent: the same runtime still carries this plugin's router
     # contribution and its panel capability.
