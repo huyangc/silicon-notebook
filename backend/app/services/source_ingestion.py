@@ -2004,13 +2004,14 @@ class SourceIngestionService:
             records.append(f"- {r['title']} [{label}] {r['summary'] or ''}")
 
         name_val, desc_val = fallback_metadata(titles, labels)
-        llm_client = self.model_clients.chat("notebook_metadata")
-        if records and llm_client.configured:
+        if records:
             try:
-                name_val, desc_val = synthesize_metadata(
-                    llm_client, records,
-                    batch_chars=self.settings.notebook_metadata_batch_chars,
-                )
+                llm_client = self.model_clients.chat("notebook_metadata")
+                if llm_client.configured:
+                    name_val, desc_val = synthesize_metadata(
+                        llm_client, records,
+                        batch_chars=self.settings.notebook_metadata_batch_chars,
+                    )
             except Exception:
                 pass  # A failed batch cannot publish a partial corpus summary.
 
