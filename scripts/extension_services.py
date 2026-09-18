@@ -18,7 +18,7 @@ import time
 
 from extension_service_runtime import (
     CONTROL_MARGIN_SECONDS, POLL_SECONDS, ServiceError, atomic_json, ensure_state,
-    lock, read_json, request_stop, running, safe_open, stop_path, supervise,
+    healthy, lock, read_json, request_stop, running, safe_open, stop_path, supervise,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -113,7 +113,7 @@ def _spawn(directory: Path, services: list[dict], fingerprint: str, receipt: Pat
         if not running(directory, "supervisor.lock") or state.get("state") != "ready" or state.get("fingerprint") != fingerprint:
             raise ServiceError("running_configuration_changed_stop_before_start")
         write_receipt(receipt, state["run_id"], False)
-        return {"state": "ready", "reused": True}
+        return {"state": "rechecking", "run_id": state["run_id"]}
     if not services:
         write_receipt(receipt, "", False)
         return {"state": "disabled"}
@@ -172,6 +172,35 @@ def rollback(directory: Path, owner: dict) -> None:
     stop_path(directory, run_id).unlink(missing_ok=True)
 
 
+def recheck_reused(directory: Path, services: list[dict], fingerprint: str, run_id: str) -> dict:
+    def require_same_ready_session() -> None:
+        state = read_json(directory / "state.json")
+        if (state.get("run_id") != run_id or state.get("state") != "ready"
+            or state.get("fingerprint") != fingerprint
+            or not running(directory) or not running(directory, "supervisor.lock")
+            or read_json(stop_path(directory, run_id)).get("run_id") == run_id):
+            raise ServiceError("reused_session_changed")
+
+    # A ready snapshot is not a current health guarantee, especially for external
+    # services. Do not hold operations.lock during probes or claim this session:
+    # another terminal must remain able to stop it, and failure must leave it alone.
+    for service in services:
+        deadline = time.monotonic() + service["startup_timeout_seconds"]
+        while True:
+            require_same_ready_session()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ServiceError(service["key"] + ":readiness_timeout")
+            ready = healthy(service, min(remaining, service["healthcheck_timeout_seconds"]))
+            require_same_ready_session()
+            if ready and time.monotonic() < deadline:
+                break
+            time.sleep(POLL_SECONDS)
+    with lock(directory / "operations.lock"):
+        require_same_ready_session()
+        return {"state": "ready", "reused": True}
+
+
 def start(directory: Path, services: list[dict], fingerprint: str, receipt: Path | None) -> dict:
     # Hold the control lock only through the daemon ownership handshake; status
     # and a second terminal's stop remain available throughout readiness waits.
@@ -180,6 +209,8 @@ def start(directory: Path, services: list[dict], fingerprint: str, receipt: Path
         with lock(directory / "operations.lock"):
             spawned = _spawn(directory, services, fingerprint, receipt, owner)
         if isinstance(spawned, dict):
+            if spawned["state"] == "rechecking":
+                return recheck_reused(directory, services, fingerprint, spawned["run_id"])
             return spawned
         process, run_id = spawned
         deadline = time.monotonic() + sum(s["startup_timeout_seconds"] for s in services) + CONTROL_MARGIN_SECONDS

@@ -194,16 +194,27 @@ def healthy(service: dict, timeout: float) -> bool:
 
 
 def shutdown(workers: list[tuple[dict, subprocess.Popen]]) -> None:
+    failure = ""
     for service, process in reversed(workers):
-        if process.poll() is not None:
-            continue
-        process.terminate()
-        try:
-            process.wait(timeout=service["shutdown_timeout_seconds"] + CONTROL_MARGIN_SECONDS)
-        except subprocess.TimeoutExpired:
-            # This Popen owns a still-live guard/group leader, never a disk PID.
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
+        deadline = time.monotonic() + service["shutdown_timeout_seconds"] + CONTROL_MARGIN_SECONDS
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=max(POLL_SECONDS, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                # This Popen owns a still-live guard/group leader, never a disk PID.
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+        # Even a dead guard may have a surviving witness finishing group cleanup.
+        # Wait for its lease, never signal the reaped guard's numeric PID/group.
+        lease = Path(service["worker_lease"])
+        while running(lease.parent, lease.name):
+            if time.monotonic() >= deadline:
+                failure = service["key"] + ":cleanup_timeout"
+                break
+            time.sleep(POLL_SECONDS)
+    if failure:
+        raise ServiceError(failure)
 
 
 def supervise(directory: Path, payload: dict) -> int:
@@ -246,11 +257,13 @@ def supervise(directory: Path, payload: dict) -> int:
                 process = None
                 if service["mode"] == "managed":
                     service["worker_state"] = str(directory / (run_id + "-" + str(len(workers)) + ".json"))
-                    process = subprocess.Popen(
-                        [sys.executable, str(WORKER), str(os.getpid())], stdin=subprocess.PIPE,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
-                        pass_fds=(runtime_fd,),
-                    )
+                    service["worker_lease"] = str(Path(service["worker_state"]).with_suffix(".lock"))
+                    with lock(Path(service["worker_lease"]), blocking=False) as group_fd:
+                        process = subprocess.Popen(
+                            [sys.executable, str(WORKER), str(os.getpid())], stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+                            pass_fds=(runtime_fd, group_fd),
+                        )
                     workers.append((service, process))
                     process.stdin.write(json.dumps(service).encode())
                     process.stdin.close()
@@ -289,13 +302,19 @@ def supervise(directory: Path, payload: dict) -> int:
             failure = "service_runtime_failed"
         finally:
             publish("stopping", failure)
-            shutdown(workers)
+            try:
+                shutdown(workers)
+            except ServiceError as exc:
+                failure = str(exc)
             for value in states.values():
                 value["state"] = "stopped"
                 value["pid"] = None
             publish("failed" if failure else "stopped", failure)
             for service, _ in workers:
-                Path(service["worker_state"]).unlink(missing_ok=True)
+                lease = Path(service["worker_lease"])
+                if not running(lease.parent, lease.name):
+                    Path(service["worker_state"]).unlink(missing_ok=True)
+                    lease.unlink(missing_ok=True)
     return 1 if failure else 0
 
 

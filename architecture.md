@@ -31,7 +31,8 @@
 `scripts/extension_services.py` 共用校验。只有显式 `extensions services` 命令及服务启动
 脚本进入进程管理层，普通 CLI、Settings 和插件 configure 不启动进程。管理器按依赖排序
 启动、检查就绪、逆序关闭；私有运行目录与锁记录归属，启动凭据区分本次创建和复用。
-独立 supervisor 持有子进程，worker guard 保持进程组归属至清理结束；应用运行时注册表
+独立 supervisor 持有子进程，worker guard 与同组清理见证共同保持租约及进程组归属，
+任一意外退出会触发清理；应用运行时注册表
 和管理员 admission 开关不管理操作系统进程。外部托管服务只检查就绪，绝不由此终止。
 服务异常退出会停止本次服务会话，不自动重启；主应用进程保持既有启动脚本的管理边界。
 
