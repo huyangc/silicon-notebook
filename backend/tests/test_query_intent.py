@@ -467,6 +467,19 @@ def test_valid_model_clarification_is_not_augmented_by_wording_rules():
     ]
 
 
+def test_malformed_row_does_not_silence_a_model_that_asked():
+    # 顶层形状合法、但唯一一条歧义行缺 question:该行被丢弃,措辞规则也不再
+    # 兜底;模型「要追问」的决定仍须保住,由通用必答行承接。
+    client = _ValidUnderstandingClient(
+        "它的锁定时间是多少？", [], [{"reason": "指代不明", "required": True}],
+    )
+
+    contract = plan_query_intent(client, "它的锁定时间是多少？")
+
+    assert contract["needs_clarification"] is True
+    assert [row["id"] for row in contract["ambiguities"]] == ["ambiguity-1"]
+
+
 def test_confirmed_answers_are_frozen_into_authoritative_research_question():
     seed = plan_query_intent(None, "帮我分析一下这个问题")
     seed["assumptions"] = ["环路已正常上电"]
