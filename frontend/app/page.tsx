@@ -5855,11 +5855,8 @@ export default function Home() {
                         {g.label}
                       </button>
                     ))}
-                    {/* 引擎子切换与检索档位只属于高级模式。 */}
-                    {isAdvanced(uiMode) && (
-                      groupOf(askMode, askModes) === "strict"
-                      || groupOf(askMode, askModes) === "extension"
-                    ) && (
+                    {/* 深入分析只有一个引擎；扩展组保留引擎选择。 */}
+                    {groupOf(askMode, askModes) === "extension" && (
                       <span className="mode-engines">
                         {modesInGroup(groupOf(askMode, askModes), askModes).map((m) => (
                           <button

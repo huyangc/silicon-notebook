@@ -3049,12 +3049,7 @@ class AskService:
         当场抹掉,历史里也留不下。"""
         msg = "系统未配置当前问答所需的模型服务，请联系维护人员"
         if completeness_unavailable:
-            msg = (
-                "当前精确完整枚举支持 Knowhow 整表物理行清单与直接行计数，"
-                "以及元素清单（公式/表格/图片/代码块）、知识对象清单与来源清单；"
-                "本次请求不能视为全部结果。\n\n"
-                + msg
-            )
+            msg += "\n\n本次请求未完成，不能视为全部结果。"
         response = AskResponse(
             answer_id="", conclusion=msg, conversation_id=conversation_id,
             retrieval_query=retrieval_query or question, llm_mode="deterministic",
@@ -4446,14 +4441,10 @@ class AskService:
                 answer_id="",
                 conclusion=(
                     (f"{coverage_prefix}\n\n" if coverage_prefix else "")
-                    + (
-                        "当前精确完整枚举支持 Knowhow 整表物理行清单与直接行计数，"
-                        "以及元素清单（公式/表格/图片/代码块）、知识对象清单与来源清单；"
-                        "本次请求不能视为全部结果。\n\n"
-                        if completeness_unavailable else ""
-                    )
                     + "当前笔记本没有可检索的来源；请先添加来源，或挂载/整理一个"
                     "已建知识图谱的参考库。"
+                    + ("\n\n本次请求未完成，不能视为全部结果。"
+                       if completeness_unavailable else "")
                 ),
                 answer=coverage_answer,
                 grounded=bool(structured_batch and structured_batch.complete),
@@ -5457,14 +5448,9 @@ class AskService:
             and has_complete_collection_result
         )
         if completeness_unavailable and not suppress_completeness_warning:
-            warning = (
-                "当前精确完整枚举支持 Knowhow 整表物理行清单与直接行计数，"
-                "以及元素清单（公式/表格/图片/代码块）、知识对象清单与来源清单；"
-                "条件筛选、去重、分组或其他集合请求本次仍来自相关性检索，"
-                "不能视为全部结果。"
-            )
-            conclusion = f"{warning}\n\n{conclusion}"
-            answer = f"> {warning}\n\n{answer}" if answer else warning
+            warning = "本次回答未验证完整性，不能视为全部结果。"
+            conclusion = f"{conclusion}\n\n{warning}"
+            answer = f"{answer}\n\n> {warning}" if answer else warning
         elif structured_batch is not None:
             enumeration_line = (
                 f"Knowhow 枚举：{structured_batch.returned_rows}/"
