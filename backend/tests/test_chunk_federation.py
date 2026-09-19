@@ -1433,3 +1433,255 @@ def test_default_deployment_pays_no_second_selection_pass(monkeypatch):
 
     assert len(calls) == 1
     assert sorted(result.collected) == ["a1", "b1"]
+
+
+# --------------------------------------------------------------------------
+# 合并池的上限不得在保底之前裁掉当前库候选
+# --------------------------------------------------------------------------
+
+def _swamped_active(*, active_reserve=0.25, recall=200, peers=7, mmr_k=16):
+    """codex 的复现:当前库 10 条 0.12,七个参考库各 200 条 1.0。
+
+    `chunk_recall` 预算被强库塞满,当前库只剩个位数候选进池——两条选择分支都
+    只能从池里挑,于是保底承诺的席位根本凑不出来。
+    """
+    local = [make_chunk(f"a{i}", 0.12, text=f"local-{i}") for i in range(10)]
+    peer_hits = {
+        f"n{lib}": [
+            make_chunk(f"n{lib}-{i}", 1.0, text=f"peer-{lib}-{i}")
+            for i in range(200)
+        ]
+        for lib in range(peers)
+    }
+
+    def retrieve(nid, query):
+        return (list(local) if nid == "a" else list(peer_hits[nid])), [], None
+
+    return FakeCandidates(
+        (("a", "personal"), *((nid, "base") for nid in peer_hits)),
+        retrieve=retrieve, recall=recall, peer_floor=0.5,
+        active_reserve=active_reserve, mmr_k=mmr_k,
+    )
+
+
+def test_merge_withholds_the_active_notebooks_reserved_candidates():
+    """默认设置下,被强库淹没的当前库仍有 ≥ 保底数的候选进入 `collected`,
+    且池子总量没有因此变大。"""
+    candidates = _swamped_active()
+
+    result = federated(candidates)
+
+    local = [hit for hit in result.collected.values() if not hit.notebook_id]
+    assert len(local) >= 4, f"当前库只剩 {len(local)} 条候选,保底凑不出 4 席"
+    assert [hit.chunk_id for hit in local[:4]] == ["a0", "a1", "a2", "a3"], (
+        "保留的必须是当前库分数最高的那几条,且确定序"
+    )
+    assert len(result.collected) <= candidates.settings.chunk_recall, (
+        "保留占用预算,不是额外追加"
+    )
+
+
+@pytest.mark.parametrize("branch", ["single", "multi"])
+def test_both_selection_branches_pay_the_floor_under_a_swamped_pool(branch):
+    """池子被裁到只剩强库时,single(MMR 修补)与 multi(保底组)都兑现 4 席。"""
+    from app.services.retrieval import quota_fuse_baseline_first
+
+    candidates = _swamped_active()
+    result = federated(candidates, sub_queries=("q1",))
+    scored = list(result.collected.values())
+
+    if branch == "single":
+        chosen = CandidateRetrievalService._mmr_select_chunks(
+            None, scored, result.ids, result.matrix, 16, 0.5,
+        )
+        seats = cf.apply_active_reserve(candidates.settings, chosen, scored, 16)
+    else:
+        seats, _counts = quota_fuse_baseline_first(
+            result.collected, result.per_query, 16,
+            relevance=lambda chunk: chunk.relevance,
+        )
+
+    assert len(seats) == 16
+    assert sum(1 for hit in seats if not hit.notebook_id) >= 4
+
+
+def test_withholding_is_inert_when_the_reserve_is_off():
+    """`reserve=0` 逐值回到纯竞争:强库通吃整个召回预算。"""
+    candidates = _swamped_active(active_reserve=0.0, recall=40)
+
+    result = federated(candidates)
+
+    assert len(result.collected) == 40
+    assert all(hit.notebook_id for hit in result.collected.values())
+
+
+def test_withholding_is_capped_by_the_actual_active_candidates():
+    """当前库合格候选不足 m 时,以它的实际数量为上限。"""
+    def retrieve(nid, query):
+        if nid == "a":
+            return [make_chunk("a1", 0.1, text="only-local")], [], None
+        return [make_chunk(f"{nid}-{i}", 1.0, text=f"{nid}-{i}")
+                for i in range(200)], [], None
+
+    candidates = FakeCandidates(
+        (("a", "personal"), ("b", "base"), ("c", "base")),
+        retrieve=retrieve, recall=20, peer_floor=0.5,
+        active_reserve=0.25, mmr_k=16,
+    )
+
+    result = federated(candidates)
+
+    assert [hit.chunk_id for hit in result.collected.values()
+            if not hit.notebook_id] == ["a1"]
+    assert len(result.collected) == 20
+
+
+def test_withheld_hit_blocks_a_peer_copy_of_the_same_passage():
+    """跨库同文:被保留的那条正文,参考库的副本不得再占一个名额——这正是
+    `peer_evidence` 在一次选择里按 `hit.text` 去重的那条规则。"""
+    shared = "同一段正文"
+
+    def retrieve(nid, query):
+        if nid == "a":
+            return [make_chunk("a1", 0.1, text=shared)], [], None
+        return [make_chunk("b1", 0.9, text=shared),
+                make_chunk("b2", 0.8, text="别的")], [], None
+
+    candidates = FakeCandidates(
+        (("a", "personal"), ("b", "base")), retrieve=retrieve,
+        recall=200, active_reserve=0.25, mmr_k=4,
+    )
+
+    result = federated(candidates)
+
+    assert sorted(result.collected) == ["a1", "b2"]
+
+
+# --------------------------------------------------------------------------
+# 逐库准备失败被隔离:读不到清单的那个库跳过,健康的库照常
+# --------------------------------------------------------------------------
+
+class _CeilingFails(FakeCandidates):
+    """中间那个参考库的 ``all_visible_source_ids`` 抛错。"""
+
+    def __init__(self, *args, failing="b", error=RuntimeError, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._failing = failing
+        self._error = error
+
+    def _all_visible_source_ids(self, notebook_id: str):
+        if notebook_id == self._failing:
+            raise self._error("source enumeration timed out on notebook b")
+        return super()._all_visible_source_ids(notebook_id)
+
+
+def test_a_peer_whose_ceiling_cannot_be_read_is_skipped_not_fanned_out():
+    """三个参与库,中间那个准备失败 → active 与第三个照常,恰一条 skip 事件。
+
+    准备发生在**父线程**、任何任务存在之前,所以 `_run_one` 的异常处理根本够
+    不着它:不隔离的话,一个参考库的来源枚举超时会把整条臂(含 active 自己的
+    检索)一起带走。
+    """
+    candidates = _CeilingFails(
+        (("a", "personal"), ("b", "base"), ("c", "base")),
+        retrieve=lambda nid, q: ([make_chunk(f"{nid}1", 0.5)], [], None),
+        visible={"c": ("s-c",)},
+    )
+
+    result = federated(candidates, sub_queries=("q1", "q2"))
+
+    assert sorted(result.collected) == ["a1", "c1"]
+    assert result.participants == ("a", "c"), (
+        "participants 的语义是「真正扇出过的库」"
+    )
+    queried = {call["notebook_id"] for call in candidates.calls}
+    assert queried == {"a", "c"}
+    assert all(
+        call["allowed_source_ids"] is not None
+        for call in candidates.calls if call["notebook_id"] != "a"
+    ), "读不到清单绝不退化成不带天花板去查它"
+    assert len(candidates.events) == 1
+    event = dict(candidates.events[0])
+    assert isinstance(event.pop("latency_ms"), int)
+    assert event == {
+        "kind": "chunk_federation_skipped", "notebook_id": "b",
+        "error_type": "RuntimeError",
+    }
+    assert "timed out" not in repr(candidates.events)
+
+
+def test_cancellation_during_preparation_is_not_swallowed():
+    candidates = _CeilingFails(
+        (("a", "personal"), ("b", "base")), error=AskCancelled,
+        retrieve=lambda nid, q: ([make_chunk(f"{nid}1", 0.5)], [], None),
+    )
+
+    with pytest.raises(AskCancelled):
+        federated(candidates)
+    assert candidates.events == []
+
+
+def test_preparation_failure_leaves_no_context_variable_behind():
+    from app.services.chunk_lane import _CHUNK_PEER_LEG
+
+    candidates = _CeilingFails(
+        (("a", "personal"), ("b", "base"), ("z", "base")),
+        copyable={"z": False},
+        retrieve=lambda nid, q: ([make_chunk(f"{nid}1", 0.5)], [], None),
+    )
+
+    federated(candidates)
+
+    assert _CHUNK_PEEK_ONLY.get() is False
+    assert _CHUNK_ARM_DRIFTED.get() is None
+    assert _CHUNK_PEER_LEG.get() is False
+
+
+def test_withheld_set_respects_the_callers_relevance_floor():
+    """保留集绕过了 `peer_evidence` 那一轮,所以它必须自己过同一道合格线。
+
+    chunk 通道上这两个参数恒为中性 0,但全局问答会传
+    `GLOBAL_ASK_MIN_RELEVANCE` / `GLOBAL_ASK_RELATIVE_RELEVANCE`——那是写进
+    文档数值栏杆的两条线,保底不许从它们底下把证据塞进来。
+    """
+    def retrieve(nid, query):
+        if nid == "a":
+            return [make_chunk("a1", 0.6), make_chunk("a2", 0.05)], [], None
+        return [make_chunk(f"b{i}", 0.9) for i in range(20)], [], None
+
+    candidates = FakeCandidates(
+        (("a", "personal"), ("b", "base")), retrieve=retrieve,
+        recall=200, active_reserve=0.25, mmr_k=16,
+    )
+
+    neutral = federated(candidates)
+    assert {"a1", "a2"} <= set(neutral.collected), "中性参数下两条都在"
+
+    floored = federated(candidates, min_relevance=0.3)
+    assert "a1" in floored.collected
+    assert "a2" not in floored.collected, "低于绝对下限的候选不得经保底混进来"
+
+    relative = federated(candidates, relative_relevance=0.5)
+    assert "a1" in relative.collected
+    assert "a2" not in relative.collected, (
+        "低于「本库最高分 × relative_relevance」的候选同样不得混进来"
+    )
+
+
+def test_withheld_set_never_grows_the_candidate_pool():
+    """`CHUNK_RECALL` 没有与 `CHUNK_MMR_K` 联动校验,所以把它调到小于保底数时,
+    保留集必须被预算夹住——池子绝不许比 `chunk_recall` 还大、且整池全是当前库。"""
+    def retrieve(nid, query):
+        if nid == "a":
+            return [make_chunk(f"a{i}", 0.5) for i in range(10)], [], None
+        return [make_chunk(f"b{i}", 0.9) for i in range(10)], [], None
+
+    candidates = FakeCandidates(
+        (("a", "personal"), ("b", "base")), retrieve=retrieve,
+        recall=2, active_reserve=1.0, mmr_k=16,
+    )
+
+    result = federated(candidates)
+
+    assert len(result.collected) == 2
+    assert all(not hit.notebook_id for hit in result.collected.values())

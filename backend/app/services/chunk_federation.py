@@ -246,9 +246,20 @@ def federated_chunk_candidates(
     )
     results = _run_tasks(candidates, tasks)
     return _merge_results(
-        candidates, participants, tasks, results, len(queries),
+        candidates, _task_participants(tasks), tasks, results, len(queries),
         min_relevance=min_relevance, relative_relevance=relative_relevance,
     )
+
+
+def _task_participants(tasks: list) -> tuple:
+    """The ``(notebook_id, tier)`` pairs the task table actually carries.
+
+    Not the same as what ``federation_participants`` returned: a peer whose
+    preparation failed is dropped from the table, and the result must say so
+    rather than list a library it never queried.  ``dict.fromkeys`` keeps the
+    deterministic library-major order.
+    """
+    return tuple(dict.fromkeys((task.notebook_id, task.tier) for task in tasks))
 
 
 def merge_chunk_matrices(parts, keep_ids=None, *, dim=None, on_drop=None):
@@ -405,7 +416,13 @@ def _federated_tasks(
     inside the worker: without an ambient ``retrieval_run`` the memo degrades
     to a pass-through, so reading it per task would be one live source
     enumeration per (library, sub-query).  With a run it still goes through the
-    same memo key, so the run-local freeze semantics are unchanged.
+    same memo key, so the run-local freeze semantics are unchanged.  That move
+    put a real database read in the PARENT thread, which is why each peer's
+    preparation carries its own failure isolation below -- a peer that cannot
+    be prepared is dropped from the table entirely and therefore never appears
+    in ``FederatedChunkResult.participants`` (see ``_task_participants``),
+    which is the field's whole meaning: the libraries this arm actually
+    searched.
     """
     # ``chunk_lane`` 而不是 ``retrieval_candidates``:那边的 ``_gather_vector_chunks``
     # 调本模块,两边互取就是 import 环;这两个 ContextVar 与那把探针因此住在
@@ -426,7 +443,36 @@ def _federated_tasks(
     try:
         for notebook_id, tier in participants:
             peer = notebook_id != active_notebook_id
-            visible = _peer_visible_sources(candidates, notebook_id) if peer else None
+            visible = None
+            if peer:
+                started = time.perf_counter()
+                try:
+                    visible = _peer_visible_sources(candidates, notebook_id)
+                except AskCancelled:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - one library must not fail the arm
+                    # Preparation runs in the PARENT thread, before any task
+                    # exists, so ``_run_one``'s own handler cannot reach this:
+                    # a peer whose source enumeration times out would otherwise
+                    # abort the whole arm -- including the active notebook's
+                    # own retrieval, which has nothing to do with that library.
+                    # Skip that one peer instead, and skip it FAIL-CLOSED: the
+                    # alternative "query it without a ceiling" would turn an
+                    # unreadable source list into a wider search than the
+                    # healthy path performs. Emitted here, in the caller's own
+                    # context, so the event keeps its log owner.
+                    _emit(candidates, {
+                        "kind": "chunk_federation_skipped",
+                        "notebook_id": notebook_id,
+                        "error_type": type(exc).__name__,
+                        "latency_ms": round(
+                            (time.perf_counter() - started) * 1000
+                        ),
+                    })
+                    continue
+            # ``_peek_only`` needs no guard of its own: its probe already
+            # answers "peek only" -- the conservative side -- for any failure,
+            # and only cancellation propagates out of the memo.
             peek = peer and _peek_only(candidates, notebook_id)
             peek_token = _CHUNK_PEEK_ONLY.set(peek)
             peer_token = _CHUNK_PEER_LEG.set(peer)
@@ -657,13 +703,45 @@ def _select_baseline_then_supplements(
     ``participants x`` that many.  The same ``hit.text`` identity
     ``peer_evidence`` uses inside one pass is applied ACROSS the two, so a
     supplement whose text a baseline hit already carries takes no extra seat.
+
+    **The active reserve is withheld from the merge, not recovered after it.**
+    ``peer_evidence``'s budget is a real cap: ten active hits at 0.12 against
+    seven libraries contributing 200 hits each at 1.0 leaves only a handful of
+    active candidates in a ``chunk_recall``-sized pool, and neither selection
+    branch can then supply the seats ``chunk_federation_active_reserve``
+    promises -- ``apply_active_reserve`` and ``_reserve_lanes`` both draw from
+    that pool.  So ``_reserve_size`` of the active notebook's strongest
+    qualified baseline hits are taken out FIRST and the rest of the libraries
+    compete for ``chunk_recall - len(kept)``: the promise is paid out of the
+    budget rather than on top of it, so the pool never grows.  The withheld
+    hits are removed from every pool before the competition, by chunk id AND by
+    ``hit.text``, which is the same identity ``peer_evidence`` de-duplicates on
+    -- otherwise a peer copy of the same passage could take a second seat that
+    one merge call would never have handed out.  Everything here is inert at
+    ``reserve = 0`` (and unreachable for a single participant), which is what
+    keeps the rollback path value-identical.
     """
     from app.services.retrieval import partition_generated_question_chunks
 
     splits = [partition_generated_question_chunks(pool) for pool in folded_pools]
+    baseline_pools = [baseline for baseline, _supplemental in splits]
     budget = candidates.settings.chunk_recall
-    selected = peer_evidence(
-        [baseline for baseline, _supplemental in splits], budget,
+    kept, unqualified = _withheld_active(
+        candidates, baseline_pools, budget,
+        min_relevance=min_relevance, relative_relevance=relative_relevance,
+    )
+    if kept:
+        blocked_ids = {hit.chunk_id for hit in kept} | unqualified
+        blocked_text = {hit.text for hit in kept}
+        baseline_pools = [
+            [
+                hit for hit in pool
+                if hit.chunk_id not in blocked_ids and hit.text not in blocked_text
+            ]
+            for pool in baseline_pools
+        ]
+    selected = kept + peer_evidence(
+        baseline_pools, max(0, budget - len(kept)),
         min_relevance=min_relevance,
         relative_relevance=relative_relevance,
         peer_floor=candidates.settings.chunk_federation_peer_floor,
@@ -683,6 +761,76 @@ def _select_baseline_then_supplements(
         )
         if hit.text not in seen
     ]
+
+
+def _withheld_active(
+    candidates, baseline_pools: list, budget: int, *,
+    min_relevance: float, relative_relevance: float,
+) -> tuple:
+    """The active notebook's hits that the cross-library cap may not discard.
+
+    Returns ``(kept, unqualified_ids)``: the withheld hits, and the active hits
+    the lane's own qualification floor rejects.  The caller must drop the
+    second set from the competition too -- see below.
+
+    ``_reserve_size`` of them, strongest first, capped by how many qualified
+    baseline hits the active notebook actually has -- the same cap
+    ``_reserve_lanes`` and ``apply_active_reserve`` apply, read from the same
+    two settings, so all three agree on one number without any of them being
+    told it.
+
+    Identified by ``not hit.notebook_id`` over the flattened pools rather than
+    by taking pool 0.  The active notebook IS pool 0 today (the seat guarantees
+    it or falls back to the single-library lane), but a predicate that reads
+    what it means survives a reordering that a positional index would silently
+    misinterpret as "reserve seats for whichever library came first".
+
+    Two bounds this set must respect, because it bypasses the pass that would
+    otherwise apply them:
+
+    * ``peer_evidence``'s own QUALIFICATION floor for the active lane --
+      ``max(min_relevance, own peak * relative_relevance)`` -- and its
+      finite-score requirement.  Both are neutral (0) on the chunk lane today,
+      but global ask passes real values from documented numeric rails, and a
+      reserve that smuggled sub-floor evidence past them would quietly make
+      those rails untrue for one library.  The floor is computed from the
+      lane's peak BEFORE withholding, and the hits it rejects are reported back
+      so the caller can drop them from the competition as well: leaving them in
+      would hand ``peer_evidence`` an active lane whose peak is now the
+      *withheld-from* remainder, and a relative floor recomputed on that lower
+      peak lets exactly the evidence this bound just rejected back in through
+      the lane's guaranteed slot.
+    * the recall budget itself.  ``chunk_recall`` is not validated against
+      ``chunk_mmr_k``, so a deployment that shrinks it below the reserve would
+      otherwise end up with a pool LARGER than ``chunk_recall`` and made
+      entirely of the active notebook.  The reserve is a share of the final
+      seats, never a licence to grow the candidate pool.
+
+    Note the intended second-order effect on ``peer_floor``'s comparable mode:
+    withholding these hits lowers the active lane's peak in the competition
+    that follows, so when the active notebook is itself the strongest library
+    the admission threshold peers must clear drops slightly.  That is the right
+    reading -- the active notebook has already been served, and the remaining
+    budget is a contest among what is left.
+    """
+    size = _reserve_size(candidates.settings, _reserve_k(candidates.settings))
+    if not size:
+        return [], set()
+    ranked = [
+        hit for hit in _qualified_active(
+            [hit for pool in baseline_pools for hit in pool]
+        )
+        if math.isfinite(_score(hit))
+    ]
+    if not ranked:
+        return [], set()
+    floor = max(min_relevance, _score(ranked[0]) * relative_relevance)
+    qualified = [hit for hit in ranked if _score(hit) >= floor]
+    unqualified = {
+        hit.chunk_id for hit in ranked if _score(hit) < floor
+    }
+    kept = qualified[:min(size, max(0, int(budget)))]
+    return kept, (unqualified if kept else set())
 
 
 def _sub_query_groups(
