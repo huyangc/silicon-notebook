@@ -329,6 +329,12 @@ class _RetrievalState:
         self.scale_runtime.maybe_auto_index(notebook_id)
 
     def _federated_graph_is_large(self, active_notebook_id: str) -> bool:
+        # Deliberately NOT `_retrieval_participants`: this reads the raw
+        # mount-table id list and today never filters by `notebook_in_scope`
+        # (a scope-excluded library still counts toward "is the graph big").
+        # Routing it through the seat would silently narrow this id set and
+        # change behaviour under a narrowed run -- out of scope for a
+        # zero-behaviour-change refactor.
         return any(
             not self.notebook_copy_stats(notebook_id)["copyable"]
             for notebook_id in self.notebooks.participant_notebook_ids(active_notebook_id)
@@ -2100,6 +2106,38 @@ class CandidateRetrievalService(_RetrievalState):
             "source_candidates_restricted": source_candidates_restricted,
         })
         return scored
+    def _retrieval_participants(
+        self, active_notebook_id: str,
+    ) -> tuple[tuple[str, str], ...]:
+        """本次检索可搜索的 (notebook_id, tier) 对,确定序(active 在前,其余
+        MOUNT_ORDER)。这是三条联邦检索腿(知识对象/关系/元素)对参与集的唯一
+        读入口,取代它们各自重复的 ``participant_tiers`` 直调 + 库维度过滤。
+
+        ⛔ 这不是鉴权口。鉴权仍走 ``resolve_participants``/``mount_sql.py`` 的
+        真实谓词(见 ``source_scope.py`` 里 ``scoped_participants`` 的注释与
+        ``source_routes.py`` 里取参与集入口的注释)。这里只是"检索消费边界",
+        与 ``scoped_participants`` 同层。
+
+        库维度用 ``notebook_in_scope`` 过滤,它是 COST guard 不是正确性闸——
+        被跳过的库在结果边界仍有 fail-closed 的 ``filter_retrieval_items``
+        兜底;这个访问器只是让一个未勾选的参考库在查询发出前就免费跳过,而不
+        仅仅是无害(见 ``notebook_in_scope`` 自己的 docstring)。
+
+        不 memo:``participant_tiers`` 本来就是每次现读,且一次 ask 里三条腿
+        各调一次;缓存无收益,却会引入"run 中途挂载变化"的语义问题。
+        """
+        with self._connect() as db:
+            notebook_ids, tier_map = self.notebooks.participant_tiers(
+                db, active_notebook_id,
+            )
+        from app.services.source_scope import notebook_in_scope
+
+        return tuple(
+            (nid, tier_map.get(nid, "personal"))
+            for nid in notebook_ids
+            if notebook_in_scope(nid)
+        )
+
     def _federated_retrieve_impl(
         self,
         active_notebook_id: str,
@@ -2122,11 +2160,6 @@ class CandidateRetrievalService(_RetrievalState):
         and base only wins as a tie-break on an EXACT score tie — never via any
         multiplier/quota/floor. A personal hit with higher relevance still wins.
         """
-        with self._connect() as db:
-            notebook_ids, tier_map = self.notebooks.participant_tiers(
-                db, active_notebook_id,
-            )
-
         all_hits: List[RetrievedKnowledge] = []
         sources_by_notebook = None
         if allowed_source_keys is not None:
@@ -2134,13 +2167,11 @@ class CandidateRetrievalService(_RetrievalState):
             for source_notebook_id, source_id in allowed_source_keys:
                 if source_notebook_id and source_id:
                     sources_by_notebook.setdefault(source_notebook_id, []).append(source_id)
-        from app.services.source_scope import notebook_in_scope
 
-        for nid in notebook_ids:
-            # Library dimension is decided here; local source ceilings are
-            # intersected exactly once inside `_retrieve_scored`.
-            if not notebook_in_scope(nid):
-                continue
+        # Library dimension is decided inside `_retrieval_participants`
+        # (COST guard, not the correctness gate -- see its docstring); local
+        # source ceilings are intersected exactly once inside `_retrieve_scored`.
+        for nid, tier in self._retrieval_participants(active_notebook_id):
             explicit_allowed = (
                 sources_by_notebook.get(nid)
                 if sources_by_notebook is not None else None
@@ -2161,7 +2192,6 @@ class CandidateRetrievalService(_RetrievalState):
                     nid, query, types=types, w_keyword=w_keyword,
                     w_semantic=w_semantic,
                 )
-            tier = tier_map.get(nid, "personal")
             for h in hits:
                 h.notebook_id = nid
                 h.tier = tier
@@ -2175,20 +2205,14 @@ class CandidateRetrievalService(_RetrievalState):
                                      query: str) -> List["RetrievedRelation"]:
         """跨 {base notebook(s)} ∪ {active} 检索关系,逐本 .notebook_id/.tier 标注。
         每本走 _retrieve_relations_scored(同尺),合并按 score 降序。"""
-        with self._connect() as db:
-            notebook_ids, tier_map = self.notebooks.participant_tiers(
-                db, active_notebook_id,
-            )
         all_hits: List["RetrievedRelation"] = []
-        from app.services.source_scope import notebook_in_scope
 
-        for nid in notebook_ids:
-            # Library dimension. The active-notebook check below is
-            # `nid == active_notebook_id`-guarded, so it never even looks at a
-            # participant library -- a run that unchecked one would otherwise
-            # keep searching it and rely entirely on the result boundary.
-            if not notebook_in_scope(nid):
-                continue
+        # Library dimension is decided inside `_retrieval_participants`. The
+        # active-notebook check below is `nid == active_notebook_id`-guarded,
+        # so it never even looks at a participant library -- a run that
+        # unchecked one would otherwise keep searching it and rely entirely
+        # on the result boundary.
+        for nid, tier in self._retrieval_participants(active_notebook_id):
             # Relation ANN/FTS artifacts are not source partitioned yet.  A
             # truly narrowed run skips this active-notebook channel before I/O;
             # an all-selected frozen snapshot keeps the normal graph path and
@@ -2200,7 +2224,6 @@ class CandidateRetrievalService(_RetrievalState):
             ):
                 continue
             hits = self._retrieve_relations_scored(nid, query)
-            tier = tier_map.get(nid, "personal")
             for h in hits:
                 h.notebook_id = nid
                 h.tier = tier
@@ -2227,28 +2250,22 @@ class CandidateRetrievalService(_RetrievalState):
         would reopen exactly the unbounded corpus-language probe codex #640
         R2 P1 closed for it.
         """
-        with self._connect() as db:
-            notebook_ids, _tier_map = self.notebooks.participant_tiers(
-                db, active_notebook_id
-            )
         sources_by_notebook: dict[str, list[str]] = {}
         for notebook_id, source_id in allowed_source_keys:
             if notebook_id and source_id:
                 sources_by_notebook.setdefault(notebook_id, []).append(source_id)
-        from app.services.source_scope import notebook_in_scope
 
         hits: List[RetrievedElement] = []
-        for notebook_id in notebook_ids:
-            # Library dimension, and the last point at which an element's
-            # origin library is still known: `RetrievedElement` has no
-            # notebook_id field, so `filter_retrieval_items(..., "element",
-            # ...)` can only ever judge one against the ACTIVE notebook.
-            # Correctness downstream still holds without this line (the inner
+        for notebook_id, _tier in self._retrieval_participants(active_notebook_id):
+            # Library dimension is decided inside `_retrieval_participants`,
+            # which remains the last point at which an element's origin
+            # library is still known: `RetrievedElement` has no notebook_id
+            # field, so `filter_retrieval_items(..., "element", ...)` can only
+            # ever judge one against the ACTIVE notebook. Correctness
+            # downstream still holds without this line (the inner
             # `_retrieve_elements` intersects the same ceiling and comes back
             # empty), but only after paying for the search -- this is what
             # makes an unchecked library free rather than merely harmless.
-            if not notebook_in_scope(notebook_id):
-                continue
             source_ids = sources_by_notebook.get(notebook_id)
             if not source_ids:
                 continue
