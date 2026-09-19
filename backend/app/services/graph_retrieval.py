@@ -5,7 +5,7 @@ import heapq
 import json
 import math
 import time
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 from app.models.common import Evidence
 from app.services.knowledge_contracts import USABLE_STATUSES
@@ -50,6 +50,19 @@ def _xbridge_similarities(dists) -> "np.ndarray":
     sims = np.where(np.isnan(sims), 0.0, sims)
     np.maximum(sims, 0.0, out=sims)
     return sims
+
+
+def _peer_chunk_allowed(row, chunk_owner: Dict[str, str], ceilings) -> bool:
+    """这一行能不能进候选:当前库恒真,参考库要在**该库自己**的天花板里。
+
+    ``chunk_owner`` 空(单库路径 / ``object_owners`` 为 ``None``)时恒真,所以
+    今天的那条路径逐值不变。参考库的 owner 若连天花板都没有(整库被取消勾选),
+    这里同样是拒绝——不过那种 owner 早在反查分组时就整组跳过了,这里是后盾。
+    """
+    owner = chunk_owner.get(row["id"], "")
+    if not owner:
+        return True
+    return str(row["source_id"] or "") in ceilings.get(owner, frozenset())
 
 
 def _binary_text_key(value: str) -> bytes:
@@ -1388,8 +1401,95 @@ class GraphRetrievalService(_RetrievalState):
             scoped.setdefault(row["element_id"], []).append(row["chunk_id"])
         return scoped
 
+    def _kg_peer_source_ceilings(
+        self, notebook_id: str, object_owners: "Mapping[str, str]"
+    ) -> Dict[str, frozenset]:
+        """``{peer_notebook_id: frozenset(source_id)}`` —— 每个参考库自己的天花板。
+
+        ⛔ 不是鉴权谓词,是消费边界的成本/范围闸,与 ``chunk_federation`` 的 peer
+        腿同一条规则,而且**刻意复用同一个 memo key**(``_peer_visible_sources``):
+        一次 ask 里两条腿看到的参考库来源清单必须是同一份冻结快照,否则
+        「向量腿引得到、KG 腿引不到」这种不对称会随运行中途的上传/auto-fold 漂移。
+
+        三层,顺序不许换:
+
+        1. ``notebook_in_scope`` —— 库维度被取消勾选的参考库**整库跳过**,而且是
+           在任何读之前:它是纯 ContextVar 读,零 SQL,所以被排除的库连一次来源
+           枚举都不会触发(结果边界的 ``filter_retrieval_items`` 仍是 fail-closed
+           后盾,这里是成本那一半)。
+        2. ``all_visible_source_ids`` —— **只取 visible,永不取 hidden**。请求用户
+           通常不是参考库的成员,那个库的 Memory/Knowhow 投影今天根本到不了
+           chunk 通道;经这条反查放进来就是凭空新增一个越权面。
+        3. ``scoped_allowed_source_ids`` —— 再与本次勾选的来源清单取交,库被排除
+           时它返回 ``()``,当场空手。
+
+        不在返回值里的 owner = 这一轮不参与,调用方整组跳过。
+        """
+        from app.services.chunk_federation import _peer_visible_sources
+        from app.services.source_scope import (
+            notebook_in_scope, scoped_allowed_source_ids,
+        )
+
+        ceilings: Dict[str, frozenset] = {}
+        for owner in dict.fromkeys(object_owners.values()):
+            if not owner or owner == notebook_id or not notebook_in_scope(owner):
+                continue
+            ceilings[owner] = frozenset(
+                scoped_allowed_source_ids(owner, _peer_visible_sources(self, owner))
+                or ()
+            )
+        return ceilings
+
+    def _elem_chunks_by_owner(
+        self, db, notebook_id: str, elem_ids: list, elem_owner: Dict[str, str],
+        ceilings: Dict[str, frozenset],
+    ) -> "Tuple[Dict[str, list], Dict[str, str]]":
+        """按 owner 分组的 element→chunk 反查:``(elem_map, {chunk_id: owner})``。
+
+        分组只改**反查**,不改调用方那两层输出循环——输出序仍然完全由
+        ``elem_ids`` 的 first-seen 序与每个 element 自己的 chunk 列表序决定。
+
+        参考库一侧**只允许 ``chunk_elements`` 有界点查**:``_elem_chunks_scoped``
+        的另一支(未回填的 ``_elem_chunk_map``)是对整库 chunks 的全量扫描 + 逐行
+        ``json.loads``,对一个用户并不在其中的外库是联邦不该强加的成本。所以未
+        回填的参考库这一轮拿不到原文,并显式记一条无内容事件而不是静默少召回。
+        当前库两支都保留:那是用户正在用的那一本,今天就在付这个成本。
+
+        (非 restricted 的 overlay 其实进不来大库——``_chunk_kg_overlay`` 顶部的
+        ``_federated_graph_is_large`` 会先整支拒绝;但 restricted 分支绕开了那道
+        守卫,所以有界性必须在这里自己成立。)
+        """
+        from app.services.chunk_federation import _emit
+
+        groups: Dict[str, list] = {}
+        for el in elem_ids:
+            groups.setdefault(elem_owner.get(el) or notebook_id, []).append(el)
+        elem_map: Dict[str, list] = {}
+        chunk_owner: Dict[str, str] = {}
+        for owner, elems in groups.items():
+            if owner == notebook_id:
+                elem_map.update(self._elem_chunks_scoped(db, notebook_id, elems))
+                continue
+            if owner not in ceilings:
+                continue
+            if not self.knowledge.chunk_elements_indexed(db, owner):
+                _emit(self, {
+                    "kind": "kg_source_chunks_peer_unindexed",
+                    "notebook_id": notebook_id,
+                    "peer_notebook_id": owner,
+                    "elements": len(elems),
+                })
+                continue
+            scoped = self._elem_chunks_scoped(db, owner, elems)
+            elem_map.update(scoped)
+            for cids in scoped.values():
+                for cid in cids:
+                    chunk_owner.setdefault(cid, owner)
+        return elem_map, chunk_owner
+
     def _kg_source_chunks(
-        self, notebook_id: str, object_ids: list, *, support_by_object=None
+        self, notebook_id: str, object_ids: list, *, support_by_object=None,
+        object_owners: "Mapping[str, str] | None" = None,
     ) -> list:
         """KG 对象 evidence 的 element_id → 含该 element 的 chunk(LightRAG 源 chunk)。
         返回 List[RetrievedChunk](relevance 占位 0.3,后续 rerank 重排)。
@@ -1409,28 +1509,58 @@ class GraphRetrievalService(_RetrievalState):
         批 5:element→chunk 反查改由 ``_elem_chunks_scoped`` 按标记分叉——已回填
         的 notebook 走 ``chunk_elements`` 有界点查(SQLite ``ORDER BY rowid`` /
         PostgreSQL ``ORDER BY ordinal``,即插入序),未回填的仍走原全量缓存,
-        逐字不变。"""
+        逐字不变。
+
+        ``object_owners``(``{object_id: 该对象所属 notebook_id}``)打开跨库反查。
+        ``None`` = 今天的行为逐字不变:一次 ``_elem_chunks_scoped(db, notebook_id,
+        elem_ids)``,输出逐值相等。非 ``None`` 时**外层两层循环一字不动**(上面
+        那条 first-seen 序因此原样成立),只把 element→chunk 的反查按 owner 分组,
+        每个 owner 各查自己的库——这条不对称原本让「引了参考库的知识对象,却拿
+        不出它的原文」:``_chunk_kg_overlay`` 今天就会返回参考库的对象,而反查的
+        SQL 却钉死 ``ce.notebook_id = active``。
+
+        参考库的 chunk 打 ``notebook_id=owner``,**当前库的不打标**(本分支的统一
+        判据:``notebook_id`` 为空 = active,见 ``chunk_federation`` 的模块
+        docstring);每个参考库的来源天花板见 ``_kg_peer_source_ceilings``,它在
+        候选进入 rerank 输入之前生效,结果边界的 ``filter_retrieval_items``
+        (``retrieval_service.mixed_chunk_candidates``)仍是 fail-closed 后盾。"""
         from app.services.retrieval import (
             RetrievedChunk, RetrievalSupport, merge_retrieval_supports,
         )
         if not object_ids:
             return []
+        owners = dict(object_owners or {})
+        # 天花板在开连接**之前**算完:``all_visible_source_ids`` 自己要开连接,
+        # 放进下面的 ``with`` 里就是连接套连接(``_ent_chunk_map`` 为同一理由把
+        # ``_elem_chunk_map`` 提到 ``with`` 之前)。
+        ceilings = (
+            self._kg_peer_source_ceilings(notebook_id, owners) if owners else {}
+        )
         with self._connect() as db:
             erows = self.knowledge.object_evidence_rows(db, object_ids)
             # SQL IN(...) 不保证返回序 — 按 object_ids 输入序重放,evidence 内保持
             # JSON 数组序,element_id 有序去重(dict.fromkeys 语义)。
             ev_by_id = {r["id"]: r["evidence"] for r in erows}
             elem_ids: list = []
+            elem_owner: Dict[str, str] = {}
             seen_el = set()
             for oid in object_ids:
+                owner = owners.get(oid) or notebook_id
                 for e in json.loads(ev_by_id.get(oid) or "[]"):
                     el = e.get("element_id") if isinstance(e, dict) else None
                     if el and el not in seen_el:
                         seen_el.add(el)
                         elem_ids.append(el)
+                        elem_owner[el] = owner
             if not elem_ids:
                 return []
-            elem_map = self._elem_chunks_scoped(db, notebook_id, elem_ids)
+            if owners:
+                elem_map, chunk_owner = self._elem_chunks_by_owner(
+                    db, notebook_id, elem_ids, elem_owner, ceilings,
+                )
+            else:
+                elem_map = self._elem_chunks_scoped(db, notebook_id, elem_ids)
+                chunk_owner = {}
             chunk_ids: list = []
             seen_cid = set()
             chunk_support_objects: Dict[str, list[str]] = {}
@@ -1452,7 +1582,14 @@ class GraphRetrievalService(_RetrievalState):
             if not chunk_ids:
                 return []
             crows = self.chunks.rows_by_ids(db, chunk_ids)
-        by_id = {cr["id"]: cr for cr in crows}
+        # 天花板在这里落地,早于任何候选被构造出来、更早于 rerank 输入:被参考库
+        # 天花板挡掉的行直接不进 ``by_id``,下面那句既有的 ``cr is None → continue``
+        # 就是它的出口,输出序一字不动。``chunk_owner`` 为空(``object_owners``
+        # 为 None)时谓词恒真,逐值回到今天。
+        by_id = {
+            cr["id"]: cr for cr in crows
+            if _peer_chunk_allowed(cr, chunk_owner, ceilings)
+        }
         out = []
         for cid in chunk_ids:
             cr = by_id.get(cid)
@@ -1471,6 +1608,7 @@ class GraphRetrievalService(_RetrievalState):
                 chunk_id=cr["id"], source_id=cr["source_id"], source_title="",
                 section_path=cr["section_path"], text=cr["text"],
                 element_ids=json.loads(cr["element_ids"] or "[]"), relevance=0.3,
+                notebook_id=chunk_owner.get(cid, ""),
                 retrieval_supports=supports))
         return out
     def _ent_chunk_map(

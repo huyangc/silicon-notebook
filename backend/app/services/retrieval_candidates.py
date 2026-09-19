@@ -4276,6 +4276,30 @@ class CandidateRetrievalService(_RetrievalState):
                 seen.add(content_key)
                 out.append(c)
         return out
+    def _kg_object_owners(self, notebook_id: str, kg_id_map: dict) -> dict | None:
+        """overlay 命中的每个 KG 对象属于哪个库 —— 只在**真有参考库对象**时才返回。
+
+        取数只认 ``render_subgraph_context`` 已经写进 id_map 的 ``notebook_id``:
+        那一格已经过共享的 ``foreign_notebook_id`` 归一(当前库 = 空串),而且它覆盖
+        整个 1-hop 子图,不止 ``kg_hits`` 那几个种子——按种子取会漏掉扩散出来的
+        参考库对象。这里再把空串还原成 active 的真实 id,下游因此只处理一种形状。
+
+        返回 ``None`` = 回到今天的单库反查,两种情形都要:
+        ``CHUNK_FEDERATION_ENABLED=0``(既定的单一回退开关),以及本轮 overlay 压根
+        没命中任何外库对象(绝大多数笔记本)。后者让单库路径逐字不变,而且不需要
+        再去问一次参与集。
+        """
+        if not self.settings.chunk_federation_enabled:
+            return None
+        owners = {
+            str(entry.get("object_id") or ""):
+                str(entry.get("notebook_id") or "") or notebook_id
+            for entry in kg_id_map.values() if entry.get("object_id")
+        }
+        if not any(owner != notebook_id for owner in owners.values()):
+            return None
+        return owners
+
     def _mix_retrieve(self, notebook_id: str, query: str, hl: str, sub_queries: list) -> tuple:
         """三路 mix:向量 chunk + KG-overlay 源 chunk + 概念漫游(PPR)跨文档 chunk,
         round-robin 并池去重。返回 (candidates, kg_block, kg_id_map, kg_hits, ppr_count)。
@@ -4295,6 +4319,7 @@ class CandidateRetrievalService(_RetrievalState):
             kg_chunks = self._kg_source_chunks(
                 notebook_id, [v["object_id"] for v in kg_id_map.values()],
                 support_by_object=support_by_object,
+                object_owners=self._kg_object_owners(notebook_id, kg_id_map),
             )
         # 概念漫游(PPR)第 3 路:gated GRAPH_PPR_ENABLED;无 KG/无 reset → []。
         ppr_chunks = (
