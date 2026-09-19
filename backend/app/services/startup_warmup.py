@@ -467,6 +467,13 @@ def _sweep_agent_profile_chains(repo: object) -> None:
         logger.info("startup: settled %d stranded understanding chain(s)", swept)
 
 
+def _sweep_global_ask_jobs(repo: object) -> None:
+    """Recover persisted work only on server startup, allowing narrow test runtimes."""
+    store = getattr(getattr(repo, "_runtime", None), "global_ask_store", None)
+    if store is not None:
+        store.recover()
+
+
 def _pool_budget_warning(settings: object) -> str | None:
     """Return a one-time startup warning when the PostgreSQL connection pool
     is sized smaller than the worst-case background job concurrency this
@@ -566,6 +573,7 @@ def run_startup(lease: object | None) -> object | None:
         # in-progress state by the previous process. Offline CLIs must not make
         # this claim while a live backend may still own those jobs.
         repo._recover_interrupted_jobs()
+        _sweep_global_ask_jobs(repo)
         # Agentic Memory P1 (T4): the same claim, for the same reason, for the
         # understanding-consolidation chains. It is NOT part of
         # ``_recover_interrupted_jobs`` because that one is a per-backend SQL

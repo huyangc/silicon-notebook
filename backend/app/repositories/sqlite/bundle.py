@@ -7,6 +7,7 @@ from typing import Any
 
 from app.core.config import Settings
 from app.repositories.bundle import PersistenceBundle
+from app.repositories.global_ask_store import GlobalAskStore
 from app.repositories.ports import RepositorySeams
 from app.repositories.sqlite.agent_observation_store import AgentObservationStore
 from app.repositories.sqlite.agent_profile_store import AgentProfileStore
@@ -74,6 +75,7 @@ class SqlitePersistenceBundle(PersistenceBundle):
     queries: QueryStore
     reports: ReportStore
     ask_state: AskStateStore
+    global_ask: GlobalAskStore
     unified_kg: UnifiedKgStore
     model_status: ModelStatusStore
     agent_profile: AgentProfileStore
@@ -144,6 +146,7 @@ class SqlitePersistenceBundleFactory:
             current_user_id=lambda: identity.current_user().id,
         )
         ask_state = AskStateStore(database, seams)
+        global_ask = GlobalAskStore(database)
         unified_kg = UnifiedKgStore(database, seams.now)
         model_status = ModelStatusStore(database)
         agent_profile = AgentProfileStore(
@@ -179,6 +182,7 @@ class SqlitePersistenceBundleFactory:
             queries=queries,
             reports=reports,
             ask_state=ask_state,
+            global_ask=global_ask,
             unified_kg=unified_kg,
             model_status=model_status,
             agent_profile=agent_profile,

@@ -21,7 +21,7 @@ Codex CLI / Claude Code / Python Agent
 
 关键语义：
 
-- 每个新 MCP session 都必须先调用 `select_notebook`，不能依赖上一次会话的选择。
+- 每个新 MCP session 调用单库数据工具前都必须先调用 `select_notebook`，不能依赖上一次会话的选择；全局问答工具独立传入范围，无需选择当前笔记本。
 - `search_notebook_context` 只读正式平面：来源、知识对象和已确认 Memory，不返回 candidate。
 - `search_agent_memory` 在 token 同时具备 `memory:read_candidates` 时可读 candidate 与 confirmed Memory。
 - `propose_memory` 只创建 `candidate`。它不会自动进入 Ask、笔记本搜索或深度报告；用户必须回到界面确认。
@@ -256,6 +256,20 @@ claude mcp list
 （`build_kg` / `build_retrieval_index`，再轮询 `get_build_status`）。
 
 ## 5. 在 Agent 对话中做第一次调用
+
+全局问答可直接调用 `ask_global`，无需 `select_notebook`。例如：
+
+```json
+{"question":"这些项目的低温测试结论有哪些共同点？","notebook_scope":{"mode":"all"},"client_request_id":"low-temperature-review-1"}
+```
+
+`all` 只覆盖 token 白名单与当前用户读权的交集，不是整个平台全部笔记本。
+限定范围时先分页调用 `list_notebooks`，再传
+`notebook_scope={"mode":"include","notebook_ids":[...]}`；空列表恢复全部。
+用返回的 `job_id` 调用 `get_global_ask` 查看状态和结果，长答案和引用按返回的分页信息继续读取。
+调用 `cancel_global_ask` 明确停止任务，`get_global_cited_element` 读取实际引用原文。
+`conversation_id` 可以接续网页端同一用户的全局会话，但历史和结果仍受当前 token 权限约束。
+第一版检索可见导入来源的原文，不把隐藏的 Memory/Knowhow 投影或 candidate 当作全局证据。
 
 给 Agent 一个明确且可审计的首轮任务，例如：
 

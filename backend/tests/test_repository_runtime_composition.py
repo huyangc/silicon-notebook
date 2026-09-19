@@ -44,6 +44,9 @@ def runtime(tmp_path, monkeypatch):
 # *frozen set*, not a floor: adding a seat is a deliberate act that belongs in
 # the same diff as this list, and removing one must never pass silently.
 RUNTIME_ATTRIBUTES = [
+    "_global_ask",
+    "_global_ask_wire_lock",
+    "global_ask_store",
     "_ask_retrieval",
     "_ask_wire_lock",
     "_closed",
@@ -358,7 +361,7 @@ def test_the_storage_root_callable_does_not_retain_the_runtime(runtime):
 
 
 LAZY_WIRING_SEATS = {
-    "_build_ask_domain": frozenset({"ask"}),
+    "_build_ask_domain": frozenset({"ask", "global_ask"}),
     "_build_knowledge_domain": frozenset(
         {
             "kg_mutations",

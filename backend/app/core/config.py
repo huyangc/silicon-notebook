@@ -1249,6 +1249,12 @@ class Settings(BaseSettings):
     chunk_mmr_k: int = Field(16, validation_alias="CHUNK_MMR_K")
     chunk_mmr_lambda: float = Field(0.5, validation_alias="CHUNK_MMR_LAMBDA")
     chunk_answer_budget_chars: int = Field(30000, validation_alias="CHUNK_ANSWER_BUDGET_CHARS")
+    global_ask_candidate_limit: int = Field(
+        64, ge=1, validation_alias="GLOBAL_ASK_CANDIDATE_LIMIT",
+    )
+    global_ask_history_turns: int = Field(
+        10, ge=0, validation_alias="GLOBAL_ASK_HISTORY_TURNS",
+    )
     document_overview_max_elements: int = Field(
         64, ge=2, validation_alias="DOCUMENT_OVERVIEW_MAX_ELEMENTS",
     )

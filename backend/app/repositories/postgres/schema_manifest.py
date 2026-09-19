@@ -60,6 +60,8 @@ POSTGRES_BUSINESS_TABLES = (
     "concept_merge_candidates",
     "concept_whitelist",
     "conversations",
+    "global_ask_conversations",
+    "global_ask_jobs",
     "element_embeddings",
     "extension_runtime_toggles",
     "extraction_runs",
@@ -313,6 +315,6 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # (app.models.ask.StoredSubmittedVia), not a CHECK, like ``wishes.status``.
 # No table, index, FK or unique-surface change.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=75,
-    postgres_version=55,
+    sqlite_version=76,
+    postgres_version=56,
 )

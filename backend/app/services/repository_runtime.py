@@ -314,6 +314,7 @@ class _PersistenceSeats:
     # stored, never evaluated.  Cancel-event registry + fail-open trace
     # logging stay facade-side.
     ask_state: Any
+    global_ask_store: Any
     memory_store: Any
     index_projections: IndexProjectionStorePort
     # Vector persistence is finished by wire_persistence(): its write seat
@@ -401,6 +402,7 @@ def _build_persistence_seats(
         governance=bundle.governance,
         unified_kg=bundle.unified_kg,
         ask_state=bundle.ask_state,
+        global_ask_store=bundle.global_ask,
         memory_store=bundle.memory,
         index_projections=bundle.index_projection,
         embedding_store=bundle.embeddings,
@@ -810,6 +812,9 @@ class _AskDomain:
     # and the first ask touches it.
     ask: "AskService | None"
     ask_execution: AskExecutionCoordinator
+    global_ask_store: Any
+    global_ask_lock: Any
+    global_ask: Any
 
 
 def _build_ask_domain(
@@ -829,6 +834,9 @@ def _build_ask_domain(
 
     cancellations = AskCancellationRegistry()
     return _AskDomain(
+        global_ask_store=seats.global_ask_store,
+        global_ask_lock=threading.Lock(),
+        global_ask=None,
         ask_cancellations=cancellations,
         ask=None,
         ask_execution=AskExecutionCoordinator(
@@ -1114,11 +1122,8 @@ class RepositoryRuntime:
         self.knowledge_lifecycle = knowledge.knowledge_lifecycle
         self.knowledge_query = knowledge.knowledge_query
         self.pending_actions_service = knowledge.pending_actions_service
-        # Finished by wire_knowledge_lifecycle(): its collaborators
-        # (self.knowledge_lifecycle.kg_maintenance / kg_conflict_jobs) are
-        # only real once that method's own tail builds them (see that
-        # method for why NotebookDeleteJobRunner cannot be built any
-        # earlier).
+        # wire_knowledge_lifecycle finishes deletion after building its
+        # kg_maintenance and kg_conflict_jobs collaborators.
         self.notebook_delete = None
         retrieval = _build_retrieval_domain(foundation)
         self.retrieval_snapshots = retrieval.retrieval_snapshots
@@ -1143,6 +1148,9 @@ class RepositoryRuntime:
         self.ask_cancellations = ask.ask_cancellations
         self.ask = ask.ask
         self.ask_execution = ask.ask_execution
+        self.global_ask_store = ask.global_ask_store
+        self._global_ask_wire_lock = ask.global_ask_lock
+        self._global_ask = ask.global_ask
         tools = self.content_tools = _build_content_tools(foundation, seats, self._current_user_id)
         self.command_catalog = tools.command_catalog
         self.collection_catalog = tools.collection_catalog
@@ -1340,6 +1348,8 @@ class RepositoryRuntime:
         if self._closed:
             return
         self._closed = True
+        if self._global_ask is not None:
+            self._global_ask.close()
         self.models.close()
         self.database.close()
 
@@ -2327,6 +2337,32 @@ class RepositoryRuntime:
         wire_report_execution's engine factory.  The AskService itself is
         composed by :meth:`ask_service` on first ask."""
         self._ask_retrieval = retrieval
+
+    def global_ask_service(self):
+        """Independent global conversations over the shared retrieval/model owners."""
+        from app.services.global_ask import GlobalAskService
+        from app.services.global_ask_synthesis import GlobalAskSynthesis
+
+        if self._global_ask is not None:
+            return self._global_ask
+        with self._global_ask_wire_lock:
+            if self._global_ask is None:
+                ask = self.ask_service()
+                self._global_ask = GlobalAskService(
+                    store=self.global_ask_store,
+                    notebooks=self.notebook_summaries.list_for_user,
+                    can_read=self.sharing_store.user_can_read_notebook,
+                    sources=self.source_store,
+                    retrieve=ask.retrieval.retrieve_chunk_candidates,
+                    rewrite_query=ask._rewrite_followup_query,
+                    synthesize=GlobalAskSynthesis(
+                        settings=self.settings, model_clients=self.models,
+                        parse_anchors=ask.evidence_context.parse_anchors,
+                        style_block=ask._search_profile_style_block,
+                    ),
+                    settings=self.settings,
+                )
+        return self._global_ask
 
     def ask_service(self) -> AskService:
         """The ONE runtime-owned AskService (Task 24), composed lazily.

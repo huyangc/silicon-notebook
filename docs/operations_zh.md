@@ -80,6 +80,13 @@ bash scripts/cli.sh extensions services stop
 诊断，不代表服务就绪。批量摄取不隐式启动服务，应先显式启动服务或启动完整应用；
 管理员插件开关只影响访问。
 
+## 全局问答恢复
+
+全局问答在浏览器断连后继续运行；重新打开 `/ask` 可通过已保存的会话获取进度。
+服务器启动时把遗留的未完成全局任务标记为 `interrupted`，提示重新提交；普通仓库实例化
+和离线工具不补偿正在运行的服务器所拥有的任务。正常关闭先发送取消信号并等待线程结束，
+再关闭共享模型与数据库资源；后台完成不能覆盖已取消或已中断的终态。
+
 ## 可观测性 / 日志
 
 后端通过统一的 `EventLogger`（`app/core/event_logging.py`）输出结构化日志：每条事件一行 JSONL 写入 `.local/logs/`，并附控制台简要行。写日志是 best-effort，绝不影响它所观测的请求或管线；未配置模型时 LLM 通道为 no-op。
@@ -1372,6 +1379,8 @@ PYTHONPATH=backend python scripts/eval_selected_source_graph.py \
 发布默认值已经启用 `SOURCE_SUBGRAPH_PPR_ENABLED`、partition 发布/读取，并把 `SELECTED_SOURCE_GRAPH_ROLLOUT_MODE` 设为 `shadow`；该控制态只存在于运维内部 telemetry，用户可读日志与 UI 会过滤它。超大来源应先构建或刷新 partition 伴生产物，再判断 shadow 覆盖。canonical gate 通过后，配置受信 attestation 路径及精确 corpus/model pin，再依次走 `allowlist` 或稳定 hash `rollout`，最后才考虑 `on`。回滚只需把 `SELECTED_SOURCE_GRAPH_ROLLOUT_MODE=off`，会立即恢复历史 `B`，无需删除工件。不同 corpus signature 或 model contract 之间禁止复制 attestation。
 
 ### 合并两个共享 base 库的部署(`scripts/merge_dbs.py`)
+
+全局问答会话和任务按用户归属保留，在既有用户身份并集之后独立合并，不受笔记本导入集合限制。同一记录标识且用户相同以主库为准；记录标识对应不同用户、任务与对话归属不一致，或同一请求标识对应不同任务时拒绝合并，不静默丢弃数据。导入的进行中任务转为已中断。原始引用保持不变；指向已舍弃公共库资料的引用可能无法再打开，需要重新提问。
 
 离线、非破坏性工具,用于把两个各自独立部署、但**共享同一个公共知识库**(同一个 base notebook id)的 silicon-notebook 实例合并成一个。保留哪侧的 base 由 `--keep-base` 指定(通常选更全的那侧)——运行时会先打印两侧 base 的统计(`sources`/`chunks`/`knowledge_objects` 计数)供核对;两侧其余(个人)notebook 原样全部并入,包括各自持有的参考库挂载边(`notebook_bases`)。源库的 `.db`/storage 文件只读,工具始终写出全新的 `--out` / `--out-storage`。两侧输入允许是旧 schema 版本——合并前会先各自迁移到最新(在私有临时副本上进行,不改动源文件)。多领域部署下一侧可能不止一个公共知识库:本工具不支持这种形态、也不会替你猜——若任一侧存在不止一个 `tier='base'` 的 notebook,会立即中止并点名是哪一侧、列出全部候选,而不是自作主张选一个。
 

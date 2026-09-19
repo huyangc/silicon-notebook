@@ -99,6 +99,69 @@ This repository targets a local real-team beta loop built around a KG-native pip
 
 PostgreSQL 16 is the default deployment choice and is used in both the current development and production environments; SQLite remains a supported alternative. The application selects exactly one through `DATABASE_URL`; it does not dual-write or move existing data. PostgreSQL stores vectors in `bytea`, so pgvector is not required. The unset-setting SQLite fallback is documented in the deployment reference and does not describe the current deployment configuration.
 
+## Global Ask
+
+Global Ask opens from a bottom-right bubble in the authenticated collection and notebook workspace.
+Clicking opens a compact chat; expanding fills the viewport with history, chat and evidence reading.
+Minimizing, reopening and switching size retain the same mounted conversation, draft, scope and task
+progress; minimizing does not cancel a task. Embedded chat leaves the host URL unchanged and loads
+its data only after first opening. Signing out clears its local state. `/ask` remains independently
+accessible, including conversation links. Conversations belong to the initiating user; they neither create an empty carrier notebook
+nor change reference-library mounts. The page reuses the shared header, palette, button feedback and
+answer Markdown, with conversation history, searchable notebook selection, a persistent scope summary,
+background-task status and original-evidence reading. The mobile layout retains scope, send and stop.
+
+Scope has two states: `all` means every currently readable notebook; `include` is an explicit set.
+Clearing selection restores `all`. Manually selecting every current notebook remains an explicit set,
+whereas `all` resolves current access again on the next turn. Omitting scope starts a new conversation
+with `all`, or inherits the current scope on follow-up; the browser explicitly sends its selection each
+turn. An invalid or inaccessible explicit notebook rejects the request instead of silently disappearing.
+Mounts never expand the participant set. Execution freezes participants and source ceilings, so notebooks
+or sources added later cannot join a running request.
+
+Browser scope follows the user's live read access; MCP additionally intersects the live token allowlist.
+History, task results and cited evidence recheck access. Narrowing scope cannot reintroduce excluded
+notebook material through earlier assistant answers. Receipts distinguish eligible participants, notebooks
+actually searched and notebooks cited. An operational failure fails the whole task with a retry message;
+empty retrieval still counts as searched. Not citing a notebook does not assert that it contains no relevant material.
+Admitted prior user questions resolve follow-up retrieval through the shared query-rewrite workload;
+prior assistant answers are never treated as evidence. Cited elements are checked again before completion;
+changed or removed evidence fails the task and asks the user to retry.
+
+V1 retrieves original chunks from visible imported sources across notebooks and synthesizes one answer.
+No knowledge graph is required. Hidden Memory/Knowhow projections, cross-notebook graph reasoning and
+automatic Memory writeback are outside this version. Ordinary participant notebooks are peer evidence;
+conflicts retain provenance and applicability. Retrieval candidates and model context remain bounded:
+global scope does not promise full-document reading, exhaustive enumeration or a complete per-library audit.
+
+Authenticated HTTP routes live under `/api/global-ask`: `POST /ask` returns a pollable task;
+`GET /jobs/{job_id}` reads progress or the answer; `POST /jobs/{job_id}/cancel` stops execution;
+`GET /jobs/{job_id}/citations/{element_id}` reads only an original element actually cited by that task.
+`GET /conversations` and `GET /conversations/{id}` accept `limit`/`offset`, with `has_more`/`next_offset`
+on detail pages; `PATCH /conversations/{id}` renames and `DELETE` removes a conversation. Conversations
+belong only to their initiating user. Browser and MCP can continue the same `conversation_id`, subject
+to the token allowlist and current read rights over historical scope. Owning a conversation never widens
+token capabilities. `client_request_id` supports identical retries and rejects reuse with different input.
+A conversation cannot start another task while its previous answer is running.
+The job's `error` is explicitly displayable Chinese retry guidance, never raw exception text.
+Automatically derived conversation titles are bounded summaries; the original question remains complete.
+
+Input reuses `ASK_QUESTION_MAX_CHARS=4000` and `CONVERSATION_TITLE_MAX_CHARS=200`; global identifiers
+and client request identifiers allow 200 characters. List pagination defaults to 50, capped at 100.
+`GLOBAL_ASK_CANDIDATE_LIMIT` defaults to 64 (minimum 1), bounding merged evidence across all notebooks
+without cutting the participant list. `GLOBAL_ASK_HISTORY_TURNS` defaults to 10 (minimum 0), controlling
+prior user questions only. Model original-text projection reuses `CHUNK_ANSWER_BUDGET_CHARS` rather than
+introducing a second truncation setting.
+
+The four global MCP tools do not require `select_notebook`. `ask_global`, `get_global_ask` and
+`cancel_global_ask` require both `ask:execute` and `knowledge:read`; `get_global_cited_element` requires
+`knowledge:read`. `get_global_ask` exposes `next_answer_offset` and `next_citation_offset` for independent
+answer and citation pagination. Citation metadata can be visibly compressed under the shared MCP budget;
+the original-element reader exposes `next_offset` for complete text. Answer pages, identifiers and
+continuation cursors must not be silently truncated. Results include `/ask?conversation_id=...`.
+`list_notebooks` accepts `offset`/`query` and returns `total`/`next_offset`; discovery searches the complete
+live allowlist rather than treating its first page as the global universe.
+
 ## Product Flow
 
 The outer page is a notebook collection/library (KG-native pipeline):
@@ -960,7 +1023,7 @@ other clients apply a flat per-call ceiling instead. `ask_notebook` in `reasonin
 routinely runs for minutes (plan, federated retrieval, reflect loop, synthesis) and
 `build_kg` can take longer still, so without a heartbeat the client abandons a call the
 server is still executing successfully and the Agent sees a transport error where the
-answer was about to arrive. Every one of the 24 core tools therefore runs its blocking body
+answer was about to arrive. Every one of the 28 core tools therefore runs its blocking body
 under one progress heartbeat that fires every **5 seconds** and carries only the tool name
 and elapsed wall-clock seconds — never the question, a notebook or source name, or any
 other notebook content, the same rule the observability events follow. It is free where it
@@ -1028,8 +1091,9 @@ resolved. Without `-s user` the entry is registered for the current directory on
 that cannot interpolate persists the raw header instead: use least-privilege scopes, a short
 expiry, protect the local config, and revoke/rotate the token after use.
 
-Every new MCP session must call `select_notebook` before a data tool. The default core tool set
-is these 24 tools; `mcp_server.PUBLIC_TOOLS` is exactly these 24 tools, not a larger combined
+Every new MCP session must call `select_notebook` before a notebook-bound data tool. The global
+Ask tools accept their own scope and do not require or change the selected notebook. The default core tool set
+is these 28 tools; `mcp_server.PUBLIC_TOOLS` is exactly these 28 tools, not a larger combined
 catalog -- it is the same list as `mcp_server.CORE_TOOLS`:
 
 | Group | Tools | Scope |
@@ -1044,9 +1108,10 @@ catalog -- it is the same list as `mcp_server.CORE_TOOLS`:
 | Build | `build_kg`, `build_retrieval_index` | `maintenance:execute` (owner-only) |
 | Build read | `get_build_status` | `knowledge:read` |
 | Notebook understanding (agent) | `get_notebook_profile`, `add_observation` | `agent_profile:read` / `agent_observation:write` |
+| Global Ask | `ask_global`, `get_global_ask`, `cancel_global_ask`, `get_global_cited_element` | `ask:execute` / `knowledge:read`; see Global Ask below |
 
 The deployed server-local frozen catalog is authoritative for discovery and onboarding: it is
-exactly the 24 tools above, derived live from the seven core registrars, and
+exactly the 28 tools above, derived live from the eight core registrars, and
 `mcp_server.PUBLIC_TOOLS` is that same list rather than a second hand-kept copy. Every call
 repeats live token/scope/allowlist/membership checks, and every write scope is forced through the
 owner-only notebook gate. Results are copied into a bounded shape while being built -- no deeper than 5 levels, with

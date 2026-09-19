@@ -103,6 +103,14 @@ is a separate import/settings diagnostic and cannot prove a service is ready.
 Batch ingestion never starts services implicitly; start them explicitly or use
 the full application launcher first. The admin plugin switch affects access only.
 
+## Global Ask recovery
+
+Global Ask jobs survive browser disconnection; reopen `/ask` to poll the saved conversation.
+Server startup marks unfinished global jobs `interrupted` and prompts resubmission. Ordinary
+repository construction and offline tools do not recover jobs owned by a running server.
+Graceful shutdown signals cancellation and waits for workers before closing shared model and
+database resources. A cancelled or interrupted job cannot later overwrite its terminal state.
+
 ## Observability
 
 The backend emits structured logs through a single `EventLogger` (`app/core/event_logging.py`): one JSONL line per event under `.local/logs/` plus a brief console line. Logging is best-effort — it never breaks the request or pipeline it observes — and is a no-op for the LLM channel when no model is configured.
@@ -1686,6 +1694,8 @@ Exit `0` means every hard isolation/baseline invariant, per-case and aggregate q
 The shipped defaults already run `SOURCE_SUBGRAPH_PPR_ENABLED`, partition publication/reading, and `SELECTED_SOURCE_GRAPH_ROLLOUT_MODE=shadow`; this control state stays in operator-only internal telemetry and is filtered from user-readable logs and UI. Build or refresh companions for oversized sources before judging shadow coverage. After the canonical gate passes, configure the trusted attestation path plus exact corpus/model pins, then move through `allowlist` or stable-hash `rollout` before `on`. Roll back with the single `SELECTED_SOURCE_GRAPH_ROLLOUT_MODE=off` switch; this immediately restores the historical `B` path and does not require deleting artifacts. Never copy an attestation between a different corpus signature or model contract.
 
 ### Merging two shared-base deployments (`scripts/merge_dbs.py`)
+
+Global Ask conversations and jobs are preserved as user-owned records independently of notebook selection, after the existing user-identity union. The chosen primary wins for the same record ID and owner; a record ID with different owners, a task with a mismatched conversation owner, or one request key naming different tasks aborts the merge rather than dropping data. Imported running tasks become interrupted. Source references are retained as recorded; a reference into discarded shared-base content may no longer resolve and needs a fresh question.
 
 Offline, non-destructive tool for consolidating two separately-deployed silicon-notebook instances that share exactly one common public knowledge base (same base notebook id) back into one. It keeps the fuller side's base — you pick with `--keep-base`, and the tool prints both sides' base stats (`sources`/`chunks`/`knowledge_objects` counts) up front so you can confirm the choice — while every other (personal) notebook from both sides is carried over untouched, including each one's own reference-library mounts (`notebook_bases`). Source `.db`/storage files are only read; the tool always writes new `--out` / `--out-storage` files. Either input may be on an older schema version — each is migrated to current (in a private temp copy) before merging. Multi-domain deployments can have more than one public knowledge base per side: this tool does not support that shape and refuses to guess — if either side has more than one `tier='base'` notebook, it aborts immediately, naming the side and every candidate, instead of picking one.
 

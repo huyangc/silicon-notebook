@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import sqlite3
 import sys
@@ -60,6 +61,57 @@ def test_assert_taxonomy_complete_flags_unclassified_command_catalog_tables(
     message = str(exc_info.value)
     assert "catalog_jobs" in message
     assert "catalog_candidates" in message
+
+
+def _global_ask_record(conn, conversation_id, job_id, *, owner="u", request="request", status="done"):
+    conn.execute(
+        "INSERT OR IGNORE INTO users (id,email,display_name,role,status,username,created_at,updated_at) "
+        "VALUES (?,?,'User','user','active',?,'now','now')",
+        (owner, f"{owner}@example.invalid", owner),
+    )
+    conn.execute(
+        "INSERT INTO global_ask_conversations VALUES (?,?,?,?,?,?,?)",
+        (conversation_id, owner, "Original title", '{"mode":"all","notebook_ids":[]}', "web", "now", "now"),
+    )
+    conn.execute(
+        "INSERT INTO global_ask_jobs VALUES (?,?,?,?,?,?,?,?)",
+        (job_id, conversation_id, owner, request, '{"question":"original"}', status,
+         json.dumps({"status": status, "question": "original", "response": {"answer": "preserved answer"}}), "now"),
+    )
+    conn.commit()
+
+
+@pytest.mark.parametrize("conflict", ["none", "request", "owner", "missing_owner"])
+def test_global_ask_merge_preserves_history_or_rejects_identity_conflicts(tmp_path, conflict):
+    primary, secondary = tmp_path / "primary.db", tmp_path / "secondary.db"
+    for path in (primary, secondary):
+        merge_dbs.migrate_to_current(path)
+    left, right = sqlite3.connect(primary), sqlite3.connect(secondary)
+    try:
+        _global_ask_record(left, "conv-main", "job-main", request="main-key")
+        _global_ask_record(
+            right, "conv-main" if conflict == "owner" else "conv-import", "job-import",
+            owner="other" if conflict in {"owner", "missing_owner"} else "u",
+            request="main-key" if conflict == "request" else "import-key", status="running",
+        )
+        right.close()
+        left.execute("ATTACH DATABASE ? AS sec", (str(secondary),))
+        if conflict != "none":
+            with pytest.raises(SystemExit):
+                with left:
+                    merge_dbs._merge_global_ask(left)
+            assert left.execute("SELECT count(*) FROM global_ask_jobs").fetchone()[0] == 1
+        else:
+            with left:
+                merge_dbs._merge_global_ask(left)
+            rows = left.execute("SELECT id,status,payload_json FROM global_ask_jobs ORDER BY id").fetchall()
+            assert len(rows) == 2
+            imported = next(row for row in rows if row[0] == "job-import")
+            assert imported[1] == "interrupted"
+            assert json.loads(imported[2])["response"]["answer"] == "preserved answer"
+    finally:
+        left.close()
+        right.close()
 
 
 def _schema_db(definition: tuple[str, ...]) -> sqlite3.Connection:

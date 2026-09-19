@@ -3,6 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 export type RootModalSlot =
+  | "global-ask"
   | "password-change"
   | "search-profile"
   | "notebook-editor"
@@ -97,6 +98,7 @@ type ModalPolicy = Readonly<{
 // may sit above it; this preserves the existing analytics -> confirmation and
 // source-detail -> confirmation shapes without introducing one global activeModal.
 export const ROOT_MODAL_POLICIES: Readonly<Record<RootModalSlot, ModalPolicy>> = {
+  "global-ask": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: true },
   "password-change": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false },
   "search-profile": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false },
   "notebook-editor": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false, workspaceSensitive: true },

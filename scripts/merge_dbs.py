@@ -14,6 +14,7 @@ docs/superpowers/specs/2026-07-16-merge-duplicate-base-dbs-design.md。
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sqlite3
 import sys
@@ -160,6 +161,10 @@ OBJECT_SCHEMA_SEMANTIC_COLUMNS = (
     "list_fields", "source", "status", "rationale",
 )
 
+# Owner-scoped records span notebooks, so notebook selection cannot classify them.
+# Their non-PK unique constraints require explicit collision handling, not OR IGNORE.
+GLOBAL_ASK_TABLES = ("global_ask_conversations", "global_ask_jobs")
+
 # 外部内容 FTS —— 导入后 rebuild
 EXTERNAL_FTS_TABLES = ["memory_items_fts"]
 
@@ -263,6 +268,7 @@ def assert_taxonomy_complete(conn: sqlite3.Connection) -> None:
         | set(NOTEBOOK_SCOPED_TABLES)
         | {t for (t, *_rest) in CHILD_TABLES}
         | set(GLOBAL_UNION_TABLES)
+        | set(GLOBAL_ASK_TABLES)
         | set(SKIP_SECONDARY_TABLES)
     )
     classified_virtual = set(FTS_NOTEBOOK_TABLES) | set(EXTERNAL_FTS_TABLES)
@@ -468,6 +474,53 @@ def sweep_orphan_group_grants(conn: sqlite3.Connection) -> int:
     return cur.rowcount or 0
 
 
+def _merge_global_ask(conn: sqlite3.Connection) -> None:
+    """Preserve both owners' histories; fail on conflicting identity or request keys."""
+    for table in GLOBAL_ASK_TABLES:
+        if not (_table_exists(conn, table, "main") and _table_exists(conn, table, "sec")):
+            continue
+        cursor = conn.execute(f"SELECT * FROM sec.{table}")
+        columns = [column[0] for column in cursor.description]
+        for row in cursor:
+            values = dict(zip(columns, row))
+            owner = conn.execute(
+                "SELECT id FROM main.users WHERE id=?", (values["user_id"],)
+            ).fetchone()
+            if owner is None:
+                raise SystemExit("全局问答用户身份未能合并，拒绝导入；请先处理用户身份冲突。")
+            existing = conn.execute(
+                f"SELECT user_id FROM main.{table} WHERE id=?", (values["id"],)
+            ).fetchone()
+            if existing:
+                if existing[0] != values["user_id"]:
+                    raise SystemExit("全局问答记录标识对应不同用户，拒绝合并；请先处理身份冲突。")
+                continue  # Same stable record identity: the chosen primary wins.
+            if table == "global_ask_jobs":
+                parent = conn.execute(
+                    "SELECT user_id FROM main.global_ask_conversations WHERE id=?",
+                    (values["conversation_id"],),
+                ).fetchone()
+                if not parent or parent[0] != values["user_id"]:
+                    raise SystemExit("全局问答任务与对话归属不一致，拒绝合并。")
+                if values["client_request_id"] is not None:
+                    conflict = conn.execute(
+                        "SELECT id FROM main.global_ask_jobs WHERE user_id=? AND client_request_id=?",
+                        (values["user_id"], values["client_request_id"]),
+                    ).fetchone()
+                    if conflict:
+                        raise SystemExit("全局问答请求标识对应不同任务，拒绝合并；请先处理请求标识冲突。")
+                if values["status"] == "running":
+                    values["status"] = "interrupted"
+                    payload = json.loads(values["payload_json"])
+                    payload["status"] = "interrupted"
+                    values["payload_json"] = json.dumps(payload, ensure_ascii=False)
+            placeholders = ",".join("?" for _ in columns)
+            conn.execute(
+                f"INSERT INTO main.{table} ({','.join(columns)}) VALUES ({placeholders})",
+                [values[column] for column in columns],
+            )
+
+
 def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
                shared_base: str) -> dict:
     if out_db.exists():
@@ -530,6 +583,7 @@ def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
                 cols = _col_list(conn, t)
                 conn.execute(
                     f"INSERT OR IGNORE INTO main.{t} ({cols}) SELECT {cols} FROM sec.{t}")
+            _merge_global_ask(conn)
             for t in KG_STATE_TABLES:                                    # 清导入 notebook 的 KG 状态
                 if _table_exists(conn, t, "main"):
                     conn.execute(

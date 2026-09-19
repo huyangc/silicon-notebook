@@ -48,9 +48,29 @@ FIXTURE_SECRETS = (
 )
 
 
+def _rollback_v76(db: sqlite3.Connection) -> None:
+    db.execute("DROP TABLE global_ask_jobs")
+    db.execute("DROP TABLE global_ask_conversations")
+
+
 def _rollback_v75(db: sqlite3.Connection) -> None:
+    _rollback_v76(db)
     db.execute("ALTER TABLE notebooks DROP COLUMN name_auto")
     db.execute("ALTER TABLE notebooks DROP COLUMN metadata_generation")
+
+
+def test_deployed_v75_database_verifies_global_question_conversations(tmp_path):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(module.offline_settings(database, tmp_path / "upgrade-storage"))
+    upgraded.close_local()
+    with sqlite3.connect(database) as rollback:
+        _rollback_v76(rollback)
+        rollback.execute("PRAGMA user_version = 75")
+    result = module.verify_snapshot(database, storage)
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 75
+    assert result.final_user_version == module.SCHEMA_VERSION
 
 
 def _rollback_v74(db: sqlite3.Connection) -> None:
@@ -1911,7 +1931,7 @@ def test_deployed_v74_database_verifies_metadata_ownership(tmp_path):
     result = module.verify_snapshot(database, storage)
     assert result.ok, result.discrepancies
     assert result.source_user_version == 74
-    assert result.final_user_version == module.SCHEMA_VERSION == 75
+    assert result.final_user_version == module.SCHEMA_VERSION
 
 
 def test_deployed_v73_database_verifies_question_submitted_via(tmp_path):
@@ -1935,7 +1955,7 @@ def test_deployed_v73_database_verifies_question_submitted_via(tmp_path):
 
     assert result.ok, result.discrepancies
     assert result.source_user_version == 73
-    assert result.final_user_version == module.SCHEMA_VERSION == 75
+    assert result.final_user_version == module.SCHEMA_VERSION
 
 
 def test_deployed_v72_database_verifies_wish_status(tmp_path):

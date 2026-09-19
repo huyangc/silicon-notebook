@@ -19,7 +19,7 @@ Codex CLI / Claude Code / Python Agent
           └─ source management and builds (owner-only write plane)
 ```
 
-- Every new MCP session must call `select_notebook` before a data tool.
+- Every new MCP session must call `select_notebook` before a notebook-bound data tool; global Ask tools accept an independent scope.
 - `search_notebook_context` returns only formal source/KG/confirmed-Memory context.
 - `search_agent_memory` may also return candidates when the token has `memory:read_candidates`.
 - `propose_memory` creates only a `candidate`; it does not enter Ask, notebook search, or reports until the owner confirms it in the UI.
@@ -267,6 +267,21 @@ push the heavy work onto the background tools (`build_kg` / `build_retrieval_ind
 poll `get_build_status`) which return immediately by design.
 
 ## 5. First Agent task
+
+Global Ask calls `ask_global` directly, without `select_notebook`. For example:
+
+```json
+{"question":"What do these projects' low-temperature tests have in common?","notebook_scope":{"mode":"all"},"client_request_id":"low-temperature-review-1"}
+```
+
+`all` intersects the token allowlist with its owner's current read access; it never means every notebook
+in the deployment. To choose a subset, page through `list_notebooks`, then supply
+`notebook_scope={"mode":"include","notebook_ids":[...]}`; an empty list restores all.
+Use the returned `job_id` with `get_global_ask` for status and results; follow the pagination metadata
+to retrieve long answers and citations. `cancel_global_ask` explicitly stops work, and
+`get_global_cited_element` reads the cited original evidence. `conversation_id` can continue the same
+user's browser-created global conversation, but current token permissions still constrain history and
+results. V1 searches visible imported-source text, excluding hidden Memory/Knowhow projections and candidates.
 
 Use an explicit first prompt:
 

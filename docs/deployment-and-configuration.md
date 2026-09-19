@@ -849,6 +849,12 @@ them; the active retrieval route determines which settings apply.
 `KG_ISOLATED_RANK_PENALTY` lowers an isolated node's ranking score without changing its
 relevance value; `QUERY_REWRITE_ENABLED` controls pre-answer query rewriting/expansion.
 
+Global Ask uses `GLOBAL_ASK_CANDIDATE_LIMIT` for merged cross-notebook evidence and
+`GLOBAL_ASK_HISTORY_TURNS` for admitted prior user questions. Model context shares
+`CHUNK_ANSWER_BUDGET_CHARS`; no separate model endpoint is needed (`query_rewrite`
+and `ask_answer` use the existing model-service configuration). Exact defaults and
+rails are owned by [Global Ask](./product-and-api.md#global-ask).
+
 General-Q&A document introductions reuse `CHUNK_ANSWER_BUDGET_CHARS` for evidence
 context. `DOCUMENT_OVERVIEW_MAX_ELEMENTS` (default 64, minimum 2) bounds the number
 of original parsed elements sampled for one document, including the final position.

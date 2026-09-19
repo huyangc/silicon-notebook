@@ -166,6 +166,14 @@ _UNIQUE_PREDICATES = {
         "client_request_id IS NOT NULL",
         ("client_request_id", "is", "not", "null"),
     ),
+    "idx_global_ask_request": (
+        "client_request_id IS NOT NULL",
+        ("client_request_id", "is", "not", "null"),
+    ),
+    "idx_global_ask_running": (
+        "status = 'running'",
+        ("status", "=", "'running'"),
+    ),
 }
 
 

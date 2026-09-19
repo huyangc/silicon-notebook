@@ -1378,6 +1378,26 @@
         "type": "index"
       },
       {
+        "name": "idx_global_ask_request",
+        "sql_sha256": "dfdbafb41881455ea1ab7fbb685b6fef859000284efd15b839593a6f9eb4535d",
+        "type": "index"
+      },
+      {
+        "name": "idx_global_ask_running",
+        "sql_sha256": "eae83e7fa456f549fa57d36a0416b95dbeb4e386ed8c819361b5ac6f25977463",
+        "type": "index"
+      },
+      {
+        "name": "idx_global_conversations_owner",
+        "sql_sha256": "74b328cf9c36f364acfd18782fbdcfa706306bbabbce2c0f291baeded5ea4014",
+        "type": "index"
+      },
+      {
+        "name": "idx_global_jobs_conversation",
+        "sql_sha256": "b8da6bb804b68c26c5b38505c107f3c8717f0dac9f51115cf2f3f508bd7fc8e8",
+        "type": "index"
+      },
+      {
         "name": "idx_group_members_user",
         "sql_sha256": "002d67003510427d1ee0d7d476667738b655a8bb4a46320a2c769d4e94919347",
         "type": "index"
@@ -2038,6 +2058,16 @@
         "type": "table"
       },
       {
+        "name": "global_ask_conversations",
+        "sql_sha256": "50fe149be163268e436be7ee04be9672a7e8dc18bf05ecd62fb6ae4e7390284b",
+        "type": "table"
+      },
+      {
+        "name": "global_ask_jobs",
+        "sql_sha256": "2acb63510b72adc0d5cbd7543a194d9f3a9db7062500679318eb409423ba4212",
+        "type": "table"
+      },
+      {
         "name": "group_members",
         "sql_sha256": "0f737f305e1dd7e1ebb16db0246a08bd3e4e7287085fc36e2f3bd63a5a84d0fd",
         "type": "table"
@@ -2418,6 +2448,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 75
+    "user_version": 76
   }
 }

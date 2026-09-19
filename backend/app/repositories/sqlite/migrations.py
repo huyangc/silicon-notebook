@@ -197,7 +197,7 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # v75 adds notebook title ownership and metadata publication generations,
 # paired with PostgreSQL 0055_notebook_metadata.sql. Legacy non-placeholder
 # titles remain manual because their provenance is ambiguous.
-SCHEMA_VERSION = 75
+SCHEMA_VERSION = 76
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3937,6 +3937,33 @@ class SqliteMigrator:
             self.add_column_if_missing(
                 db, "notebooks", "metadata_generation", "INTEGER NOT NULL DEFAULT 0"
             )
+
+    def _migration_76(self) -> None:
+        """Independent user-owned global Ask conversations and durable jobs."""
+        with self._connect() as db:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS global_ask_conversations (
+                    id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL,
+                    scope_json TEXT NOT NULL, submitted_via TEXT NOT NULL,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_global_conversations_owner
+                    ON global_ask_conversations(user_id, updated_at, id);
+                CREATE TABLE IF NOT EXISTS global_ask_jobs (
+                    id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL
+                        REFERENCES global_ask_conversations(id) ON DELETE CASCADE,
+                    user_id TEXT NOT NULL, client_request_id TEXT,
+                    request_json TEXT NOT NULL, status TEXT NOT NULL,
+                    payload_json TEXT NOT NULL, created_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_global_ask_request
+                    ON global_ask_jobs(user_id, client_request_id)
+                    WHERE client_request_id IS NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_global_ask_running
+                    ON global_ask_jobs(conversation_id) WHERE status='running';
+                CREATE INDEX IF NOT EXISTS idx_global_jobs_conversation
+                    ON global_ask_jobs(conversation_id, created_at, id);
+            """)
 
     def _reap_stale_derived_generations(self) -> None:
         """批 3·W2 启动恢复(sqlite 化身):先全局释放滞留在飞认领(启动这

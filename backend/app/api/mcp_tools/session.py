@@ -21,14 +21,18 @@ def register_session_tools(
     server: FastMCP, repository_provider: Callable[[], Any]
 ) -> None:
     @server.tool(description="List live notebooks in this Agent token's allowlist.")
-    async def list_notebooks(ctx: Context, limit: int = RESULT_LIMIT) -> dict[str, Any]:
+    async def list_notebooks(
+        ctx: Context, limit: int = RESULT_LIMIT, offset: int = 0, query: str = ""
+    ) -> dict[str, Any]:
+        if offset < 0:
+            raise ValueError("分页位置不能小于零，请从第一页重新读取")
         repo = repository_provider()
         principal = await anyio.to_thread.run_sync(_live_principal, repo)
 
         def load() -> list[dict[str, Any]]:
             rows: list[dict[str, Any]] = []
             with _owner_request_context(principal):
-                for notebook_id in principal.notebook_ids[:RESULT_LIMIT]:
+                for notebook_id in principal.notebook_ids:
                     if not repo.user_can_read_notebook(
                         notebook_id, principal.owner_id
                     ):
@@ -36,6 +40,10 @@ def register_session_tools(
                     try:
                         item = repo.get_notebook(notebook_id)
                     except KeyError:
+                        continue
+                    if query.strip().casefold() not in (
+                        f"{item.name} {item.purpose}".casefold()
+                    ):
                         continue
                     rows.append(
                         {
@@ -52,11 +60,24 @@ def register_session_tools(
 
         rows = await _run_with_progress(ctx, load, label="list_notebooks")
         cap = max(1, min(int(limit), RESULT_LIMIT))
-        return _budget_response(
-            {"items": rows[:cap], "selected_notebook_id": ""},
-            initial_omitted_items=max(0, len(rows) - cap),
-            field_limits={"name": 200, "purpose": 500},
-        )
+        page = rows[offset:offset + cap]
+        # Advance only past identities actually delivered within the byte budget.
+        while True:
+            next_offset = offset + len(page)
+            response = _budget_response(
+                {
+                    "items": page, "selected_notebook_id": "", "total": len(rows),
+                    "next_offset": next_offset if next_offset < len(rows) else None,
+                },
+                field_limits={"name": 200, "purpose": 500},
+            )
+            if [row.get("notebook_id") for row in response["items"]] == [
+                row["notebook_id"] for row in page
+            ]:
+                return response
+            if len(page) <= 1:
+                raise ValueError("笔记本列表暂时无法完整返回，请稍后重试")
+            page = page[:-1]
 
     @server.tool(description="Select one allowlisted notebook for this MCP session.")
     async def select_notebook(notebook_id: str, ctx: Context) -> dict[str, Any]:

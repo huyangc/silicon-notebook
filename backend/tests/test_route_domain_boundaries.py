@@ -9,6 +9,7 @@ from app.api.ask_routes import router as ask_router
 from app.api.catalog_routes import router as catalog_router
 from app.api.content_overview_routes import router as content_overview_router
 from app.api.group_routes import router as group_router
+from app.api.global_ask_routes import router as global_ask_router
 from app.api.kg_routes import router as kg_router
 from app.api.knowhow_routes import router as knowhow_router
 from app.api.knowledge_routes import router as knowledge_router
@@ -37,6 +38,7 @@ DOMAIN_ROUTERS = (
     group_router,
     agent_profile_router,
     wish_router,
+    global_ask_router,
 )
 EXPECTED_COMPOSITION_NAMES = (
     "memory_router",
@@ -63,6 +65,7 @@ EXPECTED_COMPOSITION_NAMES = (
     "agent_profile_router",
     # 许愿墙是全局反馈域，不归属于任何单个笔记本。
     "wish_router",
+    "global_ask_router",
 )
 
 

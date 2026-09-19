@@ -7,6 +7,7 @@ from typing import Any, Callable
 from mcp.server.fastmcp import FastMCP
 
 from app.api.mcp_tools.citations import register_citation_tools
+from app.api.mcp_tools.global_ask import register_global_ask_tools
 from app.api.mcp_tools.knowhow import register_knowhow_tools
 from app.api.mcp_tools.maintenance import register_maintenance_tools
 from app.api.mcp_tools.memory_context import register_memory_context_tools
@@ -23,6 +24,7 @@ _CORE_REGISTRARS = (
     register_source_tools,
     register_maintenance_tools,
     register_profile_tools,
+    register_global_ask_tools,
 )
 
 

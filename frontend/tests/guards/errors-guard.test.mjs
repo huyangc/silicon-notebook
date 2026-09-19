@@ -118,6 +118,15 @@ const APPROVED_MESSAGE_READS = Object.freeze({
   },
 });
 const APPROVED_DIAGNOSTIC_READS = Object.freeze({
+  "ask/global-ask-workspace.tsx|<module>.GlobalAskWorkspace|diagnostic|error": {
+    count: 3,
+    reason: "Two ask.error reads render the useGlobalAsk owner's already-humanized/fixed "
+      + "Chinese state. The third is GlobalAskJob.error: GlobalAskService._run persists "
+      + "only an explicit GlobalAskError.message or fixed Chinese generic failure copy, "
+      + "never exception text. This is a new typed user-copy contract, not permission to "
+      + "display other jobs' diagnostic errors. Global Ask component tests pin transport "
+      + "exception redaction and actionable safe job copy; backend tests pin worker redaction.",
+  },
   "bundle-intake.ts|<module>.processMarkdownCandidate|diagnostic|error": {
     count: 3,
     reason: "InlineResult.error is md-bundle.ts's typed too-large payload ({bytes,limit,images}), "

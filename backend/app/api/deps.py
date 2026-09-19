@@ -80,6 +80,10 @@ def notebook_store_port() -> NotebookStorePort:
 def ask_stream_repository() -> AskStreamPort:
     return repository()
 
+
+def global_ask_service():
+    return repository()._runtime.global_ask_service()  # type: ignore[attr-defined]
+
 def _bearer_token(request: Request) -> str:
     header = request.headers.get("Authorization", "")
     if header.lower().startswith("bearer "):
