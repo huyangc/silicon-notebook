@@ -345,10 +345,12 @@ def test_ask_payload_base_scope_alone_narrows_without_manual_context(
 
     repo, active, _base, local_source, base_sources = federated_corpus
     repo.settings.query_rewrite_enabled = False
-    # chunk mode only crosses into a mounted library through the "mix" overlay's
-    # PPR path (kg_overlay_enabled AND a configured reranker AND a KG on either
-    # side) -- without it `_retrieve_chunks` is single-notebook by construction
-    # and this test could not prove anything either way.
+    # `_retrieve_chunks` itself is still single-notebook by construction; what
+    # crosses into a mounted library is the federated chunk lane above it
+    # (`chunk_federation`, one `_retrieve_chunks` call per participant) plus the
+    # "mix" overlay's PPR path. The overlay is bound here (kg_overlay_enabled
+    # AND a configured reranker AND a KG on either side) so BOTH cross-library
+    # routes are live and the narrowing assertion below has to close both.
     bind_rerank_client(repo, _IdentityReranker())
     bind_chat_client(repo, "ask_answer", _MirrorLLM())
 

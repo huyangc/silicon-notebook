@@ -579,7 +579,12 @@ delta 的语义强一致；这些内容仍须完成 fold 或开启 `SCALE_SEARCH
 （`copyable=false`）或整库 chunk 数超过 `CHUNK_BRUTEFORCE_MAX_CHUNKS` 的库上的报告 run 仍用有界
 FTS fail-open 回退——这把守卫是**库**的属性，与本次 run 的来源范围无关。跑在小库上的报告 run
 走的是有界暴力向量路径（按允许来源取 chunk 行，向量取缓存的整库矩阵并在打分前掩码到这些
-chunk 上），所以 `chunk_bruteforce_skipped` 出现在小库上是需要排查的信号，不是预期回退。
+chunk 上），所以 `chunk_bruteforce_skipped(large_library_no_ann)` 出现在小库上是需要排查的信号，
+不是预期回退。处置前先读这条事件的 `reason`：联邦 chunk 腿对**大参考库**只借用已常驻的索引，
+暖索引不在场时它当场降级为有界 FTS 并发 `chunk_bruteforce_skipped(peek_no_warm_ann)`——每个
+子查询一条，而那个库的 scale 索引可能完全健康，只是没进常驻位。只有 `large_library_no_ann`
+才意味着「去建 scale 索引」；`peek_no_warm_ann` 的条数由 `SCALE_IDX_CACHE_MAX_LARGE` 的常驻
+预算和笔记本挂了几个大参考库决定，本身不是缺陷。`scripts/diag_slow.py` 把这两种原因分桶统计。
 冻结的全选来源清单在 sidecar 证明全部索引 source code 均获允许时，
 也不再支付 HNSW Python filter callback；只要出现未知或未授权 code，就继续走过滤/按范围路径。
 
@@ -591,7 +596,10 @@ chunk 上），所以 `chunk_bruteforce_skipped` 出现在小库上是需要排�
 `candidate_ms` 以及 `scale_index_ms`、`kg_ann_ms`、`kg_lexical_ms`。retrieval-run 汇总另含
 `chunk_fts_timeouts` 与 `chunk_fts_circuit_skips`。这些事件还携带兼容的 `stage` / `latency_ms`
 字段（`chunk_scale_index`、`chunk_ann`、`chunk_fts` 或 `kg_candidates`），因此
-`diag.py slow` 与 `diag.py latency` 都会聚合它们。部署后应验证：范围完整的报告 ANN 命中显示
+`diag.py slow` 与 `diag.py latency` 都会聚合它们。联邦「只借不加载」腿发出的
+`chunk_scale_index` 事件额外带 `lane=peek`：它量的是一次字典查找而不是一次索引加载，所以
+`diag_slow.py` 把它单列成 `chunk_scale_index(peek)` 一桶，不让它把常驻加载的分位拉向零。
+部署后应验证：范围完整的报告 ANN 命中显示
 `report_ann_only`，其 `chunk_fts_ms` 接近零；等待 fold 的来源显示
 `report_delta_fallback`；一次 FTS 超时只花独立 deadline 而非 30 秒；readiness 已预热全部必需
 scale index。

@@ -55,6 +55,7 @@
 
 - **manifest**:全部 `kg_index/*/manifest.json` 的 `dim == 1024`;`n_ann/n_chunk_ann/n_relation_ann` 与四表行数吻合。
 - **事件归零**(`python scripts/diag_slow.py --since 24` 的事件段):`dim_mismatch`、`scale_fold_refused`、`kg_bruteforce_refused`、`chunk_bruteforce_skipped(large_library_no_ann)`、`relation_scoring_skipped`、`element_scoring_skipped`、`scale_ppr_bailout(ann_sources_skipped>0)` 均应为 0;每大库有完整 `scale_index_build` 9 段。
+  - 同名事件的另一个原因 `chunk_bruteforce_skipped(peek_no_warm_ann)` **不在**归零清单里:它来自联邦 chunk 腿对大参考库「只借用常驻索引」的约定,索引建好了也照样出现(见 `docs/operations_zh.md`)。诊断脚本按原因分桶,验收只看 `large_library_no_ann` 那一桶。
 - **diag_slow 维度段**:`report_env` 显示 `EMBED_DIM=4096` / `EMBED_RUNTIME_DIM=1024`;规模画像段**不**报「维度失配」(判据已改为 manifest 应 == 运行时维,库内向量恒为存储维属正常)。
 - **资源**:稳态 RSS 与夜间 fold 峰值较切换前显著下降(目标 ÷4 量级)。
 - **质量**:`mrl_truncation --gold` 复测,recall@12 / MRR 对第 1 步基线的相对衰减在预算内。
