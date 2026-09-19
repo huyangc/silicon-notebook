@@ -105,7 +105,8 @@ Global Ask opens from a bottom-right bubble in the authenticated collection and 
 Clicking opens a compact chat; expanding fills the viewport with history, chat and evidence reading.
 Minimizing, reopening and switching size retain the same mounted conversation, draft, scope and task
 progress; minimizing does not cancel a task. Embedded chat leaves the host URL unchanged and loads
-its data only after first opening. Signing out clears its local state. `/ask` remains independently
+its data only after first opening. Reopening refreshes notebook choices without resetting the chat;
+error recovery restores the active conversation, draft scope and running-task polling. Signing out clears its local state. `/ask` remains independently
 accessible, including conversation links. Conversations belong to the initiating user; they neither create an empty carrier notebook
 nor change reference-library mounts. The page reuses the shared header, palette, button feedback and
 answer Markdown, with conversation history, searchable notebook selection, a persistent scope summary,

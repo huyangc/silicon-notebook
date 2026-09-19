@@ -25,8 +25,8 @@ const suggestions = [
   { title: "寻找相关证据", question: "这个问题有哪些原文证据支持，还有哪些信息需要补充？", icon: FileText },
 ];
 
-export default function GlobalAskWorkspace({ compact = false, embedded = false, controls, onOpenNotebook }: { compact?: boolean; embedded?: boolean; controls?: ReactNode; onOpenNotebook?: () => void }) {
-  const ask = useGlobalAsk({ syncUrl: !embedded });
+export default function GlobalAskWorkspace({ compact = false, embedded = false, active = true, controls, onOpenNotebook }: { compact?: boolean; embedded?: boolean; active?: boolean; controls?: ReactNode; onOpenNotebook?: () => void }) {
+  const ask = useGlobalAsk({ syncUrl: !embedded, active });
   const [historyOpen, setHistoryOpen] = useState(false);
   const [selected, setSelected] = useState<EvidenceSelection | null>(null);
   const [element, setElement] = useState<SourceElement | null>(null);
