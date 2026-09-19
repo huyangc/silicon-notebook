@@ -6,20 +6,52 @@ established.  Deliberately NOT new methods on ``retrieval_candidates.py``:
 that module is already the largest in the service layer, and keeping the
 merge/fan-out policy here lets it be unit-tested without a database.
 
-Two structural rules this module exists to hold:
+Three structural rules this module exists to hold:
 
 * **Zero behaviour change for the ordinary single-library notebook.**  A
   participant set of one short-circuits to the pre-existing
   ``_retrieve_chunks_multi``/``_retrieve_chunks`` lanes and returns their
-  values unchanged -- peer evidence selection is not even entered.
-* **One flat fan-out.**  "Per library" and "per sub-query" are flattened into
-  a single task table served by a single executor, so the peak concurrent
-  database connection count stays what it was before federation existed
-  instead of multiplying the two dimensions.
+  values unchanged -- peer evidence selection is not even entered, and no
+  reserve/regrouping rule below is applied.
+* **One flat fan-out, and every leaf holds the run's fan-out slot.**  "Per
+  library" and "per sub-query" are flattened into a single task table served
+  by a single executor, so the two dimensions are not multiplied.  The honest
+  ceiling is this: on the **Ask** path (no ``fanout_limit``) the peak number of
+  concurrent ``_retrieve_chunks`` calls is ``chunk_fanout_max_workers`` (8 by
+  default), which is HIGHER than the pre-federation typical
+  ``min(len(sub_queries), 8)`` -- the same 8 worker seats are now shared by
+  ``libraries x sub-queries`` tasks instead of ``sub-queries`` tasks, so a
+  notebook with few sub-queries and several mounted libraries genuinely runs
+  more leaves at once than it used to.  On the **report** path the binding
+  ceiling is the run's own ``fanout_limit``, because ``_retrieve_for`` (and the
+  single-participant short-circuit, and ``_retrieve_chunks_multi``'s own
+  sub-query pool) each acquire ``retrieval_fanout_slot`` around the actual
+  producer call rather than letting an orchestrator hold one -- see
+  ``retrieval_run``'s module docstring for why the slot may only wrap the leaf.
+* **The current notebook is the subject; mounted reference libraries are the
+  supplement.**  Recall is federated, but SELECTION is federation-aware:
+  ``per_query`` stays one group per sub-query (so a library count cannot
+  dilute the downstream quota), and the active notebook keeps a reserved share
+  of the final evidence (``chunk_federation_active_reserve``).  The active
+  notebook's own hits are deliberately NOT stamped with its id -- ``""`` means
+  active on every consumer already (``evidence_context.chunk_citations``,
+  ``source_scope.filter_retrieval_items``, ``domain.citation_origin
+  .foreign_notebook_id``), so "empty == active" is the one clean predicate the
+  selection layer needs and no new consumer has to remember to normalise.
+
+  The reserve covers the two selection branches this module feeds: MMR (via
+  ``apply_active_reserve`` in ``RetrievalService.select_chunk_candidates``,
+  which also serves ``reasoning_retrieval.search_chunks``) and the quota fuse
+  (via ``_reserve_lanes``).  The ``mix`` branch is deliberately NOT covered:
+  its ordering comes from a rerank MODEL over the whole pool and its cut is a
+  token budget, so a reserved seat there would have to be carved out of
+  ``select_with_reserves_baseline_first``'s existing reserve rules rather than
+  bolted on here.  Whether it needs one is a separate, measurable question.
 """
 from __future__ import annotations
 
 import contextvars
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -27,7 +59,9 @@ from typing import Any, Sequence
 
 from app.services.cancellation import AskCancelled
 from app.services.global_evidence import peer_evidence
-from app.services.retrieval_run import memoized_retrieval_value
+from app.services.retrieval_run import (
+    memoized_retrieval_value, retrieval_fanout_slot,
+)
 
 
 # The tier a participant set always gives its own active notebook, and the
@@ -40,8 +74,13 @@ class FederatedChunkResult:
     """One federated chunk arm's result, shaped like ``_retrieve_chunks_multi``.
 
     ``collected`` -- ``{chunk_id: RetrievedChunk}`` after cross-library merge.
-    ``per_query`` -- one group per ``(notebook, sub_query)`` task, in task
-    order, for the downstream per-group quota fuse.
+    ``per_query`` -- the downstream quota fuse's groups.  **One group per
+    sub-query**, exactly as before federation: each library's hits for one
+    sub-query are merged into that sub-query's single group, so the quota a
+    sub-query gets does not shrink as libraries are mounted.  Prepended to
+    those are the active notebook's reserved lanes (see ``_reserve_lanes``);
+    with ``chunk_federation_active_reserve = 0``, or on the single-participant
+    short-circuit, there are none and the list is exactly the historical shape.
     ``ids``/``matrix`` -- the concatenated vector rows, already restricted to
     ``collected`` (the restriction happens per library, before concatenation).
     ``participants`` -- the libraries this call fanned out to, deterministic
@@ -135,12 +174,13 @@ def federated_chunk_candidates(
         return _single_library_result(
             candidates, active_notebook_id, list(sub_queries), participants,
         )
+    queries = list(sub_queries)
     tasks = _federated_tasks(
-        candidates, active_notebook_id, participants, list(sub_queries), drifted,
+        candidates, active_notebook_id, participants, queries, drifted,
     )
     results = _run_tasks(candidates, tasks)
     return _merge_results(
-        candidates, participants, tasks, results,
+        candidates, participants, tasks, results, len(queries),
         min_relevance=min_relevance, relative_relevance=relative_relevance,
     )
 
@@ -234,15 +274,26 @@ def _single_library_result(
 
     ``sub_queries`` is never empty here: ``federated_chunk_candidates`` answers
     that case before the participant seat is read at all.
+
+    ``collected`` keys by ``chunk_id`` and therefore assumes chunk ids are
+    unique WITHIN one recall leg -- pinned behaviourally (ANN / FTS-degraded /
+    brute-force lanes alike) by ``test_chunk_federation_peek.py::
+    test_one_recall_leg_never_repeats_a_chunk_id`` rather than by this comment
+    alone.
+
+    The fan-out slot sits on the leaf here too: the multi-query branch already
+    takes one per sub-query inside ``_retrieve_chunks_multi``, and the single
+    query branch is itself the leaf, so it takes its own.
     """
     if len(sub_queries) >= 2:
         collected, per_query, ids, matrix = candidates._retrieve_chunks_multi(
             active_notebook_id, sub_queries,
         )
     else:
-        scored, ids, matrix = candidates._retrieve_chunks(
-            active_notebook_id, sub_queries[0],
-        )
+        with retrieval_fanout_slot():
+            scored, ids, matrix = candidates._retrieve_chunks(
+                active_notebook_id, sub_queries[0],
+            )
         collected = {chunk.chunk_id: chunk for chunk in scored}
         per_query = [dict(collected)]
     return FederatedChunkResult(
@@ -257,14 +308,20 @@ def _federated_tasks(
 ) -> list:
     """The flat task table: library-major, sub-query-minor, deterministic.
 
-    Both context variables the chunk lane reads are set HERE, before the
+    All three context variables the chunk lane reads are set HERE, before the
     fan-out, and reset immediately after every task's ``Context`` snapshot has
     been taken -- the discipline ``_retrieve_chunks_multi`` documents at
     length.  Resetting the live variables cannot affect the copies already
     taken, and keeps their live window as narrow as possible.
 
-    Neither ``set``/``reset`` pair is optional, and both failure modes are
-    silent in production rather than loud:
+    ``_CHUNK_PEER_LEG`` is the widest of the three (every non-active task) and
+    turns off the optional generated-question contributor seam for peer
+    libraries; see its own comment in ``chunk_lane`` for the cost/semantics
+    argument, and note that a SMALL peer keeps its ordinary index lane, which
+    is why it is not folded into ``_CHUNK_PEEK_ONLY``.
+
+    No ``set``/``reset`` pair is optional, and the failure modes are silent in
+    production rather than loud:
 
     * Without ``_CHUNK_ARM_DRIFTED`` being set (or without ``drifted`` being
       threaded in from the caller), ``_retrieve_chunks_baseline`` re-probes
@@ -288,7 +345,8 @@ def _federated_tasks(
     # 调本模块,两边互取就是 import 环;这两个 ContextVar 与那把探针因此住在
     # 一个零服务层依赖的叶子模块里,``retrieval_candidates`` 按原名再导出。
     from app.services.chunk_lane import (
-        _CHUNK_ARM_DRIFTED, _CHUNK_PEEK_ONLY, _lexical_gate_drift_probe,
+        _CHUNK_ARM_DRIFTED, _CHUNK_PEEK_ONLY, _CHUNK_PEER_LEG,
+        _lexical_gate_drift_probe,
     )
 
     if drifted is None:
@@ -305,6 +363,7 @@ def _federated_tasks(
             visible = _peer_visible_sources(candidates, notebook_id) if peer else None
             peek = peer and _peek_only(candidates, notebook_id)
             peek_token = _CHUNK_PEEK_ONLY.set(peek)
+            peer_token = _CHUNK_PEER_LEG.set(peer)
             try:
                 tasks.extend(
                     _Task(
@@ -314,6 +373,7 @@ def _federated_tasks(
                     for query in sub_queries
                 )
             finally:
+                _CHUNK_PEER_LEG.reset(peer_token)
                 _CHUNK_PEEK_ONLY.reset(peek_token)
     finally:
         _CHUNK_ARM_DRIFTED.reset(drift_token)
@@ -344,11 +404,23 @@ def _peek_only(candidates, notebook_id: str) -> bool:
     active notebook: that is the library the user is actually using, and
     loading its index is a cost that exists today either way.  An unreadable
     copy-stats probe answers "peek only" -- the conservative side.
+
+    Frozen per library for the run, exactly like ``_peer_visible_sources``
+    above and for the same reason: ``notebook_copy_stats``' version signal
+    opens a pooled connection of its own, and the three chunk entry points
+    (plus every reflect action) would otherwise re-probe each peer.  A library
+    crossing the large/small threshold mid-run must not switch lanes halfway
+    through one ask either.  Without an ambient run the memo is a pass-through.
     """
-    try:
-        return not candidates.notebook_copy_stats(notebook_id)["copyable"]
-    except Exception:  # noqa: BLE001 - never cold-load on an unreadable probe
-        return True
+    def _probe() -> bool:
+        try:
+            return not candidates.notebook_copy_stats(notebook_id)["copyable"]
+        except Exception:  # noqa: BLE001 - never cold-load on an unreadable probe
+            return True
+
+    return memoized_retrieval_value(
+        ("federated_chunk_peek_only", notebook_id), _probe,
+    )
 
 
 def _run_tasks(candidates, tasks: list) -> list:
@@ -397,13 +469,22 @@ def _retrieve_for(candidates, task: _Task):
     contextualized live enumeration, not a producer's own genuinely narrow
     universe, and attesting True would turn off the corpus-language probe and
     switch the lexical arm.
+
+    The run's fan-out slot is acquired HERE, around the one producer call, and
+    nowhere above: ``reasoning_retrieval.search_chunks`` used to wrap its
+    ``retrieve_chunk_candidates`` call in a slot, which after this module took
+    over stopped bounding anything (the real leaves are these pool threads) and
+    would self-deadlock at ``fanout_limit=1`` if both layers held one.  A
+    worker parked here is still cancellable: ``RetrievalRunState.fanout_slot``
+    polls ``cancel_event`` while it waits.
     """
-    if not task.peer:
-        return candidates._retrieve_chunks(task.notebook_id, task.query)
-    return candidates._retrieve_chunks(
-        task.notebook_id, task.query,
-        allowed_source_ids=task.visible, producer_explicit=False,
-    )
+    with retrieval_fanout_slot():
+        if not task.peer:
+            return candidates._retrieve_chunks(task.notebook_id, task.query)
+        return candidates._retrieve_chunks(
+            task.notebook_id, task.query,
+            allowed_source_ids=task.visible, producer_explicit=False,
+        )
 
 
 def _emit(candidates, event: dict) -> None:
@@ -418,7 +499,7 @@ def _emit(candidates, event: dict) -> None:
 
 
 def _merge_results(
-    candidates, participants, tasks: list, results: list, *,
+    candidates, participants, tasks: list, results: list, sub_count: int, *,
     min_relevance: float, relative_relevance: float,
 ) -> FederatedChunkResult:
     """Fold within each library, pool by PARTICIPANT order, then select.
@@ -436,14 +517,27 @@ def _merge_results(
     collision with a historical channel is never supplemental.  Cross-SOURCE
     identical text is still merged by ``peer_evidence`` -- that one is the
     intended "two libraries hold the same paper" behaviour.
+
+    **Only peer hits are stamped.**  Tagging the active notebook's own hits
+    too would make "single participant -> empty id / several participants ->
+    active's own id" a difference every new consumer has to remember to
+    normalise, for no gain: ``evidence_context.chunk_citations``,
+    ``source_scope.filter_retrieval_items`` and
+    ``domain.citation_origin.foreign_notebook_id`` all already read an empty id
+    as "the active notebook".  Leaving it empty makes ``not hit.notebook_id``
+    the selection layer's clean "this is the user's own library" predicate and
+    keeps the value identical to the single-library lane's.
     """
     pools: dict = {notebook_id: [] for notebook_id, _ in participants}
     per_task: list = []
     parts: list = []
     for task, (scored, ids, matrix) in zip(tasks, results):
-        tagged = [replace(hit, notebook_id=task.notebook_id) for hit in scored]
+        tagged = (
+            [replace(hit, notebook_id=task.notebook_id) for hit in scored]
+            if task.peer else list(scored)
+        )
         pools[task.notebook_id].append(tagged)
-        per_task.append({hit.chunk_id: hit for hit in tagged})
+        per_task.append(tagged)
         parts.append((ids, matrix))
     selected = peer_evidence(
         [_fold_library_pool(pools[notebook_id]) for notebook_id, _ in participants],
@@ -453,15 +547,165 @@ def _merge_results(
         peer_floor=candidates.settings.chunk_federation_peer_floor,
     )
     collected = {hit.chunk_id: hit for hit in selected}
-    per_query = [
-        {cid: hit for cid, hit in group.items() if cid in collected}
-        for group in per_task
-    ]
+    per_query = _reserve_lanes(candidates, collected) + _sub_query_groups(
+        per_task, collected, sub_count,
+    )
     ids, matrix = _merge_selected_matrices(candidates, tasks, parts, collected)
     return FederatedChunkResult(
         collected, per_query, ids, matrix,
         tuple(notebook_id for notebook_id, _ in participants),
     )
+
+
+def _sub_query_groups(per_task: list, collected: dict, sub_count: int) -> list:
+    """One group per SUB-QUERY, every library's hits for it merged in.
+
+    The task table is library-major/sub-query-minor, so task ``i`` answers
+    sub-query ``i % sub_count``.
+
+    Why not one group per ``(library, sub_query)`` task, which is what a flat
+    task table produces for free: ``quota_fuse`` is a round-robin ACROSS
+    groups, so the number of groups is the denominator of every sub-query's
+    quota.  Four sub-queries against four libraries would be 16 groups for the
+    16 fused seats -- the active notebook fixed at 4 -- and eight libraries
+    would be 32 groups for 16 seats, so the libraries at the tail of
+    MOUNT_ORDER would get none at all.  Merging back to one group per
+    sub-query restores exactly today's denominator: mounting libraries widens
+    the candidate pool without re-cutting the quota.
+
+    Each group's value is the ``collected`` representative rather than this
+    task's own instance: the cross-sub-query fold may have unioned supports
+    into a different object for the same chunk id, and ``quota_fuse`` hands the
+    group's object straight to the answer.  Order inside a group is by
+    comparable score descending (one producer, one 0..1 scale -- the premise
+    ``CHUNK_FEDERATION_PEER_FLOOR``'s comparable mode already rests on), ties
+    keeping task order, so it is deterministic; ``quota_fuse`` re-sorts by
+    relevance anyway, so this only fixes what a reader sees.
+    """
+    buckets: list = [[] for _ in range(max(1, sub_count))]
+    for index, hits in enumerate(per_task):
+        bucket = buckets[index % len(buckets)]
+        bucket.extend(
+            collected[hit.chunk_id] for hit in hits if hit.chunk_id in collected
+        )
+    return [
+        {hit.chunk_id: hit for hit in sorted(bucket, key=lambda h: -_score(h))}
+        for bucket in buckets
+    ]
+
+
+def _reserve_lanes(candidates, collected: dict) -> list:
+    """The active notebook's reserved seats, as dedicated single-hit groups.
+
+    The product rule is in ``Settings.chunk_federation_active_reserve``: the
+    current notebook is the subject, mounted reference libraries are the
+    supplement, so the active notebook keeps at least ``ceil(k * reserve)`` of
+    the final seats whenever it has qualified candidates at all.
+
+    Why the multi-query branch gets its floor from the DATA rather than from a
+    post-selection repair: that branch's selection is
+    ``quota_fuse_baseline_first``, called directly inside ``ask_chunk`` (a
+    function under a zero-slack length ceiling), so ``per_query`` is the only
+    surface between this module and the seats.  It is also enough to make the
+    floor exact rather than approximate.  ``quota_fuse`` assigns each candidate
+    to the group where its relevance is highest and breaks ties on the LOWEST
+    group index, so one dedicated single-hit group per reserved seat, placed
+    first, captures exactly those hits and hands each of them a seat in the
+    very first round-robin round.  One group per seat (not one group holding
+    them all) is required: several reserved hits in one group would all be
+    assigned to it and it would still yield only one per round.  Singletons
+    also mean the lanes cannot take MORE than the floor -- any further active
+    hit competes on merit inside its own sub-query group, which is what "at
+    least ``ceil(k * reserve)``, the rest to whoever is strongest" means.
+
+    ``k`` is ``chunk_mmr_k``: ``ChunkRetrievalPlan.fuse_k`` is that same field
+    (its docstring calls the equality an explicit contract), and the single
+    branch's MMR ``k`` is the same one -- so both branches reserve the same
+    share without this module having to be told the caller's ``k``.
+
+    Only baseline (non generated-question-only) hits qualify: a supplemental
+    row is fused in a later phase, so reserving a seat for one would move a
+    seat without moving evidence.  When the active notebook has fewer qualified
+    candidates than the floor, the floor is its actual count -- an empty active
+    notebook reserves nothing and this returns ``[]``.
+    """
+    size = _reserve_size(candidates.settings, _reserve_k(candidates.settings))
+    if not size:
+        return []
+    return [{hit.chunk_id: hit} for hit in _qualified_active(collected.values())[:size]]
+
+
+def _reserve_k(settings) -> int:
+    return int(getattr(settings, "chunk_mmr_k", 0) or 0)
+
+
+def _reserve_size(settings, k: int) -> int:
+    """``ceil(k * reserve)``, clamped to ``k``; ``0`` switches the rule off."""
+    reserve = float(getattr(settings, "chunk_federation_active_reserve", 0.0) or 0.0)
+    if reserve <= 0 or k <= 0:
+        return 0
+    return min(int(k), int(math.ceil(k * reserve)))
+
+
+def _score(hit) -> float:
+    return float(hit.relevance or hit.score or 0.0)
+
+
+def _qualified_active(hits) -> list:
+    """Active-library hits eligible to hold a reserved seat, strongest first.
+
+    "Active" is ``not hit.notebook_id`` -- see ``_merge_results`` for why the
+    active leg is the only one left unstamped.  Stable sort, so equal scores
+    keep the caller's own deterministic order.
+    """
+    from app.services.retrieval import is_generated_question_only_chunk
+
+    qualified = [
+        hit for hit in hits
+        if not hit.notebook_id and not is_generated_question_only_chunk(hit)
+    ]
+    qualified.sort(key=lambda hit: -_score(hit))
+    return qualified
+
+
+def apply_active_reserve(settings, selected, pool, k: int) -> list:
+    """Repair one already-made selection so the active notebook holds its floor.
+
+    The MMR branch's counterpart to ``_reserve_lanes``: ``select_chunk_candidates``
+    has both the finished selection and the candidate pool in hand, so the
+    cheapest honest fix is to hand the trailing PEER seats back to the
+    strongest active candidates that MMR passed over, leaving every other
+    position -- and therefore the diversity ordering MMR produced -- untouched.
+
+    Inert by construction where it must be: with a single participant (or
+    ``CHUNK_FEDERATION_ENABLED=0``) every hit is active, so the floor is
+    already met and this returns the same list; with ``reserve = 0`` it does
+    not even look.  The floor is capped by how many qualified active
+    candidates exist, so a notebook whose own library genuinely has nothing to
+    say never evicts real peer evidence.
+    """
+    size = _reserve_size(settings, k)
+    if not size:
+        return list(selected)
+    chosen = list(selected)
+    have = sum(1 for hit in chosen if not hit.notebook_id)
+    if have >= size:
+        return chosen
+    seen = {hit.chunk_id for hit in chosen}
+    spare = [
+        hit for hit in _qualified_active(pool) if hit.chunk_id not in seen
+    ]
+    index = len(chosen) - 1
+    for hit in spare[: size - have]:
+        while index >= 0 and not chosen[index].notebook_id:
+            index -= 1
+        if index < 0:
+            # Nothing peer-owned left to hand back; the selection is already
+            # as local as its inputs allow.
+            break
+        chosen[index] = hit
+        index -= 1
+    return chosen
 
 
 def _fold_library_pool(groups: list) -> list:

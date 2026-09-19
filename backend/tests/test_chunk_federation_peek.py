@@ -513,3 +513,34 @@ def test_multi_fanout_reads_the_setting(repo, monkeypatch, fanout):
 
     assert not broken, "并发不足以让 barrier 放行 → 上限没读到 settings"
     assert live["peak"] == fanout, "并发峰值必须正好是设定的上限"
+
+
+@pytest.mark.parametrize("lane", ["bruteforce", "peek_fts", "peek_ann"])
+def test_one_recall_leg_never_repeats_a_chunk_id(repo, monkeypatch, lane):
+    """一条召回腿内 chunk_id 唯一 —— 三条 lane 各跑一次。
+
+    ``chunk_federation._single_library_result`` 把 ``scored`` 按 chunk_id 装进
+    ``collected``,所以一条腿内出现重复 id 会**静默丢候选**(后一条覆盖前一条),
+    而 ANN∪FTS 的 union、暴力向量路径与 FTS 降级路径各自都有机会产出同一个
+    chunk。这条断言把那个假设从注释变成用例。
+    """
+    notebook = _seed(repo, n=6)
+    candidates = repo.retrieval.candidates
+    if lane == "bruteforce":
+        scored, _ids, _mat = candidates._retrieve_chunks(notebook.id, "bandgap")
+    else:
+        _forbid(
+            monkeypatch, candidates, "_scale_index",
+            "peek lane 不得冷加载 scale 索引",
+        )
+        _peek_returns(
+            monkeypatch, candidates,
+            _warm_index(_Ann()) if lane == "peek_ann" else None,
+        )
+        scored, _ids, _mat = _in_peek_context(
+            candidates._retrieve_chunks, notebook.id, "bandgap",
+        )
+
+    ids = [chunk.chunk_id for chunk in scored]
+    assert ids, f"{lane} 腿零候选,这条断言证不了任何事"
+    assert len(ids) == len(set(ids)), f"{lane} 腿出现重复 chunk_id:{ids}"

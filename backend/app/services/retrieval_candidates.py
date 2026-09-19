@@ -36,6 +36,7 @@ from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancel
 from app.services.chunk_lane import (  # noqa: F401 - re-exported, see above
     _CHUNK_ARM_DRIFTED,
     _CHUNK_PEEK_ONLY,
+    _CHUNK_PEER_LEG,
     _lexical_gate_drift_probe,
 )
 from app.services.knowledge_contracts import USABLE_STATUSES
@@ -68,6 +69,7 @@ from app.services.retrieval_run import (
     current_retrieval_run,
     memoized_query_embedding,
     memoized_retrieval_value,
+    retrieval_fanout_slot,
 )
 from app.services.source_display import source_display_title
 from app.services.source_element_selection import (
@@ -297,20 +299,53 @@ class _RetrievalState:
         兜底;这个访问器只是让一个未勾选的参考库在查询发出前就免费跳过,而不
         仅仅是无害(见 ``notebook_in_scope`` 自己的 docstring)。
 
-        不 memo:``participant_tiers`` 本来就是每次现读,且一次 ask 里三条腿
-        各调一次;缓存无收益,却会引入"run 中途挂载变化"的语义问题。
+        **run-local 冻结**(``memoized_retrieval_value``)。联邦 chunk 落地之后
+        这个座位不再是「一次 ask 三条腿各一次」:``_gather_vector_chunks`` /
+        ``retrieve_chunk_candidates`` / ``retrieve_chunk_candidates_multi`` 三个
+        chunk 入口各走一次,reasoning 的 ``search_chunks`` 每个 reflect 动作一次、
+        无图首轮每条子查询一次,而且**没挂任何参考库的笔记本同样要付**(参与集
+        ≤1 的短路判断在查询之后)。每一次都是一条 ``_connect()`` + 一次 mount
+        查询。
+
+        冻结的理由与同一条通道上 ``all_visible_source_ids`` 的 run-local memo
+        (见 ``chunk_federation._peer_visible_sources``)是**同一条**:run 中途的
+        挂载/上传不许扩宽一次已经在飞的 run。两处对同一句话取相反结论才是纪律
+        自相矛盾。无 ambient run 时 ``memoized_retrieval_value`` 退化成直通,照旧
+        现读。
+
+        memo 的取值时机是**过滤之前**的 ``(notebook_ids, tier_map)``,
+        ``notebook_in_scope`` 每次调用都现过一遍:那道过滤读的是 ContextVar 里
+        的 scope,而同一个 run 内并非只有一个 scope 上下文(报告腿会按节切换、
+        插件腿会合成一份),把过滤后的结果冻住会让第二个 scope 拿到第一个 scope
+        的答案。冻住的是「挂了哪些库」这个事实,不是「这次请求能搜哪些库」。
+
+        ⛔ 这不是 ``_unsafe_source_scope_restricted`` 那种被 codex #634 R1 禁止
+        memo 的判据:那条是**范围 ENFORCEMENT** 的活体探针,这里是挂载表快照,
+        库维度的收窄仍然每次现算。
         """
-        with self._connect() as db:
-            notebook_ids, tier_map = self.notebooks.participant_tiers(
-                db, active_notebook_id,
-            )
         from app.services.source_scope import notebook_in_scope
 
+        notebook_ids, tier_map = memoized_retrieval_value(
+            ("retrieval_participants", active_notebook_id),
+            lambda: self._mount_participants(active_notebook_id),
+        )
         return tuple(
             (nid, tier_map.get(nid, "personal"))
             for nid in notebook_ids
             if notebook_in_scope(nid)
         )
+
+    def _mount_participants(self, active_notebook_id: str) -> tuple:
+        """One live mount read: ``(notebook_ids, tier_map)``, before any filter.
+
+        Split out so the run-local freeze above has exactly one thing to
+        memoise, and so PR-C's participant override has a fallback to call.
+        """
+        with self._connect() as db:
+            notebook_ids, tier_map = self.notebooks.participant_tiers(
+                db, active_notebook_id,
+            )
+        return tuple(notebook_ids), dict(tier_map)
 
     def _federated_graph_is_large(self, active_notebook_id: str) -> bool:
         # KNOWN DIVERGENCE, not a settled design: this reads the raw mount-table
@@ -2653,14 +2688,16 @@ class CandidateRetrievalService(_RetrievalState):
         allowed_source_ids=None,
     ):
         """Bounded low-recall supplement; shadow mode cannot alter results."""
-        if _CHUNK_PEEK_ONLY.get():
-            # 联邦 warm-peek 腿(非 active 的大库)。它的整条约束是「绝不为一个
-            # 用户并不在里面的大库付冷成本」,而这个接缝恰恰是最贵的一条:peek
-            # 落空 → FTS 命中常低于 ``generated_question_trigger_hits`` → 对那个
-            # 外库拉最多 ``generated_question_max_scan_rows + 1`` 行
-            # ``chunk_questions`` 向量并全部解码,每个(库,子查询)各一次,且没有
-            # 任何 memo。越权面不变(天花板仍下推),但成本面正是这条 lane 承诺
-            # 不付的那一种,所以这里直接归还 baseline。
+        if _CHUNK_PEEK_ONLY.get() or _CHUNK_PEER_LEG.get():
+            # 联邦腿在检索一个请求用户通常并不属于的库。这个接缝恰恰是最贵的
+            # 一条:命中低于 ``generated_question_trigger_hits`` → 对那个外库拉
+            # 最多 ``generated_question_max_scan_rows + 1`` 行 ``chunk_questions``
+            # 向量并全部解码,每个(库,子查询)各一次,且没有任何 memo。它还会以
+            # **请求方的** ``actor_id`` 在外库上跑,而「请求方不是该库成员」这条
+            # 语义今天没有任何用例保证。越权面不变(天花板仍下推,
+            # ``all_visible_source_ids`` 按构造排除 memory/knowhow 投影),所以
+            # 这是成本与语义的裁决,不是补一个泄漏。两个判据都留着:``PEEK`` 是
+            # 大库子集,``PEER_LEG`` 是全集,读方写全等于把两条合同各写一次。
             return baseline
         mode = self.settings.generated_question_index_mode
         scored, _ids, _matrix = baseline
@@ -3704,10 +3741,19 @@ class CandidateRetrievalService(_RetrievalState):
             # possible.
             _CHUNK_ARM_DRIFTED.reset(token)
 
+        def _leaf(query):
+            # 扇出闸下沉到**每一次真实的叶子调用**,不是由编排者在外面持一个。
+            # ``retrieval_run.py`` 的模块 docstring 就是这条合同:外层 worker 持着
+            # 最后一个槽等自己的子查询,就是自锁。Ask 路径不设 ``fanout_limit``,
+            # 这一层是逐字 no-op;报告路径下这 N 条子查询因此各自受闸约束,而不
+            # 是整组算一个。
+            with retrieval_fanout_slot():
+                return self._retrieve_chunks(notebook_id, query)
+
         def _one(task):
             q, ctx = task
             try:
-                return ctx.run(self._retrieve_chunks, notebook_id, q)
+                return ctx.run(_leaf, q)
             except AskCancelled:
                 raise
             except Exception:

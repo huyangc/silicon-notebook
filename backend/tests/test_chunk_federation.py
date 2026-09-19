@@ -22,6 +22,9 @@ from app.services.retrieval_candidates import (
 
 # 握手超时:只是死锁守卫,绝不是任何断言的判据。
 _HANDSHAKE_TIMEOUT = 30.0
+# 「凑不齐的闸等多久才下结论」。上限正确时这个闸**结构上**永远凑不齐,所以这
+# 个窗口的长短不影响结论,只影响用例跑多久。
+_BREAK_SECONDS = 2.0
 
 
 def make_chunk(chunk_id: str, relevance: float, text: str = "",
@@ -41,7 +44,8 @@ class FakeCandidates:
     def __init__(self, participants, *, retrieve=None, recall=200,
                  workers=8, max_participants=8, enabled=True,
                  visible=None, copyable=None, multi_result=None,
-                 peer_floor=0.0, restricted=False):
+                 peer_floor=0.0, restricted=False, active_reserve=0.0,
+                 mmr_k=16):
         self._participants = tuple(participants)
         self._retrieve = retrieve or (lambda nid, query: ([], [], None))
         self._visible = visible or {}
@@ -54,6 +58,10 @@ class FakeCandidates:
             chunk_fanout_max_workers=workers,
             chunk_recall=recall,
             chunk_federation_peer_floor=peer_floor,
+            # 默认 0:本文件绝大多数用例测的是合并/扇出策略,保底会在 ``per_query``
+            # 前面插组、改变它们的判据。测保底的用例显式传值。
+            chunk_federation_active_reserve=active_reserve,
+            chunk_mmr_k=mmr_k,
             embed_runtime_dim=0,
         )
         self.events = []
@@ -365,10 +373,65 @@ def test_runtime_dimension_wins_over_the_majority():
 # 4. 任务表确定性:库为主序、子查询为次序;聚池按参与集序不按完成序
 # --------------------------------------------------------------------------
 
-def test_task_order_is_participant_major_and_deterministic():
+def test_per_query_stays_one_group_per_sub_query():
+    """组数 = 子查询数,不是「库 × 子查询」。
+
+    ``quota_fuse`` 是跨组 round-robin,组数就是每个子查询配额的分母。按
+    「(库, 子查询)」出组的话,4 库 × 4 子查询 = 16 组对 16 席(active 被钉死在
+    4 席),8 库就是 32 组对 16 席、排在后面的库一席不得——挂库越多,每个子查询
+    的配额被切得越碎。
+    """
     def retrieve(nid, query):
-        cid = f"{nid}-{query}"
-        return [make_chunk(cid, 0.5)], [], None
+        return [make_chunk(f"{nid}-{query}", 0.5)], [], None
+
+    def run_once(libraries):
+        candidates = FakeCandidates(
+            (("a", "personal"), *((nid, "base") for nid in libraries)),
+            retrieve=retrieve,
+        )
+        return federated(candidates, sub_queries=("q1", "q2"))
+
+    first, second = run_once(("b",)), run_once(("b",))
+
+    assert [sorted(group) for group in first.per_query] == [
+        ["a-q1", "b-q1"], ["a-q2", "b-q2"],
+    ]
+    assert list(first.collected) == list(second.collected)
+    assert [list(g) for g in first.per_query] == [
+        list(g) for g in second.per_query
+    ]
+
+    # 库数从 2 涨到 8,组数(= 配额分母)一动不动。
+    wide = run_once(tuple(f"n{i}" for i in range(1, 8)))
+    assert len(wide.per_query) == 2
+
+
+def test_task_order_is_participant_major_and_deterministic():
+    """任务表本身仍是库主序、子查询次序(``per_query`` 的分组据此取模)。
+
+    直接看任务表而不是看 ``calls``:后者由工作线程追加,顺序是调度噪声。
+    """
+    participants = (("a", "personal"), ("b", "base"))
+
+    def build():
+        candidates = FakeCandidates(participants)
+        return [
+            (task.notebook_id, task.query, task.peer)
+            for task in cf._federated_tasks(
+                candidates, "a", participants, ["q1", "q2"], False,
+            )
+        ]
+
+    assert build() == [
+        ("a", "q1", False), ("a", "q2", False),
+        ("b", "q1", True), ("b", "q2", True),
+    ]
+    assert build() == build()
+
+
+def test_collected_order_is_deterministic_across_runs():
+    def retrieve(nid, query):
+        return [make_chunk(f"{nid}-{query}", 0.5)], [], None
 
     def run_once():
         candidates = FakeCandidates(
@@ -376,15 +439,7 @@ def test_task_order_is_participant_major_and_deterministic():
         )
         return federated(candidates, sub_queries=("q1", "q2"))
 
-    first, second = run_once(), run_once()
-
-    assert [sorted(group) for group in first.per_query] == [
-        ["a-q1"], ["a-q2"], ["b-q1"], ["b-q2"],
-    ]
-    assert list(first.collected) == list(second.collected)
-    assert [sorted(g) for g in first.per_query] == [
-        sorted(g) for g in second.per_query
-    ]
+    assert list(run_once().collected) == list(run_once().collected)
 
 
 def test_pools_follow_participant_order_not_completion_order():
@@ -531,7 +586,8 @@ def test_total_workers_never_exceed_setting():
     result = federated(candidates, sub_queries=sub_queries)
 
     assert state["peak"] == workers
-    assert len(result.per_query) == len(participants) * len(sub_queries)
+    assert len(result.per_query) == len(sub_queries)
+    assert len(candidates.calls) == len(participants) * len(sub_queries)
 
 
 def test_mmr_sees_cross_library_similarity():
@@ -727,7 +783,7 @@ def test_irrelevant_libraries_do_not_reserve_slots_in_comparable_mode():
     result = _federate_merge(_strong_active_and_weak_peers(0.5))
 
     assert len(result) == 8
-    assert all(hit.notebook_id == "a" for hit in result), (
+    assert all(not hit.notebook_id for hit in result), (
         "峰值 0.05 的无关库不得从 0.9 的强库手里各拿走一个保底名额"
     )
 
@@ -736,7 +792,7 @@ def test_peer_floor_zero_keeps_the_guaranteed_slot_per_library():
     """对照臂:设 0 就是今天的行为,每个库一条保底。"""
     result = _federate_merge(_strong_active_and_weak_peers(0.0))
 
-    assert sum(hit.notebook_id != "a" for hit in result) == 7
+    assert sum(bool(hit.notebook_id) for hit in result) == 7
 
 
 def test_a_genuinely_relevant_base_still_reserves_its_slot():
@@ -825,3 +881,345 @@ def test_peer_source_ceiling_is_read_once_per_library_without_a_run():
 
     assert sorted(candidates.visible_reads) == sorted(nid for nid, _ in peers)
     assert len(candidates.calls) == 8 * 4, "前提:任务表确实是 8 库 × 4 子查询"
+
+
+# --------------------------------------------------------------------------
+# 选择层的联邦感知:active 不打标 + 保底份额
+# --------------------------------------------------------------------------
+
+def _weak_active_strong_peers(libraries=("b",), *, active_reserve=0.25,
+                              mmr_k=16, sub_queries=("q1",)):
+    """当前库几篇弱短文(0.30~0.40)对上强参考库(0.60~0.85)。
+
+    这正是评审指出、既有夹具恰好绕开的形态:``base_only`` 的 active 是零 chunk,
+    所以「active 被挤空」根本没机会发生。
+    """
+    active = [make_chunk(f"a{i}", 0.40 - i * 0.01) for i in range(10)]
+
+    def retrieve(nid, query):
+        if nid == "a":
+            return list(active), [], None
+        return [
+            make_chunk(f"{nid}{i}", 0.85 - i * 0.006) for i in range(40)
+        ], [], None
+
+    return FakeCandidates(
+        (("a", "personal"), *((nid, "base") for nid in libraries)),
+        retrieve=retrieve, active_reserve=active_reserve, mmr_k=mmr_k,
+    ), list(sub_queries)
+
+
+def test_active_hits_are_never_stamped_with_their_own_notebook_id():
+    """给 active 也打标会让「单参与者 → 空 / 多参与者 → active id」成为每个新
+    消费者都得自己记得归一的隐性差异。空串就是 active,这是选择层唯一的判据。"""
+    candidates, queries = _weak_active_strong_peers()
+
+    result = federated(candidates, sub_queries=queries)
+
+    local = [hit for hit in result.collected.values() if hit.chunk_id[0] == "a"]
+    assert local, "前提:active 确实有候选"
+    assert all(hit.notebook_id == "" for hit in local)
+    assert all(
+        hit.notebook_id == "b" for hit in result.collected.values()
+        if hit.chunk_id[0] == "b"
+    )
+
+
+def test_reserve_lanes_give_active_its_floor_in_the_quota_fuse():
+    """multi 腿:保底组让 round-robin 第一轮就把席位发给 active。"""
+    from app.services.retrieval import quota_fuse_baseline_first
+
+    candidates, queries = _weak_active_strong_peers(
+        sub_queries=("q1", "q2", "q3", "q4"),
+    )
+    result = federated(candidates, sub_queries=queries)
+
+    assert len(result.per_query) == 4 + 4, "4 个保底组 + 4 个子查询组"
+    assert all(len(group) == 1 for group in result.per_query[:4])
+
+    selected, _counts = quota_fuse_baseline_first(
+        result.collected, result.per_query, 16,
+        relevance=lambda c: c.relevance,
+    )
+    assert len(selected) == 16
+    assert sum(1 for hit in selected if not hit.notebook_id) >= 4
+    assert sum(1 for hit in selected if hit.notebook_id) == 16 - sum(
+        1 for hit in selected if not hit.notebook_id
+    )
+
+
+def test_reserve_zero_restores_pure_relevance():
+    from app.services.retrieval import quota_fuse_baseline_first
+
+    candidates, queries = _weak_active_strong_peers(
+        active_reserve=0.0, sub_queries=("q1", "q2", "q3", "q4"),
+    )
+    result = federated(candidates, sub_queries=queries)
+
+    assert len(result.per_query) == 4, "关掉保底时组序逐字是今天的样子"
+    selected, _counts = quota_fuse_baseline_first(
+        result.collected, result.per_query, 16,
+        relevance=lambda c: c.relevance,
+    )
+    assert all(hit.notebook_id for hit in selected), (
+        "纯相关度下强参考库本就该通吃——这条是保底用例的对照臂"
+    )
+
+
+def test_active_floor_does_not_shrink_as_libraries_are_mounted():
+    from app.services.retrieval import quota_fuse_baseline_first
+
+    def local_seats(library_count):
+        candidates, queries = _weak_active_strong_peers(
+            libraries=tuple(f"n{i}" for i in range(library_count)),
+            sub_queries=("q1", "q2", "q3", "q4"),
+        )
+        result = federated(candidates, sub_queries=queries)
+        selected, _counts = quota_fuse_baseline_first(
+            result.collected, result.per_query, 16,
+            relevance=lambda c: c.relevance,
+        )
+        return sum(1 for hit in selected if not hit.notebook_id)
+
+    assert local_seats(2) >= 4
+    assert local_seats(8) >= local_seats(2)
+
+
+def test_reserve_lanes_are_capped_by_the_qualified_active_candidates():
+    """active 只有 2 条合格候选时保底就是 2,不会凭空造席位。"""
+    def retrieve(nid, query):
+        if nid == "a":
+            return [make_chunk("a1", 0.3), make_chunk("a2", 0.2)], [], None
+        return [make_chunk(f"b{i}", 0.9) for i in range(20)], [], None
+
+    candidates = FakeCandidates(
+        (("a", "personal"), ("b", "base")), retrieve=retrieve,
+        active_reserve=0.25, mmr_k=16,
+    )
+
+    result = federated(candidates)
+
+    assert len(result.per_query) == 2 + 1
+    assert [list(group) for group in result.per_query[:2]] == [["a1"], ["a2"]]
+
+
+def test_reserve_lanes_ignore_generated_question_only_candidates():
+    """补充臂的行在 ``quota_fuse_baseline_first`` 的第二阶段才发席位,给它留一个
+    保底组等于挪走一个席位却没挪来证据。"""
+    question_only = make_chunk(
+        "a-q", 0.99, supports=(
+            RetrievalSupport("generated_question", "chunk", "a-q", 0.99),
+        ),
+    )
+
+    def retrieve(nid, query):
+        if nid == "a":
+            return [question_only, make_chunk("a1", 0.3)], [], None
+        return [make_chunk(f"b{i}", 0.9) for i in range(20)], [], None
+
+    candidates = FakeCandidates(
+        (("a", "personal"), ("b", "base")), retrieve=retrieve,
+        active_reserve=0.25, mmr_k=16,
+    )
+
+    result = federated(candidates)
+
+    assert [list(group) for group in result.per_query[:1]] == [["a1"]]
+
+
+def test_mmr_branch_hands_trailing_peer_seats_back_to_active():
+    """single 腿:MMR 选完之后,排在最后的参考库席位换回 active 的最高分落选项,
+    其余位置一字不动。"""
+    settings = SimpleNamespace(
+        chunk_federation_active_reserve=0.25, chunk_mmr_k=16,
+    )
+    selected = [make_chunk(f"b{i}", 0.9 - i * 0.01) for i in range(8)]
+    for index, hit in enumerate(selected):
+        selected[index] = hit.__class__(**{
+            **hit.__dict__, "notebook_id": "b",
+        })
+    spare = [make_chunk(f"a{i}", 0.4 - i * 0.01) for i in range(5)]
+
+    repaired = cf.apply_active_reserve(
+        settings, selected, list(selected) + spare, 8,
+    )
+
+    assert [hit.chunk_id for hit in repaired[:6]] == [
+        hit.chunk_id for hit in selected[:6]
+    ], "未被换掉的位置必须一字不动"
+    assert [hit.chunk_id for hit in repaired[6:]] == ["a1", "a0"], (
+        "从尾部往前换,最强的落选 active 落在最后一个 peer 席位上"
+    )
+
+
+def test_mmr_branch_reserve_is_inert_for_a_single_library():
+    settings = SimpleNamespace(
+        chunk_federation_active_reserve=0.25, chunk_mmr_k=16,
+    )
+    selected = [make_chunk(f"a{i}", 0.9 - i * 0.01) for i in range(8)]
+    pool = selected + [make_chunk("a9", 0.1)]
+
+    assert cf.apply_active_reserve(settings, selected, pool, 8) == selected
+    off = SimpleNamespace(
+        chunk_federation_active_reserve=0.0, chunk_mmr_k=16,
+    )
+    assert cf.apply_active_reserve(off, selected, pool, 8) == selected
+
+
+# --------------------------------------------------------------------------
+# 扇出闸:槽在叶子上,不在编排者手里
+# --------------------------------------------------------------------------
+
+def test_every_leaf_holds_one_fanout_slot():
+    """``retrieval_run(fanout_limit=2)`` 下 3 库 × 3 子查询 → 最大并发恰好 2。
+
+    判据是握手、不是墙钟:``Barrier(3)`` 只有在**三条**叶子同时在跑时才放行。
+    上限真的是 2 时它永远凑不齐,于是所有叶子都从 ``BrokenBarrierError`` 出来
+    (``_BREAK_SECONDS`` 只是「等够了、可以下结论」的窗口,不是断言判据),而且
+    正好两条叶子会同时停在闸上 → ``peak == 2`` 是确定的,不是抢出来的。
+    槽若没下沉到叶子(8 个工作位全放行),闸当场凑齐 → ``released`` 非空。
+    """
+    from app.services.retrieval_run import retrieval_run
+
+    lock = threading.Lock()
+    state = {"live": 0, "peak": 0}
+    gate = threading.Barrier(3, timeout=_BREAK_SECONDS)
+    released = []
+
+    def retrieve(nid, query):
+        with lock:
+            state["live"] += 1
+            state["peak"] = max(state["peak"], state["live"])
+        try:
+            gate.wait()
+            released.append((nid, query))
+        except threading.BrokenBarrierError:
+            pass
+        with lock:
+            state["live"] -= 1
+        return [make_chunk(f"{nid}-{query}", 0.5)], [], None
+
+    candidates = FakeCandidates(
+        (("a", "personal"), ("b", "base"), ("c", "base")),
+        retrieve=retrieve, workers=8,
+    )
+
+    with retrieval_run(run_kind="report_generation", fanout_limit=2):
+        federated(candidates, sub_queries=("q1", "q2", "q3"))
+
+    assert not released, (
+        f"三条叶子同时在跑 → 扇出闸没约束到叶子 I/O:{released}"
+    )
+    assert state["peak"] == 2, (
+        f"叶子并发是 {state['peak']},不是 fanout_limit=2"
+    )
+    assert len(candidates.calls) == 9
+
+
+def test_a_single_slot_run_never_deadlocks():
+    """``fanout_limit=1``:父层若也持槽,``BoundedSemaphore`` 当场自锁。
+
+    超时只是死锁守卫,不是任何断言的判据——失败信息直接说清是什么锁死了。
+    """
+    from app.services.retrieval_run import retrieval_run
+
+    done = threading.Event()
+
+    def _run():
+        candidates = FakeCandidates(
+            (("a", "personal"), ("b", "base"), ("c", "base")),
+            retrieve=lambda nid, q: ([make_chunk(f"{nid}-{q}", 0.5)], [], None),
+        )
+        with retrieval_run(run_kind="report_generation", fanout_limit=1):
+            federated(candidates, sub_queries=("q1", "q2", "q3"))
+        done.set()
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(_HANDSHAKE_TIMEOUT)
+    assert done.is_set(), (
+        "fanout_limit=1 下联邦 chunk 腿死锁:编排层与叶子同时持槽时,"
+        "BoundedSemaphore 的唯一名额会被外层占着等内层"
+    )
+
+
+def test_no_run_keeps_the_leaf_slot_a_noop():
+    candidates = FakeCandidates(
+        (("a", "personal"), ("b", "base")),
+        retrieve=lambda nid, q: ([make_chunk(f"{nid}-{q}", 0.5)], [], None),
+    )
+
+    result = federated(candidates, sub_queries=("q1", "q2"))
+
+    assert len(result.collected) == 4
+
+
+# --------------------------------------------------------------------------
+# run-local 冻结:每库的 copy-stats 探针只跑一次
+# --------------------------------------------------------------------------
+
+def test_copy_stats_probe_is_frozen_per_library_for_one_run():
+    """``notebook_copy_stats`` 的版本信号自己开一条池化连接,三个 chunk 入口
+    (以及每个 reflect 动作)都会各探一次。"""
+    from app.services.retrieval_run import retrieval_run
+
+    class Counting(FakeCandidates):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.stats_reads = []
+
+        def notebook_copy_stats(self, notebook_id):
+            self.stats_reads.append(notebook_id)
+            return super().notebook_copy_stats(notebook_id)
+
+    candidates = Counting((("a", "personal"), ("b", "base"), ("c", "base")))
+
+    with retrieval_run(run_kind="ask_chunk"):
+        for _ in range(4):
+            federated(candidates, sub_queries=("q1", "q2"))
+
+    assert sorted(candidates.stats_reads) == ["b", "c"]
+
+
+def test_copy_stats_probe_is_live_without_a_run():
+    class Counting(FakeCandidates):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.stats_reads = []
+
+        def notebook_copy_stats(self, notebook_id):
+            self.stats_reads.append(notebook_id)
+            return super().notebook_copy_stats(notebook_id)
+
+    candidates = Counting((("a", "personal"), ("b", "base")))
+    for _ in range(3):
+        federated(candidates)
+
+    assert candidates.stats_reads == ["b", "b", "b"]
+
+
+# --------------------------------------------------------------------------
+# 外库腿不进生成问题索引的补召回接缝
+# --------------------------------------------------------------------------
+
+def test_peer_leg_flag_is_set_for_every_peer_not_just_large_ones():
+    from app.services.chunk_lane import _CHUNK_PEER_LEG
+
+    seen = {}
+
+    class Recording(FakeCandidates):
+        def _retrieve_chunks(self, notebook_id, query, recall=0, **kwargs):
+            seen[notebook_id] = _CHUNK_PEER_LEG.get()
+            return super()._retrieve_chunks(notebook_id, query, recall, **kwargs)
+
+    candidates = Recording(
+        (("a", "personal"), ("b", "base"), ("c", "base")),
+        copyable={"b": True, "c": False},
+    )
+
+    federated(candidates)
+
+    assert seen == {"a": False, "b": True, "c": True}
+    # peek 仍然只对大库打开——两条 lane 不是同一条。
+    assert dict(candidates.peek_seen) == {"a": False, "b": False, "c": True}
+    assert _CHUNK_PEER_LEG.get() is False, "不得外泄到调用方的上下文"

@@ -3347,10 +3347,8 @@ class ReasoningRetriever:
         分支同参);首轮播种显式传 `ranked_per_query_take`(档位字段),让「档位
         买更多首轮证据」对原文同样成立。
 
-        与 `ppr_retrieve`/`exact_lookup` 包装同形地走 `_filter_candidates`
-        与 `retrieval_fanout_slot`:knowhow 智能补全用前者剔除私有 Memory 与
-        当前表自身投影,新通道不得绕过;后者是并发扇出闸,首轮播种一次提交
-        N 条子查询,不占同一把闸就等于把它开了个后门。
+        与 `ppr_retrieve`/`exact_lookup` 包装同形地走 `_filter_candidates`:
+        knowhow 智能补全用它剔除私有 Memory 与当前表自身投影,新通道不得绕过。
 
         **范围是参与集,不再是当前笔记本一本**。复用 chunk 模式的原语就一并
         继承了它们的范围,而那套原语已经联邦化:`retrieve_chunk_candidates` 走
@@ -3368,13 +3366,19 @@ class ReasoningRetriever:
         `AskService._no_kg_scope_admits_run`)——这条通道到得了的库才算数,而现在
         它到得了参与集。
 
-        扇出闸只圈住 `retrieve_chunk_candidates` 这一步(它是发 I/O 的那半);
-        `select_chunk_candidates` 的 MMR 是纯 CPU、只读已在手的候选与矩阵,
-        圈进临界区只会让 N 条并发子查询彼此排队等对方算完 MMR。
+        **扇出闸不在这一层**。`retrieve_chunk_candidates` 改道联邦通道之后,这里
+        的一次调用内部会再开 `min(任务数, CHUNK_FANOUT_MAX_WORKERS)` 条线程、各
+        发一次 `_retrieve_chunks`,子线程并不继承这一层持有的槽——外面这一圈于是
+        既拦不住真正的叶子 I/O(报告 run 的 `fanout_limit` 默认 8:5 节并发 × 挂
+        3 个参考库 → 最多 32 条并发 `_retrieve_chunks`,各自 `_connect()`,而 PG
+        池默认 10),又会在 `fanout_limit=1` 时和内层同时持槽把自己锁死。槽因此
+        下沉到 `chunk_federation._retrieve_for` 与 `_retrieve_chunks_multi` 的每
+        个子任务里,也就是 `retrieval_run.py` 模块 docstring 要求的位置:只有真正
+        的检索调用被圈住,编排者不得持槽。`select_chunk_candidates` 的 MMR 是纯
+        CPU、只读已在手的候选与矩阵,本来也不该进临界区。
         """
-        with retrieval_fanout_slot():
-            scored, ids, matrix = self.retrieval.retrieve_chunk_candidates(
-                notebook_id, query)
+        scored, ids, matrix = self.retrieval.retrieve_chunk_candidates(
+            notebook_id, query)
         selected = self.retrieval.select_chunk_candidates(
             scored, ids, matrix,
             self.settings.chunk_mmr_k if k is None else k,
