@@ -163,6 +163,61 @@ test("scope starts at all, searching preserves selection, clearing restores all"
   expect(screen.getByRole("button", { name: "全部笔记本 · 2 个" })).toBeTruthy();
 });
 
+test("reopening refreshes notebook choices without resetting the draft or explicit scope", async () => {
+  api.notebooks.mockResolvedValueOnce([]);
+  const hook = renderHook(({ active }) => useGlobalAsk({ syncUrl: false, active }), { initialProps: { active: true } });
+  await waitFor(() => expect(hook.result.current.loading).toBe(false));
+  act(() => hook.result.current.setDraft("创建资料后继续提问"));
+  hook.rerender({ active: false });
+  hook.rerender({ active: true });
+  await waitFor(() => expect(hook.result.current.notebooks).toEqual(notebooks));
+  expect(hook.result.current.draft).toBe("创建资料后继续提问");
+  const selected: GlobalScope = { mode: "include", notebook_ids: ["nb-0"] };
+  act(() => hook.result.current.setScope(selected));
+  hook.rerender({ active: false });
+  hook.rerender({ active: true });
+  await waitFor(() => expect(api.notebooks).toHaveBeenCalledTimes(3));
+  expect(hook.result.current.scope).toEqual(selected);
+  expect(api.list).toHaveBeenCalledTimes(1);
+});
+
+test("embedded reload keeps the current conversation, failed draft, selected scope and retry identity", async () => {
+  api.ask.mockResolvedValueOnce(job("done")).mockRejectedValueOnce(new Error("network"));
+  api.detail.mockResolvedValue(detail("conv-a", [job("done")]));
+  const { result } = renderHook(() => useGlobalAsk({ syncUrl: false }));
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  act(() => result.current.setDraft("第一个问题"));
+  await act(async () => { await result.current.submit(); });
+  const selected: GlobalScope = { mode: "include", notebook_ids: ["nb-0"] };
+  act(() => { result.current.setDraft("只在指定笔记本追问"); result.current.setScope(selected); });
+  await act(async () => { await result.current.submit(); });
+  const request = api.ask.mock.calls[1][0];
+  await act(async () => { await result.current.load(); });
+  expect(result.current.conversationId).toBe("conv-a");
+  expect(result.current.scope).toEqual(selected);
+  expect(result.current.draft).toBe("只在指定笔记本追问");
+  expect(result.current.turns).toHaveLength(1);
+  api.ask.mockResolvedValueOnce(job("done"));
+  await act(async () => { await result.current.submit(); });
+  expect(api.ask.mock.calls[2][0]).toEqual(request);
+});
+
+test("error recovery restores a running conversation after stop fails", async () => {
+  api.cancel.mockRejectedValueOnce(new Error("network"));
+  api.detail.mockResolvedValue(detail("conv-a", [job()]));
+  api.poll.mockResolvedValue(job("cancelled"));
+  const { result } = renderHook(() => useGlobalAsk({ syncUrl: false }));
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  act(() => result.current.setDraft("后台问题"));
+  await act(async () => { await result.current.submit(); });
+  await act(async () => { await result.current.stop(); });
+  expect(result.current.error).toBeTruthy();
+  await act(async () => { await result.current.load(); });
+  expect(result.current.running?.job_id).toBe("job-conv-a");
+  await waitFor(() => expect(result.current.running).toBeUndefined(), { timeout: 2500 });
+  expect(result.current.conversationId).toBe("conv-a");
+});
+
 test("unavailable selected ids stay explicit until user removes them", () => {
   const changed = vi.fn();
   render(<NotebookScopePicker notebooks={notebooks} scope={{ mode: "include", notebook_ids: ["revoked"] }} onChange={changed} disabled={false} />);

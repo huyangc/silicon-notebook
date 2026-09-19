@@ -20,7 +20,7 @@ function mergeJob(current: GlobalJob, incoming: GlobalJob): GlobalJob {
   return incoming;
 }
 
-export function useGlobalAsk({ syncUrl = true }: { syncUrl?: boolean } = {}) {
+export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: boolean; active?: boolean } = {}) {
   const [notebooks, setNotebooks] = useState<NotebookSummary[]>([]);
   const [conversations, setConversations] = useState<GlobalConversation[]>([]);
   const [conversationId, setConversationId] = useState("");
@@ -51,38 +51,47 @@ export function useGlobalAsk({ syncUrl = true }: { syncUrl?: boolean } = {}) {
   const retryRequest = useRef<{ key: string; id: string } | null>(null);
   const currentId = useRef(conversationId);
   currentId.current = conversationId;
+  const currentScope = useRef(scope);
+  currentScope.current = scope;
+  const initialized = useRef(false);
+  const notebookVersion = useRef(0);
+  const wasActive = useRef(active);
   const running = turns.find((turn) => turn.status === "running");
 
   const load = useCallback(async () => {
     const ticket = ++owner.current;
+    const libraryTicket = ++notebookVersion.current;
+    const resumeId = currentId.current || (syncUrl ? new URLSearchParams(window.location.search).get("conversation_id") : "");
+    const preserveScope = initialized.current;
+    const draftScope = currentScope.current;
     ++historyVersion.current;
     setLoading(true);
-    setOpenFailed(false);
+    setOpenFailed(Boolean(resumeId));
     setError("");
+    setPollError("");
+    setPollRevision((value) => value + 1);
+    setTurns([]);
+    setTurnOffset(null);
+    setConversationId(resumeId || "");
     try {
       await fetchMe();
       const [libraries, history] = await Promise.all([listNotebooks(), listGlobalConversations()]);
       if (!mounted.current || owner.current !== ticket) return;
-      setNotebooks(libraries);
+      if (libraryTicket === notebookVersion.current) setNotebooks(libraries);
       setConversations(history);
       setMoreHistory(history.length === GLOBAL_ASK_PAGE_SIZE);
       setHistoryOffset(history.length);
       historyNeedsRefresh.current = false;
-      setTurns([]);
-      setConversationId("");
-      setScope({ mode: "all" });
-      const linkedId = syncUrl ? new URLSearchParams(window.location.search).get("conversation_id") : null;
-      if (linkedId) {
-        setConversationId(linkedId);
-        setOpenFailed(true);
-        const detail = await getGlobalConversation(linkedId);
+      if (resumeId) {
+        const detail = await getGlobalConversation(resumeId);
         if (!mounted.current || owner.current !== ticket) return;
         setTurns(detail.turns);
         setTurnOffset(detail.has_more ? detail.next_offset : null);
         setConversationId(detail.id);
-        setScope(detail.notebook_scope);
+        setScope(preserveScope ? draftScope : detail.notebook_scope);
         setOpenFailed(false);
       }
+      initialized.current = true;
     } catch (cause) {
       if (mounted.current && owner.current === ticket) setError(toUserMessage(cause, "全局问答加载失败，请重试"));
     } finally {
@@ -97,7 +106,19 @@ export function useGlobalAsk({ syncUrl = true }: { syncUrl?: boolean } = {}) {
   }, [load]);
 
   useEffect(() => {
-    if (!running || pollError) return;
+    const reopening = active && !wasActive.current;
+    wasActive.current = active;
+    if (!reopening) return;
+    const ticket = ++notebookVersion.current;
+    void listNotebooks().then((libraries) => {
+      if (mounted.current && notebookVersion.current === ticket) setNotebooks(libraries);
+    }).catch((cause) => {
+      if (mounted.current && notebookVersion.current === ticket) setError(toUserMessage(cause, "笔记本列表刷新失败，请重新加载"));
+    });
+  }, [active]);
+
+  useEffect(() => {
+    if (!running || pollError || loading) return;
     const ticket = owner.current;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -115,7 +136,7 @@ export function useGlobalAsk({ syncUrl = true }: { syncUrl?: boolean } = {}) {
     }
     timer = setTimeout(poll, POLL_INTERVAL_MS);
     return () => { disposed = true; clearTimeout(timer); };
-  }, [running?.job_id, running?.status, pollError, pollRevision]);
+  }, [running?.job_id, running?.status, pollError, pollRevision, loading]);
 
   function updateUrl(id: string) {
     if (!syncUrl) return;
