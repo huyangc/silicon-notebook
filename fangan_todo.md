@@ -203,19 +203,6 @@
       `source_scope.scoped_subgraph_nodes` 的 docstring：把 scope 放进键会按勾选组合
       重建整图）。参与集覆盖在场时守卫已经读座位——因为那时两张图也读座位，守卫与
       建图口径同源；要修的是无覆盖那一半。
-- [ ] **横向对比的兄弟实体名不过来源级闸（逐库天花板下会漏名字）**：与已关闭的
-      「联邦 KG 的 1-hop 扩展节点」那条（见 `fangan_done.md`）同类、
-      方向同样是**多给**。`communities.mounted_base_ids` / `resolve_comparison_peers`
-      只做了**库维度**收窄；一本仍在参与集里的库，如果某个实体只由该库天花板之外的
-      来源（典型是隐藏 Memory / Knowhow 投影）支撑，它的**名字**仍会经
-      `comention_peers` / 社区成员行被取出来，进 `ask_chunk` 的 `sub_queries` 与
-      reasoning 的 `_action_expand_community`，并原样进可见轨迹与 `used_queries`。
-      `mounted_base_ids` 的 docstring 已经写明这条通道泄漏的是**查询词本身**、结果侧
-      过滤补救不了——那条论证对逐库天花板同样成立，只是当时只有库维度一种收窄。
-      今天不可达（生产上没有任何地方构造 `notebook_source_ceilings`）。最小修法：在
-      取名字的入口（`CommunityQueryService.comention_peers` / `community_member_peers`
-      的消费点）按该 owner 的 `source_ceiling_for` 裁掉无可见来源支撑的实体，或在
-      查询层结构性排除隐藏投影支撑的实体。**PR-D 第一个写入方落地之前必须关掉。**
 - [ ] **逐步推理词法臂的关键词按语料语言双语化（给 `plan()` 传 `corpus_langs`）**：
       无图首轮的词法臂用的是 `plan()` 里 `expand_query` 产出的高/低层关键词，而
       `plan()` 调 `expand_query` 时**不传** `corpus_langs`，拿到的是 prompt 的

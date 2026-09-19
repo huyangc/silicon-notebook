@@ -5,7 +5,11 @@
  · community_peers:base 库 Louvain 社区 + 廉价词法重排,miss 时 emit community_unavailable
    事件(绝不静默零召回)。
 两路焦点解析共用同一归一化 + UnifiedKgStore.resolve_focal(Task 13:本模块只保留
-编排/重排/事件,持久化读一律走注入的 CommunityQueryService.unified_kg)。"""
+编排/重排/事件,持久化读一律走注入的 CommunityQueryService.unified_kg)。
+
+收窄有两道,两道都在「名字被取出来」之前:库维度在 mounted_base_ids,来源维度
+(逐库冻结来源天花板)在 _source_ceiling_kwargs —— 后者由两个 peers 函数各自下推
+给 store,做成 SQL 谓词。"""
 from __future__ import annotations
 from typing import List, Optional, Tuple
 
@@ -39,6 +43,11 @@ class CommunityQueryService:
         再按库勾选**收窄**。座位的形状是「active 在前、其余是参考库」,所以两条
         分支都把首项剥掉;fallback 也照这个形状拼出来,免得两条分支对「首项是谁」
         各有一套理解。
+
+        这里只答**库维度**。逐库冻结来源天花板在绑时,一本仍在这份清单里的库
+        还可能有「只由天花板之外的来源(典型是隐藏 Memory / Knowhow 投影)支撑」
+        的实体——**来源级闸在名字出口**,见 ``_source_ceiling_kwargs`` 与
+        ``sibling_peers`` / ``community_peers``;不在这里,也不在两个调用点。
         """
         from app.services.retrieval_participants import (
             resolve_retrieval_participant_ids,
@@ -84,7 +93,8 @@ class CommunityQueryService:
             })
             return []
         rows = self.unified_kg.community_member_peers(
-            base_notebook_id, community_id, focal, candidates
+            base_notebook_id, community_id, focal, candidates,
+            **_source_ceiling_kwargs(base_notebook_id),
         )
         ranked = sorted(
             rows,
@@ -114,7 +124,8 @@ class CommunityQueryService:
             if not focal:
                 return []
             return self.unified_kg.comention_peers(
-                notebook_id, focal, self.sibling_min_bridge, top_k
+                notebook_id, focal, self.sibling_min_bridge, top_k,
+                **_source_ceiling_kwargs(notebook_id),
             )
         except Exception:
             return []
@@ -131,6 +142,37 @@ class CommunityQueryService:
             base_notebook_id, focal_name, question,
             top_k=top_k, candidates=candidates,
         ), "community"
+
+
+def _source_ceiling_kwargs(notebook_id: str) -> dict:
+    """兄弟实体名的**来源级闸**:这一库这次 run 的冻结来源天花板,转成 store kwargs。
+
+    为什么闸在这里:``mounted_base_ids`` 只答库维度。一本仍在参与集里的库,
+    若某实体只由该库天花板**之外**的来源(典型是隐藏 Memory / Knowhow 投影)
+    支撑,它的**名字**照样会经共提/社区成员行出来,进 ``ask_chunk`` 的
+    ``sub_queries`` 与 reasoning 的 ``_action_expand_community``,并原样进
+    ``used_queries`` 与可见轨迹、被发给 embedding 与模型。``mounted_base_ids``
+    的 docstring 已经写明这条通道泄漏的是**查询词本身**——结果侧过滤补救不了,
+    所以裁剪必须发生在名字被取出来之前,也就是 SQL 侧。
+
+    为什么闸在两个 peers 函数里、不在两个调用点:两条对比路径(chunk 的子查询
+    扩展、reasoning 的 ``expand_community``)问的是同一个问题,闸放在名字的唯一
+    出口才自然保证它们拿到同一份裁剪结果。
+
+    ``None`` 与空集是两个不同的答案,必须按 ``is None`` 分(见
+    ``ActiveSourceScope.source_ceiling_for``):
+      · 没有天花板 → ``{}``,store 一个参数都不多收,SQL 与今天逐字相同、
+        不多发任何查询——这是「零行为变化」的落点;
+      · 有天花板 → ``allowed_source_ids=<清单>``,空集即 deny all(该库一个
+        名字都不出),store 侧对空清单直接返回 []。
+    """
+    from app.services.source_scope import current_source_scope
+
+    scope = current_source_scope()
+    ceiling = None if scope is None else scope.source_ceiling_for(notebook_id)
+    if ceiling is None:
+        return {}
+    return {"allowed_source_ids": sorted(ceiling)}
 
 
 def _norm(s: str) -> str:

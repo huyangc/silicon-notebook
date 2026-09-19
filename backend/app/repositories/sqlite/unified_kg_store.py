@@ -62,6 +62,57 @@ _PUBLISHED_COMMUNITY_GEN = (
 )
 
 
+# PR-D0·D0-2:对比兄弟的**来源级闸**谓词(PG 孪生同名函数,语义等价)。
+#
+# 实体(概念簇)与支撑来源的关系在数据层是两跳:
+#   concept_clusters.member_object_id → knowledge_object_sources.source_id,
+# 后者是 evidence[].source_id 打平出来的反向索引(P0-4),与 KG 词法臂
+# ``KnowledgeStore.fts_search`` 的来源闸读的是**同一个**关系——对比兄弟名与
+# KG 命中必须对「这个实体有没有被清单内来源支撑」给出同一个答案。
+#
+# 反向索引未回填的库(``unified_kg_state.source_index_backfilled=0``)走
+# 权威支:直接扫 evidence JSON。``fts_search`` 的注释逐字写明了理由——False
+# 是「历史/未知」而不是「没有行」,信它会把候选集静默清空。
+def _object_support_exists(cluster_ref: str, placeholders: str, *,
+                           authoritative: bool) -> str:
+    """该簇某个成员对象是否被清单内来源支撑(相关子查询,关联到 cluster_ref)。"""
+    if authoritative:
+        return (
+            "EXISTS (SELECT 1 FROM knowledge_objects ko "
+            f"WHERE ko.id={cluster_ref}.member_object_id "
+            f"AND ko.notebook_id={cluster_ref}.notebook_id "
+            "AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(ko.evidence) "
+            "THEN CASE WHEN json_type(ko.evidence)='array' "
+            "THEN ko.evidence ELSE '[]' END ELSE '[]' END) ev "
+            "WHERE ev.type='object' AND json_extract("
+            "CASE WHEN ev.type='object' THEN ev.value ELSE '{}' END,"
+            f"'$.source_id') IN ({placeholders})))"
+        )
+    return (
+        "EXISTS (SELECT 1 FROM knowledge_object_sources kos "
+        f"WHERE kos.notebook_id={cluster_ref}.notebook_id "
+        f"AND kos.object_id={cluster_ref}.member_object_id "
+        f"AND kos.source_id IN ({placeholders}))"
+    )
+
+
+def _canonical_support_exists(row_ref: str, placeholders: str, *,
+                              authoritative: bool) -> str:
+    """``row_ref`` 那一行的 canonical_id 是否还有天花板内来源支撑。
+
+    给 ``community_members`` 这种只带 canonical_id 的表用:先回到本世代的
+    ``concept_clusters``,再问成员对象的支撑。``comention_peers`` 的名字查询
+    本身就坐在 ``concept_clusters`` 上,直接用 ``_object_support_exists``。
+    """
+    return (
+        "EXISTS (SELECT 1 FROM concept_clusters kc "
+        f"WHERE kc.notebook_id={row_ref}.notebook_id "
+        f"AND kc.canonical_id={row_ref}.canonical_id "
+        f"AND kc.generation = {_PUBLISHED_CLUSTER_GEN} "
+        f"AND {_object_support_exists('kc', placeholders, authoritative=authoritative)})"
+    )
+
+
 class UnifiedKgStore:
     def __init__(self, database: SqliteDatabase, now=None) -> None:
         self.database = database
@@ -1288,22 +1339,60 @@ class UnifiedKgStore:
         return row["community_id"] if row else None
 
     def community_member_peers(
-        self, notebook_id: str, community_id: str, exclude_canonical_id: str, limit: int
+        self, notebook_id: str, community_id: str, exclude_canonical_id: str, limit: int,
+        *, allowed_source_ids: Sequence[str] | None = None,
     ) -> List[sqlite3.Row]:
+        """``allowed_source_ids`` 缺省 → SQL 与来源闸落地之前逐字相同。
+
+        传进来时是本 run 给**该库**冻结的来源天花板:只留还有天花板内来源
+        支撑的成员。空清单是显式 deny,不是「不限」(见 ``source_scope
+        .source_ceiling_for`` 的 None / frozenset() 之分)。
+        """
         with self.database.connect() as db:
+            if allowed_source_ids is None:
+                return db.execute(
+                    "SELECT canonical_name, centrality FROM community_members "
+                    "WHERE notebook_id=? AND community_id=? AND canonical_id!=? "
+                    f"AND generation = {_PUBLISHED_COMMUNITY_GEN} "
+                    "ORDER BY centrality DESC, canonical_id ASC LIMIT ?",
+                    (notebook_id, community_id, exclude_canonical_id, notebook_id, limit)
+                ).fetchall()
+            source_ids = list(dict.fromkeys(allowed_source_ids))
+            if not source_ids:
+                return []
+            gate = _canonical_support_exists(
+                "community_members", ",".join("?" for _ in source_ids),
+                authoritative=not self._source_index_backfilled(db, notebook_id),
+            )
             return db.execute(
                 "SELECT canonical_name, centrality FROM community_members "
                 "WHERE notebook_id=? AND community_id=? AND canonical_id!=? "
-                f"AND generation = {_PUBLISHED_COMMUNITY_GEN} "
+                f"AND generation = {_PUBLISHED_COMMUNITY_GEN} AND {gate} "
                 "ORDER BY centrality DESC, canonical_id ASC LIMIT ?",
-                (notebook_id, community_id, exclude_canonical_id, notebook_id, limit)
+                (notebook_id, community_id, exclude_canonical_id, notebook_id,
+                 notebook_id, *source_ids, limit)
             ).fetchall()
 
     def comention_peers(
-        self, notebook_id: str, canonical_id: str, min_bridge: int, limit: int
+        self, notebook_id: str, canonical_id: str, min_bridge: int, limit: int,
+        *, allowed_source_ids: Sequence[str] | None = None,
     ) -> List[Tuple[str, int]]:
-        """concept_comentions 两侧按 bridge_claims 降序取对端 canonical_name。"""
+        """concept_comentions 两侧按 bridge_claims 降序取对端 canonical_name。
+
+        ``allowed_source_ids`` 同 ``community_member_peers``:缺省 → 名字查询
+        与来源闸落地之前逐字相同;传进来时把闸挂在**取名字**的那条查询上,
+        无天花板内来源支撑的对端一个名字都不出去。
+        """
         with self.database.connect() as db:
+            gate = ""
+            if allowed_source_ids is not None:
+                source_ids = list(dict.fromkeys(allowed_source_ids))
+                if not source_ids:
+                    return []
+                gate = "AND " + _object_support_exists(
+                    "concept_clusters", ",".join("?" for _ in source_ids),
+                    authoritative=not self._source_index_backfilled(db, notebook_id),
+                ) + " "
             rows = db.execute(
                 "SELECT canonical_a, canonical_b, bridge_claims FROM concept_comentions "
                 "WHERE notebook_id=? AND (canonical_a=? OR canonical_b=?) AND bridge_claims>=? "
@@ -1316,11 +1405,23 @@ class UnifiedKgStore:
                 other = r["canonical_b"] if r["canonical_a"] == canonical_id else r["canonical_a"]
                 nm = db.execute(
                     "SELECT canonical_name FROM concept_clusters WHERE notebook_id=? "
-                    f"AND canonical_id=? AND generation = {_PUBLISHED_CLUSTER_GEN} LIMIT 1",
-                    (notebook_id, other, notebook_id)).fetchone()
+                    f"AND canonical_id=? AND generation = {_PUBLISHED_CLUSTER_GEN} "
+                    f"{gate}LIMIT 1",
+                    (notebook_id, other, notebook_id,
+                     *(() if allowed_source_ids is None else source_ids))).fetchone()
                 if nm and nm["canonical_name"]:
                     out.append((nm["canonical_name"], int(r["bridge_claims"])))
             return out
+
+    @staticmethod
+    def _source_index_backfilled(db: sqlite3.Connection, notebook_id: str) -> bool:
+        """P0-4 反向索引的完整性凭证(``KnowledgeStore.source_index_backfilled``
+        的同一行读法,这里自读是因为来源闸与它同在一条只读连接上)。"""
+        row = db.execute(
+            "SELECT source_index_backfilled FROM unified_kg_state WHERE notebook_id=?",
+            (notebook_id,),
+        ).fetchone()
+        return bool(row and row["source_index_backfilled"])
 
     # ------------------------------------------ KG 质量分析(只读聚合,T1)
     # 承 docs/superpowers/specs/2026-07-25-kg-analysis-view-design.md「T1 只读聚合
