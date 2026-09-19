@@ -187,6 +187,22 @@
       数量为上限。刻意不在联邦 PR 里做：那个函数的 reserve 规则是独立一处改动。
 - [ ] BM25 / FTS5 / tsvector 全文索引：已评估为低 ROI、基础设施级，暂缓。
 - [ ] 结构化硬过滤：软加权已够用，硬过滤有清空结果风险，暂缓。
+- [ ] **`_federated_graph_is_large` 把取消勾选的参考库也算进「图是否过大」**：这个
+      判据（`backend/app/services/retrieval_candidates.py`）在**无参与集覆盖**时读
+      挂载表的裸 id 清单，从不过 `notebook_in_scope`。于是一个刚被用户取消勾选的大
+      参考库仍然把它撑成「大图」，本次 run 范围内每个库都很小时，`_chunk_kg_overlay`
+      与 PPR 回退照样以 `reason=large_notebook` 拒绝，事件也因此误描述了这次 run 的
+      语料。**不要单独收窄这个守卫**：它守的两张图在无覆盖时仍然按全部挂载库建
+      （`graph_retrieval._federated_rx_graph` 读 `participant_rows`、`_ppr_graph` 读
+      `participant_ids`，库维度是在走查**结果**上由 `scoped_subgraph_nodes` 过滤的），
+      只放松守卫会放行它本来要拒绝的那次构建——小笔记本挂一本 9M 对象的参考库、
+      用户取消勾选它，就会逐库跑 `graph_object_rows`/`graph_relation_rows`/
+      `cluster_member_rows`（`retrieval_service.ppr_retrieve` 的 docstring 记着这条路
+      数十分钟、数 GB，曾在 1.13M 节点库上冻结 reasoning）。所以这是**一次联合改
+      动**：必须先让那两张图按库勾选建，而那是缓存键的独立取舍（论证见
+      `source_scope.scoped_subgraph_nodes` 的 docstring：把 scope 放进键会按勾选组合
+      重建整图）。参与集覆盖在场时守卫已经读座位——因为那时两张图也读座位，守卫与
+      建图口径同源；要修的是无覆盖那一半。
 - [ ] **联邦 KG 的 1-hop 扩展节点不过任何来源级闸（逐库天花板下会漏内容）**：
       `source_scope.scoped_subgraph_nodes` 只判库维度——图节点带的是
       `{type, name, tier, notebook_id}`，没有 `source_id`，所以「这个节点有没有被
@@ -207,6 +223,18 @@
       引文、留名字，不算修好），要么就得给 whole-graph 走查加一条新的按来源闸，
       那是独立一处改动。不要改成「有 peer 天花板就走 restricted 支」——那等于让
       冻结变成收窄，违反 `peer_ceiling_active` 的既定语义。
+- [ ] **横向对比的兄弟实体名不过来源级闸（逐库天花板下会漏名字）**：与上一条同类、
+      方向同样是**多给**。`communities.mounted_base_ids` / `resolve_comparison_peers`
+      只做了**库维度**收窄；一本仍在参与集里的库，如果某个实体只由该库天花板之外的
+      来源（典型是隐藏 Memory / Knowhow 投影）支撑，它的**名字**仍会经
+      `comention_peers` / 社区成员行被取出来，进 `ask_chunk` 的 `sub_queries` 与
+      reasoning 的 `_action_expand_community`，并原样进可见轨迹与 `used_queries`。
+      `mounted_base_ids` 的 docstring 已经写明这条通道泄漏的是**查询词本身**、结果侧
+      过滤补救不了——那条论证对逐库天花板同样成立，只是当时只有库维度一种收窄。
+      今天不可达（生产上没有任何地方构造 `notebook_source_ceilings`）。最小修法：在
+      取名字的入口（`CommunityQueryService.comention_peers` / `community_member_peers`
+      的消费点）按该 owner 的 `source_ceiling_for` 裁掉无可见来源支撑的实体，或在
+      查询层结构性排除隐藏投影支撑的实体。**PR-D 第一个写入方落地之前必须关掉。**
 - [ ] **`evidence_context.knowledge_context` 的 canonical 折叠不认参与集覆盖**：
       它按 `self.notebooks.participant_notebook_ids(notebook_id)` 取折叠范围
       （`backend/app/services/evidence_context.py` 约 821 行，刻意不按 base_scope

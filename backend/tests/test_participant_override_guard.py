@@ -17,7 +17,9 @@
    ``plugin_ask_engine`` 拿到的 ``participant_notebook_ids`` 是组合根注入的
    callable,组合根把它换成一个读座位的 lambda,消费方文件一字未动、组合文件
    也不 import 覆盖模块 —— 前四条全绿而鉴权谓词已经被覆盖感知的座位换掉;
-6. fail-soft 不许吞掉身份复核的 raise。
+6. **登记清单内**的 fail-soft handler 不许吞掉身份复核的 raise(见本文件末尾的
+   `_SEAT_FAILSOFT_SITES`:那是一份人工核出的、try 体能触达参与集座位的清单,
+   不是「所有 handler」;新增一个能触达座位的 fail-soft handler 必须同 diff 登记)。
 
 写入方白名单仍是 ⊆:``global_ask`` 在 PR-D 才接。
 """
@@ -503,10 +505,32 @@ def test_authorization_sites_keep_the_real_mount_predicate():
 # 方文件一字未动、组合文件也不 import 覆盖模块,于是三层守卫全绿,而鉴权谓词已经
 # 变成了覆盖感知的座位。所以实参本身要被钉住:必须是那个谓词的**属性引用**,
 # 不能是 lambda、不能是别的可调用。
-_INJECTION_SITES = {
-    "app/services/repository_runtime.py",
-    "app/services/ask_service.py",
+#
+# 位置实参同样要看:``lambda`` 不必写成关键字实参就能注入进去,而「只遍历
+# ``node.keywords``」的守卫对位置传参是瞎的。所以本节两条一起钉——登记点的关键字
+# 实参必须是属性引用,且这些文件里**任何**提到参与集的 lambda 实参一律报红。
+#
+# 登记到 ``(文件 -> 必须扫到的关键字名)``,而不是「全局至少一个」:后者在某个
+# 文件的注入点被整段删掉时仍然绿。
+_INJECTION_POINTS = {
+    "app/services/repository_runtime.py": frozenset({
+        # knowledge_query / knowledge_lifecycle 的注入。
+        "participant_notebook_ids",
+        # 插件面第一跳。
+        "ask_engine_participant_notebooks",
+    }),
+    "app/services/ask_service.py": frozenset({
+        # 插件面第二跳(PluginRetrievalAccess)。
+        "participant_notebook_ids",
+    }),
 }
+_INJECTION_SITES = frozenset(_INJECTION_POINTS)
+# 注入实参名的后缀:一个新的注入点若沿用这套命名,自动进入检查面。
+_INJECTION_ARG_SUFFIXES = (
+    "participant_notebook_ids", "participant_notebooks",
+)
+# lambda 实参里出现这些名字 = 它在就地合成一份参与集谓词。
+_LAMBDA_RED_FLAGS = ("_retrieval_participants", "participant")
 _PREDICATE_ATTRIBUTE_TAILS = frozenset({
     "participant_notebook_ids",
     # 插件面是两跳注入:组合根把真实谓词放进 ``AskService
@@ -518,52 +542,332 @@ _PREDICATE_ATTRIBUTE_TAILS = frozenset({
 })
 
 
-def _predicate_injection_values(path: str, source: str) -> list[ast.AST]:
-    """所有把谓词注入下去的实参节点(关键字实参 + 直接位置实参)。"""
-    values: list[ast.AST] = []
+def _injection_findings(
+    path: str, source: str
+) -> tuple[set[str], list[str]]:
+    """``(扫到的关键字名, 违规描述)``。
+
+    两类违规:登记的关键字实参不是真实谓词的属性引用;以及**任何**位置或关键字
+    位置上的 lambda 在就地合成参与集谓词——后者是「只遍历 ``node.keywords``」的
+    守卫完全看不见的那一半。
+    """
+    from tests.architecture.semantic_source import dotted_name
+
+    seen: set[str] = set()
+    problems: list[str] = []
     for node in ast.walk(ast.parse(source, filename=path)):
         if not isinstance(node, ast.Call):
             continue
-        for keyword in node.keywords:
-            if keyword.arg and keyword.arg.endswith(
-                ("participant_notebook_ids", "participant_notebooks")
-            ):
-                values.append(keyword.value)
-    return values
+        arguments = [(None, arg) for arg in node.args]
+        arguments += [(kw.arg, kw.value) for kw in node.keywords]
+        for name, value in arguments:
+            if isinstance(value, ast.Lambda):
+                body = ast.dump(value)
+                if any(flag in body for flag in _LAMBDA_RED_FLAGS):
+                    problems.append(
+                        f"{path}: 实参 {name or '<位置>'} 是一个就地合成参与集谓词"
+                        f"的 lambda"
+                    )
+                continue
+            if not name or not name.endswith(_INJECTION_ARG_SUFFIXES):
+                continue
+            seen.add(name)
+            dotted = dotted_name(value)
+            if not dotted.endswith(tuple(_PREDICATE_ATTRIBUTE_TAILS)):
+                problems.append(
+                    f"{path}: 实参 {name} 不是 "
+                    f"{sorted(_PREDICATE_ATTRIBUTE_TAILS)} 的属性引用 "
+                    f"({ast.dump(value)[:100]})"
+                )
+    return seen, problems
 
 
 def test_injected_participant_predicate_is_the_real_mount_predicate():
     """注入下去的参与集谓词必须是真实谓词的属性引用,不得是 lambda 或别的可调用。
 
-    正向证据:每个实参解析成的 dotted 名以 ``participant_notebook_ids`` 结尾。
+    正向证据:**每个登记的注入点**都要被扫到(不是「全局至少一个」——那样某个
+    文件的注入点被整段改名/删掉时守卫仍然绿),且它的实参解析成的 dotted 名以
+    ``participant_notebook_ids`` 结尾。位置实参上的 lambda 同样报红。
     负向证据:组合根里不出现 ``_retrieval_participants``——座位是检索消费边界的
     东西,出现在组合根就意味着它正被喂给某个鉴权消费方。
     """
-    from tests.architecture.semantic_source import dotted_name
-
-    offenders: dict[str, list[str]] = {}
-    seen_any = False
-    for path in sorted(_INJECTION_SITES):
+    problems: list[str] = []
+    for path, expected in sorted(_INJECTION_POINTS.items()):
         source = (_BACKEND / path).read_text(encoding="utf-8")
-        for value in _predicate_injection_values(path, source):
-            seen_any = True
-            name = dotted_name(value)
-            if not name.endswith(tuple(_PREDICATE_ATTRIBUTE_TAILS)):
-                offenders.setdefault(path, []).append(
-                    ast.dump(value)[:120]
+        seen, found = _injection_findings(path, source)
+        problems.extend(found)
+        missing = sorted(expected - seen)
+        if missing:
+            problems.append(
+                f"{path}: 登记的注入点 {missing} 一个都没扫到;改名或删掉了吗?"
+                f"这条登记已经空转"
+            )
+        if "_retrieval_participants" in source:
+            problems.append(
+                f"{path}: 组合根/注入点不得出现检索座位 "
+                f"``_retrieval_participants``"
+            )
+    assert not problems, (
+        "参与集谓词的注入面有问题:\n  " + "\n  ".join(problems)
+        + f"\n消费方里有鉴权路径,注入一个覆盖感知的可调用等于绕过白名单。"
+        f"{_WHITELIST_RATIONALE}"
+    )
+
+
+def test_injection_guard_catches_a_positional_lambda():
+    """正对照:位置传进去的 lambda 必须被抓到,关键字换成 lambda 同样。"""
+    positional, problems = _injection_findings(
+        "x.py",
+        "wire(lambda nb: [i for i, _ in c._retrieval_participants(nb)])\n",
+    )
+    assert positional == set()
+    assert len(problems) == 1 and "<位置>" in problems[0]
+
+    _seen, keyword_problems = _injection_findings(
+        "y.py",
+        "wire(participant_notebook_ids=lambda nb: participants(nb))\n",
+    )
+    assert len(keyword_problems) == 1
+    assert "participant_notebook_ids" in keyword_problems[0]
+
+    # 对照臂:真实谓词的属性引用必须通过。
+    seen, clean = _injection_findings(
+        "z.py", "wire(participant_notebook_ids=store.participant_notebook_ids)\n",
+    )
+    assert seen == {"participant_notebook_ids"} and clean == []
+
+
+# 第 4 层:fail-soft 不许吞掉身份复核的 raise。
+#
+# 座位对「actor 错配 / 无 ambient run」是 **raise** 而不是静默回落,但检索路径
+# 遍地是刻意的 fail-soft ``except Exception``。中间任何一处把它吞掉,一次越权
+# 上下文泄漏就表现成一次「本次检索未命中」的正常回答——正是
+# ``retrieval_participants`` 的 docstring 点名要避免的静默,只是发生在更外一层。
+#
+# 下面是**登记清单**,不是「所有 handler」:每一项都由「这个 try 体能不能触达
+# 参与集座位」这一条判定得来(反向可达性 + 逐处人工复核)。定位用**标记调用名**
+# 而不是行号:行号会漂,而标记调用正是让这个 try 体可达座位的那一个调用。
+#
+# ⚠ 新增一个会触达座位的 fail-soft handler 时,必须在同一个 diff 里登记到这里。
+_SEAT_FAILSOFT_SITES = (
+    # (文件, 函数 qualname, 让它可达座位的标记调用)
+    ("app/services/ask_service.py",
+     "AskService._no_kg_scope_admits_run", "collection_map"),
+    ("app/services/ask_service.py",
+     "AskService._run_reasoning_stage", "execute_reasoning_retrieval_stage"),
+    ("app/services/ask_service.py",
+     "AskService.ask_plugin_engine", "admit_plugin_engine_result"),
+    ("app/services/reasoning_retrieval.py",
+     "ReasoningRetriever._chunk_seed_search", "search_chunks"),
+    ("app/services/reasoning_retrieval.py",
+     "ReasoningRetriever._first_round_search", "search"),
+    ("app/services/reasoning_retrieval.py",
+     "ReasoningRetriever._quota_rerank", "search"),
+    ("app/services/reasoning_retrieval.py",
+     "ReasoningRetriever._first_round_prompt_blocks", "collection_map"),
+    ("app/services/reasoning_retrieval.py",
+     "ReasoningRetriever._action_expand_community", "mounted_base_ids"),
+    ("app/services/reasoning_retrieval.py",
+     "ReasoningRetriever._run_enumeration", "resolve_source_title"),
+    ("app/services/reasoning_retrieval.py",
+     "ReasoningRetriever._run_enumeration", "enumerate_sources"),
+    ("app/services/reasoning_retrieval.py",
+     "ReasoningRetriever.run", "follow_chain"),
+    ("app/services/report_engine.py",
+     "ReportEngine._load_probe_query_results._safe", "loader"),
+    ("app/services/report_engine.py",
+     "ReportEngine._build_corpus_map", "_probe_knowledge_hits"),
+    ("app/services/report_engine.py",
+     "ReportEngine._build_corpus_map", "ppr_retrieve"),
+    ("app/services/report_engine.py",
+     "ReportEngine._deep_dive", "federated_retrieve"),
+    ("app/services/chunk_federation.py", "_run_one", "run"),
+)
+
+_CONTROL_ERROR = "RetrievalControlError"
+
+
+def _called_names(nodes) -> set[str]:
+    names: set[str] = set()
+    for node in nodes:
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call):
+                func = sub.func
+                if isinstance(func, ast.Name):
+                    names.add(func.id)
+                elif isinstance(func, ast.Attribute):
+                    names.add(func.attr)
+    return names
+
+
+def _is_broad(handler: ast.ExceptHandler) -> bool:
+    if handler.type is None:
+        return True
+    parts = (
+        handler.type.elts if isinstance(handler.type, ast.Tuple)
+        else [handler.type]
+    )
+    return any(
+        isinstance(part, ast.Name) and part.id in {"Exception", "BaseException"}
+        for part in parts
+    )
+
+
+def _catches_control_error(handler: ast.ExceptHandler) -> bool:
+    if handler.type is None:
+        return False
+    parts = (
+        handler.type.elts if isinstance(handler.type, ast.Tuple)
+        else [handler.type]
+    )
+    return any(
+        isinstance(part, ast.Name) and part.id == _CONTROL_ERROR
+        for part in parts
+    )
+
+
+def _bare_raise_body(body) -> bool:
+    return any(
+        isinstance(stmt, ast.Raise) and stmt.exc is None for stmt in body
+    )
+
+
+def _reraises_control(handler: ast.ExceptHandler) -> bool:
+    """这个 handler 会不会把控制异常原样放出去?
+
+    三种合格写法,都在生产里真实用到:显式 ``except RetrievalControlError:
+    raise``、无条件 ``raise``(``except BaseException: …; raise``),以及
+    ``if … or isinstance(exc, RetrievalControlError): raise``——最后一种是函数
+    行数天花板为零松弛时唯一不新增行的写法。
+    """
+    if _catches_control_error(handler) and _bare_raise_body(handler.body):
+        return True
+    if handler.body and isinstance(handler.body[-1], ast.Raise) and (
+        handler.body[-1].exc is None
+    ):
+        return True
+    for stmt in ast.walk(ast.Module(body=handler.body, type_ignores=[])):
+        if not isinstance(stmt, ast.If) or not _bare_raise_body(stmt.body):
+            continue
+        if any(
+            isinstance(name, ast.Name) and name.id == _CONTROL_ERROR
+            for name in ast.walk(stmt.test)
+        ):
+            return True
+    return False
+
+
+def _try_is_protected(node: ast.Try) -> bool:
+    if any(
+        _catches_control_error(handler) and _bare_raise_body(handler.body)
+        for handler in node.handlers
+    ):
+        return True
+    broad = [h for h in node.handlers if _is_broad(h)]
+    return bool(broad) and all(_reraises_control(h) for h in broad)
+
+
+def _function_node(tree: ast.Module, qualname: str):
+    target = qualname.split(".")
+    def walk(nodes, path):
+        for node in nodes:
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)):
+                here = [*path, node.name]
+                if here == target:
+                    return node
+                if target[:len(here)] == here:
+                    found = walk(node.body, here)
+                    if found is not None:
+                        return found
+        return None
+    return walk(tree.body, [])
+
+
+def _unprotected_seat_handlers(sources: dict[str, str], sites) -> list[str]:
+    """登记点里「宽 except 没有放行控制异常」的那些,附定位信息。"""
+    problems: list[str] = []
+    for path, qualname, marker in sites:
+        tree = ast.parse(sources[path], filename=path)
+        function = _function_node(tree, qualname)
+        if function is None:
+            problems.append(f"{path}::{qualname} 找不到(改名了吗?守卫会空转)")
+            continue
+        tries = [
+            node for node in ast.walk(function)
+            if isinstance(node, ast.Try)
+            and marker in _called_names(node.body)
+            and any(_is_broad(h) for h in node.handlers)
+        ]
+        if not tries:
+            problems.append(
+                f"{path}::{qualname} 里找不到包住 {marker}() 的宽 except —— "
+                f"调用挪走了,还是 handler 没了?这条登记已经空转"
+            )
+            continue
+        for node in tries:
+            if not _try_is_protected(node):
+                problems.append(
+                    f"{path}::{qualname} 包住 {marker}() 的 fail-soft handler "
+                    f"会吞掉 {_CONTROL_ERROR}"
                 )
-    assert seen_any, (
-        "一个注入点都没扫到;实参名改了吗?守卫会恒真通过。"
-    )
-    assert not offenders, (
-        f"参与集谓词的注入实参不是 {sorted(_PREDICATE_ATTRIBUTE_TAILS)} 的属性"
-        f"引用:{offenders}。消费方里有鉴权路径,注入一个覆盖感知的可调用等于"
-        f"绕过白名单。{_WHITELIST_RATIONALE}"
+    return problems
+
+
+def test_registered_failsoft_handlers_reraise_the_control_error():
+    """登记清单里的每个 fail-soft handler 都必须放行 ``RetrievalControlError``。"""
+    sources = {
+        path: (_BACKEND / path).read_text(encoding="utf-8")
+        for path, _qual, _marker in _SEAT_FAILSOFT_SITES
+    }
+    problems = _unprotected_seat_handlers(sources, _SEAT_FAILSOFT_SITES)
+    assert not problems, (
+        "这些登记的 fail-soft handler 会把参与集覆盖的身份复核失败吞成一次"
+        "「未命中」的正常回答:\n  " + "\n  ".join(problems)
+        + "\n按 ask_service.AskService._no_kg_scope_admits_run 的写法加一条 "
+        "`except RetrievalControlError: raise`(函数受行数天花板约束时,并进既有"
+        "的控制异常元组、或用 `isinstance(exc, RetrievalControlError)` 条件放行)。"
     )
 
-    for path in sorted(_INJECTION_SITES):
-        source = (_BACKEND / path).read_text(encoding="utf-8")
-        assert "_retrieval_participants" not in source, (
-            f"{path} 是组合根/注入点,不得出现检索座位 ``_retrieval_participants``:"
-            f"注入一份覆盖感知的谓词给鉴权消费方,文件本身不用 import 覆盖模块。"
-        )
+
+def test_failsoft_guard_catches_a_removed_reraise():
+    """正对照:删掉 re-raise 必须报红,守卫本身不是摆设。
+
+    三个合成源覆盖三种合格写法各自被拆掉的样子,外加一条「标记调用挪走了」的
+    空转检测。
+    """
+    sources = {
+        "a.py":
+            "def f():\n"
+            "    try:\n"
+            "        seat()\n"
+            "    except Exception:\n"
+            "        return []\n",
+        "b.py":
+            "def f():\n"
+            "    try:\n"
+            "        seat()\n"
+            "    except (AskCancelled, RetrievalControlError):\n"
+            "        raise\n"
+            "    except Exception:\n"
+            "        return []\n",
+        "c.py":
+            "def f():\n"
+            "    try:\n"
+            "        seat()\n"
+            "    except Exception as exc:\n"
+            "        if closed or isinstance(exc, RetrievalControlError):\n"
+            "            raise\n"
+            "        return []\n",
+        "d.py":
+            "def f():\n"
+            "    try:\n"
+            "        other()\n"
+            "    except Exception:\n"
+            "        return []\n",
+    }
+    sites = [(name, "f", "seat") for name in ("a.py", "b.py", "c.py", "d.py")]
+    problems = _unprotected_seat_handlers(sources, sites)
+    assert len(problems) == 2, problems
+    assert "a.py" in problems[0] and "吞掉" in problems[0]
+    assert "d.py" in problems[1] and "空转" in problems[1]

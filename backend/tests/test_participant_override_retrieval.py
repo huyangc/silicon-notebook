@@ -10,6 +10,8 @@ context 本地性),``test_participant_override_guard.py`` 测结构性隔离。�
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.core.config import Settings
@@ -379,13 +381,8 @@ def test_any_base_has_kg_is_unchanged_without_an_override(repo, islands):
     assert repo.retrieval.any_base_has_kg(ids[0]) is False
 
 
-def test_graph_size_guard_ignores_an_unchecked_large_library(repo, islands, monkeypatch):
-    """**行为变化**:取消勾选的大参考库不再把 run 判成 large。
-
-    `_federated_graph_is_large` 过去读挂载表裸清单,于是一个刚被取消勾选的大库
-    仍然让 `_chunk_kg_overlay` / PPR 回退以 `reason=large_notebook` 拒绝,尽管本
-    次 run 要搜的每个库都很小。
-    """
+def test_graph_size_guard_answers_for_the_override_set(repo, islands, monkeypatch):
+    """覆盖在场时守卫读座位 —— 因为那时两张图也读座位,守卫与建图口径同源。"""
     ids, _sources = islands
     active = ids[0]
     candidates = repo.retrieval.candidates
@@ -396,8 +393,9 @@ def test_graph_size_guard_ignores_an_unchecked_large_library(repo, islands, monk
 
     with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
         with participant_override(_override(ids)):
-            # 勾着那个大库 -> 仍然判 large(反向护栏:这不是一刀切关掉)。
+            # 覆盖集里含那本大库 -> 判 large(两张图也会把它建进去)。
             assert candidates._federated_graph_is_large(active) is True
+            # 库维度把它滤掉 -> 覆盖下的两张图同样不会建它,守卫跟着关。
             with source_scope_context(
                 active, None,
                 BaseNotebookScope(mode="include", notebook_ids=[ids[2]]),
@@ -405,8 +403,18 @@ def test_graph_size_guard_ignores_an_unchecked_large_library(repo, islands, monk
                 assert candidates._federated_graph_is_large(active) is False
 
 
-def test_graph_size_guard_also_follows_the_library_checkboxes(repo, monkeypatch):
-    """同一条修复的库维度形态(不需要覆盖):挂载 + 取消勾选那个大库。"""
+def test_graph_size_guard_stays_scope_blind_without_an_override(repo, monkeypatch):
+    """⛔ 无覆盖时**不许**跟着库勾选走:取消勾选的大库仍然判 large。
+
+    这不是漏改。守卫守的那两张图在无覆盖时按**全部挂载库**建
+    (`_federated_rx_graph` 读 `participant_rows`、`_ppr_graph` 读
+    `participant_ids`),只把守卫收窄就会放行它本来要拒绝的那次构建:小笔记本挂
+    一本超大参考库、用户取消勾选它 -> 守卫关 -> 逐库跑
+    `graph_object_rows`/`graph_relation_rows`/`cluster_member_rows`,正是
+    `retrieval_service.ppr_retrieve` 记着的那条数十分钟、数 GB 的路。
+
+    **变异锚点**:让无覆盖分支改读座位 -> 第二条断言从 True 变 False。
+    """
     base = repo.create_notebook(NotebookCreate(name="huge reference"))
     repo.mark_notebook_base(base.id)
     active = repo.create_notebook(NotebookCreate(name="small notebook"))
@@ -421,7 +429,9 @@ def test_graph_size_guard_also_follows_the_library_checkboxes(repo, monkeypatch)
     with source_scope_context(
         active.id, None, BaseNotebookScope(mode="include", notebook_ids=[]),
     ):
-        assert candidates._federated_graph_is_large(active.id) is False
+        assert candidates._federated_graph_is_large(active.id) is True, (
+            "无覆盖时守卫必须与建图口径同源:两张图仍按全部挂载库建"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -555,3 +565,115 @@ def test_assert_override_matches_run_is_the_loud_pre_check(repo, islands):
         with participant_override(_override(ids, actor=_ACTOR)):
             with pytest.raises(ParticipantOverrideError):
                 assert_override_matches_run()
+
+
+def test_reasoning_fail_open_seed_does_not_swallow_the_attestation_failure(
+    repo, islands,
+):
+    """reasoning 的 fail-open 播种臂必须把身份复核的 raise 放出去。
+
+    ``_chunk_seed_search`` 是这一族 handler 的代表:``fail_closed`` 在 Ask 路径
+    恒为 False,所以「吞掉、返回 []」是它的**正常**行为——一条子查询炸掉不该拖垮
+    整轮播种。但覆盖的身份复核失败不是子查询炸了,吞掉它就等于把一次越权上下文
+    泄漏包装成一句「本次检索未命中」。
+
+    **变异锚点**:删掉 ``except RetrievalControlError: raise`` -> 这里返回 ``[]``。
+    """
+    ids, _sources = islands
+    active = ids[0]
+    retriever = _reasoning_retriever(repo)
+    assert retriever.fail_closed is False, "前提:Ask 路径是 fail-open 的"
+
+    with retrieval_run(run_kind="ask_global", actor_id="somebody-else"):
+        with participant_override(_override(ids, actor=_ACTOR)):
+            with pytest.raises(ParticipantOverrideError):
+                retriever._chunk_seed_search(active, _QUERY, 4)
+
+    # 对照臂:普通的检索故障仍然被吞掉,fail-open 语义没有被顺手改掉。
+    class _Boom(RuntimeError):
+        pass
+
+    original = retriever.search_chunks
+    try:
+        retriever.search_chunks = lambda *a, **k: (_ for _ in ()).throw(_Boom())
+        assert retriever._chunk_seed_search(active, _QUERY, 4) == []
+    finally:
+        retriever.search_chunks = original
+
+
+def test_report_probe_loader_does_not_swallow_the_attestation_failure():
+    """报告的覆盖探针 ``_safe`` 同款:普通故障吞掉,控制异常放出去。
+
+    直接调真方法(`ReportEngine._load_probe_query_results`)而不是搭一台完整报告
+    引擎:被测的是它内部那个 ``_safe`` 闭包,替身只需要提供它读的三个协作者。
+    """
+    from types import SimpleNamespace
+
+    from app.services.report_engine import ReportEngine
+
+    load = ReportEngine._load_probe_query_results
+
+    class _Engine:
+        settings = SimpleNamespace(
+            report_retrieval_fanout=1, report_probe_channel_concurrency=1,
+        )
+        _bounded_probe_queries = ReportEngine._bounded_probe_queries
+
+        def __init__(self, error) -> None:
+            self._error = error
+
+        def _probe_knowledge_hits(self, _notebook_id, _query):
+            raise self._error
+
+        def _probe_element_hits(self, _notebook_id, _query):
+            return []
+
+    # 普通故障:吞掉,并把 ok=False 记进结果(既有 fail-open 语义)。
+    groups = load(_Engine(RuntimeError("boom")), "nb", [["q"]], max_queries=2)
+    assert groups and groups[0] and groups[0][0][0] == []
+
+    # 控制异常:向上抛。
+    with pytest.raises(ParticipantOverrideError):
+        load(
+            _Engine(ParticipantOverrideError("attestation failed")),
+            "nb", [["q"]], max_queries=2,
+        )
+
+
+def test_follow_chain_only_passes_participant_ids_under_an_override(repo, islands):
+    """无覆盖时**连关键字都不传**,端口调用形状逐字不变。
+
+    ``participant_ids`` 是给两个内置适配器加的可选参数。每次都显式传
+    ``participant_ids=None`` 会把它变成调用形状的一部分,任何仓库外/插件侧实现
+    该端口的替身都会在每一次 ``follow_chain`` 上 ``TypeError``。
+    """
+    ids, _sources = islands
+    active, peer = ids[0], ids[1]
+    seen: list[dict] = []
+    graph = repo.retrieval.graph
+    original = graph.knowledge.follow_start_row
+
+    def _spy(db, object_id, active_notebook_id, statuses, **kwargs):
+        seen.append(dict(kwargs))
+        return original(db, object_id, active_notebook_id, statuses, **kwargs)
+
+    graph.knowledge = SimpleNamespace(
+        **{
+            name: getattr(graph.knowledge, name)
+            for name in dir(graph.knowledge)
+            if not name.startswith("__")
+        }
+    )
+    graph.knowledge.follow_start_row = _spy
+    try:
+        graph.follow_chain(active, "ko-missing")
+        assert seen == [{}], "无覆盖时不得出现 participant_ids 关键字"
+
+        seen.clear()
+        with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+            with participant_override(_override(ids)):
+                graph.follow_chain(active, "ko-missing")
+        assert len(seen) == 1
+        assert seen[0]["participant_ids"] == [active, peer, ids[2]]
+    finally:
+        graph.knowledge = repo.retrieval.candidates.knowledge

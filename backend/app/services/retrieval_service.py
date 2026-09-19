@@ -87,13 +87,16 @@ class RetrievalService:
         ``filter_retrieval_items`` still drops it here -- only recall/budget
         share is at stake, same as the graph-walk case.
 
-        The size guard this and ``_chunk_kg_overlay`` sit behind
-        (``_federated_graph_is_large``) reads the participant seat, so it now
-        answers for the libraries this run really searches: unchecking a library
-        large enough to trip it does turn the guard back off. The cache-key
-        argument that used to justify the divergence never applied to the guard
-        itself -- it is a per-library ``copyable`` lookup, not a graph build, so
-        consulting the scope costs nothing and publishes nothing.
+        Known, deliberately unfixed limitation: ``_federated_graph_is_large``
+        (the size guard this and ``_chunk_kg_overlay`` sit behind) walks EVERY
+        mounted participant, because the graphs it guards are BUILT over every
+        mounted participant. It cannot consult the per-request scope on its own
+        without either publishing a scope-blind cache under a library-less key
+        or forcing a full multi-million-node rebuild per checkbox combination,
+        so UNCHECKING a library large enough to trip the guard does not turn the
+        guard back off. Narrowing the guard alone would be strictly worse than
+        the current behaviour: the build it admits still reads the unchecked
+        library. Guard and builder move together or not at all.
         """
         return filter_retrieval_items(
             _notebook_id(args, kwargs), "chunk",

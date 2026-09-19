@@ -893,10 +893,18 @@ class GraphRetrievalService(_RetrievalState):
         #    v1: support the common SINGLE base case; if >1 base index exists,
         #    splice them sequentially onto the combined graph.
         #    With a participant override the mount table names a set this run
-        #    does not search, so the seat answers instead (both spellings lead
-        #    with the active notebook, hence the same ``[1:]``); the combined
-        #    graph built from these ids is keyed by the override's fingerprint
-        #    inside ``_scale_combined_graph``.
+        #    does not search, so the seat answers instead; the combined graph
+        #    built from these ids is keyed by the override's fingerprint inside
+        #    ``_scale_combined_graph``.
+        #    Both spellings lead with the active notebook, hence the same
+        #    ``[1:]``. Under an override that is guaranteed, not incidental:
+        #    ``resolve_retrieval_participants`` raises unless this very id is
+        #    the override's ``notebook_ids[0]``, and the seat's library filter
+        #    (``ActiveSourceScope.covers_notebook``) always keeps the scope's
+        #    own notebook. A scope keyed by a DIFFERENT notebook than the id
+        #    passed here would break that -- but such a call raises in the seat
+        #    long before reaching this line, because the override refuses to
+        #    resolve for any active id but its own.
         override = current_participant_override()
         if override is None:
             with self._connect() as db:
@@ -1252,17 +1260,20 @@ class GraphRetrievalService(_RetrievalState):
             # override was attested against a ``can_read_many`` that already
             # passed for this actor, and the seat re-checks that identity on
             # every read (see ``retrieval_participants``' module docstring).
+            # The keyword is passed ONLY when an override is installed. Handing
+            # every call an explicit ``participant_ids=None`` would make the new
+            # parameter part of the call shape, and any out-of-tree or plugin
+            # implementation of this port would start raising ``TypeError`` on
+            # every ``follow_chain``; the no-override path keeps the exact call
+            # it always made.
             override = current_participant_override()
             start = self.knowledge.follow_start_row(
                 db, start_object_id, active_notebook_id, USABLE_STATUSES,
-                participant_ids=(
-                    None if override is None
-                    else [
-                        participant_id
-                        for participant_id, _tier
-                        in self._retrieval_participants(active_notebook_id)
-                    ]
-                ),
+                **({} if override is None else {"participant_ids": [
+                    participant_id
+                    for participant_id, _tier
+                    in self._retrieval_participants(active_notebook_id)
+                ]}),
             )
             if start is None:
                 return FollowChainResult()

@@ -78,6 +78,11 @@ from dataclasses import dataclass, replace
 from typing import Any, Sequence
 
 from app.services.cancellation import AskCancelled
+# Only the NAME, from the dependency-free domain layer: these modules are
+# not on the participant override's frozen reader whitelist, but their
+# fail-soft handlers must re-raise its control exception instead of
+# degrading an identity-attestation failure into an empty result set.
+from app.domain.retrieval_control import RetrievalControlError
 from app.services.global_evidence import peer_evidence
 from app.services.retrieval_run import (
     memoized_retrieval_value, retrieval_fanout_slot,
@@ -609,6 +614,14 @@ def _run_one(candidates, task: _Task):
     except AskCancelled:
         # Cancellation is the user's own decision, never a per-library
         # degradation to swallow.
+        raise
+    except RetrievalControlError:
+        # Nor is a participant-override attestation failure. Registered
+        # defence in depth: the seat is read in the PARENT thread before this
+        # task table exists, so today nothing inside ``_retrieve_for`` can
+        # raise it -- but this is the one handler that turns any per-leg
+        # failure into a silently missing library, so it must not be the
+        # place a future seat read goes to die.
         raise
     except Exception as exc:  # noqa: BLE001 - one library must not fail the arm
         # Emit inside THIS TASK's own context, not the worker thread's bare

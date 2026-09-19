@@ -378,29 +378,48 @@ class _RetrievalState:
         )
 
     def _federated_graph_is_large(self, active_notebook_id: str) -> bool:
-        """Is any library THIS RUN WILL SEARCH too big for the whole-graph lanes?
+        """Is any library the lanes behind this guard WILL BUILD OVER too big?
 
-        Reads the participant seat, so the answer covers exactly the set the
-        run searches -- both dimensions of it. Until PR-C this read the raw
-        mount-table id list and never filtered by `notebook_in_scope`, so a
-        reference library the user had just UNCHECKED still counted toward "is
-        the graph big": with a small active notebook and one huge unchecked
-        library, `_chunk_kg_overlay` / the PPR fallback refused with
-        `reason=large_notebook` although every library the run would touch was
-        small, and the event misdescribed the run's corpus. That divergence was
-        kept deliberately while the refactor that created the seat had to stay
-        behaviour-neutral (fangan_todo.md); a participant override widens the
-        identical gap from the library dimension to any override, so both are
-        closed here in one behaviour change.
+        THE RULE: this guard's participant spelling must be the same one the
+        graphs it guards use. It is not "which libraries does this run search";
+        it is "how big is the graph `_chunk_kg_overlay` / the PPR fallback are
+        about to construct". Answering a narrower question than the builder asks
+        admits a build the guard exists to refuse.
 
-        This only ever RELAXES the guard: the seat's output is a subset of the
-        mount list it used to read, so a run refused before can now be admitted
-        but never the reverse. What the admitted lanes then read is unchanged
-        and still scope-filtered at their own boundaries
-        (`scoped_subgraph_nodes` / `filter_retrieval_items`), so relaxing the
-        guard cannot make an excluded library's content citable -- it only stops
-        that library from disabling lanes over libraries the run really reads.
+        * **No override** -> the raw mount-table id list, UNFILTERED by
+          `notebook_in_scope`, exactly as before PR-C. That is not an oversight
+          and unchecking a huge reference library deliberately does NOT turn the
+          guard back off: `graph_retrieval._federated_rx_graph` still builds
+          from `participant_rows` and `_ppr_graph` still from `participant_ids`,
+          i.e. over EVERY mounted library, checked or not (the library dimension
+          is filtered out of the walk's RESULT by `scoped_subgraph_nodes`, for
+          the process-cache reason argued in its docstring). Filtering here
+          alone would let a small personal notebook with one unchecked 9M-object
+          reference library fall through to a full federated/PPR build --
+          per-participant `graph_object_rows`/`graph_relation_rows`/
+          `cluster_member_rows` over that same huge library, which is the
+          minutes-long, multi-GB path `retrieval_service.ppr_retrieve` documents
+          and which once froze reasoning on a 1.13M-node library.
+        * **Override in place** -> the seat, because with an override BOTH
+          graphs read the seat too (see `_federated_rx_graph`/`_ppr_graph`), so
+          guard and builder stay the same set.
+
+        Making the guard honour the library checkboxes therefore requires
+        making the two graphs build by them first -- which is a cache-key change
+        with its own trade-off (`scoped_subgraph_nodes` explains why the scope
+        is deliberately not in those keys). Registered in `fangan_todo.md` as
+        one joint change; do not relax this half on its own.
         """
+        from app.services.retrieval_participants import (
+            current_participant_override,
+        )
+
+        if current_participant_override() is None:
+            return any(
+                not self.notebook_copy_stats(notebook_id)["copyable"]
+                for notebook_id
+                in self.notebooks.participant_notebook_ids(active_notebook_id)
+            )
         return any(
             not self.notebook_copy_stats(notebook_id)["copyable"]
             for notebook_id, _tier in self._retrieval_participants(
@@ -637,9 +656,28 @@ class _RetrievalState:
         With an override the mount join answers about a set this run does not
         search, so the question is answered over the seat instead: one indexed
         `has_kg` EXISTS per participant, `any()`-short-circuited, bounded by the
-        override's ≤8 libraries. `[1:]` keeps R1 intact -- the BASE dimension
-        only; the seat leads with the nominal active and every caller pairs this
-        with its own `_notebook_has_kg` for the active half.
+        override's ≤8 libraries.
+
+        `[1:]` keeps R1 intact -- the BASE dimension only. It relies on the
+        seat's head being the nominal active, which is guaranteed rather than
+        incidental under an override: `resolve_retrieval_participants` raises
+        unless `active_notebook_id` IS the override's `notebook_ids[0]`, and the
+        library filter's first branch (`ActiveSourceScope.covers_notebook`)
+        always keeps the scope's own notebook. Every caller pairs this with its
+        own `_notebook_has_kg` for the active half.
+
+        ⚠ The override arm does NOT reuse a caller-supplied `database`: no port
+        answers "does THIS notebook have a KG" on a given connection
+        (`has_kg` opens its own; `any_mounted_has_kg_on` answers the mount
+        question), and `ports.py`'s Protocol method count is a zero-slack
+        ceiling, so adding one is a separate, reviewed change. Acceptable today
+        because NO production caller passes `database` to this method -- the
+        three call sites (`_mix_retrieve`, `_build_chunk_retrieval_plan`,
+        `retrieval_service.any_base_has_kg`) all pass the notebook id alone, and
+        the connection-holding consumer is the facade's own
+        `any_mounted_has_kg_compat`, which never reaches here. A future caller
+        that does hold a connection would pay "one held + one borrowed per
+        participant" on PostgreSQL; wire a `has_kg_on(db, nb)` port then.
         """
         from app.services.retrieval_participants import (
             current_participant_override,
