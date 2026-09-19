@@ -39,10 +39,18 @@ Three structural rules this module exists to hold:
   .foreign_notebook_id``), so "empty == active" is the one clean predicate the
   selection layer needs and no new consumer has to remember to normalise.
 
-  The reserve covers the two selection branches this module feeds: MMR (via
-  ``apply_active_reserve`` in ``RetrievalService.select_chunk_candidates``,
-  which also serves ``reasoning_retrieval.search_chunks``) and the quota fuse
-  (via ``_reserve_lanes``).  The ``mix`` branch is NOT covered, and that gap is
+  The reserve is TWO halves with one number between them.  This module
+  withholds the candidates it needs from the cross-library cap
+  (``_withheld_active``) and hands the number downstream on the candidate
+  mapping (``FederatedCollected.active_reserve``); the seats themselves are
+  enforced once per branch, on the FINISHED selection, by the single pure
+  function ``retrieval.enforce_active_floor`` -- reached from the quota fuse
+  (``quota_fuse_baseline_first``) and from MMR (``apply_active_reserve`` in
+  ``RetrievalService.select_chunk_candidates``, which also serves
+  ``reasoning_retrieval.search_chunks``).  Nothing about the reserve lives in
+  ``per_query`` any more: ``ask_chunk`` appends its own keyword/exact groups
+  after this module has produced them, so a rule written into the fusion's
+  INPUTS only binds the inputs this module produced.  The ``mix`` branch is NOT covered, and that gap is
   now a known risk rather than a neutral choice.  The original argument was
   structural -- mix's ordering comes from a rerank MODEL over the whole pool
   and its cut is a token budget, so a reserved seat there has to be carved out
@@ -86,15 +94,19 @@ class FederatedChunkResult:
     """One federated chunk arm's result, shaped like ``_retrieve_chunks_multi``.
 
     ``collected`` -- ``{chunk_id: RetrievedChunk}`` after cross-library merge.
-    ``per_query`` -- the downstream quota fuse's groups.  **One group per
-    sub-query**, exactly as before federation: each library's hits for one
+    A ``FederatedCollected`` (see below) when several libraries took part, so
+    the active-notebook floor travels with the candidates; an ordinary ``dict``
+    on the single-participant short-circuit.
+    ``per_query`` -- the downstream quota fuse's groups: **one group per
+    sub-query**, exactly as before federation.  Each library's hits for one
     sub-query are merged into that sub-query's single group, so the quota a
     sub-query gets does not shrink as libraries are mounted, and each entry
     carries THAT sub-query's own relevance (the merged representative's
-    provenance, this leg's score -- see ``_sub_query_groups``).  Prepended to
-    those are the active notebook's reserved lanes (see ``_reserve_lanes``);
-    with ``chunk_federation_active_reserve = 0``, or on the single-participant
-    short-circuit, there are none and the list is exactly the historical shape.
+    provenance, this leg's score -- see ``_sub_query_groups``).  Nothing else
+    is in this list: the active reserve is NOT expressed here, because
+    ``ask_chunk`` appends its own keyword/exact groups after receiving it and
+    any rule written into the groups is only a rule about the groups this
+    module produced.
     ``ids``/``matrix`` -- the concatenated vector rows, already restricted to
     ``collected`` (the restriction happens per library, before concatenation).
     ``participants`` -- the libraries this call fanned out to, deterministic
@@ -106,6 +118,41 @@ class FederatedChunkResult:
     ids: list
     matrix: Any
     participants: tuple
+
+
+class FederatedCollected(dict):
+    """``{chunk_id: RetrievedChunk}`` that also carries the active-notebook floor.
+
+    An ATTRIBUTE on the mapping rather than a parameter, because there is no
+    parameter to use.  ``ask_chunk``'s multi branch receives this mapping,
+    mutates it in place (``_merge_multi_direct_chunk_hits``), appends its own
+    quota groups and hands the same object to ``quota_fuse_baseline_first`` --
+    and that function is called from inside ``ask_chunk``, which sits under a
+    zero-slack function-length ceiling and may not be edited to thread one more
+    argument through.  The mapping is therefore the only carrier that survives
+    the whole path, and in-place mutation is exactly what keeps it alive.
+
+    ``active_reserve`` is a plain class-level default so that a rebuilt copy
+    (``FederatedCollected(rows)``) is always well-formed; callers that rebuild
+    the mapping must re-attach the value explicitly -- see
+    ``with_active_reserve``.
+    """
+
+    active_reserve: int = 0
+
+
+def with_active_reserve(rows: dict, active_reserve: int) -> dict:
+    """Re-attach the floor to a mapping rebuilt from a federated one.
+
+    Returns the input untouched when there is no floor to carry, so the
+    single-participant and ``CHUNK_FEDERATION_ACTIVE_RESERVE=0`` paths keep
+    handing an ordinary ``dict`` downstream and stay value-identical.
+    """
+    if not active_reserve:
+        return rows
+    carried = FederatedCollected(rows)
+    carried.active_reserve = int(active_reserve)
+    return carried
 
 
 @dataclass(frozen=True)
@@ -671,12 +718,11 @@ def _merge_results(
         min_relevance=min_relevance,
         relative_relevance=relative_relevance,
     )
-    collected = {hit.chunk_id: hit for hit in selected}
-    lanes = _reserve_lanes(candidates, collected)
-    per_query = lanes + _sub_query_groups(
-        per_task, collected, sub_count,
-        reserved={chunk_id for lane in lanes for chunk_id in lane},
+    collected = with_active_reserve(
+        {hit.chunk_id: hit for hit in selected},
+        _reserve_size(candidates.settings, _reserve_k(candidates.settings)),
     )
+    per_query = _sub_query_groups(per_task, collected, sub_count)
     ids, matrix = _merge_selected_matrices(candidates, tasks, parts, collected)
     return FederatedChunkResult(
         collected, per_query, ids, matrix,
@@ -709,8 +755,8 @@ def _select_baseline_then_supplements(
     seven libraries contributing 200 hits each at 1.0 leaves only a handful of
     active candidates in a ``chunk_recall``-sized pool, and neither selection
     branch can then supply the seats ``chunk_federation_active_reserve``
-    promises -- ``apply_active_reserve`` and ``_reserve_lanes`` both draw from
-    that pool.  So ``_reserve_size`` of the active notebook's strongest
+    promises -- ``enforce_active_floor`` draws its replacements from that pool.
+      So ``_reserve_size`` of the active notebook's strongest
     qualified baseline hits are taken out FIRST and the rest of the libraries
     compete for ``chunk_recall - len(kept)``: the promise is paid out of the
     budget rather than on top of it, so the pool never grows.  The withheld
@@ -774,10 +820,19 @@ def _withheld_active(
     second set from the competition too -- see below.
 
     ``_reserve_size`` of them, strongest first, capped by how many qualified
-    baseline hits the active notebook actually has -- the same cap
-    ``_reserve_lanes`` and ``apply_active_reserve`` apply, read from the same
-    two settings, so all three agree on one number without any of them being
-    told it.
+    baseline hits the active notebook actually has -- the same number the
+    finished selection is later held to (``FederatedCollected.active_reserve``
+    -> ``retrieval.enforce_active_floor``), read from the same two settings, so
+    the two halves agree without either being told.  This half only guarantees
+    that the CANDIDATES survive the cross-library cap; the floor itself is
+    enforced once, on the finished selection.
+
+    De-duplicated by ``hit.text`` -- the identity ``peer_evidence`` uses --
+    before the count is taken.  ``_fold_library_pool``'s identity includes
+    ``source_id``, so two active sources holding the same passage keep both
+    copies; withholding both would spend the reserve twice on one piece of
+    evidence, and the copies would then never meet the text de-duplication
+    ``peer_evidence`` would have applied to them.
 
     Identified by ``not hit.notebook_id`` over the flattened pools rather than
     by taking pool 0.  The active notebook IS pool 0 today (the seat guarantees
@@ -825,7 +880,13 @@ def _withheld_active(
     if not ranked:
         return [], set()
     floor = max(min_relevance, _score(ranked[0]) * relative_relevance)
-    qualified = [hit for hit in ranked if _score(hit) >= floor]
+    qualified: list = []
+    seen_text: set = set()
+    for hit in ranked:
+        if _score(hit) < floor or hit.text in seen_text:
+            continue
+        seen_text.add(hit.text)
+        qualified.append(hit)
     unqualified = {
         hit.chunk_id for hit in ranked if _score(hit) < floor
     }
@@ -833,9 +894,7 @@ def _withheld_active(
     return kept, (unqualified if kept else set())
 
 
-def _sub_query_groups(
-    per_task: list, collected: dict, sub_count: int, *, reserved: set,
-) -> list:
+def _sub_query_groups(per_task: list, collected: dict, sub_count: int) -> list:
     """One group per SUB-QUERY, every library's hits for it merged in.
 
     The task table is library-major/sub-query-minor, so task ``i`` answers
@@ -871,10 +930,14 @@ def _sub_query_groups(
     representative object itself whenever they already agree, which is the
     common case and what keeps the single-library values untouched.
 
-    ``reserved`` -- chunk ids the active-reserve lanes already hold.  They are
-    omitted here so that a reserved chunk exists in exactly ONE group and
-    ``quota_fuse``'s assignment cannot be argued with at all; see
-    ``_reserve_lanes``.
+    Nothing about the active reserve appears here.  It used to: a dedicated
+    single-hit group per reserved seat, placed first, which ``quota_fuse``'s
+    round-robin then had to serve.  That construction is only as strong as the
+    group list this module hands over, and ``ask_chunk`` appends its own
+    keyword/exact groups to it afterwards -- a direct hit that re-scores a
+    reserved chunk higher moves it into the new group and the reserved lane
+    ends up empty.  The floor therefore belongs after the fusion, not in its
+    inputs; see ``retrieval.enforce_active_floor``.
 
     Order inside a group is by that sub-query's own score descending, ties
     keeping task order, so it is deterministic; ``quota_fuse`` re-sorts by
@@ -884,8 +947,6 @@ def _sub_query_groups(
     for index, hits in enumerate(per_task):
         bucket = buckets[index % len(buckets)]
         for hit in hits:
-            if hit.chunk_id in reserved:
-                continue
             representative = collected.get(hit.chunk_id)
             if representative is None:
                 continue
@@ -905,57 +966,6 @@ def _as_leg_scored(representative, hit):
     ):
         return representative
     return replace(representative, relevance=hit.relevance, score=hit.score)
-
-
-def _reserve_lanes(candidates, collected: dict) -> list:
-    """The active notebook's reserved seats, as dedicated single-hit groups.
-
-    The product rule is in ``Settings.chunk_federation_active_reserve``: the
-    current notebook is the subject, mounted reference libraries are the
-    supplement, so the active notebook keeps at least ``ceil(k * reserve)`` of
-    the final seats whenever it has qualified candidates at all.
-
-    Why the multi-query branch gets its floor from the DATA rather than from a
-    post-selection repair: that branch's selection is
-    ``quota_fuse_baseline_first``, called directly inside ``ask_chunk`` (a
-    function under a zero-slack length ceiling), so ``per_query`` is the only
-    surface between this module and the seats.  It is also enough to make the
-    floor exact rather than approximate: ``_sub_query_groups`` omits these
-    chunk ids, so each reserved hit exists in exactly ONE group and
-    ``quota_fuse`` has nothing to assign it to but its own lane, which hands it
-    a seat in the very first round-robin round.
-
-    Structural exclusion rather than "the lane happens to hold the highest
-    relevance": once each group carries its own sub-query's score (see
-    ``_sub_query_groups``), relevance comparison stops being a reliable pin.
-    ``prefer_stronger_chunk_candidate`` lets a *lower*-scoring historical row
-    beat a question-only row for the same passage, so a leg's own instance can
-    legitimately out-score the merged representative -- and the lane would lose
-    the tie-break it used to win.  Inflating the lane's relevance instead would
-    put a forged number on the object the answer receives.
-
-    One group per seat (not one group holding them all) is still required:
-    several reserved hits in one group would yield only one per round.
-    Singletons also mean the lanes cannot take MORE than the floor -- any
-    further active hit competes on merit inside its own sub-query group, which
-    is what "at least ``ceil(k * reserve)``, the rest to whoever is strongest"
-    means.
-
-    ``k`` is ``chunk_mmr_k``: ``ChunkRetrievalPlan.fuse_k`` is that same field
-    (its docstring calls the equality an explicit contract), and the single
-    branch's MMR ``k`` is the same one -- so both branches reserve the same
-    share without this module having to be told the caller's ``k``.
-
-    Only baseline (non generated-question-only) hits qualify: a supplemental
-    row is fused in a later phase, so reserving a seat for one would move a
-    seat without moving evidence.  When the active notebook has fewer qualified
-    candidates than the floor, the floor is its actual count -- an empty active
-    notebook reserves nothing and this returns ``[]``.
-    """
-    size = _reserve_size(candidates.settings, _reserve_k(candidates.settings))
-    if not size:
-        return []
-    return [{hit.chunk_id: hit} for hit in _qualified_active(collected.values())[:size]]
 
 
 def _reserve_k(settings) -> int:
@@ -992,43 +1002,22 @@ def _qualified_active(hits) -> list:
 
 
 def apply_active_reserve(settings, selected, pool, k: int) -> list:
-    """Repair one already-made selection so the active notebook holds its floor.
+    """The MMR branch's entry to the ONE floor implementation.
 
-    The MMR branch's counterpart to ``_reserve_lanes``: ``select_chunk_candidates``
-    has both the finished selection and the candidate pool in hand, so the
-    cheapest honest fix is to hand the trailing PEER seats back to the
-    strongest active candidates that MMR passed over, leaving every other
-    position -- and therefore the diversity ordering MMR produced -- untouched.
-
-    Inert by construction where it must be: with a single participant (or
-    ``CHUNK_FEDERATION_ENABLED=0``) every hit is active, so the floor is
-    already met and this returns the same list; with ``reserve = 0`` it does
-    not even look.  The floor is capped by how many qualified active
-    candidates exist, so a notebook whose own library genuinely has nothing to
-    say never evicts real peer evidence.
+    ``RetrievalService.select_chunk_candidates`` calls this after MMR, which on
+    the ``single`` chunk branch is genuinely the finished selection: ``ask_chunk``
+    has already merged its keyword and exact-lookup hits into ``scored`` before
+    asking for the selection, so there is no later producer to defeat the floor
+    the way there is on the multi branch.  All this adds is the settings read --
+    the same ``_reserve_size``/``_reserve_k`` pair the federated merge uses, so
+    both branches reserve one number -- and then it delegates to
+    ``retrieval.enforce_active_floor``, which owns the rule (tail-first peer
+    replacement, supplements given up before evidence, text de-duplication,
+    inert without a peer hit or without a floor).
     """
-    size = _reserve_size(settings, k)
-    if not size:
-        return list(selected)
-    chosen = list(selected)
-    have = sum(1 for hit in chosen if not hit.notebook_id)
-    if have >= size:
-        return chosen
-    seen = {hit.chunk_id for hit in chosen}
-    spare = [
-        hit for hit in _qualified_active(pool) if hit.chunk_id not in seen
-    ]
-    index = len(chosen) - 1
-    for hit in spare[: size - have]:
-        while index >= 0 and not chosen[index].notebook_id:
-            index -= 1
-        if index < 0:
-            # Nothing peer-owned left to hand back; the selection is already
-            # as local as its inputs allow.
-            break
-        chosen[index] = hit
-        index -= 1
-    return chosen
+    from app.services.retrieval import enforce_active_floor
+
+    return enforce_active_floor(selected, pool, _reserve_size(settings, k))
 
 
 def _fold_library_pool(groups: list) -> list:

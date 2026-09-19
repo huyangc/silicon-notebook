@@ -283,21 +283,32 @@ class RetrievalService:
         子查询折叠后的最大值会让同一条候选在每组并列,``quota_fuse`` 的并列取
         最小下标于是把重叠的召回窗整片塌进第一组,后面的查询方向一席不得。
 
-        组前面还会有「当前笔记本保底组」:每个保底席位一个单命中组,round-robin
-        第一轮就把它们发出去。详见 ``chunk_federation._reserve_lanes``;
-        ``CHUNK_FEDERATION_ACTIVE_RESERVE=0`` 或单参与者短路时一个都没有,组序
-        逐字是今天的样子。调用方(``ask_chunk`` 的 multi 分支)不需要任何改动。
+        分组里**不含**任何保底组:``ask_chunk`` 在拿到这份 ``per_query`` 之后还会
+        追加自己的关键词/精确命中分组,所以写进分组里的规则只是「关于本模块交出
+        的那几组」的规则。当前笔记本的保底改在**融合之后**执行一次,见
+        ``retrieval.enforce_active_floor``;它的 floor 由返回的 ``collected``
+        自己带着(``chunk_federation.FederatedCollected.active_reserve``)。
+
+        ⚠ 这里按来源范围重建 ``collected`` 之后必须把那个属性接回去
+        (``with_active_reserve``),否则保底在这一跳就静默丢了。单参与者短路或
+        ``CHUNK_FEDERATION_ACTIVE_RESERVE=0`` 时它返回的仍是普通 ``dict``,
+        下游逐值不变。
         """
-        from app.services.chunk_federation import federated_chunk_candidates
+        from app.services.chunk_federation import (
+            federated_chunk_candidates, with_active_reserve,
+        )
 
         result = federated_chunk_candidates(self.candidates, notebook_id, list(queries))
         collected, per_query = result.collected, result.per_query
         ids, matrix = result.ids, result.matrix
-        allowed = {
-            item.chunk_id: item for item in filter_retrieval_items(
-                notebook_id, "chunk", collected.values()
-            )
-        }
+        allowed = with_active_reserve(
+            {
+                item.chunk_id: item for item in filter_retrieval_items(
+                    notebook_id, "chunk", collected.values()
+                )
+            },
+            getattr(collected, "active_reserve", 0),
+        )
         filtered_per_query = [
             {chunk_id: item for chunk_id, item in rows.items() if chunk_id in allowed}
             for rows in per_query
@@ -325,9 +336,14 @@ class RetrievalService:
         MMR 只认候选自己的 ``relevance``,而联邦召回把「几篇短文的当前库」和
         「一个 40 条强命中的参考库」放进了同一个池子:``chunk_mmr_k`` 个席位会
         整片落在参考库,用户问自己刚上传的文档却一条自己的原文都拿不到。保底在
-        MMR **之后**做(``chunk_federation.apply_active_reserve``),因为 MMR 的
-        多样性排序本身不该被改写——只把排在最后的若干个参考库席位换成当前库
-        最高分的落选候选,其余位置一字不动。
+        MMR **之后**做(``chunk_federation.apply_active_reserve`` → 与 multi 分支
+        共用的 ``retrieval.enforce_active_floor``),因为 MMR 的多样性排序本身不该
+        被改写——只把排在最后的若干个参考库席位换成当前库最高分的落选候选,其余
+        位置一字不动。
+
+        这一层就是 single 分支的**最终选择**:``ask_chunk`` 在调本方法之前已经把
+        关键词与精确命中并进了 ``scored``,所以不存在「之后还有生产者把保底绕过去」
+        的问题(multi 分支有,所以那边的保底落在融合之后)。
 
         单参与者(或 ``CHUNK_FEDERATION_ENABLED=0``)时每条候选都属于当前库,
         保底恒自动满足,这里逐值回到改动之前。
