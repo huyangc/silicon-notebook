@@ -54,8 +54,10 @@ test("knowhow 与未索引提示使用对象统称", () => {
 
 
 test("引用提示使用对象统称", async () => {
-  const answerPanel = await parseModule("answer-panel.tsx");
-  const titles = stringLiterals(answerPanel)
+  // 这两句 title 住在引用小卡片里；那张卡从 answer-panel.tsx 抽成了自己的模块
+  // （citation-card.tsx），全局问答与笔记本内问答共用同一份实现。
+  const citationCard = await parseModule("citation-card.tsx");
+  const titles = stringLiterals(citationCard)
     .filter((value) => value.includes("引用") && value.includes("绑定"));
 
   assert.equal(titles.length, 2);

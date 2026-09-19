@@ -1,16 +1,14 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowUp, BookOpen, Check, ChevronRight, Copy, FileText, Layers3, LoaderCircle, MessageSquare, PanelLeft, Plus, Square, X } from "lucide-react";
+import { ArrowUp, BookOpen, Check, ChevronRight, Copy, FileText, Layers3, LoaderCircle, MessageSquare, PanelLeft, Plus, Square } from "lucide-react";
 import { PageHeader } from "../components/PageHeader";
 import { AnswerMarkdown, type AnswerReference } from "../answer-markdown";
-import { buildAnswerReferences } from "../answer-formatting";
 import { ChatAnswer } from "../chat-answer";
 import { ChatQuestion } from "../chat-question";
 import { askQuestionLimitHint } from "../ask-api";
-import { toUserMessage } from "../errors";
-import { getGlobalCitation, type GlobalJob } from "../global-ask-api";
-import type { SourceElement } from "../workspace-model";
+import { CitationPopover } from "../citation-card";
+import { type GlobalJob } from "../global-ask-api";
 import { GlobalConversationList } from "./conversation-list";
 import { NotebookScopePicker } from "./notebook-scope-picker";
 import { GlobalCoverageReceipt } from "./global-coverage-receipt";
@@ -19,7 +17,10 @@ import { useCopyResult } from "../copy-result";
 import { notebookHash } from "../memory-model";
 import "./global-ask.css";
 
-type EvidenceSelection = { jobId: string; reference: AnswerReference };
+/** 当前打开的引用小卡片：哪一轮问答的哪一条引用，以及它那枚行内标记的视口 rect
+ *  （`CitationPopover` 按它定位）。jobId 一起记，同一条会话里多轮问答的行内标记
+ *  选中高亮才不会串到别的轮次上。 */
+type CiteSelection = { jobId: string; reference: AnswerReference; rect: DOMRect };
 const suggestions = [
   { title: "汇总一个主题", question: "围绕同一个主题，各笔记本有哪些关键结论？", icon: Layers3 },
   { title: "比较不同观点", question: "资料中有哪些相互补充或存在分歧的观点？请标明来源。", icon: BookOpen },
@@ -29,27 +30,25 @@ const suggestions = [
 export default function GlobalAskWorkspace({ compact = false, embedded = false, active = true, controls, onOpenNotebook }: { compact?: boolean; embedded?: boolean; active?: boolean; controls?: ReactNode; onOpenNotebook?: () => void }) {
   const ask = useGlobalAsk({ syncUrl: !embedded, active });
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [selected, setSelected] = useState<EvidenceSelection | null>(null);
-  const [element, setElement] = useState<SourceElement | null>(null);
-  const [evidenceError, setEvidenceError] = useState("");
-  const [evidenceRevision, setEvidenceRevision] = useState(0);
+  const [cite, setCite] = useState<CiteSelection | null>(null);
   const copyResult = useCopyResult();
   const [copying, setCopying] = useState("");
   const copyFlight = useRef<number | null>(null);
   const copyOwner = useRef(0);
   const composer = useRef<HTMLTextAreaElement>(null);
-  const reader = useRef<HTMLElement>(null);
   const transcript = useRef<HTMLDivElement>(null);
   const names = new Map(ask.notebooks.map((notebook) => [notebook.id, notebook.name]));
+  // 引用卡按 id→name 查所属库名（跨库徽章）。`names` 那份 Map 是覆盖回执的既有
+  // 形状，这里只换成卡片要的 Record，不另起一份真源。
+  const notebookNames = Object.fromEntries(names);
   const busy = ask.loading || ask.opening || ask.submitting || ask.stopping;
   const composerDisabled = busy || ask.openFailed;
   const hint = askQuestionLimitHint(ask.draft.trim());
-  const selectedValue = selected?.reference.anchor ?? selected?.reference.citation;
   const selectedNotebookIds = ask.scope.mode === "include" ? new Set(ask.scope.notebook_ids) : null;
   const excludesPreviousContext = selectedNotebookIds !== null
     && ask.turns.some((turn) => turn.resolved_notebook_ids.some((id) => !selectedNotebookIds.has(id)));
 
-  useEffect(() => { setSelected(null); }, [ask.conversationId]);
+  useEffect(() => { setCite(null); }, [ask.conversationId]);
   useLayoutEffect(() => {
     ++copyOwner.current;
     copyFlight.current = null;
@@ -57,21 +56,35 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
     setCopying("");
     return () => { ++copyOwner.current; };
   }, [ask.conversationId, copyResult.reset]);
+  // 卡片打开时 Esc 只关卡片，不能连带把整个全局问答浮窗关掉。
+  // 浮窗是一个 <dialog>：小窗形态用 `.show()`，全屏形态用 `.showModal()`，两种形态
+  // 都在 dialog 上挂了 onKeyDown（requestClose）、模态还会走原生 close request
+  // （onCancel）。所以这里必须在任何人之前把这一次 Esc 吃掉：
+  //  · **window 捕获期**而不是 React 的冒泡期——React 18 把监听挂在根容器（dialog
+  //    的祖先）上，冒泡期拦截赶不上焦点恰好落在 dialog 元素自身的那一路；捕获期在
+  //    整条派发路径的最前面，React 的合成事件根本不会被触发。
+  //  · `preventDefault()` 同时掐掉模态 <dialog> 的原生 close request（Esc 的默认
+  //    动作），否则全屏形态下卡片关了、窗口也跟着关。
+  // 卡片自己挂在 window 冒泡期的那个 Escape 监听因此不会再跑（事件到不了），
+  // 关闭动作由这里代劳，语义完全一致。
+  //
+  // ⚠ 浮窗收起后本组件**仍然挂载**（launcher 的 `started` 不回 false），所以卡片
+  // 必须随 `active` 一起收掉：否则这个捕获期监听会留在 window 上，把宿主页面的下一次
+  // Esc（来源详情、图片预览、设置面板……它们都挂在冒泡期）整个吞掉；重开浮窗时
+  // 卡片还会按几分钟前的旧视口坐标悬着。
+  useEffect(() => { if (!active) setCite(null); }, [active]);
   useEffect(() => {
-    if (!selected) return;
-    let disposed = false;
-    setElement(null);
-    setEvidenceError("");
-    reader.current?.focus();
-    const id = selected.reference.anchor?.element_id ?? selected.reference.citation?.element_id;
-    if (!id) { setEvidenceError("这条引用暂时无法定位原文，请重新提问。"); return; }
-    void getGlobalCitation(selected.jobId, id).then((value) => {
-      if (!disposed) setElement(value);
-    }).catch((cause) => {
-      if (!disposed) setEvidenceError(toUserMessage(cause, "原文加载失败，请重试"));
-    });
-    return () => { disposed = true; };
-  }, [selected, evidenceRevision]);
+    if (!cite || !active) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      // 输入法合成期的 Esc 是「取消候选」，不是「关卡片」。
+      if (event.key !== "Escape" || event.isComposing) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setCite(null);
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [cite, active]);
   useEffect(() => {
     if (ask.running) transcript.current?.scrollTo({ top: transcript.current.scrollHeight, behavior: "smooth" });
   }, [ask.running?.job_id]);
@@ -98,7 +111,7 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
       <button className="sort-button" onClick={() => setHistoryOpen(!historyOpen)} aria-expanded={historyOpen}><PanelLeft size={16} />历史对话</button>
       <button className="sort-button" disabled={busy} onClick={() => { ask.newConversation(); setHistoryOpen(false); }}><Plus size={16} />新建对话</button>
     </div>
-    <div className={`global-layout${selected ? " has-evidence" : ""}`}>
+    <div className="global-layout">
       <div className={`global-history-wrap${historyOpen ? " mobile-open" : ""}`}>
         <GlobalConversationList items={ask.conversations} activeId={ask.conversationId} disabled={busy}
           more={ask.moreHistory} loadingMore={ask.loadingHistory} error={ask.historyError}
@@ -124,14 +137,8 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                   <div className="global-answer-label"><span className="global-answer-mark">SN</span><strong>综合回答</strong><span>引用来自 {job.cited_notebook_ids.length} 个笔记本</span></div>
                   {job.response.grounded !== true && <p className="global-answer-grounding" role="note">以下回答未得到原文充分支持，请结合引用核对。</p>}
                   <AnswerMarkdown answer={job.response.answer} anchors={job.response.anchors} citations={job.response.citations}
-                    selectedReferenceId={selected?.jobId === job.job_id ? selected.reference.id : null}
-                    onReferenceClick={(reference) => setSelected({ jobId: job.job_id, reference })} />
-                  <div className="global-citation-list">{buildAnswerReferences(job.response.answer, job.response.anchors, job.response.citations).map((reference) => {
-                    const value = reference.anchor ?? reference.citation;
-                    return <button key={reference.id} className="global-citation" onClick={() => setSelected({ jobId: job.job_id, reference })}>
-                      <FileText size={14} /><span>{names.get(value?.notebook_id ?? "") ?? "笔记本"}<small>{reference.anchor?.source_title ?? reference.citation?.label ?? reference.displayLabel}</small></span><ChevronRight size={13} />
-                    </button>;
-                  })}</div>
+                    selectedReferenceId={cite?.jobId === job.job_id ? cite.reference.id : null}
+                    onReferenceClick={(reference, event) => setCite({ jobId: job.job_id, reference, rect: event.currentTarget.getBoundingClientRect() })} />
                   <footer className="global-answer-footer"><small>{job.response.completeness_notice}</small><button aria-label="复制回答" className={copyResult.resultFor(job.job_id) === "copied" ? "global-text-button copy-result-copied" : copyResult.resultFor(job.job_id) === "failed" ? "global-text-button copy-result-failed" : "global-text-button"} disabled={Boolean(copying)} onClick={() => void copyAnswer(job)}>{copyResult.resultFor(job.job_id) === "copied" ? <Check size={13} /> : <Copy size={13} />}<span role="status">{copying === job.job_id ? "复制中…" : copyResult.resultFor(job.job_id) === "copied" ? "已复制" : copyResult.resultFor(job.job_id) === "failed" ? "复制失败" : "复制"}</span></button></footer>
                 </ChatAnswer> : <div className={`global-job-status${job.status === "failed" ? " failed" : ""}`} role="status">
                   {job.status === "running" && <LoaderCircle size={18} className="global-spin" />}
@@ -157,15 +164,28 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
           <p className={`global-composer-hint${hint ? " invalid" : ""}`}>{hint || (ask.notebooks.length ? "答案来自所选范围的原文 · Enter 发送，Shift + Enter 换行" : "还没有可访问的笔记本，请先返回主页添加资料。")}</p>
         </div>
       </main>
-      {selected && <aside className="global-evidence" ref={reader} tabIndex={-1} aria-label="引用原文" onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setSelected(null); } }}>
-        <div className="global-evidence-heading"><span><FileText size={17} />引用原文</span><button className="icon-button" aria-label="关闭引用原文" onClick={() => setSelected(null)}><X size={18} /></button></div>
-        <div className="global-evidence-body"><p className="global-evidence-notebook"><BookOpen size={14} />{names.get(selectedValue?.notebook_id ?? "") ?? "来源笔记本"}</p>
-          <h2>{selected.reference.anchor?.source_title ?? selected.reference.citation?.label ?? "引用来源"}</h2>
-          <small>{element?.location_label ?? selectedValue?.location_label}</small>
-          {element && selectedValue?.notebook_id && <a className="global-original-link" href={`/${notebookHash(selectedValue.notebook_id, element.source_id)}`} onClick={onOpenNotebook}>在笔记本中打开 <ChevronRight size={13} /></a>}
-          {evidenceError ? <div className="global-inline-error" role="alert">{evidenceError}<button className="global-text-button" onClick={() => setEvidenceRevision((value) => value + 1)}>重试</button></div> : element ? <div className="global-original-text">{element.text}</div> : <div className="global-loading" role="status"><LoaderCircle size={18} className="global-spin" />正在读取原文…</div>}
-        </div>
-      </aside>}
     </div>
+    {/* 引用小卡片。与笔记本内问答**同一个组件**，所以两个面的界面与逻辑逐字一致；
+        全局问答额外给它一个「打开笔记本」出口。
+        ⚠ 就地渲染、不走 portal：全屏形态下浮窗是 top layer 里的模态 <dialog>，
+        渲染在它子树之外的 fixed 元素会被整个盖住且不可交互。挂在这里（仍在
+        `.global-ask-page` 之内）两种形态都成立；`.global-ask-window` 没有
+        transform/contain 一类会改变 fixed 定位包含块的样式，卡片用的视口坐标
+        （placeCitationPopover）因此是准的，也不会被 dialog 的 overflow:hidden 裁掉。
+        ⚠ notebookId 传 null：全局问答没有「当前笔记本」，也就没有可用的资产代理
+        端点。附图区因此整块不渲染（与「无附图」等价）——绝不拿引用自己的
+        notebook_id 去直连另一个库的资产，那是前端替用户猜权限。
+        onOpenSource / onOpenKnowledgeGraph / onOpenKnowhowRow / importController
+        同理一概不传：这些入口都只在某个笔记本的工作区里才有承接方，缺席时卡片
+        优雅降级成「不渲染那颗按钮」。 */}
+    {cite && <CitationPopover
+      reference={cite.reference}
+      notebookId={null}
+      notebookNames={notebookNames}
+      notebookHref={(notebookId, sourceId) => `/${notebookHash(notebookId, sourceId)}`}
+      onOpenNotebook={onOpenNotebook}
+      anchorRect={cite.rect}
+      onClose={() => setCite(null)}
+    />}
   </div>;
 }
