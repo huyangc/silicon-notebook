@@ -14,6 +14,7 @@
 自己**的 PPR / 私有 Memory / 社区报告 / 弱支撑关系 / 精确章节 / 报告整库画像；用户
 只是少借一个参考库，不该为此付出「当前库检索能力被砍」的代价。
 """
+import contextlib
 from types import SimpleNamespace
 
 import pytest
@@ -31,6 +32,7 @@ from app.models.notebooks import NotebookRef, NotebookSummary
 from app.models.source_scope import BaseNotebookScope, SourceScope
 from app.services.retrieval import RetrievedChunk, RetrievedKnowledge
 from app.services.kg.follow_chain import ChainHop, FollowChainResult, InferredChain
+from app.services.retrieval_candidates import CandidateRetrievalService
 from app.services.retrieval_service import RetrievalService
 from app.services.source_scope import (
     ActiveSourceScope,
@@ -694,7 +696,15 @@ class _KgProbeCandidates:
 
     ``_any_base_notebook_has_kg`` 模拟真实实现:一条跨**全部有效挂载库**的 mount-join
     EXISTS —— 它答不了「这次勾了的库里有没有图」,这正是被测的缺陷。
+
+    参与集从**真实座位**取:``_retrieval_participants`` / ``_mount_participants``
+    直接借 ``CandidateRetrievalService`` 的真方法,替身只提供它们要的两个协作者
+    (``_connect`` 与 ``notebooks.participant_tiers``)。自己另写一份座位就测不到
+    「这道闸到底读没读座位」——而那正是它与直调挂载谓词的区别。
     """
+
+    _retrieval_participants = CandidateRetrievalService._retrieval_participants
+    _mount_participants = CandidateRetrievalService._mount_participants
 
     def __init__(self, *, mounted, with_kg):
         self._mounted = list(mounted)
@@ -702,12 +712,23 @@ class _KgProbeCandidates:
         self.mount_join_calls = 0
         self.probed: list[str] = []
         self.notebooks = SimpleNamespace(
-            participant_notebook_ids=self._participant_notebook_ids
+            participant_notebook_ids=self._participant_notebook_ids,
+            participant_tiers=self._participant_tiers,
         )
+
+    def _connect(self):
+        return contextlib.nullcontext(None)
 
     def _participant_notebook_ids(self, active_notebook_id):
         # resolve_participants 的形状:首项恒为 active 本身。
         return [active_notebook_id, *self._mounted]
+
+    def _participant_tiers(self, db, active_notebook_id):
+        notebook_ids = self._participant_notebook_ids(active_notebook_id)
+        return notebook_ids, {
+            notebook_id: ("personal" if index == 0 else "base")
+            for index, notebook_id in enumerate(notebook_ids)
+        }
 
     def _notebook_has_kg(self, notebook_id):
         self.probed.append(notebook_id)

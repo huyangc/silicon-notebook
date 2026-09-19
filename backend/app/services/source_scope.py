@@ -513,6 +513,36 @@ def source_scope_ceiling_active() -> bool:
     return bool(scope and scope.ceiling_active)
 
 
+def peer_scope_ceiling_active() -> bool:
+    """FILTERING question, PER-NOTEBOOK dimension: does any participant carry a
+    frozen source ceiling of its own on this run?
+
+    The third of three questions this module answers, and the three are not
+    interchangeable:
+
+    * ``source_scope_ceiling_active()`` -- "is the ACTIVE notebook's own
+      checkbox snapshot binding?"  One notebook, the local mode/source_ids
+      pair.
+    * ``base_scope_ceiling_active()`` -- "is a frozen reference-LIBRARY
+      allow-list binding?"  The library dimension: which participants are in at
+      all, never which sources inside one.
+    * this one -- "is ANY notebook, active or peer, bounded to a frozen source
+      list of its own?"  The per-notebook dimension a federated run uses to
+      freeze each participant's visible sources.
+
+    A federated run submits neither of the first two (no local checkboxes, no
+    library checkboxes), so a gate that asks only those two skips its whole
+    filter and every out-of-ceiling row survives.  That is why this exists as a
+    peer of them rather than as something folded into either.
+
+    ⛔ There is deliberately no ``peer_scope_restricted()``: freezing each
+    participant's currently visible sources is not a narrowing and must never
+    switch a channel off (see ``ActiveSourceScope.peer_ceiling_active``).
+    """
+    scope = current_source_scope()
+    return bool(scope and scope.peer_ceiling_active)
+
+
 def base_scope_restricted() -> bool:
     """CHANNEL question, LIBRARY dimension: did this run really shrink the
     mounted-reference-library selection?
@@ -786,8 +816,10 @@ def filter_retrieval_items(
     # of the loop because it is a per-run fact, and widened past
     # ``ceiling_active`` alone because a per-notebook ceiling on the active
     # notebook empties evidence exactly the way the local one does -- see where
-    # the knowledge/relation branch consults it below.
-    active_ceiling_binds = (
+    # the knowledge/relation branch consults it below.  It answers for the
+    # ACTIVE notebook only; a peer's own answer is per-item and is computed
+    # inside the loop, because each participant carries its own ceiling.
+    active_source_ceiling_binds = (
         scope.ceiling_active
         or scope.source_ceiling_for(active_notebook_id) is not None
     )
@@ -827,22 +859,37 @@ def filter_retrieval_items(
                 else getattr(item, "evidence", ())
             ) or ()
             evidence = filter_evidence(origin, raw_evidence)
-            # "No surviving evidence" disqualifies an ACTIVE-notebook node
-            # whenever A SOURCE CEILING is what emptied it -- the local
-            # mode/source_ids one or a per-notebook one naming this same
-            # notebook; both filter through ``allows()`` and both are the
-            # user's own frozen selection.  When NEITHER is in force (a
-            # base-only run supplies no source scope at all), nothing
-            # source-shaped was filtered and this loop is running solely
-            # because of the library dimension -- dropping an
-            # already-evidence-less active node there would be a filtering
+            # "No surviving evidence" disqualifies a node whenever A SOURCE
+            # CEILING IS WHAT EMPTIED IT.  The question is asked about the
+            # node's OWN library, never about the nominal active one: the
+            # active notebook answers it with the local mode/source_ids ceiling
+            # or a per-notebook one naming itself, a peer answers it with its
+            # own per-notebook ceiling, and both filter through ``allows()``.
+            #
+            # ⛔ Do NOT collapse this back to ``origin != active_notebook_id``.
+            # That spelling fails OPEN for every peer: ``_federated_retrieve_
+            # relations_impl`` runs an ANN/FTS relation probe that is NOT
+            # source-partitioned, so a peer relation supported only by that
+            # library's hidden Memory projection is recalled, has its evidence
+            # emptied here by the peer's ceiling, and would then be kept with
+            # empty evidence -- and ``evidence_context.knowledge_context()``
+            # never reads ``hit.evidence``: it re-queries ``node_context(origin,
+            # object_id)`` for the definition/snippet and mints a live ``k{n}``
+            # anchor.  The same datum would get opposite verdicts depending on
+            # which library it came from.
+            #
+            # When no source ceiling binds the origin (a base-only run supplies
+            # no source scope at all), nothing source-shaped was filtered and
+            # this loop is running solely because of the library dimension --
+            # dropping an already-evidence-less node there would be a filtering
             # decision the user never asked for (before these fields existed
             # the whole function short-circuited).
-            if (
-                origin != active_notebook_id
-                or not active_ceiling_binds
-                or evidence
-            ):
+            source_ceiling_binds_origin = (
+                active_source_ceiling_binds
+                if origin == active_notebook_id
+                else scope.source_ceiling_for(origin) is not None
+            )
+            if evidence or not source_ceiling_binds_origin:
                 if isinstance(item, dict):
                     out.append({**item, "evidence": evidence})
                     continue
@@ -874,9 +921,36 @@ def scoped_subgraph_nodes(subgraph: Iterable[Any]) -> list[Any]:
     influence WHICH allowed nodes surface, but none of its own content reaches
     the rendered context or becomes citable.  Deliberately accepted.
 
-    Only the library dimension is consulted: a locally narrowed run never gets
-    here at all (both callers replace the whole-graph walk with isolated
-    source-bounded seeds when ``source_scope_restricted()``).
+    ⚠ ONLY THE LIBRARY DIMENSION IS DECIDED HERE, and the old wording for that
+    ("a locally narrowed run never gets here at all") is no longer the whole
+    truth, so do not lean on it.  It described one shape -- a run that narrowed
+    LOCAL sources, where both callers replace the whole-graph walk with isolated
+    source-bounded seeds because ``source_scope_restricted()`` is True.  A run
+    whose only ceiling is the PER-NOTEBOOK one reaches this function with
+    ``restricted is False`` by deliberate design (see
+    ``ActiveSourceScope.restricted``: freezing each participant's visible
+    sources is not a narrowing and must not switch channels off), so the
+    whole-graph walk runs and its nodes arrive here.
+
+    This function cannot judge them.  A graph node carries
+    ``{type, name, tier, notebook_id}`` and no ``source_id``, so "is this node
+    supported by a source inside its library's ceiling" is a question with no
+    answer in the data it receives.  It therefore answers the library question
+    only and leaves the source question OPEN for the walk result.
+
+    Who does own it, and what is still open: the seeds are safe --
+    ``federated_retrieve``/``federated_retrieve_relations`` intersect
+    ``scoped_allowed_source_ids`` per participant and are then re-checked by
+    ``filter_retrieval_items``, whose knowledge/relation branch drops a node
+    whose own library's ceiling emptied its evidence.  What the 1-hop EXPANSION
+    adds is not: ``render_subgraph_context`` writes each expanded node's NAME and
+    the incoming edge's first evidence QUOTE into the prompt behind a live
+    ``k{n}`` anchor, and neither passes any source-level gate.  With a peer
+    ceiling in force that is a peer library's content reaching the prompt from
+    sources the ceiling excluded.  Unreachable today (nothing in production
+    constructs ``notebook_source_ceilings`` yet) and registered in
+    ``fangan_todo.md`` with the minimum fix; it must be closed before the first
+    writer installs one.
 
     ONE STATED PREMISE, because the filter fails OPEN on it: a node carrying no
     ``notebook_id`` is kept.  That is safe only because every node the walk can

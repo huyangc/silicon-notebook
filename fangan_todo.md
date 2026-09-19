@@ -187,14 +187,35 @@
       数量为上限。刻意不在联邦 PR 里做：那个函数的 reserve 规则是独立一处改动。
 - [ ] BM25 / FTS5 / tsvector 全文索引：已评估为低 ROI、基础设施级，暂缓。
 - [ ] 结构化硬过滤：软加权已够用，硬过滤有清空结果风险，暂缓。
-- [ ] **`_federated_graph_is_large` 把取消勾选的参考库也算进「图是否过大」**：这个
-      判据（`backend/app/services/retrieval_candidates.py`，函数内注释已逐字写明）
-      读的是挂载表的裸 id 清单，从不过 `notebook_in_scope`。于是一个刚被用户取消
-      勾选的大参考库仍然把它撑成「大图」，本次 run 范围内每个库都很小时，
-      `_chunk_kg_overlay` 与 PPR 回退照样以 `reason=large_notebook` 拒绝，事件也
-      因此误描述了这次 run 的语料。建这个参与集座位时刻意没动它（那次重构必须
-      零行为变化），改它是行为变更；留到「参与集覆盖」那一步和图/PPR 的其它参与集
-      读点一起统一口径——那一步把同一个缺口从「库维度」扩大到「任意覆盖」。
+- [ ] **联邦 KG 的 1-hop 扩展节点不过任何来源级闸（逐库天花板下会漏内容）**：
+      `source_scope.scoped_subgraph_nodes` 只判库维度——图节点带的是
+      `{type, name, tier, notebook_id}`，没有 `source_id`，所以「这个节点有没有被
+      该库天花板之内的来源支撑」这个问题它无从回答。种子那一侧是安全的
+      （`federated_retrieve` / `federated_retrieve_relations` 逐参与库与
+      `scoped_allowed_source_ids` 求交，再经 `filter_retrieval_items` 按每条命中
+      自己那一库的天花板复核）；1-hop **扩展**出来的节点不是：
+      `render_subgraph_context` 会把它的**名字**与入边的第一条证据**引文**写进
+      提示词、并铸一个活的 `k{n}` 锚点。有逐库天花板在绑时，这就是该库天花板
+      之外来源的内容进了提示词。今天不可达（生产上没有任何地方构造
+      `notebook_source_ceilings`，PR-D 才会），但 PR-D 的全局 v1 关 PPR、**保留**
+      federated KG，所以必须在第一个写入方落地之前关掉。最小修法：在
+      `_chunk_kg_overlay` 的非 restricted 支里，`scoped_subgraph_nodes` 之后、
+      `render_subgraph_context` 之前，按节点 owner 的天花板裁一遍——边证据可以就地
+      过 `filter_evidence`（**必须先拷贝边字典**：子图取自进程级缓存的图，就地改
+      会污染缓存），节点名则需要一次按 owner 的 evidence 反查（`node_context` 同
+      形，有界于 `chunk_kg_fan_out` × 深度）。刻意不在本 PR 做：它要么半修（只去
+      引文、留名字，不算修好），要么就得给 whole-graph 走查加一条新的按来源闸，
+      那是独立一处改动。不要改成「有 peer 天花板就走 restricted 支」——那等于让
+      冻结变成收窄，违反 `peer_ceiling_active` 的既定语义。
+- [ ] **`evidence_context.knowledge_context` 的 canonical 折叠不认参与集覆盖**：
+      它按 `self.notebooks.participant_notebook_ids(notebook_id)` 取折叠范围
+      （`backend/app/services/evidence_context.py` 约 821 行，刻意不按 base_scope
+      收窄，理由在该处注释）。覆盖在场时这个清单是名义 active 的挂载集，而不是
+      覆盖集，于是覆盖库里的对象 `_canonical()` 查不到、两端解析到覆盖库对象的
+      关系行会被 `object_to_key` 丢掉。这是**召回退化**不是泄漏（方向是少给，不是
+      多给）。修它要把 `evidence_context.py` 加进覆盖模块的读者白名单——那是一次
+      必须被评审看见的编辑，且该文件另一处（约 312 行）是**鉴权**用途、必须继续走
+      真实挂载谓词，所以两处不能一把改。留给 PR-D 与全局问答的真实效果一起定。
 - [ ] **逐步推理词法臂的关键词按语料语言双语化（给 `plan()` 传 `corpus_langs`）**：
       无图首轮的词法臂用的是 `plan()` 里 `expand_query` 产出的高/低层关键词，而
       `plan()` 调 `expand_query` 时**不传** `corpus_langs`，拿到的是 prompt 的

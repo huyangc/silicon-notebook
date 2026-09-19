@@ -90,6 +90,11 @@ from app.services.ask_followup import (
     current_followup_resolution,
 )
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
+# The NAME only, from the dependency-free domain layer: this module must not be
+# able to read or install a participant override (it is not on the frozen reader
+# whitelist), but its fail-soft handlers must be able to re-raise the override's
+# control exception instead of degrading it into a normal answer.
+from app.domain.retrieval_control import RetrievalControlError
 from app.services.citation_markers import LOOSE_MARKER_RE, MARKER_RE, marker_keys
 from app.services.document_read_answer import document_read_block_reserve
 from app.services.evidence_context import anchor_image_targets
@@ -1287,6 +1292,12 @@ class AskService:
         try:
             collection_map = self.collection_catalog.collection_map(notebook_id)
         except AskCancelled:
+            raise
+        except RetrievalControlError:
+            # 参与集覆盖的身份复核失败(actor 错配 / 无 ambient run)是**控制流**,
+            # 不是「地图建不出来」这种退化。吞掉它会让一次越权上下文泄漏表现成一次
+            # 普通早退——正是 ``retrieval_participants`` 的 docstring 点名要避免的
+            # 静默回落,只是发生在更外一层。与 ``AskCancelled`` 同形、同位置。
             raise
         except Exception:       # noqa: BLE001 — 见 docstring:退回早退
             return False

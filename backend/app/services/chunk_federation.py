@@ -194,6 +194,19 @@ def _bounded_participants(
         # itself.  Federation has nothing to add to a set that no longer
         # contains the notebook being asked about; fall back to the
         # single-library lane rather than inventing a different active.
+        #
+        # NOT reachable with a participant override, and the reason is
+        # structural rather than incidental: the seat filters with
+        # ``notebook_in_scope`` -> ``ActiveSourceScope.covers_notebook``, whose
+        # FIRST branch returns True for a blank id and for the scope's own
+        # notebook.  An override resolves only for the nominal active it
+        # declares (``resolve_retrieval_participants`` raises otherwise) and
+        # that same id is what the run's ``source_scope_context`` is keyed by,
+        # so the head of the list is exactly the notebook ``covers_notebook``
+        # never drops.  Pinned by
+        # ``test_participant_override_retrieval.py::
+        # test_library_scope_can_still_narrow_an_override``, which unchecks
+        # every peer and asserts the active survives.
         return ((active_notebook_id, _ACTIVE_TIER),), 0
     maximum = settings.chunk_federation_max_participants
     if len(participants) <= maximum:

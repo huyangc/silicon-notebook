@@ -33,6 +33,16 @@ _LEGS = (
     "_federated_retrieve_relations_impl",
     "_federated_retrieve_elements_impl",
 )
+# PR-C seated two more mount-table predicates on the same accessor, so that a
+# participant override reaches them too.  Named here rather than folded into
+# ``_LEGS`` because they are not federated retrieval legs: they are GATES whose
+# answers used to come from a raw mount read.
+_GATES = (
+    # "is any library this run searches too big for the whole-graph lanes"
+    "_federated_graph_is_large",
+    # "does any reference library have a KG" -- override arm only.
+    "_any_base_notebook_has_kg",
+)
 
 
 def _seat_file_index() -> PythonSourceIndex:
@@ -72,7 +82,7 @@ def test_three_federated_legs_read_one_seat():
         finding.key.scope.rsplit(".", 1)[-1]: finding.count
         for finding in index.calls(target="self._retrieval_participants")
     }
-    assert seated == {leg: 1 for leg in _LEGS}, seated
+    assert seated == {name: 1 for name in (*_LEGS, *_GATES)}, seated
 
 
 def test_the_seat_lives_on_the_shared_base_class():

@@ -1832,3 +1832,221 @@ def test_peer_only_scope_is_not_narrowing():
         assert source_scope_restricted() is False
         assert base_scope_restricted() is False
         assert scoped_conversation_history("上一轮的答案") == "上一轮的答案"
+
+
+# --- 逐库天花板的 fail-open 收口(C3 评审 F1 / F4 / F5 / F6)-----------------
+#
+# C2 把 ``notebook_source_ceilings`` 加进模型与几个读点,但「有没有天花板在绑」
+# 这个问句在若干闸上仍然只按**名义 active** 回答。下面每条对应一处:那些闸在
+# 只有逐库天花板时整段跳过 / 对 peer 恒放行。缺席态逐字不变,由上方既有用例
+# 零改动全绿证明。
+
+
+def test_knowledge_branch_judges_a_peer_by_its_own_ceiling():
+    """参考库的知识/关系对象:证据被**它自己那一库**的天花板清空 → 整条丢掉。
+
+    旧判据是 ``origin != active_notebook_id or not active_ceiling_binds or
+    evidence``,第一支对任何 peer 恒真,于是 peer 对象带着空证据存活。空证据不
+    是无害的:``evidence_context.knowledge_context`` 从不读 ``hit.evidence``,
+    它按 ``node_context(origin, object_id)`` 重查定义拼进提示词并铸一个活的
+    ``k{n}`` 锚点 —— 内容进了答案且可引用,只是不可追溯。同一条数据在 active
+    与 peer 上得到相反裁决。
+
+    **变异锚点**:把判据改回 ``origin != active_notebook_id or ...`` →
+    第一条断言里 ``ko-b9`` 会存活。
+    """
+    with source_scope_context("nbA", None, None, {"nbB": frozenset({"b1"})}):
+        kept = filter_retrieval_items("nbA", "knowledge", [
+            _knowledge("b1", notebook_id="nbB"),
+            _knowledge("b9", notebook_id="nbB"),
+        ])
+        assert [row.object_id for row in kept] == ["ko-b1"], (
+            "天花板外来源支撑的参考库对象必须整条丢掉,不能只清空证据"
+        )
+        assert [ev.source_id for ev in kept[0].evidence] == ["b1"]
+
+    # 部分在内:保留,且证据被收窄到天花板之内。
+    with source_scope_context("nbA", None, None, {"nbB": frozenset({"b1"})}):
+        partial = _knowledge("b1", notebook_id="nbB")
+        partial.evidence = list(partial.evidence) + [
+            Evidence(
+                source_id="b9", source_title="b9", element_id="el-b9",
+                element_type="paragraph", location_label="p1",
+                quoted_span="must not leak", confidence=1.0,
+            ),
+        ]
+        kept = filter_retrieval_items("nbA", "knowledge", [partial])
+        assert [ev.source_id for ev in kept[0].evidence] == ["b1"]
+
+    # 没有任何天花板绑住那一库 → 逐字不变(证据原样、对象保留)。
+    with source_scope_context("nbA", None, None, {"nbA": frozenset({"s1"})}):
+        kept = filter_retrieval_items("nbA", "knowledge", [
+            _knowledge("b9", notebook_id="nbB"),
+        ])
+        assert [row.object_id for row in kept] == ["ko-b9"]
+        assert [ev.source_id for ev in kept[0].evidence] == ["b9"]
+
+
+def test_active_empty_ceiling_drops_an_evidence_less_node():
+    """``frozenset()`` 是显式拒绝,所以判据必须是 ``is not None`` 而不是真值。
+
+    真值判断下一个被冻到零来源的 active 会被读成「没有天花板」,于是无证据的
+    节点照常存活。
+    """
+    with source_scope_context("nbA", None, None, {"nbA": frozenset()}):
+        assert filter_retrieval_items("nbA", "knowledge", [
+            _knowledge("s1", notebook_id="nbA"),
+        ]) == []
+
+
+def test_follow_chain_and_node_context_honour_a_peer_ceiling():
+    """``follow_chain`` 的外层闸与 hop 证据、``node_context`` 的行,都按该库的
+    天花板判。
+
+    三处旧写法各自 fail-open:外层闸只问本地/库两个维度(联邦 run 两个都没
+    提交,整段过滤被跳过);hop 的跨库臂原样返回 ``list(hop.evidence)``;
+    ``node_context`` 的 ``origin != notebook_id`` 对 peer 恒真。
+
+    **变异锚点**:去掉外层的 ``peer_scope_ceiling_active()`` → 第一条断言里
+    ``b9`` 的证据会活下来;hop 的跨库臂改回无条件 ``list(...)`` → 同一条;
+    ``node_context`` 改回 ``not source_scope_ceiling_active() or origin !=
+    notebook_id`` → 最后一条返回原行。
+    """
+    def hop(relation_id: str, notebook_id: str, evidence):
+        return ChainHop(
+            relation_id=relation_id,
+            notebook_id=notebook_id,
+            tier="base" if notebook_id != "nbA" else "personal",
+            source_object_id="a",
+            target_object_id="b",
+            edge_type="precedes",
+            source_name="a",
+            target_name="b",
+            evidence=evidence,
+        )
+
+    peer_hop = hop("r1", "nbB", [
+        {"source_id": "b9", "quoted_span": "must not leak"},
+        {"source_id": "b1", "quoted_span": "selected"},
+    ])
+    chain = InferredChain(
+        source_object_id="a", via_object_id="b", target_object_id="c",
+        source_name="a", via_name="b", target_name="c",
+        inferred_edge_type="precedes",
+        hops=(peer_hop, hop("r2", "nbB", [{"source_id": "b1"}])),
+    )
+    nodes = [
+        {"object_id": oid, "notebook_id": "nbB",
+         "evidence": [{"source_id": "b1"}]}
+        for oid in ("a", "b", "c")
+    ]
+
+    class _Graph:
+        def follow_chain(self, *_args, **_kwargs):
+            return FollowChainResult(inferences=[chain], nodes=list(nodes))
+
+        def node_context(self, *_args, **_kwargs):
+            return {
+                "notebook_id": "nbB",
+                "name": "peer node",
+                "evidence": [{"source_id": "b9"}],
+            }
+
+    retrieval = RetrievalService(
+        candidates=object(), graph=_Graph(), community_queries=lambda: []
+    )
+    with source_scope_context("nbA", None, None, {"nbB": frozenset({"b1"})}):
+        result = retrieval.follow_chain("nbA", "a")
+        assert len(result.inferences) == 1
+        assert [
+            item["source_id"] for item in result.inferences[0].hops[0].evidence
+        ] == ["b1"], "参考库 hop 的证据必须按该库的天花板收窄"
+        # 该库天花板把这一行的证据清空 → ``{}`` 是既有的「没了」哨兵。
+        assert retrieval.node_context("nbA", "o1") == {}
+
+    # 没有任何天花板 → 两处都逐字不变。
+    retrieval_plain = RetrievalService(
+        candidates=object(), graph=_Graph(), community_queries=lambda: []
+    )
+    with source_scope_context("nbA", None, None, None):
+        plain = retrieval_plain.follow_chain("nbA", "a")
+        assert [
+            item["source_id"] for item in plain.inferences[0].hops[0].evidence
+        ] == ["b9", "b1"]
+        assert retrieval_plain.node_context("nbA", "o1")["evidence"] == [
+            {"source_id": "b9"}
+        ]
+
+
+def test_evidence_json_allowed_binds_a_peer_ceiling():
+    """``evidence_json_allowed`` 的逐库天花板分支(C2 落地时零用例覆盖)。"""
+    from app.services.source_scope import evidence_json_allowed
+
+    with source_scope_context("nbA", None, None, {"nbB": frozenset({"b1"})}):
+        assert evidence_json_allowed("nbB", '[{"source_id":"b9"}]') is False
+        assert evidence_json_allowed("nbB", '[{"source_id":"b1"}]') is True
+        # 未被点名的库仍然「无天花板」,恒放行。
+        assert evidence_json_allowed("nbC", '[{"source_id":"anything"}]') is True
+
+
+def test_generated_question_hydration_pushes_down_a_peer_ceiling():
+    """GQ 原文 hydrate 的 SQL 必须收到来源清单。
+
+    联邦 run 的名义 active 没有本地 mode/source_ids,``ceiling_active`` 为
+    False,旧的 ``elif`` 因此不触发 —— hydrate 的语句在 ``LIMIT`` 之前不带任何
+    来源谓词。
+
+    **变异锚点**:删掉逐库天花板那一支 → ``source_mode`` 回到 ``None``。
+    """
+    from app.services.retrieval_candidates import CandidateRetrievalService
+
+    seen: dict[str, object] = {}
+
+    class _Chunks:
+        def retrieval_contribution_rows(self, db, notebook_id, batch, *,
+                                        actor_id, source_mode, source_ids):
+            seen["source_mode"] = source_mode
+            seen["source_ids"] = tuple(source_ids)
+            return []
+
+    class _Candidates:
+        chunks = _Chunks()
+
+        def _connect(self):
+            import contextlib
+
+            return contextlib.nullcontext(None)
+
+        def _in_batches(self, values):
+            yield list(values)
+
+    hydrate = CandidateRetrievalService._hydrate_generated_question_chunks
+    with source_scope_context("nbA", None, None, {"nbA": frozenset({"s2", "s1"})}):
+        hydrate(_Candidates(), "nbA", "user-a", ["c1"], allowed_source_ids=None)
+    assert seen == {"source_mode": "include", "source_ids": ("s1", "s2")}
+
+    seen.clear()
+    with source_scope_context("nbA", None, None, None):
+        hydrate(_Candidates(), "nbA", "user-a", ["c1"], allowed_source_ids=None)
+    assert seen == {"source_mode": None, "source_ids": ()}
+
+
+def test_scope_with_ceilings_is_hashable_and_order_insensitive():
+    """``notebook_source_ceilings`` 存成 tuple-of-pairs 而不是 dict 的理由。
+
+    ``ActiveSourceScope`` 是冻结 dataclass,装一个 dict 会让它整体不可哈希 ——
+    而它会被放进集合/字典键的位置(以及任何 memo)。同时,两个构造顺序不同的
+    mapping 必须造出相等(因而可互换命中)的 scope,否则同一次冻结按字典迭代
+    顺序会得到两个不等的对象。
+    """
+    left = ActiveSourceScope(
+        notebook_id="nbA", mode="exclude", source_ids=frozenset(),
+        notebook_source_ceilings={"nbB": {"b2", "b1"}, "nbC": {"c1"}},
+    )
+    right = ActiveSourceScope(
+        notebook_id="nbA", mode="exclude", source_ids=frozenset(),
+        notebook_source_ceilings={"nbC": {"c1"}, "nbB": {"b1", "b2"}},
+    )
+    assert hash(left) == hash(right)
+    assert left == right
+    assert {left, right} == {left}

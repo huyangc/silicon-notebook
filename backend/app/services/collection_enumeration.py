@@ -119,6 +119,13 @@ from app.services.collection_catalog import (
 )
 from app.services.extraction_profiles import PROFILES
 from app.services.knowledge_contracts import USABLE_STATUSES
+# Reader #4 on ``retrieval_participants``' frozen whitelist: the typed
+# enumerations must walk the same libraries federated retrieval walks, and both
+# the rows and the denominator come from the list resolved here.
+from app.services.retrieval_participants import (
+    resolve_retrieval_participant_ids,
+    resolve_retrieval_participants,
+)
 from app.services.source_display import source_display_title
 from app.services.source_scope import scoped_participants
 
@@ -1621,11 +1628,39 @@ class CollectionEnumerationService:
         into "which libraries this run reads".  Tiers are returned unfiltered
         on purpose: they are a display lookup keyed by notebook id, so entries
         for skipped libraries are simply never asked for.
+
+        Resolution order is fixed: the participant override (when one is
+        installed) REPLACES the set, ``scoped_participants`` then NARROWS it by
+        the library checkboxes.  With no override the pairs below are
+        ``participant_tiers``' own output, so ``dict(pairs)`` is the same tier
+        map it returns -- both are keyed by the same unfiltered id list.
+        """
+        pairs = resolve_retrieval_participants(
+            active_notebook_id,
+            lambda: self._mount_participant_pairs(db, active_notebook_id),
+        )
+        return (
+            scoped_participants(notebook_id for notebook_id, _tier in pairs),
+            dict(pairs),
+        )
+
+    def _mount_participant_pairs(
+        self, db: object, active_notebook_id: str
+    ) -> Tuple[Tuple[str, str], ...]:
+        """The live mount read as ``(notebook_id, tier)`` pairs.
+
+        The override's fallback has to be pair-shaped; ``participant_tiers``
+        returns ``(ids, tier_map)`` whose map is keyed by exactly those ids
+        (both come out of one ``resolve_participants`` call), so zipping them
+        here loses nothing.
         """
         notebook_ids, tiers = self._notebooks.participant_tiers(
             db, active_notebook_id
         )
-        return scoped_participants(notebook_ids), tiers
+        return tuple(
+            (str(notebook_id), str(tiers.get(notebook_id, "personal")))
+            for notebook_id in notebook_ids
+        )
 
     def _closing_participants(
         self, db: object, active_notebook_id: str
@@ -1656,9 +1691,19 @@ class CollectionEnumerationService:
         over an event with no bearing on it.  A newly mounted CHECKED library
         still lands in this list and still breaks the comparison — which is the
         case that matters, because the walk never visited it.
+
+        The participant override is re-resolved here too, and in the same order
+        (replace, then narrow), for the identity to be comparable at all: the
+        opening list went through it, so a closing list that skipped it would
+        report ``concurrent_change`` on every federated walk.
         """
         return scoped_participants(
-            self._notebooks.participant_ids(db, active_notebook_id)
+            resolve_retrieval_participant_ids(
+                active_notebook_id,
+                lambda: self._notebooks.participant_ids(
+                    db, active_notebook_id,
+                ),
+            )
         )
 
     def _source_display(

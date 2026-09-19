@@ -6258,3 +6258,62 @@ def test_postgres_concept_cluster_detail_rows_keyset_pagination_matches_full_rea
 # for the mutation result). The source-text guard lives there, mirroring
 # test_image_backfill_transaction_guard.py's
 # test_postgres_keyset_compares_on_the_same_collation_it_orders_by.
+
+
+@pytest.mark.postgres_integration
+def test_postgres_follow_start_row_accepts_an_explicit_participant_set(
+    postgres_database,
+):
+    """C4 -- ``participant_ids`` 是 PostgreSQL(规范定义)与 SQLite(镜像)同一份
+    语义:非 None 时用显式参与集替换内联的挂载子查询,None/不传时逐字走挂载谓词。
+
+    ``nb-base`` **没有**被 ``nb-personal`` 挂载,所以它的对象在挂载子查询下不是
+    合法起点;这正是参与集覆盖要表达而挂载表表达不了的形态。不放宽授权:唯一会
+    传这个参数的调用方是覆盖在场的检索腿,而覆盖集已过 ``can_read_many``
+    (见两个适配器同名方法的 docstring)。
+    """
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 56
+    _seed_catalog(postgres_database)
+    store = PostgresKnowledgeStore(postgres_database, _seams())
+    rows = [
+        (
+            "ko-peer",
+            "nb-base",
+            "claim",
+            "approved",
+            json.dumps({"name": "ko-peer"}),
+            json.dumps(_evidence()),
+            "source-golden",
+            NOW,
+            NOW,
+        ),
+    ]
+    with postgres_database.write() as connection:
+        store.insert_object_chunk(connection, rows)
+
+    with postgres_database.connect() as connection:
+        # 不传:挂载子查询逐字保留,未挂载的库不是合法起点。
+        assert store.follow_start_row(
+            connection, "ko-peer", "nb-personal", USABLE_STATUSES
+        ) is None
+        # 显式 None 与不传必须等价。
+        assert store.follow_start_row(
+            connection, "ko-peer", "nb-personal", USABLE_STATUSES,
+            participant_ids=None,
+        ) is None
+        # 传覆盖集 -> 合法,且行的归属库如实。
+        row = store.follow_start_row(
+            connection, "ko-peer", "nb-personal", USABLE_STATUSES,
+            participant_ids=["nb-personal", "nb-base"],
+        )
+        assert row is not None
+        assert row["notebook_id"] == "nb-base"
+        assert json.loads(row["payload"])["name"] == "ko-peer"
+        # 空清单是 fail-closed,不是「无限制」——``IN ()`` 不是合法 SQL,语义上
+        # 「没有任何库参与」也本就没有合法起点。
+        assert store.follow_start_row(
+            connection, "ko-peer", "nb-personal", USABLE_STATUSES,
+            participant_ids=[],
+        ) is None
