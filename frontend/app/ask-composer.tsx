@@ -110,7 +110,12 @@ export function AskComposer({
           {running ? <Square size={16} strokeWidth={2.5} /> : "→"}
         </button>
       </div>
-      {children && <div className="chat-input-controls">{children}</div>}
+      {/* 按键提示住在本组件:它描述的就是上面 handleKeyDown 的行为,两者分家就会各说各话。
+          与全局问答 composer 同一句话。 */}
+      <div className="chat-input-controls">
+        {children}
+        <span className="chat-hint chat-key-hint">Enter 发送 · Shift + Enter 换行</span>
+      </div>
     </div>
   );
 }
