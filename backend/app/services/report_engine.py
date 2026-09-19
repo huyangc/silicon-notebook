@@ -2705,6 +2705,16 @@ class ReportEngine:
                     status[i]["phase"] = (
                         "失败" if drafted.get("failed") else "完成"
                     )
+            except RetrievalControlError:
+                # Registered fail-soft handler: ``_draft_section`` ->
+                # ``knowledge_context_with_outline`` -> ``evidence_context
+                # .knowledge_context`` -> the participant seat (the canonical
+                # fold's range).  Below, a swallowed identity mismatch would
+                # become one section quietly marked 失败 in a delivered report.
+                # Not folded into the ``AskCancelled`` arm: that arm records
+                # the stage timing as ``cancelled=True``, and this is not a
+                # cancellation.
+                raise
             except AskCancelled:
                 self._emit_stage_timing(
                     notebook_id, rid, "draft", drafting_started, section_index=i,

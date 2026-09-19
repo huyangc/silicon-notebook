@@ -2021,6 +2021,7 @@ def complete_row(
     It deliberately calls neither Ask synthesis nor conversations/Memory.
     """
     from app.core.llm import cap_kwargs
+    from app.domain.retrieval_control import RetrievalControlError
     from app.services.cancellation import AskCancelled
     from app.services.model_work import ModelNotConfiguredError
     from app.services.reasoning_retrieval import (
@@ -2151,7 +2152,13 @@ def complete_row(
         )
     except ModelNotConfiguredError:
         raise
-    except AskCancelled:
+    except (AskCancelled, RetrievalControlError):
+        # Registered fail-soft handler: this ``try`` body reaches the
+        # participant seat twice over — through the reasoning retriever, and
+        # through ``_completion_library_evidence`` ->
+        # ``evidence_context.knowledge_context`` (the canonical fold's range).
+        # The arm below would rewrite an identity-attestation failure into
+        # "逐步推理检索暂时不可用" and blame the reasoning model for it.
         raise
     except Exception as exc:
         models.note_model_error(

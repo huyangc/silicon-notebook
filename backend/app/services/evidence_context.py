@@ -24,6 +24,12 @@ from app.repositories.ports import (
 from app.services.retrieval import (
     RetrievedChunk, RetrievedElement, RetrievedKnowledge, est_tokens,
 )
+# ⛔ 读的是**检索消费边界**那一个点(``knowledge_context`` 的 canonical 折叠范围),
+# 不是本模块的鉴权点。``collection_item_citations`` 的成员资格复核必须继续直调真实
+# 挂载谓词 ``self.notebooks.participant_notebook_ids``;两处没有被一把改掉由
+# ``backend/tests/test_participant_override_guard.py::
+# test_evidence_context_authorization_site_keeps_mount_predicate`` 反向钉住。
+from app.services.retrieval_participants import resolve_retrieval_participant_ids
 from app.services.citation_markers import MARKER_RE, marker_keys
 from app.services.source_display import source_display_title
 from app.services.source_element_selection import deduplicate_source_chunks_in_order
@@ -818,7 +824,19 @@ class EvidenceContextService:
         # miss;而 ``in_network_relations``(见本函数下方)取回的、两端解析到被排除
         # 库对象的关系行,会在 ``object_to_key`` 查不到 key 时被丢弃。收窄它需要改动
         # canonical 折叠/去重语义,超出本次修复范围。
-        participants = self.notebooks.participant_notebook_ids(notebook_id)
+        #
+        # 但**折叠范围**必须认参与集覆盖(PR-D0 / D0-3)。覆盖在场时这次 run 搜的是
+        # 一组互不挂载的库,名义 active 的挂载表根本列不出它们:折叠范围仍按挂载表
+        # 取,会让覆盖集里另一个库的对象 ``_canonical()`` 恒 miss(同一 canonical 的
+        # 知识对象折不到一起),``in_network_relations`` 也压根不去查那些库,两端解析
+        # 到它们的关系行因此一条都不出现。方向是**少给**(召回退化),不是泄漏——但
+        # 那正是覆盖要消除的那种"看起来正常的空手"。无覆盖时
+        # ``resolve_retrieval_participant_ids`` 就是 ``fallback()`` 本身(见该函数
+        # docstring:str 归一后逐值相同、零额外查询),所以这一行在生产上今天逐字不变。
+        participants = resolve_retrieval_participant_ids(
+            notebook_id,
+            lambda: self.notebooks.participant_notebook_ids(notebook_id),
+        )
         # T3(B2 有界化):需要折叠的 id 集合 = hit ids(本函数内 ``_canonical()``
         # 的全部调用点都只在这些 object_id 上查找)∪ priority_object_ids(防御性
         # 超集——当前唯一生产调用方 report_engine.py 的 bound_ids 恒 ⊆ hit ids,

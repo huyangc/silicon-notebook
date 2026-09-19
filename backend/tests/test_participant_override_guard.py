@@ -54,6 +54,12 @@ _READER_WHITELIST = frozenset({
     "app/services/collection_enumeration.py",
     # ``mounted_base_ids``(对比题的兄弟库)。
     "app/services/communities.py",
+    # ``knowledge_context`` 的 canonical 折叠范围(同一 canonical 的知识对象折到
+    # 一起、``in_network_relations`` 去哪些库取关系行)。**只有那一个消费点**:
+    # 同文件的 ``collection_item_citations`` 是鉴权用途,必须继续直调真实挂载
+    # 谓词,由 ``test_evidence_context_authorization_site_keeps_mount_predicate``
+    # 反向钉住。
+    "app/services/evidence_context.py",
 })
 _WRITER_WHITELIST = frozenset({
     "app/services/global_ask.py",
@@ -64,9 +70,10 @@ _IMPORT_WHITELIST = _READER_WHITELIST | _WRITER_WHITELIST
 # 不再 import 的模块意味着接线被悄悄回退(例如 ``collection_catalog`` 改回直调
 # ``participant_ids``),而 ⊆ 断言对回退是沉默的。
 #
-# 已知的未来读者:``app/services/chunk_federation.py``。PR-D 要在任务体里按
+# 今天是 6 个读者(D0-3 加入 ``evidence_context``)。已知的未来读者:
+# ``app/services/chunk_federation.py``。PR-D0 的 D0-4 要在任务体里按
 # ``federated_ask_active()`` 切 ``read_budget`` 与 ``peer_evidence`` 阈值,届时
-# 它要同时进 ``_READER_WHITELIST`` 与这里——本 PR 它不 import,所以两个集合都
+# 它要同时进 ``_READER_WHITELIST`` 与这里——本任务它不 import,所以两个集合都
 # 不含它。
 _EXPECTED_IMPORTERS = frozenset(_READER_WHITELIST)
 
@@ -496,6 +503,99 @@ def test_authorization_sites_keep_the_real_mount_predicate():
             )
 
 
+# 第 2 层的第三半(D0-3):**同一个文件里**的两个 ``participant_notebook_ids``。
+#
+# ``evidence_context.py`` 是白名单读者里唯一一个自己也带鉴权调用点的文件:
+# ``knowledge_context`` 的 canonical 折叠范围经覆盖解析(检索消费边界),而
+# ``collection_item_citations`` 在元素水合前复核成员资格(鉴权)。两者在源码里只
+# 隔几百行、名字一模一样,"顺手把另一处也改道"是这个形状最自然的错法,而上面那条
+# 文件级的 ``_AUTHORIZATION_SITES`` 断言看不见它——那份清单按文件登记,而这个文件
+# 已经(正当地)在读者白名单里。所以这里按**函数作用域**再钉一次。
+_EVIDENCE_CONTEXT_PATH = "app/services/evidence_context.py"
+# ``PythonSourceIndex`` 的作用域名从 ``<module>`` 起算(它不为 lambda 另起一层,
+# 所以 ``knowledge_context`` 里那个 fallback lambda 的调用也记在本函数名下)。
+_SCOPE_ROOT = "<module>."
+# 鉴权点:元素水合前的成员资格复核。必须直调真实挂载谓词。
+_EVIDENCE_CONTEXT_AUTHORIZATION_SCOPE = (
+    f"{_SCOPE_ROOT}EvidenceContextService.collection_item_citations"
+)
+# 检索消费点:canonical 折叠范围。唯一允许经覆盖解析的作用域。
+_EVIDENCE_CONTEXT_RETRIEVAL_SCOPE = (
+    f"{_SCOPE_ROOT}EvidenceContextService.knowledge_context"
+)
+_RESOLVE_NAMES = frozenset({
+    "resolve_retrieval_participant_ids", "resolve_retrieval_participants",
+})
+
+
+def _evidence_context_scopes(kind: str):
+    """``evidence_context.py`` 里 ``kind`` 类记账的 ``(作用域, 目标)`` 集合。"""
+    source = (_BACKEND / _EVIDENCE_CONTEXT_PATH).read_text(encoding="utf-8")
+    index = PythonSourceIndex.from_sources({_EVIDENCE_CONTEXT_PATH: source})
+    findings = index.calls() if kind == "call" else index.attributes()
+    return {(finding.key.scope, finding.key.target) for finding in findings}
+
+
+def test_evidence_context_authorization_site_keeps_mount_predicate():
+    """鉴权那处仍然直调挂载谓词,覆盖解析只出现在 ``knowledge_context``。
+
+    两半都要:
+
+    1. ``collection_item_citations`` 里有对 ``self.notebooks
+       .participant_notebook_ids`` 的**直接**调用,且该作用域内不出现任何
+       ``resolve_*``——证明两处没有被一把改掉;
+    2. ``resolve_retrieval_participant_ids`` 的调用作用域**恰好**是
+       ``knowledge_context``(相等,不是 ⊆)——多一个作用域就是覆盖在本文件里
+       扩面了,少一个就是 D0-3 的接线被回退了(那时折叠范围又回到名义 active
+       的挂载表,覆盖集里另一个库的对象恒折不到)。
+
+    **变异锚点**:把鉴权那处改成经 ``resolve_*`` -> 第 1 条红;把
+    ``knowledge_context`` 改回直调 -> 第 2 条红。
+    """
+    assert (_BACKEND / _EVIDENCE_CONTEXT_PATH).is_file(), _EVIDENCE_CONTEXT_PATH
+    calls = _evidence_context_scopes("call")
+
+    direct = {
+        scope for scope, target in calls
+        if target.rsplit(".", 1)[-1] == "participant_notebook_ids"
+        and target.startswith("self.notebooks")
+    }
+    assert _EVIDENCE_CONTEXT_AUTHORIZATION_SCOPE in direct, (
+        f"{_EVIDENCE_CONTEXT_PATH}::"
+        f"{_EVIDENCE_CONTEXT_AUTHORIZATION_SCOPE} 不再直调 "
+        f"self.notebooks.participant_notebook_ids。它是元素水合前的成员资格"
+        f"复核,必须继续问挂载表,不得改道经参与集覆盖。"
+        f"{_WHITELIST_RATIONALE}"
+    )
+
+    leaked = sorted(
+        target for scope, target in calls
+        if scope.startswith(_EVIDENCE_CONTEXT_AUTHORIZATION_SCOPE)
+        and target.rsplit(".", 1)[-1] in _RESOLVE_NAMES
+    )
+    assert not leaked, (
+        f"鉴权作用域 {_EVIDENCE_CONTEXT_AUTHORIZATION_SCOPE} 里出现了覆盖解析"
+        f"{leaked}。{_WHITELIST_RATIONALE}"
+    )
+
+    resolving = {
+        scope for scope, target in calls
+        if target.rsplit(".", 1)[-1] in _RESOLVE_NAMES
+    }
+    assert resolving == {_EVIDENCE_CONTEXT_RETRIEVAL_SCOPE}, (
+        f"{_EVIDENCE_CONTEXT_PATH} 里经覆盖解析参与集的作用域应当恰好是 "
+        f"{{{_EVIDENCE_CONTEXT_RETRIEVAL_SCOPE!r}}},实际是 {sorted(resolving)}。"
+        f"多出来的是越权面,少掉的是 D0-3 的接线被回退。{_WHITELIST_RATIONALE}"
+    )
+
+    # 折叠范围的 fallback 仍然是真实谓词本身:``resolve_*`` 无覆盖时直通
+    # ``fallback()``,fallback 换成别的取数方式会让「无覆盖逐字不变」失效。
+    assert _EVIDENCE_CONTEXT_RETRIEVAL_SCOPE in direct, (
+        f"{_EVIDENCE_CONTEXT_RETRIEVAL_SCOPE} 的覆盖解析 fallback 不再是 "
+        f"self.notebooks.participant_notebook_ids;无覆盖时它必须与今天逐值相等。"
+    )
+
+
 # 第 2 层的第二半(A2):注入式谓词的**来源**。
 #
 # ``knowledge_query`` / ``knowledge_lifecycle`` / ``plugin_ask_engine`` 上面那条
@@ -657,6 +757,10 @@ _SEAT_FAILSOFT_SITES = (
      "AskService._run_reasoning_stage", "execute_reasoning_retrieval_stage"),
     ("app/services/ask_service.py",
      "AskService.ask_plugin_engine", "admit_plugin_engine_result"),
+    # D0-3:``synth()`` 把 KG 证据装配算在合成里(``_answer_context`` ->
+    # ``evidence_context.knowledge_context`` -> canonical 折叠范围读座位),
+    # 吞掉就是重试一次再返回空答案。
+    ("app/services/ask_service.py", "AskService._answer_with_retry", "synth"),
     ("app/services/reasoning_retrieval.py",
      "ReasoningRetriever._chunk_seed_search", "search_chunks"),
     ("app/services/reasoning_retrieval.py",
@@ -681,6 +785,16 @@ _SEAT_FAILSOFT_SITES = (
      "ReportEngine._build_corpus_map", "ppr_retrieve"),
     ("app/services/report_engine.py",
      "ReportEngine._deep_dive", "federated_retrieve"),
+    # D0-3:节撰写腿。``_draft_section`` -> ``knowledge_context_with_outline``
+    # -> ``evidence_context.knowledge_context`` -> 折叠范围读座位;吞掉就是
+    # 一份交付出去的报告里悄悄多一节「失败」。
+    ("app/services/report_engine.py",
+     "ReportEngine._run_sections._draft_one", "_draft_section"),
+    # D0-3:知识表智能补全。这个 try 体两头都触达座位——推理检索器,以及
+    # ``_completion_library_evidence`` -> ``knowledge_context``。宽 handler 会
+    # 把身份复核失败改写成「逐步推理检索暂时不可用」并记到推理模型头上。
+    ("app/services/knowhow/api.py", "complete_row",
+     "_completion_library_evidence"),
     ("app/services/chunk_federation.py", "_run_one", "run"),
 )
 
