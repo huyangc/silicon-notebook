@@ -253,6 +253,49 @@ test("partial coverage identifies skipped notebooks and discloses lexical fallba
   expect(receipt).toHaveTextContent("1 个笔记本使用词法降级检索，跨语言召回可能不完整");
 });
 
+const manyNotebooks: NotebookSummary[] = Array.from({ length: 11 }, (_, index) => ({
+  ...notebooks[0], id: `many-${index}`, name: `笔记本 ${index}`, counts: { sources: index },
+}));
+
+test("over the notebook cap, the unusable all-scope becomes a visible preselection of the 8 richest notebooks", async () => {
+  api.notebooks.mockResolvedValue(manyNotebooks);
+  api.ask.mockResolvedValue(job("running"));
+  const { result } = renderHook(() => useGlobalAsk({ syncUrl: false }));
+  // 来源最多的 8 个 = many-3 … many-10，按列表原序给出。
+  await waitFor(() => expect(result.current.scope).toEqual({
+    mode: "include", notebook_ids: manyNotebooks.slice(3).map((item) => item.id),
+  }));
+  act(() => result.current.setDraft("问题"));
+  await act(async () => { await result.current.submit(); });
+  expect(api.ask).toHaveBeenCalledWith(expect.objectContaining({
+    notebook_scope: { mode: "include", notebook_ids: manyNotebooks.slice(3).map((item) => item.id) },
+  }));
+  // 新建对话回到「全部」时同样被换掉，不会留下一个提交必然 422 的范围。
+  act(() => result.current.newConversation());
+  await waitFor(() => expect(result.current.scope.mode).toBe("include"));
+});
+
+test("the picker holds the selection at the cap and never offers an all-scope it cannot submit", () => {
+  function Picker() {
+    const [scope, setScope] = useState<GlobalScope>({ mode: "include", notebook_ids: manyNotebooks.slice(3).map((item) => item.id) });
+    return <NotebookScopePicker notebooks={manyNotebooks} scope={scope} onChange={setScope} disabled={false} />;
+  }
+  render(<Picker />);
+  fireEvent.click(screen.getByRole("button", { name: "已选择 8 个笔记本" }));
+  expect(screen.queryByRole("button", { name: /全部可访问的笔记本/ })).toBeNull();
+  expect(screen.getByRole("note")).toHaveTextContent("一次最多检索 8 个笔记本");
+  // 选满：未选的勾不动；取消一个之后才能再选。
+  const spare = screen.getByRole("checkbox", { name: /笔记本 0/ }) as HTMLInputElement;
+  expect(spare.disabled).toBe(true);
+  fireEvent.click(screen.getByRole("checkbox", { name: /笔记本 10/ }));
+  expect(spare.disabled).toBe(false);
+  fireEvent.click(spare);
+  expect(screen.getByRole("button", { name: "已选择 8 个笔记本" })).toBeTruthy();
+  // 清空选择不回落到「全部」（那会被立刻重新预选）。
+  for (const box of screen.getAllByRole("checkbox")) if ((box as HTMLInputElement).checked) fireEvent.click(box);
+  expect(screen.getByRole("button", { name: "未选择笔记本" })).toBeTruthy();
+});
+
 test("scope starts at all, searching preserves selection, clearing restores all", () => {
   function Picker() {
     const [scope, setScope] = useState<GlobalScope>({ mode: "all" });

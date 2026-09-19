@@ -82,6 +82,8 @@
 .global-scope-search input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; font-size: 13px; }
 .global-scope-all { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 10px; border: 0; border-radius: 9px; padding: 12px 10px; color: var(--global-accent); background: var(--global-tint); text-align: left; font-size: 12px; }
 .global-scope-all strong, .global-scope-all small { display: block; line-height: 1.8; }
+.global-scope-cap { margin: 0; border-radius: 9px; padding: 10px; color: var(--global-accent); background: var(--global-tint); font-size: 12px; line-height: 1.7; }
+.global-scope-option:has(input:disabled) { cursor: not-allowed; opacity: .55; }
 .global-scope-list { max-height: min(310px, 38vh); overflow: auto; margin: 8px -4px; }
 .global-scope-option { display: flex; align-items: center; gap: 8px; padding: 12px 6px; border-radius: 9px; cursor: pointer; }
 .global-scope-option:hover, .global-scope-option.selected { background: var(--soft); }
