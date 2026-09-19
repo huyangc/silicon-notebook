@@ -171,6 +171,20 @@
       `_require_ask_available` / 前端三处同源口径；默认配置下
       `enumeration_wired and collection_map.sources > 0` 已先放行，所以这条缺口只在枚举
       工具被关掉时单独暴露。刻意不在联邦 PR 里扩范围。
+- [ ] **mix 分支没有当前笔记本的保底席位，跨库放开后风险变大**。`chunk_federation`
+      给另外两条选择分支都做了 active 保底（MMR 走 `apply_active_reserve`、配额融合走
+      `_reserve_lanes`，见 `CHUNK_FEDERATION_ACTIVE_RESERVE`），mix 分支刻意没做——当时
+      的论据是「mix 的序来自对整池的 rerank 模型、截断是 token 预算，保底要嵌进
+      `select_with_reserves_baseline_first` 的既有 reserve 规则里，不能在召回侧硬塞」。
+      结构性论据仍然成立，但**前提已经变了**：做那个裁决时 mix 的第 2 路（KG-overlay
+      源 chunk）只在当前库内反查，池子里必然有当前库的原文；`_kg_source_chunks` 拿到
+      跨库反查之后，三路可以**全部**是参考库的。触发形态：当前笔记本只有两篇短笔记
+      （relevance 0.30–0.40），挂着一个强命中的大参考库 → rerank 之后 token 预算内一条
+      当前库的原文都不剩，用户问的是自己刚上传的文档，答案却全部引自参考库。修法方向：
+      在 `select_with_reserves_baseline_first` 的 reserve rules 里加一条 active 通道
+      （判据仍是 `not hit.notebook_id`，与另外两条分支同一个「空 = 当前库」口径），
+      席位数复用 `CHUNK_FEDERATION_ACTIVE_RESERVE × CHUNK_MMR_K`，合格候选不足时以实际
+      数量为上限。刻意不在联邦 PR 里做：那个函数的 reserve 规则是独立一处改动。
 - [ ] BM25 / FTS5 / tsvector 全文索引：已评估为低 ROI、基础设施级，暂缓。
 - [ ] 结构化硬过滤：软加权已够用，硬过滤有清空结果风险，暂缓。
 - [ ] **`_federated_graph_is_large` 把取消勾选的参考库也算进「图是否过大」**：这个

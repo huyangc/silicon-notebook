@@ -13,8 +13,11 @@ active`,所以「引了参考库的知识对象,却拿不出它的原文」。�
 * 参考库的隐藏投影(memory/knowhow 来源)恒不出现,哪怕某个对象的 evidence 指到它;
 * 库维度被取消勾选的参考库整库跳过,且对该库零读。
 
-外加接线两条:`CHUNK_FEDERATION_ENABLED=0` 与「本轮没有外库对象」都传 `None`,
-以及 `_mix_retrieve` 真跑一遍时参考库的原文进入候选且归属正确。
+外加接线四条:`CHUNK_FEDERATION_ENABLED=0` 与「本轮没有外库对象」都传 `None`;
+归属表**与 chunk 腿的参与集求交**(`CHUNK_FEDERATION_MAX_PARTICIPANTS` 对这条腿
+同样是上界,超出的库零读);逐库天花板与联邦向量腿**共用同一个 run 级 memo
+key**(run 中途新增的来源不进本轮);以及 `_mix_retrieve` 真跑一遍时参考库的原文
+进入候选且归属正确。
 """
 from __future__ import annotations
 
@@ -26,6 +29,7 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.models.source_scope import BaseNotebookScope
 from app.services.embedding import FakeEmbedder
+from app.services.retrieval_run import memoized_retrieval_value, retrieval_run
 from app.services.source_scope import source_scope_context
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients
@@ -326,7 +330,169 @@ def test_unbackfilled_peer_never_full_scans(repo, mounted, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 7. _mix_retrieve 的接线
+# 7. 逐库天花板与联邦向量腿共用同一个 run 级 memo key
+# ---------------------------------------------------------------------------
+
+
+def test_peer_ceiling_reuses_the_federated_chunk_memo_key(repo, mounted):
+    """run 中途给参考库新增的可见来源,不进本轮的 KG 反查。
+
+    这条守的是 `_kg_peer_source_ceilings` 的 docstring 写成不变量的那件事:
+    它与联邦 chunk 腿共用 `("federated_chunk_visible", nid)` 这一个 memo key,
+    所以一次 ask 里两条腿看到的是**同一份**冻结快照。直读 `all_visible_source_ids`
+    或换一个 key 都会让这条断言红——run 中途的上传会当场放宽一次在飞的检索,
+    而向量腿那边仍是冻结的,「向量腿引不到、KG 腿引得到」的不对称就出现了。
+    """
+    active, base = mounted
+    with retrieval_run(run_kind="ask_chunk"):
+        # 向量腿在 `_federated_tasks` 里就是这样冻住每个 peer 的来源清单的。
+        frozen = memoized_retrieval_value(
+            ("federated_chunk_visible", base),
+            lambda: tuple(repo.retrieval.graph.sources.all_visible_source_ids(base)),
+        )
+        assert "src-base-late" not in frozen
+
+        # run 中途上传:新来源 + 它的 chunk + 指到它的 KG evidence。
+        _seed_source(repo, base, "src-base-late")
+        _seed_chunks(repo, base, "src-base-late",
+                     [("ck-base-late", ["el-base-late"])])
+        _seed_object(repo, base, "o-base-late", "src-base-late",
+                     ["el-base-late", "el-base-1"])
+        _backfill(repo, base)
+
+        chunks = repo.retrieval.graph._kg_source_chunks(
+            active, ["o-base-late"], object_owners={"o-base-late": base},
+        )
+
+    ids = [chunk.chunk_id for chunk in chunks]
+    assert "ck-base-late" not in ids
+    # 冻结清单里那条来源的原文照常反查得到 —— 冻的是清单,不是整条通道。
+    assert ids == ["ck-base-1", "ck-base-2"]
+
+
+# ---------------------------------------------------------------------------
+# 8. 归属表 ⊆ chunk 腿的参与集
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def three_bases(repo):
+    """active 挂 3 个都有 KG 与原文的参考库,挂载顺序即参与集顺序。"""
+    active = repo.create_notebook(NotebookCreate(name="我的笔记本"))
+    bases = []
+    for index in (1, 2, 3):
+        base = repo.create_notebook(NotebookCreate(name=f"参考库{index}"))
+        repo.mark_notebook_base(base.id)
+        source_id = f"src-b{index}"
+        _seed_source(repo, base.id, source_id)
+        _seed_chunks(repo, base.id, source_id, [(f"ck-b{index}", [f"el-b{index}"])])
+        _seed_object(repo, base.id, f"o-b{index}", source_id, [f"el-b{index}"])
+        _backfill(repo, base.id)
+        bases.append(base.id)
+    repo.replace_notebook_bases(active.id, bases, "user-local")
+    repo.collection_catalog.invalidate()
+    return active.id, bases
+
+
+def test_owner_map_is_intersected_with_the_participant_set(
+    repo, three_bases, monkeypatch
+):
+    """上界设 2(active + 1 个参考库)→ 第 3 个库的对象零读、不出原文。
+
+    `CHUNK_FEDERATION_MAX_PARTICIPANTS` 文档写的是**上界**。不求交的话向量腿
+    只搜被允许的那些库,KG 腿却照样为超出上界的库反查原文并送进答案——那个
+    旋钮对这条腿就是失效的。`notebook_in_scope` 顶不上:没提交 `base_scope`
+    时它对任意 id 恒真。
+    """
+    active, bases = three_bases
+    candidates = repo.retrieval.candidates
+    repo.settings.chunk_federation_max_participants = 2
+    id_map = {
+        f"k{index}": {"object_id": f"o-b{index}", "notebook_id": base}
+        for index, base in enumerate(bases, start=1)
+    }
+
+    owners = candidates._kg_object_owners(active, id_map)
+
+    # active + 首个挂载库 = 2 个席位;其余两个落回 active。
+    assert owners == {
+        "o-b1": bases[0], "o-b2": active, "o-b3": active,
+    }
+
+    visible_calls: list[str] = []
+    original = repo.retrieval.graph.sources.all_visible_source_ids
+    monkeypatch.setattr(
+        repo.retrieval.graph.sources, "all_visible_source_ids",
+        lambda nid: (visible_calls.append(nid), original(nid))[1],
+    )
+    chunks = repo.retrieval.graph._kg_source_chunks(
+        active, ["o-b1", "o-b2", "o-b3"], object_owners=owners,
+    )
+
+    assert [chunk.chunk_id for chunk in chunks] == ["ck-b1"]
+    # 超出上界的库连一次来源枚举都不该发生。
+    assert visible_calls == [bases[0]]
+
+
+def _collect_events(repo, monkeypatch) -> list:
+    """收事件,并且**用 monkeypatch 还原** —— `event_log` 是 runtime 级对象,
+    裸赋值会把替身留给同一个 worker 后面的用例。"""
+    events: list = []
+    monkeypatch.setattr(
+        repo.retrieval.candidates.event_log, "emit", events.append,
+    )
+    return events
+
+
+def test_participant_ids_never_emit_the_truncation_event(
+    repo, three_bases, monkeypatch
+):
+    """只问成员资格的那一口不发 `chunk_federation_truncated`。
+
+    同一次 ask 里真正扇出的向量腿已经发过一次;KG 腿再发一次,会把一次截断
+    在事件流里读成两次。
+    """
+    from app.services.chunk_federation import (
+        federation_participant_ids, federation_participants,
+    )
+
+    active, bases = three_bases
+    candidates = repo.retrieval.candidates
+    repo.settings.chunk_federation_max_participants = 2
+    events = _collect_events(repo, monkeypatch)
+
+    assert federation_participant_ids(candidates, active) == {active, bases[0]}
+    assert events == []
+
+    # 对照:announcing 的那一口照发不误,事件本身没被删掉。
+    federation_participants(candidates, active)
+    assert [event["kind"] for event in events] == ["chunk_federation_truncated"]
+    assert events[0]["participants"] == 4 and events[0]["kept"] == 2
+
+
+def test_one_ask_announces_one_truncation(repo, three_bases, monkeypatch):
+    """一次 `_mix_retrieve` 里 `chunk_federation_truncated` 恰好一条。
+
+    向量腿与 KG 腿读的是同一个参与集,但只有真正扇出的那条腿该 announce。
+    KG 腿若改用 announcing 的那一口,同一次截断会在事件流里出现两次,运维
+    读到的「参与库被截断」次数就是实际的两倍。
+    """
+    active, _bases = three_bases
+    candidates = repo.retrieval.candidates
+    repo.settings.chunk_federation_max_participants = 2
+    events = _collect_events(repo, monkeypatch)
+
+    candidates._mix_retrieve(active, "o-b1", "", ["o-b1"])
+
+    truncations = [
+        event for event in events
+        if event.get("kind") == "chunk_federation_truncated"
+    ]
+    assert len(truncations) == 1, events
+
+
+# ---------------------------------------------------------------------------
+# 9. _mix_retrieve 的接线
 # ---------------------------------------------------------------------------
 
 
