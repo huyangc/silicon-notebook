@@ -160,6 +160,17 @@
         关键词。结果：走高级界面的 run 只剩语义臂，词法臂在最需要它的跨语言场景缺席。
         与下方「词法臂关键词双语化」是同一处的两个问题（一个是不跑、一个是跑了但语言对
         不上），做的时候一起定。
+- [ ] **空笔记本 + 无图参考库：原文通道已能跨库检索，端到端仍不可用**。联邦 chunk 通道
+      落地后，`_retrieve_chunks` 确实会对每个参与库各发一条召回腿，`AskService
+      ._no_kg_scope_admits_run` 的放行判据也已改成参与集口径（`collection_map.sources`）。
+      但 HTTP 上够不着这一支：`NotebookSummary.ask_available` 的参考库判据是
+      `base_kg_available`（挂载参考库**有可用知识图谱**，`query_store
+      .notebook_has_usable_base_kg`），一个无图参考库撑不起它，于是前端 `isAskBlocked`
+      保持输入框禁用、直连 `POST /ask` 被 `_require_ask_available` 拦成 409。修复需要一个
+      「任一参与库有可检索的原文（chunk）」的可用性判据，并同时改 `ask_available` /
+      `_require_ask_available` / 前端三处同源口径；默认配置下
+      `enumeration_wired and collection_map.sources > 0` 已先放行，所以这条缺口只在枚举
+      工具被关掉时单独暴露。刻意不在联邦 PR 里扩范围。
 - [ ] BM25 / FTS5 / tsvector 全文索引：已评估为低 ROI、基础设施级，暂缓。
 - [ ] 结构化硬过滤：软加权已够用，硬过滤有清空结果风险，暂缓。
 - [ ] **`_federated_graph_is_large` 把取消勾选的参考库也算进「图是否过大」**：这个

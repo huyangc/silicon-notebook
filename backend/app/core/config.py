@@ -1233,6 +1233,16 @@ class Settings(BaseSettings):
     # 自己最高分比的旧行为(全局问答那条调用点恒是这个语义,它不传本参数)。
     chunk_federation_peer_floor: float = Field(
         0.5, ge=0, le=1, validation_alias="CHUNK_FEDERATION_PEER_FLOOR")
+    # 当前笔记本在**最终入选证据**里的保底份额。产品规则:当前笔记本是主体,挂载
+    # 的参考库是补充。召回池按分数合并后,选择层(单查询的 MMR / 多子查询的配额
+    # round-robin)只认相对分,于是「几篇短文的当前库 0.30~0.40 + 一个 40 条
+    # 0.60~0.85 的参考库」会把 `chunk_mmr_k` 个席位全给参考库——用户问自己刚上传
+    # 的文档,却一条自己的原文都拿不到。多参与者时,只要当前库有合格候选,它至少
+    # 占 `ceil(k × 本值)` 席(合格候选不足则以其实际数量为上限);参考库的强命中仍
+    # 占其余席位。设 0 = 关闭保底、回到纯相关度。单参与者时每条候选都属于当前库,
+    # 这条规则恒自动满足,所以未挂参考库的笔记本逐值不变。
+    chunk_federation_active_reserve: float = Field(
+        0.25, ge=0, le=1, validation_alias="CHUNK_FEDERATION_ACTIVE_RESERVE")
     # 词法候选的语料语言闸:库内没有任何 CJK 字符时,丢掉纯 CJK 的三字片段词项
     # ——它们对该库保证零命中,却在 PostgreSQL 上各买一次真实探针(实测 7,026 块
     # 的英文库:64 词项 29.7s/26 行,其中 26 行全部来自 2 个拉丁词项;报告 4 节

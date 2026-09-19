@@ -271,9 +271,17 @@ class RetrievalService:
     def retrieve_chunk_candidates_multi(self, notebook_id, queries):
         """多子查询原文段落召回 —— 同样是参与集口径,四元组形状一字不变。
 
-        ``per_query`` 的组数从「每个子查询一组」变成「每个 (库, 子查询) 一组」,
-        这正是下游 ``quota_fuse_baseline_first`` 想要的:每组各有配额,于是
-        「每库至少露一手」又多一层保险。调用方不需要任何改动,它只是拿到更多组。
+        ``per_query`` **仍然是每个子查询一组**,各库对同一子查询的命中并进同一
+        组。这一点是刻意的,不是顺手:``quota_fuse_baseline_first`` 是**跨组**
+        round-robin,组数就是每个子查询配额的分母。若按「(库, 子查询)」出组,
+        4 库 × 4 子查询 = 16 组对 16 个席位(当前库被钉死在 4 席),8 库就是
+        32 组对 16 席、MOUNT_ORDER 靠后的库一席不得——挂库越多,每个子查询的
+        配额被切得越碎。合回子查询维度后,挂参考库只加宽候选池,不重切配额。
+
+        组前面还会有「当前笔记本保底组」:每个保底席位一个单命中组,round-robin
+        第一轮就把它们发出去。详见 ``chunk_federation._reserve_lanes``;
+        ``CHUNK_FEDERATION_ACTIVE_RESERVE=0`` 或单参与者短路时一个都没有,组序
+        逐字是今天的样子。调用方(``ask_chunk`` 的 multi 分支)不需要任何改动。
         """
         from app.services.chunk_federation import federated_chunk_candidates
 
@@ -307,6 +315,19 @@ class RetrievalService:
         return self.candidates._union_chunk_candidates(base, extra)
 
     def select_chunk_candidates(self, scored, ids, matrix, k, lambda_):
+        """MMR 精选,再补上当前笔记本的保底席位。
+
+        MMR 只认候选自己的 ``relevance``,而联邦召回把「几篇短文的当前库」和
+        「一个 40 条强命中的参考库」放进了同一个池子:``chunk_mmr_k`` 个席位会
+        整片落在参考库,用户问自己刚上传的文档却一条自己的原文都拿不到。保底在
+        MMR **之后**做(``chunk_federation.apply_active_reserve``),因为 MMR 的
+        多样性排序本身不该被改写——只把排在最后的若干个参考库席位换成当前库
+        最高分的落选候选,其余位置一字不动。
+
+        单参与者(或 ``CHUNK_FEDERATION_ENABLED=0``)时每条候选都属于当前库,
+        保底恒自动满足,这里逐值回到改动之前。
+        """
+        from app.services.chunk_federation import apply_active_reserve
         from app.services.retrieval import partition_generated_question_chunks
 
         baseline, supplemental = partition_generated_question_chunks(scored)
@@ -314,10 +335,12 @@ class RetrievalService:
             baseline, ids, matrix, k, lambda_
         )
         remaining = max(0, k - len(selected))
-        if not remaining or not supplemental:
-            return selected
-        return selected + self.candidates._mmr_select_chunks(
-            supplemental, ids, matrix, remaining, lambda_
+        if remaining and supplemental:
+            selected = selected + self.candidates._mmr_select_chunks(
+                supplemental, ids, matrix, remaining, lambda_
+            )
+        return apply_active_reserve(
+            self.candidates.settings, selected, scored, k,
         )
 
     def has_kg(self, notebook_id):

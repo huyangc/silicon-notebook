@@ -14,7 +14,11 @@ ContextVar)。本文件跑一个真的 `SQLiteRepository` + 一个真挂载的�
 * 任务 B3 留下的、需要真实接线才能断言的四项(peer 腿 `producer_explicit=False`、
   逐库天花板 = 该库可见来源且不含隐藏投影、隐藏 Memory 投影恒不出现、被取消
   勾选的库零候选零 SQL),以及 peek 腿返回形状对 `merge_chunk_matrices` 的维度
-  假设成立。
+  假设成立;
+* 选择层的联邦感知:active **有** chunk 但很弱、参考库一堆强命中时,当前笔记本
+  在 single(MMR)与 multi(配额融合)两条分支上都拿得到保底席位,`reserve=0`
+  回到纯相关度,参与库从 2 涨到 8 时席位不下降;
+* `search_chunks` 不在联邦扇出外面再持一个 `retrieval_fanout_slot`。
 """
 import json
 import re
@@ -129,8 +133,12 @@ def test_base_library_passages_reach_search_chunks(repo, base_only):
 
 
 def test_multi_query_lane_also_reaches_the_base_library(repo, base_only):
-    """`retrieve_chunk_candidates_multi` 同样改道;`per_query` 的组数变成
-    「(库, 子查询)」而不是「子查询」,四元组形状不变。"""
+    """`retrieve_chunk_candidates_multi` 同样改道;`per_query` 仍是每个子查询
+    一组(各库并进同一组),四元组形状不变。
+
+    active 零 chunk,所以保底组一个都没有——`_reserve_lanes` 的上限是当前库的
+    合格候选数。
+    """
     active, base, _base_source = base_only
 
     collected, per_query, _ids, _matrix = (
@@ -138,10 +146,8 @@ def test_multi_query_lane_also_reaches_the_base_library(repo, base_only):
     )
 
     assert collected and {c.notebook_id for c in collected.values()} == {base}
-    # 库主序、子查询次序:active(零 chunk,两组皆空)在前,base 的两组在后。
-    assert len(per_query) == 4, "两个参与库 × 两个子查询 = 四组"
-    assert per_query[:2] == [{}, {}]
-    assert all(group for group in per_query[2:])
+    assert len(per_query) == 2, "两个子查询 = 两组,与挂了几个库无关"
+    assert all(group for group in per_query)
     assert all(cid in collected for group in per_query for cid in group)
 
 
@@ -228,14 +234,34 @@ def _pre_federation(repo, notebook_id, queries):
     return allowed, filtered, ids, matrix
 
 
+def _fields(chunk):
+    """逐值比较的全字段投影。
+
+    只比 6 个字段会让「改道后 `element_ids` 丢了 / `retrieval_supports` 被换成
+    补充臂那一份」这类漂移静默通过,而那两个字段正是引用卡附图与「这条为什么
+    被召回」的依据。
+    """
+    return {
+        name: getattr(chunk, name) for name in vars(chunk)
+    }
+
+
 def _same_chunks(left, right):
-    return [
-        (c.chunk_id, c.source_id, c.text, c.score, c.relevance, c.notebook_id)
-        for c in left
-    ] == [
-        (c.chunk_id, c.source_id, c.text, c.score, c.relevance, c.notebook_id)
-        for c in right
-    ]
+    return [_fields(c) for c in left] == [_fields(c) for c in right]
+
+
+def _same_matrix(actual, expected):
+    """矩阵逐值相等,不只是 shape 相等。
+
+    shape 相等在改道用例里几乎是恒真的(同库同维),真正会漂的是**行序**——
+    联邦腿按选中集合取行再拼接,取行顺序错了 shape 一模一样、MMR 的 pair_sim
+    全错。
+    """
+    import numpy as np
+
+    if expected is None or actual is None:
+        return expected is None and actual is None
+    return np.array_equal(np.asarray(actual), np.asarray(expected))
 
 
 def test_single_participant_single_query_is_value_identical(repo, single_library):
@@ -250,9 +276,8 @@ def test_single_participant_single_query_is_value_identical(repo, single_library
 
     assert _same_chunks(scored, expected_scored)
     assert ids == expected_ids
-    assert (matrix is None) == (expected_matrix is None)
-    if matrix is not None:
-        assert matrix.shape == expected_matrix.shape
+    assert expected_matrix is not None, "基线矩阵为空,矩阵那条断言证不了任何事"
+    assert _same_matrix(matrix, expected_matrix)
 
 
 def test_single_participant_multi_query_is_value_identical(repo, single_library):
@@ -272,7 +297,7 @@ def test_single_participant_multi_query_is_value_identical(repo, single_library)
         list(group) for group in exp_per_query
     ]
     assert ids == exp_ids
-    assert (matrix is None) == (exp_matrix is None)
+    assert _same_matrix(matrix, exp_matrix)
 
 
 def test_single_participant_gather_vector_chunks_is_value_identical(
@@ -482,3 +507,238 @@ def test_peek_branch_shapes_feed_merge_chunk_matrices(repo, base_only, monkeypat
     assert (merged is None) == (not merged_ids)
     if merged is not None:
         assert merged.shape[0] == len(merged_ids)
+
+
+# ---------------------------------------------------------------------------
+# 6. 选择层的联邦感知:active 弱、peer 强时,当前笔记本仍拿得到保底席位
+# ---------------------------------------------------------------------------
+
+_WEAK = "版图 的边角料 与 无关讨论"
+
+
+@pytest.fixture
+def weak_active_strong_peers(repo):
+    """active **有** chunk 但都很弱,参考库一堆强命中。
+
+    `base_only` 那组夹具的 active 是零 chunk,恰好绕开了这个形态——而它才是
+    真实回归:用户刚上传几篇短文,挂着一个大参考库,问自己那几篇,结果一条
+    自己的原文都拿不到。候选池必须**大于** `chunk_mmr_k`,否则 MMR 全量返回、
+    选择层根本不发生。
+    """
+    builds = []
+
+    def _build(peer_count=1):
+        # 同一个用例里可以建两套(2 个库 vs 8 个库),来源 id 必须各不相同。
+        tag = len(builds)
+        builds.append(tag)
+        active = repo.create_notebook(NotebookCreate(name="my notebook"))
+        for index in range(5):
+            _seed_source(repo, active.id, f"local{tag}-{index}",
+                         text=f"{_WEAK} {index}")
+        bases = []
+        for library in range(peer_count):
+            base = repo.create_notebook(NotebookCreate(name=f"ref {library}"))
+            repo.mark_notebook_base(base.id)
+            for index in range(30 // peer_count):
+                _seed_source(
+                    repo, base.id, f"peer{tag}-{library}-{index}",
+                    text=f"{_QUERY} 的要点在参考文档 {library}-{index} 里逐条展开",
+                )
+            bases.append(base.id)
+        repo.replace_notebook_bases(active.id, bases, "user-local")
+        repo.collection_catalog.invalidate()
+        return active.id, bases
+
+    return _build
+
+
+def _mmr_seats(repo, active):
+    scored, ids, matrix = repo.retrieval.retrieve_chunk_candidates(active, _QUERY)
+    assert len(scored) > repo.settings.chunk_mmr_k, (
+        "候选池必须大于 k,否则 MMR 全量返回、这条用例测不到选择层"
+    )
+    selected = repo.retrieval.select_chunk_candidates(
+        scored, ids, matrix,
+        repo.settings.chunk_mmr_k, repo.settings.chunk_mmr_lambda,
+    )
+    return selected
+
+
+def _fuse_seats(repo, active):
+    from app.services.retrieval import quota_fuse_baseline_first
+
+    collected, per_query, _ids, _matrix = (
+        repo.retrieval.retrieve_chunk_candidates_multi(
+            active, [_QUERY, "matching 版图"]
+        )
+    )
+    selected, _counts = quota_fuse_baseline_first(
+        collected, per_query, repo.settings.chunk_mmr_k,
+        relevance=lambda chunk: chunk.relevance,
+    )
+    return selected
+
+
+def _floor(repo):
+    import math
+
+    return math.ceil(
+        repo.settings.chunk_mmr_k * repo.settings.chunk_federation_active_reserve
+    )
+
+
+@pytest.mark.parametrize("branch", ["single", "multi"])
+def test_active_keeps_its_reserved_seats_against_a_stronger_peer(
+    repo, weak_active_strong_peers, branch
+):
+    active, bases = weak_active_strong_peers()
+    seats = (_mmr_seats if branch == "single" else _fuse_seats)(repo, active)
+
+    local = [chunk for chunk in seats if not chunk.notebook_id]
+    peer = [chunk for chunk in seats if chunk.notebook_id]
+    assert len(seats) == repo.settings.chunk_mmr_k
+    assert len(local) >= _floor(repo), (
+        f"{branch} 分支:当前笔记本被强参考库挤空了(拿到 {len(local)} 席)"
+    )
+    assert {chunk.notebook_id for chunk in peer} == set(bases)
+    assert len(peer) == len(seats) - len(local), "其余席位仍归参考库的强命中"
+    assert all(
+        chunk.relevance >= max(hit.relevance for hit in local)
+        for chunk in peer
+    ), "保底只发 floor 席,不改其余席位按相关度排的事实"
+
+
+@pytest.mark.parametrize("branch", ["single", "multi"])
+def test_reserve_zero_returns_to_pure_relevance(
+    repo, weak_active_strong_peers, branch
+):
+    """对照臂:关掉保底,强参考库照旧通吃——证明上一条测的是保底本身。"""
+    active, _bases = weak_active_strong_peers()
+    repo.settings.chunk_federation_active_reserve = 0.0
+
+    seats = (_mmr_seats if branch == "single" else _fuse_seats)(repo, active)
+
+    assert seats and all(chunk.notebook_id for chunk in seats)
+
+
+@pytest.mark.parametrize("branch", ["single", "multi"])
+def test_active_seats_do_not_shrink_as_more_libraries_are_mounted(
+    repo, weak_active_strong_peers, branch
+):
+    """配额分母是子查询数,不是参与库数:2 个库涨到 8 个,当前库的席位不下降。"""
+    seats_for = _mmr_seats if branch == "single" else _fuse_seats
+
+    narrow_active, narrow_bases = weak_active_strong_peers(peer_count=2)
+    narrow = sum(1 for c in seats_for(repo, narrow_active) if not c.notebook_id)
+
+    wide_active, wide_bases = weak_active_strong_peers(peer_count=8)
+    wide = sum(1 for c in seats_for(repo, wide_active) if not c.notebook_id)
+
+    assert len(narrow_bases) == 2 and len(wide_bases) == 8
+    assert narrow >= _floor(repo)
+    assert wide >= narrow, f"库数从 2 涨到 8,当前库席位从 {narrow} 掉到 {wide}"
+
+
+def test_single_participant_selection_is_value_identical(repo, single_library):
+    """单参与者:保底这一步必须是恒等的(每条候选都属于当前库)。"""
+    scored, ids, matrix = repo.retrieval.retrieve_chunk_candidates(
+        single_library, _QUERY
+    )
+    baseline = repo.retrieval.candidates._mmr_select_chunks(
+        scored, ids, matrix,
+        repo.settings.chunk_mmr_k, repo.settings.chunk_mmr_lambda,
+    )
+
+    selected = repo.retrieval.select_chunk_candidates(
+        scored, ids, matrix,
+        repo.settings.chunk_mmr_k, repo.settings.chunk_mmr_lambda,
+    )
+
+    assert _same_chunks(selected, baseline)
+
+
+# ---------------------------------------------------------------------------
+# 7. 扇出闸:`search_chunks` 不得在联邦通道**外面**再持一个槽
+# ---------------------------------------------------------------------------
+
+def test_search_chunks_does_not_hold_a_slot_around_the_federated_lane(
+    repo, base_only
+):
+    """`fanout_limit=1` 下 `search_chunks` 必须能跑完。
+
+    父层与叶子同时持槽时,`BoundedSemaphore` 的唯一名额会被外层占着等内层——
+    这是真实的自锁,不是理论风险;超时只是死锁守卫,不是断言判据。
+    """
+    import threading
+
+    from app.services.retrieval_run import retrieval_run
+
+    active, base, _base_source = base_only
+    retriever = _reasoning_retriever(repo)
+    outcome = {}
+
+    def _run():
+        with retrieval_run(run_kind="report_generation", fanout_limit=1):
+            outcome["selected"] = retriever.search_chunks(active, _QUERY)
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(30.0)
+
+    assert "selected" in outcome, (
+        "search_chunks 在 fanout_limit=1 下死锁:编排层仍在联邦扇出外面持槽"
+    )
+    assert {chunk.notebook_id for chunk in outcome["selected"]} == {base}
+
+
+def test_search_chunks_leaves_are_bounded_by_the_report_fanout_gate(
+    repo, weak_active_strong_peers, monkeypatch
+):
+    """`fanout_limit=2` 下,`search_chunks` 一次调用最多两条 `_retrieve_chunks`。
+
+    判据是握手:`Barrier(3)` 只有在三条叶子同时在跑时才放行,而 3 个参与库 ×
+    1 个子查询正好是三条腿。槽若只在 `search_chunks` 那一层(编排者持一个、
+    子线程不受约束),三条腿当场凑齐闸 → `released` 非空。报告 run 的
+    `fanout_limit` 默认 8、章节并发 5,这正是「挂 3 个参考库就变成 32 条并发
+    `_retrieve_chunks`、各自 `_connect()`」的形态。
+
+    闸的等待窗只是「等够了、可以下结论」,上限正确时它**结构上**永远凑不齐。
+    """
+    import threading
+
+    from app.services.retrieval_run import retrieval_run
+
+    active, bases = weak_active_strong_peers(peer_count=2)
+    assert len(bases) == 2, "前提:active + 2 个参考库 = 三条腿"
+    candidates = repo.retrieval.candidates
+    lock = threading.Lock()
+    state = {"live": 0, "peak": 0}
+    gate = threading.Barrier(3, timeout=2.0)
+    released = []
+    original = candidates._retrieve_chunks
+
+    def _spy(notebook_id, query, recall=0, **kwargs):
+        with lock:
+            state["live"] += 1
+            state["peak"] = max(state["peak"], state["live"])
+        try:
+            gate.wait()
+            released.append(notebook_id)
+        except threading.BrokenBarrierError:
+            pass
+        with lock:
+            state["live"] -= 1
+        return original(notebook_id, query, recall, **kwargs)
+
+    monkeypatch.setattr(candidates, "_retrieve_chunks", _spy)
+    retriever = _reasoning_retriever(repo)
+
+    with retrieval_run(run_kind="report_generation", fanout_limit=2):
+        retriever.search_chunks(active, _QUERY)
+
+    assert not released, (
+        f"三条叶子同时在跑 → 扇出闸没约束到叶子 I/O:{released}"
+    )
+    assert state["peak"] == 2, (
+        f"叶子并发是 {state['peak']},不是 fanout_limit=2"
+    )

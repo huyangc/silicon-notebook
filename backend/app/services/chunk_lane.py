@@ -111,5 +111,32 @@ _CHUNK_PEEK_ONLY: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "_chunk_peek_only", default=False
 )
 
+# "This task is searching a library the requester is not in." Strictly wider
+# than ``_CHUNK_PEEK_ONLY`` above, which is the LARGE subset of the same set,
+# and set by ``chunk_federation`` for every peer task.
+#
+# Its one reader is the optional contributor seam in
+# ``_run_chunk_candidate_contributors``. That seam runs the generated-question
+# index under the REQUESTER's ``actor_id``; on a peer library that identity has
+# no defined meaning (the requester is normally not a member) and no test
+# pins what it should answer there, while the cost -- up to
+# ``generated_question_max_scan_rows + 1`` question vectors pulled and decoded,
+# once per (library, sub-query), with no memo -- is paid per peer leg. The
+# authorization surface is unchanged either way (the peer ceiling is pushed
+# down and ``all_visible_source_ids`` already excludes memory/knowhow
+# projections), so this is a cost and semantics decision, not a leak fix.
+#
+# A separate variable rather than widening ``_CHUNK_PEEK_ONLY``: that one also
+# picks the index LANE (borrow-a-warm-index instead of cold-loading), and a
+# SMALL peer library must keep loading its own index exactly as it does today.
+_CHUNK_PEER_LEG: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_chunk_peer_leg", default=False
+)
 
-__all__ = ["_CHUNK_ARM_DRIFTED", "_CHUNK_PEEK_ONLY", "_lexical_gate_drift_probe"]
+
+__all__ = [
+    "_CHUNK_ARM_DRIFTED",
+    "_CHUNK_PEEK_ONLY",
+    "_CHUNK_PEER_LEG",
+    "_lexical_gate_drift_probe",
+]
