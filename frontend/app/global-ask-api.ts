@@ -2,6 +2,26 @@ import { requestJson, requestVoid } from "./api-client.ts";
 import type { AnswerAnchorLike, CitationLike } from "./answer-formatting.ts";
 
 export type GlobalScope = { mode: "all" } | { mode: "include"; notebook_ids: string[] };
+
+/** 一次全局提问最多参与的笔记本数。后端 `GLOBAL_ASK_MAX_NOTEBOOKS` 的硬上限(`le=8`)
+ *  的镜像:超过它的范围后端直接 422,所以界面必须在提交之前就把范围收进这个数。 */
+export const GLOBAL_ASK_MAX_NOTEBOOKS = 8;
+
+/** 「全部」在可读笔记本超过上限时不是一个可提交的范围。此时预选来源最多的那几个
+ *  (列表没有「最近使用」这类字段;来源多的库是更可能被问到的库),同数按列表原序。
+ *  不超过上限时原样返回传入的范围。 */
+export function submittableGlobalScope(
+  scope: GlobalScope,
+  notebooks: ReadonlyArray<{ id: string; counts: Record<string, number> }>,
+): GlobalScope {
+  if (scope.mode !== "all" || notebooks.length <= GLOBAL_ASK_MAX_NOTEBOOKS) return scope;
+  const ranked = notebooks
+    .map((item, index) => ({ id: item.id, sources: item.counts.sources ?? 0, index }))
+    .sort((left, right) => right.sources - left.sources || left.index - right.index)
+    .slice(0, GLOBAL_ASK_MAX_NOTEBOOKS)
+    .sort((left, right) => left.index - right.index);
+  return { mode: "include", notebook_ids: ranked.map((item) => item.id) };
+}
 export type GlobalSkippedNotebook = { notebook_id: string; reason: string };
 export type GlobalAnswer = {
   answer_id: string;

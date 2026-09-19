@@ -5,7 +5,8 @@ import { askQuestionLimitHint } from "../ask-api.ts";
 import { toUserMessage } from "../errors.ts";
 import {
   askGlobal, cancelGlobalJob, getGlobalConversation, getGlobalJob, listGlobalConversations,
-  GLOBAL_ASK_PAGE_SIZE, type GlobalConversation, type GlobalJob, type GlobalScope,
+  GLOBAL_ASK_MAX_NOTEBOOKS, GLOBAL_ASK_PAGE_SIZE, submittableGlobalScope,
+  type GlobalConversation, type GlobalJob, type GlobalScope,
 } from "../global-ask-api.ts";
 import type { NotebookSummary } from "../workspace-model.ts";
 
@@ -122,6 +123,14 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
       if (mounted.current && notebookVersion.current === ticket) setError(toUserMessage(cause, "笔记本列表刷新失败，请重新加载"));
     });
   }, [active]);
+
+  // 「全部」在可读笔记本超过上限时提交必然 422：把它换成一份看得见、改得动的预选。
+  // 放在 effect 里而不是只在提交时换，是因为范围选择器要把这 8 个显示成已勾选。
+  useEffect(() => {
+    if (loading) return;
+    const next = submittableGlobalScope(scope, notebooks);
+    if (next !== scope) setScope(next);
+  }, [loading, scope, notebooks]);
 
   useEffect(() => {
     if (!running || loading) return;
@@ -290,6 +299,10 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     const question = draft.trim();
     const hint = askQuestionLimitHint(question);
     if (!question || hint) { setError(hint || "请先输入问题"); return; }
+    if (scope.mode === "include" && !scope.notebook_ids.length) { setError("请至少选择一个笔记本"); return; }
+    if (scope.mode === "include" && scope.notebook_ids.length > GLOBAL_ASK_MAX_NOTEBOOKS) {
+      setError(`一次最多检索 ${GLOBAL_ASK_MAX_NOTEBOOKS} 个笔记本，请减少选择`); return;
+    }
     if (scope.mode === "include" && scope.notebook_ids.some((id) => !notebooks.some((item) => item.id === id))) {
       setError("部分已选笔记本不可访问，请重新选择范围"); return;
     }
