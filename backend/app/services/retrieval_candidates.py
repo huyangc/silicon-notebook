@@ -4258,6 +4258,104 @@ class CandidateRetrievalService(_RetrievalState):
                 seen.add(oid)
                 fused.append(oid)
         return fused
+    def _ceiling_scoped_subgraph(self, subgraph: list, scope) -> list:
+        """Drop walk nodes no in-ceiling source of THEIR OWN library supports,
+        and narrow each surviving edge's evidence to that same ceiling.
+
+        WHY HERE, AND WHY ``scoped_subgraph_nodes`` CANNOT DO IT.  That helper
+        owns the LIBRARY dimension of the same walk result and stops there by
+        construction: a graph node payload is ``{object_id, object_type, name,
+        tier, notebook_id}`` (``kg.graph_reason.build_rx_graph``) and carries no
+        ``source_id``, so "is this node supported by a source inside its
+        library's frozen ceiling" is a question with no answer in the data it
+        receives.  Answering it needs a read, and a filter that reads does not
+        belong inside a pure scope predicate.  The seeds are already safe --
+        ``federated_retrieve``/``federated_retrieve_relations`` intersect
+        ``scoped_allowed_source_ids`` per participant and are re-checked by
+        ``filter_retrieval_items``, whose knowledge/relation branch drops a hit
+        whose own library's ceiling emptied its evidence -- so what this closes
+        is the 1-hop EXPANSION, where ``render_subgraph_context`` writes a
+        node's NAME and its incoming edge's FIRST evidence quote into the answer
+        prompt behind a live ``k{n}`` anchor.
+
+        ⛔ NOT fixed by routing a peer-ceiling run down the ``restricted``
+        branch instead.  Freezing each participant's currently visible sources
+        is not a narrowing and must never switch a channel off -- see
+        ``ActiveSourceScope.restricted``, which spells that out and deliberately
+        does not consult ``peer_ceiling_active``.  Nor is "strip the quote, keep
+        the name" a fix: the name is the leak the ledger entry names first.
+
+        CACHE IMMUTABILITY.  The walk result comes from the PyDiGraph memoised
+        in the process-wide ``_vector_cache`` under a scope-blind key.
+        ``multihop_subgraph`` hands back a shallow copy of each node and edge
+        payload, but an edge copy still SHARES its ``evidence`` list object with
+        the cached graph, so narrowing that list in place would delete a peer's
+        evidence from every later request in the process.  Every surviving edge
+        is therefore rebuilt as a fresh dict with a fresh list; nothing reached
+        from ``G`` is ever assigned into.
+
+        BOUND.  One batched ``object_evidence_rows`` read -- a single ``IN``
+        over at most one object id per node in the walk result, which the walk's
+        own ``chunk_kg_max_depth``/``chunk_kg_fan_out`` caps already bound.
+        Never one query per node.
+
+        SHORT CIRCUIT.  Two layers, both ``is not None`` and never truthiness:
+        the caller does not enter this function at all unless SOME per-notebook
+        ceiling binds the run, and a node whose owning library has none
+        (``source_ceiling_for(owner) is None``) is passed through untouched and
+        contributes no id to the read.  ``frozenset()`` is a different answer --
+        "this library is frozen to zero sources", an explicit deny -- and must
+        drop every one of that library's nodes.  A node with no ``notebook_id``
+        keeps ``scoped_subgraph_nodes``' stated fail-open premise: it matches no
+        ceiling key, so it is ungoverned here too.
+        """
+        from app.services.source_scope import filter_evidence
+
+        # Governed nodes only: {object_id: owning notebook id}.
+        owners: Dict[str, str] = {}
+        for triple in subgraph:
+            node = triple[0] or {}
+            owner = str(node.get("notebook_id") or "")
+            if scope.source_ceiling_for(owner) is not None:
+                owners[str(node.get("object_id") or "")] = owner
+        if not owners:
+            return subgraph
+        supported: set = set()
+        with self._connect() as db:
+            for row in self.knowledge.object_evidence_rows(db, list(owners)):
+                object_id = str(row["id"])
+                if filter_evidence(
+                    owners.get(object_id, ""),
+                    json.loads(row["evidence"] or "[]"),
+                ):
+                    supported.add(object_id)
+        out: list = []
+        for node, edge, src_oid in subgraph:
+            object_id = str((node or {}).get("object_id") or "")
+            owner = owners.get(object_id)
+            if owner is None:
+                out.append((node, edge, src_oid))
+                continue
+            if object_id not in supported:
+                # The whole triple goes, exactly as an unchecked library's node
+                # does in ``scoped_subgraph_nodes``: emptying the evidence alone
+                # would leave the name in the prompt behind a live anchor, just
+                # untraceable (``filter_retrieval_items``' knowledge branch makes
+                # the same call for the same reason).  A later
+                # triple naming this one as ``src_oid`` renders ``[?]`` with an
+                # empty name (``render_subgraph_context`` resolves the source
+                # name through ``id_map``), so nothing of it survives.
+                continue
+            if edge:
+                # New dict AND new list: see CACHE IMMUTABILITY above.  Gated on
+                # the TARGET node's owner because that is the library this
+                # quote is rendered and cited under (``id_map[k]["notebook_id"]``
+                # is the node's), so evidence from anywhere else fails closed.
+                edge = {**edge, "evidence": filter_evidence(
+                    owner, edge.get("evidence") or [],
+                )}
+            out.append((node, edge, src_oid))
+        return out
     def _chunk_kg_overlay(self, notebook_id: str, query: str, hl: str, id_offset: int):
         """种子(节点∪关系端点)→1-hop 子图→渲染。
 
@@ -4355,11 +4453,20 @@ class CandidateRetrievalService(_RetrievalState):
         subgraph = multihop_subgraph(G, oid_to_idx, idx_to_oid, seed_ids=seeds,
                                      edge_types=None, max_depth=max_depth,
                                      max_fan_out=fan_out)
-        from app.services.source_scope import scoped_subgraph_nodes
+        from app.services.source_scope import (
+            current_source_scope, scoped_subgraph_nodes,
+        )
 
         # The federated graph is process-cached under a scope-blind key, so the
         # library ceiling is applied to the walk's RESULT (see the helper).
         subgraph = scoped_subgraph_nodes(subgraph)
+        # ...and the SOURCE ceiling right after it, for the half
+        # ``scoped_subgraph_nodes`` structurally cannot answer.  Guarded here
+        # rather than inside the helper so a run without per-notebook ceilings
+        # -- every single-notebook ask -- does not even enter it.
+        scope = current_source_scope()
+        if scope is not None and scope.peer_ceiling_active:
+            subgraph = self._ceiling_scoped_subgraph(subgraph, scope)
         if not subgraph:
             return "", {}, [], {}
         block, id_map = render_subgraph_context(

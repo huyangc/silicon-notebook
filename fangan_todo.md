@@ -203,27 +203,8 @@
       `source_scope.scoped_subgraph_nodes` 的 docstring：把 scope 放进键会按勾选组合
       重建整图）。参与集覆盖在场时守卫已经读座位——因为那时两张图也读座位，守卫与
       建图口径同源；要修的是无覆盖那一半。
-- [ ] **联邦 KG 的 1-hop 扩展节点不过任何来源级闸（逐库天花板下会漏内容）**：
-      `source_scope.scoped_subgraph_nodes` 只判库维度——图节点带的是
-      `{type, name, tier, notebook_id}`，没有 `source_id`，所以「这个节点有没有被
-      该库天花板之内的来源支撑」这个问题它无从回答。种子那一侧是安全的
-      （`federated_retrieve` / `federated_retrieve_relations` 逐参与库与
-      `scoped_allowed_source_ids` 求交，再经 `filter_retrieval_items` 按每条命中
-      自己那一库的天花板复核）；1-hop **扩展**出来的节点不是：
-      `render_subgraph_context` 会把它的**名字**与入边的第一条证据**引文**写进
-      提示词、并铸一个活的 `k{n}` 锚点。有逐库天花板在绑时，这就是该库天花板
-      之外来源的内容进了提示词。今天不可达（生产上没有任何地方构造
-      `notebook_source_ceilings`，PR-D 才会），但 PR-D 的全局 v1 关 PPR、**保留**
-      federated KG，所以必须在第一个写入方落地之前关掉。最小修法：在
-      `_chunk_kg_overlay` 的非 restricted 支里，`scoped_subgraph_nodes` 之后、
-      `render_subgraph_context` 之前，按节点 owner 的天花板裁一遍——边证据可以就地
-      过 `filter_evidence`（**必须先拷贝边字典**：子图取自进程级缓存的图，就地改
-      会污染缓存），节点名则需要一次按 owner 的 evidence 反查（`node_context` 同
-      形，有界于 `chunk_kg_fan_out` × 深度）。刻意不在本 PR 做：它要么半修（只去
-      引文、留名字，不算修好），要么就得给 whole-graph 走查加一条新的按来源闸，
-      那是独立一处改动。不要改成「有 peer 天花板就走 restricted 支」——那等于让
-      冻结变成收窄，违反 `peer_ceiling_active` 的既定语义。
-- [ ] **横向对比的兄弟实体名不过来源级闸（逐库天花板下会漏名字）**：与上一条同类、
+- [ ] **横向对比的兄弟实体名不过来源级闸（逐库天花板下会漏名字）**：与已关闭的
+      「联邦 KG 的 1-hop 扩展节点」那条（见 `fangan_done.md`）同类、
       方向同样是**多给**。`communities.mounted_base_ids` / `resolve_comparison_peers`
       只做了**库维度**收窄；一本仍在参与集里的库，如果某个实体只由该库天花板之外的
       来源（典型是隐藏 Memory / Knowhow 投影）支撑，它的**名字**仍会经
