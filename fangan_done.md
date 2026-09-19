@@ -562,3 +562,26 @@ chunk/插件响应除 `status` 外不变。顺手修了 `plan_query_intent` 兜�
 问题在无模型主题时合同构造失败的潜在 500。成本登记：每次 reasoning 调用多一次理解模型调用、
 检索种子从 1 条扩到必答主题数，用户裁决接受。文档：`docs/product-and-api*.md` MCP 段、
 `docs/agent-mcp-memory-sop*.md` 排障表与长任务段。
+
+## 35. 联邦 KG 的 1-hop 扩展节点过逐库来源天花板（2026-09-20）
+
+`_chunk_kg_overlay` 的非 restricted 支在 `scoped_subgraph_nodes`（只判库维度）之后、
+`render_subgraph_context` 之前多了一道按节点所属库的来源级裁剪
+`CandidateRetrievalService._ceiling_scoped_subgraph`：逐库冻结天花板在绑时，一个
+只由该库天花板之外来源（典型是隐藏 Memory / Knowhow 投影）支撑的 1-hop 扩展节点整条
+丢弃——它的名字与入边引文都不再进提示词、也不再铸 `k{n}` 锚点；仍留下的边，其证据被
+收窄到该节点所属库的天花板之内，所以渲染出的引文只可能来自天花板内的来源。节点→支撑
+来源的判定走一次批量 `object_evidence_rows`（单条 `IN`，上界 = 本次走查结果的节点数），
+因为图节点载荷只有 `{object_id, object_type, name, tier, notebook_id}`、不带 `source_id`。
+种子不需要豁免也不会被误杀：种子经 `filter_retrieval_items` 的 knowledge/relation 支已按
+自己那一库的天花板复核过，因此必有天花板内的证据。
+
+不变量：`current_source_scope()` 为空或本次 run 没有任何逐库天花板时整段不进入，
+`kg_block` / `kg_id_map` 与改动前逐值相等且零新增查询；`None`（无天花板）与
+`frozenset()`（冻结为零来源、显式拒绝）按 `is not None` 区分，后者丢掉该库全部节点；
+子图取自进程级缓存的联邦图，裁剪只新建边字典与证据列表，缓存里的那份连取两次仍完整。
+刻意没有改成「有逐库天花板就走 restricted 支」——那等于把冻结变成收窄，违反
+`ActiveSourceScope.restricted` 写明的既定语义。
+
+今天生产上不可达（没有任何地方构造 `notebook_source_ceilings`），覆盖由
+`backend/tests/test_peer_ceiling_subgraph.py` 直接安装天花板触发。

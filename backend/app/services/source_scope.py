@@ -938,19 +938,23 @@ def scoped_subgraph_nodes(subgraph: Iterable[Any]) -> list[Any]:
     answer in the data it receives.  It therefore answers the library question
     only and leaves the source question OPEN for the walk result.
 
-    Who does own it, and what is still open: the seeds are safe --
+    Who does own it: the seeds are safe --
     ``federated_retrieve``/``federated_retrieve_relations`` intersect
     ``scoped_allowed_source_ids`` per participant and are then re-checked by
     ``filter_retrieval_items``, whose knowledge/relation branch drops a node
-    whose own library's ceiling emptied its evidence.  What the 1-hop EXPANSION
-    adds is not: ``render_subgraph_context`` writes each expanded node's NAME and
-    the incoming edge's first evidence QUOTE into the prompt behind a live
-    ``k{n}`` anchor, and neither passes any source-level gate.  With a peer
-    ceiling in force that is a peer library's content reaching the prompt from
-    sources the ceiling excluded.  Unreachable today (nothing in production
-    constructs ``notebook_source_ceilings`` yet) and registered in
-    ``fangan_todo.md`` with the minimum fix; it must be closed before the first
-    writer installs one.
+    whose own library's ceiling emptied its evidence.  The 1-hop EXPANSION was
+    not: ``render_subgraph_context`` writes each expanded node's NAME and the
+    incoming edge's first evidence QUOTE into the prompt behind a live ``k{n}``
+    anchor, and neither passed any source-level gate, so a peer ceiling in force
+    meant that library's excluded sources reaching the prompt.  CLOSED by
+    ``retrieval_candidates.CandidateRetrievalService._ceiling_scoped_subgraph``,
+    which runs on this function's output inside ``_chunk_kg_overlay``'s
+    non-restricted branch: it drops every node no in-ceiling source of its own
+    library supports (one batched evidence read, bounded by the walk) and
+    narrows each surviving edge's evidence to that ceiling.  Nothing here
+    changed -- this function still answers the library question only -- and the
+    per-notebook shape stays unreachable in production until a writer
+    constructs ``notebook_source_ceilings``.
 
     ONE STATED PREMISE, because the filter fails OPEN on it: a node carrying no
     ``notebook_id`` is kept.  That is safe only because every node the walk can
