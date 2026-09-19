@@ -358,7 +358,14 @@ def test_enumeration_rows_and_denominator_come_from_one_predicate(repo, islands)
 
 
 def test_comparison_peer_libraries_come_from_the_override(repo, islands):
-    """``communities.mounted_base_ids``:覆盖下是覆盖集去掉名义 active。"""
+    """``communities.mounted_base_ids``:覆盖下是**整个**覆盖集。
+
+    D0-5 之前这里断言的是「覆盖集去掉名义 active」。剥掉首项的理由是「当前库
+    自己不是自己的参考库」,而对等模式没有当前库:首项只是
+    ``ParticipantOverride.notebook_ids[0]`` 这个命名锚点,继续剥掉等于唯独它的
+    内容不参与横向对比——一条反向特权。逐库去重见 ``mounted_base_ids`` 的
+    docstring 与 ``test_peer_mode_ask_steps.py`` 的那条用例。
+    """
     ids, _sources = islands
     active = ids[0]
     queries = repo._runtime.ask_service().communities()
@@ -367,16 +374,18 @@ def test_comparison_peer_libraries_come_from_the_override(repo, islands):
     with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
         with participant_override(_override(ids)):
             peers = queries.mounted_base_ids(active)
-    assert peers == [ids[1], ids[2]]
+    assert peers == list(ids)
 
-    # 库维度仍可再收窄。
+    # 库维度仍可再收窄——但 ``covers_notebook`` 对 scope 自己的 notebook_id 恒真
+    # (名义 active 的来源由 ``allows()`` 另行把关),所以能被勾选去掉的只有 peer。
+    # D1 的安装形状不提交库维度,这个组合只在用例里出现。
     with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
         with participant_override(_override(ids)):
             with source_scope_context(
                 active, None,
                 BaseNotebookScope(mode="include", notebook_ids=[ids[2]]),
             ):
-                assert queries.mounted_base_ids(active) == [ids[2]]
+                assert queries.mounted_base_ids(active) == [ids[0], ids[2]]
 
 
 # ---------------------------------------------------------------------------

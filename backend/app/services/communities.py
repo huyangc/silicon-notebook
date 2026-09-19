@@ -41,9 +41,21 @@ class CommunityQueryService:
 
         参与集覆盖在场时这份库清单来自覆盖集而不是挂载表(本模块是覆盖模块冻结
         白名单上的读者 #5)。顺序固定:覆盖**替换**集合,``scoped_participants``
-        再按库勾选**收窄**。座位的形状是「active 在前、其余是参考库」,所以两条
-        分支都把首项剥掉;fallback 也照这个形状拼出来,免得两条分支对「首项是谁」
+        再按库勾选**收窄**。座位的形状是「active 在前、其余是参考库」,所以单库
+        模式把首项剥掉;fallback 也照这个形状拼出来,免得两条分支对「首项是谁」
         各有一套理解。
+
+        **对等模式(D0-5)不剥首项。** 剥掉首项的理由是「当前库自己不是自己的
+        参考库」——那条理由要有一个主体库才成立。对等 run 的首项只是
+        ``ParticipantOverride.notebook_ids[0]`` 这个命名锚点,用户逐个选的 8 个
+        库里它没有任何特殊地位;继续剥掉等于「唯独这一库不许被问到兄弟实体」,
+        是一条反向的特权(名义 active 的内容不参与横向对比)。不剥也不会重复计:
+        两个调用点都是**逐库**调 ``resolve_comparison_peers(base_nb, …)``,每一轮
+        只查那一个库自己的共提/社区行,拿回来的名字再按名字去重
+        (``if pname not in peers`` / ``not in sub_queries``),所以多一个库只是
+        多一轮查询,不会让任何一个名字被计两次;它也不会把焦点实体自己当兄弟
+        ——那由 ``comention_peers``/``community_member_peers`` 的 ``focal`` 参数
+        在 SQL 侧排除,与是哪个库无关。
 
         这里只答**库维度**。逐库冻结来源天花板在绑时,一本仍在这份清单里的库
         还可能有「只由天花板之外的来源(典型是隐藏 Memory / Knowhow 投影)支撑」
@@ -51,6 +63,7 @@ class CommunityQueryService:
         ``sibling_peers`` / ``community_peers``;不在这里,也不在两个调用点。
         """
         from app.services.retrieval_participants import (
+            federated_ask_active,
             resolve_retrieval_participant_ids,
         )
         from app.services.source_scope import scoped_participants
@@ -62,7 +75,9 @@ class CommunityQueryService:
                 *self.unified_kg.mounted_base_ids(active_notebook_id),
             ),
         )
-        return list(scoped_participants(participants[1:]))
+        return list(scoped_participants(
+            participants if federated_ask_active() else participants[1:]
+        ))
 
     def community_peers(self, base_notebook_id: str, focal_name: str,
                         question: str, *, top_k: int,

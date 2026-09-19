@@ -669,3 +669,104 @@ True），既有用例零改动全绿。
 过不了是**结构性**的——它在 store 侧由两条路产出（概念簇 `canonical_description` 这个对象级
 LLM 融合描述，归因不到单一来源；以及 `defines` 关系那个源对象证据的首条原文，有来源但没随
 字符串返回），服务层拿到的只是一个字符串。关掉它需要改 `node_context` 的返回形状。
+
+## 39. 联邦 chunk 通道的对等模式：没有主体库时三件套分叉（2026-09-20）
+
+PR-B 给联邦 chunk 通道确立了「**当前库是主体**」三件套：保底份额、当前库命中不打标、引用
+归属按 active 归零。一次搜「已鉴权参与集」的 run 没有主体——名义 active 只是
+`ParticipantOverride.notebook_ids[0]` 这个命名锚点，是覆盖集的第一项，用户从没单独选中它。
+参与集覆盖在场（`retrieval_participants.federated_ask_active()`）时通道整体分叉：
+
+- **保底恒 0**：`chunk_federation._reserve_size` 首行返回 0，一处覆盖三条消费路——
+  `_withheld_active` 提前空手、`FederatedCollected` 不带 `active_reserve`、
+  `apply_active_reserve` → `retrieval.enforce_active_floor` 恒以 0 被调用因而 inert。
+  `enforce_active_floor` / `quota_fuse_baseline_first` 一行未改。
+- **每条腿都是 peer 腿**：新增 `_peer_leg(active_id, notebook_id)`，`_federated_tasks` 读它。
+  一处同时解决四件事——所有命中打**真实** `notebook_id`（不再有「空 = 当前库」的未打标
+  命中）、名义 active 的冻结来源天花板也显式下推到生产者（`producer_explicit=False`）、
+  `_peek_only` 对名义 active 同样生效（大库只借暖索引、绝不冷加载共享 scale 索引）、
+  生成问题索引的补召回接缝对全部腿关闭。
+- **合并阈值换轨**：新增 `_merge_thresholds`，对等模式下 `peer_evidence` 收到文档栏杆
+  `GLOBAL_ASK_MIN_RELEVANCE`(0.25) / `GLOBAL_ASK_RELATIVE_RELEVANCE`(0.6) 与
+  `peer_floor=0`（全局的库是用户逐题逐个选的，不是「挂在那里的参考库」，绝对合格线已经
+  挡住无关填充），合并预算换成 `GLOBAL_ASK_CANDIDATE_LIMIT`(64) 而不是 `CHUNK_RECALL`(200)。
+- **单参与者不短路**：`federated_chunk_candidates` 的短路条件改成
+  `len(participants) <= 1 and not federated_ask_active()`——只选一个库的全局提问同样要走
+  逐库通道，否则它没有逐库天花板下推、没有打标。
+- **覆盖预检**：`_bounded_participants` 首行 `assert_override_matches_run()`。它是每条联邦腿、
+  每个消费方取参与集的唯一入口，跑在父线程、不在任何 `try` 里，所以身份复核失败在扇出
+  之前就炸出来，而不是死在 worker 线程深处的某个 fail-soft handler 里；这一处因此刻意
+  **不**登记进守卫的 `_SEAT_FAILSOFT_SITES`。
+
+**引用归属**统一经新增的 `source_scope.citation_active_id(notebook_id)`：逐库天花板在绑时
+返回 `""`，于是 `foreign_notebook_id(x, "")` 把任何非空归属原样放过——包括名义 active 自己的。
+七个跨库引用生产点（`evidence_context` 五处、`kg/follow_chain`、`kg/graph_reason`、
+`document_source_overview`、`spreadsheet_analysis`）共享这一条规则，而不是各自决定；
+`test_citation_notebook_id_guard` 的既有静态断言零改动通过（只换了第二个实参）。配套
+`prompts.answer_prompt(peer_notebooks=True)` 讲「平等证据来源」而不是 base/personal 权威序，
+tier 只用于引用卡显示。
+
+判据刻意是**两个**：检索层读 `federated_ask_active()`（`chunk_federation` 成为覆盖模块的第
+7 个读者），`ask_service` / 引用 / 提示词侧读 `source_scope.peer_scope_ceiling_active()`。
+后者只回答「有没有逐库天花板」，替换不了任何集合，所以 Ask 主干不必进覆盖模块的读者白名单；
+两者不漂移是因为 PR-D1 由**一个**上下文管理器同时安装覆盖与天花板，守卫用例
+`test_peer_mode_federation.py::test_peer_mode_predicates_agree` 钉住这个构造前提（含两条
+只装一半的负对照）。
+
+今天生产上不可达——没有任何地方安装覆盖或构造 `notebook_source_ceilings`——所以这次是零
+行为变化：覆盖缺席的逐字不变由既有 `test_chunk_federation*.py` / `test_evidence_context*.py`
+全套零改动全绿承担，分叉本身由 `backend/tests/test_peer_mode_federation.py` 与
+`test_peer_mode_citations.py` 在用例里直接安装覆盖触发。
+
+## 40. 对等模式下 `AskService` 各步骤与三条 active-only 检索腿的处置（2026-09-20）
+
+第 39 条把联邦 chunk 通道改成了对等模式，这一条把**通道之外**的步骤对齐——名义 active 不
+该在任何一步上比它的对等库多拿一点东西。`ask_service.py` 一律读
+`source_scope.peer_scope_ceiling_active()`，检索层一律读 `federated_ask_active()`：
+
+- **私有记忆整条关**（`_memory_hits`）。私有记忆属于**一个**笔记本，答一个集合的 run 没有
+  哪个库的私有层该折进来。一处闸覆盖两个调用点（`ask_chunk` 与 `_run_reasoning_stage`），
+  `reasoning_retrieval` 自己没有任何 memory 取数点（`consult_memory` 读的是 reflect 的经验库，
+  不是笔记本 Memory 投影）。
+- **`index_required` 恒 False**（`_needs_index`）。它是一句对**当前库**的行动号召，8 个库的
+  run 没有承接方；连索引探针都不跑。
+- **「所选来源图」通道关**（`_activate_selected_source_graph`）。整条通道定义在「用户在这个
+  库里勾选的来源」之上，而对等 run 不提交本地勾选；返回形状与今天的 dormant 分支逐字相同。
+- **提示词换成对等权威**：四个合成入口（`_answer_chunks` / `_answer_mix` / `_answer_reasoning`
+  / `_try_document_overview`）都把 `peer_notebooks=peer_scope_ceiling_active()` 传给
+  `answer_prompt`。用例里是结构断言（AST）而不是四条行为断言，所以**新增第五个合成入口**
+  忘了传同样报红。
+- **PPR 关**：`retrieval_candidates._mix_retrieve` 的第 3 路加闸，`graph_retrieval
+  ._ppr_retrieve` 首行再加一道防御性的——reasoning 的种子/动作腿与报告引擎都直调后者，
+  只放在 mix 那一处会漏。PPR 走的是按名义 active 缓存的一张联邦图、reset 向量也只从它的
+  种子出发，在没有主体库的 run 里那是命名锚点独有的一条腿。
+- **关键词臂与精确查找臂关**（`_keyword_chunk_candidates` / `_exact_lookup_chunks`）。这两条
+  臂是 active-only 的（每次 ask 一次，不随联邦腿分叉），留着等于凭空给命名锚点多两条腿。
+  精确臂一关，`exact_section_reserve` 的 `exact_ids` 恒空、该保底规则自动 inert，下游不需要
+  第二道闸。联邦化这两条臂登记在 `fangan_todo.md`。
+- **对比题库清单不再剥首项**（`communities.mounted_base_ids`）。剥掉首项的理由是「当前库不是
+  自己的参考库」，那要有一个主体库才成立；继续剥等于唯独名义 active 的内容不参与横向对比，
+  是一条反向特权。不剥也不会重复计：两个消费点都是逐库调 `resolve_comparison_peers(base_nb,…)`，
+  每轮只查那一个库自己的共提/社区行，名字再按名字去重。
+- **文档概述的引用归属**（`_try_document_overview` 尾部那圈就地归一）改按 `citation_active_id`
+  比较。它是唯一一处**不经** `foreign_notebook_id` 的引用归属改写（改的是属性而不是
+  `notebook_id=` 关键字，所以 `test_citation_notebook_id_guard` 结构上看不见它）：
+  `collection_item_citations` 已按第 39 条把真实归属带回来，这圈再按原始 `notebook_id` 比一次
+  就会把名义 active 的每条引用重新抹成空串。
+- **表格分析臂按逐库天花板收窄**（`_spreadsheet_reasoning_results`）。这条臂走的是**真实挂载
+  谓词**（鉴权级座位，绝不许变成覆盖感知），对等模式下那份清单答的是名义 active 自己的挂载表
+  ——挂在命名锚点下、却不在本次选择里的参考库，会成为唯一一个仍向答案供证据的选择外来源。
+  收窄只减不增（消费边界过滤，不是第二条学参与集的路）；把 peer 的工作簿也分析进来是联邦化
+  那一半，登记在 `fangan_todo.md`。
+
+**关键事实**（PR-D1 的构造前提，已加守卫）：`AskService.ask` 内层的
+`source_scope_context(nb, None, None)` 在三者全 None 时 **yield 而不设 scope**，所以全局入口
+在 `ask()` 之外装好的逐库天花板原样存活——否则上面每一条闸都会在生产里当场失效。用例
+`test_peer_mode_ask_steps.py::test_inner_scope_context_is_a_passthrough` 按**对象同一性**断言，
+并有一条「没有外层时它同样什么都不装」的负对照。
+
+行数天花板零改动：被改的函数一个都不在 `scripts/architecture_boundary_baseline.json ::
+function_length_ceiling` 里（`ask_chunk` / `_run_reasoning_stage` / `_draft_reasoning_response`
+一行未动），新用例里那条 `test_length_ceiling_functions_untouched` 直接复用守卫的零松弛判据。
+今天生产上仍不可达，覆盖由 `backend/tests/test_peer_mode_ask_steps.py` 在用例里安装
+「覆盖 + 逐库天花板」触发，每条闸都带一条不装任何东西的逐值对照臂。

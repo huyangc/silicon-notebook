@@ -40,6 +40,13 @@ from app.services.chunk_lane import (  # noqa: F401 - re-exported, see above
     _lexical_gate_drift_probe,
 )
 from app.services.knowledge_contracts import USABLE_STATUSES
+# Reader #1 on ``retrieval_participants``' frozen whitelist (the participant
+# seat ``_RetrievalState._retrieval_participants`` below resolves through it).
+# ``federated_ask_active`` is the PEER-mode predicate the two ACTIVE-ONLY recall
+# arms and the PPR leg read; the module is dependency-light (``domain
+# .retrieval_control`` + ``services.retrieval_run``) so it costs no cycle here,
+# unlike the ``chunk_lane`` re-export above.
+from app.services.retrieval_participants import federated_ask_active
 from app.services.retrieval import (
     RELEVANCE_FLOOR,
     W_KEYWORD,
@@ -3978,10 +3985,19 @@ class CandidateRetrievalService(_RetrievalState):
         the caller merges these into whatever candidate set its branch built
         (dedup by chunk_id), so a chunk that matches only a 2nd-language keyword —
         never the question-language sub_queries — is still retrieved. fail-open:
-        FTS/hydrate errors (e.g. legacy lib missing chunks_fts) → []."""
+        FTS/hydrate errors (e.g. legacy lib missing chunks_fts) → [].
+
+        PEER mode returns ``[]``: this arm is ACTIVE-ONLY (one ``chunk_fts_search``
+        against the notebook it is handed, called once per ask rather than per
+        federated leg), so in a run that answers for a set it would hand the
+        nominal active — a naming anchor the user never singled out — a second
+        recall leg none of its peers has.  Federating it is registered in
+        ``fangan_todo.md``; until then the honest behavior is no leg at all."""
         from app.services.retrieval import (
             RetrievalSupport, add_chunk_supports, score_chunks,
         )
+        if federated_ask_active():
+            return []
         needle = (keywords or "").strip()
         if not needle:
             return []
@@ -4043,7 +4059,17 @@ class CandidateRetrievalService(_RetrievalState):
         Called ONCE per ask (not per sub-query), exactly like
         `_keyword_chunk_candidates`, and fail-open for the same reason: a
         supplementary recall channel must never take the whole retrieval down.
+
+        ACTIVE-ONLY, and therefore closed in PEER mode for the same reason as
+        `_keyword_chunk_candidates`: an identifier lookup that only ever reaches
+        the nominal active would give it a second recall leg its peers do not
+        have, and `exact_section_reserve` would then reserve budget seats for
+        that one library's sections.  With `[]` here the reserve rule becomes
+        inert on its own (its `exact_ids` set is empty), so no second gate is
+        needed downstream.
         """
+        if federated_ask_active():
+            return []
         # The exact-section helper currently allocates slots before hydration
         # and has no source predicate.  Skip it only for a truly narrowed run;
         # an all-selected frozen snapshot keeps the historical channel and its
@@ -4615,10 +4641,15 @@ class CandidateRetrievalService(_RetrievalState):
                 object_owners=self._kg_object_owners(notebook_id, kg_id_map),
             )
         # 概念漫游(PPR)第 3 路:gated GRAPH_PPR_ENABLED;无 KG/无 reset → []。
+        # 对等模式整条关掉:PPR 是**一张图**上的随机游走,而联邦图按名义 active
+        # 的参与集缓存、reset 向量也只从它的种子出发——8 个库的对等 run 里,它
+        # 等于给命名锚点多一条别人没有的腿,成本还是按库数翻倍。
+        # ``graph_retrieval._ppr_retrieve`` 首行有同一条闸做防御性第二道。
         ppr_chunks = (
             self._ppr_retrieve(notebook_id, query)
             if self.settings.graph_ppr_enabled
             and not self._unsafe_source_scope_restricted(notebook_id)
+            and not federated_ask_active()
             else []
         )
         merged, by_content = [], {}

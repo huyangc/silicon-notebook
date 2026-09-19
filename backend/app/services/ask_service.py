@@ -137,7 +137,19 @@ from app.services.source_graph_activation import (
     selected_evidence_lane_is_dormant,
     selected_source_graph_call_context,
 )
-from app.services.source_scope import source_scope_context, source_scope_restricted
+# PEER mode (D0-5) is read through ``source_scope``, never through the
+# participant-override module: ``ask_service`` hosts registered fail-soft
+# handlers and sits next to authorization, so it must not gain the ability to
+# learn — let alone replace — which libraries a run may search.  "Does every
+# participant carry a frozen source ceiling of its own" is the strictly weaker
+# question, and the one manager that installs a global run installs both facts
+# together (see ``source_scope.peer_scope_ceiling_active``).
+from app.services.source_scope import (
+    citation_active_id,
+    peer_scope_ceiling_active,
+    source_scope_context,
+    source_scope_restricted,
+)
 from app.services.source_element_selection import (
     rank_source_elements,
     source_chunk_content_key,
@@ -174,6 +186,29 @@ _EXTERNAL_SUPPLEMENT_KB_EXCERPT_MAX_CHARS = 500
 _EXTERNAL_SUPPLEMENT_KB_BLOCK_MAX_CHARS = 4000
 _EXTERNAL_SUPPLEMENT_MAX_CONFLICTS = 4
 _EXTERNAL_SUPPLEMENT_TEXT_MAX_CHARS = 2000
+
+
+def _peer_ceiling_participants(notebook_ids) -> tuple:
+    """Keep only the notebooks that carry a frozen per-notebook ceiling.
+
+    A NARROWING filter for the one lane that must keep calling the real mount
+    predicate (``_spreadsheet_reasoning_results``).  It can only ever remove an
+    id, so it is a consumption-boundary filter over an already-authorized set,
+    not a second way to learn which libraries a run may search — the
+    participant-override module stays out of this file (see the import note at
+    the top).  Callers gate on ``peer_scope_ceiling_active()`` first, so a run
+    with no ceilings never reaches it and keeps its historical list byte for
+    byte.
+    """
+    from app.services.source_scope import current_source_scope
+
+    scope = current_source_scope()
+    if scope is None:
+        return tuple(notebook_ids)
+    return tuple(
+        notebook_id for notebook_id in notebook_ids
+        if scope.source_ceiling_for(notebook_id) is not None
+    )
 
 
 def _merge_multi_direct_chunk_hits(collected: dict, direct_hits) -> None:
@@ -884,7 +919,17 @@ class AskService:
         top_hits=(),
         max_results: int = 20,
     ):
-        """Append quality-approved G after frozen B; otherwise return B."""
+        """Append quality-approved G after frozen B; otherwise return B.
+
+        Closed in PEER mode: the whole lane is defined over "the sources the
+        user SELECTED in this notebook" (``selected_source_graph``'s frozen B),
+        and a run that answers for a set submits no local checkbox list at all
+        — the nominal active's own selected-source graph is not the run's
+        subject, so activating it would give that one library an evidence lane
+        none of its peers has.  Returns the historical no-op shape.
+        """
+        if peer_scope_ceiling_active():
+            return list(chunks), None
         service = getattr(self, "selected_source_graph", None)
         host = getattr(self, "retrieval_contributors", None)
         connection_probe = getattr(self, "retrieval_connection_probe", None)
@@ -1337,7 +1382,12 @@ class AskService:
         # Memory/Knowhow projection sources are intentionally absent from the
         # checkbox list. Once the user narrows that list, only selected imported
         # sources (plus mounted bases) may contribute evidence.
-        if source_scope_restricted():
+        # PEER mode closes the whole channel through the same door (both the
+        # chunk and the reasoning call site reach it here, and
+        # ``reasoning_retrieval`` has no memory read of its own): private
+        # memories belong to ONE notebook, and a run that answers for a set has
+        # no notebook whose private layer it may fold in.
+        if source_scope_restricted() or peer_scope_ceiling_active():
             return []
         if self.memory_retriever is None:
             return []
@@ -1709,7 +1759,13 @@ class AskService:
         大库检索强制走索引,无索引时检索降级(FTS/skip/refuse),需提示用户手动建索引。
         小库(copyable=True)允许暴力、不要求索引 → False。已建索引(含 stale/有 delta)→
         False(那是恒定成本·最终一致态,由「N 源待索引」徽章覆盖,不重复提示)。
-        两处判定都廉价:copystats 版本 memo;索引探针经磁盘身份缓存 O(1)。"""
+        两处判定都廉价:copystats 版本 memo;索引探针经磁盘身份缓存 O(1)。
+
+        对等模式恒 False:``index_required`` 是一句**对当前库**的行动号召,而一次
+        对等 run 没有当前库——8 个库里哪一个该建索引没有承接方,徽章只会把一个
+        用户点不动的提示挂在一次跨库提问上。"""
+        if peer_scope_ceiling_active():
+            return False
         try:
             has_index = self.scale_index_probe(notebook_id)
             return self.scale_profiles().requires_index(
@@ -2328,7 +2384,8 @@ class AskService:
         llm_client = llm_client or self.model_clients.chat("ask_answer")
         raw = llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(
-                question, context_block, history, style_block=style_block)}],
+                question, context_block, history, style_block=style_block,
+                peer_notebooks=peer_scope_ceiling_active())}],
             ANSWER_SCHEMA_HINT,
             cancel_event=cancel_event,
             **cap_kwargs(llm_client, "answer_max_tokens"),
@@ -2386,7 +2443,8 @@ class AskService:
         llm_client = llm_client or self.model_clients.chat("ask_answer")
         raw = llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(
-                question, context_block, history, style_block=style_block)}],
+                question, context_block, history, style_block=style_block,
+                peer_notebooks=peer_scope_ceiling_active())}],
             ANSWER_SCHEMA_HINT,
             cancel_event=cancel_event,
             **cap_kwargs(llm_client, "answer_max_tokens"),
@@ -2917,6 +2975,7 @@ class AskService:
                 section_total=section_total,
                 style_block=style_block,
                 external_rules=has_external,
+                peer_notebooks=peer_scope_ceiling_active(),
             )}],
             ANSWER_SCHEMA_HINT,
             timeout=self.settings.reasoning_timeout_seconds,
@@ -3243,6 +3302,7 @@ class AskService:
                                       "conclusions only where supported. Preserve section labels. "
                                       "Never treat sampled passages or stored summaries as a full reading. "
                                       "Coverage: " + prepared.coverage_note,
+                                      peer_notebooks=peer_scope_ceiling_active(),
                                   ))
                         raw = client.chat_json(
                             [{"role": "user", "content": prompt}],
@@ -3280,8 +3340,16 @@ class AskService:
         citations = prepared.citations
         if isinstance(citations, dict):
             citations = list(citations.values())
+        # The one citation-origin normalisation that lives outside
+        # ``foreign_notebook_id`` (it rewrites an attribute in place rather than
+        # passing a ``notebook_id=`` keyword, which is why
+        # ``test_citation_notebook_id_guard`` cannot see it).  It must still
+        # share the one rule: in PEER mode ``citation_active_id`` answers "" and
+        # this loop becomes a no-op, so the nominal active's overview citations
+        # keep their real owner like every peer's do.
+        overview_active_id = citation_active_id(notebook_id)
         for reference in [*citations, *anchors]:
-            if reference.notebook_id == notebook_id:
+            if reference.notebook_id == overview_active_id:
                 reference.notebook_id = ""
         response = AskResponse(
             answer_id="", answer=answer, conclusion=_MARKER_GROUP_RE.sub("", answer).strip(),
@@ -4364,6 +4432,21 @@ class AskService:
                 notebook_id,
                 *self.ask_engine_participant_notebooks(notebook_id),
             )))
+            # This lane deliberately walks the REAL mount predicate (it is an
+            # authorization-grade seat that must never become override-aware),
+            # which in PEER mode answers for the nominal active's own mount
+            # table -- a set that has nothing to do with the libraries the user
+            # selected.  Narrow it to the run's ceiling-carrying participants so
+            # a base mounted under the naming anchor cannot become the one
+            # library outside the selection that still contributes evidence.
+            # NARROWING ONLY: this can drop libraries, never add one, so it
+            # stays a consumption-boundary filter rather than a second way to
+            # learn a participant set.  (The other half -- analysing the PEERS'
+            # workbooks -- is a federation gap registered in `fangan_todo.md`.)
+            if peer_scope_ceiling_active():
+                participant_notebook_ids = _peer_ceiling_participants(
+                    participant_notebook_ids
+                )
             source_refs = tuple(
                 (participant_notebook_id, source_id)
                 for participant_notebook_id in participant_notebook_ids

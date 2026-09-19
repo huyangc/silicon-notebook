@@ -202,6 +202,37 @@
       （判据仍是 `not hit.notebook_id`，与另外两条分支同一个「空 = 当前库」口径），
       席位数复用 `CHUNK_FEDERATION_ACTIVE_RESERVE × CHUNK_MMR_K`，合格候选不足时以实际
       数量为上限。刻意不在联邦 PR 里做：那个函数的 reserve 规则是独立一处改动。
+- [ ] **全局（对等）模式的关键词臂 / 精确查找臂联邦化**。`_keyword_chunk_candidates`
+      与 `_exact_lookup_chunks` 是 **active-only** 的补召回腿：每次 ask 只跑一次、只对
+      传进来的那一个 notebook 发 `chunk_fts_search` / `exact_lookup_chunks`，不随联邦腿
+      逐库分叉。对等模式（`federated_ask_active()`）下留着它们等于凭空给**名义 active**
+      多两条别的参与库没有的腿，所以 D0-5 把两条在对等模式下整条关掉（`fangan_done.md`
+      第 40 条），代价如实：全局问答暂时没有词法补召回，也没有精确标识符快查——跨语言
+      提问与「问一个命令名」这两种形态在全局模式下只剩语义臂。联邦化要连带决定三件事：
+      逐库词法臂的候选配额（今天 `CHUNK_RECALL` 是**每条腿**的量，× 库数会把池子撑爆，
+      对等模式的合并预算已经换成 `GLOBAL_ASK_CANDIDATE_LIMIT`）、逐库 `corpus_langs`
+      探测的成本（每库一次 `_lexical_corpus_langs`，与上面那条双语化待办同一处）、以及
+      `exact_section_reserve` 的席位在跨库池子里该怎么分（今天它只认 `exact_ids` 这一个
+      集合，跨库之后需要一个按库的口径，否则某一个库的章节能把保底席位全占了）。
+- [ ] **全局（对等）模式的表格分析臂只覆盖名义 active**。`AskService
+      ._spreadsheet_reasoning_results` 走的是**真实挂载谓词**
+      （`ask_engine_participant_notebooks`，鉴权级座位，绝不许变成覆盖感知——守卫
+      `test_participant_override_guard::test_injected_participant_predicate_is_the_real_mount_predicate`
+      钉住了这一点），所以对等模式下它答的是名义 active 自己的挂载表，而不是用户选中的
+      那几个库。D0-5 已经把**泄漏**那一半关掉：按逐库冻结天花板收窄，挂在命名锚点下却不
+      在本次选择里的参考库不再供证据（只减不增）。剩下的是**联邦化**那一半：其余参与库
+      的工作簿今天完全不参与分析，于是「比较 A 库和 B 库那两张报价表」在全局模式下只能
+      看到 A 库的。修法要新开一条不经鉴权座位的参与集入口（与 `chunk_federation
+      ._bounded_participants` 同源），并决定跨库工作簿的成本上界（分析臂是模型规划 +
+      逐表读取，× 库数不是免费的）。
+- [ ] **全局（对等）模式下「参考库」这套措辞没有对应物**。`document_overview
+      .overview_intent` 从问句里解析「不包括参考库 / 只介绍…」并产出 `local_only=True`，
+      `collection_enumeration` 据此把枚举范围收成 `notebook_ids == active_notebook_id`
+      一本。对等 run 里没有「当前库 vs 参考库」这组关系，`local_only` 于是把一次跨 8 库
+      的「我的库里有哪些文档」压成只看命名锚点。方向是**少给**（不是泄漏），所以 D0-5
+      没有动它；拍板时要一起决定全局模式下这组措辞映射到什么（整体忽略？还是换一套
+      「只看某一个库」的显式范围表达），以及 `docs/product-and-api*.md` 里 `read_document`
+      那段的对应文案。
 - [ ] BM25 / FTS5 / tsvector 全文索引：已评估为低 ROI、基础设施级，暂缓。
 - [ ] 结构化硬过滤：软加权已够用，硬过滤有清空结果风险，暂缓。
 - [ ] **`_federated_graph_is_large` 把取消勾选的参考库也算进「图是否过大」**：这个
