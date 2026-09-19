@@ -22,6 +22,7 @@ from app.services.cancellation import CancelEvent, raise_if_cancelled
 T = TypeVar("T")
 _CANCEL_POLL_SECONDS = 0.05
 _RUN_KINDS = frozenset({
+    "ask_global",
     "ask_chunk",
     "ask_reasoning",
     "ask_plugin_engine",
@@ -69,6 +70,11 @@ class RetrievalRunState:
         self.fanout_wait_ms = 0
         self.chunk_fts_timeouts = 0
         self.chunk_fts_circuit_skips = 0
+
+    def peek_embedding(self, key: Hashable):
+        """Read a completed query embedding without waiting or submitting work."""
+        with self._lock:
+            return self._embedding_cache.get(key)
 
     def memoized_embedding(self, key: Hashable, compute: Callable[[], T]) -> T:
         """Return one successful value per key, single-flight across threads.

@@ -99,6 +99,8 @@ def _job_page(job: Any, answer_offset: int = 0, citation_offset: int = 0) -> dic
                 "resolved": len(data.get("resolved_notebook_ids", [])),
                 "searched": len(data.get("searched_notebook_ids", [])),
                 "cited": len(data.get("cited_notebook_ids", [])),
+                "skipped_notebooks": data.get("skipped_notebooks", []),
+                "degraded_notebook_ids": data.get("degraded_notebook_ids", []),
             },
             "error": data.get("error", ""),
             "completeness_notice": response.get("completeness_notice", ""),
@@ -110,7 +112,7 @@ def _job_page(job: Any, answer_offset: int = 0, citation_offset: int = 0) -> dic
             packed.get("answer") == text
             and _citation_keys(packed.get("citations", [])) == _citation_keys(refs)
             and all(packed.get(key) == payload[key] for key in (
-                "job_id", "conversation_id", "answer_id", "next_answer_offset", "next_citation_offset"
+                "job_id", "conversation_id", "answer_id", "next_answer_offset", "next_citation_offset", "coverage"
             ))
         ):
             return packed

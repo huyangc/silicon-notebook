@@ -23,7 +23,11 @@ def setup(tmp_path):
     sources = SimpleNamespace(
         all_visible_source_ids=lambda nb: [f"s-{nb}"],
         evidence_elements=lambda ids: {},
+        evidence_fingerprints=lambda ids: {},
     )
+    sources.visible_source_ids_by_notebook = lambda ids: {
+        nb: sources.all_visible_source_ids(nb) for nb in ids
+    }
 
     def retrieve(nb, query):
         scope = current_source_scope()
@@ -210,7 +214,7 @@ def test_sources_are_frozen_before_any_retrieval(setup):
 def test_source_removed_during_synthesis_cannot_commit_stale_citation(setup):
     service, _, _, _ = setup
     elements = {"e-a": {"id": "e-a", "source_id": "s-a", "text": "original"}}
-    service.sources.evidence_elements = lambda ids: {key: dict(elements[key]) for key in ids if key in elements}
+    service.sources.evidence_fingerprints = lambda ids: {key: (elements[key]["source_id"], elements[key]["text"]) for key in ids if key in elements}
 
     def synthesis(*args):
         elements.clear()
@@ -220,8 +224,9 @@ def test_source_removed_during_synthesis_cannot_commit_stale_citation(setup):
     service.synthesize = synthesis
     job = service.start(GlobalAskRequest(question="q"), user_id="u")
     result = finished(service, job)
-    assert result.status == "failed" and result.response is None
-    assert "变化" in result.error
+    assert result.status == "done" and not result.response.grounded
+    assert not result.response.citations
+    assert "变化" in result.response.answer
 
 
 def test_http_job_conversation_and_error_contract(setup, monkeypatch):

@@ -237,6 +237,20 @@ class RetrievalService:
         scored, ids, matrix = self.candidates._retrieve_chunks(notebook_id, query)
         return filter_retrieval_items(notebook_id, "chunk", scored), ids, matrix
 
+    def prepare_global_query(self, query):
+        """One model-stage embedding; notebook fan-out only borrows its result."""
+        return self.candidates._embed_query(query)
+
+    def retrieve_global_chunk_candidates(self, notebook_id, query, *,
+                                         deadline=None, cancel_event=None):
+        from app.services.global_retrieval import retrieve_global_candidates
+        result = retrieve_global_candidates(
+            self.candidates, notebook_id, query, deadline=deadline,
+            cancel_event=cancel_event,
+        )
+        result.chunks = filter_retrieval_items(notebook_id, "chunk", result.chunks)
+        return result
+
     def retrieve_chunk_candidates_multi(self, notebook_id, queries):
         collected, per_query, ids, matrix = self.candidates._retrieve_chunks_multi(
             notebook_id, queries

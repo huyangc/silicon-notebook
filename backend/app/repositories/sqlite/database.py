@@ -15,6 +15,8 @@ from app.repositories.sqlite.write_lock_stats import WriteLockStats
 
 
 _FETCHMANY_OMITTED = object()
+# Polling granularity affects interruption latency only, never selected rows.
+_READ_BUDGET_VM_STEPS = 1000
 
 
 class _DiagnosticCursor(sqlite3.Cursor):
@@ -330,6 +332,61 @@ def _caller_site() -> str:
     return "?"
 
 
+class _BudgetedReadConnection:
+    """Keep the progress interrupt installed through cursor consumption."""
+
+    def __init__(self, connection, budget):
+        self.connection = connection
+        self.budget = budget
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+    def __enter__(self):
+        self.budget.check()
+        previous_busy_timeout = self.connection.execute(
+            "PRAGMA busy_timeout"
+        ).fetchone()[0]
+        busy_ms = min(previous_busy_timeout,
+                      max(1, int(self.budget.remaining_seconds() * 1000)))
+        self.connection.execute(f"PRAGMA busy_timeout = {busy_ms}")
+        def interrupted():
+            from app.repositories.read_budget import ReadBudgetExceeded
+            try:
+                self.budget.check()
+            except ReadBudgetExceeded:
+                return 1
+            return 0
+        frames = getattr(self.connection, "_read_budget_frames", None)
+        if frames is None:
+            frames = self.connection._read_budget_frames = []
+        # All nested connect() wrappers share this thread-local connection.
+        # Keep both settings on its stack so an inner exit restores the outer
+        # interrupt, including when the same wrapper is entered recursively.
+        frames.append((interrupted, previous_busy_timeout))
+        self.connection.set_progress_handler(interrupted, _READ_BUDGET_VM_STEPS)
+        self.connection.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        frames = self.connection._read_budget_frames
+        _, previous_busy_timeout = frames.pop()
+        self.connection.set_progress_handler(None, 0)
+        try:
+            self.connection.execute(f"PRAGMA busy_timeout = {previous_busy_timeout}")
+            return self.connection.__exit__(*exc)
+        finally:
+            if frames:
+                self.connection.set_progress_handler(frames[-1][0], _READ_BUDGET_VM_STEPS)
+
+    def execute(self, *args, **kwargs):
+        self.budget.check()
+        busy_ms = min(self.connection._read_budget_frames[-1][1],
+                      max(1, int(self.budget.remaining_seconds() * 1000)))
+        self.connection.execute(f"PRAGMA busy_timeout = {busy_ms}")
+        return self.connection.execute(*args, **kwargs)
+
+
 class SqliteDatabase:
     """进程内 SQLite 连接来源。**每线程复用一条连接**(threading.local),而非每次
     新建——把 fd 用量从 O(操作数) 降到 O(线程数),并省掉每操作反复建连接/PRAGMA/
@@ -389,6 +446,10 @@ class SqliteDatabase:
         if conn is None:
             conn = self._new_connection()
             self._local.conn = conn
+        from app.repositories.read_budget import current_read_budget
+        budget = current_read_budget()
+        if budget is not None:
+            return _BudgetedReadConnection(conn, budget)
         return conn
 
     def is_connection_held(self) -> bool:

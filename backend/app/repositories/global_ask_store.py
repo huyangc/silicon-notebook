@@ -11,6 +11,15 @@ class GlobalAskStore:
     def __init__(self, database, *, marker="?"):
         self.database = database
         self.marker = marker
+        self._history_projection = (
+            "payload_json::jsonb->>'question' AS question, "
+            "payload_json::jsonb->'response'->>'answer' AS answer, "
+            "payload_json::jsonb->'resolved_notebook_ids' AS notebook_ids"
+            if marker == "%s" else
+            "json_extract(payload_json,'$.question') AS question, "
+            "json_extract(payload_json,'$.response.answer') AS answer, "
+            "json_extract(payload_json,'$.resolved_notebook_ids') AS notebook_ids"
+        )
 
     def _sql(self, text):
         return text.replace("?", self.marker)
@@ -109,6 +118,28 @@ class GlobalAskStore:
             ), (conversation_id, user_id, limit, offset)).fetchall()
         return [self._job(row) for row in rows]
 
+    def completed_history(self, conversation_id, user_id, limit):
+        """Only successful dialogue turns; avoid constructing answer/citation models."""
+        with self.database.connect() as db:
+            rows = db.execute(self._sql(
+                f"SELECT {self._history_projection} FROM global_ask_jobs WHERE conversation_id=? AND user_id=? "
+                "AND status='done' ORDER BY created_at DESC,id DESC LIMIT ?"
+            ), (conversation_id, user_id, limit)).fetchall()
+        turns = []
+        for row in rows:
+            if row["answer"] is not None:
+                ids = row["notebook_ids"]
+                turns.append({"question": row["question"], "answer": row["answer"],
+                              "notebook_ids": json.loads(ids) if isinstance(ids, str) else ids})
+        return turns
+
+    def running_job_ids(self, conversation_id, user_id):
+        with self.database.connect() as db:
+            rows = db.execute(self._sql(
+                "SELECT id FROM global_ask_jobs WHERE conversation_id=? AND user_id=? AND status='running'"
+            ), (conversation_id, user_id)).fetchall()
+        return [row["id"] for row in rows]
+
     def rename(self, conversation_id, user_id, title):
         with self.database.write() as db:
             return db.execute(self._sql(
@@ -124,4 +155,3 @@ class GlobalAskStore:
     def recover(self):
         with self.database.write() as db:
             db.execute("UPDATE global_ask_jobs SET status='interrupted' WHERE status='running'")
-

@@ -4303,6 +4303,13 @@
               "title": "Created At",
               "type": "string"
             },
+            "degraded_notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Degraded Notebook Ids",
+              "type": "array"
+            },
             "grounded": {
               "default": false,
               "title": "Grounded",
@@ -4327,6 +4334,13 @@
                 "type": "string"
               },
               "title": "Searched Notebook Ids",
+              "type": "array"
+            },
+            "skipped_notebooks": {
+              "items": {
+                "$ref": "#/components/schemas/GlobalAskSkippedNotebook"
+              },
+              "title": "Skipped Notebooks",
               "type": "array"
             }
           },
@@ -4359,6 +4373,13 @@
             "created_at": {
               "title": "Created At",
               "type": "string"
+            },
+            "degraded_notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Degraded Notebook Ids",
+              "type": "array"
             },
             "error": {
               "anyOf": [
@@ -4404,6 +4425,13 @@
                 "type": "string"
               },
               "title": "Searched Notebook Ids",
+              "type": "array"
+            },
+            "skipped_notebooks": {
+              "items": {
+                "$ref": "#/components/schemas/GlobalAskSkippedNotebook"
+              },
+              "title": "Skipped Notebooks",
               "type": "array"
             },
             "status": {
@@ -4477,6 +4505,24 @@
             "question"
           ],
           "title": "GlobalAskRequest",
+          "type": "object"
+        },
+        "GlobalAskSkippedNotebook": {
+          "properties": {
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "reason": {
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "notebook_id",
+            "reason"
+          ],
+          "title": "GlobalAskSkippedNotebook",
           "type": "object"
         },
         "GlobalConversationDetail": {

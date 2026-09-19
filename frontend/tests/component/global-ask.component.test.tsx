@@ -33,7 +33,7 @@ const conversation = (id = "conv-a"): GlobalConversation => ({
 });
 const job = (status: GlobalJob["status"] = "running", id = "conv-a"): GlobalJob => ({
   job_id: `job-${id}`, conversation_id: id, status, question: "共同问题是什么？", created_at: "2026-09-19T01:00:00Z",
-  notebook_scope: { mode: "all" }, resolved_notebook_ids: ["nb-0", "nb-1"], searched_notebook_ids: [], cited_notebook_ids: [], error: null, response: null,
+  notebook_scope: { mode: "all" }, resolved_notebook_ids: ["nb-0", "nb-1"], searched_notebook_ids: [], cited_notebook_ids: [], skipped_notebooks: [], error: null, response: null,
 });
 const detail = (id = "conv-a", turns: GlobalJob[] = []): GlobalConversationDetail => ({ ...conversation(id), turns, has_more: false, next_offset: null });
 function deferred<T>() {
@@ -141,6 +141,116 @@ test("a minimized chat keeps polling without cancellation and Escape restores th
   await waitFor(() => expect(api.poll).toHaveBeenCalledTimes(1), { timeout: 2500 });
   fireEvent.click(screen.getByRole("button", { name: "打开全局问答" }));
   expect(screen.getByText("已停止回答，可以修改问题后继续。")).toBeTruthy();
+});
+
+test("unchanged progress backs polling off, while new progress restores the short interval", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.detail.mockResolvedValue(detail("conv-a", [job()]));
+  api.poll.mockResolvedValue(job());
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+  vi.useFakeTimers();
+  act(() => result.current.retryPoll());
+  await act(async () => { await vi.advanceTimersByTimeAsync(1200); });
+  expect(api.poll).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(2399); });
+  expect(api.poll).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(api.poll).toHaveBeenCalledTimes(2);
+  api.poll.mockResolvedValue({ ...job(), searched_notebook_ids: ["nb-0"] });
+  await act(async () => { await vi.advanceTimersByTimeAsync(4799); });
+  expect(api.poll).toHaveBeenCalledTimes(2);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(result.current.running?.searched_notebook_ids).toEqual(["nb-0"]);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1200); });
+  expect(api.poll).toHaveBeenCalledTimes(4);
+  await act(async () => { await vi.advanceTimersByTimeAsync(2400 + 4800 + 9600); });
+  expect(api.poll).toHaveBeenCalledTimes(7);
+  await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+  expect(api.poll).toHaveBeenCalledTimes(8);
+  await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+  expect(api.poll).toHaveBeenCalledTimes(9);
+});
+
+test("hidden documents stop polling and resume immediately without overlapping an in-flight read", async () => {
+  const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.detail.mockResolvedValue(detail("conv-a", [job()]));
+  const pending = deferred<GlobalJob>();
+  api.poll.mockReturnValueOnce(pending.promise).mockResolvedValue(job("cancelled"));
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+  vi.useFakeTimers();
+  act(() => result.current.retryPoll());
+  await act(async () => { await vi.advanceTimersByTimeAsync(1200); });
+  expect(api.poll).toHaveBeenCalledTimes(1);
+  act(() => { visibility.mockReturnValue("hidden"); document.dispatchEvent(new Event("visibilitychange")); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+  expect(api.poll).toHaveBeenCalledTimes(1);
+  expect(result.current.running?.job_id).toBe("job-conv-a");
+  act(() => { visibility.mockReturnValue("visible"); document.dispatchEvent(new Event("visibilitychange")); });
+  expect(api.poll).toHaveBeenCalledTimes(1);
+  await act(async () => { pending.resolve(job()); });
+  expect(api.poll).toHaveBeenCalledTimes(2);
+  expect(result.current.turns[0].status).toBe("cancelled");
+  expect(api.cancel).not.toHaveBeenCalled();
+});
+
+test("initially hidden tasks wait for visibility and a transient failure retries with backoff", async () => {
+  const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.detail.mockResolvedValue(detail("conv-a", [job()]));
+  api.poll.mockRejectedValueOnce(new Error("offline")).mockResolvedValue(job("cancelled"));
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+  vi.useFakeTimers();
+  await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+  expect(api.poll).not.toHaveBeenCalled();
+  await act(async () => { visibility.mockReturnValue("visible"); document.dispatchEvent(new Event("visibilitychange")); });
+  expect(api.poll).toHaveBeenCalledTimes(1);
+  expect(result.current.pollError).toContain("自动重试");
+  await act(async () => { await vi.advanceTimersByTimeAsync(2399); });
+  expect(api.poll).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(api.poll).toHaveBeenCalledTimes(2);
+  expect(result.current.pollError).toBe("");
+  expect(result.current.turns[0].status).toBe("cancelled");
+});
+
+test("scope narrowing explains lost follow-up context beside the composer and restores cleanly", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.detail.mockResolvedValue(detail("conv-a", [job("cancelled")]));
+  render(<GlobalAskPage />);
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入问题" })).toBeEnabled());
+  expect(screen.queryByText(/先前涉及其他笔记本的提问不会用于本次追问/)).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "全部笔记本 · 2 个" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: /材料研究/ }));
+  expect(screen.getByText(/先前涉及其他笔记本的提问不会用于本次追问/).closest("form")).toBeTruthy();
+  fireEvent.click(screen.getByRole("checkbox", { name: /热管理/ }));
+  expect(screen.queryByText(/先前涉及其他笔记本的提问不会用于本次追问/)).toBeNull();
+});
+
+test("partial coverage identifies skipped notebooks and discloses lexical fallback on completed answers", async () => {
+  const skipped = [{ notebook_id: "nb-1", reason: "检索暂时不可用，请稍后重试。" }];
+  const complete: GlobalJob = {
+    ...job("done"), searched_notebook_ids: ["nb-0"], cited_notebook_ids: ["nb-0"], skipped_notebooks: skipped,
+    response: {
+      answer_id: "answer-partial", question: "共同问题是什么？", answer: "成功检索的资料表明温度影响性能。", grounded: true,
+      anchors: [], citations: [], created_at: "2026-09-19T01:00:00Z", notebook_scope: { mode: "all" },
+      resolved_notebook_ids: ["nb-0", "nb-1"], searched_notebook_ids: ["nb-0"], cited_notebook_ids: ["nb-0"],
+      skipped_notebooks: skipped, degraded_notebook_ids: ["nb-0"], completeness_notice: "回答仅使用本次命中的有限原文。",
+    },
+  };
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.detail.mockResolvedValue(detail("conv-a", [complete]));
+  render(<GlobalAskPage />);
+  await screen.findByText(complete.response!.answer);
+  const receipt = screen.getByLabelText("本轮检索回执");
+  expect(receipt).toHaveTextContent("范围 2 个 · 已检索 1 个 · 引用来自 1 个笔记本");
+  expect(receipt).toHaveTextContent("热管理");
+  expect(receipt).toHaveTextContent(skipped[0].reason);
+  expect(receipt).toHaveTextContent("部分笔记本未完成检索");
+  expect(receipt).toHaveTextContent("1 个笔记本使用词法降级检索，跨语言召回可能不完整");
 });
 
 test("scope starts at all, searching preserves selection, clearing restores all", () => {
@@ -359,6 +469,7 @@ test("page renders notebook-aware references, coverage notice and authorized ori
       citations: [], created_at: "2026-09-19T01:00:00Z", notebook_scope: { mode: "all" },
       resolved_notebook_ids: ["nb-0", "nb-1"], searched_notebook_ids: ["nb-0", "nb-1"], cited_notebook_ids: ["nb-0"],
       completeness_notice: "回答仅使用本次命中的有限原文，不代表逐篇穷尽检查。",
+      skipped_notebooks: [],
     },
   };
   window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
@@ -410,6 +521,7 @@ test("pending clipboard work belongs to its conversation and cannot unlock a new
         anchors: [], citations: [], created_at: "2026-09-19T01:00:00Z", notebook_scope: { mode: "all" },
         resolved_notebook_ids: ["nb-0"], searched_notebook_ids: ["nb-0"], cited_notebook_ids: [],
         completeness_notice: "仅使用命中的原文。",
+        skipped_notebooks: [],
       },
     }])));
     window.history.replaceState(null, "", "/ask?conversation_id=conv-a");

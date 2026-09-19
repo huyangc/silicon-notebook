@@ -850,7 +850,12 @@ them; the active retrieval route determines which settings apply.
 relevance value; `QUERY_REWRITE_ENABLED` controls pre-answer query rewriting/expansion.
 
 Global Ask uses `GLOBAL_ASK_CANDIDATE_LIMIT` for merged cross-notebook evidence and
-`GLOBAL_ASK_HISTORY_TURNS` for admitted prior user questions. Model context shares
+`GLOBAL_ASK_HISTORY_TURNS` for admitted completed conversational turns.
+`GLOBAL_ASK_MAX_NOTEBOOKS`, `GLOBAL_ASK_MAX_CONCURRENT`, `GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS`,
+`GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS` and `GLOBAL_ASK_SHUTDOWN_TIMEOUT_SECONDS` control explicit
+scope admission, process capacity and retrieval/shutdown budgets. Size the PostgreSQL pool with the global
+Ask concurrency included. Cold ANN uses disclosed lexical fallback instead of evicting warm shared indexes.
+Model context shares
 `CHUNK_ANSWER_BUDGET_CHARS`; no separate model endpoint is needed (`query_rewrite`
 and `ask_answer` use the existing model-service configuration). Exact defaults and
 rails are owned by [Global Ask](./product-and-api.md#global-ask).

@@ -9,7 +9,13 @@ import {
 } from "../global-ask-api.ts";
 import type { NotebookSummary } from "../workspace-model.ts";
 
-const POLL_INTERVAL_MS = 1200;
+const POLL_MIN_INTERVAL_MS = 1200;
+const POLL_MAX_INTERVAL_MS = 15000;
+const POLL_BACKOFF_FACTOR = 2;
+
+function progressKey(job: GlobalJob): string {
+  return JSON.stringify([job.status, job.searched_notebook_ids, job.skipped_notebooks ?? [], job.degraded_notebook_ids ?? []]);
+}
 
 // A cancelled/done turn is terminal even if a previously issued poll arrives later.
 function mergeJob(current: GlobalJob, incoming: GlobalJob): GlobalJob {
@@ -118,25 +124,62 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
   }, [active]);
 
   useEffect(() => {
-    if (!running || pollError || loading) return;
+    if (!running || loading) return;
     const ticket = owner.current;
     let disposed = false;
-    let timer: ReturnType<typeof setTimeout>;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let inFlight = false;
+    let resumeRequested = false;
+    let interval = POLL_MIN_INTERVAL_MS;
+    let previousProgress = progressKey(running);
+    let terminal = false;
+    const isCurrent = () => !disposed && mounted.current && ticket === owner.current;
+    const visible = () => document.visibilityState !== "hidden";
+    function schedule() {
+      if (isCurrent() && visible() && !terminal) timer = setTimeout(poll, interval);
+    }
     async function poll() {
+      if (!isCurrent() || !visible() || terminal || inFlight) return;
+      inFlight = true;
       try {
         const update = await getGlobalJob(running!.job_id);
-        if (disposed || !mounted.current || ticket !== owner.current) return;
+        if (!isCurrent()) return;
         setTurns((items) => items.map((item) => item.job_id === update.job_id ? mergeJob(item, update) : item));
-        if (update.status === "running") timer = setTimeout(poll, POLL_INTERVAL_MS);
+        setPollError("");
+        const nextProgress = progressKey(update);
+        interval = nextProgress === previousProgress ? Math.min(POLL_MAX_INTERVAL_MS, interval * POLL_BACKOFF_FACTOR) : POLL_MIN_INTERVAL_MS;
+        previousProgress = nextProgress;
+        terminal = update.status !== "running";
       } catch (cause) {
-        if (!disposed && mounted.current && ticket === owner.current) {
-          setPollError(toUserMessage(cause, "暂时无法获取进度，任务仍可能在后台运行，请重新连接"));
+        if (isCurrent()) {
+          interval = Math.min(POLL_MAX_INTERVAL_MS, interval * POLL_BACKOFF_FACTOR);
+          setPollError(toUserMessage(cause, "暂时无法获取进度，正在自动重试；任务仍可能在后台运行"));
         }
+      } finally {
+        inFlight = false;
+        if (resumeRequested && isCurrent() && visible() && !terminal) {
+          resumeRequested = false;
+          interval = POLL_MIN_INTERVAL_MS;
+          void poll();
+        } else schedule();
       }
     }
-    timer = setTimeout(poll, POLL_INTERVAL_MS);
-    return () => { disposed = true; clearTimeout(timer); };
-  }, [running?.job_id, running?.status, pollError, pollRevision, loading]);
+    function onVisibilityChange() {
+      clearTimeout(timer);
+      if (!visible()) { resumeRequested = false; return; }
+      interval = POLL_MIN_INTERVAL_MS;
+      if (inFlight) resumeRequested = true;
+      else void poll();
+    }
+    // active only controls the chat presentation: minimizing never detaches this owner.
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    schedule();
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [running?.job_id, running?.status, pollRevision, loading]);
 
   function updateUrl(id: string) {
     if (!syncUrl) return;

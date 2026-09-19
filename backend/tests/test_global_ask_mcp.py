@@ -32,6 +32,15 @@ def job(*, answer="", citations=None):
     }
 
 
+def test_coverage_retains_every_skip_and_degraded_receipt():
+    value = job(answer="partial answer")
+    value["skipped_notebooks"] = [{"notebook_id": "nb-b", "reason": "检索超时，请重试。"}]
+    value["degraded_notebook_ids"] = ["nb-a"]
+    page = module._job_page(value)
+    assert page["coverage"]["skipped_notebooks"] == value["skipped_notebooks"]
+    assert page["coverage"]["degraded_notebook_ids"] == ["nb-a"]
+
+
 @pytest.fixture
 def adapter(monkeypatch):
     principal = SimpleNamespace(

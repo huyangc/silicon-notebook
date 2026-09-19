@@ -108,8 +108,12 @@ the full application launcher first. The admin plugin switch affects access only
 Global Ask jobs survive browser disconnection; reopen `/ask` to poll the saved conversation.
 Server startup marks unfinished global jobs `interrupted` and prompts resubmission. Ordinary
 repository construction and offline tools do not recover jobs owned by a running server.
-Graceful shutdown signals cancellation and waits for workers before closing shared model and
-database resources. A cancelled or interrupted job cannot later overwrite its terminal state.
+Graceful shutdown signals cancellation and waits within the configured shutdown budget before closing
+shared model and database resources. Workers cannot save after that close boundary; unfinished durable
+jobs remain running until startup recovery marks them interrupted. A cancelled or interrupted job cannot
+later overwrite its terminal state. Inspect skipped/degraded notebook receipts before interpreting a partial
+answer: reduce the selected scope after timeouts, and prepare scale indexes to improve semantic recall.
+Global retrieval has its own `ask_global` event category and never cold-loads shared whole-library indexes.
 
 ## Observability
 

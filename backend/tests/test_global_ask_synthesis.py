@@ -126,14 +126,8 @@ def test_absent_actor_does_not_resolve_a_default_users_style_profile(has_run):
 
 def test_unknown_markers_cannot_create_citations_or_launder_a_mixed_group():
     models = RecordingModels("有效 [k1]；未知 [k99]；混合 【k1，k99】；再次 [k1]")
-    answer, grounded, anchors, citations = synthesis(models)(
-        "问题", [chunk()], {}, "", threading.Event(),
-    )
-    assert "k99" not in answer
-    assert "混合 【" not in answer
-    assert grounded is True
-    assert [anchor.key for anchor in anchors] == ["k1"]
-    assert [citation.element_id for citation in citations] == ["element-a"]
+    with pytest.raises(ValueError, match="unbound"):
+        synthesis(models)("问题", [chunk()], {}, "", threading.Event())
 
 
 @pytest.mark.parametrize("marker", ["[ k1 ]", "【 k1 】", "【k1】"])
@@ -148,7 +142,7 @@ def test_supported_marker_spellings_bind_with_the_real_anchor_parser(marker):
 
 @pytest.mark.parametrize("claimed_grounded", [True, False])
 def test_answer_without_a_valid_reference_is_ungrounded(claimed_grounded):
-    result = synthesis(RecordingModels("没有证据引用 [k99]", grounded=claimed_grounded))(
+    result = synthesis(RecordingModels("没有证据引用", grounded=claimed_grounded))(
         "问题", [chunk()], {}, "", threading.Event(),
     )
     assert result[1:] == (False, [], [])
