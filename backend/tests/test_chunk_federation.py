@@ -1223,3 +1223,213 @@ def test_peer_leg_flag_is_set_for_every_peer_not_just_large_ones():
     # peek 仍然只对大库打开——两条 lane 不是同一条。
     assert dict(candidates.peek_seen) == {"a": False, "b": False, "c": True}
     assert _CHUNK_PEER_LEG.get() is False, "不得外泄到调用方的上下文"
+
+
+# --------------------------------------------------------------------------
+# 分组带的是「该子查询自己的相关度」,不是跨子查询折叠后的最大值
+# --------------------------------------------------------------------------
+
+def _overlapping_windows(libraries):
+    """codex 的复现形态:两个子查询的召回窗重叠,方向却不同。
+
+    `q1` 强相关的是 c1/c2,`q2` 强相关的是 c3。三条候选**两个子查询都召回到**
+    ——这正是「重叠召回窗」:若每组都拿折叠后的最大分,三条会在 `quota_fuse`
+    里并列、并列取最小下标 → 全部塌进第一组,第二个方向一席不得。
+    """
+    scores = {
+        "q1": {"c1": 0.9, "c2": 0.89, "c3": 0.1},
+        "q2": {"c1": 0.1, "c2": 0.1, "c3": 0.8},
+    }
+    owner = {cid: libraries[index % len(libraries)]
+             for index, cid in enumerate(("c1", "c2", "c3"))}
+
+    def retrieve(nid, query):
+        hits = [
+            make_chunk(cid, scores[query][cid])
+            for cid in ("c1", "c2", "c3") if owner[cid] == nid
+        ]
+        return hits, [], None
+
+    return FakeCandidates(
+        (("a", "personal"), *((nid, "base") for nid in set(libraries))),
+        retrieve=retrieve, recall=200,
+    )
+
+
+@pytest.mark.parametrize("libraries", [("b", "b", "b"), ("b", "b", "c")])
+def test_each_sub_query_group_keeps_its_own_relevance(libraries):
+    """两个子查询、重叠召回窗、`fuse_k=2` → 两个方向各得一席。
+
+    单库路径的 ground truth 是 `_retrieve_chunks_multi`:它的 `per_query[i]`
+    是 `{c.chunk_id: c for c in scored}`——**该子查询自己**那批对象、自己那份
+    分数。联邦路径必须同形,否则重叠的召回窗会塌成一组。
+    """
+    from app.services.retrieval import quota_fuse_baseline_first
+
+    result = federated(
+        _overlapping_windows(libraries), sub_queries=("q1", "q2"),
+    )
+
+    assert len(result.per_query) == 2
+    assert [
+        {cid: round(hit.relevance, 2) for cid, hit in group.items()}
+        for group in result.per_query
+    ] == [
+        {"c1": 0.9, "c2": 0.89, "c3": 0.1},
+        {"c3": 0.8, "c1": 0.1, "c2": 0.1},
+    ]
+
+    selected, _counts = quota_fuse_baseline_first(
+        result.collected, result.per_query, 2,
+        relevance=lambda chunk: chunk.relevance,
+    )
+    assert [hit.chunk_id for hit in selected] == ["c1", "c3"], (
+        "两个方向各一席;塌成一组时拿到的是 ['c1', 'c2']"
+    )
+
+
+def test_group_entries_carry_the_merged_representative_provenance():
+    """组里的对象是 `quota_fuse` 直接交给答案的那一个,所以 support 必须是
+    跨子查询合并后的并集,只有 relevance/score 回到该子查询自己的值。"""
+    semantic = RetrievalSupport("semantic", "chunk", "c1", 0.9)
+    lexical = RetrievalSupport("lexical", "chunk", "c1", 0.2)
+
+    def retrieve(nid, query):
+        if nid != "b":
+            return [], [], None
+        support = semantic if query == "q1" else lexical
+        return [make_chunk("c1", 0.9 if query == "q1" else 0.2,
+                           supports=(support,))], [], None
+
+    candidates = FakeCandidates(
+        (("a", "personal"), ("b", "base")), retrieve=retrieve,
+    )
+
+    result = federated(candidates, sub_queries=("q1", "q2"))
+
+    merged = result.collected["c1"]
+    assert {s.origin for s in merged.retrieval_supports} == {"semantic", "lexical"}
+    for index, expected in enumerate((0.9, 0.2)):
+        entry = result.per_query[index]["c1"]
+        assert entry.relevance == pytest.approx(expected)
+        assert {s.origin for s in entry.retrieval_supports} == {
+            "semantic", "lexical",
+        }, "组里的对象丢了合并后的 provenance"
+        assert entry.notebook_id == "b"
+
+
+def test_reserved_chunks_live_in_exactly_one_group():
+    """保底是**结构性**的:保底席位的 chunk 不再出现在它的子查询组里,于是
+    `quota_fuse` 除了那条保底组无处可归——不依赖任何相关度比较。
+
+    依赖相关度不再可靠:`prefer_stronger_chunk_candidate` 允许一条**分数更低**
+    的历史命中战胜同段正文的 question-only 行,所以某一腿自己的实例可以比合并
+    代表分更高。
+    """
+    def retrieve(nid, query):
+        if nid == "a":
+            return [make_chunk("a1", 0.3), make_chunk("a2", 0.2)], [], None
+        return [make_chunk(f"b{i}", 0.9) for i in range(20)], [], None
+
+    candidates = FakeCandidates(
+        (("a", "personal"), ("b", "base")), retrieve=retrieve,
+        active_reserve=0.25, mmr_k=8,
+    )
+
+    result = federated(candidates, sub_queries=("q1", "q2"))
+
+    lanes, groups = result.per_query[:2], result.per_query[2:]
+    assert [list(lane) for lane in lanes] == [["a1"], ["a2"]]
+    assert all("a1" not in group and "a2" not in group for group in groups)
+
+
+# --------------------------------------------------------------------------
+# 补充候选只追加,绝不挤掉基线
+# --------------------------------------------------------------------------
+
+def _question_only(chunk_id: str, relevance: float, text: str = ""):
+    return make_chunk(
+        chunk_id, relevance, text=text, supports=(
+            RetrievalSupport("generated_question", "chunk", chunk_id, relevance),
+        ),
+    )
+
+
+def test_supplements_never_evict_a_baseline_candidate():
+    """`CHUNK_RECALL=16`:1 条 active 的 question-only + 16 条 peer 基线 →
+    16 条基线全在,补充追加成第 17 条。
+
+    单库路径结构上就没这个问题(`_retrieve_chunks_multi` 先把全部基线聚完再
+    考虑补充,而且没有共享预算)。`peer_evidence` 引入了共享预算,所以联邦路径
+    必须显式把契约还回来——被挤掉的基线,`quota_fuse_baseline_first` 是救不
+    回来的,它只能重排已经进了 `collected` 的东西。
+    """
+    from app.services.retrieval import is_generated_question_only_chunk
+
+    baseline = [make_chunk(f"b{i}", 0.9 - i * 0.01) for i in range(16)]
+
+    def retrieve(nid, query):
+        if nid == "a":
+            return [_question_only("a-q", 0.95)], [], None
+        return list(baseline), [], None
+
+    candidates = FakeCandidates(
+        (("a", "personal"), ("b", "base")), retrieve=retrieve, recall=16,
+    )
+
+    result = federated(candidates)
+
+    assert {hit.chunk_id for hit in baseline} <= set(result.collected), (
+        "补充候选吃掉了基线的召回预算"
+    )
+    assert len(result.collected) == 17
+    supplements = [
+        cid for cid, hit in result.collected.items()
+        if is_generated_question_only_chunk(hit)
+    ]
+    assert supplements == ["a-q"]
+    assert list(result.collected)[-1] == "a-q", "补充只追加在基线之后"
+
+
+def test_supplement_text_colliding_with_a_baseline_takes_no_extra_seat():
+    """跨库同文:补充那条与某条基线正文相同 → 不额外占名额(与
+    `peer_evidence` 在单次选择里的 `hit.text` 同一把尺)。"""
+    shared = "同一段正文"
+
+    def retrieve(nid, query):
+        if nid == "a":
+            return [_question_only("a-q", 0.95, text=shared)], [], None
+        return [make_chunk("b1", 0.9, text=shared)], [], None
+
+    candidates = FakeCandidates(
+        (("a", "personal"), ("b", "base")), retrieve=retrieve, recall=16,
+    )
+
+    result = federated(candidates)
+
+    assert list(result.collected) == ["b1"]
+
+
+def test_default_deployment_pays_no_second_selection_pass(monkeypatch):
+    """`GENERATED_QUESTION_INDEX_MODE=off`(默认)时没有任何补充候选,
+    `peer_evidence` 只跑一次,`collected` 逐值不变。"""
+    calls = []
+    original = cf.peer_evidence
+
+    def _counting(pools, limit, **kwargs):
+        calls.append(limit)
+        return original(pools, limit, **kwargs)
+
+    monkeypatch.setattr(cf, "peer_evidence", _counting)
+
+    def retrieve(nid, query):
+        return [make_chunk(f"{nid}1", 0.5)], [], None
+
+    candidates = FakeCandidates(
+        (("a", "personal"), ("b", "base")), retrieve=retrieve,
+    )
+
+    result = federated(candidates)
+
+    assert len(calls) == 1
+    assert sorted(result.collected) == ["a1", "b1"]

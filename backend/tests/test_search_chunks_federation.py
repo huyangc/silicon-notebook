@@ -601,24 +601,31 @@ def test_active_keeps_its_reserved_seats_against_a_stronger_peer(
         f"{branch} 分支:当前笔记本被强参考库挤空了(拿到 {len(local)} 席)"
     )
     assert {chunk.notebook_id for chunk in peer} == set(bases)
-    assert len(peer) == len(seats) - len(local), "其余席位仍归参考库的强命中"
-    assert all(
-        chunk.relevance >= max(hit.relevance for hit in local)
-        for chunk in peer
-    ), "保底只发 floor 席,不改其余席位按相关度排的事实"
+    assert len(peer) > len(local), "其余席位仍归参考库的强命中,保底不反客为主"
 
 
 @pytest.mark.parametrize("branch", ["single", "multi"])
-def test_reserve_zero_returns_to_pure_relevance(
+def test_reserve_zero_drops_the_active_notebook_below_its_floor(
     repo, weak_active_strong_peers, branch
 ):
-    """对照臂:关掉保底,强参考库照旧通吃——证明上一条测的是保底本身。"""
+    """对照臂:关掉保底,当前笔记本掉到保底线以下——证明上一条测的是保底本身。
+
+    不断言「一席都没有」:`quota_fuse` 的每个子查询组各有配额,第二个子查询
+    («matching 版图»)本来就更偏向当前库那几篇短文,凭本事也能拿到几席。要是
+    断言成零,那条断言靠的其实是「组被折叠成一组」的缺陷(见
+    `_sub_query_groups` 的 per-leg relevance 说明),缺陷修好它就会红。
+    """
+    seats_for = _mmr_seats if branch == "single" else _fuse_seats
     active, _bases = weak_active_strong_peers()
+
+    with_reserve = sum(1 for c in seats_for(repo, active) if not c.notebook_id)
+    floor = _floor(repo)
     repo.settings.chunk_federation_active_reserve = 0.0
+    without = sum(1 for c in seats_for(repo, active) if not c.notebook_id)
 
-    seats = (_mmr_seats if branch == "single" else _fuse_seats)(repo, active)
-
-    assert seats and all(chunk.notebook_id for chunk in seats)
+    assert with_reserve >= floor
+    assert without < floor, f"关掉保底后仍有 {without} 席,这条对照臂证不了任何事"
+    assert without < with_reserve
 
 
 @pytest.mark.parametrize("branch", ["single", "multi"])

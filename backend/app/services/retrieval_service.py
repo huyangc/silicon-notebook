@@ -278,6 +278,11 @@ class RetrievalService:
         32 组对 16 席、MOUNT_ORDER 靠后的库一席不得——挂库越多,每个子查询的
         配额被切得越碎。合回子查询维度后,挂参考库只加宽候选池,不重切配额。
 
+        组里的每条候选带的是**该子查询自己**的相关度(provenance 取合并代表),
+        与单库腿 ``_retrieve_chunks_multi`` 的 ``per_query`` 同形。统一换成跨
+        子查询折叠后的最大值会让同一条候选在每组并列,``quota_fuse`` 的并列取
+        最小下标于是把重叠的召回窗整片塌进第一组,后面的查询方向一席不得。
+
         组前面还会有「当前笔记本保底组」:每个保底席位一个单命中组,round-robin
         第一轮就把它们发出去。详见 ``chunk_federation._reserve_lanes``;
         ``CHUNK_FEDERATION_ACTIVE_RESERVE=0`` 或单参与者短路时一个都没有,组序
