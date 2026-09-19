@@ -7,7 +7,6 @@ by their owning stores.
 """
 from __future__ import annotations
 
-import contextvars
 import json
 import itertools
 import logging
@@ -27,6 +26,17 @@ from app.domain.extensions import GENERATED_QUESTION_ACCESS_CAPABILITY
 from app.domain.retrieval import ChunkRetrievalPlan
 from app.repositories.ports import ChunkLexicalSearchTimeout
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
+# chunk 召回腿的两个 per-task ContextVar 与那把 routing 探针住在
+# ``app.services.chunk_lane``(一个零服务层依赖的叶子模块),不在本文件:联邦腿
+# ``chunk_federation`` 与本文件的生产者用的是同一套,而本文件的
+# ``_gather_vector_chunks`` 又要调联邦腿,留在任何一侧都是真实的 import 环。
+# 这里按历史名字原样再导出,所有既有读者(含测试里的 ``rc._CHUNK_PEEK_ONLY``)
+# 一字不改。
+from app.services.chunk_lane import (  # noqa: F401 - re-exported, see above
+    _CHUNK_ARM_DRIFTED,
+    _CHUNK_PEEK_ONLY,
+    _lexical_gate_drift_probe,
+)
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.retrieval import (
     RELEVANCE_FLOOR,
@@ -139,95 +149,6 @@ def _first_relation_sample(raw: object) -> str:
     if isinstance(samples, list) and samples:
         return str(samples[0])
     return ""
-
-
-def _lexical_gate_drift_probe(retrieval_state, notebook_id: str) -> bool:
-    """Once-per-arm-entry wrapper around ``_unsafe_source_scope_restricted``
-    for the lexical-gate ROUTING callers (``_retrieve_chunks_multi``,
-    ``_retrieve_chunks_baseline``, ``_keyword_chunk_candidates``) — codex #640
-    R2 P2.  A module-level function, not a method, and doubly ``getattr``-
-    guarded (missing attribute AND non-callable): production ``retrieval_state``
-    always has the real probe, but a couple of existing tests invoke one of
-    those three methods unbound against a bare ``SimpleNamespace``/adapter
-    double standing in for ``self`` that has no ``_RetrievalState`` surface at
-    all (see ``test_multi_query_native_cancellation_is_not_swallowed`` — a
-    method lookup like ``self._lexical_gate_drift_probe`` would itself raise
-    ``AttributeError`` on that double, which is why this lives at module scope
-    instead). Such a double answers "no drift", the same as the pre-#640-R2
-    baseline for every caller that never reaches this branch. This does NOT
-    memoise the probe itself — every call here still re-reads it fresh; it
-    only centralizes the fallback for callers that may not have it at all.
-
-    codex #640 R3 P2: fail-open on ANY exception the probe itself raises, not
-    just a missing/non-callable attribute.  Two of this wrapper's three call
-    sites (``_retrieve_chunks_multi``, ``_keyword_chunk_candidates``) invoke it
-    OUTSIDE their own fail-open ``try/except`` block — it runs once, before
-    the multi-query fan-out or before the FTS ``try`` further down — so an
-    unguarded probe exception there would propagate past this ROUTING-only
-    verdict and take the whole chunk/keyword arm (and therefore the ask) down
-    with it, exactly the failure mode every other lexical helper in this file
-    (``_lexical_corpus_langs``, ``_lexical_object_hits``) already refuses to
-    allow. "No drift" is the safe answer on failure for the same reason the
-    missing-probe branch above already answers it that way: it routes to the
-    SAME lane an unprobed/absent probe already takes (the pre-#640-R2
-    baseline), never disables the enforcement predicate itself (that is pushed
-    down unconditionally regardless of this verdict — see
-    ``_lexical_gate_source_scoped``), and can only ever pick the wrong lexical
-    TERM SET for this one call, never let an out-of-scope row through.  The
-    diagnostic event is best-effort: a double with no usable ``event_log``
-    (the same ``SimpleNamespace`` this function already tolerates above) must
-    not turn a swallowed probe failure into a new, unswallowed emit failure.
-    """
-    probe = getattr(retrieval_state, "_unsafe_source_scope_restricted", None)
-    if not callable(probe):
-        return False
-    try:
-        return bool(probe(notebook_id))
-    except Exception as exc:  # noqa: BLE001 — a routing-only probe must never break retrieval
-        emit = getattr(getattr(retrieval_state, "event_log", None), "emit", None)
-        if callable(emit):
-            try:
-                emit({
-                    "kind": "lexical_gate_probe_failed",
-                    "notebook_id": notebook_id,
-                    "error_type": type(exc).__name__,
-                })
-            except Exception:  # noqa: BLE001 — diagnostics must never break retrieval
-                pass
-        return False
-
-
-# codex #640 R2 P2: ``_retrieve_chunks_multi`` fans a single chunk-arm entry
-# out to one ``_retrieve_chunks`` call per sub-query (a ThreadPoolExecutor, one
-# COPIED context per task).  Threading the once-per-arm drift verdict down as
-# an ordinary keyword argument on ``_retrieve_chunks`` would change that
-# method's call-time signature for every one of its many existing test
-# doubles (several suites replace ``_retrieve_chunks`` wholesale with a
-# narrower fake and would raise ``TypeError`` on an unexpected kwarg). A
-# contextvar sidesteps that: ``_retrieve_chunks_multi`` sets it once, each
-# sub-query's copied ``Context`` snapshots that one value, and only the real,
-# never-mocked ``_retrieve_chunks_baseline`` reads it back — a full-method
-# fake never even looks at it.  Scope is exactly one ``_retrieve_chunks_multi``
-# call (set immediately before the fan-out, reset in a ``finally`` right
-# after building the per-task context copies): this is NOT the run/request-
-# level memoisation codex #634 R1 rejected, and it is never read for a scope
-# ENFORCEMENT decision — see ``_lexical_gate_source_scoped``'s docstring for
-# why a routing-only use tolerates this while enforcement never may.
-_CHUNK_ARM_DRIFTED: contextvars.ContextVar[Optional[bool]] = contextvars.ContextVar(
-    "_chunk_arm_drifted", default=None
-)
-
-# Federated chunk recall (``chunk_federation``) searches libraries the user is
-# not "in". For a LARGE one of those, cold-loading its scale index would evict
-# the warm indexes the single-notebook path depends on, so that one task may
-# only BORROW an index that is already resident. A contextvar for the same
-# reason as ``_CHUNK_ARM_DRIFTED`` above: ``_retrieve_chunks`` is replaced
-# wholesale by narrower test doubles, while ``_retrieve_chunks_baseline`` --
-# the only reader -- never is. Scope is exactly one federated task's copied
-# ``Context``; it is never set for the active notebook.
-_CHUNK_PEEK_ONLY: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "_chunk_peek_only", default=False
-)
 
 
 class _RetrievalState:
@@ -4224,18 +4145,41 @@ class CandidateRetrievalService(_RetrievalState):
                     )
         return block, id_map, node_hits, support_by_object
     def _gather_vector_chunks(self, notebook_id: str, sub_queries: list) -> list:
-        """向量 chunk 候选(多子查询合并去重;单查询直接 scored)。返回 List[RetrievedChunk]。"""
-        if len(sub_queries) >= 2:
+        """向量 chunk 候选(多子查询合并去重;单查询直接 scored)。返回 List[RetrievedChunk]。
+
+        ``CHUNK_FEDERATION_ENABLED`` 关 → 走下面 ``elif``/``else`` 两支,逐字是
+        联邦化之前的实现(单一回退开关,见 ``chunk_federation`` 的模块 docstring);
+        开 → 召回改走参与集(当前库 + 本次勾选的参考库),**返回形状与去重口径
+        都不变**,多出来的只是候选的归属库。
+
+        去重仍按今天分两种:多子查询腿按 ``content_key`` 去重 —— 跨库相同原文
+        因此同样只占一个名额,这正是挂了同一篇论文的两个库该有的行为;单子查询
+        腿一次都不去重,所以单库单查询时必须原样把 ``collected`` 的值交回去
+        (联邦模块在参与集 ≤1 时把 ``_retrieve_chunks`` 的 ``scored`` 原样按
+        chunk_id 装进 ``collected``,而 chunk_id 在一条召回腿内唯一 —— 见
+        ``_union_chunk_candidates`` 的去重键,它就是按 chunk_id ∪ content_key
+        收口的),拿回的是逐值相同的那份列表。
+        """
+        if self.settings.chunk_federation_enabled:
+            from app.services.chunk_federation import federated_chunk_candidates
+
+            result = federated_chunk_candidates(self, notebook_id, sub_queries)
+            if len(sub_queries) < 2 and len(result.participants) <= 1:
+                return list(result.collected.values())
+            values = result.collected.values()
+        elif len(sub_queries) >= 2:
             collected, _per, _ids, _mat = self._retrieve_chunks_multi(notebook_id, sub_queries)
-            seen, out = set(), []
-            for c in collected.values():
-                content_key = source_chunk_content_key(c)
-                if content_key not in seen:
-                    seen.add(content_key)
-                    out.append(c)
-            return out
-        scored, _ids, _mat = self._retrieve_chunks(notebook_id, sub_queries[0])
-        return scored
+            values = collected.values()
+        else:
+            scored, _ids, _mat = self._retrieve_chunks(notebook_id, sub_queries[0])
+            return scored
+        seen, out = set(), []
+        for c in values:
+            content_key = source_chunk_content_key(c)
+            if content_key not in seen:
+                seen.add(content_key)
+                out.append(c)
+        return out
     def _mix_retrieve(self, notebook_id: str, query: str, hl: str, sub_queries: list) -> tuple:
         """三路 mix:向量 chunk + KG-overlay 源 chunk + 概念漫游(PPR)跨文档 chunk,
         round-robin 并池去重。返回 (candidates, kg_block, kg_id_map, kg_hits, ppr_count)。

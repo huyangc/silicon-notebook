@@ -234,8 +234,25 @@ class RetrievalService:
         )
 
     def retrieve_chunk_candidates(self, notebook_id, query):
-        scored, ids, matrix = self.candidates._retrieve_chunks(notebook_id, query)
-        return filter_retrieval_items(notebook_id, "chunk", scored), ids, matrix
+        """单查询原文段落召回 —— 范围是**参与集**,不再是 active 一本。
+
+        ``chunk_federation`` 在参与集 ≤1(或 ``CHUNK_FEDERATION_ENABLED`` 关)
+        时短路回 ``_retrieve_chunks``,所以未挂参考库的笔记本逐值回到今天。
+
+        ``filter_retrieval_items`` 仍留在**外层**,且跨库正确:它的 ``chunk``
+        分支按每条候选**自己的** ``notebook_id`` 判 ``covers_notebook`` /
+        ``allows``(联邦腿已给每条打上归属库),取消勾选的参考库因此在这道结果
+        边界上仍是 fail-closed 的后盾 —— 参与集访问器里的库维度跳过只是成本闸。
+        """
+        from app.services.chunk_federation import federated_chunk_candidates
+
+        result = federated_chunk_candidates(self.candidates, notebook_id, [query])
+        scored = list(result.collected.values())
+        return (
+            filter_retrieval_items(notebook_id, "chunk", scored),
+            result.ids,
+            result.matrix,
+        )
 
     def prepare_global_query(self, query):
         """One model-stage embedding; notebook fan-out only borrows its result."""
@@ -252,9 +269,17 @@ class RetrievalService:
         return result
 
     def retrieve_chunk_candidates_multi(self, notebook_id, queries):
-        collected, per_query, ids, matrix = self.candidates._retrieve_chunks_multi(
-            notebook_id, queries
-        )
+        """多子查询原文段落召回 —— 同样是参与集口径,四元组形状一字不变。
+
+        ``per_query`` 的组数从「每个子查询一组」变成「每个 (库, 子查询) 一组」,
+        这正是下游 ``quota_fuse_baseline_first`` 想要的:每组各有配额,于是
+        「每库至少露一手」又多一层保险。调用方不需要任何改动,它只是拿到更多组。
+        """
+        from app.services.chunk_federation import federated_chunk_candidates
+
+        result = federated_chunk_candidates(self.candidates, notebook_id, list(queries))
+        collected, per_query = result.collected, result.per_query
+        ids, matrix = result.ids, result.matrix
         allowed = {
             item.chunk_id: item for item in filter_retrieval_items(
                 notebook_id, "chunk", collected.values()

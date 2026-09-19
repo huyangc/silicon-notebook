@@ -471,16 +471,24 @@ def test_ask_disconnect_documentation_matches_detached_worker_contract():
 
 
 def test_retrieval_documentation_scopes_federation_and_tier_tie_break_by_path():
+    # 原文段落通道已联邦化(`chunk_federation`):`chunk` 基线与 reasoning 的
+    # `search_chunks` 共用的那条通道现在按**参与集**读取,active-only 只是
+    # `CHUNK_FEDERATION_ENABLED=0` 的回退形态。两份 2026-07-10 的
+    # `docs/superpowers/` 快照刻意不在这条断言里:它们记录的是当时的决定,
+    # 按 `AGENTS.md` 不是现行合同,改写它们等于篡改历史记录。
     _assert_phrases(
         {
-            "README.md": "Baseline `chunk` retrieval reads chunks from the active notebook only",
-            "README_zh.md": "`chunk` 基线只从当前 active notebook 读取 chunk",
-            "architecture.md": "`chunk` 基线只读取 active notebook 的 chunk",
-            "fangan_done.md": "`chunk` 基线只读 active notebook 的 chunk",
-            "docs/superpowers/specs/2026-07-10-architecture-remediation-design.md":
-                "`chunk` 基线只读取 active notebook 的 chunk",
-            "docs/superpowers/plans/2026-07-10-architecture-contract-alignment.md":
-                "`chunk` 基线只读取 active notebook 的 chunk",
+            "README.md": "reads the **participant set**",
+            "README_zh.md": "按**参与集**读取 chunk",
+            "architecture.md": "按**参与集**读取",
+            "fangan_done.md": "按参与集读取 chunk",
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": "`CHUNK_FEDERATION_ENABLED` is its switch",
+            "README_zh.md": "开关是 `CHUNK_FEDERATION_ENABLED`",
+            "architecture.md": "`CHUNK_FEDERATION_ENABLED` 是它的单一回退开关",
         }
     )
     _assert_phrases(

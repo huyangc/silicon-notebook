@@ -207,14 +207,17 @@ class CollectionMap:
     # consumers now.  It is rendered beside the federated total because the
     # source roster is enumerable at EITHER scope (``enumerate.scope``), so the
     # model choosing between them needs both numbers, not one.  And it exists
-    # in the first place because ``AskService._no_kg_scope_admits_run`` has to
-    # judge a channel whose reach is narrower than the map's: source-passage
-    # retrieval
-    # (``search_chunks`` / the no-graph first-round seed) rides chunk mode's
-    # own primitives, and those are active-notebook-local by design.  Deriving
-    # it here rather than counting again at the call site costs zero extra
-    # queries (the per-notebook loop already reads each participant's signal
-    # rows) and keeps ONE definition of "user-visible source" for both numbers.
+    # in the first place because ``AskService._no_kg_scope_admits_run`` had to
+    # judge a channel whose reach was narrower than the map's: source-passage
+    # retrieval (``search_chunks`` / the no-graph first-round seed) rides chunk
+    # mode's own primitives, and those used to be active-notebook-local.  They
+    # are federated now (``chunk_federation``), so that gate reads ``sources``
+    # whenever ``CHUNK_FEDERATION_ENABLED`` is on and falls back to this number
+    # only on the rollback switch -- the second consumer did not disappear, its
+    # reach became conditional.  Deriving it here rather than counting again at
+    # the call site costs zero extra queries (the per-notebook loop already
+    # reads each participant's signal rows) and keeps ONE definition of
+    # "user-visible source" for both numbers.
     # No default, for ``sources``' reason and then some: a silent zero here
     # turns into a refusal to answer.
     active_sources: int

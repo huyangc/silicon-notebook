@@ -3352,13 +3352,21 @@ class ReasoningRetriever:
         当前表自身投影,新通道不得绕过;后者是并发扇出闸,首轮播种一次提交
         N 条子查询,不占同一把闸就等于把它开了个后门。
 
-        **范围是当前笔记本,不是参与集**(codex #690 R2 P2-1)。复用 chunk 模式
-        的原语就一并继承了它们的范围:`retrieve_chunk_candidates` 的索引与库读
-        都是 notebook-local,所以挂载的参考库的原文段落不在这条通道里——参考库
-        只经知识图谱与元素/知识对象/来源清单参与。无图早退的放行判据因此按
-        `collection_map.active_sources` 判这条通道(见
-        `AskService._no_kg_scope_admits_run`);联邦化是独立特性,登记在
-        `fangan_todo.md` 的检索一节。
+        **范围是参与集,不再是当前笔记本一本**。复用 chunk 模式的原语就一并
+        继承了它们的范围,而那套原语已经联邦化:`retrieve_chunk_candidates` 走
+        `chunk_federation.federated_chunk_candidates`,当前库与本次勾选的参考库
+        各出一条召回腿,合并后每条候选带自己的 `notebook_id`(引用卡与 tier 徽章
+        据它渲染)。开关是 `CHUNK_FEDERATION_ENABLED`、上界是
+        `CHUNK_FEDERATION_MAX_PARTICIPANTS`;关掉时参与集收成当前库一本,这条
+        通道逐字回到 active-only。
+
+        参考库贡献的天花板是**该库当前可见的来源**:隐藏投影(Memory / Knowhow)
+        结构性不进跨库原文通道,取消勾选的库一条都不贡献(库维度在参与集里就已
+        跳过,结果边界的 `filter_retrieval_items` 仍是 fail-closed 后盾)。非当前
+        库的大库只借用已常驻的暖索引、绝不冷加载,暖索引缺席时退回有界词法。
+        无图早退的放行判据因此也改成参与集口径(`collection_map.sources`,见
+        `AskService._no_kg_scope_admits_run`)——这条通道到得了的库才算数,而现在
+        它到得了参与集。
 
         扇出闸只圈住 `retrieve_chunk_candidates` 这一步(它是发 I/O 的那半);
         `select_chunk_candidates` 的 MMR 是纯 CPU、只读已在手的候选与矩阵,
