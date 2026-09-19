@@ -42,11 +42,23 @@ Three structural rules this module exists to hold:
   The reserve covers the two selection branches this module feeds: MMR (via
   ``apply_active_reserve`` in ``RetrievalService.select_chunk_candidates``,
   which also serves ``reasoning_retrieval.search_chunks``) and the quota fuse
-  (via ``_reserve_lanes``).  The ``mix`` branch is deliberately NOT covered:
-  its ordering comes from a rerank MODEL over the whole pool and its cut is a
-  token budget, so a reserved seat there would have to be carved out of
-  ``select_with_reserves_baseline_first``'s existing reserve rules rather than
-  bolted on here.  Whether it needs one is a separate, measurable question.
+  (via ``_reserve_lanes``).  The ``mix`` branch is NOT covered, and that gap is
+  now a known risk rather than a neutral choice.  The original argument was
+  structural -- mix's ordering comes from a rerank MODEL over the whole pool
+  and its cut is a token budget, so a reserved seat there has to be carved out
+  of ``select_with_reserves_baseline_first``'s existing reserve rules rather
+  than bolted on here -- and that part still holds.  What no longer holds is
+  its PREMISE.  When the decision was made, mix's second lane (KG-overlay
+  source chunks) resolved evidence only inside the active notebook, so the pool
+  always contained some active passages no matter how strong a mounted library
+  was.  Since ``graph_retrieval._kg_source_chunks`` gained cross-library
+  resolution, all THREE mix lanes can come back entirely peer-owned: an active
+  notebook holding two short notes at 0.30-0.40 against a large reference
+  library full of strong hits can finish a mix answer with no passage of its
+  own surviving the rerank and the token budget.  Fixing it means one more
+  active-lane rule inside ``select_with_reserves_baseline_first``; it is
+  registered in ``fangan_todo.md``'s retrieval section and deliberately not
+  done here, because that function's reserve rules are their own change.
 """
 from __future__ import annotations
 
@@ -110,6 +122,36 @@ class _Task:
     visible: tuple | None
 
 
+def _bounded_participants(
+    candidates, active_notebook_id: str,
+) -> tuple[tuple[tuple[str, str], ...], int]:
+    """``(participants, mounted_total)`` -- the seat, the filter and the bound.
+
+    Side-effect free on purpose: the truncation EVENT belongs to the arm that
+    is about to search, not to every consumer that merely needs to know which
+    libraries that arm will cover.  ``mounted_total`` is ``0`` unless the bound
+    actually cut something, so the one announcing caller below is the only
+    place that has to know the event's shape.
+    """
+    settings = candidates.settings
+    if not settings.chunk_federation_enabled:
+        # The rollback path: one library, so every caller takes the
+        # short-circuit below and behaviour returns to pre-federation exactly.
+        # No participant query is issued at all.
+        return ((active_notebook_id, _ACTIVE_TIER),), 0
+    participants = tuple(candidates._retrieval_participants(active_notebook_id))
+    if not participants or participants[0][0] != active_notebook_id:
+        # The seat's library-dimension cost guard dropped the active notebook
+        # itself.  Federation has nothing to add to a set that no longer
+        # contains the notebook being asked about; fall back to the
+        # single-library lane rather than inventing a different active.
+        return ((active_notebook_id, _ACTIVE_TIER),), 0
+    maximum = settings.chunk_federation_max_participants
+    if len(participants) <= maximum:
+        return participants, 0
+    return participants[:maximum], len(participants)
+
+
 def federation_participants(
     candidates, active_notebook_id: str,
 ) -> tuple[tuple[str, str], ...]:
@@ -120,36 +162,58 @@ def federation_participants(
     only through ``candidates._retrieval_participants`` -- the single seat --
     never through ``participant_tiers`` directly.
 
+    THE ANNOUNCING form: it emits ``chunk_federation_truncated`` when the bound
+    cut the set, so it belongs to the arm that is about to run the fan-out.  A
+    consumer that only needs the membership question answered takes
+    ``federation_participant_ids`` instead and stays silent -- see its
+    docstring for why a second announcement of the same fact is worse than
+    none.
+
     ⛔ Not an authorization predicate.  Authorization still runs through
     ``resolve_participants``/``mount_sql.py``; this is the retrieval
     consumption boundary, the same layer as ``scoped_participants``.
     """
-    settings = candidates.settings
-    if not settings.chunk_federation_enabled:
-        # The rollback path: one library, so every caller takes the
-        # short-circuit below and behaviour returns to pre-federation exactly.
-        # No participant query is issued at all.
-        return ((active_notebook_id, _ACTIVE_TIER),)
-    participants = tuple(candidates._retrieval_participants(active_notebook_id))
-    if not participants or participants[0][0] != active_notebook_id:
-        # The seat's library-dimension cost guard dropped the active notebook
-        # itself.  Federation has nothing to add to a set that no longer
-        # contains the notebook being asked about; fall back to the
-        # single-library lane rather than inventing a different active.
-        return ((active_notebook_id, _ACTIVE_TIER),)
-    maximum = settings.chunk_federation_max_participants
-    if len(participants) <= maximum:
-        return participants
-    # Truncate along the deterministic order and say so.  Silently searching
-    # fewer libraries than are mounted is exactly the kind of invisible
-    # narrowing this event exists to make observable.
-    _emit(candidates, {
-        "kind": "chunk_federation_truncated",
-        "notebook_id": active_notebook_id,
-        "participants": len(participants),
-        "kept": maximum,
-    })
-    return participants[:maximum]
+    participants, mounted_total = _bounded_participants(
+        candidates, active_notebook_id,
+    )
+    if mounted_total:
+        # Truncate along the deterministic order and say so.  Silently
+        # searching fewer libraries than are mounted is exactly the kind of
+        # invisible narrowing this event exists to make observable.
+        _emit(candidates, {
+            "kind": "chunk_federation_truncated",
+            "notebook_id": active_notebook_id,
+            "participants": mounted_total,
+            "kept": len(participants),
+        })
+    return participants
+
+
+def federation_participant_ids(
+    candidates, active_notebook_id: str,
+) -> frozenset:
+    """The ids the chunk lane will actually search, as a membership test.
+
+    Same seat, same library filter, same ``chunk_federation_max_participants``
+    bound as ``federation_participants`` -- and deliberately NO truncation
+    event.  The one fact "this ask searched fewer libraries than are mounted"
+    is emitted once, by the arm that does the fan-out; a second copy from a
+    consumer that is only intersecting its own list against the set would make
+    the event's count read like two separate truncations of one ask.
+
+    This exists so a SECOND consumer of the participant set cannot silently
+    drift wider than the chunk fan-out.  ``notebook_in_scope`` is not a
+    substitute: with no ``base_scope`` submitted it answers True for any id at
+    all, so it cannot bound a list assembled from somewhere else.
+
+    The set is re-resolved per call rather than memoized, matching
+    ``federation_participants``: the participant seat is deliberately un-memoed
+    so a run cannot pin a mount table it read at a different moment.
+    """
+    participants, _mounted_total = _bounded_participants(
+        candidates, active_notebook_id,
+    )
+    return frozenset(notebook_id for notebook_id, _tier in participants)
 
 
 def federated_chunk_candidates(

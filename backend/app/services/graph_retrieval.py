@@ -1424,6 +1424,16 @@ class GraphRetrievalService(_RetrievalState):
            时它返回 ``()``,当场空手。
 
         不在返回值里的 owner = 这一轮不参与,调用方整组跳过。
+
+        为什么可以在 ``elem_ids`` 解析**之前**就为所有 owner 取天花板(哪怕某个库
+        的对象一条 element_id 都没有):它必须在 ``self._connect()`` 之外算完
+        (``all_visible_source_ids`` 自己要开连接,放进去就是连接套连接),而把它推
+        到 ``elem_owner`` 之后就要把 ``_kg_source_chunks`` 拆成两段连接作用域——那
+        是这条通道明令不做的重构。代价在一次 run 里恰好是零:调用方
+        (``_kg_object_owners``)已经把 owner 集与 chunk 腿的参与集求过交,而联邦
+        向量腿在同一次 ``_mix_retrieve`` 里**先跑**,且会为每个 peer 参与库按同一个
+        memo key 枚举一次可见来源——所以这里每一次都是 memo 命中。没有 ambient run
+        时(memo 直通)会真读,但那种场景本来就没有任何东西被冻结。
         """
         from app.services.chunk_federation import _peer_visible_sources
         from app.services.source_scope import (
@@ -1521,8 +1531,20 @@ class GraphRetrievalService(_RetrievalState):
 
         参考库的 chunk 打 ``notebook_id=owner``,**当前库的不打标**(本分支的统一
         判据:``notebook_id`` 为空 = active,见 ``chunk_federation`` 的模块
-        docstring);每个参考库的来源天花板见 ``_kg_peer_source_ceilings``,它在
-        候选进入 rerank 输入之前生效,结果边界的 ``filter_retrieval_items``
+        docstring)。这个归属**下游可以被推翻**,且位置是确定的:``_mix_retrieve``
+        合并三路时对同一条正文调 ``prefer_stronger_chunk_candidate``,它保留
+        relevance 高的那个对象连同**它的** ``notebook_id``;本函数的 relevance 是
+        占位 0.3,所以当前库的向量命中低于 0.3 时,同一段正文会以参考库的身份被
+        引用。影响限于引用上那枚库名标记(正文本身是同一段),没有越权面——两边
+        都已各自过了自己库的天花板——所以刻意不在合并处加特判。
+
+        ``elem_owner`` 的 first-seen 赋值不会撞车,前提是 **element id 全局唯一**:
+        它是随机代理键,分享的深拷贝会重映射而不是照抄。若这条前提哪天不成立,
+        撞车表现为某个 element 被归给先看见它的那个库,而不是静默串库读数据——
+        因为每个 owner 的反查 SQL 仍然各带自己的 ``notebook_id`` 谓词。
+
+        每个参考库的来源天花板见 ``_kg_peer_source_ceilings``,它在候选进入 rerank
+        输入之前生效,结果边界的 ``filter_retrieval_items``
         (``retrieval_service.mixed_chunk_candidates``)仍是 fail-closed 后盾。"""
         from app.services.retrieval import (
             RetrievedChunk, RetrievalSupport, merge_retrieval_supports,

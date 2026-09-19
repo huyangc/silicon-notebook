@@ -4284,10 +4284,29 @@ class CandidateRetrievalService(_RetrievalState):
         整个 1-hop 子图,不止 ``kg_hits`` 那几个种子——按种子取会漏掉扩散出来的
         参考库对象。这里再把空串还原成 active 的真实 id,下游因此只处理一种形状。
 
-        返回 ``None`` = 回到今天的单库反查,两种情形都要:
-        ``CHUNK_FEDERATION_ENABLED=0``(既定的单一回退开关),以及本轮 overlay 压根
-        没命中任何外库对象(绝大多数笔记本)。后者让单库路径逐字不变,而且不需要
-        再去问一次参与集。
+        **归属表与 chunk 腿的参与集求交**(``federation_participant_ids``),不在集合
+        里的 owner 落回 active。三条理由:
+
+        1. ``CHUNK_FEDERATION_MAX_PARTICIPANTS`` 是**上界**,文档就是这么写的。
+           不求交的话,挂 10 个参考库、上界设 4 → 向量腿搜 4 个库,KG 腿却照样
+           为另外 6 个库的对象反查原文并把它们送进答案,那个旋钮对这条腿失效。
+        2. ``kg_id_map`` 的取值域今天靠的是一条**没有任何地方断言**的传递性质
+           (id_map ← ``_federated_rx_graph`` ← ``participant_rows``),而
+           ``notebook_in_scope`` 在没提交 ``base_scope`` 时对任意 id 恒真,承担不了
+           成员资格检查。求交把「这条腿只看参与集」变成本函数自己的不变量。
+        3. PR-C 会把 ``_retrieval_participants`` 做成可覆盖座位;两个集合一旦按
+           构造分叉,不求交就没有任何东西会报红。
+
+        落回 active 而不是丢弃对象:落回后按 active 反查,那个 element 自然查不到,
+        等价于改动之前的行为——既不凭空少一个对象,也不越过上界。
+
+        读的是**不发事件**的那一口:``chunk_federation_truncated`` 由真正扇出的
+        向量腿在同一次 ask 里发过了,这里再发一次会把一次截断读成两次。
+
+        返回 ``None`` = 回到今天的单库反查,三种情形:
+        ``CHUNK_FEDERATION_ENABLED=0``(既定的单一回退开关)、本轮 overlay 压根没
+        命中任何外库对象(绝大多数笔记本)、以及命中的外库对象全部落在参与集之外
+        (求交后只剩 active)。前两种不读参与集,所以单库路径连一次挂载查询都不多。
         """
         if not self.settings.chunk_federation_enabled:
             return None
@@ -4295,6 +4314,15 @@ class CandidateRetrievalService(_RetrievalState):
             str(entry.get("object_id") or ""):
                 str(entry.get("notebook_id") or "") or notebook_id
             for entry in kg_id_map.values() if entry.get("object_id")
+        }
+        if not any(owner != notebook_id for owner in owners.values()):
+            return None
+        from app.services.chunk_federation import federation_participant_ids
+
+        allowed = federation_participant_ids(self, notebook_id)
+        owners = {
+            object_id: (owner if owner in allowed else notebook_id)
+            for object_id, owner in owners.items()
         }
         if not any(owner != notebook_id for owner in owners.values()):
             return None
