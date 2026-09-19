@@ -113,6 +113,8 @@ answer Markdown, with conversation history, searchable notebook selection, a per
 background-task status and original-evidence reading. The mobile layout retains scope, send and stop.
 Polling backs off from 1.2 seconds to 15 seconds while progress is unchanged, pauses when the browser
 document is hidden, and resumes immediately on visibility. Narrowing scope shows a history-context reminder.
+Ungrounded answers carry an explicit warning even when they include some citations. Each completed or
+skipped notebook persists a narrow coverage update, so polling and mid-retrieval cancellation retain progress.
 
 Scope has two states: `all` means every currently readable notebook; `include` is an explicit set.
 Clearing selection restores `all`. Manually selecting every current notebook remains an explicit set,

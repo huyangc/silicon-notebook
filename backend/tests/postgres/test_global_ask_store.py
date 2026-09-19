@@ -90,6 +90,22 @@ def test_completed_history_projects_only_successful_dialogue(store):
     assert store.running_job_ids(first.conversation_id, "user-a") == []
 
 
+def test_progress_patch_preserves_payload_and_cannot_overwrite_terminal_state(store):
+    value = job()
+    store.create(value, "user-a", "request-a", "payload", "web", new_conversation=True)
+    value.searched_notebook_ids = ["nb-a"]
+    value.degraded_notebook_ids = ["nb-a"]
+    assert store.save_progress(value, "user-a")
+    assert store.job(value.job_id, "user-a").question == value.question
+    assert store.job(value.job_id, "user-a").degraded_notebook_ids == ["nb-a"]
+    assert not store.save_progress(value, "user-b")
+    value.status = "cancelled"
+    assert store.save(value, "user-a")
+    value.searched_notebook_ids.append("nb-b")
+    assert not store.save_progress(value, "user-a")
+    assert store.job(value.job_id, "user-a").searched_notebook_ids == ["nb-a"]
+
+
 def test_postgres_global_batch_authority_sources_and_evidence_snapshot(store):
     from app.repositories.postgres.sharing_store import SharingStore
     from app.repositories.postgres.source_store import SourceStore

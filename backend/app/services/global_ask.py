@@ -77,10 +77,12 @@ class GlobalAskService:
             raise GlobalAskError(404, "对话不存在，请刷新列表。")
         return row
 
-    def _save_if_open(self, job, user_id):
+    def _save_if_open(self, job, user_id, *, progress=False):
         """No detached worker may reopen persistence after runtime shutdown."""
         with self._lock:
-            return False if self._closed else self.store.save(job, user_id)
+            if self._closed:
+                return False
+            return self.store.save_progress(job, user_id) if progress else self.store.save(job, user_id)
 
     def _history(self, conversation, ids, user_id, allowed, authority_check):
         history = []
@@ -168,7 +170,9 @@ class GlobalAskService:
                     self.store.save(job, user_id)
                     raise
                 previous = self.store.request_job(user_id, payload.client_request_id)
-                if previous is not None and previous[1] == request_json:
+                if previous is not None:
+                    if previous[1] != request_json:
+                        raise GlobalAskError(409, "请求标识已用于其他问题，请重新提交。") from exc
                     self._check(previous[0].resolved_notebook_ids, user_id, allowed, authority_check)
                     return previous[0]
                 if conversation and self.store.running_job_ids(conversation.id, user_id):
@@ -189,6 +193,8 @@ class GlobalAskService:
                 job.skipped_notebooks.append(GlobalAskSkippedNotebook(
                     notebook_id=notebook_id, reason="总检索时限已到，请缩小范围后重试。",
                 ))
+                if not self._save_if_open(job, user_id, progress=True):
+                    raise AskCancelled()
                 continue
             self._check([notebook_id], user_id, allowed, authority_check)
             source_ids = source_ceiling[notebook_id]
@@ -207,6 +213,8 @@ class GlobalAskService:
             except (GlobalRetrievalSkipped, ReadBudgetExceeded) as exc:
                 reason = "检索超时，请缩小范围后重试。" if isinstance(exc, ReadBudgetExceeded) or exc.reason == "timeout" else "检索暂不可用，请检查资料索引后重试。"
                 job.skipped_notebooks.append(GlobalAskSkippedNotebook(notebook_id=notebook_id, reason=reason))
+                if not self._save_if_open(job, user_id, progress=True):
+                    raise AskCancelled()
                 continue
             if isinstance(result, GlobalRetrievalResult):
                 hits = result.chunks
@@ -227,8 +235,8 @@ class GlobalAskService:
                 pool.append(replace(hit, notebook_id=notebook_id))
             pools.append(pool)
             job.searched_notebook_ids.append(notebook_id)
-        if not self._save_if_open(job, user_id):
-            raise AskCancelled()
+            if not self._save_if_open(job, user_id, progress=True):
+                raise AskCancelled()
         return peer_evidence(pools, self.settings.global_ask_candidate_limit), evidence
 
     def _run(self, job, user_id, names, history, event, allowed, authority_check, source_ceiling):

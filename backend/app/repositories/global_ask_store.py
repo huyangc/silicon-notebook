@@ -110,6 +110,19 @@ class GlobalAskStore:
             ), (job.status, job.model_dump_json(), job.job_id, user_id))
         return cursor.rowcount == 1
 
+    def save_progress(self, job, user_id):
+        """Patch coverage only; never resend the question or overwrite a terminal job."""
+        patch = job.model_dump(include={
+            "searched_notebook_ids", "skipped_notebooks", "degraded_notebook_ids",
+        }, mode="json")
+        expression = "(payload_json::jsonb || ?::jsonb)::text" if self.marker == "%s" else "json_patch(payload_json, ?)"
+        with self.database.write() as db:
+            cursor = db.execute(self._sql(
+                f"UPDATE global_ask_jobs SET payload_json={expression} "
+                "WHERE id=? AND user_id=? AND status='running'"
+            ), (json.dumps(patch, ensure_ascii=False), job.job_id, user_id))
+        return cursor.rowcount == 1
+
     def jobs(self, conversation_id, user_id, limit, offset):
         with self.database.connect() as db:
             rows = db.execute(self._sql(

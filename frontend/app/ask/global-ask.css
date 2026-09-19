@@ -100,6 +100,7 @@
 .global-turn .chat-assistant { padding: 0; border: 0; background: transparent; }
 .global-answer-label { display: flex; gap: 9px; align-items: center; margin-bottom: 20px; font-size: 13px; }
 .global-answer-label > span:last-child { margin-left: auto; color: var(--muted); font-size: 11px; }
+.global-answer-grounding { margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--warning-border); border-radius: 9px; background: var(--warning-bg); color: var(--warning); font-size: 12px; line-height: 1.8; }
 .global-answer-mark { background: var(--ink); color: var(--panel); font-size: 9px; width: 25px; height: 25px; border-radius: 50%; display: grid; place-items: center; }
 .global-citation-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0 14px; }
 .global-citation { display: flex; align-items: center; gap: 8px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--global-accent); text-align: left; max-width: 100%; }
