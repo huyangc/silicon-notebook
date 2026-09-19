@@ -21,6 +21,9 @@ from app.services.kg.edge_schema import (
     DEFAULT_REASONING_EDGE_TYPES,
     is_queryable_edge_pair,
 )
+# ``source_scope`` is a zero-``app``-import leaf, so this keeps the renderer as
+# import-light as ``citation_origin`` does and adds no cycle.
+from app.services.source_scope import citation_active_id
 
 # Default reasoning edge types (well-populated: derived_from=4160, supports=6068,
 # depends_on=791).  contrasts_with/prerequisite_of are thin; callers may extend.
@@ -310,7 +313,15 @@ def render_subgraph_context(
     earlier ``tier == "base"`` test (A2), which dropped the id of a node from a
     mounted PRIVATE library — such a library keeps ``tier="personal"`` while
     genuinely being a different notebook, so its citations lost their library
-    badge and fell back to the generic tier wording.
+    badge and fell back to the generic tier wording.  In PEER mode
+    (``source_scope.citation_active_id``) there is no current notebook at all,
+    so that id resolves to ``""`` and every node keeps its real owner,
+    including the nominal active's — the interface has to name the selected
+    library each citation came from.  Normalised once, on entry, because
+    citation origin is this parameter's ONLY use in this renderer: it reaches
+    no query, no scope and no authorization test.  ``_kg_object_owners`` is
+    unaffected either way, since its ``entry["notebook_id"] or notebook_id``
+    fallback lands on the same id the stamp now carries explicitly.
 
     gate ii (T3, knowhow KG-node retrieval): when a node is a single-row knowhow
     cell KO it carries the raw `{table_id, rows}` (threaded here by
@@ -334,6 +345,7 @@ def render_subgraph_context(
     # dependency-free leaf, so it is imported at module scope like edge_schema.
     from app.services.evidence_context import _knowhow_ref_from_payload
 
+    active_notebook_id = citation_active_id(active_notebook_id)
     lines: List[str] = []
     id_map: Dict[str, dict] = {}
     oid_to_key: Dict[str, str] = {}

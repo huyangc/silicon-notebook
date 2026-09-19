@@ -27,7 +27,8 @@ sufficient on its own, and all three are pinned by
 
 1. **Single-reader whitelist.**  Only the retrieval consumption boundary may
    import this module (``retrieval_candidates`` / ``graph_retrieval`` /
-   ``collection_catalog`` / ``collection_enumeration`` / ``communities``), and
+   ``collection_catalog`` / ``collection_enumeration`` / ``communities`` /
+   ``evidence_context`` / ``chunk_federation``), and
    only ``global_ask`` may install an override.  The guard asserts the set of
    production importers is a subset of that whitelist, so a new reader is a
    deliberate, reviewed edit of the whitelist rather than an import someone
@@ -62,12 +63,15 @@ arriving one frame further out.
 
 Two defences, and the first one is the real one:
 
-1. **The writer pre-checks, outside every fail-soft frame.**  After
-   establishing the retrieval run and BEFORE any retrieval starts,
-   ``global_ask`` calls ``assert_override_matches_run()``.  It has no side
-   effects and answers the same two questions the seat asks, so a mismatch
-   fails loudly at the top of the request instead of quietly at the bottom of a
-   worker thread.  (Wired in PR-D; this module ships the primitive.)
+1. **The pre-check runs outside every fail-soft frame.**  It lives on the
+   first line of ``chunk_federation._bounded_participants`` -- the single entry
+   through which every federated consumer reaches the seat, in the PARENT
+   thread, after the retrieval run exists and before any producer is called.
+   ``assert_override_matches_run()`` has no side effects and answers the same
+   two questions the seat asks, so a mismatch fails loudly at the top of the
+   fan-out instead of quietly at the bottom of a worker thread.  It sits on the
+   retrieval side rather than in ``global_ask`` because the retrieval run is
+   established by ``AskService.ask`` itself, which may not read this module.
 2. **The REGISTERED fail-soft handlers re-raise it**, named beside
    ``except AskCancelled: raise``.  "Registered", not "every": the set is the
    hand-audited list of handlers whose ``try`` body can actually reach a seat
@@ -269,11 +273,11 @@ def federated_ask_active() -> bool:
 def assert_override_matches_run() -> None:
     """Re-check the installed override against the ambient run, and return None.
 
-    THE LOUD-FAILURE ENTRY POINT.  The writer calls this once, after the
-    retrieval run exists and before any retrieval begins, so an attestation
-    failure surfaces at the top of the request rather than inside a worker
-    thread where a fail-soft handler could turn it into an empty result set (see
-    the module docstring).
+    THE LOUD-FAILURE ENTRY POINT.  ``chunk_federation._bounded_participants``
+    calls this on its first line, after the retrieval run exists and before any
+    retrieval begins, so an attestation failure surfaces at the top of the
+    fan-out rather than inside a worker thread where a fail-soft handler could
+    turn it into an empty result set (see the module docstring).
 
     No override installed -> no-op, so the caller never has to ask first.  Side
     effect free: it neither reads the mount table nor resolves participants, so

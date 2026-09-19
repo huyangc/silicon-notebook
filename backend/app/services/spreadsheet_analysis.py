@@ -23,6 +23,7 @@ from app.models.ask import (
 )
 from app.repositories.analysis_artifacts import AnalysisArtifactStore
 from app.services.cancellation import AskCancelled, raise_if_cancelled
+from app.services.source_scope import citation_active_id
 
 
 SPREADSHEET_SUFFIXES = frozenset({".xlsx", ".xlsm", ".xls"})
@@ -1251,7 +1252,9 @@ class SpreadsheetAnalysisService:
         工作簿不是「只可能来自本库」的证据：ask 的表格通道按参与集
         `(notebook_id, source_id)` 逐个载入 manifest，挂载参考库里的工作簿会一路
         走到这里。所以署名走与其它跨库证据完全相同的两条规则——归属过
-        `domain.citation_origin.foreign_notebook_id`（本库归空串，跨库才留 id），
+        `domain.citation_origin.foreign_notebook_id`（本库归空串，跨库才留 id；
+        对等模式下 `source_scope.citation_active_id` 让「本库」整体消失，每条回执
+        都带真实归属），
         tier 查 `NotebookStore.tier_map`（与 graph_retrieval 同一张表，不另立第二
         套判定）。`notebook_tiers` 缺项/为空时回落 "personal"，即模型字段原默认值。
         """
@@ -1268,7 +1271,9 @@ class SpreadsheetAnalysisService:
             quoted_span="电子表格确定性分析结果",
             source_file_name=manifest.get("source_file_name", ""),
             tier=notebook_tiers.get(origin_notebook_id, "personal"),
-            notebook_id=foreign_notebook_id(origin_notebook_id, active_notebook_id),
+            notebook_id=foreign_notebook_id(
+                origin_notebook_id, citation_active_id(active_notebook_id),
+            ),
         )
 
 

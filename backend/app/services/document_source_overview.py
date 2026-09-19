@@ -11,6 +11,7 @@ from app.models.ask import Citation
 from app.repositories.ports import SourceStorePort
 from app.services.cancellation import CancelEvent, raise_if_cancelled
 from app.services.collection_enumeration import SourceItem
+from app.services.source_scope import citation_active_id
 
 
 @dataclass(frozen=True)
@@ -75,7 +76,12 @@ def prepare_source_overview(
     the id_map ``notebook_id`` must be non-empty only for such cross-notebook
     evidence.  A defaulted argument would let a caller forget it and echo the
     active notebook's own id back, which is exactly the badge bug the A1 guard
-    (``tests/test_citation_notebook_id_guard.py``) exists to prevent.
+    (``tests/test_citation_notebook_id_guard.py``) exists to prevent.  In PEER
+    mode (``source_scope.citation_active_id``) there is no current library at
+    all, so that id resolves to ``""`` and every enumerated source keeps its
+    real owner, the nominal active's included.  Normalised once, on entry:
+    citation origin is this parameter's ONLY use here -- authorization and
+    title resolution belong to the caller, as stated above.
 
     ``coverage`` selects the sampling shape: ``"spread"`` (the default) takes
     evenly spaced positions that always include the last element, since a
@@ -87,6 +93,7 @@ def prepare_source_overview(
     their output is byte-for-byte unchanged.
     """
     raise_if_cancelled(cancel_event)
+    active_notebook_id = citation_active_id(active_notebook_id)
     if budget_chars <= 0 or max_elements <= 0:
         return SourceOverview("", {}, [], "本次没有可用的原文概述预算，请增加预算后重试。")
     source_id = source_item.source_id
