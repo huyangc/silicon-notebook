@@ -208,7 +208,10 @@ def _federated_tasks(
     length.  Resetting the live variables cannot affect the copies already
     taken, and keeps their live window as narrow as possible.
     """
-    from app.services.retrieval_candidates import (
+    # ``chunk_lane`` 而不是 ``retrieval_candidates``:那边的 ``_gather_vector_chunks``
+    # 调本模块,两边互取就是 import 环;这两个 ContextVar 与那把探针因此住在
+    # 一个零服务层依赖的叶子模块里,``retrieval_candidates`` 按原名再导出。
+    from app.services.chunk_lane import (
         _CHUNK_ARM_DRIFTED, _CHUNK_PEEK_ONLY, _lexical_gate_drift_probe,
     )
 

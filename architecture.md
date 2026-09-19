@@ -15,7 +15,7 @@
 第一阶段用 `backend/tests/test_architecture_documentation.py` 固定以下容易漂移的架构契约：
 
 - Ask stream 的 transport 断连与用户显式取消是两种事件；前者不取消 detached worker。
-- 检索联合范围按 mode 区分；知识对象的 exact-score `base` 次序不能泛化到 chunk 或 relation 检索。
+- 原文段落通道按参与集读取，`CHUNK_FEDERATION_ENABLED` 是它唯一的回退开关；知识对象的 exact-score `base` 次序不能泛化到 chunk 或 relation 检索。
 - notebook 内页是来源栏 + 主区域的两列 workspace，主区域有 问答 (Ask) / 知识库 (Knowledge) / 记忆 (Memory) / 深度报告 (Deep Report) 四个 tab；没有固定 Studio 右栏。
 - Memory 独立于 source/chunk/KG，始终绑定创建者和一个 notebook；Agent candidate 与 confirmed-only notebook 正式检索是两个隔离平面。
 
@@ -327,7 +327,7 @@ transport disconnect / navigation / refresh
 
 ### 3.3 联合检索与回答合成
 
-联合范围按检索路径区分：`chunk` 基线只读取 active notebook 的 chunk；启用 KG overlay 或 PPR 时，才可能加入 federated KG 上下文与 base-backed chunk。`reasoning` 使用 federated KG 路径。
+原文段落通道（`chunk` 基线与 `reasoning` 的 `search_chunks` 共用）按**参与集**读取：active notebook + 本次勾选的参考库各出一条召回腿，由 `backend/app/services/chunk_federation.py` 扁平化成单层扇出后合并，`CHUNK_FEDERATION_ENABLED` 是它的单一回退开关。非 active 的参与库按「该库当前可见来源」下推天花板，且大库只借用暖索引不冷加载。启用 KG overlay 或 PPR 时再加入 federated KG 上下文与 base-backed chunk。`reasoning` 使用 federated KG 路径。
 
 知识对象 `federated_retrieve()` 跨 active 与其显式挂载的参考库集合（`notebook_bases`，可能为空）收集并标记 tier，其相关度 score 不乘 tier 常数，也不设置 tier 配额或地板；exact-score 的 `base` 次序只适用于知识对象命中。因此相关度更高的 personal knowledge hit 仍在前。`federated_retrieve_relations()` 的关系命中只按 score 降序，不使用 base 平局次序。
 

@@ -1673,15 +1673,20 @@ def _mount_graphless_base_with_sources(repo, active_id):
 
 
 def test_graphless_base_sources_do_not_admit_the_active_only_passage_channel(arepo):
-    """codex #690 R2 P2-1:原文通道够不着参考库,放行判据就不能拿它当理由。
+    """回退开关关掉联邦 chunk 后,原文通道回到 active-only,放行判据跟着回去。
 
     场景是当前笔记本**零源** + 一个有来源、没有图的参考库 + 枚举接线关掉。此时
-    唯一还活着的放行理由是「原文段落检索有得可检」,而 `search_chunks` 复用的是
-    chunk 模式的 notebook-local 原语——参考库的段落根本不在通道里。用参与集的
-    来源数(`collection_map.sources`)放行,进去的是一轮播种恒空手、动作恒空手的
-    空转:三次模型调用换一个空答案。判据因此只数 `active_sources`。
+    唯一还活着的放行理由是「原文段落检索有得可检」。`CHUNK_FEDERATION_ENABLED`
+    关着时 `search_chunks` 复用的 chunk 原语收回 notebook-local(联邦模块短路),
+    参考库的段落根本不在通道里;用参与集的来源数(`collection_map.sources`)放行
+    进去的是一轮播种恒空手、动作恒空手的空转:三次模型调用换一个空答案。判据
+    因此在这个开关下只数 `active_sources`。
+
+    联邦开着时的**对偶**(同一个场景放行、而且真能拿到参考库的段落)在
+    `test_search_chunks_federation.py` 里,两条必须成对读。
     """
     arepo.settings.reasoning_enum_tools_enabled = False
+    arepo.settings.chunk_federation_enabled = False
     nb = _seed(arepo, formulas=0, with_kg=False, with_source=False)
     _mount_graphless_base_with_sources(arepo, nb.id)
     # 前提确认:参与集的来源数非零(否则这条测的不是「口径之差」),当前笔记本为零。

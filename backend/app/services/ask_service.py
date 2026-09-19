@@ -1203,19 +1203,25 @@ class AskService:
 
         * **枚举工具能列出东西** —— 地图上有非零集合(元素 / 知识对象 / 来源)。
           接线判据与 run 内的总闸共用 ``enumeration_wiring_active``;
-        * **原文段落检索有得可检** —— **当前笔记本**里有用户可见来源。接线判据
-          同样共用 ``chunk_search_wiring_active``,因为原文检索根本不经枚举接线,
-          拿枚举那把闸当唯一放行条件会把无图笔记本的主检索通道一起挡掉。
+        * **原文段落检索有得可检** —— 这条通道够得着的库里有用户可见来源。接线
+          判据同样共用 ``chunk_search_wiring_active``,因为原文检索根本不经枚举
+          接线,拿枚举那把闸当唯一放行条件会把无图笔记本的主检索通道一起挡掉。
 
-        两条理由的**范围口径不同,这是合同不是疏漏**(codex R2 P2-1)。枚举那条数
-        参与集(当前 notebook + 勾选的参考库):枚举工具本身就是联邦的,元素/知识
-        对象/来源三份清单都跨库。原文那条只数 ``collection_map.active_sources``
-        —— chunk 模式的检索原语是 active-only(见 ``docs/product-and-api*.md``
-        「检索模式」段),``ReasoningRetriever.search_chunks`` 复用的正是它们,所以
-        参考库的原文段落根本不在这条通道里。用参与集的来源数给它放行,等于拿一个
-        它到不了的库当理由:当前笔记本零源、只有一个无图参考库有来源时,放行进去
-        的是一轮播种恒空手、动作恒空手的空转。参考库的原文段落联邦检索是独立
-        特性(见 ``fangan_todo.md`` 检索一节的登记),没做之前判据必须说真话。
+        两条理由的**范围口径现在是同一个:参与集**(当前 notebook + 本次勾选的
+        参考库),都读 ``collection_map.sources``。原先它们刻意不同口径,前提是
+        「chunk 模式的检索原语 active-only,``ReasoningRetriever.search_chunks``
+        复用的正是它们,所以参考库的原文段落根本不在这条通道里」——那个前提已被
+        联邦 chunk 通道拆掉:``retrieve_chunk_candidates`` 走
+        ``chunk_federation``,参与集里每个库各出一条召回腿。判据必须跟着说真话,
+        否则就反过来变成「通道到得了、判据却装作到不了」:当前笔记本零源、只有一
+        个无图参考库有来源时,那是一轮**真能拿到原文**的 run 被挡在门外。
+
+        ``CHUNK_FEDERATION_ENABLED`` 关掉时参与集收成当前库一本,这条判据也同步
+        退回 ``active_sources`` —— 单一开关、单一回退路径,不留「通道关了判据还
+        按参与集放行」的空转。``collection_map.sources`` 不扣
+        ``CHUNK_FEDERATION_MAX_PARTICIPANTS`` 的截断(地图不知道谁被截断),所以
+        它在挂库极多时**偏宽**;偏宽的方向是多跑一轮而不是少答一题,与这条判据
+        自身 fail-open 的方向一致。
 
         两处接线判据都必须与 run 内的总闸**同源**:各写一份(或干脆不判)就会出现
         「早退放行了、run 里却什么工具都没有」的空转——两把 kill switch 都关时是
@@ -1283,8 +1289,12 @@ class AskService:
             or collection_map.sources > 0
         ):
             return True
-        # active_sources,不是 sources:见 docstring 的范围口径一节。
-        return chunk_search_wired and collection_map.active_sources > 0
+        if not chunk_search_wired:
+            return False
+        # 参与集口径 / active-only 口径按联邦开关分叉:见 docstring 的范围口径一节。
+        if self.settings.chunk_federation_enabled:
+            return collection_map.sources > 0
+        return collection_map.active_sources > 0
 
     def _tier_map_for(self, notebook_ids: Iterable[str]) -> Dict[str, str]:
         return self.evidence_context.tier_map(list(notebook_ids))
