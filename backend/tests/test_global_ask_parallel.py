@@ -312,12 +312,19 @@ def test_per_library_budget_starts_when_the_library_starts(setup, monkeypatch):
     """A library queued behind the concurrency bound must not be charged for
     its wait. With one slot the second library starts long after the first, so
     its budget has to be measured from its own start, not from submission."""
+    import math
     import time as real_time
     from types import SimpleNamespace
 
     service, readable, _, _ = setup
     names = _libraries(service, readable, {"a", "b"})
-    clock = [real_time.monotonic()]
+    # The fake clock has to stay next to the host's: ``read_budget`` compares
+    # these deadlines against the REAL monotonic clock, so a far-away seed
+    # expires every budget on the spot. It is floored because
+    # ``(start + budget) - start`` is only exactly ``budget`` when ``start``
+    # carries no fraction -- seeded with the raw host clock, this assertion
+    # depended on the CI machine's uptime (about 2 seeds in 10,000 round).
+    clock = [float(math.floor(real_time.monotonic()))]
     monkeypatch.setattr("app.services.global_ask.time",
                         SimpleNamespace(monotonic=lambda: clock[0]))
     entered, release = Event(), Event()
@@ -340,7 +347,7 @@ def test_per_library_budget_starts_when_the_library_starts(setup, monkeypatch):
     budget = service.settings.global_ask_notebook_timeout_seconds
     for name in names:
         started, deadline = observed[name]
-        assert deadline - started == budget, name
+        assert deadline - started == pytest.approx(budget), name
 
 
 @pytest.mark.parametrize("setup", [{"global_ask_retrieval_concurrency": 1}], indirect=True)
