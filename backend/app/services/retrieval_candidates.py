@@ -217,6 +217,18 @@ _CHUNK_ARM_DRIFTED: contextvars.ContextVar[Optional[bool]] = contextvars.Context
     "_chunk_arm_drifted", default=None
 )
 
+# Federated chunk recall (``chunk_federation``) searches libraries the user is
+# not "in". For a LARGE one of those, cold-loading its scale index would evict
+# the warm indexes the single-notebook path depends on, so that one task may
+# only BORROW an index that is already resident. A contextvar for the same
+# reason as ``_CHUNK_ARM_DRIFTED`` above: ``_retrieve_chunks`` is replaced
+# wholesale by narrower test doubles, while ``_retrieve_chunks_baseline`` --
+# the only reader -- never is. Scope is exactly one federated task's copied
+# ``Context``; it is never set for the active notebook.
+_CHUNK_PEEK_ONLY: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_chunk_peek_only", default=False
+)
+
 
 class _RetrievalState:
     def __init__(
