@@ -1204,6 +1204,17 @@ class Settings(BaseSettings):
     chunk_overlap_chars: int = Field(0, validation_alias="CHUNK_OVERLAP_CHARS")
     # chunk-native 检索: 大召回候选数 / MMR 精选数 / MMR λ / 答案上下文预算(长上下文综合)。
     chunk_recall: int = Field(200, validation_alias="CHUNK_RECALL")   # mix 候选池/MMR 候选;LightRAG 风格猛召回
+    # 联邦 chunk 通道:挂载参考库的原文段落是否进入 chunk 召回。关掉 = 参与集恒
+    # 等于 active 一本,联邦模块整体短路回单库召回。上界按 MOUNT_ORDER 截断并发
+    # 内容无关事件,绝不静默扩张。扇出上限是「库 × 子查询」压成一层后的总工作位
+    # 数,默认 8 与联邦化之前 `_retrieve_chunks_multi` 里的字面量一致,所以单库多
+    # 子查询的并发峰值逐字不变,只是任务的构成变了。
+    chunk_federation_enabled: bool = Field(
+        True, validation_alias="CHUNK_FEDERATION_ENABLED")
+    chunk_federation_max_participants: int = Field(
+        8, ge=1, le=8, validation_alias="CHUNK_FEDERATION_MAX_PARTICIPANTS")
+    chunk_fanout_max_workers: int = Field(
+        8, ge=1, le=16, validation_alias="CHUNK_FANOUT_MAX_WORKERS")
     # 词法候选的语料语言闸:库内没有任何 CJK 字符时,丢掉纯 CJK 的三字片段词项
     # ——它们对该库保证零命中,却在 PostgreSQL 上各买一次真实探针(实测 7,026 块
     # 的英文库:64 词项 29.7s/26 行,其中 26 行全部来自 2 个拉丁词项;报告 4 节
