@@ -32,6 +32,11 @@ class GlobalAskRequest(BaseModel):
             raise ValueError("请输入问题。")
         return value
 
+class GlobalAskSkippedNotebook(BaseModel):
+    notebook_id: str
+    reason: str
+
+
 class GlobalAskAnswer(BaseModel):
     answer_id: str
     question: str
@@ -44,6 +49,8 @@ class GlobalAskAnswer(BaseModel):
     resolved_notebook_ids: list[str]
     searched_notebook_ids: list[str]
     cited_notebook_ids: list[str]
+    skipped_notebooks: list[GlobalAskSkippedNotebook] = Field(default_factory=list)
+    degraded_notebook_ids: list[str] = Field(default_factory=list)
     completeness_notice: str = "回答仅使用本次命中的有限原文，不代表逐篇穷尽检查。"
 
 class GlobalAskJob(BaseModel):
@@ -56,6 +63,8 @@ class GlobalAskJob(BaseModel):
     resolved_notebook_ids: list[str]
     searched_notebook_ids: list[str] = Field(default_factory=list)
     cited_notebook_ids: list[str] = Field(default_factory=list)
+    skipped_notebooks: list[GlobalAskSkippedNotebook] = Field(default_factory=list)
+    degraded_notebook_ids: list[str] = Field(default_factory=list)
     # Explicitly displayable Chinese guidance; the service never stores raw exceptions here.
     error: str | None = None
     response: GlobalAskAnswer | None = None

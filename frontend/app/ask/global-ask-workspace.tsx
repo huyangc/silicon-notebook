@@ -13,6 +13,7 @@ import { getGlobalCitation, type GlobalJob } from "../global-ask-api";
 import type { SourceElement } from "../workspace-model";
 import { GlobalConversationList } from "./conversation-list";
 import { NotebookScopePicker } from "./notebook-scope-picker";
+import { GlobalCoverageReceipt } from "./global-coverage-receipt";
 import { useGlobalAsk } from "./use-global-ask";
 import { useCopyResult } from "../copy-result";
 import { notebookHash } from "../memory-model";
@@ -44,6 +45,9 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
   const composerDisabled = busy || ask.openFailed;
   const hint = askQuestionLimitHint(ask.draft.trim());
   const selectedValue = selected?.reference.anchor ?? selected?.reference.citation;
+  const selectedNotebookIds = ask.scope.mode === "include" ? new Set(ask.scope.notebook_ids) : null;
+  const excludesPreviousContext = selectedNotebookIds !== null
+    && ask.turns.some((turn) => turn.resolved_notebook_ids.some((id) => !selectedNotebookIds.has(id)));
 
   useEffect(() => { setSelected(null); }, [ask.conversationId]);
   useLayoutEffect(() => {
@@ -133,6 +137,7 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                   <span>{job.status === "running" ? `正在查阅资料 · 已检索 ${job.searched_notebook_ids.length} / ${job.resolved_notebook_ids.length} 个笔记本` : job.status === "cancelled" ? "已停止回答，可以修改问题后继续。" : job.status === "interrupted" ? "服务已重启，请重新提交问题。" : job.error || "回答未完成，请检查模型服务后重试。"}</span>
                   {job.status !== "running" && <button className="global-text-button" onClick={() => { ask.setDraft(job.question); composer.current?.focus(); }}>重新提问</button>}
                 </div>}
+                <GlobalCoverageReceipt job={job} notebookNames={names} />
               </section>)}
             </div>}
         </div>
@@ -146,6 +151,7 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
             <div className="global-composer-toolbar"><NotebookScopePicker notebooks={ask.notebooks} scope={ask.scope} onChange={ask.setScope} disabled={composerDisabled || Boolean(ask.running)} />
               {ask.running ? <button className="global-send new-pill" type="button" disabled={ask.stopping} onClick={() => void ask.stop()}><Square size={14} />{ask.stopping ? "停止中…" : "停止"}</button> : <button className="global-send new-pill" type="submit" disabled={composerDisabled || !ask.draft.trim() || Boolean(hint) || !ask.notebooks.length} aria-label="发送问题">{ask.submitting ? <LoaderCircle className="global-spin" size={18} /> : <ArrowUp size={19} />}</button>}
             </div>
+            {excludesPreviousContext && <p className="global-scope-context-notice" role="status">范围已收窄：先前涉及其他笔记本的提问不会用于本次追问，请重新说明要讨论的对象。</p>}
           </form>
           <p className={`global-composer-hint${hint ? " invalid" : ""}`}>{hint || (ask.notebooks.length ? "答案来自所选范围的原文 · Enter 发送，Shift + Enter 换行" : "还没有可访问的笔记本，请先返回主页添加资料。")}</p>
         </div>

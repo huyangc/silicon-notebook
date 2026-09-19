@@ -13,16 +13,26 @@ from app.services.retrieval_run import current_retrieval_run
 
 
 class GlobalAskSynthesis:
-    def __init__(self, *, settings, model_clients, parse_anchors, style_block=None):
+    def __init__(self, *, settings, model_clients, parse_anchors, style_block=None,
+                 answer_with_retry=None):
         self.settings = settings
         self.model_clients = model_clients
         self.parse_anchors = parse_anchors
         self.style_block = style_block
+        self.answer_with_retry = answer_with_retry
 
     def _context(self, chunks, notebook_names):
         blocks, id_map = [], {}
         used = 0
-        for chunk in chunks:
+        represented = {chunk.notebook_id for chunk in chunks if chunk.element_ids}
+        share = self.settings.chunk_answer_budget_chars // max(1, len(represented))
+        per_notebook = {}
+        deferred = []
+
+        def admit(chunk, allowance):
+            nonlocal used
+            if not chunk.element_ids:
+                return True
             key = f"k{len(blocks) + 1}"
             block = json.dumps({
                 "key": key,
@@ -31,8 +41,9 @@ class GlobalAskSynthesis:
                 "location": chunk.section_path,
                 "text": chunk.text,
             }, ensure_ascii=False)
-            if used + len(block) + 1 > self.settings.chunk_answer_budget_chars:
-                continue
+            cost = len(block) + 1
+            if cost > allowance or used + cost > self.settings.chunk_answer_budget_chars:
+                return False
             used += len(block) + 1
             blocks.append(block)
             id_map[key] = {
@@ -43,6 +54,16 @@ class GlobalAskSynthesis:
                 "location_label": chunk.section_path, "notebook_id": chunk.notebook_id,
                 "tier": "personal", "relevance": chunk.relevance,
             }
+            per_notebook[chunk.notebook_id] = per_notebook.get(chunk.notebook_id, 0) + cost
+            return True
+
+        # Reserve each represented notebook's equal share before redistributing
+        # unused capacity; a near-budget chunk cannot preempt other libraries.
+        for chunk in chunks:
+            if not admit(chunk, share - per_notebook.get(chunk.notebook_id, 0)):
+                deferred.append(chunk)
+        for chunk in deferred:
+            admit(chunk, self.settings.chunk_answer_budget_chars - used)
         return "\n".join(blocks), id_map
 
     def __call__(self, question, chunks, notebook_names, history, cancel_event):
@@ -57,24 +78,35 @@ class GlobalAskSynthesis:
         run = current_retrieval_run()
         style = self.style_block(run.actor_id) if self.style_block and run and run.actor_id else ""
         prompt = answer_prompt(question, context, history, style_block=style, peer_notebooks=True)
-        raw = client.chat_json(
-            [{"role": "user", "content": prompt}], ANSWER_SCHEMA_HINT,
-            cancel_event=cancel_event, **cap_kwargs(client, "answer_max_tokens"),
-        )
-        raise_if_cancelled(cancel_event)
-        data = json.loads(raw)
-        answer = data.get("answer") if isinstance(data, dict) else None
-        if not isinstance(answer, str) or not answer.strip():
-            raise ValueError("empty global answer")
-
         def bound_marker(match):
             keys = marker_keys(match.group(0))
-            return "[" + ",".join(keys) + "]" if keys and all(key in id_map for key in keys) else ""
+            if not keys or any(key not in id_map for key in keys):
+                raise ValueError("unbound global citation")
+            return "[" + ",".join(keys) + "]"
 
-        answer = LOOSE_MARKER_RE.sub(bound_marker, answer.strip())
-        if not answer.strip():
-            raise ValueError("empty global answer after citation binding")
-        anchors = self.parse_anchors(answer, id_map)
+        def generate():
+            raise_if_cancelled(cancel_event)
+            raw = client.chat_json(
+                [{"role": "user", "content": prompt}], ANSWER_SCHEMA_HINT,
+                cancel_event=cancel_event, **cap_kwargs(client, "answer_max_tokens"),
+            )
+            raise_if_cancelled(cancel_event)
+            data = json.loads(raw)
+            answer = data.get("answer") if isinstance(data, dict) else None
+            if not isinstance(answer, str) or not answer.strip():
+                raise ValueError("empty global answer")
+            answer = LOOSE_MARKER_RE.sub(bound_marker, answer.strip())
+            if not answer.strip():
+                raise ValueError("empty global answer after citation binding")
+            anchors = self.parse_anchors(answer, id_map)
+            return answer, data.get("grounded") is True and bool(anchors), anchors
+
+        if self.answer_with_retry:
+            answer, grounded, anchors, ok = self.answer_with_retry(generate, "全局问答")
+            if not ok:
+                return "模型暂未生成有效回答，请稍后重试。", False, [], []
+        else:
+            answer, grounded, anchors = generate()
         citations = [
             Citation(
                 label=anchor.source_title or anchor.label,
@@ -86,4 +118,4 @@ class GlobalAskSynthesis:
             )
             for anchor in anchors
         ]
-        return answer, data.get("grounded") is True and bool(anchors), anchors, citations
+        return answer, grounded, anchors, citations

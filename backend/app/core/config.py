@@ -1255,6 +1255,17 @@ class Settings(BaseSettings):
     global_ask_history_turns: int = Field(
         10, ge=0, validation_alias="GLOBAL_ASK_HISTORY_TURNS",
     )
+    global_ask_max_notebooks: int = Field(32, ge=1, validation_alias="GLOBAL_ASK_MAX_NOTEBOOKS")
+    global_ask_max_concurrent: int = Field(4, ge=1, validation_alias="GLOBAL_ASK_MAX_CONCURRENT")
+    global_ask_retrieval_timeout_seconds: float = Field(
+        30, gt=0, validation_alias="GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS",
+    )
+    global_ask_notebook_timeout_seconds: float = Field(
+        5, gt=0, validation_alias="GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS",
+    )
+    global_ask_shutdown_timeout_seconds: float = Field(
+        5, gt=0, validation_alias="GLOBAL_ASK_SHUTDOWN_TIMEOUT_SECONDS",
+    )
     document_overview_max_elements: int = Field(
         64, ge=2, validation_alias="DOCUMENT_OVERVIEW_MAX_ELEMENTS",
     )

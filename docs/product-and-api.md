@@ -111,6 +111,8 @@ accessible, including conversation links. Conversations belong to the initiating
 nor change reference-library mounts. The page reuses the shared header, palette, button feedback and
 answer Markdown, with conversation history, searchable notebook selection, a persistent scope summary,
 background-task status and original-evidence reading. The mobile layout retains scope, send and stop.
+Polling backs off from 1.2 seconds to 15 seconds while progress is unchanged, pauses when the browser
+document is hidden, and resumes immediately on visibility. Narrowing scope shows a history-context reminder.
 
 Scope has two states: `all` means every currently readable notebook; `include` is an explicit set.
 Clearing selection restores `all`. Manually selecting every current notebook remains an explicit set,
@@ -123,11 +125,14 @@ or sources added later cannot join a running request.
 Browser scope follows the user's live read access; MCP additionally intersects the live token allowlist.
 History, task results and cited evidence recheck access. Narrowing scope cannot reintroduce excluded
 notebook material through earlier assistant answers. Receipts distinguish eligible participants, notebooks
-actually searched and notebooks cited. An operational failure fails the whole task with a retry message;
-empty retrieval still counts as searched. Not citing a notebook does not assert that it contains no relevant material.
-Admitted prior user questions resolve follow-up retrieval through the shared query-rewrite workload;
-prior assistant answers are never treated as evidence. Cited elements are checked again before completion;
-changed or removed evidence fails the task and asks the user to retry.
+actually searched, skipped notebooks with Chinese reasons, notebooks using lexical fallback, and notebooks cited.
+Retrieval timeouts/unavailability skip that notebook with explicit partial coverage; empty retrieval still counts
+as searched. Authorization changes still fail closed. Not citing a notebook does not assert absence of material.
+Only completed, scope-compatible turns enter follow-up context through shared query rewriting; assistant answers
+resolve references but are never evidence. Every element backing a cited chunk is checked by source identity
+and text fingerprint, ignoring unrelated metadata changes. Changed evidence is removed and synthesis retries
+once from surviving chunks; repeated drift or no surviving support returns an ungrounded retry notice, never
+unsupported claims with their citation markers merely erased.
 
 V1 retrieves original chunks from visible imported sources across notebooks and synthesizes one answer.
 No knowledge graph is required. Hidden Memory/Knowhow projections, cross-notebook graph reasoning and
@@ -150,9 +155,30 @@ Automatically derived conversation titles are bounded summaries; the original qu
 Input reuses `ASK_QUESTION_MAX_CHARS=4000` and `CONVERSATION_TITLE_MAX_CHARS=200`; global identifiers
 and client request identifiers allow 200 characters. List pagination defaults to 50, capped at 100.
 `GLOBAL_ASK_CANDIDATE_LIMIT` defaults to 64 (minimum 1), bounding merged evidence across all notebooks
-without cutting the participant list. `GLOBAL_ASK_HISTORY_TURNS` defaults to 10 (minimum 0), controlling
-prior user questions only. Model original-text projection reuses `CHUNK_ANSWER_BUDGET_CHARS` rather than
-introducing a second truncation setting.
+without cutting the participant list. Selection rotates notebooks and sources in their local relevance order,
+deduplicating identical text across notebooks rather than comparing scores across retrieval lanes.
+Model context reserves an equal character share per represented notebook before redistributing unused
+space; unknown model citation markers trigger the shared answer retry rather than retaining unbound claims.
+`GLOBAL_ASK_HISTORY_TURNS` defaults to 10 (minimum 0), controlling completed prior turns.
+`GLOBAL_ASK_MAX_NOTEBOOKS` defaults to 32 (minimum 1): a larger resolved scope is rejected with a request to
+select fewer notebooks, never silently truncated. `GLOBAL_ASK_MAX_CONCURRENT` defaults to 4 (minimum 1)
+per process, including admissions in progress; a full service rejects new work for retry and contributes to
+the PostgreSQL pool budget warning. Shutdown cancels workers and waits at most
+`GLOBAL_ASK_SHUTDOWN_TIMEOUT_SECONDS` (default 5, greater than 0).
+`GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS` (default 30, greater than 0) bounds the retrieval phase;
+`GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS` (default 5, greater than 0) bounds each notebook within it.
+SQL execution and connection-pool acquisition use remaining deadlines. Database transport failures can
+outlast the server-side SQL timeout; this is not a hard wall-clock guarantee under broken network I/O.
+Native ANN calls cannot be forcibly
+interrupted; overdue results are discarded before hydration/synthesis. Shared query rewriting and one query
+embedding run before this phase under existing model-service timeouts; these are not whole-answer deadlines.
+Global retrieval never cold-loads shared scale indexes, ANN handles, deltas or whole-library vector matrices.
+It uses already-warm ANN only when the frozen source scope covers its source catalog; otherwise bounded
+lexical recall plus candidate-only vector scoring is disclosed in `degraded_notebook_ids`, including its
+cross-language recall limitation. `skipped_notebooks` contains `{notebook_id, reason}` receipts in both jobs
+and answers; MCP exposes both lists in `coverage`. Model original-text projection reuses
+`CHUNK_ANSWER_BUDGET_CHARS` rather than introducing a second truncation setting. Oversized chunks are
+omitted whole, so evidence budgets do not promise a citation or context slot for every notebook.
 
 The four global MCP tools do not require `select_notebook`. `ask_global`, `get_global_ask` and
 `cancel_global_ask` require both `ask:execute` and `knowledge:read`; `get_global_cited_element` requires

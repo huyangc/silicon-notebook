@@ -160,6 +160,21 @@ class SourceStore:
             ).fetchall()
         return [row["id"] for row in rows]
 
+    def visible_source_ids_by_notebook(self, notebook_ids: Sequence[str]) -> dict[str, list[str]]:
+        """Freeze a bounded global participant set in one read snapshot."""
+        result = {notebook_id: [] for notebook_id in notebook_ids}
+        if not result:
+            return result
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT id,notebook_id FROM sources WHERE notebook_id = ANY(%s) "
+                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} ORDER BY notebook_id,id",
+                (list(result),),
+            ).fetchall()
+        for row in rows:
+            result[row["notebook_id"]].append(row["id"])
+        return result
+
     def hidden_source_ids(self, notebook_id: str, owner_id: str) -> list[str]:
         """Hidden Memory/Knowhow projection participants **for one user**, in
         stable id order — see the SQLite adapter for why the Memory owner
@@ -786,6 +801,50 @@ class SourceStore:
                     item = dict(row)
                     item["metadata"] = _metadata_compat(item["metadata"])
                     result[row["id"]] = item
+        return result
+
+    def global_candidate_evidence(self, db, chunk_ids: Sequence[str]) -> dict[str, dict]:
+        """Read model text and its element identities in one SQL snapshot."""
+        ids = list(dict.fromkeys(chunk_ids))
+        if not ids:
+            return {}
+        rows = db.execute(
+            "SELECT c.id,c.source_id,c.text,c.section_path,c.element_ids,s.title AS source_title, "
+            "e.id AS evidence_id,e.source_id AS evidence_source_id,e.text AS evidence_text "
+            "FROM chunks c JOIN sources s ON s.id=c.source_id "
+            "LEFT JOIN LATERAL jsonb_array_elements_text(c.element_ids::jsonb) declared(element_id) ON TRUE "
+            "LEFT JOIN source_elements e ON e.id=declared.element_id "
+            "WHERE c.id = ANY(%s) ORDER BY c.id", (ids,),
+        ).fetchall()
+        result = {}
+        for row in rows:
+            element_ids = row["element_ids"]
+            item = result.setdefault(row["id"], {
+                "id": row["id"], "source_id": row["source_id"], "source_title": row["source_title"],
+                "text": row["text"], "section_path": row["section_path"],
+                "element_ids": json.loads(element_ids) if isinstance(element_ids, str) else list(element_ids),
+                "element_fingerprints": {},
+            })
+            if row["evidence_id"] is not None:
+                item["element_fingerprints"][row["evidence_id"]] = (
+                    row["evidence_source_id"], hashlib.sha256(row["evidence_text"].encode()).hexdigest(),
+                )
+        return result
+
+    def evidence_fingerprints(self, element_ids: Sequence[str]) -> dict[str, tuple[str, str]]:
+        ids = list(dict.fromkeys(element_id for element_id in element_ids if element_id))
+        if not ids:
+            return {}
+        result = {}
+        with self.database.connect() as connection:
+            for offset in range(0, len(ids), self.IN_CHUNK):
+                batch = ids[offset:offset + self.IN_CHUNK]
+                rows = connection.execute(
+                    "SELECT id,source_id,text FROM source_elements "
+                    f"WHERE id IN ({placeholders(batch)})", batch,
+                ).fetchall()
+                for row in rows:
+                    result[row["id"]] = (row["source_id"], hashlib.sha256(row["text"].encode()).hexdigest())
         return result
 
     def image_asset_rows(

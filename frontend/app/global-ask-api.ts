@@ -3,6 +3,7 @@ import type { AnswerAnchorLike, CitationLike } from "./answer-formatting.ts";
 import type { SourceElement } from "./workspace-model.ts";
 
 export type GlobalScope = { mode: "all" } | { mode: "include"; notebook_ids: string[] };
+export type GlobalSkippedNotebook = { notebook_id: string; reason: string };
 export type GlobalAnswer = {
   answer_id: string;
   question: string;
@@ -15,6 +16,8 @@ export type GlobalAnswer = {
   resolved_notebook_ids: string[];
   searched_notebook_ids: string[];
   cited_notebook_ids: string[];
+  skipped_notebooks: GlobalSkippedNotebook[];
+  degraded_notebook_ids?: string[];
   completeness_notice: string;
 };
 export type GlobalJob = {
@@ -27,6 +30,8 @@ export type GlobalJob = {
   resolved_notebook_ids: string[];
   searched_notebook_ids: string[];
   cited_notebook_ids: string[];
+  skipped_notebooks: GlobalSkippedNotebook[];
+  degraded_notebook_ids?: string[];
   error: string | null;
   response: GlobalAnswer | null;
 };

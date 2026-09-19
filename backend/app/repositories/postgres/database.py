@@ -236,6 +236,34 @@ _PSYCOPG_LOG_FILTER = _ConnectingThreadLogFilter()
 logging.getLogger("psycopg").addFilter(_PSYCOPG_LOG_FILTER)
 
 
+class _BudgetedReadConnection:
+    """Recompute the remaining server deadline before each bounded read."""
+
+    def __init__(self, connection, budget, statement_ceiling_ms=None):
+        self.connection = connection
+        self.budget = budget
+        self.statement_ceiling_ms = statement_ceiling_ms
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+    def execute(self, query, params=None, **kwargs):
+        # A cancelled statement aborts its savepoint. Let the owning store
+        # roll it back even after the read deadline has elapsed.
+        if isinstance(query, str) and query.lstrip().upper().startswith(
+            ("ROLLBACK", "RELEASE SAVEPOINT")
+        ):
+            return self.connection.execute(query, params, **kwargs)
+        timeout_ms = max(1, math.ceil(self.budget.remaining_seconds() * 1000))
+        if self.statement_ceiling_ms is not None:
+            timeout_ms = min(timeout_ms, self.statement_ceiling_ms)
+        self.connection.execute(
+            "SELECT set_config('statement_timeout', %s, true)",
+            (f"{timeout_ms}ms",),
+        )
+        return self.connection.execute(query, params, **kwargs)
+
+
 class _SafeDiagnosticConnection(psycopg.Connection[PostgresRow]):
     """Keep raw conninfo failures out of both psycopg and pool loggers."""
 
@@ -493,7 +521,12 @@ class PostgresDatabase:
     @contextmanager
     def _acquire(self) -> Iterator[psycopg.Connection[PostgresRow]]:
         self._ensure_open()
-        manager = self._pool.connection(timeout=self._acquire_timeout)
+        from app.repositories.read_budget import current_read_budget
+        budget = current_read_budget()
+        timeout = self._acquire_timeout
+        if budget is not None:
+            timeout = min(timeout, budget.remaining_seconds())
+        manager = self._pool.connection(timeout=timeout)
         try:
             conn = manager.__enter__()
         except PoolTimeout:
@@ -525,7 +558,13 @@ class PostgresDatabase:
     def connect(self) -> Iterator[psycopg.Connection[PostgresRow]]:
         """Acquire one healthy dict-row connection and return it transactionally."""
         with self._acquire() as conn:
-            yield conn
+            from app.repositories.read_budget import current_read_budget
+            budget = current_read_budget()
+            yield _BudgetedReadConnection(
+                conn, budget, min(self._statement_timeout_ms, max(1, math.ceil(
+                    self.settings.postgres_chunk_fts_timeout_seconds * 1000
+                ))),
+            ) if budget else conn
 
     def is_connection_held(self) -> bool:
         """Whether this execution currently owns any pooled connection."""

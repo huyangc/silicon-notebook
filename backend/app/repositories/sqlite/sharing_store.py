@@ -18,6 +18,7 @@ from app.repositories.sqlite.access_sql import (
     NOTEBOOK_READ_SQL,
     NOTEBOOK_WRITE_SQL,
     admin_access_params,
+    read_access_clause,
     read_access_params,
 )
 from app.repositories.sqlite.database import SqliteDatabase
@@ -531,6 +532,29 @@ class SharingStore:
                 NOTEBOOK_READ_SQL, (notebook_id, *read_access_params(user_id))
             ).fetchone()
         return row is not None
+
+    def readable_notebook_names(self, user_id: str) -> dict[str, str]:
+        """Narrow live global scope; no summary/count/index hydration."""
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT nb.id,nb.name FROM notebooks nb WHERE " + read_access_clause()
+                + f" AND nb.{NOTEBOOK_LIVE_SQL} ORDER BY nb.id",
+                read_access_params(user_id),
+            ).fetchall()
+        return {row["id"]: row["name"] for row in rows}
+
+    def readable_notebook_ids(self, notebook_ids: Sequence[str], user_id: str) -> set[str]:
+        ids = list(dict.fromkeys(notebook_ids))
+        if not ids:
+            return set()
+        placeholders = ",".join("?" for _ in ids)
+        with self.database.connect() as db:
+            rows = db.execute(
+                f"SELECT nb.id FROM notebooks nb WHERE nb.id IN ({placeholders}) AND "
+                + read_access_clause() + f" AND nb.{NOTEBOOK_LIVE_SQL}",
+                (*ids, *read_access_params(user_id)),
+            ).fetchall()
+        return {row["id"] for row in rows}
 
     def is_member(self, notebook_id: str, user_id: str) -> bool:
         with self.database.connect() as db:

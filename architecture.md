@@ -256,10 +256,15 @@ source 状态沿 `queued → parsing → parsed → extracting → extracted` �
 全局问答独立使用 `GlobalAskService`，由 `RepositoryRuntime.global_ask_service()` 延迟组合；
 HTTP 的 `global_ask_routes.py` 与 MCP 的 `global_ask.py` 共用此服务。`GlobalAskStore` 在
 SQLite/PostgreSQL bundle 中分别绑定参数占位符，持有用户所有的全局会话和任务；不扩张
-单库 facade 或参考库挂载。执行前冻结库集合及可见来源，逐库调用既有原文检索，再交给
-`GlobalAskSynthesis` 使用共用模型服务一次合成；问题改写只接收范围兼容的用户提问历史。
-后台线程持有取消事件，终态通过 `status='running'` 条件更新提交，运行时关闭先取消并等待
-线程结束；只有服务器启动补偿把遗留任务转为 `interrupted`，普通仓库实例化不执行补偿。
+单库 facade 或参考库挂载。窄批量查询复核读权并冻结来源，受理锁仅保护容量和建行。
+专用全局候选入口只读已暖 ANN 或有界词法候选，不加载共享冷索引或整库矩阵；数据库适配器
+在请求局部读预算下约束连接等待与 SQL。问题改写及单次向量准备复用模型与 retrieval-run。
+按库与来源轮流选材后，`GlobalAskSynthesis` 复用现有提示词、锚点解析、模型服务和答案重试；
+它是无知识图谱库的原文合成适配层，不新增独立 reasoning 引擎，后续 reasoning 归一化仍应
+复用该检索原语并替换合成适配。历史仅含范围兼容的完成轮次，助手回答只作指代语境。
+引用校验覆盖段落全部元素的来源与文本指纹；失效证据剔除后有界重合成。
+后台线程有容量上限并持有取消事件，终态通过 `status='running'` 条件更新提交；关闭先取消并
+有界等待，只有服务器启动补偿把遗留任务转为 `interrupted`，普通仓库实例化不执行补偿。
 `frontend/app/ask` 拥有全局会话、范围、轮询及引用阅读状态，复用共享页面和答案组件。
 认证后的主页挂载按用户隔离的 `GlobalAskLauncher`，首次打开才加载共享问答组件；气泡、
 小窗和全屏切换保留同一组件实例；展示租约由根弹窗协调器的 actor 级 `global-ask` slot 管理，

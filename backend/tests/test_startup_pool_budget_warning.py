@@ -55,6 +55,12 @@ def test_sqlite_backend_is_exempt():
     assert warning is None
 
 
+def test_global_ask_capacity_is_included_in_pool_budget():
+    warning = _pool_budget_warning(_settings(postgres_pool_max_size=24, global_ask_max_concurrent=4))
+    assert "全局问答并发(4)" in warning
+    assert "=27" in warning
+
+
 def test_malformed_database_url_does_not_raise():
     """URL 校验是别处的职责;本函数只在能确认是 postgres 时才判定,绝不额外报错。"""
     warning = _pool_budget_warning(_settings(database_url="not a url"))

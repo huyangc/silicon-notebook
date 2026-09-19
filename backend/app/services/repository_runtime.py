@@ -2350,15 +2350,18 @@ class RepositoryRuntime:
                 ask = self.ask_service()
                 self._global_ask = GlobalAskService(
                     store=self.global_ask_store,
-                    notebooks=self.notebook_summaries.list_for_user,
+                    notebooks=self.sharing_store.readable_notebook_names,
                     can_read=self.sharing_store.user_can_read_notebook,
+                    can_read_many=self.sharing_store.readable_notebook_ids,
                     sources=self.source_store,
-                    retrieve=ask.retrieval.retrieve_chunk_candidates,
+                    retrieve=ask.retrieval.retrieve_global_chunk_candidates,
+                    prepare_query=ask.retrieval.prepare_global_query,
                     rewrite_query=ask._rewrite_followup_query,
                     synthesize=GlobalAskSynthesis(
                         settings=self.settings, model_clients=self.models,
                         parse_anchors=ask.evidence_context.parse_anchors,
                         style_block=ask._search_profile_style_block,
+                        answer_with_retry=ask._answer_with_retry,
                     ),
                     settings=self.settings,
                 )

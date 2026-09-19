@@ -233,6 +233,28 @@ class ScaleArtifactCatalog:
                 return None
         return identity
 
+    def peek_warm_chunk_index(self, notebook_id: str):
+        """Borrow a current resident ANN handle without loading any artifact.
+
+        Unlike ``load`` this never adopts an entry, waits for a cold loader,
+        parses a manifest, or opens an ANN handle. The borrowed reference pins
+        its lifetime only for this query. Ingestion-stale indexes remain
+        admissible, but disk replacement and pipeline publication do not.
+        """
+        cached = self.scale_cache().get(notebook_id)
+        if cached is None or getattr(cached, "chunk_ann_handle", None) is None:
+            return None
+        if _signature_superseded(cached, self._manifest_signature(notebook_id)):
+            return None
+        if self.pipeline_identity is not None:
+            from app.domain.indexing_pipeline import BUILTIN_INDEXING_PIPELINE_VERSION
+            expected = list(cached.manifest.get("pipeline_identity") or [
+                "", BUILTIN_INDEXING_PIPELINE_VERSION,
+            ])
+            if expected != list(self.pipeline_identity(notebook_id)):
+                return None
+        return cached
+
     def load(self, notebook_id: str, allow_stale: bool = False):
         """Return a valid ScaleIndex or None.
 
