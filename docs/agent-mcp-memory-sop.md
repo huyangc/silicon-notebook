@@ -278,7 +278,9 @@ Global Ask calls `ask_global` directly, without `select_notebook`. For example:
 in the deployment. To choose a subset, page through `list_notebooks`, then supply
 `notebook_scope={"mode":"include","notebook_ids":[...]}`; an empty list restores all.
 Use the returned `job_id` with `get_global_ask` for status and results; follow the pagination metadata
-to retrieve long answers and citations. `cancel_global_ask` explicitly stops work, and
+to retrieve long answers and citations. Also follow `next_coverage_offset` as `coverage_offset` to read
+every skipped/degraded notebook receipt; coverage counts always describe the complete task.
+`cancel_global_ask` explicitly stops work, and
 `get_global_cited_element` reads the cited original evidence. `conversation_id` can continue the same
 user's browser-created global conversation, but current token permissions still constrain history and
 results. V1 searches visible imported-source text, excluding hidden Memory/Knowhow projections and candidates.

@@ -61,7 +61,7 @@ def _rig(warm=False):
         sources=SimpleNamespace(global_candidate_evidence=evidence_rows),
         embeddings=SimpleNamespace(rows_by_ids=lambda db, table, column, ids: [
             {"vid": cid, "vector": "[1.0, 0.0]"} for cid in ids
-        ]),
+        ], global_small_chunk_vector_page=lambda *args, **kwargs: (False, [])),
         _mask_vector_matrix=lambda ids, matrix, allowed: (ids, matrix),
         _vector_matrix=_forbidden, _gather_chunks=_forbidden,
     )

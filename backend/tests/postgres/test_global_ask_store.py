@@ -106,12 +106,16 @@ def test_progress_patch_preserves_payload_and_cannot_overwrite_terminal_state(st
     assert store.job(value.job_id, "user-a").searched_notebook_ids == ["nb-a"]
 
 
-def test_postgres_global_batch_authority_sources_and_evidence_snapshot(store):
+def test_postgres_global_batch_authority_sources_and_evidence_snapshot(store, monkeypatch):
+    from contextlib import contextmanager
+    import hashlib
+
     from app.repositories.postgres.sharing_store import SharingStore
     from app.repositories.postgres.source_store import SourceStore
 
     database = store.database
     now = "2026-09-19T00:00:00Z"
+    original_text = "原始证据 · β 低温性能 🔋"
     with database.write() as db:
         db.execute(
             "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s)",
@@ -129,11 +133,11 @@ def test_postgres_global_batch_authority_sources_and_evidence_snapshot(store):
                 )
         db.execute(
             "INSERT INTO source_elements(id,source_id,element_type,location_label,text,created_at) VALUES(%s,%s,%s,%s,%s,%s)",
-            ("element", "source-0-markdown", "paragraph", "p1", "original evidence", now),
+            ("element", "source-0-markdown", "paragraph", "p1", original_text, now),
         )
         db.execute(
             "INSERT INTO chunks(id,notebook_id,source_id,text,element_ids,created_at) VALUES(%s,%s,%s,%s,%s::jsonb,%s)",
-            ("chunk", "nb-0", "source-0-markdown", "original evidence", '["element","missing"]', now),
+            ("chunk", "nb-0", "source-0-markdown", original_text, '["element","missing"]', now),
         )
     sharing = object.__new__(SharingStore)
     sharing.database = database
@@ -145,10 +149,34 @@ def test_postgres_global_batch_authority_sources_and_evidence_snapshot(store):
     assert sharing.readable_notebook_ids(list(names), "other-user") == set()
     ceilings = sources.visible_source_ids_by_notebook(list(names))
     assert all(values == [f"source-{nb.removeprefix('nb-')}-markdown"] for nb, values in ceilings.items())
+    projections = []
+    connect = database.connect
+
+    class ProjectionProbe:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, query, parameters):
+            cursor = self.connection.execute(query, parameters)
+            projections.append({column.name for column in cursor.description})
+            return cursor
+
+    @contextmanager
+    def probe_connection():
+        with connect() as connection:
+            yield ProjectionProbe(connection)
+
+    monkeypatch.setattr(database, "connect", probe_connection)
     fingerprint = sources.evidence_fingerprints(["element"])
+    assert fingerprint == {"element": ("source-0-markdown", hashlib.sha256(original_text.encode("utf-8")).hexdigest())}
+    assert projections.pop() == {"id", "source_id", "evidence_hash"}
     with database.connect() as db:
         snapshot = sources.global_candidate_evidence(db, ["chunk", "missing-chunk"])
-    assert snapshot["chunk"]["text"] == "original evidence"
+    assert projections.pop() == {
+        "id", "source_id", "text", "section_path", "element_ids", "source_title",
+        "evidence_id", "evidence_source_id", "evidence_hash",
+    }
+    assert snapshot["chunk"]["text"] == original_text
     assert snapshot["chunk"]["element_ids"] == ["element", "missing"]
     assert snapshot["chunk"]["element_fingerprints"] == fingerprint
     with database.write() as db:

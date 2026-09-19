@@ -10,6 +10,10 @@ class GlobalAskRetrievalPort(Protocol):
     def retrieve_global_chunk_candidates(self, notebook_id: str, query: str, *, deadline: float | None = None, cancel_event: Any = None) -> Any: ...
 
 
+class GlobalAskEmbeddingStorePort(Protocol):
+    def global_small_chunk_vector_page(self, db: object, notebook_id: str, *, allowed_source_ids: Sequence[str] | None, max_chunks: int, after: str, page_size: int) -> tuple[bool, list[dict]]: ...
+
+
 class GlobalAskAuthorityStorePort(Protocol):
     """Batch read authority used only by global orchestration."""
     def readable_notebook_names(self, user_id: str) -> dict[str, str]: ...

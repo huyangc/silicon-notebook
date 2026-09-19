@@ -68,7 +68,8 @@ def truncate_vec(arr: np.ndarray, runtime_dim: int) -> np.ndarray:
 
 
 def build_matrix(rows: Iterable[Tuple[str, str]], n_hint: int = 0,
-                 runtime_dim: "Optional[int]" = None) -> Tuple[List[str], np.ndarray]:
+                 runtime_dim: "Optional[int]" = None, *,
+                 expected_dim: "Optional[int]" = None) -> Tuple[List[str], np.ndarray]:
     """rows: iterable of (id, vector_raw) where vector_raw is either legacy JSON
     text or a raw float32 BLOB (bytes/memoryview) — see `decode_vector`. Returns
     (ids, normalized float32 matrix [N, dim]). Rows with empty/invalid/wrong-dim
@@ -88,7 +89,12 @@ def build_matrix(rows: Iterable[Tuple[str, str]], n_hint: int = 0,
     runtime_dim: MRL 运行时截断维 — None(默认)= 读 settings 的 EMBED_RUNTIME_DIM;
     显式 0 = 不截断(真相源工具/测试用)。截断发生在逐行 decode 之后、首行定维
     判定**之前**(否则原生维首行会把已截断的后续行整批当异维丢),且在预分配
-    矩阵之前生效 —— 峰值内存按截断维计,这是大库 fold/build 峰值 ÷4 的前提。"""
+    矩阵之前生效 —— 峰值内存按截断维计,这是大库 fold/build 峰值 ÷4 的前提。
+
+    expected_dim: when querying an already known vector space, reject rows
+    of another dimension after runtime truncation and before the first row
+    selects the matrix dimension. None preserves the existing first-row rule.
+    """
     rd = resolve_runtime_dim() if runtime_dim is None else int(runtime_dim)
     ids: List[str] = []
     dim = None
@@ -123,6 +129,8 @@ def build_matrix(rows: Iterable[Tuple[str, str]], n_hint: int = 0,
             continue
         if rd > 0:
             arr = truncate_vec(arr, rd)     # 必须先于定维判定(见 docstring)
+        if expected_dim is not None and arr.size != expected_dim:
+            continue
         if dim is None:
             dim = int(arr.size)
         elif arr.size != dim:

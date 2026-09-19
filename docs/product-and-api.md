@@ -157,10 +157,14 @@ Automatically derived conversation titles are bounded summaries; the original qu
 Input reuses `ASK_QUESTION_MAX_CHARS=4000` and `CONVERSATION_TITLE_MAX_CHARS=200`; global identifiers
 and client request identifiers allow 200 characters. List pagination defaults to 50, capped at 100.
 `GLOBAL_ASK_CANDIDATE_LIMIT` defaults to 64 (minimum 1), bounding merged evidence across all notebooks
-without cutting the participant list. Selection rotates notebooks and sources in their local relevance order,
-deduplicating identical text across notebooks rather than comparing scores across retrieval lanes.
-Model context reserves an equal character share per represented notebook before redistributing unused
-space; unknown model citation markers trigger the shared answer retry rather than retaining unbound claims.
+without cutting the participant list. Candidates must meet `GLOBAL_ASK_MIN_RELEVANCE` (default 0.25,
+range 0–1) and `GLOBAL_ASK_RELATIVE_RELEVANCE` times their notebook's best score (default 0.6,
+range 0–1). Each notebook with qualified evidence reserves one distinct passage; remaining slots follow
+local reciprocal rank weighted by confidence relative to that notebook's best score. Identical text is
+deduplicated across notebooks. Raw scores from different retrieval lanes are not compared for global rank.
+Model context first admits each notebook's best passage if these fit together; otherwise each notebook
+may reserve one whole passage within its equal character share before unused space is redistributed.
+Unknown model citation markers trigger the shared answer retry rather than retaining unbound claims.
 `GLOBAL_ASK_HISTORY_TURNS` defaults to 10 (minimum 0), controlling completed prior turns.
 `GLOBAL_ASK_MAX_NOTEBOOKS` defaults to 32 (minimum 1): a larger resolved scope is rejected with a request to
 select fewer notebooks, never silently truncated. `GLOBAL_ASK_MAX_CONCURRENT` defaults to 4 (minimum 1)
@@ -175,17 +179,24 @@ Native ANN calls cannot be forcibly
 interrupted; overdue results are discarded before hydration/synthesis. Shared query rewriting and one query
 embedding run before this phase under existing model-service timeouts; these are not whole-answer deadlines.
 Global retrieval never cold-loads shared scale indexes, ANN handles, deltas or whole-library vector matrices.
-It uses already-warm ANN only when the frozen source scope covers its source catalog; otherwise bounded
-lexical recall plus candidate-only vector scoring is disclosed in `degraded_notebook_ids`, including its
-cross-language recall limitation. `skipped_notebooks` contains `{notebook_id, reason}` receipts in both jobs
+It uses already-warm ANN when the frozen source scope covers its source catalog. Small notebooks can also
+recall semantically by streaming stored vectors in bounded batches, retaining only top candidates and never
+populating the shared matrix cache. `GLOBAL_ASK_SMALL_NOTEBOOK_MAX_CHUNKS` defaults to 20000
+(minimum 0; 0 disables this arm); a positive `CHUNK_BRUTEFORCE_MAX_CHUNKS` further lowers this ceiling,
+while 0 never permits an unbounded scan. Source filtering precedes scoring and reads share the notebook deadline.
+Where semantic recall is unavailable, bounded lexical recall plus candidate-only vector scoring is disclosed
+in `degraded_notebook_ids`, including its cross-language limitation. `skipped_notebooks` contains
+`{notebook_id, reason}` receipts in both jobs
 and answers; MCP exposes both lists in `coverage`. Model original-text projection reuses
 `CHUNK_ANSWER_BUDGET_CHARS` rather than introducing a second truncation setting. Oversized chunks are
 omitted whole, so evidence budgets do not promise a citation or context slot for every notebook.
 
 The four global MCP tools do not require `select_notebook`. `ask_global`, `get_global_ask` and
 `cancel_global_ask` require both `ask:execute` and `knowledge:read`; `get_global_cited_element` requires
-`knowledge:read`. `get_global_ask` exposes `next_answer_offset` and `next_citation_offset` for independent
-answer and citation pagination. Citation metadata can be visibly compressed under the shared MCP budget;
+`knowledge:read`. `get_global_ask` exposes `next_answer_offset`, `next_citation_offset` and
+`next_coverage_offset` for independent answer, citation and coverage pagination. Coverage retains complete
+counts; skipped/degraded notebook lists continue together using `coverage_offset`.
+Citation metadata can be visibly compressed under the shared MCP budget;
 the original-element reader exposes `next_offset` for complete text. Answer pages, identifiers and
 continuation cursors must not be silently truncated. Results include `/ask?conversation_id=...`.
 `list_notebooks` accepts `offset`/`query` and returns `total`/`next_offset`; discovery searches the complete

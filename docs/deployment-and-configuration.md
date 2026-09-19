@@ -854,7 +854,10 @@ Global Ask uses `GLOBAL_ASK_CANDIDATE_LIMIT` for merged cross-notebook evidence 
 `GLOBAL_ASK_MAX_NOTEBOOKS`, `GLOBAL_ASK_MAX_CONCURRENT`, `GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS`,
 `GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS` and `GLOBAL_ASK_SHUTDOWN_TIMEOUT_SECONDS` control explicit
 scope admission, process capacity and retrieval/shutdown budgets. Size the PostgreSQL pool with the global
-Ask concurrency included. Cold ANN uses disclosed lexical fallback instead of evicting warm shared indexes.
+Ask concurrency included. `GLOBAL_ASK_SMALL_NOTEBOOK_MAX_CHUNKS` bounds transient streamed semantic
+recall for small notebooks without evicting warm shared indexes. `GLOBAL_ASK_MIN_RELEVANCE` and
+`GLOBAL_ASK_RELATIVE_RELEVANCE` filter weak candidates before reserving peer evidence; tune them against
+representative questions. Libraries without semantic recall use disclosed lexical fallback.
 Model context shares
 `CHUNK_ANSWER_BUDGET_CHARS`; no separate model endpoint is needed (`query_rewrite`
 and `ask_answer` use the existing model-service configuration). Exact defaults and

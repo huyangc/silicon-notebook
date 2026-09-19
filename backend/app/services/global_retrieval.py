@@ -1,5 +1,7 @@
 """Bounded cross-notebook recall, isolated from whole-library cold loaders."""
 from dataclasses import dataclass, field
+import heapq
+import math
 import time
 
 from app.repositories.read_budget import (
@@ -10,7 +12,12 @@ from app.services.cancellation import AskCancelled
 from app.services.retrieval import score_chunks
 from app.services.retrieval_run import current_retrieval_run
 from app.services.source_scope import scoped_allowed_source_ids
-from app.services.vector_index import build_matrix, query_sims
+from app.services.vector_index import build_matrix, query_sims, resolve_runtime_dim
+
+
+# Allocation/pagination granularity only; all eligible rows are visited and
+# result selection remains governed by the public candidate and library rails.
+_GLOBAL_VECTOR_PAGE_SIZE = 256
 
 
 class GlobalRetrievalSkipped(RuntimeError):
@@ -82,6 +89,10 @@ def _retrieve(candidates, notebook_id, query, budget):
             budget.check()
             candidate_ids.extend(labels[int(label)] for label in labs[0])
             semantic = True
+    if not semantic and vector is not None:
+        candidate_ids, semantic = _small_notebook_candidates(
+            candidates, notebook_id, vector, allowed, recall, budget,
+        )
     # Bound lexical candidates at the SQL producer, including on cold/small
     # notebooks. Neither whole-table text reads nor shared matrices are used.
     try:
@@ -136,7 +147,9 @@ def _retrieve(candidates, notebook_id, query, budget):
     chunks = [chunk for chunk in chunks if not conflicts.intersection(chunk["element_ids"])]
     kept_ids = {chunk["chunk_id"] for chunk in chunks}
     ids, matrix = build_matrix(
-        (row["vid"], row["vector"]) for row in vrows if row["vid"] in kept_ids
+        ((row["vid"], row["vector"]) for row in vrows if row["vid"] in kept_ids),
+        runtime_dim=resolve_runtime_dim(candidates.settings),
+        expected_dim=len(vector) if vector is not None else None,
     )
     budget.check()
     if allowed is not None:
@@ -151,3 +164,71 @@ def _retrieve(candidates, notebook_id, query, budget):
     return GlobalRetrievalResult(scored, ids, matrix, not semantic, {
         element: fingerprints[element] for element in selected_elements
     })
+
+
+def _small_notebook_candidates(candidates, notebook_id, vector, allowed, recall, budget):
+    """Score temporary vector pages while retaining only the bounded top K."""
+    maximum = candidates.settings.global_ask_small_notebook_max_chunks
+    brute_guard = candidates.settings.chunk_bruteforce_max_chunks
+    if brute_guard > 0:
+        maximum = min(maximum, brute_guard)
+    if maximum <= 0:
+        return [], False
+    heap = []
+    after = ""
+    examined = 0
+    semantic = False
+    while examined < maximum:
+        budget.check()
+        page_size = min(_GLOBAL_VECTOR_PAGE_SIZE, maximum - examined)
+        with candidates._connect() as db:
+            admitted, rows = candidates.embeddings.global_small_chunk_vector_page(
+                db, notebook_id, allowed_source_ids=allowed, max_chunks=maximum,
+                after=after, page_size=page_size,
+            )
+        budget.check()
+        if not admitted:
+            # A library may have grown since the preceding page. Discard its
+            # partial semantic pool; it remains eligible for bounded FTS.
+            return [], False
+        if not rows:
+            break
+
+        def checked_rows():
+            for row in rows:
+                budget.check()
+                yield row["vid"], row["vector"]
+
+        ids, matrix = build_matrix(
+            checked_rows(), runtime_dim=resolve_runtime_dim(candidates.settings),
+            expected_dim=len(vector),
+        )
+        budget.check()
+        for chunk_id, score in query_sims(vector, ids, matrix).items():
+            if not math.isfinite(score):
+                continue
+            semantic = True
+            entry = (score, chunk_id)
+            if len(heap) < recall:
+                heapq.heappush(heap, entry)
+            elif entry > heap[0]:
+                heapq.heapreplace(heap, entry)
+        budget.check()
+        examined += len(rows)
+        after = max(row["vid"] for row in rows)
+        if len(rows) < page_size:
+            break
+    if examined >= maximum:
+        # Concurrent deletion/insertion can keep physical size under the rail
+        # while moving new rows beyond our cursor. Reaching the work cap must
+        # not silently turn a prefix into a completed semantic scan.
+        budget.check()
+        with candidates._connect() as db:
+            admitted, remaining = candidates.embeddings.global_small_chunk_vector_page(
+                db, notebook_id, allowed_source_ids=allowed, max_chunks=maximum,
+                after=after, page_size=1,
+            )
+        budget.check()
+        if not admitted or remaining:
+            return [], False
+    return [chunk_id for _, chunk_id in sorted(heap, reverse=True)], semantic

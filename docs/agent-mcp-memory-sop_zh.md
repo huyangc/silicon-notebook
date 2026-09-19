@@ -267,6 +267,8 @@ claude mcp list
 限定范围时先分页调用 `list_notebooks`，再传
 `notebook_scope={"mode":"include","notebook_ids":[...]}`；空列表恢复全部。
 用返回的 `job_id` 调用 `get_global_ask` 查看状态和结果，长答案和引用按返回的分页信息继续读取。
+检索回执通过 `next_coverage_offset` 作为 `coverage_offset` 继续读取，直到取完未检索/降级
+库列表；回执数量始终描述整次任务。
 调用 `cancel_global_ask` 明确停止任务，`get_global_cited_element` 读取实际引用原文。
 `conversation_id` 可以接续网页端同一用户的全局会话，但历史和结果仍受当前 token 权限约束。
 第一版检索可见导入来源的原文，不把隐藏的 Memory/Knowhow 投影或 candidate 当作全局证据。

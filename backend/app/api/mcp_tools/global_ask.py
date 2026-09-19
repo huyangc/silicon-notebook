@@ -75,17 +75,24 @@ def _citation_keys(rows: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
     return [tuple(row.get(key) for key in ("notebook_id", "source_id", "element_id")) for row in rows]
 
 
-def _job_page(job: Any, answer_offset: int = 0, citation_offset: int = 0) -> dict[str, Any]:
-    """Keep text pages exact and never advance past an omitted reference."""
+def _job_page(job: Any, answer_offset: int = 0, citation_offset: int = 0,
+              coverage_offset: int = 0) -> dict[str, Any]:
+    """Keep independent text, citation and coverage pages exact and resumable."""
     data = _plain(job)
     response = data.get("response") or {}
     answer = response.get("answer", "")
     citations = response.get("citations", [])
+    skipped = data.get("skipped_notebooks", [])
+    degraded = data.get("degraded_notebook_ids", [])
+    coverage_total = max(len(skipped), len(degraded))
     answer_count = TEXT_LIMIT
     citation_count = min(RESULT_LIMIT, len(citations) - min(citation_offset, len(citations)))
+    coverage_count = min(RESULT_LIMIT, coverage_total - min(coverage_offset, coverage_total))
     while True:
         text = answer[answer_offset:answer_offset + answer_count]
         refs = citations[citation_offset:citation_offset + citation_count]
+        skipped_page = skipped[coverage_offset:coverage_offset + coverage_count]
+        degraded_page = degraded[coverage_offset:coverage_offset + coverage_count]
         payload = {
             "job_id": data["job_id"], "conversation_id": data["conversation_id"],
             "status": data["status"], "answer_id": response.get("answer_id", ""),
@@ -94,13 +101,17 @@ def _job_page(job: Any, answer_offset: int = 0, citation_offset: int = 0) -> dic
             "citations": refs, "citation_offset": citation_offset,
             "next_citation_offset": citation_offset + len(refs) if citation_offset + len(refs) < len(citations) else None,
             "total_citations": len(citations), "grounded": response.get("grounded", False),
+            "coverage_offset": coverage_offset,
+            "next_coverage_offset": (coverage_offset + coverage_count
+                                     if coverage_offset + coverage_count < coverage_total else None),
             "scope_mode": (data.get("notebook_scope") or {}).get("mode", "all"),
             "coverage": {
                 "resolved": len(data.get("resolved_notebook_ids", [])),
                 "searched": len(data.get("searched_notebook_ids", [])),
                 "cited": len(data.get("cited_notebook_ids", [])),
-                "skipped_notebooks": data.get("skipped_notebooks", []),
-                "degraded_notebook_ids": data.get("degraded_notebook_ids", []),
+                "skipped": len(skipped), "degraded": len(degraded),
+                "skipped_notebooks": skipped_page,
+                "degraded_notebook_ids": degraded_page,
             },
             "error": data.get("error", ""),
             "completeness_notice": response.get("completeness_notice", ""),
@@ -112,12 +123,15 @@ def _job_page(job: Any, answer_offset: int = 0, citation_offset: int = 0) -> dic
             packed.get("answer") == text
             and _citation_keys(packed.get("citations", [])) == _citation_keys(refs)
             and all(packed.get(key) == payload[key] for key in (
-                "job_id", "conversation_id", "answer_id", "next_answer_offset", "next_citation_offset", "coverage"
+                "job_id", "conversation_id", "status", "answer_id", "next_answer_offset",
+                "next_citation_offset", "coverage_offset", "next_coverage_offset", "coverage"
             ))
         ):
             return packed
         if citation_count > 1:
             citation_count //= 2
+        elif coverage_count > 1:
+            coverage_count //= 2
         elif answer_count > 1:
             answer_count //= 2
         else:
@@ -129,7 +143,8 @@ def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[],
         "Ask across all currently authorized notebooks, or an explicit include scope. "
         "No select_notebook needed. Omitted scope inherits a continued conversation; "
         "new conversations and empty include lists default to all. Returns a background "
-        "job; poll get_global_ask. Use client_request_id for safe submission retries. "
+        "job; poll get_global_ask and follow next_coverage_offset for all coverage receipts. "
+        "Use client_request_id for safe submission retries. "
         "Requires ask:execute and knowledge:read. Searches document evidence only."
     ))
     @_safe_errors
@@ -169,15 +184,18 @@ def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[],
 
     @server.tool(description=(
         "Read a global Ask job without notebook selection. Poll status; for complete "
-        "answer text and citations follow next_answer_offset and next_citation_offset "
-        "until null. Each call rechecks token and historical scope authorization. "
+        "answer text, citations and coverage receipts, follow next_answer_offset, "
+        "next_citation_offset and next_coverage_offset independently until null. "
+        "Coverage counts remain totals; its skipped and degraded lists share coverage_offset. "
+        "Each call rechecks token and historical scope authorization. "
         "Requires ask:execute and knowledge:read."
     ))
     @_safe_errors
     async def get_global_ask(
         job_id: str, ctx: Context, answer_offset: int = 0, citation_offset: int = 0,
+        coverage_offset: int = 0,
     ) -> dict[str, Any]:
-        _offsets(answer_offset, citation_offset)
+        _offsets(answer_offset, citation_offset, coverage_offset)
         repo = repository_provider()
 
         def load() -> Any:
@@ -189,10 +207,11 @@ def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[],
                 )
 
         job = await _run_with_progress(ctx, load, label="get_global_ask")
-        return _job_page(job, answer_offset, citation_offset)
+        return _job_page(job, answer_offset, citation_offset, coverage_offset)
 
     @server.tool(description=(
         "Request cancellation of an owned global Ask job. No notebook selection needed. "
+        "Follow next_coverage_offset with get_global_ask for all coverage receipts. "
         "Requires ask:execute and knowledge:read, plus live access to its frozen scope."
     ))
     @_safe_errors

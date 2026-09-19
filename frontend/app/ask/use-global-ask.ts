@@ -218,9 +218,12 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     }
   }
 
-  function newConversation() {
-    if (flight.current) return;
+  function resetConversation() {
     ++owner.current;
+    flight.current = false;
+    currentId.current = "";
+    setSubmitting(false);
+    setStopping(false);
     // Explicitly starting over ends the old draft's idempotent retry identity.
     retryRequest.current = null;
     setConversationId("");
@@ -234,6 +237,11 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     setOpening(false);
     setOpenFailed(false);
     updateUrl("");
+  }
+
+  function newConversation() {
+    if (flight.current) return;
+    resetConversation();
   }
 
   async function loadMoreHistory() {
@@ -318,8 +326,10 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     } catch (cause) {
       if (mounted.current && ticket === owner.current) setError(toUserMessage(cause, "提交失败，请重试；重复提交不会创建重复任务"));
     } finally {
-      flight.current = false;
-      if (mounted.current && ticket === owner.current) setSubmitting(false);
+      if (ticket === owner.current) {
+        flight.current = false;
+        if (mounted.current) setSubmitting(false);
+      }
     }
   }
 
@@ -337,8 +347,10 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     } catch (cause) {
       if (mounted.current && ticket === owner.current) setError(toUserMessage(cause, "停止失败，请重试"));
     } finally {
-      flight.current = false;
-      if (mounted.current && ticket === owner.current) setStopping(false);
+      if (ticket === owner.current) {
+        flight.current = false;
+        if (mounted.current) setStopping(false);
+      }
     }
   }
 
@@ -350,7 +362,9 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     ++historyVersion.current;
     setConversations((items) => items.filter((item) => item.id !== id));
     setHistoryOffset((offset) => Math.max(0, offset - 1));
-    if (currentId.current === id) newConversation();
+    // Deletion can finish while a submit or cancel is pending. Retire that owner
+    // unconditionally so its late response cannot restore the deleted conversation.
+    if (currentId.current === id) resetConversation();
   }
 
   return {

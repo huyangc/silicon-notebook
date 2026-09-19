@@ -27,6 +27,35 @@ def test_duplicate_text_does_not_consume_other_library_unique_slot():
     assert [hit.text for hit in selected] == ["same", "different"]
 
 
+def test_focused_question_does_not_reserve_slots_for_noise_libraries():
+    strong = [replace(chunk(f"a-{i}", text=f"relevant {i}", notebook_id="a"), relevance=0.9 - i * 0.01)
+              for i in range(12)]
+    noise = [[replace(chunk(f"n-{i}", text=f"weak {i}", notebook_id=f"noise-{i}"), relevance=0.13)]
+             for i in range(31)]
+    selected = peer_evidence([strong, *noise], 12, min_relevance=0.25, relative_relevance=0.6)
+    assert selected == strong
+
+
+def test_library_reservation_keeps_relevant_minority_but_not_its_weak_tail():
+    strong = [replace(chunk(f"a-{i}", text=f"strong {i}", notebook_id="a"), relevance=0.9)
+              for i in range(10)]
+    minority = [replace(chunk("b", text="minority", notebook_id="b"), relevance=0.5),
+                replace(chunk("weak", text="weak tail", notebook_id="b"), relevance=0.26)]
+    selected = peer_evidence([strong, minority], 6, min_relevance=0.25, relative_relevance=0.6)
+    assert selected[:2] == [strong[0], minority[0]]
+    assert sum(hit.notebook_id == "a" for hit in selected) == 5
+    assert minority[1] not in selected
+
+
+def test_remaining_capacity_prefers_local_confidence_over_equal_turns():
+    sustained = [replace(chunk(f"a-{i}", text=f"sustained {i}", notebook_id="a"), relevance=0.9)
+                 for i in range(3)]
+    falling = [replace(chunk("b0", text="b best", notebook_id="b"), relevance=0.9),
+               replace(chunk("b1", text="b tail", notebook_id="b"), relevance=0.4)]
+    selected = peer_evidence([sustained, falling], 4, min_relevance=0.25, relative_relevance=0.4)
+    assert selected == [sustained[0], falling[0], sustained[1], sustained[2]]
+
+
 def test_context_reserves_other_library_before_admitting_near_budget_chunk():
     run = synthesis(RecordingModels(), budget=1000)
     large = chunk("large", text="x" * 700, notebook_id="a")
@@ -36,6 +65,21 @@ def test_context_reserves_other_library_before_admitting_near_budget_chunk():
     assert {row["notebook_id"] for row in identities.values()} == {"a", "b"}
     assert "a support" in context and "b support" in context
     assert len(context) <= 1000
+
+
+def test_context_does_not_replace_a_fitting_best_passage_with_a_weaker_tail():
+    run = synthesis(RecordingModels(), budget=1000)
+    best = chunk("a-best", text="a" * 500, notebook_id="a")
+    tail = chunk("a-tail", text="t" * 300, notebook_id="a")
+    other = chunk("b", text="b" * 100, notebook_id="b")
+    _, refs = run._context([best, other, tail], {})
+    assert {row["object_id"] for row in refs.values()} == {best.chunk_id, other.chunk_id}
+
+
+def test_exact_dedup_preserves_semantically_different_code_indentation():
+    a = chunk("a", text="if enabled:\n    run()\nfinish()", notebook_id="a")
+    b = chunk("b", text="if enabled:\n    run()\n    finish()", notebook_id="b")
+    assert peer_evidence([[a], [b]], 2) == [a, b]
 
 
 def test_shared_answer_retry_recovers_empty_model_response():

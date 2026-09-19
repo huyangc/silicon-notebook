@@ -804,13 +804,14 @@ class SourceStore:
         return result
 
     def global_candidate_evidence(self, db, chunk_ids: Sequence[str]) -> dict[str, dict]:
-        """Read model text and its element identities in one SQL snapshot."""
+        """Read chunk text and element hashes in one snapshot; keep element bodies in PostgreSQL."""
         ids = list(dict.fromkeys(chunk_ids))
         if not ids:
             return {}
         rows = db.execute(
             "SELECT c.id,c.source_id,c.text,c.section_path,c.element_ids,s.title AS source_title, "
-            "e.id AS evidence_id,e.source_id AS evidence_source_id,e.text AS evidence_text "
+            "e.id AS evidence_id,e.source_id AS evidence_source_id, "
+            "encode(sha256(convert_to(e.text,'UTF8')),'hex') AS evidence_hash "
             "FROM chunks c JOIN sources s ON s.id=c.source_id "
             "LEFT JOIN LATERAL jsonb_array_elements_text(c.element_ids::jsonb) declared(element_id) ON TRUE "
             "LEFT JOIN source_elements e ON e.id=declared.element_id "
@@ -827,11 +828,12 @@ class SourceStore:
             })
             if row["evidence_id"] is not None:
                 item["element_fingerprints"][row["evidence_id"]] = (
-                    row["evidence_source_id"], hashlib.sha256(row["evidence_text"].encode()).hexdigest(),
+                    row["evidence_source_id"], row["evidence_hash"],
                 )
         return result
 
     def evidence_fingerprints(self, element_ids: Sequence[str]) -> dict[str, tuple[str, str]]:
+        """Validate original identities without transferring element bodies."""
         ids = list(dict.fromkeys(element_id for element_id in element_ids if element_id))
         if not ids:
             return {}
@@ -840,11 +842,12 @@ class SourceStore:
             for offset in range(0, len(ids), self.IN_CHUNK):
                 batch = ids[offset:offset + self.IN_CHUNK]
                 rows = connection.execute(
-                    "SELECT id,source_id,text FROM source_elements "
+                    "SELECT id,source_id,encode(sha256(convert_to(text,'UTF8')),'hex') AS evidence_hash "
+                    "FROM source_elements "
                     f"WHERE id IN ({placeholders(batch)})", batch,
                 ).fetchall()
                 for row in rows:
-                    result[row["id"]] = (row["source_id"], hashlib.sha256(row["text"].encode()).hexdigest())
+                    result[row["id"]] = (row["source_id"], row["evidence_hash"])
         return result
 
     def image_asset_rows(
