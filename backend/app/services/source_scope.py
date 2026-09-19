@@ -543,6 +543,35 @@ def peer_scope_ceiling_active() -> bool:
     return bool(scope and scope.peer_ceiling_active)
 
 
+def citation_active_id(notebook_id: str) -> str:
+    """The id every citation producer must normalise its origin AGAINST.
+
+    ``domain.citation_origin.foreign_notebook_id(origin, active)`` blanks an
+    origin that equals ``active``, because the frontend resolves a non-empty id
+    through a library-name map that includes the active notebook -- echoing it
+    back badges the user's own notes 「来自「当前笔记本自己的名字」」.  That rule
+    needs a notion of "the current library", and in PEER mode there is none: the
+    nominal active is ``ParticipantOverride.notebook_ids[0]``, a naming anchor
+    the user never singled out, and the interface has to say which of the
+    selected libraries each citation came from -- including that one.
+
+    So this returns ``""`` there, and ``foreign_notebook_id(x, "")`` passes any
+    non-empty ``x`` through unchanged (its own first branch still blanks a
+    missing origin), which is exactly what the pre-unification
+    ``global_ask_synthesis`` achieved by hard-coding ``""`` at its single
+    anchor site.  Making it a shared rule is what lets the SEVEN producers that
+    build cross-library citations share one answer instead of each deciding.
+
+    Reads ``peer_scope_ceiling_active()`` rather than the participant override:
+    the citation/prompt side is not on the override's reader whitelist and must
+    not become an eighth way to learn which libraries a run may search.  "Does
+    every participant carry a frozen ceiling of its own" is a strictly weaker
+    question that cannot replace any set, and the one manager that installs a
+    global run installs both facts together, so the two can never disagree.
+    """
+    return "" if peer_scope_ceiling_active() else notebook_id
+
+
 def base_scope_restricted() -> bool:
     """CHANNEL question, LIBRARY dimension: did this run really shrink the
     mounted-reference-library selection?

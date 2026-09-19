@@ -60,6 +60,12 @@ _READER_WHITELIST = frozenset({
     # 谓词,由 ``test_evidence_context_authorization_site_keeps_mount_predicate``
     # 反向钉住。
     "app/services/evidence_context.py",
+    # 对等模式的三件套分叉(D0-4):保底份额恒 0、每条腿都是 peer(打标 / 天花板
+    # 下推 / peek-only / 关补召回)、跨库合并阈值换成全局栏杆。它同时是覆盖预检
+    # ``assert_override_matches_run()`` 的落点:``_bounded_participants`` 是每个
+    # 联邦消费方读参与集的唯一入口,跑在父线程、不在任何 ``try`` 里,所以那一处
+    # 刻意**不**登记进下面的 ``_SEAT_FAILSOFT_SITES``。
+    "app/services/chunk_federation.py",
 })
 _WRITER_WHITELIST = frozenset({
     "app/services/global_ask.py",
@@ -70,11 +76,8 @@ _IMPORT_WHITELIST = _READER_WHITELIST | _WRITER_WHITELIST
 # 不再 import 的模块意味着接线被悄悄回退(例如 ``collection_catalog`` 改回直调
 # ``participant_ids``),而 ⊆ 断言对回退是沉默的。
 #
-# 今天是 6 个读者(D0-3 加入 ``evidence_context``)。已知的未来读者:
-# ``app/services/chunk_federation.py``。PR-D0 的 D0-4 要在任务体里按
-# ``federated_ask_active()`` 切 ``read_budget`` 与 ``peer_evidence`` 阈值,届时
-# 它要同时进 ``_READER_WHITELIST`` 与这里——本任务它不 import,所以两个集合都
-# 不含它。
+# 今天是 7 个读者(D0-3 加入 ``evidence_context``,D0-4 加入
+# ``chunk_federation``)。
 _EXPECTED_IMPORTERS = frozenset(_READER_WHITELIST)
 
 # 被守的**名字**面 = 模块 ``__all__`` 去掉异常类型。异常刻意不守:它的规范定义
@@ -367,7 +370,7 @@ def test_writer_detection_sees_through_an_import_alias():
     """别名分支自己也要有用例,否则它是一条永不触发的死守卫。
 
     三个合成源:限定调用、别名调用、以及一个**只读**覆盖的对照臂——最后一个
-    绝不能被算成写入方,否则守卫会把五个合法读者全判成越权。
+    绝不能被算成写入方,否则守卫会把七个合法读者全判成越权。
     """
     installers = _override_installers({
         "app/x/qualified.py":

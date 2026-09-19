@@ -296,6 +296,15 @@ def _answer_section_directive(
 
 
 def _answer_authority_rules(peer_notebooks: bool) -> str:
+    """Rules 5-6: how the model weighs evidence from different libraries.
+
+    With ``peer_notebooks=True`` the ``[base]``/``[personal]`` TIER IS NOT AN
+    AUTHORITY ORDER at all -- the rules below say so in those words, and it is
+    kept on the citation only so the reference card can show which kind of
+    library a passage came from.  A peer-mode run has no current notebook, so
+    "defer to the base reference" has nothing to defer to: the libraries were
+    selected one by one for this question and rank equally by construction.
+    """
     if peer_notebooks:
         return (
             "5. These notebooks are peer sources, with no automatic authority based on "

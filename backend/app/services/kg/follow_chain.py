@@ -28,6 +28,9 @@ from app.services.kg.edge_schema import (
     TRANSITIVE_EDGE_TYPES as REGISTERED_TRANSITIVE_EDGE_TYPES,
     is_valid_edge_pair,
 )
+# ``source_scope`` is a zero-``app``-import leaf, so this keeps the renderer as
+# import-light as ``citation_origin`` does and adds no cycle.
+from app.services.source_scope import citation_active_id
 
 # Only relations with a well-understood transitive interpretation are enabled
 # in v1.  The tuple shape leaves room for safe mixed-type composition rules in
@@ -543,7 +546,15 @@ def render_follow_chain_context(
     笔记本自己」" badge on ordinary, non-federated follow-chain evidence (the
     same failure mode ``evidence_context.py``'s ``chunk_context``/
     ``knowledge_context`` avoid via their ``raw_origin``/``origin`` split).
+
+    In PEER mode (``source_scope.citation_active_id``) there is no current
+    notebook at all, so that id resolves to ``""`` and every hop keeps its real
+    owner -- the frontend must be able to badge each selected library by name,
+    the nominal active included.  Normalised once, on entry, because citation
+    origin is this parameter's ONLY use in this renderer: it never reaches a
+    query, a scope or an authorization test.
     """
+    active_notebook_id = citation_active_id(active_notebook_id)
     if not inferences:
         return "(none)", {}
 

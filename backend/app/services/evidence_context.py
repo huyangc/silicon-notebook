@@ -33,7 +33,7 @@ from app.services.retrieval_participants import resolve_retrieval_participant_id
 from app.services.citation_markers import MARKER_RE, marker_keys
 from app.services.source_display import source_display_title
 from app.services.source_element_selection import deduplicate_source_chunks_in_order
-from app.services.source_scope import notebook_in_scope
+from app.services.source_scope import citation_active_id, notebook_in_scope
 
 
 def _fold(value: object) -> str:
@@ -393,7 +393,9 @@ class EvidenceContextService:
                         "file_name", ""
                     ),
                     tier=str(getattr(item, "tier", "personal") or "personal"),
-                    notebook_id=foreign_notebook_id(origin, active_notebook_id),
+                    notebook_id=foreign_notebook_id(
+                        origin, citation_active_id(active_notebook_id),
+                    ),
                     knowhow=None,
                 )
                 continue
@@ -444,7 +446,13 @@ class EvidenceContextService:
                 quoted_span=quoted[:300],
                 source_file_name=item_source_info.get("file_name", ""),
                 tier=str(getattr(item, "tier", "personal") or "personal"),
-                notebook_id=foreign_notebook_id(origin, active_notebook_id),
+                # ``citation_active_id`` and NOT ``active_notebook_id``: the id
+                # above is this function's authorization anchor (it keys the
+                # mount predicate and ``expected_notebook_id``), which peer mode
+                # must not touch; only the display normalisation changes.
+                notebook_id=foreign_notebook_id(
+                    origin, citation_active_id(active_notebook_id),
+                ),
                 knowhow=_knowhow_ref(evidence_row) if evidence_row else None,
             )
         return citations
@@ -513,7 +521,8 @@ class EvidenceContextService:
             # 徽章。规则的唯一定义在 domain/citation_origin.py。
             origin = (getattr(chunk, "notebook_id", "") or "") or notebook_id
             raw_origin = foreign_notebook_id(
-                getattr(chunk, "notebook_id", ""), notebook_id
+                getattr(chunk, "notebook_id", ""),
+                citation_active_id(notebook_id),
             )
             element_ids = getattr(chunk, "element_ids", None) or []
             evidence_by_id[key] = {
@@ -886,7 +895,8 @@ class EvidenceContextService:
                 # 此前的错误假设)。规则的唯一定义在 domain/citation_origin.py。
                 origin = (getattr(hit, "notebook_id", "") or "") or notebook_id
                 raw_origin = foreign_notebook_id(
-                    getattr(hit, "notebook_id", ""), notebook_id
+                    getattr(hit, "notebook_id", ""),
+                    citation_active_id(notebook_id),
                 )
                 if not notebook_in_scope(origin):
                     # 参考库勾选闸,落在**装配点**而不是下面的 node_context 读上。
@@ -1355,7 +1365,8 @@ class EvidenceContextService:
             # `if (references.length > 0) return references;` 之后的 citations
             # 兜底分支)。归一化每命中一次,下面的 Citation 直接用这个已归一的值。
             hit_notebook_id = foreign_notebook_id(
-                getattr(hit, "notebook_id", ""), notebook_id
+                getattr(hit, "notebook_id", ""),
+                citation_active_id(notebook_id),
             )
             for evidence in hit.evidence:
                 if evidence.element_id and evidence.element_id not in valid_element_ids:
@@ -1503,9 +1514,14 @@ class EvidenceContextService:
                 source_id=c.source_id, element_id=eid,
                 location_label=c.section_path, quoted_span=c.text[:200],
                 source_file_name=source_info.get("file_name", ""),
+                # The tier lookup keeps the ``or notebook_id`` fallback: it
+                # asks WHICH LIBRARY this chunk lives in, and peer-mode
+                # stamping makes that branch unreachable rather than wrong.
+                # Only the display normalisation switches to the peer rule.
                 tier=chunk_tier_map.get(
                     c.notebook_id or notebook_id, "personal"),
-                notebook_id=foreign_notebook_id(c.notebook_id, notebook_id),
+                notebook_id=foreign_notebook_id(
+                    c.notebook_id, citation_active_id(notebook_id)),
                 knowhow=knowhow_refs.get(eid)), tuple(c.element_ids)))
         return pairs
 
