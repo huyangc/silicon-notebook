@@ -1,6 +1,6 @@
 """Bounded global admission and request-level authority/query behavior."""
 from contextlib import contextmanager
-from threading import Event, Thread
+from threading import Barrier, Event, Thread
 import time
 
 import pytest
@@ -93,6 +93,42 @@ def test_admission_bounds_new_conversations_and_preserves_idempotent_retry(setup
         release.set()
     finished(service, job)
     assert finished(service, service.start(GlobalAskRequest(question="after release"), user_id="u")).status == "done"
+
+
+def test_concurrent_request_id_reuse_with_different_payload_returns_conflict(setup, monkeypatch):
+    service, _, _, _ = setup
+    checked = Barrier(2)
+    request_job = service.store.request_job
+
+    def simultaneous_initial_lookup(user_id, request_id):
+        previous = request_job(user_id, request_id)
+        if previous is None:
+            checked.wait(timeout=5)
+        return previous
+
+    monkeypatch.setattr(service.store, "request_job", simultaneous_initial_lookup)
+    jobs, errors = [], []
+
+    def submit(question):
+        try:
+            jobs.append(service.start(
+                GlobalAskRequest(question=question, client_request_id="shared-request"), user_id="u",
+            ))
+        except Exception as error:
+            errors.append(error)
+
+    submitters = [Thread(target=submit, args=(question,)) for question in ("first question", "different question")]
+    for submitter in submitters:
+        submitter.start()
+    for submitter in submitters:
+        submitter.join(10)
+    assert all(not submitter.is_alive() for submitter in submitters)
+    assert len(jobs) == len(errors) == 1
+    assert isinstance(errors[0], GlobalAskError)
+    assert errors[0].status_code == 409
+    assert errors[0].message == "请求标识已用于其他问题，请重新提交。"
+    assert finished(service, jobs[0]).status == "done"
+    assert len(service.list_conversations(user_id="u")) == 1
 
 
 def test_slow_scope_preparation_does_not_block_cancellation(setup):

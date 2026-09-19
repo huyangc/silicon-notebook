@@ -137,3 +137,27 @@ def test_total_retrieval_budget_discloses_unsearched_remaining_notebooks(setup, 
     assert result.searched_notebook_ids == []
     assert [row.notebook_id for row in result.skipped_notebooks] == ["a", "b"]
     assert "总检索时限" in result.skipped_notebooks[1].reason
+
+
+def test_polling_and_cancellation_retain_completed_notebook_progress(setup):
+    from app.services.global_retrieval import GlobalRetrievalSkipped
+    service, _, _, _ = setup
+    entered, release = Event(), Event()
+    def retrieve(nb, query):
+        if nb == "a":
+            raise GlobalRetrievalSkipped("timeout")
+        entered.set()
+        assert release.wait(5)
+        return [], [], None
+    service.retrieve = retrieve
+    request = service.start(GlobalAskRequest(question="progress"), user_id="u")
+    try:
+        assert entered.wait(5)
+        progress = service.get_job(request.job_id, user_id="u")
+        assert progress.status == "running"
+        assert [row.notebook_id for row in progress.skipped_notebooks] == ["a"]
+        stopped = service.cancel(request.job_id, user_id="u")
+        assert stopped.skipped_notebooks == progress.skipped_notebooks
+    finally:
+        release.set()
+    assert finished(service, request).status == "cancelled"

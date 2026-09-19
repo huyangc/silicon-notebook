@@ -506,6 +506,33 @@ test("page hides raw transport failures and preserves explicitly safe job guidan
   expect(screen.queryByText(diagnostic)).toBeNull();
 });
 
+test.each([false, true, undefined])("answer grounding notice follows the reliability value even with citations: %s", async (grounded) => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.detail.mockResolvedValue({
+    ...detail(),
+    turns: [{
+      ...job("done"), cited_notebook_ids: ["nb-0"],
+      response: {
+        answer_id: "answer-grounding", question: "共同问题是什么？", answer: "部分结论仍需要核实 [k1]。", grounded,
+        anchors: [{ key: "k1", object_id: "chunk-1", object_type: "chunk", label: "测试记录", notebook_id: "nb-0", source_id: "source-1", element_id: "element-1", source_title: "测试记录" }],
+        citations: [{ label: "测试记录", notebook_id: "nb-0", source_id: "source-1", element_id: "element-1", location_label: "第 2 页", quoted_span: "已有部分依据" }],
+        created_at: "2026-09-19T01:00:00Z", notebook_scope: { mode: "all" },
+        resolved_notebook_ids: ["nb-0", "nb-1"], searched_notebook_ids: ["nb-0", "nb-1"], cited_notebook_ids: ["nb-0"],
+        skipped_notebooks: [], completeness_notice: "回答仅使用本次命中的有限原文。",
+      },
+    }],
+  });
+  render(<GlobalAskPage />);
+  await screen.findByText("部分结论仍需要核实", { exact: false });
+  expect(screen.getByRole("button", { name: /材料研究.*测试记录/ })).toBeTruthy();
+  const warning = screen.queryByText("以下回答未得到原文充分支持，请结合引用核对。");
+  if (grounded === true) expect(warning).toBeNull();
+  else {
+    expect(warning).toHaveAttribute("role", "note");
+    expect(warning?.closest(".chat-assistant")).toBeTruthy();
+  }
+});
+
 test("pending clipboard work belongs to its conversation and cannot unlock a newer copy", async () => {
   const first = deferred<void>();
   const second = deferred<void>();

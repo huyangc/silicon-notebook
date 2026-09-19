@@ -122,6 +122,7 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                 <div className="global-turn-scope"><BookOpen size={12} />{job.notebook_scope.mode === "all" ? "全部笔记本" : "指定笔记本"} · {job.resolved_notebook_ids.length} 个</div>
                 {job.response ? <ChatAnswer answeredAt={job.response.created_at}>
                   <div className="global-answer-label"><span className="global-answer-mark">SN</span><strong>综合回答</strong><span>引用来自 {job.cited_notebook_ids.length} 个笔记本</span></div>
+                  {job.response.grounded !== true && <p className="global-answer-grounding" role="note">以下回答未得到原文充分支持，请结合引用核对。</p>}
                   <AnswerMarkdown answer={job.response.answer} anchors={job.response.anchors} citations={job.response.citations}
                     selectedReferenceId={selected?.jobId === job.job_id ? selected.reference.id : null}
                     onReferenceClick={(reference) => setSelected({ jobId: job.job_id, reference })} />
