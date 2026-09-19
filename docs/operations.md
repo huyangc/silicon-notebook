@@ -713,8 +713,16 @@ whole-notebook chunk count exceeds `CHUNK_BRUTEFORCE_MAX_CHUNKS` still uses boun
 fail-open fallback — that guard is a property of the library, not of the run's source scope. A
 report run against a small library keeps the bounded brute-force vector lane instead (chunk
 rows read for the allowed sources, the cached whole-notebook vector matrix masked down to those
-chunks before scoring), so `chunk_bruteforce_skipped` appearing on a small library is a signal
-to investigate, not the expected fallback. A frozen
+chunks before scoring), so `chunk_bruteforce_skipped(large_library_no_ann)` appearing on a
+small library is a signal to investigate, not the expected fallback. Read that event's
+`reason` before acting on it: the federated chunk lane borrows a resident index only for a
+large **reference** library, so when none is resident it degrades to bounded FTS and emits
+`chunk_bruteforce_skipped(peek_no_warm_ann)` instead — once per sub-query, for a library whose
+scale index may be perfectly healthy and simply not in the residency budget. Only
+`large_library_no_ann` means "build the scale index"; `peek_no_warm_ann` counts are driven by
+`SCALE_IDX_CACHE_MAX_LARGE` residency and by how many large reference libraries a notebook mounts,
+and are not by themselves a defect. `scripts/diag_slow.py` buckets the two reasons separately.
+A frozen
 all-selected source list also no longer pays the HNSW Python filter callback when the sidecar
 proves every indexed source code is allowed; any unknown or unallowed code keeps the
 filtered/scoped path.
@@ -728,7 +736,11 @@ the legacy aggregate as pure ANN: `site=chunk_scale_index` reports
 `candidate_ms` plus `scale_index_ms`, `kg_ann_ms`, and `kg_lexical_ms`. The retrieval-run
 summary reports `chunk_fts_timeouts` and `chunk_fts_circuit_skips`. These events also carry
 the compatible `stage`/`latency_ms` pair (`chunk_scale_index`, `chunk_ann`, `chunk_fts`, or
-`kg_candidates`), so both `diag.py slow` and `diag.py latency` aggregate them. After deploying, verify
+`kg_candidates`), so both `diag.py slow` and `diag.py latency` aggregate them. A
+`chunk_scale_index` event from the federated borrow-only lane additionally carries
+`lane=peek`: it timed one dictionary lookup rather than an index load, so `diag_slow.py`
+reports it as its own `chunk_scale_index(peek)` bucket instead of dragging the residency
+percentiles toward zero. After deploying, verify
 that scope-complete report ANN hits show `report_ann_only` and near-zero `chunk_fts_ms`;
 pending-fold sources show `report_delta_fallback`; FTS timeouts cost roughly
 the private deadline rather than 30 seconds; and readiness has preloaded every required scale

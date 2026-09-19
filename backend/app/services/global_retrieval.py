@@ -200,7 +200,7 @@ def _retrieve(candidates, notebook_id, query, budget):
         return GlobalRetrievalResult([], [], None, False)
     recall = candidates.settings.chunk_recall
     budget.check()
-    index = candidates.scale_runtime.catalog.peek_warm_chunk_index(notebook_id)
+    index = candidates._peek_warm_chunk_index(notebook_id)
     run = current_retrieval_run()
     vector = run.peek_embedding(query[:candidates.settings.embed_truncate_chars]) if run else None
     budget.check()

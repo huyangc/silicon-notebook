@@ -97,6 +97,44 @@ def test_event_report_aggregates_retrieval_leaf_stages(tmp_path, capsys):
         assert stage in output
 
 
+def test_event_report_separates_the_borrowed_index_lane(tmp_path, capsys):
+    """peek 腿量的是一次字典查找,恒接近 0ms;两种跳过原因对应完全不同的运维
+    动作。两者按纯计数/单桶累加,会让 runbook 的「应为 0」与 `chunk_scale_index`
+    的分位统计都读成假的。"""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    now = datetime.now()
+    # 各自一个时间戳:`diag_common` 的去重键按 (channel, id, ts, kind, stage, …)
+    # 取,同一微秒的同 kind 事件会被当成重复行丢掉(生产里它们本就各有时间)。
+    def _ts(offset):
+        return (now - timedelta(seconds=offset)).isoformat()
+
+    rows = [
+        {"kind": "ask_stage", "stage": "chunk_scale_index",
+         "latency_ms": 900, "ts": _ts(1)},
+        {"kind": "ask_stage", "stage": "chunk_scale_index", "lane": "peek",
+         "latency_ms": 0, "ts": _ts(2)},
+        {"kind": "chunk_bruteforce_skipped", "notebook_id": "nb-1",
+         "reason": "large_library_no_ann", "ts": _ts(3)},
+        {"kind": "chunk_bruteforce_skipped", "notebook_id": "nb-2",
+         "reason": "peek_no_warm_ann", "ts": _ts(4)},
+        {"kind": "chunk_bruteforce_skipped", "notebook_id": "nb-3",
+         "reason": "../escape", "ts": _ts(5)},
+    ]
+    (logs / "events.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+    slow = load_slow()
+    slow.report_events(str(tmp_path), timedelta(hours=1))
+    output = capsys.readouterr().out
+
+    assert "chunk_scale_index(peek)" in output
+    assert "chunk_bruteforce_skipped(large_library_no_ann)" in output
+    assert "chunk_bruteforce_skipped(peek_no_warm_ann)" in output
+    assert "escape" not in output, "原因必须过白名单,不得原样回显"
+
+
 def test_default_report_caps_all_sections(tmp_path, capsys, monkeypatch):
     slow = load_slow()
     monkeypatch.setattr(slow, "report_requests", lambda *args: print("x" * 40_000))

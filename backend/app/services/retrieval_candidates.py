@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from app.core.ask_context import _ASK_EMBED_CACHE
 from app.core.config import (
+    DEFAULT_CHUNK_FANOUT_MAX_WORKERS,
     DEFAULT_CHUNK_KG_FAN_OUT,
     DEFAULT_CHUNK_KG_MAX_DEPTH,
     DEFAULT_CHUNK_KG_NODE_SEED_TOP_N,
@@ -238,6 +239,18 @@ class _RetrievalState:
 
     def _open_scale_ann(self, index, kind: str):
         return self.scale_runtime.open_ann(index, kind)
+
+    def _peek_warm_chunk_index(self, notebook_id: str):
+        """Borrow an ALREADY resident chunk index, never load one.
+
+        Same one-hop delegation convention as ``_scale_index`` /
+        ``_open_scale_ann`` above, and for the same reason: the two callers
+        (the federated warm-peek lane in ``_retrieve_chunks_baseline`` and
+        ``global_retrieval``) reach the catalog through one seat that a test
+        can replace symmetrically with the ``_scale_index`` it is contrasted
+        against, instead of reaching two levels into ``scale_runtime``.
+        """
+        return self.scale_runtime.catalog.peek_warm_chunk_index(notebook_id)
 
     def _index_delta(self, notebook_id: str) -> dict:
         return self.scale_runtime.builder._index_delta(notebook_id)
@@ -2640,6 +2653,15 @@ class CandidateRetrievalService(_RetrievalState):
         allowed_source_ids=None,
     ):
         """Bounded low-recall supplement; shadow mode cannot alter results."""
+        if _CHUNK_PEEK_ONLY.get():
+            # 联邦 warm-peek 腿(非 active 的大库)。它的整条约束是「绝不为一个
+            # 用户并不在里面的大库付冷成本」,而这个接缝恰恰是最贵的一条:peek
+            # 落空 → FTS 命中常低于 ``generated_question_trigger_hits`` → 对那个
+            # 外库拉最多 ``generated_question_max_scan_rows + 1`` 行
+            # ``chunk_questions`` 向量并全部解码,每个(库,子查询)各一次,且没有
+            # 任何 memo。越权面不变(天花板仍下推),但成本面正是这条 lane 承诺
+            # 不付的那一种,所以这里直接归还 baseline。
+            return baseline
         mode = self.settings.generated_question_index_mode
         scored, _ids, _matrix = baseline
         host = self.retrieval_contributors
@@ -2972,14 +2994,18 @@ class CandidateRetrievalService(_RetrievalState):
             # handle),所以下游 ``_retrieve_chunks_ann`` 里的 ``_open_scale_ann``
             # 必然命中 memoize 直接返回——peek 腿上不发生任何 artifact 打开。
             idx = (
-                self.scale_runtime.catalog.peek_warm_chunk_index(notebook_id)
+                self._peek_warm_chunk_index(notebook_id)
                 if peek_only
                 else self._scale_index(notebook_id, allow_stale=True)
             )
             scale_index_load_ms = round(
                 (time.perf_counter() - scale_started) * 1000
             )
-            self.event_log.emit({
+            # ``stage`` 保持 ``chunk_scale_index``——``scripts/diag_slow.py`` 有
+            # stage 白名单,换名字会把这一段整体打成 ``other``。腿的区别走**新增
+            # 字段** ``lane``:peek 腿量的是一次字典查找(恒接近 0ms),混进常驻
+            # 加载的分位统计里会把 p50/p95 一起拉低,所以诊断脚本按这个字段分桶。
+            event = {
                 "kind": "ask_stage",
                 "stage": "chunk_scale_index",
                 "site": "chunk_scale_index",
@@ -2987,7 +3013,10 @@ class CandidateRetrievalService(_RetrievalState):
                 "latency_ms": scale_index_load_ms,
                 "scale_index_load_ms": scale_index_load_ms,
                 "status": "ready" if idx is not None else "unavailable",
-            })
+            }
+            if peek_only:
+                event["lane"] = "peek"
+            self.event_log.emit(event)
             if idx is not None and getattr(idx, "chunk_ann_labels", None):
                 ann = self._retrieve_chunks_ann(
                     notebook_id, query, query_vector, idx, recall,
@@ -3006,12 +3035,24 @@ class CandidateRetrievalService(_RetrievalState):
             # 非 active 的大库冷加载,会把单库路径依赖的暖索引挤出
             # ``scale_idx_cache_max``(大库位 ``_large=2``)。
             # ``n_chunks`` 仍走 ``notebook_chunk_count`` 的 seq-gated memo,不得
-            # 传占位值——见 ``_retrieve_chunks_fts_degraded`` 的 docstring。
+            # 传占位值——见 ``_retrieve_chunks_fts_degraded`` 的 docstring。在这条
+            # 腿上它**只是事件的诊断值**:触发降级的是 lane 本身(暖索引不在场),
+            # 不是这个计数,所以它既不与 ``threshold`` 成对解释降级原因,也不该被
+            # 运维当成「库太大」的证据。
+            #
+            # ``reason`` 也因此不是 ``large_library_no_ann``:这个库的索引可能
+            # 建得好好的,只是此刻不在常驻位里。发默认原因会让运维照着 runbook
+            # 去建一个已经存在的索引(``docs/operations*.md`` 与
+            # ``docs/runtime-dim-truncation-runbook.md`` 把那条事件写成「应为 0」)。
+            #
+            # 补召回接缝在 ``_run_chunk_candidate_contributors`` 顶部同样按这条
+            # lane 早退:这一腿绝不为外库付生成问题索引的扫描/解码成本。
             return self._retrieve_chunks_fts_degraded(
                 notebook_id, query, query_vector, recall,
                 self.notebook_chunk_count(notebook_id),
                 allowed_source_ids=allowed_source_ids,
                 source_restricted=source_restricted,
+                reason="peek_no_warm_ann",
             )
         # ── 大库暴力守卫(镜像 #171 冷矩阵守卫哲学):走到这里 = ANN 不可用(未建
         # scale 索引 / embed 失败 query_vector=None / ANN fail-open)。超阈值的库
@@ -3106,7 +3147,8 @@ class CandidateRetrievalService(_RetrievalState):
     def _retrieve_chunks_fts_degraded(self, notebook_id, query, query_vector,
                                       recall, n_chunks, *,
                                       allowed_source_ids=None,
-                                      source_restricted: bool = False):
+                                      source_restricted: bool = False,
+                                      reason: str = "large_library_no_ann"):
         """大库且 chunk ANN 不可用时的有界降级:FTS5 词法候选(k=recall)→ 只对
         候选 hydrate 文本+向量,候选内做关键词+语义融合打分。绝不 _gather_chunks
         全表、不全量分词、不触发全量向量矩阵加载(与 PR#158「查询恒定成本」取向
@@ -3124,7 +3166,13 @@ class CandidateRetrievalService(_RetrievalState):
         ``_retrieve_chunks_baseline`` 现探一次后传下来,不得由
         ``allowed_source_ids is not None`` 推断:全选冻结也带清单,却不该关掉语料
         语言闸——见 ``_lexical_gate_source_scoped``。默认 False 服务于不带清单的调用
-        方(那一支恒为未收窄)。"""
+        方(那一支恒为未收窄)。
+
+        ``reason`` 是事件里那条**为什么降级**,默认值让既有调用点(大库 / 超阈值
+        库那道守卫)逐字不变。联邦 warm-peek 腿传 ``peek_no_warm_ann``:那个库的
+        索引可能完全健康,只是此刻不常驻,与「大库没建索引」是两种完全不同的运维
+        动作——混用会让运维去建一个已经存在的索引。新增取值必须同步
+        ``scripts/diag_slow.py`` 的原因白名单与 ``docs/operations*.md``。"""
         from app.services.retrieval import (
             RetrievalSupport, add_chunk_supports, score_chunks,
         )
@@ -3148,7 +3196,7 @@ class CandidateRetrievalService(_RetrievalState):
             fts_error = type(exc).__name__
         event = {
             "kind": "chunk_bruteforce_skipped", "notebook_id": notebook_id,
-            "reason": "large_library_no_ann", "n_chunks": n_chunks,
+            "reason": reason, "n_chunks": n_chunks,
             "threshold": self.settings.chunk_bruteforce_max_chunks,
             "fts_hits": len(hits), "embed_ok": query_vector is not None,
         }
@@ -3667,16 +3715,18 @@ class CandidateRetrievalService(_RetrievalState):
 
         results = []
         if sub_queries:
-            # 扇出上限是**具名**限额(``CHUNK_FANOUT_MAX_WORKERS``,默认 8 = 这里
-            # 原来那个字面量),与联邦 chunk 腿共用同一个数:两层扇出被压成一层
-            # 后,「库 × 子查询」的总并发仍受这一个上限约束,DB 连接峰值不变。
-            # 两层 ``getattr`` 兜底针对的是既有测试替身:本方法被 unbound 调用、
-            # ``self`` 是连 ``settings`` 都没有的 ``SimpleNamespace``(见
-            # ``test_generated_question_plugin`` 的原生取消用例),而 ``Settings``
-            # 上这个字段由同一个 PR 的联邦模块任务加入。兜底值与该字段声明的默认值
-            # 同源同值,所以「单库 + N 子查询」的并发上限逐字不变。
+            # 扇出上限是**具名**限额(``CHUNK_FANOUT_MAX_WORKERS``,默认 8 = 联邦
+            # 化之前这里那个字面量),与联邦 chunk 腿共用同一个数:两层扇出被压成
+            # 一层后,「库 × 子查询」的总并发仍受这一个上限约束,DB 连接峰值不变。
+            # 两层 ``getattr`` 兜底针对的是既有测试替身:本方法可以被 unbound
+            # 调用、``self`` 是连 ``settings`` 都没有的 ``SimpleNamespace``(见
+            # ``test_generated_question_plugin`` 的原生取消用例);缺 ``settings``
+            # 与 ``settings`` 上缺这个字段各对应一层。兜底值与 ``Settings`` 上那个
+            # 字段的默认值是**同一个常量**(两处各写一个 8 会在其中一处被改时静默
+            # 分叉),所以「单库 + N 子查询」的并发上限逐字不变。
             fanout = getattr(
-                getattr(self, "settings", None), "chunk_fanout_max_workers", 8
+                getattr(self, "settings", None), "chunk_fanout_max_workers",
+                DEFAULT_CHUNK_FANOUT_MAX_WORKERS,
             )
             with ThreadPoolExecutor(
                 max_workers=min(len(sub_queries), fanout)

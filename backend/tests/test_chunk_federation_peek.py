@@ -149,6 +149,14 @@ class _SettingsProxy:
         return getattr(self._base, name)
 
 
+def _peek_returns(monkeypatch, candidates, index):
+    """桩在 ``_RetrievalState`` 的一跳委托上,与 ``_scale_index`` 对称——两条腿
+    因此是同一层的两个可替换座位,而不是「一个方法 vs 两跳属性链」。"""
+    monkeypatch.setattr(
+        candidates, "_peek_warm_chunk_index", lambda _notebook_id: index,
+    )
+
+
 def test_peek_only_never_loads_scale_index(repo, monkeypatch):
     """暖 ANN 在场:peek 腿借用它走 ANN,``_scale_index`` 一次都不被调。"""
     notebook = _seed(repo)
@@ -158,10 +166,7 @@ def test_peek_only_never_loads_scale_index(repo, monkeypatch):
         monkeypatch, candidates, "_scale_index",
         "peek lane 不得冷加载 scale 索引",
     )
-    monkeypatch.setattr(
-        candidates.scale_runtime.catalog, "peek_warm_chunk_index",
-        lambda _notebook_id: _warm_index(handle),
-    )
+    _peek_returns(monkeypatch, candidates, _warm_index(handle))
 
     scored, _ids, _mat = _in_peek_context(
         candidates._retrieve_chunks_baseline, notebook.id, "bandgap",
@@ -192,10 +197,7 @@ def test_peek_only_without_warm_ann_degrades_instead_of_bruteforce(
         monkeypatch, candidates, "_gather_chunks",
         "peek lane 不得整表读正文",
     )
-    monkeypatch.setattr(
-        candidates.scale_runtime.catalog, "peek_warm_chunk_index",
-        lambda _notebook_id: None,
-    )
+    _peek_returns(monkeypatch, candidates, None)
     degraded = []
     original = candidates._retrieve_chunks_fts_degraded
 
@@ -218,15 +220,26 @@ def test_peek_only_without_warm_ann_degrades_instead_of_bruteforce(
     ]
     assert len(skipped) == 1
     assert skipped[0]["n_chunks"] == 3, "必须是整库真实计数,不得传占位值"
+    assert skipped[0]["reason"] == "peek_no_warm_ann", (
+        "索引可能建好且健康,只是此刻不常驻;发 large_library_no_ann 会让运维"
+        "去建一个已经存在的索引"
+    )
     assert len(scored) >= 1, "降级仍要给出 FTS 候选"
 
 
-def test_peek_only_degrades_even_when_ann_lane_is_off(repo, monkeypatch):
-    """``chunk_ann_enabled=0``(或 embed 失败)时 ANN 分支根本不进,「绝不暴力」
-    这条约束照样成立——判据因此必须读在那个 if 之外。"""
+@pytest.mark.parametrize("arm", ["ann_off", "embed_failed"])
+def test_peek_only_degrades_when_the_ann_branch_is_never_entered(
+    repo, monkeypatch, arm
+):
+    """``chunk_ann_enabled=0`` **与** embed 失败(``query_vector is None``)时
+    ANN 分支根本不进,「绝不暴力」这条约束照样成立——判据因此必须读在那个 if
+    之外。两条臂各跑一次,而不是只跑一条再在 docstring 里声称覆盖两条。"""
     notebook = _seed(repo)
     candidates = repo.retrieval.candidates
-    monkeypatch.setattr(candidates.settings, "chunk_ann_enabled", False)
+    if arm == "ann_off":
+        monkeypatch.setattr(candidates.settings, "chunk_ann_enabled", False)
+    else:
+        monkeypatch.setattr(candidates, "_embed_query", lambda _query: None)
     _forbid(
         monkeypatch, candidates, "_scale_index",
         "peek lane 不得冷加载 scale 索引",
@@ -242,10 +255,12 @@ def test_peek_only_degrades_even_when_ann_lane_is_off(repo, monkeypatch):
         drifted=False,
     )
 
-    assert [
+    skipped = [
         event for event in events
         if event.get("kind") == "chunk_bruteforce_skipped"
     ]
+    assert skipped and skipped[0]["reason"] == "peek_no_warm_ann"
+    assert skipped[0]["embed_ok"] is (arm == "ann_off")
 
 
 def test_default_lane_still_loads_scale_index(repo, monkeypatch):
@@ -261,13 +276,92 @@ def test_default_lane_still_loads_scale_index(repo, monkeypatch):
 
     monkeypatch.setattr(candidates, "_scale_index", _scale_index)
     _forbid(
-        monkeypatch, candidates.scale_runtime.catalog, "peek_warm_chunk_index",
+        monkeypatch, candidates, "_peek_warm_chunk_index",
         "默认腿不得走 warm-peek",
     )
+    events = _capture_events(repo, monkeypatch)
 
     candidates._retrieve_chunks_baseline(notebook.id, "bandgap", drifted=False)
 
     assert seen == [(notebook.id, True)]
+    stages = [
+        event for event in events
+        if event.get("stage") == "chunk_scale_index"
+    ]
+    assert stages and all("lane" not in event for event in stages), (
+        "默认腿的 ask_stage 事件不得带 lane 字段"
+    )
+
+
+def test_peek_lane_marks_its_scale_index_stage(repo, monkeypatch):
+    """``stage`` 保持 ``chunk_scale_index``(diag_slow 有白名单),腿的区别走新增
+    的 ``lane`` 字段:peek 量的是一次字典查找,混进常驻加载的分位会拉低 p50。"""
+    notebook = _seed(repo)
+    candidates = repo.retrieval.candidates
+    _forbid(
+        monkeypatch, candidates, "_scale_index",
+        "peek lane 不得冷加载 scale 索引",
+    )
+    _peek_returns(monkeypatch, candidates, None)
+    events = _capture_events(repo, monkeypatch)
+
+    _in_peek_context(
+        candidates._retrieve_chunks_baseline, notebook.id, "bandgap",
+        drifted=False,
+    )
+
+    stages = [
+        event for event in events
+        if event.get("stage") == "chunk_scale_index"
+    ]
+    assert stages and all(event["lane"] == "peek" for event in stages)
+
+
+def test_peek_lane_skips_the_supplemental_contributor_seam(repo, monkeypatch):
+    """补召回接缝也受 lane 约束:peek 落空 → FTS 命中常低于触发阈值 → 否则就会
+    对一个**外库**拉最多 ``generated_question_max_scan_rows + 1`` 行问题索引向量
+    并全部解码,每个(库,子查询)一次、无 memo。越权面没变,但成本面正是这条 lane
+    承诺不付的那一种。"""
+    from app.services.retrieval_run import retrieval_run
+
+    notebook = _seed(repo)
+    candidates = repo.retrieval.candidates
+    # 对照臂也要跑得通,所以这里不能禁 ``_scale_index``,只把它桩成"索引缺席":
+    # 两条腿于是走到同一个降级返回,唯一的变量就是这条 lane。
+    monkeypatch.setattr(
+        candidates, "_scale_index", lambda _notebook_id, allow_stale=False: None,
+    )
+    _peek_returns(monkeypatch, candidates, None)
+    monkeypatch.setattr(
+        candidates.settings, "generated_question_index_mode", "shadow",
+    )
+    runs = []
+    monkeypatch.setattr(
+        candidates, "retrieval_contributors",
+        SimpleNamespace(run=lambda *a, **kw: runs.append(kw) or []),
+    )
+
+    with retrieval_run(run_kind="ask", actor_id="user-local"):
+        _in_peek_context(candidates._retrieve_chunks, notebook.id, "bandgap")
+        assert runs == [], "peek 腿不得触达补召回 host"
+
+        # 对照臂:同一个 host、同一次运行,默认腿照常调用。
+        candidates._retrieve_chunks(notebook.id, "bandgap")
+
+    assert len(runs) == 1
+
+
+def test_fanout_default_is_a_single_shared_constant(repo):
+    """``Settings`` 的默认值与 ``_retrieve_chunks_multi`` 的替身兜底必须同源:
+    两处各写一个 8,其中一处被改时会静默分叉成两个并发上限。"""
+    from app.core.config import DEFAULT_CHUNK_FANOUT_MAX_WORKERS
+
+    assert repo.settings.chunk_fanout_max_workers == (
+        DEFAULT_CHUNK_FANOUT_MAX_WORKERS
+    )
+    assert Settings().chunk_fanout_max_workers == (
+        DEFAULT_CHUNK_FANOUT_MAX_WORKERS
+    )
 
 
 def test_peek_only_is_scoped_to_the_copied_context():
@@ -349,11 +443,46 @@ def test_allowed_source_ids_reach_the_ann_producer_under_peek(
 
 
 @pytest.mark.parametrize("fanout", [2, 3])
+def test_multi_fanout_executor_width_is_exactly_the_setting(
+    repo, monkeypatch, fanout
+):
+    """上限的**确定性**断言:直接看执行器的构造参数。
+
+    仅靠下面那条握手不足以钉死上界——池里多出来的工作线程未必会在握手窗口内
+    被调度进来,于是「改回字面量 8」有相当概率仍然全绿(实测约三成)。"""
+    import concurrent.futures
+
+    candidates = repo.retrieval.candidates
+    monkeypatch.setattr(
+        candidates, "settings", _SettingsProxy(candidates.settings, fanout)
+    )
+    monkeypatch.setattr(candidates, "_retrieve_chunks",
+                        lambda *_args, **_kwargs: ([], [], None))
+    seen = []
+    original = concurrent.futures.ThreadPoolExecutor
+
+    def _record(*args, **kwargs):
+        seen.append(kwargs.get("max_workers"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", _record)
+
+    candidates._retrieve_chunks_multi(
+        "nb", [f"q{i}" for i in range(fanout * 2)], drifted=False
+    )
+    assert seen == [fanout], "超过上限的子查询数必须被压到设定上限"
+
+    seen.clear()
+    candidates._retrieve_chunks_multi("nb", ["only-one"], drifted=False)
+    assert seen == [1], "子查询少于上限时取子查询数"
+
+
+@pytest.mark.parametrize("fanout", [2, 3])
 def test_multi_fanout_reads_the_setting(repo, monkeypatch, fanout):
-    """``_retrieve_chunks_multi`` 的工作线程上限来自 settings,不是字面量。
+    """并发**下界**:上限确实被用满了,不是被压到 1 顺序跑。
 
     握手不用墙钟:``Barrier(fanout)`` 只有在**恰好** fanout 个任务同时在跑时才
-    放行,上限更小会停在 barrier(``broken``)、更大会把峰值顶上去(``peak``)。"""
+    放行,上限更小会停在 barrier(``broken``)。"""
     candidates = repo.retrieval.candidates
     monkeypatch.setattr(
         candidates, "settings", _SettingsProxy(candidates.settings, fanout)

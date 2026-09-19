@@ -79,6 +79,44 @@ def test_context_does_not_replace_a_fitting_best_passage_with_a_weaker_tail():
     assert {row["object_id"] for row in refs.values()} == {best.chunk_id, other.chunk_id}
 
 
+def _one_strong_and_n_noise(noise_count=7):
+    strong = [replace(chunk(f"a-{i}", text=f"relevant {i}", notebook_id="a"), relevance=0.9 - i * 0.001)
+              for i in range(40)]
+    noise = [[replace(chunk(f"n{n}-0", text=f"unrelated {n}", notebook_id=f"n{n}"), relevance=0.05)]
+             for n in range(noise_count)]
+    return strong, noise
+
+
+def test_peer_floor_denies_reserved_slots_to_libraries_far_below_the_best():
+    strong, noise = _one_strong_and_n_noise()
+    selected = peer_evidence([strong, *noise], 8, peer_floor=0.5)
+    assert selected == strong[:8]
+
+
+def test_peer_floor_zero_is_value_identical_to_the_historical_merge():
+    strong, noise = _one_strong_and_n_noise()
+    pools = [strong, *noise]
+    assert peer_evidence(pools, 8, peer_floor=0) == peer_evidence(pools, 8)
+    # 同样对带阈值的既有调用形状成立（全局问答那条调用点的参数组合）。
+    scoped = dict(min_relevance=0.25, relative_relevance=0.6)
+    assert peer_evidence(pools, 12, peer_floor=0, **scoped) == peer_evidence(pools, 12, **scoped)
+
+
+def test_peer_floor_keeps_a_genuinely_relevant_minority_library():
+    strong, noise = _one_strong_and_n_noise(5)
+    minority = [replace(chunk("b-0", text="minority best", notebook_id="b"), relevance=0.6)]
+    selected = peer_evidence([strong, minority, *noise], 4, peer_floor=0.5)
+    assert minority[0] in selected, "peak 0.6 ≥ 0.9×0.5，保底名额不得被大库挤掉"
+    assert {hit.notebook_id for hit in selected} == {"a", "b"}
+
+
+def test_peer_floor_lets_a_denied_library_still_win_leftover_capacity():
+    """没有保底名额 ≠ 被排除：预算有余时它的命中仍按跨库归一的优先级参与竞争。"""
+    strong = [replace(chunk("a-0", text="relevant", notebook_id="a"), relevance=0.9)]
+    weak = [replace(chunk("w-0", text="weak", notebook_id="w"), relevance=0.05)]
+    assert peer_evidence([strong, weak], 4, peer_floor=0.5) == [strong[0], weak[0]]
+
+
 def test_exact_dedup_preserves_semantically_different_code_indentation():
     a = chunk("a", text="if enabled:\n    run()\nfinish()", notebook_id="a")
     b = chunk("b", text="if enabled:\n    run()\n    finish()", notebook_id="b")

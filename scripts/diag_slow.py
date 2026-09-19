@@ -55,6 +55,14 @@ _SAFE_STAGES = frozenset({
     "chunk_ann", "chunk_fts", "chunk_scale_index", "kg_candidates",
 })
 _SAFE_OBJECT_TYPES = frozenset({"concept", "claim", "formula", "procedure"})
+# ask_stage 的 chunk 召回腿。``stage`` 恒是 ``chunk_scale_index``(白名单在上面),
+# 腿的区别在 ``lane`` 字段:联邦 warm-peek 腿只做一次字典查找,恒接近 0ms,混进
+# 常驻加载的分位统计会把 p50/p95 一起拉低。
+_SAFE_LANES = frozenset({"peek"})
+# chunk_bruteforce_skipped 的原因。``large_library_no_ann`` = 大库/超阈值库没有
+# 可用 ANN,真解是建 scale 索引(runbook 判据:应为 0);``peek_no_warm_ann`` =
+# 联邦外库腿只借暖索引而此刻它不常驻,索引本身可能完全健康,不是待办。
+_SAFE_SKIP_REASONS = frozenset({"large_library_no_ann", "peek_no_warm_ann"})
 _ENV_BOOL_KEYS = frozenset({
     "RELATION_RETRIEVAL_ENABLED", "CHUNK_KG_OVERLAY_ENABLED", "CHUNK_ANN_ENABLED",
     "SCALE_INDEX_AUTO_ENABLED", "SCALE_SEARCH_INCLUDE_DELTA", "SCALE_AUTO_FOLD_ON_ADD",
@@ -164,6 +172,24 @@ def _scan_summary(stats):
 def _safe_stage(value):
     stage = str(value).lower()
     return stage if stage in _SAFE_STAGES else "other"
+
+
+def _safe_stage_lane(event):
+    """``stage``,带上被识别的召回腿后缀。未知/缺失的 lane 原样按 stage 归桶。"""
+    stage = _safe_stage(event.get("stage"))
+    lane = event.get("lane")
+    return f"{stage}({lane})" if lane in _SAFE_LANES else stage
+
+
+def _safe_skip_site(kind, event):
+    """守卫跳过的位点,``chunk_bruteforce_skipped`` 再按白名单内的原因分桶。
+
+    两种原因对应完全不同的运维动作(建索引 / 什么都不用做),按纯计数累加会让
+    runbook 里那条「应为 0」的判据读成假阳性。"""
+    if kind != "chunk_bruteforce_skipped":
+        return kind
+    reason = event.get("reason")
+    return f"{kind}({reason})" if reason in _SAFE_SKIP_REASONS else kind
 
 
 def _safe_presence(value):
@@ -411,14 +437,14 @@ def report_events(local_dir, since):
                        "chunk_bruteforce_skipped", "kg_bruteforce_refused",
                        "element_scoring_skipped", "dim_mismatch",
                        "scale_fold_refused", "viz_lazy_build_refused"):
-                refuse_sites[k] += 1
+                refuse_sites[_safe_skip_site(k, e)] += 1
             elif k == "model_error":
                 key = f"{_safe_stage(e.get('stage'))}/{_safe_presence(e.get('error', e.get('message')))}"
                 model_errors[key] += 1
             elif k == "ask_stage":
                 ms = diag_common.finite_number(e.get("latency_ms"))
                 if ms is not None:
-                    ask_stage[_safe_stage(e.get("stage"))].add(ms)
+                    ask_stage[_safe_stage_lane(e)].add(ms)
             elif k == "pipeline":
                 ms = diag_common.finite_number(e.get("latency_ms"))
                 if ms is not None and e.get("status") == "done":

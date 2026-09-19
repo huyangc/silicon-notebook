@@ -74,6 +74,9 @@ def _rig(warm=False):
         return {cid: chunk_sources.get(cid, "source") for cid in ids}
     candidates = SimpleNamespace(
         settings=Settings(), scale_runtime=SimpleNamespace(catalog=catalog),
+        # The one-hop delegate ``_RetrievalState`` exposes, same convention as
+        # ``_scale_index``; the global lane reaches the catalog through it.
+        _peek_warm_chunk_index=catalog.peek_warm_chunk_index,
         _embed_query=_forbidden, _connect=lambda: nullcontext(None),
         _chunk_fts_hits=fts, hydrate_chunk_candidates=_forbidden,
         _in_batches=lambda ids: [ids],

@@ -48,6 +48,15 @@ DEFAULT_REPORT_PROBE_CHANNEL_CONCURRENCY = 2
 DEFAULT_REASONING_MAX_PLUGIN_ACTIONS = 2
 DEFAULT_REASONING_PLUGIN_ACTION_TIMEOUT_SECONDS = 8.0
 DEFAULT_EXTERNAL_EVIDENCE_MAX_PER_RUN = 10
+# The chunk fan-out's total worker ceiling ("library x sub-query" flattened into
+# one table). ``Settings.chunk_fanout_max_workers`` declares it as its default
+# AND ``retrieval_candidates._retrieve_chunks_multi`` falls back to it for the
+# test doubles that stand in for ``self`` without any ``settings`` at all, so
+# the two must be ONE literal: a silent drift between them would change the
+# single-library fan-out's concurrency without any setting having moved. The
+# constant lives here rather than in the services layer because ``config.py``
+# must not depend on ``app.services``; the dependency points services -> config.
+DEFAULT_CHUNK_FANOUT_MAX_WORKERS = 8
 
 
 
@@ -1214,7 +1223,16 @@ class Settings(BaseSettings):
     chunk_federation_max_participants: int = Field(
         8, ge=1, le=8, validation_alias="CHUNK_FEDERATION_MAX_PARTICIPANTS")
     chunk_fanout_max_workers: int = Field(
-        8, ge=1, le=16, validation_alias="CHUNK_FANOUT_MAX_WORKERS")
+        DEFAULT_CHUNK_FANOUT_MAX_WORKERS, ge=1, le=16,
+        validation_alias="CHUNK_FANOUT_MAX_WORKERS")
+    # 跨库合并的「可比模式」下限。联邦 chunk 的每一个库走的是**同一条**生产者
+    # (``_retrieve_chunks``,同一个 0..1 ``_fuse`` 量纲),所以各库的分数跨库可比
+    # ——这与全局问答「不同生产者的分不可比」的前提不同。峰值低于「全场最高峰值 ×
+    # 本值」的库因此拿不到保底名额(它的命中仍参与剩余名额竞争),剩余名额也改按
+    # 跨库归一的 ``(score/全场最高)/名次`` 排。设 0 = 逐字回到每库保底一条、只与
+    # 自己最高分比的旧行为(全局问答那条调用点恒是这个语义,它不传本参数)。
+    chunk_federation_peer_floor: float = Field(
+        0.5, ge=0, le=1, validation_alias="CHUNK_FEDERATION_PEER_FLOOR")
     # 词法候选的语料语言闸:库内没有任何 CJK 字符时,丢掉纯 CJK 的三字片段词项
     # ——它们对该库保证零命中,却在 PostgreSQL 上各买一次真实探针(实测 7,026 块
     # 的英文库:64 词项 29.7s/26 行,其中 26 行全部来自 2 个拉丁词项;报告 4 节
