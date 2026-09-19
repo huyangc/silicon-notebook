@@ -925,8 +925,12 @@ def test_active_hits_are_never_stamped_with_their_own_notebook_id():
     )
 
 
-def test_reserve_lanes_give_active_its_floor_in_the_quota_fuse():
-    """multi 腿:保底组让 round-robin 第一轮就把席位发给 active。"""
+def test_the_floor_is_paid_after_the_quota_fuse():
+    """multi 腿:``per_query`` 里没有任何保底组,保底在融合**之后**兑现一次。
+
+    组里写规则是靠不住的:``ask_chunk`` 拿到这份 ``per_query`` 之后还会追加自己
+    的关键词/精确命中分组(见 ``test_direct_hit_groups_cannot_defeat_the_floor``)。
+    """
     from app.services.retrieval import quota_fuse_baseline_first
 
     candidates, queries = _weak_active_strong_peers(
@@ -934,8 +938,10 @@ def test_reserve_lanes_give_active_its_floor_in_the_quota_fuse():
     )
     result = federated(candidates, sub_queries=queries)
 
-    assert len(result.per_query) == 4 + 4, "4 个保底组 + 4 个子查询组"
-    assert all(len(group) == 1 for group in result.per_query[:4])
+    assert len(result.per_query) == 4, "只有子查询组,没有保底组"
+    assert result.collected.active_reserve == 4, (
+        "floor 由 collected 自己带着穿过 ask_chunk"
+    )
 
     selected, _counts = quota_fuse_baseline_first(
         result.collected, result.per_query, 16,
@@ -943,9 +949,6 @@ def test_reserve_lanes_give_active_its_floor_in_the_quota_fuse():
     )
     assert len(selected) == 16
     assert sum(1 for hit in selected if not hit.notebook_id) >= 4
-    assert sum(1 for hit in selected if hit.notebook_id) == 16 - sum(
-        1 for hit in selected if not hit.notebook_id
-    )
 
 
 def test_reserve_zero_restores_pure_relevance():
@@ -985,8 +988,10 @@ def test_active_floor_does_not_shrink_as_libraries_are_mounted():
     assert local_seats(8) >= local_seats(2)
 
 
-def test_reserve_lanes_are_capped_by_the_qualified_active_candidates():
+def test_the_floor_is_capped_by_the_qualified_active_candidates():
     """active 只有 2 条合格候选时保底就是 2,不会凭空造席位。"""
+    from app.services.retrieval import quota_fuse_baseline_first
+
     def retrieve(nid, query):
         if nid == "a":
             return [make_chunk("a1", 0.3), make_chunk("a2", 0.2)], [], None
@@ -998,14 +1003,22 @@ def test_reserve_lanes_are_capped_by_the_qualified_active_candidates():
     )
 
     result = federated(candidates)
+    selected, _counts = quota_fuse_baseline_first(
+        result.collected, result.per_query, 16,
+        relevance=lambda c: c.relevance,
+    )
 
-    assert len(result.per_query) == 2 + 1
-    assert [list(group) for group in result.per_query[:2]] == [["a1"], ["a2"]]
+    assert len(selected) == 16
+    assert sorted(
+        hit.chunk_id for hit in selected if not hit.notebook_id
+    ) == ["a1", "a2"]
 
 
-def test_reserve_lanes_ignore_generated_question_only_candidates():
-    """补充臂的行在 ``quota_fuse_baseline_first`` 的第二阶段才发席位,给它留一个
-    保底组等于挪走一个席位却没挪来证据。"""
+def test_the_floor_ignores_generated_question_only_candidates():
+    """补充臂的行在 ``quota_fuse_baseline_first`` 的第二阶段才发席位,拿它去顶一个
+    保底席位等于挪走一个席位却没挪来证据。"""
+    from app.services.retrieval import quota_fuse_baseline_first
+
     question_only = make_chunk(
         "a-q", 0.99, supports=(
             RetrievalSupport("generated_question", "chunk", "a-q", 0.99),
@@ -1023,8 +1036,15 @@ def test_reserve_lanes_ignore_generated_question_only_candidates():
     )
 
     result = federated(candidates)
+    selected, _counts = quota_fuse_baseline_first(
+        result.collected, result.per_query, 16,
+        relevance=lambda c: c.relevance,
+    )
 
-    assert [list(group) for group in result.per_query[:1]] == [["a1"]]
+    local = [hit for hit in selected if not hit.notebook_id]
+    assert [hit.chunk_id for hit in local] == ["a1"], (
+        "保底只认基线候选;补充那条照常走它自己的第二阶段"
+    )
 
 
 def test_mmr_branch_hands_trailing_peer_seats_back_to_active():
@@ -1316,31 +1336,6 @@ def test_group_entries_carry_the_merged_representative_provenance():
             "semantic", "lexical",
         }, "组里的对象丢了合并后的 provenance"
         assert entry.notebook_id == "b"
-
-
-def test_reserved_chunks_live_in_exactly_one_group():
-    """保底是**结构性**的:保底席位的 chunk 不再出现在它的子查询组里,于是
-    `quota_fuse` 除了那条保底组无处可归——不依赖任何相关度比较。
-
-    依赖相关度不再可靠:`prefer_stronger_chunk_candidate` 允许一条**分数更低**
-    的历史命中战胜同段正文的 question-only 行,所以某一腿自己的实例可以比合并
-    代表分更高。
-    """
-    def retrieve(nid, query):
-        if nid == "a":
-            return [make_chunk("a1", 0.3), make_chunk("a2", 0.2)], [], None
-        return [make_chunk(f"b{i}", 0.9) for i in range(20)], [], None
-
-    candidates = FakeCandidates(
-        (("a", "personal"), ("b", "base")), retrieve=retrieve,
-        active_reserve=0.25, mmr_k=8,
-    )
-
-    result = federated(candidates, sub_queries=("q1", "q2"))
-
-    lanes, groups = result.per_query[:2], result.per_query[2:]
-    assert [list(lane) for lane in lanes] == [["a1"], ["a2"]]
-    assert all("a1" not in group and "a2" not in group for group in groups)
 
 
 # --------------------------------------------------------------------------
@@ -1685,3 +1680,116 @@ def test_withheld_set_never_grows_the_candidate_pool():
 
     assert len(result.collected) == 2
     assert all(not hit.notebook_id for hit in result.collected.values())
+
+
+# --------------------------------------------------------------------------
+# 保底在「最终融合之后」兑现:ask_chunk 之后追加的分组绕不过它
+# --------------------------------------------------------------------------
+
+def _ask_chunk_multi_fuse(collected, per_query, direct_hits, top_n=16):
+    """复刻 `ask_service.ask_chunk` multi 分支在融合前后的那几行。
+
+    用的是**真实的** `_merge_multi_direct_chunk_hits`(模块级函数,可直接 import),
+    所以「原地改 collected + 追加一个分组 + 再融合」这一串与生产逐行同形。
+    """
+    from app.services.ask_service import _merge_multi_direct_chunk_hits
+    from app.services.retrieval import quota_fuse_baseline_first
+
+    if direct_hits:
+        _merge_multi_direct_chunk_hits(collected, direct_hits)
+        per_query = per_query + [{c.chunk_id: c for c in direct_hits}]
+    selected, _counts = quota_fuse_baseline_first(
+        collected, per_query, top_n, relevance=lambda c: c.relevance,
+    )
+    return selected
+
+
+def test_direct_hit_groups_cannot_defeat_the_floor():
+    """codex 的复现:关键词命中以**更高分**重复当前库的保底候选,并作为额外分组
+    加入 → 最终 16 席里当前库仍 ≥ 4。
+
+    保底若写在 `per_query` 的分组里,`quota_fuse` 会把这些 chunk 归到后加的那
+    组(相关度更高),保底组当场落空。
+    """
+    candidates, queries = _weak_active_strong_peers(
+        sub_queries=("q1", "q2", "q3", "q4"),
+    )
+    result = federated(candidates, sub_queries=queries)
+    local = [hit for hit in result.collected.values() if not hit.notebook_id]
+    assert len(local) >= 4, "前提:当前库确实有 ≥4 条候选进了池"
+
+    # 关键词腿以更高分重复这四条(active 命中,`notebook_id` 为空)。
+    keyword = [
+        make_chunk(hit.chunk_id, 0.95, text=hit.text, source_id=hit.source_id)
+        for hit in local[:4]
+    ]
+
+    selected = _ask_chunk_multi_fuse(result.collected, result.per_query, keyword)
+
+    assert len(selected) == 16
+    assert sum(1 for hit in selected if not hit.notebook_id) >= 4, (
+        "后加的分组把保底绕过去了"
+    )
+
+
+def test_identical_active_passages_spend_one_reserved_seat():
+    """codex 的第二条复现:当前库多个来源含**相同正文** →
+    `_fold_library_pool` 因为身份带 `source_id` 会把它们都留着,保留集与最终入选
+    里该正文只该占一席。"""
+    shared = "同一段正文,四个来源各存了一份"
+
+    def retrieve(nid, query):
+        if nid == "a":
+            return [
+                make_chunk(f"a{i}", 0.4 - i * 0.01, text=shared,
+                           source_id=f"src-a{i}")
+                for i in range(4)
+            ] + [make_chunk("a-other", 0.35, text="另一段")], [], None
+        return [make_chunk(f"b{i}", 0.9, text=f"peer-{i}")
+                for i in range(40)], [], None
+
+    candidates = FakeCandidates(
+        (("a", "personal"), ("b", "base")), retrieve=retrieve,
+        recall=200, active_reserve=0.25, mmr_k=16,
+    )
+
+    result = federated(candidates)
+    local = [hit for hit in result.collected.values() if not hit.notebook_id]
+
+    assert sum(1 for hit in local if hit.text == shared) == 1, (
+        f"保留集把同一段正文留了 {sum(1 for h in local if h.text == shared)} 份"
+    )
+
+    selected = _ask_chunk_multi_fuse(result.collected, result.per_query, [])
+    assert sum(1 for hit in selected if hit.text == shared) == 1
+
+
+# --------------------------------------------------------------------------
+# floor 的载体:collected 子类 + 属性全程存活
+# --------------------------------------------------------------------------
+
+def test_the_floor_survives_the_scope_filter_and_the_in_place_merge():
+    """`retrieve_chunk_candidates_multi` 会按来源范围**重建** collected,
+    `ask_chunk` 随后**原地**改它——floor 必须一路活到 `quota_fuse_baseline_first`。"""
+    from app.services.ask_service import _merge_multi_direct_chunk_hits
+
+    rows = {"a1": make_chunk("a1", 0.3)}
+    carried = cf.with_active_reserve(rows, 4)
+    assert isinstance(carried, cf.FederatedCollected)
+    assert carried.active_reserve == 4
+
+    _merge_multi_direct_chunk_hits(carried, [make_chunk("b1", 0.9)])
+    assert carried.active_reserve == 4, "原地合并不得把属性丢掉"
+    assert isinstance(carried, cf.FederatedCollected)
+
+    # 重建(端口层那一跳)之后必须重新接上。
+    rebuilt = cf.with_active_reserve(dict(carried), carried.active_reserve)
+    assert rebuilt.active_reserve == 4
+
+
+def test_no_floor_keeps_an_ordinary_dict():
+    """单参与者 / `reserve=0`:交出去的仍是普通 dict,下游逐值不变。"""
+    rows = {"a1": make_chunk("a1", 0.3)}
+
+    assert cf.with_active_reserve(rows, 0) is rows
+    assert type(cf.with_active_reserve(rows, 0)) is dict

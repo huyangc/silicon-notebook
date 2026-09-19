@@ -1210,6 +1210,23 @@ def quota_fuse_baseline_first(
 
     Question-index-only candidates remain grouped by their originating query,
     but are considered only after the complete baseline round-robin result.
+
+    ``collected.active_reserve`` -- an optional attribute a federated candidate
+    mapping may carry (``chunk_federation.FederatedCollected``).  When present
+    and non-zero, ``enforce_active_floor`` runs on the FINISHED fusion, which is
+    the only place a floor on the active notebook's share can actually hold:
+    the caller is free to merge further direct-hit producers into ``collected``
+    and to append their own quota groups before calling this, so any rule
+    expressed in the GROUPS is only a rule about the groups this function was
+    handed.  A plain ``dict`` -- every single-library caller, every test double
+    -- has no such attribute and takes the historical path unchanged.
+
+    ``counts`` is the fusion's own per-group accounting and is deliberately NOT
+    rewritten by that floor: a floor substitution replaces one already-selected
+    row with another, so attributing it to a group would invent a contribution
+    the round-robin never made.  The one production caller (``ask_chunk``'s
+    multi branch) discards ``counts``; ``reasoning_retrieval`` reports its own
+    per-sub-query quota from its own fuse call, which carries no reserve.
     """
     baseline = {
         oid: item for oid, item in collected.items()
@@ -1230,15 +1247,102 @@ def quota_fuse_baseline_first(
         baseline, baseline_per_query, top_n, relevance=relevance
     )
     remaining = max(0, top_n - len(selected))
-    if not remaining or not supplemental:
-        return selected, counts
-    supplemental_per_query = [
-        {oid: item for oid, item in rows.items() if oid in supplemental}
-        for rows in per_query
+    if remaining and supplemental:
+        supplemental_per_query = [
+            {oid: item for oid, item in rows.items() if oid in supplemental}
+            for rows in per_query
+        ]
+        extra, extra_counts = quota_fuse(
+            supplemental, supplemental_per_query, remaining, relevance=relevance
+        )
+        selected = selected + extra
+        counts = [
+            count + extra_counts[index] for index, count in enumerate(counts)
+        ]
+    return enforce_active_floor(
+        selected,
+        collected.values(),
+        int(getattr(collected, "active_reserve", 0) or 0),
+        relevance=relevance,
+    ), counts
+
+
+def enforce_active_floor(
+    selected, candidates, floor, relevance=lambda h: h.relevance
+):
+    """Guarantee the active notebook a minimum share of a FINISHED selection.
+
+    Pure, deterministic, settings-free: the caller supplies ``floor``.  Both
+    chunk selection branches end here -- the multi branch through
+    ``quota_fuse_baseline_first`` and the single branch through
+    ``RetrievalService.select_chunk_candidates`` after MMR -- so the rule has
+    exactly one implementation and one place it can be defeated from, which is
+    nowhere: by construction it runs on the list that is about to become the
+    answer's evidence.
+
+    "Active" is ``not hit.notebook_id``.  Federated recall stamps only peer
+    libraries' hits, so an empty origin means the notebook being asked about --
+    the same reading ``evidence_context``, ``source_scope`` and
+    ``citation_origin`` already have.
+
+    Inert, returning the caller's own list object, whenever the floor cannot be
+    at stake: ``floor <= 0`` (the feature off), an empty selection, or a
+    selection with no peer hit at all (single-library retrieval, or a federated
+    ask the active notebook already dominates).  That is what keeps the
+    single-library path byte-identical.
+
+    Otherwise the missing seats are taken from the active notebook's strongest
+    BASELINE candidates that the selection passed over, and they replace PEER
+    rows from the tail inwards -- generated-question-only peer rows first,
+    because an optional supplement is the cheapest thing in the list to give
+    up, then the lowest-ranked peer evidence.  An active row is never replaced,
+    every surviving row keeps its position, and ``len(selected)`` is unchanged:
+    the reserve moves WHOSE evidence fills a seat, never how many seats exist.
+
+    Candidates are de-duplicated by ``hit.text`` -- the identity
+    ``global_evidence.peer_evidence`` uses -- against each other AND against
+    what is already selected.  Without it, two active sources holding the same
+    passage (``_fold_library_pool`` keeps both, because its identity includes
+    ``source_id``) would spend the reserve twice on one piece of evidence.
+    """
+    rows = list(selected)
+    if floor <= 0 or not rows or not any(row.notebook_id for row in rows):
+        return selected
+    local = [
+        row for row in rows
+        if not row.notebook_id and not is_generated_question_only_chunk(row)
     ]
-    extra, extra_counts = quota_fuse(
-        supplemental, supplemental_per_query, remaining, relevance=relevance
-    )
-    return selected + extra, [
-        count + extra_counts[index] for index, count in enumerate(counts)
+    seen_text = {row.text for row in rows}
+    seen_ids = {row.chunk_id for row in rows}
+    spare: List["RetrievedChunk"] = []
+    for candidate in sorted(
+        (
+            item for item in candidates
+            if not item.notebook_id
+            and not is_generated_question_only_chunk(item)
+            and item.chunk_id not in seen_ids
+        ),
+        key=lambda item: -float(relevance(item) or 0.0),
+    ):
+        if candidate.text in seen_text:
+            continue
+        seen_text.add(candidate.text)
+        spare.append(candidate)
+    need = min(int(floor), len(local) + len(spare)) - len(local)
+    if need <= 0 or not spare:
+        return selected
+    tail = range(len(rows) - 1, -1, -1)
+    victims = [
+        index for index in tail
+        if rows[index].notebook_id
+        and is_generated_question_only_chunk(rows[index])
+    ] + [
+        index for index in tail
+        if rows[index].notebook_id
+        and not is_generated_question_only_chunk(rows[index])
     ]
+    if not victims:
+        return selected
+    for index, candidate in zip(victims[:need], spare):
+        rows[index] = candidate
+    return rows

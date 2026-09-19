@@ -136,8 +136,8 @@ def test_multi_query_lane_also_reaches_the_base_library(repo, base_only):
     """`retrieve_chunk_candidates_multi` 同样改道;`per_query` 仍是每个子查询
     一组(各库并进同一组),四元组形状不变。
 
-    active 零 chunk,所以保底组一个都没有——`_reserve_lanes` 的上限是当前库的
-    合格候选数。
+    active 零 chunk,所以保底恒为 0 席——floor 的上限是当前库合格候选的实际
+    数量,由 `enforce_active_floor` 在最终融合之后夹住。
     """
     active, base, _base_source = base_only
 
@@ -749,3 +749,83 @@ def test_search_chunks_leaves_are_bounded_by_the_report_fanout_gate(
     assert state["peak"] == 2, (
         f"叶子并发是 {state['peak']},不是 fanout_limit=2"
     )
+
+
+def test_the_floor_reaches_ask_chunk_through_the_port_layer(
+    repo, weak_active_strong_peers
+):
+    """端口层按来源范围重建了 `collected`,floor 必须接着活着到融合那一步。
+
+    这一跳今天是 `retrieve_chunk_candidates_multi` 里的一个字典推导式;它不把
+    属性接回去的话,保底会在这里静默消失,而两侧的用例都还是绿的。
+    """
+    from app.services.chunk_federation import FederatedCollected
+
+    active, _bases = weak_active_strong_peers()
+
+    collected, per_query, _ids, _matrix = (
+        repo.retrieval.retrieve_chunk_candidates_multi(
+            active, [_QUERY, "matching 版图"]
+        )
+    )
+
+    assert isinstance(collected, FederatedCollected)
+    assert collected.active_reserve == _floor(repo)
+    assert len(per_query) == 2, "分组里不含任何保底组"
+
+
+def test_direct_hit_groups_do_not_defeat_the_floor_end_to_end(
+    repo, weak_active_strong_peers
+):
+    """真实夹具走一遍 `ask_chunk` multi 分支的原地合并 + 加组 + 融合。"""
+    from app.services.ask_service import _merge_multi_direct_chunk_hits
+    from app.services.retrieval import quota_fuse_baseline_first
+
+    active, _bases = weak_active_strong_peers()
+    collected, per_query, _ids, _matrix = (
+        repo.retrieval.retrieve_chunk_candidates_multi(
+            active, [_QUERY, "matching 版图"]
+        )
+    )
+    local = [hit for hit in collected.values() if not hit.notebook_id]
+    assert len(local) >= _floor(repo)
+
+    # 关键词腿以更高分重复当前库那几条候选(真实的合并函数会原地改 collected)。
+    from dataclasses import replace as _replace
+
+    keyword = [_replace(hit, relevance=0.99, score=0.99) for hit in local[:4]]
+    _merge_multi_direct_chunk_hits(collected, keyword)
+    per_query = per_query + [{hit.chunk_id: hit for hit in keyword}]
+
+    selected, _counts = quota_fuse_baseline_first(
+        collected, per_query, repo.settings.chunk_mmr_k,
+        relevance=lambda chunk: chunk.relevance,
+    )
+
+    assert len(selected) == repo.settings.chunk_mmr_k
+    assert sum(1 for hit in selected if not hit.notebook_id) >= _floor(repo)
+
+
+def test_activating_the_source_graph_never_evicts_a_reserved_seat(
+    repo, weak_active_strong_peers
+):
+    """融合之后 `ask_chunk` 还会调 `_activate_selected_source_graph`。
+
+    它的合同是「冻结的 B 原样在前、被质量门接受的 G 追加在后」——所以它只能让
+    列表变长,绝不会把当前库的保底席位换掉。这条用例走真实服务确认那个前缀
+    是**同一批对象、同一顺序**。
+    """
+    active, _bases = weak_active_strong_peers()
+    ask = repo._runtime.ask_service()
+    seats = _fuse_seats(repo, active)
+    local_before = sum(1 for hit in seats if not hit.notebook_id)
+    assert local_before >= _floor(repo)
+
+    activated, _status = ask._activate_selected_source_graph(
+        active, seats, top_hits=(), max_results=repo.settings.ppr_top_chunks,
+    )
+
+    assert [hit.chunk_id for hit in activated[:len(seats)]] == [
+        hit.chunk_id for hit in seats
+    ], "冻结基线的前缀必须原样保留"
+    assert sum(1 for hit in activated if not hit.notebook_id) >= local_before
