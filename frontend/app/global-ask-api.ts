@@ -1,6 +1,5 @@
 import { requestJson, requestVoid } from "./api-client.ts";
 import type { AnswerAnchorLike, CitationLike } from "./answer-formatting.ts";
-import type { SourceElement } from "./workspace-model.ts";
 
 export type GlobalScope = { mode: "all" } | { mode: "include"; notebook_ids: string[] };
 export type GlobalSkippedNotebook = { notebook_id: string; reason: string };
@@ -73,5 +72,6 @@ export const getGlobalJob = (id: string) =>
   requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}`, options);
 export const cancelGlobalJob = (id: string) =>
   requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}/cancel`, { ...options, method: "POST" });
-export const getGlobalCitation = (jobId: string, elementId: string) =>
-  requestJson<SourceElement>(`${root}/jobs/${encodeURIComponent(jobId)}/citations/${encodeURIComponent(elementId)}`, options);
+// 引用原文全文的读取端点（`GET /global-ask/jobs/{job}/citations/{element}`）在后端
+// 保留，MCP 侧仍在用。浏览器这一侧不再有调用方：引用小卡片直接用回答里已经带着的
+// anchors/citations（snippet / quoted_span），不为一张卡片再多打一次全文。

@@ -89,6 +89,14 @@ const COMPONENT_SCAN = [
   {
     file: "answer-panel.tsx",
     scanImports: false,
+    why: "持有 useImportRowController 的答案视图（合法 import api-config，只扫字面量）",
+  },
+  {
+    // 「导入为来源」那颗按钮随引用小卡片一起抽进了 citation-card.tsx（全局问答与
+    // 笔记本内问答共用同一张卡）。它才是现在的 ImportRowButton 调用点——不跟着搬，
+    // 这条守卫的扫描面就又漏掉了真正的改道落点（与上面那条 P1 同一个坑）。
+    file: "citation-card.tsx",
+    scanImports: false,
     why: "外部证据引用卡的「导入为来源」调用点（合法 import api-config，只扫字面量）",
   },
 ];

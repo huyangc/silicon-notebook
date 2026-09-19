@@ -18,7 +18,6 @@
 .global-window-controls .icon-button { width: 32px; height: 32px; min-height: 32px; border: 0; background: transparent; }
 .global-window-controls .icon-button:hover { background: var(--soft); }
 .global-layout { display: grid; grid-template-columns: 232px minmax(0, 1fr); flex: 1; min-height: 0; }
-.global-layout.has-evidence { grid-template-columns: 232px minmax(0, 1fr) 320px; }
 .global-history-wrap { min-height: 0; border-right: 1px solid var(--line); }
 .global-history { display: flex; flex-direction: column; gap: 22px; padding: 24px 14px 16px; height: 100%; min-height: 0; }
 .global-new { display: flex; justify-content: center; align-items: center; gap: 8px; width: 100%; flex-shrink: 0; }
@@ -102,10 +101,6 @@
 .global-answer-label > span:last-child { margin-left: auto; color: var(--muted); font-size: 11px; }
 .global-answer-grounding { margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--warning-border); border-radius: 9px; background: var(--warning-bg); color: var(--warning); font-size: 12px; line-height: 1.8; }
 .global-answer-mark { background: var(--ink); color: var(--panel); font-size: 9px; width: 25px; height: 25px; border-radius: 50%; display: grid; place-items: center; }
-.global-citation-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0 14px; }
-.global-citation { display: flex; align-items: center; gap: 8px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--global-accent); text-align: left; max-width: 100%; }
-.global-citation > span { min-width: 0; font-size: 11px; }
-.global-citation small { display: block; color: var(--muted); margin-top: 3px; font-size: 10px; overflow-wrap: anywhere; }
 .global-answer-footer { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 12px; }
 .global-answer-footer small { font-size: 10px; line-height: 1.8; }
 .global-text-button { border: none; background: transparent; padding: 2px; color: var(--global-accent); display: inline-flex; align-items: center; gap: 5px; font-size: 12px; white-space: nowrap; }
@@ -115,32 +110,16 @@
 .global-job-status.failed { color: var(--danger); }
 .global-muted { color: var(--muted); font-size: 12px; padding: 10px; }
 .global-loading { display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--muted); font-size: 13px; padding: 50px 15px; }
-.global-evidence { min-width: 0; min-height: 0; background: var(--bg); border-left: 1px solid var(--line); display: flex; flex-direction: column; outline: none; }
-.global-evidence-heading { display: flex; align-items: center; justify-content: space-between; padding: 18px; border-bottom: 1px solid var(--line); }
-.global-evidence-heading > span { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-.global-evidence-heading .icon-button { height: 28px; width: 28px; min-height: 28px; }
-.global-evidence-body { overflow-y: auto; padding: 24px 20px; }
-.global-evidence-notebook { color: var(--global-accent); font-size: 11px; display: flex; align-items: center; gap: 6px; }
-.global-evidence-body h2 { font-size: 17px; line-height: 1.6; margin: 14px 0 8px; overflow-wrap: anywhere; }
-.global-evidence-body > small { color: var(--muted); font-size: 11px; }
-.global-original-text { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 24px; font-size: 13px; line-height: 2; }
-.global-original-link { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--global-accent); margin-top: 16px; text-decoration: none; }
-.global-original-link:hover { text-decoration: underline; }
 .global-mobile-toolbar { display: none; }
 .global-spin { animation: global-spin 1s linear infinite; }
 @keyframes global-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .global-spin { animation: none; } }
 @media (max-width: 1150px) {
-  .global-layout.has-evidence { grid-template-columns: 180px minmax(0, 1fr) 300px; }
   .global-layout { grid-template-columns: 200px minmax(0, 1fr); }
-}
-@media (max-width: 950px) {
-  .global-layout.has-evidence { grid-template-columns: 200px minmax(0, 1fr); }
-  .global-evidence { position: fixed; right: 0; top: 48px; bottom: 0; width: min(380px, 90vw); z-index: 30; box-shadow: var(--shadow); }
 }
 @media (max-width: 700px) {
   .global-ask-page { min-height: 0; }
-  .global-layout, .global-layout.has-evidence { grid-template-columns: minmax(0, 1fr); position: relative; }
+  .global-layout { grid-template-columns: minmax(0, 1fr); position: relative; }
   .global-mobile-toolbar { display: flex; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
   .global-mobile-toolbar .sort-button { display: flex; align-items: center; gap: 7px; min-height: 30px; padding: 0 10px; font-size: 12px; }
   .global-history-wrap { display: none; }
@@ -157,13 +136,12 @@
   .global-scope-trigger { font-size: 11px; gap: 5px; }
   .global-scope-panel { max-width: calc(100vw - 48px); }
   .global-turns { padding: 20px 18px; }
-  .global-evidence { top: 0; width: 100%; border-left: 0; }
   .global-answer-label { flex-wrap: wrap; }
   .global-answer-label > span:last-child { margin-left: 0; }
 }
 
 /* Compact layout is determined by the chat window, not the host page width. */
-.compact .global-layout, .compact .global-layout.has-evidence { grid-template-columns: minmax(0, 1fr); position: relative; }
+.compact .global-layout { grid-template-columns: minmax(0, 1fr); position: relative; }
 .compact .global-main-heading { display: none; }
 .compact .global-mobile-toolbar { display: flex; justify-content: space-between; padding: 9px 16px; gap: 10px; border-bottom: 1px solid var(--line); background: var(--panel); }
 .compact .global-mobile-toolbar .sort-button { display: flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 9px; font-size: 11px; border-color: transparent; background: transparent; color: var(--muted); }
@@ -189,8 +167,6 @@
 .compact .global-turns { padding: 20px 18px; }
 .compact .global-answer-label { flex-wrap: wrap; gap: 7px; }
 .compact .global-answer-label > span:last-child { margin-left: 0; }
-.compact .global-evidence { position: absolute; inset: 0; width: 100%; z-index: 30; border: 0; box-shadow: none; }
-.global-ask-window.is-full .global-evidence { top: 0; }
 .compact .answer-markdown { font-size: 14px; line-height: 1.85; }
 .compact .answer-markdown p, .compact .answer-markdown ul, .compact .answer-markdown ol { font-size: 14px; line-height: 1.85; }
 .compact .answer-markdown h1, .compact .answer-markdown h2 { font-size: 18px; }

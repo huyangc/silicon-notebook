@@ -1,4 +1,4 @@
-import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { NotebookScopePicker } from "../../app/ask/notebook-scope-picker.tsx";
@@ -6,13 +6,14 @@ import { GlobalConversationList } from "../../app/ask/conversation-list.tsx";
 import { useGlobalAsk } from "../../app/ask/use-global-ask.ts";
 import GlobalAskPage from "../../app/ask/page.tsx";
 import { GlobalAskLauncher } from "../../app/ask/global-ask-launcher.tsx";
+import { AnswerView } from "../../app/answer-panel.tsx";
 import { useRootModalCoordinator } from "../../app/use-root-modal-coordinator.ts";
 import type { GlobalConversation, GlobalConversationDetail, GlobalJob, GlobalScope } from "../../app/global-ask-api.ts";
-import type { NotebookSummary } from "../../app/workspace-model.ts";
+import type { AskResponse, NotebookSummary } from "../../app/workspace-model.ts";
 
 const api = vi.hoisted(() => ({
   me: vi.fn(), notebooks: vi.fn(), list: vi.fn(), detail: vi.fn(), ask: vi.fn(),
-  poll: vi.fn(), cancel: vi.fn(), rename: vi.fn(), remove: vi.fn(), citation: vi.fn(),
+  poll: vi.fn(), cancel: vi.fn(), rename: vi.fn(), remove: vi.fn(),
 }));
 vi.mock("../../app/auth.ts", () => ({ fetchMe: api.me }));
 vi.mock("../../app/notebook-api.ts", () => ({ listNotebooks: api.notebooks }));
@@ -21,7 +22,6 @@ vi.mock("../../app/global-ask-api.ts", async (importOriginal) => ({
   listGlobalConversations: api.list, getGlobalConversation: api.detail,
   askGlobal: api.ask, getGlobalJob: api.poll, cancelGlobalJob: api.cancel,
   renameGlobalConversation: api.rename, deleteGlobalConversation: api.remove,
-  getGlobalCitation: api.citation,
 }));
 
 const notebooks: NotebookSummary[] = ["材料研究", "热管理"].map((name, index) => ({
@@ -539,33 +539,169 @@ test.each(["other conversation", "failed deletion"] as const)("a pending submit 
   expect(screen.getByText("仍然有效的问题")).toBeTruthy();
 });
 
-test("page renders notebook-aware references, coverage notice and authorized original content", async () => {
-  const complete: GlobalJob = {
-    ...job("done"), searched_notebook_ids: ["nb-0", "nb-1"], cited_notebook_ids: ["nb-0"],
-    response: {
-      answer_id: "answer-1", question: "共同问题是什么？", answer: "温度影响性能 [k1]。", grounded: true,
-      anchors: [{ key: "k1", object_id: "", object_type: "element", label: "测试记录", notebook_id: "nb-0", source_id: "source-1", element_id: "element-1", source_title: "测试记录" }],
-      citations: [], created_at: "2026-09-19T01:00:00Z", notebook_scope: { mode: "all" },
-      resolved_notebook_ids: ["nb-0", "nb-1"], searched_notebook_ids: ["nb-0", "nb-1"], cited_notebook_ids: ["nb-0"],
-      completeness_notice: "回答仅使用本次命中的有限原文，不代表逐篇穷尽检查。",
-      skipped_notebooks: [],
-    },
-  };
+// 全局问答的引用呈现与笔记本内问答共用同一张小卡片（`CitationPopover` /
+// `SelectedReferenceDetail`）：点行内标记，卡片就在标记旁弹出。答案下方那排引用
+// 列表与右侧「引用原文」阅读栏已经撤掉，卡片直接用回答自带的 snippet/quoted_span，
+// 不再为它多打一次全文读取。
+const citedAnswer: GlobalJob = {
+  ...job("done"), searched_notebook_ids: ["nb-0", "nb-1"], cited_notebook_ids: ["nb-0"],
+  response: {
+    answer_id: "answer-1", question: "共同问题是什么？", answer: "温度影响性能 [k1]。", grounded: true,
+    anchors: [{
+      key: "k1", object_id: "", object_type: "element", label: "测试记录",
+      notebook_id: "nb-0", source_id: "source-1", element_id: "element-1",
+      source_title: "测试记录", location_label: "第 2 页", tier: "personal",
+      snippet: "低温环境下，容量下降。",
+    }],
+    citations: [], created_at: "2026-09-19T01:00:00Z", notebook_scope: { mode: "all" },
+    resolved_notebook_ids: ["nb-0", "nb-1"], searched_notebook_ids: ["nb-0", "nb-1"], cited_notebook_ids: ["nb-0"],
+    completeness_notice: "回答仅使用本次命中的有限原文，不代表逐篇穷尽检查。",
+    skipped_notebooks: [],
+  },
+};
+
+test("page opens the shared citation card beside the inline marker, with source, notebook and an open-notebook link", async () => {
   window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
   api.list.mockResolvedValue([conversation()]);
-  api.detail.mockResolvedValue(detail("conv-a", [complete]));
-  const pending = deferred<{ id: string; source_id: string; element_type: string; location_label: string; text: string; metadata: object }>();
-  api.citation.mockReturnValue(pending.promise);
-  render(<GlobalAskPage />);
+  api.detail.mockResolvedValue(detail("conv-a", [citedAnswer]));
+  const { container } = render(<GlobalAskPage />);
   await screen.findByText("温度影响性能", { exact: false });
-  expect(screen.getByText(complete.response!.completeness_notice)).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: /材料研究.*测试记录/ }));
-  expect(api.citation).toHaveBeenCalledWith("job-conv-a", "element-1");
-  expect(screen.getByText("正在读取原文…")).toBeTruthy();
-  await act(async () => { pending.resolve({ id: "element-1", source_id: "source-1", element_type: "paragraph", location_label: "第 2 页", text: "低温环境下，容量下降。", metadata: {} }); });
-  expect(screen.getByText("低温环境下，容量下降。")).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "关闭引用原文" }));
-  expect(screen.queryByText("低温环境下，容量下降。")).toBeNull();
+  expect(screen.getByText(citedAnswer.response!.completeness_notice)).toBeTruthy();
+  // 撤掉的两件东西不得以任何形式回来。
+  expect(container.querySelector(".global-citation-list")).toBeNull();
+  expect(container.querySelector(".global-evidence")).toBeNull();
+
+  const marker = await screen.findByRole("button", { name: "[1]" });
+  fireEvent.click(marker);
+  const card = await screen.findByRole("dialog");
+  expect(card).toHaveClass("cite-popover");
+  expect(card).toHaveTextContent("测试记录");
+  // 跨库徽章把 notebook_id 解成库名：这条引用来自哪个笔记本必须一眼可见。
+  expect(card).toHaveTextContent("来自「材料研究」（个人知识库）");
+  // 原文摘录直接来自回答自带的 anchor.snippet，没有第二次网络读取。
+  expect(card).toHaveTextContent("低温环境下，容量下降。");
+  // 选中态：卡片打开时对应标记高亮。
+  expect(marker).toHaveAttribute("aria-expanded", "true");
+
+  const openNotebook = await screen.findByRole("link", { name: "打开笔记本" });
+  expect(openNotebook).toHaveAttribute("href", "/#notebook=nb-0&source=source-1");
+
+  // 点卡片外部关闭（与笔记本内问答同一条路径：window 捕获期的 pointerdown）。
+  await act(async () => { document.body.dispatchEvent(new Event("pointerdown", { bubbles: true })); });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(marker).toHaveAttribute("aria-expanded", "false");
+});
+
+test("Escape closes only the citation card, never the floating chat window", async () => {
+  installDialogMethods();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [citedAnswer]));
+  const { container } = render(<Launcher />);
+  fireEvent.click(screen.getByRole("button", { name: "打开全局问答" }));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入问题" })).toBeEnabled());
+  fireEvent.click(await screen.findByRole("button", { name: "对话 conv-a" }));
+  await screen.findByText("温度影响性能", { exact: false });
+  fireEvent.click(await screen.findByRole("button", { name: "[1]" }));
+  const card = await waitFor(() => {
+    const node = container.querySelector(".cite-popover");
+    expect(node).not.toBeNull();
+    return node!;
+  });
+
+  // 卡片必须渲染在 <dialog> 子树内：全屏形态 showModal() 把 dialog 提到 top layer，
+  // 渲染在它之外的 fixed 元素会被盖住且不可交互。
+  expect(screen.getByRole("dialog", { name: "全局问答" }).contains(card)).toBe(true);
+  // 从 body 派发而不是从卡片派发：卡片从不接管焦点，真实按键的 target 不在卡片里。
+  // 把拦截改成卡片上的局部 onKeyDown 的实现，在这里必须红。
+  fireEvent.keyDown(document.body, { key: "Escape" });
+  await waitFor(() => expect(container.querySelector(".cite-popover")).toBeNull());
+  // 浮窗还在，草稿输入框仍可用——一次 Esc 只收一层。
+  expect(screen.getByRole("dialog", { name: "全局问答" })).toBeTruthy();
+  expect(screen.getByRole("textbox", { name: "输入问题" })).toBeTruthy();
+  // 卡片关掉之后，同一个 Esc 才轮到浮窗自己。
+  fireEvent.keyDown(screen.getByRole("dialog", { name: "全局问答" }), { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局问答" })).toBeNull());
+});
+
+test("collapsing the window closes the card and releases the page's Escape", async () => {
+  installDialogMethods();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [citedAnswer]));
+  const { container } = render(<Launcher />);
+  fireEvent.click(screen.getByRole("button", { name: "打开全局问答" }));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入问题" })).toBeEnabled());
+  fireEvent.click(await screen.findByRole("button", { name: "对话 conv-a" }));
+  await screen.findByText("温度影响性能", { exact: false });
+  fireEvent.click(await screen.findByRole("button", { name: "[1]" }));
+  await waitFor(() => expect(container.querySelector(".cite-popover")).not.toBeNull());
+
+  // 「打开笔记本」的点击落在卡片内部，不会触发 pointerdown-outside；浮窗收起后
+  // 工作区仍然挂载。卡片与它的捕获期 Esc 拦截器必须一起收掉。
+  const pageEscape = vi.fn();
+  window.addEventListener("keydown", pageEscape);
+  try {
+    fireEvent.click(within(container.querySelector(".cite-popover") as HTMLElement).getByRole("link", { name: "打开笔记本" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局问答" })).toBeNull());
+    await waitFor(() => expect(container.querySelector(".cite-popover")).toBeNull());
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(pageEscape).toHaveBeenCalledTimes(1);
+  } finally {
+    window.removeEventListener("keydown", pageEscape);
+  }
+});
+
+test("a modified click on open-notebook goes to a new tab without collapsing the window", async () => {
+  installDialogMethods();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [citedAnswer]));
+  const { container } = render(<Launcher />);
+  fireEvent.click(screen.getByRole("button", { name: "打开全局问答" }));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入问题" })).toBeEnabled());
+  fireEvent.click(await screen.findByRole("button", { name: "对话 conv-a" }));
+  await screen.findByText("温度影响性能", { exact: false });
+  fireEvent.click(await screen.findByRole("button", { name: "[1]" }));
+  const card = await waitFor(() => {
+    const node = container.querySelector(".cite-popover");
+    expect(node).not.toBeNull();
+    return node as HTMLElement;
+  });
+  fireEvent.click(within(card).getByRole("link", { name: "打开笔记本" }), { metaKey: true });
+  expect(screen.getByRole("dialog", { name: "全局问答" })).toBeTruthy();
+});
+
+test("the in-notebook citation card has no open-notebook link (no handler, no button)", async () => {
+  const answer: AskResponse = {
+    answer_id: "answer-in-notebook",
+    conversation_id: "conversation-1",
+    conclusion: "温度影响性能 [k1]。",
+    answer: "温度影响性能 [k1]。",
+    grounded: true,
+    anchors: [{
+      key: "k1", object_id: "", object_type: "element", label: "测试记录",
+      name: "测试记录", source_title: "测试记录", location_label: "第 2 页",
+      source_id: "source-1", element_id: "element-1", notebook_id: "nb-0",
+      tier: "personal", snippet: "低温环境下，容量下降。",
+    }],
+    related_knowledge: [], citations: [], llm_mode: "reasoning",
+  };
+  render(
+    <AnswerView
+      answer={answer}
+      feedbackSent=""
+      onOpenSource={() => undefined}
+      notebookId="nb-0"
+      notebookNames={{ "nb-0": "材料研究" }}
+      buildingScaleIndex={false}
+      memorySaved={false}
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "[1]" }));
+  const card = await screen.findByRole("dialog");
+  expect(card).toHaveTextContent("测试记录");
+  expect(within(card).queryByRole("link", { name: "打开笔记本" })).toBeNull();
+  expect(card.textContent).not.toContain("打开笔记本");
+  // 同一张卡上笔记本内独有的入口照常在。
+  expect(within(card).getByRole("button", { name: "查看原文" })).toBeTruthy();
 });
 
 test("page hides raw transport failures and preserves explicitly safe job guidance", async () => {
@@ -603,7 +739,8 @@ test.each([false, true, undefined])("answer grounding notice follows the reliabi
   });
   render(<GlobalAskPage />);
   await screen.findByText("部分结论仍需要核实", { exact: false });
-  expect(screen.getByRole("button", { name: /材料研究.*测试记录/ })).toBeTruthy();
+  // 有引用可点（行内标记）与「有没有据」是两件事：引用在，提醒仍按可靠性取值走。
+  expect(await screen.findByRole("button", { name: "[1]" })).toBeTruthy();
   const warning = screen.queryByText("以下回答未得到原文充分支持，请结合引用核对。");
   if (grounded === true) expect(warning).toBeNull();
   else {

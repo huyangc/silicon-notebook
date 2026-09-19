@@ -7359,13 +7359,14 @@ button.tag:hover {
   opacity: 0.5;
 }
 
-/* 外部证据引用卡（`ask.reflect_action`）头部的两个出口。
-   「打开链接」必须是真 <a>（中键/右键「在新标签页打开」、复制链接地址都要能用），
-   但视觉上与同排的「知识图谱」/「查看原文」按钮同款——否则同一排会出现两种形状的
-   动作控件。⚠ 不把 `a` 并进 `.cite-detail-head button` 那条选择器：`span` 那条通用
-   规则（display:inline-flex + 12px/700）不覆盖 <a>，`:disabled` 那条对链接又没有
-   意义，就地写全反而说得清。 */
-.cite-detail-head .cite-detail-external-link {
+/* 引用卡头部的两个链接出口：外部证据（`ask.reflect_action`）的「打开链接」，
+   与跨笔记本引用（全局问答）的「打开笔记本」。两者都必须是真 <a>（中键/右键
+   「在新标签页打开」、复制链接地址都要能用），但视觉上与同排的「知识图谱」/
+   「查看原文」按钮同款——否则同一排会出现两种形状的动作控件。⚠ 不把 `a` 并进
+   `.cite-detail-head button` 那条选择器：`span` 那条通用规则（display:inline-flex
+   + 12px/700）不覆盖 <a>，`:disabled` 那条对链接又没有意义，就地写全反而说得清。 */
+.cite-detail-head .cite-detail-external-link,
+.cite-detail-head .cite-detail-notebook-link {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -7381,11 +7382,12 @@ button.tag:hover {
   text-decoration: none;
 }
 
-/* 按下态。全局那条 `button:not(:disabled)…:active` 只认 <button>，这颗出口是真
-   <a>（中键/右键要能用），不补的话它是这一排里唯一一个按下去没有任何视觉变化的
+/* 按下态。全局那条 `button:not(:disabled)…:active` 只认 <button>，这两颗出口是真
+   <a>（中键/右键要能用），不补的话它们是这一排里唯一按下去没有任何视觉变化的
    控件。声明逐字照抄那条 base 规则（globals.css 顶部「按下必须有可见变化、松手
    还原」），同样刻意不加 transition。 */
-.cite-detail-head .cite-detail-external-link:active {
+.cite-detail-head .cite-detail-external-link:active,
+.cite-detail-head .cite-detail-notebook-link:active {
   opacity: 0.7;
   filter: brightness(0.88);
 }
