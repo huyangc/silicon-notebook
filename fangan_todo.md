@@ -216,15 +216,6 @@
       取名字的入口（`CommunityQueryService.comention_peers` / `community_member_peers`
       的消费点）按该 owner 的 `source_ceiling_for` 裁掉无可见来源支撑的实体，或在
       查询层结构性排除隐藏投影支撑的实体。**PR-D 第一个写入方落地之前必须关掉。**
-- [ ] **`evidence_context.knowledge_context` 的 canonical 折叠不认参与集覆盖**：
-      它按 `self.notebooks.participant_notebook_ids(notebook_id)` 取折叠范围
-      （`backend/app/services/evidence_context.py` 约 821 行，刻意不按 base_scope
-      收窄，理由在该处注释）。覆盖在场时这个清单是名义 active 的挂载集，而不是
-      覆盖集，于是覆盖库里的对象 `_canonical()` 查不到、两端解析到覆盖库对象的
-      关系行会被 `object_to_key` 丢掉。这是**召回退化**不是泄漏（方向是少给，不是
-      多给）。修它要把 `evidence_context.py` 加进覆盖模块的读者白名单——那是一次
-      必须被评审看见的编辑，且该文件另一处（约 312 行）是**鉴权**用途、必须继续走
-      真实挂载谓词，所以两处不能一把改。留给 PR-D 与全局问答的真实效果一起定。
 - [ ] **逐步推理词法臂的关键词按语料语言双语化（给 `plan()` 传 `corpus_langs`）**：
       无图首轮的词法臂用的是 `plan()` 里 `expand_query` 产出的高/低层关键词，而
       `plan()` 调 `expand_query` 时**不传** `corpus_langs`，拿到的是 prompt 的

@@ -585,3 +585,33 @@ chunk/插件响应除 `status` 外不变。顺手修了 `plan_query_intent` 兜�
 
 今天生产上不可达（没有任何地方构造 `notebook_source_ceilings`），覆盖由
 `backend/tests/test_peer_ceiling_subgraph.py` 直接安装天花板触发。
+
+## 36. `knowledge_context` 的 canonical 折叠范围认参与集覆盖（2026-09-20）
+
+PR-D0 的前置之一，**今天在生产上不可达、零行为变化**（没有任何写入方安装参与集覆盖），
+用例里经 `retrieval_run(actor_id=…)` + `participant_override(…)` 进入。
+`evidence_context.knowledge_context` 过去按 `self.notebooks.participant_notebook_ids`
+取 canonical 折叠范围，覆盖在场时那是名义 active 的**挂载表**而不是覆盖集：覆盖集里另一个
+库的同簇对象 `_canonical()` 恒 miss、`in_network_relations` 压根不去查那些库，关系行两端
+因此在 `object_to_key` 里无从解析。方向是**少给**（召回退化）不是泄漏，但那正是覆盖要消除
+的那种「看起来正常的空手」。现在这一处经
+`resolve_retrieval_participant_ids(notebook_id, lambda: …)` 解析；无覆盖时它直通
+`fallback()`，逐值相等、不多一次查询。
+
+`evidence_context.py` 因此成为覆盖模块的**第 6 个读者**（前五个：`retrieval_candidates`、
+`graph_retrieval`、`collection_catalog`、`collection_enumeration`、`communities`）。它是唯一
+一个自己也带鉴权调用点的读者——同文件的 `collection_item_citations` 在元素水合前复核成员
+资格，必须继续直调真实挂载谓词——所以守卫在文件级白名单之外另按**函数作用域**把两者钉开：
+鉴权作用域仍直调 `self.notebooks.participant_notebook_ids` 且其中不出现任何 `resolve_*`，
+经覆盖解析的作用域集合**恰好等于** `{knowledge_context}`（相等，不是 ⊆：多一个是越权面，
+少一个是接线被回退）。
+
+fail-soft 纪律同 diff 补齐：从 `knowledge_context` 往上逐个核对调用方后，三处宽
+`except Exception` 新登记进 `_SEAT_FAILSOFT_SITES` 并改为放行 `RetrievalControlError`——
+`AskService._answer_with_retry`（`synth()` 里装 KG 证据，吞掉就是重试一次再返回空答案，
+也就是一句「检索到却答不出」）、`ReportEngine._run_sections._draft_one`（吞掉就是交付出去
+的报告里悄悄多一节「失败」）、`knowhow.api.complete_row`（吞掉会改写成「逐步推理检索暂时
+不可用」并记到推理模型头上；这一处在本次改动之前就已能经推理检索器触达座位，属顺手补齐
+的既有缺口）。`evidence_context.py` 自身不含任何宽 handler，所以它不进登记清单。
+文档：`docs/development*.md` 守卫一节（读者数 5→6、新增按函数作用域的那条断言）。
+

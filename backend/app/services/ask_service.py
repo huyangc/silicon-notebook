@@ -2519,7 +2519,13 @@ class AskService:
             last_raised = False
             try:
                 answer, grounded, anchors = synth()
-            except AskCancelled:
+            except (AskCancelled, RetrievalControlError):
+                # ``synth()`` 把 KG 证据装配(``_answer_context`` ->
+                # ``evidence_context.knowledge_context``)算在合成里,而那一步的
+                # canonical 折叠范围读参与集座位。身份复核失败被下面那条宽
+                # handler 吞掉,就会重试一次、记一条 answer 报警、返回空答案——
+                # 一次越权上下文泄漏表现成「检索到却答不出」。登记在
+                # ``test_participant_override_guard._SEAT_FAILSOFT_SITES``。
                 raise
             except Exception as exc:
                 self.model_errors.note_model_error(
