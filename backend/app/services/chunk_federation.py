@@ -89,7 +89,9 @@ class FederatedChunkResult:
     ``per_query`` -- the downstream quota fuse's groups.  **One group per
     sub-query**, exactly as before federation: each library's hits for one
     sub-query are merged into that sub-query's single group, so the quota a
-    sub-query gets does not shrink as libraries are mounted.  Prepended to
+    sub-query gets does not shrink as libraries are mounted, and each entry
+    carries THAT sub-query's own relevance (the merged representative's
+    provenance, this leg's score -- see ``_sub_query_groups``).  Prepended to
     those are the active notebook's reserved lanes (see ``_reserve_lanes``);
     with ``chunk_federation_active_reserve = 0``, or on the single-participant
     short-circuit, there are none and the list is exactly the historical shape.
@@ -591,6 +593,20 @@ def _merge_results(
     as "the active notebook".  Leaving it empty makes ``not hit.notebook_id``
     the selection layer's clean "this is the user's own library" predicate and
     keeps the value identical to the single-library lane's.
+
+    **Baseline first, supplements appended.**  The generated-question index's
+    contract (``docs/product-and-api.md``, "Optional generated-question recall
+    supplement") is that a question-only hit may only be *appended* after
+    baseline hits -- it "does not evict or reorder them".  The single-library
+    lane honours that structurally: ``_retrieve_chunks_multi`` aggregates every
+    baseline row before considering any supplement, and there is no shared
+    budget for a supplement to spend.  ``peer_evidence`` introduces one
+    (``chunk_recall``), so this module has to restore the contract explicitly:
+    the cross-library merge runs over BASELINE pools only, and supplements get
+    their own pass whose results are appended.  Otherwise one active-library
+    question-only hit against ``chunk_recall`` peer baseline hits silently
+    costs a baseline candidate that nothing downstream can recover --
+    ``quota_fuse_baseline_first`` can only reorder what reached ``collected``.
     """
     pools: dict = {notebook_id: [] for notebook_id, _ in participants}
     per_task: list = []
@@ -603,16 +619,17 @@ def _merge_results(
         pools[task.notebook_id].append(tagged)
         per_task.append(tagged)
         parts.append((ids, matrix))
-    selected = peer_evidence(
+    selected = _select_baseline_then_supplements(
+        candidates,
         [_fold_library_pool(pools[notebook_id]) for notebook_id, _ in participants],
-        candidates.settings.chunk_recall,
         min_relevance=min_relevance,
         relative_relevance=relative_relevance,
-        peer_floor=candidates.settings.chunk_federation_peer_floor,
     )
     collected = {hit.chunk_id: hit for hit in selected}
-    per_query = _reserve_lanes(candidates, collected) + _sub_query_groups(
+    lanes = _reserve_lanes(candidates, collected)
+    per_query = lanes + _sub_query_groups(
         per_task, collected, sub_count,
+        reserved={chunk_id for lane in lanes for chunk_id in lane},
     )
     ids, matrix = _merge_selected_matrices(candidates, tasks, parts, collected)
     return FederatedChunkResult(
@@ -621,7 +638,56 @@ def _merge_results(
     )
 
 
-def _sub_query_groups(per_task: list, collected: dict, sub_count: int) -> list:
+def _select_baseline_then_supplements(
+    candidates, folded_pools: list, *,
+    min_relevance: float, relative_relevance: float,
+) -> list:
+    """Cross-library selection that a supplement can extend but never displace.
+
+    The split happens AFTER ``_fold_library_pool``, so a passage that is both a
+    historical hit and a question-index hit has already collapsed into its
+    baseline representative with the union of both support sets -- exactly the
+    single-library ordering rule -- and is therefore counted as baseline here.
+
+    Two passes over ``peer_evidence``, each with its own ``chunk_recall``
+    budget.  Supplements do not share the baseline's budget (that is the whole
+    point), and they keep a budget of their own rather than being unbounded
+    because the producer-side caps (``GENERATED_QUESTION_RECALL`` and friends)
+    are per library, so a federated arm would otherwise admit
+    ``participants x`` that many.  The same ``hit.text`` identity
+    ``peer_evidence`` uses inside one pass is applied ACROSS the two, so a
+    supplement whose text a baseline hit already carries takes no extra seat.
+    """
+    from app.services.retrieval import partition_generated_question_chunks
+
+    splits = [partition_generated_question_chunks(pool) for pool in folded_pools]
+    budget = candidates.settings.chunk_recall
+    selected = peer_evidence(
+        [baseline for baseline, _supplemental in splits], budget,
+        min_relevance=min_relevance,
+        relative_relevance=relative_relevance,
+        peer_floor=candidates.settings.chunk_federation_peer_floor,
+    )
+    supplemental = [optional for _baseline, optional in splits]
+    if not any(supplemental):
+        # The default deployment (``GENERATED_QUESTION_INDEX_MODE=off``) never
+        # produces one, and must not pay a second pass to find that out.
+        return selected
+    seen = {hit.text for hit in selected}
+    return selected + [
+        hit for hit in peer_evidence(
+            supplemental, budget,
+            min_relevance=min_relevance,
+            relative_relevance=relative_relevance,
+            peer_floor=candidates.settings.chunk_federation_peer_floor,
+        )
+        if hit.text not in seen
+    ]
+
+
+def _sub_query_groups(
+    per_task: list, collected: dict, sub_count: int, *, reserved: set,
+) -> list:
     """One group per SUB-QUERY, every library's hits for it merged in.
 
     The task table is library-major/sub-query-minor, so task ``i`` answers
@@ -637,25 +703,60 @@ def _sub_query_groups(per_task: list, collected: dict, sub_count: int) -> list:
     sub-query restores exactly today's denominator: mounting libraries widens
     the candidate pool without re-cutting the quota.
 
-    Each group's value is the ``collected`` representative rather than this
-    task's own instance: the cross-sub-query fold may have unioned supports
-    into a different object for the same chunk id, and ``quota_fuse`` hands the
-    group's object straight to the answer.  Order inside a group is by
-    comparable score descending (one producer, one 0..1 scale -- the premise
-    ``CHUNK_FEDERATION_PEER_FLOOR``'s comparable mode already rests on), ties
+    **A group carries THIS sub-query's relevance.**  ``quota_fuse`` assigns
+    every candidate to the group where ``relevance(h)`` is highest and breaks
+    ties on the lowest group index, so handing every group the merged
+    representative -- whose relevance is the maximum across sub-queries -- makes
+    all of a chunk's groups tie and collapses it into the first one.  Two
+    sub-queries with overlapping recall windows then stop covering two
+    directions: with scores ``(0.9, 0.89, 0.1)`` and ``(0.1, 0.1, 0.8)`` and
+    ``fuse_k=2`` the fuse returns the first direction's top two instead of one
+    from each.  ``_retrieve_chunks_multi`` is the ground truth here: its
+    ``per_query[i]`` is ``{c.chunk_id: c for c in scored}`` -- that sub-query's
+    OWN objects with that sub-query's own scores.
+
+    Provenance still comes from the merged representative (supports union,
+    ``exact_lookup``, ``notebook_id``), because ``quota_fuse`` hands the
+    group's object straight to the answer and a partial support set there would
+    under-report why a passage was retrieved.  So a group's entry is the
+    representative with this leg's ``relevance``/``score`` restored -- the
+    representative object itself whenever they already agree, which is the
+    common case and what keeps the single-library values untouched.
+
+    ``reserved`` -- chunk ids the active-reserve lanes already hold.  They are
+    omitted here so that a reserved chunk exists in exactly ONE group and
+    ``quota_fuse``'s assignment cannot be argued with at all; see
+    ``_reserve_lanes``.
+
+    Order inside a group is by that sub-query's own score descending, ties
     keeping task order, so it is deterministic; ``quota_fuse`` re-sorts by
     relevance anyway, so this only fixes what a reader sees.
     """
     buckets: list = [[] for _ in range(max(1, sub_count))]
     for index, hits in enumerate(per_task):
         bucket = buckets[index % len(buckets)]
-        bucket.extend(
-            collected[hit.chunk_id] for hit in hits if hit.chunk_id in collected
-        )
+        for hit in hits:
+            if hit.chunk_id in reserved:
+                continue
+            representative = collected.get(hit.chunk_id)
+            if representative is None:
+                continue
+            bucket.append(_as_leg_scored(representative, hit))
     return [
         {hit.chunk_id: hit for hit in sorted(bucket, key=lambda h: -_score(h))}
         for bucket in buckets
     ]
+
+
+def _as_leg_scored(representative, hit):
+    """The merged representative, scored as THIS leg scored it."""
+    if (
+        hit is representative
+        or (hit.relevance == representative.relevance
+            and hit.score == representative.score)
+    ):
+        return representative
+    return replace(representative, relevance=hit.relevance, score=hit.score)
 
 
 def _reserve_lanes(candidates, collected: dict) -> list:
@@ -671,16 +772,26 @@ def _reserve_lanes(candidates, collected: dict) -> list:
     ``quota_fuse_baseline_first``, called directly inside ``ask_chunk`` (a
     function under a zero-slack length ceiling), so ``per_query`` is the only
     surface between this module and the seats.  It is also enough to make the
-    floor exact rather than approximate.  ``quota_fuse`` assigns each candidate
-    to the group where its relevance is highest and breaks ties on the LOWEST
-    group index, so one dedicated single-hit group per reserved seat, placed
-    first, captures exactly those hits and hands each of them a seat in the
-    very first round-robin round.  One group per seat (not one group holding
-    them all) is required: several reserved hits in one group would all be
-    assigned to it and it would still yield only one per round.  Singletons
-    also mean the lanes cannot take MORE than the floor -- any further active
-    hit competes on merit inside its own sub-query group, which is what "at
-    least ``ceil(k * reserve)``, the rest to whoever is strongest" means.
+    floor exact rather than approximate: ``_sub_query_groups`` omits these
+    chunk ids, so each reserved hit exists in exactly ONE group and
+    ``quota_fuse`` has nothing to assign it to but its own lane, which hands it
+    a seat in the very first round-robin round.
+
+    Structural exclusion rather than "the lane happens to hold the highest
+    relevance": once each group carries its own sub-query's score (see
+    ``_sub_query_groups``), relevance comparison stops being a reliable pin.
+    ``prefer_stronger_chunk_candidate`` lets a *lower*-scoring historical row
+    beat a question-only row for the same passage, so a leg's own instance can
+    legitimately out-score the merged representative -- and the lane would lose
+    the tie-break it used to win.  Inflating the lane's relevance instead would
+    put a forged number on the object the answer receives.
+
+    One group per seat (not one group holding them all) is still required:
+    several reserved hits in one group would yield only one per round.
+    Singletons also mean the lanes cannot take MORE than the floor -- any
+    further active hit competes on merit inside its own sub-query group, which
+    is what "at least ``ceil(k * reserve)``, the rest to whoever is strongest"
+    means.
 
     ``k`` is ``chunk_mmr_k``: ``ChunkRetrievalPlan.fuse_k`` is that same field
     (its docstring calls the equality an explicit contract), and the single
