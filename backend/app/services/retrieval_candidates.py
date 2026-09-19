@@ -340,13 +340,56 @@ class _RetrievalState:
     def maybe_auto_index(self, notebook_id: str) -> None:
         self.scale_runtime.maybe_auto_index(notebook_id)
 
+    def _retrieval_participants(
+        self, active_notebook_id: str,
+    ) -> tuple[tuple[str, str], ...]:
+        """本次检索可搜索的 (notebook_id, tier) 对,确定序(active 在前,其余
+        MOUNT_ORDER)。这是三条联邦检索腿(知识对象/关系/元素)对参与集的唯一
+        读入口,取代它们各自重复的 ``participant_tiers`` 直调 + 库维度过滤。
+
+        ⛔ 这不是鉴权口。鉴权仍走 ``resolve_participants``/``mount_sql.py`` 的
+        真实谓词(见 ``source_scope.py`` 里 ``scoped_participants`` 的注释与
+        ``source_routes.py`` 里取参与集入口的注释)。这里只是联邦腿的"检索消费
+        边界",与它们原先各自内联的那道 cost guard 同层——区别于
+        ``scoped_participants`` / ``knowledge_context`` 那两处 correctness-critical
+        的消费点(那里的跳过还决定分母,见 ``notebook_in_scope`` 的 docstring)。
+
+        定义在 ``_RetrievalState`` 而不是 ``CandidateRetrievalService``:
+        ``GraphRetrievalService`` 是同一基类的兄弟子类,联邦图/PPR 的参与集
+        也要读这一个座位。
+
+        库维度用 ``notebook_in_scope`` 过滤,它是 COST guard 不是正确性闸——
+        被跳过的库在结果边界仍有 fail-closed 的 ``filter_retrieval_items``
+        兜底;这个访问器只是让一个未勾选的参考库在查询发出前就免费跳过,而不
+        仅仅是无害(见 ``notebook_in_scope`` 自己的 docstring)。
+
+        不 memo:``participant_tiers`` 本来就是每次现读,且一次 ask 里三条腿
+        各调一次;缓存无收益,却会引入"run 中途挂载变化"的语义问题。
+        """
+        with self._connect() as db:
+            notebook_ids, tier_map = self.notebooks.participant_tiers(
+                db, active_notebook_id,
+            )
+        from app.services.source_scope import notebook_in_scope
+
+        return tuple(
+            (nid, tier_map.get(nid, "personal"))
+            for nid in notebook_ids
+            if notebook_in_scope(nid)
+        )
+
     def _federated_graph_is_large(self, active_notebook_id: str) -> bool:
-        # Deliberately NOT `_retrieval_participants`: this reads the raw
-        # mount-table id list and today never filters by `notebook_in_scope`
-        # (a scope-excluded library still counts toward "is the graph big").
-        # Routing it through the seat would silently narrow this id set and
-        # change behaviour under a narrowed run -- out of scope for a
-        # zero-behaviour-change refactor.
+        # KNOWN DIVERGENCE, not a settled design: this reads the raw mount-table
+        # id list and never filters by `notebook_in_scope`, so a library the
+        # user just UNCHECKED still counts toward "is the graph big". With a
+        # small active notebook and one huge unchecked reference library,
+        # `_chunk_kg_overlay` / the PPR fallback refuse with
+        # `reason=large_notebook` although every library this run will search
+        # is small -- and the event misdescribes the run's corpus. It was kept
+        # off `_retrieval_participants` only because the refactor that created
+        # the seat had to be behaviour-neutral. Fixing it is a behaviour change
+        # and belongs with the participant-override work, which widens the same
+        # gap from "library dimension" to "any override" (fangan_todo.md).
         return any(
             not self.notebook_copy_stats(notebook_id)["copyable"]
             for notebook_id in self.notebooks.participant_notebook_ids(active_notebook_id)
@@ -2118,38 +2161,6 @@ class CandidateRetrievalService(_RetrievalState):
             "source_candidates_restricted": source_candidates_restricted,
         })
         return scored
-    def _retrieval_participants(
-        self, active_notebook_id: str,
-    ) -> tuple[tuple[str, str], ...]:
-        """本次检索可搜索的 (notebook_id, tier) 对,确定序(active 在前,其余
-        MOUNT_ORDER)。这是三条联邦检索腿(知识对象/关系/元素)对参与集的唯一
-        读入口,取代它们各自重复的 ``participant_tiers`` 直调 + 库维度过滤。
-
-        ⛔ 这不是鉴权口。鉴权仍走 ``resolve_participants``/``mount_sql.py`` 的
-        真实谓词(见 ``source_scope.py`` 里 ``scoped_participants`` 的注释与
-        ``source_routes.py`` 里取参与集入口的注释)。这里只是"检索消费边界",
-        与 ``scoped_participants`` 同层。
-
-        库维度用 ``notebook_in_scope`` 过滤,它是 COST guard 不是正确性闸——
-        被跳过的库在结果边界仍有 fail-closed 的 ``filter_retrieval_items``
-        兜底;这个访问器只是让一个未勾选的参考库在查询发出前就免费跳过,而不
-        仅仅是无害(见 ``notebook_in_scope`` 自己的 docstring)。
-
-        不 memo:``participant_tiers`` 本来就是每次现读,且一次 ask 里三条腿
-        各调一次;缓存无收益,却会引入"run 中途挂载变化"的语义问题。
-        """
-        with self._connect() as db:
-            notebook_ids, tier_map = self.notebooks.participant_tiers(
-                db, active_notebook_id,
-            )
-        from app.services.source_scope import notebook_in_scope
-
-        return tuple(
-            (nid, tier_map.get(nid, "personal"))
-            for nid in notebook_ids
-            if notebook_in_scope(nid)
-        )
-
     def _federated_retrieve_impl(
         self,
         active_notebook_id: str,
@@ -3026,10 +3037,24 @@ class CandidateRetrievalService(_RetrievalState):
         from app.services.vector_index import query_sims
         recall = recall or self.settings.chunk_recall
         query_vector = self._embed_query(query)
+        # 联邦 warm-peek lane(``_CHUNK_PEEK_ONLY``,由 ``chunk_federation`` 的
+        # 任务体在非 active 的**大库**那一腿上 set)。判据必须在下面那个 ANN
+        # 分支**之外**先读:``chunk_ann_enabled=0`` 或 embed 失败
+        # (``query_vector is None``)时那个 if 根本不进,而「这一腿绝不冷加载、
+        # 绝不全表暴力」这条约束照样要成立。
+        peek_only = _CHUNK_PEEK_ONLY.get()
         if (self.settings.chunk_ann_enabled
                 and query_vector is not None):
             scale_started = time.perf_counter()
-            idx = self._scale_index(notebook_id, allow_stale=True)
+            # ``peek_warm_chunk_index`` 只归还已经常驻、且 ``chunk_ann_handle``
+            # 已经打开的那一份(不加载、不等冷加载、不解析 manifest、不 open
+            # handle),所以下游 ``_retrieve_chunks_ann`` 里的 ``_open_scale_ann``
+            # 必然命中 memoize 直接返回——peek 腿上不发生任何 artifact 打开。
+            idx = (
+                self.scale_runtime.catalog.peek_warm_chunk_index(notebook_id)
+                if peek_only
+                else self._scale_index(notebook_id, allow_stale=True)
+            )
             scale_index_load_ms = round(
                 (time.perf_counter() - scale_started) * 1000
             )
@@ -3050,6 +3075,23 @@ class CandidateRetrievalService(_RetrievalState):
                 )
                 if ann is not None:
                     return ann
+        if peek_only:
+            # 暖 ANN 缺席(索引不常驻/handle 未开/签名被换代)或 ANN fail-open:
+            # 这一腿当场降级为有界 FTS,**绝不**往下走。下面那条有界暴力向量
+            # 路径会 ``_gather_chunks`` 整表读正文,并写 ``_vector_matrix`` 那份
+            # 版本键控的**共享**进程缓存——正是 warm-peek 要躲开的冲刷与成本。
+            # 为什么只对非 active 的大库这样:active 是用户「正在用」的那一本,
+            # 冷加载它的 scale 索引是今天就在发生的成本,不因联邦而改变;而为一个
+            # 非 active 的大库冷加载,会把单库路径依赖的暖索引挤出
+            # ``scale_idx_cache_max``(大库位 ``_large=2``)。
+            # ``n_chunks`` 仍走 ``notebook_chunk_count`` 的 seq-gated memo,不得
+            # 传占位值——见 ``_retrieve_chunks_fts_degraded`` 的 docstring。
+            return self._retrieve_chunks_fts_degraded(
+                notebook_id, query, query_vector, recall,
+                self.notebook_chunk_count(notebook_id),
+                allowed_source_ids=allowed_source_ids,
+                source_restricted=source_restricted,
+            )
         # ── 大库暴力守卫(镜像 #171 冷矩阵守卫哲学):走到这里 = ANN 不可用(未建
         # scale 索引 / embed 失败 query_vector=None / ANN fail-open)。超阈值的库
         # 绝不落进下面「全表拉文本 + 逐 chunk 纯 Python 分词」——生产 55 万 KG 级
@@ -3704,7 +3746,20 @@ class CandidateRetrievalService(_RetrievalState):
 
         results = []
         if sub_queries:
-            with ThreadPoolExecutor(max_workers=min(len(sub_queries), 8)) as ex:
+            # 扇出上限是**具名**限额(``CHUNK_FANOUT_MAX_WORKERS``,默认 8 = 这里
+            # 原来那个字面量),与联邦 chunk 腿共用同一个数:两层扇出被压成一层
+            # 后,「库 × 子查询」的总并发仍受这一个上限约束,DB 连接峰值不变。
+            # 两层 ``getattr`` 兜底针对的是既有测试替身:本方法被 unbound 调用、
+            # ``self`` 是连 ``settings`` 都没有的 ``SimpleNamespace``(见
+            # ``test_generated_question_plugin`` 的原生取消用例),而 ``Settings``
+            # 上这个字段由同一个 PR 的联邦模块任务加入。兜底值与该字段声明的默认值
+            # 同源同值,所以「单库 + N 子查询」的并发上限逐字不变。
+            fanout = getattr(
+                getattr(self, "settings", None), "chunk_fanout_max_workers", 8
+            )
+            with ThreadPoolExecutor(
+                max_workers=min(len(sub_queries), fanout)
+            ) as ex:
                 results = list(ex.map(_one, tasks))
         per_query, collected_by_content = [], {}
         supplemental_rows, ids, mat = [], [], None
