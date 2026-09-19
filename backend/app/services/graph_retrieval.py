@@ -18,6 +18,7 @@ from app.services.retrieval_candidates import _RetrievalState
 # separate one override's set from another's.
 from app.services.retrieval_participants import (
     current_participant_override,
+    federated_ask_active,
     override_fingerprint,
 )
 
@@ -1107,7 +1108,15 @@ class GraphRetrievalService(_RetrievalState):
         定义,not notebook_copy_stats()["copyable"])下拒绝构建该图,发
         ppr_fallback_refused 事件后返回 []——调用方(reasoning 种子/agent 动作、
         chunk 模式三路 mix;曾经的 graph 引擎 PPR 分支同样如此,该 ask 模式已
-        退役)均已对 [] 容错降级。小库保留旧回退路径,字节不变。"""
+        退役)均已对 [] 容错降级。小库保留旧回退路径,字节不变。
+
+        对等模式整条关掉(D0-5)。调用方 ``retrieval_candidates._mix_retrieve``
+        已经有同一条闸,这里是**防御性第二道**:reasoning 的种子/动作腿与报告
+        引擎都直调本函数,闸只放在 mix 那一处就漏掉了它们。关的理由见那处注释
+        ——PPR 走的是按名义 active 缓存的一张联邦图、reset 向量也只从它的种子
+        出发,在没有主体库的 run 里那是命名锚点独有的一条腿。"""
+        if federated_ask_active():
+            return []
         from app.services.kg.ppr import run_ppr
         top_chunks = self.settings.ppr_top_chunks
         ranked = self.scale_ppr(

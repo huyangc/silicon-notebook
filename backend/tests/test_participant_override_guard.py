@@ -801,6 +801,29 @@ _SEAT_FAILSOFT_SITES = (
     ("app/services/chunk_federation.py", "_run_one", "run"),
 )
 
+# D0-6 的逐条复核结论(人工可达性,不是断言;记在这里是为了下一个 diff 不必重推):
+# 下面这些 handler 是 D0-1..D0-5 新增或触及的宽 ``except``,**都不登记**,理由各自写明。
+# 判据只有一条:这个 try 体能不能触达参与集座位(``_retrieval_participants`` /
+# ``resolve_retrieval_participant*``)——不是「它里面有没有 source_scope 读」。
+#
+# * ``retrieval_candidates._chunk_kg_overlay``(D0-1 的 ``_ceiling_scoped_subgraph``)
+#   —— 该函数里**没有任何宽 except**,裁剪整段裸奔。
+# * ``communities.sibling_peers`` 的 ``except Exception`` —— try 体是
+#   ``_resolve_focal`` + ``comention_peers(**_ceiling_kwargs(...))``;``_ceiling_kwargs``
+#   只读 ``source_scope.current_source_scope()`` 与 ``retrieval_run`` 的 memo,座位读发生在
+#   **更外层**的 ``mounted_base_ids``(它不在任何 try 里,而它的 reasoning 调用点
+#   ``_action_expand_community`` 已在上面登记)。
+# * ``communities._note_source_index_fallback._probe`` —— 纯可观测性探针
+#   (``source_index_backfilled`` + emit),不触达座位。
+# * ``chunk_federation._federated_tasks`` / ``_peek_only._probe`` / ``_emit`` ——
+#   分别是逐库可见来源枚举、copy-stats 探针、事件投递;参与集在
+#   ``_bounded_participants`` 里(父线程、这些 try 之外)早已读完。
+# * ``chunk_lane._lexical_gate_drift_probe`` / ``graph_retrieval._kg_peer_source_ceilings``
+#   —— 前者包 ``_unsafe_source_scope_restricted``,后者包 ``all_visible_source_ids`` +
+#   ``scoped_allowed_source_ids``,两者都只读 ``source_scope``。
+# * D0-5 没有新增任何宽 ``except``;它加在 ``_spreadsheet_reasoning_results``(已有宽
+#   handler)里的两行只读 ``source_scope`` 的 ContextVar,同样不触达座位。
+
 _CONTROL_ERROR = "RetrievalControlError"
 
 
