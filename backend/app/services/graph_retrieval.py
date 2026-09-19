@@ -1423,7 +1423,11 @@ class GraphRetrievalService(_RetrievalState):
         3. ``scoped_allowed_source_ids`` —— 再与本次勾选的来源清单取交,库被排除
            时它返回 ``()``,当场空手。
 
-        不在返回值里的 owner = 这一轮不参与,调用方整组跳过。
+        不在返回值里的 owner = 这一轮不参与,调用方整组跳过。**读不到清单的
+        owner 也走这条出口**:枚举抛错(语句超时之类)时只跳过那一个 owner 并发一条
+        内容无关事件,健康的库与 active 不受影响。绝不退化成"读不到就不带天花板
+        去查它"——那是把一次读失败变成一次比正常路径更宽的检索(fail-closed)。
+        ``AskCancelled`` 照抛:取消是用户的决定,不是逐库降级。
 
         为什么可以在 ``elem_ids`` 解析**之前**就为所有 owner 取天花板(哪怕某个库
         的对象一条 element_id 都没有):它必须在 ``self._connect()`` 之外算完
@@ -1435,7 +1439,8 @@ class GraphRetrievalService(_RetrievalState):
         memo key 枚举一次可见来源——所以这里每一次都是 memo 命中。没有 ambient run
         时(memo 直通)会真读,但那种场景本来就没有任何东西被冻结。
         """
-        from app.services.chunk_federation import _peer_visible_sources
+        from app.services.cancellation import AskCancelled
+        from app.services.chunk_federation import _emit, _peer_visible_sources
         from app.services.source_scope import (
             notebook_in_scope, scoped_allowed_source_ids,
         )
@@ -1444,10 +1449,21 @@ class GraphRetrievalService(_RetrievalState):
         for owner in dict.fromkeys(object_owners.values()):
             if not owner or owner == notebook_id or not notebook_in_scope(owner):
                 continue
-            ceilings[owner] = frozenset(
-                scoped_allowed_source_ids(owner, _peer_visible_sources(self, owner))
-                or ()
-            )
+            started = time.perf_counter()
+            try:
+                ceilings[owner] = frozenset(
+                    scoped_allowed_source_ids(owner, _peer_visible_sources(self, owner))
+                    or ()
+                )
+            except AskCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001 - one owner must not fail the lane
+                _emit(self, {
+                    "kind": "kg_peer_ceiling_skipped",
+                    "notebook_id": owner,
+                    "error_type": type(exc).__name__,
+                    "latency_ms": round((time.perf_counter() - started) * 1000),
+                })
         return ceilings
 
     def _elem_chunks_by_owner(

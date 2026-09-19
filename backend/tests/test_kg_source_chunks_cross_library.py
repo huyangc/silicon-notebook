@@ -571,3 +571,74 @@ def test_mix_retrieve_carries_base_passages_with_their_origin(
         support.origin == "kg_source"
         for chunk in base_chunks for support in chunk.retrieval_supports
     )
+
+
+# ---------------------------------------------------------------------------
+# 12. 逐 owner 的准备失败被隔离
+# ---------------------------------------------------------------------------
+
+
+def test_one_owners_unreadable_ceiling_never_takes_down_the_lane(
+    repo, mounted, monkeypatch
+):
+    """某个参考库的来源枚举抛错(语句超时之类)→ 只有它这一轮空手。
+
+    active 与其余 owner 照常反查,发一条内容无关事件;绝不退化成「读不到清单
+    就不带天花板去查它」——那会把一次读失败变成一次比正常路径更宽的检索。
+    """
+    active, base = mounted
+    graph = repo.retrieval.graph
+    events = _collect_events(repo, monkeypatch)
+    element_calls: list[str] = []
+    original_elements = graph.chunks.chunks_for_element_ids
+    monkeypatch.setattr(
+        graph.chunks, "chunks_for_element_ids",
+        lambda db, nid, elems: (
+            element_calls.append(nid), original_elements(db, nid, elems)
+        )[1],
+    )
+    monkeypatch.setattr(
+        graph.sources, "all_visible_source_ids",
+        lambda nid: (_ for _ in ()).throw(
+            RuntimeError("statement timeout on src-base")
+        ),
+    )
+
+    chunks = graph._kg_source_chunks(
+        active, ["o-base", "o-act"],
+        object_owners={"o-base": base, "o-act": active},
+    )
+
+    assert [chunk.chunk_id for chunk in chunks] == ["ck-act-1"]
+    assert base not in element_calls, "读不到天花板的库不得被无天花板地反查"
+    skipped = [
+        event for event in events
+        if event.get("kind") == "kg_peer_ceiling_skipped"
+    ]
+    assert len(skipped) == 1
+    event = dict(skipped[0])
+    assert isinstance(event.pop("latency_ms"), int)
+    assert event == {
+        "kind": "kg_peer_ceiling_skipped", "notebook_id": base,
+        "error_type": "RuntimeError",
+    }
+    assert "timeout" not in repr(events), "事件不得携带异常消息"
+
+
+def test_cancellation_while_preparing_an_owner_is_not_swallowed(
+    repo, mounted, monkeypatch
+):
+    from app.services.cancellation import AskCancelled
+
+    active, base = mounted
+    graph = repo.retrieval.graph
+    monkeypatch.setattr(
+        graph.sources, "all_visible_source_ids",
+        lambda nid: (_ for _ in ()).throw(AskCancelled()),
+    )
+
+    with pytest.raises(AskCancelled):
+        graph._kg_source_chunks(
+            active, ["o-base", "o-act"],
+            object_owners={"o-base": base, "o-act": active},
+        )
