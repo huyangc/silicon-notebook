@@ -177,9 +177,12 @@ HTTP 入口均位于 `/api/global-ask`，要求登录：`POST /ask` 返回可轮
 输入沿用 `ASK_QUESTION_MAX_CHARS=4000` 与 `CONVERSATION_TITLE_MAX_CHARS=200`；
 全局会话/任务标识和客户端请求标识上限 200 字符。列表分页默认 50、上限 100。
 `GLOBAL_ASK_CANDIDATE_LIMIT` 默认 64、最小 1，限制所有库合并后的候选数，不截短参与库集合；
-选材按库和来源轮流保留各自的相关度顺序，去除跨库相同文本，不直接比较不同检索分支的分数。
-模型上下文先为各个候选库预留相等字符份额，再分配剩余空间；模型未知引用触发共用答案重试，
-不保留无法绑定依据的结论。
+候选须同时达到 `GLOBAL_ASK_MIN_RELEVANCE`（默认 0.25，范围 0–1）以及本库最高分乘以
+`GLOBAL_ASK_RELATIVE_RELEVANCE`（默认 0.6，范围 0–1）。有合格证据的库先保留一条不同原文，
+剩余名额按库内倒数名次与相对本库最高分的置信比例分配，去除跨库相同文本；不把不同检索
+分支的原始分数直接用于全局排序。
+各库最佳段落合计可容纳时，模型上下文优先全部保留；否则各库先在均分字符份额内保留一段
+完整原文，再分配剩余空间。模型未知引用触发共用答案重试，不保留无法绑定依据的结论。
 `GLOBAL_ASK_HISTORY_TURNS` 默认 10、最小 0，控制可用的既往完成轮数。
 `GLOBAL_ASK_MAX_NOTEBOOKS` 默认 32、最小 1，解析范围超过上限时明确要求少选库，不静默截断。
 `GLOBAL_ASK_MAX_CONCURRENT` 默认 4、最小 1，限制每进程任务及正在受理的请求；满额拒绝新任务
@@ -191,16 +194,21 @@ SQL 执行和连接池获取使用剩余时限；数据库网络故障的传输�
 因此不承诺网络异常下的严格墙钟截止。原生 ANN 不能强制抢占，超时结果在加载候选或合成前丢弃。
 共用问题改写与一次问题向量生成发生在此阶段之前，受已有模型服务超时控制，因此这些配置
 不是整份答案的硬截止时间。全局检索不冷加载共享 scale 索引、ANN 句柄、增量或整库向量矩阵。
-仅当冻结来源范围覆盖索引来源目录时使用已暖 ANN；其余采用有界词法召回和候选向量评分，
-通过 `degraded_notebook_ids` 披露，包括跨语言召回可能不完整。任务和答案均返回
+冻结来源范围覆盖索引来源目录时使用已暖 ANN。小库还可按批流式读取已存向量进行语义召回，
+只保留靠前候选，不写共享矩阵缓存。`GLOBAL_ASK_SMALL_NOTEBOOK_MAX_CHUNKS` 默认 20000、
+最小 0（0 禁用此分支）；`CHUNK_BRUTEFORCE_MAX_CHUNKS` 为正时进一步收紧上限，为 0
+也不会允许无限扫描。来源过滤在打分前执行，读取受单库时限约束。
+语义召回不可用时采用有界词法召回和候选向量评分，通过 `degraded_notebook_ids` 披露，
+包括跨语言召回可能不完整。任务和答案均返回
 `skipped_notebooks: [{notebook_id, reason}]`；MCP 的 `coverage` 包含这两份回执。
 超出模型上下文预算的段落整段省略，因此不承诺每个库都能获得引用或上下文名额。
 模型原文预算复用 `CHUNK_ANSWER_BUDGET_CHARS`，不另建第二份截断设置。
 
 四个 MCP 全局工具不依赖 `select_notebook`：`ask_global`、`get_global_ask` 与
 `cancel_global_ask` 同时要求 `ask:execute` 和 `knowledge:read`；`get_global_cited_element`
-要求 `knowledge:read`。`get_global_ask` 的 `next_answer_offset` 与 `next_citation_offset`
-分别延续正文和引用分页；引用元数据可按 MCP 共用预算披露压缩，原文点查则通过 `next_offset`
+要求 `knowledge:read`。`get_global_ask` 的 `next_answer_offset`、`next_citation_offset` 与
+`next_coverage_offset` 分别延续正文、引用和检索回执分页；回执保留完整数量，未检索和降级
+库列表共用 `coverage_offset` 继续读取。引用元数据可按 MCP 共用预算披露压缩，原文点查则通过 `next_offset`
 取回完整文本。正文页、标识和后续分页游标不得静默截断。结果附带网页会话路径
 `/ask?conversation_id=...`。`list_notebooks` 新增 `offset`/`query`，返回 `total`/`next_offset`，
 搜索遍历完整实时白名单，不能把第一页误当成全局范围。

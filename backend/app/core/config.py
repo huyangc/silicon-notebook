@@ -1257,6 +1257,15 @@ class Settings(BaseSettings):
     )
     global_ask_max_notebooks: int = Field(32, ge=1, validation_alias="GLOBAL_ASK_MAX_NOTEBOOKS")
     global_ask_max_concurrent: int = Field(4, ge=1, validation_alias="GLOBAL_ASK_MAX_CONCURRENT")
+    global_ask_small_notebook_max_chunks: int = Field(
+        20000, ge=0, validation_alias="GLOBAL_ASK_SMALL_NOTEBOOK_MAX_CHUNKS",
+    )
+    global_ask_min_relevance: float = Field(
+        0.25, ge=0, le=1, validation_alias="GLOBAL_ASK_MIN_RELEVANCE",
+    )
+    global_ask_relative_relevance: float = Field(
+        0.6, ge=0, le=1, validation_alias="GLOBAL_ASK_RELATIVE_RELEVANCE",
+    )
     global_ask_retrieval_timeout_seconds: float = Field(
         30, gt=0, validation_alias="GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS",
     )

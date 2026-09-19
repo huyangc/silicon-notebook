@@ -26,21 +26,21 @@ class GlobalAskSynthesis:
         used = 0
         represented = {chunk.notebook_id for chunk in chunks if chunk.element_ids}
         share = self.settings.chunk_answer_budget_chars // max(1, len(represented))
-        per_notebook = {}
-        deferred = []
+        selected = set()
 
-        def admit(chunk, allowance):
-            nonlocal used
-            if not chunk.element_ids:
-                return True
-            key = f"k{len(blocks) + 1}"
-            block = json.dumps({
+        def serialize(chunk, key):
+            return json.dumps({
                 "key": key,
                 "notebook": notebook_names.get(chunk.notebook_id, "笔记本"),
                 "source": chunk.source_title,
                 "location": chunk.section_path,
                 "text": chunk.text,
             }, ensure_ascii=False)
+
+        def admit(chunk, allowance):
+            nonlocal used
+            key = f"k{len(blocks) + 1}"
+            block = serialize(chunk, key)
             cost = len(block) + 1
             if cost > allowance or used + cost > self.settings.chunk_answer_budget_chars:
                 return False
@@ -54,16 +54,28 @@ class GlobalAskSynthesis:
                 "location_label": chunk.section_path, "notebook_id": chunk.notebook_id,
                 "tier": "personal", "relevance": chunk.relevance,
             }
-            per_notebook[chunk.notebook_id] = per_notebook.get(chunk.notebook_id, 0) + cost
+            selected.add(chunk.chunk_id)
             return True
 
-        # Reserve each represented notebook's equal share before redistributing
-        # unused capacity; a near-budget chunk cannot preempt other libraries.
-        for chunk in chunks:
-            if not admit(chunk, share - per_notebook.get(chunk.notebook_id, 0)):
-                deferred.append(chunk)
-        for chunk in deferred:
-            admit(chunk, self.settings.chunk_answer_budget_chars - used)
+        candidates = [chunk for chunk in chunks if chunk.element_ids]
+        best = {}
+        for chunk in candidates:
+            best.setdefault(chunk.notebook_id, chunk)
+        best_cost = sum(len(serialize(chunk, f"k{index}")) + 1
+                        for index, chunk in enumerate(best.values(), start=1))
+        if best_cost <= self.settings.chunk_answer_budget_chars:
+            # Never let a weaker, shorter tail preempt a reserved best passage
+            # when all libraries' best passages fit together.
+            for chunk in best.values():
+                admit(chunk, self.settings.chunk_answer_budget_chars - used)
+        else:
+            represented = set()
+            for chunk in candidates:
+                if chunk.notebook_id not in represented and admit(chunk, share):
+                    represented.add(chunk.notebook_id)
+        for chunk in candidates:
+            if chunk.chunk_id not in selected:
+                admit(chunk, self.settings.chunk_answer_budget_chars - used)
         return "\n".join(blocks), id_map
 
     def __call__(self, question, chunks, notebook_names, history, cancel_event):

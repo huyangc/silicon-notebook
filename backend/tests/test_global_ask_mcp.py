@@ -6,7 +6,7 @@ import pytest
 
 from app.api.mcp_tools import global_ask as module
 from app.api.mcp_tools import session as session_module
-from app.api.mcp_tools._shared import TOTAL_TEXT_LIMIT
+from app.api.mcp_tools._shared import RESULT_LIMIT, TOTAL_TEXT_LIMIT
 from tests.test_memory_mcp import OfficialMcpClient, _payload, mcp_env
 
 
@@ -39,6 +39,57 @@ def test_coverage_retains_every_skip_and_degraded_receipt():
     page = module._job_page(value)
     assert page["coverage"]["skipped_notebooks"] == value["skipped_notebooks"]
     assert page["coverage"]["degraded_notebook_ids"] == ["nb-a"]
+    assert page["coverage"]["skipped"] == page["coverage"]["degraded"] == 1
+    assert page["coverage_offset"] == 0 and page["next_coverage_offset"] is None
+
+
+@pytest.mark.parametrize("long_ids", [False, True])
+@pytest.mark.parametrize("status", ["running", "done", "cancelled"])
+def test_coverage_pages_reassemble_all_32_notebook_identities_under_the_byte_budget(long_ids, status):
+    ids = [f"{index:03d}-" + ("库" * 196 if long_ids else "library") for index in range(32)]
+    value = job(answer="跨库答案与原文证据。" * 500)
+    value["status"] = status
+    value["resolved_notebook_ids"] = ids
+    value["searched_notebook_ids"] = ids[:23]
+    value["skipped_notebooks"] = [{"notebook_id": nb, "reason": "检索超时，请重试。"} for nb in ids]
+    value["degraded_notebook_ids"] = ids[:23]
+    offset = 0
+    skipped, degraded, page_counts = [], [], []
+    while True:
+        page = module._job_page(value, coverage_offset=offset)
+        assert page["status"] == status
+        assert len(json.dumps(page, ensure_ascii=False).encode()) <= TOTAL_TEXT_LIMIT
+        coverage = page["coverage"]
+        assert (coverage["resolved"], coverage["searched"], coverage["skipped"], coverage["degraded"]) == (32, 23, 32, 23)
+        assert page["coverage_offset"] == offset
+        skipped.extend(coverage["skipped_notebooks"])
+        degraded.extend(coverage["degraded_notebook_ids"])
+        count = max(len(coverage["skipped_notebooks"]), len(coverage["degraded_notebook_ids"]))
+        page_counts.append(count)
+        assert 0 < count <= RESULT_LIMIT
+        if page["next_coverage_offset"] is None:
+            break
+        assert page["next_coverage_offset"] == offset + count
+        offset = page["next_coverage_offset"]
+    assert skipped == value["skipped_notebooks"]
+    assert degraded == value["degraded_notebook_ids"]
+    if long_ids:
+        assert page_counts[0] < RESULT_LIMIT
+
+
+def test_coverage_cursor_advances_when_only_the_longer_list_has_remaining_items():
+    value = job()
+    value["skipped_notebooks"] = [{"notebook_id": "skipped", "reason": "请重试。"}]
+    value["degraded_notebook_ids"] = [f"nb-{index}" for index in range(32)]
+    first = module._job_page(value)
+    assert first["next_coverage_offset"] == RESULT_LIMIT
+    last = module._job_page(value, coverage_offset=first["next_coverage_offset"])
+    assert last["coverage"]["skipped_notebooks"] == []
+    assert first["coverage"]["degraded_notebook_ids"] + last["coverage"]["degraded_notebook_ids"] == value["degraded_notebook_ids"]
+    assert last["next_coverage_offset"] is None
+    exhausted = module._job_page(value, coverage_offset=100)
+    assert exhausted["coverage"]["skipped_notebooks"] == exhausted["coverage"]["degraded_notebook_ids"] == []
+    assert exhausted["next_coverage_offset"] is None
 
 
 @pytest.fixture
@@ -127,6 +178,23 @@ async def test_read_and_cancel_forward_current_owner_and_allowlist(adapter):
         ("job-a", {"user_id": "owner-a", "allowed_notebook_ids": ["nb-a"]}),
         ("job-a", {"user_id": "owner-a", "allowed_notebook_ids": ["nb-b"]}),
     ]
+
+
+@pytest.mark.anyio
+async def test_get_continues_coverage_independently_and_rejects_negative_offset(adapter):
+    handlers, _, _, service = adapter
+    saved = job(answer="完整答案")
+    saved["degraded_notebook_ids"] = [f"nb-{index}" for index in range(32)]
+    calls = []
+    service.get_job = lambda *_args, **_kw: calls.append(True) or saved
+    first = await handlers["get_global_ask"]("job-a", None)
+    last = await handlers["get_global_ask"]("job-a", None, coverage_offset=first["next_coverage_offset"])
+    assert first["answer"] == last["answer"] == "完整答案"
+    assert last["coverage"]["degraded_notebook_ids"] == saved["degraded_notebook_ids"][RESULT_LIMIT:]
+    assert last["next_coverage_offset"] is None
+    with pytest.raises(ValueError, match="分页位置不能小于零"):
+        await handlers["get_global_ask"]("job-a", None, coverage_offset=-1)
+    assert len(calls) == 2
 
 
 @pytest.mark.anyio
@@ -254,8 +322,9 @@ async def test_official_client_global_tools_need_no_selected_notebook(mcp_env, m
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
         started = _payload(await client.call("ask_global", {"question": "跨库结论是什么？"}))
         assert started["job_id"] == "job-a"
-        result = _payload(await client.call("get_global_ask", {"job_id": "job-a"}))
+        result = _payload(await client.call("get_global_ask", {"job_id": "job-a", "coverage_offset": 1}))
         assert result["answer"] == "跨库答案"
+        assert result["coverage_offset"] == 1 and result["next_coverage_offset"] is None
         element = _payload(await client.call("get_global_cited_element", {
             "job_id": "job-a", "element_id": "element-a",
         }))

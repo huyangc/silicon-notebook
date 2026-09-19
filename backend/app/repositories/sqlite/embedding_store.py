@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Callable, ContextManager, Sequence
 
 import sqlite3
+import json
 
 from app.domain.vector_index import encode_vector
 
@@ -121,6 +122,40 @@ class EmbeddingStore:
             f"SELECT {id_col} AS vid, vector FROM {table} WHERE notebook_id = ?",
             (notebook_id,),
         ).fetchall()
+
+    @staticmethod
+    def global_small_chunk_vector_page(db, notebook_id: str, *, allowed_source_ids,
+                                       max_chunks: int, after: str, page_size: int):
+        """Bound library size before returning any source-scoped vector bytes.
+
+        The capped count and page share a statement snapshot. A notebook that
+        grows beyond admission between pages returns no vectors on its next
+        page. No chunk text or full-library matrix crosses this boundary.
+        """
+        if max_chunks <= 0 or page_size <= 0:
+            return False, []
+        source_clause = ""
+        source_params = ()
+        if allowed_source_ids is not None:
+            source_clause = " AND c.source_id IN (SELECT value FROM json_each(?))"
+            source_params = (json.dumps(list(allowed_source_ids)),)
+        rows = db.execute(
+            "WITH bounded_chunks AS (SELECT id FROM chunks WHERE notebook_id=? LIMIT ?), "
+            "library_size AS (SELECT COUNT(*) AS chunk_count FROM bounded_chunks), "
+            "page AS (SELECT c.id AS vid,e.vector FROM chunks c "
+            "JOIN chunk_embeddings e ON e.chunk_id=c.id AND e.notebook_id=c.notebook_id "
+            "WHERE c.notebook_id=? AND c.id>? "
+            "AND (SELECT chunk_count FROM library_size)<=?" + source_clause +
+            " ORDER BY c.id LIMIT ?) "
+            "SELECT library_size.chunk_count,page.vid,page.vector FROM library_size "
+            "LEFT JOIN page ON 1=1 ORDER BY page.vid",
+            (notebook_id, max_chunks + 1, notebook_id, after, max_chunks,
+             *source_params, page_size),
+        ).fetchall()
+        return int(rows[0]["chunk_count"]) <= max_chunks, [
+            {"vid": row["vid"], "vector": row["vector"]}
+            for row in rows if row["vid"] is not None
+        ]
 
     @staticmethod
     def vector_rows_for_ids(db, notebook_id: str, table: str, id_col: str, ids):

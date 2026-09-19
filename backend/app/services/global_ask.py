@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 import json
 import threading
 import time
-import time
 from uuid import uuid4
 
 from app.models.global_ask import (
@@ -237,7 +236,11 @@ class GlobalAskService:
             job.searched_notebook_ids.append(notebook_id)
             if not self._save_if_open(job, user_id, progress=True):
                 raise AskCancelled()
-        return peer_evidence(pools, self.settings.global_ask_candidate_limit), evidence
+        return peer_evidence(
+            pools, self.settings.global_ask_candidate_limit,
+            min_relevance=self.settings.global_ask_min_relevance,
+            relative_relevance=self.settings.global_ask_relative_relevance,
+        ), evidence
 
     def _run(self, job, user_id, names, history, event, allowed, authority_check, source_ceiling):
         try:

@@ -460,6 +460,85 @@ test("rename shows local success and delete requires explicit confirmation", asy
   await waitFor(() => expect(deleted).toHaveBeenCalledWith("conv-a"));
 });
 
+test.each(["resolve", "reject"] as const)("deleting the active conversation retires a pending submit and its late %s cannot unlock a new submit", async (outcome) => {
+  const deletion = deferred<void>();
+  const oldSubmission = deferred<GlobalJob>();
+  const newSubmission = deferred<GlobalJob>();
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  api.remove.mockReturnValue(deletion.promise);
+  api.ask.mockReturnValueOnce(oldSubmission.promise).mockReturnValueOnce(newSubmission.promise);
+  render(<GlobalAskPage />);
+  const input = await screen.findByRole("textbox", { name: "输入问题" });
+  await waitFor(() => expect(input).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "删除 对话 conv-a" }));
+  fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+  expect(api.remove).toHaveBeenCalledWith("conv-a");
+  fireEvent.change(input, { target: { value: "即将删除的对话中的问题" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+  expect(api.ask.mock.calls[0][0].conversation_id).toBe("conv-a");
+
+  await act(async () => { deletion.resolve(); });
+  expect(window.location.search).toBe("");
+  expect(input).toBeEnabled();
+  expect(input).toHaveValue("");
+  expect(screen.queryByRole("button", { name: "对话 conv-a" })).toBeNull();
+  fireEvent.change(input, { target: { value: "新对话中的问题" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+  expect(api.ask.mock.calls[1][0].conversation_id).toBeUndefined();
+  expect(api.ask.mock.calls[1][0].client_request_id).not.toBe(api.ask.mock.calls[0][0].client_request_id);
+
+  await act(async () => {
+    if (outcome === "resolve") oldSubmission.resolve({ ...job(), question: "已删除对话的迟到回答" });
+    else oldSubmission.reject(new Error("deleted conversation"));
+  });
+  expect(window.location.search).toBe("");
+  expect(screen.queryByText("已删除对话的迟到回答")).toBeNull();
+  expect(input).toBeDisabled();
+  // A stale finally must not release the synchronous guard of the new request.
+  fireEvent.submit(input.closest("form")!);
+  expect(api.ask).toHaveBeenCalledTimes(2);
+  api.list.mockResolvedValue([conversation("conv-new")]);
+  await act(async () => { newSubmission.resolve({ ...job("cancelled", "conv-new"), question: "新对话中的问题" }); });
+  expect(window.location.search).toBe("?conversation_id=conv-new");
+  expect(input).toBeEnabled();
+  expect(screen.getByText("新对话中的问题")).toBeTruthy();
+});
+
+test.each(["other conversation", "failed deletion"] as const)("a pending submit survives %s without losing its owner", async (scenario) => {
+  const deletion = deferred<void>();
+  const submission = deferred<GlobalJob>();
+  const deletedId = scenario === "other conversation" ? "conv-b" : "conv-a";
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation(), conversation("conv-b")]);
+  api.remove.mockReturnValue(deletion.promise);
+  api.ask.mockReturnValue(submission.promise);
+  render(<GlobalAskPage />);
+  const input = await screen.findByRole("textbox", { name: "输入问题" });
+  await waitFor(() => expect(input).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: `删除 对话 ${deletedId}` }));
+  fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+  fireEvent.change(input, { target: { value: "仍然有效的问题" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+  expect(api.ask).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    if (scenario === "other conversation") deletion.resolve();
+    else deletion.reject(new Error("offline"));
+  });
+  expect(window.location.search).toBe("?conversation_id=conv-a");
+  expect(input).toBeDisabled();
+  expect(input).toHaveValue("仍然有效的问题");
+  if (scenario === "failed deletion") expect(screen.getByText("操作失败，请重试")).toBeTruthy();
+  else expect(screen.queryByRole("button", { name: "对话 conv-b" })).toBeNull();
+  fireEvent.submit(input.closest("form")!);
+  expect(api.ask).toHaveBeenCalledTimes(1);
+  api.list.mockResolvedValue([conversation()]);
+  await act(async () => { submission.resolve({ ...job("cancelled"), question: "仍然有效的问题" }); });
+  expect(window.location.search).toBe("?conversation_id=conv-a");
+  expect(input).toBeEnabled();
+  expect(screen.getByText("仍然有效的问题")).toBeTruthy();
+});
+
 test("page renders notebook-aware references, coverage notice and authorized original content", async () => {
   const complete: GlobalJob = {
     ...job("done"), searched_notebook_ids: ["nb-0", "nb-1"], cited_notebook_ids: ["nb-0"],

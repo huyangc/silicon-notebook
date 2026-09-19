@@ -682,7 +682,9 @@ origin 写进此名单后 URL 导入才能触达。每项必须带 `http://` 或
 `GLOBAL_ASK_MAX_NOTEBOOKS`、`GLOBAL_ASK_MAX_CONCURRENT`、`GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS`、
 `GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS` 和 `GLOBAL_ASK_SHUTDOWN_TIMEOUT_SECONDS` 分别控制范围
 受理、进程容量及检索/关闭预算。PostgreSQL 连接池预算包含全局问答并发。
-未暖 ANN 使用显式披露的词法降级，不挤占共享热索引。
+`GLOBAL_ASK_SMALL_NOTEBOOK_MAX_CHUNKS` 限制小库临时流式语义召回，不挤占共享热索引。
+`GLOBAL_ASK_MIN_RELEVANCE` 和 `GLOBAL_ASK_RELATIVE_RELEVANCE` 在逐库保底前过滤弱候选，
+应按代表性问题评测后调节。没有语义召回的库才使用显式披露的词法降级。
 模型上下文复用 `CHUNK_ANSWER_BUDGET_CHARS`；`query_rewrite` 和 `ask_answer`
 沿用既有模型服务配置，无需新增模型端点。精确默认值与边界见
 [全局问答](./product-and-api_zh.md#全局问答)。
