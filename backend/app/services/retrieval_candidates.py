@@ -329,31 +329,33 @@ class _RetrievalState:
         覆盖不在场时这个函数逐字回到上面描述的行为——``resolve_retrieval_
         participants`` 在无覆盖时就是 ``fallback()`` 本身。
 
-        memo key 在覆盖在场时带上覆盖指纹。同一个 run 内理论上不会既有覆盖又
-        无覆盖(覆盖装在 run 外层、全程在场),但 key 不带指纹就是一个等着被复用
-        的坑:任何一次"先无覆盖解析一次、再装覆盖"的接线顺序,都会让第二次读到
-        第一次冻住的挂载集,而且静默。
+        ⛔ 覆盖在场时**不走 memo**,每一次读都重新解析。理由有两条,缺一不可:
+        (1) 解析本身就是身份复核(actor、名义 active),而 memo 命中会整段跳过
+        ``resolve_retrieval_participants``——同一个 run 里先用甲的覆盖预热、再装
+        一个成员相同却声明给乙的覆盖,读到的会是缓存而不是报错;成员换个顺序
+        还能绕过名义 active 的检查(指纹对顺序不敏感)。fail-closed 的合同是
+        「每次读都复核」,不是「第一次读复核」。(2) 覆盖集是内存里的一个 tuple,
+        解析零 I/O,根本没有可省的成本;memo 在这条路上只有风险没有收益。
+        无覆盖时 key 与行为逐字不变。
         """
         from app.services.retrieval_participants import (
             current_participant_override,
-            override_fingerprint,
             resolve_retrieval_participants,
         )
         from app.services.source_scope import notebook_in_scope
 
-        override = current_participant_override()
-        pairs = memoized_retrieval_value(
-            ("retrieval_participants", active_notebook_id)
-            if override is None
-            else (
-                "retrieval_participants",
-                active_notebook_id,
-                override_fingerprint(override),
-            ),
-            lambda: resolve_retrieval_participants(
+        def resolve():
+            return resolve_retrieval_participants(
                 active_notebook_id,
                 lambda: self._mount_participants(active_notebook_id),
-            ),
+            )
+
+        pairs = (
+            resolve()
+            if current_participant_override() is not None
+            else memoized_retrieval_value(
+                ("retrieval_participants", active_notebook_id), resolve
+            )
         )
         return tuple(
             (nid, tier) for nid, tier in pairs if notebook_in_scope(nid)
