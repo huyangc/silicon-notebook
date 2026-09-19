@@ -83,6 +83,12 @@ from app.repositories.ports import (
     UnifiedKgStorePort,
 )
 from app.services.knowledge_contracts import USABLE_STATUSES
+# Reader #3 on ``retrieval_participants``' frozen whitelist: the collection map
+# reports what THIS RUN may enumerate, so a participant override has to reach
+# it or the map would advertise libraries retrieval will not read.
+from app.services.retrieval_participants import (
+    resolve_retrieval_participant_ids,
+)
 from app.services.source_scope import current_source_scope, scoped_participants
 
 
@@ -283,7 +289,11 @@ class CollectionCatalogService:
     retrieval uses, whose validity predicate lives once in ``mount_sql.py``.  A
     base that was mounted but has since been downgraded or changed owner drops
     out of retrieval and must drop out of the map with it; anything else would
-    promise the model collections it cannot reach.
+    promise the model collections it cannot reach.  When a run installs a
+    participant override that set is REPLACED by the override's libraries, for
+    the same reason: the map must describe the libraries this run reads, and a
+    federated run reads libraries that are not mounted into its nominal active
+    notebook at all.
 
     ``collection_map`` then narrows that list by the run's reference-library
     checkboxes (``scoped_participants``) — the map is the number the model
@@ -370,8 +380,17 @@ class CollectionCatalogService:
         build recomputes it.  Wrong entries are unreachable, not sticky.
         """
         with self._database.connect() as db:
+            # Order is load-bearing: the override REPLACES the participant set,
+            # ``scoped_participants`` then NARROWS whatever came out by the
+            # run's library checkboxes. Reversing them would narrow the mount
+            # table and then throw the result away.
             notebook_ids = scoped_participants(
-                self._notebooks.participant_ids(db, active_notebook_id)
+                resolve_retrieval_participant_ids(
+                    active_notebook_id,
+                    lambda: self._notebooks.participant_ids(
+                        db, active_notebook_id,
+                    ),
+                )
             )
             elements, sources, active_sources = self._scope_signal_row_counts(
                 db, notebook_ids, active_notebook_id

@@ -322,46 +322,90 @@ class _RetrievalState:
         ⛔ 这不是 ``_unsafe_source_scope_restricted`` 那种被 codex #634 R1 禁止
         memo 的判据:那条是**范围 ENFORCEMENT** 的活体探针,这里是挂载表快照,
         库维度的收窄仍然每次现算。
+
+        **参与集覆盖**(PR-C)。覆盖在场时整份挂载读被 ``retrieval_participants
+        .resolve_retrieval_participants`` 替换掉(``_mount_participants`` 一次
+        都不调),但**库维度过滤照跑**:勾选可以把覆盖集再收窄,不能把它扩张。
+        覆盖不在场时这个函数逐字回到上面描述的行为——``resolve_retrieval_
+        participants`` 在无覆盖时就是 ``fallback()`` 本身。
+
+        memo key 在覆盖在场时带上覆盖指纹。同一个 run 内理论上不会既有覆盖又
+        无覆盖(覆盖装在 run 外层、全程在场),但 key 不带指纹就是一个等着被复用
+        的坑:任何一次"先无覆盖解析一次、再装覆盖"的接线顺序,都会让第二次读到
+        第一次冻住的挂载集,而且静默。
         """
+        from app.services.retrieval_participants import (
+            current_participant_override,
+            override_fingerprint,
+            resolve_retrieval_participants,
+        )
         from app.services.source_scope import notebook_in_scope
 
-        notebook_ids, tier_map = memoized_retrieval_value(
-            ("retrieval_participants", active_notebook_id),
-            lambda: self._mount_participants(active_notebook_id),
+        override = current_participant_override()
+        pairs = memoized_retrieval_value(
+            ("retrieval_participants", active_notebook_id)
+            if override is None
+            else (
+                "retrieval_participants",
+                active_notebook_id,
+                override_fingerprint(override),
+            ),
+            lambda: resolve_retrieval_participants(
+                active_notebook_id,
+                lambda: self._mount_participants(active_notebook_id),
+            ),
         )
         return tuple(
-            (nid, tier_map.get(nid, "personal"))
-            for nid in notebook_ids
-            if notebook_in_scope(nid)
+            (nid, tier) for nid, tier in pairs if notebook_in_scope(nid)
         )
 
     def _mount_participants(self, active_notebook_id: str) -> tuple:
-        """One live mount read: ``(notebook_ids, tier_map)``, before any filter.
+        """One live mount read as ``(notebook_id, tier)`` pairs, before any filter.
 
         Split out so the run-local freeze above has exactly one thing to
-        memoise, and so PR-C's participant override has a fallback to call.
+        memoise, and so the participant override has a fallback to call.  Pairs
+        rather than ``(ids, tier_map)`` because that is the shape
+        ``resolve_retrieval_participants`` contracts for a fallback; the missing
+        tier default moved in here with it, so the resolved value is already
+        complete and the filter above only filters.
         """
         with self._connect() as db:
             notebook_ids, tier_map = self.notebooks.participant_tiers(
                 db, active_notebook_id,
             )
-        return tuple(notebook_ids), dict(tier_map)
+        return tuple(
+            (nid, tier_map.get(nid, "personal")) for nid in notebook_ids
+        )
 
     def _federated_graph_is_large(self, active_notebook_id: str) -> bool:
-        # KNOWN DIVERGENCE, not a settled design: this reads the raw mount-table
-        # id list and never filters by `notebook_in_scope`, so a library the
-        # user just UNCHECKED still counts toward "is the graph big". With a
-        # small active notebook and one huge unchecked reference library,
-        # `_chunk_kg_overlay` / the PPR fallback refuse with
-        # `reason=large_notebook` although every library this run will search
-        # is small -- and the event misdescribes the run's corpus. It was kept
-        # off `_retrieval_participants` only because the refactor that created
-        # the seat had to be behaviour-neutral. Fixing it is a behaviour change
-        # and belongs with the participant-override work, which widens the same
-        # gap from "library dimension" to "any override" (fangan_todo.md).
+        """Is any library THIS RUN WILL SEARCH too big for the whole-graph lanes?
+
+        Reads the participant seat, so the answer covers exactly the set the
+        run searches -- both dimensions of it. Until PR-C this read the raw
+        mount-table id list and never filtered by `notebook_in_scope`, so a
+        reference library the user had just UNCHECKED still counted toward "is
+        the graph big": with a small active notebook and one huge unchecked
+        library, `_chunk_kg_overlay` / the PPR fallback refused with
+        `reason=large_notebook` although every library the run would touch was
+        small, and the event misdescribed the run's corpus. That divergence was
+        kept deliberately while the refactor that created the seat had to stay
+        behaviour-neutral (fangan_todo.md); a participant override widens the
+        identical gap from the library dimension to any override, so both are
+        closed here in one behaviour change.
+
+        This only ever RELAXES the guard: the seat's output is a subset of the
+        mount list it used to read, so a run refused before can now be admitted
+        but never the reverse. What the admitted lanes then read is unchanged
+        and still scope-filtered at their own boundaries
+        (`scoped_subgraph_nodes` / `filter_retrieval_items`), so relaxing the
+        guard cannot make an excluded library's content citable -- it only stops
+        that library from disabling lanes over libraries the run really reads.
+        """
         return any(
             not self.notebook_copy_stats(notebook_id)["copyable"]
-            for notebook_id in self.notebooks.participant_notebook_ids(active_notebook_id)
+            for notebook_id, _tier in self._retrieval_participants(
+                active_notebook_id,
+            )
         )
 
     def cluster_map(self, notebook_id: str) -> dict[str, str]:
@@ -583,6 +627,31 @@ class _RetrievalState:
         return bool(source_scope_restricted() or drifted)
 
     def _any_base_notebook_has_kg(self, notebook_id: str, database=None) -> bool:
+        """Does any reference library have a knowledge graph?
+
+        With no override this is the historical single mount-join EXISTS, byte
+        for byte -- one statement, zero extra queries, and it deliberately
+        answers for every MOUNTED library (the library-dimension divergence is
+        `retrieval_service.any_base_has_kg`'s to narrow, not this accessor's).
+
+        With an override the mount join answers about a set this run does not
+        search, so the question is answered over the seat instead: one indexed
+        `has_kg` EXISTS per participant, `any()`-short-circuited, bounded by the
+        override's ≤8 libraries. `[1:]` keeps R1 intact -- the BASE dimension
+        only; the seat leads with the nominal active and every caller pairs this
+        with its own `_notebook_has_kg` for the active half.
+        """
+        from app.services.retrieval_participants import (
+            current_participant_override,
+        )
+
+        if current_participant_override() is not None:
+            return any(
+                self._notebook_has_kg(participant_id)
+                for participant_id, _tier in self._retrieval_participants(
+                    notebook_id,
+                )[1:]
+            )
         if database is not None:
             return self.knowledge.any_mounted_has_kg_on(database, notebook_id)
         return self.knowledge.any_mounted_has_kg(notebook_id)
@@ -2196,7 +2265,24 @@ class CandidateRetrievalService(_RetrievalState):
     def _federated_retrieve_relations_impl(self, active_notebook_id: str,
                                      query: str) -> List["RetrievedRelation"]:
         """跨 {base notebook(s)} ∪ {active} 检索关系,逐本 .notebook_id/.tier 标注。
-        每本走 _retrieve_relations_scored(同尺),合并按 score 降序。"""
+        每本走 _retrieve_relations_scored(同尺),合并按 score 降序。
+
+        ⚠ **参与库的来源天花板在这条腿上不下推**,由结果边界
+        ``source_scope.filter_retrieval_items(..., "relation", ...)`` 强制。
+        理由是这条腿本身不具备下推的形状:关系的 ANN/FTS 产物至今**不按来源分区**
+        (正下方那条 active 专属的 ``_unsafe_source_scope_restricted`` 跳过,存在
+        的原因就是这个),所以没有一个"关系 → 来源"的谓词可以塞进 ``LIMIT``
+        之前。同库的 chunk / element 腿有 ``allowed_source_ids`` 可用,这条没有。
+
+        代价与 PR-A 里「ANN 被投影 chunk 饿死」同形、并按同样的理由接受:某个参与库
+        若有大量由天花板外来源(典型是该库的隐藏 Memory 投影)支撑的关系,它们会占掉
+        这条腿的 Top-K 名额,该库真正可用的关系因此少召回。**不越权**——那些关系在
+        结果边界被 fail-closed 地丢掉(``filter_retrieval_items`` 的
+        knowledge/relation 分支按每条命中**自己那一库**的天花板判,空证据即丢弃),
+        损失的只是召回份额。真要修,得先让关系产物按来源分区;在那之前超取会按倍数
+        放大每参与库一次的 ANN 成本,收益却只在"该库投影特别多"这一种形态上,
+        所以现在不做。
+        """
         all_hits: List["RetrievedRelation"] = []
 
         # Library dimension is decided inside `_retrieval_participants`. The
@@ -3663,17 +3749,42 @@ class CandidateRetrievalService(_RetrievalState):
         *,
         allowed_source_ids: Iterable[str] | None,
     ) -> list[RetrievedChunk]:
-        """Hydrate GQ originals only after notebook/scope/actor SQL checks."""
-        from app.services.source_scope import current_source_scope
+        """Hydrate GQ originals only after notebook/scope/actor SQL checks.
+
+        Branch order mirrors ``source_scope.scoped_allowed_source_ids`` and is
+        under the same prohibition on reordering.  The per-notebook ceiling arm
+        is not optional here: a federated run submits no LOCAL checkbox scope,
+        so ``ceiling_active`` is False on its nominal active notebook and the
+        historical ``elif`` below would leave this statement with NO source
+        predicate at all -- an unbounded read before ``LIMIT``, which is the
+        shape ``scoped_allowed_source_ids``' docstring rules out in those words.
+        The two arms cannot both bind: ``ActiveSourceScope.__post_init__``
+        refuses a scope that puts a per-notebook ceiling AND the local
+        mode/source_ids ceiling on the same notebook.
+        """
+        from app.services.source_scope import (
+            current_source_scope,
+            scoped_allowed_source_ids,
+        )
 
         scope = current_source_scope()
         if scope is not None and scope.notebook_id != notebook_id:
             return []
         source_mode: str | None = None
         source_ids: tuple[str, ...] = ()
+        peer_ceiling = (
+            None if scope is None else scope.source_ceiling_for(notebook_id)
+        )
         if allowed_source_ids is not None:
             source_mode = "include"
             source_ids = tuple(sorted(set(allowed_source_ids)))
+        elif peer_ceiling is not None:
+            # Taken from ``scoped_allowed_source_ids`` rather than from
+            # ``peer_ceiling`` directly so the materialized list has exactly one
+            # definition. An empty ceiling stays an explicit deny: the adapters
+            # short-circuit ``include`` with no ids to zero rows.
+            source_mode = "include"
+            source_ids = tuple(scoped_allowed_source_ids(notebook_id) or ())
         elif scope is not None and scope.ceiling_active:
             source_mode = scope.mode
             values = (

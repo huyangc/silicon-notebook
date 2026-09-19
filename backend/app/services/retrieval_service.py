@@ -87,13 +87,13 @@ class RetrievalService:
         ``filter_retrieval_items`` still drops it here -- only recall/budget
         share is at stake, same as the graph-walk case.
 
-        Known, deliberately unfixed limitation: ``_federated_graph_is_large``
-        (the size guard this and ``_chunk_kg_overlay`` sit behind) walks EVERY
-        mounted participant. It cannot consult the per-request scope without
-        either publishing a scope-blind cache under a library-less key or
-        forcing a full multi-million-node rebuild per checkbox combination, so
-        UNCHECKING a library large enough to trip the guard does not turn the
-        guard back off.
+        The size guard this and ``_chunk_kg_overlay`` sit behind
+        (``_federated_graph_is_large``) reads the participant seat, so it now
+        answers for the libraries this run really searches: unchecking a library
+        large enough to trip it does turn the guard back off. The cache-key
+        argument that used to justify the divergence never applied to the guard
+        itself -- it is a per-library ``copyable`` lookup, not a graph build, so
+        consulting the scope costs nothing and publishes nothing.
         """
         return filter_retrieval_items(
             _notebook_id(args, kwargs), "chunk",
@@ -106,23 +106,32 @@ class RetrievalService:
             base_scope_ceiling_active,
             current_source_scope,
             filter_evidence,
+            peer_scope_ceiling_active,
             source_scope_ceiling_active,
         )
 
         notebook_id = _notebook_id(args, kwargs)
         result = self.graph.follow_chain(*args, **kwargs)
         scope = current_source_scope()
-        # Two ORTHOGONAL ceilings gate this result: the local checkbox one and
-        # the mounted-library one. Testing the local one alone hands an
-        # unchecked reference library's chains back untouched, because
-        # narrowing only the library dimension deliberately leaves the local
-        # answers alone (R1).
+        # THREE ORTHOGONAL ceilings gate this result: the local checkbox one,
+        # the mounted-library one, and each participant's own frozen source
+        # list. Testing the local one alone hands an unchecked reference
+        # library's chains back untouched, because narrowing only the library
+        # dimension deliberately leaves the local answers alone (R1); testing
+        # only those two hands back a federated run's chains untouched, because
+        # such a run submits NEITHER of them -- its only ceiling is the
+        # per-notebook one, and skipping the filter on it is fail-open on the
+        # very path that is supposed to be the backstop.
         #
         # CEILING, not narrowing: skipping the whole filter is a FILTERING
         # decision, and the frozen snapshots bind on every submitted scope --
         # including the browser's default full selection, where both narrowing
         # answers are False.
-        if not (source_scope_ceiling_active() or base_scope_ceiling_active()):
+        if not (
+            source_scope_ceiling_active()
+            or base_scope_ceiling_active()
+            or peer_scope_ceiling_active()
+        ):
             return result
         result.nodes = filter_retrieval_items(notebook_id, "knowledge", result.nodes)
         allowed_nodes = {
@@ -144,10 +153,20 @@ class RetrievalService:
                 if not scope.covers_notebook(hop.notebook_id):
                     scoped_hops = []
                     break
+                # Source dimension second, judged against the hop's OWN
+                # library. A peer hop used to be handed back verbatim on the
+                # argument that a still-checked library is not governed by the
+                # active notebook's checkboxes -- true, but it is governed by
+                # its own per-notebook ceiling, and returning its evidence
+                # unfiltered is fail-open the moment one binds. The library
+                # with no ceiling of its own still answers ``None`` here and
+                # keeps every row, exactly as before.
                 evidence = (
                     list(hop.evidence)
                     if hop.notebook_id != notebook_id
-                    else filter_evidence(notebook_id, hop.evidence)
+                    and scope.source_ceiling_for(hop.notebook_id) is None
+                    else filter_evidence(hop.notebook_id or notebook_id,
+                                         hop.evidence)
                 )
                 if not evidence:
                     scoped_hops = []
@@ -172,7 +191,6 @@ class RetrievalService:
         from app.services.source_scope import (
             current_source_scope,
             filter_evidence,
-            source_scope_ceiling_active,
         )
 
         row = self.graph.node_context(*args, **kwargs)
@@ -183,9 +201,18 @@ class RetrievalService:
         origin = str(row.get("notebook_id") or notebook_id)
         if not scope.covers_notebook(origin):
             return {}
-        # Local dimension unchanged: only the active notebook's own rows are
-        # evidence-filtered, and only when a frozen local ceiling is in force.
-        if not source_scope_ceiling_active() or origin != notebook_id:
+        # Branch order and spelling copied verbatim from
+        # ``source_scope.evidence_json_allowed``, and for its stated reason: the
+        # local arm answers "not mine" for every peer library, so a per-notebook
+        # ceiling tested after it would never bind a peer's row. This method is
+        # where a peer's definition/snippet enters the answer prompt behind a
+        # live ``k{n}`` anchor (see ``filter_retrieval_items``' knowledge branch),
+        # so returning that row unfiltered is the leak, not a courtesy.
+        # ``is not None``, never truthiness: ``frozenset()`` is "frozen to zero
+        # sources", an explicit deny, and must filter rather than pass through.
+        if scope.source_ceiling_for(origin) is None and (
+            not scope.ceiling_active or origin != notebook_id
+        ):
             return row
         evidence = filter_evidence(origin, row.get("evidence") or [])
         return {**row, "evidence": evidence} if evidence else {}
@@ -382,13 +409,22 @@ class RetrievalService:
         out is the definition of a misleading gate.
 
         The narrowing goes through the two established seams rather than into
-        the SQL: ``participant_notebook_ids``
-        (``resolve_participants``/``mount_sql.py`` -- the shared retrieval AND
-        authorization predicate, which a per-request checkbox must never
-        narrow) followed by ``scoped_participants`` (the consumption-boundary
-        filter the collection map and the typed enumerations already use). Same
-        list, same predicate, one filter -- so this gate can never disagree
-        with what enumeration and federated retrieval consider in scope.
+        the SQL: ``candidates._retrieval_participants`` -- the participant SEAT,
+        whose own fallback is ``resolve_participants``/``mount_sql.py``, the
+        shared retrieval AND authorization predicate a per-request checkbox must
+        never narrow -- followed by ``scoped_participants`` (the
+        consumption-boundary filter the collection map and the typed
+        enumerations already use). Same list, same predicate, one filter -- so
+        this gate can never disagree with what enumeration and federated
+        retrieval consider in scope.
+
+        Deliberately the seat rather than a direct
+        ``retrieval_participants`` import: the override module's reader
+        whitelist is five files and every addition to it has to be a reviewed
+        edit (``backend/tests/test_participant_override_guard.py``). Reading the
+        seat gets this gate the override for free without widening that list,
+        and the no-override branch below reaches the same answer through
+        ``_any_base_notebook_has_kg``, which is override-aware on its own.
 
         R1 is preserved: only the BASE dimension is consulted. The active
         notebook is dropped from the participant list and answered separately
@@ -433,11 +469,13 @@ class RetrievalService:
         return any(
             self.has_kg(base_id)
             for base_id in scoped_participants(
-                self.candidates.notebooks.participant_notebook_ids(notebook_id)
+                participant_id
+                for participant_id, _tier in
+                self.candidates._retrieval_participants(notebook_id)
             )
-            # participant_notebook_ids leads with the active notebook, and
-            # covers_notebook() always keeps it -- this gate is about the base
-            # dimension only (R1).
+            # The seat leads with the active notebook, and covers_notebook()
+            # always keeps it -- this gate is about the base dimension only
+            # (R1).
             if base_id != notebook_id
         )
 

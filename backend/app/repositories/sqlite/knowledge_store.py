@@ -1397,17 +1397,42 @@ class KnowledgeStore:
 
     @staticmethod
     def follow_start_row(db: sqlite3.Connection, object_id: str,
-                         active_notebook_id: str, statuses):
+                         active_notebook_id: str, statuses,
+                         participant_ids=None):
         """起点授权门:只有 active 自己的对象、或 active 挂载的参考库里的对象,
-        才能作为 follow_chain 的合法起点(未挂载的 tier='base' 库不算,即便它已发布)。"""
+        才能作为 follow_chain 的合法起点(未挂载的 tier='base' 库不算,即便它已发布)。
+
+        ``participant_ids`` 非 None 时用这份显式清单替换内联的挂载子查询。
+
+        ⛔ 这不放宽授权。唯一会传它的调用方是**参与集覆盖在场**的检索腿,而覆盖
+        集在构造时就已经过 ``can_read_many``(``ParticipantOverride
+        .attested_actor_id`` 就是那次检查通过的用户,``resolve_retrieval_
+        participants`` 每次使用还会拿它与本次 run 的 actor 复核并在不符时 raise)。
+        所以这条分支是把「哪些库参与本次检索」这个已经被授权过的答案交给 SQL,
+        不是让 SQL 少问一次权限:覆盖不在场时清单为 None、子查询逐字保留。
+
+        空清单 -> None。``IN ()`` 不是合法 SQL,而且语义上"没有任何库参与"本就
+        没有合法起点,fail-closed 与本函数的既有语义一致。"""
         ph = ",".join("?" for _ in statuses)
+        if participant_ids is None:
+            return db.execute(
+                f"SELECT ko.*, n.tier AS notebook_tier "
+                f"FROM knowledge_objects ko JOIN notebooks n ON n.id=ko.notebook_id "
+                f"WHERE ko.id=? AND ko.status IN ({ph}) "
+                "AND (ko.notebook_id=? OR ko.notebook_id IN ("
+                + MOUNTED_BASE_IDS_SUBQUERY + "))",
+                (object_id, *statuses, active_notebook_id, active_notebook_id),
+            ).fetchone()
+        ids = [str(value) for value in participant_ids]
+        if not ids:
+            return None
+        id_ph = ",".join("?" for _ in ids)
         return db.execute(
             f"SELECT ko.*, n.tier AS notebook_tier "
             f"FROM knowledge_objects ko JOIN notebooks n ON n.id=ko.notebook_id "
             f"WHERE ko.id=? AND ko.status IN ({ph}) "
-            "AND (ko.notebook_id=? OR ko.notebook_id IN ("
-            + MOUNTED_BASE_IDS_SUBQUERY + "))",
-            (object_id, *statuses, active_notebook_id, active_notebook_id),
+            f"AND ko.notebook_id IN ({id_ph})",
+            (object_id, *statuses, *ids),
         ).fetchone()
 
     @staticmethod

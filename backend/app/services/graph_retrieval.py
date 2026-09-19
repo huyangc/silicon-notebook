@@ -11,6 +11,15 @@ from app.models.common import Evidence
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.retrieval import RetrievedKnowledge
 from app.services.retrieval_candidates import _RetrievalState
+# Reader #2 on ``retrieval_participants``' frozen whitelist (see that module's
+# docstring and ``backend/tests/test_participant_override_guard.py``): the
+# federated relation graph, the PPR graph and the scale PPR graph all resolve a
+# participant set, and all three publish process-level caches whose keys must
+# separate one override's set from another's.
+from app.services.retrieval_participants import (
+    current_participant_override,
+    override_fingerprint,
+)
 
 
 #: Rows per batched hnswlib ``knn_query`` in the cross-layer synonym bridge.
@@ -27,6 +36,42 @@ from app.services.retrieval_candidates import _RetrievalState
 #: consumer of the same handle. This path runs once per cache-version miss
 #: (cold combined-graph load), not per query, so the pool is acceptable here.
 _XBRIDGE_QUERY_BLOCK = 4096
+
+
+def _participant_graph_cache_key(notebook_id: str, family: str) -> str:
+    """Process-level cache key for a graph built over the participant set.
+
+    ``{nb}:{family}`` with no override -- byte for byte the historical key --
+    and ``{nb}:{fingerprint}:{family}`` with one.
+
+    WHY AN OVERRIDE MAY ENTER A CACHE KEY WHEN A SOURCE SCOPE MUST NOT.
+    ``source_scope.scoped_subgraph_nodes`` argues at length that putting the
+    run's scope into this key would force a full multi-million-node rebuild per
+    CHECKBOX COMBINATION, so the library dimension is filtered out of the walk's
+    RESULT instead.  A participant override is a different cardinality
+    altogether: it names at most ``chunk_federation_max_participants``
+    libraries, it is chosen by the user as a saved retrieval scope rather than
+    assembled per click, and the same scope is re-asked repeatedly.  A handful
+    of long-lived entries is what the version-keyed LRU is for; one entry per
+    checkbox power set is not.
+
+    The fingerprint goes BEFORE the family, not after, and that is load-bearing:
+    ``retrieval_snapshot_cache`` evicts these families with
+    ``key.endswith(":fed_rxgraph")`` / ``endswith(":ppr_graph")``, so a
+    fingerprint appended to the tail would quietly exempt every override-built
+    graph from the belt-and-braces eviction a KG mutation triggers.
+
+    The key is the second line of defence, not the first: each family's VERSION
+    tuple already carries one entry per participant, so two different
+    participant sets under one key miss on version and rebuild rather than
+    serving each other's graph.  The key separates them so they stop evicting
+    each other, and so a future version tuple that stops enumerating
+    participants cannot silently turn a thrash into a leak.
+    """
+    override = current_participant_override()
+    if override is None:
+        return f"{notebook_id}:{family}"
+    return f"{notebook_id}:{override_fingerprint(override)}:{family}"
 
 
 def _xbridge_similarities(dists) -> "np.ndarray":
@@ -242,20 +287,37 @@ class GraphRetrievalService(_RetrievalState):
 
         Each relation row is tagged with its notebook_id before passing to
         build_rx_graph so per-edge tier stamping works.
+
+        With a participant override in place the mount table describes a set
+        this run does not search, so the participant list comes from the seat
+        (``_retrieval_participants``) and the cache key carries the override's
+        fingerprint. With no override the mount read below, the list it builds
+        and the key are byte for byte what they were -- in particular it still
+        does NOT filter by ``notebook_in_scope``: the library dimension is
+        filtered out of this graph's WALK RESULT by ``scoped_subgraph_nodes``,
+        and moving that decision into the build is a separate change with its
+        own cache-key consequences.
         """
         from app.services.kg.graph_reason import build_rx_graph
+        override = current_participant_override()
         with self._connect() as db:
-            # Participating notebooks: active + all base notebooks (excl. active
-            # if active is itself base, to avoid duplication).
-            active_row, base_rows = self.notebooks.participant_rows(
-                db, active_notebook_id,
-            )
-            active_tier = active_row["tier"] if active_row else "personal"
+            if override is None:
+                # Participating notebooks: active + all base notebooks (excl.
+                # active if active is itself base, to avoid duplication).
+                active_row, base_rows = self.notebooks.participant_rows(
+                    db, active_notebook_id,
+                )
+                active_tier = active_row["tier"] if active_row else "personal"
 
-            # Build participating list: active first, then all base notebooks.
-            participants = [(active_notebook_id, active_tier)] + [
-                (r["id"], r["tier"]) for r in base_rows
-            ]
+                # Build participating list: active first, then all base
+                # notebooks.
+                participants = [(active_notebook_id, active_tier)] + [
+                    (r["id"], r["tier"]) for r in base_rows
+                ]
+            else:
+                participants = list(
+                    self._retrieval_participants(active_notebook_id)
+                )
             # Version key: per-notebook (nb_id, relations (count, max created_at,
             # per-review-status counts), objects (count, max updated_at),
             # concept_clusters (count, max created_at)). Object coverage makes
@@ -347,7 +409,8 @@ class GraphRetrievalService(_RetrievalState):
                     cluster_groups=cluster_groups or None)
 
             return self._vector_cache.get(
-                f"{active_notebook_id}:fed_rxgraph", version, _load)
+                _participant_graph_cache_key(active_notebook_id, "fed_rxgraph"),
+                version, _load)
     def _ppr_graph(self, notebook_id: str):
         """Build (and version-cache) the graph-mode PPR graph: KG nodes + chunk
         nodes + relation/membership/synonym(+variant) edges. Always spans active
@@ -357,8 +420,20 @@ class GraphRetrievalService(_RetrievalState):
         返回 (G, key_to_idx, chunk_idx_to_id)。"""
         from app.services.kg.edge_schema import EDGE_SCHEMA_VERSION
         from app.services.kg.ppr import build_ppr_graph
+        # Override in place -> the participant set comes from the seat and the
+        # cache key carries its fingerprint; absent -> the live mount read and
+        # the historical key, unchanged.
+        override = current_participant_override()
         with self._connect() as db:
-            participants = self.notebooks.participant_ids(db, notebook_id)
+            participants = (
+                self.notebooks.participant_ids(db, notebook_id)
+                if override is None
+                else [
+                    participant_id
+                    for participant_id, _tier
+                    in self._retrieval_participants(notebook_id)
+                ]
+            )
             # O(1) monotonic seq triple (kg_mutation_seq, cluster_mutation_seq,
             # mention_seq) per participant instead of 5 COUNT/MAX scans over
             # relations/objects/chunks/clusters + the mention read. kg_mutation_seq
@@ -434,7 +509,9 @@ class GraphRetrievalService(_RetrievalState):
                 extra_edges = extra_edges + self._mention_extra_edges(nb)
             return build_ppr_graph(kg_nodes, chunk_ids, relations, memberships, cluster_groups, extra_edges=extra_edges)
 
-        return self._vector_cache.get(f"{notebook_id}:ppr_graph", version, _load)
+        return self._vector_cache.get(
+            _participant_graph_cache_key(notebook_id, "ppr_graph"),
+            version, _load)
     def _mention_extra_edges(self, notebook_id: str) -> List[Tuple[str, str, float]]:
         """P2 共提桥 → 图 extra_edges:每条 mention_edges 行转一条软边
         (claim_object_id ↔ f"cluster:{concept_canonical_id}", 权重 mention_edge_weight)。
@@ -793,7 +870,8 @@ class GraphRetrievalService(_RetrievalState):
             }
 
         return self._vector_cache.get(
-            f"{notebook_id}:scale_combined", version, _load)
+            _participant_graph_cache_key(notebook_id, "scale_combined"),
+            version, _load)
 
     def _scale_ppr_impl(
         self, notebook_id: str, question: str, *, max_results: int | None = None
@@ -814,8 +892,21 @@ class GraphRetrievalService(_RetrievalState):
         # 1. Base set: tier='base' notebooks (excluding active) with a valid index.
         #    v1: support the common SINGLE base case; if >1 base index exists,
         #    splice them sequentially onto the combined graph.
-        with self._connect() as db:
-            base_ids = self.notebooks.participant_ids(db, notebook_id)[1:]
+        #    With a participant override the mount table names a set this run
+        #    does not search, so the seat answers instead (both spellings lead
+        #    with the active notebook, hence the same ``[1:]``); the combined
+        #    graph built from these ids is keyed by the override's fingerprint
+        #    inside ``_scale_combined_graph``.
+        override = current_participant_override()
+        if override is None:
+            with self._connect() as db:
+                base_ids = self.notebooks.participant_ids(db, notebook_id)[1:]
+        else:
+            base_ids = [
+                participant_id
+                for participant_id, _tier
+                in self._retrieval_participants(notebook_id)
+            ][1:]
         base_indexes = [(bid, self._scale_index(bid, allow_stale=True)) for bid in base_ids]
         base_indexes = [(bid, idx) for bid, idx in base_indexes if idx is not None]
         # P0-00: 自身若有(含 stale)索引,把 self 也当作 participant(self CSR=substrate,
@@ -1154,8 +1245,24 @@ class GraphRetrievalService(_RetrievalState):
         with self._connect() as db:
             # Authorization/scope gate: an action may only start from the active
             # notebook or an authoritative base notebook participating in this ask.
+            # With a participant override the mount subquery inside that
+            # statement describes the wrong set -- the override's libraries are
+            # not mounted into the nominal active at all -- so the seat's ids
+            # are passed explicitly. That is not a widening of the gate: the
+            # override was attested against a ``can_read_many`` that already
+            # passed for this actor, and the seat re-checks that identity on
+            # every read (see ``retrieval_participants``' module docstring).
+            override = current_participant_override()
             start = self.knowledge.follow_start_row(
                 db, start_object_id, active_notebook_id, USABLE_STATUSES,
+                participant_ids=(
+                    None if override is None
+                    else [
+                        participant_id
+                        for participant_id, _tier
+                        in self._retrieval_participants(active_notebook_id)
+                    ]
+                ),
             )
             if start is None:
                 return FollowChainResult()

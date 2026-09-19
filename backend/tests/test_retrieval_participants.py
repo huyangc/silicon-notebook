@@ -270,3 +270,42 @@ def test_override_is_immutable_after_attestation():
     assert override.pairs() == (("nb-a", "personal"), ("nb-b", "personal"))
     with pytest.raises(TypeError):
         override.tiers["nb-b"] = "base"  # type: ignore[index]
+
+
+def test_override_is_unhashable_so_it_cannot_become_a_cache_key():
+    """``__hash__ = None``:覆盖对象不许当缓存键,指纹才是。
+
+    冻结 dataclass 默认可哈希,而一个可哈希的覆盖就是在邀请别人拿它去键一个
+    进程级缓存——那等于把 **attested actor** 也键了进去:同一个检索范围的两个
+    用户会各建各的一份多百万节点的图,条目本身还会把一个用户 id 长期留在进程
+    级 dict 里。``override_fingerprint`` 只认成员集合,内容无关、跨进程稳定。
+    """
+    override = _override(["nb-a", "nb-b"])
+    with pytest.raises(TypeError):
+        hash(override)
+    with pytest.raises(TypeError):
+        {override: "cache entry"}
+
+
+def test_bare_string_notebook_ids_are_refused():
+    """``tuple("nb-a")`` 会静默拆成四个单字符"库"。
+
+    它们能过下面每一条校验,然后搜一个不存在的东西。裸 id 是调用方最自然会写
+    错的形状,所以必须拒收而不是曲解。
+    """
+    for bad in ("nb-a", b"nb-a"):
+        with pytest.raises(ParticipantOverrideError):
+            ParticipantOverride(
+                notebook_ids=bad, tiers={}, attested_actor_id=_ACTOR,
+            )
+
+
+def test_repr_does_not_leak_the_attested_actor():
+    """默认 repr 会把 actor id 写进每一个 traceback / 日志 / 调试输出。
+
+    与本模块异常文本「内容无关」的纪律同一条。库 id 仍然可见:任何接线 bug 都
+    是从「这次到底搜了哪些库」诊断的,而指纹本来就已经公开这件事。
+    """
+    text = repr(_override(["nb-a", "nb-b"], actor="secret-user"))
+    assert "secret-user" not in text
+    assert "nb-a" in text and "nb-b" in text

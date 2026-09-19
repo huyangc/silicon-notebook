@@ -1633,18 +1633,38 @@ class KnowledgeStore:
 
     @staticmethod
     def follow_start_row(db: Any, object_id: str,
-                         active_notebook_id: str, statuses):
+                         active_notebook_id: str, statuses,
+                         participant_ids=None):
         """起点授权门:只有 active 自己的对象、或 active 挂载的参考库里的对象,
-        才能作为 follow_chain 的合法起点(未挂载的 tier='base' 库不算,即便它已发布)。"""
+        才能作为 follow_chain 的合法起点(未挂载的 tier='base' 库不算,即便它已发布)。
+
+        ``participant_ids`` 的语义、授权论证与空清单的 fail-closed 规则与 SQLite
+        镜像逐条相同(见 ``sqlite/knowledge_store.py`` 的同名方法):非 None 时用
+        显式参与集替换内联的挂载子查询,而该清单只由参与集覆盖在场的检索腿传入,
+        覆盖集本身已经过 ``can_read_many``。PostgreSQL 是规范定义、SQLite 是镜像,
+        两侧必须同改。"""
         ph = ",".join("%s" for _ in statuses)
-        row = db.execute(
-            f"SELECT ko.*, n.tier AS notebook_tier "
-            f"FROM knowledge_objects ko JOIN notebooks n ON n.id=ko.notebook_id "
-            f"WHERE ko.id=%s AND ko.status IN ({ph}) "
-            "AND (ko.notebook_id=%s OR ko.notebook_id IN ("
-            + MOUNTED_BASE_IDS_SUBQUERY + "))",
-            (object_id, *statuses, active_notebook_id, active_notebook_id),
-        ).fetchone()
+        if participant_ids is None:
+            row = db.execute(
+                f"SELECT ko.*, n.tier AS notebook_tier "
+                f"FROM knowledge_objects ko JOIN notebooks n ON n.id=ko.notebook_id "
+                f"WHERE ko.id=%s AND ko.status IN ({ph}) "
+                "AND (ko.notebook_id=%s OR ko.notebook_id IN ("
+                + MOUNTED_BASE_IDS_SUBQUERY + "))",
+                (object_id, *statuses, active_notebook_id, active_notebook_id),
+            ).fetchone()
+        else:
+            ids = [str(value) for value in participant_ids]
+            if not ids:
+                return None
+            id_ph = ",".join("%s" for _ in ids)
+            row = db.execute(
+                f"SELECT ko.*, n.tier AS notebook_tier "
+                f"FROM knowledge_objects ko JOIN notebooks n ON n.id=ko.notebook_id "
+                f"WHERE ko.id=%s AND ko.status IN ({ph}) "
+                f"AND ko.notebook_id IN ({id_ph})",
+                (object_id, *statuses, *ids),
+            ).fetchone()
         if row is None:
             return None
         return _compat_rows([row], payload=True, evidence=True)[0]

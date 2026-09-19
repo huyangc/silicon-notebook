@@ -33,14 +33,26 @@ class CommunityQueryService:
 
         判据必须是库维度而不是 ``source_scope_restricted()``:只取消参考库时后者恒为
         False(R1),这条通道会全程敞着。
+
+        参与集覆盖在场时这份库清单来自覆盖集而不是挂载表(本模块是覆盖模块冻结
+        白名单上的读者 #5)。顺序固定:覆盖**替换**集合,``scoped_participants``
+        再按库勾选**收窄**。座位的形状是「active 在前、其余是参考库」,所以两条
+        分支都把首项剥掉;fallback 也照这个形状拼出来,免得两条分支对「首项是谁」
+        各有一套理解。
         """
+        from app.services.retrieval_participants import (
+            resolve_retrieval_participant_ids,
+        )
         from app.services.source_scope import scoped_participants
 
-        return list(
-            scoped_participants(
-                self.unified_kg.mounted_base_ids(active_notebook_id)
-            )
+        participants = resolve_retrieval_participant_ids(
+            active_notebook_id,
+            lambda: (
+                active_notebook_id,
+                *self.unified_kg.mounted_base_ids(active_notebook_id),
+            ),
         )
+        return list(scoped_participants(participants[1:]))
 
     def community_peers(self, base_notebook_id: str, focal_name: str,
                         question: str, *, top_k: int,

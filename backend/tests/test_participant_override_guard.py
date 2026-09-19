@@ -5,16 +5,21 @@
 (``source_scope.scoped_participants`` 的注释逐字写明:跨库来源代理、引用解析、
 资产读取都吃它)。覆盖一旦漏进鉴权路径就是越权。
 
-本文件钉三件事,任何一条单独成立都足以挡住越权:
+本文件钉这些事,任何一条单独成立都足以挡住越权:
 
-1. 谁能 import 这个模块(读者 5 个 + 写入方 1 个的冻结白名单);
-2. 谁能安装覆盖(只有 ``global_ask``);
-3. 鉴权路径既不 import 它,也仍然在调真实的挂载谓词——第二半才是关键:
-   只断言"没 import"挡不住把某个鉴权点整体改道成别的取数方式。
+1. 谁能 import 这个模块——**相等**断言,不是 ⊆(C3 接线后读者集合已经确定);
+2. 谁能 import 这个模块的**名字**(再导出旁路:白名单模块把访问器再导出,
+   鉴权文件从它那里拿,三层守卫会全绿);
+3. 谁能安装覆盖(只有 ``global_ask``,含 ``as`` 改名的调用);
+4. 鉴权路径既不 import 它,也仍然在调真实的挂载谓词——第二半才是关键:
+   只断言"没 import"挡不住把某个鉴权点整体改道成别的取数方式;
+5. **注入式谓词的来源**:``knowledge_query`` / ``knowledge_lifecycle`` /
+   ``plugin_ask_engine`` 拿到的 ``participant_notebook_ids`` 是组合根注入的
+   callable,组合根把它换成一个读座位的 lambda,消费方文件一字未动、组合文件
+   也不 import 覆盖模块 —— 前四条全绿而鉴权谓词已经被覆盖感知的座位换掉;
+6. fail-soft 不许吞掉身份复核的 raise。
 
-C1 阶段本模块还没有任何 importer,所以 1/2 写成 ⊆ 白名单而不是 ==。C3/PR-D
-接线之后这两条断言仍然成立,不需要改写;白名单本身要不要动是一次独立的、
-必须被评审看见的编辑。
+写入方白名单仍是 ⊆:``global_ask`` 在 PR-D 才接。
 """
 from __future__ import annotations
 
@@ -22,6 +27,7 @@ import ast
 from functools import lru_cache
 from pathlib import Path
 
+import app.services.retrieval_participants as override_module
 from tests.architecture.semantic_source import PythonSourceIndex
 
 
@@ -52,6 +58,22 @@ _WRITER_WHITELIST = frozenset({
 })
 _IMPORT_WHITELIST = _READER_WHITELIST | _WRITER_WHITELIST
 
+# C3 接线之后读者集合已经确定,所以这一条是**相等**而不是 ⊆:一个白名单里却
+# 不再 import 的模块意味着接线被悄悄回退(例如 ``collection_catalog`` 改回直调
+# ``participant_ids``),而 ⊆ 断言对回退是沉默的。
+#
+# 已知的未来读者:``app/services/chunk_federation.py``。PR-D 要在任务体里按
+# ``federated_ask_active()`` 切 ``read_budget`` 与 ``peer_evidence`` 阈值,届时
+# 它要同时进 ``_READER_WHITELIST`` 与这里——本 PR 它不 import,所以两个集合都
+# 不含它。
+_EXPECTED_IMPORTERS = frozenset(_READER_WHITELIST)
+
+# 被守的**名字**面 = 模块 ``__all__`` 去掉异常类型。异常刻意不守:它的规范定义
+# 点是 ``app/domain/retrieval_control.py``,任何 fail-soft handler 都要能 import
+# 它来 re-raise(见该模块 docstring),而"能命名一个异常"不授予任何权限。
+_ERROR_NAMES = frozenset({"ParticipantOverrideError"})
+_OVERRIDE_SURFACE = frozenset(override_module.__all__) - _ERROR_NAMES
+
 _WHITELIST_RATIONALE = (
     "白名单在 backend/tests/test_participant_override_guard.py 的 "
     "_READER_WHITELIST / _WRITER_WHITELIST,论证在 "
@@ -66,7 +88,25 @@ _WHITELIST_RATIONALE = (
 # services.retrieval_participants as ...``),任何调用 ``participant_override``
 # 的模块也必然先 import 了它。所以预筛相对于全量 AST 扫描不丢任何东西:唯一
 # 能绕开的是 ``importlib.import_module`` 拼字符串,而那同样绕得开纯 AST 扫描。
-_NEEDLES = ("retrieval_participants", "participant_override", "federated_ask_active")
+#
+# 再导出旁路(A1)要求预筛同时覆盖**公开面的每个名字**,否则一个
+# ``from app.services.retrieval_candidates import current_participant_override``
+# 的鉴权文件连解析都轮不到。下面这组 needle 是公开面的前缀覆盖——
+# ``resolve_retrieval_participant(_id)s`` 含 ``retrieval_participants``、
+# ``current_participant_override`` 含 ``participant_override``——由
+# ``test_needles_cover_the_whole_override_surface`` 逐字钉住,新增一个公开名
+# 而漏掉 needle 会当场报红,而不是把守卫悄悄变成空转。
+_NEEDLES = (
+    "retrieval_participants",
+    # ``resolve_retrieval_participant_ids`` 的公共前缀止于单数形式,所以上面那条
+    # 复数 needle 覆盖不到它。
+    "retrieval_participant_ids",
+    "participant_override",
+    "federated_ask_active",
+    "override_fingerprint",
+    "ParticipantOverride",
+    "assert_override_matches_run",
+)
 
 
 @lru_cache(maxsize=1)
@@ -133,11 +173,61 @@ def _production_importers() -> set[str]:
     }
 
 
-def test_only_retrieval_modules_may_read_the_override():
-    """``backend/app`` 下 import 覆盖模块的文件集合 ⊆ 冻结白名单。
+def _override_installers(sources: dict[str, str]) -> set[str]:
+    """安装了覆盖的文件集合(``participant_override(...)`` 的调用方)。
 
-    先自检白名单本身都指向真实文件:路径打错时"⊆ 白名单"会恒真地通过,守卫
-    就变成了空转。
+    按 dotted 名的最后一段匹配,所以 ``retrieval_participants.participant_
+    override(...)`` 这种限定调用也算得到;``current_participant_override``
+    末段不同,不会被误计。别名另算一遍:import 记账记的是**原名**,所以
+    ``from ... import participant_override as install`` 之后的 ``install(...)``
+    只有先把局部名收集起来才看得见。
+    """
+    index = PythonSourceIndex.from_sources(sources)
+    aliases: dict[str, set[str]] = {}
+    for path, source in sources.items():
+        for node in ast.walk(ast.parse(source, filename=path)):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            for alias in node.names:
+                if alias.name == "participant_override" and alias.asname:
+                    aliases.setdefault(path, set()).add(alias.asname)
+    return {
+        finding.key.path
+        for finding in index.calls()
+        if finding.key.path != _OVERRIDE_PATH
+        and (
+            finding.key.target.rsplit(".", 1)[-1] == "participant_override"
+            or finding.key.target in aliases.get(finding.key.path, set())
+        )
+    }
+
+
+def test_needles_cover_the_whole_override_surface():
+    """预筛的 needle 必须覆盖公开面的每一个名字。
+
+    这条是**守卫自己的守卫**。预筛把解析面从 519 个文件压到几个,代价是:一个
+    没被 needle 覆盖的公开名,其再导出旁路连解析都进不去,下面所有断言对它恒真
+    通过。新增公开名而忘了补 needle,要在这里响亮失败,而不是在别处静默。
+    """
+    uncovered = sorted(
+        name for name in _OVERRIDE_SURFACE
+        if not any(needle in name for needle in _NEEDLES)
+    )
+    assert not uncovered, (
+        f"这些公开名没有任何 needle 覆盖,预筛会把它们的再导出旁路整类漏掉:"
+        f"{uncovered}。把名字(或它的一个子串)加进 _NEEDLES。"
+    )
+
+
+def test_only_retrieval_modules_may_read_the_override():
+    """``backend/app`` 下 import 覆盖模块的文件集合 **等于** 冻结读者白名单。
+
+    相等而不是 ⊆:多出来的是越权面,少掉的是接线被悄悄回退——后者 ⊆ 断言看不见,
+    而"``collection_catalog`` 改回直调 ``participant_ids``"恰恰是回退的样子。
+    写入方仍是 ⊆(``global_ask`` 在 PR-D 才接)。
+
+    先自检白名单本身都指向真实文件:路径打错时断言会恒真地通过,守卫就变成了
+    空转。
     """
     missing = sorted(
         name for name in _IMPORT_WHITELIST if not (_BACKEND / name).is_file()
@@ -155,31 +245,135 @@ def test_only_retrieval_modules_may_read_the_override():
         f"这些生产模块 import 了 {_OVERRIDE_MODULE},但不在白名单里:"
         f"{unexpected}。{_WHITELIST_RATIONALE}"
     )
+    missing_readers = sorted(_EXPECTED_IMPORTERS - importers)
+    assert not missing_readers, (
+        f"这些模块应当读参与集座位/覆盖,却不再 import {_OVERRIDE_MODULE}:"
+        f"{missing_readers}。接线被回退了吗?{_WHITELIST_RATIONALE}"
+    )
+
+
+def _surface_importers(sources: dict[str, str]) -> dict[str, list[str]]:
+    """文件 -> 它从**任何**模块 import 到的覆盖公开名。
+
+    白名单成员不在结果里:它们 import 覆盖模块是本来就允许的。挡的是「从某个
+    白名单模块再导出的名字那里拿」这种写法——它 import 的不是覆盖模块,所以
+    ``_production_importers`` 看不见它。
+    """
+    found: dict[str, list[str]] = {}
+    for finding in PythonSourceIndex.from_sources(sources).imports():
+        path = finding.key.path
+        if path == _OVERRIDE_PATH or path in _IMPORT_WHITELIST:
+            continue
+        _module, separator, name = finding.key.target.partition(":")
+        if separator and name in _OVERRIDE_SURFACE:
+            found.setdefault(path, []).append(finding.key.target)
+    return found
+
+
+def test_re_export_detection_catches_the_bypass():
+    """正对照:A1 那条断言必须真的会红,而不是一条恒绿的摆设。
+
+    对照臂是异常类型——它刻意不在被守的名字面里:任何 fail-soft handler 都要能
+    import 它来 re-raise,而命名一个异常不授予任何权限。
+    """
+    caught = _surface_importers({
+        "app/api/source_routes.py":
+            "from app.services.retrieval_candidates import "
+            "current_participant_override\n",
+        "app/services/knowledge_query.py":
+            "from app.services.graph_retrieval import "
+            "resolve_retrieval_participants as resolve\n",
+        "app/services/ask_service.py":
+            "from app.domain.retrieval_control import "
+            "ParticipantOverrideError\n",
+        # 白名单成员自己 import 覆盖模块是允许的,不得被这条误伤。
+        "app/services/communities.py":
+            "from app.services.retrieval_participants import "
+            "resolve_retrieval_participant_ids\n",
+    })
+    assert sorted(caught) == [
+        "app/api/source_routes.py", "app/services/knowledge_query.py",
+    ], caught
+
+
+def test_no_module_may_re_export_the_override_surface():
+    """再导出旁路:非白名单文件不得从**任何**模块 import 覆盖的公开名。
+
+    与上一条不重复,挡的是另一种写法:白名单模块 import 了访问器,鉴权文件再写
+    ``from app.services.retrieval_candidates import current_participant_override``
+    ——它 import 的不是覆盖模块,上一条的"谁 import 了覆盖模块"因此全绿,而访问器
+    已经到手。``as`` 改名也算得到:记账里记的是**原名**,不是别名。
+
+    第二半:白名单读者自己不得把这些名字再导出(写进 ``__all__``,或做一个模块级
+    别名赋值 ``foo = current_participant_override``)。没有这半句,上面那种写法只要
+    对面先加一行 ``__all__`` 就又成立了。
+    """
+    offenders = _surface_importers(dict(_candidate_sources()))
+    assert not offenders, (
+        f"这些非白名单模块 import 了覆盖的公开名(可能经由某个白名单模块再导出):"
+        f"{ {k: sorted(v) for k, v in sorted(offenders.items())} }。"
+        f"{_WHITELIST_RATIONALE}"
+    )
+
+    re_exporters: dict[str, list[str]] = {}
+    for path in sorted(_READER_WHITELIST):
+        source = (_BACKEND / path).read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=path)
+        leaked = sorted(_module_level_assignments(source, path) & _OVERRIDE_SURFACE)
+        leaked += sorted(_declared_all(tree) & _OVERRIDE_SURFACE)
+        if leaked:
+            re_exporters[path] = leaked
+    assert not re_exporters, (
+        f"白名单读者把覆盖的公开名再导出了:{re_exporters}。再导出会让"
+        f"「谁 import 了覆盖模块」这条断言绕得过去。{_WHITELIST_RATIONALE}"
+    )
 
 
 def test_writer_is_only_global_ask():
     """调用 ``participant_override(...)`` 的生产模块 ⊆ {global_ask}。
 
-    与上一条不重复:读者白名单允许 5 个模块 import 本模块,而它们**读**覆盖
+    与上一条不重复:读者白名单允许若干模块 import 本模块,而它们**读**覆盖
     是对的、**装**覆盖不是。安装参与集是一次授权动作(``can_read_many`` 已经
     在 ``global_ask`` 侧跑过),检索层任何一个消费点自己装一份,就是自己给自己
     发的授权。
 
     按 dotted 名的最后一段匹配,所以 ``retrieval_participants.participant_
     override(...)`` 这种限定调用也算得到;``current_participant_override``
-    末段不同,不会被误计。
+    末段不同,不会被误计。别名同样算得到:先把每个文件里绑到
+    ``participant_override`` 的局部名收集起来(import 记账记的是原名),再拿它们
+    去比调用目标——否则 ``from ... import participant_override as install`` 之后
+    ``install(...)`` 就是一个守卫看不见的写入方。
     """
-    writers = {
-        finding.key.path
-        for finding in _candidate_index().calls()
-        if finding.key.path != _OVERRIDE_PATH
-        and finding.key.target.rsplit(".", 1)[-1] == "participant_override"
-    }
-    unexpected = sorted(writers - _WRITER_WHITELIST)
+    assert _candidate_sources(), "预筛扫空了,守卫会恒真通过"
+    unexpected = sorted(
+        _override_installers(dict(_candidate_sources())) - _WRITER_WHITELIST
+    )
     assert not unexpected, (
         f"这些生产模块安装了参与集覆盖,但唯一写入方是 "
         f"{sorted(_WRITER_WHITELIST)}:{unexpected}。{_WHITELIST_RATIONALE}"
     )
+
+
+def test_writer_detection_sees_through_an_import_alias():
+    """别名分支自己也要有用例,否则它是一条永不触发的死守卫。
+
+    三个合成源:限定调用、别名调用、以及一个**只读**覆盖的对照臂——最后一个
+    绝不能被算成写入方,否则守卫会把五个合法读者全判成越权。
+    """
+    installers = _override_installers({
+        "app/x/qualified.py":
+            "from app.services import retrieval_participants\n"
+            "retrieval_participants.participant_override(o)\n",
+        "app/x/aliased.py":
+            "from app.services.retrieval_participants import "
+            "participant_override as install\n"
+            "install(o)\n",
+        "app/x/reader.py":
+            "from app.services.retrieval_participants import "
+            "current_participant_override\n"
+            "current_participant_override()\n",
+    })
+    assert installers == {"app/x/qualified.py", "app/x/aliased.py"}
 
 
 # 第 2 层:必须保持走真实挂载谓词的鉴权/谓词调用点。
@@ -216,6 +410,29 @@ _AUTHORIZATION_SITES = {
     "app/repositories/sqlite/mount_sql.py": "predicate_sql",
     "app/repositories/postgres/mount_sql.py": "predicate_sql",
 }
+
+
+def _declared_all(tree: ast.Module) -> set[str]:
+    """模块级 ``__all__`` 里的字符串字面量。"""
+    names: set[str] = set()
+    for node in tree.body:
+        targets = (
+            node.targets if isinstance(node, ast.Assign)
+            else [node.target] if isinstance(node, ast.AnnAssign)
+            else []
+        )
+        if not any(
+            isinstance(t, ast.Name) and t.id == "__all__" for t in targets
+        ):
+            continue
+        value = node.value
+        if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+            names.update(
+                element.value for element in value.elts
+                if isinstance(element, ast.Constant)
+                and isinstance(element.value, str)
+            )
+    return names
 
 
 def _module_level_assignments(source: str, path: str) -> set[str]:
@@ -275,3 +492,78 @@ def test_authorization_sites_keep_the_real_mount_predicate():
             assert not missing, (
                 f"{path} 是挂载谓词的定义点,却不再定义 {missing}。"
             )
+
+
+# 第 2 层的第二半(A2):注入式谓词的**来源**。
+#
+# ``knowledge_query`` / ``knowledge_lifecycle`` / ``plugin_ask_engine`` 上面那条
+# 断言看的是它们**调用**了 ``participant_notebook_ids``——但它们调的是组合根注入
+# 进来的一个 callable。组合根把实参从 ``notebook_store.participant_notebook_ids``
+# 换成 ``lambda nb: [i for i, _ in candidates._retrieval_participants(nb)]``,消费
+# 方文件一字未动、组合文件也不 import 覆盖模块,于是三层守卫全绿,而鉴权谓词已经
+# 变成了覆盖感知的座位。所以实参本身要被钉住:必须是那个谓词的**属性引用**,
+# 不能是 lambda、不能是别的可调用。
+_INJECTION_SITES = {
+    "app/services/repository_runtime.py",
+    "app/services/ask_service.py",
+}
+_PREDICATE_ATTRIBUTE_TAILS = frozenset({
+    "participant_notebook_ids",
+    # 插件面是两跳注入:组合根把真实谓词放进 ``AskService
+    # .ask_engine_participant_notebooks``,``AskService`` 再把那个属性交给
+    # ``PluginRetrievalAccess``。第一跳的实参已经在本断言里被钉成真实谓词,第二
+    # 跳照样必须是属性引用而不是就地写的 lambda——否则第一跳钉住的东西可以在第
+    # 二跳被包一层换掉。
+    "ask_engine_participant_notebooks",
+})
+
+
+def _predicate_injection_values(path: str, source: str) -> list[ast.AST]:
+    """所有把谓词注入下去的实参节点(关键字实参 + 直接位置实参)。"""
+    values: list[ast.AST] = []
+    for node in ast.walk(ast.parse(source, filename=path)):
+        if not isinstance(node, ast.Call):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg and keyword.arg.endswith(
+                ("participant_notebook_ids", "participant_notebooks")
+            ):
+                values.append(keyword.value)
+    return values
+
+
+def test_injected_participant_predicate_is_the_real_mount_predicate():
+    """注入下去的参与集谓词必须是真实谓词的属性引用,不得是 lambda 或别的可调用。
+
+    正向证据:每个实参解析成的 dotted 名以 ``participant_notebook_ids`` 结尾。
+    负向证据:组合根里不出现 ``_retrieval_participants``——座位是检索消费边界的
+    东西,出现在组合根就意味着它正被喂给某个鉴权消费方。
+    """
+    from tests.architecture.semantic_source import dotted_name
+
+    offenders: dict[str, list[str]] = {}
+    seen_any = False
+    for path in sorted(_INJECTION_SITES):
+        source = (_BACKEND / path).read_text(encoding="utf-8")
+        for value in _predicate_injection_values(path, source):
+            seen_any = True
+            name = dotted_name(value)
+            if not name.endswith(tuple(_PREDICATE_ATTRIBUTE_TAILS)):
+                offenders.setdefault(path, []).append(
+                    ast.dump(value)[:120]
+                )
+    assert seen_any, (
+        "一个注入点都没扫到;实参名改了吗?守卫会恒真通过。"
+    )
+    assert not offenders, (
+        f"参与集谓词的注入实参不是 {sorted(_PREDICATE_ATTRIBUTE_TAILS)} 的属性"
+        f"引用:{offenders}。消费方里有鉴权路径,注入一个覆盖感知的可调用等于"
+        f"绕过白名单。{_WHITELIST_RATIONALE}"
+    )
+
+    for path in sorted(_INJECTION_SITES):
+        source = (_BACKEND / path).read_text(encoding="utf-8")
+        assert "_retrieval_participants" not in source, (
+            f"{path} 是组合根/注入点,不得出现检索座位 ``_retrieval_participants``:"
+            f"注入一份覆盖感知的谓词给鉴权消费方,文件本身不用 import 覆盖模块。"
+        )

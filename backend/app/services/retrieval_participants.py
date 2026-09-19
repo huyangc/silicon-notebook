@@ -50,6 +50,30 @@ sufficient on its own, and all three are pinned by
    than silently fall back to the mount table, because a silent fallback still
    returns a plausible answer and nobody ever finds out.
 
+The raise must survive the retrieval layer's fail-soft handlers
+---------------------------------------------------------------
+Raising is only a protection if the raise reaches the caller.  The retrieval
+path degrades gracefully by design -- one library must not fail the arm, a
+lexical probe must not cost the semantic one -- so it is full of
+``except Exception`` handlers that would turn an attestation failure into an
+empty candidate list and, from there, into a perfectly normal-looking "未命中"
+answer.  That is precisely the silent fallback this module exists to refuse,
+arriving one frame further out.
+
+Two defences, and the first one is the real one:
+
+1. **The writer pre-checks, outside every fail-soft frame.**  After
+   establishing the retrieval run and BEFORE any retrieval starts,
+   ``global_ask`` calls ``assert_override_matches_run()``.  It has no side
+   effects and answers the same two questions the seat asks, so a mismatch
+   fails loudly at the top of the request instead of quietly at the bottom of a
+   worker thread.  (Wired in PR-D; this module ships the primitive.)
+2. **Every fail-soft handler between a seat read and the Ask/report entry
+   re-raises it**, named beside ``except AskCancelled: raise``.  Handlers in
+   modules that may not read the override import the exception from
+   ``app.domain.retrieval_control`` -- the name alone, no accessor.
+   ``backend/tests/test_participant_override_guard.py`` pins the set.
+
 Fail-closed without a run
 -------------------------
 An override is only meaningful inside a retrieval run that carries an actor,
@@ -67,26 +91,20 @@ from __future__ import annotations
 import hashlib
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Callable, Iterator, Mapping, Optional, Sequence
 
+# The exception lives in the dependency-free domain layer, NOT here, so that a
+# fail-soft ``except Exception`` handler in a module barred from reading the
+# override can still name it and re-raise it.  See that module's docstring for
+# why it is an ``Exception`` and not a ``BaseException``, and why it is not an
+# ``AskCancelled``.  Re-exported for every existing importer.
+from app.domain.retrieval_control import ParticipantOverrideError
 from app.services.retrieval_run import current_retrieval_run
 
 
 _DEFAULT_TIER = "personal"
-
-
-class ParticipantOverrideError(RuntimeError):
-    """An override was installed or used outside the contract above.
-
-    Every message is content-free on purpose: these raise on identity
-    mismatches, so the operands are a user id and a notebook id.  Naming them
-    in an exception puts them in tracebacks, logs and error responses, which is
-    the one place a scope-isolation failure must not start leaking the very
-    identifiers it was protecting.  The failing call site is in the traceback
-    already; the values are recoverable from the debugger, not from the log.
-    """
 
 
 @dataclass(frozen=True)
@@ -102,13 +120,39 @@ class ParticipantOverride:
     by the writer and then read by every leg of a fan-out, so a malformed one
     would otherwise surface as N confusing failures deep inside worker threads
     instead of one at the point that built it.
+
+    ⛔ UNHASHABLE ON PURPOSE (``__hash__ = None``).  A frozen dataclass is
+    hashable by default, and a hashable override is an invitation to key a
+    process-level cache on the object itself -- which would key it on the
+    ATTESTED ACTOR as well as on the libraries, so two users with the same
+    retrieval scope would each build and hold their own copy of the same
+    multi-million-node graph, and the entry would keep a user id alive in a
+    process-wide dict.  ``override_fingerprint`` is the one supported cache key:
+    membership only, order-insensitive, content-free, stable across processes.
+
+    ``attested_actor_id`` is ``repr=False``: the default dataclass ``repr`` puts
+    it into every traceback frame, log line and debugger dump that touches an
+    override, which is the same leak the exception messages in this module are
+    written to avoid.  ``notebook_ids`` stays visible -- "which libraries" is
+    the fact every wiring bug is diagnosed from, and it is already the thing the
+    fingerprint publishes.
     """
 
     notebook_ids: tuple[str, ...]
     tiers: Mapping[str, str]
-    attested_actor_id: str
+    attested_actor_id: str = field(repr=False)
+
+    __hash__ = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
+        if isinstance(self.notebook_ids, (str, bytes)):
+            # ``tuple("nb-a")`` silently yields ('n','b','-','a'): four
+            # single-character "libraries" that pass every check below and then
+            # search nothing.  A bare id is the most natural thing for a caller
+            # to pass, so it must be refused rather than mangled.
+            raise ParticipantOverrideError(
+                "participant override notebook_ids must be a sequence of ids"
+            )
         notebook_ids = tuple(str(value) for value in self.notebook_ids)
         if not notebook_ids:
             raise ParticipantOverrideError("participant override is empty")
@@ -178,6 +222,15 @@ def participant_override(override: ParticipantOverride) -> Iterator[None]:
     The reset is in ``finally`` so an exception raised by the body -- the
     cancellation path above all -- cannot leave an override installed on a
     thread that goes back into a pool.
+
+    ⛔ ENTER AND EXIT IN THE SAME CONTEXT.  ``ContextVar.reset(token)`` raises
+    ``ValueError`` when the token was created in a different context, so this
+    must not decorate a generator (whose ``__enter__`` and ``__exit__`` land on
+    whatever contexts the consumer happens to be in), be entered in one thread
+    and left in another, or wrap an ``await`` that can be resumed elsewhere.
+    Wrap the whole fan-out instead and let ``copy_context()`` carry the
+    installed value into the workers -- which is exactly how the retrieval legs
+    see it, and why the value is a ContextVar in the first place.
     """
     current = _OVERRIDE.get()
     if current is not None:
@@ -208,6 +261,54 @@ def federated_ask_active() -> bool:
     return _OVERRIDE.get() is not None
 
 
+def assert_override_matches_run() -> None:
+    """Re-check the installed override against the ambient run, and return None.
+
+    THE LOUD-FAILURE ENTRY POINT.  The writer calls this once, after the
+    retrieval run exists and before any retrieval begins, so an attestation
+    failure surfaces at the top of the request rather than inside a worker
+    thread where a fail-soft handler could turn it into an empty result set (see
+    the module docstring).
+
+    No override installed -> no-op, so the caller never has to ask first.  Side
+    effect free: it neither reads the mount table nor resolves participants, so
+    calling it costs one ContextVar read on the common path and cannot be
+    mistaken for "resolve the participants now".
+    """
+    override = _OVERRIDE.get()
+    if override is None:
+        return
+    _attest(override, override.nominal_active_id)
+
+
+def _attest(override: ParticipantOverride, active_notebook_id: str) -> None:
+    """The two checks, in the order the module docstring fixes them.
+
+    Shared by ``resolve_retrieval_participants`` and
+    ``assert_override_matches_run`` so the pre-check can never drift from the
+    check it is meant to pre-empt -- a pre-check that accepts what the real one
+    rejects is worse than none, because it reads as a clean bill of health.
+    """
+    run = current_retrieval_run()
+    if run is None:
+        raise ParticipantOverrideError(
+            "participant override used outside a retrieval run"
+        )
+    if str(run.actor_id) != override.attested_actor_id:
+        raise ParticipantOverrideError(
+            "participant override was attested for a different actor"
+        )
+    if str(active_notebook_id) != override.nominal_active_id:
+        # An override authorizes one named set for one named nominal active.
+        # Answering it for some other active id is how a second notebook's
+        # retrieval -- a report leaf, a plugin engine, anything that resolves
+        # participants for an id of its own -- would silently inherit this
+        # run's set.
+        raise ParticipantOverrideError(
+            "participant override does not cover the requested active notebook"
+        )
+
+
 def resolve_retrieval_participants(
     active_notebook_id: str,
     fallback: Callable[[], Sequence[tuple[str, str]]],
@@ -230,25 +331,36 @@ def resolve_retrieval_participants(
             (str(notebook_id), str(tier)) for notebook_id, tier in fallback()
         )
 
-    run = current_retrieval_run()
-    if run is None:
-        raise ParticipantOverrideError(
-            "participant override used outside a retrieval run"
-        )
-    if str(run.actor_id) != override.attested_actor_id:
-        raise ParticipantOverrideError(
-            "participant override was attested for a different actor"
-        )
-    if str(active_notebook_id) != override.nominal_active_id:
-        # An override authorizes one named set for one named nominal active.
-        # Answering it for some other active id is how a second notebook's
-        # retrieval -- a report leaf, a plugin engine, anything that resolves
-        # participants for an id of its own -- would silently inherit this
-        # run's set.
-        raise ParticipantOverrideError(
-            "participant override does not cover the requested active notebook"
-        )
+    _attest(override, active_notebook_id)
     return override.pairs()
+
+
+def resolve_retrieval_participant_ids(
+    active_notebook_id: str,
+    fallback: Callable[[], Sequence[str]],
+) -> tuple[str, ...]:
+    """Id-only form of ``resolve_retrieval_participants``.
+
+    Three readers (the collection map, the typed enumerations' closing check,
+    ``communities.mounted_base_ids``) resolve participants through an id-only
+    predicate and never look at a tier.  Giving them their own entry point
+    keeps them from inventing a throwaway tier just to satisfy the pair-shaped
+    signature, and keeps the checks (actor attestation, nominal active) in ONE
+    function rather than duplicated per shape.
+
+    The fallback's ids are stamped with the same default tier the pair form
+    uses for an override that names no tier, and the tier is then dropped --
+    so with no override this is the caller's own predicate, str-normalised,
+    which is exactly what ``scoped_participants`` did to it one line later
+    anyway.
+    """
+    return tuple(
+        notebook_id
+        for notebook_id, _tier in resolve_retrieval_participants(
+            active_notebook_id,
+            lambda: tuple((str(value), _DEFAULT_TIER) for value in fallback()),
+        )
+    )
 
 
 def override_fingerprint(override: ParticipantOverride) -> str:
@@ -271,12 +383,21 @@ def override_fingerprint(override: ParticipantOverride) -> str:
     return hashlib.blake2s(payload, digest_size=8).hexdigest()
 
 
+# ⛔ ``__all__`` is also the guarded surface: ``test_participant_override_guard``
+# reads it to forbid a NON-whitelisted module from re-importing any of these
+# names out of a whitelisted one (``from app.services.retrieval_candidates
+# import current_participant_override`` would otherwise pass all three layers).
+# ``ParticipantOverrideError`` is deliberately absent from that guarded set --
+# it is re-exported from ``app.domain.retrieval_control`` precisely so any
+# fail-soft handler can name it, and naming an exception grants no authority.
 __all__ = [
     "ParticipantOverride",
     "ParticipantOverrideError",
+    "assert_override_matches_run",
     "current_participant_override",
     "federated_ask_active",
     "override_fingerprint",
     "participant_override",
+    "resolve_retrieval_participant_ids",
     "resolve_retrieval_participants",
 ]
