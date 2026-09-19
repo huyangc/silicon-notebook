@@ -1094,6 +1094,12 @@ def test_comparison_peer_reads_apply_the_per_notebook_source_ceiling(
     # 缺省仍与闸落地之前逐值相同。
     assert _comention() == [("Hidden", 3), ("Mixed", 3)]
     assert _community() == ["Hidden", "Mixed"]
+    # 整库规模的天花板(生产上可达数千个来源 id)不改变答案:清单恒为**一个**
+    # 数组参数(`=ANY(%s)`),不随库大小展开成占位符 —— SQLite 孪生用
+    # `json_each(?)` 达到同一效果,那边的上限是硬的(`SQLITE_MAX_VARIABLE_NUMBER`)。
+    wide = [open_source] + [f"s-filler-{index}" for index in range(5000)]
+    assert _comention(allowed_source_ids=wide) == [("Mixed", 3)]
+    assert _community(allowed_source_ids=wide) == ["Mixed"]
 
 
 @pytest.mark.postgres_integration

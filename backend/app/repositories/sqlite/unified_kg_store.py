@@ -73,9 +73,24 @@ _PUBLISHED_COMMUNITY_GEN = (
 # 反向索引未回填的库(``unified_kg_state.source_index_backfilled=0``)走
 # 权威支:直接扫 evidence JSON。``fts_search`` 的注释逐字写明了理由——False
 # 是「历史/未知」而不是「没有行」,信它会把候选集静默清空。
-def _object_support_exists(cluster_ref: str, placeholders: str, *,
-                           authoritative: bool) -> str:
-    """该簇某个成员对象是否被清单内来源支撑(相关子查询,关联到 cluster_ref)。"""
+#
+# ⚠ 一组 id **恒为一个参数**(``json_each(?)`` 绑一个 JSON 数组),不是逐个
+# 占位符。来源天花板是一整库的可见来源清单,生产上可达数千;逐个占位符会让
+# 参数量随库大小线性增长,撞上 ``SQLITE_MAX_VARIABLE_NUMBER`` 时抛
+# ``OperationalError``,而 ``communities.sibling_peers`` 的
+# ``except Exception: return []`` 会把它吞成「这库没有兄弟」—— 对比题静默劣化,
+# 没有任何信号。PG 孪生用 ``=ANY(%s)`` 达到同一效果。
+# 本段的另一个用处是 ``comention_peers`` 批量取名字时的 canonical_id 集合,
+# 形状同理(有界于 ``limit``,但同样不必为它开 N 个变量)。
+_JSON_ID_LIST = "(SELECT CAST(value AS TEXT) FROM json_each(?))"
+
+
+def _object_support_exists(cluster_ref: str, *, authoritative: bool) -> str:
+    """该簇某个成员对象是否被清单内来源支撑(相关子查询,关联到 cluster_ref)。
+
+    清单以**一个** JSON 数组参数绑定(``_JSON_ID_LIST``),调用方传
+    ``json.dumps(source_ids)``。
+    """
     if authoritative:
         return (
             "EXISTS (SELECT 1 FROM knowledge_objects ko "
@@ -86,18 +101,17 @@ def _object_support_exists(cluster_ref: str, placeholders: str, *,
             "THEN ko.evidence ELSE '[]' END ELSE '[]' END) ev "
             "WHERE ev.type='object' AND json_extract("
             "CASE WHEN ev.type='object' THEN ev.value ELSE '{}' END,"
-            f"'$.source_id') IN ({placeholders})))"
+            f"'$.source_id') IN {_JSON_ID_LIST}))"
         )
     return (
         "EXISTS (SELECT 1 FROM knowledge_object_sources kos "
         f"WHERE kos.notebook_id={cluster_ref}.notebook_id "
         f"AND kos.object_id={cluster_ref}.member_object_id "
-        f"AND kos.source_id IN ({placeholders}))"
+        f"AND kos.source_id IN {_JSON_ID_LIST})"
     )
 
 
-def _canonical_support_exists(row_ref: str, placeholders: str, *,
-                              authoritative: bool) -> str:
+def _canonical_support_exists(row_ref: str, *, authoritative: bool) -> str:
     """``row_ref`` 那一行的 canonical_id 是否还有天花板内来源支撑。
 
     给 ``community_members`` 这种只带 canonical_id 的表用:先回到本世代的
@@ -109,7 +123,7 @@ def _canonical_support_exists(row_ref: str, placeholders: str, *,
         f"WHERE kc.notebook_id={row_ref}.notebook_id "
         f"AND kc.canonical_id={row_ref}.canonical_id "
         f"AND kc.generation = {_PUBLISHED_CLUSTER_GEN} "
-        f"AND {_object_support_exists('kc', placeholders, authoritative=authoritative)})"
+        f"AND {_object_support_exists('kc', authoritative=authoritative)})"
     )
 
 
@@ -1361,7 +1375,7 @@ class UnifiedKgStore:
             if not source_ids:
                 return []
             gate = _canonical_support_exists(
-                "community_members", ",".join("?" for _ in source_ids),
+                "community_members",
                 authoritative=not self._source_index_backfilled(db, notebook_id),
             )
             return db.execute(
@@ -1370,7 +1384,7 @@ class UnifiedKgStore:
                 f"AND generation = {_PUBLISHED_COMMUNITY_GEN} AND {gate} "
                 "ORDER BY centrality DESC, canonical_id ASC LIMIT ?",
                 (notebook_id, community_id, exclude_canonical_id, notebook_id,
-                 notebook_id, *source_ids, limit)
+                 notebook_id, json.dumps(source_ids), limit)
             ).fetchall()
 
     def comention_peers(
@@ -1379,20 +1393,30 @@ class UnifiedKgStore:
     ) -> List[Tuple[str, int]]:
         """concept_comentions 两侧按 bridge_claims 降序取对端 canonical_name。
 
-        ``allowed_source_ids`` 同 ``community_member_peers``:缺省 → 名字查询
-        与来源闸落地之前逐字相同;传进来时把闸挂在**取名字**的那条查询上,
-        无天花板内来源支撑的对端一个名字都不出去。
+        ``allowed_source_ids`` 同 ``community_member_peers``:缺省 → 结果与来源闸
+        落地之前逐值相同;传进来时把闸挂在**取名字**的那条查询上,无天花板内
+        来源支撑的对端一个名字都不出去。
+
+        名字是**一条**按 canonical_id 集合的批量读,不是逐行一次:
+        ① 逐行版本本来就是 N+1(N = ``limit``,默认 8);
+        ② 加闸之后每一行还要各背一遍整库天花板的清单谓词。
+        ``MIN(canonical_name)`` + ``GROUP BY`` 取代原来的 ``LIMIT 1``:一个
+        canonical_id 的全部成员行共享同一个 canonical_name(两者都由
+        ``kg_canonical_scratch`` 的同一行写出),所以取值不变,而聚合形式在两个
+        后端上都是确定的——裸列 + GROUP BY 在 PostgreSQL 上根本不合法。
         """
         with self.database.connect() as db:
             gate = ""
+            gate_params: tuple = ()
             if allowed_source_ids is not None:
                 source_ids = list(dict.fromkeys(allowed_source_ids))
                 if not source_ids:
                     return []
                 gate = "AND " + _object_support_exists(
-                    "concept_clusters", ",".join("?" for _ in source_ids),
+                    "concept_clusters",
                     authoritative=not self._source_index_backfilled(db, notebook_id),
                 ) + " "
+                gate_params = (json.dumps(source_ids),)
             rows = db.execute(
                 "SELECT canonical_a, canonical_b, bridge_claims FROM concept_comentions "
                 "WHERE notebook_id=? AND (canonical_a=? OR canonical_b=?) AND bridge_claims>=? "
@@ -1400,18 +1424,40 @@ class UnifiedKgStore:
                 "CASE WHEN canonical_a=? THEN canonical_b ELSE canonical_a END ASC LIMIT ?",
                 (notebook_id, canonical_id, canonical_id, min_bridge,
                  canonical_id, limit)).fetchall()
-            out: List[Tuple[str, int]] = []
-            for r in rows:
-                other = r["canonical_b"] if r["canonical_a"] == canonical_id else r["canonical_a"]
-                nm = db.execute(
-                    "SELECT canonical_name FROM concept_clusters WHERE notebook_id=? "
-                    f"AND canonical_id=? AND generation = {_PUBLISHED_CLUSTER_GEN} "
-                    f"{gate}LIMIT 1",
-                    (notebook_id, other, notebook_id,
-                     *(() if allowed_source_ids is None else source_ids))).fetchone()
-                if nm and nm["canonical_name"]:
-                    out.append((nm["canonical_name"], int(r["bridge_claims"])))
-            return out
+            ordered = [
+                (str(r["canonical_b"] if r["canonical_a"] == canonical_id
+                     else r["canonical_a"]), int(r["bridge_claims"]))
+                for r in rows
+            ]
+            wanted = list(dict.fromkeys(other for other, _claims in ordered))
+            if not wanted:
+                return []
+            names = {
+                str(row["canonical_id"]): str(row["canonical_name"] or "")
+                for row in db.execute(
+                    "SELECT canonical_id, MIN(canonical_name) AS canonical_name "
+                    "FROM concept_clusters WHERE notebook_id=? "
+                    f"AND canonical_id IN {_JSON_ID_LIST} "
+                    f"AND generation = {_PUBLISHED_CLUSTER_GEN} "
+                    f"{gate}GROUP BY canonical_id",
+                    (notebook_id, json.dumps(wanted), notebook_id,
+                     *gate_params)).fetchall()
+            }
+            return [
+                (names[other], claims)
+                for other, claims in ordered if names.get(other)
+            ]
+
+    def source_index_backfilled(self, notebook_id: str) -> bool:
+        """上面那道闸这次会不会走权威支,给**服务层**的可观测入口。
+
+        闸本身在 SQL 里,走的是哪一支只有这条只读连接知道;而事件必须由服务层
+        发(store 不拿 event_log)。形状与本段其它对比原语一致:自开只读连接、
+        一条短查询。只有天花板真的在绑时才会被调到,所以无天花板的 run
+        (今天生产的全部 run)一条查询都不多发。
+        """
+        with self.database.connect() as db:
+            return self._source_index_backfilled(db, notebook_id)
 
     @staticmethod
     def _source_index_backfilled(db: sqlite3.Connection, notebook_id: str) -> bool:

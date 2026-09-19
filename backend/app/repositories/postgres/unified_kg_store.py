@@ -1478,12 +1478,16 @@ class UnifiedKgStore:
     ) -> List[Tuple[str, int]]:
         """concept_comentions 两侧按 bridge_claims 降序取对端 canonical_name。
 
-        ``allowed_source_ids`` 同 ``community_member_peers``:缺省 → 名字查询
-        与来源闸落地之前逐字相同;传进来时把闸挂在**取名字**的那条查询上,
-        无天花板内来源支撑的对端一个名字都不出去。
+        ``allowed_source_ids`` 同 ``community_member_peers``:缺省 → 结果与来源闸
+        落地之前逐值相同;传进来时把闸挂在**取名字**的那条查询上,无天花板内
+        来源支撑的对端一个名字都不出去。
+
+        名字是**一条**按 canonical_id 集合的批量读(SQLite 孪生同注记):逐行版本
+        本来就是 N+1,加闸之后每一行还要各背一遍整库天花板的清单谓词。
         """
         with self.database.connect() as db:
             gate = ""
+            gate_params: tuple = ()
             if allowed_source_ids is not None:
                 source_ids = list(dict.fromkeys(allowed_source_ids))
                 if not source_ids:
@@ -1492,6 +1496,7 @@ class UnifiedKgStore:
                     "concept_clusters",
                     authoritative=not self._source_index_backfilled(db, notebook_id),
                 ) + " "
+                gate_params = (source_ids,)
             rows = db.execute(
                 "SELECT canonical_a, canonical_b, bridge_claims FROM concept_comentions "
                 "WHERE notebook_id=%s AND (canonical_a=%s OR canonical_b=%s) AND bridge_claims>=%s "
@@ -1499,18 +1504,33 @@ class UnifiedKgStore:
                 "CASE WHEN canonical_a=%s THEN canonical_b ELSE canonical_a END "
                 "COLLATE \"C\" ASC LIMIT %s",
                 (notebook_id, canonical_id, canonical_id, min_bridge, canonical_id, limit)).fetchall()
-            out: List[Tuple[str, int]] = []
-            for r in rows:
-                other = r["canonical_b"] if r["canonical_a"] == canonical_id else r["canonical_a"]
-                nm = db.execute(
-                    f"SELECT canonical_name FROM concept_clusters WHERE notebook_id=%s "
-                    f"AND canonical_id=%s AND generation = {_PUBLISHED_CLUSTER_GEN} "
-                    f"{gate}LIMIT 1",
-                    (notebook_id, other, notebook_id,
-                     *(() if allowed_source_ids is None else (source_ids,)))).fetchone()
-                if nm and nm["canonical_name"]:
-                    out.append((nm["canonical_name"], int(r["bridge_claims"])))
-            return out
+            ordered = [
+                (str(r["canonical_b"] if r["canonical_a"] == canonical_id
+                     else r["canonical_a"]), int(r["bridge_claims"]))
+                for r in rows
+            ]
+            wanted = list(dict.fromkeys(other for other, _claims in ordered))
+            if not wanted:
+                return []
+            names = {
+                str(row["canonical_id"]): str(row["canonical_name"] or "")
+                for row in db.execute(
+                    f"SELECT canonical_id, MIN(canonical_name) AS canonical_name "
+                    f"FROM concept_clusters WHERE notebook_id=%s "
+                    f"AND canonical_id=ANY(%s) "
+                    f"AND generation = {_PUBLISHED_CLUSTER_GEN} "
+                    f"{gate}GROUP BY canonical_id",
+                    (notebook_id, wanted, notebook_id, *gate_params)).fetchall()
+            }
+            return [
+                (names[other], claims)
+                for other, claims in ordered if names.get(other)
+            ]
+
+    def source_index_backfilled(self, notebook_id: str) -> bool:
+        """SQLite 孪生同注记:给服务层的可观测入口,只在天花板真的在绑时被调。"""
+        with self.database.connect() as db:
+            return self._source_index_backfilled(db, notebook_id)
 
     @staticmethod
     def _source_index_backfilled(db: Any, notebook_id: str) -> bool:

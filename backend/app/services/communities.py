@@ -8,8 +8,9 @@
 编排/重排/事件,持久化读一律走注入的 CommunityQueryService.unified_kg)。
 
 收窄有两道,两道都在「名字被取出来」之前:库维度在 mounted_base_ids,来源维度
-(逐库冻结来源天花板)在 _source_ceiling_kwargs —— 后者由两个 peers 函数各自下推
-给 store,做成 SQL 谓词。"""
+(逐库冻结来源天花板)在 _source_ceiling_kwargs —— 后者由两个 peers 函数各自经
+_ceiling_kwargs 下推给 store,做成 SQL 谓词;同一个入口顺带发那条 source_index_
+fallback 事件(闸在 SQL 里、事件在服务层)。"""
 from __future__ import annotations
 from typing import List, Optional, Tuple
 
@@ -94,7 +95,7 @@ class CommunityQueryService:
             return []
         rows = self.unified_kg.community_member_peers(
             base_notebook_id, community_id, focal, candidates,
-            **_source_ceiling_kwargs(base_notebook_id),
+            **self._ceiling_kwargs(base_notebook_id),
         )
         ranked = sorted(
             rows,
@@ -125,10 +126,54 @@ class CommunityQueryService:
                 return []
             return self.unified_kg.comention_peers(
                 notebook_id, focal, self.sibling_min_bridge, top_k,
-                **_source_ceiling_kwargs(notebook_id),
+                **self._ceiling_kwargs(notebook_id),
             )
         except Exception:
             return []
+
+    def _ceiling_kwargs(self, notebook_id: str) -> dict:
+        """``_source_ceiling_kwargs`` 加一条可观测性:闸落在**未回填库**上时发事件。
+
+        为什么要这条信号:闸有两支(见 ``_object_support_exists``)。反向索引
+        ``knowledge_object_sources`` 已回填的库走窄索引读;没回填的库退回扫
+        ``knowledge_objects.evidence`` JSON 的权威支——语义相同、成本完全不同,
+        而且从外面一个字都看不出来。词法臂在同一个判断点上早就发
+        ``source_index_fallback``(``retrieval_candidates`` 的
+        ``site="kg_source_scoped_fts"``),这里是同一族事件的第二个站点。
+
+        ``store 层不拿 event_log``,所以判断点在 SQL 里、事件在这里,代价是多一次
+        短查询——只在天花板真的在绑时发生(今天生产恒不绑,零成本)。
+
+        ``memoized_retrieval_value``:每次 run、每个库至多问一次,也就至多一条
+        事件。run 缺席(直调 store 的测试/脚本)时退化为每次调用都问一次,这是
+        可观测性的 fail-open 面,不改任何检索结果。
+        """
+        kwargs = _source_ceiling_kwargs(notebook_id)
+        if kwargs:
+            self._note_source_index_fallback(notebook_id)
+        return kwargs
+
+    def _note_source_index_fallback(self, notebook_id: str) -> None:
+        from app.services.retrieval_run import memoized_retrieval_value
+
+        def _probe() -> bool:
+            try:
+                if self.unified_kg.source_index_backfilled(notebook_id):
+                    return False
+                self.event_log.emit({
+                    "kind": "source_index_fallback",
+                    "notebook_id": notebook_id,
+                    "site": "comparison_peer_source_ceiling",
+                })
+                return True
+            except Exception:
+                # 内容无关的可观测性,fail-open:它绝不能把一次对比检索变成异常
+                # (``sibling_peers`` 的 except 会把异常吞成「这库没有兄弟」)。
+                return False
+
+        memoized_retrieval_value(
+            ("comparison_peer_source_index_fallback", str(notebook_id)), _probe,
+        )
 
     def resolve_comparison_peers(self, base_notebook_id: str, focal_name: str,
                                  question: str, *, top_k: int,

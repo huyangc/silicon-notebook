@@ -640,3 +640,32 @@ store 一个参数都不多收，SQL 与调用次数逐条不变。`None`（无�
 `notebook_source_ceilings`，PR-D 才会——所以这次改动零行为变化，验收经
 `source_scope_context(..., notebook_source_ceilings=...)` 在真 SQLite 夹具上进行
 （`backend/tests/test_comparison_peer_ceiling.py`，含 PG 侧 conformance 镜像用例）。
+
+## 38. KG 命中的定义 / 引文 / 引用过来源天花板（2026-09-20）
+
+**这一条修的是线上既有行为**，不是「写入方之前必须关掉」的那三条之一。`knowledge_context`
+刻意不读 `hit.evidence`（清空证据不够：对象名照样渲染成一行、照样铸一个活的 `k{n}` 锚点），
+改按 `node_context(origin, object_id)` 重查。那条重查坐在 `GraphRetrievalService.node_context`
+这个**刻意不设闸**的座位上，按 `knowledge_objects.evidence` 整列返回 occurrences，而
+`occurrences[0]` 同时决定提示词里那句 `— def: <原文>` 与引用卡的
+`source_id` / `element_id` / `source_title` / `location_label`。于是一个对象可以凭天花板**内**
+的那条证据被 `filter_retrieval_items` 合法放行（那道复核只要求剩下一条证据），却把天花板
+**外**那条的原文写进提示词、并让引用指向一个用户已经取消勾选的来源。
+
+触发面不限于联邦：**单库的 LOCAL 勾选天花板今天线上就能复现**——取消勾选某来源之后，它的
+元素正文仍可能作为某个 KG 对象的定义出现在答案里。PR-C 那次 `RetrievalService.node_context`
+的修复没有覆盖到这里：那一层是 reasoning 链路补水专用，`evidence_context` 直连 graph 服务，
+根本不经过它（两处 docstring 互相点名了这个分工）。
+
+修法在 `EvidenceContextService.knowledge_context._admit` 的重查结果上过一次
+`source_scope.filter_evidence(origin, occurrences)`，再取第一条。判据是**对象自己那一库**的
+天花板（`filter_evidence` → `allows()` 依次问库维度、逐库天花板、本地 mode/source_ids 三支），
+与 `filter_retrieval_items` 的 knowledge 支同一把尺子。过滤后为空时 **fail-closed 整条不 admit**，
+不回落未过滤的那一列——回落等于取消这道闸，只清空 snippet 又会留下名字与活锚点。缺席态逐字
+不变:无任何天花板时 `filter_evidence` 是恒等函数（`source_allowed` 在 scope 为 None 时直接
+True），既有用例零改动全绿。
+
+登记的残余口（见 `fangan_todo.md`）：`node_context` 的 `definition` 字段过不了这道闸，而且
+过不了是**结构性**的——它在 store 侧由两条路产出（概念簇 `canonical_description` 这个对象级
+LLM 融合描述，归因不到单一来源；以及 `defines` 关系那个源对象证据的首条原文，有来源但没随
+字符串返回），服务层拿到的只是一个字符串。关掉它需要改 `node_context` 的返回形状。

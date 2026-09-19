@@ -33,7 +33,9 @@ from app.services.retrieval_participants import resolve_retrieval_participant_id
 from app.services.citation_markers import MARKER_RE, marker_keys
 from app.services.source_display import source_display_title
 from app.services.source_element_selection import deduplicate_source_chunks_in_order
-from app.services.source_scope import citation_active_id, notebook_in_scope
+from app.services.source_scope import (
+    citation_active_id, filter_evidence, notebook_in_scope,
+)
 
 
 def _fold(value: object) -> str:
@@ -913,6 +915,34 @@ class EvidenceContextService:
                     context = self.knowledge.node_context(origin, hit.object_id)
                 except KeyError:
                     continue
+                # 来源级闸,落在这条**重查**的结果上。上面的 notebook_in_scope 只答
+                # 库维度,而 node_context 走的是 GraphRetrievalService 那个**刻意不
+                # 设闸**的座位(见它的注释:两个消费者各自在自己的边界上设闸,这里
+                # 就是本消费者的边界)。它按 ``knowledge_objects.evidence`` 整列返回
+                # occurrences,下面 ``occurrences[0]`` 同时决定了 snippet、definition
+                # 的兜底、以及引用卡的 source_id/element_id/source_title ——
+                # ``hit.evidence`` 已被 ``filter_retrieval_items`` 的 knowledge 支按
+                # 该对象**自己那一库**的天花板收窄过,这一列却没有,所以同一个对象
+                # 可以凭天花板内的那条证据被合法召回,却把天花板外那条的原文写进
+                # 提示词、并让引用指向一个用户已经取消勾选(或从未冻结进来)的来源。
+                # 这在**单库**的 LOCAL 勾选天花板下今天就可复现,不是联邦专有。
+                #
+                # 缺席时逐字不变:没有任何天花板时 ``filter_evidence`` 是恒等
+                # (``source_allowed`` → scope 为 None 直接 True;有 scope 但该库无
+                # 天花板时 ``allows()`` 在库维度/逐库/本地三支上依次放行)。
+                raw_occurrences = context.get("occurrences") or []
+                occurrences = filter_evidence(origin, raw_occurrences)
+                if raw_occurrences and not occurrences:
+                    # FAIL-CLOSED,且与 ``filter_retrieval_items`` 的 knowledge 支
+                    # 同口径:被闸清空的对象**整条**丢掉,不回落到未过滤的那一列。
+                    # 只清空 snippet/definition 不够 —— 对象名照样会渲染成一行、
+                    # 照样铸一个活的 k{n} 锚点(与上面 notebook_in_scope 整条跳过
+                    # 的理由逐字相同)。
+                    #
+                    # 理论上不可达:种子侧已判过该对象至少有一条天花板内证据,而
+                    # 两边读的是同一列。真的走到这里说明那道复核与这次重查之间出
+                    # 现了分歧,那正是必须少给、不是多给的时刻。
+                    continue
                 separator = 1 if lines else 0
                 remaining_total = ceiling - used - separator
                 if remaining_total <= 0:
@@ -920,8 +950,15 @@ class EvidenceContextService:
                 next_id += 1
                 key = f"k{next_id + id_offset}"
                 name = str(hit.payload.get("name", "")).strip()
-                occurrences = context.get("occurrences") or []
                 snippet = occurrences[0].get("element_text") if occurrences else ""
+                # ⚠ ``context["definition"]`` 过不了这道闸,而且**过不了是结构性
+                # 的**:它在 store 侧由两条不同的路产出(概念簇的
+                # ``canonical_description`` —— 对象级的 LLM 融合描述,归因不到单一
+                # 来源;以及 ``defines`` 关系那个源对象证据的首条原文 —— 有来源,
+                # 但那个来源没有随字符串返回)。``node_context`` 只交回一个字符串,
+                # 服务层因此无从判断它来自哪一条。登记在 ``fangan_todo.md``
+                # 「KG 对象 definition 的来源归因」,需要改 ``node_context`` 的返回
+                # 形状才能关,不在本次修复范围内。
                 definition = context.get("definition") or snippet
                 tier = getattr(hit, "tier", "personal")
                 prefix = f"{key}: [{hit.object_type}][{tier}] {name}"

@@ -2825,6 +2825,12 @@ class KnowledgeStore:
 
     @staticmethod
     def source_index_backfilled(db: Any, notebook_id: str) -> bool:
+        """P0-4 反向索引的完整性凭证(SQLite 孪生的 docstring 是规范说明)。
+
+        ⚠ 同语义的读法共三份:这里、以及两个 ``unified_kg_store.py`` 里的
+        ``UnifiedKgStore._source_index_backfilled``(对比兄弟来源闸自开只读
+        连接,不能接受外部 ``db``)。三处行为必须逐字一致。
+        """
         row = db.execute(
             "SELECT source_index_backfilled FROM unified_kg_state WHERE notebook_id=%s",
             (notebook_id,),
