@@ -68,11 +68,16 @@ Two defences, and the first one is the real one:
    effects and answers the same two questions the seat asks, so a mismatch
    fails loudly at the top of the request instead of quietly at the bottom of a
    worker thread.  (Wired in PR-D; this module ships the primitive.)
-2. **Every fail-soft handler between a seat read and the Ask/report entry
-   re-raises it**, named beside ``except AskCancelled: raise``.  Handlers in
-   modules that may not read the override import the exception from
+2. **The REGISTERED fail-soft handlers re-raise it**, named beside
+   ``except AskCancelled: raise``.  "Registered", not "every": the set is the
+   hand-audited list of handlers whose ``try`` body can actually reach a seat
+   read, kept in ``_SEAT_FAILSOFT_SITES`` in
+   ``backend/tests/test_participant_override_guard.py`` and pinned there by an
+   AST guard.  Adding a fail-soft handler that can reach a seat read means
+   adding it to that list in the same change -- the guard cannot discover one
+   on its own, it can only prove that the listed ones still re-raise.  Handlers
+   in modules that may not read the override import the exception from
    ``app.domain.retrieval_control`` -- the name alone, no accessor.
-   ``backend/tests/test_participant_override_guard.py`` pins the set.
 
 Fail-closed without a run
 -------------------------

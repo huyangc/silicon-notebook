@@ -2103,6 +2103,13 @@ class AskService:
                 raise
             except AskPluginEngineError:
                 raise
+            except RetrievalControlError:
+                # Registered fail-soft handler: the plugin's element seat
+                # is ``retrieval.federated_retrieve_elements``, which reads
+                # the participant seat. Collapsing an attestation failure
+                # into a generic plugin error code would hide a scope
+                # isolation failure behind a plugin's name.
+                raise
             except Exception as exc:
                 code = safe_plugin_engine_error_code(
                     getattr(exc, "code", "plugin_engine_failed")
@@ -4920,7 +4927,7 @@ class AskService:
                     top_hits=top_hits,
                     max_results=self.settings.ppr_top_chunks,
                 )
-            except (AskCancelled, StageBoundaryError):
+            except (AskCancelled, RetrievalControlError, StageBoundaryError):
                 raise
             except Exception:
                 top_hits, elements, trace, chunks, chains = (

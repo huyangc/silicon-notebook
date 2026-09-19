@@ -51,6 +51,11 @@ from app.services.agent_profile_block import (
     clip_block_value, render_profile_block, rendered_row_count,
 )
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
+# Only the NAME, from the dependency-free domain layer: these modules are
+# not on the participant override's frozen reader whitelist, but their
+# fail-soft handlers must re-raise its control exception instead of
+# degrading an identity-attestation failure into an empty result set.
+from app.domain.retrieval_control import RetrievalControlError
 from app.services.citation_markers import LOOSE_MARKER_RE
 from app.services.model_work import MalformedModelResponse
 from app.services.collection_catalog import (
@@ -3930,6 +3935,9 @@ class ReasoningRetriever:
                 continue
             try:
                 per_q.append({h.object_id: h for h in self.search(notebook_id, q)})
+            except RetrievalControlError:
+                # 登记的 fail-soft handler:同 ``_first_round_search``。
+                raise
             except Exception:
                 if self.fail_closed:
                     raise
@@ -4411,6 +4419,10 @@ class ReasoningRetriever:
             return hits
         except AskCancelled:
             raise
+        except RetrievalControlError:
+            # 登记的 fail-soft handler:``search`` → ``federated_retrieve`` →
+            # 座位(见 ``_chunk_seed_search`` 的注释)。
+            raise
         except Exception:
             if self.fail_closed:
                 raise
@@ -4556,7 +4568,9 @@ class ReasoningRetriever:
                     self.collection_catalog.collection_map(notebook_id)
                 )
                 collection_map_text = render_collection_map(collection_map)
-            except AskCancelled:
+            except (AskCancelled, RetrievalControlError):
+                # 登记的 fail-soft handler:``collection_map`` 经
+                # ``resolve_retrieval_participant_ids`` 触达座位。
                 raise
             except Exception as exc:  # noqa: BLE001 — 见上:地图不是必需品
                 record(TraceStep(
@@ -4827,6 +4841,16 @@ class ReasoningRetriever:
         try:
             return self.search_chunks(notebook_id, query, k=take)
         except AskCancelled:
+            raise
+        except RetrievalControlError:
+            # 登记的 fail-soft handler 之一。``search_chunks`` 经
+            # ``retrieve_chunk_candidates`` → ``chunk_federation`` 触达参与集
+            # 座位,而座位对身份错配/无 ambient run 是 **raise** 而不是回落。
+            # fail-open 吞掉它 = 一次越权上下文泄漏表现成「本次检索未命中」,
+            # 正是 ``retrieval_participants`` 的 docstring 点名要避免的静默。
+            # ``fail_closed`` 在 Ask 路径为 False,所以不能靠它。清单与守卫见
+            # ``backend/tests/test_participant_override_guard.py``:新增一个能
+            # 触达座位的 fail-soft handler 必须同 diff 登记。
             raise
         except Exception:
             if self.fail_closed:
@@ -5767,6 +5791,10 @@ class ReasoningRetriever:
                         peers.append(pname)
                 if found and peer_source != "comention":
                     peer_source = src
+        except RetrievalControlError:
+            # 登记的 fail-soft handler:``mounted_base_ids`` 经
+            # ``resolve_retrieval_participant_ids`` 触达座位。
+            raise
         except Exception as exc:  # noqa: BLE001 — 注释声称 fail-open 但原代码未实现兜底:
             if self.fail_closed:
                 raise
@@ -6094,7 +6122,7 @@ class ReasoningRetriever:
                         cancel_event=self.cancel_event,
                     )
                 )
-            except AskCancelled:
+            except (AskCancelled, RetrievalControlError):
                 raise
             except Exception as exc:  # noqa: BLE001 — 见下的 skip
                 # 解析不出来与「名字对不上」对用户是同一件事:这一个动作
@@ -6211,7 +6239,7 @@ class ReasoningRetriever:
                         notebook_id, kind, budget=budget,
                         cursor=chain_state.cursor if chain_state else None,
                         cancel_event=self.cancel_event)
-            except AskCancelled:
+            except (AskCancelled, RetrievalControlError):
                 raise
             except ValueError as exc:
                 # 两类来源:执行器对「未知 kind / 不在作用域或不可枚举的
@@ -7331,8 +7359,8 @@ class ReasoningRetriever:
                             edge_type=decision.chain_edge_type,
                             target_object_id=decision.chain_target_object_id,
                             direction=decision.chain_direction)
-                    except Exception:
-                        if self.fail_closed:
+                    except Exception as exc:  # 见 _chunk_seed_search 的登记注释
+                        if self.fail_closed or isinstance(exc, RetrievalControlError):
                             raise
                         chain_result = None
                     raise_if_cancelled(self.cancel_event)

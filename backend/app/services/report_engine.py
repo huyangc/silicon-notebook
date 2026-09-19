@@ -47,6 +47,11 @@ from app.core.config import (
 from app.core.llm import cap_kwargs
 from app.domain.extensions import RetrievalContributorHostPort
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
+# Only the NAME, from the dependency-free domain layer: these modules are
+# not on the participant override's frozen reader whitelist, but their
+# fail-soft handlers must re-raise its control exception instead of
+# degrading an identity-attestation failure into an empty result set.
+from app.domain.retrieval_control import RetrievalControlError
 from app.services.citation_markers import MARKER_RE, marker_keys
 from app.services.report_execution import REPORT_CANCELLATIONS
 from app.services.report_corpus_profile import (
@@ -1087,8 +1092,13 @@ class ReportEngine:
         def _safe(loader, query) -> Tuple[list, bool]:
             try:
                 return loader(notebook_id, query), True
-            except AskCancelled:
+            except (AskCancelled, RetrievalControlError):
                 # Cancellation is control flow, not a best-effort probe miss.
+                # Neither is a participant-override attestation failure: the
+                # loaders reach ``federated_retrieve`` -> the participant seat,
+                # which RAISES on an identity mismatch rather than falling back.
+                # A registered fail-soft handler (see
+                # ``backend/tests/test_participant_override_guard.py``).
                 raise
             except Exception:
                 return [], False
@@ -1357,7 +1367,9 @@ class ReportEngine:
                 parts.append("检索到的知识条目(name[type][tier]):\n" + "\n".join(
                     f"- {str(h.payload.get('name','')).strip()}"
                     f"[{h.object_type}][{getattr(h,'tier','personal')}]" for h in kg))
-        except AskCancelled:
+        except (AskCancelled, RetrievalControlError):
+            # Registered fail-soft handler: ``_probe_knowledge_hits`` ->
+            # ``federated_retrieve`` -> the participant seat.
             raise
         except Exception:
             pass
@@ -1370,7 +1382,9 @@ class ReportEngine:
                 if chunks:
                     parts.append("相关原文所在(来源·章节,不含正文):\n" + "\n".join(
                         f"- {c.source_title} · {c.section_path}" for c in chunks))
-            except AskCancelled:
+            except (AskCancelled, RetrievalControlError):
+                # Registered fail-soft handler: ``ppr_retrieve`` builds the PPR
+                # graph, which reads the seat when an override is installed.
                 raise
             except Exception:
                 pass
@@ -2021,7 +2035,9 @@ class ReportEngine:
                             result.top_hits.append(hit)
                             seen_objects.add(hit.object_id)
                             new_count += 1
-                except AskCancelled:
+                except (AskCancelled, RetrievalControlError):
+                    # Registered fail-soft handler: ``federated_retrieve`` ->
+                    # the participant seat.
                     raise
                 except Exception:
                     pass

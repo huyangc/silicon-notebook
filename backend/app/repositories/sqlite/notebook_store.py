@@ -107,6 +107,10 @@ class NotebookStore:
 
     @staticmethod
     def participant_tiers(db: sqlite3.Connection, active_notebook_id: str):
+        """``([notebook_id, ...], {notebook_id: tier})`` —— 两半由同一次
+        ``resolve_participants`` 派生,所以 tier map 的键集合**恒等于**那份 id 列表。
+        消费方(``collection_enumeration._mount_participant_pairs``)按这条不变量把
+        两半 zip 回 ``(id, tier)`` 对;要改成「map 里还带别的库」就必须同时改它。"""
         pairs = NotebookStore.resolve_participants(db, active_notebook_id)
         return [nb_id for nb_id, _ in pairs], dict(pairs)
 
