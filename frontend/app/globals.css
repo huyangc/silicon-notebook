@@ -5077,6 +5077,16 @@ button.chat-session-card {
   line-height: 1.5;
 }
 
+/* 按键提示:靠右、弱化,永远排在这一行的最后;空间不够时随 flex-wrap 整体换行。
+   两个类的选择器同上——要压过 `.chat-input-bar span` 的 13px/#667085。 */
+.chat-input-controls .chat-key-hint {
+  margin-left: auto;
+  color: #98a2b3;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
 .chat-input {
   flex: 1 1 auto;
   min-width: 0;

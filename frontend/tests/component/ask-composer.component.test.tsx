@@ -52,6 +52,15 @@ describe("AskComposer", () => {
     expect(onSubmit).toHaveBeenCalledOnce();
   });
 
+  test("the key hint states the same Enter / Shift+Enter behaviour, after the caller's controls", () => {
+    render(<ControlledComposer onSubmit={() => undefined} />);
+    const hint = screen.getByText("Enter 发送 · Shift + Enter 换行");
+    const controls = hint.parentElement!;
+    expect(controls).toHaveClass("chat-input-controls");
+    expect(controls.lastElementChild).toBe(hint);
+    expect(controls).toHaveTextContent("2 个来源");
+  });
+
   test("running state locks input and turns send into interrupt", async () => {
     const user = userEvent.setup();
     const onAbort = vi.fn();
