@@ -130,6 +130,33 @@ def test_seat_returns_the_override_set(repo, islands):
     )
 
 
+def test_seat_re_attests_on_every_read_inside_one_run(repo, islands):
+    """座位在覆盖在场时绝不从 run-local memo 里答。
+
+    复现:同一个 run 里先用一份合法覆盖把座位读热,再装一份**成员相同**却声明给
+    另一个用户的覆盖——memo 命中会整段跳过身份复核,读到缓存而不是报错;成员换个
+    顺序还能绕过名义 active 的检查(指纹对顺序不敏感)。两条都必须抛。
+    """
+    from app.domain.retrieval_control import ParticipantOverrideError
+
+    ids, _sources = islands
+    active = ids[0]
+    seat = repo.retrieval.candidates._retrieval_participants
+    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+        with participant_override(_override(ids)):
+            assert [nid for nid, _tier in seat(active)] == list(ids)
+        with participant_override(_override(ids, actor="someone-else")):
+            with pytest.raises(ParticipantOverrideError):
+                seat(active)
+        reordered = (ids[1], ids[0], ids[2])
+        with participant_override(_override(reordered)):
+            with pytest.raises(ParticipantOverrideError):
+                seat(active)
+        # 合法覆盖重新装回来照常工作:前两次失败没有留下任何缓存状态。
+        with participant_override(_override(ids)):
+            assert [nid for nid, _tier in seat(active)] == list(ids)
+
+
 def test_seat_is_unchanged_without_an_override(repo, islands):
     """覆盖不在场 -> 挂载谓词的输出逐字不变(这里就是 active 自己一本)。"""
     ids, _sources = islands
