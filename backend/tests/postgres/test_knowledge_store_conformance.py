@@ -988,6 +988,114 @@ def test_unified_kg_equal_rank_top_k_reads_use_id_tie_breaks(knowledge_harness):
     ) == [("Peer A", 3), ("Peer Z", 3)]
 
 
+def test_comparison_peer_reads_apply_the_per_notebook_source_ceiling(
+    knowledge_harness,
+):
+    """PR-D0·D0-2 的 PG 侧镜像(SQLite 孪生:tests/test_comparison_peer_ceiling.py)。
+
+    ``allowed_source_ids`` 缺省 → 与来源闸落地之前逐值相同;传进来时只留还有
+    天花板内来源支撑的实体。两条支都要走到:反向索引已认证的库读
+    ``knowledge_object_sources``,未认证的库(无 ``unified_kg_state`` 行)读
+    evidence JSON —— 后者不是可选项,把「历史/未知」当成「没有行」会静默清空
+    候选集。
+    """
+    unified = PostgresUnifiedKgStore(knowledge_harness.database, now=lambda: NOW)
+    open_source, hidden_source = "source-ceiling-open", "source-ceiling-hidden"
+    members = (
+        ("ko-ceiling-focal", "K-focal", "Focal", open_source),
+        ("ko-ceiling-mixed-open", "K-mixed", "Mixed", open_source),
+        ("ko-ceiling-mixed-hidden", "K-mixed", "Mixed", hidden_source),
+        ("ko-ceiling-hidden", "K-hidden", "Hidden", hidden_source),
+    )
+    object_rows = [
+        (
+            object_id, "nb-personal", "concept", "approved",
+            json.dumps({"name": name}),
+            json.dumps([{**_evidence()[0], "source_id": source_id}]),
+            source_id, NOW, NOW,
+        )
+        for object_id, _canonical, name, source_id in members
+    ]
+    cluster_rows = [
+        (
+            f"cluster-ceiling-{index}", "nb-personal", canonical, object_id,
+            name, "concept", "", "", NOW,
+        )
+        for index, (object_id, canonical, name, _source) in enumerate(members, 1)
+    ]
+    ph = "%s"
+    with knowledge_harness.database.write() as connection:
+        knowledge_harness.knowledge.insert_object_chunk(connection, object_rows)
+        unified.replace_cluster_rows_streamed(
+            connection, "nb-personal", "concept", cluster_rows
+        )
+        execute_many(
+            connection,
+            "INSERT INTO knowledge_object_sources(object_id,source_id,notebook_id) "
+            "VALUES (%s,%s,%s)",
+            [(object_id, source_id, "nb-personal")
+             for object_id, _canonical, _name, source_id in members],
+        )
+        member_sql = (
+            "INSERT INTO community_members(canonical_id,notebook_id,level,community_id,"
+            "canonical_name,centrality) VALUES (" + ",".join([ph] * 6) + ")"
+        )
+        for canonical, name in (
+            ("K-focal", "Focal"), ("K-hidden", "Hidden"), ("K-mixed", "Mixed"),
+        ):
+            connection.execute(
+                member_sql,
+                (canonical, "nb-personal", 0, "community-ceiling", name, 0.5),
+            )
+        comention_sql = (
+            "INSERT INTO concept_comentions(notebook_id,canonical_a,canonical_b,"
+            "bridge_claims) VALUES (" + ",".join([ph] * 4) + ")"
+        )
+        for peer in ("K-hidden", "K-mixed"):
+            connection.execute(
+                comention_sql, ("nb-personal", "K-focal", peer, 3)
+            )
+
+    def _comention(**kwargs):
+        return unified.comention_peers("nb-personal", "K-focal", 1, 8, **kwargs)
+
+    def _community(**kwargs):
+        return [
+            row["canonical_name"]
+            for row in unified.community_member_peers(
+                "nb-personal", "community-ceiling", "K-focal", 8, **kwargs
+            )
+        ]
+
+    assert _comention() == [("Hidden", 3), ("Mixed", 3)]
+    assert _community() == ["Hidden", "Mixed"]
+
+    # 无 unified_kg_state 行 = 反向索引未认证 → 权威支(扫 evidence JSON)。
+    assert _comention(allowed_source_ids=[open_source]) == [("Mixed", 3)]
+    assert _community(allowed_source_ids=[open_source]) == ["Mixed"]
+
+    with knowledge_harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO unified_kg_state(notebook_id,updated_at,"
+            "source_index_backfilled) VALUES (%s,%s,1)",
+            ("nb-personal", normalize_timestamp(NOW)),
+        )
+
+    # 认证之后走反向索引支,答案必须一模一样。
+    assert _comention(allowed_source_ids=[open_source]) == [("Mixed", 3)]
+    assert _community(allowed_source_ids=[open_source]) == ["Mixed"]
+    assert _comention(allowed_source_ids=[hidden_source]) == [
+        ("Hidden", 3), ("Mixed", 3)
+    ]
+    assert _community(allowed_source_ids=[hidden_source]) == ["Hidden", "Mixed"]
+    # 空清单是显式 deny,不是「不限」。
+    assert _comention(allowed_source_ids=[]) == []
+    assert _community(allowed_source_ids=[]) == []
+    # 缺省仍与闸落地之前逐值相同。
+    assert _comention() == [("Hidden", 3), ("Mixed", 3)]
+    assert _community() == ["Hidden", "Mixed"]
+
+
 @pytest.mark.postgres_integration
 def test_postgres_embedding_bytea_roundtrip_and_fail_closed_validation(
     postgres_database,

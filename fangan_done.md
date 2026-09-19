@@ -615,3 +615,28 @@ fail-soft 纪律同 diff 补齐：从 `knowledge_context` 往上逐个核对调�
 的既有缺口）。`evidence_context.py` 自身不含任何宽 handler，所以它不进登记清单。
 文档：`docs/development*.md` 守卫一节（读者数 5→6、新增按函数作用域的那条断言）。
 
+## 37. 对比题兄弟实体名过逐库来源级闸（2026-09-20）
+
+PR-D0 的前置之一。横向对比（共提 / 社区）此前只做**库维度**收窄（`communities.mounted_base_ids`
+按参与集与参考库勾选收窄）。逐库冻结来源天花板（`ActiveSourceScope.source_ceiling_for`，PR-C
+落地）在绑时，一本仍在参与集里的库若某实体**只由该库天花板之外的来源**（典型是隐藏 Memory /
+Knowhow 投影）支撑，它的**名字**仍会被取出来，进 `ask_chunk` 的 `sub_queries` 与 reasoning 的
+`_action_expand_community`，并原样进 `used_queries`、可见轨迹，还会被发给 embedding 与模型。
+`mounted_base_ids` 的 docstring 早已写明这条通道泄漏的是**查询词本身**、结果侧过滤补救不了；
+那条论证对来源维度同样成立。
+
+修法落在**名字的唯一出口**而不是两个调用点：`CommunityQueryService.sibling_peers` /
+`community_peers` 各读一次 `_source_ceiling_kwargs(owner)`，把该库的天花板作为
+`allowed_source_ids` 下推给 store，在 SQL 侧变成一条 `EXISTS` 谓词——实体（概念簇）与支撑来源
+的两跳关系是 `concept_clusters.member_object_id` → `knowledge_object_sources.source_id`，与 KG
+词法臂 `KnowledgeStore.fts_search` 的来源闸读同一张反向索引；反向索引未回填的库
+（`unified_kg_state.source_index_backfilled=0`）走同款权威支直接扫 evidence JSON，不把「历史 /
+未知」误读成「没有行」。PG 与 SQLite 逐条对齐；`ports.py` 的 Protocol 面零改动（两个 store 方法
+不在任何 Protocol 上），只给现有方法加了一个关键字可选参数。
+
+短路是零行为变化的落点：无 scope、或该 owner `source_ceiling_for(owner) is None` 时整段不执行，
+store 一个参数都不多收，SQL 与调用次数逐条不变。`None`（无天花板）与空集（deny all）按
+`is not None` 区分，空集即该库一个名字都不出。生产上今天不可达——没有任何地方构造
+`notebook_source_ceilings`，PR-D 才会——所以这次改动零行为变化，验收经
+`source_scope_context(..., notebook_source_ceilings=...)` 在真 SQLite 夹具上进行
+（`backend/tests/test_comparison_peer_ceiling.py`，含 PG 侧 conformance 镜像用例）。
