@@ -4353,5 +4353,40 @@ MIGRATION_MANIFEST[(74, 75)] = {
 }
 
 
+# v76: owner-scoped global conversations and detached question-answer jobs.
+GLOBAL_ASK_TABLES = {
+    "global_ask_conversations": """CREATE TABLE global_ask_conversations (
+                    id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL,
+                    scope_json TEXT NOT NULL, submitted_via TEXT NOT NULL,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                )""",
+    "global_ask_jobs": """CREATE TABLE global_ask_jobs (
+                    id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL
+                        REFERENCES global_ask_conversations(id) ON DELETE CASCADE,
+                    user_id TEXT NOT NULL, client_request_id TEXT,
+                    request_json TEXT NOT NULL, status TEXT NOT NULL,
+                    payload_json TEXT NOT NULL, created_at TEXT NOT NULL
+                )""",
+}
+GLOBAL_ASK_INDEXES = {
+    "idx_global_conversations_owner": "CREATE INDEX idx_global_conversations_owner\n                    ON global_ask_conversations(user_id, updated_at, id)",
+    "idx_global_ask_request": "CREATE UNIQUE INDEX idx_global_ask_request\n                    ON global_ask_jobs(user_id, client_request_id)\n                    WHERE client_request_id IS NOT NULL",
+    "idx_global_ask_running": "CREATE UNIQUE INDEX idx_global_ask_running\n                    ON global_ask_jobs(conversation_id) WHERE status='running'",
+    "idx_global_jobs_conversation": "CREATE INDEX idx_global_jobs_conversation\n                    ON global_ask_jobs(conversation_id, created_at, id)",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 76, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **GLOBAL_ASK_TABLES},
+        "indexes": {**manifest["indexes"], **GLOBAL_ASK_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(75, 76)] = {
+    "tables": GLOBAL_ASK_TABLES, "columns": {}, "indexes": GLOBAL_ASK_INDEXES,
+    "triggers": {}, "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

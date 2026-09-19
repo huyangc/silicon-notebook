@@ -6,6 +6,7 @@ from app.api.ask_routes import router as ask_router
 from app.api.catalog_routes import router as catalog_router
 from app.api.content_overview_routes import router as content_overview_router
 from app.api.group_routes import router as group_router
+from app.api.global_ask_routes import router as global_ask_router
 from app.api.kg_routes import router as kg_router
 from app.api.knowhow_routes import router as knowhow_router
 from app.api.knowledge_routes import router as knowledge_router
@@ -43,5 +44,6 @@ for domain_router in (
     # 只是延续写法。
     agent_profile_router,
     wish_router,
+    global_ask_router,
 ):
     router.include_router(domain_router)

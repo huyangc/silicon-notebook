@@ -677,6 +677,12 @@ origin 写进此名单后 URL 导入才能触达。每项必须带 `http://` 或
 `KG_ISOLATED_RANK_PENALTY` 降低孤立节点的排序分数，不改变其相关度值；
 `QUERY_REWRITE_ENABLED` 控制问答前的查询改写/扩展。
 
+全局问答的 `GLOBAL_ASK_CANDIDATE_LIMIT` 控制跨库合并证据，
+`GLOBAL_ASK_HISTORY_TURNS` 控制允许进入上下文的既往用户问题。
+模型上下文复用 `CHUNK_ANSWER_BUDGET_CHARS`；`query_rewrite` 和 `ask_answer`
+沿用既有模型服务配置，无需新增模型端点。精确默认值与边界见
+[全局问答](./product-and-api_zh.md#全局问答)。
+
 通用问答的文档介绍复用 `CHUNK_ANSWER_BUDGET_CHARS` 限制证据上下文。
 `DOCUMENT_OVERVIEW_MAX_ELEMENTS`（默认 64，最小 2）限制单篇文档读取的原始解析元素数，
 取样包含最后一个位置。这是部署侧成本与覆盖预算，不保证完整章节覆盖。

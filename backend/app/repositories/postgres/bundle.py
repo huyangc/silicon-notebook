@@ -12,6 +12,7 @@ from app.repositories.postgres._store_utils import jsonb, normalize_timestamp
 from app.repositories.postgres.agent_observation_store import AgentObservationStore
 from app.repositories.postgres.agent_profile_store import AgentProfileStore
 from app.repositories.postgres.ask_state_store import AskStateStore
+from app.repositories.global_ask_store import GlobalAskStore
 from app.repositories.postgres.catalog_store import CatalogStore
 from app.repositories.postgres.chunk_store import ChunkStore
 from app.repositories.postgres.database import PostgresDatabase
@@ -176,6 +177,7 @@ class PostgresPersistenceBundle(PersistenceBundle):
     queries: QueryStore
     reports: ReportStore
     ask_state: AskStateStore
+    global_ask: GlobalAskStore
     unified_kg: UnifiedKgStore
     model_status: ModelStatusStore
     agent_profile: AgentProfileStore
@@ -271,6 +273,7 @@ class PostgresPersistenceBundleFactory:
                 current_user_id=lambda: identity.current_user().id,
             )
             ask_state = AskStateStore(database, seams)
+            global_ask = GlobalAskStore(database, marker="%s")
             unified_kg = UnifiedKgStore(database, seams.now)
             model_status = ModelStatusStore(database)
             agent_profile = AgentProfileStore(
@@ -308,6 +311,7 @@ class PostgresPersistenceBundleFactory:
                 queries=queries,
                 reports=reports,
                 ask_state=ask_state,
+                global_ask=global_ask,
                 unified_kg=unified_kg,
                 model_status=model_status,
                 agent_profile=agent_profile,

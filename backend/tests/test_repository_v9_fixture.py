@@ -148,7 +148,8 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # wishes.status（NOT NULL DEFAULT 'open'，默认值即回填），以及 v74 提问调用方式
     # ask_jobs/reports/retained_user_activity.submitted_via（NOT NULL DEFAULT
     # ''，不回填，历史行留空串），合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 75
+    from app.repositories.sqlite.migrations import SCHEMA_VERSION
+    assert snapshot["schema"]["user_version"] == SCHEMA_VERSION
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

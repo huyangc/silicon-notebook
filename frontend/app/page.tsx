@@ -5,6 +5,7 @@ import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database
 import "katex/dist/katex.min.css";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
 import { AuthedImage } from "./authed-image";
+import { GlobalAskLauncher } from "./ask/global-ask-launcher";
 import { FormulaView } from "./formula-view";
 import {
   currentPreviewImage,
@@ -4517,6 +4518,7 @@ export default function Home() {
    */
   function handleRootModalClosed(slot: RootModalSlot, _reason: RootModalCloseReason) {
     switch (slot) {
+      case "global-ask":
       case "password-change":
       case "search-profile":
       case "understanding":
@@ -7602,6 +7604,7 @@ export default function Home() {
         />
       )}
 
+      <GlobalAskLauncher key={currentUser.id} presentation={rootModals} />
       {toast && <div className="toast">{toast}</div>}
       <PendingToast toast={pending.toast} onClose={() => pending.setToast(null)}
         onClick={() => { if (pending.toast) openDoneItem(pending.toast); }} />

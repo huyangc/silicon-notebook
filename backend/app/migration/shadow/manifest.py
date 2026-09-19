@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=75, postgres_version=55, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=76, postgres_version=56, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -88,6 +88,8 @@ _SQLITE_NULL_GUARD_KEYS = frozenset(
         "concept_merge_candidates.id",
         "concept_whitelist.term",
         "conversations.id",
+        "global_ask_conversations.id",
+        "global_ask_jobs.id",
         "element_embeddings.element_id",
         "extraction_runs.id",
         "feedback.id",
@@ -807,6 +809,8 @@ _TABLES = (
         "identity",
         path_columns=("file_path",),
     ),
+    _table("global_ask_conversations", ("id",), ReplicationKeyKind.DECLARED_PK, 96, "identity"),
+    _table("global_ask_jobs", ("id",), ReplicationKeyKind.DECLARED_PK, 97, "identity"),
 )
 
 MANIFEST = Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from app.core.config import Settings
+from app.repositories.global_ask_ports import GlobalAskStorePort
 from app.repositories.ports import (
     AgentObservationStorePort,
     AgentProfileStorePort,
@@ -61,6 +62,7 @@ class PersistenceBundle(Protocol):
     queries: QueryStorePort
     reports: ReportStorePort
     ask_state: AskStateStorePort
+    global_ask: GlobalAskStorePort
     unified_kg: UnifiedKgStorePort
     model_status: ModelStatusStorePort
     agent_profile: AgentProfileStorePort

@@ -1,0 +1,127 @@
+"""Durable global conversations and jobs on the shared database boundary."""
+from __future__ import annotations
+
+import json
+
+from app.models.ask import CONVERSATION_TITLE_MAX_CHARS
+from app.models.global_ask import GlobalAskJob, GlobalConversationSummary
+
+
+class GlobalAskStore:
+    def __init__(self, database, *, marker="?"):
+        self.database = database
+        self.marker = marker
+
+    def _sql(self, text):
+        return text.replace("?", self.marker)
+
+    @staticmethod
+    def _conversation(row):
+        if row is None:
+            return None
+        return GlobalConversationSummary(
+            id=row["id"], title=row["title"], created_at=row["created_at"],
+            updated_at=row["updated_at"], notebook_scope=json.loads(row["scope_json"]),
+            submitted_via=row["submitted_via"],
+        )
+
+    def conversation(self, conversation_id, user_id):
+        with self.database.connect() as db:
+            row = db.execute(self._sql(
+                "SELECT * FROM global_ask_conversations WHERE id=? AND user_id=?"
+            ), (conversation_id, user_id)).fetchone()
+        return self._conversation(row)
+
+    def list_conversations(self, user_id, limit, offset):
+        with self.database.connect() as db:
+            rows = db.execute(self._sql(
+                "SELECT * FROM global_ask_conversations WHERE user_id=? "
+                "ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?"
+            ), (user_id, limit, offset)).fetchall()
+        return [self._conversation(row) for row in rows]
+
+    @staticmethod
+    def _job(row):
+        if row is None:
+            return None
+        result = GlobalAskJob.model_validate_json(row["payload_json"])
+        result.status = row["status"]
+        if result.status == "interrupted":
+            result.error = "服务已重启，请重新提交问题。"
+        return result
+
+    def job(self, job_id, user_id):
+        with self.database.connect() as db:
+            row = db.execute(self._sql(
+                "SELECT * FROM global_ask_jobs WHERE id=? AND user_id=?"
+            ), (job_id, user_id)).fetchone()
+        return self._job(row)
+
+    def request_job(self, user_id, request_id):
+        if not request_id:
+            return None
+        with self.database.connect() as db:
+            row = db.execute(self._sql(
+                "SELECT * FROM global_ask_jobs WHERE user_id=? AND client_request_id=?"
+            ), (user_id, request_id)).fetchone()
+        return None if row is None else (self._job(row), row["request_json"])
+
+    def create(self, job, user_id, request_id, request_json, submitted_via, *, new_conversation):
+        with self.database.write() as db:
+            if new_conversation:
+                db.execute(self._sql(
+                    "INSERT INTO global_ask_conversations"
+                    "(id,user_id,title,scope_json,submitted_via,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?)"
+                ), (job.conversation_id, user_id,
+                    job.question[:CONVERSATION_TITLE_MAX_CHARS],
+                    job.notebook_scope.model_dump_json(), submitted_via,
+                    job.created_at, job.created_at))
+            else:
+                row = db.execute(self._sql(
+                    "SELECT id FROM global_ask_conversations WHERE id=? AND user_id=?"
+                ), (job.conversation_id, user_id)).fetchone()
+                if row is None:
+                    raise KeyError(job.conversation_id)
+            db.execute(self._sql(
+                "INSERT INTO global_ask_jobs"
+                "(id,conversation_id,user_id,client_request_id,request_json,status,payload_json,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?)"
+            ), (job.job_id, job.conversation_id, user_id, request_id or None,
+                request_json, job.status, job.model_dump_json(), job.created_at))
+            db.execute(self._sql(
+                "UPDATE global_ask_conversations SET scope_json=?,updated_at=? WHERE id=? AND user_id=?"
+            ), (job.notebook_scope.model_dump_json(), job.created_at, job.conversation_id, user_id))
+
+    def save(self, job, user_id):
+        with self.database.write() as db:
+            cursor = db.execute(self._sql(
+                "UPDATE global_ask_jobs SET status=?,payload_json=? "
+                "WHERE id=? AND user_id=? AND status='running'"
+            ), (job.status, job.model_dump_json(), job.job_id, user_id))
+        return cursor.rowcount == 1
+
+    def jobs(self, conversation_id, user_id, limit, offset):
+        with self.database.connect() as db:
+            rows = db.execute(self._sql(
+                "SELECT * FROM global_ask_jobs WHERE conversation_id=? AND user_id=? "
+                "ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?"
+            ), (conversation_id, user_id, limit, offset)).fetchall()
+        return [self._job(row) for row in rows]
+
+    def rename(self, conversation_id, user_id, title):
+        with self.database.write() as db:
+            return db.execute(self._sql(
+                "UPDATE global_ask_conversations SET title=? WHERE id=? AND user_id=?"
+            ), (title, conversation_id, user_id)).rowcount == 1
+
+    def delete(self, conversation_id, user_id):
+        with self.database.write() as db:
+            return db.execute(self._sql(
+                "DELETE FROM global_ask_conversations WHERE id=? AND user_id=?"
+            ), (conversation_id, user_id)).rowcount == 1
+
+    def recover(self):
+        with self.database.write() as db:
+            db.execute("UPDATE global_ask_jobs SET status='interrupted' WHERE status='running'")
+

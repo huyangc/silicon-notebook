@@ -127,6 +127,59 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 
 展开轨迹后，每一步的补充详情在限定宽度内换行，默认最多显示两行。只有实际超出两行时才出现“查看完整内容”按钮，点击“收起”恢复预览。全文完整保留，展开后的详情在限定高度内滚动，避免撑长整个页面；步骤耗时仍显示在详情旁边。窄屏下，详情与耗时移到摘要下方。容器尺寸或详情内容变化时重新判断是否超出两行。此展示规则适用于共用轨迹面板，包括实时和历史问答轨迹；不改变持久化轨迹数据，也不改变插件参数的独立全文披露。
 
+### 全局问答
+
+全局问答入口是已登录集合页和笔记本工作区右下角的气泡。点击打开小聊天窗，放大后以完整
+页面展示历史、问答和引用原文。收起、重新打开和切换大小保留同一会话、草稿、选库范围与
+任务进度；收起不取消任务。嵌入聊天不改动所在页面的 URL，首次打开后才加载问答数据，退出
+登录清除本地状态。`/ask` 仍可独立访问并支持会话链接。全局会话属于发起用户，
+不创建用于承载会话的空笔记本，也不修改参考库挂载。页面沿用共享页头、配色、按钮反馈与
+答案 Markdown 排版，提供历史会话、可搜索的笔记本选择器、持续可见的范围提示、后台任务
+状态和引用原文入口。移动布局保留范围选择、发送与停止操作。
+
+范围有两个状态：`all` 表示全部可访问笔记本；`include` 表示指定笔记本集合。
+选择器清除全部选择时恢复 `all`。手动选中当前所有笔记本仍属于固定集合；`all` 则在
+下一轮重新解析可访问集合。新会话省略范围默认 `all`，续问省略范围继承会话设置，网页
+每轮显式提交当前范围。指定失效或无权读取的笔记本时拒绝整次请求，不静默删除该项。
+参与集不沿参考库挂载扩张，每轮执行前冻结，后续新增库或来源不加入正在执行的请求。
+
+网页的全部范围来自用户实时读权；MCP 的全部范围再与当前 token 的笔记本白名单取交集。
+历史、任务结果和引用点查继续复核权限。会话范围收窄后，旧回答中的外库内容不能通过
+历史上下文重新进入模型。范围回执区分允许参与的库、实际检索的库与引用来自的库；执行错误
+使整次任务失败并提示重试，检索为空仍计入已检索，不把「未引用」解释成「没有资料」。
+允许进入上下文的既往用户问题通过共用的问题改写模型解析追问，既往回答不作为证据。
+完成前再次核验引用元素；原文变化或删除时任务失败，提示用户重新提问。
+
+第一版使用跨库可见导入来源的原文段落召回，再统一合成一份答案。没有知识图谱的库也能
+参与；库内隐藏的 Memory/Knowhow 投影、跨库图谱推理及自动写回记忆不属于本版范围。
+普通参与库作为平等证据来源，冲突应保留来源与适用条件。候选与模型上下文使用有界预算，
+全局范围不等于完整阅读每篇文档，也不承诺穷尽性清单或逐库完整审计。
+
+HTTP 入口均位于 `/api/global-ask`，要求登录：`POST /ask` 返回可轮询的任务；
+`GET /jobs/{job_id}` 读取进度或答案；`POST /jobs/{job_id}/cancel` 停止执行；
+`GET /jobs/{job_id}/citations/{element_id}` 只读取该任务实际引用的原文元素。
+`GET /conversations` 与 `GET /conversations/{id}` 支持 `limit`/`offset` 分页，
+后者返回 `has_more`/`next_offset`；`PATCH /conversations/{id}` 重命名，`DELETE` 删除。
+会话仅属于发起用户，网页和 MCP 可凭同一 `conversation_id` 接续；MCP 仍复核完整历史范围的
+白名单和读权，不因为拥有会话而扩大 token 能力。`client_request_id` 支持相同请求重试，
+复用标识提交不同内容时拒绝。同一会话正在回答时不能再提交另一任务。
+任务的 `error` 明确属于可显示的中文重试提示，不保存异常原文。
+自动生成的会话名称是有长度上限的摘要，原始问题完整保留。
+
+输入沿用 `ASK_QUESTION_MAX_CHARS=4000` 与 `CONVERSATION_TITLE_MAX_CHARS=200`；
+全局会话/任务标识和客户端请求标识上限 200 字符。列表分页默认 50、上限 100。
+`GLOBAL_ASK_CANDIDATE_LIMIT` 默认 64、最小 1，限制所有库合并后的候选数，不截短参与库集合；
+`GLOBAL_ASK_HISTORY_TURNS` 默认 10、最小 0，只控制可用的既往用户提问轮数。
+模型原文预算复用 `CHUNK_ANSWER_BUDGET_CHARS`，不另建第二份截断设置。
+
+四个 MCP 全局工具不依赖 `select_notebook`：`ask_global`、`get_global_ask` 与
+`cancel_global_ask` 同时要求 `ask:execute` 和 `knowledge:read`；`get_global_cited_element`
+要求 `knowledge:read`。`get_global_ask` 的 `next_answer_offset` 与 `next_citation_offset`
+分别延续正文和引用分页；引用元数据可按 MCP 共用预算披露压缩，原文点查则通过 `next_offset`
+取回完整文本。正文页、标识和后续分页游标不得静默截断。结果附带网页会话路径
+`/ask?conversation_id=...`。`list_notebooks` 新增 `offset`/`query`，返回 `total`/`next_offset`，
+搜索遍历完整实时白名单，不能把第一页误当成全局范围。
+
 ### 按来源选择检索范围
 
 来源侧栏初始全选所有可见导入来源，每行提供复选框，并提供“全选”/“清空”。当前选择同时传入不读语料的问答意图预检、问答执行和新建深度报告，约束当前 notebook 的内容块、来源元素、知识证据与关系、图路径/PPR 输出以及报告检索。范围被收窄时，隐藏的 Memory/Knowhow 投影证据也不参与，因为这些内部来源没有面向用户的复选框。这份隐藏证据里两种来源的范围不同：Knowhow 投影是笔记本级共享的，会进入每位成员的上限；Memory 投影按创建者私有，只进创建者自己的上限，且过滤就发生在那一次读取里，所以共享笔记本绝不会把一位成员的私有 Memory 暴露给另一位。已挂载的参考库是独立参与者，始终保持在范围内。
@@ -721,7 +774,7 @@ loopback HTTP；默认允许远程明文 HTTP 并放宽 Host/Origin（DNS-rebind
 *idle* 超时——一次调用在若干秒内既没给出响应、也没发过任何 progress 通知就被中断——别的
 客户端则是每次调用一个固定上限。`reasoning` 档的 `ask_notebook` 动辄跑几分钟（规划、联邦
 检索、反思循环、答案合成），`build_kg` 更久，所以没有心跳时客户端会放弃一次服务端仍在正常
-执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 24 个 core 工具的阻塞主体一律
+执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 28 个 core 工具的阻塞主体一律
 跑在同一道心跳下，**每 5 秒**一拍，内容只有工具名与已耗墙钟秒数——绝不带问题原文、笔记本或
 来源名称，与观测事件同一条口径。不需要它的场合是免费的：客户端没有在请求 `_meta` 里带
 `progressToken` 时该通知是 no-op，而第一拍要等满一个间隔，所以毫秒级返回的工具（绝大多数）
@@ -773,8 +826,8 @@ header 必须单引号，否则 shell 会先展开它；这样落到配置里的
 `-s user` 时该配置只在当前目录生效。若客户端不支持插值，落盘的就是原始 header：应使用最小
 scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 
-每个新 MCP session 必须先调用 `select_notebook`，再调用数据工具。默认 core 的二十四个工具如下；
-`mcp_server.PUBLIC_TOOLS` 就是下面这 24 条本身，不是更大的组合目录——它与 `mcp_server.CORE_TOOLS`
+每个新 MCP session 必须先调用 `select_notebook`，再调用绑定单个笔记本的数据工具。全局问答工具独立传入范围，不要求或改变当前选中的笔记本。默认 core 的二十八个工具如下；
+`mcp_server.PUBLIC_TOOLS` 就是下面这 28 条本身，不是更大的组合目录——它与 `mcp_server.CORE_TOOLS`
 是同一份清单：
 
 | 分组 | 工具 | Scope |
@@ -789,9 +842,10 @@ scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 | 构建 | `build_kg`、`build_retrieval_index` | `maintenance:execute`（owner-only） |
 | 构建状态读取 | `get_build_status` | `knowledge:read` |
 | 库理解（Agent） | `get_notebook_profile`、`add_observation` | `agent_profile:read` / `agent_observation:write` |
+| 全局问答 | `ask_global`、`get_global_ask`、`cancel_global_ask`、`get_global_cited_element` | `ask:execute` / `knowledge:read`；见全局问答合同 |
 
 实际部署以 server-local frozen catalog 作为 discovery 与 onboarding 的权威清单：它精确等于上表
-24 个工具，由七个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
+28 个工具，由八个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
 手抄。每次调用都重新检查 live token/scope/allowlist/成员权，所有写 scope 都强制经过 owner-only
 notebook 闸。结果在构造时就被复制进有界形状——深度不超过 5 层，逐字段/map/list 施加上限——超大容器不会
 先被完整构造出来才裁剪。这份有界拷贝随后被逐步、可见地压缩（先缩最长字符串，再丢 map 条目，

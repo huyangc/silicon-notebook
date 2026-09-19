@@ -4263,6 +4263,365 @@
           "title": "Freshness",
           "type": "object"
         },
+        "GlobalAskAnswer": {
+          "properties": {
+            "anchors": {
+              "items": {
+                "$ref": "#/components/schemas/AnswerAnchor"
+              },
+              "title": "Anchors",
+              "type": "array"
+            },
+            "answer": {
+              "title": "Answer",
+              "type": "string"
+            },
+            "answer_id": {
+              "title": "Answer Id",
+              "type": "string"
+            },
+            "citations": {
+              "items": {
+                "$ref": "#/components/schemas/Citation"
+              },
+              "title": "Citations",
+              "type": "array"
+            },
+            "cited_notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Cited Notebook Ids",
+              "type": "array"
+            },
+            "completeness_notice": {
+              "default": "回答仅使用本次命中的有限原文，不代表逐篇穷尽检查。",
+              "title": "Completeness Notice",
+              "type": "string"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "grounded": {
+              "default": false,
+              "title": "Grounded",
+              "type": "boolean"
+            },
+            "notebook_scope": {
+              "$ref": "#/components/schemas/GlobalNotebookScope"
+            },
+            "question": {
+              "title": "Question",
+              "type": "string"
+            },
+            "resolved_notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Resolved Notebook Ids",
+              "type": "array"
+            },
+            "searched_notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Searched Notebook Ids",
+              "type": "array"
+            }
+          },
+          "required": [
+            "answer_id",
+            "question",
+            "answer",
+            "created_at",
+            "notebook_scope",
+            "resolved_notebook_ids",
+            "searched_notebook_ids",
+            "cited_notebook_ids"
+          ],
+          "title": "GlobalAskAnswer",
+          "type": "object"
+        },
+        "GlobalAskJob": {
+          "properties": {
+            "cited_notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Cited Notebook Ids",
+              "type": "array"
+            },
+            "conversation_id": {
+              "title": "Conversation Id",
+              "type": "string"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Error"
+            },
+            "job_id": {
+              "title": "Job Id",
+              "type": "string"
+            },
+            "notebook_scope": {
+              "$ref": "#/components/schemas/GlobalNotebookScope"
+            },
+            "question": {
+              "title": "Question",
+              "type": "string"
+            },
+            "resolved_notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Resolved Notebook Ids",
+              "type": "array"
+            },
+            "response": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/GlobalAskAnswer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "searched_notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Searched Notebook Ids",
+              "type": "array"
+            },
+            "status": {
+              "enum": [
+                "running",
+                "done",
+                "failed",
+                "cancelled",
+                "interrupted"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id",
+            "conversation_id",
+            "status",
+            "question",
+            "created_at",
+            "notebook_scope",
+            "resolved_notebook_ids"
+          ],
+          "title": "GlobalAskJob",
+          "type": "object"
+        },
+        "GlobalAskRequest": {
+          "properties": {
+            "client_request_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Client Request Id"
+            },
+            "conversation_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Conversation Id"
+            },
+            "notebook_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/GlobalNotebookScope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "question": {
+              "maxLength": 4000,
+              "minLength": 1,
+              "title": "Question",
+              "type": "string"
+            }
+          },
+          "required": [
+            "question"
+          ],
+          "title": "GlobalAskRequest",
+          "type": "object"
+        },
+        "GlobalConversationDetail": {
+          "properties": {
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "has_more": {
+              "default": false,
+              "title": "Has More",
+              "type": "boolean"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "next_offset": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Next Offset"
+            },
+            "notebook_scope": {
+              "$ref": "#/components/schemas/GlobalNotebookScope"
+            },
+            "submitted_via": {
+              "enum": [
+                "web",
+                "mcp"
+              ],
+              "title": "Submitted Via",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "turns": {
+              "items": {
+                "$ref": "#/components/schemas/GlobalAskJob"
+              },
+              "title": "Turns",
+              "type": "array"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "created_at",
+            "updated_at",
+            "notebook_scope",
+            "submitted_via",
+            "turns"
+          ],
+          "title": "GlobalConversationDetail",
+          "type": "object"
+        },
+        "GlobalConversationRename": {
+          "properties": {
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "title": "GlobalConversationRename",
+          "type": "object"
+        },
+        "GlobalConversationSummary": {
+          "properties": {
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "notebook_scope": {
+              "$ref": "#/components/schemas/GlobalNotebookScope"
+            },
+            "submitted_via": {
+              "enum": [
+                "web",
+                "mcp"
+              ],
+              "title": "Submitted Via",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "created_at",
+            "updated_at",
+            "notebook_scope",
+            "submitted_via"
+          ],
+          "title": "GlobalConversationSummary",
+          "type": "object"
+        },
+        "GlobalNotebookScope": {
+          "properties": {
+            "mode": {
+              "default": "all",
+              "enum": [
+                "all",
+                "include"
+              ],
+              "title": "Mode",
+              "type": "string"
+            },
+            "notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Notebook Ids",
+              "type": "array"
+            }
+          },
+          "title": "GlobalNotebookScope",
+          "type": "object"
+        },
         "GrantCreate": {
           "additionalProperties": false,
           "properties": {
@@ -15280,6 +15639,390 @@
             }
           },
           "summary": "List Doc Types"
+        }
+      },
+      "/api/global-ask/ask": {
+        "post": {
+          "operationId": "ask_global_api_global_ask_ask_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GlobalAskRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "202": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/GlobalAskJob"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Ask Global",
+          "tags": [
+            "global-ask"
+          ]
+        }
+      },
+      "/api/global-ask/conversations": {
+        "get": {
+          "operationId": "global_conversations_api_global_ask_conversations_get",
+          "parameters": [
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 50,
+                "maximum": 100,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "offset",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Offset",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/GlobalConversationSummary"
+                    },
+                    "title": "Response Global Conversations Api Global Ask Conversations Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Global Conversations",
+          "tags": [
+            "global-ask"
+          ]
+        }
+      },
+      "/api/global-ask/conversations/{conversation_id}": {
+        "delete": {
+          "operationId": "delete_global_conversation_api_global_ask_conversations__conversation_id__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "conversation_id",
+              "required": true,
+              "schema": {
+                "title": "Conversation Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Delete Global Conversation",
+          "tags": [
+            "global-ask"
+          ]
+        },
+        "get": {
+          "operationId": "global_conversation_api_global_ask_conversations__conversation_id__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "conversation_id",
+              "required": true,
+              "schema": {
+                "title": "Conversation Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 50,
+                "maximum": 100,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "offset",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Offset",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/GlobalConversationDetail"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Global Conversation",
+          "tags": [
+            "global-ask"
+          ]
+        },
+        "patch": {
+          "operationId": "rename_global_conversation_api_global_ask_conversations__conversation_id__patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "conversation_id",
+              "required": true,
+              "schema": {
+                "title": "Conversation Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GlobalConversationRename"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/GlobalConversationSummary"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Rename Global Conversation",
+          "tags": [
+            "global-ask"
+          ]
+        }
+      },
+      "/api/global-ask/jobs/{job_id}": {
+        "get": {
+          "operationId": "get_global_ask_job_api_global_ask_jobs__job_id__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "job_id",
+              "required": true,
+              "schema": {
+                "title": "Job Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/GlobalAskJob"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Global Ask Job",
+          "tags": [
+            "global-ask"
+          ]
+        }
+      },
+      "/api/global-ask/jobs/{job_id}/cancel": {
+        "post": {
+          "operationId": "cancel_global_ask_job_api_global_ask_jobs__job_id__cancel_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "job_id",
+              "required": true,
+              "schema": {
+                "title": "Job Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/GlobalAskJob"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Cancel Global Ask Job",
+          "tags": [
+            "global-ask"
+          ]
+        }
+      },
+      "/api/global-ask/jobs/{job_id}/citations/{element_id}": {
+        "get": {
+          "operationId": "global_cited_element_api_global_ask_jobs__job_id__citations__element_id__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "job_id",
+              "required": true,
+              "schema": {
+                "title": "Job Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "element_id",
+              "required": true,
+              "schema": {
+                "title": "Element Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/SourceElement"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Global Cited Element",
+          "tags": [
+            "global-ask"
+          ]
         }
       },
       "/api/group-invites/{token}/join": {
