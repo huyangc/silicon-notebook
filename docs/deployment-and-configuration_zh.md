@@ -679,9 +679,13 @@ origin 写进此名单后 URL 导入才能触达。每项必须带 `http://` 或
 
 全局问答的 `GLOBAL_ASK_CANDIDATE_LIMIT` 控制跨库合并证据，
 `GLOBAL_ASK_HISTORY_TURNS` 控制允许进入上下文的既往完成对话。
-`GLOBAL_ASK_MAX_NOTEBOOKS`、`GLOBAL_ASK_MAX_CONCURRENT`、`GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS`、
+`GLOBAL_ASK_MAX_NOTEBOOKS`、`GLOBAL_ASK_MAX_CONCURRENT`、`GLOBAL_ASK_RETRIEVAL_CONCURRENCY`、
+`GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS`、
 `GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS` 和 `GLOBAL_ASK_SHUTDOWN_TIMEOUT_SECONDS` 分别控制范围
-受理、进程容量及检索/关闭预算。PostgreSQL 连接池预算包含全局问答并发。
+受理、进程容量、跨库检索并行度及检索/关闭预算。`GLOBAL_ASK_MAX_NOTEBOOKS` 的产品上限是 8，
+配置更大的值不通过校验。**升级须知：** 此前把它设成大于 8 的部署（旧默认值是 32）升级后 Settings 校验会失败、后端起不来；升级前请删除该变量或改成不大于 8。PostgreSQL 连接池预算要同时计入这两个并发旋钮：任务线程自身做权限
+复核与进度保存各占一条连接，进程级共享的检索线程池每个忙碌执行位再占一条，因此启动告警按
+`GLOBAL_ASK_MAX_CONCURRENT + GLOBAL_ASK_RETRIEVAL_CONCURRENCY` 计。
 `GLOBAL_ASK_SMALL_NOTEBOOK_MAX_CHUNKS` 限制小库临时流式语义召回，不挤占共享热索引。
 `GLOBAL_ASK_MIN_RELEVANCE` 和 `GLOBAL_ASK_RELATIVE_RELEVANCE` 在逐库保底前过滤弱候选，
 应按代表性问题评测后调节。没有语义召回的库才使用显式披露的词法降级。

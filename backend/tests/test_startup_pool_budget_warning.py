@@ -55,10 +55,23 @@ def test_sqlite_backend_is_exempt():
     assert warning is None
 
 
-def test_global_ask_capacity_is_included_in_pool_budget():
-    warning = _pool_budget_warning(_settings(postgres_pool_max_size=24, global_ask_max_concurrent=4))
-    assert "全局问答并发(4)" in warning
-    assert "=27" in warning
+def test_global_ask_job_and_retrieval_capacity_are_both_in_pool_budget():
+    """全局问答吃两层连接:任务线程 + 它共享的逐库检索线程池。只算任务并发会
+    把「检索池满员」的真实峰值漏掉一半(4+4=8,不是 4)。"""
+    warning = _pool_budget_warning(_settings(
+        postgres_pool_max_size=24, global_ask_max_concurrent=4,
+        global_ask_retrieval_concurrency=4,
+    ))
+    assert "全局问答并发(任务4+检索4=8)" in warning
+    assert "=31" in warning
+
+
+def test_missing_retrieval_concurrency_field_still_counts_the_job_pool():
+    """最小 settings double 缺这个字段时不得抛,也不得把任务并发一起丢掉。"""
+    warning = _pool_budget_warning(_settings(
+        postgres_pool_max_size=24, global_ask_max_concurrent=4,
+    ))
+    assert "全局问答并发(任务4+检索0=4)" in warning
 
 
 def test_malformed_database_url_does_not_raise():

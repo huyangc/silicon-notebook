@@ -88,7 +88,16 @@ bash scripts/cli.sh extensions services stop
 预算内等待，再关闭共享模型与数据库资源；越过关闭边界的工作线程不能继续保存。
 尚未提交的持久任务保留运行状态，由下次启动补偿为已中断；后台完成不能覆盖已取消或
 已中断终态。解读局部答案前检查未检索和降级回执：超时后缩小选库范围，准备 scale 索引
-以改善语义召回。全局检索使用独立的 `ask_global` 事件类别，不冷加载共享整库索引。
+以改善语义召回。跳过原因刻意不点名成因；可排查的原因码是 `global_retrieval_skipped` 事件，
+它只带笔记本、`reason`、失败异常的类名与耗时毫秒，不带异常消息、SQL 或问题原文。原因码有四种：
+`timeout`（本地预算到期、PostgreSQL 取消语句、或 SQLite 中断）、`saturated`（剩余预算内借不到连接——
+池被打满、查询根本没跑，运维抓手是池容量或并发，不是用户的选库范围）、`queue_deadline`（阶段时限
+到点时该库仍在共享检索池里排队）、`unavailable`（其余）。另有 `global_retrieval_ann_starved` 事件，
+报告某库的 ANN 邻域被全局天花板排除的 chunk 占满：它带 `dropped`、`survivors` 与放大后的 `k`，
+表示这次回答用的是**局部邻域**——重建该库的 scale 索引会写入来源 sidecar，超取随之消失。
+逐库检索并行执行，进程级上界是 `GLOBAL_ASK_RETRIEVAL_CONCURRENCY`，并在并发任务之间公平分配；
+放宽选库范围因此同时消耗连接，而不只是墙钟时间。
+全局检索使用独立的 `ask_global` 事件类别，不冷加载共享整库索引。
 
 ## 可观测性 / 日志
 

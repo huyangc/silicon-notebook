@@ -140,9 +140,11 @@ def _job_page(job: Any, answer_offset: int = 0, citation_offset: int = 0,
 
 def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) -> None:
     @server.tool(description=(
-        "Ask across all currently authorized notebooks, or an explicit include scope. "
-        "No select_notebook needed. Omitted scope inherits a continued conversation; "
-        "new conversations and empty include lists default to all. Returns a background "
+        "Ask across at most 8 notebooks: all currently authorized ones when there are no "
+        "more than 8, otherwise an explicit include scope of 8 or fewer. A wider resolved "
+        "scope is rejected with 422 rather than truncated, so list_notebooks first when the "
+        "allowlist is larger. No select_notebook needed. Omitted scope inherits a continued "
+        "conversation; new conversations and empty include lists default to all. Returns a background "
         "job; poll get_global_ask and follow next_coverage_offset for all coverage receipts. "
         "Use client_request_id for safe submission retries. "
         "Requires ask:execute and knowledge:read. Searches document evidence only."

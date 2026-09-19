@@ -40,7 +40,7 @@ def chunk(suffix="a", *, text="原文完整内容。", notebook_id="notebook-a")
     )
 
 
-def synthesis(models, *, budget=20_000, style_block=None):
+def synthesis(models, *, budget=20_000, style_block=None, tier_map=None):
     settings = SimpleNamespace(chunk_answer_budget_chars=budget)
     sources = SimpleNamespace(source_metadata=lambda ids: {
         source_id: {"title": f"已存标题 {source_id}", "file_name": f"{source_id}.pdf"}
@@ -51,8 +51,25 @@ def synthesis(models, *, budget=20_000, style_block=None):
     )
     return GlobalAskSynthesis(
         settings=settings, model_clients=models, parse_anchors=evidence.parse_anchors,
-        style_block=style_block,
+        style_block=style_block, tier_map=tier_map,
     )
+
+
+def test_anchor_tier_is_looked_up_per_notebook_not_assumed_personal():
+    seen = []
+
+    def tier_map(notebook_ids):
+        seen.append(list(notebook_ids))
+        return {"notebook-base": "base"}
+
+    chunks = [chunk("a", notebook_id="notebook-base"), chunk("b", text="另一段原文。", notebook_id="notebook-mine")]
+    _, _, anchors, _ = synthesis(RecordingModels("结论 [k1] [k2]"), tier_map=tier_map)(
+        "问题", chunks, {}, "", threading.Event(),
+    )
+    assert seen == [["notebook-base", "notebook-mine"]]
+    assert {anchor.notebook_id: anchor.tier for anchor in anchors} == {
+        "notebook-base": "base", "notebook-mine": "personal",
+    }
 
 
 def test_peer_evidence_prompt_exposes_only_participating_provenance():

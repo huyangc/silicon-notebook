@@ -2362,8 +2362,10 @@ class RepositoryRuntime:
                         parse_anchors=ask.evidence_context.parse_anchors,
                         style_block=ask._search_profile_style_block,
                         answer_with_retry=ask._answer_with_retry,
+                        tier_map=ask._tier_map_for,
                     ),
                     settings=self.settings,
+                    event_log=self.event_log,
                 )
         return self._global_ask
 

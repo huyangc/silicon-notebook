@@ -1,8 +1,9 @@
 """Global source Ask ownership, authority, and detached execution."""
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextvars import copy_context
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import json
 import threading
@@ -20,7 +21,22 @@ from app.services.retrieval_run import retrieval_run
 from app.services.source_scope import source_scope_context
 from app.services.global_evidence import peer_evidence
 from app.repositories.read_budget import read_budget, ReadBudgetExceeded
-from app.services.global_retrieval import GlobalRetrievalSkipped, GlobalRetrievalResult
+from app.services.global_retrieval import (
+    GlobalRetrievalSkipped, GlobalRetrievalResult, emit_global_event,
+)
+
+
+# Reasons a library produced no evidence, paired with the Chinese receipt the
+# user reads. The copy never guesses a cause; the reason code is what travels
+# in telemetry (see ``docs/operations.md``).
+_SKIP_COPY = {
+    # The phase budget ran out while this library was still queued: nothing
+    # was asked of the database, so "select fewer notebooks" would be wrong.
+    "queue_deadline": "检索未开始，请稍后重试。",
+    "timeout": "检索超时，请缩小范围后重试。",
+    "saturated": "检索未完成，请稍后重试。",
+    "unavailable": "检索未完成，请稍后重试。",
+}
 
 
 class GlobalAskError(Exception):
@@ -34,9 +50,63 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+class _AnyCancelled:
+    """``is_set()`` over several cancellation sources, as one token.
+
+    ``raise_if_cancelled`` and ``ReadBudget`` only ever ask a cancel token for
+    ``is_set()``, so a composite satisfies the same contract without a second
+    plumbing path. This is how one library's hard failure reaches the other
+    libraries already executing on retrieval threads.
+    """
+
+    __slots__ = ("_tokens",)
+
+    def __init__(self, *tokens):
+        self._tokens = tuple(token for token in tokens if token is not None)
+
+    def is_set(self):
+        return any(token.is_set() for token in self._tokens)
+
+
+def _ordered_insert(values, value, order, key=lambda item: item):
+    """Insert into a list already sorted by ``order``, keeping it sorted.
+
+    Progress rows are written as libraries finish, but a poller must never see
+    the receipt order jump around: every intermediate save is a subsequence of
+    ``resolved_notebook_ids``. Participant counts are capped at 8, so the
+    linear rank lookup is cheaper than maintaining an index.
+    """
+    rank = order.index(key(value))
+    for position, existing in enumerate(values):
+        if order.index(key(existing)) > rank:
+            values.insert(position, value)
+            return
+    values.append(value)
+
+
+@dataclass
+class _NotebookOutcome:
+    """One library's retrieval verdict, produced ENTIRELY on a worker thread.
+
+    The worker never touches ``job``: it returns a value and the owning job
+    thread is the only writer of the durable coverage lists. That keeps the
+    persisted receipts free of data races and lets their order follow
+    ``resolved_notebook_ids`` instead of thread-scheduling order.
+    """
+
+    pool: list = field(default_factory=list)
+    evidence: dict = field(default_factory=dict)
+    degraded: bool = False
+    reason: str = ""
+
+    @property
+    def skipped(self):
+        return _SKIP_COPY.get(self.reason, "") if self.reason else ""
+
+
 class GlobalAskService:
     def __init__(self, *, store, notebooks, can_read, sources, retrieve, synthesize, settings,
-                 rewrite_query=None, can_read_many=None, prepare_query=None):
+                 rewrite_query=None, can_read_many=None, prepare_query=None, event_log=None):
         self.store = store
         self.notebooks = notebooks
         self.can_read = can_read
@@ -47,11 +117,26 @@ class GlobalAskService:
         self.settings = settings
         self.rewrite_query = rewrite_query
         self.prepare_query = prepare_query
+        # Optional content-free sink. Skips decided here (never queued before
+        # the phase budget ran out) never reach the retrieval module's own
+        # emitter, so they would otherwise be the one skip with no receipt.
+        self.event_log = event_log
         self._lock = threading.RLock()
         self._events = {}
         self._workers = {}
         self._pending = 0
         self._closed = False
+        # ONE retrieval pool per service instance, shared by every job it runs.
+        # The runtime composes exactly one service per process, which is what
+        # makes ``global_ask_retrieval_concurrency`` a real upper bound on
+        # retrieval-held database connections and lets the startup pool budget
+        # add it to ``global_ask_max_concurrent``. Per-job pools would instead
+        # multiply by the job capacity and blow through the PostgreSQL pool
+        # (default max size 10).
+        self._retrieval_pool = ThreadPoolExecutor(
+            max_workers=max(1, int(settings.global_ask_retrieval_concurrency)),
+            thread_name_prefix="global-ask-retrieve",
+        )
 
     def _check(self, ids, user_id, allowed_notebook_ids=None, authority_check=None):
         ids = set(ids)
@@ -124,7 +209,15 @@ class GlobalAskService:
             if not ids:
                 raise GlobalAskError(422, "没有可访问的笔记本，请先创建笔记本并添加资料。")
             if len(ids) > self.settings.global_ask_max_notebooks:
-                raise GlobalAskError(422, f"本次范围超过 {self.settings.global_ask_max_notebooks} 个笔记本，请缩小范围后重试。")
+                ceiling = self.settings.global_ask_max_notebooks
+                # ``all`` resolved past the ceiling: the caller (an MCP client
+                # above all) cannot narrow a scope it never sent, so the message
+                # has to say that an explicit selection is the way out.
+                raise GlobalAskError(422, (
+                    f"可访问的笔记本超过 {ceiling} 个，请选择不超过 {ceiling} 个笔记本后重试。"
+                    if scope.mode != "include" else
+                    f"本次范围超过 {ceiling} 个笔记本，请选择不超过 {ceiling} 个笔记本后重试。"
+                ))
             self._check(ids, user_id, allowed, authority_check)
             # Freeze every source ceiling before starting any retrieval or detached work.
             source_rows = self.sources.visible_source_ids_by_notebook(ids)
@@ -182,60 +275,165 @@ class GlobalAskService:
             with self._lock:
                 self._pending -= 1
 
+    def _retrieve_notebook(self, notebook_id, user_id, abort, allowed, authority_check,
+                           source_ids, query, deadline):
+        """One library's bounded retrieval, executed on a retrieval thread.
+
+        The caller submits this through ``copy_context().run`` so the run-local
+        ContextVars (retrieval run with its shared query embedding, read budget
+        and source scope) reach the worker. A bare ``submit`` would give the
+        worker an empty context: ``current_retrieval_run()`` would be ``None``,
+        the prepared query embedding would be re-computed per library, and the
+        source-scope ceiling would silently disappear.
+
+        The per-library budget starts when this body actually runs, not when it
+        was queued, so a library waiting behind the concurrency bound is not
+        charged for its wait. The whole-phase ``deadline`` is absolute.
+        """
+        raise_if_cancelled(abort)
+        if time.monotonic() >= deadline:
+            # Queued, never executed. It issued no query, so the receipt must
+            # not blame this library's size or the selected scope.
+            return _NotebookOutcome(reason="queue_deadline")
+        self._check([notebook_id], user_id, allowed, authority_check)
+        scope = {
+            "mode": "include", "source_ids": source_ids, "owner_id": user_id,
+            "hidden_source_ids": [], "narrowed": True,
+        }
+        notebook_deadline = min(
+            deadline, time.monotonic() + self.settings.global_ask_notebook_timeout_seconds
+        )
+        try:
+            with read_budget(notebook_deadline, abort), source_scope_context(
+                notebook_id, scope, {"mode": "include", "notebook_ids": []},
+            ):
+                result = self.retrieve(notebook_id, query)
+            if time.monotonic() >= notebook_deadline:
+                raise ReadBudgetExceeded()
+        except (GlobalRetrievalSkipped, ReadBudgetExceeded) as exc:
+            # Only a real expiry asks the user to narrow scope. An exhausted
+            # connection pool or an unknown fault gets the copy that guesses
+            # nothing; the machine-readable reason travels in the event.
+            return _NotebookOutcome(reason=(
+                "timeout" if isinstance(exc, ReadBudgetExceeded) else exc.reason
+            ))
+        evidence, degraded = {}, False
+        if isinstance(result, GlobalRetrievalResult):
+            hits = result.chunks
+            evidence = result.evidence_fingerprints
+            degraded = result.degraded
+        else:
+            hits, _, _ = result
+            # Compatibility for injected retrieval adapters. The production
+            # global retriever supplies fingerprints from its SQL snapshot.
+            evidence = self.sources.evidence_fingerprints([
+                element_id for hit in hits for element_id in hit.element_ids
+            ])
+        return _NotebookOutcome(
+            pool=[replace(hit, notebook_id=notebook_id)
+                  for hit in hits if hit.source_id in source_ids],
+            evidence=dict(evidence), degraded=degraded,
+        )
+
+    def _retrieval_window(self):
+        """How many libraries THIS job may keep in flight right now.
+
+        The retrieval pool is shared, so a job that submitted all of its
+        libraries at once would own every execution slot and every later job
+        would sit in the FIFO queue until its own phase budget expired -- the
+        second questioner got zero searched libraries and an answer with no
+        evidence. Dividing the slots by the number of live jobs keeps the pool
+        exactly full (4 slots / 4 jobs = 1 each) without raising the connection
+        bound the startup pool budget is computed from.
+
+        The share is recomputed on every top-up, so a job that started alone
+        holds wider ground only until its next library finishes: a newcomer
+        then waits at most one library, never a whole phase.
+        """
+        with self._lock:
+            active = max(1, len(self._workers))
+        return max(1, int(self.settings.global_ask_retrieval_concurrency) // active)
+
+    def _record(self, job, user_id, notebook_id, outcome, order):
+        """Persist one library's verdict, in resolved order, from the job thread."""
+        if outcome.reason:
+            _ordered_insert(job.skipped_notebooks, GlobalAskSkippedNotebook(
+                notebook_id=notebook_id, reason=outcome.skipped,
+            ), order, key=lambda row: row.notebook_id)
+            if outcome.reason == "queue_deadline":
+                # Every other reason was already reported by the retrieval
+                # module itself; this one never reached it.
+                emit_global_event(self, {
+                    "kind": "global_retrieval_skipped", "notebook_id": notebook_id,
+                    "reason": outcome.reason, "error_type": "", "latency_ms": 0,
+                })
+        else:
+            _ordered_insert(job.searched_notebook_ids, notebook_id, order)
+            if outcome.degraded:
+                _ordered_insert(job.degraded_notebook_ids, notebook_id, order)
+        if not self._save_if_open(job, user_id, progress=True):
+            raise AskCancelled()
+
+    def _fan_out(self, job, user_id, event, allowed, authority_check, source_ceiling,
+                 query, deadline):
+        """Run every library through the shared pool under a fair window."""
+        order = job.resolved_notebook_ids
+        pending, futures, outcomes = list(order), {}, {}
+        # One token for "the user cancelled" OR "this phase gave up", so a
+        # worker only ever has to answer ``is_set()``.
+        phase = threading.Event()
+        abort = _AnyCancelled(event, phase)
+        try:
+            while pending or futures:
+                if time.monotonic() >= deadline:
+                    for notebook_id in pending:
+                        outcomes[notebook_id] = _NotebookOutcome(reason="queue_deadline")
+                        self._record(job, user_id, notebook_id,
+                                     outcomes[notebook_id], order)
+                    pending = []
+                while pending and len(futures) < self._retrieval_window():
+                    notebook_id = pending.pop(0)
+                    # A FRESH copy per library: each task then owns its own read
+                    # budget and source scope while sharing the one run state.
+                    context = copy_context()
+                    futures[self._retrieval_pool.submit(
+                        context.run, self._retrieve_notebook, notebook_id, user_id,
+                        abort, allowed, authority_check, source_ceiling[notebook_id],
+                        query, deadline,
+                    )] = notebook_id
+                if not futures:
+                    break
+                done, _ = wait(list(futures), return_when=FIRST_COMPLETED)
+                for future in done:
+                    notebook_id = futures.pop(future)
+                    # A revoked authority or a cancellation inside any library
+                    # must fail the whole request, exactly as the serial loop did.
+                    outcomes[notebook_id] = future.result()
+                    self._record(job, user_id, notebook_id, outcomes[notebook_id], order)
+        finally:
+            # Queued libraries must not start, and the ones ALREADY executing
+            # must not keep a retrieval slot (and its database connection) for
+            # the rest of their own budget while this job is already lost.
+            # ``cancel()`` cannot touch a running future; the abort token can,
+            # at their next ``budget.check()``.
+            phase.set()
+            for future in futures:
+                future.cancel()
+        return outcomes
+
     def _collect(self, job, user_id, event, allowed, authority_check, source_ceiling, query):
-        pools = []
-        evidence = {}
         deadline = time.monotonic() + self.settings.global_ask_retrieval_timeout_seconds
+        outcomes = self._fan_out(
+            job, user_id, event, allowed, authority_check, source_ceiling, query, deadline,
+        )
+        # Completion order is thread scheduling; evidence selection must not be.
+        pools, evidence = [], {}
         for notebook_id in job.resolved_notebook_ids:
-            raise_if_cancelled(event)
-            if time.monotonic() >= deadline:
-                job.skipped_notebooks.append(GlobalAskSkippedNotebook(
-                    notebook_id=notebook_id, reason="总检索时限已到，请缩小范围后重试。",
-                ))
-                if not self._save_if_open(job, user_id, progress=True):
-                    raise AskCancelled()
+            outcome = outcomes.get(notebook_id)
+            if outcome is None or outcome.reason:
                 continue
-            self._check([notebook_id], user_id, allowed, authority_check)
-            source_ids = source_ceiling[notebook_id]
-            scope = {
-                "mode": "include", "source_ids": source_ids, "owner_id": user_id,
-                "hidden_source_ids": [], "narrowed": True,
-            }
-            notebook_deadline = min(deadline, time.monotonic() + self.settings.global_ask_notebook_timeout_seconds)
-            try:
-                with read_budget(notebook_deadline, event), source_scope_context(
-                    notebook_id, scope, {"mode": "include", "notebook_ids": []},
-                ):
-                    result = self.retrieve(notebook_id, query)
-                if time.monotonic() >= notebook_deadline:
-                    raise ReadBudgetExceeded()
-            except (GlobalRetrievalSkipped, ReadBudgetExceeded) as exc:
-                reason = "检索超时，请缩小范围后重试。" if isinstance(exc, ReadBudgetExceeded) or exc.reason == "timeout" else "检索暂不可用，请检查资料索引后重试。"
-                job.skipped_notebooks.append(GlobalAskSkippedNotebook(notebook_id=notebook_id, reason=reason))
-                if not self._save_if_open(job, user_id, progress=True):
-                    raise AskCancelled()
-                continue
-            if isinstance(result, GlobalRetrievalResult):
-                hits = result.chunks
-                evidence.update(result.evidence_fingerprints)
-                if result.degraded:
-                    job.degraded_notebook_ids.append(notebook_id)
-            else:
-                hits, _, _ = result
-                # Compatibility for injected retrieval adapters. The production
-                # global retriever supplies fingerprints from its SQL snapshot.
-                evidence.update(self.sources.evidence_fingerprints([
-                    element_id for hit in hits for element_id in hit.element_ids
-                ]))
-            pool = []
-            for hit in hits:
-                if hit.source_id not in source_ids:
-                    continue
-                pool.append(replace(hit, notebook_id=notebook_id))
-            pools.append(pool)
-            job.searched_notebook_ids.append(notebook_id)
-            if not self._save_if_open(job, user_id, progress=True):
-                raise AskCancelled()
+            pools.append(outcome.pool)
+            evidence.update(outcome.evidence)
         return peer_evidence(
             pools, self.settings.global_ask_candidate_limit,
             min_relevance=self.settings.global_ask_min_relevance,
@@ -246,7 +444,8 @@ class GlobalAskService:
         try:
             with retrieval_run(
                 run_kind="ask_global", actor_id=user_id, correlation_id=job.job_id,
-                fanout_limit=1, cancel_event=event,
+                fanout_limit=self.settings.global_ask_retrieval_concurrency,
+                cancel_event=event,
             ):
                 raise_if_cancelled(event)
                 self._check(job.resolved_notebook_ids, user_id, allowed, authority_check)
@@ -414,3 +613,6 @@ class GlobalAskService:
         deadline = time.monotonic() + self.settings.global_ask_shutdown_timeout_seconds
         for worker in workers:
             worker.join(timeout=max(0.0, deadline - time.monotonic()))
+        # Never widen the shutdown budget: drop queued retrievals and let any
+        # in-flight one finish against its own already-cancelled read budget.
+        self._retrieval_pool.shutdown(wait=False, cancel_futures=True)

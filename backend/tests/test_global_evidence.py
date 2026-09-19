@@ -2,6 +2,9 @@
 from dataclasses import replace
 from threading import Event
 from types import SimpleNamespace
+import time
+
+import pytest
 
 from app.models.ask import Citation
 from app.models.global_ask import GlobalAskRequest
@@ -164,8 +167,11 @@ def test_retrieval_snapshot_cannot_be_replaced_by_a_newer_validation_baseline(se
     assert not result.response.citations
 
 
+@pytest.mark.parametrize("setup", [{"global_ask_retrieval_concurrency": 1}], indirect=True)
 def test_total_retrieval_budget_discloses_unsearched_remaining_notebooks(setup, monkeypatch):
-    import time
+    # One retrieval slot is what makes "the second library starts after the
+    # first has already spent the whole phase budget" reachable at all; with a
+    # wider pool both libraries start before the clock moves.
     service, _, retrieved, _ = setup
     clock = [time.monotonic()]
     monkeypatch.setattr("app.services.global_ask.time", SimpleNamespace(monotonic=lambda: clock[0]))
@@ -180,7 +186,9 @@ def test_total_retrieval_budget_discloses_unsearched_remaining_notebooks(setup, 
     assert retrieved == ["a"]
     assert result.searched_notebook_ids == []
     assert [row.notebook_id for row in result.skipped_notebooks] == ["a", "b"]
-    assert "总检索时限" in result.skipped_notebooks[1].reason
+    # "b" never issued a query: it was still queued when the phase budget ran
+    # out, so the receipt must not blame the selected scope.
+    assert result.skipped_notebooks[1].reason == "检索未开始，请稍后重试。"
 
 
 def test_polling_and_cancellation_retain_completed_notebook_progress(setup):
@@ -197,7 +205,14 @@ def test_polling_and_cancellation_retain_completed_notebook_progress(setup):
     request = service.start(GlobalAskRequest(question="progress"), user_id="u")
     try:
         assert entered.wait(5)
+        # Libraries now retrieve concurrently, so "b is in flight" no longer
+        # implies "a's receipt has already been persisted". Hand-shake on the
+        # observable progress row instead of on a wall-clock assumption.
         progress = service.get_job(request.job_id, user_id="u")
+        deadline = time.monotonic() + 5
+        while not progress.skipped_notebooks and time.monotonic() < deadline:
+            Event().wait(0.01)
+            progress = service.get_job(request.job_id, user_id="u")
         assert progress.status == "running"
         assert [row.notebook_id for row in progress.skipped_notebooks] == ["a"]
         stopped = service.cancel(request.job_id, user_id="u")

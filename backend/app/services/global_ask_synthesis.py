@@ -14,8 +14,9 @@ from app.services.retrieval_run import current_retrieval_run
 
 class GlobalAskSynthesis:
     def __init__(self, *, settings, model_clients, parse_anchors, style_block=None,
-                 answer_with_retry=None):
+                 answer_with_retry=None, tier_map=None):
         self.settings = settings
+        self.tier_map = tier_map
         self.model_clients = model_clients
         self.parse_anchors = parse_anchors
         self.style_block = style_block
@@ -23,6 +24,9 @@ class GlobalAskSynthesis:
 
     def _context(self, chunks, notebook_names):
         blocks, id_map = [], {}
+        # The citation card states this tier as a fact, so it is looked up the
+        # same way the in-notebook path does it, never assumed.
+        tiers = self.tier_map(sorted({chunk.notebook_id for chunk in chunks})) if self.tier_map else {}
         used = 0
         represented = {chunk.notebook_id for chunk in chunks if chunk.element_ids}
         share = self.settings.chunk_answer_budget_chars // max(1, len(represented))
@@ -52,7 +56,7 @@ class GlobalAskSynthesis:
                 "snippet": chunk.text, "source_id": chunk.source_id,
                 "element_id": next(iter(chunk.element_ids), ""),
                 "location_label": chunk.section_path, "notebook_id": chunk.notebook_id,
-                "tier": "personal", "relevance": chunk.relevance,
+                "tier": tiers.get(chunk.notebook_id, "personal"), "relevance": chunk.relevance,
             }
             selected.add(chunk.chunk_id)
             return True

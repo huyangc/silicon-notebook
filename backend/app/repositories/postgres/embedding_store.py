@@ -331,8 +331,18 @@ class EmbeddingStore:
 
     @staticmethod
     def global_small_chunk_vector_page(db, notebook_id: str, *, allowed_source_ids,
-                                       max_chunks: int, after: str, page_size: int):
-        """One bounded size gate and source-filtered vector page per snapshot."""
+                                       max_chunks: int, after: str, page_size: int,
+                                       size_gate: bool = True):
+        """One bounded size gate and source-filtered vector page per snapshot.
+
+        ``size_gate=False`` returns the page WITHOUT evaluating admission, and
+        reports ``True`` to mean "no gate was asked for" -- never "this library
+        was admitted". Only a caller that already admitted the library in an
+        earlier snapshot, and that re-admits it in a closing snapshot before
+        publishing anything, may pass it. The gate is an aggregate over up to
+        ``max_chunks + 1`` index tuples, so paying it on every page of a long
+        scan costs more than the vector reads it guards.
+        """
         if max_chunks <= 0 or page_size <= 0:
             return False, []
         source_clause = ""
@@ -340,6 +350,17 @@ class EmbeddingStore:
         if allowed_source_ids is not None:
             source_clause = " AND c.source_id=ANY(%s::text[])"
             source_params = (list(allowed_source_ids),)
+        if not size_gate:
+            rows = db.execute(
+                "SELECT c.id AS vid,e.vector FROM chunks c "
+                "JOIN chunk_embeddings e ON e.chunk_id=c.id AND e.notebook_id=c.notebook_id "
+                "WHERE c.notebook_id=%s AND c.id>%s" + source_clause +
+                " ORDER BY c.id LIMIT %s",
+                (notebook_id, after, *source_params, page_size),
+            ).fetchall()
+            return True, _compat_vector_rows([
+                {"vid": row["vid"], "vector": row["vector"]} for row in rows
+            ])
         rows = db.execute(
             "WITH bounded_chunks AS (SELECT id FROM chunks WHERE notebook_id=%s LIMIT %s), "
             "library_size AS (SELECT COUNT(*) AS chunk_count FROM bounded_chunks), "

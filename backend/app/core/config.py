@@ -1255,8 +1255,20 @@ class Settings(BaseSettings):
     global_ask_history_turns: int = Field(
         10, ge=0, validation_alias="GLOBAL_ASK_HISTORY_TURNS",
     )
-    global_ask_max_notebooks: int = Field(32, ge=1, validation_alias="GLOBAL_ASK_MAX_NOTEBOOKS")
+    # 跨库参与上限是**产品裁决**的硬顶,不是部署可以往上调的成本旋钮(`le=8`):
+    # 一次全局提问的检索阶段会被放大到 N 个库,每个库各占一条数据库连接与一份
+    # 候选池,库越多答案越稀薄而延迟越长。往下调仍然自由。
+    global_ask_max_notebooks: int = Field(
+        8, ge=1, le=8, validation_alias="GLOBAL_ASK_MAX_NOTEBOOKS",
+    )
     global_ask_max_concurrent: int = Field(4, ge=1, validation_alias="GLOBAL_ASK_MAX_CONCURRENT")
+    # 单个任务内**同时**检索的库数。逐库串行时总延迟 = 各库之和(线上 13 库
+    # 实测 18 秒);这里给并行一个全局上界,因为每个检索线程各占一条 PG 连接,
+    # 默认池只有 10。上限 8 与 `global_ask_max_notebooks` 同顶——再高也没有
+    # 更多库可分。
+    global_ask_retrieval_concurrency: int = Field(
+        4, ge=1, le=8, validation_alias="GLOBAL_ASK_RETRIEVAL_CONCURRENCY",
+    )
     global_ask_small_notebook_max_chunks: int = Field(
         20000, ge=0, validation_alias="GLOBAL_ASK_SMALL_NOTEBOOK_MAX_CHUNKS",
     )

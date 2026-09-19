@@ -7,12 +7,14 @@ import pytest
 
 from app.models.global_ask import GlobalAskRequest
 from app.services.global_ask import GlobalAskError
-from tests.test_global_ask import setup, finished
+from tests.test_global_ask import setup, finished, _stage_job_threads
 
 
-def test_twenty_four_notebooks_use_one_batch_per_authority_boundary(setup, monkeypatch):
+def test_max_scope_notebooks_use_one_batch_per_authority_boundary(setup, monkeypatch):
     service, readable, _, _ = setup
-    readable.update(f"library-{index}" for index in range(22))
+    # The product ceiling is 8 participants, so a full-scope request is the
+    # widest authority batch this boundary can ever be asked for.
+    readable.update(f"library-{index}" for index in range(6))
     calls, frozen, workers = [], [], []
     service.notebooks = lambda user: {nb: nb for nb in sorted(readable)}
     service.can_read_many = lambda ids, user: calls.append(tuple(ids)) or readable.intersection(ids)
@@ -20,11 +22,12 @@ def test_twenty_four_notebooks_use_one_batch_per_authority_boundary(setup, monke
     service.sources.visible_source_ids_by_notebook = lambda ids: frozen.append(tuple(ids)) or {
         nb: [f"s-{nb}"] for nb in ids
     }
-    monkeypatch.setattr("app.services.global_ask.threading.Thread.start", lambda worker: workers.append(worker))
+    monkeypatch.setattr("app.services.global_ask.threading.Thread.start",
+                        _stage_job_threads(workers))
     job = service.start(GlobalAskRequest(question="compare"), user_id="u")
-    assert len(job.resolved_notebook_ids) == 24
-    assert len(calls) == 2 and all(len(ids) == 24 for ids in calls)
-    assert len(frozen) == 1 and len(frozen[0]) == 24
+    assert len(job.resolved_notebook_ids) == 8
+    assert len(calls) == 2 and all(len(ids) == 8 for ids in calls)
+    assert len(frozen) == 1 and len(frozen[0]) == 8
     workers.pop().run()
     assert finished(service, job).status == "done"
     calls.clear()
@@ -32,7 +35,7 @@ def test_twenty_four_notebooks_use_one_batch_per_authority_boundary(setup, monke
     assert len(calls) == 1
     calls.clear()
     service.conversation(job.conversation_id, user_id="u")
-    assert len(calls) == 1 and len(calls[0]) == 24
+    assert len(calls) == 1 and len(calls[0]) == 8
 
 
 def test_history_and_conversation_recheck_union_once_and_exclude_failed_turns(setup):

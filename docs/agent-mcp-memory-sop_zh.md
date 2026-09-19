@@ -264,7 +264,8 @@ claude mcp list
 ```
 
 `all` 只覆盖 token 白名单与当前用户读权的交集，不是整个平台全部笔记本。
-限定范围时先分页调用 `list_notebooks`，再传
+一次提问最多覆盖 8 个笔记本：`all` 解析结果超过 8 个时直接返回 422（不会静默截断），
+此时先分页调用 `list_notebooks`，再传不超过 8 个 id 的
 `notebook_scope={"mode":"include","notebook_ids":[...]}`；空列表恢复全部。
 用返回的 `job_id` 调用 `get_global_ask` 查看状态和结果，长答案和引用按返回的分页信息继续读取。
 检索回执通过 `next_coverage_offset` 作为 `coverage_offset` 继续读取，直到取完未检索/降级

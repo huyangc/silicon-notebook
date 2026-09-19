@@ -803,6 +803,26 @@ class SourceStore:
                     result[row["id"]] = item
         return result
 
+    def global_chunk_source_ids(self, db, chunk_ids: Sequence[str]) -> dict[str, str]:
+        """``{chunk_id: source_id}`` only -- the ceiling probe for global ANN.
+
+        The chunk ANN index holds EVERY chunk of a notebook, Memory/Knowhow
+        projections included, while the global ceiling excludes those source
+        types by construction. A global query therefore has to learn how much
+        of an ANN neighbourhood its ceiling actually admits BEFORE deciding the
+        neighbourhood is usable. ``global_candidate_evidence`` would answer the
+        same question, but it also transfers chunk text and per-element hashes
+        for candidates that are about to be discarded -- up to the over-fetch
+        multiple of ``chunk_recall`` of them. This reads two indexed columns.
+        """
+        ids = list(dict.fromkeys(chunk_ids))
+        if not ids:
+            return {}
+        rows = db.execute(
+            "SELECT id,source_id FROM chunks WHERE id = ANY(%s)", (ids,),
+        ).fetchall()
+        return {row["id"]: row["source_id"] for row in rows}
+
     def global_candidate_evidence(self, db, chunk_ids: Sequence[str]) -> dict[str, dict]:
         """Read chunk text and element hashes in one snapshot; keep element bodies in PostgreSQL."""
         ids = list(dict.fromkeys(chunk_ids))
