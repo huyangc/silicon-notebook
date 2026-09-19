@@ -144,6 +144,28 @@ def test_enforce_active_floor_deduplicates_by_text():
     assert len(out) == 4
 
 
+def test_enforce_active_floor_counts_held_seats_per_distinct_passage():
+    """已入选的当前库条目也按「一段正文一席」计数。
+
+    关键词/精确命中会从另一个本地来源把同一段正文再带进来一次
+    (``_merge_multi_direct_chunk_hits`` 的身份含 ``source_id``,两份都留着);
+    四份同文副本不等于四席保底——其余不同的当前库候选仍然应当换进来。
+    """
+    from app.services.retrieval import enforce_active_floor
+
+    copies = [_chunk(f"dup{i}", 0.8, text="同一段正文") for i in range(4)]
+    peers = [_chunk(f"b{i}", 0.9, notebook_id="b") for i in range(12)]
+    distinct = [_chunk(f"a{i}", 0.5 - i * 0.01, text=f"另一段正文 {i}") for i in range(3)]
+    selected = [*copies, *peers]
+
+    out = enforce_active_floor(selected, [*selected, *distinct], 4)
+
+    held = {hit.text for hit in out if not hit.notebook_id}
+    assert held == {"同一段正文", *(hit.text for hit in distinct)}
+    assert len(out) == len(selected)
+    assert [hit.chunk_id for hit in out[:4]] == [hit.chunk_id for hit in copies]
+
+
 def test_enforce_active_floor_never_duplicates_what_is_already_selected():
     from app.services.retrieval import enforce_active_floor
 

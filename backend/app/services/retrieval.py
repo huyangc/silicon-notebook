@@ -1308,10 +1308,16 @@ def enforce_active_floor(
     rows = list(selected)
     if floor <= 0 or not rows or not any(row.notebook_id for row in rows):
         return selected
-    local = [
-        row for row in rows
+    # Seats already held are counted per DISTINCT passage, the same one-seat-
+    # per-text contract the spare candidates below are held to.  A direct
+    # (keyword / exact-lookup) hit can reintroduce a passage from a second local
+    # source -- ``_merge_multi_direct_chunk_hits`` keeps both copies because its
+    # identity includes ``source_id`` -- and counting each copy would declare
+    # the floor met by four renderings of one piece of evidence.
+    local = {
+        row.text for row in rows
         if not row.notebook_id and not is_generated_question_only_chunk(row)
-    ]
+    }
     seen_text = {row.text for row in rows}
     seen_ids = {row.chunk_id for row in rows}
     spare: List["RetrievedChunk"] = []
