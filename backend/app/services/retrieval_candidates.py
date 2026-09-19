@@ -4294,10 +4294,16 @@ class CandidateRetrievalService(_RetrievalState):
         is therefore rebuilt as a fresh dict with a fresh list; nothing reached
         from ``G`` is ever assigned into.
 
-        BOUND.  One batched ``object_evidence_rows`` read -- a single ``IN``
-        over at most one object id per node in the walk result, which the walk's
-        own ``chunk_kg_max_depth``/``chunk_kg_fan_out`` caps already bound.
-        Never one query per node.
+        BOUND.  Batched ``object_evidence_rows`` reads -- at most one object id
+        per node in the walk result, split through this class' shared
+        ``_in_batches``/``_IN_CHUNK`` width.  Never one query per node, and
+        never one unbounded ``IN`` either: the walk's
+        ``chunk_kg_max_depth``/``chunk_kg_fan_out`` caps are DEPLOYMENT-TUNABLE
+        environment variables, so "the walk already bounds it" bounds the id
+        count by configuration, not by a protocol constant.  Raised far enough
+        the single ``IN`` used to exceed SQLite's variable limit, and the
+        ``OperationalError`` escaped ``_chunk_kg_overlay`` into ``_mix_retrieve``
+        -- a whole arm failing, not degrading.
 
         SHORT CIRCUIT.  Two layers, both ``is not None`` and never truthiness:
         the caller does not enter this function at all unless SOME per-notebook
@@ -4322,13 +4328,14 @@ class CandidateRetrievalService(_RetrievalState):
             return subgraph
         supported: set = set()
         with self._connect() as db:
-            for row in self.knowledge.object_evidence_rows(db, list(owners)):
-                object_id = str(row["id"])
-                if filter_evidence(
-                    owners.get(object_id, ""),
-                    json.loads(row["evidence"] or "[]"),
-                ):
-                    supported.add(object_id)
+            for batch in self._in_batches(owners):
+                for row in self.knowledge.object_evidence_rows(db, batch):
+                    object_id = str(row["id"])
+                    if filter_evidence(
+                        owners.get(object_id, ""),
+                        json.loads(row["evidence"] or "[]"),
+                    ):
+                        supported.add(object_id)
         out: list = []
         for node, edge, src_oid in subgraph:
             object_id = str((node or {}).get("object_id") or "")

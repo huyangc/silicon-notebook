@@ -2714,6 +2714,14 @@ class ReportEngine:
                 # Not folded into the ``AskCancelled`` arm: that arm records
                 # the stage timing as ``cancelled=True``, and this is not a
                 # cancellation.
+                #
+                # DELIBERATELY updates no phase, emits no stage timing and does
+                # not persist: the whole report fails at the layer above, so a
+                # per-section 失败 marker would be written into a status board
+                # nobody will deliver, and it would be the WRONG marker —— the
+                # section did not fail, the run's identity did.  (Today this
+                # arm is unreachable anyway: nothing in production constructs a
+                # participant override.  Keep it, and keep it bare.)
                 raise
             except AskCancelled:
                 self._emit_stage_timing(

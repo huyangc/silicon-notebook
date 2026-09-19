@@ -377,3 +377,152 @@ def test_empty_ceiling_denies_the_library(overlay, federation):
         not str(row["object_id"]).startswith("o-peer-")
         for row in id_map.values()
     )
+
+
+# ---------------------------------------------------------------------------
+# 7. 有别的库的天花板、但本 run 的库一个都没被点名 → 整段不生效、零查询
+# ---------------------------------------------------------------------------
+
+
+def test_a_run_whose_own_libraries_have_no_ceiling_reads_nothing(
+    repo, overlay, federation, monkeypatch,
+):
+    """``peer_ceiling_active`` 为真只说明「这个 run 上有某个库被冻结了」。
+
+    判据必须逐 owner 问 ``source_ceiling_for(owner) is not None``:本 run 走到的
+    两个库都没有被点名时,节点一个都不许被裁,那次批量 evidence 读也一次都不许
+    发出去 —— 否则「装了天花板的 run」会替**每一个**库付一次读,而那些库压根
+    不在天花板清单里。
+    """
+    active, peer = federation
+    candidates = repo.retrieval.candidates
+    evidence_reads: list = []
+    real_rows = candidates.knowledge.object_evidence_rows
+    monkeypatch.setattr(
+        candidates.knowledge, "object_evidence_rows",
+        lambda db, object_ids: (
+            evidence_reads.append(list(object_ids)), real_rows(db, object_ids)
+        )[1],
+    )
+
+    baseline_block, baseline_id_map = overlay()
+    assert evidence_reads == [], "对照臂本身不该读"
+
+    block, id_map = overlay({"nb-somewhere-else": frozenset({"whatever"})})
+
+    assert block == baseline_block
+    # ⚠ 只比这道闸自己拥有的东西(留下哪些节点、各自的引文)。``id_map`` 整体
+    # 不可比:任何逐库天花板在场都会让 ``citation_active_id`` 进对等模式,当前库
+    # 那条引用的 ``notebook_id`` 徽章从空串变成真实 id —— 那是 D0-4 的既定语义,
+    # 与本闸无关。
+    def _content(rows):
+        return {(row["object_id"], row["name"], row["snippet"])
+                for row in rows.values()}
+
+    assert _content(id_map) == _content(baseline_id_map)
+    assert HIDDEN_NAME in block, "没有天花板绑住这两个库,谁都不该被裁"
+    assert evidence_reads == []
+
+    # 对照臂:真的点名了本 run 的库之后,读与裁剪都发生。
+    overlay(_full_ceilings(active, peer))
+    assert len(evidence_reads) == 1
+
+
+# ---------------------------------------------------------------------------
+# 8. 批量 evidence 读必须分批:节点数是可调环境变量的函数,不是协议常量
+# ---------------------------------------------------------------------------
+
+
+def _governed_subgraph(peer: str, count: int) -> list:
+    """``count`` 个同属 ``peer`` 的扩展节点(形状同 ``multihop_subgraph`` 的输出)。"""
+    return [
+        ({"object_id": f"o-bulk-{index}", "object_type": "concept",
+          "name": f"bulk-{index}", "tier": "base", "notebook_id": peer},
+         None, None)
+        for index in range(count)
+    ]
+
+
+def test_bulk_evidence_read_is_batched_and_survives_the_variable_limit(
+    repo, federation, monkeypatch,
+):
+    """节点数 > 一个批次时分批读,且结果与不分批逐值相等。
+
+    ``chunk_kg_max_depth`` / ``chunk_kg_fan_out`` 是**部署可调的环境变量**,
+    所以「走查自己的上限已经约束了它」约束的是配置、不是协议常量:调大之后
+    一次性 ``IN (?,…)`` 会撞上 ``SQLITE_MAX_VARIABLE_NUMBER``,异常从
+    ``_chunk_kg_overlay`` 一路冒到 ``_mix_retrieve`` —— 整条臂失败,不是降级。
+
+    用例把本线程那条复用连接的变量上限调到 SQLite 的历史默认 999(本机构建
+    编译出来的上限是 25 万,不调的话这条路根本压不出来),再喂进 2 个批次的
+    节点。
+
+    **变异锚点**:去掉 ``_in_batches`` 改回一次性 ``list(owners)`` →
+    ``OperationalError: too many SQL variables``。
+    """
+    import sqlite3
+
+    _active, peer = federation
+    candidates = repo.retrieval.candidates
+    count = candidates._IN_CHUNK * 2
+    subgraph = _governed_subgraph(peer, count)
+
+    connection = candidates.database.connect()
+    previous = connection.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+    connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+    batches: list[int] = []
+    real_rows = candidates.knowledge.object_evidence_rows
+
+    def _counting(db, object_ids):
+        ids = list(object_ids)
+        batches.append(len(ids))
+        return real_rows(db, ids)
+
+    monkeypatch.setattr(
+        candidates.knowledge, "object_evidence_rows", _counting)
+    try:
+        with source_scope_context(
+            _active, None, None,
+            notebook_source_ceilings={peer: frozenset({"src-peer-ok"})},
+        ):
+            from app.services.source_scope import current_source_scope
+
+            kept = candidates._ceiling_scoped_subgraph(
+                subgraph, current_source_scope())
+    finally:
+        connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous)
+
+    assert len(batches) == 2 and batches == [candidates._IN_CHUNK] * 2
+    assert max(batches) <= candidates._IN_CHUNK
+    # 这批节点一个都没有真实 evidence 行 → 全部无天花板内支撑 → 全裁掉。
+    # 与「不分批时同一份输入」的结果逐值相等由下一条对照臂钉住。
+    assert kept == []
+
+
+def test_batched_and_unbatched_reads_agree_value_for_value(repo, federation):
+    """分批只改查询次数,不改结果:跨批次的「有支撑 / 无支撑」判定必须一致。
+
+    造一批节点,其中跨越批次边界的若干个有天花板内来源的真实 evidence 行,
+    断言幸存集合恰好是它们 —— 一个「只处理第一批」的实现会漏掉后面那些。
+    """
+    _active, peer = federation
+    candidates = repo.retrieval.candidates
+    count = candidates._IN_CHUNK + 5
+    supported_ids = {f"o-bulk-{index}"
+                     for index in (0, candidates._IN_CHUNK - 1,
+                                   candidates._IN_CHUNK, count - 1)}
+    for object_id in sorted(supported_ids):
+        _seed_object(repo, peer, object_id, object_id,
+                     [("src-peer-ok", f"{object_id} 的引文")])
+
+    subgraph = _governed_subgraph(peer, count)
+    with source_scope_context(
+        _active, None, None,
+        notebook_source_ceilings={peer: frozenset({"src-peer-ok"})},
+    ):
+        from app.services.source_scope import current_source_scope
+
+        kept = candidates._ceiling_scoped_subgraph(
+            subgraph, current_source_scope())
+
+    assert {str(node["object_id"]) for node, _edge, _src in kept} == supported_ids

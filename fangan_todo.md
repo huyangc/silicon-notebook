@@ -138,6 +138,23 @@
       Hypothesis 对象。
 - [ ] schema 归纳只提议新类型，不对既有类型提议新字段。
 - [ ] KG refine 自我修正只有总开关 `KG_REFINE_ENABLED`，无抽样 / 比率控制。
+- [ ] **KG 对象 `definition` 的来源归因**（`fangan_done.md` 第 38 条的残余口）。
+      `knowledge_context` 的 snippet / 引用已按来源天花板过滤，但同一次装配用的
+      `node_context(...)["definition"]` 过不了闸，而且过不了是结构性的：store 侧它由两条
+      不同的路产出——概念簇的 `canonical_description`（对象级 LLM 融合描述，归因不到单一
+      来源）与 `defines` 关系那个源对象证据的首条原文（有来源，但没有随字符串返回）——
+      服务层拿到的只是一个字符串，无从判断来自哪一条。后者今天在**单库取消勾选来源**下
+      仍可能把范围外的原文当作定义写进提示词。关掉它要给 `node_context` 的返回加上
+      definition 的来源归属（或按 basis 分成两个字段），属于返回形状变更，牵动双后端与
+      `EvidenceKnowledgeContextPort`；前者要先决定「对象级描述在收窄范围下是否还算合法
+      证据」，那是一次产品裁决而不是过滤改动。
+- [ ] **集合枚举的引用不过来源天花板**（同一族，另一条通道）。`collection_enumeration`
+      的 KG 行按 `knowledge_objects.evidence` 原样取 `evidence_element_ids`，
+      `evidence_context.collection_item_citations` 再从中选第一条活的元素建引用卡——两步
+      都只认**库维度**（参与集），不认来源天花板。今天这是自洽的：整个枚举面（花名册）
+      本来就不按来源收窄，只修引用那一半会变成半套语义。要不要让「我的库里有哪些文档 /
+      对象」也认来源勾选，是一次产品裁决（收窄范围时枚举总闸已经会关闭，见
+      `docs/product-and-api_zh.md` 的 `read_document` 一段），拍板后再一并改两步。
 
 ### 检索
 

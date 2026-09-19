@@ -353,6 +353,161 @@ def test_chunk_and_reasoning_paths_share_one_gate(repo, library, service, monkey
     assert chunk_side[0] == [MIXED]
 
 
+# --------------------------------------------------------------------------- #
+# 7. 参数量不随天花板大小增长:清单恒为一个 JSON 数组参数
+# --------------------------------------------------------------------------- #
+@contextlib.contextmanager
+def _variable_limit(repo, limit: int):
+    """把这条只读连接的 SQL 变量上限压到 SQLite 的历史默认值。
+
+    本机构建编译出来的上限是 25 万,不压根本压不出来;生产上 `SQLITE_MAX_
+    VARIABLE_NUMBER` 是个编译期常量,老一点的构建就是 999。
+    """
+    import sqlite3
+
+    connection = object.__getattribute__(repo, "_runtime").unified_kg.database.connect()
+    previous = connection.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+    connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, limit)
+    try:
+        yield
+    finally:
+        connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous)
+
+
+def _wide_ceiling(notebook_id: str, width: int = 5000) -> dict:
+    """真实形状:一整库的可见来源清单,生产上可达数千。"""
+    return {notebook_id: frozenset(
+        {OPEN_SOURCE} | {f"s-filler-{index}" for index in range(width)})}
+
+
+def test_a_wide_ceiling_never_becomes_a_wide_parameter_list(repo, library, service):
+    """5000 个来源 id 的天花板不许把 SQL 变量打爆。
+
+    逐个占位符时参数量 = 天花板大小 × 每行一次(``comention_peers`` 的名字查询
+    过去是逐行发的),撞上上限即 ``OperationalError``;而
+    ``communities.sibling_peers`` 的 ``except Exception: return []`` 会把它吞成
+    「这库没有兄弟」—— 对比题静默劣化,日志里一个字都没有。
+
+    **变异锚点**:把 ``_JSON_ID_LIST`` 换回 ``",".join("?" …)`` → 本条红。
+    """
+    ceilings = _wide_ceiling(library.id)
+    with _variable_limit(repo, 999):
+        with source_scope_context(
+            library.id, None, None, notebook_source_ceilings=ceilings,
+        ):
+            assert _sibling_names(service, library.id) == [MIXED]
+            assert _community_peers(service, library.id) == [MIXED]
+
+
+def test_wide_ceiling_also_survives_the_unbackfilled_authoritative_branch(
+    repo, library, service
+):
+    """未回填库走扫 evidence JSON 的权威支,清单同样只占一个参数。"""
+    with repo._write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET source_index_backfilled=0 "
+            "WHERE notebook_id=?", (library.id,))
+    with _variable_limit(repo, 999):
+        with source_scope_context(
+            library.id, None, None,
+            notebook_source_ceilings=_wide_ceiling(library.id),
+        ):
+            assert _sibling_names(service, library.id) == [MIXED]
+            assert _community_peers(service, library.id) == [MIXED]
+
+
+# --------------------------------------------------------------------------- #
+# 8. 名字是一条批量读,不是 N+1
+# --------------------------------------------------------------------------- #
+def _name_queries(statements) -> list[str]:
+    """取 canonical_name 的查询。
+
+    ``resolve_focal``(焦点解析)按 ``lower(canonical_name)=`` 这个独有谓词排除,
+    剩下的就是 ``comention_peers`` 的取名字读——批量化之前每条共提行一次。
+    """
+    return [
+        statement for statement in statements
+        if "canonical_name" in statement
+        and "concept_clusters" in statement
+        and "lower(canonical_name)" not in statement
+    ]
+
+
+@pytest.mark.parametrize("ceilings", [None, "narrow"])
+def test_comention_names_are_read_in_one_query(repo, library, service, ceilings):
+    """N 条共提行 → **一条**名字查询,有闸无闸都一样。
+
+    加闸之前这里就是 N+1;加闸之后每一行还要各背一遍整库天花板的清单谓词,
+    所以批量化同时消掉两个问题。
+
+    **变异锚点**:退回逐行 ``LIMIT 1`` 的名字查询 → 本条红(计数变 2)。
+    """
+    scope = (
+        contextlib.nullcontext() if ceilings is None
+        else source_scope_context(
+            library.id, None, None,
+            notebook_source_ceilings=_ceilings(library.id, OPEN_SOURCE))
+    )
+    with scope:
+        with _traced(repo) as statements:
+            names = _sibling_names(service, library.id)
+    assert names == ([HIDDEN, MIXED] if ceilings is None else [MIXED])
+    assert len(_name_queries(statements)) == 1, _name_queries(statements)
+
+
+# --------------------------------------------------------------------------- #
+# 9. 未回填库走权威支时有可观测信号(B2)
+# --------------------------------------------------------------------------- #
+def test_unbackfilled_library_emits_one_source_index_fallback_per_run(
+    repo, library, service
+):
+    """闸在 SQL 里、事件在服务层:每次 run 每库至多一条,内容无关。
+
+    词法臂在同一个判断点上早就发这条事件(``site="kg_source_scoped_fts"``),
+    对比兄弟这一站过去一声不吭 —— 权威支是扫 evidence JSON,成本量级完全不同。
+    """
+    from app.services.retrieval_run import retrieval_run
+
+    with repo._write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET source_index_backfilled=0 "
+            "WHERE notebook_id=?", (library.id,))
+    ceilings = _ceilings(library.id, OPEN_SOURCE)
+    with retrieval_run(run_kind="ask_chunk"):
+        with source_scope_context(
+            library.id, None, None, notebook_source_ceilings=ceilings,
+        ):
+            _sibling_names(service, library.id)
+            _community_peers(service, library.id)
+            _sibling_names(service, library.id)
+    fallbacks = [e for e in service.event_log.events
+                 if e["kind"] == "source_index_fallback"]
+    assert len(fallbacks) == 1, fallbacks
+    assert fallbacks[0]["notebook_id"] == library.id
+    assert fallbacks[0]["site"] == "comparison_peer_source_ceiling"
+    assert set(fallbacks[0]) == {"kind", "notebook_id", "site"}, "内容无关"
+
+
+def test_backfilled_library_and_absent_ceiling_emit_nothing(repo, library, service):
+    """回填过的库、以及压根没有天花板的 run,都不发这条事件、也不多读一次。"""
+    from app.services.retrieval_run import retrieval_run
+
+    with retrieval_run(run_kind="ask_chunk"):
+        with source_scope_context(
+            library.id, None, None,
+            notebook_source_ceilings=_ceilings(library.id, OPEN_SOURCE),
+        ):
+            _sibling_names(service, library.id)
+    with retrieval_run(run_kind="ask_chunk"):
+        with _traced(repo) as statements:
+            _sibling_names(service, library.id)
+    assert [e for e in service.event_log.events
+            if e["kind"] == "source_index_fallback"] == []
+    assert not [s for s in statements if "source_index_backfilled" in s], (
+        "无天花板的 run 一条额外查询都不许多发"
+    )
+
+
 def test_only_communities_reads_the_two_peer_store_methods():
     """闸只有一处的**结构**证据:生产里没有第二个读这两个 store 方法的地方。
 
