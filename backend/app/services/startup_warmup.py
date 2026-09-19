@@ -522,7 +522,14 @@ def _pool_budget_warning(settings: object) -> str | None:
         # 六相位作业全程吃数据库连接,漏算会让「其余各池刚好贴着池容量」的
         # 配置在删除启动时被打穿而无预警。
         delete = int(getattr(settings, "notebook_delete_concurrency", 1))
-        global_ask = int(getattr(settings, "global_ask_max_concurrent", 0))
+        # 全局问答占两层连接:每个任务线程自己做权限复核与进度保存,它再把逐库
+        # 检索交给一个进程级共享的有界线程池,那个池的每个执行位也各占一条连接。
+        # 只算任务并发会把「库多时检索池满员」的真实峰值漏掉一半。
+        global_ask_jobs = int(getattr(settings, "global_ask_max_concurrent", 0))
+        global_ask_retrieval = int(
+            getattr(settings, "global_ask_retrieval_concurrency", 0)
+        )
+        global_ask = global_ask_jobs + global_ask_retrieval
         budget = heavy + light + kg + search + scale + delete + global_ask
         pool_max = int(settings.postgres_pool_max_size)
         if pool_max > budget:
@@ -531,7 +538,9 @@ def _pool_budget_warning(settings: object) -> str | None:
             f"pool-budget: POSTGRES_POOL_MAX_SIZE={pool_max} <= "
             f"重活维护池({heavy})+轻活维护池({light})+KG 分析并发({kg})"
             f"+搜索并发({search})+scale 构建并发({scale})"
-            f"+删除作业并发({delete})+全局问答并发({global_ask})={budget}；"
+            f"+删除作业并发({delete})"
+            f"+全局问答并发(任务{global_ask_jobs}+检索{global_ask_retrieval}"
+            f"={global_ask})={budget}；"
             "高峰期后台 job、搜索与索引构建可能耗尽连接池并让前台请求排队甚至超时。"
             f"建议把 POSTGRES_POOL_MAX_SIZE 调到至少 {budget + 1}。"
         )

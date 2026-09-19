@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from threading import Event
+from threading import Event, Thread
 from types import SimpleNamespace
 import time
 import pytest
@@ -15,8 +15,12 @@ from app.services.sqlite_repository import SQLiteRepository
 
 
 @pytest.fixture
-def setup(tmp_path):
-    settings = Settings(_env_file=None, database_url=f"sqlite:///{tmp_path / 'global.db'}", storage_dir=str(tmp_path / "storage"))
+def setup(tmp_path, request):
+    # Indirect parametrization overrides Settings fields BEFORE the service is
+    # built, which is the only moment the shared retrieval pool is sized.
+    overrides = getattr(request, "param", None) or {}
+    settings = Settings(_env_file=None, database_url=f"sqlite:///{tmp_path / 'global.db'}",
+                        storage_dir=str(tmp_path / "storage"), **overrides)
     repo = SQLiteRepository(settings)
     readable = {"a", "b"}
     retrieved, syntheses = [], []
@@ -54,6 +58,25 @@ def setup(tmp_path):
     repo.close()
 
 
+def _stage_job_threads(staged):
+    """Hold back ONLY the detached job thread, so it can be run inline.
+
+    ``threading.Thread.start`` is shared by the whole process, including the
+    shared retrieval pool's workers. Patching it wholesale leaves that pool with
+    no threads at all and every submitted library retrieval waits forever, so
+    the interception is keyed on the job thread's own name.
+    """
+    original = Thread.start
+
+    def start(thread):
+        if thread.name == "global-ask":
+            staged.append(thread)
+            return None
+        return original(thread)
+
+    return start
+
+
 def finished(service, job):
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
@@ -69,7 +92,10 @@ def test_all_searches_each_notebook_once_and_synthesizes_once(setup):
     job = service.start(GlobalAskRequest(question="compare"), user_id="u")
     result = finished(service, job)
     assert result.status == "done"
-    assert retrieved == ["a", "b"]
+    # Libraries retrieve concurrently, so the ORDER they enter retrieval is
+    # thread scheduling; what must stay fixed is that each is visited once and
+    # that the durable receipt follows the resolved participant order.
+    assert sorted(retrieved) == ["a", "b"]
     assert len(syntheses) == 1
     assert {chunk.notebook_id for chunk in syntheses[0][1]} == {"a", "b"}
     assert result.searched_notebook_ids == ["a", "b"]
@@ -278,7 +304,7 @@ def test_worker_checks_authority_and_cancel_before_history_rewrite(setup, monkey
     service, _, _, _ = setup
     staged, rewrites = [], []
     allowed = [["a", "b"]]
-    monkeypatch.setattr("app.services.global_ask.threading.Thread.start", lambda thread: staged.append(thread))
+    monkeypatch.setattr("app.services.global_ask.threading.Thread.start", _stage_job_threads(staged))
     service.rewrite_query = lambda *args: rewrites.append(args) or "rewritten"
     job = service.start(GlobalAskRequest(question="q"), user_id="u", authority_check=lambda: allowed[0])
     if change == "revoke":

@@ -793,6 +793,21 @@ class SourceStore:
                     out[row["id"]] = dict(row)
         return out
 
+    def global_chunk_source_ids(self, db, chunk_ids: Sequence[str]) -> dict[str, str]:
+        """``{chunk_id: source_id}`` only -- mirrors the PostgreSQL ceiling probe.
+
+        See ``postgres/source_store.py`` for why the global ANN lane needs a
+        source-identity-only read instead of reusing the hydration query.
+        """
+        ids = list(dict.fromkeys(chunk_ids))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        rows = db.execute(
+            f"SELECT id,source_id FROM chunks WHERE id IN ({placeholders})", ids,
+        ).fetchall()
+        return {row["id"]: row["source_id"] for row in rows}
+
     def global_candidate_evidence(self, db, chunk_ids: Sequence[str]) -> dict[str, dict]:
         """Read model text and its element identities in one SQL snapshot."""
         ids = list(dict.fromkeys(chunk_ids))

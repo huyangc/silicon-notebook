@@ -126,16 +126,49 @@ def test_growth_beyond_size_budget_discards_partial_semantic_results(small_libra
     calls = []
     def page(*args, **kwargs):
         result = original(*args, **kwargs)
-        calls.append(True)
+        calls.append(kwargs.get("size_gate", True))
         if len(calls) == 1:
-            # This test adapter returns an already materialized first page;
-            # its following SQL page must re-evaluate library-size admission.
+            # This test adapter returns an already materialized first page; the
+            # library grows past the rail while the scan is still running.
             add("personal", "chunk-c", "source", "Battery charging.", [1., 0.])
         return result
     monkeypatch.setattr(candidates.embeddings, "global_small_chunk_vector_page", page)
     result = ask(candidates)
     assert result.degraded and result.chunks == []
-    assert len(calls) == 2
+    # The size gate is paid on the first page and on the closing snapshot only;
+    # the page in between reads vectors without the bounded aggregate. The
+    # closing snapshot is what refuses to publish the prefix.
+    assert calls == [True, False, True]
+
+
+def test_ungated_page_keeps_the_source_filter_and_cursor(small_library):
+    """``size_gate=False`` drops ONLY the bounded library-size aggregate; the
+    source ceiling, the notebook partition and the id cursor are unchanged.
+    Mirrors ``tests/postgres/test_global_small_notebook_vectors.py``."""
+    candidates, database, add, _, _ = small_library
+    add("personal", "chunk-a", "source", "Battery energy conversion.", [1., 0.])
+    add("personal", "chunk-b", "private", "Private battery notes.", [1., 0.])
+    add("personal", "chunk-c", "source", "Battery charging.", [1., 0.])
+    add("other", "chunk-d", "source", "Unrelated library.", [1., 0.])
+    with database.connect() as db:
+        assert EmbeddingStore.global_small_chunk_vector_page(
+            db, "personal", allowed_source_ids=["source"], max_chunks=1, after="", page_size=10,
+        ) == (False, [])
+        admitted, rows = EmbeddingStore.global_small_chunk_vector_page(
+            db, "personal", allowed_source_ids=["source"], max_chunks=1, after="",
+            page_size=10, size_gate=False,
+        )
+        assert admitted and [row["vid"] for row in rows] == ["chunk-a", "chunk-c"]
+        admitted, tail = EmbeddingStore.global_small_chunk_vector_page(
+            db, "personal", allowed_source_ids=["source"], max_chunks=3, after="chunk-a",
+            page_size=10, size_gate=False,
+        )
+        assert admitted and [row["vid"] for row in tail] == ["chunk-c"]
+        admitted, unscoped = EmbeddingStore.global_small_chunk_vector_page(
+            db, "personal", allowed_source_ids=None, max_chunks=3, after="",
+            page_size=10, size_gate=False,
+        )
+        assert admitted and [row["vid"] for row in unscoped] == ["chunk-a", "chunk-b", "chunk-c"]
 
 
 def test_scan_cap_does_not_publish_a_prefix_after_concurrent_replacement(small_library, monkeypatch):

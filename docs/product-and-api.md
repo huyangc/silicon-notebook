@@ -102,7 +102,7 @@ PostgreSQL 16 is the default deployment choice and is used in both the current d
 ## Global Ask
 
 Global Ask opens from a bottom-right bubble in the authenticated collection and notebook workspace.
-Clicking opens a compact chat; expanding fills the viewport with history, chat and evidence reading.
+Clicking opens a compact chat; expanding fills the viewport with history and chat.
 Minimizing, reopening and switching size retain the same mounted conversation, draft, scope and task
 progress; minimizing does not cancel a task. Embedded chat leaves the host URL unchanged and loads
 its data only after first opening. Reopening refreshes notebook choices without resetting the chat;
@@ -110,7 +110,12 @@ error recovery restores the active conversation, draft scope and running-task po
 accessible, including conversation links. Conversations belong to the initiating user; they neither create an empty carrier notebook
 nor change reference-library mounts. The page reuses the shared header, palette, button feedback and
 answer Markdown, with conversation history, searchable notebook selection, a persistent scope summary,
-background-task status and original-evidence reading. The mobile layout retains scope, send and stop.
+background-task status. Citations use the same card as in-notebook Ask: clicking an inline marker opens
+it beside the marker with the cited passage, its notebook and library tier, plus an **open notebook** link
+that goes to that notebook at the cited source (a plain click also minimizes the chat; a modified click
+opens a new tab and leaves it open). There is no citation list under the answer and no side reader; entries
+that need a notebook workspace (source view, Knowledge Graph, Knowhow row, import, attached images) are
+absent. While a card is open, Escape closes only the card. The mobile layout retains scope, send and stop.
 Polling backs off from 1.2 seconds to 15 seconds while progress is unchanged, pauses when the browser
 document is hidden, and resumes immediately on visibility. Narrowing scope shows a history-context reminder.
 Ungrounded answers carry an explicit warning even when they include some citations. Each completed or
@@ -129,7 +134,10 @@ History, task results and cited evidence recheck access. Narrowing scope cannot 
 notebook material through earlier assistant answers. Receipts distinguish eligible participants, notebooks
 actually searched, skipped notebooks with Chinese reasons, notebooks using lexical fallback, and notebooks cited.
 Retrieval timeouts/unavailability skip that notebook with explicit partial coverage; empty retrieval still counts
-as searched. Authorization changes still fail closed. Not citing a notebook does not assert absence of material.
+as searched. A skip reason states only what happened and never guesses a cause such as a broken index: only a
+retrieval that actually ran out of time asks the user to narrow scope, a notebook still queued when the phase
+budget expired says retrieval never started, and everything else asks them to retry. The machine-readable cause
+travels as a content-free `global_retrieval_skipped` event instead. Authorization changes still fail closed. Not citing a notebook does not assert absence of material.
 Only completed, scope-compatible turns enter follow-up context through shared query rewriting; assistant answers
 resolve references but are never evidence. Every element backing a cited chunk is checked by source identity
 and text fingerprint, ignoring unrelated metadata changes. Changed evidence is removed and synthesis retries
@@ -166,22 +174,48 @@ Model context first admits each notebook's best passage if these fit together; o
 may reserve one whole passage within its equal character share before unused space is redistributed.
 Unknown model citation markers trigger the shared answer retry rather than retaining unbound claims.
 `GLOBAL_ASK_HISTORY_TURNS` defaults to 10 (minimum 0), controlling completed prior turns.
-`GLOBAL_ASK_MAX_NOTEBOOKS` defaults to 32 (minimum 1): a larger resolved scope is rejected with a request to
-select fewer notebooks, never silently truncated. `GLOBAL_ASK_MAX_CONCURRENT` defaults to 4 (minimum 1)
+`GLOBAL_ASK_MAX_NOTEBOOKS` defaults to 8 and accepts 1–8: 8 is a product ceiling, not a deployment knob, so a
+larger value fails configuration validation and a larger resolved scope is rejected, never silently
+truncated. The rejection is actionable rather than a bare limit statement: an `all` scope that resolved past
+the ceiling asks for a selection of 8 or fewer, because a caller that never sent a scope — an MCP client
+above all — cannot narrow one. The browser keeps this from happening: when a user can read more than 8
+notebooks it pre-selects the 8 with the most sources and leaves the selection editable up to 8, and
+otherwise selects all of them. `GLOBAL_ASK_MAX_CONCURRENT` defaults to 4 (minimum 1)
 per process, including admissions in progress; a full service rejects new work for retry and contributes to
 the PostgreSQL pool budget warning. Shutdown cancels workers and waits at most
 `GLOBAL_ASK_SHUTDOWN_TIMEOUT_SECONDS` (default 5, greater than 0).
 `GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS` (default 30, greater than 0) bounds the retrieval phase;
 `GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS` (default 5, greater than 0) bounds each notebook within it.
+Participating notebooks retrieve concurrently, bounded by `GLOBAL_ASK_RETRIEVAL_CONCURRENCY`
+(default 4, range 1–8) across the whole process, so the retrieval phase is no longer the sum of its
+libraries. That bound is shared by every running task, and each one keeps only its fair share of it
+(slots divided by live tasks, recomputed whenever a notebook finishes), so a task submitted while
+another is running still makes progress instead of queueing behind it until its own budget expires. A notebook's own budget starts when its retrieval actually begins, not when it is queued, while
+the phase budget is absolute. Receipt order and evidence selection follow the resolved participant order,
+never completion order, so the same question over the same notebooks yields the same answer.
 SQL execution and connection-pool acquisition use remaining deadlines. Database transport failures can
 outlast the server-side SQL timeout; this is not a hard wall-clock guarantee under broken network I/O.
 Native ANN calls cannot be forcibly
 interrupted; overdue results are discarded before hydration/synthesis. Shared query rewriting and one query
 embedding run before this phase under existing model-service timeouts; these are not whole-answer deadlines.
 Global retrieval never cold-loads shared scale indexes, ANN handles, deltas or whole-library vector matrices.
-It uses already-warm ANN when the frozen source scope covers its source catalog. Small notebooks can also
+It uses already-warm ANN when the index's source catalog is covered by the frozen scope, and — unlike the
+in-notebook lane below — also when that catalog is absent, through verified over-fetch. The chunk index is
+built from every chunk of a notebook, so it also holds Memory/Knowhow projection chunks that the global
+ceiling excludes by source type; a plain Top-K can therefore consist entirely of rows the ceiling will
+discard. Before trusting a catalog-less neighbourhood the lane reads source identity only for its hits: if
+none were dropped the result is exact, and otherwise it re-queries with a geometrically wider k, at most
+twice. Still short of the recall target with labels left unexamined, the notebook falls back to the exact
+paged lane, which applies the ceiling inside SQL; over that lane's size rail it keeps what survived, reports
+`degraded_notebook_ids`, and leaves a content-free receipt. Reading the whole index and finding fewer
+admitted chunks than the target is not starvation — those survivors are the complete admitted set.
+A notebook counts as semantically searched only when this lane contributed surviving candidates, never
+merely because a vector query ran. Authority is unchanged throughout: hydrated candidates outside the frozen
+list are still removed before scoring. Small notebooks can also
 recall semantically by streaming stored vectors in bounded batches, retaining only top candidates and never
-populating the shared matrix cache. `GLOBAL_ASK_SMALL_NOTEBOOK_MAX_CHUNKS` defaults to 20000
+populating the shared matrix cache. The bounded size check runs on the first batch and once more after the
+scan; a notebook that grew past the ceiling meanwhile publishes no semantic results at all.
+`GLOBAL_ASK_SMALL_NOTEBOOK_MAX_CHUNKS` defaults to 20000
 (minimum 0; 0 disables this arm); a positive `CHUNK_BRUTEFORCE_MAX_CHUNKS` further lowers this ceiling,
 while 0 never permits an unbounded scan. Source filtering precedes scoring and reads share the notebook deadline.
 Where semantic recall is unavailable, bounded lexical recall plus candidate-only vector scoring is disclosed
@@ -269,7 +303,7 @@ The browser's `kgAvailable` predicate is likewise **per-selection**, not per-mou
 
 **`kgAvailable` no longer decides whether built-in reasoning can be submitted.** A no-graph notebook now reaches the same evidence budget as chunk-native Q&A on source passages (see [Collection enumeration tools → Notebooks without a knowledge graph](#collection-enumeration-tools)), so the server registry sets built-in `reasoning`'s `requires_kg` to `false`, and the frontend's built-in `ask-modes.ts` table mirrors it; the `requiresKg(mode) && !kgAvailable` submission gate therefore never fires for built-in `reasoning`. `kgAvailable` now only shapes the composer's hint copy and the "will borrow reference library" wording — it still blocks **extension engines** (plugin modes) that declare `requires_kg=true`, since that is the plugin's own hard prerequisite and is unaffected by this change. The "no graph" hint still splits into two causes with different remedies: a graph-bearing library is mounted but unchecked → “已整理知识图谱的参考库这次都没勾选，深入分析将只用原文检索；在来源面板重新勾选可增强”, deliberately offering **no** build button (the fix is re-checking the box, not spending on a build); no graph-bearing library is mounted at all → “该笔记本尚无知识图谱，深入分析将只用原文检索；整理知识图谱可增强问答效果”, with the build button kept and clickable. Collapsing the two would push a user toward a whole-notebook graph build (real model spend) when re-checking one box is the fix.
 
-This top-level checkbox scope is a hard active-notebook ceiling and the *only* source of retrieval scope. The model never proposes, narrows, or widens it: the corpus-blind intent planner emits no source identities, and no Agent action inside a run can change which sources are in scope. An all-selected include snapshot keeps normal graph channels, privately snapshots current hidden Memory/Knowhow participants, and freezes source-partitioned candidates and result checks. A visible-source or hidden-participant addition/deletion after validation disables unsafe graph channels before I/O; source-partitioned retrieval continues against the frozen ceiling, which is pushed down for every frozen scope — a drift only changes which lane those producers route to, never whether the ceiling binds them. Mounted reference libraries remain independent participants. For indexed chunk/element retrieval, the scale artifact stores compact row-aligned source codes; HNSW applies the allowed-source predicate before Top-K, and hydrated results are checked again before scoring/synthesis. An older published index without this optional sidecar remains loadable but uses bounded source-filtered FTS until a rebuild or delta fold writes the map. After KG, PPR, and exact deterministic seeds, a completely empty evidence state performs one bounded raw-element search before asking the reflect model whether evidence is sufficient. Channels whose persisted artifacts cannot safely apply the active-source predicate before traversal (whole-graph/PPR/relation expansion, exact-section lookup, and whole-corpus report profiling) are skipped for the active notebook during a narrowed checkbox run or participant-universe drift; post-filtering alone is not authority because excluded candidates can consume Top-K or supply hidden graph premises. Direct source-bounded chunk, element, and KG retrieval remains available, and base-backed KG seeds can still supply base chunks without traversing the combined graph.
+This top-level checkbox scope is a hard active-notebook ceiling and the *only* source of retrieval scope. The model never proposes, narrows, or widens it: the corpus-blind intent planner emits no source identities, and no Agent action inside a run can change which sources are in scope. An all-selected include snapshot keeps normal graph channels, privately snapshots current hidden Memory/Knowhow participants, and freezes source-partitioned candidates and result checks. A visible-source or hidden-participant addition/deletion after validation disables unsafe graph channels before I/O; source-partitioned retrieval continues against the frozen ceiling, which is pushed down for every frozen scope — a drift only changes which lane those producers route to, never whether the ceiling binds them. Mounted reference libraries remain independent participants. For indexed chunk/element retrieval, the scale artifact stores compact row-aligned source codes; HNSW applies the allowed-source predicate before Top-K, and hydrated results are checked again before scoring/synthesis. An older published index without this optional sidecar remains loadable but uses bounded source-filtered FTS until a rebuild or delta fold writes the map — that fallback is specific to THIS lane, where a checkbox selection can genuinely narrow the scope to a fraction of the index. Global Ask never narrows by source, so it handles the same index with verified over-fetch instead (see [Global Ask](#global-ask)). After KG, PPR, and exact deterministic seeds, a completely empty evidence state performs one bounded raw-element search before asking the reflect model whether evidence is sufficient. Channels whose persisted artifacts cannot safely apply the active-source predicate before traversal (whole-graph/PPR/relation expansion, exact-section lookup, and whole-corpus report profiling) are skipped for the active notebook during a narrowed checkbox run or participant-universe drift; post-filtering alone is not authority because excluded candidates can consume Top-K or supply hidden graph premises. Direct source-bounded chunk, element, and KG retrieval remains available, and base-backed KG seeds can still supply base chunks without traversing the combined graph.
 
 The internal `SourceSubgraphSnapshot` is the read-side preparation for replacing those active-notebook skips, but it is now consumed only through the shared, quality-gated Ask and Deep Report activation seam. It opens one repeatable read, resolves only the frozen visible-source ids, and applies source predicates before every `LIMIT`; SQLite pins source-first access for object, chunk, and cluster reads so excluded sources are not traversed before filtering. A relation is admitted only when its own source and both endpoint objects belong to the selected source set. Object-to-chunk memberships come only from current-generation source facts, normalized evidence-element bindings, and selected chunks—never the whole-notebook entity/chunk map. Cache identity uses the O(1) notebook KG/cluster mutation sequences plus bounded source/run/backfill state; sanctioned live projection writes advance the KG sequence and historical repair advances its source ledger. Cache hits therefore do not recount facts, chunks, or evidence bindings. Current-generation live-fact completeness is revalidated from the already bounded fact window while a snapshot is built. Missing reverse-index state, source deletion, generation drift, or an unsupported fact projection version fails closed before dependent graph use; crossing a row rail disables only the capabilities that depend on that incomplete leg. An incomplete live or backfilled projection may still supply names and evidence from the source-local rows it did prove, but fact-completeness and PPR/membership capabilities stay disabled. Cached payload and evidence trees are recursively immutable. Whole-scope, off, and shadow runs preserve the historical response, prompt, trace, candidate-order, evidence-budget, and citation contracts; only an attested active run may append source-local G after B.
 

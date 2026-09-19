@@ -275,8 +275,9 @@ Global Ask calls `ask_global` directly, without `select_notebook`. For example:
 ```
 
 `all` intersects the token allowlist with its owner's current read access; it never means every notebook
-in the deployment. To choose a subset, page through `list_notebooks`, then supply
-`notebook_scope={"mode":"include","notebook_ids":[...]}`; an empty list restores all.
+in the deployment. A question reaches at most 8 notebooks: if `all` resolves to more than 8 the call is
+rejected with 422 (never truncated), so page through `list_notebooks` and supply
+`notebook_scope={"mode":"include","notebook_ids":[...]}` with 8 or fewer ids; an empty list restores all.
 Use the returned `job_id` with `get_global_ask` for status and results; follow the pagination metadata
 to retrieve long answers and citations. Also follow `next_coverage_offset` as `coverage_offset` to read
 every skipped/degraded notebook receipt; coverage counts always describe the complete task.

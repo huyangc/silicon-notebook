@@ -851,10 +851,17 @@ relevance value; `QUERY_REWRITE_ENABLED` controls pre-answer query rewriting/exp
 
 Global Ask uses `GLOBAL_ASK_CANDIDATE_LIMIT` for merged cross-notebook evidence and
 `GLOBAL_ASK_HISTORY_TURNS` for admitted completed conversational turns.
-`GLOBAL_ASK_MAX_NOTEBOOKS`, `GLOBAL_ASK_MAX_CONCURRENT`, `GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS`,
+`GLOBAL_ASK_MAX_NOTEBOOKS`, `GLOBAL_ASK_MAX_CONCURRENT`, `GLOBAL_ASK_RETRIEVAL_CONCURRENCY`,
+`GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS`,
 `GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS` and `GLOBAL_ASK_SHUTDOWN_TIMEOUT_SECONDS` control explicit
-scope admission, process capacity and retrieval/shutdown budgets. Size the PostgreSQL pool with the global
-Ask concurrency included. `GLOBAL_ASK_SMALL_NOTEBOOK_MAX_CHUNKS` bounds transient streamed semantic
+scope admission, process capacity, cross-notebook retrieval parallelism and retrieval/shutdown budgets.
+`GLOBAL_ASK_MAX_NOTEBOOKS` is capped at 8 by the product contract and will not validate above it.
+**Upgrade note:** a deployment that previously set it above 8 (the old default was 32) now fails settings
+validation and the backend will not start. Remove the variable or lower it to 8 or less before upgrading.
+Size the PostgreSQL pool with BOTH global Ask knobs included: each job thread holds a connection for its
+own authority and progress work, and the single process-wide retrieval pool holds one more per busy slot,
+so the startup warning counts `GLOBAL_ASK_MAX_CONCURRENT + GLOBAL_ASK_RETRIEVAL_CONCURRENCY`.
+`GLOBAL_ASK_SMALL_NOTEBOOK_MAX_CHUNKS` bounds transient streamed semantic
 recall for small notebooks without evicting warm shared indexes. `GLOBAL_ASK_MIN_RELEVANCE` and
 `GLOBAL_ASK_RELATIVE_RELEVANCE` filter weak candidates before reserving peer evidence; tune them against
 representative questions. Libraries without semantic recall use disclosed lexical fallback.

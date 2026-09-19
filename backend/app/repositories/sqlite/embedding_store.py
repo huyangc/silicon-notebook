@@ -125,12 +125,19 @@ class EmbeddingStore:
 
     @staticmethod
     def global_small_chunk_vector_page(db, notebook_id: str, *, allowed_source_ids,
-                                       max_chunks: int, after: str, page_size: int):
+                                       max_chunks: int, after: str, page_size: int,
+                                       size_gate: bool = True):
         """Bound library size before returning any source-scoped vector bytes.
 
-        The capped count and page share a statement snapshot. A notebook that
-        grows beyond admission between pages returns no vectors on its next
-        page. No chunk text or full-library matrix crosses this boundary.
+        Mirrors the PostgreSQL definition. The capped count and page share a
+        statement snapshot. No chunk text or full-library matrix crosses this
+        boundary.
+
+        ``size_gate=False`` returns the page WITHOUT evaluating admission and
+        reports ``True`` to mean "no gate was asked for" -- never "this library
+        was admitted". It exists so a long scan pays the bounded aggregate on
+        its first and closing snapshots instead of on every page; a caller that
+        does not re-admit the library before publishing must not pass it.
         """
         if max_chunks <= 0 or page_size <= 0:
             return False, []
@@ -139,6 +146,15 @@ class EmbeddingStore:
         if allowed_source_ids is not None:
             source_clause = " AND c.source_id IN (SELECT value FROM json_each(?))"
             source_params = (json.dumps(list(allowed_source_ids)),)
+        if not size_gate:
+            rows = db.execute(
+                "SELECT c.id AS vid,e.vector FROM chunks c "
+                "JOIN chunk_embeddings e ON e.chunk_id=c.id AND e.notebook_id=c.notebook_id "
+                "WHERE c.notebook_id=? AND c.id>?" + source_clause +
+                " ORDER BY c.id LIMIT ?",
+                (notebook_id, after, *source_params, page_size),
+            ).fetchall()
+            return True, [{"vid": row["vid"], "vector": row["vector"]} for row in rows]
         rows = db.execute(
             "WITH bounded_chunks AS (SELECT id FROM chunks WHERE notebook_id=? LIMIT ?), "
             "library_size AS (SELECT COUNT(*) AS chunk_count FROM bounded_chunks), "

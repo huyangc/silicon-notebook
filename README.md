@@ -12,7 +12,7 @@ The project is a local-team beta built with FastAPI and Next.js. PostgreSQL is t
 - Multi-turn Ask with source selection, clickable evidence, conversation history, and `chunk` or `reasoning` retrieval.
 - Knowledge extraction and governance for concepts, claims, formulas, procedures, relations, and a unified graph.
 - Private Memory, structured knowhow, deep reports, reference libraries, and controlled notebook/report sharing.
-- Global Ask at `/ask` searches all readable notebooks by default, or an explicit selection, with independent conversations and cross-notebook citations; the same workflow is available through MCP.
+- Global Ask at `/ask` searches up to 8 notebooks per question — all readable ones when there are no more than 8, otherwise the 8 with the most sources are pre-selected and the selection can be changed — with independent conversations and cross-notebook citations; the same workflow is available through MCP.
 - External Agent access through authenticated MCP tools, including scoped Ask, source, Memory, and knowhow workflows.
 - A startup-frozen Extension SDK for deployment-owned backend, UI, Ask-engine, parser, indexing, exporter, and observer contributions.
 
