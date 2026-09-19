@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 from pydantic import ValidationError
@@ -20,6 +21,10 @@ from app.services.retrieval import (
 from app.services.kg.follow_chain import ChainHop, FollowChainResult, InferredChain
 from app.services.retrieval_service import RetrievalService
 from app.services.source_scope import (
+    ActiveSourceScope,
+    base_scope_restricted,
+    current_base_scope_payload,
+    current_source_scope_payload,
     filter_retrieval_items,
     scoped_allowed_source_ids,
     scoped_conversation_history,
@@ -1564,3 +1569,266 @@ def test_both_adapters_filter_memory_ownership_inside_the_single_query():
         assert (
             isinstance(call.args[1], ast.Tuple) and len(call.args[1].elts) == 2
         ), f"{store.__module__}: notebook 与 owner 两个参数都必须绑进这条语句"
+
+
+# --- 逐库来源天花板(``notebook_source_ceilings``)---------------------------
+#
+# 这一组钉的是 PR-C 给 ``ActiveSourceScope`` 加的第三种天花板形状:对**任意**
+# notebook(含名义 active)各冻一份来源清单。它是「冻结」不是「收窄」,所以
+# 判据分成两半,任何一半站到另一半那边都是 bug:
+#   * 问「有没有天花板在绑」的闸必须把它算进去(否则 fail-open);
+#   * 问「用户是不是真的收窄了」的闸必须不算它(否则全局问答的全选会把历史、
+#     PPR、私有 Memory、社区报告一起关掉)。
+# 缺席时逐字回到今天的行为,这一点由本文件上方既有用例零改动全绿来证明。
+
+
+def test_peer_ceiling_binds_before_limit():
+    """参考库的天花板必须物化成清单交给产出方,而不是等结果侧再过滤。
+
+    ``scoped_allowed_source_ids`` 的返回值就是产出方 ``LIMIT`` 之前的谓词
+    (见该函数 docstring 里「后过滤不算权威,越界候选会吃掉 Top-K」那一段),
+    所以带天花板的库必须拿到排序后的物化清单,而不是 ``None``。
+
+    **变异锚点**:让 ② 分支返回 ``allowed``(即透传)→ 第一条断言从
+    ``("b1", "b2")`` 变成 ``None``。
+    """
+    with source_scope_context("nbA", None, None, {"nbB": frozenset({"b2", "b1"})}):
+        assert scoped_allowed_source_ids("nbB", None) == ("b1", "b2"), (
+            "带天花板的参考库必须拿到物化、确定序的清单"
+        )
+        # 对照:没有天花板的库(这里正好是名义 active)行为逐字不变 ——
+        # 本地维度未提交,所以仍然是「无天花板」的 None。
+        assert scoped_allowed_source_ids("nbA") is None
+        assert scoped_allowed_source_ids("nbC") is None
+
+
+def test_peer_ceiling_intersects_explicit():
+    """显式清单必须取交集,绝不透传,且保持调用方给的顺序。
+
+    联邦 chunk 腿与 KG 反查腿传下来的是**实时枚举**的可见来源
+    (``chunk_federation._peer_visible_sources``),实时 ∩ 冻结才是冻结宇宙;
+    原样透传等于把冻结之后新增的来源放进一次已经在飞的 run。
+
+    顺序保持的是 ``allowed`` 的顺序而不是排序:那个顺序属于产出方,不属于
+    这里。
+
+    **变异锚点**:把交集写成 ``tuple(sorted(ceiling & set(allowed)))`` →
+    顺序断言报红。
+    """
+    with source_scope_context("nbA", None, None, {"nbB": frozenset({"b1", "b3"})}):
+        assert scoped_allowed_source_ids(
+            "nbB", ["b3", "b1", "drifted-in"]
+        ) == ("b3", "b1"), "交集必须丢掉天花板之外的 id,并保持调用方的顺序"
+        assert scoped_allowed_source_ids("nbB", ["drifted-in"]) == ()
+
+
+def test_library_exclusion_still_wins_over_peer_ceiling():
+    """① 库排除永远在 ② 逐库天花板之前。
+
+    两个分支的返回形状语义相反:库排除返回 ``()``(显式拒绝,SQL 侧在 LIMIT
+    前就空),逐库天花板返回一份非空清单(这个库照常参与,只是被冻住)。把 ②
+    抬到 ① 之上,就把「这个库整体不参与」变成「这个库按自己的清单参与」——
+    被取消勾选的参考库原地复活。
+
+    **变异锚点**:把 ② 那一段挪到 ``covers_notebook`` 判定之前 → 这里三条
+    断言全红。
+    """
+    base = BaseNotebookScope(
+        mode="include", notebook_ids=["nbB"], narrowed=True
+    )
+    with source_scope_context(
+        "nbA", None, base, {"nbB": frozenset({"b1"}), "nbC": frozenset({"c1"})}
+    ):
+        assert scoped_allowed_source_ids("nbC") == (), (
+            "被库维度排除的参考库是显式拒绝,不得因为它有逐库天花板而复活"
+        )
+        assert scoped_allowed_source_ids("nbC", ["c1"]) == ()
+        assert source_allowed("nbC", "c1") is False
+        # 对照:仍然勾选着的那个库,天花板照常绑定。
+        assert scoped_allowed_source_ids("nbB") == ("b1",)
+        assert source_allowed("nbB", "b1") is True
+
+
+def test_active_double_ceiling_is_rejected_at_construction():
+    """名义 active 同时被两套规则覆盖 → 构造期 ``ValueError``。
+
+    本地 ``mode``/``source_ids`` 与逐库天花板都能给同一个库一个答案,而两个
+    答案没有正确的优先级可言(谁在上面都能举出反例)。与其让每个读点各自挑
+    一个,不如让这种对象根本不存在。
+    """
+    with pytest.raises(ValueError):
+        ActiveSourceScope(
+            notebook_id="nbA",
+            mode="include",
+            source_ids=frozenset({"s1"}),
+            notebook_source_ceilings={"nbA": frozenset({"s1"})},
+        )
+    # ``exclude`` + 非空清单同样是一条本地天花板,一样要拒。
+    with pytest.raises(ValueError):
+        ActiveSourceScope(
+            notebook_id="nbA",
+            mode="exclude",
+            source_ids=frozenset({"s1"}),
+            notebook_source_ceilings={"nbA": frozenset()},
+        )
+    # 经上下文管理器提交也必须在 ``__enter__`` 当场炸,不能带着歧义进 run。
+    with pytest.raises(ValueError):
+        with source_scope_context(
+            "nbA",
+            SourceScope(mode="include", source_ids=["s1"]),
+            None,
+            {"nbA": frozenset({"s1"})},
+        ):
+            pass
+    # 两个合法组合:天花板只落在别的库上;或者名义 active 只有天花板、没有
+    # 本地维度。
+    ActiveSourceScope(
+        notebook_id="nbA",
+        mode="include",
+        source_ids=frozenset({"s1"}),
+        notebook_source_ceilings={"nbB": frozenset({"b1"})},
+    )
+    ActiveSourceScope(
+        notebook_id="nbA",
+        mode="exclude",
+        source_ids=frozenset(),
+        notebook_source_ceilings={"nbA": frozenset({"s1"})},
+    )
+
+
+def test_peer_ceiling_never_enters_persisted_payload():
+    """两份可再持久化的 payload 里不得出现任何逐库天花板的痕迹。
+
+    ``report_engine.prepare_intent`` 会把这两份 payload 写进报告的
+    ``understanding`` 合同,确认时再由 ``_validate_source_scope`` 重新冻结。
+    逐库天花板描述的是**别的库**,写进去就等于给一份单库报告冻上另一个库的
+    来源清单。
+
+    **变异锚点**:在任一 payload 里加上 ceilings 键 → 这里报红。
+    """
+    peer_only = {"nbA": frozenset({"s1"}), "nbB": frozenset({"b1"})}
+    with source_scope_context("nbA", None, None, peer_only):
+        assert current_source_scope_payload() is None, (
+            "只有逐库天花板的 run 未提交任何维度,必须与无 scope 返回同一个值"
+        )
+        assert current_base_scope_payload() is None
+
+    local = SourceScope(mode="include", source_ids=["s1"])
+    base = BaseNotebookScope(mode="include", notebook_ids=["nbB"])
+    with source_scope_context("nbA", local, base):
+        baseline = (current_source_scope_payload(), current_base_scope_payload())
+    with source_scope_context("nbA", local, base, {"nbB": frozenset({"b1"})}):
+        with_ceilings = (
+            current_source_scope_payload(), current_base_scope_payload()
+        )
+    assert with_ceilings == baseline, (
+        "提交了两个维度时,逐库天花板也不得改变 payload 的任何一个字节"
+    )
+    assert "b1" not in json.dumps(with_ceilings)
+
+
+def test_filter_retrieval_items_not_short_circuited_by_peer_only_scope():
+    """只有逐库天花板时,结果边界仍然要逐项走完。
+
+    这条短路原本问的是「本地或库维度有没有天花板」。联邦 run 两个维度都没
+    提交,于是整段循环被跳过、越界 chunk 全部存活 —— 在恰恰是产出方天花板
+    fail-closed 后盾的那条路上 fail-open。
+
+    **变异锚点**:把短路条件里的 ``scope.peer_ceiling_active`` 去掉 →
+    ``cb-out`` 存活,第一条断言报红。
+    """
+    chunks = [
+        RetrievedChunk("cb-in", "b1", "t", "", "x", notebook_id="nbB"),
+        RetrievedChunk("cb-out", "b9", "t", "", "x", notebook_id="nbB"),
+        RetrievedChunk("ca", "s1", "t", "", "x"),
+    ]
+    with source_scope_context("nbA", None, None, {"nbB": frozenset({"b1"})}):
+        assert [
+            row.chunk_id
+            for row in filter_retrieval_items("nbA", "chunk", chunks)
+        ] == ["cb-in", "ca"], (
+            "越界的参考库 chunk 必须被剔除;没有天花板的名义 active 不受影响"
+        )
+
+    # 名义 active 自己的天花板把证据清空时,知识节点必须整条丢掉 —— 与本地
+    # 天花板清空它时同款。留着一个没有证据的节点等于把内容送进提示词却不可
+    # 追溯(``evidence_context.knowledge_context`` 会自己重查定义)。
+    #
+    # **变异锚点**:把 ``active_ceiling_binds`` 改回 ``scope.ceiling_active``
+    # → ``ko-s9`` 带着空证据存活。
+    with source_scope_context("nbA", None, None, {"nbA": frozenset({"s1"})}):
+        kept = filter_retrieval_items("nbA", "knowledge", [
+            _knowledge("s1", notebook_id="nbA"),
+            _knowledge("s9", notebook_id="nbA"),
+        ])
+        assert [row.object_id for row in kept] == ["ko-s1"]
+
+
+def test_drift_probe_unaffected_by_peer_ceilings():
+    """漂移探针对 peer 恒 True,对 active 逐字不变。
+
+    探针要是被逐库天花板带偏,``_unsafe_source_scope_restricted`` 就会被永久
+    钉成 True,把词法臂整段路由到「真收窄」那条车道上 —— 而联邦 run 其实什么
+    都没收窄。
+    """
+    with source_scope_context("nbA", None, None, {"nbB": frozenset({"b1"})}):
+        assert source_scope_visible_universe_matches("nbB", ["anything"]) is True
+        # 名义 active:``narrowed is None``(本地维度未提交),探针照常恒 True。
+        assert source_scope_visible_universe_matches("nbA", ["anything"]) is True
+
+    frozen = SourceScope(mode="include", source_ids=["s1"], narrowed=False)
+    for ceilings in (None, {"nbB": frozenset({"b1"})}):
+        with source_scope_context("nbA", frozen, None, ceilings):
+            assert source_scope_visible_universe_matches("nbA", ["s1"], []) is True
+            assert source_scope_visible_universe_matches(
+                "nbA", ["s1", "s2"], []
+            ) is False, f"ceilings={ceilings!r} 不得改变 active 的漂移判定"
+            assert source_scope_visible_universe_matches("nbB", ["s1", "s2"]) is True
+
+
+def test_ceiling_on_the_nominal_active_without_local_scope():
+    """名义 active 也只是参与集里的一员:它自己的天花板走同一条 ② 分支。
+
+    全局问答不存在「你自己的库待遇不一样」这个暗坑 —— 名义 active 只是个
+    命名锚点,它的来源清单与其余参与库一样被冻住。
+    """
+    with source_scope_context("nbA", None, None, {"nbA": frozenset({"s2", "s1"})}):
+        assert scoped_allowed_source_ids("nbA", None) == ("s1", "s2")
+        assert scoped_allowed_source_ids("nbA", ["s2", "drifted-in"]) == ("s2",)
+        assert source_allowed("nbA", "s1") is True
+        assert source_allowed("nbA", "drifted-in") is False
+        # 未被天花板点名的库仍然「无天花板」,不因为别人被冻住而受牵连。
+        assert scoped_allowed_source_ids("nbB", ["b1"]) == ("b1",)
+        assert source_allowed("nbB", "b1") is True
+
+
+def test_empty_ceiling_denies_everything():
+    """``frozenset()`` 是「冻结到零个来源」,不是「没有天花板」。
+
+    ``None`` 与 ``frozenset()`` 必须是两个答案:前者返回 ``allowed``(可能是
+    ``None`` = 无限制),后者返回 ``()`` = 显式拒绝。下游按 ``is not None``
+    分支,混掉这两个就是把一个被冻空的库放成无限制。
+    """
+    with source_scope_context("nbA", None, None, {"nbB": frozenset()}):
+        empty = scoped_allowed_source_ids("nbB")
+        assert empty == () and empty is not None, (
+            "冻结到零个来源必须是空元组,不能退化成「无限制」的 None"
+        )
+        assert scoped_allowed_source_ids("nbB", ["b1"]) == ()
+        assert source_allowed("nbB", "b1") is False
+        assert source_allowed("nbB", "") is False
+
+
+def test_peer_only_scope_is_not_narrowing():
+    """逐库天花板是冻结,不是收窄:两个 ``restricted`` 都必须是 False。
+
+    全局问答的「全选」不许关掉任何通道。历史尤其要命:
+    ``scoped_conversation_history`` 一旦判它收窄,每一轮全局问答都会把上一轮
+    的答案清空,多轮对话当场失效。
+    """
+    with source_scope_context(
+        "nbA", None, None, {"nbA": frozenset({"s1"}), "nbB": frozenset({"b1"})}
+    ):
+        assert source_scope_restricted() is False
+        assert base_scope_restricted() is False
+        assert scoped_conversation_history("上一轮的答案") == "上一轮的答案"

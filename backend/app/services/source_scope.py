@@ -36,6 +36,16 @@ keyed on narrowing -- the lexical corpus-language gate above all -- must keep
 answering "not narrowed".  ``retrieval_candidates
 ._lexical_gate_source_scoped`` is where that second question is asked.
 
+A THIRD shape rides alongside those two without belonging to either:
+``notebook_source_ceilings`` freezes a source id list PER NOTEBOOK, for any
+participant including the nominal active one.  It is a CEILING in exactly the
+sense of question 1 above and is NEVER narrowing: a federated run that selected
+every library and every source still freezes each participant's visible source
+list, precisely so a concurrent upload cannot widen an in-flight run.  It must
+therefore be counted wherever a gate asks "is any ceiling in force?" and must
+NOT be counted where a gate asks "did the user shrink this run?" -- the same
+split the two dimensions above already live by.
+
 ⚠ ``source_scope_restricted()`` reads the LOCAL dimension only, on purpose.  It
 gates the ACTIVE notebook's own non-source-partitionable channels (PPR, private
 Memory, community reports, weak-support relations, exact-section lookup, the
@@ -55,6 +65,36 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import Any, Iterable, Iterator
+
+
+# The STORED shape of ``ActiveSourceScope.notebook_source_ceilings``: pairs of
+# ``(notebook_id, frozen source ids)``, sorted by notebook id.
+NotebookSourceCeilings = tuple[tuple[str, frozenset[str]], ...]
+
+
+def _ceiling_pairs(value: Any) -> NotebookSourceCeilings:
+    """Normalize a per-notebook ceiling argument into the canonical stored shape.
+
+    Accepts the ergonomic ``Mapping`` form callers write as well as an already
+    normalized sequence of pairs, and always returns pairs sorted by notebook
+    id, so two scopes built from equal mappings compare -- and hash -- equal.
+
+    Sorting is keyed on the notebook id ALONE.  Ordering the pairs as whole
+    tuples would fall through to comparing two ``frozenset``s on a key
+    collision, and ``frozenset.__lt__`` is the SUBSET predicate, not a total
+    order: ``sorted`` would then produce an arbitrary, input-order-dependent
+    result instead of raising.
+    """
+    if not value:
+        return ()
+    items = value.items() if hasattr(value, "items") else value
+    return tuple(sorted(
+        (
+            (str(notebook_id), frozenset(str(sid) for sid in source_ids))
+            for notebook_id, source_ids in items
+        ),
+        key=lambda pair: pair[0],
+    ))
 
 
 @dataclass(frozen=True)
@@ -102,6 +142,77 @@ class ActiveSourceScope:
     # for a user who only unchecked a reference library.
     source_provided: bool = True
     base_provided: bool = True
+    # PER-NOTEBOOK CEILING: a hard include list for ANY notebook id, the
+    # nominal ``self.notebook_id`` included.  Absent (the default) means every
+    # gate below behaves exactly as it did before this field existed, which is
+    # what keeps every single-notebook run byte-identical.
+    #
+    # It exists for the federated/global run, where "the active notebook" is a
+    # naming anchor with no retrieval privilege and each participant carries
+    # its OWN frozen visible-source list.  ``mode``/``source_ids`` cannot
+    # express that: they are singular and bind ``self.notebook_id`` only.
+    #
+    # STORED AS SORTED PAIRS, NOT A MAPPING, although ``__post_init__`` accepts
+    # a Mapping so callers may write the obvious thing.  This dataclass is
+    # ``frozen=True`` with the default ``eq=True``, so Python generates
+    # ``__hash__`` from EVERY field; a ``dict`` field would make ``hash(scope)``
+    # raise ``TypeError`` for scoped runs only.  No caller hashes a scope
+    # today, which is exactly why the failure would surface later, in whichever
+    # future cache key first tries -- and only for a federated run.  Read it
+    # through ``source_ceiling_for``.
+    notebook_source_ceilings: NotebookSourceCeilings = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "notebook_source_ceilings",
+            _ceiling_pairs(self.notebook_source_ceilings),
+        )
+        # Reject the ambiguous combination at CONSTRUCTION time: with a local
+        # mode/source_ids ceiling AND a per-notebook ceiling both covering the
+        # nominal active notebook, two rules answer the same question about the
+        # same library, and every reader below would have to pick one.  There
+        # is no correct pick, so there must be no such object.
+        if (
+            self.ceiling_active
+            and self.source_ceiling_for(self.notebook_id) is not None
+        ):
+            raise ValueError(
+                "notebook_source_ceilings must not cover the active notebook "
+                "while the local mode/source_ids ceiling also binds it"
+            )
+
+    def source_ceiling_for(self, notebook_id: str) -> frozenset[str] | None:
+        """This notebook's frozen per-notebook ceiling, or None when it has none.
+
+        ``None`` and ``frozenset()`` are DIFFERENT answers and every caller
+        must branch on ``is not None``: the first means "no per-notebook
+        ceiling binds here", the second means "this notebook is frozen to zero
+        sources" -- an explicit deny.
+
+        A linear scan rather than a dict: the list is one entry per participant
+        library (bounded by the federation participant cap), and the absent
+        case -- every single-notebook run -- returns on the emptiness check
+        without iterating at all.
+        """
+        if not self.notebook_source_ceilings:
+            return None
+        for candidate_id, ceiling in self.notebook_source_ceilings:
+            if candidate_id == notebook_id:
+                return ceiling
+        return None
+
+    @property
+    def peer_ceiling_active(self) -> bool:
+        """Whether ANY per-notebook ceiling binds on this run.
+
+        The FILTERING question (dimension 1) for the per-notebook shape, and
+        deliberately without a ``restricted`` counterpart: freezing each
+        participant's current visible sources is not a narrowing, so it must
+        never switch a channel off.  ``filter_retrieval_items``' short-circuit
+        is where leaving it out would fail open.
+        """
+        return bool(self.notebook_source_ceilings)
 
     @property
     def ceiling_active(self) -> bool:
@@ -133,6 +244,12 @@ class ActiveSourceScope:
         notebook's own PPR/graph/private-Memory/community/exact-lookup
         channels, which have nothing to do with which borrowed libraries this
         run may read.
+
+        ⛔ ``peer_ceiling_active`` is NOT consulted, here or in
+        ``base_restricted``.  A per-notebook ceiling freezes what each
+        participant may contribute; it never expresses that the user shrank
+        anything, and a federated run that selected everything must not lose
+        its history, PPR, Memory or community reports to a bookkeeping freeze.
         """
         if self.narrowed is not None:
             return self.narrowed
@@ -175,6 +292,15 @@ class ActiveSourceScope:
     def allows(self, notebook_id: str, source_id: str) -> bool:
         if not self.covers_notebook(notebook_id):
             return False
+        # Same branch order as ``scoped_allowed_source_ids``, for the same
+        # reasons and under the same prohibition on reordering: library
+        # exclusion first, the per-notebook ceiling second, the two historical
+        # local-dimension branches last.  A blank ``notebook_id`` (callers' "the
+        # active notebook" stand-in) never matches a per-notebook key, so it
+        # keeps its historical answer.
+        ceiling = self.source_ceiling_for(notebook_id)
+        if ceiling is not None:
+            return source_id in ceiling
         # Mounted base libraries are independent participants and are never
         # governed by the active notebook's source checkboxes.
         if notebook_id and notebook_id != self.notebook_id:
@@ -227,11 +353,29 @@ def _narrowed_flag(raw: dict[str, Any] | None) -> bool | None:
 
 @contextmanager
 def source_scope_context(
-    notebook_id: str, scope: Any, base_scope: Any = None
+    notebook_id: str,
+    scope: Any,
+    base_scope: Any = None,
+    notebook_source_ceilings: Any = None,
 ) -> Iterator[None]:
+    """Install this run's retrieval scope, if it has one at all.
+
+    ``notebook_source_ceilings`` is the third, independently optional input: a
+    ``{notebook_id: source ids}`` mapping (see ``ActiveSourceScope``).  Supplying
+    ONLY it builds a scope whose LOCAL and LIBRARY dimensions are both
+    UNSUBMITTED -- ``mode="exclude"``/``source_ids=frozenset()`` with
+    ``narrowed=None`` and ``source_provided=False``, and the mirror for the
+    library half -- which is the exact representation a base-only run already
+    produces today.  That matters beyond tidiness: ``narrowed=None`` keeps the
+    drift probe returning True, ``ceiling_active``/``restricted`` stay False, and
+    both persistable payloads keep returning ``None``.
+
+    With all three absent no scope is installed at all, exactly as before.
+    """
     raw = _scope_dict(scope)
     base_raw = _scope_dict(base_scope)
-    if raw is None and base_raw is None:
+    ceilings = _ceiling_pairs(notebook_source_ceilings)
+    if raw is None and base_raw is None and not ceilings:
         yield
         return
     current = ActiveSourceScope(
@@ -255,6 +399,7 @@ def source_scope_context(
         base_narrowed=_narrowed_flag(base_raw),
         source_provided=raw is not None,
         base_provided=base_raw is not None,
+        notebook_source_ceilings=ceilings,
     )
     token = _CURRENT_SOURCE_SCOPE.set(current)
     try:
@@ -276,6 +421,14 @@ def current_source_scope_payload() -> dict[str, Any] | None:
     ``exclude:[]`` would be re-frozen on confirm into
     ``include:[every visible source]`` -- freezing a local ceiling onto a
     report whose author only unchecked a reference library.
+
+    ⛔ ``notebook_source_ceilings`` is NEVER serialized here, and neither is any
+    derivative of it.  The same re-persist/re-freeze path is the reason: a
+    per-notebook ceiling describes OTHER libraries, so writing it into a report's
+    ``understanding`` contract would freeze one library's source list onto a
+    report scoped to a different one -- and a peer-only run reaches this function
+    with ``source_provided=False``, so it must return exactly what an unscoped
+    run returns: ``None``.
     """
     scope = current_source_scope()
     if scope is None or not scope.source_provided:
@@ -299,6 +452,9 @@ def current_base_scope_payload() -> dict[str, Any] | None:
     persisting a synthesised ``exclude:[]`` would be re-frozen on confirm into
     ``include:[libraries mounted at that moment]``, silently locking a
     later-mounted reference library out of a report the user never scoped.
+
+    ⛔ Carries no ``notebook_source_ceilings`` either, for the reason spelled out
+    in ``current_source_scope_payload``.
     """
     scope = current_source_scope()
     if scope is None or not scope.base_provided:
@@ -462,6 +618,12 @@ def scoped_participants(notebook_ids: Iterable[str]) -> tuple[str, ...]:
 
     With no scope -- or with the default whole-scope one -- this is one
     ContextVar read and a tuple copy.
+
+    ⛔ ``peer_ceiling_active`` is not consulted: this decides WHICH LIBRARIES
+    participate, and a per-notebook source ceiling never removes a library --
+    it bounds what the library may contribute once it is in.  Folding it in
+    would make ``scoped_subgraph_nodes``/``covers_notebook``, which share this
+    library-only question, start answering a source-shaped one.
     """
     scope = current_source_scope()
     if scope is None or not scope.base_ceiling_active:
@@ -546,6 +708,28 @@ def scoped_allowed_source_ids(
         # everything regardless of the local dimension's shape, so no branch
         # added below may ever be hoisted above it.
         return ()
+    # ② PER-NOTEBOOK CEILING.  Its position is fixed on BOTH sides and neither
+    # may be relaxed:
+    #   * strictly BELOW ① -- hoisting it above the library exclusion would turn
+    #     "this library does not participate at all" (``()``, an explicit deny)
+    #     into "this library is frozen to its own source list", readmitting an
+    #     unchecked reference library through the very branch meant to freeze
+    #     the checked ones;
+    #   * strictly ABOVE ③ -- ③ hands ``allowed`` straight back for every
+    #     notebook that is not the scope's own, which is exactly the set of
+    #     notebooks this ceiling exists to bind.  Below ③ it would be dead code
+    #     for every peer library and the ceiling would silently fail open.
+    ceiling = scope.source_ceiling_for(notebook_id)
+    if ceiling is not None:
+        # Materialized here for the same two reasons the docstring gives for the
+        # local ceiling, and ``explicit`` is intersected, never passed through:
+        # the federated chunk/KG legs enumerate their peer's visible sources
+        # LIVE, so live ∩ frozen is the frozen universe while live passed
+        # through is the drifted one.  Intersection preserves ``allowed``'s
+        # order because that order is the producer's, not ours.
+        if allowed is None:
+            return tuple(sorted(ceiling))
+        return tuple(value for value in allowed if value in ceiling)
     if not scope.ceiling_active or notebook_id != scope.notebook_id:
         return allowed
     # ⛔ No ``narrowed``-shaped branch may be added here.  Narrowing decides
@@ -585,8 +769,28 @@ def filter_retrieval_items(
     # branches -- which delegate to ``scope.allows()`` -- and its
     # "knowledge"/"relation" branch -- which calls ``covers_notebook()``
     # directly -- would never see the library ceiling applied at all.
-    if scope is None or not (scope.ceiling_active or scope.base_ceiling_active):
+    #
+    # ``peer_ceiling_active`` is in this disjunction for the identical reason,
+    # one step further out: a federated run supplies neither a local nor a
+    # library scope, so without it a run whose ONLY ceiling is per-notebook
+    # would skip the whole loop and every out-of-ceiling item would survive --
+    # fail-OPEN, on the one path that is the fail-closed backstop for the
+    # producer-side ceilings.
+    if scope is None or not (
+        scope.ceiling_active
+        or scope.base_ceiling_active
+        or scope.peer_ceiling_active
+    ):
         return values
+    # "Did a SOURCE ceiling bind the ACTIVE notebook on this run?"  Hoisted out
+    # of the loop because it is a per-run fact, and widened past
+    # ``ceiling_active`` alone because a per-notebook ceiling on the active
+    # notebook empties evidence exactly the way the local one does -- see where
+    # the knowledge/relation branch consults it below.
+    active_ceiling_binds = (
+        scope.ceiling_active
+        or scope.source_ceiling_for(active_notebook_id) is not None
+    )
     out: list[Any] = []
     for item in values:
         origin = str(
@@ -624,16 +828,19 @@ def filter_retrieval_items(
             ) or ()
             evidence = filter_evidence(origin, raw_evidence)
             # "No surviving evidence" disqualifies an ACTIVE-notebook node
-            # whenever the LOCAL CEILING is what emptied it.  When no local
-            # ceiling is in force (a base-only run supplies no source scope, so
-            # ``ceiling_active`` is False), nothing local was filtered and this
-            # loop is running solely because of the library dimension --
-            # dropping an already-evidence-less active node there would be a
-            # filtering decision the user never asked for (before this field
-            # existed the whole function short-circuited).
+            # whenever A SOURCE CEILING is what emptied it -- the local
+            # mode/source_ids one or a per-notebook one naming this same
+            # notebook; both filter through ``allows()`` and both are the
+            # user's own frozen selection.  When NEITHER is in force (a
+            # base-only run supplies no source scope at all), nothing
+            # source-shaped was filtered and this loop is running solely
+            # because of the library dimension -- dropping an
+            # already-evidence-less active node there would be a filtering
+            # decision the user never asked for (before these fields existed
+            # the whole function short-circuited).
             if (
                 origin != active_notebook_id
-                or not scope.ceiling_active
+                or not active_ceiling_binds
                 or evidence
             ):
                 if isinstance(item, dict):
@@ -695,12 +902,18 @@ def scoped_subgraph_nodes(subgraph: Iterable[Any]) -> list[Any]:
 
 
 def evidence_json_allowed(notebook_id: str, raw: Any) -> bool:
+    """Same branch order as ``scoped_allowed_source_ids``/``allows``, and for
+    the same reason: ③ below answers True for every notebook that is not the
+    scope's own, so a per-notebook ceiling placed after it would never bind a
+    peer library's evidence blob."""
     scope = current_source_scope()
     if scope is None:
         return True
     if not scope.covers_notebook(notebook_id):
         return False
-    if not scope.ceiling_active or notebook_id != scope.notebook_id:
+    if scope.source_ceiling_for(notebook_id) is None and (
+        not scope.ceiling_active or notebook_id != scope.notebook_id
+    ):
         return True
     if isinstance(raw, str):
         try:
@@ -730,6 +943,15 @@ def source_scope_visible_universe_matches(
     from the frozen snapshot on every request in a shared notebook and pin
     these channels off permanently.  The caller owns that: it passes
     ``ActiveSourceScope.owner_id``.
+
+    ⛔ ``notebook_source_ceilings`` deliberately plays no part here, and adding
+    it would be a bug in both directions.  For a PEER notebook the first
+    predicate below already answers True (this probe describes the scope's own
+    notebook and nothing else).  For the scope's own notebook a federated run
+    carries ``narrowed is None`` -- it submitted no local scope -- so the probe
+    answers True there too, and it must: a peer-only run has not narrowed
+    anything, and reporting drift would pin ``_unsafe_source_scope_restricted``
+    True for the whole run and reroute the lexical arm off its normal lane.
     """
     scope = current_source_scope()
     if (
