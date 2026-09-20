@@ -80,7 +80,7 @@ def _turn() -> DetachedAskTurn:
 
 def _plan() -> FederatedRunPlan:
     return FederatedRunPlan(
-        phase_deadline=1.0,
+        phase_timeout_seconds=1.0,
         notebook_timeout_seconds=2.0,
         executor=object(),
         window=lambda: 4,
