@@ -980,6 +980,56 @@ def test_an_unattributed_citation_is_reported_under_its_own_reason(service):
     assert service.test_events[-1]["reason"] == "unattributed"
 
 
+def _external_citation(**updates):
+    return Citation(
+        label="arXiv · 某篇论文", source_id="", element_id="",
+        location_label="摘要", quoted_span="库外原文", tier="external",
+        url="https://arxiv.org/abs/2401.00001",
+    ).model_copy(update=updates)
+
+
+def test_an_external_citation_does_not_void_the_answer(service):
+    """reflect 插件动作带回的库外证据不属于任何一个库,不参与冻结复核。
+
+    它按构造就是 URL 支撑的(库 / 来源 / element 三者皆空),既没有可离开的冻结
+    天花板、也没有可漂移的指纹;把它的空归属当成「归一点漏改」会让每一份用到库外
+    证据的全局答案整份作废,文案还说是库里的原文变了(codex #755 第 5 轮 P2)。
+    库内那条引用照常复核,归属统计只数库内的。
+    """
+    service.test_visible["b"] = {"s-b"}
+    service.ask = _FakeAsk(
+        rounds=[_ok(*_LIBRARIES)],
+        citations=[_citation("b"), _external_citation()], evidence={},
+    )
+
+    result = _run(service)
+
+    assert result.status == "done"
+    assert [row.tier for row in result.answer.citations] == ["personal", "external"]
+    assert result.cited_notebook_ids == ["b"]
+    assert not [event for event in service.test_events
+                if event.get("kind") == "global_ask_citations_void"]
+
+
+@pytest.mark.parametrize("updates", [
+    {"source_id": "s-b"},            # 自称库外,却指着一个库内来源
+    {"element_id": "e-b-1"},         # ……或一个库内 element
+    {"url": ""},                     # 没有可打开的地址,就不是 URL 支撑的证据
+], ids=["names-a-source", "names-an-element", "no-url"])
+def test_the_external_tier_alone_does_not_exempt_a_citation(service, updates):
+    """豁免是严格的:只认「tier=external + 有 URL + 不指向任何库内行」。"""
+    service.test_visible["b"] = {"s-b"}
+    service.ask = _FakeAsk(
+        rounds=[_ok(*_LIBRARIES)],
+        citations=[_external_citation(**updates)], evidence={},
+    )
+
+    result = _run(service)
+
+    assert result.answer.citations == []
+    assert service.test_events[-1]["reason"] == "unattributed"
+
+
 def test_a_citation_without_a_source_element_is_held_to_the_ceiling_only(service):
     """KG 对象 / 文档概述锚点没有 element 指纹,只过「来源仍在天花板且可见」。
 
