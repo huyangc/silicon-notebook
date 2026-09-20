@@ -68,6 +68,17 @@ _READER_WHITELIST = frozenset({
     "app/services/chunk_federation.py",
 })
 _WRITER_WHITELIST = frozenset({
+    # D1-2:``global_ask_run`` —— 唯一同时安装覆盖、逐库天花板、detached turn 与
+    # 联邦运行计划的管理器,也是 ``participant_override(...)`` 的**唯一调用点**。
+    # 写入方与读者是两种角色:读者白名单上的模块读覆盖是对的、装覆盖不是,而这
+    # 一个模块只装不读(它一行也不调 ``current_participant_override`` /
+    # ``federated_ask_active``)。所以它进写入方白名单而**不**进
+    # ``_EXPECTED_IMPORTERS`` 那条相等断言——那条断言钉的是读者接线有没有被悄悄
+    # 回退,把一个纯写入方混进去会让它开始钉错的东西。
+    "app/services/global_run.py",
+    # ``ParticipantOverride`` 的构造点(D1-4 接线):建覆盖是一次鉴权动作,与
+    # ``can_read_many`` 同处;建好之后交给上面那个管理器去装。今天还没有接线,
+    # 所以它在这里是 ⊆ 的一员而不是必须出现的一员。
     "app/services/global_ask.py",
 })
 _IMPORT_WHITELIST = _READER_WHITELIST | _WRITER_WHITELIST
@@ -342,7 +353,7 @@ def test_no_module_may_re_export_the_override_surface():
 
 
 def test_writer_is_only_global_ask():
-    """调用 ``participant_override(...)`` 的生产模块 ⊆ {global_ask}。
+    """调用 ``participant_override(...)`` 的生产模块 ⊆ ``_WRITER_WHITELIST``。
 
     与上一条不重复:读者白名单允许若干模块 import 本模块,而它们**读**覆盖
     是对的、**装**覆盖不是。安装参与集是一次授权动作(``can_read_many`` 已经

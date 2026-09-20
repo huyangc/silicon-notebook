@@ -7,10 +7,15 @@
 
 判据刻意是两个,分工是硬约束:
 
-* ``ask_service.py`` 读 ``source_scope.peer_scope_ceiling_active()`` —— 它是三处
+* ``ask_service.py`` 读 ``source_scope.subjectless_run_active()`` —— 它是三处
   已登记 fail-soft handler 的宿主、也是鉴权相邻面,不许进覆盖模块的读者白名单;
 * 检索层(``retrieval_candidates`` / ``graph_retrieval`` / ``communities``)读
   ``retrieval_participants.federated_ask_active()`` —— 它们已经在白名单上。
+
+⚠ D1-2 起 ask 侧读的是**显式无主体位**而不是 ``peer_scope_ceiling_active()``:
+后者对「单库 run 冻结自己的来源清单」同样为真,而那种 run 仍然有当前库。两者的
+分工由 ``test_global_run.py::test_single_notebook_ceiling_is_not_subjectless``
+反向钉住,本文件的安装形状因此多了一个 ``subjectless=True``。
 
 两者恒等由 ``test_peer_mode_federation.py::test_peer_mode_predicates_agree`` 钉住,
 本文件不重复。
@@ -40,6 +45,7 @@ from app.services.source_scope import (
     current_source_scope,
     peer_scope_ceiling_active,
     source_scope_context,
+    subjectless_run_active,
 )
 
 
@@ -60,16 +66,21 @@ def _ceilings(notebook_ids) -> dict:
 
 @contextlib.contextmanager
 def _peer_scope(notebook_ids=("nb-a", "nb-b", "nb-c")):
-    """名义 active + 覆盖 + 逐库天花板,PR-D1 冻结的那一组安装形状。
+    """名义 active + 覆盖 + 逐库天花板 + 无主体位,PR-D1 冻结的那一组安装形状。
 
     ``source_scope_context`` 只提交第三个维度,所以 ``restricted`` /
     ``ceiling_active`` 恒 False、两份 payload 恒 None —— 这正是 1.5 列出的五个
     后果,也是本文件每条闸能独立于「收窄」被断言的前提。
+
+    ``subjectless=True`` 不是装饰:ask 侧每条闸读的就是它。生产上这四件事只由
+    ``global_run.global_ask_run`` 一次装齐,用例里逐件装是为了让对照臂能只拆掉
+    其中一件。
     """
     ids = tuple(notebook_ids)
     with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
         with source_scope_context(
             ids[0], None, None, notebook_source_ceilings=_ceilings(ids),
+            subjectless=True,
         ):
             with participant_override(_override(ids)):
                 yield ids
@@ -203,7 +214,9 @@ def test_every_answer_prompt_call_site_passes_the_peer_flag():
 
     结构断言而不是四条行为断言:后三处要跑起来得先立起半个 AskService,而漏掉的
     风险恰恰在「又加了第五个合成入口」那一天。``peer_notebooks`` 的实参必须就是
-    ``peer_scope_ceiling_active()`` 的调用,写成 ``True``/``False`` 常量同样报红。
+    ``subjectless_run_active()`` 的调用,写成 ``True``/``False`` 常量同样报红,
+    写成 ``peer_scope_ceiling_active()`` 也报红——后者对「单库 run 冻结自己的来源
+    清单」为真,而那种 run 的提示词必须保留 base/personal 权威序。
     """
     calls = _answer_prompt_call_nodes()
     assert len(calls) >= 4, f"合成调用点只剩 {len(calls)} 个,入口被改名了吗?"
@@ -220,11 +233,11 @@ def test_every_answer_prompt_call_site_passes_the_peer_flag():
         if not (
             isinstance(value, ast.Call)
             and isinstance(value.func, ast.Name)
-            and value.func.id == "peer_scope_ceiling_active"
+            and value.func.id == "subjectless_run_active"
         ):
             violations.append(
                 f"line {node.lineno}: peer_notebooks 不是 "
-                f"peer_scope_ceiling_active() 的调用"
+                f"subjectless_run_active() 的调用"
             )
     assert not violations, violations
 
@@ -595,6 +608,7 @@ def test_inner_scope_context_is_a_passthrough():
         with source_scope_context(ids[0], None, None):
             assert current_source_scope() is outer
             assert peer_scope_ceiling_active() is True
+            assert subjectless_run_active() is True
             assert federated_ask_active() is True
 
         # 退出内层没有把外层一起重置掉。
@@ -606,6 +620,7 @@ def test_inner_scope_context_is_a_passthrough():
     with source_scope_context("nb-a", None, None):
         assert current_source_scope() is None
         assert peer_scope_ceiling_active() is False
+        assert subjectless_run_active() is False
 
 
 # ---------------------------------------------------------------------------
