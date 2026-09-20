@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchMe } from "../auth.ts";
 import { listNotebooks } from "../notebook-api.ts";
 import { askQuestionLimitHint } from "../ask-api.ts";
-import { toUserMessage } from "../errors.ts";
+import { httpErrorStatus, toUserMessage } from "../errors.ts";
 import {
   askGlobal, cancelGlobalJob, getGlobalConversation, getGlobalJob, globalJobIsGone, listGlobalConversations,
   previewGlobalAskIntent, submitGlobalFeedback,
@@ -595,13 +595,14 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
       });
       if (!mounted.current || ticket !== owner.current) return;
       retryRequest.current = null;
+      let adopted = job;
       if (stopRequested.current && job.status === "running") {
         // 提交还没回来用户就按了停止：作业刚建好、什么都还没上屏——停掉并丢弃，
         // 问题回到输入框（情形二）。停不掉就照常接管它，停止键仍在。
         stopRequested.current = false;
         try {
           const stopped = await cancelGlobalJob(job.job_id, true);
-          const gone = stopped.status === "cancelled" && await globalJobIsGone(job.job_id);
+          const gone = stopped.status === "cancelled" && await globalJobIsGone(job.job_id) === true;
           if (!mounted.current || ticket !== owner.current) return;
           if (gone) {
             const remaining = currentTurns.current.filter((item) => item.job_id !== job.job_id && item.job_id !== replaces);
@@ -610,8 +611,10 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
             settleDiscard(remaining, job.conversation_id);
             return;
           }
-          // 停了但没删（别处先一步停了它）：照常接管这条作业，它以「已停止」留在对话里。
-          job.status = stopped.status;
+          // 没删成：别处先一步停了它，或它抢在取消到达之前已经答完。接管的是取消
+          // 接口交回的**整份**作业——只抄状态的话，一条已完成的作业会顶着 done 却没有
+          // 回答，轮询也不会再去取。
+          adopted = stopped;
         } catch (cause) {
           if (!mounted.current || ticket !== owner.current) return;
           setError(toUserMessage(cause, "停止失败，请重试"));
@@ -621,7 +624,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
       if (seed.length) setTraceSeeds((seeds) => ({ ...seeds, [job.job_id]: seed }));
       showPending(null);
       setConversationId(job.conversation_id);
-      setTurns((items) => [...items.filter((item) => item.job_id !== job.job_id && item.job_id !== replaces), job]);
+      setTurns((items) => [...items.filter((item) => item.job_id !== job.job_id && item.job_id !== replaces), adopted]);
       setPollError("");
       updateUrl(job.conversation_id);
       const version = ++historyVersion.current;
@@ -664,7 +667,20 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
               setDraft((draft) => draft.trim() === question ? "" : draft);
               setError("");
             }
-          }).catch(() => { /* 重拉失败不盖过上面那条提交错误。 */ });
+          }).catch((recoveryCause) => {
+            // 会话本身已经不在了（丢弃时连空会话一起删了而本地没确认到，或在别处被
+            // 删）：退回「还没有会话」，否则之后每一次提交都指着一个不存在的会话。
+            // 其它重拉失败不盖过上面那条提交错误。
+            if (httpErrorStatus(recoveryCause) !== 404) return;
+            if (!mounted.current || ticket !== owner.current || serial !== submitSerial.current) return;
+            retryRequest.current = null;
+            setTurns([]);
+            setTurnOffset(null);
+            currentId.current = "";
+            setConversationId("");
+            setConversationTitle("");
+            updateUrl("");
+          });
         }
       }
     } finally {
@@ -719,7 +735,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     setStopping(true);
     try {
       const job = await cancelGlobalJob(target.job_id, discard);
-      const gone = discard && job.status === "cancelled" && await globalJobIsGone(target.job_id);
+      const gone = discard && job.status === "cancelled" && await globalJobIsGone(target.job_id) === true;
       if (mounted.current && ticket === owner.current) {
         setPollError("");
         if (gone) {
