@@ -214,7 +214,7 @@ carries its automatic title and holds no other turn takes the new question as it
 a 409, and a retry under the same `client_request_id` replays as usual); a job echoes the
 `client_request_id` it was submitted with, on the `POST /ask` response and on every later read, so a client that
 lost a response recognises **its own** job in a re-read conversation — matching question text is not identity
-(two tabs can submit the same words); the public share projection never carries the field;
+(two browser windows can submit the same words); the public share projection never carries the field;
 `POST /intent` and `POST /intent/stream` are the `reasoning` understanding preflight, taking
 `{question, conversation_id?, notebook_scope?}` and returning the same understanding contract in-notebook Ask
 uses. The preflight authorizes itself and resolves scope and read rights through the IDENTICAL block
