@@ -328,6 +328,54 @@ def case_production_shaped_timestamps_keep_lexical_and_temporal_order_aligned(st
     assert _public_ids(store, token) == ["job-whole", "job-frac"]
 
 
+def case_a_late_inserted_job_with_an_early_stamp_stays_outside_the_snapshot(store):
+    """插入顺序必须就是 keyset 顺序,否则一条没人复核过的回答会自己出现在公开页上。
+
+    服务层先给作业盖时间戳、再跑问题理解(一次模型调用)、最后才插入。提交 A 卡在
+    理解里时,提交 B 可以后来居上:插入、答完、被分享(水位钉在 B)。此后 A 才插入——
+    B 已经不是 running,「每会话至多一个 running」的索引拦不住它——而 A 带着**早于**
+    水位的时间戳,答完就落进已发布的前缀(codex #758 第 1 轮 P1)。``create`` 在插入
+    事务里把时间戳钳到「严格晚于本会话最新作业」,所以 A 排在 B 之后。
+    """
+    from app.models.global_ask import GlobalAskJob, GlobalNotebookScope
+
+    conversation_id, user_id = insert_conversation(store, "conv-race", "user-race")
+    insert_job(store, conversation_id, user_id, "job-b", "2026-01-01T00:00:05+00:00")
+    token = store.share_conversation(conversation_id, user_id)["share_token"]
+
+    stalled = GlobalAskJob(
+        job_id="job-a", conversation_id=conversation_id, status="running",
+        question="卡在问题理解里的那一条", created_at="2026-01-01T00:00:01+00:00",
+        notebook_scope=GlobalNotebookScope(mode="all"), resolved_notebook_ids=["nb-1"],
+    )
+    store.create(stalled, user_id, None, "{}", "web", new_conversation=False)
+
+    assert stalled.created_at > "2026-01-01T00:00:05+00:00"
+    stalled.status = "done"
+    assert store.save(stalled, user_id) is True
+    assert _public_ids(store, token) == ["job-b"]
+    # 持久化的 payload 与列是同一个时刻,不是两个。
+    assert store.job("job-a", user_id).created_at == stalled.created_at
+    # 重新分享之后它才公开,而且排在 B 之后。
+    store.share_conversation(conversation_id, user_id)
+    assert _public_ids(store, token) == ["job-b", "job-a"]
+
+
+def case_a_job_stamped_after_the_newest_one_keeps_its_own_stamp(store):
+    """对照臂:钳位只在需要时生效,正常先后的提交时间戳原样保留。"""
+    from app.models.global_ask import GlobalAskJob, GlobalNotebookScope
+
+    conversation_id, user_id = insert_conversation(store, "conv-order", "user-order")
+    insert_job(store, conversation_id, user_id, "job-1", "2026-01-01T00:00:05+00:00")
+    later = GlobalAskJob(
+        job_id="job-2", conversation_id=conversation_id, status="running",
+        question="正常的下一条", created_at="2026-01-01T00:00:09.500000+00:00",
+        notebook_scope=GlobalNotebookScope(mode="all"), resolved_notebook_ids=["nb-1"],
+    )
+    store.create(later, user_id, None, "{}", "web", new_conversation=False)
+    assert later.created_at == "2026-01-01T00:00:09.500000+00:00"
+
+
 CASES = [
     case_share_is_token_idempotent_but_advances_the_watermark,
     case_a_turn_written_after_the_share_stays_private_until_reshared,
@@ -344,5 +392,7 @@ CASES = [
     case_a_deleted_watermark_job_falls_back_to_the_interval_not_to_nothing,
     case_the_public_read_is_capped_at_one_past_the_render_limit,
     case_production_shaped_timestamps_keep_lexical_and_temporal_order_aligned,
+    case_a_late_inserted_job_with_an_early_stamp_stays_outside_the_snapshot,
+    case_a_job_stamped_after_the_newest_one_keeps_its_own_stamp,
 ]
 CASE_IDS = [case.__name__.removeprefix("case_") for case in CASES]

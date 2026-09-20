@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 
 from app.core.capability_tokens import (
     GLOBAL_CONVERSATION_SHARE_PREFIX,
@@ -96,7 +97,30 @@ class GlobalAskStore:
         return None if row is None else (self._job(row), row["request_json"])
 
     def create(self, job, user_id, request_id, request_json, submitted_via, *, new_conversation):
+        """Insert one running job, stamped so that insertion order IS keyset order.
+
+        ⚠ ``job.created_at`` is REWRITTEN here when it would not sort strictly
+        after every job this conversation already holds. The public share
+        snapshot is a keyset prefix over ``(created_at, id)``, and "a job that
+        finishes after the share stays outside it" only holds if a later-inserted
+        job can never carry an earlier stamp. It could: the service stamps a job
+        before its reasoning preflight (a model call), so a submission that
+        stalled there was inserted AFTER a faster one had been submitted,
+        answered and shared -- with a timestamp from before that share's
+        watermark, which published it without the owner ever re-sharing. The
+        one-running-job index does not prevent this (the faster job is already
+        done when the slow one is inserted).
+
+        Clamping inside the insert transaction closes it for every writer, the
+        service's own re-stamp after preflight included: whatever the caller's
+        clock said, this row sorts after its conversation's newest job. With the
+        one-running-job index that gives the ordering the snapshot needs -- a job
+        still running at share time was inserted after the watermark job, and a
+        job inserted later still sorts later.
+        """
         with self.database.write() as db:
+            if not new_conversation:
+                job.created_at = self._after_latest_job(db, job.conversation_id, job.created_at)
             if new_conversation:
                 db.execute(self._sql(
                     "INSERT INTO global_ask_conversations"
@@ -121,6 +145,30 @@ class GlobalAskStore:
             db.execute(self._sql(
                 "UPDATE global_ask_conversations SET scope_json=?,updated_at=? WHERE id=? AND user_id=?"
             ), (job.notebook_scope.model_dump_json(), job.created_at, job.conversation_id, user_id))
+
+    def _after_latest_job(self, db, conversation_id, stamp):
+        """``stamp``, or one microsecond past the conversation's newest job when
+        ``stamp`` would not sort strictly after it.
+
+        The comparison is the same TEXT comparison the keyset makes, so "sorts
+        after" here means exactly what the snapshot predicate will later see. An
+        unparsable stored stamp is left alone rather than guessed at.
+        """
+        # PostgreSQL: pin the aggregate to the byte order the Python comparison
+        # below (and the share keyset) uses; a linguistic default collation
+        # weighs the punctuation in an ISO stamp differently.
+        collate = ' COLLATE "C"' if self.marker == "%s" else ""
+        row = db.execute(self._sql(
+            f"SELECT MAX(created_at{collate}) AS latest FROM global_ask_jobs WHERE conversation_id=?"
+        ), (conversation_id,)).fetchone()
+        latest = row["latest"] if row is not None else None
+        if not latest or str(stamp) > str(latest):
+            return stamp
+        try:
+            bumped = datetime.fromisoformat(str(latest)) + timedelta(microseconds=1)
+        except ValueError:
+            return stamp
+        return bumped.isoformat()
 
     def save(self, job, user_id):
         with self.database.write() as db:
@@ -286,16 +334,21 @@ class GlobalAskStore:
         completed job to bound the snapshot -- enforced inside the same write
         transaction, so a never-answered conversation never has a token minted.
 
-        ⚠ THE SNAPSHOT RESTS ON A PRECONDITION OWNED ELSEWHERE. The keyset is
-        over ``(created_at, id)`` and ``created_at`` is a job's SUBMISSION
-        instant, not its completion. With two jobs of one conversation in flight,
-        the one submitted first could finish AFTER a share pinned the watermark
-        to the other -- and would then sit inside the published prefix without
-        the owner ever re-sharing. That cannot happen today only because
-        ``idx_global_ask_running`` (a partial unique index on
-        ``global_ask_jobs(conversation_id) WHERE status='running'``) allows one
-        running job per conversation. Relaxing that index for concurrent turns
-        means this watermark has to move to a completion-ordered key first.
+        ⚠ THE SNAPSHOT RESTS ON TWO FACTS OWNED ELSEWHERE, and needs both. The
+        keyset is over ``(created_at, id)``, so "a job that finishes after this
+        share stays outside it" requires that such a job always sorts AFTER the
+        watermark job:
+
+        * ``create`` stamps every job to sort strictly after its conversation's
+          newest one, inside the insert transaction -- so keyset order is
+          insertion order, whatever instant the caller's clock offered (a
+          submission that stalled in its reasoning preflight used to be inserted
+          late carrying an early stamp);
+        * ``idx_global_ask_running`` allows one running job per conversation --
+          so a job still running when the share is taken was inserted after the
+          watermark job finished being the running one.
+
+        Drop either and an answer nobody reviewed can appear on a published link.
         """
         candidate = new_capability_token(GLOBAL_CONVERSATION_SHARE_PREFIX)
         expected = str(expected_through_id or "").strip()

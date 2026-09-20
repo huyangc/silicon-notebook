@@ -550,6 +550,38 @@ def test_sharing_is_refused_while_a_referenced_library_is_unreadable(client):
     assert _share(client, reader, cid, "job-a")["share_token"].startswith("gshr-")
 
 
+def test_an_unpublished_later_turn_cannot_veto_sharing_an_earlier_one(client):
+    """分享前的读权复核只看**将要公开的那段前缀**。
+
+    早一轮用的是仍可读的库 A,晚一轮用的是已被撤权的库 B:只分享到早一轮时,晚一轮
+    根本不公开,它不该否决这次分享——匿名读取本来就会成功(codex #758 第 1 轮 P2)。
+    分享到晚一轮则照旧拒绝。
+    """
+    owner, _owner_id = _new_user(client)
+    nb_a, nb_b = _notebook(client, owner), _notebook(client, owner)
+    reader, reader_id, _group_id, grants = _group_granted_reader(
+        client, owner, [nb_a, nb_b])
+    cid = _seed(reader_id, [
+        _job_payload("job-early", "x", question="早一轮", cited=[nb_a], resolved=[nb_a]),
+        _job_payload("job-late", "x", question="晚一轮", cited=[nb_b], resolved=[nb_b]),
+    ])
+    assert client.delete(
+        f"/api/notebooks/{nb_b}/grants/{grants[nb_b]}", headers=owner
+    ).status_code == 204
+
+    token = _share(client, reader, cid, "job-early")["share_token"]
+    page = client.get(f"/api/public/conversations/{token}")
+    assert page.status_code == 200
+    assert [turn["question"] for turn in page.json()["turns"]] == ["早一轮"]
+
+    refused = client.post(_share_path(cid), headers=reader,
+                          json={"expected_through_id": "job-late"})
+    assert refused.status_code == 404
+    # 被拒的那次推进不许动已发布的水位。
+    assert [turn["question"] for turn in
+            client.get(f"/api/public/conversations/{token}").json()["turns"]] == ["早一轮"]
+
+
 # ------------------------------------------------------- token 命名空间分流
 
 
