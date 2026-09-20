@@ -17,7 +17,7 @@ import type { AskResponse, NotebookSummary } from "../../app/workspace-model.ts"
 const api = vi.hoisted(() => ({
   me: vi.fn(), notebooks: vi.fn(), list: vi.fn(), detail: vi.fn(), ask: vi.fn(),
   poll: vi.fn(), cancel: vi.fn(), rename: vi.fn(), remove: vi.fn(), intent: vi.fn(),
-  feedback: vi.fn(), assetBlob: vi.fn(),
+  feedback: vi.fn(), assetBlob: vi.fn(), gone: vi.fn(),
 }));
 vi.mock("../../app/auth.ts", () => ({ fetchMe: api.me }));
 vi.mock("../../app/notebook-api.ts", () => ({ listNotebooks: api.notebooks }));
@@ -27,6 +27,7 @@ vi.mock("../../app/global-ask-api.ts", async (importOriginal) => ({
   askGlobal: api.ask, getGlobalJob: api.poll, cancelGlobalJob: api.cancel,
   renameGlobalConversation: api.rename, deleteGlobalConversation: api.remove,
   previewGlobalAskIntent: api.intent, submitGlobalFeedback: api.feedback,
+  globalJobIsGone: api.gone,
 }));
 // 附图走鉴权 fetch→blob→objectURL（`AuthedImage`）。这里只替掉那一次网络读取，
 // 断言看的是它**拿着哪个笔记本的 URL** 去读的。
@@ -90,6 +91,8 @@ beforeEach(() => {
   api.detail.mockImplementation((id: string) => Promise.resolve(detail(id)));
   api.ask.mockResolvedValue(job());
   api.intent.mockImplementation((question: string) => Promise.resolve(clearContract(question)));
+  // 「停止并丢弃」之后客户端会向服务端确认作业真的不在了；默认：确实删了。
+  api.gone.mockResolvedValue(true);
   api.assetBlob.mockResolvedValue(new Blob(["fake-image-bytes"], { type: "image/png" }));
   if (typeof URL.createObjectURL !== "function") URL.createObjectURL = vi.fn(() => "blob:mock-url");
   if (typeof URL.revokeObjectURL !== "function") URL.revokeObjectURL = vi.fn();
@@ -1384,6 +1387,43 @@ test("stopping a job that has shown nothing discards it and returns the question
   expect(result.current.conversationId).toBe("");
   expect(window.location.search).toBe("");
   expect(result.current.conversations).toEqual([]);
+});
+
+test("a discard the server did not carry out leaves the turn and the conversation alone", async () => {
+  // 别的标签页先一步停了这条作业：`cancel?discard=true` 照样回 cancelled，却什么都
+  // 没删。确认不到 404，本地就不许摘记录、更不许丢会话（codex #761 R2 P2）。
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [job()]));
+  api.poll.mockReturnValue(new Promise(() => {}));
+  api.cancel.mockResolvedValue(job("cancelled"));
+  api.gone.mockResolvedValue(false);
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+  await act(async () => { await result.current.stop(); });
+  expect(api.gone).toHaveBeenCalledWith("job-conv-a");
+  expect(result.current.turns.map((turn) => turn.status)).toEqual(["cancelled"]);
+  expect(result.current.conversationId).toBe("conv-a");
+  expect(result.current.conversations).toHaveLength(1);
+  expect(result.current.draft).toBe("");
+});
+
+test("discarding a loaded turn moves the older-turns cursor with it", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  const earlier = { ...job("done"), job_id: "job-earlier", answer: standardAnswer() };
+  api.detail.mockImplementation((id: string, offset = 0) => Promise.resolve(offset === 0
+    ? { ...detail(id, [earlier, job()]), has_more: true, next_offset: 2 }
+    : detail(id, [])));
+  api.poll.mockReturnValue(new Promise(() => {}));
+  api.cancel.mockResolvedValue(job("cancelled"));
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+  await act(async () => { await result.current.stop(); });
+  // 服务端少了一行，OFFSET 分页整体前移一格：游标 2 → 1，会话也还在。
+  expect(result.current.turnOffset).toBe(1);
+  expect(result.current.conversationId).toBe("conv-a");
+  await act(async () => { await result.current.loadMoreTurns(); });
+  expect(api.detail).toHaveBeenLastCalledWith("conv-a", 1);
 });
 
 test("a follow-up stopped before any output keeps the conversation and its earlier turns", async () => {

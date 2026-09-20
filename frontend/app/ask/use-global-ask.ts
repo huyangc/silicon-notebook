@@ -4,7 +4,7 @@ import { listNotebooks } from "../notebook-api.ts";
 import { askQuestionLimitHint } from "../ask-api.ts";
 import { toUserMessage } from "../errors.ts";
 import {
-  askGlobal, cancelGlobalJob, getGlobalConversation, getGlobalJob, listGlobalConversations,
+  askGlobal, cancelGlobalJob, getGlobalConversation, getGlobalJob, globalJobIsGone, listGlobalConversations,
   previewGlobalAskIntent, submitGlobalFeedback,
   GLOBAL_ASK_MAX_NOTEBOOKS, GLOBAL_ASK_PAGE_SIZE, submittableGlobalScope,
   type GlobalConversation, type GlobalJob, type GlobalScope,
@@ -601,14 +601,17 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
         stopRequested.current = false;
         try {
           const stopped = await cancelGlobalJob(job.job_id, true);
+          const gone = stopped.status === "cancelled" && await globalJobIsGone(job.job_id);
           if (!mounted.current || ticket !== owner.current) return;
-          if (stopped.status === "cancelled") {
+          if (gone) {
             const remaining = currentTurns.current.filter((item) => item.job_id !== job.job_id && item.job_id !== replaces);
             setTurns(remaining);
             returnQuestion();
             settleDiscard(remaining, job.conversation_id);
             return;
           }
+          // 停了但没删（别处先一步停了它）：照常接管这条作业，它以「已停止」留在对话里。
+          job.status = stopped.status;
         } catch (cause) {
           if (!mounted.current || ticket !== owner.current) return;
           setError(toUserMessage(cause, "停止失败，请重试"));
@@ -666,6 +669,9 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
    *  （与笔记本内问答同一条规则），本地也得退回「还没有会话」，否则下一次提问
    *  会带着一个已经不存在的会话 id 去提交。 */
   function settleDiscard(remaining: readonly GlobalJob[], discardedConversationId: string) {
+    // 服务端少了一行：更早的问答按 OFFSET 分页，游标得跟着退一格，否则下一次
+    //「加载更早的问答」会整条跳过原本排在边界上的那一轮。
+    setTurnOffset((offset) => offset === null ? null : Math.max(0, offset - 1));
     if (remaining.length || turnOffset !== null) return;
     if (currentId.current && currentId.current !== discardedConversationId) return;
     currentId.current = "";
@@ -697,9 +703,10 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     setStopping(true);
     try {
       const job = await cancelGlobalJob(target.job_id, discard);
+      const gone = discard && job.status === "cancelled" && await globalJobIsGone(target.job_id);
       if (mounted.current && ticket === owner.current) {
         setPollError("");
-        if (discard && job.status === "cancelled") {
+        if (gone) {
           const remaining = currentTurns.current.filter((item) => item.job_id !== job.job_id);
           setTurns(remaining);
           setDraft((draft) => draft.trim() ? draft : target.question);
