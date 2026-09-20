@@ -10,7 +10,7 @@ from app.domain.auth_policy import AuthStoreError
 #: test can never drift from what this store actually executes (mirrors
 #: ``access_sql.py``'s exported ``ADMIN_GRANT_*_SQL`` constants, used the
 #: same way by ``test_admin_grant_chain_lock.py``).
-ACTOR_ADMIN_ROLE_LOCK_SQL = "SELECT role FROM users WHERE id=%s FOR UPDATE"
+ACTOR_ADMIN_ROLE_LOCK_SQL = "SELECT role,status FROM users WHERE id=%s FOR UPDATE"
 
 
 def _row(row) -> dict:
@@ -48,7 +48,7 @@ class ExtensionToggleStore:
         self, plugin_id: str, enabled: bool, actor_id: str
     ) -> dict:
         """授权在写事务内按 actor 现时角色复检(镜像
-        ``identity_store.set_user_role``:``FOR UPDATE`` 锁 actor 行,非 admin
+        ``identity_store.set_user_role``:``FOR UPDATE`` 锁 actor 行,非 admin 或已停用
         → ``PermissionError``,不写入)。
 
         ``plugin_id`` 只做最小护栏——空串/纯空白直接拒绝。「必须在已装载的
@@ -65,7 +65,7 @@ class ExtensionToggleStore:
             actor = db.execute(
                 ACTOR_ADMIN_ROLE_LOCK_SQL, (actor_id,)
             ).fetchone()
-            if actor is None or actor["role"] != "admin":
+            if actor is None or actor["role"] != "admin" or actor["status"] != "active":
                 raise PermissionError("admin role required")
             # 取时必须在 FOR UPDATE 拿到 actor 行锁之后:在锁外取时,一个先取
             # 时、后拿锁的请求会用更旧的时间戳盖掉更新的写,让 updated_at 倒退。

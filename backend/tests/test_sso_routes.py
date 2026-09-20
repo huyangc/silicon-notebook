@@ -156,6 +156,21 @@ def test_sso_name_does_not_claim_unlinked_same_name(setup):
     assert "尚未关联" in response.json()["detail"]
 
 
+@pytest.mark.parametrize("provider_response", [{"code": "private-code"}, {"error": "private-error"}])
+def test_callback_without_browser_proof_redirects_to_sanitized_recovery(setup, provider_response):
+    client, identity, provider, flow = setup
+    _dual(identity)
+    start = client.post("/api/auth/sso/start")
+    state = parse_qs(urlsplit(start.json()["authorization_url"]).query)["state"][0]
+    client.cookies.clear()
+    response = client.get("/api/auth/sso/callback", params={"state": state, **provider_response})
+    assert response.status_code == 303
+    assert response.headers["location"] == "http://localhost:3000/auth/sso/callback?error=authentication_failed"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert provider.calls == []
+
+
 def test_binding_is_rejected_after_original_session_logout(setup):
     client, identity, provider, flow = setup
     original = _local_user(client)

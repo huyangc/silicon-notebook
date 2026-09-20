@@ -187,19 +187,31 @@ def test_empty_or_whitespace_plugin_id_is_rejected_and_nothing_is_written(
     assert store.extension_runtime_disabled_ids() == frozenset()
 
 
-def test_a_demoted_actor_is_rechecked_at_write_time_not_at_call_time(
-    store: ExtensionToggleStore, database: SqliteDatabase,
+@pytest.mark.parametrize("revoked_attribute", ["role", "status"])
+def test_a_demoted_or_disabled_actor_is_rechecked_at_write_time_not_at_call_time(
+    store: ExtensionToggleStore, database: SqliteDatabase, revoked_attribute: str,
 ):
     """Authorization must be read inside the write transaction, not cached
     from an earlier check — mirrors ``identity_store.set_user_role``'s own
     rationale (never trust a role read before the write started)."""
     _seed_user(database, user_id="user-was-admin", role="admin")
     store.set_extension_runtime_enabled("plugin-e", False, "user-was-admin")
+    original = store.list_extension_runtime_toggles()
 
     with database.write() as db:
-        db.execute("UPDATE users SET role='user' WHERE id=?", ("user-was-admin",))
+        if revoked_attribute == "role":
+            db.execute("UPDATE users SET role='user' WHERE id=?", ("user-was-admin",))
+        else:
+            db.execute("UPDATE users SET status='disabled' WHERE id=?", ("user-was-admin",))
 
     with pytest.raises(PermissionError, match="admin role required"):
         store.set_extension_runtime_enabled("plugin-e", True, "user-was-admin")
-    # The earlier disable is untouched — the rejected re-enable never wrote.
+    with pytest.raises(PermissionError, match="admin role required"):
+        store.set_extension_runtime_enabled("new-plugin", False, "user-was-admin")
+    # Neither an upsert nor an insert may change toggles or their audit fields.
+    assert store.list_extension_runtime_toggles() == original
     assert store.extension_runtime_disabled_ids() == frozenset({"plugin-e"})
+    with database.write() as db:
+        db.execute("UPDATE users SET role='admin',status='active' WHERE id=?", ("user-was-admin",))
+    assert store.set_extension_runtime_enabled("plugin-e",True,"user-was-admin")["enabled"] is True
+    assert store.extension_runtime_disabled_ids() == frozenset()

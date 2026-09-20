@@ -18,7 +18,7 @@ proves what is genuinely backend-specific:
   impossible there, so that side has no twin) instead of SQLite's process-
   wide write mutex;
 - the demoted-actor recheck race (mirrors
-  ``test_extension_toggle_store.py::test_a_demoted_actor_is_rechecked_at_write_time_not_at_call_time``)
+  ``test_extension_toggle_store.py::test_a_demoted_or_disabled_actor_is_rechecked_at_write_time_not_at_call_time``)
   is re-proved here because PostgreSQL's per-connection isolation makes it a
   genuinely different code path (``FOR UPDATE`` + a second connection's
   concurrent ``UPDATE``) from SQLite's single process-wide writer lock.
@@ -162,9 +162,10 @@ def test_enabled_column_is_a_real_postgres_boolean_not_the_bigint_flag_conventio
     assert str(row["t"]) == "boolean"
 
 
-def test_a_demoted_actor_is_rechecked_at_write_time_not_at_call_time(store):
+@pytest.mark.parametrize("revoked_attribute", ["role", "status"])
+def test_a_demoted_or_disabled_actor_is_rechecked_at_write_time_not_at_call_time(store, revoked_attribute):
     """PG twin of
-    ``test_extension_toggle_store.py::test_a_demoted_actor_is_rechecked_at_write_time_not_at_call_time``.
+    ``test_extension_toggle_store.py::test_a_demoted_or_disabled_actor_is_rechecked_at_write_time_not_at_call_time``.
 
     Authorization must be read inside the write transaction, not cached from
     an earlier check — mirrors ``identity_store.set_user_role``'s own
@@ -175,16 +176,24 @@ def test_a_demoted_actor_is_rechecked_at_write_time_not_at_call_time(store):
     """
     _seed_user(store.database, user_id="user-was-admin", username="a00000007", role="admin")
     store.set_extension_runtime_enabled("plugin-f", False, "user-was-admin")
+    original = store.list_extension_runtime_toggles()
 
     with store.database.write() as connection:
-        connection.execute(
-            "UPDATE users SET role='user' WHERE id=%s", ("user-was-admin",)
-        )
+        if revoked_attribute == "role":
+            connection.execute("UPDATE users SET role='user' WHERE id=%s", ("user-was-admin",))
+        else:
+            connection.execute("UPDATE users SET status='disabled' WHERE id=%s", ("user-was-admin",))
 
     with pytest.raises(PermissionError):
         store.set_extension_runtime_enabled("plugin-f", True, "user-was-admin")
-    # The earlier disable is untouched — the rejected re-enable never wrote.
+    with pytest.raises(PermissionError):
+        store.set_extension_runtime_enabled("new-plugin", False, "user-was-admin")
+    assert store.list_extension_runtime_toggles() == original
     assert store.extension_runtime_disabled_ids() == frozenset({"plugin-f"})
+    with store.database.write() as connection:
+        connection.execute("UPDATE users SET role='admin',status='active' WHERE id=%s", ("user-was-admin",))
+    assert store.set_extension_runtime_enabled("plugin-f",True,"user-was-admin")["enabled"] is True
+    assert store.extension_runtime_disabled_ids() == frozenset()
 
 
 def test_set_extension_runtime_enabled_holds_a_real_row_lock_on_the_actor(store):

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchMe } from "../../auth";
 import { PageHeader } from "../../components/PageHeader";
 import { toUserMessage } from "../../errors";
@@ -39,6 +39,11 @@ export default function AdminAuthPage() {
   const [policy, setPolicy] = useState<AuthPolicy | null>(null);
   const [preflight, setPreflight] = useState<AuthMigrationPreflight | null>(null);
   const [accounts, setAccounts] = useState<AuthAccountPage | null>(null);
+  const [accountsBusy, setAccountsBusy] = useState(false);
+  const [accountsError, setAccountsError] = useState("");
+  const accountReadRef = useRef(0);
+  const accountReadInFlight = useRef(false);
+  const failedAccountOffset = useRef(0);
   const [audit, setAudit] = useState<AuthAuditPage | null>(null);
   const [auditError, setAuditError] = useState("");
   const [auditBusy, setAuditBusy] = useState(false);
@@ -55,11 +60,43 @@ export default function AdminAuthPage() {
   const [busy, setBusy] = useState(false);
 
   async function reload(offset = accounts?.offset ?? 0) {
-    const [nextPolicy, nextPreflight, nextAccounts] = await Promise.all([
-      fetchAuthPolicy(), fetchAuthMigration(), fetchAuthAccounts(offset),
-    ]);
-    setPolicy(nextPolicy); setPreflight(nextPreflight); setAccounts(nextAccounts); setMode(nextPolicy.mode);
-    setMaintenanceGeneration(nextPolicy.config_generation);
+    // A post-mutation refresh supersedes any older pagination read.
+    const read = ++accountReadRef.current;
+    accountReadInFlight.current = true;
+    setAccountsBusy(true); setAccountsError("");
+    try {
+      const [nextPolicy, nextPreflight, nextAccounts] = await Promise.all([
+        fetchAuthPolicy(), fetchAuthMigration(), fetchAuthAccounts(offset),
+      ]);
+      if (read !== accountReadRef.current) return;
+      setPolicy(nextPolicy); setPreflight(nextPreflight); setAccounts(nextAccounts); setMode(nextPolicy.mode);
+      setMaintenanceGeneration(nextPolicy.config_generation);
+    } finally {
+      if (read === accountReadRef.current) {
+        accountReadInFlight.current = false;
+        setAccountsBusy(false);
+      }
+    }
+  }
+
+  async function loadAccountsPage(offset: number) {
+    // The ref closes the gap before React paints the disabled controls.
+    if (busy || accountReadInFlight.current) return;
+    const read = ++accountReadRef.current;
+    accountReadInFlight.current = true;
+    failedAccountOffset.current = offset;
+    setAccountsBusy(true); setAccountsError("");
+    try {
+      const next = await fetchAuthAccounts(offset);
+      if (read === accountReadRef.current) setAccounts(next);
+    } catch (cause) {
+      if (read === accountReadRef.current) setAccountsError(toUserMessage(cause, "加载账号列表失败，请重试。"));
+    } finally {
+      if (read === accountReadRef.current) {
+        accountReadInFlight.current = false;
+        setAccountsBusy(false);
+      }
+    }
   }
 
   async function reloadAudit(offset = audit?.offset ?? 0) {
@@ -70,14 +107,18 @@ export default function AdminAuthPage() {
   }
 
   useEffect(() => {
+    let cancelled = false;
     void (async () => {
       try {
         const me = await fetchMe();
+        if (cancelled) return;
         if (me.role !== "admin") { setError("无权限：仅管理员可管理认证迁移。"); return; }
         await reload(0);
+        if (cancelled) return;
         await reloadAudit(0);
-      } catch (cause) { setError(toUserMessage(cause, "加载认证迁移状态失败，请稍后重试。")); }
+      } catch (cause) { if (!cancelled) setError(toUserMessage(cause, "加载认证迁移状态失败，请稍后重试。")); }
     })();
+    return () => { cancelled = true; accountReadRef.current += 1; accountReadInFlight.current = false; };
   }, []);
 
   async function changePolicy() {
@@ -154,7 +195,8 @@ export default function AdminAuthPage() {
       {grant && <p className="admin-auth-grant"><strong>一次性迁移凭证：</strong><code>{grant.grant_token}</code>，有效期 {grant.expires_in} 秒。</p>}
     </section>
     <section className="admin-auth-card"><h2>账号状态</h2><table><thead><tr><th>用户</th><th>统一身份</th><th>状态</th><th>操作</th></tr></thead><tbody>{accounts.items.map((account) => <tr key={account.id}><td>{account.display_name || account.username}</td><td>{account.identity_status === "active" ? account.subject || "已关联" : "未关联"}</td><td>{account.status === "active" ? "启用" : "已停用"}</td><td><button type="button" disabled={busy} onClick={() => { void setAccountStatus(account); }}>{account.status === "active" ? "停用" : "启用"}</button></td></tr>)}</tbody></table>
-      <div className="admin-auth-pagination"><button type="button" disabled={busy || accounts.offset === 0} onClick={() => { void reload(priorOffset); }}>上一页</button><span>第 {Math.floor(accounts.offset / accounts.limit) + 1} 页</span><button type="button" disabled={busy || (accounts.total !== undefined && nextOffset >= accounts.total)} onClick={() => { void reload(nextOffset); }}>下一页</button></div>
+      <div className="admin-auth-pagination"><button type="button" disabled={busy || accountsBusy || accounts.offset === 0} onClick={() => { void loadAccountsPage(priorOffset); }}>上一页</button><span role="status">{accountsBusy ? "正在加载账号列表…" : `第 ${Math.floor(accounts.offset / accounts.limit) + 1} 页`}</span><button type="button" disabled={busy || accountsBusy || (accounts.total !== undefined && nextOffset >= accounts.total)} onClick={() => { void loadAccountsPage(nextOffset); }}>下一页</button></div>
+      {accountsError && <div><p className="admin-auth-error" role="alert">{accountsError}</p><button type="button" disabled={busy || accountsBusy} onClick={() => { void loadAccountsPage(failedAccountOffset.current); }}>重试加载账号</button></div>}
     </section>
     <section className="admin-auth-card"><h2>认证审计</h2><p>只显示账号迁移与身份操作记录，不展示凭证或凭证引用。</p>
       {auditError && <p className="admin-auth-error" role="alert">{auditError}</p>}
