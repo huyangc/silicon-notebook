@@ -4,10 +4,10 @@ import { listNotebooks } from "../notebook-api.ts";
 import { askQuestionLimitHint } from "../ask-api.ts";
 import { httpErrorStatus, toUserMessage } from "../errors.ts";
 import {
-  askGlobal, cancelGlobalJob, getGlobalConversation, getGlobalJob, globalJobIsGone, listGlobalConversations,
+  askGlobal, cancelGlobalJob, getGlobalConversation, getGlobalJob, listGlobalConversations,
   previewGlobalAskIntent, submitGlobalFeedback,
   GLOBAL_ASK_MAX_NOTEBOOKS, GLOBAL_ASK_PAGE_SIZE, submittableGlobalScope,
-  type GlobalConversation, type GlobalJob, type GlobalScope,
+  type GlobalConversation, type GlobalConversationDetail, type GlobalJob, type GlobalScope,
 } from "../global-ask-api.ts";
 import { ASK_MODES, DEFAULT_ASK_MODE, askModeIds, submissionAskMode } from "../ask-modes.ts";
 import { isAdvanced, normalizeUiMode, type UiMode } from "../ui-mode.ts";
@@ -313,6 +313,19 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
         previousProgress = nextProgress;
         terminal = update.status !== "running";
       } catch (cause) {
+        // 作业不存在了（别的标签页把它停掉并丢弃了）：这不是「暂时读不到」。重试只会
+        // 永远 404、输入区永远锁着——以服务端为准对一次账，这一轮到此为止。
+        if (isCurrent() && httpErrorStatus(cause) === 404) {
+          const synced = await readConversation(running!.conversation_id);
+          if (isCurrent() && synced !== null) {
+            terminal = true;
+            setPollError("");
+            if (synced === "gone") dropConversationIdentity(running!.conversation_id);
+            else applyConversation(synced);
+            if (synced === "gone" || !synced.turns.some((item) => item.job_id === running!.job_id)) handBack(running!.question);
+            return;
+          }
+        }
         if (isCurrent()) {
           interval = Math.min(POLL_MAX_INTERVAL_MS, interval * POLL_BACKOFF_FACTOR);
           setPollError(toUserMessage(cause, "暂时无法获取进度，正在自动重试；任务仍可能在后台运行"));
@@ -600,35 +613,11 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
         // 提交还没回来用户就按了停止：作业刚建好、什么都还没上屏——停掉并丢弃，
         // 问题回到输入框（情形二）。停不掉就照常接管它，停止键仍在。
         stopRequested.current = false;
-        try {
-          const stopped = await cancelGlobalJob(job.job_id, true);
-          const gone = stopped.status === "cancelled" && await globalJobIsGone(job.job_id) === true;
-          if (!mounted.current || ticket !== owner.current) return;
-          if (gone) {
-            const remaining = currentTurns.current.filter((item) => item.job_id !== job.job_id && item.job_id !== replaces);
-            setTurns(remaining);
-            returnQuestion();
-            settleDiscard(remaining, job.conversation_id);
-            return;
-          }
-          // 没删成：别处先一步停了它，或它抢在取消到达之前已经答完。接管的是取消
-          // 接口交回的**整份**作业——只抄状态的话，一条已完成的作业会顶着 done 却没有
-          // 回答，轮询也不会再去取。
-          adopted = stopped;
-        } catch (cause) {
-          // 取消的响应丢了，但服务端可能已经停掉并删了它：确认到 404 就按丢弃收尾，
-          // 否则本地会攥着一条服务端不存在的 running 作业，轮询与再次停止都永远 404。
-          const gone = await globalJobIsGone(job.job_id) === true;
-          if (!mounted.current || ticket !== owner.current) return;
-          if (gone) {
-            const remaining = currentTurns.current.filter((item) => item.job_id !== job.job_id && item.job_id !== replaces);
-            setTurns(remaining);
-            returnQuestion();
-            settleDiscard(remaining, job.conversation_id);
-            return;
-          }
-          setError(toUserMessage(cause, "停止失败，请重试"));
-        }
+        const outcome = await discardJob(job, () => mounted.current && ticket === owner.current);
+        if (!mounted.current || ticket !== owner.current) return;
+        if (outcome === null) return;
+        if (outcome === "failed") setError("停止失败，请重试");
+        else adopted = outcome;
       }
       const seed = handOffIntentTrace(pendingRef.current?.trace ?? []);
       if (seed.length) setTraceSeeds((seeds) => ({ ...seeds, [job.job_id]: seed }));
@@ -657,39 +646,33 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
       });
     } catch (cause) {
       if (mounted.current && ticket === owner.current) {
+        const stopWanted = stopRequested.current;
         returnQuestion();
         setError(toUserMessage(cause, "提交失败，请重试；重复提交不会创建重复任务"));
-        // 带替换的提交失败有两种可能，重拉一次会话才分得清：
-        //   · 响应丢了、其实已经成功——会话里多出一条我们没见过的、问题相同的作业：
-        //     那就是这次提交，直接认领它（清掉弹回的问题与错误），不给用户一个会
-        //     建出重复回答的「重试」；
-        //   · 本地那条「已停止」记录在服务端已经不在了（别处替换过）——换上真实的
-        //     轮次，并作废这次的重试身份：下一次提交按新状态重新算要不要替换。
-        if (replaces && conversationId) {
+        // 失败不等于没提交：响应可能只是丢了。凡是这次提交带着「替换」或一次还没
+        // 兑现的「停止」，就以服务端为准重新同步一次会话（`readConversation`）：
+        //   · 会话里多出一条我们没见过的、问题相同的作业——那就是这次提交：认领它
+        //     （清掉弹回的问题与错误），不给用户一个会建出重复回答的「重试」；用户
+        //     按过停止的话，对它兑现那次停止；
+        //   · 本地那条「已停止」记录在服务端已经不在了——换上真实的轮次，并作废这次
+        //     的重试身份：下一次提交按新状态重新算要不要替换；
+        //   · 会话本身不在了——退回「还没有会话」。
+        if ((replaces || stopWanted) && conversationId) {
           const known = new Set(currentTurns.current.map((item) => item.job_id));
-          void getGlobalConversation(conversationId).then((detail) => {
-            if (!mounted.current || ticket !== owner.current || serial !== submitSerial.current) return;
-            const accepted = detail.turns.find((item) => !known.has(item.job_id) && item.question === question);
-            setTurns(detail.turns);
-            setTurnOffset(detail.has_more ? detail.next_offset : null);
+          const alive = () => mounted.current && ticket === owner.current && serial === submitSerial.current;
+          void readConversation(conversationId).then(async (synced) => {
+            if (!alive() || synced === null) return;
             retryRequest.current = null;
-            if (accepted) {
-              setDraft((draft) => draft.trim() === question ? "" : draft);
-              setError("");
+            if (synced === "gone") { dropConversationIdentity(conversationId); return; }
+            applyConversation(synced);
+            const accepted = synced.turns.find((item) => !known.has(item.job_id) && item.question === question);
+            if (!accepted) return;
+            setDraft((draft) => draft.trim() === question ? "" : draft);
+            setError("");
+            if (stopWanted && accepted.status === "running") {
+              const outcome = await discardJob(accepted, alive);
+              if (alive() && outcome === "failed") setError("停止失败，请重试");
             }
-          }).catch((recoveryCause) => {
-            // 会话本身已经不在了（丢弃时连空会话一起删了而本地没确认到，或在别处被
-            // 删）：退回「还没有会话」，否则之后每一次提交都指着一个不存在的会话。
-            // 其它重拉失败不盖过上面那条提交错误。
-            if (httpErrorStatus(recoveryCause) !== 404) return;
-            if (!mounted.current || ticket !== owner.current || serial !== submitSerial.current) return;
-            retryRequest.current = null;
-            setTurns([]);
-            setTurnOffset(null);
-            currentId.current = "";
-            setConversationId("");
-            setConversationTitle("");
-            updateUrl("");
           });
         }
       }
@@ -702,26 +685,82 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     }
   }
 
-  /** 丢弃之后的会话身份：服务端在丢掉会话里最后一条作业时连空会话一起删了
-   *  （与笔记本内问答同一条规则），本地也得退回「还没有会话」，否则下一次提问
-   *  会带着一个已经不存在的会话 id 去提交。 */
-  function settleDiscard(remaining: readonly GlobalJob[], discardedConversationId: string) {
-    // 服务端少了一行：更早的问答按 OFFSET 分页，游标得跟着退一格，否则下一次
-    //「加载更早的问答」会整条跳过原本排在边界上的那一轮。
-    setTurnOffset((offset) => offset === null ? null : Math.max(0, offset - 1));
-    if (remaining.length || turnOffset !== null) return;
-    if (currentId.current && currentId.current !== discardedConversationId) return;
-    currentId.current = "";
-    setConversationId("");
-    setConversationTitle("");
-    updateUrl("");
-    ++historyVersion.current;
-    // 与 `removeConversation` 同一条账：列表里少了一条已加载的会话，历史分页的
-    // OFFSET 游标跟着退一格。
-    if (conversations.some((item) => item.id === discardedConversationId)) {
-      setHistoryOffset((offset) => Math.max(0, offset - 1));
+  // ------------------------------------------------------------------
+  // 与服务端对账的**唯一**接缝。
+  //
+  // 替换与丢弃都会让服务端的作业、乃至整条会话消失，而响应可能丢、别的标签页也可能
+  // 先动手。凡是本地与服务端可能已经不一致的地方——停止并丢弃之后、取消失败之后、
+  // 带替换 / 带停止的提交失败之后、轮询读到 404 之后——一律**重读会话、以它为准**，
+  // 不在各个调用点各猜各的（那样每个点都要重新发明「游标退一格」「会话还在不在」）。
+  // ------------------------------------------------------------------
+
+  /** 重读一条会话。`"gone"` = 服务端已经没有它；`null` = 这次没读到（网络 / 5xx），
+   *  什么都不能断言。 */
+  async function readConversation(id: string) {
+    try {
+      return await getGlobalConversation(id);
+    } catch (cause) {
+      return httpErrorStatus(cause) === 404 ? "gone" as const : null;
     }
-    setConversations((items) => items.filter((item) => item.id !== discardedConversationId));
+  }
+
+  /** 把服务端的第一页装进视图：轮次与「更早的问答」游标一起换，两者因此不会错位。 */
+  function applyConversation(detail: GlobalConversationDetail) {
+    setTurns(detail.turns);
+    setTurnOffset(detail.has_more ? detail.next_offset : null);
+    setConversationTitle(detail.title || "");
+  }
+
+  /** 会话在服务端已经不存在：退回「还没有会话」，历史列表与它的 OFFSET 游标同步。 */
+  function dropConversationIdentity(id: string) {
+    setTurns([]);
+    setTurnOffset(null);
+    retryRequest.current = null;
+    if (!currentId.current || currentId.current === id) {
+      currentId.current = "";
+      setConversationId("");
+      setConversationTitle("");
+      updateUrl("");
+    }
+    ++historyVersion.current;
+    if (conversations.some((item) => item.id === id)) setHistoryOffset((offset) => Math.max(0, offset - 1));
+    setConversations((items) => items.filter((item) => item.id !== id));
+  }
+
+  /** 情形二的问题交还：pending 轮撤掉，输入框空着就把问题放回去。 */
+  function handBack(question: string) {
+    showPending(null);
+    setDraft((draft) => draft.trim() ? draft : question);
+  }
+
+  /**
+   * 停掉一条还没有任何过程输出的作业，并以服务端为准收尾。
+   *   · `null`——它已经不在了（连同它开出来的空会话）：问题已交还输入框；
+   *   · 一条作业——它还在：别处先一步停了它、它抢先答完了、或这次没能确认删除。
+   *     交回的是服务端那一份**完整**的作业；
+   *   · `"failed"`——取消没成、也读不到会话：什么都没变，停止键仍可重试。
+   */
+  async function discardJob(target: GlobalJob, alive: () => boolean): Promise<GlobalJob | null | "failed"> {
+    let answered: GlobalJob | null = null;
+    try {
+      answered = await cancelGlobalJob(target.job_id, true);
+    } catch { /* 响应丢了不等于没停掉：下面照样对账。 */ }
+    // 抢在取消到达之前已经答完 / 失败：取消接口交回的就是终态，无需对账。
+    if (answered && answered.status !== "cancelled") return answered;
+    const synced = await readConversation(target.conversation_id);
+    if (!alive()) return answered ?? "failed";
+    if (synced === null) return answered ?? "failed";
+    if (synced === "gone") {
+      dropConversationIdentity(target.conversation_id);
+      handBack(target.question);
+      return null;
+    }
+    applyConversation(synced);
+    const still = synced.turns.find((item) => item.job_id === target.job_id);
+    // 还在跑、而取消请求又没成：这就是一次失败的停止，停止键留着重试。
+    if (still) return !answered && still.status === "running" ? "failed" : still;
+    handBack(target.question);
+    return null;
   }
 
   /**
@@ -740,36 +779,27 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     if (flight.current) return;
     const ticket = owner.current;
     const target = running;
-    const discard = !globalJobHasProcessOutput(target);
+    const alive = () => mounted.current && ticket === owner.current;
     flight.current = true;
     setStopping(true);
     try {
-      const job = await cancelGlobalJob(target.job_id, discard);
-      const gone = discard && job.status === "cancelled" && await globalJobIsGone(target.job_id) === true;
-      if (mounted.current && ticket === owner.current) {
-        setPollError("");
-        if (gone) {
-          const remaining = currentTurns.current.filter((item) => item.job_id !== job.job_id);
-          setTurns(remaining);
-          setDraft((draft) => draft.trim() ? draft : target.question);
-          settleDiscard(remaining, target.conversation_id);
-        } else {
+      if (globalJobHasProcessOutput(target)) {
+        // 情形一：停下来，记录留在对话里。
+        const job = await cancelGlobalJob(target.job_id, false);
+        if (alive()) {
+          setPollError("");
           setTurns((items) => items.map((item) => item.job_id === job.job_id ? mergeJob(item, job) : item));
+        }
+      } else {
+        const outcome = await discardJob(target, alive);
+        if (alive()) {
+          setPollError("");
+          if (outcome === "failed") setError("停止失败，请重试");
+          else if (outcome) setTurns((items) => items.map((item) => item.job_id === outcome.job_id ? mergeJob(item, outcome) : item));
         }
       }
     } catch (cause) {
-      // 同上：带丢弃的取消若其实已经成功，确认到 404 就照丢弃收尾，不留一条死作业。
-      const gone = discard && await globalJobIsGone(target.job_id) === true;
-      if (mounted.current && ticket === owner.current) {
-        if (gone) {
-          const remaining = currentTurns.current.filter((item) => item.job_id !== target.job_id);
-          setTurns(remaining);
-          setDraft((draft) => draft.trim() ? draft : target.question);
-          settleDiscard(remaining, target.conversation_id);
-        } else {
-          setError(toUserMessage(cause, "停止失败，请重试"));
-        }
-      }
+      if (alive()) setError(toUserMessage(cause, "停止失败，请重试"));
     } finally {
       if (ticket === owner.current) {
         flight.current = false;

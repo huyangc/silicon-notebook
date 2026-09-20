@@ -1,5 +1,4 @@
 import { requestJson, requestVoid } from "./api-client.ts";
-import { httpErrorStatus } from "./errors.ts";
 import { requestTaskStream } from "./request-task-stream.ts";
 import type { AnswerAnchorLike, CitationLike } from "./answer-formatting.ts";
 import type { ReasoningTraceStep } from "./ask-stream.ts";
@@ -164,26 +163,9 @@ export const previewGlobalAskIntent = (
 export const getGlobalJob = (id: string) =>
   requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}`, options).then(withAnswerIdentity);
 /** 停止一条作业。`discard`：还没有任何过程输出就停止——问题弹回输入框，服务端
- *  连这条记录（以及它刚开出来的空会话）一起丢掉，与笔记本内问答同一条规则。 */
-/** 「停止并丢弃」之后向服务端确认这条作业**真的不在了**。
- *
- *  `cancel?discard=true` 只丢弃被那次调用停下来的作业：别的标签页先一步停了它、
- *  或它已经不是会话里最新的一条时，服务端照样回 `cancelled` 却什么都没删。本地
- *  在确认之前不许当它已经消失——否则会把一条仍然存在的记录、连同它所在的会话，
- *  从这个视图里摘掉。404 才算确认（`true`），读到了就是还在（`false`）；读不到
- *  （网络错、5xx）先重读一次，仍读不到回 `null`——调用方按「没确认」保留记录，由
- *  之后的提交失败重拉去对账（会话已不存在时那里会退回「还没有会话」）。 */
-export async function globalJobIsGone(id: string): Promise<boolean | null> {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      await requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}`, options);
-      return false;
-    } catch (cause) {
-      if (httpErrorStatus(cause) === 404) return true;
-    }
-  }
-  return null;
-}
+ *  连这条记录（以及它刚开出来的空会话）一起丢掉，与笔记本内问答同一条规则。它只丢弃
+ *  **被这次调用停下来**的作业，响应也可能丢：调用方一律重读会话对账
+ *  （`use-global-ask.ts` 的 `discardJob`），不凭这里的返回值断言「已经删了」。 */
 export const cancelGlobalJob = (id: string, discard = false) =>
   requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}/cancel${discard ? "?discard=true" : ""}`, { ...options, method: "POST" }).then(withAnswerIdentity);
 export const submitGlobalFeedback = (jobId: string, rating: "useful" | "not_useful") =>
