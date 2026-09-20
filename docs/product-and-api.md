@@ -102,6 +102,9 @@ PostgreSQL 16 is the default deployment choice and is used in both the current d
 ## Global Ask
 
 Global Ask opens from a bottom-right bubble in the authenticated collection and notebook workspace.
+The bubble is 58px on the collection page; inside a notebook workspace it shrinks to 40px and tucks into
+the empty corner below-right of the Ask composer — the composer never makes room for it, so its left and
+right margins stay symmetric.
 Clicking opens a compact chat; expanding fills the viewport with history and chat.
 Minimizing, reopening and switching size retain the same mounted conversation, draft, scope and task
 progress; minimizing does not cancel a task. Embedded chat leaves the host URL unchanged and loads
