@@ -39,6 +39,25 @@ import { sourceImageAssetUrl } from "./source-image";
 import { label, TIER } from "./vocabulary";
 
 
+/**
+ * 此刻有几张引用卡正在接管 Esc。
+ *
+ * 卡片在 **window 捕获期**拦 Esc（`preventDefault` + `stopPropagation` + 收起自己），
+ * 所以冒泡期的任何宿主监听（React 合成事件在内）都拿不到这次按键——一次 Esc 只收
+ * 一层，卡片先走。剩下的一个缺口是原生 `<dialog>` 的 close request：捕获期
+ * `preventDefault()` 能否掐掉它各浏览器不完全一致，宿主（全局问答浮窗）因此在
+ * `oncancel` 上读这个计数兜底：有卡片接管就不关窗。
+ *
+ * 计数只在监听真的装上时才加（`dismissSuspended` 期间卡片让位给页面级图片预览，
+ * 那一刻 Esc 本来就该归预览弹窗），所以「计数 > 0」与「这次 Esc 会被卡片吃掉」是
+ * 同一件事，不是两份可能漂移的判断。
+ */
+let escapeHolders = 0;
+export function citationPopoverHoldsEscape(): boolean {
+  return escapeHolders > 0;
+}
+
+
 function InlineFormula({ latex }: { latex: string }) {
   let html = "";
   const normalized = unwrapStandaloneLatex(latex);
@@ -473,7 +492,20 @@ export function CitationPopover({
       if (ref.current && !ref.current.contains(event.target as Node)) onClose();
     };
     const onKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      // 输入法合成期的 Esc 是「取消候选」,不是「关卡片」。
+      if (event.key !== "Escape" || event.isComposing) return;
+      // ⚠ 捕获期 + preventDefault + stopPropagation,三件缺一不可:
+      //  · **捕获期**在整条派发路径最前面。冒泡期赶不上宿主挂在祖先上的监听——
+      //    React 18 把合成事件装在根容器上,全局问答浮窗那个 <dialog> 正是卡片的
+      //    祖先,它的 onKeyDown 会先跑、把整个浮窗收掉(卡片只是收了个寂寞)。
+      //  · `stopPropagation()` 让这次按键到不了任何冒泡期监听,于是「一次 Esc 只收
+      //    一层」是结构性的,不靠每个宿主自己记得判断。
+      //  · `preventDefault()` 掐掉原生 <dialog> 的 close request(Esc 的默认动作),
+      //    否则全屏形态下卡片关了、窗口也跟着关。浏览器对这一条的支持不完全一致,
+      //    宿主还有 `citationPopoverHoldsEscape()` 那道兜底。
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
     };
     const onScroll = (event: Event) => {
       // 浮层内部滚动(查看长内容)不应关闭;只有外部页面/祖先滚动导致脱锚时才关。
@@ -481,11 +513,13 @@ export function CitationPopover({
       onClose();
     };
     window.addEventListener("pointerdown", onDown, true);
-    window.addEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
     window.addEventListener("scroll", onScroll, true);
+    escapeHolders += 1;
     return () => {
+      escapeHolders -= 1;
       window.removeEventListener("pointerdown", onDown, true);
-      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("scroll", onScroll, true);
     };
   }, [dismissSuspended, onClose]);

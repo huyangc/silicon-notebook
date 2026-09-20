@@ -3,6 +3,7 @@
 import { lazy, Suspense, useLayoutEffect, useRef, useState } from "react";
 import { Maximize2, MessageSquare, Minimize2, Minus } from "lucide-react";
 import type { RootModalCoordinator } from "../use-root-modal-coordinator";
+import { citationPopoverHoldsEscape } from "../citation-card";
 import "./global-ask-launcher.css";
 import "./global-ask.css";
 
@@ -45,7 +46,13 @@ export function GlobalAskLauncher({ presentation }: { presentation: Presentation
 
   return <>
     <button ref={launcher} className="global-ask-bubble" aria-label="打开全局问答" title="全局问答" aria-expanded={open} aria-controls="global-ask-window" hidden={open} onClick={() => { setStarted(true); setMode("compact"); }}><MessageSquare size={25} strokeWidth={1.7} /><span className="global-bubble-label">全局问答</span></button>
-    <dialog ref={dialog} id="global-ask-window" className={`global-ask-window ${mode === "full" ? "is-full" : "is-compact"}`} style={{ zIndex: view.zIndex }} inert={open && !view.topmost ? true : undefined} aria-hidden={open && !view.topmost ? true : undefined} aria-label="全局问答" onCancel={(event) => { event.preventDefault(); presentation.requestClose("global-ask", "escape"); }} onKeyDown={(event) => { if (event.key === "Escape" && !event.defaultPrevented) { event.preventDefault(); presentation.requestClose("global-ask", "escape"); } }}>
+    <dialog ref={dialog} id="global-ask-window" className={`global-ask-window ${mode === "full" ? "is-full" : "is-compact"}`} style={{ zIndex: view.zIndex }} inert={open && !view.topmost ? true : undefined} aria-hidden={open && !view.topmost ? true : undefined} aria-label="全局问答"
+      // 引用小卡片在 window 捕获期就把 Esc 吃掉了（preventDefault + stopPropagation），
+      // 所以下面那个 onKeyDown 在有卡片时根本不会触发。剩下的缺口只有原生 <dialog>
+      // 的 close request：捕获期 preventDefault 能否掐掉它各浏览器不一致，这里读卡片
+      // 自己报出的「我正接管 Esc」兜一道，避免「卡片关了、窗口也跟着关」。
+      onCancel={(event) => { event.preventDefault(); if (citationPopoverHoldsEscape()) return; presentation.requestClose("global-ask", "escape"); }}
+      onKeyDown={(event) => { if (event.key === "Escape" && !event.defaultPrevented) { event.preventDefault(); presentation.requestClose("global-ask", "escape"); } }}>
       {started && <Suspense fallback={<div className="global-window-loading" role="status">正在打开全局问答…<button className="sort-button" onClick={() => setMode("closed")}>收起</button></div>}>
         <GlobalAskWorkspace embedded active={open} compact={mode !== "full"} onOpenNotebook={() => setMode("closed")} controls={<>
           <button autoFocus className="icon-button" aria-label={mode === "full" ? "退出全屏" : "全屏展开"} title={mode === "full" ? "退出全屏" : "全屏展开"} onClick={() => setMode(mode === "full" ? "compact" : "full")}>{mode === "full" ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>

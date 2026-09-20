@@ -5,6 +5,7 @@ import {
   appSourceModules,
   declarations,
   importsFrom,
+  jsxElements,
   parseModule,
 } from "../../test-support/semantic-source.mjs";
 
@@ -121,6 +122,25 @@ test("both ask surfaces render answers through the shared answer panel", async (
     assert.equal(names(globalAsk, "function").has(name), false);
     assert.equal(names(answerPanel, "function").has(name), true);
   }
+
+  // 正向判据：只断言 import 挡不住「换个名字就地复制一份、import 留着不用」。
+  // 新作业那条路径必须**真的**渲染 <AnswerView>，且渲染的就是 `job.answer`。
+  const views = jsxElements(globalAsk, "AnswerView");
+  assert.equal(views.length, 1, "ask/global-ask-workspace.tsx 里的 <AnswerView> 调用点数量漂移，守卫失效");
+  assert.equal(
+    views[0].bindings?.answer,
+    "job.answer",
+    "新作业必须把 job.answer 原样交给共享的 AnswerView",
+  );
+
+  // 反向判据：答案渲染原语的 import 清单**逐字**钉死。把 AnswerView 的实现抄一份
+  // 进来，必然要拉进它用的那些原语（answer-markdown 的正文渲染器、answer-panel 的
+  // 内部卡片…），清单一变这里就红。历史轮次那条路径只用 AnswerMarkdown。
+  assert.deepEqual(
+    new Set(importsFrom(globalAsk, "../answer-markdown").map((item) => item.imported)),
+    new Set(["AnswerMarkdown", "AnswerReference"]),
+  );
+  assert.deepEqual(imported, new Set(["AnswerView", "ReasoningTracePanel"]));
 });
 
 

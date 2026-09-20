@@ -100,6 +100,21 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
   const wasActive = useRef(active);
   const running = turns.find((turn) => turn.status === "running");
 
+  /**
+   * 退休在途的问题理解与它的审阅卡。
+   *
+   * **凡是推进 `owner.current` 的地方都必须调它**：`previewIntent` 的 finally 只在
+   * 「自己仍是当前那次预检」时才收 `intentChecking`，owner 换了而这里没清，界面就会
+   * 永久停在「取消问题理解」——草稿框、范围、引擎全禁用，而 `abortIntent()` 已经是
+   * 空动作，只能刷新页面。
+   */
+  const retireIntent = useCallback(() => {
+    intentAbort.current?.abort();
+    intentAbort.current = null;
+    setIntentChecking(false);
+    setIntentReview(null);
+  }, []);
+
   const load = useCallback(async () => {
     const ticket = ++owner.current;
     const libraryTicket = ++notebookVersion.current;
@@ -107,6 +122,8 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     const preserveScope = initialized.current;
     const draftScope = currentScope.current;
     ++historyVersion.current;
+    // owner 刚被推进，在途预检随之失去归属：必须在同一处退休它（见 retireIntent）。
+    retireIntent();
     setLoading(true);
     setOpenFailed(Boolean(resumeId));
     setError("");
@@ -139,7 +156,7 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     } finally {
       if (mounted.current && owner.current === ticket) setLoading(false);
     }
-  }, [syncUrl]);
+  }, [syncUrl, retireIntent]);
 
   useEffect(() => {
     mounted.current = true;
@@ -258,11 +275,8 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     setConversationId(id);
     setDraft("");
     setScope({ mode: "all" });
-    // 切换对话同样退休在途的问题理解与审阅卡（同 resetConversation 的理由）。
-    intentAbort.current?.abort();
-    intentAbort.current = null;
-    setIntentChecking(false);
-    setIntentReview(null);
+    // 切换对话同样推进了 owner：在途的问题理解与审阅卡一并退休。
+    retireIntent();
     try {
       const detail = await getGlobalConversation(id);
       if (!mounted.current || ticket !== owner.current) return;
@@ -288,10 +302,7 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     setStopping(false);
     // 在途的问题理解属于旧对话：连同它的审阅卡一起退休，否则确认时会把上一段
     // 对话的问题提交进新对话。
-    intentAbort.current?.abort();
-    intentAbort.current = null;
-    setIntentChecking(false);
-    setIntentReview(null);
+    retireIntent();
     // Explicitly starting over ends the old draft's idempotent retry identity.
     retryRequest.current = null;
     setConversationId("");
@@ -386,7 +397,9 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
       const contract = await previewGlobalAskIntent(
         question, conversationId || undefined, scope, controller.signal,
       );
-      if (!mounted.current || ticket !== owner.current) return;
+      // `signal.aborted` 也要查：流可能已经返回、而用户恰在这一瞬点了「取消问题
+      // 理解」。只 abort 请求不查这一下，作业照样会被建出来——取消变成了假的。
+      if (!mounted.current || ticket !== owner.current || controller.signal.aborted) return;
       const understandingMs = Math.max(0, Date.now() - startedAt);
       if (contract.needs_clarification) {
         setIntentReview({ question, contract, understandingMs });
@@ -400,8 +413,17 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
       // 用户自己按下的「取消问题理解」不是失败，不上错误条。
       if (!controller.signal.aborted) setError(toUserMessage(cause, "问题理解没能完成，请重试"));
     } finally {
-      if (intentAbort.current === controller) intentAbort.current = null;
-      if (mounted.current && ticket === owner.current) setIntentChecking(false);
+      // 判据是「自己这次预检是否仍是当前那一次」，**不看 ticket**：owner 换过
+      // （load / 切换对话 / 新建对话）时那条路径已经 retireIntent 收过状态了，而
+      // 按 ticket 判会让本次的收尾整个跳过，界面永久停在「取消问题理解」。
+      // 判据是「自己这次预检是否仍是当前那一次」，**不看 ticket**：owner 换过
+      // （load / 切换对话 / 新建对话）时那条路径已经 retireIntent 收过状态了，
+      // 按 ticket 判则会把本次的收尾整个跳过。两道一起才让「界面永久停在『取消
+      // 问题理解』」不可能发生——退休不再依赖每一个未来的 owner 推进点都记得调。
+      if (intentAbort.current === controller) {
+        intentAbort.current = null;
+        if (mounted.current) setIntentChecking(false);
+      }
     }
   }
 

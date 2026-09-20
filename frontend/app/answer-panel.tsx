@@ -1050,6 +1050,7 @@ export function AnswerView({
   notebookNames,
   notebookHref,
   onOpenNotebook,
+  dismissSignal,
   onBuildScaleIndex,
   buildingScaleIndex,
   scaleIndexStatus,
@@ -1095,6 +1096,11 @@ export function AnswerView({
   /** 「打开笔记本」按下之后的收尾（全局问答借此收起浮窗）。只在 notebookHref
    *  也传了、且那颗按钮真渲染出来时才有意义。 */
   onOpenNotebook?: () => void;
+  /** 值一变就收起本视图里开着的引用卡。宿主借此在自己被收起/隐藏时把卡片一并收掉
+   *  ——卡片是 `position: fixed` 且在 window 捕获期接管 Esc 的，留着不收会在宿主
+   *  已经看不见之后继续吃掉页面的下一次 Esc（全局问答浮窗收起后本组件仍然挂载）。
+   *  缺省即不参与，单库调用点不传，行为逐字不变。 */
+  dismissSignal?: unknown;
   onBuildScaleIndex?: (notebookId: string) => void;
   buildingScaleIndex: boolean;
   scaleIndexStatus?: Pick<ScaleIndexStatus, "exists" | "building" | "state"> | null;
@@ -1185,6 +1191,7 @@ export function AnswerView({
     );
   };
   useEffect(() => setCitePopover(null), [answer.answer_id]);
+  useEffect(() => setCitePopover(null), [dismissSignal]);
   useEffect(() => {
     if (!copied) return;
     const timer = window.setTimeout(() => setCopied(false), 1400);
