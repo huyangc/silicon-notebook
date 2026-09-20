@@ -93,8 +93,23 @@ const root = "/global-ask";
 
 export const listGlobalConversations = (offset = 0) =>
   requestJson<GlobalConversation[]>(`${root}/conversations?limit=${GLOBAL_ASK_PAGE_SIZE}&offset=${offset}`, options);
+/**
+ * 全局回答的身份就是它的作业。
+ *
+ * 全局回答不落任何笔记本的 answers 表,而 `answer_id` 是那张表铸的——所以较早完成的
+ * 全局作业存下来的 `answer.answer_id` 是空串(后端现在在完成时用 `job_id` 补上,
+ * 但已经落库的旧作业不会回填)。共享的 `AnswerView` 以它为键:按回答重置引用小卡片,
+ * 并且只在它非空时才提供按回答的动作(分享)。在**读入口**统一补一次,下游就不用各自
+ * 判断「这条全局回答有没有 id」。
+ */
+export function withAnswerIdentity(job: GlobalJob): GlobalJob {
+  if (!job.answer || job.answer.answer_id) return job;
+  return { ...job, answer: { ...job.answer, answer_id: job.job_id } };
+}
+
 export const getGlobalConversation = (id: string, offset = 0) =>
-  requestJson<GlobalConversationDetail>(`${root}/conversations/${encodeURIComponent(id)}?limit=${GLOBAL_ASK_PAGE_SIZE}&offset=${offset}`, options);
+  requestJson<GlobalConversationDetail>(`${root}/conversations/${encodeURIComponent(id)}?limit=${GLOBAL_ASK_PAGE_SIZE}&offset=${offset}`, options)
+    .then((detail) => ({ ...detail, turns: detail.turns.map(withAnswerIdentity) }));
 export const renameGlobalConversation = (id: string, title: string) =>
   requestJson<GlobalConversation>(`${root}/conversations/${encodeURIComponent(id)}`, {
     ...options, method: "PATCH", body: JSON.stringify({ title }),
@@ -111,7 +126,8 @@ export const askGlobal = (input: {
   /** 「逐步推理」的问题理解结果。预检说需要澄清时由用户在审阅卡里补齐后回传。 */
   intent?: AskIntentConfirmation;
   retrieval_effort?: AskRetrievalEffortId;
-}) => requestJson<GlobalJob>(`${root}/ask`, { ...options, method: "POST", body: JSON.stringify(input) });
+}) => requestJson<GlobalJob>(`${root}/ask`, { ...options, method: "POST", body: JSON.stringify(input) })
+  .then(withAnswerIdentity);
 
 /**
  * 全局问答的问题理解预检。与单库的 `/notebooks/{id}/ask/intent/stream` 完全同形
@@ -142,13 +158,13 @@ export const previewGlobalAskIntent = (
   },
 );
 export const getGlobalJob = (id: string) =>
-  requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}`, options);
+  requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}`, options).then(withAnswerIdentity);
 export const cancelGlobalJob = (id: string) =>
-  requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}/cancel`, { ...options, method: "POST" });
+  requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}/cancel`, { ...options, method: "POST" }).then(withAnswerIdentity);
 export const submitGlobalFeedback = (jobId: string, rating: "useful" | "not_useful") =>
   requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(jobId)}/feedback`, {
     ...options, method: "POST", body: JSON.stringify({ rating }),
-  });
+  }).then(withAnswerIdentity);
 
 // --- 回答投影：新形状 `job.answer` 优先，旧形状 `job.response` 兜底 ------------
 //

@@ -276,6 +276,10 @@ def test_chunk_mode_returns_standard_ask_response(service):
     # 的),不补的话界面会把**提交**时刻显示成回答时刻。
     assert result.answer.answered_at
     assert result.answer.answered_at >= result.created_at
+    # 同一处绕过的另一半:``answer_id`` 也是那条 ``save_answer`` 铸的。共享的回答视图
+    # 以它为键(按回答重置引用小卡片、只在它非空时才给出「分享」),全局回答的身份
+    # 就是它的作业。
+    assert result.answer.answer_id == result.job_id
 
 
 def test_reasoning_mode_streams_trace_into_job(service):
