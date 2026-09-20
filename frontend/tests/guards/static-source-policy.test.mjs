@@ -41,6 +41,10 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // `.send-button.stop` 不回潮。样式表没有可消费的 AST,文本是唯一诚实的输入;同文件对
   // 各 tsx 的断言(导入表、JSX 元素)全部走 semantic-source 的语义解析。
   "tests/guards/stop-control-guard.test.mjs",
+  // 只读 ask/global-ask-launcher.css:断言气泡的样式表不碰 `.chat-input-bar`(输入框左右
+  // 留白对称),且笔记本里的气泡尺寸/离角距离放得进右下空白角。样式表没有可消费的 AST,
+  // jsdom 也不做布局,文本是唯一诚实的输入。
+  "tests/guards/global-ask-bubble-guard.test.mjs",
   // 同上,只读 globals.css:断言提问导航锚在对话区那一行(grid-row),而不是对整个
   // 面板绝对居中。样式表没有可消费的 AST,jsdom 又不做 grid 布局(量出来的 rect
   // 恒为 0),文本是唯一诚实的输入。对 page.tsx 的断言仍走语义解析。
