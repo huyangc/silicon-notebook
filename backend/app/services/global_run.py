@@ -13,7 +13,7 @@ A global run is four facts, and they are only ever true together:
 3. ``detached_ask_turn`` -- the conversation turn, handed down instead of read
    from ``ask_state``, so nothing is written to a per-notebook answers table.
 4. ``federated_run_plan`` -- the shared executor, the fair window, the phase
-   deadline, the cancel token and the one return seam for receipts and
+   budget, the cancel token and the one return seam for receipts and
    evidence fingerprints.
 
 WHY ONE MANAGER, AND WHY IT ASSERTS SO LOUDLY

@@ -6,7 +6,7 @@ Why this module holds only data and context variables
 -----------------------------------------------------
 Its consumers are the two heaviest modules in the service layer --
 ``chunk_federation`` reads the run plan to borrow the shared executor, the fair
-window, the phase deadline and the cancel token, and ``ask_service`` reads the
+window, the phase budget and the cancel token, and ``ask_service`` reads the
 detached turn to answer without touching ``ask_state``.  Neither may acquire an
 import edge to the participant-override module just to reach a seat, and
 ``ask_service`` in particular is barred from that module by a zero-slack guard.
@@ -144,9 +144,17 @@ class FederatedRunPlan:
       next job still needs.
     * ``window`` is re-read rather than captured, so the fair share shrinks and
       grows as other jobs come and go.
-    * ``phase_deadline`` is an absolute ``time.monotonic()`` value, not a
-      duration: a duration restarted per leg would let a fan-out outlive the
-      phase by however many legs it has.
+    * ``phase_timeout_seconds`` is the budget of ONE federated call -- one
+      fan-out over the participant set -- and the consumer turns it into an
+      absolute deadline when that call begins.  It is deliberately NOT an
+      absolute ``time.monotonic()`` value fixed when the run starts: a
+      reasoning run calls the federation once per retrieval round, with model
+      calls in between, so a run-absolute deadline would declare every round
+      after the first already expired and the whole participant set skipped
+      with ``queue_deadline``.  What the value still may not be is a budget
+      restarted per LEG: the consumer derives one deadline per call and every
+      leg of that call shares it, which is what keeps a fan-out from outliving
+      the phase by however many legs it has.
     * ``cancel`` carries every cancellation source as one token, which is how
       one library's hard failure reaches the libraries already executing.
     * ``on_library`` / ``on_evidence`` are the single return seam.  Receipts and
@@ -159,7 +167,7 @@ class FederatedRunPlan:
     the import edge the module exists to avoid.
     """
 
-    phase_deadline: float
+    phase_timeout_seconds: float
     notebook_timeout_seconds: float
     executor: Any
     window: Callable[[], int]

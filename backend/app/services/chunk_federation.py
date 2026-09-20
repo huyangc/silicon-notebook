@@ -80,22 +80,41 @@ Three structural rules this module exists to hold:
   invented for reference libraries that merely happen to be mounted.  Every
   one of these forks is unreachable in production today -- nothing installs an
   override yet -- so the absent-override path stays byte-identical.
+* **...and then the fan-out itself is borrowed.**  A global run additionally
+  installs a ``FederatedRunPlan`` (``federated_run.py``), and with one present
+  this module stops owning its own concurrency: the tasks run on the run's
+  SHARED executor under its fair window, each leg wrapped in a per-library
+  ``read_budget``, each failure classified into one of four reason codes, and
+  each library's receipt plus the selection's evidence fingerprints handed
+  back through the plan's two callbacks.  Without a plan -- every run in
+  production today -- ``_run_tasks`` builds its own pool exactly as before and
+  not one of those behaviours is reachable.
 """
 from __future__ import annotations
 
 import contextvars
 import math
 import time
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass, field, replace
 from typing import Any, Sequence
 
-from app.services.cancellation import AskCancelled
+from app.services.cancellation import AskCancelled, raise_if_cancelled
 # Only the NAME, from the dependency-free domain layer: these modules are
 # not on the participant override's frozen reader whitelist, but their
 # fail-soft handlers must re-raise its control exception instead of
 # degrading an identity-attestation failure into an empty result set.
 from app.domain.retrieval_control import RetrievalControlError
+# The budget vocabulary itself is repository knowledge -- which driver failure
+# means "the statement was cancelled" and which means "no connection could be
+# leased" -- so it is imported rather than re-derived here; see
+# ``read_budget.classify_read_failure``.  This is the same pair
+# ``global_retrieval`` consumes today, and the reason codes it produces are
+# exactly ``federated_run.LIBRARY_SKIP_REASONS``.
+from app.repositories.read_budget import classify_read_failure, read_budget
+from app.services.federated_run import (
+    LibraryOutcome, current_federated_run_plan,
+)
 from app.services.global_evidence import peer_evidence
 # PEER MODE.  ``federated_ask_active()`` answers "is this run searching a
 # participant SET rather than one notebook with borrowed libraries", which is
@@ -114,6 +133,22 @@ from app.services.retrieval_run import (
 # The tier a participant set always gives its own active notebook, and the
 # fallback ``_retrieval_participants`` itself uses for an unmapped id.
 _ACTIVE_TIER = "personal"
+
+# What one leg returns when it failed: the empty shape ``_retrieve_chunks``
+# itself returns for "nothing found", so a failed leg is indistinguishable from
+# an empty one to the merge -- the DIFFERENCE travels in the receipt.
+_EMPTY_LEG = ([], [], None)
+
+# Most-informative-first, for a library whose legs failed for several reasons.
+# ``saturated`` wins over ``timeout`` on purpose, and it is the one ordering
+# choice here that is not arbitrary: the user-facing sentence for a timeout
+# asks them to narrow the scope, which -- when what actually happened is that
+# no connection could be leased -- is advice about somebody else's load (the
+# argument ``read_budget.classify_read_failure`` spells out).  So a call that
+# saw a full pool at all reports the code whose copy guesses nothing.
+# ``queue_deadline`` outranks ``unavailable`` because it is a fact about this
+# run's budget rather than an unclassified fault.
+_SKIP_SEVERITY = ("saturated", "timeout", "queue_deadline", "unavailable")
 
 
 @dataclass(frozen=True)
@@ -197,6 +232,28 @@ class _Task:
     # ``_federated_tasks``). ``None`` only for a non-peer active notebook,
     # whose call shape stays the bare positional one.
     visible: tuple | None
+
+
+@dataclass(frozen=True)
+class _Legs:
+    """What ONE federated call has to say about each participant library.
+
+    Assembled across three places that each know only part of it -- the
+    participant order comes from the seat, the dropped libraries from task
+    preparation, the per-task reasons from the fan-out -- and consumed in one
+    place, on the parent thread, where the candidate counts are also known.
+    Bundled rather than threaded as three parameters so ``_merge_results``
+    grows one optional argument instead of three.
+
+    ``order`` is the FULL participant set, not the task table's own
+    ``_task_participants``: a library whose preparation failed has no task and
+    would otherwise vanish from the receipts entirely -- neither searched nor
+    skipped -- which is the one outcome the coverage lists may not have.
+    """
+
+    order: tuple = ()
+    reasons: tuple = ()
+    dropped: dict = field(default_factory=dict)
 
 
 def _bounded_participants(
@@ -338,6 +395,13 @@ def federated_chunk_candidates(
     rules than the same ask over two.  "The user selected one library" is not
     the same fact as "this notebook has no mounted references", which is the
     only fact the short-circuit was written for.
+
+    THE RUN PLAN IS READ ONCE, HERE, and only in peer mode.  Once per call and
+    not per leg, so every leg of one fan-out shares one phase deadline and one
+    window source; and gated on ``federated_ask_active()`` so that a plan
+    installed without an override -- a shape ``global_run.global_ask_run``
+    makes unconstructible, but a test or a future caller could still assemble
+    -- cannot switch the ordinary notebook path onto a borrowed executor.
     """
     if not sub_queries:
         # Nothing to search, so nothing was searched: answer before reading the
@@ -351,13 +415,21 @@ def federated_chunk_candidates(
             candidates, active_notebook_id, list(sub_queries), participants,
         )
     queries = list(sub_queries)
+    plan = current_federated_run_plan() if federated_ask_active() else None
+    dropped: dict = {}
     tasks = _federated_tasks(
         candidates, active_notebook_id, participants, queries, drifted,
+        # ``None`` without a plan, so the ordinary notebook path's skip event
+        # keeps exactly the fields it has always had: there is no receipt seam
+        # to carry a reason code to, and a code in the event alone would show
+        # up in one deployment's telemetry and not another's.
+        dropped=dropped if plan is not None else None,
     )
-    results = _run_tasks(candidates, tasks)
+    results, reasons = _run_tasks(candidates, tasks, plan)
     return _merge_results(
         candidates, _task_participants(tasks), tasks, results, len(queries),
         min_relevance=min_relevance, relative_relevance=relative_relevance,
+        plan=plan, legs=_Legs(tuple(participants), tuple(reasons), dropped),
     )
 
 
@@ -491,7 +563,7 @@ def _single_library_result(
 
 def _federated_tasks(
     candidates, active_notebook_id: str, participants, sub_queries: list,
-    drifted: bool | None,
+    drifted: bool | None, *, dropped: dict | None = None,
 ) -> list:
     """The flat task table: library-major, sub-query-minor, deterministic.
 
@@ -535,6 +607,13 @@ def _federated_tasks(
     in ``FederatedChunkResult.participants`` (see ``_task_participants``),
     which is the field's whole meaning: the libraries this arm actually
     searched.
+
+    ``dropped`` is where that skip is RECORDED when the caller wants receipts:
+    ``{notebook_id: reason}`` for each peer whose preparation failed.  An
+    out-parameter rather than a second return value because the task table is
+    read positionally by existing callers, and a plain return of the drops from
+    here would report them in preparation order -- the receipts must follow the
+    participant order instead, which only the caller knows in full.
     """
     # ``chunk_lane`` 而不是 ``retrieval_candidates``:那边的 ``_gather_vector_chunks``
     # 调本模块,两边互取就是 import 环;这两个 ContextVar 与那把探针因此住在
@@ -577,14 +656,24 @@ def _federated_tasks(
                     # unreadable source list into a wider search than the
                     # healthy path performs. Emitted here, in the caller's own
                     # context, so the event keeps its log owner.
-                    _emit(candidates, {
+                    event = {
                         "kind": "chunk_federation_skipped",
                         "notebook_id": notebook_id,
                         "error_type": type(exc).__name__,
                         "latency_ms": round(
                             (time.perf_counter() - started) * 1000
                         ),
-                    })
+                    }
+                    if dropped is not None:
+                        # No deadline to compare against: this failure happened
+                        # before the fan-out had one, so an unclassifiable
+                        # enumeration fault is ``unavailable`` rather than a
+                        # timeout guessed from a clock.
+                        dropped[notebook_id] = (
+                            classify_read_failure(exc) or "unavailable"
+                        )
+                        event["reason"] = dropped[notebook_id]
+                    _emit(candidates, event)
                     continue
             # ``_peek_only`` needs no guard of its own: its probe already
             # answers "peek only" -- the conservative side -- for any failure,
@@ -679,17 +768,161 @@ def _peek_only(candidates, notebook_id: str) -> bool:
     )
 
 
-def _run_tasks(candidates, tasks: list) -> list:
-    """One executor for the whole flattened table, bounded by one setting."""
+def _run_tasks(candidates, tasks: list, plan=None) -> tuple:
+    """``(results, reasons)`` -- one entry per task, in task-table order.
+
+    ⛔ WITHOUT A PLAN THIS IS THE PRE-EXISTING FUNCTION.  Same own executor,
+    same ``chunk_fanout_max_workers`` bound, same ``pool.map`` over the table
+    in order, same ``with`` (that pool is this call's own and must be shut
+    down).  ``reasons`` is then all-empty: there is no receipt seam to carry a
+    code to, and inventing one would change the events the ordinary notebook
+    path emits.
+    """
+    if plan is not None:
+        return _run_planned_tasks(candidates, tasks, plan)
     workers = min(len(tasks), max(1, candidates.settings.chunk_fanout_max_workers))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(lambda task: _run_one(candidates, task), tasks))
+        legs = list(pool.map(lambda task: _run_one(candidates, task), tasks))
+    return [value for value, _reason in legs], [reason for _value, reason in legs]
 
 
-def _run_one(candidates, task: _Task):
-    started = time.perf_counter()
+def _run_planned_tasks(candidates, tasks: list, plan) -> tuple:
+    """The global run's fan-out: borrowed executor, fair window, one deadline.
+
+    Structurally ``global_ask._fan_out``, moved one layer down and re-keyed
+    from libraries to TASKS, with the four properties that function existed for
+    kept intact:
+
+    * **The executor is borrowed, never owned.**  No ``with``: it is the one
+      pool per process and therefore the only real bound on retrieval-held
+      database connections, so leaving a ``with`` block would shut down a pool
+      the next job still needs.  Nothing here shuts it down or waits on it.
+    * **The window is re-read on every top-up**, so a job that started alone
+      gives ground back as soon as one of its tasks finishes and a newcomer
+      waits at most one task rather than a whole phase.
+    * **The phase deadline is derived HERE, once per call** (see
+      ``FederatedRunPlan.phase_timeout_seconds``): a reasoning run enters this
+      function once per retrieval round with model calls in between, and a
+      deadline fixed when the run started would declare rounds 2..n dead on
+      arrival.
+    * **Expiry is two different facts.**  A task still QUEUED when the budget
+      runs out issued no query at all -- ``queue_deadline``, whose copy must
+      not blame the library's size or the selected scope.  A task already
+      executing is charged ``timeout`` and is then ABANDONED rather than waited
+      on: its own ``read_budget`` is capped by this same deadline, so it cannot
+      outlive the phase, and blocking here for it would spend the synthesis
+      budget of a call that has already given up on its result.
+
+    Fairness is per LIBRARY, not per task: the table is library-major, so
+    submitting it in order would let one library's sub-queries fill a window of
+    2 while seven libraries wait.  ``_round_robin`` re-orders the SUBMISSION
+    (never the results, which stay in task-table order for the merge) so each
+    library gets its first sub-query in before any library gets its second.
+    """
+    deadline = time.monotonic() + float(plan.phase_timeout_seconds)
+    results: list = [_EMPTY_LEG] * len(tasks)
+    reasons: list = [""] * len(tasks)
+    pending = _round_robin(tasks)
+    futures: dict = {}
     try:
-        return task.context.run(_retrieve_for, candidates, task)
+        while pending or futures:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                for index in pending:
+                    reasons[index] = "queue_deadline"
+                    _emit_leg_skipped(candidates, tasks[index], "queue_deadline", "", 0)
+                for index in futures.values():
+                    reasons[index] = "timeout"
+                    # ``lane`` distinguishes this row from the one the leg
+                    # itself may still emit when it finally gives up: the leg
+                    # is abandoned, not finished, so both facts are real and an
+                    # operator must be able to tell them apart instead of
+                    # reading one leg's expiry as two skips.
+                    _emit_leg_skipped(
+                        candidates, tasks[index], "timeout", "", 0,
+                        lane="abandoned",
+                    )
+                break
+            while pending and len(futures) < max(1, int(plan.window())):
+                index = pending.pop(0)
+                futures[plan.executor.submit(
+                    _run_one, candidates, tasks[index], plan, deadline,
+                )] = index
+            done, _not_done = wait(
+                list(futures), timeout=max(0.0, deadline - time.monotonic()),
+                return_when=FIRST_COMPLETED,
+            )
+            for future in done:
+                index = futures.pop(future)
+                # Re-raises cancellation and attestation failures on THIS
+                # thread, exactly as ``pool.map`` does above: neither is a
+                # per-library degradation, and both must fail the whole arm.
+                results[index], reasons[index] = future.result()
+    finally:
+        # Queued tasks must not start, and the results of the ones already
+        # running are no longer wanted. ``cancel()`` handles the first; for the
+        # second, the callback is what keeps an abandoned failure from being an
+        # exception nobody ever retrieves.
+        for future in futures:
+            if not future.cancel():
+                future.add_done_callback(_discard_leg)
+    return results, reasons
+
+
+def _discard_leg(future) -> None:
+    """Consume an abandoned leg's outcome so nothing is left unretrieved."""
+    try:
+        future.exception()
+    except Exception:  # noqa: BLE001 - the phase is already over
+        pass
+
+
+def _round_robin(tasks: list) -> list:
+    """Task indexes re-ordered library-minor: every library's q1, then q2...
+
+    The table itself stays library-major (``per_query`` grouping depends on
+    it); only the order tasks are SUBMITTED in changes, which is the order that
+    decides who gets the scarce window seats.
+    """
+    columns: dict = {}
+    for index, task in enumerate(tasks):
+        columns.setdefault(task.notebook_id, []).append(index)
+    ordered: list = []
+    for position in range(max((len(column) for column in columns.values()), default=0)):
+        for column in columns.values():
+            if position < len(column):
+                ordered.append(column[position])
+    return ordered
+
+
+def _run_one(candidates, task: _Task, plan=None, deadline: float = 0.0) -> tuple:
+    """``(value, reason)`` for one task; ``reason`` is empty unless it failed.
+
+    ⛔ THE PER-LIBRARY BUDGET STARTS HERE, not where the task was queued.  This
+    body runs on the worker thread, so a task that waited behind the window is
+    not charged for its wait -- the property ``global_ask._retrieve_notebook``
+    documents and the reason the budget cannot be attached to the task table.
+    It is still capped by the PHASE deadline, so waiting does not let a late
+    task run past the end of the call either.
+    """
+    started = time.perf_counter()
+    notebook_deadline = deadline
+    if plan is not None:
+        # A run already cancelled must not open a connection at all, and the
+        # answer is ``AskCancelled`` rather than a skip: the user's own
+        # decision is never a per-library degradation. A cancel that arrives
+        # mid-flight is seen by ``budget.check()`` instead and lands as
+        # ``timeout`` -- the same split ``global_ask`` has today.
+        raise_if_cancelled(plan.cancel)
+        notebook_deadline = min(
+            deadline, time.monotonic() + float(plan.notebook_timeout_seconds),
+        )
+    try:
+        if plan is None:
+            return task.context.run(_retrieve_for, candidates, task), ""
+        return task.context.run(
+            _budgeted_retrieve_for, candidates, task, plan, notebook_deadline,
+        ), ""
     except AskCancelled:
         # Cancellation is the user's own decision, never a per-library
         # degradation to swallow.
@@ -703,6 +936,17 @@ def _run_one(candidates, task: _Task):
         # place a future seat read goes to die.
         raise
     except Exception as exc:  # noqa: BLE001 - one library must not fail the arm
+        reason = ""
+        if plan is not None:
+            # The same judgment ``global_retrieval._emit_skipped`` makes, and
+            # deliberately the same function: a statement the server cancelled
+            # AT the deadline and a local clock that has just passed it are one
+            # event seen from two sides, so the driver's own answer wins and
+            # the clock only decides what an UNCLASSIFIED failure was.
+            reason = classify_read_failure(exc) or (
+                "timeout" if time.monotonic() >= notebook_deadline
+                else "unavailable"
+            )
         # Emit inside THIS TASK's own context, not the worker thread's bare
         # one. The events logger is per-user and picks its directory from the
         # ``_log_owner`` ContextVar (``app.core.event_logging``), which a pool
@@ -710,13 +954,52 @@ def _run_one(candidates, task: _Task):
         # would file every federated skip under ``user-local`` no matter who
         # asked. The context is no longer entered once ``run`` above has
         # raised, so running it a second time is legal.
-        task.context.run(_emit, candidates, {
-            "kind": "chunk_federation_skipped",
-            "notebook_id": task.notebook_id,
-            "error_type": type(exc).__name__,
-            "latency_ms": round((time.perf_counter() - started) * 1000),
-        })
-        return ([], [], None)
+        task.context.run(
+            _emit_leg_skipped, candidates, task, reason,
+            type(exc).__name__,
+            round((time.perf_counter() - started) * 1000),
+        )
+        return _EMPTY_LEG, reason
+
+
+def _emit_leg_skipped(candidates, task: _Task, reason: str, error_type: str,
+                      latency_ms: int, *, lane: str = "") -> None:
+    """One leg's content-free skip receipt.
+
+    ``reason`` is ADDED to the event rather than replacing anything, and only
+    when there is one: without a run plan there are no reason codes at all and
+    the event must stay the field-for-field one the ordinary notebook path has
+    always emitted. Nothing here carries the query, the library's contents or
+    an exception message -- only a class name.
+    """
+    event = {
+        "kind": "chunk_federation_skipped",
+        "notebook_id": task.notebook_id,
+        "error_type": error_type,
+        "latency_ms": latency_ms,
+    }
+    if reason:
+        event["reason"] = reason
+    if lane:
+        event["lane"] = lane
+    _emit(candidates, event)
+
+
+def _budgeted_retrieve_for(candidates, task: _Task, plan, deadline: float):
+    """``_retrieve_for`` under this library's own read budget.
+
+    A wrapper rather than a branch inside ``_retrieve_for`` so the producer
+    call shapes that function documents stay untouched, and so the budget is
+    entered INSIDE the task's own context -- ``read_budget`` installs a
+    ContextVar, and each task owns a separate ``Context``, which is what keeps
+    one library's expiry from being another's.
+
+    ``min`` of the two bounds, never the notebook timeout alone: a leg that
+    started just before the phase ended may not keep a connection for its full
+    per-library budget after the call has stopped waiting for it.
+    """
+    with read_budget(deadline, plan.cancel):
+        return _retrieve_for(candidates, task)
 
 
 def _retrieve_for(candidates, task: _Task):
@@ -768,7 +1051,7 @@ def _emit(candidates, event: dict) -> None:
 
 def _merge_results(
     candidates, participants, tasks: list, results: list, sub_count: int, *,
-    min_relevance: float, relative_relevance: float,
+    min_relevance: float, relative_relevance: float, plan=None, legs=None,
 ) -> FederatedChunkResult:
     """Fold within each library, pool by PARTICIPANT order, then select.
 
@@ -812,6 +1095,16 @@ def _merge_results(
     question-only hit against ``chunk_recall`` peer baseline hits silently
     costs a baseline candidate that nothing downstream can recover --
     ``quota_fuse_baseline_first`` can only reorder what reached ``collected``.
+
+    **The two callbacks fire from HERE, on the calling thread, last.**  This is
+    the only frame that holds all three things a receipt needs -- the
+    participant order, each leg's verdict and each library's candidate count
+    after the within-library fold -- and it is the parent thread, so the job
+    stays the single writer of its own coverage lists and the worker threads
+    only ever return values.  Receipts go first because ``on_library`` is also
+    where the run re-checks authority per library and may fail the whole call;
+    publishing evidence fingerprints for a run that is about to be refused
+    would be work done for nobody.
     """
     pools: dict = {notebook_id: [] for notebook_id, _ in participants}
     per_task: list = []
@@ -824,9 +1117,13 @@ def _merge_results(
         pools[task.notebook_id].append(tagged)
         per_task.append(tagged)
         parts.append((ids, matrix))
+    folded = {
+        notebook_id: _fold_library_pool(pools[notebook_id])
+        for notebook_id, _tier in participants
+    }
     selected = _select_baseline_then_supplements(
         candidates,
-        [_fold_library_pool(pools[notebook_id]) for notebook_id, _ in participants],
+        [folded[notebook_id] for notebook_id, _tier in participants],
         min_relevance=min_relevance,
         relative_relevance=relative_relevance,
     )
@@ -836,10 +1133,114 @@ def _merge_results(
     )
     per_query = _sub_query_groups(per_task, collected, sub_count)
     ids, matrix = _merge_selected_matrices(candidates, tasks, parts, collected)
+    if plan is not None:
+        _report_receipts(plan, legs or _Legs(), tasks, folded)
+        _report_evidence(candidates, plan, collected)
     return FederatedChunkResult(
         collected, per_query, ids, matrix,
         tuple(notebook_id for notebook_id, _ in participants),
     )
+
+
+def _report_receipts(plan, legs, tasks: list, folded: dict) -> None:
+    """One ``LibraryOutcome`` per participant, in participant order.
+
+    Aggregated within THIS call only.  A reasoning run federates once per
+    retrieval round, so a library that answered round 1 and timed out in round
+    2 produces two receipts; folding those into the run's coverage lists is the
+    job's decision, not the federation's, and doing it here would require this
+    module to remember state across calls it is not the owner of.
+
+    The three shapes, and why the middle one cannot carry its reason:
+
+    * every leg failed -> ``skipped`` with the most informative code among them
+      (``_SKIP_SEVERITY``).  A library that issued several sub-queries and lost
+      them all searched nothing, whatever the mixture of causes;
+    * SOME legs failed -> ``ok`` and ``degraded``.  The library did contribute
+      evidence, so the coverage list must not call it skipped, but the answer
+      was assembled from less than the library had -- which is exactly what
+      ``degraded`` means to the reader.  It carries NO reason code:
+      ``LibraryOutcome`` refuses an answering library that holds a skip reason,
+      and rightly so, because ``_SKIP_COPY`` would then render a "retrieval did
+      not finish" sentence next to a library whose passages are in the answer;
+    * none failed -> plain ``ok``.
+
+    ``candidate_count`` is the library's pool as it entered the cross-library
+    merge: after the within-library fold (so one passage found by three
+    sub-queries counts once) and before ``peer_evidence`` (so it measures what
+    the library OFFERED, not how much of it won a seat).
+    """
+    failures: dict = {}
+    totals: dict = {}
+    for task, reason in zip(tasks, legs.reasons):
+        totals[task.notebook_id] = totals.get(task.notebook_id, 0) + 1
+        if reason:
+            failures.setdefault(task.notebook_id, []).append(reason)
+    for notebook_id, _tier in legs.order:
+        prepare_failure = legs.dropped.get(notebook_id)
+        if prepare_failure:
+            outcome = LibraryOutcome(status="skipped", reason=prepare_failure)
+        else:
+            failed = failures.get(notebook_id, ())
+            total = totals.get(notebook_id, 0)
+            if total and len(failed) == total:
+                outcome = LibraryOutcome(
+                    status="skipped", reason=_worst_reason(failed),
+                )
+            else:
+                outcome = LibraryOutcome(
+                    status="ok", degraded=bool(failed),
+                    candidate_count=len(folded.get(notebook_id, ())),
+                )
+        plan.on_library(notebook_id, outcome)
+
+
+def _worst_reason(reasons) -> str:
+    """The most informative code among one library's failed legs."""
+    for reason in _SKIP_SEVERITY:
+        if reason in reasons:
+            return reason
+    return "unavailable"
+
+
+def _report_evidence(candidates, plan, collected: dict) -> None:
+    """The retrieval-time fingerprints of everything that was SELECTED.
+
+    ONE bounded read for the whole call, over the elements of the finished
+    selection -- not one per library, and not over every candidate that was
+    ever considered.  The consumer (the job's citation re-check) only ever asks
+    about evidence that reached the answer, so widening this to the candidate
+    pool would multiply the read by the recall budget for rows nobody can cite.
+
+    Fail-soft, and the direction of the failure is deliberate: an unreadable
+    fingerprint map is published as an EMPTY one, which makes the re-check
+    refuse the citations rather than accept them unverified.  Cancellation and
+    attestation failures are not failures of this read and re-raise.
+
+    ⛔ Deliberately absent from the guard's ``_SEAT_FAILSOFT_SITES``: the try
+    body is a single source-store read: it cannot reach the participant seat,
+    so swallowing it cannot turn an identity failure into a silently narrower
+    search.
+    """
+    element_ids = list(dict.fromkeys(
+        element_id for hit in collected.values()
+        for element_id in (hit.element_ids or ())
+    ))
+    try:
+        fingerprints = (
+            candidates.sources.evidence_fingerprints(element_ids)
+            if element_ids else {}
+        )
+    except (AskCancelled, RetrievalControlError):
+        raise
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        _emit(candidates, {
+            "kind": "chunk_federation_evidence_unavailable",
+            "error_type": type(exc).__name__,
+            "elements": len(element_ids),
+        })
+        fingerprints = {}
+    plan.on_evidence(fingerprints)
 
 
 def _select_baseline_then_supplements(
