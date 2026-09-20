@@ -14,11 +14,13 @@ Three things only a live database can demonstrate:
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import psycopg
 import pytest
 
 from app.core.config import Settings
+from app.models.notebooks import NotebookCreate
 from app.repositories.postgres.repository import PostgresRepository
 from app.services import batch_ingest as bi
 from app.services import maintenance_cli
@@ -233,8 +235,7 @@ def test_the_ledger_preflight_refuses_a_gap_in_the_middle(
 # ───────────────────────────────────────────────────────── the CLI loop ──
 
 @pytest.fixture
-def indexed_notebook(postgres_settings, tmp_path, monkeypatch):
-    """A small real notebook with sources, KG and vectors, ready to index."""
+def cli_settings(postgres_settings, tmp_path, monkeypatch):
     settings = postgres_settings.model_copy(
         update={
             "storage_dir": str(tmp_path / "storage"),
@@ -242,6 +243,33 @@ def indexed_notebook(postgres_settings, tmp_path, monkeypatch):
             "embed_dim": 16,
         }
     )
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    return settings
+
+
+@pytest.fixture
+def initialized_database(cli_settings):
+    """A real migrated database is sufficient for unknown-notebook refusals."""
+    owner = PostgresRepository(cli_settings, model_provider=_provider())
+    owner.close()
+    return cli_settings
+
+
+@pytest.fixture
+def unindexed_notebook(cli_settings):
+    """Claim admission happens before any source, KG or vector work."""
+    owner = PostgresRepository(cli_settings, model_provider=_provider())
+    try:
+        notebook_id = owner.create_notebook(NotebookCreate(name="Scale CLI")).id
+    finally:
+        owner.close()
+    return notebook_id, cli_settings
+
+
+@pytest.fixture
+def indexed_notebook(cli_settings, tmp_path, monkeypatch):
+    """A small real notebook with sources, KG and vectors, ready to index."""
+    settings = cli_settings
     monkeypatch.setattr(
         maintenance_cli,
         "create_repository",
@@ -260,7 +288,10 @@ def indexed_notebook(postgres_settings, tmp_path, monkeypatch):
         "ingest", "--input-dir", str(source_dir), "--notebook-name", "Scale CLI",
         "--workers", "1", *common,
     ]) == 0
-    probe = PostgresRepository(settings, model_provider=_provider())
+    # Ingest already owns migration/seeding; finding its notebook is read-only.
+    probe = PostgresRepository(
+        settings, model_provider=_provider(), migrate=False, seed=False
+    )
     try:
         notebook_id = next(
             notebook.id
@@ -272,7 +303,6 @@ def indexed_notebook(postgres_settings, tmp_path, monkeypatch):
     assert bi.main(["kg", "--notebook-id", notebook_id, *common]) == 0
     assert bi.main(["embed", "--notebook-id", notebook_id, *common]) == 0
 
-    monkeypatch.setattr(cli, "Settings", lambda: settings)
     return notebook_id, settings
 
 
@@ -318,7 +348,7 @@ def test_build_export_import_inspect_round_trips(
     assert receipt["manifest"]["dim"] == 16
 
 
-def test_an_unknown_notebook_is_a_readable_refusal(indexed_notebook, capsys):
+def test_an_unknown_notebook_is_a_readable_refusal(initialized_database, capsys):
     """``status()`` raises ``KeyError``; letting it escape would print a bare
     traceback with the id as the entire message."""
     assert cli.main(["inspect", "--notebook", "nb-does-not-exist"]) == 2
@@ -326,7 +356,7 @@ def test_an_unknown_notebook_is_a_readable_refusal(indexed_notebook, capsys):
 
 
 def test_build_of_an_unknown_notebook_is_a_readable_refusal(
-    indexed_notebook, capsys
+    initialized_database, capsys
 ):
     """P2, codex PR#643 R1, end to end: ``require_write_admission`` (reached
     deep inside ``build_scale_index``) raises a bare ``KeyError`` for an
@@ -344,14 +374,14 @@ def test_build_of_an_unknown_notebook_is_a_readable_refusal(
     assert "unknown notebook" in capsys.readouterr().err
 
 
-def test_a_claim_held_elsewhere_stops_the_build(indexed_notebook, capsys):
+def test_a_claim_held_elsewhere_stops_the_build(unindexed_notebook, capsys):
     """The whole point of the claim: two writers must never publish over the
     same artifact directory."""
     from pathlib import Path
 
     from app.repositories.postgres.database import PostgresDatabase
 
-    notebook_id, settings = indexed_notebook
+    notebook_id, settings = unindexed_notebook
     other = PostgresDatabase(settings, Path(__file__).resolve().parents[3])
     handle = other.try_scale_build_lock(notebook_id)
     assert handle is not None
@@ -500,15 +530,17 @@ def test_an_import_naming_an_unknown_notebook_refuses_before_touching_disk(
 
 
 def test_sqlite_is_refused_even_with_a_reachable_database(
-    indexed_notebook, monkeypatch, capsys, tmp_path
+    monkeypatch, capsys, tmp_path
 ):
-    _notebook_id, settings = indexed_notebook
+    database_path = tmp_path / "x.db"
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT 1").fetchone() == (1,)
     monkeypatch.setattr(
         cli,
         "Settings",
         lambda: Settings(
-            database_url=f"sqlite:///{tmp_path / 'x.db'}",
-            storage_dir=settings.storage_dir,
+            database_url=f"sqlite:///{database_path}",
+            storage_dir=str(tmp_path / "storage"),
         ),
     )
     assert cli.main(["inspect", "--notebook", "nb-1"]) == 2
