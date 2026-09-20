@@ -75,35 +75,17 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
     setCopying("");
     return () => { ++copyOwner.current; };
   }, [ask.conversationId, copyResult.reset]);
-  // 卡片打开时 Esc 只关卡片，不能连带把整个全局问答浮窗关掉。
-  // 浮窗是一个 <dialog>：小窗形态用 `.show()`，全屏形态用 `.showModal()`，两种形态
-  // 都在 dialog 上挂了 onKeyDown（requestClose）、模态还会走原生 close request
-  // （onCancel）。所以这里必须在任何人之前把这一次 Esc 吃掉：
-  //  · **window 捕获期**而不是 React 的冒泡期——React 18 把监听挂在根容器（dialog
-  //    的祖先）上，冒泡期拦截赶不上焦点恰好落在 dialog 元素自身的那一路；捕获期在
-  //    整条派发路径的最前面，React 的合成事件根本不会被触发。
-  //  · `preventDefault()` 同时掐掉模态 <dialog> 的原生 close request（Esc 的默认
-  //    动作），否则全屏形态下卡片关了、窗口也跟着关。
-  // 卡片自己挂在 window 冒泡期的那个 Escape 监听因此不会再跑（事件到不了），
-  // 关闭动作由这里代劳，语义完全一致。
+  // 「Esc 只收一层」的拦截已经下沉进 `CitationPopover` 自己（window 捕获期
+  // preventDefault + stopPropagation + 收起）：两条渲染路径的卡片——历史轮次这条
+  // 就地渲染的，以及新作业那条由 `AnswerView` 内部渲染的——因此共用同一份保护，
+  // 这里不再另写一份 bespoke effect。原生 <dialog> close request 那道缺口由
+  // launcher 的 onCancel 读 `citationPopoverHoldsEscape()` 兜底。
   //
-  // ⚠ 浮窗收起后本组件**仍然挂载**（launcher 的 `started` 不回 false），所以卡片
-  // 必须随 `active` 一起收掉：否则这个捕获期监听会留在 window 上，把宿主页面的下一次
-  // Esc（来源详情、图片预览、设置面板……它们都挂在冒泡期）整个吞掉；重开浮窗时
-  // 卡片还会按几分钟前的旧视口坐标悬着。
+  // ⚠ 浮窗收起后本组件**仍然挂载**（launcher 的 `started` 不回 false），所以两条
+  // 路径的卡片都必须随 `active` 一起收掉：否则那个捕获期监听会留在 window 上，把
+  // 宿主页面的下一次 Esc 整个吞掉；重开浮窗时卡片还会按几分钟前的旧视口坐标悬着。
+  // 本地这份直接清 state，`AnswerView` 内部那份走 `dismissSignal`。
   useEffect(() => { if (!active) setCite(null); }, [active]);
-  useEffect(() => {
-    if (!cite || !active) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      // 输入法合成期的 Esc 是「取消候选」，不是「关卡片」。
-      if (event.key !== "Escape" || event.isComposing) return;
-      event.preventDefault();
-      event.stopPropagation();
-      setCite(null);
-    };
-    window.addEventListener("keydown", onKeyDown, true);
-    return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [cite, active]);
   useEffect(() => {
     if (ask.running) transcript.current?.scrollTo({ top: transcript.current.scrollHeight, behavior: "smooth" });
   }, [ask.running?.job_id]);
@@ -154,7 +136,6 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                 <div className="global-turn-scope"><BookOpen size={12} />{job.notebook_scope.mode === "all" ? "全部笔记本" : "指定笔记本"} · {job.resolved_notebook_ids.length} 个</div>
                 {job.answer ? <ChatAnswer answeredAt={job.answer.answered_at ?? job.created_at}>
                   <div className="global-answer-label"><span className="global-answer-mark">SN</span><strong>综合回答</strong><span>引用来自 {job.cited_notebook_ids.length} 个笔记本</span></div>
-                  {trace.length > 0 && <ReasoningTracePanel steps={trace} />}
                   {/* 单库动作（打开来源 / 知识图谱 / Knowhow 行 / 保存记忆 / 分享 /
                       构建索引 / 导入站外建议）一概不传：全局问答没有「当前笔记本」，
                       这些入口在这里没有承接方，缺席时 AnswerView 按既有惯例连按钮都
@@ -168,9 +149,14 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                     notebookNames={notebookNames}
                     notebookHref={(notebookId, sourceId) => `/${notebookHash(notebookId, sourceId)}`}
                     onOpenNotebook={onOpenNotebook}
+                    dismissSignal={active}
                     buildingScaleIndex={false}
                     memorySaved={false}
                   />
+                  {/* 轨迹恒在回答**下方**：完成态由 AnswerView 自己渲染在这个位置
+                      （answer.reasoning_trace），这里补的是它不渲染的那两种情形，
+                      位置必须一致——同一轮里跳一次位置比没有轨迹更难读。 */}
+                  {trace.length > 0 && <ReasoningTracePanel steps={trace} />}
                 </ChatAnswer> : job.response ? <ChatAnswer answeredAt={job.response.created_at}>
                   <div className="global-answer-label"><span className="global-answer-mark">SN</span><strong>综合回答</strong><span>引用来自 {job.cited_notebook_ids.length} 个笔记本</span></div>
                   {job.response.grounded !== true && <p className="global-answer-grounding" role="note">以下回答未得到原文充分支持，请结合引用核对。</p>}
@@ -179,14 +165,15 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                     onReferenceClick={(reference, event) => setCite({ jobId: job.job_id, reference, rect: event.currentTarget.getBoundingClientRect() })} />
                   <footer className="global-answer-footer"><small>{job.response.completeness_notice}</small><button aria-label="复制回答" className={copyResult.resultFor(job.job_id) === "copied" ? "global-text-button copy-result-copied" : copyResult.resultFor(job.job_id) === "failed" ? "global-text-button copy-result-failed" : "global-text-button"} disabled={Boolean(copying)} onClick={() => void copyAnswer(job)}>{copyResult.resultFor(job.job_id) === "copied" ? <Check size={13} /> : <Copy size={13} />}<span role="status">{copying === job.job_id ? "复制中…" : copyResult.resultFor(job.job_id) === "copied" ? "已复制" : copyResult.resultFor(job.job_id) === "failed" ? "复制失败" : "复制"}</span></button></footer>
                 </ChatAnswer> : <>
-                {/* 轨迹面板刻意在 role="status" 之外：它自带一颗可展开的按钮、内容
-                    每一步都在变，塞进 live region 会让读屏把整块反复念一遍。 */}
-                {trace.length > 0 && <div className="chat-assistant chat-thinking"><ReasoningTracePanel steps={trace} live={job.status === "running"} /></div>}
                 <div className={`global-job-status${job.status === "failed" ? " failed" : ""}`} role="status">
                   {job.status === "running" && <LoaderCircle size={18} className="global-spin" />}
                   <span>{job.status === "running" ? `正在查阅资料 · 已检索 ${job.searched_notebook_ids.length} / ${job.resolved_notebook_ids.length} 个笔记本` : job.status === "cancelled" ? "已停止回答，可以修改问题后继续。" : job.status === "interrupted" ? "服务已重启，请重新提交问题。" : job.error || "回答未完成，请检查模型服务后重试。"}</span>
                   {job.status !== "running" && <button className="global-text-button" onClick={() => { ask.setDraft(job.question); composer.current?.focus(); }}>重新提问</button>}
                 </div>
+                {/* 与完成态同一个位置（回答/状态之下），同一轮里不跳位。
+                    刻意在 role="status" 之外：它自带一颗可展开的按钮、内容每一步都
+                    在变，塞进 live region 会让读屏把整块反复念一遍。 */}
+                {trace.length > 0 && <div className="chat-assistant chat-thinking"><ReasoningTracePanel steps={trace} live={job.status === "running"} /></div>}
                 </>}
                 <GlobalCoverageReceipt job={job} notebookNames={names} />
               </section>; })}

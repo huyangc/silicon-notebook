@@ -9,6 +9,7 @@ import { GlobalAskLauncher } from "../../app/ask/global-ask-launcher.tsx";
 import { AnswerView } from "../../app/answer-panel.tsx";
 import { useRootModalCoordinator } from "../../app/use-root-modal-coordinator.ts";
 import type { GlobalConversation, GlobalConversationDetail, GlobalJob, GlobalScope } from "../../app/global-ask-api.ts";
+import type { QueryIntentContract } from "../../app/ask-intent-model.ts";
 import type { AskResponse, NotebookSummary } from "../../app/workspace-model.ts";
 
 const api = vi.hoisted(() => ({
@@ -635,6 +636,11 @@ const citedAnswer: GlobalJob = {
   },
 };
 
+/** 新作业：单库引擎直出的标准回答，引用卡由 AnswerView 内部渲染。 */
+const answeredJob: GlobalJob = {
+  ...job("done"), cited_notebook_ids: ["nb-0"], answer: standardAnswer(),
+};
+
 test("page opens the shared citation card beside the inline marker, with source, notebook and an open-notebook link", async () => {
   window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
   api.list.mockResolvedValue([conversation()]);
@@ -970,6 +976,122 @@ test.each([
   fireEvent.click(summary);
   await waitFor(() => expect(summary).toHaveAttribute("aria-expanded", "true"));
   expect(within(panel).getByRole("listitem")).toHaveTextContent("检索材料研究");
+});
+
+/** 打开浮窗、载入这条新作业、点开第一条引用的卡片。返回卡片与它的行内标记。 */
+async function openAnsweredCard(container: HTMLElement) {
+  fireEvent.click(screen.getByRole("button", { name: "打开全局问答" }));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入问题" })).toBeEnabled());
+  fireEvent.click(await screen.findByRole("button", { name: "对话 conv-a" }));
+  await screen.findByText("跨库结论", { exact: false });
+  const marker = await screen.findByRole("button", { name: "[1]" });
+  fireEvent.click(marker);
+  const card = await waitFor(() => {
+    const node = container.querySelector(".cite-popover");
+    expect(node).not.toBeNull();
+    return node as HTMLElement;
+  });
+  return { card, marker };
+}
+
+// 新作业那条路径上，卡片由 AnswerView 内部渲染，走的是 citation-card 自己的 Esc
+// 拦截（window 捕获期 preventDefault + stopPropagation）。#751 那三条保护必须在这
+// 条路径上同样成立——workspace 那份 bespoke effect 已经删掉，靠的就是下沉的这一份。
+test("Escape closes only the AnswerView citation card, never the floating chat window", async () => {
+  installDialogMethods();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [answeredJob]));
+  const { container } = render(<Launcher />);
+  const { card, marker } = await openAnsweredCard(container);
+  // 卡片必须渲染在 <dialog> 子树内：全屏形态 showModal() 把 dialog 提到 top layer。
+  expect(screen.getByRole("dialog", { name: "全局问答" }).contains(card)).toBe(true);
+
+  // ⚠ 从 **dialog 子树内**的元素派发（刚点过的行内标记，真实按键时焦点就在它上面）。
+  // 从 document.body 派发的事件压根不经过 dialog，把拦截删掉也不会红。
+  fireEvent.keyDown(marker, { key: "Escape" });
+  await waitFor(() => expect(container.querySelector(".cite-popover")).toBeNull());
+  expect(screen.getByRole("dialog", { name: "全局问答" })).toBeTruthy();
+  expect(screen.getByRole("textbox", { name: "输入问题" })).toBeTruthy();
+  // 卡片关掉之后，同一个 Esc 才轮到浮窗自己。
+  fireEvent.keyDown(screen.getByRole("dialog", { name: "全局问答" }), { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局问答" })).toBeNull());
+});
+
+test("collapsing the window closes the AnswerView card and releases the page's Escape", async () => {
+  installDialogMethods();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [answeredJob]));
+  const { container } = render(<Launcher />);
+  await openAnsweredCard(container);
+  // 收起按钮是普通 click（不派发 pointerdown），所以这里单独验的就是 dismissSignal：
+  // 浮窗收起后本组件仍然挂载，卡片不跟着收就会把宿主页面的下一次 Esc 整个吞掉。
+  fireEvent.click(screen.getByRole("button", { name: "收起全局问答" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局问答" })).toBeNull());
+  await waitFor(() => expect(container.querySelector(".cite-popover")).toBeNull());
+
+  const pageEscape = vi.fn();
+  window.addEventListener("keydown", pageEscape);
+  try {
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(pageEscape).toHaveBeenCalledTimes(1);
+  } finally {
+    window.removeEventListener("keydown", pageEscape);
+  }
+});
+
+test("a modified click on the AnswerView card's open-notebook goes to a new tab without collapsing the window", async () => {
+  installDialogMethods();
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [answeredJob]));
+  const { container } = render(<Launcher />);
+  const { card } = await openAnsweredCard(container);
+  fireEvent.click(within(card).getByRole("link", { name: "打开笔记本" }), { metaKey: true });
+  expect(screen.getByRole("dialog", { name: "全局问答" })).toBeTruthy();
+});
+
+test("owner retirement during an in-flight intent preview cannot strand the composer", async () => {
+  const pending = deferred<QueryIntentContract>();
+  api.intent.mockReturnValue(pending.promise);
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  act(() => result.current.selectMode("reasoning"));
+  act(() => result.current.setDraft("请逐步比较两个体系"));
+  await act(async () => { void result.current.submit(); });
+  await waitFor(() => expect(result.current.intentChecking).toBe(true));
+
+  // load() 推进 owner。在途预检必须在同一处退休，否则它的 finally 会因 ticket 不
+  // 匹配而跳过 setIntentChecking(false)，界面永久停在「取消问题理解」。
+  await act(async () => { await result.current.load(); });
+  expect(result.current.intentChecking).toBe(false);
+  expect(result.current.intentReview).toBeNull();
+  // 迟到的预检响应也不能把界面重新锁住，更不能建出作业。
+  await act(async () => { pending.resolve(clearContract("请逐步比较两个体系")); });
+  expect(result.current.intentChecking).toBe(false);
+  expect(api.ask).not.toHaveBeenCalled();
+  // 真正的判据是「界面没被卡死」：换回通用问答，下一次提问照常发得出去。
+  act(() => result.current.selectMode("chunk"));
+  act(() => result.current.setDraft("换个问题"));
+  await act(async () => { await result.current.submit(); });
+  expect(api.ask).toHaveBeenCalledTimes(1);
+});
+
+test("cancelling the understanding step after the stream returned still creates no job", async () => {
+  const pending = deferred<QueryIntentContract>();
+  api.intent.mockReturnValue(pending.promise);
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  act(() => result.current.selectMode("reasoning"));
+  act(() => result.current.setDraft("请逐步比较两个体系"));
+  await act(async () => { void result.current.submit(); });
+  await waitFor(() => expect(result.current.intentChecking).toBe(true));
+
+  await act(async () => {
+    // 同一个同步块：流已返回（resolve），await 的后续还没跑，用户此刻按下取消。
+    pending.resolve(clearContract("请逐步比较两个体系"));
+    result.current.abortIntent();
+  });
+  expect(api.ask).not.toHaveBeenCalled();
+  await waitFor(() => expect(result.current.intentChecking).toBe(false));
 });
 
 test("citation badge shows the owning notebook for every citation", async () => {
