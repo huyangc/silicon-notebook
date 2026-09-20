@@ -59,7 +59,7 @@ _LIBRARY_STATUSES = frozenset({"ok", "skipped"})
 
 @dataclass(frozen=True)
 class LibraryOutcome:
-    """One participant library's receipt, produced ENTIRELY on a worker thread.
+    """One participant library's receipt, produced on the CALLING thread.
 
     Field-for-field the durable half of ``global_ask._NotebookOutcome``: that
     class also carries the candidate pool and the evidence map, which are the
@@ -68,9 +68,13 @@ class LibraryOutcome:
     left here is exactly what the job thread writes into the persisted coverage
     lists.
 
-    Frozen, unlike ``_NotebookOutcome``: a receipt crosses a thread boundary and
-    is then inserted into a list a poller reads, so it must not be editable
-    after the fact by whichever side still holds a reference.
+    The producer is the federation's merge step, which runs on the thread that
+    asked for retrieval, after the fan-out has been folded: the worker threads
+    only ever RETURN values, so nothing here is assembled under a race and the
+    receipts follow the participant order rather than thread scheduling.
+
+    Frozen: a receipt is inserted into a list a poller reads, so it must not be
+    editable after the fact by whichever side still holds a reference.
 
     ``status`` and ``reason`` are not redundant.  "Skipped" is the fact the
     coverage list is built from; the reason code is what telemetry carries and
@@ -161,6 +165,24 @@ class FederatedRunPlan:
       the retrieval-time evidence fingerprints both travel it, so there is one
       place where worker results become job state and one thread doing the
       writing.
+
+    ``on_evidence`` is ACCUMULATING, and its three rules are a contract, not an
+    implementation detail of either side:
+
+    1. **The consumer merges.**  A run federates once per retrieval round, so
+       this callback fires once per round with that round's selection; the
+       receiver folds each map into one table (``update``) rather than
+       replacing it.
+    2. **The earliest snapshot in the run is a legitimate "before".**  The
+       re-check asks whether the evidence changed BETWEEN retrieval and the
+       answer, so whichever round first fingerprinted an element answers that
+       question for the whole run -- which is what lets the federation skip
+       re-reading elements it has already published.
+    3. **Absence is refusal.**  An element that never made it into the
+       accumulated table is not attestable, so a citation resting on it must be
+       refused rather than accepted unverified.  This is what makes a failed
+       fingerprint read fail CLOSED element by element: it publishes nothing
+       for that batch instead of publishing something weaker.
 
     Callables rather than objects: this is a leaf module, and typing these
     fields would drag the federation's and the job's types into it and create
