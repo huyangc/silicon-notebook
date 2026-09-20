@@ -1659,6 +1659,63 @@ test("a Stop pressed during a replacement whose response was lost is still honou
   expect(result.current.draft).toBe("其实已经提交的问题");
 });
 
+test("a Stop during a new conversation's first submission survives a lost response", async () => {
+  // 新会话第一问：响应丢了时连会话 id 都没有、无从对账。用同一个幂等 id 再发一次，
+  // 已建的作业被原样回放，那次停止才够得着它（codex #761 R7 P2）。
+  const first = deferred<GlobalJob>();
+  api.ask.mockReturnValueOnce(first.promise).mockResolvedValueOnce({ ...job(), question: "第一问" });
+  api.cancel.mockResolvedValue({ ...job("cancelled"), question: "第一问" });
+  api.detail.mockRejectedValue(conversationGone());
+  const { result } = renderHook(() => useGlobalAsk({ syncUrl: false }));
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  act(() => result.current.setDraft("第一问"));
+  await act(async () => { void result.current.submit(); });
+  await act(async () => { await result.current.stop(); });
+  await act(async () => { first.reject(new Error("network")); });
+  await waitFor(() => expect(api.cancel).toHaveBeenCalledWith("job-conv-a", true));
+  expect(api.ask).toHaveBeenCalledTimes(2);
+  expect(api.ask.mock.calls[1][0].client_request_id).toBe(api.ask.mock.calls[0][0].client_request_id);
+  await waitFor(() => expect(result.current.submitting).toBe(false));
+  expect(result.current.turns).toEqual([]);
+  expect(result.current.draft).toBe("第一问");
+  expect(result.current.error).toBe("");
+});
+
+test("a failed submission nobody tried to stop is not re-sent behind the user's back", async () => {
+  api.ask.mockRejectedValue(new Error("network"));
+  const { result } = renderHook(() => useGlobalAsk({ syncUrl: false }));
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  act(() => result.current.setDraft("普通失败"));
+  await act(async () => { await result.current.submit(); });
+  expect(api.ask).toHaveBeenCalledTimes(1);
+  expect(result.current.draft).toBe("普通失败");
+  expect(result.current.error).not.toBe("");
+});
+
+test("an older-turns page that was in flight cannot undo a reconciliation", async () => {
+  // 「加载更早的问答」在途时一次停止并丢弃换掉了第一页与游标：迟到的旧页不得再把
+  // 它的行与旧游标写回来（codex #761 R7 P2）。
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  const earlier = { ...job("done"), job_id: "job-earlier", answer: standardAnswer() };
+  const stale = deferred<GlobalConversationDetail>();
+  let discarded = false;
+  api.detail.mockImplementation((id: string, offset = 0) => offset !== 0 ? stale.promise
+    : Promise.resolve(discarded ? { ...detail(id, [earlier]), has_more: true, next_offset: 1 }
+      : { ...detail(id, [earlier, job()]), has_more: true, next_offset: 2 }));
+  api.poll.mockReturnValue(new Promise(() => {}));
+  api.cancel.mockImplementation(() => { discarded = true; return Promise.resolve(job("cancelled")); });
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+  act(() => { void result.current.loadMoreTurns(); });
+  await act(async () => { await result.current.stop(); });
+  expect(result.current.turnOffset).toBe(1);
+  await act(async () => {
+    stale.resolve({ ...detail("conv-a", [{ ...job("done"), job_id: "job-oldest" }]), has_more: true, next_offset: 3 });
+  });
+  expect(result.current.turnOffset).toBe(1);
+  expect(result.current.turns.map((turn) => turn.job_id)).toEqual(["job-earlier"]);
+});
+
 test("an older stopped turn wears the same notice without promising a replacement", async () => {
   window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
   const older = { ...job("cancelled"), job_id: "job-older", question: "更早停下的问题" };

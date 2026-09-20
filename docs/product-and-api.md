@@ -219,8 +219,8 @@ submission uses; it creates no job, no conversation and no row. The streaming va
 and the authority recheck before the first frame, so a 404/422 stays a real status code instead of an error
 frame inside a 200. A client that disconnects cancels the understanding call.
 `GET /jobs/{job_id}` reads progress or the answer; `POST /jobs/{job_id}/cancel` stops execution, and
-`?discard=true` means "stopped before any process output": the job **this call stopped** (it must be
-the conversation's newest) is deleted together with a conversation it had just opened; a finished job, and a
+`?discard=true` means "stopped before any process output": the job **this call found running** and that then stopped (it must be
+the conversation's newest; it still counts when the worker wrote `cancelled` first) is deleted together with a conversation it had just opened; a finished job, and a
 job that was already stopped earlier (it may be the very record the rule keeps in the transcript), is never
 discarded;
 `POST /jobs/{job_id}/feedback` (body `{rating: "useful" | "not_useful"}`) records one 👍/👎 for a
