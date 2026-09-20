@@ -77,6 +77,12 @@ class GlobalAskStore:
             return None
         result = GlobalAskJob.model_validate_json(row["payload_json"])
         result.status = row["status"]
+        # The submission's idempotency id lives in its own column, not in the
+        # payload; a narrower SELECT simply does not carry it.
+        try:
+            result.client_request_id = row["client_request_id"] or ""
+        except (KeyError, IndexError):
+            pass
         if result.status == "interrupted":
             result.error = "服务已重启，请重新提交问题。"
         return result

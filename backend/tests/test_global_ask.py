@@ -233,6 +233,11 @@ def test_include_scope_and_idempotency_and_owner_isolation(setup):
     assert finished(service, job).status == "done"
     assert service.start(request, user_id="u").job_id == job.job_id
     assert retrieved == ["a"]
+    # The id is echoed on the job, from the POST and from every later read, so a
+    # client that lost the response can recognise its own submission.
+    assert job.client_request_id == "once"
+    assert service.get_job(job.job_id, user_id="u").client_request_id == "once"
+    assert service.conversation(job.conversation_id, user_id="u").turns[0].client_request_id == "once"
     with pytest.raises(GlobalAskError) as error:
         service.start(request.model_copy(update={"question": "different"}), user_id="u")
     assert error.value.status_code == 409

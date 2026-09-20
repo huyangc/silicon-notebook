@@ -151,6 +151,14 @@ class GlobalAskJob(BaseModel):
     # wins (see ``GlobalAskStore.set_feedback``): once non-empty it never
     # changes, matching the disabled-once-clicked button in the interface.
     feedback: str = ""
+    # The idempotency id the submission carried (``GlobalAskRequest.
+    # client_request_id``), echoed back so a client that lost a response can
+    # recognise ITS OWN job in a re-read conversation. Matching on the question
+    # text does not establish that: two tabs can submit the same words. It is
+    # filled from the row's own column on read (``GlobalAskStore._job``) and by
+    # ``GlobalAskService.start`` on the job it returns; the owner is the only
+    # reader of a job, and the public share projection never sees this field.
+    client_request_id: str = ""
 
 
 # D1-1 read-side projections: prefer the new ``answer``/``trace`` shape and

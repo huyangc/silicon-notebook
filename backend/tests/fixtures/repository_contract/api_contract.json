@@ -4431,6 +4431,11 @@
               "title": "Cited Notebook Ids",
               "type": "array"
             },
+            "client_request_id": {
+              "default": "",
+              "title": "Client Request Id",
+              "type": "string"
+            },
             "conversation_id": {
               "title": "Conversation Id",
               "type": "string"

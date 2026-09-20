@@ -924,7 +924,7 @@ class GlobalAskService:
                 conversation_id=conversation.id if conversation else "gconv-" + uuid4().hex,
                 status="running", question=payload.question, created_at=_now(),
                 notebook_scope=scope, resolved_notebook_ids=ids,
-                mode=spec.id,
+                mode=spec.id, client_request_id=payload.client_request_id or "",
                 # ⛔ CLAMPED, not carried. ``deep`` multiplies the reasoning
                 # round ceiling, and every round federates over the whole
                 # participant set: eight libraries at the deep round count does

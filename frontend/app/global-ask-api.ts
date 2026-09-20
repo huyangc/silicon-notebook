@@ -72,6 +72,8 @@ export type GlobalJob = {
    *  为准——一旦非空就不会再变,与按钮「点过就禁用」的界面契约一致。旧作业
    *  没有这个字段,读到时按未反馈处理。 */
   feedback?: string;
+  /** 这条作业提交时带的幂等 id。响应丢失后重读会话时，凭它认出「这条是我提交的」。 */
+  client_request_id?: string;
 };
 export type GlobalConversation = {
   id: string;
