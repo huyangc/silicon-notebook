@@ -30,6 +30,11 @@ from app.models.sources import SourceElement
 from app.services.cancellation import AskCancelled
 from app.services.global_ask import GlobalAskError
 
+# Upper bound on how long a pushed frame waits for an idle connection to notice
+# it. Small against the sub-second goal, large enough that a parked watcher is
+# twenty cheap wake-ups a second rather than a held thread.
+_STREAM_IDLE_SLEEP_SECONDS = 0.05
+
 router = APIRouter(prefix="/global-ask", tags=["global-ask"])
 
 
@@ -174,7 +179,9 @@ async def stream_global_ask_job(
         _call, global_ask_service().attach, job_id, user_id=user.id,
     )
     return StreamingResponse(
-        deliver_ask_events(events, request),
+        # Idle waits happen on the event loop: this stream stays open for the whole
+        # run on every page that is watching it (see ``deliver_ask_events``).
+        deliver_ask_events(events, request, idle_sleep_seconds=_STREAM_IDLE_SLEEP_SECONDS),
         media_type="application/x-ndjson",
         headers=NDJSON_STREAM_HEADERS,
     )

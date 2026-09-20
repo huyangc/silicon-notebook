@@ -231,8 +231,13 @@ frame inside a 200. A client that disconnects cancels the understanding call.
 whole coverage lists — `searched_notebook_ids`, `skipped_notebooks`, `degraded_notebook_ids` — which
 replace rather than merge; the first one after `started` is a full snapshot at offset 0), then exactly one
 terminal frame — `final` carrying the job as the store has it once it left `running`, or `gone` when the row
-is no longer there (stopped-and-discarded, or its conversation deleted) — and a blank keepalive line every
-5 seconds of silence. Authority is checked before the first frame by the same call `GET /jobs/{job_id}`
+is no longer there (stopped-and-discarded, its conversation deleted, or the member's read access to one of
+the job's libraries revoked mid-run); a follower whose own store read fails ends with
+`{"event":"error","error":…}` (fixed wording, never the exception text); a service shutdown that leaves the
+job `running` ends the stream with **no terminal frame** — a reader treats any of these as a lost stream and
+falls back to polling — and a blank keepalive line every 5 seconds of silence. A receipt-only frame has empty
+`steps` and a `trace_offset` at the end of the trace: the coverage lists are taken whether or not the trace
+part of a frame fits. Authority is checked before the first frame by the same call `GET /jobs/{job_id}`
 makes, so a missing or foreign job keeps its real 404. A reader applies a frame as
 `trace = trace[:trace_offset] + steps` when `trace_offset <= len(trace)` and ignores a frame that would
 leave a gap; re-delivery of a step it already has is therefore harmless. A client disconnect NEVER cancels

@@ -357,20 +357,20 @@ def test_closing_the_queue_stops_the_follower_and_never_cancels_the_job(setup):
     with service._lock:
         service._feeds.pop(job.job_id)
         service._live.pop(job.job_id)
+    before = set(threading.enumerate())
     events = service.attach(job.job_id, user_id="u")
     assert events.get(timeout=5)["event"] == "started"
+    # Only the follower THIS attach started: a process-wide scan would go red
+    # for somebody else's leak and be impossible to attribute.
+    mine = [
+        thread for thread in threading.enumerate()
+        if thread not in before and thread.name == "global-ask-follow"
+    ]
+    assert len(mine) == 1
 
     events.close()
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        if not any(
-            thread.name == "global-ask-follow" and thread.is_alive()
-            for thread in threading.enumerate()
-        ):
-            break
-        Event().wait(0.01)
-    else:
-        pytest.fail("the follower outlived the connection it served")
+    mine[0].join(5)
+    assert not mine[0].is_alive(), "the follower outlived the connection it served"
 
     resume.set()
     assert finished(service, job).status == "done"
@@ -406,3 +406,172 @@ def test_the_http_stream_returns_ndjson_lines_in_order(setup, monkeypatch):
         # The authority refusal is a real status code, not a frame inside a 200.
         missing = client.get("/api/global-ask/jobs/gask-nope/stream")
         assert missing.status_code == 404 and missing.headers["X-User-Message"] == "1"
+
+
+
+# ---------------------------------------------------------------------------
+# Review findings on the first cut of the stream
+# ---------------------------------------------------------------------------
+
+def test_a_coverage_frame_carries_no_steps_and_points_at_the_trace_end(setup):
+    """A library receipt must not resend the whole trace: that is the O(n^2)
+    the persistence throttle exists to avoid. ``trace_offset`` is the trace's
+    current length and ``steps`` is empty; readers take the coverage lists from
+    a frame whether or not its trace part fits them."""
+    service, _, _, _ = setup
+    job = service.start(GlobalAskRequest(question="q"), user_id="u")
+    finished(service, job)
+    live = service.store.job(job.job_id, "u")
+    live.trace = [_step("一"), _step("二")]
+    frame = service._progress_frame(live, None)
+    assert frame["trace_offset"] == 2 and frame["steps"] == []
+    assert frame["searched_notebook_ids"] == live.searched_notebook_ids
+
+
+def test_a_shutdown_never_reports_a_running_row_as_final(setup):
+    """``close()`` refuses the worker's own terminal write, so the row is still
+    ``running`` when the worker unwinds. A ``final`` built from it would stop
+    the client's polling on a job that says it is not over: the stream must end
+    WITHOUT a terminal frame so the client falls back to polling."""
+    service, _, _, _ = setup
+    parked, resume = _park(service)
+    job = service.start(GlobalAskRequest(question="q"), user_id="u")
+    assert parked.wait(5)
+    events = service.attach(job.job_id, user_id="u")
+    closer = Thread(target=service.close)
+    closer.start()
+    resume.set()
+    closer.join(10)
+    frames = _collect(events)
+    assert service.store.job(job.job_id, "u").status == "running"
+    assert [frame["event"] for frame in frames if frame["event"] in {"final", "gone"}] == []
+    assert frames[0]["event"] == "started"
+
+
+def test_access_revoked_mid_run_ends_the_stream_as_gone_not_with_the_answer(setup):
+    """Polling re-checks authority on every read; the stream that replaces it
+    must not be the looser of the two. Both paths: the live feed's terminal and
+    the store follower."""
+    service, readable, _, _ = setup
+    parked, resume = _park(service)
+    job = service.start(GlobalAskRequest(question="q"), user_id="u")
+    assert parked.wait(5)
+    fed = service.attach(job.job_id, user_id="u")
+    readable.discard("b")
+    resume.set()
+    frames = _collect(fed)
+    assert frames[-1] == {"event": "gone"}
+    assert all(frame["event"] != "final" for frame in frames)
+
+    readable.add("b")
+    service.follow_poll_seconds = 0.01
+    parked, resume = _park(service)
+    second = service.start(GlobalAskRequest(question="q2"), user_id="u")
+    assert parked.wait(5)
+    with service._lock:
+        service._feeds.pop(second.job_id)
+        service._live.pop(second.job_id)
+    followed = service.attach(second.job_id, user_id="u")
+    assert followed.get(timeout=5)["event"] == "started"
+    readable.discard("b")
+    tail = _collect(followed)
+    assert tail[-1] == {"event": "gone"}
+    assert all(frame["event"] != "final" for frame in tail)
+    readable.add("b")
+    resume.set()
+    finished(service, second)
+
+
+def test_a_follower_backs_off_while_nothing_moves_and_resets_when_it_does(setup):
+    service, _, _, _ = setup
+    service.follow_poll_seconds = 0.5
+    service.follow_poll_max_seconds = 2.0
+    parked, resume = _park(service)
+    job = service.start(GlobalAskRequest(question="q"), user_id="u")
+    assert parked.wait(5)
+    with service._lock:
+        service._feeds.pop(job.job_id)
+        service._live.pop(job.job_id)
+    events = _queue()
+    waits, enough = [], Event()
+
+    def record(timeout):
+        # The follower's ONLY pacing call: record what it asked for and return
+        # at once, so the schedule is observed without any wall-clock wait.
+        waits.append(timeout)
+        if len(waits) >= 5:
+            enough.set()
+            events.close()
+        return events.closed.is_set()
+
+    events.closed.wait = record
+    events.put({"event": "started"})
+    service._follow(events, job.job_id, "u")
+    assert enough.wait(5)
+    _collect(events)
+    # First read is a change (nothing seen yet) -> base interval; then doubling
+    # up to the cap while the parked job stays quiet.
+    assert waits[:5] == [0.5, 1.0, 2.0, 2.0, 2.0]
+    resume.set()
+    finished(service, job)
+
+
+def test_a_feed_orphaned_by_a_worker_that_never_started_is_closed(setup, monkeypatch):
+    service, _, _, _ = setup
+    seen = {}
+    real_start = Thread.start
+
+    def start(thread):
+        if thread.name != "global-ask":
+            return real_start(thread)
+        # A reader subscribes in the window where the row and the feed exist
+        # but the worker is about to fail to start.
+        job_id = next(iter(service._feeds))
+        seen["events"] = _queue()
+        assert service._feeds[job_id].subscribe(seen["events"], lambda: {"event": "progress"})
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(Thread, "start", start)
+    with pytest.raises(RuntimeError):
+        service.start(GlobalAskRequest(question="q"), user_id="u")
+    monkeypatch.undo()
+    # The sentinel arrives: the reader's transport ends and it falls back to
+    # polling instead of idling on keepalives for a job that never ran.
+    assert _collect(seen["events"]) == [{"event": "progress"}]
+
+
+def test_an_idle_stream_connection_holds_no_executor_thread(monkeypatch):
+    """The global stream stays open for a whole run on every page watching it;
+    a blocked ``to_thread`` per idle connection would drain asyncio's default
+    executor, which the rest of the API shares."""
+    import asyncio
+
+    from app.api import task_stream
+
+    events = _queue()
+
+    async def refuse(*args, **kwargs):
+        raise AssertionError("an idle global stream must not use to_thread")
+
+    monkeypatch.setattr(task_stream.asyncio, "to_thread", refuse)
+
+    class Request:
+        async def is_disconnected(self):
+            return False
+
+    async def run():
+        lines = []
+        stream = task_stream.deliver_ask_events(events, Request(), idle_sleep_seconds=0.001)
+
+        async def feed():
+            await asyncio.sleep(0.01)
+            events.put({"event": "started"})
+            events.put(None)
+
+        feeder = asyncio.ensure_future(feed())
+        async for line in stream:
+            lines.append(line)
+        await feeder
+        return lines
+
+    assert [json.loads(line)["event"] for line in asyncio.run(run())] == ["started"]

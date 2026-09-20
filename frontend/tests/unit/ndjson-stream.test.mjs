@@ -100,3 +100,14 @@ test("yieldToPaint still settles when requestAnimationFrame is suspended (a hidd
     globalThis.window = previous;
   }
 });
+
+
+test("a consumer that throws cancels the reader instead of leaving the body open", async () => {
+  let cancelled = false;
+  const body = new ReadableStream({
+    start(controller) { controller.enqueue(new TextEncoder().encode('{"event":"error"}\n')); },
+    cancel() { cancelled = true; },
+  });
+  await assert.rejects(readNdjsonStream(body, () => { throw new Error("error frame"); }), /error frame/);
+  assert.equal(cancelled, true);
+});

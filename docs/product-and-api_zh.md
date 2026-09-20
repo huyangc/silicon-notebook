@@ -227,7 +227,11 @@ HTTP 入口均位于 `/api/global-ask`，要求登录：`POST /ask` 返回可轮
 （从绝对下标 `trace_offset` 起的轨迹步，外加**当前完整**的覆盖清单——`searched_notebook_ids`、
 `skipped_notebooks`、`degraded_notebook_ids`——它们整份替换、绝不合并；`started` 之后的第一帧是
 `trace_offset` 为 0 的全量快照），随后恰好一帧终态——`final` 带上作业离开 `running` 后存储里的那一行，
-或者行已不存在（停止并丢弃、或会话被删除）时的 `gone`——以及静默每 5 秒一个空行保活。
+或者行已不存在（停止并丢弃、会话被删除、或该成员对作业所涉某个库的读权在途中被收回）时的 `gone`；
+跟随线程自己读库失败时以 `{"event":"error","error":…}` 收尾（固定文案，绝不带异常原文）；服务
+退出时作业仍是 `running`，则**不发终态帧**直接结束——读取方一律按「流断了」退回轮询——以及静默每
+5 秒一个空行保活。纯回执帧的 `steps` 为空、`trace_offset` 指在轨迹末尾：覆盖清单无论轨迹那一半接不
+接得上都照收。
 鉴权在第一帧之前完成，走的就是 `GET /jobs/{job_id}` 的那次调用，所以不存在或不属于当前用户的作业
 仍是真实的 404。读取方按 `trace_offset <= len(trace)` 时 `trace = trace[:trace_offset] + steps` 应用，
 会留下空档的帧直接忽略；因此重复投递一条已有的步骤是无害的。客户端断连**绝不取消作业**——它只停止
