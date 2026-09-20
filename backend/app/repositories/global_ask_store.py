@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import json
 
-from app.core.capability_tokens import new_capability_token
+from app.core.capability_tokens import (
+    GLOBAL_CONVERSATION_SHARE_PREFIX,
+    new_capability_token,
+)
 # Safety ceiling on how many turns one public page renders; the same name the
 # notebook-scoped public read caps its fetch by. Pure leaf module, no cycle.
 from app.domain.conversation_public_view import MAX_TURNS
@@ -282,8 +285,19 @@ class GlobalAskStore:
         user's, and ``ConversationHasNoShareableAnswer`` when it holds no
         completed job to bound the snapshot -- enforced inside the same write
         transaction, so a never-answered conversation never has a token minted.
+
+        ⚠ THE SNAPSHOT RESTS ON A PRECONDITION OWNED ELSEWHERE. The keyset is
+        over ``(created_at, id)`` and ``created_at`` is a job's SUBMISSION
+        instant, not its completion. With two jobs of one conversation in flight,
+        the one submitted first could finish AFTER a share pinned the watermark
+        to the other -- and would then sit inside the published prefix without
+        the owner ever re-sharing. That cannot happen today only because
+        ``idx_global_ask_running`` (a partial unique index on
+        ``global_ask_jobs(conversation_id) WHERE status='running'``) allows one
+        running job per conversation. Relaxing that index for concurrent turns
+        means this watermark has to move to a completion-ordered key first.
         """
-        candidate = new_capability_token("gshr")
+        candidate = new_capability_token(GLOBAL_CONVERSATION_SHARE_PREFIX)
         expected = str(expected_through_id or "").strip()
         with self.database.write() as db:
             conv = db.execute(self._sql(
