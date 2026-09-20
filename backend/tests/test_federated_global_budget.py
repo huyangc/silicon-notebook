@@ -1000,12 +1000,14 @@ def test_a_second_round_reads_only_the_new_elements(pool):
     assert [sorted(row) for row in receipts.evidence] == [["e-1"], ["e-2"]]
 
 
-def test_unreadable_fingerprints_publish_an_empty_map_and_are_retried(pool):
-    """指纹读不到 → 发一条内容无关事件、回传空表,检索本身不塌;下一轮重试。
+def test_unreadable_fingerprints_are_published_as_none_and_retried(pool):
+    """指纹读不到 → 发一条内容无关事件、逐 element 回传 ``None``,检索本身不塌;下一轮重试。
 
-    方向是刻意的:那一批 element 在累积表里**缺席**,而缺席即不可佐证,所以靠它们
-    的引用会被拒绝而不是不加核验地放行。读失败的 element 不进已见集合,否则一次
-    瞬时故障会让它们在整次 run 里永久不可佐证。
+    三态合同:快照 / ``None``(走过本通道但读不到 → 复核拒绝)/ 缺席(从未走过本
+    通道:文档概览、集合枚举、图对象 → 复核只按来源天花板判)。读失败若回传空表,
+    这批 element 就与「从未走过本通道」无法区分,要么被不加核验地放行、要么连累
+    概览类答案整份作废。读失败的 element 不进已见集合,否则一次瞬时故障会让它们在
+    整次 run 里永久不可佐证;下一轮读成功的快照取代 ``None``。
     """
     ids = ("nb-a",)
     candidates = FakeCandidates(
@@ -1027,7 +1029,7 @@ def test_unreadable_fingerprints_publish_an_empty_map_and_are_retried(pool):
 
     assert list(result.collected) == ["c-nb-a"]
     assert candidates.fingerprint_reads == [["e-1"], ["e-1"]]
-    assert receipts.evidence == [{}, {"e-1": ("src", "fp")}]
+    assert receipts.evidence == [{"e-1": None}, {"e-1": ("src", "fp")}]
     assert [event for event in candidates.events
             if event["kind"] == "chunk_federation_evidence_unavailable"] == [{
                 "kind": "chunk_federation_evidence_unavailable",

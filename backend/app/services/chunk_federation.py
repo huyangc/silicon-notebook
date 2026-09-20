@@ -1399,10 +1399,13 @@ def _report_evidence(candidates, plan, collected: dict, deadline: float) -> None
     degrades to reading every time.
 
     Fail-soft, and the direction of the failure is deliberate.  An unreadable
-    batch publishes nothing for those elements, and ABSENCE from the
-    accumulated table is what the re-check treats as "not attestable" -- so the
-    citations resting on them are refused rather than accepted unverified.  The
-    same elements stay out of the seen-set, so the next round retries them.
+    batch publishes ``None`` for each of those elements, which is what the
+    re-check treats as "not attestable" -- so the citations resting on them are
+    refused rather than accepted unverified.  (Publishing nothing would not do:
+    absence is how an element that never travelled this channel looks, and
+    those are held to the ceiling only.)  The same elements stay out of the
+    seen-set, so the next round retries them and a success replaces the
+    ``None``.
     Cancellation and attestation failures are not failures of this read and
     re-raise.
 
@@ -1449,7 +1452,11 @@ def _report_evidence(candidates, plan, collected: dict, deadline: float) -> None
                 "error_type": type(exc).__name__,
                 "elements": len(element_ids),
             })
-            fingerprints = {}
+            # STATED as unreadable, not left out: absence from the accumulated
+            # table means "never travelled this channel" (overviews, graph
+            # objects), which the re-check holds to the ceiling only. These
+            # elements did travel it, so they must be refusable by name.
+            fingerprints = dict.fromkeys(element_ids)
     plan.on_evidence(fingerprints)
 
 
