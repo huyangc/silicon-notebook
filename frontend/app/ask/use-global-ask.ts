@@ -662,21 +662,25 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
         setError(toUserMessage(cause, "提交失败，请重试；重复提交不会创建重复任务"));
         // 失败不等于没提交：响应可能只是丢了。凡是这次提交带着「替换」或一次还没
         // 兑现的「停止」，就以服务端为准重新同步一次会话（`readConversation`）：
-        //   · 会话里多出一条我们没见过的、问题相同的作业——那就是这次提交：认领它
+        //   · 会话里有一条带着这次提交的幂等 id 的作业——那就是这次提交：认领它
         //     （清掉弹回的问题与错误），不给用户一个会建出重复回答的「重试」；用户
         //     按过停止的话，对它兑现那次停止；
         //   · 本地那条「已停止」记录在服务端已经不在了——换上真实的轮次，并作废这次
         //     的重试身份：下一次提交按新状态重新算要不要替换；
         //   · 会话本身不在了——退回「还没有会话」。
         if ((replaces || stopWanted) && conversationId) {
-          const known = new Set(currentTurns.current.map((item) => item.job_id));
+          const requestId = retryRequest.current?.id ?? "";
           const alive = () => mounted.current && ticket === owner.current && serial === submitSerial.current;
           void readConversation(conversationId).then(async (synced) => {
             if (!alive() || synced === null) return;
             retryRequest.current = null;
             if (synced === "gone") { dropConversationIdentity(conversationId); return; }
             applyConversation(synced);
-            const accepted = synced.turns.find((item) => !known.has(item.job_id) && item.question === question);
+            // 认领凭的是**这次提交自己的幂等 id**，不是问题文本：两个标签页可以用同一句话
+            // 替换同一条记录，赢的那条是别人的作业——认错了还会把别人的作业停掉删掉。
+            const accepted = requestId
+              ? synced.turns.find((item) => item.client_request_id === requestId)
+              : undefined;
             if (!accepted) return;
             setDraft((draft) => draft.trim() === question ? "" : draft);
             setError("");

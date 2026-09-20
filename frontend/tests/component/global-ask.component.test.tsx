@@ -1519,8 +1519,10 @@ test("a replacement whose response was lost is claimed, not offered as a retry",
   // （codex #761 R3 P2）。
   window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
   const stopped = { ...job("cancelled"), searched_notebook_ids: ["nb-0"] };
-  const accepted = { ...job(), job_id: "job-accepted", question: "其实已经提交的问题" };
-  api.detail.mockResolvedValueOnce(detail("conv-a", [stopped])).mockResolvedValueOnce(detail("conv-a", [accepted]));
+  api.detail.mockResolvedValueOnce(detail("conv-a", [stopped])).mockImplementationOnce(() => Promise.resolve(
+    // 服务端那条作业带着**这次提交**的幂等 id：凭它认领，不凭问题文本。
+    detail("conv-a", [{ ...job(), job_id: "job-accepted", question: "其实已经提交的问题", client_request_id: api.ask.mock.calls[0][0].client_request_id }]),
+  ));
   api.ask.mockRejectedValueOnce(new Error("network"));
   api.poll.mockReturnValue(new Promise(() => {}));
   const { result } = renderHook(() => useGlobalAsk());
@@ -1642,9 +1644,12 @@ test("a Stop pressed during a replacement whose response was lost is still honou
   const accepted = { ...job(), job_id: "job-accepted", question: "其实已经提交的问题" };
   const submission = deferred<GlobalJob>();
   api.detail.mockResolvedValueOnce(detail("conv-a", [stopped]))
-    .mockResolvedValueOnce(detail("conv-a", [accepted]))
+    .mockImplementationOnce(() => Promise.resolve(detail("conv-a", [
+      { ...accepted, client_request_id: api.ask.mock.calls[0][0].client_request_id },
+    ])))
     .mockRejectedValue(conversationGone());
-  api.ask.mockReturnValue(submission.promise);
+  // 提交途中按过停止 → 失败后会用同一个幂等 id 重发一次；这里两次都失败，走对账。
+  api.ask.mockReturnValueOnce(submission.promise).mockRejectedValue(new Error("network"));
   api.cancel.mockResolvedValue({ ...accepted, status: "cancelled" });
   api.poll.mockReturnValue(new Promise(() => {}));
   const { result } = renderHook(() => useGlobalAsk());
@@ -1714,6 +1719,28 @@ test("an older-turns page that was in flight cannot undo a reconciliation", asyn
   });
   expect(result.current.turnOffset).toBe(1);
   expect(result.current.turns.map((turn) => turn.job_id)).toEqual(["job-earlier"]);
+});
+
+test("another tab's identical question is never claimed, and never stopped on this tab's behalf", async () => {
+  // 两个标签页用同一句话替换同一条记录：赢的是对面那条。这边失败后对账看到它，问题
+  // 文本一模一样，但幂等 id 不是这边的——不认领、更不替用户把它停掉（codex #761 R8）。
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  const stopped = { ...job("cancelled"), searched_notebook_ids: ["nb-0"] };
+  const theirs = { ...job(), job_id: "job-theirs", question: "同一句话", client_request_id: "the-other-tab" };
+  const submission = deferred<GlobalJob>();
+  api.detail.mockResolvedValueOnce(detail("conv-a", [stopped])).mockResolvedValue(detail("conv-a", [theirs]));
+  api.ask.mockReturnValueOnce(submission.promise).mockRejectedValue(humanizedError("上一条问题已无法替换，请刷新对话后重新提交。", 409));
+  api.poll.mockReturnValue(new Promise(() => {}));
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.turns).toHaveLength(1));
+  act(() => result.current.setDraft("同一句话"));
+  await act(async () => { void result.current.submit(); });
+  await act(async () => { await result.current.stop(); });
+  await act(async () => { submission.reject(humanizedError("上一条问题已无法替换，请刷新对话后重新提交。", 409)); });
+  await waitFor(() => expect(result.current.turns.map((turn) => turn.job_id)).toEqual(["job-theirs"]));
+  expect(api.cancel).not.toHaveBeenCalled();
+  expect(result.current.draft).toBe("同一句话");
+  expect(result.current.error).not.toBe("");
 });
 
 test("an older stopped turn wears the same notice without promising a replacement", async () => {
