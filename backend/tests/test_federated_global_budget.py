@@ -253,7 +253,7 @@ class _global_run:
         )
         managers = [
             retrieval_run(
-                run_kind="ask_global", actor_id=self.actor,
+                run_kind="ask_chunk", actor_id=self.actor,
                 fanout_limit=self.fanout_limit,
             ),
             global_ask_run(
@@ -1094,7 +1094,7 @@ def test_without_a_plan_the_module_still_owns_its_own_pool(monkeypatch):
     override = ParticipantOverride(
         notebook_ids=ids, tiers={}, attested_actor_id=_ACTOR,
     )
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with source_scope_context(
             ids[0], None, None,
             notebook_source_ceilings={nid: frozenset({f"src-{nid}"})

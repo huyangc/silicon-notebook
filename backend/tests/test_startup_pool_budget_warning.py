@@ -107,3 +107,20 @@ def test_search_and_scale_consumers_alone_can_trigger_the_warning():
     assert warning is not None
     assert "搜索并发(4)" in warning
     assert "scale 构建并发(2)" in warning
+
+
+def test_chunk_fanout_pool_is_counted_in_the_budget():
+    """chunk 联邦扇出自建一个独立池,即使全局问答完全不跑也照样占连接——
+    今天从未进过这份预算(D1-7 之前),必须补上。"""
+    warning = _pool_budget_warning(
+        _settings(postgres_pool_max_size=24, chunk_fanout_max_workers=8)
+    )
+    assert warning is not None
+    assert "chunk 联邦扇出(8)" in warning
+    assert "=31" in warning  # 23 (生产默认) + 8
+
+
+def test_missing_chunk_fanout_field_does_not_raise():
+    """最小 settings double 缺这个字段时不得抛,也不得把其余预算一起丢掉。"""
+    warning = _pool_budget_warning(_settings(postgres_pool_max_size=24))
+    assert warning is None

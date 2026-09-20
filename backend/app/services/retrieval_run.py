@@ -22,7 +22,6 @@ from app.services.cancellation import CancelEvent, raise_if_cancelled
 T = TypeVar("T")
 _CANCEL_POLL_SECONDS = 0.05
 _RUN_KINDS = frozenset({
-    "ask_global",
     "ask_chunk",
     "ask_reasoning",
     "ask_plugin_engine",

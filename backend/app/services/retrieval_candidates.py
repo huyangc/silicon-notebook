@@ -253,11 +253,11 @@ class _RetrievalState:
         """Borrow an ALREADY resident chunk index, never load one.
 
         Same one-hop delegation convention as ``_scale_index`` /
-        ``_open_scale_ann`` above, and for the same reason: the two callers
-        (the federated warm-peek lane in ``_retrieve_chunks_baseline`` and
-        ``global_retrieval``) reach the catalog through one seat that a test
-        can replace symmetrically with the ``_scale_index`` it is contrasted
-        against, instead of reaching two levels into ``scale_runtime``.
+        ``_open_scale_ann`` above, and for the same reason: its caller (the
+        federated warm-peek lane in ``_retrieve_chunks_baseline``) reaches the
+        catalog through one seat that a test can replace symmetrically with
+        the ``_scale_index`` it is contrasted against, instead of reaching two
+        levels into ``scale_runtime``.
         """
         return self.scale_runtime.catalog.peek_warm_chunk_index(notebook_id)
 

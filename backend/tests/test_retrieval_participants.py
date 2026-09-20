@@ -59,7 +59,7 @@ def test_override_replaces_fallback():
         ["nb-a", "nb-b", "nb-c"], tiers={"nb-a": "personal", "nb-b": "base"},
     )
 
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(override):
             assert federated_ask_active() is True
             resolved = resolve_retrieval_participants("nb-a", fallback)
@@ -100,7 +100,7 @@ def test_actor_mismatch_raises():
     fallback = _CountingFallback([("nb-a", "personal")])
     override = _override(["nb-a", "nb-b"], actor="user-1")
 
-    with retrieval_run(run_kind="ask_global", actor_id="user-2"):
+    with retrieval_run(run_kind="ask_chunk", actor_id="user-2"):
         with participant_override(override):
             with pytest.raises(ParticipantOverrideError) as excinfo:
                 resolve_retrieval_participants("nb-a", fallback)
@@ -137,7 +137,7 @@ def test_nominal_active_mismatch_raises():
     fallback = _CountingFallback([("nb-x", "personal")])
     override = _override(["nb-a", "nb-b"])
 
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(override):
             # [0] 才是名义 active:覆盖集里的第二个库同样不算。
             for wrong_active in ("nb-x", "nb-b"):

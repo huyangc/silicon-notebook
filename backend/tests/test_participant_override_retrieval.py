@@ -122,7 +122,7 @@ def _override(notebook_ids, *, tiers=None, actor=_ACTOR) -> ParticipantOverride:
 def test_seat_returns_the_override_set(repo, islands):
     ids, _sources = islands
     active = ids[0]
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(_override(ids, tiers={ids[1]: "base"})):
             seated = repo.retrieval.candidates._retrieval_participants(active)
     assert seated == (
@@ -142,7 +142,7 @@ def test_seat_re_attests_on_every_read_inside_one_run(repo, islands):
     ids, _sources = islands
     active = ids[0]
     seat = repo.retrieval.candidates._retrieval_participants
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(_override(ids)):
             assert [nid for nid, _tier in seat(active)] == list(ids)
         with participant_override(_override(ids, actor="someone-else")):
@@ -169,7 +169,7 @@ def test_library_scope_can_still_narrow_an_override(repo, islands):
     """覆盖是替换,不是豁免:库维度仍然可以把覆盖集再收窄,但不能扩张。"""
     ids, _sources = islands
     active = ids[0]
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(_override(ids)):
             with source_scope_context(
                 active, None,
@@ -190,7 +190,7 @@ def test_federated_chunk_lane_searches_every_override_library(repo, islands):
     """
     ids, sources = islands
     active = ids[0]
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(_override(ids)):
             scored, _ids, _matrix = repo.retrieval.retrieve_chunk_candidates(
                 active, _QUERY,
@@ -205,7 +205,7 @@ def test_federated_kg_lane_searches_every_override_library(repo, islands):
     """知识对象腿同样按覆盖集,且 tier 取覆盖声明的值。"""
     ids, _sources = islands
     active = ids[0]
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(_override(ids, tiers={ids[1]: "base"})):
             hits = repo.retrieval.federated_retrieve(active, _QUERY)
     assert {hit.notebook_id for hit in hits} == set(ids)
@@ -225,7 +225,7 @@ def test_kg_owner_table_intersects_the_override_set(repo, islands):
         "k1": {"object_id": "o1", "notebook_id": ids[1]},
         "k2": {"object_id": "o2", "notebook_id": "nb-outside"},
     }
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(_override(ids)):
             owners = repo.retrieval.candidates._kg_object_owners(active, id_map)
     assert owners == {"o1": ids[1], "o2": active}
@@ -261,10 +261,10 @@ def test_fed_rxgraph_cache_key_includes_override_fingerprint(repo, islands):
     wide = _override(ids)
     narrow = _override([ids[0], ids[1]])
 
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(wide):
             repo.retrieval.graph._federated_rx_graph(active)
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(narrow):
             repo.retrieval.graph._federated_rx_graph(active)
 
@@ -283,7 +283,7 @@ def test_override_graph_actually_spans_the_override_libraries(repo, islands):
     """键分开只是第一层;图本身也必须真的覆盖了三个库的节点。"""
     ids, _sources = islands
     active = ids[0]
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(_override(ids)):
             graph, _idx_to_oid, oid_to_idx = (
                 repo.retrieval.graph._federated_rx_graph(active)
@@ -308,7 +308,7 @@ def test_ppr_and_scale_cache_keys_follow_the_same_rule(repo, islands):
             f"{active}:{family}"
         )
     override = _override(ids)
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(override):
             for family in ("ppr_graph", "scale_combined"):
                 assert _participant_graph_cache_key(active, family) == (
@@ -327,7 +327,7 @@ def test_collection_map_counts_override_participants(repo, islands):
     assert baseline.sources == 1, "前提:没有覆盖时只看得见 active 自己"
 
     repo.collection_catalog.invalidate()
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(_override(ids)):
             mapped = repo.collection_catalog.collection_map(active)
     assert set(mapped.notebook_ids) == set(ids)
@@ -345,7 +345,7 @@ def test_enumeration_rows_and_denominator_come_from_one_predicate(repo, islands)
         page_size=25, max_rows=1_000, max_pages=50, max_payload_chars=256_000,
     )
     repo.collection_catalog.invalidate()
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(_override(ids)):
             result = repo.collection_enumeration.enumerate_sources(
                 active, budget=budget,
@@ -371,7 +371,7 @@ def test_comparison_peer_libraries_come_from_the_override(repo, islands):
     queries = repo._runtime.ask_service().communities()
     assert queries.mounted_base_ids(active) == [], "前提:没挂任何参考库"
 
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(_override(ids)):
             peers = queries.mounted_base_ids(active)
     assert peers == list(ids)
@@ -379,7 +379,7 @@ def test_comparison_peer_libraries_come_from_the_override(repo, islands):
     # 库维度仍可再收窄——但 ``covers_notebook`` 对 scope 自己的 notebook_id 恒真
     # (名义 active 的来源由 ``allows()`` 另行把关),所以能被勾选去掉的只有 peer。
     # D1 的安装形状不提交库维度,这个组合只在用例里出现。
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(_override(ids)):
             with source_scope_context(
                 active, None,
@@ -398,11 +398,11 @@ def test_any_base_has_kg_answers_for_the_override_set(repo, islands):
     active = ids[0]
     gate = repo.retrieval
 
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(_override(ids)):
             # 没提交 base_scope:走 `_any_base_notebook_has_kg` 的覆盖臂。
             assert gate.any_base_has_kg(active) is True
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(_override(ids)):
             with source_scope_context(
                 active, None,
@@ -427,7 +427,7 @@ def test_graph_size_guard_answers_for_the_override_set(repo, islands, monkeypatc
         lambda notebook_id: {"copyable": notebook_id != ids[1]},
     )
 
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(_override(ids)):
             # 覆盖集里含那本大库 -> 判 large(两张图也会把它建进去)。
             assert candidates._federated_graph_is_large(active) is True
@@ -582,7 +582,7 @@ def test_actor_mismatch_raises_out_of_every_entry_point(repo, islands, entry):
             repo._runtime.ask_service()._no_kg_scope_admits_run(active)
         ),
     }
-    with retrieval_run(run_kind="ask_global", actor_id="somebody-else"):
+    with retrieval_run(run_kind="ask_chunk", actor_id="somebody-else"):
         with participant_override(_override(ids, actor=_ACTOR)):
             with pytest.raises(ParticipantOverrideError):
                 entries[entry]()
@@ -594,10 +594,10 @@ def test_assert_override_matches_run_is_the_loud_pre_check(repo, islands):
     # 无覆盖 -> no-op,连 run 都不要求。
     assert_override_matches_run() is None
 
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(_override(ids)):
             assert_override_matches_run() is None
-    with retrieval_run(run_kind="ask_global", actor_id="somebody-else"):
+    with retrieval_run(run_kind="ask_chunk", actor_id="somebody-else"):
         with participant_override(_override(ids, actor=_ACTOR)):
             with pytest.raises(ParticipantOverrideError):
                 assert_override_matches_run()
@@ -620,7 +620,7 @@ def test_reasoning_fail_open_seed_does_not_swallow_the_attestation_failure(
     retriever = _reasoning_retriever(repo)
     assert retriever.fail_closed is False, "前提:Ask 路径是 fail-open 的"
 
-    with retrieval_run(run_kind="ask_global", actor_id="somebody-else"):
+    with retrieval_run(run_kind="ask_chunk", actor_id="somebody-else"):
         with participant_override(_override(ids, actor=_ACTOR)):
             with pytest.raises(ParticipantOverrideError):
                 retriever._chunk_seed_search(active, _QUERY, 4)
@@ -786,7 +786,7 @@ def test_canonical_fold_uses_override_set(repo, islands):
     assert len(baseline_map) == 4, baseline_map
     assert "relations:" not in baseline_block
 
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with participant_override(_override(ids)):
             block, id_map = evidence.knowledge_context(active, hits)
 
@@ -880,7 +880,7 @@ def test_canonical_fold_raises_on_actor_mismatch(repo, islands):
     hits = _fold_hits(peer, by_name)
     evidence = _evidence_context(repo)
 
-    with retrieval_run(run_kind="ask_global", actor_id="somebody-else"):
+    with retrieval_run(run_kind="ask_chunk", actor_id="somebody-else"):
         with participant_override(_override(ids, actor=_ACTOR)):
             with pytest.raises(ParticipantOverrideError):
                 evidence.knowledge_context(active, hits)
@@ -944,7 +944,7 @@ def test_follow_chain_only_passes_participant_ids_under_an_override(repo, island
         assert seen == [{}], "无覆盖时不得出现 participant_ids 关键字"
 
         seen.clear()
-        with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+        with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
             with participant_override(_override(ids)):
                 graph.follow_chain(active, "ko-missing")
         assert len(seen) == 1

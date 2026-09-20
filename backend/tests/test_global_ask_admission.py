@@ -231,10 +231,6 @@ def test_sqlite_narrow_access_and_source_freeze_use_three_queries_for_twenty_fou
             "INSERT INTO source_elements(id,source_id,element_type,location_label,text,created_at) VALUES(?,?,?,?,?,?)",
             ("element", "source-0-markdown", "paragraph", "p1", "original evidence", "2026-09-19"),
         )
-        db.execute(
-            "INSERT INTO chunks(id,notebook_id,source_id,text,element_ids,created_at) VALUES(?,?,?,?,?,?)",
-            ("chunk", "nb-0", "source-0-markdown", "original evidence", '["element","missing"]', "2026-09-19"),
-        )
     # Bypass constructors' unrelated copy dependencies; these read methods only own a database.
     sharing = object.__new__(SharingStore)
     sharing.database = database
@@ -264,12 +260,6 @@ def test_sqlite_narrow_access_and_source_freeze_use_three_queries_for_twenty_fou
     assert fingerprint["element"][0] == "source-0-markdown"
     assert len(statements) == 1 and "metadata" not in statements[0]
     statements.clear()
-    with database.connect() as db:
-        snapshot = sources.global_candidate_evidence(db, ["chunk", "missing-chunk"])
-    assert snapshot["chunk"]["text"] == "original evidence"
-    assert snapshot["chunk"]["element_ids"] == ["element", "missing"]
-    assert snapshot["chunk"]["element_fingerprints"] == fingerprint
-    assert len(statements) == 1 and "metadata" not in statements[0]
     with database.write() as db:
         db.execute("UPDATE source_elements SET metadata=? WHERE id=?", ('{"image":"enhanced"}', "element"))
     assert sources.evidence_fingerprints(["element"]) == fingerprint

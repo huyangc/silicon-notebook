@@ -803,55 +803,6 @@ class SourceStore:
                     result[row["id"]] = item
         return result
 
-    def global_chunk_source_ids(self, db, chunk_ids: Sequence[str]) -> dict[str, str]:
-        """``{chunk_id: source_id}`` only -- the ceiling probe for global ANN.
-
-        The chunk ANN index holds EVERY chunk of a notebook, Memory/Knowhow
-        projections included, while the global ceiling excludes those source
-        types by construction. A global query therefore has to learn how much
-        of an ANN neighbourhood its ceiling actually admits BEFORE deciding the
-        neighbourhood is usable. ``global_candidate_evidence`` would answer the
-        same question, but it also transfers chunk text and per-element hashes
-        for candidates that are about to be discarded -- up to the over-fetch
-        multiple of ``chunk_recall`` of them. This reads two indexed columns.
-        """
-        ids = list(dict.fromkeys(chunk_ids))
-        if not ids:
-            return {}
-        rows = db.execute(
-            "SELECT id,source_id FROM chunks WHERE id = ANY(%s)", (ids,),
-        ).fetchall()
-        return {row["id"]: row["source_id"] for row in rows}
-
-    def global_candidate_evidence(self, db, chunk_ids: Sequence[str]) -> dict[str, dict]:
-        """Read chunk text and element hashes in one snapshot; keep element bodies in PostgreSQL."""
-        ids = list(dict.fromkeys(chunk_ids))
-        if not ids:
-            return {}
-        rows = db.execute(
-            "SELECT c.id,c.source_id,c.text,c.section_path,c.element_ids,s.title AS source_title, "
-            "e.id AS evidence_id,e.source_id AS evidence_source_id, "
-            "encode(sha256(convert_to(e.text,'UTF8')),'hex') AS evidence_hash "
-            "FROM chunks c JOIN sources s ON s.id=c.source_id "
-            "LEFT JOIN LATERAL jsonb_array_elements_text(c.element_ids::jsonb) declared(element_id) ON TRUE "
-            "LEFT JOIN source_elements e ON e.id=declared.element_id "
-            "WHERE c.id = ANY(%s) ORDER BY c.id", (ids,),
-        ).fetchall()
-        result = {}
-        for row in rows:
-            element_ids = row["element_ids"]
-            item = result.setdefault(row["id"], {
-                "id": row["id"], "source_id": row["source_id"], "source_title": row["source_title"],
-                "text": row["text"], "section_path": row["section_path"],
-                "element_ids": json.loads(element_ids) if isinstance(element_ids, str) else list(element_ids),
-                "element_fingerprints": {},
-            })
-            if row["evidence_id"] is not None:
-                item["element_fingerprints"][row["evidence_id"]] = (
-                    row["evidence_source_id"], row["evidence_hash"],
-                )
-        return result
-
     def evidence_fingerprints(self, element_ids: Sequence[str]) -> dict[str, tuple[str, str]]:
         """Validate original identities without transferring element bodies."""
         ids = list(dict.fromkeys(element_id for element_id in element_ids if element_id))

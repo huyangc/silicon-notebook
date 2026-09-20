@@ -1,10 +1,10 @@
 """Federated chunk recall: the participant set's passages, not only active's.
 
 Module-level functions taking the ``CandidateRetrievalService`` state as their
-first positional argument -- the shape ``global_retrieval.py`` already
-established.  Deliberately NOT new methods on ``retrieval_candidates.py``:
-that module is already the largest in the service layer, and keeping the
-merge/fan-out policy here lets it be unit-tested without a database.
+first positional argument.  Deliberately NOT new methods on
+``retrieval_candidates.py``: that module is already the largest in the
+service layer, and keeping the merge/fan-out policy here lets it be
+unit-tested without a database.
 
 Three structural rules this module exists to hold:
 
@@ -110,8 +110,7 @@ from app.domain.retrieval_control import RetrievalControlError
 # The budget vocabulary itself is repository knowledge -- which driver failure
 # means "the statement was cancelled" and which means "no connection could be
 # leased" -- so it is imported rather than re-derived here; see
-# ``read_budget.classify_read_failure``.  This is the same pair
-# ``global_retrieval`` consumes today, and the reason codes it produces are
+# ``read_budget.classify_read_failure``.  The reason codes it produces are
 # exactly ``federated_run.LIBRARY_SKIP_REASONS``.
 from app.repositories.read_budget import classify_read_failure, read_budget
 from app.services.federated_run import (
@@ -1114,11 +1113,10 @@ def _run_one(candidates, task: _Task, plan=None, deadline: float = 0.0,
             # still queued in the parent, and for the same reason.
             reason = "queue_deadline"
         elif plan is not None:
-            # The same judgment ``global_retrieval._emit_skipped`` makes, and
-            # deliberately the same function: a statement the server cancelled
-            # AT the deadline and a local clock that has just passed it are one
-            # event seen from two sides, so the driver's own answer wins and
-            # the clock only decides what an UNCLASSIFIED failure was.
+            # A statement the server cancelled AT the deadline and a local
+            # clock that has just passed it are one event seen from two
+            # sides, so the driver's own answer wins and the clock only
+            # decides what an UNCLASSIFIED failure was.
             reason = classify_read_failure(exc) or (
                 "timeout" if time.monotonic() >= clock.deadline
                 else "unavailable"

@@ -189,7 +189,7 @@ def test_progress_patch_preserves_payload_and_cannot_overwrite_terminal_state(st
     assert store.job(value.job_id, "user-a").searched_notebook_ids == ["nb-a"]
 
 
-def test_postgres_global_batch_authority_sources_and_evidence_snapshot(store, monkeypatch):
+def test_postgres_global_batch_authority_and_source_ceiling(store, monkeypatch):
     from contextlib import contextmanager
     import hashlib
 
@@ -217,10 +217,6 @@ def test_postgres_global_batch_authority_sources_and_evidence_snapshot(store, mo
         db.execute(
             "INSERT INTO source_elements(id,source_id,element_type,location_label,text,created_at) VALUES(%s,%s,%s,%s,%s,%s)",
             ("element", "source-0-markdown", "paragraph", "p1", original_text, now),
-        )
-        db.execute(
-            "INSERT INTO chunks(id,notebook_id,source_id,text,element_ids,created_at) VALUES(%s,%s,%s,%s,%s::jsonb,%s)",
-            ("chunk", "nb-0", "source-0-markdown", original_text, '["element","missing"]', now),
         )
     sharing = object.__new__(SharingStore)
     sharing.database = database
@@ -253,15 +249,6 @@ def test_postgres_global_batch_authority_sources_and_evidence_snapshot(store, mo
     fingerprint = sources.evidence_fingerprints(["element"])
     assert fingerprint == {"element": ("source-0-markdown", hashlib.sha256(original_text.encode("utf-8")).hexdigest())}
     assert projections.pop() == {"id", "source_id", "evidence_hash"}
-    with database.connect() as db:
-        snapshot = sources.global_candidate_evidence(db, ["chunk", "missing-chunk"])
-    assert projections.pop() == {
-        "id", "source_id", "text", "section_path", "element_ids", "source_title",
-        "evidence_id", "evidence_source_id", "evidence_hash",
-    }
-    assert snapshot["chunk"]["text"] == original_text
-    assert snapshot["chunk"]["element_ids"] == ["element", "missing"]
-    assert snapshot["chunk"]["element_fingerprints"] == fingerprint
     with database.write() as db:
         db.execute("UPDATE source_elements SET metadata=%s::jsonb WHERE id=%s", ('{"image":"enhanced"}', "element"))
     assert sources.evidence_fingerprints(["element"]) == fingerprint

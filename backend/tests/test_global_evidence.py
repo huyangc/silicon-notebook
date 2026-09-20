@@ -12,17 +12,32 @@ D1-4 之后这里删掉了三条旧流水线专属的用例,理由各自不同,�
   · ``test_total_retrieval_budget_discloses_unsearched_remaining_notebooks``
     —— 阶段时限与 ``queue_deadline`` 搬进了联邦通道,由
     ``tests/test_federated_global_budget.py`` 在它真正的宿主上钉。
+
+D1-7 又删掉了三条:``test_context_reserves_other_library_before_admitting_near_budget_chunk``、
+``test_context_does_not_replace_a_fitting_best_passage_with_a_weaker_tail``、
+``test_shared_answer_retry_recovers_empty_model_response``——三条钉的都是旧独立
+流水线合成阶段(其 ``_context``/``answer_with_retry``)自己的跨库预算分配与重试
+逻辑,而那一整个模块随退役的旧独立流水线一起删除(零生产调用方,合成早已并入
+``AskService`` 单引擎)。``chunk()`` 辅助函数本身与那个模块无关(其余
+``peer_evidence`` 用例一直在用它构造纯 ``RetrievedChunk``),因此原地保留,不再
+从那个已删模块的测试文件借道导入。
 """
 from dataclasses import replace
 from threading import Event
-from types import SimpleNamespace
 
+from app.domain.retrieval import RetrievedChunk
 from app.models.ask import Citation
 from app.models.global_ask import GlobalAskRequest
-from app.services.ask_service import AskService
 from app.services.global_evidence import peer_evidence
 from tests.test_global_ask import setup, finished, _LibraryUnavailable
-from tests.test_global_ask_synthesis import chunk, synthesis, RecordingModels
+
+
+def chunk(suffix="a", *, text="原文完整内容。", notebook_id="notebook-a"):
+    return RetrievedChunk(
+        chunk_id=f"chunk-{suffix}", source_id=f"source-{suffix}",
+        source_title=f"研究 {suffix}", section_path="结果 / 低温",
+        text=text, element_ids=[f"element-{suffix}"], notebook_id=notebook_id,
+    )
 
 
 def test_twenty_four_libraries_get_first_round_before_dominant_scores_repeat():
@@ -70,26 +85,6 @@ def test_remaining_capacity_prefers_local_confidence_over_equal_turns():
     assert selected == [sustained[0], falling[0], sustained[1], sustained[2]]
 
 
-def test_context_reserves_other_library_before_admitting_near_budget_chunk():
-    run = synthesis(RecordingModels(), budget=1000)
-    large = chunk("large", text="x" * 700, notebook_id="a")
-    a = chunk("small-a", text="a support", notebook_id="a")
-    b = chunk("small-b", text="b support", notebook_id="b")
-    context, identities = run._context([large, b, a], {})
-    assert {row["notebook_id"] for row in identities.values()} == {"a", "b"}
-    assert "a support" in context and "b support" in context
-    assert len(context) <= 1000
-
-
-def test_context_does_not_replace_a_fitting_best_passage_with_a_weaker_tail():
-    run = synthesis(RecordingModels(), budget=1000)
-    best = chunk("a-best", text="a" * 500, notebook_id="a")
-    tail = chunk("a-tail", text="t" * 300, notebook_id="a")
-    other = chunk("b", text="b" * 100, notebook_id="b")
-    _, refs = run._context([best, other, tail], {})
-    assert {row["object_id"] for row in refs.values()} == {best.chunk_id, other.chunk_id}
-
-
 def _one_strong_and_n_noise(noise_count=7):
     strong = [replace(chunk(f"a-{i}", text=f"relevant {i}", notebook_id="a"), relevance=0.9 - i * 0.001)
               for i in range(40)]
@@ -132,20 +127,6 @@ def test_exact_dedup_preserves_semantically_different_code_indentation():
     a = chunk("a", text="if enabled:\n    run()\nfinish()", notebook_id="a")
     b = chunk("b", text="if enabled:\n    run()\n    finish()", notebook_id="b")
     assert peer_evidence([[a], [b]], 2) == [a, b]
-
-
-def test_shared_answer_retry_recovers_empty_model_response():
-    models = RecordingModels("")
-    def after_call():
-        if len(models.calls) == 2:
-            models.answer = "recovered [k1]"
-    models.after_call = after_call
-    run = synthesis(models)
-    owner = SimpleNamespace(model_errors=SimpleNamespace(note_model_error=lambda *a, **kw: None))
-    run.answer_with_retry = lambda generate, label: AskService._answer_with_retry(owner, generate, label)
-    answer, grounded, _, refs = run("q", [chunk()], {}, "", Event())
-    assert answer == "recovered [k1]" and grounded and refs
-    assert len(models.calls) == 2
 
 
 def test_the_retrieval_snapshot_outranks_a_freshly_read_baseline(setup):

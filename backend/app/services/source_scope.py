@@ -670,10 +670,10 @@ def citation_active_id(notebook_id: str) -> str:
 
     So this returns ``""`` there, and ``foreign_notebook_id(x, "")`` passes any
     non-empty ``x`` through unchanged (its own first branch still blanks a
-    missing origin), which is exactly what the pre-unification
-    ``global_ask_synthesis`` achieved by hard-coding ``""`` at its single
-    anchor site.  Making it a shared rule is what lets the SEVEN producers that
-    build cross-library citations share one answer instead of each deciding.
+    missing origin), which is exactly what the pre-unification global-only
+    synthesis stage achieved by hard-coding ``""`` at its single anchor site.
+    Making it a shared rule is what lets the SEVEN producers that build
+    cross-library citations share one answer instead of each deciding.
 
     Reads ``subjectless_run_active()`` rather than the participant override:
     the citation/prompt side is not on the override's reader whitelist and must

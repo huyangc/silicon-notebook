@@ -1308,9 +1308,6 @@ class Settings(BaseSettings):
     global_ask_retrieval_concurrency: int = Field(
         4, ge=1, le=8, validation_alias="GLOBAL_ASK_RETRIEVAL_CONCURRENCY",
     )
-    global_ask_small_notebook_max_chunks: int = Field(
-        20000, ge=0, validation_alias="GLOBAL_ASK_SMALL_NOTEBOOK_MAX_CHUNKS",
-    )
     global_ask_min_relevance: float = Field(
         0.25, ge=0, le=1, validation_alias="GLOBAL_ASK_MIN_RELEVANCE",
     )

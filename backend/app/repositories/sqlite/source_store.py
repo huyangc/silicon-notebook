@@ -793,48 +793,6 @@ class SourceStore:
                     out[row["id"]] = dict(row)
         return out
 
-    def global_chunk_source_ids(self, db, chunk_ids: Sequence[str]) -> dict[str, str]:
-        """``{chunk_id: source_id}`` only -- mirrors the PostgreSQL ceiling probe.
-
-        See ``postgres/source_store.py`` for why the global ANN lane needs a
-        source-identity-only read instead of reusing the hydration query.
-        """
-        ids = list(dict.fromkeys(chunk_ids))
-        if not ids:
-            return {}
-        placeholders = ",".join("?" for _ in ids)
-        rows = db.execute(
-            f"SELECT id,source_id FROM chunks WHERE id IN ({placeholders})", ids,
-        ).fetchall()
-        return {row["id"]: row["source_id"] for row in rows}
-
-    def global_candidate_evidence(self, db, chunk_ids: Sequence[str]) -> dict[str, dict]:
-        """Read model text and its element identities in one SQL snapshot."""
-        ids = list(dict.fromkeys(chunk_ids))
-        if not ids:
-            return {}
-        placeholders = ",".join("?" for _ in ids)
-        rows = db.execute(
-            "SELECT c.id,c.source_id,c.text,c.section_path,c.element_ids,s.title AS source_title, "
-            "e.id AS evidence_id,e.source_id AS evidence_source_id,e.text AS evidence_text "
-            "FROM chunks c JOIN sources s ON s.id=c.source_id "
-            "LEFT JOIN json_each(c.element_ids) declared ON 1=1 "
-            "LEFT JOIN source_elements e ON e.id=declared.value "
-            f"WHERE c.id IN ({placeholders}) ORDER BY c.id", ids,
-        ).fetchall()
-        result = {}
-        for row in rows:
-            item = result.setdefault(row["id"], {
-                "id": row["id"], "source_id": row["source_id"], "source_title": row["source_title"],
-                "text": row["text"], "section_path": row["section_path"],
-                "element_ids": json.loads(row["element_ids"]), "element_fingerprints": {},
-            })
-            if row["evidence_id"] is not None:
-                item["element_fingerprints"][row["evidence_id"]] = (
-                    row["evidence_source_id"], hashlib.sha256(row["evidence_text"].encode()).hexdigest(),
-                )
-        return result
-
     def evidence_fingerprints(self, element_ids: Sequence[str]) -> dict[str, tuple[str, str]]:
         ids = list(dict.fromkeys(element_id for element_id in element_ids if element_id))
         if not ids:
