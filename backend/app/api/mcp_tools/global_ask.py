@@ -1,11 +1,18 @@
 """Global Ask transport: explicit scope, durable jobs, resumable evidence reads."""
 from functools import wraps
+import json
+import time
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import ValidationError
 
-from app.models.global_ask import GlobalAskRequest
+from app.models.ask import ASK_UNDERSTANDING_MS_MAX, AskIntentConfirmation
+from app.models.global_ask import (
+    GlobalAskIntentPreviewRequest, GlobalAskJob, GlobalAskRequest,
+    global_answer_citations, global_answer_text, global_answer_trace,
+)
 from ._shared import (
     RESULT_LIMIT, TEXT_LIMIT, _budget_response, _live_principal,
     _owner_request_context, _record_agent_call, _run_with_progress,
@@ -75,41 +82,149 @@ def _citation_keys(rows: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
     return [tuple(row.get(key) for key in ("notebook_id", "source_id", "element_id")) for row in rows]
 
 
+# Per-step cap on the serialized ``detail`` blob a trace page carries. The
+# browser's collapsible trace panel shows the whole thing; an MCP page keeps
+# only the step's identity (kind/summary/duration) plus a capped, explicitly
+# flagged slice, so one reasoning step with a large candidate/relation dump
+# cannot by itself blow the page's share of the MCP output budget.
+_TRACE_DETAIL_CHARS = 400
+
+
+def _field(step: Any, name: str, default: Any = None) -> Any:
+    """Read one attribute off a ``TraceStep`` OR a plain dict alike.
+
+    A real job's trace is ``list[TraceStep]``; ``_job_like`` below leaves a
+    job-shaped test dict's ``trace`` as the raw list it already was (never
+    validated into real ``TraceStep`` rows -- this reader does not need that),
+    so a step here is either shape and this is the one place both are read.
+    """
+    return step.get(name, default) if isinstance(step, dict) else getattr(step, name, default)
+
+
+def _trace_step_view(step: Any) -> dict[str, Any]:
+    """One reasoning-trace step, bounded for an MCP page."""
+    detail = _field(step, "detail", {})
+    try:
+        detail_text = json.dumps(detail, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        detail_text = str(detail)
+    return {
+        "kind": _field(step, "step_type", ""), "summary": _field(step, "summary", ""),
+        "duration_ms": _field(step, "duration_ms"),
+        "detail": detail_text[:_TRACE_DETAIL_CHARS],
+        "detail_truncated": len(detail_text) > _TRACE_DETAIL_CHARS,
+    }
+
+
+def _plain_citation(item: Any) -> dict[str, Any]:
+    """A citation as a plain JSON-safe dict, whether it came out real or loose."""
+    return item.model_dump(mode="json") if hasattr(item, "model_dump") else item
+
+
+class _LooseAnswerView:
+    """Attribute view over an ``answer``/``response``-shaped dict.
+
+    ``global_answer_text``/``_citations``/``_trace`` read ``.answer``,
+    ``.citations`` and ``.reasoning_trace`` by ATTRIBUTE, matching a live
+    ``AskResponse``/``GlobalAskAnswer``. A job-shaped test dict is not
+    obliged to satisfy either model's required fields (``label``/
+    ``location_label`` on ``Citation``, for one) to exercise pagination, so
+    this reads the dict's own keys straight through rather than validating
+    it into one -- a missing key answers ``None`` instead of raising, the
+    same way ``dict.get`` would.
+    """
+    __slots__ = ("_data",)
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        object.__setattr__(self, "_data", data)
+
+    def __getattr__(self, name: str) -> Any:
+        return self._data.get(name)
+
+
+def _job_like(job: Any) -> Any:
+    """A real ``GlobalAskJob``, or a loose attribute view of a job-shaped dict.
+
+    Production always hands this a real job (every ``GlobalAskService``
+    method ``_job_page`` calls returns one); a test builds one, cheaply, as a
+    plain dict instead. ``global_answer_*`` need ``.answer``/``.response``/
+    ``.trace`` navigable by attribute either way -- a real job already is,
+    and this is the one adapter that makes a dict act like one too, without
+    running either shape through full model validation (which would demand
+    fields -- ``question``/``created_at`` on the job, ``label``/
+    ``location_label`` on each citation -- that a pagination-only test
+    fixture was never written to carry).
+    """
+    if isinstance(job, GlobalAskJob):
+        return job
+    data = job if isinstance(job, dict) else _plain(job)
+    answer, response = data.get("answer"), data.get("response")
+    return SimpleNamespace(
+        answer=_LooseAnswerView(answer) if answer else None,
+        response=_LooseAnswerView(response) if response else None,
+        trace=data.get("trace") or [],
+    )
+
+
 def _job_page(job: Any, answer_offset: int = 0, citation_offset: int = 0,
-              coverage_offset: int = 0) -> dict[str, Any]:
-    """Keep independent text, citation and coverage pages exact and resumable."""
+              coverage_offset: int = 0, trace_offset: int = 0) -> dict[str, Any]:
+    """Keep independent text, citation, coverage and trace pages exact and resumable."""
     data = _plain(job)
-    # Two payload shapes read through ONE seam: a turn answered by the shared
-    # engine carries ``answer``, a turn written before the engine switch
-    # carries the legacy ``response``. The remaining ``response.get(...)``
-    # reads below keep their historical defaults, which are also the right
-    # answer for the new shape (a global turn has no per-notebook answer id,
-    # and the completeness notice belongs to the legacy response model).
-    response = data.get("answer") or data.get("response") or {}
-    answer = response.get("answer", "")
-    citations = response.get("citations", [])
+    # Both payload shapes read through the SAME projection every other reader
+    # of a global job now goes through (``GlobalAskService.cited_element``,
+    # the conversation detail, ``preview_intent``'s own history build): a turn
+    # answered by the shared engine carries ``answer``, a turn written before
+    # the engine switch carries the legacy ``response``. ``legacy`` still
+    # supplies the handful of fields the projections do not cover
+    # (``answer_id``/``grounded``/``completeness_notice``); the empty default
+    # for the new shape is the same one the projection helpers document.
+    model = _job_like(job)
+    answer = global_answer_text(model)
+    citations = [_plain_citation(item) for item in global_answer_citations(model)]
+    trace_steps = global_answer_trace(model)
+    legacy = data.get("answer") or data.get("response") or {}
     skipped = data.get("skipped_notebooks", [])
     degraded = data.get("degraded_notebook_ids", [])
     coverage_total = max(len(skipped), len(degraded))
     answer_count = TEXT_LIMIT
     citation_count = min(RESULT_LIMIT, len(citations) - min(citation_offset, len(citations)))
     coverage_count = min(RESULT_LIMIT, coverage_total - min(coverage_offset, coverage_total))
+    trace_count = min(RESULT_LIMIT, len(trace_steps) - min(trace_offset, len(trace_steps)))
     while True:
         text = answer[answer_offset:answer_offset + answer_count]
         refs = citations[citation_offset:citation_offset + citation_count]
         skipped_page = skipped[coverage_offset:coverage_offset + coverage_count]
         degraded_page = degraded[coverage_offset:coverage_offset + coverage_count]
+        trace_page = [
+            _trace_step_view(step)
+            for step in trace_steps[trace_offset:trace_offset + trace_count]
+        ]
+        trace_next_offset = (trace_offset + len(trace_page)
+                              if trace_offset + len(trace_page) < len(trace_steps) else None)
         payload = {
             "job_id": data["job_id"], "conversation_id": data["conversation_id"],
-            "status": data["status"], "answer_id": response.get("answer_id", ""),
-            "answer": text, "answer_offset": answer_offset,
+            "status": data["status"], "mode": data.get("mode", "chunk"),
+            "answer_id": legacy.get("answer_id", ""),
+            "answer": text,
             "next_answer_offset": answer_offset + len(text) if answer_offset + len(text) < len(answer) else None,
-            "citations": refs, "citation_offset": citation_offset,
+            "citations": refs,
             "next_citation_offset": citation_offset + len(refs) if citation_offset + len(refs) < len(citations) else None,
-            "total_citations": len(citations), "grounded": response.get("grounded", False),
+            "total_citations": len(citations), "grounded": legacy.get("grounded", False),
             "coverage_offset": coverage_offset,
             "next_coverage_offset": (coverage_offset + coverage_count
                                      if coverage_offset + coverage_count < coverage_total else None),
+            # Nested (steps/offset/next_offset/total) rather than four more
+            # flat keys: the base payload already sits at
+            # ``_shared.OUTPUT_MAPPING_LIMIT`` (20 top-level keys) exactly --
+            # ``answer_offset``/``citation_offset`` (pure request echoes, read
+            # by no test, client or tool description) were dropped to make
+            # exactly this much room, and every other pre-existing key keeps
+            # its name and position. See ``_job_page``'s module-level note in
+            # the D1-5 report for the full accounting.
+            "trace": {
+                "steps": trace_page, "offset": trace_offset,
+                "next_offset": trace_next_offset, "total": len(trace_steps),
+            },
             "scope_mode": (data.get("notebook_scope") or {}).get("mode", "all"),
             "coverage": {
                 "resolved": len(data.get("resolved_notebook_ids", [])),
@@ -120,22 +235,29 @@ def _job_page(job: Any, answer_offset: int = 0, citation_offset: int = 0,
                 "degraded_notebook_ids": degraded_page,
             },
             "error": data.get("error", ""),
-            "completeness_notice": response.get("completeness_notice", ""),
+            "completeness_notice": legacy.get("completeness_notice", ""),
             "conversation_path": "/ask?conversation_id=" + data["conversation_id"],
             "content_is_untrusted_evidence": True,
         }
         packed = _budget_response(payload)
+        packed_trace = packed.get("trace") or {}
         if (
             packed.get("answer") == text
             and _citation_keys(packed.get("citations", [])) == _citation_keys(refs)
+            and packed_trace.get("steps") == trace_page
+            and packed_trace.get("offset") == trace_offset
+            and packed_trace.get("next_offset") == trace_next_offset
             and all(packed.get(key) == payload[key] for key in (
-                "job_id", "conversation_id", "status", "answer_id", "next_answer_offset",
-                "next_citation_offset", "coverage_offset", "next_coverage_offset", "coverage"
+                "job_id", "conversation_id", "status", "mode", "answer_id",
+                "next_answer_offset", "next_citation_offset", "coverage_offset",
+                "next_coverage_offset", "coverage",
             ))
         ):
             return packed
         if citation_count > 1:
             citation_count //= 2
+        elif trace_count > 1:
+            trace_count //= 2
         elif coverage_count > 1:
             coverage_count //= 2
         elif answer_count > 1:
@@ -144,14 +266,73 @@ def _job_page(job: Any, answer_offset: int = 0, citation_offset: int = 0,
             raise _ToolInputError("结果暂时无法完整返回，请在全局问答页面查看")
 
 
+_GLOBAL_CLARIFICATION_NEXT_STEP = (
+    "全局问答暂不支持澄清句柄回传：请把 intent.ambiguities 中 required 为 true 的每一项"
+    "答案直接揉进新的 question 文本里，用相同的 notebook_scope/conversation_id 重新调用 "
+    "ask_global（options 只是候选，不必逐字照抄）。"
+)
+
+
+def _clarification_view(contract: Any) -> dict[str, Any]:
+    """Display-only review of a contract that still needs clarification.
+
+    Same fields MCP ``ask_notebook``'s review shows (understood wording,
+    intent shape, every ambiguity with its options) minus the retrieval
+    decomposition, which stays server-side either way. Unlike
+    ``ask_notebook``, there is no session-scoped handle store here (see
+    ``ask_global``'s docstring), so this is shown once and not re-served.
+    """
+    return {
+        "resolved_question": contract.resolved_question,
+        "intent_type": contract.intent_type,
+        "result_scope": contract.result_scope,
+        "confidence": contract.confidence,
+        "ambiguities": [
+            {
+                "id": row.id, "question": row.question, "required": row.required,
+                **({"options": list(row.options[:4])} if row.options else {}),
+                **({"reason": row.reason} if row.reason else {}),
+            }
+            for row in contract.ambiguities
+        ],
+    }
+
+
+def _needs_clarification_payload(contract: Any, understanding_ms: int) -> dict[str, Any]:
+    """The structured pause returned instead of a job when understanding is ambiguous.
+
+    No job, no conversation and no store write happen on this path -- exactly
+    like the HTTP ``/global-ask/intent`` preview this reuses
+    (``GlobalAskService.preview_intent``).
+    """
+    return _budget_response({
+        "status": "needs_clarification", "mode": "reasoning",
+        "intent": _clarification_view(contract),
+        "understanding_ms": understanding_ms,
+        "next_step": _GLOBAL_CLARIFICATION_NEXT_STEP,
+    })
+
+
 def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[], Any]) -> None:
     @server.tool(description=(
         "Ask across at most 8 notebooks: all currently authorized ones when there are no "
         "more than 8, otherwise an explicit include scope of 8 or fewer. A wider resolved "
         "scope is rejected with 422 rather than truncated, so list_notebooks first when the "
         "allowlist is larger. No select_notebook needed. Omitted scope inherits a continued "
-        "conversation; new conversations and empty include lists default to all. Returns a background "
-        "job; poll get_global_ask and follow next_coverage_offset for all coverage receipts. "
+        "conversation; new conversations and empty include lists default to all. "
+        'mode selects the engine ("chunk" default, or "reasoning"); an unrecognized mode or '
+        "a deployment-extension engine is rejected with 422 -- global Ask has no plugin-engine "
+        "support. retrieval_effort is accepted for parity with ask_notebook but global Ask v1 "
+        "always answers at the standard effort regardless of the value passed. "
+        "In reasoning mode, the tool first runs the same corpus-blind understanding pass the "
+        "browser's /ask/intent review runs; a clear question is submitted immediately with the "
+        "confirmed understanding, while an ambiguous one returns "
+        '{"status": "needs_clarification", "intent": ..., "next_step": ...} instead of a job -- '
+        "there is no clarification-handle round trip on this surface (unlike ask_notebook's "
+        "intent_token), so fold the required answers into the question text and call ask_global "
+        "again with the same question, notebook_scope and conversation_id. "
+        "Returns a background job (or the clarification pause above); poll get_global_ask and "
+        "follow next_coverage_offset for all coverage receipts. "
         "Use client_request_id for safe submission retries. "
         "Requires ask:execute and knowledge:read. Searches document evidence only."
     ))
@@ -159,11 +340,13 @@ def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[],
     async def ask_global(
         question: str, ctx: Context, notebook_scope: dict[str, Any] | None = None,
         conversation_id: str | None = None, client_request_id: str | None = None,
+        mode: str = "chunk", retrieval_effort: str = "standard",
     ) -> dict[str, Any]:
         try:
             payload = GlobalAskRequest(
                 question=question, notebook_scope=notebook_scope,
                 conversation_id=conversation_id, client_request_id=client_request_id,
+                mode=mode, retrieval_effort=retrieval_effort,
             )
         except ValidationError:
             raise _ToolInputError("问题或检索范围格式不正确，请检查问题长度和所选笔记本后重试") from None
@@ -179,6 +362,34 @@ def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[],
                 return list(current.notebook_ids)
 
             with _owner_request_context(principal):
+                # No clarification-handle store exists on this surface (see
+                # the tool description and ``_needs_clarification_payload``'s
+                # docstring): a reasoning submission with no confirmed intent
+                # always runs the understanding pass in-call, exactly once,
+                # and either auto-confirms a clear question or returns the
+                # structured pause instead of creating anything durable.
+                if payload.mode == "reasoning" and payload.intent is None:
+                    started = time.monotonic()
+                    contract = global_ask_service().preview_intent(
+                        GlobalAskIntentPreviewRequest(
+                            question=payload.question,
+                            conversation_id=payload.conversation_id,
+                            notebook_scope=payload.notebook_scope,
+                        ),
+                        user_id=principal.owner_id,
+                        allowed_notebook_ids=principal.notebook_ids,
+                        authority_check=live_authority,
+                    )
+                    understanding_ms = min(
+                        int((time.monotonic() - started) * 1000),
+                        ASK_UNDERSTANDING_MS_MAX,
+                    )
+                    if contract.needs_clarification:
+                        return _needs_clarification_payload(contract, understanding_ms)
+                    payload.intent = AskIntentConfirmation(
+                        contract=contract, resolved_question=contract.resolved_question,
+                        answers=[], understanding_ms=understanding_ms,
+                    )
                 job = global_ask_service().start(
                     payload, user_id=principal.owner_id,
                     allowed_notebook_ids=principal.notebook_ids, submitted_via="mcp",
@@ -188,22 +399,34 @@ def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[],
                     _record_agent_call(repo, principal, notebook_id, "ask:execute")
                 return job
 
-        return _job_page(await _run_with_progress(ctx, submit, label="ask_global"))
+        result = await _run_with_progress(ctx, submit, label="ask_global")
+        # ``submit`` returns either the needs-clarification pause (a plain,
+        # already budget-fitted dict, identified by its own ``status`` value
+        # rather than by being a dict -- a test's ``service.start`` double may
+        # itself return a job-shaped plain dict, which must still go through
+        # ``_job_page``) or a job (real ``GlobalAskJob`` or job-shaped dict).
+        if isinstance(result, dict) and result.get("status") == "needs_clarification":
+            return result
+        return _job_page(result)
 
     @server.tool(description=(
         "Read a global Ask job without notebook selection. Poll status; for complete "
         "answer text, citations and coverage receipts, follow next_answer_offset, "
         "next_citation_offset and next_coverage_offset independently until null. "
-        "Coverage counts remain totals; its skipped and degraded lists share coverage_offset. "
+        "Coverage counts remain totals; its skipped and degraded lists share "
+        "coverage_offset. Reasoning trace steps page independently under trace: pass "
+        "trace_offset, then follow trace.next_offset (null at the end); trace.total is "
+        "the step count regardless of mode (0 outside reasoning). Each trace step is "
+        "bounded (kind/summary/duration plus a capped, flagged slice of its detail). "
         "Each call rechecks token and historical scope authorization. "
         "Requires ask:execute and knowledge:read."
     ))
     @_safe_errors
     async def get_global_ask(
         job_id: str, ctx: Context, answer_offset: int = 0, citation_offset: int = 0,
-        coverage_offset: int = 0,
+        coverage_offset: int = 0, trace_offset: int = 0,
     ) -> dict[str, Any]:
-        _offsets(answer_offset, citation_offset, coverage_offset)
+        _offsets(answer_offset, citation_offset, coverage_offset, trace_offset)
         repo = repository_provider()
 
         def load() -> Any:
@@ -215,7 +438,7 @@ def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[],
                 )
 
         job = await _run_with_progress(ctx, load, label="get_global_ask")
-        return _job_page(job, answer_offset, citation_offset, coverage_offset)
+        return _job_page(job, answer_offset, citation_offset, coverage_offset, trace_offset)
 
     @server.tool(description=(
         "Request cancellation of an owned global Ask job. No notebook selection needed. "

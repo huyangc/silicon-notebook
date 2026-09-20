@@ -21,8 +21,8 @@ class Capture:
         return register
 
 
-def job(*, answer="", citations=None):
-    return {
+def job(*, answer="", citations=None, mode=None, trace=None):
+    payload = {
         "job_id": "job-a", "conversation_id": "conversation-a", "status": "done",
         "notebook_scope": {"mode": "all", "notebook_ids": []},
         "resolved_notebook_ids": ["nb-a"], "searched_notebook_ids": ["nb-a"],
@@ -30,6 +30,11 @@ def job(*, answer="", citations=None):
         "response": {"answer_id": "answer-a", "answer": answer, "grounded": True,
                      "citations": citations or []},
     }
+    if mode is not None:
+        payload["mode"] = mode
+    if trace is not None:
+        payload["trace"] = trace
+    return payload
 
 
 def test_a_turn_answered_by_the_shared_engine_reads_back(monkeypatch):
@@ -56,6 +61,43 @@ def test_a_turn_answered_by_the_shared_engine_reads_back(monkeypatch):
         assert page["grounded"] is True
         assert [row["notebook_id"] for row in page["citations"]] == ["nb-a"]
         assert page["total_citations"] == 1
+
+
+def test_trace_pages_independently_with_its_own_cursor():
+    """Reasoning trace steps page under ``trace`` with their own offset/next_offset,
+
+    independent of the answer/citation/coverage cursors -- same resumable
+    semantics (an explicit ``None`` at the end, never a missing key), just
+    nested rather than flat (see ``_job_page``'s own note on why).
+    """
+    steps = [
+        {"step_type": "plan" if i % 2 else "retrieve", "summary": f"step {i}",
+         "detail": {"i": i}, "duration_ms": i}
+        for i in range(45)
+    ]
+    value = job(answer="answer", mode="reasoning", trace=steps)
+    offset = 0
+    collected: list = []
+    pages = 0
+    while True:
+        page = module._job_page(value, trace_offset=offset)
+        assert page["trace"]["total"] == 45
+        assert page["trace"]["offset"] == offset
+        collected.extend(page["trace"]["steps"])
+        pages += 1
+        if page["trace"]["next_offset"] is None:
+            break
+        assert page["trace"]["next_offset"] > offset
+        offset = page["trace"]["next_offset"]
+    assert pages > 1, "45 steps must not fit in a single page (RESULT_LIMIT=20)"
+    assert [step["summary"] for step in collected] == [f"step {i}" for i in range(45)]
+    assert collected[0]["kind"] == "retrieve" and collected[0]["duration_ms"] == 0
+    assert collected[1]["kind"] == "plan"
+
+
+def test_trace_is_empty_for_a_chunk_job_with_no_steps():
+    page = module._job_page(job(answer="answer"))
+    assert page["trace"] == {"steps": [], "offset": 0, "next_offset": None, "total": 0}
 
 
 def test_coverage_retains_every_skip_and_degraded_receipt():
@@ -179,6 +221,102 @@ async def test_followup_omitted_scope_is_not_replaced_with_all(adapter):
     await handlers["ask_global"]("继续比较", None, conversation_id="conversation-a")
     assert seen[0].notebook_scope is None
     assert seen[0].conversation_id == "conversation-a"
+
+
+@pytest.mark.anyio
+async def test_ask_global_passes_mode_through_to_start_and_the_page(adapter):
+    """D1-5: ``mode``/``retrieval_effort`` reach ``GlobalAskRequest`` and the
+    returned job's ``mode`` surfaces on the page, byte for byte."""
+    handlers, _, _, service = adapter
+    seen = []
+
+    def start(payload, **kwargs):
+        seen.append(payload)
+        return job(mode=payload.mode)
+
+    service.start = start
+    ctx = SimpleNamespace(session=SimpleNamespace())
+    result = await handlers["ask_global"](
+        "问题", ctx, mode="chunk", retrieval_effort="standard",
+    )
+    assert seen[0].mode == "chunk"
+    assert seen[0].retrieval_effort == "standard"
+    assert result["mode"] == "chunk"
+
+
+@pytest.mark.anyio
+async def test_ask_global_unknown_mode_surfaces_the_core_error_verbatim(adapter):
+    """An unrecognized/plugin mode's 422 keeps the same shape every other
+    ``GlobalAskError`` gets on this surface: a ``_ToolInputError`` carrying
+    the core's own Chinese copy, not a raw exception dump."""
+    from app.services.global_ask import GlobalAskError
+
+    handlers, _, _, service = adapter
+
+    def start(payload, **kwargs):
+        raise GlobalAskError(422, "不支持的问答引擎，请刷新页面后重试。")
+
+    service.start = start
+    ctx = SimpleNamespace(session=SimpleNamespace())
+    with pytest.raises(module._ToolInputError) as error:
+        await handlers["ask_global"]("问题", ctx, mode="bogus")
+    assert str(error.value) == "不支持的问答引擎，请刷新页面后重试。"
+
+
+@pytest.mark.anyio
+async def test_ask_global_reasoning_auto_confirms_a_clear_question(adapter):
+    """A clear reasoning question runs the understanding pass in-call and
+    submits with a confirmed intent -- no clarification pause, no second
+    round trip, matching how MCP ``ask_notebook`` treats a clear question."""
+    handlers, principal, _, service = adapter
+    from app.models.ask import QueryIntentContract
+
+    def preview_intent(payload, *, user_id, allowed_notebook_ids, authority_check):
+        return QueryIntentContract(
+            objective=payload.question, resolved_question=payload.question,
+            needs_clarification=False,
+        )
+
+    seen = []
+
+    def start(payload, **kwargs):
+        seen.append(payload)
+        return job(mode="reasoning")
+
+    service.preview_intent = preview_intent
+    service.start = start
+    ctx = SimpleNamespace(session=SimpleNamespace())
+    result = await handlers["ask_global"]("解释一下这份研究的方法论", ctx, mode="reasoning")
+    assert result["status"] == "done"
+    assert seen[0].intent is not None
+    assert seen[0].intent.resolved_question == "解释一下这份研究的方法论"
+
+
+@pytest.mark.anyio
+async def test_ask_global_reasoning_needs_clarification_creates_nothing(adapter):
+    """An ambiguous reasoning question returns the structured pause instead
+    of a job -- no ``service.start`` call, no session-scoped handle (there is
+    none on this surface; see ``_needs_clarification_payload``'s docstring)."""
+    handlers, principal, _, service = adapter
+    from app.models.ask import QueryIntentContract, QueryIntentAmbiguity
+
+    def preview_intent(payload, *, user_id, allowed_notebook_ids, authority_check):
+        return QueryIntentContract(
+            objective=payload.question, resolved_question=payload.question,
+            needs_clarification=True,
+            ambiguities=[QueryIntentAmbiguity(id="a1", question="具体指哪一个项目？")],
+        )
+
+    def start(payload, **kwargs):
+        pytest.fail("an ambiguous reasoning question must not create a job")
+
+    service.preview_intent = preview_intent
+    service.start = start
+    ctx = SimpleNamespace(session=SimpleNamespace())
+    result = await handlers["ask_global"]("它的结论是什么", ctx, mode="reasoning")
+    assert result["status"] == "needs_clarification"
+    assert result["intent"]["ambiguities"][0]["question"] == "具体指哪一个项目？"
+    assert "ask_global" in result["next_step"]
 
 
 @pytest.mark.anyio

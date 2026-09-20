@@ -48,6 +48,32 @@ class GlobalAskRequest(BaseModel):
             raise ValueError("请输入问题。")
         return value
 
+class GlobalAskIntentPreviewRequest(BaseModel):
+    """Understand a global reasoning question before any job or conversation exists.
+
+    Field-for-field the submission-time scope inputs of ``GlobalAskRequest``
+    (``question``, ``conversation_id``, ``notebook_scope``) -- deliberately
+    nothing else. ``GlobalAskService.preview_intent`` resolves scope from
+    these three the same way ``start()`` resolves it from the matching three
+    on ``GlobalAskRequest`` (see ``GlobalAskService._resolve_run_scope``), so
+    a preview and the submission that follows it can only see the same
+    library set when they are actually given the same inputs. There is no
+    ``mode`` field: like the single-library ``/ask/intent``, this preview is
+    always the reasoning understanding pass, and the caller decides whether
+    to run it before submitting a reasoning question.
+    """
+    question: str = Field(min_length=1, max_length=ASK_QUESTION_MAX_CHARS)
+    conversation_id: str | None = Field(default=None, max_length=GLOBAL_ASK_ID_MAX_CHARS)
+    notebook_scope: GlobalNotebookScope | None = None
+
+    @field_validator("question")
+    @classmethod
+    def nonblank(cls, value):
+        if not value.strip():
+            raise ValueError("请输入问题。")
+        return value
+
+
 class GlobalAskSkippedNotebook(BaseModel):
     notebook_id: str
     reason: str

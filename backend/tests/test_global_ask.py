@@ -15,7 +15,7 @@ import pytest
 
 from app.core.config import Settings
 from app.domain.retrieval import RetrievedChunk
-from app.models.ask import AskResponse
+from app.models.ask import AskResponse, QueryIntentContract
 from app.models.global_ask import GlobalAskRequest, GlobalNotebookScope
 from app.models.ask import Citation
 from app.services.ask_followup import FollowupResolution
@@ -43,6 +43,7 @@ class _EngineDouble:
         self.sources = sources
         self.retrieve = self._default_retrieve
         self.synthesize = self._default_synthesize
+        self.preview_reasoning_intent = self._default_preview_reasoning_intent
         self.retrieved: list = []
         self.syntheses: list = []
 
@@ -59,6 +60,12 @@ class _EngineDouble:
             question=question, resolved_question=question,
             rewrite_ms=None, gate_message="",
         )
+
+    @staticmethod
+    def _default_preview_reasoning_intent(notebook_id, question, history="", *, cancel_event=None):
+        """语料盲的理解替身:字面回声问题,从不读参与集或来源。"""
+        stripped = question.strip()
+        return QueryIntentContract(objective=stripped, resolved_question=stripped)
 
     # -- 默认行为 ----------------------------------------------------------
     @staticmethod
