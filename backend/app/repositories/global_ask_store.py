@@ -136,6 +136,42 @@ class GlobalAskStore:
             ), (json.dumps(patch, ensure_ascii=False), job.job_id, user_id))
         return cursor.rowcount == 1
 
+    def set_feedback(self, job_id, user_id, rating):
+        """First write wins: a job that already carries a non-empty feedback
+        keeps it, matching the disabled-once-clicked button in the interface.
+
+        The empty-feedback check rides in the UPDATE's own WHERE clause
+        (rather than a read-then-write from Python) so two concurrent
+        submissions cannot both "win" -- only one UPDATE can match the row
+        while it still has no feedback; the other sees it already gone from
+        the WHERE and reports 0 rows, exactly the same as arriving after the
+        first request's response landed.
+
+        Returns ``None`` only when the job does not belong to this user or is
+        not yet ``done`` -- the two conditions the caller must reject with a
+        fresh error. Any other case (written now, or already carrying a prior
+        rating) returns the current row.
+        """
+        patch = json.dumps({"feedback": rating}, ensure_ascii=False)
+        expression = "(payload_json::jsonb || ?::jsonb)::text" if self.marker == "%s" else "json_patch(payload_json, ?)"
+        empty_feedback = (
+            "(payload_json::jsonb->>'feedback' IS NULL OR payload_json::jsonb->>'feedback' = '')"
+            if self.marker == "%s" else
+            "(json_extract(payload_json,'$.feedback') IS NULL OR json_extract(payload_json,'$.feedback') = '')"
+        )
+        with self.database.write() as db:
+            cursor = db.execute(self._sql(
+                f"UPDATE global_ask_jobs SET payload_json={expression} "
+                f"WHERE id=? AND user_id=? AND status='done' AND {empty_feedback}"
+            ), (patch, job_id, user_id))
+            if cursor.rowcount != 1:
+                eligible = db.execute(self._sql(
+                    "SELECT 1 FROM global_ask_jobs WHERE id=? AND user_id=? AND status='done'"
+                ), (job_id, user_id)).fetchone()
+                if eligible is None:
+                    return None
+        return self.job(job_id, user_id)
+
     def jobs(self, conversation_id, user_id, limit, offset):
         with self.database.connect() as db:
             rows = db.execute(self._sql(

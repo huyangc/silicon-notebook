@@ -16,6 +16,7 @@ import type { AskResponse, NotebookSummary } from "../../app/workspace-model.ts"
 const api = vi.hoisted(() => ({
   me: vi.fn(), notebooks: vi.fn(), list: vi.fn(), detail: vi.fn(), ask: vi.fn(),
   poll: vi.fn(), cancel: vi.fn(), rename: vi.fn(), remove: vi.fn(), intent: vi.fn(),
+  feedback: vi.fn(),
 }));
 vi.mock("../../app/auth.ts", () => ({ fetchMe: api.me }));
 vi.mock("../../app/notebook-api.ts", () => ({ listNotebooks: api.notebooks }));
@@ -24,7 +25,7 @@ vi.mock("../../app/global-ask-api.ts", async (importOriginal) => ({
   listGlobalConversations: api.list, getGlobalConversation: api.detail,
   askGlobal: api.ask, getGlobalJob: api.poll, cancelGlobalJob: api.cancel,
   renameGlobalConversation: api.rename, deleteGlobalConversation: api.remove,
-  previewGlobalAskIntent: api.intent,
+  previewGlobalAskIntent: api.intent, submitGlobalFeedback: api.feedback,
 }));
 
 const notebooks: NotebookSummary[] = ["材料研究", "热管理"].map((name, index) => ({
@@ -887,12 +888,72 @@ test("renders AnswerView for new jobs", async () => {
   await waitFor(() => expect(container.querySelector(".chat-answer")).not.toBeNull());
   expect(container.querySelector(".global-answer-footer")).toBeNull();
   expect(screen.getByText("回答仅使用本次命中的有限原文。")).toBeTruthy();
-  // 单库动作没有承接方时一颗按钮都不渲染（保存记忆 / 分享 / 反馈）。
+  // 单库动作没有承接方时那几颗按钮不渲染（保存记忆 / 分享）；反馈现在有承接方
+  // （ask.sendFeedback），所以两颗按钮都在，且是可点的未选中态。
   expect(screen.queryByRole("button", { name: "保存到记忆" })).toBeNull();
   expect(screen.queryByRole("button", { name: "分享到这条回答" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "有用" })).toBeNull();
+  const useful = screen.getByRole("button", { name: "有用" });
+  const notUseful = screen.getByRole("button", { name: "需改进" });
+  expect(useful).not.toBeDisabled();
+  expect(notUseful).not.toBeDisabled();
+  expect(useful.className).not.toContain("selected");
+  expect(notUseful.className).not.toContain("selected");
   // 复制回答是自足动作，AnswerView 自己就带。
   expect(await screen.findByRole("button", { name: "复制回答" })).toBeTruthy();
+});
+
+test("feedback buttons submit, highlight and disable immediately, and roll back on failure", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  const turn = { ...job("done"), cited_notebook_ids: ["nb-0"], answer: standardAnswer() };
+  api.detail.mockResolvedValue(detail("conv-a", [turn]));
+  const failure = deferred<never>();
+  api.feedback.mockReturnValueOnce(failure.promise);
+  render(<GlobalAskPage />);
+  const useful = await screen.findByRole("button", { name: "有用" });
+  fireEvent.click(useful);
+  // 乐观：不等网络响应就立刻高亮并禁用（Interactive feedback：按下必须有可见变化）。
+  expect(useful).toBeDisabled();
+  expect(useful.className).toContain("selected");
+  expect(api.feedback).toHaveBeenCalledWith(turn.job_id, "useful");
+  await act(async () => { failure.reject(new Error("network down")); });
+  // 失败回滚：按钮恢复可点、未选中，并给出中文提示（既有的 error 呈现方式）。
+  await waitFor(() => expect(screen.getByRole("button", { name: "有用" })).not.toBeDisabled());
+  expect(screen.getByRole("button", { name: "有用" }).className).not.toContain("selected");
+  expect(await screen.findByText("反馈提交失败，请重试")).toBeTruthy();
+
+  // 重试成功：服务端回执把 feedback 落定，按钮保持高亮禁用。
+  api.feedback.mockResolvedValueOnce({ ...turn, feedback: "useful" });
+  fireEvent.click(screen.getByRole("button", { name: "有用" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "有用" })).toBeDisabled());
+  expect(screen.getByRole("button", { name: "有用" }).className).toContain("selected");
+  expect(api.feedback).toHaveBeenCalledTimes(2);
+});
+
+test("a job that already carries feedback reopens with the matching button selected and disabled", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [{
+    ...job("done"), cited_notebook_ids: ["nb-0"], answer: standardAnswer(), feedback: "not_useful",
+  }]));
+  render(<GlobalAskPage />);
+  const notUseful = await screen.findByRole("button", { name: "需改进" });
+  const useful = screen.getByRole("button", { name: "有用" });
+  expect(notUseful).toBeDisabled();
+  expect(notUseful.className).toContain("selected");
+  expect(useful).toBeDisabled();
+  expect(useful.className).not.toContain("selected");
+});
+
+test("renders legacy markdown for historical jobs without feedback buttons", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [citedAnswer]));
+  render(<GlobalAskPage />);
+  await screen.findByText("温度影响性能", { exact: false });
+  // 历史形状（只有 `response`）走 AnswerMarkdown 自绘，不是 AnswerView：没有反馈按钮。
+  expect(screen.queryByRole("button", { name: "有用" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "需改进" })).toBeNull();
 });
 
 test("renders legacy markdown for historical jobs", async () => {

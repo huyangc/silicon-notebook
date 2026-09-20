@@ -4357,6 +4357,23 @@
           "title": "GlobalAskAnswer",
           "type": "object"
         },
+        "GlobalAskFeedbackRequest": {
+          "properties": {
+            "rating": {
+              "enum": [
+                "useful",
+                "not_useful"
+              ],
+              "title": "Rating",
+              "type": "string"
+            }
+          },
+          "required": [
+            "rating"
+          ],
+          "title": "GlobalAskFeedbackRequest",
+          "type": "object"
+        },
         "GlobalAskIntentPreviewRequest": {
           "description": "Understand a global reasoning question before any job or conversation exists.\n\nField-for-field the submission-time scope inputs of ``GlobalAskRequest``\n(``question``, ``conversation_id``, ``notebook_scope``) -- deliberately\nnothing else. ``GlobalAskService.preview_intent`` resolves scope from\nthese three the same way ``start()`` resolves it from the matching three\non ``GlobalAskRequest`` (see ``GlobalAskService._resolve_run_scope``), so\na preview and the submission that follows it can only see the same\nlibrary set when they are actually given the same inputs. There is no\n``mode`` field: like the single-library ``/ask/intent``, this preview is\nalways the reasoning understanding pass, and the caller decides whether\nto run it before submitting a reasoning question.",
           "properties": {
@@ -4439,6 +4456,11 @@
                 }
               ],
               "title": "Error"
+            },
+            "feedback": {
+              "default": "",
+              "title": "Feedback",
+              "type": "string"
             },
             "job_id": {
               "title": "Job Id",
@@ -16247,6 +16269,58 @@
             }
           },
           "summary": "Global Cited Element",
+          "tags": [
+            "global-ask"
+          ]
+        }
+      },
+      "/api/global-ask/jobs/{job_id}/feedback": {
+        "post": {
+          "operationId": "submit_global_ask_feedback_api_global_ask_jobs__job_id__feedback_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "job_id",
+              "required": true,
+              "schema": {
+                "title": "Job Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GlobalAskFeedbackRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/GlobalAskJob"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Submit Global Ask Feedback",
           "tags": [
             "global-ask"
           ]

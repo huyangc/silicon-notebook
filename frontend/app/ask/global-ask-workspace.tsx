@@ -145,7 +145,8 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                       只额外给它一个跨库专属的出口：每条引用「打开笔记本」。 */}
                   <AnswerView
                     answer={job.answer}
-                    feedbackSent=""
+                    feedbackSent={job.feedback ?? ""}
+                    onFeedback={(rating) => void ask.sendFeedback(job.job_id, rating)}
                     notebookId={null}
                     notebookNames={notebookNames}
                     notebookHref={(notebookId, sourceId) => `/${notebookHash(notebookId, sourceId)}`}

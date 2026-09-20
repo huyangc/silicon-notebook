@@ -118,6 +118,12 @@
 - [ ] **Prompt 三层化后的 per-notebook 定制与 self-evo**：接缝只有 `fragment_text()`；L1 片段分
       两类（A 类离线 GEPA + 人审，B 类只改示例槽位），尚未拍板开放。
 - [ ] **Agentic Memory 注入开闸与 A/B**：P1–P4 已合入，注入默认关闭，开闸是独立决定。
+- [ ] **全局回答的 👍/👎 反馈未进管理端提问分析 / 笔记本分析口径**：`POST
+      /global-ask/jobs/{job_id}/feedback` 把评分写进该任务 `global_ask_jobs.payload_json` 的
+      `feedback` 字段（首次写入为准），并发一个内容无关事件 `global_ask_feedback`；两者都不落
+      笔记本内问答用的 `feedback` 表，因此管理端「提问分析」报告与笔记本分析面板现有的反馈
+      统计都看不到这批数据。要并进同一份统计口径，需要决定是新增一条跨表聚合，还是把全局
+      反馈也镜像写一份进 `feedback` 表（后者要解决它没有 `answers` 行外键可挂的问题）。
 - [ ] **无图披露步文案「构建知识图谱」→「整理知识图谱」**：`reasoning_retrieval.py` 那条
       `kg_unavailable` 披露步的 `summary` 违反界面词汇表，但它被 `docs/product-and-api*.md`
       逐字冻结（文档明写「含其中的半角逗号」）、并被 `tests/fixtures/repository_contract/

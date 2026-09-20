@@ -1446,6 +1446,28 @@ class GlobalAskService:
                 return self.get_job(job_id, user_id=user_id, allowed_notebook_ids=allowed_notebook_ids)
         return job
 
+    def submit_feedback(self, job_id, rating, *, user_id, allowed_notebook_ids=None):
+        """Same authority path as ``get_job``, then the two feedback-only
+        gates: a legal rating, and a job that has actually finished.
+
+        The event is content-free by construction -- rating/mode/library
+        count only, never the question or answer text -- the same discipline
+        ``_emit`` calls document elsewhere in this service.
+        """
+        if rating not in {"useful", "not_useful"}:
+            raise GlobalAskError(422, "反馈类型不正确，请重试。")
+        job = self.get_job(job_id, user_id=user_id, allowed_notebook_ids=allowed_notebook_ids)
+        if job.status != "done":
+            raise GlobalAskError(409, "回答尚未完成，暂时无法反馈。")
+        updated = self.store.set_feedback(job_id, user_id, rating)
+        if updated is None:
+            raise GlobalAskError(404, "问答任务不存在，请刷新对话。")
+        self._emit({
+            "kind": "global_ask_feedback", "rating": rating,
+            "mode": updated.mode, "libraries": len(updated.resolved_notebook_ids),
+        })
+        return updated
+
     @staticmethod
     def _validate_page(limit, offset):
         if not 1 <= limit <= GLOBAL_ASK_PAGE_MAX or offset < 0:

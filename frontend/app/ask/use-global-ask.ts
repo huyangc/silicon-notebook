@@ -5,7 +5,7 @@ import { askQuestionLimitHint } from "../ask-api.ts";
 import { toUserMessage } from "../errors.ts";
 import {
   askGlobal, cancelGlobalJob, getGlobalConversation, getGlobalJob, listGlobalConversations,
-  previewGlobalAskIntent,
+  previewGlobalAskIntent, submitGlobalFeedback,
   GLOBAL_ASK_MAX_NOTEBOOKS, GLOBAL_ASK_PAGE_SIZE, submittableGlobalScope,
   type GlobalConversation, type GlobalJob, type GlobalScope,
 } from "../global-ask-api.ts";
@@ -537,6 +537,38 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     }
   }
 
+  /**
+   * 👍/👎 反馈:乐观地把这一轮的 `feedback` 置为 `rating`——按钮立刻高亮并禁用
+   * （`AnswerView` 按 `feedbackSent` truthy 禁用），满足「按下必须有可见变化」。
+   * 失败则把这一轮的 `feedback` 改回提交前的值，并按其它动作同样的方式给出
+   * 中文提示（`error` 状态位，走 `toUserMessage` 的既有人话层）。
+   *
+   * 命中当前渲染里已有 feedback 的这一轮就直接跳过——按钮本来就已禁用，这里
+   * 只是防止一次意外的重复派发覆盖已经发生的反馈。
+   *
+   * owner/ticket 纪律：切换会话（`load` / `openConversation` / `newConversation`
+   * 都会推进 `owner.current`）之后迟到的响应不得写进新会话，同 `submitJob`/
+   * `stop` 的既有写法。
+   */
+  async function sendFeedback(jobId: string, rating: "useful" | "not_useful") {
+    const target = turns.find((item) => item.job_id === jobId);
+    if (!target || target.feedback) return;
+    const ticket = owner.current;
+    const previous = target.feedback ?? "";
+    setTurns((items) => items.map((item) => item.job_id === jobId ? { ...item, feedback: rating } : item));
+    try {
+      const updated = await submitGlobalFeedback(jobId, rating);
+      if (mounted.current && ticket === owner.current) {
+        setTurns((items) => items.map((item) => item.job_id === updated.job_id ? mergeJob(item, updated) : item));
+      }
+    } catch (cause) {
+      if (mounted.current && ticket === owner.current) {
+        setTurns((items) => items.map((item) => item.job_id === jobId ? { ...item, feedback: previous } : item));
+        setError(toUserMessage(cause, "反馈提交失败，请重试"));
+      }
+    }
+  }
+
   function updateConversation(updated: GlobalConversation) {
     ++historyVersion.current;
     setConversations((items) => items.map((item) => item.id === updated.id ? updated : item));
@@ -554,7 +586,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     notebooks, conversations, conversationId, turns, scope, setScope, draft, setDraft,
     loading, opening, openFailed, submitting, stopping, error, pollError, historyError, running,
     moreHistory, loadingHistory, turnOffset, loadingTurns, loadMoreHistory, loadMoreTurns,
-    load, openConversation, newConversation, submit, stop, updateConversation, removeConversation,
+    load, openConversation, newConversation, submit, stop, sendFeedback, updateConversation, removeConversation,
     mode, selectMode, modes: GLOBAL_ASK_MODES, uiMode,
     intentReview, intentChecking, confirmIntent, cancelIntent, abortIntent,
     retryPoll: () => { setPollError(""); setPollRevision((value) => value + 1); },

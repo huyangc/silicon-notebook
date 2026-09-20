@@ -485,3 +485,77 @@ def test_job_errors_never_expose_raw_exception_content(setup, failure_stage):
     assert result.status == "failed"
     assert result.error == "回答未完成，请检查模型服务和资料状态后重试。"
     assert "secret" not in service.get_job(job.job_id, user_id="u").model_dump_json()
+
+
+def test_submit_feedback_authority_rating_and_completion_gates(setup):
+    """``submit_feedback`` reuses ``get_job``'s own authority check (same 404
+    for a foreign or nonexistent job), then adds its two own gates: a legal
+    rating (422) and a finished job (409). The event it emits carries only
+    the rating/engine/library count -- never the question or answer text."""
+    service, _, _, _ = setup
+    events = []
+    service.event_log = SimpleNamespace(emit=lambda event: events.append(event))
+    job = service.start(GlobalAskRequest(question="q"), user_id="u")
+
+    with pytest.raises(GlobalAskError) as unfinished:
+        service.submit_feedback(job.job_id, "useful", user_id="u")
+    assert unfinished.value.status_code == 409
+
+    finished(service, job)
+
+    with pytest.raises(GlobalAskError) as bad_rating:
+        service.submit_feedback(job.job_id, "not-a-rating", user_id="u")
+    assert bad_rating.value.status_code == 422
+
+    with pytest.raises(GlobalAskError) as foreign_job:
+        service.submit_feedback(job.job_id, "useful", user_id="other")
+    assert foreign_job.value.status_code == 404
+
+    with pytest.raises(GlobalAskError) as missing_job:
+        service.submit_feedback("no-such-job", "useful", user_id="u")
+    assert missing_job.value.status_code == 404
+
+    updated = service.submit_feedback(job.job_id, "useful", user_id="u")
+    assert updated.feedback == "useful"
+    assert service.get_job(job.job_id, user_id="u").feedback == "useful"
+
+    # 事件在成功路径才发，而且没有任何一次失败的调用（未完成/非法评分/越权/
+    # 不存在）漏进了这份清单。
+    assert [event["rating"] for event in events] == ["useful"]
+    assert all(set(event) == {"kind", "rating", "mode", "libraries"} for event in events)
+    assert events[0]["kind"] == "global_ask_feedback"
+    assert events[0]["mode"] == "chunk"
+    assert events[0]["libraries"] == 2
+
+
+def test_submit_feedback_first_write_wins_through_the_service(setup):
+    service, _, _, _ = setup
+    job = service.start(GlobalAskRequest(question="q"), user_id="u")
+    finished(service, job)
+    first = service.submit_feedback(job.job_id, "useful", user_id="u")
+    assert first.feedback == "useful"
+    second = service.submit_feedback(job.job_id, "not_useful", user_id="u")
+    assert second.feedback == "useful"
+    assert service.get_job(job.job_id, user_id="u").feedback == "useful"
+
+
+def test_submit_feedback_route(setup, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.api import global_ask_routes
+    from app.api.deps import get_current_user
+
+    service, _, _, _ = setup
+    monkeypatch.setattr(global_ask_routes, "global_ask_service", lambda: service)
+    app = FastAPI()
+    app.include_router(global_ask_routes.router, prefix="/api")
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="u")
+    with TestClient(app) as client:
+        response = client.post("/api/global-ask/ask", json={"question": "hello"})
+        job_id = response.json()["job_id"]
+        finished(service, service.store.job(job_id, "u"))
+        feedback = client.post(f"/api/global-ask/jobs/{job_id}/feedback", json={"rating": "useful"})
+        assert feedback.status_code == 200
+        assert feedback.json()["feedback"] == "useful"
+        invalid = client.post(f"/api/global-ask/jobs/{job_id}/feedback", json={"rating": "bogus"})
+        assert invalid.status_code == 422
