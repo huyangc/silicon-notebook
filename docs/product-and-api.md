@@ -232,7 +232,9 @@ whole coverage lists — `searched_notebook_ids`, `skipped_notebooks`, `degraded
 replace rather than merge; the first one after `started` is a full snapshot at offset 0), then exactly one
 terminal frame — `final` carrying the job as the store has it once it left `running`, or `gone` when the row
 is no longer there (stopped-and-discarded, its conversation deleted, or the member's read access to one of
-the job's libraries revoked mid-run); a follower whose own store read fails ends with
+the job's libraries revoked mid-run); read access is re-checked **before every frame that leaves** (not at all
+while nobody is watching), and a revocation ends the stream as `gone` at once, without one more step — the same
+rule as polling, which authorizes each read when it is made; a follower whose own store read fails ends with
 `{"event":"error","error":…}` (fixed wording, never the exception text); a service shutdown that leaves the
 job `running` ends the stream with **no terminal frame** — a reader treats any of these as a lost stream and
 falls back to polling — and a blank keepalive line every 5 seconds of silence. A receipt-only frame has empty
