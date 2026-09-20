@@ -213,6 +213,10 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
     }
     assert service["ports"] == ["5432:5432"]
     assert "pg_isready -U postgres -d postgres" in service["options"]
+    assert (
+        "--mount type=tmpfs,destination=/var/lib/postgresql/data,tmpfs-size=4294967296"
+        in service["options"]
+    )
 
     checkout = _uses_step(
         job,
@@ -237,6 +241,8 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
         "LOCALE_PROVIDER icu ICU_LOCALE 'en-US'",
         "ENCODING 'SQL_ASCII'",
         'os.environ["GITHUB_OUTPUT"]',
+        '"fsync", "synchronous_commit", "full_page_writes"',
+        "SELECT current_setting(%s)",
     ):
         assert phrase in command
     assert "print(" not in command

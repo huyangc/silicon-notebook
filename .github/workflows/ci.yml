@@ -102,6 +102,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
+          --mount type=tmpfs,destination=/var/lib/postgresql/data,tmpfs-size=4294967296
           --health-cmd "pg_isready -U postgres -d postgres"
           --health-interval 5s
           --health-timeout 5s
@@ -157,6 +158,12 @@ jobs:
               dbname="postgres",
               autocommit=True,
           ) as connection:
+              # Disposable in-memory storage avoids hosted-disk DDL overhead;
+              # keep PostgreSQL's real commit/WAL machinery enabled.
+              for setting in ("fsync", "synchronous_commit", "full_page_writes"):
+                  assert connection.execute(
+                      "SELECT current_setting(%s)", (setting,)
+                  ).fetchone()[0] == "on", f"unexpected {setting} policy"
               connection.execute(
                   sql.SQL("CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION").format(
                       sql.Identifier(role), sql.Literal(password)
@@ -204,6 +211,19 @@ jobs:
           TEST_POSTGRES_DECOY_OWNER_ROLE: silicon_notebook_ci_owner_decoy
           TEST_POSTGRES_TARGETS_JSON: ${{ steps.postgres-targets.outputs.targets }}
         run: bash scripts/check_postgres.sh
+
+      - name: Record PostgreSQL storage usage
+        if: always()
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$POSTGRES_CONTAINER" sh -c '
+            df -h "$PGDATA"
+            if [ -r /sys/fs/cgroup/memory.peak ]; then
+              printf "PostgreSQL container peak memory (bytes): "
+              cat /sys/fs/cgroup/memory.peak
+            fi
+          '
 
       - name: Upload PostgreSQL test timings
         if: always()

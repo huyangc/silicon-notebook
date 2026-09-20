@@ -476,7 +476,11 @@ runner，可能以 `SIGILL` 崩溃。CI 使用可移植构建，以少量 ANN �
 
 PostgreSQL 覆盖与离线门禁明确分离。`level-3-postgres-integration` job 启动 PostgreSQL 16，
 通过 `bash scripts/check_postgres.sh` 选择 `postgres_integration or postgres_lane_contract`；
-后者将环境自足的适配器/迁移契约与 launcher/目标安全检查纳入它所归属的泳道。CI 先创建四组显式的主库、
+后者将环境自足的适配器/迁移契约与 launcher/目标安全检查纳入它所归属的泳道。
+仅 CI service 将 PGDATA 放在上限 4 GiB 的 tmpfs，减少短命 schema 的宿主磁盘开销。
+WAL、`fsync`、`synchronous_commit`、`full_page_writes` 保持默认值，建库时检查后三项；
+job 记录存储用量与容器内存峰值。此泳道验证运行中的数据库行为，不验证容器丢失或宿主
+断电后的介质持久性；生产与本地 PostgreSQL 存储不变。CI 先创建四组显式的主库、
 非 C UTF8 库与非 UTF 库，再交给权限不变的最小权限应用账号。`TEST_POSTGRES_TARGETS_JSON`
 是四个对象组成的数组，每个对象包含 `primary`、`non_c`、`non_utf` URL 字段；同一显式
 服务端地址上的十二个数据库必须互不相同。launcher 在启动四个 pytest worker 前校验并
