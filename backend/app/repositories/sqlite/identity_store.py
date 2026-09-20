@@ -264,9 +264,9 @@ class IdentityStore:
             self.database.begin_immediate(db)
             self.auth.lock(db)
             actor = db.execute(
-                "SELECT role FROM users WHERE id = ?", (actor_id,)
+                "SELECT role, status FROM users WHERE id = ?", (actor_id,)
             ).fetchone()
-            if actor is None or actor["role"] != "admin":
+            if actor is None or actor["role"] != "admin" or actor["status"] != "active":
                 raise PermissionError("admin role required")
             target = db.execute(
                 "SELECT id, username, role FROM users WHERE id = ?", (user_id,)
@@ -470,9 +470,9 @@ class IdentityStore:
             self.database.begin_immediate(db)
             self.auth.require_local_write(db)
             actor = db.execute(
-                "SELECT role FROM users WHERE id = ?", (actor_id,)
+                "SELECT role, status FROM users WHERE id = ?", (actor_id,)
             ).fetchone()
-            if actor is None or actor["role"] != "admin":
+            if actor is None or actor["role"] != "admin" or actor["status"] != "active":
                 raise PermissionError("admin role required")
             target = db.execute(
                 "SELECT id, username FROM users WHERE id = ?", (user_id,)
@@ -561,10 +561,11 @@ class IdentityStore:
         now = _now()
         with self.database.write() as db:
             self.database.begin_immediate(db)
+            self.auth.lock(db)
             actor = db.execute(
-                "SELECT role FROM users WHERE id = ?", (actor_id,)
+                "SELECT role, status FROM users WHERE id = ?", (actor_id,)
             ).fetchone()
-            if actor is None or actor["role"] != "admin":
+            if actor is None or actor["role"] != "admin" or actor["status"] != "active":
                 raise PermissionError("admin role required")
             db.execute(
                 "INSERT INTO app_settings(key, value, updated_at) VALUES(?, ?, ?) "
@@ -586,10 +587,11 @@ class IdentityStore:
         now = _now()
         with self.database.write() as db:
             self.database.begin_immediate(db)
+            self.auth.lock(db)
             actor = db.execute(
-                "SELECT role FROM users WHERE id = ?", (actor_id,)
+                "SELECT role, status FROM users WHERE id = ?", (actor_id,)
             ).fetchone()
-            if actor is None or actor["role"] != "admin":
+            if actor is None or actor["role"] != "admin" or actor["status"] != "active":
                 raise PermissionError("admin role required")
             target = db.execute(
                 "SELECT id, username FROM users WHERE id = ?", (user_id,)

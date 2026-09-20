@@ -12,7 +12,7 @@ afterEach(() => {
   window.history.replaceState(null, "", "/");
 });
 
-function authenticationServer(migration: boolean, firstCapabilitiesFailure?: 404 | 503 | "network") {
+function authenticationServer(migration: boolean, firstCapabilitiesFailure?: 404 | 503 | "network", options: { repeatFailure?: boolean; role?: string } = {}) {
   const requests: string[] = [];
   let capabilitiesAttempts = 0;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
@@ -20,7 +20,7 @@ function authenticationServer(migration: boolean, firstCapabilitiesFailure?: 404
     requests.push(path);
     if (path === "/api/ready") return Response.json({ ready: true });
     if (path === "/api/auth/capabilities") {
-      if (capabilitiesAttempts++ === 0 && firstCapabilitiesFailure) {
+      if ((capabilitiesAttempts++ === 0 || options.repeatFailure) && firstCapabilitiesFailure) {
         if (firstCapabilitiesFailure === "network") throw new TypeError("offline");
         return Response.json({ detail: "capabilities unavailable" }, { status: firstCapabilitiesFailure });
       }
@@ -31,7 +31,7 @@ function authenticationServer(migration: boolean, firstCapabilitiesFailure?: 404
     }
     if (path === "/api/me") return migration
       ? Response.json({ detail: "migration only" }, { status: 401 })
-      : Response.json({ id: "user-1", username: "alice", role: "user", ui_mode: "auto", search_profile: null });
+      : Response.json({ id: "user-1", username: "alice", role: options.role ?? "user", ui_mode: "auto", search_profile: null });
     if (path === "/api/me/identities") return Response.json({
       linked: !migration, local_login_name: "a12345678", external_username: migration ? null : "alice", display_name: "Alice",
     });
@@ -79,7 +79,7 @@ test.each([503, "network"] as const)("capabilities failure %s preserves a migrat
   expect(screen.queryByLabelText("用户名")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
   expect(getToken()).toBe("migration-token");
-  expect(requests).toEqual(["/api/ready", "/api/auth/capabilities"]);
+  expect(requests).toEqual(["/api/ready", "/api/auth/capabilities", "/api/me"]);
 
   await userEvent.setup().click(screen.getByRole("button", { name: "重试" }));
   await screen.findByRole("heading", { name: "关联统一身份" });
@@ -95,4 +95,42 @@ test("an explicitly absent capabilities endpoint retains legacy local login", as
   expect(await screen.findByRole("button", { name: "本地登录" })).toBeInTheDocument();
   expect(screen.getByLabelText("用户名")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+});
+
+test("provider maintenance does not block an existing administrator SSO session", async () => {
+  const requests = authenticationServer(false, 503, { repeatFailure: true, role: "admin" });
+  setToken("valid-admin-sso");
+  render(<Home />);
+  await waitFor(() => expect(requests).toContain("/api/me/pending-actions/stream"));
+  expect(requests).toContain("/api/notebooks");
+  expect(requests).toContain("/api/me/pending-actions");
+  expect(getToken()).toBe("valid-admin-sso");
+  expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+  await userEvent.setup().click(screen.getByRole("button", { name: "账户菜单" }));
+  expect(screen.getByRole("menuitem", { name: "认证迁移" })).toBeInTheDocument();
+  expect(screen.queryByRole("menuitem", { name: "修改密码" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("menuitem", { name: "关联统一身份" })).not.toBeInTheDocument();
+});
+
+test.each(["invalid-token", "migration-token"])("unknown capabilities preserve rejected %s across retries without business access", async (token) => {
+  const requests = authenticationServer(true, 503, { repeatFailure: true });
+  setToken(token);
+  render(<Home />);
+  await screen.findByRole("alert");
+  await userEvent.setup().click(screen.getByRole("button", { name: "重试" }));
+  await screen.findByRole("alert");
+  expect(getToken()).toBe(token);
+  expect(requests).toEqual([
+    "/api/ready", "/api/auth/capabilities", "/api/me", "/api/auth/capabilities", "/api/me",
+  ]);
+  expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
+});
+
+test("unknown capabilities without a bearer keep new login controls closed", async () => {
+  const requests = authenticationServer(false, 503);
+  render(<Home />);
+  await screen.findByRole("alert");
+  expect(screen.queryByLabelText("用户名")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "统一登录" })).not.toBeInTheDocument();
+  expect(requests).toEqual(["/api/ready", "/api/auth/capabilities"]);
 });

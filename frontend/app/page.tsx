@@ -626,7 +626,7 @@ export default function Home() {
   // 一个值(ui-mode.ts)，不散落第二份布尔。未登录/字段缺失时归一成 "auto"。
   const uiMode: UiMode = normalizeUiMode(currentUser?.ui_mode);
   const [authChecked, setAuthChecked] = useState(false);
-  const [authCapabilities, setAuthCapabilities] = useState<AuthCapabilities>(LOCAL_AUTH_CAPABILITIES);
+  const [authCapabilities, setAuthCapabilities] = useState<AuthCapabilities | null>(null);
   const [migrationSession, setMigrationSession] = useState(false);
   const [authRestoreError, setAuthRestoreError] = useState("");
   const [authRestoreRetry, setAuthRestoreRetry] = useState(0);
@@ -1573,30 +1573,26 @@ export default function Home() {
     return () => { cancelled = true; if (timer !== undefined) window.clearTimeout(timer); };
   }, [serviceReady, readyRetry]);
 
-  // 认证能力先于会话恢复读取。S2 的本地迁移令牌不得触发 /me 或任何工作区加载。
+  // Capabilities govern new authentication; /me independently validates an
+  // existing session, including during provider-configuration maintenance.
   useEffect(() => {
     if (!serviceReady) return;
     let cancelled = false;
     async function restoreAuthentication() {
       setAuthRestoreError("");
       setMigrationSession(false);
-      let capabilities = LOCAL_AUTH_CAPABILITIES;
+      let capabilities: AuthCapabilities | null = null;
       try {
         capabilities = await fetchAuthCapabilities();
       } catch (error) {
         // Only an explicitly missing endpoint identifies a legacy deployment.
         // An unavailable provider must not silently expose local authentication.
-        if (httpErrorStatus(error) !== 404) {
-          if (!cancelled) {
-            setAuthRestoreError("认证状态暂时无法确认，请稍后重试。");
-            setAuthChecked(true);
-          }
-          return;
-        }
+        if (httpErrorStatus(error) === 404) capabilities = LOCAL_AUTH_CAPABILITIES;
       }
       if (cancelled) return;
       setAuthCapabilities(capabilities);
       if (!getToken()) {
+        if (!capabilities) setAuthRestoreError("认证状态暂时无法确认，请稍后重试。");
         setAuthChecked(true);
         return;
       }
@@ -1643,7 +1639,11 @@ export default function Home() {
         // S2 accepts an SSO session at /me but deliberately rejects a local
         // migration token. Verify it through the dedicated identity endpoint
         // before preserving it; an expired SSO token must return to login.
-        if (capabilities.mode === "binding_required" && httpErrorStatus(error) === 401) {
+        if (!capabilities) {
+          // Without the policy we cannot distinguish an expired session from
+          // a migration-only credential. Preserve it until a successful retry.
+          if (!cancelled) setAuthRestoreError("认证状态暂时无法确认，请稍后重试。");
+        } else if (capabilities.mode === "binding_required" && httpErrorStatus(error) === 401) {
           try {
             await fetchMyIdentities();
             if (!cancelled) setMigrationSession(true);
@@ -1665,7 +1665,7 @@ export default function Home() {
   }, [serviceReady, authRestoreRetry]);
 
   useEffect(() => {
-    if (!currentUser || !authCapabilities.binding_allowed) {
+    if (!currentUser || !authCapabilities?.binding_allowed) {
       setIdentityInfo(null);
       return;
     }
@@ -1674,7 +1674,7 @@ export default function Home() {
       .then((identity) => { if (!cancelled) setIdentityInfo(identity); })
       .catch(() => { if (!cancelled) setIdentityInfo(null); });
     return () => { cancelled = true; };
-  }, [currentUser?.id, authCapabilities.binding_allowed]);
+  }, [currentUser?.id, authCapabilities?.binding_allowed]);
 
   // 浏览器返回/前进:hash 是唯一的真相源,读它切视图。一律传 "none"——
   // 浏览器已经改过 URL,任何再写都会污染历史栈。
@@ -4960,15 +4960,15 @@ export default function Home() {
   // 启动就绪门:在认证/加载分支之前拦截。未就绪时只展示启动屏,绝不露出登录表单或空白挂起。
   if (!serviceReady) return <StartingScreen snapshot={readySnapshot} onRetry={() => setReadyRetry((n) => n + 1)} />;
   if (!authChecked) return <div className="auth-gate"><div className="auth-card">加载中…</div></div>;
-  if (!currentUser && authRestoreError) {
+  if (!currentUser && (authRestoreError || !authCapabilities)) {
     return <div className="auth-gate"><div className="auth-card">
       <div className="auth-brand">silicon-notebook</div>
-      <p className="auth-error" role="alert">{authRestoreError}</p>
+      <p className="auth-error" role="alert">{authRestoreError || "认证状态暂时无法确认，请稍后重试。"}</p>
       <button className="auth-submit" type="button" onClick={() => { setAuthChecked(false); setAuthRestoreRetry((value) => value + 1); }}>重试</button>
     </div></div>;
   }
   if (!currentUser) {
-    return <AuthGate capabilities={authCapabilities} migrationSession={migrationSession} onAuthenticated={(u) => {
+    return <AuthGate capabilities={authCapabilities!} migrationSession={migrationSession} onAuthenticated={(u) => {
       activateWorkspaceOwners(u.id);
       setCurrentUser(u);
       setStatusText("");
@@ -5030,8 +5030,8 @@ export default function Home() {
             initials={accountBadge}
             memoryActive={outerView === "memory"}
             showAdminUsage={canSeeAdminUsage(currentUser.role)}
-            canChangePassword={(authCapabilities.mode === "local" || authCapabilities.mode === "dual") && currentUser.id !== "user-local"}
-            canBindIdentity={authCapabilities.binding_allowed && !identityInfo?.linked}
+            canChangePassword={(authCapabilities?.mode === "local" || authCapabilities?.mode === "dual") && currentUser.id !== "user-local"}
+            canBindIdentity={Boolean(authCapabilities?.binding_allowed && !identityInfo?.linked)}
             linkedIdentityName={identityInfo?.linked ? identityInfo.external_username : null}
             advancedMode={isAdvanced(uiMode)}
             searchProfileEnabled={userSearchProfileEnabled}

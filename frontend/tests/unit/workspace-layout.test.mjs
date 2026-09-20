@@ -132,7 +132,7 @@ test("修改密码弹窗在 page 接线:菜单回调打开、内置管理员隐�
     menus[0].bindings.onChangePassword,
     '() => { rootModals.open("password-change", rootModals.captureActorOwner()); }',
   );
-  assert.equal(menus[0].bindings.canChangePassword, '(authCapabilities.mode === "local" || authCapabilities.mode === "dual") && currentUser.id !== "user-local"');
+  assert.equal(menus[0].bindings.canChangePassword, '(authCapabilities?.mode === "local" || authCapabilities?.mode === "dual") && currentUser.id !== "user-local"');
 });
 
 

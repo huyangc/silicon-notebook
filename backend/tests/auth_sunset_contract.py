@@ -243,6 +243,44 @@ class AuthSunsetContract:
             auth.set_account_status(old_user.id,"active",actor_id=first.id)
         assert not auth.owner_eligible(old_user.id)
 
+    @pytest.mark.parametrize("operation", ["role", "password", "global_limit", "user_limit"])
+    def test_admin_mutations_recheck_status_after_request_authentication(self, identity, operation):
+        actor, session = identity.register_user_with_session("z00000001","pw")
+        target = identity.create_user("z00000002","pw")
+        identity.set_user_role("user-local",actor.id,"admin")
+        authenticated_actor = identity.resolve_session(session)
+        assert authenticated_actor.role == "admin"
+
+        def mutate(second=False):
+            actor_id = authenticated_actor.id
+            if operation == "role":
+                return identity.set_user_role(actor_id,target.id,"user" if second else "admin")
+            if operation == "password":
+                return identity.admin_reset_user_password(actor_id,target.id,"second-password" if second else "first-password")
+            if operation == "global_limit":
+                return identity.set_global_document_limit_default(actor_id,300 if second else 200)
+            return identity.set_user_document_limit_override(actor_id,target.id,300 if second else 200)
+
+        def snapshot():
+            with identity.database.connect() as db:
+                row = identity.auth._execute(db,"SELECT role,password_hash,password_salt,password_iterations,auth_revision FROM users WHERE id=?",(target.id,)).fetchone()
+            return dict(row),identity.global_document_limit_default(),identity.user_document_limit_override(target.id)
+
+        mutate()
+        before = snapshot()
+        target_session = identity.create_session(target.id)
+        # Simulate another admin disabling this account after the HTTP layer
+        # accepted its session, while this request still holds the old profile.
+        identity.auth.set_account_status(actor.id,"disabled",actor_id="user-local")
+        assert identity.resolve_session(session) is None
+        with pytest.raises(PermissionError,match="admin role required"):
+            mutate(second=True)
+        assert snapshot() == before
+        assert identity.resolve_session(target_session).id == target.id
+        identity.auth.set_account_status(actor.id,"active",actor_id="user-local")
+        mutate(second=True)
+        assert snapshot() != before
+
     def test_identity_audit_survives_consumption_without_credentials(self, identity):
         import json
         user, local = identity.register_user_with_session("z00000001","pw")
