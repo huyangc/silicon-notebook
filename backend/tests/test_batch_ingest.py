@@ -1183,6 +1183,35 @@ def test_ensure_notebook_explicit_owner(repo):
     assert cb == u.id and cb2 == u.id
 
 
+@pytest.mark.parametrize("owner", ["CorpUID", "corpuid", " CORPuid ", "a00123456", "A00123456"])
+def test_owner_resolution_preserves_user_id_after_sso_rename(repo, owner):
+    user = repo.create_user("a00123456", "pw123456")
+    with repo._connect() as db:
+        db.execute("UPDATE users SET username='CorpUID' WHERE id=?", (user.id,))
+    resolved = bi._resolve_owner_profile(repo, owner)
+    assert resolved.id == user.id
+    assert resolved.username == "CorpUID"
+
+
+@pytest.mark.parametrize("conflicting_name", ["corpuid", "a00123456"])
+def test_owner_resolution_rejects_ambiguous_current_or_legacy_names(repo, conflicting_name):
+    first = repo.create_user("a00123456", "pw123456")
+    second = repo.create_user("a00123457", "pw123456")
+    with repo._connect() as db:
+        db.execute("UPDATE users SET username='CorpUID' WHERE id=?", (first.id,))
+        db.execute("UPDATE users SET username=? WHERE id=?", (conflicting_name,second.id))
+    assert repo.maintenance.resolve_owner_profile(conflicting_name) is None
+    with pytest.raises(SystemExit):
+        bi._resolve_owner_profile(repo, conflicting_name)
+
+
+def test_owner_resolution_keeps_default_admin_and_rejects_non_names(repo):
+    user = repo.create_user("a00123456", "pw123456")
+    assert repo.maintenance.resolve_owner_profile(None).id == "user-local"
+    for value in (user.id,user.email,"", "   "):
+        assert repo.maintenance.resolve_owner_profile(value) is None
+
+
 def test_ensure_notebook_unknown_owner_errors(repo):
     with pytest.raises(SystemExit):
         bi._resolve_owner_profile(repo, "a00999999")

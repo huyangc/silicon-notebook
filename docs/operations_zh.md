@@ -910,6 +910,8 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 前置：用 `MODEL_SERVICES_CONFIG` 指向部署 TOML，按阶段绑定所需 workload（尤其是 `chunk_embedding`、`source_element_embedding`、`knowledge_object_embedding`、`kg_extract`、`paper_metadata` 和可选的 `chunk_question_generation`），`.env` 只保存 TOML 引用的密钥。`chunk_embedding` 未绑定时 CLI 默认拒绝运行；确需无向量导入须显式加 `--allow-no-embed`。续跑从**数据库状态**推导而非读取进度文件：`ingest` 看内容哈希，`kg` 看最近一次抽取是否完成，`embed` 看向量行是否存在。parse 中断但已写入哈希的来源用 `reparse` 修复；`<storage>/batch_ingest/<notebook>.jsonl` 只是只写运行日志。
 
+SSO 关联后，共用的 `--owner` 解析同时接受可信外部用户名和保留的 `local_login_name`，大小写不敏感，二者仍定位到原本站 user_id。遇到多账号歧义时拒绝解析，不猜测归属。检索回放也遵循此规则；这不会在退役后重新开启密码认证。
+
 ### 离线 / 异机 scale 构建(`scripts/build_scale_index.py`)
 
 上面的 `batch_ingest.py index` 是**停服**通道（数据库级全局 advisory lock，要求

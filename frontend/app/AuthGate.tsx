@@ -88,6 +88,23 @@ export function AuthGate({ capabilities, migrationSession = false, onAuthenticat
     await redirectToSso(() => startSsoGrant(grantToken.trim(), grantPurpose));
   }
 
+  const migrationHelp = canUseGrant && <div className="auth-migration-help">
+    <button type="button" disabled={busy} aria-expanded={grantOpen} onClick={() => { setGrantOpen((value) => !value); setError(""); }}>需要迁移帮助？</button>
+    {grantOpen && <div className="auth-grant-form">
+      <p>请使用管理员签发的一次性迁移凭证。该凭证只能用于你获准的操作。</p>
+      <label className="auth-label">迁移凭证
+        <input className="auth-input" value={grantToken} disabled={busy} onChange={(event) => setGrantToken(event.target.value)} autoComplete="off" />
+      </label>
+      <fieldset disabled={busy}>
+        <legend>操作</legend>
+        <label><input type="radio" checked={grantPurpose === "enroll"} onChange={() => setGrantPurpose("enroll")} /> 新建账号</label>
+        <label><input type="radio" checked={grantPurpose === "recover"} onChange={() => setGrantPurpose("recover")} /> 恢复账号</label>
+        <label><input type="radio" checked={grantPurpose === "replace"} onChange={() => setGrantPurpose("replace")} /> 更换统一账号</label>
+      </fieldset>
+      <button className="auth-sso-submit" type="button" disabled={busy} onClick={() => { void startGrant(); }}>{busy ? "正在跳转…" : "验证凭证并继续"}</button>
+    </div>}
+  </div>;
+
   if (bindingOnly) return (
     <div className="auth-gate">
       <form className="auth-card" onSubmit={(event) => { event.preventDefault(); void redirectToSso(() => startIdentityBinding(password)); }}>
@@ -101,6 +118,7 @@ export function AuthGate({ capabilities, migrationSession = false, onAuthenticat
         {error && <div className="auth-error" role="alert">{error}</div>}
         <button className="auth-submit" type="submit" disabled={busy || !password}>{busy ? "正在跳转…" : "验证并关联统一身份"}</button>
         {canUseSso && <button className="auth-sso-submit" type="button" disabled={busy} onClick={() => { void redirectToSso(startSsoLogin); }}>{busy ? "正在跳转…" : "统一登录"}</button>}
+        {migrationHelp}
       </form>
     </div>
   );
@@ -124,22 +142,7 @@ export function AuthGate({ capabilities, migrationSession = false, onAuthenticat
           <button className="auth-submit" type="submit" disabled={busy}>{busy ? "请稍候…" : capabilities.mode === "binding_required" ? "验证并关联统一身份" : mode === "login" ? "本地登录" : "注册并进入"}</button>
         </>}
         {canUseSso && <button className="auth-sso-submit" type="button" disabled={busy} onClick={() => { void redirectToSso(startSsoLogin); }}>{busy ? "正在跳转…" : "统一登录"}</button>}
-        {canUseGrant && <div className="auth-migration-help">
-          <button type="button" disabled={busy} aria-expanded={grantOpen} onClick={() => { setGrantOpen((value) => !value); setError(""); }}>需要迁移帮助？</button>
-          {grantOpen && <div className="auth-grant-form">
-            <p>请使用管理员签发的一次性迁移凭证。该凭证只能用于你获准的操作。</p>
-            <label className="auth-label">迁移凭证
-              <input className="auth-input" value={grantToken} disabled={busy} onChange={(event) => setGrantToken(event.target.value)} autoComplete="off" />
-            </label>
-            <fieldset disabled={busy}>
-              <legend>操作</legend>
-              <label><input type="radio" checked={grantPurpose === "enroll"} onChange={() => setGrantPurpose("enroll")} /> 新建账号</label>
-              <label><input type="radio" checked={grantPurpose === "recover"} onChange={() => setGrantPurpose("recover")} /> 恢复账号</label>
-              <label><input type="radio" checked={grantPurpose === "replace"} onChange={() => setGrantPurpose("replace")} /> 更换统一账号</label>
-            </fieldset>
-            <button className="auth-sso-submit" type="button" disabled={busy} onClick={() => { void startGrant(); }}>{busy ? "正在跳转…" : "验证凭证并继续"}</button>
-          </div>}
-        </div>}
+        {migrationHelp}
         {!canUseLocal && !canUseSso && <p className="auth-error" role="alert">当前登录方式不可用，请联系管理员。</p>}
         {error && <div className="auth-error" role="alert">{error}</div>}
       </form>
