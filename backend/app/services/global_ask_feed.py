@@ -39,12 +39,13 @@ class JobFeed:
     transport own the feed's bookkeeping.
     """
 
-    __slots__ = ("_lock", "_subscribers", "_closed")
+    __slots__ = ("_lock", "_subscribers", "_closed", "_watchdog")
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._subscribers: list = []
         self._closed = False
+        self._watchdog = False
 
     def subscribe(self, events, snapshot: Callable[[], Any]) -> bool:
         """Deliver ``snapshot()`` to ``events`` and register it for the rest.
@@ -61,6 +62,19 @@ class JobFeed:
             if frame is not None:
                 events.put(frame)
             self._subscribers.append(events)
+            return True
+
+    def is_closed(self) -> bool:
+        with self._lock:
+            return self._closed
+
+    def claim_watchdog(self) -> bool:
+        """True exactly once per feed: the caller is the one that starts the
+        feed's store watchdog. Every later subscriber finds it already running."""
+        with self._lock:
+            if self._closed or self._watchdog:
+                return False
+            self._watchdog = True
             return True
 
     def watched(self) -> bool:

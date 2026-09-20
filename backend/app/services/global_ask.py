@@ -553,6 +553,12 @@ class GlobalAskService:
         self.follow_poll_seconds = 0.5
         # ...and how far a follower backs off while nothing moves.
         self.follow_poll_max_seconds = 5.0
+        # How often a WATCHED local feed checks the row for a terminal that
+        # another process wrote (see ``_watch_store``).
+        self.feed_watch_seconds = 2.0
+        # Jobs whose ``cancel(discard=True)`` is between "signalled" and
+        # "done": that request, not the unwinding worker, publishes the terminal.
+        self._discarding = set()
         self._pending = 0
         self._closed = False
         # Monotonic clock, injectable so the trace throttle can be tested with
@@ -1413,13 +1419,60 @@ class GlobalAskService:
         """
         with self._lock:
             feed = self._feeds.get(job_id)
+        self._end_feed(feed, job_id, user_id)
+
+    def _end_feed(self, feed, job_id, user_id):
+        """``_close_feed`` for a caller that already holds the feed."""
         if feed is None:
             return
         try:
             feed.close(self._terminal_frame(job_id, user_id))
-        except Exception as exc:  # noqa: BLE001 - see docstring
+        except Exception as exc:  # noqa: BLE001 - see ``_close_feed``
             _LOG.error("global-ask terminal push failed for %s (%s)", job_id, type(exc).__name__)
             feed.close(None)
+
+    def _watch_store(self, feed, job_id, user_id):
+        """While a local feed has readers, notice a terminal written ELSEWHERE.
+
+        The feed is closed by whoever ends the job IN THIS PROCESS. In a
+        multi-process deployment a cancel (or a discard, or a conversation
+        delete) can be handled by another process: it updates the row, but it
+        cannot reach this process's feed or its worker's cancel event. A reader
+        attached here is not polling -- the stream is open -- so it would keep
+        showing a running job until the local worker finished its current model
+        call, long after the stop was durable.
+
+        One low-frequency watchdog per watched feed closes that gap: when the
+        row has left ``running`` (or is gone) it signals the local worker and
+        ends the feed from the store. It starts with the first reader, reads
+        one row per tick, and dies with the feed.
+        """
+        if not feed.claim_watchdog():
+            return
+
+        def watchdog():
+            while not feed.is_closed():
+                time.sleep(self.feed_watch_seconds)
+                if feed.is_closed():
+                    return
+                try:
+                    row = self.store.job(job_id, user_id)
+                except Exception as exc:  # noqa: BLE001 - try again next tick
+                    _LOG.error("global-ask feed watch failed for %s (%s)", job_id, type(exc).__name__)
+                    continue
+                if row is not None and row.status == "running":
+                    continue
+                with self._lock:
+                    event = self._events.get(job_id)
+                    discarding = job_id in self._discarding
+                if discarding:
+                    continue  # a local cancel-and-discard is mid-flight; it owns the terminal
+                if event is not None:
+                    event.set()
+                self._end_feed(feed, job_id, user_id)
+                return
+
+        threading.Thread(target=watchdog, daemon=True, name="global-ask-feed-watch").start()
 
     def attach(self, job_id, *, user_id, allowed_notebook_ids=None):
         """A delivery queue carrying this job's events until it ends.
@@ -1458,6 +1511,7 @@ class GlobalAskService:
             if feed is not None and live is not None and feed.subscribe(
                 events, lambda: self._progress_frame(live, 0),
             ):
+                self._watch_store(feed, job_id, user_id)
                 return events
         self._follow(events, job_id, user_id, allowed_notebook_ids)
         return events
@@ -1558,7 +1612,19 @@ class GlobalAskService:
             # terminal row, so what a watcher is told is exactly what a reload
             # would read. ``cancel()`` may have closed this feed already, in
             # which case this is a no-op by the feed's own first-terminal rule.
-            self._close_feed(job.job_id, user_id)
+            #
+            # ⛔ UNLESS a ``cancel(discard=True)`` is in flight for this job. The
+            # worker can unwind faster than the cancelling request gets from
+            # "write cancelled" to "delete the row"; a ``final(cancelled)``
+            # published in that gap closes the feed for good, the ``gone`` that
+            # follows can no longer be sent, and another watching page keeps a
+            # stopped turn -- possibly a whole conversation -- that the server
+            # no longer has. The canceller holds its own reference to the feed
+            # and publishes the one terminal that is true once it is done.
+            with self._lock:
+                discarding = job.job_id in self._discarding
+            if not discarding:
+                self._close_feed(job.job_id, user_id)
             with self._lock:
                 self._events.pop(job.job_id, None)
                 self._workers.pop(job.job_id, None)
@@ -1962,16 +2028,30 @@ class GlobalAskService:
         if job.status == "running":
             with self._lock:
                 event = self._events.get(job_id)
+                # Taken BEFORE the worker is signalled, and held by reference:
+                # from here to the end of this call the terminal frame is this
+                # request's to publish (see ``_run``'s finally), and the worker
+                # may drop the feed from the registry while we are still busy.
+                feed = self._feeds.get(job_id)
+                if discard:
+                    self._discarding.add(job_id)
                 if event is not None:
                     event.set()
-            job.status, job.response, job.answer = "cancelled", None, None
-            if not self.store.save(job, user_id):
-                job = self.get_job(job_id, user_id=user_id, allowed_notebook_ids=allowed_notebook_ids)
-                if job.status != "cancelled":
-                    return job
-            if discard:
-                self.store.discard_cancelled(job_id, user_id)
-            self._close_feed(job_id, user_id)
+            try:
+                job.status, job.response, job.answer = "cancelled", None, None
+                if not self.store.save(job, user_id):
+                    job = self.get_job(job_id, user_id=user_id, allowed_notebook_ids=allowed_notebook_ids)
+                    if job.status != "cancelled":
+                        return job
+                if discard:
+                    self.store.discard_cancelled(job_id, user_id)
+            finally:
+                # Whatever happened above -- including a store error -- a watcher
+                # is owed a terminal read from the store as it now is, and the
+                # worker has stood down in our favour.
+                with self._lock:
+                    self._discarding.discard(job_id)
+                self._end_feed(feed, job_id, user_id)
         return job
 
     def submit_feedback(self, job_id, rating, *, user_id, allowed_notebook_ids=None):
