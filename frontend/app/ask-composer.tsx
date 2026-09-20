@@ -24,6 +24,9 @@ type AskComposerProps = {
   // 判据留在本组件而不是只在调用方,是因为提交有两条路:发送键与 Enter。Enter 的
   // handler 就在下面,调用方够不着它,只 gate 按钮会让超限的问题从键盘照样发出去。
   submitBlocked?: boolean;
+  // 调用方要把焦点送回输入框时递增它（「编辑问题」）。输入框的 ref 留在本组件里不外露：
+  // 调用方只说「现在聚焦」，不需要知道里面是哪个元素、叫什么类名。0 / 未传 = 不聚焦。
+  focusSignal?: number;
   children?: ReactNode;
 };
 
@@ -38,9 +41,14 @@ export function AskComposer({
   abortLabel = "中断生成",
   disabled = false,
   submitBlocked = false,
+  focusSignal = 0,
   children,
 }: AskComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (focusSignal > 0) textareaRef.current?.focus();
+  }, [focusSignal]);
 
   // 随内容自动增高(封顶 MAX_INPUT_HEIGHT,超出内部滚动)。替代已移除的手动 resize 手柄:
   // 长提问 / Shift+Enter 多行不再被压在一行里,又不暴露游离的拖拽把手。先置 auto 让

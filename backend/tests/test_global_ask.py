@@ -345,6 +345,31 @@ def test_edit_and_resend_replaces_the_stopped_job(setup):
     assert service.start(request, user_id="u").job_id == job.job_id
 
 
+def test_a_concurrent_twin_of_a_replacing_submission_gets_the_job_back(setup, monkeypatch):
+    """Two deliveries of ONE submission race; the loser must not read as stale.
+
+    The loser passed both early checks before the winner committed, so inside
+    the insert it finds the stopped job already gone. That is the race-recovery
+    branch's case -- same ``client_request_id``, same request -- not a 409.
+    """
+    service, _, _, _ = setup
+    stopped = _stopped_job(service)
+    request = GlobalAskRequest(
+        question="改好的问题", conversation_id=stopped.conversation_id,
+        replaces_job_id=stopped.job_id, client_request_id="twin",
+    )
+    winner = service.start(request, user_id="u")
+    assert finished(service, winner).status == "done"
+    # The loser's view of the world: it saw neither the winner's row nor the deletion.
+    monkeypatch.setattr(service, "replay", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "_check_replaceable", lambda *args, **kwargs: None)
+    assert service.start(request, user_id="u").job_id == winner.job_id
+    # A DIFFERENT submission naming the same gone job is still refused.
+    with pytest.raises(GlobalAskError) as stale:
+        service.start(request.model_copy(update={"client_request_id": "other"}), user_id="u")
+    assert stale.value.status_code == 409
+
+
 def test_stop_with_discard_leaves_no_record_but_never_discards_an_answer(setup):
     service, _, _, _ = setup
     entered, release = Event(), Event()
@@ -368,6 +393,11 @@ def test_stop_with_discard_leaves_no_record_but_never_discards_an_answer(setup):
     assert service.store.job(job.job_id, "u") is None
     assert service.store.conversation(job.conversation_id, "u") is None
     service.ask.synthesize = original
+    # A record that was ALREADY stopped is the one the rule keeps: a replayed or
+    # foreign ``discard`` must not be able to delete it.
+    kept = _stopped_job(service, question="留在对话里的那条")
+    assert service.cancel(kept.job_id, user_id="u", discard=True).status == "cancelled"
+    assert service.store.job(kept.job_id, "u") is not None
     answered = service.start(GlobalAskRequest(question="q2"), user_id="u")
     assert finished(service, answered).status == "done"
     assert service.cancel(answered.job_id, user_id="u", discard=True).status == "done"

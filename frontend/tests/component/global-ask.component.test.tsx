@@ -9,7 +9,7 @@ import GlobalAskWorkspace from "../../app/ask/global-ask-workspace.tsx";
 import { GlobalAskLauncher } from "../../app/ask/global-ask-launcher.tsx";
 import { AnswerView } from "../../app/answer-panel.tsx";
 import { useRootModalCoordinator } from "../../app/use-root-modal-coordinator.ts";
-import { STOPPED_TURN_TEXT } from "../../app/stopped-turn.tsx";
+import { STOPPED_TURN_KEPT_TEXT, STOPPED_TURN_TEXT } from "../../app/stopped-turn.tsx";
 import type { GlobalConversation, GlobalConversationDetail, GlobalJob, GlobalScope } from "../../app/global-ask-api.ts";
 import type { QueryIntentContract } from "../../app/ask-intent-model.ts";
 import type { AskResponse, NotebookSummary } from "../../app/workspace-model.ts";
@@ -1345,6 +1345,29 @@ test("stopping before the submission returns cancels and discards the job once i
   expect(result.current.stopping).toBe(false);
 });
 
+test("in reasoning mode a stop after understanding returned still reaches the submission", async () => {
+  // 理解已经返回、建作业的 POST 还在途：这一刻按下的停止不能落到「取消问题理解」
+  // 那条已经没东西可取消的路径上（评审 P1）。
+  const submission = deferred<GlobalJob>();
+  api.ask.mockReturnValue(submission.promise);
+  api.cancel.mockResolvedValue({ ...job("cancelled"), question: "请逐步比较" });
+  const { result } = renderHook(() => useGlobalAsk({ syncUrl: false }));
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  act(() => result.current.selectMode("reasoning"));
+  act(() => result.current.setDraft("请逐步比较"));
+  await act(async () => { void result.current.submit(); });
+  await waitFor(() => expect(api.ask).toHaveBeenCalledTimes(1));
+  expect(result.current.intentChecking).toBe(false);
+  expect(result.current.submitting).toBe(true);
+  await act(async () => { await result.current.stop(); });
+  expect(result.current.stopping).toBe(true);
+  await act(async () => { submission.resolve({ ...job(), question: "请逐步比较" }); });
+  expect(api.cancel).toHaveBeenCalledWith("job-conv-a", true);
+  expect(result.current.turns).toEqual([]);
+  expect(result.current.draft).toBe("请逐步比较");
+  expect(result.current.pending).toBeNull();
+});
+
 test("stopping a job that has shown nothing discards it and returns the question", async () => {
   window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
   api.list.mockResolvedValue([conversation()]);
@@ -1405,6 +1428,18 @@ test("a job stopped mid-process stays, can be edited, and the next question repl
   await act(async () => { replacement.resolve({ ...job(), job_id: "job-new", question: "改好的问题" }); });
   expect(screen.queryByText("共同问题是什么？")).toBeNull();
   expect(screen.getByText("改好的问题")).toBeTruthy();
+});
+
+test("an older stopped turn wears the same notice without promising a replacement", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  const older = { ...job("cancelled"), job_id: "job-older", question: "更早停下的问题" };
+  const later = { ...job("done"), job_id: "job-later", answer: standardAnswer() };
+  api.detail.mockResolvedValue(detail("conv-a", [older, later]));
+  render(<GlobalAskPage />);
+  expect(await screen.findByText(STOPPED_TURN_KEPT_TEXT)).toBeTruthy();
+  expect(screen.queryByText(STOPPED_TURN_TEXT)).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "编辑问题" }));
+  expect(screen.getByRole("textbox", { name: "输入问题" })).toHaveValue("更早停下的问题");
 });
 
 test("a failed re-send brings the stopped record back and returns the new question", async () => {

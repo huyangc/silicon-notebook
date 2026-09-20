@@ -259,13 +259,13 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                     <button aria-label="分享到这条回答" title="分享到这条回答（含此前的全部问答）" className="global-text-button" type="button" onClick={() => openShare(job.job_id)}><Share2 size={13} /><span>分享</span></button>
                   </footer>
                 </ChatAnswer> : <>
-                {/* 被停止的一轮：长相与文案全站一份（`stopped-turn.tsx`）。只有最新的那条
-                    可替换，所以只有它带「编辑问题」；更早的停止记录仍是旧的「重新提问」。 */}
-                {job.status === "cancelled" && job.job_id === replaceable?.job_id
-                  ? <StoppedTurnNotice disabled={busy || inFlight} onEdit={() => { ask.setDraft(job.question); composer.current?.focus(); }} />
+                {/* 被停止的一轮：长相与文案全站一份（`stopped-turn.tsx`）。只有会话里最新
+                    的那条会被下一次提问替换；更早的停止记录用同一块提示，只是不许诺替换。 */}
+                {job.status === "cancelled"
+                  ? <StoppedTurnNotice replaceable={job.job_id === replaceable?.job_id} disabled={busy || inFlight} onEdit={() => { ask.setDraft(job.question); composer.current?.focus(); }} />
                   : <div className={`global-job-status${job.status === "failed" ? " failed" : ""}`} role="status">
                   {job.status === "running" && <LoaderCircle size={18} className="global-spin" />}
-                  <span>{job.status === "running" ? `正在查阅资料 · 已检索 ${job.searched_notebook_ids.length} / ${job.resolved_notebook_ids.length} 个笔记本` : job.status === "cancelled" ? "已停止回答，可以修改问题后继续。" : job.status === "interrupted" ? "服务已重启，请重新提交问题。" : job.error || "回答未完成，请检查模型服务后重试。"}</span>
+                  <span>{job.status === "running" ? `正在查阅资料 · 已检索 ${job.searched_notebook_ids.length} / ${job.resolved_notebook_ids.length} 个笔记本` : job.status === "interrupted" ? "服务已重启，请重新提交问题。" : job.error || "回答未完成，请检查模型服务后重试。"}</span>
                   {job.status !== "running" && <button className="global-text-button" onClick={() => { ask.setDraft(job.question); composer.current?.focus(); }}>重新提问</button>}
                 </div>}
                 {/* 与完成态同一个位置（回答/状态之下），同一轮里不跳位。

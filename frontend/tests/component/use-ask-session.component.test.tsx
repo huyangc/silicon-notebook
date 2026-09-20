@@ -5268,7 +5268,8 @@ test("a Stop after retrieval output keeps the turn and leaves the input empty", 
   expect(value!.pendingQuestion).toBe("");
   expect(value!.stoppedTurn?.question).toBe("stopped after retrieval");
   expect(value!.stoppedTurn?.trace.map((step) => step.summary)).toEqual(["启动检索", "命中 3 条"]);
-  expect(effects.notify).toHaveBeenCalledWith("已停止回答");
+  // The record left in the transcript carries the notice; no toast repeats it,
+  // and the "question handed back" toast would be false here.
   expect(effects.notify).not.toHaveBeenCalledWith("已中断回答");
 });
 
@@ -5283,7 +5284,6 @@ test("a Stop with only the job's start step hands the question back, Case B", as
   expect(value!.question).toBe("stopped before any output");
   expect(value!.stoppedTurn).toBeNull();
   expect(effects.notify).toHaveBeenCalledWith("已中断回答");
-  expect(effects.notify).not.toHaveBeenCalledWith("已停止回答");
 });
 
 test("editing a stopped turn drafts the question and keeps the record standing", async () => {
@@ -5315,6 +5315,29 @@ test("the next submission replaces the stopped turn as soon as its pending turn 
   replacement.resolve(answer("conversation-stopped"));
   await act(async () => { await submitting; });
   expect(value!.stoppedTurn).toBeNull();
+});
+
+test("a re-send that ends before any output brings the stopped record back", async () => {
+  api.listConversations.mockResolvedValue([summary("conversation-stopped")]);
+  render(<Harness />);
+  beginOwnedNotebook();
+  await stopAfter("first question", [START_STEP, RETRIEVAL_STEP]);
+
+  // Stopped again with nothing shown (Case B): the new question goes back to
+  // the input and the earlier record — nothing replaced it — is standing again.
+  await stopAfter("second question", [START_STEP]);
+  expect(value!.question).toBe("second question");
+  expect(value!.stoppedTurn?.question).toBe("first question");
+  expect(value!.stoppedTurn?.trace.map((step) => step.summary)).toEqual(["启动检索", "命中 3 条"]);
+
+  // A plain failure of the re-send does the same.
+  api.runAskStream.mockRejectedValueOnce(new Error("network"));
+  await act(async () => { await value!.submit("third question"); });
+  expect(value!.stoppedTurn?.question).toBe("first question");
+
+  // A second Case A stop replaces the record with the newer one.
+  await stopAfter("fourth question", [RETRIEVAL_STEP]);
+  expect(value!.stoppedTurn?.question).toBe("fourth question");
 });
 
 test("a stopped turn never survives a new session or another conversation", async () => {

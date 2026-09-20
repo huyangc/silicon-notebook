@@ -38,6 +38,14 @@ function ControlledComposer({
 
 
 describe("AskComposer", () => {
+  test("a rising focus signal puts the caret back in the input", () => {
+    const props = { value: "", placeholder: "提问", onChange: () => undefined, onSubmit: () => undefined, onAbort: () => undefined, running: false };
+    const view = render(<AskComposer {...props} />);
+    expect(screen.getByRole("textbox", { name: "提问" })).not.toHaveFocus();
+    view.rerender(<AskComposer {...props} focusSignal={1} />);
+    expect(screen.getByRole("textbox", { name: "提问" })).toHaveFocus();
+  });
+
   test("Enter submits while Shift+Enter inserts a newline", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();

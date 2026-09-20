@@ -1529,9 +1529,8 @@ export default function Home() {
   };
   const [kgSize, setKgSize] = useState({ width: 720, height: 560 });
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
-  // 问答面板根节点。用途只有一个:把焦点送回提问输入框(「编辑问题」)。输入框由
-  // AskComposer 自己持有 ref、不外露,这里按面板范围取它,而不是全局按 aria-label 找。
-  const chatPanelRef = useRef<HTMLElement | null>(null);
+  // 「编辑问题」把焦点送回提问输入框:输入框的 ref 归 AskComposer 自己,这里只递增信号。
+  const [askComposerFocusSignal, setAskComposerFocusSignal] = useState(0);
   const memoryLinksAbortRef = useRef<AbortController | null>(null);
   const memorySessionAbortRef = useRef(new AbortController());
   const sessionPopoverRef = useRef<HTMLDivElement | null>(null);
@@ -3780,7 +3779,7 @@ export default function Home() {
   // 记录本身留在对话里,由下一次提问替换(判据与文案见 stopped-turn.tsx)。
   function editStoppedAskTurn() {
     askSession.editStoppedTurn();
-    chatPanelRef.current?.querySelector<HTMLTextAreaElement>("textarea.chat-input")?.focus();
+    setAskComposerFocusSignal((value) => value + 1);
   }
 
   function requestDeleteSession(session: ConversationSummary) {
@@ -5574,7 +5573,7 @@ export default function Home() {
               </button>
             )}
 
-            <section className="workspace-panel chat-panel" ref={chatPanelRef}>
+            <section className="workspace-panel chat-panel">
               <div className="workspace-panel-header">
                 <div className="chat-tabs">
                   {CHAT_MODES.map(([mode, label]) => (
@@ -5850,6 +5849,7 @@ export default function Home() {
                   abortLabel={intentChecking ? "取消问题理解" : "中断生成"}
                   disabled={askBlocked || sessionLoading || Boolean(askIntentReview)}
                   submitBlocked={askQuestionOverLimit !== null}
+                  focusSignal={askComposerFocusSignal}
                 >
                   {/* 与来源页签工具条同一句话的第二处显示 —— 共用 retrievalScopeText，
                       两处不一致在结构上就不可能发生。 */}

@@ -164,7 +164,6 @@ type StoppedAskTurn = Readonly<{
   conversationId: string | null;
   question: string;
   askedAt: string;
-  mode: string;
   trace: ReasoningTraceStep[];
 }>;
 
@@ -483,8 +482,12 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   // actor/notebook key, same conversation). Anything that moves the view —
   // another notebook, another actor, a hidden owner, a conversation that is no
   // longer the stopped one — hides it without anybody having to remember to.
+  // While a submission is in flight its pending turn stands in the record's
+  // place; the record itself is only dropped once an answer lands (see
+  // startAskRun), so a re-send that fails or is stopped early brings it back.
   const visibleStoppedTurn = (
     ownerIsVisible
+    && !asking && !intentChecking && !intentReview
     && ownerRef.current
     && stoppedTurn
     && stoppedTurn.key === ownerKey(ownerRef.current)
@@ -1867,9 +1870,11 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     if (ownsRun()) {
       effectsRef.current.ensureAskVisible();
       setQuestion("");
-      // This submission's pending turn is going up: it replaces whatever
-      // stopped turn was still standing in the transcript.
-      setStoppedTurn(null);
+      // A stopped turn still standing in the transcript gives way to this
+      // pending turn, but it is only HIDDEN while a submission is in flight
+      // (the transcript renders it when nothing is): the record is dropped
+      // when a turn actually takes its place, so a re-send that fails or is
+      // stopped before any output brings it back instead of destroying it.
       setPendingQuestion(q);
       setPendingAskedAt(askedAt);
       pendingModeSourceRef.current = selectedMode;
@@ -1954,6 +1959,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
           }
         },
       );
+      // An answered turn is what replaces a stopped record — here, and only
+      // here (a new Case A stop overwrites it instead; see the catch below).
+      setStoppedTurn(null);
       if (!ownsRun()) {
         // Retire the in-flight record BEFORE the history refresh below awaits:
         // a restore that resolves its detail in that window must see this run
@@ -2011,11 +2019,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
             conversationId: conversationIdAtStart,
             question: q,
             askedAt,
-            mode: selectedMode,
             // Frozen here: the record must not follow a run that keeps reading.
             trace: [...run.trace],
           });
-          effectsRef.current.notify("已停止回答");
+          // No toast: the record left in the transcript carries the notice.
           return true;
         }
         effectsRef.current.notify("已中断回答");
@@ -2106,9 +2113,6 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     askIntentDraftOwnerRef.current = run.draftToken;
     askIntentTraceRef.current = run.trace;
     setQuestion("");
-    // Same replacement point as the direct run path: the new submission's
-    // pending turn takes the stopped turn's place as soon as it shows.
-    setStoppedTurn(null);
     setPendingQuestion(q);
     setPendingAskedAt(askedAt);
     pendingModeSourceRef.current = "reasoning";
