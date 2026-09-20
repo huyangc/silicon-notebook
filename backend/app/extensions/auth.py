@@ -22,6 +22,7 @@ from app.domain.auth_provider import (
     AuthProviderDescriptor,
     AuthProviderError,
     ExternalIdentity,
+    is_auth_provider_stable_id,
 )
 from app.extension_sdk.auth import (
     AUTH_PROVIDER_POINT,
@@ -35,7 +36,6 @@ from app.extensions.discovery import ExtensionDiscoveryError
 from app.extensions.registry import ExtensionRegistry, ExtensionRegistryError
 
 
-_STABLE_ID = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _STABLE_NAMESPACE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 _PARAMETER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]*$")
 _PKCE_VALUE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
@@ -268,11 +268,13 @@ def _validated_descriptor(
     if type(value) is not AuthProviderDescription:
         raise TypeError
     if (
-        not _valid_stable(value.provider_id, AUTH_PROVIDER_ID_MAX_CHARS)
+        not is_auth_provider_stable_id(
+            value.provider_id, max_chars=AUTH_PROVIDER_ID_MAX_CHARS
+        )
         or not _valid_namespace(value.provider_namespace)
-        or not _valid_stable(
+        or not is_auth_provider_stable_id(
             value.configuration_generation,
-            AUTH_PROVIDER_CONFIGURATION_GENERATION_MAX_CHARS,
+            max_chars=AUTH_PROVIDER_CONFIGURATION_GENERATION_MAX_CHARS,
         )
         or not _valid_text(value.public_label, AUTH_PROVIDER_PUBLIC_LABEL_MAX_CHARS)
         or type(value.supports_pkce) is not bool
@@ -364,10 +366,6 @@ def _validate_redirect_uri(value: object) -> None:
         or parts.fragment
     ):
         raise AuthProviderError("invalid_auth_redirect_uri")
-
-
-def _valid_stable(value: object, limit: int) -> bool:
-    return type(value) is str and len(value) <= limit and bool(_STABLE_ID.fullmatch(value))
 
 
 def _valid_namespace(value: object) -> bool:

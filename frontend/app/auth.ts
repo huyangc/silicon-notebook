@@ -216,7 +216,7 @@ export function fetchMyIdentities(): Promise<IdentityInfo> {
 
 export async function logoutUser(): Promise<void> {
   try {
-    await performApiRequest("/auth/logout", { method: "POST", tag: "auth" });
+    await performApiRequest("/auth/logout", { method: "POST", tag: "auth", credentials: "include" });
   } catch {
     // Logout is intentionally fail-open: the locally held credential must still be discarded.
   } finally {

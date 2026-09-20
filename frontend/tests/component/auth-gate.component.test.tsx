@@ -40,6 +40,7 @@ test("migration mode verifies local credentials without entering a workspace", a
 
   expect(screen.getByLabelText("用户名")).toBeInTheDocument();
   expect(screen.queryByText("注册")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "统一登录" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "验证并关联统一身份" })).toBeEnabled();
   await actor.type(screen.getByLabelText("用户名"), "a12345678");
   await actor.type(screen.getByLabelText("密码"), "pw");

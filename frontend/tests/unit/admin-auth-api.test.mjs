@@ -18,13 +18,13 @@ test("authentication migration admin API uses explicit policy revision and maint
   const calls = [];
   globalThis.fetch = async (url, init) => {
     calls.push({ url, init });
-    return new Response(JSON.stringify({ mode: "dual", revision: 4, config_generation: 8 }), { headers: { "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ mode: "dual", revision: 4, config_generation: "generation-2" }), { headers: { "Content-Type": "application/json" } });
   };
   await updateAuthPolicy("sso_only", 4, true);
-  await prepareAuthProviderMaintenance(4, 9);
+  await prepareAuthProviderMaintenance(4, "generation-3");
   assert.equal(calls[0].url, "http://127.0.0.1:8000/api/admin/auth/policy");
   assert.equal(calls[0].init.body, JSON.stringify({ mode: "sso_only", expected_revision: 4, allow_rollback: true }));
-  assert.equal(calls[1].init.body, JSON.stringify({ expected_revision: 4, configuration_generation: 9 }));
+  assert.equal(calls[1].init.body, JSON.stringify({ expected_revision: 4, configuration_generation: "generation-3" }));
 });
 
 test("account controls are paged and recovery grants carry only the explicit scoped target", async () => {
@@ -41,6 +41,16 @@ test("account controls are paged and recovery grants carry only the explicit sco
   assert.equal(calls[1].url, "http://127.0.0.1:8000/api/admin/auth/migration");
   assert.equal(calls[2].init.body, JSON.stringify({ status: "disabled" }));
   assert.equal(calls[3].init.body, JSON.stringify({ purpose: "recover", subject: "operator-note", target_user_id: "u1" }));
+});
+
+test("account inventory consumes identity status and subject from the actual API projection", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    items: [{ id: "u1", username: "alice", display_name: "Alice", status: "active", local_login_name: "a12345678", provider_namespace: "corp", subject: "alice-uid", identity_status: "active", last_login_at: null }],
+    total: 1, offset: 0, limit: 50,
+  }), { headers: { "Content-Type": "application/json" } });
+  const page = await fetchAuthAccounts();
+  assert.equal(page.items[0].subject, "alice-uid");
+  assert.equal(page.items[0].identity_status, "active");
 });
 
 test("authentication audit is a paged read-only request", async () => {

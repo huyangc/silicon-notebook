@@ -7,7 +7,7 @@ from app.services.auth_utils import is_valid_username
 auth_router = APIRouter(prefix="/auth")
 
 
-@auth_router.post("/register", response_model=AuthResult, response_model_exclude_defaults=True)
+@auth_router.post("/register", response_model=AuthResult)
 def register(payload: AuthRequest) -> AuthResult:
     if not is_valid_username(payload.username):
         raise user_error(400, "用户名须为「单个小写字母+八位数字」，如 a12345678")
@@ -30,7 +30,7 @@ def register(payload: AuthRequest) -> AuthResult:
     return AuthResult(token=token, user=user)
 
 
-@auth_router.post("/login", response_model=AuthResult, response_model_exclude_defaults=True)
+@auth_router.post("/login", response_model=AuthResult)
 def login(payload: AuthRequest) -> AuthResult:
     """验证与建会话必须走同一个 store 方法(单写事务):拆成 authenticate_user +
     create_session 会与改密/重置的会话吊销竞态,让旧密码登录的会话逃过吊销。"""

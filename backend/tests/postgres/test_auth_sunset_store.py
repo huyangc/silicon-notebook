@@ -5,6 +5,9 @@ from app.repositories.postgres.migrator import PostgresMigrator
 from tests.auth_sunset_contract import AuthSunsetContract
 
 
+pytestmark = pytest.mark.postgres_integration
+
+
 @pytest.fixture
 def identity(postgres_database, postgres_settings):
     PostgresMigrator(postgres_database).migrate()

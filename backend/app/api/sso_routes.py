@@ -226,13 +226,11 @@ def prepare_configuration(payload: AuthenticationConfigurationUpdate, request: R
         or descriptor.provider_namespace != policy["provider_namespace"]
     ):
         raise user_error(409, "当前认证身份源不匹配，不能准备配置升级。")
-    generation = payload.configuration_generation
-    if generation != generation.strip() or any(ord(char) <= 32 for char in generation):
-        raise user_error(400, "配置代次不能为空或包含空白字符。")
     try:
         return flow.store.prepare_provider_configuration(expected_revision=payload.expected_revision,
             actor_id=actor.id, plugin_id=descriptor.plugin_id, provider_id=descriptor.provider_id,
-            provider_namespace=descriptor.provider_namespace, config_generation=generation)
+            provider_namespace=descriptor.provider_namespace,
+            config_generation=payload.configuration_generation)
     except ValueError as exc:
         raise _error(exc) from None
 

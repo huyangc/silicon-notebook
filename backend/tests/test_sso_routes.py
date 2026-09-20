@@ -82,6 +82,31 @@ def test_local_default_needs_no_external_plugin(setup):
     assert provider.calls == []
 
 
+def test_local_register_and_login_preserve_complete_legacy_user_payload(setup):
+    client, identity, provider, flow = setup
+    registered = _local_user(client)
+    profile = identity.resolve_session(registered["token"]).model_dump(mode="json")
+    assert set(registered) == {"token", "user"}
+    assert registered["user"] == profile
+    assert {"memory_mode", "domain_focus", "ui_mode", "search_profile"} <= registered["user"].keys()
+    logged_in = client.post("/api/auth/login", json={"username": "a12345678", "password": "local-password"}).json()
+    assert set(logged_in) == {"token", "user"}
+    assert logged_in["user"] == profile
+    assert provider.calls == []
+
+
+def test_binding_stage_adds_migration_flag_to_complete_user_payload(setup):
+    client, identity, provider, flow = setup
+    registered = _local_user(client)
+    _dual(identity)
+    identity.auth.set_policy("binding_required", actor_id="user-local", expected_revision=1)
+    response = client.post("/api/auth/login", json={"username": "a12345678", "password": "local-password"})
+    assert response.status_code == 200
+    assert response.json()["migration_required"] is True
+    assert response.json()["user"] == registered["user"]
+    assert identity.resolve_session(response.json()["token"]) is None
+
+
 def test_local_first_confirmation_keeps_id_and_old_password_name(setup):
     client, identity, provider, flow = setup
     original = _local_user(client)
@@ -258,3 +283,38 @@ def test_provider_failure_uses_fixed_public_message(setup, monkeypatch):
     assert response.status_code == 409
     assert response.headers["x-user-message"] == "1"
     assert "secret-provider-response" not in response.text
+
+
+def test_configuration_maintenance_rejects_noncanonical_generation_without_write(setup):
+    client, identity, _provider, _flow = setup
+    _dual(identity)
+    admin = client.post(
+        "/api/auth/login", json={"username": "admin", "password": "admin"}
+    ).json()
+    headers = {"Authorization": "Bearer " + admin["token"]}
+
+    rejected = client.patch(
+        "/api/admin/auth/provider-configuration",
+        headers=headers,
+        json={
+            "expected_revision": 1,
+            "configuration_generation": "Generation-2",
+        },
+    )
+    assert rejected.status_code == 422
+    unchanged = identity.auth.get_policy()
+    assert unchanged["revision"] == 1
+    assert unchanged["config_generation"] == "generation-1"
+
+    accepted = client.patch(
+        "/api/admin/auth/provider-configuration",
+        headers=headers,
+        json={
+            "expected_revision": 1,
+            "configuration_generation": "generation-2",
+        },
+    )
+    assert accepted.status_code == 200, accepted.text
+    updated = identity.auth.get_policy()
+    assert updated["revision"] == 2
+    assert updated["config_generation"] == "generation-2"

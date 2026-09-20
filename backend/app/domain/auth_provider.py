@@ -1,6 +1,7 @@
 """Provider-neutral external-authentication values and application port."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -16,6 +17,18 @@ AUTH_PROVIDER_SUBJECT_MAX_CHARS = 512
 AUTH_PROVIDER_USERNAME_MAX_CHARS = 512
 AUTH_PROVIDER_DISPLAY_NAME_MAX_CHARS = 512
 AUTH_PROVIDER_AUTHORIZATION_URL_MAX_CHARS = 8192
+AUTH_PROVIDER_STABLE_ID_PATTERN = r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
+_AUTH_PROVIDER_STABLE_ID = re.compile(AUTH_PROVIDER_STABLE_ID_PATTERN)
+
+
+def is_auth_provider_stable_id(value: object, *, max_chars: int) -> bool:
+    """Return whether a provider identifier is canonical and bounded."""
+
+    return (
+        type(value) is str
+        and len(value) <= max_chars
+        and bool(_AUTH_PROVIDER_STABLE_ID.fullmatch(value))
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,9 +93,11 @@ __all__ = [
     "AUTH_PROVIDER_NAMESPACE_MAX_CHARS",
     "AUTH_PROVIDER_PUBLIC_LABEL_MAX_CHARS",
     "AUTH_PROVIDER_SUBJECT_MAX_CHARS",
+    "AUTH_PROVIDER_STABLE_ID_PATTERN",
     "AUTH_PROVIDER_USERNAME_MAX_CHARS",
     "AuthProviderDescriptor",
     "AuthProviderError",
     "AuthProviderHostPort",
     "ExternalIdentity",
+    "is_auth_provider_stable_id",
 ]

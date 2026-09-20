@@ -59,7 +59,7 @@ export default function AdminAuthPage() {
       fetchAuthPolicy(), fetchAuthMigration(), fetchAuthAccounts(offset),
     ]);
     setPolicy(nextPolicy); setPreflight(nextPreflight); setAccounts(nextAccounts); setMode(nextPolicy.mode);
-    setMaintenanceGeneration(String(nextPolicy.config_generation));
+    setMaintenanceGeneration(nextPolicy.config_generation);
   }
 
   async function reloadAudit(offset = audit?.offset ?? 0) {
@@ -97,10 +97,10 @@ export default function AdminAuthPage() {
   }
 
   async function prepareMaintenance() {
-    if (!policy || !/^\d+$/.test(maintenanceGeneration)) { setError("请输入有效的配置代次。 "); return; }
+    if (!policy || !maintenanceGeneration.trim() || /\s/.test(maintenanceGeneration)) { setError("配置代次不能为空且不能包含空白字符。 "); return; }
     setBusy(true); setError(""); setNotice("");
     try {
-      const updated = await prepareAuthProviderMaintenance(policy.revision, Number(maintenanceGeneration));
+      const updated = await prepareAuthProviderMaintenance(policy.revision, maintenanceGeneration);
       setPolicy(updated); setNotice("已进入认证提供方维护准备状态；重启并加载该代次后再恢复新的统一登录。");
     } catch (cause) { setError(toUserMessage(cause, "维护准备失败，请刷新后重试。")); }
     finally { setBusy(false); }
@@ -142,7 +142,7 @@ export default function AdminAuthPage() {
       <button type="button" disabled={busy || mode === policy.mode} onClick={() => { void changePolicy(); }}>{busy ? "处理中…" : "更新策略"}</button>
     </section>
     <section className="admin-auth-card"><h2>认证提供方维护</h2><p>准备维护会使在途统一登录失效，并在插件按指定配置代次重启前拒绝新的统一登录；当前有效统一登录会话不受影响。</p>
-      <label>准备配置代次<input inputMode="numeric" value={maintenanceGeneration} disabled={busy} onChange={(event) => setMaintenanceGeneration(event.target.value)} /></label>
+      <label>准备配置代次<input value={maintenanceGeneration} disabled={busy} onChange={(event) => setMaintenanceGeneration(event.target.value)} /></label>
       <button type="button" disabled={busy} onClick={() => { void prepareMaintenance(); }}>准备维护</button>
     </section>
     <section className="admin-auth-card"><h2>签发迁移凭证</h2><p>凭证只显示一次。请通过受控渠道交给获准使用人。</p>
@@ -153,7 +153,7 @@ export default function AdminAuthPage() {
       <button type="button" disabled={busy} onClick={() => { void createGrant(); }}>签发凭证</button>
       {grant && <p className="admin-auth-grant"><strong>一次性迁移凭证：</strong><code>{grant.grant_token}</code>，有效期 {grant.expires_in} 秒。</p>}
     </section>
-    <section className="admin-auth-card"><h2>账号状态</h2><table><thead><tr><th>用户</th><th>统一身份</th><th>状态</th><th>操作</th></tr></thead><tbody>{accounts.items.map((account) => <tr key={account.id}><td>{account.display_name || account.username}</td><td>{account.external_username || "未关联"}</td><td>{account.status === "active" ? "启用" : "已停用"}</td><td><button type="button" disabled={busy} onClick={() => { void setAccountStatus(account); }}>{account.status === "active" ? "停用" : "启用"}</button></td></tr>)}</tbody></table>
+    <section className="admin-auth-card"><h2>账号状态</h2><table><thead><tr><th>用户</th><th>统一身份</th><th>状态</th><th>操作</th></tr></thead><tbody>{accounts.items.map((account) => <tr key={account.id}><td>{account.display_name || account.username}</td><td>{account.identity_status === "active" ? account.subject || "已关联" : "未关联"}</td><td>{account.status === "active" ? "启用" : "已停用"}</td><td><button type="button" disabled={busy} onClick={() => { void setAccountStatus(account); }}>{account.status === "active" ? "停用" : "启用"}</button></td></tr>)}</tbody></table>
       <div className="admin-auth-pagination"><button type="button" disabled={busy || accounts.offset === 0} onClick={() => { void reload(priorOffset); }}>上一页</button><span>第 {Math.floor(accounts.offset / accounts.limit) + 1} 页</span><button type="button" disabled={busy || (accounts.total !== undefined && nextOffset >= accounts.total)} onClick={() => { void reload(nextOffset); }}>下一页</button></div>
     </section>
     <section className="admin-auth-card"><h2>认证审计</h2><p>只显示账号迁移与身份操作记录，不展示凭证或凭证引用。</p>
