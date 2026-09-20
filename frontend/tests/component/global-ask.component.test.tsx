@@ -1061,17 +1061,29 @@ test("a changed confirmation gets a new request id after an ambiguous failure; a
   fireEvent.click(screen.getByRole("button", { name: "深入分析" }));
   fireEvent.change(input, { target: { value: "哪个更耐低温" } });
 
+  // 慢 runner 上的两条竞态都在这里收口（CI 在 #758 上红过一次，本机 8 连跑不复现）：
+  // 审阅卡挂载后有一个按 contract 清空回答的 effect，它若落在输入之后，填进去的回答
+  // 会被冲掉；卡片若在此期间重挂，先前取到的按钮就是一个永远 disabled 的过期节点。
+  // 所以每一轮都**重新查询**输入框与按钮，回答被冲掉就再填一次，而不是攥着第一次
+  // 查到的节点等它变可用。超时放宽只是给慢 runner 留余量，断言的仍是因果。
+  const slow = { timeout: 5000 };
   async function submitWith(answer: string, nth: number) {
     fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
-    const card = await screen.findByRole("region", { name: "确认逐步推理的问题理解" });
-    fireEvent.change(within(card).getByRole("textbox", { name: "要比较哪几个体系？的补充答案" }), {
-      target: { value: answer },
-    });
-    const confirm = within(card).getByRole("button", { name: "确认并开始检索" });
-    await waitFor(() => expect(confirm).toBeEnabled());
-    fireEvent.click(confirm);
-    await waitFor(() => expect(api.ask).toHaveBeenCalledTimes(nth));
-    await waitFor(() => expect(screen.getByRole("button", { name: "发送问题" })).toBeEnabled());
+    await screen.findByRole("region", { name: "确认逐步推理的问题理解" }, slow);
+    const confirmButton = async () => {
+      let button!: HTMLElement;
+      await waitFor(() => {
+        const card = screen.getByRole("region", { name: "确认逐步推理的问题理解" });
+        const box = within(card).getByRole("textbox", { name: "要比较哪几个体系？的补充答案" }) as HTMLTextAreaElement;
+        if (box.value !== answer) fireEvent.change(box, { target: { value: answer } });
+        button = within(card).getByRole("button", { name: "确认并开始检索" });
+        expect(button).toBeEnabled();
+      }, slow);
+      return button;
+    };
+    fireEvent.click(await confirmButton());
+    await waitFor(() => expect(api.ask).toHaveBeenCalledTimes(nth), slow);
+    await waitFor(() => expect(screen.getByRole("button", { name: "发送问题" })).toBeEnabled(), slow);
   }
 
   await submitWith("磷酸铁锂与三元", 1);
