@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowUp, BookOpen, Check, ChevronRight, Copy, FileText, Layers3, LoaderCircle, MessageSquare, PanelLeft, Plus, Square } from "lucide-react";
+import { ArrowUp, BookOpen, Check, ChevronRight, Copy, FileText, Layers3, LoaderCircle, MessageSquare, PanelLeft, Plus, Share2, Square } from "lucide-react";
 import { PageHeader } from "../components/PageHeader";
 import { AnswerMarkdown, type AnswerReference } from "../answer-markdown";
 // 标准答案视图与推理轨迹面板与笔记本内问答**同一份实现**：全局问答直接调单库
@@ -236,7 +236,12 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                   <AnswerMarkdown answer={job.response.answer} anchors={job.response.anchors} citations={job.response.citations}
                     selectedReferenceId={cite?.jobId === job.job_id ? cite.reference.id : null}
                     onReferenceClick={(reference, event) => setCite({ jobId: job.job_id, reference, rect: event.currentTarget.getBoundingClientRect() })} />
-                  <footer className="global-answer-footer"><small>{job.response.completeness_notice}</small><button aria-label="复制回答" className={copyResult.resultFor(job.job_id) === "copied" ? "global-text-button copy-result-copied" : copyResult.resultFor(job.job_id) === "failed" ? "global-text-button copy-result-failed" : "global-text-button"} disabled={Boolean(copying)} onClick={() => void copyAnswer(job)}>{copyResult.resultFor(job.job_id) === "copied" ? <Check size={13} /> : <Copy size={13} />}<span role="status">{copying === job.job_id ? "复制中…" : copyResult.resultFor(job.job_id) === "copied" ? "已复制" : copyResult.resultFor(job.job_id) === "failed" ? "复制失败" : "复制"}</span></button></footer>
+                  <footer className="global-answer-footer"><small>{job.response.completeness_notice}</small><button aria-label="复制回答" className={copyResult.resultFor(job.job_id) === "copied" ? "global-text-button copy-result-copied" : copyResult.resultFor(job.job_id) === "failed" ? "global-text-button copy-result-failed" : "global-text-button"} disabled={Boolean(copying)} onClick={() => void copyAnswer(job)}>{copyResult.resultFor(job.job_id) === "copied" ? <Check size={13} /> : <Copy size={13} />}<span role="status">{copying === job.job_id ? "复制中…" : copyResult.resultFor(job.job_id) === "copied" ? "已复制" : copyResult.resultFor(job.job_id) === "failed" ? "复制失败" : "复制"}</span></button>
+                    {/* 旧形状的轮次同样可以公开（后端快照两种形状都投影），所以只含历史回答的
+                        会话也得有入口——否则用户得先再问一条新问题才分享得了。同一个弹窗、同一条
+                        边界规则（作业 id），与新回答那颗按钮同名。 */}
+                    <button aria-label="分享到这条回答" title="分享到这条回答（含此前的全部问答）" className="global-text-button" type="button" onClick={() => openShare(job.job_id)}><Share2 size={13} /><span>分享</span></button>
+                  </footer>
                 </ChatAnswer> : <>
                 <div className={`global-job-status${job.status === "failed" ? " failed" : ""}`} role="status">
                   {job.status === "running" && <LoaderCircle size={18} className="global-spin" />}
