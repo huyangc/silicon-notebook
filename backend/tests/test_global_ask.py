@@ -345,6 +345,35 @@ def test_edit_and_resend_replaces_the_stopped_job(setup):
     assert service.start(request, user_id="u").job_id == job.job_id
 
 
+def test_stop_with_discard_leaves_no_record_but_never_discards_an_answer(setup):
+    service, _, _, _ = setup
+    entered, release = Event(), Event()
+
+    def synthesis(*args):
+        entered.set()
+        assert release.wait(5)
+        return "late answer", False, [], []
+
+    original = service.ask.synthesize
+    service.ask.synthesize = synthesis
+    job = service.start(GlobalAskRequest(question="q"), user_id="u")
+    assert entered.wait(5)
+    assert service.cancel(job.job_id, user_id="u", discard=True).status == "cancelled"
+    release.set()
+    deadline = time.monotonic() + 5
+    while job.job_id in service._events and time.monotonic() < deadline:
+        Event().wait(0.01)
+    # The first question opened the conversation; both are gone, and the
+    # worker's late writes found no row to touch.
+    assert service.store.job(job.job_id, "u") is None
+    assert service.store.conversation(job.conversation_id, "u") is None
+    service.ask.synthesize = original
+    answered = service.start(GlobalAskRequest(question="q2"), user_id="u")
+    assert finished(service, answered).status == "done"
+    assert service.cancel(answered.job_id, user_id="u", discard=True).status == "done"
+    assert service.store.job(answered.job_id, "u").status == "done"
+
+
 def test_a_stale_replacement_is_refused_before_anything_is_spent(setup):
     service, _, retrieved, _ = setup
     stopped = _stopped_job(service)
@@ -469,6 +498,15 @@ def test_http_job_conversation_and_error_contract(setup, monkeypatch):
         assert renamed.json()["title"] == "Comparison"
         invalid = client.post("/api/global-ask/ask", json={"question": "q", "notebook_scope": {"mode": "include", "notebook_ids": ["no"]}})
         assert invalid.status_code == 404 and invalid.headers["X-User-Message"] == "1"
+        # ``discard`` reaches the service as a boolean; an answered job is never discarded.
+        kept = client.post(f"/api/global-ask/jobs/{job.job_id}/cancel", params={"discard": "true"})
+        assert kept.status_code == 200 and kept.json()["status"] == "done"
+        assert service.store.job(job.job_id, "u") is not None
+        # "Edit and re-send" is refused with a user-facing 409 once it is stale.
+        stale = client.post("/api/global-ask/ask", json={
+            "question": "q", "conversation_id": job.conversation_id, "replaces_job_id": job.job_id,
+        })
+        assert stale.status_code == 409 and stale.headers["X-User-Message"] == "1"
         assert client.delete(f"/api/global-ask/conversations/{job.conversation_id}").status_code == 204
 
 

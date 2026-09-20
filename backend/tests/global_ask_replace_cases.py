@@ -1,4 +1,6 @@
-"""Backend-agnostic contract cases for "edit and re-send" on a global conversation.
+"""Backend-agnostic contract cases for the two ways a stopped global job leaves.
+
+"Edit and re-send" replaces it; "stopped before anything was shown" discards it.
 
 ``GlobalAskStore.create(replaces_job_id=…)`` deletes the stopped job the user is
 re-asking inside the same transaction that inserts its replacement. One store
@@ -141,6 +143,39 @@ def case_the_title_stays_when_other_turns_remain(store):
     assert store.conversation("conv-r", USER).title == "第一个问题"
 
 
+def case_a_discarded_first_question_takes_its_conversation_with_it(store):
+    first = start(store, "job-1", new_conversation=True)
+    finish(store, first, "cancelled")
+    assert store.discard_cancelled("job-1", USER) is True
+    assert store.job("job-1", USER) is None
+    assert store.conversation("conv-r", USER) is None
+
+
+def case_a_discarded_follow_up_leaves_the_earlier_turns(store):
+    first = start(store, "job-1", new_conversation=True)
+    finish(store, first, "done")
+    stopped = start(store, "job-2")
+    finish(store, stopped, "cancelled")
+    assert store.discard_cancelled("job-2", USER) is True
+    assert job_ids(store) == ["job-1"]
+    assert store.conversation("conv-r", USER) is not None
+
+
+def case_only_a_newest_stopped_job_of_its_owner_is_discarded(store):
+    answered = start(store, "job-1", new_conversation=True)
+    finish(store, answered, "done")
+    assert store.discard_cancelled("job-1", USER) is False
+    stopped = start(store, "job-2")
+    finish(store, stopped, "cancelled")
+    assert store.discard_cancelled("job-2", "user-b") is False
+    later = start(store, "job-3")
+    assert store.discard_cancelled("job-3", USER) is False  # still running
+    finish(store, later, "done")
+    assert store.discard_cancelled("job-2", USER) is False  # no longer the newest
+    assert store.discard_cancelled("job-missing", USER) is False
+    assert job_ids(store) == ["job-1", "job-2", "job-3"]
+
+
 CASES = [
     case_a_stopped_newest_job_is_replaced_in_the_same_insert,
     case_the_replacement_still_sorts_after_everything_the_conversation_held,
@@ -153,5 +188,8 @@ CASES = [
     case_an_automatic_title_follows_the_replacement_when_nothing_else_is_left,
     case_a_title_the_user_typed_is_left_alone,
     case_the_title_stays_when_other_turns_remain,
+    case_a_discarded_first_question_takes_its_conversation_with_it,
+    case_a_discarded_follow_up_leaves_the_earlier_turns,
+    case_only_a_newest_stopped_job_of_its_owner_is_discarded,
 ]
 CASE_IDS = [case.__name__.removeprefix("case_") for case in CASES]
