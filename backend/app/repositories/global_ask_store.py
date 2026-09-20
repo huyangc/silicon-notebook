@@ -135,6 +135,10 @@ class GlobalAskStore:
         """
         if replaces_job_id and new_conversation:
             raise ReplacedJobUnavailable(replaces_job_id)
+        # The row's own column is the authority for the idempotency id and ``_job``
+        # echoes it on every read; the object handed in (and the payload stored from
+        # it) says the same, so what ``create`` was given equals what is read back.
+        job.client_request_id = request_id or ""
         with self.database.write() as db:
             if new_conversation:
                 db.execute(self._sql(
