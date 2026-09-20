@@ -1,6 +1,7 @@
 """Behavioral contract executed against both real SQL adapters."""
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import json
 import threading
 
 import pytest
@@ -39,11 +40,15 @@ def bind(identity, user, token, **kwargs):
     return identity.auth.confirm(pending_id,PROOF,session_token=token,session_seconds=600)
 
 
-def login_sso(identity, subject, username):
+def stage_sso(identity, subject, username):
     auth = identity.auth
     state = auth.begin("login",PROOF,ttl_seconds=600)
-    code = auth.stage_identity(auth.claim(state,PROOF),ExternalIdentity("test:tenant",subject,username,"Test User"),PROOF,ttl_seconds=600)
-    return auth.inspect_completion(code,PROOF,session_seconds=600)
+    return auth.stage_identity(auth.claim(state,PROOF),ExternalIdentity("test:tenant",subject,username,"Test User"),PROOF,ttl_seconds=600)
+
+
+def login_sso(identity, subject, username):
+    code = stage_sso(identity,subject,username)
+    return identity.auth.inspect_completion(code,PROOF,session_seconds=600)
 
 
 def prepare_cutover(identity):
@@ -406,6 +411,108 @@ class AuthSunsetContract:
         with pytest.raises(AuthStoreError,match="stale_local_proof"):
             identity.auth.confirm(token,PROOF,session_token=local,session_seconds=600)
         assert not identity.auth.identities(user.id)["linked"]
+
+    @pytest.mark.parametrize("operation", ["admin_reset", "password_change"])
+    def test_password_mutation_invalidates_staged_sso_login(self, identity, operation):
+        user, local = identity.register_user_with_session("z00000001","pw")
+        dual(identity)
+        _, old_sso = bind(identity,user,local)
+        code = stage_sso(identity,"stable-1","pending-rename")
+        if operation == "admin_reset":
+            identity.admin_reset_user_password("user-local",user.id,"changed")
+            assert identity.resolve_session(old_sso) is None
+        else:
+            identity.change_user_password(user.id,"pw","changed",keep_token=old_sso)
+            assert identity.resolve_session(old_sso).id == user.id
+        with identity.database.connect() as db:
+            before = identity.auth._execute(db,"SELECT count(*) AS n FROM auth_sessions").fetchone()["n"]
+        for _ in range(2):
+            with pytest.raises(AuthStoreError,match="stale_transaction"):
+                identity.auth.inspect_completion(code,PROOF,session_seconds=600)
+        with identity.database.connect() as db:
+            after = identity.auth._execute(db,"SELECT count(*) AS n FROM auth_sessions").fetchone()["n"]
+        assert after == before
+        assert identity.auth.identities(user.id)["external_username"] == "CorpUID"
+        fresh = login_sso(identity,"stable-1","fresh-rename")
+        assert fresh["user"].id == user.id
+        assert identity.resolve_session(fresh["token"]).id == user.id
+
+    @pytest.mark.parametrize("mutation", ["disabled", "deleted", "reassigned"])
+    def test_staged_sso_login_rechecks_exact_mapping_owner(self, identity, mutation):
+        user, local = identity.register_user_with_session("z00000001","pw")
+        other = identity.create_user("z00000002","pw")
+        dual(identity)
+        bind(identity,user,local)
+        code = stage_sso(identity,"stable-1","pending-rename")
+        with identity.auth._write() as (db, _):
+            if mutation == "deleted":
+                identity.auth._execute(db,"DELETE FROM external_identities WHERE subject=?",("stable-1",))
+            elif mutation == "disabled":
+                identity.auth._execute(db,"UPDATE external_identities SET status='disabled' WHERE subject=?",("stable-1",))
+            else:
+                identity.auth._execute(db,"UPDATE external_identities SET user_id=? WHERE subject=?",(other.id,"stable-1"))
+        expected = "account_inactive" if mutation == "disabled" else "stale_transaction"
+        with pytest.raises(AuthStoreError,match=expected):
+            identity.auth.inspect_completion(code,PROOF,session_seconds=600)
+
+    def test_sso_login_completed_before_reset_is_revoked_by_reset(self, identity):
+        user, local = identity.register_user_with_session("z00000001","pw")
+        dual(identity)
+        bind(identity,user,local)
+        completed = login_sso(identity,"stable-1","CorpUID")
+        assert identity.resolve_session(completed["token"]).id == user.id
+        identity.admin_reset_user_password("user-local",user.id,"changed")
+        assert identity.resolve_session(completed["token"]) is None
+
+    def test_concurrent_reset_and_sso_handoff_cannot_escape_revocation(self, identity):
+        user, local = identity.register_user_with_session("z00000001","pw")
+        dual(identity)
+        bind(identity,user,local)
+        code = stage_sso(identity,"stable-1","CorpUID")
+        barrier = threading.Barrier(2)
+
+        def complete():
+            barrier.wait()
+            try:
+                return identity.auth.inspect_completion(code,PROOF,session_seconds=600)["token"]
+            except AuthStoreError as exc:
+                assert str(exc) == "stale_transaction"
+                return None
+
+        def reset():
+            barrier.wait()
+            identity.admin_reset_user_password("user-local",user.id,"changed")
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            completion = pool.submit(complete)
+            reset_future = pool.submit(reset)
+            token = completion.result()
+            reset_future.result()
+        assert token is None or identity.resolve_session(token) is None
+
+    def test_legacy_sso_handoff_without_user_revision_requires_restart(self, identity):
+        user, local = identity.register_user_with_session("z00000001","pw")
+        dual(identity)
+        bind(identity,user,local)
+        code = stage_sso(identity,"stable-1","CorpUID")
+        with identity.auth._write() as (db, _):
+            row = identity.auth._execute(db,"SELECT token_digest,payload FROM auth_transactions WHERE purpose='handoff'").fetchone()
+            payload = json.loads(row["payload"])
+            payload.pop("identity_user_id")
+            payload.pop("identity_auth_revision")
+            identity.auth._execute(db,"UPDATE auth_transactions SET payload=? WHERE token_digest=?",(json.dumps(payload),row["token_digest"]))
+        with pytest.raises(AuthStoreError,match="stale_transaction"):
+            identity.auth.inspect_completion(code,PROOF,session_seconds=600)
+        assert login_sso(identity,"stable-1","CorpUID")["user"].id == user.id
+
+    def test_unlinked_sso_handoff_cannot_adopt_a_later_binding(self, identity):
+        user, local = identity.register_user_with_session("z00000001","pw")
+        dual(identity)
+        code = stage_sso(identity,"stable-1","CorpUID")
+        bind(identity,user,local)
+        with pytest.raises(AuthStoreError,match="identity_not_linked"):
+            identity.auth.inspect_completion(code,PROOF,session_seconds=600)
+        assert login_sso(identity,"stable-1","CorpUID")["user"].id == user.id
 
     def test_s2_password_sessions_are_only_migration_credentials(self, identity):
         user, local = identity.register_user_with_session("z00000001","pw")

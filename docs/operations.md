@@ -2188,6 +2188,8 @@ separate filesystem inventory notices cleanup.
 
 ## Authentication migration and retirement
 
+The additive SQLite v78 upgrade keeps existing users, password material and sessions. Its schema changes, legacy-login-name backfill and version stamp commit atomically. If a previous interrupted attempt left some or all v78 objects with a v77 stamp, restart with the current build to complete the migration; existing login aliases are preserved. PostgreSQL uses the paired transactional migration 0058. A schema upgrade does not advance the authentication policy from its default `local` mode.
+
 Start with the disabled [W3 example](../examples/extensions/w3-auth/README.md). Verify token/userinfo success and failure payloads, immutable subject/non-reassignment, callback registration, PKCE capability, CA trust, session expiry and offboarding responsibility against the real provider. Unit tests use fakes and do not establish real connectivity.
 
 The administrator's **认证迁移** page at `/admin/auth` exposes policy/preflight, paged accounts and grant issuance. For plugin upgrades, keep a valid administrator SSO session, stage the reviewed package/configuration, then `PATCH /api/admin/auth/provider-configuration` with `expected_revision` and the target `configuration_generation`. This explicitly starts a maintenance gap for new logins; restart with the matching configuration before accepting new authentication. Existing valid SSO sessions remain usable. The same route can restore the previous generation after a failed rollout while the administrator session is valid. It works after retirement without changing that marker or credentials; changing the actual provider or namespace is rejected and requires a separate identity migration.

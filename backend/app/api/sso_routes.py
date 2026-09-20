@@ -37,7 +37,7 @@ def _error(exc):
         "username already exists": "统一账号名与已有账号冲突，请联系管理员处理。",
         "local_verification_failed": "本站密码验证失败，请重新输入当前密码。",
         "invalid_transaction": "认证操作已过期或已使用，请重新发起。",
-        "stale_transaction": "认证配置或迁移阶段已变化，请重新发起。",
+        "stale_transaction": "认证状态已变化，请重新发起。",
         "stale_local_proof": "原本站登录状态已失效，请重新登录后关联。",
         "account_inactive": "账号已停用，请联系管理员。",
         "admin_required": "仅管理员可执行此操作。",
