@@ -35,6 +35,23 @@ const AUDIT_ACTION_LABEL: Readonly<Record<string, string>> = {
 
 function auditActionLabel(action: string): string { return AUDIT_ACTION_LABEL[action] ?? "其他账号操作"; }
 
+const ACTION_FEEDBACK_MS = 5000;
+type ActionResult = { text: string; failed?: boolean; accountId?: string };
+
+function useActionResult() {
+  const [result, setResult] = useState<ActionResult | null>(null);
+  useEffect(() => {
+    if (!result) return;
+    const timer = window.setTimeout(() => setResult(null), ACTION_FEEDBACK_MS);
+    return () => window.clearTimeout(timer);
+  }, [result]);
+  return [result, setResult] as const;
+}
+
+function ActionFeedback({ result }: { result: ActionResult | null }) {
+  return result && <p className={result.failed ? "admin-auth-error" : "admin-auth-notice"} role={result.failed ? "alert" : "status"}>{result.text}</p>;
+}
+
 export default function AdminAuthPage() {
   const [policy, setPolicy] = useState<AuthPolicy | null>(null);
   const [preflight, setPreflight] = useState<AuthMigrationPreflight | null>(null);
@@ -55,9 +72,22 @@ export default function AdminAuthPage() {
   const [grantSubject, setGrantSubject] = useState("");
   const [grantTarget, setGrantTarget] = useState("");
   const [grant, setGrant] = useState<AuthGrant | null>(null);
-  const [notice, setNotice] = useState("");
+  const [policyResult, setPolicyResult] = useActionResult();
+  const [maintenanceResult, setMaintenanceResult] = useActionResult();
+  const [grantResult, setGrantResult] = useActionResult();
+  const [accountResult, setAccountResult] = useActionResult();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const mutationInFlight = useRef(false);
+
+  function beginMutation() {
+    if (mutationInFlight.current) return false;
+    mutationInFlight.current = true;
+    setBusy(true);
+    return true;
+  }
+
+  function finishMutation() { mutationInFlight.current = false; setBusy(false); }
 
   async function reload(offset = accounts?.offset ?? 0) {
     // A post-mutation refresh supersedes any older pagination read.
@@ -124,46 +154,56 @@ export default function AdminAuthPage() {
   async function changePolicy() {
     if (!policy) return;
     if (mode === "retired" && retiredConfirmation !== "退役本地凭据") {
-      setError("请输入“退役本地凭据”后才能继续。此操作会关闭本地凭据入口。 ");
+      setPolicyResult({ failed: true, text: "请输入“退役本地凭据”后才能继续。此操作会关闭本地凭据入口。" });
       return;
     }
-    setBusy(true); setError(""); setNotice("");
+    if (!beginMutation()) return;
+    setPolicyResult(null);
     try {
       const updated = await updateAuthPolicy(mode, policy.revision, allowRollback);
       setPolicy(updated); setMode(updated.mode); setRetiredConfirmation("");
-      setNotice(`认证策略已更新为“${MODES.find((item) => item.value === updated.mode)?.label}”。`);
-      await reload(accounts?.offset ?? 0);
-    } catch (cause) { setError(toUserMessage(cause, "认证策略更新失败，请刷新后重试。")); }
-    finally { setBusy(false); }
+      setPolicyResult({ text: `认证策略已更新为“${MODES.find((item) => item.value === updated.mode)?.label}”。` });
+      try { await reload(accounts?.offset ?? 0); }
+      catch { setPolicyResult({ failed: true, text: "认证策略已更新，但状态刷新失败，请刷新页面。" }); }
+    } catch (cause) { setPolicyResult({ failed: true, text: toUserMessage(cause, "认证策略更新失败，请刷新后重试。") }); }
+    finally { finishMutation(); }
   }
 
   async function prepareMaintenance() {
-    if (!policy || !maintenanceGeneration.trim() || /\s/.test(maintenanceGeneration)) { setError("配置代次不能为空且不能包含空白字符。 "); return; }
-    setBusy(true); setError(""); setNotice("");
+    if (!policy || !maintenanceGeneration.trim() || /\s/.test(maintenanceGeneration)) { setMaintenanceResult({ failed: true, text: "配置代次不能为空且不能包含空白字符。" }); return; }
+    if (!beginMutation()) return;
+    setMaintenanceResult(null);
     try {
       const updated = await prepareAuthProviderMaintenance(policy.revision, maintenanceGeneration);
-      setPolicy(updated); setNotice("已进入认证提供方维护准备状态；重启并加载该代次后再恢复新的统一登录。");
-    } catch (cause) { setError(toUserMessage(cause, "维护准备失败，请刷新后重试。")); }
-    finally { setBusy(false); }
+      setPolicy(updated); setMaintenanceResult({ text: "已进入认证提供方维护准备状态；重启并加载该代次后再恢复新的统一登录。" });
+    } catch (cause) { setMaintenanceResult({ failed: true, text: toUserMessage(cause, "维护准备失败，请刷新后重试。") }); }
+    finally { finishMutation(); }
   }
 
   async function createGrant() {
-    if (!grantSubject.trim()) { setError("请填写迁移凭证的使用人标识。 "); return; }
-    if (grantPurpose === "replace" && !grantTarget.trim()) { setError("更换统一账号必须指定原账号 ID。 "); return; }
-    setBusy(true); setError(""); setGrant(null);
-    try { setGrant(await issueAuthGrant(grantPurpose, grantSubject.trim(), grantTarget.trim() || undefined)); }
-    catch (cause) { setError(toUserMessage(cause, "签发迁移凭证失败，请稍后重试。")); }
-    finally { setBusy(false); }
+    if (!grantSubject.trim()) { setGrantResult({ failed: true, text: "请填写迁移凭证的使用人标识。" }); return; }
+    if (grantPurpose === "replace" && !grantTarget.trim()) { setGrantResult({ failed: true, text: "更换统一账号必须指定原账号 ID。" }); return; }
+    if (!beginMutation()) return;
+    setGrantResult(null); setGrant(null);
+    try {
+      setGrant(await issueAuthGrant(grantPurpose, grantSubject.trim(), grantTarget.trim() || undefined));
+      setGrantResult({ text: "已签发迁移凭证，请保存下方凭证并通过受控渠道交给使用人。" });
+    }
+    catch (cause) { setGrantResult({ failed: true, text: toUserMessage(cause, "签发迁移凭证失败，请稍后重试。") }); }
+    finally { finishMutation(); }
   }
 
   async function setAccountStatus(account: AuthAccount) {
-    setBusy(true); setError("");
+    if (!beginMutation()) return;
+    setAccountResult(null);
     try {
       await updateAuthAccountStatus(account.id, account.status === "active" ? "disabled" : "active");
-      await reload(accounts?.offset ?? 0);
-      setNotice(`已${account.status === "active" ? "停用" : "启用"}该账号。`);
-    } catch (cause) { setError(toUserMessage(cause, "账号状态更新失败，请稍后重试。")); }
-    finally { setBusy(false); }
+      const text = `已${account.status === "active" ? "停用" : "启用"}该账号。`;
+      setAccountResult({ accountId: account.id, text });
+      try { await reload(accounts?.offset ?? 0); }
+      catch { setAccountResult({ accountId: account.id, failed: true, text: `${text}但列表刷新失败，请刷新页面。` }); }
+    } catch (cause) { setAccountResult({ accountId: account.id, failed: true, text: toUserMessage(cause, "账号状态更新失败，请稍后重试。") }); }
+    finally { finishMutation(); }
   }
 
   if (!policy || !preflight || !accounts) return <main className="admin-auth-page"><PageHeader title="认证迁移" />{error ? <p className="admin-auth-error">{error}</p> : <p>加载中…</p>}</main>;
@@ -172,7 +212,7 @@ export default function AdminAuthPage() {
   return <main className="admin-auth-page">
     <PageHeader title="认证迁移" />
     <p className="admin-auth-intro">此页只显示部署认证策略和迁移状态。切换、维护准备、账号停用和凭证签发都需要明确点击，不会自动执行。</p>
-    {error && <p className="admin-auth-error" role="alert">{error}</p>}{notice && <p className="admin-auth-notice" role="status">{notice}</p>}
+    {error && <p className="admin-auth-error" role="alert">{error}</p>}
     <section className="admin-auth-card"><h2>切换预检</h2><dl className="admin-auth-metrics">
       <div><dt>活跃用户</dt><dd>{preflight.active_users}</dd></div><div><dt>未完成关联</dt><dd>{preflight.unready_users}</dd></div><div><dt>已就绪管理员</dt><dd>{preflight.ready_admins}</dd></div><div><dt>可切换</dt><dd>{preflight.ready ? "是" : "否"}</dd></div>
     </dl></section>
@@ -181,10 +221,12 @@ export default function AdminAuthPage() {
       {mode !== policy.mode && <label><input type="checkbox" checked={allowRollback} disabled={busy} onChange={(event) => setAllowRollback(event.target.checked)} /> 这是受控回退；允许后端按部署策略执行回退</label>}
       {mode === "retired" && <label>确认退役<input value={retiredConfirmation} disabled={busy} onChange={(event) => setRetiredConfirmation(event.target.value)} placeholder="输入：退役本地凭据" /></label>}
       <button type="button" disabled={busy || mode === policy.mode} onClick={() => { void changePolicy(); }}>{busy ? "处理中…" : "更新策略"}</button>
+      <ActionFeedback result={policyResult} />
     </section>
     <section className="admin-auth-card"><h2>认证提供方维护</h2><p>准备维护会使在途统一登录失效，并在插件按指定配置代次重启前拒绝新的统一登录；当前有效统一登录会话不受影响。</p>
       <label>准备配置代次<input value={maintenanceGeneration} disabled={busy} onChange={(event) => setMaintenanceGeneration(event.target.value)} /></label>
       <button type="button" disabled={busy} onClick={() => { void prepareMaintenance(); }}>准备维护</button>
+      <ActionFeedback result={maintenanceResult} />
     </section>
     <section className="admin-auth-card"><h2>签发迁移凭证</h2><p>凭证只显示一次。请通过受控渠道交给获准使用人。</p>
       <label>用途<select value={grantPurpose} disabled={busy} onChange={(event) => setGrantPurpose(event.target.value as AuthGrant["purpose"])}><option value="enroll">新建账号</option><option value="recover">恢复账号</option><option value="replace">更换统一账号</option></select></label>
@@ -192,9 +234,10 @@ export default function AdminAuthPage() {
       <label>目标账号 ID{grantPurpose === "replace" ? "（必填）" : "（可选）"}<input value={grantTarget} disabled={busy} onChange={(event) => setGrantTarget(event.target.value)} /></label>
       {grantPurpose === "replace" && <p>更换凭证只能用于该目标账号。用户确认新统一身份后，原用户 ID、数据和角色保留，旧统一身份与旧统一登录会话将失效。</p>}
       <button type="button" disabled={busy} onClick={() => { void createGrant(); }}>签发凭证</button>
+      <ActionFeedback result={grantResult} />
       {grant && <p className="admin-auth-grant"><strong>一次性迁移凭证：</strong><code>{grant.grant_token}</code>，有效期 {grant.expires_in} 秒。</p>}
     </section>
-    <section className="admin-auth-card"><h2>账号状态</h2><table><thead><tr><th>用户</th><th>统一身份</th><th>状态</th><th>操作</th></tr></thead><tbody>{accounts.items.map((account) => <tr key={account.id}><td>{account.display_name || account.username}</td><td>{account.identity_status === "active" ? account.subject || "已关联" : "未关联"}</td><td>{account.status === "active" ? "启用" : "已停用"}</td><td><button type="button" disabled={busy} onClick={() => { void setAccountStatus(account); }}>{account.status === "active" ? "停用" : "启用"}</button></td></tr>)}</tbody></table>
+    <section className="admin-auth-card"><h2>账号状态</h2><table><thead><tr><th>用户</th><th>统一身份</th><th>状态</th><th>操作</th></tr></thead><tbody>{accounts.items.map((account) => <tr key={account.id}><td>{account.display_name || account.username}</td><td>{account.identity_status === "active" ? account.subject || "已关联" : "未关联"}</td><td>{account.status === "active" ? "启用" : "已停用"}</td><td><button type="button" disabled={busy} onClick={() => { void setAccountStatus(account); }}>{account.status === "active" ? "停用" : "启用"}</button><ActionFeedback result={accountResult?.accountId === account.id ? accountResult : null} /></td></tr>)}</tbody></table>
       <div className="admin-auth-pagination"><button type="button" disabled={busy || accountsBusy || accounts.offset === 0} onClick={() => { void loadAccountsPage(priorOffset); }}>上一页</button><span role="status">{accountsBusy ? "正在加载账号列表…" : `第 ${Math.floor(accounts.offset / accounts.limit) + 1} 页`}</span><button type="button" disabled={busy || accountsBusy || (accounts.total !== undefined && nextOffset >= accounts.total)} onClick={() => { void loadAccountsPage(nextOffset); }}>下一页</button></div>
       {accountsError && <div><p className="admin-auth-error" role="alert">{accountsError}</p><button type="button" disabled={busy || accountsBusy} onClick={() => { void loadAccountsPage(failedAccountOffset.current); }}>重试加载账号</button></div>}
     </section>

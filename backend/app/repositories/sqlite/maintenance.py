@@ -189,16 +189,21 @@ class SQLiteMaintenanceAdapter:
     # -- identity / notebooks -------------------------------------------------
 
     def resolve_owner_profile(self, owner: Optional[str]):
-        """Resolve a notebook owner (username, case-insensitive) or the seeded
-        admin (owner=None) to a UserProfile; None when not found."""
+        """Resolve a case-insensitive current/local login name, or the default
+        admin (owner=None). Missing or ambiguous names return None."""
         with self._runtime.database.connect() as db:
             if owner is not None:
-                from app.domain.auth_utils import normalize_username
-
-                user = db.execute(
-                    "SELECT * FROM users WHERE username=?",
-                    (normalize_username(owner),),
-                ).fetchone()
+                owner = owner.strip()
+                if not owner:
+                    return None
+                candidates = db.execute(
+                    "SELECT * FROM users WHERE lower(username)=lower(?) "
+                    "OR lower(local_login_name)=lower(?)",
+                    (owner,owner),
+                ).fetchall()
+                if len(candidates) != 1:
+                    return None
+                user = candidates[0]
             else:
                 user = db.execute(
                     "SELECT * FROM users WHERE role='admin' ORDER BY created_at ASC LIMIT 1"

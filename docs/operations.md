@@ -1085,6 +1085,8 @@ Options: `--owner` (notebook owner username, case-insensitive; defaults to the a
 
 Prereqs: point `MODEL_SERVICES_CONFIG` at the deployment TOML, bind the workloads required by the selected phase (notably `chunk_embedding`, `source_element_embedding`, `knowledge_object_embedding`, `kg_extract`, `paper_metadata`, and optional `chunk_question_generation`), and place only the referenced secrets in `.env`. If `chunk_embedding` is unbound, the CLI **refuses to run by default** — pass `--allow-no-embed` to import without vectors, never silently; phases whose required chat workload is unbound fail clearly. A re-run resumes from **database state**, not a progress file: `ingest` checks content hashes, `kg` checks the latest extraction run, and `embed` checks vector rows. Because a hash is stored before parsing completes, repair interrupted sources without elements using `reparse`. `<storage>/batch_ingest/<notebook>.jsonl` is a write-only run log.
 
+After SSO linking, the shared `--owner` resolver accepts either the verified external username or the retained `local_login_name`, case-insensitively, and resolves both to the original site user ID. An ambiguous match is rejected instead of choosing an account. This also applies to retrieval replay; it does not enable password authentication after retirement.
+
 ### Offline / off-host scale builds (`scripts/build_scale_index.py`)
 
 `batch_ingest.py index` above is the **stopped-service** channel (a

@@ -86,6 +86,37 @@ def test_postgres_adapter_implements_every_batch_maintenance_method():
 
 
 @pytest.mark.postgres_integration
+@pytest.mark.parametrize("owner", ["CorpUID", "corpuid", " CORPuid ", "a00123456", "A00123456"])
+def test_owner_resolution_preserves_user_id_after_sso_rename(postgres_repository, owner):
+    user = postgres_repository.create_user("a00123456", "pw123456")
+    with postgres_repository._runtime.database.write() as db:
+        db.execute("UPDATE users SET username='CorpUID' WHERE id=%s", (user.id,))
+    resolved = postgres_repository.maintenance.resolve_owner_profile(owner)
+    assert resolved.id == user.id
+    assert resolved.username == "CorpUID"
+
+
+@pytest.mark.postgres_integration
+@pytest.mark.parametrize("conflicting_name", ["corpuid", "a00123456"])
+def test_owner_resolution_rejects_ambiguous_current_or_legacy_names(postgres_repository, conflicting_name):
+    first = postgres_repository.create_user("a00123456", "pw123456")
+    second = postgres_repository.create_user("a00123457", "pw123456")
+    with postgres_repository._runtime.database.write() as db:
+        db.execute("UPDATE users SET username='CorpUID' WHERE id=%s", (first.id,))
+        db.execute("UPDATE users SET username=%s WHERE id=%s", (conflicting_name,second.id))
+    assert postgres_repository.maintenance.resolve_owner_profile(conflicting_name) is None
+
+
+@pytest.mark.postgres_integration
+def test_owner_resolution_keeps_default_admin_and_rejects_non_names(postgres_repository):
+    user = postgres_repository.create_user("a00123456", "pw123456")
+    maintenance = postgres_repository.maintenance
+    assert maintenance.resolve_owner_profile(None).id == "user-local"
+    for value in (user.id,user.email,"", "   "):
+        assert maintenance.resolve_owner_profile(value) is None
+
+
+@pytest.mark.postgres_integration
 def test_offline_lock_uses_non_pool_session_and_reports_contention(
     postgres_repository,
 ):

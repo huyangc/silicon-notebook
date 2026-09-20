@@ -183,8 +183,7 @@ class PostgresMaintenanceAdapter:
     # -- backend-neutral batch maintenance ----------------------------------
 
     def resolve_owner_profile(self, owner: Optional[str]):
-        from app.domain.auth_utils import normalize_username
-
+        """Resolve a unique current/local login name without guessing its owner."""
         with self._runtime.database.connect() as db:
             if owner is None:
                 user = db.execute(
@@ -192,10 +191,17 @@ class PostgresMaintenanceAdapter:
                     "ORDER BY created_at,id COLLATE \"C\" LIMIT 1"
                 ).fetchone()
             else:
-                user = db.execute(
-                    "SELECT * FROM users WHERE username=%s",
-                    (normalize_username(owner),),
-                ).fetchone()
+                owner = owner.strip()
+                if not owner:
+                    return None
+                candidates = db.execute(
+                    "SELECT * FROM users WHERE lower(username)=lower(%s) "
+                    "OR lower(local_login_name)=lower(%s)",
+                    (owner,owner),
+                ).fetchall()
+                if len(candidates) != 1:
+                    return None
+                user = candidates[0]
             if user is None:
                 return None
             profile = db.execute(

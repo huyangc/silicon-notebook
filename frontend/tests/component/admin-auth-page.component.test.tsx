@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { AuthAccountPage, AuthPolicy } from "../../app/admin/auth/api";
 
 const api = vi.hoisted(() => ({
@@ -44,6 +44,99 @@ beforeEach(() => {
   api.fetchAuthAccounts.mockResolvedValue(page(0, "first-account"));
   api.fetchAuthAudit.mockResolvedValue({ items: [], offset: 0, limit: 100, total: 0 });
   api.updateAuthAccountStatus.mockResolvedValue({});
+});
+
+afterEach(() => { vi.useRealTimers(); });
+
+function actionSection(name: string) {
+  return within(screen.getByRole("heading", { name }).closest("section")!);
+}
+
+test.each(["success", "failure"])("maintenance %s stays beside its controls, blocks duplicate requests and clears itself", async (outcome) => {
+  const pending = deferred<AuthPolicy>();
+  api.prepareAuthProviderMaintenance.mockReturnValue(pending.promise);
+  render(<AdminAuthPage />);
+  await screen.findByText("first-account");
+  const section = actionSection("认证提供方维护");
+  const button = section.getByRole("button", { name: "准备维护" });
+  vi.useFakeTimers();
+  act(() => { button.click(); button.click(); });
+  expect(button).toBeDisabled();
+  expect(api.prepareAuthProviderMaintenance).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    if (outcome === "success") pending.resolve({ ...policy, revision: 2 });
+    else pending.reject(new TypeError("offline"));
+  });
+  const role = outcome === "success" ? "status" : "alert";
+  expect(section.getByRole(role)).toHaveTextContent(outcome === "success" ? "已进入认证提供方维护准备状态" : "维护准备失败");
+  expect(screen.getAllByRole(role).filter((element) => element.textContent?.includes(outcome === "success" ? "已进入" : "维护准备失败"))).toHaveLength(1);
+  expect(button).toBeEnabled();
+  act(() => { vi.runOnlyPendingTimers(); });
+  expect(section.queryByRole(role)).not.toBeInTheDocument();
+});
+
+test("policy and grant validation and server failures stay next to their own controls", async () => {
+  api.updateAuthPolicy.mockRejectedValue(new TypeError("offline"));
+  api.issueAuthGrant.mockRejectedValue(new TypeError("offline"));
+  render(<AdminAuthPage />);
+  await screen.findByText("first-account");
+  const actor = userEvent.setup();
+  const policies = actionSection("认证策略");
+  await actor.selectOptions(policies.getByLabelText("目标模式"), "retired");
+  await actor.click(policies.getByRole("button", { name: "更新策略" }));
+  expect(policies.getByRole("alert")).toHaveTextContent("请输入“退役本地凭据”");
+  expect(api.updateAuthPolicy).not.toHaveBeenCalled();
+  await actor.selectOptions(policies.getByLabelText("目标模式"), "sso_only");
+  await actor.click(policies.getByRole("button", { name: "更新策略" }));
+  expect(policies.getByRole("alert")).toHaveTextContent("认证策略更新失败");
+  const grants = actionSection("签发迁移凭证");
+  await actor.click(grants.getByRole("button", { name: "签发凭证" }));
+  expect(grants.getByRole("alert")).toHaveTextContent("请填写迁移凭证的使用人标识");
+  expect(api.issueAuthGrant).not.toHaveBeenCalled();
+  await actor.type(grants.getByLabelText("使用人标识"), "person");
+  await actor.click(grants.getByRole("button", { name: "签发凭证" }));
+  expect(grants.getByRole("alert")).toHaveTextContent("签发迁移凭证失败");
+});
+
+test("successful policy and grant actions show local results while the issued credential remains available", async () => {
+  const updated = { ...policy, mode: "sso_only", revision: 2 };
+  api.updateAuthPolicy.mockResolvedValue(updated);
+  api.issueAuthGrant.mockResolvedValue({ grant_token: "one-time-grant", purpose: "enroll", expires_in: 300 });
+  render(<AdminAuthPage />);
+  await screen.findByText("first-account");
+  api.fetchAuthPolicy.mockResolvedValue(updated);
+  const actor = userEvent.setup();
+  const policies = actionSection("认证策略");
+  await actor.selectOptions(policies.getByLabelText("目标模式"), "sso_only");
+  await actor.click(policies.getByRole("button", { name: "更新策略" }));
+  expect(policies.getByRole("status")).toHaveTextContent("认证策略已更新");
+  const grants = actionSection("签发迁移凭证");
+  await actor.type(grants.getByLabelText("使用人标识"), "person");
+  vi.useFakeTimers();
+  await act(async () => { grants.getByRole("button", { name: "签发凭证" }).click(); });
+  expect(grants.getByRole("status")).toHaveTextContent("已签发迁移凭证");
+  act(() => { vi.runOnlyPendingTimers(); });
+  expect(grants.queryByRole("status")).not.toBeInTheDocument();
+  expect(grants.getByText("one-time-grant")).toBeInTheDocument();
+});
+
+test.each(["success", "failure", "refresh failure"])("account mutation %s reports only at the affected row", async (outcome) => {
+  const initial = page(0, "first-account");
+  initial.items.push({ ...initial.items[0], id: "other-account", display_name: "other-account" });
+  api.fetchAuthAccounts.mockResolvedValue(initial);
+  render(<AdminAuthPage />);
+  await screen.findByText("first-account");
+  if (outcome === "failure") api.updateAuthAccountStatus.mockRejectedValue(new TypeError("offline"));
+  else if (outcome === "refresh failure") api.fetchAuthAccounts.mockRejectedValue(new TypeError("offline"));
+  else api.fetchAuthAccounts.mockResolvedValue({ ...initial, items: initial.items.map((account) => account.id === "first-account" ? { ...account, status: "disabled" } : account) });
+  const row = within(screen.getByText("first-account").closest("tr")!);
+  await userEvent.setup().click(row.getByRole("button", { name: "停用" }));
+  expect(row.getByRole(outcome === "success" ? "status" : "alert")).toHaveTextContent(
+    outcome === "success" ? "已停用该账号" : outcome === "failure" ? "账号状态更新失败" : "已停用该账号。但列表刷新失败",
+  );
+  const other = within(screen.getByText("other-account").closest("tr")!);
+  expect(other.queryByRole("status")).not.toBeInTheDocument();
+  expect(other.queryByRole("alert")).not.toBeInTheDocument();
 });
 
 test("account pagination blocks duplicate clicks and retries the failed destination beside the controls", async () => {
