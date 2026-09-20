@@ -6,7 +6,22 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 CHECK_LANE_NAME="${CHECK_LANE_NAME:-contracts}"
 CHECK_TIMING_FILE="${CHECK_TIMING_FILE:-/dev/stdout}"
 START_SECONDS=$SECONDS
-trap 'printf "%s=%s\n" "$CHECK_LANE_NAME" "$((SECONDS - START_SECONDS))" > "$CHECK_TIMING_FILE"' EXIT
+record_timing() {
+  if [[ "$CHECK_TIMING_FILE" == /dev/stdout ]]; then
+    printf '%s=%s\n' "$CHECK_LANE_NAME" "$((SECONDS - START_SECONDS))"
+  else
+    printf '%s=%s\n' "$CHECK_LANE_NAME" "$((SECONDS - START_SECONDS))" > "$CHECK_TIMING_FILE"
+  fi
+}
+trap record_timing EXIT
+
+# This lane also runs directly on its own CI runner.
+export SILICON_NOTEBOOK_ENV_FILE=""
+export MODEL_SERVICES_CONFIG=""
+export EXTENSIONS_CONFIG=""
+export MINERU_MODE="off" MINERU_API_TOKEN=""
+mkdir -p "$ROOT_DIR/.local/pycache" "$ROOT_DIR/backend/.local"
+export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
 
 "$PYTHON_BIN" -m py_compile \
   "$ROOT_DIR/backend/app/main.py" \
@@ -99,4 +114,6 @@ PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   "$ROOT_DIR/scripts/generate_ui_extension_contract.py" --check
 
 PYTHONPATH="$ROOT_DIR/backend:$ROOT_DIR" "$PYTHON_BIN" \
-  -m pytest -p no:cacheprovider "$ROOT_DIR/fangan/testcases/harness/tests"
+  -m pytest -p no:cacheprovider --durations=30 \
+  --junitxml="$ROOT_DIR/backend/.local/contracts-junit.xml" \
+  "$ROOT_DIR/fangan/testcases/harness/tests"

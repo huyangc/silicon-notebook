@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.architecture.source_trees import read_source_tree
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _BACKEND = _REPO_ROOT / "backend"
 _CACHE_PKG = _BACKEND / "app" / "core" / "cache"
@@ -65,7 +67,7 @@ def _concrete_backend_imports(path: Path) -> list[str]:
     守卫要修的缺陷，如实记录避免后人误以为它是硬边界。
     """
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        tree = read_source_tree(path, errors="replace")
     except SyntaxError:
         return []
     hits: list[str] = []
@@ -88,6 +90,7 @@ def _concrete_backend_imports(path: Path) -> list[str]:
 
 
 @pytest.mark.architecture_contract
+@pytest.mark.xdist_group(name="production_source_trees")
 def test_concrete_backend_is_not_imported_outside_the_cache_module():
     offenders = []
     for path in _python_files():

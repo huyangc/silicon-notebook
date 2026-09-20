@@ -142,6 +142,13 @@ PYTHON_BIN=/path/to/python bash scripts/check.sh
 ```
 contracts + 后端测试/离线 smoke + 前端测试/tsc/build 三条 lane 并行执行。脚本会强制 `MODEL_SERVICES_CONFIG=""`，不读取开发者真实密钥，也不会访问付费/网络模型服务；EXIT=0 即过。
 
+GitHub G1 在独立 runner 运行三条泳道，后端再分两片。复现单片可执行
+`PYTHON_BIN=/path/to/python bash scripts/check_backend.sh --shard-index 0 --shard-count 2`
+（另一片 index 为 1）；不传参数则执行完整后端 G1。`scripts/check_contracts.sh`
+也可单独执行。两者仍隔离部署环境并在 `backend/.local` 生成 JUnit 耗时文件，
+CI 上传保留七天。完整验收仍执行 `check.sh`，分片策略见
+[`docs/development_zh.md`](../docs/development_zh.md#github-actions-ci)。
+
 ### `check_postgres.sh` —— 独立 PostgreSQL 门禁
 
 本地串行运行需显式 `TEST_POSTGRES_URL` 指向专用 `silicon_notebook_*_test` 数据库。

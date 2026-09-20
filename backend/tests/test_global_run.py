@@ -50,6 +50,7 @@ from app.services.source_scope import (
     source_scope_context,
     subjectless_run_active,
 )
+from tests.architecture.source_trees import read_source_tree
 from types import SimpleNamespace
 
 
@@ -240,9 +241,9 @@ def test_a_bare_source_id_is_refused_not_split_into_characters(bare):
 # 3. 只有 global_ask 装,且无主体位只由管理器写
 # ---------------------------------------------------------------------------
 
-def _app_sources() -> dict:
+def _app_sources() -> dict[str, ast.AST]:
     return {
-        path.relative_to(_ROOT).as_posix(): path.read_text(encoding="utf-8")
+        path.relative_to(_ROOT).as_posix(): read_source_tree(path)
         for path in sorted(_APP.rglob("*.py"))
     }
 
@@ -255,7 +256,7 @@ def _call_sites(sources: dict, function_name: str) -> set:
     """
     found: set = set()
     for path, source in sources.items():
-        tree = ast.parse(source, filename=path)
+        tree = ast.parse(source, filename=path) if isinstance(source, str) else source
         local_names = {function_name}
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
@@ -295,9 +296,10 @@ def _subjectless_keyword_sites(sources: dict) -> set:
     """
     found: set = set()
     for path, source in sources.items():
-        if "subjectless" not in source:
+        if isinstance(source, str) and "subjectless" not in source:
             continue
-        for node in ast.walk(ast.parse(source, filename=path)):
+        tree = ast.parse(source, filename=path) if isinstance(source, str) else source
+        for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             for keyword in node.keywords:
@@ -313,6 +315,7 @@ def _subjectless_keyword_sites(sources: dict) -> set:
     return found
 
 
+@pytest.mark.xdist_group(name="production_source_trees")
 def test_only_global_ask_installs():
     """安装管理器的调用点 == ``{app/services/global_ask.py}``,无主体位 == 管理器自己。
 

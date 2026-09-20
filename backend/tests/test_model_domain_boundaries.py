@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.architecture.source_trees import read_source_tree
+
 
 ROOT = Path(__file__).resolve().parents[2]
 MODELS = ROOT / "backend" / "app" / "models"
@@ -239,12 +241,13 @@ def test_moved_facade_reference_helper_allows_unmoved_facade_access():
 
 
 @pytest.mark.architecture_contract
+@pytest.mark.xdist_group(name="production_source_trees")
 def test_first_party_production_uses_domain_model_modules():
     app_root = ROOT / "backend" / "app"
     offenders = []
     for path in app_root.rglob("*.py"):
         if path == MODELS / "schemas.py":
             continue
-        if imports_schema_facade(ast.parse(path.read_text(encoding="utf-8"))):
+        if imports_schema_facade(read_source_tree(path)):
             offenders.append(path.relative_to(ROOT).as_posix())
     assert offenders == []

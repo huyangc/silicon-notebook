@@ -468,17 +468,37 @@ storage，并连 `Storage` 类一起补（否则 `vi.spyOn(Storage.prototype, �
 Node 22 上行为逐字不变。该泳道同时跑生产构建——那次修复的第一版误引了没有类型声明的
 `jsdom`，正是被构建的类型检查当场抓到的。
 
+PR/push G1 在独立 runner 上运行 backend、contracts 和 Node 22 frontend 三条泳道。
+后端把同一个 G1 收集集合分成两片，每片四个 pytest worker；显式执行
+`check_backend.sh --shard-index 0 --shard-count 2`（或 index 1）才启用分片，
+分片环境不会泄漏给嵌套 pytest。插件在正常 marker 筛选后分配，保持每个
+`xdist_group` 完整，普通模块也不拆散；使用
+`backend/tests/fixtures/g1_module_timings.json` 的耗时提示、未知模块回退到收集条数，
+确定性地平衡负载。提示只影响放在哪片，新增模块自动纳入，不影响覆盖集合。
+`check.sh` 仍是本地完整门禁，G2 选择不变。原 `level-1-standard` 汇总三条泳道，
+只有全部成功（含后端矩阵的两片）才成功；失败、取消、跳过或缺失都不能放行。
+G1 墙钟时间从首条泳道开始计到汇总完成，包含安装与 runner 调度，不能只报汇总
+job 自己的几秒钟。这种隔离与分片用更多 runner 分钟换取更短的等待时间。
+backend 与 contracts wrapper 单独执行时仍隔离部署环境，打印慢 pytest 时长，
+并将 JUnit 写入 `backend/.local`；CI 包括失败时也上传，保留七天。
+
+六条生产源码扫描共用一个 worker 和按文件内容校验的 AST 缓存；每次仍重读文件，
+修改不会复用旧树。Agent Profile job base/overlay 测试使用当前 schema 的独立副本，
+专门的 store/升级用例仍执行真实迁移并保留旧 schema 断言。
+
 已提交的 OpenAPI 契约是字节语义冻结契约，因此
 `backend/requirements.txt` 精确固定 FastAPI `0.135.3` 与 Pydantic
 `2.12.4`。只能在有意重生 OpenAPI 契约并在干净环境跑 G2 扩展门时，
 才同步升级这两个框架。
 
 该 workflow 只有读权限，不接收模型或部署 secrets，并把后端 pytest worker
-限制为 4，避免 GitHub 托管 runner 过度抢占。后端安装设置
-`HNSWLIB_NO_NATIVE=1`，标准门禁禁用 pip wheel cache：`hnswlib` 默认会用
+限制为每台 runner 4 个，避免 GitHub 托管 runner 过度抢占。后端安装设置
+`HNSWLIB_NO_NATIVE=1`，G1 Python 泳道共享 G3 专用的可移植 wheel cache，使用精确的
+OS/架构/Python/requirements/策略 key，不回退到其他缓存；G2 继续禁用 pip wheel cache。
+`hnswlib` 默认会用
 `-march=native` 编译，把这种本机 wheel 缓存后恢复到 CPU 特性不同的托管
 runner，可能以 `SIGILL` 崩溃。CI 使用可移植构建，以少量 ANN 性能换取确定性；
-生产 wheelhouse 仍可按已声明的部署 CPU 定向构建。20 分钟 timeout 包含依赖安装，
+生产 wheelhouse 仍可按已声明的部署 CPU 定向构建。每条 G1 执行泳道的 20 分钟 timeout 包含依赖安装，
 与 Apple Silicon 本地 warm gate 的 60 秒内目标刻意分开。初次接入时
 `CI / level-1-standard` 仅用于观察；只有在 PR 与合并后的 `master` 都稳定绿跑后，
 并由用户明确批准分支保护变更，才把它设为 `master` 的 required check。

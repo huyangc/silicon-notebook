@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository
+from tests.architecture.source_trees import read_source_tree
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -111,6 +112,7 @@ def _settings(tmp_path) -> Settings:
 
 
 @pytest.mark.architecture_contract
+@pytest.mark.xdist_group(name="production_source_trees")
 def test_raw_model_transports_are_confined_to_reviewed_boundaries():
     """Raw SDK construction/calls must never bypass the runtime scheduler."""
     offenders: list[str] = []
@@ -120,7 +122,7 @@ def test_raw_model_transports_are_confined_to_reviewed_boundaries():
         "RerankClient",
     }
     for path, relative in _python_sources("backend/app", "scripts"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
+        tree = read_source_tree(path)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -146,13 +148,14 @@ def test_raw_model_transports_are_confined_to_reviewed_boundaries():
 
 
 @pytest.mark.architecture_contract
+@pytest.mark.xdist_group(name="production_source_trees")
 def test_offline_kg_transport_has_no_product_runtime_importers():
     importers: set[str] = set()
     prefixes: dict[str, set[str]] = {}
     for path, relative in _python_sources("backend/app", "scripts"):
         if relative == OFFLINE_KG_TRANSPORT:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
+        tree = read_source_tree(path)
         if _imports_kg_client(tree):
             importers.add(relative)
             prefixes[relative] = {
@@ -175,12 +178,13 @@ def test_offline_kg_transport_has_no_product_runtime_importers():
 
 
 @pytest.mark.architecture_contract
+@pytest.mark.xdist_group(name="production_source_trees")
 def test_retired_model_configuration_and_gate_symbols_are_absent():
     offenders: list[str] = []
     retired_routes = {"/me/model-settings", "/me/model-services"}
     for path, relative in _python_sources("backend/app", "frontend/app", "scripts"):
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
+            tree = read_source_tree(path)
         except SyntaxError:
             # TypeScript/TSX is covered by the front-end architecture contract.
             continue
