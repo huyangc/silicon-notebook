@@ -5366,6 +5366,42 @@ button.stop-control:disabled {
   stroke: currentColor;
 }
 
+/* 被停止的那一轮留在对话里时的提示（`stopped-turn.tsx`，两个问答面共用一份）。 */
+.stopped-turn-notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 10px 0;
+  color: #667085;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+button.stopped-turn-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #d9dfeb;
+  border-radius: 999px;
+  background: #fff;
+  color: #344054;
+  padding: 3px 11px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+button.stopped-turn-edit:hover:not(:disabled) {
+  border-color: #98a2b3;
+  background: #f5f7fa;
+}
+
+button.stopped-turn-edit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .studio-panel {
   grid-template-rows: 64px 1fr;
 }
