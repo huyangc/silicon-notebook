@@ -11,6 +11,7 @@ import type { SearchProfilePatchBody } from "./search-profile-model.ts";
 export { API_BASE } from "./api-config.ts";
 export { authHeaders, clearToken, getToken, setToken } from "./auth-session.ts";
 import { clearToken } from "./auth-session.ts";
+import { saveSsoReturnLocation } from "./auth-return-location.ts";
 
 export type AuthUser = {
   id: string;
@@ -146,6 +147,7 @@ export async function fetchAuthCapabilities(): Promise<AuthCapabilities> {
 }
 
 async function ssoStart(path: string, body: unknown): Promise<string> {
+  saveSsoReturnLocation();
   const result = await requestJson<{ authorization_url: string }>(path, {
     tag: "auth",
     method: "POST",

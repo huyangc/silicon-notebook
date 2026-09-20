@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import time
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -12,6 +13,7 @@ from app.extension_sdk import (
     EXTENSION_API_VERSION,
     AuthProviderDescription,
     Availability,
+    AvailabilityStatus,
     ContributionDeclaration,
     ContributionKind,
     ExtensionContribution,
@@ -63,6 +65,7 @@ class _Provider:
 class _Bundle:
     provider: _Provider
     trust: str = "builtin"
+    availability: object = None
 
     @property
     def manifest(self):
@@ -76,8 +79,13 @@ class _Bundle:
         )
 
     def register(self, registrar):
+        def probe(_context):
+            if isinstance(self.availability, BaseException):
+                raise self.availability
+            return self.availability or Availability.available()
+
         registrar.add_provider(ExtensionContribution(
-            _DECLARATION, self.provider, lambda _context: Availability.available()
+            _DECLARATION, self.provider, probe
         ))
 
 
@@ -86,7 +94,11 @@ def _host(provider: _Provider, **kwargs):
 
 
 def test_empty_runtime_has_no_auth_provider():
-    assert build_extension_runtime().auth_provider.describe() is None
+    host = build_extension_runtime().auth_provider
+    assert host.describe() is None
+    with pytest.raises(AuthProviderError) as exc_info:
+        host.ensure_available()
+    assert exc_info.value.code == "auth_provider_unavailable"
 
 
 def test_host_freezes_description_and_builds_core_owned_authorization_url():
@@ -184,6 +196,10 @@ def test_live_admin_admission_disables_authorization_and_exchange():
     ).auth_provider
     disabled.add("test.auth")
 
+    with pytest.raises(AuthProviderError) as availability_error:
+        host.ensure_available()
+    assert availability_error.value.code == "auth_provider_unavailable"
+
     with pytest.raises(AuthProviderError) as url_error:
         host.authorization_url(
             state="state",
@@ -200,6 +216,75 @@ def test_live_admin_admission_disables_authorization_and_exchange():
             timeout_seconds=1.0,
         )
     assert auth_error.value.code == "auth_provider_unavailable"
+
+
+@pytest.mark.parametrize(
+    "availability",
+    (
+        Availability(AvailabilityStatus.DISABLED, "provider_disabled"),
+        Availability(AvailabilityStatus.UNAVAILABLE, "provider_unavailable"),
+        RuntimeError("private probe failure"),
+    ),
+    ids=("disabled", "unavailable", "probe-failure"),
+)
+def test_live_provider_availability_fails_closed_without_hiding_metadata(
+    availability,
+):
+    host = build_extension_runtime(
+        (_Bundle(_Provider(), availability=availability),)
+    ).auth_provider
+    assert host.describe() is not None
+    with pytest.raises(AuthProviderError) as exc_info:
+        host.ensure_available()
+    assert exc_info.value.code == "auth_provider_unavailable"
+
+
+def test_application_bootstrap_rejects_an_unavailable_configured_provider(
+    monkeypatch,
+):
+    from app import bootstrap
+    from app.core.config import Settings
+
+    runtime = build_extension_runtime((
+        _Bundle(
+            _Provider(),
+            availability=Availability(
+                AvailabilityStatus.UNAVAILABLE, "provider_unavailable"
+            ),
+        ),
+    ))
+    closed: list[bool] = []
+    repository = SimpleNamespace(
+        _runtime=SimpleNamespace(
+            identity=SimpleNamespace(
+                auth=SimpleNamespace(
+                    get_policy=lambda: {
+                        "mode": "dual",
+                        "retired_at": None,
+                        "plugin_id": "test.auth",
+                        "provider_id": "test",
+                        "provider_namespace": "test.production",
+                        "config_generation": "initial",
+                    }
+                )
+            )
+        ),
+        close=lambda: closed.append(True),
+    )
+    monkeypatch.setattr(bootstrap, "application_extension_runtime", lambda: runtime)
+    monkeypatch.setattr(bootstrap, "create_repository", lambda *_args, **_kwargs: repository)
+    monkeypatch.setattr(bootstrap, "prime_extension_admission", lambda _repository: None)
+
+    settings = Settings(
+        _env_file=None,
+        auth_optional=False,
+        auth_public_base_url="http://localhost",
+        auth_frontend_base_url="http://localhost:3000",
+    )
+    with pytest.raises(AuthProviderError) as exc_info:
+        bootstrap.create_application_repository(settings)
+    assert exc_info.value.code == "auth_provider_unavailable"
+    assert closed == [True]
 
 
 def test_multiple_auth_providers_fail_registry_freeze():
