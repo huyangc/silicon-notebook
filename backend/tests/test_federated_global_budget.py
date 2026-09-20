@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+import math
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -74,10 +75,16 @@ class _Clock:
     ``read_budget`` 内部读的是真钟,所以假钟一旦漂离真钟,被测代码算出来的
     deadline 就会落在真钟的过去或遥远的未来,断言随之变成自说自话。以真钟为基准、
     只做显式跳进,既让预算算术可以零容差断言,又让真钟那一侧仍然成立。
+
+    基准**向下取整**。真钟是任意小数,``base + 10.0`` 再减 ``base`` 在浮点里未必还
+    是 ``10.0``(CI 上红过:``514.8948546839999 - 504.894854684 != 10.0``——与
+    #753 修过的那个预算用例同一个坑,是否命中随主机 uptime 而定)。整数值的基准加上
+    本文件用到的整数秒跳进与预算,每一步都精确可表示,「零容差」才名副其实。代价是假钟
+    最多落后真钟 1 秒,所以用到本时钟的用例预算都取 ≥ 2 秒。
     """
 
     def __init__(self):
-        self.base = time.monotonic()
+        self.base = float(math.floor(time.monotonic()))
         self.offset = 0.0
 
     def now(self) -> float:
