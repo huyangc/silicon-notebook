@@ -4,7 +4,9 @@ import type { AnswerAnchorLike, CitationLike } from "./answer-formatting.ts";
 import type { ReasoningTraceStep } from "./ask-stream.ts";
 import type { AskIntentConfirmation, QueryIntentContract } from "./ask-intent-model.ts";
 import type { AskRetrievalEffortId } from "./ask-retrieval-effort.ts";
-import type { AskResponse } from "./workspace-model.ts";
+import type { ConversationShareApi } from "./conversation-share-api.ts";
+import type { ShareTurn } from "./conversation-share-disclosure.ts";
+import type { AskResponse, ConversationShareResponse } from "./workspace-model.ts";
 
 export type GlobalScope = { mode: "all" } | { mode: "include"; notebook_ids: string[] };
 
@@ -147,6 +149,61 @@ export const submitGlobalFeedback = (jobId: string, rating: "useful" | "not_usef
   requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(jobId)}/feedback`, {
     ...options, method: "POST", body: JSON.stringify({ rating }),
   });
+
+// --- 回答投影：新形状 `job.answer` 优先，旧形状 `job.response` 兜底 ------------
+//
+// 与后端 `backend/app/models/global_ask.py` 的 `global_answer_text` /
+// `global_answer_citations` 同一条判据（`answer` 非空即用它，否则退回 `response`，
+// 都没有才是空）。抽成三个具名函数而不是在每个消费方就地写一遍三元：这个 fallback
+// 一旦分家，就会出现「引用卡按新形状读、分享披露按旧形状读」这种只错一半的情形。
+export const globalAnswerAnchors = (job: GlobalJob): AnswerAnchorLike[] =>
+  job.answer ? job.answer.anchors : job.response ? job.response.anchors : [];
+export const globalAnswerCitations = (job: GlobalJob): CitationLike[] =>
+  job.answer ? job.answer.citations : job.response ? job.response.citations : [];
+
+/**
+ * 全局会话的轮次 → 分享披露逻辑吃的那一份 `ShareTurn`。
+ *
+ * 两条刻意的映射：
+ *  · **只取 `status === "done"`**。运行中/失败/取消/中断的作业没有可公开的回答，
+ *    后端快照也不会包含它们；把它们算进披露会凭空多报轮数与引用。
+ *  · `answer_id` 位放的是 **`job_id`**。全局侧没有「答案行 id」这种东西，分享水位
+ *    的边界就是作业本身（`expected_through_id` 送的也是 job_id）——两处必须同源，
+ *    否则弹窗算出来的边界与服务端钉住的边界说的是两件事。
+ */
+export function globalShareTurns(turns: GlobalJob[]): ShareTurn[] {
+  return turns
+    .filter((job) => job.status === "done")
+    .map((job) => ({
+      answer_id: job.job_id,
+      created_at: job.created_at,
+      response: { anchors: globalAnswerAnchors(job), citations: globalAnswerCitations(job) },
+    }));
+}
+
+/**
+ * 全局会话的分享接线（与单库 `notebookConversationShareApi` **同形**，弹窗因此是同
+ * 一份实现）。三个端点与单库逐字段同形、错误语义相同：零可分享回答 409、水位过期
+ * 409、非本人 404；公开链接仍然是同一个 `/c/{token}` 页面。
+ *
+ * ⚠ `loadTurns` 读的是会话详情的**第一页**（offset 0 = 最新那一页，`GLOBAL_ASK_PAGE_SIZE`
+ * 条）。超过一页的长会话里，边界作业若落在更早的页上，`resolveShareBoundary` 会判
+ * `unresolved` → 披露退化成不带数字、但附图与个人记忆两面都提的兜底文案，发布仍按
+ * 用户点的那条 job_id 进行。这是**宁可不给数字也不给错数字**的既有降级路径，不是漏洞。
+ */
+export function globalConversationShareApi(conversationId: string): ConversationShareApi {
+  const path = `${root}/conversations/${encodeURIComponent(conversationId)}/share`;
+  return {
+    key: `global:${conversationId}`,
+    load: () => requestJson<ConversationShareResponse>(path, options),
+    loadTurns: () => getGlobalConversation(conversationId).then((detail) => globalShareTurns(detail.turns || [])),
+    share: (expectedThroughId) => requestJson<ConversationShareResponse>(path, {
+      ...options, method: "POST", body: JSON.stringify({ expected_through_id: expectedThroughId }),
+    }),
+    unshare: () => requestVoid(path, { ...options, method: "DELETE" }),
+  };
+}
+
 // 引用原文全文的读取端点（`GET /global-ask/jobs/{job}/citations/{element}`）在后端
 // 保留，MCP 侧仍在用。浏览器这一侧不再有调用方：引用小卡片直接用回答里已经带着的
 // anchors/citations（snippet / quoted_span），不为一张卡片再多打一次全文。

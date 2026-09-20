@@ -12,7 +12,24 @@
 // 时间戳分类会把它算成「已分享」→ newCount 少算 → 弹窗隐藏「更新到最新」→ 那条答案
 // 永远发布不出去。分类必须与后端 keyset 同源。
 
-import type { ConversationDetail } from "./workspace-model.ts";
+/** 披露与边界逻辑吃的那一份「轮次」——**结构性**的最小形状，不是某一个面的 wire 类型。
+ *
+ *  笔记本内会话原样传 `ConversationDetail["turns"]`（逐字兼容，下面每个函数的行为一个
+ *  字没动）；全局问答把 `GlobalJob[]` 适配成同一形状，`answer_id` 位放的是 **job_id**
+ *  ——全局侧的分享水位边界是**作业**，不是答案行。
+ *
+ *  ⚠ 这里刻意不 import 任何一个面的会话类型：披露逻辑是两个面共用的**同一份**实现，
+ *  一旦它认得某一面的具体类型，第二个面就只能复制一份近似实现出来，而「Memory 披露
+ *  绝不省略」那条红线就会立刻分家成两份、各修一半。 */
+export type ShareTurnImage = { asset_id?: string };
+export type ShareTurn = {
+  answer_id: string;
+  created_at: string;
+  response?: {
+    anchors?: { images?: ShareTurnImage[] }[] | null;
+    citations?: { images?: ShareTurnImage[]; memory_id?: string }[] | null;
+  } | null;
+};
 
 // countsError 兜底文案（设计 §五 consent 红线）。会话详情没加载出来时算不出精确数字,
 // 但披露的**两个面——附图与个人记忆——缺一不可**:公开页两者都会包含,只提其一等于对
@@ -61,7 +78,7 @@ export function withinWatermark(createdAt: string, watermark: string): boolean {
  *   * id 非空但 turns 里找不到（水位答案被删/漂移）→ 回退 `withinWatermark` 时间戳
  *     区间,与后端删除兜底同口径,绝不 crash。 */
 function watermarkClassifier(
-  turns: ConversationDetail["turns"],
+  turns: ShareTurn[],
   sharedThroughId: string,
   watermark: string,
 ): (index: number, createdAt: string) => boolean {
@@ -87,7 +104,7 @@ function watermarkClassifier(
  * ≥ 公开页实际,绝不出现「公开页有内容而披露没数」(codex T5 评审已核这条不变量)。
  */
 export function summarizeShareDisclosure(
-  turns: ConversationDetail["turns"],
+  turns: ShareTurn[],
   sharedThroughId: string,
   watermark: string,
 ): ShareDisclosure {
@@ -103,7 +120,7 @@ export function summarizeShareDisclosure(
       continue;
     }
     sharedCount += 1;
-    const response = turn.response || ({} as ConversationDetail["turns"][number]["response"]);
+    const response: NonNullable<ShareTurn["response"]> = turn.response || {};
     const assetIds = new Set<string>();
     for (const anchor of response.anchors || []) {
       for (const image of anchor.images || []) {
@@ -145,7 +162,7 @@ export type ShareUpdatePreview = {
  * (已在早前轮次公开过、新轮又引用一次的记忆不计入新增)。
  */
 export function summarizeShareUpdate(
-  turns: ConversationDetail["turns"],
+  turns: ShareTurn[],
   sharedThroughId: string,
   watermark: string,
 ): ShareUpdatePreview {
@@ -181,7 +198,7 @@ export type ShareBoundary = {
   /** 边界答案在权威 turn 顺序里的下标；-1 = 未指定边界，或指定了但解析不出。 */
   index: number;
   /** 本次将要发布的那批轮次——截到边界答案（含）为止；未指定边界时是全部轮次。 */
-  turns: ConversationDetail["turns"];
+  turns: ShareTurn[];
   /** 指定了边界但 turns 里找不到它 → 披露算不出，退化成不带数字的兜底文案。 */
   unresolved: boolean;
   /** 当前水位已越过边界：公开页已包含这条回答，而且还包含更多（后端不允许收回）。 */
@@ -210,7 +227,7 @@ export function shareScopeState(boundary: ShareBoundary, shared: boolean): Share
 }
 
 export function resolveShareBoundary(
-  turns: ConversationDetail["turns"],
+  turns: ShareTurn[],
   throughAnswerId: string,
   sharedThroughId: string,
 ): ShareBoundary {
