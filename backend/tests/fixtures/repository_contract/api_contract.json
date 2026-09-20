@@ -4357,6 +4357,44 @@
           "title": "GlobalAskAnswer",
           "type": "object"
         },
+        "GlobalAskIntentPreviewRequest": {
+          "description": "Understand a global reasoning question before any job or conversation exists.\n\nField-for-field the submission-time scope inputs of ``GlobalAskRequest``\n(``question``, ``conversation_id``, ``notebook_scope``) -- deliberately\nnothing else. ``GlobalAskService.preview_intent`` resolves scope from\nthese three the same way ``start()`` resolves it from the matching three\non ``GlobalAskRequest`` (see ``GlobalAskService._resolve_run_scope``), so\na preview and the submission that follows it can only see the same\nlibrary set when they are actually given the same inputs. There is no\n``mode`` field: like the single-library ``/ask/intent``, this preview is\nalways the reasoning understanding pass, and the caller decides whether\nto run it before submitting a reasoning question.",
+          "properties": {
+            "conversation_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Conversation Id"
+            },
+            "notebook_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/GlobalNotebookScope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "question": {
+              "maxLength": 4000,
+              "minLength": 1,
+              "title": "Question",
+              "type": "string"
+            }
+          },
+          "required": [
+            "question"
+          ],
+          "title": "GlobalAskIntentPreviewRequest",
+          "type": "object"
+        },
         "GlobalAskJob": {
           "properties": {
             "answer": {
@@ -15992,6 +16030,88 @@
             }
           },
           "summary": "Rename Global Conversation",
+          "tags": [
+            "global-ask"
+          ]
+        }
+      },
+      "/api/global-ask/intent": {
+        "post": {
+          "description": "Understand a global reasoning question before creating a job/conversation.\n\nByte-for-byte the request-local cancellation dance ``ask_routes.\npreview_ask_intent`` runs above the single-library engine: the potentially\nslow model call moves onto a worker thread, and a client that disconnects\nbefore it returns sets ``cancel_event`` rather than leaving the call to run\nto completion for nobody. ``GlobalAskService.preview_intent`` re-resolves\nscope and re-checks authority on the SAME path ``start()`` uses, so a\nlibrary the caller can no longer read here is refused exactly as it would\nbe on submission.",
+          "operationId": "preview_global_ask_intent_api_global_ask_intent_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GlobalAskIntentPreviewRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/QueryIntentContract"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Preview Global Ask Intent",
+          "tags": [
+            "global-ask"
+          ]
+        }
+      },
+      "/api/global-ask/intent/stream": {
+        "post": {
+          "description": "Heartbeat-capable browser transport for the global intent preview.\n\nThe blocking JSON endpoint above remains available for compatibility\nclients; this is the same NDJSON heartbeat wrapper\n``ask_routes.preview_ask_intent_stream`` uses so a slow understanding\ncall does not sit past a reverse proxy's idle timeout. A distinct\nstage/error_code from the single-library endpoint (``global_ask_intent``\nrather than ``ask_intent``) keeps the two features' telemetry apart, the\nsame way ``knowhow_routes``/``memory_routes`` each carry their own stage\nname rather than sharing one across features.\n\nONE deliberate difference from ``ask_routes.preview_ask_intent_stream``:\nthat endpoint resolves scope/history in a plain pre-stream step so a\n404/422 keeps its real HTTP status, and only the model call itself runs\ninside the stream. This endpoint runs ``GlobalAskService.preview_intent``\n-- scope resolution, authority re-check AND the model call -- entirely\ninside the stream worker, because there is no second public entry point\non ``GlobalAskService`` to split those two phases (the surface this\nchange may add is deliberately kept to the one ``preview_intent``\nmethod). The practical effect: a scope/authority failure on THIS\nendpoint surfaces as the stream's generic content-free\n``{\"event\": \"error\", \"error\": \"global_ask_intent_failed\"}`` frame rather\nthan a distinct pre-stream status code. The blocking endpoint above does\nnot have this gap -- ``task.result()`` re-raises the real\n``GlobalAskError`` there -- so a client that needs the specific reason\n(foreign conversation, revoked access, empty question) can call it\ninstead of the stream.",
+          "operationId": "preview_global_ask_intent_stream_api_global_ask_intent_stream_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GlobalAskIntentPreviewRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Preview Global Ask Intent Stream",
           "tags": [
             "global-ask"
           ]

@@ -10,11 +10,11 @@ import time
 from uuid import uuid4
 
 from app.core.ask_retrieval_policy import DEFAULT_RETRIEVAL_EFFORT
-from app.models.ask import AskRequest
+from app.models.ask import AskRequest, QueryIntentContract
 from app.models.global_ask import (
-    GlobalAskJob, GlobalAskRequest, GlobalConversationDetail,
-    GlobalNotebookScope, GLOBAL_ASK_PAGE_MAX, GLOBAL_ASK_PAGE_SIZE,
-    GlobalAskSkippedNotebook, global_answer_citations,
+    GlobalAskIntentPreviewRequest, GlobalAskJob, GlobalAskRequest,
+    GlobalConversationDetail, GlobalNotebookScope, GLOBAL_ASK_PAGE_MAX,
+    GLOBAL_ASK_PAGE_SIZE, GlobalAskSkippedNotebook, global_answer_citations,
 )
 from app.models.sources import SourceElement
 from app.services.ask_followup import followup_resolution_context
@@ -383,6 +383,121 @@ class GlobalAskService:
             normalized = stored_json
         return normalized == request_json
 
+    def _resolve_run_scope(self, payload, user_id, allowed_notebook_ids, authority_check):
+        """The scope ``start()`` and ``preview_intent`` must resolve IDENTICALLY.
+
+        Byte-for-byte the block ``start()`` used to run inline: same
+        conversation lookup, same scope defaulting, same participant-count
+        ceiling, same two authority re-checks around the source-ceiling
+        freeze, same history projection. Pulled out so a preview and the
+        submission it precedes cannot drift onto two library sets from the
+        same inputs -- a preview that resolved a different set than the run
+        it previews would hand the user a confirmation that does not describe
+        what actually gets asked.
+
+        Returns ``(conversation, scope, ids, allowed, source_ceiling, history,
+        user_history)``.
+        """
+        conversation = self._conversation(payload.conversation_id, user_id) if payload.conversation_id else None
+        scope = payload.notebook_scope or (conversation.notebook_scope if conversation else GlobalNotebookScope())
+        rows = self.notebooks(user_id)
+        names = rows if isinstance(rows, dict) else {row.id: row.name for row in rows}
+        allowed = None if allowed_notebook_ids is None else frozenset(allowed_notebook_ids)
+        ids = list(scope.notebook_ids) if scope.mode == "include" else [
+            key for key in names if allowed is None or key in allowed
+        ]
+        if not ids:
+            raise GlobalAskError(422, "没有可访问的笔记本，请先创建笔记本并添加资料。")
+        if len(ids) > self.settings.global_ask_max_notebooks:
+            ceiling = self.settings.global_ask_max_notebooks
+            # ``all`` resolved past the ceiling: the caller (an MCP client
+            # above all) cannot narrow a scope it never sent, so the message
+            # has to say that an explicit selection is the way out.
+            raise GlobalAskError(422, (
+                f"可访问的笔记本超过 {ceiling} 个，请选择不超过 {ceiling} 个笔记本后重试。"
+                if scope.mode != "include" else
+                f"本次范围超过 {ceiling} 个笔记本，请选择不超过 {ceiling} 个笔记本后重试。"
+            ))
+        self._check(ids, user_id, allowed, authority_check)
+        # Freeze every source ceiling before starting any retrieval or detached work.
+        source_rows = self.sources.visible_source_ids_by_notebook(ids)
+        source_ceiling = {notebook_id: frozenset(source_rows[notebook_id]) for notebook_id in ids}
+        self._check(ids, user_id, allowed, authority_check)
+        history, user_history = self._history(
+            conversation, ids, user_id, allowed, authority_check,
+        )
+        return conversation, scope, ids, allowed, source_ceiling, history, user_history
+
+    def preview_intent(self, payload: GlobalAskIntentPreviewRequest, *, user_id,
+                        allowed_notebook_ids=None, authority_check=None,
+                        cancel_event=None) -> QueryIntentContract:
+        """Preview a global reasoning question's understanding before any job exists.
+
+        Resolves the identical scope ``start()`` would from the identical
+        inputs (``_resolve_run_scope``) -- including its authority re-checks,
+        so access revoked between preview and submission is refused here the
+        same way ``start()`` refuses it -- then calls the single-library
+        engine's understanding pass under the SAME four-fact context
+        ``_execute`` installs for a real run: a participant override over the
+        resolved libraries, their just-frozen source ceilings, a throwaway
+        detached turn, and a ``FederatedRunPlan`` whose callbacks are never
+        invoked (see ``_preview_federated_plan``).
+
+        That last part is defensive rather than load-bearing today:
+        ``AskService.preview_reasoning_intent`` is documented CORPUS-BLIND
+        (``AskExecutionPort.preview_reasoning_intent``'s docstring says so
+        verbatim) -- it hands the question and history straight to
+        ``plan_query_intent``, which never reads a notebook, a mount table or
+        the participant override, so the peer-mode context this installs is
+        never actually read on this path. Installing it anyway is what keeps
+        that true by CONSTRUCTION rather than by one function's current
+        implementation: if the understanding step ever grows a corpus-aware
+        step, it inherits the resolved participant set for free instead of
+        silently reading the nominal active's own mount table.
+
+        No job row, no conversation row and no store write happen here: this
+        is read-only end to end, all the way down to
+        ``preview_reasoning_intent`` itself, which issues no federated call.
+        """
+        conversation, _scope, ids, _allowed, source_ceiling, full_history, user_history = (
+            self._resolve_run_scope(payload, user_id, allowed_notebook_ids, authority_check)
+        )
+        nominal_active = ids[0]
+        override = ParticipantOverride(
+            notebook_ids=tuple(ids), tiers={}, attested_actor_id=user_id,
+        )
+        turn = DetachedAskTurn(
+            conversation_id=conversation.id if conversation else "gconv-" + uuid4().hex,
+            history=full_history, user_history=user_history,
+        )
+        plan = self._preview_federated_plan(cancel_event or threading.Event())
+        with global_ask_run(override, source_ceiling, turn, plan, nominal_active=nominal_active):
+            return self.ask.preview_reasoning_intent(
+                nominal_active, payload.question, user_history, cancel_event=cancel_event,
+            )
+
+    def _preview_federated_plan(self, cancel_event) -> FederatedRunPlan:
+        """A ``FederatedRunPlan`` whose callbacks are never invoked.
+
+        ``global_ask_run`` requires one of the four facts it installs
+        all-or-nothing (see its docstring), but ``preview_intent`` never makes
+        a federated call -- see ``preview_intent``'s own docstring for why.
+        This exists only so the plan can be installed in the same shape
+        ``_execute`` installs it in, borrowing the same shared retrieval pool
+        and fair-window accessor a real run would (never entered as an
+        executor, so borrowing it costs nothing) rather than fabricating a
+        second, untested plan shape for the preview path alone.
+        """
+        return FederatedRunPlan(
+            phase_timeout_seconds=float(self.settings.global_ask_retrieval_timeout_seconds),
+            notebook_timeout_seconds=float(self.settings.global_ask_notebook_timeout_seconds),
+            executor=self._retrieval_pool,
+            window=self._retrieval_window,
+            cancel=cancel_event,
+            on_library=lambda *_args: None,
+            on_evidence=lambda *_args: None,
+        )
+
     def start(self, payload: GlobalAskRequest, *, user_id, allowed_notebook_ids=None,
               submitted_via="web", authority_check=None):
         spec = self._resolve_mode(payload.mode)
@@ -401,33 +516,8 @@ class GlobalAskService:
                 raise GlobalAskError(429, "全局问答正在处理其他任务，请稍后重试。")
             self._pending += 1
         try:
-            conversation = self._conversation(payload.conversation_id, user_id) if payload.conversation_id else None
-            scope = payload.notebook_scope or (conversation.notebook_scope if conversation else GlobalNotebookScope())
-            rows = self.notebooks(user_id)
-            names = rows if isinstance(rows, dict) else {row.id: row.name for row in rows}
-            allowed = None if allowed_notebook_ids is None else frozenset(allowed_notebook_ids)
-            ids = list(scope.notebook_ids) if scope.mode == "include" else [
-                key for key in names if allowed is None or key in allowed
-            ]
-            if not ids:
-                raise GlobalAskError(422, "没有可访问的笔记本，请先创建笔记本并添加资料。")
-            if len(ids) > self.settings.global_ask_max_notebooks:
-                ceiling = self.settings.global_ask_max_notebooks
-                # ``all`` resolved past the ceiling: the caller (an MCP client
-                # above all) cannot narrow a scope it never sent, so the message
-                # has to say that an explicit selection is the way out.
-                raise GlobalAskError(422, (
-                    f"可访问的笔记本超过 {ceiling} 个，请选择不超过 {ceiling} 个笔记本后重试。"
-                    if scope.mode != "include" else
-                    f"本次范围超过 {ceiling} 个笔记本，请选择不超过 {ceiling} 个笔记本后重试。"
-                ))
-            self._check(ids, user_id, allowed, authority_check)
-            # Freeze every source ceiling before starting any retrieval or detached work.
-            source_rows = self.sources.visible_source_ids_by_notebook(ids)
-            source_ceiling = {notebook_id: frozenset(source_rows[notebook_id]) for notebook_id in ids}
-            self._check(ids, user_id, allowed, authority_check)
-            history, user_history = self._history(
-                conversation, ids, user_id, allowed, authority_check,
+            conversation, scope, ids, allowed, source_ceiling, history, user_history = (
+                self._resolve_run_scope(payload, user_id, allowed_notebook_ids, authority_check)
             )
             job = GlobalAskJob(
                 job_id="gask-" + uuid4().hex,
