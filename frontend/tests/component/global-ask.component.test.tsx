@@ -9,6 +9,7 @@ import GlobalAskWorkspace from "../../app/ask/global-ask-workspace.tsx";
 import { GlobalAskLauncher } from "../../app/ask/global-ask-launcher.tsx";
 import { AnswerView } from "../../app/answer-panel.tsx";
 import { useRootModalCoordinator } from "../../app/use-root-modal-coordinator.ts";
+import { STOPPED_TURN_TEXT } from "../../app/stopped-turn.tsx";
 import type { GlobalConversation, GlobalConversationDetail, GlobalJob, GlobalScope } from "../../app/global-ask-api.ts";
 import type { QueryIntentContract } from "../../app/ask-intent-model.ts";
 import type { AskResponse, NotebookSummary } from "../../app/workspace-model.ts";
@@ -193,7 +194,7 @@ test("a minimized chat keeps polling without cancellation and Escape restores th
   expect(api.cancel).not.toHaveBeenCalled();
   await waitFor(() => expect(api.poll).toHaveBeenCalledTimes(1), { timeout: 2500 });
   fireEvent.click(screen.getByRole("button", { name: "打开全局问答" }));
-  expect(screen.getByText("已停止回答，可以修改问题后继续。")).toBeTruthy();
+  expect(screen.getByText(STOPPED_TURN_TEXT)).toBeTruthy();
 });
 
 test("unchanged progress backs polling off, while new progress restores the short interval", async () => {
@@ -506,9 +507,11 @@ test("denied history blocks submission, including an MCP conversation deep link"
 test("late running poll cannot resurrect an explicitly cancelled turn", async () => {
   const pending = deferred<GlobalJob>();
   window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
-  api.detail.mockResolvedValue(detail("conv-a", [job()]));
+  // 已有检索回执上屏：停止后这一轮留在对话里（情形一），迟到的轮询不得把它复活。
+  const progressed = { ...job(), searched_notebook_ids: ["nb-0"] };
+  api.detail.mockResolvedValue(detail("conv-a", [progressed]));
   api.poll.mockReturnValue(pending.promise);
-  api.cancel.mockResolvedValue(job("cancelled"));
+  api.cancel.mockResolvedValue({ ...progressed, status: "cancelled" });
   const { result } = renderHook(() => useGlobalAsk());
   await waitFor(() => expect(result.current.running).toBeTruthy());
   vi.useFakeTimers();
@@ -516,7 +519,8 @@ test("late running poll cannot resurrect an explicitly cancelled turn", async ()
   act(() => result.current.retryPoll());
   await act(async () => { await vi.advanceTimersByTimeAsync(1200); });
   expect(api.poll).toHaveBeenCalledTimes(1);
-  await act(async () => { await result.current.stop(); pending.resolve(job()); });
+  await act(async () => { await result.current.stop(); pending.resolve(progressed); });
+  expect(api.cancel).toHaveBeenCalledWith(progressed.job_id, false);
   expect(result.current.turns[0].status).toBe("cancelled");
   expect(result.current.running).toBeUndefined();
 });
@@ -623,7 +627,9 @@ test.each(["other conversation", "failed deletion"] as const)("a pending submit 
   });
   expect(window.location.search).toBe("?conversation_id=conv-a");
   expect(input).toBeDisabled();
-  expect(input).toHaveValue("仍然有效的问题");
+  // 问题在点击当下就上屏（pending 轮），输入框随之清空。
+  expect(input).toHaveValue("");
+  expect(screen.getByText("仍然有效的问题")).toBeTruthy();
   if (scenario === "failed deletion") expect(screen.getByText("操作失败，请重试")).toBeTruthy();
   else expect(screen.queryByRole("button", { name: "对话 conv-b" })).toBeNull();
   fireEvent.submit(input.closest("form")!);
@@ -1259,6 +1265,161 @@ test("cancelling the understanding step after the stream returned still creates 
   });
   expect(api.ask).not.toHaveBeenCalled();
   await waitFor(() => expect(result.current.intentChecking).toBe(false));
+});
+
+// ---- 提交与停止：与笔记本内问答同一套风格（规则见 app/stopped-turn.tsx）----
+
+test("the question is on screen the moment it is sent, before the job exists", async () => {
+  const submission = deferred<GlobalJob>();
+  api.ask.mockReturnValue(submission.promise);
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  act(() => result.current.setDraft("立即上屏的问题"));
+  await act(async () => { void result.current.submit(); });
+  expect(result.current.pending?.question).toBe("立即上屏的问题");
+  expect(result.current.draft).toBe("");
+  expect(result.current.turns).toEqual([]);
+  await act(async () => { submission.resolve({ ...job(), question: "立即上屏的问题" }); });
+  expect(result.current.pending).toBeNull();
+  expect(result.current.turns.map((turn) => turn.question)).toEqual(["立即上屏的问题"]);
+});
+
+test("the understanding step runs live under the pending question and is handed to the job", async () => {
+  const understanding = deferred<QueryIntentContract>();
+  let heartbeat: ((elapsed: number) => void) | undefined;
+  api.intent.mockImplementation((_q: string, _c: unknown, _s: unknown, _signal: unknown, onHeartbeat: (elapsed: number) => void) => {
+    heartbeat = onHeartbeat;
+    return understanding.promise;
+  });
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  act(() => result.current.selectMode("reasoning"));
+  act(() => result.current.setDraft("请逐步比较"));
+  await act(async () => { void result.current.submit(); });
+  expect(result.current.pending?.trace.map((step) => step.step_type)).toEqual(["intent"]);
+  act(() => heartbeat?.(2500));
+  expect(result.current.pending?.trace).toHaveLength(1);
+  expect(result.current.pending?.trace[0].duration_ms).toBe(2500);
+  await act(async () => { understanding.resolve(clearContract("请逐步比较")); });
+  await waitFor(() => expect(result.current.turns).toHaveLength(1));
+  const seed = result.current.traceSeeds[result.current.turns[0].job_id];
+  expect(seed.map((step) => step.summary)).toEqual(["已理解问题"]);
+  // 交接时摘掉耗时：后端回放的 intent 步才是计时的那一份。
+  expect(seed[0].duration_ms).toBeUndefined();
+});
+
+test("stopping during understanding returns the question to the input and leaves no turn", async () => {
+  api.intent.mockImplementation((_q: string, _c: unknown, _s: unknown, signal: AbortSignal) => new Promise((_, reject) => {
+    signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+  }));
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  act(() => result.current.selectMode("reasoning"));
+  act(() => result.current.setDraft("还没想好的问题"));
+  await act(async () => { void result.current.submit(); });
+  await waitFor(() => expect(result.current.intentChecking).toBe(true));
+  await act(async () => { await result.current.stop(); });
+  await waitFor(() => expect(result.current.intentChecking).toBe(false));
+  expect(result.current.draft).toBe("还没想好的问题");
+  expect(result.current.pending).toBeNull();
+  expect(result.current.error).toBe("");
+  expect(api.ask).not.toHaveBeenCalled();
+});
+
+test("stopping before the submission returns cancels and discards the job once it exists", async () => {
+  const submission = deferred<GlobalJob>();
+  api.ask.mockReturnValue(submission.promise);
+  api.cancel.mockResolvedValue({ ...job("cancelled"), question: "提交途中按了停止" });
+  const { result } = renderHook(() => useGlobalAsk({ syncUrl: false }));
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  act(() => result.current.setDraft("提交途中按了停止"));
+  await act(async () => { void result.current.submit(); });
+  await act(async () => { await result.current.stop(); });
+  expect(result.current.stopping).toBe(true);
+  expect(api.cancel).not.toHaveBeenCalled();
+  await act(async () => { submission.resolve({ ...job(), question: "提交途中按了停止" }); });
+  expect(api.cancel).toHaveBeenCalledWith("job-conv-a", true);
+  expect(result.current.turns).toEqual([]);
+  expect(result.current.conversationId).toBe("");
+  expect(result.current.draft).toBe("提交途中按了停止");
+  expect(result.current.stopping).toBe(false);
+});
+
+test("stopping a job that has shown nothing discards it and returns the question", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [job()]));
+  api.poll.mockReturnValue(new Promise(() => {}));
+  api.cancel.mockResolvedValue(job("cancelled"));
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+  await act(async () => { await result.current.stop(); });
+  expect(api.cancel).toHaveBeenCalledWith("job-conv-a", true);
+  expect(result.current.turns).toEqual([]);
+  expect(result.current.draft).toBe("共同问题是什么？");
+  // 这条问题开出来的会话随它一起丢弃：本地退回「还没有会话」。
+  expect(result.current.conversationId).toBe("");
+  expect(window.location.search).toBe("");
+  expect(result.current.conversations).toEqual([]);
+});
+
+test("a follow-up stopped before any output keeps the conversation and its earlier turns", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  const earlier = { ...job("done"), job_id: "job-earlier", answer: standardAnswer() };
+  api.detail.mockResolvedValue(detail("conv-a", [earlier, job()]));
+  api.poll.mockReturnValue(new Promise(() => {}));
+  api.cancel.mockResolvedValue(job("cancelled"));
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+  await act(async () => { await result.current.stop(); });
+  expect(result.current.turns.map((turn) => turn.job_id)).toEqual(["job-earlier"]);
+  expect(result.current.conversationId).toBe("conv-a");
+});
+
+test("a job stopped mid-process stays, can be edited, and the next question replaces it", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  const progressed = { ...job(), trace: [{ step_type: "search", summary: "初检索得到 19 个候选", detail: {} }] };
+  api.detail.mockResolvedValue(detail("conv-a", [progressed]));
+  api.poll.mockReturnValue(new Promise(() => {}));
+  api.cancel.mockResolvedValue({ ...progressed, status: "cancelled" });
+  const replacement = deferred<GlobalJob>();
+  api.ask.mockReturnValue(replacement.promise);
+  render(<GlobalAskPage />);
+  fireEvent.click(await screen.findByRole("button", { name: "停止" }));
+  await waitFor(() => expect(api.cancel).toHaveBeenCalledWith("job-conv-a", false));
+  // 情形一：记录留在对话里，问题不弹回输入框。
+  expect(await screen.findByText(STOPPED_TURN_TEXT)).toBeTruthy();
+  const input = screen.getByRole("textbox", { name: "输入问题" });
+  expect(input).toHaveValue("");
+  expect(screen.getByText("初检索得到 19 个候选")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "编辑问题" }));
+  expect(input).toHaveValue("共同问题是什么？");
+  expect(screen.getByText(STOPPED_TURN_TEXT)).toBeTruthy();
+  fireEvent.change(input, { target: { value: "改好的问题" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+  await waitFor(() => expect(api.ask).toHaveBeenCalledTimes(1));
+  expect(api.ask.mock.calls[0][0].replaces_job_id).toBe("job-conv-a");
+  // 新问题一上屏，旧记录就让位。
+  expect(screen.queryByText(STOPPED_TURN_TEXT)).toBeNull();
+  expect(screen.getByText("改好的问题")).toBeTruthy();
+  await act(async () => { replacement.resolve({ ...job(), job_id: "job-new", question: "改好的问题" }); });
+  expect(screen.queryByText("共同问题是什么？")).toBeNull();
+  expect(screen.getByText("改好的问题")).toBeTruthy();
+});
+
+test("a failed re-send brings the stopped record back and returns the new question", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  const stopped = { ...job("cancelled"), searched_notebook_ids: ["nb-0"] };
+  api.detail.mockResolvedValue(detail("conv-a", [stopped]));
+  api.ask.mockRejectedValue(new Error("network"));
+  render(<GlobalAskPage />);
+  expect(await screen.findByText(STOPPED_TURN_TEXT)).toBeTruthy();
+  const input = screen.getByRole("textbox", { name: "输入问题" });
+  fireEvent.change(input, { target: { value: "另一个问题" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+  await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+  expect(screen.getByText(STOPPED_TURN_TEXT)).toBeTruthy();
+  expect(input).toHaveValue("另一个问题");
 });
 
 test("citation badge shows the owning notebook for every citation", async () => {
