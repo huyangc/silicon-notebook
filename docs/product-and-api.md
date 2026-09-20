@@ -202,6 +202,11 @@ submission uses; it creates no job, no conversation and no row. The streaming va
 and the authority recheck before the first frame, so a 404/422 stays a real status code instead of an error
 frame inside a 200. A client that disconnects cancels the understanding call.
 `GET /jobs/{job_id}` reads progress or the answer; `POST /jobs/{job_id}/cancel` stops execution;
+`POST /jobs/{job_id}/feedback` (body `{rating: "useful" | "not_useful"}`) records one 👍/👎 for a
+finished job owned by the caller, first write wins -- a second submission on the same job does not
+overwrite the first; the rating lives in that job's `payload_json` under `feedback`, never in the
+in-notebook `feedback` table, so it does not surface in the notebook analytics panel or any
+per-notebook feedback rollup.
 `GET /jobs/{job_id}/citations/{element_id}` reads only an original element actually cited by that task.
 `GET /conversations` and `GET /conversations/{id}` accept `limit`/`offset`, with `has_more`/`next_offset`
 on detail pages; `PATCH /conversations/{id}` renames and `DELETE` removes a conversation. Conversations

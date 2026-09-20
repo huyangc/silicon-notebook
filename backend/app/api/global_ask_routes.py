@@ -10,7 +10,7 @@ from app.api.task_stream import task_stream_response
 from app.models.identity import UserProfile
 from app.models.ask import QueryIntentContract
 from app.models.global_ask import (
-    GlobalAskIntentPreviewRequest, GlobalAskRequest, GlobalAskJob,
+    GlobalAskFeedbackRequest, GlobalAskIntentPreviewRequest, GlobalAskRequest, GlobalAskJob,
     GlobalConversationSummary, GlobalConversationDetail,
     GlobalConversationRename, GLOBAL_ASK_PAGE_SIZE, GLOBAL_ASK_PAGE_MAX,
 )
@@ -138,6 +138,11 @@ def get_global_ask_job(job_id: str, user: UserProfile = Depends(get_current_user
 @router.post("/jobs/{job_id}/cancel", response_model=GlobalAskJob)
 def cancel_global_ask_job(job_id: str, user: UserProfile = Depends(get_current_user)):
     return _call(global_ask_service().cancel, job_id, user_id=user.id)
+
+
+@router.post("/jobs/{job_id}/feedback", response_model=GlobalAskJob)
+def submit_global_ask_feedback(job_id: str, payload: GlobalAskFeedbackRequest, user: UserProfile = Depends(get_current_user)):
+    return _call(global_ask_service().submit_feedback, job_id, payload.rating, user_id=user.id)
 
 
 @router.get("/jobs/{job_id}/citations/{element_id}", response_model=SourceElement)

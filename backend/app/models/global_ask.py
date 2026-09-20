@@ -74,6 +74,10 @@ class GlobalAskIntentPreviewRequest(BaseModel):
         return value
 
 
+class GlobalAskFeedbackRequest(BaseModel):
+    rating: Literal["useful", "not_useful"]
+
+
 class GlobalAskSkippedNotebook(BaseModel):
     notebook_id: str
     reason: str
@@ -135,6 +139,12 @@ class GlobalAskJob(BaseModel):
     retrieval_effort: RetrievalEffort = DEFAULT_RETRIEVAL_EFFORT
     trace: list[TraceStep] = Field(default_factory=list)
     answer: AskResponse | None = None
+    # "" (未反馈) / "useful" / "not_useful". A row persisted before this field
+    # existed has no key at all -- the default reads back as "", the same
+    # "nothing sent yet" state a brand-new done job starts in. First write
+    # wins (see ``GlobalAskStore.set_feedback``): once non-empty it never
+    # changes, matching the disabled-once-clicked button in the interface.
+    feedback: str = ""
 
 
 # D1-1 read-side projections: prefer the new ``answer``/``trace`` shape and

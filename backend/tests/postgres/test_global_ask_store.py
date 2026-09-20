@@ -189,6 +189,56 @@ def test_progress_patch_preserves_payload_and_cannot_overwrite_terminal_state(st
     assert store.job(value.job_id, "user-a").searched_notebook_ids == ["nb-a"]
 
 
+def test_set_feedback_first_write_wins_and_gates_owner_and_status(store):
+    """PG twin of the SQLite store contract in
+    ``backend/tests/test_global_ask_store.py``: ownership, completion, and
+    first-write-wins are all expressed in the UPDATE's own WHERE clause
+    (``payload_json::jsonb->>'feedback'``), not a read-then-write from
+    Python."""
+    value = job()
+    store.create(value, "user-a", "request-a", "payload", "web", new_conversation=True)
+
+    # Not yet done: rejected.
+    assert store.set_feedback(value.job_id, "user-a", "useful") is None
+
+    value.status = "done"
+    assert store.save(value, "user-a")
+
+    # Foreign user: rejected, row untouched.
+    assert store.set_feedback(value.job_id, "user-b", "useful") is None
+    assert store.job(value.job_id, "user-a").feedback == ""
+
+    # Missing job: rejected.
+    assert store.set_feedback("no-such-job", "user-a", "useful") is None
+
+    updated = store.set_feedback(value.job_id, "user-a", "useful")
+    assert updated.feedback == "useful"
+    assert store.job(value.job_id, "user-a").feedback == "useful"
+
+    # First write wins: a second, different rating does not overwrite it.
+    again = store.set_feedback(value.job_id, "user-a", "not_useful")
+    assert again.feedback == "useful"
+    assert store.job(value.job_id, "user-a").feedback == "useful"
+
+
+def test_set_feedback_updates_a_legacy_row_with_no_feedback_key_at_all(store):
+    """A row persisted before this field existed has no ``feedback`` key in
+    its JSONB at all -- the PG write-side empty check
+    (``->>'feedback' IS NULL OR ... = ''``) must treat that the same as an
+    explicit empty string."""
+    value = job()
+    store.create(value, "user-a", "request-a", "payload", "web", new_conversation=True)
+    value.status = "done"
+    assert store.save(value, "user-a")
+    with store.database.write() as db:
+        db.execute(
+            "UPDATE global_ask_jobs SET payload_json = (payload_json::jsonb - 'feedback')::text WHERE id=%s",
+            (value.job_id,),
+        )
+    updated = store.set_feedback(value.job_id, "user-a", "useful")
+    assert updated is not None and updated.feedback == "useful"
+
+
 def test_postgres_global_batch_authority_and_source_ceiling(store, monkeypatch):
     from contextlib import contextmanager
     import hashlib

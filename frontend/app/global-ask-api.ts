@@ -66,6 +66,10 @@ export type GlobalJob = {
   answer?: AskResponse | null;
   /** 旧的跨库合成回答。**只有历史轮次才有**；新作业恒为 null。 */
   response: GlobalAnswer | null;
+  /** 这条回答收到的反馈:"" 未反馈,否则 "useful" / "not_useful"。首次写入
+   *  为准——一旦非空就不会再变,与按钮「点过就禁用」的界面契约一致。旧作业
+   *  没有这个字段,读到时按未反馈处理。 */
+  feedback?: string;
 };
 export type GlobalConversation = {
   id: string;
@@ -139,6 +143,10 @@ export const getGlobalJob = (id: string) =>
   requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}`, options);
 export const cancelGlobalJob = (id: string) =>
   requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}/cancel`, { ...options, method: "POST" });
+export const submitGlobalFeedback = (jobId: string, rating: "useful" | "not_useful") =>
+  requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(jobId)}/feedback`, {
+    ...options, method: "POST", body: JSON.stringify({ rating }),
+  });
 // 引用原文全文的读取端点（`GET /global-ask/jobs/{job}/citations/{element}`）在后端
 // 保留，MCP 侧仍在用。浏览器这一侧不再有调用方：引用小卡片直接用回答里已经带着的
 // anchors/citations（snippet / quoted_span），不为一张卡片再多打一次全文。

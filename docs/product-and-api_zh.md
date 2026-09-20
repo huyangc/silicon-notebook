@@ -207,6 +207,10 @@ HTTP 入口均位于 `/api/global-ask`，要求登录：`POST /ask` 返回可轮
 把范围解析与鉴权放在第一帧之前，所以 404/422 仍是真实状态码，而不是 200 里的一个错误帧。
 客户端断开即取消该次理解调用。
 `GET /jobs/{job_id}` 读取进度或答案；`POST /jobs/{job_id}/cancel` 停止执行；
+`POST /jobs/{job_id}/feedback`（请求体 `{rating: "useful" | "not_useful"}`）为已完成、
+属于当前用户的任务记一次 👍/👎，首次写入为准——同一任务的第二次反馈不覆盖第一次；
+反馈存在该任务 `payload_json` 的 `feedback` 字段里，不进笔记本内问答的 `feedback` 表，
+因此不出现在笔记本分析面板或按笔记本聚合的反馈统计中。
 `GET /jobs/{job_id}/citations/{element_id}` 只读取该任务实际引用的原文元素。
 `GET /conversations` 与 `GET /conversations/{id}` 支持 `limit`/`offset` 分页，
 后者返回 `has_more`/`next_offset`；`PATCH /conversations/{id}` 重命名，`DELETE` 删除。
