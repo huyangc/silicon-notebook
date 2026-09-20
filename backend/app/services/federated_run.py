@@ -201,6 +201,16 @@ class FederatedRunPlan:
        a single federated call, so treating absence as refusal would void every
        such answer; the consumer holds those citations to the frozen source
        ceiling and to the element still existing under the same source.
+    4. **A citation names ONE element; the passage behind it may rest on
+       several.**  ``on_evidence_groups`` is what says so.  It publishes, for
+       each hit this call selected, the WHOLE tuple of element ids that hit was
+       assembled from, while the citation the reader ends up with carries only
+       the first of them.  The others are fingerprinted by rule 3 like any
+       other selected element, but without the grouping nothing downstream
+       could tell that a change in element three of a five-element passage
+       falsifies the citation that names element one.  The consumer folds the
+       groups into a sibling map and re-checks a citation's siblings beside the
+       citation itself.
 
     Callables rather than objects: this is a leaf module, and typing these
     fields would drag the federation's and the job's types into it and create
@@ -218,6 +228,11 @@ class FederatedRunPlan:
     # reason the callables above are: this is a leaf module. Last and
     # defaulted, so every existing construction of this plan keeps working.
     call_scope: Any = None
+    # ``Callable[[Iterable[tuple[str, ...]]], None] | None`` -- rule 4 above.
+    # ``None`` means NOBODY CONSUMES the grouping and the producer must not
+    # call it, which is what keeps a plan assembled before this field existed
+    # (and every test double shaped like one) working unchanged.
+    on_evidence_groups: Any = None
 
 
 _DETACHED_TURN: "ContextVar[DetachedAskTurn | None]" = ContextVar(

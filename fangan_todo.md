@@ -158,6 +158,28 @@
 
 ### 检索
 
+- [ ] **全局引用复核：非联邦通道引用的检索时刻存活快照**。`GlobalAskService
+      ._validate_citations` 的「缺席 + 现读不存在 → 放行」那一支是**刻意保留的现状**
+      （codex #755 第 2 轮 P2，裁决为不改并登记）。codex 要求「引用指向真实 source
+      element 而现读缺失就拒」，不能只这么做：非空的 `Citation.element_id` 并不保证那一行
+      在 run 开始时是活的——KG 对象的 `evidence[].element_id` 在来源重新入库（元素 id 重发）
+      之后会变成悬空 id，`knowledge_store._enrich_evidence` 原样把它交回给
+      `evidence_context.knowledge_context`（文本回落 `quoted_span`），这也正是
+      `evidence_context.collection_item_citations` 要「挑第一条活的元素」的原因；单库问答
+      照样发布这类引用。一律拒绝会把一批**本来就这样**的既有可答问题整份作废，而且用户读到
+      的那句「引用原文在回答期间发生了变化」是假的。
+      **代价（明写）**：合成窗口内被删的非联邦引用会发布一条打不开的引用卡。
+      **真正的修法**：让四个不经联邦 chunk 通道的引用生产者——文档概览
+      （`document_source_overview`）、集合枚举（`collection_enumeration` /
+      `evidence_context.collection_item_citations`）、KG 对象
+      （`evidence_context.knowledge_context`）、`follow_chain`——也在**检索时刻**经同一道
+      接缝 `FederatedRunPlan.on_evidence`（三态：快照 / `None` / 缺席）登记一份存活快照；
+      有了快照，这一支就退化成既有的「快照存在 + 现读缺失 → changed」，不需要新判据。
+      四个生产者各自改动，单独立项。
+      现状由 `tests/test_global_ask_engine_parity.py::
+      test_a_non_federated_citation_whose_element_vanished_is_still_delivered` 钉住：改成
+      拒绝而不补快照，那条用例会红。
+
 - [ ] **「中文问句检索英文语料首轮空」的三条次因（此前未登记）**。主因——冻结来源范围
       关掉 chunk 向量通道——已修（`docs/superpowers/specs/2026-09-07-scoped-chunk-vector-lane-design_zh.md`）；
       排查过程中另外过了三条，逐条登记如下：

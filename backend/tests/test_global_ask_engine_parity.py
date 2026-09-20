@@ -65,11 +65,15 @@ class _FakeAsk:
     """
 
     def __init__(self, *, rounds=((),), citations=(), evidence=None,
-                 trace=(), extension_modes=(), on_run=None):
+                 evidence_groups=None, trace=(), extension_modes=(),
+                 on_run=None):
         # 每一轮 = 一次联邦调用,内容是 ``[(notebook_id, LibraryOutcome), ...]``。
         self.rounds = [list(row) for row in rounds]
         self.citations = list(citations)
         self.evidence_rounds = evidence
+        # 每一轮入选的多元素段落:``[(element_id, ...), ...]``。一条引用只带
+        # 段落的**首个** element,这一列才说出「这条引用背后还靠着哪些」。
+        self.evidence_group_rounds = evidence_groups
         self.trace = list(trace)
         self.extension_modes = tuple(extension_modes)
         self.on_run = on_run
@@ -118,6 +122,8 @@ class _FakeAsk:
                     continue
                 for notebook_id_, outcome in receipts:
                     plan.on_library(notebook_id_, outcome)
+                # 与生产者同序:分组先于指纹(``_report_evidence``)。
+                plan.on_evidence_groups(self._groups_for(index))
                 plan.on_evidence(self._evidence_for(index))
             if self.on_run is not None:
                 self.on_run(self)
@@ -137,6 +143,13 @@ class _FakeAsk:
         if isinstance(self.evidence_rounds, dict):
             return self.evidence_rounds if index == 0 else {}
         return self.evidence_rounds[index]
+
+    def _groups_for(self, index):
+        if self.evidence_group_rounds is None:
+            return ()
+        return self.evidence_group_rounds[index] if index < len(
+            self.evidence_group_rounds
+        ) else ()
 
 
 def _ok(*notebook_ids):
@@ -912,6 +925,131 @@ def test_a_deleted_element_is_refused_not_mistaken_for_a_graph_object(service):
 
     assert result.answer.citations == []
     assert "变化" in result.answer.answer
+
+
+def _passage_service(service, *, evidence, fingerprints):
+    """被引段落跨两个 element:引用只带首个,分组说出第二个。
+
+    ``build_chunks`` 把碎元素合成 ~600 字,所以多数 chunk 跨多个元素;
+    ``evidence_context.chunk_citations`` 只把 ``element_ids[0]`` 写进
+    ``Citation.element_id``。第二个 element 的原文同样进了提示词、同样支撑了
+    答案,复核却看不见它——这正是分组接缝要补的那一半。
+    """
+    service.ask = _FakeAsk(
+        rounds=[_ok(*_LIBRARIES)], citations=[_citation("b")],
+        evidence=evidence, evidence_groups=[[("e-b-1", "e-b-2")]],
+    )
+    service.test_visible["b"] = {"s-b"}
+    service.test_fingerprints.clear()
+    service.test_fingerprints.update(fingerprints)
+
+
+def test_a_passage_whose_second_element_changed_voids_the_answer(service):
+    """被引段落的第二个 element 在答案产生后被改 → 整份作废。
+
+    引用名义上指向 ``e-b-1``,而读者看到的那段原文里有一半来自 ``e-b-2``。
+    只复核被引的那一个,等于对「引文中段被人改掉」这件事永久失明。
+    """
+    _passage_service(
+        service,
+        evidence={"e-b-1": ("s-b", "前半"), "e-b-2": ("s-b", "后半")},
+        fingerprints={"e-b-1": ("s-b", "前半"), "e-b-2": ("s-b", "改过的后半")},
+    )
+
+    result = _run(service)
+
+    assert result.answer.citations == []
+    assert "变化" in result.answer.answer
+    assert service.test_events[-1]["reason"] == "changed"
+
+
+def test_a_passage_whose_second_element_is_unreadable_is_refused(service):
+    """段落的第二个 element 指纹读不到 → ``unreadable``,与被引元素同一口径。
+
+    三态合同对同一次检索里取出的每一个 element 都成立:``None`` 是声明出来的
+    拒绝,不因为它不是引用卡上印的那一个就降级成「不管」。
+    """
+    _passage_service(
+        service,
+        evidence={"e-b-1": ("s-b", "前半"), "e-b-2": None},
+        fingerprints={"e-b-1": ("s-b", "前半"), "e-b-2": ("s-b", "后半")},
+    )
+
+    result = _run(service)
+
+    assert result.answer.citations == []
+    assert service.test_events[-1]["reason"] == "unreadable"
+
+
+def test_a_passage_whose_elements_all_still_hold_is_grounded(service):
+    """对照臂:整段每一个 element 都没动 → 照常交付。
+
+    没有这一条,上面两条用「凡是多元素段落一律作废」也能全绿。
+    """
+    _passage_service(
+        service,
+        evidence={"e-b-1": ("s-b", "前半"), "e-b-2": ("s-b", "后半")},
+        fingerprints={"e-b-1": ("s-b", "前半"), "e-b-2": ("s-b", "后半")},
+    )
+
+    result = _run(service)
+
+    assert result.answer.grounded is True
+    assert [row.element_id for row in result.answer.citations] == ["e-b-1"]
+    assert not [row for row in service.test_events
+                if row.get("kind") == "global_ask_citations_void"]
+
+
+def test_a_single_element_passage_is_checked_exactly_as_before(service):
+    """单元素 chunk 不受分组影响:没有 sibling,判据就是原来那一条。
+
+    分组只发长度 ≥ 2 的段落(``chunk_federation._evidence_groups``),所以
+    单元素路径连一张 sibling 表都不会有。
+    """
+    service.ask = _FakeAsk(
+        rounds=[_ok(*_LIBRARIES)], citations=[_citation("b")],
+        evidence={"e-b-1": ("s-b", "原文")}, evidence_groups=[[("e-b-1",)]],
+    )
+    service.test_visible["b"] = {"s-b"}
+    service.test_fingerprints.clear()
+    service.test_fingerprints["e-b-1"] = ("s-b", "原文")
+
+    result = _run(service)
+
+    assert result.answer.grounded is True
+    assert [row.element_id for row in result.answer.citations] == ["e-b-1"]
+
+
+def test_a_non_federated_citation_whose_element_vanished_is_still_delivered(service):
+    """⛔ 钉住现状,不是钉住「对」:缺席 + 现读不存在 = 放行。
+
+    codex #755 第 2 轮 P2 要求在这里拒绝。**不改**,理由记在
+    ``fangan_todo.md`` 检索一节「全局引用复核:非联邦通道引用的检索时刻存活
+    快照」:非空的 ``Citation.element_id`` 并不保证这一行在 run 开始时是活的
+    ——KG 对象的 ``evidence[].element_id`` 在来源重新入库(元素 id 重发)之后
+    会变成悬空 id,``knowledge_store._enrich_evidence`` 原样交回它,这也正是
+    ``evidence_context.collection_item_citations`` 要「挑第一条活的元素」的
+    原因。只凭现读缺失就拒,会把一批**本来就这样**的既有可答问题整份作废,
+    而且文案(「引用原文在回答期间发生了变化」)是假的。
+
+    真正的修法是让四个非联邦生产者(文档概览 / 集合枚举 / KG 对象 /
+    follow_chain)也在**检索时刻**经 ``plan.on_evidence`` 登记一份存活快照;
+    在那之前,合成窗口内被删的非联邦引用会发布一条打不开的引用卡,这是明写的
+    代价。改成拒绝而不补快照 = 这条用例变红。
+    """
+    service.ask = _FakeAsk(
+        rounds=[[]], citations=[_citation("b")], evidence=None,
+    )
+    service.test_visible["b"] = {"s-b"}
+    service.test_fingerprints.clear()
+
+    result = _run(service)
+
+    assert result.status == "done"
+    assert result.answer.grounded is True
+    assert [row.element_id for row in result.answer.citations] == ["e-b-1"]
+    assert not [row for row in service.test_events
+                if row.get("kind") == "global_ask_citations_void"]
 
 
 def test_every_citation_names_its_notebook(service):

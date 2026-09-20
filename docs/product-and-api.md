@@ -160,7 +160,11 @@ Only completed, scope-compatible turns enter follow-up context through shared qu
 resolve references but are never evidence. Submission freezes each participant's currently visible source list,
 and once the answer exists every citation is rechecked against it: the source must still be inside that frozen
 list and still visible, and an element that travelled the federated chunk channel must additionally carry the
-same text fingerprint it had at retrieval time and still belong to the same source. A citation that never
+same text fingerprint it had at retrieval time and still belong to the same source. That fingerprint check
+covers the WHOLE passage behind the citation, not only the element the citation names: a passage is assembled
+from as many source elements as it took to fill it, the citation card carries the first of them, and the rest
+are rechecked beside it — so an edit to the middle of a quoted passage voids the answer exactly as an edit to
+its opening does. A citation that never
 travelled that channel (document overview, collection enumeration, a graph object) is held to the ceiling,
 visibility and source ownership alone. If any citation fails, the WHOLE answer is voided and replaced by the
 Chinese retry notice: ungrounded, with citations and evidence attachments cleared and the reasoning trace kept.
