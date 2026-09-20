@@ -1055,12 +1055,19 @@ test("reasoning submission goes through intent review", async () => {
   // 审阅卡出来之前不得提交。
   const card = await screen.findByRole("region", { name: "确认逐步推理的问题理解" });
   expect(api.ask).not.toHaveBeenCalled();
-  const confirm = within(card).getByRole("button", { name: "确认并开始检索" });
-  expect(confirm).toBeDisabled();
-  fireEvent.change(within(card).getByRole("textbox", { name: "要比较哪几个体系？的补充答案" }), {
-    target: { value: "磷酸铁锂与三元" },
-  });
-  await waitFor(() => expect(confirm).toBeEnabled());
+  expect(within(card).getByRole("button", { name: "确认并开始检索" })).toBeDisabled();
+  // 不跨 await 攥节点：审阅卡挂载后有一个按 contract 清空回答的 effect，慢 runner 上
+  // 它会落在输入之后把回答冲掉，卡片重挂时先前取到的按钮还会变成永远 disabled 的
+  // 过期节点（#758 同文件另一条用例红过，这条在 #761 的 CI 上红了）。每一轮重新查询、
+  // 回答被冲掉就再填。
+  let confirm!: HTMLElement;
+  await waitFor(() => {
+    const current = screen.getByRole("region", { name: "确认逐步推理的问题理解" });
+    const box = within(current).getByRole("textbox", { name: "要比较哪几个体系？的补充答案" }) as HTMLTextAreaElement;
+    if (box.value !== "磷酸铁锂与三元") fireEvent.change(box, { target: { value: "磷酸铁锂与三元" } });
+    confirm = within(current).getByRole("button", { name: "确认并开始检索" });
+    expect(confirm).toBeEnabled();
+  }, { timeout: 5000 });
   fireEvent.click(confirm);
   await waitFor(() => expect(api.ask).toHaveBeenCalledTimes(1));
   const submitted = api.ask.mock.calls[0][0];
