@@ -13,11 +13,13 @@ class GlobalAskStore:
         self.marker = marker
         self._history_projection = (
             "payload_json::jsonb->>'question' AS question, "
-            "payload_json::jsonb->'response'->>'answer' AS answer, "
+            "COALESCE(payload_json::jsonb->'answer'->>'answer', "
+            "payload_json::jsonb->'response'->>'answer') AS answer, "
             "payload_json::jsonb->'resolved_notebook_ids' AS notebook_ids"
             if marker == "%s" else
             "json_extract(payload_json,'$.question') AS question, "
-            "json_extract(payload_json,'$.response.answer') AS answer, "
+            "COALESCE(json_extract(payload_json,'$.answer.answer'), "
+            "json_extract(payload_json,'$.response.answer')) AS answer, "
             "json_extract(payload_json,'$.resolved_notebook_ids') AS notebook_ids"
         )
 
