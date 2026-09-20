@@ -16,7 +16,8 @@ import GlobalAskPage from "../../app/ask/page.tsx";
 import { GlobalAskLauncher } from "../../app/ask/global-ask-launcher.tsx";
 import { useRootModalCoordinator } from "../../app/use-root-modal-coordinator.ts";
 import { humanizedError } from "../../app/errors.ts";
-import type { GlobalConversation, GlobalConversationDetail, GlobalJob } from "../../app/global-ask-api.ts";
+import { GLOBAL_ASK_PAGE_SIZE, type GlobalConversation, type GlobalConversationDetail, type GlobalJob } from "../../app/global-ask-api.ts";
+import { SHARE_SNAPSHOT_MAX_TURNS } from "../../app/conversation-share-disclosure.ts";
 import type { AskResponse, ConversationShareResponse, NotebookSummary } from "../../app/workspace-model.ts";
 
 const net = vi.hoisted(() => ({
@@ -44,20 +45,26 @@ const conversation = (id = "conv-a"): GlobalConversation => ({
   notebook_scope: { mode: "all" }, submitted_via: "web",
 });
 
-const answer = (answerId: string, memoryId = ""): AskResponse => ({
+const answer = (answerId: string, memoryId = "", assetId = ""): AskResponse => ({
   answer_id: answerId, conversation_id: "conv-a", conclusion: "跨库结论。",
-  answer: `跨库结论 ${answerId}。`, grounded: true, anchors: [], related_knowledge: [],
+  answer: `跨库结论 [k1]。`, grounded: true, related_knowledge: [],
+  anchors: [{
+    key: "k1", object_id: "", object_type: "element", label: "测试记录", name: "测试记录",
+    source_title: "测试记录", location_label: "第 2 页", source_id: "s1", element_id: "e1",
+    notebook_id: "nb-0", tier: "personal", snippet: "低温环境下，容量下降。",
+    ...(assetId ? { images: [{ element_id: "e1", asset_id: assetId, caption: "图 1" }] } : {}),
+  }],
   citations: memoryId
     ? [{ label: "1", source_id: "s1", element_id: "e1", location_label: "第 1 页", quoted_span: "原文片段", memory_id: memoryId }]
     : [],
   llm_mode: "chunk", completeness_notice: "回答仅使用本次命中的有限原文。",
 });
 
-const doneJob = (jobId: string, createdAt: string, memoryId = ""): GlobalJob => ({
+const doneJob = (jobId: string, createdAt: string, memoryId = "", assetId = ""): GlobalJob => ({
   job_id: jobId, conversation_id: "conv-a", status: "done", question: `问题 ${jobId}`,
   created_at: createdAt, notebook_scope: { mode: "all" }, resolved_notebook_ids: ["nb-0"],
   searched_notebook_ids: ["nb-0"], cited_notebook_ids: ["nb-0"], skipped_notebooks: [],
-  error: null, mode: "chunk", response: null, answer: answer(`answer-${jobId}`, memoryId),
+  error: null, mode: "chunk", response: null, answer: answer(`answer-${jobId}`, memoryId, assetId),
 });
 
 // 两条 done + 一条**未完成**。未完成那条没有可公开的回答，后端快照也不会包含它——
@@ -76,14 +83,27 @@ const SHARED = (throughId: string, at: string): ConversationShareResponse => ({
 });
 const NOT_SHARED = () => humanizedError("not shared", 404);
 
-const detailFor = (id: string): GlobalConversationDetail => ({
-  ...conversation(id), turns: turnsByConversation[id] ?? [], has_more: false, next_offset: null,
-});
+/** 后端分页语义的镜像：`offset 0` 是**最新**一页，每页内部升序，后续 offset 更早。
+ *  `loadMoreTurns` 把新取到的整页拼在已有序列之前，正是这个语义。 */
+const detailFor = (id: string, offset = 0): GlobalConversationDetail => {
+  const all = turnsByConversation[id] ?? [];
+  const end = Math.max(all.length - offset, 0);
+  const start = Math.max(end - GLOBAL_ASK_PAGE_SIZE, 0);
+  return {
+    ...conversation(id),
+    turns: all.slice(start, end),
+    has_more: start > 0,
+    next_offset: start > 0 ? offset + (end - start) : null,
+  };
+};
+/** 每个 offset 会不会翻车/翻不到头，由用例按需替换。 */
+let detailImpl: (id: string, offset: number) => Promise<GlobalConversationDetail>;
 
 beforeEach(() => {
   sharePaths = [];
   turnsByConversation = { "conv-a": [JOB_1, JOB_2, UNFINISHED] };
   Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: vi.fn() });
+  detailImpl = async (id, offset) => detailFor(id, offset);
   net.me.mockResolvedValue({ id: "user-1", ui_mode: "advanced" });
   net.notebooks.mockResolvedValue(notebooks);
   shareApi.get.mockRejectedValue(NOT_SHARED());
@@ -101,8 +121,10 @@ beforeEach(() => {
       return shareApi.get();
     }
     if (path.startsWith("/global-ask/conversations?")) return [conversation()];
-    const detail = /^\/global-ask\/conversations\/([^/?]+)\?/.exec(path);
-    if (detail) return detailFor(decodeURIComponent(detail[1]));
+    const detail = /^\/global-ask\/conversations\/([^/?]+)\?(.*)$/.exec(path);
+    if (detail) {
+      return detailImpl(decodeURIComponent(detail[1]), Number(new URLSearchParams(detail[2]).get("offset") || 0));
+    }
     throw new Error(`unexpected request: ${method} ${path}`);
   });
   net.requestVoid.mockImplementation(async (path: string, options: { method?: string } = {}) => {
@@ -242,12 +264,119 @@ test("切到别的会话后，上一条会话迟到的分享回执不写进新�
 });
 
 
+// --- 长会话：披露的数字必须覆盖**整条**会话，覆盖不了就不给数字 ----------------
+//
+// `offset 0` 是最新一页，所以只读第一页丢的是**最早**的轮次。用户点最新那条下面的
+// 分享时边界就在第一页里，`resolveShareBoundary` 正常解析、不走任何降级——于是抬头
+// 写「共 50 轮」而实际 70 轮，附图/记忆只数了最新 50 轮，而公开页会包含全部。这正是
+// 「披露数 ≥ 公开页实际」那条不变量的反面（评审 P1）。
+
+/** N 轮的长会话。最早那条（page 1 上）带一张附图与一条独有的个人记忆——只读第一页
+ *  时这两个数字都会静默缩水。 */
+function longConversation(count: number): GlobalJob[] {
+  return Array.from({ length: count }, (_, index) => doneJob(
+    `job-${index + 1}`,
+    `2026-09-19T01:${String(index).padStart(2, "0")}:00Z`,
+    index === 0 ? "m-oldest" : index === count - 1 ? "m-newest" : "",
+    index === 0 ? "asset-oldest" : "",
+  ));
+}
+
+/** 弹窗里一个数字都不该出现时的通用断言。 */
+function expectNoDisclosureNumbers() {
+  expect(screen.getByText(/公开页可能包含引用到的附图与个人记忆摘录（本次未能统计数量）/)).toBeInTheDocument();
+  expect(screen.queryByText(/本会话共 \d+ 轮/)).toBeNull();
+  expect(screen.queryByText(/张附图/)).toBeNull();
+  expect(screen.queryByText(/条你引用到的个人记忆摘录/)).toBeNull();
+}
+
+test("70 轮的会话：翻页取全，抬头与附图/记忆计数按 70 轮算", async () => {
+  turnsByConversation = { "conv-a": longConversation(70) };
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  render(<GlobalAskPage />);
+  const buttons = await screen.findAllByRole("button", { name: "分享到这条回答" });
+  // 界面本身仍然只渲染第一页（50 条）——披露取全与「加载更早的问答」是两码事。
+  expect(buttons).toHaveLength(GLOBAL_ASK_PAGE_SIZE);
+  fireEvent.click(buttons[buttons.length - 1]); // 最新那条：边界就在第一页里
+  await screen.findByText("分享会话");
+
+  expect(await screen.findByText(/分享至第 70 轮回答（本会话共 70 轮）/)).toBeInTheDocument();
+  // 最早那轮的附图与记忆都在第二页上：只读第一页时这两条会各少一个。
+  expect(screen.getByText(/公开页会包含 1 张附图/)).toBeInTheDocument();
+  expect(screen.getByText(/公开页会包含 2 条你引用到的个人记忆摘录/)).toBeInTheDocument();
+});
+
+test("取更早那页失败：一个数字都不给，只给两面都提的兜底文案", async () => {
+  turnsByConversation = { "conv-a": longConversation(70) };
+  detailImpl = async (id, offset) => {
+    if (offset > 0) throw new Error("更早的问答加载失败");
+    return detailFor(id, offset);
+  };
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  render(<GlobalAskPage />);
+  const buttons = await screen.findAllByRole("button", { name: "分享到这条回答" });
+  fireEvent.click(buttons[buttons.length - 1]);
+  await screen.findByText("分享会话");
+
+  await waitFor(() => expectNoDisclosureNumbers());
+  // 披露算不出不等于不能发布：expected 仍是用户点的那条作业。
+  fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
+  await waitFor(() => expect(shareApi.post).toHaveBeenCalledWith("job-70"));
+});
+
+test("翻到上界仍有更早的轮次：同样一个数字都不给", async () => {
+  turnsByConversation = { "conv-a": longConversation(60) };
+  // 永远报「还有更早的」——比公开快照上界还长的会话，披露没有可给的确数。
+  detailImpl = async (id, offset) => ({ ...detailFor(id, offset), has_more: true, next_offset: offset + GLOBAL_ASK_PAGE_SIZE });
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  render(<GlobalAskPage />);
+  const buttons = await screen.findAllByRole("button", { name: "分享到这条回答" });
+  fireEvent.click(buttons[buttons.length - 1]);
+  await screen.findByText("分享会话");
+
+  await waitFor(() => expectNoDisclosureNumbers());
+  // 翻页有硬上界，不会无限翻下去。
+  expect(SHARE_SNAPSHOT_MAX_TURNS / GLOBAL_ASK_PAGE_SIZE).toBe(10);
+});
+
+
+// --- P3：两层不同时接管 Esc；抬头的会话名要对 ---------------------------------
+
+test("开分享前先收掉引用小卡片：两层不同时在场", async () => {
+  const { container } = await (async () => {
+    window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+    return render(<GlobalAskPage />);
+  })();
+  fireEvent.click((await screen.findAllByRole("button", { name: "[1]" }))[1]);
+  await waitFor(() => expect(container.querySelector(".cite-popover")).not.toBeNull());
+
+  fireEvent.click((await screen.findAllByRole("button", { name: "分享到这条回答" }))[1]);
+  await screen.findByText("分享会话");
+  await waitFor(() => expect(container.querySelector(".cite-popover")).toBeNull());
+});
+
+test("抬头的会话名取自会话详情，不靠只有最新一页的历史列表", async () => {
+  // 深链打开一条**不在**历史列表首页里的旧会话。照列表查会写成「未命名会话」。
+  turnsByConversation = { "conv-old": [JOB_1, JOB_2] };
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-old");
+  render(<GlobalAskPage />);
+  fireEvent.click((await screen.findAllByRole("button", { name: "分享到这条回答" }))[1]);
+  await screen.findByText("分享会话");
+
+  expect(screen.getByText("对话 conv-old")).toBeInTheDocument();
+  expect(screen.queryByText("未命名会话")).toBeNull();
+});
+
+
 function Launcher() {
   const presentation = useRootModalCoordinator({ actorId: "user-1", sourceId: null, onClosed() {} });
   return <GlobalAskLauncher presentation={presentation} />;
 }
 
-test("弹窗打开时按 Esc 只关弹窗，不关全局问答浮窗", async () => {
+// 分享是一次**写入**，Esc 不给误触的顺手关闭——与笔记本侧同策略
+// （`use-root-modal-coordinator` 对 `conversation-share` 写的就是 `escape: false`）。
+// 弹窗在途时被 Esc 卸载，POST 照常完成、会话已公开，而链接与回执全丢。
+test("弹窗打开时按 Esc：弹窗不关，全局问答浮窗也不关", async () => {
   installDialogMethods();
   window.history.replaceState(null, "", "/?conversation_id=host-state");
   render(<Launcher />);
@@ -265,13 +394,18 @@ test("弹窗打开时按 Esc 只关弹窗，不关全局问答浮窗", async () 
   expect(windowDialog.contains(heading)).toBe(true);
 
   // ⚠ 从 **dialog 子树内**的元素派发（真实按键时焦点就在弹窗里）。从 document.body
-  // 派发的事件压根不经过 dialog，把 stopPropagation 删掉也不会红。
+  // 派发的事件压根不经过 dialog，把拦截删掉也不会红。
   fireEvent.keyDown(heading, { key: "Escape" });
-  await waitFor(() => expect(screen.queryByText("分享会话")).toBeNull());
-  // 一次 Esc 只收一层：浮窗还在，草稿框仍可用。
+  await Promise.resolve();
+  expect(screen.getByText("分享会话")).toBeInTheDocument();
+  // Esc 也没穿透去关整个浮窗——那正是拦截仍要 preventDefault + stopPropagation 的理由。
   expect(screen.getByRole("dialog", { name: "全局问答" })).toBeTruthy();
-  expect(screen.getByRole("textbox", { name: "输入问题" })).toBeTruthy();
 
+  // 出路是弹窗自己那颗关闭按钮，而且它**不被 busy 禁用**（无退路弹窗契约）。
+  const close = screen.getByTitle("关闭");
+  expect(close).not.toBeDisabled();
+  fireEvent.click(close);
+  await waitFor(() => expect(screen.queryByText("分享会话")).toBeNull());
   // 弹窗关掉之后，同一个 Esc 才轮到浮窗自己。
   fireEvent.keyDown(screen.getByRole("dialog", { name: "全局问答" }), { key: "Escape" });
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局问答" })).toBeNull());

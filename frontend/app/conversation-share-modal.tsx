@@ -172,7 +172,12 @@ export function ConversationShareModal({
       });
     const detailDone = apiRef.current.loadTurns()
       .then((loaded) => {
-        if (!cancelled) setTurns(loaded || []);
+        if (cancelled) return;
+        setTurns(loaded.turns || []);
+        // ⚠ 「取到了，但取得不全」与「没取到」在披露上是**同一件事**：半份序列算出来的
+        // 是一个偏小的**确数**（共几轮、几张附图、几条记忆），而公开页包含的是全部——
+        // 那比没有数字更坏，因为它看上去言之凿凿。取不全一律走同一条降级。
+        if (!loaded.complete) setCountsError(true);
       })
       .catch(() => {
         // 详情失败：披露算不出但仍可分享，退化成不带数字的兜底告警（countsError）。

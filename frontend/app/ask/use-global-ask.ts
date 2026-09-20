@@ -66,6 +66,10 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
   const [notebooks, setNotebooks] = useState<NotebookSummary[]>([]);
   const [conversations, setConversations] = useState<GlobalConversation[]>([]);
   const [conversationId, setConversationId] = useState("");
+  // 当前会话的标题，**以会话详情为准**。`conversations` 只有最新一页，深链
+  // 打开较旧的会话时在列表里查不到；凡是要显示会话名的地方（分享弹窗抬头）
+  // 照着列表查就会写成「未命名会话」。
+  const [conversationTitle, setConversationTitle] = useState("");
   const [turns, setTurns] = useState<GlobalJob[]>([]);
   const [scope, setScope] = useState<GlobalScope>({ mode: "all" });
   const [draft, setDraft] = useState("");
@@ -159,6 +163,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
         const detail = await getGlobalConversation(resumeId);
         if (!mounted.current || owner.current !== ticket) return;
         setTurns(detail.turns);
+        setConversationTitle(detail.title || "");
         setTurnOffset(detail.has_more ? detail.next_offset : null);
         setConversationId(detail.id);
         setScope(preserveScope ? draftScope : detail.notebook_scope);
@@ -287,6 +292,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     setTurnOffset(null);
     setLoadingTurns(false);
     setConversationId(id);
+    setConversationTitle("");
     setDraft("");
     setScope({ mode: "all" });
     // 切换对话同样推进了 owner：在途的问题理解与审阅卡一并退休。
@@ -296,6 +302,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
       if (!mounted.current || ticket !== owner.current) return;
       setTurns(detail.turns);
       setTurnOffset(detail.has_more ? detail.next_offset : null);
+      setConversationTitle(detail.title || "");
       setScope(detail.notebook_scope);
       updateUrl(id);
     } catch (cause) {
@@ -320,6 +327,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     // Explicitly starting over ends the old draft's idempotent retry identity.
     retryRequest.current = null;
     setConversationId("");
+    setConversationTitle("");
     setTurns([]);
     setTurnOffset(null);
     setLoadingTurns(false);
@@ -570,6 +578,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
   }
 
   function updateConversation(updated: GlobalConversation) {
+    if (updated.id === currentId.current) setConversationTitle(updated.title || "");
     ++historyVersion.current;
     setConversations((items) => items.map((item) => item.id === updated.id ? updated : item));
   }
@@ -583,7 +592,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
   }
 
   return {
-    notebooks, conversations, conversationId, turns, scope, setScope, draft, setDraft,
+    notebooks, conversations, conversationId, conversationTitle, turns, scope, setScope, draft, setDraft,
     loading, opening, openFailed, submitting, stopping, error, pollError, historyError, running,
     moreHistory, loadingHistory, turnOffset, loadingTurns, loadMoreHistory, loadMoreTurns,
     load, openConversation, newConversation, submit, stop, sendFeedback, updateConversation, removeConversation,
