@@ -973,6 +973,12 @@ PostgreSQL coverage is deliberately separate from the offline gates. The
 `bash scripts/check_postgres.sh`, selecting `postgres_integration or postgres_lane_contract`.
 The latter includes hermetic adapter/migration contracts and launcher/target safety
 checks in the lane that owns them.
+Only the CI service stores PGDATA on a bounded 4 GiB tmpfs to avoid hosted-disk
+overhead from disposable schemas. WAL, `fsync`, `synchronous_commit`, and
+`full_page_writes` retain their defaults; provisioning checks the three settings.
+The job records storage usage and container peak memory. This lane tests live
+database behavior, not persistence across container loss or host power failure;
+production and local PostgreSQL storage are unchanged.
 CI provisions four explicit groups of primary, non-C UTF8, and non-UTF targets
 before handing off to the unchanged least-privilege application role. The
 `TEST_POSTGRES_TARGETS_JSON` array contains four objects with `primary`, `non_c`,
