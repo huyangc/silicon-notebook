@@ -810,6 +810,54 @@ class SourceStore:
                     result[row["id"]] = (row["source_id"], hashlib.sha256(row["text"].encode()).hexdigest())
         return result
 
+    def passage_evidence_snapshot(self, chunk_ids: Sequence[str]) -> dict[str, dict]:
+        """A retrieved passage's own text and its elements' identities, together.
+
+        ONE statement per batch, which is the whole point -- see
+        ``GlobalAskSourceStorePort`` for why splitting the passage read from
+        the element read reopens the re-ingest race the caller exists to close.
+        A chunk never spans two batches, so "this text and these fingerprints
+        came from one snapshot" holds per chunk even when the request does not
+        fit in one statement.
+
+        The join shape is the retired ``global_candidate_evidence``'s, minus
+        everything the caller does not need: no source titles, no section
+        paths, and the element bodies are hashed rather than returned.
+        ``chunks.text`` does cross the wire here (SQLite has no built-in
+        ``sha256``), but only to be hashed on arrival -- callers see a digest.
+        """
+        ids = list(dict.fromkeys(chunk_id for chunk_id in chunk_ids if chunk_id))
+        if not ids:
+            return {}
+        result: dict[str, dict] = {}
+        with self.database.connect() as db:
+            for offset in range(0, len(ids), self.IN_CHUNK):
+                batch = ids[offset:offset + self.IN_CHUNK]
+                placeholders = ",".join("?" for _ in batch)
+                rows = db.execute(
+                    "SELECT c.id,c.text,e.id AS element_id,"
+                    "e.source_id AS element_source_id,e.text AS element_text "
+                    "FROM chunks c "
+                    "LEFT JOIN json_each(c.element_ids) declared ON 1=1 "
+                    "LEFT JOIN source_elements e ON e.id=declared.value "
+                    f"WHERE c.id IN ({placeholders})", batch,
+                ).fetchall()
+                for row in rows:
+                    passage = result.setdefault(row["id"], {
+                        "text_sha": hashlib.sha256(
+                            row["text"].encode()
+                        ).hexdigest(),
+                        "elements": {},
+                    })
+                    if row["element_id"] is not None:
+                        passage["elements"][row["element_id"]] = (
+                            row["element_source_id"],
+                            hashlib.sha256(
+                                row["element_text"].encode()
+                            ).hexdigest(),
+                        )
+        return result
+
     def image_asset_rows(
         self, element_ids: Sequence[str]
     ) -> List[tuple[str, Any]]:

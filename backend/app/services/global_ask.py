@@ -203,6 +203,10 @@ class _RunState:
         # other federated call's callbacks for the length of that write. This
         # one is what makes the writes themselves serial, so a stale snapshot
         # cannot land after a fresher one even though both passed their claim.
+        # ⛔ EVERY in-flight write of this job's row takes it, not only the
+        # coverage ones: ``save_progress`` persists the whole row, so a trace
+        # write outside this lock would be a second, unsequenced publisher of
+        # the coverage fields (see ``_append_trace``).
         self.publish_lock = threading.Lock()
         self._sequence = 0
         self._published = 0
@@ -996,6 +1000,23 @@ class GlobalAskService:
         rewritten -- and the terminal write always happens, so what the
         finished turn contains is not affected. ``_TRACE_SAVE_*`` bound the two
         ways a poller can fall behind: elapsed time and accumulated steps.
+
+        ⛔ THE WRITE GOES THROUGH ``publish_lock``, like every other progress
+        write. ``save_progress`` persists the WHOLE job row, coverage lists
+        included, so this is not a trace-only write however it reads here: a
+        reasoning run appends trace steps from the same threads that are
+        federating, and a trace write that serialized the row while a receipt
+        thread was mid-publish could commit an older coverage list after a
+        newer one -- a poller would watch a library it had already reported
+        disappear, and a cancellation right afterwards would leave the stale
+        list durable. Holding the publish lock across "serialize and write"
+        makes that impossible without a sequence of its own: the coverage
+        fields on ``job`` are only ever mutated under this same lock and only
+        after ``claim_publish``, so whatever this write serializes is by
+        construction the newest claimed snapshot. ``state.lock`` is still
+        released first -- no database write happens under it (see
+        ``_publish_coverage``), and taking the two in this order everywhere
+        keeps them ordered publish-then-state.
         """
         try:
             with state.lock:
@@ -1009,7 +1030,8 @@ class GlobalAskService:
                     state.traced_at = now
                     state.traced_at_count = len(job.trace)
             if due:
-                self._save_if_open(job, user_id, progress=True)
+                with state.publish_lock:
+                    self._save_if_open(job, user_id, progress=True)
         except Exception:  # noqa: BLE001 - see docstring
             pass
 
@@ -1320,16 +1342,20 @@ class GlobalAskService:
                 # a citation card that opens on nothing. Refusing instead would
                 # be worse and would also be a lie -- a non-empty
                 # ``element_id`` does not attest that the row was ever live in
-                # this run. A KG object's ``evidence[].element_id`` survives a
-                # re-ingest that re-issued that source's element ids
-                # (``knowledge_store._enrich_evidence`` hands a dangling id
-                # straight back, which is why ``collection_item_citations``
-                # hunts for the FIRST LIVE occurrence), so "missing now" covers
-                # both "deleted just now" and "dead since long before this
-                # question" -- and the copy says the original CHANGED DURING
-                # THE ANSWER. The honest fix is a retrieval-time liveness
-                # snapshot from the four producers that never touch this
-                # channel; it is registered in ``fangan_todo.md`` under 检索.
+                # this run. Element ids are NOT re-issued on a re-ingest --
+                # ``source_ingestion`` mints them deterministically from
+                # ``(source, index)``, so the same id comes back -- but a
+                # reparse that yields FEWER elements, and a row-level Knowhow
+                # deletion, both leave stored ids with no row behind them, and
+                # ``knowledge_store._enrich_evidence`` hands such a dangling id
+                # straight back to a KG object's ``evidence[]`` (which is why
+                # ``collection_item_citations`` hunts for the FIRST LIVE
+                # occurrence). So "missing now" covers both "deleted just now"
+                # and "dead since long before this question" -- and the copy
+                # says the original CHANGED DURING THE ANSWER. The honest fix
+                # is a retrieval-time FINGERPRINT snapshot from the four
+                # producers that never touch this channel; it is registered in
+                # ``fangan_todo.md`` under 检索.
                 if after is not None and after[0] != citation.source_id:
                     return _VOID_CHANGED
             elif after is None or before != after or after[0] != citation.source_id:

@@ -160,7 +160,12 @@ Only completed, scope-compatible turns enter follow-up context through shared qu
 resolve references but are never evidence. Submission freezes each participant's currently visible source list,
 and once the answer exists every citation is rechecked against it: the source must still be inside that frozen
 list and still visible, and an element that travelled the federated chunk channel must additionally carry the
-same text fingerprint it had at retrieval time and still belong to the same source. That fingerprint check
+same text fingerprint it had at retrieval time and still belong to the same source. The retrieval-time
+fingerprint is read out of the SAME database snapshot as the passage the run retrieved, and it is kept only when
+that passage's own text still matches what the run read; element ids are reused deterministically when a source
+is re-ingested, so a fingerprint read by id alone could describe text that replaced what the answer rested on.
+A passage that changed, or disappeared, under a run attests nothing: every element behind it is refused. That
+fingerprint check
 covers the WHOLE passage behind the citation, not only the element the citation names: a passage is assembled
 from as many source elements as it took to fill it, the citation card carries the first of them, and the rest
 are rechecked beside it — so an edit to the middle of a quoted passage voids the answer exactly as an edit to

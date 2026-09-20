@@ -22,6 +22,7 @@ PR-A 在 ``global_ask`` 里攒出的那套有界并行(进程级共享执行器�
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -95,6 +96,15 @@ def clock(monkeypatch):
     return injected
 
 
+# 快照替身里「这个段落已经不在库里了」的取值,与「原文被改成别的字」区分开:
+# 前者在返回里**缺席**,后者带着另一个 ``text_sha`` 回来。
+_PASSAGE_GONE = object()
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
 def make_chunk(chunk_id: str, relevance: float = 0.9, *,
                elements=()) -> RetrievedChunk:
     return RetrievedChunk(
@@ -113,8 +123,14 @@ class FakeCandidates:
     """
 
     def __init__(self, participants, *, retrieve=None, visible=None,
-                 fingerprints=None, recall=200):
+                 fingerprints=None, passages=None, recall=200):
         self._participants = tuple(participants)
+        # ``{chunk_id: 库里此刻的原文}``,或 ``_PASSAGE_GONE``。缺省 = 与检索腿
+        # 交回的那条命中逐字相同,也就是「没人动过」。
+        self._passages = passages or {}
+        # 生产者交回过的每条命中,按 chunk id。快照替身要靠它才能回答「这个段落
+        # 现在长什么样」,而这正是真 store 在一条语句里同时读到的两半。
+        self.returned: dict = {}
         self._retrieve = retrieve or (
             lambda nid, query: (
                 [make_chunk(f"c-{nid}-{query}", elements=[f"e-{nid}"])], [], None
@@ -139,10 +155,12 @@ class FakeCandidates:
         self.event_log = SimpleNamespace(emit=self.events.append)
         self.calls: list = []
         self.budgets: dict = {}
+        # 记的是每次快照读要的**段落**清单——结清口径就是按段落的。
         self.fingerprint_reads: list = []
         self.sources = SimpleNamespace(
             all_visible_source_ids=self._all_visible_source_ids,
             evidence_fingerprints=self._evidence_fingerprints,
+            passage_evidence_snapshot=self._passage_evidence_snapshot,
         )
         self._lock = threading.Lock()
 
@@ -160,16 +178,56 @@ class FakeCandidates:
         return value
 
     def _evidence_fingerprints(self, element_ids):
-        with self._lock:
-            self.fingerprint_reads.append(list(element_ids))
-            read_index = len(self.fingerprint_reads)
         if callable(self._fingerprints):
-            return self._fingerprints(read_index, list(element_ids))
+            return self._fingerprints(0, list(element_ids))
         if isinstance(self._fingerprints, Exception):
             raise self._fingerprints
         return {
             element_id: self._fingerprints.get(element_id, ("src", "fp"))
             for element_id in element_ids
+        }
+
+    def _passage_evidence_snapshot(self, chunk_ids):
+        """真 store 的形状:``{chunk_id: {text_sha, elements}}``,库里没有的段落缺席。
+
+        ``_passages`` 是「这个段落此刻在库里的样子」——注入一段新原文就等于在检索腿
+        与这次快照读之间发生了一次重新解析,注入 ``_PASSAGE_GONE`` 就是段落没了。
+        元素指纹仍由 ``fingerprints`` 决定,签名不变,所以既有用例一个字不用改。
+        """
+        chunk_ids = list(chunk_ids)
+        with self._lock:
+            self.fingerprint_reads.append(list(chunk_ids))
+            read_index = len(self.fingerprint_reads)
+        if isinstance(self._fingerprints, Exception):
+            raise self._fingerprints
+        live = [
+            chunk_id for chunk_id in chunk_ids
+            if chunk_id in self.returned
+            and self._passages.get(chunk_id) is not _PASSAGE_GONE
+        ]
+        element_ids = list(dict.fromkeys(
+            element_id for chunk_id in live
+            for element_id in self.returned[chunk_id].element_ids
+        ))
+        if callable(self._fingerprints):
+            prints = self._fingerprints(read_index, element_ids)
+        else:
+            prints = {
+                element_id: self._fingerprints.get(element_id, ("src", "fp"))
+                for element_id in element_ids
+            }
+        return {
+            chunk_id: {
+                "text_sha": _sha(self._passages.get(
+                    chunk_id, self.returned[chunk_id].text,
+                )),
+                "elements": {
+                    element_id: prints[element_id]
+                    for element_id in self.returned[chunk_id].element_ids
+                    if element_id in prints
+                },
+            }
+            for chunk_id in live
         }
 
     def _unsafe_source_scope_restricted(self, notebook_id: str) -> bool:
@@ -194,7 +252,11 @@ class FakeCandidates:
                 cf.time.monotonic(),
                 None if budget is None else budget.deadline,
             ))
-        return self._retrieve(notebook_id, query)
+        result = self._retrieve(notebook_id, query)
+        with self._lock:
+            for hit in result[0]:
+                self.returned.setdefault(hit.chunk_id, hit)
+        return result
 
     def _retrieve_chunks_multi(self, notebook_id, sub_queries, *, drifted=None):
         raise AssertionError("single-library short circuit was taken")
@@ -937,10 +999,8 @@ def test_evidence_fingerprints_are_read_once(pool):
         cf.federated_chunk_candidates(candidates, ids[0], ["q"])
 
     assert len(candidates.fingerprint_reads) == 1
-    # 去重之后的一份有界清单,不是每条命中各带一份。
-    assert sorted(candidates.fingerprint_reads[0]) == [
-        "e-nb-a", "e-nb-b", "e-nb-c", "e-shared",
-    ]
+    # 去重之后的一份有界**段落**清单,不是每条命中各带一份。
+    assert sorted(candidates.fingerprint_reads[0]) == ["c-nb-a", "c-nb-b", "c-nb-c"]
     assert len(receipts.evidence) == 1
     assert sorted(receipts.evidence[0]) == [
         "e-nb-a", "e-nb-b", "e-nb-c", "e-shared",
@@ -984,11 +1044,12 @@ def test_evidence_read_has_its_own_budget_not_the_spent_phase(clock, pool):
 
 
 def test_an_element_missing_from_a_successful_read_is_stated_as_none(pool):
-    """读成功、但某个入选 element 没有行(检索之后被重新入库删掉)→ 回传 ``None``。
+    """段落文字对得上、但它声明的某个 element 没有行 → 那一个回传 ``None``。
 
     缺席的含义是「从未走过本通道」,复核只按来源天花板判;一个走过本通道、却在
-    指纹读之前被删掉的 element 若被留成缺席,它的引用就会被不加核验地放行。它也
-    不进已见集合,下一轮照常重试(codex #755 第 1 轮 P2)。
+    快照读之前被删掉的 element 若被留成缺席,它的引用就会被不加核验地放行
+    (codex #755 第 1 轮 P2)。段落本身通过了文字核对,所以整段就此结清——重解析
+    后元素变少是个稳定状态,下一轮再读一次只会得到同一个答案。
     """
     ids = ("nb-a",)
     candidates = FakeCandidates(
@@ -1008,16 +1069,16 @@ def test_an_element_missing_from_a_successful_read_is_stated_as_none(pool):
         cf.federated_chunk_candidates(candidates, ids[0], ["q"])
 
     assert receipts.evidence[0] == {"e-live": ("src", "fp"), "e-deleted": None}
-    # 真快照已结清、不再读;缺行的那个下一轮重试。
-    assert candidates.fingerprint_reads == [["e-live", "e-deleted"], ["e-deleted"]]
+    assert candidates.fingerprint_reads == [["c-nb-a"]]
 
 
-def test_a_second_round_reads_only_the_new_elements(pool):
-    """同一次 run 的第二轮只读新增 element,已回传过的不再读。
+def test_a_second_round_reads_only_the_new_passages(pool):
+    """同一次 run 的第二轮只读新增**段落**,已佐证过的那些不再读。
 
     ``on_evidence`` 是**累积**语义:消费者把每轮的表合并成一张,而本次 run 内任何
-    一次快照都是合法的「之前」。推理 5 轮各覆盖全部选中元素 = 5 次宽读,而轮与轮
-    之间的选择大面积重叠。去重是 run-local 的,所以两次 run 不会互借快照。
+    一次快照都是合法的「之前」。推理 5 轮各覆盖全部选中段落 = 5 次宽读,而轮与轮
+    之间的选择大面积重叠。结清口径是段落而不是 element:一个 element 的可信度不
+    高于它被读出来的那一段原文。去重是 run-local 的,所以两次 run 不会互借快照。
     """
     ids = ("nb-a",)
 
@@ -1034,17 +1095,17 @@ def test_a_second_round_reads_only_the_new_elements(pool):
         cf.federated_chunk_candidates(candidates, ids[0], ["q1"])
         cf.federated_chunk_candidates(candidates, ids[0], ["q2"])
 
-    assert candidates.fingerprint_reads == [["e-1"], ["e-2"]]
+    assert candidates.fingerprint_reads == [["c-1"], ["c-2"]]
     assert [sorted(row) for row in receipts.evidence] == [["e-1"], ["e-2"]]
 
 
 def test_unreadable_fingerprints_are_published_as_none_and_retried(pool):
-    """指纹读不到 → 发一条内容无关事件、逐 element 回传 ``None``,检索本身不塌;下一轮重试。
+    """快照读不到 → 发一条内容无关事件、逐 element 回传 ``None``,检索本身不塌;下一轮重试。
 
     三态合同:快照 / ``None``(走过本通道但读不到 → 复核拒绝)/ 缺席(从未走过本
     通道:文档概览、集合枚举、图对象 → 复核只按来源天花板判)。读失败若回传空表,
     这批 element 就与「从未走过本通道」无法区分,要么被不加核验地放行、要么连累
-    概览类答案整份作废。读失败的 element 不进已见集合,否则一次瞬时故障会让它们在
+    概览类答案整份作废。读失败的段落不进已见集合,否则一次瞬时故障会让它们在
     整次 run 里永久不可佐证;下一轮读成功的快照取代 ``None``。
     """
     ids = ("nb-a",)
@@ -1066,13 +1127,138 @@ def test_unreadable_fingerprints_are_published_as_none_and_retried(pool):
         cf.federated_chunk_candidates(candidates, ids[0], ["q"])
 
     assert list(result.collected) == ["c-nb-a"]
-    assert candidates.fingerprint_reads == [["e-1"], ["e-1"]]
+    assert candidates.fingerprint_reads == [["c-nb-a"], ["c-nb-a"]]
     assert receipts.evidence == [{"e-1": None}, {"e-1": ("src", "fp")}]
     assert [event for event in candidates.events
             if event["kind"] == "chunk_federation_evidence_unavailable"] == [{
                 "kind": "chunk_federation_evidence_unavailable",
+                "reason": "read_failed",
                 "error_type": "RuntimeError", "elements": 1,
             }]
+
+
+def test_a_passage_rewritten_after_retrieval_attests_nothing(pool):
+    """检索读到原文之后、快照读之前来源被重新解析 → 这一段的 element 全部 ``None``。
+
+    这是「按 id 读指纹」根本挡不住的那一类:元素 id 是按 ``(来源, 序号)`` 确定性
+    复用的,重新入库之后**同一个 id 下已经是新文字**。若把新文字的指纹记在旧段落
+    名下,终态复核拿新指纹比新指纹、恒等,一份基于已经不存在的原文写出来的答案就
+    会被当成有据发布。所以快照带回段落自己的 ``text_sha``,对不上就整段拒绝——
+    而且下一轮还要重试,瞬时不一致不该让这一段在整次 run 里永久作废。
+    """
+    ids = ("nb-a",)
+    candidates = FakeCandidates(
+        _participants(ids),
+        retrieve=lambda nid, q: (
+            [make_chunk("c-1", elements=["e-1", "e-2"])], [], None,
+        ),
+        passages={"c-1": "这段原文在检索之后被整段换掉了"},
+    )
+    receipts = Receipts()
+
+    with _global_run(ids, _plan(pool, receipts)):
+        cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+        # 来源恢复(或那次重解析写回了同样的文字):下一轮照常采信。
+        candidates._passages = {}
+        cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+
+    assert receipts.evidence == [
+        {"e-1": None, "e-2": None},
+        {"e-1": ("src", "fp"), "e-2": ("src", "fp")},
+    ]
+    # 没结清 → 第二轮重读同一段。
+    assert candidates.fingerprint_reads == [["c-1"], ["c-1"]]
+    assert [event for event in candidates.events
+            if event["kind"] == "chunk_federation_evidence_unavailable"] == [{
+                "kind": "chunk_federation_evidence_unavailable",
+                "reason": "passage_changed", "passages": 1, "elements": 2,
+            }]
+
+
+def test_settling_is_per_passage_so_a_shared_element_still_checks_the_new_one(pool):
+    """结清按段落,不按 element:同一个 element 出现在下一轮的**另一段**里,那一段
+    照样要读。
+
+    这两种结清口径只在这一种形状上分得开。按 element 结清的话,第二轮那条命中的
+    全部 element 都已经「见过」,于是这次调用整个不读——一段在检索之后被改写的原文
+    就此一次都没有被核对过,而复核那边只会听见沉默。按段落结清则第二轮照读 ``c-2``,
+    发现文字对不上,把 ``e-1`` 明确标成不可佐证。
+    """
+    ids = ("nb-a",)
+
+    def retrieve(notebook_id, query):
+        # 两条命中共用一个 element(重叠切分的常态),但只有第一轮那条的原文没被动过。
+        return [make_chunk("c-1" if query == "q1" else "c-2",
+                           elements=["e-1"])], [], None
+
+    candidates = FakeCandidates(
+        _participants(ids), retrieve=retrieve,
+        passages={"c-2": "第二段原文在检索之后被换掉了"},
+    )
+    receipts = Receipts()
+
+    with _global_run(ids, _plan(pool, receipts)):
+        cf.federated_chunk_candidates(candidates, ids[0], ["q1"])
+        cf.federated_chunk_candidates(candidates, ids[0], ["q2"])
+
+    assert candidates.fingerprint_reads == [["c-1"], ["c-2"]]
+    assert receipts.evidence == [{"e-1": ("src", "fp")}, {"e-1": None}]
+
+
+def test_a_passage_that_vanished_between_retrieval_and_the_snapshot_is_refused(pool):
+    """段落本身已经不在库里 → 同样整段 ``None``,不是「读到了一张空表」。
+
+    快照对已消失的段落是**缺席**的,而缺席在这条通道上绝不能退化成放行:这些
+    element 确实走过本通道,必须可以被逐个拒绝。
+    """
+    ids = ("nb-a",)
+    candidates = FakeCandidates(
+        _participants(ids),
+        retrieve=lambda nid, q: ([make_chunk("c-1", elements=["e-1"])], [], None),
+        passages={"c-1": _PASSAGE_GONE},
+    )
+    receipts = Receipts()
+
+    with _global_run(ids, _plan(pool, receipts)):
+        cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+
+    assert receipts.evidence == [{"e-1": None}]
+
+
+def test_one_stale_passage_refuses_an_element_another_passage_still_holds(pool):
+    """同一个 element 落在两段里,一段变了一段没变 → 该 element 仍是 ``None``。
+
+    fail-closed 的方向是有理由的:让答案站住的是「这段原文」,不是「这个 id 在库里
+    还有一行」。它周围的文字换掉之后,另一段恰好也引用它并不能把它变回可佐证——
+    而且回传顺序不该决定结论,所以拒绝是在整批采信之后统一落下的。
+    """
+    ids = ("nb-a",)
+    candidates = FakeCandidates(
+        _participants(ids),
+        retrieve=lambda nid, q: ([
+            make_chunk("c-good", 0.9, elements=["e-shared", "e-good"]),
+            make_chunk("c-stale", 0.8, elements=["e-shared", "e-stale"]),
+        ], [], None),
+        passages={"c-stale": "被重新解析过的另一段"},
+    )
+    receipts = Receipts()
+
+    with _global_run(ids, _plan(pool, receipts)):
+        cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+        cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+
+    assert receipts.evidence[0] == {
+        "e-shared": None, "e-good": ("src", "fp"), "e-stale": None,
+    }
+    # 过了文字核对的那一段结清,没过的下一轮单独重读。
+    assert [sorted(row) for row in candidates.fingerprint_reads] == [
+        ["c-good", "c-stale"], ["c-stale"],
+    ]
+    assert [event for event in candidates.events
+            if event["kind"] == "chunk_federation_evidence_unavailable"][0] == {
+                "kind": "chunk_federation_evidence_unavailable",
+                "reason": "passage_changed", "passages": 1, "elements": 2,
+            }
 
 
 # --------------------------------------------------------------------------
@@ -1146,7 +1332,7 @@ def test_groups_are_reported_again_for_an_already_fingerprinted_passage(pool):
         cf.federated_chunk_candidates(candidates, ids[0], ["q1"])
         cf.federated_chunk_candidates(candidates, ids[0], ["q2"])
 
-    assert candidates.fingerprint_reads == [["e-1", "e-2"]]
+    assert candidates.fingerprint_reads == [["c-wide"]]
     assert [row[1] for row in receipts.groups] == [
         [("e-1", "e-2")], [("e-1", "e-2")],
     ]

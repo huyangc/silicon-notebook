@@ -821,6 +821,43 @@ class SourceStore:
                     result[row["id"]] = (row["source_id"], row["evidence_hash"])
         return result
 
+    def passage_evidence_snapshot(self, chunk_ids: Sequence[str]) -> dict[str, dict]:
+        """A retrieved passage's own text and its elements' identities, together.
+
+        The SQLite twin's contract, and the same reason for it -- see
+        ``GlobalAskSourceStorePort``. ONE statement per batch and a chunk never
+        spans two, so a passage's text digest and its element digests always
+        come from one snapshot. PostgreSQL hashes both sides in SQL, so neither
+        the passage text nor any element body ever crosses the wire.
+        """
+        ids = list(dict.fromkeys(chunk_id for chunk_id in chunk_ids if chunk_id))
+        if not ids:
+            return {}
+        result: dict[str, dict] = {}
+        with self.database.connect() as connection:
+            for offset in range(0, len(ids), self.IN_CHUNK):
+                batch = ids[offset:offset + self.IN_CHUNK]
+                rows = connection.execute(
+                    "SELECT c.id,"
+                    "encode(sha256(convert_to(c.text,'UTF8')),'hex') AS text_sha,"
+                    "e.id AS element_id,e.source_id AS element_source_id,"
+                    "encode(sha256(convert_to(e.text,'UTF8')),'hex') AS element_hash "
+                    "FROM chunks c "
+                    "LEFT JOIN LATERAL jsonb_array_elements_text("
+                    "c.element_ids::jsonb) declared(element_id) ON TRUE "
+                    "LEFT JOIN source_elements e ON e.id=declared.element_id "
+                    f"WHERE c.id IN ({placeholders(batch)})", batch,
+                ).fetchall()
+                for row in rows:
+                    passage = result.setdefault(row["id"], {
+                        "text_sha": row["text_sha"], "elements": {},
+                    })
+                    if row["element_id"] is not None:
+                        passage["elements"][row["element_id"]] = (
+                            row["element_source_id"], row["element_hash"],
+                        )
+        return result
+
     def image_asset_rows(
         self, element_ids: Sequence[str]
     ) -> list[tuple[str, Any]]:

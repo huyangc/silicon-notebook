@@ -188,6 +188,16 @@ class FederatedRunPlan:
        answer, so whichever round first fingerprinted an element answers that
        question for the whole run -- which is what lets the federation skip
        re-reading elements it has already published.
+       ⛔ A published snapshot must come from the SAME database snapshot as the
+       passage text the run retrieved, and the producer must have proved the
+       two agree before publishing.  Element ids are reused deterministically
+       across a re-ingest (``el-<source>-<index>``), so a fingerprint read by
+       id alone, taken after the retrieval leg, can describe text that replaced
+       what the run actually read -- and the re-check would then compare that
+       new text against itself, find it unchanged, and call an answer written
+       from vanished text grounded.  A producer that cannot prove the agreement
+       publishes ``None`` under rule 3 instead of a snapshot it cannot stand
+       behind.
     3. **Three states, and "unreadable" is stated, never implied.**  A value is
        either a ``(source_id, fingerprint)`` snapshot, or ``None`` -- "this
        element came through the federated chunk channel and its fingerprint

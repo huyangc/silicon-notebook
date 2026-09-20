@@ -1,6 +1,7 @@
 """Bounded global admission and request-level authority/query behavior."""
 from contextlib import contextmanager
 from threading import Barrier, Event, Thread
+import hashlib
 import time
 
 import pytest
@@ -267,3 +268,131 @@ def test_sqlite_narrow_access_and_source_freeze_use_three_queries_for_twenty_fou
         db.execute("UPDATE source_elements SET text=? WHERE id=?", ("changed evidence", "element"))
     assert sources.evidence_fingerprints(["element"]) != fingerprint
     assert sharing.readable_notebook_ids(list(ids), "unrelated-user") == set()
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def test_sqlite_passage_snapshot_reads_text_and_element_prints_in_one_statement(setup, monkeypatch):
+    """一条语句、一个快照里同时给出段落原文摘要与它每个元素的指纹。
+
+    这正是 ``evidence_fingerprints`` 单独读做不到的那件事:元素 id 是按
+    ``(来源, 序号)`` 确定性复用的,所以「这个 id 现在的文字」并不等于「这次检索读到
+    的那段原文」。两半必须同快照,消费者才能先核对原文、再采信指纹。
+    """
+    from app.repositories.sqlite.source_store import SourceStore
+
+    service, _, _, _ = setup
+    database = service.store.database
+    with database.write() as db:
+        owner = db.execute("SELECT id FROM users LIMIT 1").fetchone()["id"]
+        db.execute(
+            "INSERT INTO notebooks(id,name,purpose,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            ("nb-passage", "Passages", "", owner, "2026-09-20", "2026-09-20"),
+        )
+        db.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            ("src-passage", "nb-passage", "Original", "markdown", "2026-09-20", "2026-09-20"),
+        )
+        for index, text in enumerate(("first half", "second half")):
+            db.execute(
+                "INSERT INTO source_elements(id,source_id,element_type,location_label,text,created_at) VALUES(?,?,?,?,?,?)",
+                (f"el-src-passage-{index:04d}", "src-passage", "paragraph",
+                 f"p{index}", text, "2026-09-20"),
+            )
+        db.execute(
+            "INSERT INTO chunks(id,notebook_id,source_id,text,section_path,element_ids,created_at) VALUES(?,?,?,?,?,?,?)",
+            ("chunk-wide", "nb-passage", "src-passage", "first half second half",
+             "", '["el-src-passage-0000","el-src-passage-0001"]', "2026-09-20"),
+        )
+        # 一个不声明任何元素的段落:仍要出现在返回里(它存在),只是元素表为空——
+        # 「段落没了」与「段落没有元素」是两件事,不能都退化成缺席。
+        db.execute(
+            "INSERT INTO chunks(id,notebook_id,source_id,text,section_path,element_ids,created_at) VALUES(?,?,?,?,?,?,?)",
+            ("chunk-bare", "nb-passage", "src-passage", "standalone", "", "[]", "2026-09-20"),
+        )
+    sources = object.__new__(SourceStore)
+    sources.database = database
+
+    statements = []
+    original = database.connect
+
+    @contextmanager
+    def traced():
+        with original() as db:
+            db.set_trace_callback(statements.append)
+            try:
+                yield db
+            finally:
+                db.set_trace_callback(None)
+
+    monkeypatch.setattr(database, "connect", traced)
+    snapshot = sources.passage_evidence_snapshot(
+        ["chunk-wide", "chunk-bare", "chunk-vanished"]
+    )
+    # 同一个快照:原文摘要与两个元素指纹出自一条 SELECT。
+    assert len([
+        statement for statement in statements
+        if statement.lstrip().upper().startswith("SELECT")
+    ]) == 1
+    assert snapshot["chunk-wide"] == {
+        "text_sha": _sha("first half second half"),
+        "elements": {
+            "el-src-passage-0000": ("src-passage", _sha("first half")),
+            "el-src-passage-0001": ("src-passage", _sha("second half")),
+        },
+    }
+    assert snapshot["chunk-bare"] == {
+        "text_sha": _sha("standalone"), "elements": {},
+    }
+    # 库里已经没有的段落缺席,不是一条空记录。
+    assert "chunk-vanished" not in snapshot
+
+    # 同一个 id 下换掉元素文字 → 指纹跟着变,段落摘要不变。
+    with database.write() as db:
+        db.execute("UPDATE source_elements SET text=? WHERE id=?",
+                   ("first half, revised", "el-src-passage-0000"))
+    after = sources.passage_evidence_snapshot(["chunk-wide"])
+    assert after["chunk-wide"]["text_sha"] == snapshot["chunk-wide"]["text_sha"]
+    assert after["chunk-wide"]["elements"]["el-src-passage-0000"] == (
+        "src-passage", _sha("first half, revised"),
+    )
+    # 段落原文被重新解析覆盖 → 摘要变,这正是调用方用来拒绝旧答案的那一位。
+    with database.write() as db:
+        db.execute("UPDATE chunks SET text=? WHERE id=?",
+                   ("entirely different", "chunk-wide"))
+    assert sources.passage_evidence_snapshot(["chunk-wide"])["chunk-wide"][
+        "text_sha"
+    ] == _sha("entirely different")
+
+
+def test_sqlite_passage_snapshot_batches_past_the_variable_limit(setup):
+    """超过 SQLite 变量上限的段落清单按批走,而且每个段落仍在自己的那一个快照里。"""
+    from app.repositories.sqlite.source_store import SourceStore
+
+    service, _, _, _ = setup
+    database = service.store.database
+    wanted = [f"chunk-{index:05d}" for index in range(1500)]
+    with database.write() as db:
+        owner = db.execute("SELECT id FROM users LIMIT 1").fetchone()["id"]
+        db.execute(
+            "INSERT INTO notebooks(id,name,purpose,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            ("nb-bulk", "Bulk", "", owner, "2026-09-20", "2026-09-20"),
+        )
+        db.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            ("src-bulk", "nb-bulk", "Original", "markdown", "2026-09-20", "2026-09-20"),
+        )
+        for chunk_id in wanted:
+            db.execute(
+                "INSERT INTO chunks(id,notebook_id,source_id,text,section_path,element_ids,created_at) VALUES(?,?,?,?,?,?,?)",
+                (chunk_id, "nb-bulk", "src-bulk", f"text of {chunk_id}", "", "[]",
+                 "2026-09-20"),
+            )
+    sources = object.__new__(SourceStore)
+    sources.database = database
+
+    snapshot = sources.passage_evidence_snapshot(wanted)
+    assert len(snapshot) == len(wanted)
+    assert snapshot[wanted[-1]]["text_sha"] == _sha(f"text of {wanted[-1]}")
