@@ -257,22 +257,25 @@ source 状态沿 `queued → parsing → parsed → extracting → extracted` �
 HTTP 的 `global_ask_routes.py` 与 MCP 的 `global_ask.py` 共用此服务。`GlobalAskStore` 在
 SQLite/PostgreSQL bundle 中分别绑定参数占位符，持有用户所有的全局会话和任务；不扩张
 单库 facade 或参考库挂载。窄批量查询复核读权并冻结来源，受理锁仅保护容量和建行。
-专用全局候选入口只读已暖 ANN、小库有界流式向量召回或有界词法候选，不加载共享冷索引或
-整库矩阵；小库扫描在首批与结束各核验一次规模，在来源范围内分批解码，用完即弃，仅保留靠前候选。
-chunk ANN 由整库 chunk 建成（含天花板按类型排除的 Memory/Knowhow 投影），因此索引缺 sidecar 时
-先按来源身份验证命中行、不足则有界超取，仍饿死才回落精确 SQL 通道或披露降级；「语义已检索」按
-是否产出幸存候选判定，不按是否调用过向量查询。数据库适配器在请求局部读预算下约束连接等待与
-SQL；失败分类由 repositories 层统一把驱动异常映射成 `timeout`/`saturated` 两种口径，services 不
-import 驱动。逐库检索由 `GlobalAskService` 持有的有界线程池执行（进程内只组合一个实例，池容量
-即检索侧连接上界），任务经 `copy_context()` 携带 retrieval-run、读预算与来源范围进入工作线程；
-每个 job 只占该池的公平份额（执行位 ÷ 活跃 job），完成一个补一个，避免先到的 job 独占 FIFO 队列
-把后到者饿死。任务只返回结果值，`job` 只由 job 线程按 `resolved_notebook_ids` 有序插入，与完成
-顺序无关；任一库失败或取消时，phase 级中止令牌与用户取消事件合成一个 `is_set()` 传给 read budget，
-让在途任务在下一次预算检查时释放执行位。问题改写及单次向量准备复用模型与 retrieval-run。
-相关度绝对/库内相对门槛过滤后各库保底，剩余按库内名次和相对置信度选材；
-`GlobalAskSynthesis` 复用现有提示词、锚点解析、模型服务和答案重试；
-它是无知识图谱库的原文合成适配层，不新增独立 reasoning 引擎，后续 reasoning 归一化仍应
-复用该检索原语并替换合成适配。历史仅含范围兼容的完成轮次，助手回答只作指代语境。
+全局问答**不再有独立的检索链路与合成适配层**：`GlobalAskService._execute` 经
+`app/services/global_run.py::global_ask_run(...)` 装好四件事之后，直接调 `AskService.ask`，由同一套
+引擎完成检索、提示词、锚点解析、模型服务与答案重试。那四件事只能同时成立、也只在这一个管理器里
+安装：参与集覆盖（检索层经 `federated_ask_active()` 读）、逐库冻结来源天花板 + `subjectless` 位
+（引用/提示词侧经 `subjectless_run_active()` 读，过滤点经 `peer_scope_ceiling_active()` 读，天花板必须
+是参与集上的**全映射**）、detached 对话轮次（因此不写任何笔记本的 answers 表）、联邦运行计划（共享
+执行器、公平窗口、阶段预算、取消令牌以及回执与证据指纹的唯一返回接缝）。装一半不是降级而是错误：
+检索层与 ask 层读的是两个不同谓词，分开安装会让它们互相矛盾。
+这次 run **没有主体库位**：交给引擎的 `notebook_id` 是 `resolved_notebook_ids[0]`，只作命名锚点，
+按同一条 `_peer_leg` 判据与其余参与库同等对待（打标归属、下推逐库天花板、大库只 peek、关补召回）。
+跨库检索走 `chunk_federation` 的联邦通道：参与库 × 子查询的任务表提交到 `GlobalAskService` 持有的
+进程级共享线程池（进程内只组合一个实例，池容量即检索侧连接上界），任务经 `copy_context()` 携带
+retrieval-run、读预算、参与集与来源范围进入工作线程；公平份额按**在途联邦调用数**分配（执行位 ÷
+在途调用数），因为一次 reasoning 作业会并发多次联邦调用。数据库适配器在请求局部读预算下约束连接
+等待与 SQL；失败分类由 repositories 层统一把驱动异常映射成 `timeout`/`saturated` 两种口径，services
+不 import 驱动。任务只返回结果值，回执按 `resolved_notebook_ids` 有序折叠，与完成顺序无关；任一库
+失败或取消时，phase 级中止令牌与用户取消事件合成一个 `is_set()` 传给 read budget，让在途任务在下一次
+预算检查时释放执行位。相关度绝对/库内相对门槛过滤后各库保底，剩余按库内名次和相对置信度选材。
+历史仅含范围兼容的完成轮次，助手回答只作指代语境。
 引用校验覆盖段落全部元素的来源与文本指纹；失效证据剔除后有界重合成。
 后台线程有容量上限并持有取消事件，终态通过 `status='running'` 条件更新提交；关闭先取消并
 有界等待，只有服务器启动补偿把遗留任务转为 `interrupted`，普通仓库实例化不执行补偿。

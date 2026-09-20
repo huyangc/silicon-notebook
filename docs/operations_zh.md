@@ -88,16 +88,24 @@ bash scripts/cli.sh extensions services stop
 预算内等待，再关闭共享模型与数据库资源；越过关闭边界的工作线程不能继续保存。
 尚未提交的持久任务保留运行状态，由下次启动补偿为已中断；后台完成不能覆盖已取消或
 已中断终态。解读局部答案前检查未检索和降级回执：超时后缩小选库范围，准备 scale 索引
-以改善语义召回。跳过原因刻意不点名成因；可排查的原因码是 `global_retrieval_skipped` 事件，
-它只带笔记本、`reason`、失败异常的类名与耗时毫秒，不带异常消息、SQL 或问题原文。原因码有四种：
-`timeout`（本地预算到期、PostgreSQL 取消语句、或 SQLite 中断）、`saturated`（剩余预算内借不到连接——
+以改善语义召回。跳过原因刻意不点名成因；可排查的原因码是 `chunk_federation_skipped` 事件——在全局
+run 下它在笔记本、失败异常类名与耗时毫秒之外多带一个 `reason`，不带异常消息、SQL 或问题原文。
+阶段时限到点时仍在执行、被本次 run 放弃的腿带 `lane="abandoned"`，用来把「被放弃」与「跑完了」分开。
+原因码有四种：
+`timeout`（逐库预算到期、PostgreSQL 取消语句、或 SQLite 中断）、`saturated`（剩余预算内借不到连接——
 池被打满、查询根本没跑，运维抓手是池容量或并发，不是用户的选库范围）、`queue_deadline`（阶段时限
-到点时该库仍在共享检索池里排队）、`unavailable`（其余）。另有 `global_retrieval_ann_starved` 事件，
-报告某库的 ANN 邻域被全局天花板排除的 chunk 占满：它带 `dropped`、`survivors` 与放大后的 `k`，
-表示这次回答用的是**局部邻域**——重建该库的 scale 索引会写入来源 sidecar，超取随之消失。
-逐库检索并行执行，进程级上界是 `GLOBAL_ASK_RETRIEVAL_CONCURRENCY`，并在并发任务之间公平分配；
-放宽选库范围因此同时消耗连接，而不只是墙钟时间。
-全局检索使用独立的 `ask_global` 事件类别，不冷加载共享整库索引。
+到点时该库仍在共享检索池里排队，一次查询都没发出，因此「请缩小范围」是错的建议）、
+`unavailable`（其余）。`chunk_federation_evidence_unavailable` 表示某次调用的证据指纹读不出来，
+受影响的引用因此按名字可被拒绝；`global_ask_citations_void` 表示一份答案被引用复核整份作废，
+带内容无关的 `reason`（`changed` / `unreadable` / `unattributed` / `out_of_ceiling`）——`unattributed`
+是某个引用生产者的归一缺口、需要修，其余是与正在编辑的用户抢跑。已退役的独立全局检索链路带走了
+`global_retrieval_skipped` 与 `global_retrieval_ann_starved` 两个事件，它们不再出现。
+词法降级不再有逐库披露，它和别的 run 一样只发 `chunk_bruteforce_skipped`；降级清单现在只表示
+「该库有部分检索腿失败」。
+逐库检索并行执行，进程级上界是 `GLOBAL_ASK_RETRIEVAL_CONCURRENCY`，并在**在途联邦调用**之间公平
+分配（一次 `reasoning` 作业会同时发起多次）；放宽选库范围因此同时消耗连接，而不只是墙钟时间。
+全局 run 使用引擎自己的 retrieval-run 类别（`ask_chunk` / `ask_reasoning`），不再有独立类别；
+大参与库那一腿不冷加载共享整库索引。
 
 ## 可观测性 / 日志
 

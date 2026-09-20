@@ -855,16 +855,23 @@ Global Ask uses `GLOBAL_ASK_CANDIDATE_LIMIT` for merged cross-notebook evidence 
 `GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS`,
 `GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS` and `GLOBAL_ASK_SHUTDOWN_TIMEOUT_SECONDS` control explicit
 scope admission, process capacity, cross-notebook retrieval parallelism and retrieval/shutdown budgets.
+`GLOBAL_ASK_RETRIEVAL_CONCURRENCY` sizes the ONE process-level executor shared by every global run, and
+`GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS` budgets ONE federated retrieval call rather than a whole job, so a
+`reasoning` job spends it once per retrieval round.
 `GLOBAL_ASK_MAX_NOTEBOOKS` is capped at 8 by the product contract and will not validate above it.
 **Upgrade note:** a deployment that previously set it above 8 (the old default was 32) now fails settings
 validation and the backend will not start. Remove the variable or lower it to 8 or less before upgrading.
 Size the PostgreSQL pool with BOTH global Ask knobs included: each job thread holds a connection for its
 own authority and progress work, and the single process-wide retrieval pool holds one more per busy slot,
-so the startup warning counts `GLOBAL_ASK_MAX_CONCURRENT + GLOBAL_ASK_RETRIEVAL_CONCURRENCY`.
-`GLOBAL_ASK_SMALL_NOTEBOOK_MAX_CHUNKS` bounds transient streamed semantic
-recall for small notebooks without evicting warm shared indexes. `GLOBAL_ASK_MIN_RELEVANCE` and
+so the startup warning counts `GLOBAL_ASK_MAX_CONCURRENT + GLOBAL_ASK_RETRIEVAL_CONCURRENCY`. The chunk
+arm's own fan-out is counted as well (`CHUNK_FANOUT_MAX_WORKERS`): each of its worker slots issues a
+database query of its own, and a budget that leaves it out under-reports a deployment that the ordinary
+in-notebook chunk arm alone can exhaust.
+`GLOBAL_ASK_MIN_RELEVANCE` and
 `GLOBAL_ASK_RELATIVE_RELEVANCE` filter weak candidates before reserving peer evidence; tune them against
-representative questions. Libraries without semantic recall use disclosed lexical fallback.
+representative questions. Libraries without semantic recall use bounded lexical fallback.
+`CHUNK_FEDERATION_ENABLED=0` does not switch global Ask off or back to a single-library short circuit: a
+global run degrades to a one-leg federation that searches the first resolved library only.
 Model context shares
 `CHUNK_ANSWER_BUDGET_CHARS`; no separate model endpoint is needed (`query_rewrite`
 and `ask_answer` use the existing model-service configuration). Exact defaults and
@@ -1210,7 +1217,7 @@ REASONING_MAX_CONSULT_MEMORY # max consult_memory calls per run (default 2; ge=0
 USER_SEARCH_PROFILE_ENABLED  # single gate for the per-user search/answer style preference document (Agentic Memory P3, B-line): background inference, Ask plan/answer injection, and PATCH /me/search-profile's writability all key off it (default true; false reverts everywhere to byte-identical pre-feature behavior on the injection/write side — no inference, no injection, PATCH 409s — but GET /me still returns any existing value already on the row rather than forging search_profile: null)
 USER_SEARCH_PROFILE_TRIGGER  # completed asks for that user before the deterministic, zero-LLM answer_language inference job runs again (default 20; ge=1)
 CHUNK_RECALL                 # chunk 大召回数 (default 200; mix 候选池 / MMR 候选)
-CHUNK_FEDERATION_ENABLED     # federated chunk recall: whether a mounted reference library's own source passages enter chunk retrieval alongside the active notebook's (default true). False is the single rollback switch: the participant set collapses to the active notebook alone, the federated module short-circuits to the pre-federation single-library lanes, and behaviour returns to active-only passage recall. A peer library contributes only its currently visible sources — hidden Memory/Knowhow projections are structurally excluded from the cross-library passage channel — and a library the request unchecked contributes nothing at all
+CHUNK_FEDERATION_ENABLED     # federated chunk recall: whether a mounted reference library's own source passages enter chunk retrieval alongside the active notebook's (default true). False is the single rollback switch: the participant set collapses to the active notebook alone, the federated module short-circuits to the pre-federation single-library lanes, and behaviour returns to active-only passage recall. Global Ask is the one exception — a run with no subject library keeps the federated path and degrades to a one-leg federation over the first resolved library rather than taking that short circuit. A peer library contributes only its currently visible sources — hidden Memory/Knowhow projections are structurally excluded from the cross-library passage channel — and a library the request unchecked contributes nothing at all
 CHUNK_FEDERATION_MAX_PARTICIPANTS # upper bound on libraries one federated chunk arm searches (default 8; 1..8). Beyond it the set is truncated along the deterministic mount order and a content-free `chunk_federation_truncated` event is emitted; the set is never silently widened or silently narrowed. Start at 4 in production and watch that event plus the ask-stage latency distribution before raising it
 CHUNK_FANOUT_MAX_WORKERS     # total worker slots for ONE chunk arm's flattened `(library × sub-query)` fan-out (default 8; 1..16). "Per library" and "per sub-query" share ONE executor rather than nesting, so one arm's concurrency is this value regardless of how many reference libraries are mounted; the default matches the fixed width the single-library multi-sub-query path used before federation existed. It bounds ONE arm, not a request: a deep report runs several section workers concurrently, and their combined leaf I/O is bounded by `REPORT_RETRIEVAL_FANOUT` instead, which every federated chunk leaf now acquires individually
 CHUNK_FEDERATION_ACTIVE_RESERVE # the active notebook's reserved share of the FINAL selected passages (default 0.25; 0..1). Recall is federated, but the current notebook is the subject and mounted reference libraries are the supplement: with several participants, the active notebook keeps at least `ceil(CHUNK_MMR_K × this)` seats whenever it has qualified candidates, capped by how many it actually has, and reference libraries' strong hits take the rest. The rule has two halves. The reserved candidates are withheld during the cross-library merge rather than recovered after it, so a library large enough to fill the whole `CHUNK_RECALL` pool cannot discard them before selection runs; they are paid out of that budget, never on top of it. The seats themselves are then enforced once, on the FINISHED selection of each branch, because Ask merges further keyword/exact-lookup producers into the candidates after retrieval returns — a floor expressed in the fusion's inputs would only bind the inputs this channel produced. Seats are taken back from the lowest-ranked reference-library rows (optional generated-question supplements first); the selection never changes length, and passages with identical text spend one seat, not one per copy. Without it a few short local notes (relevance 0.30–0.40) lose every seat to one reference library's 0.60–0.85 hits, so a question about the document the user just uploaded returns none of it. 0 disables the reserve and restores pure relevance ordering; a notebook with no mounted library is unaffected either way
