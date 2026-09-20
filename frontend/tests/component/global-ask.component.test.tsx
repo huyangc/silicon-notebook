@@ -181,6 +181,14 @@ test("a minimized chat keeps polling without cancellation and Escape restores th
   fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "后台问题" } });
   fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
   await waitFor(() => expect(screen.getByRole("button", { name: "停止" })).toBeTruthy());
+  // 停止键是图标键：名字在 aria-label 上，按钮面上没有字；外观取全站共用的那个类，
+  // 并且与发送键同住工具条的右栏（不与范围、引擎挤在同一条换行里）。
+  const stop = screen.getByRole("button", { name: "停止" });
+  expect(stop.textContent).toBe("");
+  expect(stop).toHaveClass("stop-control");
+  expect(stop.querySelector(".stop-glyph")).toBeTruthy();
+  expect(stop.parentElement).toHaveClass("global-composer-toolbar");
+  expect(stop.closest(".global-composer-controls")).toBeNull();
   fireEvent.keyDown(screen.getByRole("dialog", { name: "全局问答" }), { key: "Escape" });
   expect(api.cancel).not.toHaveBeenCalled();
   await waitFor(() => expect(api.poll).toHaveBeenCalledTimes(1), { timeout: 2500 });
