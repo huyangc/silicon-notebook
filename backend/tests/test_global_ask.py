@@ -364,6 +364,21 @@ def test_a_concurrent_twin_of_a_replacing_submission_gets_the_job_back(setup, mo
     monkeypatch.setattr(service, "replay", lambda *args, **kwargs: None)
     monkeypatch.setattr(service, "_check_replaceable", lambda *args, **kwargs: None)
     assert service.start(request, user_id="u").job_id == winner.job_id
+    # The other interleaving: the loser passed the replay, the winner committed,
+    # and only then did the loser run the EARLY check (which now finds the old
+    # job gone). It must look again before calling its own request stale.
+    monkeypatch.undo()
+    calls = {"count": 0}
+    real_replay = service.replay
+
+    def replay_blind_once(*args, **kwargs):
+        calls["count"] += 1
+        return None if calls["count"] == 1 else real_replay(*args, **kwargs)
+
+    monkeypatch.setattr(service, "replay", replay_blind_once)
+    assert service.start(request, user_id="u").job_id == winner.job_id
+    assert calls["count"] == 2
+    monkeypatch.undo()
     # A DIFFERENT submission naming the same gone job is still refused.
     with pytest.raises(GlobalAskError) as stale:
         service.start(request.model_copy(update={"client_request_id": "other"}), user_id="u")

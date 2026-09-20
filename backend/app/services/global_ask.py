@@ -896,7 +896,19 @@ class GlobalAskService:
             return replayed
         # AFTER the replay: a retry whose first attempt already replaced the old
         # job names a row that no longer exists, and must get its job back.
-        self._check_replaceable(payload, user_id)
+        try:
+            self._check_replaceable(payload, user_id)
+        except GlobalAskError:
+            # A concurrent twin may have committed between the replay above and
+            # this read -- it deleted the old job, which is exactly why the check
+            # failed. Look once more before calling the request stale.
+            twin = self.replay(
+                payload, user_id=user_id, allowed_notebook_ids=allowed_notebook_ids,
+                authority_check=authority_check,
+            )
+            if twin is not None:
+                return twin
+            raise
         with self._lock:
             if self._closed:
                 raise GlobalAskError(503, "服务正在关闭，请稍后重新提交问题。")

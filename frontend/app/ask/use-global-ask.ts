@@ -646,13 +646,24 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
       if (mounted.current && ticket === owner.current) {
         returnQuestion();
         setError(toUserMessage(cause, "提交失败，请重试；重复提交不会创建重复任务"));
-        // 带替换的提交失败，多半是本地那条「已停止」记录在服务端已经不在了（别处替换
-        // 过、会话被删）。不重拉的话每次重发都带着同一个过期 id 再 409 一次。
+        // 带替换的提交失败有两种可能，重拉一次会话才分得清：
+        //   · 响应丢了、其实已经成功——会话里多出一条我们没见过的、问题相同的作业：
+        //     那就是这次提交，直接认领它（清掉弹回的问题与错误），不给用户一个会
+        //     建出重复回答的「重试」；
+        //   · 本地那条「已停止」记录在服务端已经不在了（别处替换过）——换上真实的
+        //     轮次，并作废这次的重试身份：下一次提交按新状态重新算要不要替换。
         if (replaces && conversationId) {
+          const known = new Set(currentTurns.current.map((item) => item.job_id));
           void getGlobalConversation(conversationId).then((detail) => {
             if (!mounted.current || ticket !== owner.current || serial !== submitSerial.current) return;
+            const accepted = detail.turns.find((item) => !known.has(item.job_id) && item.question === question);
             setTurns(detail.turns);
             setTurnOffset(detail.has_more ? detail.next_offset : null);
+            retryRequest.current = null;
+            if (accepted) {
+              setDraft((draft) => draft.trim() === question ? "" : draft);
+              setError("");
+            }
           }).catch(() => { /* 重拉失败不盖过上面那条提交错误。 */ });
         }
       }
@@ -679,6 +690,11 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     setConversationTitle("");
     updateUrl("");
     ++historyVersion.current;
+    // 与 `removeConversation` 同一条账：列表里少了一条已加载的会话，历史分页的
+    // OFFSET 游标跟着退一格。
+    if (conversations.some((item) => item.id === discardedConversationId)) {
+      setHistoryOffset((offset) => Math.max(0, offset - 1));
+    }
     setConversations((items) => items.filter((item) => item.id !== discardedConversationId));
   }
 

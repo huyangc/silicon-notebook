@@ -1389,6 +1389,22 @@ test("stopping a job that has shown nothing discards it and returns the question
   expect(result.current.conversations).toEqual([]);
 });
 
+test("discarding a listed conversation moves the history cursor with it", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-0");
+  const page = Array.from({ length: 50 }, (_, index) => conversation(`conv-${index}`));
+  api.list.mockImplementation((offset = 0) => Promise.resolve(offset === 0 ? page : []));
+  api.detail.mockResolvedValue(detail("conv-0", [job("running", "conv-0")]));
+  api.poll.mockReturnValue(new Promise(() => {}));
+  api.cancel.mockResolvedValue(job("cancelled", "conv-0"));
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+  await act(async () => { await result.current.stop(); });
+  expect(result.current.conversations).toHaveLength(49);
+  await act(async () => { await result.current.loadMoreHistory(); });
+  // 服务端少了一条会话：下一页从 49 而不是 50 开始取，才不会跳过边界上的那一条。
+  expect(api.list).toHaveBeenLastCalledWith(49);
+});
+
 test("a discard the server did not carry out leaves the turn and the conversation alone", async () => {
   // 别的标签页先一步停了这条作业：`cancel?discard=true` 照样回 cancelled，却什么都
   // 没删。确认不到 404，本地就不许摘记录、更不许丢会话（codex #761 R2 P2）。
@@ -1489,6 +1505,48 @@ test("a late recovery read cannot overwrite a re-send that has since succeeded",
   expect(result.current.turns.map((turn) => turn.job_id)).toEqual(["job-new"]);
   await act(async () => { recovery.resolve(detail("conv-a", [stopped])); });
   expect(result.current.turns.map((turn) => turn.job_id)).toEqual(["job-new"]);
+});
+
+test("a replacement whose response was lost is claimed, not offered as a retry", async () => {
+  // 替换其实已经提交、只是响应丢了：重拉会话会看到一条没见过的、问题相同的作业。
+  // 认领它；否则「重试」会因为已无可替换的记录而换一个 request id，建出重复回答
+  // （codex #761 R3 P2）。
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  const stopped = { ...job("cancelled"), searched_notebook_ids: ["nb-0"] };
+  const accepted = { ...job(), job_id: "job-accepted", question: "其实已经提交的问题" };
+  api.detail.mockResolvedValueOnce(detail("conv-a", [stopped])).mockResolvedValueOnce(detail("conv-a", [accepted]));
+  api.ask.mockRejectedValueOnce(new Error("network"));
+  api.poll.mockReturnValue(new Promise(() => {}));
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.turns).toHaveLength(1));
+  act(() => result.current.setDraft("其实已经提交的问题"));
+  await act(async () => { await result.current.submit(); });
+  await waitFor(() => expect(result.current.turns.map((turn) => turn.job_id)).toEqual(["job-accepted"]));
+  expect(result.current.draft).toBe("");
+  expect(result.current.error).toBe("");
+  expect(result.current.running?.job_id).toBe("job-accepted");
+  expect(api.ask).toHaveBeenCalledTimes(1);
+});
+
+test("a stale replacement drops its retry identity once the real turns are known", async () => {
+  // 那条「已停止」记录在服务端已经不在了、也没有我们的作业：下一次提交必须是一次
+  // 全新的、不带替换的提交，而不是带着同一个过期 id 再 409 一次。
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  const stopped = { ...job("cancelled"), searched_notebook_ids: ["nb-0"] };
+  const others = { ...job("done"), job_id: "job-others", question: "别处问的问题", answer: standardAnswer() };
+  api.detail.mockResolvedValueOnce(detail("conv-a", [stopped])).mockResolvedValueOnce(detail("conv-a", [others]));
+  api.ask.mockRejectedValueOnce(new Error("conflict"))
+    .mockResolvedValueOnce({ ...job(), job_id: "job-fresh", question: "再发一次" });
+  api.poll.mockReturnValue(new Promise(() => {}));
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.turns).toHaveLength(1));
+  act(() => result.current.setDraft("再发一次"));
+  await act(async () => { await result.current.submit(); });
+  await waitFor(() => expect(result.current.turns.map((turn) => turn.job_id)).toEqual(["job-others"]));
+  expect(result.current.draft).toBe("再发一次");
+  await act(async () => { await result.current.submit(); });
+  expect(api.ask.mock.calls[1][0].replaces_job_id).toBeUndefined();
+  expect(api.ask.mock.calls[1][0].client_request_id).not.toBe(api.ask.mock.calls[0][0].client_request_id);
 });
 
 test("an older stopped turn wears the same notice without promising a replacement", async () => {
