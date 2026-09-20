@@ -45,6 +45,11 @@ POSTGRES_BUSINESS_TABLES = (
     "ask_jobs",
     "ask_trace_steps",
     "auth_sessions",
+    "auth_policy",
+    "auth_policy_audit",
+    "auth_identity_audit",
+    "auth_transactions",
+    "external_identities",
     "canonical_relations",
     "catalog_candidates",
     "catalog_jobs",
@@ -331,6 +336,6 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # watermark must compare against global_ask_jobs.created_at under the
 # canonical (created_at, id) order.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=77,
-    postgres_version=57,
+    sqlite_version=78,
+    postgres_version=58,
 )

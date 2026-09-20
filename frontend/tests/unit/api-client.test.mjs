@@ -131,13 +131,13 @@ test("performApiRequest exposes a reviewed raw response for special policy", asy
   assert.equal(response.status, 403);
 });
 
-test("default 401 policy preserves the stored session", async () => {
+test("default 401 policy clears the stored session and reloads", async () => {
   setToken("tok-1");
   globalThis.fetch = async () => new Response(null, { status: 401 });
 
   await performApiRequest("/me", { tag: "auth" });
-  assert.equal(getToken(), "tok-1");
-  assert.equal(reloads, 0);
+  assert.equal(getToken(), "");
+  assert.equal(reloads, 1);
 });
 
 test("clear-and-reload 401 policy clears the token before reloading", async () => {

@@ -20,6 +20,7 @@ from app.extensions.gap_consult import GapConsultHost
 from app.extensions.reflect_action import ReflectActionHost
 from app.extensions.report import ReportCompletedObserverHost
 from app.extensions.report_export import ReportExporterHost
+from app.extensions.auth import AuthProviderHost
 from app.extensions.registry import ExtensionRegistry, ExtensionRegistryError
 from app.extensions.parser_chain import ParserChainCancelled, ParserProviderChainHost
 from app.extensions.retrieval import RetrievalContributorHost, RetrievalHostCancelled
@@ -38,6 +39,7 @@ __all__ = [
     "ReflectActionHost",
     "ReportCompletedObserverHost",
     "ReportExporterHost",
+    "AuthProviderHost",
     "ParserChainCancelled",
     "ParserProviderChainHost",
     "RetrievalContributorHost",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.repositories.postgres._store_utils import iso_timestamp, utc_now
 from app.repositories.postgres.database import PostgresDatabase
+from app.domain.auth_policy import AuthStoreError
 
 
 #: Single definition point for the admin-recheck row lock, shared with
@@ -57,6 +58,10 @@ class ExtensionToggleStore:
         if not plugin_id.strip():
             raise ValueError("empty plugin_id")
         with self.database.write() as db:
+            db.execute("INSERT INTO auth_policy(id) VALUES(1) ON CONFLICT(id) DO NOTHING")
+            policy = db.execute("SELECT mode,plugin_id FROM auth_policy WHERE id=1 FOR UPDATE").fetchone()
+            if not enabled and policy["mode"] != "local" and policy["plugin_id"] == plugin_id:
+                raise AuthStoreError("authentication_provider_required")
             actor = db.execute(
                 ACTOR_ADMIN_ROLE_LOCK_SQL, (actor_id,)
             ).fetchone()

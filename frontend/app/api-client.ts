@@ -43,7 +43,7 @@ export async function performApiRequest(
   const {
     auth = "required",
     tag,
-    unauthorized = "preserve",
+    unauthorized = "clear-and-reload",
     headers: inputHeaders,
     ...init
   } = options;

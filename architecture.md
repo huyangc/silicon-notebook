@@ -657,3 +657,12 @@ Vitest/jsdom/Testing Library；策略同时覆盖测试入口和 helper 模块�
 测试性能优化保持结果语义不变：同一 pytest 进程内的全仓 AST/协议扫描只解析每个生产文件一次；缓存容器策略直接针对容器验证，不为纯淘汰语义构建数据库和 ANN 索引；autouse 隔离路径从各 worker 已有的 pytest base temp 派生，而不是为每条纯测试额外创建 `tmp_path`；普通 UT 与 G1 测试保持环境自足，不绑定宿主端口、不依赖环境服务；只有合同本身属于进程级行为时才保留自包含的子进程/信号覆盖。并发正确性以 event/barrier 握手证明，不把固定 sleep 或线程唤醒顺序当作契约。
 
 SQLite source open 的分类只在 `open_fresh_live_sqlite` 调用边界生效：非瞬态 `sqlite3.OperationalError` 归为 binding identity；locked、busy、interrupted open 仍瞬态整批重试，后续 SQLite operational error 保持原 schema/query 分类。
+
+
+## 认证扩展与业务身份边界
+
+外部认证通过 `app.domain.auth_provider.AuthProviderHostPort` 注入，SDK合同由 `app.extension_sdk.auth` 拥有，`app.extensions.auth` 负责单provider、冻结描述、参数/输出验证、实时admission和受限deadline。主仓不import W3示例。独立打包的 `examples/extensions/w3-auth` 只实现供应商协议，不获得本站repository、密码、会话或资源授权。
+
+组合根在数据库迁移和extension admission prime之后复验持久化认证策略。固定主仓认证路由是未登录协议入口；普通插件HTTP路由的登录依赖不变。认证流程由 `app.services.auth_flow` 编排，外部网络调用始终发生在数据库事务之外；`identity.auth` 持有后端共用的AuthStore，经SQLite/PostgreSQL适配统一锁住策略行后执行映射、一次性凭证和会话提交。新权限不扩散到兼容facade。
+
+`users.id` 是业务身份主键；正式外部用户名和临时本地登录名分开存储。唯一外部映射、凭据来源、绝对期限及持久化迁移阶段决定准入。Agent初验和工具调用使用同一所有者准入，网页认证流式响应每帧复验会话；MCP由其协议逐请求和逐工具检查，保留已提交写入的终态确认。插件不可更改阶段或签发本站会话。关闭本地认证不删除业务用户、权限和资产；完整运行合同与迁移操作分别归产品/API和运维参考。

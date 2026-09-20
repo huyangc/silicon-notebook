@@ -183,6 +183,16 @@ EXTERNAL_FTS_TABLES = ["memory_items_fts"]
 #   (b) 派生产物 —— 合并后本来就该由重建重新产出, 拷过来只会带着**源库的版本戳**落地。
 SKIP_SECONDARY_TABLES = [
     "auth_sessions",
+    # v78 external-auth policy, browser transactions, identity bindings, and
+    # their audit trail are deployment security state.  Importing a secondary
+    # policy could switch the primary login mode or selected provider; importing
+    # its subject bindings could attach that deployment's asserted identities to
+    # primary users.  Preserve the primary deployment's complete auth boundary.
+    "auth_policy",
+    "auth_transactions",
+    "external_identities",
+    "auth_policy_audit",
+    "auth_identity_audit",
     # Forward-shadow capture state and event history belong to the primary
     # deployment/run. Importing a secondary ledger would mix run identities.
     "shadow_capture_control",

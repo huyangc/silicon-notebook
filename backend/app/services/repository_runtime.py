@@ -1324,6 +1324,7 @@ class RepositoryRuntime:
             self.seams.now,
             embedding_scheduler=lambda fn, item: kg_scheduler.submit_job(fn, item),
             kg_ingest_scheduler=lambda fn, item: kg_scheduler.submit_job(fn, item),
+            owner_eligible=self.identity.auth.owner_eligible,
         )
         self.memory_retriever = MemoryRetriever(self.memory_store, query_embedder)
         self.catalog.memory_retriever = self.memory_retriever

@@ -8,6 +8,7 @@ import pathlib
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
 
+import anyio
 import httpx
 import pytest
 from mcp import ClientSession
@@ -5277,9 +5278,12 @@ async def test_token_level_failure_after_append_keeps_the_rows(
 
     async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
         _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        result = _payload(await client.call("add_observation", {
-            "text": "written just before revocation", "client_request_id": "tok-1",
-        }))
+        # Revocation after the commit must not silently remove the terminal
+        # JSON-RPC acknowledgement and leave the official client waiting.
+        with anyio.fail_after(5):
+            result = _payload(await client.call("add_observation", {
+                "text": "written just before revocation", "client_request_id": "tok-1",
+            }))
 
     assert result["accepted"] is True
     rows = repo.agent_observations.list_observations(

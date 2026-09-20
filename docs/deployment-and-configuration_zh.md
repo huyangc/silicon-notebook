@@ -1273,3 +1273,18 @@ EXTENSION_ADMISSION_REFRESH_SECONDS  # 服务进程重读管理员运行时开�
 ```
 
 这是叠在上面 TOML 拓扑之上的第二层、以数据库为真值的开关，不是替代它：`EXTENSIONS_CONFIG` 的 `enabled` 键依旧只表示「装不装载」，依旧只能靠重启生效，一个从未点名或标了 `enabled = false` 的插件不会因为这层开关而注册。一旦某个 `trust="deployment"` 插件已经装载，管理员就可以在 `/admin/extensions`（`PATCH /api/admin/extensions/{plugin_id}`）不重启地把它开或关；当前值存在 `extension_runtime_toggles` 表里，按 plugin id 建键，无行即启用。这一行会在插件从 `EXTENSIONS_CONFIG` 移除、之后又重新加回时保留下来——一个被卸载又重新装载的插件恢复的是管理员上一次给它这个 id 设的开关，不会被重置为启用。发起这次管理员写入的进程立即重新发布自己的内存快照；同一部署里的其它服务进程（例如多副本）各自按 `EXTENSION_ADMISSION_REFRESH_SECONDS` 的节奏收敛。零个已装载 `trust="deployment"` 插件的进程完全不起刷新线程——一个没有部署插件的常规部署仍要付一次启动时的 prime（与其它所有进程一样，组合期本就要做的那一次读表加迁移），只是不会在它之上再起一条周期轮询。离线 CLI 与批处理进程（`batch_ingest.py` 等）只在启动组合那一刻 prime 一次这份快照，运行期间不会再刷新——管理员运行中途翻的开关，一个已经在跑的批处理任务要等下一次调用才能看到。运维操作手册见 [`docs/deployment-extensions-sop_zh.md`](deployment-extensions-sop_zh.md)。
+
+
+## 外部认证部署
+
+将可选的[W3示例](../examples/extensions/w3-auth/README_zh.md)安装到后端实际使用的Python环境，将默认关闭的TOML复制到仓库外，填写环境变量引用后在副本中启用，并保留 `EXTENSIONS_CONFIG` 内其他插件条目。主仓不强制依赖W3包；示例目录可原样移到独立插件仓库维护。
+
+`AUTH_PUBLIC_BASE_URL` 是公开API origin，需在IDaaS登记其 `/api/auth/sso/callback`。`AUTH_FRONTEND_BASE_URL` 默认使用同一origin，接收 `/auth/sso/callback`。生产必须使用HTTPS及相同hostname，保证host-only、SameSite浏览器证明可发送，推荐同源反向代理；开发可用回环HTTP和不同端口。不能从请求Host或未经信任的转发头推导这些地址。
+
+高级预算为 `AUTH_TRANSACTION_TTL_SECONDS`、`AUTH_SSO_SESSION_SECONDS`、`AUTH_PROVIDER_TIMEOUT_SECONDS`，精确默认值和范围归产品/API参考。迁移阶段存于数据库，没有平行的环境变量模式开关。装载插件不会自动启用SSO，需管理员推进策略。非local阶段要求provider、身份源及配置代次匹配，并拒绝匿名管理员回退；插件缺失、不兼容或被禁用时启动失败。上游运行时故障只阻止新SSO，不恢复密码入口。
+
+配置代次标识已审核的插件版本、端点、客户端和密钥版本组合；上述项目变化时更新非敏感代次，所有部署副本保持一致，经受控路径更新策略。在途事务不能跨代次完成。身份源命名空间不能由包版本生成；普通插件开关不能停用当前认证插件。
+
+W3专有字段、TLS/CA及Secret环境引用由插件文档维护。反向代理、APM及前端访问日志需去掉OAuth回调/交接query；主仓会去除Uvicorn认证访问记录中的query，这不会代替上游基础设施配置。
+
+现有生产Settings校验仍要求非默认 `SILICON_NOTEBOOK_ADMIN_PASSWORD`，退役后也需保留该配置。数据库初始化会遵守持久化的仅统一认证/退役策略，不写入或恢复此密码。移除这项已不再使用的配置要求属于尚待处理的单独变更，该变更部署前不要删除配置。

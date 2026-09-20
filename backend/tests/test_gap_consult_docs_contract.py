@@ -102,10 +102,12 @@ POINTS_OUTSIDE_THE_PROTOCOL_TABLE = frozenset({"PLUGIN_HTTP_ROUTER_POINT"})
 _COUNT_WORDS_EN = {
     1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
     6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+    11: "eleven",
 }
 _COUNT_WORDS_ZH = {
     1: "一", 2: "二", 3: "三", 4: "四", 5: "五",
     6: "六", 7: "七", 8: "八", 9: "九", 10: "十",
+    11: "十一",
 }
 
 # How far past one occurrence of a ``*_POINT`` name to look for a paired

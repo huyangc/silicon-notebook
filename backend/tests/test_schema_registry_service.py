@@ -17,6 +17,7 @@ from app.models.schemas import (
 )
 from app.services.sqlite_repository import SQLiteRepository, _now
 from tests.model_testkit import RecordingModelProvider, bind_chat_client
+from tests.sqlite_migration_testkit import rollback_v78
 
 
 @pytest.fixture
@@ -80,6 +81,7 @@ def test_v47_migration_relocates_legacy_notebook_schema(repo):
     notebook = repo.create_notebook(NotebookCreate(name="legacy schema"))
     now = _now()
     with repo._write() as db:
+        rollback_v78(db)
         db.execute("DROP TABLE notebook_object_schemas")
         db.execute(
             "INSERT INTO object_schemas "
@@ -111,6 +113,7 @@ def test_v47_migration_relocates_legacy_notebook_schema(repo):
 def test_v47_migration_refuses_orphaned_legacy_schema(repo):
     now = _now()
     with repo._write() as db:
+        rollback_v78(db)
         db.execute("DROP TABLE notebook_object_schemas")
         db.execute(
             "INSERT INTO object_schemas "

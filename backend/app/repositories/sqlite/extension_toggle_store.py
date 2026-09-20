@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app.repositories.sqlite.database import SqliteDatabase
+from app.domain.auth_policy import AuthStoreError
 
 
 def _now() -> str:
@@ -69,6 +70,10 @@ class ExtensionToggleStore:
             raise ValueError("empty plugin_id")
         with self.database.write() as db:
             self.database.begin_immediate(db)
+            db.execute("INSERT INTO auth_policy(id) VALUES(1) ON CONFLICT(id) DO NOTHING")
+            policy = db.execute("SELECT mode,plugin_id FROM auth_policy WHERE id=1").fetchone()
+            if not enabled and policy["mode"] != "local" and policy["plugin_id"] == plugin_id:
+                raise AuthStoreError("authentication_provider_required")
             actor = db.execute(
                 "SELECT role FROM users WHERE id = ?", (actor_id,)
             ).fetchone()

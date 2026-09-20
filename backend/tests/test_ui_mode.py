@@ -13,6 +13,8 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.core.request_context import set_request_user
+from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.migrations import SqliteMigrator
 from app.services.sqlite_repository import SQLiteRepository
 
 
@@ -156,32 +158,46 @@ def test_sqlite_migration_v44_to_v45_adds_ui_mode_column(tmp_path, monkeypatch):
 
     # 先把 SCHEMA_VERSION 钉在 44,建一个"旧库"(ui_mode 列缺失)。
     monkeypatch.setattr(migrations_module, "SCHEMA_VERSION", 44)
-    repo = SQLiteRepository(
-        Settings(
-            database_url=f"sqlite:///{tmp_path}/t.db",
-            storage_dir=str(tmp_path / "storage"),
-            _env_file=None, event_log_enabled=False, llm_log_enabled=False,
-        )
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path}/t.db",
+        storage_dir=str(tmp_path / "storage"),
+        _env_file=None, event_log_enabled=False, llm_log_enabled=False,
     )
-    ident = _identity(repo)
-    created = ident.create_user("z00000004", "pw")
+    database = SqliteDatabase(settings, tmp_path)
+    migrator = SqliteMigrator(database, settings)
+    assert migrator.migrate()
 
-    with repo._connect() as db:
+    with database.write() as db:
+        db.execute(
+            "INSERT INTO users "
+            "(id,email,display_name,role,status,username,created_at,updated_at) "
+            "VALUES ('user-before-v45','z00000004@example.invalid','Before',"
+            "'user','active','z00000004','before','before')"
+        )
+        db.execute(
+            "INSERT INTO user_profiles "
+            "(id,user_id,memory_mode,domain_focus,created_at,updated_at) "
+            "VALUES ('profile-before-v45','user-before-v45','manual','[]',"
+            "'before','before')"
+        )
         cols = {r[1] for r in db.execute("PRAGMA table_info(user_profiles)").fetchall()}
         assert "ui_mode" not in cols
         assert db.execute("PRAGMA user_version").fetchone()[0] == 44
 
     # 恢复真实 SCHEMA_VERSION(45),对同一个库文件重新跑迁移。
     monkeypatch.setattr(migrations_module, "SCHEMA_VERSION", 45)
-    applied = repo._migrator.migrate()
+    applied = migrator.migrate()
     assert applied == [45]
 
-    with repo._connect() as db:
+    with database.connect() as db:
         cols = {r[1] for r in db.execute("PRAGMA table_info(user_profiles)").fetchall()}
+        preserved = db.execute(
+            "SELECT u.username,p.ui_mode FROM users u JOIN user_profiles p "
+            "ON p.user_id=u.id WHERE u.id='user-before-v45'"
+        ).fetchone()
         assert "ui_mode" in cols
         assert db.execute("PRAGMA user_version").fetchone()[0] == 45
 
-    # 升级前创建的用户仍在,且回退 "auto"(升级不会为存量行填充非 NULL 默认值)。
-    reread = ident.authenticate_user("z00000004", "pw")
-    assert reread.id == created.id
-    assert reread.ui_mode == "auto"
+    # 升级前的用户/profile 都保留；NULL 由已覆盖的读路径投影为 "auto"。
+    assert tuple(preserved) == ("z00000004", None)
+    database.close_local()

@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=77, postgres_version=57, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=78, postgres_version=58, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -78,6 +78,9 @@ _SQLITE_NULL_GUARD_KEYS = frozenset(
         "app_settings.key",
         "ask_jobs.id",
         "auth_sessions.token",
+        "auth_policy.id",
+        "auth_policy_audit.id",
+        "auth_identity_audit.id",
         "catalog_candidates.id",
         "catalog_jobs.id",
         "chunk_embeddings.chunk_id",
@@ -811,6 +814,11 @@ _TABLES = (
     ),
     _table("global_ask_conversations", ("id",), ReplicationKeyKind.DECLARED_PK, 96, "identity"),
     _table("global_ask_jobs", ("id",), ReplicationKeyKind.DECLARED_PK, 97, "identity"),
+    _table("auth_policy", ("id",), ReplicationKeyKind.DECLARED_PK, 98, "timestamptz"),
+    _table("external_identities", ("provider_namespace", "subject"), ReplicationKeyKind.DECLARED_PK, 99, "timestamptz"),
+    _table("auth_policy_audit", ("id",), ReplicationKeyKind.DECLARED_PK, 100, "timestamptz"),
+    TableSpec("auth_transactions", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 101),
+    _table("auth_identity_audit", ("id",), ReplicationKeyKind.DECLARED_PK, 102, "timestamptz"),
 )
 
 MANIFEST = Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)

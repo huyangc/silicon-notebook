@@ -58,14 +58,17 @@ at `SCHEMA_VERSION` still runs no migrations. The only supported way back is
 to restore the pre-upgrade backup, or redeploy a build whose `SCHEMA_VERSION`
 is at least the database's — there is no reverse migration.
 
-The current schema version is 77. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v77 and remains readable. Global Ask adds user-owned conversation
+The current schema version is 78. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v78 and remains readable. Global Ask adds user-owned conversation
 and task tables (SQLite v76 / PostgreSQL 0056), with idempotent request and single-running-task
 unique indexes and conversation deletion cascading to its jobs; SQLite v77 / PostgreSQL 0057 then
 adds the public share token and read watermark (`share_token`, `shared_through_at`,
 `shared_through_id`, all nullable, plus a partial unique index on the issued token) to those global
 conversations — the same shape SQLite v52 / PostgreSQL 0030 put on notebook conversations, repeated
-because a global session belongs to no notebook. Those migrations
+because a global session belongs to no notebook. SQLite v78 / PostgreSQL 0058 separates local login
+names from stable user names, adds the singleton authentication policy, external-identity bindings,
+short-lived browser authentication transactions, and policy/identity audit tables, and extends sessions
+with their authentication source, external subject, and absolute expiry. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain

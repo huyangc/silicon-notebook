@@ -2752,3 +2752,63 @@ workload 做有界规划，不引入 Anthropic SDK 一类通用 Agent。模型�
 - `off` 模式 PDF 回退用 PyMuPDF4LLM 的分页 Markdown，保留标题、多栏阅读顺序和重建表格；只有该解析器缺失或报错时才最后回退 pypdf。公式、图片和复杂扫描件的权威高保真路径仍是 MinerU。URL/上传文件的云解析在重试后仍失败时也走同一本地回退，并以 `extracted` + `parse_quality_warning=true` 返回；来源详情会说明风险并提供重新解析/删除入口，后续 MinerU 重解析成功会清掉警告。见[用 MinerU 解析 PDF](./operations_zh.md#用-mineru-解析-pdf)。
 - 用户记忆保持手动 opt-in，当前没有自动记忆行为。
 - PostgreSQL 查询取消（`psycopg.errors.QueryCanceled`——语句超时或运维主动取消）在**非流式**响应上冒泡到请求栈顶层时，返回结构化 `503`（`detail` 加机器可读的 `code: "query_timeout"`），并发出一条 `query_timeout` 事件（带与配对 `kind=http` 行相同的请求 id、method/path，路由带 notebook 维度时一并携带）——而不再是裸的、不可观测的 `500`。**流式**响应一旦已开始就无法改写状态码——流会中断，但同一条 `query_timeout` 事件（标 `streaming: true`）仍由最外层 ASGI 观察者发出。前端仍显示既有通用 5xx「服务暂时不可用」文案（不新增用户可见文案；`frontend/app/errors.ts` 对所有 5xx 都刻意泛化）。既有的 savepoint 有界探测（例如 `knowledge_store.py` 的 chunk 词法召回预算）不受影响——它们在自己的调用点就已捕获并转换为领域异常，QueryCanceled 到不了这个 handler。
+
+
+## 外部认证与本地凭据退役
+
+可选的 `auth.provider` 部署插件负责外部身份认证；本站保留业务用户、会话和资源权限。W3示例位于 `examples/extensions/w3-auth`，可独立打包且默认关闭。它实现OAuth2授权码及userinfo适配，不代表平台已支持OIDC，也不代表已经连通真实IDaaS。
+
+持久化策略为 `local → dual → binding_required → sso_only → retired`，默认仍为local。dual保留密码操作并允许用户主动关联；binding_required关闭注册/改密，密码会话只能迁移，不能访问业务HTTP或订阅；sso_only拒绝本地会话和密码；retired不可逆地关闭本地认证并清理密码材料。阶段修改要求真实管理员会话及版本匹配，数据库在提交时复验切换条件。插件故障不会改变认证阶段。
+
+已有用户先验证当前本站密码，再统一认证并确认展示的身份。原 `users.id`、资产、角色、偏好及内部邮箱保持不变；可信外部用户名成为 `users.username`，原 `local_login_name` 仅在并存/迁移期继续用于密码登录。SSO只按唯一的 `(provider_namespace, subject)` 映射登录，不按用户名或邮箱认领。与他人正式用户名或旧登录名冲突时整个绑定回滚。显示姓名不用于身份匹配。
+
+state、浏览器证明、平台支持时的PKCE、原本站会话、策略/配置代次和一次性交接均由主仓控制。外部token不离开插件调用。回调跳转只携带短时交接码，浏览器还必须持有host-only、HttpOnly、SameSite证明cookie；绑定确认另需原本站Bearer。退出、重置密码、停用、重放及阶段/配置变化会使待办证明失效。SSO绝对期限从可信外部认证开始计算，滑动访问不能延长；网页认证的NDJSON/SSE每帧发送前复验会话。`/mcp` 继续由其协议逐请求、逐工具检查Agent凭据及所有者资格；已提交写入可以在token撤销后返回终态确认，后续访问仍被拒绝。
+
+下表均以 `/api` 为前缀。公开入口仍校验事务用途及浏览器证明；普通插件路由仍要求本站会话。
+
+| 接口 | 合同 |
+| --- | --- |
+| `GET /auth/capabilities` | 最小公开能力：阶段、本地登录/注册、统一登录/关联开关及标签 |
+| `POST /auth/sso/start` | 发起外部登录，返回 `authorization_url` |
+| `POST /me/identity-binding/start` | 原Bearer及 `current_password`，返回授权地址 |
+| `GET /auth/sso/callback` | 固定回调，校验state/证明后调用认证插件 |
+| `POST /auth/sso/complete` | `{code}`，返回登录token/user或明确的绑定/授权开通确认预览 |
+| `POST /me/identity-binding/confirm` | `{pending_id}`，原子提交关联与名称并轮换会话 |
+| `POST /me/identity-binding/cancel` | `{pending_id}`，取消待确认事务 |
+| `GET /me/identities` | 本人的关联状态、统一名称及临时本地登录名；可接受迁移凭据 |
+| `GET/PATCH /admin/auth/policy` | 持久化策略；修改需预期版本及显式回退标志 |
+| `GET /admin/auth/migration` | 预检计数及策略，不等同于真实IDaaS验收 |
+| `GET /admin/auth/accounts` | 分页迁移清单，包含已停用账号 |
+| `GET /admin/auth/audit` | 仅管理员可分页读取关联、授权和账号状态审计；不含凭据或原始认证响应 |
+| `PATCH /admin/auth/provider-configuration` | 准备新配置代次，保持阶段、provider和身份源；使在途认证失效 |
+| `PATCH /admin/auth/accounts/{user_id}` | 显式启用/停用账号并撤销其本站会话 |
+| `POST /admin/auth/grants` | 管理员签发绑定精确外部subject的限时新用户/历史恢复/身份更换凭证 |
+| `POST /auth/sso/grant/start` | 兑换授权并认证指定外部subject；新开通不能继承历史资产 |
+| `POST /admin/auth/retirement-cleanup` | 写入退役标记后可重试的凭据清理 |
+
+原 `POST /auth/login` 在收口期可返回 `migration_required=true`，此token不能用于业务。纯SSO新用户只获普通用户身份且无本地密码。晚到老用户需管理员签发固定原用户ID的恢复凭证，再由本人统一认证和确认；不自动建号或合并账号。
+
+更换已关联的统一账号必须由管理员签发 `replace` 凭证，固定原本站用户ID及当前身份源中的精确新subject。确认页展示原账号与新统一身份；用户认证并明确确认后，在同一事务中停用旧映射和旧SSO会话、保留历史subject归属并激活新映射，原用户ID、资产和角色不变。失败或取消不会改变原映射。授权签发、使用、完成以及关联、改名和账号状态变更均保留受限持久审计，不依赖短期认证事务。账号清单和审计均采用下表分页限制。
+
+Agent初验及每次数据工具调用都复验账号状态；仅统一认证和退役阶段还要求当前身份源的有效映射。关联收口期保留启用账号的Agent访问，便于迁移。token记录保留，每次调用实时检查所有者资格。浏览器绝对期限不能代替IDaaS离职通知；上线前必须确定subject稳定性、不可重分配及离职处置流程。切换预检要求两名已迁移的具名管理员、全部启用账号有结论及后续直接SSO登录记录；内置共享管理员必须停用。
+
+主仓认证限制如下，超限拒绝，不截断身份：
+
+| 配置/常量 | 数值 |
+| --- | --- |
+| `AUTH_TRANSACTION_TTL_SECONDS` | 默认600，60–1800秒 |
+| `AUTH_SSO_SESSION_SECONDS` | 默认28800，300–86400秒 |
+| `AUTH_PROVIDER_TIMEOUT_SECONDS` | 默认15，大于0且不超过60秒 |
+| `AUTH_PROVIDER_ID_MAX_CHARS` | 128 |
+| `AUTH_PROVIDER_NAMESPACE_MAX_CHARS` | 256 |
+| `AUTH_PROVIDER_CONFIGURATION_GENERATION_MAX_CHARS` | 128 |
+| `AUTH_PROVIDER_PUBLIC_LABEL_MAX_CHARS` | 80 |
+| `AUTH_PROVIDER_ENDPOINT_MAX_CHARS` | 2048 |
+| `AUTH_PROVIDER_SUBJECT_MAX_CHARS` | 512 |
+| `AUTH_PROVIDER_USERNAME_MAX_CHARS` | 512 |
+| `AUTH_PROVIDER_DISPLAY_NAME_MAX_CHARS` | 512 |
+| `AUTH_PROVIDER_AUTHORIZATION_URL_MAX_CHARS` | 8192 |
+| `AUTH_CUTOVER_MIN_ADMINS` | 2 |
+| `AUTH_INVENTORY_PAGE_SIZE` / `AUTH_INVENTORY_PAGE_MAX` | 默认100，最多200 |
+
+宿主只接纳一个provider，限制同时执行的调用，并拒绝超时后返回的结果；超时插件若仍未返回，会继续占用其执行槽位。供应商传输限制归示例README对维护。安装、分阶段发布及恢复见部署和运维参考。

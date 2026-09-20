@@ -81,6 +81,7 @@ KG_JOB_RESTART_MESSAGE = (
 # Tables whose rows the startup sequence may legitimately touch; every one is
 # compared row-by-row against the documented allowance instead of digest-only.
 SPECIAL_TABLES = (
+    "auth_policy",
     "users",
     "user_profiles",
     "concept_whitelist",
@@ -793,6 +794,11 @@ _BUILTIN_OBJECT_SCHEMAS = {
 # Stable values for every startup-insertable row.  Timestamp, password hash,
 # and salt columns are explicitly volatile; no other key or value is accepted.
 SEED_MANIFEST = {
+    "auth_policy": {"1": {
+        "id": 1, "mode": "local", "revision": 0, "provider_id": "",
+        "provider_namespace": "", "config_generation": "", "plugin_id": "",
+        "retired_at": None, "updated_by": "",
+    }},
     "users": {
         "user-local": {
             "id": "user-local",
@@ -1447,10 +1453,16 @@ def compare_snapshots(
                 continue
             if kind == "table":
                 relocation_table = relocation_active and name == "notebook_object_schemas"
+                policy_seed = (
+                    name == "auth_policy"
+                    and list(post.special_rows.get(name, {}).values())
+                    == [SEED_MANIFEST["auth_policy"]["1"]]
+                )
                 if (
                     post.tables[name].row_count
                     and name not in MEMORY_FTS_SHADOW_TABLES
                     and not relocation_table
+                    and not policy_seed
                 ):
                     note(name, "migration-added-table-not-empty")
                 else:
@@ -4444,6 +4456,89 @@ MIGRATION_MANIFEST[(76, 77)] = {
     "indexes": GLOBAL_ASK_SHARE_INDEXES, "triggers": {}, "views": {},
 }
 
+
+# SQLite78: authentication names, source-aware sessions and sunset policy.
+AUTH_SUNSET_SCHEMA = {
+  "tables": {
+    "auth_policy": "CREATE TABLE auth_policy (\n                 id INTEGER PRIMARY KEY CHECK(id=1),\n                 mode TEXT NOT NULL DEFAULT 'local' CHECK(mode IN ('local','dual','binding_required','sso_only','retired')),\n                 revision INTEGER NOT NULL DEFAULT 0,\n                 provider_id TEXT NOT NULL DEFAULT '', provider_namespace TEXT NOT NULL DEFAULT '',\n                 config_generation TEXT NOT NULL DEFAULT '', plugin_id TEXT NOT NULL DEFAULT '', retired_at TEXT, updated_by TEXT NOT NULL DEFAULT ''\n                )",
+    "external_identities": "CREATE TABLE external_identities (\n                 provider_namespace TEXT NOT NULL, subject TEXT NOT NULL,\n                 user_id TEXT NOT NULL REFERENCES users(id), status TEXT NOT NULL DEFAULT 'active',\n                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_login_at TEXT,\n                 PRIMARY KEY(provider_namespace,subject)\n                )",
+    "auth_transactions": "CREATE TABLE auth_transactions (\n                 token_digest TEXT PRIMARY KEY, purpose TEXT NOT NULL, browser_digest TEXT NOT NULL,\n                 payload TEXT NOT NULL, expires_at BIGINT NOT NULL\n                )",
+    "auth_policy_audit": "CREATE TABLE auth_policy_audit (\n                 id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, previous_mode TEXT NOT NULL,\n                 mode TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL\n                )",
+    "auth_identity_audit": "CREATE TABLE auth_identity_audit (\n                 id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, target_user_id TEXT NOT NULL,\n                 action TEXT NOT NULL, provider_namespace TEXT NOT NULL,\n                 subject TEXT NOT NULL, grant_reference TEXT NOT NULL DEFAULT '',\n                 created_at TEXT NOT NULL\n                )"
+  },
+  "indexes": {
+    "idx_users_local_login_name": "CREATE UNIQUE INDEX idx_users_local_login_name ON users(local_login_name) WHERE local_login_name IS NOT NULL",
+    "idx_auth_transactions_expiry": "CREATE INDEX idx_auth_transactions_expiry ON auth_transactions(expires_at)",
+    "idx_external_identities_active_user": "CREATE UNIQUE INDEX idx_external_identities_active_user\n                 ON external_identities(user_id,provider_namespace) WHERE status='active'",
+    "idx_auth_identity_audit_created": "CREATE INDEX idx_auth_identity_audit_created\n                 ON auth_identity_audit(created_at,id)"
+  },
+  "columns": {
+    "users": {
+      "local_login_name": [
+        "local_login_name",
+        "TEXT",
+        0,
+        None,
+        0
+      ],
+      "auth_revision": [
+        "auth_revision",
+        "INTEGER",
+        1,
+        "0",
+        0
+      ]
+    },
+    "auth_sessions": {
+      "auth_source": [
+        "auth_source",
+        "TEXT",
+        1,
+        "'local'",
+        0
+      ],
+      "absolute_expires_at": [
+        "absolute_expires_at",
+        "TEXT",
+        0,
+        None,
+        0
+      ],
+      "provider_namespace": [
+        "provider_namespace",
+        "TEXT",
+        1,
+        "''",
+        0
+      ],
+      "external_subject": [
+        "external_subject",
+        "TEXT",
+        1,
+        "''",
+        0
+      ]
+    }
+  }
+}
+MIGRATION_MANIFEST = {
+    (key[0], 78, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **AUTH_SUNSET_SCHEMA["tables"]},
+        "columns": {
+            **manifest["columns"],
+            **{
+                table: {**manifest["columns"].get(table, {}), **columns}
+                for table, columns in AUTH_SUNSET_SCHEMA["columns"].items()
+            },
+        },
+        "indexes": {**manifest["indexes"], **AUTH_SUNSET_SCHEMA["indexes"]},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(77, 78)] = {
+    **AUTH_SUNSET_SCHEMA, "triggers": {}, "views": {},
+}
 
 if __name__ == "__main__":
     raise SystemExit(main())

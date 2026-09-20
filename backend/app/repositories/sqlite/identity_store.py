@@ -70,6 +70,8 @@ class IdentityStore:
     ) -> None:
         self.database = database
         self.settings = settings
+        from app.repositories.auth_store import AuthStore
+        self.auth = AuthStore(database, settings, self, postgres=False)
 
     def current_user(self) -> UserProfile:
         ctx_user = get_request_user()
@@ -115,9 +117,11 @@ class IdentityStore:
         register_user_with_session 共用,后者要求「建用户+发首个会话」原子。"""
         from app.domain.auth_utils import hash_password, is_valid_username, normalize_username
 
+        self.auth.require_local_write(db)
         if not is_valid_username(username):
             raise ValueError("invalid username")
         norm = normalize_username(username)
+        self.auth.check_name(db, norm)
         user_id = _new_user_id()
         now = _now()
         pw_hash, pw_salt, pw_iters = hash_password(password)
@@ -128,10 +132,10 @@ class IdentityStore:
         if exists:
             raise ValueError("username already exists")
         db.execute(
-            "INSERT INTO users (id, email, display_name, role, status, username, "
+            "INSERT INTO users (id, email, display_name, role, status, username, local_login_name, "
             "password_hash, password_salt, password_iterations, created_at, updated_at) "
-            "VALUES (?, ?, ?, 'user', 'active', ?, ?, ?, ?, ?, ?)",
-            (user_id, email, norm, norm, pw_hash, pw_salt, pw_iters, now, now),
+            "VALUES (?, ?, ?, 'user', 'active', ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, email, norm, norm, norm, pw_hash, pw_salt, pw_iters, now, now),
         )
         db.execute(
             "INSERT INTO user_profiles (id, user_id, memory_mode, domain_focus, created_at, updated_at) "
@@ -145,27 +149,7 @@ class IdentityStore:
         return self._user_profile(user, profile)
 
     def _insert_session_in_txn(self, db, user_id: str) -> str:
-        token = secrets.token_urlsafe(32)
-        now = _now()
-        db.execute(
-            "INSERT INTO auth_sessions (token, user_id, created_at, expires_at, last_seen_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (token, user_id, now, _session_expiry(), now),
-        )
-        # 最近上线(规格 docs/superpowers/specs/
-        # 2026-09-07-admin-usage-overview-usage-signals-design_zh.md §3
-        # B1、§7 决策 1):登录/注册/新建会话与 auth_sessions 同一写事务里
-        # 一并写 users.last_seen_at——这里总是刚登录,不需要节流判断。仍带
-        # 单调守卫(last_seen_at IS NULL OR < ?):与 resolve_session 的 touch
-        # 路径共用同一条不变量(`docs/development*.md`「单调不回退」)——
-        # `_now()` 取自 `datetime.now()` 裸本地时刻,DST 秋季回拨时同一进程
-        # 内会真的产出一个比之前更早的字符串,裸 UPDATE 会把这一列往回拨。
-        db.execute(
-            "UPDATE users SET last_seen_at = ? "
-            "WHERE id = ? AND (last_seen_at IS NULL OR last_seen_at < ?)",
-            (now, user_id, now),
-        )
-        return token
+        return self.auth.insert_local_session(db, user_id)
 
     def create_user(self, username: str, password: str) -> UserProfile:
         with self.database.write() as db:
@@ -186,11 +170,13 @@ class IdentityStore:
         from app.domain.auth_utils import normalize_username, verify_password
 
         norm = normalize_username(username)
-        with self.database.connect() as db:
+        with self.database.write() as db:
+            if not self.auth.local_login_allowed(db):
+                return None
             user = db.execute(
-                "SELECT * FROM users WHERE username = ?", (norm,)
+                "SELECT * FROM users WHERE local_login_name = ?", (norm,)
             ).fetchone()
-            if user is None:
+            if user is None or user["status"] != "active":
                 return None
             if not verify_password(
                 password,
@@ -218,10 +204,12 @@ class IdentityStore:
         norm = normalize_username(username)
         with self.database.write() as db:
             self.database.begin_immediate(db)
+            if not self.auth.local_login_allowed(db):
+                return None
             user = db.execute(
-                "SELECT * FROM users WHERE username = ?", (norm,)
+                "SELECT * FROM users WHERE local_login_name = ?", (norm,)
             ).fetchone()
-            if user is None:
+            if user is None or user["status"] != "active":
                 return None
             if not verify_password(
                 password,
@@ -240,62 +228,13 @@ class IdentityStore:
             return self._insert_session_in_txn(db, user_id)
 
     def resolve_session(self, token: str) -> UserProfile | None:
-        if not token:
-            return None
-        now = _now()
-        with self.database.connect() as db:
-            row = db.execute(
-                "SELECT * FROM auth_sessions WHERE token = ?", (token,)
-            ).fetchone()
-            if row is None:
-                return None
-            expired = row["expires_at"] <= now
-            user = None if expired else db.execute(
-                "SELECT * FROM users WHERE id = ?", (row["user_id"],)
-            ).fetchone()
-            profile = None if user is None else db.execute(
-                "SELECT * FROM user_profiles WHERE user_id = ?", (user["id"],)
-            ).fetchone()
-        if expired:
-            with self.database.write() as db:
-                db.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
-            return None
-        if user is None:
-            return None
-        touch_before = (
-            datetime.now()
-            - timedelta(
-                seconds=max(1, self.settings.auth_session_touch_interval_seconds)
-            )
-        ).replace(microsecond=0).isoformat()
-        if row["last_seen_at"] <= touch_before:
-            with self.database.write() as db:
-                # 与 PG 侧逐字对齐:users 先、auth_sessions 后,顺序与
-                # change_user_password / admin_reset_user_password 一致(先
-                # `SELECT users` 再 `DELETE FROM auth_sessions`)。SQLite 的
-                # `write()` 本身是进程内写串行(见本文件 378 行 write_lock 说明),
-                # 单进程下不存在两个事务互相等待对方行锁的死锁场景;这里保持
-                # 同一顺序纯粹是为了两侧语义逐字一致,不是因为 SQLite 真的需要
-                # 它——真正需要这个顺序来避免 DeadlockDetected 的只有 PG 侧
-                # (见 identity_store.py 的同名方法)。单调不回退(last_seen_at
-                # IS NULL OR < ?)已经让重复/并发的 touch 请求各自写 users 都
-                # 无害。这一列不随 auth_sessions 行被删除(登出/吊销)而清空,
-                # 登出后仍保留。
-                db.execute(
-                    "UPDATE users SET last_seen_at = ? "
-                    "WHERE id = ? AND (last_seen_at IS NULL OR last_seen_at < ?)",
-                    (now, user["id"], now),
-                )
-                db.execute(
-                    "UPDATE auth_sessions SET last_seen_at = ?, expires_at = ? "
-                    "WHERE token = ? AND last_seen_at = ? AND expires_at > ?",
-                    (now, _session_expiry(), token, row["last_seen_at"], now),
-                )
-        return self._user_profile(user, profile)
+        return self.auth.resolve_session(token)
 
     def delete_session(self, token: str) -> None:
         with self.database.write() as db:
+            self.auth.lock(db)
             db.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
+        self.auth.cancel_for_session(token)
 
     def audit_labels_for_user_ids(self, user_ids) -> dict[str, str]:
         """Resolve at most 512 exact ids, in SQLite-safe chunks of at most 200."""
@@ -323,6 +262,7 @@ class IdentityStore:
             raise ValueError("invalid role")
         with self.database.write() as db:
             self.database.begin_immediate(db)
+            self.auth.lock(db)
             actor = db.execute(
                 "SELECT role FROM users WHERE id = ?", (actor_id,)
             ).fetchone()
@@ -487,6 +427,7 @@ class IdentityStore:
         pw_hash, pw_salt, pw_iters = hash_password(new_password)
         with self.database.write() as db:
             self.database.begin_immediate(db)
+            self.auth.require_local_write(db)
             row = db.execute(
                 "SELECT * FROM users WHERE id = ?", (user_id,)
             ).fetchone()
@@ -502,7 +443,7 @@ class IdentityStore:
             now = _now()
             db.execute(
                 "UPDATE users SET password_hash = ?, password_salt = ?, "
-                "password_iterations = ?, updated_at = ? WHERE id = ?",
+                "password_iterations = ?, updated_at = ?, auth_revision=auth_revision+1 WHERE id = ?",
                 (pw_hash, pw_salt, pw_iters, now, user_id),
             )
             db.execute(
@@ -527,6 +468,7 @@ class IdentityStore:
         pw_hash, pw_salt, pw_iters = hash_password(new_password)
         with self.database.write() as db:
             self.database.begin_immediate(db)
+            self.auth.require_local_write(db)
             actor = db.execute(
                 "SELECT role FROM users WHERE id = ?", (actor_id,)
             ).fetchone()
@@ -540,7 +482,7 @@ class IdentityStore:
             now = _now()
             db.execute(
                 "UPDATE users SET password_hash = ?, password_salt = ?, "
-                "password_iterations = ?, updated_at = ? WHERE id = ?",
+                "password_iterations = ?, updated_at = ?, auth_revision=auth_revision+1 WHERE id = ?",
                 (pw_hash, pw_salt, pw_iters, now, user_id),
             )
             db.execute(

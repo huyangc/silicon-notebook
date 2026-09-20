@@ -207,9 +207,25 @@ from app.extension_sdk.deployment import (
     CapabilityProvidingBundle,
     DeploymentExtensionBundle,
 )
+from app.extension_sdk.auth import (
+    AUTH_PROVIDER_POINT,
+    AuthProvider,
+    AuthProviderCodeContext,
+    AuthProviderDescription,
+    AuthProviderFailure,
+    AuthProviderFailureKind,
+    ExternalIdentity,
+)
 
 __all__ = [
     "EXTENSION_API_VERSION",
+    "AUTH_PROVIDER_POINT",
+    "AuthProvider",
+    "AuthProviderCodeContext",
+    "AuthProviderDescription",
+    "AuthProviderFailure",
+    "AuthProviderFailureKind",
+    "ExternalIdentity",
     "ActorRef",
     "Availability",
     "AvailabilityProbe",

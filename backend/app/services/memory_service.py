@@ -127,6 +127,7 @@ class MemoryService:
         now,
         embedding_scheduler: Callable[[Callable[[MemoryEmbeddingJob], MemoryRecord], MemoryEmbeddingJob], Any] | None = None,
         kg_ingest_scheduler: Callable[[Callable[[tuple[str, str]], None], tuple[str, str]], Any] | None = None,
+        owner_eligible: Callable[[str], bool] | None = None,
     ) -> None:
         self.store = store
         self.ask_state = ask_state
@@ -137,6 +138,7 @@ class MemoryService:
         self.now = now
         self.embedding_scheduler = embedding_scheduler or (lambda fn, item: fn(item))
         self.kg_ingest_scheduler = kg_ingest_scheduler or (lambda fn, item: fn(item))
+        self.owner_eligible = owner_eligible
         self.promotion_service: Any | None = None
         self.memory_kg: Any | None = None
 
@@ -443,6 +445,7 @@ class MemoryService:
             or row["profile_status"] != "active"
             or row["revoked_at"] is not None
             or _is_expired(row["expires_at"], now)
+            or (self.owner_eligible is not None and not self.owner_eligible(row["owner_id"]))
         ):
             return None
         return AgentPrincipal(
@@ -468,6 +471,7 @@ class MemoryService:
             or row["profile_status"] != "active"
             or row["revoked_at"] is not None
             or _is_expired(row["expires_at"], _utc_now())
+            or (self.owner_eligible is not None and not self.owner_eligible(row["owner_id"]))
         ):
             raise PermissionError(notebook_id)
         current_scopes = {

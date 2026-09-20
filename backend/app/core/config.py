@@ -123,6 +123,18 @@ class Settings(BaseSettings):
     admin_password: str = Field("admin", validation_alias="SILICON_NOTEBOOK_ADMIN_PASSWORD")
     # True 时无 token 的请求回退为 seeded admin（仅本地/测试用）；生产保持 False=强制登录。
     auth_optional: bool = Field(False, validation_alias="SILICON_NOTEBOOK_AUTH_OPTIONAL")
+    # Authentication redirects use deployment-owned origins, never Host headers.
+    auth_public_base_url: str = Field("", validation_alias="AUTH_PUBLIC_BASE_URL")
+    auth_frontend_base_url: str = Field("", validation_alias="AUTH_FRONTEND_BASE_URL")
+    auth_transaction_ttl_seconds: int = Field(
+        600, ge=60, le=1800, validation_alias="AUTH_TRANSACTION_TTL_SECONDS"
+    )
+    auth_sso_session_seconds: int = Field(
+        28800, ge=300, le=86400, validation_alias="AUTH_SSO_SESSION_SECONDS"
+    )
+    auth_provider_timeout_seconds: float = Field(
+        15.0, gt=0, le=60, validation_alias="AUTH_PROVIDER_TIMEOUT_SECONDS"
+    )
     auth_session_touch_interval_seconds: int = Field(
         300, validation_alias="AUTH_SESSION_TOUCH_INTERVAL_SECONDS"
     )
@@ -1815,6 +1827,41 @@ class Settings(BaseSettings):
                     "production requires a non-default SILICON_NOTEBOOK_ADMIN_PASSWORD"
                 )
         return self
+
+    def validate_authentication_bootstrap(self, mode: str, *, retired: bool) -> None:
+        """Validate production credentials against the locked database policy.
+
+        Both database initializers call this before any password seed. URL or
+        environment flags cannot supply evidence that credentials are retired.
+        """
+        no_local_credentials = mode == "sso_only" or (mode == "retired" and retired)
+        if self.environment.strip().lower() in {"prod", "production"} and not no_local_credentials:
+            if not self.admin_password.strip() or self.admin_password == "admin":
+                raise ValueError("production requires a non-default SILICON_NOTEBOOK_ADMIN_PASSWORD")
+
+    @field_validator("auth_public_base_url", "auth_frontend_base_url")
+    @classmethod
+    def _validate_auth_base_url(cls, value: str) -> str:
+        from urllib.parse import urlsplit
+
+        if not value:
+            return ""
+        parsed = urlsplit(value)
+        local_http = parsed.scheme == "http" and parsed.hostname in {
+            "localhost", "127.0.0.1", "::1"
+        }
+        if (
+            (parsed.scheme != "https" and not local_http)
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+            or any(ord(char) <= 32 for char in value)
+        ):
+            raise ValueError("authentication base URL must be an HTTPS origin")
+        return value.rstrip("/")
 
     @model_validator(mode="after")
     def _resolve_core_bound_defaults(self) -> "Settings":
