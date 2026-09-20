@@ -661,3 +661,77 @@ def test_stream_failures_are_logged_by_class_name_only(setup, caplog):
         assert "RuntimeError" in record.getMessage()
     resume.set()
     finished(service, job)
+
+
+
+def test_a_fast_unwinding_worker_cannot_end_the_stream_before_the_discard(setup, monkeypatch):
+    """``cancel(discard=True)``: the worker may unwind between the canceller's
+    "write cancelled" and its "delete the row". A ``final(cancelled)`` from the
+    worker in that gap would close the feed for good and the ``gone`` that is
+    actually true could never be sent -- another watching page would keep a turn
+    the server no longer has. The canceller owns the terminal for the whole
+    operation; the worker stands down."""
+    service, _, _, _ = setup
+    parked, resume = _park(service)
+    job = service.start(GlobalAskRequest(question="q"), user_id="u")
+    assert parked.wait(5)
+    events = service.attach(job.job_id, user_id="u")
+    real_discard = service.store.discard_cancelled
+    unwound = Event()
+
+    def discard_after_the_worker_is_gone(job_id, user_id):
+        # Deterministic worst case: let the worker unwind COMPLETELY (its
+        # ``_run`` finally included) before the row is deleted.
+        resume.set()
+        deadline = time.monotonic() + 5
+        while job_id in service._workers and time.monotonic() < deadline:
+            Event().wait(0.005)
+        unwound.set()
+        return real_discard(job_id, user_id)
+
+    monkeypatch.setattr(service.store, "discard_cancelled", discard_after_the_worker_is_gone)
+    assert service.cancel(job.job_id, user_id="u", discard=True).status == "cancelled"
+    assert unwound.is_set()
+    frames = _collect(events)
+    terminals = [frame for frame in frames if frame["event"] in {"final", "gone"}]
+    assert terminals == [{"event": "gone"}], terminals
+    assert job.job_id not in service._discarding
+
+
+def test_a_terminal_written_by_another_process_reaches_a_local_reader(setup):
+    """Multi-process: another process cancels the job. It updates the row but
+    cannot reach THIS process's feed or worker, and the attached reader is not
+    polling. The watched feed's store watchdog ends the stream from the store
+    and signals the local worker."""
+    service, _, _, _ = setup
+    service.feed_watch_seconds = 0.01
+    parked, resume = _park(service)
+    job = service.start(GlobalAskRequest(question="q"), user_id="u")
+    assert parked.wait(5)
+    events = service.attach(job.job_id, user_id="u")
+    # The other process: a bare store write, no local cancel() at all.
+    row = service.store.job(job.job_id, "u")
+    row.status = "cancelled"
+    assert service.store.save(row, "u")
+    frames = _collect(events)
+    assert frames[-1]["event"] == "final" and frames[-1]["job"]["status"] == "cancelled"
+    assert service._events[job.job_id].is_set() if job.job_id in service._events else True
+    resume.set()
+    finished(service, job)
+
+
+def test_the_store_watchdog_runs_once_per_feed_and_only_when_watched(setup):
+    service, _, _, _ = setup
+    service.feed_watch_seconds = 0.01
+    parked, resume = _park(service)
+    job = service.start(GlobalAskRequest(question="q"), user_id="u")
+    assert parked.wait(5)
+    watchers = lambda: [t for t in threading.enumerate() if t.name == "global-ask-feed-watch" and t.is_alive()]  # noqa: E731
+    before = len(watchers())
+    first = service.attach(job.job_id, user_id="u")
+    second = service.attach(job.job_id, user_id="u")
+    assert len(watchers()) == before + 1
+    resume.set()
+    _collect(first)
+    _collect(second)
+    finished(service, job)
