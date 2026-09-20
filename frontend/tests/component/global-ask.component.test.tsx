@@ -414,6 +414,8 @@ test("embedded reload keeps the current conversation, failed draft, selected sco
 });
 
 test("error recovery restores a running conversation after stop fails", async () => {
+  // 停止失败而作业确实还在（确认读得到它）：这是真失败，不是「响应丢了的丢弃」。
+  api.gone.mockResolvedValue(false);
   api.cancel.mockRejectedValueOnce(new Error("network"));
   api.detail.mockResolvedValue(detail("conv-a", [job()]));
   api.poll.mockResolvedValue(job("cancelled"));
@@ -1593,6 +1595,25 @@ test("an unconfirmed discard keeps the turn, and a vanished conversation is drop
   expect(result.current.turns).toEqual([]);
   expect(result.current.draft).toBe("再问一次");
   expect(window.location.search).toBe("");
+});
+
+test("a discard whose response was lost is still reconciled", async () => {
+  // 服务端已经停掉并删了作业、只是响应丢了：确认到 404 就按丢弃收尾，不留一条永远
+  // 404 的 running 作业把输入区锁死（codex #761 R5 P2）。
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [job()]));
+  api.poll.mockReturnValue(new Promise(() => {}));
+  api.cancel.mockRejectedValue(new Error("network"));
+  api.gone.mockResolvedValue(true);
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+  await act(async () => { await result.current.stop(); });
+  expect(result.current.turns).toEqual([]);
+  expect(result.current.running).toBeUndefined();
+  expect(result.current.draft).toBe("共同问题是什么？");
+  expect(result.current.error).toBe("");
+  expect(result.current.conversationId).toBe("");
 });
 
 test("an older stopped turn wears the same notice without promising a replacement", async () => {
