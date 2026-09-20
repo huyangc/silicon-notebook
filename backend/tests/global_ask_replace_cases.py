@@ -143,6 +143,26 @@ def case_the_title_stays_when_other_turns_remain(store):
     assert store.conversation("conv-r", USER).title == "第一个问题"
 
 
+def case_the_delete_and_the_insert_are_one_transaction(store):
+    """A replacement whose INSERT fails must leave the stopped job where it was.
+
+    The insert is made to fail on the per-user ``client_request_id`` uniqueness;
+    were the delete committed on its own, the old record would be gone with
+    nothing in its place.
+    """
+    answered = start(store, "job-1", new_conversation=True)
+    finish(store, answered, "done")
+    stopped = start(store, "job-2", question="打错的问题")
+    finish(store, stopped, "cancelled")
+    clash = make_job("job-3", question="改好的问题")
+    with pytest.raises(Exception) as failure:
+        store.create(clash, USER, "request-job-1", "{}", "web",
+                     new_conversation=False, replaces_job_id="job-2")
+    assert not isinstance(failure.value, ReplacedJobUnavailable)
+    assert job_ids(store) == ["job-1", "job-2"]
+    assert store.job("job-2", USER).status == "cancelled"
+
+
 def case_a_discarded_first_question_takes_its_conversation_with_it(store):
     first = start(store, "job-1", new_conversation=True)
     finish(store, first, "cancelled")
@@ -188,6 +208,7 @@ CASES = [
     case_an_automatic_title_follows_the_replacement_when_nothing_else_is_left,
     case_a_title_the_user_typed_is_left_alone,
     case_the_title_stays_when_other_turns_remain,
+    case_the_delete_and_the_insert_are_one_transaction,
     case_a_discarded_first_question_takes_its_conversation_with_it,
     case_a_discarded_follow_up_leaves_the_earlier_turns,
     case_only_a_newest_stopped_job_of_its_owner_is_discarded,

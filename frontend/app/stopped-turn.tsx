@@ -24,15 +24,20 @@ export function hasProcessOutput(steps: readonly ReasoningTraceStep[] | null | u
 }
 
 export const STOPPED_TURN_TEXT = "已停止回答。重新提问后，这条记录会被新的回答替换。";
+/** 不会被替换的那种：全局问答里**不是最新一轮**的旧停止记录（后面已经有别的问答，
+ *  后端只许替换会话里最新的那条）。同一块提示，只是不许诺替换。 */
+export const STOPPED_TURN_KEPT_TEXT = "已停止回答。";
 
-export function StoppedTurnNotice({ onEdit, disabled = false }: {
-  /** 把这条问题放回输入框并聚焦。不传则只显示提示（例如不是最新一轮、已不可替换）。 */
+export function StoppedTurnNotice({ onEdit, disabled = false, replaceable = true }: {
+  /** 把这条问题放回输入框并聚焦。 */
   onEdit?: () => void;
   disabled?: boolean;
+  /** 下一次提问是否会替换这条记录。 */
+  replaceable?: boolean;
 }) {
   return (
     <div className="stopped-turn-notice">
-      <span role="status">{STOPPED_TURN_TEXT}</span>
+      <span role="status">{replaceable ? STOPPED_TURN_TEXT : STOPPED_TURN_KEPT_TEXT}</span>
       {onEdit && (
         <button type="button" className="stopped-turn-edit" disabled={disabled} onClick={onEdit}>
           <Pencil size={13} aria-hidden="true" />编辑问题

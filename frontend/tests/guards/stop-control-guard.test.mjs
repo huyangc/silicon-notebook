@@ -19,7 +19,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { appSourceModules, importsFrom, jsxElements } from "../../test-support/semantic-source.mjs";
+import { appSourceModules, importsFrom, jsxElements, stringLiterals } from "../../test-support/semantic-source.mjs";
 
 const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../app");
 const OWNER = "stop-control.tsx";
@@ -49,4 +49,31 @@ test("the stop look is declared once", async () => {
   const css = await readFile(path.join(APP_DIR, "globals.css"), "utf8");
   assert.equal(css.match(/^button\.stop-control\s*\{/gm)?.length, 1);
   assert.doesNotMatch(css, /\.send-button\.stop\b/);
+});
+
+
+// 停止之后留下的那一轮同样只有一份：判据、提示与文案都在 stopped-turn.tsx。
+const STOPPED_OWNER = "stopped-turn.tsx";
+
+test("both ask surfaces judge a stop by the one shared predicate", async () => {
+  const modules = new Map((await appSourceModules()).map((item) => [item.path, item.module]));
+  for (const [relative, specifier] of [
+    ["use-ask-session.ts", "./stopped-turn.tsx"],
+    ["ask/use-global-ask.ts", "../stopped-turn.tsx"],
+  ]) {
+    const imported = importsFrom(modules.get(relative), specifier).map((item) => item.imported);
+    assert.ok(imported.includes("hasProcessOutput"), `${relative} must take hasProcessOutput from stopped-turn`);
+  }
+  for (const relative of ["page.tsx", "ask/global-ask-workspace.tsx"]) {
+    assert.ok(jsxElements(modules.get(relative), "StoppedTurnNotice").length > 0, `${relative} must render <StoppedTurnNotice />`);
+  }
+});
+
+test("the stopped-turn copy is written in exactly one module", async () => {
+  const offenders = [];
+  for (const item of await appSourceModules()) {
+    if (item.path === STOPPED_OWNER) continue;
+    if (stringLiterals(item.module).some((text) => text.includes("已停止回答"))) offenders.push(item.path);
+  }
+  assert.deepEqual(offenders, [], "take the notice from stopped-turn.tsx instead of spelling it again");
 });

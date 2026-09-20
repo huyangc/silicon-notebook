@@ -968,9 +968,6 @@ class GlobalAskService:
                     self._events[job.job_id] = event
                     self._workers[job.job_id] = worker
                     worker.start()
-            except ReplacedJobUnavailable as exc:
-                # The insert rolled back with it: nothing was created or deleted.
-                raise GlobalAskError(409, _REPLACE_UNAVAILABLE) from exc
             except Exception as exc:
                 if created:
                     with self._lock:
@@ -989,6 +986,12 @@ class GlobalAskService:
                         raise GlobalAskError(409, "请求标识已用于其他问题，请重新提交。") from exc
                     self._check(previous[0].resolved_notebook_ids, user_id, allowed, authority_check)
                     return previous[0]
+                if isinstance(exc, ReplacedJobUnavailable):
+                    # Checked AFTER the replay above: a concurrent twin of this
+                    # very submission may have done the replacing, and then this
+                    # caller is owed that job, not a 409. The insert rolled back
+                    # with the exception: nothing was created or deleted.
+                    raise GlobalAskError(409, _REPLACE_UNAVAILABLE) from exc
                 if conversation and self.store.running_job_ids(conversation.id, user_id):
                     raise GlobalAskError(409, "这段对话仍在回答，请等待完成或停止后重试。") from exc
                 raise
@@ -1574,9 +1577,12 @@ class GlobalAskService:
 
         ``discard`` is the "stopped before anything was shown" half of the
         product's one cancel style: the question goes back to the input box, so
-        no record of the attempt stays (``GlobalAskStore.discard_cancelled``). A
-        job that was NOT stopped by this call -- it had already finished -- is
-        never discarded: the caller asked to throw away an attempt, not an answer.
+        no record of the attempt stays (``GlobalAskStore.discard_cancelled``).
+        ⛔ Only a job THIS CALL stopped is discarded. A job that had already
+        finished is an answer, and a job that was already ``cancelled`` may be
+        the very record the product rule keeps -- stopped after its process
+        output was on screen, editable, waiting to be replaced. A replayed or
+        foreign ``discard`` must not be able to delete either.
         The worker may still be unwinding; every write it has left is guarded by
         ``status='running'`` and matches no row.
         """
@@ -1589,8 +1595,8 @@ class GlobalAskService:
             job.status, job.response, job.answer = "cancelled", None, None
             if not self.store.save(job, user_id):
                 return self.get_job(job_id, user_id=user_id, allowed_notebook_ids=allowed_notebook_ids)
-        if discard and job.status == "cancelled":
-            self.store.discard_cancelled(job_id, user_id)
+            if discard:
+                self.store.discard_cancelled(job_id, user_id)
         return job
 
     def submit_feedback(self, job_id, rating, *, user_id, allowed_notebook_ids=None):

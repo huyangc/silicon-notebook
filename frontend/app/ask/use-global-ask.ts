@@ -176,6 +176,9 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     pendingRef.current = null;
     setPendingState(null);
     stopRequested.current = false;
+    // 轨迹种子只对本次实时展示有意义：视图一换（重载 / 切换 / 新建对话）就清掉，
+    // 不让它跟着标签页无限累积。
+    setTraceSeeds({});
     if (retired && options.returnQuestion) setDraft(retired.question);
   }, []);
 
@@ -505,6 +508,11 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
         return;
       }
       updatePendingTrace((steps) => replaceLastIntentStep(steps, intentUnderstoodStep(contract, understandingMs)));
+      // 理解阶段到此结束，**先**收掉它再提交（与笔记本内问答同一处接缝）：建作业的
+      // POST 在服务端还要跑一段，这期间按下的停止必须落到「提交在途」那条路径上，
+      // 而不是对一个早已返回的理解请求做一次空的 abort。
+      intentAbort.current = null;
+      setIntentChecking(false);
       await submitJob(question, buildAskIntentConfirmation(
         contract, contract.resolved_question, {}, understandingMs,
       ));
@@ -613,6 +621,9 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
       void listGlobalConversations().then((history) => {
         if (mounted.current && ticket === owner.current && version === historyVersion.current) {
           setConversations(history);
+          // 替换掉会话里唯一的一轮时，服务端会把自动标题改成新问题：抬头跟着列表走。
+          const current = history.find((item) => item.id === job.conversation_id);
+          if (current) setConversationTitle(current.title || "");
           setHistoryOffset(history.length);
           setMoreHistory(history.length === GLOBAL_ASK_PAGE_SIZE);
           setHistoryError("");
@@ -628,6 +639,15 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
       if (mounted.current && ticket === owner.current) {
         returnQuestion();
         setError(toUserMessage(cause, "提交失败，请重试；重复提交不会创建重复任务"));
+        // 带替换的提交失败，多半是本地那条「已停止」记录在服务端已经不在了（别处替换
+        // 过、会话被删）。不重拉的话每次重发都带着同一个过期 id 再 409 一次。
+        if (replaces && conversationId) {
+          void getGlobalConversation(conversationId).then((detail) => {
+            if (!mounted.current || ticket !== owner.current) return;
+            setTurns(detail.turns);
+            setTurnOffset(detail.has_more ? detail.next_offset : null);
+          }).catch(() => { /* 重拉失败不盖过上面那条提交错误。 */ });
+        }
       }
     } finally {
       if (ticket === owner.current) {
