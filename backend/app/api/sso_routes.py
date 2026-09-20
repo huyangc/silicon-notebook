@@ -123,14 +123,19 @@ def callback(request: Request):
     if not flow.settings.auth_public_base_url:
         raise user_error(404, "统一认证尚未配置，请从本站登录页进入。")
     try:
+        # Missing/expired browser proof is an expected callback failure. Keep
+        # the browser on the same sanitized recovery path as an expired state.
+        proof = request.cookies.get(flow.cookie_name, "")
+        if not proof:
+            raise ValueError("invalid_transaction")
         if "error" in request.query_params:
             if len(request.query_params.getlist("state")) == 1:
-                flow.store.claim(request.query_params["state"], _proof(request, flow))
+                flow.store.claim(request.query_params["state"], proof)
             raise ValueError("authentication_failed")
         # Reject duplicate OAuth values instead of choosing one interpretation.
         if any(len(request.query_params.getlist(key)) != 1 for key in ("state", "code")):
             raise ValueError("invalid_transaction")
-        code = flow.callback(request.query_params["state"], request.query_params["code"], _proof(request, flow))
+        code = flow.callback(request.query_params["state"], request.query_params["code"], proof)
         url = flow.frontend_redirect(code=code)
     except (ValueError, AuthProviderError):
         url = flow.frontend_redirect(error="authentication_failed")

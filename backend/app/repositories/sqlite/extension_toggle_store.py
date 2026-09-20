@@ -57,8 +57,8 @@ class ExtensionToggleStore:
         self, plugin_id: str, enabled: bool, actor_id: str
     ) -> dict:
         """Upsert 该插件的运行时开关;授权在写事务内按 actor 现时角色复检
-        (镜像 ``identity_store.set_user_role``:非 admin → ``PermissionError``,
-        不写入),避免读到已被降权的旧角色。行原地更新(``updated_at`` 前进),
+        (镜像 ``identity_store.set_user_role``:非 admin 或已停用 → ``PermissionError``,
+        不写入),避免读到已被降权或停用的旧状态。行原地更新(``updated_at`` 前进),
         不会因为反复开关而堆出历史行——这张表只存「当前」状态,审计的是最近
         一次操作而非操作序列。
 
@@ -75,9 +75,9 @@ class ExtensionToggleStore:
             if not enabled and policy["mode"] != "local" and policy["plugin_id"] == plugin_id:
                 raise AuthStoreError("authentication_provider_required")
             actor = db.execute(
-                "SELECT role FROM users WHERE id = ?", (actor_id,)
+                "SELECT role, status FROM users WHERE id = ?", (actor_id,)
             ).fetchone()
-            if actor is None or actor["role"] != "admin":
+            if actor is None or actor["role"] != "admin" or actor["status"] != "active":
                 raise PermissionError("admin role required")
             # 取时必须在 begin_immediate 之后:在锁外取时,一个先取时、后拿锁
             # 的请求会用更旧的时间戳盖掉更新的写,让 updated_at 倒退。
