@@ -255,3 +255,116 @@ def test_postgres_global_batch_authority_and_source_ceiling(store, monkeypatch):
     with database.write() as db:
         db.execute("UPDATE source_elements SET text=%s WHERE id=%s", ("changed evidence", "element"))
     assert sources.evidence_fingerprints(["element"]) != fingerprint
+
+
+def test_postgres_passage_snapshot_pairs_passage_text_with_its_element_prints(store):
+    """PG 孪生:段落摘要与元素指纹同一条语句、同一个快照,元素正文不过线。
+
+    与 SQLite 侧同一份合同(``GlobalAskSourceStorePort``):元素 id 确定性复用,
+    所以只按 id 读指纹无法回答「这是不是这次检索读到的那段原文」。
+    """
+    import hashlib
+
+    from app.repositories.postgres.source_store import SourceStore
+
+    database = store.database
+    now = "2026-09-20T00:00:00Z"
+    halves = ("首段 · α 数据", "次段 · β 数据 🔬")
+    passage_text = " ".join(halves)
+    with database.write() as db:
+        db.execute(
+            "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s)",
+            ("passage-owner", "passage@example.test", "Passage", "user", "active", now, now),
+        )
+        db.execute(
+            "INSERT INTO notebooks(id,name,created_by,created_at,updated_at) VALUES(%s,%s,%s,%s,%s)",
+            ("nb-passage", "Passages", "passage-owner", now, now),
+        )
+        db.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,created_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s)",
+            ("src-passage", "nb-passage", "Original", "markdown", now, now),
+        )
+        for index, text in enumerate(halves):
+            db.execute(
+                "INSERT INTO source_elements(id,source_id,element_type,location_label,text,created_at) VALUES(%s,%s,%s,%s,%s,%s)",
+                (f"el-src-passage-{index:04d}", "src-passage", "paragraph", f"p{index}", text, now),
+            )
+        db.execute(
+            "INSERT INTO chunks(id,notebook_id,source_id,text,section_path,element_ids,created_at) VALUES(%s,%s,%s,%s,%s,%s::jsonb,%s)",
+            ("chunk-wide", "nb-passage", "src-passage", passage_text, "",
+             '["el-src-passage-0000","el-src-passage-0001"]', now),
+        )
+        db.execute(
+            "INSERT INTO chunks(id,notebook_id,source_id,text,section_path,element_ids,created_at) VALUES(%s,%s,%s,%s,%s,%s::jsonb,%s)",
+            ("chunk-bare", "nb-passage", "src-passage", "独立段落", "", "[]", now),
+        )
+    sources = object.__new__(SourceStore)
+    sources.database = database
+
+    def digest(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    snapshot = sources.passage_evidence_snapshot(
+        ["chunk-wide", "chunk-bare", "chunk-vanished"]
+    )
+    assert snapshot["chunk-wide"] == {
+        "text_sha": digest(passage_text),
+        "elements": {
+            "el-src-passage-0000": ("src-passage", digest(halves[0])),
+            "el-src-passage-0001": ("src-passage", digest(halves[1])),
+        },
+    }
+    # 「段落没有元素」与「段落已经没了」是两件事。
+    assert snapshot["chunk-bare"] == {"text_sha": digest("独立段落"), "elements": {}}
+    assert "chunk-vanished" not in snapshot
+
+    with database.write() as db:
+        db.execute("UPDATE source_elements SET text=%s WHERE id=%s",
+                   ("首段 · α 数据(修订)", "el-src-passage-0000"))
+    after = sources.passage_evidence_snapshot(["chunk-wide"])
+    assert after["chunk-wide"]["text_sha"] == snapshot["chunk-wide"]["text_sha"]
+    assert after["chunk-wide"]["elements"]["el-src-passage-0000"] == (
+        "src-passage", digest("首段 · α 数据(修订)"),
+    )
+    with database.write() as db:
+        db.execute("UPDATE chunks SET text=%s WHERE id=%s", ("整段换掉", "chunk-wide"))
+    assert sources.passage_evidence_snapshot(["chunk-wide"])["chunk-wide"][
+        "text_sha"
+    ] == digest("整段换掉")
+
+
+def test_postgres_passage_snapshot_batches_past_the_parameter_limit(store):
+    """上千个段落 id 分批读,每个段落仍在自己的那一个快照里。"""
+    import hashlib
+
+    from app.repositories.postgres.source_store import SourceStore
+
+    database = store.database
+    now = "2026-09-20T00:00:00Z"
+    wanted = [f"chunk-{index:05d}" for index in range(1500)]
+    with database.write() as db:
+        db.execute(
+            "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s)",
+            ("bulk-owner", "bulk@example.test", "Bulk", "user", "active", now, now),
+        )
+        db.execute(
+            "INSERT INTO notebooks(id,name,created_by,created_at,updated_at) VALUES(%s,%s,%s,%s,%s)",
+            ("nb-bulk", "Bulk", "bulk-owner", now, now),
+        )
+        db.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,created_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s)",
+            ("src-bulk", "nb-bulk", "Original", "markdown", now, now),
+        )
+        for chunk_id in wanted:
+            db.execute(
+                "INSERT INTO chunks(id,notebook_id,source_id,text,section_path,element_ids,created_at) VALUES(%s,%s,%s,%s,%s,%s::jsonb,%s)",
+                (chunk_id, "nb-bulk", "src-bulk", f"text of {chunk_id}", "", "[]", now),
+            )
+    sources = object.__new__(SourceStore)
+    sources.database = database
+
+    snapshot = sources.passage_evidence_snapshot(wanted)
+    assert len(snapshot) == len(wanted)
+    assert snapshot[wanted[-1]]["text_sha"] == hashlib.sha256(
+        f"text of {wanted[-1]}".encode("utf-8")
+    ).hexdigest()

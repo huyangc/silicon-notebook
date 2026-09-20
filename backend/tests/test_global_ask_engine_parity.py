@@ -716,6 +716,84 @@ def test_a_stale_coverage_snapshot_is_never_published_after_a_fresher_one(servic
     assert state.claim_publish(second) is False
 
 
+def test_a_trace_write_cannot_commit_a_stale_coverage_list(service):
+    """trace 写与 coverage 发布走同一条发布路径:持久化的覆盖列表不许倒退。
+
+    ``save_progress`` 写的是**整行**,coverage 字段在内。reasoning 一边从引擎自己
+    的线程推 trace、一边从别的线程发回执,所以一次 trace 写会在 coverage 发布的
+    正中间把整行序列化出去。它若不走 ``publish_lock``,就成了 coverage 字段的第二
+    个、没有序号的发布者:拿到旧 coverage、卡住、在更新的那份提交之后才落库——
+    轮询看到 run 在丢地盘,随后的取消还会把这份陈旧列表永久留下。
+
+    握手不靠计时:trace 写在**进入 store 之后**卡住(这时它手上的序列化快照已经
+    取好了),主线程这才去发回执。修好之后这次发布根本进不来,``coverage_persisted``
+    的等待必然走到上限——上限只决定用例多慢,不决定结论;结论落在持久化顺序上。
+    """
+    from threading import Event, Thread
+
+    trace_idents: list = []
+    trace_writing, coverage_persisted = Event(), Event()
+    persisted: list = []
+    recorder = threading.Lock()
+    original = service.store.save_progress
+
+    def probing_save(job, user_id):
+        # 真 store 也是在写之前把整行(含 coverage)序列化出来的。
+        snapshot = list(job.searched_notebook_ids)
+        if threading.get_ident() in trace_idents:
+            trace_writing.set()
+            coverage_persisted.wait(0.5)
+        result = original(job, user_id)
+        with recorder:
+            persisted.append(snapshot)
+        if snapshot:
+            coverage_persisted.set()
+        return result
+
+    service.store.save_progress = probing_save
+
+    class _TraceRacingAsk(_FakeAsk):
+        def ask(self, notebook_id, payload, *, user_id, job_id="",
+                cancel_event=None, on_trace=None):
+            with retrieval_run(
+                run_kind="ask_reasoning", actor_id=user_id,
+                correlation_id=job_id,
+            ):
+                plan = current_federated_run_plan()
+
+                def push():
+                    trace_idents.append(threading.get_ident())
+                    on_trace(TraceStep(step_type="plan", summary="第一步"))
+
+                tracer = Thread(target=push)
+                tracer.start()
+                assert trace_writing.wait(5), "trace 写没有进到 store"
+                plan.on_library(
+                    "a", LibraryOutcome(status="ok", candidate_count=1),
+                )
+                tracer.join(5)
+                assert not tracer.is_alive()
+                return AskResponse(
+                    answer_id="", conclusion="结论", answer="答案",
+                    mode="reasoning",
+                    conversation_id=current_detached_ask_turn().conversation_id,
+                )
+
+    service.ask = _TraceRacingAsk()
+
+    result = _run(service, mode="reasoning")
+
+    assert result.status == "done", result.error
+    # trace 写先提交它那份(当时还空的)覆盖列表,回执那份**之后**才落库。
+    assert persisted[:2] == [[], ["a"]], persisted
+    # 任何一次写都不得比前一次少:那正是轮询读到的「丢地盘」。
+    assert all(
+        set(earlier) <= set(later)
+        for earlier, later in zip(persisted, persisted[1:])
+    ), persisted
+    assert result.searched_notebook_ids == ["a"]
+
+
 def test_receipt_order_follows_resolved_ids(service):
     """回执按解析序,不按完成序:轮询不能看到收据来回跳。"""
     service.ask = _FakeAsk(rounds=[[
@@ -1460,6 +1538,62 @@ def test_end_to_end_document_overview_is_not_voided(tmp_path, monkeypatch):
         # 一次联邦调用都没有的 run 不诬告任何库。
         assert result.searched_notebook_ids == [nb.id for nb in notebooks]
         assert result.skipped_notebooks == []
+    finally:
+        repo.close()
+
+
+def test_end_to_end_a_source_reparsed_mid_run_voids_instead_of_self_comparing(
+    tmp_path, monkeypatch,
+):
+    """真库真引擎:检索腿读完原文、快照读之前来源被重新解析 → 整份作废。
+
+    元素 id 是确定性复用的(``el-<来源>-<序号>``),所以重新解析之后**同一个 id
+    下已经是新文字**。若检索时刻的指纹是按 id 单独读的,读到的就是新文字的指纹,
+    终态复核再读一次也是新文字——两份新指纹自比恒等,一份基于已经不存在的原文
+    写出来的答案会被当成有据发布。段落快照把原文摘要与元素指纹钉在同一个数据库
+    快照里,所以这里必须是 ``unreadable`` 作废,而不是 grounded。
+
+    握手不靠计时:重写就发生在快照读这个调用里,在读之前。
+    """
+    repo, notebooks, user_id = _e2e_repo(
+        tmp_path, monkeypatch, answer="三个库都提到了低温性能。",
+    )
+    try:
+        service = repo._runtime.global_ask_service()
+        sources = service.sources
+        original = sources.passage_evidence_snapshot
+        reparsed: list = []
+
+        def reparse_then_read(chunk_ids):
+            # 只在第一次快照读之前动手:模拟「检索腿已经把原文读走了,来源随后被
+            # 重新解析」,新文字仍然挂在同一批 id 下。
+            if not reparsed:
+                reparsed.append(tuple(chunk_ids))
+                with sources.database.write() as db:
+                    for chunk_id in chunk_ids:
+                        db.execute(
+                            "UPDATE chunks SET text=? WHERE id=?",
+                            (f"重新解析后的正文 {chunk_id}", chunk_id),
+                        )
+                    db.execute(
+                        "UPDATE source_elements SET text=text||'（重新解析）'"
+                    )
+            return original(chunk_ids)
+
+        monkeypatch.setattr(
+            sources, "passage_evidence_snapshot", reparse_then_read,
+        )
+
+        result = _e2e_answer(repo, notebooks, user_id, "低温性能如何")
+
+        assert result.status == "done", result.error
+        assert reparsed, "这次 run 根本没走联邦原文通道,用例什么也没证明"
+        assert result.answer.grounded is False
+        assert result.answer.citations == []
+        assert result.answer.answer == (
+            "引用原文在回答期间发生了变化，暂时无法提供可靠结论，请重新提问。"
+        )
+        assert result.cited_notebook_ids == []
     finally:
         repo.close()
 

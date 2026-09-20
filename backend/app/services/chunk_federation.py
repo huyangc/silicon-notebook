@@ -93,6 +93,7 @@ Three structural rules this module exists to hold:
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import math
 import threading
 import time
@@ -1497,33 +1498,64 @@ def _worst_reason(reasons) -> str:
     return "unavailable"
 
 
+def _text_sha(text) -> str:
+    """The digest the passage snapshot compares against, on this side."""
+    return hashlib.sha256((text or "").encode()).hexdigest()
+
+
 def _report_evidence(candidates, plan, collected: dict, deadline: float) -> None:
     """The retrieval-time fingerprints of everything this call SELECTED.
 
-    ONE read per call at most, over the elements of the finished selection --
+    ONE read per call at most, over the PASSAGES of the finished selection --
     not one per library, and not over every candidate that was ever considered.
     The consumer (the job's citation re-check) only ever asks about evidence
     that reached the answer, so widening this to the candidate pool would
     multiply the read by the recall budget for rows nobody can cite.
 
+    BY PASSAGE, and that is a correctness property rather than a batching
+    convenience.  Element ids are reused DETERMINISTICALLY across a re-ingest
+    (``source_ingestion`` mints ``el-<source>-<index>``), so "the row with this
+    id" is not the same claim as "the text this run retrieved".  A source
+    reparsed between the retrieval leg's read and this one leaves new text
+    under every one of the old ids; fingerprinting by id alone would file that
+    NEW text as the OLD passage's evidence, and the re-check -- which reads the
+    same new text again -- would compare it against itself, find it identical,
+    and publish an answer written from text nobody can still find as grounded.
+    So the snapshot comes back keyed by chunk, carrying the passage's own text
+    digest beside its elements' fingerprints out of ONE database snapshot
+    (``GlobalAskSourceStorePort.passage_evidence_snapshot``), and a hit is
+    attested only when that digest matches the text this call actually
+    selected.  The residual race is narrower and harmless: if the source was
+    reparsed in between and the new passage text is byte-identical, the answer
+    rests on text that is still there, which is exactly what attestation
+    claims; any other edit changes the digest and is caught.
+
     ACCUMULATING, which is what makes the per-run de-duplication correct rather
     than merely cheap.  The consumer merges each call's map into one table, and
     any snapshot taken during this run is a legitimate "before" for the
-    re-check, so an element whose fingerprint an earlier round already
-    published must not be read again: a five-round reasoning run would
-    otherwise re-read every selected element five times, and the rounds share
-    most of their selection.  The seen-set is run-local, so two runs never
-    borrow each other's snapshots, and without an ambient retrieval run it
-    degrades to reading every time.
+    re-check, so a passage an earlier round already attested must not be read
+    again: a five-round reasoning run would otherwise re-read every selected
+    passage five times, and the rounds share most of their selection.  The
+    seen-set settles CHUNKS, not elements -- an element is only ever as
+    attested as the passage it was read out of -- and a passage that failed its
+    text check stays out of it, so the next round retries it.  The set is
+    run-local, so two runs never borrow each other's snapshots, and without an
+    ambient retrieval run it degrades to reading every time.
 
     Fail-soft, and the direction of the failure is deliberate.  An unreadable
     batch publishes ``None`` for each of those elements, which is what the
     re-check treats as "not attestable" -- so the citations resting on them are
     refused rather than accepted unverified.  (Publishing nothing would not do:
     absence is how an element that never travelled this channel looks, and
-    those are held to the ceiling only.)  The same elements stay out of the
-    seen-set, so the next round retries them and a success replaces the
-    ``None``.
+    those are held to the ceiling only.)  A passage whose text no longer
+    matches, or that has disappeared outright, publishes ``None`` for every
+    element it declared by the same rule and for the same reason: it travelled
+    this channel and cannot be vouched for.  ``None`` WINS over a snapshot from
+    another hit in the same call -- one element can sit in two selected
+    passages, and an element whose surrounding text moved under it is not
+    attestable just because some other passage still holds it.  (The rule that
+    a real snapshot already published is not overwritten by a later ``None``
+    belongs to the consumer's merge and is unchanged.)
     Cancellation and attestation failures are not failures of this read and
     re-raise.
 
@@ -1545,43 +1577,38 @@ def _report_evidence(candidates, plan, collected: dict, deadline: float) -> None
     rule (``FederatedRunPlan.on_evidence_groups``): which elements belong to
     one selected passage is structural, so it is published on every call
     regardless of whether the fingerprint read succeeded, and it is NOT subject
-    to the seen-set -- that set exists to stop re-READING settled elements, and
+    to the seen-set -- that set exists to stop re-READING settled passages, and
     a group costs no read at all.
     """
     seen = memoized_retrieval_value(
         ("federated_chunk_evidence_seen",), lambda: set(),
     )
-    element_ids = [
-        element_id for element_id in dict.fromkeys(
-            element_id for hit in collected.values()
-            for element_id in (hit.element_ids or ())
-        )
-        if element_id not in seen
+    # A passage declaring no elements has nothing to attest, so it neither
+    # costs a read nor enters the seen-set.
+    pending = [
+        chunk_id for chunk_id, hit in collected.items()
+        if chunk_id not in seen and hit.element_ids
     ]
     fingerprints: dict = {}
-    if element_ids:
+    if pending:
+        element_ids = list(dict.fromkeys(
+            element_id for chunk_id in pending
+            for element_id in collected[chunk_id].element_ids
+        ))
         try:
             with read_budget(
                 time.monotonic() + float(plan.notebook_timeout_seconds),
                 plan.cancel,
             ):
-                read = dict(
-                    candidates.sources.evidence_fingerprints(element_ids)
+                snapshot = dict(
+                    candidates.sources.passage_evidence_snapshot(pending)
                 )
-            # Every REQUESTED element gets a stated value. A read that succeeds
-            # but comes back without a row (the element was deleted by a
-            # re-ingest between retrieval and this read) must not leave it
-            # absent: absence means "never travelled this channel" and is held
-            # to the ceiling only, so a deleted element would be accepted.
-            fingerprints = {**dict.fromkeys(element_ids), **read}
-            # Only real snapshots are settled; a missing row is retried next
-            # round like an unreadable one.
-            seen.update(read)
         except (AskCancelled, RetrievalControlError):
             raise
         except Exception as exc:  # noqa: BLE001 - see docstring
             _emit(candidates, {
                 "kind": "chunk_federation_evidence_unavailable",
+                "reason": "read_failed",
                 "error_type": type(exc).__name__,
                 "elements": len(element_ids),
             })
@@ -1590,10 +1617,58 @@ def _report_evidence(candidates, plan, collected: dict, deadline: float) -> None
             # objects), which the re-check holds to the ceiling only. These
             # elements did travel it, so they must be refusable by name.
             fingerprints = dict.fromkeys(element_ids)
+        else:
+            fingerprints = _attest_passages(
+                candidates, collected, pending, element_ids, snapshot, seen,
+            )
     groups = getattr(plan, "on_evidence_groups", None)
     if groups is not None:
         groups(_evidence_groups(collected))
     plan.on_evidence(fingerprints)
+
+
+def _attest_passages(candidates, collected: dict, pending: list,
+                     element_ids: list, snapshot: dict, seen: set) -> dict:
+    """Turn one passage snapshot into the per-element table the consumer folds.
+
+    Every REQUESTED element gets a stated value, because absence means "never
+    travelled this channel" and is held to the source ceiling alone -- so
+    leaving one out would wave through exactly the element this read failed to
+    vouch for.  Three ways to end up ``None``: the passage is gone, its text
+    moved, or the passage still stands but this element's row does not (a
+    re-ingest that produced fewer elements).  The first two refuse the whole
+    passage; only the third is per element.
+
+    Refusals are applied LAST so they cannot be undone by an attestation that a
+    different hit contributed for the same element -- see ``_report_evidence``
+    on why ``None`` wins within one call.
+    """
+    fingerprints: dict = dict.fromkeys(element_ids)
+    refused: set = set()
+    stale = 0
+    for chunk_id in pending:
+        hit = collected[chunk_id]
+        passage = snapshot.get(chunk_id)
+        if passage is None or passage["text_sha"] != _text_sha(hit.text):
+            stale += 1
+            refused.update(hit.element_ids)
+            continue
+        # Attested out of the same statement that proved the text -- so this
+        # passage is settled for the rest of the run.
+        seen.add(chunk_id)
+        for element_id in hit.element_ids:
+            if fingerprints.get(element_id) is None:
+                fingerprints[element_id] = passage["elements"].get(element_id)
+    for element_id in refused:
+        fingerprints[element_id] = None
+    if stale:
+        _emit(candidates, {
+            "kind": "chunk_federation_evidence_unavailable",
+            "reason": "passage_changed",
+            "passages": stale,
+            "elements": len(refused),
+        })
+    return fingerprints
 
 
 def _evidence_groups(collected: dict) -> list:

@@ -278,6 +278,12 @@ retrieval-run、读预算、参与集与来源范围进入工作线程；公平�
 历史仅含范围兼容的完成轮次，助手回答只作指代语境。
 引用校验覆盖被引段落**全部支撑元素**的来源与文本指纹——引用卡只带首个元素，段落其余元素经
 `FederatedRunPlan.on_evidence_groups` 随检索一并回传；任一条通不过即整份作废，不再剔除后重合成。
+检索时刻的指纹由 `GlobalAskSourceStorePort.passage_evidence_snapshot` 按**段落**读：一条语句、一个
+快照里同时取回 `chunks.text` 的摘要与该 chunk 声明的每个元素的 `(source_id, sha256(text))`，先核对
+段落原文与检索腿读到的逐字相同，再采信元素指纹。元素 id 按 `(来源, 序号)` 确定性复用，分两次读会
+把重新解析后的新文字记在旧段落名下，终态复核于是拿新指纹比新指纹、恒等放行。段落对不上或已消失 →
+其全部元素回传 `None`（走过本通道但无法佐证），并发 `chunk_federation_evidence_unavailable`
+（`reason=passage_changed`）；run 内的去重结清按 chunk，只有过了文字核对的段落才结清。
 后台线程有容量上限并持有取消事件，终态通过 `status='running'` 条件更新提交；关闭先取消并
 有界等待，只有服务器启动补偿把遗留任务转为 `interrupted`，普通仓库实例化不执行补偿。
 `frontend/app/ask` 拥有全局会话、范围、轮询及引用阅读状态，复用共享页面和答案组件。

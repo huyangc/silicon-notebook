@@ -11,9 +11,30 @@ class GlobalAskAuthorityStorePort(Protocol):
 
 
 class GlobalAskSourceStorePort(Protocol):
-    """Narrow source snapshots for global execution and evidence validation."""
+    """Narrow source snapshots for global execution and evidence validation.
+
+    ``passage_evidence_snapshot`` and ``evidence_fingerprints`` are not two
+    spellings of one read. The first answers "what did the passage this run
+    RETRIEVED consist of", and it has to answer both halves -- the passage's
+    own text and its elements' fingerprints -- out of ONE database snapshot,
+    because element ids are reused deterministically across a re-ingest
+    (``el-<source>-<index>``): read the two separately and a source reparsed in
+    between hands back new text under an old id, which would be filed as the
+    old passage's evidence and then compared against itself at re-check time.
+    The second is the terminal "what is it NOW" read, taken once the answer
+    exists and deliberately by element id, because by then the question is
+    about the cited elements rather than about any passage.
+
+    ``passage_evidence_snapshot`` returns, per chunk id that still exists,
+    ``{"text_sha": <sha256 of chunks.text>, "elements": {element_id:
+    (source_id, sha256 of the element text)}}``. A chunk the library no longer
+    holds is ABSENT from the mapping rather than present and empty, which is
+    how the caller tells "this passage is gone" from "this passage declares no
+    elements". Only hashes cross the boundary; element bodies never do.
+    """
     def visible_source_ids_by_notebook(self, notebook_ids: Sequence[str]) -> dict[str, list[str]]: ...
     def evidence_fingerprints(self, element_ids: Sequence[str]) -> dict[str, tuple[str, str]]: ...
+    def passage_evidence_snapshot(self, chunk_ids: Sequence[str]) -> dict[str, dict]: ...
 
 
 class GlobalAskStorePort(Protocol):
