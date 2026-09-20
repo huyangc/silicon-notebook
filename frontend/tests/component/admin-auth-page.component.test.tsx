@@ -52,6 +52,63 @@ function actionSection(name: string) {
   return within(screen.getByRole("heading", { name }).closest("section")!);
 }
 
+test.each(["recover", "replace"])("selecting an inventory account submits its exact ID only on explicit %s grant issuance", async (purpose) => {
+  const inventory = page(0, "opaque-user-42");
+  inventory.items[0] = { ...inventory.items[0], username: "a12345678", display_name: "原账号", subject: purpose === "replace" ? "old-subject" : null, identity_status: purpose === "replace" ? "active" : null };
+  api.fetchAuthAccounts.mockResolvedValue(inventory);
+  api.issueAuthGrant.mockResolvedValue({ grant_token: "scoped-grant", purpose, expires_in: 300 });
+  render(<AdminAuthPage />);
+  await screen.findByText("原账号");
+  const actor = userEvent.setup();
+  const grants = actionSection("签发迁移凭证");
+  await actor.type(grants.getByLabelText("使用人标识"), "approved-new-subject");
+  const row = within(screen.getByText("原账号").closest("tr")!);
+  vi.useFakeTimers();
+  act(() => { row.getByRole("button", { name: "选择为原账号" }).click(); });
+  expect(row.getByRole("status")).toHaveTextContent("已选择为原账号");
+  expect(grants.getByLabelText("用途")).toHaveValue(purpose);
+  expect(grants.getByLabelText(/目标账号 ID/)).toHaveValue("opaque-user-42");
+  expect(grants.getByLabelText("使用人标识")).toHaveValue("approved-new-subject");
+  expect(grants.getByText(/已选原账号/)).toHaveTextContent(`原账号（用户名：a12345678；统一身份：${purpose === "replace" ? "old-subject" : "未关联"}`);
+  expect(grants.getByText(/已选原账号/)).toHaveTextContent("选择账号不会签发凭证");
+  expect(api.issueAuthGrant).not.toHaveBeenCalled();
+  act(() => { vi.runOnlyPendingTimers(); });
+  expect(row.queryByRole("status")).not.toBeInTheDocument();
+  expect(grants.getByLabelText(/目标账号 ID/)).toHaveValue("opaque-user-42");
+  vi.useRealTimers();
+  await actor.click(grants.getByRole("button", { name: "签发凭证" }));
+  expect(api.issueAuthGrant).toHaveBeenCalledWith(purpose, "approved-new-subject", "opaque-user-42");
+});
+
+test("switching to enrollment clears the selected target and never submits an old account ID", async () => {
+  api.issueAuthGrant.mockResolvedValue({ grant_token: "enrollment-grant", purpose: "enroll", expires_in: 300 });
+  render(<AdminAuthPage />);
+  await screen.findByText("first-account");
+  const actor = userEvent.setup();
+  const grants = actionSection("签发迁移凭证");
+  await actor.click(accountSection().getByRole("button", { name: "选择为原账号" }));
+  await actor.selectOptions(grants.getByLabelText("用途"), "enroll");
+  expect(grants.queryByText(/已选原账号/)).not.toBeInTheDocument();
+  expect(grants.queryByLabelText(/目标账号 ID/)).not.toBeInTheDocument();
+  await actor.type(grants.getByLabelText("使用人标识"), "new-person");
+  await actor.click(grants.getByRole("button", { name: "签发凭证" }));
+  expect(api.issueAuthGrant).toHaveBeenCalledWith("enroll", "new-person", undefined);
+  await actor.selectOptions(grants.getByLabelText("用途"), "replace");
+  expect(grants.getByLabelText(/目标账号 ID/)).toHaveValue("");
+});
+
+test("editing a selected target removes the previous account's confirmation summary", async () => {
+  render(<AdminAuthPage />);
+  await screen.findByText("first-account");
+  const actor = userEvent.setup();
+  await actor.click(accountSection().getByRole("button", { name: "选择为原账号" }));
+  const grants = actionSection("签发迁移凭证");
+  await actor.clear(grants.getByLabelText(/目标账号 ID/));
+  await actor.type(grants.getByLabelText(/目标账号 ID/), "another-id");
+  expect(grants.queryByText(/已选原账号/)).not.toBeInTheDocument();
+  expect(accountSection().queryByText(/已选择为原账号/)).not.toBeInTheDocument();
+});
+
 test.each(["success", "failure"])("maintenance %s stays beside its controls, blocks duplicate requests and clears itself", async (outcome) => {
   const pending = deferred<AuthPolicy>();
   api.prepareAuthProviderMaintenance.mockReturnValue(pending.promise);
