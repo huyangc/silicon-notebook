@@ -9,7 +9,8 @@ import {
   GLOBAL_ASK_MAX_NOTEBOOKS, GLOBAL_ASK_PAGE_SIZE, submittableGlobalScope,
   type GlobalConversation, type GlobalJob, type GlobalScope,
 } from "../global-ask-api.ts";
-import { ASK_MODES, DEFAULT_ASK_MODE, askModeIds } from "../ask-modes.ts";
+import { ASK_MODES, DEFAULT_ASK_MODE, askModeIds, submissionAskMode } from "../ask-modes.ts";
+import { isAdvanced, normalizeUiMode, type UiMode } from "../ui-mode.ts";
 import { DEFAULT_ASK_RETRIEVAL_EFFORT } from "../ask-retrieval-effort.ts";
 import {
   buildAskIntentConfirmation,
@@ -56,7 +57,12 @@ function mergeJob(current: GlobalJob, incoming: GlobalJob): GlobalJob {
   return incoming;
 }
 
-export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: boolean; active?: boolean } = {}) {
+export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode }: {
+  syncUrl?: boolean; active?: boolean;
+  /** 宿主（笔记本页里的浮窗）手里那份**实时**的界面模式。独立的 /ask 页面不传，
+   *  改用本 hook 载入时读到的用户档案。 */
+  uiMode?: UiMode;
+} = {}) {
   const [notebooks, setNotebooks] = useState<NotebookSummary[]>([]);
   const [conversations, setConversations] = useState<GlobalConversation[]>([]);
   const [conversationId, setConversationId] = useState("");
@@ -66,6 +72,13 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
   // 服务端渲染出的首屏读不到 localStorage,所以初值恒是默认引擎、挂载后再改写;
   // 直接在 useState 初始化里读会让首屏与 hydration 后的选中页签对不上。
   const [mode, setMode] = useState<string>(DEFAULT_ASK_MODE);
+  // 界面模式决定有没有引擎控件，也决定**提交走哪个引擎**——与笔记本内问答同一条
+  // 规则（`submissionAskMode`）：简化界面没有控件，提交固定走 SIMPLIFIED_ASK_MODE；
+  // `mode` 在简化界面下只是一份不可见的记忆。档案读到之前按简化界面处理：宁可晚一拍
+  // 露出控件，也不先露出一个这位用户本不该看到的控件。
+  const [loadedUiMode, setLoadedUiMode] = useState<UiMode>(normalizeUiMode(undefined));
+  const uiMode = hostUiMode ?? loadedUiMode;
+  const submissionMode = submissionAskMode(isAdvanced(uiMode), mode);
   const [intentReview, setIntentReview] = useState<GlobalIntentReview | null>(null);
   const [intentChecking, setIntentChecking] = useState(false);
   const intentAbort = useRef<AbortController | null>(null);
@@ -133,7 +146,8 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     setTurnOffset(null);
     setConversationId(resumeId || "");
     try {
-      await fetchMe();
+      const me = await fetchMe();
+      if (mounted.current && owner.current === ticket) setLoadedUiMode(normalizeUiMode(me.ui_mode));
       const [libraries, history] = await Promise.all([listNotebooks(), listGlobalConversations()]);
       if (!mounted.current || owner.current !== ticket) return;
       if (libraryTicket === notebookVersion.current) setNotebooks(libraries);
@@ -378,7 +392,7 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     }
     // 「逐步推理」与笔记本内问答走同一套交互：先预检问题理解，需要澄清时弹审阅卡，
     // 确认后才带着 intent 提交。通用问答没有这一步，直接建作业。
-    if (mode === "reasoning") { await previewIntent(question); return; }
+    if (submissionMode === "reasoning") { await previewIntent(question); return; }
     await submitJob(question);
   }
 
@@ -458,7 +472,7 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
       || intent.resolved_question !== intent.contract.resolved_question)
       ? { resolved: intent.resolved_question, answers: intent.answers }
       : null;
-    const key = JSON.stringify({ question, scope, conversationId, mode, edited });
+    const key = JSON.stringify({ question, scope, conversationId, mode: submissionMode, edited });
     if (retryRequest.current?.key !== key) retryRequest.current = { key, id: crypto.randomUUID() };
     try {
       const job = await askGlobal({
@@ -466,7 +480,7 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
         notebook_scope: scope,
         conversation_id: conversationId || undefined,
         client_request_id: retryRequest.current.id,
-        mode,
+        mode: submissionMode,
         intent,
         retrieval_effort: GLOBAL_ASK_RETRIEVAL_EFFORT,
       });
@@ -541,7 +555,7 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     loading, opening, openFailed, submitting, stopping, error, pollError, historyError, running,
     moreHistory, loadingHistory, turnOffset, loadingTurns, loadMoreHistory, loadMoreTurns,
     load, openConversation, newConversation, submit, stop, updateConversation, removeConversation,
-    mode, selectMode, modes: GLOBAL_ASK_MODES,
+    mode, selectMode, modes: GLOBAL_ASK_MODES, uiMode,
     intentReview, intentChecking, confirmIntent, cancelIntent, abortIntent,
     retryPoll: () => { setPollError(""); setPollRevision((value) => value + 1); },
   };

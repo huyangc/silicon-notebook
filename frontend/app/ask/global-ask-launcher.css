@@ -1,5 +1,9 @@
 .global-ask-bubble { position: fixed; right: max(24px, env(safe-area-inset-right)); bottom: max(24px, env(safe-area-inset-bottom)); z-index: 40; width: 58px; height: 58px; display: grid; place-items: center; padding: 0; border: 1px solid color-mix(in srgb, var(--panel) 18%, transparent); border-radius: 50%; background: var(--ink); color: var(--panel); box-shadow: 0 6px 24px color-mix(in srgb, var(--ink) 20%, transparent); }
 .global-ask-bubble[hidden] { display: none; }
+/* 气泡停在视口右下角，恰好是笔记本工作区问答面板的右下角——也就是输入框的右端
+   （按键提示与发送键所在）。输入框让出气泡那一格（58px + 8px 间隙），气泡与它并排，
+   谁也不压谁。规则放在这份样式里：只有挂了气泡的页面才会加载它。 */
+.chat-panel .chat-input-bar { margin-right: 66px; }
 .global-ask-bubble:hover { background: color-mix(in srgb, var(--ink) 85%, var(--panel)); }
 .global-bubble-label { position: absolute; right: calc(100% + 10px); white-space: nowrap; padding: 7px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--ink); font-size: 12px; opacity: 0; pointer-events: none; }
 .global-ask-bubble:hover .global-bubble-label, .global-ask-bubble:focus-visible .global-bubble-label { opacity: 1; }
@@ -11,5 +15,6 @@
 .global-window-loading { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 24px; font-size: 13px; }
 @media (max-width: 700px) {
   .global-ask-bubble { right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom)); width: 54px; height: 54px; }
+  .chat-panel .chat-input-bar { margin-right: 62px; }
   .global-ask-window.is-compact { right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); width: calc(100% - 24px); height: min(680px, calc(100dvh - 80px)); }
 }

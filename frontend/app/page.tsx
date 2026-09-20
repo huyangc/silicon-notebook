@@ -7562,7 +7562,7 @@ export default function Home() {
         />
       )}
 
-      <GlobalAskLauncher key={currentUser.id} presentation={rootModals} />
+      <GlobalAskLauncher key={currentUser.id} presentation={rootModals} uiMode={uiMode} />
       {toast && <div className="toast">{toast}</div>}
       <PendingToast toast={pending.toast} onClose={() => pending.setToast(null)}
         onClick={() => { if (pending.toast) openDoneItem(pending.toast); }} />

@@ -4,6 +4,7 @@ import { lazy, Suspense, useLayoutEffect, useRef, useState } from "react";
 import { Maximize2, MessageSquare, Minimize2, Minus } from "lucide-react";
 import type { RootModalCoordinator } from "../use-root-modal-coordinator";
 import { citationPopoverHoldsEscape } from "../citation-card";
+import type { UiMode } from "../ui-mode";
 import "./global-ask-launcher.css";
 import "./global-ask.css";
 
@@ -11,7 +12,7 @@ const GlobalAskWorkspace = lazy(() => import("./global-ask-workspace"));
 
 type Presentation = Pick<RootModalCoordinator, "view" | "open" | "requestClose" | "captureActorOwner">;
 
-export function GlobalAskLauncher({ presentation }: { presentation: Presentation }) {
+export function GlobalAskLauncher({ presentation, uiMode }: { presentation: Presentation; uiMode?: UiMode }) {
   const [expanded, setExpanded] = useState(false);
   const [started, setStarted] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -54,7 +55,7 @@ export function GlobalAskLauncher({ presentation }: { presentation: Presentation
       onCancel={(event) => { event.preventDefault(); if (citationPopoverHoldsEscape()) return; presentation.requestClose("global-ask", "escape"); }}
       onKeyDown={(event) => { if (event.key === "Escape" && !event.defaultPrevented) { event.preventDefault(); presentation.requestClose("global-ask", "escape"); } }}>
       {started && <Suspense fallback={<div className="global-window-loading" role="status">正在打开全局问答…<button className="sort-button" onClick={() => setMode("closed")}>收起</button></div>}>
-        <GlobalAskWorkspace embedded active={open} compact={mode !== "full"} onOpenNotebook={() => setMode("closed")} controls={<>
+        <GlobalAskWorkspace embedded uiMode={uiMode} active={open} compact={mode !== "full"} onOpenNotebook={() => setMode("closed")} controls={<>
           <button autoFocus className="icon-button" aria-label={mode === "full" ? "退出全屏" : "全屏展开"} title={mode === "full" ? "退出全屏" : "全屏展开"} onClick={() => setMode(mode === "full" ? "compact" : "full")}>{mode === "full" ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>
           <button className="icon-button" aria-label="收起全局问答" title="收起，保留当前对话" onClick={() => setMode("closed")}><Minus size={19} /></button>
         </>} />
