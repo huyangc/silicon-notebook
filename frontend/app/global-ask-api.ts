@@ -126,6 +126,9 @@ export const askGlobal = (input: {
   /** 「逐步推理」的问题理解结果。预检说需要澄清时由用户在审阅卡里补齐后回传。 */
   intent?: AskIntentConfirmation;
   retrieval_effort?: AskRetrievalEffortId;
+  /** 「编辑后重发」：这次提问要替换的那条已停止的作业（只能是会话里最新的一条）。
+   *  后端在建新作业的同一个事务里删掉它。 */
+  replaces_job_id?: string;
 }) => requestJson<GlobalJob>(`${root}/ask`, { ...options, method: "POST", body: JSON.stringify(input) })
   .then(withAnswerIdentity);
 
@@ -159,8 +162,10 @@ export const previewGlobalAskIntent = (
 );
 export const getGlobalJob = (id: string) =>
   requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}`, options).then(withAnswerIdentity);
-export const cancelGlobalJob = (id: string) =>
-  requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}/cancel`, { ...options, method: "POST" }).then(withAnswerIdentity);
+/** 停止一条作业。`discard`：还没有任何过程输出就停止——问题弹回输入框，服务端
+ *  连这条记录（以及它刚开出来的空会话）一起丢掉，与笔记本内问答同一条规则。 */
+export const cancelGlobalJob = (id: string, discard = false) =>
+  requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}/cancel${discard ? "?discard=true" : ""}`, { ...options, method: "POST" }).then(withAnswerIdentity);
 export const submitGlobalFeedback = (jobId: string, rating: "useful" | "not_useful") =>
   requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(jobId)}/feedback`, {
     ...options, method: "POST", body: JSON.stringify({ rating }),

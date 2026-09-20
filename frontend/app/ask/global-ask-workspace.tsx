@@ -19,12 +19,14 @@ import { ConversationShareModal } from "../conversation-share-modal";
 import { globalConversationShareApi, type GlobalJob } from "../global-ask-api";
 import { holdGlobalAskEscape } from "./global-ask-escape";
 import type { UiMode } from "../ui-mode";
+import type { ReasoningTraceStep } from "../ask-stream";
 import { GlobalConversationList } from "./conversation-list";
 import { NotebookScopePicker } from "./notebook-scope-picker";
 import { GlobalCoverageReceipt } from "./global-coverage-receipt";
-import { useGlobalAsk } from "./use-global-ask";
+import { replaceableTurn, useGlobalAsk } from "./use-global-ask";
 import { useCopyResult } from "../copy-result";
 import { STOP_CONTROL_CLASS, StopGlyph } from "../stop-control";
+import { StoppedTurnNotice } from "../stopped-turn";
 import { notebookHash } from "../memory-model";
 import "./global-ask.css";
 
@@ -41,9 +43,12 @@ type ShareSelection = { jobId: string; title: string };
  *  渲染——这里只补它不渲染的两种情形：还没有答案（运行中逐步追加的 `job.trace`），
  *  以及答案里的轨迹被清空、只剩作业上那一份。两处都挂同一个面板，所以不会出现
  *  「运行时一种样子、完成后另一种样子」。chunk 引擎没有轨迹，返回空数组。 */
-function pendingTraceOf(job: GlobalJob) {
+function pendingTraceOf(job: GlobalJob, seed: ReasoningTraceStep[] = []) {
   if (job.answer?.reasoning_trace?.length) return [];
-  return job.trace ?? [];
+  // 问题理解阶段合成的那几步接在作业自己的轨迹前面（笔记本内问答的 traceSeed）：
+  // 交接那一刻轨迹不清零重来，用户看到的是同一条轨迹继续往下长。
+  const steps = job.trace ?? [];
+  return seed.length ? [...seed, ...steps] : steps;
 }
 
 const suggestions = [
@@ -73,9 +78,12 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
   // 范围与引擎都锁住——否则确认的会是另一份范围/引擎下理解出来的问题。
   const inFlight = Boolean(ask.running) || ask.intentChecking || Boolean(ask.intentReview);
   const hint = askQuestionLimitHint(ask.draft.trim());
+  const replaceable = replaceableTurn(ask.turns);
+  // 停止键在三个阶段都在：问题理解中、提交请求在途、作业在跑。
+  const stoppable = Boolean(ask.running) || ask.intentChecking || (ask.submitting && Boolean(ask.pending));
   // 停止键只有图标（全站同一枚，见 `stop-control.tsx`）；此刻按下去会停掉什么，写在
   // 无障碍名与悬停提示上。停止中换成转圈：按下之后按钮自身要有可见变化。
-  const stopLabel = ask.intentChecking ? "取消问题理解" : ask.stopping ? "停止中…" : "停止";
+  const stopLabel = ask.stopping ? "停止中…" : ask.intentChecking ? "取消问题理解" : "停止";
   const selectedNotebookIds = ask.scope.mode === "include" ? new Set(ask.scope.notebook_ids) : null;
   const excludesPreviousContext = selectedNotebookIds !== null
     && ask.turns.some((turn) => turn.resolved_notebook_ids.some((id) => !selectedNotebookIds.has(id)));
@@ -132,8 +140,8 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
     };
   }, [share]);
   useEffect(() => {
-    if (ask.running) transcript.current?.scrollTo({ top: transcript.current.scrollHeight, behavior: "smooth" });
-  }, [ask.running?.job_id]);
+    if (ask.running || ask.pending) transcript.current?.scrollTo({ top: transcript.current.scrollHeight, behavior: "smooth" });
+  }, [ask.running?.job_id, ask.pending?.askedAt]);
 
   /** 「分享到这条回答」。全局侧的边界是**作业**，所以传的是 `job_id`——服务端
    *  `expected_through_id` 钉的也是它。 */
@@ -184,7 +192,7 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
       <main className="global-main">
         <header className="global-main-heading"><div><MessageSquare size={18} /><h1>全局问答</h1></div><span>连接资料，找到答案</span></header>
         <div className="global-transcript" ref={transcript} aria-label="问答内容" aria-busy={ask.loading || ask.opening}>
-          {ask.loading || ask.opening ? <div className="global-loading" role="status"><LoaderCircle className="global-spin" size={22} />正在加载对话…</div> : !ask.turns.length ?
+          {ask.loading || ask.opening ? <div className="global-loading" role="status"><LoaderCircle className="global-spin" size={22} />正在加载对话…</div> : !ask.turns.length && !ask.pending ?
             <div className="global-welcome">
               <div className="global-welcome-mark"><Layers3 size={30} strokeWidth={1.5} /></div>
               <p className="global-eyebrow">让知识彼此连接</p>
@@ -193,7 +201,11 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
               <div className="global-suggestions">{suggestions.map(({ title, question, icon: Icon }) => <button key={title} disabled={busy} onClick={() => { ask.setDraft(question); composer.current?.focus(); }}><Icon size={19} /><strong>{title}</strong><ChevronRight size={14} /></button>)}</div>
             </div> : <div className="global-turns">
               {ask.turnOffset !== null && <button className="sort-button global-older" disabled={ask.loadingTurns} onClick={() => void ask.loadMoreTurns()}>{ask.loadingTurns ? "正在加载…" : "加载更早的问答"}</button>}
-              {ask.turns.map((job) => { const trace = pendingTraceOf(job); return <section key={job.job_id} className="global-turn">
+              {ask.turns.map((job) => {
+                // 下一次提问会替换最新那条被停止的记录：新问题一上屏，旧记录就让位
+                // （提交没成时 pending 轮撤掉，它原样回来）。
+                if (ask.pending && job.job_id === replaceable?.job_id) return null;
+                const trace = pendingTraceOf(job, ask.traceSeeds[job.job_id]); return <section key={job.job_id} className="global-turn">
                 <ChatQuestion question={job.question} askedAt={job.created_at} />
                 <div className="global-turn-scope"><BookOpen size={12} />{job.notebook_scope.mode === "all" ? "全部笔记本" : "指定笔记本"} · {job.resolved_notebook_ids.length} 个</div>
                 {job.answer ? <ChatAnswer answeredAt={job.answer.answered_at ?? job.created_at}>
@@ -247,11 +259,15 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                     <button aria-label="分享到这条回答" title="分享到这条回答（含此前的全部问答）" className="global-text-button" type="button" onClick={() => openShare(job.job_id)}><Share2 size={13} /><span>分享</span></button>
                   </footer>
                 </ChatAnswer> : <>
-                <div className={`global-job-status${job.status === "failed" ? " failed" : ""}`} role="status">
+                {/* 被停止的一轮：长相与文案全站一份（`stopped-turn.tsx`）。只有最新的那条
+                    可替换，所以只有它带「编辑问题」；更早的停止记录仍是旧的「重新提问」。 */}
+                {job.status === "cancelled" && job.job_id === replaceable?.job_id
+                  ? <StoppedTurnNotice disabled={busy || inFlight} onEdit={() => { ask.setDraft(job.question); composer.current?.focus(); }} />
+                  : <div className={`global-job-status${job.status === "failed" ? " failed" : ""}`} role="status">
                   {job.status === "running" && <LoaderCircle size={18} className="global-spin" />}
                   <span>{job.status === "running" ? `正在查阅资料 · 已检索 ${job.searched_notebook_ids.length} / ${job.resolved_notebook_ids.length} 个笔记本` : job.status === "cancelled" ? "已停止回答，可以修改问题后继续。" : job.status === "interrupted" ? "服务已重启，请重新提交问题。" : job.error || "回答未完成，请检查模型服务后重试。"}</span>
                   {job.status !== "running" && <button className="global-text-button" onClick={() => { ask.setDraft(job.question); composer.current?.focus(); }}>重新提问</button>}
-                </div>
+                </div>}
                 {/* 与完成态同一个位置（回答/状态之下），同一轮里不跳位。
                     刻意在 role="status" 之外：它自带一颗可展开的按钮、内容每一步都
                     在变，塞进 live region 会让读屏把整块反复念一遍。 */}
@@ -259,6 +275,17 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                 </>}
                 <GlobalCoverageReceipt job={job} notebookNames={names} />
               </section>; })}
+              {/* 已提交、作业还没交回来的那一轮：问题在点击当下就上屏，问题理解的步骤
+                  实时画在下面——与笔记本内问答的 pending 轮同一个时刻、同一块面板。 */}
+              {ask.pending && <section className="global-turn" aria-label="正在提交的问题">
+                <ChatQuestion question={ask.pending.question} askedAt={ask.pending.askedAt} />
+                <div className="global-turn-scope"><BookOpen size={12} />{ask.pending.scope.mode === "all" ? "全部笔记本" : "指定笔记本"}</div>
+                <div className="global-job-status" role="status">
+                  {!ask.intentReview && <LoaderCircle size={18} className="global-spin" />}
+                  <span>{ask.intentReview ? "等待你确认问题理解" : ask.intentChecking ? "正在理解问题…" : "正在提交问题…"}</span>
+                </div>
+                {ask.pending.trace.length > 0 && <div className="chat-assistant chat-thinking"><ReasoningTracePanel steps={ask.pending.trace} live={!ask.intentReview} /></div>}
+              </section>}
             </div>}
         </div>
         <div className="global-composer-area">
@@ -295,8 +322,8 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                 kgAvailable={false}
                 uiMode={ask.uiMode}
               /></div>
-              {ask.running || ask.intentChecking
-                ? <button className={`global-send ${STOP_CONTROL_CLASS}`} type="button" disabled={ask.stopping} aria-label={stopLabel} title={stopLabel} onClick={() => { if (ask.intentChecking) ask.abortIntent(); else void ask.stop(); }}>{ask.stopping ? <LoaderCircle className="global-spin" size={16} /> : <StopGlyph />}</button>
+              {stoppable
+                ? <button className={`global-send ${STOP_CONTROL_CLASS}`} type="button" disabled={ask.stopping} aria-label={stopLabel} title={stopLabel} onClick={() => void ask.stop()}>{ask.stopping ? <LoaderCircle className="global-spin" size={16} /> : <StopGlyph />}</button>
                 : <button className="global-send new-pill" type="submit" disabled={composerDisabled || inFlight || !ask.draft.trim() || Boolean(hint) || !ask.notebooks.length} aria-label="发送问题">{ask.submitting ? <LoaderCircle className="global-spin" size={18} /> : <ArrowUp size={19} />}</button>}
             </div>
             {excludesPreviousContext && <p className="global-scope-context-notice" role="status">范围已收窄：先前涉及其他笔记本的提问不会用于本次追问，请重新说明要讨论的对象。</p>}

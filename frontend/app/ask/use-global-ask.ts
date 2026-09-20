@@ -17,6 +17,12 @@ import {
   type AskIntentConfirmation,
   type QueryIntentContract,
 } from "../ask-intent-model.ts";
+import {
+  handOffIntentTrace, intentClarifyStep, intentConfirmedStep, intentUnderstandingStep,
+  intentUnderstoodStep, replaceLastIntentStep,
+} from "../ask-intent-trace.ts";
+import type { ReasoningTraceStep } from "../ask-stream.ts";
+import { hasProcessOutput } from "../stopped-turn.tsx";
 import type { NotebookSummary } from "../workspace-model.ts";
 
 const POLL_MIN_INTERVAL_MS = 1200;
@@ -44,8 +50,33 @@ type GlobalIntentReview = {
   understandingMs: number;
 };
 
+/** 已提交、服务端还没交回作业的那一轮：问题立即上屏（与笔记本内问答的 pending 轮
+ *  同一个做法），问题理解的步骤实时画在它下面。它只活在这个 hook 里。 */
+export type GlobalPendingTurn = {
+  question: string;
+  askedAt: string;
+  scope: GlobalScope;
+  trace: ReasoningTraceStep[];
+};
+
+// 轨迹步数也进这把键：逐步推理的一轮可以连出好几步而覆盖回执一动不动，键里没有它，
+// 轮询会把「只长轨迹」判成没进展、一路退避到 15 秒，实时轨迹就成了 15 秒一跳。
 function progressKey(job: GlobalJob): string {
-  return JSON.stringify([job.status, job.searched_notebook_ids, job.skipped_notebooks ?? [], job.degraded_notebook_ids ?? []]);
+  return JSON.stringify([job.status, job.searched_notebook_ids, job.skipped_notebooks ?? [], job.degraded_notebook_ids ?? [], job.trace?.length ?? 0]);
+}
+
+/** 这条作业是否已经有过程输出上屏：轨迹里有真正的检索 / 推理步，或任何一个库已经
+ *  交回了检索回执。停止时据此分两种情形（规则见 `stopped-turn.tsx`）。 */
+export function globalJobHasProcessOutput(job: GlobalJob): boolean {
+  return hasProcessOutput(job.trace)
+    || job.searched_notebook_ids.length > 0
+    || (job.skipped_notebooks?.length ?? 0) > 0;
+}
+
+/** 下一次提问会替换的那条记录：会话里**最新**的一轮，且它是被停止的。 */
+export function replaceableTurn(turns: readonly GlobalJob[]): GlobalJob | null {
+  const last = turns[turns.length - 1];
+  return last && last.status === "cancelled" ? last : null;
 }
 
 // A cancelled/done turn is terminal even if a previously issued poll arrives later.
@@ -86,6 +117,13 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
   const [intentReview, setIntentReview] = useState<GlobalIntentReview | null>(null);
   const [intentChecking, setIntentChecking] = useState(false);
   const intentAbort = useRef<AbortController | null>(null);
+  const [pending, setPendingState] = useState<GlobalPendingTurn | null>(null);
+  const pendingRef = useRef<GlobalPendingTurn | null>(null);
+  // 问题理解阶段合成的那几步，交接给作业之后接在它的实时轨迹前面（笔记本内问答的
+  // traceSeed）。只在本次实时展示里有用：完成后以 `answer.reasoning_trace` 为准。
+  const [traceSeeds, setTraceSeeds] = useState<Record<string, ReasoningTraceStep[]>>({});
+  // 「提交请求还没回来就按了停止」：作业 id 此刻还不知道，等它一回来立刻停掉并丢弃。
+  const stopRequested = useRef(false);
   const [loading, setLoading] = useState(true);
   const [opening, setOpening] = useState(false);
   const [openFailed, setOpenFailed] = useState(false);
@@ -112,6 +150,8 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
   currentId.current = conversationId;
   const currentScope = useRef(scope);
   currentScope.current = scope;
+  const currentTurns = useRef(turns);
+  currentTurns.current = turns;
   const initialized = useRef(false);
   const notebookVersion = useRef(0);
   const wasActive = useRef(active);
@@ -125,12 +165,35 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
    * 永久停在「取消问题理解」——草稿框、范围、引擎全禁用，而 `abortIntent()` 已经是
    * 空动作，只能刷新页面。
    */
-  const retireIntent = useCallback(() => {
+  const retireIntent = useCallback((options: { returnQuestion?: boolean } = {}) => {
     intentAbort.current?.abort();
     intentAbort.current = null;
     setIntentChecking(false);
     setIntentReview(null);
+    // 上屏的 pending 轮与在途预检同生共死。`returnQuestion`：这一轮是被「重新加载」
+    // 打断的，对话没换，问题交还输入框；切换 / 新建对话则随旧对话一起作废。
+    const retired = pendingRef.current;
+    pendingRef.current = null;
+    setPendingState(null);
+    stopRequested.current = false;
+    if (retired && options.returnQuestion) setDraft(retired.question);
   }, []);
+
+  function showPending(next: GlobalPendingTurn | null) {
+    pendingRef.current = next;
+    setPendingState(next);
+  }
+  function updatePendingTrace(update: (steps: ReasoningTraceStep[]) => ReasoningTraceStep[]) {
+    const current = pendingRef.current;
+    if (current) showPending({ ...current, trace: update(current.trace) });
+  }
+  /** 情形二的收尾：这一轮还没有任何过程输出就结束了（取消、失败、返回修改）——
+   *  问题回到输入框，对话里不留它。 */
+  function returnQuestion() {
+    const retired = pendingRef.current;
+    showPending(null);
+    if (retired) setDraft((draft) => draft.trim() ? draft : retired.question);
+  }
 
   const load = useCallback(async () => {
     const ticket = ++owner.current;
@@ -140,7 +203,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     const draftScope = currentScope.current;
     ++historyVersion.current;
     // owner 刚被推进，在途预检随之失去归属：必须在同一处退休它（见 retireIntent）。
-    retireIntent();
+    retireIntent({ returnQuestion: true });
     setLoading(true);
     setOpenFailed(Boolean(resumeId));
     setError("");
@@ -398,6 +461,11 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     if (scope.mode === "include" && scope.notebook_ids.some((id) => !notebooks.some((item) => item.id === id))) {
       setError("部分已选笔记本不可访问，请重新选择范围"); return;
     }
+    // 问题**立即**上屏、输入框清空——与笔记本内问答同一个时刻（点击当下，先于任何
+    // await）。此前要等问题理解与建作业两次往返都回来，界面上像卡住了一样。
+    stopRequested.current = false;
+    showPending({ question, askedAt: new Date().toISOString(), scope, trace: [] });
+    setDraft("");
     // 「逐步推理」与笔记本内问答走同一套交互：先预检问题理解，需要澄清时弹审阅卡，
     // 确认后才带着 intent 提交。通用问答没有这一步，直接建作业。
     if (submissionMode === "reasoning") { await previewIntent(question); return; }
@@ -406,7 +474,8 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
 
   /**
    * 跑一次问题理解预检。理解清楚就直接把系统的理解当确认提交；需要澄清就把合同
-   * 交给审阅卡。草稿全程不动——取消或失败后用户原地就能改。
+   * 交给审阅卡。理解步骤实时画在 pending 轮下面（与笔记本内问答同一组合成步，
+   * `ask-intent-trace.ts`）；取消或失败时问题回到输入框，用户原地就能改。
    */
   async function previewIntent(question: string) {
     const ticket = owner.current;
@@ -415,23 +484,34 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     setIntentChecking(true);
     setError("");
     const startedAt = Date.now();
+    updatePendingTrace(() => [intentUnderstandingStep()]);
     try {
       const contract = await previewGlobalAskIntent(
         question, conversationId || undefined, scope, controller.signal,
+        (elapsed) => {
+          if (mounted.current && ticket === owner.current && intentAbort.current === controller) {
+            updatePendingTrace((steps) => replaceLastIntentStep(steps, intentUnderstandingStep(elapsed)));
+          }
+        },
       );
+      if (!mounted.current || ticket !== owner.current) return;
       // `signal.aborted` 也要查：流可能已经返回、而用户恰在这一瞬点了「取消问题
       // 理解」。只 abort 请求不查这一下，作业照样会被建出来——取消变成了假的。
-      if (!mounted.current || ticket !== owner.current || controller.signal.aborted) return;
+      if (controller.signal.aborted) { returnQuestion(); return; }
       const understandingMs = Math.max(0, Date.now() - startedAt);
       if (contract.needs_clarification) {
+        updatePendingTrace((steps) => replaceLastIntentStep(steps, intentClarifyStep(contract, understandingMs)));
         setIntentReview({ question, contract, understandingMs });
         return;
       }
+      updatePendingTrace((steps) => replaceLastIntentStep(steps, intentUnderstoodStep(contract, understandingMs)));
       await submitJob(question, buildAskIntentConfirmation(
         contract, contract.resolved_question, {}, understandingMs,
       ));
     } catch (cause) {
       if (!mounted.current || ticket !== owner.current) return;
+      // 取消也好、失败也好，此刻都还没有任何过程输出：问题回到输入框。
+      returnQuestion();
       // 用户自己按下的「取消问题理解」不是失败，不上错误条。
       if (!controller.signal.aborted) setError(toUserMessage(cause, "问题理解没能完成，请重试"));
     } finally {
@@ -457,11 +537,16 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     const review = intentReview;
     if (!review || flight.current) return;
     setIntentReview(null);
+    updatePendingTrace((steps) => [
+      ...steps, intentConfirmedStep(confirmation.resolved_question, confirmation.answers.length),
+    ]);
     await submitJob(review.question, confirmation);
   }
 
+  /** 审阅卡的「返回修改」：问题回到输入框（情形二——还没有任何过程输出）。 */
   function cancelIntent() {
     setIntentReview(null);
+    returnQuestion();
   }
 
   async function submitJob(question: string, intent?: AskIntentConfirmation) {
@@ -480,7 +565,10 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
       || intent.resolved_question !== intent.contract.resolved_question)
       ? { resolved: intent.resolved_question, answers: intent.answers }
       : null;
-    const key = JSON.stringify({ question, scope, conversationId, mode: submissionMode, edited });
+    // 会话里最新的一轮若是被停止的，这次提问就替换它（规则见 `stopped-turn.tsx`）。
+    // 进幂等键：同一个问题「替换 A」与「不替换」是两次不同的提交。
+    const replaces = replaceableTurn(currentTurns.current)?.job_id;
+    const key = JSON.stringify({ question, scope, conversationId, mode: submissionMode, edited, replaces });
     if (retryRequest.current?.key !== key) retryRequest.current = { key, id: crypto.randomUUID() };
     try {
       const job = await askGlobal({
@@ -491,13 +579,35 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
         mode: submissionMode,
         intent,
         retrieval_effort: GLOBAL_ASK_RETRIEVAL_EFFORT,
+        replaces_job_id: replaces,
       });
       if (!mounted.current || ticket !== owner.current) return;
-      setConversationId(job.conversation_id);
-      setTurns((items) => [...items.filter((item) => item.job_id !== job.job_id), job]);
-      setDraft("");
-      setPollError("");
       retryRequest.current = null;
+      if (stopRequested.current && job.status === "running") {
+        // 提交还没回来用户就按了停止：作业刚建好、什么都还没上屏——停掉并丢弃，
+        // 问题回到输入框（情形二）。停不掉就照常接管它，停止键仍在。
+        stopRequested.current = false;
+        try {
+          const stopped = await cancelGlobalJob(job.job_id, true);
+          if (!mounted.current || ticket !== owner.current) return;
+          if (stopped.status === "cancelled") {
+            const remaining = currentTurns.current.filter((item) => item.job_id !== job.job_id && item.job_id !== replaces);
+            setTurns(remaining);
+            returnQuestion();
+            settleDiscard(remaining, job.conversation_id);
+            return;
+          }
+        } catch (cause) {
+          if (!mounted.current || ticket !== owner.current) return;
+          setError(toUserMessage(cause, "停止失败，请重试"));
+        }
+      }
+      const seed = handOffIntentTrace(pendingRef.current?.trace ?? []);
+      if (seed.length) setTraceSeeds((seeds) => ({ ...seeds, [job.job_id]: seed }));
+      showPending(null);
+      setConversationId(job.conversation_id);
+      setTurns((items) => [...items.filter((item) => item.job_id !== job.job_id && item.job_id !== replaces), job]);
+      setPollError("");
       updateUrl(job.conversation_id);
       const version = ++historyVersion.current;
       void listGlobalConversations().then((history) => {
@@ -515,25 +625,64 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
         }
       });
     } catch (cause) {
-      if (mounted.current && ticket === owner.current) setError(toUserMessage(cause, "提交失败，请重试；重复提交不会创建重复任务"));
+      if (mounted.current && ticket === owner.current) {
+        returnQuestion();
+        setError(toUserMessage(cause, "提交失败，请重试；重复提交不会创建重复任务"));
+      }
     } finally {
       if (ticket === owner.current) {
         flight.current = false;
-        if (mounted.current) setSubmitting(false);
+        stopRequested.current = false;
+        if (mounted.current) { setSubmitting(false); setStopping(false); }
       }
     }
   }
 
+  /** 丢弃之后的会话身份：服务端在丢掉会话里最后一条作业时连空会话一起删了
+   *  （与笔记本内问答同一条规则），本地也得退回「还没有会话」，否则下一次提问
+   *  会带着一个已经不存在的会话 id 去提交。 */
+  function settleDiscard(remaining: readonly GlobalJob[], discardedConversationId: string) {
+    if (remaining.length || turnOffset !== null) return;
+    if (currentId.current && currentId.current !== discardedConversationId) return;
+    currentId.current = "";
+    setConversationId("");
+    setConversationTitle("");
+    updateUrl("");
+    ++historyVersion.current;
+    setConversations((items) => items.filter((item) => item.id !== discardedConversationId));
+  }
+
+  /**
+   * 停止。全站同一套取消风格（`stopped-turn.tsx`）：
+   *   · 还没有过程输出——问题理解中、提交还没回来、或作业建好了但什么都还没上屏——
+   *     问题回到输入框，不留记录（服务端一并丢弃）；
+   *   · 已有检索 / 推理过程上屏——这一轮留在对话里，可「编辑问题」，下一次提问替换它。
+   */
   async function stop() {
-    if (!running || flight.current) return;
+    if (intentChecking) { abortIntent(); return; }
+    if (!running) {
+      // 提交请求在途：作业 id 还不知道。记下来，`submitJob` 拿到作业就停掉并丢弃。
+      if (submitting && pendingRef.current) { stopRequested.current = true; setStopping(true); }
+      return;
+    }
+    if (flight.current) return;
     const ticket = owner.current;
+    const target = running;
+    const discard = !globalJobHasProcessOutput(target);
     flight.current = true;
     setStopping(true);
     try {
-      const job = await cancelGlobalJob(running.job_id);
+      const job = await cancelGlobalJob(target.job_id, discard);
       if (mounted.current && ticket === owner.current) {
-        setTurns((items) => items.map((item) => item.job_id === job.job_id ? mergeJob(item, job) : item));
         setPollError("");
+        if (discard && job.status === "cancelled") {
+          const remaining = currentTurns.current.filter((item) => item.job_id !== job.job_id);
+          setTurns(remaining);
+          setDraft((draft) => draft.trim() ? draft : target.question);
+          settleDiscard(remaining, target.conversation_id);
+        } else {
+          setTurns((items) => items.map((item) => item.job_id === job.job_id ? mergeJob(item, job) : item));
+        }
       }
     } catch (cause) {
       if (mounted.current && ticket === owner.current) setError(toUserMessage(cause, "停止失败，请重试"));
@@ -594,6 +743,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
   return {
     notebooks, conversations, conversationId, conversationTitle, turns, scope, setScope, draft, setDraft,
     loading, opening, openFailed, submitting, stopping, error, pollError, historyError, running,
+    pending, traceSeeds,
     moreHistory, loadingHistory, turnOffset, loadingTurns, loadMoreHistory, loadMoreTurns,
     load, openConversation, newConversation, submit, stop, sendFeedback, updateConversation, removeConversation,
     mode, selectMode, modes: GLOBAL_ASK_MODES, uiMode,
