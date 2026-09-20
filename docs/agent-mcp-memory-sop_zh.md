@@ -270,6 +270,9 @@ claude mcp list
 用返回的 `job_id` 调用 `get_global_ask` 查看状态和结果，长答案和引用按返回的分页信息继续读取。
 检索回执通过 `next_coverage_offset` 作为 `coverage_offset` 继续读取，直到取完未检索/降级
 库列表；回执数量始终描述整次任务。
+`mode` 省略即 `chunk`；传 `"reasoning"` 走逐步推理：问题理解无歧义时自动确认并提交，需要
+澄清时返回 `status="needs_clarification"`，把补充信息写进新问题后重新调用即可（不保存句柄）。
+推理轨迹在 `trace` 里分页，用 `trace.next_offset` 作为 `trace_offset` 继续读取。
 调用 `cancel_global_ask` 明确停止任务，`get_global_cited_element` 读取实际引用原文。
 `conversation_id` 可以接续网页端同一用户的全局会话，但历史和结果仍受当前 token 权限约束。
 第一版检索可见导入来源的原文，不把隐藏的 Memory/Knowhow 投影或 candidate 当作全局证据。

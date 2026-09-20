@@ -281,6 +281,10 @@ rejected with 422 (never truncated), so page through `list_notebooks` and supply
 Use the returned `job_id` with `get_global_ask` for status and results; follow the pagination metadata
 to retrieve long answers and citations. Also follow `next_coverage_offset` as `coverage_offset` to read
 every skipped/degraded notebook receipt; coverage counts always describe the complete task.
+`mode` defaults to `chunk`; pass `"reasoning"` for step-by-step reasoning: an unambiguous understanding
+is confirmed and submitted automatically, and one that needs clarification returns
+`status="needs_clarification"` — fold the missing detail into a new question and call again (no handle is
+stored). The reasoning trace is paged under `trace`; follow `trace.next_offset` as `trace_offset`.
 `cancel_global_ask` explicitly stops work, and
 `get_global_cited_element` reads the cited original evidence. `conversation_id` can continue the same
 user's browser-created global conversation, but current token permissions still constrain history and
