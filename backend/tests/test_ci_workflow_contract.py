@@ -1,8 +1,12 @@
 """GitHub Actions keeps offline and PostgreSQL gates isolated and least-privilege."""
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
+import subprocess
 
+import pytest
 import yaml
 
 
@@ -72,36 +76,63 @@ def test_ci_events_permissions_and_concurrency_are_bounded() -> None:
     assert "secrets." not in repr(workflow)
 
 
-def test_standard_ci_job_installs_declared_dependencies_and_runs_only_standard_gate() -> None:
+def test_standard_ci_lanes_keep_all_wrappers_and_cover_both_backend_shards() -> None:
     workflow = _load_workflow()
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
     assert set(jobs) == {
         "standard-gate",
+        "standard-backend",
+        "standard-contracts",
+        "standard-frontend",
         "frontend-node-current",
         "postgres-integration",
     }
-    job = jobs["standard-gate"]
-    assert isinstance(job, dict)
-
-    assert job["name"] == "level-1-standard"
-    assert job["runs-on"] == "ubuntu-24.04"
-    assert job["timeout-minutes"] == "20"
-
-    checkout = _uses_step(
-        job,
-        "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
-    )
-    assert checkout["with"] == {"persist-credentials": "false"}
-
-    python = _uses_step(
-        job,
-        "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
-    )
-    assert python["with"] == {"python-version": "3.13"}
-
+    for lane in ("backend", "contracts", "frontend"):
+        job = jobs[f"standard-{lane}"]
+        assert job["runs-on"] == "ubuntu-24.04"
+        assert job["timeout-minutes"] == "20"
+        assert "if" not in job and "continue-on-error" not in job
+        checkout = _uses_step(
+            job, "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+        )
+        assert checkout["with"] == {"persist-credentials": "false"}
+        commands = [step["run"] for step in job["steps"] if "run" in step]
+        expected_gate = f"bash scripts/check_{lane}.sh"
+        if lane == "backend":
+            expected_gate += " --shard-index ${{ matrix.shard }} --shard-count 2"
+        assert commands == [
+            "npm ci --prefix frontend" if lane == "frontend" else
+            "python -m pip install -r backend/requirements.txt",
+            expected_gate,
+        ]
+        assert all("if" not in step and "continue-on-error" not in step
+                   for step in job["steps"] if "run" in step)
+        if lane != "frontend":
+            python = _uses_step(
+                job, "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+            )
+            assert python["with"] == {"python-version": "3.13"}
+            upload = _uses_step(
+                job, "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+            )
+            assert upload["if"] == "always()"
+            assert upload["with"]["retention-days"] == "7"
+            assert upload["with"]["path"] == (
+                "backend/.local/backend-junit-shard-${{ matrix.shard }}.xml"
+                if lane == "backend" else "backend/.local/contracts-junit.xml"
+            )
+    assert jobs["standard-backend"]["strategy"] == {
+        "fail-fast": "false", "matrix": {"shard": ["0", "1"]},
+    }
+    assert _named_step(jobs["standard-backend"], "Run standard backend shard")["env"] == {
+        "PYTHON_BIN": "python", "BACKEND_PYTEST_WORKERS": "4",
+    }
+    assert _named_step(jobs["standard-contracts"], "Run standard contracts lane")["env"] == {
+        "PYTHON_BIN": "python",
+    }
     node = _uses_step(
-        job,
+        jobs["standard-frontend"],
         "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
     )
     assert node["with"] == {
@@ -110,29 +141,33 @@ def test_standard_ci_job_installs_declared_dependencies_and_runs_only_standard_g
         "cache-dependency-path": "frontend/package-lock.json",
     }
 
-    steps = job["steps"]
-    assert isinstance(steps, list)
-    run_steps = [
-        step
-        for step in steps
-        if isinstance(step, dict) and isinstance(step.get("run"), str)
-    ]
-    commands = [step["run"] for step in run_steps]
-    assert (
-        "python -m pip install --no-cache-dir -r backend/requirements.txt"
-        in commands
-    )
-    assert "npm ci --prefix frontend" in commands
-    assert commands[-1] == "bash scripts/check.sh"
-    assert [
-        command for command in commands if "scripts/check" in command
-    ] == ["bash scripts/check.sh"]
 
-    gate = run_steps[-1]
-    assert gate["env"] == {
-        "PYTHON_BIN": "python",
-        "BACKEND_PYTEST_WORKERS": "4",
-    }
+@pytest.mark.parametrize("lane", ["standard-backend", "standard-contracts", "standard-frontend"])
+@pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped", None])
+def test_standard_aggregate_executes_fail_closed_for_every_lane(lane, result, tmp_path) -> None:
+    """Execute the actual workflow command; skipped/missing jobs must never look green."""
+    job = _load_workflow()["jobs"]["standard-gate"]
+    expected = {"standard-backend", "standard-contracts", "standard-frontend"}
+    assert job["name"] == "level-1-standard"
+    assert set(job["needs"]) == expected
+    assert job["if"] == "${{ always() }}"
+    assert "continue-on-error" not in job
+    assert len(job["steps"]) == 1
+    gate = job["steps"][0]
+    assert "if" not in gate and "continue-on-error" not in gate
+    assert gate["env"] == {"NEEDS_JSON": "${{ toJSON(needs) }}"}
+    needs = {name: {"result": "success"} for name in expected}
+    if result is None:
+        del needs[lane]
+    else:
+        needs[lane]["result"] = result
+    completed = subprocess.run(
+        ["bash", "-e", "-c", gate["run"]], cwd=tmp_path,
+        env={"PATH": os.defpath, "NEEDS_JSON": json.dumps(needs)},
+        capture_output=True, text=True, timeout=10,
+    )
+    assert completed.returncode == (0 if result == "success" else 1), completed.stderr
+    assert ("Every standard lane passed." in completed.stdout) == (result == "success")
 
 
 def test_frontend_node_current_job_covers_the_documented_node_ceiling() -> None:
@@ -166,7 +201,7 @@ def test_frontend_node_current_job_covers_the_documented_node_ceiling() -> None:
     # 这条泳道的**全部意义**就是这个版本高于 standard-gate 钉的 22:两者相等时
     # 它只是把同一份验证跑了两遍,那个缺口会重新变成不可见。
     standard_node = _uses_step(
-        workflow["jobs"]["standard-gate"],
+        workflow["jobs"]["standard-frontend"],
         "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
     )
     assert int(node["with"]["node-version"]) > int(
@@ -293,9 +328,10 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
     ]
 
 
-def test_ci_builds_hnswlib_portably_without_reusing_native_wheels() -> None:
+@pytest.mark.parametrize("job_name", ["standard-backend", "standard-contracts", "postgres-integration"])
+def test_ci_builds_hnswlib_portably_without_reusing_native_wheels(job_name) -> None:
     workflow = _load_workflow()
-    job = workflow["jobs"]["standard-gate"]
+    job = workflow["jobs"][job_name]
     assert isinstance(job, dict)
 
     python = _uses_step(
@@ -306,9 +342,13 @@ def test_ci_builds_hnswlib_portably_without_reusing_native_wheels() -> None:
 
     install = _named_step(job, "Install backend dependencies")
     assert install["env"] == {"HNSWLIB_NO_NATIVE": "1"}
-    assert install["run"] == (
-        "python -m pip install --no-cache-dir -r backend/requirements.txt"
-    )
+    assert install["run"] == "python -m pip install -r backend/requirements.txt"
+    assert job["env"]["PIP_CACHE_DIR"] == "${{ github.workspace }}/.local/pip-portable-v1"
+    cache = _uses_step(job, "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830")
+    assert cache["with"] == {
+        "path": "${{ env.PIP_CACHE_DIR }}",
+        "key": "${{ runner.os }}-${{ runner.arch }}-py313-portable-hnsw-v1-${{ hashFiles('backend/requirements.txt') }}",
+    }
 
 
 def test_daily_extended_gate_runs_once_per_day_and_is_manually_dispatchable() -> None:

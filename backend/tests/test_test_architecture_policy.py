@@ -448,9 +448,17 @@ def test_reused_sqlite_schema_keeps_each_test_database_mutably_isolated(tmp_path
 
 
 def test_sqlite_migration_contracts_bypass_the_schema_template():
-    conftest_source = (ROOT / "backend" / "tests" / "conftest.py").read_text(
-        encoding="utf-8"
-    )
+    import ast
+
+    from tests.conftest import _REAL_SQLITE_MIGRATION_MODULES
+
+    # These service protocols only initialize an empty database in their
+    # harness. Their store's upgrade cases remain real migration contracts.
+    setup_only_modules = {
+        "test_agent_profile_job_base.py",
+        "test_agent_profile_job_overlay.py",
+    }
+    reviewed_setup_modules = set()
     missing = []
     for path in sorted((ROOT / "backend" / "tests").glob("test_*.py")):
         if path.name == Path(__file__).name:
@@ -465,6 +473,27 @@ def test_sqlite_migration_contracts_bypass_the_schema_template():
         )
         if not directly_owns_migrator and not indirectly_owns_startup_migration:
             continue
-        if f'"{path.name}"' not in conftest_source:
+        if path.name in setup_only_modules:
+            tree = ast.parse(source, filename=str(path))
+            harness = next(
+                node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "harness"
+            )
+            assert any(
+                isinstance(node, ast.Attribute) and node.attr == "fixture"
+                and isinstance(node.value, ast.Name) and node.value.id == "pytest"
+                for node in harness.decorator_list
+            ), path.name
+            # A later migration test must not inherit the setup exception.
+            references = [
+                node for node in ast.walk(tree)
+                if isinstance(node, ast.Name) and node.id == "SqliteMigrator"
+            ]
+            assert len(references) == 1 and references[0] in ast.walk(harness), path.name
+            assert path.name not in _REAL_SQLITE_MIGRATION_MODULES, path.name
+            reviewed_setup_modules.add(path.name)
+            continue
+        if path.name not in _REAL_SQLITE_MIGRATION_MODULES:
             missing.append(path.name)
+    assert reviewed_setup_modules == setup_only_modules
     assert missing == []

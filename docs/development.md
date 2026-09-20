@@ -960,19 +960,45 @@ fails on a developer's machine while CI stays green.
 built-ins read as `undefined`; Node 22 behavior is byte-identical. The lane also runs
 the build, which is what caught that fix's first attempt importing untyped `jsdom`.
 
+The PR/push G1 workflow runs the backend, contracts, and Node 22 frontend lanes
+on separate runners. Backend uses two shards of the same G1 collection, with four
+pytest workers each. `check_backend.sh --shard-index 0 --shard-count 2` (or index 1)
+enables sharding explicitly; no sharding environment leaks into nested pytest.
+The plugin partitions after normal marker selection, keeps each `xdist_group`
+together and ordinary modules intact, and balances deterministic units using
+`backend/tests/fixtures/g1_module_timings.json` with a collected-count fallback.
+Timing hints affect placement only: new modules are included automatically.
+`check.sh` remains the complete local gate, and G2 selection is unchanged.
+The existing `level-1-standard` check aggregates all three lane jobs and fails
+unless every result is success, including both backend matrix entries; skipped,
+cancelled, failed, or missing dependencies cannot pass. Measure G1 wall time from
+the first lane start through aggregate completion, including installation and
+runner scheduling, rather than reporting the aggregate's short runtime alone.
+This isolation and sharding spend more runner minutes to reduce elapsed time.
+Backend and contracts wrappers preserve offline environment isolation when run
+directly, print slow pytest durations, and write JUnit reports under `backend/.local`;
+CI uploads them for seven days, including on failure.
+
+Six production-source guard scans share one worker and content-validated AST cache;
+every lookup rereads the file, so edits cannot reuse a stale tree. Agent Profile
+job base/overlay tests use independent copies of the current schema, while their
+dedicated store/upgrade tests retain real migrations and old-schema assertions.
+
 The committed OpenAPI contract is byte-semantically frozen, so
 `backend/requirements.txt` pins FastAPI `0.135.3` and Pydantic `2.12.4`
 exactly. Upgrade either framework only together with an intentional OpenAPI
 contract regeneration and a clean-environment G2 extended-gate run.
 
 The workflow is read-only, does not receive model or deployment secrets, and
-uses four backend pytest workers to avoid oversubscribing the hosted runner.
-Backend installation sets `HNSWLIB_NO_NATIVE=1`; the standard lane disables pip's wheel cache:
+uses four backend pytest workers per runner to avoid oversubscribing the hosted runner.
+Backend installation sets `HNSWLIB_NO_NATIVE=1`; G1 Python lanes share G3's dedicated
+portable-wheel cache with an exact OS/architecture/Python/requirements/policy key
+and no fallback to another cache. G2 continues to disable pip's wheel cache:
 `hnswlib` otherwise builds with `-march=native`, and a cached locally built
 wheel can crash with `SIGILL` when restored on a hosted runner with different
 CPU features. The portable build trades a small ANN speedup for deterministic
 CI; production wheelhouses may still target their declared deployment CPU.
-Its 20-minute timeout includes dependency installation and is intentionally
+Each G1 execution lane's 20-minute timeout includes dependency installation and is intentionally
 separate from the under-60-second local Apple Silicon warm-gate target.
 `CI / level-1-standard` is initially observational; make it a required `master` check
 only after stable green pull-request and post-merge runs have been observed
