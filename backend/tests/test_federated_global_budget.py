@@ -12,15 +12,16 @@ PR-A 在 ``global_ask`` 里攒出的那套有界并行(进程级共享执行器�
   字段——``test_without_a_plan_the_module_still_owns_its_own_pool`` 是那条对照臂,
   其余由既有的 ``test_chunk_federation*.py`` 零改动全绿承担。
 * **并发一律靠握手。** ``threading.Barrier`` / ``Event`` / 计数信号量决定顺序;
-  ``sleep`` 只用来**制造**排队这个条件,断言永远落在因果关系、计数与预算算术上,
-  不落在「多久之内完成」。唯一的例外是「阶段到点不等在途腿」,那条的本质就是时间,
-  用的是 10 秒阻塞对 5 秒上界这种量级差。
-* **预算算术用真实单调钟。** ``read_budget`` 内部读的就是它,注入一个不贴着真实钟
-  的假钟只会把断言变成自说自话;所以这里比的是「``deadline - 起跑时刻``」这种差值,
-  并用 ``pytest.approx`` 给出与调度噪声同量级的容差。
+  等待一律是「等某个标志置位」并带一个纯安全网的上限,断言落在因果关系与计数上,
+  从不落在「多久之内完成」。
+* **预算算术用注入的时钟,断言零容差。** 假钟以真实单调钟为基准、只按测试的指令
+  跳进(``_Clock``),所以 ``read_budget`` 内部那只真钟看到的 deadline 仍在真实的
+  未来——这是仓库踩过的坑:假钟必须贴着真钟。于是「deadline 减起跑时刻」可以断言成
+  精确等式,不留 0.2 秒那种会在 CI 上抖的容差。
 """
 from __future__ import annotations
 
+import contextvars
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -30,6 +31,7 @@ import numpy as np
 import pytest
 
 from app.domain.retrieval import RetrievedChunk
+from app.domain.retrieval_control import RetrievalControlError
 from app.repositories.read_budget import ReadBudgetExceeded, current_read_budget
 from app.services import chunk_federation as cf
 from app.services.cancellation import AskCancelled
@@ -46,6 +48,51 @@ _ACTOR = "user-global-budget"
 # 够宽,宽到「逐库预算」与「阶段预算」哪个在起作用是可以分开断言的。
 _PHASE = 60.0
 _NOTEBOOK = 5.0
+
+
+# 纯安全网:握手永远等的是某个标志置位,这个上限只保证用例失败时是断言失败而不是
+# 整轮测试挂死。它不是任何断言的依据。
+_HANDSHAKE_LIMIT = 10.0
+
+
+def wait_until_set(token, limit: float = _HANDSHAKE_LIMIT) -> bool:
+    """等一个 ``is_set()`` 标志置位;返回是否等到。"""
+    if hasattr(token, "wait"):
+        return bool(token.wait(limit))
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        if token.is_set():
+            return True
+        time.sleep(0.005)
+    return False
+
+
+class _Clock:
+    """贴着真实单调钟的注入时钟:基准取自真钟,只按测试指令跳进。
+
+    ``read_budget`` 内部读的是真钟,所以假钟一旦漂离真钟,被测代码算出来的
+    deadline 就会落在真钟的过去或遥远的未来,断言随之变成自说自话。以真钟为基准、
+    只做显式跳进,既让预算算术可以零容差断言,又让真钟那一侧仍然成立。
+    """
+
+    def __init__(self):
+        self.base = time.monotonic()
+        self.offset = 0.0
+
+    def now(self) -> float:
+        return self.base + self.offset
+
+    def advance(self, seconds: float) -> None:
+        self.offset += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    injected = _Clock()
+    monkeypatch.setattr(cf, "time", SimpleNamespace(
+        monotonic=injected.now, perf_counter=time.perf_counter,
+    ))
+    return injected
 
 
 def make_chunk(chunk_id: str, relevance: float = 0.9, *,
@@ -115,6 +162,9 @@ class FakeCandidates:
     def _evidence_fingerprints(self, element_ids):
         with self._lock:
             self.fingerprint_reads.append(list(element_ids))
+            read_index = len(self.fingerprint_reads)
+        if callable(self._fingerprints):
+            return self._fingerprints(read_index, list(element_ids))
         if isinstance(self._fingerprints, Exception):
             raise self._fingerprints
         return {
@@ -138,8 +188,11 @@ class FakeCandidates:
         budget = current_read_budget()
         with self._lock:
             self.calls.append((notebook_id, query))
+            # ``cf.time`` 而不是模块级 ``time``:注入时钟是打在被测模块上的,
+            # 记账必须用同一只钟,否则「起跑时刻」与「deadline」不在一个刻度上。
             self.budgets.setdefault(notebook_id, []).append((
-                time.monotonic(), None if budget is None else budget.deadline,
+                cf.time.monotonic(),
+                None if budget is None else budget.deadline,
             ))
         return self._retrieve(notebook_id, query)
 
@@ -186,10 +239,11 @@ class _global_run:
     的计划来自那个管理器」。
     """
 
-    def __init__(self, notebook_ids, plan, *, actor=_ACTOR):
+    def __init__(self, notebook_ids, plan, *, actor=_ACTOR, fanout_limit=None):
         self.notebook_ids = tuple(notebook_ids)
         self.plan = plan
         self.actor = actor
+        self.fanout_limit = fanout_limit
         self._stack: list = []
 
     def __enter__(self):
@@ -198,7 +252,10 @@ class _global_run:
             attested_actor_id=self.actor,
         )
         managers = [
-            retrieval_run(run_kind="ask_global", actor_id=self.actor),
+            retrieval_run(
+                run_kind="ask_global", actor_id=self.actor,
+                fanout_limit=self.fanout_limit,
+            ),
             global_ask_run(
                 override,
                 {nid: {f"src-{nid}"} for nid in self.notebook_ids},
@@ -249,49 +306,68 @@ def _plan(pool, receipts, *, window=4, phase=_PHASE, notebook=_NOTEBOOK,
 # 逐库预算:从起跑算起,不从排队算起
 # --------------------------------------------------------------------------
 
-def test_per_library_budget_starts_when_task_runs():
+def test_per_library_budget_starts_when_task_runs(clock):
     """排队等待不计入该库预算。
 
     窗口开到 4 让两条腿**同时提交**,而共享池只有一个座位,所以第二条腿真的在
-    执行器队列里等了第一条腿的 0.3 秒——这正是生产里「窗口比池宽、或别的作业占着
-    座位」的形状,也是唯一能把「提交时刻」与「起跑时刻」分开的形状。
+    执行器队列里等着——这正是生产里「窗口比池宽、或别的作业占着座位」的形状,也是
+    唯一能把「提交时刻」与「起跑时刻」分开的形状。等待本身用注入时钟跳过,所以这里
+    既不睡觉也没有容差:三条断言都是精确等式。
 
-    断言两条:第二个库的 deadline 比第一个的**晚**(否则就是在提交时刻算的),
-    而它自己的 ``deadline - 起跑时刻`` 仍是完整的逐库预算(否则就是被排队吃掉了)。
+    第一条腿先等「两条都已提交」这个握手再让时钟跳进:``submit`` 会让出 GIL,一条
+    瞬时完成的腿能在主线程提交第二条之前就跑完,那样两次提交仍在同一刻,用例就悄悄
+    测不到排队了。
     """
     ids = ("nb-slow", "nb-queued")
-    candidates = FakeCandidates(
-        _participants(ids),
-        retrieve=lambda nid, q: (
-            time.sleep(0.3) if nid == "nb-slow" else None,
-            ([make_chunk(f"c-{nid}")], [], None),
-        )[1],
-    )
+    submitted = threading.Event()
+
+    class CountingPool(ThreadPoolExecutor):
+        def __init__(self):
+            super().__init__(max_workers=1)
+            self.submits = 0
+
+        def submit(self, *args, **kwargs):
+            future = super().submit(*args, **kwargs)
+            self.submits += 1
+            if self.submits == len(ids):
+                submitted.set()
+            return future
+
+    def retrieve(notebook_id, query):
+        if notebook_id == "nb-slow":
+            assert wait_until_set(submitted)
+            clock.advance(10.0)
+        return [make_chunk(f"c-{notebook_id}")], [], None
+
+    candidates = FakeCandidates(_participants(ids), retrieve=retrieve)
     receipts = Receipts()
-    executor = ThreadPoolExecutor(max_workers=1)
+    executor = CountingPool()
     try:
         with _global_run(ids, _plan(executor, receipts, window=4)):
             cf.federated_chunk_candidates(candidates, ids[0], ["q"])
     finally:
         executor.shutdown(wait=True)
 
-    queued_delay = (
-        candidates.deadline_of("nb-queued") - candidates.deadline_of("nb-slow")
-    )
-    assert queued_delay >= 0.2, "第二个库的预算是在提交时刻起算的"
+    assert executor.submits == 2
+
     for notebook_id in ids:
         assert (
             candidates.deadline_of(notebook_id)
             - candidates.started_at(notebook_id)
-        ) == pytest.approx(_NOTEBOOK, abs=0.2)
+        ) == _NOTEBOOK
+    # 排队的那 10 秒整整齐齐地推后了第二条腿的预算起点;若预算在提交时刻起算,
+    # 两个 deadline 会完全相等。
+    assert (
+        candidates.deadline_of("nb-queued") - candidates.deadline_of("nb-slow")
+    ) == 10.0
 
 
-def test_phase_deadline_is_per_call(pool):
+def test_phase_deadline_is_per_call(clock, pool):
     """两次联邦调用各有各的时限,不共用一个 run 起点起算的绝对时刻。
 
-    推理模式一次 run 会多轮调用本模块,中间夹着模型调用。绝对时刻会让第二轮开始
-    就整集 ``queue_deadline``。逐库预算调到远大于阶段预算,于是 ``min`` 取到的是
-    阶段这一侧,阶段时限因此可观测。
+    推理模式一次 run 会多轮调用本模块,中间夹着模型调用——用注入时钟把那段模型
+    时间跳过去。绝对时刻会让第二轮开始就整集 ``queue_deadline``。逐库预算调到远大于
+    阶段预算,于是 ``min`` 取到的是阶段这一侧,阶段时限因此可观测。
     """
     ids = ("nb-a",)
     candidates = FakeCandidates(_participants(ids))
@@ -299,16 +375,16 @@ def test_phase_deadline_is_per_call(pool):
     phase = 3.0
 
     with _global_run(ids, _plan(pool, receipts, phase=phase, notebook=1000.0)):
-        first_at = time.monotonic()
+        first_at = clock.now()
         cf.federated_chunk_candidates(candidates, ids[0], ["q1"])
-        time.sleep(0.25)
-        second_at = time.monotonic()
+        clock.advance(10.0)
+        second_at = clock.now()
         cf.federated_chunk_candidates(candidates, ids[0], ["q2"])
 
     first, second = (row[1] for row in candidates.budgets["nb-a"])
-    assert first == pytest.approx(first_at + phase, abs=0.2)
-    assert second == pytest.approx(second_at + phase, abs=0.2)
-    assert second - first >= 0.2, "第二次调用沿用了第一次的绝对时限"
+    assert first == first_at + phase
+    assert second == second_at + phase
+    assert second - first == 10.0
 
 
 # --------------------------------------------------------------------------
@@ -531,35 +607,37 @@ def test_window_is_shared_round_robin_across_libraries(pool):
     ]
 
 
-def test_expired_phase_does_not_wait_for_a_running_leg(pool):
-    """阶段到点时,在途的腿按 ``timeout`` 记账并被放弃,调用不阻塞等它。
+def test_expired_phase_abandons_and_releases_a_running_leg(pool):
+    """阶段到点时,在途的腿按 ``timeout`` 记账、被放弃,并且**收到取消信号**。
 
-    在途腿自己的读预算被同一个阶段 deadline 封顶,所以它跑不出这次调用;而调用
-    方再等下去花的是合成的预算。阻塞 10 秒 vs 5 秒上界:这条断言本质就是时间,
-    所以量级差开到两倍以上。
+    调用方再等下去花的是合成的预算,所以它不等;但代价不能是那条腿继续攥着共享
+    执行器的座位和一条数据库连接跑完自己的逐库预算——并发的其它作业正按这个池算
+    自己的公平窗口。所以离开时必须置位阶段信号。腿自己等的就是那个信号(握手),
+    不是一段时长。
     """
     ids = ("nb-fast", "nb-stuck")
-    release = threading.Event()
     entered = threading.Event()
+    finished = threading.Event()
+    observed: dict = {}
 
     def retrieve(notebook_id, query):
         if notebook_id == "nb-stuck":
             entered.set()
-            release.wait(10)
+            observed["released"] = wait_until_set(
+                current_read_budget().cancel_event
+            )
+            finished.set()
         return [make_chunk(f"c-{notebook_id}")], [], None
 
     candidates = FakeCandidates(_participants(ids), retrieve=retrieve)
     receipts = Receipts()
-    try:
-        started = time.monotonic()
-        with _global_run(ids, _plan(pool, receipts, window=2, phase=0.4)):
-            result = cf.federated_chunk_candidates(candidates, ids[0], ["q"])
-        elapsed = time.monotonic() - started
-    finally:
-        release.set()
+
+    with _global_run(ids, _plan(pool, receipts, window=2, phase=0.4)):
+        result = cf.federated_chunk_candidates(candidates, ids[0], ["q"])
 
     assert entered.is_set(), "被放弃的那条腿从未起跑,这条用例没测到东西"
-    assert elapsed < 5.0
+    assert wait_until_set(finished)
+    assert observed["released"] is True, "在途腿没收到阶段结束信号"
     assert list(result.collected) == ["c-nb-fast"]
     stuck = receipts.outcome("nb-stuck")
     assert (stuck.status, stuck.reason) == ("skipped", "timeout")
@@ -567,6 +645,172 @@ def test_expired_phase_does_not_wait_for_a_running_leg(pool):
         event.get("lane") for event in candidates.events
         if event["kind"] == "chunk_federation_skipped"
     ] == ["abandoned"]
+
+
+def test_a_hard_failure_releases_the_legs_still_running(pool):
+    """一条腿硬失败 → 父线程立刻返回,其余在途腿必须当场收到取消信号。
+
+    这是比到点更尖锐的那一种:父线程是**抛着**离开的,没有任何一轮记账。少了阶段
+    信号,其余腿会按自己的逐库预算继续跑满,占着共享池的座位与连接,而这次问答
+    早已失败。腿等的是 token 置位,不是时长。
+    """
+    ids = ("nb-watch", "nb-boom")
+    watching = threading.Event()
+    finished = threading.Event()
+    observed: dict = {}
+
+    def retrieve(notebook_id, query):
+        if notebook_id == "nb-watch":
+            watching.set()
+            observed["released"] = wait_until_set(
+                current_read_budget().cancel_event
+            )
+            finished.set()
+            return [make_chunk("c-nb-watch")], [], None
+        assert wait_until_set(watching)
+        raise RetrievalControlError("attestation failed")
+
+    candidates = FakeCandidates(_participants(ids), retrieve=retrieve)
+    receipts = Receipts()
+
+    with _global_run(ids, _plan(pool, receipts, window=2)):
+        with pytest.raises(RetrievalControlError):
+            cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+
+    assert wait_until_set(finished)
+    assert observed["released"] is True, "硬失败没有释放其余在途腿"
+    assert receipts.libraries == []
+
+
+def test_a_leg_parked_on_the_fanout_slot_reports_queue_deadline(pool):
+    """卡在 run 的 ``fanout_limit`` 信号量上的腿是 ``queue_deadline``,不是超时。
+
+    它一个字也没问数据库——等的是这次 run 自己的扇出闸。记成 ``timeout`` 会让用户
+    读到「请缩小范围」,而范围压根没被搜过,正是两个原因码分家要避免的那种误导。
+    窗口比扇出闸宽,所以两条腿都提交了,第二条必然停在信号量上。
+    """
+    ids = ("nb-holder", "nb-parked")
+    holding = threading.Event()
+    finished = threading.Event()
+
+    def retrieve(notebook_id, query):
+        if notebook_id == "nb-holder":
+            holding.set()
+            wait_until_set(current_read_budget().cancel_event)
+            finished.set()
+        return [make_chunk(f"c-{notebook_id}")], [], None
+
+    candidates = FakeCandidates(_participants(ids), retrieve=retrieve)
+    receipts = Receipts()
+
+    with _global_run(
+        ids, _plan(pool, receipts, window=2, phase=0.4), fanout_limit=1,
+    ):
+        cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+
+    assert holding.is_set()
+    assert wait_until_set(finished)
+    holder = receipts.outcome("nb-holder")
+    assert (holder.status, holder.reason) == ("skipped", "timeout")
+    parked = receipts.outcome("nb-parked")
+    assert (parked.status, parked.reason) == ("skipped", "queue_deadline")
+
+
+def test_cancel_after_a_leg_started_fails_the_whole_call(pool):
+    """取消在腿起跑之后到达 → 抛 ``AskCancelled``,不写出「全部超时」的回执。
+
+    中途取消对腿来说就是预算被掐断,``classify_read_failure`` 会把它读成
+    ``timeout``。若不在发回执之前复核 run 自己的取消令牌,一次用户主动停止就会被
+    持久化成一份「每个库都超时了」的覆盖列表。只认 ``plan.cancel``:本次调用自己的
+    阶段信号不是取消。
+    """
+    ids = ("nb-a",)
+    cancel = threading.Event()
+    candidates = FakeCandidates(
+        _participants(ids),
+        retrieve=lambda nid, q: (
+            cancel.set(), ([make_chunk(f"c-{nid}")], [], None),
+        )[1],
+    )
+    receipts = Receipts()
+
+    with _global_run(ids, _plan(pool, receipts, cancel=cancel)):
+        with pytest.raises(AskCancelled):
+            cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+
+    assert candidates.calls == [("nb-a", "q")], "这条腿本来就该跑过一次"
+    assert receipts.libraries == []
+    assert receipts.evidence == []
+
+
+def test_fanning_out_from_the_pools_own_thread_is_refused():
+    """在借来的池自己的线程上扇出 = 等自己排在后面的任务,经典自死锁。"""
+    ids = ("nb-a",)
+    candidates = FakeCandidates(_participants(ids))
+    receipts = Receipts()
+    executor = ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="d13-selfdeadlock",
+    )
+    try:
+        with _global_run(ids, _plan(executor, receipts)):
+            context = contextvars.copy_context()
+            future = executor.submit(
+                context.run,
+                lambda: cf.federated_chunk_candidates(candidates, ids[0], ["q"]),
+            )
+            with pytest.raises(RuntimeError, match="own executor"):
+                future.result(timeout=_HANDSHAKE_LIMIT)
+    finally:
+        executor.shutdown(wait=True)
+
+    assert candidates.calls == []
+
+
+def test_a_leg_that_finished_at_the_deadline_keeps_its_result():
+    """到点那一刻已经干净完成的腿保留结果,不被无条件记成超时。
+
+    直接测这个纯函数:它要覆盖的是「``wait`` 空手返回与时限检查之间那一瞬完成」的
+    竞态,用真实线程去撞那一瞬既不确定也不可复现。它同时钉住另一半——以异常结束的
+    腿必须原样抛出,``_run_one`` 只会放行取消与身份复核两种,都不许被时钟降级成
+    逐库跳过。
+    """
+    finished = _FakeFuture(value=((["hit"], ["id"], None), ""))
+    running = _FakeFuture(running=True)
+    futures = {finished: 0, running: 1}
+    results = [cf._empty_leg(), cf._empty_leg()]
+    reasons = ["", ""]
+
+    cf._harvest_finished(futures, results, reasons)
+
+    assert results[0] == (["hit"], ["id"], None)
+    assert list(futures.values()) == [1]
+
+    control = _FakeFuture(error=RetrievalControlError("attestation failed"))
+    with pytest.raises(RetrievalControlError):
+        cf._harvest_finished({control: 0}, [cf._empty_leg()], [""])
+
+
+class _FakeFuture:
+    """``done``/``cancelled``/``exception``/``result`` 四件套,够 ``_harvest_finished`` 用。"""
+
+    def __init__(self, *, value=None, error=None, running=False):
+        self._value = value
+        self._error = error
+        self._running = running
+
+    def done(self) -> bool:
+        return not self._running
+
+    def cancelled(self) -> bool:
+        return False
+
+    def exception(self):
+        return self._error
+
+    def result(self):
+        if self._error is not None:
+            raise self._error
+        return self._value
 
 
 # --------------------------------------------------------------------------
@@ -695,10 +939,73 @@ def test_evidence_fingerprints_are_read_once(pool):
     assert receipts.threads == {threading.get_ident()}
 
 
-def test_unreadable_fingerprints_publish_an_empty_map(pool):
-    """指纹读不到 → 发一条内容无关事件、回传空表,检索本身不塌。
+def test_evidence_read_has_its_own_budget_not_the_spent_phase(clock, pool):
+    """阶段被慢库耗尽时,答完的库的入选证据仍要被佐证。
 
-    空表的方向是刻意的:引用复核因此会**拒绝**这些引用,而不是不加核验地放行。
+    阶段恰恰是在「某个库慢」时走完的,而逐库跳过就是为这种情形存在的。指纹读若
+    以阶段剩余为上界,一个慢库就会让**整份答案**作废(缺席即拒绝)——于是它有自己
+    的、逐库大小的预算,从读的那一刻起算。用注入时钟在生产者里把阶段走完:断言
+    落在读那一刻 ``current_read_budget()`` 的 deadline,而不是读有没有发生。
+    """
+    ids = ("nb-a",)
+    phase, notebook = 3.0, 5.0
+    seen: dict = {}
+
+    def retrieve(nid, query):
+        clock.advance(phase + 1.0)
+        return [make_chunk(f"c-{nid}", elements=[f"e-{nid}"])], [], None
+
+    def fingerprints(read_index, element_ids):
+        seen["deadline"] = current_read_budget().deadline
+        seen["now"] = clock.now()
+        return {element_id: ("src", "fp") for element_id in element_ids}
+
+    candidates = FakeCandidates(
+        _participants(ids), retrieve=retrieve, fingerprints=fingerprints,
+    )
+    receipts = Receipts()
+
+    with _global_run(ids, _plan(pool, receipts, phase=phase, notebook=notebook)):
+        started = clock.now()
+        cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+
+    assert seen["now"] > started + phase          # 阶段确已走完
+    assert seen["deadline"] == seen["now"] + notebook
+    assert sorted(receipts.evidence[0]) == ["e-nb-a"]
+
+
+def test_a_second_round_reads_only_the_new_elements(pool):
+    """同一次 run 的第二轮只读新增 element,已回传过的不再读。
+
+    ``on_evidence`` 是**累积**语义:消费者把每轮的表合并成一张,而本次 run 内任何
+    一次快照都是合法的「之前」。推理 5 轮各覆盖全部选中元素 = 5 次宽读,而轮与轮
+    之间的选择大面积重叠。去重是 run-local 的,所以两次 run 不会互借快照。
+    """
+    ids = ("nb-a",)
+
+    def retrieve(notebook_id, query):
+        hits = [make_chunk("c-1", elements=["e-1"])]
+        if query == "q2":
+            hits.append(make_chunk("c-2", elements=["e-2"]))
+        return hits, [], None
+
+    candidates = FakeCandidates(_participants(ids), retrieve=retrieve)
+    receipts = Receipts()
+
+    with _global_run(ids, _plan(pool, receipts)):
+        cf.federated_chunk_candidates(candidates, ids[0], ["q1"])
+        cf.federated_chunk_candidates(candidates, ids[0], ["q2"])
+
+    assert candidates.fingerprint_reads == [["e-1"], ["e-2"]]
+    assert [sorted(row) for row in receipts.evidence] == [["e-1"], ["e-2"]]
+
+
+def test_unreadable_fingerprints_publish_an_empty_map_and_are_retried(pool):
+    """指纹读不到 → 发一条内容无关事件、回传空表,检索本身不塌;下一轮重试。
+
+    方向是刻意的:那一批 element 在累积表里**缺席**,而缺席即不可佐证,所以靠它们
+    的引用会被拒绝而不是不加核验地放行。读失败的 element 不进已见集合,否则一次
+    瞬时故障会让它们在整次 run 里永久不可佐证。
     """
     ids = ("nb-a",)
     candidates = FakeCandidates(
@@ -706,15 +1013,21 @@ def test_unreadable_fingerprints_publish_an_empty_map(pool):
         retrieve=lambda nid, q: (
             [make_chunk(f"c-{nid}", elements=["e-1"])], [], None,
         ),
-        fingerprints=RuntimeError("evidence table is unreadable"),
+        fingerprints=lambda read_index, element_ids: (
+            (_ for _ in ()).throw(RuntimeError("evidence table is unreadable"))
+            if read_index == 1
+            else {element_id: ("src", "fp") for element_id in element_ids}
+        ),
     )
     receipts = Receipts()
 
     with _global_run(ids, _plan(pool, receipts)):
         result = cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+        cf.federated_chunk_candidates(candidates, ids[0], ["q"])
 
     assert list(result.collected) == ["c-nb-a"]
-    assert receipts.evidence == [{}]
+    assert candidates.fingerprint_reads == [["e-1"], ["e-1"]]
+    assert receipts.evidence == [{}, {"e-1": ("src", "fp")}]
     assert [event for event in candidates.events
             if event["kind"] == "chunk_federation_evidence_unavailable"] == [{
                 "kind": "chunk_federation_evidence_unavailable",
@@ -730,7 +1043,8 @@ def test_cancel_propagates(pool):
     """计划的取消令牌一旦置位,整条臂抛 ``AskCancelled``,不降级成逐库跳过。
 
     取消是用户自己的决定,不是某个库的故障;而且已经取消的 run 不许再开连接,
-    所以生产者一次都不该被调用。
+    所以生产者一次都不该被调用,也不该留下任何一条「这个库被跳过了」的事件——
+    那正是把取消读成逐库超时的样子。
     """
     ids = ("nb-a", "nb-b")
     candidates = FakeCandidates(_participants(ids))
@@ -743,6 +1057,7 @@ def test_cancel_propagates(pool):
             cf.federated_chunk_candidates(candidates, ids[0], ["q"])
 
     assert candidates.calls == []
+    assert candidates.events == []
     assert receipts.libraries == []
     assert receipts.evidence == []
 

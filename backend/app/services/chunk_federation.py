@@ -94,6 +94,7 @@ from __future__ import annotations
 
 import contextvars
 import math
+import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, replace
@@ -134,10 +135,19 @@ from app.services.retrieval_run import (
 # fallback ``_retrieval_participants`` itself uses for an unmapped id.
 _ACTIVE_TIER = "personal"
 
-# What one leg returns when it failed: the empty shape ``_retrieve_chunks``
-# itself returns for "nothing found", so a failed leg is indistinguishable from
-# an empty one to the merge -- the DIFFERENCE travels in the receipt.
-_EMPTY_LEG = ([], [], None)
+def _empty_leg() -> tuple:
+    """What one leg returns when it failed.
+
+    The empty shape ``_retrieve_chunks`` itself returns for "nothing found", so
+    a failed leg is indistinguishable from an empty one to the merge -- the
+    DIFFERENCE travels in the receipt.
+
+    Built fresh on every call rather than shared as a module constant: the
+    lists inside are MUTABLE and the merge hands them on (``pools`` collects
+    them, ``parts`` keeps the id list).  One shared instance would make every
+    failed leg in the process the same two lists.
+    """
+    return ([], [], None)
 
 # Most-informative-first, for a library whose legs failed for several reasons.
 # ``saturated`` wins over ``timeout`` on purpose, and it is the one ordering
@@ -234,6 +244,51 @@ class _Task:
     visible: tuple | None
 
 
+class _AnyCancelled:
+    """``is_set()`` over several cancellation sources, as ONE token.
+
+    ``ReadBudget`` and ``raise_if_cancelled`` only ever ask a token for
+    ``is_set()``, so a composite satisfies the same contract without a second
+    plumbing path.  This is how "this call has given up" reaches the legs that
+    are still executing -- without it, a leg whose parent already returned goes
+    on holding a shared-executor seat and a database connection for the rest of
+    its own per-library budget, while the OTHER global jobs compute their fair
+    window from that same pool.
+
+    A copy of ``global_ask._AnyCancelled`` rather than an import: this module
+    may not depend on the job layer, and the class is four lines of ``any``.
+    """
+
+    __slots__ = ("_tokens",)
+
+    def __init__(self, *tokens):
+        self._tokens = tuple(token for token in tokens if token is not None)
+
+    def is_set(self) -> bool:
+        return any(token.is_set() for token in self._tokens)
+
+
+@dataclass
+class _LegClock:
+    """What the PARENT needs to know about a leg it can no longer wait for.
+
+    Created in the parent thread, written once by the worker, read by the
+    parent when the phase expires.  One bool and one float written by a single
+    writer: no lock, and no invariant spanning the two.
+
+    ``producer_started`` is the ``queue_deadline``/``timeout`` split carried
+    into the fan-out slot.  A leg parked on ``retrieval_fanout_slot``'s
+    semaphore has asked the database NOTHING -- the run's own ``fanout_limit``
+    is what it is waiting for -- so charging it "timeout" would tell the user
+    to narrow a scope that was never queried.  The flag is set at the last
+    moment before the producer call, and the per-library budget starts on the
+    same line, so slot waiting is charged to neither.
+    """
+
+    producer_started: bool = False
+    deadline: float = 0.0
+
+
 @dataclass(frozen=True)
 class _Legs:
     """What ONE federated call has to say about each participant library.
@@ -254,6 +309,9 @@ class _Legs:
     order: tuple = ()
     reasons: tuple = ()
     dropped: dict = field(default_factory=dict)
+    # This call's phase deadline, so the closing evidence read is bounded by
+    # the same budget the legs were.
+    deadline: float = 0.0
 
 
 def _bounded_participants(
@@ -402,6 +460,12 @@ def federated_chunk_candidates(
     installed without an override -- a shape ``global_run.global_ask_run``
     makes unconstructible, but a test or a future caller could still assemble
     -- cannot switch the ordinary notebook path onto a borrowed executor.
+
+    A call with NO sub-query returns before the participant seat is read, and
+    therefore sends no receipts at all -- not even "skipped" ones.  That is the
+    intended reading: with no leg there is no "searched" or "skipped" to
+    report, and the run's coverage of a round it never fanned out is the job's
+    question, not this module's.
     """
     if not sub_queries:
         # Nothing to search, so nothing was searched: answer before reading the
@@ -416,6 +480,12 @@ def federated_chunk_candidates(
         )
     queries = list(sub_queries)
     plan = current_federated_run_plan() if federated_ask_active() else None
+    # ONE deadline for the whole call: the fan-out charges its legs against it
+    # and the closing evidence read is bounded by what is left of it.
+    deadline = (
+        time.monotonic() + float(plan.phase_timeout_seconds)
+        if plan is not None else 0.0
+    )
     dropped: dict = {}
     tasks = _federated_tasks(
         candidates, active_notebook_id, participants, queries, drifted,
@@ -425,11 +495,12 @@ def federated_chunk_candidates(
         # up in one deployment's telemetry and not another's.
         dropped=dropped if plan is not None else None,
     )
-    results, reasons = _run_tasks(candidates, tasks, plan)
+    results, reasons = _run_tasks(candidates, tasks, plan, deadline)
     return _merge_results(
         candidates, _task_participants(tasks), tasks, results, len(queries),
         min_relevance=min_relevance, relative_relevance=relative_relevance,
-        plan=plan, legs=_Legs(tuple(participants), tuple(reasons), dropped),
+        plan=plan,
+        legs=_Legs(tuple(participants), tuple(reasons), dropped, deadline),
     )
 
 
@@ -768,7 +839,7 @@ def _peek_only(candidates, notebook_id: str) -> bool:
     )
 
 
-def _run_tasks(candidates, tasks: list, plan=None) -> tuple:
+def _run_tasks(candidates, tasks: list, plan=None, deadline: float = 0.0) -> tuple:
     """``(results, reasons)`` -- one entry per task, in task-table order.
 
     ⛔ WITHOUT A PLAN THIS IS THE PRE-EXISTING FUNCTION.  Same own executor,
@@ -779,14 +850,14 @@ def _run_tasks(candidates, tasks: list, plan=None) -> tuple:
     path emits.
     """
     if plan is not None:
-        return _run_planned_tasks(candidates, tasks, plan)
+        return _run_planned_tasks(candidates, tasks, plan, deadline)
     workers = min(len(tasks), max(1, candidates.settings.chunk_fanout_max_workers))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         legs = list(pool.map(lambda task: _run_one(candidates, task), tasks))
     return [value for value, _reason in legs], [reason for _value, reason in legs]
 
 
-def _run_planned_tasks(candidates, tasks: list, plan) -> tuple:
+def _run_planned_tasks(candidates, tasks: list, plan, deadline: float) -> tuple:
     """The global run's fan-out: borrowed executor, fair window, one deadline.
 
     Structurally ``global_ask._fan_out``, moved one layer down and re-keyed
@@ -800,46 +871,73 @@ def _run_planned_tasks(candidates, tasks: list, plan) -> tuple:
     * **The window is re-read on every top-up**, so a job that started alone
       gives ground back as soon as one of its tasks finishes and a newcomer
       waits at most one task rather than a whole phase.
-    * **The phase deadline is derived HERE, once per call** (see
+    * **The phase deadline is derived once per call** by the caller (see
       ``FederatedRunPlan.phase_timeout_seconds``): a reasoning run enters this
       function once per retrieval round with model calls in between, and a
       deadline fixed when the run started would declare rounds 2..n dead on
       arrival.
-    * **Expiry is two different facts.**  A task still QUEUED when the budget
-      runs out issued no query at all -- ``queue_deadline``, whose copy must
-      not blame the library's size or the selected scope.  A task already
-      executing is charged ``timeout`` and is then ABANDONED rather than waited
-      on: its own ``read_budget`` is capped by this same deadline, so it cannot
-      outlive the phase, and blocking here for it would spend the synthesis
-      budget of a call that has already given up on its result.
+    * **Leaving sets the phase token.**  ``phase`` is this call's own "I am no
+      longer waiting for you" flag, composed with the run's cancel token into
+      the one token every leg's ``read_budget`` polls.  Without it, ONE leg's
+      hard failure (an attestation error, a cancellation) returns the parent
+      immediately while the other legs keep a shared-executor seat and a
+      database connection for the rest of their own per-library budget -- and
+      the OTHER jobs' fair window is computed from that same pool.  It is set
+      in ``finally``, so every exit -- expiry, failure, success -- releases
+      them.
+    * **Expiry is two different facts, and the leg decides which.**  A task
+      that never reached its producer call asked the database NOTHING --
+      whether it was still queued here or parked on the run's own fan-out
+      semaphore -- so it is ``queue_deadline``, whose copy must not blame the
+      library's size or the selected scope.  Only a leg that got as far as the
+      producer is charged ``timeout``.  Either way it is then ABANDONED rather
+      than waited on: its budget is capped by this same deadline, so it cannot
+      outlive the phase, and blocking here would spend the synthesis budget of
+      a call that has already given up on its result.
 
     Fairness is per LIBRARY, not per task: the table is library-major, so
     submitting it in order would let one library's sub-queries fill a window of
     2 while seven libraries wait.  ``_round_robin`` re-orders the SUBMISSION
     (never the results, which stay in task-table order for the merge) so each
     library gets its first sub-query in before any library gets its second.
+
+    ⛔ NOT GUARDED, AND UNGUARDABLE FROM HERE: the caller must not itself be
+    running on ``plan.executor``.  This function blocks in ``wait`` for tasks
+    it has just submitted to that pool, so being one of that pool's own workers
+    is the classic self-deadlock -- the seat needed to finish the work is the
+    one the waiter is sitting in.  ``_refuse_pool_thread`` catches the shape
+    that is cheap to detect (the pool's own thread-name prefix); an executor
+    that renames its threads defeats it, so the rule stands on this paragraph
+    and not on that check.
     """
-    deadline = time.monotonic() + float(plan.phase_timeout_seconds)
-    results: list = [_EMPTY_LEG] * len(tasks)
+    _refuse_pool_thread(plan)
+    phase = threading.Event()
+    abort = _AnyCancelled(plan.cancel, phase)
+    results: list = [_empty_leg() for _ in tasks]
     reasons: list = [""] * len(tasks)
+    clocks: list = [_LegClock() for _ in tasks]
     pending = _round_robin(tasks)
     futures: dict = {}
     try:
         while pending or futures:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            if deadline - time.monotonic() <= 0:
+                _harvest_finished(futures, results, reasons)
                 for index in pending:
                     reasons[index] = "queue_deadline"
                     _emit_leg_skipped(candidates, tasks[index], "queue_deadline", "", 0)
                 for index in futures.values():
-                    reasons[index] = "timeout"
+                    # The leg itself says whether it ever reached a producer.
+                    reasons[index] = (
+                        "timeout" if clocks[index].producer_started
+                        else "queue_deadline"
+                    )
                     # ``lane`` distinguishes this row from the one the leg
                     # itself may still emit when it finally gives up: the leg
                     # is abandoned, not finished, so both facts are real and an
                     # operator must be able to tell them apart instead of
                     # reading one leg's expiry as two skips.
                     _emit_leg_skipped(
-                        candidates, tasks[index], "timeout", "", 0,
+                        candidates, tasks[index], reasons[index], "", 0,
                         lane="abandoned",
                     )
                 break
@@ -847,6 +945,7 @@ def _run_planned_tasks(candidates, tasks: list, plan) -> tuple:
                 index = pending.pop(0)
                 futures[plan.executor.submit(
                     _run_one, candidates, tasks[index], plan, deadline,
+                    abort, clocks[index],
                 )] = index
             done, _not_done = wait(
                 list(futures), timeout=max(0.0, deadline - time.monotonic()),
@@ -859,14 +958,57 @@ def _run_planned_tasks(candidates, tasks: list, plan) -> tuple:
                 # per-library degradation, and both must fail the whole arm.
                 results[index], reasons[index] = future.result()
     finally:
-        # Queued tasks must not start, and the results of the ones already
-        # running are no longer wanted. ``cancel()`` handles the first; for the
-        # second, the callback is what keeps an abandoned failure from being an
-        # exception nobody ever retrieves.
+        # Queued tasks must not start, and the legs already running must stop
+        # holding a pool seat for a call that is over. ``cancel()`` handles the
+        # first; ``phase`` is what reaches the second, at its next
+        # ``budget.check()``. The callback keeps an abandoned failure from
+        # being an exception nobody ever retrieves.
+        phase.set()
         for future in futures:
             if not future.cancel():
                 future.add_done_callback(_discard_leg)
+    # AFTER the loop, and only the run's own token: a phase that merely ran out
+    # of budget produces receipts, but a cancelled RUN must not be answered
+    # with "every library timed out" -- mid-flight cancellation reaches the
+    # legs as an expired budget, which would otherwise be classified exactly
+    # that way and persisted as a coverage list.
+    raise_if_cancelled(plan.cancel)
     return results, reasons
+
+
+def _harvest_finished(futures: dict, results: list, reasons: list) -> None:
+    """Take the results of legs that already finished cleanly at the deadline.
+
+    A leg that completed while the parent was in its last ``wait`` has a real
+    result; discarding it as "timeout" would throw away evidence the database
+    already produced. Legs that finished by RAISING are re-raised here instead:
+    ``_run_one`` only lets cancellation and attestation failures out, and
+    neither may be downgraded into a per-library skip just because the clock
+    also happened to run out.
+    """
+    for future in list(futures):
+        if not future.done() or future.cancelled():
+            continue
+        error = future.exception()
+        if error is not None:
+            raise error
+        index = futures.pop(future)
+        results[index], reasons[index] = future.result()
+
+
+def _refuse_pool_thread(plan) -> None:
+    """Refuse to fan out from a thread of the very pool being fanned out to.
+
+    Best effort by design (see ``_run_planned_tasks``): it recognises a
+    ``ThreadPoolExecutor``'s own naming convention and nothing else, because
+    the alternative -- asking the executor which threads are its own -- is not
+    part of the ``Executor`` interface.
+    """
+    prefix = getattr(plan.executor, "_thread_name_prefix", "")
+    if prefix and threading.current_thread().name.startswith(str(prefix)):
+        raise RuntimeError(
+            "a federated fan-out may not run on its own executor's thread"
+        )
 
 
 def _discard_leg(future) -> None:
@@ -895,33 +1037,36 @@ def _round_robin(tasks: list) -> list:
     return ordered
 
 
-def _run_one(candidates, task: _Task, plan=None, deadline: float = 0.0) -> tuple:
+def _run_one(candidates, task: _Task, plan=None, deadline: float = 0.0,
+             cancel=None, clock=None) -> tuple:
     """``(value, reason)`` for one task; ``reason`` is empty unless it failed.
 
-    ⛔ THE PER-LIBRARY BUDGET STARTS HERE, not where the task was queued.  This
-    body runs on the worker thread, so a task that waited behind the window is
-    not charged for its wait -- the property ``global_ask._retrieve_notebook``
-    documents and the reason the budget cannot be attached to the task table.
-    It is still capped by the PHASE deadline, so waiting does not let a late
-    task run past the end of the call either.
+    ⛔ THE PER-LIBRARY BUDGET DOES NOT START HERE.  It starts one frame below,
+    after the run's fan-out slot has been acquired (``_budgeted_retrieve_for``),
+    because neither kind of waiting may be charged to it: not the wait behind
+    this call's own window -- the property ``global_ask._retrieve_notebook``
+    documents -- and not the wait on the run's ``fanout_limit`` semaphore,
+    which is a second queue nobody asked the database anything from.  What this
+    frame contributes is the PHASE cap, so that waiting cannot let a late task
+    run past the end of the call either.
     """
     started = time.perf_counter()
-    notebook_deadline = deadline
+    if clock is None:
+        clock = _LegClock(deadline=deadline)
     if plan is not None:
-        # A run already cancelled must not open a connection at all, and the
-        # answer is ``AskCancelled`` rather than a skip: the user's own
-        # decision is never a per-library degradation. A cancel that arrives
-        # mid-flight is seen by ``budget.check()`` instead and lands as
-        # ``timeout`` -- the same split ``global_ask`` has today.
-        raise_if_cancelled(plan.cancel)
-        notebook_deadline = min(
-            deadline, time.monotonic() + float(plan.notebook_timeout_seconds),
-        )
+        # A run already cancelled -- or a call that has already stopped waiting
+        # -- must not open a connection at all, and the answer is
+        # ``AskCancelled`` rather than a skip: the user's own decision is never
+        # a per-library degradation. A cancel that arrives mid-flight is seen
+        # by ``budget.check()`` instead, which is why the parent re-checks the
+        # run's token before it publishes any receipt.
+        raise_if_cancelled(cancel if cancel is not None else plan.cancel)
     try:
         if plan is None:
             return task.context.run(_retrieve_for, candidates, task), ""
         return task.context.run(
-            _budgeted_retrieve_for, candidates, task, plan, notebook_deadline,
+            _budgeted_retrieve_for, candidates, task, plan, deadline,
+            cancel if cancel is not None else plan.cancel, clock,
         ), ""
     except AskCancelled:
         # Cancellation is the user's own decision, never a per-library
@@ -937,14 +1082,19 @@ def _run_one(candidates, task: _Task, plan=None, deadline: float = 0.0) -> tuple
         raise
     except Exception as exc:  # noqa: BLE001 - one library must not fail the arm
         reason = ""
-        if plan is not None:
+        if plan is not None and not clock.producer_started:
+            # It never got past the fan-out slot, so whatever went wrong, this
+            # library was never asked anything. Same code as a task that was
+            # still queued in the parent, and for the same reason.
+            reason = "queue_deadline"
+        elif plan is not None:
             # The same judgment ``global_retrieval._emit_skipped`` makes, and
             # deliberately the same function: a statement the server cancelled
             # AT the deadline and a local clock that has just passed it are one
             # event seen from two sides, so the driver's own answer wins and
             # the clock only decides what an UNCLASSIFIED failure was.
             reason = classify_read_failure(exc) or (
-                "timeout" if time.monotonic() >= notebook_deadline
+                "timeout" if time.monotonic() >= clock.deadline
                 else "unavailable"
             )
         # Emit inside THIS TASK's own context, not the worker thread's bare
@@ -959,7 +1109,7 @@ def _run_one(candidates, task: _Task, plan=None, deadline: float = 0.0) -> tuple
             type(exc).__name__,
             round((time.perf_counter() - started) * 1000),
         )
-        return _EMPTY_LEG, reason
+        return _empty_leg(), reason
 
 
 def _emit_leg_skipped(candidates, task: _Task, reason: str, error_type: str,
@@ -985,25 +1135,59 @@ def _emit_leg_skipped(candidates, task: _Task, reason: str, error_type: str,
     _emit(candidates, event)
 
 
-def _budgeted_retrieve_for(candidates, task: _Task, plan, deadline: float):
-    """``_retrieve_for`` under this library's own read budget.
+def _budgeted_retrieve_for(candidates, task: _Task, plan, deadline: float,
+                           cancel, clock: _LegClock):
+    """The producer call under this library's own read budget.
 
-    A wrapper rather than a branch inside ``_retrieve_for`` so the producer
-    call shapes that function documents stay untouched, and so the budget is
-    entered INSIDE the task's own context -- ``read_budget`` installs a
-    ContextVar, and each task owns a separate ``Context``, which is what keeps
-    one library's expiry from being another's.
+    ⛔ THE ORDER OF THESE THREE LINES IS THE CONTRACT.  The fan-out slot is
+    acquired FIRST, the budget is opened SECOND, and the flag that says "this
+    library was actually asked something" is set between them.  Inverting the
+    first two -- which is what wrapping ``_retrieve_for`` whole would do --
+    charges the wait on the run's ``fanout_limit`` semaphore to the library's
+    read budget, and since that wait polls only the run's own cancel event, the
+    leg then expires having issued no query at all and is reported as a
+    ``timeout``: the user is told to narrow a scope that was never searched.
+
+    The budget is entered INSIDE the task's own context -- ``read_budget``
+    installs a ContextVar and each task owns a separate ``Context``, which is
+    what keeps one library's expiry from being another's -- and ``cancel`` is
+    the composite token, so this call giving up releases the leg too.
 
     ``min`` of the two bounds, never the notebook timeout alone: a leg that
     started just before the phase ended may not keep a connection for its full
     per-library budget after the call has stopped waiting for it.
     """
-    with read_budget(deadline, plan.cancel):
-        return _retrieve_for(candidates, task)
+    with retrieval_fanout_slot():
+        clock.deadline = min(
+            deadline, time.monotonic() + float(plan.notebook_timeout_seconds),
+        )
+        clock.producer_started = True
+        with read_budget(clock.deadline, cancel):
+            return _producer_call(candidates, task)
 
 
 def _retrieve_for(candidates, task: _Task):
-    """One task's producer call.
+    """One task's producer call, inside the run's fan-out slot.
+
+    The slot is acquired HERE, around the one producer call, and nowhere
+    above: ``reasoning_retrieval.search_chunks`` used to wrap its
+    ``retrieve_chunk_candidates`` call in a slot, which after this module took
+    over stopped bounding anything (the real leaves are these pool threads) and
+    would self-deadlock at ``fanout_limit=1`` if both layers held one.  A
+    worker parked here is still cancellable: ``RetrievalRunState.fanout_slot``
+    polls ``cancel_event`` while it waits.
+
+    The planned path does not call this function -- it takes the same two steps
+    itself, in the same order, so that it can open the read budget BETWEEN them
+    (``_budgeted_retrieve_for``).  Both paths make the producer call through
+    the one ``_producer_call`` below, so the call shapes cannot drift apart.
+    """
+    with retrieval_fanout_slot():
+        return _producer_call(candidates, task)
+
+
+def _producer_call(candidates, task: _Task):
+    """The producer call itself -- the ONE place either path issues it.
 
     The ACTIVE library is called positionally with no keyword at all: several
     existing suites replace ``_retrieve_chunks`` wholesale with a narrower
@@ -1020,22 +1204,13 @@ def _retrieve_for(candidates, task: _Task):
     contextualized live enumeration, not a producer's own genuinely narrow
     universe, and attesting True would turn off the corpus-language probe and
     switch the lexical arm.
-
-    The run's fan-out slot is acquired HERE, around the one producer call, and
-    nowhere above: ``reasoning_retrieval.search_chunks`` used to wrap its
-    ``retrieve_chunk_candidates`` call in a slot, which after this module took
-    over stopped bounding anything (the real leaves are these pool threads) and
-    would self-deadlock at ``fanout_limit=1`` if both layers held one.  A
-    worker parked here is still cancellable: ``RetrievalRunState.fanout_slot``
-    polls ``cancel_event`` while it waits.
     """
-    with retrieval_fanout_slot():
-        if not task.peer:
-            return candidates._retrieve_chunks(task.notebook_id, task.query)
-        return candidates._retrieve_chunks(
-            task.notebook_id, task.query,
-            allowed_source_ids=task.visible, producer_explicit=False,
-        )
+    if not task.peer:
+        return candidates._retrieve_chunks(task.notebook_id, task.query)
+    return candidates._retrieve_chunks(
+        task.notebook_id, task.query,
+        allowed_source_ids=task.visible, producer_explicit=False,
+    )
 
 
 def _emit(candidates, event: dict) -> None:
@@ -1134,8 +1309,9 @@ def _merge_results(
     per_query = _sub_query_groups(per_task, collected, sub_count)
     ids, matrix = _merge_selected_matrices(candidates, tasks, parts, collected)
     if plan is not None:
-        _report_receipts(plan, legs or _Legs(), tasks, folded)
-        _report_evidence(candidates, plan, collected)
+        legs = legs or _Legs()
+        _report_receipts(plan, legs, tasks, folded)
+        _report_evidence(candidates, plan, collected, legs.deadline)
     return FederatedChunkResult(
         collected, per_query, ids, matrix,
         tuple(notebook_id for notebook_id, _ in participants),
@@ -1203,43 +1379,77 @@ def _worst_reason(reasons) -> str:
     return "unavailable"
 
 
-def _report_evidence(candidates, plan, collected: dict) -> None:
-    """The retrieval-time fingerprints of everything that was SELECTED.
+def _report_evidence(candidates, plan, collected: dict, deadline: float) -> None:
+    """The retrieval-time fingerprints of everything this call SELECTED.
 
-    ONE bounded read for the whole call, over the elements of the finished
-    selection -- not one per library, and not over every candidate that was
-    ever considered.  The consumer (the job's citation re-check) only ever asks
-    about evidence that reached the answer, so widening this to the candidate
-    pool would multiply the read by the recall budget for rows nobody can cite.
+    ONE read per call at most, over the elements of the finished selection --
+    not one per library, and not over every candidate that was ever considered.
+    The consumer (the job's citation re-check) only ever asks about evidence
+    that reached the answer, so widening this to the candidate pool would
+    multiply the read by the recall budget for rows nobody can cite.
 
-    Fail-soft, and the direction of the failure is deliberate: an unreadable
-    fingerprint map is published as an EMPTY one, which makes the re-check
-    refuse the citations rather than accept them unverified.  Cancellation and
-    attestation failures are not failures of this read and re-raise.
+    ACCUMULATING, which is what makes the per-run de-duplication correct rather
+    than merely cheap.  The consumer merges each call's map into one table, and
+    any snapshot taken during this run is a legitimate "before" for the
+    re-check, so an element whose fingerprint an earlier round already
+    published must not be read again: a five-round reasoning run would
+    otherwise re-read every selected element five times, and the rounds share
+    most of their selection.  The seen-set is run-local, so two runs never
+    borrow each other's snapshots, and without an ambient retrieval run it
+    degrades to reading every time.
+
+    Fail-soft, and the direction of the failure is deliberate.  An unreadable
+    batch publishes nothing for those elements, and ABSENCE from the
+    accumulated table is what the re-check treats as "not attestable" -- so the
+    citations resting on them are refused rather than accepted unverified.  The
+    same elements stay out of the seen-set, so the next round retries them.
+    Cancellation and attestation failures are not failures of this read and
+    re-raise.
+
+    Bounded by its OWN per-library-sized budget, deliberately NOT by what is
+    left of the phase.  The phase runs out exactly when some library was slow,
+    and that is the case the per-library skip exists to survive: the libraries
+    that did answer produced a selection, and refusing to attest it because a
+    peer ate the phase would turn "one slow library is skipped" into "the whole
+    answer is voided" (absence here means every citation is refused).  It is
+    one bounded read on the calling thread, after the fan-out has released its
+    executor seats, so it cannot extend the phase for anyone else.
 
     ⛔ Deliberately absent from the guard's ``_SEAT_FAILSOFT_SITES``: the try
-    body is a single source-store read: it cannot reach the participant seat,
-    so swallowing it cannot turn an identity failure into a silently narrower
+    body is a single source-store read, so it cannot reach the participant seat
+    and swallowing it cannot turn an identity failure into a silently narrower
     search.
     """
-    element_ids = list(dict.fromkeys(
-        element_id for hit in collected.values()
-        for element_id in (hit.element_ids or ())
-    ))
-    try:
-        fingerprints = (
-            candidates.sources.evidence_fingerprints(element_ids)
-            if element_ids else {}
+    seen = memoized_retrieval_value(
+        ("federated_chunk_evidence_seen",), lambda: set(),
+    )
+    element_ids = [
+        element_id for element_id in dict.fromkeys(
+            element_id for hit in collected.values()
+            for element_id in (hit.element_ids or ())
         )
-    except (AskCancelled, RetrievalControlError):
-        raise
-    except Exception as exc:  # noqa: BLE001 - see docstring
-        _emit(candidates, {
-            "kind": "chunk_federation_evidence_unavailable",
-            "error_type": type(exc).__name__,
-            "elements": len(element_ids),
-        })
-        fingerprints = {}
+        if element_id not in seen
+    ]
+    fingerprints: dict = {}
+    if element_ids:
+        try:
+            with read_budget(
+                time.monotonic() + float(plan.notebook_timeout_seconds),
+                plan.cancel,
+            ):
+                fingerprints = dict(
+                    candidates.sources.evidence_fingerprints(element_ids)
+                )
+            seen.update(fingerprints)
+        except (AskCancelled, RetrievalControlError):
+            raise
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            _emit(candidates, {
+                "kind": "chunk_federation_evidence_unavailable",
+                "error_type": type(exc).__name__,
+                "elements": len(element_ids),
+            })
+            fingerprints = {}
     plan.on_evidence(fingerprints)
 
 
