@@ -4359,6 +4359,16 @@
         },
         "GlobalAskJob": {
           "properties": {
+            "answer": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/AskResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "cited_notebook_ids": {
               "items": {
                 "type": "string"
@@ -4394,6 +4404,11 @@
             },
             "job_id": {
               "title": "Job Id",
+              "type": "string"
+            },
+            "mode": {
+              "default": "chunk",
+              "title": "Mode",
               "type": "string"
             },
             "notebook_scope": {
@@ -4444,6 +4459,13 @@
               ],
               "title": "Status",
               "type": "string"
+            },
+            "trace": {
+              "items": {
+                "$ref": "#/components/schemas/TraceStep"
+              },
+              "title": "Trace",
+              "type": "array"
             }
           },
           "required": [
@@ -4484,6 +4506,21 @@
               ],
               "title": "Conversation Id"
             },
+            "intent": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/AskIntentConfirmation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mode": {
+              "default": "chunk",
+              "title": "Mode",
+              "type": "string"
+            },
             "notebook_scope": {
               "anyOf": [
                 {
@@ -4498,6 +4535,18 @@
               "maxLength": 4000,
               "minLength": 1,
               "title": "Question",
+              "type": "string"
+            },
+            "retrieval_effort": {
+              "default": "standard",
+              "enum": [
+                "overview",
+                "standard",
+                "deep",
+                "thorough",
+                "exhaustive"
+              ],
+              "title": "Retrieval Effort",
               "type": "string"
             }
           },

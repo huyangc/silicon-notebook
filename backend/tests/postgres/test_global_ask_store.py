@@ -90,6 +90,89 @@ def test_completed_history_projects_only_successful_dialogue(store):
     assert store.running_job_ids(first.conversation_id, "user-a") == []
 
 
+def test_legacy_response_row_still_reads_pg(store):
+    """D1-1: a row persisted before the answer/trace/mode fields existed --
+    pure ``response``, nothing new on the payload -- still round-trips and
+    still projects through the Postgres COALESCE variant of
+    ``_history_projection``."""
+    from app.models.global_ask import GlobalAskAnswer
+
+    value = job()
+    store.create(value, "user-a", "request-a", "payload", "web", new_conversation=True)
+    value.status = "done"
+    value.response = GlobalAskAnswer(
+        answer_id="answer", question=value.question, answer="旧答案文本",
+        created_at=value.created_at, notebook_scope=value.notebook_scope,
+        resolved_notebook_ids=value.resolved_notebook_ids,
+        searched_notebook_ids=[], cited_notebook_ids=[],
+    )
+    assert store.save(value, "user-a")
+    reread = store.job(value.job_id, "user-a")
+    assert reread.answer is None
+    assert reread.mode == "chunk" and reread.trace == []
+    assert reread.response.answer == "旧答案文本"
+    assert store.completed_history(value.conversation_id, "user-a", 10) == [{
+        "question": value.question, "answer": "旧答案文本",
+        "notebook_ids": value.resolved_notebook_ids,
+    }]
+
+
+def test_new_answer_row_reads_pg(store):
+    """A row whose only populated answer shape is the new ``answer`` field
+    (``response`` left at its default ``None``) reads back through both the
+    model round-trip and the COALESCE projection."""
+    from app.models.ask import AskResponse, Citation
+
+    value = job()
+    store.create(value, "user-a", "request-a", "payload", "web", new_conversation=True)
+    value.status = "done"
+    value.mode = "chunk"
+    value.answer = AskResponse(
+        conclusion="done", answer="新答案文本",
+        citations=[Citation(
+            label="[1]", source_id="s1", element_id="e1",
+            location_label="L1", quoted_span="span1",
+        )],
+    )
+    assert store.save(value, "user-a")
+    reread = store.job(value.job_id, "user-a")
+    assert reread.response is None
+    assert reread.answer.answer == "新答案文本"
+    assert store.completed_history(value.conversation_id, "user-a", 10) == [{
+        "question": value.question, "answer": "新答案文本",
+        "notebook_ids": value.resolved_notebook_ids,
+    }]
+
+
+def test_both_shapes_in_one_conversation_history_pg(store):
+    """A legacy-shaped turn and a new-shaped turn in the SAME conversation
+    both surface in ``completed_history``, newest first."""
+    from app.models.ask import AskResponse
+    from app.models.global_ask import GlobalAskAnswer
+
+    legacy = job("job-legacy", "conversation-mixed")
+    legacy.created_at = "2026-09-19T00:00:00Z"
+    store.create(legacy, "user-a", "request-legacy", "payload", "web", new_conversation=True)
+    legacy.status = "done"
+    legacy.response = GlobalAskAnswer(
+        answer_id="answer-legacy", question=legacy.question, answer="第一答",
+        created_at=legacy.created_at, notebook_scope=legacy.notebook_scope,
+        resolved_notebook_ids=legacy.resolved_notebook_ids,
+        searched_notebook_ids=[], cited_notebook_ids=[],
+    )
+    assert store.save(legacy, "user-a")
+
+    new = job("job-new", "conversation-mixed")
+    new.created_at = "2026-09-19T00:00:01Z"
+    store.create(new, "user-a", "request-new", "payload", "web", new_conversation=False)
+    new.status = "done"
+    new.answer = AskResponse(conclusion="done", answer="第二答")
+    assert store.save(new, "user-a")
+
+    history = store.completed_history("conversation-mixed", "user-a", 10)
+    assert [turn["answer"] for turn in history] == ["第二答", "第一答"]
+
+
 def test_progress_patch_preserves_payload_and_cannot_overwrite_terminal_state(store):
     value = job()
     store.create(value, "user-a", "request-a", "payload", "web", new_conversation=True)

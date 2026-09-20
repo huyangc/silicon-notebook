@@ -2,7 +2,16 @@
 from __future__ import annotations
 from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
-from app.models.ask import AnswerAnchor, Citation, ASK_QUESTION_MAX_CHARS, CONVERSATION_TITLE_MAX_CHARS
+from app.models.ask import (
+    AnswerAnchor,
+    AskIntentConfirmation,
+    AskResponse,
+    Citation,
+    TraceStep,
+    ASK_QUESTION_MAX_CHARS,
+    CONVERSATION_TITLE_MAX_CHARS,
+)
+from app.core.ask_retrieval_policy import DEFAULT_RETRIEVAL_EFFORT, RetrievalEffort
 
 GLOBAL_ASK_PAGE_SIZE = 50
 GLOBAL_ASK_PAGE_MAX = 100
@@ -24,6 +33,13 @@ class GlobalAskRequest(BaseModel):
     notebook_scope: GlobalNotebookScope | None = None
     conversation_id: str | None = Field(default=None, max_length=GLOBAL_ASK_ID_MAX_CHARS)
     client_request_id: str | None = Field(default=None, max_length=GLOBAL_ASK_ID_MAX_CHARS)
+    # D1-1: data-model-only groundwork for routing a global (cross-library) ask
+    # through the same single-library ``AskService.ask`` engine used by
+    # ``AskRequest``. Not consumed by ``_run`` yet -- see ``mode``/``trace``/
+    # ``answer`` on ``GlobalAskJob`` for the matching read-side note.
+    mode: str = "chunk"
+    intent: AskIntentConfirmation | None = None
+    retrieval_effort: RetrievalEffort = DEFAULT_RETRIEVAL_EFFORT
 
     @field_validator("question")
     @classmethod
@@ -67,7 +83,51 @@ class GlobalAskJob(BaseModel):
     degraded_notebook_ids: list[str] = Field(default_factory=list)
     # Explicitly displayable Chinese guidance; the service never stores raw exceptions here.
     error: str | None = None
+    # Legacy answer shape: the global-only synthesis response ``_run`` has
+    # always written. Kept so already-persisted rows keep reading back
+    # unchanged; new code should read ``answer`` (or the
+    # ``global_answer_*`` projection helpers below) instead of this field
+    # directly. Do not write new rows through this field once the engine
+    # moves onto ``AskService.ask`` (a later task) -- it stays only to
+    # replay history.
     response: GlobalAskAnswer | None = None
+    # D1-1 groundwork (unused by ``_run`` today, which still only writes
+    # ``response`` above): once the global engine calls the single-library
+    # ``AskService.ask``, ``mode``/``trace``/``answer`` become the write
+    # side and ``response`` becomes legacy-only.
+    mode: str = "chunk"
+    trace: list[TraceStep] = Field(default_factory=list)
+    answer: AskResponse | None = None
+
+
+# D1-1 read-side projections: prefer the new ``answer``/``trace`` shape and
+# fall back to the legacy ``response`` shape a job written before the engine
+# switch (a later task) so every existing persisted row keeps reading back
+# with no migration. ``_run`` does not populate ``answer``/``trace`` yet, so
+# today these always resolve through the legacy branch -- they exist ahead of
+# that switch so the read side and the write side change on separate,
+# independently reviewable commits.
+def global_answer_text(job: "GlobalAskJob") -> str:
+    if job.answer is not None:
+        return job.answer.answer
+    if job.response is not None:
+        return job.response.answer
+    return ""
+
+
+def global_answer_citations(job: "GlobalAskJob") -> list[Citation]:
+    if job.answer is not None:
+        return job.answer.citations
+    if job.response is not None:
+        return job.response.citations
+    return []
+
+
+def global_answer_trace(job: "GlobalAskJob") -> list[TraceStep]:
+    if job.answer is not None and job.answer.reasoning_trace:
+        return job.answer.reasoning_trace
+    return job.trace
+
 
 class GlobalConversationSummary(BaseModel):
     id: str
