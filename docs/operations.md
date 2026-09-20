@@ -113,20 +113,28 @@ shared model and database resources. Workers cannot save after that close bounda
 jobs remain running until startup recovery marks them interrupted. A cancelled or interrupted job cannot
 later overwrite its terminal state. Inspect skipped/degraded notebook receipts before interpreting a partial
 answer: reduce the selected scope after timeouts, and prepare scale indexes to improve semantic recall.
-Skip reasons deliberately do not name a cause; the machine-readable one is the `global_retrieval_skipped`
-event, which carries the notebook, a `reason`, the failing exception's class name and the elapsed
-milliseconds — never a message, SQL or question text. The reasons are `timeout` (the local budget expired,
+Skip reasons deliberately do not name a cause; the machine-readable one is the `chunk_federation_skipped`
+event, which under a global run additionally carries a `reason` beside the notebook, the failing exception's
+class name and the elapsed milliseconds — never a message, SQL or question text. A leg abandoned because the
+phase budget expired while it was still executing carries `lane="abandoned"`, so an operator can tell a leg
+this run gave up on from one that finished. The reasons are `timeout` (the per-notebook budget expired,
 PostgreSQL cancelled the statement, or SQLite interrupted it), `saturated` (no connection could be leased
 in the remaining budget — the pool is full, the query never ran, and the operator lever is pool size or
 concurrency, not the user's scope), `queue_deadline` (the phase budget expired while the notebook was still
-queued behind the shared retrieval pool) and `unavailable` (everything else). A separate
-`global_retrieval_ann_starved` event reports a notebook whose ANN neighbourhood was dominated by chunks the
-global ceiling excludes: it carries `dropped`, `survivors` and the widened `k`, and means the answer used a
-partial neighbourhood — rebuilding that notebook's scale index writes the source sidecar and removes the
-over-fetch entirely. Libraries are retrieved in parallel, bounded per process by
-`GLOBAL_ASK_RETRIEVAL_CONCURRENCY` and shared fairly between concurrent tasks; a widened scope therefore
-costs connections, not only wall time.
-Global retrieval has its own `ask_global` event category and never cold-loads shared whole-library indexes.
+queued behind the shared retrieval pool — nothing was asked of the database, so "narrow your scope" would be
+the wrong advice) and `unavailable` (everything else). `chunk_federation_evidence_unavailable` reports that
+a call's evidence fingerprints could not be read, which makes the affected citations refusable by name;
+`global_ask_citations_void` reports an answer withdrawn by the citation recheck and carries a content-free
+`reason` (`changed`, `unreadable`, `unattributed`, `out_of_ceiling`) — `unattributed` is a normalization gap
+in a citation producer and needs a fix, the others are races with an editing user. The retired global
+retrieval lane's `global_retrieval_skipped` and `global_retrieval_ann_starved` events no longer exist.
+Lexical degradation is no longer disclosed per notebook; it emits `chunk_bruteforce_skipped` like any other
+run, and `degraded_notebook_ids` now means only that some of that notebook's retrieval legs failed.
+Libraries are retrieved in parallel, bounded per process by
+`GLOBAL_ASK_RETRIEVAL_CONCURRENCY` and shared fairly between IN-FLIGHT FEDERATED CALLS (a `reasoning` job
+federates several times at once); a widened scope therefore costs connections, not only wall time.
+A global run uses the engine's own retrieval-run kinds (`ask_chunk` / `ask_reasoning`) rather than a
+category of its own, and a large participant's leg never cold-loads a shared whole-library index.
 
 ## Observability
 

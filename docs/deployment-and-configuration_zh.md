@@ -682,13 +682,18 @@ origin 写进此名单后 URL 导入才能触达。每项必须带 `http://` 或
 `GLOBAL_ASK_MAX_NOTEBOOKS`、`GLOBAL_ASK_MAX_CONCURRENT`、`GLOBAL_ASK_RETRIEVAL_CONCURRENCY`、
 `GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS`、
 `GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS` 和 `GLOBAL_ASK_SHUTDOWN_TIMEOUT_SECONDS` 分别控制范围
-受理、进程容量、跨库检索并行度及检索/关闭预算。`GLOBAL_ASK_MAX_NOTEBOOKS` 的产品上限是 8，
+受理、进程容量、跨库检索并行度及检索/关闭预算。`GLOBAL_ASK_RETRIEVAL_CONCURRENCY` 是所有全局
+run 共用的那**一个**进程级执行器的大小；`GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS` 约束的是**一次**
+联邦检索调用而不是整次作业，`reasoning` 每轮检索各花一份。`GLOBAL_ASK_MAX_NOTEBOOKS` 的产品上限是 8，
 配置更大的值不通过校验。**升级须知：** 此前把它设成大于 8 的部署（旧默认值是 32）升级后 Settings 校验会失败、后端起不来；升级前请删除该变量或改成不大于 8。PostgreSQL 连接池预算要同时计入这两个并发旋钮：任务线程自身做权限
 复核与进度保存各占一条连接，进程级共享的检索线程池每个忙碌执行位再占一条，因此启动告警按
-`GLOBAL_ASK_MAX_CONCURRENT + GLOBAL_ASK_RETRIEVAL_CONCURRENCY` 计。
-`GLOBAL_ASK_SMALL_NOTEBOOK_MAX_CHUNKS` 限制小库临时流式语义召回，不挤占共享热索引。
+`GLOBAL_ASK_MAX_CONCURRENT + GLOBAL_ASK_RETRIEVAL_CONCURRENCY` 计。chunk 臂自己的扇出
+（`CHUNK_FANOUT_MAX_WORKERS`）同样计入：它的每个工作位各发一次数据库查询，漏算会把一个仅靠
+库内 chunk 臂就能打穿的配置误判为安全。
 `GLOBAL_ASK_MIN_RELEVANCE` 和 `GLOBAL_ASK_RELATIVE_RELEVANCE` 在逐库保底前过滤弱候选，
-应按代表性问题评测后调节。没有语义召回的库才使用显式披露的词法降级。
+应按代表性问题评测后调节。没有语义召回的库使用有界词法降级。
+`CHUNK_FEDERATION_ENABLED=0` 既不关掉全局问答，也不让它回到单库短路：全局 run 退化为只检索
+第一个解析库的单腿联邦。
 模型上下文复用 `CHUNK_ANSWER_BUDGET_CHARS`；`query_rewrite` 和 `ask_answer`
 沿用既有模型服务配置，无需新增模型端点。精确默认值与边界见
 [全局问答](./product-and-api_zh.md#全局问答)。
@@ -974,7 +979,7 @@ RETRIEVAL_EXPERIENCE_TRIGGER # 蒸馏一批前需累计的已完成提问数（�
 USER_SEARCH_PROFILE_ENABLED  # 每用户检索/回答风格偏好文档总闸（Agentic Memory P3 B 线）：后台归纳、Ask 规划/答案注入、`PATCH /me/search-profile` 可写性都由它决定（默认 true；关闭后注入/写入两侧处处逐字回到接入前——不归纳、不注入、`PATCH` 409——但 `GET /me` 仍照常返回该行上已存在的取值，不会伪造成 `search_profile: null`）
 USER_SEARCH_PROFILE_TRIGGER  # 确定性、零 LLM 的 `answer_language` 归纳任务再次运行前，该用户需累计的已完成提问数（默认 20；ge=1）
 CHUNK_RECALL                 # chunk 大召回数（默认 200；mix 候选池 / 无 rerank 时 MMR 候选）
-CHUNK_FEDERATION_ENABLED     # 联邦 chunk 召回：挂载参考库自己的原文段落是否与当前笔记本的段落一起进入 chunk 检索（默认 true）。false 是唯一的回退开关：参与集收成当前笔记本一本，联邦模块短路回联邦化之前的单库召回，行为回到「只召回当前库原文」。参考库只贡献它当前可见的来源——隐藏的 Memory/Knowhow 投影结构性不参与跨库原文通道——请求取消勾选的库则一条都不贡献
+CHUNK_FEDERATION_ENABLED     # 联邦 chunk 召回：挂载参考库自己的原文段落是否与当前笔记本的段落一起进入 chunk 检索（默认 true）。false 是唯一的回退开关：参与集收成当前笔记本一本，联邦模块短路回联邦化之前的单库召回，行为回到「只召回当前库原文」。全局问答是唯一例外——没有主体库的 run 仍走联邦路径，退化为只检索第一个解析库的单腿联邦，而不是走那条短路。参考库只贡献它当前可见的来源——隐藏的 Memory/Knowhow 投影结构性不参与跨库原文通道——请求取消勾选的库则一条都不贡献
 CHUNK_FEDERATION_MAX_PARTICIPANTS # 一条联邦 chunk 臂最多搜索几个库（默认 8；1..8）。超出时按确定的挂载顺序截断并发一条内容无关的 `chunk_federation_truncated` 事件；既不静默扩张也不静默收窄。生产建议先设 4，观察这个事件与 ask 阶段延迟分布后再放到 8
 CHUNK_FANOUT_MAX_WORKERS     # **一条** chunk 臂把「库 × 子查询」压平之后的总工作位数（默认 8；1..16）。两层扇出共用**一个**执行器而不是嵌套，所以不论挂了几个参考库，单条臂的并发都是这个值；默认值与联邦化之前单库多子查询路径固定使用的宽度一致。它约束的是一条臂、不是一次请求：深度报告会并发跑多个章节 worker，它们合起来的叶子 I/O 由 `REPORT_RETRIEVAL_FANOUT` 约束——每条联邦 chunk 叶子现在都各自持那把闸
 CHUNK_FEDERATION_ACTIVE_RESERVE # 当前笔记本在**最终入选段落**里的保底份额（默认 0.25；0..1）。召回是联邦的，但当前笔记本是主体、挂载的参考库是补充：多参与者时，只要当前笔记本有合格候选，它至少占 `ceil(CHUNK_MMR_K × 本值)` 席（合格候选不足则以其实际数量为上限），参考库的强命中占其余席位。这条规则有两半。候选在**跨库合并那一步**就先行保留，不是事后补救：否则一个足以塞满整个 `CHUNK_RECALL` 池的大库会在选择开始之前就把它们裁掉；保留占用该预算，绝不额外追加。席位则在每条分支的**最终选择之后**兑现一次——Ask 在检索返回之后还会把关键词/精确命中并进候选，所以写在融合输入里的保底只约束得了本通道交出的那部分输入。让出席位的是排名最靠后的参考库条目（先让补充的生成问题命中），选择的长度不变；正文相同的段落只花一个席位，不是每份副本各花一个。没有这条保底时，几篇 0.30–0.40 的本地短文会被一个参考库的 0.60–0.85 命中整片挤掉，用户问自己刚上传的文档却一条自己的原文都拿不到。设 0 关闭保底、回到纯相关度排序；没挂参考库的笔记本两种设置下都不受影响

@@ -770,3 +770,89 @@ function_length_ceiling` 里（`ask_chunk` / `_run_reasoning_stage` / `_draft_re
 一行未动），新用例里那条 `test_length_ceiling_functions_untouched` 直接复用守卫的零松弛判据。
 今天生产上仍不可达，覆盖由 `backend/tests/test_peer_mode_ask_steps.py` 在用例里安装
 「覆盖 + 逐库天花板」触发，每条闸都带一条不装任何东西的逐值对照臂。
+
+## 41. 全局问答改由单库引擎作答：`global_run` 的四件事（2026-09-20）
+
+全局问答不再有自己的检索链路与合成适配层。`GlobalAskService._execute` 经
+`app/services/global_run.py::global_ask_run(...)` 安装四件事之后直接调 `AskService.ask`：
+
+1. **参与集覆盖**——本次 run 搜哪些库，以及挣到它们的那个身份；检索层经
+   `federated_ask_active()` 读。
+2. **逐库冻结来源天花板 + `subjectless` 位**——`source_scope_context(..., notebook_source_ceilings=
+   ..., subjectless=True)`。天花板必须是参与集上的**全映射**（可见来源为空的库写成
+   `frozenset()`，不得缺键）：`ask_service._peer_ceiling_participants` 把「没有天花板条目」读成
+   fail-closed，而 `ActiveSourceScope.allows` 把同一事实读成 fail-open，只有全映射能让两者一致。
+3. **detached 对话轮次**——轮次是传下去的，不是从 `ask_state` 读的，所以答案不写进任何笔记本的
+   answers 表；全局会话与任务仍存在 `global_ask_*` 表里。
+4. **联邦运行计划**——共享执行器、公平窗口、阶段预算、取消令牌，以及回执与证据指纹的唯一返回接缝。
+
+装一半不是降级而是**错误**：检索层与 ask 层刻意读两个不同谓词，分开安装会让它们互相矛盾——
+只装覆盖，检索腿进对等模式而 ask 侧仍是单库模式（名义 active 的私有 Memory 会折进跨库答案）；
+只装天花板，ask 侧进对等而检索仍按锚点的挂载表扇出。四个座位都在一个 `ExitStack` 上，任一检查
+失败就把已装的解开，正常返回、异常、取消三条路径都重置。
+
+守卫（`backend/tests/test_participant_override_guard.py` / `test_global_run.py`）：安装覆盖的写入方
+白名单恰好是 `{app/services/global_run.py}`，`global_ask.py` 只**构造** `ParticipantOverride`、一个
+座位都不装；`subjectless=` 这个关键字只许出现在 `global_run.py`（`source_scope.py` 的同名转发
+豁免）；检索读者白名单仍是**七个**，按相等断言钉住。
+
+## 42. 全局问答的两种引擎与 reasoning 的问题理解预检（2026-09-20）
+
+- `mode` 走引擎自己的注册表（含退役别名），`chunk` 默认、`reasoning` 可选；部署扩展引擎一律 422
+  （「全局问答暂不支持该引擎」），无法识别的 mode 同样 422。界面的引擎选择器因此整组不出现扩展引擎。
+- 作业返回标准 `AskResponse`（`GlobalAskJob.answer`）。归一之前的历史作业保留 `GlobalAskJob.response`
+  且只读；`models/global_ask.py` 的 `global_answer_text` / `global_answer_citations` /
+  `global_answer_trace` 是两种形状的唯一读口，历史 SQL 投影用 `COALESCE(answer.answer,
+  response.answer)` 双后端实现，零迁移。
+- `reasoning` 提交前走问题理解预检：HTTP `POST /api/global-ask/intent` 与 `/intent/stream`，请求体
+  `{question, conversation_id?, notebook_scope?}`，返回 `QueryIntentContract`。预检自己鉴权，并按与
+  `start()` **完全相同**的 `_resolve_run_scope` 解析范围、复核读权，不建 job、不建会话、不写表；
+  流式版本把范围解析与鉴权放在第一帧之前，所以 404/422 仍是真实状态码。预检同样装上那四件事
+  （回调永不触发的运行计划），让理解步骤将来长出读语料的能力时自动继承参与集。
+- `retrieval_effort` 在全局 v1 被**钳到** `standard`：`deep` 会把推理轮数乘以 8 个库，超出
+  `global_ask_retrieval_timeout_seconds` 的合理范围，结果是花完预算、多数库报成未检索。界面不提供档位。
+- 运行中的推理轨迹经轮询暴露（`job.trace`，按时间与步数双阈值节流持久化——全局作业没有子表，
+  每步重写整份 JSON 是 O(n²)）；完成后以 `answer.reasoning_trace` 为准，`job.trace` 清空。
+
+## 43. 全局问答的回执口径与引用冻结复核（2026-09-20）
+
+- 回执按整次 run 聚合（一次 reasoning 作业会联邦多轮，同一个库因此可能有多份回执）：**任何一轮都
+  没成功** → 未检索，原因取最近一轮；成功过但某一轮失败或降级 → 已检索 **且** 降级；全部成功 →
+  已检索。一次联邦调用都没发生的 run（文档概览、集合枚举直接作答）把全部解析库报成已检索、零跳过。
+- 因此 `degraded_notebook_ids` 现在只表示「该库有部分检索腿失败」。旧流水线的「词法降级逐库披露」
+  没有对应信号了（词法降级只发 `chunk_bruteforce_skipped`），文档已如实收窄。
+- 回执写入是串行且带单调序号的（`_RunState.claim_publish`）：reasoning 的多个子查询线程同时回调，
+  没有这两条性质，较慢的写入方会把更旧的快照最后写下去，轮询方会看见覆盖列表往回退。
+- **引用冻结复核收窄了产品行为**：提交时刻冻结每个参与库的可见来源清单；答案产生后逐条复核——
+  来源仍在天花板内且仍可见；走过联邦 chunk 通道的元素还要求检索时指纹 == 现读指纹且来源归属未变。
+  指纹三态是合同：快照 / `None`（读失败，按名字拒绝，fail-closed）/ **缺席**（从未走过该通道——
+  文档概览、集合枚举、图对象——只判天花板 + 可见 + 元素仍在同一来源下）。
+  任何一条通不过，**整份作废**：`grounded=False`、`evidence_level="inferred"`、引用与证据附件清空、
+  换成既有中文重试提示，推理轨迹保留。旧行为「剔除失效证据后用剩余段落重新合成一次」不再有——
+  重新合成会重新检索、重新冻结，那是另一份答案顶着这一份的身份（synthesis-only 入口登记在
+  `fangan_todo.md`）。作废原因（`changed` / `unreadable` / `unattributed` / `out_of_ceiling`）走
+  内容无关的 `global_ask_citations_void` 事件，用户读到的始终是同一句话。
+- 五处权限复核全部保留：run 开始、每个库回执到达时（`_on_library`）、答案产生后、引用复核后、落库前。
+  回调里抛出的失败先被记录再抛出，因此不依赖下游 fail-soft handler 是否吞掉它。
+
+## 44. 全局检索的预算口径与共享执行器（2026-09-20）
+
+- 不逐库轮询：联邦 chunk 通道的任务表 = 参与库 × 子查询，一次性提交到**进程级共享执行器**
+  （`GLOBAL_ASK_RETRIEVAL_CONCURRENCY`，默认 4、范围 1–8，也是检索侧连接上界的唯一真源）。
+- 公平窗口按**在途联邦调用数**分配，不是按活跃作业数：一次 reasoning 作业会从引擎自己的线程并发
+  进入联邦多次，按作业分份额等于把整个池交给它，其余腿排到阶段时限耗尽，用户却被告知「检索未开始」
+  ——那是把争用问题说成了范围问题。
+- `GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS`（默认 30）是**每次联邦调用**的阶段时限，不是整次 run 的
+  绝对时刻；reasoning 每轮各算一份（run 级绝对截止会让第一轮之后的每一轮开局即过期）。
+- `GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS`（默认 5）从该库**真正发起数据库查询**那一刻起算：排队、
+  等 run 级 fan-out 槽都不计入，否则一个一次查询都没发出的库会被报成 `timeout`。
+- 四种原因码不变（`timeout` / `saturated` / `queue_deadline` / `unavailable`），判据仍是
+  `read_budget.classify_read_failure`。`chunk_federation_skipped` 在全局 run 下多带 `reason`；阶段
+  到点被放弃的在途腿带 `lane="abandoned"`；新增 `chunk_federation_evidence_unavailable`。
+  随旧链路删除而消失的是 `global_retrieval_skipped` 与 `global_retrieval_ann_starved`。
+- 冷加载守卫对每个参与库（含第一个库）一视同仁：`_peer_leg` 在对等模式下对名义 active 也为真，
+  因此 `_peek_only` 对它同样运行——**大库**那一腿只借已常驻的 scale 索引，绝不冷加载。
+- `CHUNK_FEDERATION_ENABLED=0` 下全局问答退化为**单腿联邦**（只搜第一个库），而不是回到单库短路：
+  `federated_chunk_candidates` 的短路条件带 `not federated_ask_active()`。
+- 作业线程绝不能是共享检索池的 worker（`_execute` 首行用 `RuntimeError` 而非 `assert` 守住）：
+  联邦会在调用方线程上 `wait()`，池 worker 等池槽是经典死锁，而且在满并发下是稳态而非罕见交错。
