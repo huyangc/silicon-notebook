@@ -259,6 +259,15 @@ def test_coverage_frames_carry_whole_lists_not_deltas(setup):
         if frame["event"] == "progress" and frame["searched_notebook_ids"]
     ]
     assert coverage, frames
+    # Every sub-query reports every library; only a CHANGE in coverage is pushed,
+    # so a receipt-only frame never repeats the one before it.
+    receipts = [
+        (frame["searched_notebook_ids"], frame["degraded_notebook_ids"],
+         [row["notebook_id"] for row in frame["skipped_notebooks"]])
+        for frame in frames
+        if frame["event"] == "progress" and frame["trace_offset"] > 0 and not frame["steps"]
+    ]
+    assert all(left != right for left, right in zip(receipts, receipts[1:])), receipts
     for frame in coverage:
         assert frame["searched_notebook_ids"] == ["a"]
         assert frame["degraded_notebook_ids"] == []
