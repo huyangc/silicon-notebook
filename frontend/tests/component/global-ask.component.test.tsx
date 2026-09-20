@@ -10,6 +10,7 @@ import { GlobalAskLauncher } from "../../app/ask/global-ask-launcher.tsx";
 import { AnswerView } from "../../app/answer-panel.tsx";
 import { useRootModalCoordinator } from "../../app/use-root-modal-coordinator.ts";
 import { STOPPED_TURN_KEPT_TEXT, STOPPED_TURN_TEXT } from "../../app/stopped-turn.tsx";
+import { humanizedError } from "../../app/errors.ts";
 import type { GlobalConversation, GlobalConversationDetail, GlobalJob, GlobalScope } from "../../app/global-ask-api.ts";
 import type { QueryIntentContract } from "../../app/ask-intent-model.ts";
 import type { AskResponse, NotebookSummary } from "../../app/workspace-model.ts";
@@ -1547,6 +1548,51 @@ test("a stale replacement drops its retry identity once the real turns are known
   await act(async () => { await result.current.submit(); });
   expect(api.ask.mock.calls[1][0].replaces_job_id).toBeUndefined();
   expect(api.ask.mock.calls[1][0].client_request_id).not.toBe(api.ask.mock.calls[0][0].client_request_id);
+});
+
+test("a stop that lost the race to the answer adopts the whole finished job", async () => {
+  // 提交在途时按了停止，而作业抢在取消到达之前已经答完：取消接口交回的是带回答的
+  // done 作业，必须整份接管——只抄状态会留下一条「done 却没有回答」的轮次（R4 P2）。
+  const submission = deferred<GlobalJob>();
+  api.ask.mockReturnValue(submission.promise);
+  const finished = { ...job("done"), question: "抢先答完的问题", answer: standardAnswer() };
+  api.cancel.mockResolvedValue(finished);
+  const { result } = renderHook(() => useGlobalAsk({ syncUrl: false }));
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  act(() => result.current.setDraft("抢先答完的问题"));
+  await act(async () => { void result.current.submit(); });
+  await act(async () => { await result.current.stop(); });
+  await act(async () => { submission.resolve({ ...job(), question: "抢先答完的问题" }); });
+  expect(api.gone).not.toHaveBeenCalled();
+  expect(result.current.turns).toHaveLength(1);
+  expect(result.current.turns[0].status).toBe("done");
+  expect(result.current.turns[0].answer?.answer).toBe("跨库结论 [k1]。");
+  expect(result.current.draft).toBe("");
+});
+
+test("an unconfirmed discard keeps the turn, and a vanished conversation is dropped on the next failure", async () => {
+  // 丢弃之后的确认读失败（null）：不许当它已经删了。会话若真的已不存在，下一次提交
+  // 失败后的重拉拿到 404，本地退回「还没有会话」，不再指着一个死会话（R4 P2）。
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValueOnce(detail("conv-a", [job()]));
+  api.poll.mockReturnValue(new Promise(() => {}));
+  api.cancel.mockResolvedValue(job("cancelled"));
+  api.gone.mockResolvedValue(null);
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+  await act(async () => { await result.current.stop(); });
+  expect(result.current.turns.map((turn) => turn.status)).toEqual(["cancelled"]);
+  expect(result.current.conversationId).toBe("conv-a");
+
+  api.ask.mockRejectedValueOnce(new Error("对话不存在，请刷新列表。"));
+  api.detail.mockRejectedValueOnce(humanizedError("对话不存在，请刷新列表。", 404));
+  act(() => result.current.setDraft("再问一次"));
+  await act(async () => { await result.current.submit(); });
+  await waitFor(() => expect(result.current.conversationId).toBe(""));
+  expect(result.current.turns).toEqual([]);
+  expect(result.current.draft).toBe("再问一次");
+  expect(window.location.search).toBe("");
 });
 
 test("an older stopped turn wears the same notice without promising a replacement", async () => {
