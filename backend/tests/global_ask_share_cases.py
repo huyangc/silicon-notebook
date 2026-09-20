@@ -279,6 +279,55 @@ def case_a_token_cannot_be_issued_twice(store):
     assert store.conversation_share_state(third, user_id)["share_token"] == ""
 
 
+def case_a_deleted_watermark_job_falls_back_to_the_interval_not_to_nothing(store):
+    """水位作业事后被删:keyset 失锚,退回 ``created_at <= 水位时刻`` 的区间。
+
+    一条已经发出去的链接不许因此变成空会话(fail closed);区间读比 keyset 在同刻
+    并列上略宽,但仍然不越过水位时刻——之后写的轮次照样不公开。
+    """
+    conversation_id, user_id = _seed_three_done(store)
+    token = store.share_conversation(conversation_id, user_id)["share_token"]
+    insert_job(store, conversation_id, user_id, "job-d", "2026-01-01T00:00:05")
+    with store.database.write() as db:
+        db.execute(store._sql("DELETE FROM global_ask_jobs WHERE id=?"), ("job-c",))
+
+    assert _public_ids(store, token) == ["job-a", "job-b"]
+
+
+def case_the_public_read_is_capped_at_one_past_the_render_limit(store):
+    """匿名读取有上界:渲染上限 + 1(多出的那一条只用来披露「被截断了」)。"""
+    from app.domain.conversation_public_view import MAX_TURNS
+
+    conversation_id, user_id = insert_conversation(store, "conv-long", "user-long")
+    for index in range(MAX_TURNS + 5):
+        # 真实写入形状:UTC ``isoformat()``,整秒时刻不带小数位。
+        stamp = f"2026-01-01T{index // 3600:02d}:{index // 60 % 60:02d}:{index % 60:02d}+00:00"
+        insert_job(store, conversation_id, user_id, f"job-{index:04d}", stamp)
+    token = store.share_conversation(conversation_id, user_id)["share_token"]
+
+    ids = _public_ids(store, token)
+    assert len(ids) == MAX_TURNS + 1
+    assert ids[0] == "job-0000"
+
+
+def case_production_shaped_timestamps_keep_lexical_and_temporal_order_aligned(store):
+    """水位比较是**文本**比较,所以字典序必须等于时间序。
+
+    生产写的是 ``datetime.now(timezone.utc).isoformat()``:带 ``+00:00``,微秒为 0 时
+    省略小数位。整秒串是同秒小数串的前缀、``+`` 排在 ``.`` 之前,所以整秒时刻恒排在
+    同一秒的小数时刻之前——与时间序一致。哪天有写入点改用 ``Z`` 后缀或本地偏移,
+    这条会红。
+    """
+    conversation_id, user_id = insert_conversation(store, "conv-shape", "user-shape")
+    insert_job(store, conversation_id, user_id, "job-whole", "2026-01-01T00:00:01+00:00")
+    insert_job(store, conversation_id, user_id, "job-frac", "2026-01-01T00:00:01.250000+00:00")
+    insert_job(store, conversation_id, user_id, "job-next", "2026-01-01T00:00:02+00:00")
+    token = store.share_conversation(
+        conversation_id, user_id, expected_through_id="job-frac")["share_token"]
+
+    assert _public_ids(store, token) == ["job-whole", "job-frac"]
+
+
 CASES = [
     case_share_is_token_idempotent_but_advances_the_watermark,
     case_a_turn_written_after_the_share_stays_private_until_reshared,
@@ -292,5 +341,8 @@ CASES = [
     case_job_payloads_cross_untouched_in_both_shapes,
     case_an_unknown_or_blank_token_resolves_to_nothing,
     case_a_token_cannot_be_issued_twice,
+    case_a_deleted_watermark_job_falls_back_to_the_interval_not_to_nothing,
+    case_the_public_read_is_capped_at_one_past_the_render_limit,
+    case_production_shaped_timestamps_keep_lexical_and_temporal_order_aligned,
 ]
 CASE_IDS = [case.__name__.removeprefix("case_") for case in CASES]
