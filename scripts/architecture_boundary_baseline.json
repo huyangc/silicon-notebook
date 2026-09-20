@@ -363,7 +363,7 @@
     "backend/app/services/notebook_sharing.py::NotebookCopyService.copy_notebook": 640,
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever._new_run_state": 208,
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever._run_enumeration": 259,
-    "backend/app/services/reasoning_retrieval.py::ReasoningRetriever.run": 1295,
+    "backend/app/services/reasoning_retrieval.py::ReasoningRetriever.run": 1294,
     "backend/app/services/report_engine.py::ReportEngine._assemble": 457,
     "backend/app/services/report_engine.py::ReportEngine._draft_section": 317,
     "backend/app/services/repository_facade.py::RepositoryFacade.__init__": 477,

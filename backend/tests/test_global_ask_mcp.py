@@ -7,6 +7,8 @@ import pytest
 from app.api.mcp_tools import global_ask as module
 from app.api.mcp_tools import session as session_module
 from app.api.mcp_tools._shared import RESULT_LIMIT, TOTAL_TEXT_LIMIT
+from app.models.ask import AskResponse
+from app.models.global_ask import GlobalAskJob, GlobalAskSkippedNotebook
 from tests.test_memory_mcp import OfficialMcpClient, _payload, mcp_env
 
 
@@ -22,19 +24,47 @@ class Capture:
 
 
 def job(*, answer="", citations=None, mode=None, trace=None):
+    """A REAL ``GlobalAskJob``, not a job-shaped dict.
+
+    ``_job_page`` is only ever handed a real job in production (every
+    ``GlobalAskService`` method it reads returns one), so a test fixture that
+    hands it a loose dict was paying for an adapter in production code that
+    only the tests ever exercised -- and an adapter that reads missing keys as
+    ``None`` is exactly the shape that hides a projection regression. Building
+    the real model here costs the required fields (``question``/``created_at``
+    on the job, ``label``/``location_label`` on each citation) and buys the
+    guarantee that what the page reads is what a live job carries.
+    """
     payload = {
         "job_id": "job-a", "conversation_id": "conversation-a", "status": "done",
+        "question": "问题", "created_at": "2026-09-20T00:00:00+00:00",
         "notebook_scope": {"mode": "all", "notebook_ids": []},
         "resolved_notebook_ids": ["nb-a"], "searched_notebook_ids": ["nb-a"],
         "cited_notebook_ids": ["nb-a"], "error": None,
-        "response": {"answer_id": "answer-a", "answer": answer, "grounded": True,
-                     "citations": citations or []},
+        "response": {
+            "answer_id": "answer-a", "question": "问题", "answer": answer,
+            "grounded": True, "citations": citations or [],
+            "created_at": "2026-09-20T00:00:00+00:00",
+            "notebook_scope": {"mode": "all", "notebook_ids": []},
+            "resolved_notebook_ids": ["nb-a"],
+            "searched_notebook_ids": ["nb-a"], "cited_notebook_ids": ["nb-a"],
+        },
     }
     if mode is not None:
         payload["mode"] = mode
     if trace is not None:
         payload["trace"] = trace
-    return payload
+    return GlobalAskJob.model_validate(payload)
+
+
+def _citation(**overrides):
+    row = {
+        "label": "来源", "source_id": "s-a", "element_id": "e-a",
+        "location_label": "第 1 节", "quoted_span": "原文",
+        "notebook_id": "nb-a",
+    }
+    row.update(overrides)
+    return row
 
 
 def test_a_turn_answered_by_the_shared_engine_reads_back(monkeypatch):
@@ -43,17 +73,13 @@ def test_a_turn_answered_by_the_shared_engine_reads_back(monkeypatch):
     D1-4 之后新作业写的是标准 ``AskResponse``,旧行仍然只有 ``response``。任何一
     个形状读空,MCP 客户端看到的就是一次「完成了但没有答案」的提问。
     """
-    legacy = job(answer="旧形状答案", citations=[
-        {"label": "来源", "source_id": "s-a", "element_id": "e-a",
-         "location_label": "第 1 节", "quoted_span": "原文",
-         "notebook_id": "nb-a"},
-    ])
+    legacy = job(answer="旧形状答案", citations=[_citation()])
     current = job()
-    current.pop("response")
-    current["answer"] = {
+    current.response = None
+    current.answer = AskResponse.model_validate({
         "answer_id": "", "conclusion": "结论", "answer": "新形状答案",
-        "grounded": True, "citations": legacy["response"]["citations"],
-    }
+        "grounded": True, "citations": [_citation()],
+    })
 
     for value, expected in ((legacy, "旧形状答案"), (current, "新形状答案")):
         page = module._job_page(value)
@@ -102,10 +128,12 @@ def test_trace_is_empty_for_a_chunk_job_with_no_steps():
 
 def test_coverage_retains_every_skip_and_degraded_receipt():
     value = job(answer="partial answer")
-    value["skipped_notebooks"] = [{"notebook_id": "nb-b", "reason": "检索超时，请重试。"}]
-    value["degraded_notebook_ids"] = ["nb-a"]
+    value.skipped_notebooks = [GlobalAskSkippedNotebook(notebook_id="nb-b", reason="检索超时，请重试。")]
+    value.degraded_notebook_ids = ["nb-a"]
     page = module._job_page(value)
-    assert page["coverage"]["skipped_notebooks"] == value["skipped_notebooks"]
+    assert page["coverage"]["skipped_notebooks"] == [
+        row.model_dump(mode="json") for row in value.skipped_notebooks
+    ]
     assert page["coverage"]["degraded_notebook_ids"] == ["nb-a"]
     assert page["coverage"]["skipped"] == page["coverage"]["degraded"] == 1
     assert page["coverage_offset"] == 0 and page["next_coverage_offset"] is None
@@ -116,11 +144,11 @@ def test_coverage_retains_every_skip_and_degraded_receipt():
 def test_coverage_pages_reassemble_all_32_notebook_identities_under_the_byte_budget(long_ids, status):
     ids = [f"{index:03d}-" + ("库" * 196 if long_ids else "library") for index in range(32)]
     value = job(answer="跨库答案与原文证据。" * 500)
-    value["status"] = status
-    value["resolved_notebook_ids"] = ids
-    value["searched_notebook_ids"] = ids[:23]
-    value["skipped_notebooks"] = [{"notebook_id": nb, "reason": "检索超时，请重试。"} for nb in ids]
-    value["degraded_notebook_ids"] = ids[:23]
+    value.status = status
+    value.resolved_notebook_ids = ids
+    value.searched_notebook_ids = ids[:23]
+    value.skipped_notebooks = [GlobalAskSkippedNotebook(notebook_id=nb, reason="检索超时，请重试。") for nb in ids]
+    value.degraded_notebook_ids = ids[:23]
     offset = 0
     skipped, degraded, page_counts = [], [], []
     while True:
@@ -139,21 +167,21 @@ def test_coverage_pages_reassemble_all_32_notebook_identities_under_the_byte_bud
             break
         assert page["next_coverage_offset"] == offset + count
         offset = page["next_coverage_offset"]
-    assert skipped == value["skipped_notebooks"]
-    assert degraded == value["degraded_notebook_ids"]
+    assert skipped == [row.model_dump(mode="json") for row in value.skipped_notebooks]
+    assert degraded == value.degraded_notebook_ids
     if long_ids:
         assert page_counts[0] < RESULT_LIMIT
 
 
 def test_coverage_cursor_advances_when_only_the_longer_list_has_remaining_items():
     value = job()
-    value["skipped_notebooks"] = [{"notebook_id": "skipped", "reason": "请重试。"}]
-    value["degraded_notebook_ids"] = [f"nb-{index}" for index in range(32)]
+    value.skipped_notebooks = [GlobalAskSkippedNotebook(notebook_id="skipped", reason="请重试。")]
+    value.degraded_notebook_ids = [f"nb-{index}" for index in range(32)]
     first = module._job_page(value)
     assert first["next_coverage_offset"] == RESULT_LIMIT
     last = module._job_page(value, coverage_offset=first["next_coverage_offset"])
     assert last["coverage"]["skipped_notebooks"] == []
-    assert first["coverage"]["degraded_notebook_ids"] + last["coverage"]["degraded_notebook_ids"] == value["degraded_notebook_ids"]
+    assert first["coverage"]["degraded_notebook_ids"] + last["coverage"]["degraded_notebook_ids"] == value.degraded_notebook_ids
     assert last["next_coverage_offset"] is None
     exhausted = module._job_page(value, coverage_offset=100)
     assert exhausted["coverage"]["skipped_notebooks"] == exhausted["coverage"]["degraded_notebook_ids"] == []
@@ -348,13 +376,13 @@ async def test_read_and_cancel_forward_current_owner_and_allowlist(adapter):
 async def test_get_continues_coverage_independently_and_rejects_negative_offset(adapter):
     handlers, _, _, service = adapter
     saved = job(answer="完整答案")
-    saved["degraded_notebook_ids"] = [f"nb-{index}" for index in range(32)]
+    saved.degraded_notebook_ids = [f"nb-{index}" for index in range(32)]
     calls = []
     service.get_job = lambda *_args, **_kw: calls.append(True) or saved
     first = await handlers["get_global_ask"]("job-a", None)
     last = await handlers["get_global_ask"]("job-a", None, coverage_offset=first["next_coverage_offset"])
     assert first["answer"] == last["answer"] == "完整答案"
-    assert last["coverage"]["degraded_notebook_ids"] == saved["degraded_notebook_ids"][RESULT_LIMIT:]
+    assert last["coverage"]["degraded_notebook_ids"] == saved.degraded_notebook_ids[RESULT_LIMIT:]
     assert last["next_coverage_offset"] is None
     with pytest.raises(ValueError, match="分页位置不能小于零"):
         await handlers["get_global_ask"]("job-a", None, coverage_offset=-1)
@@ -377,11 +405,11 @@ async def test_unexpected_service_errors_never_echo_private_details(adapter, err
 
 def test_large_cjk_answer_and_citations_are_resumable_without_skipped_identity():
     full_answer = "全局原文证据😀\n" * 1500
-    refs = [{
-        "notebook_id": f"nb-{i}", "source_id": f"source-{i}",
-        "element_id": f"element-{i}", "quoted_span": "引用内容" * 500,
-        "source_file_name": "很长的标题" * 100,
-    } for i in range(43)]
+    refs = [_citation(
+        notebook_id=f"nb-{i}", source_id=f"source-{i}",
+        element_id=f"element-{i}", quoted_span="引用内容" * 500,
+        source_file_name="很长的标题" * 100,
+    ) for i in range(43)]
     saved = job(answer=full_answer, citations=refs)
     answer_offset = citation_offset = 0
     collected_text = []
@@ -467,7 +495,7 @@ async def test_discovery_search_reaches_beyond_first_twenty_allowlisted_notebook
 async def test_official_client_global_tools_need_no_selected_notebook(mcp_env, monkeypatch):
     notebook_id = mcp_env["notebook"].id
     saved = job(answer="跨库答案")
-    saved["resolved_notebook_ids"] = [notebook_id]
+    saved.resolved_notebook_ids = [notebook_id]
     calls = []
 
     def start(payload, **kwargs):
@@ -477,7 +505,7 @@ async def test_official_client_global_tools_need_no_selected_notebook(mcp_env, m
 
     service = SimpleNamespace(
         start=start, get_job=lambda *_args, **_kw: saved,
-        cancel=lambda *_args, **_kw: {**saved, "status": "cancelled"},
+        cancel=lambda *_args, **_kw: saved.model_copy(update={"status": "cancelled"}),
         cited_element=lambda *_args, **_kw: {
             "id": "element-a", "source_id": "source-a", "text": "引用原文",
         },

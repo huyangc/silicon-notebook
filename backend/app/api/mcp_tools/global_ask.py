@@ -2,7 +2,6 @@
 from functools import wraps
 import json
 import time
-from types import SimpleNamespace
 from typing import Any, Callable
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -91,12 +90,11 @@ _TRACE_DETAIL_CHARS = 400
 
 
 def _field(step: Any, name: str, default: Any = None) -> Any:
-    """Read one attribute off a ``TraceStep`` OR a plain dict alike.
+    """Read one attribute off a ``TraceStep`` or a plain dict alike.
 
-    A real job's trace is ``list[TraceStep]``; ``_job_like`` below leaves a
-    job-shaped test dict's ``trace`` as the raw list it already was (never
-    validated into real ``TraceStep`` rows -- this reader does not need that),
-    so a step here is either shape and this is the one place both are read.
+    A job's trace is ``list[TraceStep]``, but a step that arrives through a
+    replayed payload may still be a raw dict, so this is the one place both
+    shapes are read.
     """
     return step.get(name, default) if isinstance(step, dict) else getattr(step, name, default)
 
@@ -121,51 +119,6 @@ def _plain_citation(item: Any) -> dict[str, Any]:
     return item.model_dump(mode="json") if hasattr(item, "model_dump") else item
 
 
-class _LooseAnswerView:
-    """Attribute view over an ``answer``/``response``-shaped dict.
-
-    ``global_answer_text``/``_citations``/``_trace`` read ``.answer``,
-    ``.citations`` and ``.reasoning_trace`` by ATTRIBUTE, matching a live
-    ``AskResponse``/``GlobalAskAnswer``. A job-shaped test dict is not
-    obliged to satisfy either model's required fields (``label``/
-    ``location_label`` on ``Citation``, for one) to exercise pagination, so
-    this reads the dict's own keys straight through rather than validating
-    it into one -- a missing key answers ``None`` instead of raising, the
-    same way ``dict.get`` would.
-    """
-    __slots__ = ("_data",)
-
-    def __init__(self, data: dict[str, Any]) -> None:
-        object.__setattr__(self, "_data", data)
-
-    def __getattr__(self, name: str) -> Any:
-        return self._data.get(name)
-
-
-def _job_like(job: Any) -> Any:
-    """A real ``GlobalAskJob``, or a loose attribute view of a job-shaped dict.
-
-    Production always hands this a real job (every ``GlobalAskService``
-    method ``_job_page`` calls returns one); a test builds one, cheaply, as a
-    plain dict instead. ``global_answer_*`` need ``.answer``/``.response``/
-    ``.trace`` navigable by attribute either way -- a real job already is,
-    and this is the one adapter that makes a dict act like one too, without
-    running either shape through full model validation (which would demand
-    fields -- ``question``/``created_at`` on the job, ``label``/
-    ``location_label`` on each citation -- that a pagination-only test
-    fixture was never written to carry).
-    """
-    if isinstance(job, GlobalAskJob):
-        return job
-    data = job if isinstance(job, dict) else _plain(job)
-    answer, response = data.get("answer"), data.get("response")
-    return SimpleNamespace(
-        answer=_LooseAnswerView(answer) if answer else None,
-        response=_LooseAnswerView(response) if response else None,
-        trace=data.get("trace") or [],
-    )
-
-
 def _job_page(job: Any, answer_offset: int = 0, citation_offset: int = 0,
               coverage_offset: int = 0, trace_offset: int = 0) -> dict[str, Any]:
     """Keep independent text, citation, coverage and trace pages exact and resumable."""
@@ -178,10 +131,9 @@ def _job_page(job: Any, answer_offset: int = 0, citation_offset: int = 0,
     # supplies the handful of fields the projections do not cover
     # (``answer_id``/``grounded``/``completeness_notice``); the empty default
     # for the new shape is the same one the projection helpers document.
-    model = _job_like(job)
-    answer = global_answer_text(model)
-    citations = [_plain_citation(item) for item in global_answer_citations(model)]
-    trace_steps = global_answer_trace(model)
+    answer = global_answer_text(job)
+    citations = [_plain_citation(item) for item in global_answer_citations(job)]
+    trace_steps = global_answer_trace(job)
     legacy = data.get("answer") or data.get("response") or {}
     skipped = data.get("skipped_notebooks", [])
     degraded = data.get("degraded_notebook_ids", [])
@@ -401,10 +353,8 @@ def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[],
 
         result = await _run_with_progress(ctx, submit, label="ask_global")
         # ``submit`` returns either the needs-clarification pause (a plain,
-        # already budget-fitted dict, identified by its own ``status`` value
-        # rather than by being a dict -- a test's ``service.start`` double may
-        # itself return a job-shaped plain dict, which must still go through
-        # ``_job_page``) or a job (real ``GlobalAskJob`` or job-shaped dict).
+        # already budget-fitted dict, identified by its own ``status`` value)
+        # or a ``GlobalAskJob``.
         if isinstance(result, dict) and result.get("status") == "needs_clarification":
             return result
         return _job_page(result)

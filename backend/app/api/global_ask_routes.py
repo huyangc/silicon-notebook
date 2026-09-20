@@ -51,11 +51,14 @@ async def preview_global_ask_intent(
     be on submission.
     """
     cancel_event = threading.Event()
+    service = global_ask_service()
+    prepared = await asyncio.to_thread(
+        _call, service.prepare_intent_preview, payload, user_id=user.id,
+    )
 
     def run_preview() -> QueryIntentContract:
         return _call(
-            global_ask_service().preview_intent, payload,
-            user_id=user.id, cancel_event=cancel_event,
+            service.run_intent_preview, prepared, cancel_event=cancel_event,
         )
 
     task = asyncio.create_task(asyncio.to_thread(run_preview))
@@ -98,29 +101,26 @@ async def preview_global_ask_intent_stream(
     same way ``knowhow_routes``/``memory_routes`` each carry their own stage
     name rather than sharing one across features.
 
-    ONE deliberate difference from ``ask_routes.preview_ask_intent_stream``:
-    that endpoint resolves scope/history in a plain pre-stream step so a
-    404/422 keeps its real HTTP status, and only the model call itself runs
-    inside the stream. This endpoint runs ``GlobalAskService.preview_intent``
-    -- scope resolution, authority re-check AND the model call -- entirely
-    inside the stream worker, because there is no second public entry point
-    on ``GlobalAskService`` to split those two phases (the surface this
-    change may add is deliberately kept to the one ``preview_intent``
-    method). The practical effect: a scope/authority failure on THIS
-    endpoint surfaces as the stream's generic content-free
-    ``{"event": "error", "error": "global_ask_intent_failed"}`` frame rather
-    than a distinct pre-stream status code. The blocking endpoint above does
-    not have this gap -- ``task.result()`` re-raises the real
-    ``GlobalAskError`` there -- so a client that needs the specific reason
-    (foreign conversation, revoked access, empty question) can call it
-    instead of the stream.
+    TWO PHASES, exactly like ``ask_routes.preview_ask_intent_stream``: scope
+    resolution and the authority re-check run BEFORE the stream opens, so a
+    foreign conversation, a revoked share or an over-wide scope keeps its real
+    404/422 and its real Chinese sentence. Only the model call -- the slow
+    part the heartbeat exists for -- runs inside the stream. Running both
+    inside the stream is what the first cut did, and it turned every one of
+    those refusals into a 200 plus a content-free
+    ``{"event": "error", "error": "global_ask_intent_failed"}`` frame, which a
+    client cannot tell apart from "the model service is down".
     """
     cancel_event = threading.Event()
+    service = global_ask_service()
+    # Before the first frame: the response status is still negotiable here.
+    prepared = await asyncio.to_thread(
+        _call, service.prepare_intent_preview, payload, user_id=user.id,
+    )
 
     def run_preview() -> QueryIntentContract:
         return _call(
-            global_ask_service().preview_intent, payload,
-            user_id=user.id, cancel_event=cancel_event,
+            service.run_intent_preview, prepared, cancel_event=cancel_event,
         )
 
     return task_stream_response(

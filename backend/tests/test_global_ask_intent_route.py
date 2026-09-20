@@ -78,6 +78,43 @@ def test_intent_endpoint_stream_emits_final_contract(tmp_path, monkeypatch):
     assert client.get("/api/global-ask/conversations").json() == []
 
 
+@pytest.mark.parametrize("path", ["/intent", "/intent/stream"])
+def test_a_scope_failure_keeps_its_real_status_on_both_transports(
+    tmp_path, monkeypatch, path,
+):
+    """范围/鉴权失败在**开流之前**refuse,两条传输给出同一个状态码与同一句中文。
+
+    这两步一旦跑进流里,HTTP 状态就已经是 200 了,每一种拒绝都会退化成一帧内容
+    无关的 ``error``——客户端分不出「这段对话不是你的」和「模型服务挂了」。
+    """
+    client = _client(tmp_path, monkeypatch)
+    client.post("/api/notebooks", json={"name": "nb"})
+
+    response = client.post(
+        f"/api/global-ask{path}",
+        json={"question": "分析一下这批资料", "conversation_id": "gconv-foreign"},
+    )
+
+    assert response.status_code == 404
+    assert response.headers.get("X-User-Message") == "1"
+    assert "对话不存在" in response.text
+    # 一帧都没发出去过。
+    assert '"event"' not in response.text
+
+
+def test_an_empty_scope_is_refused_before_the_stream_opens(tmp_path, monkeypatch):
+    """没有可访问的笔记本 → 422,而不是 200 + error 帧。"""
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/global-ask/intent/stream", json={"question": "分析一下这批资料"},
+    )
+
+    assert response.status_code == 422
+    assert "没有可访问的笔记本" in response.text
+    assert '"event"' not in response.text
+
+
 # -- 服务层:范围/鉴权/只读契约 ------------------------------------------------
 
 def test_intent_preview_rechecks_authority_the_same_way_start_does(setup):

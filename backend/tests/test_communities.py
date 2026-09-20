@@ -1,4 +1,6 @@
 import json
+from contextlib import contextmanager
+
 import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
@@ -99,11 +101,51 @@ def _peer_service(peers_by_library):
     )
 
 
+def _peer_run(ids):
+    """把进程切进对等模式(参与集覆盖),轮转与帽只在这里面生效。"""
+    from app.services.retrieval_participants import (
+        ParticipantOverride, participant_override,
+    )
+    from app.services.retrieval_run import retrieval_run
+
+    @contextmanager
+    def _installed():
+        with retrieval_run(run_kind="ask_global", actor_id="user-1"):
+            with participant_override(ParticipantOverride(
+                notebook_ids=tuple(ids), tiers={},
+                attested_actor_id="user-1",
+            )):
+                yield
+
+    return _installed()
+
+
 def test_comparison_peer_names_truncates_by_rotating_over_libraries():
-    """总量帽按库轮转,不是逐库拼完切前 N 条。
+    """对等模式:总量帽按库轮转,不是逐库拼完切前 N 条。
 
     直接切前 N 条会把整个配额发给遍历顺序最靠前的那一两个库,后面的库一个名字
     都进不了子查询——多选一个库反而让它自己的兄弟实体被挤掉。
+    """
+    service = _peer_service({
+        "nb-a": ["a1", "a2", "a3"],
+        "nb-b": ["b1", "b2", "b3"],
+        "nb-c": ["c1", "c2", "c3"],
+    })
+
+    with _peer_run(["nb-a", "nb-b", "nb-c"]):
+        names = service.comparison_peer_names(
+            ["nb-a", "nb-b", "nb-c"], "Focal", "compare",
+            top_k=3, candidates=10, cap_factor=1,
+        )
+
+    assert names == ["a1", "b1", "c1"]
+
+
+def test_comparison_peer_names_keeps_single_library_behaviour_value_identical():
+    """单库(哪怕挂了三个参考库)逐值不变:顺序追加、无帽、一个也不少。
+
+    轮转与帽是为参与集带来的拥挤发明的;把它们加到单库模式上会重排一个既有
+    笔记本的子查询顺序、截掉它本来拿得到的名字,那是一次独立的产品行为改动。
     """
     service = _peer_service({
         "nb-a": ["a1", "a2", "a3"],
@@ -116,7 +158,35 @@ def test_comparison_peer_names_truncates_by_rotating_over_libraries():
         top_k=3, candidates=10, cap_factor=1,
     )
 
-    assert names == ["a1", "b1", "c1"]
+    assert names == ["a1", "a2", "a3", "b1", "b2", "b3", "c1", "c2", "c3"]
+
+
+def test_comparison_peer_names_stops_querying_once_the_cap_is_full():
+    """对等模式下达到帽即停止解析后面的库:装不下的查询不发。"""
+    asked: list = []
+
+    class _Unified:
+        def resolve_focal(self, notebook_id, key):
+            asked.append(notebook_id)
+            return "cluster:focal"
+
+        def comention_peers(self, notebook_id, focal, min_bridges, top_k):
+            return [(f"{notebook_id}-1", 5)]
+
+    service = CommunityQueryService(
+        notebooks=object(), unified_kg=_Unified(),
+        event_log=type("Log", (), {"emit": lambda *args, **kwargs: None})(),
+        sibling_min_bridge=5,
+    )
+
+    ids = ["nb-a", "nb-b", "nb-c", "nb-d"]
+    with _peer_run(ids):
+        names = service.comparison_peer_names(
+            ids, "Focal", "compare", top_k=2, candidates=10, cap_factor=1,
+        )
+
+    assert names == ["nb-a-1", "nb-b-1"]
+    assert asked == ["nb-a", "nb-b"]
 
 
 def test_comparison_peer_names_dedupes_and_keeps_a_deterministic_order():
@@ -125,24 +195,25 @@ def test_comparison_peer_names_dedupes_and_keeps_a_deterministic_order():
         "nb-b": ["shared", "b2"],
     })
 
-    names = service.comparison_peer_names(
-        ["nb-a", "nb-b"], "Focal", "compare",
-        top_k=4, candidates=10, cap_factor=2,
-    )
+    with _peer_run(["nb-a", "nb-b"]):
+        names = service.comparison_peer_names(
+            ["nb-a", "nb-b"], "Focal", "compare",
+            top_k=4, candidates=10, cap_factor=2,
+        )
 
     assert names == ["shared", "a2", "b2"]
 
 
 def test_comparison_peer_names_is_value_identical_for_a_single_library():
-    """单库(单参与库)逐值不变:该库最多交出 ``top_k`` 个,而帽 >= ``top_k``。"""
+    """一个库时轮转退化成原来的顺序,帽 >= ``top_k`` 所以恒不触发。"""
     service = _peer_service({"nb-a": ["a1", "a2", "a3", "a4"]})
 
-    assert service.comparison_peer_names(
-        ["nb-a"], "Focal", "compare", top_k=4, candidates=10, cap_factor=1,
-    ) == ["a1", "a2", "a3", "a4"]
-    assert service.comparison_peer_names(
-        ["nb-a"], "Focal", "compare", top_k=4, candidates=10, cap_factor=2,
-    ) == ["a1", "a2", "a3", "a4"]
+    for factor in (1, 2):
+        with _peer_run(["nb-a"]):
+            assert service.comparison_peer_names(
+                ["nb-a"], "Focal", "compare", top_k=4, candidates=10,
+                cap_factor=factor,
+            ) == ["a1", "a2", "a3", "a4"]
 
 
 def test_comparison_peer_names_without_any_library_is_empty():

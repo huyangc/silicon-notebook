@@ -214,6 +214,25 @@
       探测的成本（每库一次 `_lexical_corpus_langs`，与上面那条双语化待办同一处）、以及
       `exact_section_reserve` 的席位在跨库池子里该怎么分（今天它只认 `exact_ids` 这一个
       集合，跨库之后需要一个按库的口径，否则某一个库的章节能把保底席位全占了）。
+- [ ] **全局（对等）模式的元素检索臂联邦化**。`retrieval_candidates.retrieve_elements`
+      是第三条 **active-only** 补召回腿（前两条见上一条）：它只对传进来的那一个 notebook
+      发一次元素检索，没有联邦通道。对等模式下留着它，等于凭空给**名义 active** 多一条
+      别的参与库没有的腿；更糟的是它的命中会经 `evidence_context.element_citations` 出
+      引用卡，而那条装配一直是单库口径。D1-4 因此把它整条关掉（生产者一处闸 +
+      `ReasoningRetriever._element_search_skip` 让轨迹如实说明 + `_first_round_empty_
+      fallback` 不再自动补腿），代价如实：全局问答暂时没有「按原文元素定向检索」这条腿，
+      reasoning 的确定性通道全空时也不再自动补它。联邦化要连带决定逐库元素配额、以及
+      `element_citations` 的 tier 查表在跨库时按哪一本算。
+      **附带**：`search_elements` 这个动作仍然留在 reflect 的动作目录里（与
+      `reasoning_max_element_searches=0` 这个既有的「关着但仍提供」态同形），模型偶尔
+      选到它会浪费一轮反思。要把它从 prompt/schema/白名单三处一起摘掉，得给 `reflect()`
+      加第五把 run 级闸，属于动作契约的独立改动。
+- [ ] **全局（对等）模式没有单库那道「检索范围为空」的 409 预检**。单库入口的
+      `_require_ask_available` 在勾选后范围为空时直接 409，全局入口没有对应物：八个库
+      全空时这次 run 照样跑完，交回一份没有证据的答案（`grounded=False`），用户读到的是
+      「没查到」而不是「你这次的范围里什么都没有」。修法要先决定「全局范围为空」的判据
+      （逐库冻结天花板全空？还是还要看 chunk/KG 有没有行），以及它该在 `start()` 里拒绝
+      还是作为一种终态原因码。
 - [ ] **全局（对等）模式的表格分析臂只覆盖名义 active**。`AskService
       ._spreadsheet_reasoning_results` 走的是**真实挂载谓词**
       （`ask_engine_participant_notebooks`，鉴权级座位，绝不许变成覆盖感知——守卫

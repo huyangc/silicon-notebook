@@ -202,6 +202,7 @@ def service(tmp_path):
     sources.visible_source_ids_by_notebook = lambda ids: {
         nb: sorted(visible.get(nb, ())) for nb in ids
     }
+    events: list = []
     built = GlobalAskService(
         store=repo._runtime.global_ask_store,
         notebooks=lambda user: [SimpleNamespace(id=nb, name=nb.upper())
@@ -209,10 +210,12 @@ def service(tmp_path):
         can_read=lambda nb, user: nb in readable and user == "u",
         can_read_many=lambda ids, user: [nb for nb in ids if nb in readable],
         sources=sources, settings=settings, ask=_FakeAsk(),
+        event_log=SimpleNamespace(emit=events.append),
     )
     built.test_visible = visible
     built.test_fingerprints = fingerprints
     built.test_readable = readable
+    built.test_events = events
     yield built
     built.close()
     repo.close()
@@ -259,11 +262,17 @@ def test_chunk_mode_returns_standard_ask_response(service):
 
 
 def test_reasoning_mode_streams_trace_into_job(service):
-    steps = [TraceStep(step_type="plan", summary="拆解问题"),
-             TraceStep(step_type="search", summary="检索")]
+    """边跑边可见:引擎还没返回,轮询就已经读得到已推送的步骤。
+
+    步数闸(``_TRACE_SAVE_STEPS``)是这里真正被触发的那一道——时间闸在一次快到
+    测不出来的假引擎里恒不成立,所以用步数把「写出去了」这件事钉死,而不是靠
+    跑得够慢。
+    """
+    steps = [TraceStep(step_type="plan", summary=f"第 {index} 步")
+             for index in range(6)]
     seen: list = []
     service.ask = _FakeAsk(
-        rounds=[_ok(*_LIBRARIES)], trace=steps,
+        rounds=[[]], trace=steps,
         on_run=lambda fake: seen.append(
             [row.summary for row in
              service.store.job(_current_job_id(service), "u").trace]
@@ -273,13 +282,78 @@ def test_reasoning_mode_streams_trace_into_job(service):
     result = _run(service, mode="reasoning")
 
     assert result.status == "done"
-    # 边跑边可见:引擎还没返回时,轮询就已经读得到两步。
-    assert seen == [["拆解问题", "检索"]]
+    # 第 5 步触发步数闸,所以引擎返回之前至少看得到前 5 步。
+    assert seen[0][:5] == [f"第 {index} 步" for index in range(5)]
     # 终态清空,权威在 ``answer.reasoning_trace``,避免 payload 翻倍。
     assert result.trace == []
     assert [row.summary for row in result.answer.reasoning_trace] == [
-        "拆解问题", "检索",
+        f"第 {index} 步" for index in range(6)
     ]
+
+
+def test_the_trace_write_is_throttled_and_the_terminal_state_is_complete(service):
+    """每一步都整行重写 = O(n²) 字节(全局作业的 trace 在同一份 JSON payload 里,
+    不像单库那样是子表的一行 INSERT)。
+
+    注入时钟,不看墙钟:前四步只写一次(第一步那次),第五步触发步数闸,时间推
+    过阈值再来一步触发时间闸。终态无论如何都是完整的。
+    """
+    writes: list = []
+    original = service.store.save_progress
+    service.store.save_progress = lambda job, user_id: (
+        writes.append(len(job.trace)), original(job, user_id),
+    )[1]
+    clock = [1000.0]
+    service._clock = lambda: clock[0]
+
+    def push(fake):
+        plan = current_federated_run_plan()
+        assert plan is not None
+
+    steps = [TraceStep(step_type="plan", summary=f"s{index}")
+             for index in range(7)]
+    service.ask = _FakeAsk(rounds=[[]], trace=steps, on_run=push)
+
+    result = _run(service, mode="reasoning")
+
+    assert result.status == "done"
+    # 第 1 步(距上次写 ∞)写一次,之后要再攒够 ``_TRACE_SAVE_STEPS`` 步才写第
+    # 二次(第 6 步);第 2~5 步一次都不落库。终态那次是收尾的进度写。
+    assert writes[:2] == [1, 6], writes
+    assert not {2, 3, 4, 5} & set(writes), writes
+    assert [row.summary for row in result.answer.reasoning_trace] == [
+        f"s{index}" for index in range(7)
+    ]
+
+
+def test_the_trace_time_bound_also_fires(service):
+    """时间闸单独有用例,否则它是一条永不触发的死代码。"""
+    writes: list = []
+    original = service.store.save_progress
+    service.store.save_progress = lambda job, user_id: (
+        writes.append(len(job.trace)), original(job, user_id),
+    )[1]
+    clock = [1000.0]
+    service._clock = lambda: clock[0]
+
+    def tick(step):
+        clock[0] += 10.0
+
+    steps = [TraceStep(step_type="plan", summary=f"s{index}")
+             for index in range(3)]
+
+    class _TickingAsk(_FakeAsk):
+        def ask(self, notebook_id, payload, **kwargs):
+            on_trace = kwargs.get("on_trace")
+            kwargs["on_trace"] = lambda step: (tick(step), on_trace(step))[1]
+            return super().ask(notebook_id, payload, **kwargs)
+
+    service.ask = _TickingAsk(rounds=[[]], trace=steps)
+
+    assert _run(service, mode="reasoning").status == "done"
+
+    # 每一步之间时钟都跳过阈值,所以三步各写一次。
+    assert writes[:3] == [1, 2, 3], writes
 
 
 def _current_job_id(service):
@@ -292,40 +366,41 @@ def _current_job_id(service):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("mode", ["chunk", "reasoning"])
-def test_answers_table_is_never_written(tmp_path, mode):
+def test_answers_table_is_never_written(tmp_path, monkeypatch, mode):
     """真 ``AskService``,桩 ``ask_state``:引擎走完一整轮也不碰它。
 
     这条用例故意不用假引擎——它要证明的正是**生产的** ``_prepare_turn`` /
     ``_save_answer`` 在 detached turn 下的行为,假引擎证明不了。
-    """
-    settings = Settings(
-        _env_file=None, database_url=f"sqlite:///{tmp_path / 'g.db'}",
-        storage_dir=str(tmp_path / "s"),
-    )
-    repo = SQLiteRepository(settings)
-    try:
-        from app.models.notebooks import NotebookCreate
 
-        notebooks = [repo.create_notebook(NotebookCreate(name=f"库{i}"))
-                     for i in range(2)]
-        user_id = repo.current_user().id
+    两个断言缺一不可:作业必须 ``done``(不是「随便什么终态」——一次在检索之前
+    就炸掉的 run 同样不会碰 store,那样这条守卫就恒真了),而且 ``_save_answer``
+    必须**真的被调用过**并交回 detached 的空 answer id。
+    """
+    repo, notebooks, user_id = _e2e_repo(
+        tmp_path, monkeypatch, answer="这些库里有三篇手册。",
+    )
+    try:
         service = repo._runtime.global_ask_service()
         trap = _WriteTrap()
         service.ask.ask_state = trap
-        job = service.start(
-            GlobalAskRequest(
-                question="低温性能在这几个库里分别是怎么写的", mode=mode,
-                notebook_scope={"mode": "include",
-                                "notebook_ids": [nb.id for nb in notebooks]},
-            ),
-            user_id=user_id,
+        saved: list = []
+        original_save = service.ask._save_answer
+
+        def spy(*args, **kwargs):
+            answer_id = original_save(*args, **kwargs)
+            saved.append(answer_id)
+            return answer_id
+
+        monkeypatch.setattr(service.ask, "_save_answer", spy)
+
+        result = _e2e_answer(
+            repo, notebooks, user_id, "介绍一下这个notebook中的文章", mode=mode,
         )
-        deadline = time.monotonic() + 10
-        while job.job_id in service._events and time.monotonic() < deadline:
-            threading.Event().wait(0.01)
-        result = service.get_job(job.job_id, user_id=user_id)
-        assert result.status in ("done", "failed")
+
+        assert result.status == "done", result.error
         assert trap.touched == []
+        # 走到了持久化收口,并且那一步返回了 detached 的空值。
+        assert saved == [""], saved
     finally:
         repo.close()
 
@@ -549,6 +624,81 @@ def test_a_library_that_answers_a_later_round_is_not_skipped(service):
     assert result.degraded_notebook_ids == ["a"]
 
 
+def test_concurrent_receipt_callbacks_do_not_lose_coverage(service):
+    """两条线程同时回执:聚合与持久化都不能丢账。
+
+    reasoning 把子查询扇到引擎自己的池上,每条线程各自进一次联邦通道,所以
+    ``on_library`` / ``on_evidence`` 是**并发**回调。握手(``Barrier``)构造出
+    「两条回调同时在 flight」这个事实,而不是靠 sleep 等它发生。
+    """
+    from threading import Barrier, Thread
+
+    ready = Barrier(2, timeout=5)
+
+    class _ConcurrentAsk(_FakeAsk):
+        def ask(self, notebook_id, payload, **kwargs):
+            with retrieval_run(
+                run_kind="ask_reasoning", actor_id=kwargs["user_id"],
+            ):
+                plan = current_federated_run_plan()
+                errors: list = []
+
+                def leg(library, element_id):
+                    try:
+                        ready.wait()
+                        plan.on_library(
+                            library,
+                            LibraryOutcome(status="ok", candidate_count=1),
+                        )
+                        plan.on_evidence({element_id: (f"s-{library}", "fp")})
+                    except BaseException as exc:  # noqa: BLE001
+                        errors.append(exc)
+
+                threads = [
+                    Thread(target=leg, args=("a", "e-a-1")),
+                    Thread(target=leg, args=("b", "e-b-1")),
+                ]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(5)
+                assert not errors, errors
+                plan.on_library(
+                    "c", LibraryOutcome(status="skipped", reason="timeout"),
+                )
+                return AskResponse(
+                    answer_id="", conclusion="结论", answer="答案",
+                    mode="reasoning", conversation_id="gconv-x",
+                )
+
+    service.ask = _ConcurrentAsk()
+
+    result = _run(service, mode="reasoning")
+
+    assert result.status == "done"
+    # 两条并发回执都记住了,顺序仍然是解析序。
+    assert result.searched_notebook_ids == ["a", "b"]
+    assert [row.notebook_id for row in result.skipped_notebooks] == ["c"]
+
+
+def test_a_stale_coverage_snapshot_is_never_published_after_a_fresher_one(service):
+    """序号闸:拿着旧快照的写者在新快照落地之后不许再写。
+
+    没有这道闸,两条并发回调会以「都读、都通过、旧的最后写」收场,持久化的覆盖
+    列表于是往回走——一个库从 ``searched`` 里消失又出现,轮询读到的是一次在丢
+    地盘的 run。
+    """
+    from app.services.global_ask import _RunState
+
+    state = _RunState(["a", "b"])
+    first, *_ = state.coverage()
+    second, *_ = state.coverage()
+
+    assert state.claim_publish(second) is True
+    assert state.claim_publish(first) is False
+    assert state.claim_publish(second) is False
+
+
 def test_receipt_order_follows_resolved_ids(service):
     """回执按解析序,不按完成序:轮询不能看到收据来回跳。"""
     service.ask = _FakeAsk(rounds=[[
@@ -611,17 +761,18 @@ def test_changed_evidence_returns_retry_copy(service):
     assert result.cited_notebook_ids == []
 
 
-def test_a_missing_fingerprint_is_refused_not_accepted(service):
-    """第 2 轮指纹读失败 → 只在那一轮出现的 element 没有「之前」 → 整份作废。
+def test_an_unreadable_fingerprint_is_refused_not_accepted(service):
+    """第 2 轮指纹读失败 → 那一轮的 element 被**明确**标成 ``None`` → 整份作废。
 
-    ``_report_evidence`` 读失败时按契约回传**空表**,正是为了让复核拒绝而不是
-    放行未经核对的引用。所以「累积表非空」不能当作放行理由:判据是**这一条**
-    引用的 element 在不在表里。
+    契约的三态在这里起作用:``None`` 是「走过联邦 chunk 通道但读不到指纹」,
+    是一条**声明出来的**拒绝;它与「压根没走过那条通道」(缺席)是两件事,后者
+    是文档概览/集合枚举的常态,按天花板判即可。所以「累积表非空」不构成放行
+    理由,判据是**这一条**引用的 element 在表里是什么状态。
     """
     service.ask = _FakeAsk(
         rounds=[_ok(*_LIBRARIES), _ok(*_LIBRARIES)],
         citations=[_citation("b", 2)],
-        evidence=[{"e-b-1": ("s-b", "原文")}, {}],
+        evidence=[{"e-b-1": ("s-b", "原文")}, {"e-b-2": None}],
     )
     service.test_visible["b"] = {"s-b"}
     service.test_fingerprints.update({
@@ -632,6 +783,42 @@ def test_a_missing_fingerprint_is_refused_not_accepted(service):
 
     assert result.answer.citations == []
     assert "变化" in result.answer.answer
+    assert service.test_events[-1]["reason"] == "unreadable"
+
+
+def test_a_real_snapshot_is_never_overwritten_by_a_later_unreadable_one(service):
+    """第 1 轮读到了真快照,第 2 轮同一个 element 读失败 → 仍按真快照判。
+
+    契约规则 2:run 里最早的那份快照就是合法的「之前」。让后到的 ``None`` 覆盖
+    它,等于一次读失败就能作废一份本来完全可佐证的答案。
+    """
+    service.ask = _FakeAsk(
+        rounds=[_ok(*_LIBRARIES), _ok(*_LIBRARIES)],
+        citations=[_citation("b")],
+        evidence=[{"e-b-1": ("s-b", "原文")}, {"e-b-1": None}],
+    )
+    service.test_visible["b"] = {"s-b"}
+    service.test_fingerprints["e-b-1"] = ("s-b", "原文")
+
+    result = _run(service, mode="reasoning")
+
+    assert [row.element_id for row in result.answer.citations] == ["e-b-1"]
+    assert result.answer.grounded is True
+
+
+def test_a_later_real_snapshot_replaces_an_unreadable_one(service):
+    """反向:先 ``None``、后真快照 → 用真快照,不停留在拒绝态。"""
+    service.ask = _FakeAsk(
+        rounds=[_ok(*_LIBRARIES), _ok(*_LIBRARIES)],
+        citations=[_citation("b")],
+        evidence=[{"e-b-1": None}, {"e-b-1": ("s-b", "原文")}],
+    )
+    service.test_visible["b"] = {"s-b"}
+    service.test_fingerprints["e-b-1"] = ("s-b", "原文")
+
+    result = _run(service, mode="reasoning")
+
+    assert [row.element_id for row in result.answer.citations] == ["e-b-1"]
 
 
 def test_a_source_that_left_the_frozen_ceiling_voids_the_answer(service):
@@ -647,6 +834,55 @@ def test_a_source_that_left_the_frozen_ceiling_voids_the_answer(service):
 
     assert result.answer.citations == []
     assert "变化" in result.answer.answer
+
+
+def test_a_run_with_no_federated_call_keeps_its_real_element_citations(service):
+    """集合枚举 / 文档概览形状:引用的是**真的** ``source_elements`` 行,但这条路
+    一次联邦调用都不发,所以累积表里没有它们的快照。
+
+    「缺席 → 拒绝」会把这类答案 100% 判成作废。缺席的正确读法是「从未走过联邦
+    chunk 通道」,判据只剩天花板那一半 + 「现读那一行还挂在引用声明的来源下」。
+    """
+    service.ask = _FakeAsk(
+        rounds=[[]], citations=[_citation("b")], evidence=None,
+    )
+    service.test_visible["b"] = {"s-b"}
+    # 真实存在的 element 行,但没有任何一轮联邦调用给它发过指纹。
+    service.test_fingerprints["e-b-1"] = ("s-b", "原文")
+
+    result = _run(service)
+
+    assert result.status == "done"
+    assert result.answer.grounded is True
+    assert [row.notebook_id for row in result.answer.citations] == ["b"]
+    assert not [row for row in service.test_events
+                if row.get("kind") == "global_ask_citations_void"]
+
+
+def test_an_unfederated_citation_whose_element_moved_source_is_refused(service):
+    """缺席那一支不是免检:现读那一行若已经挂到别的来源下,照样作废。"""
+    service.ask = _FakeAsk(
+        rounds=[[]], citations=[_citation("b")], evidence=None,
+    )
+    service.test_visible["b"] = {"s-b"}
+    service.test_fingerprints["e-b-1"] = ("s-other", "原文")
+
+    result = _run(service)
+
+    assert result.answer.citations == []
+    assert service.test_events[-1]["reason"] == "changed"
+
+
+def test_an_unattributed_citation_is_reported_under_its_own_reason(service):
+    """空归属是 D0 归一漏改的告警面,不能和「证据变了」混成一个原因码。"""
+    blank = _citation("b").model_copy(update={"notebook_id": ""})
+    service.ask = _FakeAsk(rounds=[_ok(*_LIBRARIES)], citations=[blank])
+    service.test_visible["b"] = {"s-b"}
+
+    result = _run(service)
+
+    assert result.answer.citations == []
+    assert service.test_events[-1]["reason"] == "unattributed"
 
 
 def test_a_citation_without_a_source_element_is_held_to_the_ceiling_only(service):
@@ -942,5 +1178,133 @@ def test_end_to_end_answer_cites_more_than_one_library(tmp_path, monkeypatch):
         assert result.searched_notebook_ids == [nb.id for nb in notebooks]
         # 八库 run 不得冷加载任何共享 scale 索引(``_peek_only`` 对全部腿生效)。
         assert loads == []
+    finally:
+        repo.close()
+
+
+def _e2e_repo(tmp_path, monkeypatch, *, answer):
+    """真仓库 + 假模型,三个有内容的库。返回 ``(repo, notebooks, user_id)``。"""
+    import json
+
+    from app.models.notebooks import NotebookCreate
+    from app.repositories.ports import UploadedSourceFile
+    from app.services.embedding import FakeEmbedder
+    from tests.model_testkit import (
+        RecordingModelProvider, bind_all_embedding_clients, bind_chat_client,
+    )
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'e2e.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    repo = SQLiteRepository(Settings(), model_provider=RecordingModelProvider())
+    bind_all_embedding_clients(repo, FakeEmbedder(dim=16))
+
+    class _Answering:
+        configured = True
+        model = "fake"
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "sub_queries" in schema_hint:
+                return json.dumps({"sub_queries": [{"query": "文档"}]})
+            prompt = "\n".join(str(row.get("content", "")) for row in messages)
+            keys = sorted(set(
+                part.split("]")[0]
+                for part in prompt.split("[k")[1:] if "]" in part
+            ))
+            return json.dumps({
+                "conclusion": answer,
+                "answer": answer + "".join(f"[k{key}]" for key in keys[:4]),
+                "anchors": [], "grounded": True,
+                "summary": answer, "sections": [],
+            })
+
+    for workload in ("ask_answer", "query_rewrite", "reasoning_agent",
+                     "evidence_refine", "source_summary"):
+        bind_chat_client(repo, workload, _Answering())
+
+    notebooks = []
+    for index in range(3):
+        notebook = repo.create_notebook(NotebookCreate(name=f"库{index}"))
+        source = repo.upload_sources(notebook.id, [UploadedSourceFile(
+            file_name=f"手册{index}.md",
+            content_type="text/markdown",
+            content=(
+                f"# 手册{index}\n\n## 低温性能\n\n"
+                f"本器件在低温下的增益随温度下降而上升，实测在零下四十度"
+                f"仍然满足指标{index}。低温性能是第{index}章的主题。"
+            ).encode("utf-8"),
+        )], scheduler=lambda _source_id: None)[0]
+        repo.process_source(source.id)
+        notebooks.append(notebook)
+    return repo, notebooks, repo.current_user().id
+
+
+def _e2e_answer(repo, notebooks, user_id, question, **kwargs):
+    service = repo._runtime.global_ask_service()
+    job = service.start(
+        GlobalAskRequest(
+            question=question,
+            notebook_scope={"mode": "include",
+                            "notebook_ids": [nb.id for nb in notebooks]},
+            **kwargs,
+        ),
+        user_id=user_id,
+    )
+    deadline = time.monotonic() + 40
+    while job.job_id in service._events and time.monotonic() < deadline:
+        threading.Event().wait(0.02)
+    return service.get_job(job.job_id, user_id=user_id)
+
+
+def test_end_to_end_document_overview_is_not_voided(tmp_path, monkeypatch):
+    """文档概览:真库、真引擎、一次联邦调用都没有,答案必须**不**被作废。
+
+    这条路的引用是真的 ``source_elements`` 行,却从不经过联邦 chunk 通道,所以
+    累积指纹表里没有它们。把缺席当拒绝,就是把「我的库里有哪些文档」这类答案
+    100% 判成「引用原文发生了变化」。
+    """
+    repo, notebooks, user_id = _e2e_repo(
+        tmp_path, monkeypatch, answer="这些库里有三篇手册。",
+    )
+    try:
+        result = _e2e_answer(
+            repo, notebooks, user_id, "介绍一下这个notebook中的文章",
+        )
+
+        assert result.status == "done", result.error
+        assert "引用原文在回答期间发生了变化" not in result.answer.answer
+        assert result.answer.citations, "文档概览必须交出引用"
+        origins = {row.notebook_id for row in result.answer.citations}
+        assert all(row.notebook_id for row in result.answer.citations)
+        assert origins <= {nb.id for nb in notebooks}
+        # 名义 active 自己的引用也带归属。
+        assert notebooks[0].id in origins
+        # 一次联邦调用都没有的 run 不诬告任何库。
+        assert result.searched_notebook_ids == [nb.id for nb in notebooks]
+        assert result.skipped_notebooks == []
+    finally:
+        repo.close()
+
+
+def test_end_to_end_reasoning_enumeration_is_not_voided(tmp_path, monkeypatch):
+    """集合枚举(reasoning)同形:引用来自枚举行,不经联邦通道,不得被作废。"""
+    repo, notebooks, user_id = _e2e_repo(
+        tmp_path, monkeypatch, answer="这些库里有三篇手册。",
+    )
+    try:
+        result = _e2e_answer(
+            repo, notebooks, user_id, "介绍一下这个notebook中的文章",
+            mode="reasoning",
+        )
+
+        assert result.status == "done", result.error
+        assert "引用原文在回答期间发生了变化" not in result.answer.answer
+        assert all(row.notebook_id for row in result.answer.citations)
+        # 对等模式关掉了单库元素腿:轨迹里不该出现一次真的 search_elements。
+        trace = result.answer.reasoning_trace or []
+        assert not [
+            step for step in trace
+            if step.step_type == "fallback" and "降级查原文" in step.summary
+        ]
     finally:
         repo.close()

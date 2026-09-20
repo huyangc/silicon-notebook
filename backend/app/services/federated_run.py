@@ -147,7 +147,17 @@ class FederatedRunPlan:
       it as a context manager, because leaving that block shuts down a pool the
       next job still needs.
     * ``window`` is re-read rather than captured, so the fair share shrinks and
-      grows as other jobs come and go.
+      grows as other fan-outs come and go.
+    * ``call_scope`` is how ``window`` knows how many there are. The consumer
+      enters it around ONE whole fan-out -- every leg of one call inside one
+      scope, released in ``finally`` -- and the owner counts the open scopes.
+      Without it the only thing the owner can count is JOBS, and a reasoning
+      job is not one fan-out: it federates once per sub-query, from several of
+      the engine's own threads at once, so a per-job share hands one job the
+      whole pool while its own remaining legs queue up behind it and expire.
+      ``None`` (the default) means "nobody is counting" and the consumer must
+      treat it as a no-op, which is what keeps the ordinary notebook path --
+      which has no plan at all -- byte-identical.
     * ``phase_timeout_seconds`` is the budget of ONE federated call -- one
       fan-out over the participant set -- and the consumer turns it into an
       absolute deadline when that call begins.  It is deliberately NOT an
@@ -204,6 +214,10 @@ class FederatedRunPlan:
     cancel: Any
     on_library: Callable[[str, LibraryOutcome], None]
     on_evidence: Callable[[Mapping[str, "tuple[str, str] | None"]], None]
+    # ``Callable[[], ContextManager[None]] | None``, typed loosely for the same
+    # reason the callables above are: this is a leaf module. Last and
+    # defaulted, so every existing construction of this plan keeps working.
+    call_scope: Any = None
 
 
 _DETACHED_TURN: "ContextVar[DetachedAskTurn | None]" = ContextVar(

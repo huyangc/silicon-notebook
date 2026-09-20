@@ -97,6 +97,7 @@ import math
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any, Sequence
 
@@ -911,6 +912,31 @@ def _run_planned_tasks(candidates, tasks: list, plan, deadline: float) -> tuple:
     and not on that check.
     """
     _refuse_pool_thread(plan)
+    with _call_scope(plan):
+        return _run_planned_legs(candidates, tasks, plan, deadline)
+
+
+@contextmanager
+def _call_scope(plan):
+    """Declare this whole fan-out in flight, for as long as it runs.
+
+    The owner counts open scopes and divides the shared pool by that count
+    (see ``FederatedRunPlan.call_scope``), so the scope has to wrap the entire
+    call -- from before the first submission to after the last leg is either
+    harvested or abandoned -- and has to be released on every exit. A plan
+    without one is a no-op, which is what keeps every non-global caller
+    unchanged.
+    """
+    scope = getattr(plan, "call_scope", None)
+    if scope is None:
+        yield
+        return
+    with scope():
+        yield
+
+
+def _run_planned_legs(candidates, tasks: list, plan, deadline: float) -> tuple:
+    """``_run_planned_tasks``' body, inside its call scope."""
     phase = threading.Event()
     abort = _AnyCancelled(plan.cancel, phase)
     results: list = [_empty_leg() for _ in tasks]

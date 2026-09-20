@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from contextvars import copy_context
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import threading
 import time
+from typing import Any, Mapping
 from uuid import uuid4
 
 from app.core.ask_retrieval_policy import DEFAULT_RETRIEVAL_EFFORT
@@ -45,6 +48,56 @@ _EVIDENCE_CHANGED_COPY = (
 )
 _UNKNOWN_ENGINE_COPY = "不支持的问答引擎，请刷新页面后重试。"
 _PLUGIN_ENGINE_COPY = "全局问答暂不支持该引擎，请选择其他引擎后重试。"
+
+# How often a running job's reasoning trace is rewritten into its row. Two
+# bounds rather than one: the time bound keeps a slow run's panel moving, the
+# step bound keeps a burst from waiting out the timer. Both are deliberately
+# NOT settings -- they tune a write amplification, not a quality or cost budget
+# an operator has any basis to choose (see ``_append_trace``).
+_TRACE_SAVE_SECONDS = 0.5
+_TRACE_SAVE_STEPS = 5
+
+# Why a citation's evidence could not be attested. Content-free; the copy the
+# user sees is the same one sentence in every case, but an operator has to be
+# able to tell "the original changed" from "this citation carries no library
+# at all", because the second is a normalization gap in the citation
+# producers, not a race with an editing user.
+_VOID_CHANGED = "changed"          # snapshot exists and no longer matches
+_VOID_UNREADABLE = "unreadable"    # travelled the federated channel, unreadable
+_VOID_UNATTRIBUTED = "unattributed"  # no notebook id: a D0 normalization gap
+_VOID_OUT_OF_CEILING = "out_of_ceiling"  # source left the frozen ceiling
+
+
+@dataclass(frozen=True)
+class _PreparedIntentPreview:
+    """Everything phase two of the intent preview needs, already authorized.
+
+    Frozen and explicit rather than a tuple: it crosses from the request
+    thread (where the authority check ran) to a worker thread, and a caller
+    must not be able to widen the participant set between the two phases.
+    """
+
+    question: str
+    nominal_active: str
+    override: Any
+    source_ceiling: Mapping[str, Any]
+    turn: DetachedAskTurn
+
+
+class _Absent:
+    """'This element never travelled the federated chunk channel.'
+
+    A sentinel rather than ``None``, because ``None`` is already a STATED
+    value in the evidence table -- 'it did travel that channel and could
+    not be fingerprinted' -- and the two mean opposite things to the
+    citation re-check: absence is accepted under the ceiling check alone,
+    ``None`` is refused.
+    """
+
+    __slots__ = ()
+
+
+_ABSENT = _Absent()
 
 
 class GlobalAskError(Exception):
@@ -113,18 +166,27 @@ class _RunState:
       searched AND degraded;
     * answered everywhere -> searched.
 
-    ``lock`` is not decoration. The receipt callbacks fire on whichever thread
-    made the federated call and the trace callback fires from the engine's own
-    stack; both mutate the same job object the owning thread persists.
+    ``lock`` is not decoration, and it is not only about the job thread. A
+    reasoning run fans its sub-queries out over the engine's OWN pool, and each
+    of those threads enters the federation independently -- so ``on_library``
+    and ``on_evidence`` fire from SEVERAL threads at once, all folding into
+    this one object and all persisting the same job row. Every read and write
+    here is therefore under the lock, and ``coverage`` hands back a SNAPSHOT
+    with a monotonic sequence number so two concurrent progress saves cannot
+    land out of order and publish a coverage list that went backwards.
     """
 
     __slots__ = (
         "order", "evidence", "succeeded", "failed", "degraded", "federated",
-        "error", "lock",
+        "error", "lock", "publish_lock", "_sequence", "_published",
+        "traced_at", "traced_at_count",
     )
 
     def __init__(self, order):
         self.order = list(order)
+        # When the trace was last persisted, and how many steps were in it then.
+        self.traced_at = 0.0
+        self.traced_at_count = 0
         self.evidence: dict = {}
         self.succeeded: set = set()
         self.failed: dict = {}
@@ -132,6 +194,15 @@ class _RunState:
         self.federated = False
         self.error: BaseException | None = None
         self.lock = threading.RLock()
+        # A SECOND lock, held across "claim the snapshot, mutate the job row,
+        # write it". ``lock`` guards the aggregation and must never be held
+        # across a database write, or a receipt callback would block every
+        # other federated call's callbacks for the length of that write. This
+        # one is what makes the writes themselves serial, so a stale snapshot
+        # cannot land after a fresher one even though both passed their claim.
+        self.publish_lock = threading.Lock()
+        self._sequence = 0
+        self._published = 0
 
     def record(self, notebook_id, outcome) -> None:
         with self.lock:
@@ -146,15 +217,33 @@ class _RunState:
     def record_evidence(self, mapping) -> None:
         """Merge one federated call's retrieval-time fingerprints.
 
-        Merge, never replace: a reasoning run publishes a map per round and the
-        citation re-check asks about every element that reached the answer, so
-        an empty map from a round that selected nothing must not erase what the
-        earlier rounds established.
+        THREE STATES, per ``FederatedRunPlan.on_evidence``'s contract:
+
+        * a ``(source_id, fingerprint)`` pair is the retrieval-time snapshot;
+        * ``None`` states "this element came through the federated chunk
+          channel and its fingerprint could not be read" -- a refusal, carried
+          explicitly so a failed read fails closed element by element;
+        * ABSENCE means the element never travelled that channel at all.
+
+        Merging therefore has a direction. A real snapshot is authoritative and
+        is never overwritten by a later ``None`` (rule 2 of the contract: the
+        earliest snapshot in the run is a legitimate "before"), while a later
+        successful read does replace a ``None``. Plain ``update`` would get
+        this backwards and let one failed round refuse citations an earlier
+        round had already attested.
         """
         if not mapping:
             return
         with self.lock:
-            self.evidence.update(mapping)
+            for element_id, snapshot in mapping.items():
+                if snapshot is None and self.evidence.get(element_id) is not None:
+                    continue
+                self.evidence[element_id] = snapshot
+
+    def evidence_snapshot(self) -> dict:
+        """A copy the citation re-check can iterate while callbacks still fire."""
+        with self.lock:
+            return dict(self.evidence)
 
     def fail(self, exc: BaseException) -> None:
         """Remember the FIRST failure raised inside a callback."""
@@ -178,11 +267,19 @@ class _RunState:
             raise error
 
     def coverage(self):
-        """``(searched, degraded, skipped_reasons)`` in resolved order.
+        """``(sequence, searched, degraded, skipped_reasons)`` in resolved order.
 
         Built by ``_ordered_insert`` from sets, whose iteration order is
         unspecified: a poller must never see the receipts permute between two
         progress saves for reasons that have nothing to do with the run.
+
+        The whole snapshot is taken under the lock and stamped with a
+        monotonically increasing ``sequence``. Several federated calls run
+        concurrently under a reasoning run, so two callbacks can be between
+        "read the state" and "write the row" at the same time; without the
+        stamp the slower writer could publish the older snapshot last and a
+        poller would watch the coverage list shrink. ``publish`` is what
+        enforces the ordering -- see it for why the check belongs there.
 
         A run that never federated at all -- a document overview or a
         collection enumeration answers straight from the participant-aware
@@ -193,8 +290,10 @@ class _RunState:
         exactly what ``queue_deadline`` exists NOT to do.
         """
         with self.lock:
+            self._sequence += 1
+            sequence = self._sequence
             if not self.federated:
-                return list(self.order), [], {}
+                return sequence, list(self.order), [], {}
             searched, degraded = [], []
             for notebook_id in self.succeeded:
                 _ordered_insert(searched, notebook_id, self.order)
@@ -210,7 +309,23 @@ class _RunState:
                 for notebook_id, reason in self.failed.items()
                 if notebook_id not in self.succeeded
             }
-        return searched, degraded, skipped
+        return sequence, searched, degraded, skipped
+
+    def claim_publish(self, sequence) -> bool:
+        """May a writer holding ``sequence`` still publish it?
+
+        False once a NEWER snapshot has been published. The check and the
+        bookkeeping are one atomic step, which is the whole point: two
+        concurrent receipt callbacks otherwise interleave as "both check, both
+        pass, the older one writes last" and the persisted coverage goes
+        backwards -- a library disappears from ``searched`` and then comes
+        back, which a poller renders as a run losing ground.
+        """
+        with self.lock:
+            if sequence <= self._published:
+                return False
+            self._published = sequence
+            return True
 
 
 # Name prefix of the SHARED retrieval pool's threads. The job thread must not
@@ -248,6 +363,12 @@ class GlobalAskService:
         self._workers = {}
         self._pending = 0
         self._closed = False
+        # Monotonic clock, injectable so the trace throttle can be tested with
+        # a handshake instead of a wall-clock sleep.
+        self._clock = time.monotonic
+        # How many FEDERATED CALLS are in flight across the whole process --
+        # not how many jobs. See ``_retrieval_window``.
+        self._federated_calls = 0
         # ONE retrieval pool per service instance, shared by every job it runs.
         # The runtime composes exactly one service per process, which is what
         # makes ``global_ask_retrieval_concurrency`` a real upper bound on
@@ -284,11 +405,27 @@ class GlobalAskService:
         return row
 
     def _save_if_open(self, job, user_id, *, progress=False):
-        """No detached worker may reopen persistence after runtime shutdown."""
+        """No detached worker may reopen persistence after runtime shutdown.
+
+        ⛔ THE LOCK GUARDS THE FLAG, NOT THE WRITE. ``self._lock`` is the
+        process-level lock ``_retrieval_window`` and admission also take, so
+        holding it across a database write makes one job's slow write block
+        every other job's top-up loop -- while those jobs' per-library budgets
+        keep running. The flag is read under the lock and the write happens
+        outside it.
+
+        The resulting window is one row: a shutdown that flips ``_closed``
+        between the read and the write lets that one write through. It cannot
+        resurrect a job, because the durable guard is in the statement itself
+        -- both store writes are ``WHERE ... status='running'`` and report
+        their ``rowcount``, so a job the shutdown (or a cancellation, or a
+        deletion) has already moved out of ``running`` matches no row and this
+        returns False exactly as it did before.
+        """
         with self._lock:
             if self._closed:
                 return False
-            return self.store.save_progress(job, user_id) if progress else self.store.save(job, user_id)
+        return self.store.save_progress(job, user_id) if progress else self.store.save(job, user_id)
 
     def _history(self, conversation, ids, user_id, allowed, authority_check):
         """``(history, user_history)`` in the shapes the engine already speaks.
@@ -428,20 +565,53 @@ class GlobalAskService:
         )
         return conversation, scope, ids, allowed, source_ceiling, history, user_history
 
-    def preview_intent(self, payload: GlobalAskIntentPreviewRequest, *, user_id,
-                        allowed_notebook_ids=None, authority_check=None,
-                        cancel_event=None) -> QueryIntentContract:
-        """Preview a global reasoning question's understanding before any job exists.
+    def prepare_intent_preview(self, payload: GlobalAskIntentPreviewRequest, *,
+                                user_id, allowed_notebook_ids=None,
+                                authority_check=None):
+        """Phase ONE of the intent preview: resolve scope and re-check authority.
 
-        Resolves the identical scope ``start()`` would from the identical
-        inputs (``_resolve_run_scope``) -- including its authority re-checks,
-        so access revoked between preview and submission is refused here the
-        same way ``start()`` refuses it -- then calls the single-library
-        engine's understanding pass under the SAME four-fact context
-        ``_execute`` installs for a real run: a participant override over the
-        resolved libraries, their just-frozen source ceilings, a throwaway
-        detached turn, and a ``FederatedRunPlan`` whose callbacks are never
-        invoked (see ``_preview_federated_plan``).
+        Split out from the model call for one reason: everything in here can
+        fail with a PRECISE, user-facing status (404 for a conversation that is
+        not this member's, 422 for an empty or over-wide scope, 404 for access
+        revoked since the page loaded), and those statuses only survive if the
+        step runs BEFORE a streaming response has begun. Once the first NDJSON
+        frame is out the HTTP status is already 200 and every refusal degrades
+        into a content-free ``error`` frame -- which is exactly what the
+        streaming endpoint used to do to all of them.
+
+        The blocking endpoint runs the same two phases, so the two transports
+        cannot drift on what they refuse or on what they say.
+
+        Read-only: no job row, no conversation row, no store write. Resolution
+        is ``_resolve_run_scope``, the identical block ``start()`` uses, so a
+        preview and the submission it precedes cannot land on two library sets
+        from the same inputs.
+        """
+        conversation, _scope, ids, _allowed, source_ceiling, full_history, user_history = (
+            self._resolve_run_scope(payload, user_id, allowed_notebook_ids, authority_check)
+        )
+        return _PreparedIntentPreview(
+            question=payload.question,
+            nominal_active=ids[0],
+            override=ParticipantOverride(
+                notebook_ids=tuple(ids), tiers={}, attested_actor_id=user_id,
+            ),
+            source_ceiling=source_ceiling,
+            turn=DetachedAskTurn(
+                conversation_id=(
+                    conversation.id if conversation else "gconv-" + uuid4().hex
+                ),
+                history=full_history, user_history=user_history,
+            ),
+        )
+
+    def run_intent_preview(self, prepared, *, cancel_event=None) -> QueryIntentContract:
+        """Phase TWO: the understanding pass, under a real global-run context.
+
+        Installs the SAME four facts ``_execute`` installs for a real run: the
+        participant override over the resolved libraries, their just-frozen
+        source ceilings, the detached turn, and a ``FederatedRunPlan`` whose
+        callbacks are never invoked (see ``_preview_federated_plan``).
 
         That last part is defensive rather than load-bearing today:
         ``AskService.preview_reasoning_intent`` is documented CORPUS-BLIND
@@ -454,27 +624,31 @@ class GlobalAskService:
         implementation: if the understanding step ever grows a corpus-aware
         step, it inherits the resolved participant set for free instead of
         silently reading the nominal active's own mount table.
-
-        No job row, no conversation row and no store write happen here: this
-        is read-only end to end, all the way down to
-        ``preview_reasoning_intent`` itself, which issues no federated call.
         """
-        conversation, _scope, ids, _allowed, source_ceiling, full_history, user_history = (
-            self._resolve_run_scope(payload, user_id, allowed_notebook_ids, authority_check)
-        )
-        nominal_active = ids[0]
-        override = ParticipantOverride(
-            notebook_ids=tuple(ids), tiers={}, attested_actor_id=user_id,
-        )
-        turn = DetachedAskTurn(
-            conversation_id=conversation.id if conversation else "gconv-" + uuid4().hex,
-            history=full_history, user_history=user_history,
-        )
         plan = self._preview_federated_plan(cancel_event or threading.Event())
-        with global_ask_run(override, source_ceiling, turn, plan, nominal_active=nominal_active):
+        with global_ask_run(
+            prepared.override, prepared.source_ceiling, prepared.turn, plan,
+            nominal_active=prepared.nominal_active,
+        ):
             return self.ask.preview_reasoning_intent(
-                nominal_active, payload.question, user_history, cancel_event=cancel_event,
+                prepared.nominal_active, prepared.question,
+                prepared.turn.user_history, cancel_event=cancel_event,
             )
+
+    def preview_intent(self, payload: GlobalAskIntentPreviewRequest, *, user_id,
+                        allowed_notebook_ids=None, authority_check=None,
+                        cancel_event=None) -> QueryIntentContract:
+        """Both phases, for callers that are not streaming (MCP, tests).
+
+        Kept as one method so the two-phase split cannot become two different
+        behaviours; the HTTP endpoints call the phases separately only so the
+        first one's status codes reach the client.
+        """
+        prepared = self.prepare_intent_preview(
+            payload, user_id=user_id, allowed_notebook_ids=allowed_notebook_ids,
+            authority_check=authority_check,
+        )
+        return self.run_intent_preview(prepared, cancel_event=cancel_event)
 
     def _preview_federated_plan(self, cancel_event) -> FederatedRunPlan:
         """A ``FederatedRunPlan`` whose callbacks are never invoked.
@@ -496,6 +670,7 @@ class GlobalAskService:
             cancel=cancel_event,
             on_library=lambda *_args: None,
             on_evidence=lambda *_args: None,
+            call_scope=self._federated_call,
         )
 
     def start(self, payload: GlobalAskRequest, *, user_id, allowed_notebook_ids=None,
@@ -552,11 +727,24 @@ class GlobalAskService:
                 with self._lock:
                     if self._closed:
                         raise GlobalAskError(503, "服务正在关闭，请稍后重新提交问题。")
-                    self.store.create(
-                        job, user_id, payload.client_request_id, request_json, submitted_via,
-                        new_conversation=conversation is None,
-                    )
-                    created = True
+                # OUTSIDE the lock: this is a database write, and the lock is
+                # also what ``_retrieval_window`` takes on every top-up of
+                # every RUNNING job. Holding it here makes one submission's
+                # insert stall every in-flight run's fan-out. The admission
+                # bound is already reserved by ``_pending`` above, so nothing
+                # here depends on the insert being inside it.
+                self.store.create(
+                    job, user_id, payload.client_request_id, request_json, submitted_via,
+                    new_conversation=conversation is None,
+                )
+                created = True
+                with self._lock:
+                    # Re-read: a shutdown may have landed while the row was
+                    # being written. ``created`` is already true, so the
+                    # handler below turns the row terminal instead of leaving
+                    # a running job with no worker behind it.
+                    if self._closed:
+                        raise GlobalAskError(503, "服务正在关闭，请稍后重新提交问题。")
                     self._events[job.job_id] = event
                     self._workers[job.job_id] = worker
                     worker.start()
@@ -571,7 +759,10 @@ class GlobalAskService:
                     raise
                 previous = self.store.request_job(user_id, payload.client_request_id)
                 if previous is not None:
-                    if previous[1] != request_json:
+                    # The SAME comparison the fast path above uses: a literal
+                    # string compare here would make the race-recovery branch
+                    # reject a legacy-shaped row the fast path accepts.
+                    if not self._same_request(previous[1], request_json):
                         raise GlobalAskError(409, "请求标识已用于其他问题，请重新提交。") from exc
                     self._check(previous[0].resolved_notebook_ids, user_id, allowed, authority_check)
                     return previous[0]
@@ -583,24 +774,50 @@ class GlobalAskService:
             with self._lock:
                 self._pending -= 1
 
-    def _retrieval_window(self):
-        """How many libraries THIS job may keep in flight right now.
+    @contextmanager
+    def _federated_call(self):
+        """Count ONE federated call for as long as it is in flight.
 
-        The retrieval pool is shared, so a job that submitted all of its
-        libraries at once would own every execution slot and every later job
-        would sit in the FIFO queue until its own phase budget expired -- the
-        second questioner got zero searched libraries and an answer with no
-        evidence. Dividing the slots by the number of live jobs keeps the pool
-        exactly full (4 slots / 4 jobs = 1 each) without raising the connection
-        bound the startup pool budget is computed from.
-
-        The share is recomputed on every top-up, so a job that started alone
-        holds wider ground only until its next library finishes: a newcomer
-        then waits at most one library, never a whole phase.
+        The federation enters this around each whole fan-out (see
+        ``FederatedRunPlan.call_scope``), so the counter is the number of
+        fan-outs competing for the shared pool right now. Decremented in
+        ``finally``: a call that dies of an expired phase, a cancellation or an
+        attestation failure must give its share back, or the window shrinks
+        permanently for the rest of the process's life.
         """
         with self._lock:
-            active = max(1, len(self._workers))
-        return max(1, int(self.settings.global_ask_retrieval_concurrency) // active)
+            self._federated_calls += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._federated_calls = max(0, self._federated_calls - 1)
+
+    def _retrieval_window(self):
+        """How many legs ONE federated call may keep in flight right now.
+
+        The retrieval pool is shared, so a fan-out that submitted all of its
+        legs at once would own every execution slot and every other fan-out
+        would sit in the FIFO queue until its own phase budget expired -- that
+        questioner got zero searched libraries and an answer with no evidence.
+
+        The divisor is the number of IN-FLIGHT FEDERATED CALLS, not the number
+        of live jobs, and that distinction is the whole point. A reasoning job
+        fans its sub-queries out over the engine's own pool, and every one of
+        those threads enters the federation independently: one job, eight
+        sub-queries and eight libraries is up to 64 legs queued behind however
+        many workers the shared pool has. Dividing by "live jobs" hands that
+        single job the entire pool and the other 60-odd legs expire on the
+        phase deadline -- and the user is told "检索未开始", which describes a
+        contention problem as a scope problem.
+
+        The share is recomputed on every top-up, so a call that started alone
+        gives ground back as soon as another one begins: a newcomer waits at
+        most one leg, never a whole phase.
+        """
+        with self._lock:
+            calls = max(1, self._federated_calls)
+        return max(1, int(self.settings.global_ask_retrieval_concurrency) // calls)
 
     def _emit(self, event):
         """Fail-open content-free telemetry; observability never fails a run."""
@@ -659,40 +876,66 @@ class GlobalAskService:
             raise
 
     def _publish_coverage(self, job, user_id, state, *, progress):
-        """Rebuild the durable coverage lists and save them."""
-        searched, degraded, skipped = state.coverage()
-        job.searched_notebook_ids = searched
-        job.degraded_notebook_ids = degraded
-        job.skipped_notebooks = [
-            GlobalAskSkippedNotebook(
-                notebook_id=notebook_id,
-                reason=_SKIP_COPY.get(skipped[notebook_id], ""),
-            )
-            for notebook_id in job.resolved_notebook_ids
-            if notebook_id in skipped
-        ]
-        if not self._save_if_open(job, user_id, progress=progress):
+        """Rebuild the durable coverage lists and save them, in snapshot order.
+
+        Serial per run and ordered by sequence: a reasoning run federates from
+        several sub-query threads at once, so without both properties two
+        receipts can interleave into a persisted coverage list that loses a
+        library it had already reported.
+        """
+        sequence, searched, degraded, skipped = state.coverage()
+        with state.publish_lock:
+            if not state.claim_publish(sequence):
+                return
+            job.searched_notebook_ids = searched
+            job.degraded_notebook_ids = degraded
+            job.skipped_notebooks = [
+                GlobalAskSkippedNotebook(
+                    notebook_id=notebook_id,
+                    # An unknown code must still say something: an empty note
+                    # renders as a library listed with no reason at all.
+                    reason=_SKIP_COPY.get(
+                        skipped[notebook_id], _SKIP_COPY["unavailable"],
+                    ),
+                )
+                for notebook_id in job.resolved_notebook_ids
+                if notebook_id in skipped
+            ]
+            open_for_writing = self._save_if_open(job, user_id, progress=progress)
+        if not open_for_writing:
             raise AskCancelled()
 
     def _append_trace(self, job, user_id, state, step):
         """Stream one reasoning step into the job a poller is reading.
 
-        Fail-OPEN in full, exactly like the single-library
-        ``append_trace_fail_open``: a trace is how the user watches a run, and
-        losing a step -- or losing the storage the step was going to -- must
-        never be the reason an otherwise good answer fails.
+        Fail-OPEN in full, like the single-library ``append_trace_fail_open``:
+        a trace is how the user watches a run, and losing a step -- or losing
+        the storage the step was going to -- must never be the reason an
+        otherwise good answer fails.
 
-        One save per step, deliberately un-throttled. It matches what the
-        notebook-scoped path does, it keeps the polled progress exact, and the
-        steps are bounded by the reasoning round ceiling. The rows are also
-        transient: the finished job clears ``trace`` because
-        ``answer.reasoning_trace`` is the authority, so nothing here decides
-        what the durable turn finally contains.
+        THROTTLED, unlike the notebook-scoped path, which is append-only: it
+        INSERTs one row per step into a child table, so its cost per step is
+        constant. A global job has no child table; its trace lives inside the
+        job's single JSON payload, so persisting every step rewrites the whole
+        list and the run costs O(n²) bytes in the number of steps. Steps still
+        enter memory immediately -- the throttle only decides when the row is
+        rewritten -- and the terminal write always happens, so what the
+        finished turn contains is not affected. ``_TRACE_SAVE_*`` bound the two
+        ways a poller can fall behind: elapsed time and accumulated steps.
         """
         try:
             with state.lock:
                 job.trace.append(step)
-            self._save_if_open(job, user_id, progress=True)
+                now = self._clock()
+                due = (
+                    len(job.trace) - state.traced_at_count >= _TRACE_SAVE_STEPS
+                    or now - state.traced_at >= _TRACE_SAVE_SECONDS
+                )
+                if due:
+                    state.traced_at = now
+                    state.traced_at_count = len(job.trace)
+            if due:
+                self._save_if_open(job, user_id, progress=True)
         except Exception:  # noqa: BLE001 - see docstring
             pass
 
@@ -738,9 +981,12 @@ class GlobalAskService:
         answer exists, after the citations have been re-checked, and once more
         immediately before the answer is persisted.
         """
-        assert not threading.current_thread().name.startswith(
-            _RETRIEVAL_THREAD_PREFIX
-        ), "the global job thread must not be a shared retrieval-pool worker"
+        if threading.current_thread().name.startswith(_RETRIEVAL_THREAD_PREFIX):
+            # NOT an ``assert``: ``python -O`` drops those, and this one guards
+            # a deadlock rather than a typo.
+            raise RuntimeError(
+                "the global job thread must not be a shared retrieval-pool worker"
+            )
         state = _RunState(job.resolved_notebook_ids)
         raise_if_cancelled(event)
         self._check(job.resolved_notebook_ids, user_id, allowed, authority_check)
@@ -769,6 +1015,9 @@ class GlobalAskService:
                 notebook_id, outcome,
             ),
             on_evidence=state.record_evidence,
+            # The fair share is per FAN-OUT, and a reasoning run has many in
+            # flight at once. See ``_retrieval_window``.
+            call_scope=self._federated_call,
         )
         try:
             with global_ask_run(
@@ -794,27 +1043,54 @@ class GlobalAskService:
                     self._ask_payload(job, intent),
                     user_id=user_id,
                     job_id=job.job_id,
-                    cancel_event=plan.cancel,
+                    # The job's OWN event, not ``plan.cancel``. The engine's
+                    # reasoning stage boundary asserts its cancellation handle
+                    # is a real ``threading.Event`` (``_assert_reasoning_
+                    # runtime``), and the composite token is not one -- passing
+                    # it made every reasoning run fail at the stage boundary
+                    # before it retrieved anything. The composite is the
+                    # FEDERATION's token and still reaches the legs through
+                    # ``plan.cancel``; it carries this event, so a user
+                    # cancellation reaches both sides. The other half -- a
+                    # revoked share raised inside a receipt callback -- reaches
+                    # the legs through ``phase`` and reaches the job through
+                    # ``_RunState.raise_first_error``.
+                    cancel_event=event,
                     on_trace=lambda step: self._append_trace(
                         job, user_id, state, step,
                     ),
                 )
-        except BaseException:
+        except (Exception, AskCancelled):
             # A callback's failure outranks whatever reached this frame: a
             # cancellation raised because the phase token was set by a revoked
-            # share is that revocation, not a user pressing stop.
+            # share is that revocation, not a user pressing stop, and the
+            # SECURITY fact is the one the terminal state must describe.
+            #
+            # Deliberately NOT ``BaseException``: a ``KeyboardInterrupt`` or a
+            # ``SystemExit`` is the interpreter going away, and rewriting it
+            # into "your share was revoked" would both mislead and delay the
+            # shutdown by whatever the rewritten exception's handling costs.
             state.raise_first_error()
             raise
         state.raise_first_error()
         raise_if_cancelled(event)
         self._check(job.resolved_notebook_ids, user_id, allowed, authority_check)
-        if self._validate_citations(response.citations, state.evidence, source_ceiling):
+        void_reason = self._validate_citations(
+            response.citations, state.evidence_snapshot(), source_ceiling, event,
+        )
+        if void_reason:
             # VOIDED WHOLE, never patched. Dropping the dead markers would
             # leave the claims that depended on them standing, and re-running
             # the engine would re-retrieve and re-freeze everything -- a
             # different answer wearing this one's identity.
+            #
+            # The user always reads the same sentence, but the REASON travels
+            # in the event: "the original changed" is a race with an editing
+            # user and needs no action, while ``unattributed`` is a
+            # normalization gap in a citation producer and needs a fix.
             self._emit({
                 "kind": "global_ask_citations_void",
+                "reason": void_reason,
                 "libraries": len(job.resolved_notebook_ids),
                 "citations": len(response.citations),
             })
@@ -850,35 +1126,53 @@ class GlobalAskService:
         job.status = "done"
         self._save_if_open(job, user_id)
 
-    def _validate_citations(self, citations, evidence, source_ceiling):
+    def _validate_citations(self, citations, evidence, source_ceiling, event=None):
         """Does every citation still describe the library as it is NOW?
 
-        Both halves of the frozen-evidence contract survive the engine switch:
+        Returns a void REASON code, or ``""`` when every citation still holds.
 
-        1. the cited source is still inside the ceiling frozen when the job was
-           admitted, AND is still visible in its own library;
-        2. the cited element's fingerprint and its source ownership are
-           unchanged since retrieval read them.
+        Two halves, and which ones apply depends on how the cited element
+        reached the answer. ``evidence`` is the run's accumulated
+        retrieval-time table, whose three states are a contract, not an
+        implementation detail (``FederatedRunPlan.on_evidence``, rule 3):
 
-        ``evidence`` is the accumulated retrieval-time snapshot published by
-        every federated call of this run. A cited element that is a real source
-        element but has NO entry there cannot be verified -- which is exactly
-        what a round whose fingerprint read failed publishes -- so it is
-        refused rather than accepted unverified.
+        =====================  ==========  ===============================
+        snapshot state         live read   verdict
+        =====================  ==========  ===============================
+        ``(source, print)``    matches     accept (both halves pass)
+        ``(source, print)``    differs     ``changed``
+        ``(source, print)``    missing     ``changed`` (element deleted)
+        ``None``               any         ``unreadable`` -- it travelled
+                                           the federated channel and could
+                                           not be fingerprinted, so it is
+                                           not attestable
+        absent                 same source accept -- the row is still where
+                                           the citation says it is
+        absent                 other source ``changed`` -- it moved
+        absent                 missing     accept -- no ``source_elements``
+                                           row was ever cited (a graph
+                                           object or relation); the ceiling
+                                           half is the whole check
+        =====================  ==========  ===============================
 
-        Citation kinds that are not source elements at all -- knowledge-graph
-        objects and relations, document-overview anchors -- have no fingerprint
-        by nature: the live read does not know their id either. They are held
-        to half (1) alone. The two cases are told apart by the LIVE read rather
-        than by the snapshot, so an element that existed at retrieval time and
-        has since been deleted is absent from ``current`` while present in
-        ``evidence``, and is refused instead of being mistaken for a graph
-        object.
+        ABSENCE is the case the first cut got wrong. A document overview and a
+        collection enumeration cite real ``source_elements`` rows and make no
+        federated call at all, so refusing "no snapshot" voided 100% of those
+        answers. Their honest check is the one above: frozen ceiling, still
+        visible, and the row still belongs to the source the citation names.
 
-        Returns True when the answer must be voided.
+        The ceiling half applies to every kind, and runs FIRST: it is the only
+        check a graph object gets, and it is the cheap one.
+
+        ⛔ BOUNDED AND CANCELLABLE. This runs after the engine's own run has
+        exited, so nothing above it is watching the clock any more: the
+        per-notebook visibility reads get the run's per-library budget and the
+        cancel token is polled before each one.
         """
         if not citations:
-            return False
+            return ""
+        from app.repositories.read_budget import read_budget
+
         current = self.sources.evidence_fingerprints(list(dict.fromkeys(
             citation.element_id for citation in citations if citation.element_id
         )))
@@ -886,26 +1180,40 @@ class GlobalAskService:
         for citation in citations:
             notebook_id = citation.notebook_id
             if not notebook_id:
-                # Peer mode stamps every citation. A blank origin means a
-                # normalization point was missed, and an unattributable
-                # citation cannot be checked against any library's ceiling.
-                return True
+                # Peer mode stamps every citation, the nominal active included.
+                # A blank origin is a missed normalization point in one of the
+                # citation producers, not a race with an editing user -- and an
+                # unattributable citation cannot be checked against ANY
+                # library's ceiling, so it fails closed under its own code.
+                return _VOID_UNATTRIBUTED
             if notebook_id not in visible:
-                visible[notebook_id] = set(
-                    self.sources.all_visible_source_ids(notebook_id)
-                )
+                raise_if_cancelled(event)
+                with read_budget(
+                    time.monotonic()
+                    + float(self.settings.global_ask_notebook_timeout_seconds),
+                    event,
+                ):
+                    visible[notebook_id] = set(
+                        self.sources.all_visible_source_ids(notebook_id)
+                    )
             if (citation.source_id not in source_ceiling.get(notebook_id, ())
                     or citation.source_id not in visible[notebook_id]):
-                return True
-            before = evidence.get(citation.element_id)
+                return _VOID_OUT_OF_CEILING
+            before = evidence.get(citation.element_id, _ABSENT)
             after = current.get(citation.element_id)
-            if before is None and after is None:
+            if before is None:
+                return _VOID_UNREADABLE
+            if before is _ABSENT:
+                # Never came through the federated chunk channel. Either it is
+                # not a source element at all (accept: the ceiling half is the
+                # whole check), or it is one and must still sit under the
+                # source the citation names.
+                if after is not None and after[0] != citation.source_id:
+                    return _VOID_CHANGED
                 continue
-            if before is None or after is None or before != after:
-                return True
-            if after[0] != citation.source_id:
-                return True
-        return False
+            if after is None or before != after or after[0] != citation.source_id:
+                return _VOID_CHANGED
+        return ""
 
     def get_job(self, job_id, *, user_id, allowed_notebook_ids=None):
         job = self.store.job(job_id, user_id)

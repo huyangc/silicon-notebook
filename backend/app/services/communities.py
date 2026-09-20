@@ -14,6 +14,10 @@ fallback 事件(闸在 SQL 里、事件在服务层)。"""
 from __future__ import annotations
 from typing import List, Optional, Tuple
 
+# PEER mode: the participant-set predicate. This module is reader #5 on the
+# participant override's frozen whitelist (see ``mounted_base_ids``).
+from app.services.retrieval_participants import federated_ask_active
+
 
 class CommunityQueryService:
     def __init__(self, *, notebooks, unified_kg, event_log,
@@ -193,34 +197,50 @@ class CommunityQueryService:
     def comparison_peer_names(self, base_notebook_ids, focal_name: str,
                               question: str, *, top_k: int, candidates: int,
                               cap_factor: int) -> List[str]:
-        """每个库的兄弟实体名,去重、**按库轮转**截到总量帽以内。
+        """每个库的兄弟实体名,去重后交给调用方。
 
-        chunk 模式的对比子查询过去是「逐库取名、逐个 append」,没有任何总量帽:
-        参与集 8 个库 × ``community_peers_topk`` 就是 64 条子查询,每条再按参与
-        库扇出。reasoning 侧早就有帽(``community_peers_topk × cap_factor``),
-        这里复用**同一个表达式**,而不是另发明一个旋钮。
+        **对等模式**(一次跨库提问)额外做两件事:按库轮转、截到总量帽以内。
+        chunk 模式的对比子查询过去没有任何总量帽,参与集 8 个库 ×
+        ``community_peers_topk`` 就是 64 条子查询,每条再按参与库扇出;帽值复用
+        reasoning 侧的同一个表达式(``community_peers_topk × cap_factor``),不
+        另发明旋钮。截断按轮转而不是 ``peers[:cap]``:逐库拼接后直接切前 N 条,
+        会把整个配额发给遍历顺序最靠前的那一两个库,后面的库一个名字都进不了
+        子查询——多选一个库反而让它自己的兄弟实体被挤掉。
 
-        截断按库轮转而不是 ``peers[:cap]``:逐库拼接后直接切前 N 条,会把整个
-        配额发给遍历顺序最靠前的那一两个库,后面的库一个名字都进不了子查询——
-        多选一个库反而让它自己的兄弟实体被挤掉。轮转下每个库按名次交替出一个,
-        帽小于库数时也至少各给前几个库一条。
+        **单库模式逐值不变**,而且是刻意的:一个挂了三个参考库的笔记本今天就是
+        「逐库顺序追加、无帽」,轮转会重排它的子查询顺序、帽会截掉它本来拿得到
+        的名字。那是一次**产品行为改动**,不该搭着一次跨库接线的便车发出去;
+        这里要解决的拥挤是参与集带来的,所以闸也只在参与集在场时合上。
 
         确定性:库序取自调用方给的 ``base_notebook_ids``(``mounted_base_ids``
         的确定性顺序),库内序取自 ``resolve_comparison_peers`` 的名次序,去重按
         首次出现。没有 set/dict 遍历顺序参与。
 
-        **单库逐值不变**:一个库时轮转退化成原来的顺序,且该库最多交出 ``top_k``
-        个名字,而 ``cap_factor ≥ 1`` 让帽 ≥ ``top_k``,所以截断恒不触发。
+        取数是**按需**的:对等模式下达到帽即停止解析后面的库——轮转语义保证每个
+        库至少被问过第一轮,所以提前停止只会省掉「反正也装不下」的那几次查询,
+        不会让某个库整个失声。
         """
-        per_library = [
-            self.resolve_comparison_peers(
+        peer_mode = federated_ask_active()
+        cap = max(0, int(top_k) * int(cap_factor)) if peer_mode else None
+        per_library: List[List[str]] = []
+        for base_nb in base_notebook_ids:
+            per_library.append(self.resolve_comparison_peers(
                 base_nb, focal_name, question,
                 top_k=top_k, candidates=candidates,
-            )[0]
-            for base_nb in base_notebook_ids
-        ]
+            )[0])
+            if cap is not None and sum(
+                min(len(peers), 1) for peers in per_library
+            ) >= cap:
+                # 每个库已经至少被问过一轮,而第一轮就已经填满帽:后面的库无论
+                # 交出什么都装不下,查询它们只是纯成本。
+                break
         names: List[str] = []
-        cap = max(0, int(top_k) * int(cap_factor))
+        if cap is None:
+            for peers in per_library:
+                for name in peers:
+                    if name not in names:
+                        names.append(name)
+            return names
         for rank in range(max((len(peers) for peers in per_library), default=0)):
             for peers in per_library:
                 if len(names) >= cap:

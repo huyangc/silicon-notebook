@@ -106,6 +106,12 @@ from app.services.retrieval_run import (
     retrieval_fanout_slot,
 )
 from app.services.search_profile import render_style_block
+# The ASK-side peer predicate. This module may not read the participant
+# override (it is not on that module's frozen reader whitelist);
+# ``subjectless_run_active`` only answers "this run has no subject library",
+# which is exactly the fact the element arm's closure turns on, and it is
+# installed by the same one manager that installs the override.
+from app.services.source_scope import subjectless_run_active
 from app.services.source_element_selection import (
     rank_source_elements,
     source_chunk_content_key,
@@ -3328,6 +3334,33 @@ class ReasoningRetriever:
         except KeyError:
             return {}
 
+    def _element_search_skip(self, elements_searches):
+        """``(summary, reason)`` when this round must not search elements.
+
+        Two closed states, and the trace has to tell them apart:
+
+        * PEER mode -- the element arm is ACTIVE-ONLY (one search against the
+          notebook it is handed; there is no federated element channel), so in
+          a run answering for a participant SET it would give the naming anchor
+          a recall leg none of its peers has, and produce the one citation kind
+          with no real library attached. It is closed at the producer
+          (``retrieval_candidates.retrieve_elements``); this is what keeps the
+          trace from reporting a search that could only come back empty.
+        * the per-run count cap.
+
+        ``None`` = go ahead. Separate from the execution branch so the branch
+        stays one line per state; the copy is user-visible trace text.
+        """
+        if subjectless_run_active():
+            return ("跳过 search_elements(跨库提问不使用单库原文检索)", "peer_mode")
+        if elements_searches >= self.settings.reasoning_max_element_searches:
+            return (
+                f"跳过 search_elements(已达次数上限 "
+                f"{self.settings.reasoning_max_element_searches})",
+                "element_search_cap",
+            )
+        return None
+
     def search_elements(self, notebook_id, query):
         with retrieval_fanout_slot():
             retrieved = self.retrieval.retrieve_elements(notebook_id, query)
@@ -5858,6 +5891,11 @@ class ReasoningRetriever:
         if (
             not (collected or elements or chunks)
             and self.settings.reasoning_max_element_searches > 0
+            # PEER mode has no element arm at all (see
+            # ``retrieval_candidates.retrieve_elements``): the automatic top-up
+            # would search one library on behalf of eight and come back empty,
+            # spending a trace step to say so.
+            and not subjectless_run_active()
         ):
             elements_searches = 1
             found = self.search_elements(notebook_id, question)
@@ -7038,11 +7076,10 @@ class ReasoningRetriever:
                                          summary=f"补充子查询: {display}",
                                          detail=_subquery_detail))
             elif decision.next_action == "search_elements":
-                if elements_searches >= self.settings.reasoning_max_element_searches:
-                    record(TraceStep(step_type="skip",
-                                     summary=f"跳过 search_elements(已达次数上限 "
-                                             f"{self.settings.reasoning_max_element_searches})",
-                                     detail={"reason": "element_search_cap"}))
+                skip = self._element_search_skip(elements_searches)
+                if skip:
+                    record(TraceStep(step_type="skip", summary=skip[0],
+                                     detail={"reason": skip[1]}))
                 else:
                     elements_searches += 1
                     eq = decision.elements_query or question

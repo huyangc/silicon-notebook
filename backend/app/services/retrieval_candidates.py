@@ -4741,8 +4741,28 @@ class CandidateRetrievalService(_RetrievalState):
         )
 
     def retrieve_elements(self, *args, **kwargs):
+        """PEER mode returns ``[]``: this is the THIRD active-only recall arm.
+
+        Like the keyword and exact-lookup arms above, it issues one search
+        against the single notebook it is handed -- there is no federated
+        element channel -- so in a run that answers for a participant SET it
+        would give the nominal active, a naming anchor the user never singled
+        out, a recall leg none of its peers has. Its hits also reach the answer
+        as citations, and those citations are assembled by a lane that has
+        always been single-library, so the leg additionally produced the one
+        kind of citation with no real library attached.
+
+        Closed at the producer rather than at the reasoning action that calls
+        it, for the same reason the other two arms are: this is the single
+        place every caller goes through. The reasoning side separately stops
+        OFFERING the action, so the model does not spend a round choosing one
+        that can only come back empty. Federating this arm is registered in
+        ``fangan_todo.md``; until then the honest behavior is no leg at all.
+        """
         from app.services.source_scope import filter_retrieval_items
 
+        if federated_ask_active():
+            return []
         notebook_id = str(args[0] if args else kwargs.get("notebook_id", ""))
         return filter_retrieval_items(
             notebook_id, "element", self._retrieve_elements(*args, **kwargs)
