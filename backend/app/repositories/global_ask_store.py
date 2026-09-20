@@ -119,8 +119,6 @@ class GlobalAskStore:
         job inserted later still sorts later.
         """
         with self.database.write() as db:
-            if not new_conversation:
-                job.created_at = self._after_latest_job(db, job.conversation_id, job.created_at)
             if new_conversation:
                 db.execute(self._sql(
                     "INSERT INTO global_ask_conversations"
@@ -131,11 +129,21 @@ class GlobalAskStore:
                     job.notebook_scope.model_dump_json(), submitted_via,
                     job.created_at, job.created_at))
             else:
+                # ⛔ LOCK FIRST, then read the newest stamp. PostgreSQL runs this
+                # transaction at READ COMMITTED with no writer serialization: a
+                # submission that read ``MAX(created_at)`` and then paused could
+                # resume after a sibling had been inserted, answered and shared,
+                # and insert itself carrying a stamp from before that watermark.
+                # ``share_conversation`` takes this same row lock, so the two
+                # serialize on it: whichever goes second sees the other's commit.
+                # (SQLite's ``write()`` is a process-level write lock already.)
                 row = db.execute(self._sql(
                     "SELECT id FROM global_ask_conversations WHERE id=? AND user_id=?"
+                    + self._row_lock
                 ), (job.conversation_id, user_id)).fetchone()
                 if row is None:
                     raise KeyError(job.conversation_id)
+                job.created_at = self._after_latest_job(db, job.conversation_id, job.created_at)
             db.execute(self._sql(
                 "INSERT INTO global_ask_jobs"
                 "(id,conversation_id,user_id,client_request_id,request_json,status,payload_json,created_at) "
