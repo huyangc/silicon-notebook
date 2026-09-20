@@ -924,6 +924,12 @@ class GlobalAskService:
                 # insert stall every in-flight run's fan-out. The admission
                 # bound is already reserved by ``_pending`` above, so nothing
                 # here depends on the insert being inside it.
+                # Stamped at INSERTION, not at construction: the preflight above
+                # is a model call, and a job that carried its pre-preflight
+                # instant into the table could sort before a faster sibling that
+                # was already answered and shared (the store clamps this too --
+                # see ``GlobalAskStore.create``).
+                job.created_at = _now()
                 self.store.create(
                     job, user_id, payload.client_request_id, request_json, submitted_via,
                     new_conversation=conversation is None,
@@ -1632,7 +1638,7 @@ class GlobalAskService:
         if self.store.conversation(conversation_id, user_id) is None:
             raise KeyError(conversation_id)
 
-    def _share_authority_sweep(self, conversation_id, user_id):
+    def _share_authority_sweep(self, conversation_id, user_id, expected_through_id=""):
         """Refuse to MINT a link the sharer could not open themselves.
 
         A global answer can cite a library the sharer has since lost access to
@@ -1643,19 +1649,35 @@ class GlobalAskService:
         point runs, so "can this user still read these libraries" has exactly
         one definition.
 
+        Only the turns that WILL BE PUBLISHED may veto the share. With a
+        boundary (``expected_through_id``, a job id) that is the prefix up to and
+        including that job in the canonical ``(created_at, id)`` order; turns
+        after it stay private, so a later turn over a library the sharer has
+        lost must not block sharing an earlier one whose anonymous read would
+        succeed. A boundary that does not resolve here is left for the store to
+        refuse (``ConversationShareWatermarkStale``): this sweep then checks
+        nothing rather than guessing a prefix.
+
         Best effort by construction, and that is the honest division of labour:
-        it sweeps the conversation's most recent ``MAX_TURNS`` completed turns
+        it reads the conversation's most recent ``MAX_TURNS`` completed turns
         rather than the not-yet-computed snapshot (the store resolves the
         watermark inside its own write transaction). The AUTHORITATIVE gate is
         ``public_conversation``'s per-open re-check, which reads exactly the
         published snapshot; this one only stops the obvious dead link.
         """
-        jobs = self.store.jobs(conversation_id, user_id, MAX_TURNS, 0)
+        done = [
+            job for job in self.store.jobs(conversation_id, user_id, MAX_TURNS, 0)
+            if job is not None and job.status == "done"
+        ]
+        if expected_through_id:
+            boundary = next(
+                (job for job in done if job.job_id == expected_through_id), None)
+            if boundary is None:
+                return
+            edge = (boundary.created_at, boundary.job_id)
+            done = [job for job in done if (job.created_at, job.job_id) <= edge]
         self._check(
-            _snapshot_notebook_ids([
-                job.model_dump(mode="json")
-                for job in jobs if job is not None and job.status == "done"
-            ]),
+            _snapshot_notebook_ids([job.model_dump(mode="json") for job in done]),
             user_id,
         )
 
@@ -1669,7 +1691,7 @@ class GlobalAskService:
         so the published snapshot can only ever equal the disclosed one.
         """
         self._owned_conversation(conversation_id, user_id)
-        self._share_authority_sweep(conversation_id, user_id)
+        self._share_authority_sweep(conversation_id, user_id, expected_through_id)
         return self.store.share_conversation(
             conversation_id, user_id, expected_through_id=expected_through_id
         )

@@ -48,6 +48,23 @@
 -- session belongs to no notebook), so these three columns never travel with a
 -- copy and there is nothing to clear.
 
+-- THE KEYSET COLUMN ITSELF MUST SORT BY BYTES. 0056 created
+-- global_ask_jobs.created_at as plain `TEXT`, i.e. under the database default
+-- collation, which may be linguistic (en_US.UTF-8, ...). A linguistic collation
+-- gives punctuation a low weight, and an ISO stamp's ordering hangs on exactly
+-- that punctuation: `...:05+00:00` (a whole second -- isoformat() omits a zero
+-- microsecond field) versus `...:05.000001+00:00`. Under en_US those two do
+-- not sort the way they sort in time, so the snapshot predicate, the canonical
+-- ORDER BY and the insert-time clamp in GlobalAskStore.create (which keeps a
+-- late-inserted job outside an already published watermark by stamping it one
+-- microsecond past the newest job) would each see a different order -- and the
+-- clamp's guarantee would silently not hold on such a database. Every other
+-- text column this repository orders or compares by is COLLATE "C"; this
+-- brings the one outlier in line. The table was created one migration ago and
+-- is small; the rewrite also rebuilds idx_global_jobs_conversation under the
+-- new collation, which is what lets the keyset read keep using it.
+ALTER TABLE global_ask_jobs ALTER COLUMN created_at TYPE text COLLATE "C";
+
 ALTER TABLE global_ask_conversations ADD COLUMN share_token text COLLATE "C";
 ALTER TABLE global_ask_conversations ADD COLUMN shared_through_at text COLLATE "C";
 ALTER TABLE global_ask_conversations ADD COLUMN shared_through_id text COLLATE "C";
