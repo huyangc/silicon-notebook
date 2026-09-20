@@ -14,7 +14,7 @@ import {
   type AskStreamEvent,
   type ReasoningTraceStep,
 } from "./ask-stream.ts";
-import { readNdjsonStream } from "./ndjson-stream.ts";
+import { readNdjsonStream, yieldToPaint } from "./ndjson-stream.ts";
 import type { AskJobDetail } from "./ask-reconnect.ts";
 import type { QueryIntentContract } from "./ask-intent-model.ts";
 import type { BaseScopePayload, SourceScopePayload } from "./source-scope.ts";
@@ -152,14 +152,6 @@ export async function runAskStream<TResponse = AskResponse>(
   if (!response.body) throw new Error("Streaming response body is unavailable");
 
   let finalResponse: TResponse | null = null;
-
-  const yieldToPaint = () => new Promise<void>((resolve) => {
-    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
-      resolve();
-      return;
-    }
-    window.requestAnimationFrame(() => resolve());
-  });
 
   const consumeLine = async (line: string) => {
     const event = JSON.parse(line) as AskStreamEvent<TResponse>;
