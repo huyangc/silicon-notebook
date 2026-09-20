@@ -14,6 +14,7 @@ import { ChatQuestion } from "../chat-question";
 import { askQuestionLimitHint } from "../ask-api";
 import { CitationPopover } from "../citation-card";
 import { type GlobalJob } from "../global-ask-api";
+import type { UiMode } from "../ui-mode";
 import { GlobalConversationList } from "./conversation-list";
 import { NotebookScopePicker } from "./notebook-scope-picker";
 import { GlobalCoverageReceipt } from "./global-coverage-receipt";
@@ -43,8 +44,8 @@ const suggestions = [
   { title: "寻找相关证据", question: "这个问题有哪些原文证据支持，还有哪些信息需要补充？", icon: FileText },
 ];
 
-export default function GlobalAskWorkspace({ compact = false, embedded = false, active = true, controls, onOpenNotebook }: { compact?: boolean; embedded?: boolean; active?: boolean; controls?: ReactNode; onOpenNotebook?: () => void }) {
-  const ask = useGlobalAsk({ syncUrl: !embedded, active });
+export default function GlobalAskWorkspace({ compact = false, embedded = false, active = true, controls, onOpenNotebook, uiMode }: { compact?: boolean; embedded?: boolean; active?: boolean; controls?: ReactNode; onOpenNotebook?: () => void; uiMode?: UiMode }) {
+  const ask = useGlobalAsk({ syncUrl: !embedded, active, uiMode });
   const [historyOpen, setHistoryOpen] = useState(false);
   const [cite, setCite] = useState<CiteSelection | null>(null);
   const copyResult = useCopyResult();
@@ -208,7 +209,7 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                 onChange={ask.selectMode}
                 disabled={composerDisabled || inFlight}
                 kgAvailable={false}
-                uiMode="advanced"
+                uiMode={ask.uiMode}
               />
               {ask.running || ask.intentChecking
                 ? <button className="global-send new-pill" type="button" disabled={ask.stopping} onClick={() => { if (ask.intentChecking) ask.abortIntent(); else void ask.stop(); }}><Square size={14} />{ask.intentChecking ? "取消问题理解" : ask.stopping ? "停止中…" : "停止"}</button>

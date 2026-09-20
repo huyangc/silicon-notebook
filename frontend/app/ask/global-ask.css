@@ -100,7 +100,9 @@
 .global-scope-footer .sort-button { min-height: 30px; padding: 0 14px; font-size: 12px; }
 .global-turns { max-width: 840px; margin: auto; padding: 22px 30px 40px; }
 .global-turn { margin-bottom: 36px; }
-.global-turn-scope { display: flex; justify-content: flex-end; align-items: center; gap: 5px; margin: 8px 0 24px; color: var(--muted); font-size: 11px; }
+/* 上边距要容得下问题气泡的悬停时间戳：它绝对定位在气泡正下方右端（top:100%+3px、
+   11px 一行），8px 的间距会让两行字叠在一起。 */
+.global-turn-scope { display: flex; justify-content: flex-end; align-items: center; gap: 5px; margin: 20px 0 24px; color: var(--muted); font-size: 11px; }
 .global-turn .chat-assistant { padding: 0; border: 0; background: transparent; }
 .global-answer-label { display: flex; gap: 9px; align-items: center; margin-bottom: 20px; font-size: 13px; }
 .global-answer-label > span:last-child { margin-left: auto; color: var(--muted); font-size: 11px; }

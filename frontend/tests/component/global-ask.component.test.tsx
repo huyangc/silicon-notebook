@@ -5,6 +5,7 @@ import { NotebookScopePicker } from "../../app/ask/notebook-scope-picker.tsx";
 import { GlobalConversationList } from "../../app/ask/conversation-list.tsx";
 import { useGlobalAsk } from "../../app/ask/use-global-ask.ts";
 import GlobalAskPage from "../../app/ask/page.tsx";
+import GlobalAskWorkspace from "../../app/ask/global-ask-workspace.tsx";
 import { GlobalAskLauncher } from "../../app/ask/global-ask-launcher.tsx";
 import { AnswerView } from "../../app/answer-panel.tsx";
 import { useRootModalCoordinator } from "../../app/use-root-modal-coordinator.ts";
@@ -74,7 +75,8 @@ function deferred<T>() {
 beforeEach(() => {
   vi.resetAllMocks();
   window.history.replaceState(null, "", "/ask");
-  api.me.mockResolvedValue({ id: "user-1" });
+  // 高级界面：本文件绝大多数用例都要操作引擎控件；简化界面另有专门的用例。
+  api.me.mockResolvedValue({ id: "user-1", ui_mode: "advanced" });
   api.notebooks.mockResolvedValue(notebooks);
   api.list.mockResolvedValue([]);
   api.detail.mockImplementation((id: string) => Promise.resolve(detail(id)));
@@ -922,6 +924,34 @@ test("mode picker submits the selected engine", async () => {
   expect(api.ask.mock.calls[0][0].mode).toBe("reasoning");
   expect(api.ask.mock.calls[0][0].intent.resolved_question).toBe("请逐步比较两个体系");
   expect(api.ask.mock.calls[0][0].retrieval_effort).toBe("standard");
+});
+
+test("the simplified interface offers no engine picker and submits the fixed engine after understanding", async () => {
+  // 与笔记本内问答同一条规则（`submissionAskMode`）：简化界面没有引擎控件，提交固定走
+  // SIMPLIFIED_ASK_MODE（reasoning），所以照样先过问题理解；`mode` 只是一份不可见的记忆。
+  api.me.mockResolvedValue({ id: "user-1", ui_mode: "auto" });
+  render(<GlobalAskPage />);
+  const input = await screen.findByRole("textbox", { name: "输入问题" });
+  await waitFor(() => expect(input).toBeEnabled());
+  expect(screen.queryByRole("button", { name: "深入分析" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "通用问答" })).toBeNull();
+  fireEvent.change(input, { target: { value: "请逐步比较两个体系" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+  await waitFor(() => expect(api.ask).toHaveBeenCalledTimes(1));
+  expect(api.intent).toHaveBeenCalledTimes(1);
+  expect(api.ask.mock.calls[0][0].mode).toBe("reasoning");
+  expect(api.ask.mock.calls[0][0].intent.resolved_question).toBe("请逐步比较两个体系");
+});
+
+test("an embedded window follows the host's live interface mode, not the profile it loaded", async () => {
+  // 笔记本页里切换自动/高级模式不会让浮窗重新载入档案，所以宿主把实时的界面模式传下来。
+  api.me.mockResolvedValue({ id: "user-1", ui_mode: "advanced" });
+  const view = render(<GlobalAskWorkspace embedded uiMode="auto" />);
+  const input = await screen.findByRole("textbox", { name: "输入问题" });
+  await waitFor(() => expect(input).toBeEnabled());
+  expect(screen.queryByRole("button", { name: "深入分析" })).toBeNull();
+  view.rerender(<GlobalAskWorkspace embedded uiMode="advanced" />);
+  expect(await screen.findByRole("button", { name: "深入分析" })).toBeTruthy();
 });
 
 test("reasoning submission goes through intent review", async () => {
