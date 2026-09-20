@@ -100,6 +100,23 @@ class _Absent:
 _ABSENT = _Absent()
 
 
+def _is_external_citation(citation) -> bool:
+    """Is this citation URL-backed material from OUTSIDE every library?
+
+    Strict on purpose: the tier alone does not exempt a citation from the
+    re-check. It must also carry an openable address and name NO library row --
+    a citation that says "external" while pointing at a source or an element is
+    a library citation wearing the wrong tier, and gets the full check.
+    """
+    return (
+        getattr(citation, "tier", "") == "external"
+        and bool(getattr(citation, "url", ""))
+        and not citation.notebook_id
+        and not citation.source_id
+        and not citation.element_id
+    )
+
+
 class GlobalAskError(Exception):
     def __init__(self, status_code, message):
         super().__init__(message)
@@ -1305,6 +1322,16 @@ class GlobalAskService:
         )))
         visible: dict = {}
         for citation in citations:
+            if _is_external_citation(citation):
+                # Material a reflect plugin action brought back from OUTSIDE the
+                # libraries. It is URL-backed by construction
+                # (``EvidenceContextService.external_citations`` leaves library,
+                # source and element blank on purpose), so there is no frozen
+                # ceiling it could leave and no fingerprint it could drift
+                # from -- and treating its blank origin as a missed
+                # normalization would void every answer that used one, under
+                # copy saying the library changed.
+                continue
             notebook_id = citation.notebook_id
             if not notebook_id:
                 # Peer mode stamps every citation, the nominal active included.
