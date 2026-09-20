@@ -1073,6 +1073,9 @@ def test_comparison_peer_reads_apply_the_per_notebook_source_ceiling(
     # 无 unified_kg_state 行 = 反向索引未认证 → 权威支(扫 evidence JSON)。
     assert _comention(allowed_source_ids=[open_source]) == [("Mixed", 3)]
     assert _community(allowed_source_ids=[open_source]) == ["Mixed"]
+    assert unified.comention_peers(
+        "nb-personal", "K-focal", 1, 1, allowed_source_ids=[open_source]
+    ) == [("Mixed", 3)]
 
     with knowledge_harness.database.write() as connection:
         connection.execute(
@@ -1088,6 +1091,12 @@ def test_comparison_peer_reads_apply_the_per_notebook_source_ceiling(
         ("Hidden", 3), ("Mixed", 3)
     ]
     assert _community(allowed_source_ids=[hidden_source]) == ["Hidden", "Mixed"]
+    # 闸压在 LIMIT 之前:Hidden 与 Mixed 同强度、Hidden 排前,limit=1 时先限后滤
+    # 会让无支撑的 Hidden 占走唯一名额,合格的 Mixed 出不来。
+    assert unified.comention_peers("nb-personal", "K-focal", 1, 1) == [("Hidden", 3)]
+    assert unified.comention_peers(
+        "nb-personal", "K-focal", 1, 1, allowed_source_ids=[open_source]
+    ) == [("Mixed", 3)]
     # 空清单是显式 deny,不是「不限」。
     assert _comention(allowed_source_ids=[]) == []
     assert _community(allowed_source_ids=[]) == []

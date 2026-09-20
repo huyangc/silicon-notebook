@@ -416,6 +416,29 @@ def test_wide_ceiling_also_survives_the_unbackfilled_authoritative_branch(
             assert _community_peers(service, library.id) == [MIXED]
 
 
+@pytest.mark.parametrize("backfilled", [1, 0], ids=["reverse-index", "authoritative"])
+def test_ceiling_applies_before_the_comention_limit(repo, library, backfilled):
+    """闸必须压在 LIMIT 之前,不是只挂在取名字的那条读上。
+
+    HIDDEN 与 MIXED 共提强度相同、HIDDEN 排在前面。``limit=1`` 时若先限后滤,
+    唯一的名额被无天花板内支撑的 HIDDEN 占走、再被名字查询裁掉,结果是 ``[]``
+    ——合格的 MIXED 永远出不来(codex #754 第 1 轮 P2)。
+    """
+    with repo._write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET source_index_backfilled=? "
+            "WHERE notebook_id=?", (backfilled, library.id))
+    unified = object.__getattribute__(repo, "_runtime").unified_kg
+
+    def _peers(**kwargs):
+        return unified.comention_peers(
+            library.id, CANONICAL[FOCAL], 1, 1, **kwargs)
+
+    assert _peers() == [(HIDDEN, 4)]
+    assert _peers(allowed_source_ids=[OPEN_SOURCE]) == [(MIXED, 4)]
+    assert _peers(allowed_source_ids=[HIDDEN_SOURCE]) == [(HIDDEN, 4)]
+
+
 # --------------------------------------------------------------------------- #
 # 8. 名字是一条批量读,不是 N+1
 # --------------------------------------------------------------------------- #

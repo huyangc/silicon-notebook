@@ -112,12 +112,14 @@ def _object_support_exists(cluster_ref: str, *, authoritative: bool) -> str:
     )
 
 
-def _canonical_support_exists(row_ref: str, *, authoritative: bool) -> str:
+def _canonical_support_exists(
+    row_ref: str, *, authoritative: bool, canonical_expr: str | None = None,
+) -> str:
     """``row_ref`` 那一行的 canonical_id 是否还有天花板内来源支撑。"""
     return (
         "EXISTS (SELECT 1 FROM concept_clusters kc "
         f"WHERE kc.notebook_id={row_ref}.notebook_id "
-        f"AND kc.canonical_id={row_ref}.canonical_id "
+        f"AND kc.canonical_id={canonical_expr or row_ref + '.canonical_id'} "
         f"AND kc.generation = {_PUBLISHED_CLUSTER_GEN} "
         f"AND {_object_support_exists('kc', authoritative=authoritative)})"
     )
@@ -1479,31 +1481,42 @@ class UnifiedKgStore:
         """concept_comentions 两侧按 bridge_claims 降序取对端 canonical_name。
 
         ``allowed_source_ids`` 同 ``community_member_peers``:缺省 → 结果与来源闸
-        落地之前逐值相同;传进来时把闸挂在**取名字**的那条查询上,无天花板内
-        来源支撑的对端一个名字都不出去。
+        落地之前逐值相同;传进来时闸挂两处——**取名字**的那条查询(出口)与
+        共提行的 ``LIMIT`` **之前**(否则无支撑的高位对端占满名额)。
 
         名字是**一条**按 canonical_id 集合的批量读(SQLite 孪生同注记):逐行版本
         本来就是 N+1,加闸之后每一行还要各背一遍整库天花板的清单谓词。
         """
         with self.database.connect() as db:
-            gate = ""
+            gate = limit_gate = ""
             gate_params: tuple = ()
+            limit_params: tuple = ()
             if allowed_source_ids is not None:
                 source_ids = list(dict.fromkeys(allowed_source_ids))
                 if not source_ids:
                     return []
+                authoritative = not self._source_index_backfilled(db, notebook_id)
                 gate = "AND " + _object_support_exists(
-                    "concept_clusters",
-                    authoritative=not self._source_index_backfilled(db, notebook_id),
+                    "concept_clusters", authoritative=authoritative,
                 ) + " "
                 gate_params = (source_ids,)
+                # SQLite 孪生同注记:闸还要压在 LIMIT 之前,否则无支撑的高位对端
+                # 会占满名额、把合格的低位对端挤出去。
+                limit_gate = "AND " + _canonical_support_exists(
+                    "cm", authoritative=authoritative,
+                    canonical_expr="CASE WHEN cm.canonical_a=%s "
+                                   "THEN cm.canonical_b ELSE cm.canonical_a END",
+                ) + " "
+                limit_params = (canonical_id, notebook_id, source_ids)
             rows = db.execute(
-                "SELECT canonical_a, canonical_b, bridge_claims FROM concept_comentions "
+                "SELECT canonical_a, canonical_b, bridge_claims FROM concept_comentions cm "
                 "WHERE notebook_id=%s AND (canonical_a=%s OR canonical_b=%s) AND bridge_claims>=%s "
+                f"{limit_gate}"
                 "ORDER BY bridge_claims DESC, "
                 "CASE WHEN canonical_a=%s THEN canonical_b ELSE canonical_a END "
                 "COLLATE \"C\" ASC LIMIT %s",
-                (notebook_id, canonical_id, canonical_id, min_bridge, canonical_id, limit)).fetchall()
+                (notebook_id, canonical_id, canonical_id, min_bridge,
+                 *limit_params, canonical_id, limit)).fetchall()
             ordered = [
                 (str(r["canonical_b"] if r["canonical_a"] == canonical_id
                      else r["canonical_a"]), int(r["bridge_claims"]))
