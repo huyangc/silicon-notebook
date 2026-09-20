@@ -254,17 +254,17 @@ class IdentityStore:
         互相操作、或同一管理员的两条不同 admin 路径并发时,会以相反顺序等待
         对方持有的行而死锁。ORDER BY id 让所有 admin 变更(角色/文档上限/
         密码重置)共用同一加锁顺序;actor==target 时 IN 去重命中同一行。
-        actor 缺失或非 admin → PermissionError;返回 (actor_row, target_row|None),
+        actor 缺失、停用或非 admin → PermissionError;返回 (actor_row, target_row|None),
         目标缺失由调用方按各自语义处理(通常 KeyError → 404)。"""
         self.auth.lock(db)
         rows = db.execute(
-            "SELECT id,username,role FROM users WHERE id IN (%s,%s) "
+            "SELECT id,username,role,status FROM users WHERE id IN (%s,%s) "
             "ORDER BY id FOR UPDATE",
             (actor_id, user_id),
         ).fetchall()
         by_id = {row["id"]: row for row in rows}
         actor = by_id.get(actor_id)
-        if actor is None or actor["role"] != "admin":
+        if actor is None or actor["role"] != "admin" or actor["status"] != "active":
             raise PermissionError("admin role required")
         return actor, by_id.get(user_id)
 
@@ -534,10 +534,11 @@ class IdentityStore:
         if not _DOCUMENT_LIMIT_MIN <= value <= _DOCUMENT_LIMIT_MAX:
             raise ValueError("document limit out of range")
         with self.database.write() as db:
+            self.auth.lock(db)
             actor = db.execute(
-                "SELECT role FROM users WHERE id=%s FOR UPDATE", (actor_id,)
+                "SELECT role,status FROM users WHERE id=%s FOR UPDATE", (actor_id,)
             ).fetchone()
-            if actor is None or actor["role"] != "admin":
+            if actor is None or actor["role"] != "admin" or actor["status"] != "active":
                 raise PermissionError("admin role required")
             db.execute(
                 "INSERT INTO app_settings(key,value,updated_at) VALUES(%s,%s,%s) "
