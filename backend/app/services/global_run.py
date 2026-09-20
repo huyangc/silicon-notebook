@@ -82,6 +82,22 @@ def _validated_ceilings(
     """
     participants = set(override.notebook_ids)
     given = set(ceilings)
+    bare = sorted(
+        notebook_id for notebook_id, value in ceilings.items()
+        if isinstance(value, (str, bytes))
+    )
+    if bare:
+        # ``frozenset("src-1")`` silently yields the five CHARACTERS of the id:
+        # a ceiling that admits no real source and therefore denies the whole
+        # library, which reads downstream as "this notebook has nothing visible"
+        # rather than as the wiring bug it is. A bare id is the most natural
+        # thing for a caller to pass, so it must be refused rather than mangled
+        # -- the same reason ``ParticipantOverride`` refuses a bare id for
+        # ``notebook_ids``.
+        raise ParticipantOverrideError(
+            f"source ceilings must map each notebook to a collection of "
+            f"source ids, not a single string ({bare})"
+        )
     if given != participants:
         # Content-free: ids are the fact every wiring bug is diagnosed from and
         # the override already publishes them, but nothing else about the

@@ -355,7 +355,7 @@
     "backend/app/extensions/retrieval.py::RetrievalContributorHost._run": 363,
     "backend/app/services/ask_service.py::AskService._draft_reasoning_response": 698,
     "backend/app/services/ask_service.py::AskService._run_reasoning_stage": 515,
-    "backend/app/services/ask_service.py::AskService.ask_chunk": 334,
+    "backend/app/services/ask_service.py::AskService.ask_chunk": 333,
     "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.complete_relations_for_source": 425,
     "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.rebuild_communities": 413,
     "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.rebuild_unified_kg": 482,

@@ -2341,29 +2341,22 @@ class RepositoryRuntime:
     def global_ask_service(self):
         """Independent global conversations over the shared retrieval/model owners."""
         from app.services.global_ask import GlobalAskService
-        from app.services.global_ask_synthesis import GlobalAskSynthesis
 
         if self._global_ask is not None:
             return self._global_ask
         with self._global_ask_wire_lock:
             if self._global_ask is None:
-                ask = self.ask_service()
+                # The SAME engine the notebook-scoped entry points use. A
+                # global run is that engine under a participant override, so
+                # there is no second retrieval or synthesis chain to compose
+                # here any more.
                 self._global_ask = GlobalAskService(
                     store=self.global_ask_store,
                     notebooks=self.sharing_store.readable_notebook_names,
                     can_read=self.sharing_store.user_can_read_notebook,
                     can_read_many=self.sharing_store.readable_notebook_ids,
                     sources=self.source_store,
-                    retrieve=ask.retrieval.retrieve_global_chunk_candidates,
-                    prepare_query=ask.retrieval.prepare_global_query,
-                    rewrite_query=ask._rewrite_followup_query,
-                    synthesize=GlobalAskSynthesis(
-                        settings=self.settings, model_clients=self.models,
-                        parse_anchors=ask.evidence_context.parse_anchors,
-                        style_block=ask._search_profile_style_block,
-                        answer_with_retry=ask._answer_with_retry,
-                        tier_map=ask._tier_map_for,
-                    ),
+                    ask=self.ask_service(),
                     settings=self.settings,
                     event_log=self.event_log,
                 )

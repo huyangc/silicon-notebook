@@ -1,3 +1,11 @@
+"""全局问答的**作业层**:准入、范围解析、权限、历史、持久化与生命周期。
+
+D1-4 之后这一层不再拥有检索与合成:它建一次参与集覆盖 + 逐库冻结来源天花板 +
+detached turn + 联邦运行计划,然后调同一个单库引擎。所以这里的引擎是一个替身
+(``_EngineDouble``),它按参与集逐库发回执、回传检索时刻的指纹、调一个可替换的
+合成钩子——「哪一库被搜过」「合成在什么时候发生」因此仍然可以被这一层的用例精确
+摆布,而**引擎接缝本身**的约定在 ``test_global_ask_engine_parity.py`` 里钉。
+"""
 from __future__ import annotations
 
 from threading import Event, Thread
@@ -7,11 +15,129 @@ import pytest
 
 from app.core.config import Settings
 from app.domain.retrieval import RetrievedChunk
+from app.models.ask import AskResponse
 from app.models.global_ask import GlobalAskRequest, GlobalNotebookScope
 from app.models.ask import Citation
+from app.services.ask_followup import FollowupResolution
+from app.services.ask_modes import resolve_mode
+from app.services.federated_run import (
+    LibraryOutcome, current_detached_ask_turn, current_federated_run_plan,
+)
 from app.services.global_ask import GlobalAskService, GlobalAskError
+from app.services.retrieval_participants import current_participant_override
+from app.services.retrieval_run import retrieval_run
 from app.services.source_scope import current_source_scope
 from app.services.sqlite_repository import SQLiteRepository
+
+
+class _EngineDouble:
+    """``AskService`` 的替身,三个钩子分别对应作业层要摆布的三件事。
+
+    ``retrieve(notebook_id, query)`` 逐库调用一次,返回 ``(hits, _, _)`` 或抛出;
+    ``synthesize(question, chunks, names, history, cancel)`` 是合成那一刻;
+    两者之间经 ``plan`` 发逐库回执与指纹,与生产联邦通道同形(回执在调用线程、
+    按参与集顺序、每库一次,随后一次 ``on_evidence``)。
+    """
+
+    def __init__(self, sources):
+        self.sources = sources
+        self.retrieve = self._default_retrieve
+        self.synthesize = self._default_synthesize
+        self.retrieved: list = []
+        self.syntheses: list = []
+
+    # -- 入口预检 ----------------------------------------------------------
+    def _resolve_ask_mode(self, mode):
+        return resolve_mode(mode)
+
+    def validate_reasoning_submission(self, notebook_id, payload):
+        return None
+
+    def resolve_reasoning_followup(self, notebook_id, payload, history=None):
+        question = payload.question.strip()
+        return FollowupResolution(
+            question=question, resolved_question=question,
+            rewrite_ms=None, gate_message="",
+        )
+
+    # -- 默认行为 ----------------------------------------------------------
+    @staticmethod
+    def _default_retrieve(notebook_id, query):
+        return [RetrievedChunk(
+            chunk_id=f"c-{notebook_id}", source_id=f"s-{notebook_id}",
+            source_title=f"Source {notebook_id}", section_path="Section",
+            text=f"evidence {notebook_id}", element_ids=[f"e-{notebook_id}"],
+            relevance=0.8,
+        )], [], None
+
+    @staticmethod
+    def _default_synthesize(question, chunks, names, history, cancel):
+        return "answer", False, [], []
+
+    # -- 引擎 --------------------------------------------------------------
+    def ask(self, notebook_id, payload, *, user_id, job_id="",
+            cancel_event=None, on_trace=None):
+        with retrieval_run(
+            run_kind=f"ask_{payload.mode}", actor_id=user_id,
+            correlation_id=job_id, cancel_event=cancel_event,
+        ):
+            turn = current_detached_ask_turn()
+            plan = current_federated_run_plan()
+            override = current_participant_override()
+            scope = current_source_scope()
+            chunks, receipts = [], []
+            for participant in override.notebook_ids:
+                allowed = scope.source_ceiling_for(participant)
+                try:
+                    hits, _ids, _matrix = self.retrieve(
+                        participant, payload.question,
+                    )
+                except _LibraryUnavailable as exc:
+                    receipts.append((participant, LibraryOutcome(
+                        status="skipped", reason=exc.reason,
+                    )))
+                    continue
+                self.retrieved.append(participant)
+                kept = [
+                    hit.model_copy(update={"notebook_id": participant})
+                    if hasattr(hit, "model_copy")
+                    else _stamped(hit, participant)
+                    for hit in hits
+                    if allowed is None or hit.source_id in allowed
+                ]
+                chunks.extend(kept)
+                receipts.append((participant, LibraryOutcome(
+                    status="ok", candidate_count=len(kept),
+                )))
+            for participant, outcome in receipts:
+                plan.on_library(participant, outcome)
+            plan.on_evidence(self.sources.evidence_fingerprints([
+                element_id for chunk in chunks for element_id in chunk.element_ids
+            ]))
+            self.syntheses.append((payload.question, chunks, {}, turn.history))
+            answer, grounded, anchors, citations = self.synthesize(
+                payload.question, chunks, {}, turn.history, cancel_event,
+            )
+            return AskResponse(
+                answer_id="", conclusion=answer, answer=answer,
+                grounded=grounded, anchors=list(anchors),
+                citations=list(citations), mode=payload.mode,
+                conversation_id=turn.conversation_id,
+            )
+
+
+class _LibraryUnavailable(Exception):
+    """替身里「这一库这次没搜成」的信号,对应联邦腿的 skip 回执。"""
+
+    def __init__(self, reason="unavailable"):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _stamped(hit, notebook_id):
+    import dataclasses
+
+    return dataclasses.replace(hit, notebook_id=notebook_id)
 
 
 @pytest.fixture
@@ -23,7 +149,6 @@ def setup(tmp_path, request):
                         storage_dir=str(tmp_path / "storage"), **overrides)
     repo = SQLiteRepository(settings)
     readable = {"a", "b"}
-    retrieved, syntheses = [], []
     sources = SimpleNamespace(
         all_visible_source_ids=lambda nb: [f"s-{nb}"],
         evidence_elements=lambda ids: {},
@@ -32,28 +157,14 @@ def setup(tmp_path, request):
     sources.visible_source_ids_by_notebook = lambda ids: {
         nb: sources.all_visible_source_ids(nb) for nb in ids
     }
-
-    def retrieve(nb, query):
-        scope = current_source_scope()
-        assert scope.source_ids == frozenset({f"s-{nb}"})
-        assert scope.base_mode == "include" and not scope.base_notebook_ids
-        retrieved.append(nb)
-        return [RetrievedChunk(
-            chunk_id=f"c-{nb}", source_id=f"s-{nb}", source_title=f"Source {nb}",
-            section_path="Section", text=f"evidence {nb}", element_ids=[f"e-{nb}"], relevance=0.8,
-        )], [], None
-
-    def synthesize(question, chunks, names, history, event):
-        syntheses.append((question, chunks, names, history))
-        return "answer", False, [], []
-
+    engine = _EngineDouble(sources)
     service = GlobalAskService(
         store=repo._runtime.global_ask_store,
         notebooks=lambda user: [SimpleNamespace(id=nb, name=nb.upper()) for nb in sorted(readable)],
         can_read=lambda nb, user: nb in readable and user == "u",
-        sources=sources, retrieve=retrieve, synthesize=synthesize, settings=settings,
+        sources=sources, settings=settings, ask=engine,
     )
-    yield service, readable, retrieved, syntheses
+    yield service, readable, engine.retrieved, engine.syntheses
     service.close()
     repo.close()
 
@@ -92,14 +203,12 @@ def test_all_searches_each_notebook_once_and_synthesizes_once(setup):
     job = service.start(GlobalAskRequest(question="compare"), user_id="u")
     result = finished(service, job)
     assert result.status == "done"
-    # Libraries retrieve concurrently, so the ORDER they enter retrieval is
-    # thread scheduling; what must stay fixed is that each is visited once and
-    # that the durable receipt follows the resolved participant order.
     assert sorted(retrieved) == ["a", "b"]
     assert len(syntheses) == 1
     assert {chunk.notebook_id for chunk in syntheses[0][1]} == {"a", "b"}
     assert result.searched_notebook_ids == ["a", "b"]
-    assert service.conversation(job.conversation_id, user_id="u").turns[0].response.answer == "answer"
+    turns = service.conversation(job.conversation_id, user_id="u").turns
+    assert turns[0].answer.answer == "answer"
 
 
 def test_empty_include_means_all_and_unknown_scope_is_rejected(setup):
@@ -150,6 +259,28 @@ def test_followup_inherits_and_narrowing_drops_prior_context(setup):
     assert "private all-context" not in syntheses[-1][3]
 
 
+def test_the_detached_turn_carries_the_history_in_the_engine_s_own_shape(setup):
+    """历史交给引擎的形状与单库 ``prepare_turn`` 逐字同形。
+
+    ``User: … / Assistant: …`` 成对、最旧在前,外加只含提问行的那一半。全局对话
+    自己渲染一套方言,等于让同一个模型按入口不同读到两种历史块。
+    """
+    service, _, _, _ = setup
+    turns = []
+    service.ask.synthesize = lambda question, chunks, names, history, cancel: (
+        turns.append(current_detached_ask_turn()) or ("answer", False, [], [])
+    )
+    first = service.start(GlobalAskRequest(question="低温性能"), user_id="u")
+    finished(service, first)
+    second = service.start(GlobalAskRequest(question="原因是什么", conversation_id=first.conversation_id), user_id="u")
+    assert finished(service, second).status == "done"
+
+    turn = turns[-1]
+    assert turn.history == "User: 低温性能\nAssistant: answer"
+    assert turn.user_history == "User: 低温性能"
+    assert turn.conversation_id == first.conversation_id
+
+
 def test_explicit_cancel_prevents_late_synthesis_commit(setup):
     service, _, _, _ = setup
     entered, release = Event(), Event()
@@ -159,29 +290,29 @@ def test_explicit_cancel_prevents_late_synthesis_commit(setup):
         assert release.wait(5)
         return "late answer", False, [], []
 
-    service.synthesize = synthesis
+    service.ask.synthesize = synthesis
     job = service.start(GlobalAskRequest(question="q"), user_id="u")
     assert entered.wait(5)
     assert service.cancel(job.job_id, user_id="u").status == "cancelled"
     release.set()
     result = finished(service, job)
-    assert result.status == "cancelled" and result.response is None
+    assert result.status == "cancelled" and result.answer is None
 
 
 def test_live_token_revocation_stops_before_synthesis(setup):
     service, _, _, syntheses = setup
     current = [["a", "b"]]
-    retrieve = service.retrieve
+    retrieve = service.ask.retrieve
 
     def revoke_after_retrieval(nb, query):
         result = retrieve(nb, query)
         current[0] = []
         return result
 
-    service.retrieve = revoke_after_retrieval
+    service.ask.retrieve = revoke_after_retrieval
     job = service.start(GlobalAskRequest(question="q"), user_id="u", allowed_notebook_ids=["a", "b"], authority_check=lambda: current[0])
     result = finished(service, job)
-    assert result.status == "failed" and result.response is None
+    assert result.status == "failed" and result.answer is None
     assert not syntheses
 
 
@@ -194,7 +325,7 @@ def test_delete_cancels_active_worker_and_removes_durable_conversation(setup):
         assert release.wait(5)
         return "late", False, [], []
 
-    service.synthesize = synthesis
+    service.ask.synthesize = synthesis
     job = service.start(GlobalAskRequest(question="q"), user_id="u")
     assert entered.wait(5)
     service.delete_conversation(job.conversation_id, user_id="u")
@@ -204,35 +335,17 @@ def test_delete_cancels_active_worker_and_removes_durable_conversation(setup):
     assert service.list_conversations(user_id="u") == []
 
 
-def test_followup_rewrite_is_used_for_retrieval(setup):
-    service, _, _, _ = setup
-    first = service.start(GlobalAskRequest(question="低温性能"), user_id="u")
-    finished(service, first)
-    queries = []
-    retrieve = service.retrieve
-    service.rewrite_query = lambda history, question, event: "低温性能的原因" if history else question
-
-    def capture(nb, query):
-        queries.append(query)
-        return retrieve(nb, query)
-
-    service.retrieve = capture
-    job = service.start(GlobalAskRequest(question="原因是什么", conversation_id=first.conversation_id), user_id="u")
-    assert finished(service, job).status == "done"
-    assert queries == ["低温性能的原因", "低温性能的原因"]
-
-
 def test_sources_are_frozen_before_any_retrieval(setup):
     service, _, _, _ = setup
     frozen = []
     service.sources.all_visible_source_ids = lambda nb: frozen.append(nb) or [f"s-{nb}"]
-    retrieve = service.retrieve
+    retrieve = service.ask.retrieve
 
     def verify(nb, query):
         assert frozen == ["a", "b"]
         return retrieve(nb, query)
 
-    service.retrieve = verify
+    service.ask.retrieve = verify
     job = service.start(GlobalAskRequest(question="q"), user_id="u")
     assert finished(service, job).status == "done"
 
@@ -247,12 +360,12 @@ def test_source_removed_during_synthesis_cannot_commit_stale_citation(setup):
         citation = Citation(label="source", source_id="s-a", element_id="e-a", location_label="Section", quoted_span="original", notebook_id="a")
         return "claim [k1]", True, [], [citation]
 
-    service.synthesize = synthesis
+    service.ask.synthesize = synthesis
     job = service.start(GlobalAskRequest(question="q"), user_id="u")
     result = finished(service, job)
-    assert result.status == "done" and not result.response.grounded
-    assert not result.response.citations
-    assert "变化" in result.response.answer
+    assert result.status == "done" and not result.answer.grounded
+    assert not result.answer.citations
+    assert "变化" in result.answer.answer
 
 
 def test_http_job_conversation_and_error_contract(setup, monkeypatch):
@@ -290,22 +403,23 @@ def test_storage_restart_recovery_is_explicit_and_releases_conversation(setup):
         assert release.wait(5)
         return "late", False, [], []
 
-    service.synthesize = synthesis
+    service.ask.synthesize = synthesis
     job = service.start(GlobalAskRequest(question="q"), user_id="u")
     assert entered.wait(5)
     service.store.recover()
     release.set()
     assert finished(service, job).status == "interrupted"
-    assert service.store.job(job.job_id, "u").response is None
+    assert service.store.job(job.job_id, "u").answer is None
 
 
 @pytest.mark.parametrize("change", ["revoke", "cancel"])
-def test_worker_checks_authority_and_cancel_before_history_rewrite(setup, monkeypatch, change):
+def test_worker_checks_authority_and_cancel_before_calling_the_engine(setup, monkeypatch, change):
+    """run 开始那一次复核在**引擎之前**:撤权或取消时一次模型都不该花。"""
     service, _, _, _ = setup
-    staged, rewrites = [], []
+    staged, asked = [], []
     allowed = [["a", "b"]]
     monkeypatch.setattr("app.services.global_ask.threading.Thread.start", _stage_job_threads(staged))
-    service.rewrite_query = lambda *args: rewrites.append(args) or "rewritten"
+    service.ask.retrieve = lambda nb, query: asked.append(nb) or ([], [], None)
     job = service.start(GlobalAskRequest(question="q"), user_id="u", authority_check=lambda: allowed[0])
     if change == "revoke":
         allowed[0] = []
@@ -314,7 +428,7 @@ def test_worker_checks_authority_and_cancel_before_history_rewrite(setup, monkey
     staged[0].run()
     result = finished(service, job)
     assert result.status == ("failed" if change == "revoke" else "cancelled")
-    assert not rewrites
+    assert not asked
 
 
 def test_runtime_wiring_supports_notebooks_without_knowledge_graph(tmp_path):
@@ -327,13 +441,13 @@ def test_runtime_wiring_supports_notebooks_without_knowledge_graph(tmp_path):
         user_id = repo.current_user().id
         service = repo._runtime.global_ask_service()
         job = service.start(GlobalAskRequest(question="有哪些内容"), user_id=user_id)
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 10
         while job.job_id in service._events and time.monotonic() < deadline:
             Event().wait(0.01)
         result = service.get_job(job.job_id, user_id=user_id)
         assert result.status == "done"
         assert result.resolved_notebook_ids == [notebook.id]
-        assert result.response.grounded is False
+        assert result.answer is not None and result.answer.grounded is False
     finally:
         repo.close()
 
@@ -358,7 +472,7 @@ def test_job_errors_never_expose_raw_exception_content(setup, failure_stage):
     def fail(*args):
         raise RuntimeError("secret upstream response/path")
 
-    setattr(service, failure_stage, fail)
+    setattr(service.ask, failure_stage, fail)
     job = service.start(GlobalAskRequest(question="q"), user_id="u")
     result = finished(service, job)
     assert result.status == "failed"

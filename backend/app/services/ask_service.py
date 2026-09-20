@@ -97,6 +97,10 @@ from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancel
 from app.domain.retrieval_control import RetrievalControlError
 from app.services.citation_markers import LOOSE_MARKER_RE, MARKER_RE, marker_keys
 from app.services.document_read_answer import document_read_block_reserve
+# A leaf that imports nothing from ``app`` (see its module docstring): reading
+# the detached turn costs one import and creates no edge to the participant
+# override module this file is barred from.
+from app.services.federated_run import current_detached_ask_turn
 from app.services.evidence_context import anchor_image_targets
 from app.services.model_work import MalformedModelResponse, ModelNotConfiguredError
 
@@ -1447,7 +1451,7 @@ class AskService:
         self._confirmed_reasoning_intent(payload, "")
 
     def resolve_reasoning_followup(
-        self, notebook_id: str, payload: AskRequest,
+        self, notebook_id: str, payload: AskRequest, history: str | None = None,
     ) -> FollowupResolution:
         """Decide, before any durable Ask exists, whether an elliptical
         follow-up can be resolved from this member's own prior turns.
@@ -1496,12 +1500,20 @@ class AskService:
         _seed, gate_message = followup_gate(question, "", "", max_topics=1)
         if not gate_message:
             return admitted
-        history = self.ask_state.conversation_user_history(
-            notebook_id,
-            payload.conversation_id or "",
-            self.current_user_id(),
-            5,
-        )
+        # ``history`` supplied means the caller owns the conversation model and
+        # has already read this member's own question lines from it (global Ask
+        # keeps its turns in its own store, so ``ask_state`` holds none of
+        # them). It is the same shape ``conversation_user_history`` returns --
+        # ``User: <question>`` lines, oldest first -- and an empty string is a
+        # legal value meaning "no prior turns", which walks into the same 422 as
+        # a notebook conversation with no history.
+        if history is None:
+            history = self.ask_state.conversation_user_history(
+                notebook_id,
+                payload.conversation_id or "",
+                self.current_user_id(),
+                5,
+            )
         if not history.strip():
             return FollowupResolution(
                 question=question,
@@ -1794,7 +1806,21 @@ class AskService:
         create-or-continue behavior.  Once a durable job exists, however, its
         exact parent and running status are authoritative: cancellation or
         deletion raises before any fallback conversation can be created.
+
+        A DETACHED turn short-circuits both: the caller owns the conversation
+        and its history in its own store, so there is no ``conversations`` row
+        to create or lease and no ``ask_jobs`` row to validate against.  Going
+        through ``ask_state`` here would create a per-notebook conversation for
+        a question asked of a whole participant set and attribute it to
+        whichever library happens to be the naming anchor.
         """
+        from app.repositories.ports import PreparedAskTurn as _PreparedAskTurn
+
+        detached = current_detached_ask_turn()
+        if detached is not None:
+            return _PreparedAskTurn(
+                detached.conversation_id, detached.history, detached.user_history,
+            )
         if not job_id:
             return self.ask_state.prepare_turn(
                 notebook_id, conversation_id, question, user_id
@@ -1830,6 +1856,16 @@ class AskService:
         if receipt is not None:
             response.retrieval_scope = receipt
         response.asked_at = asked_at or response.asked_at
+        # A DETACHED turn owns its own persistence. The three assignments above
+        # still run because they shape the RESPONSE the caller gets back; what
+        # must not happen is the write. There is no notebook whose ``answers``
+        # table this turn belongs to -- writing it under the naming anchor would
+        # make one of the participating libraries claim a cross-library answer,
+        # and that row would then reappear in that notebook's conversation list.
+        # The empty answer id is the historical "no durable answer" value the
+        # non-job branch already returns for compatibility callers.
+        if current_detached_ask_turn() is not None:
+            return ""
         if not job_id:
             return self.ask_state.save_answer(
                 notebook_id, conversation_id, question, response, user_id
@@ -3459,15 +3495,14 @@ class AskService:
             if ex and ex.comparison and (self.settings.community_layer_enabled
                                           or self.settings.mention_bridge_enabled):
                 communities = self.communities()
-                base_ids = communities.mounted_base_ids(notebook_id)
-                for base_nb in base_ids:
-                    peers, _src = communities.resolve_comparison_peers(
-                        base_nb, ex.comparison["focal"], retrieval_query,
+                for pname in communities.comparison_peer_names(
+                        communities.mounted_base_ids(notebook_id),
+                        ex.comparison["focal"], retrieval_query,
                         top_k=self.settings.community_peers_topk,
-                        candidates=self.settings.community_rerank_candidates)
-                    for pname in peers:
-                        if pname not in sub_queries:
-                            sub_queries.append(pname)
+                        candidates=self.settings.community_rerank_candidates,
+                        cap_factor=self.settings.reasoning_community_peers_cap_factor):
+                    if pname not in sub_queries:
+                        sub_queries.append(pname)
             hl = " ".join(ex.high_level_keywords) if ex else ""
             # Bilingual keyword string (high+low level, both corpus languages) for
             # the CHUNK lexical union — this is how "FTS carries the 2nd language"

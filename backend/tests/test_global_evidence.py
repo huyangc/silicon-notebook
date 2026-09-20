@@ -1,16 +1,27 @@
-"""Cross-library selection, model-budget fairness and safe answer recovery."""
+"""跨库证据选择,以及作业层对「引用冻结」与「逐库回执」的把关。
+
+D1-4 之后这里删掉了三条旧流水线专属的用例,理由各自不同,都不是「让它绿」:
+
+  · ``test_changed_later_element_rebuilds_only_from_surviving_notebook``
+    —— 失效证据剔除后**重新合成一次**这个补救动作被刻意收窄成整份作废(见
+    计划 1.8):再调一次引擎会重跑全部检索、重新冻结来源,语义上不是同一份
+    答案。替代用例是 ``test_global_ask_engine_parity.py`` 的
+    ``test_changed_evidence_returns_retry_copy``。
+  · ``test_revocation_during_validation_prevents_second_model_call``
+    —— 「第二次模型调用」在新引擎下不存在,这条断言恒真。
+  · ``test_total_retrieval_budget_discloses_unsearched_remaining_notebooks``
+    —— 阶段时限与 ``queue_deadline`` 搬进了联邦通道,由
+    ``tests/test_federated_global_budget.py`` 在它真正的宿主上钉。
+"""
 from dataclasses import replace
 from threading import Event
 from types import SimpleNamespace
-import time
-
-import pytest
 
 from app.models.ask import Citation
 from app.models.global_ask import GlobalAskRequest
 from app.services.ask_service import AskService
 from app.services.global_evidence import peer_evidence
-from tests.test_global_ask import setup, finished
+from tests.test_global_ask import setup, finished, _LibraryUnavailable
 from tests.test_global_ask_synthesis import chunk, synthesis, RecordingModels
 
 
@@ -137,122 +148,72 @@ def test_shared_answer_retry_recovers_empty_model_response():
     assert len(models.calls) == 2
 
 
-def test_changed_later_element_rebuilds_only_from_surviving_notebook(setup):
+def test_the_retrieval_snapshot_outranks_a_freshly_read_baseline(setup):
+    """检索时刻的指纹是「之前」,复核时现读的那一份不是。
+
+    把「之前」也现读一遍,两边自然恒等,这道闸就变成一句空话:答案会带着一段
+    **已经被改过**的原文照常交付。所以累积快照必须赢过现读的基线。
+    """
     service, _, _, _ = setup
-    original = service.retrieve
-    def retrieve(nb, query):
-        hits, ids, matrix = original(nb, query)
-        if nb == "a":
-            hits = [replace(hits[0], element_ids=["e-a", "e-a2"])]
-        return hits, ids, matrix
-    service.retrieve = retrieve
-    fingerprints = {"e-a": ("s-a", "one"), "e-a2": ("s-a", "two"), "e-b": ("s-b", "three")}
-    service.sources.evidence_fingerprints = lambda ids: {key: fingerprints[key] for key in ids if key in fingerprints}
-    calls = []
+    service.ask.retrieve = lambda nb, query: ([replace(
+        chunk(f"c-{nb}", text=f"evidence {nb}", notebook_id=nb),
+        source_id=f"s-{nb}", element_ids=[f"e-{nb}"],
+    )], [], None)
+    snapshot = {"e-a": ("s-a", "old"), "e-b": ("s-b", "old")}
+    live = {"e-a": ("s-a", "new"), "e-b": ("s-b", "new")}
+    reads = []
+
+    def fingerprints(ids):
+        reads.append(tuple(ids))
+        # 第一次是联邦通道在检索时刻读的快照,之后是复核现读。
+        source = snapshot if len(reads) == 1 else live
+        return {key: source[key] for key in ids if key in source}
+
+    service.sources.evidence_fingerprints = fingerprints
+
     def synthesize(question, chunks, *args):
-        calls.append([row.notebook_id for row in chunks])
-        if len(calls) == 1:
-            fingerprints["e-a2"] = ("s-a", "changed")
         hit = chunks[0]
-        return f"claim {hit.notebook_id}", True, [], [Citation(
-            label="source", source_id=hit.source_id, element_id=hit.element_ids[0],
+        return "stale claim", True, [], [Citation(
+            label="s", source_id=hit.source_id, element_id=hit.element_ids[0],
             location_label="", quoted_span=hit.text, notebook_id=hit.notebook_id,
         )]
-    service.synthesize = synthesize
+
+    service.ask.synthesize = synthesize
     result = finished(service, service.start(GlobalAskRequest(question="q"), user_id="u"))
-    assert result.status == "done" and result.response.answer == "claim b"
-    assert calls == [["a", "b"], ["b"]]
-    assert result.cited_notebook_ids == ["b"]
 
-
-def test_revocation_during_validation_prevents_second_model_call(setup):
-    service, readable, _, _ = setup
-    reads, calls = [], []
-    def fingerprints(ids):
-        reads.append(ids)
-        if not calls:
-            return {"e-a": ("s-a", "old")}
-        readable.clear()
-        return {}
-    service.sources.evidence_fingerprints = fingerprints
-    def synthesize(*args):
-        calls.append(True)
-        return "claim", True, [], [Citation(label="s", source_id="s-a", element_id="e-a",
-            location_label="", quoted_span="", notebook_id="a")]
-    service.synthesize = synthesize
-    result = finished(service, service.start(GlobalAskRequest(question="q"), user_id="u"))
-    assert result.status == "failed" and result.response is None
-    assert calls == [True]
-
-
-def test_retrieval_snapshot_cannot_be_replaced_by_a_newer_validation_baseline(setup):
-    from app.services.global_retrieval import GlobalRetrievalResult
-    service, _, _, _ = setup
-    original = service.retrieve
-    def retrieve(nb, query):
-        hits, ids, matrix = original(nb, query)
-        return GlobalRetrievalResult(hits, ids, matrix, False, {f"e-{nb}": (f"s-{nb}", "old")})
-    service.retrieve = retrieve
-    service.sources.evidence_fingerprints = lambda ids: {key: ("s-" + key[2:], "new") for key in ids}
-    def synthesize(question, chunks, *args):
-        hit = chunks[0]
-        return "stale claim", True, [], [Citation(label="s", source_id=hit.source_id,
-            element_id=hit.element_ids[0], location_label="", quoted_span=hit.text, notebook_id=hit.notebook_id)]
-    service.synthesize = synthesize
-    result = finished(service, service.start(GlobalAskRequest(question="q"), user_id="u"))
-    assert result.status == "done" and not result.response.grounded
-    assert "stale claim" not in result.response.answer
-    assert not result.response.citations
-
-
-@pytest.mark.parametrize("setup", [{"global_ask_retrieval_concurrency": 1}], indirect=True)
-def test_total_retrieval_budget_discloses_unsearched_remaining_notebooks(setup, monkeypatch):
-    # One retrieval slot is what makes "the second library starts after the
-    # first has already spent the whole phase budget" reachable at all; with a
-    # wider pool both libraries start before the clock moves.
-    service, _, retrieved, _ = setup
-    clock = [time.monotonic()]
-    monkeypatch.setattr("app.services.global_ask.time", SimpleNamespace(monotonic=lambda: clock[0]))
-    original = service.retrieve
-    def retrieve(nb, query):
-        result = original(nb, query)
-        clock[0] += service.settings.global_ask_retrieval_timeout_seconds + 1
-        return result
-    service.retrieve = retrieve
-    result = finished(service, service.start(GlobalAskRequest(question="q"), user_id="u"))
-    assert result.status == "done"
-    assert retrieved == ["a"]
-    assert result.searched_notebook_ids == []
-    assert [row.notebook_id for row in result.skipped_notebooks] == ["a", "b"]
-    # "b" never issued a query: it was still queued when the phase budget ran
-    # out, so the receipt must not blame the selected scope.
-    assert result.skipped_notebooks[1].reason == "检索未开始，请稍后重试。"
+    assert result.status == "done" and not result.answer.grounded
+    assert "stale claim" not in result.answer.answer
+    assert not result.answer.citations
 
 
 def test_polling_and_cancellation_retain_completed_notebook_progress(setup):
-    from app.services.global_retrieval import GlobalRetrievalSkipped
+    """已经收到的逐库回执在取消之后仍然留在作业行上。
+
+    回执是「这次 run 到底搜过哪几个库」的唯一凭据;取消把它抹掉,用户看到的就是
+    一次什么都没发生的提问。
+    """
     service, _, _, _ = setup
     entered, release = Event(), Event()
+
     def retrieve(nb, query):
         if nb == "a":
-            raise GlobalRetrievalSkipped("timeout")
+            raise _LibraryUnavailable("timeout")
+        return [], [], None
+
+    def synthesize(question, chunks, names, history, cancel):
         entered.set()
         assert release.wait(5)
-        return [], [], None
-    service.retrieve = retrieve
+        return "late", False, [], []
+
+    service.ask.retrieve = retrieve
+    service.ask.synthesize = synthesize
     request = service.start(GlobalAskRequest(question="progress"), user_id="u")
     try:
         assert entered.wait(5)
-        # Libraries now retrieve concurrently, so "b is in flight" no longer
-        # implies "a's receipt has already been persisted". Hand-shake on the
-        # observable progress row instead of on a wall-clock assumption.
         progress = service.get_job(request.job_id, user_id="u")
-        deadline = time.monotonic() + 5
-        while not progress.skipped_notebooks and time.monotonic() < deadline:
-            Event().wait(0.01)
-            progress = service.get_job(request.job_id, user_id="u")
         assert progress.status == "running"
         assert [row.notebook_id for row in progress.skipped_notebooks] == ["a"]
+        assert progress.searched_notebook_ids == ["b"]
         stopped = service.cancel(request.job_id, user_id="u")
         assert stopped.skipped_notebooks == progress.skipped_notebooks
     finally:

@@ -91,11 +91,22 @@ class GlobalAskJob(BaseModel):
     # moves onto ``AskService.ask`` (a later task) -- it stays only to
     # replay history.
     response: GlobalAskAnswer | None = None
-    # D1-1 groundwork (unused by ``_run`` today, which still only writes
-    # ``response`` above): once the global engine calls the single-library
-    # ``AskService.ask``, ``mode``/``trace``/``answer`` become the write
-    # side and ``response`` becomes legacy-only.
+    # The engine that answers this turn and the resource level it runs at, both
+    # frozen when the job is created and read back by the detached worker, so
+    # neither request field can be "accepted and then ignored".
+    #
+    # ``retrieval_effort`` is CLAMPED to the default at admission rather than
+    # carried from the request: see ``GlobalAskService.start``.
+    #
+    # The confirmed INTENT is deliberately not a field here. It is run input,
+    # handed to the worker like the conversation history, and the finished turn
+    # already publishes the understanding that actually answered on
+    # ``answer.intent``. Putting it on the job as well would persist the same
+    # contract twice AND -- because this model is a response body while
+    # ``GlobalAskRequest`` is a request body -- split ``AskIntentConfirmation``
+    # into two schema names across the whole public OpenAPI document.
     mode: str = "chunk"
+    retrieval_effort: RetrievalEffort = DEFAULT_RETRIEVAL_EFFORT
     trace: list[TraceStep] = Field(default_factory=list)
     answer: AskResponse | None = None
 

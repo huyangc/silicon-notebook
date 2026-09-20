@@ -29,6 +29,8 @@ import ast
 from functools import lru_cache
 from pathlib import Path
 
+import pytest
+
 import app.services.retrieval_participants as override_module
 from tests.architecture.semantic_source import PythonSourceIndex
 
@@ -75,13 +77,23 @@ _WRITER_WHITELIST = frozenset({
     # ``federated_ask_active``)。所以它进写入方白名单而**不**进
     # ``_EXPECTED_IMPORTERS`` 那条相等断言——那条断言钉的是读者接线有没有被悄悄
     # 回退,把一个纯写入方混进去会让它开始钉错的东西。
+    #
+    # **只有这一个文件。** D1-4 接线之后 ``global_ask.py`` 只**构造**
+    # ``ParticipantOverride``(那是一次鉴权动作,与 ``can_read_many`` 同处),再把
+    # 它交给这个管理器去装;构造一个值不安装任何座位,所以它不需要、也不应该有
+    # 写入方资格。由 ``test_global_ask_never_installs_seats_itself`` 反向钉住。
     "app/services/global_run.py",
-    # ``ParticipantOverride`` 的构造点(D1-4 接线):建覆盖是一次鉴权动作,与
-    # ``can_read_many`` 同处;建好之后交给上面那个管理器去装。今天还没有接线,
-    # 所以它在这里是 ⊆ 的一员而不是必须出现的一员。
+})
+# 第三种角色:**构造**一个 ``ParticipantOverride`` 而既不读也不装。建覆盖是一次
+# 鉴权动作(``can_read_many`` 刚刚在同一个函数里跑过,``attested_actor_id`` 说的
+# 就是那件事),它必须与授权同处;安装则交给管理器,由它的全映射断言把两个座位
+# 绑在一起。所以全局入口可以 import 这个类型,但既不在读者白名单上(它一行也不
+# 调访问器),也不在写入方白名单上(它一行也不调 ``participant_override(...)``,
+# 由 ``test_global_ask_never_installs_seats_itself`` 反向钉住)。
+_CONSTRUCTOR_WHITELIST = frozenset({
     "app/services/global_ask.py",
 })
-_IMPORT_WHITELIST = _READER_WHITELIST | _WRITER_WHITELIST
+_IMPORT_WHITELIST = _READER_WHITELIST | _WRITER_WHITELIST | _CONSTRUCTOR_WHITELIST
 
 # C3 接线之后读者集合已经确定,所以这一条是**相等**而不是 ⊆:一个白名单里却
 # 不再 import 的模块意味着接线被悄悄回退(例如 ``collection_catalog`` 改回直调
@@ -374,6 +386,76 @@ def test_writer_is_only_global_ask():
     assert not unexpected, (
         f"这些生产模块安装了参与集覆盖,但唯一写入方是 "
         f"{sorted(_WRITER_WHITELIST)}:{unexpected}。{_WHITELIST_RATIONALE}"
+    )
+
+
+def _seat_calls(source: str, path: str, function_name: str) -> bool:
+    """``function_name`` 被**调用**了吗(限定名、别名都算)?
+
+    只认调用。``ParticipantOverride(...)`` 这种构造不算,它造的是一个值;安装
+    座位的是 ``participant_override(...)`` 这个上下文管理器。
+    """
+    tree = ast.parse(source, filename=path)
+    local_names = {function_name}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == function_name:
+                    local_names.add(alias.asname or alias.name)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = (
+            func.id if isinstance(func, ast.Name)
+            else func.attr if isinstance(func, ast.Attribute)
+            else ""
+        )
+        if name in local_names:
+            return True
+    return False
+
+
+@pytest.mark.parametrize(
+    "seat", ["participant_override", "source_scope_context"],
+)
+def test_global_ask_never_installs_seats_itself(seat):
+    """全局入口只**构造**覆盖,不装任何座位。
+
+    两个座位必须同时安装才有意义(见 ``global_run`` 的模块 docstring:只装一半
+    是错的 run,不是降级的 run),而「同时」这件事只有那个管理器的全映射断言保证
+    得了。全局入口自己调这两个函数里的任何一个,都是绕过那道断言的形状——
+    ``participant_override(...)`` 单独装会让 ask 侧留在单库模式,
+    ``source_scope_context(...)`` 单独装会让检索腿按锚点库的挂载表扇出。
+
+    ``source_scope_context`` 也覆盖了一个更普通的回归:旧的逐库检索循环曾在
+    ``global_ask`` 里自己开来源范围,那条路已经被引擎取代,不该回来。
+    """
+    path = "app/services/global_ask.py"
+    source = (_BACKEND / path).read_text(encoding="utf-8")
+    assert not _seat_calls(source, path, seat), (
+        f"{path} 调用了 {seat}(...);座位只许由 app/services/global_run.py 的"
+        f"管理器安装。{_WHITELIST_RATIONALE}"
+    )
+
+
+def test_seat_call_guard_sees_through_an_alias():
+    """上一条的检测分支自己要有正对照,否则它是一条永不触发的死守卫。"""
+    assert _seat_calls(
+        "from app.services.retrieval_participants import "
+        "participant_override as install\nwith install(o):\n    pass\n",
+        "x.py", "participant_override",
+    )
+    assert _seat_calls(
+        "import app.services.source_scope as m\nm.source_scope_context(a)\n",
+        "x.py", "source_scope_context",
+    )
+    # 构造一个 ``ParticipantOverride`` 不是安装。
+    assert not _seat_calls(
+        "from app.services.retrieval_participants import ParticipantOverride\n"
+        "o = ParticipantOverride(notebook_ids=('a',), tiers={}, "
+        "attested_actor_id='u')\n",
+        "x.py", "participant_override",
     )
 
 
@@ -834,6 +916,14 @@ _SEAT_FAILSOFT_SITES = (
 #   ``scoped_allowed_source_ids``,两者都只读 ``source_scope``。
 # * D0-5 没有新增任何宽 ``except``;它加在 ``_spreadsheet_reasoning_results``(已有宽
 #   handler)里的两行只读 ``source_scope`` 的 ContextVar,同样不触达座位。
+# * D1-4 在 ``global_ask.py`` 新增的三个宽 ``except`` —— ``_emit``(事件投递)、
+#   ``_append_trace``(``job.trace.append`` + 一次作业行写)、``_same_request``
+#   (旧请求串过模型归一)——都不登记:三个 try 体都不读参与集,而且该文件根本不在
+#   读者白名单上(它只**构造** ``ParticipantOverride``,见 ``_CONSTRUCTOR_WHITELIST``),
+#   连访问器都 import 不到。同文件的 ``_on_library`` / ``_execute`` 里那两个
+#   ``except BaseException`` 不是 fail-soft:两者都把异常记下来之后原样 ``raise``,
+#   ``_RunState.raise_first_error`` 还会在引擎返回后再抛一次——这正是为了让**别人**
+#   的 fail-soft 吞掉回调异常也照样失败。
 
 _CONTROL_ERROR = "RetrievalControlError"
 

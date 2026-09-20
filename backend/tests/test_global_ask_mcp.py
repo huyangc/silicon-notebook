@@ -32,6 +32,32 @@ def job(*, answer="", citations=None):
     }
 
 
+def test_a_turn_answered_by_the_shared_engine_reads_back(monkeypatch):
+    """新形状(``answer``)与旧形状(``response``)经同一个接缝读出来。
+
+    D1-4 之后新作业写的是标准 ``AskResponse``,旧行仍然只有 ``response``。任何一
+    个形状读空,MCP 客户端看到的就是一次「完成了但没有答案」的提问。
+    """
+    legacy = job(answer="旧形状答案", citations=[
+        {"label": "来源", "source_id": "s-a", "element_id": "e-a",
+         "location_label": "第 1 节", "quoted_span": "原文",
+         "notebook_id": "nb-a"},
+    ])
+    current = job()
+    current.pop("response")
+    current["answer"] = {
+        "answer_id": "", "conclusion": "结论", "answer": "新形状答案",
+        "grounded": True, "citations": legacy["response"]["citations"],
+    }
+
+    for value, expected in ((legacy, "旧形状答案"), (current, "新形状答案")):
+        page = module._job_page(value)
+        assert page["answer"] == expected
+        assert page["grounded"] is True
+        assert [row["notebook_id"] for row in page["citations"]] == ["nb-a"]
+        assert page["total_citations"] == 1
+
+
 def test_coverage_retains_every_skip_and_degraded_receipt():
     value = job(answer="partial answer")
     value["skipped_notebooks"] = [{"notebook_id": "nb-b", "reason": "检索超时，请重试。"}]
