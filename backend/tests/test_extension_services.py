@@ -18,6 +18,11 @@ import extension_services as manager
 import extension_service_runtime as runtime
 
 
+# Lifecycle cases already exercise real process/thread concurrency. Keep unrelated
+# supervisors from competing for startup deadlines across xdist workers.
+pytestmark = pytest.mark.xdist_group("extension_service_lifecycle")
+
+
 @pytest.fixture
 def directory(tmp_path):
     directory = tmp_path / "runtime"
@@ -124,6 +129,72 @@ def test_unsafe_state_symlink_rejected(tmp_path):
     link.symlink_to(target, target_is_directory=True)
     with pytest.raises(runtime.ServiceError, match="unsafe_state"):
         runtime.ensure_state(link / "children")
+
+
+def _replace_after_next_open(monkeypatch, path, value):
+    open_file = runtime.os.open
+    opened = []
+
+    def open_then_replace(candidate, *args, **kwargs):
+        fd = open_file(candidate, *args, **kwargs)
+        if Path(candidate) == path and not opened:
+            opened.append(fd)
+            runtime.atomic_json(path, value)
+            assert os.fstat(fd).st_nlink == 0
+        return fd
+
+    monkeypatch.setattr(runtime.os, "open", open_then_replace)
+    return opened
+
+
+def test_state_read_keeps_open_snapshot_during_atomic_replacement(tmp_path, monkeypatch):
+    path = tmp_path / "state.json"
+    before = {"run_id": "old", "state": "starting"}
+    after = {"run_id": "new", "state": "ready"}
+    runtime.atomic_json(path, before)
+    opened = _replace_after_next_open(monkeypatch, path, after)
+
+    assert runtime.read_json(path) == before
+    assert runtime.read_json(path) == after
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+
+
+@pytest.mark.parametrize("operation", ["read", "lock", "event"])
+def test_hardlinked_state_files_are_rejected(tmp_path, operation):
+    path = tmp_path / "events.jsonl"
+    runtime.atomic_json(path, {"state": "ready"})
+    (tmp_path / "other-link").hardlink_to(path)
+
+    with pytest.raises(runtime.ServiceError, match="unsafe_state_file"):
+        if operation == "read":
+            runtime.read_json(path)
+        elif operation == "lock":
+            with runtime.lock(path):
+                pytest.fail("hardlinked lock acquired")
+        else:
+            runtime.event(tmp_path, "run", "ready")
+
+
+@pytest.mark.parametrize("operation", ["lock", "event", "writable_opt_in"])
+def test_unlinked_state_writers_and_locks_are_rejected(tmp_path, monkeypatch, operation):
+    path = tmp_path / "events.jsonl"
+    runtime.atomic_json(path, {"state": "starting"})
+    after = {"state": "ready"}
+    opened = _replace_after_next_open(monkeypatch, path, after)
+
+    with pytest.raises(runtime.ServiceError, match="unsafe_state_file"):
+        if operation == "lock":
+            with runtime.lock(path):
+                pytest.fail("unlinked lock acquired")
+        elif operation == "event":
+            runtime.event(tmp_path, "run", "ready")
+        else:
+            fd = runtime.safe_open(path, os.O_RDWR, allow_unlinked=True)
+            os.close(fd)
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+    assert runtime.read_json(path) == after
 
 
 def test_locks_exclude_second_owner(directory):
