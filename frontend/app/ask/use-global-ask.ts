@@ -5,9 +5,10 @@ import { askQuestionLimitHint } from "../ask-api.ts";
 import { httpErrorStatus, toUserMessage } from "../errors.ts";
 import {
   askGlobal, cancelGlobalJob, getGlobalConversation, getGlobalJob, listGlobalConversations,
-  previewGlobalAskIntent, submitGlobalFeedback,
+  previewGlobalAskIntent, streamGlobalJob, submitGlobalFeedback,
   GLOBAL_ASK_MAX_NOTEBOOKS, GLOBAL_ASK_PAGE_SIZE, submittableGlobalScope,
-  type GlobalConversation, type GlobalConversationDetail, type GlobalJob, type GlobalScope,
+  type GlobalConversation, type GlobalConversationDetail, type GlobalJob,
+  type GlobalJobProgressFrame, type GlobalScope,
 } from "../global-ask-api.ts";
 import { ASK_MODES, DEFAULT_ASK_MODE, askModeIds, submissionAskMode } from "../ask-modes.ts";
 import { isAdvanced, normalizeUiMode, type UiMode } from "../ui-mode.ts";
@@ -290,24 +291,29 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
 
   useEffect(() => {
     if (!running || loading) return;
+    const target = running;
     const ticket = owner.current;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let inFlight = false;
     let resumeRequested = false;
     let interval = POLL_MIN_INTERVAL_MS;
-    let previousProgress = progressKey(running);
+    let previousProgress = progressKey(target);
     let terminal = false;
+    // 推送流在位期间轮询一次都不发：`polling` 只在流退场（没开成、中途断、body 结束
+    // 却没给终态帧）之后才置真。置真之后这条回路与推送流上线**之前**逐字一致——
+    // 同一套退避、同一套可见性暂停、同一处 404 对账。
+    let polling = false;
     const isCurrent = () => !disposed && mounted.current && ticket === owner.current;
     const visible = () => document.visibilityState !== "hidden";
     function schedule() {
-      if (isCurrent() && visible() && !terminal) timer = setTimeout(poll, interval);
+      if (polling && isCurrent() && visible() && !terminal) timer = setTimeout(poll, interval);
     }
     async function poll() {
       if (!isCurrent() || !visible() || terminal || inFlight) return;
       inFlight = true;
       try {
-        const update = await getGlobalJob(running!.job_id);
+        const update = await getGlobalJob(target.job_id);
         if (!isCurrent()) return;
         setTurns((items) => items.map((item) => item.job_id === update.job_id ? mergeJob(item, update) : item));
         setPollError("");
@@ -318,16 +324,9 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
       } catch (cause) {
         // 作业不存在了（别的标签页把它停掉并丢弃了）：这不是「暂时读不到」。重试只会
         // 永远 404、输入区永远锁着——以服务端为准对一次账，这一轮到此为止。
-        if (isCurrent() && httpErrorStatus(cause) === 404) {
-          const synced = await readConversation(running!.conversation_id);
-          if (isCurrent() && synced !== null) {
-            terminal = true;
-            setPollError("");
-            if (synced === "gone") dropConversationIdentity(running!.conversation_id);
-            else applyConversation(synced);
-            if (synced === "gone" || !synced.turns.some((item) => item.job_id === running!.job_id)) handBack(running!.question);
-            return;
-          }
+        if (isCurrent() && httpErrorStatus(cause) === 404 && await reconcileMissingJob(target, isCurrent)) {
+          terminal = true;
+          return;
         }
         if (isCurrent()) {
           interval = Math.min(POLL_MAX_INTERVAL_MS, interval * POLL_BACKOFF_FACTOR);
@@ -349,11 +348,66 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
       if (inFlight) resumeRequested = true;
       else void poll();
     }
-    // active only controls the chat presentation: minimizing never detaches this owner.
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    schedule();
+    /**
+     * 一帧进度上屏。
+     *
+     * 三条判据都来自「这是加速器」这个身份——它给的东西都可能过期、重复、或有缺口，
+     * 所以三条都只允许它**少画**，绝不允许它改写更权威的东西：
+     *   · 本地已经终态的一轮不接任何进度帧。停止是用户此刻按下的，服务端那边的
+     *     步骤还会再推几帧过来；接了就等于把刚停下的一轮复活（同 `mergeJob` 的判据）。
+     *   · `trace_offset` 超过本地已有长度 = 中间漏了帧。接上去会把缺的那几步吞掉、
+     *     轨迹短一截；整帧丢弃，等终态帧或轮询兜底把它补齐。
+     *   · 三份覆盖清单按**替换**写：帧里带的就是服务端此刻的全量（契约如此），
+     *     按并集写会让已经不再跳过的笔记本永远留在回执里。
+     */
+    function applyProgress(frame: GlobalJobProgressFrame) {
+      if (!isCurrent()) return;
+      setTurns((items) => items.map((item) => {
+        if (item.job_id !== target.job_id || item.status !== "running") return item;
+        const trace = item.trace ?? [];
+        if (frame.trace_offset > trace.length) return item;
+        return {
+          ...item,
+          trace: [...trace.slice(0, frame.trace_offset), ...frame.steps],
+          searched_notebook_ids: frame.searched_notebook_ids,
+          skipped_notebooks: frame.skipped_notebooks,
+          degraded_notebook_ids: frame.degraded_notebook_ids,
+        };
+      }));
+    }
+    /** 流退场，接上既有的轮询回路。第一次读照旧按最短间隔排期（与流上线前的挂载
+     *  时机同形），可见性监听也到这时才挂——推送流不需要它，隐藏的标签页照收。 */
+    function fallBackToPolling() {
+      if (polling || terminal || !isCurrent()) return;
+      polling = true;
+      // active only controls the chat presentation: minimizing never detaches this owner.
+      document.addEventListener("visibilitychange", onVisibilityChange);
+      schedule();
+    }
+    // 先挂流、后退回轮询。流上任何一种失败都**不上错误条**：用户没有任何动作需要
+    // 因此改变，而轮询紧接着就会把这一轮看完——为一条用户看不见的捷径报错，只会
+    // 让「失败」这个词在界面上贬值（只显示真影响结果的失败）。
+    const stream = new AbortController();
+    void streamGlobalJob(target.job_id, { onProgress: applyProgress }, stream.signal)
+      .then(async (outcome) => {
+        if (!isCurrent()) return;
+        if (outcome.kind === "final") {
+          terminal = true;
+          setPollError("");
+          setTurns((items) => items.map((item) => item.job_id === outcome.job.job_id ? mergeJob(item, outcome.job) : item));
+          return;
+        }
+        // 作业行没了：与轮询读到 404 走**同一处**对账。对不上账（网络 / 5xx）时什么
+        // 都不能断言，退回轮询，由它的 404 分支按既有节奏再试。
+        if (await reconcileMissingJob(target, isCurrent)) terminal = true;
+        else fallBackToPolling();
+      })
+      .catch(() => { fallBackToPolling(); });
     return () => {
       disposed = true;
+      // 卸载 / 换 owner / 换作业 / 「重试」都从这里走：流必须当场断开，否则旧作业的
+      // 帧会继续往一个已经不属于它的视图里写。断开**不会**取消作业（后端契约）。
+      stream.abort();
       clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
@@ -742,6 +796,24 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     ++historyVersion.current;
     if (conversations.some((item) => item.id === id)) setHistoryOffset((offset) => Math.max(0, offset - 1));
     setConversations((items) => items.filter((item) => item.id !== id));
+  }
+
+  /**
+   * 一条本以为还在跑的作业，在服务端已经不在了（别的标签页停掉并丢弃、会话被删）。
+   *
+   * 轮询读到 404 与推送流交回 `gone` 说的是同一件事，收尾也必须是同一件事——分成两份
+   * 就会出现「流那条路忘了退游标 / 忘了把问题交还」这种只错一半的情形。返回值是
+   * 「这次对完账了没有」：`false` = 这次读不到（网络 / 5xx），什么都不能断言，调用方
+   * 按自己的节奏重试。
+   */
+  async function reconcileMissingJob(target: GlobalJob, alive: () => boolean): Promise<boolean> {
+    const synced = await readConversation(target.conversation_id);
+    if (!alive() || synced === null) return false;
+    setPollError("");
+    if (synced === "gone") dropConversationIdentity(target.conversation_id);
+    else applyConversation(synced);
+    if (synced === "gone" || !synced.turns.some((item) => item.job_id === target.job_id)) handBack(target.question);
+    return true;
   }
 
   /** 情形二的问题交还：pending 轮撤掉，输入框空着就把问题放回去。 */

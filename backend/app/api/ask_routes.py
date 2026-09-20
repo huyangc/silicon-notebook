@@ -1,5 +1,4 @@
 import asyncio
-import queue
 import threading
 from time import monotonic
 from typing import Any, List
@@ -77,7 +76,7 @@ from app.services.search_concurrency import run_under_search_gate
 from app.services.source_scope import retrieval_scope_receipt_context
 from app.api.task_stream import (
     NDJSON_STREAM_HEADERS,
-    ndjson_line,
+    deliver_ask_events,
     task_stream_response,
 )
 
@@ -822,39 +821,22 @@ async def _stream_ask_events(
         yield line
 
 
-async def _deliver_ask_events(events, request: Request):
-    """Drain one Ask delivery queue to NDJSON — shared by a fresh start and a
-    keyed re-submission that attached to an existing job."""
-    last_delivery = monotonic()
-    # 客户端断连只停止本次流(break),**不** set cancel_event —— worker 脱离连接
-    # 跑到完、答案照存。唯一取消入口是 POST …/ask/jobs/{job_id}/cancel。
-    # 队列的 close() 只通知**为本次连接服务的**跟随者(键重发接回既有 job 的轮询)
-    # 停下;真正执行的 worker 不读它。
-    try:
-        while True:
-            try:
-                event = events.get_nowait()
-            except queue.Empty:
-                if await request.is_disconnected():
-                    break
-                try:
-                    event = await asyncio.to_thread(events.get, True, 0.1)
-                except queue.Empty:
-                    now = monotonic()
-                    if now - last_delivery >= ASK_STREAM_HEARTBEAT_SECONDS:
-                        # An empty NDJSON line is transport-only: it carries no
-                        # notebook content and existing clients already ignore it.
-                        yield "\n"
-                        last_delivery = now
-                    continue
-            if event is None:
-                break
-            yield ndjson_line(event)
-            last_delivery = monotonic()
-    finally:
-        close = getattr(events, "close", None)
-        if close is not None:
-            close()
+def _deliver_ask_events(events, request: Request):
+    """This module's binding of the shared delivery loop (``task_stream``).
+
+    The loop itself moved out when the global Ask stream needed the same
+    transport: two route modules cannot share it by importing one another
+    (``test_route_domain_boundaries``). What stays here is the BINDING, and it
+    is not decoration — ``ASK_STREAM_HEARTBEAT_SECONDS`` and this module's
+    ``monotonic`` are the rails this endpoint has always used, and tests pin
+    both by patching them here. ``lambda: monotonic()`` rather than the
+    function object so the patch still reaches an already-running stream.
+    """
+    return deliver_ask_events(
+        events, request,
+        clock=lambda: monotonic(),
+        heartbeat_seconds=ASK_STREAM_HEARTBEAT_SECONDS,
+    )
 
 
 @router.post("/notebooks/{notebook_id}/ask/stream", dependencies=[Depends(require_notebook_read)])
