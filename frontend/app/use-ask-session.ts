@@ -60,6 +60,7 @@ import {
 import { jobPollDone, newTraceSteps } from "./ask-reconnect.ts";
 import { humanizedError, toUserMessage } from "./errors.ts";
 import { mergeSessionListFallback, recordStartedConversation } from "./ask-session-state.ts";
+import { hasProcessOutput } from "./stopped-turn.tsx";
 import {
   conversationCleanupToast,
   reconcileConversationCleanup,
@@ -138,6 +139,33 @@ type IntentReview = Readonly<{
   askedAt: string;
   sourceScope: SourceScopePayload;
   baseScope: BaseScopePayload;
+}>;
+
+/**
+ * One turn the user stopped AFTER retrieval/reasoning output was already on
+ * screen. The product rule (and the notice itself) lives in stopped-turn.tsx:
+ * such a turn stays in the transcript, the question does NOT go back to the
+ * input, and the next submission replaces the record.
+ *
+ * Nothing about a cancelled notebook Ask is durable server-side (no answers
+ * row; a brand-new conversation is deleted by the backend), so this in-memory
+ * record is the only copy — and it stays that way. It is never written to the
+ * per-tab mirror and never onto a run record, so no restore, reload or
+ * re-attach can resurrect a stopped question as a resendable draft.
+ *
+ * `key`/`conversationId` are the identity the record belongs to: the owner key
+ * it was stopped under and the conversation the view is on after the stop's
+ * conversation-id revert. The returned view hides the record as soon as either
+ * stops matching the current view, so it can never show under another
+ * conversation, notebook or user.
+ */
+type StoppedAskTurn = Readonly<{
+  key: string;
+  conversationId: string | null;
+  question: string;
+  askedAt: string;
+  mode: string;
+  trace: ReasoningTraceStep[];
 }>;
 
 type SessionRequest = {
@@ -338,6 +366,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   const [pendingAskedAt, setPendingAskedAt] = useState("");
   const [pendingMode, setPendingMode] = useState<string>(DEFAULT_ASK_MODE);
   const [pendingTrace, setPendingTrace] = useState<ReasoningTraceStep[]>([]);
+  const [stoppedTurn, setStoppedTurn] = useState<StoppedAskTurn | null>(null);
   const [mode, setMode] = useState<string>(DEFAULT_ASK_MODE);
   const [askModes, setAskModes] = useState<readonly AskModeDef[]>(ASK_MODES);
   const [retrievalEffort, setRetrievalEffort] = useState<AskRetrievalEffortId>(
@@ -449,6 +478,18 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   const ownerBelongsToActor = Boolean(
     ownerRef.current && ownerRef.current.actorId === actorIdRef.current,
   );
+  // Visibility of a stopped turn is DERIVED, never a pile of resets: it shows
+  // only while the view is the one it was stopped in (same visible owner, same
+  // actor/notebook key, same conversation). Anything that moves the view —
+  // another notebook, another actor, a hidden owner, a conversation that is no
+  // longer the stopped one — hides it without anybody having to remember to.
+  const visibleStoppedTurn = (
+    ownerIsVisible
+    && ownerRef.current
+    && stoppedTurn
+    && stoppedTurn.key === ownerKey(ownerRef.current)
+    && stoppedTurn.conversationId === conversationId
+  ) ? stoppedTurn : null;
 
   useEffect(() => {
     // Match the workspace-extension projection cadence: an Ask-mode request is
@@ -1122,6 +1163,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     setRenamingSessionId(null);
     setSessionTitleDraft("");
     clearPendingTurn();
+    // A stopped turn belongs to the conversation it was stopped in; this view
+    // is being emptied for a new notebook / a leave / a deleted conversation.
+    setStoppedTurn(null);
   }
 
   function activateActor(nextActorId: string) {
@@ -1516,6 +1560,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     if (!current) return null;
     draftModeRef.current = null;
     detachVisibleRun();
+    // Both session commands come through here (openSession / startNewSession):
+    // the stopped turn stays with the conversation it was stopped in.
+    setStoppedTurn(null);
     const owner = {
       ...current,
       workspaceEpoch,
@@ -1581,6 +1628,16 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   function releaseQuestion(value: string) {
     if (!currentNotebookOwner()) return;
     setQuestion(value);
+  }
+
+  /**
+   * "编辑问题" on a stopped turn: the question becomes the draft again while the
+   * record stays in the transcript — it is replaced by the next submission,
+   * whatever that question turns out to be, not by opening the editor.
+   */
+  function editStoppedTurn() {
+    if (!visibleStoppedTurn) return;
+    setQuestion(visibleStoppedTurn.question);
   }
 
   function selectMode(next: string) {
@@ -1810,6 +1867,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     if (ownsRun()) {
       effectsRef.current.ensureAskVisible();
       setQuestion("");
+      // This submission's pending turn is going up: it replaces whatever
+      // stopped turn was still standing in the transcript.
+      setStoppedTurn(null);
       setPendingQuestion(q);
       setPendingAskedAt(askedAt);
       pendingModeSourceRef.current = selectedMode;
@@ -1932,9 +1992,32 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         }
         return true;
       }
-      setQuestion(q);
+      // Case A of the shared cancel rule: this run had already put real
+      // retrieval/reasoning output on screen, so the turn stays in the
+      // transcript and the question does NOT go back to the input. What counts
+      // as process output is `hasProcessOutput` in stopped-turn.tsx and only
+      // there — both ask surfaces judge Case A by that one predicate, which
+      // also discounts the intent seed and the job's synthetic "start" step.
+      // Everything else, the whole intent phase included, is Case B and hands
+      // the draft back.
+      const stoppedAfterProcess = isAbortError(error) && hasProcessOutput(run.trace);
+      if (!stoppedAfterProcess) setQuestion(q);
       if (startedConversationId !== conversationIdAtStart) setConversationId(conversationIdAtStart);
       if (isAbortError(error)) {
+        if (stoppedAfterProcess) {
+          setStoppedTurn({
+            key: run.key,
+            // The conversation this view is on once the revert above has run.
+            conversationId: conversationIdAtStart,
+            question: q,
+            askedAt,
+            mode: selectedMode,
+            // Frozen here: the record must not follow a run that keeps reading.
+            trace: [...run.trace],
+          });
+          effectsRef.current.notify("已停止回答");
+          return true;
+        }
         effectsRef.current.notify("已中断回答");
         return true;
       }
@@ -2023,6 +2106,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     askIntentDraftOwnerRef.current = run.draftToken;
     askIntentTraceRef.current = run.trace;
     setQuestion("");
+    // Same replacement point as the direct run path: the new submission's
+    // pending turn takes the stopped turn's place as soon as it shows.
+    setStoppedTurn(null);
     setPendingQuestion(q);
     setPendingAskedAt(askedAt);
     pendingModeSourceRef.current = "reasoning";
@@ -2326,6 +2412,12 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         })
         .finally(() => { cancelRequestsInFlightRef.current.delete(cancelKey); });
     } else if (controller) {
+      // Stopped before `started`: no job exists yet, so the run has reported no
+      // process output at all and this is always Case B by the discriminator in
+      // startAskRun — the question goes straight back to the input and nothing
+      // stays in the transcript. (The bump below also detaches the run, so its
+      // catch takes the "nobody is looking" path and can leave no stopped turn
+      // either.)
       cancelRequestedControllersRef.current.add(controller);
       viewGenerationRef.current += 1;
       const currentOwner = ownerRef.current;
@@ -2605,6 +2697,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     pendingAskedAt: ownerIsVisible ? pendingAskedAt : "",
     pendingMode: ownerIsVisible ? pendingMode : DEFAULT_ASK_MODE,
     pendingTrace: ownerIsVisible ? pendingTrace : NO_PENDING_TRACE,
+    stoppedTurn: visibleStoppedTurn,
     askModes: ownerIsVisible ? askModes : ASK_MODES,
     mode: ownerIsVisible ? mode : DEFAULT_ASK_MODE,
     retrievalEffort: ownerIsVisible ? retrievalEffort : DEFAULT_ASK_RETRIEVAL_EFFORT,
@@ -2623,6 +2716,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     openSession,
     startNewSession,
     releaseQuestion,
+    editStoppedTurn,
     selectMode,
     selectRetrievalEffort,
     submit,

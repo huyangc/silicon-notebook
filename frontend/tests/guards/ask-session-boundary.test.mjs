@@ -61,6 +61,8 @@ test("Ask-session hook has a narrow dependency boundary", () => {
     "./conversation-cleanup.ts",
     "./errors.ts",
     "./source-scope.ts",
+    // 停止风格（情形一 / 情形二的轨迹判据）全站一份，两个问答面共用同一个谓词。
+    "./stopped-turn.tsx",
     "./workspace-model.ts",
     "./workspace-transitions.ts",
   ]);
@@ -122,6 +124,7 @@ test("Ask-session public surface exposes readonly views and named commands, neve
     "confirmIntent",
     "cancelIntent",
     "abort",
+    "editStoppedTurn",
     "deleteSession",
     "bulkCleanup",
     "submitFeedback",
