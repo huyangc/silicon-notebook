@@ -8,6 +8,9 @@ import { declarations, importsFrom, jsxElements, parseModule } from "../../test-
 const picker = await parseModule("effort-picker.tsx");
 const report = await parseModule("report-view.tsx");
 const page = await parseModule("page.tsx");
+// 问答那侧的「检索档位」随引擎选择器一起搬进了共享控件（ask-mode-picker.tsx，
+// 全局问答与笔记本内问答共用）。调用点换了文件，判据不变：仍然只有一个。
+const askModePicker = await parseModule("ask-mode-picker.tsx");
 
 
 function rangeSliders(module) {
@@ -23,9 +26,11 @@ test("研究深度 and 检索档位 render one shared control", () => {
 
   // 两个调用点都消费共享控件,且各自只挂一个。
   assert.ok(importsFrom(report, "./effort-picker").some((item) => item.imported === "EffortPicker"));
-  assert.ok(importsFrom(page, "./effort-picker").some((item) => item.imported === "EffortPicker"));
+  assert.ok(importsFrom(askModePicker, "./effort-picker").some((item) => item.imported === "EffortPicker"));
   assert.equal(jsxElements(report, "EffortPicker").length, 1);
-  assert.equal(jsxElements(page, "EffortPicker").length, 1);
+  assert.equal(jsxElements(askModePicker, "EffortPicker").length, 1);
+  // page.tsx 现在只是消费共享的引擎选择器，不再自己挂档位控件。
+  assert.equal(jsxElements(page, "EffortPicker").length, 0);
 });
 
 
@@ -35,6 +40,7 @@ test("the grade slider exists only inside the shared control", () => {
   assert.equal(rangeSliders(picker).length, 1);
   assert.equal(rangeSliders(report).length, 0);
   assert.equal(rangeSliders(page).length, 0);
+  assert.equal(rangeSliders(askModePicker).length, 0);
 });
 
 

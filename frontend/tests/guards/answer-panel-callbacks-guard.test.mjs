@@ -57,9 +57,26 @@ const KNOWN_OPTIONAL_CALLBACKS = [
 // 它改成裸 `undefined` 就该报红——那意味着谁都测不了模型。
 const TRIVIALLY_EMPTY = /^(?:undefined|null|false|\([^)]*\)\s*=>\s*(?:\{\s*\}|undefined|null))$/;
 
+// 跨笔记本专属的出口：只有全局问答那个调用点才有「这条引用属于另一个笔记本」可跳。
+// 笔记本内问答本来就在那个笔记本里，传了只会多出一颗自己跳自己的按钮——**缺席是
+// 契约，不是漏传**。回归门：global-ask.component.test.tsx 的
+// 「the in-notebook citation card has no open-notebook link (no handler, no button)」
+// （笔记本内一侧）与「citation badge shows the owning notebook for every citation」
+// （全局一侧）。同一条判据的另一半 `notebookHref` 不带 `on` 前缀，本就不在派生清单里。
+const CROSS_NOTEBOOK_ONLY = new Set(["onOpenNotebook"]);
+
 test("page.tsx 的生产 <AnswerView> 仍然传齐 answer-panel 的每一个可选交互回调", async () => {
   const answerPanel = await parseModule("answer-panel.tsx");
-  const required = optionalCallbackProps(answerPanel, "AnswerView");
+  const derived = optionalCallbackProps(answerPanel, "AnswerView");
+  // 豁免必须真的还在 props 里：改名/删掉之后豁免就该失效，不能留一条永远命中不了
+  // 的白名单把下一个同名回调悄悄放过去。
+  for (const name of CROSS_NOTEBOOK_ONLY) {
+    assert.ok(
+      derived.includes(name),
+      `豁免清单里的 ${name} 已经不是 AnswerView 的可选回调了——请一并删掉这条豁免`,
+    );
+  }
+  const required = derived.filter((name) => !CROSS_NOTEBOOK_ONLY.has(name));
   for (const name of KNOWN_OPTIONAL_CALLBACKS) {
     assert.ok(
       required.includes(name),

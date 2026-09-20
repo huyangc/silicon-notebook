@@ -5,14 +5,43 @@ import { askQuestionLimitHint } from "../ask-api.ts";
 import { toUserMessage } from "../errors.ts";
 import {
   askGlobal, cancelGlobalJob, getGlobalConversation, getGlobalJob, listGlobalConversations,
+  previewGlobalAskIntent,
   GLOBAL_ASK_MAX_NOTEBOOKS, GLOBAL_ASK_PAGE_SIZE, submittableGlobalScope,
   type GlobalConversation, type GlobalJob, type GlobalScope,
 } from "../global-ask-api.ts";
+import { ASK_MODES, DEFAULT_ASK_MODE, askModeIds } from "../ask-modes.ts";
+import { DEFAULT_ASK_RETRIEVAL_EFFORT } from "../ask-retrieval-effort.ts";
+import {
+  buildAskIntentConfirmation,
+  type AskIntentConfirmation,
+  type QueryIntentContract,
+} from "../ask-intent-model.ts";
 import type { NotebookSummary } from "../workspace-model.ts";
 
 const POLL_MIN_INTERVAL_MS = 1200;
 const POLL_MAX_INTERVAL_MS = 15000;
 const POLL_BACKOFF_FACTOR = 2;
+
+/** 全局问答可选的引擎:**只有内置那两个**。部署扩展引擎不参与——后端对全局
+ *  问答一律 422,所以界面压根不该把它们摆出来(扩展组因此自然为空)。 */
+export const GLOBAL_ASK_MODES = ASK_MODES;
+const GLOBAL_ASK_MODE_IDS = new Set(askModeIds(GLOBAL_ASK_MODES));
+
+/** 全局问答 v1 不提供档位控件:恒用默认档。这里是一个具名常量而不是一格没有
+ *  消费方的状态——界面上没有改它的入口,做成 state 只会是死代码。 */
+const GLOBAL_ASK_RETRIEVAL_EFFORT = DEFAULT_ASK_RETRIEVAL_EFFORT;
+
+/** 引擎选择是 per-viewer 的便利记忆(同「记住上次用的那个页签」),不是要可靠
+ *  持久、也不需要跨设备的状态,所以放浏览器存储。读写一律 try/catch:隐私窗口、
+ *  站点数据被清、预览环境里访问器本身就可能抛,读不到也必须能正常渲染。 */
+const MODE_STORAGE_KEY = "sn.globalAskMode";
+
+/** 问题理解的审阅态:待用户补齐澄清项的那一刻。 */
+type GlobalIntentReview = {
+  question: string;
+  contract: QueryIntentContract;
+  understandingMs: number;
+};
 
 function progressKey(job: GlobalJob): string {
   return JSON.stringify([job.status, job.searched_notebook_ids, job.skipped_notebooks ?? [], job.degraded_notebook_ids ?? []]);
@@ -34,6 +63,12 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
   const [turns, setTurns] = useState<GlobalJob[]>([]);
   const [scope, setScope] = useState<GlobalScope>({ mode: "all" });
   const [draft, setDraft] = useState("");
+  // 服务端渲染出的首屏读不到 localStorage,所以初值恒是默认引擎、挂载后再改写;
+  // 直接在 useState 初始化里读会让首屏与 hydration 后的选中页签对不上。
+  const [mode, setMode] = useState<string>(DEFAULT_ASK_MODE);
+  const [intentReview, setIntentReview] = useState<GlobalIntentReview | null>(null);
+  const [intentChecking, setIntentChecking] = useState(false);
+  const intentAbort = useRef<AbortController | null>(null);
   const [loading, setLoading] = useState(true);
   const [opening, setOpening] = useState(false);
   const [openFailed, setOpenFailed] = useState(false);
@@ -111,6 +146,19 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     void load();
     return () => { mounted.current = false; ++owner.current; ++historyVersion.current; };
   }, [load]);
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(MODE_STORAGE_KEY);
+      if (stored && GLOBAL_ASK_MODE_IDS.has(stored)) setMode(stored);
+    } catch { /* 读不到就用默认引擎，渲染照常。 */ }
+  }, []);
+
+  function selectMode(id: string) {
+    if (!GLOBAL_ASK_MODE_IDS.has(id)) return;
+    setMode(id);
+    try { window.localStorage.setItem(MODE_STORAGE_KEY, id); } catch { /* 记不住不影响本次提问。 */ }
+  }
 
   useEffect(() => {
     const reopening = active && !wasActive.current;
@@ -210,6 +258,11 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     setConversationId(id);
     setDraft("");
     setScope({ mode: "all" });
+    // 切换对话同样退休在途的问题理解与审阅卡（同 resetConversation 的理由）。
+    intentAbort.current?.abort();
+    intentAbort.current = null;
+    setIntentChecking(false);
+    setIntentReview(null);
     try {
       const detail = await getGlobalConversation(id);
       if (!mounted.current || ticket !== owner.current) return;
@@ -233,6 +286,12 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     currentId.current = "";
     setSubmitting(false);
     setStopping(false);
+    // 在途的问题理解属于旧对话：连同它的审阅卡一起退休，否则确认时会把上一段
+    // 对话的问题提交进新对话。
+    intentAbort.current?.abort();
+    intentAbort.current = null;
+    setIntentChecking(false);
+    setIntentReview(null);
     // Explicitly starting over ends the old draft's idempotent retry identity.
     retryRequest.current = null;
     setConversationId("");
@@ -295,7 +354,7 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
   }
 
   async function submit() {
-    if (flight.current || running || opening || openFailed || loading) return;
+    if (flight.current || running || opening || openFailed || loading || intentChecking || intentReview) return;
     const question = draft.trim();
     const hint = askQuestionLimitHint(question);
     if (!question || hint) { setError(hint || "请先输入问题"); return; }
@@ -306,14 +365,80 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     if (scope.mode === "include" && scope.notebook_ids.some((id) => !notebooks.some((item) => item.id === id))) {
       setError("部分已选笔记本不可访问，请重新选择范围"); return;
     }
+    // 「逐步推理」与笔记本内问答走同一套交互：先预检问题理解，需要澄清时弹审阅卡，
+    // 确认后才带着 intent 提交。通用问答没有这一步，直接建作业。
+    if (mode === "reasoning") { await previewIntent(question); return; }
+    await submitJob(question);
+  }
+
+  /**
+   * 跑一次问题理解预检。理解清楚就直接把系统的理解当确认提交；需要澄清就把合同
+   * 交给审阅卡。草稿全程不动——取消或失败后用户原地就能改。
+   */
+  async function previewIntent(question: string) {
+    const ticket = owner.current;
+    const controller = new AbortController();
+    intentAbort.current = controller;
+    setIntentChecking(true);
+    setError("");
+    const startedAt = Date.now();
+    try {
+      const contract = await previewGlobalAskIntent(
+        question, conversationId || undefined, scope, controller.signal,
+      );
+      if (!mounted.current || ticket !== owner.current) return;
+      const understandingMs = Math.max(0, Date.now() - startedAt);
+      if (contract.needs_clarification) {
+        setIntentReview({ question, contract, understandingMs });
+        return;
+      }
+      await submitJob(question, buildAskIntentConfirmation(
+        contract, contract.resolved_question, {}, understandingMs,
+      ));
+    } catch (cause) {
+      if (!mounted.current || ticket !== owner.current) return;
+      // 用户自己按下的「取消问题理解」不是失败，不上错误条。
+      if (!controller.signal.aborted) setError(toUserMessage(cause, "问题理解没能完成，请重试"));
+    } finally {
+      if (intentAbort.current === controller) intentAbort.current = null;
+      if (mounted.current && ticket === owner.current) setIntentChecking(false);
+    }
+  }
+
+  function abortIntent() {
+    intentAbort.current?.abort();
+  }
+
+  async function confirmIntent(confirmation: AskIntentConfirmation) {
+    const review = intentReview;
+    if (!review || flight.current) return;
+    setIntentReview(null);
+    await submitJob(review.question, confirmation);
+  }
+
+  function cancelIntent() {
+    setIntentReview(null);
+  }
+
+  async function submitJob(question: string, intent?: AskIntentConfirmation) {
     flight.current = true;
     setSubmitting(true);
     setError("");
     const ticket = owner.current;
-    const key = JSON.stringify({ question, scope, conversationId });
+    // 引擎进幂等键：换引擎重问同一个问题是**另一次**提问，不该复用上一次的
+    // request id 被后端当成重复提交挡掉。
+    const key = JSON.stringify({ question, scope, conversationId, mode });
     if (retryRequest.current?.key !== key) retryRequest.current = { key, id: crypto.randomUUID() };
     try {
-      const job = await askGlobal({ question, notebook_scope: scope, conversation_id: conversationId || undefined, client_request_id: retryRequest.current.id });
+      const job = await askGlobal({
+        question,
+        notebook_scope: scope,
+        conversation_id: conversationId || undefined,
+        client_request_id: retryRequest.current.id,
+        mode,
+        intent,
+        retrieval_effort: GLOBAL_ASK_RETRIEVAL_EFFORT,
+      });
       if (!mounted.current || ticket !== owner.current) return;
       setConversationId(job.conversation_id);
       setTurns((items) => [...items.filter((item) => item.job_id !== job.job_id), job]);
@@ -385,6 +510,8 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     loading, opening, openFailed, submitting, stopping, error, pollError, historyError, running,
     moreHistory, loadingHistory, turnOffset, loadingTurns, loadMoreHistory, loadMoreTurns,
     load, openConversation, newConversation, submit, stop, updateConversation, removeConversation,
+    mode, selectMode, modes: GLOBAL_ASK_MODES,
+    intentReview, intentChecking, confirmIntent, cancelIntent, abortIntent,
     retryPoll: () => { setPollError(""); setPollRevision((value) => value + 1); },
   };
 }

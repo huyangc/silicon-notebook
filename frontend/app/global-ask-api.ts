@@ -1,5 +1,10 @@
 import { requestJson, requestVoid } from "./api-client.ts";
+import { requestTaskStream } from "./request-task-stream.ts";
 import type { AnswerAnchorLike, CitationLike } from "./answer-formatting.ts";
+import type { ReasoningTraceStep } from "./ask-stream.ts";
+import type { AskIntentConfirmation, QueryIntentContract } from "./ask-intent-model.ts";
+import type { AskRetrievalEffortId } from "./ask-retrieval-effort.ts";
+import type { AskResponse } from "./workspace-model.ts";
 
 export type GlobalScope = { mode: "all" } | { mode: "include"; notebook_ids: string[] };
 
@@ -52,6 +57,14 @@ export type GlobalJob = {
   skipped_notebooks: GlobalSkippedNotebook[];
   degraded_notebook_ids?: string[];
   error: string | null;
+  /** 本轮使用的引擎 id（后端默认 "chunk"）。 */
+  mode: string;
+  /** 运行中逐步追加的推理轨迹；完成后以 `answer.reasoning_trace` 为准，
+   *  它可能被清空。chunk 引擎没有轨迹。 */
+  trace?: ReasoningTraceStep[];
+  /** 全局问答直接调单库引擎之后的标准回答。**新作业只有它**。 */
+  answer?: AskResponse | null;
+  /** 旧的跨库合成回答。**只有历史轮次才有**；新作业恒为 null。 */
   response: GlobalAnswer | null;
 };
 export type GlobalConversation = {
@@ -87,7 +100,41 @@ export const askGlobal = (input: {
   notebook_scope: GlobalScope;
   conversation_id?: string;
   client_request_id: string;
+  /** 省略即后端默认 "chunk"。未知或扩展引擎后端 422（全局问答不挂部署扩展引擎）。 */
+  mode?: string;
+  /** 「逐步推理」的问题理解结果。预检说需要澄清时由用户在审阅卡里补齐后回传。 */
+  intent?: AskIntentConfirmation;
+  retrieval_effort?: AskRetrievalEffortId;
 }) => requestJson<GlobalJob>(`${root}/ask`, { ...options, method: "POST", body: JSON.stringify(input) });
+
+/**
+ * 全局问答的问题理解预检。与单库的 `/notebooks/{id}/ask/intent/stream` 完全同形
+ * （同一个 task-stream 传输、同一份 `QueryIntentContract`），所以这里逐字照搬
+ * `previewAskIntent` 的写法，只换端点与请求体里的范围字段。
+ */
+export const previewGlobalAskIntent = (
+  question: string,
+  conversationId?: string | null,
+  notebookScope?: GlobalScope,
+  signal?: AbortSignal,
+  onHeartbeat?: (elapsedMs: number) => void | Promise<void>,
+) => requestTaskStream<QueryIntentContract>(
+  `${root}/intent/stream`,
+  {
+    ...options,
+    method: "POST",
+    body: JSON.stringify({
+      question,
+      conversation_id: conversationId || undefined,
+      notebook_scope: notebookScope,
+    }),
+    signal,
+  },
+  {
+    onHeartbeat: (elapsedMs) => onHeartbeat?.(elapsedMs),
+    fallbackMessage: "问题理解没能完成，请重试",
+  },
+);
 export const getGlobalJob = (id: string) =>
   requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}`, options);
 export const cancelGlobalJob = (id: string) =>

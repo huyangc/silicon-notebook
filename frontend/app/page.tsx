@@ -55,15 +55,12 @@ import { AgentProfilePanel } from "./agent-profile-panel";
 import { kgBandTarget, kgBandVelocity, kgTypeBandTargets } from "./kg-layout";
 import { withoutDecidedMerge } from "./kg-merge-model";
 import {
-  ASK_MODE_GROUPS,
-  groupOf, groupLabel, modesInGroup, defaultModeForGroup,
+  groupOf, groupLabel,
   requiresKg, streamsTrace,
 } from "./ask-modes";
-import {
-  ASK_RETRIEVAL_EFFORT_OPTIONS,
-  type AskRetrievalEffortId,
-} from "./ask-retrieval-effort";
-import { EffortPicker } from "./effort-picker";
+import { type AskRetrievalEffortId } from "./ask-retrieval-effort";
+// 引擎选择器只有一份实现，与全局问答共用（守卫见 architecture-boundaries）。
+import { AskModePicker } from "./ask-mode-picker";
 import { proposePromotion } from "./promotion-queue";
 import { PromotionQueueModal } from "./promotion-queue-modal";
 import { usePromotionQueue } from "./use-promotion-queue";
@@ -5840,60 +5837,21 @@ export default function Home() {
                   ) : askQuotedPhraseHint ? (
                     <span className="chat-hint">{askQuotedPhraseHint}</span>
                   ) : null}
-                  {/* 自动模式只保留问答框：模式、引擎、档位以及相应提示整组不挂载。
+                  {/* 自动模式只保留问答框：模式、引擎、档位以及相应提示整组不挂载
+                      （判据在 AskModePicker 里，与全局问答共用同一份控件）。
                       高级模式继续完整消费用户在前端做出的选择。 */}
-                  {isAdvanced(uiMode) && (
-                  <div className="ask-mode-control" role="group" aria-label="问答模式">
-                    {ASK_MODE_GROUPS.filter((group) => (
-                      group.id !== "extension"
-                      || (isAdvanced(uiMode) && modesInGroup("extension", askModes).length > 0)
-                    )).map((g) => (
-                      <button
-                        key={g.id}
-                        type="button"
-                        className={`mode-tab${groupOf(askMode, askModes) === g.id ? " active" : ""}`}
-                        disabled={asking || intentChecking || sessionLoading || Boolean(askIntentReview)}
-                        onClick={() => askSession.selectMode(defaultModeForGroup(g.id, askModes))}
-                      >
-                        {g.label}
-                      </button>
-                    ))}
-                    {/* 深入分析只有一个引擎；扩展组保留引擎选择。 */}
-                    {groupOf(askMode, askModes) === "extension" && (
-                      <span className="mode-engines">
-                        {modesInGroup(groupOf(askMode, askModes), askModes).map((m) => (
-                          <button
-                            key={m.id}
-                            type="button"
-                            className={`mode-engine${askMode === m.id ? " active" : ""}`}
-                            title={m.desc}
-                            disabled={
-                              asking || intentChecking || sessionLoading
-                              || Boolean(askIntentReview)
-                              || (m.requiresKg && !kgAvailable)
-                            }
-                            onClick={() => askSession.selectMode(m.id)}
-                          >
-                            {m.label}
-                          </button>
-                        ))}
-                      </span>
-                    )}
-                    {isAdvanced(uiMode) && askMode === "reasoning" && (
-                      <span className="ask-retrieval-effort">
-                        {/* 与深度报告的「研究深度」共用 EffortPicker：同一套档名理应是同一个控件。
-                            popover 只给该档一句说明，不再铺开每档的阈值数字。 */}
-                        <EffortPicker
-                          chipLabel="档位"
-                          title="检索档位"
-                          options={ASK_RETRIEVAL_EFFORT_OPTIONS}
-                          value={askRetrievalEffort}
-                          onChange={(id) => askSession.selectRetrievalEffort(id as AskRetrievalEffortId)}
-                          disabled={asking || intentChecking || sessionLoading || Boolean(askIntentReview)}
-                          compact
-                        />
-                      </span>
-                    )}
+                  <AskModePicker
+                    modes={askModes}
+                    value={askMode}
+                    onChange={(id) => askSession.selectMode(id)}
+                    disabled={asking || intentChecking || sessionLoading || Boolean(askIntentReview)}
+                    kgAvailable={kgAvailable}
+                    uiMode={uiMode}
+                    effort={{
+                      value: askRetrievalEffort,
+                      onChange: (id) => askSession.selectRetrievalEffort(id as AskRetrievalEffortId),
+                    }}
+                    hints={<>
                     {groupOf(askMode, askModes) === "strict" && !kgAvailable && (
                       kgBlockedByScope ? (
                         // 出路是把勾选点回来,不是花钱整理一次整库图谱 —— 这一支
@@ -5936,8 +5894,8 @@ export default function Home() {
                     }) && (
                       <span className="chat-hint">本笔记本尚无知识图谱，将借用参考库「{borrowedBaseNames.join("、")}」推理</span>
                     )}
-                  </div>
-                  )}
+                    </>}
+                  />
                 </AskComposer>
                 </>
               )}
