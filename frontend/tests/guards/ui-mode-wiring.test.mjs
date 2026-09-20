@@ -14,10 +14,11 @@ import assert from "node:assert/strict";
 
 import ts from "typescript";
 
-import { findFunction, parseModule } from "../../test-support/semantic-source.mjs";
+import { findFunction, jsxElements, parseModule } from "../../test-support/semantic-source.mjs";
 
 
 const page = await parseModule("page.tsx");
+const askModePicker = await parseModule("ask-mode-picker.tsx");
 const sourceListPanel = await parseModule("source-list-panel.tsx");
 const askSession = await parseModule("use-ask-session.ts");
 const askModes = await parseModule("ask-modes.ts");
@@ -493,6 +494,10 @@ test("use-ask-session.ts 不得直接比可见 mode 与 \"reasoning\"", () => {
 });
 
 test("自动模式不挂载整组 Ask 模式选择控件", () => {
+  // 控件已从 page.tsx 抽成共享组件（全局问答与笔记本内问答同用一份，见
+  // architecture-boundaries 的「the ask engine picker has a single definition
+  // point」）。判据跟着搬，不变的是同一件事：`.ask-mode-control` 只有一个挂载点，
+  // 且自动模式下整组不渲染。
   const controls = [];
   function visit(node) {
     if (ts.isJsxElement(node)) {
@@ -507,20 +512,26 @@ test("自动模式不挂载整组 Ask 模式选择控件", () => {
     }
     ts.forEachChild(node, visit);
   }
-  visit(page);
+  visit(askModePicker);
   assert.equal(controls.length, 1, "问答模式控件应只有一个生产挂载点");
+  visit(page);
+  assert.equal(controls.length, 1, "page.tsx 不得再内联一份 ask-mode-control");
 
-  let conditional = null;
-  for (let node = controls[0].parent; node; node = node.parent) {
-    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
-      conditional = node;
-      break;
-    }
-  }
-  assert.ok(conditional, "ask-mode-control 必须位于条件渲染表达式中");
+  // 闸是组件开头那条 early return：整个控件连同全部提示一起不挂载。
+  const body = findFunction(askModePicker, "AskModePicker").getText(askModePicker);
+  assert.match(
+    body,
+    /if\s*\(\s*!isAdvanced\(uiMode\)\s*\)\s*return null;/,
+    "AskModePicker 必须在自动模式下整组不渲染（早退，而不是逐块隐藏）",
+  );
+
+  // page.tsx 交的必须是 uiMode **原值**：传一个算好的布尔等于把判断挪回调用方，
+  // 上面那条 early return 就再也钉不住它（同来源行 source-row--no-select 的理由）。
+  const sites = jsxElements(page, "AskModePicker");
+  assert.equal(sites.length, 1, "page.tsx 里的 <AskModePicker> 调用点数量漂移，守卫失效");
   assert.equal(
-    conditional.left.getText(page),
-    "isAdvanced(uiMode)",
-    "只有高级模式可以挂载模式选择控件",
+    sites[0].bindings?.uiMode ?? sites[0].attributes?.uiMode,
+    "uiMode",
+    "page.tsx 必须把 uiMode 原值交给共享控件",
   );
 });

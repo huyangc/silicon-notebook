@@ -1048,6 +1048,8 @@ export function AnswerView({
   imagePreviewOpen = false,
   notebookId,
   notebookNames,
+  notebookHref,
+  onOpenNotebook,
   onBuildScaleIndex,
   buildingScaleIndex,
   scaleIndexStatus,
@@ -1085,6 +1087,14 @@ export function AnswerView({
   /** 多领域基准库(Task 14)：id→name 映射，来自 notebooks 列表 + 当前笔记本挂载的
    * 参考库(base_notebooks)合并，逐 turn 复用同一份，供引用徽章标来源库名。 */
   notebookNames: Record<string, string>;
+  /** 跨笔记本引用的「打开笔记本」出口，原样透传给引用小卡片（它不知道路由形状）。
+   *  可选——笔记本内问答本来就在这个笔记本里，它不传，那颗按钮整个不渲染，DOM 与
+   *  既有行为逐字不变（回归门：global-ask.component.test.tsx 的
+   *  「the in-notebook citation card has no open-notebook link」）。 */
+  notebookHref?: (notebookId: string, sourceId: string) => string;
+  /** 「打开笔记本」按下之后的收尾（全局问答借此收起浮窗）。只在 notebookHref
+   *  也传了、且那颗按钮真渲染出来时才有意义。 */
+  onOpenNotebook?: () => void;
   onBuildScaleIndex?: (notebookId: string) => void;
   buildingScaleIndex: boolean;
   scaleIndexStatus?: Pick<ScaleIndexStatus, "exists" | "building" | "state"> | null;
@@ -1325,6 +1335,13 @@ export function AnswerView({
           reference={citePopover.reference}
           notebookId={notebookId}
           notebookNames={notebookNames}
+          notebookHref={notebookHref}
+          // 与 onOpenKnowledgeGraph 等同一条收尾路径：跳转是同页 hash 路由，
+          // 不收起的话卡片会继续浮在刚跳到的笔记本上。
+          onOpenNotebook={onOpenNotebook ? () => {
+            setCitePopover(null);
+            onOpenNotebook();
+          } : undefined}
           anchorRect={citePopover.rect}
           onClose={() => setCitePopover(null)}
           // 「知识图谱」「在表格中查看」都会在本卡片之上打开一个新的全屏视图

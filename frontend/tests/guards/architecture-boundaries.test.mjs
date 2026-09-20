@@ -105,6 +105,52 @@ test("citation popover has one implementation shared by both ask surfaces", asyn
 });
 
 
+// 全局问答改成直接调单库引擎之后，两个面拿到的就是同一个 `AskResponse`：答案视图
+// 与推理轨迹面板必须是同一份实现。复制一套近似渲染（全局一份、笔记本内一份）正是
+// 这条守卫要挡的事——同 CitationPopover 那条的理由。
+test("both ask surfaces render answers through the shared answer panel", async () => {
+  const globalAsk = await parseModule("ask/global-ask-workspace.tsx");
+  const imported = new Set(
+    importsFrom(globalAsk, "../answer-panel").map((item) => item.imported),
+  );
+  for (const name of ["AnswerView", "ReasoningTracePanel"]) {
+    assert.ok(
+      imported.has(name),
+      `ask/global-ask-workspace.tsx 没有从 answer-panel import ${name}——答案视图可能被复制了一份`,
+    );
+    assert.equal(names(globalAsk, "function").has(name), false);
+    assert.equal(names(answerPanel, "function").has(name), true);
+  }
+});
+
+
+// 引擎选择器（`.ask-mode-control`：分组页签 + 扩展引擎子选择 + 检索档位）只有一个
+// 定义点。判据是结构性的：只有 ask-mode-picker.tsx 允许出现 `mode-tab` 这个
+// className，两个消费方都必须 import 那个组件、都不许自己再声明一个同名函数。
+test("the ask engine picker has a single definition point", async () => {
+  const picker = await parseModule("ask-mode-picker.tsx");
+  const globalAsk = await parseModule("ask/global-ask-workspace.tsx");
+  assert.equal(names(picker, "function").has("AskModePicker"), true);
+  for (const [module, specifier, label] of [
+    [page, "./ask-mode-picker", "page.tsx"],
+    [globalAsk, "../ask-mode-picker", "ask/global-ask-workspace.tsx"],
+  ]) {
+    assert.ok(
+      importsFrom(module, specifier).some((item) => item.imported === "AskModePicker"),
+      `${label} 没有从 ask-mode-picker import AskModePicker——引擎选择器可能被复制了一份`,
+    );
+    assert.equal(names(module, "function").has("AskModePicker"), false);
+  }
+  // `.mode-tab` 带点的那种写法是散文里在引用一条 CSS 选择器（如 effort-picker 的
+  // 「与相邻的 .mode-tab 同高」），不是第二个渲染点，所以排除掉。
+  const owners = [];
+  for (const { path, module } of await appSourceModules()) {
+    if (/(?<!\.)mode-tab/.test(module.getFullText())) owners.push(path);
+  }
+  assert.deepEqual(owners, ["ask-mode-picker.tsx"]);
+});
+
+
 test("frontend has no retired personal model configuration contract", async () => {
   const forbidden = [
     "/me/model-settings",

@@ -13,7 +13,7 @@ import type { AskResponse, NotebookSummary } from "../../app/workspace-model.ts"
 
 const api = vi.hoisted(() => ({
   me: vi.fn(), notebooks: vi.fn(), list: vi.fn(), detail: vi.fn(), ask: vi.fn(),
-  poll: vi.fn(), cancel: vi.fn(), rename: vi.fn(), remove: vi.fn(),
+  poll: vi.fn(), cancel: vi.fn(), rename: vi.fn(), remove: vi.fn(), intent: vi.fn(),
 }));
 vi.mock("../../app/auth.ts", () => ({ fetchMe: api.me }));
 vi.mock("../../app/notebook-api.ts", () => ({ listNotebooks: api.notebooks }));
@@ -22,6 +22,7 @@ vi.mock("../../app/global-ask-api.ts", async (importOriginal) => ({
   listGlobalConversations: api.list, getGlobalConversation: api.detail,
   askGlobal: api.ask, getGlobalJob: api.poll, cancelGlobalJob: api.cancel,
   renameGlobalConversation: api.rename, deleteGlobalConversation: api.remove,
+  previewGlobalAskIntent: api.intent,
 }));
 
 const notebooks: NotebookSummary[] = ["材料研究", "热管理"].map((name, index) => ({
@@ -33,7 +34,34 @@ const conversation = (id = "conv-a"): GlobalConversation => ({
 });
 const job = (status: GlobalJob["status"] = "running", id = "conv-a"): GlobalJob => ({
   job_id: `job-${id}`, conversation_id: id, status, question: "共同问题是什么？", created_at: "2026-09-19T01:00:00Z",
-  notebook_scope: { mode: "all" }, resolved_notebook_ids: ["nb-0", "nb-1"], searched_notebook_ids: [], cited_notebook_ids: [], skipped_notebooks: [], error: null, response: null,
+  notebook_scope: { mode: "all" }, resolved_notebook_ids: ["nb-0", "nb-1"], searched_notebook_ids: [], cited_notebook_ids: [], skipped_notebooks: [], error: null, mode: "chunk", response: null,
+});
+/** 单库引擎直出的标准回答（新作业恒走这条）。 */
+const standardAnswer = (overrides: Partial<AskResponse> = {}): AskResponse => ({
+  answer_id: "answer-standard", conversation_id: "conv-a",
+  conclusion: "跨库结论。", answer: "跨库结论 [k1]。", grounded: true,
+  anchors: [{
+    key: "k1", object_id: "", object_type: "element", label: "测试记录",
+    name: "测试记录", source_title: "测试记录", location_label: "第 2 页",
+    source_id: "source-1", element_id: "element-1", notebook_id: "nb-0",
+    tier: "personal", snippet: "低温环境下，容量下降。",
+  }],
+  related_knowledge: [], citations: [], llm_mode: "chunk",
+  completeness_notice: "回答仅使用本次命中的有限原文。",
+  ...overrides,
+});
+const clearContract = (question: string) => ({
+  objective: question, resolved_question: question, intent_type: "explain",
+  result_scope: "ranked" as const, completeness_required: false, entities: [],
+  mandatory_topics: [], comparison_axes: [], constraints: [], excluded_topics: [],
+  expected_output: "", assumptions: [], ambiguities: [], confidence: 0.9,
+  needs_clarification: false, confirmed: false,
+});
+const clarifyingContract = (question: string) => ({
+  ...clearContract(question),
+  resolved_question: `${question}（按最近一年）`,
+  ambiguities: [{ id: "a1", question: "要比较哪几个体系？", required: true }],
+  confidence: 0.4, needs_clarification: true,
 });
 const detail = (id = "conv-a", turns: GlobalJob[] = []): GlobalConversationDetail => ({ ...conversation(id), turns, has_more: false, next_offset: null });
 function deferred<T>() {
@@ -50,6 +78,10 @@ beforeEach(() => {
   api.list.mockResolvedValue([]);
   api.detail.mockImplementation((id: string) => Promise.resolve(detail(id)));
   api.ask.mockResolvedValue(job());
+  api.intent.mockImplementation((question: string) => Promise.resolve(clearContract(question)));
+  // 引擎选择是 per-viewer 的浏览器存储记忆；用例之间不许互相串味。存储本身不可用
+  // 的环境（隐私窗口、被清的站点数据）也必须能跑——那正是 hook 里 try/catch 的契约。
+  try { window.localStorage.clear(); } catch { /* 存储不可用即无记忆，照常。 */ }
 });
 afterEach(() => vi.useRealTimers());
 
@@ -830,5 +862,151 @@ test("pending clipboard work belongs to its conversation and cannot unlock a new
   } finally {
     if (previousClipboard) Object.defineProperty(navigator, "clipboard", previousClipboard);
     else Reflect.deleteProperty(navigator, "clipboard");
+  }
+});
+
+// --- 标准 AnswerView + 引擎选择器 --------------------------------------------
+
+test("renders AnswerView for new jobs", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [{
+    ...job("done"), cited_notebook_ids: ["nb-0"], answer: standardAnswer(),
+  }]));
+  const { container } = render(<GlobalAskPage />);
+  await screen.findByText("跨库结论", { exact: false });
+  // AnswerView 的根节点。历史轮次那套自绘渲染没有它。
+  await waitFor(() => expect(container.querySelector(".chat-answer")).not.toBeNull());
+  expect(container.querySelector(".global-answer-footer")).toBeNull();
+  expect(screen.getByText("回答仅使用本次命中的有限原文。")).toBeTruthy();
+  // 单库动作没有承接方时一颗按钮都不渲染（保存记忆 / 分享 / 反馈）。
+  expect(screen.queryByRole("button", { name: "保存到记忆" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "分享到这条回答" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "有用" })).toBeNull();
+  // 复制回答是自足动作，AnswerView 自己就带。
+  expect(await screen.findByRole("button", { name: "复制回答" })).toBeTruthy();
+});
+
+test("renders legacy markdown for historical jobs", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [citedAnswer]));
+  const { container } = render(<GlobalAskPage />);
+  await screen.findByText("温度影响性能", { exact: false });
+  // 历史轮次只有 `response`：保留今天这段渲染，删了它历史对话就是空白。
+  await waitFor(() => expect(container.querySelector(".global-answer-footer")).not.toBeNull());
+  expect(container.querySelector(".chat-answer")).toBeNull();
+  expect(await screen.findByRole("button", { name: "[1]" })).toBeTruthy();
+});
+
+test("mode picker submits the selected engine", async () => {
+  render(<GlobalAskPage />);
+  const input = await screen.findByRole("textbox", { name: "输入问题" });
+  await waitFor(() => expect(input).toBeEnabled());
+  // 扩展功能组整组不出现：后端对全局问答一律 422。
+  expect(screen.queryByRole("button", { name: "扩展功能" })).toBeNull();
+  expect(screen.getByRole("button", { name: "通用问答" })).toHaveClass("active");
+  fireEvent.click(screen.getByRole("button", { name: "深入分析" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "深入分析" })).toHaveClass("active"));
+  fireEvent.change(input, { target: { value: "请逐步比较两个体系" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+  await waitFor(() => expect(api.ask).toHaveBeenCalledTimes(1));
+  // 理解清楚就不打扰用户，直接把系统的理解当确认提交。
+  expect(api.intent).toHaveBeenCalledTimes(1);
+  expect(api.ask.mock.calls[0][0].mode).toBe("reasoning");
+  expect(api.ask.mock.calls[0][0].intent.resolved_question).toBe("请逐步比较两个体系");
+  expect(api.ask.mock.calls[0][0].retrieval_effort).toBe("standard");
+});
+
+test("reasoning submission goes through intent review", async () => {
+  api.intent.mockImplementation((question: string) => Promise.resolve(clarifyingContract(question)));
+  render(<GlobalAskPage />);
+  const input = await screen.findByRole("textbox", { name: "输入问题" });
+  await waitFor(() => expect(input).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "深入分析" }));
+  fireEvent.change(input, { target: { value: "哪个更耐低温" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+  // 审阅卡出来之前不得提交。
+  const card = await screen.findByRole("region", { name: "确认逐步推理的问题理解" });
+  expect(api.ask).not.toHaveBeenCalled();
+  const confirm = within(card).getByRole("button", { name: "确认并开始检索" });
+  expect(confirm).toBeDisabled();
+  fireEvent.change(within(card).getByRole("textbox", { name: "要比较哪几个体系？的补充答案" }), {
+    target: { value: "磷酸铁锂与三元" },
+  });
+  await waitFor(() => expect(confirm).toBeEnabled());
+  fireEvent.click(confirm);
+  await waitFor(() => expect(api.ask).toHaveBeenCalledTimes(1));
+  const submitted = api.ask.mock.calls[0][0];
+  expect(submitted.mode).toBe("reasoning");
+  expect(submitted.intent.resolved_question).toBe("哪个更耐低温（按最近一年）");
+  expect(submitted.intent.answers).toEqual([{ id: "a1", answer: "磷酸铁锂与三元" }]);
+});
+
+test.each([
+  ["running", "running" as const, true],
+  ["finished with an emptied answer trace", "done" as const, false],
+])("trace panel appears when trace is non-empty (%s)", async (_label, status, live) => {
+  const trace = [{ step_type: "retrieve", summary: "检索材料研究", detail: {}, duration_ms: 120 }];
+  const turn: GlobalJob = {
+    ...job(status), mode: "reasoning", trace,
+    // 完成后 `job.trace` 可能被清空、以 `answer.reasoning_trace` 为准；这里反过来
+    // 测另一半：答案里的轨迹空了，作业上那一份仍然要显示出来。
+    ...(status === "done" ? { answer: standardAnswer({ reasoning_trace: [] }) } : {}),
+  };
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [turn]));
+  api.poll.mockResolvedValue(turn);
+  const { container } = render(<GlobalAskPage />);
+  expect(await screen.findByText("检索材料研究")).toBeTruthy();
+  const panel = await waitFor(() => {
+    const node = container.querySelector(".reasoning-trace-panel");
+    expect(node).not.toBeNull();
+    return node as HTMLElement;
+  });
+  expect(panel.classList.contains("live")).toBe(live);
+  const summary = within(panel).getByRole("button", { expanded: false });
+  fireEvent.click(summary);
+  await waitFor(() => expect(summary).toHaveAttribute("aria-expanded", "true"));
+  expect(within(panel).getByRole("listitem")).toHaveTextContent("检索材料研究");
+});
+
+test("citation badge shows the owning notebook for every citation", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [{
+    ...job("done"), cited_notebook_ids: ["nb-0", "nb-1"],
+    answer: standardAnswer({
+      answer: "两个库都提到 [k1][k2]。",
+      anchors: [
+        // 第一个库（resolved 集里的头一个）同样带非空 notebook_id：它不是「本库」，
+        // 全局模式下没有哪一个库是隐含的当前笔记本。
+        {
+          key: "k1", object_id: "", object_type: "element", label: "材料记录",
+          name: "材料记录", source_title: "材料记录", location_label: "第 2 页",
+          source_id: "source-1", element_id: "element-1", notebook_id: "nb-0",
+          tier: "personal", snippet: "低温环境下，容量下降。",
+        },
+        {
+          key: "k2", object_id: "", object_type: "element", label: "散热记录",
+          name: "散热记录", source_title: "散热记录", location_label: "第 5 页",
+          source_id: "source-2", element_id: "element-2", notebook_id: "nb-1",
+          tier: "personal", snippet: "风道改形后温升下降。",
+        },
+      ],
+    }),
+  }]));
+  render(<GlobalAskPage />);
+  for (const [marker, name, href] of [
+    ["[1]", "材料研究", "/#notebook=nb-0&source=source-1"],
+    ["[2]", "热管理", "/#notebook=nb-1&source=source-2"],
+  ] as const) {
+    fireEvent.click(await screen.findByRole("button", { name: marker }));
+    const card = await screen.findByRole("dialog");
+    expect(card).toHaveTextContent(`来自「${name}」（个人知识库）`);
+    expect(within(card).getByRole("link", { name: "打开笔记本" })).toHaveAttribute("href", href);
+    await act(async () => { document.body.dispatchEvent(new Event("pointerdown", { bubbles: true })); });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   }
 });

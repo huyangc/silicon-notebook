@@ -60,7 +60,10 @@
 .global-composer:focus-within { border-color: var(--global-accent); }
 .global-composer textarea { display: block; width: 100%; resize: vertical; max-height: 180px; min-height: 76px; border: 0; outline: 0; border-radius: 18px; padding: 18px 18px 4px; font: inherit; font-size: 14px; line-height: 1.7; color: var(--ink); background: transparent; }
 .global-composer textarea::placeholder { color: var(--muted); }
-.global-composer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px 12px; }
+.global-composer-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 10px 12px 12px; }
+/* 工具条现在有三样东西：范围、引擎、发送。范围与引擎归左、发送留在最右——只靠
+   space-between 会把引擎摊到正中间，读起来像三组互不相干的控件。 */
+.global-composer-toolbar .ask-mode-control { margin-right: auto; }
 .global-send.new-pill { height: 36px; min-height: 36px; min-width: 36px; padding: 0 11px; display: flex; align-items: center; gap: 5px; border-radius: 12px; flex-shrink: 0; }
 .global-composer-hint { font-size: 11px; color: var(--muted); text-align: center; margin: 10px 0 0; }
 .global-composer-hint.invalid { color: var(--danger); }
