@@ -71,11 +71,13 @@ export default function AdminAuthPage() {
   const [grantPurpose, setGrantPurpose] = useState<AuthGrant["purpose"]>("enroll");
   const [grantSubject, setGrantSubject] = useState("");
   const [grantTarget, setGrantTarget] = useState("");
+  const [selectedGrantAccount, setSelectedGrantAccount] = useState<AuthAccount | null>(null);
   const [grant, setGrant] = useState<AuthGrant | null>(null);
   const [policyResult, setPolicyResult] = useActionResult();
   const [maintenanceResult, setMaintenanceResult] = useActionResult();
   const [grantResult, setGrantResult] = useActionResult();
   const [accountResult, setAccountResult] = useActionResult();
+  const [selectionResult, setSelectionResult] = useActionResult();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const mutationInFlight = useRef(false);
@@ -186,11 +188,30 @@ export default function AdminAuthPage() {
     if (!beginMutation()) return;
     setGrantResult(null); setGrant(null);
     try {
-      setGrant(await issueAuthGrant(grantPurpose, grantSubject.trim(), grantTarget.trim() || undefined));
+      setGrant(await issueAuthGrant(grantPurpose, grantSubject.trim(), grantPurpose === "enroll" ? undefined : grantTarget.trim() || undefined));
       setGrantResult({ text: "已签发迁移凭证，请保存下方凭证并通过受控渠道交给使用人。" });
     }
     catch (cause) { setGrantResult({ failed: true, text: toUserMessage(cause, "签发迁移凭证失败，请稍后重试。") }); }
     finally { finishMutation(); }
+  }
+
+  function selectGrantAccount(account: AuthAccount) {
+    if (mutationInFlight.current) return;
+    setGrantTarget(account.id);
+    setSelectedGrantAccount(account);
+    if (grantPurpose === "enroll") setGrantPurpose(account.identity_status === "active" ? "replace" : "recover");
+    setGrantResult(null);
+    setSelectionResult({ accountId: account.id, text: "已选择为原账号，请在上方凭证表单核对并确认签发。" });
+  }
+
+  function changeGrantPurpose(purpose: AuthGrant["purpose"]) {
+    setGrantPurpose(purpose);
+    setGrantResult(null);
+    if (purpose === "enroll") {
+      setGrantTarget("");
+      setSelectedGrantAccount(null);
+      setSelectionResult(null);
+    }
   }
 
   async function setAccountStatus(account: AuthAccount) {
@@ -229,15 +250,22 @@ export default function AdminAuthPage() {
       <ActionFeedback result={maintenanceResult} />
     </section>
     <section className="admin-auth-card"><h2>签发迁移凭证</h2><p>凭证只显示一次。请通过受控渠道交给获准使用人。</p>
-      <label>用途<select value={grantPurpose} disabled={busy} onChange={(event) => setGrantPurpose(event.target.value as AuthGrant["purpose"])}><option value="enroll">新建账号</option><option value="recover">恢复账号</option><option value="replace">更换统一账号</option></select></label>
+      <label>用途<select value={grantPurpose} disabled={busy} onChange={(event) => changeGrantPurpose(event.target.value as AuthGrant["purpose"])}><option value="enroll">新建账号</option><option value="recover">恢复账号</option><option value="replace">更换统一账号</option></select></label>
       <label>使用人标识<input value={grantSubject} disabled={busy} onChange={(event) => setGrantSubject(event.target.value)} /></label>
-      <label>目标账号 ID{grantPurpose === "replace" ? "（必填）" : "（可选）"}<input value={grantTarget} disabled={busy} onChange={(event) => setGrantTarget(event.target.value)} /></label>
+      {grantPurpose !== "enroll" && <>
+        <p>可在下方账号列表点击“选择为原账号”，无需手动输入账号 ID。核对原账号与使用人标识后，点击“签发凭证”确认。</p>
+        <label>目标账号 ID（必填）<input value={grantTarget} disabled={busy} onChange={(event) => { setGrantTarget(event.target.value); setSelectedGrantAccount(null); setSelectionResult(null); }} /></label>
+        {selectedGrantAccount && <p>已选原账号：{selectedGrantAccount.display_name || selectedGrantAccount.username}（用户名：{selectedGrantAccount.username}；统一身份：{selectedGrantAccount.subject || "未关联"}；账号 ID：<code>{selectedGrantAccount.id}</code>）。选择账号不会签发凭证。</p>}
+      </>}
       {grantPurpose === "replace" && <p>更换凭证只能用于该目标账号。用户确认新统一身份后，原用户 ID、数据和角色保留，旧统一身份与旧统一登录会话将失效。</p>}
       <button type="button" disabled={busy} onClick={() => { void createGrant(); }}>签发凭证</button>
       <ActionFeedback result={grantResult} />
       {grant && <p className="admin-auth-grant"><strong>一次性迁移凭证：</strong><code>{grant.grant_token}</code>，有效期 {grant.expires_in} 秒。</p>}
     </section>
-    <section className="admin-auth-card"><h2>账号状态</h2><table><thead><tr><th>用户</th><th>统一身份</th><th>状态</th><th>操作</th></tr></thead><tbody>{accounts.items.map((account) => <tr key={account.id}><td>{account.display_name || account.username}</td><td>{account.identity_status === "active" ? account.subject || "已关联" : "未关联"}</td><td>{account.status === "active" ? "启用" : "已停用"}</td><td><button type="button" disabled={busy} onClick={() => { void setAccountStatus(account); }}>{account.status === "active" ? "停用" : "启用"}</button><ActionFeedback result={accountResult?.accountId === account.id ? accountResult : null} /></td></tr>)}</tbody></table>
+    <section className="admin-auth-card"><h2>账号状态</h2><table><thead><tr><th>用户</th><th>统一身份</th><th>状态</th><th>操作</th></tr></thead><tbody>{accounts.items.map((account) => <tr key={account.id}><td>{account.display_name || account.username}</td><td>{account.identity_status === "active" ? account.subject || "已关联" : "未关联"}</td><td>{account.status === "active" ? "启用" : "已停用"}</td><td>
+      <button type="button" disabled={busy} onClick={() => selectGrantAccount(account)}>选择为原账号</button>
+      <ActionFeedback result={selectionResult?.accountId === account.id ? selectionResult : null} />
+      <button type="button" disabled={busy} onClick={() => { void setAccountStatus(account); }}>{account.status === "active" ? "停用" : "启用"}</button><ActionFeedback result={accountResult?.accountId === account.id ? accountResult : null} /></td></tr>)}</tbody></table>
       <div className="admin-auth-pagination"><button type="button" disabled={busy || accountsBusy || accounts.offset === 0} onClick={() => { void loadAccountsPage(priorOffset); }}>上一页</button><span role="status">{accountsBusy ? "正在加载账号列表…" : `第 ${Math.floor(accounts.offset / accounts.limit) + 1} 页`}</span><button type="button" disabled={busy || accountsBusy || (accounts.total !== undefined && nextOffset >= accounts.total)} onClick={() => { void loadAccountsPage(nextOffset); }}>下一页</button></div>
       {accountsError && <div><p className="admin-auth-error" role="alert">{accountsError}</p><button type="button" disabled={busy || accountsBusy} onClick={() => { void loadAccountsPage(failedAccountOffset.current); }}>重试加载账号</button></div>}
     </section>
