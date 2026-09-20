@@ -48,10 +48,13 @@ def ensure_state(path: Path) -> None:
     path.chmod(0o700)
 
 
-def safe_open(path: Path, flags: int) -> int:
+def safe_open(path: Path, flags: int, *, allow_unlinked: bool = False) -> int:
     fd = os.open(path, flags | os.O_NOFOLLOW, 0o600)
     info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+    # atomic_json can replace the path between open and fstat. A reader still
+    # owns a coherent old snapshot; writers and locks must retain a linked inode.
+    unlinked_snapshot = allow_unlinked and flags == os.O_RDONLY and info.st_nlink == 0
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or (info.st_nlink != 1 and not unlinked_snapshot):
         os.close(fd)
         raise ServiceError("unsafe_state_file")
     os.fchmod(fd, 0o600)
@@ -75,7 +78,7 @@ def atomic_json(path: Path, value: object) -> None:
 
 def read_json(path: Path) -> dict:
     try:
-        fd = safe_open(path, os.O_RDONLY)
+        fd = safe_open(path, os.O_RDONLY, allow_unlinked=True)
     except FileNotFoundError:
         return {}
     with os.fdopen(fd, encoding="utf-8") as stream:

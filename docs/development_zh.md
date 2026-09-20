@@ -443,6 +443,11 @@ G1/G2 选择表达式不变。前端源码策略检查在隔离的 guard 进程�
 lane 的 `check_ui_vocabulary.py` 负责；单元测试保留最小空扫描失败 fixture 和变异
 覆盖，不再重复执行一次全仓计数。
 
+扩展服务生命周期测试共用一个 `xdist_group`，限制相互争抢资源的 supervisor 启动数；
+每条测试内部仍保留真实进程和线程并发。状态文件回归测试在打开后强制替换路径：
+JSON 读取方可读取已打开、当前用户所有的普通文件快照，即使其最后一个链接已移除；
+锁和可写句柄仍要求单链接，不安全文件仍被拒绝。
+
 ### GitHub Actions CI
 
 `.github/workflows/ci.yml` 把 G1 暴露为 `CI / level-1-standard`，在目标为

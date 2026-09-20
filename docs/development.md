@@ -932,6 +932,12 @@ vocabulary non-vacuity on the real repository belongs to `check_ui_vocabulary.py
 in the contracts lane; unit tests retain the minimal empty-scan failure fixture
 and mutation coverage without a second full-tree count.
 
+Extension-service lifecycle tests share one `xdist_group` to bound competing
+supervisor startups; each test retains its own real process/thread concurrency.
+State-file regression tests force replacement after open: JSON readers may consume
+the already-open, owner-owned regular-file snapshot after its final link disappears,
+while lock/writable handles still require one link and unsafe files remain rejected.
+
 ### GitHub Actions CI
 
 `.github/workflows/ci.yml` exposes G1 as `CI / level-1-standard` for pull
