@@ -178,11 +178,19 @@ class FederatedRunPlan:
        answer, so whichever round first fingerprinted an element answers that
        question for the whole run -- which is what lets the federation skip
        re-reading elements it has already published.
-    3. **Absence is refusal.**  An element that never made it into the
-       accumulated table is not attestable, so a citation resting on it must be
-       refused rather than accepted unverified.  This is what makes a failed
-       fingerprint read fail CLOSED element by element: it publishes nothing
-       for that batch instead of publishing something weaker.
+    3. **Three states, and "unreadable" is stated, never implied.**  A value is
+       either a ``(source_id, fingerprint)`` snapshot, or ``None`` -- "this
+       element came through the federated chunk channel and its fingerprint
+       could not be read".  ``None`` is refusal: a citation resting on it is
+       not attestable and must be refused rather than accepted unverified, which
+       is what makes a failed read fail CLOSED element by element.  A real
+       snapshot is never overwritten by ``None`` and a later successful read
+       replaces one.  ABSENCE means something else entirely: the element never
+       travelled this channel at all.  Document overviews, collection
+       enumerations and graph objects cite real ``source_elements`` rows without
+       a single federated call, so treating absence as refusal would void every
+       such answer; the consumer holds those citations to the frozen source
+       ceiling and to the element still existing under the same source.
 
     Callables rather than objects: this is a leaf module, and typing these
     fields would drag the federation's and the job's types into it and create
@@ -195,7 +203,7 @@ class FederatedRunPlan:
     window: Callable[[], int]
     cancel: Any
     on_library: Callable[[str, LibraryOutcome], None]
-    on_evidence: Callable[[Mapping[str, tuple[str, str]]], None]
+    on_evidence: Callable[[Mapping[str, "tuple[str, str] | None"]], None]
 
 
 _DETACHED_TURN: "ContextVar[DetachedAskTurn | None]" = ContextVar(
