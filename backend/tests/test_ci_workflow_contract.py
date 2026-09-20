@@ -262,7 +262,8 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
 
     cache = _named_step(job, "Cache portable Python dependencies")
     assert cache["uses"] == "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830"
-    assert job["env"]["PIP_CACHE_DIR"] == "${{ runner.temp }}/pip-portable-v1"
+    # Job-level env is evaluated before runner context is available.
+    assert job["env"]["PIP_CACHE_DIR"] == "${{ github.workspace }}/.local/pip-portable-v1"
     assert cache["with"]["path"] == "${{ env.PIP_CACHE_DIR }}"
     assert "portable-hnsw-v1" in cache["with"]["key"]
     assert "runner.arch" in cache["with"]["key"]
