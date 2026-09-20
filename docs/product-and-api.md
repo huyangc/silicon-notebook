@@ -128,7 +128,10 @@ The question appears in the transcript at the moment it is sent (the same instan
 pending turn); for `reasoning`, the understanding steps run live under it, using the same client-synthesized
 steps as the notebook Ask, and are prepended to the job's own live trace once the job exists; a cancelled or
 failed attempt returns the question to the input.
-Polling backs off from 1.2 seconds to 15 seconds while progress is unchanged, pauses when the browser
+The browser follows a running job through the push stream (`GET /jobs/{job_id}/stream`), and falls back to
+polling when that stream never opens, errors, or ends without a terminal frame. A hidden document keeps the
+stream running — it is push, so there is nothing to pause. That fallback polling backs off from 1.2 seconds
+to 15 seconds while progress is unchanged, pauses when the browser
 document is hidden, and resumes immediately on visibility; a change in the coverage receipts **or in the
 number of trace steps** counts as progress, so a reasoning run that keeps emitting steps stays at 1.2 seconds. Narrowing scope shows a history-context reminder.
 Ungrounded answers carry an explicit warning even when they include some citations. Each completed or
@@ -221,7 +224,23 @@ uses. The preflight authorizes itself and resolves scope and read rights through
 submission uses; it creates no job, no conversation and no row. The streaming variant runs scope resolution
 and the authority recheck before the first frame, so a 404/422 stays a real status code instead of an error
 frame inside a 200. A client that disconnects cancels the understanding call.
-`GET /jobs/{job_id}` reads progress or the answer; `POST /jobs/{job_id}/cancel` stops execution, and
+`GET /jobs/{job_id}` reads progress or the answer.
+`GET /jobs/{job_id}/stream` is the same job pushed to an attached client as NDJSON
+(`application/x-ndjson`), an accelerator over that read and never a second way to run anything: it emits
+`started` (always first), `progress` (the trace steps from an absolute `trace_offset` plus the CURRENT
+whole coverage lists — `searched_notebook_ids`, `skipped_notebooks`, `degraded_notebook_ids` — which
+replace rather than merge; the first one after `started` is a full snapshot at offset 0), then exactly one
+terminal frame — `final` carrying the job as the store has it once it left `running`, or `gone` when the row
+is no longer there (stopped-and-discarded, or its conversation deleted) — and a blank keepalive line every
+5 seconds of silence. Authority is checked before the first frame by the same call `GET /jobs/{job_id}`
+makes, so a missing or foreign job keeps its real 404. A reader applies a frame as
+`trace = trace[:trace_offset] + steps` when `trace_offset <= len(trace)` and ignores a frame that would
+leave a gap; re-delivery of a step it already has is therefore harmless. A client disconnect NEVER cancels
+the job — it stops delivery to that client only, exactly like in-notebook Ask, and `POST /jobs/{job_id}/cancel`
+stays the one cancel entry. Polling remains the fallback for a client that never opens the stream, loses it,
+or sees it end without a terminal frame, and the MCP contract is unchanged: MCP follows a job by paging
+`GET /jobs/{job_id}`, never through this endpoint.
+`POST /jobs/{job_id}/cancel` stops execution, and
 `?discard=true` means "stopped before any process output": the job **this call found running** and that then stopped (it must be
 the conversation's newest; it still counts when the worker wrote `cancelled` first) is deleted together with a conversation it had just opened; a finished job, and a
 job that was already stopped earlier (it may be the very record the rule keeps in the transcript), is never

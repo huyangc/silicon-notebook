@@ -1,4 +1,6 @@
-import { requestJson, requestVoid } from "./api-client.ts";
+import { performApiRequest, requestJson, requestVoid } from "./api-client.ts";
+import { throwHumanizedHttpError } from "./errors.ts";
+import { readNdjsonStream } from "./ndjson-stream.ts";
 import { requestTaskStream } from "./request-task-stream.ts";
 import type { AnswerAnchorLike, CitationLike } from "./answer-formatting.ts";
 import type { ReasoningTraceStep } from "./ask-stream.ts";
@@ -164,6 +166,97 @@ export const previewGlobalAskIntent = (
 );
 export const getGlobalJob = (id: string) =>
   requestJson<GlobalJob>(`${root}/jobs/${encodeURIComponent(id)}`, options).then(withAnswerIdentity);
+
+// --- 运行中作业的推送流 -------------------------------------------------------
+//
+// 与笔记本内问答的 `/ask/stream` 同一种传输（NDJSON，同一个行读取循环），但身份
+// 完全不同：它是**加速器**，不是承载。作业的持久性全在作业行与 `GET /jobs/{id}` 上，
+// 没打开流、流断了、换了台机器的客户端照样靠轮询把这一轮看完；断开也**绝不**取消
+// 作业（唯一的取消入口仍是 `POST /jobs/{id}/cancel`）。所以这里每一种失败都只是
+// 「这条捷径没走通」，调用方退回轮询即可，不必、也不该变成用户看得见的错误。
+
+/**
+ * 进度帧。
+ *
+ * `steps` 是从**绝对**下标 `trace_offset` 开始的那一段轨迹：第一帧是全量快照
+ * （offset 0），之后通常只带新增的那一步。读法固定为
+ * `trace = trace[:trace_offset] + steps`，所以重复投递同一步是幂等的，而
+ * `trace_offset` 超过本地已有长度的帧有缺口、必须整帧丢弃（终态帧与轮询兜底会补齐）。
+ *
+ * 三份覆盖清单每帧都是**当前全量**（它们很短），语义是替换而不是合并——按合并读会
+ * 让已经移出 skipped 的笔记本永远留在回执里。
+ */
+export type GlobalJobProgressFrame = {
+  trace_offset: number;
+  steps: ReasoningTraceStep[];
+  searched_notebook_ids: string[];
+  skipped_notebooks: GlobalSkippedNotebook[];
+  degraded_notebook_ids: string[];
+};
+
+type GlobalJobStreamFrame =
+  | { event: "started"; job_id: string; conversation_id: string }
+  | ({ event: "progress" } & GlobalJobProgressFrame)
+  | { event: "final"; job: GlobalJob }
+  | { event: "gone" }
+  // 契约的事件表里没有它，但服务端的推送环节一旦自己出错，只能在 200 的流里说；
+  // 认成「流坏了」退回轮询，比把它当未知帧忽略、然后干等到 body 结束要早一拍。
+  | { event: "error"; error: string };
+
+/** 流给出的终局：作业已离开 running（`final`），或者作业行已经不在了（`gone`——
+ *  别处停掉并丢弃、或会话被删）。 */
+export type GlobalJobStreamOutcome =
+  | { kind: "final"; job: GlobalJob }
+  | { kind: "gone" };
+
+export type GlobalJobStreamHandlers = {
+  onProgress: (frame: GlobalJobProgressFrame) => void | Promise<void>;
+};
+
+/**
+ * 挂上一条运行中作业的推送流，读到终局为止。
+ *
+ * 鉴权在第一帧之前就判完（与 `GET /jobs/{id}` 同一次读），所以 404 / 403 是真的
+ * HTTP 状态码，不是 200 里的一帧——这里一律 reject，调用方退回轮询，由它既有的
+ * 404 对账分支收尾，不在这一层再造一套「作业不见了」的判据。
+ *
+ * reject 的四种情形（传输失败、HTTP 失败、`error` 帧、body 结束却没有终态帧）对
+ * 调用方是同一件事：捷径没走通。因此错误正文一律是英文技术串，不经人话层——它们
+ * 只会进日志，不该有一份看起来像给用户看的中文文案在那儿等着被误显示。
+ *
+ * 刻意**不**在帧之间让渡渲染（笔记本内问答那条流会 `requestAnimationFrame`）：推送
+ * 帧本来就一帧一个网络分片，读循环每帧都在 `read()` 上让出事件循环；而后台标签页
+ * 里 rAF 是挂起的，真加了反而会把这条「隐藏也要继续收」的流卡住。
+ */
+export async function streamGlobalJob(
+  jobId: string,
+  handlers: GlobalJobStreamHandlers,
+  signal?: AbortSignal,
+): Promise<GlobalJobStreamOutcome> {
+  const response = await performApiRequest(
+    `${root}/jobs/${encodeURIComponent(jobId)}/stream`,
+    { ...options, signal },
+  );
+  if (!response.ok) await throwHumanizedHttpError(response, options.tag);
+  if (!response.body) throw new Error("global ask stream returned no readable body");
+  let outcome: GlobalJobStreamOutcome | null = null;
+  await readNdjsonStream(response.body, async (line) => {
+    const frame = JSON.parse(line) as GlobalJobStreamFrame;
+    if (frame.event === "progress") {
+      await handlers.onProgress(frame);
+    } else if (frame.event === "final") {
+      // 与其它作业读入口同一处归一：全局回答的身份就是它的作业（`withAnswerIdentity`）。
+      outcome = { kind: "final", job: withAnswerIdentity(frame.job) };
+    } else if (frame.event === "gone") {
+      outcome = { kind: "gone" };
+    } else if (frame.event === "error") {
+      throw new Error("global ask stream reported a feed error");
+    }
+    // `started` 只是开场白：作业身份是调用方点开这条流时就有的，无须回填。
+  });
+  if (!outcome) throw new Error("global ask stream ended without a terminal frame");
+  return outcome;
+}
 /** 停止一条作业。`discard`：还没有任何过程输出就停止——问题弹回输入框，服务端
  *  连这条记录（以及它刚开出来的空会话）一起丢掉，与笔记本内问答同一条规则。它只丢弃
  *  **被这次调用停下来**的作业，响应也可能丢：调用方一律重读会话对账

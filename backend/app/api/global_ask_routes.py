@@ -6,7 +6,11 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Res
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_current_user, global_ask_service, user_error
-from app.api.task_stream import task_stream_response
+from app.api.task_stream import (
+    NDJSON_STREAM_HEADERS,
+    deliver_ask_events,
+    task_stream_response,
+)
 from app.models.identity import UserProfile
 from app.models.ask import (
     ConversationShareRequest,
@@ -141,6 +145,39 @@ async def preview_global_ask_intent_stream(
 @router.get("/jobs/{job_id}", response_model=GlobalAskJob)
 def get_global_ask_job(job_id: str, user: UserProfile = Depends(get_current_user)):
     return _call(global_ask_service().get_job, job_id, user_id=user.id)
+
+
+@router.get("/jobs/{job_id}/stream")
+async def stream_global_ask_job(
+    job_id: str, request: Request, user: UserProfile = Depends(get_current_user),
+) -> StreamingResponse:
+    """Push this job's progress to an ATTACHED client, as NDJSON.
+
+    An accelerator on top of the durable job, not a second way to run one:
+    `POST /ask` still creates it, `GET /jobs/{id}` still reads it, and a client
+    that never opens this endpoint — or loses it — sees the same run by
+    polling. Nothing here starts, finishes or cancels anything.
+
+    ⛔ THE CLIENT DISCONNECTING DOES NOT CANCEL THE JOB, exactly as on the
+    notebook Ask stream: the shared delivery loop stops delivering and closes
+    the queue, which stops a follower polling on this connection's behalf and
+    drops this subscriber from the live feed. The only cancel entry is
+    ``POST /jobs/{job_id}/cancel``.
+
+    Authority is checked BEFORE the first frame, through the very call
+    ``GET /jobs/{id}`` makes (``GlobalAskService.get_job``, inside ``attach``),
+    so a foreign or missing job keeps its real 404 instead of degrading into an
+    error frame inside a 200. That call is blocking, hence ``to_thread`` — the
+    same shape the two intent endpoints above use for their preflight.
+    """
+    events = await asyncio.to_thread(
+        _call, global_ask_service().attach, job_id, user_id=user.id,
+    )
+    return StreamingResponse(
+        deliver_ask_events(events, request),
+        media_type="application/x-ndjson",
+        headers=NDJSON_STREAM_HEADERS,
+    )
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=GlobalAskJob)

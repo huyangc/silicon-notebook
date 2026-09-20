@@ -11,10 +11,10 @@ import {
   throwHumanizedHttpError,
 } from "./errors.ts";
 import {
-  takeNdjsonLines,
   type AskStreamEvent,
   type ReasoningTraceStep,
 } from "./ask-stream.ts";
+import { readNdjsonStream } from "./ndjson-stream.ts";
 import type { AskJobDetail } from "./ask-reconnect.ts";
 import type { QueryIntentContract } from "./ask-intent-model.ts";
 import type { BaseScopePayload, SourceScopePayload } from "./source-scope.ts";
@@ -151,9 +151,6 @@ export async function runAskStream<TResponse = AskResponse>(
   if (!response.ok) await throwHumanizedHttpError(response, "api");
   if (!response.body) throw new Error("Streaming response body is unavailable");
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
   let finalResponse: TResponse | null = null;
 
   const yieldToPaint = () => new Promise<void>((resolve) => {
@@ -187,16 +184,9 @@ export async function runAskStream<TResponse = AskResponse>(
     }
   };
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const parsed = takeNdjsonLines(buffer);
-    buffer = parsed.remainder;
-    for (const line of parsed.lines) await consumeLine(line);
-  }
-  buffer += decoder.decode();
-  if (buffer.trim()) await consumeLine(buffer.trim());
+  // 字节→行由共享的读取循环负责（`ndjson-stream.ts`）；这里只留本协议自己的事件
+  // 语义。两者此前挤在一个函数里，于是每个新传输都要把同一段边界处理再抄一遍。
+  await readNdjsonStream(response.body, consumeLine);
   if (!finalResponse) throw new Error("Streaming response ended without a final answer");
   return finalResponse;
 }

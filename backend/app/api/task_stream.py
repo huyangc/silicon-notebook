@@ -8,11 +8,20 @@ cooperatively cancels providers that accept the supplied ``threading.Event``.
 
 Durable jobs must not use this helper: navigation is allowed to detach those
 jobs and their state is recovered from the database instead.
+
+ONE EXCEPTION, and it is a transport rather than a runtime:
+:func:`deliver_ask_events` drains a DURABLE job's delivery queue to NDJSON.  It
+lives here because two route modules now need it (the notebook Ask stream and
+the global Ask stream), and a route module importing another route module is
+exactly the cross-domain edge ``test_route_domain_boundaries`` exists to
+prevent.  It starts, cancels and owns nothing: a disconnect stops delivery to
+this client only, and the durable worker keeps running by contract.
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import queue
 import threading
 from collections.abc import Callable
 from time import monotonic
@@ -138,6 +147,55 @@ async def task_event_stream(
             cancellation.set()
         if not task_observed:
             _observe_detached_task(task)
+
+
+async def deliver_ask_events(
+    events,
+    request: Request,
+    *,
+    clock: Callable[[], float] = monotonic,
+    heartbeat_seconds: float = INTERACTIVE_STREAM_HEARTBEAT_SECONDS,
+):
+    """Drain one durable-job delivery queue to NDJSON — shared by every client
+    that attaches to such a job (a fresh notebook Ask, a keyed re-submission
+    that attached to an existing job, a global Ask job's push stream).
+
+    ``clock`` and ``heartbeat_seconds`` are injected rather than read from this
+    module's globals so a caller keeps its OWN heartbeat rail and its own
+    monkeypatchable clock: ``ask_routes`` has had both since before this loop
+    moved here, and binding them to this module would silently retarget them.
+
+    客户端断连只停止本次流(break),**不** set cancel_event —— worker 脱离连接
+    跑到完、答案照存。唯一取消入口是各自领域的 cancel 端点。
+    队列的 close() 只通知**为本次连接服务的**跟随者(键重发接回既有 job 的轮询、
+    全局问答的 ``global-ask-follow``)停下;真正执行的 worker 不读它。
+    """
+    last_delivery = clock()
+    try:
+        while True:
+            try:
+                event = events.get_nowait()
+            except queue.Empty:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.to_thread(events.get, True, 0.1)
+                except queue.Empty:
+                    now = clock()
+                    if now - last_delivery >= heartbeat_seconds:
+                        # An empty NDJSON line is transport-only: it carries no
+                        # notebook content and existing clients already ignore it.
+                        yield "\n"
+                        last_delivery = now
+                    continue
+            if event is None:
+                break
+            yield ndjson_line(event)
+            last_delivery = clock()
+    finally:
+        close = getattr(events, "close", None)
+        if close is not None:
+            close()
 
 
 def task_stream_response(

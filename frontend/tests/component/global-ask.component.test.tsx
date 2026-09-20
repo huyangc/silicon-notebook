@@ -14,14 +14,18 @@ import { humanizedError } from "../../app/errors.ts";
 
 /** 服务端已经没有这条会话了（对账读到的 404）。 */
 const conversationGone = () => humanizedError("对话不存在，请刷新列表。", 404);
-import type { GlobalConversation, GlobalConversationDetail, GlobalJob, GlobalScope } from "../../app/global-ask-api.ts";
+import type {
+  GlobalConversation, GlobalConversationDetail, GlobalJob, GlobalJobProgressFrame,
+  GlobalJobStreamHandlers, GlobalJobStreamOutcome, GlobalScope,
+} from "../../app/global-ask-api.ts";
+import type { ReasoningTraceStep } from "../../app/ask-stream.ts";
 import type { QueryIntentContract } from "../../app/ask-intent-model.ts";
 import type { AskResponse, NotebookSummary } from "../../app/workspace-model.ts";
 
 const api = vi.hoisted(() => ({
   me: vi.fn(), notebooks: vi.fn(), list: vi.fn(), detail: vi.fn(), ask: vi.fn(),
   poll: vi.fn(), cancel: vi.fn(), rename: vi.fn(), remove: vi.fn(), intent: vi.fn(),
-  feedback: vi.fn(), assetBlob: vi.fn(),
+  feedback: vi.fn(), assetBlob: vi.fn(), stream: vi.fn(),
 }));
 vi.mock("../../app/auth.ts", () => ({ fetchMe: api.me }));
 vi.mock("../../app/notebook-api.ts", () => ({ listNotebooks: api.notebooks }));
@@ -31,6 +35,7 @@ vi.mock("../../app/global-ask-api.ts", async (importOriginal) => ({
   askGlobal: api.ask, getGlobalJob: api.poll, cancelGlobalJob: api.cancel,
   renameGlobalConversation: api.rename, deleteGlobalConversation: api.remove,
   previewGlobalAskIntent: api.intent, submitGlobalFeedback: api.feedback,
+  streamGlobalJob: api.stream,
 }));
 // 附图走鉴权 fetch→blob→objectURL（`AuthedImage`）。这里只替掉那一次网络读取，
 // 断言看的是它**拿着哪个笔记本的 URL** 去读的。
@@ -94,6 +99,10 @@ beforeEach(() => {
   api.detail.mockImplementation((id: string) => Promise.resolve(detail(id)));
   api.ask.mockResolvedValue(job());
   api.intent.mockImplementation((question: string) => Promise.resolve(clearContract(question)));
+  // 默认「这条捷径走不通」：推送流是加速器，绝大多数用例断言的是**承载**那一半
+  // （轮询回路本身）。默认让它开不成，这些用例才继续逐字走它们原来那条路；要看
+  // 推送行为的用例自己换掉这个实现（`attachStream`）。
+  api.stream.mockRejectedValue(new Error("stream unavailable"));
   api.assetBlob.mockResolvedValue(new Blob(["fake-image-bytes"], { type: "image/png" }));
   if (typeof URL.createObjectURL !== "function") URL.createObjectURL = vi.fn(() => "blob:mock-url");
   if (typeof URL.revokeObjectURL !== "function") URL.revokeObjectURL = vi.fn();
@@ -1888,4 +1897,244 @@ test("a citation with no owning notebook renders no image block at all", async (
   expect(within(card).queryByText("本段附图")).toBeNull();
   expect(screen.queryByRole("img", { name: "图 1：示意图" })).toBeNull();
   expect(api.assetBlob).not.toHaveBeenCalled();
+});
+
+// --- 运行中作业的推送流 -------------------------------------------------------
+//
+// 流是加速器、轮询是承载：下面每一条都同时钉住这两句话的某一半——流在位时轮询一次
+// 都不发，而流的任何一种失败都只是退回轮询，用户看不见任何「失败」。
+
+const traceStep = (summary: string): ReasoningTraceStep => ({ step_type: "retrieve", summary, detail: {} });
+const summaries = (job?: GlobalJob) => (job?.trace ?? []).map((step) => step.summary);
+
+type StreamAttachment = {
+  handlers: GlobalJobStreamHandlers;
+  signal?: AbortSignal;
+  settle: {
+    promise: Promise<GlobalJobStreamOutcome>;
+    resolve: (value: GlobalJobStreamOutcome) => void;
+    reject: (value: unknown) => void;
+  };
+};
+
+/**
+ * 接管推送流：每一次挂载都记下它的 `onProgress` 与 `signal`，终局由用例自己给。
+ *
+ * 按**次序**保留每一次挂载（而不是只留最后一次），是因为「换会话时旧流必须断开」
+ * 这条只有在同时拿得到前后两条流的 signal 时才检验得了。
+ */
+function streamRig() {
+  const attached: StreamAttachment[] = [];
+  api.stream.mockImplementation((
+    _jobId: string, handlers: GlobalJobStreamHandlers, signal?: AbortSignal,
+  ) => {
+    const settle = deferred<GlobalJobStreamOutcome>();
+    attached.push({ handlers, signal, settle });
+    return settle.promise;
+  });
+  async function open(index = 0) {
+    await waitFor(() => expect(attached.length).toBeGreaterThan(index));
+    return attached[index];
+  }
+  return {
+    open,
+    /** 推一帧进度。没写的字段按「空」补齐，用例里只留它真正要说的那几个。 */
+    async progress(frame: Partial<GlobalJobProgressFrame> & { trace_offset: number }, index = 0) {
+      const { handlers } = await open(index);
+      await act(async () => {
+        await handlers.onProgress({
+          steps: [], searched_notebook_ids: [], skipped_notebooks: [], degraded_notebook_ids: [],
+          ...frame,
+        });
+      });
+    },
+    async settle(outcome: GlobalJobStreamOutcome, index = 0) {
+      const { settle } = await open(index);
+      await act(async () => { settle.resolve(outcome); await settle.promise; });
+    },
+    async fail(cause: unknown, index = 0) {
+      const { settle } = await open(index);
+      await act(async () => {
+        settle.reject(cause);
+        await settle.promise.catch(() => {});
+      });
+    },
+  };
+}
+
+test("stream progress paints the running turn's trace and coverage without a single poll", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.detail.mockResolvedValue(detail("conv-a", [job()]));
+  const stream = streamRig();
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+
+  // 第一帧是全量快照（offset 0）。
+  await stream.progress({
+    trace_offset: 0, steps: [traceStep("检索 A"), traceStep("检索 B")],
+    searched_notebook_ids: ["nb-0"],
+    skipped_notebooks: [{ notebook_id: "nb-1", reason: "检索暂时不可用，请稍后重试。" }],
+    degraded_notebook_ids: ["nb-0"],
+  });
+  expect(summaries(result.current.running)).toEqual(["检索 A", "检索 B"]);
+  expect(result.current.running?.searched_notebook_ids).toEqual(["nb-0"]);
+  expect(result.current.running?.skipped_notebooks).toEqual([
+    { notebook_id: "nb-1", reason: "检索暂时不可用，请稍后重试。" },
+  ]);
+  expect(result.current.running?.degraded_notebook_ids).toEqual(["nb-0"]);
+
+  // 之后的帧只带新增的那一步，覆盖清单仍是当前全量——**替换**而不是并集：上一帧
+  // 里跳过的、降级的那个库这次不在清单上了，回执就不该继续挂着它。
+  await stream.progress({
+    trace_offset: 2, steps: [traceStep("推理")], searched_notebook_ids: ["nb-0", "nb-1"],
+  });
+  expect(summaries(result.current.running)).toEqual(["检索 A", "检索 B", "推理"]);
+  expect(result.current.running?.searched_notebook_ids).toEqual(["nb-0", "nb-1"]);
+  expect(result.current.running?.skipped_notebooks).toEqual([]);
+  expect(result.current.running?.degraded_notebook_ids).toEqual([]);
+
+  expect(api.stream).toHaveBeenCalledTimes(1);
+  expect(api.stream.mock.calls[0][0]).toBe("job-conv-a");
+  expect(api.poll).not.toHaveBeenCalled();
+  expect(result.current.pollError).toBe("");
+});
+
+test("a re-delivered frame cannot duplicate steps and a gapped frame is ignored whole", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.detail.mockResolvedValue(detail("conv-a", [job()]));
+  const stream = streamRig();
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+
+  await stream.progress({ trace_offset: 0, steps: [traceStep("A")], searched_notebook_ids: ["nb-0"] });
+  // 重投 / 交叠：读法是「截到 offset 再接上」，所以同一步再来一次是幂等的。
+  await stream.progress({ trace_offset: 0, steps: [traceStep("A"), traceStep("B")], searched_notebook_ids: ["nb-0"] });
+  expect(summaries(result.current.running)).toEqual(["A", "B"]);
+
+  // 有缺口（offset 3 > 本地 2）：接上去会把中间那一步吞掉，所以整帧丢弃——连它带的
+  // 覆盖清单也不采信，那份清单说的是一个本地还没走到的时刻。
+  await stream.progress({ trace_offset: 3, steps: [traceStep("D")], searched_notebook_ids: ["nb-0", "nb-1"] });
+  expect(summaries(result.current.running)).toEqual(["A", "B"]);
+  expect(result.current.running?.searched_notebook_ids).toEqual(["nb-0"]);
+
+  // 服务端重写了第 2 步（同一个 offset 换了内容）：截到 offset 再接上，不留旧的那条。
+  await stream.progress({ trace_offset: 1, steps: [traceStep("B 修正")], searched_notebook_ids: ["nb-0"] });
+  expect(summaries(result.current.running)).toEqual(["A", "B 修正"]);
+  expect(api.poll).not.toHaveBeenCalled();
+});
+
+test("a final frame ends the turn without a single poll", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.detail.mockResolvedValue(detail("conv-a", [job()]));
+  const stream = streamRig();
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+  await stream.progress({ trace_offset: 0, steps: [traceStep("检索")], searched_notebook_ids: ["nb-0"] });
+
+  await stream.settle({ kind: "final", job: { ...job("done"), searched_notebook_ids: ["nb-0"], answer: standardAnswer() } });
+  await waitFor(() => expect(result.current.running).toBeUndefined());
+  expect(result.current.turns.map((turn) => turn.status)).toEqual(["done"]);
+  expect(result.current.turns[0].answer?.answer_id).toBe("answer-standard");
+  expect(api.poll).not.toHaveBeenCalled();
+  expect(result.current.pollError).toBe("");
+});
+
+test("a gone frame hands the question back through the same reconciliation as the poll's 404", async () => {
+  // 与「另一个标签页把作业停掉并丢弃」那条用例逐字同一个结局：以服务端为准对一次账，
+  // 这一轮到此为止、问题回到输入框，而不是让输入区锁在一条永远读不到的作业上。
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  const earlier = { ...job("done"), job_id: "job-earlier", answer: standardAnswer() };
+  api.detail.mockResolvedValueOnce(detail("conv-a", [earlier, job()]))
+    .mockResolvedValue(detail("conv-a", [earlier]));
+  const stream = streamRig();
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+
+  await stream.settle({ kind: "gone" });
+  await waitFor(() => expect(result.current.running).toBeUndefined());
+  expect(result.current.turns.map((turn) => turn.job_id)).toEqual(["job-earlier"]);
+  expect(result.current.draft).toBe("共同问题是什么？");
+  expect(result.current.conversationId).toBe("conv-a");
+  expect(result.current.pollError).toBe("");
+  expect(api.poll).not.toHaveBeenCalled();
+});
+
+test("a gone frame whose conversation is gone too drops the conversation identity", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValueOnce(detail("conv-a", [job()])).mockRejectedValue(conversationGone());
+  const stream = streamRig();
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+
+  await stream.settle({ kind: "gone" });
+  await waitFor(() => expect(result.current.conversationId).toBe(""));
+  expect(result.current.turns).toEqual([]);
+  expect(result.current.draft).toBe("共同问题是什么？");
+  expect(result.current.conversations).toEqual([]);
+  expect(window.location.search).toBe("");
+  expect(api.poll).not.toHaveBeenCalled();
+});
+
+test("a stream that fails falls back to the existing poll loop without showing an error", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.detail.mockResolvedValue(detail("conv-a", [job()]));
+  api.poll.mockResolvedValue(job("cancelled"));
+  const stream = streamRig();
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+
+  // 流中途断了（没有终态帧）：这不是用户需要知道的事——轮询紧接着把这一轮看完。
+  await stream.fail(new Error("global ask stream ended without a terminal frame"));
+  await waitFor(() => expect(api.poll).toHaveBeenCalledTimes(1), { timeout: 2500 });
+  await waitFor(() => expect(result.current.turns[0].status).toBe("cancelled"));
+  expect(result.current.pollError).toBe("");
+  expect(result.current.error).toBe("");
+});
+
+test("the stream is aborted on unmount and when the conversation changes", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.detail.mockImplementation((id: string) => Promise.resolve(detail(id, [job("running", id)])));
+  const stream = streamRig();
+  const { result, unmount } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running?.job_id).toBe("job-conv-a"));
+  const first = await stream.open(0);
+  expect(first.signal?.aborted).toBe(false);
+
+  // 换会话推进了 owner：旧作业的帧绝不能再往新视图里写，所以旧流当场断开。
+  await act(async () => { await result.current.openConversation("conv-b"); });
+  await waitFor(() => expect(result.current.running?.job_id).toBe("job-conv-b"));
+  expect(first.signal?.aborted).toBe(true);
+  const second = await stream.open(1);
+  expect(second.signal?.aborted).toBe(false);
+
+  unmount();
+  expect(second.signal?.aborted).toBe(true);
+  expect(api.cancel).not.toHaveBeenCalled();
+});
+
+test("a progress frame that lost the race to a local stop cannot resurrect the turn", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  // 已有检索回执上屏：停止后这一轮留在对话里（情形一）。服务端那边的下一步仍在路上。
+  const progressed = { ...job(), searched_notebook_ids: ["nb-0"], trace: [traceStep("已经画出来的一步")] };
+  api.detail.mockResolvedValue(detail("conv-a", [progressed]));
+  api.cancel.mockResolvedValue({ ...progressed, status: "cancelled" });
+  const stream = streamRig();
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+  const { handlers } = await stream.open();
+
+  // 停止与那一帧是并发的：两道判据（这条 effect 已经退休 / 本地这一轮已经终态）
+  // 任意一道都必须兜住它——用户按下的停止不许被服务端还在路上的下一步推翻。
+  await act(async () => {
+    await result.current.stop();
+    await handlers.onProgress({
+      trace_offset: 1, steps: [traceStep("迟到的一步")],
+      searched_notebook_ids: ["nb-0", "nb-1"], skipped_notebooks: [], degraded_notebook_ids: [],
+    });
+  });
+  expect(result.current.turns.map((turn) => turn.status)).toEqual(["cancelled"]);
+  expect(summaries(result.current.turns[0])).toEqual(["已经画出来的一步"]);
+  expect(result.current.turns[0].searched_notebook_ids).toEqual(["nb-0"]);
+  expect(result.current.running).toBeUndefined();
 });

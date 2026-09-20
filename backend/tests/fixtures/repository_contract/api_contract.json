@@ -17086,6 +17086,47 @@
           ]
         }
       },
+      "/api/global-ask/jobs/{job_id}/stream": {
+        "get": {
+          "description": "Push this job's progress to an ATTACHED client, as NDJSON.\n\nAn accelerator on top of the durable job, not a second way to run one:\n`POST /ask` still creates it, `GET /jobs/{id}` still reads it, and a client\nthat never opens this endpoint — or loses it — sees the same run by\npolling. Nothing here starts, finishes or cancels anything.\n\n⛔ THE CLIENT DISCONNECTING DOES NOT CANCEL THE JOB, exactly as on the\nnotebook Ask stream: the shared delivery loop stops delivering and closes\nthe queue, which stops a follower polling on this connection's behalf and\ndrops this subscriber from the live feed. The only cancel entry is\n``POST /jobs/{job_id}/cancel``.\n\nAuthority is checked BEFORE the first frame, through the very call\n``GET /jobs/{id}`` makes (``GlobalAskService.get_job``, inside ``attach``),\nso a foreign or missing job keeps its real 404 instead of degrading into an\nerror frame inside a 200. That call is blocking, hence ``to_thread`` — the\nsame shape the two intent endpoints above use for their preflight.",
+          "operationId": "stream_global_ask_job_api_global_ask_jobs__job_id__stream_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "job_id",
+              "required": true,
+              "schema": {
+                "title": "Job Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Stream Global Ask Job",
+          "tags": [
+            "global-ask"
+          ]
+        }
+      },
       "/api/group-invites/{token}/join": {
         "post": {
           "description": "Join as a plain member. Unknown/revoked/deleted links share one 404.",

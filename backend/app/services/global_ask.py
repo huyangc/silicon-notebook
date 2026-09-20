@@ -7,6 +7,7 @@ from contextvars import copy_context
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import logging
 import threading
 import time
 from typing import Any, Mapping
@@ -25,12 +26,17 @@ from app.models.global_ask import (
 )
 from app.models.sources import SourceElement
 from app.repositories.global_ask_ports import ReplacedJobUnavailable
+from app.services.ask_execution import new_delivery_queue
 from app.services.ask_followup import followup_resolution_context
 from app.services.ask_modes import UnknownAskMode
 from app.services.cancellation import AskCancelled, raise_if_cancelled
 from app.services.federated_run import DetachedAskTurn, FederatedRunPlan
+from app.services.global_ask_feed import JobFeed
 from app.services.global_run import global_ask_run
 from app.services.retrieval_participants import ParticipantOverride
+
+
+_LOG = logging.getLogger("silicon_notebook.global_ask")
 
 
 # Reasons a library produced no evidence, paired with the Chinese receipt the
@@ -53,6 +59,11 @@ _EVIDENCE_CHANGED_COPY = (
 )
 _UNKNOWN_ENGINE_COPY = "不支持的问答引擎，请刷新页面后重试。"
 _PLUGIN_ENGINE_COPY = "全局问答暂不支持该引擎，请选择其他引擎后重试。"
+# The push stream's own failure, as opposed to the job's: the follower could not
+# read the job row. Stable wording, never the exception -- a store read can
+# raise with SQL or a path in its text, and the client is told to fall back to
+# reopening the conversation (polling, which is the durable path anyway).
+_FOLLOW_FAILURE_COPY = "接回这次回答时出错，请稍后重新打开该会话查看。"
 
 # How often a running job's reasoning trace is rewritten into its row. Two
 # bounds rather than one: the time bound keeps a slow run's panel moving, the
@@ -524,6 +535,20 @@ class GlobalAskService:
         self._lock = threading.RLock()
         self._events = {}
         self._workers = {}
+        # The push transport, parallel to ``_events``/``_workers`` and with the
+        # same lifetime: ``{job_id: JobFeed}`` fans this process's running jobs
+        # out to the clients watching them, and ``{job_id: live job}`` is the
+        # worker's own job object, which is what a newcomer's snapshot must be
+        # built from. The persisted row is NOT that snapshot -- the trace write
+        # is throttled (see ``_append_trace``), so a snapshot taken from the
+        # store would be behind the next published step and the reader would
+        # apply it over a gap and drop the steps in between.
+        self._feeds = {}
+        self._live = {}
+        # How often a follower polls the store for a job this process is not
+        # running. An attribute rather than a constant so a test can shrink it
+        # instead of waiting out real half-seconds.
+        self.follow_poll_seconds = 0.5
         self._pending = 0
         self._closed = False
         # Monotonic clock, injectable so the trace throttle can be tested with
@@ -939,14 +964,6 @@ class GlobalAskService:
             )
             event = threading.Event()
             context = copy_context()
-            worker = threading.Thread(
-                target=lambda: context.run(
-                    self._run, job.model_copy(deep=True), user_id, history,
-                    user_history, event, allowed, authority_check, source_ceiling,
-                    followup, payload.intent,
-                ),
-                daemon=True, name="global-ask",
-            )
             created = False
             try:
                 with self._lock:
@@ -970,6 +987,21 @@ class GlobalAskService:
                     replaces_job_id=payload.replaces_job_id or None,
                 )
                 created = True
+                # The worker's own copy, taken HERE rather than inside the
+                # thread body: ``attach`` builds a newcomer's snapshot from this
+                # very object, so it has to exist by the time the job is
+                # registered as running. It is still taken after ``created_at``
+                # is stamped, so the detached run carries the insertion instant
+                # exactly as it did when the copy lived in the thread target.
+                run_job = job.model_copy(deep=True)
+                worker = threading.Thread(
+                    target=lambda: context.run(
+                        self._run, run_job, user_id, history, user_history,
+                        event, allowed, authority_check, source_ceiling,
+                        followup, payload.intent,
+                    ),
+                    daemon=True, name="global-ask",
+                )
                 with self._lock:
                     # Re-read: a shutdown may have landed while the row was
                     # being written. ``created`` is already true, so the
@@ -979,12 +1011,19 @@ class GlobalAskService:
                         raise GlobalAskError(503, "服务正在关闭，请稍后重新提交问题。")
                     self._events[job.job_id] = event
                     self._workers[job.job_id] = worker
+                    # Registered in the same step as the worker, so no window
+                    # exists where the job is running and a client attaching to
+                    # it silently falls back to polling the store.
+                    self._feeds[job.job_id] = JobFeed()
+                    self._live[job.job_id] = run_job
                     worker.start()
             except Exception as exc:
                 if created:
                     with self._lock:
                         self._events.pop(job.job_id, None)
                         self._workers.pop(job.job_id, None)
+                        self._feeds.pop(job.job_id, None)
+                        self._live.pop(job.job_id, None)
                     job.status = "failed"
                     job.error = "任务未能启动，请重新提交问题。"
                     self.store.save(job, user_id)
@@ -1120,6 +1159,16 @@ class GlobalAskService:
         several sub-query threads at once, so without both properties two
         receipts can interleave into a persisted coverage list that loses a
         library it had already reported.
+
+        ⛔ THE PUSH FRAME GOES OUT AFTER THE MUTATION AND OUTSIDE BOTH LOCKS.
+        ``publish_lock`` is held across a database write, and the feed's own
+        lock serializes every subscriber of this job -- nesting them would put
+        a store write inside the feed's critical section (see
+        ``global_ask_feed``'s module docstring). It also goes out only once the
+        write LANDED: a snapshot whose write matched no row belongs to a job
+        that has already left ``running``, and the terminal frame is what such
+        a reader is owed, not one last coverage list nothing durable agrees
+        with.
         """
         sequence, searched, degraded, skipped = state.coverage()
         with state.publish_lock:
@@ -1142,6 +1191,7 @@ class GlobalAskService:
             open_for_writing = self._save_if_open(job, user_id, progress=progress)
         if not open_for_writing:
             raise AskCancelled()
+        self._publish_progress(job, 0)
 
     def _append_trace(self, job, user_id, state, step):
         """Stream one reasoning step into the job a poller is reading.
@@ -1177,10 +1227,31 @@ class GlobalAskService:
         released first -- no database write happens under it (see
         ``_publish_coverage``), and taking the two in this order everywhere
         keeps them ordered publish-then-state.
+
+        ⛔ THE PUSH FRAME IS UNTHROTTLED AND GOES OUT UNDER NEITHER LOCK. The
+        throttle exists to bound a database rewrite, and pushing a step costs
+        one dict and a queue put; a stream that inherited the throttle would
+        show the watching user less than the polling one does. So a watcher
+        can legitimately be AHEAD of the row for up to one throttle window --
+        that is what the accelerator is for, and a client that falls back to
+        polling re-reads a trace it already has rather than losing one. The
+        frame is published after the append, and after the throttled write
+        when one was due, from outside ``state.lock`` and ``publish_lock``
+        alike: the feed takes a lock of its own and fans out to every
+        subscriber under it, so nesting it inside either of these would put a
+        database write inside the feed's critical section.
+
+        The frame carries the appended step's ABSOLUTE index and the trace
+        tail from there, not just the one step. Several threads append and
+        publish concurrently, so the two orders can disagree -- the tail is
+        what makes a frame that overtakes an older one self-repairing: the
+        older frame's lower offset re-delivers both steps, and re-delivery is
+        harmless by contract while a gap is not.
         """
         try:
             with state.lock:
                 job.trace.append(step)
+                offset = len(job.trace) - 1
                 now = self._clock()
                 due = (
                     len(job.trace) - state.traced_at_count >= _TRACE_SAVE_STEPS
@@ -1192,8 +1263,190 @@ class GlobalAskService:
             if due:
                 with state.publish_lock:
                     self._save_if_open(job, user_id, progress=True)
+            self._publish_progress(job, offset)
         except Exception:  # noqa: BLE001 - see docstring
             pass
+
+    # ------------------------------------------------------------------
+    # push transport -- an ACCELERATOR over the durable job, never a second
+    # source of truth. Every frame below describes state the store already
+    # holds (or is about to), so a client that never attaches, or loses the
+    # connection, recovers exactly the same run by polling ``GET /jobs/{id}``.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _progress_frame(job, trace_offset):
+        """One ``progress`` frame: the trace from ``trace_offset`` + coverage.
+
+        The coverage lists are WHOLE lists every time, never deltas. They are
+        short (one entry per participant, capped at 8) and they REPLACE on the
+        reader; merging them would make a reader's view depend on which frames
+        it happened to receive, which is the one thing a lossy accelerator must
+        never do.
+
+        ``mode="json"`` rather than a plain dump: the steps and the skip
+        receipts are models, and the frame is about to be serialized by a
+        transport that only speaks JSON primitives.
+        """
+        return {
+            "event": "progress",
+            "trace_offset": trace_offset,
+            "steps": [
+                step.model_dump(mode="json") for step in job.trace[trace_offset:]
+            ],
+            "searched_notebook_ids": list(job.searched_notebook_ids),
+            "skipped_notebooks": [
+                skipped.model_dump(mode="json") for skipped in job.skipped_notebooks
+            ],
+            "degraded_notebook_ids": list(job.degraded_notebook_ids),
+        }
+
+    def _publish_progress(self, job, trace_offset):
+        """Fan one progress frame out to this job's watchers. Fail-OPEN.
+
+        Same discipline as the trace itself: the push stream is how a looking
+        user watches a run, and neither a defective subscriber nor a missing
+        feed may become the reason an otherwise good answer fails. A job with
+        no feed (this process is not running it, or it already went terminal)
+        is the ordinary case, not an error.
+        """
+        with self._lock:
+            feed = self._feeds.get(job.job_id)
+        if feed is None:
+            return
+        try:
+            feed.publish(lambda: self._progress_frame(job, trace_offset))
+        except Exception:  # noqa: BLE001 - see docstring
+            _LOG.exception("global-ask push failed for %s", job.job_id)
+
+    def _terminal_frame(self, job_id, user_id):
+        """The stream's last frame, read from the STORE rather than from memory.
+
+        The store is what the poll fallback and every later read see, so taking
+        the terminal from anywhere else is how a stream and a reload come to
+        disagree about how a run ended. A row that is no longer there --
+        stopped-and-discarded, or its conversation deleted -- is ``gone``,
+        which is a real outcome and not a failure: the client reconciles it
+        exactly as the poll's own 404 branch does.
+        """
+        job = self.store.job(job_id, user_id)
+        if job is None:
+            return {"event": "gone"}
+        return {"event": "final", "job": job.model_dump(mode="json")}
+
+    def _close_feed(self, job_id, user_id):
+        """End this job's live stream with its terminal frame. Fail-OPEN.
+
+        Called by whoever ends the job -- the worker as ``_run`` unwinds, and
+        ``cancel()`` right after its own write -- because a stopped reader must
+        not have to wait out the worker's unwind to learn that it stopped. The
+        feed itself admits only the FIRST terminal, so the loser of that race
+        publishes nothing.
+
+        The store read happens BEFORE ``close``, never inside the feed's lock.
+        """
+        with self._lock:
+            feed = self._feeds.get(job_id)
+        if feed is None:
+            return
+        try:
+            feed.close(self._terminal_frame(job_id, user_id))
+        except Exception:  # noqa: BLE001 - see docstring
+            _LOG.exception("global-ask terminal push failed for %s", job_id)
+            feed.close(None)
+
+    def attach(self, job_id, *, user_id, allowed_notebook_ids=None):
+        """A delivery queue carrying this job's events until it ends.
+
+        AUTHORITY FIRST, and by the same call ``GET /jobs/{id}`` makes: a
+        missing job, a foreign one, or one whose libraries this member can no
+        longer read raises ``GlobalAskError`` here -- before a single frame
+        exists -- so the transport above can answer a real status code instead
+        of a 200 with a refusal buried inside it.
+
+        Two ways to follow the job, and the caller cannot tell them apart:
+
+        * this process is running it -> subscribe to its live feed, which
+          hands back a full snapshot and then every later event;
+        * anything else (already terminal, or running in another process, so
+          there is no feed here) -> a daemon follower that polls the store.
+
+        The queue always opens with ``started`` and always ends with the
+        ``None`` sentinel, so the transport's loop is identical either way.
+        """
+        job = self.get_job(job_id, user_id=user_id, allowed_notebook_ids=allowed_notebook_ids)
+        events = new_delivery_queue()
+        events.put({
+            "event": "started",
+            "job_id": job.job_id,
+            "conversation_id": job.conversation_id,
+        })
+        if job.status == "running":
+            with self._lock:
+                feed = self._feeds.get(job_id)
+                live = self._live.get(job_id)
+            # ``subscribe`` reports False once the feed has closed, which is
+            # the race this branch exists to lose safely: the run ended between
+            # the status read above and here, and the follower below then reads
+            # the terminal state from the store.
+            if feed is not None and live is not None and feed.subscribe(
+                events, lambda: self._progress_frame(live, 0),
+            ):
+                return events
+        self._follow(events, job_id, user_id)
+        return events
+
+    def _follow(self, events, job_id, user_id):
+        """Poll the store on this ONE client's behalf until the job ends.
+
+        REQUEST-LOCAL by construction: it exists for the connection that asked
+        and stops at its next check once that connection closes the queue, so
+        concurrent followers are bounded by concurrent readers rather than by
+        how often a job is reopened. It executes, persists and cancels nothing
+        -- a disconnect here stops delivery, never the run.
+
+        A job that is already terminal yields ``started`` + its terminal frame
+        and nothing else: replaying a finished run's progress would animate a
+        trace the reader is about to be handed whole anyway.
+
+        Its OWN failure (a store read that raised) ends the stream with stable
+        Chinese wording and is logged. The exception text never reaches the
+        client: a store failure's message can carry SQL, a path, or source
+        content, and the client's honest next step -- reopen the conversation,
+        i.e. fall back to polling -- does not depend on which one it was.
+        """
+        closed = getattr(events, "closed", None)
+
+        def follower():
+            progress = None
+            try:
+                while not (closed is not None and closed.is_set()):
+                    job = self.store.job(job_id, user_id)
+                    if job is None:
+                        events.put({"event": "gone"})
+                        return
+                    if job.status != "running":
+                        events.put({
+                            "event": "final", "job": job.model_dump(mode="json"),
+                        })
+                        return
+                    frame = self._progress_frame(job, 0)
+                    if frame != progress:
+                        progress = frame
+                        events.put(frame)
+                    if closed is None:
+                        time.sleep(self.follow_poll_seconds)
+                    else:
+                        closed.wait(self.follow_poll_seconds)
+            except Exception:  # noqa: BLE001 - the transport must end well-formed
+                _LOG.exception("global-ask follow failed for %s", job_id)
+                events.put({"event": "error", "error": _FOLLOW_FAILURE_COPY})
+            finally:
+                events.put(None)
+
+        threading.Thread(
+            target=follower, daemon=True, name="global-ask-follow",
+        ).start()
 
     def _run(self, job, user_id, history, user_history, event, allowed,
              authority_check, source_ceiling, followup=None, intent=None):
@@ -1214,9 +1467,17 @@ class GlobalAskService:
             )
             self._save_if_open(job, user_id)
         finally:
+            # The terminal frame comes from the STORE and goes out BEFORE the
+            # feed is dropped: every branch above has already written its own
+            # terminal row, so what a watcher is told is exactly what a reload
+            # would read. ``cancel()`` may have closed this feed already, in
+            # which case this is a no-op by the feed's own first-terminal rule.
+            self._close_feed(job.job_id, user_id)
             with self._lock:
                 self._events.pop(job.job_id, None)
                 self._workers.pop(job.job_id, None)
+                self._feeds.pop(job.job_id, None)
+                self._live.pop(job.job_id, None)
 
     def _execute(self, job, user_id, history, user_history, event, allowed,
                  authority_check, source_ceiling, followup, intent):
@@ -1603,6 +1864,13 @@ class GlobalAskService:
         record and its empty conversation behind intermittently.
         The worker may still be unwinding; every write it has left is guarded by
         ``status='running'`` and matches no row.
+
+        The watching client is told HERE rather than by the unwinding worker.
+        A run can take seconds to notice its cancel token between two retrieval
+        legs, and a user who pressed stop must not sit in front of a spinner
+        for that long. Both shapes are covered because the frame is read from
+        the store after the write: a plain stop reads back ``cancelled``, and
+        a discard reads back nothing at all and ends the stream with ``gone``.
         """
         job = self.get_job(job_id, user_id=user_id, allowed_notebook_ids=allowed_notebook_ids)
         if job.status == "running":
@@ -1617,6 +1885,7 @@ class GlobalAskService:
                     return job
             if discard:
                 self.store.discard_cancelled(job_id, user_id)
+            self._close_feed(job_id, user_id)
         return job
 
     def submit_feedback(self, job_id, rating, *, user_id, allowed_notebook_ids=None):
@@ -1863,6 +2132,17 @@ class GlobalAskService:
         deadline = time.monotonic() + self.settings.global_ask_shutdown_timeout_seconds
         for worker in workers:
             worker.join(timeout=max(0.0, deadline - time.monotonic()))
+        # AFTER the join, so a worker that settled inside the shutdown budget
+        # still delivered its real terminal frame. What is left here is a run
+        # that outlived the budget, and its watchers get the sentinel alone:
+        # there is no terminal to report (the row is still ``running`` until
+        # the next start's recovery sweep) and inventing one would tell a
+        # client the answer is in when the process is going away. Their poll
+        # fallback is what reconciles the row afterwards.
+        with self._lock:
+            feeds = list(self._feeds.values())
+        for feed in feeds:
+            feed.close(None)
         # Never widen the shutdown budget: drop queued retrievals and let any
         # in-flight one finish against its own already-cancelled read budget.
         self._retrieval_pool.shutdown(wait=False, cancel_futures=True)
