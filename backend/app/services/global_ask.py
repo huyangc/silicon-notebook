@@ -1218,7 +1218,7 @@ class GlobalAskService:
         # bring back the O(n^2) bytes the persistence throttle exists to avoid,
         # and readers apply the coverage lists whether or not the trace part of
         # a frame fits them.
-        self._publish_progress(job, None)
+        self._publish_progress(job, user_id, None)
 
     def _append_trace(self, job, user_id, state, step):
         """Stream one reasoning step into the job a poller is reading.
@@ -1290,7 +1290,7 @@ class GlobalAskService:
             if due:
                 with state.publish_lock:
                     self._save_if_open(job, user_id, progress=True)
-            self._publish_progress(job, offset)
+            self._publish_progress(job, user_id, offset)
         except Exception:  # noqa: BLE001 - see docstring
             pass
 
@@ -1330,8 +1330,18 @@ class GlobalAskService:
             "degraded_notebook_ids": list(job.degraded_notebook_ids),
         }
 
-    def _publish_progress(self, job, trace_offset):
+    def _publish_progress(self, job, user_id, trace_offset):
         """Fan one progress frame out to this job's watchers. Fail-OPEN.
+
+        ⛔ AUTHORITY IS RE-CHECKED BEFORE EVERY FRAME THAT WILL LEAVE. Polling
+        -- the transport this stands in for -- authorizes each read at the
+        moment it is made, so a member whose access to one of the job's
+        libraries is revoked mid-run stops seeing it at once. A subscription
+        authorized only when it was opened would keep delivering new reasoning
+        steps (queries, hit metadata) for the rest of the run, and a ``gone`` at
+        the end cannot take those back. Every watcher of a job is its owner, so
+        one check covers them all; it is skipped when nobody is watching, and it
+        runs OUTSIDE the feed's lock (it reads the store).
 
         Same discipline as the trace itself: the push stream is how a looking
         user watches a run, and neither a defective subscriber nor a missing
@@ -1344,9 +1354,18 @@ class GlobalAskService:
         if feed is None:
             return
         try:
+            if not feed.watched():
+                return
+            try:
+                self._check(job.resolved_notebook_ids, user_id)
+            except GlobalAskError:
+                feed.close({"event": "gone"})
+                return
             feed.publish(lambda: self._progress_frame(job, trace_offset))
-        except Exception:  # noqa: BLE001 - see docstring
-            _LOG.exception("global-ask push failed for %s", job.job_id)
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            # The class name only: exception text can carry SQL, a path or
+            # source content, and none of that belongs in a log.
+            _LOG.error("global-ask push failed for %s (%s)", job.job_id, type(exc).__name__)
 
     def _terminal_frame(self, job_id, user_id):
         """The stream's last frame, read from the STORE rather than from memory.
@@ -1398,8 +1417,8 @@ class GlobalAskService:
             return
         try:
             feed.close(self._terminal_frame(job_id, user_id))
-        except Exception:  # noqa: BLE001 - see docstring
-            _LOG.exception("global-ask terminal push failed for %s", job_id)
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            _LOG.error("global-ask terminal push failed for %s (%s)", job_id, type(exc).__name__)
             feed.close(None)
 
     def attach(self, job_id, *, user_id, allowed_notebook_ids=None):
@@ -1505,8 +1524,8 @@ class GlobalAskService:
                         time.sleep(wait)
                     else:
                         closed.wait(wait)
-            except Exception:  # noqa: BLE001 - the transport must end well-formed
-                _LOG.exception("global-ask follow failed for %s", job_id)
+            except Exception as exc:  # noqa: BLE001 - the transport must end well-formed
+                _LOG.error("global-ask follow failed for %s (%s)", job_id, type(exc).__name__)
                 events.put({"event": "error", "error": _FOLLOW_FAILURE_COPY})
             finally:
                 events.put(None)

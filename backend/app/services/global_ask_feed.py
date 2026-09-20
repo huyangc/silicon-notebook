@@ -63,6 +63,17 @@ class JobFeed:
             self._subscribers.append(events)
             return True
 
+    def watched(self) -> bool:
+        """Is anybody still reading? Lets a publisher skip work -- an authority
+        re-check, say -- that only matters when a frame will actually leave."""
+        with self._lock:
+            if self._closed:
+                return False
+            self._subscribers = [
+                events for events in self._subscribers if not self._is_closed(events)
+            ]
+            return bool(self._subscribers)
+
     def publish(self, make_event: Callable[[], Any]) -> None:
         """Evaluate ``make_event()`` and fan it out. A no-op once closed.
 

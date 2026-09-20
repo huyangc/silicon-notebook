@@ -584,3 +584,80 @@ def test_an_idle_stream_connection_holds_no_executor_thread(monkeypatch):
         return lines
 
     assert [json.loads(line)["event"] for line in asyncio.run(run())] == ["started"]
+
+
+
+def test_access_revoked_mid_run_stops_live_progress_at_once(setup):
+    """Not at the end of the run: polling authorizes every read when it is made,
+    so a watcher whose access is revoked must not receive another trace step --
+    a ``gone`` at the end cannot take back what was already delivered."""
+    service, readable, _, _ = setup
+    parked, resume = _park(service, before=("撤权之前",), after=("撤权之后-一", "撤权之后-二"))
+    job = service.start(GlobalAskRequest(question="q"), user_id="u")
+    assert parked.wait(5)
+    events = service.attach(job.job_id, user_id="u")
+    readable.discard("b")
+    resume.set()
+    frames = _collect(events)
+    readable.add("b")
+    delivered = [step["summary"] for frame in frames if frame["event"] == "progress" for step in frame["steps"]]
+    assert "撤权之前" in delivered
+    assert not any(summary.startswith("撤权之后") for summary in delivered), delivered
+    assert frames[-1] == {"event": "gone"}
+    finished(service, job)
+
+
+def test_an_unwatched_job_pays_for_no_authority_check(setup):
+    """The re-check exists for frames that will actually leave."""
+    service, _, _, _ = setup
+    calls = []
+    real = service._check
+
+    def counting(ids, user_id, *args, **kwargs):
+        calls.append(("progress" if not args and not kwargs else "other"))
+        return real(ids, user_id, *args, **kwargs)
+
+    parked, resume = _park(service, after=("一", "二", "三"))
+    job = service.start(GlobalAskRequest(question="q"), user_id="u")
+    assert parked.wait(5)
+    service._check = counting
+    calls.clear()
+    resume.set()
+    finished(service, job)
+    service._check = real
+    assert "progress" not in calls
+
+
+def test_stream_failures_are_logged_by_class_name_only(setup, caplog):
+    """Exception text can carry SQL, a private path or source content."""
+    import logging
+
+    service, _, _, _ = setup
+    service.follow_poll_seconds = 0.01
+    secret = "SELECT * FROM chunks WHERE text='机密原文' /private/path"
+    parked, resume = _park(service)
+    job = service.start(GlobalAskRequest(question="q"), user_id="u")
+    assert parked.wait(5)
+    with service._lock:
+        service._feeds.pop(job.job_id)
+        service._live.pop(job.job_id)
+    events = _queue()
+    events.put({"event": "started"})
+    real_get_job = service.get_job
+
+    def broken(*args, **kwargs):
+        raise RuntimeError(secret)
+
+    service.get_job = broken
+    with caplog.at_level(logging.ERROR, logger="silicon_notebook.global_ask"):
+        service._follow(events, job.job_id, "u")
+        frames = _collect(events)
+    service.get_job = real_get_job
+    assert frames[-1]["event"] == "error" and secret not in json.dumps(frames, ensure_ascii=False)
+    assert caplog.records, "the failure must still be logged"
+    for record in caplog.records:
+        assert secret not in record.getMessage()
+        assert record.exc_info is None
+        assert "RuntimeError" in record.getMessage()
+    resume.set()
+    finished(service, job)
