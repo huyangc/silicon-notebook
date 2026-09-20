@@ -162,6 +162,31 @@ test("每条完成的回答下面都有分享入口，运行中的那条没有�
 });
 
 
+test("只含旧形状回答的会话同样能分享：历史轮次的页脚也有入口，边界同样是作业", async () => {
+  // 后端快照两种形状都投影；入口若只挂在新形状（AnswerView）上，一条全是历史回答的
+  // 会话就得先再问一条新问题才分享得了（codex #758 第 2 轮 P2）。
+  const legacy: GlobalJob = {
+    ...doneJob("job-legacy", "2026-09-19T00:59:00Z"),
+    answer: null,
+    response: {
+      answer_id: "old-answer", question: "旧问题", answer: "旧形状的回答。", grounded: true,
+      anchors: [], citations: [], created_at: "2026-09-19T00:59:01Z",
+      notebook_scope: { mode: "all" }, resolved_notebook_ids: ["nb-0"],
+      searched_notebook_ids: ["nb-0"], cited_notebook_ids: ["nb-0"], skipped_notebooks: [],
+      completeness_notice: "回答仅使用本次命中的有限原文。",
+    },
+  };
+  turnsByConversation["conv-a"] = [legacy];
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  render(<GlobalAskPage />);
+  await screen.findByText("旧形状的回答。", { exact: false });
+
+  fireEvent.click(await screen.findByRole("button", { name: "分享到这条回答" }));
+  expect(await screen.findByText(/分享至第 1 轮回答（本会话共 1 轮）/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
+  await waitFor(() => expect(shareApi.post).toHaveBeenCalledWith("job-legacy"));
+});
+
 test("边界钉在这条**作业**上：POST 走全局端点，expected_through_id 是 job_id", async () => {
   await openShareOn(1);
 
