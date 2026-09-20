@@ -449,7 +449,16 @@ export function useGlobalAsk({ syncUrl = true, active = true }: { syncUrl?: bool
     const ticket = owner.current;
     // 引擎进幂等键：换引擎重问同一个问题是**另一次**提问，不该复用上一次的
     // request id 被后端当成重复提交挡掉。
-    const key = JSON.stringify({ question, scope, conversationId, mode });
+    // 确认内容里**用户亲手改过的部分**也进幂等键：后端按「问题 / 范围 / 会话 / 引擎」
+    // 认重试、刻意不比 intent（每次预检模型给出的理解与耗时都不同，比了重试就永远
+    // 409）。所以「响应丢了 → 重新预检 → 这次改了确认的问题或补充回答」必须在这里换一个
+    // request id，否则后端会把上一次确认的那份作业原样交回来。没动过的确认不进键，
+    // 重试才仍然命中同一份作业。
+    const edited = intent && (intent.answers.length > 0
+      || intent.resolved_question !== intent.contract.resolved_question)
+      ? { resolved: intent.resolved_question, answers: intent.answers }
+      : null;
+    const key = JSON.stringify({ question, scope, conversationId, mode, edited });
     if (retryRequest.current?.key !== key) retryRequest.current = { key, id: crypto.randomUUID() };
     try {
       const job = await askGlobal({

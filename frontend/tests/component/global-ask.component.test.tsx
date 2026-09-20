@@ -949,6 +949,52 @@ test("reasoning submission goes through intent review", async () => {
   expect(submitted.intent.answers).toEqual([{ id: "a1", answer: "磷酸铁锂与三元" }]);
 });
 
+test("a changed confirmation gets a new request id after an ambiguous failure; an unchanged one reuses it", async () => {
+  // 后端认重试时刻意不比 intent（每次预检给出的理解都不同），所以「这次确认的内容
+  // 被用户改了」只能由这里换 request id 来表达，否则会原样拿回上一次确认的作业。
+  api.intent.mockImplementation((question: string) => Promise.resolve(clarifyingContract(question)));
+  api.ask.mockRejectedValue(new Error("network"));
+  render(<GlobalAskPage />);
+  const input = await screen.findByRole("textbox", { name: "输入问题" });
+  await waitFor(() => expect(input).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "深入分析" }));
+  fireEvent.change(input, { target: { value: "哪个更耐低温" } });
+
+  async function submitWith(answer: string, nth: number) {
+    fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+    const card = await screen.findByRole("region", { name: "确认逐步推理的问题理解" });
+    fireEvent.change(within(card).getByRole("textbox", { name: "要比较哪几个体系？的补充答案" }), {
+      target: { value: answer },
+    });
+    const confirm = within(card).getByRole("button", { name: "确认并开始检索" });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    await waitFor(() => expect(api.ask).toHaveBeenCalledTimes(nth));
+    await waitFor(() => expect(screen.getByRole("button", { name: "发送问题" })).toBeEnabled());
+  }
+
+  await submitWith("磷酸铁锂与三元", 1);
+  await submitWith("磷酸铁锂与三元", 2);
+  await submitWith("钠离子与三元", 3);
+  const ids = api.ask.mock.calls.map((call) => call[0].client_request_id);
+  expect(ids[1]).toBe(ids[0]);
+  expect(ids[2]).not.toBe(ids[0]);
+});
+
+test("a shared-engine job discloses partial retrieval, not the legacy lexical fallback", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [{
+    ...job("done"), searched_notebook_ids: ["nb-0"], cited_notebook_ids: ["nb-0"],
+    degraded_notebook_ids: ["nb-0"], answer: standardAnswer(),
+  }]));
+  render(<GlobalAskPage />);
+  await screen.findByText("跨库结论", { exact: false });
+  const receipt = await screen.findByLabelText("本轮检索回执");
+  expect(receipt).toHaveTextContent("1 个笔记本有部分检索未完成，这些笔记本的资料可能覆盖不全");
+  expect(receipt).not.toHaveTextContent("词法降级");
+});
+
 test.each([
   ["running", "running" as const, true],
   ["finished with an emptied answer trace", "done" as const, false],

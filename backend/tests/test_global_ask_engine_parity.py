@@ -272,6 +272,10 @@ def test_chunk_mode_returns_standard_ask_response(service):
     assert result.response is None
     assert result.cited_notebook_ids == ["b"]
     assert result.searched_notebook_ids == list(_LIBRARIES)
+    # 完成时刻由本服务补盖:detached 轮次绕过了单库那条 ``save_answer``(平时是它盖
+    # 的),不补的话界面会把**提交**时刻显示成回答时刻。
+    assert result.answer.answered_at
+    assert result.answer.answered_at >= result.created_at
 
 
 def test_reasoning_mode_streams_trace_into_job(service):

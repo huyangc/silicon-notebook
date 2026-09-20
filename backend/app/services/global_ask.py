@@ -1195,6 +1195,11 @@ class GlobalAskService:
             citation.notebook_id for citation in response.citations
             if citation.notebook_id
         ))
+        # The completion stamp is ``AskStateStore.save_answer``'s job on the
+        # notebook path; the detached turn bypasses that store, so it is set
+        # here or the workspace shows the SUBMISSION time as the answer time.
+        if not response.answered_at:
+            response.answered_at = _now()
         job.answer = response
         # ``answer.reasoning_trace`` is the authority once the run finishes;
         # keeping the streamed copy too would double the persisted payload.
