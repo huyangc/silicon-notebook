@@ -223,6 +223,43 @@ HTTP 入口均位于 `/api/global-ask`，要求登录：`POST /ask` 返回可轮
 任务的 `error` 明确属于可显示的中文重试提示，不保存异常原文。
 自动生成的会话名称是有长度上限的摘要，原始问题完整保留。
 
+#### 全局会话分享
+
+一条全局会话也可由它的所有者发布成免登录只读页，**与单库会话同一个公开页** `/c/{token}`：
+公开读取仍是 `GET /api/public/conversations/{token}`，图片仍是
+`GET /api/public/conversations/{token}/assets/{alias}`，两侧按 token 的能力命名空间前缀分流
+（`gshr-` 走全局，`cshr-` 走单库；两个命名空间划分 token 空间，任一分支都不会命中另一个的
+token）。已认证的三个端点在 `/api/global-ask/conversations/{conversation_id}/share` 上：`POST`
+发放并推进水位、`GET` 供所有者回读 token 与水位（未分享是 404，弹窗据此判「正常未分享」）、
+`DELETE` 撤销（本人已撤销过的会话再撤一次仍是 204；别人的或不存在的会话是 404——底层 UPDATE
+是幂等的，这个 404 来自服务层的所有权判定）。全局会话不属于任何笔记本，所以这里**没有**
+`require_notebook_read` 这层库级守卫：所有权就是全部的闸。
+
+与单库相比，只有两处真正不同：
+
+- **边界是作业**，不是答案行。`expected_through_id` 送的是 `job_id`；解析不到（已删除、仍在
+  运行、失败、取消，或属于别的会话）与回退到已发布水位之前都是 409，文案与单库逐字相同
+  （「这条会话已有变化，请刷新后重新分享。」「这条会话还没有已完成的回答，暂时无法分享。」）。
+  零已完成作业的会话在同一个写事务里被拒，**不会**先铸出 token 再回滚。
+- **实时复核的对象是一组库**。单库复核的是会话所在的那一本；全局会话不在任何库里，因此
+  **每次打开公开链接**都按分享者的身份复核本次快照里被引各库的读权——取各轮
+  `cited_notebook_ids` 的并集，并集为空时退化为各轮 `resolved_notebook_ids` 的并集（零引用
+  不等于零复核）。任一库读不了，整条链接连同它的图片一起 404，与未知 token 不可区分；权限
+  恢复后**同一个** token 自动复活。创建分享时也跑同一条判定：分享者此刻读不了的库被引用的
+  会话不许发布（404 +「部分笔记本已无法访问，请重新选择范围。」），免得发出去一条生来就
+  404 的链接。
+
+图片沿用单库的 token-HMAC 别名通道（别名只能反查**公开页实际披露**的那批图），并受同一个
+部署开关 `MINERU_RETURN_IMAGES` 约束；全局侧另加一条闸：资产所属库必须落在本次**已复核**的
+库集合内，否则同样 404——快照横跨多个库，「冻结的快照就是授权」只能按库逐个成立。
+
+投影逐字复用单库白名单（`conversation_public_view`）：公开页**不显示库名**、不出任何可寻址
+id（`notebook_id`/`source_id`/`element_id`/`asset_id`/`job_id`…）、不出
+`skipped_notebooks`/`degraded_notebook_ids`/`resolved_notebook_ids` 这类回执，也不出
+`reasoning_trace` 与 `intent`。轮数/引用数/摘录/图注等上限见[同一张表](#问答会话公开分享护栏)——
+两条链路共用这一份投影与这一组常量。旧形状（回答挂在 `response` 下）的轮次照样投影，缺失的
+`asked_at`/`answered_at`/`evidence_level` 走投影既有的退化分支。
+
 输入沿用 `ASK_QUESTION_MAX_CHARS=4000` 与 `CONVERSATION_TITLE_MAX_CHARS=200`；
 全局会话/任务标识和客户端请求标识上限 200 字符。列表分页默认 50、上限 100。
 `GLOBAL_ASK_CANDIDATE_LIMIT` 默认 64、最小 1，限制所有库合并后的候选数，不截短参与库集合；
@@ -2268,6 +2305,10 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 后三个上限定义在 `backend/app/services/report_public_view.py`，创建上限定义在 `backend/app/models/reports.py`（前端镜像在 `frontend/app/report-api.ts::REPORT_INPUT_LIMITS`）；与下表的会话侧同名常量彼此独立（两条分享链路各有自己的契约），但截断披露这条口径必须一致。
 
 ### 问答会话公开分享护栏
+
+下表每一条对**全局（跨库）会话的分享**同样适用：两条链路共用同一份投影模块、同一对匿名端点，
+因此也共用这一组常量。真正不同的只有两处（水位边界是作业、实时复核的是一组库），见
+[全局会话分享](#全局会话分享)。
 
 | 上限 | 数值 |
 | --- | ---: |

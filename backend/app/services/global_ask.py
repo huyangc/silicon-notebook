@@ -13,6 +13,10 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from app.core.ask_retrieval_policy import DEFAULT_RETRIEVAL_EFFORT
+# The same ceiling the anonymous page renders by; the share-time authority
+# sweep below is bounded by it so one click can never deserialize more turns
+# than a public read of the same conversation already does.
+from app.domain.conversation_public_view import MAX_TURNS
 from app.models.ask import AskRequest, QueryIntentContract
 from app.models.global_ask import (
     GlobalAskIntentPreviewRequest, GlobalAskJob, GlobalAskRequest,
@@ -403,6 +407,68 @@ _RETRIEVAL_THREAD_PREFIX = "global-ask-retrieve"
 # Fields that ride along with a request without identifying it; see
 # ``GlobalAskService._same_request``.
 _REQUEST_IDENTITY_EXCLUDES = frozenset({"intent"})
+
+
+def _payload_notebook_ids(payload: Any, key: str) -> list[str]:
+    """One notebook-id list off a stored job payload, across both answer shapes.
+
+    The job row carries the list at top level (``GlobalAskJob.cited_notebook_ids``
+    / ``resolved_notebook_ids``), but a row written before that field existed
+    only has it nested inside the legacy ``response`` (``GlobalAskAnswer``) or
+    the newer ``answer``. Reading top level first and falling back to the nested
+    shapes means a legacy turn still declares its libraries instead of silently
+    contributing nothing to the set that gets re-authorized.
+    """
+    row = payload if isinstance(payload, dict) else {}
+    for source in (row, row.get("answer"), row.get("response")):
+        if not isinstance(source, dict):
+            continue
+        value = source.get(key)
+        if isinstance(value, list) and value:
+            return [str(item) for item in value if item]
+    return []
+
+
+def _snapshot_notebook_ids(turns: list[tuple[list[str], list[str]]]) -> set[str]:
+    """The libraries ONE published snapshot has to re-authorize, per turn pairs
+    of ``(cited ids, resolved ids)``.
+
+    Citations are the tight answer: they name the libraries whose material the
+    reader can actually see. The fallback to ``resolved`` exists so that "this
+    snapshot cited nothing" cannot degrade into "this snapshot needs no
+    re-check" -- a conversation whose every turn came back ungrounded still ran
+    over a resolved participant set, and a link built from it must die with the
+    sharer's access to those libraries exactly like any other. Only a snapshot
+    with no library on either axis re-checks nothing, because there is then no
+    library whose access could have been revoked.
+    """
+    cited = {item for cited_ids, _resolved in turns for item in cited_ids}
+    if cited:
+        return cited
+    return {item for _cited, resolved_ids in turns for item in resolved_ids}
+
+
+def _public_turn_row(job: Any) -> dict[str, Any]:
+    """One snapshot job as the shared public projection wants a turn.
+
+    ``conversation_public_view.public_turn`` reads the question off the TURN and
+    everything else off ``payload``, where ``payload`` is the stored answer --
+    so a global turn hands it ``answer`` (the shared engine's ``AskResponse``)
+    or, for a row written before the engine switch, the legacy ``response``.
+    The projection's own degradation branches then cover what the legacy shape
+    lacks (``asked_at``/``answered_at``/``evidence_level``), which is why this
+    passes the stored dict through untouched rather than normalizing it here:
+    the allowlist, not this function, is the disclosure boundary.
+    """
+    row = job if isinstance(job, dict) else {}
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    answer = payload.get("answer")
+    if not isinstance(answer, dict):
+        answer = payload.get("response")
+    return {
+        "question": payload.get("question") or "",
+        "payload": answer if isinstance(answer, dict) else {},
+    }
 
 
 class GlobalAskService:
@@ -1504,6 +1570,145 @@ class GlobalAskService:
                 if event is not None:
                     event.set()
             self.store.delete(conversation_id, user_id)
+
+    # ------------------------------------------------------------------
+    # public conversation sharing -- the global twin of the notebook-scoped
+    # trio in ``ask_routes`` (`_own_conversation_or_404` + share/read/unshare)
+    # and of its anonymous read. The store owns the token, the watermark and
+    # the snapshot; this layer owns AUTHORITY, which is the one thing that
+    # genuinely differs: a notebook conversation re-authorizes the single
+    # library it lives in, while a global conversation lives in no library and
+    # has to re-authorize the set its own snapshot actually drew on.
+    # ------------------------------------------------------------------
+
+    def _owned_conversation(self, conversation_id, user_id):
+        """Owner gate for the share endpoints; ``KeyError`` when it is missing
+        OR not this user's.
+
+        Deliberately NOT ``_conversation``'s ``GlobalAskError``: these three
+        endpoints mirror the notebook-scoped share trio byte for byte, and that
+        one answers the same plain 404 for "does not exist" and "exists but is
+        not yours" -- a distinguishable response would turn the endpoint into an
+        oracle for whose conversations exist. The route does that mapping, so
+        the store's own ``KeyError`` contract travels all the way up unchanged.
+        """
+        if self.store.conversation(conversation_id, user_id) is None:
+            raise KeyError(conversation_id)
+
+    def _share_authority_sweep(self, conversation_id, user_id):
+        """Refuse to MINT a link the sharer could not open themselves.
+
+        A global answer can cite a library the sharer has since lost access to
+        (a revoked grant, a group they left, a deleted library). The public read
+        re-checks that on every open and 404s, so such a link would be dead on
+        arrival; creating it anyway would hand the user a URL that silently
+        never works. This runs the SAME ``_check`` every other global entry
+        point runs, so "can this user still read these libraries" has exactly
+        one definition.
+
+        Best effort by construction, and that is the honest division of labour:
+        it sweeps the conversation's most recent ``MAX_TURNS`` completed turns
+        rather than the not-yet-computed snapshot (the store resolves the
+        watermark inside its own write transaction). The AUTHORITATIVE gate is
+        ``public_conversation``'s per-open re-check, which reads exactly the
+        published snapshot; this one only stops the obvious dead link.
+        """
+        jobs = self.store.jobs(conversation_id, user_id, MAX_TURNS, 0)
+        self._check(
+            _snapshot_notebook_ids([
+                (job.cited_notebook_ids, job.resolved_notebook_ids)
+                for job in jobs if job is not None and job.status == "done"
+            ]),
+            user_id,
+        )
+
+    def share_conversation(self, conversation_id, *, user_id, expected_through_id=""):
+        """Publish this conversation behind an unguessable link AND advance the
+        read watermark -- one call, exactly like the notebook-scoped endpoint.
+
+        ``expected_through_id`` is a JOB id here (the newest completed turn the
+        client saw in what it disclosed). The store pins the watermark to it, or
+        raises ``ConversationShareWatermarkStale`` when it no longer resolves,
+        so the published snapshot can only ever equal the disclosed one.
+        """
+        self._owned_conversation(conversation_id, user_id)
+        self._share_authority_sweep(conversation_id, user_id)
+        return self.store.share_conversation(
+            conversation_id, user_id, expected_through_id=expected_through_id
+        )
+
+    def conversation_share(self, conversation_id, *, user_id):
+        """The issued token + watermark, for the owner's read-back only. The
+        token IS the grant, so this stays owner-scoped in the store's own
+        ``WHERE user_id=?``; a non-owner gets the same ``KeyError`` as a missing
+        conversation."""
+        return self.store.conversation_share_state(conversation_id, user_id)
+
+    def unshare_conversation(self, conversation_id, *, user_id):
+        """Revoke the link. Idempotent underneath (a zero-row UPDATE reports
+        success either way), which is why the owner gate runs first."""
+        self._owned_conversation(conversation_id, user_id)
+        self.store.unshare_conversation(conversation_id, user_id)
+
+    def public_conversation(self, token):
+        """The anonymous snapshot for one global share token, or ``None``.
+
+        ⚠ NO REQUEST USER EXISTS ON THIS PATH. Everything here takes its
+        identity explicitly: ``public_conversation_by_token`` resolves on the
+        token alone, and the re-check runs under the SHARER's ``user_id`` as it
+        comes back on that row. Nothing may call a method that reads "the
+        current user" from the ambient context -- unset, that falls back to the
+        seeded administrator, and an anonymous reader would be authorized as an
+        admin. ``can_read_many``/``can_read`` are the sharing store's
+        ``readable_notebook_ids``/``user_can_read_notebook``, both of which take
+        the user id as an argument and touch no ContextVar.
+
+        The re-check is LIVE on every open (product decision 2026-09-20): the
+        snapshot is frozen, the authorization is not. The set re-checked is the
+        union of the snapshot turns' ``cited_notebook_ids``, falling back to
+        their ``resolved_notebook_ids`` when nothing was cited, so a snapshot
+        that cited nothing is not a snapshot that checks nothing (see
+        ``_snapshot_notebook_ids``). Losing read access to ANY of them kills the
+        whole link -- one unreadable library cannot be quietly dropped from an
+        answer that already quoted it -- and restoring access revives the SAME
+        token.
+
+        Every failure returns ``None`` so the route can answer the one
+        indistinguishable 404 an unknown token gets: which of "never existed",
+        "revoked", "creatorless" or "no longer readable" happened is exactly
+        what an anonymous caller must not learn.
+
+        The returned row is the shape ``conversation_public_view`` projects,
+        plus ONE gate field: ``notebook_ids``, the set just re-authorized. It is
+        never projected (the allowlist ignores it and the page route pops it);
+        the anonymous image endpoint reads it to refuse an asset that lives
+        outside the libraries this open actually re-checked.
+        """
+        row = self.store.public_conversation_by_token(token)
+        if row is None:
+            return None
+        creator = str(row.get("user_id") or "")
+        if not creator:
+            # Fail closed: an ownerless row can never be live-re-authorized,
+            # and a link that can never be re-checked must not be served.
+            return None
+        jobs = [job for job in (row.get("jobs") or []) if isinstance(job, dict)]
+        scope = _snapshot_notebook_ids([
+            (_payload_notebook_ids(job.get("payload"), "cited_notebook_ids"),
+             _payload_notebook_ids(job.get("payload"), "resolved_notebook_ids"))
+            for job in jobs
+        ])
+        try:
+            self._check(scope, creator)
+        except GlobalAskError:
+            return None
+        return {
+            "title": row.get("title") or "",
+            "created_at": row.get("created_at") or "",
+            "shared_through_at": row.get("shared_through_at") or "",
+            "turns": [_public_turn_row(job) for job in jobs],
+            "notebook_ids": frozenset(scope),
+        }
 
     def cited_element(self, job_id, element_id, *, user_id, allowed_notebook_ids=None):
         job = self.get_job(job_id, user_id=user_id, allowed_notebook_ids=allowed_notebook_ids)

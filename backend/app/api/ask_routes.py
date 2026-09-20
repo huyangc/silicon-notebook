@@ -11,8 +11,10 @@ from app.core.config import get_settings
 from app.bootstrap import application_extension_runtime
 from app.domain.ask_engine import AskPluginEngineError
 
+from app.core.capability_tokens import is_global_conversation_share_token
 from app.api.deps import (
     get_current_user,
+    global_ask_service,
     notebook_access_repository,
     notebook_catalog_repository,
     repository,
@@ -1168,8 +1170,40 @@ def unshare_conversation_route(
     repo.unshare_conversation(notebook_id, conversation_id)
 
 
+def _public_global_conversation_or_404(token: str) -> dict:
+    """The GLOBAL (cross-library) branch of the shared anonymous read.
+
+    A global conversation belongs to a user and to no notebook, so its live
+    re-check cannot be "does the creator still read THIS notebook" — there is
+    none. ``GlobalAskService.public_conversation`` re-authorizes the set of
+    libraries the published snapshot actually drew on, under the sharer's own
+    id, and answers ``None`` for every failure (unknown/revoked token, empty
+    creator, any library no longer readable) so this route can keep the one
+    indistinguishable 404 the notebook-scoped branch gives. The row it returns
+    is the SAME shape ``conversation_public_view`` projects, plus the
+    ``notebook_ids`` gate field the image endpoint reads.
+
+    Both branches stay legal on the anonymous router for the same reason: every
+    call underneath takes its identity explicitly and none of them consults the
+    request-user ContextVar (which falls back to the seeded admin when unset).
+    """
+    row = global_ask_service().public_conversation(token)
+    if row is None:
+        raise HTTPException(status_code=404, detail="shared conversation not found")
+    return row
+
+
 def _public_conversation_or_404(repo, token: str) -> dict:
     """Resolve a shared conversation by token and run the live creator re-check.
+
+    TWO features share this one anonymous surface, told apart by the token's
+    capability-namespace prefix: ``gshr-`` is a global (cross-library)
+    conversation and takes the branch above, anything else is the
+    notebook-scoped conversation this function has always served. One endpoint
+    pair rather than two is what keeps ``/c/{token}`` a single public page — a
+    reader is handed a link, not a feature name. The two namespaces partition
+    the token space (``capability_tokens``), so neither branch can ever resolve
+    the other's token.
 
     Shared by the page endpoint and the image endpoint so the two gates can
     NEVER diverge — the design (§七 item 3) requires the image channel to run
@@ -1201,6 +1235,8 @@ def _public_conversation_or_404(repo, token: str) -> dict:
     present; the page route pops them before projection, the image route only
     reads notebook scope from them and never projects the row.
     """
+    if is_global_conversation_share_token(token):
+        return _public_global_conversation_or_404(token)
     row = repo.public_conversation_by_token(token)
     if row is None:
         raise HTTPException(status_code=404, detail="shared conversation not found")
@@ -1234,6 +1270,10 @@ def public_conversation_route(token: str) -> PublicConversation:
     # (store docstring). Defense-in-depth — the allowlist ignores them anyway.
     row.pop("notebook_id", None)
     row.pop("created_by", None)
+    # The global branch's gate field, popped on the same principle: the set of
+    # libraries this open re-authorized is for the image endpoint's scope check,
+    # never for a reader.
+    row.pop("notebook_ids", None)
     # The raw share token derives each image's opaque alias (T4); the deployment
     # image switch is passed as a bool so the projection stays a pure function.
     return PublicConversation(
@@ -1288,6 +1328,15 @@ def public_conversation_asset_route(token: str, alias: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="shared image not found")
     asset = repo.get_notebook_asset(asset_id)
     if asset is None:
+        raise HTTPException(status_code=404, detail="shared image not found")
+    # GLOBAL branch only (``notebook_ids`` is absent on a notebook-scoped row,
+    # whose authorization is the paragraph above and stays unchanged): the
+    # asset's own library must be one this open ALREADY re-authorized. A global
+    # snapshot spans several libraries, so "the frozen snapshot is the grant"
+    # has to be read per library — losing access to one of them must not keep
+    # serving its images through a link the other libraries keep alive.
+    scope = row.get("notebook_ids")
+    if scope is not None and str(asset.get("notebook_id") or "") not in scope:
         raise HTTPException(status_code=404, detail="shared image not found")
     # Only serve the existing image mime whitelist (reusing the asset service's
     # allowlist / extension map, never a fresh path join). Assets are only ever

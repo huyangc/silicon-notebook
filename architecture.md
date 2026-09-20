@@ -257,6 +257,12 @@ source 状态沿 `queued → parsing → parsed → extracting → extracted` �
 HTTP 的 `global_ask_routes.py` 与 MCP 的 `global_ask.py` 共用此服务。`GlobalAskStore` 在
 SQLite/PostgreSQL bundle 中分别绑定参数占位符，持有用户所有的全局会话和任务；不扩张
 单库 facade 或参考库挂载。窄批量查询复核读权并冻结来源，受理锁仅保护容量和建行。
+全局会话的公开分享复用**同一条**匿名链路而不是另开一条：token 的能力命名空间前缀
+（`gshr-` / `cshr-`，唯一定义点 `app/core/capability_tokens.py`）在
+`ask_routes._public_conversation_or_404` 分流，投影仍是 `conversation_public_view` 那份白名单，
+因此 `/c/{token}` 只有一个公开页；两条链路唯一不同的是授权——全局会话不在任何笔记本里，
+`GlobalAskService.public_conversation` 每次打开都按分享者身份复核该快照被引各库的读权，
+并把这份已复核的库集合交给匿名图片端点做资产归属校验。
 全局问答**不再有独立的检索链路与合成适配层**：`GlobalAskService._execute` 经
 `app/services/global_run.py::global_ask_run(...)` 装好四件事之后，直接调 `AskService.ask`，由同一套
 引擎完成检索、提示词、锚点解析、模型服务与答案重试。那四件事只能同时成立、也只在这一个管理器里
