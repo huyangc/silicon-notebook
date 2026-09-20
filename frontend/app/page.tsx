@@ -1093,7 +1093,9 @@ export default function Home() {
   const analyticsLoadScopeRef = useRef(new AnalyticsLoadScope());
   const modelStatusRequestRef = useRef(0);
   const modelTestCoordinatorRef = useRef(new ModelTestCoordinator());
-  const pending = usePendingActions(Boolean(authChecked && getToken()));
+  // A restored migration token can complete identity binding but cannot read
+  // business data. Subscribe only after /me has established a business user.
+  const pending = usePendingActions(Boolean(authChecked && currentUser));
   const latestScaleIndexDoneEventKey = latestScaleIndexDoneKey(
     pending.doneItems,
     currentNotebookId,
@@ -1669,7 +1671,7 @@ export default function Home() {
   // 浏览器返回/前进:hash 是唯一的真相源,读它切视图。一律传 "none"——
   // 浏览器已经改过 URL,任何再写都会污染历史栈。
   useEffect(() => {
-    if (!authChecked) return;
+    if (!authChecked || !currentUser) return;
     function onPopState() {
       const hash = window.location.hash;
       const groupTarget = parseGroupsHash(hash);

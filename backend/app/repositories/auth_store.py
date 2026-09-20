@@ -200,6 +200,26 @@ class AuthStore:
     def _validate_transaction(self, db, payload, policy):
         if payload["policy_revision"] != policy["revision"] or payload["config_generation"] != policy["config_generation"] or policy["mode"] == "local":
             raise AuthStoreError("stale_transaction")
+        if payload["purpose"] == "login" and "identity" in payload:
+            # A staged provider result cannot regain authority after a password
+            # reset or identity reassignment. Keep this separate from bind's
+            # target_user_id, which requires proof of the original local session.
+            if "identity_user_id" not in payload or "identity_auth_revision" not in payload:
+                raise AuthStoreError("stale_transaction")
+            if payload["identity_user_id"] is None:
+                raise AuthStoreError("identity_not_linked")
+            values = payload["identity"]
+            mapping = self._execute(
+                db,
+                "SELECT user_id,status FROM external_identities "
+                "WHERE provider_namespace=? AND subject=?",
+                (values["provider_namespace"],values["subject"]),
+            ).fetchone()
+            user = self._user(db,payload["identity_user_id"])
+            if not mapping or mapping["user_id"] != payload["identity_user_id"] or not user or user["auth_revision"] != payload["identity_auth_revision"]:
+                raise AuthStoreError("stale_transaction")
+            if mapping["status"] != "active" or user["status"] != "active":
+                raise AuthStoreError("account_inactive")
         if payload["purpose"] in ("enroll","recover","replace"):
             actor = self._user(db,payload["grant_actor_id"])
             if not actor or actor["role"] != "admin" or actor["status"] != "active" or actor["auth_revision"] != payload["grant_actor_revision"]:
@@ -307,6 +327,16 @@ class AuthStore:
                 raise AuthStoreError("wrong_provider")
             if payload["purpose"] in ("enroll","recover","replace") and values["subject"] != payload["subject"]:
                 raise AuthStoreError("grant_identity_mismatch")
+            if payload["purpose"] == "login":
+                mapping = self._execute(
+                    db,
+                    "SELECT user_id FROM external_identities "
+                    "WHERE provider_namespace=? AND subject=?",
+                    (values["provider_namespace"],values["subject"]),
+                ).fetchone()
+                user = self._user(db,mapping["user_id"]) if mapping else None
+                payload["identity_user_id"] = user["id"] if user else None
+                payload["identity_auth_revision"] = user["auth_revision"] if user else None
             payload.pop("pkce_verifier",None)
             payload["identity"] = values
             payload["authenticated_at"] = int(time.time())

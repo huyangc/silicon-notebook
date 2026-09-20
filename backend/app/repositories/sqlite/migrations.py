@@ -4187,49 +4187,78 @@ class SqliteMigrator:
 
     def _migration_78(self) -> None:
         """Separate local credentials from stable external identities."""
-        with self._connect() as db:
+        with self.database.write(operation="sqlite.migration.78") as db:
+            self.database.begin_immediate(db)
             self.add_column_if_missing(db, "users", "local_login_name", "TEXT")
             self.add_column_if_missing(db, "users", "auth_revision", "INTEGER NOT NULL DEFAULT 0")
-            db.execute("UPDATE users SET local_login_name=username WHERE username<>''")
-            db.execute("CREATE UNIQUE INDEX idx_users_local_login_name ON users(local_login_name) WHERE local_login_name IS NOT NULL")
+            db.execute(
+                "UPDATE users SET local_login_name=username "
+                "WHERE username<>'' AND local_login_name IS NULL"
+            )
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_local_login_name "
+                "ON users(local_login_name) WHERE local_login_name IS NOT NULL"
+            )
             self.add_column_if_missing(db, "auth_sessions", "auth_source", "TEXT NOT NULL DEFAULT 'local'")
             self.add_column_if_missing(db, "auth_sessions", "absolute_expires_at", "TEXT")
             self.add_column_if_missing(db, "auth_sessions", "provider_namespace", "TEXT NOT NULL DEFAULT ''")
             self.add_column_if_missing(db, "auth_sessions", "external_subject", "TEXT NOT NULL DEFAULT ''")
-            db.executescript("""
-                CREATE TABLE auth_policy (
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS auth_policy (
                  id INTEGER PRIMARY KEY CHECK(id=1),
                  mode TEXT NOT NULL DEFAULT 'local' CHECK(mode IN ('local','dual','binding_required','sso_only','retired')),
                  revision INTEGER NOT NULL DEFAULT 0,
                  provider_id TEXT NOT NULL DEFAULT '', provider_namespace TEXT NOT NULL DEFAULT '',
                  config_generation TEXT NOT NULL DEFAULT '', plugin_id TEXT NOT NULL DEFAULT '', retired_at TEXT, updated_by TEXT NOT NULL DEFAULT ''
-                );
-                CREATE TABLE external_identities (
+                )
+            """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS external_identities (
                  provider_namespace TEXT NOT NULL, subject TEXT NOT NULL,
                  user_id TEXT NOT NULL REFERENCES users(id), status TEXT NOT NULL DEFAULT 'active',
                  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_login_at TEXT,
                  PRIMARY KEY(provider_namespace,subject)
-                );
-                CREATE UNIQUE INDEX idx_external_identities_active_user
-                 ON external_identities(user_id,provider_namespace) WHERE status='active';
-                CREATE TABLE auth_transactions (
+                )
+            """)
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "idx_external_identities_active_user\n"
+                "                 ON external_identities(user_id,provider_namespace) "
+                "WHERE status='active'"
+            )
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS auth_transactions (
                  token_digest TEXT PRIMARY KEY, purpose TEXT NOT NULL, browser_digest TEXT NOT NULL,
                  payload TEXT NOT NULL, expires_at BIGINT NOT NULL
-                );
-                CREATE INDEX idx_auth_transactions_expiry ON auth_transactions(expires_at);
-                CREATE TABLE auth_policy_audit (
+                )
+            """)
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_auth_transactions_expiry "
+                "ON auth_transactions(expires_at)"
+            )
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS auth_policy_audit (
                  id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, previous_mode TEXT NOT NULL,
                  mode TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL
-                );
-                CREATE TABLE auth_identity_audit (
+                )
+            """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS auth_identity_audit (
                  id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, target_user_id TEXT NOT NULL,
                  action TEXT NOT NULL, provider_namespace TEXT NOT NULL,
                  subject TEXT NOT NULL, grant_reference TEXT NOT NULL DEFAULT '',
                  created_at TEXT NOT NULL
-                );
-                CREATE INDEX idx_auth_identity_audit_created
-                 ON auth_identity_audit(created_at,id);
+                )
             """)
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_auth_identity_audit_created\n"
+                "                 ON auth_identity_audit(created_at,id)"
+            )
+            # Keep the complete v78 schema, its identity backfill and the
+            # version stamp in one SQLite transaction.  IF NOT EXISTS plus the
+            # NULL-only backfill above also lets this transaction safely adopt
+            # schema objects committed by the former non-atomic implementation.
+            db.execute("PRAGMA user_version = 78")
 
     def _seed(self) -> None:
         now = _now()
@@ -4338,10 +4367,11 @@ class SqliteMigrator:
         applied: list[int] = []
         for version in range(current + 1, SCHEMA_VERSION + 1):
             getattr(self, f"_migration_{version}")()
-            # v25 stamps itself inside the same BEGIN IMMEDIATE transaction as
-            # its irreversible credential/status scrub. Preserve the existing
-            # migration/stamp behavior byte-for-byte for v1-v24.
-            if version != 25:
+            # v25 and v78 stamp themselves inside the same BEGIN IMMEDIATE
+            # transaction as their irreversible data/schema changes. Preserve
+            # the existing migration/stamp behavior byte-for-byte for all
+            # other versions.
+            if version not in {25, 78}:
                 with self._connect() as db:
                     db.execute(f"PRAGMA user_version = {version}")
             applied.append(version)
