@@ -182,6 +182,12 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "原始异常不转换为可展示错误。test_global_ask.py 覆盖 HTTP 错误标记"
         "及后台原始异常不泄漏。"
     ),
+    "app/api/global_ask_routes.py::_share_call": (
+        "与同文件 ::_call 同一形状:唯一的动态实参是 GlobalAskError.message,它仅来自 "
+        "global_ask.py 的固定中文业务错误(分享时的读权复核走既有的权限文案);同函数其余"
+        "两条 409 是中文字面量,404 走 HTTPException 而非 user_error。"
+        "test_global_ask_share_api.py 覆盖真实响应。"
+    ),
     "app/api/ask_routes.py::_plugin_engine_http_error": (
         "detail 是同函数内两个中文字面量的三元选择(「扩展引擎返回了无法核验的引用」/"
         "「扩展引擎暂时无法完成回答,请重试」),按稳定错误码 exc.code 分类,异常原文"
