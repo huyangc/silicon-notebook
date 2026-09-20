@@ -163,6 +163,15 @@ OBJECT_SCHEMA_SEMANTIC_COLUMNS = (
 
 # Owner-scoped records span notebooks, so notebook selection cannot classify them.
 # Their non-PK unique constraints require explicit collision handling, not OR IGNORE.
+# v77 全局会话公开分享: global_ask_conversations 新增 share_token/shared_through_at/
+# shared_through_id 三列, 与上面 conversations 那三列同一裁决——随行走, 本脚本不做
+# 专门的 token 冲突检测或清空。`_merge_global_ask` 走 `SELECT *` 逐列搬运, 所以它们
+# 自动随会话行一起进入合并库, 不需要在这里新增分类或投影。
+# ⚠ 不要"顺手"把这三列清空: 那会让副库里每一条已经发出去的全局分享链接在合并后
+#   静默 404, 而合并的语义是把两个部署调和成一个、不是撤销其中一侧的用户数据。
+#   链接本身不是越权通道——公开读取每次都实时复核分享者对快照内被引各库的读权,
+#   合并后 ACL 变严即自动失效; token 冲突概率由 256 位随机凭据兜底, 真撞上会被
+#   share_token 的部分唯一索引硬失败, 不会静默合并成一条。
 GLOBAL_ASK_TABLES = ("global_ask_conversations", "global_ask_jobs")
 
 # 外部内容 FTS —— 导入后 rebuild

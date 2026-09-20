@@ -197,7 +197,19 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # v75 adds notebook title ownership and metadata publication generations,
 # paired with PostgreSQL 0055_notebook_metadata.sql. Legacy non-placeholder
 # titles remain manual because their provenance is ambiguous.
-SCHEMA_VERSION = 76
+# v76 adds the user-owned global Ask conversations and detached jobs, paired
+# with PostgreSQL 0056_global_ask.sql.
+# v77 adds share_token / shared_through_at / shared_through_id (all nullable
+# TEXT) plus the partial unique index idx_global_conversations_share_token to
+# global_ask_conversations, paired with PostgreSQL
+# 0057_global_ask_share.sql -- the same three-column public-share shape v52
+# put on ``conversations``, repeated because a global session belongs to no
+# notebook and cannot live in that table (its notebook_id is NOT NULL with a
+# foreign key). One new replicated unique surface (NULL park on share_token,
+# same shape as idx_conversations_share_token); no table, FK or
+# existing-column change, and no backfill -- every pre-existing row is simply
+# unshared.
+SCHEMA_VERSION = 77
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3964,6 +3976,43 @@ class SqliteMigrator:
                 CREATE INDEX IF NOT EXISTS idx_global_jobs_conversation
                     ON global_ask_jobs(conversation_id, created_at, id);
             """)
+
+    def _migration_77(self) -> None:
+        """Public share tokens + a read watermark for GLOBAL conversations.
+
+        The same three columns v52 put on ``conversations``, repeated on
+        ``global_ask_conversations`` because a global session belongs to no
+        notebook and therefore cannot live in that table at all
+        (``conversations.notebook_id`` is NOT NULL with a foreign key into
+        notebooks). Read ``_migration_52`` for the full design rationale --
+        token on the row so a deleted session takes its public link with it,
+        partial unique index so unshared rows cost nothing and NULLs never
+        collide, ``shared_through_at`` a literal timestamp value rather than a
+        reference so the boundary survives the deletion of the job it was
+        captured from, ``shared_through_id`` a denormalized snapshot of that
+        job's id.
+
+        The canonical read order for this table's jobs is ``(created_at, id)``
+        (every existing read in ``GlobalAskStore`` sorts by it), so the
+        watermark keyset tie-breaks on the job id and needs no rowid lookup --
+        unlike ``answers``, whose canonical order tie-breaks on ``rowid``.
+
+        Must go through ``add_column_if_missing``: SQLite has no
+        ``ADD COLUMN IF NOT EXISTS``, and the "already-deployed database
+        backfill" test family rolls ``user_version`` back and re-runs the whole
+        ladder over a table that already carries these columns.
+        """
+        with self._connect() as db:
+            for column in ("share_token", "shared_through_at", "shared_through_id"):
+                self.add_column_if_missing(
+                    db, "global_ask_conversations", column, "TEXT DEFAULT NULL"
+                )
+            db.executescript(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_global_conversations_share_token
+                  ON global_ask_conversations(share_token) WHERE share_token IS NOT NULL;
+                """
+            )
 
     def _reap_stale_derived_generations(self) -> None:
         """批 3·W2 启动恢复(sqlite 化身):先全局释放滞留在飞认领(启动这

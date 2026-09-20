@@ -1393,6 +1393,11 @@
         "type": "index"
       },
       {
+        "name": "idx_global_conversations_share_token",
+        "sql_sha256": "2db3be0c7569caa97b15a5afa5162c672751d023a443cdf6e87cfb1c8a3c6b62",
+        "type": "index"
+      },
+      {
         "name": "idx_global_jobs_conversation",
         "sql_sha256": "b8da6bb804b68c26c5b38505c107f3c8717f0dac9f51115cf2f3f508bd7fc8e8",
         "type": "index"
@@ -2059,7 +2064,7 @@
       },
       {
         "name": "global_ask_conversations",
-        "sql_sha256": "50fe149be163268e436be7ee04be9672a7e8dc18bf05ecd62fb6ae4e7390284b",
+        "sql_sha256": "90365a46d3541207f4c2f58850edee9d7608c12e589e145e40817ddd9421c9a1",
         "type": "table"
       },
       {
@@ -2448,6 +2453,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 76
+    "user_version": 77
   }
 }

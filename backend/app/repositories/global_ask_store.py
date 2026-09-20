@@ -3,8 +3,23 @@ from __future__ import annotations
 
 import json
 
+from app.core.capability_tokens import new_capability_token
+# Safety ceiling on how many turns one public page renders; the same name the
+# notebook-scoped public read caps its fetch by. Pure leaf module, no cycle.
+from app.domain.conversation_public_view import MAX_TURNS
 from app.models.ask import CONVERSATION_TITLE_MAX_CHARS
 from app.models.global_ask import GlobalAskJob, GlobalConversationSummary
+from app.repositories.ports import (
+    ConversationHasNoShareableAnswer,
+    ConversationShareWatermarkStale,
+)
+
+# The canonical order of one global conversation's jobs, oldest first, and its
+# DESC twin. Every existing read of ``global_ask_jobs`` already sorts by this
+# pair, so the share watermark's keyset is written against the SAME tuple and
+# cannot drift from the order the public page renders in.
+GLOBAL_JOBS_ORDER_ASC = "ORDER BY created_at ASC,id ASC"
+GLOBAL_JOBS_ORDER_DESC = "ORDER BY created_at DESC,id DESC"
 
 
 class GlobalAskStore:
@@ -217,3 +232,242 @@ class GlobalAskStore:
     def recover(self):
         with self.database.write() as db:
             db.execute("UPDATE global_ask_jobs SET status='interrupted' WHERE status='running'")
+
+    # ------------------------------------------------------------------
+    # public conversation sharing -- the global twin of
+    # ask_state_store.share_conversation / unshare_conversation /
+    # conversation_share_state / public_conversation_by_token. Read those
+    # docstrings for the full design rationale; every decision recorded there
+    # (token idempotent but watermark advance-only, expected_through_id pinning
+    # the disclosed boundary, atomic refusal of a zero-answer conversation,
+    # keyset rather than timestamp-interval snapshot) holds here verbatim. The
+    # differences are mechanical: the shareable unit is a DONE job rather than
+    # an answer row, the keyset tie-break is the job id rather than
+    # rowid/ordinal, and ownership is a ``user_id`` column on the row instead
+    # of an api-layer ``created_by`` gate -- a global conversation belongs to
+    # exactly one user and to no notebook, so every method here scopes by it
+    # and a non-owner is indistinguishable from a missing row.
+    # ------------------------------------------------------------------
+
+    @property
+    def _row_lock(self):
+        """``FOR UPDATE`` on PostgreSQL, nothing on SQLite.
+
+        It serializes concurrent shares of the SAME conversation so the
+        watermark can only advance: under READ COMMITTED two shares could each
+        read the latest done job before either UPDATE, and the stale one would
+        clobber a watermark the other already returned live. SQLite needs no
+        lock -- ``database.write()`` there is a process-level write lock that
+        already serializes these.
+        """
+        return " FOR UPDATE" if self.marker == "%s" else ""
+
+    def share_conversation(self, conversation_id, user_id, *, expected_through_id=None):
+        """Issue (or reuse) this conversation's public token and pin its read
+        watermark to one completed job.
+
+        Idempotent on the TOKEN only: re-sharing keeps the existing link so a
+        URL already handed out never starts 404ing. The WATERMARK always
+        advances -- "share" and "update to latest" are the same call.
+
+        ``expected_through_id`` is a JOB id (the newest completed job the client
+        saw in the turns it computed its disclosure from). When it resolves to a
+        done job of this conversation the watermark is pinned to exactly that
+        job, even if a newer one has since finished. When it does not resolve --
+        deleted, still running, failed, cancelled, or another conversation's --
+        we raise ``ConversationShareWatermarkStale`` rather than silently
+        publishing "latest", which would bypass the user's consent.
+
+        Raises ``KeyError`` when the conversation does not exist OR is not this
+        user's, and ``ConversationHasNoShareableAnswer`` when it holds no
+        completed job to bound the snapshot -- enforced inside the same write
+        transaction, so a never-answered conversation never has a token minted.
+        """
+        candidate = new_capability_token("gshr")
+        expected = str(expected_through_id or "").strip()
+        with self.database.write() as db:
+            conv = db.execute(self._sql(
+                "SELECT id, shared_through_id FROM global_ask_conversations "
+                "WHERE id=? AND user_id=?" + self._row_lock
+            ), (conversation_id, user_id)).fetchone()
+            if conv is None:
+                raise KeyError(conversation_id)
+            through_at, through_id = self._share_boundary(
+                db, conversation_id, user_id, expected
+            )
+            if through_id is None:
+                raise ConversationHasNoShareableAnswer(conversation_id)
+            current_id = conv["shared_through_id"]
+            if current_id and current_id != through_id:
+                # Advance-only: reject a request whose boundary sorts BEFORE the
+                # published one, evaluated in SQL over both job rows with the
+                # SAME (created_at, id) keyset the public snapshot uses. An equal
+                # boundary short-circuits above as an idempotent no-op; a current
+                # boundary whose job was deleted resolves nothing here and
+                # advances, matching the public read's deleted-watermark
+                # fallback.
+                regresses = db.execute(self._sql(
+                    "SELECT 1 FROM global_ask_jobs r, global_ask_jobs c "
+                    "WHERE r.id=? AND c.id=? AND r.conversation_id=? "
+                    "AND c.conversation_id=? AND (r.created_at < c.created_at "
+                    "OR (r.created_at = c.created_at AND r.id < c.id))"
+                ), (through_id, current_id, conversation_id, conversation_id)).fetchone()
+                if regresses is not None:
+                    raise ConversationShareWatermarkStale(expected or through_id)
+            issued = db.execute(self._sql(
+                "UPDATE global_ask_conversations "
+                "SET share_token=COALESCE(share_token,?), shared_through_at=?, "
+                "shared_through_id=? WHERE id=? AND user_id=? "
+                "RETURNING share_token, shared_through_at, shared_through_id"
+            ), (candidate, through_at, through_id, conversation_id, user_id)).fetchone()
+        return self._share_state(issued)
+
+    def _share_boundary(self, db, conversation_id, user_id, expected):
+        """Resolve ``(created_at, id)`` of the job the watermark pins to.
+
+        Only a ``done`` job can bound a snapshot: a running/failed/cancelled one
+        has nothing publishable, so it must not resolve even when its id is
+        passed explicitly.
+        """
+        if expected:
+            boundary = db.execute(self._sql(
+                "SELECT id, created_at FROM global_ask_jobs "
+                "WHERE id=? AND conversation_id=? AND user_id=? AND status='done'"
+            ), (expected, conversation_id, user_id)).fetchone()
+            if boundary is None:
+                raise ConversationShareWatermarkStale(expected)
+            return boundary["created_at"], boundary["id"]
+        latest = db.execute(self._sql(
+            "SELECT id, created_at FROM global_ask_jobs WHERE conversation_id=? "
+            "AND user_id=? AND status='done' " + GLOBAL_JOBS_ORDER_DESC + " LIMIT 1"
+        ), (conversation_id, user_id)).fetchone()
+        if latest is None:
+            return None, None
+        return latest["created_at"], latest["id"]
+
+    @staticmethod
+    def _share_state(row):
+        return {
+            "share_token": str(row["share_token"] or ""),
+            "shared_through_at": str(row["shared_through_at"] or ""),
+            "shared_through_id": str(row["shared_through_id"] or ""),
+        }
+
+    def unshare_conversation(self, conversation_id, user_id):
+        """Revoke the public link; idempotent. The next public request 404s,
+        same as an unknown token. A later share mints a NEW token rather than
+        resurrecting the revoked one (the COALESCE above sees NULL)."""
+        with self.database.write() as db:
+            db.execute(self._sql(
+                "UPDATE global_ask_conversations SET share_token=NULL, "
+                "shared_through_at=NULL, shared_through_id=NULL "
+                "WHERE id=? AND user_id=?"
+            ), (conversation_id, user_id))
+
+    def conversation_share_state(self, conversation_id, user_id):
+        """The issued token + watermark, for the owner's read-back only.
+
+        Never fold this into ``conversation``'s projection: that one is the
+        ordinary session read, and ``share_token`` is an anonymous access grant.
+        Raises ``KeyError`` when the conversation is missing or not this user's.
+        """
+        with self.database.connect() as db:
+            row = db.execute(self._sql(
+                "SELECT share_token, shared_through_at, shared_through_id "
+                "FROM global_ask_conversations WHERE id=? AND user_id=?"
+            ), (conversation_id, user_id)).fetchone()
+        if row is None:
+            raise KeyError(conversation_id)
+        return self._share_state(row)
+
+    def public_conversation_by_token(self, token):
+        """Resolve one shared global conversation by token alone -- the only
+        session-free read here, so it takes nothing but the token (any other
+        identifier would let it run as whichever user the ambient context
+        happens to default to).
+
+        Returns ``None`` for an unknown/revoked token, and also for a row whose
+        watermark is NULL: ``share_conversation`` always writes both together,
+        so NULL means the row was never shared through the normal path -- fail
+        closed rather than serve an ungated conversation.
+
+        Jobs are bounded to a clean prefix of the canonical ``(created_at, id)``
+        order, as a KEYSET on the watermark job's own tuple rather than a
+        ``created_at <=`` interval: two jobs can share an instant, and the
+        interval would also pull in the one that sorts AFTER the watermark. Only
+        ``done`` jobs are eligible, so a running/failed/cancelled turn is
+        excluded by construction. When ``shared_through_id`` no longer resolves
+        (that job was deleted after the share) the keyset has no anchor and we
+        fall back to the plain interval -- slightly less precise on a
+        same-instant tie, but an already-shared link must not fail closed.
+
+        ``user_id`` comes back as the sharer's identity for the caller's live
+        authorization re-check; it is NOT part of any public disclosure surface
+        and must be dropped before anything crosses to an anonymous reader. Job
+        payloads are handed back exactly as stored -- the public whitelist
+        projection belongs to the service layer, and re-validating through a
+        model here would quietly drop the legacy ``response``-shaped payloads.
+        """
+        clean = str(token or "").strip()
+        if not clean:
+            return None
+        with self.database.connect() as db:
+            conv = db.execute(self._sql(
+                "SELECT id, user_id, title, created_at, shared_through_at, "
+                "shared_through_id FROM global_ask_conversations WHERE share_token=?"
+            ), (clean,)).fetchone()
+            if conv is None or not conv["shared_through_at"]:
+                return None
+            rows = self._public_jobs(db, conv)
+        return {
+            "id": conv["id"],
+            "user_id": conv["user_id"],
+            "title": conv["title"] or "",
+            "created_at": conv["created_at"],
+            "shared_through_at": conv["shared_through_at"],
+            "shared_through_id": conv["shared_through_id"] or "",
+            "jobs": [
+                {
+                    "job_id": row["id"],
+                    "payload": self._payload(row["payload_json"]),
+                    "created_at": row["created_at"],
+                }
+                for row in rows
+            ],
+        }
+
+    def _public_jobs(self, db, conv):
+        """The watermark-bounded prefix of this conversation's done jobs.
+
+        ``LIMIT MAX_TURNS + 1`` (cap + 1) is applied AFTER the keyset predicate
+        and the canonical ORDER BY: it bounds the fetch to exactly what the
+        projection renders plus the one extra row it needs to disclose
+        truncation. Without it a pathological conversation makes every anonymous
+        page read deserialize every payload it ever produced.
+        """
+        watermark = None
+        if conv["shared_through_id"]:
+            watermark = db.execute(self._sql(
+                "SELECT id, created_at FROM global_ask_jobs "
+                "WHERE id=? AND conversation_id=? AND status='done'"
+            ), (conv["shared_through_id"], conv["id"])).fetchone()
+        if watermark is not None:
+            return db.execute(self._sql(
+                "SELECT id, payload_json, created_at FROM global_ask_jobs "
+                "WHERE conversation_id=? AND status='done' AND ("
+                "created_at < ? OR (created_at = ? AND id <= ?)) "
+                + GLOBAL_JOBS_ORDER_ASC + " LIMIT ?"
+            ), (conv["id"], watermark["created_at"], watermark["created_at"],
+                watermark["id"], MAX_TURNS + 1)).fetchall()
+        return db.execute(self._sql(
+            "SELECT id, payload_json, created_at FROM global_ask_jobs "
+            "WHERE conversation_id=? AND status='done' AND created_at <= ? "
+            + GLOBAL_JOBS_ORDER_ASC + " LIMIT ?"
+        ), (conv["id"], conv["shared_through_at"], MAX_TURNS + 1)).fetchall()
+
+    @staticmethod
+    def _payload(raw):
+        try:
+            return json.loads(raw or "{}")
+        except (TypeError, ValueError):
+            return {}

@@ -52,3 +52,23 @@ class GlobalAskStorePort(Protocol):
     def rename(self, conversation_id: str, user_id: str, title: str) -> bool: ...
     def delete(self, conversation_id: str, user_id: str) -> bool: ...
     def recover(self) -> None: ...
+
+    # Public sharing. The first three are owner-scoped and raise ``KeyError``
+    # when the conversation is missing or belongs to someone else -- a
+    # non-owner must be indistinguishable from a missing row. ``share_
+    # conversation`` additionally raises ``ConversationShareWatermarkStale``
+    # (``expected_through_id`` -- a JOB id -- no longer resolves to a done job
+    # of this conversation, or the boundary would regress an already-published
+    # watermark) and ``ConversationHasNoShareableAnswer`` (no completed job to
+    # bound the snapshot; refused atomically, so no token is minted). It returns
+    # ``{"share_token", "shared_through_at", "shared_through_id"}``, the same
+    # shape ``conversation_share_state`` reads back.
+    # ``public_conversation_by_token`` is the ONLY session-free read: it takes
+    # nothing but the token, returns ``None`` for unknown/revoked, and hands
+    # back the sharer's ``user_id`` for the caller's live authorization
+    # re-check plus the watermark-bounded done jobs with their payloads
+    # untouched -- the public whitelist projection is the service layer's job.
+    def share_conversation(self, conversation_id: str, user_id: str, *, expected_through_id: str | None = None) -> dict: ...
+    def conversation_share_state(self, conversation_id: str, user_id: str) -> dict: ...
+    def unshare_conversation(self, conversation_id: str, user_id: str) -> None: ...
+    def public_conversation_by_token(self, token: str) -> dict | None: ...
