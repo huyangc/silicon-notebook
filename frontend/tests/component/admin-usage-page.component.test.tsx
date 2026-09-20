@@ -40,6 +40,7 @@ vi.mock("../../app/admin/usage/AnalysisIssuesSheet.tsx", () => ({
 }));
 
 import AdminUsagePage from "../../app/admin/usage/page";
+import { humanizedError } from "../../app/errors";
 
 beforeEach(() => {
   window.history.replaceState({}, "", "/admin/usage");
@@ -320,6 +321,24 @@ test("管理员行的文档上限显示不限且不可编辑", async () => {
   const builtin = within(builtinRow as HTMLTableRowElement);
   expect(builtin.getByText("不限")).toBeInTheDocument();
   expect(builtin.queryByRole("button", { name: "编辑" })).toBeNull();
+});
+
+test.each([humanizedError("认证服务暂不可用", 503), new TypeError("offline")])("认证能力读取失败时保留用户总览但不开放密码操作: %s", async (error) => {
+  primeCommonMocks();
+  mocks.fetchAuthCapabilities.mockRejectedValue(error);
+  render(<AdminUsagePage />);
+  const target = await targetRow();
+  expect(target.getByRole("button", { name: "设为管理员" })).toBeInTheDocument();
+  expect(target.queryByRole("button", { name: "重置密码" })).toBeNull();
+  expect(screen.queryByRole("columnheader", { name: "密码" })).toBeNull();
+});
+
+test("旧版认证能力端点不存在时保留本地密码管理", async () => {
+  primeCommonMocks();
+  mocks.fetchAuthCapabilities.mockRejectedValue(humanizedError("未找到", 404));
+  render(<AdminUsagePage />);
+  const target = await targetRow();
+  expect(target.getByRole("button", { name: "重置密码" })).toBeInTheDocument();
 });
 
 test("管理员可为普通用户重置密码;内置管理员与本人行受保护", async () => {

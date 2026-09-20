@@ -7,7 +7,7 @@ import {
 import { fetchAuthCapabilities, fetchMe, LOCAL_AUTH_CAPABILITIES } from "../../auth.ts";
 import { clampPopoverLeft } from "../../effort-picker-logic";
 import { PageHeader } from "../../components/PageHeader.tsx";
-import { toUserMessage } from "../../errors.ts";
+import { httpErrorStatus, toUserMessage } from "../../errors.ts";
 import { Pagination } from "../../Pagination";
 import { useClientPagination } from "../../use-client-pagination.ts";
 import {
@@ -441,7 +441,7 @@ export default function AdminUsagePage() {
   const [nbCache, setNbCache] = useState<Record<string, NotebookCacheEntry>>({});
   const [onlineIds, setOnlineIds] = useState<Set<string>>(new Set());
   const [currentUserId, setCurrentUserId] = useState("");
-  const [localPasswordsAllowed, setLocalPasswordsAllowed] = useState(true);
+  const [localPasswordsAllowed, setLocalPasswordsAllowed] = useState(false);
   const [confirmingRole, setConfirmingRole] = useState<{ userId: string; role: AdminUserRole } | null>(null);
   const [rolePendingId, setRolePendingId] = useState("");
   const [uploadLimitDefault, setUploadLimitDefault] = useState<number | null>(null);
@@ -479,13 +479,13 @@ export default function AdminUsagePage() {
         const [rows, limitDefault, authCapabilities] = await Promise.all([
           fetchAdminUsers(),
           fetchUploadLimitDefault(),
-          fetchAuthCapabilities().catch(() => LOCAL_AUTH_CAPABILITIES),
+          fetchAuthCapabilities().catch((error) => httpErrorStatus(error) === 404 ? LOCAL_AUTH_CAPABILITIES : null),
         ]);
         setState({ kind: "ready", rows });
         setUploadLimitDefault(limitDefault);
         setDefaultInput(String(limitDefault));
         setOnlineIds(new Set(rows.filter((r) => r.is_online).map((r) => r.id)));
-        setLocalPasswordsAllowed(authCapabilities.mode === "local" || authCapabilities.mode === "dual");
+        setLocalPasswordsAllowed(authCapabilities?.mode === "local" || authCapabilities?.mode === "dual");
       } catch (e) {
         // 哨兵先判(分流到专用无权限视图),其余一律过人话层——此前这里直出
         // e.message,断网时页面上会写「加载失败:Failed to fetch」。
