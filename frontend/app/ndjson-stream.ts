@@ -32,3 +32,32 @@ export async function readNdjsonStream(
   buffer += decoder.decode();
   if (buffer.trim()) await consume(buffer.trim());
 }
+
+
+const PAINT_YIELD_FALLBACK_MS = 50;
+
+/**
+ * 两帧之间让浏览器画一次，轨迹才是一步一步出现而不是攒成一坨。
+ *
+ * ⚠ 必须带定时器兜底：后台标签页里浏览器**暂停** `requestAnimationFrame`，只等它的
+ * 读取循环会原地卡死——后端早已答完，页面却停在「启动检索」，直到用户切回来。笔记本
+ * 内问答的流曾经就是这样（只有 `requestTaskStream` 带了兜底）；三条 NDJSON 传输现在
+ * 共用这一份。
+ */
+export function yieldToPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+      resolve();
+      return;
+    }
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(fallback);
+      resolve();
+    };
+    const fallback = setTimeout(finish, PAINT_YIELD_FALLBACK_MS);
+    window.requestAnimationFrame(finish);
+  });
+}

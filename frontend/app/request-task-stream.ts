@@ -8,6 +8,7 @@ import {
   throwHumanizedHttpError,
 } from "./errors.ts";
 import { takeNdjsonLines } from "./ndjson.ts";
+import { yieldToPaint } from "./ndjson-stream.ts";
 
 type TaskStreamEvent<T> =
   | { event: "started"; stage: string; elapsed_ms: number }
@@ -20,29 +21,6 @@ export type TaskStreamCallbacks = {
   onHeartbeat?: (elapsedMs: number, stage: string) => void | Promise<void>;
   fallbackMessage?: string;
 };
-
-const PAINT_YIELD_FALLBACK_MS = 50;
-
-function yieldToPaint(): Promise<void> {
-  return new Promise((resolve) => {
-    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
-      resolve();
-      return;
-    }
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(fallback);
-      resolve();
-    };
-    // Browsers suspend requestAnimationFrame in background tabs.  A bounded
-    // timer keeps the network reader draining so a terminal frame can settle
-    // even while the page is hidden.
-    const fallback = setTimeout(finish, PAINT_YIELD_FALLBACK_MS);
-    window.requestAnimationFrame(finish);
-  });
-}
 
 /** Consume the shared request-local started/heartbeat/final NDJSON protocol. */
 export async function requestTaskStream<T>(

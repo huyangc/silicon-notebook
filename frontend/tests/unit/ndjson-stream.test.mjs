@@ -85,3 +85,18 @@ test("consume 抛出时整条读取 reject", async () => {
     { message: "feed error" },
   );
 });
+
+
+test("yieldToPaint still settles when requestAnimationFrame is suspended (a hidden tab)", async () => {
+  const { yieldToPaint } = await import("../../app/ndjson-stream.ts");
+  const previous = globalThis.window;
+  // 后台标签页：浏览器收下回调、却永远不调用它。
+  globalThis.window = { requestAnimationFrame: () => 1 };
+  try {
+    const started = Date.now();
+    await yieldToPaint();
+    assert.ok(Date.now() - started < 1000, "the bounded timer must release the reader");
+  } finally {
+    globalThis.window = previous;
+  }
+});
