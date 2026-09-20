@@ -91,7 +91,7 @@ jobs:
     env:
       # This cache has never contained a -march=native wheel. Do not fall
       # back to a generic pip cache from another build policy.
-      PIP_CACHE_DIR: ${{ runner.temp }}/pip-portable-v1
+      PIP_CACHE_DIR: ${{ github.workspace }}/.local/pip-portable-v1
     services:
       postgres:
         image: postgres:16
