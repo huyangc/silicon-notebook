@@ -10,54 +10,38 @@
 //      只能经 `StopGlyph`；
 //   2. 两个问答输入区的停止键都挂 `STOP_CONTROL_CLASS`、内容是 `StopGlyph`；
 //   3. 外观规则只有一份，旧的 `.send-button.stop` 不回潮。
+//
+// tsx 一侧的断言全部走 semantic-source 的语义解析（导入表、JSX 元素），不读裸文本；
+// 只有第 3 条读 globals.css——样式表没有可消费的 AST。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { appSourceModules, importsFrom, jsxElements } from "../../test-support/semantic-source.mjs";
+
 const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../app");
 const OWNER = "stop-control.tsx";
+const COMPOSERS = ["ask-composer.tsx", "ask/global-ask-workspace.tsx"];
 
-async function sourceFiles(dir) {
-  const found = [];
-  for (const entry of await readdir(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) found.push(...await sourceFiles(full));
-    else if (/\.tsx?$/.test(entry.name)) found.push(full);
-  }
-  return found;
-}
-
-/** 该文件从 lucide-react 导入的具名符号（按逗号切开后逐个精确比较，`CheckSquare`
- *  之类的长名字不会被误判成 `Square`）。 */
-function lucideImports(source) {
-  const names = [];
-  for (const match of source.matchAll(/import\s*\{([^}]*)\}\s*from\s*"lucide-react"/g)) {
-    for (const part of match[1].split(",")) {
-      const name = part.trim().split(/\s+as\s+/)[0];
-      if (name) names.push(name);
-    }
-  }
-  return names;
-}
+const importsSquare = (module) => importsFrom(module, "lucide-react").some((item) => item.imported === "Square");
 
 test("the stop square is imported in exactly one place", async () => {
-  const offenders = [];
-  for (const file of await sourceFiles(APP_DIR)) {
-    if (path.basename(file) === OWNER) continue;
-    if (lucideImports(await readFile(file, "utf8")).includes("Square")) offenders.push(path.relative(APP_DIR, file));
-  }
-  assert.deepEqual(offenders, [], "draw a stop mark with <StopGlyph /> from stop-control.tsx");
-  const owner = await readFile(path.join(APP_DIR, OWNER), "utf8");
-  assert.ok(lucideImports(owner).includes("Square"));
+  const modules = await appSourceModules();
+  const importers = modules.filter((item) => importsSquare(item.module)).map((item) => item.path);
+  assert.deepEqual(importers, [OWNER], "draw a stop mark with <StopGlyph /> from stop-control.tsx");
 });
 
 test("both ask composers take the shared class and glyph", async () => {
-  for (const relative of ["ask-composer.tsx", "ask/global-ask-workspace.tsx"]) {
-    const source = await readFile(path.join(APP_DIR, relative), "utf8");
-    assert.match(source, /STOP_CONTROL_CLASS/, `${relative} must use STOP_CONTROL_CLASS`);
-    assert.match(source, /<StopGlyph\b/, `${relative} must render <StopGlyph />`);
+  const modules = new Map((await appSourceModules()).map((item) => [item.path, item.module]));
+  for (const relative of COMPOSERS) {
+    const module = modules.get(relative);
+    assert.ok(module, `${relative} is missing`);
+    const specifier = relative.includes("/") ? "../stop-control" : "./stop-control";
+    const imported = importsFrom(module, specifier).map((item) => item.imported);
+    assert.deepEqual(imported, ["STOP_CONTROL_CLASS", "StopGlyph"], `${relative} must take both from stop-control`);
+    assert.ok(jsxElements(module, "StopGlyph").length > 0, `${relative} must render <StopGlyph />`);
   }
 });
 

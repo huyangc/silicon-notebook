@@ -37,6 +37,10 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // not a source-position query — a stylesheet cascade contract has no AST to consume,
   // and jsdom's getComputedStyle ignores specificity, so text is the only honest input.
   "tests/guards/effort-picker-style-guard.test.mjs",
+  // 同上,只读 globals.css:断言停止键的外观规则(`button.stop-control`)只声明一次、旧的
+  // `.send-button.stop` 不回潮。样式表没有可消费的 AST,文本是唯一诚实的输入;同文件对
+  // 各 tsx 的断言(导入表、JSX 元素)全部走 semantic-source 的语义解析。
+  "tests/guards/stop-control-guard.test.mjs",
   // 同上,只读 globals.css:断言提问导航锚在对话区那一行(grid-row),而不是对整个
   // 面板绝对居中。样式表没有可消费的 AST,jsdom 又不做 grid 布局(量出来的 rect
   // 恒为 0),文本是唯一诚实的输入。对 page.tsx 的断言仍走语义解析。
