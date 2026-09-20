@@ -4388,5 +4388,62 @@ MIGRATION_MANIFEST[(75, 76)] = {
 }
 
 
+# v77 (global conversation public share, parity with PostgreSQL
+# 0057_global_ask_share.sql): three nullable TEXT columns plus the partial
+# unique share-token index on global_ask_conversations. No new table, trigger
+# or view, and no backfill -- every pre-existing row is simply unshared.
+GLOBAL_ASK_SHARE_COLUMNS = {
+    "global_ask_conversations": {
+        "share_token": ("share_token", "TEXT", 0, "NULL", 0),
+        "shared_through_at": ("shared_through_at", "TEXT", 0, "NULL", 0),
+        "shared_through_id": ("shared_through_id", "TEXT", 0, "NULL", 0),
+    },
+}
+# global_ask_conversations ends with a plain column definition (no trailing
+# table constraint), so SQLite's ALTER TABLE ADD COLUMN splices each new
+# definition in place of the closing parenthesis -- the WISH_WALL_TABLES_V73
+# position, not the RETAINED_USER_ACTIVITY_TABLES_V74 one. Verified against a
+# real ALTERed table rather than assumed.
+GLOBAL_ASK_TABLES_V77 = {
+    **GLOBAL_ASK_TABLES,
+    "global_ask_conversations": GLOBAL_ASK_TABLES[
+        "global_ask_conversations"
+    ].replace(
+        "updated_at TEXT NOT NULL\n                )",
+        "updated_at TEXT NOT NULL\n                , share_token TEXT DEFAULT NULL,"
+        " shared_through_at TEXT DEFAULT NULL,"
+        " shared_through_id TEXT DEFAULT NULL)",
+    ),
+}
+GLOBAL_ASK_SHARE_INDEXES = {
+    "idx_global_conversations_share_token": "CREATE UNIQUE INDEX idx_global_conversations_share_token\n                  ON global_ask_conversations(share_token) WHERE share_token IS NOT NULL",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 77, *key[2:]): {
+        **manifest,
+        # Every (x, 76) entry creates both global-ask tables (the v76 block
+        # injected them into all of them), so the ALTERed text replaces the
+        # v76 text unconditionally here.
+        "tables": {**manifest["tables"], **GLOBAL_ASK_TABLES_V77},
+        # Consulted only for a database that already HAS the table (the
+        # (76, 77) hop); the per-column check walks `pre.tables`, so on an
+        # older lineage that creates it fresh this entry is simply unused.
+        "columns": {
+            **manifest["columns"],
+            "global_ask_conversations": {
+                **manifest["columns"].get("global_ask_conversations", {}),
+                **GLOBAL_ASK_SHARE_COLUMNS["global_ask_conversations"],
+            },
+        },
+        "indexes": {**manifest["indexes"], **GLOBAL_ASK_SHARE_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(76, 77)] = {
+    "tables": {}, "columns": GLOBAL_ASK_SHARE_COLUMNS,
+    "indexes": GLOBAL_ASK_SHARE_INDEXES, "triggers": {}, "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

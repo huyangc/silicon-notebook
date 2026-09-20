@@ -63,18 +63,28 @@ def test_assert_taxonomy_complete_flags_unclassified_command_catalog_tables(
     assert "catalog_candidates" in message
 
 
-def _global_ask_record(conn, conversation_id, job_id, *, owner="u", request="request", status="done"):
+def _global_ask_record(conn, conversation_id, job_id, *, owner="u", request="request",
+                       status="done", share_token=None):
     conn.execute(
         "INSERT OR IGNORE INTO users (id,email,display_name,role,status,username,created_at,updated_at) "
         "VALUES (?,?,'User','user','active',?,'now','now')",
         (owner, f"{owner}@example.invalid", owner),
     )
+    # Columns spelled out on purpose: v77 added the three share columns, and a
+    # positional INSERT would break again on the next added column.
     conn.execute(
-        "INSERT INTO global_ask_conversations VALUES (?,?,?,?,?,?,?)",
-        (conversation_id, owner, "Original title", '{"mode":"all","notebook_ids":[]}', "web", "now", "now"),
+        "INSERT INTO global_ask_conversations"
+        "(id,user_id,title,scope_json,submitted_via,created_at,updated_at,"
+        "share_token,shared_through_at,shared_through_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (conversation_id, owner, "Original title", '{"mode":"all","notebook_ids":[]}',
+         "web", "now", "now",
+         share_token, "now" if share_token else None, job_id if share_token else None),
     )
     conn.execute(
-        "INSERT INTO global_ask_jobs VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO global_ask_jobs"
+        "(id,conversation_id,user_id,client_request_id,request_json,status,payload_json,created_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
         (job_id, conversation_id, owner, request, '{"question":"original"}', status,
          json.dumps({"status": status, "question": "original", "response": {"answer": "preserved answer"}}), "now"),
     )
@@ -93,6 +103,7 @@ def test_global_ask_merge_preserves_history_or_rejects_identity_conflicts(tmp_pa
             right, "conv-main" if conflict == "owner" else "conv-import", "job-import",
             owner="other" if conflict in {"owner", "missing_owner"} else "u",
             request="main-key" if conflict == "request" else "import-key", status="running",
+            share_token="gshr-import",
         )
         right.close()
         left.execute("ATTACH DATABASE ? AS sec", (str(secondary),))
@@ -109,6 +120,13 @@ def test_global_ask_merge_preserves_history_or_rejects_identity_conflicts(tmp_pa
             imported = next(row for row in rows if row[0] == "job-import")
             assert imported[1] == "interrupted"
             assert json.loads(imported[2])["response"]["answer"] == "preserved answer"
+            # v77 share columns ride along with the conversation row, exactly
+            # like conversations.share_token does — the merge reconciles two
+            # deployments into one, it does not revoke one side's public links.
+            assert left.execute(
+                "SELECT share_token,shared_through_at,shared_through_id "
+                "FROM global_ask_conversations WHERE id='conv-import'"
+            ).fetchone() == ("gshr-import", "now", "job-import")
     finally:
         left.close()
         right.close()

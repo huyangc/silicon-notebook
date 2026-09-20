@@ -174,6 +174,12 @@ _UNIQUE_PREDICATES = {
         "status = 'running'",
         ("status", "=", "'running'"),
     ),
+    # Global conversation public share tokens (v77/0057): same NULL-park shape
+    # as idx_conversations_share_token above, on the global twin of that table.
+    "idx_global_conversations_share_token": (
+        "share_token IS NOT NULL",
+        ("share_token", "is", "not", "null"),
+    ),
 }
 
 

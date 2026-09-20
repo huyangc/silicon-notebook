@@ -314,7 +314,23 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # from. Allowed values are pinned by the API model
 # (app.models.ask.StoredSubmittedVia), not a CHECK, like ``wishes.status``.
 # No table, index, FK or unique-surface change.
+# PostgreSQL v56 / SQLite v76 add the two user-owned global Ask tables
+# (global_ask_conversations, global_ask_jobs) with an idempotent-request and a
+# single-running-job partial unique index; deleting a conversation cascades to
+# its jobs.
+# PostgreSQL v57 / SQLite v77 add share_token / shared_through_at /
+# shared_through_id (all nullable) plus the partial unique index
+# idx_global_conversations_share_token to global_ask_conversations -- the same
+# public-share shape PostgreSQL v30 / SQLite v52 put on ``conversations``,
+# repeated because a global session belongs to no notebook and
+# conversations.notebook_id is NOT NULL with a foreign key. One new replicated
+# unique surface (NULL park on share_token, same shape as
+# idx_conversations_share_token); no table, FK or existing-column change, and
+# no backfill. shared_through_at is text rather than timestamptz because every
+# timestamp in this table family is text on PostgreSQL too (0056) and the
+# watermark must compare against global_ask_jobs.created_at under the
+# canonical (created_at, id) order.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=76,
-    postgres_version=56,
+    sqlite_version=77,
+    postgres_version=57,
 )
