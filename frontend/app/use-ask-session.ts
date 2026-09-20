@@ -375,7 +375,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [sessionTitleDraft, setSessionTitleDraft] = useState("");
   const [feedbackSent, setFeedbackSent] = useState<Record<string, string>>({});
-  const [reconnectJob, setReconnectJob] = useState<{ jobId: string; seen: number } | null>(null);
+  const [reconnectJob, setReconnectJob] = useState<{ jobId: string; seen: number; askedAt: string } | null>(null);
   const [ownerSerial, setOwnerSerial] = useState(0);
   const [askModeProjectionSerial, setAskModeProjectionSerial] = useState(0);
 
@@ -1372,7 +1372,11 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       askJobIdRef.current = active.job_id;
       askNotebookIdRef.current = expected.notebookId;
       reconnectConversationIdRef.current = id;
-      setReconnectJob({ jobId: active.job_id, seen: (active.trace ?? []).length });
+      setReconnectJob({
+        jobId: active.job_id,
+        seen: (active.trace ?? []).length,
+        askedAt: active.asked_at,
+      });
     } else {
       setReconnectJob(null);
       setAsking(false);
@@ -1961,7 +1965,19 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       );
       // An answered turn is what replaces a stopped record — here, and only
       // here (a new Case A stop overwrites it instead; see the catch below).
-      setStoppedTurn(null);
+      // Scoped to THIS run's view: a run the user left behind may finish while
+      // another conversation or notebook is holding a stopped record of its
+      // own, and must not take that one with it. A record and a run match on
+      // the conversation they both started from; "no conversation yet" (null)
+      // identifies nothing — every new session starts there — so for those the
+      // run must still be the one on screen.
+      const answersVisibleView = ownsRun();
+      setStoppedTurn((current) => (
+        current && current.key === run.key && current.conversationId === conversationIdAtStart
+          && (answersVisibleView || conversationIdAtStart !== null)
+          ? null
+          : current
+      ));
       if (!ownsRun()) {
         // Retire the in-flight record BEFORE the history refresh below awaits:
         // a restore that resolves its detail in that window must see this run
@@ -2503,7 +2519,23 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
             }
             await loadSessionsFor(owner).catch(() => {});
           } else if (detail.status === "cancelled") {
-            effectsRef.current.notify("该问答已被取消");
+            // The one cancel style covers a re-attached run too (it has no
+            // stream, so its Stop never reaches startAskRun's catch): with
+            // process output on screen the turn stays as a stopped record,
+            // otherwise the question goes back to the input. The job detail
+            // carries both the question and the whole trace.
+            if (hasProcessOutput(detail.trace)) {
+              setStoppedTurn({
+                key: ownerKey(owner),
+                conversationId: reconnectConversationIdRef.current,
+                question: detail.question,
+                askedAt: reconnectJob.askedAt,
+                trace: [...(detail.trace ?? [])],
+              });
+            } else {
+              setQuestion(detail.question);
+              effectsRef.current.notify("该问答已被取消");
+            }
             await loadSessionsFor(owner).catch(() => {});
           } else {
             effectsRef.current.notify(detail.status === "interrupted"

@@ -5340,6 +5340,83 @@ test("a re-send that ends before any output brings the stopped record back", asy
   expect(value!.stoppedTurn?.question).toBe("fourth question");
 });
 
+test.each([
+  ["with process output keeps the turn", [START_STEP, RETRIEVAL_STEP], true],
+  ["with nothing shown hands the question back", [START_STEP], false],
+] as const)("a re-attached run stopped %s", async (_label, trace, keeps) => {
+  // After a reload the run has no stream, so its Stop never reaches the stream
+  // catch; the reconnect poll's cancelled branch must apply the same rule.
+  vi.useFakeTimers();
+  api.cancelAskJob.mockResolvedValue(undefined);
+  api.listConversations.mockResolvedValue([summary("conversation-reattached")]);
+  api.getConversation.mockResolvedValue(detail("conversation-reattached", "notebook-a", {
+    activeJob: {
+      job_id: "job-reattached",
+      question: "reattached question",
+      asked_at: "2026-08-22T00:00:00Z",
+      mode: "reasoning",
+      trace: [...trace],
+    },
+  }));
+  api.getAskJob.mockResolvedValue({
+    job_id: "job-reattached", status: "cancelled", mode: "reasoning",
+    question: "reattached question", trace: [...trace], answer_id: "", error: "",
+  });
+  render(<Harness />);
+  const owner = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.asking).toBe(true);
+
+  act(() => value!.abort());
+  await act(async () => { await vi.advanceTimersByTimeAsync(1600); });
+
+  expect(value!.asking).toBe(false);
+  expect(value!.pendingQuestion).toBe("");
+  if (keeps) {
+    expect(value!.question).toBe("");
+    expect(value!.stoppedTurn?.question).toBe("reattached question");
+    expect(value!.stoppedTurn?.trace.map((step) => step.summary)).toEqual(["启动检索", "命中 3 条"]);
+  } else {
+    expect(value!.question).toBe("reattached question");
+    expect(value!.stoppedTurn).toBeNull();
+  }
+});
+
+test("a run left behind in another conversation cannot clear this view's stopped record", async () => {
+  // Both conversations exist server-side: a list without A's would read as
+  // "A was deleted" and reset the view, which is not what is under test.
+  api.listConversations.mockResolvedValue([summary("conversation-stopped"), summary("conversation-background")]);
+  render(<Harness />);
+  beginOwnedNotebook();
+
+  // Question A keeps running in the conversation the user then leaves.
+  const background = deferred<AskResponse>();
+  api.runAskStream.mockImplementationOnce(async (
+    _notebookId: string, _payload: unknown, _onProgress: unknown, _signal?: AbortSignal,
+    onStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    await onStart!("job-background", "conversation-background");
+    return await background.promise;
+  });
+  let leftBehind!: Promise<void>;
+  act(() => { leftBehind = value!.submit("question left behind"); });
+  await act(async () => { await Promise.resolve(); });
+  act(() => value!.startNewSession(2));
+  expect(value!.asking).toBe(false);
+
+  // Question B is stopped after process output in the new session.
+  await stopAfter("stopped in the new session", [START_STEP, RETRIEVAL_STEP]);
+  expect(value!.stoppedTurn?.question).toBe("stopped in the new session");
+
+  // A finishes now. It answered ANOTHER conversation: B's record stays.
+  background.resolve(answer("conversation-background"));
+  await act(async () => { await leftBehind; });
+  expect(value!.stoppedTurn?.question).toBe("stopped in the new session");
+});
+
 test("a stopped turn never survives a new session or another conversation", async () => {
   api.listConversations.mockResolvedValue([summary("conversation-stopped")]);
   render(<Harness />);

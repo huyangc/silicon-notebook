@@ -124,6 +124,9 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
   const [traceSeeds, setTraceSeeds] = useState<Record<string, ReasoningTraceStep[]>>({});
   // 「提交请求还没回来就按了停止」：作业 id 此刻还不知道，等它一回来立刻停掉并丢弃。
   const stopRequested = useRef(false);
+  // 每次提交递增。替换失败后的那次自动重拉不 await，期间用户可能已经重试成功：
+  // 重拉回来时序号对不上，就说明它手里是旧快照，不许覆盖刚接受的新一轮。
+  const submitSerial = useRef(0);
   const [loading, setLoading] = useState(true);
   const [opening, setOpening] = useState(false);
   const [openFailed, setOpenFailed] = useState(false);
@@ -562,6 +565,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     setSubmitting(true);
     setError("");
     const ticket = owner.current;
+    const serial = ++submitSerial.current;
     // 引擎进幂等键：换引擎重问同一个问题是**另一次**提问，不该复用上一次的
     // request id 被后端当成重复提交挡掉。
     // 确认内容里**用户亲手改过的部分**也进幂等键：后端按「问题 / 范围 / 会话 / 引擎」
@@ -643,7 +647,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
         // 过、会话被删）。不重拉的话每次重发都带着同一个过期 id 再 409 一次。
         if (replaces && conversationId) {
           void getGlobalConversation(conversationId).then((detail) => {
-            if (!mounted.current || ticket !== owner.current) return;
+            if (!mounted.current || ticket !== owner.current || serial !== submitSerial.current) return;
             setTurns(detail.turns);
             setTurnOffset(detail.has_more ? detail.next_offset : null);
           }).catch(() => { /* 重拉失败不盖过上面那条提交错误。 */ });
