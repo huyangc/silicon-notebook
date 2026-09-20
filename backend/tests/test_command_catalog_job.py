@@ -177,6 +177,7 @@ from app.services.knowhow import api as knowhow_api
 from app.services.model_work import ModelProviderError
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
+from tests.sqlite_migration_testkit import rollback_v78
 from tests.model_testkit import bind_all_embedding_clients, bind_chat_client
 
 
@@ -701,6 +702,7 @@ def test_deployed_v38_database_gains_the_catalog_tables(tmp_path, monkeypatch):
     first = SQLiteRepository(Settings())
     first.close()
     with sqlite3.connect(tmp_path / "d.db") as db:
+        rollback_v78(db)
         db.executescript(
             "DROP TABLE IF EXISTS catalog_candidates;"
             "DROP TABLE IF EXISTS catalog_jobs;"

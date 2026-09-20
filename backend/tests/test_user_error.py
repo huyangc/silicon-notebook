@@ -177,6 +177,10 @@ def test_no_bare_chinese_4xx_http_exception():
 # 写清楚为什么它仍然满足「中文用户文案」这个契约、以及谁在覆盖它。
 # 键用「文件::函数名」而不是行号——行号会被无关改动推移。
 ALLOWED_DYNAMIC_USER_ERROR = {
+    "app/api/sso_routes.py::_error": (
+        "仅把固定认证错误码映射为函数内中文常量；未知码使用固定兜底，"
+        "外部认证响应和异常原文不会展示。test_sso_routes 覆盖错误响应与脱敏。"
+    ),
     "app/api/global_ask_routes.py::_call": (
         "GlobalAskError.message 仅来自 global_ask.py 的固定中文业务错误；"
         "原始异常不转换为可展示错误。test_global_ask.py 覆盖 HTTP 错误标记"

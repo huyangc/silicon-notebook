@@ -4,6 +4,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   fetchMe: vi.fn(),
+  fetchAuthCapabilities: vi.fn(),
   fetchAdminUsers: vi.fn(),
   fetchOnlineIds: vi.fn(),
   updateAdminUserRole: vi.fn(),
@@ -15,7 +16,7 @@ const mocks = vi.hoisted(() => ({
   fetchAnalysisIssues: vi.fn(),
 }));
 
-vi.mock("../../app/auth.ts", () => ({ fetchMe: mocks.fetchMe }));
+vi.mock("../../app/auth.ts", () => ({ fetchMe: mocks.fetchMe, fetchAuthCapabilities: mocks.fetchAuthCapabilities, LOCAL_AUTH_CAPABILITIES: { mode: "local" } }));
 vi.mock("../../app/admin/usage/api.ts", () => ({
   FORBIDDEN_SENTINEL: "forbidden",
   fetchAdminUsers: mocks.fetchAdminUsers,
@@ -42,6 +43,7 @@ import AdminUsagePage from "../../app/admin/usage/page";
 
 beforeEach(() => {
   window.history.replaceState({}, "", "/admin/usage");
+  mocks.fetchAuthCapabilities.mockResolvedValue({ mode: "local", local_login: true, local_registration: true, sso_login: false, binding_allowed: false, provider_label: "" });
 });
 
 // 展开区「用户摘要」用的默认口径值(规格 §3 B1–B5/Phase C)；单个用例需要不同数值时
@@ -99,6 +101,7 @@ const rows = [
 // 每个用例都要自备实现(vitest 配了 restoreMocks,测试间会清实现)。
 function primeCommonMocks() {
   mocks.fetchMe.mockResolvedValue({ id: "user-local", role: "admin" });
+  mocks.fetchAuthCapabilities.mockResolvedValue({ mode: "local", local_login: true, local_registration: true, sso_login: false, binding_allowed: false, provider_label: "" });
   mocks.fetchAdminUsers.mockResolvedValue(rows);
   mocks.fetchOnlineIds.mockResolvedValue([]);
   mocks.fetchUploadLimitDefault.mockResolvedValue(20);

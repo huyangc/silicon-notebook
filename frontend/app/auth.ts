@@ -29,6 +29,56 @@ export type AuthUser = {
   search_profile: unknown;
 };
 
+export type AuthMode = "local" | "dual" | "binding_required" | "sso_only" | "retired";
+
+/** Public, deployment-selected authentication surface.  The provider's private
+ * protocol never crosses this boundary; the browser only receives a generic
+ * capability and an optional display label for assistive text. */
+export type AuthCapabilities = {
+  mode: AuthMode;
+  local_login: boolean;
+  local_registration: boolean;
+  sso_login: boolean;
+  binding_allowed: boolean;
+  provider_label: string;
+};
+
+export type IdentityInfo = {
+  linked: boolean;
+  local_login_name: string | null;
+  external_username: string | null;
+  display_name: string | null;
+};
+
+export type SsoCompletion =
+  | { status: "authenticated"; token: string; user: AuthUser }
+  | {
+    status: "binding_required";
+    pending_id: string;
+    local_login_name: string;
+    external_username: string;
+    display_name: string;
+  }
+  | {
+    status: "confirmation_required";
+    pending_id: string;
+    external_username: string;
+    display_name: string;
+    purpose: "enroll" | "recover" | "replace";
+    target_user_id: string | null;
+    target_username: string | null;
+    previous_external_username?: string | null;
+  };
+
+export const LOCAL_AUTH_CAPABILITIES: AuthCapabilities = {
+  mode: "local",
+  local_login: true,
+  local_registration: true,
+  sso_login: false,
+  binding_allowed: false,
+  provider_label: "",
+};
+
 /** fetchMe / updateUiMode 的响应体归一化——两处都要把后端 ui_mode 收敛成合法值。 */
 function normalizeAuthUser(raw: AuthUser): AuthUser {
   return { ...raw, ui_mode: normalizeUiMode((raw as { ui_mode?: unknown }).ui_mode) };
@@ -72,9 +122,96 @@ export async function registerUser(
 export async function loginUser(
   username: string,
   password: string
-): Promise<{ token: string; user: AuthUser }> {
-  const result = await authFetch<{ token: string; user: AuthUser }>("/auth/login", { username, password });
+): Promise<{ token: string; user: AuthUser; migration_required?: boolean }> {
+  const result = await authFetch<{ token: string; user: AuthUser; migration_required?: boolean }>("/auth/login", { username, password });
   return { ...result, user: normalizeAuthUser(result.user) };
+}
+
+export async function fetchAuthCapabilities(): Promise<AuthCapabilities> {
+  const result = await requestJson<AuthCapabilities>("/auth/capabilities", {
+    auth: "none",
+    tag: "auth",
+    credentials: "include",
+  });
+  const modes: readonly AuthMode[] = ["local", "dual", "binding_required", "sso_only", "retired"];
+  if (!modes.includes(result.mode)
+    || typeof result.local_login !== "boolean"
+    || typeof result.local_registration !== "boolean"
+    || typeof result.sso_login !== "boolean"
+    || typeof result.binding_allowed !== "boolean"
+    || typeof result.provider_label !== "string") {
+    throw new TypeError("authentication capabilities response is invalid");
+  }
+  return result;
+}
+
+async function ssoStart(path: string, body: unknown): Promise<string> {
+  const result = await requestJson<{ authorization_url: string }>(path, {
+    tag: "auth",
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    credentials: "include",
+  });
+  if (!result.authorization_url) throw new TypeError("authentication redirect is missing");
+  return result.authorization_url;
+}
+
+/** Starts a browser-bound external sign-in.  It deliberately returns only an
+ * authorization URL; identity tokens remain in the server/plugin boundary. */
+export function startSsoLogin(): Promise<string> {
+  return ssoStart("/auth/sso/start", {});
+}
+
+export function startIdentityBinding(currentPassword: string): Promise<string> {
+  return ssoStart("/me/identity-binding/start", { current_password: currentPassword });
+}
+
+/** A deployment-issued, scoped one-time grant permits only enrollment or
+ * recovery.  The browser never submits a target user ID. */
+export function startSsoGrant(grantToken: string, purpose: "enroll" | "recover" | "replace"): Promise<string> {
+  return ssoStart("/auth/sso/grant/start", { grant_token: grantToken, purpose });
+}
+
+export async function completeSsoLogin(code: string): Promise<SsoCompletion> {
+  const result = await requestJson<SsoCompletion>("/auth/sso/complete", {
+    auth: "none",
+    tag: "auth",
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+    credentials: "include",
+  });
+  if (result.status === "authenticated") {
+    return { ...result, user: normalizeAuthUser(result.user) };
+  }
+  return result;
+}
+
+export async function confirmIdentityBinding(pendingId: string): Promise<{ token: string; user: AuthUser }> {
+  const result = await requestJson<{ token: string; user: AuthUser }>("/me/identity-binding/confirm", {
+    tag: "auth",
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pending_id: pendingId }),
+    credentials: "include",
+  });
+  return { ...result, user: normalizeAuthUser(result.user) };
+}
+
+export async function cancelIdentityBinding(pendingId: string): Promise<void> {
+  const res = await performApiRequest("/me/identity-binding/cancel", {
+    tag: "auth",
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pending_id: pendingId }),
+    credentials: "include",
+  });
+  if (!res.ok) await throwHumanizedHttpError(res, "auth");
+}
+
+export function fetchMyIdentities(): Promise<IdentityInfo> {
+  return requestJson<IdentityInfo>("/me/identities", { tag: "auth", credentials: "include", unauthorized: "preserve" });
 }
 
 export async function logoutUser(): Promise<void> {
@@ -99,7 +236,9 @@ export async function changeMyPassword(oldPassword: string, newPassword: string)
 }
 
 export async function fetchMe(): Promise<AuthUser> {
-  const user = await requestJson<AuthUser>("/me", { tag: "auth" });
+  // Startup needs to distinguish an S2 migration token from an expired SSO
+  // session before the global 401 policy clears browser state.
+  const user = await requestJson<AuthUser>("/me", { tag: "auth", unauthorized: "preserve" });
   return normalizeAuthUser(user);
 }
 

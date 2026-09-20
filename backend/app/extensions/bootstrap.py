@@ -74,6 +74,7 @@ from app.extensions.gap_consult import GapConsultHost
 from app.extensions.reflect_action import ReflectActionHost
 from app.extensions.report import ReportCompletedObserverHost
 from app.extensions.report_export import ReportExporterHost
+from app.extensions.auth import AuthProviderHost
 
 
 _BOUND_AGENT_PROFILE_UI_PORT = object()
@@ -114,6 +115,10 @@ class ExtensionRuntime:
     # empty tuple, and every reflect turn is byte-identical to one before the
     # point existed.
     reflect_actions: ReflectActionHost
+    # Optional single external-authentication provider. Authentication routes
+    # consume only its domain port; plugins never receive a Request or a core
+    # user/session/repository object.
+    auth_provider: AuthProviderHost
     # Validated settings instance per deployment plugin, keyed by plugin id.
     # Built-in bundles never appear here.  The mapping is read-only so a later
     # consumer (the plugin route host) cannot mutate the frozen composition.
@@ -203,6 +208,7 @@ def build_extension_runtime(
             registry,
             event_sink=event_sink,
         ),
+        auth_provider=AuthProviderHost(registry),
     )
 
 

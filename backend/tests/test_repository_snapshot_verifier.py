@@ -48,7 +48,32 @@ FIXTURE_SECRETS = (
 )
 
 
+def _rollback_v78(db: sqlite3.Connection) -> None:
+    for table in ("auth_identity_audit","auth_policy_audit","auth_transactions","external_identities","auth_policy"):
+        db.execute(f"DROP TABLE {table}")
+    db.execute("DROP INDEX idx_users_local_login_name")
+    db.execute("ALTER TABLE users DROP COLUMN local_login_name")
+    db.execute("ALTER TABLE users DROP COLUMN auth_revision")
+    for column in ("auth_source","absolute_expires_at","provider_namespace","external_subject"):
+        db.execute(f"ALTER TABLE auth_sessions DROP COLUMN {column}")
+
+
+def test_deployed_v77_database_backfills_local_identity_without_changing_owners(tmp_path):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(module.offline_settings(database,tmp_path/"upgrade-storage"))
+    upgraded.close_local()
+    with sqlite3.connect(database) as rollback:
+        _rollback_v78(rollback)
+        rollback.execute("PRAGMA user_version=77")
+    result = module.verify_snapshot(database,storage)
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 77
+    assert result.final_user_version == module.SCHEMA_VERSION
+
+
 def _rollback_v76(db: sqlite3.Connection) -> None:
+    _rollback_v78(db)
     db.execute("DROP TABLE global_ask_jobs")
     db.execute("DROP TABLE global_ask_conversations")
 

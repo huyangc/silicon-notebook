@@ -52,6 +52,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 
 ## 3. 用户系统与分享
 
+- **外部认证插件与本地凭据退役代码交付（2026-09-20；对应方案 §v1.0 Enterprise Platform 的 SSO）**：新增通用 `auth.provider` 接缝及可独立打包的 `examples/extensions/w3-auth` OAuth2/userinfo 示例，默认关闭；支持本地优先验证与显式关联、保留原 `user_id` 的统一用户名同步，以及 `local → dual → binding_required → sso_only → retired` 持久化阶段。管理员认证迁移页提供预检、授权开通/历史恢复/受控身份更换和分页审计；更换身份保留原资产权限并停用旧映射及旧SSO会话。SQLite v78、PostgreSQL 0058 迁移及共享认证合同已落地。标准 `scripts/check.sh` 通过：后端 13,386、合同 54、前端单元 2,752、组件 1,271 项，生产构建和类型检查通过；真实 PostgreSQL 认证专项与内网 IDaaS 尚未联调，不能据此视为生产切换完成。生产仍保留原非默认管理员密码配置校验；Agent凭据按请求实时检查所有者资格，未新增自动永久撤销。行为与发布边界见产品/API、部署及运维参考。
 - 当前为多账号 owner 隔离：自助注册/登录使用不透明 Bearer session；管理员可在用户总览授予/撤销其他用户的管理员角色，并共同管理全局 base tier。用户总览默认每页 20 条、可切换 20/50/100 条，并支持按数据列表头对完整用户集合做升降序排序。内置管理员与当前操作账户不可降级。
 - 已完成（2026-07-22）：管理员授权管理——`PATCH /api/admin/users/{user_id}/role` 仅接受 `admin/user`，在同一写事务中重验操作者权限；用户使用总览提供二次确认的授予/撤销操作并即时更新角色显示。普通用户越权、内置管理员降级、当前管理员自降级、无效角色与不存在用户均有测试覆盖；已有 session 在下一次请求读取新角色。`scripts/check.sh`（含前端 production build）已通过。
 - 分享链接已实现：小 notebook 复制到接收者账号；大 notebook 以只读成员方式加入。当前没有实时协同编辑。用户可在头像菜单自助修改密码（保留当前会话、吊销其他会话），管理员可在用户总览重置用户密码（吊销目标全部会话）；内置 `admin` 的密码仍由部署环境变量决定，两条路径都拒绝它。
@@ -456,7 +457,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **历史 Article 方案**：已退役，不属于当前后续承诺；当前长内容产出路径是 Deep Report。
 - **深度报告来源身份缓存**：本轮只做单次有界解析，不增加 run 级来源族缓存。后续若缓存，应缓存原始身份行并在本轮触达集合上重新执行并查合并；不能直接缓存任意子集的最终 family key，否则后续出现哈希/标题桥接资料时会改变族归属。
 - **v0.4 Review Mode**：review session、场景 checklist sign-off、reviewer 评论、action items、导出 review 报告。
-- **v1.0 企业**：RBAC / source 级权限 / 审计 / SSO / 私有部署 / Confluence·SharePoint·Jira·Git·Slack connectors / 多 notebook 搜索 / rule version diff。
+- **v1.0 企业**：RBAC / source 级权限 / 企业业务审计 / 真实IDaaS联调与SSO生产切换、PostgreSQL认证专项验收（插件及迁移代码见第3节） / 私有部署 / Confluence·SharePoint·Jira·Git·Slack connectors / 多 notebook 搜索 / rule version diff。
 - 检索：BM25 / FTS5 / pgvector 放量、结构化硬过滤、Knowledge graph（已评估为低 ROI / 基础设施级，暂缓）。
 - 扫描件 OCR、DOCX/PPTX 公式（OMML）解析；MinerU 已覆盖 PDF 的公式/表格/版面（本机 MLX 或 GPU 主机）。
 - **架构渐进整改后续阶段**：阶段 3（FastAPI routers 与前端 API client）和旧阶段 4 的 Pydantic 模型分文件已由 2026-07-21 application-boundary 条目交付。剩余架构计划仅为阶段 5（前端 workspace 状态拆分）与旧阶段 6 的 FastAPI lifespan / 统一应用生命周期；阶段 2、4、6 的 Repository 部分已由 Repository composition refactor 交付（见第 19 节账本 2026-07-11 条目）。

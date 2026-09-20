@@ -18,6 +18,7 @@ from app.api.deps import (
 )
 from app.core.cache import CacheAdmin, make_cache_backend
 from app.core.config import get_settings
+from app.domain.auth_policy import AuthStoreError
 from app.models.admin import (
     ActivityAsk,
     ActivityReport,
@@ -243,6 +244,8 @@ def reset_admin_user_password(
         )
     except BuiltinAdminPasswordError:
         raise user_error(409, "内置管理员密码由部署配置决定，请修改环境变量后重启生效")
+    except AuthStoreError:
+        raise user_error(403, "本站密码重置已关闭，请使用账号迁移恢复流程。") from None
     except PermissionError:
         raise user_error(403, "仅管理员可重置用户密码")
     except KeyError:
@@ -923,6 +926,8 @@ def update_admin_extension_runtime(
             # 管理员会话在两次检查之间被别的会话降权，是可以想象的竞态，答案必须
             # 和上面同一句话，而不是一条陌生的堆栈。
             raise user_error(403, "仅管理员可管理扩展运行时开关")
+        except AuthStoreError:
+            raise user_error(409, "当前认证插件不能直接停用，请先完成认证维护预检。") from None
         try:
             refresh_extension_admission(store)
         except Exception as exc:

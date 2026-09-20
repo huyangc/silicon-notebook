@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     import numpy as np
 
 from app.core.config import Settings
+from app.repositories.auth_ports import AuthStorePort
 from app.domain.ask import AskMode
 from app.domain.cancellation import CancelEvent
 from app.domain.graph import FollowChainResult
@@ -543,6 +544,8 @@ class KnowhowHistoryStorePort(Protocol):
 @runtime_checkable
 class IdentityStorePort(IdentityRepository, Protocol):
     """Identity-store surface used by backend-neutral composition."""
+
+    auth: AuthStorePort
 
     @staticmethod
     def _user_profile(user: object, profile: object) -> UserProfile: ...

@@ -3510,3 +3510,63 @@ Explicitly not yet built (a phased sequencing choice, not a silent gap): correla
 - The `off`-mode PDF fallback uses PyMuPDF4LLM page-chunked Markdown to retain headings, multi-column reading order and reconstructed tables; pypdf is only the last resort if that parser is unavailable or errors. MinerU still provides the authoritative high-fidelity formula/image/complex-scan path. A cloud URL/file parse that fails after retries uses the same local fallback and returns an extracted source with `parse_quality_warning=true`; the source detail explains the risk and offers reparse/delete actions. A later successful MinerU reparse clears the warning. See [PDF parsing with MinerU](./operations.md#pdf-parsing-with-mineru).
 - User memory remains manual opt-in only; no automatic memory behavior has been added.
 - A PostgreSQL query cancellation (`psycopg.errors.QueryCanceled` — statement timeout or an administrative cancel) that reaches the top of the request stack on a non-streaming response returns a structured `503` (`detail` plus a machine-readable `code: "query_timeout"`) and emits a `query_timeout` event carrying the paired `kind=http` row's request id, method/path and, when the route names one, `notebook_id` — instead of falling through to a bare, unobservable `500`. On a streaming response that has already started, no status code can be rewritten — the stream aborts, but the same `query_timeout` event (marked `streaming: true`) is still emitted from an outermost ASGI observer. The frontend still shows its existing generic 5xx "service unavailable" copy (no new user-facing text ships; `frontend/app/errors.ts` deliberately generalizes every 5xx). The pre-existing savepoint-bounded probes (e.g. the chunk lexical-recall budget in `knowledge_store.py`) are unaffected — they catch and convert their own `QueryCanceled` into a domain-specific exception before it ever reaches this handler.
+
+
+## External authentication and local credential retirement
+
+The optional `auth.provider` deployment plugin authenticates external identities; core retains site users, sessions and resource authorization. The W3 example lives in `examples/extensions/w3-auth`, is independently packageable and is disabled by default. It is an OAuth2 code/userinfo adapter, not an assertion of OIDC support or verified connectivity to a real IDaaS.
+
+The persistent policy is `local → dual → binding_required → sso_only → retired`. Local remains the default. Dual supports existing password operations and explicit local-first linking. Binding-required disables registration/password changes and restricts password sessions to migration; they cannot access business HTTP or streams. SSO-only rejects local sessions and passwords. Retired permanently disallows a return to passwords and removes local credential material. Policy changes require a real administrator session and revision match; the database rechecks cutover eligibility. A plugin failure never changes policy.
+
+An existing user must verify their current local password, complete external authentication and confirm the displayed identity. Core preserves `users.id`, assets, roles, preferences and internal email. The verified external username becomes `users.username`; the original `local_login_name` remains the password login name only during coexistence/migration. SSO uses the unique `(provider_namespace, subject)` mapping, never a username/email match. Cross-account username or legacy-name conflicts abort the whole binding. Display names do not identify accounts.
+
+OAuth state, browser proof, PKCE when supported, original local session, policy/configuration generation and one-time handoff are core-owned. External access tokens remain within the provider call. The callback URL contains only a short-lived handoff code; the browser must also hold a host-only HttpOnly SameSite cookie. Confirming a binding additionally requires the original local bearer. Logout, reset, disable, replay or stage/configuration changes invalidate pending authority. Existing SSO sessions have an absolute limit measured from verified external authentication; sliding access cannot extend it. Browser-authenticated NDJSON/SSE delivery rechecks sessions before every emitted frame. The `/mcp` transport retains its own per-request and per-tool Agent checks, including current owner eligibility; an already committed write can still return its terminal acknowledgement after token revocation, while subsequent access is denied.
+
+All routes below are under `/api`. Public routes still enforce their transaction purpose and browser proof; ordinary extension routes remain session protected.
+
+| Route | Contract |
+| --- | --- |
+| `GET /auth/capabilities` | Public minimal mode, local login/registration, SSO/binding flags and provider label |
+| `POST /auth/sso/start` | Begin external login; returns `authorization_url` |
+| `POST /me/identity-binding/start` | Original bearer plus `current_password`; returns authorization URL |
+| `GET /auth/sso/callback` | Fixed callback; validates state/proof and exchanges code through provider |
+| `POST /auth/sso/complete` | `{code}`; returns authenticated token/user or explicit binding/grant confirmation preview |
+| `POST /me/identity-binding/confirm` | `{pending_id}`; atomically commits mapping/name and rotates session |
+| `POST /me/identity-binding/cancel` | `{pending_id}`; discards pending confirmation |
+| `GET /me/identities` | Own linked status, external name and temporary local login name; migration credentials accepted |
+| `GET/PATCH /admin/auth/policy` | Persistent policy; writes require expected revision and explicit rollback flag |
+| `GET /admin/auth/migration` | Preflight counts and policy; not a claim of real IDaaS acceptance |
+| `GET /admin/auth/accounts` | Paged migration inventory, including disabled accounts |
+| `GET /admin/auth/audit` | Administrator-only paged identity/grant/account-status audit; no credentials or raw provider payloads |
+| `PATCH /admin/auth/provider-configuration` | Prepare a new configuration generation without changing mode, provider or namespace; invalidates in-flight authentication |
+| `PATCH /admin/auth/accounts/{user_id}` | Explicit account enable/disable; revokes its site sessions |
+| `POST /admin/auth/grants` | Admin-issued, expiring enrollment/recovery/replacement grant for one exact external subject |
+| `POST /auth/sso/grant/start` | Redeem grant and authenticate its exact external subject; enrollment never adopts existing assets |
+| `POST /admin/auth/retirement-cleanup` | Idempotent cleanup after the durable retirement marker |
+
+Existing `POST /auth/login` returns optional `migration_required=true` in binding-required mode; its token is not a business credential. New SSO users are ordinary users without a local password. Late-user recovery requires an administrator grant fixed to an existing user ID plus the user's external authentication and confirmation. No automatic new-account creation or account merging occurs.
+
+Replacing an already linked identity requires an administrator-issued `replace` grant fixed to the original site user ID and the exact new external subject in the current namespace. Confirmation previews the original account and new identity. After the user authenticates and explicitly confirms, one transaction disables the previous mapping and old SSO sessions, retains historical subject ownership, and activates the new mapping without changing the site user ID, assets or role. Failed or cancelled attempts leave the original mapping intact. Grant issuance, use and completion, bindings, renames and account-status changes have durable restricted audit records, independent of temporary authentication transactions. Account inventory and audit both use the pagination rails below.
+
+Account status is rechecked for Agent authentication and each data-tool call; an active current-namespace identity is additionally required in SSO-only/retired mode. Binding-required retains active owners’ Agent access while they migrate. Token rows are retained; current owner eligibility is enforced on every call. Browser absolute expiry alone does not provide an IDaaS offboarding signal. Operators must establish the provider's subject stability, non-reassignment and offboarding procedure before production cutover. Two migrated named administrators, all active accounts resolved, and subsequent direct SSO login evidence are required by the cutover preflight; shared built-in admin must be disabled.
+
+Core authentication rails (reject over-limit input; never truncate identities):
+
+| Setting/constant | Value |
+| --- | --- |
+| `AUTH_TRANSACTION_TTL_SECONDS` | Default 600; 60–1800 seconds |
+| `AUTH_SSO_SESSION_SECONDS` | Default 28800; 300–86400 seconds |
+| `AUTH_PROVIDER_TIMEOUT_SECONDS` | Default 15; greater than 0, at most 60 seconds |
+| `AUTH_PROVIDER_ID_MAX_CHARS` | 128 |
+| `AUTH_PROVIDER_NAMESPACE_MAX_CHARS` | 256 |
+| `AUTH_PROVIDER_CONFIGURATION_GENERATION_MAX_CHARS` | 128 |
+| `AUTH_PROVIDER_PUBLIC_LABEL_MAX_CHARS` | 80 |
+| `AUTH_PROVIDER_ENDPOINT_MAX_CHARS` | 2048 |
+| `AUTH_PROVIDER_SUBJECT_MAX_CHARS` | 512 |
+| `AUTH_PROVIDER_USERNAME_MAX_CHARS` | 512 |
+| `AUTH_PROVIDER_DISPLAY_NAME_MAX_CHARS` | 512 |
+| `AUTH_PROVIDER_AUTHORIZATION_URL_MAX_CHARS` | 8192 |
+| `AUTH_CUTOVER_MIN_ADMINS` | 2 |
+| `AUTH_INVENTORY_PAGE_SIZE` / `AUTH_INVENTORY_PAGE_MAX` | Default 100; maximum 200 |
+
+The host admits one provider; it bounds simultaneous provider workers and rejects late results. A timed-out trusted plugin can retain its worker slot until its call returns. Provider transport-specific limits belong to the example's README pair. Installation, staged rollout and recovery are owned by the deployment and operations references.

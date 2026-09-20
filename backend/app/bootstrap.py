@@ -6,6 +6,7 @@ from collections.abc import Callable
 from app.core.config import Settings
 from app.extensions import ExtensionRuntime, default_extension_runtime
 from app.domain.extension_http import PluginRouterSpec
+from app.domain.auth_provider import AuthProviderHostPort
 from app.extensions.admin_projection import (
     LoadedExtensionProjection,
     project_loaded_extensions,
@@ -22,6 +23,10 @@ from app.services.extension_toggles import refresh_extension_admission
 
 def application_extension_runtime() -> ExtensionRuntime:
     return default_extension_runtime()
+
+
+def application_auth_provider() -> AuthProviderHostPort:
+    return application_extension_runtime().auth_provider
 
 
 def application_extension_ui_projection(
@@ -92,6 +97,15 @@ def create_application_repository(settings: Settings) -> NotebookRepository:
         settings, **application_repository_hosts(runtime)  # type: ignore[arg-type]
     )
     prime_extension_admission(repository)
+    try:
+        from app.services.auth_flow import AuthFlowService
+
+        policy = repository._runtime.identity.auth.get_policy()
+        settings.validate_authentication_bootstrap(policy["mode"], retired=bool(policy["retired_at"]))
+        AuthFlowService(repository._runtime.identity.auth, runtime.auth_provider, settings).validate_configuration()
+    except BaseException:
+        repository.close()
+        raise
     return repository
 
 

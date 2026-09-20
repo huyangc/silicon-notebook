@@ -136,6 +136,12 @@ _UNIQUE_PREDICATES = {
         ("memory_id", "is", "not", "null", "and", "memory_id", "<>", "''"),
     ),
     "idx_users_username": ("username != ''", ("username", "<>", "''")),
+    "idx_users_local_login_name": (
+        "local_login_name IS NOT NULL", ("local_login_name", "is", "not", "null")
+    ),
+    "idx_external_identities_active_user": (
+        "status = 'active'", ("status", "=", "'active'")
+    ),
     # notebook_share_requests (v28): a pending-only uniqueness constraint on
     # (notebook_id, group_id). See idx_catalog_jobs_one_active above for the
     # same partial-unique-over-an-enumerated-status shape.

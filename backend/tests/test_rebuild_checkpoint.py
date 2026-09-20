@@ -6,6 +6,7 @@ from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
 from tests.model_testkit import bind_chat_client, bind_all_embedding_clients
+from tests.sqlite_migration_testkit import rollback_v78
 
 
 @pytest.fixture
@@ -38,6 +39,7 @@ def test_deployed_v9_db_gets_checkpoint_table_backfilled(repo):
     from app.services.sqlite_repository import SCHEMA_VERSION
 
     with repo._connect() as db:
+        rollback_v78(db)
         db.execute("DROP TABLE kg_rebuild_checkpoint")
         db.execute("PRAGMA user_version = 9")
 

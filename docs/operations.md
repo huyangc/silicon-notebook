@@ -2184,3 +2184,23 @@ source copy or model content was unavailable, already resolved/deleted, or clean
 permission to read the user's original source or model input by a different path. If a live
 record has reached expiry it is already outside the supported read contract even before a
 separate filesystem inventory notices cleanup.
+
+
+## Authentication migration and retirement
+
+Start with the disabled [W3 example](../examples/extensions/w3-auth/README.md). Verify token/userinfo success and failure payloads, immutable subject/non-reassignment, callback registration, PKCE capability, CA trust, session expiry and offboarding responsibility against the real provider. Unit tests use fakes and do not establish real connectivity.
+
+The administrator's **认证迁移** page at `/admin/auth` exposes policy/preflight, paged accounts and grant issuance. For plugin upgrades, keep a valid administrator SSO session, stage the reviewed package/configuration, then `PATCH /api/admin/auth/provider-configuration` with `expected_revision` and the target `configuration_generation`. This explicitly starts a maintenance gap for new logins; restart with the matching configuration before accepting new authentication. Existing valid SSO sessions remain usable. The same route can restore the previous generation after a failed rollout while the administrator session is valid. It works after retirement without changing that marker or credentials; changing the actual provider or namespace is rejected and requires a separate identity migration.
+
+1. Keep policy `local` during deployment preparation. Install the plugin and configure public callback origins; retain current local accounts and data.
+2. A real administrator selects `dual` through `PATCH /api/admin/auth/policy` with `expected_revision`. Migrate named administrators first; each user verifies their own local password, authenticates externally and explicitly confirms the displayed identity. Verify a subsequent direct SSO login.
+3. Review `GET /api/admin/auth/migration`, resolve name collisions and dormant accounts, and move to `binding_required`. Passwords now admit only migration. Disable the shared built-in account after named administrators can manage the site; retain its assets and explicitly handle its Agent ownership.
+4. Cut over to `sso_only` only after the database preflight passes and real operational acceptance is complete. Old local sessions and migration credentials lose access; ongoing durable jobs retain their normal lifetime while delivery/subscriptions require current credentials.
+5. During observation an explicit audited `allow_rollback` may return to a previously verified dual/migration stage; it does not restore deleted sessions or change account mappings/data. A package rollback must preserve identity namespace and policy.
+6. After the agreed observation period, explicitly choose `retired`. The durable irreversible marker precedes credential cleanup. Retry `POST /api/admin/auth/retirement-cleanup` if interrupted; it cannot reopen passwords.
+
+Post-cutover new users use an admin-issued `enroll` grant bound to one subject. Historical recovery uses a `recover` grant additionally fixed to the original site user ID; the user must authenticate the specified identity and confirm. Grants expire, are single use and convey no administrator role. Verify ownership outside this API before issuing one; matching a name/email is insufficient.
+
+Use a `replace` grant to change an already linked identity, fixing both the original site user ID and new external subject. The user checks the original account and new identity before confirming. Old mappings and SSO sessions become inactive while site data and permissions remain; historical subjects remain reserved and cannot be transferred to another user. Administrators can page through grant issuance/use/completion and identity/account changes on the migration page or through `GET /api/admin/auth/audit`; credentials are excluded.
+
+Keep a tested backup named SSO administrator and a compatible plugin build. Authentication outages are repaired by restoring the approved provider/configuration; retirement has no password fallback. Historical backups may contain password hashes: apply current retirement policy and cleanup before exposing a restored service. Do not start an old binary that ignores the retirement marker. Provider offboarding without a trusted lifecycle feed requires an explicit operator-disable process; do not promise immediate detection from browser expiry alone.

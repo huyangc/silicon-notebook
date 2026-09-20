@@ -31,6 +31,7 @@ from app.repositories.ports import (
 from app.repositories.sqlite.agent_profile_store import AgentProfileStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.migrations import SqliteMigrator
+from tests.sqlite_migration_testkit import rollback_v78
 
 NOW = "2026-08-18T00:00:00+00:00"
 NOTEBOOK_ID = "nb-1"
@@ -634,17 +635,15 @@ def test_the_startup_sweep_strands_every_in_flight_token(
 def test_a_deployed_v52_database_gains_the_claim_token_column(tmp_path: Path):
     """已部署库补建:回滚到 v52 再开一次,v53 必须补上这一列。
 
-    同时钉住本迁移必须**可重跑**:「已部署库补建」这一族测试的做法是只回滚
-    ``user_version``,整条梯子会在一张**可能已经带着这一列**的表上重跑本迁移。
-    SQLite 没有 ``ADD COLUMN IF NOT EXISTS``,裸 ALTER 会以
-    ``duplicate column name`` 炸在启动路径上——五条历史补建用例一起红,而它们
-    与 Agent 库理解毫无关系,单看报错完全指不回这里。
+    同时钉住 v53 本身必须可重跑。每次伪造 v52 前都完整撤销更新的 v78；否则
+    ``user_version=52`` 却仍带 v78 索引的混合代次 schema 并不是任何真实部署。
     """
     settings = Settings(database_url=f"sqlite:///{tmp_path / 'deployed.db'}")
     database = SqliteDatabase(settings, tmp_path)
     SqliteMigrator(database, settings).migrate()
 
     with database.write() as db:
+        rollback_v78(db)
         db.execute("ALTER TABLE agent_profile_jobs DROP COLUMN claim_token")
         db.execute("PRAGMA user_version = 52")
     database.close_local()
@@ -658,6 +657,7 @@ def test_a_deployed_v52_database_gains_the_claim_token_column(tmp_path: Path):
     # Re-running the ladder over the already-patched table must be a no-op,
     # not a duplicate-column error.
     with reopened.write() as db:
+        rollback_v78(db)
         db.execute("PRAGMA user_version = 52")
     reopened.close_local()
     again = SqliteDatabase(settings, tmp_path)

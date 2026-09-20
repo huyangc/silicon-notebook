@@ -4,7 +4,7 @@ import {
   Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState,
   type RefObject,
 } from "react";
-import { fetchMe } from "../../auth.ts";
+import { fetchAuthCapabilities, fetchMe, LOCAL_AUTH_CAPABILITIES } from "../../auth.ts";
 import { clampPopoverLeft } from "../../effort-picker-logic";
 import { PageHeader } from "../../components/PageHeader.tsx";
 import { toUserMessage } from "../../errors.ts";
@@ -441,6 +441,7 @@ export default function AdminUsagePage() {
   const [nbCache, setNbCache] = useState<Record<string, NotebookCacheEntry>>({});
   const [onlineIds, setOnlineIds] = useState<Set<string>>(new Set());
   const [currentUserId, setCurrentUserId] = useState("");
+  const [localPasswordsAllowed, setLocalPasswordsAllowed] = useState(true);
   const [confirmingRole, setConfirmingRole] = useState<{ userId: string; role: AdminUserRole } | null>(null);
   const [rolePendingId, setRolePendingId] = useState("");
   const [uploadLimitDefault, setUploadLimitDefault] = useState<number | null>(null);
@@ -475,11 +476,16 @@ export default function AdminUsagePage() {
           return;
         }
         setCurrentUserId(me.id);
-        const [rows, limitDefault] = await Promise.all([fetchAdminUsers(), fetchUploadLimitDefault()]);
+        const [rows, limitDefault, authCapabilities] = await Promise.all([
+          fetchAdminUsers(),
+          fetchUploadLimitDefault(),
+          fetchAuthCapabilities().catch(() => LOCAL_AUTH_CAPABILITIES),
+        ]);
         setState({ kind: "ready", rows });
         setUploadLimitDefault(limitDefault);
         setDefaultInput(String(limitDefault));
         setOnlineIds(new Set(rows.filter((r) => r.is_online).map((r) => r.id)));
+        setLocalPasswordsAllowed(authCapabilities.mode === "local" || authCapabilities.mode === "dual");
       } catch (e) {
         // 哨兵先判(分流到专用无权限视图),其余一律过人话层——此前这里直出
         // e.message,断网时页面上会写「加载失败:Failed to fetch」。
@@ -807,7 +813,7 @@ export default function AdminUsagePage() {
               <SortableHeader label="最近活跃" sortKey="last_active" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
               <th>用户分析</th>
               <SortableHeader label="文档上限" sortKey="upload_limit" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
-              <th>密码</th>
+              {localPasswordsAllowed && <th>密码</th>}
               <th>权限管理</th>
             </tr>
           </thead>
@@ -878,7 +884,7 @@ export default function AdminUsagePage() {
                       />
                     )}
                   </td>
-                  <td className="usage-limit-cell">
+                  {localPasswordsAllowed && <td className="usage-limit-cell">
                     {u.id === "user-local" ? (
                       <span className="usage-role-locked" title="内置管理员密码由部署配置决定">受保护</span>
                     ) : u.id === currentUserId ? (
@@ -898,7 +904,7 @@ export default function AdminUsagePage() {
                         onSubmit={() => void submitResetPassword(u)}
                       />
                     )}
-                  </td>
+                  </td>}
                   <td>
                     <div className="usage-cell-stack">
                       {!u.role_mutable ? (

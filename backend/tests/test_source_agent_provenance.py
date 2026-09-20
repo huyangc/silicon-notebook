@@ -24,6 +24,7 @@ from app.repositories.sqlite.migrations import SCHEMA_VERSION
 from app.services import remote_sources
 from app.services.remote_sources import PdfProbe
 from app.services.sqlite_repository import SQLiteRepository
+from tests.sqlite_migration_testkit import rollback_v78
 
 
 AGENT = "ap-agent-1"
@@ -100,6 +101,7 @@ def test_deployed_v47_database_gains_the_column_on_open(repo, tmp_path):
     database = tmp_path / "t.db"
     repo.close_local()
     with sqlite3.connect(database) as rollback:
+        rollback_v78(rollback)
         rollback.execute("ALTER TABLE sources DROP COLUMN agent_profile_id")
         rollback.execute("PRAGMA user_version = 47")
 

@@ -433,3 +433,8 @@ Use **Agent access → issued tokens → 撤销 (revoke)**, then **确认撤销*
 To change what an existing token may do, choose **修改权限** (edit access) on it instead: scopes, default notebook, allowlist, and expiry are saved together and the Agent's next tool call sees them, with no reissue or client reconfiguration. Revoked tokens cannot be edited. Editing never reveals the plaintext again; if the token itself was lost or exposed, issue a new one and revoke the old one.
 
 For rotation, issue and verify a new short-lived token first, update the Agent environment, then revoke the old token. Do not reuse a token that appeared in logs, shell history, or plaintext client configuration.
+
+
+## Owner eligibility during authentication migration
+
+Agent tokens do not replace a human's local-password plus SSO account-linking proof. Every Agent authentication and data-tool invocation also checks the owner's current site status and migration eligibility, including existing MCP sessions. From SSO-only onward the owner needs an active identity mapping in the selected namespace; disabled, unlinked or shared built-in owners lose access. Binding-required leaves active owners' existing machine access available for the migration inventory. Eligible owners keep their token scopes and notebook allowlist. Browser SSO expiry alone cannot detect provider-side offboarding; follow the explicit account-disable/lifecycle procedure in the operations reference.

@@ -12,6 +12,8 @@ from fastapi.responses import JSONResponse
 from psycopg.errors import QueryCanceled
 
 from app.api.auth_routes import auth_router
+from app.api.sso_routes import sso_router
+from app.api.auth_stream import AuthenticationStreamGuard
 from app.api.agent_mcp_onboarding import (
     AGENT_MCP_ONBOARDING_PATH,
     agent_mcp_onboarding_router,
@@ -25,6 +27,7 @@ from app.api.deps import (
     model_provider_if_initialized,
     repository,
     shutdown_repository_if_initialized,
+    stream_credential_is_valid,
 )
 from app.api.ask_routes import public_router as public_conversation_router
 from app.api.knowhow_agent_routes import agent_router as knowhow_agent_router
@@ -179,6 +182,9 @@ def _env_file_preflight() -> None:
 
 
 def create_app() -> FastAPI:
+    from app.core.auth_logging import install_authentication_access_filter
+
+    install_authentication_access_filter()
     validate_process_local_scheduler_deployment()
     _env_file_preflight()
     settings = get_settings()
@@ -466,6 +472,7 @@ def create_app() -> FastAPI:
     # Registered AFTER the @app.middleware("http") decorators above so it
     # wraps them (last added = outermost).
     app.add_middleware(_QueryTimeoutStreamObserver)
+    app.add_middleware(AuthenticationStreamGuard, is_valid=stream_credential_is_valid)
 
     app.add_middleware(
         CORSMiddleware,
@@ -498,6 +505,7 @@ def create_app() -> FastAPI:
         return readiness.snapshot()
 
     app.include_router(auth_router, prefix="/api")  # 公开：注册/登录/登出
+    app.include_router(sso_router, prefix="/api")  # Fixed core routes check their own purpose/session.
     # 机器可读的接入说明不含 token，也不要求先有浏览器 session。用户把这条
     # URL 与另行签发的一次性明文 token 一起交给 Agent，Agent 才能在尚未接通
     # MCP 的前提下先读取配置步骤。MCP_PUBLIC_URL 是说明里唯一的服务地址真源。

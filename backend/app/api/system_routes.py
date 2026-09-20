@@ -4,6 +4,7 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from app.domain.auth_policy import AuthStoreError
 
 from app.api.deps import (
     _bearer_token,
@@ -127,6 +128,8 @@ def update_my_password(
         raise user_error(409, "内置管理员密码由部署配置决定，请修改环境变量后重启生效")
     except PasswordMismatchError:
         raise user_error(400, "当前密码不正确")
+    except AuthStoreError:
+        raise user_error(403, "本站密码修改已关闭，请使用统一认证服务管理凭据。") from None
     except KeyError:
         raise HTTPException(status_code=404, detail="User not found")
 

@@ -245,6 +245,7 @@ class AuthRequest(BaseModel):
 class AuthResult(BaseModel):
     token: str
     user: UserProfile
+    migration_required: bool = False
 
 
 class PasswordChangeRequest(BaseModel):

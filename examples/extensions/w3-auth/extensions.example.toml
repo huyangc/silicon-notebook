@@ -1,0 +1,21 @@
+# This example is deliberately inactive. Copy it outside the checkout, set the
+# required environment variables, review the identity contract, then change
+# enabled to true and point EXTENSIONS_CONFIG at the copy.
+
+[extensions."examples.w3_auth"]
+bundle = "silicon_notebook_auth_w3.bundle:BUNDLE"
+enabled = false
+
+[extensions."examples.w3_auth".settings]
+login_origin_env = "W3_LOGIN_ORIGIN"
+client_id_env = "W3_CLIENT_ID"
+client_secret_env = "W3_CLIENT_SECRET"
+ca_bundle_env = "W3_CA_BUNDLE"
+provider_id = "w3"
+provider_namespace = "w3.production"
+configuration_generation = "initial"
+public_label = "统一登录"
+pkce_supported = false
+userinfo_auth_mode = "query"
+subject_field = "uid"
+timeout_seconds = 10.0

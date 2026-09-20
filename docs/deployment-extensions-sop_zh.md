@@ -273,7 +273,7 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 
 ### 3.5 其它 contribution 类型
 
-其余十个生产扩展点在 SDK 里是 Protocol；实现该 Protocol、声明匹配的 `ContributionKind`、经对应的 `add_*` 注册即可。
+其余十一个生产扩展点在 SDK 里是 Protocol；实现该 Protocol、声明匹配的 `ContributionKind`、经对应的 `add_*` 注册即可。
 
 | 扩展点常量 | kind | Protocol | 模块 |
 | --- | --- | --- | --- |
@@ -287,8 +287,11 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 | `INDEXING_PIPELINE_POINT`（`indexing.pipeline`） | `CONTRIBUTOR` | `IndexingPipelineProvider` | `app/extension_sdk/indexing.py` |
 | `SOURCE_ELEMENT_ENRICHER_POINT`（`source.element_enricher`） | `CONTRIBUTOR` | `ElementEnricher` | `app/extension_sdk/element_enrichment.py` |
 | `ASK_REFLECT_ACTION_POINT`（`ask.reflect_action`） | `CONTRIBUTOR` | `ReflectActionContributor` | `app/extension_sdk/reflect_action.py` |
+| `AUTH_PROVIDER_POINT`（`auth.provider`） | `PROVIDER` | `AuthProvider` | `app/extension_sdk/auth.py` |
 
 每个扩展点给的是窄的、point-specific 的 context——绝不是万能 service locator——并各自声明了 contribution 必须 `require` 哪些 capability 才拿得到访问端口。动手前先读那份 Protocol 与它的模块 docstring：该扩展点的 fail-open 与取消规则写在那里。
+
+一个 `auth.provider` contribution 是本次部署在启动时冻结的唯一外部身份 provider。它的纯函数 `describe()` 与 `authorization_parameters()` 给出稳定 provider id、身份源命名空间、配置代次、公开标签、固定 HTTPS 授权端点、PKCE 支持情况及 provider 自己的静态参数。core 拒绝插件提供 `state`、`redirect_uri`、`code_challenge` 或 `code_challenge_method`，再自行加入这些值。`authenticate_code()` 只收到授权码、core 固定的回调、可选 verifier 与单调时钟 deadline，并返回 `ExternalIdentity(provider_namespace, subject, username, display_name)`。它拿不到浏览器 `Request`、cookies、本站 token 或密码、repository、目标 user id、角色或会话签发器。公开 start/callback 路由、state 与浏览器证明、账号关联、用户名冲突及本站会话都归 core。provider 失败一律关闭，并映射为有类型、无内容的错误；原始 token、上游响应与异常原文都不能穿过宿主。本地模式可以没有 provider，但任何模式都不能有两个。这个扩展点不开放匿名插件路由：免登录回调是 core 的固定路由，只调用窄宿主。
 
 `ask.engine` provider 登记一份 `mode_id` 以自身插件 id 开头的描述符，并返回 `AskEngineResult(answer_markdown, citations)`。它只收到当前问题及检索、模型、轨迹、取消端口。检索返回有界证据和本次 run 内的不透明句柄；只能引用本次调用中由同一端口签发的句柄，并在 Markdown 放入对应 `[kN]` 或 `【kN】` 标记。核心对整份引用 fail-closed 校验、自己构造 durable citations，并在保存前复核 run 身份。除元素 `search()`/`fetch()` 外，`RetrievalAccessPort` 还暴露一套有界 KG 读端口——`search_kg(query, k, object_types=())`、`kg_neighbors(evidence_key, k, edge_type="", direction="both")`、`kg_overview()`——`search_kg` 与 `kg_neighbors` 共享一份独立预算（`ASK_PLUGIN_ENGINE_KG_SEARCH_MAX_CALLS`）；KG 命中只有存在存活证据绑定才可引用，引用打开的是该对象首条存活证据元素（不是图谱视图），邻居结果不带边类型标签与截断信号。完整契约细节与护栏见[产品与 API 参考](./product-and-api_zh.md#部署问答引擎askengine)。v1 刻意没有会话历史、意图预检、PPR/社区/图漫游、repository、settings、连接、raw model client 或实时轨迹接口；实时可用性通过时会在浏览器高级模式的第三分组出现，MCP 的 `ask_notebook` 也会把同一个已注册且实时可用的 mode id 接纳为其 `mode` 参数——插件引擎单次调用可能比内建 mode 长得多，调用方的客户端读超时需要留出真正的余量。
 
@@ -637,6 +640,8 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 
 **上表里除运行时开关之外的每一行都是重启进程。** 装载层依旧没有热更新，这一半没有变：registry 只在启动时冻结一次，**哪些插件存在**在进程生命周期内是个事实，不是每次请求都要重新推导的移动目标。运行时开关是叠在这层拓扑之上的另一层，薄得多：它从不改变谁被装载，只决定一个已经装载的 deployment 插件此刻是否服务请求。发起改动的那个进程立即生效；同一部署里的其它服务进程在一个刷新周期内收敛；离线 CLI/批处理进程只在自己启动那一刻读一次，运行期间不会再变。
 
+通用运行时开关不得停用当前非本地认证策略选中的 `auth.provider`。该 provider 是本部署的登录依赖；更换或移除必须走认证策略自己的维护/预检与重启流程。把它当成可选工作区插件会让所有人员登录路径一起失效，因此通用管理员开关会拒绝这个目标，不能把“临时停用”当作认证模式切换。
+
 离线 CLI（`scripts/batch_ingest.py` 等）构建同一个 runtime，因而装载同一份插件拓扑。批处理任务卡在某个插件上时，修的是配置文件——绝不是「这一次跑就把变量清掉」，那会悄悄给这个任务一份与服务不同的组合。
 
 ## 9. 拒绝码表
@@ -738,7 +743,7 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 | 装载拓扑的热更新 | registry 在启动时冻结，**哪些插件存在**因此是一个事实而不是每次请求都要问一遍的问题。新增/移除/升级一个插件、以及在 TOML 里改 `enabled`，一律重启。已装载 deployment 插件的运行时开关（第 8 节）是叠在这层固定拓扑之上、不需要重启的另一层，不是这条规则的例外。 |
 | 进程隔离插件 | `trust="isolated"` 是 registry 当前一律拒绝的保留值。部署插件就是可信的同进程代码。 |
 | 插件自建数据库表 | schema 是一套带版本、带校验和、参与正向复制的封闭集合。用给你的接缝做持久化，或把状态留在自己的上游。见模块化插件架构设计稿 §10。 |
-| 匿名插件路由 | 挂载点恒带 router 级会话依赖。免登录公开页是核心的产品决定，不是插件能开的。 |
+| 匿名插件路由 | 挂载点恒带 router 级会话依赖。免登录公开页是核心的产品决定，不是插件能开的。`auth.provider` 回调只是用途上的窄例外，不是挂载机制的例外：它是 core 固定路由，插件仍不贡献任何路由。 |
 | 扩展 MCP 工具目录 | `PUBLIC_TOOLS` 是一份 core 拥有的冻结清单，静态文档与 smoke guard 都从它派生。不向插件开放。 |
 | 插件 CSS、插件依赖、远程浏览器代码 | 视觉复用既有类与 `:root` token；新依赖走基座 PR；浏览器绝不在运行时拉取插件 JavaScript。 |
 | 每个插件一格自己的 root-dialog slot | 只有一格通用的 `extension` slot，按 contribution 认领，所以同一时刻只有一个插件弹窗可见。把插件名写进 core 的 slot 联合类型等于每装一个插件就要给公网仓库打一次补丁——那正是整套流程要避免的事。 |
@@ -803,3 +808,11 @@ EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml PYTHONPATH=backend \
 
 - **它的测试放在 `backend/tests/`，不在包里。** 5.3 节要求真正的插件把测试留在自己的仓库里，那条要求依然有效。本仓库的后端泳道只收集 `backend/tests`，所以一个照 5.3 节字面执行的样板会交付一批永远不会被跑到的测试。**不要把这个安排照抄进真正的插件。** 一旦落进 `backend/tests`，`backend/tests/test_arxiv_sample_plugin*.py` 与 `frontend/tests/{unit,guards}` 下的两份就是普通测试：随 **G1** 每次 PR 就跑，不是只在 G2 才跑。
 - **它的 UI 包有自己的 G2 泳道。** 因为配了插件的树跑不过基座的 `npm run test`（5.3 节），样板的前端那一半由 `scripts/check_sample_plugin.sh` 验证，它挂在 `scripts/check_extended.sh` 里跑：用真工具同步这个包，对着一个**非空**的 `frontend/features/ext-*/` 跑 node 泳道，跑界面词汇守卫，再做类型检查。它的退出 `trap` 会**恢复**调用者原本的 `SILICON_NOTEBOOK_UI_PLUGINS` 而不是清空它，这样一台本来就配了私有插件的机器不会因为一次被中断的运行而丢掉它们。
+
+## 13. W3 认证示例（`examples/extensions/w3-auth`）
+
+`examples/extensions/w3-auth/` 是一个可独立构建的 `auth.provider` Python 包；它没有前端包，也没有插件 HTTP router。示例 TOML 明确写着 `enabled = false`，所以默认 checkout 不会 import 它，也不会开放 SSO。把它装进后端解释器，将 TOML 复制到仓库外，通过命名的环境变量提供 HTTPS 登录 origin、client id、client secret 与可选 CA bundle，然后再启用，并由 core 认证策略选中它。manifest 与所有部署插件一样受 `EXTENSION_API_VERSION` 发现检查；core 从不直接 import 这个示例包。
+
+适配器实现 README 对登记的固定 W3 路径：浏览器授权、JSON 授权码兑换、再读取 JSON userinfo。它不跟随重定向；TLS 校验始终打开，并可配置自定义 CA；socket timeout 受宿主剩余 deadline 再次压低。userinfo query-token 模式对应当前取得的供应商示例；Bearer 模式必须在平台确认后显式配置。两种模式都不记录或返回 token、完整 URL、上游响应或异常原文。
+
+W3 `uid` 必须是原始非空字符串：不强转、不转小写、不裁空白、不截断，并作为 `username`。显示姓名依次取 `displayNameCn` → `displayName` → `uid`。默认也以 `uid` 作为 `subject`；平台确认它的命名空间、稳定性与不可重分配合同之前，不得按这条身份规则上线。若另有已经确认的顶层不可变主体字段，可显式将它设为 `subject_field`，而 `username` 仍为 `uid`。改变该字段或 `provider_namespace` 是身份迁移，不是普通包升级。包内 README 与 README_zh 是其私有设置及平台确认门槛的运维来源。

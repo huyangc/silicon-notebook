@@ -209,7 +209,7 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # same shape as idx_conversations_share_token); no table, FK or
 # existing-column change, and no backfill -- every pre-existing row is simply
 # unshared.
-SCHEMA_VERSION = 77
+SCHEMA_VERSION = 78
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -4185,9 +4185,58 @@ class SqliteMigrator:
                 len(failed_steps), ", ".join(failed_steps),
             )
 
+    def _migration_78(self) -> None:
+        """Separate local credentials from stable external identities."""
+        with self._connect() as db:
+            self.add_column_if_missing(db, "users", "local_login_name", "TEXT")
+            self.add_column_if_missing(db, "users", "auth_revision", "INTEGER NOT NULL DEFAULT 0")
+            db.execute("UPDATE users SET local_login_name=username WHERE username<>''")
+            db.execute("CREATE UNIQUE INDEX idx_users_local_login_name ON users(local_login_name) WHERE local_login_name IS NOT NULL")
+            self.add_column_if_missing(db, "auth_sessions", "auth_source", "TEXT NOT NULL DEFAULT 'local'")
+            self.add_column_if_missing(db, "auth_sessions", "absolute_expires_at", "TEXT")
+            self.add_column_if_missing(db, "auth_sessions", "provider_namespace", "TEXT NOT NULL DEFAULT ''")
+            self.add_column_if_missing(db, "auth_sessions", "external_subject", "TEXT NOT NULL DEFAULT ''")
+            db.executescript("""
+                CREATE TABLE auth_policy (
+                 id INTEGER PRIMARY KEY CHECK(id=1),
+                 mode TEXT NOT NULL DEFAULT 'local' CHECK(mode IN ('local','dual','binding_required','sso_only','retired')),
+                 revision INTEGER NOT NULL DEFAULT 0,
+                 provider_id TEXT NOT NULL DEFAULT '', provider_namespace TEXT NOT NULL DEFAULT '',
+                 config_generation TEXT NOT NULL DEFAULT '', plugin_id TEXT NOT NULL DEFAULT '', retired_at TEXT, updated_by TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE external_identities (
+                 provider_namespace TEXT NOT NULL, subject TEXT NOT NULL,
+                 user_id TEXT NOT NULL REFERENCES users(id), status TEXT NOT NULL DEFAULT 'active',
+                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_login_at TEXT,
+                 PRIMARY KEY(provider_namespace,subject)
+                );
+                CREATE UNIQUE INDEX idx_external_identities_active_user
+                 ON external_identities(user_id,provider_namespace) WHERE status='active';
+                CREATE TABLE auth_transactions (
+                 token_digest TEXT PRIMARY KEY, purpose TEXT NOT NULL, browser_digest TEXT NOT NULL,
+                 payload TEXT NOT NULL, expires_at BIGINT NOT NULL
+                );
+                CREATE INDEX idx_auth_transactions_expiry ON auth_transactions(expires_at);
+                CREATE TABLE auth_policy_audit (
+                 id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, previous_mode TEXT NOT NULL,
+                 mode TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL
+                );
+                CREATE TABLE auth_identity_audit (
+                 id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, target_user_id TEXT NOT NULL,
+                 action TEXT NOT NULL, provider_namespace TEXT NOT NULL,
+                 subject TEXT NOT NULL, grant_reference TEXT NOT NULL DEFAULT '',
+                 created_at TEXT NOT NULL
+                );
+                CREATE INDEX idx_auth_identity_audit_created
+                 ON auth_identity_audit(created_at,id);
+            """)
+
     def _seed(self) -> None:
         now = _now()
         with self._connect() as db:
+            db.execute("INSERT INTO auth_policy(id) VALUES(1) ON CONFLICT(id) DO NOTHING")
+            policy = db.execute("SELECT * FROM auth_policy WHERE id=1").fetchone()
+            self.settings.validate_authentication_bootstrap(policy["mode"], retired=bool(policy["retired_at"]))
             db.execute(
                 """
                 INSERT OR IGNORE INTO users
@@ -4221,14 +4270,15 @@ class SqliteMigrator:
             )
             # 把内置 user-local 升级为 admin（id 不变=现有 notebook 零迁移）：
             # 每次启动据 settings.admin_password 重置 admin 密码（改密=改环境变量后重启）。
-            from app.domain.auth_utils import hash_password
-            pw_hash, pw_salt, pw_iters = hash_password(self.settings.admin_password)
-            db.execute(
-                "UPDATE users SET role='admin', username='admin', "
-                "password_hash=?, password_salt=?, password_iterations=?, updated_at=? "
-                "WHERE id='user-local'",
-                (pw_hash, pw_salt, pw_iters, now),
-            )
+            if policy["mode"] in ("local", "dual", "binding_required") and not policy["retired_at"]:
+                from app.domain.auth_utils import hash_password
+                pw_hash, pw_salt, pw_iters = hash_password(self.settings.admin_password)
+                db.execute(
+                    "UPDATE users SET role='admin', username='admin', local_login_name='admin', "
+                    "password_hash=?, password_salt=?, password_iterations=?, updated_at=? "
+                    "WHERE id='user-local'",
+                    (pw_hash, pw_salt, pw_iters, now),
+                )
             from app.domain.kg.names import normalize_name as _wl_norm
             builtin_whitelist = [
                 "VCO", "PLL", "LNA", "BJT", "MOS", "MOSFET", "CMOS", "FET",

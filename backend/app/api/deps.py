@@ -91,6 +91,10 @@ def _bearer_token(request: Request) -> str:
     return ""
 
 
+def stream_credential_is_valid(token: str) -> bool:
+    return identity_repository().resolve_session(token) is not None
+
+
 async def get_current_user(request: Request) -> AsyncIterator[UserProfile]:
     """解析 Bearer token → session → user，写入 ContextVar（请求结束复位）。
     无 token 且 settings.auth_optional → 回退 seeded admin；否则 401。
@@ -105,6 +109,8 @@ async def get_current_user(request: Request) -> AsyncIterator[UserProfile]:
         if user is None:
             raise HTTPException(status_code=401, detail="invalid or expired session")
     elif settings.auth_optional:
+        if await run_in_threadpool(lambda: repo.auth.get_policy()["mode"]) != "local":
+            raise HTTPException(status_code=401, detail="authentication required")
         user = await run_in_threadpool(repo.current_user)  # ContextVar 未设 → seeded admin
     else:
         raise HTTPException(status_code=401, detail="authentication required")

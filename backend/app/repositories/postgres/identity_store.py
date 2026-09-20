@@ -54,6 +54,8 @@ class IdentityStore:
     ) -> None:
         self.database = database
         self.settings = settings
+        from app.repositories.auth_store import AuthStore
+        self.auth = AuthStore(database, settings, self, postgres=True)
 
     def current_user(self) -> UserProfile:
         context_user = get_request_user()
@@ -100,20 +102,23 @@ class IdentityStore:
         翻译留在公开方法(异常在 execute 时抛出,穿过本 helper 上抛)。"""
         from app.domain.auth_utils import hash_password, is_valid_username, normalize_username
 
+        self.auth.require_local_write(connection)
         if not is_valid_username(username):
             raise ValueError("invalid username")
         normalized = normalize_username(username)
+        self.auth.check_name(connection, normalized)
         user_id = f"user-{uuid4().hex}"
         now = utc_now()
         password_hash, password_salt, iterations = hash_password(password)
         user = connection.execute(
             "INSERT INTO users "
-            "(id,email,display_name,role,status,username,password_hash,password_salt,"
+            "(id,email,display_name,role,status,username,local_login_name,password_hash,password_salt,"
             "password_iterations,created_at,updated_at) "
-            "VALUES (%s,%s,%s,'user','active',%s,%s,%s,%s,%s,%s) RETURNING *",
+            "VALUES (%s,%s,%s,'user','active',%s,%s,%s,%s,%s,%s,%s) RETURNING *",
             (
                 user_id,
                 f"{normalized}@users.silicon-notebook.local",
+                normalized,
                 normalized,
                 normalized,
                 password_hash,
@@ -132,28 +137,7 @@ class IdentityStore:
         return user, profile
 
     def _insert_session_in_txn(self, connection, user_id: str) -> str:
-        token = secrets.token_urlsafe(32)
-        now = utc_now()
-        connection.execute(
-            "INSERT INTO auth_sessions(token,user_id,created_at,expires_at,last_seen_at) "
-            "VALUES (%s,%s,%s,%s,%s)",
-            (token, user_id, now, now + timedelta(days=30), now),
-        )
-        # 最近上线(规格 docs/superpowers/specs/
-        # 2026-09-07-admin-usage-overview-usage-signals-design_zh.md §3
-        # B1、§7 决策 1):登录/注册/新建会话与 auth_sessions 同一写事务里
-        # 一并写 users.last_seen_at——这里总是刚登录,不需要节流判断。仍带
-        # 单调守卫(AND last_seen_at IS NULL OR < %s):与 resolve_session 的
-        # touch 路径共用同一条不变量(`docs/development*.md`「单调不回退」),
-        # 使该表述对登录路径同样成立——SQLite 侧同名方法用裸本地时刻
-        # (`datetime.now()`),DST 回拨时会真的倒退;PG 侧这里加同一守卫
-        # 主要是保持两侧语义逐字对齐,而不是因为 PG 服务器时钟本身有回退风险。
-        connection.execute(
-            "UPDATE users SET last_seen_at=%s "
-            "WHERE id=%s AND (last_seen_at IS NULL OR last_seen_at<%s)",
-            (now, user_id, now),
-        )
-        return token
+        return self.auth.insert_local_session(connection, user_id)
 
     def create_user(self, username: str, password: str) -> UserProfile:
         try:
@@ -185,11 +169,13 @@ class IdentityStore:
     def authenticate_user(self, username: str, password: str) -> UserProfile | None:
         from app.domain.auth_utils import normalize_username, verify_password
 
-        with self.database.connect() as connection:
+        with self.database.write() as connection:
+            if not self.auth.local_login_allowed(connection):
+                return None
             user = connection.execute(
-                "SELECT * FROM users WHERE username=%s", (normalize_username(username),)
+                "SELECT * FROM users WHERE local_login_name=%s", (normalize_username(username),)
             ).fetchone()
-            if user is None or not verify_password(
+            if user is None or user["status"] != "active" or not verify_password(
                 password,
                 user["password_hash"],
                 user["password_salt"],
@@ -211,11 +197,13 @@ class IdentityStore:
         from app.domain.auth_utils import normalize_username, verify_password
 
         with self.database.write() as db:
+            if not self.auth.local_login_allowed(db):
+                return None
             user = db.execute(
-                "SELECT * FROM users WHERE username=%s FOR UPDATE",
+                "SELECT * FROM users WHERE local_login_name=%s FOR UPDATE",
                 (normalize_username(username),),
             ).fetchone()
-            if user is None:
+            if user is None or user["status"] != "active":
                 return None
             if not verify_password(
                 password,
@@ -234,74 +222,13 @@ class IdentityStore:
             return self._insert_session_in_txn(connection, user_id)
 
     def resolve_session(self, token: str) -> UserProfile | None:
-        if not token:
-            return None
-        now = utc_now()
-        with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM auth_sessions WHERE token=%s", (token,)
-            ).fetchone()
-            if row is None:
-                return None
-            if row["expires_at"] <= now:
-                expired = True
-                user = profile = None
-            else:
-                expired = False
-                user = connection.execute(
-                    "SELECT * FROM users WHERE id=%s", (row["user_id"],)
-                ).fetchone()
-                profile = (
-                    connection.execute(
-                        "SELECT * FROM user_profiles WHERE user_id=%s", (user["id"],)
-                    ).fetchone()
-                    if user
-                    else None
-                )
-        if expired:
-            with self.database.write() as connection:
-                connection.execute("DELETE FROM auth_sessions WHERE token=%s", (token,))
-            return None
-        if user is None:
-            return None
-        touch_before = now - timedelta(
-            seconds=max(1, self.settings.auth_session_touch_interval_seconds)
-        )
-        if row["last_seen_at"] <= touch_before:
-            with self.database.write() as connection:
-                # 加锁顺序必须是 users 先、auth_sessions 后,与
-                # change_user_password / admin_reset_user_password 一致(那两个
-                # 方法先 `SELECT users ... FOR UPDATE` 再 `DELETE FROM
-                # auth_sessions`)。这里以前是反过来(先 CAS auth_sessions 再
-                # 按 CAS 结果决定要不要碰 users),两条路径因此以相反顺序申请
-                # 对方持有的行锁——在本机 PG 上可复现 DeadlockDetected(两个
-                # 并发事务,一个走本 touch 路径、另一个走改密路径)。单调不
-                # 回退(AND last_seen_at IS NULL OR < %s)已经让重复/并发的
-                # touch 请求各自写 users 都无害,因此不再需要先看 auth_sessions
-                # 的 CAS 是否命中才决定要不要写 users——直接按新顺序发两条
-                # UPDATE。这一列不随 auth_sessions 行被删除(登出/吊销)而
-                # 清空,登出后仍保留。
-                connection.execute(
-                    "UPDATE users SET last_seen_at=%s "
-                    "WHERE id=%s AND (last_seen_at IS NULL OR last_seen_at<%s)",
-                    (now, user["id"], now),
-                )
-                connection.execute(
-                    "UPDATE auth_sessions SET last_seen_at=%s,expires_at=%s "
-                    "WHERE token=%s AND last_seen_at=%s AND expires_at>%s",
-                    (
-                        now,
-                        now + timedelta(days=30),
-                        token,
-                        row["last_seen_at"],
-                        now,
-                    ),
-                )
-        return self._user_profile(user, profile)
+        return self.auth.resolve_session(token)
 
     def delete_session(self, token: str) -> None:
         with self.database.write() as connection:
+            self.auth.lock(connection)
             connection.execute("DELETE FROM auth_sessions WHERE token=%s", (token,))
+        self.auth.cancel_for_session(token)
 
     def audit_labels_for_user_ids(self, user_ids) -> dict[str, str]:
         """PostgreSQL parity for bounded legacy audit-id resolution."""
@@ -329,6 +256,7 @@ class IdentityStore:
         密码重置)共用同一加锁顺序;actor==target 时 IN 去重命中同一行。
         actor 缺失或非 admin → PermissionError;返回 (actor_row, target_row|None),
         目标缺失由调用方按各自语义处理(通常 KeyError → 404)。"""
+        self.auth.lock(db)
         rows = db.execute(
             "SELECT id,username,role FROM users WHERE id IN (%s,%s) "
             "ORDER BY id FOR UPDATE",
@@ -505,6 +433,7 @@ class IdentityStore:
         # 新密码哈希不依赖事务内状态,提前算好缩短持锁时间(镜像 SQLite 侧)。
         pw_hash, pw_salt, pw_iters = hash_password(new_password)
         with self.database.write() as db:
+            self.auth.require_local_write(db)
             row = db.execute(
                 "SELECT * FROM users WHERE id=%s FOR UPDATE", (user_id,)
             ).fetchone()
@@ -519,7 +448,7 @@ class IdentityStore:
                 raise PasswordMismatchError("wrong password")
             db.execute(
                 "UPDATE users SET password_hash=%s,password_salt=%s,"
-                "password_iterations=%s,updated_at=%s WHERE id=%s",
+                "password_iterations=%s,updated_at=%s,auth_revision=auth_revision+1 WHERE id=%s",
                 (pw_hash, pw_salt, pw_iters, utc_now(), user_id),
             )
             db.execute(
@@ -542,12 +471,13 @@ class IdentityStore:
         # 镜像 change_user_password:哈希提前算,缩短持锁时间。
         pw_hash, pw_salt, pw_iters = hash_password(new_password)
         with self.database.write() as db:
+            self.auth.require_local_write(db)
             _actor, target = self._lock_actor_and_target(db, actor_id, user_id)
             if target is None:
                 raise KeyError(user_id)
             db.execute(
                 "UPDATE users SET password_hash=%s,password_salt=%s,"
-                "password_iterations=%s,updated_at=%s WHERE id=%s",
+                "password_iterations=%s,updated_at=%s,auth_revision=auth_revision+1 WHERE id=%s",
                 (pw_hash, pw_salt, pw_iters, utc_now(), user_id),
             )
             db.execute("DELETE FROM auth_sessions WHERE user_id=%s", (user_id,))

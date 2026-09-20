@@ -94,15 +94,15 @@ def _initialize(
     from app.domain.auth_utils import hash_password
     from app.domain.kg.names import normalize_name as whitelist_norm
 
-    password_hash, password_salt, password_iterations = hash_password(
-        settings.admin_password
-    )
     whitelist = (
         "VCO", "PLL", "LNA", "BJT", "MOS", "MOSFET", "CMOS", "FET",
         "NMOS", "PMOS", "BiCMOS", "JFET", "op amp", "ADC", "DAC",
         "CMRR", "PSRR", "ESD", "PVT", "AC", "DC", "IC", "RF", "IF", "LO",
     )
     with database.write() as connection:
+        connection.execute("INSERT INTO auth_policy(id) VALUES(1) ON CONFLICT(id) DO NOTHING")
+        policy = connection.execute("SELECT * FROM auth_policy WHERE id=1 FOR UPDATE").fetchone()
+        settings.validate_authentication_bootstrap(policy["mode"], retired=bool(policy["retired_at"]))
         connection.execute(
             "INSERT INTO users "
             "(id,email,display_name,role,status,created_at,updated_at) "
@@ -122,12 +122,14 @@ def _initialize(
             "ON CONFLICT DO NOTHING",
             (jsonb(["Analog IC", "Packaging", "Reliability"]), now, now),
         )
-        connection.execute(
-            "UPDATE users SET role='admin',username='admin',password_hash=%s,"
-            "password_salt=%s,password_iterations=%s,updated_at=%s "
-            "WHERE id='user-local'",
-            (password_hash, password_salt, password_iterations, now),
-        )
+        if policy["mode"] in ("local", "dual", "binding_required") and not policy["retired_at"]:
+            password_hash, password_salt, password_iterations = hash_password(settings.admin_password)
+            connection.execute(
+                "UPDATE users SET role='admin',username='admin',local_login_name='admin',password_hash=%s,"
+                "password_salt=%s,password_iterations=%s,updated_at=%s "
+                "WHERE id='user-local'",
+                (password_hash, password_salt, password_iterations, now),
+            )
         for term in whitelist:
             connection.execute(
                 "INSERT INTO concept_whitelist(term,note,created_at) "

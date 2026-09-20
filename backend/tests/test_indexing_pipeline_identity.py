@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 from app.core.config import Settings
 from app.models.notebooks import NotebookCreate
+from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.migrations import SqliteMigrator
 from app.services.scale_index_builder import ScaleIndexBuilder
 from app.services.sqlite_repository import SQLiteRepository, _now
 
@@ -15,15 +17,27 @@ def _repo(tmp_path, monkeypatch):
     return SQLiteRepository(Settings(_env_file=None))
 
 
+def _migration_database(tmp_path):
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'identity.db'}",
+        storage_dir=str(tmp_path / "storage"),
+        model_services_config="",
+        _env_file=None,
+    )
+    database = SqliteDatabase(settings, tmp_path)
+    return database, SqliteMigrator(database, settings)
+
+
 def test_sqlite_migration_57_to_58_preserves_notebook_and_adds_identities(
     tmp_path, monkeypatch
 ):
     from app.repositories.sqlite import migrations as migrations_module
 
     monkeypatch.setattr(migrations_module, "SCHEMA_VERSION", 57)
-    repo = _repo(tmp_path, monkeypatch)
+    database, migrator = _migration_database(tmp_path)
+    assert migrator.migrate()
     notebook_id = "nb-pre-pipeline"
-    with repo._connect() as db:
+    with database.write() as db:
         db.execute(
             "INSERT INTO notebooks (id,name,created_at,updated_at) VALUES (?,?,?,?)",
             (notebook_id, "pre-pipeline", _now(), _now()),
@@ -36,9 +50,9 @@ def test_sqlite_migration_57_to_58_preserves_notebook_and_adds_identities(
         assert db.execute("PRAGMA user_version").fetchone()[0] == 57
 
     monkeypatch.setattr(migrations_module, "SCHEMA_VERSION", 58)
-    assert repo._migrator.migrate() == [58]
+    assert migrator.migrate() == [58]
 
-    with repo._connect() as db:
+    with database.connect() as db:
         notebook_row = db.execute(
             "SELECT name,indexing_pipeline,indexing_pipeline_version,"
             "indexing_pipeline_generation,indexing_pipeline_job_id "
@@ -58,6 +72,7 @@ def test_sqlite_migration_57_to_58_preserves_notebook_and_adds_identities(
         "indexing_pipeline_job_id": "",
     }
     assert {"indexing_pipeline_id", "indexing_pipeline_version"} <= product_columns
+    database.close_local()
 
 
 def test_sqlite_migration_58_to_59_adds_durable_stage_tables(
@@ -66,8 +81,9 @@ def test_sqlite_migration_58_to_59_adds_durable_stage_tables(
     from app.repositories.sqlite import migrations as migrations_module
 
     monkeypatch.setattr(migrations_module, "SCHEMA_VERSION", 58)
-    repo = _repo(tmp_path, monkeypatch)
-    with repo._connect() as db:
+    database, migrator = _migration_database(tmp_path)
+    assert migrator.migrate()
+    with database.connect() as db:
         assert db.execute("PRAGMA user_version").fetchone()[0] == 58
         assert db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
@@ -75,9 +91,9 @@ def test_sqlite_migration_58_to_59_adds_durable_stage_tables(
         ).fetchone() is None
 
     monkeypatch.setattr(migrations_module, "SCHEMA_VERSION", 59)
-    assert repo._migrator.migrate() == [59]
+    assert migrator.migrate() == [59]
 
-    with repo._connect() as db:
+    with database.connect() as db:
         tables = {
             str(row["name"])
             for row in db.execute(
@@ -89,6 +105,7 @@ def test_sqlite_migration_58_to_59_adds_durable_stage_tables(
         "indexing_pipeline_stages",
         "indexing_pipeline_stage_sources",
     } <= tables
+    database.close_local()
 
 
 def test_startup_recovery_discards_unpublished_stage_and_keeps_live_identity(
