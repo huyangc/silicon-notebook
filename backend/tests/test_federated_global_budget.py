@@ -760,12 +760,12 @@ def test_a_hard_failure_releases_the_legs_still_running(pool):
     assert receipts.libraries == []
 
 
-def test_a_leg_parked_on_the_fanout_slot_reports_queue_deadline(pool):
+def test_a_leg_parked_on_the_fanout_slot_reports_queue_deadline(pool, monkeypatch):
     """卡在 run 的 ``fanout_limit`` 信号量上的腿是 ``queue_deadline``,不是超时。
 
     它一个字也没问数据库——等的是这次 run 自己的扇出闸。记成 ``timeout`` 会让用户
     读到「请缩小范围」,而范围压根没被搜过,正是两个原因码分家要避免的那种误导。
-    窗口比扇出闸宽,所以两条腿都提交了,第二条必然停在信号量上。
+    窗口比扇出闸宽;先握手确认 holder 已拿到闸,再提交另一条腿,确保它停在信号量上。
     """
     ids = ("nb-holder", "nb-parked")
     holding = threading.Event()
@@ -780,6 +780,17 @@ def test_a_leg_parked_on_the_fanout_slot_reports_queue_deadline(pool):
 
     candidates = FakeCandidates(_participants(ids), retrieve=retrieve)
     receipts = Receipts()
+    real_submit = pool.submit
+
+    def submit_after_holder_starts(*args, **kwargs):
+        future = real_submit(*args, **kwargs)
+        # Executor submission order does not guarantee semaphore acquisition
+        # order. The first producer signals only after taking the real slot;
+        # let submission proceed to the parked leg only after that handshake.
+        assert wait_until_set(holding), "holder never acquired the fanout slot"
+        return future
+
+    monkeypatch.setattr(pool, "submit", submit_after_holder_starts)
 
     with _global_run(
         ids, _plan(pool, receipts, window=2, phase=0.4), fanout_limit=1,
