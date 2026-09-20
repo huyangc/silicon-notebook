@@ -6,7 +6,11 @@ from fastapi.testclient import TestClient
 
 from app.api import auth_routes, sso_routes
 from app.core.config import Settings
-from app.domain.auth_provider import AuthProviderDescriptor, ExternalIdentity
+from app.domain.auth_provider import (
+    AuthProviderDescriptor,
+    AuthProviderError,
+    ExternalIdentity,
+)
 from app.services.auth_flow import AuthFlowService
 from app.services.sqlite_repository import SQLiteRepository
 
@@ -15,10 +19,17 @@ class Provider:
     def __init__(self):
         self.identity = ExternalIdentity("corp.production", "employee-17", "b87654321", "统一姓名")
         self.calls = []
+        self.available = True
+        self.availability_checks = 0
 
     def describe(self):
         return AuthProviderDescriptor("corp.auth", "corp.auth.provider", "corp.auth",
             "corp.production", "generation-1", "统一登录", "https://identity.test/authorize", True)
+
+    def ensure_available(self):
+        self.availability_checks += 1
+        if not self.available:
+            raise AuthProviderError("auth_provider_unavailable")
 
     def authorization_url(self, *, state, redirect_uri, code_challenge):
         return "https://identity.test/authorize?" + urlencode({"state": state,
@@ -80,6 +91,7 @@ def test_local_default_needs_no_external_plugin(setup):
     assert not caps["sso_login"]
     assert client.post("/api/auth/sso/start").status_code == 503
     assert provider.calls == []
+    assert provider.availability_checks == 0
 
 
 def test_local_register_and_login_preserve_complete_legacy_user_payload(setup):
@@ -228,6 +240,7 @@ def test_configuration_maintenance_keeps_mode_and_supports_restart(setup, monkey
     _dual(identity)
     admin = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()
     headers = {"Authorization": "Bearer " + admin["token"]}
+    provider.available = False
     response = client.patch("/api/admin/auth/provider-configuration", headers=headers,
         json={"expected_revision": 1, "configuration_generation": "generation-2"})
     assert response.status_code == 200, response.text
@@ -235,6 +248,7 @@ def test_configuration_maintenance_keeps_mode_and_supports_restart(setup, monkey
     assert client.get("/api/auth/capabilities").status_code == 503
     descriptor = provider.describe()
     monkeypatch.setattr(provider, "describe", lambda: replace(descriptor, configuration_generation="generation-2"))
+    provider.available = True
     assert client.get("/api/auth/capabilities").status_code == 200
 
 
@@ -318,3 +332,28 @@ def test_configuration_maintenance_rejects_noncanonical_generation_without_write
     updated = identity.auth.get_policy()
     assert updated["revision"] == 2
     assert updated["config_generation"] == "generation-2"
+
+
+def test_unavailable_provider_blocks_capabilities_and_policy_write_without_revision(setup):
+    client, identity, provider, _flow = setup
+    _dual(identity)
+    admin = client.post(
+        "/api/auth/login", json={"username": "admin", "password": "admin"}
+    ).json()
+    headers = {"Authorization": "Bearer " + admin["token"]}
+    provider.available = False
+
+    assert client.get("/api/auth/capabilities").status_code == 503
+    rejected = client.patch(
+        "/api/admin/auth/policy",
+        headers=headers,
+        json={
+            "mode": "binding_required",
+            "expected_revision": 1,
+            "allow_rollback": False,
+        },
+    )
+    assert rejected.status_code == 503
+    policy = identity.auth.get_policy()
+    assert policy["mode"] == "dual"
+    assert policy["revision"] == 1

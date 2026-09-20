@@ -11,6 +11,7 @@ import {
 } from "../../../auth";
 import { toUserMessage } from "../../../errors";
 import { IdentityBindingConfirmation } from "../../../identity-binding-confirmation";
+import { consumeSsoReturnLocation } from "../../../auth-return-location";
 
 type CallbackState =
   | { kind: "working" }
@@ -44,7 +45,7 @@ export default function SsoCallbackPage() {
       .then((result) => {
         if (result.status === "authenticated") {
           setToken(result.token);
-          window.location.replace("/");
+          window.location.replace(consumeSsoReturnLocation());
           return;
         }
         setState({ kind: "preview", pending: result });
@@ -62,7 +63,7 @@ export default function SsoCallbackPage() {
     try {
       const result = await confirmIdentityBinding(state.pending.pending_id);
       setToken(result.token);
-      window.location.replace("/");
+      window.location.replace(consumeSsoReturnLocation());
     } catch (err) {
       setState({ kind: "error", copy: toUserMessage(err, "关联未完成，请返回后重试。") });
       setBusy(false);
@@ -74,7 +75,7 @@ export default function SsoCallbackPage() {
     setBusy(true);
     try {
       await cancelIdentityBinding(state.pending.pending_id);
-      window.location.replace("/");
+      window.location.replace(consumeSsoReturnLocation());
     } catch (err) {
       setState({ kind: "error", copy: toUserMessage(err, "取消关联失败，请稍后重试。") });
       setBusy(false);
@@ -89,7 +90,10 @@ export default function SsoCallbackPage() {
         {state.kind === "error" && <>
           <h1 className="auth-title">统一登录未完成</h1>
           <p className="auth-error" role="alert">{state.copy}</p>
-          <a className="auth-return" href="/">返回登录页</a>
+          <a className="auth-return" href="/" onClick={(event) => {
+            event.preventDefault();
+            window.location.replace(consumeSsoReturnLocation());
+          }}>返回登录页</a>
         </>}
         {state.kind === "preview" && <>
           <IdentityBindingConfirmation pending={state.pending} busy={busy} onConfirm={() => { void confirm(); }} onCancel={() => { void cancel(); }} />

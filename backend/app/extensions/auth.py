@@ -127,6 +127,11 @@ class AuthProviderHost:
         provider = self._provider
         return None if provider is None else provider.descriptor
 
+    def ensure_available(self) -> None:
+        """Fail closed unless the frozen provider is admitted right now."""
+
+        self._require_available()
+
     def authorization_url(
         self,
         *,

@@ -1583,8 +1583,16 @@ export default function Home() {
       let capabilities = LOCAL_AUTH_CAPABILITIES;
       try {
         capabilities = await fetchAuthCapabilities();
-      } catch {
-        // 旧部署尚未提供能力端点时保留原本地登录体验；真正登录仍由服务端裁决。
+      } catch (error) {
+        // Only an explicitly missing endpoint identifies a legacy deployment.
+        // An unavailable provider must not silently expose local authentication.
+        if (httpErrorStatus(error) !== 404) {
+          if (!cancelled) {
+            setAuthRestoreError("认证状态暂时无法确认，请稍后重试。");
+            setAuthChecked(true);
+          }
+          return;
+        }
       }
       if (cancelled) return;
       setAuthCapabilities(capabilities);

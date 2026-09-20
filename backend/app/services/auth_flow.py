@@ -7,7 +7,6 @@ import secrets
 from urllib.parse import urlencode, urlsplit
 
 from app.core.config import Settings
-from app.core.extension_admission import disabled_plugin_ids
 from app.domain.auth_provider import AuthProviderError, AuthProviderHostPort
 
 AUTH_BROWSER_PROOF_BYTES = 32
@@ -40,13 +39,14 @@ class AuthFlowService:
         ):
             raise AuthProviderError("https_required")
         descriptor = self.host.describe()
-        if descriptor is None or descriptor.plugin_id in disabled_plugin_ids() or (
+        if descriptor is None or (
             descriptor.plugin_id != policy["plugin_id"]
             or descriptor.provider_id != policy["provider_id"]
             or descriptor.provider_namespace != policy["provider_namespace"]
             or descriptor.configuration_generation != policy["config_generation"]
         ):
             raise AuthProviderError("provider_configuration_mismatch")
+        self.host.ensure_available()
         return descriptor
 
     def capabilities(self):

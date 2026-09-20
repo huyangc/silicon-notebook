@@ -66,6 +66,8 @@ class AuthProviderError(RuntimeError):
 class AuthProviderHostPort(Protocol):
     def describe(self) -> AuthProviderDescriptor | None: ...
 
+    def ensure_available(self) -> None: ...
+
     def authorization_url(
         self,
         *,
