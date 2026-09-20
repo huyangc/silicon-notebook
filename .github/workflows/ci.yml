@@ -88,6 +88,10 @@ jobs:
     name: level-3-postgres-integration
     runs-on: ubuntu-24.04
     timeout-minutes: 35
+    env:
+      # This cache has never contained a -march=native wheel. Do not fall
+      # back to a generic pip cache from another build policy.
+      PIP_CACHE_DIR: ${{ runner.temp }}/pip-portable-v1
     services:
       postgres:
         image: postgres:16
@@ -113,12 +117,19 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Cache portable Python dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ env.PIP_CACHE_DIR }}
+          key: ${{ runner.os }}-${{ runner.arch }}-py313-portable-hnsw-v1-${{ hashFiles('backend/requirements.txt') }}
+
       - name: Install backend dependencies
         env:
           HNSWLIB_NO_NATIVE: "1"
-        run: python -m pip install --no-cache-dir -r backend/requirements.txt
+        run: python -m pip install -r backend/requirements.txt
 
       - name: Provision least-privilege PostgreSQL test targets
+        id: postgres-targets
         env:
           PGHOST: 127.0.0.1
           PGPORT: "5432"
@@ -127,7 +138,9 @@ jobs:
           POSTGRES_APP_PASSWORD: ci-only-app-password
         run: |
           python - <<'PY'
+          import json
           import os
+          from urllib.parse import quote
 
           import psycopg
           from psycopg import sql
@@ -135,6 +148,7 @@ jobs:
           role = "silicon_notebook_app"
           decoy_owner_role = "silicon_notebook_ci_owner_decoy"
           password = os.environ["POSTGRES_APP_PASSWORD"]
+          targets = []
           with psycopg.connect(
               host=os.environ["PGHOST"],
               port=os.environ["PGPORT"],
@@ -159,21 +173,28 @@ jobs:
                       sql.Identifier(decoy_owner_role), sql.Identifier(role)
                   )
               )
-              connection.execute(
-                  sql.SQL("CREATE DATABASE {} WITH OWNER {} ENCODING 'UTF8' TEMPLATE template0").format(
-                      sql.Identifier("silicon_notebook_ci_test"), sql.Identifier(role)
-                  )
-              )
-              connection.execute(
-                  sql.SQL("CREATE DATABASE {} WITH OWNER {} ENCODING 'UTF8' LOCALE_PROVIDER icu ICU_LOCALE 'en-US' TEMPLATE template0").format(
-                      sql.Identifier("silicon_notebook_non_c_test"), sql.Identifier(role)
-                  )
-              )
-              connection.execute(
-                  sql.SQL("CREATE DATABASE {} WITH OWNER {} ENCODING 'SQL_ASCII' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0").format(
-                      sql.Identifier("silicon_notebook_non_utf_test"), sql.Identifier(role)
-                  )
-              )
+              # Migrations use a database-wide advisory lock. Each worker
+              # needs its own database, not merely its own schema.
+              for worker in range(4):
+                  group = {}
+                  for key, kind, options in (
+                      ("primary", "ci", "ENCODING 'UTF8'"),
+                      ("non_c", "non_c", "ENCODING 'UTF8' LOCALE_PROVIDER icu ICU_LOCALE 'en-US'"),
+                      ("non_utf", "non_utf", "ENCODING 'SQL_ASCII' LC_COLLATE 'C' LC_CTYPE 'C'"),
+                  ):
+                      database = f"silicon_notebook_{kind}_w{worker}_test"
+                      connection.execute(
+                          sql.SQL("CREATE DATABASE {} WITH OWNER {} {} TEMPLATE template0").format(
+                              sql.Identifier(database), sql.Identifier(role), sql.SQL(options)
+                          )
+                      )
+                      group[key] = (
+                          f"postgresql://{quote(role, safe='')}:{quote(password, safe='')}"
+                          f"@{os.environ['PGHOST']}:{os.environ['PGPORT']}/{database}"
+                      )
+                  targets.append(group)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"targets={json.dumps(targets)}\n")
           PY
 
       - name: Run PostgreSQL adapter integration gate
@@ -181,7 +202,14 @@ jobs:
           PYTHON_BIN: python
           POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED: "1"
           TEST_POSTGRES_DECOY_OWNER_ROLE: silicon_notebook_ci_owner_decoy
-          TEST_POSTGRES_URL: postgresql://silicon_notebook_app:ci-only-app-password@127.0.0.1:5432/silicon_notebook_ci_test
-          TEST_POSTGRES_NON_C_URL: postgresql://silicon_notebook_app:ci-only-app-password@127.0.0.1:5432/silicon_notebook_non_c_test
-          TEST_POSTGRES_NON_UTF_URL: postgresql://silicon_notebook_app:ci-only-app-password@127.0.0.1:5432/silicon_notebook_non_utf_test
+          TEST_POSTGRES_TARGETS_JSON: ${{ steps.postgres-targets.outputs.targets }}
         run: bash scripts/check_postgres.sh
+
+      - name: Upload PostgreSQL test timings
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: postgres-test-timings
+          path: backend/.local/postgres-junit.xml
+          if-no-files-found: warn
+          retention-days: 7

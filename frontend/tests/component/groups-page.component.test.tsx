@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -35,6 +35,7 @@ import {
   type GroupDetail,
 } from "../../app/group-api.ts";
 import { GroupsPage } from "../../app/groups-page.tsx";
+import { COPY_RESULT_HOLD_MS } from "../../app/copy-result";
 import type { NotebookSummary } from "../../app/workspace-model.ts";
 
 const OWNER_DETAIL: GroupDetail = {
@@ -554,25 +555,33 @@ async function openInviteCard(user: ReturnType<typeof userEvent.setup>) {
 
 test("复制成功时按钮自己变成「已复制」并换成成功配色，随后自动还原", async () => {
   const user = userEvent.setup();
-  const writeText = vi.fn().mockResolvedValue(undefined);
+  let completeCopy!: () => void;
+  const writeText = vi.fn(() => new Promise<void>((resolve) => { completeCopy = resolve; }));
   Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
   try {
     const copy = await openInviteCard(user);
     await user.click(copy);
 
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(
+    expect(writeText).toHaveBeenCalledWith(
       expect.stringContaining("group_invite=gri_copy-token"),
-    ));
-    const copied = await screen.findByRole("button", { name: "已复制" });
+    );
+    // Keep userEvent on the real clock; only the pending result uses fake time.
+    vi.useFakeTimers();
+    await act(async () => { completeCopy(); });
+    const copied = screen.getByRole("button", { name: "已复制" });
     expect(copied).toHaveClass("copy-result-copied");
     expect(document.querySelector(".group-page-status.success")).not.toBeInTheDocument();
 
     // 结果态是 JS 状态,不像 :active 那样松手自动还原——忘了摘掉就会一直挂着,
     // 下一次点击反而看不出有没有点上。
-    const restored = await screen.findByRole("button", { name: "复制" }, { timeout: 4000 });
+    await act(async () => { await vi.advanceTimersByTimeAsync(COPY_RESULT_HOLD_MS - 1); });
+    expect(screen.getByRole("button", { name: "已复制" })).toHaveClass("copy-result-copied");
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    const restored = screen.getByRole("button", { name: "复制" });
     expect(restored).not.toHaveClass("copy-result-copied");
     expect(restored).not.toHaveClass("copy-result-failed");
   } finally {
+    vi.useRealTimers();
     Reflect.deleteProperty(navigator, "clipboard");
   }
 });

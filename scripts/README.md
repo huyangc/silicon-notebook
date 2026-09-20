@@ -142,6 +142,17 @@ PYTHON_BIN=/path/to/python bash scripts/check.sh
 ```
 contracts + 后端测试/离线 smoke + 前端测试/tsc/build 三条 lane 并行执行。脚本会强制 `MODEL_SERVICES_CONFIG=""`，不读取开发者真实密钥，也不会访问付费/网络模型服务；EXIT=0 即过。
 
+### `check_postgres.sh` —— 独立 PostgreSQL 门禁
+
+本地串行运行需显式 `TEST_POSTGRES_URL` 指向专用 `silicon_notebook_*_test` 数据库。
+非 C UTF8 与非 UTF 辅助库分别由 `TEST_POSTGRES_NON_C_URL`、`TEST_POSTGRES_NON_UTF_URL`
+提供；权威 CI 要求三者齐全。可选的四 worker 模式改用 `TEST_POSTGRES_TARGETS_JSON`：
+四个 `{ "primary": "URL", "non_c": "URL", "non_utf": "URL" }` 对象组成的数组，
+数据库须由管理员预建，同一显式服务端上的十二个目标互不相同，不得与串行 URL 变量混用。
+运行方式为 `PYTHON_BIN=/path/to/python bash scripts/check_postgres.sh`；launcher
+预检全部目标并隔离凭据，每条用例仍使用独立 schema。慢测试计时直接输出，JUnit 写入
+`backend/.local/postgres-junit.xml`。完整隔离与 CI 约定见[开发说明](../docs/development_zh.md#验证)。
+
 ### `migrate_sqlite_to_postgres.py` —— SQLite 存量迁移到 PostgreSQL
 
 默认只预检；目标必须是空的 PostgreSQL 16 UTF-8 数据库，URL 从环境变量读取而不出现在 CLI 参数：

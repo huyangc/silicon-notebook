@@ -13,6 +13,12 @@ import pytest
 
 from app.core.config import Settings
 from app.core.database_url import database_identity
+from tests.postgres.targets import (
+    PARALLEL_WORKERS,
+    TARGETS_ENV,
+    configured_target_groups,
+    worker_environment,
+)
 
 
 _DEDICATED_DATABASE = re.compile(
@@ -29,6 +35,36 @@ _SAFE_SSLMODES = {
     "verify-ca",
     "verify-full",
 }
+
+
+def pytest_configure(config) -> None:
+    """Each xdist worker owns three databases; ordinary serial runs are unchanged."""
+    try:
+        groups = configured_target_groups(os.environ)
+        if groups is None:
+            return
+        for group in groups:
+            for url in group.values():
+                _require_dedicated_test_database(url)
+                if urlsplit(url).password is not None:
+                    raise RuntimeError("PostgreSQL worker URL contains a password")
+        worker = getattr(config, "workerinput", None)
+        if worker is None:
+            if (
+                config.getoption("numprocesses") != PARALLEL_WORKERS
+                or config.getoption("dist") != "loadgroup"
+                or str(config.getoption("maxworkerrestart")) != "0"
+            ):
+                raise RuntimeError(
+                    "PostgreSQL target groups require four fixed loadgroup workers"
+                )
+            return
+        os.environ.update(worker_environment(groups, worker["workerid"]))
+        # Nested subprocess gates deliberately inherit only this worker's
+        # serial targets, never another worker's targets or the controller map.
+        os.environ.pop(TARGETS_ENV)
+    except (RuntimeError, ValueError, KeyError):
+        raise pytest.UsageError("invalid PostgreSQL worker target configuration") from None
 
 
 @dataclass(frozen=True)

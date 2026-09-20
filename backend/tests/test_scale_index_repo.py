@@ -592,7 +592,7 @@ def test_build_scale_index_writes_chunk_ann(repo):
     assert idx.chunk_ann_path.endswith("chunk_ann.bin")
 
 
-def test_build_scale_index_emits_stage_timings(repo, monkeypatch):
+def test_build_scale_index_emits_stage_timings_and_callbacks(repo, monkeypatch):
     """build_scale_index must time each internal stage (kg_matrix/ann_build/
     synonym/gather/transition/chunk_matrix/viz_arrays/persist) and emit a
     scale_index_build event per stage plus a final total — for locating the
@@ -601,7 +601,9 @@ def test_build_scale_index_emits_stage_timings(repo, monkeypatch):
     before gather (ann_build/synonym are new stages; gather no longer builds
     its own hnsw). Disk manifest.json carries the pre-persist stages
     (persist/total aren't known until after the file is written); the
-    RETURNED manifest dict additionally carries persist+total."""
+    RETURNED manifest dict additionally carries persist+total. The facade's
+    on_stage callback reports those same stages for CLI progress; observe
+    both outputs from this one build of the same notebook."""
     nb = repo.create_notebook(NotebookCreate(name="base"))
     repo.store_kg(nb.id, None, [
         {"local_id": "a", "object_type": "concept", "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
@@ -618,9 +620,12 @@ def test_build_scale_index_emits_stage_timings(repo, monkeypatch):
 
     monkeypatch.setattr(repo.event_log, "emit", spy_emit)
 
-    manifest = repo.build_scale_index(nb.id)
+    calls = []
+    manifest = repo.build_scale_index(
+        nb.id, on_stage=lambda stage, ms: calls.append((stage, ms))
+    )
 
-    # Returned manifest: 10 keys (9 stages + total)
+    # Returned manifest: 11 keys (10 stages + total)
     expected_stages = {"kg_matrix", "ann_build", "synonym", "gather", "transition",
                        "chunk_matrix", "relation_matrix", "viz_arrays",
                        "source_partitions", "persist"}
@@ -659,34 +664,14 @@ def test_build_scale_index_emits_stage_timings(repo, monkeypatch):
         assert isinstance(e["latency_ms"], int)
         assert e["latency_ms"] >= 0
 
-
-def test_build_scale_index_on_stage_callback(repo):
-    """build_scale_index(on_stage=...) must invoke the callback once per
-    stage — the same 8 stages as the scale_index_build events, plus total —
-    right when each stage's timing is recorded, so a CLI caller can print
-    real-time per-stage progress on long (490k-object) builds without
-    depending on the events logger (which doesn't print to the terminal)."""
-    nb = repo.create_notebook(NotebookCreate(name="base"))
-    repo.store_kg(nb.id, None, [
-        {"local_id": "a", "object_type": "concept", "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
-        {"local_id": "b", "object_type": "concept", "payload": {"name": "current mirror", "section_path": ""}, "evidence": []},
-    ], [{"source_local_id": "b", "target_local_id": "a", "edge_type": "depends_on", "evidence": []}])
-    repo.rebuild_unified_kg(nb.id)
-
-    calls = []
-    manifest = repo.build_scale_index(nb.id, on_stage=lambda stage, ms: calls.append((stage, ms)))
-
-    expected_stages = {"kg_matrix", "ann_build", "synonym", "gather", "transition",
-                       "chunk_matrix", "relation_matrix", "viz_arrays",
-                       "source_partitions", "persist", "total"}
+    # Callback count, coverage, order and latency retain their own assertions.
     assert len(calls) == 11
-    assert {c[0] for c in calls} == expected_stages
+    assert {c[0] for c in calls} == expected_stages | {"total"}
     assert calls[-2][0] == "persist"
     assert calls[-1][0] == "total"
     for stage, ms in calls:
         assert isinstance(ms, int)
         assert ms >= 0
-    assert manifest["n_nodes"] >= 2
 
 
 def test_build_scale_index_on_stage_exception_does_not_break_build(repo):
@@ -1070,8 +1055,34 @@ def test_scale_index_eligible_decoupled_from_tier(repo, monkeypatch):
     small = mk("small-personal", 1)  # 1 < 阈值 3
     assert repo.scale_index_status(big.id)["eligible"] is True     # 非 base 也 eligible(解耦)
     assert repo.scale_index_status(small.id)["eligible"] is False  # 小库仍不 eligible
+    # This contract ends at admission. Keep the real worker/claim lifecycle,
+    # but do not build unrelated ANN artifacts or leave a daemon using a repo
+    # whose fixture has already been torn down.
+    import threading
+
+    scale = repo._runtime.scale_artifacts
+    built = []
+    workers = []
+
+    def build(notebook_id, on_stage=None):
+        built.append(notebook_id)
+        return {}
+
+    def start_worker(name, target):
+        worker = threading.Thread(name=name, target=target, daemon=True)
+        workers.append(worker)
+        worker.start()
+
+    monkeypatch.setattr(scale.builder, "build", build)
+    monkeypatch.setattr(scale, "_start_daemon", start_worker)
     # 大个人库 trigger 不再 409(now → building/already_building)
-    assert repo.trigger_scale_index_rebuild(big.id)["status"] in ("building", "already_building")
+    try:
+        assert repo.trigger_scale_index_rebuild(big.id)["status"] in ("building", "already_building")
+    finally:
+        for worker in workers:
+            worker.join(timeout=10)
+            assert not worker.is_alive()
+    assert built == [big.id]
 
 
 # ── Task 1: hnsw 只建一次 + ef_construction 可配 (build_scale_index perf) ────

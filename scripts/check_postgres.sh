@@ -9,11 +9,12 @@ if [[ "$PYTHON_BIN" != /* && -x "$ROOT_DIR/$PYTHON_BIN" ]]; then
   PYTHON_BIN="$ROOT_DIR/$PYTHON_BIN"
 fi
 
-: "${TEST_POSTGRES_URL:?TEST_POSTGRES_URL is required}"
-
-if [[ "${POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED:-0}" == "1" ]]; then
-  : "${TEST_POSTGRES_NON_C_URL:?TEST_POSTGRES_NON_C_URL is required in the authoritative CI lane}"
-  : "${TEST_POSTGRES_NON_UTF_URL:?TEST_POSTGRES_NON_UTF_URL is required in the authoritative CI lane}"
+if [[ -z "${TEST_POSTGRES_TARGETS_JSON+x}" ]]; then
+  : "${TEST_POSTGRES_URL:?TEST_POSTGRES_URL is required}"
+  if [[ "${POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED:-0}" == "1" ]]; then
+    : "${TEST_POSTGRES_NON_C_URL:?TEST_POSTGRES_NON_C_URL is required in the authoritative CI lane}"
+    : "${TEST_POSTGRES_NON_UTF_URL:?TEST_POSTGRES_NON_UTF_URL is required in the authoritative CI lane}"
+  fi
 fi
 
 # The PostgreSQL lane is still network-offline with respect to model providers.
@@ -28,7 +29,7 @@ export RERANK_MODEL="" RERANK_API_KEY=""
 export MINERU_MODE="off" MINERU_API_TOKEN=""
 
 # The Python launcher owns URL parsing, database_status/redact_database_url
-# diagnostics, password-free pytest URLs, and the `-m postgres_integration`
-# selection. Keeping conninfo parsing out of shell prevents accidental echoing.
+# diagnostics, password-free pytest URLs, and selection of integration and
+# hermetic lane contracts. Keeping conninfo parsing out of shell prevents echoing.
 cd "$ROOT_DIR/backend"
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" -m tests.postgres.lane

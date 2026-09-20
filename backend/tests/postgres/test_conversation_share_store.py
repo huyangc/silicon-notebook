@@ -472,6 +472,7 @@ def _wait_for_conversation_row_lock(postgres_database) -> None:
         while time.monotonic() < deadline:
             waiting = inspector.execute(
                 "SELECT 1 FROM pg_stat_activity WHERE pid<>pg_backend_pid() "
+                "AND datname=current_database() "
                 "AND wait_event_type='Lock' AND state='active' "
                 "AND query ILIKE '%conversations%' LIMIT 1"
             ).fetchone()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -12,6 +13,15 @@ import psycopg
 import pytest
 
 from tests.postgres import lane as postgres_lane
+from tests.postgres import conftest as postgres_fixtures
+from tests.postgres.targets import (
+    PARALLEL_WORKERS,
+    TARGETS_ENV,
+    TARGET_SPECS,
+    configured_target_groups,
+    parse_target_groups,
+    worker_environment,
+)
 from tests.postgres.conftest import (
     _database_catalog,
     _require_dedicated_test_database,
@@ -33,6 +43,236 @@ from tests.postgres.lane import (
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 _INVALID_HOST_PROBE_DUMMY_PASSWORD = "invalid-host-probe-dummy"
+pytestmark = pytest.mark.postgres_lane_contract
+
+
+def _parallel_groups(*, password: str | None = None) -> list[dict[str, str]]:
+    userinfo = "lane_user" if password is None else f"lane_user:{password}"
+    return [
+        {
+            key: f"postgresql://{userinfo}@db.example/silicon_notebook_test_w{index}_{key}"
+            for key, _, _ in TARGET_SPECS
+        }
+        for index in range(PARALLEL_WORKERS)
+    ]
+
+
+def _parallel_environment(monkeypatch, groups=None):
+    for _, env_name, _ in TARGET_SPECS:
+        # Record absent keys as well: the worker hook later writes them.
+        monkeypatch.setenv(env_name, "")
+        monkeypatch.delenv(env_name)
+    monkeypatch.setenv(TARGETS_ENV, json.dumps(_parallel_groups() if groups is None else groups))
+
+
+def test_worker_targets_keep_all_databases_disjoint_and_explicit():
+    groups = parse_target_groups(json.dumps(_parallel_groups()))
+    assigned = [worker_environment(groups, f"gw{index}") for index in range(PARALLEL_WORKERS)]
+    assert len({url for group in assigned for url in group.values()}) == 12
+    for index, environment in enumerate(assigned):
+        assert environment == {
+            env_name: groups[index][key] for key, env_name, _ in TARGET_SPECS
+        }
+
+
+@pytest.mark.parametrize("worker_id", ["master", "gw4", "gw-1", "gw00", "gw1-extra"])
+def test_worker_targets_reject_unowned_worker_ids(worker_id):
+    with pytest.raises(RuntimeError, match="identity"):
+        worker_environment(_parallel_groups(), worker_id)
+
+
+@pytest.mark.parametrize("raw", ["", "null", "{}", "[]", "[{}]", "not-json", "[{}, {}, {}, {}, {}]"])
+def test_worker_targets_reject_invalid_group_count_or_structure(raw):
+    with pytest.raises(RuntimeError):
+        parse_target_groups(raw)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "extra", "empty", "non_string", "same_group", "other_worker", "other_server", "duplicate_key"])
+def test_worker_targets_fail_closed_on_incomplete_or_overlapping_databases(mutation):
+    groups = _parallel_groups()
+    if mutation == "missing":
+        del groups[3]["non_utf"]
+    elif mutation == "extra":
+        groups[3]["unexpected"] = groups[3]["primary"]
+    elif mutation == "empty":
+        groups[3]["primary"] = ""
+    elif mutation == "non_string":
+        groups[3]["primary"] = 42
+    elif mutation == "same_group":
+        groups[3]["non_utf"] = groups[3]["primary"]
+    elif mutation == "other_worker":
+        # Credentials, the postgres alias, host case and implicit port cannot
+        # make the same database safe for concurrent migration owners.
+        groups[3]["primary"] = groups[0]["primary"].replace(
+            "postgresql://lane_user@db.example", "postgres://other:secret@DB.EXAMPLE:5432"
+        )
+    elif mutation == "other_server":
+        groups[3]["primary"] = groups[3]["primary"].replace("db.example", "alias.example")
+    raw = json.dumps(groups)
+    if mutation == "duplicate_key":
+        raw = raw.replace('"primary":', '"primary": "ignored", "primary":', 1)
+    with pytest.raises(RuntimeError):
+        parse_target_groups(raw)
+
+
+def test_parallel_configuration_rejects_even_empty_legacy_target_variables():
+    environment = {TARGETS_ENV: json.dumps(_parallel_groups()), "TEST_POSTGRES_URL": ""}
+    with pytest.raises(RuntimeError, match="cannot be combined"):
+        configured_target_groups(environment)
+
+
+@pytest.mark.parametrize("suffix", ["?options=-csearch_path%3Dpublic", "?hostaddr=127.0.0.2", "?password=sentinel-secret"])
+def test_parallel_launcher_validates_last_url_before_starting_any_child(monkeypatch, capsys, suffix):
+    groups = _parallel_groups(password="sentinel-secret")
+    groups[3]["non_utf"] += suffix
+    _parallel_environment(monkeypatch, groups)
+    monkeypatch.setattr(postgres_lane, "_run_child", lambda *a, **k: pytest.fail("invalid target reached a child"))
+    assert postgres_lane.main() == 2
+    output = capsys.readouterr()
+    assert "invalid database configuration" in output.err
+    assert "sentinel" not in output.err
+
+
+@pytest.mark.parametrize("failed_target", [None, 11])
+def test_parallel_preflight_checks_every_target_before_pytest_and_hides_passwords(monkeypatch, failed_target):
+    _parallel_environment(monkeypatch, _parallel_groups(password="sentinel-worker-password"))
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--collect-only --disable-warnings")
+    monkeypatch.delenv("PGPASSFILE", raising=False)
+    monkeypatch.delenv("PGPASSWORD", raising=False)
+    inspected = []
+    calls = []
+    pgpass_paths = []
+
+    def inspect(target):
+        assert target.url_password is None
+        inspected.append(target)
+        return len(inspected) - 1 != failed_target
+
+    def child(command, environment, **kwargs):
+        calls.append(command)
+        assert "sentinel" not in repr(command) + repr(environment)
+        assert "PYTEST_ADDOPTS" not in environment
+        assert all(env_name not in environment for _, env_name, _ in TARGET_SPECS)
+        pgpass = Path(environment["PGPASSFILE"])
+        pgpass_paths.append(pgpass)
+        entries = [_pgpass_fields(line) for line in pgpass.read_text().splitlines()]
+        assert len(entries) == 12
+        assert len({tuple(entry[:4]) for entry in entries}) == 12
+        assert all(entry[-1] == "sentinel-worker-password" for entry in entries)
+        if command[-1] == "--preflight":
+            with monkeypatch.context() as isolated:
+                isolated.setattr(os, "environ", environment)
+                status = postgres_lane._preflight_mode_main()
+        else:
+            assert len(inspected) == 12
+            assert command[command.index("-n") + 1] == "4"
+            assert "--dist=loadgroup" in command
+            assert "--max-worker-restart=0" in command
+            assert "--durations=30" in command
+            assert "postgres_integration or postgres_lane_contract" in command
+            status = 0
+        return subprocess.CompletedProcess(command, status)
+
+    monkeypatch.setattr(postgres_lane, "_inspect_target", inspect)
+    monkeypatch.setattr(postgres_lane, "_run_child", child)
+    assert postgres_lane.main() == (0 if failed_target is None else 2)
+    assert len(inspected) == 12
+    assert len(calls) == (2 if failed_target is None else 1)
+    assert all(not path.exists() for path in pgpass_paths)
+
+
+def test_parallel_worker_configuration_exposes_only_its_serial_targets(monkeypatch):
+    class Config:
+        workerinput = {"workerid": "gw2"}
+
+    groups = _parallel_groups()
+    _parallel_environment(monkeypatch, groups)
+    # Monkeypatch owns these keys before the hook changes/removes them, so the
+    # real worker's original environment is restored after this unit test.
+    postgres_fixtures.pytest_configure(Config())
+    assert TARGETS_ENV not in os.environ
+    assert {key: os.environ[key] for _, key, _ in TARGET_SPECS} == worker_environment(groups, "gw2")
+
+
+@pytest.mark.parametrize("options", [
+    {"numprocesses": 0, "dist": "loadgroup", "maxworkerrestart": 0},
+    {"numprocesses": 4, "dist": "load", "maxworkerrestart": 0},
+    {"numprocesses": 4, "dist": "loadgroup", "maxworkerrestart": 1},
+])
+def test_parallel_controller_rejects_unsafe_scheduling(monkeypatch, options):
+    class Config:
+        def getoption(self, name):
+            return options[name]
+
+    _parallel_environment(monkeypatch)
+    with pytest.raises(pytest.UsageError, match="configuration"):
+        postgres_fixtures.pytest_configure(Config())
+
+
+def test_real_xdist_keeps_complete_collection_and_assigns_worker_databases(monkeypatch, tmp_path):
+    """Exercise real worker startup and loadgroup scheduling without a server."""
+    import xml.etree.ElementTree as ET
+
+    _parallel_environment(monkeypatch)
+    targets = postgres_lane._configured_targets()
+    assert targets is not None
+    (tmp_path / "conftest.py").write_text(
+        "from tests.postgres.conftest import pytest_configure\n", encoding="utf-8"
+    )
+    (tmp_path / "pytest.ini").write_text(
+        "[pytest]\nmarkers = xdist_group(name): keep a group on one worker\n",
+        encoding="utf-8",
+    )
+    source = '''import json, os
+from pathlib import Path
+import pytest
+from tests.postgres.targets import TARGETS_ENV, TARGET_SPECS
+
+@pytest.mark.parametrize("case", [pytest.param(index, marks=pytest.mark.xdist_group(name=f"group{index // 4}")) for index in range(40)])
+def test_database_ownership(case, worker_id):
+    assert TARGETS_ENV not in os.environ
+    index = 0 if worker_id == "master" else int(worker_id.removeprefix("gw"))
+    for key, env_name, _ in TARGET_SPECS:
+        assert os.environ[env_name].endswith(f"/silicon_notebook_test_w{index}_{key}")
+    destination = Path(__file__).parent / ("parallel" if worker_id != "master" else "serial") / f"{case}.json"
+    with destination.open("x") as output:
+        json.dump({"case": case, "worker": worker_id}, output)
+'''
+    (tmp_path / "test_worker_ownership.py").write_text(source, encoding="utf-8")
+    collected = []
+    with _pytest_environment(targets) as parallel_environment:
+        for mode, workers in (("serial", "0"), ("parallel", "4")):
+            (tmp_path / mode).mkdir()
+            environment = dict(parallel_environment)
+            if mode == "serial":
+                environment.pop(TARGETS_ENV)
+                environment.update(worker_environment(_parallel_groups(), "gw0"))
+            report = tmp_path / f"{mode}.xml"
+            completed = subprocess.run(
+                [sys.executable, "-m", "pytest", "-q", "-n", workers,
+                 "--dist=loadgroup", "--max-worker-restart=0", "-p", "no:cacheprovider",
+                 f"--junitxml={report}", str(tmp_path)],
+                cwd=tmp_path,
+                env=environment,
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+            assert completed.returncode == 0, completed.stdout + completed.stderr
+            cases = ET.parse(report).findall(".//testcase")
+            # loadgroup adds its scheduling suffix to the reported node ID;
+            # compare the underlying semantic test identity across modes.
+            collected.append({
+                (case.attrib["classname"], case.attrib["name"].split("@", 1)[0])
+                for case in cases
+            })
+            assert len(cases) == 40
+    assert collected[0] == collected[1]
+    records = [json.loads(path.read_text()) for path in (tmp_path / "parallel").glob("*.json")]
+    assert {record["case"] for record in records} == set(range(40))
+    assert {record["worker"] for record in records} == {"gw0", "gw1", "gw2", "gw3"}
+    for group in range(10):
+        assert len({record["worker"] for record in records if record["case"] // 4 == group}) == 1
 
 
 def _pgpass_fields(line: str) -> list[str]:
@@ -91,6 +331,7 @@ def _invalid_host_probe_password(url: str) -> str:
 
 def _run_postgres_gate(url: str) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
+    env.pop(TARGETS_ENV, None)
     env["PYTHON_BIN"] = sys.executable
     env["TEST_POSTGRES_URL"] = url
     env.pop("TEST_POSTGRES_NON_C_URL", None)
@@ -821,11 +1062,13 @@ def test_signal_immediately_after_resource_registration_is_honored(
         ("pytest", signal.SIGINT, 130),
     ],
 )
+@pytest.mark.parametrize("parallel", [False, True])
 def test_launcher_signal_reaps_blocked_child_and_removes_pgpass(
     tmp_path,
     phase,
     signum,
     expected_status,
+    parallel,
 ):
     if os.name != "posix":
         return
@@ -843,10 +1086,11 @@ def test_launcher_signal_reaps_blocked_child_and_removes_pgpass(
     wrapper = (
         "from tests.postgres import lane; "
         f"lane._preflight_command=lambda: {blocker if phase == 'preflight' else success!r}; "
-        f"lane._pytest_command=lambda: {blocker if phase == 'pytest' else success!r}; "
+        f"lane._pytest_command=lambda *args: {blocker if phase == 'pytest' else success!r}; "
         "raise SystemExit(lane.main())"
     )
     env = os.environ.copy()
+    env.pop(TARGETS_ENV, None)
     env["PYTHONPATH"] = str(REPO_ROOT / "backend")
     env["TMPDIR"] = str(tmp_path)
     env["TEST_POSTGRES_URL"] = (
@@ -855,6 +1099,9 @@ def test_launcher_signal_reaps_blocked_child_and_removes_pgpass(
     )
     env.pop("TEST_POSTGRES_NON_C_URL", None)
     env.pop("TEST_POSTGRES_NON_UTF_URL", None)
+    if parallel:
+        env.pop("TEST_POSTGRES_URL")
+        env[TARGETS_ENV] = json.dumps(_parallel_groups(password="sentinel-parallel-secret"))
     launcher = subprocess.Popen(
         [sys.executable, "-c", wrapper],
         cwd=REPO_ROOT / "backend",
