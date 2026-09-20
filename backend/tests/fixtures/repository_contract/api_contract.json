@@ -16057,6 +16057,141 @@
           ]
         }
       },
+      "/api/global-ask/conversations/{conversation_id}/share": {
+        "delete": {
+          "description": "Revoke the link; the next public request 404s like any unknown token.\n\nThe 404 for a foreign or missing conversation comes from the service's\nownership gate, NOT from the store: ``unshare_conversation`` is a bare\nidempotent UPDATE that reports success whether or not it matched a row, so\nwithout that gate this endpoint would answer 204 for someone else's\nconversation id. Un-sharing an ALREADY-unshared conversation of one's own\nstays a 204, matching the notebook-scoped endpoint.",
+          "operationId": "unshare_global_conversation_route_api_global_ask_conversations__conversation_id__share_delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "conversation_id",
+              "required": true,
+              "schema": {
+                "title": "Conversation Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Unshare Global Conversation Route",
+          "tags": [
+            "global-ask"
+          ]
+        },
+        "get": {
+          "description": "Read back the existing link + watermark, owner only -- the token IS the\ngrant. Not shared is a 404, the same answer an unknown conversation gets;\nthe browser's share dialog reads that 404 as \"not shared yet\" rather than\nas an error.",
+          "operationId": "get_global_conversation_share_route_api_global_ask_conversations__conversation_id__share_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "conversation_id",
+              "required": true,
+              "schema": {
+                "title": "Conversation Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ConversationShareResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Global Conversation Share Route",
+          "tags": [
+            "global-ask"
+          ]
+        },
+        "post": {
+          "description": "Publish this conversation behind a link AND advance the watermark.\n\n``expected_through_id`` is a JOB id on this surface (the notebook-scoped\ntwin pins an answer id): the newest completed turn the client saw in what\nit disclosed. It pins the published snapshot to exactly that turn, closing\nthe window where a turn finishing between the client's disclosure read and\nthis POST would otherwise be published without the user ever reviewing it.",
+          "operationId": "share_global_conversation_route_api_global_ask_conversations__conversation_id__share_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "conversation_id",
+              "required": true,
+              "schema": {
+                "title": "Conversation Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ConversationShareRequest"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Payload"
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ConversationShareResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Share Global Conversation Route",
+          "tags": [
+            "global-ask"
+          ]
+        }
+      },
       "/api/global-ask/intent": {
         "post": {
           "description": "Understand a global reasoning question before creating a job/conversation.\n\nByte-for-byte the request-local cancellation dance ``ask_routes.\npreview_ask_intent`` runs above the single-library engine: the potentially\nslow model call moves onto a worker thread, and a client that disconnects\nbefore it returns sets ``cancel_event`` rather than leaving the call to run\nto completion for nobody. ``GlobalAskService.preview_intent`` re-resolves\nscope and re-checks authority on the SAME path ``start()`` uses, so a\nlibrary the caller can no longer read here is refused exactly as it would\nbe on submission.",

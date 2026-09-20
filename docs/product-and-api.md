@@ -222,6 +222,53 @@ A conversation cannot start another task while its previous answer is running.
 The job's `error` is explicitly displayable Chinese retry guidance, never raw exception text.
 Automatically derived conversation titles are bounded summaries; the original question remains complete.
 
+#### Global conversation sharing
+
+A global conversation can also be published by its owner as a sign-in-free read-only page, on the
+**same public page as a notebook conversation**: `/c/{token}`, read anonymously through
+`GET /api/public/conversations/{token}`, with images at
+`GET /api/public/conversations/{token}/assets/{alias}`. The two features are told apart by the token's
+capability namespace prefix (`gshr-` is global, `cshr-` is notebook-scoped; the two namespaces
+partition the token space, so neither branch ever resolves the other's token). The three authenticated
+endpoints live at `/api/global-ask/conversations/{conversation_id}/share`: `POST` issues the link and
+advances the watermark, `GET` reads the token/watermark back for the owner (not shared is a 404, which
+is how the share dialog recognises "not shared yet"), and `DELETE` revokes (re-revoking one's own
+already-unshared conversation is still 204; a foreign or missing conversation is 404 — the underlying
+UPDATE is idempotent, so that 404 comes from the service's ownership gate). A global conversation
+belongs to no notebook, so there is no `require_notebook_read` above these routes: ownership is the
+whole gate.
+
+Only two things genuinely differ from the notebook-scoped trio:
+
+- **The boundary is a job**, not an answer row. `expected_through_id` carries a `job_id`; a boundary
+  that does not resolve (deleted, still running, failed, cancelled, or another conversation's) and one
+  that regresses behind the published watermark are both 409, with the same Chinese sentences the
+  notebook-scoped route uses. A conversation with zero completed jobs is refused inside the same write
+  transaction and never has a token minted and rolled back.
+- **The live re-check covers a SET of libraries.** The notebook-scoped link re-authorizes the one
+  notebook its conversation lives in; a global conversation lives in none, so **every open of the public
+  link** re-checks the sharer's read access to the libraries this snapshot drew on — the union of each
+  turn's `cited_notebook_ids`, falling back to the union of their `resolved_notebook_ids` when nothing
+  was cited (zero citations must not mean zero re-checks). Losing access to any one of them 404s the
+  whole link and its images, indistinguishably from an unknown token; restoring access revives the
+  **same** token. The same predicate also runs at share time: a conversation referencing a library the
+  sharer can no longer read cannot be published (404 with the existing access-changed sentence), rather
+  than handing out a link that is dead on arrival.
+
+Images reuse the notebook-scoped token-HMAC alias channel (an alias reverses only against the assets
+the public page actually disclosed) under the same `MINERU_RETURN_IMAGES` deployment switch, plus one
+global-only gate: the asset's own library must be inside the set this open already re-checked, or the
+image 404s — a snapshot spans several libraries, so "the frozen snapshot is the grant" can only hold
+per library.
+
+The projection is the notebook-scoped allowlist verbatim (`conversation_public_view`): the public page
+shows **no library names**, no addressable id (`notebook_id`/`source_id`/`element_id`/`asset_id`/
+`job_id`…), none of the `skipped_notebooks`/`degraded_notebook_ids`/`resolved_notebook_ids` receipts,
+and no `reasoning_trace` or `intent`. Turn/reference/snippet/caption bounds are
+[the same table](#public-conversation-share-guardrails) — both links share this one projection and one
+set of constants. A legacy turn (its answer stored under `response`) still projects; the
+`asked_at`/`answered_at`/`evidence_level` it lacks take the projection's existing degradation branch.
+
 Input reuses `ASK_QUESTION_MAX_CHARS=4000` and `CONVERSATION_TITLE_MAX_CHARS=200`; global identifiers
 and client request identifiers allow 200 characters. List pagination defaults to 50, capped at 100.
 `GLOBAL_ASK_CANDIDATE_LIMIT` defaults to 64 (minimum 1), bounding merged evidence across all notebooks
@@ -2978,6 +3025,8 @@ The composer half of that rail measures in **Unicode code points** (the same uni
 The last three live in `backend/app/services/report_public_view.py`; the creation bound lives in `backend/app/models/reports.py` (mirrored by `frontend/app/report-api.ts::REPORT_INPUT_LIMITS`). They are independent of the same-named constants in the conversation table below (the two share links each own their contract), but the truncation-disclosure rule must stay identical across both.
 
 ### Public conversation share guardrails
+
+Every bound below applies **identically to a shared global (cross-library) conversation**: the two features share one projection module, one anonymous endpoint pair, and therefore one set of constants — see [Global conversation sharing](#global-conversation-sharing) for the two things that do differ (the watermark boundary is a job, and the live re-check covers a set of libraries).
 
 | Bound | Value |
 | --- | ---: |

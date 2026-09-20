@@ -16,6 +16,16 @@ import secrets
 # `[A-Za-z0-9_-]` and survives path segments and diagnostics redaction patterns.
 CAPABILITY_TOKEN_BYTES = 32
 
+# The two conversation-share namespaces. They matter beyond documentation
+# because ONE anonymous endpoint pair (`/public/conversations/{token}` and its
+# image sibling) serves BOTH features: a notebook-scoped conversation and a
+# global (cross-library) one are stored in different tables with different
+# re-authorization rules, and the prefix is what tells the route which branch
+# owns a token. Minting and dispatch therefore read the same two names, so a
+# renamed prefix cannot silently stop resolving.
+NOTEBOOK_CONVERSATION_SHARE_PREFIX = "cshr"
+GLOBAL_CONVERSATION_SHARE_PREFIX = "gshr"
+
 
 def new_capability_token(prefix: str) -> str:
     """Return `<prefix>-<256 random bits>`; never reuse a row-id generator."""
@@ -23,3 +33,15 @@ def new_capability_token(prefix: str) -> str:
     if not clean:
         raise ValueError("capability tokens need a namespace prefix")
     return f"{clean}-{secrets.token_urlsafe(CAPABILITY_TOKEN_BYTES)}"
+
+
+def is_global_conversation_share_token(token: str) -> bool:
+    """Whether this share token belongs to the GLOBAL conversation feature.
+
+    The separator is part of the test on purpose: matching the bare prefix
+    would also claim a hypothetical future `gshrx-...` namespace, and the two
+    branches must partition the token space rather than overlap. A notebook
+    conversation's `cshr-...` token can never satisfy this, so it keeps falling
+    through to the notebook-scoped branch unchanged.
+    """
+    return str(token or "").startswith(f"{GLOBAL_CONVERSATION_SHARE_PREFIX}-")

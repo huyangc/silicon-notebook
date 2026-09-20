@@ -856,3 +856,31 @@ function_length_ceiling` 里（`ask_chunk` / `_run_reasoning_stage` / `_draft_re
   `federated_chunk_candidates` 的短路条件带 `not federated_ask_active()`。
 - 作业线程绝不能是共享检索池的 worker（`_execute` 首行用 `RuntimeError` 而非 `assert` 守住）：
   联邦会在调用方线程上 `wait()`，池 worker 等池槽是经典死锁，而且在满并发下是稳态而非罕见交错。
+
+## 45. 全局会话的公开分享：同一个公开页、按库集合的实时复核（2026-09-20）
+
+- 公开页仍是 `/c/{token}`，匿名端点仍是 `GET /public/conversations/{token}` 与
+  `.../assets/{alias}`。**不新开路由**：token 的能力命名空间前缀（`gshr-` 全局 / `cshr-` 单库，
+  唯一定义点 `app/core/capability_tokens.py`）在 `ask_routes._public_conversation_or_404` 分流。
+  两个命名空间划分 token 空间，任一分支都不会兜住另一个的 token（把前缀互换即 404）。
+- 已认证三端点在 `/api/global-ask/conversations/{id}/share`，请求/响应模型**复用**单库的
+  `ConversationShareRequest`/`ConversationShareResponse`（导入，不复制第二份），所以浏览器用同一个
+  `ConversationShareApi` 注入对象驱动两种会话。没有 `require_notebook_read`：全局会话不属于任何
+  笔记本，所有权就是全部的闸。
+- 水位边界是**作业**（`expected_through_id` 送 `job_id`）。解析不到与回退都是 409，文案与单库
+  逐字相同；零已完成作业在同一个写事务里被拒，不会先铸 token 再回滚。
+- `DELETE` 的 404 来自**服务层**所有权判定，不是 store：`GlobalAskStore.unshare_conversation` 是
+  一条无返回值的幂等 UPDATE，匹配不到行也照样「成功」，没有这道闸别人的会话 id 会拿到 204。
+  本人已撤销过的会话再撤一次仍是 204。
+- 每次打开公开链接都按**分享者**身份实时复核本快照被引各库的读权：取各轮 `cited_notebook_ids`
+  并集，为空时退化为 `resolved_notebook_ids` 并集——零引用不等于零复核。任一库读不了整条链接
+  （连同图片）404，与未知 token 不可区分；恢复即同 token 复活。创建分享时跑同一条 `_check`，
+  不许发出生来就 404 的链接。
+- 匿名路径上**没有请求用户**：`public_conversation_by_token` 只吃 token，复核走显式传 user_id 的
+  `readable_notebook_ids`/`user_can_read_notebook`，不碰 ContextVar（未设置时它会回退成种子管理员）。
+  用例把 `identity.current_user` 换成抛错实现，两个匿名端点仍须 200。
+- 图片复用 token-HMAC 别名通道与 `MINERU_RETURN_IMAGES` 开关，另加一条全局专有闸：资产所属库必须
+  落在本次**已复核**的库集合内，否则 404——快照横跨多个库，「冻结的快照就是授权」只能按库逐个成立。
+- 投影**零改动**逐字复用 `conversation_public_view` 白名单：不显示库名、不出任何可寻址 id、不出
+  `skipped/degraded/resolved` 回执、不出 `trace`/`intent`。新旧两种作业形状都能投影，旧形状缺
+  `asked_at`/`answered_at`/`evidence_level` 走投影既有的退化分支。

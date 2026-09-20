@@ -37,7 +37,10 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Iterator, List, Optional
 
-from app.core.capability_tokens import new_capability_token
+from app.core.capability_tokens import (
+    NOTEBOOK_CONVERSATION_SHARE_PREFIX,
+    new_capability_token,
+)
 from app.core.internal_observability import (
     public_trace_steps,
     sanitize_answer_payload,
@@ -1396,7 +1399,7 @@ class AskStateStore:
         ``created_by`` gate still belongs to the API/service layer that calls
         this method.
         """
-        candidate = new_capability_token("cshr")
+        candidate = new_capability_token(NOTEBOOK_CONVERSATION_SHARE_PREFIX)
         expected = str(expected_through_id or "").strip()
         with self.database.write() as db:
             conv = db.execute(
