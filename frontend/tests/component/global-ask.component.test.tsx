@@ -1430,6 +1430,27 @@ test("a job stopped mid-process stays, can be edited, and the next question repl
   expect(screen.getByText("改好的问题")).toBeTruthy();
 });
 
+test("a late recovery read cannot overwrite a re-send that has since succeeded", async () => {
+  // 带替换的提交失败后会自动重拉会话（不 await）；用户紧接着重试成功，迟到的旧快照
+  // 不得把刚接受的新一轮换回那条已被服务端删掉的停止记录（codex #761 R1 P2）。
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  const stopped = { ...job("cancelled"), searched_notebook_ids: ["nb-0"] };
+  const recovery = deferred<GlobalConversationDetail>();
+  api.detail.mockResolvedValueOnce(detail("conv-a", [stopped])).mockReturnValueOnce(recovery.promise);
+  api.ask.mockRejectedValueOnce(new Error("network"))
+    .mockResolvedValueOnce({ ...job(), job_id: "job-new", question: "重试成功的问题" });
+  api.poll.mockReturnValue(new Promise(() => {}));
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.turns).toHaveLength(1));
+  act(() => result.current.setDraft("重试成功的问题"));
+  await act(async () => { await result.current.submit(); });
+  expect(result.current.error).not.toBe("");
+  await act(async () => { await result.current.submit(); });
+  expect(result.current.turns.map((turn) => turn.job_id)).toEqual(["job-new"]);
+  await act(async () => { recovery.resolve(detail("conv-a", [stopped])); });
+  expect(result.current.turns.map((turn) => turn.job_id)).toEqual(["job-new"]);
+});
+
 test("an older stopped turn wears the same notice without promising a replacement", async () => {
   window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
   const older = { ...job("cancelled"), job_id: "job-older", question: "更早停下的问题" };
