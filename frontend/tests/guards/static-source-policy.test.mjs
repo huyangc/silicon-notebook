@@ -481,7 +481,14 @@ async function sourceModules(directory) {
 }
 
 
-function relativeImports(relative, source, moduleNames) {
+// Repository inputs are immutable within this isolated Node test process. Keep
+// the text comparison so synthetic cases that replace a module still reparse.
+const parsedModules = new Map();
+
+
+function parseModule(relative, source) {
+  const cached = parsedModules.get(relative);
+  if (cached?.source === source) return cached.sourceFile;
   const sourceFile = ts.createSourceFile(
     relative,
     source,
@@ -489,6 +496,13 @@ function relativeImports(relative, source, moduleNames) {
     true,
     scriptKind(relative),
   );
+  parsedModules.set(relative, { source, sourceFile });
+  return sourceFile;
+}
+
+
+function relativeImports(relative, source, moduleNames) {
+  const sourceFile = parseModule(relative, source);
   const imports = [];
   function resolve(specifier) {
     if (!specifier.startsWith(".")) return undefined;
@@ -587,7 +601,7 @@ function policyRelativeModules(moduleSources) {
 }
 
 
-async function policyModules() {
+async function readPolicySnapshot() {
   const sources = new Map();
   for (const root of POLICY_ROOTS) {
     for (const absolute of await sourceModules(root)) {
@@ -595,9 +609,23 @@ async function policyModules() {
       sources.set(relative, await readFile(absolute, "utf8"));
     }
   }
-  return [...policyRelativeModules(sources)]
-    .sort()
-    .map((relative) => path.join(FRONTEND_DIR, relative));
+  return { sources, relatives: [...policyRelativeModules(sources)].sort() };
+}
+
+
+let policySnapshotPromise;
+
+
+function policySnapshot() {
+  policySnapshotPromise ??= readPolicySnapshot();
+  return policySnapshotPromise;
+}
+
+
+async function policyModules() {
+  return (await policySnapshot()).relatives.map(
+    (relative) => path.join(FRONTEND_DIR, relative),
+  );
 }
 
 
@@ -685,13 +713,7 @@ function moduleReadsFiles(sourceFile) {
 
 
 function hasPositionOrOrderQuery(relative, source) {
-  const sourceFile = ts.createSourceFile(
-    relative,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    scriptKind(relative),
-  );
+  const sourceFile = parseModule(relative, source);
   const readsFiles = moduleReadsFiles(sourceFile);
   const registeredReader = (
     readsFiles && STRICT_TEXT_READER_ALLOWLIST.has(relative)
@@ -1670,13 +1692,7 @@ function hasPositionOrOrderQuery(relative, source) {
 
 
 function modulePolicyOffenders(relative, source) {
-  const sourceFile = ts.createSourceFile(
-    relative,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    scriptKind(relative),
-  );
+  const sourceFile = parseModule(relative, source);
   const offenders = [];
   const readsFiles = moduleReadsFiles(sourceFile);
   if (readsFiles && !DIRECT_READ_ALLOWLIST.has(relative)) {
@@ -1699,11 +1715,10 @@ function modulePolicyOffenders(relative, source) {
 
 
 async function policyOffenders() {
+  const { sources, relatives } = await policySnapshot();
   const offenders = [];
-  for (const absolute of await policyModules()) {
-    const relative = path.relative(FRONTEND_DIR, absolute).replaceAll(path.sep, "/");
-    const source = await readFile(absolute, "utf8");
-    offenders.push(...modulePolicyOffenders(relative, source));
+  for (const relative of relatives) {
+    offenders.push(...modulePolicyOffenders(relative, sources.get(relative)));
   }
   return offenders.sort();
 }

@@ -7,10 +7,11 @@
 // 按下态（globals.css 的 `button:…:active`）由 tests/guards/button-press-feedback-guard
 // 钉住——那条没有 AST、jsdom 也不做级联。这里钉它管不到的另一半：结果态的文案、配色类
 // 与自动还原，以及「按 key 分格」——同一排里点正文复制不该让分享链接那颗跟着变。
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, test, vi } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 
+import { COPY_RESULT_HOLD_MS } from "../../app/copy-result";
 import { ReportsPanel } from "../../app/report-view";
 import type { ReportDetailT } from "../../app/report-model";
 import { reportWorkspaceFixture } from "./report-workspace-fixture";
@@ -44,18 +45,29 @@ function renderToolbar(copyShareLink: () => Promise<boolean | null>) {
   );
 }
 
+afterEach(() => vi.useRealTimers());
+
 test("分享链接复制成功：按钮自己变成「已复制」并换成成功配色，随后自动还原", async () => {
   const user = userEvent.setup();
-  renderToolbar(async () => true);
+  let completeCopy!: (copied: boolean) => void;
+  const copyShareLink = vi.fn(() => new Promise<boolean>((resolve) => { completeCopy = resolve; }));
+  renderToolbar(copyShareLink);
 
   await user.click(screen.getByRole("button", { name: "复制链接" }));
+  expect(copyShareLink).toHaveBeenCalledTimes(1);
+  // Complete the user interaction before controlling the result-state deadline.
+  vi.useFakeTimers();
+  await act(async () => { completeCopy(true); });
 
-  const copied = await screen.findByRole("button", { name: "已复制" });
+  const copied = screen.getByRole("button", { name: "已复制" });
   expect(copied).toHaveClass("copy-result-copied");
 
   // 结果态是 JS 状态,不像 :active 那样松手自动还原——忘了摘掉就一直挂着,
   // 下一次点击反而看不出有没有点上。
-  const restored = await screen.findByRole("button", { name: "复制链接" }, { timeout: 4000 });
+  await act(async () => { await vi.advanceTimersByTimeAsync(COPY_RESULT_HOLD_MS - 1); });
+  expect(screen.getByRole("button", { name: "已复制" })).toHaveClass("copy-result-copied");
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  const restored = screen.getByRole("button", { name: "复制链接" });
   expect(restored).not.toHaveClass("copy-result-copied");
   expect(restored).not.toHaveClass("copy-result-failed");
 });

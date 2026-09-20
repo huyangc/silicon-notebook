@@ -256,8 +256,9 @@ def test_install_builds_the_three_new_indexes_and_is_idempotent(postgres_databas
     assert after_migration == state
 
 
-@pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch4")
-def test_both_trigram_keys_of_the_composite_are_live_and_chosen(postgres_database):
+def _assert_both_trigram_keys_of_the_composite_are_live_and_chosen(
+    postgres_database, notebook_id: str,
+):
     """Each of the composite's TWO trigram keys must be independently usable.
 
     A multi-column GIN lets a scan constrain any subset of its keys, so the
@@ -265,9 +266,6 @@ def test_both_trigram_keys_of_the_composite_are_live_and_chosen(postgres_databas
     ``(notebook_id, lower(file_name))``, each leaving the other key free.
     Asserted with NO planner knobs.
     """
-    assert PostgresMigrator(postgres_database).migrate() == 58
-    notebook_id = _seed_search_corpus(postgres_database)
-
     arms = (
         ("title", "LOWER(title) LIKE %s", "%zqxjtitle%"),
         ("file_name", "LOWER(file_name) LIKE %s", "%zqxjfile%"),
@@ -295,8 +293,9 @@ def test_both_trigram_keys_of_the_composite_are_live_and_chosen(postgres_databas
             assert "Seq Scan" not in plan_text, f"{label}:\n{plan_text}"
 
 
-@pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch4")
-def test_the_or_of_both_arms_bitmap_ors_one_composite_index(postgres_database):
+def _assert_the_or_of_both_arms_bitmap_ors_one_composite_index(
+    postgres_database, notebook_id: str,
+):
     """THE shape decision of this batch, settled against a real planner: does one
     three-key index serve ``LIKE … OR LIKE …`` by being scanned twice?
 
@@ -316,9 +315,6 @@ def test_the_or_of_both_arms_bitmap_ors_one_composite_index(postgres_database):
     ``sources`` when the pattern is too short for trigram extraction. BitmapOr
     inside one scan node is strictly the better shape.
     """
-    assert PostgresMigrator(postgres_database).migrate() == 58
-    notebook_id = _seed_search_corpus(postgres_database)
-
     with postgres_database.connect() as connection:
         plan_text = "\n".join(
             str(row["QUERY PLAN"]) for row in connection.execute(
@@ -340,15 +336,13 @@ def test_the_or_of_both_arms_bitmap_ors_one_composite_index(postgres_database):
     assert "Seq Scan" not in plan_text, plan_text
 
 
-@pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch4")
-def test_author_leg_is_served_by_its_own_new_gin_index(postgres_database):
+def _assert_author_leg_is_served_by_its_own_new_gin_index(
+    postgres_database, notebook_id: str,
+):
     """The author leg is the one the production diag caught scanning 210k rows
     whole (a parallel sequential scan inside a hashed subplan) -- the dominant
     term in the 363ms COUNT. It must now enter through its own index, and this
     is asserted with NO planner knobs at all."""
-    assert PostgresMigrator(postgres_database).migrate() == 58
-    notebook_id = _seed_search_corpus(postgres_database)
-
     with postgres_database.connect() as connection:
         plan_text = "\n".join(
             str(row["QUERY PLAN"]) for row in connection.execute(
@@ -365,8 +359,9 @@ def test_author_leg_is_served_by_its_own_new_gin_index(postgres_database):
     assert "Seq Scan" not in plan_text, plan_text
 
 
-@pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch4")
-def test_paper_title_leg_is_served_by_its_own_new_gin_index(postgres_database):
+def _assert_paper_title_leg_is_served_by_its_own_new_gin_index(
+    postgres_database, notebook_id: str,
+):
     """The paper-title leg, asserted with no planner knobs.
 
     ``source_paper_meta`` is the smallest of the three tables (30,002 rows in
@@ -381,9 +376,6 @@ def test_paper_title_leg_is_served_by_its_own_new_gin_index(postgres_database):
     a green here is evidence for production too, not merely at production
     scale.
     """
-    assert PostgresMigrator(postgres_database).migrate() == 58
-    notebook_id = _seed_search_corpus(postgres_database)
-
     with postgres_database.connect() as connection:
         plan_text = "\n".join(
             str(row["QUERY PLAN"]) for row in connection.execute(
@@ -400,9 +392,8 @@ def test_paper_title_leg_is_served_by_its_own_new_gin_index(postgres_database):
     assert "Seq Scan" not in plan_text, plan_text
 
 
-@pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch4")
-def test_list_sources_page_issues_the_union_shape_and_its_plan_uses_the_indexes(
-    postgres_database,
+def _assert_list_sources_page_issues_the_union_shape_and_its_plan_uses_the_indexes(
+    postgres_database, notebook_id: str,
 ):
     """Shape guard against a regression to the cross-table OR-EXISTS predicate.
 
@@ -413,8 +404,6 @@ def test_list_sources_page_issues_the_union_shape_and_its_plan_uses_the_indexes(
     SQL string cannot drift out of sync with the real one) and the plan
     PostgreSQL produces for it.
     """
-    assert PostgresMigrator(postgres_database).migrate() == 58
-    notebook_id = _seed_search_corpus(postgres_database)
     sources = SourceStore(postgres_database, now=lambda: normalize_timestamp(NOW))
 
     captured: list[tuple[str, object]] = []
@@ -500,6 +489,47 @@ def test_list_sources_page_issues_the_union_shape_and_its_plan_uses_the_indexes(
     assert "BitmapOr" in plan_text, plan_text
     assert "Seq Scan on source_authors" not in plan_text, plan_text
     assert "Seq Scan on source_paper_meta" not in plan_text, plan_text
+
+
+@pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch4")
+def test_search_plan_matrix_uses_the_live_indexes_and_adapter_union(postgres_database):
+    """Read-only plans share one fully migrated, seeded, and vacuumed corpus.
+
+    Keep the corpus size and the five independent assertion families intact:
+    only preparation is shared. Migration rejection and online installation
+    tests below/above still own separate database worlds because they mutate
+    the schema. A named check is attached to any failure for case-level triage.
+    """
+    assert PostgresMigrator(postgres_database).migrate() == 58
+    notebook_id = _seed_search_corpus(postgres_database)
+    checks = (
+        (
+            "title and file-name trigram keys",
+            _assert_both_trigram_keys_of_the_composite_are_live_and_chosen,
+        ),
+        (
+            "composite BitmapOr",
+            _assert_the_or_of_both_arms_bitmap_ors_one_composite_index,
+        ),
+        (
+            "author GIN",
+            _assert_author_leg_is_served_by_its_own_new_gin_index,
+        ),
+        (
+            "paper-title GIN",
+            _assert_paper_title_leg_is_served_by_its_own_new_gin_index,
+        ),
+        (
+            "adapter UNION, results, and hidden sources",
+            _assert_list_sources_page_issues_the_union_shape_and_its_plan_uses_the_indexes,
+        ),
+    )
+    for label, check in checks:
+        try:
+            check(postgres_database, notebook_id)
+        except Exception as error:
+            error.add_note(f"Search-plan scenario: {label}")
+            raise
 
 
 # ---------------------------------------------------------------------------

@@ -178,9 +178,9 @@ test("a minimized chat keeps polling without cancellation and Escape restores th
   render(<Launcher />);
   fireEvent.click(screen.getByRole("button", { name: "打开全局问答" }));
   await waitFor(() => expect(screen.getByRole("textbox", { name: "输入问题" })).toBeEnabled());
+  vi.useFakeTimers();
   fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "后台问题" } });
-  fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
-  await waitFor(() => expect(screen.getByRole("button", { name: "停止" })).toBeTruthy());
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "发送问题" })); });
   // 停止键是图标键：名字在 aria-label 上，按钮面上没有字；外观取全站共用的那个类，
   // 并且与发送键同住工具条的右栏（不与范围、引擎挤在同一条换行里）。
   const stop = screen.getByRole("button", { name: "停止" });
@@ -191,7 +191,10 @@ test("a minimized chat keeps polling without cancellation and Escape restores th
   expect(stop.closest(".global-composer-controls")).toBeNull();
   fireEvent.keyDown(screen.getByRole("dialog", { name: "全局问答" }), { key: "Escape" });
   expect(api.cancel).not.toHaveBeenCalled();
-  await waitFor(() => expect(api.poll).toHaveBeenCalledTimes(1), { timeout: 2500 });
+  await act(async () => { await vi.advanceTimersByTimeAsync(1199); });
+  expect(api.poll).not.toHaveBeenCalled();
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(api.poll).toHaveBeenCalledTimes(1);
   fireEvent.click(screen.getByRole("button", { name: "打开全局问答" }));
   expect(screen.getByText("已停止回答，可以修改问题后继续。")).toBeTruthy();
 });
@@ -414,13 +417,18 @@ test("error recovery restores a running conversation after stop fails", async ()
   api.poll.mockResolvedValue(job("cancelled"));
   const { result } = renderHook(() => useGlobalAsk({ syncUrl: false }));
   await waitFor(() => expect(result.current.loading).toBe(false));
+  vi.useFakeTimers();
   act(() => result.current.setDraft("后台问题"));
   await act(async () => { await result.current.submit(); });
   await act(async () => { await result.current.stop(); });
   expect(result.current.error).toBeTruthy();
   await act(async () => { await result.current.load(); });
   expect(result.current.running?.job_id).toBe("job-conv-a");
-  await waitFor(() => expect(result.current.running).toBeUndefined(), { timeout: 2500 });
+  await act(async () => { await vi.advanceTimersByTimeAsync(1199); });
+  expect(api.poll).not.toHaveBeenCalled();
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(api.poll).toHaveBeenCalledTimes(1);
+  expect(result.current.running).toBeUndefined();
   expect(result.current.conversationId).toBe("conv-a");
 });
 

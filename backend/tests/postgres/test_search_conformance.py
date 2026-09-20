@@ -1068,14 +1068,20 @@ def test_corpus_gate_keeps_every_latin_hit_while_cutting_the_probe_count(
     gated_terms = corpus_gated_recall_terms(_LONG_CHINESE_QUERY, ["en"])
     assert len(gated_terms) * 4 < len(ungated_terms)
 
+    # Keep all three fixture rows within each term's candidate quota. The
+    # whole mixed-language sentence may also match Latin chunks, depending on
+    # pg_trgm's character classification. With k=12 the ungated 64-term probe
+    # admits only one row per term, while gating increases that quota; extra
+    # hits then measure quota expansion rather than removal of empty CJK probes.
+    result_limit = 50
     with search_harness.database.connect() as connection:
         ungated_probe = _ProbeCountingConnection(connection)
         ungated = search_harness.knowledge.chunk_fts_search(
-            ungated_probe, "nb-latin", _LONG_CHINESE_QUERY, 12
+            ungated_probe, "nb-latin", _LONG_CHINESE_QUERY, result_limit
         )
         gated_probe = _ProbeCountingConnection(connection)
         gated = search_harness.knowledge.chunk_fts_search(
-            gated_probe, "nb-latin", _LONG_CHINESE_QUERY, 12,
+            gated_probe, "nb-latin", _LONG_CHINESE_QUERY, result_limit,
             corpus_langs=["en"],
         )
     assert [row["chunk_id"] for row in gated] == [

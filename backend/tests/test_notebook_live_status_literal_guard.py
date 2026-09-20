@@ -80,6 +80,8 @@ import pathlib
 import re
 import sys
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 APP_DIR = ROOT / "backend" / "app"
 SCRIPTS_DIR = ROOT / "scripts"
@@ -183,6 +185,9 @@ def _all_scanned_constants() -> list[tuple[str, ast.Constant]]:
     return out
 
 
+# These scans share one immutable AST cache; loadgroup keeps that cache in
+# one worker without changing which verification lane owns any assertion.
+@pytest.mark.xdist_group(name="notebook_live_status_literals")
 def test_no_raw_copying_read_side_literal_outside_the_constant():
     """常量之外不该再出现裸的 `status != 'copying'` / `status <> 'copying'`。"""
     violations: list[str] = []
@@ -195,6 +200,7 @@ def test_no_raw_copying_read_side_literal_outside_the_constant():
     )
 
 
+@pytest.mark.xdist_group(name="notebook_live_status_literals")
 def test_copying_write_side_sentinel_confined_to_sharing_store_whitelist():
     """`status='copying'` 等值形只许出现在两个 sharing_store.py 的两个方法里。"""
     violations: list[str] = []
@@ -211,6 +217,7 @@ def test_copying_write_side_sentinel_confined_to_sharing_store_whitelist():
     )
 
 
+@pytest.mark.xdist_group(name="notebook_live_status_literals")
 def test_deleting_never_folds_into_the_copying_write_side_sentinel():
     """白名单函数体内的字面量绝不能出现 `'deleting'`。
 

@@ -44,6 +44,7 @@ def _wait_for_lock_wait(postgres_database, needle: str, future) -> None:
                 )
             waiting = inspector.execute(
                 "SELECT 1 FROM pg_stat_activity WHERE pid<>pg_backend_pid() "
+                "AND datname=current_database() "
                 "AND wait_event_type='Lock' AND state='active' "
                 "AND query ILIKE %s LIMIT 1",
                 (f"%{needle}%",),
@@ -687,6 +688,7 @@ def _wait_for_notebook_root_wait(inspector, blocker_pid: int, future) -> None:
         waiter = inspector.execute(
             "SELECT pid, query FROM pg_stat_activity "
             "WHERE wait_event_type='Lock' AND state='active' "
+            "AND datname=current_database() "
             "AND %s = ANY(pg_blocking_pids(pid))",
             (blocker_pid,),
         ).fetchone()
@@ -695,6 +697,8 @@ def _wait_for_notebook_root_wait(inspector, blocker_pid: int, future) -> None:
             assert "FOR KEY SHARE" in waiter["query"], waiter["query"]
             assert inspector.execute(
                 "SELECT 1 FROM pg_locks WHERE pid=%s AND locktype='tuple' "
+                "AND database=(SELECT oid FROM pg_database "
+                "WHERE datname=current_database()) "
                 "AND relation='notebooks'::regclass",
                 (waiter["pid"],),
             ).fetchone() is not None, "waiter holds no notebooks tuple lock"
@@ -1764,6 +1768,7 @@ def _wait_for_memory_row_lock(postgres_database) -> None:
         while time.monotonic() < deadline:
             waiting = inspector.execute(
                 "SELECT 1 FROM pg_stat_activity WHERE pid<>pg_backend_pid() "
+                "AND datname=current_database() "
                 "AND wait_event_type='Lock' AND state='active' "
                 "AND query ILIKE '%memory_items%' LIMIT 1"
             ).fetchone()

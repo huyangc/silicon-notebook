@@ -232,11 +232,11 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
         "silicon_notebook_ci_owner_decoy",
         "CREATE ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB",
         "GRANT {} TO {}",
-        "silicon_notebook_ci_test",
-        "silicon_notebook_non_c_test",
+        "for worker in range(4)",
+        'database = f"silicon_notebook_{kind}_w{worker}_test"',
         "LOCALE_PROVIDER icu ICU_LOCALE 'en-US'",
-        "silicon_notebook_non_utf_test",
         "ENCODING 'SQL_ASCII'",
+        'os.environ["GITHUB_OUTPUT"]',
     ):
         assert phrase in command
     assert "print(" not in command
@@ -249,15 +249,32 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
     assert env["TEST_POSTGRES_DECOY_OWNER_ROLE"] == (
         "silicon_notebook_ci_owner_decoy"
     )
-    for key in (
+    assert env["TEST_POSTGRES_TARGETS_JSON"] == (
+        "${{ steps.postgres-targets.outputs.targets }}"
+    )
+    # Serial and parallel target sets cannot be mixed: the launcher fails
+    # closed instead of guessing which database the caller intended.
+    assert not set(env).intersection({
         "TEST_POSTGRES_URL",
         "TEST_POSTGRES_NON_C_URL",
         "TEST_POSTGRES_NON_UTF_URL",
-    ):
-        assert env[key].startswith(
-            "postgresql://silicon_notebook_app:ci-only-app-password@127.0.0.1:5432/"
-        )
-        assert "postgres@" not in env[key]
+    })
+
+    cache = _named_step(job, "Cache portable Python dependencies")
+    assert cache["uses"] == "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830"
+    assert job["env"]["PIP_CACHE_DIR"] == "${{ runner.temp }}/pip-portable-v1"
+    assert cache["with"]["path"] == "${{ env.PIP_CACHE_DIR }}"
+    assert "portable-hnsw-v1" in cache["with"]["key"]
+    assert "runner.arch" in cache["with"]["key"]
+    assert "hashFiles('backend/requirements.txt')" in cache["with"]["key"]
+    assert "restore-keys" not in cache["with"]
+    install = _named_step(job, "Install backend dependencies")
+    assert install["env"] == {"HNSWLIB_NO_NATIVE": "1"}
+    assert install["run"] == "python -m pip install -r backend/requirements.txt"
+
+    timings = _named_step(job, "Upload PostgreSQL test timings")
+    assert timings["if"] == "always()"
+    assert timings["with"]["path"] == "backend/.local/postgres-junit.xml"
 
     run_commands = [
         step["run"]

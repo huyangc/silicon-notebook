@@ -73,6 +73,8 @@ def _assert_ordered(section: str, phrases: tuple[str, ...]) -> None:
 
 
 def test_postgres_integration_lane_is_separate_fail_closed_and_pg16_authoritative():
+    from tests.postgres.lane import _pytest_command
+
     offline = _read("scripts/check.sh")
     assert "check_postgres.sh" not in offline
     assert "TEST_POSTGRES_URL" not in offline
@@ -82,7 +84,10 @@ def test_postgres_integration_lane_is_separate_fail_closed_and_pg16_authoritativ
     launcher = _read("backend/tests/postgres/lane.py")
     catalog_helpers = _read("backend/tests/postgres/conftest.py")
     assert 'TEST_POSTGRES_URL:?TEST_POSTGRES_URL is required' in postgres
-    assert "-m postgres_integration" in postgres
+    command = _pytest_command()
+    assert command[command.index("-m", command.index("pytest")) + 1] == (
+        "postgres_integration or postgres_lane_contract"
+    )
     assert "POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED" in postgres
     assert "TEST_POSTGRES_NON_C_URL" in postgres
     assert "TEST_POSTGRES_NON_UTF_URL" in postgres
@@ -129,7 +134,7 @@ def test_postgres_integration_lane_is_separate_fail_closed_and_pg16_authoritativ
         "LOCALE_PROVIDER icu",
         "SQL_ASCII",
         "POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED: \"1\"",
-        "TEST_POSTGRES_URL",
+        "TEST_POSTGRES_TARGETS_JSON",
         "bash scripts/check_postgres.sh",
     ):
         assert phrase in workflow

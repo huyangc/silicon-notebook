@@ -69,6 +69,7 @@ def _seed_source_and_objects(repository, notebook_id: str) -> None:
         )
 
 
+@pytest.mark.postgres_lane_contract
 def test_postgres_adapter_implements_every_batch_maintenance_method():
     declared = {
         name
@@ -1008,6 +1009,7 @@ def test_source_target_pages_use_c_keysets_and_preserve_retry_semantics(
     ]
 
 
+@pytest.mark.postgres_integration
 def test_statement_timeout_floor_raises_but_never_lowers(postgres_repository):
     """T-W4-4:维护整表 DELETE 的事务内放宽是「取底」——默认 30s 抬到 600s、
     运维已调更高的值保持、0(禁用)保持;且事务结束即复原(不泄漏)。"""

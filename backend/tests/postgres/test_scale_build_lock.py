@@ -40,6 +40,8 @@ def _holder_pids(postgres_database, notebook_id: str) -> list[int]:
         rows = conn.execute(
             "SELECT pid FROM pg_locks "
             "WHERE locktype = 'advisory' AND granted "
+            "AND database = (SELECT oid FROM pg_database "
+            "WHERE datname = current_database()) "
             "AND classid = %s::oid AND objid = %s::oid",
             (advisory_lock_oid(NAMESPACE), advisory_lock_oid(key)),
         ).fetchall()
@@ -211,6 +213,30 @@ def test_a_negative_advisory_key_is_still_self_verifiable(postgres_database):
     finally:
         handle.release()
     assert _holder_pids(postgres_database, notebook_id) == []
+
+
+def test_holder_probe_ignores_the_same_advisory_key_in_another_database(
+    postgres_database, postgres_non_c_database
+):
+    """The server-wide lock catalog must not mix independent CI worker DBs."""
+    notebook_id = "nb-probe-database-scope"
+    foreign_handle = postgres_non_c_database.try_scale_build_lock(notebook_id)
+    assert isinstance(foreign_handle, ScaleBuildLock)
+    try:
+        assert _holder_pids(postgres_database, notebook_id) == []
+        local_handle = postgres_database.try_scale_build_lock(notebook_id)
+        assert isinstance(local_handle, ScaleBuildLock)
+        try:
+            assert _holder_pids(postgres_database, notebook_id) == [
+                local_handle._connection.info.backend_pid
+            ]
+            assert _holder_pids(postgres_non_c_database, notebook_id) == [
+                foreign_handle._connection.info.backend_pid
+            ]
+        finally:
+            local_handle.release()
+    finally:
+        foreign_handle.release()
 
 
 def test_killing_the_lock_session_releases_the_claim(

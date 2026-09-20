@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import signal
@@ -29,6 +30,12 @@ from tests.postgres.conftest import (
     _require_dedicated_test_database,
     _validate_database_catalog,
     _validate_test_url_options,
+)
+from tests.postgres.targets import (
+    PARALLEL_WORKERS,
+    TARGETS_ENV,
+    TARGET_SPECS,
+    configured_target_groups,
 )
 
 
@@ -147,6 +154,7 @@ class _Target:
     sanitized_url: str
     url_password: str | None
     safe_status: str
+    group_index: int | None = None
 
 
 def _password_free_url(url: str) -> tuple[str, str | None]:
@@ -319,8 +327,15 @@ def _pgpass_entry(url: str, password: str) -> str:
     )
 
 
-def _prepare_target(label: str, env_name: str, expected: str) -> _Target | None:
-    raw_url = os.environ.get(env_name)
+def _prepare_target(
+    label: str,
+    env_name: str,
+    expected: str,
+    *,
+    raw_url: str | None = None,
+    group_index: int | None = None,
+) -> _Target | None:
+    raw_url = os.environ.get(env_name) if raw_url is None else raw_url
     if not raw_url:
         return None
     _validate_test_url_options(raw_url)
@@ -341,7 +356,57 @@ def _prepare_target(label: str, env_name: str, expected: str) -> _Target | None:
         sanitized_url=sanitized_url,
         url_password=password,
         safe_status=safe_status,
+        group_index=group_index,
     )
+
+
+def _configured_targets() -> list[_Target] | None:
+    try:
+        groups = configured_target_groups(os.environ)
+    except Exception:
+        print(
+            "PostgreSQL worker preflight failed: invalid database configuration",
+            file=sys.stderr,
+        )
+        return None
+    if groups is not None:
+        try:
+            return [
+                _prepare_target(
+                    f"worker {index} {key}",
+                    env_name,
+                    expected,
+                    raw_url=group[key],
+                    group_index=index,
+                )
+                for index, group in enumerate(groups)
+                for key, env_name, expected in TARGET_SPECS
+            ]
+        except Exception:
+            print(
+                "PostgreSQL worker preflight failed: invalid database configuration",
+                file=sys.stderr,
+            )
+            return None
+
+    targets = []
+    labels = {
+        "primary": "primary",
+        "non_c": "non-C UTF8",
+        "non_utf": "non-UTF negative",
+    }
+    for key, env_name, expected in TARGET_SPECS:
+        try:
+            target = _prepare_target(labels[key], env_name, expected)
+        except Exception:
+            print(
+                f"PostgreSQL {labels[key]} preflight failed: invalid database configuration",
+                file=sys.stderr,
+            )
+            return None
+        if target is not None:
+            targets.append(target)
+    return targets
 
 
 def _inspect_target(target: _Target) -> bool:
@@ -390,8 +455,16 @@ def _pytest_environment(
     }
     child_env["PYTHONPATH"] = str(BACKEND_ROOT)
     child_env["SILICON_NOTEBOOK_ENV_FILE"] = ""
+    groups: list[dict[str, str]] = [{} for _ in range(PARALLEL_WORKERS)]
+    keys = {env: key for key, env, _ in TARGET_SPECS}
     for target in targets:
-        child_env[target.env_name] = target.sanitized_url
+        if target.group_index is None:
+            child_env[target.env_name] = target.sanitized_url
+        else:
+            groups[target.group_index][keys[target.env_name]] = target.sanitized_url
+    if any(groups):
+        child_env[TARGETS_ENV] = json.dumps(groups)
+        configured_target_groups(child_env)
 
     fallback_password = os.environ.get("PGPASSWORD")
     entries = [
@@ -458,7 +531,7 @@ def _preflight_command() -> list[str]:
     return [sys.executable, "-m", "tests.postgres.lane", "--preflight"]
 
 
-def _pytest_command() -> list[str]:
+def _pytest_command(workers: int = 0) -> list[str]:
     return [
         sys.executable,
         "-m",
@@ -466,11 +539,15 @@ def _pytest_command() -> list[str]:
         "-p",
         "no:cacheprovider",
         "-n",
-        "0",
+        str(workers),
+        "--dist=loadgroup",
+        "--max-worker-restart=0",
+        "--durations=30",
+        f"--junitxml={BACKEND_ROOT / '.local' / 'postgres-junit.xml'}",
         "--tb=short",
         "--maxfail=1",
         "-m",
-        "postgres_integration",
+        "postgres_integration or postgres_lane_contract",
         "tests/postgres",
     ]
 
@@ -579,7 +656,12 @@ def _run_pytest_in_environment(
     *,
     owner: _LauncherResources | None = None,
 ) -> int:
-    completed = _run_child(_pytest_command(), child_env, owner=owner)
+    command = (
+        _pytest_command(PARALLEL_WORKERS)
+        if configured_target_groups(child_env) is not None
+        else _pytest_command()
+    )
+    completed = _run_child(command, child_env, owner=owner)
     return completed.returncode
 
 
@@ -676,25 +758,13 @@ def _preflight_mode_main() -> int:
         )
         return 2
 
-    specs = (
-        ("primary", "TEST_POSTGRES_URL", "utf8"),
-        ("non-C UTF8", "TEST_POSTGRES_NON_C_URL", "non-c"),
-        ("non-UTF negative", "TEST_POSTGRES_NON_UTF_URL", "non-utf"),
-    )
-    targets: list[_Target] = []
-    for label, env_name, expected in specs:
-        try:
-            target = _prepare_target(label, env_name, expected)
-            if target is not None and target.url_password is not None:
-                raise RuntimeError("isolated preflight URL contains a password")
-        except Exception:
-            print(
-                f"PostgreSQL {label} preflight failed: invalid database configuration",
-                file=sys.stderr,
-            )
-            return 2
-        if target is not None:
-            targets.append(target)
+    targets = _configured_targets()
+    if targets is None or any(target.url_password is not None for target in targets):
+        print(
+            "PostgreSQL preflight failed: invalid database configuration",
+            file=sys.stderr,
+        )
+        return 2
 
     for target in targets:
         if not _inspect_target(target):
@@ -703,23 +773,9 @@ def _preflight_mode_main() -> int:
 
 
 def main() -> int:
-    specs = (
-        ("primary", "TEST_POSTGRES_URL", "utf8"),
-        ("non-C UTF8", "TEST_POSTGRES_NON_C_URL", "non-c"),
-        ("non-UTF negative", "TEST_POSTGRES_NON_UTF_URL", "non-utf"),
-    )
-    targets: list[_Target] = []
-    for label, env_name, expected in specs:
-        try:
-            target = _prepare_target(label, env_name, expected)
-        except Exception:
-            print(
-                f"PostgreSQL {label} preflight failed: invalid database configuration",
-                file=sys.stderr,
-            )
-            return 2
-        if target is not None:
-            targets.append(target)
+    targets = _configured_targets()
+    if targets is None:
+        return 2
 
     try:
         return _run_isolated_gate(targets)

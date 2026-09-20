@@ -180,6 +180,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
                     )
 
 
+@pytest.mark.postgres_lane_contract
 def test_packaged_index_migration_phases_are_exact():
     from app.repositories.postgres.migrator import load_migrations
 
@@ -703,6 +704,7 @@ def test_packaged_index_migration_phases_are_exact():
     assert "NOT NULL DEFAULT ''" not in v50_ddl_only
 
 
+@pytest.mark.postgres_lane_contract
 def test_source_index_running_timestamp_maps_to_postgres_null():
     from app.migration.shadow.manifest import MANIFEST
     from app.migration.shadow.transform import PostgresColumn, transform_sqlite_value
@@ -718,6 +720,7 @@ def test_source_index_running_timestamp_maps_to_postgres_null():
     assert transform_sqlite_value(spec, column, "") is None
 
 
+@pytest.mark.postgres_lane_contract
 def test_agent_profile_jobs_empty_timestamps_map_to_postgres_null():
     from app.migration.shadow.manifest import MANIFEST
     from app.migration.shadow.transform import PostgresColumn, transform_sqlite_value
@@ -733,6 +736,7 @@ def test_agent_profile_jobs_empty_timestamps_map_to_postgres_null():
         assert transform_sqlite_value(spec, column, "") is None
 
 
+@pytest.mark.postgres_lane_contract
 def test_catalog_jobs_empty_finished_at_maps_to_postgres_null():
     from app.migration.shadow.manifest import MANIFEST
     from app.migration.shadow.transform import PostgresColumn, transform_sqlite_value
@@ -747,6 +751,7 @@ def test_catalog_jobs_empty_finished_at_maps_to_postgres_null():
     assert transform_sqlite_value(spec, column, "") is None
 
 
+@pytest.mark.postgres_lane_contract
 def test_initial_migration_guards_utf8_before_business_ddl():
     from app.repositories.postgres.migrator import load_migrations
 

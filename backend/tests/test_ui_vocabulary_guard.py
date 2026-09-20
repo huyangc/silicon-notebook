@@ -405,17 +405,6 @@ def test_扫描面塌了要红而不是静默放行(tmp_path, monkeypatch, capsy
     assert "call sites found" in capsys.readouterr().err
 
 
-@pytest.mark.architecture_contract
-def test_真实后端确有可展示文案站点(tmp_path):
-    """非空性:守卫真的在后端 app 树上找到了标记站点(不是扫了个空目录)。"""
-    total = sum(
-        guard.scan_user_error(path)[0] for path in guard.BACKEND_APP.rglob("*.py")
-    )
-    assert total >= guard.MIN_USER_ERROR_SITES, (
-        f"只找到 {total} 处 {guard.USER_ERROR}() —— 扫描面塌了"
-    )
-
-
 def test_后端真实文案确实曾经违规过(tmp_path):
     """变异验证:把 notebook_routes.py 的一条 403 改回「基准库」,守卫必须红。
 

@@ -898,7 +898,7 @@ The verification gates are tiered:
 | G2 extended | `scripts/check_extended.sh`: G1 plus real-index/performance, cold graph/index contracts, and repository-wide semantic scans (heavy subset) | Once daily at `17 18 * * *` UTC (02:17 Asia/Shanghai), plus manual dispatch |
 | G3 PostgreSQL | `scripts/check_postgres.sh`: direct PostgreSQL adapter integration | Independent PR/push/manual CI job |
 
-G1 runs three bounded lanes concurrently: `check_backend.sh` executes the stable backend pytest suite with default 12 backend pytest workers (override with `BACKEND_PYTEST_WORKERS`); `check_contracts.sh` executes syntax/dependency preflight, hermetic smoke paths, contract checks, and the deterministic extraction-scoring harness; `check_frontend.sh` executes every recursively discovered `*.test.mjs`, every `*.component.test.tsx`, the production frontend build, and the package typecheck. Node's test runner and Vitest are each capped at four workers, leaving CPU headroom for the backend critical path. The Next build must keep `ignoreBuildErrors` unset and stays the fail-closed typecheck for production code, but Next's build-time type checker silently filters out every diagnostic reported in `*.test.*`/`*.spec.*` files and `__tests__`/`__mocks__` directories (the `ignoreRegex` in `next/dist/lib/typescript/runTypeCheck.js`, verified on Next 15.5), so a type error that only exists under `frontend/tests/**` never fails the build. The frontend lane therefore runs `npm run lint` (`tsc --noEmit`) after the build — after, so it type-checks the freshly regenerated `.next/types` rather than a stale tree — as the one pass that sees those files; with `incremental` the warm re-check costs under a second (~5s cold), so the duplicate parse the lane once avoided is no longer a budget concern. Its backend lane excludes `slow` real-index/performance tests, `graph_index_contract` cold graph/index contracts, `architecture_contract_heavy` (the 8 of the 64 `architecture_contract` repository-wide semantic scans that cost more than 2s per test; the other 56 run in G1), and the PostgreSQL tree. G2 first runs G1 and then the exact complementary backend marker set — `backend/tests/test_test_architecture_policy.py::test_verification_lane_markers_partition_every_architecture_contract_test` proves that split empirically via `--collect-only`, not just by pinning the two `-m` strings. Each lane has its own process group, so interrupting or terminating the controller also terminates and reaps pytest, npm, and Next.js descendants. The official-client MCP smoke pins exactly the 28 published tools: seven Memory/context, four knowhow, one citation point-read, seven source, three build, two notebook-understanding tools, and four independent global-Ask tools. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
+G1 runs three bounded lanes concurrently: `check_backend.sh` executes the stable backend pytest suite with default 12 backend pytest workers (override with `BACKEND_PYTEST_WORKERS`); `check_contracts.sh` executes syntax/dependency preflight, hermetic smoke paths, contract checks, and the deterministic extraction-scoring harness; `check_frontend.sh` executes every recursively discovered `*.test.mjs`, every `*.component.test.tsx`, the production frontend build, and the package typecheck. Node's test runner and Vitest are each capped at four workers, leaving CPU headroom for the backend critical path. The Next build must keep `ignoreBuildErrors` unset and stays the fail-closed typecheck for production code, but Next's build-time type checker silently filters out every diagnostic reported in `*.test.*`/`*.spec.*` files and `__tests__`/`__mocks__` directories (the `ignoreRegex` in `next/dist/lib/typescript/runTypeCheck.js`, verified on Next 15.5), so a type error that only exists under `frontend/tests/**` never fails the build. The frontend lane therefore runs `npm run lint` (`tsc --noEmit`) after the build — after, so it type-checks the freshly regenerated `.next/types` rather than a stale tree — as the one pass that sees those files; with `incremental` the warm re-check costs under a second (~5s cold), so the duplicate parse the lane once avoided is no longer a budget concern. Its backend lane excludes `slow` real-index/performance tests, `graph_index_contract` cold graph/index contracts, `architecture_contract_heavy` (the eight repository-wide semantic scans in `_ARCHITECTURE_CONTRACT_HEAVY_TESTS`; the remaining lightweight `architecture_contract` tests run in G1), and the PostgreSQL tree. G2 first runs G1 and then the exact complementary backend marker set — `backend/tests/test_test_architecture_policy.py::test_verification_lane_markers_partition_every_architecture_contract_test` proves that split empirically via `--collect-only`, not just by pinning the two `-m` strings. Each lane has its own process group, so interrupting or terminating the controller also terminates and reaps pytest, npm, and Next.js descendants. The official-client MCP smoke pins exactly the 28 published tools: seven Memory/context, four knowhow, one citation point-read, seven source, three build, two notebook-understanding tools, and four independent global-Ask tools. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
 
 Use the project’s Homebrew/Miniconda interpreter for acceptance:
 
@@ -909,6 +909,23 @@ PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.s
 The Apple Silicon warm gate hard target is at most 60 seconds. CI lane timings are observational only, so this measured local target is not a portable timeout assertion for every CI host.
 
 Keep test-speed changes result-preserving. The G1 standard and G2 extended marker expressions are exact complements, while PostgreSQL stays independently authoritative; never make a committed test unreachable. Ordinary unit and standard-gate tests are hermetic: they do not bind host ports or depend on ambient services; self-contained subprocess/signal coverage is reserved for contracts that are intrinsically process-level. Cache repository-wide AST/protocol parsing once per test process (pytest worker or isolated Node guard process), and expose a membership-only projection when a frozen-fixture test does not need detailed sites, signatures, or ownership. An executable repository guard gets one real-tree invocation in its owning contracts lane; unit tests for argument parsing, failure modes, and extra roots redirect its default roots to minimal fixtures rather than rescanning the repository. Assertions over the same immutable behavior matrix belong in one labelled traversal so they do not rebuild an identical database world per row or assertion family. The frontend lane syncs its immutable local-plugin projection once, then suppresses only npm's redundant `pretest`/`prebuild`/`prelint` hooks; those hooks remain mandatory for each standalone developer command. Test cache/container policy through the policy object instead of constructing unrelated database and ANN artifacts; and derive autouse isolation paths from the worker's existing pytest base temp rather than allocating a new `tmp_path` directory for every pure test. Ordinary SQLite repository tests copy a current empty schema built once per pytest worker, but every test keeps an independent mutable database file; migration, upgrade, and repository-snapshot modules stay on the real migration ladder through `_REAL_SQLITE_MIGRATION_MODULES`. Repository-heavy tests may reduce only the default password-hash cost in the pytest autouse fixture: authentication helpers retain the production default, and credential-field snapshot modules remain in `_REAL_PASSWORD_HASH_MODULES`. Concurrency tests use events/barriers for ordering and fairness assertions rather than fixed sleeps or assumed thread wake-up order. When queued work runs in waves, a controller thread must release observed capacity with events instead of leaving a later wave alone in a cyclic barrier. Delayed process-global jobs must be cancelled and reaped in shared teardown before per-test repositories close; cleanup scoped to one repository object cannot contain route-owned work.
+
+Test fixture cost follows the behavior under test. Scale-build lock admission and
+handoff tests use an unindexed notebook; real build/fold/publication tests retain
+their seeded or indexed artifacts. Normal stage-event and progress-callback
+assertions share one facade build, while callback failures and the direct builder
+artifact contract remain separate. The three notebook lifecycle literal scans
+share one `xdist_group` so their process-local AST cache is actually reused;
+the G1/G2 selection expressions remain unchanged. Frontend source-policy checks
+reuse immutable module inputs and parsed trees within their isolated guard process.
+
+Timer tests advance controlled clocks through the original deadline, including
+the before/after state, instead of waiting in real time. Background-delete HTTP
+tests hold and release the real runner with events; the startup sweeper test waits
+for an observed periodic sweep and checks that its thread exits on close. UI
+vocabulary non-vacuity on the real repository belongs to `check_ui_vocabulary.py`
+in the contracts lane; unit tests retain the minimal empty-scan failure fixture
+and mutation coverage without a second full-tree count.
 
 ### GitHub Actions CI
 
@@ -939,7 +956,7 @@ contract regeneration and a clean-environment G2 extended-gate run.
 
 The workflow is read-only, does not receive model or deployment secrets, and
 uses four backend pytest workers to avoid oversubscribing the hosted runner.
-Backend installation sets `HNSWLIB_NO_NATIVE=1` and disables pip's wheel cache:
+Backend installation sets `HNSWLIB_NO_NATIVE=1`; the standard lane disables pip's wheel cache:
 `hnswlib` otherwise builds with `-march=native`, and a cached locally built
 wheel can crash with `SIGILL` when restored on a hosted runner with different
 CPU features. The portable build trades a small ANN speedup for deterministic
@@ -951,11 +968,35 @@ only after stable green pull-request and post-merge runs have been observed
 and the user explicitly approves the branch-protection change.
 
 PostgreSQL coverage is deliberately separate from the offline gates. The
-`level-3-postgres-integration` job starts PostgreSQL 16, provisions least-privilege and
-auxiliary encoding/locale targets, and runs `bash scripts/check_postgres.sh` with
-only the `postgres_integration` marker. Local verification uses an installed
-PostgreSQL 16 service and an explicit `TEST_POSTGRES_URL`; `scripts/check.sh`
-must never start or contact PostgreSQL.
+`level-3-postgres-integration` job starts PostgreSQL 16 and runs
+`bash scripts/check_postgres.sh`, selecting `postgres_integration or postgres_lane_contract`.
+The latter includes hermetic adapter/migration contracts and launcher/target safety
+checks in the lane that owns them.
+CI provisions four explicit groups of primary, non-C UTF8, and non-UTF targets
+before handing off to the unchanged least-privilege application role. The
+`TEST_POSTGRES_TARGETS_JSON` array contains four objects with `primary`, `non_c`,
+and `non_utf` URL fields. All twelve databases must be distinct on one explicit
+server endpoint. The launcher validates and preflights every target before starting
+four pytest workers, maps each worker to only its own three databases, and keeps
+passwords in the temporary pgpass file. Missing/duplicate targets, mixed serial and
+parallel configuration, or an unexpected worker fail closed; worker restart is disabled.
+Each test still creates its own schema and runs real migrations. This database-level
+isolation avoids contention on the fixed migration advisory lock. Lock-observation
+queries must filter the current database; a server-global activity view is not isolated
+by schema. The batch4 read-only plan matrix shares one unchanged large corpus,
+while online installation and migration mutation tests retain independent schemas.
+
+Local verification can still use an installed PostgreSQL 16 service and an explicit
+`TEST_POSTGRES_URL` for the serial lane; do not also set the parallel JSON variable.
+Auxiliary targets remain mandatory in authoritative CI. `scripts/check.sh` must never
+start or contact PostgreSQL. The PG launcher always reports slow setup/call/teardown
+durations and writes `backend/.local/postgres-junit.xml`, uploaded by CI even on failure.
+It does not forward arbitrary `PYTEST_ADDOPTS` into its isolated child environment.
+The PG dependency cache uses a dedicated portable-wheel directory and an exact
+OS/architecture/Python/requirements/policy key, with no generic fallback cache;
+`HNSWLIB_NO_NATIVE=1` remains mandatory. The whole PG job is measured against a
+three-minute optimization target; a successful test result alone does not prove it met
+that target, and cold-cache installation time is included in the observation.
 The lane covers direct PostgreSQL behavior only; retired tests for the SQLite
 backend implementation, SQLite-to-PostgreSQL import/forward-shadow, and
 cross-backend parity are not active coverage.

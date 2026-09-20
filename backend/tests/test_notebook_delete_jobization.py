@@ -24,7 +24,7 @@ Covers:
 """
 from __future__ import annotations
 
-import time
+import threading
 from datetime import datetime as _RealDatetime
 from datetime import timedelta, timezone
 
@@ -187,31 +187,38 @@ def test_second_sequential_delete_request_gets_409_from_the_owner_scoped_guard(
     nb = client.post("/api/notebooks", json={"name": "D2"}, headers=headers).json()["id"]
 
     rt = deps.repository()._runtime
-    rt.notebook_delete._quiesce_timeout_seconds = 5.0
-    with rt.database.write() as db:
-        db.execute(
-            "INSERT INTO kg_build_jobs (id,notebook_id,created_by,mode,status,"
-            "stage,total_sources,completed_sources,failed_sources,error_code,"
-            "error_message,created_at,updated_at,finished_at) VALUES "
-            "('kgj-block',?,?,?,'running','extracting',1,0,0,'','',?,?,'')",
-            (nb, "u", "incremental", NOW, NOW),
-        )
+    worker_entered = threading.Event()
+    release_worker = threading.Event()
+    real_run = rt.notebook_delete.run
 
-    first = client.delete(f"/api/notebooks/{nb}", headers=headers)
-    assert first.status_code == 202
-    second = client.delete(f"/api/notebooks/{nb}", headers=headers)
-    assert second.status_code == 409
+    def run_after_second_request(job_id):
+        worker_entered.set()
+        assert release_worker.wait(10.0), "DELETE assertions did not release the worker"
+        real_run(job_id)
+
+    # Keep the real HTTP guard, tombstone CAS and executor admission. Pause
+    # at the job boundary so the second request sees the committed tombstone
+    # without waiting through the unrelated KG-quiesce backoff.
+    monkeypatch.setattr(rt.notebook_delete, "run", run_after_second_request)
+    try:
+        first = client.delete(f"/api/notebooks/{nb}", headers=headers)
+        assert first.status_code == 202
+        assert worker_entered.wait(10.0), "delete job never entered its worker"
+        second = client.delete(f"/api/notebooks/{nb}", headers=headers)
+        assert second.status_code == 409
+
+        with rt.database.connect() as conn:
+            job_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM notebook_delete_jobs WHERE notebook_id=?",
+                (nb,),
+            ).fetchone()["c"]
+        assert job_count == 1  # 第二次请求没有悄悄再排一个作业
+    finally:
+        release_worker.set()
+        _drain()
 
     with rt.database.connect() as conn:
-        job_count = conn.execute(
-            "SELECT COUNT(*) AS c FROM notebook_delete_jobs WHERE notebook_id=?",
-            (nb,),
-        ).fetchone()["c"]
-    assert job_count == 1  # 第二次请求没有悄悄再排一个作业
-
-    with rt.database.write() as db:
-        db.execute("UPDATE kg_build_jobs SET status='succeeded' WHERE id='kgj-block'")
-    _drain()
+        assert conn.execute("SELECT 1 FROM notebooks WHERE id=?", (nb,)).fetchone() is None
 
 
 def test_delete_by_a_non_owner_still_gets_404(tmp_path, monkeypatch):
@@ -801,12 +808,28 @@ def test_run_startup_wires_and_stops_the_notebook_delete_sweeper(monkeypatch):
         state = startup_warmup._active_lifecycle
         assert state is not None
         assert state.notebook_delete_sweeper_stop is not None
-        assert nd_module._active is not None
-        time.sleep(1.5)  # one tick fires without raising (interval is 1s)
-        assert nd_module._active is not None  # thread still alive
+        sweeper = nd_module._active
+        assert sweeper is not None
+        periodic_tick = threading.Event()
+        real_sweep_once = repo._runtime.notebook_delete.sweep_once
+
+        def observe_periodic_sweep():
+            result = real_sweep_once()
+            if threading.current_thread() is sweeper._thread:
+                periodic_tick.set()
+            return result
+
+        # Install after run_startup: its synchronous startup sweep cannot
+        # satisfy this event. Only a successful tick on the real sweep thread
+        # counts, and the production interval remains in force.
+        monkeypatch.setattr(repo._runtime.notebook_delete, "sweep_once", observe_periodic_sweep)
+        assert periodic_tick.wait(10.0), "periodic sweep never completed"
+        assert nd_module._active is sweeper
+        assert sweeper._thread.is_alive()
     finally:
         startup_warmup.close_repository(lease, repo)
     assert nd_module._active is None
+    assert not sweeper._thread.is_alive()
 
 
 def test_checkpoint_predicate_treats_a_missing_notebook_as_deleting(repo):

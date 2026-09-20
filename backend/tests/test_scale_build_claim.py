@@ -92,14 +92,34 @@ def _add_source(repo, notebook_id, *, source_id, object_id, chunk_id, day):
 
 
 @pytest.fixture
-def indexed_notebook(repo):
-    notebook = repo.create_notebook(NotebookCreate(name="claimed"))
+def notebook_id(repo):
+    """Admission and claim ownership do not need a built graph or ANN."""
+    return repo.create_notebook(NotebookCreate(name="claimed")).id
+
+
+@pytest.fixture
+def seeded_notebook(repo, notebook_id):
     _add_source(
-        repo, notebook.id, source_id="s1", object_id="o1", chunk_id="c1", day=1
+        repo, notebook_id, source_id="s1", object_id="o1", chunk_id="c1", day=1
     )
-    repo.rebuild_unified_kg(notebook.id)
-    repo.build_scale_index(notebook.id)
-    return notebook.id
+    repo.rebuild_unified_kg(notebook_id)
+    return notebook_id
+
+
+@pytest.fixture
+def indexed_notebook(repo, seeded_notebook):
+    """Publish real artifacts for full/fold and main/companion contracts."""
+    repo.build_scale_index(seeded_notebook)
+    return seeded_notebook
+
+
+@pytest.fixture
+def published_notebook(repo, notebook_id):
+    """Directory swaps preserve bytes without interpreting index contents."""
+    live = repo._runtime.scale_artifact_store.scale_dir(notebook_id)
+    live.mkdir(parents=True)
+    (live / "manifest.json").write_text('{"marker": "original"}', encoding="utf-8")
+    return notebook_id
 
 
 class _StubLock:
@@ -162,35 +182,35 @@ def test_advisory_keys_normalize_into_the_int32_range():
 # ------------------------------------------------- swap re-verification ----
 
 def test_swap_is_refused_and_tmp_kept_when_the_claim_was_lost(
-    repo, indexed_notebook
+    repo, published_notebook
 ):
     """The swap is the only destructive step; a claim that evaporated during
     the build means somebody else may own the directory now."""
     store = repo._runtime.scale_artifact_store
-    live = store.scale_dir(indexed_notebook)
+    live = store.scale_dir(published_notebook)
     before = (live / "manifest.json").read_bytes()
-    temporary = store.prepare_fold_directory(indexed_notebook)
+    temporary = store.prepare_fold_directory(published_notebook)
     (temporary / "manifest.json").write_text("{}", encoding="utf-8")
 
     with pytest.raises(ScaleBuildLockLost):
         store.swap_fold_directory(
-            indexed_notebook, temporary, verify_held=lambda: False
+            published_notebook, temporary, verify_held=lambda: False
         )
 
     assert (live / "manifest.json").read_bytes() == before
     assert temporary.exists(), "the staged build must be left for the operator"
 
 
-def test_a_held_claim_lets_the_swap_through(repo, indexed_notebook):
+def test_a_held_claim_lets_the_swap_through(repo, published_notebook):
     store = repo._runtime.scale_artifact_store
-    temporary = store.prepare_fold_directory(indexed_notebook)
+    temporary = store.prepare_fold_directory(published_notebook)
     (temporary / "manifest.json").write_text('{"marker": 1}', encoding="utf-8")
 
     store.swap_fold_directory(
-        indexed_notebook, temporary, verify_held=lambda: True
+        published_notebook, temporary, verify_held=lambda: True
     )
 
-    published = store.scale_dir(indexed_notebook) / "manifest.json"
+    published = store.scale_dir(published_notebook) / "manifest.json"
     assert json.loads(published.read_text(encoding="utf-8")) == {"marker": 1}
 
 
@@ -270,34 +290,34 @@ def test_an_unverifiable_claim_counts_as_lost(repo):
 # -------------------------------------------------- synchronous claiming ---
 
 def test_facade_build_scale_index_now_excludes_a_concurrent_builder(
-    repo, indexed_notebook
+    repo, notebook_id
 ):
     """``build()`` used to claim nothing at all, so two callers could stage and
     swap the same directory. The facade path inherits the claim now."""
     scale = _scale(repo)
     with scale.building_lock:
-        scale.building.add(indexed_notebook)
+        scale.building.add(notebook_id)
     try:
         with pytest.raises(ScaleBuildBusy):
-            repo.build_scale_index(indexed_notebook)
+            repo.build_scale_index(notebook_id)
     finally:
         with scale.building_lock:
-            scale.building.discard(indexed_notebook)
+            scale.building.discard(notebook_id)
 
 
 def test_a_busy_cross_process_claim_refuses_the_synchronous_build(
-    repo, indexed_notebook, monkeypatch
+    repo, notebook_id, monkeypatch
 ):
     scale = _scale(repo)
     monkeypatch.setattr(scale, "_scale_build_lock", lambda _nb: None)
 
     with pytest.raises(ScaleBuildBusy):
-        scale.build(indexed_notebook)
+        scale.build(notebook_id)
 
-    assert indexed_notebook not in scale.building
+    assert notebook_id not in scale.building
 
 
-def test_a_probe_that_raises_fails_closed(repo, indexed_notebook, monkeypatch):
+def test_a_probe_that_raises_fails_closed(repo, notebook_id, monkeypatch):
     def explode(_notebook_id):
         raise RuntimeError("database unreachable")
 
@@ -305,11 +325,11 @@ def test_a_probe_that_raises_fails_closed(repo, indexed_notebook, monkeypatch):
     monkeypatch.setattr(scale, "_scale_build_lock", explode)
 
     with pytest.raises(ScaleBuildBusy):
-        scale.build(indexed_notebook)
+        scale.build(notebook_id)
 
 
 def test_a_synchronous_build_releases_its_claim_on_both_outcomes(
-    repo, indexed_notebook, monkeypatch
+    repo, seeded_notebook, monkeypatch
 ):
     scale = _scale(repo)
     handles: list[_StubLock] = []
@@ -320,7 +340,7 @@ def test_a_synchronous_build_releases_its_claim_on_both_outcomes(
         return handle
 
     monkeypatch.setattr(scale, "_scale_build_lock", issue)
-    scale.build(indexed_notebook)
+    scale.build(seeded_notebook)
     monkeypatch.setattr(
         scale.builder,
         "build",
@@ -329,17 +349,17 @@ def test_a_synchronous_build_releases_its_claim_on_both_outcomes(
         ),
     )
     with pytest.raises(RuntimeError, match="boom"):
-        scale.build(indexed_notebook)
+        scale.build(seeded_notebook)
 
     assert [handle.releases for handle in handles] == [1, 1]
     assert scale._scale_build_lock_handles == {}
-    assert indexed_notebook not in scale.building
+    assert seeded_notebook not in scale.building
 
 
 # ------------------------------------------------------------- admission ---
 
 def test_admission_hands_its_claim_to_the_worker_and_the_worker_releases_it(
-    repo, indexed_notebook, monkeypatch
+    repo, notebook_id, monkeypatch
 ):
     scale = _scale(repo)
     handles: list[_StubLock] = []
@@ -354,6 +374,14 @@ def test_admission_hands_its_claim_to_the_worker_and_the_worker_releases_it(
     monkeypatch.setattr(scale, "_scale_build_lock", issue)
     seen: dict[str, object] = {}
     finished = threading.Event()
+    workers: list[threading.Thread] = []
+
+    def start_worker(name, target):
+        worker = threading.Thread(name=name, target=target, daemon=True)
+        workers.append(worker)
+        worker.start()
+
+    monkeypatch.setattr(scale, "_start_daemon", start_worker)
 
     def fake_build(notebook_id, on_stage=None):
         seen["registered"] = dict(scale._scale_build_lock_handles)
@@ -365,16 +393,17 @@ def test_admission_hands_its_claim_to_the_worker_and_the_worker_releases_it(
         scale, "notify_index_done", lambda _nb: finished.set()
     )
 
-    assert scale._run_scale_op(indexed_notebook, "full") is True
+    assert scale._run_scale_op(notebook_id, "full") is True
     assert finished.wait(timeout=10)
+    # Notification precedes follow-up admission and slot handoff. Join the
+    # whole worker so every probe has finished before checking for leaks.
+    assert len(workers) == 1
+    workers[0].join(timeout=10)
+    assert not workers[0].is_alive()
     admitted = handles[0]
-    for _ in range(500):
-        if admitted.releases:
-            break
-        threading.Event().wait(0.02)
 
     # The worker — not the admitting thread — saw the claim and released it.
-    assert seen["registered"] == {indexed_notebook: admitted}
+    assert seen["registered"] == {notebook_id: admitted}
     assert seen["verified"] is True
     assert admitted.releases == 1
     # Every later probe (the coalesced follow-up, the slot handoff) started and
@@ -384,7 +413,7 @@ def test_admission_hands_its_claim_to_the_worker_and_the_worker_releases_it(
 
 
 def test_admission_releases_its_claim_when_nothing_starts(
-    repo, indexed_notebook, monkeypatch
+    repo, notebook_id, monkeypatch
 ):
     """Handoff discipline: every non-started exit of the claimed half must
     release. Mutation anchor — delete the ``finally`` in
@@ -396,14 +425,14 @@ def test_admission_releases_its_claim_when_nothing_starts(
     queue in exactly this window."""
     scale = _scale(repo)
     handle = _StubLock()
-    scale.idle_queue[indexed_notebook] = ("fold", "2026-08-31T00:00:00+00:00")
+    scale.idle_queue[notebook_id] = ("fold", "2026-08-31T00:00:00+00:00")
 
     def issue(notebook_id):
         scale.idle_queue.pop(notebook_id, None)
         return handle
 
     monkeypatch.setattr(scale, "_scale_build_lock", issue)
-    assert scale._admit_scale_op(indexed_notebook, "auto", claim_idle=True) == (
+    assert scale._admit_scale_op(notebook_id, "auto", claim_idle=True) == (
         "refused"
     )
 
@@ -412,7 +441,7 @@ def test_admission_releases_its_claim_when_nothing_starts(
 
 
 def test_admission_releases_its_claim_when_the_request_is_only_parked(
-    repo, indexed_notebook, monkeypatch
+    repo, notebook_id, monkeypatch
 ):
     scale = _scale(repo)
     handle = _StubLock()
@@ -422,17 +451,17 @@ def test_admission_releases_its_claim_when_the_request_is_only_parked(
     while scale._scale_build_semaphore.acquire(blocking=False):
         taken.append(1)
     try:
-        assert scale._admit_scale_op(indexed_notebook, "full") == "queued"
+        assert scale._admit_scale_op(notebook_id, "full") == "queued"
     finally:
         for _ in taken:
             scale._scale_build_semaphore.release()
 
-    assert indexed_notebook in scale._scale_pending
+    assert notebook_id in scale._scale_pending
     assert handle.releases == 1
 
 
 def test_a_busy_claim_queues_the_followup_and_records_no_backoff(
-    repo, indexed_notebook, monkeypatch
+    repo, notebook_id, monkeypatch
 ):
     """An offline build legitimately runs for 40 minutes. Charging that to this
     notebook's failure backoff would push automatic retries to the 30-minute
@@ -441,34 +470,34 @@ def test_a_busy_claim_queues_the_followup_and_records_no_backoff(
     monkeypatch.setattr(scale, "_scale_build_lock", lambda _nb: None)
 
     outcome = scale._admit_scale_op(
-        indexed_notebook, "full", supersede_idle=True, queue_full_if_busy=True
+        notebook_id, "full", supersede_idle=True, queue_full_if_busy=True
     )
 
     assert outcome == "queued"
-    assert scale.idle_queue[indexed_notebook][0] == "full"
+    assert scale.idle_queue[notebook_id][0] == "full"
     assert scale._scale_failure_state == {}
-    assert indexed_notebook not in scale.building
+    assert notebook_id not in scale.building
     # Nothing was consumed and no worker exists, so no slot was spent either.
     assert scale._slot_available() is True
 
 
 def test_a_busy_claim_leaves_a_drained_queue_entry_where_it_was(
-    repo, indexed_notebook, monkeypatch
+    repo, notebook_id, monkeypatch
 ):
     scale = _scale(repo)
-    scale.idle_queue[indexed_notebook] = ("fold", "2026-08-31T00:00:00+00:00")
+    scale.idle_queue[notebook_id] = ("fold", "2026-08-31T00:00:00+00:00")
     monkeypatch.setattr(scale, "_scale_build_lock", lambda _nb: None)
 
     assert scale._admit_scale_op(
-        indexed_notebook, "auto", claim_idle=True
+        notebook_id, "auto", claim_idle=True
     ) == "refused"
 
-    assert scale.idle_queue[indexed_notebook][0] == "fold"
+    assert scale.idle_queue[notebook_id][0] == "fold"
     assert scale._scale_failure_state == {}
 
 
 def test_an_unevaluable_claim_parks_the_request_instead_of_naming_a_builder(
-    repo, indexed_notebook, monkeypatch
+    repo, notebook_id, monkeypatch
 ):
     """codex W-CLI R1 P1-1, the reviewer's exact scenario.
 
@@ -481,25 +510,27 @@ def test_an_unevaluable_claim_parks_the_request_instead_of_naming_a_builder(
     for the unavailable case (i.e. merge the three states back into two) and
     both assertions below go red.
     """
+    # Base-tier eligibility reaches trigger admission without an ANN build.
+    repo.mark_notebook_base(notebook_id)
     scale = _scale(repo)
     monkeypatch.setattr(
         scale, "_scale_build_lock", lambda _nb: SCALE_BUILD_LOCK_UNAVAILABLE
     )
 
-    assert scale.trigger(indexed_notebook, when="now", manual=True) == {
+    assert scale.trigger(notebook_id, when="now", manual=True) == {
         "status": "queued",
-        "notebook_id": indexed_notebook,
+        "notebook_id": notebook_id,
     }
 
-    assert indexed_notebook in scale._scale_pending
-    assert indexed_notebook not in scale.building
+    assert notebook_id in scale._scale_pending
+    assert notebook_id not in scale.building
     # Parking is not failing: the backoff window must not move for work that
     # was never attempted.
     assert scale._scale_failure_state == {}
 
 
 def test_a_probe_that_raises_is_unavailable_not_held(
-    repo, indexed_notebook, monkeypatch
+    repo, notebook_id, monkeypatch
 ):
     """A probe that blew up knows nothing about who owns the notebook."""
     def explode(_notebook_id):
@@ -509,35 +540,35 @@ def test_a_probe_that_raises_is_unavailable_not_held(
     monkeypatch.setattr(scale, "_scale_build_lock", explode)
 
     assert (
-        scale._acquire_scale_build_lock(indexed_notebook)
+        scale._acquire_scale_build_lock(notebook_id)
         is SCALE_BUILD_LOCK_UNAVAILABLE
     )
-    assert scale._admit_scale_op(indexed_notebook, "full") == "queued"
-    assert indexed_notebook in scale._scale_pending
+    assert scale._admit_scale_op(notebook_id, "full") == "queued"
+    assert notebook_id in scale._scale_pending
 
 
 def test_an_unevaluable_claim_leaves_a_drained_entry_where_it_was(
-    repo, indexed_notebook, monkeypatch
+    repo, notebook_id, monkeypatch
 ):
     """Parking is for FRESH immediate requests. A drain's entry is already
     parked; a second record would start the same notebook twice."""
     scale = _scale(repo)
     stamp = "2026-08-31T00:00:00+00:00"
-    scale.idle_queue[indexed_notebook] = ("fold", stamp)
+    scale.idle_queue[notebook_id] = ("fold", stamp)
     monkeypatch.setattr(
         scale, "_scale_build_lock", lambda _nb: SCALE_BUILD_LOCK_UNAVAILABLE
     )
 
     assert scale._admit_scale_op(
-        indexed_notebook, "auto", claim_idle=True
+        notebook_id, "auto", claim_idle=True
     ) == "queued"
 
-    assert scale.idle_queue[indexed_notebook] == ("fold", stamp)
-    assert indexed_notebook not in scale._scale_pending
+    assert scale.idle_queue[notebook_id] == ("fold", stamp)
+    assert notebook_id not in scale._scale_pending
 
 
 def test_a_notebook_already_building_here_never_opens_a_lock_session(
-    repo, indexed_notebook, monkeypatch
+    repo, notebook_id, monkeypatch
 ):
     """codex W-CLI R1 P2-1: the claim probe is a dedicated non-pooled
     PostgreSQL session. Admission attempts for a notebook this process is
@@ -553,26 +584,26 @@ def test_a_notebook_already_building_here_never_opens_a_lock_session(
 
     monkeypatch.setattr(scale, "_scale_build_lock", issue)
     with scale.building_lock:
-        scale.building.add(indexed_notebook)
+        scale.building.add(notebook_id)
     try:
-        assert scale._admit_scale_op(indexed_notebook, "full") == "refused"
+        assert scale._admit_scale_op(notebook_id, "full") == "refused"
         assert scale._admit_scale_op(
-            indexed_notebook, "full", queue_full_if_busy=True
+            notebook_id, "full", queue_full_if_busy=True
         ) == "queued"
         # A stale drain is answered the same way, and just as cheaply.
         assert scale._admit_scale_op(
-            indexed_notebook, "auto", claim_pending=True
+            notebook_id, "auto", claim_pending=True
         ) == "refused"
     finally:
         with scale.building_lock:
-            scale.building.discard(indexed_notebook)
+            scale.building.discard(notebook_id)
 
     assert probes == []
-    assert scale.idle_queue[indexed_notebook][0] == "full"
+    assert scale.idle_queue[notebook_id][0] == "full"
 
 
 def test_both_backends_report_an_in_process_build_the_same_way(
-    repo, indexed_notebook, monkeypatch
+    repo, notebook_id, monkeypatch
 ):
     """codex W-CLI R1 N1. On PostgreSQL the in-flight build in this very
     process holds the advisory lock, so the cross-process probe answers "held
@@ -584,14 +615,14 @@ def test_both_backends_report_an_in_process_build_the_same_way(
     scale = _scale(repo)
     monkeypatch.setattr(scale, "_scale_build_lock", lambda _nb: None)
     with scale.building_lock:
-        scale.building.add(indexed_notebook)
+        scale.building.add(notebook_id)
     try:
-        assert scale.fold(indexed_notebook) == {"status": "already_building"}
+        assert scale.fold(notebook_id) == {"status": "already_building"}
         with pytest.raises(ScaleBuildAlreadyBuilding):
-            scale.build(indexed_notebook)
+            scale.build(notebook_id)
     finally:
         with scale.building_lock:
-            scale.building.discard(indexed_notebook)
+            scale.building.discard(notebook_id)
 
 
 # ------------------------------------------------------- fold discipline ---
@@ -777,7 +808,7 @@ def test_a_lost_claim_during_the_companion_rebuild_propagates_and_does_not_overw
 
 
 def test_a_failed_worker_start_rolls_back_everything_it_took(
-    repo, indexed_notebook, monkeypatch
+    repo, notebook_id, monkeypatch
 ):
     """Mutation anchor for the rollback branch: drop any one of the four
     restorations (claim, ticket, ``building``, queue entries) and exactly one
@@ -792,18 +823,18 @@ def test_a_failed_worker_start_rolls_back_everything_it_took(
         lambda name, target: (_ for _ in ()).throw(RuntimeError("no thread")),
     )
     stamp = "2026-08-31T00:00:00+00:00"
-    scale.idle_queue[indexed_notebook] = ("fold", stamp)
-    scale._scale_pending[indexed_notebook] = ("full", stamp)
+    scale.idle_queue[notebook_id] = ("fold", stamp)
+    scale._scale_pending[notebook_id] = ("full", stamp)
 
     with pytest.raises(RuntimeError, match="no thread"):
-        scale._admit_scale_op(indexed_notebook, "auto", claim_idle=True)
+        scale._admit_scale_op(notebook_id, "auto", claim_idle=True)
 
     assert handle.releases == 1
     assert scale._scale_build_lock_handles == {}
     assert scale._slot_available() is True
-    assert indexed_notebook not in scale.building
-    assert scale.idle_queue[indexed_notebook] == ("fold", stamp)
-    assert scale._scale_pending[indexed_notebook] == ("full", stamp)
+    assert notebook_id not in scale.building
+    assert scale.idle_queue[notebook_id] == ("fold", stamp)
+    assert scale._scale_pending[notebook_id] == ("full", stamp)
     assert scale._scale_failure_state == {}
 
 
