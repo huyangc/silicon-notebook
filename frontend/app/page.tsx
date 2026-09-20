@@ -169,6 +169,7 @@ import {
 import { FloatingModalCard } from "./floating-modal-card";
 import { ImagePreviewModal } from "./image-preview-modal";
 import { ConversationShareModal } from "./conversation-share-modal";
+import { notebookConversationShareApi } from "./conversation-share-api";
 import {
   CommandCatalogReview,
   CommandCatalogSection,
@@ -6964,8 +6965,7 @@ export default function Home() {
           // key 含边界:同一条会话里换一条回答再点分享,必须整块重挂,否则弹窗会带着
           // 上一次的 notice/error 与已加载态,把「已生成分享链接」按到新的边界上。
           key={`${sharingSession.id}:${sharingSession.throughAnswerId}`}
-          notebookId={currentNotebookId}
-          conversationId={sharingSession.id}
+          api={notebookConversationShareApi(currentNotebookId, sharingSession.id)}
           title={sharingSession.title || ""}
           throughAnswerId={sharingSession.throughAnswerId}
           onClose={() => rootModals.requestClose("conversation-share", "button")}

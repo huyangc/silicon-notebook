@@ -13,7 +13,11 @@ import { ChatAnswer } from "../chat-answer";
 import { ChatQuestion } from "../chat-question";
 import { askQuestionLimitHint } from "../ask-api";
 import { CitationPopover } from "../citation-card";
-import { type GlobalJob } from "../global-ask-api";
+// 会话分享弹窗与笔记本内问答**同一份实现**：端点、轮次形状两边不同，都经注入的
+// `ConversationShareApi` 抹平，五句范围文案与两条披露因此只有一个定义点。
+import { ConversationShareModal } from "../conversation-share-modal";
+import { globalConversationShareApi, type GlobalJob } from "../global-ask-api";
+import { holdGlobalAskEscape } from "./global-ask-escape";
 import type { UiMode } from "../ui-mode";
 import { GlobalConversationList } from "./conversation-list";
 import { NotebookScopePicker } from "./notebook-scope-picker";
@@ -27,6 +31,9 @@ import "./global-ask.css";
  *  （`CitationPopover` 按它定位）。jobId 一起记，同一条会话里多轮问答的行内标记
  *  选中高亮才不会串到别的轮次上。 */
 type CiteSelection = { jobId: string; reference: AnswerReference; rect: DOMRect };
+/** 正在被分享的那条作业：分享水位的边界是**作业**（`job_id`），不是答案行 id。
+ *  `title` 在打开的那一刻取，弹窗抬头显示的会话名因此不随后续重命名跳字。 */
+type ShareSelection = { jobId: string; title: string };
 /** 本轮该由**本组件**渲染的推理轨迹。
  *
  *  完成后的轨迹以 `answer.reasoning_trace` 为准，而那一份 `AnswerView` 自己就会
@@ -48,6 +55,7 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
   const ask = useGlobalAsk({ syncUrl: !embedded, active, uiMode });
   const [historyOpen, setHistoryOpen] = useState(false);
   const [cite, setCite] = useState<CiteSelection | null>(null);
+  const [share, setShare] = useState<ShareSelection | null>(null);
   const copyResult = useCopyResult();
   const [copying, setCopying] = useState("");
   const copyFlight = useRef<number | null>(null);
@@ -68,7 +76,9 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
   const excludesPreviousContext = selectedNotebookIds !== null
     && ask.turns.some((turn) => turn.resolved_notebook_ids.some((id) => !selectedNotebookIds.has(id)));
 
-  useEffect(() => { setCite(null); }, [ask.conversationId]);
+  // 切会话即收掉两个内层弹层。分享弹窗尤其不能留：它的 `key` 含会话 id，留着会先
+  // 让上一条会话的分享态挂在新会话的抬头下面，用户读到的范围文案说的是另一条会话。
+  useEffect(() => { setCite(null); setShare(null); }, [ask.conversationId]);
   useLayoutEffect(() => {
     ++copyOwner.current;
     copyFlight.current = null;
@@ -86,10 +96,43 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
   // 路径的卡片都必须随 `active` 一起收掉：否则那个捕获期监听会留在 window 上，把
   // 宿主页面的下一次 Esc 整个吞掉；重开浮窗时卡片还会按几分钟前的旧视口坐标悬着。
   // 本地这份直接清 state，`AnswerView` 内部那份走 `dismissSignal`。
-  useEffect(() => { if (!active) setCite(null); }, [active]);
+  useEffect(() => { if (!active) { setCite(null); setShare(null); } }, [active]);
+  // 分享弹窗打开时，Esc 只收它这一层。手法与引用小卡片同源（window **捕获期** +
+  // preventDefault + stopPropagation）：冒泡期赶不上宿主 <dialog> 上的 onKeyDown，
+  // 那个监听会把整个浮窗收掉、弹窗只是收了个寂寞。原生 <dialog> 的 close request
+  // 由 launcher 的 onCancel 读 `globalAskLayerHoldsEscape()` 兜底。
+  //
+  // ⚠ 拦截刻意放在**这里**而不是弹窗组件内部：笔记本内那个调用点由 root modal
+  // 协调器裁定 Esc，而 `conversation-share` 那一格的策略正是 `escape: false`
+  // （分享态是一次写入，不给误触的顺手关闭）。把拦截写进共享组件就会顺手改掉
+  // 笔记本内的既有行为。
+  useEffect(() => {
+    if (!share) return;
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape" || event.isComposing) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setShare(null);
+    };
+    window.addEventListener("keydown", onKey, true);
+    const release = holdGlobalAskEscape();
+    return () => {
+      release();
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [share]);
   useEffect(() => {
     if (ask.running) transcript.current?.scrollTo({ top: transcript.current.scrollHeight, behavior: "smooth" });
   }, [ask.running?.job_id]);
+
+  /** 「分享到这条回答」。全局侧的边界是**作业**，所以传的是 `job_id`——服务端
+   *  `expected_through_id` 钉的也是它。 */
+  function openShare(jobId: string) {
+    setShare({
+      jobId,
+      title: ask.conversations.find((item) => item.id === ask.conversationId)?.title || "",
+    });
+  }
 
   async function copyAnswer(job: GlobalJob) {
     if (copyFlight.current !== null) return;
@@ -137,10 +180,13 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                 <div className="global-turn-scope"><BookOpen size={12} />{job.notebook_scope.mode === "all" ? "全部笔记本" : "指定笔记本"} · {job.resolved_notebook_ids.length} 个</div>
                 {job.answer ? <ChatAnswer answeredAt={job.answer.answered_at ?? job.created_at}>
                   <div className="global-answer-label"><span className="global-answer-mark">SN</span><strong>综合回答</strong><span>引用来自 {job.cited_notebook_ids.length} 个笔记本</span></div>
-                  {/* 单库动作（打开来源 / 知识图谱 / Knowhow 行 / 保存记忆 / 分享 /
+                  {/* 单库动作（打开来源 / 知识图谱 / Knowhow 行 / 保存记忆 /
                       构建索引 / 导入站外建议）一概不传：全局问答没有「当前笔记本」，
                       这些入口在这里没有承接方，缺席时 AnswerView 按既有惯例连按钮都
-                      不渲染。只额外给它一个跨库专属的出口：每条引用「打开笔记本」。
+                      不渲染。两个出口是例外，因为它们在这里**有**承接方：每条引用
+                      「打开笔记本」（跨库专属），以及「分享到这条回答」——全局会话有
+                      自己的一组分享端点，水位边界是**作业**，所以传的是 job_id 而不是
+                      回调带回来的 answer_id。
                       ⚠ notebookId 传 null 说的是「没有 active notebook」，**不是**
                       「不显示图片」：取图归属由 `assetNotebookId` 单点裁定，没有
                       active 时每一张附图退到那条引用/条目自己的所属库去取。那个库
@@ -158,6 +204,7 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                     notebookNames={notebookNames}
                     notebookHref={(notebookId, sourceId) => `/${notebookHash(notebookId, sourceId)}`}
                     onOpenNotebook={onOpenNotebook}
+                    onShare={() => openShare(job.job_id)}
                     dismissSignal={active}
                     buildingScaleIndex={false}
                     memorySaved={false}
@@ -254,6 +301,23 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
       onOpenNotebook={onOpenNotebook}
       anchorRect={cite.rect}
       onClose={() => setCite(null)}
+    />}
+    {/* 会话分享弹窗。与笔记本内问答**同一个组件**——端点、轮次形状的差别全部由注入的
+        `globalConversationShareApi` 吸收，弹窗正文、五句范围文案与两条披露一个字没动。
+        ⚠ 与引用小卡片同一条挂载规矩：就地渲染、不走 portal。全屏形态下浮窗是 top layer
+        里的模态 <dialog>，渲染在它子树之外的 fixed 元素会被整个盖住且不可交互；挂在这里
+        （仍在 `.global-ask-page` 之内）两种形态都成立，`.global-ask-window` 没有
+        transform/contain 一类会改变 fixed 包含块的样式，`.utility-modal`（fixed + inset:0）
+        因此既不会被它的 overflow:hidden 裁掉、也不会缩进小窗里。
+        ⚠ key 含边界：同一条会话里换一条回答再点分享必须整块重挂，否则弹窗会带着上一次的
+        notice/error 与已加载态，把「已生成分享链接」按到新的边界上（与 page.tsx 同一条）。
+        Esc 由上面那个捕获期监听单独接管，只收这一层。 */}
+    {share && ask.conversationId && <ConversationShareModal
+      key={`${ask.conversationId}:${share.jobId}`}
+      api={globalConversationShareApi(ask.conversationId)}
+      title={share.title}
+      throughAnswerId={share.jobId}
+      onClose={() => setShare(null)}
     />}
   </div>;
 }

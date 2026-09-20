@@ -897,10 +897,11 @@ test("renders AnswerView for new jobs", async () => {
   await waitFor(() => expect(container.querySelector(".chat-answer")).not.toBeNull());
   expect(container.querySelector(".global-answer-footer")).toBeNull();
   expect(screen.getByText("回答仅使用本次命中的有限原文。")).toBeTruthy();
-  // 单库动作没有承接方时那几颗按钮不渲染（保存记忆 / 分享）；反馈现在有承接方
-  // （ask.sendFeedback），所以两颗按钮都在，且是可点的未选中态。
+  // 单库动作没有承接方时那几颗按钮不渲染（保存记忆）；反馈（ask.sendFeedback）与
+  // 分享（全局会话自己的一组分享端点）现在都有承接方，所以两者的按钮都在。
+  // 分享那一条的完整行为在 global-ask-share.component.test.tsx。
   expect(screen.queryByRole("button", { name: "保存到记忆" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "分享到这条回答" })).toBeNull();
+  expect(screen.getByRole("button", { name: "分享到这条回答" })).toBeTruthy();
   const useful = screen.getByRole("button", { name: "有用" });
   const notUseful = screen.getByRole("button", { name: "需改进" });
   expect(useful).not.toBeDisabled();

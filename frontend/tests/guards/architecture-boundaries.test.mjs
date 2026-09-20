@@ -144,6 +144,57 @@ test("both ask surfaces render answers through the shared answer panel", async (
 });
 
 
+// 会话分享弹窗只有**一份**实现：笔记本内问答与全局问答 import 同一个模块。复制一份
+// 近似弹窗（两边各画一个）正是这条守卫要挡的事——五句范围文案（`BOUNDED_SCOPE_COPY`）
+// 是排在复制按钮**之上**、用户照着它把链接发出去的那句话，一旦分家就只会修一半，而
+// 界面上看不出来（#530 连吃 4 条阻塞评审的根因就在这句话说错了范围）。
+test("the conversation share modal has one implementation shared by both ask surfaces", async () => {
+  const shareModal = await parseModule("conversation-share-modal.tsx");
+  const globalAsk = await parseModule("ask/global-ask-workspace.tsx");
+  assert.equal(names(shareModal, "function").has("ConversationShareModal"), true);
+  for (const [module, specifier, label] of [
+    [page, "./conversation-share-modal", "page.tsx"],
+    [globalAsk, "../conversation-share-modal", "ask/global-ask-workspace.tsx"],
+  ]) {
+    assert.ok(
+      importsFrom(module, specifier).some((item) => item.imported === "ConversationShareModal"),
+      `${label} 没有从 conversation-share-modal import ConversationShareModal——分享弹窗可能被复制了一份`,
+    );
+    assert.equal(names(module, "function").has("ConversationShareModal"), false);
+  }
+
+  // 正向判据：只断言 import 挡不住「换个名字就地复制一份、import 留着不用」。全局
+  // 工作区必须**真的**挂载 <ConversationShareModal>，且边界钉的是那条**作业**——
+  // 全局侧没有答案行 id，水位边界就是 job_id（服务端 expected_through_id 送的也是它）。
+  const mounts = jsxElements(globalAsk, "ConversationShareModal");
+  assert.equal(mounts.length, 1, "ask/global-ask-workspace.tsx 里的 <ConversationShareModal> 调用点数量漂移，守卫失效");
+  assert.match(
+    String(mounts[0].bindings?.throughAnswerId ?? ""),
+    /jobId/,
+    "全局分享弹窗的边界没有钉在这条作业上——服务端 expected_through_id 收到的会是别的东西",
+  );
+  const shareButtons = jsxElements(globalAsk, "AnswerView");
+  assert.match(
+    String(shareButtons[0]?.bindings?.onShare ?? ""),
+    /job\.job_id/,
+    "全局 AnswerView 的 onShare 没有把这条作业的 job_id 交出去",
+  );
+
+  // 反向判据：五句范围文案与注入接口各自只有一个定义点。第二份文案、第二个工厂
+  // （自己拼一遍 `/…/share` 三个端点）都会在这里红。
+  for (const [marker, owner] of [
+    ["BOUNDED_SCOPE_COPY", "conversation-share-modal.tsx"],
+    ["ConversationShareApi =", "conversation-share-api.ts"],
+  ]) {
+    const owners = [];
+    for (const { path, module } of await appSourceModules()) {
+      if (module.getFullText().includes(marker)) owners.push(path);
+    }
+    assert.deepEqual(owners, [owner], marker);
+  }
+});
+
+
 // 引擎选择器（`.ask-mode-control`：分组页签 + 扩展引擎子选择 + 检索档位）只有一个
 // 定义点。判据是结构性的：只有 ask-mode-picker.tsx 允许出现 `mode-tab` 这个
 // className，两个消费方都必须 import 那个组件、都不许自己再声明一个同名函数。

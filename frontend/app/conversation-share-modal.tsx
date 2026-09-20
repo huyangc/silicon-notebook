@@ -12,7 +12,7 @@
 //     撤销中），点完立即不可点（仓库长任务按钮红线）。
 //   * 分享请求是异步的、而弹窗态是会话级：完成时用 `aliveRef` 确认弹窗还挂着、没被
 //     切到别的会话，否则把上一个会话的分享态按到新会话头上（镜像 report-view 的
-//     activeIdRef 手法；本弹窗按 conversationId 作 key，切会话即重挂，aliveRef 足矣）。
+//     activeIdRef 手法；两个调用点都按会话 + 边界作 key，切会话即重挂，aliveRef 足矣）。
 //
 // 两条披露（设计 §五 是用户 consent 红线）：包含 M 张附图、包含 K 条个人记忆摘录。
 // 计数不来自 share 回执（它只给链接口令 + 水位），而是打开弹窗时加载该会话、按**水位
@@ -23,7 +23,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Copy, Link2, RefreshCw, X } from "lucide-react";
 
-import { getConversation, getConversationShare, shareConversation, unshareConversation } from "./ask-api.ts";
+import type { ConversationShareApi } from "./conversation-share-api.ts";
 import { buildPublicConversationLink } from "./public-conversation.ts";
 import { FloatingModalCard } from "./floating-modal-card.tsx";
 import { httpErrorStatus, toUserMessage } from "./errors.ts";
@@ -36,9 +36,9 @@ import {
   summarizeShareDisclosure,
   summarizeShareUpdate,
   type ShareDisclosure,
+  type ShareTurn,
   type ShareUpdatePreview,
 } from "./conversation-share-disclosure.ts";
-import type { ConversationDetail } from "./workspace-model.ts";
 
 /** 复制到剪贴板：优先 navigator.clipboard，回退隐藏 textarea + execCommand。 */
 async function copyToClipboard(text: string): Promise<void> {
@@ -86,16 +86,17 @@ const BOUNDED_SCOPE_COPY: Record<ReturnType<typeof shareScopeState>, string> = {
 };
 
 export function ConversationShareModal({
-  notebookId,
-  conversationId,
+  api,
   title,
   throughAnswerId = "",
   onClose,
   interactive = true,
   zIndex,
 }: {
-  notebookId: string;
-  conversationId: string;
+  /** 「这条会话怎么读/怎么发/怎么撤、轮次从哪来」整体注入（`conversation-share-api.ts`）。
+   *  弹窗因此对「哪个面的会话」零依赖：笔记本内会话与全局问答会话住在两组端点上，
+   *  但正文、五句范围文案、两条披露与全部按钮反馈只有这一份实现。 */
+  api: ConversationShareApi;
   title: string;
   /** 发布边界：分享到**这条答案**为止，即每条回答下面那个分享按钮（T6）。空串 = 整条
    *  会话 /「更新到最新」，也就是会话列表里那个按钮的既有语义——该模式下本组件的行为
@@ -105,6 +106,11 @@ export function ConversationShareModal({
   interactive?: boolean;
   zIndex?: number;
 }) {
+  // 工厂每次渲染都造一个新对象（调用点写起来不用记得 memo），所以加载 effect 只以
+  // `api.key` 作依赖、经这个 ref 读到当前那一份实现。渲染期赋值与下面的 `busyRef`
+  // 同一手法。
+  const apiRef = useRef(api);
+  apiRef.current = api;
   const aliveRef = useRef(true);
   useEffect(() => {
     aliveRef.current = true;
@@ -119,7 +125,7 @@ export function ConversationShareModal({
   // 水位答案 id——「已分享 vs 新增」的权威分类判据(codex #522 R3),按它在权威 turn
   // 顺序里的位置分,而不是 created_at 时间戳。watermark（时间戳）只作显示与删除兜底。
   const [watermarkId, setWatermarkId] = useState("");
-  const [turns, setTurns] = useState<ConversationDetail["turns"]>([]);
+  const [turns, setTurns] = useState<ShareTurn[]>([]);
   // 会话详情没加载出来 → 无法算数。Memory 披露此时退化成不带数字的告警，绝不省略。
   // **仍可分享**（水位/是否已分享是另一路独立加载的）。
   const [countsError, setCountsError] = useState(false);
@@ -139,7 +145,7 @@ export function ConversationShareModal({
     let cancelled = false;
     setLoading(true);
     setError("");
-    // 每次重跑（切会话/切库导致 notebookId/conversationId 变）都要清掉上一轮的
+    // 每次重跑（切会话/切库导致 api.key 变）都要清掉上一轮的
     // countsError / shareStateError，否则一次失败后即便重跑成功，兜底告警/禁用态
     // 会残留在一个已经算得出精确数字、已加载出分享状态的会话上（codex T5 评审 P2-4）。
     setCountsError(false);
@@ -149,7 +155,7 @@ export function ConversationShareModal({
     // 塞进一个 Promise.all，任一 reject 就在 set turns 之前整体短路，turns 停在 []、
     // countsError 停在 false，而 loading 仍被 finally 清掉 → CTA 可点 → 发空 expected
     // → 服务端按当前最新兜底发布，**未显示任何披露就公开了**（codex #522 R6 P1）。
-    const shareDone = getConversationShare(notebookId, conversationId)
+    const shareDone = apiRef.current.load()
       .then((share) => {
         if (cancelled) return;
         setToken(share.share_token || "");
@@ -164,9 +170,9 @@ export function ConversationShareModal({
         setShareStateError(true);
         setError(toUserMessage(err, "分享状态加载失败，请重试"));
       });
-    const detailDone = getConversation(conversationId)
-      .then((conversation) => {
-        if (!cancelled) setTurns(conversation.turns || []);
+    const detailDone = apiRef.current.loadTurns()
+      .then((loaded) => {
+        if (!cancelled) setTurns(loaded || []);
       })
       .catch(() => {
         // 详情失败：披露算不出但仍可分享，退化成不带数字的兜底告警（countsError）。
@@ -179,7 +185,7 @@ export function ConversationShareModal({
     return () => {
       cancelled = true;
     };
-  }, [notebookId, conversationId]);
+  }, [api.key]);
 
   const shared = Boolean(token);
   const link = shared ? buildPublicConversationLink(token, typeof window !== "undefined" ? window.location.origin : "") : "";
@@ -240,7 +246,7 @@ export function ConversationShareModal({
       // 界面上写着「分享到这一条」,发出去的却是整条会话。
       const expectedThroughId = throughAnswerId
         || (scopedTurns.length ? scopedTurns[scopedTurns.length - 1].answer_id : "");
-      const resp = await shareConversation(notebookId, conversationId, expectedThroughId);
+      const resp = await api.share(expectedThroughId);
       if (!aliveRef.current) return;
       setToken(resp.share_token || "");
       setWatermark(resp.shared_through_at || "");
@@ -264,7 +270,7 @@ export function ConversationShareModal({
     setError("");
     setNotice("");
     try {
-      await unshareConversation(notebookId, conversationId);
+      await api.unshare();
       if (!aliveRef.current) return;
       setToken("");
       setWatermark("");
@@ -293,7 +299,7 @@ export function ConversationShareModal({
    *  危险的只有「照着一句已经过时的范围声明把链接发出去」。一次网络抖动不该顺手废掉发布。 */
   async function refreshShareState(): Promise<ShareStateCheck> {
     try {
-      const share = await getConversationShare(notebookId, conversationId);
+      const share = await api.load();
       if (!aliveRef.current) return "same";
       const nextToken = share.share_token || "";
       const nextAt = share.shared_through_at || "";

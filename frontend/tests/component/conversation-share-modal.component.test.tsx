@@ -24,6 +24,7 @@ vi.mock("../../app/ask-api.ts", () => ({
 }));
 
 import { ConversationShareModal } from "../../app/conversation-share-modal.tsx";
+import { notebookConversationShareApi } from "../../app/conversation-share-api.ts";
 import { humanizedError } from "../../app/errors.ts";
 import { SHARE_DISCLOSURE_COUNTS_ERROR } from "../../app/conversation-share-disclosure.ts";
 
@@ -56,8 +57,10 @@ const DETAIL = {
 function renderModal(throughAnswerId = "") {
   return render(
     <ConversationShareModal
-      notebookId="nb-1"
-      conversationId="conv-1"
+      // 弹窗的四个调用已改成注入（`ConversationShareApi`），笔记本内那一份由这个
+      // 工厂构造：它调的仍然是本文件 mock 掉的那四个 ask-api 函数、参数一个不变，
+      // 所以下面每一条断言（含 `toHaveBeenCalledWith("nb-1", "conv-1", …)`）逐字未动。
+      api={notebookConversationShareApi("nb-1", "conv-1")}
       title="一次问答"
       throughAnswerId={throughAnswerId}
       onClose={vi.fn()}
