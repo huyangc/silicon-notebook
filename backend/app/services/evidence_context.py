@@ -621,7 +621,13 @@ class EvidenceContextService:
                 ),
                 "location_label": location,
                 "tier": tier,
-                "notebook_id": "",
+                # Same rule as every other citation producer: the element arm
+                # is single-library, so the origin IS the notebook it was
+                # handed, and ``citation_active_id`` is what blanks it in a run
+                # that has a subject library. Never a hardcoded "".
+                "notebook_id": foreign_notebook_id(
+                    notebook_id, citation_active_id(notebook_id),
+                ),
                 "relevance": float(element.score or 0.0),
                 "knowhow": None,
             }
@@ -1457,9 +1463,18 @@ class EvidenceContextService:
         一次、``citation_source_info`` 一次、``tier_map`` 一次,与最终建几条卡
         无关;三个批量都按整池算(锚点收窄不改读取次数)。
 
-        ``notebook_id`` 只用于解 ``tier``:element 检索是**单库**通道(跨库命中
-        走 KG/chunk 两条),``Citation.notebook_id`` 因此恒为空串——空串就是
-        「本库」,前端不会为它画跨库徽章。
+        ``notebook_id`` 解 ``tier``,**也**是这批引用的真实归属:element 检索是
+        单库通道(跨库命中走 KG/chunk 两条),所以每条命中都来自传进来的这一本。
+        归属照例过 ``foreign_notebook_id(origin, citation_active_id(active))``——
+        单库模式下 origin == active,归一成空串,与今天逐值相同(空串就是「本库」,
+        前端不为它画跨库徽章);对等模式下 ``citation_active_id`` 返回空串,于是
+        真实库 id 原样保留。
+
+        为什么不写死空串:对等 run 没有「本库」,一条恒空归属的引用既不能被引用
+        冻结复核对上任何一本库的天花板,也不能在界面上说出自己来自哪一本。这条
+        通道本身在对等模式下是关着的(见
+        ``retrieval_candidates.retrieve_elements``),所以这行今天不可达——但
+        「关着」是另一处的决定,归属口径不该依赖它才正确。
         """
         element_by_id = {item.element_id: item for item in elements}
         element_refs = self.knowhow_refs_for(element_by_id)
@@ -1484,7 +1499,9 @@ class EvidenceContextService:
                 quoted_span=item.text[:200],
                 source_file_name=source_info.get("file_name", ""),
                 tier=element_tier,
-                notebook_id="",
+                notebook_id=foreign_notebook_id(
+                    notebook_id, citation_active_id(notebook_id),
+                ),
                 knowhow=element_refs.get(item.element_id),
             ))
         return citations

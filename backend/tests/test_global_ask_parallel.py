@@ -14,7 +14,8 @@ D1-4 之前这个文件钉的是 ``global_ask`` 自己的扇出:并发重叠、w
 """
 from __future__ import annotations
 
-from threading import Event
+from threading import Barrier, Event, Thread
+from types import SimpleNamespace
 import pytest
 
 from app.core.config import Settings
@@ -94,31 +95,117 @@ def test_the_run_plan_lends_the_shared_pool_and_the_live_window(setup):
 @pytest.mark.parametrize(
     "setup", [{"global_ask_retrieval_concurrency": 4}], indirect=True,
 )
-def test_the_fair_window_shrinks_as_jobs_arrive(setup, monkeypatch):
-    """共享池 + FIFO:一个作业一次提交全部库就占满槽位,下一个提问者的库排到
-    自己的阶段时限到期都起不了跑——零个被搜过的库、一份没有证据的答案。
+def test_the_fair_window_shrinks_per_federated_call_not_per_job(setup):
+    """份额的分母是**在途联邦调用数**,不是作业数。
 
-    份额按**活跃作业数**现算,所以这里用登记状态而不是真跑:两个作业登记之后
-    窗口必须是二分之一。
+    按作业分的版本在 reasoning 上是错的:一个作业把子查询扇到引擎自己的池上,
+    每条线程各自进一次联邦通道,1 作业 × 8 子查询 × 8 库 = 最多 64 条腿排在 4
+    个 worker 后面。按作业分会把整池发给那一个作业,剩下六十条腿在阶段时限上
+    过期,用户读到的是「检索未开始」——把一次争用说成了范围问题。
     """
     service, _, _, _ = setup
     assert service._retrieval_window() == 4
-    staged = []
-    monkeypatch.setattr("app.services.global_ask.threading.Thread.start",
-                        _stage_job_threads(staged))
-    jobs = [service.start(GlobalAskRequest(question=question), user_id="u")
-            for question in ("first question", "second question")]
-    assert len(staged) == 2
 
-    assert service._retrieval_window() == 2
+    with service._federated_call():
+        assert service._retrieval_window() == 4
+        with service._federated_call():
+            # 同一个作业的两次并发联邦调用,各拿一半。
+            assert service._retrieval_window() == 2
+            with service._federated_call(), service._federated_call():
+                assert service._retrieval_window() == 1
+        assert service._retrieval_window() == 4
 
-    monkeypatch.undo()
-    for thread in staged:
-        thread.start()
-    for job in jobs:
-        assert finished(service, job).status == "done"
-    # 作业退场,份额还回去。
     assert service._retrieval_window() == 4
+
+
+@pytest.mark.parametrize(
+    "setup", [{"global_ask_retrieval_concurrency": 4}], indirect=True,
+)
+def test_a_federated_call_that_dies_gives_its_share_back(setup):
+    """异常退出也要还份额,否则窗口对这个进程的余生永久收窄。"""
+    service, _, _, _ = setup
+    with pytest.raises(RuntimeError):
+        with service._federated_call():
+            raise RuntimeError("phase gave up")
+    assert service._retrieval_window() == 4
+
+
+def test_two_concurrent_federated_calls_each_get_half_the_window(setup):
+    """握手:两条线程同时在联邦调用里,各自读到的窗口都是一半。
+
+    不用墙钟——两条线程在 ``Barrier`` 上碰头之后才读窗口,所以「同时在途」是
+    构造出来的事实,不是等出来的。
+    """
+    service, _, _, _ = setup
+    service.settings.global_ask_retrieval_concurrency = 4
+    ready, read = Barrier(2, timeout=5), Barrier(2, timeout=5)
+    seen: list = []
+
+    def call():
+        with service._federated_call():
+            ready.wait()
+            seen.append(service._retrieval_window())
+            # 第二道栅栏:两条线程都读完之前谁也不许退出自己的 scope,否则先
+            # 读完的那条会把份额还回去,后读的那条读到的就是「只有我一个」。
+            read.wait()
+
+    threads = [Thread(target=call) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+    assert seen == [2, 2]
+    assert service._retrieval_window() == 4
+
+
+def test_the_federation_enters_the_call_scope_for_a_whole_fan_out(setup):
+    """联邦通道必须真的进 ``plan.call_scope``,否则计数永远是 0、窗口永远是满池。
+
+    直接驱动 ``_run_planned_tasks``(任务表为空,这条用例问的是 scope 有没有被
+    进入,不是腿跑得对不对),并在 scope 内部读计数——``finally`` 释放之后再读就
+    分不出「进过」和「没进过」。
+    """
+    from app.services import chunk_federation as cf
+
+    from contextlib import contextmanager
+
+    service, _, _, _ = setup
+    inside: list = []
+
+    @contextmanager
+    def counting_scope():
+        with service._federated_call():
+            inside.append(service._federated_calls)
+            yield
+
+    plan = SimpleNamespace(
+        call_scope=counting_scope,
+        executor=service._retrieval_pool,
+        window=lambda: 4,
+        cancel=Event(),
+    )
+
+    results, reasons = cf._run_planned_tasks(
+        SimpleNamespace(), [], plan, deadline=1e18,
+    )
+
+    assert (results, reasons) == ([], [])
+    # 进过 scope(计数在里面是 1)……
+    assert inside == [1]
+    # ……出来之后还回去了。
+    assert service._federated_calls == 0
+
+
+def test_a_plan_without_a_call_scope_is_a_no_op(setup):
+    """对照臂:普通笔记本路径没有 plan(或 plan 没有 scope),计数一动不动。"""
+    from app.services import chunk_federation as cf
+
+    service, _, _, _ = setup
+    with cf._call_scope(None):
+        assert service._federated_calls == 0
+    with cf._call_scope(SimpleNamespace(call_scope=None)):
+        assert service._federated_calls == 0
+    assert service._federated_calls == 0
 
 
 def test_a_cancelled_job_stops_the_libraries_already_executing(setup):

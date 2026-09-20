@@ -383,6 +383,50 @@ def test_keyword_arm_is_closed_in_peer_mode():
     assert probe.calls == ["restricted_probe", "corpus_langs", "chunk_fts"]
 
 
+def test_element_arm_is_closed_in_peer_mode():
+    """第三条 active-only 补召回腿(D1-4):元素检索没有联邦通道,对等模式整条关。
+
+    它比另外两条还多一层代价:命中会经 ``evidence_context.element_citations``
+    出引用卡,而那条装配一直是单库口径——对等 run 里就是一条没法对任何一本库的
+    天花板复核的引用。
+    """
+    calls: list = []
+
+    class _Elements:
+        def _retrieve_elements(self, *args, **kwargs):
+            calls.append(args[0] if args else kwargs.get("notebook_id"))
+            return ["hit"]
+
+    probe = _Elements()
+
+    with _peer_scope():
+        assert CandidateRetrievalService.retrieve_elements(probe, "nb-a", "q") == []
+    assert calls == []
+
+    # 对照臂:不装覆盖时这条腿照常跑,命中逐值原样交回。
+    assert CandidateRetrievalService.retrieve_elements(
+        probe, "nb-a", "q",
+    ) == ["hit"]
+    assert calls == ["nb-a"]
+
+
+def test_the_reasoning_element_action_is_skipped_in_peer_mode():
+    """动作执行处同一把闸:轨迹如实说明,而不是报一次「查了但一段都没有」。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    retriever = object.__new__(ReasoningRetriever)
+    retriever.settings = SimpleNamespace(reasoning_max_element_searches=3)
+
+    with _peer_scope():
+        skip = ReasoningRetriever._element_search_skip(retriever, 0)
+    assert skip is not None and skip[1] == "peer_mode"
+
+    assert ReasoningRetriever._element_search_skip(retriever, 0) is None
+    assert ReasoningRetriever._element_search_skip(retriever, 3)[1] == (
+        "element_search_cap"
+    )
+
+
 def test_exact_lookup_arm_is_closed_in_peer_mode():
     """同上。它一关,``exact_section_reserve`` 的 ``exact_ids`` 恒空、该保底规则
     自动 inert,所以下游不需要第二道闸。"""

@@ -108,24 +108,16 @@ REGISTERED_SITES: Registry = {
         "cross-notebook evidence (chunk_context / knowledge_context / "
         "render_follow_chain_context / render_subgraph_context / "
         "spreadsheet_prompt_block) normalise through the helper when they "
-        "WRITE that key — pinned below in BUILDER_SITES — and element_context "
-        "is single-notebook by construction and always writes an empty "
-        "string.",
+        "WRITE that key — pinned below in BUILDER_SITES.  element_context is "
+        "single-notebook, and since D1-4 it normalises through the helper too "
+        "rather than hardcoding an empty string: the arm is CLOSED in peer "
+        "mode, but an origin rule that is only correct because another module "
+        "keeps a lane shut is not a rule.",
     ),
     (EVIDENCE_CONTEXT, "EvidenceContextService.citations_from"): (
         ("hit_notebook_id",),
         "Normalises once per hit into `hit_notebook_id` (helper call a few "
         "lines above) and reuses that local for every evidence row of the hit.",
-    ),
-    (EVIDENCE_CONTEXT, "EvidenceContextService.element_citations"): (
-        ("''",),
-        "Element citations are hydrated from `element_context`, which is "
-        "single-notebook by construction (it tier-maps exactly the active "
-        "notebook and writes an empty id_map notebook_id), so the constant "
-        "empty string is structurally the active notebook.  (PR-B 甲: this "
-        "site moved here verbatim from `AskService._draft_reasoning_response` "
-        "when the reasoning element leg was lifted into the shared "
-        "evidence-context layer; the argument text is unchanged.)",
     ),
 }
 
@@ -167,12 +159,6 @@ BUILDER_SITES: Registry = {
         "the enumerated SourceItem carries the raw participant notebook id, so "
         "the id_map write normalises it against the required active_notebook_id "
         "keyword, same as the Citation it emits beside it.",
-    ),
-    (EVIDENCE_CONTEXT, "EvidenceContextService.element_context"): (
-        ("''",),
-        "Single-notebook by construction: it tier-maps exactly the active "
-        "notebook, so the constant empty string IS the normalised value.  "
-        "Pinned because parse_anchors' registration leans on this claim.",
     ),
     (EVIDENCE_CONTEXT, "EvidenceContextService.external_context"): (
         ("''",),
