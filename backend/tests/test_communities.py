@@ -110,7 +110,7 @@ def _peer_run(ids):
 
     @contextmanager
     def _installed():
-        with retrieval_run(run_kind="ask_global", actor_id="user-1"):
+        with retrieval_run(run_kind="ask_chunk", actor_id="user-1"):
             with participant_override(ParticipantOverride(
                 notebook_ids=tuple(ids), tiers={},
                 attested_actor_id="user-1",

@@ -77,7 +77,7 @@ def _peer_scope(notebook_ids=("nb-a", "nb-b", "nb-c")):
     其中一件。
     """
     ids = tuple(notebook_ids)
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with source_scope_context(
             ids[0], None, None, notebook_source_ceilings=_ceilings(ids),
             subjectless=True,

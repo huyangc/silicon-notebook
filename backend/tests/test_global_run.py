@@ -113,7 +113,7 @@ def test_one_manager_installs_all_four():
     override, ceilings = _override(), _ceilings()
 
     assert _nothing_installed()
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with global_ask_run(
             override, ceilings, _turn(), _plan(), nominal_active="nb-a",
         ):
@@ -180,7 +180,7 @@ def test_half_install_raises(case):
     """
     ceilings, nominal_active = case()
 
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with pytest.raises(ParticipantOverrideError):
             with global_ask_run(
                 _override(), ceilings, _turn(), _plan(),
@@ -199,7 +199,7 @@ def test_empty_source_list_must_be_present_not_skipped():
     恰是 ``{nid: s for nid, s in ... if s}``。
     """
     override = _override()
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with global_ask_run(
             override, _ceilings(), _turn(), _plan(), nominal_active="nb-a",
         ):
@@ -227,7 +227,7 @@ def test_a_bare_source_id_is_refused_not_split_into_characters(bare):
     """
     ceilings = _ceilings()
     ceilings["nb-a"] = bare
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with pytest.raises(ParticipantOverrideError):
             with global_ask_run(
                 _override(), ceilings, _turn(), _plan(), nominal_active="nb-a",
@@ -382,7 +382,7 @@ def test_context_local_across_threads():
     def run(name, notebook_ids):
         try:
             override = _override(notebook_ids)
-            with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+            with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
                 with global_ask_run(
                     override, _ceilings(notebook_ids),
                     DetachedAskTurn(conversation_id=f"conv-{name}"), _plan(),
@@ -425,7 +425,7 @@ def test_exception_in_body_resets_everything():
     class _Boom(Exception):
         pass
 
-    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         with pytest.raises(_Boom):
             with global_ask_run(
                 _override(), _ceilings(), _turn(), _plan(),

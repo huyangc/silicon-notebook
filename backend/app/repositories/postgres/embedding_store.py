@@ -330,56 +330,6 @@ class EmbeddingStore:
                 break
 
     @staticmethod
-    def global_small_chunk_vector_page(db, notebook_id: str, *, allowed_source_ids,
-                                       max_chunks: int, after: str, page_size: int,
-                                       size_gate: bool = True):
-        """One bounded size gate and source-filtered vector page per snapshot.
-
-        ``size_gate=False`` returns the page WITHOUT evaluating admission, and
-        reports ``True`` to mean "no gate was asked for" -- never "this library
-        was admitted". Only a caller that already admitted the library in an
-        earlier snapshot, and that re-admits it in a closing snapshot before
-        publishing anything, may pass it. The gate is an aggregate over up to
-        ``max_chunks + 1`` index tuples, so paying it on every page of a long
-        scan costs more than the vector reads it guards.
-        """
-        if max_chunks <= 0 or page_size <= 0:
-            return False, []
-        source_clause = ""
-        source_params = ()
-        if allowed_source_ids is not None:
-            source_clause = " AND c.source_id=ANY(%s::text[])"
-            source_params = (list(allowed_source_ids),)
-        if not size_gate:
-            rows = db.execute(
-                "SELECT c.id AS vid,e.vector FROM chunks c "
-                "JOIN chunk_embeddings e ON e.chunk_id=c.id AND e.notebook_id=c.notebook_id "
-                "WHERE c.notebook_id=%s AND c.id>%s" + source_clause +
-                " ORDER BY c.id LIMIT %s",
-                (notebook_id, after, *source_params, page_size),
-            ).fetchall()
-            return True, _compat_vector_rows([
-                {"vid": row["vid"], "vector": row["vector"]} for row in rows
-            ])
-        rows = db.execute(
-            "WITH bounded_chunks AS (SELECT id FROM chunks WHERE notebook_id=%s LIMIT %s), "
-            "library_size AS (SELECT COUNT(*) AS chunk_count FROM bounded_chunks), "
-            "page AS (SELECT c.id AS vid,e.vector FROM chunks c "
-            "JOIN chunk_embeddings e ON e.chunk_id=c.id AND e.notebook_id=c.notebook_id "
-            "WHERE c.notebook_id=%s AND c.id>%s "
-            "AND (SELECT chunk_count FROM library_size)<=%s" + source_clause +
-            " ORDER BY c.id LIMIT %s) "
-            "SELECT library_size.chunk_count,page.vid,page.vector FROM library_size "
-            "LEFT JOIN page ON true ORDER BY page.vid",
-            (notebook_id, max_chunks + 1, notebook_id, after, max_chunks,
-             *source_params, page_size),
-        ).fetchall()
-        return int(rows[0]["chunk_count"]) <= max_chunks, _compat_vector_rows([
-            {"vid": row["vid"], "vector": row["vector"]}
-            for row in rows if row["vid"] is not None
-        ])
-
-    @staticmethod
     def vector_rows_for_ids(db, notebook_id: str, table: str, id_col: str, ids):
         values = list(ids)
         if not values:

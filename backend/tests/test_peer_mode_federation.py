@@ -188,7 +188,7 @@ class _peer_run:
 
     def __enter__(self):
         active = self.notebook_ids[0]
-        managers = [retrieval_run(run_kind="ask_global", actor_id=self.actor)]
+        managers = [retrieval_run(run_kind="ask_chunk", actor_id=self.actor)]
         if self.with_ceilings:
             managers.append(source_scope_context(
                 active, None, None,

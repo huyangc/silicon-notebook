@@ -1,17 +1,7 @@
 """Persistence contract for independent global question-answer sessions."""
-from typing import Any, Protocol, Sequence
+from typing import Protocol, Sequence
 
 from app.models.global_ask import GlobalAskJob, GlobalConversationSummary
-
-
-class GlobalAskRetrievalPort(Protocol):
-    """Global recall has an explicit preparation phase and bounded reads."""
-    def prepare_global_query(self, query: str) -> Any: ...
-    def retrieve_global_chunk_candidates(self, notebook_id: str, query: str, *, deadline: float | None = None, cancel_event: Any = None) -> Any: ...
-
-
-class GlobalAskEmbeddingStorePort(Protocol):
-    def global_small_chunk_vector_page(self, db: object, notebook_id: str, *, allowed_source_ids: Sequence[str] | None, max_chunks: int, after: str, page_size: int, size_gate: bool = True) -> tuple[bool, list[dict]]: ...
 
 
 class GlobalAskAuthorityStorePort(Protocol):
@@ -24,8 +14,6 @@ class GlobalAskSourceStorePort(Protocol):
     """Narrow source snapshots for global execution and evidence validation."""
     def visible_source_ids_by_notebook(self, notebook_ids: Sequence[str]) -> dict[str, list[str]]: ...
     def evidence_fingerprints(self, element_ids: Sequence[str]) -> dict[str, tuple[str, str]]: ...
-    def global_chunk_source_ids(self, db: object, chunk_ids: Sequence[str]) -> dict[str, str]: ...
-    def global_candidate_evidence(self, db: object, chunk_ids: Sequence[str]) -> dict[str, dict]: ...
 
 
 class GlobalAskStorePort(Protocol):

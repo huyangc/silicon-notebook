@@ -335,8 +335,7 @@ _RETRIEVAL_THREAD_PREFIX = "global-ask-retrieve"
 
 class GlobalAskService:
     def __init__(self, *, store, notebooks, can_read, sources, settings, ask=None,
-                 rewrite_query=None, can_read_many=None, event_log=None,
-                 retrieve=None, synthesize=None, prepare_query=None):
+                 can_read_many=None, event_log=None):
         self.store = store
         self.notebooks = notebooks
         self.can_read = can_read
@@ -346,14 +345,6 @@ class GlobalAskService:
         # a participant override, not a second retrieval and synthesis stack.
         self.ask = ask
         self.settings = settings
-        # ⛔ Legacy injection points of the retired global-only pipeline. ``_run``
-        # calls none of them; they stay as accepted-and-ignored keywords only so
-        # that removing the pipeline (and the composition that still passes
-        # them) is a separate, independently revertible change.
-        self.retrieve = retrieve
-        self.synthesize = synthesize
-        self.rewrite_query = rewrite_query
-        self.prepare_query = prepare_query
         # Optional content-free sink. Skips decided here (never queued before
         # the phase budget ran out) never reach the retrieval module's own
         # emitter, so they would otherwise be the one skip with no receipt.

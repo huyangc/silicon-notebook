@@ -522,15 +522,22 @@ def _pool_budget_warning(settings: object) -> str | None:
         # 六相位作业全程吃数据库连接,漏算会让「其余各池刚好贴着池容量」的
         # 配置在删除启动时被打穿而无预警。
         delete = int(getattr(settings, "notebook_delete_concurrency", 1))
-        # 全局问答占两层连接:每个任务线程自己做权限复核与进度保存,它再把逐库
-        # 检索交给一个进程级共享的有界线程池,那个池的每个执行位也各占一条连接。
-        # 只算任务并发会把「库多时检索池满员」的真实峰值漏掉一半。
+        # 全局问答占两层连接:每个任务线程自己做权限复核与进度保存,它再把
+        # 联邦检索交给一个进程级共享的有界线程池——``global_ask_retrieval_concurrency``
+        # 是全局问答联邦检索的进程级共享执行器大小,那个池的每个执行位也各占
+        # 一条连接。只算任务并发会把「库多时检索池满员」的真实峰值漏掉一半。
         global_ask_jobs = int(getattr(settings, "global_ask_max_concurrent", 0))
         global_ask_retrieval = int(
             getattr(settings, "global_ask_retrieval_concurrency", 0)
         )
         global_ask = global_ask_jobs + global_ask_retrieval
-        budget = heavy + light + kg + search + scale + delete + global_ask
+        # 单库(含挂载参考库)内的 chunk 联邦扇出自建一个独立的有界线程池
+        # (``chunk_fanout_max_workers``,默认 8),与上面全局问答的共享执行器是
+        # 两条完全独立的池——即使只问一个库、从不触发全局问答也会占用它。今天
+        # 从未进过这份预算,漏算它会让「其余各池刚好贴着池容量」的配置在扇出
+        # 打满时被打穿而无预警。
+        chunk_fanout = int(getattr(settings, "chunk_fanout_max_workers", 0))
+        budget = heavy + light + kg + search + scale + delete + global_ask + chunk_fanout
         pool_max = int(settings.postgres_pool_max_size)
         if pool_max > budget:
             return None
@@ -540,7 +547,7 @@ def _pool_budget_warning(settings: object) -> str | None:
             f"+搜索并发({search})+scale 构建并发({scale})"
             f"+删除作业并发({delete})"
             f"+全局问答并发(任务{global_ask_jobs}+检索{global_ask_retrieval}"
-            f"={global_ask})={budget}；"
+            f"={global_ask})+chunk 联邦扇出({chunk_fanout})={budget}；"
             "高峰期后台 job、搜索与索引构建可能耗尽连接池并让前台请求排队甚至超时。"
             f"建议把 POSTGRES_POOL_MAX_SIZE 调到至少 {budget + 1}。"
         )
