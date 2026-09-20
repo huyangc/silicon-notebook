@@ -4,8 +4,8 @@ import type { AnswerAnchorLike, CitationLike } from "./answer-formatting.ts";
 import type { ReasoningTraceStep } from "./ask-stream.ts";
 import type { AskIntentConfirmation, QueryIntentContract } from "./ask-intent-model.ts";
 import type { AskRetrievalEffortId } from "./ask-retrieval-effort.ts";
-import type { ConversationShareApi } from "./conversation-share-api.ts";
-import type { ShareTurn } from "./conversation-share-disclosure.ts";
+import type { ConversationShareApi, ShareTurnsResult } from "./conversation-share-api.ts";
+import { SHARE_SNAPSHOT_MAX_TURNS, type ShareTurn } from "./conversation-share-disclosure.ts";
 import type { AskResponse, ConversationShareResponse } from "./workspace-model.ts";
 
 export type GlobalScope = { mode: "all" } | { mode: "include"; notebook_ids: string[] };
@@ -181,22 +181,57 @@ export function globalShareTurns(turns: GlobalJob[]): ShareTurn[] {
     }));
 }
 
+/** 取全一条全局会话的轮次最多翻几页。上界与后端公开快照的 `MAX_TURNS` 同源——超出
+ *  那个规模的会话，公开页本身也投影不全（`truncated_turns`），披露没有可给的确数。 */
+const SHARE_TURN_MAX_PAGES = Math.ceil(SHARE_SNAPSHOT_MAX_TURNS / GLOBAL_ASK_PAGE_SIZE);
+
+/**
+ * 取**全**一条全局会话的轮次，拿不全就如实说。
+ *
+ * ⚠ 页序：`offset 0` 是**最新**一页，后续 offset 是更早的页（与
+ * `use-global-ask.loadMoreTurns` 同一拼法——它把新取到的整页拼在已有序列**之前**）。
+ * 每页内部是升序，所以完整的升序序列 = 把各页**倒序**首尾相接。只读第一页会丢掉**最早**
+ * 的那些轮次，而披露的每个数字都声称覆盖链接的全部内容：那会给出一个偏小的确数，
+ * 且边界作业就在第一页里时连 `unresolved` 降级都不会触发（评审 P1）。
+ *
+ * 任何一页失败 → 整条 reject，由弹窗既有的 catch 走兜底文案；翻到上界仍 `has_more`
+ * → `complete: false`。两种情形都**不给**半份序列。
+ */
+async function loadGlobalShareTurns(conversationId: string): Promise<ShareTurnsResult> {
+  const pages: GlobalJob[][] = [];
+  let offset = 0;
+  for (let page = 0; page < SHARE_TURN_MAX_PAGES; page += 1) {
+    const detail = await getGlobalConversation(conversationId, offset);
+    pages.push(detail.turns || []);
+    if (!detail.has_more || detail.next_offset === null) {
+      // 翻页期间新作业落库会让 offset 整体后移，同一条可能被相邻两页各取一次；
+      // 按 job_id 去重、保留先出现的那条（升序序列里更早的位置），与
+      // `loadMoreTurns` 的去重口径一致。
+      const seen = new Set<string>();
+      const ordered: GlobalJob[] = [];
+      for (const job of pages.reverse().flat()) {
+        if (seen.has(job.job_id)) continue;
+        seen.add(job.job_id);
+        ordered.push(job);
+      }
+      return { turns: globalShareTurns(ordered), complete: true };
+    }
+    offset = detail.next_offset;
+  }
+  return { turns: [], complete: false };
+}
+
 /**
  * 全局会话的分享接线（与单库 `notebookConversationShareApi` **同形**，弹窗因此是同
  * 一份实现）。三个端点与单库逐字段同形、错误语义相同：零可分享回答 409、水位过期
  * 409、非本人 404；公开链接仍然是同一个 `/c/{token}` 页面。
- *
- * ⚠ `loadTurns` 读的是会话详情的**第一页**（offset 0 = 最新那一页，`GLOBAL_ASK_PAGE_SIZE`
- * 条）。超过一页的长会话里，边界作业若落在更早的页上，`resolveShareBoundary` 会判
- * `unresolved` → 披露退化成不带数字、但附图与个人记忆两面都提的兜底文案，发布仍按
- * 用户点的那条 job_id 进行。这是**宁可不给数字也不给错数字**的既有降级路径，不是漏洞。
  */
 export function globalConversationShareApi(conversationId: string): ConversationShareApi {
   const path = `${root}/conversations/${encodeURIComponent(conversationId)}/share`;
   return {
     key: `global:${conversationId}`,
     load: () => requestJson<ConversationShareResponse>(path, options),
-    loadTurns: () => getGlobalConversation(conversationId).then((detail) => globalShareTurns(detail.turns || [])),
+    loadTurns: () => loadGlobalShareTurns(conversationId),
     share: (expectedThroughId) => requestJson<ConversationShareResponse>(path, {
       ...options, method: "POST", body: JSON.stringify({ expected_through_id: expectedThroughId }),
     }),

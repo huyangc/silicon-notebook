@@ -21,6 +21,12 @@
  *  ⚠ 这里刻意不 import 任何一个面的会话类型：披露逻辑是两个面共用的**同一份**实现，
  *  一旦它认得某一面的具体类型，第二个面就只能复制一份近似实现出来，而「Memory 披露
  *  绝不省略」那条红线就会立刻分家成两份、各修一半。 */
+/** 公开快照最多投影多少轮——后端 `app/domain/conversation_public_view.MAX_TURNS` 的
+ *  镜像。披露只在**拿得到完整序列**时才给数字，所以取轮次的那一侧需要一个与服务端
+ *  同源的上界：读到这个数还没到头，就说明这条会话的公开范围本就超出了可披露的规模，
+ *  此时给数字等于编（见 `ShareTurnsResult.complete`）。 */
+export const SHARE_SNAPSHOT_MAX_TURNS = 500;
+
 export type ShareTurnImage = { asset_id?: string };
 export type ShareTurn = {
   answer_id: string;

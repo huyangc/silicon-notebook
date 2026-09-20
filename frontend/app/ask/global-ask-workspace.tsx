@@ -97,22 +97,28 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
   // 宿主页面的下一次 Esc 整个吞掉；重开浮窗时卡片还会按几分钟前的旧视口坐标悬着。
   // 本地这份直接清 state，`AnswerView` 内部那份走 `dismissSignal`。
   useEffect(() => { if (!active) { setCite(null); setShare(null); } }, [active]);
-  // 分享弹窗打开时，Esc 只收它这一层。手法与引用小卡片同源（window **捕获期** +
-  // preventDefault + stopPropagation）：冒泡期赶不上宿主 <dialog> 上的 onKeyDown，
-  // 那个监听会把整个浮窗收掉、弹窗只是收了个寂寞。原生 <dialog> 的 close request
-  // 由 launcher 的 onCancel 读 `globalAskLayerHoldsEscape()` 兜底。
+  // 分享弹窗打开时，Esc **谁都不关**——既不关弹窗，也不穿透去关整个全局问答浮窗。
   //
-  // ⚠ 拦截刻意放在**这里**而不是弹窗组件内部：笔记本内那个调用点由 root modal
-  // 协调器裁定 Esc，而 `conversation-share` 那一格的策略正是 `escape: false`
-  // （分享态是一次写入，不给误触的顺手关闭）。把拦截写进共享组件就会顺手改掉
-  // 笔记本内的既有行为。
+  // 这条与笔记本内那个调用点同策略：`use-root-modal-coordinator` 给
+  // `conversation-share` 定的就是 `escape: false`。分享是一次**写入**，不给误触的
+  // 顺手关闭——点了「分享到这一条」、请求在途时误触 Esc，弹窗一旦卸载，POST 照常
+  // 完成、会话已经公开，而链接与「已生成分享链接」的回执全丢，界面上没有任何地方
+  // 说过刚刚公开了什么（评审 P2）。关闭走弹窗自己那颗「×」（它不被 busy 禁用，
+  // 「无退路弹窗」契约）。
+  //
+  // 拦截仍然要**捕获期 + preventDefault + stopPropagation**，三件缺一不可：冒泡期
+  // 赶不上宿主 <dialog> 上的 onKeyDown，那个监听会把整个浮窗连同弹窗一起收掉；
+  // 原生 <dialog> 的 close request 由 launcher 的 onCancel 读
+  // `globalAskLayerHoldsEscape()` 兜底。
+  //
+  // ⚠ 拦截放在**这里**而不是弹窗组件内部：笔记本内那一侧的 Esc 由协调器统一裁定，
+  // 把监听写进共享组件会多出第二个裁判。
   useEffect(() => {
     if (!share) return;
     const onKey = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape" || event.isComposing) return;
       event.preventDefault();
       event.stopPropagation();
-      setShare(null);
     };
     window.addEventListener("keydown", onKey, true);
     const release = holdGlobalAskEscape();
@@ -128,9 +134,17 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
   /** 「分享到这条回答」。全局侧的边界是**作业**，所以传的是 `job_id`——服务端
    *  `expected_through_id` 钉的也是它。 */
   function openShare(jobId: string) {
+    // 引用小卡片与分享弹窗不同时在场：两层都接管 Esc 时一次按键会收掉两层。就地
+    // 渲染的那张（历史轮次）直接清 state，AnswerView 内部那张走 `dismissSignal`
+    // ——下面那个 prop 读的是 `active && !share`，所以 setShare 本身就会收起它。
+    setCite(null);
+    // 抬头的会话名以**会话详情**里那份为准，列表只作兜底：`ask.conversations` 只有
+    // 最新一页，深链打开较旧的会话时查不到，抬头会写成「未命名会话」（评审 P3）。
     setShare({
       jobId,
-      title: ask.conversations.find((item) => item.id === ask.conversationId)?.title || "",
+      title: ask.conversationTitle
+        || ask.conversations.find((item) => item.id === ask.conversationId)?.title
+        || "",
     });
   }
 
@@ -205,7 +219,10 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                     notebookHref={(notebookId, sourceId) => `/${notebookHash(notebookId, sourceId)}`}
                     onOpenNotebook={onOpenNotebook}
                     onShare={() => openShare(job.job_id)}
-                    dismissSignal={active}
+                    // 浮窗收起（active 转假）与分享弹窗开合都要收掉卡片：两层同时
+                    // 接管 Esc 时一次按键会收两层，而收起后留着的监听会吞掉宿主
+                    // 页面的下一次 Esc。
+                    dismissSignal={active && !share}
                     buildingScaleIndex={false}
                     memorySaved={false}
                   />
