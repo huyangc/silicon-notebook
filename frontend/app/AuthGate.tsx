@@ -30,7 +30,7 @@ export function AuthGate({ capabilities, migrationSession = false, onAuthenticat
   const [grantPurpose, setGrantPurpose] = useState<"enroll" | "recover" | "replace">("enroll");
   const canUseLocal = capabilities.local_login && capabilities.mode !== "retired";
   const canRegister = capabilities.local_registration && capabilities.mode !== "retired";
-  const canUseSso = capabilities.sso_login && capabilities.mode !== "binding_required";
+  const canUseSso = capabilities.sso_login;
   const canUseGrant = capabilities.sso_login;
   const bindingOnly = migrationSession || migrationReady;
   const usernameHint = username && !isValidUsername(username)
@@ -100,6 +100,7 @@ export function AuthGate({ capabilities, migrationSession = false, onAuthenticat
         </label>
         {error && <div className="auth-error" role="alert">{error}</div>}
         <button className="auth-submit" type="submit" disabled={busy || !password}>{busy ? "正在跳转…" : "验证并关联统一身份"}</button>
+        {canUseSso && <button className="auth-sso-submit" type="button" disabled={busy} onClick={() => { void redirectToSso(startSsoLogin); }}>{busy ? "正在跳转…" : "统一登录"}</button>}
       </form>
     </div>
   );

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import time
 from urllib.parse import parse_qs, urlsplit
 
@@ -119,6 +119,16 @@ def test_host_freezes_description_and_builds_core_owned_authorization_url():
 def test_host_rejects_provider_owned_reserved_parameters_at_startup():
     provider = _Provider()
     provider.parameters = (("redirect_uri", "https://attacker.example"),)
+    with pytest.raises(ExtensionRegistryError, match="invalid auth provider"):
+        _host(provider)
+
+
+def test_host_rejects_noncanonical_configuration_generation():
+    provider = _Provider()
+    provider.description = replace(
+        provider.description,
+        configuration_generation="Generation-2",
+    )
     with pytest.raises(ExtensionRegistryError, match="invalid auth provider"):
         _host(provider)
 

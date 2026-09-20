@@ -3522,6 +3522,8 @@ An existing user must verify their current local password, complete external aut
 
 OAuth state, browser proof, PKCE when supported, original local session, policy/configuration generation and one-time handoff are core-owned. External access tokens remain within the provider call. The callback URL contains only a short-lived handoff code; the browser must also hold a host-only HttpOnly SameSite cookie. Confirming a binding additionally requires the original local bearer. Logout, reset, disable, replay or stage/configuration changes invalidate pending authority. Existing SSO sessions have an absolute limit measured from verified external authentication; sliding access cannot extend it. Browser-authenticated NDJSON/SSE delivery rechecks sessions before every emitted frame. The `/mcp` transport retains its own per-request and per-tool Agent checks, including current owner eligibility; an already committed write can still return its terminal acknowledgement after token revocation, while subsequent access is denied.
 
+Provider configuration generations use the same stable-identifier grammar as provider IDs: they start with a lowercase letter and contain lowercase letters or digits, with single `.`, `_`, or `-` separators between segments. Invalid generations are rejected before the policy revision changes.
+
 All routes below are under `/api`. Public routes still enforce their transaction purpose and browser proof; ordinary extension routes remain session protected.
 
 | Route | Contract |

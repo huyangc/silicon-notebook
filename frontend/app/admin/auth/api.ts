@@ -7,7 +7,7 @@ export type AuthPolicy = {
   provider_id: string | null;
   provider_namespace: string | null;
   plugin_id: string | null;
-  config_generation: number;
+  config_generation: string;
   retired_at: string | null;
   updated_by: string | null;
 };
@@ -25,8 +25,11 @@ export type AuthAccount = {
   username: string;
   display_name: string;
   status: "active" | "disabled";
-  local_login_name?: string | null;
-  external_username?: string | null;
+  local_login_name: string | null;
+  provider_namespace: string | null;
+  subject: string | null;
+  identity_status: "active" | "disabled" | null;
+  last_login_at: string | null;
 };
 
 export type AuthAccountPage = { items: AuthAccount[]; total: number; offset: number; limit: number };
@@ -60,7 +63,7 @@ export const fetchAuthAudit = (offset = 0, limit = 100) => adminJson<AuthAuditPa
 export const updateAuthPolicy = (mode: AuthPolicy["mode"], expectedRevision: number, allowRollback = false) => adminJson<AuthPolicy>("/admin/auth/policy", {
   method: "PATCH", body: JSON.stringify({ mode, expected_revision: expectedRevision, allow_rollback: allowRollback }),
 });
-export const prepareAuthProviderMaintenance = (expectedRevision: number, configurationGeneration: number) => adminJson<AuthPolicy>("/admin/auth/provider-configuration", {
+export const prepareAuthProviderMaintenance = (expectedRevision: number, configurationGeneration: string) => adminJson<AuthPolicy>("/admin/auth/provider-configuration", {
   method: "PATCH", body: JSON.stringify({ expected_revision: expectedRevision, configuration_generation: configurationGeneration }),
 });
 export const updateAuthAccountStatus = (id: string, status: AuthAccount["status"]) => adminJson<AuthAccount>(`/admin/auth/accounts/${encodeURIComponent(id)}`, {

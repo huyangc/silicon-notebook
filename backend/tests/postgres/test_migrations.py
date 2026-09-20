@@ -447,6 +447,71 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     ]
 
 
+def test_auth_sunset_migration_preserves_legacy_password_and_session(
+    postgres_database, postgres_settings,
+):
+    from app.domain.auth_utils import hash_password
+    from app.repositories.postgres.identity_store import IdentityStore
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    migrator = PostgresMigrator(postgres_database)
+    assert migrator.migrate(target_version=57) == 57
+    password_hash, password_salt, iterations = hash_password("legacy-password")
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,created_at,updated_at,"
+            "username,password_hash,password_salt,password_iterations) "
+            "VALUES (%s,%s,%s,'admin',now(),now(),%s,%s,%s,%s)",
+            (
+                "legacy-user", "legacy@example.test", "Legacy Admin",
+                "a00123456", password_hash, password_salt, iterations,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
+            "VALUES ('passwordless-user','passwordless@example.test',"
+            "'Passwordless','user',now(),now())"
+        )
+        connection.execute(
+            "INSERT INTO auth_sessions(token,user_id,created_at,expires_at,last_seen_at) "
+            "VALUES ('legacy-session','legacy-user',now(),now()+interval '1 day',now())"
+        )
+
+    assert migrator.migrate() == 58
+    assert migrator.migrate() == 58
+    with postgres_database.connect() as connection:
+        users = {
+            row["id"]: row for row in connection.execute(
+                "SELECT id,local_login_name,auth_revision,password_hash,"
+                "password_salt,password_iterations FROM users"
+            ).fetchall()
+        }
+        session = connection.execute(
+            "SELECT auth_source,absolute_expires_at FROM auth_sessions "
+            "WHERE token='legacy-session'"
+        ).fetchone()
+    legacy = users["legacy-user"]
+    assert legacy["local_login_name"] == "a00123456"
+    assert legacy["auth_revision"] == 0
+    assert (legacy["password_hash"], legacy["password_salt"], legacy["password_iterations"]) == (
+        password_hash, password_salt, iterations,
+    )
+    assert users["passwordless-user"]["local_login_name"] is None
+    assert session["auth_source"] == "local"
+    assert session["absolute_expires_at"] is None
+
+    store = IdentityStore(postgres_database, postgres_settings)
+    authenticated = store.authenticate_user("A00123456", "legacy-password")
+    assert authenticated.id == "legacy-user"
+    assert authenticated.role == "admin"
+    assert authenticated.display_name == "Legacy Admin"
+    assert store.authenticate_user("a00123456", "incorrect-password") is None
+    assert store.resolve_session("legacy-session").id == "legacy-user"
+    logged_in, token = store.login_with_password("a00123456", "legacy-password")
+    assert logged_in.id == "legacy-user"
+    assert store.resolve_session(token).id == "legacy-user"
+
+
 def test_indexing_pipeline_migration_upgrades_v35_without_rewriting_products(
     postgres_database,
 ):

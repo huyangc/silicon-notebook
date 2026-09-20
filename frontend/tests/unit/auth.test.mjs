@@ -70,6 +70,16 @@ test("logout clears the local token when the network request fails", async () =>
   assert.equal(storage.has("silicon_notebook_token"), false);
 });
 
+test("logout includes browser credentials so it revokes pending browser-bound authentication", async () => {
+  let captured;
+  globalThis.fetch = async (_url, init) => {
+    captured = init;
+    return new Response(null, { status: 204 });
+  };
+  await logoutUser();
+  assert.equal(captured.credentials, "include");
+});
+
 test("public capabilities decide the visible authentication modes", async () => {
   globalThis.fetch = async (url, init) => {
     assert.equal(url, "http://127.0.0.1:8000/api/auth/capabilities");

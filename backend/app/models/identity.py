@@ -245,7 +245,9 @@ class AuthRequest(BaseModel):
 class AuthResult(BaseModel):
     token: str
     user: UserProfile
-    migration_required: bool = False
+    # Keep the legacy login payload intact outside the migration stage; a
+    # route-wide exclude_defaults would also drop nested user preferences.
+    migration_required: bool = Field(default=False, exclude_if=lambda value: not value)
 
 
 class PasswordChangeRequest(BaseModel):

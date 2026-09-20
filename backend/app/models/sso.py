@@ -1,8 +1,12 @@
 """Public, supplier-independent authentication messages."""
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
-from app.domain.auth_provider import AUTH_PROVIDER_CONFIGURATION_GENERATION_MAX_CHARS
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.domain.auth_provider import (
+    AUTH_PROVIDER_CONFIGURATION_GENERATION_MAX_CHARS,
+    is_auth_provider_stable_id,
+)
 
 
 class BindingStart(BaseModel):
@@ -48,4 +52,17 @@ class AuthenticationGrantStart(BaseModel):
 class AuthenticationConfigurationUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_revision: int = Field(ge=0)
-    configuration_generation: str = Field(min_length=1, max_length=AUTH_PROVIDER_CONFIGURATION_GENERATION_MAX_CHARS)
+    configuration_generation: str = Field(
+        min_length=1,
+        max_length=AUTH_PROVIDER_CONFIGURATION_GENERATION_MAX_CHARS,
+    )
+
+    @field_validator("configuration_generation")
+    @classmethod
+    def validate_configuration_generation(cls, value: str) -> str:
+        if not is_auth_provider_stable_id(
+            value,
+            max_chars=AUTH_PROVIDER_CONFIGURATION_GENERATION_MAX_CHARS,
+        ):
+            raise ValueError("configuration_generation must be a stable identifier")
+        return value
