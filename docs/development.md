@@ -913,7 +913,11 @@ Keep test-speed changes result-preserving. The G1 standard and G2 extended marke
 
 Test fixture cost follows the behavior under test. Scale-build lock admission and
 handoff tests use an unindexed notebook; real build/fold/publication tests retain
-their seeded or indexed artifacts. Normal stage-event and progress-callback
+their seeded or indexed artifacts. Scale CLI unknown-notebook refusals use a real
+migrated database without ingestion, KG or vectors; the non-PostgreSQL URL gate
+uses a reachable SQLite file. Full CLI artifact flows still ingest, extract and
+embed, and their read-only notebook lookup does not repeat migration/seeding.
+Normal stage-event and progress-callback
 assertions share one facade build, while callback failures and the direct builder
 artifact contract remain separate. The three notebook lifecycle literal scans
 share one `xdist_group` so their process-local AST cache is actually reused;
@@ -992,6 +996,10 @@ isolation avoids contention on the fixed migration advisory lock. Lock-observati
 queries must filter the current database; a server-global activity view is not isolated
 by schema. The batch4 read-only plan matrix shares one unchanged large corpus,
 while online installation and migration mutation tests retain independent schemas.
+The batch2 payload plan matrix seeds its 100k-row notebook once: it first checks
+the rare term's natural plan, then adds 20k foreign-notebook hits and re-analyzes
+before checking scoped bitmap access and zero local results. Both original plan
+assertion sets remain reachable; neither corpus scale nor planner checks are reduced.
 
 Local verification can still use an installed PostgreSQL 16 service and an explicit
 `TEST_POSTGRES_URL` for the serial lane; do not also set the parallel JSON variable.

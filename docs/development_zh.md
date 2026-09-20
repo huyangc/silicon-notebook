@@ -428,7 +428,10 @@ G1 标准门并发运行 backend、contracts、frontend 三个 lane。`check_bac
 测试加速必须保持结果语义：G1 标准门与 G2 扩展门的 marker 表达式精确互补，PostgreSQL 独立负责，任何已提交用例都不能变成不可达；全仓 AST/协议扫描在同一测试进程（pytest worker 或隔离的 Node guard 进程）内只解析每个生产文件一次，冻结 fixture 用例若只关心成员集合，就应使用只投影名称的入口，不生成详细站点、签名与 ownership；可执行的全仓守卫只在其归属的 contracts lane 对真实源码树运行一次，参数解析、失败模式与 extra-root 的单元测试把默认根重定向到最小 fixture，不再重复扫描全仓；同一份不可变行为矩阵上的断言只遍历一次，并给每一格保留明确失败标签，不能为每一格或不同断言族重复搭建完全相同的数据库世界；frontend lane 只同步一次不可变的本地插件投影，随后仅抑制 npm 重复的 `pretest`/`prebuild`/`prelint` 钩子，开发者单独执行每条命令时这些钩子仍是必跑项；缓存容器策略直接验证容器，不搭建无关数据库与 ANN 索引；autouse 隔离路径从 worker 已有的 pytest base temp 派生，不为每条纯测试额外创建 `tmp_path`；普通 SQLite 仓储测试按 worker 只构建一次当前空 schema，再复制成每条测试各自独立的可变数据库文件，迁移/升级/仓储快照模块必须登记 `_REAL_SQLITE_MIGRATION_MODULES` 并执行真实迁移梯；仓储密集测试只可在 pytest autouse fixture 中降低默认密码派生成本，认证 helper 保留生产默认，比较凭据字段的快照模块必须登记 `_REAL_PASSWORD_HASH_MODULES`；普通 UT 与 G1 测试必须环境自足，不绑定宿主端口、不依赖环境服务；只有合同本身属于进程级行为时才保留自包含的子进程/信号覆盖。并发顺序与公平性使用 event/barrier，而非固定 sleep 或线程唤醒顺序；分波次排队时由控制线程运行被测同步编排，在观测到目标容量后用 event 放行，不能让后一波单独落进 cyclic barrier；进程级延迟任务须在共享 teardown 中取消待执行项并等待活跃项收敛，不能只清理由某个局部 repository 对象可见的任务。
 
 测试 fixture 的成本应跟随被测行为。Scale-build 的锁准入与接力测试使用尚未建索引
-的笔记本；真实 build/fold/发布测试继续保留所需的种子数据或索引产物。正常阶段事件
+的笔记本；真实 build/fold/发布测试继续保留所需的种子数据或索引产物。Scale CLI 的
+未知笔记本拒绝用例使用真实迁移后的数据库，无需导入、知识图谱或向量；非 PostgreSQL
+URL 拒绝用例使用可连接的 SQLite 文件。完整 CLI 制品流程仍执行导入、抽取与嵌入，
+其中只读查找笔记本不再重复迁移和初始化。正常阶段事件
 与进度回调断言共用一次 facade build，回调失败与直接 builder 的产物合同仍独立覆盖。
 三条笔记本生命周期字面量扫描共用一个 `xdist_group`，确保进程内 AST 缓存确实复用；
 G1/G2 选择表达式不变。前端源码策略检查在隔离的 guard 进程内复用不可变模块输入
@@ -490,6 +493,9 @@ job 记录存储用量与容器内存峰值。此泳道验证运行中的数据�
 每条测试仍创建独立 schema 并执行真实迁移；数据库级隔离避免固定迁移 advisory lock
 互相竞争。锁观察查询必须限定当前数据库，服务端全局活动视图不会因 schema 隔离而隔离。
 batch4 的只读计划矩阵共用一份规模不变的大语料；在线安装与迁移变异测试仍保留独立 schema。
+batch2 的 payload 计划矩阵只创建一次 10 万行笔记本：先检查稀有词的自然计划，再加入
+其他笔记本的 2 万行命中数据并重新 ANALYZE，检查位图访问被限定在当前笔记本且本地
+结果为空。两组原有计划断言仍可达，语料规模和计划检查均不缩减。
 
 本地仍可使用已安装的 PostgreSQL 16 和显式 `TEST_POSTGRES_URL` 运行串行泳道，此时
 不得同时设置并行 JSON 变量；权威 CI 仍要求辅助目标齐全。`scripts/check.sh` 不得启动

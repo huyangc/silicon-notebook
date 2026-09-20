@@ -140,7 +140,15 @@ def _seed_notebook_with_source(repository, name: str, source_id: str = "src-a") 
 
 
 @pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch2")
-def test_payload_trgm_index_is_usable_for_a_rare_term_ilike(postgres_repository):
+def test_payload_trgm_plan_matrix_keeps_rare_and_cross_notebook_index_access(
+    postgres_repository,
+):
+    """Seed the 100k-row notebook once for the two payload index scenarios.
+
+    Check the rare term before adding the 20k foreign hits, so its natural
+    planner statistics remain unchanged. The second scenario retains the
+    large queried notebook and zero local matches for its different term.
+    """
     assert (
         PostgresMigrator(postgres_repository._runtime.database).migrate() == 58
     )
@@ -217,22 +225,14 @@ def test_payload_trgm_index_is_usable_for_a_rare_term_ilike(postgres_repository)
         r"\s+Index Cond: \(\(notebook_id = ",
         plan,
     ), plan
+    _assert_payload_index_stays_notebook_scoped(postgres_repository, notebook_id)
 
 
-@pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch2")
-def test_payload_index_stays_notebook_scoped_when_term_lives_in_another_notebook(
-    postgres_repository,
-):
+def _assert_payload_index_stays_notebook_scoped(postgres_repository, nb_queried):
     """codex #636 R1 P1 的场景重演:词在**别的** notebook 里高频、在被查的
     notebook 里不存在。legacy 单表达式全局 GIN 在这里会先建 ~2 万行的全局位图、
     到 heap recheck 才按 notebook 丢行(docs/operations.md 已记录的超时教训);
     复合形必须把 notebook 等值带进索引访问,位图从一开始就是空的。"""
-    assert (
-        PostgresMigrator(postgres_repository._runtime.database).migrate() == 58
-    )
-    nb_queried = _seed_notebook_with_source(
-        postgres_repository, "cross-nb-queried", source_id="src-a"
-    )
     nb_other = _seed_notebook_with_source(
         postgres_repository, "cross-nb-other", source_id="src-b"
     )
@@ -240,19 +240,8 @@ def test_payload_index_stays_notebook_scoped_when_term_lives_in_another_notebook
     now = normalize_timestamp(runtime.seams.now())
     with runtime.database.write() as db:
         db.execute("SET LOCAL statement_timeout = '0'")
-        # 被查 notebook:100k 行填充,不含探针词——量级要大到「nb 前缀 btree
-        # 位图 + heap filter 全过一遍」真实地贵过复合 GIN 臂,否则 planner 对
-        # 小 notebook 选 nb 前缀位图(那也是 notebook 内的,不是本条要防的
-        # 全局位图病灶,但会让断言落空)。
-        db.execute(
-            "INSERT INTO knowledge_objects "
-            "(id,notebook_id,object_type,status,payload,evidence,source_id,"
-            "created_at,updated_at,ordinal) "
-            "SELECT 'ko-q-'||g, %s, 'concept','approved', "
-            "jsonb_build_object('name','item '||g,'note','filler '||md5(g::text)), "
-            "'[]'::jsonb, 'src-a', %s, %s, g FROM generate_series(1, 100000) g",
-            (nb_queried, now, now),
-        )
+        # Reuse the large queried notebook from the rare-term check. Neither
+        # its 100k filler rows nor its one rare row contains crossnbneedle.
         # 另一个 notebook:2 万行全部含探针词——词在全库层面高度可选中,
         # 但与被查 notebook 零交集。
         db.execute(
@@ -262,7 +251,7 @@ def test_payload_index_stays_notebook_scoped_when_term_lives_in_another_notebook
             "SELECT 'ko-o-'||g, %s, 'concept','approved', "
             "jsonb_build_object('name','item '||g,'note',"
             "'crossnbneedle payload '||md5(g::text)), "
-            "'[]'::jsonb, 'src-b', %s, %s, 100000+g "
+            "'[]'::jsonb, 'src-b', %s, %s, 100001+g "
             "FROM generate_series(1, 20000) g",
             (nb_other, now, now),
         )
