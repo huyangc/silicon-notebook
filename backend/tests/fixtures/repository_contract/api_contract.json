@@ -4609,6 +4609,18 @@
               "title": "Question",
               "type": "string"
             },
+            "replaces_job_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Replaces Job Id"
+            },
             "retrieval_effort": {
               "default": "standard",
               "enum": [
@@ -16327,6 +16339,16 @@
               "schema": {
                 "title": "Job Id",
                 "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "discard",
+              "required": false,
+              "schema": {
+                "default": false,
+                "title": "Discard",
+                "type": "boolean"
               }
             }
           ],
