@@ -1464,10 +1464,18 @@ def _report_evidence(candidates, plan, collected: dict, deadline: float) -> None
                 time.monotonic() + float(plan.notebook_timeout_seconds),
                 plan.cancel,
             ):
-                fingerprints = dict(
+                read = dict(
                     candidates.sources.evidence_fingerprints(element_ids)
                 )
-            seen.update(fingerprints)
+            # Every REQUESTED element gets a stated value. A read that succeeds
+            # but comes back without a row (the element was deleted by a
+            # re-ingest between retrieval and this read) must not leave it
+            # absent: absence means "never travelled this channel" and is held
+            # to the ceiling only, so a deleted element would be accepted.
+            fingerprints = {**dict.fromkeys(element_ids), **read}
+            # Only real snapshots are settled; a missing row is retried next
+            # round like an unreadable one.
+            seen.update(read)
         except (AskCancelled, RetrievalControlError):
             raise
         except Exception as exc:  # noqa: BLE001 - see docstring

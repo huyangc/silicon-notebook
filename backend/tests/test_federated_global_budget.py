@@ -974,6 +974,35 @@ def test_evidence_read_has_its_own_budget_not_the_spent_phase(clock, pool):
     assert sorted(receipts.evidence[0]) == ["e-nb-a"]
 
 
+def test_an_element_missing_from_a_successful_read_is_stated_as_none(pool):
+    """读成功、但某个入选 element 没有行(检索之后被重新入库删掉)→ 回传 ``None``。
+
+    缺席的含义是「从未走过本通道」,复核只按来源天花板判;一个走过本通道、却在
+    指纹读之前被删掉的 element 若被留成缺席,它的引用就会被不加核验地放行。它也
+    不进已见集合,下一轮照常重试(codex #755 第 1 轮 P2)。
+    """
+    ids = ("nb-a",)
+    candidates = FakeCandidates(
+        _participants(ids),
+        retrieve=lambda nid, q: (
+            [make_chunk(f"c-{nid}", elements=["e-live", "e-deleted"])], [], None,
+        ),
+        fingerprints=lambda read_index, element_ids: {
+            element_id: ("src", "fp") for element_id in element_ids
+            if element_id != "e-deleted"
+        },
+    )
+    receipts = Receipts()
+
+    with _global_run(ids, _plan(pool, receipts)):
+        cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+        cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+
+    assert receipts.evidence[0] == {"e-live": ("src", "fp"), "e-deleted": None}
+    # 真快照已结清、不再读;缺行的那个下一轮重试。
+    assert candidates.fingerprint_reads == [["e-live", "e-deleted"], ["e-deleted"]]
+
+
 def test_a_second_round_reads_only_the_new_elements(pool):
     """同一次 run 的第二轮只读新增 element,已回传过的不再读。
 
