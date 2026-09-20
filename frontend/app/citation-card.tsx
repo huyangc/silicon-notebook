@@ -35,7 +35,7 @@ import { referenceImages } from "./inline-citation-images";
 import { KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import { mapCitationKnowhowRef } from "./knowhow-model.ts";
 import { unwrapStandaloneLatex } from "./math-markdown";
-import { sourceImageAssetUrl } from "./source-image";
+import { assetNotebookId, sourceImageAssetUrl } from "./source-image";
 import { label, TIER } from "./vocabulary";
 
 
@@ -167,11 +167,12 @@ export function SelectedReferenceDetail({
   importController,
 }: {
   reference: AnswerReference;
-  /** 检索结果带图(T1/T2)：本段附图的资产 URL 恒用**当前 active notebook**——同
-   *  ElementCollectionItemRow 的既有口径,后端按资产自己声明的所属库在参与集内
-   *  解析,跨库图片因此也能取到。可为 null(极少数尚未选中笔记本的调用点,以及
-   *  压根没有 active notebook 的全局问答);此时附图区不渲染(与「无图」等价——
-   *  没有可用的代理端点,绝不拿引用自己的 notebook_id 去直连另一个库)。 */
+  /** 检索结果带图(T1/T2)：**active** notebook,没有就传 null。取图归属交给
+   *  `assetNotebookId` 单点裁定——有 active 恒用 active(同 ElementCollectionItemRow
+   *  的既有口径:后端按资产自己声明的所属库在 active 的参与集内解析,跨库图片因此
+   *  也能取到,而挂载的参考库用户未必是成员,只能经 active 代理);没有 active(全局
+   *  问答)才用这条引用自己的 notebook_id——那是本轮范围里用户自己有读权、经
+   *  `can_read_many` 准入过的库,服务端每次请求仍会复核。两者皆空才不渲染附图区。 */
   notebookId: string | null;
   /** 多领域基准库(Task 14)：id→name 映射，来自 notebooks 列表 + 当前笔记本挂载的
    * 参考库(base_notebooks)合并，供引用徽章把 notebook_id 解成人类可读的库名。 */
@@ -257,6 +258,9 @@ export function SelectedReferenceDetail({
   // 后端 attach_citation_images 只从绑定证据自己所在 chunk/元素的候选里取图,
   // 因此一条引用下的全部附图恒与该引用同源,不存在附图跨到别的来源的情况。
   const images = referenceImages(reference);
+  // 取图归属:有 active 恒用 active(逐字保持既有口径),没有 active(全局问答)才用这条
+  // 引用自己的所属库。两者皆空就整块不渲染。完整论证见 source-image.ts。
+  const imageNotebookId = assetNotebookId(notebookId, sourceNotebookId);
   return (
     <aside className="cite-detail-card" aria-live="polite">
       <div className="cite-detail-head">
@@ -395,14 +399,14 @@ export function SelectedReferenceDetail({
       )}
       {/* 检索结果带图(T1/T2)：与上方引证内容(snippet/来源/原始文件)用独立区块 +
           分隔线区分——本段附图不是模型引用过的证据,只是证据片段附近的图,绝不能
-          让它看起来像 snippet 的一部分。notebookId 为空(极少数尚未选中笔记本的
-          调用点)时没有可用的资产代理端点,整个区块不渲染,与"无附图"等价。 */}
-      {images.length > 0 && notebookId && (
+          让它看起来像 snippet 的一部分。算出来的取图归属库为空(既没有 active、这条
+          引用也没有所属库)时没有可用的资产端点,整个区块不渲染,与"无附图"等价。 */}
+      {images.length > 0 && imageNotebookId && (
         <div className="cite-detail-images">
           <span className="cite-detail-images-label">本段附图</span>
           <ul className="cite-detail-image-list">
             {images.map((image) => {
-              const imageUrl = sourceImageAssetUrl(API_BASE, notebookId, image.asset_id);
+              const imageUrl = sourceImageAssetUrl(API_BASE, imageNotebookId, image.asset_id);
               const thumbnail = imageUrl
                 ? <AuthedImage url={imageUrl} alt={image.caption || "附图"} />
                 : <p className="tool-hint">图片不可用</p>;

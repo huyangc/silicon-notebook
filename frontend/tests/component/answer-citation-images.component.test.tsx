@@ -443,7 +443,12 @@ test("同一图片被正文多次引用时只在第一次出现处展示一次",
   expect(fetchInternalAssetBlob).toHaveBeenCalledTimes(1);
 });
 
+// 有 active notebook 时的取图归属闸(`assetNotebookId` 的第一条):条目**带着**别的
+// notebook_id 也照样走 active。全局问答为了出图新增了「没有 active 才用条目自己的
+// 库」那条分支,这条用例守的是它没有顺手把这一条也改掉——挂载进来的参考库用户未必
+// 是成员,只能经 active 的有效参与集代理,直连 base-1 是替用户猜权限。
 test("跨库附图仍经当前 active notebook 的代理资产端点读取", async () => {
+  const user = userEvent.setup();
   const answer = anchorAnswerWithImages();
   answer.anchors[0].notebook_id = "base-1";
   answer.anchors[0].tier = "base";
@@ -453,6 +458,15 @@ test("跨库附图仍经当前 active notebook 的代理资产端点读取", asy
   const url = vi.mocked(fetchInternalAssetBlob).mock.calls[0][0];
   expect(url).toContain("/notebooks/nb-1/assets/asset-1");
   expect(url).not.toContain("base-1");
+
+  // 引用浮层里的「本段附图」缩略图是第二个取图点，同一条闸必须同样成立。
+  await user.click(screen.getByRole("button", { name: "[1]" }));
+  const card = await screen.findByRole("dialog");
+  await within(card).findByRole("img", { name: "图 1：示意图" });
+  await waitFor(() => expect(fetchInternalAssetBlob).toHaveBeenCalledTimes(2));
+  for (const [called] of vi.mocked(fetchInternalAssetBlob).mock.calls) {
+    expect(called).toContain("/notebooks/nb-1/assets/asset-1");
+  }
 });
 
 test("citation 回退编号携带 images 时也在正文引用位置插图", async () => {

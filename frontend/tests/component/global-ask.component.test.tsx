@@ -16,7 +16,7 @@ import type { AskResponse, NotebookSummary } from "../../app/workspace-model.ts"
 const api = vi.hoisted(() => ({
   me: vi.fn(), notebooks: vi.fn(), list: vi.fn(), detail: vi.fn(), ask: vi.fn(),
   poll: vi.fn(), cancel: vi.fn(), rename: vi.fn(), remove: vi.fn(), intent: vi.fn(),
-  feedback: vi.fn(),
+  feedback: vi.fn(), assetBlob: vi.fn(),
 }));
 vi.mock("../../app/auth.ts", () => ({ fetchMe: api.me }));
 vi.mock("../../app/notebook-api.ts", () => ({ listNotebooks: api.notebooks }));
@@ -26,6 +26,12 @@ vi.mock("../../app/global-ask-api.ts", async (importOriginal) => ({
   askGlobal: api.ask, getGlobalJob: api.poll, cancelGlobalJob: api.cancel,
   renameGlobalConversation: api.rename, deleteGlobalConversation: api.remove,
   previewGlobalAskIntent: api.intent, submitGlobalFeedback: api.feedback,
+}));
+// 附图走鉴权 fetch→blob→objectURL（`AuthedImage`）。这里只替掉那一次网络读取，
+// 断言看的是它**拿着哪个笔记本的 URL** 去读的。
+vi.mock("../../app/source-api.ts", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../app/source-api.ts")>(),
+  fetchInternalAssetBlob: api.assetBlob,
 }));
 
 const notebooks: NotebookSummary[] = ["材料研究", "热管理"].map((name, index) => ({
@@ -83,6 +89,9 @@ beforeEach(() => {
   api.detail.mockImplementation((id: string) => Promise.resolve(detail(id)));
   api.ask.mockResolvedValue(job());
   api.intent.mockImplementation((question: string) => Promise.resolve(clearContract(question)));
+  api.assetBlob.mockResolvedValue(new Blob(["fake-image-bytes"], { type: "image/png" }));
+  if (typeof URL.createObjectURL !== "function") URL.createObjectURL = vi.fn(() => "blob:mock-url");
+  if (typeof URL.revokeObjectURL !== "function") URL.revokeObjectURL = vi.fn();
   // 引擎选择是 per-viewer 的浏览器存储记忆；用例之间不许互相串味。存储本身不可用
   // 的环境（隐私窗口、被清的站点数据）也必须能跑——那正是 hook 里 try/catch 的契约。
   try { window.localStorage.clear(); } catch { /* 存储不可用即无记忆，照常。 */ }
@@ -1268,4 +1277,70 @@ test("citation badge shows the owning notebook for every citation", async () => 
     await act(async () => { document.body.dispatchEvent(new Event("pointerdown", { bubbles: true })); });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   }
+});
+
+// --- 回答里的附图 -------------------------------------------------------------
+//
+// 全局问答没有 active notebook，早先因此整块不渲染附图。现在取图归属由
+// `assetNotebookId` 单点裁定：没有 active 就用这条引用**自己的**所属库——那是本轮
+// 范围里用户自己有读权、经 `can_read_many` 准入过的库，而取图端点每次请求仍跑
+// `require_notebook_read` + 「资产所属库在该 notebook 的有效参与集内」。断言因此盯
+// 死请求 URL 里的笔记本 id：它必须是引用自己的库，而不是别的库、也不是拼不出来。
+const answerWithImages = (overrides: Partial<AskResponse> = {}) => standardAnswer({
+  answer: "跨库结论 [k1]。\n\n后一段。",
+  anchors: [{
+    key: "k1", object_id: "", object_type: "element", label: "测试记录",
+    name: "测试记录", source_title: "测试记录", location_label: "第 2 页",
+    source_id: "source-1", element_id: "element-1", notebook_id: "nb-1",
+    tier: "personal", snippet: "低温环境下，容量下降。",
+    images: [{ element_id: "img-el-1", asset_id: "asset-1", caption: "图 1：示意图" }],
+  }],
+  ...overrides,
+});
+
+test("global answers show citation images, read through each citation's own notebook", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  api.detail.mockResolvedValue(detail("conv-a", [{
+    ...job("done"), cited_notebook_ids: ["nb-1"], answer: answerWithImages(),
+  }]));
+  render(<GlobalAskPage />);
+
+  // ① 正文内联附图：`notebookId={null}` 不再让整块消失。
+  const region = await screen.findByRole("complementary", { name: "引用图片 [1]" });
+  await within(region).findByRole("img", { name: "图 1：示意图" });
+  await waitFor(() => expect(api.assetBlob).toHaveBeenCalled());
+  expect(api.assetBlob.mock.calls[0][0]).toContain("/notebooks/nb-1/assets/asset-1");
+  // 没有承接方时不留一颗点了没反应的控件：全局问答不接页面级放大预览。
+  expect(within(region).queryByRole("button", { name: /放大查看/ })).toBeNull();
+
+  // ② 引用卡里的「本段附图」：同一条归属规则，同一个库。
+  fireEvent.click(await screen.findByRole("button", { name: "[1]" }));
+  const card = await screen.findByRole("dialog");
+  expect(within(card).getByText("本段附图")).toBeTruthy();
+  await within(card).findByRole("img", { name: "图 1：示意图" });
+  await waitFor(() => expect(api.assetBlob).toHaveBeenCalledTimes(2));
+  for (const [url] of api.assetBlob.mock.calls) {
+    expect(url).toContain("/notebooks/nb-1/assets/asset-1");
+  }
+});
+
+test("a citation with no owning notebook renders no image block at all", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.list.mockResolvedValue([conversation()]);
+  // 更老的回答可能既没有 active 也没有 notebook_id：归属算出来是空串，整块不渲染，
+  // 绝不拼一个取不到的 URL 去换一张「图片加载失败」。
+  const answer = answerWithImages();
+  delete answer.anchors![0].notebook_id;
+  api.detail.mockResolvedValue(detail("conv-a", [{
+    ...job("done"), cited_notebook_ids: [], answer,
+  }]));
+  render(<GlobalAskPage />);
+
+  await screen.findByText("跨库结论", { exact: false });
+  fireEvent.click(await screen.findByRole("button", { name: "[1]" }));
+  const card = await screen.findByRole("dialog");
+  expect(within(card).queryByText("本段附图")).toBeNull();
+  expect(screen.queryByRole("img", { name: "图 1：示意图" })).toBeNull();
+  expect(api.assetBlob).not.toHaveBeenCalled();
 });

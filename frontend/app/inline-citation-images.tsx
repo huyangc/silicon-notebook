@@ -15,7 +15,7 @@ import type { AnswerReference, CitationImageLike } from "./answer-formatting";
 import { AuthedImage } from "./authed-image";
 import type { AnswerImagePreviewItem } from "./image-preview";
 import type { CitationImageSlotItem } from "./rehype-citation-images";
-import { sourceImageAssetUrl } from "./source-image";
+import { assetNotebookId, sourceImageAssetUrl } from "./source-image";
 
 // 检索结果带图(T1/T2)：anchor 优先、citation 兜底,与 answer-panel.tsx 其余
 // reference* helper 的既有惯例一致(anchor/citation 二选一,由 buildAnswerReferences
@@ -41,6 +41,21 @@ export function referenceImages(reference: AnswerReference): CitationImageLike[]
   return reference.anchor?.images ?? reference.citation?.images ?? [];
 }
 
+/**
+ * 这条引用**自己**属于哪个笔记本。
+ *
+ * citation 优先、anchor 兜底,与 citation-card.tsx 里 `sourceNotebookId`(「打开笔记本」
+ * 链接用的那一份)逐字同序——同一条引用在两处解出的所属库必须是同一个,否则「打开
+ * 笔记本」跳去 A 库、附图却去 B 库取。笔记本内问答里这个值多数缺席(后端只在跨库
+ * 命中时才下发),全局问答里恒非空(含范围里的第一个库)。
+ *
+ * 只是「这条引用来自哪」的事实,不是取图归属——取哪个库的资产端点由
+ * `assetNotebookId` 单独裁定(active 优先)。
+ */
+export function referenceNotebookId(reference: AnswerReference): string {
+  return reference.citation?.notebook_id || reference.anchor?.notebook_id || "";
+}
+
 export type ResolvedCitationImage = Readonly<{
   reference: AnswerReference;
   image: CitationImageLike;
@@ -52,7 +67,10 @@ export function InlineCitationImages({
   onPreviewImage,
 }: {
   rows: readonly ResolvedCitationImage[];
-  notebookId: string;
+  /** **active** notebook,没有(全局问答)传 null。每一行的取图归属由
+   *  `assetNotebookId` 逐行裁定:有 active 恒用 active,没有才用那一行引用自己的
+   *  所属库。见 source-image.ts 的完整论证。 */
+  notebookId: string | null;
   /** 点开这一张附图。左右切换用的画册由调用方统一定位（AnswerView / ReportMarkdown
    *  各自的 imageGallery）,所以这里只报「点的是哪一张」。没有承接方时图片仍显示但
    *  不可点击。 */
@@ -68,7 +86,11 @@ export function InlineCitationImages({
       </div>
       <ul className="answer-inline-image-list">
         {rows.map(({ reference, image }) => {
-          const url = sourceImageAssetUrl(API_BASE, notebookId, image.asset_id);
+          const url = sourceImageAssetUrl(
+            API_BASE,
+            assetNotebookId(notebookId, referenceNotebookId(reference)),
+            image.asset_id,
+          );
           const alt = image.caption || `${reference.displayLabel} 的附图`;
           return (
             <li key={image.asset_id} className="answer-inline-image-item">

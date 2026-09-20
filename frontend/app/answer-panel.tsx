@@ -66,7 +66,7 @@ import {
   STRUCTURED_ENUMERATION_LIMITS,
 } from "./ask-retrieval-effort";
 import { shouldShowIndexRequiredBanner, type ScaleIndexStatus } from "./scale-index";
-import { sourceImageAssetUrl } from "./source-image";
+import { assetNotebookId, sourceImageAssetUrl } from "./source-image";
 import { retrievalScopeSummary } from "./source-scope";
 import type {
   AskResponse,
@@ -410,10 +410,12 @@ function ElementCollectionItemRow({
   // 局部 const 而非 item.source_id!:非空断言只是在闭包里骗过编译器,局部 const
   // 让 TS 在这个块内真的把它窄化成 string,闭包捕获的是这个已收窄的绑定。
   const sourceId = item.source_id ?? "";
-  // 资产 URL 恒用**当前 active notebook**:后端按资产自己声明的所属库在参与集内解析,
-  // 跨库图片因此也能取到。绝不拿 item.notebook_id 去直连另一个库(那是成员口径的越权猜测)。
+  // 取图归属由 assetNotebookId 单点裁定:**有 active 就恒用 active**(后端按资产自己
+  // 声明的所属库在 active 的参与集内解析,跨库图片因此也能取到;绝不拿 item.notebook_id
+  // 去直连另一个库——挂载的参考库用户未必是成员,那是越权猜测),没有 active(全局问答)
+  // 才用条目自己的库(本轮范围里用户自己有读权的库)。完整论证见 source-image.ts。
   const imageUrl = kind === "image" && item.asset_id
-    ? sourceImageAssetUrl(API_BASE, notebookId || "", item.asset_id)
+    ? sourceImageAssetUrl(API_BASE, assetNotebookId(notebookId, itemNotebookId), item.asset_id)
     : "";
   return (
     <li className="answer-collection-item">
@@ -1180,16 +1182,16 @@ export function AnswerView({
       image,
     ))
     : undefined;
-  const renderCitationImages = (items: CitationImageSlotItem[]) => {
-    if (!notebookId) return null;
-    return (
-      <InlineCitationImages
-        rows={resolveCitationImageRows(items, (key) => referencesByCitationKey[key])}
-        notebookId={notebookId}
-        onPreviewImage={previewImage}
-      />
-    );
-  };
+  // 没有 active notebook 不再是「整块不渲染」的理由:归属逐行由 assetNotebookId 裁定,
+  // 全局问答下每一行退到那条引用自己的所属库。真正取不到图的行(既无 active、引用也
+  // 没有 notebook_id——旧答案)由 InlineCitationImages 逐行显示「图片不可用」。
+  const renderCitationImages = (items: CitationImageSlotItem[]) => (
+    <InlineCitationImages
+      rows={resolveCitationImageRows(items, (key) => referencesByCitationKey[key])}
+      notebookId={notebookId}
+      onPreviewImage={previewImage}
+    />
+  );
   useEffect(() => setCitePopover(null), [answer.answer_id]);
   useEffect(() => setCitePopover(null), [dismissSignal]);
   useEffect(() => {
