@@ -306,6 +306,77 @@ def test_explicit_cancel_prevents_late_synthesis_commit(setup):
     assert result.status == "cancelled" and result.answer is None
 
 
+def _stopped_job(service, question="打错的问题", conversation_id=None):
+    """A job the user stopped mid-synthesis, fully settled (worker unwound)."""
+    entered, release = Event(), Event()
+
+    def synthesis(*args):
+        entered.set()
+        assert release.wait(5)
+        return "late answer", False, [], []
+
+    original = service.ask.synthesize
+    service.ask.synthesize = synthesis
+    job = service.start(GlobalAskRequest(question=question, conversation_id=conversation_id), user_id="u")
+    assert entered.wait(5)
+    assert service.cancel(job.job_id, user_id="u").status == "cancelled"
+    release.set()
+    finished(service, job)
+    service.ask.synthesize = original
+    return job
+
+
+def test_edit_and_resend_replaces_the_stopped_job(setup):
+    service, _, _, _ = setup
+    stopped = _stopped_job(service)
+    request = GlobalAskRequest(
+        question="改好的问题", conversation_id=stopped.conversation_id,
+        replaces_job_id=stopped.job_id, client_request_id="resend",
+    )
+    job = service.start(request, user_id="u")
+    assert finished(service, job).status == "done"
+    turns = service.conversation(stopped.conversation_id, user_id="u").turns
+    assert [turn.job_id for turn in turns] == [job.job_id]
+    with pytest.raises(GlobalAskError) as missing:
+        service.get_job(stopped.job_id, user_id="u")
+    assert missing.value.status_code == 404
+    # A retry of the SAME submission names a row that is already gone; it must
+    # get its job back, not a 409 for a stale replacement.
+    assert service.start(request, user_id="u").job_id == job.job_id
+
+
+def test_a_stale_replacement_is_refused_before_anything_is_spent(setup):
+    service, _, retrieved, _ = setup
+    stopped = _stopped_job(service)
+    answered = service.start(
+        GlobalAskRequest(question="后一个问题", conversation_id=stopped.conversation_id), user_id="u",
+    )
+    assert finished(service, answered).status == "done"
+    before = list(retrieved)
+    for payload in (
+        # Not the newest job any more.
+        GlobalAskRequest(question="q", conversation_id=stopped.conversation_id, replaces_job_id=stopped.job_id),
+        # An answer is never replaceable.
+        GlobalAskRequest(question="q", conversation_id=stopped.conversation_id, replaces_job_id=answered.job_id),
+        # No conversation named, another conversation named, unknown job.
+        GlobalAskRequest(question="q", replaces_job_id=stopped.job_id),
+        GlobalAskRequest(question="q", conversation_id="gconv-other", replaces_job_id=stopped.job_id),
+        GlobalAskRequest(question="q", conversation_id=stopped.conversation_id, replaces_job_id="gask-missing"),
+    ):
+        with pytest.raises(GlobalAskError) as error:
+            service.start(payload, user_id="u")
+        assert error.value.status_code == 409
+    assert retrieved == before
+    turns = service.conversation(stopped.conversation_id, user_id="u").turns
+    assert [turn.job_id for turn in turns] == [stopped.job_id, answered.job_id]
+    # Somebody else's stopped job reads as "not there", same as any other job.
+    with pytest.raises(GlobalAskError) as foreign:
+        service.start(GlobalAskRequest(
+            question="q", conversation_id=stopped.conversation_id, replaces_job_id=stopped.job_id,
+        ), user_id="other")
+    assert foreign.value.status_code in {404, 409}
+
+
 def test_live_token_revocation_stops_before_synthesis(setup):
     service, _, _, syntheses = setup
     current = [["a", "b"]]

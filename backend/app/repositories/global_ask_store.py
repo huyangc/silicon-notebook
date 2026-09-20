@@ -13,6 +13,7 @@ from app.core.capability_tokens import (
 from app.domain.conversation_public_view import MAX_TURNS
 from app.models.ask import CONVERSATION_TITLE_MAX_CHARS
 from app.models.global_ask import GlobalAskJob, GlobalConversationSummary
+from app.repositories.global_ask_ports import ReplacedJobUnavailable
 from app.repositories.ports import (
     ConversationHasNoShareableAnswer,
     ConversationShareWatermarkStale,
@@ -96,7 +97,8 @@ class GlobalAskStore:
             ), (user_id, request_id)).fetchone()
         return None if row is None else (self._job(row), row["request_json"])
 
-    def create(self, job, user_id, request_id, request_json, submitted_via, *, new_conversation):
+    def create(self, job, user_id, request_id, request_json, submitted_via, *,
+               new_conversation, replaces_job_id=None):
         """Insert one running job, stamped so that insertion order IS keyset order.
 
         ⚠ ``job.created_at`` is REWRITTEN here when it would not sort strictly
@@ -117,7 +119,16 @@ class GlobalAskStore:
         one-running-job index that gives the ordering the snapshot needs -- a job
         still running at share time was inserted after the watermark job, and a
         job inserted later still sorts later.
+
+        ``replaces_job_id`` is "edit and re-send": the stopped job the user is
+        re-asking is deleted in THIS transaction, so the conversation never holds
+        both the abandoned attempt and its replacement, and never loses the old
+        one without gaining the new one. See ``_discard_replaced`` for what may
+        be named. A cancelled job is never inside a share snapshot (the public
+        projection reads ``done`` jobs only), so deleting it cannot move one.
         """
+        if replaces_job_id and new_conversation:
+            raise ReplacedJobUnavailable(replaces_job_id)
         with self.database.write() as db:
             if new_conversation:
                 db.execute(self._sql(
@@ -143,7 +154,11 @@ class GlobalAskStore:
                 ), (job.conversation_id, user_id)).fetchone()
                 if row is None:
                     raise KeyError(job.conversation_id)
+                # Clamp BEFORE the delete: stamps stay monotonic over every job
+                # this conversation has ever held, replaced ones included.
                 job.created_at = self._after_latest_job(db, job.conversation_id, job.created_at)
+                if replaces_job_id:
+                    self._discard_replaced(db, job, user_id, replaces_job_id)
             db.execute(self._sql(
                 "INSERT INTO global_ask_jobs"
                 "(id,conversation_id,user_id,client_request_id,request_json,status,payload_json,created_at) "
@@ -153,6 +168,35 @@ class GlobalAskStore:
             db.execute(self._sql(
                 "UPDATE global_ask_conversations SET scope_json=?,updated_at=? WHERE id=? AND user_id=?"
             ), (job.notebook_scope.model_dump_json(), job.created_at, job.conversation_id, user_id))
+
+    def _discard_replaced(self, db, job, user_id, replaces_job_id):
+        """Delete the stopped job ``job`` re-asks. Caller holds the conversation row lock.
+
+        ⛔ Only the conversation's NEWEST job, and only while ``cancelled``. An
+        older turn has later turns that were asked with it on screen; a ``done``
+        turn is an answer (and may be inside a share); a ``running`` one still
+        has a worker. Anything else raises and the whole insert rolls back.
+
+        A conversation that still carries its automatic title (the first
+        question) and is left with no other job takes the new question as its
+        title: the history list would otherwise keep naming a question that no
+        longer exists anywhere in it. A title the user typed is left alone.
+        """
+        newest = db.execute(self._sql(
+            "SELECT id,status,payload_json FROM global_ask_jobs "
+            f"WHERE conversation_id=? AND user_id=? {GLOBAL_JOBS_ORDER_DESC} LIMIT 1"
+        ), (job.conversation_id, user_id)).fetchone()
+        if newest is None or newest["id"] != replaces_job_id or newest["status"] != "cancelled":
+            raise ReplacedJobUnavailable(replaces_job_id)
+        old_title = self._job(newest).question[:CONVERSATION_TITLE_MAX_CHARS]
+        db.execute(self._sql(
+            "DELETE FROM global_ask_jobs WHERE id=? AND user_id=? AND status='cancelled'"
+        ), (replaces_job_id, user_id))
+        db.execute(self._sql(
+            "UPDATE global_ask_conversations SET title=? WHERE id=? AND user_id=? AND title=? "
+            "AND NOT EXISTS (SELECT 1 FROM global_ask_jobs WHERE conversation_id=?)"
+        ), (job.question[:CONVERSATION_TITLE_MAX_CHARS], job.conversation_id, user_id,
+            old_title, job.conversation_id))
 
     def _after_latest_job(self, db, conversation_id, stamp):
         """``stamp``, or one microsecond past the conversation's newest job when
