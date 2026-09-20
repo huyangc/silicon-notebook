@@ -213,6 +213,7 @@ import { AskSessionHeaderActions } from "./ask-session-header";
 import { ChatTurnNav, chatTurnDomId } from "./chat-turn-nav";
 import { ChatQuestion } from "./chat-question";
 import { ChatAnswer } from "./chat-answer";
+import { StoppedTurnNotice } from "./stopped-turn";
 import { WaitingWishCarousel } from "./waiting-wish-carousel";
 import { Pagination } from "./Pagination";
 import { useClientPagination } from "./use-client-pagination.ts";
@@ -1528,6 +1529,9 @@ export default function Home() {
   };
   const [kgSize, setKgSize] = useState({ width: 720, height: 560 });
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
+  // 问答面板根节点。用途只有一个:把焦点送回提问输入框(「编辑问题」)。输入框由
+  // AskComposer 自己持有 ref、不外露,这里按面板范围取它,而不是全局按 aria-label 找。
+  const chatPanelRef = useRef<HTMLElement | null>(null);
   const memoryLinksAbortRef = useRef<AbortController | null>(null);
   const memorySessionAbortRef = useRef(new AbortController());
   const sessionPopoverRef = useRef<HTMLDivElement | null>(null);
@@ -2055,6 +2059,7 @@ export default function Home() {
     pendingAskedAt,
     pendingMode,
     pendingTrace,
+    stoppedTurn: askStoppedTurn,
     askModes,
     mode: askMode,
     retrievalEffort: askRetrievalEffort,
@@ -3769,6 +3774,13 @@ export default function Home() {
       rootTransition,
       actorId && notebookId ? { actorId, notebookId, workspaceEpoch } : null,
     );
+  }
+
+  // 被停止那一轮的「编辑问题」:问题回到输入框并把焦点送过去,用户接着改就行。
+  // 记录本身留在对话里,由下一次提问替换(判据与文案见 stopped-turn.tsx)。
+  function editStoppedAskTurn() {
+    askSession.editStoppedTurn();
+    chatPanelRef.current?.querySelector<HTMLTextAreaElement>("textarea.chat-input")?.focus();
   }
 
   function requestDeleteSession(session: ConversationSummary) {
@@ -5562,7 +5574,7 @@ export default function Home() {
               </button>
             )}
 
-            <section className="workspace-panel chat-panel">
+            <section className="workspace-panel chat-panel" ref={chatPanelRef}>
               <div className="workspace-panel-header">
                 <div className="chat-tabs">
                   {CHAT_MODES.map(([mode, label]) => (
@@ -5651,8 +5663,10 @@ export default function Home() {
                   </div>
                 </div>
               )}
-              <div ref={chatBodyRef} className={`chat-body ${chatMode !== "ask" || turns.length > 0 || askInFlight ? "answer-mode" : ""}`}>
-                {chatMode === "ask" && (turns.length === 0 && !askInFlight ? (
+              {/* 被停止的那一轮也是对话内容:新会话里停掉第一问时 turns 仍是空的,
+                  判据漏了它就会退回欢迎页,记录当场消失。 */}
+              <div ref={chatBodyRef} className={`chat-body ${chatMode !== "ask" || turns.length > 0 || askInFlight || askStoppedTurn ? "answer-mode" : ""}`}>
+                {chatMode === "ask" && (turns.length === 0 && !askInFlight && !askStoppedTurn ? (
                   <div className="welcome">
                     <div className="wave">👋</div>
                     <h2>{welcomeCopy.title}</h2>
@@ -5729,6 +5743,18 @@ export default function Home() {
                         </ChatAnswer>
                       </div>
                     ))}
+                    {/* 已停止的那一轮:问题 + 已经上屏的过程 + 统一的停止提示。轨迹不再
+                        live(它不会再长),提示与「编辑问题」的长相全站只有 stopped-turn.tsx
+                        一份。与在途轮互斥——重新提问时在途轮一出现,这条就已经被替换掉了。 */}
+                    {askStoppedTurn && !askInFlight && (
+                      <div className="chat-turn">
+                        <ChatQuestion question={askStoppedTurn.question} askedAt={askStoppedTurn.askedAt} />
+                        <div className="chat-assistant">
+                          <ReasoningTracePanel steps={askStoppedTurn.trace} />
+                          <StoppedTurnNotice onEdit={editStoppedAskTurn} />
+                        </div>
+                      </div>
+                    )}
                     {askInFlight && (
                       <div className="chat-turn" id={pendingQuestion ? chatTurnDomId(turns.length) : undefined}>
                         {pendingQuestion && <ChatQuestion question={pendingQuestion} askedAt={pendingAskedAt} />}

@@ -5201,3 +5201,192 @@ test("a cancelled navigation is forgotten by the next Stop", async () => {
   expect(pendingIntentStore()).toEqual([]);
   expect(value!.question).toBe("navigation cancelled");
 });
+
+
+// One shared cancel style, two cases (app/stopped-turn.tsx):
+//   Case B — stopped before any process output (the whole intent phase, and the
+//     job's synthetic "start" step, count as no output): the question goes back
+//     to the input and nothing stays in the transcript. Every stop test above
+//     this point is a Case B test.
+//   Case A — stopped after real retrieval/reasoning output: the turn stays,
+//     the input stays empty, and the next submission replaces the record.
+
+function stoppableRun(jobId: string, conversationId: string) {
+  const started = deferred<undefined>();
+  let signal: AbortSignal | undefined;
+  let progress: ((step: ReasoningTraceStep) => void) | undefined;
+  api.runAskStream.mockImplementation(async (
+    _notebookId: string,
+    _payload: unknown,
+    onProgress: (step: ReasoningTraceStep) => void,
+    nextSignal?: AbortSignal,
+    onStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    signal = nextSignal;
+    progress = onProgress;
+    await onStart!(jobId, conversationId);
+    started.resolve(undefined);
+    return await new Promise<AskResponse>((_resolve, reject) => {
+      nextSignal?.addEventListener("abort", () => {
+        reject(new DOMException("cancelled", "AbortError"));
+      }, { once: true });
+    });
+  });
+  return {
+    started: started.promise,
+    emit: (step: ReasoningTraceStep) => act(() => { progress!(step); }),
+    aborted: () => Boolean(signal?.aborted),
+  };
+}
+
+const START_STEP: ReasoningTraceStep = { step_type: "start", summary: "启动检索", detail: {} };
+const RETRIEVAL_STEP: ReasoningTraceStep = { step_type: "retrieval", summary: "命中 3 条", detail: {} };
+
+/** Ask `question`, let the run report `steps`, then Stop it and settle. */
+async function stopAfter(question: string, steps: readonly ReasoningTraceStep[]) {
+  const run = stoppableRun("job-stopped", "conversation-stopped");
+  let submitting!: Promise<void>;
+  act(() => { submitting = value!.submit(question); });
+  await act(async () => { await run.started; });
+  for (const step of steps) run.emit(step);
+  act(() => value!.abort());
+  await act(async () => { await submitting; });
+  return run;
+}
+
+test("a Stop after retrieval output keeps the turn and leaves the input empty", async () => {
+  api.listConversations.mockResolvedValue([summary("conversation-stopped")]);
+  render(<Harness />);
+  beginOwnedNotebook();
+
+  const run = await stopAfter("stopped after retrieval", [START_STEP, RETRIEVAL_STEP]);
+
+  expect(run.aborted()).toBe(true);
+  expect(api.cancelAskJob).toHaveBeenCalledWith("notebook-a", "job-stopped");
+  expect(value!.question).toBe("");
+  expect(value!.asking).toBe(false);
+  expect(value!.pendingQuestion).toBe("");
+  expect(value!.stoppedTurn?.question).toBe("stopped after retrieval");
+  expect(value!.stoppedTurn?.trace.map((step) => step.summary)).toEqual(["启动检索", "命中 3 条"]);
+  expect(effects.notify).toHaveBeenCalledWith("已停止回答");
+  expect(effects.notify).not.toHaveBeenCalledWith("已中断回答");
+});
+
+test("a Stop with only the job's start step hands the question back, Case B", async () => {
+  api.listConversations.mockResolvedValue([summary("conversation-stopped")]);
+  render(<Harness />);
+  beginOwnedNotebook();
+
+  const run = await stopAfter("stopped before any output", [START_STEP]);
+
+  expect(run.aborted()).toBe(true);
+  expect(value!.question).toBe("stopped before any output");
+  expect(value!.stoppedTurn).toBeNull();
+  expect(effects.notify).toHaveBeenCalledWith("已中断回答");
+  expect(effects.notify).not.toHaveBeenCalledWith("已停止回答");
+});
+
+test("editing a stopped turn drafts the question and keeps the record standing", async () => {
+  api.listConversations.mockResolvedValue([summary("conversation-stopped")]);
+  render(<Harness />);
+  beginOwnedNotebook();
+  await stopAfter("question to edit", [RETRIEVAL_STEP]);
+
+  act(() => value!.editStoppedTurn());
+  expect(value!.question).toBe("question to edit");
+  // The record is replaced by the next SUBMISSION, not by opening the editor.
+  expect(value!.stoppedTurn?.question).toBe("question to edit");
+});
+
+test("the next submission replaces the stopped turn as soon as its pending turn shows", async () => {
+  api.listConversations.mockResolvedValue([summary("conversation-stopped")]);
+  render(<Harness />);
+  beginOwnedNotebook();
+  await stopAfter("first question", [RETRIEVAL_STEP]);
+  expect(value!.stoppedTurn).not.toBeNull();
+
+  const replacement = deferred<AskResponse>();
+  api.runAskStream.mockImplementation(() => replacement.promise);
+  let submitting!: Promise<void>;
+  act(() => { submitting = value!.submit("replacement question"); });
+  expect(value!.pendingQuestion).toBe("replacement question");
+  expect(value!.stoppedTurn).toBeNull();
+
+  replacement.resolve(answer("conversation-stopped"));
+  await act(async () => { await submitting; });
+  expect(value!.stoppedTurn).toBeNull();
+});
+
+test("a stopped turn never survives a new session or another conversation", async () => {
+  api.listConversations.mockResolvedValue([summary("conversation-stopped")]);
+  render(<Harness />);
+  beginOwnedNotebook();
+
+  await stopAfter("stopped in this session", [RETRIEVAL_STEP]);
+  expect(value!.stoppedTurn).not.toBeNull();
+  act(() => value!.startNewSession(2));
+  expect(value!.stoppedTurn).toBeNull();
+
+  await stopAfter("stopped again", [RETRIEVAL_STEP]);
+  expect(value!.stoppedTurn).not.toBeNull();
+  api.getConversation.mockResolvedValue(detail("conversation-other"));
+  await act(async () => { await value!.openSession("conversation-other", 3); });
+  expect(value!.conversationId).toBe("conversation-other");
+  expect(value!.stoppedTurn).toBeNull();
+});
+
+test("a failed cancellation leaves no stopped turn and keeps Stop retryable", async () => {
+  const started = deferred<undefined>();
+  const firstCancel = deferred<undefined>();
+  const secondCancel = deferred<undefined>();
+  api.cancelAskJob
+    .mockReturnValueOnce(firstCancel.promise)
+    .mockReturnValueOnce(secondCancel.promise);
+  let signal: AbortSignal | undefined;
+  let progress: ((step: ReasoningTraceStep) => void) | undefined;
+  api.runAskStream.mockImplementation(async (
+    _notebookId: string,
+    _payload: unknown,
+    onProgress: (step: ReasoningTraceStep) => void,
+    nextSignal?: AbortSignal,
+    onStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    signal = nextSignal;
+    progress = onProgress;
+    await onStart!("job-stop-retry", "conversation-stop-retry");
+    started.resolve(undefined);
+    return await new Promise<AskResponse>((_resolve, reject) => {
+      nextSignal?.addEventListener("abort", () => {
+        reject(new DOMException("cancelled", "AbortError"));
+      }, { once: true });
+    });
+  });
+  api.listConversations.mockResolvedValue([summary("conversation-stop-retry")]);
+  render(<Harness />);
+  beginOwnedNotebook();
+
+  let submitting!: Promise<void>;
+  act(() => { submitting = value!.submit("cancel fails once"); });
+  await act(async () => { await started.promise; });
+  act(() => { progress!(RETRIEVAL_STEP); });
+
+  act(() => value!.abort());
+  firstCancel.reject(new Error("cancel unavailable"));
+  await act(async () => {
+    await firstCancel.promise.catch(() => undefined);
+    await Promise.resolve();
+  });
+  // The job is still running: nothing has been stopped, so nothing settles into
+  // the transcript and the pending turn is still live.
+  expect(signal?.aborted).toBe(false);
+  expect(value!.stoppedTurn).toBeNull();
+  expect(value!.asking).toBe(true);
+  expect(effects.notify).toHaveBeenCalledWith("取消失败，请重试");
+
+  act(() => value!.abort());
+  expect(api.cancelAskJob).toHaveBeenCalledTimes(2);
+  secondCancel.resolve(undefined);
+  await act(async () => { await submitting; });
+  expect(signal?.aborted).toBe(true);
+  expect(value!.stoppedTurn?.question).toBe("cancel fails once");
+});
