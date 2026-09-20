@@ -216,6 +216,26 @@ def test_empty_source_list_must_be_present_not_skipped():
                 raise AssertionError("跳过空来源库的天花板不该被接受")
 
 
+@pytest.mark.parametrize("bare", ["src-a", b"src-a"], ids=["str", "bytes"])
+def test_a_bare_source_id_is_refused_not_split_into_characters(bare):
+    """``{"nb-a": "src-a"}`` 必须抛,不能被 ``frozenset`` 拆成五个字符。
+
+    拆开之后天花板里一个真实来源都没有,于是那一库**整个**被判成「没有可见
+    来源」——静默的、看上去像数据问题的全库封禁。一个裸 id 是调用方最自然会写
+    错的形状,所以它必须响亮失败,与 ``ParticipantOverride`` 拒绝裸
+    ``notebook_ids`` 同理。
+    """
+    ceilings = _ceilings()
+    ceilings["nb-a"] = bare
+    with retrieval_run(run_kind="ask_global", actor_id=_ACTOR):
+        with pytest.raises(ParticipantOverrideError):
+            with global_ask_run(
+                _override(), ceilings, _turn(), _plan(), nominal_active="nb-a",
+            ):  # pragma: no cover
+                raise AssertionError("裸来源 id 不该被接受")
+        assert _nothing_installed()
+
+
 # ---------------------------------------------------------------------------
 # 3. 只有 global_ask 装,且无主体位只由管理器写
 # ---------------------------------------------------------------------------
@@ -256,11 +276,22 @@ def _call_sites(sources: dict, function_name: str) -> set:
     return found
 
 
-def _subjectless_literal_sites(sources: dict) -> set:
-    """把 ``subjectless=True`` 当**字面实参**传出去的文件集合。
+_SUBJECTLESS_FORWARDER = "backend/app/services/source_scope.py"
 
-    只认 ``Constant(True)``:``source_scope.py`` 内部的 ``subjectless=subjectless``
-    是形参转发而不是一次「我宣布这次 run 没有主体」的决定,不该被算进来。
+
+def _subjectless_keyword_sites(sources: dict) -> set:
+    """把 ``subjectless=`` 当关键字实参写出去的文件集合——**不看写的是什么值**。
+
+    早先的版本只认 ``Constant(True)``,于是
+    ``source_scope_context(..., subjectless=flag)`` 这种写法整条守卫都看不见:
+    一个变量、一个属性读、一个 ``bool(...)``,任何一种都能在第二个文件里把 ask
+    侧单独切进对等模式,而管理器的全映射断言一行都跑不到。判据因此改成「谁写了
+    这个关键字」,值是什么与它无关。
+
+    唯一放行的非管理器文件是 ``source_scope.py`` 自己的**形参转发**
+    (``subjectless=subjectless``):那不是一次「我宣布这次 run 没有主体」的决定,
+    它转发的正是调用方已经做完的那个决定。转发的判据是 ``Name`` 而且同名——
+    ``subjectless=other_flag`` 不算转发,照样报红。
     """
     found: set = set()
     for path, source in sources.items():
@@ -270,37 +301,38 @@ def _subjectless_literal_sites(sources: dict) -> set:
             if not isinstance(node, ast.Call):
                 continue
             for keyword in node.keywords:
-                if (
-                    keyword.arg == "subjectless"
-                    and isinstance(keyword.value, ast.Constant)
-                    and keyword.value.value is True
-                ):
+                if keyword.arg != "subjectless":
+                    continue
+                forwarding = (
+                    path == _SUBJECTLESS_FORWARDER
+                    and isinstance(keyword.value, ast.Name)
+                    and keyword.value.id == "subjectless"
+                )
+                if not forwarding:
                     found.add(path)
     return found
 
 
 def test_only_global_ask_installs():
-    """安装管理器的调用点 ⊆ ``{app/services/global_ask.py}``,无主体位 ⊆ 管理器自己。
+    """安装管理器的调用点 == ``{app/services/global_ask.py}``,无主体位 == 管理器自己。
 
-    ⊆ 而不是相等:今天两者一个是**空集**(D1-4 才接线,生产上没有任何地方进入
-    全局模式),接线之后恰好是那一个文件。⊆ 的判据从今天到接线后都成立,而任何
-    第三个文件出现即报红——那才是这条守卫要拦的东西:安装参与集是一次授权动作,
-    检索层任何一处自己装一份,就是自己给自己发的授权。
+    相等而不是 ⊆:D1-4 接好线之后,全局问答入口是唯一进入全局模式的地方,而
+    「一个都没有」不再是合法答案——空集意味着接线被悄悄回退(例如 ``_run`` 改回
+    自建检索链路),⊆ 断言对回退是沉默的。第三个文件出现同样报红,那才是这条守卫
+    原本要拦的东西:安装参与集是一次授权动作,检索层任何一处自己装一份,就是自己
+    给自己发的授权。
 
-    第二半同理:``subjectless=True`` 是「这次 run 没有当前库」这句话的唯一写入
-    口,写在第二个文件里就等于绕过管理器的全映射断言,把 ask 侧单独切进对等模式。
+    第二半同理:``subjectless=`` 是「这次 run 没有当前库」这句话的唯一写入口,
+    写在第二个文件里就等于绕过管理器的全映射断言,把 ask 侧单独切进对等模式。
     """
     sources = _app_sources()
     assert sources, "扫空了,守卫会恒真通过"
     assert _MANAGER_PATH in sources, _MANAGER_PATH
 
     installers = _call_sites(sources, "global_ask_run")
-    assert installers <= {"backend/app/services/global_ask.py"}, installers
+    assert installers == {"backend/app/services/global_ask.py"}, installers
 
-    declarers = _subjectless_literal_sites(sources)
-    assert declarers <= {_MANAGER_PATH}, declarers
-    # 正对照:守卫不是恒真的——管理器自己必须被扫到。
-    assert declarers == {_MANAGER_PATH}
+    assert _subjectless_keyword_sites(sources) == {_MANAGER_PATH}
 
 
 def test_call_site_guard_sees_through_an_alias():
@@ -317,11 +349,20 @@ def test_call_site_guard_sees_through_an_alias():
         "backend/app/x/aliased.py", "backend/app/x/qualified.py",
     }
 
-    assert _subjectless_literal_sites({
+    # 值无关:``True`` / ``False`` / 一个变量,写在管理器以外都算。转发豁免只在
+    # ``source_scope.py`` 自己、且实参必须与形参同名。
+    assert _subjectless_keyword_sites({
         "backend/app/x/declares.py": "f(subjectless=True)\n",
-        "backend/app/x/forwards.py": "f(subjectless=subjectless)\n",
         "backend/app/x/off.py": "f(subjectless=False)\n",
-    }) == {"backend/app/x/declares.py"}
+        "backend/app/x/indirect.py": "f(subjectless=flag)\n",
+        _SUBJECTLESS_FORWARDER: "f(subjectless=subjectless)\n",
+    }) == {
+        "backend/app/x/declares.py", "backend/app/x/off.py",
+        "backend/app/x/indirect.py",
+    }
+    assert _subjectless_keyword_sites({
+        _SUBJECTLESS_FORWARDER: "f(subjectless=other_flag)\n",
+    }) == {_SUBJECTLESS_FORWARDER}
 
 
 # ---------------------------------------------------------------------------

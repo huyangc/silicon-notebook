@@ -4435,6 +4435,18 @@
                 }
               ]
             },
+            "retrieval_effort": {
+              "default": "standard",
+              "enum": [
+                "overview",
+                "standard",
+                "deep",
+                "thorough",
+                "exhaustive"
+              ],
+              "title": "Retrieval Effort",
+              "type": "string"
+            },
             "searched_notebook_ids": {
               "items": {
                 "type": "string"

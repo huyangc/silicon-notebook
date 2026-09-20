@@ -80,3 +80,73 @@ def test_community_query_service_uses_explicit_sibling_threshold():
         "base", "Focal", "compare", top_k=3, candidates=10,
     ) == (["Peer"], "comention")
     assert calls == [("base", "cluster:focal", 5, 3)]
+
+
+def _peer_service(peers_by_library):
+    """``resolve_comparison_peers`` 定死成每库一份名单的替身。"""
+
+    class _Unified:
+        def resolve_focal(self, notebook_id, key):
+            return "cluster:focal"
+
+        def comention_peers(self, notebook_id, focal, min_bridges, top_k):
+            return [(name, 5) for name in peers_by_library.get(notebook_id, ())]
+
+    return CommunityQueryService(
+        notebooks=object(), unified_kg=_Unified(),
+        event_log=type("Log", (), {"emit": lambda *args, **kwargs: None})(),
+        sibling_min_bridge=5,
+    )
+
+
+def test_comparison_peer_names_truncates_by_rotating_over_libraries():
+    """总量帽按库轮转,不是逐库拼完切前 N 条。
+
+    直接切前 N 条会把整个配额发给遍历顺序最靠前的那一两个库,后面的库一个名字
+    都进不了子查询——多选一个库反而让它自己的兄弟实体被挤掉。
+    """
+    service = _peer_service({
+        "nb-a": ["a1", "a2", "a3"],
+        "nb-b": ["b1", "b2", "b3"],
+        "nb-c": ["c1", "c2", "c3"],
+    })
+
+    names = service.comparison_peer_names(
+        ["nb-a", "nb-b", "nb-c"], "Focal", "compare",
+        top_k=3, candidates=10, cap_factor=1,
+    )
+
+    assert names == ["a1", "b1", "c1"]
+
+
+def test_comparison_peer_names_dedupes_and_keeps_a_deterministic_order():
+    service = _peer_service({
+        "nb-a": ["shared", "a2"],
+        "nb-b": ["shared", "b2"],
+    })
+
+    names = service.comparison_peer_names(
+        ["nb-a", "nb-b"], "Focal", "compare",
+        top_k=4, candidates=10, cap_factor=2,
+    )
+
+    assert names == ["shared", "a2", "b2"]
+
+
+def test_comparison_peer_names_is_value_identical_for_a_single_library():
+    """单库(单参与库)逐值不变:该库最多交出 ``top_k`` 个,而帽 >= ``top_k``。"""
+    service = _peer_service({"nb-a": ["a1", "a2", "a3", "a4"]})
+
+    assert service.comparison_peer_names(
+        ["nb-a"], "Focal", "compare", top_k=4, candidates=10, cap_factor=1,
+    ) == ["a1", "a2", "a3", "a4"]
+    assert service.comparison_peer_names(
+        ["nb-a"], "Focal", "compare", top_k=4, candidates=10, cap_factor=2,
+    ) == ["a1", "a2", "a3", "a4"]
+
+
+def test_comparison_peer_names_without_any_library_is_empty():
+    service = _peer_service({})
+    assert service.comparison_peer_names(
+        [], "Focal", "compare", top_k=8, candidates=10, cap_factor=2,
+    ) == []

@@ -79,7 +79,13 @@ def _job_page(job: Any, answer_offset: int = 0, citation_offset: int = 0,
               coverage_offset: int = 0) -> dict[str, Any]:
     """Keep independent text, citation and coverage pages exact and resumable."""
     data = _plain(job)
-    response = data.get("response") or {}
+    # Two payload shapes read through ONE seam: a turn answered by the shared
+    # engine carries ``answer``, a turn written before the engine switch
+    # carries the legacy ``response``. The remaining ``response.get(...)``
+    # reads below keep their historical defaults, which are also the right
+    # answer for the new shape (a global turn has no per-notebook answer id,
+    # and the completeness notice belongs to the legacy response model).
+    response = data.get("answer") or data.get("response") or {}
     answer = response.get("answer", "")
     citations = response.get("citations", [])
     skipped = data.get("skipped_notebooks", [])

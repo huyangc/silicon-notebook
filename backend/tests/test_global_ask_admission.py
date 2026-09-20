@@ -42,20 +42,24 @@ def test_history_and_conversation_recheck_union_once_and_exclude_failed_turns(se
     service, readable, _, syntheses = setup
     first = service.start(GlobalAskRequest(question="question one"), user_id="u")
     finished(service, first)
-    successful = service.synthesize
-    service.synthesize = lambda *args: (_ for _ in ()).throw(ValueError("failed"))
+    successful = service.ask.synthesize
+    service.ask.synthesize = lambda *args: (_ for _ in ()).throw(ValueError("failed"))
     failed = service.start(GlobalAskRequest(question="failed question", conversation_id=first.conversation_id), user_id="u")
     assert finished(service, failed).status == "failed"
-    service.synthesize = successful
+    service.ask.synthesize = successful
     second = service.start(GlobalAskRequest(question="question two", conversation_id=first.conversation_id), user_id="u")
     finished(service, second)
     assert "question one" in syntheses[-1][3]
-    assert "Assistant (conversation context, not evidence): answer" in syntheses[-1][3]
+    assert "Assistant: answer" in syntheses[-1][3]
     assert "failed question" not in syntheses[-1][3]
     calls = []
     service.can_read_many = lambda ids, user: calls.append(tuple(ids)) or readable.intersection(ids)
-    history = service._history(service.store.conversation(first.conversation_id, "u"), readable, "u", None, None)
+    history, user_history = service._history(
+        service.store.conversation(first.conversation_id, "u"), readable, "u", None, None,
+    )
     assert "question two" in history and len(calls) == 1
+    # 只含提问行的那一半:跟进改写的取数口永远看不到助手正文。
+    assert "answer" not in user_history and "question two" in user_history
     calls.clear()
     assert len(service.conversation(first.conversation_id, user_id="u").turns) == 3
     assert len(calls) == 1
@@ -82,7 +86,7 @@ def test_admission_bounds_new_conversations_and_preserves_idempotent_retry(setup
         assert release.wait(5)
         return "answer", False, [], []
 
-    service.synthesize = synthesis
+    service.ask.synthesize = synthesis
     request = GlobalAskRequest(question="q", client_request_id="retry")
     job = service.start(request, user_id="u")
     try:
@@ -144,7 +148,7 @@ def test_slow_scope_preparation_does_not_block_cancellation(setup):
         assert synthesis_release.wait(5)
         return "answer", False, [], []
 
-    service.synthesize = synthesis
+    service.ask.synthesize = synthesis
     first = service.start(GlobalAskRequest(question="first"), user_id="u")
     assert synthesis_entered.wait(5)
     notebooks = service.notebooks
@@ -180,7 +184,7 @@ def test_close_has_one_total_deadline_and_prevents_late_writes_or_new_admission(
         assert release.wait(5)
         return "late", False, [], []
 
-    service.synthesize = synthesis
+    service.ask.synthesize = synthesis
     job = service.start(GlobalAskRequest(question="q"), user_id="u")
     try:
         assert entered.wait(5)

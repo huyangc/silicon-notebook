@@ -190,6 +190,45 @@ class CommunityQueryService:
             ("comparison_peer_source_index_fallback", str(notebook_id)), _probe,
         )
 
+    def comparison_peer_names(self, base_notebook_ids, focal_name: str,
+                              question: str, *, top_k: int, candidates: int,
+                              cap_factor: int) -> List[str]:
+        """每个库的兄弟实体名,去重、**按库轮转**截到总量帽以内。
+
+        chunk 模式的对比子查询过去是「逐库取名、逐个 append」,没有任何总量帽:
+        参与集 8 个库 × ``community_peers_topk`` 就是 64 条子查询,每条再按参与
+        库扇出。reasoning 侧早就有帽(``community_peers_topk × cap_factor``),
+        这里复用**同一个表达式**,而不是另发明一个旋钮。
+
+        截断按库轮转而不是 ``peers[:cap]``:逐库拼接后直接切前 N 条,会把整个
+        配额发给遍历顺序最靠前的那一两个库,后面的库一个名字都进不了子查询——
+        多选一个库反而让它自己的兄弟实体被挤掉。轮转下每个库按名次交替出一个,
+        帽小于库数时也至少各给前几个库一条。
+
+        确定性:库序取自调用方给的 ``base_notebook_ids``(``mounted_base_ids``
+        的确定性顺序),库内序取自 ``resolve_comparison_peers`` 的名次序,去重按
+        首次出现。没有 set/dict 遍历顺序参与。
+
+        **单库逐值不变**:一个库时轮转退化成原来的顺序,且该库最多交出 ``top_k``
+        个名字,而 ``cap_factor ≥ 1`` 让帽 ≥ ``top_k``,所以截断恒不触发。
+        """
+        per_library = [
+            self.resolve_comparison_peers(
+                base_nb, focal_name, question,
+                top_k=top_k, candidates=candidates,
+            )[0]
+            for base_nb in base_notebook_ids
+        ]
+        names: List[str] = []
+        cap = max(0, int(top_k) * int(cap_factor))
+        for rank in range(max((len(peers) for peers in per_library), default=0)):
+            for peers in per_library:
+                if len(names) >= cap:
+                    return names
+                if rank < len(peers) and peers[rank] not in names:
+                    names.append(peers[rank])
+        return names
+
     def resolve_comparison_peers(self, base_notebook_id: str, focal_name: str,
                                  question: str, *, top_k: int,
                                  candidates: int) -> Tuple[List[str], str]:

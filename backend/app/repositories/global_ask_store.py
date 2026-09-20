@@ -113,9 +113,20 @@ class GlobalAskStore:
         return cursor.rowcount == 1
 
     def save_progress(self, job, user_id):
-        """Patch coverage only; never resend the question or overwrite a terminal job."""
+        """Patch coverage and trace only; never resend the question or overwrite
+        a terminal job.
+
+        ``trace`` joins the patch because it is the OTHER thing a poller watches
+        while the answer is still being written -- a reasoning run publishes its
+        steps as they happen, and a progress save that carried the coverage
+        lists but not the steps would leave the trace panel empty until the run
+        finished, which is exactly when it stops being useful. It is still a
+        bounded, transient field: the finished job clears it because
+        ``answer.reasoning_trace`` is the authority.
+        """
         patch = job.model_dump(include={
             "searched_notebook_ids", "skipped_notebooks", "degraded_notebook_ids",
+            "trace",
         }, mode="json")
         expression = "(payload_json::jsonb || ?::jsonb)::text" if self.marker == "%s" else "json_patch(payload_json, ?)"
         with self.database.write() as db:
