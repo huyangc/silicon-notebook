@@ -207,12 +207,13 @@ class FakeCandidates:
 
 
 class Receipts:
-    """两条回传接缝的记录器,连调用线程一起记。"""
+    """三条回传接缝的记录器,连调用线程一起记。"""
 
     def __init__(self):
         self.libraries: list = []
         self.threads: set = set()
         self.evidence: list = []
+        self.groups: list = []
 
     def on_library(self, notebook_id, outcome):
         self.threads.add(threading.get_ident())
@@ -221,6 +222,11 @@ class Receipts:
     def on_evidence(self, fingerprints):
         self.threads.add(threading.get_ident())
         self.evidence.append(dict(fingerprints))
+
+    def on_evidence_groups(self, groups):
+        self.threads.add(threading.get_ident())
+        # 记的是「分组在指纹之前到」,所以顺序本身也是断言面。
+        self.groups.append((len(self.evidence), [tuple(g) for g in groups]))
 
     def outcome(self, notebook_id):
         matched = [row for nid, row in self.libraries if nid == notebook_id]
@@ -290,7 +296,7 @@ def pool():
 
 
 def _plan(pool, receipts, *, window=4, phase=_PHASE, notebook=_NOTEBOOK,
-          cancel=None) -> FederatedRunPlan:
+          cancel=None, groups=True) -> FederatedRunPlan:
     return FederatedRunPlan(
         phase_timeout_seconds=phase,
         notebook_timeout_seconds=notebook,
@@ -299,6 +305,9 @@ def _plan(pool, receipts, *, window=4, phase=_PHASE, notebook=_NOTEBOOK,
         cancel=cancel if cancel is not None else threading.Event(),
         on_library=receipts.on_library,
         on_evidence=receipts.on_evidence,
+        # ``groups=False`` 是「没有消费者」那一支:字段缺省就是 ``None``,
+        # 生产者一次都不许调它。
+        on_evidence_groups=receipts.on_evidence_groups if groups else None,
     )
 
 
@@ -1064,6 +1073,311 @@ def test_unreadable_fingerprints_are_published_as_none_and_retried(pool):
                 "kind": "chunk_federation_evidence_unavailable",
                 "error_type": "RuntimeError", "elements": 1,
             }]
+
+
+# --------------------------------------------------------------------------
+# 入选段落的元素分组
+# --------------------------------------------------------------------------
+
+def test_multi_element_passages_are_reported_as_groups_before_fingerprints(pool):
+    """入选的多元素 chunk 整组回传,而且在指纹之前到。
+
+    一条引用只带段落的首个 element(``evidence_context.chunk_citations``
+    的 ``element_ids[0]``),所以「这条引用背后还靠着哪些 element」只能由这
+    条接缝说。顺序钉死是因为消费者两张表要在同一次调用里对得上。
+    """
+    ids = ("nb-a",)
+    candidates = FakeCandidates(
+        _participants(ids),
+        retrieve=lambda nid, q: ([
+            make_chunk("c-wide", 0.9, elements=["e-1", "e-2", "e-3"]),
+            make_chunk("c-narrow", 0.8, elements=["e-9"]),
+        ], [], None),
+    )
+    receipts = Receipts()
+
+    with _global_run(ids, _plan(pool, receipts)):
+        cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+
+    # 单元素段落不发组:引用卡上印的就是那一个,一条「组」什么也没多说。
+    assert receipts.groups == [(0, [("e-1", "e-2", "e-3")])]
+    assert sorted(receipts.evidence[0]) == ["e-1", "e-2", "e-3", "e-9"]
+
+
+def test_groups_are_reported_even_when_the_fingerprint_read_failed(pool):
+    """指纹读失败照样发组:元素之间的隶属关系是结构事实,不是读出来的。
+
+    读失败那一轮的每个 element 被标成 ``None``(拒绝),而消费者要判的是
+    「这条引用背后的那几个里有没有被拒的」——没有组就判不了。
+    """
+    ids = ("nb-a",)
+    candidates = FakeCandidates(
+        _participants(ids),
+        retrieve=lambda nid, q: (
+            [make_chunk("c-wide", elements=["e-1", "e-2"])], [], None,
+        ),
+        fingerprints=RuntimeError("evidence table is unreadable"),
+    )
+    receipts = Receipts()
+
+    with _global_run(ids, _plan(pool, receipts)):
+        cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+
+    assert receipts.groups == [(0, [("e-1", "e-2")])]
+    assert receipts.evidence == [{"e-1": None, "e-2": None}]
+
+
+def test_groups_are_reported_again_for_an_already_fingerprinted_passage(pool):
+    """第二轮重复选中同一段落仍发组,尽管指纹早已结清、不再读。
+
+    已见集合管的是「别再读」,不是「别再说」:一次 run 里任何一轮的引用都
+    可能落在这一段上,而分组根本不花一次读。
+    """
+    ids = ("nb-a",)
+    candidates = FakeCandidates(
+        _participants(ids),
+        retrieve=lambda nid, q: (
+            [make_chunk("c-wide", elements=["e-1", "e-2"])], [], None,
+        ),
+    )
+    receipts = Receipts()
+
+    with _global_run(ids, _plan(pool, receipts)):
+        cf.federated_chunk_candidates(candidates, ids[0], ["q1"])
+        cf.federated_chunk_candidates(candidates, ids[0], ["q2"])
+
+    assert candidates.fingerprint_reads == [["e-1", "e-2"]]
+    assert [row[1] for row in receipts.groups] == [
+        [("e-1", "e-2")], [("e-1", "e-2")],
+    ]
+
+
+def test_without_a_consumer_the_producer_never_reports_groups(pool):
+    """``on_evidence_groups=None`` = 没有消费者,生产者一次都不许调。
+
+    这是让「本字段出现之前装配的计划形状」继续可用的那条规则——缺省即
+    ``None``,所以旧形状不会炸。
+    """
+    ids = ("nb-a",)
+    candidates = FakeCandidates(
+        _participants(ids),
+        retrieve=lambda nid, q: (
+            [make_chunk("c-wide", elements=["e-1", "e-2"])], [], None,
+        ),
+    )
+    receipts = Receipts()
+
+    with _global_run(ids, _plan(pool, receipts, groups=False)):
+        cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+
+    assert receipts.groups == []
+    assert sorted(receipts.evidence[0]) == ["e-1", "e-2"]
+
+
+# --------------------------------------------------------------------------
+# 准备阶段的逐库读也在预算内
+# --------------------------------------------------------------------------
+
+def test_preparation_reads_run_under_the_calls_own_budget(clock, pool):
+    """准备读在 ``current_read_budget()`` 下执行,deadline == min(阶段, 逐库)。
+
+    这两条读(来源天花板枚举 + 拷贝统计探针)跑在父线程、任何任务存在之前,
+    所以既不受执行器的窗口约束也不受逐库预算约束——除非在这里给它们一份。
+    逐库预算调得比阶段小,``min`` 因此取到逐库那一侧,可观测。
+    """
+    ids = ("nb-a", "nb-b")
+    phase, notebook = 60.0, 4.0
+    seen: list = []
+
+    def visible(notebook_id):
+        budget = current_read_budget()
+        seen.append((
+            notebook_id, clock.now(),
+            None if budget is None else budget.deadline,
+        ))
+        return (f"src-{notebook_id}",)
+
+    candidates = FakeCandidates(_participants(ids))
+    candidates.sources.all_visible_source_ids = visible
+    receipts = Receipts()
+
+    with _global_run(
+        ids, _plan(pool, receipts, phase=phase, notebook=notebook),
+    ):
+        cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+
+    # 对等模式下名义 active 也是 peer,所以两个库都要准备。
+    assert [row[0] for row in seen] == list(ids)
+    for _notebook_id, now, deadline in seen:
+        assert deadline == now + notebook
+
+
+def test_preparation_deadline_is_capped_by_the_phase(clock, pool):
+    """阶段剩余比逐库预算短时,准备读拿到的是阶段那一侧。
+
+    一条刚好在阶段收尾前开始的准备读,不许再攥着连接跑满自己的逐库预算。
+    """
+    ids = ("nb-a",)
+    phase, notebook = 2.0, 30.0
+    seen: list = []
+
+    def visible(notebook_id):
+        seen.append((clock.now(), current_read_budget().deadline))
+        return (f"src-{notebook_id}",)
+
+    candidates = FakeCandidates(_participants(ids))
+    candidates.sources.all_visible_source_ids = visible
+    receipts = Receipts()
+
+    with _global_run(
+        ids, _plan(pool, receipts, phase=phase, notebook=notebook),
+    ):
+        started = clock.now()
+        cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+
+    assert [row[1] for row in seen] == [started + phase]
+
+
+def test_a_library_whose_preparation_expires_is_skipped_others_survive(pool):
+    """一个库的准备读超预算 → 该库 ``skipped/timeout``,其余库照常检索。
+
+    这正是 codex 指出的那种形状:准备读不在预算里时,一个连接池饱和或元数据
+    查询很慢的库能在任何健康库被提交之前吃光整个阶段。原因码走
+    ``classify_read_failure``,与腿的判据同源。
+    """
+    ids = ("nb-ok", "nb-slow-prepare")
+    candidates = FakeCandidates(
+        _participants(ids),
+        visible={"nb-slow-prepare": ReadBudgetExceeded("read budget exhausted")},
+    )
+    receipts = Receipts()
+
+    with _global_run(ids, _plan(pool, receipts)):
+        result = cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+
+    assert [notebook_id for notebook_id, _q in candidates.calls] == ["nb-ok"]
+    assert list(result.collected) == ["c-nb-ok-q"]
+    assert result.participants == ("nb-ok",)
+    assert receipts.outcome("nb-ok").status == "ok"
+    slow = receipts.outcome("nb-slow-prepare")
+    assert (slow.status, slow.reason) == ("skipped", "timeout")
+
+
+def test_preparation_that_runs_out_the_phase_queues_the_rest_out(clock, pool):
+    """准备阶段把阶段走完 → 余下的库是 ``queue_deadline``,且从未被问过。
+
+    它们对数据库一个字都没问,所以不许记成 ``timeout``(那句文案会让用户去
+    缩小一个压根没搜过的范围)。断言落在「生产者与准备读都没碰过它们」。
+    """
+    ids = ("nb-first", "nb-late-1", "nb-late-2")
+    phase = 3.0
+    asked: list = []
+
+    def visible(notebook_id):
+        asked.append(notebook_id)
+        if notebook_id == "nb-first":
+            clock.advance(phase + 1.0)
+        return (f"src-{notebook_id}",)
+
+    candidates = FakeCandidates(_participants(ids))
+    candidates.sources.all_visible_source_ids = visible
+    receipts = Receipts()
+
+    with _global_run(ids, _plan(pool, receipts, phase=phase)):
+        cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+
+    assert asked == ["nb-first"], "被挤出的库仍然发起了准备读"
+    # ``nb-first`` 准备成功、进了任务表,但阶段已经在它的准备读里走完了,所以
+    # 它的腿也没起跑——同一个原因码,来自扇出那一侧的同一条判据。
+    assert candidates.calls == []
+    for notebook_id in ids:
+        outcome = receipts.outcome(notebook_id)
+        assert (outcome.status, outcome.reason) == ("skipped", "queue_deadline")
+    assert [
+        (event["notebook_id"], event["reason"]) for event in candidates.events
+        if event["kind"] == "chunk_federation_skipped"
+    ] == [
+        ("nb-late-1", "queue_deadline"), ("nb-late-2", "queue_deadline"),
+        ("nb-first", "queue_deadline"),
+    ]
+
+
+def test_a_cancelled_run_never_opens_a_preparation_connection(pool):
+    """取消先于准备读被判:抛 ``AskCancelled``,不留逐库跳过。
+
+    进一把令牌已置位的读预算会抛 ``ReadBudgetExceeded``,而它的分类是
+    ``timeout`` —— 少了这道前置复核,一次用户主动停止就会被持久化成一份
+    「每个库都超时了」的覆盖列表。
+    """
+    ids = ("nb-a", "nb-b")
+    asked: list = []
+    candidates = FakeCandidates(_participants(ids))
+    candidates.sources.all_visible_source_ids = lambda nid: (
+        asked.append(nid), (f"src-{nid}",),
+    )[1]
+    receipts = Receipts()
+    cancel = threading.Event()
+    cancel.set()
+
+    with _global_run(ids, _plan(pool, receipts, cancel=cancel)):
+        with pytest.raises(AskCancelled):
+            cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+
+    assert asked == []
+    assert candidates.events == []
+    assert receipts.libraries == []
+
+
+def test_preparation_cancellation_is_not_a_per_library_skip(pool):
+    """准备读里抛出的 ``AskCancelled`` 原样上抛,不被隔离成一个掉队的库。
+
+    与既有分工一致:参与集读失败保持响亮(``_bounded_participants`` 不在任何
+    ``try`` 里),逐库准备失败隔离,取消两者都不是。
+    """
+    ids = ("nb-a", "nb-b")
+    candidates = FakeCandidates(
+        _participants(ids), visible={"nb-a": AskCancelled()},
+    )
+    receipts = Receipts()
+
+    with _global_run(ids, _plan(pool, receipts)):
+        with pytest.raises(AskCancelled):
+            cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+
+    assert receipts.libraries == []
+
+
+def test_without_a_plan_preparation_reads_take_no_budget(monkeypatch):
+    """没有计划时准备读不进任何预算:那条路今天就是生产。
+
+    ``read_budget`` 一旦被调用就说明新行为提前生效了——无计划路径必须逐字节
+    不变,连一层 ContextVar 都不许多。
+    """
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("preparation opened a read budget without a plan")
+
+    monkeypatch.setattr(cf, "read_budget", _forbidden)
+    ids = ("nb-a", "nb-b")
+    seen: list = []
+    candidates = FakeCandidates(_participants(ids))
+    candidates.sources.all_visible_source_ids = lambda nid: (
+        seen.append(current_read_budget()), (f"src-{nid}",),
+    )[1]
+
+    override = ParticipantOverride(
+        notebook_ids=ids, tiers={}, attested_actor_id=_ACTOR,
+    )
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
+        with source_scope_context(
+            ids[0], None, None,
+            notebook_source_ceilings={nid: frozenset({f"src-{nid}"})
+                                      for nid in ids},
+            subjectless=True,
+        ):
+            with participant_override(override):
+                cf.federated_chunk_candidates(candidates, ids[0], ["q"])
+
+    assert seen == [None, None]
 
 
 # --------------------------------------------------------------------------

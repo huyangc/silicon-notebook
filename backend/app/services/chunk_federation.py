@@ -480,8 +480,10 @@ def federated_chunk_candidates(
         )
     queries = list(sub_queries)
     plan = current_federated_run_plan() if federated_ask_active() else None
-    # ONE deadline for the whole call: the fan-out charges its legs against it
-    # and the closing evidence read is bounded by what is left of it.
+    # ONE deadline for the whole call, derived BEFORE anything reads a
+    # database: task preparation charges its per-library reads against it just
+    # as the fan-out charges its legs, so a slow library cannot spend the phase
+    # in a place the budget does not reach.
     deadline = (
         time.monotonic() + float(plan.phase_timeout_seconds)
         if plan is not None else 0.0
@@ -494,6 +496,10 @@ def federated_chunk_candidates(
         # to carry a reason code to, and a code in the event alone would show
         # up in one deployment's telemetry and not another's.
         dropped=dropped if plan is not None else None,
+        # The same deadline the fan-out will charge its legs against: with a
+        # plan the preparation reads are inside the phase too, which is why it
+        # had to be derived above rather than inside ``_run_planned_tasks``.
+        plan=plan, deadline=deadline,
     )
     results, reasons = _run_tasks(candidates, tasks, plan, deadline)
     return _merge_results(
@@ -634,7 +640,8 @@ def _single_library_result(
 
 def _federated_tasks(
     candidates, active_notebook_id: str, participants, sub_queries: list,
-    drifted: bool | None, *, dropped: dict | None = None,
+    drifted: bool | None, *, dropped: dict | None = None, plan=None,
+    deadline: float = 0.0,
 ) -> list:
     """The flat task table: library-major, sub-query-minor, deterministic.
 
@@ -685,6 +692,24 @@ def _federated_tasks(
     read positionally by existing callers, and a plain return of the drops from
     here would report them in preparation order -- the receipts must follow the
     participant order instead, which only the caller knows in full.
+
+    ⛔ WITH A PLAN, PREPARATION IS INSIDE THE BUDGET TOO.  Those two live reads
+    run SERIALLY in this thread, before any task exists and therefore before
+    the executor, the fair window and the per-library budgets have anything to
+    bound -- so an unbudgeted preparation lets ONE slow library spend the whole
+    phase before a single healthy library has been submitted, which is the
+    exact failure per-library budgets exist to prevent.  Each peer's pair of
+    reads therefore gets ``min(this call's phase deadline, now + the plan's
+    per-library budget)`` and the run's cancel token, and a peer whose
+    preparation expires or fails is dropped alone (the isolation this function
+    already had) while the rest of the set continues.  Once the phase deadline
+    itself has passed, the remaining peers are dropped WITHOUT being asked
+    anything, so their code is ``queue_deadline`` rather than ``timeout`` --
+    the same split ``_run_planned_legs`` makes, for the same reason.
+
+    ``plan``/``deadline`` are ``None``/``0.0`` for every caller without a run
+    plan, and that path is byte-identical: no budget is opened, no deadline is
+    consulted, and the two reads keep their present shapes.
     """
     # ``chunk_lane`` 而不是 ``retrieval_candidates``:那边的 ``_gather_vector_chunks``
     # 调本模块,两边互取就是 import 环;这两个 ContextVar 与那把探针因此住在
@@ -710,10 +735,40 @@ def _federated_tasks(
         for notebook_id, tier in participants:
             peer = _peer_leg(active_notebook_id, notebook_id)
             visible = None
+            peek = False
             if peer:
                 started = time.perf_counter()
+                if plan is not None and deadline - time.monotonic() <= 0:
+                    # The phase is over and this library has been asked
+                    # NOTHING, so it is queued-out rather than timed-out: the
+                    # copy for ``timeout`` tells the user to narrow a scope
+                    # that was never searched. Same code, same argument as a
+                    # task still waiting in ``_run_planned_legs``. The event
+                    # keeps the field-for-field shape of the preparation
+                    # failure below; an empty ``error_type`` and a zero latency
+                    # are what "nothing ran" looks like in it.
+                    if dropped is not None:
+                        dropped[notebook_id] = "queue_deadline"
+                    _emit(candidates, {
+                        "kind": "chunk_federation_skipped",
+                        "notebook_id": notebook_id,
+                        "error_type": "",
+                        "latency_ms": 0,
+                        "reason": "queue_deadline",
+                    })
+                    continue
+                # ``min`` of the two bounds, never the per-library one alone,
+                # for the reason ``_budgeted_retrieve_for`` spells out for a
+                # leg: a preparation begun just before the phase ends may not
+                # hold a connection past the end of the call.
+                prepared_by = 0.0 if plan is None else min(
+                    deadline,
+                    time.monotonic() + float(plan.notebook_timeout_seconds),
+                )
                 try:
-                    visible = _peer_visible_sources(candidates, notebook_id)
+                    visible, peek = _prepared_peer(
+                        candidates, notebook_id, plan, prepared_by,
+                    )
                 except AskCancelled:
                     raise
                 except Exception as exc:  # noqa: BLE001 - one library must not fail the arm
@@ -736,20 +791,22 @@ def _federated_tasks(
                         ),
                     }
                     if dropped is not None:
-                        # No deadline to compare against: this failure happened
-                        # before the fan-out had one, so an unclassifiable
-                        # enumeration fault is ``unavailable`` rather than a
-                        # timeout guessed from a clock.
-                        dropped[notebook_id] = (
-                            classify_read_failure(exc) or "unavailable"
+                        # The driver's own answer wins, exactly as it does for
+                        # a leg (``_run_one``): a statement the server
+                        # cancelled AT the deadline and a local clock that has
+                        # just passed it are one event seen from two sides.
+                        # Only an UNCLASSIFIED failure is decided by the clock,
+                        # and without a plan there is no clock to decide with,
+                        # so it stays ``unavailable``.
+                        dropped[notebook_id] = classify_read_failure(exc) or (
+                            "timeout"
+                            if plan is not None
+                            and time.monotonic() >= prepared_by
+                            else "unavailable"
                         )
                         event["reason"] = dropped[notebook_id]
                     _emit(candidates, event)
                     continue
-            # ``_peek_only`` needs no guard of its own: its probe already
-            # answers "peek only" -- the conservative side -- for any failure,
-            # and only cancellation propagates out of the memo.
-            peek = peer and _peek_only(candidates, notebook_id)
             peek_token = _CHUNK_PEEK_ONLY.set(peek)
             peer_token = _CHUNK_PEER_LEG.set(peer)
             try:
@@ -766,6 +823,43 @@ def _federated_tasks(
     finally:
         _CHUNK_ARM_DRIFTED.reset(drift_token)
     return tasks
+
+
+def _prepared_peer(candidates, notebook_id: str, plan, deadline: float) -> tuple:
+    """``(visible ceiling, peek-only)`` for one peer, under ONE read budget.
+
+    The two reads are paired here rather than left where they were because
+    they are one unit of work to the caller: both are live per-library reads
+    issued serially in the parent thread before any task exists, both open a
+    pooled connection of their own, and a library that cannot answer the first
+    has nothing to contribute whatever the second would have said.  Sharing one
+    budget also makes the bound mean what it says -- two budgets of the same
+    size would let one library spend twice the stated per-library allowance.
+
+    ⛔ THE BUDGET IS THE ONLY DIFFERENCE, and it exists only with a plan.
+    Without one this is the pre-existing pair of calls in the pre-existing
+    order, ``_peek_only`` included -- it swallows every failure of its own
+    probe and answers the conservative side, so putting it inside the caller's
+    handler changes nothing it can reach, while leaving it outside the budget
+    would leave exactly half of the finding open.
+    """
+    if plan is None:
+        return (
+            _peer_visible_sources(candidates, notebook_id),
+            _peek_only(candidates, notebook_id),
+        )
+    # ⛔ BEFORE the budget, and the same line ``_run_one`` opens with. A run
+    # that is already cancelled must not open a connection at all, and the
+    # answer is ``AskCancelled`` rather than a skip: entering a budget whose
+    # token is set raises ``ReadBudgetExceeded``, which classifies as
+    # ``timeout`` and would persist a user's own stop as a coverage list
+    # reading "every library timed out".
+    raise_if_cancelled(plan.cancel)
+    with read_budget(deadline, plan.cancel):
+        return (
+            _peer_visible_sources(candidates, notebook_id),
+            _peek_only(candidates, notebook_id),
+        )
 
 
 def _peer_leg(active_id: str, notebook_id: str) -> bool:
@@ -1446,6 +1540,13 @@ def _report_evidence(candidates, plan, collected: dict, deadline: float) -> None
     body is a single source-store read, so it cannot reach the participant seat
     and swallowing it cannot turn an identity failure into a silently narrower
     search.
+
+    The GROUPING goes back too, just before the fingerprints and by the same
+    rule (``FederatedRunPlan.on_evidence_groups``): which elements belong to
+    one selected passage is structural, so it is published on every call
+    regardless of whether the fingerprint read succeeded, and it is NOT subject
+    to the seen-set -- that set exists to stop re-READING settled elements, and
+    a group costs no read at all.
     """
     seen = memoized_retrieval_value(
         ("federated_chunk_evidence_seen",), lambda: set(),
@@ -1489,7 +1590,24 @@ def _report_evidence(candidates, plan, collected: dict, deadline: float) -> None
             # objects), which the re-check holds to the ceiling only. These
             # elements did travel it, so they must be refusable by name.
             fingerprints = dict.fromkeys(element_ids)
+    groups = getattr(plan, "on_evidence_groups", None)
+    if groups is not None:
+        groups(_evidence_groups(collected))
     plan.on_evidence(fingerprints)
+
+
+def _evidence_groups(collected: dict) -> list:
+    """The multi-element passages among this call's selection, de-duplicated.
+
+    A one-element hit is left out entirely rather than published as a group of
+    one: the citation minted from it already names that element, so a group
+    would only restate what the fingerprint table says and make the consumer's
+    sibling map pay for a relationship with no second member.
+    """
+    return list(dict.fromkeys(
+        tuple(hit.element_ids) for hit in collected.values()
+        if hit.element_ids and len(hit.element_ids) >= 2
+    ))
 
 
 def _select_baseline_then_supplements(

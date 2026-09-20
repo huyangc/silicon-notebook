@@ -177,8 +177,8 @@ class _RunState:
     """
 
     __slots__ = (
-        "order", "evidence", "succeeded", "failed", "degraded", "federated",
-        "error", "lock", "publish_lock", "_sequence", "_published",
+        "order", "evidence", "siblings", "succeeded", "failed", "degraded",
+        "federated", "error", "lock", "publish_lock", "_sequence", "_published",
         "traced_at", "traced_at_count",
     )
 
@@ -188,6 +188,9 @@ class _RunState:
         self.traced_at = 0.0
         self.traced_at_count = 0
         self.evidence: dict = {}
+        # ``{element_id: {the other elements of every passage it appeared in}}``
+        # -- see ``record_evidence_groups``.
+        self.siblings: dict = {}
         self.succeeded: set = set()
         self.failed: dict = {}
         self.degraded: set = set()
@@ -240,10 +243,55 @@ class _RunState:
                     continue
                 self.evidence[element_id] = snapshot
 
+    def record_evidence_groups(self, groups) -> None:
+        """Merge one federated call's multi-element passages into the sibling map.
+
+        Rule 4 of ``FederatedRunPlan.on_evidence``'s contract. A citation names
+        ONE element -- ``evidence_context.chunk_citations`` publishes
+        ``element_ids[0]`` -- while the passage the reader is shown, and the
+        text the answer actually rested on, may span several. Without this map
+        an edit to the third element of a five-element passage changes the
+        quoted material and the re-check never looks at it.
+
+        Every member of a group becomes every other member's sibling, and the
+        union accumulates across rounds for the same reason the fingerprint
+        table does: a passage selected in round 1 and again in round 3 is one
+        passage, and a citation minted from either round rests on all of it.
+        """
+        if not groups:
+            return
+        with self.lock:
+            for group in groups:
+                members = tuple(dict.fromkeys(
+                    element_id for element_id in group if element_id
+                ))
+                if len(members) < 2:
+                    continue
+                for element_id in members:
+                    self.siblings.setdefault(element_id, set()).update(
+                        other for other in members if other != element_id
+                    )
+
     def evidence_snapshot(self) -> dict:
         """A copy the citation re-check can iterate while callbacks still fire."""
         with self.lock:
             return dict(self.evidence)
+
+    def sibling_snapshot(self) -> dict:
+        """The sibling map as SORTED tuples, for a deterministic re-check.
+
+        Sorted rather than handed over as sets: two siblings of one citation
+        can fail for two different reasons, and set iteration order varies with
+        the interpreter's hash seed, so an unsorted map would let the same run
+        be voided under ``changed`` in one process and ``unreadable`` in the
+        next -- the operator-facing half of the void event is exactly what that
+        distinction is for.
+        """
+        with self.lock:
+            return {
+                element_id: tuple(sorted(members))
+                for element_id, members in self.siblings.items()
+            }
 
     def fail(self, exc: BaseException) -> None:
         """Remember the FIRST failure raised inside a callback."""
@@ -676,6 +724,7 @@ class GlobalAskService:
             cancel=cancel_event,
             on_library=lambda *_args: None,
             on_evidence=lambda *_args: None,
+            on_evidence_groups=lambda *_args: None,
             call_scope=self._federated_call,
         )
 
@@ -1040,6 +1089,7 @@ class GlobalAskService:
                 notebook_id, outcome,
             ),
             on_evidence=state.record_evidence,
+            on_evidence_groups=state.record_evidence_groups,
             # The fair share is per FAN-OUT, and a reasoning run has many in
             # flight at once. See ``_retrieval_window``.
             call_scope=self._federated_call,
@@ -1102,6 +1152,7 @@ class GlobalAskService:
         self._check(job.resolved_notebook_ids, user_id, allowed, authority_check)
         void_reason = self._validate_citations(
             response.citations, state.evidence_snapshot(), source_ceiling, event,
+            siblings=state.sibling_snapshot(),
         )
         if void_reason:
             # VOIDED WHOLE, never patched. Dropping the dead markers would
@@ -1151,7 +1202,8 @@ class GlobalAskService:
         job.status = "done"
         self._save_if_open(job, user_id)
 
-    def _validate_citations(self, citations, evidence, source_ceiling, event=None):
+    def _validate_citations(self, citations, evidence, source_ceiling, event=None,
+                            *, siblings=None):
         """Does every citation still describe the library as it is NOW?
 
         Returns a void REASON code, or ``""`` when every citation still holds.
@@ -1180,6 +1232,18 @@ class GlobalAskService:
                                            half is the whole check
         =====================  ==========  ===============================
 
+        EVERY SUPPORTING ELEMENT, not only the one the citation names.
+        ``evidence_context.chunk_citations`` publishes ``element_ids[0]`` as
+        the citation's ``element_id``, but a chunk is assembled from as many
+        source elements as it took to reach ~600 characters, and the answer
+        rested on all of their text. ``siblings`` -- the run's fold of
+        ``FederatedRunPlan.on_evidence_groups``, ``{element_id: the others of
+        every passage it appeared in}`` -- is what makes the rest of the
+        passage reachable; each sibling is then held to the same table above,
+        with one difference stated in ``_validate_siblings``. Absent (no
+        groups, no plan, single-element passages) it is inert and the check is
+        exactly the per-citation one.
+
         ABSENCE is the case the first cut got wrong. A document overview and a
         collection enumeration cite real ``source_elements`` rows and make no
         federated call at all, so refusing "no snapshot" voided 100% of those
@@ -1198,8 +1262,19 @@ class GlobalAskService:
             return ""
         from app.repositories.read_budget import read_budget
 
-        current = self.sources.evidence_fingerprints(list(dict.fromkeys(
+        siblings = siblings or {}
+        cited = [
             citation.element_id for citation in citations if citation.element_id
+        ]
+        # ONE read, widened rather than repeated: the siblings are read in the
+        # same batch as the elements the citations name, so covering a whole
+        # passage costs no extra round trip. Sorted so the request is
+        # deterministic for a given selection.
+        current = self.sources.evidence_fingerprints(list(dict.fromkeys(
+            cited + sorted({
+                sibling for element_id in cited
+                for sibling in siblings.get(element_id, ())
+            })
         )))
         visible: dict = {}
         for citation in citations:
@@ -1233,10 +1308,64 @@ class GlobalAskService:
                 # not a source element at all (accept: the ceiling half is the
                 # whole check), or it is one and must still sit under the
                 # source the citation names.
+                #
+                # ⛔ "MISSING NOW" IS DELIBERATELY NOT A REFUSAL HERE, and the
+                # cost is stated rather than hidden: an element that WAS live
+                # at retrieval and was deleted during synthesis is published as
+                # a citation card that opens on nothing. Refusing instead would
+                # be worse and would also be a lie -- a non-empty
+                # ``element_id`` does not attest that the row was ever live in
+                # this run. A KG object's ``evidence[].element_id`` survives a
+                # re-ingest that re-issued that source's element ids
+                # (``knowledge_store._enrich_evidence`` hands a dangling id
+                # straight back, which is why ``collection_item_citations``
+                # hunts for the FIRST LIVE occurrence), so "missing now" covers
+                # both "deleted just now" and "dead since long before this
+                # question" -- and the copy says the original CHANGED DURING
+                # THE ANSWER. The honest fix is a retrieval-time liveness
+                # snapshot from the four producers that never touch this
+                # channel; it is registered in ``fangan_todo.md`` under 检索.
                 if after is not None and after[0] != citation.source_id:
                     return _VOID_CHANGED
-                continue
-            if after is None or before != after or after[0] != citation.source_id:
+            elif after is None or before != after or after[0] != citation.source_id:
+                return _VOID_CHANGED
+            void = self._validate_siblings(
+                citation, evidence, current, siblings.get(citation.element_id, ()),
+                source_ceiling, visible,
+            )
+            if void:
+                return void
+        return ""
+
+    def _validate_siblings(self, citation, evidence, current, siblings,
+                           source_ceiling, visible):
+        """Re-check the rest of the passage one citation was minted from.
+
+        Same table as ``_validate_citations``' own, with ONE difference:
+        absence is refused here instead of accepted. A sibling is only known to
+        this map because the federated chunk channel published the passage it
+        belongs to, and that channel fingerprints every selected element in the
+        same read -- so a sibling with no entry at all is a contradiction
+        between two halves of one call, not the ordinary "this citation never
+        travelled the channel". Refusing is the fail-closed side of a
+        disagreement nobody can interpret, and it costs nothing in practice
+        because the state is unreachable.
+
+        The ceiling half runs off the SNAPSHOT's source id rather than the
+        citation's: the elements of one chunk share a source today, so this
+        only ever restates the check the citation itself already passed --
+        which is exactly why it is written to be defended from the snapshot
+        instead of assumed. ``visible`` is already populated for this library,
+        so no sibling costs a second visibility read.
+        """
+        for sibling in siblings:
+            before = evidence.get(sibling, _ABSENT)
+            if before is None or before is _ABSENT:
+                return _VOID_UNREADABLE
+            if (before[0] not in source_ceiling.get(citation.notebook_id, ())
+                    or before[0] not in visible[citation.notebook_id]):
+                return _VOID_OUT_OF_CEILING
+            if current.get(sibling) != before:
                 return _VOID_CHANGED
         return ""
 
