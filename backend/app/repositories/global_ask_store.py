@@ -198,6 +198,44 @@ class GlobalAskStore:
         ), (job.question[:CONVERSATION_TITLE_MAX_CHARS], job.conversation_id, user_id,
             old_title, job.conversation_id))
 
+    def discard_cancelled(self, job_id, user_id):
+        """Drop a job the user stopped before it showed anything. True when dropped.
+
+        "Stopped before any output" means the question went back to the input
+        box as if it had never been sent, so nothing of the attempt stays: the
+        row goes, and a conversation this question had just opened goes with it
+        (the same rule the notebook Ask applies through
+        ``cleanup_empty_conversation``). Same gate as ``_discard_replaced`` --
+        only the conversation's NEWEST job, only while ``cancelled`` -- and the
+        same row lock, so it serializes with a concurrent insert or share.
+        """
+        with self.database.write() as db:
+            row = db.execute(self._sql(
+                "SELECT conversation_id FROM global_ask_jobs WHERE id=? AND user_id=?"
+            ), (job_id, user_id)).fetchone()
+            if row is None:
+                return False
+            conversation_id = row["conversation_id"]
+            locked = db.execute(self._sql(
+                "SELECT id FROM global_ask_conversations WHERE id=? AND user_id=?" + self._row_lock
+            ), (conversation_id, user_id)).fetchone()
+            if locked is None:
+                return False
+            newest = db.execute(self._sql(
+                "SELECT id,status FROM global_ask_jobs "
+                f"WHERE conversation_id=? AND user_id=? {GLOBAL_JOBS_ORDER_DESC} LIMIT 1"
+            ), (conversation_id, user_id)).fetchone()
+            if newest is None or newest["id"] != job_id or newest["status"] != "cancelled":
+                return False
+            db.execute(self._sql(
+                "DELETE FROM global_ask_jobs WHERE id=? AND user_id=? AND status='cancelled'"
+            ), (job_id, user_id))
+            db.execute(self._sql(
+                "DELETE FROM global_ask_conversations WHERE id=? AND user_id=? "
+                "AND NOT EXISTS (SELECT 1 FROM global_ask_jobs WHERE conversation_id=?)"
+            ), (conversation_id, user_id, conversation_id))
+        return True
+
     def _after_latest_job(self, db, conversation_id, stamp):
         """``stamp``, or one microsecond past the conversation's newest job when
         ``stamp`` would not sort strictly after it.

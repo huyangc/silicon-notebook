@@ -144,8 +144,10 @@ def get_global_ask_job(job_id: str, user: UserProfile = Depends(get_current_user
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=GlobalAskJob)
-def cancel_global_ask_job(job_id: str, user: UserProfile = Depends(get_current_user)):
-    return _call(global_ask_service().cancel, job_id, user_id=user.id)
+def cancel_global_ask_job(
+    job_id: str, discard: bool = Query(False), user: UserProfile = Depends(get_current_user),
+):
+    return _call(global_ask_service().cancel, job_id, user_id=user.id, discard=discard)
 
 
 @router.post("/jobs/{job_id}/feedback", response_model=GlobalAskJob)

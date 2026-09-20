@@ -1569,7 +1569,17 @@ class GlobalAskService:
         self._check(job.resolved_notebook_ids, user_id, allowed_notebook_ids)
         return job
 
-    def cancel(self, job_id, *, user_id, allowed_notebook_ids=None):
+    def cancel(self, job_id, *, user_id, allowed_notebook_ids=None, discard=False):
+        """Stop a running job. ``discard`` also drops the stopped record.
+
+        ``discard`` is the "stopped before anything was shown" half of the
+        product's one cancel style: the question goes back to the input box, so
+        no record of the attempt stays (``GlobalAskStore.discard_cancelled``). A
+        job that was NOT stopped by this call -- it had already finished -- is
+        never discarded: the caller asked to throw away an attempt, not an answer.
+        The worker may still be unwinding; every write it has left is guarded by
+        ``status='running'`` and matches no row.
+        """
         job = self.get_job(job_id, user_id=user_id, allowed_notebook_ids=allowed_notebook_ids)
         if job.status == "running":
             with self._lock:
@@ -1579,6 +1589,8 @@ class GlobalAskService:
             job.status, job.response, job.answer = "cancelled", None, None
             if not self.store.save(job, user_id):
                 return self.get_job(job_id, user_id=user_id, allowed_notebook_ids=allowed_notebook_ids)
+        if discard and job.status == "cancelled":
+            self.store.discard_cancelled(job_id, user_id)
         return job
 
     def submit_feedback(self, job_id, rating, *, user_id, allowed_notebook_ids=None):
