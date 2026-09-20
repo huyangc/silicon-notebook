@@ -321,6 +321,41 @@ async def test_ask_global_reasoning_auto_confirms_a_clear_question(adapter):
 
 
 @pytest.mark.anyio
+async def test_ask_global_reasoning_retry_replays_before_previewing_again(adapter):
+    """同一个 ``client_request_id`` 的重试先认出既有作业,不再跑一次问题理解。
+
+    理解是一次模型调用,而且每次产出的确认都不一样(至少 ``understanding_ms``
+    不同):先预检再 ``start`` 的顺序既白花一次调用,又会让重试带着一份不同的确认
+    去撞幂等比较。
+    """
+    handlers, _, _, service = adapter
+    previews, starts = [], []
+
+    def preview_intent(payload, **kwargs):
+        previews.append(payload)
+        raise AssertionError("a replayed request must not be previewed again")
+
+    def replay(payload, **kwargs):
+        assert payload.client_request_id == "retry-1"
+        return job(mode="reasoning")
+
+    def start(payload, **kwargs):
+        starts.append(payload)
+        raise AssertionError("a replayed request must not start a second job")
+
+    service.preview_intent = preview_intent
+    service.replay = replay
+    service.start = start
+    ctx = SimpleNamespace(session=SimpleNamespace())
+    result = await handlers["ask_global"](
+        "解释一下这份研究的方法论", ctx, mode="reasoning",
+        client_request_id="retry-1",
+    )
+    assert result["status"] == "done"
+    assert previews == [] and starts == []
+
+
+@pytest.mark.anyio
 async def test_ask_global_reasoning_needs_clarification_creates_nothing(adapter):
     """An ambiguous reasoning question returns the structured pause instead
     of a job -- no ``service.start`` call, no session-scoped handle (there is

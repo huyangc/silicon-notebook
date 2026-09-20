@@ -320,7 +320,20 @@ def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[],
                 # always runs the understanding pass in-call, exactly once,
                 # and either auto-confirms a clear question or returns the
                 # structured pause instead of creating anything durable.
-                if payload.mode == "reasoning" and payload.intent is None:
+                # A retry under the same ``client_request_id`` is recognised
+                # BEFORE the understanding pass: the pass is a model call, and
+                # its result would be thrown away once ``start`` found the job.
+                # Only asked where there is a pass to save: every other request
+                # goes straight to ``start``, which replays on its own.
+                needs_understanding = (
+                    payload.mode == "reasoning" and payload.intent is None
+                )
+                replayed = global_ask_service().replay(
+                    payload, user_id=principal.owner_id,
+                    allowed_notebook_ids=principal.notebook_ids,
+                    authority_check=live_authority,
+                ) if needs_understanding and payload.client_request_id else None
+                if replayed is None and needs_understanding:
                     started = time.monotonic()
                     contract = global_ask_service().preview_intent(
                         GlobalAskIntentPreviewRequest(
@@ -342,7 +355,7 @@ def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[],
                         contract=contract, resolved_question=contract.resolved_question,
                         answers=[], understanding_ms=understanding_ms,
                     )
-                job = global_ask_service().start(
+                job = replayed if replayed is not None else global_ask_service().start(
                     payload, user_id=principal.owner_id,
                     allowed_notebook_ids=principal.notebook_ids, submitted_via="mcp",
                     authority_check=live_authority,

@@ -1048,6 +1048,42 @@ def test_retry_with_legacy_request_json_is_idempotent(service):
     assert again.job_id == job.job_id
 
 
+def test_a_retry_with_a_regenerated_intent_is_the_same_request(service):
+    """确认过的 ``intent`` 不属于请求身份。
+
+    浏览器与 MCP 的每一次重试都会重新跑一遍问题理解,两次确认至少
+    ``understanding_ms`` 不同;把它算进身份,幂等要保护的那次重试就成了永久 409
+    (codex #755 第 1 轮 P2 ×2)。
+    """
+    from app.models.ask import AskIntentConfirmation, QueryIntentContract
+
+    def _confirmed(ms):
+        return AskIntentConfirmation(
+            contract=QueryIntentContract(
+                objective="比较一下", resolved_question="比较一下",
+                needs_clarification=False,
+            ),
+            resolved_question="比较一下", answers=[], understanding_ms=ms,
+        )
+
+    service.ask = _FakeAsk(rounds=[_ok(*_LIBRARIES)])
+    first = GlobalAskRequest(
+        question="比较一下", client_request_id="once", mode="reasoning",
+        intent=_confirmed(1200),
+    )
+    job = _finished(service, service.start(first, user_id="u"))
+
+    again = service.start(
+        first.model_copy(update={"intent": _confirmed(3400)}), user_id="u",
+    )
+    assert again.job_id == job.job_id
+    # 对照臂:引擎是用户选的,属于身份。
+    with pytest.raises(GlobalAskError) as error:
+        service.start(first.model_copy(update={"mode": "chunk", "intent": None}),
+                      user_id="u")
+    assert error.value.status_code == 409
+
+
 def test_a_genuinely_different_question_still_conflicts(service):
     """对照臂:归一不是放水——同一个 id 换个问题仍然 409。"""
     service.ask = _FakeAsk(rounds=[_ok(*_LIBRARIES)])

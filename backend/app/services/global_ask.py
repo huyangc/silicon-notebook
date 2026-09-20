@@ -331,6 +331,9 @@ class _RunState:
 # Name prefix of the SHARED retrieval pool's threads. The job thread must not
 # be one of them -- see ``_execute``.
 _RETRIEVAL_THREAD_PREFIX = "global-ask-retrieve"
+# Fields that ride along with a request without identifying it; see
+# ``GlobalAskService._same_request``.
+_REQUEST_IDENTITY_EXCLUDES = frozenset({"intent"})
 
 
 class GlobalAskService:
@@ -504,12 +507,24 @@ class GlobalAskService:
         An unparsable stored string falls back to the literal comparison: it
         was not written by this model, so normalizing it is not possible and
         treating it as a match would be a guess.
+
+        The confirmed ``intent`` is NOT part of a request's identity. It is
+        derived from the question by a model call the client repeats on every
+        retry (the browser re-runs the preview, MCP re-runs it inside the same
+        tool call), so two honest submissions of one question under one
+        ``client_request_id`` carry different confirmations -- a different
+        ``understanding_ms`` at the very least. Comparing it turned the retry
+        that idempotency exists for into a permanent 409. What identifies the
+        request is what the user chose: question, scope, conversation, engine
+        and effort.
         """
         try:
-            normalized = GlobalAskRequest.model_validate_json(stored_json).model_dump_json()
+            stored = GlobalAskRequest.model_validate_json(stored_json)
+            current = GlobalAskRequest.model_validate_json(request_json)
         except Exception:  # noqa: BLE001 - see docstring
-            normalized = stored_json
-        return normalized == request_json
+            return stored_json == request_json
+        return (stored.model_dump(exclude=_REQUEST_IDENTITY_EXCLUDES)
+                == current.model_dump(exclude=_REQUEST_IDENTITY_EXCLUDES))
 
     def _resolve_run_scope(self, payload, user_id, allowed_notebook_ids, authority_check):
         """The scope ``start()`` and ``preview_intent`` must resolve IDENTICALLY.
@@ -664,17 +679,36 @@ class GlobalAskService:
             call_scope=self._federated_call,
         )
 
+    def replay(self, payload: GlobalAskRequest, *, user_id,
+               allowed_notebook_ids=None, authority_check=None):
+        """The job this ``client_request_id`` already created, or ``None``.
+
+        Public so a transport that has to SPEND something before it can call
+        ``start`` -- MCP runs the reasoning preview, a model call, inside the
+        same tool call -- can recognise a retry first and return the existing
+        job instead of paying for a second understanding it would then throw
+        away. Same authority re-check as ``start``: a replay hands back a job's
+        content, so it is refused once any of its libraries became unreadable.
+        """
+        previous = self.store.request_job(user_id, payload.client_request_id)
+        if previous is None:
+            return None
+        job, old_request = previous
+        if not self._same_request(old_request, payload.model_dump_json()):
+            raise GlobalAskError(409, "请求标识已用于其他问题，请重新提交。")
+        self._check(job.resolved_notebook_ids, user_id, allowed_notebook_ids, authority_check)
+        return job
+
     def start(self, payload: GlobalAskRequest, *, user_id, allowed_notebook_ids=None,
               submitted_via="web", authority_check=None):
         spec = self._resolve_mode(payload.mode)
         request_json = payload.model_dump_json()
-        previous = self.store.request_job(user_id, payload.client_request_id)
-        if previous is not None:
-            job, old_request = previous
-            if not self._same_request(old_request, request_json):
-                raise GlobalAskError(409, "请求标识已用于其他问题，请重新提交。")
-            self._check(job.resolved_notebook_ids, user_id, allowed_notebook_ids, authority_check)
-            return job
+        replayed = self.replay(
+            payload, user_id=user_id, allowed_notebook_ids=allowed_notebook_ids,
+            authority_check=authority_check,
+        )
+        if replayed is not None:
+            return replayed
         with self._lock:
             if self._closed:
                 raise GlobalAskError(503, "服务正在关闭，请稍后重新提交问题。")
