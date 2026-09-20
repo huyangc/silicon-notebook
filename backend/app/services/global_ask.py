@@ -1590,11 +1590,17 @@ class GlobalAskService:
         ``discard`` is the "stopped before anything was shown" half of the
         product's one cancel style: the question goes back to the input box, so
         no record of the attempt stays (``GlobalAskStore.discard_cancelled``).
-        ⛔ Only a job THIS CALL stopped is discarded. A job that had already
-        finished is an answer, and a job that was already ``cancelled`` may be
-        the very record the product rule keeps -- stopped after its process
-        output was on screen, editable, waiting to be replaced. A replayed or
-        foreign ``discard`` must not be able to delete either.
+        ⛔ Only a job THIS CALL found running is discarded. A job that had
+        already finished is an answer, and a job that was already ``cancelled``
+        when this call read it may be the very record the product rule keeps --
+        stopped after its process output was on screen, editable, waiting to be
+        replaced. A replayed or foreign ``discard`` must not delete either.
+
+        "Found running" rather than "this call's write won": the worker observes
+        the event set below and may persist ``cancelled`` itself before this
+        thread's ``save`` runs, which then matches no row. That is still this
+        call's cancellation, and skipping the discard there would leave the
+        record and its empty conversation behind intermittently.
         The worker may still be unwinding; every write it has left is guarded by
         ``status='running'`` and matches no row.
         """
@@ -1606,7 +1612,9 @@ class GlobalAskService:
                     event.set()
             job.status, job.response, job.answer = "cancelled", None, None
             if not self.store.save(job, user_id):
-                return self.get_job(job_id, user_id=user_id, allowed_notebook_ids=allowed_notebook_ids)
+                job = self.get_job(job_id, user_id=user_id, allowed_notebook_ids=allowed_notebook_ids)
+                if job.status != "cancelled":
+                    return job
             if discard:
                 self.store.discard_cancelled(job_id, user_id)
         return job

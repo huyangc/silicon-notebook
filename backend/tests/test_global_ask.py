@@ -419,6 +419,36 @@ def test_stop_with_discard_leaves_no_record_but_never_discards_an_answer(setup):
     assert service.store.job(answered.job_id, "u").status == "done"
 
 
+def test_discard_still_happens_when_the_worker_wins_the_cancelled_write(setup, monkeypatch):
+    """The worker sees the event and may persist ``cancelled`` before ``cancel``'s
+    own ``save`` runs; that save then matches no row. It is still this call's
+    cancellation, so the discard must not be skipped (codex #761 r7)."""
+    service, _, _, _ = setup
+    entered, release = Event(), Event()
+
+    def synthesis(*args):
+        entered.set()
+        assert release.wait(5)
+        return "late answer", False, [], []
+
+    service.ask.synthesize = synthesis
+    job = service.start(GlobalAskRequest(question="q"), user_id="u")
+    assert entered.wait(5)
+    real_save = service.store.save
+
+    def worker_wins(candidate, user_id):
+        # Exactly what the worker's own terminal write does, landing first.
+        assert real_save(candidate, user_id)
+        return False
+
+    monkeypatch.setattr(service.store, "save", worker_wins)
+    assert service.cancel(job.job_id, user_id="u", discard=True).status == "cancelled"
+    monkeypatch.undo()
+    release.set()
+    assert service.store.job(job.job_id, "u") is None
+    assert service.store.conversation(job.conversation_id, "u") is None
+
+
 def test_a_stale_replacement_is_refused_before_anything_is_spent(setup):
     service, _, retrieved, _ = setup
     stopped = _stopped_job(service)

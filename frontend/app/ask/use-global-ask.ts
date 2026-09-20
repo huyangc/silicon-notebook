@@ -124,6 +124,9 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
   const [traceSeeds, setTraceSeeds] = useState<Record<string, ReasoningTraceStep[]>>({});
   // 「提交请求还没回来就按了停止」：作业 id 此刻还不知道，等它一回来立刻停掉并丢弃。
   const stopRequested = useRef(false);
+  // 轮次快照的代数：对账换掉第一页与游标时递增，在途的「加载更早的问答」据此作废，
+  // 迟到的旧页才不会把已经改正的游标写回去。
+  const turnsGeneration = useRef(0);
   // 每次提交递增。替换失败后的那次自动重拉不 await，期间用户可能已经重试成功：
   // 重拉回来时序号对不上，就说明它手里是旧快照，不许覆盖刚接受的新一轮。
   const submitSerial = useRef(0);
@@ -455,9 +458,10 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     turnsFlight.current = true;
     setLoadingTurns(true);
     const ticket = owner.current;
+    const generation = turnsGeneration.current;
     try {
       const detail = await getGlobalConversation(conversationId, turnOffset);
-      if (!mounted.current || owner.current !== ticket) return;
+      if (!mounted.current || owner.current !== ticket || generation !== turnsGeneration.current) return;
       setTurns((items) => [...detail.turns.filter((item) => !items.some((old) => old.job_id === item.job_id)), ...items]);
       setTurnOffset(detail.has_more ? detail.next_offset : null);
     } catch (cause) {
@@ -596,7 +600,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     const key = JSON.stringify({ question, scope, conversationId, mode: submissionMode, edited, replaces });
     if (retryRequest.current?.key !== key) retryRequest.current = { key, id: crypto.randomUUID() };
     try {
-      const job = await askGlobal({
+      const payload = {
         question,
         notebook_scope: scope,
         conversation_id: conversationId || undefined,
@@ -605,6 +609,13 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
         intent,
         retrieval_effort: GLOBAL_ASK_RETRIEVAL_EFFORT,
         replaces_job_id: replaces,
+      };
+      // 用户在提交途中按过停止、而这次请求失败了：响应可能只是丢了，作业照样建了。
+      // 新会话的第一问此刻连会话 id 都没有、无从对账——用**同一个幂等 id** 再发一次：
+      // 已建的作业会被原样回放，那次停止才够得着它（下面的 stopRequested 分支）。
+      const job = await askGlobal(payload).catch((cause) => {
+        if (!stopRequested.current || !mounted.current || ticket !== owner.current) throw cause;
+        return askGlobal(payload);
       });
       if (!mounted.current || ticket !== owner.current) return;
       retryRequest.current = null;
@@ -706,6 +717,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
 
   /** 把服务端的第一页装进视图：轮次与「更早的问答」游标一起换，两者因此不会错位。 */
   function applyConversation(detail: GlobalConversationDetail) {
+    ++turnsGeneration.current;
     setTurns(detail.turns);
     setTurnOffset(detail.has_more ? detail.next_offset : null);
     setConversationTitle(detail.title || "");
@@ -713,6 +725,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
 
   /** 会话在服务端已经不存在：退回「还没有会话」，历史列表与它的 OFFSET 游标同步。 */
   function dropConversationIdentity(id: string) {
+    ++turnsGeneration.current;
     setTurns([]);
     setTurnOffset(null);
     retryRequest.current = null;
