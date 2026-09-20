@@ -140,9 +140,16 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                   {/* 单库动作（打开来源 / 知识图谱 / Knowhow 行 / 保存记忆 / 分享 /
                       构建索引 / 导入站外建议）一概不传：全局问答没有「当前笔记本」，
                       这些入口在这里没有承接方，缺席时 AnswerView 按既有惯例连按钮都
-                      不渲染。notebookId 传 null 同理——没有可用的资产代理端点，附图区
-                      整块不渲染，绝不拿引用自己的 notebook_id 去直连另一个库。
-                      只额外给它一个跨库专属的出口：每条引用「打开笔记本」。 */}
+                      不渲染。只额外给它一个跨库专属的出口：每条引用「打开笔记本」。
+                      ⚠ notebookId 传 null 说的是「没有 active notebook」，**不是**
+                      「不显示图片」：取图归属由 `assetNotebookId` 单点裁定，没有
+                      active 时每一张附图退到那条引用/条目自己的所属库去取。那个库
+                      是本轮范围里用户自己有读权、经 `can_read_many` 准入过的库，
+                      取图端点每次请求仍复核当前用户对它的读权，不新增权限面。
+                      （有 active 的笔记本内问答仍恒走 active——挂载的参考库用户
+                      未必是成员，那种情形只能经 active 的参与集代理。）
+                      放大预览不接：那需要一个页面级弹层，而这里可能住在全屏
+                      `<dialog>` 的 top layer 里，见文件末尾引用卡片那段注释。 */}
                   <AnswerView
                     answer={job.answer}
                     feedbackSent={job.feedback ?? ""}
@@ -229,9 +236,13 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
         `.global-ask-page` 之内）两种形态都成立；`.global-ask-window` 没有
         transform/contain 一类会改变 fixed 定位包含块的样式，卡片用的视口坐标
         （placeCitationPopover）因此是准的，也不会被 dialog 的 overflow:hidden 裁掉。
-        ⚠ notebookId 传 null：全局问答没有「当前笔记本」，也就没有可用的资产代理
-        端点。附图区因此整块不渲染（与「无附图」等价）——绝不拿引用自己的
-        notebook_id 去直连另一个库的资产，那是前端替用户猜权限。
+        ⚠ notebookId 传 null 说的是「没有 active notebook」：卡片里「本段附图」的
+        取图归属因此退到这条引用**自己的** notebook_id（`assetNotebookId`）。这不是
+        「替用户猜权限」——全局问答的每条引用都来自本轮范围里用户自己有读权、经
+        `can_read_many` 准入过的库，而 `GET /notebooks/{id}/assets/{asset_id}` 每次
+        请求都会复核当前用户对该库的读权。旧形状（job.response）的引用同样带
+        notebook_id；真没有的（更老的回答）算出来是空串，附图区整块不渲染。
+        有 active 的笔记本内问答仍恒用 active，那条口径一个字没动。
         onOpenSource / onOpenKnowledgeGraph / onOpenKnowhowRow / importController
         同理一概不传：这些入口都只在某个笔记本的工作区里才有承接方，缺席时卡片
         优雅降级成「不渲染那颗按钮」。 */}

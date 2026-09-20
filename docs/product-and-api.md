@@ -114,8 +114,13 @@ background-task status. Citations use the same card as in-notebook Ask: clicking
 it beside the marker with the cited passage, its notebook and library tier, plus an **open notebook** link
 that goes to that notebook at the cited source (a plain click also minimizes the chat; a modified click
 opens a new tab and leaves it open). There is no citation list under the answer and no side reader; entries
-that need a notebook workspace (source view, Knowledge Graph, Knowhow row, import, attached images) are
-absent. While a card is open, Escape closes only the card. The mobile layout retains scope, send and stop.
+that need a notebook workspace (source view, Knowledge Graph, Knowhow row, import) are absent.
+Attached images do appear — both the inline citation-image blocks in the body and the **attached images**
+strip inside the citation card — without the page-level zoom preview. Each image is read through the
+asset endpoint of the notebook that owns its citation, and every request re-checks the current user's read
+access to that notebook and that the asset's owning library is in that notebook's effective participant set.
+In-notebook Ask still proxies through the active notebook, unchanged.
+While a card is open, Escape closes only the card. The mobile layout retains scope, send and stop.
 Polling backs off from 1.2 seconds to 15 seconds while progress is unchanged, pauses when the browser
 document is hidden, and resumes immediately on visibility. Narrowing scope shows a history-context reminder.
 Ungrounded answers carry an explicit warning even when they include some citations. Each completed or
