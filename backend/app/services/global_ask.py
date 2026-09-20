@@ -549,6 +549,8 @@ class GlobalAskService:
         # running. An attribute rather than a constant so a test can shrink it
         # instead of waiting out real half-seconds.
         self.follow_poll_seconds = 0.5
+        # ...and how far a follower backs off while nothing moves.
+        self.follow_poll_max_seconds = 5.0
         self._pending = 0
         self._closed = False
         # Monotonic clock, injectable so the trace throttle can be tested with
@@ -1022,11 +1024,18 @@ class GlobalAskService:
                     with self._lock:
                         self._events.pop(job.job_id, None)
                         self._workers.pop(job.job_id, None)
-                        self._feeds.pop(job.job_id, None)
+                        orphan = self._feeds.pop(job.job_id, None)
                         self._live.pop(job.job_id, None)
                     job.status = "failed"
                     job.error = "任务未能启动，请重新提交问题。"
                     self.store.save(job, user_id)
+                    # A reader may already have subscribed in the window between
+                    # the row existing and the worker failing to start. Nothing
+                    # will ever publish to this feed again: end it, so that
+                    # reader falls back to polling instead of idling on
+                    # keepalives for a job that never ran.
+                    if orphan is not None:
+                        orphan.close(None)
                     raise
                 previous = self.store.request_job(user_id, payload.client_request_id)
                 if previous is not None:
@@ -1191,7 +1200,12 @@ class GlobalAskService:
             open_for_writing = self._save_if_open(job, user_id, progress=progress)
         if not open_for_writing:
             raise AskCancelled()
-        self._publish_progress(job, 0)
+        # Coverage only: ``None`` = "from the trace's current end", i.e. no
+        # steps. Re-sending the whole trace with every library receipt would
+        # bring back the O(n^2) bytes the persistence throttle exists to avoid,
+        # and readers apply the coverage lists whether or not the trace part of
+        # a frame fits them.
+        self._publish_progress(job, None)
 
     def _append_trace(self, job, user_id, state, step):
         """Stream one reasoning step into the job a poller is reading.
@@ -1288,6 +1302,8 @@ class GlobalAskService:
         receipts are models, and the frame is about to be serialized by a
         transport that only speaks JSON primitives.
         """
+        if trace_offset is None:
+            trace_offset = len(job.trace)
         return {
             "event": "progress",
             "trace_offset": trace_offset,
@@ -1328,10 +1344,28 @@ class GlobalAskService:
         stopped-and-discarded, or its conversation deleted -- is ``gone``,
         which is a real outcome and not a failure: the client reconciles it
         exactly as the poll's own 404 branch does.
+
+        ⛔ NEVER ``final`` for a row that is still ``running``. A shutdown sets
+        ``_closed`` first, so the worker's own terminal write is refused
+        (``_save_if_open``) and the row stays ``running`` until the next
+        start's recovery sweep. A ``final`` built from that row would tell the
+        client the run is over with a job that says it is not: the client stops
+        polling and the turn spins until the page is reloaded. ``None`` ends
+        the stream with no terminal frame instead, which the client treats as
+        a lost stream and falls back to polling -- the transport that WILL see
+        the recovered row.
+
+        Read through ``get_job``, not the bare store: it is the same authority
+        path ``GET /jobs/{id}`` takes, so a member whose read access to one of
+        the job's libraries was revoked mid-run gets ``gone`` here exactly where
+        polling would now answer 404, instead of the finished answer.
         """
-        job = self.store.job(job_id, user_id)
-        if job is None:
+        try:
+            job = self.get_job(job_id, user_id=user_id)
+        except GlobalAskError:
             return {"event": "gone"}
+        if job.status == "running":
+            return None
         return {"event": "final", "job": job.model_dump(mode="json")}
 
     def _close_feed(self, job_id, user_id):
@@ -1393,10 +1427,10 @@ class GlobalAskService:
                 events, lambda: self._progress_frame(live, 0),
             ):
                 return events
-        self._follow(events, job_id, user_id)
+        self._follow(events, job_id, user_id, allowed_notebook_ids)
         return events
 
-    def _follow(self, events, job_id, user_id):
+    def _follow(self, events, job_id, user_id, allowed_notebook_ids=None):
         """Poll the store on this ONE client's behalf until the job ends.
 
         REQUEST-LOCAL by construction: it exists for the connection that asked
@@ -1418,11 +1452,19 @@ class GlobalAskService:
         closed = getattr(events, "closed", None)
 
         def follower():
-            progress = None
+            seen = None
+            wait = self.follow_poll_seconds
             try:
                 while not (closed is not None and closed.is_set()):
-                    job = self.store.job(job_id, user_id)
-                    if job is None:
+                    # ``get_job`` every tick, not the bare store: authority can
+                    # be revoked mid-run, and polling -- the transport this
+                    # stands in for -- re-checks it on every read.
+                    try:
+                        job = self.get_job(
+                            job_id, user_id=user_id,
+                            allowed_notebook_ids=allowed_notebook_ids,
+                        )
+                    except GlobalAskError:
                         events.put({"event": "gone"})
                         return
                     if job.status != "running":
@@ -1430,14 +1472,26 @@ class GlobalAskService:
                             "event": "final", "job": job.model_dump(mode="json"),
                         })
                         return
-                    frame = self._progress_frame(job, 0)
-                    if frame != progress:
-                        progress = frame
-                        events.put(frame)
-                    if closed is None:
-                        time.sleep(self.follow_poll_seconds)
+                    # A cheap key decides whether anything moved; the frame --
+                    # a dump of the whole trace -- is only built when it did.
+                    key = (
+                        len(job.trace), tuple(job.searched_notebook_ids),
+                        len(job.skipped_notebooks), tuple(job.degraded_notebook_ids),
+                    )
+                    if key != seen:
+                        seen = key
+                        wait = self.follow_poll_seconds
+                        events.put(self._progress_frame(job, 0))
                     else:
-                        closed.wait(self.follow_poll_seconds)
+                        # Same backoff shape as the browser's own poll loop: a
+                        # reader parked on a quiet job (or a hidden page that
+                        # never disconnects) must not cost two full-row reads a
+                        # second for as long as it stays open.
+                        wait = min(self.follow_poll_max_seconds, wait * 2)
+                    if closed is None:
+                        time.sleep(wait)
+                    else:
+                        closed.wait(wait)
             except Exception:  # noqa: BLE001 - the transport must end well-formed
                 _LOG.exception("global-ask follow failed for %s", job_id)
                 events.put({"event": "error", "error": _FOLLOW_FAILURE_COPY})

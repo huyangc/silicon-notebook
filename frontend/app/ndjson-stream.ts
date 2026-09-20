@@ -21,16 +21,25 @@ export async function readNdjsonStream(
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const parsed = takeNdjsonLines(buffer);
-    buffer = parsed.remainder;
-    for (const line of parsed.lines) await consume(line);
+  let finished = false;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parsed = takeNdjsonLines(buffer);
+      buffer = parsed.remainder;
+      for (const line of parsed.lines) await consume(line);
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) await consume(buffer.trim());
+    finished = true;
+  } finally {
+    // `consume` 抛了（`error` 帧、`cancelled` 帧、调用方自己的异常）：读取器还攥着
+    // 一个没读完的响应体，不 cancel 的话这条 HTTP 连接就一直挂着、不被复用。正常读完
+    // 的流已经 done，不需要、也不该再 cancel。
+    if (!finished) await reader.cancel().catch(() => undefined);
   }
-  buffer += decoder.decode();
-  if (buffer.trim()) await consume(buffer.trim());
 }
 
 

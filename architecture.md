@@ -292,7 +292,11 @@ retrieval-run、读预算、参与集与来源范围进入工作线程；公平�
 （`reason=passage_changed`）；run 内的去重结清按 chunk，只有过了文字核对的段落才结清。
 后台线程有容量上限并持有取消事件，终态通过 `status='running'` 条件更新提交；关闭先取消并
 有界等待，只有服务器启动补偿把遗留任务转为 `interrupted`，普通仓库实例化不执行补偿。
-`frontend/app/ask` 拥有全局会话、范围、轮询及引用阅读状态，复用共享页面和答案组件。
+`frontend/app/ask` 拥有全局会话、范围、作业跟随（推送流优先、轮询兜底）及引用阅读状态，复用共享页面和答案组件。
+全局作业的持久骨架仍是「建作业 + 读作业行」；`backend/app/services/global_ask_feed.py`（叶子模块，只依赖标准库）
+是叠在它上面的进程内分发，只服务正在看的客户端：`GlobalAskService` 在 worker 登记处建 feed、在轨迹与覆盖回执
+变更后发布、由结束作业的一方从**数据库**取终态帧；别的进程里的作业由请求级的 `global-ask-follow` 线程读库跟随。
+投递循环 `deliver_ask_events` 在 `app/api/task_stream.py`，笔记本内问答与全局问答的流共用。
 认证后的主页挂载按用户隔离的 `GlobalAskLauncher`，首次打开才加载共享问答组件；气泡、
 小窗和全屏切换保留同一组件实例；展示租约由根弹窗协调器的 actor 级 `global-ask` slot 管理，
 全屏且位于最上层时使用原生 dialog 隔离背景交互，信息弹层仍由共享层级仲裁。嵌入模式不读写主页

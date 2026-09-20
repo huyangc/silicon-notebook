@@ -365,10 +365,13 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
       setTurns((items) => items.map((item) => {
         if (item.job_id !== target.job_id || item.status !== "running") return item;
         const trace = item.trace ?? [];
-        if (frame.trace_offset > trace.length) return item;
+        // 有缺口的帧只丢**轨迹那一半**：覆盖清单是整份替换、与轨迹接不接得上无关，
+        // 而纯回执帧（`steps` 为空、offset 指在服务端轨迹末尾）对一个落后的读者永远
+        // 是「有缺口」的——连回执一起丢，它的检索进度就只能等下一条轨迹帧顺带更新。
+        const gapped = frame.trace_offset > trace.length;
         return {
           ...item,
-          trace: [...trace.slice(0, frame.trace_offset), ...frame.steps],
+          trace: gapped ? trace : [...trace.slice(0, frame.trace_offset), ...frame.steps],
           searched_notebook_ids: frame.searched_notebook_ids,
           skipped_notebooks: frame.skipped_notebooks,
           degraded_notebook_ids: frame.degraded_notebook_ids,
@@ -391,6 +394,12 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     void streamGlobalJob(target.job_id, { onProgress: applyProgress }, stream.signal)
       .then(async (outcome) => {
         if (!isCurrent()) return;
+        // 契约上 `final` 只在作业离开 running 之后才发；万一它还写着 running（服务端
+        // 退出时的竞态），就当这条流断了——按终态收下会停掉轮询，这一轮永远转圈。
+        if (outcome.kind === "final" && outcome.job.status === "running") {
+          fallBackToPolling();
+          return;
+        }
         if (outcome.kind === "final") {
           terminal = true;
           setPollError("");

@@ -12,9 +12,10 @@ jobs and their state is recovered from the database instead.
 ONE EXCEPTION, and it is a transport rather than a runtime:
 :func:`deliver_ask_events` drains a DURABLE job's delivery queue to NDJSON.  It
 lives here because two route modules now need it (the notebook Ask stream and
-the global Ask stream), and a route module importing another route module is
-exactly the cross-domain edge ``test_route_domain_boundaries`` exists to
-prevent.  It starts, cancels and owns nothing: a disconnect stops delivery to
+the global Ask stream), and one route module reaching into another's private
+helper is a cross-domain edge this codebase avoids by convention -- no guard
+catches it (``test_route_domain_boundaries`` pins endpoint ownership, not
+imports), which is the reason to keep the shared piece here.  It starts, cancels and owns nothing: a disconnect stops delivery to
 this client only, and the durable worker keeps running by contract.
 """
 from __future__ import annotations
@@ -155,6 +156,7 @@ async def deliver_ask_events(
     *,
     clock: Callable[[], float] = monotonic,
     heartbeat_seconds: float = INTERACTIVE_STREAM_HEARTBEAT_SECONDS,
+    idle_sleep_seconds: float | None = None,
 ):
     """Drain one durable-job delivery queue to NDJSON — shared by every client
     that attaches to such a job (a fresh notebook Ask, a keyed re-submission
@@ -167,6 +169,17 @@ async def deliver_ask_events(
 
     客户端断连只停止本次流(break),**不** set cancel_event —— worker 脱离连接
     跑到完、答案照存。唯一取消入口是各自领域的 cancel 端点。
+
+    ``idle_sleep_seconds``: how an IDLE connection waits for the next event.
+    ``None`` (the notebook Ask, unchanged) blocks in a worker thread on the
+    queue -- fine for a stream that lives exactly as long as one question. A
+    global job's stream is opened by every page that is looking at a running
+    turn and stays open for the whole run, and each blocked ``to_thread`` holds
+    one slot of asyncio's DEFAULT executor (``min(32, cpu + 4)``), which the
+    rest of the API shares: a few dozen watchers would starve every other
+    ``to_thread`` call, this route's own authority check included. Passing a
+    number makes the idle wait an ``asyncio.sleep`` on the event loop instead:
+    no thread at all, at the price of delivery latency bounded by that number.
     队列的 close() 只通知**为本次连接服务的**跟随者(键重发接回既有 job 的轮询、
     全局问答的 ``global-ask-follow``)停下;真正执行的 worker 不读它。
     """
@@ -179,7 +192,11 @@ async def deliver_ask_events(
                 if await request.is_disconnected():
                     break
                 try:
-                    event = await asyncio.to_thread(events.get, True, 0.1)
+                    if idle_sleep_seconds is None:
+                        event = await asyncio.to_thread(events.get, True, 0.1)
+                    else:
+                        await asyncio.sleep(idle_sleep_seconds)
+                        event = events.get_nowait()
                 except queue.Empty:
                     now = clock()
                     if now - last_delivery >= heartbeat_seconds:

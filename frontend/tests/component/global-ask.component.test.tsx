@@ -1999,7 +1999,7 @@ test("stream progress paints the running turn's trace and coverage without a sin
   expect(result.current.pollError).toBe("");
 });
 
-test("a re-delivered frame cannot duplicate steps and a gapped frame is ignored whole", async () => {
+test("a re-delivered frame cannot duplicate steps; a gapped frame keeps its coverage and drops its steps", async () => {
   window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
   api.detail.mockResolvedValue(detail("conv-a", [job()]));
   const stream = streamRig();
@@ -2011,9 +2011,13 @@ test("a re-delivered frame cannot duplicate steps and a gapped frame is ignored 
   await stream.progress({ trace_offset: 0, steps: [traceStep("A"), traceStep("B")], searched_notebook_ids: ["nb-0"] });
   expect(summaries(result.current.running)).toEqual(["A", "B"]);
 
-  // 有缺口（offset 3 > 本地 2）：接上去会把中间那一步吞掉，所以整帧丢弃——连它带的
-  // 覆盖清单也不采信，那份清单说的是一个本地还没走到的时刻。
+  // 有缺口（offset 3 > 本地 2）：轨迹那一半丢掉——接上去会把中间那一步吞掉；覆盖清单
+  // 照收——它是整份替换、与轨迹接不接得上无关，而纯回执帧（steps 为空、offset 指在
+  // 服务端轨迹末尾）对一个落后的读者永远「有缺口」，连回执一起丢它就看不到检索进度。
   await stream.progress({ trace_offset: 3, steps: [traceStep("D")], searched_notebook_ids: ["nb-0", "nb-1"] });
+  expect(summaries(result.current.running)).toEqual(["A", "B"]);
+  expect(result.current.running?.searched_notebook_ids).toEqual(["nb-0", "nb-1"]);
+  await stream.progress({ trace_offset: 9, steps: [], searched_notebook_ids: ["nb-0"] });
   expect(summaries(result.current.running)).toEqual(["A", "B"]);
   expect(result.current.running?.searched_notebook_ids).toEqual(["nb-0"]);
 
@@ -2021,6 +2025,21 @@ test("a re-delivered frame cannot duplicate steps and a gapped frame is ignored 
   await stream.progress({ trace_offset: 1, steps: [traceStep("B 修正")], searched_notebook_ids: ["nb-0"] });
   expect(summaries(result.current.running)).toEqual(["A", "B 修正"]);
   expect(api.poll).not.toHaveBeenCalled();
+});
+
+test("a final frame that still says running is treated as a lost stream", async () => {
+  // 服务端退出时的竞态可能让「终态」里的作业还写着 running。按终态收下会停掉轮询、这一
+  // 轮永远转圈；当它是断流，退回轮询去等真正的终态（评审 P1）。
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.detail.mockResolvedValue(detail("conv-a", [job()]));
+  api.poll.mockResolvedValue({ ...job("interrupted") });
+  const stream = streamRig();
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+  await stream.settle({ kind: "final", job: job() });
+  await waitFor(() => expect(api.poll).toHaveBeenCalled(), { timeout: 2500 });
+  await waitFor(() => expect(result.current.running).toBeUndefined());
+  expect(result.current.turns[0].status).toBe("interrupted");
 });
 
 test("a final frame ends the turn without a single poll", async () => {
