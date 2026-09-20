@@ -616,7 +616,17 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
           // 回答，轮询也不会再去取。
           adopted = stopped;
         } catch (cause) {
+          // 取消的响应丢了，但服务端可能已经停掉并删了它：确认到 404 就按丢弃收尾，
+          // 否则本地会攥着一条服务端不存在的 running 作业，轮询与再次停止都永远 404。
+          const gone = await globalJobIsGone(job.job_id) === true;
           if (!mounted.current || ticket !== owner.current) return;
+          if (gone) {
+            const remaining = currentTurns.current.filter((item) => item.job_id !== job.job_id && item.job_id !== replaces);
+            setTurns(remaining);
+            returnQuestion();
+            settleDiscard(remaining, job.conversation_id);
+            return;
+          }
           setError(toUserMessage(cause, "停止失败，请重试"));
         }
       }
@@ -748,7 +758,18 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
         }
       }
     } catch (cause) {
-      if (mounted.current && ticket === owner.current) setError(toUserMessage(cause, "停止失败，请重试"));
+      // 同上：带丢弃的取消若其实已经成功，确认到 404 就照丢弃收尾，不留一条死作业。
+      const gone = discard && await globalJobIsGone(target.job_id) === true;
+      if (mounted.current && ticket === owner.current) {
+        if (gone) {
+          const remaining = currentTurns.current.filter((item) => item.job_id !== target.job_id);
+          setTurns(remaining);
+          setDraft((draft) => draft.trim() ? draft : target.question);
+          settleDiscard(remaining, target.conversation_id);
+        } else {
+          setError(toUserMessage(cause, "停止失败，请重试"));
+        }
+      }
     } finally {
       if (ticket === owner.current) {
         flight.current = false;
