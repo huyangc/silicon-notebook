@@ -214,7 +214,7 @@ class _RunState:
 
     __slots__ = (
         "order", "evidence", "siblings", "succeeded", "failed", "degraded",
-        "federated", "error", "lock", "publish_lock", "_sequence", "_published",
+        "federated", "error", "lock", "publish_lock", "_sequence", "_published", "pushed_coverage",
         "traced_at", "traced_at_count",
     )
 
@@ -246,6 +246,8 @@ class _RunState:
         self.publish_lock = threading.Lock()
         self._sequence = 0
         self._published = 0
+        # The coverage last pushed to live watchers (``_publish_coverage``).
+        self.pushed_coverage = None
 
     def record(self, notebook_id, outcome) -> None:
         with self.lock:
@@ -1198,8 +1200,19 @@ class GlobalAskService:
                 if notebook_id in skipped
             ]
             open_for_writing = self._save_if_open(job, user_id, progress=progress)
+            # Every sub-query reports every library, so most receipts restate a
+            # coverage a watcher has already been sent. Only a CHANGE is pushed
+            # (a newcomer gets the current lists in its snapshot either way).
+            pushed = (
+                tuple(searched), tuple(degraded),
+                tuple(item.notebook_id for item in job.skipped_notebooks),
+            )
+            changed = pushed != state.pushed_coverage
+            state.pushed_coverage = pushed
         if not open_for_writing:
             raise AskCancelled()
+        if not changed:
+            return
         # Coverage only: ``None`` = "from the trace's current end", i.e. no
         # steps. Re-sending the whole trace with every library receipt would
         # bring back the O(n^2) bytes the persistence throttle exists to avoid,
