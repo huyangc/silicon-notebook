@@ -1,5 +1,5 @@
 import { useEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
-import { Square } from "lucide-react";
+import { STOP_CONTROL_CLASS, StopGlyph } from "./stop-control";
 
 
 // 输入框自动增高的上限(px),与 globals.css .chat-input 的 max-height 一致;超过则内部滚动。
@@ -100,14 +100,14 @@ export function AskComposer({
           onKeyDown={handleKeyDown}
         />
         <button
-          className={`send-button ${running ? "stop" : ""}`}
+          className={running ? `send-button ${STOP_CONTROL_CLASS}` : "send-button"}
           type="button"
           aria-label={running ? abortLabel : "发送"}
           title={running ? abortLabel : "发送"}
           disabled={!running && (disabled || submitBlocked || !value.trim())}
           onClick={running ? onAbort : onSubmit}
         >
-          {running ? <Square size={16} strokeWidth={2.5} /> : "→"}
+          {running ? <StopGlyph /> : "→"}
         </button>
       </div>
       {/* 按键提示住在本组件:它描述的就是上面 handleKeyDown 的行为,两者分家就会各说各话。

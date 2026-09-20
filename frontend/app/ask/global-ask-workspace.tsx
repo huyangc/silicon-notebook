@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowUp, BookOpen, Check, ChevronRight, Copy, FileText, Layers3, LoaderCircle, MessageSquare, PanelLeft, Plus, Share2, Square } from "lucide-react";
+import { ArrowUp, BookOpen, Check, ChevronRight, Copy, FileText, Layers3, LoaderCircle, MessageSquare, PanelLeft, Plus, Share2 } from "lucide-react";
 import { PageHeader } from "../components/PageHeader";
 import { AnswerMarkdown, type AnswerReference } from "../answer-markdown";
 // 标准答案视图与推理轨迹面板与笔记本内问答**同一份实现**：全局问答直接调单库
@@ -24,6 +24,7 @@ import { NotebookScopePicker } from "./notebook-scope-picker";
 import { GlobalCoverageReceipt } from "./global-coverage-receipt";
 import { useGlobalAsk } from "./use-global-ask";
 import { useCopyResult } from "../copy-result";
+import { STOP_CONTROL_CLASS, StopGlyph } from "../stop-control";
 import { notebookHash } from "../memory-model";
 import "./global-ask.css";
 
@@ -72,6 +73,9 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
   // 范围与引擎都锁住——否则确认的会是另一份范围/引擎下理解出来的问题。
   const inFlight = Boolean(ask.running) || ask.intentChecking || Boolean(ask.intentReview);
   const hint = askQuestionLimitHint(ask.draft.trim());
+  // 停止键只有图标（全站同一枚，见 `stop-control.tsx`）；此刻按下去会停掉什么，写在
+  // 无障碍名与悬停提示上。停止中换成转圈：按下之后按钮自身要有可见变化。
+  const stopLabel = ask.intentChecking ? "取消问题理解" : ask.stopping ? "停止中…" : "停止";
   const selectedNotebookIds = ask.scope.mode === "include" ? new Set(ask.scope.notebook_ids) : null;
   const excludesPreviousContext = selectedNotebookIds !== null
     && ask.turns.some((turn) => turn.resolved_notebook_ids.some((id) => !selectedNotebookIds.has(id)));
@@ -273,7 +277,10 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
             <textarea ref={composer} aria-label="输入问题" placeholder={ask.turns.length ? "继续追问，或选择新的笔记本范围…" : "向你的笔记本提问…"} rows={3} value={ask.draft} disabled={composerDisabled || inFlight} onChange={(event) => ask.setDraft(event.target.value)} onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void ask.submit(); }
             }} />
-            <div className="global-composer-toolbar"><NotebookScopePicker notebooks={ask.notebooks} scope={ask.scope} onChange={ask.setScope} disabled={composerDisabled || inFlight} />
+            {/* 两栏：左栏放范围与引擎，放不下就在**左栏内**换行；右栏只放发送 / 停止键，
+                恒在右下角。三样东西平铺在同一条换行 flex 里时，左边一变宽（例如多出检索
+                档位），被挤到第二行最左、独占一行的就是发送 / 停止键。 */}
+            <div className="global-composer-toolbar"><div className="global-composer-controls"><NotebookScopePicker notebooks={ask.notebooks} scope={ask.scope} onChange={ask.setScope} disabled={composerDisabled || inFlight} />
               {/* 引擎选择器与笔记本内问答共用同一份控件。
                   · 扩展引擎不进 `ask.modes`：后端对全局问答一律 422，扩展组因此整组不出现。
                   · `kgAvailable={false}`：全局模式跨多个笔记本，没有「这一个笔记本的
@@ -287,9 +294,9 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                 disabled={composerDisabled || inFlight}
                 kgAvailable={false}
                 uiMode={ask.uiMode}
-              />
+              /></div>
               {ask.running || ask.intentChecking
-                ? <button className="global-send new-pill" type="button" disabled={ask.stopping} onClick={() => { if (ask.intentChecking) ask.abortIntent(); else void ask.stop(); }}><Square size={14} />{ask.intentChecking ? "取消问题理解" : ask.stopping ? "停止中…" : "停止"}</button>
+                ? <button className={`global-send ${STOP_CONTROL_CLASS}`} type="button" disabled={ask.stopping} aria-label={stopLabel} title={stopLabel} onClick={() => { if (ask.intentChecking) ask.abortIntent(); else void ask.stop(); }}>{ask.stopping ? <LoaderCircle className="global-spin" size={16} /> : <StopGlyph />}</button>
                 : <button className="global-send new-pill" type="submit" disabled={composerDisabled || inFlight || !ask.draft.trim() || Boolean(hint) || !ask.notebooks.length} aria-label="发送问题">{ask.submitting ? <LoaderCircle className="global-spin" size={18} /> : <ArrowUp size={19} />}</button>}
             </div>
             {excludesPreviousContext && <p className="global-scope-context-notice" role="status">范围已收窄：先前涉及其他笔记本的提问不会用于本次追问，请重新说明要讨论的对象。</p>}

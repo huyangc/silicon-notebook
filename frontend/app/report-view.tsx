@@ -7,7 +7,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowLeft, ArrowUp, Check, CheckSquare, ChevronRight, Copy, Download, Plus, Share2, Sparkles, Square, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, Check, CheckSquare, ChevronRight, Copy, Download, Plus, Share2, Sparkles, Trash2, X } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -72,6 +72,7 @@ import type {
 import { REPORT_DEPTHS, isReportActive, reportQuestionLimitHint } from "./report-model";
 import { formatReportTiming } from "./report-time";
 import type { ReportWorkspace } from "./use-report-workspace";
+import { StopGlyph } from "./stop-control";
 import { label, REPORT_DEPTH, REPORT_STATUS } from "./vocabulary";
 
 export type {
@@ -1445,7 +1446,7 @@ export function ReportsPanel({
                 disabled={actionBusy}
                 onClick={() => void requestCancel()}
               >
-                <Square size={12} /> {active.status === "planning" ? "取消规划" : "取消生成"}
+                <StopGlyph size={12} /> {active.status === "planning" ? "取消规划" : "取消生成"}
               </button>
             )}
             {active.content_md && (

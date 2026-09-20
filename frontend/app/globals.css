@@ -5333,20 +5333,35 @@ button.chat-session-card {
   cursor: not-allowed;
 }
 
-.send-button.stop {
+/* 全站唯一的停止键外观：浅红底 + 红描边 + 实心方块，只有图标、不带字。笔记本内问答
+   与全局问答的停止键都挂这一个类（类名与图标从 `stop-control.tsx` 取），各自只补
+   尺寸与圆角。选择器带上元素名：要压过各处发送键自己的底色（`.send-button` 的近黑、
+   `.new-pill` 的纯黑），又不依赖样式表的加载先后。 */
+button.stop-control {
+  display: grid;
+  place-items: center;
+  padding: 0;
   border: 1px solid #efb4b4;
   border-radius: 14px;
   background: #fff7f7;
   color: #b42318;
   box-shadow: 0 6px 18px rgba(180, 35, 24, 0.14);
+  cursor: pointer;
 }
 
-.send-button.stop:hover {
+button.stop-control:hover:not(:disabled) {
   border-color: #d64a4a;
   background: #ffecec;
 }
 
-.send-button.stop svg {
+/* 停止中：请求已发出、等它落定。变淡 + 不可再点，图标由调用方换成转圈。 */
+button.stop-control:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+/* 实心方块。带字的动作行（报告的「取消生成」）只取这枚图标、不取上面的底色。 */
+.stop-glyph {
   fill: currentColor;
   stroke: currentColor;
 }
