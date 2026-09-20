@@ -46,6 +46,15 @@ therefore be counted wherever a gate asks "is any ceiling in force?" and must
 NOT be counted where a gate asks "did the user shrink this run?" -- the same
 split the two dimensions above already live by.
 
+Riding alongside all three is a bit that is not a ceiling at all:
+``subjectless`` says this run answers for a SET and none of its libraries is
+the subject.  It is stated by the single manager that installs a global run,
+never inferred, because the third shape above is legal for a single-notebook
+run too -- one that freezes its own visible source list still has a current
+library.  Gates that mean "…for the current library" read
+``subjectless_run_active()``; gates that filter rows read
+``peer_scope_ceiling_active()``.
+
 ⚠ ``source_scope_restricted()`` reads the LOCAL dimension only, on purpose.  It
 gates the ACTIVE notebook's own non-source-partitionable channels (PPR, private
 Memory, community reports, weak-support relations, exact-section lookup, the
@@ -161,6 +170,24 @@ class ActiveSourceScope:
     # future cache key first tries -- and only for a federated run.  Read it
     # through ``source_ceiling_for``.
     notebook_source_ceilings: NotebookSourceCeilings = ()
+    # THE EXPLICIT "this run has no subject library" BIT, and deliberately a
+    # field of its own rather than something derived from the ceilings above.
+    #
+    # "Carries per-notebook ceilings" and "has no subject library" are NOT the
+    # same fact.  A single-notebook run is allowed to freeze its own visible
+    # source list through this very field set -- one entry, keyed by its own
+    # ``notebook_id`` -- and that run still has a subject: the notebook the user
+    # is looking at, whose private Memory, selected-source graph, index badge
+    # and citation normalisation all remain correct.  Inferring "subjectless"
+    # from ``peer_ceiling_active`` would silently sweep such a caller into peer
+    # mode the day it appears, which is exactly the class of drift this field
+    # exists to make impossible.
+    #
+    # Set ONLY by the one manager that installs a global run (it is the single
+    # writer, pinned by a guard), and read through ``subjectless_run_active``.
+    # Absent (the default) means every gate that asks the MODE question keeps
+    # its historical single-library answer.
+    subjectless: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -168,6 +195,38 @@ class ActiveSourceScope:
             "notebook_source_ceilings",
             _ceiling_pairs(self.notebook_source_ceilings),
         )
+        if self.subjectless:
+            # A subjectless scope is only coherent in ONE shape, so refuse every
+            # other one at construction time rather than let a half-built scope
+            # reach the gates.  Each clause below is a fact some reader depends
+            # on, not tidiness:
+            #
+            # * ceilings must exist and must cover ``self.notebook_id`` -- the
+            #   nominal active is a naming anchor with no retrieval privilege,
+            #   and without its own entry ``filter_retrieval_items`` falls to
+            #   "no ceiling binds here" and stops defending it entirely, while
+            #   ``ask_service._peer_ceiling_participants`` (fail-closed on a
+            #   missing entry) and ``allows()`` (fail-open on the same fact)
+            #   would answer differently about the same library;
+            # * neither the local nor the library dimension may be submitted --
+            #   both express "the subject library's own selection", which a run
+            #   with no subject cannot have, and a local ceiling covering the
+            #   anchor is already rejected below as ambiguous.
+            if not self.notebook_source_ceilings:
+                raise ValueError(
+                    "a subjectless scope must carry per-notebook source "
+                    "ceilings"
+                )
+            if self.source_ceiling_for(self.notebook_id) is None:
+                raise ValueError(
+                    "a subjectless scope must cover its own nominal active "
+                    "notebook with a per-notebook source ceiling"
+                )
+            if self.source_provided or self.base_provided:
+                raise ValueError(
+                    "a subjectless scope must not submit the local or the "
+                    "library dimension"
+                )
         # Reject the ambiguous combination at CONSTRUCTION time: with a local
         # mode/source_ids ceiling AND a per-notebook ceiling both covering the
         # nominal active notebook, two rules answer the same question about the
@@ -357,6 +416,8 @@ def source_scope_context(
     scope: Any,
     base_scope: Any = None,
     notebook_source_ceilings: Any = None,
+    *,
+    subjectless: bool = False,
 ) -> Iterator[None]:
     """Install this run's retrieval scope, if it has one at all.
 
@@ -371,11 +432,27 @@ def source_scope_context(
     both persistable payloads keep returning ``None``.
 
     With all three absent no scope is installed at all, exactly as before.
+
+    ``subjectless`` is keyword-only and is the MODE bit described on
+    ``ActiveSourceScope.subjectless``: this run answers for a SET of libraries
+    and none of them is its subject.  It is not inferable from the three inputs
+    above (a single-notebook run may legitimately freeze its own visible source
+    list), so it has to be stated, and stating it commits the caller to the one
+    coherent shape -- ceilings covering every participant including the nominal
+    active, and neither of the other two dimensions submitted.
     """
     raw = _scope_dict(scope)
     base_raw = _scope_dict(base_scope)
     ceilings = _ceiling_pairs(notebook_source_ceilings)
     if raw is None and base_raw is None and not ceilings:
+        # Checked BEFORE the short-circuit: reaching here with ``subjectless``
+        # set would otherwise install nothing at all and return silently, which
+        # is the one failure mode a caller cannot notice -- every gate would
+        # answer "single library" for a run that has no subject.
+        if subjectless:
+            raise ValueError(
+                "a subjectless scope must carry per-notebook source ceilings"
+            )
         yield
         return
     current = ActiveSourceScope(
@@ -400,6 +477,7 @@ def source_scope_context(
         source_provided=raw is not None,
         base_provided=base_raw is not None,
         notebook_source_ceilings=ceilings,
+        subjectless=subjectless,
     )
     token = _CURRENT_SOURCE_SCOPE.set(current)
     try:
@@ -538,9 +616,44 @@ def peer_scope_ceiling_active() -> bool:
     ⛔ There is deliberately no ``peer_scope_restricted()``: freezing each
     participant's currently visible sources is not a narrowing and must never
     switch a channel off (see ``ActiveSourceScope.peer_ceiling_active``).
+
+    ⚠ This is the FILTERING question and nothing else.  "Does this run have a
+    subject library at all" is a different question with a different answer for
+    a single-notebook run that froze its own source list, and it is asked
+    through ``subjectless_run_active()``.
     """
     scope = current_source_scope()
     return bool(scope and scope.peer_ceiling_active)
+
+
+def subjectless_run_active() -> bool:
+    """MODE question: does this run answer for a SET, with no subject library?
+
+    The fourth question this module answers, and the only one that is about the
+    SHAPE of the run rather than about which rows survive a filter.  Every step
+    whose meaning is "…for the current library" -- the private Memory channel,
+    the ``index_required`` call to action, the selected-source-graph lane, the
+    prompt's peer-authority rules, the workbook lane's participant list, and
+    citation origin normalisation -- asks this one.  Filtering points
+    (``filter_retrieval_items``, ``follow_chain``'s ceiling test) keep asking
+    ``peer_scope_ceiling_active()``: a frozen source list must bind whether or
+    not the run has a subject.
+
+    Separating them is what keeps a single-notebook run that freezes its own
+    visible sources out of peer mode.  Such a scope is constructible today and
+    only test-reachable, but "has per-notebook ceilings" would have become
+    "has no current library" for it the moment any production caller froze its
+    own source list -- silently, and in the direction that folds one user's
+    private Memory into a cross-library answer.
+
+    Reads a stated bit rather than inferring one, and is deliberately NOT a
+    reader of the participant override: the citation/prompt side must not
+    become another way to learn which libraries a run may search, and the one
+    manager that installs a global run installs both facts together under a
+    loud all-or-nothing assertion, so the two cannot disagree.
+    """
+    scope = current_source_scope()
+    return bool(scope and scope.subjectless)
 
 
 def citation_active_id(notebook_id: str) -> str:
@@ -562,14 +675,20 @@ def citation_active_id(notebook_id: str) -> str:
     anchor site.  Making it a shared rule is what lets the SEVEN producers that
     build cross-library citations share one answer instead of each deciding.
 
-    Reads ``peer_scope_ceiling_active()`` rather than the participant override:
+    Reads ``subjectless_run_active()`` rather than the participant override:
     the citation/prompt side is not on the override's reader whitelist and must
     not become an eighth way to learn which libraries a run may search.  "Does
-    every participant carry a frozen ceiling of its own" is a strictly weaker
-    question that cannot replace any set, and the one manager that installs a
-    global run installs both facts together, so the two can never disagree.
+    this run have a subject library" is a strictly weaker question that cannot
+    replace any set, and the one manager that installs a global run installs
+    both facts together, so the two can never disagree.
+
+    ⛔ NOT ``peer_scope_ceiling_active()``.  Blanking the origin is only right
+    when there is no current library to badge against; a single-notebook run
+    that froze its own visible source list still has one, and answering "" for
+    it would badge the user's own notes with their own library's name on every
+    citation.
     """
-    return "" if peer_scope_ceiling_active() else notebook_id
+    return "" if subjectless_run_active() else notebook_id
 
 
 def base_scope_restricted() -> bool:

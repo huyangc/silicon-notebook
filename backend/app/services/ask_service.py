@@ -140,15 +140,20 @@ from app.services.source_graph_activation import (
 # PEER mode (D0-5) is read through ``source_scope``, never through the
 # participant-override module: ``ask_service`` hosts registered fail-soft
 # handlers and sits next to authorization, so it must not gain the ability to
-# learn — let alone replace — which libraries a run may search.  "Does every
-# participant carry a frozen source ceiling of its own" is the strictly weaker
-# question, and the one manager that installs a global run installs both facts
-# together (see ``source_scope.peer_scope_ceiling_active``).
+# learn — let alone replace — which libraries a run may search.  "Does this run
+# have a subject library at all" is the strictly weaker question, and the one
+# manager that installs a global run installs both facts together under an
+# all-or-nothing assertion (see ``source_scope.subjectless_run_active``).
+#
+# Every gate in this file asks that MODE question, not the filtering one:
+# ``peer_scope_ceiling_active()`` is also true for a single-notebook run that
+# merely froze its own visible source list, and such a run still has a current
+# library whose Memory, index badge and citation origin stay correct.
 from app.services.source_scope import (
     citation_active_id,
-    peer_scope_ceiling_active,
     source_scope_context,
     source_scope_restricted,
+    subjectless_run_active,
 )
 from app.services.source_element_selection import (
     rank_source_elements,
@@ -196,9 +201,10 @@ def _peer_ceiling_participants(notebook_ids) -> tuple:
     id, so it is a consumption-boundary filter over an already-authorized set,
     not a second way to learn which libraries a run may search — the
     participant-override module stays out of this file (see the import note at
-    the top).  Callers gate on ``peer_scope_ceiling_active()`` first, so a run
-    with no ceilings never reaches it and keeps its historical list byte for
-    byte.
+    the top).  Callers gate on ``subjectless_run_active()`` first, so a run with
+    a subject library -- including a single-notebook run that froze its own
+    visible source list -- never reaches it and keeps its historical list byte
+    for byte.
     """
     from app.services.source_scope import current_source_scope
 
@@ -928,7 +934,7 @@ class AskService:
         subject, so activating it would give that one library an evidence lane
         none of its peers has.  Returns the historical no-op shape.
         """
-        if peer_scope_ceiling_active():
+        if subjectless_run_active():
             return list(chunks), None
         service = getattr(self, "selected_source_graph", None)
         host = getattr(self, "retrieval_contributors", None)
@@ -1387,7 +1393,7 @@ class AskService:
         # ``reasoning_retrieval`` has no memory read of its own): private
         # memories belong to ONE notebook, and a run that answers for a set has
         # no notebook whose private layer it may fold in.
-        if source_scope_restricted() or peer_scope_ceiling_active():
+        if source_scope_restricted() or subjectless_run_active():
             return []
         if self.memory_retriever is None:
             return []
@@ -1764,7 +1770,7 @@ class AskService:
         对等模式恒 False:``index_required`` 是一句**对当前库**的行动号召,而一次
         对等 run 没有当前库——8 个库里哪一个该建索引没有承接方,徽章只会把一个
         用户点不动的提示挂在一次跨库提问上。"""
-        if peer_scope_ceiling_active():
+        if subjectless_run_active():
             return False
         try:
             has_index = self.scale_index_probe(notebook_id)
@@ -2385,7 +2391,7 @@ class AskService:
         raw = llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(
                 question, context_block, history, style_block=style_block,
-                peer_notebooks=peer_scope_ceiling_active())}],
+                peer_notebooks=subjectless_run_active())}],
             ANSWER_SCHEMA_HINT,
             cancel_event=cancel_event,
             **cap_kwargs(llm_client, "answer_max_tokens"),
@@ -2444,7 +2450,7 @@ class AskService:
         raw = llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(
                 question, context_block, history, style_block=style_block,
-                peer_notebooks=peer_scope_ceiling_active())}],
+                peer_notebooks=subjectless_run_active())}],
             ANSWER_SCHEMA_HINT,
             cancel_event=cancel_event,
             **cap_kwargs(llm_client, "answer_max_tokens"),
@@ -2975,7 +2981,7 @@ class AskService:
                 section_total=section_total,
                 style_block=style_block,
                 external_rules=has_external,
-                peer_notebooks=peer_scope_ceiling_active(),
+                peer_notebooks=subjectless_run_active(),
             )}],
             ANSWER_SCHEMA_HINT,
             timeout=self.settings.reasoning_timeout_seconds,
@@ -3302,7 +3308,7 @@ class AskService:
                                       "conclusions only where supported. Preserve section labels. "
                                       "Never treat sampled passages or stored summaries as a full reading. "
                                       "Coverage: " + prepared.coverage_note,
-                                      peer_notebooks=peer_scope_ceiling_active(),
+                                      peer_notebooks=subjectless_run_active(),
                                   ))
                         raw = client.chat_json(
                             [{"role": "user", "content": prompt}],
@@ -4443,7 +4449,7 @@ class AskService:
             # stays a consumption-boundary filter rather than a second way to
             # learn a participant set.  (The other half -- analysing the PEERS'
             # workbooks -- is a federation gap registered in `fangan_todo.md`.)
-            if peer_scope_ceiling_active():
+            if subjectless_run_active():
                 participant_notebook_ids = _peer_ceiling_participants(
                     participant_notebook_ids
                 )

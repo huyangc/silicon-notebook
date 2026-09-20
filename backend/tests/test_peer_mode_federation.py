@@ -34,7 +34,7 @@ from app.services.retrieval_participants import (
 )
 from app.services.retrieval_run import retrieval_run
 from app.services.source_scope import (
-    peer_scope_ceiling_active, source_scope_context,
+    peer_scope_ceiling_active, source_scope_context, subjectless_run_active,
 )
 
 
@@ -167,10 +167,14 @@ def _ceilings(notebook_ids) -> dict:
 
 
 class _peer_run:
-    """名义 active + 覆盖 + 逐库天花板,与 PR-D1 的安装形状同形。
+    """名义 active + 覆盖 + 逐库天花板 + 无主体位,与 PR-D1 的安装形状同形。
 
     ``source_scope_context`` 只提交第三个维度,所以 ``restricted`` /
     ``ceiling_active`` 恒 False、两份 payload 恒 None——1.5 冻结的那组后果。
+
+    生产上这四件事只由 ``global_run.global_ask_run`` 一次装齐;这里逐件装是为了
+    让 ``with_ceilings=False`` / ``with_override=False`` 两条负对照能只拆掉其中
+    一件,证明「必须由一个管理器同时安装」不是一句空话。
     """
 
     def __init__(self, notebook_ids, *, actor=_ACTOR, override_actor=None,
@@ -189,6 +193,7 @@ class _peer_run:
             managers.append(source_scope_context(
                 active, None, None,
                 notebook_source_ceilings=_ceilings(self.notebook_ids),
+                subjectless=True,
             ))
         if self.with_override:
             managers.append(participant_override(
@@ -525,32 +530,39 @@ def test_precheck_is_a_no_op_without_an_override():
 
 def test_peer_mode_predicates_agree():
     """检索层的 ``federated_ask_active()`` 与引用/提示词侧的
-    ``peer_scope_ceiling_active()`` 在装好的全局 run 内同为 True、都不装时同为
-    False。
+    ``subjectless_run_active()`` 在装好的全局 run 内同为 True、都不装时同为
+    False。``peer_scope_ceiling_active()``(过滤口径)在这组形状下与它们同值,
+    但那是巧合而非合同——见
+    ``test_global_run.py::test_single_notebook_ceiling_is_not_subjectless``。
 
     两者刻意不是同一个判据:``ask_service`` 是三处已登记 fail-soft handler 的宿主
     也是鉴权相邻面,把它放进覆盖模块的读者白名单等于把「能替换参与集」的权限交给
-    整条 Ask 主干;而 ``peer_scope_ceiling_active()`` 只回答「有没有逐库天花板」,
-    它替换不了任何集合。它们不漂移是因为 PR-D1 的同一个上下文管理器同时安装两
-    者——这条用例是那个构造前提的守卫。
+    整条 Ask 主干;而 ``subjectless_run_active()`` 只回答「这次 run 有没有当前库」,
+    它替换不了任何集合。它们不漂移是因为 ``global_run.global_ask_run`` 这一个上下文
+    管理器同时安装两者、且安装时对全映射响亮断言——这条用例是那个构造前提的守卫。
     """
     ids = ("nb-a", "nb-b")
 
     assert federated_ask_active() is False
     assert peer_scope_ceiling_active() is False
+    assert subjectless_run_active() is False
 
     with _peer_run(ids):
         assert federated_ask_active() is True
         assert peer_scope_ceiling_active() is True
+        assert subjectless_run_active() is True
 
     assert federated_ask_active() is False
     assert peer_scope_ceiling_active() is False
+    assert subjectless_run_active() is False
 
     # 负对照:只装一半时两者会分歧——这正是「必须由一个管理器同时安装」的理由,
     # 也证明上面的相等不是两个恒真的表达式凑出来的。
     with _peer_run(ids, with_ceilings=False):
         assert federated_ask_active() is True
         assert peer_scope_ceiling_active() is False
+        assert subjectless_run_active() is False
     with _peer_run(ids, with_override=False):
         assert federated_ask_active() is False
         assert peer_scope_ceiling_active() is True
+        assert subjectless_run_active() is True

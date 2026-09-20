@@ -43,12 +43,18 @@ def peer_scope():
 
     名义 active **也**在里面——少了它,``filter_retrieval_items`` 对它会落到
     ``ceiling_active=False → return allowed`` 而完全不设防。
+
+    ``subjectless=True`` 是 ``citation_active_id`` 真正读的那一位:归一口径只在
+    「这次 run 没有当前库」时才换成空串,而不是在「有人冻结了来源清单」时。一个
+    冻结了自己来源清单的单库 run 仍然有当前库,抹掉它的引用归属会让用户自己的
+    笔记被打上自己库的名字。
     """
     return source_scope_context(
         ACTIVE, None, None,
         notebook_source_ceilings={
             ACTIVE: {"s-active"}, PEER: {"s-peer"},
         },
+        subjectless=True,
     )
 
 
