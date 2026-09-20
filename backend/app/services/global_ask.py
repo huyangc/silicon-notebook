@@ -24,6 +24,7 @@ from app.models.global_ask import (
     GLOBAL_ASK_PAGE_SIZE, GlobalAskSkippedNotebook, global_answer_citations,
 )
 from app.models.sources import SourceElement
+from app.repositories.global_ask_ports import ReplacedJobUnavailable
 from app.services.ask_followup import followup_resolution_context
 from app.services.ask_modes import UnknownAskMode
 from app.services.cancellation import AskCancelled, raise_if_cancelled
@@ -119,6 +120,9 @@ def _is_external_citation(citation) -> bool:
         and not citation.source_id
         and not citation.element_id
     )
+
+
+_REPLACE_UNAVAILABLE = "上一条问题已无法替换，请刷新对话后重新提交。"
 
 
 class GlobalAskError(Exception):
@@ -865,6 +869,21 @@ class GlobalAskService:
         self._check(job.resolved_notebook_ids, user_id, allowed_notebook_ids, authority_check)
         return job
 
+    def _check_replaceable(self, payload: GlobalAskRequest, user_id) -> None:
+        """Refuse an "edit and re-send" early, before any model call is spent.
+
+        The binding check -- newest job of the conversation, still ``cancelled``
+        -- is made again inside the insert transaction, under the conversation
+        row lock (``GlobalAskStore._discard_replaced``); this one only keeps an
+        obviously stale request from paying for a reasoning preflight first.
+        """
+        if not payload.replaces_job_id:
+            return
+        old = self.store.job(payload.replaces_job_id, user_id)
+        if (old is None or not payload.conversation_id
+                or old.conversation_id != payload.conversation_id or old.status != "cancelled"):
+            raise GlobalAskError(409, _REPLACE_UNAVAILABLE)
+
     def start(self, payload: GlobalAskRequest, *, user_id, allowed_notebook_ids=None,
               submitted_via="web", authority_check=None):
         spec = self._resolve_mode(payload.mode)
@@ -875,6 +894,9 @@ class GlobalAskService:
         )
         if replayed is not None:
             return replayed
+        # AFTER the replay: a retry whose first attempt already replaced the old
+        # job names a row that no longer exists, and must get its job back.
+        self._check_replaceable(payload, user_id)
         with self._lock:
             if self._closed:
                 raise GlobalAskError(503, "服务正在关闭，请稍后重新提交问题。")
@@ -933,6 +955,7 @@ class GlobalAskService:
                 self.store.create(
                     job, user_id, payload.client_request_id, request_json, submitted_via,
                     new_conversation=conversation is None,
+                    replaces_job_id=payload.replaces_job_id or None,
                 )
                 created = True
                 with self._lock:
@@ -945,6 +968,9 @@ class GlobalAskService:
                     self._events[job.job_id] = event
                     self._workers[job.job_id] = worker
                     worker.start()
+            except ReplacedJobUnavailable as exc:
+                # The insert rolled back with it: nothing was created or deleted.
+                raise GlobalAskError(409, _REPLACE_UNAVAILABLE) from exc
             except Exception as exc:
                 if created:
                     with self._lock:

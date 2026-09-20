@@ -40,6 +40,12 @@ class GlobalAskRequest(BaseModel):
     mode: str = "chunk"
     intent: AskIntentConfirmation | None = None
     retrieval_effort: RetrievalEffort = DEFAULT_RETRIEVAL_EFFORT
+    # "Edit and re-send": the stopped job this submission takes the place of.
+    # Only the conversation's NEWEST job, and only while it is ``cancelled``,
+    # can be named; the row is deleted in the same transaction that inserts the
+    # new job (``GlobalAskStore.create``). Part of the request's identity, so a
+    # retry under the same ``client_request_id`` replays instead of re-deleting.
+    replaces_job_id: str | None = Field(default=None, max_length=GLOBAL_ASK_ID_MAX_CHARS)
 
     @field_validator("question")
     @classmethod
