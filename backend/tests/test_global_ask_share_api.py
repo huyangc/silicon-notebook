@@ -143,6 +143,15 @@ def _job_payload(job_id: str, conversation_id: str, *, question: str,
         "degraded_notebook_ids": ["NB-degraded"],
     }
     shape = answer if answer is not None else _answer()
+    # The fixture anchor's placeholder library becomes this turn's real one: the
+    # re-check reads the libraries named on anchors and citations too (the public
+    # page renders anchors first), so a made-up id there is a library the sharer
+    # can never read and every link built from the fixture would be born dead.
+    owning = (cited or resolved or [""])[0]
+    for key in ("anchors", "citations"):
+        for item in shape.get(key) or ():
+            if isinstance(item, dict) and item.get("notebook_id") == "NB-secret":
+                item["notebook_id"] = owning
     # 旧形状的轮次写在 ``response`` 下(引擎切换之前的持久化),新形状写 ``answer``。
     body["response" if legacy else "answer"] = shape
     return body
@@ -457,6 +466,65 @@ def test_a_snapshot_that_cited_nothing_re_checks_its_resolved_libraries(client):
         f"/api/notebooks/{nb}/grants/{grants[nb]}", headers=owner
     ).status_code == 204
     assert client.get(f"/api/public/conversations/{token}").status_code == 404
+
+
+def test_a_zero_citation_turn_is_re_checked_even_when_another_turn_cites(client):
+    """退化到 resolved 是**逐轮**判的,不是整份快照判一次。
+
+    第一轮引用库 A;第二轮是枚举型回答——引擎把它的 citations 清空了,正文却仍是
+    库 B 的文档清单。整份判空时,第一轮的引用会把退化分支关掉,库 B 从此不被复核:
+    分享者失去库 B 的读权之后,这条链接照样把库 B 的内容端给匿名读者(安全评审 P1)。
+    """
+    owner, _owner_id = _new_user(client)
+    nb_a, nb_b = _notebook(client, owner), _notebook(client, owner)
+    reader, reader_id, group_id, grants = _group_granted_reader(
+        client, owner, [nb_a, nb_b])
+    enumeration = {"conclusion": "库里有这些文档:甲、乙。",
+                   "answer": "库里有这些文档:甲、乙。",
+                   "evidence_level": "overview", "anchors": [], "citations": []}
+    cid = _seed(reader_id, [
+        _job_payload("job-a", "x", question="问题一", cited=[nb_a], resolved=[nb_a]),
+        _job_payload("job-b", "x", question="列出文档", cited=[], resolved=[nb_b],
+                     answer=enumeration),
+    ])
+    token = _share(client, reader, cid, "job-b")["share_token"]
+    page = f"/api/public/conversations/{token}"
+    assert client.get(page).status_code == 200
+
+    assert client.delete(
+        f"/api/notebooks/{nb_b}/grants/{grants[nb_b]}", headers=owner
+    ).status_code == 204
+    assert client.get(page).status_code == 404
+
+    _grant_notebook_to_group(client, owner, nb_b, group_id)
+    assert client.get(page).status_code == 200
+
+
+def test_a_library_named_only_on_an_anchor_is_re_checked(client):
+    """公开页锚点优先渲染,所以复核集合不能只从 citations 推。
+
+    一条证据的所属库只落在锚点上、``cited_notebook_ids`` 里没有它时,只读 cited 的
+    复核会放过这个库,而公开页展示的正是这条锚点的标题与原文片段。
+    """
+    owner, _owner_id = _new_user(client)
+    nb_cited, nb_anchor = _notebook(client, owner), _notebook(client, owner)
+    reader, reader_id, _group_id, grants = _group_granted_reader(
+        client, owner, [nb_cited, nb_anchor])
+    answer = _answer()
+    assert answer["anchors"], "fixture answer must carry an anchor for this case"
+    answer["anchors"][0]["notebook_id"] = nb_anchor
+    cid = _seed(reader_id, [
+        _job_payload("job-a", "x", question="问题", cited=[nb_cited],
+                     resolved=[nb_cited, nb_anchor], answer=answer),
+    ])
+    token = _share(client, reader, cid, "job-a")["share_token"]
+    page = f"/api/public/conversations/{token}"
+    assert client.get(page).status_code == 200
+
+    assert client.delete(
+        f"/api/notebooks/{nb_anchor}/grants/{grants[nb_anchor]}", headers=owner
+    ).status_code == 204
+    assert client.get(page).status_code == 404
 
 
 def test_sharing_is_refused_while_a_referenced_library_is_unreadable(client):

@@ -429,23 +429,53 @@ def _payload_notebook_ids(payload: Any, key: str) -> list[str]:
     return []
 
 
-def _snapshot_notebook_ids(turns: list[tuple[list[str], list[str]]]) -> set[str]:
-    """The libraries ONE published snapshot has to re-authorize, per turn pairs
-    of ``(cited ids, resolved ids)``.
+def _turn_evidence_notebook_ids(payload: Any) -> set[str]:
+    """Every library whose material ONE stored turn can put in front of a reader.
 
-    Citations are the tight answer: they name the libraries whose material the
-    reader can actually see. The fallback to ``resolved`` exists so that "this
-    snapshot cited nothing" cannot degrade into "this snapshot needs no
-    re-check" -- a conversation whose every turn came back ungrounded still ran
-    over a resolved participant set, and a link built from it must die with the
-    sharer's access to those libraries exactly like any other. Only a snapshot
-    with no library on either axis re-checks nothing, because there is then no
-    library whose access could have been revoked.
+    Read off both places a library can be named, not one: the job's
+    ``cited_notebook_ids`` (derived from citations) AND the ``notebook_id`` on
+    each anchor and citation of the stored answer. The public projection renders
+    ANCHORS first and only falls back to citations, so a set built from
+    citations alone would be re-authorizing a different list than the one the
+    page discloses -- two sources for one fact is where this re-check would
+    eventually leak.
     """
-    cited = {item for cited_ids, _resolved in turns for item in cited_ids}
-    if cited:
-        return cited
-    return {item for _cited, resolved_ids in turns for item in resolved_ids}
+    row = payload if isinstance(payload, dict) else {}
+    found = set(_payload_notebook_ids(row, "cited_notebook_ids"))
+    for shape in (row.get("answer"), row.get("response")):
+        if not isinstance(shape, dict):
+            continue
+        for key in ("anchors", "citations"):
+            for item in shape.get(key) or ():
+                if isinstance(item, dict) and item.get("notebook_id"):
+                    found.add(str(item["notebook_id"]))
+    return found
+
+
+def _snapshot_notebook_ids(payloads: list) -> set[str]:
+    """The libraries ONE published snapshot has to re-authorize.
+
+    PER TURN, then unioned: each turn contributes the libraries its evidence
+    names, or -- when it names none -- every library it ran over
+    (``resolved_notebook_ids``). The fallback is decided turn by turn on
+    purpose. Deciding it once for the whole snapshot let a single cited turn
+    switch the fallback off for all the others, and a turn with no citations is
+    not a turn with no library content: an enumeration answer has its citations
+    cleared while its body is still that library's document list, and a turn
+    whose only citations are external or memory-backed names no library at all.
+    Such a turn would then keep being served after the sharer lost access to the
+    library it was written from.
+
+    Only a turn with no library on either axis contributes nothing, because
+    there is then no library whose access could have been revoked.
+    """
+    scope: set[str] = set()
+    for payload in payloads:
+        scope |= (
+            _turn_evidence_notebook_ids(payload)
+            or set(_payload_notebook_ids(payload, "resolved_notebook_ids"))
+        )
+    return scope
 
 
 def _public_turn_row(job: Any) -> dict[str, Any]:
@@ -1305,6 +1335,13 @@ class GlobalAskService:
         # here or the workspace shows the SUBMISSION time as the answer time.
         if not response.answered_at:
             response.answered_at = _now()
+        # Same bypass, same consequence: ``save_answer`` is what mints an
+        # ``answer_id``, so a detached turn comes back with none. The shared
+        # answer view keys on it -- it resets its citation card per answer and
+        # only offers per-answer actions (share) when there is one -- and a
+        # global answer's identity IS its job.
+        if not response.answer_id:
+            response.answer_id = job.job_id
         job.answer = response
         # ``answer.reasoning_trace`` is the authority once the run finishes;
         # keeping the streamed copy too would double the persisted payload.
@@ -1616,7 +1653,7 @@ class GlobalAskService:
         jobs = self.store.jobs(conversation_id, user_id, MAX_TURNS, 0)
         self._check(
             _snapshot_notebook_ids([
-                (job.cited_notebook_ids, job.resolved_notebook_ids)
+                job.model_dump(mode="json")
                 for job in jobs if job is not None and job.status == "done"
             ]),
             user_id,
@@ -1693,11 +1730,7 @@ class GlobalAskService:
             # and a link that can never be re-checked must not be served.
             return None
         jobs = [job for job in (row.get("jobs") or []) if isinstance(job, dict)]
-        scope = _snapshot_notebook_ids([
-            (_payload_notebook_ids(job.get("payload"), "cited_notebook_ids"),
-             _payload_notebook_ids(job.get("payload"), "resolved_notebook_ids"))
-            for job in jobs
-        ])
+        scope = _snapshot_notebook_ids([job.get("payload") for job in jobs])
         try:
             self._check(scope, creator)
         except GlobalAskError:
