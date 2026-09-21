@@ -175,6 +175,14 @@ The backend can stay on `127.0.0.1:8000` (the proxy reaches it locally); only th
 port needs to be network-reachable. Set `BACKEND_PROXY_TARGET` if the backend isn't on
 `127.0.0.1:8000`.
 
+**Serving the app at `http://<IP>:3000` is a supported deployment, but it is not a browser Secure Context:**
+browsers expose `crypto.randomUUID`, `navigator.clipboard`, Service Workers and similar APIs only under HTTPS
+or on `localhost`. Product code carries a fallback for each (`newClientRequestId()` for ids, `copyTextSafely()`
+for copying; see `docs/development.md`), so features keep working; under plain HTTP copying uses the legacy
+hidden-textarea path, which an individual browser policy may still refuse. For a long-lived multi-user
+installation, put TLS in front (terminating HTTPS at a reverse proxy is enough; neither the frontend nor the
+backend needs a configuration change).
+
 **Alternative — frontend and backend on different hosts (two-origin, direct):** point the
 frontend at the backend's reachable URL and allow its origin on the backend:
 

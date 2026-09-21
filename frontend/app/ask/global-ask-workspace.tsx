@@ -25,6 +25,7 @@ import { NotebookScopePicker } from "./notebook-scope-picker";
 import { GlobalCoverageReceipt } from "./global-coverage-receipt";
 import { replaceableTurn, useGlobalAsk } from "./use-global-ask";
 import { useCopyResult } from "../copy-result";
+import { copyTextSafely } from "../copy-text";
 import { STOP_CONTROL_CLASS, StopGlyph } from "../stop-control";
 import { StoppedTurnNotice } from "../stopped-turn";
 import { notebookHash } from "../memory-model";
@@ -166,8 +167,10 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
     copyFlight.current = ticket;
     setCopying(job.job_id);
     try {
-      await navigator.clipboard.writeText(job.response?.answer ?? "");
-      if (ticket === copyOwner.current) copyResult.report(job.job_id, true);
+      // `navigator.clipboard` 同样是 Secure Context 限定的：http://<IP> 部署里它是
+      // undefined。`copyTextSafely` 自带隐藏 textarea 的退路，并且从不抛。
+      const copied = await copyTextSafely(job.response?.answer ?? "");
+      if (ticket === copyOwner.current) copyResult.report(job.job_id, copied);
     } catch {
       if (ticket === copyOwner.current) copyResult.report(job.job_id, false);
     } finally {

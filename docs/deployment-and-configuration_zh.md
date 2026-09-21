@@ -143,6 +143,12 @@ NEXT_PUBLIC_API_BASE_URL=/api
 后端可留在 `127.0.0.1:8000`(反代在本机转发),只需前端端口对外可达。后端不在
 `127.0.0.1:8000` 时用 `BACKEND_PROXY_TARGET` 覆盖。
 
+**用 `http://<IP>:3000` 访问是受支持的部署,但它不是浏览器的 Secure Context:** 浏览器只在 HTTPS 或
+`localhost` 下暴露 `crypto.randomUUID`、`navigator.clipboard`、Service Worker 等 API。产品代码对这些一律
+带退路(id 走 `newClientRequestId()`、复制走 `copyTextSafely()`,见 `docs/development_zh.md`),所以功能
+不受影响;但 HTTP 下复制走的是隐藏文本框的旧式路径,个别浏览器策略可能拒绝。面向多人长期使用时建议在
+前面加一层 TLS(反向代理终止 HTTPS 即可,前端与后端都不需要改配置)。
+
 **另一种——前后端在不同 host(双 origin 直连):** 把前端指向后端可达 URL,并在后端放行前端来源:
 
 ```bash

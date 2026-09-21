@@ -1298,6 +1298,45 @@ test("cancelling the understanding step after the stream returned still creates 
 
 // ---- 提交与停止：与笔记本内问答同一套风格（规则见 app/stopped-turn.tsx）----
 
+// 生产事故（2026-09-21）：前端挂在 http://<内网 IP>:3000 上。`crypto.randomUUID` 是 Secure
+// Context 限定 API，那里是 undefined；提交路径上曾经裸调它，于是每一次提问都在发出请求
+// 之前同步抛 TypeError——通用问答无声卡死，逐步推理被外层 catch 接成一句毫不相干的
+// 「问题理解没能完成，请重试」。localhost 永远复现不了，所以这里显式摘掉它。
+test.each(["chunk", "reasoning"] as const)("a %s question still submits when crypto.randomUUID does not exist", async (engine) => {
+  const original = Object.getOwnPropertyDescriptor(globalThis.crypto, "randomUUID")
+    ?? Object.getOwnPropertyDescriptor(Object.getPrototypeOf(globalThis.crypto), "randomUUID");
+  Object.defineProperty(globalThis.crypto, "randomUUID", { configurable: true, value: undefined });
+  try {
+    const { result } = renderHook(() => useGlobalAsk({ syncUrl: false }));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.selectMode(engine));
+    act(() => result.current.setDraft("裸 IP 上的提问"));
+    await act(async () => { await result.current.submit(); });
+    expect(result.current.error).toBe("");
+    expect(api.ask).toHaveBeenCalledTimes(1);
+    expect(api.ask.mock.calls[0][0].client_request_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(result.current.turns).toHaveLength(1);
+    expect(result.current.submitting).toBe(false);
+  } finally {
+    if (original) Object.defineProperty(globalThis.crypto, "randomUUID", original);
+    else delete (globalThis.crypto as { randomUUID?: unknown }).randomUUID;
+  }
+});
+
+test("a submission that fails synchronously returns the question instead of stranding the composer", async () => {
+  // 提交路径上任何一句同步抛错，都必须落进同一个收尾：pending 轮撤掉、问题回输入框、
+  // 输入区解锁、给出提交失败——而不是 flight / submitting 永远不复位。
+  api.ask.mockImplementation(() => { throw new TypeError("crypto.randomUUID is not a function"); });
+  const { result } = renderHook(() => useGlobalAsk({ syncUrl: false }));
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  act(() => result.current.setDraft("同步失败的提问"));
+  await act(async () => { await result.current.submit(); });
+  expect(result.current.submitting).toBe(false);
+  expect(result.current.pending).toBeNull();
+  expect(result.current.draft).toBe("同步失败的提问");
+  expect(result.current.error).not.toBe("");
+});
+
 test("the question is on screen the moment it is sent, before the job exists", async () => {
   const submission = deferred<GlobalJob>();
   api.ask.mockReturnValue(submission.promise);
