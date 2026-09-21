@@ -118,24 +118,37 @@ async def preview_global_ask_intent_stream(
     same way ``knowhow_routes``/``memory_routes`` each carry their own stage
     name rather than sharing one across features.
 
-    TWO PHASES, exactly like ``ask_routes.preview_ask_intent_stream``: scope
-    resolution and the authority re-check run BEFORE the stream opens, so a
-    foreign conversation, a revoked share or an over-wide scope keeps its real
-    404/422 and its real Chinese sentence. Only the model call -- the slow
-    part the heartbeat exists for -- runs inside the stream. Running both
-    inside the stream is what the first cut did, and it turned every one of
-    those refusals into a 200 plus a content-free
-    ``{"event": "error", "error": "global_ask_intent_failed"}`` frame, which a
-    client cannot tell apart from "the model service is down".
+    ONE STREAM, BOTH PHASES. Scope resolution + the authority re-check, and then
+    the model call, both run inside the streamed work: see ``run_preview``. A
+    refusal written for the user (foreign conversation, revoked share, over-wide
+    scope) reaches the client as ``{"event":"error", "status":…, "message":…}``
+    with its real status and Chinese sentence; anything else stays the
+    content-free ``global_ask_intent_failed`` and is logged by class name.
     """
     cancel_event = threading.Event()
     service = global_ask_service()
-    # Before the first frame: the response status is still negotiable here.
-    prepared = await asyncio.to_thread(
-        _call, service.prepare_intent_preview, payload, user_id=user.id,
-    )
 
     def run_preview() -> QueryIntentContract:
+        # BOTH phases run inside the stream, so the heartbeat covers both.
+        #
+        # Scope resolution used to run before the first frame, to keep its
+        # refusals' real status codes. But it is not cheap here the way it is
+        # for one notebook: it re-checks authority twice and freezes the visible
+        # source list of up to eight libraries, some of them tens of thousands
+        # of sources. On a production database that is SECONDS during which
+        # this response has sent no header and no byte -- and a proxy or
+        # gateway with a short first-byte/idle timeout drops the connection,
+        # which the browser can only report as "问题理解没能完成". The notebook
+        # stream answers in milliseconds and heartbeats from then on; this one
+        # had no heartbeat for the longest silent stretch it has.
+        #
+        # The refusals are not lost: ``task_event_stream`` carries a
+        # ``user_error``'s status and Chinese sentence in the error frame, and
+        # the blocking ``POST /intent`` above keeps real status codes for
+        # clients that want them.
+        prepared = _call(service.prepare_intent_preview, payload, user_id=user.id)
+        if cancel_event.is_set():
+            raise AskCancelled()
         return _call(
             service.run_intent_preview, prepared, cancel_event=cancel_event,
         )

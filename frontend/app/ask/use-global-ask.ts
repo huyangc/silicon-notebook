@@ -29,6 +29,8 @@ import type { NotebookSummary } from "../workspace-model.ts";
 const POLL_MIN_INTERVAL_MS = 1200;
 const POLL_MAX_INTERVAL_MS = 15000;
 const POLL_BACKOFF_FACTOR = 2;
+/** 轻提示停留的时间：够读完六个字，短到不挡下一次操作。 */
+const NOTICE_MS = 2600;
 
 /** 全局问答可选的引擎:**只有内置那两个**。部署扩展引擎不参与——后端对全局
  *  问答一律 422,所以界面压根不该把它们摆出来(扩展组因此自然为空)。 */
@@ -137,6 +139,11 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
   const [submitting, setSubmitting] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState("");
+  // 停止 / 取消之后那句一闪而过的轻提示——与笔记本内问答同一组措辞（那边走页面的 toast，
+  // 这里没有宿主页可借，自己带一条会自动消失的状态行）。结果本身已经落在界面上（问题
+  // 回到了输入框），这句话只回答「刚才那一下到底生效了没有」。
+  const [notice, setNotice] = useState("");
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [pollError, setPollError] = useState("");
   const [historyError, setHistoryError] = useState("");
   const [pollRevision, setPollRevision] = useState(0);
@@ -188,6 +195,12 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     setTraceSeeds({});
     if (retired && options.returnQuestion) setDraft(retired.question);
   }, []);
+
+  function flashNotice(text: string) {
+    clearTimeout(noticeTimer.current);
+    setNotice(text);
+    noticeTimer.current = setTimeout(() => { if (mounted.current) setNotice(""); }, NOTICE_MS);
+  }
 
   function showPending(next: GlobalPendingTurn | null) {
     pendingRef.current = next;
@@ -253,7 +266,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
   useEffect(() => {
     mounted.current = true;
     void load();
-    return () => { mounted.current = false; ++owner.current; ++historyVersion.current; };
+    return () => { mounted.current = false; ++owner.current; ++historyVersion.current; clearTimeout(noticeTimer.current); };
   }, [load]);
 
   useEffect(() => {
@@ -583,7 +596,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
       if (!mounted.current || ticket !== owner.current) return;
       // `signal.aborted` 也要查：流可能已经返回、而用户恰在这一瞬点了「取消问题
       // 理解」。只 abort 请求不查这一下，作业照样会被建出来——取消变成了假的。
-      if (controller.signal.aborted) { returnQuestion(); return; }
+      if (controller.signal.aborted) { returnQuestion(); flashNotice("已取消问题理解"); return; }
       const understandingMs = Math.max(0, Date.now() - startedAt);
       if (contract.needs_clarification) {
         updatePendingTrace((steps) => replaceLastIntentStep(steps, intentClarifyStep(contract, understandingMs)));
@@ -603,8 +616,9 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
       if (!mounted.current || ticket !== owner.current) return;
       // 取消也好、失败也好，此刻都还没有任何过程输出：问题回到输入框。
       returnQuestion();
-      // 用户自己按下的「取消问题理解」不是失败，不上错误条。
-      if (!controller.signal.aborted) setError(toUserMessage(cause, "问题理解没能完成，请重试"));
+      // 用户自己按下的「取消问题理解」不是失败，不上错误条，只给一句轻提示。
+      if (controller.signal.aborted) flashNotice("已取消问题理解");
+      else setError(toUserMessage(cause, "问题理解没能完成，请重试"));
     } finally {
       // 判据是「自己这次预检是否仍是当前那一次」，**不看 ticket**：owner 换过
       // （load / 切换对话 / 新建对话）时那条路径已经 retireIntent 收过状态了，而
@@ -638,6 +652,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
   function cancelIntent() {
     setIntentReview(null);
     returnQuestion();
+    flashNotice("已返回修改问题");
   }
 
   async function submitJob(question: string, intent?: AskIntentConfirmation) {
@@ -851,6 +866,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     if (synced === "gone") {
       dropConversationIdentity(target.conversation_id);
       handBack(target.question);
+      flashNotice("已中断回答");
       return null;
     }
     applyConversation(synced);
@@ -858,6 +874,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     // 还在跑、而取消请求又没成：这就是一次失败的停止，停止键留着重试。
     if (still) return !answered && still.status === "running" ? "failed" : still;
     handBack(target.question);
+    flashNotice("已中断回答");
     return null;
   }
 
@@ -954,7 +971,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
 
   return {
     notebooks, conversations, conversationId, conversationTitle, turns, scope, setScope, draft, setDraft,
-    loading, opening, openFailed, submitting, stopping, error, pollError, historyError, running,
+    loading, opening, openFailed, submitting, stopping, error, notice, pollError, historyError, running,
     pending, traceSeeds,
     moreHistory, loadingHistory, turnOffset, loadingTurns, loadMoreHistory, loadMoreTurns,
     load, openConversation, newConversation, submit, stop, sendFeedback, updateConversation, removeConversation,
