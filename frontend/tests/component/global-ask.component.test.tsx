@@ -1352,6 +1352,8 @@ test("stopping during understanding returns the question to the input and leaves
   expect(result.current.draft).toBe("还没想好的问题");
   expect(result.current.pending).toBeNull();
   expect(result.current.error).toBe("");
+  // 与笔记本内问答同一句轻提示：生效了，但不是失败。
+  expect(result.current.notice).toBe("已取消问题理解");
   expect(api.ask).not.toHaveBeenCalled();
 });
 
@@ -1469,6 +1471,47 @@ test("discarding a loaded turn moves the older-turns cursor with it", async () =
   expect(result.current.conversationId).toBe("conv-a");
   await act(async () => { await result.current.loadMoreTurns(); });
   expect(api.detail).toHaveBeenLastCalledWith("conv-a", 1);
+});
+
+test("stopping before any output says so with the notebook's own words, then the notice clears itself", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.detail.mockResolvedValueOnce(detail("conv-a", [job()])).mockRejectedValue(conversationGone());
+  api.poll.mockReturnValue(new Promise(() => {}));
+  api.cancel.mockResolvedValue(job("cancelled"));
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+  await act(async () => { await result.current.stop(); });
+  expect(result.current.notice).toBe("已中断回答");
+  expect(result.current.error).toBe("");
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  expect(result.current.notice).toBe("");
+});
+
+test("a job stopped mid-process gets no toast: the record left in the transcript says it", async () => {
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  const progressed = { ...job(), searched_notebook_ids: ["nb-0"] };
+  api.detail.mockResolvedValue(detail("conv-a", [progressed]));
+  api.poll.mockReturnValue(new Promise(() => {}));
+  api.cancel.mockResolvedValue({ ...progressed, status: "cancelled" });
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.running).toBeTruthy());
+  await act(async () => { await result.current.stop(); });
+  expect(result.current.turns[0].status).toBe("cancelled");
+  expect(result.current.notice).toBe("");
+});
+
+test("returning from the understanding review says so", async () => {
+  api.intent.mockImplementation((question: string) => Promise.resolve(clarifyingContract(question)));
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  act(() => result.current.selectMode("reasoning"));
+  act(() => result.current.setDraft("哪个更耐低温"));
+  await act(async () => { await result.current.submit(); });
+  expect(result.current.intentReview).not.toBeNull();
+  act(() => result.current.cancelIntent());
+  expect(result.current.notice).toBe("已返回修改问题");
+  expect(result.current.draft).toBe("哪个更耐低温");
 });
 
 test("a follow-up stopped before any output keeps the conversation and its earlier turns", async () => {

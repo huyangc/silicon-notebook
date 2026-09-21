@@ -81,3 +81,48 @@ test("request task stream keeps draining when requestAnimationFrame is suspended
 
   assert.deepEqual(result, { ok: true });
 });
+
+
+test("an error frame carrying a user refusal surfaces that sentence and its status", async () => {
+  // 把校验放进了心跳覆盖的那段工作里的流，拒绝只能经错误帧带出来：有整句就原样给用户，
+  // 不退成调用方的兜底文案（那句话与「模型服务挂了」无从区分）。
+  installWindow(true);
+  const { httpErrorStatus } = await import("../../app/errors.ts");
+  globalThis.fetch = async () => response(
+    { event: "started", stage: "global_ask_intent", elapsed_ms: 0 },
+    { event: "error", stage: "global_ask_intent", error: "global_ask_intent_failed", status: 404, message: "对话不存在，请刷新列表。" },
+  );
+  await assert.rejects(
+    requestTaskStream("/global-ask/intent/stream", { tag: "test" }, { fallbackMessage: "问题理解没能完成，请重试" }),
+    (error) => error.message === "对话不存在，请刷新列表。" && httpErrorStatus(error) === 404,
+  );
+});
+
+test("a content-free error frame and an early end both fall back, and are told apart in the console", async () => {
+  installWindow(true);
+  const logged = [];
+  const originalError = console.error;
+  console.error = (...args) => { logged.push(args.map(String).join(" ")); };
+  try {
+    globalThis.fetch = async () => response(
+      { event: "started", stage: "global_ask_intent", elapsed_ms: 0 },
+      { event: "error", stage: "global_ask_intent", error: "global_ask_intent_failed" },
+    );
+    await assert.rejects(
+      requestTaskStream("/global-ask/intent/stream", { tag: "test" }, { fallbackMessage: "问题理解没能完成，请重试" }),
+      /问题理解没能完成/,
+    );
+    globalThis.fetch = async () => response(
+      { event: "started", stage: "global_ask_intent", elapsed_ms: 0 },
+      { event: "heartbeat", stage: "global_ask_intent", elapsed_ms: 5000 },
+    );
+    await assert.rejects(
+      requestTaskStream("/global-ask/intent/stream", { tag: "test" }, { fallbackMessage: "问题理解没能完成，请重试" }),
+      /问题理解没能完成/,
+    );
+  } finally {
+    console.error = originalError;
+  }
+  assert.ok(logged.some((line) => line.includes("global_ask_intent_failed")), logged.join("\n"));
+  assert.ok(logged.some((line) => line.includes("ended-without-terminal-frame")), logged.join("\n"));
+});

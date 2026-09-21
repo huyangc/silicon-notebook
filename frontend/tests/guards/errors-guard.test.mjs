@@ -112,6 +112,12 @@ const APPROVED_MESSAGE_READS = Object.freeze({
     count: 1,
     reason: "application-owned information modal state is not exception text",
   },
+  "request-task-stream.ts|<module>.requestTaskStream.consume|property|message": {
+    count: 3,
+    reason: "An error FRAME's message, not an Error's: the backend only fills it for a "
+      + "user_error() refusal (4xx + finished Chinese copy; task_stream._user_refusal), it is "
+      + "type- and blank-checked, and it is re-thrown through humanizedError() with its status",
+  },
   "transfer-model.ts|<module>.parseCleanupFailure|property|message": {
     count: 3,
     reason: "409 cleanup payload is schema-checked before its guidance is returned",

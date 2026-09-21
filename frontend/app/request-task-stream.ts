@@ -15,7 +15,9 @@ type TaskStreamEvent<T> =
   | { event: "heartbeat"; stage: string; elapsed_ms: number }
   | { event: "final"; stage: string; result: T }
   | { event: "cancelled"; stage: string }
-  | { event: "error"; stage: string; error: string };
+  // `status` + `message`：后端用 `user_error()` 写给用户的拒绝（4xx + 中文整句）。流把校验也
+  // 放进了心跳覆盖的那段工作里，拒绝就只能经错误帧带出来；其余失败仍然不带任何内容。
+  | { event: "error"; stage: string; error: string; status?: number; message?: string };
 
 export type TaskStreamCallbacks = {
   onHeartbeat?: (elapsedMs: number, stage: string) => void | Promise<void>;
@@ -60,6 +62,9 @@ export async function requestTaskStream<T>(
     }
     if (event.event === "error") {
       logDiagnostic(`task-stream:${event.stage}`, event.error);
+      if (typeof event.message === "string" && event.message.trim()) {
+        throw humanizedError(event.message, event.status);
+      }
       throw humanizedError(callbacks.fallbackMessage ?? "操作没能完成，请重试");
     }
     const exhaustive: never = event;
@@ -78,6 +83,9 @@ export async function requestTaskStream<T>(
   buffer += decoder.decode();
   if (buffer.trim()) await consume(buffer.trim());
   if (!hasFinal) {
+    // 界面上这与「错误帧」是同一句兜底文案，控制台里必须分得开：没有终态帧就结束，
+    // 说明连接是被中途掐断的（代理 / 网关超时、后端判定客户端已断开），不是工作失败。
+    logDiagnostic(`task-stream:${path}`, "ended-without-terminal-frame");
     throw humanizedError(callbacks.fallbackMessage ?? "连接提前结束，请重试");
   }
   return finalResult as T;

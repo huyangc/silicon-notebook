@@ -78,41 +78,136 @@ def test_intent_endpoint_stream_emits_final_contract(tmp_path, monkeypatch):
     assert client.get("/api/global-ask/conversations").json() == []
 
 
-@pytest.mark.parametrize("path", ["/intent", "/intent/stream"])
-def test_a_scope_failure_keeps_its_real_status_on_both_transports(
-    tmp_path, monkeypatch, path,
-):
-    """范围/鉴权失败在**开流之前**refuse,两条传输给出同一个状态码与同一句中文。
+def _frames(response):
+    return [json.loads(line) for line in response.text.splitlines() if line.strip()]
 
-    这两步一旦跑进流里,HTTP 状态就已经是 200 了,每一种拒绝都会退化成一帧内容
-    无关的 ``error``——客户端分不出「这段对话不是你的」和「模型服务挂了」。
+
+def test_a_scope_failure_keeps_its_status_and_sentence_on_both_transports(tmp_path, monkeypatch):
+    """范围/鉴权拒绝:两条传输给出同一个状态码与同一句中文,只是载体不同。
+
+    阻塞端点 ``/intent`` 仍是真实的 HTTP 状态码。流式端点现在**先开流**——范围解析
+    (两次鉴权复核 + 冻结至多 8 个库的可见来源清单,大库上是秒级)放进了心跳覆盖的那段
+    工作里,否则这段时间响应一个字节都没发出去,代理/网关的首字节超时会把连接掐掉,
+    浏览器只能报「问题理解没能完成」。拒绝因此经 ``error`` 帧带出:``status`` +
+    ``message`` 就是 ``user_error`` 的状态码与整句,客户端照样分得清「这段对话不是你的」
+    和「模型服务挂了」。
     """
     client = _client(tmp_path, monkeypatch)
     client.post("/api/notebooks", json={"name": "nb"})
+    body = {"question": "分析一下这批资料", "conversation_id": "gconv-foreign"}
 
-    response = client.post(
-        f"/api/global-ask{path}",
-        json={"question": "分析一下这批资料", "conversation_id": "gconv-foreign"},
-    )
+    blocking = client.post("/api/global-ask/intent", json=body)
+    assert blocking.status_code == 404
+    assert blocking.headers.get("X-User-Message") == "1"
+    assert "对话不存在" in blocking.text
 
-    assert response.status_code == 404
-    assert response.headers.get("X-User-Message") == "1"
-    assert "对话不存在" in response.text
-    # 一帧都没发出去过。
-    assert '"event"' not in response.text
+    streamed = client.post("/api/global-ask/intent/stream", json=body)
+    assert streamed.status_code == 200
+    frames = _frames(streamed)
+    assert frames[0]["event"] == "started"
+    assert frames[-1]["event"] == "error"
+    assert frames[-1]["status"] == 404
+    assert "对话不存在" in frames[-1]["message"]
+    assert frames[-1]["error"] == "global_ask_intent_failed"
+    assert all(frame["event"] != "final" for frame in frames)
 
 
-def test_an_empty_scope_is_refused_before_the_stream_opens(tmp_path, monkeypatch):
-    """没有可访问的笔记本 → 422,而不是 200 + error 帧。"""
+def test_an_empty_scope_is_refused_inside_the_stream_with_its_status(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
-
     response = client.post(
         "/api/global-ask/intent/stream", json={"question": "分析一下这批资料"},
     )
+    assert response.status_code == 200
+    last = _frames(response)[-1]
+    assert last["event"] == "error" and last["status"] == 422
+    assert "没有可访问的笔记本" in last["message"]
 
-    assert response.status_code == 422
-    assert "没有可访问的笔记本" in response.text
-    assert '"event"' not in response.text
+
+def test_the_stream_opens_before_scope_resolution_finishes(monkeypatch):
+    """The first byte must not wait for scope resolution.
+
+    Driven at the ASGI-body level, not through ``TestClient`` (which buffers the
+    whole body): ``started`` has to come out of the iterator WHILE
+    ``prepare_intent_preview`` is still parked.
+    """
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    from app.api import global_ask_routes
+    from app.models.global_ask import GlobalAskIntentPreviewRequest as Payload
+
+    preparing, release = threading.Event(), threading.Event()
+    contract = QueryIntentContract(
+        objective="q", resolved_question="q", intent_type="explain",
+    )
+
+    class Service:
+        def prepare_intent_preview(self, payload, *, user_id):
+            preparing.set()
+            assert release.wait(5)
+            return "prepared"
+
+        def run_intent_preview(self, prepared, *, cancel_event=None):
+            assert prepared == "prepared"
+            return contract
+
+    class Request:
+        async def is_disconnected(self):
+            return False
+
+    monkeypatch.setattr(global_ask_routes, "global_ask_service", lambda: Service())
+
+    async def run():
+        response = await global_ask_routes.preview_global_ask_intent_stream(
+            Payload(question="q"), Request(), SimpleNamespace(id="u"),
+        )
+        body = response.body_iterator
+        first = json.loads(await asyncio.wait_for(body.__anext__(), 5))
+        assert first["event"] == "started"
+        # Scope resolution is running and has NOT finished: the header and the
+        # first frame are already out.
+        assert await asyncio.to_thread(preparing.wait, 5)
+        assert not release.is_set()
+        release.set()
+        rest = [json.loads(line) async for line in body if line.strip()]
+        return rest
+
+    rest = asyncio.run(run())
+    assert rest[-1]["event"] == "final"
+    assert rest[-1]["result"]["resolved_question"] == "q"
+
+
+def test_an_in_stream_failure_is_logged_by_class_name_only(caplog):
+    """The error frame is content-free by design and the request log records a
+    200, so without a log line an in-stream failure leaves no trace at all --
+    and the line must not carry the exception text."""
+    import asyncio
+    import logging
+
+    from app.api.task_stream import task_event_stream
+
+    secret = "SELECT text FROM chunks /private/path 机密原文"
+
+    def work():
+        raise RuntimeError(secret)
+
+    class Request:
+        async def is_disconnected(self):
+            return False
+
+    async def run():
+        return [json.loads(line) async for line in task_event_stream(
+            Request(), work, stage="global_ask_intent", error_code="global_ask_intent_failed",
+        )]
+
+    with caplog.at_level(logging.INFO, logger="silicon_notebook.task_stream"):
+        frames = asyncio.run(run())
+    assert frames[-1] == {"event": "error", "stage": "global_ask_intent", "error": "global_ask_intent_failed"}
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("RuntimeError" in message and "global_ask_intent" in message for message in messages)
+    assert all(secret not in message for message in messages)
+    assert all(record.exc_info is None for record in caplog.records)
 
 
 # -- 服务层:范围/鉴权/只读契约 ------------------------------------------------

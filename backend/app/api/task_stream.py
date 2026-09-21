@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import queue
 import threading
 from collections.abc import Callable
@@ -33,6 +34,8 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 
 from app.services.cancellation import AskCancelled
+
+_LOG = logging.getLogger("silicon_notebook.task_stream")
 
 
 # A protocol keepalive rather than a user-tunable quality/cost rail.  It is
@@ -78,6 +81,25 @@ def _observe_detached_task(task: "asyncio.Task[Any]") -> None:
     task.add_done_callback(consume)
 
 
+def _user_refusal(exc: BaseException) -> "tuple[int, str] | None":
+    """``(status, message)`` when ``exc`` is a refusal written for the user.
+
+    Only ``user_error`` results qualify: a 4xx ``HTTPException`` carrying the
+    trusted-copy header. A 5xx, a bare ``HTTPException`` or anything else stays
+    content-free -- its text was not written to be read by a user and may carry
+    SQL, a path or source content.
+    """
+    from fastapi import HTTPException
+
+    from app.api.deps import USER_MESSAGE_HEADER
+
+    if not isinstance(exc, HTTPException) or not 400 <= exc.status_code < 500:
+        return None
+    if (exc.headers or {}).get(USER_MESSAGE_HEADER) != "1" or not isinstance(exc.detail, str):
+        return None
+    return exc.status_code, exc.detail
+
+
 async def task_event_stream(
     request: Request,
     work: Callable[[], Any],
@@ -114,6 +136,12 @@ async def task_event_stream(
             if await request.is_disconnected():
                 cancellation.set()
                 _observe_detached_task(task)
+                # Logged because from the outside this looks exactly like a
+                # stream that "ended early": a 200 with no terminal frame.
+                _LOG.info(
+                    "task stream %s: client gone after %sms, work cancelled",
+                    stage, max(0, round((monotonic() - started_at) * 1000)),
+                )
                 return
             yield ndjson_line({
                 "event": "heartbeat",
@@ -128,15 +156,26 @@ async def task_event_stream(
             task_observed = True
             yield ndjson_line({"event": "cancelled", "stage": stage})
             return
-        except Exception:
+        except Exception as exc:
             task_observed = True
             # Never serialize exception text. The stable code is useful in the
             # diagnostic console while the caller supplies the human fallback.
-            yield ndjson_line({
-                "event": "error",
-                "stage": stage,
-                "error": error_code,
-            })
+            frame = {"event": "error", "stage": stage, "error": error_code}
+            # ONE exception to "content-free": a refusal the code itself wrote
+            # FOR the user (``user_error``: a 4xx with finished Chinese copy).
+            # A stream that runs its validation inside the work -- so that the
+            # heartbeat covers it -- would otherwise turn "对话不存在" into the
+            # caller's generic fallback, indistinguishable from an outage.
+            refusal = _user_refusal(exc)
+            if refusal is not None:
+                frame["status"], frame["message"] = refusal
+            else:
+                # The class name only (AGENTS.md: no exception text in logs).
+                # Without this line an in-stream failure leaves NO trace
+                # anywhere: the frame is content-free by design and the HTTP
+                # request log records a 200.
+                _LOG.error("task stream %s failed (%s)", stage, type(exc).__name__)
+            yield ndjson_line(frame)
             return
         yield ndjson_line({
             "event": "final",
