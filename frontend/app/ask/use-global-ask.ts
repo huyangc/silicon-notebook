@@ -24,6 +24,7 @@ import {
 } from "../ask-intent-trace.ts";
 import type { ReasoningTraceStep } from "../ask-stream.ts";
 import { hasProcessOutput } from "../stopped-turn.tsx";
+import { newClientRequestId } from "../client-request-id.ts";
 import type { NotebookSummary } from "../workspace-model.ts";
 
 const POLL_MIN_INTERVAL_MS = 1200;
@@ -661,6 +662,11 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     setError("");
     const ticket = owner.current;
     const serial = ++submitSerial.current;
+    let replaces: string | undefined;
+    // ⚠ 从这里起的每一句都在 try 里。幂等键那几行曾经留在 try 外面，其中一句同步抛错
+    // （见 client-request-id.ts）时 `flight` / `submitting` 永远不复位、pending 轮永远
+    // 挂着、问题也不回输入框——界面卡死而没有任何提示。
+    try {
     // 引擎进幂等键：换引擎重问同一个问题是**另一次**提问，不该复用上一次的
     // request id 被后端当成重复提交挡掉。
     // 确认内容里**用户亲手改过的部分**也进幂等键：后端按「问题 / 范围 / 会话 / 引擎」
@@ -674,10 +680,9 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
       : null;
     // 会话里最新的一轮若是被停止的，这次提问就替换它（规则见 `stopped-turn.tsx`）。
     // 进幂等键：同一个问题「替换 A」与「不替换」是两次不同的提交。
-    const replaces = replaceableTurn(currentTurns.current)?.job_id;
+    replaces = replaceableTurn(currentTurns.current)?.job_id;
     const key = JSON.stringify({ question, scope, conversationId, mode: submissionMode, edited, replaces });
-    if (retryRequest.current?.key !== key) retryRequest.current = { key, id: crypto.randomUUID() };
-    try {
+    if (retryRequest.current?.key !== key) retryRequest.current = { key, id: newClientRequestId() };
       const payload = {
         question,
         notebook_scope: scope,

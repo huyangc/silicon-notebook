@@ -20,6 +20,7 @@
 // 推理意图预检），所以那次切换只清除 `advanced: true` 的记录——那些可能带着简化界面
 // 看不见也改不了的收窄范围；简化界面自己的记录留存，往返切换后仍可续上。
 
+import { newClientRequestId } from "./client-request-id.ts";
 import type { AskIntentConfirmation, QueryIntentContract } from "./ask-intent-model.ts";
 import type { AskRetrievalEffortId } from "./ask-retrieval-effort.ts";
 import type { BaseScopePayload, SourceScopePayload } from "./source-scope.ts";
@@ -74,14 +75,9 @@ export function sessionIntentStorage(): IntentRunStorage | null {
 }
 
 export function newIntentRunId(): string {
-  try {
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-      return crypto.randomUUID();
-    }
-  } catch {
-    // fall through
-  }
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  // One generator for every client-made id; see client-request-id.ts for why a
+  // bare crypto.randomUUID() is never an option.
+  return newClientRequestId();
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
