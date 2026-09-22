@@ -209,7 +209,21 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # same shape as idx_conversations_share_token); no table, FK or
 # existing-column change, and no backfill -- every pre-existing row is simply
 # unshared.
-SCHEMA_VERSION = 78
+# v79 adds retrieval_experiences.notebook_id (TEXT NOT NULL DEFAULT '') plus
+# the NON-UNIQUE index idx_retrieval_experiences_notebook, paired with
+# PostgreSQL 0059_retrieval_experience_notebook.sql: the partition key that
+# turns v54's deployment-global experience library into one partition per
+# notebook, with '' kept as the GLOBAL partition every pre-existing row falls
+# into. The default IS the backfill and no id is recomputed -- the
+# content-addressed primary key's hash input stays byte-identical for the ''
+# partition (see retrieval_experience_projection.experience_id), which is what
+# keeps scripts/merge_dbs.py's cross-deployment union over old databases
+# correct. No new table, foreign key or unique surface: the index is
+# deliberately non-unique, because two partitions holding the same (situation,
+# action) is the definition of partitioning, not a collision. Design doc
+# docs/superpowers/specs/2026-09-22-retrieval-experience-per-notebook-
+# design_zh.md Sec 3.
+SCHEMA_VERSION = 79
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -4259,6 +4273,64 @@ class SqliteMigrator:
             # NULL-only backfill above also lets this transaction safely adopt
             # schema objects committed by the former non-atomic implementation.
             db.execute("PRAGMA user_version = 78")
+
+    def _migration_79(self) -> None:
+        """Partition the retrieval-experience library by notebook.
+
+        v54 created this table with NO tenancy column at all and said so in
+        its own header as a design decision. This migration narrows that
+        decision by exactly one grade -- entries become per-notebook, still
+        per-nobody -- so read v54's header first: everything it says about the
+        content-addressed primary key, the absent second unique surface and
+        the opaque provenance list still holds.
+
+        Three things this migration deliberately does NOT do:
+
+        * it does not recompute a single id. The partition column joins the
+          hash input only for a NON-EMPTY partition; the global partition's
+          input stays byte-identical to what v54 computed (see
+          ``retrieval_experience_projection.experience_id``). That is what
+          makes this migration a pure ``ADD COLUMN`` with the default as its
+          own backfill, and what keeps ``scripts/merge_dbs.py``'s union with a
+          database that predates this hop correct rather than merely
+          plausible.
+        * it does not make the index unique. Two partitions holding an entry
+          for the same (situation, action) is the DEFINITION of partitioning;
+          a unique index over ``notebook_id`` alone would forbid a second
+          entry per notebook, and one over (notebook_id, situation, action)
+          would add a second unique surface the shadow replicator would then
+          have to park by hand -- for nothing, because the primary key already
+          carries the partition.
+        * it does not add a foreign key to ``notebooks``. The table stays a
+          leaf (v54 item 3): notebook deletion clears a partition through the
+          explicit phase-3 registry (``notebook_delete_tables.py``), the same
+          way ``agent_notebook_profile`` does, and a row whose notebook is
+          gone is a bounded, self-healing leftover rather than a dangling
+          reference the merge tool would have to reconcile.
+
+        The index earns its keep in a way v54's "no secondary index on
+        purpose" note did not contemplate: reads are now PER PARTITION, so
+        ``WHERE notebook_id = ?`` is a genuine predicate an index can answer,
+        and the table's total row count is no longer a single small cap but
+        the global cap plus one per-notebook cap for every notebook with
+        traffic.
+
+        Must go through ``add_column_if_missing``: SQLite has no
+        ``ADD COLUMN IF NOT EXISTS``, and the "already-deployed database
+        backfill" test family rolls ``user_version`` back and re-runs the
+        whole ladder over a table that already carries the column.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db,
+                "retrieval_experiences",
+                "notebook_id",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_retrieval_experiences_notebook\n"
+                "                 ON retrieval_experiences(notebook_id)"
+            )
 
     def _seed(self) -> None:
         now = _now()

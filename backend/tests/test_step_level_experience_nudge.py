@@ -480,7 +480,7 @@ def test_fail_open_on_a_broken_experience_store(repo):
         def version_signal(self):
             raise RuntimeError("boom")
 
-        def read_all(self, *_args, **_kwargs):
+        def read_partition(self, *_args, **_kwargs):
             raise RuntimeError("boom")
 
     llm = _SeqLLM([

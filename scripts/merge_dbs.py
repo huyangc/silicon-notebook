@@ -27,6 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
 from app.repositories.ports import (  # noqa: E402
     RETRIEVAL_EXPERIENCE_MAX_ENTRIES,
+    RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES,
 )
 
 # --- 表分类(SCHEMA_VERSION=71) --------------------------------------------
@@ -138,9 +139,12 @@ GLOBAL_UNION_TABLES = [
     # INSERT OR IGNORE 按主键去重即是正确的并集语义，与 users/agent_profiles
     # 同一套"主库优先、副库同 id 冲突即丢弃"处理。
     "groups", "group_members",
-    # v54 Agentic Memory P2 的检索策略经验库。它是**部署级全局**表——没有
-    # notebook_id、没有 owner 列,所以 NOTEBOOK_SCOPED_TABLES / CHILD_TABLES 那两套
-    # 按 notebook 筛的语义对它压根不适用,与 agent_profiles/groups 同一先例。
+    # v54 Agentic Memory P2 的检索策略经验库。v79 起它有 notebook_id 列,但那是
+    # **分区键**不是 notebook 外键:仍然留在 GLOBAL_UNION_TABLES 而不搬进
+    # NOTEBOOK_SCOPED_TABLES,因为并集按内容寻址主键去重、而主键已经含分区,
+    # 按 sec_nb 筛反而会丢掉副库里那些笔记本没被导入的分区行——而那些行的存在
+    # 不依赖 notebooks 表(无外键),丢掉是净损失。合并后由
+    # `_evict_experiences_to_limit` 逐分区收容,见彼处。
     # ⚠ 并集语义之所以正确,全靠它的主键是**内容寻址**的(情境指纹+动作的确定性
     #   哈希,见 sqlite/migrations.py 的 _migration_54 第 1 条):两个独立部署对同
     #   一情境+动作算出同一个 id,``INSERT OR IGNORE`` 于是「同一条经验只留一份、
@@ -445,24 +449,51 @@ def _assert_global_schema_compatibility(
 
 
 def _evict_experiences_to_limit(
-    conn: sqlite3.Connection, max_entries: int = RETRIEVAL_EXPERIENCE_MAX_ENTRIES
+    conn: sqlite3.Connection,
+    max_entries: int = RETRIEVAL_EXPERIENCE_MAX_ENTRIES,
+    notebook_max_entries: int = RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES,
 ) -> int:
-    """合库后把 `retrieval_experiences` 收回运行时硬上限(协议常量单源;
-    淘汰序仍镜像 `sqlite/retrieval_experience_store.py::evict_to_limit`,
-    改序必须两侧同改——对账测试另钉常量相等作保险)。"""
+    """合库后把 `retrieval_experiences` **逐分区**收回运行时硬上限(协议常量
+    单源;淘汰序仍镜像 `sqlite/retrieval_experience_store.py::evict_to_limit`,
+    改序必须两侧同改——对账测试另钉常量相等作保险)。返回删除总条数。
+
+    schema v79 起这张表按 `notebook_id` 分区(`''` = 全局分区)。收容必须**按
+    分区各算各的**,与运行时 `evict_to_limit(cap, notebook_id=...)` 逐字同款:
+    整表一刀切会让一个热门库的条目把全局分区(或另一个库的分区)挤掉——两边
+    的 `updated_at` 本来就不可比,而合并方对任何一个分区都没有新证据。
+
+    v79 之前的库没有这一列,而合并前两侧都已按各自 schema 迁移到当前版本,所以
+    正常路径上列必然在;这里仍然查一次,理由与 `_table_exists` 那道同款——离线
+    脚本可能被指到一个半迁移的文件上,宁可一条都不删。
+    """
     if not _table_exists(conn, "retrieval_experiences", "main"):
         return 0
-    row = conn.execute("SELECT COUNT(*) FROM main.retrieval_experiences").fetchone()
-    overflow = int(row[0]) - max_entries
-    if overflow <= 0:
+    if "notebook_id" not in table_columns(conn, "retrieval_experiences"):
         return 0
-    conn.execute(
-        "DELETE FROM main.retrieval_experiences WHERE id IN ("
-        "SELECT id FROM main.retrieval_experiences "
-        "ORDER BY adopted ASC, support ASC, updated_at ASC, id ASC LIMIT ?)",
-        (overflow,),
-    )
-    return overflow
+    partitions = [
+        str(row[0] or "")
+        for row in conn.execute(
+            "SELECT DISTINCT notebook_id FROM main.retrieval_experiences"
+        ).fetchall()
+    ]
+    removed = 0
+    for partition in partitions:
+        cap = max_entries if partition == "" else notebook_max_entries
+        row = conn.execute(
+            "SELECT COUNT(*) FROM main.retrieval_experiences WHERE notebook_id=?",
+            (partition,),
+        ).fetchone()
+        overflow = int(row[0]) - cap
+        if overflow <= 0:
+            continue
+        conn.execute(
+            "DELETE FROM main.retrieval_experiences WHERE id IN ("
+            "SELECT id FROM main.retrieval_experiences WHERE notebook_id=? "
+            "ORDER BY adopted ASC, support ASC, updated_at ASC, id ASC LIMIT ?)",
+            (partition, overflow),
+        )
+        removed += overflow
+    return removed
 
 
 def sweep_orphan_group_grants(conn: sqlite3.Connection) -> int:
@@ -647,6 +678,8 @@ def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
         # 淘汰序与 evict_to_limit 逐字同款((adopted, support, updated_at, id)
         # 升序删到上限),这里不 import store(离线脚本自己持有连接)但序是同
         # 一份契约,改一处必须同改另一处——两侧注释互相指认。
+        # schema v79 起同样逐字同款地**按分区**收容:全局分区 300、每个笔记本
+        # 分区各 100,不是整表一刀切。
         with conn:
             evicted = _evict_experiences_to_limit(conn)
         if evicted:

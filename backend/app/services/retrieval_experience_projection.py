@@ -624,13 +624,15 @@ def validate_situation(situation: object) -> dict | None:
     return normalised
 
 
-def experience_id(situation: Mapping[str, Any], action: str) -> str:
-    """The entry's CONTENT-ADDRESSED primary key.
+def experience_id(
+    situation: Mapping[str, Any], action: str, partition: str = ""
+) -> str:
+    """The entry's CONTENT-ADDRESSED primary key, within one partition.
 
     Deterministic across processes and across deployments, which is what makes
     ``scripts/merge_dbs.py``'s ``INSERT OR IGNORE`` union correct: the same
-    (situation, action) computes the same id everywhere, so merging two
-    databases keeps one row per conclusion instead of duplicating it. An
+    (partition, situation, action) computes the same id everywhere, so merging
+    two databases keeps one row per conclusion instead of duplicating it. An
     incrementing or random id would break that in opposite directions —
     incrementing ids collide across deployments and silently drop rows, random
     ids split one conclusion into two rows with the evidence divided between
@@ -639,9 +641,42 @@ def experience_id(situation: Mapping[str, Any], action: str) -> str:
     ``sort_keys=True`` makes the hash independent of dict ordering, so an entry
     read back out of either backend re-hashes to its own id — the property that
     lets a merged database be audited rather than trusted.
+
+    ⚠ ``partition`` is named for what it IS here and not for the value the one
+    caller happens to pass. This module is scanned by the privacy guard's
+    criterion two, whose forbidden-name table exists so that no tenant id can
+    be read into anything this module projects; the partition is not read off
+    any run and is not a property of one — it is a coordinate of the library
+    being written to, chosen by the caller before a single run is observed.
+    Keeping the name honest is what lets this module stay at ZERO exemptions
+    from that table. See the design doc Sec 6 and
+    ``backend/tests/test_retrieval_experience_privacy_guard.py``.
+
+    ⚠ An EMPTY partition hashes exactly what this function hashed before
+    partitions existed — the key is left out of the payload entirely rather
+    than serialised as an empty string. That is the whole reason SQLite v79 /
+    PostgreSQL 0059 is a pure ``ADD COLUMN`` with no id recomputation, and the
+    reason a union with a database written before that hop still collapses the
+    same conclusion onto one row. Do NOT "simplify" this to always include the
+    key: the branch IS the compatibility guarantee, and pinned byte-for-byte by
+    a fixed-value test.
+
+    ⚠ The payload key is spelled ``partition``, matching the parameter rather
+    than the column the value ends up in. The name is not observable anywhere
+    outside this function — it is hash input, never stored, never rendered, and
+    both sides of a cross-deployment merge run this same code — so the spelling
+    is free, and spending it on the honest word is what keeps this module free
+    of the forbidden-name table's entries. Changing it silently re-keys every
+    non-global entry, so it is pinned by a fixed-value test too.
     """
+    payload_fields: dict[str, Any] = {
+        "situation": dict(situation),
+        "action": str(action),
+    }
+    if partition:
+        payload_fields["partition"] = str(partition)
     payload = json.dumps(
-        {"situation": dict(situation), "action": str(action)},
+        payload_fields,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,

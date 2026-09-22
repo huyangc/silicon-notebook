@@ -1,13 +1,14 @@
-"""SQLite row persistence for Agentic Memory P2's deployment-GLOBAL
-retrieval-strategy experience library (``retrieval_experiences``).
+"""SQLite row persistence for Agentic Memory P2's retrieval-strategy
+experience library (``retrieval_experiences``), partitioned by notebook since
+schema v79.
 
 Row-level only, mirroring ``agent_profile_store.py``'s split: what an entry
 MEANS, when distillation fires and how a batch of runs becomes entries all
 belong to ``app/services/retrieval_experience_job.py``. This module owns
 exactly one table, and every read it exposes is bounded by construction — see
 ``RetrievalExperienceStorePort`` in ``app/repositories/ports.py`` for the full
-contract, including why a store with no tenancy column at all is nonetheless
-the right shape here.
+contract, including why ``notebook_id`` is a partition key rather than a
+tenancy column and what carries the safety argument instead.
 """
 from __future__ import annotations
 
@@ -52,6 +53,7 @@ def _experience_row(row) -> dict:
         "support": int(row["support"]),
         "adopted": int(row["adopted"]),
         "provenance": [str(item) for item in _loads_obj(row["provenance_json"], [])],
+        "notebook_id": row["notebook_id"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -76,30 +78,35 @@ class RetrievalExperienceStore:
         # invite exactly the wrong reflex from the next person to add a write
         # path here.
 
-    def read_all(self, limit: int) -> list[dict]:
-        """The whole library. Bounded RETURN, UNBOUNDED SCAN — say both plainly
-        rather than let "bounded" cover for both.
+    def read_partition(self, notebook_id: str, limit: int) -> list[dict]:
+        """ONE partition (``""`` = the global one). Bounded RETURN, bounded
+        SCAN — both, now, and the second half is new in v79.
 
-        The ``LIMIT`` bounds what comes BACK, and the distillation's own
-        eviction bounds how big the table ever gets (a few hundred rows). But
-        the scan itself is genuinely unbounded: there is deliberately no index
-        behind ``ORDER BY id`` — entry selection scores each row's situation
-        against the current run's by set overlap over closed enum values,
-        which is not a predicate any index could answer anyway, so an index
-        here would buy nothing but pay for a migration on a query that runs
-        once every ``RETRIEVAL_EXPERIENCE_TRIGGER`` completed asks. Registered,
-        not overlooked: if the cap ever grows past a few hundred rows, revisit
-        this alongside the next schema hop rather than opening one just for it.
+        Before v79 this read was the whole table with no predicate to write,
+        and the docstring said so plainly: the scan was genuinely unbounded and
+        the missing index was registered rather than overlooked, on the
+        argument that entry selection scores situations by set overlap over
+        closed enum values — not something an index can answer — and the table
+        stayed a few hundred rows. Partitioning changes exactly that argument:
+        ``notebook_id = ?`` IS a predicate an index answers, and the table is
+        no longer capped by one number (see
+        ``RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES``), so v79 adds
+        ``idx_retrieval_experiences_notebook`` with the read that justifies it.
+
+        Equality, never a prefix and never a union: a caller that wants this
+        notebook's entries with the global ones as a fallback calls twice and
+        decides the precedence itself.
 
         ``ORDER BY id`` (the content hash) rather than by any counter — the
         caller ranks in memory, and a stable order makes two reads over an
-        unchanged table byte-identical, which is what lets the injection side
-        memoise the result.
+        unchanged partition byte-identical, which is what lets the injection
+        side memoise the result.
         """
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM retrieval_experiences ORDER BY id LIMIT ?",
-                (max(0, int(limit)),),
+                "SELECT * FROM retrieval_experiences WHERE notebook_id=? "
+                "ORDER BY id LIMIT ?",
+                (str(notebook_id or ""), max(0, int(limit))),
             ).fetchall()
         return [_experience_row(row) for row in rows]
 
@@ -122,9 +129,11 @@ class RetrievalExperienceStore:
         provenance: Sequence[str],
         provenance_max: int,
         replace_conclusion: bool,
+        notebook_id: str = "",
     ) -> dict:
         """Create or merge ONE entry — see the port docstring for the merge
-        semantics. This backend's specifics:
+        semantics, including why ``notebook_id`` is written on the INSERT
+        branch only. This backend's specifics:
 
         ⚠ ``begin_immediate`` opens the write transaction BEFORE the read.
         ``write()``'s mutex only serialises this process's writers, and the
@@ -174,8 +183,9 @@ class RetrievalExperienceStore:
                     db.execute(
                         "INSERT INTO retrieval_experiences "
                         "(id,situation_json,action,polarity,rationale,support,"
-                        "adopted,provenance_json,created_at,updated_at) "
-                        "VALUES (?,?,?,?,?,?,0,?,?,?)",
+                        "adopted,provenance_json,notebook_id,created_at,"
+                        "updated_at) "
+                        "VALUES (?,?,?,?,?,?,0,?,?,?,?)",
                         (
                             experience_id,
                             _canonical_situation(situation),
@@ -184,6 +194,7 @@ class RetrievalExperienceStore:
                             rationale,
                             len(fresh),
                             json.dumps(fresh, ensure_ascii=False),
+                            str(notebook_id or ""),
                             now,
                             now,
                         ),
@@ -278,26 +289,36 @@ class RetrievalExperienceStore:
             )
         return cursor.rowcount
 
-    def evict_to_limit(self, max_entries: int) -> int:
-        """Trim to ``max_entries`` rows, ascending by
+    def evict_to_limit(self, max_entries: int, notebook_id: str = "") -> int:
+        """Trim ONE partition to ``max_entries`` rows, ascending by
         ``(adopted, support, updated_at, id)``. Returns the row count deleted.
 
+        ⚠ Both halves carry the ``notebook_id`` predicate, and the inner
+        ``SELECT`` needs it just as much as the ``COUNT`` does: with the
+        predicate on the count alone, a partition that is three rows over its
+        own cap would delete the three worst rows IN THE WHOLE TABLE — almost
+        certainly another partition's, since the caller has just written to
+        this one and refreshed its ``updated_at``.
+
         Count and delete share one transaction so a concurrent insert cannot
-        make the computed overflow describe a table that no longer exists.
+        make the computed overflow describe a partition that no longer exists.
         ``scripts/merge_dbs.py::_evict_experiences_to_limit`` mirrors this
-        ordering for the post-union recap (codex #524 R1 P2) — change either
-        side only together with the other.
+        ordering AND this per-partition confinement for the post-union recap
+        (codex #524 R1 P2) — change either side only together with the other.
         ``id`` as the final tie-break makes the choice deterministic even for
         entries written in the same second by the same batch (SQLite's clock is
         second-granular) — without it, "which of the tied entries survived"
         would differ run to run and backend to backend.
         """
         keep = max(0, int(max_entries))
+        partition = str(notebook_id or "")
         with self.database.write() as db:
             self.database.begin_immediate(db)
             total = int(
                 db.execute(
-                    "SELECT COUNT(*) AS n FROM retrieval_experiences"
+                    "SELECT COUNT(*) AS n FROM retrieval_experiences "
+                    "WHERE notebook_id=?",
+                    (partition,),
                 ).fetchone()["n"]
             )
             overflow = total - keep
@@ -305,18 +326,26 @@ class RetrievalExperienceStore:
                 return 0
             cursor = db.execute(
                 "DELETE FROM retrieval_experiences WHERE id IN ("
-                "SELECT id FROM retrieval_experiences "
+                "SELECT id FROM retrieval_experiences WHERE notebook_id=? "
                 "ORDER BY adopted ASC, support ASC, updated_at ASC, id ASC LIMIT ?)",
-                (overflow,),
+                (partition, overflow),
             )
         self._mutations += 1
         return cursor.rowcount
 
-    def count(self) -> int:
+    def count(self, notebook_id: str | None = None) -> int:
+        """One partition's rows, or (``None``) the whole table's."""
         with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT COUNT(*) AS n FROM retrieval_experiences"
-            ).fetchone()
+            if notebook_id is None:
+                row = connection.execute(
+                    "SELECT COUNT(*) AS n FROM retrieval_experiences"
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT COUNT(*) AS n FROM retrieval_experiences "
+                    "WHERE notebook_id=?",
+                    (str(notebook_id),),
+                ).fetchone()
         return int(row["n"])
 
     def version_signal(self) -> tuple[int, int, str]:

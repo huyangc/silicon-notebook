@@ -1182,18 +1182,20 @@ class RepositoryFacade:
 
     @property
     def retrieval_experiences(self):
-        """Agentic Memory P2's deployment-GLOBAL retrieval-experience store
-        (T5).
+        """Agentic Memory P2's retrieval-experience store (T5), partitioned by
+        notebook since SQLite v79 / PostgreSQL 0059.
 
         One hop to the runtime-owned ``RetrievalExperienceStorePort`` seat,
         the same shape and the same reasoning as ``agent_profile`` above:
-        method names like ``read_all``/``count``/``upsert_experience`` are far
-        too generic to flatten onto a facade shared with every other domain.
+        method names like ``read_partition``/``count``/``upsert_experience``
+        are far too generic to flatten onto a facade shared with every other
+        domain.
 
-        ⚠ Read that port's docstring before adding a consumer. It is the only
-        store here with no tenancy column at all, which means callers get NO
-        help from a predicate: what may become a row is decided one layer up,
-        by ``retrieval_experience_projection``. A consumer that writes rows
+        ⚠ Read that port's docstring before adding a consumer. ``notebook_id``
+        here is a PARTITION key, not the tenancy predicate the rest of this
+        facade's stores give you: it narrows who sees an entry, but what may
+        become a row at all is still decided one layer up, by
+        ``retrieval_experience_projection``. A consumer that writes rows
         assembled from anywhere else has quietly removed the whole guarantee.
         """
         return self._runtime.retrieval_experiences

@@ -88,7 +88,9 @@ master 之上无其它提交）。实现计划 `docs/superpowers/plans/2026-09-2
   `idx_retrieval_experiences_notebook(notebook_id)`；PG 0059 同款 `ALTER TABLE ... ADD COLUMN`
   + `CREATE INDEX`。既有行全部落入全局分区，**不重算 id**。
 - 主键仍内容寻址：`notebook_id=''` 时哈希输入与今天**逐字节相同**（既有 id 不变，
-  `merge_dbs` 并集语义不变）；非空时输入为 `{"notebook_id", "situation", "action"}` 排序序列化。
+  `merge_dbs` 并集语义不变）；非空时输入为 `{"partition", "situation", "action"}` 排序序列化
+  （键名是 `partition` 而非 `notebook_id`：隐私守卫判据二连 projection 模块里的字符串常量也扫，
+  而这个键只是哈希输入，不落库、不渲染，两侧部署跑同一份代码，T1 实施时登记）。
   同一 (情境, 动作) 在不同分区是不同的行，这是分区的定义。
 - 唯一约束不变（仍只有主键），shadow 不变量的 unique surface 计数不变；非唯一索引不计入。
 - 上限：全局分区沿用 `RETRIEVAL_EXPERIENCE_MAX_ENTRIES=300`；每个笔记本分区

@@ -565,8 +565,13 @@ _NOT_NOTEBOOK_SCOPED = frozenset({
     "users", "user_profiles", "auth_sessions", "app_settings", "groups",
     "group_members", "agent_profiles", "model_service_status",
     "system_model_service_status", "extension_runtime_toggles",
-    "concept_whitelist", "retrieval_experiences", "wishes", "wish_votes",
+    "concept_whitelist", "wishes", "wish_votes",
 })
+# ⚠ ``retrieval_experiences`` left this set at SQLite v79: it now HAS a
+# ``notebook_id`` column (a partition key, still no foreign key into
+# notebooks), so the introspection below must see it and phase 3 must account
+# for it. Putting it back would re-exempt the one table whose partition nothing
+# else deletes.
 
 
 def test_every_notebook_scoped_table_is_accounted_for(repo):

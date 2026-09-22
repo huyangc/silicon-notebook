@@ -89,7 +89,7 @@ def retrieval_experience_harness(request) -> RetrievalExperienceHarness:
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 58
+    assert PostgresMigrator(database).migrate() == 59
     # Nothing is seeded: this table has no foreign key in either direction and
     # no tenancy column, which is the structural fact behind its deep-copy
     # exclusion and its global-union classification.
@@ -297,20 +297,20 @@ def test_eviction_keeps_the_best_entries_and_breaks_ties_by_id(
     harness.store.note_adopted(["rx_ccc"], 2)
 
     assert harness.store.evict_to_limit(2) == 1
-    surviving = {row["id"] for row in harness.store.read_all(50)}
+    surviving = {row["id"] for row in harness.store.read_partition("", 50)}
     # rx_ccc survives on ``adopted``; between the two tied entries the id
     # tie-break keeps the LATER one (descending order names survivors), which
     # is the same row SQLite's ascending LIMIT would have spared.
     assert surviving == {"rx_ccc", "rx_bbb"}
 
 
-def test_read_all_orders_by_the_c_collation(retrieval_experience_harness):
+def test_read_partition_orders_by_the_c_collation(retrieval_experience_harness):
     harness = retrieval_experience_harness
     for entry_id in ("rx_b", "rx_A", "rx_a"):
         _upsert(harness, entry_id, provenance=[f"{entry_id}-run"])
     # ``COLLATE "C"`` is byte order, so uppercase sorts before lowercase —
     # matching SQLite's default binary collation rather than a locale's.
-    assert [row["id"] for row in harness.store.read_all(50)] == [
+    assert [row["id"] for row in harness.store.read_partition("", 50)] == [
         "rx_A", "rx_a", "rx_b",
     ]
 
@@ -388,3 +388,44 @@ def test_an_adoption_is_deliberately_invisible_to_the_version_signal(
     harness.clock.value = LATER
     harness.store.note_adopted(["rx_one"])
     assert harness.store.version_signal() == before
+
+
+# ----------------------------------------------------- PostgreSQL 0059
+
+
+def test_the_partition_predicate_confines_both_reads_and_evictions(
+    retrieval_experience_harness,
+):
+    """0059's partition column, on the backend whose eviction is the
+    OFFSET-shaped one.
+
+    Worth its own case rather than trusting the SQLite mirror: here the
+    ``notebook_id`` predicate has to sit on the INNER select, because the
+    ``OFFSET`` is what names the survivors. Put it on the outer ``DELETE``
+    instead and the offset still counts the whole table, so the global
+    partition's rows below would be deleted while ``nb-a`` stayed over its cap
+    — and the returned row count would look entirely reasonable.
+    """
+    harness = retrieval_experience_harness
+    for entry_id in ("rx_g1", "rx_g2"):
+        _upsert(harness, entry_id, provenance=[f"{entry_id}-run"], notebook_id="")
+    for entry_id in ("rx_a1", "rx_a2", "rx_a3"):
+        _upsert(harness, entry_id, provenance=[f"{entry_id}-run"], notebook_id="nb-a")
+
+    assert [row["id"] for row in harness.store.read_partition("nb-a", 50)] == [
+        "rx_a1", "rx_a2", "rx_a3",
+    ]
+    assert [row["id"] for row in harness.store.read_partition("", 50)] == [
+        "rx_g1", "rx_g2",
+    ]
+    assert harness.store.read_experience("rx_a1")["notebook_id"] == "nb-a"
+    assert harness.store.read_experience("rx_g1")["notebook_id"] == ""
+
+    assert harness.store.evict_to_limit(1, "nb-a") == 2
+    assert [row["id"] for row in harness.store.read_partition("nb-a", 50)] == ["rx_a3"]
+    assert [row["id"] for row in harness.store.read_partition("", 50)] == [
+        "rx_g1", "rx_g2",
+    ]
+    assert harness.store.count() == 3
+    assert harness.store.count("") == 2
+    assert harness.store.count("nb-a") == 1

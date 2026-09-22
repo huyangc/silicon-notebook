@@ -534,18 +534,18 @@ class _Store:
         self.upserts = []
         self.evicted = 0
 
-    def read_all(self, limit):
+    def read_partition(self, notebook_id, limit):
         return self.rows[:limit]
 
     def upsert_experience(self, experience_id, **kwargs):
         self.upserts.append((experience_id, kwargs))
         return {"id": experience_id}
 
-    def evict_to_limit(self, max_entries):
+    def evict_to_limit(self, max_entries, notebook_id=""):
         self.evicted += 1
         return 0
 
-    def count(self):
+    def count(self, notebook_id=None):
         return len(self.rows)
 
 
@@ -751,7 +751,7 @@ def test_the_trigger_never_raises_into_the_ask_path():
 
 def test_a_failing_run_releases_the_single_flight_flag():
     class Exploding(_Store):
-        def read_all(self, limit):
+        def read_partition(self, notebook_id, limit):
             raise RuntimeError("boom")
 
     events = _Events()
@@ -803,9 +803,9 @@ def test_an_unclaimed_call_never_touches_the_single_flight_flag():
     )
 
     class ClaimingDuringRead(_Store):
-        def read_all(self, limit):
+        def read_partition(self, notebook_id, limit):
             service._running = True
-            return super().read_all(limit)
+            return super().read_partition(notebook_id, limit)
 
     service.experiences = ClaimingDuringRead()
     assert service._running is False
@@ -1236,7 +1236,7 @@ def test_the_experience_cache_never_serves_a_store_twin(monkeypatch):
             self.reads = 0
         def version_signal(self):
             return (1, "2026-01-01T00:00:00")
-        def read_all(self, limit):
+        def read_partition(self, notebook_id, limit):
             self.reads += 1
             return list(self.rows)
 

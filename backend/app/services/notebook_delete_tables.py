@@ -287,6 +287,14 @@ _GROUP_D_STANDALONE: tuple[DirectTable, ...] = (
     DirectTable("notebook_object_schemas", "two"),
     DirectTable("notebook_share_requests", "one", pk_column="id"),
     DirectTable("promotion_candidates", "one", pk_column="id"),
+    # SQLite v79 / PostgreSQL 0059: this notebook's PARTITION of the
+    # retrieval-strategy experience library. The table has no foreign key into
+    # ``notebooks`` (it is a leaf, by design since v54), so nothing cascades
+    # it away -- this registry entry is the only thing that clears a deleted
+    # library's entries, exactly as it is for ``agent_notebook_profile``. The
+    # ``''`` global-partition rows can never match a notebook id, so they are
+    # untouched by construction rather than by a special case.
+    DirectTable("retrieval_experiences", "one", pk_column="id"),
     DirectTable("source_authors", "one", pk_column="id"),
     DirectTable("source_index_backfills", "one", pk_column="notebook_id"),
     DirectTable("unified_kg_state", "one", pk_column="notebook_id"),
@@ -332,7 +340,12 @@ assert len(CURSOR_KEYS) == len(set(CURSOR_KEYS)), "PHASE_3_PLAN cursor keys must
 # introspection at implementation time (see this module's docstring) -- kept
 # as an executable guard so a future edit that silently drops/duplicates a
 # table trips a test, not a code review.
-EXPECTED_PHASE_3_TABLE_COUNT = 66
+#
+# 67 since SQLite v79 / PostgreSQL 0059: `retrieval_experiences` gained a
+# `notebook_id` PARTITION column and therefore a partition to clear. It is a
+# closure-EXTERNAL table (no foreign key into `notebooks` at all), so it adds
+# to the count the same way the other closure-external tables already do.
+EXPECTED_PHASE_3_TABLE_COUNT = 67
 
 
 def phase_3_table_names() -> frozenset[str]:

@@ -4540,5 +4540,77 @@ MIGRATION_MANIFEST[(77, 78)] = {
     **AUTH_SUNSET_SCHEMA, "triggers": {}, "views": {},
 }
 
+
+# v79: retrieval_experiences.notebook_id, the partition key that turns v54's
+# deployment-global experience library into one partition per notebook ('' =
+# global). One column plus ONE NON-UNIQUE index; no table, no foreign key, no
+# unique surface, and no backfill pass -- the NOT NULL DEFAULT '' is the whole
+# migration's data story, and no content-addressed id is recomputed.
+#
+# The column entry is consulted for a lineage whose database ALREADY HAS the
+# table (every hop from v54 onwards, which after the v54 broadcast is every key
+# in this manifest); the index entry is what a lineage that creates the table
+# fresh also needs, because SQLite stores the index independently of the
+# CREATE TABLE text. The table text itself does NOT change: `add_column_if_
+# missing` issues an ALTER, and SQLite appends the column to the stored SQL
+# rather than rewriting it -- so the ALTERed text is spelled out below the same
+# way the v77 global-ask hop spells out its own.
+RETRIEVAL_EXPERIENCE_PARTITION_COLUMNS = {
+    "retrieval_experiences": {
+        "notebook_id": ["notebook_id", "TEXT", 1, "''", 0],
+    },
+}
+RETRIEVAL_EXPERIENCE_PARTITION_INDEXES = {
+    "idx_retrieval_experiences_notebook": (
+        "CREATE INDEX idx_retrieval_experiences_notebook\n"
+        "                 ON retrieval_experiences(notebook_id)"
+    ),
+}
+RETRIEVAL_EXPERIENCE_PARTITION_TABLES = {
+    "retrieval_experiences": RETRIEVAL_EXPERIENCE_TABLES[
+        "retrieval_experiences"
+    ].replace(
+        "updated_at      TEXT NOT NULL\n                )",
+        "updated_at      TEXT NOT NULL\n                , notebook_id TEXT NOT NULL DEFAULT '')",
+    ),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 79, *key[2:]): {
+        **manifest,
+        # ⚠ Conditional, unlike the v77 global-ask block's unconditional
+        # replacement. `tables` means "tables this hop ADDS", and only a
+        # lineage that starts BELOW v54 creates `retrieval_experiences` on the
+        # way here — for those keys the v54 block already put the table in, and
+        # the text has to become the ALTERed one. A lineage at v54 or later
+        # already has the table, so listing it as an addition would make the
+        # verifier demand an addition that never happens
+        # ("manifest-addition-missing").
+        "tables": {
+            **manifest["tables"],
+            **(
+                RETRIEVAL_EXPERIENCE_PARTITION_TABLES
+                if "retrieval_experiences" in manifest["tables"]
+                else {}
+            ),
+        },
+        "columns": {
+            **manifest["columns"],
+            "retrieval_experiences": {
+                **manifest["columns"].get("retrieval_experiences", {}),
+                **RETRIEVAL_EXPERIENCE_PARTITION_COLUMNS["retrieval_experiences"],
+            },
+        },
+        "indexes": {**manifest["indexes"], **RETRIEVAL_EXPERIENCE_PARTITION_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(78, 79)] = {
+    "tables": {},
+    "columns": RETRIEVAL_EXPERIENCE_PARTITION_COLUMNS,
+    "indexes": RETRIEVAL_EXPERIENCE_PARTITION_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

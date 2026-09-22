@@ -397,7 +397,9 @@ class RetrievalExperienceDistillationService:
             return {
                 "runs": len(runs), "situations": 0, "written": 0, "evicted": 0,
             }
-        existing = self.experiences.read_all(RETRIEVAL_EXPERIENCE_MAX_ENTRIES)
+        existing = self.experiences.read_partition(
+            "", RETRIEVAL_EXPERIENCE_MAX_ENTRIES
+        )
         offered = _offered_entries(groups, existing)
         client = self.models.chat(RETRIEVAL_EXPERIENCE_WORKLOAD)
         prompt = retrieval_experience_prompt(

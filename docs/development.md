@@ -58,8 +58,8 @@ at `SCHEMA_VERSION` still runs no migrations. The only supported way back is
 to restore the pre-upgrade backup, or redeploy a build whose `SCHEMA_VERSION`
 is at least the database's — there is no reverse migration.
 
-The current schema version is 78. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v78 and remains readable. Global Ask adds user-owned conversation
+The current schema version is 79. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v79 and remains readable. Global Ask adds user-owned conversation
 and task tables (SQLite v76 / PostgreSQL 0056), with idempotent request and single-running-task
 unique indexes and conversation deletion cascading to its jobs; SQLite v77 / PostgreSQL 0057 then
 adds the public share token and read watermark (`share_token`, `shared_through_at`,
@@ -68,7 +68,12 @@ conversations — the same shape SQLite v52 / PostgreSQL 0030 put on notebook co
 because a global session belongs to no notebook. SQLite v78 / PostgreSQL 0058 separates local login
 names from stable user names, adds the singleton authentication policy, external-identity bindings,
 short-lived browser authentication transactions, and policy/identity audit tables, and extends sessions
-with their authentication source, external subject, and absolute expiry. Those migrations
+with their authentication source, external subject, and absolute expiry. SQLite v79 / PostgreSQL 0059
+adds `retrieval_experiences.notebook_id` (`TEXT NOT NULL DEFAULT ''`, `''` = the global partition) plus
+the non-unique `idx_retrieval_experiences_notebook`, partitioning the retrieval-strategy experience
+library by notebook; no new table, foreign key or unique surface, and no backfill pass — the default is
+the backfill, and no content-addressed id is recomputed because the global partition's hash input is
+unchanged by construction. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -348,11 +353,14 @@ deployment-GLOBAL retrieval-strategy experience library. One entry says "in
 this shape of question, this retrieval action is / is not worth reaching for",
 plus a short model-written rationale, a `support` count of the runs backing it
 and an `adopted` count of the times the model actually picked that action after
-the entry was injected. The table deliberately carries no `notebook_id`, no
+the entry was injected. As created here the table carries no `notebook_id`, no
 owner column and no foreign key in either direction: it stores general tactics
 for HOW to search, never anyone's content, so notebook deep copy cannot reach
 it (the same structural sentence that covers `groups`/`group_members`) and
-`scripts/merge_dbs.py` classifies it as a global union table. Its primary key
+`scripts/merge_dbs.py` classifies it as a global union table. (SQLite v79
+partitions the table by notebook — see that entry below; the owner column and
+the absent foreign keys stay absent, and the merge classification does not
+move.) Its primary key
 is a single CONTENT-ADDRESSED `TEXT` column — the deterministic hash of
 (situation fingerprint, action) — which is what makes that union safe across
 independent deployments (an incrementing id would silently drop rows on a
@@ -360,7 +368,9 @@ primary-key collision) and, because the declared replication key equals it
 verbatim, also what parks its one unique surface on `REPLICATION_KEY` with no
 sentinel column and no `_UNIQUE_PREDICATES` entry. It creates no index: the row
 count is hard-capped, and the only two read paths are a primary-key point
-lookup and a bounded-return, unbounded-scan read (index deferred to the next schema hop). Because v54/v32 adds one more (leaf, parentless)
+lookup and a bounded-return, unbounded-scan read (index deferred — SQLite v79
+is the hop that adds one, together with the partition predicate that gives an
+index something to answer). Because v54/v32 adds one more (leaf, parentless)
 table, the forward-shadow invariants move to 81 business tables and 110 unique
 surfaces; the branch-counted bound remains exactly 12 row slots. PostgreSQL
 migration v32 is the paired schema, and the current pairing is
