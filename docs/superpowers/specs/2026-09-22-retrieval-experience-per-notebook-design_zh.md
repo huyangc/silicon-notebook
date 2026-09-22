@@ -96,8 +96,15 @@ master 之上无其它提交）。实现计划 `docs/superpowers/plans/2026-09-2
 - 上限：全局分区沿用 `RETRIEVAL_EXPERIENCE_MAX_ENTRIES=300`；每个笔记本分区
   `RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES`（默认 100，§9）。`evict_to_limit` 改为按分区
   收容；表总量上界 = 300 + 100 × 有流量的笔记本数，登记为可接受。
-- `version_signal()` 仍是全表级信号（mutation revision, 行数, MAX(updated_at)）：写入稀少，
-  一次写入让所有分区缓存失效可接受。
+- ~~`version_signal()` 仍是全表级信号（mutation revision, 行数, MAX(updated_at)）：写入稀少，
+  一次写入让所有分区缓存失效可接受。~~ **PR-3 推翻**：注入闸默认开之后，这个签名的调用频率
+  不是「每 run 一次」而是「每个注入消费点、每一轮 reflect 各一次」（被动块 + `_zero_hit_nudge_for`
+  + `_consultable_rows`，`exhaustive` 档上界 50 轮），而全表级失效意味着任一笔记本蒸出一条就
+  让进程里所有笔记本的快照一起作废。现已改为 `version_signal(notebook_id)`：一次
+  `WHERE notebook_id IN (?, '') GROUP BY notebook_id` 的聚合同时取回「本库分区」与「全局分区」
+  两个 `(mutation revision, 行数, MAX(updated_at))`，修订计数也按分区记；两层各按自己那一半
+  判缓存命中。分区索引负责**定位**这两块的行，`MAX(updated_at)` 仍逐行取值，但被定位的行数
+  封在 ~400（300 + 100）而与笔记本总数无关。
 
 ## 4. 蒸馏链路
 

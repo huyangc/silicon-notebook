@@ -350,6 +350,9 @@ LIGHT_JOB_NAMES = (
     "knowhow-project-t1",
     "knowhow-legacy-reproject-t1",
     "knowhow-asset-sweep:nb-a",
+    # 提问交付之后的记账:没人在等它,按量级归轻活池(见 background_jobs 里
+    # `_LIGHT_MAINTENANCE_OPERATIONS` 的那条注释)。
+    "ask-completed-reasoning",
 )
 # 批 3·W1 PR-3(D-2):第三个独立池——量级既非 LLM 扇出型重活,也非秒级轻活。
 DELETE_JOB_NAMES = ("deletenb-nb-a",)

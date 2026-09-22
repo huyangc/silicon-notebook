@@ -548,6 +548,22 @@ def test_the_synchronous_ask_surface_persists_the_same_trace_as_the_stream(
     assert stream_kinds, "流式面本来就落库——它空了说明这条用例的前提没搭起来"
     assert "start" not in stream_kinds      # 合成步只上流,不落库
 
+    # 同步/MCP 面在交付之后还会提交一个提问完成记账 job。这条用例断言的只是
+    # 轨迹,不依赖它;join 是为了不把后台写留在 `tmp_path` 的库上跑到用例结束
+    # 之后——那种残留会在别的用例里变成随机噪声。
+    from app.services import background_jobs
+
+    real_submit = background_jobs.submit
+    completion_jobs: list = []
+
+    def _submit(fn, *args, name=None, **kwargs):
+        handle = real_submit(fn, *args, name=name, **kwargs)
+        if name and name.startswith("ask-completed-"):
+            completion_jobs.append(handle)
+        return handle
+
+    monkeypatch.setattr(background_jobs, "submit", _submit)
+
     blocking = client.post(f"/api/notebooks/{notebook_id}/ask", json=_body())
     assert blocking.status_code == 200
     conversation_id = blocking.json()["conversation_id"]
@@ -587,6 +603,11 @@ def test_the_synchronous_ask_surface_persists_the_same_trace_as_the_stream(
         ).fetchone()
     assert mcp_job["submitted_via"] == "mcp"
     assert _persisted(mcp_job["id"]) == stream_kinds
+
+    # 两条同步腿各提交一个;等它们跑完再让用例结束。
+    assert len(completion_jobs) == 2
+    for handle in completion_jobs:
+        handle.join(timeout=10)
 
 
 def test_the_synchronous_trace_sink_is_fail_open_and_stops_after_a_cancel():

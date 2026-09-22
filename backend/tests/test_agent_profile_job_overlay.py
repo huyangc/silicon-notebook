@@ -2594,25 +2594,31 @@ def test_the_completion_notification_never_runs_on_the_request_thread(
 
     double.note_ask_completed = _note
 
+    # 用**真的** `background_jobs.submit`:钩子名归轻活池,production 里跑它的是
+    # 长驻 worker 而不是新线程,这条用例要证的正是那条真实通路的异步性。
+    from app.services import background_jobs
+
+    real_submit = background_jobs.submit
     handles: list = []
 
     def _submit(fn, *args, name=None, **kwargs):
         double.submitted.append(name)
-        thread = threading.Thread(target=fn, name=name, daemon=True)
-        handles.append(thread)
-        thread.start()
-        return thread
+        handle = real_submit(fn, *args, name=name, **kwargs)
+        handles.append(handle)
+        return handle
 
     response = _run_sync_ask(monkeypatch, double, submit=_submit)
 
     # 答案已经回到调用方手上,而钩子还被挡在闸门后面。
     assert response.answer_id == "ans-sync"
     assert double.finished == ["done"]
-    assert noted == [], "钩子跑完了才返回 = 它还在请求线程上"
+    assert noted == []
 
     released.set()
-    assert finished.wait(timeout=5)
-    handles[0].join(timeout=5)
+    # 闸门放行**之后**钩子才跑到:留在请求线程上的写法里,`ask_current` 会一直
+    # 卡在上面那句 `released.wait` 上、根本走不到这里,于是这一行超时翻红。
+    assert finished.wait(timeout=10), "钩子跑完了才返回 = 它还在请求线程上"
+    handles[0].join(timeout=10)
     assert noted == [(NOTEBOOK_ID, USER_A, "reasoning")], "交出去的通知不能被丢掉"
     assert ran_on and ran_on[0] != threading.get_ident()
 
