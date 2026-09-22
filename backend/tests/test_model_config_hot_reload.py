@@ -315,9 +315,14 @@ def test_strict_reload_is_rejected_and_keeps_the_previous_registry(
     """热重载走同一把闸:少一行绑定的新文件被拒,旧注册表原样留着。
 
     PR-4 的严格校验做在 ``SystemModelServiceRegistry.load`` 里,所以启动与热重
-    载共用同一条判据、同一条消息。线上编辑 ``model-services.toml`` 时删错一行,
-    服务不会带着半张绑定表继续跑;管理端/运维在日志与 ``model_config_reload``
-    错误事件里拿到的,就是启动失败时那句 ``model-bindings: ...``。
+    载共用同一条判据。线上编辑 ``model-services.toml`` 时删错一行,服务不会带着
+    半张绑定表继续跑。
+
+    诊断的落点要说准:整句 ``model-bindings: ...`` 只进**进程日志**
+    (``reload_if_changed`` 里的 ``logger.error``);``model_config_reload`` 事件
+    刻意只带 ``status=error`` 与 ``code=invalid_configuration``,不带消息正文。
+    目前也没有任何管理端接口去触发 reload——watcher 与强制 reload 是仅有的两个
+    入口,所以「运维看得到原因」的唯一依据就是那条日志。
     """
     monkeypatch.setenv("HOT_RELOAD_KEY", "secret")
     monkeypatch.setattr(

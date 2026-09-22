@@ -195,6 +195,12 @@ def _model_bindings_preflight(settings: Settings) -> None:
 
     只有绑定表的问题会重新抛出。其余模型配置错误(密钥缺失、TOML 语法等)在这里
     只补一行可读日志,仍由既有路径决定失败时机——这次改动不扩大拒启的范围。
+
+    作用范围要留意:`app = create_app()` 是模块级的(这正是 `uvicorn
+    app.main:app` 必定触发预检的原因),所以任何 `import app.main` 都会跑这个
+    预检,包括测试收集期。本机直接跑 `pytest` 且 `.env` 指向一份不完整的
+    `model-services.toml` 时,失败会出现在 collection 期并报 model-bindings;
+    `scripts/check*.sh` 已经 export 空的 MODEL_SERVICES_CONFIG,不受影响。
     """
     from app.services.model_registry import (
         BINDING_GAP_PREFIX,

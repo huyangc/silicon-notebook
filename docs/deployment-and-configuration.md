@@ -579,15 +579,28 @@ misspelling, or one retired by an upgrade such as `graph_chain_verify`). Either
 one and the process exits non-zero with one readable line stating why:
 
 ```
-model-bindings: 缺少绑定的工作负载：库理解整理（agent_profile_consolidate）, 检索打法总结（retrieval_experience_distill）；未知或已退役的绑定：graph_chain_verify。请在 /etc/silicon/model-services.toml 的 [bindings] 补齐/删除后重启；确需临时放行设 MODEL_BINDINGS_STRICT=false（仅告警）。
+model-bindings: 缺少绑定的工作负载：库理解整理（agent_profile_consolidate），检索打法总结（retrieval_experience_distill）；已退役、升级后请删除的绑定：graph_chain_verify（[bindings]/[thinking]）；未知、疑似拼写错误的绑定：ask_anwser（[bindings]）。请在 /etc/silicon/model-services.toml 的 [bindings]/[thinking] 补齐/删除后重启；确需临时放行设 MODEL_BINDINGS_STRICT=false（仅告警）。
 ```
 
-Both halves are listed in full (sorted by id, with the Chinese label), so one
-edit fixes everything instead of one restart per mistake, and the message
-carries ids and labels only — never a secret or an endpoint. The check lives in
-registry loading, so **hot reload runs through the same gate**: an edit that
-deletes a binding line is rejected, the previous registry is kept, and the
-service never carries on with half a binding table.
+Every segment is listed in full (sorted by id, workloads with their Chinese
+label), so one edit fixes everything instead of one restart per mistake. Stale
+ids are split into "retired, delete the line" and "unknown, probably a typo"
+because those call for opposite actions, and each id names the table it was
+found in — an id that exists only in `[thinking]` is not findable in
+`[bindings]`. The message carries ids, labels and table names only — never a
+secret or an endpoint. The check lives in registry loading, so **hot reload runs
+through the same gate**: an edit that deletes a binding line is rejected, the
+previous registry is kept, and the service never carries on with half a binding
+table (that diagnostic goes to the backend log only; the `model_config_reload`
+event carries just `code=invalid_configuration`).
+
+**Feature switches grant no exemption.** A workload must be bound even when its
+switch (`AGENT_PROFILE_ENABLED` and friends) is off: switches change at runtime
+while the binding table is read once at startup, so leaving it unbound today
+means turning the switch on tomorrow silently downgrades instead of working.
+That is the literal reading of the ruling this check implements, and the reason
+the escape hatch is a single deployment-wide flag rather than a per-workload
+waiver.
 
 Why the rule exists: an unbound workload simply resolves to "no service" in the
 registry and the whole chain fails soft — no error anywhere, just a feature that
@@ -606,8 +619,9 @@ incomplete); adding the missing `[bindings]` lines by hand works just as well.
 a startup warning, as a temporary pass during an upgrade. It is not the product
 default and it does not change the fact that an unbound workload is silently
 unavailable. With the gate off, the backend emits one WARNING line before READY
-naming every chat workload nothing is bound to (Chinese label plus workload id)
-and one more naming the unknown/retired ids it ignored; on top of that,
+naming every workload nothing is bound to — all three kinds, the same scope as
+the refusal it replaces (Chinese label plus workload id) — and one more naming
+the unknown/retired ids it ignored; on top of that,
 `agent_profile_consolidate` and `retrieval_experience_distill` each get their
 own line ("特性已开但模型未绑定") when their feature flag
 (`AGENT_PROFILE_ENABLED`, `RETRIEVAL_EXPERIENCE_ENABLED`) is on.

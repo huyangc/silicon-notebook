@@ -479,13 +479,19 @@ rerank 三类都算），且不得出现不是工作负载的 id（拼错的，�
 `graph_chain_verify`）。任一条不满足，进程以非零码退出，日志里是一整句可读的原因：
 
 ```
-model-bindings: 缺少绑定的工作负载：库理解整理（agent_profile_consolidate）, 检索打法总结（retrieval_experience_distill）；未知或已退役的绑定：graph_chain_verify。请在 /etc/silicon/model-services.toml 的 [bindings] 补齐/删除后重启；确需临时放行设 MODEL_BINDINGS_STRICT=false（仅告警）。
+model-bindings: 缺少绑定的工作负载：库理解整理（agent_profile_consolidate），检索打法总结（retrieval_experience_distill）；已退役、升级后请删除的绑定：graph_chain_verify（[bindings]/[thinking]）；未知、疑似拼写错误的绑定：ask_anwser（[bindings]）。请在 /etc/silicon/model-services.toml 的 [bindings]/[thinking] 补齐/删除后重启；确需临时放行设 MODEL_BINDINGS_STRICT=false（仅告警）。
 ```
 
-两段都会列全（按 id 字典序，带中文标签），所以一次就能改完，不必逐条重启试错；消息里只有
-id 与标签，不含任何密钥或 endpoint。这条校验做在注册表加载里，因此**热重载走的是同一把闸**：
-线上编辑 `model-services.toml` 删错一行，新配置被拒、旧注册表原样保留，服务不会带着半张绑定
-表继续跑。
+各段都会列全（按 id 字典序，工作负载带中文标签），所以一次就能改完，不必逐条重启试错。陈旧
+id 按「已退役」与「疑似拼错」分开写，因为这两种要做的事相反；每个 id 后面注明它出现在哪张
+表——只写在 `[thinking]` 里的陈旧 id，在 `[bindings]` 里是翻不到的。消息里只有 id、中文标签和
+表名，不含任何密钥或 endpoint。这条校验做在注册表加载里，因此**热重载走的是同一把闸**：线上
+编辑 `model-services.toml` 删错一行，新配置被拒、旧注册表原样保留，服务不会带着半张绑定表继续
+跑（该诊断只进后端日志；`model_config_reload` 事件只带 `code=invalid_configuration`）。
+
+**特性开关不豁免绑定。** `AGENT_PROFILE_ENABLED` 这类开关关着，对应工作负载同样必须绑：开关
+可以在运行期改，绑定表只在启动时读一次——现在漏绑、以后把开关打开，就又回到静默降级。这是用户
+裁决「有没配置的就失败」的字面含义，也是放行只有一个部署级总闸、没有按工作负载豁免的原因。
 
 这条规则的由来：未绑定的 workload 在注册表里只解析为「无服务」，整条链路 fail-soft，不报错，
 表现是对应功能静默不工作（例如 `agent_profile_consolidate` 未绑定时，「AI 对这个库的理解」
@@ -497,8 +503,9 @@ id 与标签，不含任何密钥或 endpoint。这条校验做在注册表加�
 
 `MODEL_BINDINGS_STRICT=false` 把同一条诊断从「拒绝启动」降级为「启动告警」，用于升级期临时
 放行——它不是产品默认，也不改变「未绑定的工作负载静默不可用」这个事实。放行档下，后端在
-READY 之前用一行 WARNING 点名所有没有绑定的 chat workload（中文标签 + workload id），再用一行
-点名被忽略的未知/已退役 id；其中 `agent_profile_consolidate` 与 `retrieval_experience_distill`
+READY 之前用一行 WARNING 点名所有没有绑定的 workload（三类都算，中文标签 + workload id，与拒启
+口径一致），再用一行点名被忽略的未知/已退役 id；其中 `agent_profile_consolidate` 与
+`retrieval_experience_distill`
 在对应特性开关（`AGENT_PROFILE_ENABLED`、`RETRIEVAL_EXPERIENCE_ENABLED`）为开时，各自再单独
 一行「特性已开但模型未绑定」。
 

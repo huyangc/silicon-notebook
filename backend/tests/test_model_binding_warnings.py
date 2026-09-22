@@ -100,8 +100,10 @@ def test_deployment_with_no_model_services_at_all_gets_exactly_one_line():
     )
 
     assert len(warnings) == 1
-    assert "未配置模型服务" in warnings[0]
+    assert "当前没有可用的模型服务" in warnings[0]
     assert "降级为确定性回复" in warnings[0]
+    # 文案只说现象:判据是「注册表里没有可用服务」,不猜成因,所以不提配置项名。
+    assert "MODEL_SERVICES_CONFIG" not in warnings[0]
     # 离线模式不点名任何工作负载,也不提严格闸。
     assert "ask_answer" not in warnings[0]
     assert "MODEL_BINDINGS_STRICT" not in warnings[0]
@@ -115,7 +117,8 @@ def test_stale_binding_ids_get_their_own_line_naming_them():
     warnings = _unbound_workload_warnings(_settings(), models)
 
     assert len(warnings) == 1
-    assert "ask_anwser, graph_chain_verify" in warnings[0]
+    # 分隔符与拒启消息同口径(全角逗号)。
+    assert "ask_anwser，graph_chain_verify" in warnings[0]
     assert "MODEL_BINDINGS_STRICT" in warnings[0]
 
 
@@ -129,13 +132,27 @@ def test_a_registry_without_the_stale_id_reader_still_gets_the_other_lines():
     assert "库理解整理（agent_profile_consolidate）" in warnings[0]
 
 
-def test_only_chat_workloads_are_checked():
-    """向量/重排工作负载不在这条告警的范围里(它们的缺席由检索侧自己报)。"""
-    embedding_ids = {
+def test_every_workload_kind_is_checked_not_just_chat():
+    """向量/重排工作负载同样点名:告警口径必须与严格闸一致。
+
+    PR-3 只看 chat。PR-4 之后这条告警是「严格闸被关掉时」的替代诊断,一个比它
+    所替代的拒启更窄的告警,会让一个其实缺着向量绑定的部署以为自己没事——未绑定
+    的 embedding/rerank 让检索静默降级,和未绑定的 chat 一样严重。
+    """
+    non_chat_ids = {
         workload.id for workload in WORKLOADS.values() if workload.kind != "chat"
     }
-    assert embedding_ids  # 目录里确实有非 chat 工作负载,否则这条用例是空断言
-    assert _unbound_workload_warnings(_settings(), _models(embedding_ids)) == ()
+    assert non_chat_ids  # 目录里确实有非 chat 工作负载,否则这条用例是空断言
+
+    warnings = _unbound_workload_warnings(_settings(), _models(non_chat_ids))
+
+    assert len(warnings) == 1
+    assert "来源分块向量（chunk_embedding）" in warnings[0]
+    assert "检索结果重排（retrieval_rerank）" in warnings[0]
+    # 汇总行不再自称只管 chat。
+    assert "chat" not in warnings[0]
+    # 两条特性行仍然只对那两个 chat 工作负载升格。
+    assert "特性已开但模型未绑定" not in warnings[0]
 
 
 def test_diagnostic_never_raises_on_a_minimal_double():
@@ -158,6 +175,37 @@ def _run_startup_tree() -> ast.FunctionDef:
     raise AssertionError("run_startup 不见了")
 
 
+def _statement_index(function: ast.FunctionDef, target: ast.AST) -> int:
+    """目标节点所在语句在函数里的执行序号——刻意不用 ``.lineno``。
+
+    行号是源码位置,不是顺序语义:上面插一行注释就会改变断言里的数字,而语句的
+    先后关系一点没变。仓库的架构策略因此把「拿 .lineno 当身份用」列为违规
+    (``tests/architecture/policy.py`` 的 ``line-number-identity``)。语句序号表达
+    的正是这条守卫要说的话——「这一步在那一步之前」——并且对重排敏感、对排版
+    不敏感。
+
+    前序遍历里,包含目标的语句从外到内依次出现,所以取最大下标 = 最内层的那条
+    语句。``run_startup`` 的两个目标都埋在同一个 ``try:`` 里,只比顶层下标会得
+    到两个相同的数字。
+    """
+    ordered: list[ast.stmt] = []
+
+    def visit(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.stmt):
+                ordered.append(child)
+            visit(child)
+
+    visit(function)
+    containing = [
+        index
+        for index, statement in enumerate(ordered)
+        if any(node is target for node in ast.walk(statement))
+    ]
+    assert containing, "目标节点不在这个函数里"
+    return max(containing)
+
+
 def test_run_startup_still_emits_these_warnings_before_the_ready_line():
     """接线守卫:`run_startup` 恰好调用一次这个诊断,且在 READY 之前。
 
@@ -175,27 +223,14 @@ def test_run_startup_still_emits_these_warnings_before_the_ready_line():
     ]
     assert len(calls) == 1, "唯一消费点:多一处或少一处都要重新想清楚顺序"
 
-    ready_markers = [
+    ready = [
         node
         for node in ast.walk(run_startup)
         if isinstance(node, ast.Constant)
         and isinstance(node.value, str)
         and node.value.startswith("startup: READY")
     ]
-    assert len(ready_markers) == 1
-    # 顺序按**源码顺序的节点位置**比,不按行号:行号是诊断元数据,不是身份
-    # (仓库策略 test_test_architecture_policy 的 line-number-identity 判据)。
-    # ``ast.walk`` 是广度优先、不保证源码顺序,所以自己按子节点顺序做一次前序遍历。
-    in_source_order = list(_source_order(run_startup))
-    assert in_source_order.index(calls[0]) < in_source_order.index(ready_markers[0]), (
-        "告警必须打在 READY 那行之前"
-    )
-
-
-def _source_order(node: ast.AST):
-    """Pre-order traversal following ``ast.iter_child_nodes`` -- the order the
-    statements appear in the source -- so two nodes can be compared by position
-    without ever reading their line numbers."""
-    yield node
-    for child in ast.iter_child_nodes(node):
-        yield from _source_order(child)
+    assert len(ready) == 1
+    assert _statement_index(run_startup, calls[0]) < _statement_index(
+        run_startup, ready[0]
+    ), "告警必须打在 READY 那句之前"
