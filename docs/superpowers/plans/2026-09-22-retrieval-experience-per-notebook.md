@@ -162,8 +162,78 @@
 5. 跑 `tests/test_architecture_documentation.py`、`tests/test_gap_consult_docs_contract.py` 等文档
    对账测试；`scripts/check_ui_vocabulary.py` 不涉及（无界面改动）。
 
-## 收尾
+## 收尾（PR-1）
 
 - `bash scripts/check.sh` 全绿；G3 本机 `-n 1` 全绿。
 - `git fetch` + rebase 到最新 `origin/master`，重跑门禁。
 - 开 PR（描述含：规格链接、分区语义、守卫改动、验证证据、刻意偏离五条）；codex 评审闭环按 CLAUDE.md。
+
+**PR-1 已合入：#769（2026-09-22，codex 1 轮零意见，CI 7 check 全绿）。**
+
+---
+
+# PR-2 界面（分支 `claude/experience-partition-ui`，基线 `69004a24`）
+
+规格 §8 + §13-Q2（条目列表给全体成员看）。用户裁决「不用等我决策，把这一系列 PR 做完」，
+以下取舍由主 agent 拍板：
+
+- 三个端点挂在 P1 理解面板的路由家族下（`backend/app/api/agent_profile_routes.py`），复用
+  `require_notebook_read` 与 `agent_profile:write` 能力判据；运行时 jobs 服务经 `deps.py` 的
+  既定写法 `repository()._runtime.retrieval_experience_jobs` 取（facade 公开面只可收缩，不加席位）。
+- 「立即整理」与「清空」都要求 `agent_profile:write`（与 P1 共享底座「重新整理」同一口径：
+  owner / 可写成员），并过 `notebook_mirror_fence`；读列表只要读权。
+- 清空 = `store.evict_to_limit(0, notebook_id=…)`（不新增端口方法：ports Protocol 计数是零余量棘轮）。
+- 动作 id 是封闭词表，后端原样返回；界面用自己的词表映射成中文（同 `reasoning-trace.ts` 的步标签口径），
+  **不得**把 id 直接上屏（词汇守卫）。
+
+## 接口契约（前后端共用，两个子代理各按此实现）
+
+`GET /notebooks/{id}/understanding/experiences` → `ExperiencePartitionResponse`
+
+```json
+{
+  "enabled": true,               // distillation_wiring_active(settings, store)；false 时 entries=[]、count=0
+  "count": 3,
+  "updated_at": "2026-09-22T10:00:00+08:00" | null,   // 分区内 MAX(updated_at)
+  "can_manage": true,            // agent_profile:write 且未被镜像围栏拦下
+  "entries": [
+    {"action": "exact_lookup", "polarity": "bad", "rationale": "…", "support": 3, "adopted": 0,
+     "updated_at": "…"}
+  ]                              // 按 (support desc, updated_at desc, id asc)，最多 100 条（分区上限）
+}
+```
+
+`POST /notebooks/{id}/understanding/experiences/distill` → `{"started": true}`；总闸关 → 409
+`_DISABLED_MESSAGE` 同款文案「此功能已关闭」；单飞占用 → 409「正在整理，请稍后再试」；
+无 `agent_profile:write` → 404（镜像 rebuild）；镜像围栏 → 同 rebuild。
+
+`DELETE /notebooks/{id}/understanding/experiences` → `{"removed": 3}`；权限口径同上；总闸关也允许
+清空（既有行照常能删，镜像 Agent 记录「关开关是从现在起不记，不是把记过的藏起来」）。
+
+## T5 — 后端端点（opus）
+
+`backend/app/models/agent_profile.py` 三个响应模型；`backend/app/api/deps.py` 新增
+`retrieval_experience_jobs_service()`；`agent_profile_routes.py` 三个 handler；
+`docs/product-and-api_zh.md:1996` 起的端点表与 `.md` 对应表各加三行；测试
+（`grep -rln "understanding/rebuild" backend/tests` 找到既有路由测试文件，镜像其 fixture）：
+读权/无读权、`enabled=false` 形状、排序与上限、`can_manage` 三态、distill 的 409 两种、
+delete 只清本库分区且全局分区不动、镜像围栏。API 面变化跑 `tests/test_openapi*`/契约快照
+（`grep -rln "agent-observations" backend/tests` 找齐）。
+
+## T6 — 前端面板（opus）
+
+`frontend/features/agent-profile/profile-model.ts`：类型 + `EXPERIENCE_ACTION_LABELS`
+（retrieve 检索 / ppr 漫游 / exact_lookup 精查 / expand 扩展 / expand_community 对比 /
+follow_chain 推导 / enumerate 枚举 / outline 大纲 / search_chunks 段落 / read_document 整篇取样，
+未知 id 显示「其他」）+ `EXPERIENCE_POLARITY_LABELS`（good「好用」/ bad「不好用」）；
+`profile-api.ts` 三个函数；`agent-profile-panel.tsx` 新增第四张卡「检索经验」（模块名
+`understanding-module-name` 同款），`<details>` 懒加载（镜像「Agent 记录」的 epoch 守卫）；
+头部一句「这个库攒下的检索经验 N 条，最近更新 …」；列表每行：动作词 · 好用/不好用 · 理由 ·
+「N 次提问支持」；按钮「立即整理」（按下即 disabled + 文案「整理中…」，结果落在按钮旁：
+成功「已开始整理，稍后刷新」/ 409 原文）与「清空」（两步确认，镜像 Agent 记录的
+`confirmingAll`；成功后列表清空并在按钮旁显示「已清空 N 条」）；`enabled=false` 时卡内只显示
+「此功能已关闭」且不显示两个按钮；`can_manage=false` 不渲染按钮。词汇守卫：不得出现
+蒸馏 / 打法 / 画像 / 巡固 / 分区 / 全局库 等内部词。测试：`tests/component/agent-profile-panel.component.test.tsx`
+新增用例（列表渲染与标签映射、立即整理的按下态与结果文案、409 文案、清空两步与结果、
+enabled=false、can_manage=false）；`tests/guards/agent-profile-guard.test.mjs` 的③（只经
+profile-api）与②（无黑话）自动覆盖新代码，确认其绿；`scripts/check_ui_vocabulary.py` 绿。
