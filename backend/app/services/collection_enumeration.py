@@ -1,6 +1,6 @@
 """Typed-collection enumeration: the *清单层* under the collection map.
 
-Design doc ``docs/reasoning-enumeration-tools-design.md`` §2.3.  The map
+Design doc ``docs/superpowers/specs/2026-07-28-reasoning-enumeration-tools-design.md`` §2.3.  The map
 (``app.services.collection_catalog``) answers "how many formulas are in
 scope?"; this module answers "which ones", as an ordered, bounded, cursor-paged
 list with an explicit coverage proof.  Both layers are zero-LLM: the model

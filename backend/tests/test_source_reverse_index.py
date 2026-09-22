@@ -1,4 +1,4 @@
-"""P0-4: knowledge_object_sources reverse index (perf-audit docs/kg-perf-audit-16c64g.md).
+"""P0-4: knowledge_object_sources reverse index (perf-audit docs/superpowers/specs/2026-07-02-kg-perf-audit-16c64g.md).
 
 _clear_source_extraction_state (delete_source / _run_extraction reparse) used to
 read, parse and backfill EVERY knowledge_objects.evidence row in the notebook

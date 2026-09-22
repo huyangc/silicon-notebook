@@ -9,7 +9,7 @@
 **Tech Stack:** hnswlib、SQLite、pytest。解释器 `/opt/homebrew/Caskroom/miniconda/base/bin/python`;测试在 worktree `backend/`。
 
 ## Global Constraints
-- 依据 [review P0-4/P1-8](../../kg-scale-retrieval-review.md)。
+- 依据 [review P0-4/P1-8](../specs/2026-07-01-kg-scale-retrieval-review.md)。
 - **零正确性回归**:P0-4 handle 生命周期绑 ScaleIndex 实例(版本变→新实例→重开),不跨版本复用旧 handle;P1-8 版本键**必须**在任一检索相关写入后变化(否则服务陈旧索引=正确性 bug)。
 - fail-open:open 失败返回 None,调用方回退(现有行为)。
 - hnswlib `knn_query` 并发读安全;`set_ef` 每查询设(单 int,benign race)可接受。

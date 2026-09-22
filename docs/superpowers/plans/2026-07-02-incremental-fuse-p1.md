@@ -2,7 +2,7 @@
 
 > REQUIRED SUB-SKILL: superpowers:subagent-driven-development。
 
-**背景**(docs/kg-perf-audit-16c64g.md P1-2/P1-3):
+**背景**(docs/superpowers/specs/2026-07-02-kg-perf-audit-16c64g.md P1-2/P1-3):
 1. **P1-2**:`incremental_fuse_source`(sqlite_repository.py ~:3884 与 ~:3947,行号已漂移自查)每次上传**两遍**调用 `cluster_map(nb)`——每遍都是百万成员行全扫 + dict 构建,同步在上传抽取路径里。
 2. **P1-3(功能性缺陷,不只是慢)**:Tier2 向量桥接被 `kg_incremental_tier2_max_entities`(默认 50000)硬门挡住——49万实体的库上 Tier2 **静默失能**:新上传的概念再也得不到跨文档同义桥(emb 桥候选),孤岛照旧。而现在大库**有 scale 索引的 kg hnsw**(#156 后必建、#155 自动建),完全可以 ANN 化桥接,任意规模可用。
 
