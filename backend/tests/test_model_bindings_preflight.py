@@ -1,0 +1,179 @@
+"""PR-4:模型绑定的启动期硬校验接在 `create_app` 上,失败可读且进程起不来。
+
+用户裁决:「不配模型会静默降级,影响最终用户的使用。应该在服务启动的时候 check
+模型配置文件,如果有没有配置的,则直接失败并报错(哪些没配置,或者多配置了哪些)。」
+
+为什么预检放在 `create_app` 而不是等仓库构造:`run_startup` 把任何异常都收进
+readiness,进程照样活着、对外 503,日志里只剩一句被脱敏成「database
+initialization failed」的 ValueError——运维既拿不到原因,也拿不到非零退出码。
+`create_app` 抛出去则是 `uvicorn app.main:app` 直接起不来并非零退出,这里的两条
+守卫钉住这个接线:少调一次(或挪到 FastAPI 构造之后)整仓依然全绿,而那正是回到
+「静默降级」的路。
+"""
+import ast
+import inspect
+import logging
+
+import pytest
+
+from app import main as main_module
+from app.core.config import Settings
+from app.main import _model_bindings_preflight
+from app.services.model_registry import WORKLOADS
+
+
+_SERVICE = """[services.chat]
+display_name = "chat"
+kind = "chat"
+protocol = "openai"
+base_url = "https://llm.example/v1"
+model = "chat-model"
+api_key_env = "PREFLIGHT_KEY"
+max_concurrency = 2
+
+[services.embed]
+display_name = "embed"
+kind = "embedding"
+protocol = "dashscope"
+base_url = "https://embed.example"
+model = "embed-model"
+api_key_env = "PREFLIGHT_KEY"
+max_concurrency = 2
+
+[services.rerank]
+display_name = "rerank"
+kind = "rerank"
+protocol = "dashscope"
+base_url = "https://rerank.example"
+model = "rerank-model"
+api_key_env = "PREFLIGHT_KEY"
+max_concurrency = 2
+"""
+
+_BY_KIND = {"chat": "chat", "embedding": "embed", "rerank": "rerank"}
+
+
+def _config(tmp_path, *, omit: set[str] = frozenset(), extra: str = "") -> str:
+    lines = [
+        f'{workload_id} = "{_BY_KIND[workload.kind]}"'
+        for workload_id, workload in sorted(WORKLOADS.items())
+        if workload_id not in omit
+    ]
+    path = tmp_path / "model-services.toml"
+    path.write_text(
+        _SERVICE + "\n[bindings]\n" + "\n".join(lines) + "\n" + extra,
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _settings(path: str = "", *, strict: bool = True) -> Settings:
+    return Settings(
+        _env_file=None,
+        model_services_config=path,
+        model_bindings_strict=strict,
+    )
+
+
+def test_a_complete_binding_table_passes_the_preflight(monkeypatch, tmp_path):
+    monkeypatch.setenv("PREFLIGHT_KEY", "secret")
+
+    assert _model_bindings_preflight(_settings(_config(tmp_path))) is None
+
+
+def test_empty_config_passes_because_offline_mode_is_a_supported_runtime():
+    """`scripts/check.sh` 与本机开发都跑在这个形态下;它不是配错。"""
+    assert _model_bindings_preflight(_settings()) is None
+
+
+def test_a_missing_binding_logs_the_message_and_refuses_to_build_the_app(
+    monkeypatch, tmp_path, caplog
+):
+    monkeypatch.setenv("PREFLIGHT_KEY", "secret")
+    settings = _settings(_config(tmp_path, omit={"kg_glean", "memory_embedding"}))
+
+    with caplog.at_level(logging.ERROR, logger="silicon_notebook.startup"):
+        with pytest.raises(ValueError) as exc_info:
+            _model_bindings_preflight(settings)
+
+    message = str(exc_info.value)
+    assert "知识补充抽取（kg_glean）" in message
+    assert "记忆向量（memory_embedding）" in message
+    # 异常会被 uvicorn 打成 traceback,但运维往上翻要能一眼看到原因:日志里必须
+    # 有同一条整句,而不是只剩一个 ValueError 的类名。
+    logged = [record.getMessage() for record in caplog.records]
+    assert any("kg_glean" in line and "memory_embedding" in line for line in logged)
+
+
+def test_a_stale_binding_alone_is_enough_to_refuse(monkeypatch, tmp_path):
+    monkeypatch.setenv("PREFLIGHT_KEY", "secret")
+    settings = _settings(_config(tmp_path, extra='graph_chain_verify = "chat"\n'))
+
+    with pytest.raises(ValueError, match="graph_chain_verify"):
+        _model_bindings_preflight(settings)
+
+
+def test_the_escape_hatch_downgrades_the_refusal_to_a_started_service(
+    monkeypatch, tmp_path
+):
+    """MODEL_BINDINGS_STRICT=false 只是放行,不是「配置变对了」。
+
+    放行之后由 `startup_warmup._unbound_workload_warnings` 在 READY 之前点名,
+    见 `test_model_binding_warnings`。
+    """
+    monkeypatch.setenv("PREFLIGHT_KEY", "secret")
+    settings = _settings(_config(tmp_path, omit={"kg_glean"}), strict=False)
+
+    assert _model_bindings_preflight(settings) is None
+
+
+def test_other_model_configuration_errors_stay_on_their_existing_path(
+    monkeypatch, tmp_path, caplog
+):
+    """本次改动不扩大拒启范围:密钥缺失仍由既有路径决定失败时机。
+
+    预检只补一行可读日志就放行——重新抛出的只有绑定表的问题。把「TOML 语法
+    错」「密钥没填」也在这里拒掉会改变一批既有部署的失败形态,属于另一件事。
+    """
+    monkeypatch.delenv("PREFLIGHT_KEY", raising=False)
+    settings = _settings(_config(tmp_path))
+
+    with caplog.at_level(logging.ERROR, logger="silicon_notebook.startup"):
+        assert _model_bindings_preflight(settings) is None
+
+    assert any("PREFLIGHT_KEY" in r.getMessage() for r in caplog.records)
+
+
+def _create_app_tree() -> ast.FunctionDef:
+    tree = ast.parse(inspect.getsource(main_module))
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "create_app":
+            return node
+    raise AssertionError("create_app 不见了")
+
+
+def test_create_app_runs_the_preflight_before_it_builds_anything():
+    """接线守卫:恰好调用一次,且在 FastAPI(...) 构造之前。
+
+    删掉那一行整仓仍然全绿——守卫在这里,是因为「校验在 app 建好之后才跑」与
+    「压根没跑」对一个配错了绑定的部署是同一件事:两者都会让服务先起来。
+    """
+    create_app = _create_app_tree()
+    calls = [
+        node
+        for node in ast.walk(create_app)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_model_bindings_preflight"
+    ]
+    assert len(calls) == 1
+
+    fastapi_lines = [
+        node.lineno
+        for node in ast.walk(create_app)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "FastAPI"
+    ]
+    assert len(fastapi_lines) == 1
+    assert calls[0].lineno < fastapi_lines[0]

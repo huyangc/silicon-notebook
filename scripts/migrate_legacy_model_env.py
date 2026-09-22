@@ -31,6 +31,7 @@ from app.core.config import Settings  # noqa: E402
 from app.services.model_registry import (  # noqa: E402
     WORKLOADS,
     SystemModelServiceRegistry,
+    binding_gap,
 )
 
 
@@ -443,6 +444,19 @@ def build_migration_plan(
         "max_concurrency values were inferred from retired local concurrency "
         "settings; verify them against each physical service's real capacity"
     )
+    # The generated file is only as complete as the legacy .env it reads: a
+    # deployment that never configured EMBED_*/RERANK_* cannot be migrated into
+    # a full binding table. Startup now REFUSES a partial one
+    # (MODEL_BINDINGS_STRICT), so say so here rather than letting the operator
+    # discover it from a service that will not come up.
+    unbound, _ = binding_gap(bindings, ())
+    if unbound:
+        warnings.append(
+            "the legacy .env carried no model for these workloads, so the "
+            "generated [bindings] is incomplete and the backend will refuse to "
+            "start until you add them (or set MODEL_BINDINGS_STRICT=false): "
+            + ", ".join(unbound)
+        )
     toml_text = render_toml(tuple(services), bindings)
     plan = MigrationPlan(tuple(services), bindings, tuple(warnings), toml_text)
     validate_plan(plan)
@@ -482,6 +496,14 @@ def render_toml(
 
 
 def validate_plan(plan: MigrationPlan) -> None:
+    """Check the generated TOML parses into exactly the planned services.
+
+    Deliberately loaded with ``model_bindings_strict=False``: completeness is a
+    startup requirement, but this migration can only bind the workloads whose
+    model the legacy ``.env`` actually named. A partial legacy deployment must
+    still get its file generated — with the loud warning added in
+    ``build_migration_plan`` — instead of the tool refusing to migrate at all.
+    """
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", suffix=".toml", delete=False
     ) as handle:
@@ -489,7 +511,11 @@ def validate_plan(plan: MigrationPlan) -> None:
         temporary = Path(handle.name)
     try:
         registry = SystemModelServiceRegistry.load(
-            Settings(_env_file=None, model_services_config=str(temporary)),
+            Settings(
+                _env_file=None,
+                model_services_config=str(temporary),
+                model_bindings_strict=False,
+            ),
             plan.secrets,
         )
         if {service.id for service in registry.services()} != {

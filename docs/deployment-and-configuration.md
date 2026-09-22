@@ -571,26 +571,54 @@ all of them share that service's one scheduler and one concurrency budget.
 window sizes, batch sizes, and local ANN threads do not create another model
 gate.
 
+**The binding table is checked at startup: one missing workload or one unknown
+id and the backend refuses to start.** Whenever `MODEL_SERVICES_CONFIG` is
+non-empty, `[bindings]` must cover every workload (all three kinds — chat,
+embedding, rerank) and must not name an id that is not a workload (a
+misspelling, or one retired by an upgrade such as `graph_chain_verify`). Either
+one and the process exits non-zero with one readable line stating why:
+
+```
+model-bindings: 缺少绑定的工作负载：库理解整理（agent_profile_consolidate）, 检索打法总结（retrieval_experience_distill）；未知或已退役的绑定：graph_chain_verify。请在 /etc/silicon/model-services.toml 的 [bindings] 补齐/删除后重启；确需临时放行设 MODEL_BINDINGS_STRICT=false（仅告警）。
+```
+
+Both halves are listed in full (sorted by id, with the Chinese label), so one
+edit fixes everything instead of one restart per mistake, and the message
+carries ids and labels only — never a secret or an endpoint. The check lives in
+registry loading, so **hot reload runs through the same gate**: an edit that
+deletes a binding line is rejected, the previous registry is kept, and the
+service never carries on with half a binding table.
+
+Why the rule exists: an unbound workload simply resolves to "no service" in the
+registry and the whole chain fails soft — no error anywhere, just a feature that
+silently does nothing (an unbound `agent_profile_consolidate`, for instance,
+makes every background consolidation run behind "AI 对这个库的理解" settle as
+`failed:模型未配置，无法整理`). A `[bindings]` file is normally generated once
+and then carried across versions, so every **new** workload starts life unbound
+in every existing deployment, and the silent downgrade lands on end users.
 **After an upgrade, regenerate `.local/model-services.toml` or add bindings for
-the newly introduced workloads by hand.** A `[bindings]` file is normally
-generated once and then carried across versions, so every **new** workload
-starts life unbound in every existing deployment. An unbound workload simply
-resolves to "no service" in the registry and the whole chain fails soft — no
-error anywhere, just a feature that silently does nothing (an unbound
-`agent_profile_consolidate`, for instance, makes every background consolidation
-run behind "AI 对这个库的理解" settle as `failed:模型未配置，无法整理`). The
-backend therefore emits one WARNING line before READY naming every chat
-workload nothing is bound to (Chinese label plus workload id); on top of that,
+the newly introduced workloads by hand.** `scripts/migrate_legacy_model_env.py`
+walks every workload when generating the file (it can only bind what the legacy
+`.env` actually configured, and warns on the spot when the result is
+incomplete); adding the missing `[bindings]` lines by hand works just as well.
+
+`MODEL_BINDINGS_STRICT=false` downgrades that same diagnostic from a refusal to
+a startup warning, as a temporary pass during an upgrade. It is not the product
+default and it does not change the fact that an unbound workload is silently
+unavailable. With the gate off, the backend emits one WARNING line before READY
+naming every chat workload nothing is bound to (Chinese label plus workload id)
+and one more naming the unknown/retired ids it ignored; on top of that,
 `agent_profile_consolidate` and `retrieval_experience_distill` each get their
 own line ("特性已开但模型未绑定") when their feature flag
-(`AGENT_PROFILE_ENABLED`, `RETRIEVAL_EXPERIENCE_ENABLED`) is on. A deployment
-with an empty `MODEL_SERVICES_CONFIG` is exempt — that is the supported offline
-runtime and it already has its own startup notice.
-`scripts/migrate_legacy_model_env.py` walks every workload when regenerating
-the file; adding the missing `[bindings]` lines by hand works just as well.
-These are warnings only and never refuse to start. The admin model-service
-status page is organised by **physical service**, so an unbound workload
-produces no row there at all; the startup log is currently the authority on
+(`AGENT_PROFILE_ENABLED`, `RETRIEVAL_EXPERIENCE_ENABLED`) is on.
+
+An empty `MODEL_SERVICES_CONFIG` is a different thing entirely: that is the
+supported offline/deterministic runtime and the strict gate has no opinion about
+it (otherwise every development environment and `scripts/check.sh` would fail to
+start). It gets one WARNING line before READY saying that everything needing a
+model will answer deterministically. The admin model-service status page is
+organised by **physical service**, so an unbound workload produces no row there
+at all; the startup log — or the startup failure message — is the authority on
 which workloads are unbound.
 
 Auto mode (the simplified interface) always uses step-by-step reasoning

@@ -930,6 +930,13 @@ function_length_ceiling` 里（`ask_chunk` / `_run_reasoning_stage` / `_draft_re
   汇总全部未绑定 chat workload（中文标签 + id），`agent_profile_consolidate` /
   `retrieval_experience_distill` 在各自特性开关为开时再各占一行。空 `MODEL_SERVICES_CONFIG`
   的离线部署豁免；告警 fail-open，绝不拒启。
+- **随后按用户裁决升级为启动期硬校验**（「不配模型会静默降级，影响最终用户的使用。应该在服务
+  启动的时候 check 模型配置文件，如果有没有配置的，则直接失败并报错」）：非空
+  `MODEL_SERVICES_CONFIG` 的 `[bindings]` 必须覆盖全部工作负载（三类都算）且不含未知/已退役
+  id，否则 `create_app` 就地拒启，进程非零退出、日志里是一整句列全两段的
+  `model-bindings: …`。热重载共用同一把闸（坏配置被拒、旧注册表保留）。`MODEL_BINDINGS_STRICT
+  =false` 只是把它降级回上一条的告警形态（并加一行点名被忽略的 id），不是产品默认；空配置仍是
+  受支持的离线模式，只在 READY 之前多一行「所有需要模型的功能将降级为确定性回复」。
 - `RETRIEVAL_EXPERIENCE_INJECT_ENABLED` 默认从 false 翻为 **true**。理由是作用域变了而不是风险
   变小：分区之前一张跨库全局表说不出任何一句关于「这个库」的话。本机试跑（deepseek-flash、仓库
   docs 作语料）10 次 reasoning 提问蒸出 `runs=10, situations=1, written=2`，开闸后轨迹出现

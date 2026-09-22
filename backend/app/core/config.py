@@ -171,6 +171,16 @@ class Settings(BaseSettings):
     # selects deterministic/offline model behavior; relative paths are anchored
     # to the repository root below so startup CWD cannot change the deployment.
     model_services_config: str = Field("", validation_alias="MODEL_SERVICES_CONFIG")
+    # 用户裁决:「不配模型会静默降级,影响最终用户的使用。应该在服务启动的时候
+    # check 模型配置文件,如果有没有配置的,则直接失败并报错(哪些没配置,或者多
+    # 配置了哪些)。」因此只要给了非空 MODEL_SERVICES_CONFIG,它的 [bindings]
+    # 必须覆盖 WORKLOADS 的全部工作负载、且不含未知或已退役的 id,否则
+    # SystemModelServiceRegistry.load 直接拒绝启动。
+    #
+    # 设为 false 只是把同一条诊断从「拒绝启动」降级为「启动告警」,给运维一次
+    # 临时放行——它不是产品默认,也不改变「未绑定的工作负载静默不可用」这个事实。
+    # 空 MODEL_SERVICES_CONFIG 是另一回事(受支持的离线模式),不受本开关影响。
+    model_bindings_strict: bool = Field(True, validation_alias="MODEL_BINDINGS_STRICT")
 
     # Deployment-owned out-of-repo plugin manifest (TOML). Empty = no deployment
     # plugins; the frozen topology is then byte-identical to the built-in tuple. A

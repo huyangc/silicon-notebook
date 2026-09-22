@@ -76,6 +76,12 @@ def test_build_plan_preserves_roles_bindings_protocols_and_inferred_capacity(tmp
 
 
 def test_cli_is_dry_run_by_default_and_apply_backs_up_then_validates(tmp_path, capsys):
+    """也是 PR-4 的守卫:一份完整 legacy .env 迁出来的 toml 必须过严格闸。
+
+    末尾那次 ``SystemModelServiceRegistry.load`` 用的是默认 Settings,即
+    ``MODEL_BINDINGS_STRICT=true``。迁移脚本遍历全部 WORKLOADS 生成绑定,所以
+    新增一个工作负载却忘了让脚本覆盖它,这条会红。
+    """
     env_path = tmp_path / ".env"
     original = _legacy_env()
     env_path.write_text(original, encoding="utf-8")
@@ -146,6 +152,27 @@ def test_dashscope_rerank_keeps_the_legacy_default_base_url():
     assert plan.services[0].protocol == "dashscope"
     assert plan.services[0].base_url == "https://dashscope.aliyuncs.com/api/v1"
     assert plan.bindings == {"retrieval_rerank": "rerank"}
+
+
+def test_a_partial_legacy_env_migrates_but_says_the_backend_will_refuse_to_start():
+    """只配了 rerank 的旧部署仍然能迁移,但必须当场被告知启动会被拒。
+
+    脚本只能绑定 legacy .env 真的配过的服务,所以生成一张不完整的 [bindings]
+    是合法输出;PR-4 之后这张表会让后端拒绝启动,因此警告要在迁移时就给出来,
+    而不是让运维从一个起不来的服务里反推。
+    """
+    plan = migration.build_migration_plan({
+        "RERANK_API_KEY": "rerank-secret",
+        "RERANK_MODEL": "qwen3-rerank",
+    })
+
+    incomplete = [
+        warning for warning in plan.warnings if "refuse to start" in warning
+    ]
+    assert len(incomplete) == 1
+    assert "ask_answer" in incomplete[0]
+    assert "MODEL_BINDINGS_STRICT=false" in incomplete[0]
+    assert "retrieval_rerank" not in incomplete[0]
 
 
 @pytest.mark.parametrize(

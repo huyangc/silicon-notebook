@@ -40,7 +40,7 @@ from app.api.mcp_server import (
 from app.api.routes import router
 from app.core import diagnostics_runtime as diagnostics
 from app.core import readiness
-from app.core.config import env_file_diagnosis, get_settings
+from app.core.config import Settings, env_file_diagnosis, get_settings
 from app.core.event_logging import EventLogger, new_id
 from app.domain.indexing_pipeline import IndexingPipelineUnavailableError
 from app.bootstrap import (
@@ -181,6 +181,35 @@ def _env_file_preflight() -> None:
         "参照 .env.example 创建,或忽略本警告(容器纯环境变量部署)。", env_path)
 
 
+def _model_bindings_preflight(settings: Settings) -> None:
+    """启动期硬校验 MODEL_SERVICES_CONFIG 的绑定表,缺/多都拒绝启动。
+
+    用户裁决:「不配模型会静默降级,影响最终用户的使用。应该在服务启动的时候
+    check 模型配置文件,如果有没有配置的,则直接失败并报错。」
+
+    为什么在这里而不是等仓库构造时抛:`run_startup` 把任何异常都收进 readiness,
+    进程照样活着、对外 503,日志里只剩一句被脱敏成「database initialization
+    failed」的 ValueError——运维既拿不到原因也拿不到非零退出码。放在 create_app
+    里,同一条 `SystemModelServiceRegistry.load` 先跑一遍:消息原样进日志,异常
+    继续往上抛,uvicorn 起不来并以非零码退出。
+
+    只有绑定表的问题会重新抛出。其余模型配置错误(密钥缺失、TOML 语法等)在这里
+    只补一行可读日志,仍由既有路径决定失败时机——这次改动不扩大拒启的范围。
+    """
+    from app.services.model_registry import (
+        BINDING_GAP_PREFIX,
+        SystemModelServiceRegistry,
+    )
+
+    try:
+        SystemModelServiceRegistry.load(settings)
+    except ValueError as exc:
+        message = str(exc)
+        logger.error("模型服务配置无效：%s", message)
+        if message.startswith(BINDING_GAP_PREFIX):
+            raise
+
+
 def create_app() -> FastAPI:
     from app.core.auth_logging import install_authentication_access_filter
 
@@ -188,6 +217,7 @@ def create_app() -> FastAPI:
     validate_process_local_scheduler_deployment()
     _env_file_preflight()
     settings = get_settings()
+    _model_bindings_preflight(settings)
 
     bind_host = os.environ.get("BACKEND_HOST", os.environ.get("HOST", "127.0.0.1"))
     mcp_public_url = os.environ.get(

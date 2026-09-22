@@ -5,6 +5,7 @@ import threading
 from app.core.config import Settings
 from app.services import model_provider as provider_module
 from app.services.model_provider import RuntimeModelProvider
+from app.services.model_registry import WORKLOADS
 
 
 def _config(*, service_id: str, model: str, top_p: float) -> str:
@@ -21,6 +22,25 @@ top_p = {top_p}
 [bindings]
 ask_answer = "{service_id}"
 '''
+
+
+def _settings(path) -> Settings:
+    """Hot-reload settings with the startup binding gate off.
+
+    These tests are about the WATCHER — stable-signature debouncing, rerouting
+    an existing adapter, keeping the last valid registry when a candidate is
+    rejected. Their fixtures bind one workload on purpose so the reroute is
+    observable; a complete 37-workload table would add nothing but noise.
+    Binding completeness is enforced at startup and covered by
+    ``test_model_registry``; the reload path shares the same ``load`` and the
+    same gate, which ``test_strict_reload_is_rejected_and_keeps_the_previous_registry``
+    below pins explicitly.
+    """
+    return Settings(
+        _env_file=None,
+        model_services_config=str(path),
+        model_bindings_strict=False,
+    )
 
 
 class _EventLog:
@@ -81,6 +101,7 @@ def test_background_hot_reload_reroutes_an_existing_workload_adapter(
         Settings(
             _env_file=None,
             model_services_config=str(path),
+            model_bindings_strict=False,  # 同 _settings:这里测的是 watcher
             event_log_enabled=False,
             llm_log_enabled=False,
         ),
@@ -131,7 +152,7 @@ def test_hot_reload_updates_thinking_policy_without_rebuilding_the_service(
             return '{"ok":true}'
 
     provider = RuntimeModelProvider(
-        Settings(_env_file=None, model_services_config=str(path)),
+        _settings(path),
         _EventLog(),
         chat_factory=lambda service: ThinkingDelegate(service, []),
     )
@@ -162,7 +183,7 @@ def test_watcher_waits_for_a_stable_file_signature_before_publish(
         encoding="utf-8",
     )
     provider = RuntimeModelProvider(
-        Settings(_env_file=None, model_services_config=str(path)),
+        _settings(path),
         _EventLog(),
         chat_factory=lambda service: _ChatDelegate(service, []),
     )
@@ -194,7 +215,7 @@ def test_watcher_rejects_a_file_that_changes_while_it_is_loaded(monkeypatch, tmp
         encoding="utf-8",
     )
     provider = RuntimeModelProvider(
-        Settings(_env_file=None, model_services_config=str(path)),
+        _settings(path),
         _EventLog(),
         chat_factory=lambda service: _ChatDelegate(service, []),
     )
@@ -244,7 +265,7 @@ def test_invalid_hot_reload_keeps_last_valid_registry(monkeypatch, tmp_path):
     calls: list[tuple[str, float | None]] = []
     events = _EventLog()
     provider = RuntimeModelProvider(
-        Settings(_env_file=None, model_services_config=str(path)),
+        _settings(path),
         events,
         chat_factory=lambda service: _ChatDelegate(service, calls),
     )
@@ -258,6 +279,76 @@ def test_invalid_hot_reload_keeps_last_valid_registry(monkeypatch, tmp_path):
             [{"role": "user", "content": "still-valid"}], "{}"
         ) == '{"ok":true}'
         assert calls == [("model-one", 1.0)]
+        assert any(
+            event.get("kind") == "model_config_reload"
+            and event.get("status") == "error"
+            for event in events.events
+        )
+    finally:
+        provider.close()
+
+
+def _complete_config(*, model: str) -> str:
+    """A config that satisfies the strict startup gate: every workload bound."""
+    services = "\n".join((
+        _config(service_id="chat", model=model, top_p=1.0).split("[bindings]")[0],
+        '[services.embed]\ndisplay_name = "embed"\nkind = "embedding"\n'
+        'protocol = "dashscope"\nbase_url = "https://embed.example"\n'
+        'model = "embed-model"\napi_key_env = "HOT_RELOAD_KEY"\n'
+        "max_concurrency = 2\n",
+        '[services.rerank]\ndisplay_name = "rerank"\nkind = "rerank"\n'
+        'protocol = "dashscope"\nbase_url = "https://rerank.example"\n'
+        'model = "rerank-model"\napi_key_env = "HOT_RELOAD_KEY"\n'
+        "max_concurrency = 2\n",
+    ))
+    by_kind = {"chat": "chat", "embedding": "embed", "rerank": "rerank"}
+    bindings = "\n".join(
+        f'{workload_id} = "{by_kind[workload.kind]}"'
+        for workload_id, workload in sorted(WORKLOADS.items())
+    )
+    return f"{services}\n[bindings]\n{bindings}\n"
+
+
+def test_strict_reload_is_rejected_and_keeps_the_previous_registry(
+    monkeypatch, tmp_path
+):
+    """热重载走同一把闸:少一行绑定的新文件被拒,旧注册表原样留着。
+
+    PR-4 的严格校验做在 ``SystemModelServiceRegistry.load`` 里,所以启动与热重
+    载共用同一条判据、同一条消息。线上编辑 ``model-services.toml`` 时删错一行,
+    服务不会带着半张绑定表继续跑;管理端/运维在日志与 ``model_config_reload``
+    错误事件里拿到的,就是启动失败时那句 ``model-bindings: ...``。
+    """
+    monkeypatch.setenv("HOT_RELOAD_KEY", "secret")
+    monkeypatch.setattr(
+        provider_module, "_MODEL_CONFIG_RELOAD_INTERVAL_SECONDS", 60.0
+    )
+    path = tmp_path / "model-services.toml"
+    path.write_text(_complete_config(model="model-one"), encoding="utf-8")
+    events = _EventLog()
+    provider = RuntimeModelProvider(
+        Settings(
+            _env_file=None,
+            model_services_config=str(path),
+            model_bindings_strict=True,
+            event_log_enabled=False,
+            llm_log_enabled=False,
+        ),
+        events,
+        chat_factory=lambda service: _ChatDelegate(service, []),
+    )
+    try:
+        assert provider.chat("ask_answer").model == "model-one"
+
+        path.write_text(
+            _complete_config(model="model-two").replace(
+                'kg_glean = "chat"\n', ""
+            ),
+            encoding="utf-8",
+        )
+        assert provider.reload_if_changed(force=True) is False
+        assert provider.chat("ask_answer").model == "model-one"
+        assert provider.registry.service_for("kg_glean") is not None
         assert any(
             event.get("kind") == "model_config_reload"
             and event.get("status") == "error"
