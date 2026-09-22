@@ -495,3 +495,120 @@ def test_prune_log_deletes_in_batches_on_postgres(
             assert remaining["n"] == 0
     finally:
         database.close()
+
+
+# --------------------------------------------------------- export lease (runs)
+
+
+def _seed_export_lease(
+    database,
+    *,
+    target_env: str = "prod-tokyo",
+    run_id: str = "run-1",
+    package_id: str = "pkg-inflight",
+    floor_seq: int,
+    heartbeat_moment: datetime,
+) -> None:
+    with database.write() as conn:
+        conn.execute(
+            "INSERT INTO sync_export_runs "
+            "(target_env, run_id, package_id, started_at, heartbeat_at, floor_seq) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (target_env, run_id, package_id, heartbeat_moment, heartbeat_moment, floor_seq),
+        )
+
+
+def test_prune_log_active_lease_narrows_the_seq_bound_on_postgres(
+    cli_settings, root_dir, capsys
+):
+    _migrate(cli_settings)
+    database = PostgresDatabase(cli_settings, root_dir)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_export_state "
+                "(target_env, exported_through_seq, exported_at, package_id, "
+                "captured, exported_snapshot) VALUES (%s, %s, %s, %s, %s, %s)",
+                ("prod-tokyo", 100, "2026-01-01T00:00:00+00:00", "pkg-abc", True, "50:60:"),
+            )
+        _seed_export_lease(
+            database, floor_seq=50, heartbeat_moment=datetime.now(timezone.utc)
+        )
+        old = datetime.now(timezone.utc) - timedelta(days=40)
+        _insert_log_row(database, root_dir, cli_settings, seq=40, txid=1, changed_at=old)
+        _insert_log_row(database, root_dir, cli_settings, seq=60, txid=1, changed_at=old)
+
+        args = cli.build_parser().parse_args(["prune-log", "--json"])
+        exit_code = cli._cmd_prune_log(args, cli_settings)
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["min_seq"] == 50
+        assert payload["deleted"] == 1
+        assert payload["active_leases"] == [
+            {"target_env": "prod-tokyo", "floor_seq": 50}
+        ]
+
+        with database.connect() as conn:
+            remaining = {
+                row["seq"]
+                for row in conn.execute("SELECT seq FROM sync_change_log").fetchall()
+            }
+            assert remaining == {60}
+    finally:
+        database.close()
+
+
+def test_status_lists_export_runs_on_postgres(cli_settings, root_dir, capsys):
+    _migrate(cli_settings)
+    database = PostgresDatabase(cli_settings, root_dir)
+    try:
+        _seed_export_lease(
+            database,
+            target_env="prod-tokyo",
+            floor_seq=42,
+            heartbeat_moment=datetime.now(timezone.utc),
+        )
+        _seed_export_lease(
+            database,
+            target_env="prod-osaka",
+            run_id="run-dead",
+            package_id="pkg-dead",
+            floor_seq=7,
+            heartbeat_moment=datetime.now(timezone.utc) - timedelta(hours=2),
+        )
+
+        args = cli.build_parser().parse_args(["status", "--json"])
+        exit_code = cli._cmd_status(args, cli_settings)
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        runs_by_target = {row["target_env"]: row for row in payload["runs"]}
+        assert runs_by_target["prod-tokyo"]["floor_seq"] == 42
+        assert runs_by_target["prod-tokyo"]["dead"] is False
+        assert runs_by_target["prod-osaka"]["floor_seq"] == 7
+        assert runs_by_target["prod-osaka"]["dead"] is True
+    finally:
+        database.close()
+
+
+def test_prune_log_reports_missing_v85_columns_and_runs_table_together_on_postgres(
+    cli_settings, root_dir, capsys
+):
+    _migrate(cli_settings)
+    database = PostgresDatabase(cli_settings, root_dir)
+    try:
+        with database.write() as conn:
+            conn.execute("ALTER TABLE sync_export_state DROP COLUMN captured")
+            conn.execute("ALTER TABLE sync_export_state DROP COLUMN exported_snapshot")
+            conn.execute("DROP TABLE sync_export_runs")
+
+        args = cli.build_parser().parse_args(["prune-log"])
+        exit_code = cli._cmd_prune_log(args, cli_settings)
+        assert exit_code == 2
+        err = capsys.readouterr().err
+        assert "v85/0065" in err
+        assert "缺列" in err
+        assert "captured" in err
+        assert "缺表" in err
+        assert "sync_export_runs" in err
+    finally:
+        database.close()

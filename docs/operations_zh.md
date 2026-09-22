@@ -600,7 +600,8 @@ v1 文件没有转换器）。若升级目标端时还有 v1 包在途（已导�
 推进水位。`--full`（不带 `--notebook`）强制全量，同样
 正常推进水位。人读摘要与 `--json` 报告都会打印 `mode`、`from_seq`、`to_seq`、
 `base_package_id`（全量包与任何 `--notebook` 限定的导出都为空）、`deletes`（条数）、
-`deleted_notebooks`、`empty`。
+`deleted_notebooks`、`empty`、`captured`，以及 `run_id`（本次导出持有的租约 id，等于
+`package_id`；`--notebook` 限定的导出不占租约，为空——见设计文档 §7「在途导出租约」）。
 
 `import` 幂等：重复引入同一个包目录会短路为 `already_applied`（退出 0），不会重新应用行。
 `--dry-run` 只做到身份映射与预检为止，不写入任何数据，只输出会发生什么——正式引入前务必
@@ -662,17 +663,23 @@ PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --j
 
 `sync_change_log` 只靠写入增长，没有东西会自动从里面删——包括增量导出做的压缩：那次折叠
 发生在单次导出内存里，是为了缩小那次产出的**包**，不会删掉底层的日志行（另一个水位更旧的
-目标环境可能还需要它们）。`prune-log` 删除的是「未来任何一次导出都不可能再需要」的日志行。
-一行要**同时**满足三个条件才会被删：它的 `seq` 小于等于全部 `captured` 水位里最小的
-`exported_through_seq`；在 PostgreSQL 上，它的 `txid` 还要小于全部 `captured` 水位的
-`exported_snapshot` 取 `pg_snapshot_xmin` 后的最小值；它的 `changed_at` 早于
-`--keep-days`（默认 30）指定的天数（哪怕前两条都满足，一行按 `changed_at` 还不够旧也会被
-留下）。这两次取最小值**只看带 `captured` 水位的目标环境**：一个从未导出过、或者最近一次
-因为捕获关着而落到了全量的目标环境，对这个上限「弃权」，不参与取最小——不会因为它没有
-`captured` 水位就把上限硬拖到 0、挡住所有别的目标环境的清理。只有**一个 `captured` 水位都
-不存在**（没有任何目标环境成功做过一次带快照的导出）时，命令才会直接拒绝并点名——这不是
-某一个目标环境的上限不明确，而是根本没有任何安全上限可以取。`--dry-run` 只报告会删掉多少
-行，不真的删。
+目标环境可能还需要它们）。`prune-log` 删除的是「未来任何一次导出——包括正在跑的那一个——都
+不可能再需要」的日志行。一行要**同时**满足三个条件才会被删：它的 `seq` 小于等于
+(a) 全部 `captured` 水位里最小的 `exported_through_seq` 与 (b) 全部**活着**的
+`sync_export_runs` 租约（还没发布水位的在途导出，见设计文档 §7「在途导出租约」）的
+`floor_seq` 这两者合起来的最小值；在 PostgreSQL 上，它的 `txid` 还要小于全部 `captured`
+水位的 `exported_snapshot` 取 `pg_snapshot_xmin` 后的最小值（租约不带快照，不参与这一半）；
+它的 `changed_at` 早于 `--keep-days`（默认 30）指定的天数（哪怕前面的条件都满足，一行按
+`changed_at` 还不够旧也会被留下）。`captured` 水位那两次取最小值**只看带 `captured` 水位的
+目标环境**：一个从未导出过、或者最近一次因为捕获关着而落到了全量的目标环境，对这个上限
+「弃权」，不参与取最小——不会因为它没有 `captured` 水位就把上限硬拖到 0、挡住所有别的目标
+环境的清理。死租约（心跳超过一小时，或读不出来）同样不参与取最小——会在输出里点名
+（`dead_leases`，人读摘要里是「忽略的死租约」），但不进入判据，跟水位一侧的「弃权」是同一
+逻辑。只有**一个 `captured` 水位都不存在**时，命令才会直接拒绝并点名——单独一个活租约不能
+顶替这个前提，因为它是在给一个还没发布的水位设下界，不是替代一个已经发布的水位。`--dry-run`
+只报告会删掉多少行，不真的删。真正执行删除时按每批 5000 行分批、每批各自一个事务，避免清理
+一段长期没清过的日志时占住一个长事务或跑一条不设上限的 `DELETE`；报告里的 `batches`
+字段是实际跑了几批。
 
 ### 变更捕获（`sync capture`）
 
@@ -696,9 +703,12 @@ PYTHONPATH=backend python scripts/sync_notebooks.py capture disable --json
 也不会再清一次水位），对一次退出码含糊的调用不放心时重新跑一遍是安全的。
 
 **导出进行中执行 `sync capture enable`/`disable` 现在是自我纠正的，不再只是一条「别这么做」的
-建议。** 导出在自己读快照打开的那一刻，把门的状态记成一对世代 `(enabled, enabled_at)`；写
-水位的事务（`_advance_watermark`）落盘前会在自己的事务里重新读一次这一对，与导出开始时记下
-的比较，据此决定要不要认领 `captured`：
+建议。** 写水位的事务（`_advance_watermark`）重读门状态之前先拿写锁：SQLite 用
+`BEGIN IMMEDIATE`（跨进程串行，`sync capture enable`/`disable` 走同一把锁，不存在第三种交叠
+顺序），PostgreSQL 对 `sync_capture_control` 那一行 `SELECT ... FOR UPDATE`。「重读门 → 写
+水位 → 提交」这段区间因此不是一个可能被插入的无锁窗口，谁也插不进一次 `disable`+`enable`。
+导出在自己读快照打开的那一刻，把门的状态记成一对世代 `(enabled, enabled_at)`；写水位的事务
+在锁内重读同一对，与导出开始时记下的比较，据此决定要不要认领 `captured`：
 - 导出开始读快照时门是关的，之后几分钟执行了 `enable`：这次导出的 `captured_through_seq`
   读自门打开之前就已经固定的快照，所以这次的 `captured` 是 false，不管门后来怎么变（这个
   答案是对的——日志确实没能覆盖这次导出），并且会让这个目标**下一次**导出也被打回全量——
@@ -713,6 +723,20 @@ PYTHONPATH=backend python scripts/sync_notebooks.py capture disable --json
 两种情况都不会留下一个日志已经接不上、却还标着 `captured=true` 的水位——这种交叠不存在会
 悄悄污染增量链的窗口。开启/关闭捕获前先让在跑的导出跑完仍然是好的运维习惯（能避免一个意外
 的 `captured=false` 水位和它带来的一次额外全量导出），但已经不再是正确性意义上的必须。
+
+同一条发布路径还带另外两条保证（设计文档 §7「在途导出租约」/「导出水位」）：
+
+- **同一 target 的两次导出互斥**：不限定范围的导出在开读快照之前先占一个租约
+  （`sync_export_runs`）。同一 target 上第二个不限定范围的导出，若第一个还在跑，会被直接
+  拒绝，并点名对方的 `run_id`、`started_at`、`heartbeat_at`；心跳超过一小时没刷新的租约视为
+  死租约，会被接管（带一条 warning），不会一直卡住这个 target。
+- **发布本身是条件写，对着前驱校验**，不是后写者胜出：增量导出写水位要求这一行此刻的
+  `package_id` 仍然是这个包出发时记的 `base_package_id`；全量导出要求现存的
+  `exported_through_seq` 还没有超过本次。任何一条校验不成立，说明另一次导出已经先发布过
+  了——这次的水位写入被拒绝，刚落盘的包目录也会被删掉，不会留下一个没有任何水位指向它的包。
+
+`sync prune-log` 的 seq 下界同样尊重在途导出的租约（`floor_seq`），和尊重 `captured` 水位
+是同一套逻辑——见下面「`sync prune-log`」一节。
 
 **关闭的代价**：`disable` 会同时清空 `sync_export_state` 与 `sync_change_log`。日志从这一刻
 起不再增长，所以关闭之后的下一次导出又是一次全量快照，跟从未开过时一样——没有「暂停后再续上」

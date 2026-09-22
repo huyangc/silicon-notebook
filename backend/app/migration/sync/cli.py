@@ -40,7 +40,12 @@ from typing import Any, Mapping, Sequence
 from app.core.config import Settings
 from app.migration.sync.database import SyncExportError, _Source
 from app.migration.sync.export import ExportReport, export_notebooks
-from app.migration.sync.import_ import SyncImportError, _moment, import_package
+from app.migration.sync.import_ import (
+    SyncImportError,
+    _moment,
+    _read_moment,
+    import_package,
+)
 from app.repositories.sqlite.database import SqliteDatabase
 
 ROOT_DIR = Path(__file__).resolve().parents[4]
@@ -78,28 +83,37 @@ class SyncCaptureError(RuntimeError):
 
 
 class SyncSchemaColumnsError(RuntimeError):
-    """A sync subcommand needed a COLUMN a later migration adds, on a table
-    that already exists from an earlier one -- distinct from
-    :class:`SyncStatusError`/:class:`SyncCaptureError` (a missing TABLE)
-    because the table-existence guards those two classes back do not catch
-    this: ``sync_export_state`` exists from v83/0063, but ``captured``/
-    ``exported_snapshot`` are v85/0065 columns, so a v83 or v84 database has
-    the table and still raises a raw "no such column"/"column ... does not
-    exist" driver error the moment a query names them. This gives that
-    failure the same kind of named diagnosis the table-level guards already
-    give theirs.
+    """The v85/0065 schema shape a caller needs is not (fully) there yet --
+    either a COLUMN a later migration adds to a table that already existed
+    (``sync_export_state.captured``/``exported_snapshot``), or ``sync_export_runs``,
+    the WHOLE table v85/0065 added for the export lease (docs/incremental-
+    sync-design.md §7 "控制行门"/"导出水位"). Distinct from
+    :class:`SyncStatusError`/:class:`SyncCaptureError` (the older v83/0063/
+    v84/0064 table-existence guards) because those do not catch either gap:
+    a v83 or v84 database has ``sync_export_state`` and fails only the column
+    check, or has neither v85 addition and fails both -- either way the raw
+    "no such column"/"no such table" (or PostgreSQL's "column/relation ...
+    does not exist") driver error is what a caller would see without this,
+    so both gaps are folded into ONE diagnosis here rather than one
+    exception per gap.
 
-    ``missing_columns`` mirrors :class:`SyncCaptureError`'s ``missing_tables``
-    for the same reason: a caller that wants to degrade gracefully (``sync
-    status``'s watermark section, see ``_load_sync_status``) reads it back
-    structured instead of parsing the message apart.
+    ``missing_columns``/``missing_tables`` mirror :class:`SyncCaptureError`'s
+    ``missing_tables`` for the same reason: a caller that wants to degrade
+    gracefully (``sync status``'s watermark/lease sections, see
+    ``_load_sync_status``) reads them back structured instead of parsing the
+    message apart.
     """
 
     def __init__(
-        self, message: str, *, missing_columns: frozenset[str] = frozenset()
+        self,
+        message: str,
+        *,
+        missing_columns: frozenset[str] = frozenset(),
+        missing_tables: frozenset[str] = frozenset(),
     ) -> None:
         super().__init__(message)
         self.missing_columns = missing_columns
+        self.missing_tables = missing_tables
 
 
 def _jsonable(value: Any) -> Any:
@@ -140,6 +154,7 @@ def _export_report_as_json(report: ExportReport) -> dict[str, Any]:
     return {
         "package_dir": str(report.package_dir),
         "package_id": report.package_id,
+        "run_id": report.run_id,
         "notebooks": list(report.notebooks),
         "skipped": dict(sorted(report.skipped.items())),
         "table_counts": dict(sorted(report.table_counts.items())),
@@ -191,6 +206,8 @@ def _cmd_export(args: argparse.Namespace, settings: Settings) -> int:
         return 0
     print(f"导出包: {report.package_dir}")
     print(f"包 id: {report.package_id}")
+    if report.run_id:
+        print(f"租约 run_id: {report.run_id}")
     print(f"模式: {report.mode}")
     print(f"序号区间: from_seq={report.from_seq}, to_seq={report.to_seq}")
     if report.base_package_id:
@@ -330,9 +347,9 @@ def _missing_export_state_columns(conn: Any, *, is_postgres: bool) -> set[str]:
     guards the TABLE (v83/0063); this guards columns two later migrations
     (v85/0065) added to a table that migration never touched otherwise. A
     v83 or v84 database has the table and fails this check, which is exactly
-    the gap ``SyncSchemaColumnsError`` exists to diagnose by name instead of
-    letting a raw driver error through the first time a caller SELECTs one of
-    these columns.
+    one of the two gaps ``SyncSchemaColumnsError`` exists to diagnose by name
+    instead of letting a raw driver error through the first time a caller
+    SELECTs one of these columns.
     """
     if is_postgres:
         rows = conn.execute(
@@ -347,19 +364,92 @@ def _missing_export_state_columns(conn: Any, *, is_postgres: bool) -> set[str]:
     return set(_EXPORT_STATE_V85_COLUMNS) - found
 
 
-def _require_export_state_v85_columns(source: _Source, conn: Any) -> None:
+def _missing_export_runs_table(conn: Any, *, is_postgres: bool) -> bool:
+    """Whether ``sync_export_runs`` -- the v85/0065 export lease table (see
+    ``_migration_85``'s own docstring, or PostgreSQL's
+    ``0065_sync_export_snapshot.sql``) -- is missing. The other v85/0065 gap
+    :class:`SyncSchemaColumnsError` diagnoses, alongside
+    ``_missing_export_state_columns``: a v83/0063 or v84/0064 database has
+    neither, a database migrated only far enough to add the two
+    ``sync_export_state`` columns but not this table cannot exist (both land
+    in the same migration), so in practice this and the column check always
+    agree -- but they are still two independent facts, checked and reported
+    independently, so the diagnosis names exactly what is missing rather than
+    assuming one implies the other.
+    """
+    if is_postgres:
+        rows = conn.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = current_schema() AND table_name = 'sync_export_runs'"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'sync_export_runs'"
+        ).fetchall()
+    return not rows
+
+
+def _require_v85_schema(source: _Source, conn: Any) -> None:
     """Raise :class:`SyncSchemaColumnsError` unless ``sync_export_state`` has
-    both v85/0065 columns. Callers that must not proceed without them
-    (``sync prune-log`` -- see ``_prune_log_bounds``) use this; ``sync
-    status`` does not, because it degrades instead of refusing (see
+    both v85/0065 columns AND ``sync_export_runs`` exists. Callers that must
+    not proceed without the full v85/0065 shape (``sync prune-log`` -- see
+    ``_prune_log_bounds``, which reads both the columns and the lease table)
+    use this; ``sync status`` does not, because it degrades each section
+    independently instead of refusing the whole command (see
     ``_load_sync_status``)."""
-    missing = _missing_export_state_columns(conn, is_postgres=source.is_postgres)
-    if missing:
-        raise SyncSchemaColumnsError(
-            "本环境尚未迁移到 v85/0065（缺列: " + "、".join(sorted(missing)) + "）；"
-            "先启动一次后端完成 schema 迁移，或手动执行相应迁移脚本，再重试。",
-            missing_columns=frozenset(missing),
+    missing_columns = _missing_export_state_columns(conn, is_postgres=source.is_postgres)
+    missing_runs_table = _missing_export_runs_table(conn, is_postgres=source.is_postgres)
+    if not missing_columns and not missing_runs_table:
+        return
+    missing_tables = {"sync_export_runs"} if missing_runs_table else set()
+    detail_parts = []
+    if missing_columns:
+        detail_parts.append("缺列: " + "、".join(sorted(missing_columns)))
+    if missing_tables:
+        detail_parts.append("缺表: " + "、".join(sorted(missing_tables)))
+    raise SyncSchemaColumnsError(
+        "本环境尚未迁移到 v85/0065（" + "，".join(detail_parts) + "）；"
+        "先启动一次后端完成 schema 迁移，或手动执行相应迁移脚本，再重试。",
+        missing_columns=frozenset(missing_columns),
+        missing_tables=frozenset(missing_tables),
+    )
+
+
+# How stale an ``sync_export_runs`` lease's heartbeat may be before it is
+# treated as DEAD -- left by a run that crashed rather than one still going.
+# Matches ``_migration_85``'s own docstring ("A row whose heartbeat_at is
+# more than an hour old is a DEAD lease"); kept here rather than imported
+# from export.py because this module's import whitelist (guarded by
+# tests/test_sync_manifest.py) keeps it from reaching into that module's
+# internals, and because the rule is a CLI-facing policy in its own right
+# (prune-log's bound, status's display) rather than an export-writer detail.
+_LEASE_DEAD_AFTER_SECONDS = 3600
+
+
+def _load_export_leases(source: _Source, conn: Any) -> list[dict[str, Any]]:
+    """Every ``sync_export_runs`` row, each annotated with ``dead`` (bool):
+    whether its ``heartbeat_at`` is more than ``_LEASE_DEAD_AFTER_SECONDS``
+    old, or unparseable (treated as dead -- a lease this module cannot even
+    read the age of must not be trusted as live).
+
+    Callers decide what to DO with dead rows (``_prune_log_bounds`` ignores
+    them for the seq floor but still names them; ``_load_sync_status``
+    displays every row, dead or not) -- this function only classifies.
+    """
+    rows = source.fetch(
+        conn,
+        "SELECT target_env, run_id, package_id, started_at, heartbeat_at, "
+        "floor_seq FROM sync_export_runs ORDER BY target_env",
+    )
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        heartbeat = _read_moment(row.get("heartbeat_at"))
+        row["dead"] = (
+            heartbeat is None
+            or (now - heartbeat).total_seconds() > _LEASE_DEAD_AFTER_SECONDS
         )
+    return rows
 
 
 def _load_sync_status(settings: Settings) -> dict[str, Any]:
@@ -388,7 +478,12 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
     stance on a v84-missing database (``_capture_section_for_status``). The
     returned dict's ``exports_note`` names the gap when degraded, ``None``
     otherwise, so both renderers below (and any JSON consumer) can tell the
-    two shapes apart without inspecting individual rows.
+    two shapes apart without inspecting individual rows. ``sync_export_runs``
+    (the v85/0065 export lease -- docs/incremental-sync-design.md §7 "控制行
+    门"/"导出水位") degrades the SAME way, independently, via ``runs``/
+    ``runs_note``: a v83/v84 database has neither the columns nor this
+    table, but the two are still checked and reported separately rather than
+    one implying the other.
     """
     exports_sql_v85 = (
         "SELECT target_env, exported_through_seq, exported_at, package_id, "
@@ -426,6 +521,15 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
                 for row in exports:
                     row["captured"] = bool(row["captured"])
                 exports_note = None
+            if _missing_export_runs_table(conn, is_postgres=source.is_postgres):
+                runs = []
+                runs_note = (
+                    "在途导出需 v85/0065（缺表: sync_export_runs）；"
+                    "先启动一次后端完成 schema 迁移可看到在途导出。"
+                )
+            else:
+                runs = _load_export_leases(source, conn)
+                runs_note = None
             imports = source.fetch(conn, imports_sql)
     finally:
         source.close()
@@ -438,7 +542,13 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
                 report = {}
         row["report_json"] = report or {}
         row["notebooks"] = len(row["report_json"].get("notebooks", []) or [])
-    return {"exports": exports, "exports_note": exports_note, "imports": imports}
+    return {
+        "exports": exports,
+        "exports_note": exports_note,
+        "runs": runs,
+        "runs_note": runs_note,
+        "imports": imports,
+    }
 
 
 def _cmd_status(args: argparse.Namespace, settings: Settings) -> int:
@@ -484,6 +594,17 @@ def _cmd_status(args: argparse.Namespace, settings: Settings) -> int:
             f"  -> {row['target_env']}: seq={row['exported_through_seq']} "
             f"于 {row['exported_at']}（包 {row['package_id']}，captured="
             f"{captured_note}{snapshot_note}）"
+        )
+    print("在途导出（本环境作为源）：")
+    if state.get("runs_note"):
+        print(f"  （{state['runs_note']}）")
+    if not state["runs"]:
+        print("  （无）")
+    for row in state["runs"]:
+        dead_note = "，已死" if row["dead"] else ""
+        print(
+            f"  -> {row['target_env']}: floor_seq={row['floor_seq']} "
+            f"开始于 {row['started_at']}，心跳于 {row['heartbeat_at']}{dead_note}"
         )
     print("已引入的包（本环境作为目标）：")
     if not state["imports"]:
@@ -978,36 +1099,56 @@ class SyncPruneError(RuntimeError):
     """
 
 
-def _prune_log_bounds(source: _Source, conn: Any) -> tuple[int, int | None]:
-    """``(min_seq, min_xmin)`` -- the two upper bounds ``_prune_log``'s
-    ``DELETE``/``COUNT`` predicate is built from
-    (docs/incremental-sync-design.md §7 "保留策略").
+def _prune_log_bounds(
+    source: _Source, conn: Any
+) -> tuple[int, int | None, list[dict[str, Any]], list[dict[str, Any]]]:
+    """``(min_seq, min_xmin, active_leases, dead_leases)`` -- the two upper
+    bounds ``_prune_log``'s ``DELETE``/``COUNT`` predicate is built from,
+    plus the lease rows that fed (or did not feed) ``min_seq``
+    (docs/incremental-sync-design.md §7 "保留策略"/"在途导出租约").
 
-    Checks ``_require_export_state_v85_columns`` FIRST, before the ``SELECT``
-    below ever names ``captured``/``exported_snapshot``: those are v85/0065
-    columns, and a v83/0063 or v84/0064 database has the table but not them,
-    which would otherwise surface as a raw "no such column"/"column ... does
-    not exist" driver error instead of the named diagnosis
-    :class:`SyncSchemaColumnsError` gives.
+    Checks ``_require_v85_schema`` FIRST, before anything below names
+    ``captured``/``exported_snapshot`` or queries ``sync_export_runs``: those
+    are v85/0065 additions, and a v83/0063 or v84/0064 database is missing
+    some or all of them, which would otherwise surface as a raw "no such
+    column"/"no such table" (or PostgreSQL's "... does not exist") driver
+    error instead of the named diagnosis :class:`SyncSchemaColumnsError`
+    gives.
 
-    Both bounds are taken **only** over ``sync_export_state`` rows with
-    ``captured = 1``: a target that has never exported, or whose latest
-    export fell back to full with the capture gate off, has no change-log
-    window behind its watermark at all and simply abstains from voting on
-    either bound -- it must not drag ``min_seq`` down to some earlier,
-    unrelated number and block pruning for every target that DOES have a
-    safe bound (that would be the bug: one stale/never-exported target
-    holding retention hostage for the entire log).
+    The seq bound is taken over **two** sources, each contributing its own
+    minimum, and the smaller of the two wins:
+
+    - ``sync_export_state`` rows with ``captured = 1``: a target that has
+      never exported, or whose latest export fell back to full with the
+      capture gate off, has no change-log window behind its watermark at all
+      and simply abstains from voting -- it must not drag ``min_seq`` down to
+      some earlier, unrelated number and block pruning for every target that
+      DOES have a safe bound (that would be the bug: one stale/never-exported
+      target holding retention hostage for the entire log).
+    - LIVE ``sync_export_runs`` leases (``not row["dead"]``, see
+      ``_load_export_leases``): an export already in flight is reading a
+      window that ends at its lease's ``floor_seq``, a lower bound on the
+      watermark it has not published yet -- rows above that floor are not
+      safe to delete even though no watermark says so yet. A DEAD lease
+      (crashed run, stale heartbeat) is excluded from the bound -- it no
+      longer represents work in progress -- but is still returned, in
+      ``dead_leases``, so the caller can name it in the report rather than
+      silently ignoring it.
 
     ``min_xmin`` is ``None`` on SQLite -- there is no PostgreSQL compensation
     window to bound there (``sync_change_log.txid`` is NULL on every row; see
-    docs/incremental-sync-design.md §7 "导出水位"). Raises
-    :class:`SyncPruneError` when NOT A SINGLE target has a ``captured = 1``
-    watermark: that is the one case with no safe upper bound to compute from
-    anything, as opposed to some targets abstaining while others still
-    supply a bound.
+    docs/incremental-sync-design.md §7 "导出水位"), and is computed from
+    ``sync_export_state`` alone -- leases carry no snapshot of their own (§7
+    "在途导出租约"). Raises :class:`SyncPruneError` when NOT A SINGLE target
+    has a ``captured = 1`` watermark: that is the one case with no safe upper
+    bound to compute from anything, as opposed to some targets abstaining
+    while others (captured watermarks OR live leases) still supply one. A
+    live lease alone, with no captured watermark at all, does not lift this
+    refusal -- a lease is a bound on what a FUTURE watermark will be, not a
+    substitute for one already published, so there would still be nothing
+    proven safe to delete.
     """
-    _require_export_state_v85_columns(source, conn)
+    _require_v85_schema(source, conn)
     rows = source.fetch(
         conn,
         source.sql(
@@ -1024,18 +1165,33 @@ def _prune_log_bounds(source: _Source, conn: Any) -> tuple[int, int | None]:
             "captured=1 的水位，再重试。"
         )
     min_seq = min(int(row["exported_through_seq"]) for row in rows)
-    if not source.is_postgres:
-        return min_seq, None
-    missing_snapshot = [row for row in rows if not row["exported_snapshot"]]
-    if missing_snapshot:
-        raise SyncPruneError(
-            "sync_export_state 中存在 captured=1 但 exported_snapshot 为空的水位行"
-            "（数据不一致，不应该出现）：拒绝在不完整的快照信息上做保留判定。"
+    if source.is_postgres:
+        missing_snapshot = [row for row in rows if not row["exported_snapshot"]]
+        if missing_snapshot:
+            raise SyncPruneError(
+                "sync_export_state 中存在 captured=1 但 exported_snapshot 为空的水位行"
+                "（数据不一致，不应该出现）：拒绝在不完整的快照信息上做保留判定。"
+            )
+        min_xmin: int | None = min(
+            _Source.snapshot_xmin(str(row["exported_snapshot"])) for row in rows
         )
-    min_xmin = min(
-        _Source.snapshot_xmin(str(row["exported_snapshot"])) for row in rows
-    )
-    return min_seq, min_xmin
+    else:
+        min_xmin = None
+
+    leases = _load_export_leases(source, conn)
+    active_leases = [
+        {"target_env": row["target_env"], "floor_seq": int(row["floor_seq"])}
+        for row in leases
+        if not row["dead"]
+    ]
+    dead_leases = [
+        {"target_env": row["target_env"], "heartbeat_at": row["heartbeat_at"]}
+        for row in leases
+        if row["dead"]
+    ]
+    if active_leases:
+        min_seq = min(min_seq, min(row["floor_seq"] for row in active_leases))
+    return min_seq, min_xmin, active_leases, dead_leases
 
 
 def _prune_log_clause(
@@ -1136,7 +1292,7 @@ def _prune_log(
     """
     with source.read() as conn:
         _require_capture_tables(source, conn)
-        min_seq, min_xmin = _prune_log_bounds(source, conn)
+        min_seq, min_xmin, active_leases, dead_leases = _prune_log_bounds(source, conn)
     threshold = _moment(
         source, datetime.now(timezone.utc) - timedelta(days=keep_days)
     )
@@ -1157,6 +1313,8 @@ def _prune_log(
             "keep_days": keep_days,
             "min_seq": min_seq,
             "min_txid": min_xmin,
+            "active_leases": active_leases,
+            "dead_leases": dead_leases,
         }
 
     deleted = 0
@@ -1177,6 +1335,8 @@ def _prune_log(
         "keep_days": keep_days,
         "min_seq": min_seq,
         "min_txid": min_xmin,
+        "active_leases": active_leases,
+        "dead_leases": dead_leases,
     }
 
 
@@ -1200,6 +1360,18 @@ def _cmd_prune_log(args: argparse.Namespace, settings: Settings) -> int:
     if result["min_txid"] is not None:
         bound_note += f"，txid<{result['min_txid']}"
     print(f"保留天数: {result['keep_days']} 天；删除上限: {bound_note}")
+    if result["active_leases"]:
+        parts = "；".join(
+            f"target {row['target_env']}, floor_seq {row['floor_seq']}"
+            for row in result["active_leases"]
+        )
+        print(f"在途导出：{len(result['active_leases'])} 个（{parts}）")
+    if result["dead_leases"]:
+        parts = "；".join(
+            f"target {row['target_env']}, 心跳于 {row['heartbeat_at']}"
+            for row in result["dead_leases"]
+        )
+        print(f"忽略的死租约：{len(result['dead_leases'])} 个（{parts}），未参与本次判据")
     return 0
 
 

@@ -735,7 +735,9 @@ whichever mode gets selected, advancing the watermark normally. `--full` without
 forces a full export and still advances the watermark.
 Both the human-readable summary and `--json` report print `mode`, `from_seq`, `to_seq`,
 `base_package_id` (empty for a full export or any `--notebook`-scoped export), `deletes` (row
-count), `deleted_notebooks`, and `empty`.
+count), `deleted_notebooks`, `empty`, `captured`, and `run_id` (the export lease id this run
+held while it ran -- equal to `package_id`, empty for a `--notebook`-scoped export, which takes
+no lease; see the design doc's §7 "在途导出租约").
 
 `import` is idempotent: re-running the same package directory short-circuits with
 `already_applied` (exit 0) instead of re-applying rows. `--dry-run` stops after identity
@@ -816,19 +818,27 @@ PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --j
 `sync_change_log` only grows from writes; nothing deletes from it automatically, including the
 compaction an incremental export does — that folding happens per export, in memory, to shrink
 the *package*, and does not remove the underlying log rows (another target with an older
-watermark may still need them). `prune-log` deletes log rows that no future export could
-possibly still need. A row qualifies for deletion only when **all** of the following hold: its
-`seq` is at or below the minimum `exported_through_seq` across every `sync_export_state` row
-with `captured` true; on PostgreSQL, its `txid` is below the minimum `pg_snapshot_xmin` of every
-`captured` row's `exported_snapshot`; and its `changed_at` is older than `--keep-days` (default
-30 — a row young enough by `changed_at` is kept even if the first two conditions would otherwise
-allow deleting it). Both minimums are taken **only over targets with a `captured` watermark**: a
+watermark may still need them). `prune-log` deletes log rows that no future export — including
+one already running — could possibly still need. A row qualifies for deletion only when **all**
+of the following hold: its `seq` is at or below the minimum of (a) `exported_through_seq` across
+every `sync_export_state` row with `captured` true and (b) `floor_seq` across every LIVE
+`sync_export_runs` lease (an in-flight export that has not published its watermark yet -- see the
+design doc's §7 "在途导出租约"); on PostgreSQL, its `txid` is below the minimum `pg_snapshot_xmin`
+of every `captured` row's `exported_snapshot` (leases carry no snapshot of their own and do not
+enter this half); and its `changed_at` is older than `--keep-days` (default 30 — a row young
+enough by `changed_at` is kept even if the other conditions would otherwise allow deleting it).
+Both `sync_export_state` minimums are taken **only over targets with a `captured` watermark**: a
 target that has never exported, or whose last export fell back to full with capture off, simply
 does not vote on the bound — it does not drag the bound down to zero and block pruning for
-everyone else. The command refuses outright, naming the problem, only when **no target at all**
-has a `captured` watermark — there is then no safe upper bound to compute from anything, not
-just an unclear one for a single target. `--dry-run` reports the row count that would be deleted
-without deleting anything.
+everyone else. A DEAD lease (heartbeat older than an hour, or unreadable) does not vote either —
+it is named in the output (`dead_leases`, and "忽略的死租约" in the human summary) but excluded
+from the bound, the same abstention the watermark side already has. The command refuses outright,
+naming the problem, only when **no target at all** has a `captured` watermark — a live lease alone
+does not lift that refusal, because it bounds a watermark not yet published rather than standing
+in for one already published. `--dry-run` reports the row count that would be deleted without
+deleting anything. A real (non-`--dry-run`) delete runs in batches of 5000 rows, each its own
+transaction, so pruning a log that has gone unpruned for a long time does not hold one long-running
+transaction or a single unbounded `DELETE`; the report's `batches` field says how many ran.
 
 ### Change capture (`sync capture`)
 
@@ -855,10 +865,14 @@ does not move `enabled_at` and does not re-clear watermarks), so re-running it a
 ambiguous exit code is safe.
 
 **Running `sync capture enable`/`disable` while a `sync export` is in flight is self-correcting,
-not merely something to avoid.** The export reads the gate as a generation pair (`enabled`,
-`enabled_at`) at the start of its read snapshot, and the transaction that writes the watermark
-(`_advance_watermark`) re-reads that same pair and compares it against what the export started
-with, before deciding whether to claim `captured`:
+not merely something to avoid.** The transaction that writes the watermark (`_advance_watermark`)
+takes a WRITE LOCK before it re-reads the capture gate: `BEGIN IMMEDIATE` on SQLite (serializes
+across processes, and `sync capture enable`/`disable` take the same lock -- there is no third
+interleaving), `SELECT ... FOR UPDATE` on the `sync_capture_control` row on PostgreSQL. Nothing can
+slip a `disable`+`enable` pair into the gap between "re-read the gate" and "write the watermark and
+commit" -- that gap does not exist as an unlocked window. The export reads the gate as a generation
+pair (`enabled`, `enabled_at`) at the start of its read snapshot, and the watermark transaction
+compares that reading against what it re-reads under the lock:
 - Gate closed when the export's snapshot began, `enable` runs moments later: `captured_through_seq`
   is read from a snapshot that predates the log being trustworthy, so `captured` is false for that
   one export regardless of what the gate does afterward (correct -- the log genuinely does not
@@ -877,6 +891,24 @@ where this interleaving silently corrupts the incremental chain. Quiescing expor
 `capture enable`/`disable` call is still good operational hygiene (it avoids the surprise of an
 unexpected `captured=false` watermark and the extra full export it costs), but it is not required
 for correctness the way it used to be.
+
+Two more guarantees round out the same publish path (design doc §7 "在途导出租约"/"导出水位"):
+
+- **Mutual exclusion between two exports of the same target.** An unscoped export claims a lease
+  (`sync_export_runs`) before it opens its read snapshot. A second unscoped export to the same
+  target while the first is still running is refused outright, naming the holder's `run_id`,
+  `started_at`, and `heartbeat_at`; a lease whose heartbeat has gone unrefreshed for over an hour
+  is treated as dead and replaced (with a warning), not blocked on forever.
+- **The publish itself is a conditional write, checked against its predecessor**, not a
+  last-writer-wins upsert: an incremental export's watermark write requires the row's
+  `package_id` to still be the `base_package_id` this package was built against; a full export's
+  requires the stored `exported_through_seq` not to already be ahead of this one's. Either check
+  failing means another export published first -- this run's watermark write is refused, and the
+  package it just finished writing to disk is deleted rather than left dangling with nothing
+  pointing at it.
+
+`sync prune-log`'s seq bound also respects an in-flight export's lease (its `floor_seq`) the same
+way it respects a `captured` watermark -- see "`sync prune-log`" below.
 
 **What disabling costs**: `disable` clears both `sync_export_state` and `sync_change_log`. The
 log stops growing the moment it commits, so the next export after a disable is a full snapshot

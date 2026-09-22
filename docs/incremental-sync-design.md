@@ -386,8 +386,21 @@ SQLite 的相对开销比 PostgreSQL 明显：SQLite 基线本身极快（进程
   事务（`_advance_watermark`）落盘前会在自己的事务里重新读一次这一对，与读快照时记下的比较：
   不一致就把这次的 `captured` 降成 0（`exported_through_seq`/`exported_snapshot` 仍然如实
   写——它们是这次导出真实看到的事实，只是不再承诺日志能接得上），报告里追加一条 warning，
-  下一次导出照常回退到全量。这段窗口很窄（导出全程 vs. 一次 `disable`+`enable`），但正确性
-  不该靠窗口窄来赌，所以每次都重读重比。
+  下一次导出照常回退到全量。这个重读不是「碰运气赶在窗口关闭之前」——写水位的事务先拿锁再
+  重读：SQLite 用 `BEGIN IMMEDIATE`（跨进程串行，`sync capture enable`/`disable` 走同一把
+  锁，两边谁先谁后都不会插在「重读 → 写水位 → 提交」中间），PostgreSQL 对 `sync_capture_control`
+  那一行 `SELECT ... FOR UPDATE`。所以「重读开关 → 写水位 → 提交」这段区间里不可能再夹进一次
+  `disable`+`enable`；世代比对因此是判定式的，不是「大概率不会撞上」。
+
+- **前驱校验**：发布水位是一次条件写，不是后写者胜出——两个导出可能同时对准同一个 target。
+  增量导出发布时用 `UPDATE sync_export_state SET ... WHERE target_env = ? AND package_id =
+  <本包的 base_package_id>`：如果这行此刻的 `package_id` 已经不是本包出发时记的 `base_package_id`
+  （另一次导出抢先发布过了），受影响行数是 0，这次导出直接失败，报错点名
+  `watermark moved during export`，并删除刚落盘的包目录——留着它没有意义，它续接的那个
+  `base_package_id` 已经不是链上的东西了。全量导出发布时用 `ON CONFLICT (target_env) DO
+  UPDATE ... WHERE sync_export_state.exported_through_seq <= <本次 exported_through_seq>`：
+  水位只能前进，一次全量基线如果在竞争里落后于另一次已经发布的、更靠前的水位，同样拒绝并删包。
+  两条路径拒绝时都不留下半推进的水位——要么这次导出的水位完整写入，要么完全不写。
 
 - **增量窗口**：设上次水位为 W（`exported_through_seq`）、上次快照为 S_prev
   （`exported_snapshot`）。
@@ -510,8 +523,11 @@ SQLite 的相对开销比 PostgreSQL 明显：SQLite 基线本身极快（进程
   路径按 `resolve_path` 归一后仍然不落在这本笔记本自己的 storage 根下）或者**glob 零命中**
   （`notebook_assets` 按 `<id>.*` 在磁盘上什么都没找到）——两种情况都不是致命错误，行照常进
   `rows/<table>.jsonl`，只是这一份字节进不了包，记进 manifest 的 `missing_files`（导入端据此
-  知道这个包是「知情地不完整」，而不是事后才发现一个悬空的附件）。被删行指向的文件本包不
-  处理，由 PR-3c 在目标端按目标行路径删除。
+  知道这个包是「知情地不完整」，而不是事后才发现一个悬空的附件）。glob 零命中记的那条
+  `missing_files` 路径是 `files/assets/<nb>/<asset id>`——没有扩展名，因为压根没有匹配到的
+  文件可以借它的扩展名；这只是信息性的登记，导入端从不按路径找 asset（找不到的行就是字节
+  没跟着来，不影响其它字段落库）。被删行指向的文件本包不处理，由 PR-3c 在目标端按目标行路径
+  删除。
 
 - **模式判定**（`sync export` 不需要用户区分全量与增量）：没给 `--notebook` 时，门开 且 该
   `--target` 的水位行存在 且 `captured = 1` 且没给 `--full` ⇒ 增量；否则全量。两种情况都
@@ -533,15 +549,68 @@ SQLite 的相对开销比 PostgreSQL 明显：SQLite 基线本身极快（进程
   推进水位。
 
 - **保留策略**落地为 `sync prune-log [--keep-days N]`（`N` 默认 30）：候选日志行必须同时满足
-  三个条件——`seq` ≤ 全部 `captured = 1` 水位里最小的 `exported_through_seq`；PostgreSQL 上还
-  要求 `txid < pg_snapshot_xmin(S)` 对全部 `captured = 1` 的 `exported_snapshot` 取最小；
-  `changed_at` 早于 `now() - N 天`。取最小值只看 `captured = 1` 的水位行：没有 `captured = 1`
-  水位的目标环境（从未成功导出过，或最近一次落到全量且门是关的）**不参与**这两次取最小值——
-  它对保留策略「弃权」，而不是把上限硬拖到 0 逼停清理。只有**一个 `captured = 1` 的水位都
-  不存在**时整条命令才拒绝并点名原因——这种情况下不是某个目标环境的上限不明确，而是根本没
-  有任何安全上限可以取，任何 seq 边界都是虚假的安全感。
+  三个条件——`seq` ≤ `min(全部 captured = 1 水位的 exported_through_seq ∪ 全部活租约的
+  floor_seq)`（活租约见下「在途导出租约」，取的是这两个集合合起来的最小值，不是分别取最小
+  再相加）；PostgreSQL 上还要求 `txid < pg_snapshot_xmin(S)` 对全部 `captured = 1` 的
+  `exported_snapshot` 取最小；`changed_at` 早于 `now() - N 天`。取最小值只看 `captured = 1`
+  的水位行与活租约：没有 `captured = 1` 水位、也没有活租约的目标环境（从未成功导出过，或最
+  近一次落到全量且门是关的，眼下也没有导出在跑）**不参与**这几次取最小值——它对保留策略
+  「弃权」，而不是把上限硬拖到 0 逼停清理。只有**一个 `captured = 1` 的水位都不存在**时整条
+  命令才拒绝并点名原因（活租约本身不构成安全上限，见下）——这种情况下不是某个目标环境的上限
+  不明确，而是根本没有任何安全上限可以取，任何 seq 边界都是虚假的安全感。死租约（心跳超过
+  1 小时，见下）不参与取最小值，但仍然在 `prune-log` 的输出里点名，提醒运维那是一个可能已经
+  崩溃、需要看一眼的导出。
 
-### 升级窗口
+### 在途导出租约
+
+一次不限定范围（没给 `--notebook`）的导出，在开读快照**之前**先在 `sync_export_runs`
+（v85/0065）占一行租约。这张表存在是因为一次还没发布水位的导出，对两件事是不可见的：
+
+- **`sync prune-log`**：这次导出即将读到的日志行，此刻看起来仍然「可删」——它将要发布的水位
+  还不存在，日志行没有任何水位指向它们。租约带的 `floor_seq`（占用那一刻快照可见的
+  `MAX(seq)`）是这次导出最终会发布的水位的下界，prune-log 因此把它并入取最小值的候选集合
+  （见上「保留策略」），不会删掉一个正在跑的导出还需要的行。
+- **同一 target 的第二次不限定范围导出**：两个导出各自发布水位会互相踩踏——后发布的那个的
+  条件写（见上「前驱校验」）会失败，但那时它已经白读了一遍快照、白写了一整个包。租约把这个
+  冲突提前到导出刚开始的时候拒绝，而不是让它跑到最后才发现白干。
+
+获取租约是**一条语句**的原子操作，不是「先 `SELECT ... FOR UPDATE` 锁行、再 upsert」——租约
+行在没有任何导出跑过的 target 上原本就不存在，`FOR UPDATE` 锁不住一行不存在的行，两个同时
+起步的导出都会读到「没有人持有」，后一个的无条件 upsert 就会覆盖前一个刚写下的活租约，两边
+都以为自己拿到了互斥、都继续跑下去——租约的意义反而被这个「先读后写」的实现本身破坏掉。实际
+做法是：
+
+```sql
+INSERT INTO sync_export_runs
+    (target_env, run_id, package_id, started_at, heartbeat_at, floor_seq)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT (target_env) DO UPDATE SET
+    run_id = excluded.run_id, package_id = excluded.package_id,
+    started_at = excluded.started_at, heartbeat_at = excluded.heartbeat_at,
+    floor_seq = excluded.floor_seq
+WHERE sync_export_runs.heartbeat_at < <陈旧截止>
+```
+
+`target_env` 是主键，这条 `INSERT ... ON CONFLICT DO UPDATE ... WHERE` 本身就是互斥：受影响
+行数（`rowcount`）恰好是 1 才算拿到租约。表里还没有这一行时，`INSERT` 直接胜出，不存在锁不住
+的空档；紧随其后到达的第二个事务对同一行重新求值 `ON CONFLICT` 的 `WHERE`，看到的是胜者刚刚
+提交的、全新的心跳，`WHERE` 不成立，这次 upsert 什么都不改、`rowcount = 0`，第二个导出据此
+知道自己没拿到，读出当前持有者的 `run_id`/`started_at`/`heartbeat_at` 拒绝并点名。
+`WHERE sync_export_runs.heartbeat_at < <陈旧截止>` 让一个死租约（心跳超过 1 小时未刷新，
+`_STALE_RUN_SECONDS` 与文件相位判定 staging 目录是否废弃的 `_STALE_STAGING_SECONDS` 是同一个
+常量）能被接管：`ON CONFLICT` 的 `WHERE` 这次成立，新导出的 upsert 替换掉旧行、带一条警告；
+一个连心跳时间戳都读不出来（格式损坏）的租约按「活」处理并直接拒绝——读不出来是停下来的理由，
+不是判它已死的理由。SQLite 在 `BEGIN IMMEDIATE` 下执行同一条语句，跨进程串行，原理相同。
+
+心跳与包写入相位既有的 staging `.heartbeat` 文件由同一次 beat 刷新（`export._PackageWriter.beat`
+的节流窗口同样适用于这里），所以一个仍在正常写包的导出，租约与 staging 心跳同步续期；一个
+崩溃的导出两者一起停止刷新。租约在发布水位的**同一个事务**里删除（见上「前驱校验」），失败
+或中止路径也尽力删除——但两条删除路径都带 `WHERE target_env = ? AND run_id = ?`：只删自己
+这次跑的那一行。这是给「租约已经被判死、被新导出接管，旧 run 才姗姗来迟地结束」这个场景准备
+的——旧 run 的收尾删除只会删掉它自己那行（此刻这一行早已经不是它的了，`run_id` 对不上，删除
+影响 0 行），不会误删接管者刚写下的新租约。
+
+`--notebook` 限定的导出不占租约：它们不在导出链上、不发布水位，没有什么需要用租约保护。
 
 v84/0064 迁移在**一个事务**里做完 schema 变更，其中两步在大库上可能长时间持锁：
 
@@ -679,13 +748,15 @@ sync import <package_dir> [--create-missing-users] [--dry-run] [--importer-user 
     # --resume：同一个包断点续跑必须显式给；--verify-files：文件二次 sha256
     # 只接受 mode=full 的 v2 包；mode=incremental 的包（或 deletes/kg_epochs 非空）在预检阶段
     # 就被拒绝，错误点名 base_package_id/from_seq/to_seq 并指向 PR-3c。
-sync status [--json]      # 本库的导出水位（每个目标环境）、已引入的包与变更捕获开关状态；
-                           # 落后的笔记本清单在 PR-4
+sync status [--json]      # 本库的导出水位（每个目标环境）、在途导出租约（§7「在途导出租约」，
+                           # target/started_at/heartbeat_at/floor_seq/是否已死）、已引入的包与
+                           # 变更捕获开关状态；落后的笔记本清单在 PR-4
 sync capture enable [--json]   # 打开源端变更捕获；清空 sync_export_state（下一次导出必是全量）
 sync capture disable [--json]  # 关闭变更捕获；清空 sync_export_state 与 sync_change_log
 sync capture status [--json]   # 开关状态、enabled_at/disabled_at、日志行数与 seq 范围
 sync prune-log [--keep-days N] [--dry-run] [--json]
-    # §7「保留策略」的判据；没有任何 captured=1 水位时拒绝并点名原因
+    # §7「保留策略」的判据（含在途导出租约的 floor_seq）；没有任何 captured=1 水位时拒绝并
+    # 点名原因；死租约不参与判据但在输出里点名
 ```
 
 `export` 不需要用户显式区分全量与增量，模式由上面的判定规则自动选（§7「模式判定」）；
