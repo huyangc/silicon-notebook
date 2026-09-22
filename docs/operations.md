@@ -608,37 +608,96 @@ required.
 
 ## Cross-environment notebook sync
 
-`scripts/cli.sh sync export/import/status/capture` moves notebook content (materials, vectors,
-KG, Knowhow, memory) from one deployment to another, one-way: the source writes, the target only
-interacts with what it received. It does not touch user-interaction data (conversations,
-answers, feedback, reports, global ask, activity, wishes). See
+`scripts/cli.sh sync export/import/status/capture/prune-log` moves notebook content (materials,
+vectors, KG, Knowhow, memory) from one deployment to another, one-way: the source writes, the
+target only interacts with what it received. It does not touch user-interaction data
+(conversations, answers, feedback, reports, global ask, activity, wishes). See
 [the design doc](./incremental-sync-design.md) for scope, identity mapping, the target-side
-write fence, and the package format; every export through PR-3a is still a full snapshot (no
-incremental *reader* yet) even once change capture is on and a package's manifest keeps writing
-`from_seq=to_seq=0` -- capture only starts a local record of what it could have captured, which
-PR-3b's incremental exporter will read.
+write fence, and the package format (§7 for the change-log window, §8 for the package layout).
+
+`sync export` produces one of two package modes without the operator choosing explicitly:
+**full** (a live table scan, `from_seq=0`) or **incremental** (a `sync_change_log` window since
+the last successful export to that `--target`, §7 of the design doc). It runs incremental only
+when change capture is on, the last export to that target left a `captured` watermark, and
+neither `--full` nor `--notebook` was given; missing any of those three falls back to full.
+`--full` forces a full export even when an incremental one would otherwise run. `--notebook`
+(repeatable) narrows an export to specific notebooks and always forces full too — narrowing
+scope and reading a log window are different operations, and this CLI does not combine them.
+**Today's importer only accepts full packages** (§8 of the design doc); an incremental package
+has to wait for PR-3c — see "Operating a daily export cadence" below for what that means in
+practice.
 
 ```bash
-# Source environment: name it once, then export every live, non-mirror notebook.
+# Source environment: name it once, enable capture, then run the first (full) export --
+# this is the baseline every later incremental export builds on.
 export SILICON_NOTEBOOK_SYNC_ENV=prod-shanghai
+PYTHONPATH=backend python scripts/sync_notebooks.py capture enable --json
 PYTHONPATH=backend python scripts/sync_notebooks.py export \
-  --target prod-tokyo --out /srv/silicon-notebook/sync/outgoing --json
+  --target prod-tokyo --out /srv/silicon-notebook/sync/outgoing --json   # mode=full, captured=true
 
-# Or scope one export to specific notebooks (repeatable):
+# Every export after that, same command, is incremental automatically:
+PYTHONPATH=backend python scripts/sync_notebooks.py export \
+  --target prod-tokyo --out /srv/silicon-notebook/sync/outgoing --json   # mode=incremental
+
+# Force a full export regardless of watermark state (e.g. to reset the baseline):
+PYTHONPATH=backend python scripts/sync_notebooks.py export \
+  --target prod-tokyo --out /srv/silicon-notebook/sync/outgoing --full --json
+
+# Or scope one export to specific notebooks (always full; repeatable):
 PYTHONPATH=backend python scripts/sync_notebooks.py export \
   --target prod-tokyo --out /srv/silicon-notebook/sync/outgoing \
   --notebook nb-aaa --notebook nb-bbb --json
 
 # Target environment: copy the package directory over, then dry-run before applying.
+# (only a mode=full package can actually be imported today -- see the cadence note below)
 PYTHONPATH=backend python scripts/sync_notebooks.py import \
-  /srv/silicon-notebook/sync/incoming/sync-prod-shanghai-0-0-<id> --dry-run --json
+  /srv/silicon-notebook/sync/incoming/sync-prod-shanghai-0-42-<id> --dry-run --json
 PYTHONPATH=backend python scripts/sync_notebooks.py import \
-  /srv/silicon-notebook/sync/incoming/sync-prod-shanghai-0-0-<id> \
+  /srv/silicon-notebook/sync/incoming/sync-prod-shanghai-0-42-<id> \
   --create-missing-users --verify-files --json
 
 # Either side: check watermarks and applied packages.
 PYTHONPATH=backend python scripts/sync_notebooks.py status --json
+
+# Periodically: drop change-log rows no target's captured watermark still needs.
+PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --json
 ```
+
+### Operating a daily export cadence
+
+1. `sync capture enable` on the source, once, before the export you want to treat as the new
+   baseline. This clears every target's watermark, so the very next export to each target is
+   forced full regardless of what ran before.
+2. That next export to each target is full, and its report shows `captured=true` — its
+   watermark now has a change-log window behind it.
+3. Every export after that is incremental automatically, no flag needed, for as long as capture
+   stays on and nothing forces a full export (`--full`, `--notebook`, or a watermark that lost
+   its `captured` status).
+4. Move the package directory to the target environment the same way you already move full
+   packages (`scp`/rsync/object storage — whatever transport is in place).
+5. **Until PR-3c ships, an incremental package cannot be imported.** `sync import` rejects a
+   `mode=incremental` package at preflight, before writing anything, and the error names the
+   rejected package's `base_package_id`/`from_seq`/`to_seq`. Keep incremental packages wherever
+   they land on the target side until the PR-3c importer exists — nothing about running
+   `sync export` daily requires importing every package as it arrives; only the *source-side*
+   watermark needs to keep advancing for the next export to stay incremental.
+6. An incremental export with nothing to ship still produces a package (every `rows/*.jsonl`,
+   `deletes.jsonl`, and `kg_epochs.jsonl` is present but empty) and still advances the
+   watermark — the report's `empty` field says so. This keeps the export chain unbroken: every
+   package's `base_package_id` names the package it continues from, so skipping a day with no
+   changes never breaks the chain for the next one.
+
+Upgrading to schema v85/0065 resets every target's watermark to `captured=false` (the column is
+new; rows written before the upgrade predate it and have no change-log window behind them). The
+first export to each target after that upgrade is therefore full no matter what change capture
+was doing before the upgrade — this is expected, not a gap to work around; the next export after
+that goes back to incremental on its own.
+
+Use `--full` to deliberately reset a target's baseline without touching the capture gate or the
+watermark table directly — for example after a long gap, or simply to hand over a package that
+is self-contained and importable without any earlier package in its `base_package_id` chain. A
+`--full` export still advances the watermark normally, so the export right after it goes back to
+incremental if capture is on.
 
 `scripts/cli.sh sync export|import|status ...` is equivalent and goes through the shared
 Python launch environment (root `.env` preloaded); the standalone `scripts/sync_notebooks.py`
@@ -647,15 +706,22 @@ form above does not preload it, so export `DATABASE_URL`/`SILICON_NOTEBOOK_STORA
 
 `export` needs a `source_env`: pass `--source-env` explicitly, or set
 `SILICON_NOTEBOOK_SYNC_ENV` once per deployment so routine exports do not repeat it. Missing
-both exits 2 with a message naming the variable. `--notebook <id>` (repeatable) narrows a full
-export to specific notebooks; omit it to export everything live and non-mirror. A completed
-export always advances this environment's watermark for that `--target`, whether or not
-`--notebook` was used.
+both exits 2 with a message naming the variable. `--notebook <id>` (repeatable) narrows an
+export to specific notebooks and always forces `mode=full` (see mode selection above); omit it
+to export everything live and non-mirror, in whichever mode gets selected. `--full` forces a
+full export without narrowing the notebook set. A completed export always advances this
+environment's watermark for that `--target`, whether it ran full or incremental and whether or
+not `--notebook` was used. Both the human-readable summary and `--json` report print `mode`,
+`from_seq`, `to_seq`, `base_package_id` (empty for a full export), `deletes` (row count),
+`deleted_notebooks`, and `empty`.
 
 `import` is idempotent: re-running the same package directory short-circuits with
 `already_applied` (exit 0) instead of re-applying rows. `--dry-run` stops after identity
 mapping and preflight, writes nothing, and reports what would happen — always run it once
-before the real import. `--create-missing-users` creates a credential-less local user for
+before the real import. A `mode=incremental` package (or one whose `deletes`/`kg_epochs` are
+non-empty) is rejected at preflight, before anything is written; the error names the rejected
+package's `base_package_id`/`from_seq`/`to_seq` and points at PR-3c, which ships the
+incremental importer. `--create-missing-users` creates a credential-less local user for
 every source `username` the target has no match for (§4 of the design doc); without it,
 references to an unmatched user fall back to each table's own rule (skip the row, null the
 column, or fail the whole notebook, depending on the column). `--verify-files` re-checks every
@@ -718,18 +784,38 @@ package (§6 of the design doc); see
 [Offline / off-host scale builds](./operations.md#offline--off-host-scale-builds-scriptsbuild_scale_indexpy).
 PR-4 is expected to automate queuing this.
 
+### `sync prune-log`
+
+```bash
+PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --dry-run --json
+PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --json
+```
+
+`sync_change_log` only grows from writes; nothing deletes from it automatically, including the
+compaction an incremental export does — that folding happens per export, in memory, to shrink
+the *package*, and does not remove the underlying log rows (another target with an older
+watermark may still need them). `prune-log` deletes log rows that no future export could
+possibly still need. A row qualifies for deletion only when **all** of the following hold: its
+`seq` is at or below every target's minimum `captured` watermark (the minimum
+`exported_through_seq` across every `sync_export_state` row with `captured` true); on
+PostgreSQL, its `txid` is below every target's minimum watermark snapshot's xmin
+(`pg_snapshot_xmin` of that row's `exported_snapshot`); and its `changed_at` is older than
+`--keep-days` (a row young enough by `changed_at` is kept even if the first two conditions would
+otherwise allow deleting it). If **any** target has never produced a `captured` watermark —
+never exported, or its last export fell back to full with capture off — the command refuses
+outright and names that target: without a captured watermark there is no safe upper bound for
+it, and pruning under a guess could permanently break that target's next incremental export.
+`--dry-run` reports the row count that would be deleted without deleting anything.
+
 ### Change capture (`sync capture`)
 
 Every deployment ships with AFTER INSERT/UPDATE/DELETE triggers on all 46 synced tables
 (§7 of the design doc; 138 triggers on SQLite -- one per operation per table, since SQLite has no
 combined "AFTER INSERT OR UPDATE OR DELETE" -- and 46 on PostgreSQL, one per table), but they are
-gated OFF by default: a fresh v84/0064 migration does not
-seed the `sync_capture_control` row, so nothing is logged until an operator runs `sync capture
-enable`. Until PR-3b's incremental exporter exists, turning capture on has no effect on what
-`sync export` produces (every export is still a full snapshot) — it only starts a local record
-of the change-log seq each export could have captured through, which `sync status` and
-`ExportReport.captured_through_seq` surface. There is no reason to enable it before PR-3b ships
-unless you want that record building up in advance; there is also no harm in leaving it off.
+gated OFF by default: a fresh migration does not seed the `sync_capture_control` row, so nothing
+is logged until an operator runs `sync capture enable`. With the gate on, `sync export` reads
+that log to produce incremental packages automatically (see "Cross-environment notebook sync"
+above); with it off, every export is a full snapshot and the log does not grow.
 
 ```bash
 PYTHONPATH=backend python scripts/sync_notebooks.py capture enable --json
@@ -737,25 +823,24 @@ PYTHONPATH=backend python scripts/sync_notebooks.py capture status --json
 PYTHONPATH=backend python scripts/sync_notebooks.py capture disable --json
 ```
 
-**When to enable**: before the export you want to treat as the last full baseline an
-incremental package (once PR-3b ships) can build on. `enable` clears every row in
-`sync_export_state` — a package produced before capture was on is a snapshot the change log has
-no record of, so it can never be extended into an incremental package — meaning the *next*
-export to every target is forced back to full, re-establishing a log-backed baseline. Enabling
-when it is already on is a no-op (it does not move `enabled_at` and does not re-clear
-watermarks), so re-running it after an ambiguous exit code is safe.
+**When to enable**: before the export you want to treat as the new full baseline every later
+incremental package builds on. `enable` clears every row in `sync_export_state` — a package
+produced before capture was on is a snapshot the change log has no record of, so it can never be
+extended into an incremental package — meaning the *next* export to every target is forced back
+to full, re-establishing a log-backed baseline. Enabling when it is already on is a no-op (it
+does not move `enabled_at` and does not re-clear watermarks), so re-running it after an
+ambiguous exit code is safe.
 
 **Do not run `sync capture enable` while a `sync export` is in flight.** `_advance_watermark`
 writes `sync_export_state` only after that export finishes, so an `enable` that clears the table
 partway through an already-running export does not stop it -- that export still completes and
 still writes its watermark, but it reads `captured_through_seq` from a snapshot taken before the
-gate opened, so the seq it writes back is 0 (the correct answer for a run that started before
-capture was on, but not what an operator watching `enable` run moments earlier would expect: a
-0 watermark right after enabling looks like nothing happened). There is no code-level guard
-against this interleaving today; treat it as an operational rule (quiesce or wait out any running
-export before enabling) rather than something the CLI enforces. PR-3b's incremental-export
-baseline validation should cover this case explicitly before it ships (tracked there, not fixed
-here).
+gate opened, so the seq it writes back is 0 and `captured` is false for that one export (the
+correct answer for a run that started before capture was on, but not what an operator watching
+`enable` run moments earlier would expect: a `captured=false` watermark right after enabling
+looks like nothing happened, and forces that target's *next* export back to full too). There is
+no code-level guard against this interleaving; treat it as an operational rule (quiesce or wait
+out any running export before enabling) rather than something the CLI enforces.
 
 **What disabling costs**: `disable` clears both `sync_export_state` and `sync_change_log`. The
 log stops growing the moment it commits, so the next export after a disable is a full snapshot
@@ -768,15 +853,20 @@ relative overhead is larger because its unpatched baseline is already very fast)
 matter for bulk imports/backfills that write tens of thousands of rows in one transaction, not
 for interactive use.
 
-**Log growth**: `sync_change_log` only grows for now — PR-3b ships the compaction (fold
-same-key changes) and retention policy (drop log rows older than every target's minimum
-watermark) described in §7/§9 of the design doc. Until then, an operator who enables capture
-well before PR-3b ships should expect the table to grow unbounded and plan storage accordingly,
-or leave capture off until closer to when PR-3b lands.
+**Log growth**: exporting compacts a *window* down to one entry per changed key inside the
+package it produces, but it does not shrink `sync_change_log` itself — another target with an
+older watermark may still need the rows a newer target's export just folded away. Run
+`sync prune-log` (above) periodically once every target you care about has a `captured`
+watermark past the rows you want gone. Leaving capture on indefinitely without ever pruning
+still means unbounded growth; there is no automatic retention.
 
 Upgrading a large deployment to v84/0064 also has its own operational note — see [the design
 doc's §7 "升级窗口"](./incremental-sync-design.md#7-源端变更捕获) for the lock-window estimate on
 `knowledge_object_sources`/`community_members`'s new primary keys before running the migration.
+Upgrading further to v85/0065 (two `ADD COLUMN`s on `sync_export_state` plus one new index on
+`sync_change_log.txid`) is much lighter and does not need the same lock-window planning; its
+operational consequence is purely about watermarks, not locks — see "Operating a daily export
+cadence" above.
 
 ## PostgreSQL notebook-aware lexical indexes
 

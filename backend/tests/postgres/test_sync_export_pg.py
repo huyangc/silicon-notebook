@@ -285,6 +285,36 @@ def test_the_export_reads_one_repeatable_read_snapshot(seeded):
     )
 
 
+def test_current_snapshot_returns_this_transactions_snapshot(seeded):
+    """``_Source.current_snapshot`` 在导出自己的读事务里取回 PG 原生的
+    ``pg_snapshot`` 文本(``xmin:xmax:xip``),而且它与 ``snapshot_xmin`` 的
+    解析是一对:解析出的 xmin 必须与 PG 自己的 ``pg_snapshot_xmin`` 相等,
+    并且不大于 xmax——增量导出的补偿窗口就以这个下界做 ``txid >= xmin`` 的
+    范围扫描(§7)。"""
+    import re
+
+    from app.migration.sync.export import _Source
+
+    source = _Source(seeded["settings"], Path(__file__).resolve().parents[3])
+    try:
+        with source.read() as conn:
+            snapshot = source.current_snapshot(conn)
+            native_xmin = conn.execute(
+                "SELECT pg_snapshot_xmin(%s::pg_snapshot) AS xmin", (snapshot,)
+            ).fetchone()["xmin"]
+            native_xmax = conn.execute(
+                "SELECT pg_snapshot_xmax(%s::pg_snapshot) AS xmax", (snapshot,)
+            ).fetchone()["xmax"]
+    finally:
+        source.close()
+
+    assert isinstance(snapshot, str)
+    assert re.fullmatch(r"\d+:\d+:(\d+(,\d+)*)?", snapshot), snapshot
+    parsed = _Source.snapshot_xmin(snapshot)
+    assert parsed == int(native_xmin)
+    assert parsed <= int(native_xmax)
+
+
 def test_the_pool_connection_goes_back_with_its_defaults(seeded):
     """SET LOCAL and SET TRANSACTION both end with the transaction, and the
     pool resets a returned connection anyway -- so the next borrower must not

@@ -12,7 +12,7 @@ pytestmark = pytest.mark.postgres_integration
 
 @pytest.fixture
 def store(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 64
+    assert PostgresMigrator(postgres_database).migrate() == 65
     return GlobalAskStore(postgres_database, marker="%s")
 
 
@@ -519,7 +519,7 @@ def _guarded_store(postgres_database):
     from app.repositories.postgres import access_sql
     from app.repositories.postgres.read_authority_lock import lock_reader_access_on
 
-    assert PostgresMigrator(postgres_database).migrate() == 64
+    assert PostgresMigrator(postgres_database).migrate() == 65
     return GlobalAskStore(
         postgres_database, marker="%s", access_sql=access_sql,
         read_authority_lock=lock_reader_access_on,

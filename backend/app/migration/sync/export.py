@@ -339,6 +339,62 @@ class _Source:
         for row in conn.execute(self.sql(statement), tuple(params)):
             yield dict(row)
 
+    def current_snapshot(self, conn: Any) -> str | None:
+        """This transaction's visibility snapshot as PostgreSQL's own text
+        form (``xmin:xmax:xip1,xip2,...``), or ``None`` on SQLite.
+
+        Must be called on the CALLER'S read connection, inside the window
+        ``read()`` opened: under ``REPEATABLE READ`` the snapshot is the one
+        every statement of that transaction sees, and it is only meaningful
+        as a record of THAT window. Taken on a different connection it would
+        describe a different (later) view, and the next export's compensation
+        pass would silently skip whatever committed in between.
+
+        The value is stored in ``sync_export_state.exported_snapshot`` so the
+        NEXT export can find the transactions that were still in flight here
+        and committed afterwards -- their ``sync_change_log`` rows carry a
+        ``seq`` below this run's watermark yet became visible only later, so a
+        plain ``seq > watermark`` window would skip them forever
+        (docs/incremental-sync-design.md §7).
+
+        SQLite has no equivalent and needs none: one writer at a time means
+        ``seq`` order is commit order, so the log has no such gap. ``None``
+        is the honest answer there, not a placeholder.
+        """
+        if not self.is_postgres:
+            return None
+        rows = self.fetch(conn, "SELECT pg_current_snapshot()::text AS snapshot")
+        return str(rows[0]["snapshot"])
+
+    @staticmethod
+    def snapshot_xmin(snapshot: str) -> int:
+        """The ``xmin`` of a stored ``pg_snapshot`` text -- the oldest
+        transaction id that was still in flight when it was taken, and
+        therefore the lower bound of the next export's compensation window
+        (``txid >= xmin``, a range scan over ``idx_sync_change_log_txid``).
+
+        Parsed in Python rather than handed to ``pg_snapshot_xmin()`` because
+        the caller needs this number as a BIND PARAMETER for that range scan:
+        a function call around the stored text would be opaque to the planner
+        at plan time, while a plain integer bound keeps it an index range.
+        The snapshot text is a closed, documented format --
+        ``xmin:xmax:xip1,xip2,...``, all decimal, the xip list possibly empty
+        -- so anything else is a corrupted or hand-edited watermark row and
+        is refused rather than guessed at.
+        """
+        parts = snapshot.split(":")
+        if (
+            len(parts) != 3
+            or not parts[0].isdigit()
+            or not parts[1].isdigit()
+            or (parts[2] and not all(item.isdigit() for item in parts[2].split(",")))
+        ):
+            raise SyncExportError(
+                "sync_export_state.exported_snapshot is not a PostgreSQL "
+                f"snapshot (expected 'xmin:xmax:xip', got {snapshot!r})"
+            )
+        return int(parts[0])
+
     def columns(self, conn: Any, table: str) -> tuple[str, ...]:
         """The table's column names in its own column order. Only the NAMES
         are read live; types come from the migration DDL contract (see the

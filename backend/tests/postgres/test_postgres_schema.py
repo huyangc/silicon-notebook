@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 64
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 65
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -69,10 +69,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 64
-    assert migrator.migrate() == 64
-    assert migrator.current_version() == 64
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 64
+    assert migrator.migrate() == 65
+    assert migrator.migrate() == 65
+    assert migrator.current_version() == 65
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 65
 
 
 @pytest.mark.postgres_integration
@@ -80,7 +80,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 64
+    assert migrator.migrate() == 65
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -163,7 +163,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 64
+        assert PostgresMigrator(databases[1]).migrate() == 65
     finally:
         for database in databases:
             database.close()
@@ -252,6 +252,7 @@ def test_packaged_index_migration_phases_are_exact():
         (62, "global_ask_job_sampling"),
         (63, "sync_control_tables"),
         (64, "sync_change_capture"),
+        (65, "sync_export_snapshot"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -729,6 +730,42 @@ def test_packaged_index_migration_phases_are_exact():
     assert v64_ddl_only.count("CREATE FUNCTION sync_capture_") == 46
     assert "to_jsonb(" not in v64_ddl_only
     assert "TG_ARGV" not in v64_ddl_only
+
+    # Migration 65 (the incremental exporter's watermark state): ONE index and
+    # ONE ALTER TABLE carrying both new columns.
+    assert index_declarations(65) == [(False, "idx_sync_change_log_txid")]
+    # Spelled without ``IF NOT EXISTS`` on purpose, and that is asserted
+    # rather than merely commented: app/migration/shadow/postgres_catalog.py
+    # parses CREATE INDEX straight out of these files to build the catalog
+    # drift expectation, and its parser does not accept that clause. An
+    # IF-NOT-EXISTS index therefore drops out of the expectation while the
+    # live catalog still holds it, which is how the shadow replicator's index
+    # comparison learns to call the schema drifted. sync_change_log IS one of
+    # the manifest's application tables, so it is inside that comparison.
+    from app.migration.shadow.manifest import MANIFEST
+    from app.migration.shadow.postgres_catalog import EXPECTED_OPERATIONAL_INDEXES
+
+    assert "sync_change_log" in MANIFEST.application_names
+    txid_contract = EXPECTED_OPERATIONAL_INDEXES["idx_sync_change_log_txid"]
+    assert txid_contract.table == "sync_change_log"
+    assert txid_contract.unique is False
+    assert txid_contract.keys == (("txid",),)
+    v65_ddl_only = "\n".join(
+        line for line in migrations[65].sql.splitlines()
+        if not line.strip().startswith("--")
+    )
+    assert "ADD COLUMN captured boolean NOT NULL DEFAULT false" in v65_ddl_only
+    assert 'ADD COLUMN exported_snapshot text COLLATE "C"' in v65_ddl_only
+    # exported_snapshot must stay nullable and default-less: SQLite has no
+    # snapshot to record, and a row written before this migration has none
+    # either. A '' default would make "no snapshot" indistinguishable from an
+    # empty one at read time.
+    assert "exported_snapshot text COLLATE \"C\" NOT NULL" not in v65_ddl_only
+    assert "ON sync_change_log (txid)" in v65_ddl_only
+    # No new table, no backfill UPDATE, and nothing touching the change log's
+    # rows -- this migration is columns plus one index.
+    assert "CREATE TABLE" not in v65_ddl_only
+    assert "UPDATE sync_export_state" not in v65_ddl_only
 
     assert index_declarations(50) == [(True, "idx_ask_jobs_client_request")]
     v50_ddl_only = "\n".join(

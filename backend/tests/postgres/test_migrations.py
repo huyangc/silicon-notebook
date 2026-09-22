@@ -268,7 +268,7 @@ def test_packaged_migration_refuses_non_utf_database_before_any_ddl(
 def test_packaged_migrations_apply_in_order(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert len(PostgresMigrator(postgres_database).migrations) == 64
+    assert len(PostgresMigrator(postgres_database).migrations) == 65
     migrator = PostgresMigrator(postgres_database)
     assert migrator.migrate(target_version=2) == 2
     with postgres_database.connect() as conn:
@@ -312,7 +312,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_chunks_text_trgm" not in indexes
     for version in (3, 4, 5, 6, 7, 8, 9, 10, 11):
         assert migrator.migrate(target_version=version) == version
-    assert migrator.migrate() == 64
+    assert migrator.migrate() == 65
     with postgres_database.connect() as conn:
         final_indexes = {
             row["indexname"]
@@ -536,6 +536,9 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert sync_table_columns == {
         "sync_export_state": {
             "target_env", "exported_through_seq", "exported_at", "package_id",
+            # v65's two additions (0065_sync_export_snapshot.sql); their types
+            # and defaults are asserted in that migration's own block below.
+            "captured", "exported_snapshot",
         },
         "sync_imports": {
             "package_id", "source_env", "from_seq", "to_seq", "status",
@@ -685,11 +688,61 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert len(capture_triggers) == 46
     # The gate row is NOT seeded: an absent row reads as disabled.
     assert capture_control_rows == 0
+    # v65 (the incremental exporter's watermark state) — see
+    # migrations/0065_sync_export_snapshot.sql. Two columns appended to
+    # sync_export_state (their presence is already pinned by the column-set
+    # assertion above; their types, nullability and defaults are pinned here),
+    # plus the non-unique index the compensation pass range-scans.
+    with postgres_database.connect() as conn:
+        snapshot_columns = {
+            row["column_name"]: row
+            for row in conn.execute(
+                "SELECT column_name,data_type,is_nullable,column_default,"
+                "collation_name FROM information_schema.columns "
+                "WHERE table_schema=current_schema() "
+                "AND table_name='sync_export_state' "
+                "AND column_name IN ('captured','exported_snapshot')"
+            ).fetchall()
+        }
+        txid_index = conn.execute(
+            "SELECT i.indisunique, am.amname, "
+            "pg_get_expr(i.indpred, i.indrelid, true) AS predicate, "
+            "ARRAY(SELECT a.attname FROM unnest(i.indkey::smallint[]) "
+            "WITH ORDINALITY k(attnum, ord) "
+            "JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum "
+            "ORDER BY k.ord) AS columns "
+            "FROM pg_index i JOIN pg_class x ON x.oid=i.indexrelid "
+            "JOIN pg_class t ON t.oid=i.indrelid "
+            "JOIN pg_am am ON am.oid=x.relam "
+            "JOIN pg_namespace n ON n.oid=x.relnamespace "
+            "WHERE n.nspname=current_schema() AND t.relname='sync_change_log' "
+            "AND x.relname='idx_sync_change_log_txid'"
+        ).fetchone()
+    captured = snapshot_columns["captured"]
+    assert captured["data_type"] == "boolean"
+    assert captured["is_nullable"] == "NO"
+    # The default IS the upgrade behaviour: a watermark row written before
+    # v65 carries no snapshot, so it must read as not-captured and force one
+    # more FULL export before the log can be read as a window.
+    assert captured["column_default"] == "false"
+    exported_snapshot = snapshot_columns["exported_snapshot"]
+    assert exported_snapshot["data_type"] == "text"
+    # Nullable on purpose: SQLite has no transaction snapshot and leaves it
+    # NULL, and a PostgreSQL row written before v65 has none either.
+    assert exported_snapshot["is_nullable"] == "YES"
+    assert exported_snapshot["column_default"] is None
+    assert exported_snapshot["collation_name"] == "C"
+    assert txid_index is not None
+    assert list(txid_index["columns"]) == ["txid"]
+    assert txid_index["indisunique"] is False
+    assert txid_index["amname"] == "btree"
+    # Total, not partial: the compensation pass bounds itself by txid alone.
+    assert txid_index["predicate"] is None
     assert ledger_versions == [
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
         22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
         41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58,
-        59, 60, 61, 62, 63, 64,
+        59, 60, 61, 62, 63, 64, 65,
     ]
 
 
@@ -723,8 +776,8 @@ def test_auth_sunset_migration_preserves_legacy_password_and_session(
             "VALUES ('legacy-session','legacy-user',now(),now()+interval '1 day',now())"
         )
 
-    assert migrator.migrate() == 64
-    assert migrator.migrate() == 64
+    assert migrator.migrate() == 65
+    assert migrator.migrate() == 65
     with postgres_database.connect() as connection:
         users = {
             row["id"]: row for row in connection.execute(
@@ -824,7 +877,7 @@ def test_notebook_object_schema_migration_relocates_legacy_rows(postgres_databas
             ),
         )
 
-    assert migrator.migrate() == 64
+    assert migrator.migrate() == 65
     with postgres_database.connect() as connection:
         relocated = connection.execute(
             "SELECT notebook_id,object_type,status,created_by "
@@ -887,7 +940,7 @@ def test_source_agent_provenance_column_is_nullable_and_unconstrained(
             "AND column_name='agent_profile_id'"
         ).fetchone() is None
 
-    assert migrator.migrate() == 64
+    assert migrator.migrate() == 65
     with postgres_database.connect() as connection:
         column = connection.execute(
             "SELECT data_type,is_nullable,column_default,collation_name "
@@ -962,7 +1015,7 @@ def test_cluster_membership_migration_dedupes_before_unique_guard(postgres_datab
                 ],
             )
 
-    assert migrator.migrate() == 64
+    assert migrator.migrate() == 65
     with postgres_database.connect() as connection:
         rows = connection.execute(
             "SELECT id,canonical_id FROM concept_clusters "

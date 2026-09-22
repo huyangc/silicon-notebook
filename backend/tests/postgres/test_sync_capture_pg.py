@@ -181,6 +181,31 @@ def test_the_migration_seeds_no_control_row(migrated):
         ).fetchone()["n"] == 0
 
 
+def test_the_change_log_sequence_does_not_cache(migrated):
+    """``sync_change_log.seq`` 的序列必须是 ``CACHE 1``(IDENTITY 的默认值)。
+
+    增量导出的窗口建立在「``seq`` 的发放顺序与时间顺序一致」之上:补偿查询只
+    回看 ``seq <= 上次水位`` 且事务在上次快照之后才提交的那一小段,窗口主体则
+    是 ``seq > 上次水位``。``CACHE n > 1`` 会让一个会话预取一段号并留在本地,
+    于是一个**较小**的 seq 可能在另一个会话用掉更大的号之后很久才被发放、才被
+    提交——它既不在主窗口里(seq 更小),也不一定落进补偿窗口所覆盖的 xmin 范围
+    (那个事务在上次快照时可能还没开始),于是这条变更会被永久跳过。
+
+    序列名不写死:用 ``pg_get_serial_sequence`` 从列反查,这样即使 identity
+    序列改名,这条断言仍然钉在同一个对象上。
+    """
+    with migrated.connect() as conn:
+        row = conn.execute(
+            "SELECT s.cache_size FROM pg_sequences s "
+            "WHERE s.schemaname = current_schema() AND s.sequencename = ("
+            "  SELECT c.relname FROM pg_class c "
+            "  WHERE c.oid = pg_get_serial_sequence('sync_change_log', 'seq')::regclass"
+            ")"
+        ).fetchone()
+    assert row is not None, "sync_change_log.seq 没有可反查的序列"
+    assert row["cache_size"] == 1
+
+
 # ------------------------------------------------------------ 触发器行为
 
 
@@ -322,7 +347,7 @@ def test_the_migration_collapses_duplicate_rows_before_taking_the_key(
             "('c-2','nb-1',0,'com-1','b',0.0,1)"
         )
 
-    assert migrator.migrate() == 64
+    assert migrator.migrate() == 65
 
     with postgres_database.connect() as conn:
         kos = conn.execute(

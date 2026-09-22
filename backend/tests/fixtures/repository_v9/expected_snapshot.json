@@ -1900,6 +1900,11 @@
         "type": "index"
       },
       {
+        "name": "idx_sync_change_log_txid",
+        "sql_sha256": "37ffe67e5063f4098c465138a554aa58da94044f6030312515456ba39fd9f13c",
+        "type": "index"
+      },
+      {
         "name": "idx_users_local_login_name",
         "sql_sha256": "5ee07cb362c75be396e836af3e7f250d362233731df7528cee74025c1fc7329b",
         "type": "index"
@@ -2506,7 +2511,7 @@
       },
       {
         "name": "sync_export_state",
-        "sql_sha256": "82c06bfb973b70c6a3e551b6de6769493e863fd08f6470247fbbbfb0b5f893fb",
+        "sql_sha256": "742da3c359a9a9a142dfbe897d67eb5da487549edb80d6477232ed2fa1c6d2d4",
         "type": "table"
       },
       {
@@ -3255,6 +3260,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 84
+    "user_version": 85
   }
 }
