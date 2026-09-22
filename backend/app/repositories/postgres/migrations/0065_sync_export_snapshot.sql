@@ -60,9 +60,23 @@ CREATE INDEX idx_sync_change_log_txid
 --     look prunable, because the watermark that run will publish does not
 --     exist yet. The row is inserted BEFORE the export takes its read
 --     snapshot, carrying floor_seq = the change log's MAX(seq) at that moment
---     -- a lower bound on the watermark this run will eventually publish.
+--     -- a lower bound on the watermark this run will eventually publish --
+--     and floor_xmin = pg_snapshot_xmin(pg_current_snapshot()) read in the
+--     lease's own transaction.
+--
+--     Both floors are needed, because prune-log deletes along two dimensions
+--     and the compensation window is bounded by txid, not by seq: a lease
+--     pinning only floor_seq still lets prune-log delete a row whose seq is
+--     above the floor but whose txid is below the xmin the running export
+--     will compensate from. The lease transaction necessarily starts BEFORE
+--     the export's read snapshot, so its floor_xmin is <= that snapshot's
+--     xmin, and every transaction still in flight at the export's snapshot
+--     that commits afterwards therefore carries txid >= floor_xmin.
 --     prune-log takes its seq floor as the minimum over the captured
---     watermarks AND every live lease's floor_seq.
+--     watermarks AND every live lease's floor_seq, and its txid floor as the
+--     minimum over the captured watermarks' snapshot xmins AND every live
+--     lease's floor_xmin. floor_xmin is nullable because SQLite has no txid
+--     dimension at all and leaves it NULL.
 --   * a second unscoped export to the same target. Two of them race to
 --     publish a watermark, and the loser's package describes a window the
 --     winner's watermark already claims as exported. PRIMARY KEY (target_env)
@@ -82,5 +96,6 @@ CREATE TABLE sync_export_runs (
   started_at timestamp with time zone NOT NULL,
   heartbeat_at timestamp with time zone NOT NULL,
   floor_seq bigint NOT NULL DEFAULT 0,
+  floor_xmin bigint,
   CONSTRAINT pk_sync_export_runs PRIMARY KEY (target_env)
 );

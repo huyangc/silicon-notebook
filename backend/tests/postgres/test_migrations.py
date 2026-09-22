@@ -777,7 +777,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     # must fail here even though no per-column assertion below names it.
     assert set(lease_columns) == {
         "target_env", "run_id", "package_id", "started_at", "heartbeat_at",
-        "floor_seq",
+        "floor_seq", "floor_xmin",
     }
     # PRIMARY KEY (target_env) IS the mutual exclusion between two unscoped
     # exports to the same target -- not an incidental identity column.
@@ -799,6 +799,16 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert floor_seq["data_type"] == "bigint"
     assert floor_seq["is_nullable"] == "NO"
     assert floor_seq["column_default"] == "0"
+    # The second floor, and the one prune-log's txid bound is taken from.
+    # floor_seq alone does not protect a running export: prune-log deletes
+    # along txid too, and a row can sit above the seq floor while its txid is
+    # below the xmin that export will compensate from.
+    floor_xmin = lease_columns["floor_xmin"]
+    assert floor_xmin["data_type"] == "bigint"
+    # Nullable and default-less: SQLite has no txid dimension and leaves it
+    # NULL, and a 0 default would read as "pin from transaction 0 onwards".
+    assert floor_xmin["is_nullable"] == "YES"
+    assert floor_xmin["column_default"] is None
     # The migration starts no export, so it leaves no lease behind.
     assert lease_rows == 0
     assert ledger_versions == [

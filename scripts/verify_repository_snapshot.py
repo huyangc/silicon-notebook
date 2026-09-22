@@ -4885,11 +4885,12 @@ MIGRATION_MANIFEST[(83, 84)] = {
 # WHERE txid IS NOT NULL, which on SQLite is an index over nothing (txid is
 # NULL on every row this backend writes) and therefore also stays empty, plus
 # one new adapter-internal table, sync_export_runs (the in-flight export
-# lease). No trigger or view, and no backfill: both column defaults are
-# already the right value for every pre-existing watermark row, and the lease
-# table describes running exports, of which a just-migrated database has none
-# -- so it clears "migration-added-table-not-empty" the same way v84's gate
-# table does.
+# lease; its floor_xmin is NULL on every SQLite row, which has no txid
+# dimension to pin). No trigger or view, and no backfill: both column defaults
+# are already the right value for every pre-existing watermark row, and the
+# lease table describes running exports, of which a just-migrated database
+# has none -- so it clears "migration-added-table-not-empty" the same way
+# v84's gate table does.
 SYNC_EXPORT_RUNS_TABLES = {
     "sync_export_runs": """CREATE TABLE sync_export_runs (
                     target_env TEXT NOT NULL PRIMARY KEY,
@@ -4897,7 +4898,8 @@ SYNC_EXPORT_RUNS_TABLES = {
                     package_id TEXT NOT NULL,
                     started_at TEXT NOT NULL,
                     heartbeat_at TEXT NOT NULL,
-                    floor_seq INTEGER NOT NULL DEFAULT 0
+                    floor_seq INTEGER NOT NULL DEFAULT 0,
+                    floor_xmin INTEGER
                 )""",
 }
 SYNC_EXPORT_SNAPSHOT_COLUMNS = {

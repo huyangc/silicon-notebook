@@ -823,10 +823,23 @@ def _claim_export_lease(
 
     - ``sync prune-log`` deletes log rows at or below the smallest captured
       watermark. A running export's watermark does not exist yet, so the rows
-      it is about to read still look prunable. The lease carries
-      ``floor_seq`` -- the log's ``MAX(seq)`` at claim time, a lower bound on
-      the watermark this run will publish -- and prune-log takes its floor as
-      the minimum over the watermarks AND every live lease.
+      it is about to read still look prunable. The lease carries two floors,
+      both read in THIS transaction, and prune-log takes its bounds as the
+      minimum over the captured watermarks AND every live lease:
+
+      * ``floor_seq`` -- the log's ``MAX(seq)`` at claim time, a lower bound
+        on the ``exported_through_seq`` this run will publish.
+      * ``floor_xmin`` -- this transaction's ``pg_snapshot_xmin``, NULL on
+        SQLite (no txid there, and no in-flight window to compensate for).
+        This is what protects the NEXT export's COMPENSATION window, which
+        ``floor_seq`` alone cannot: that window re-reads log rows whose
+        ``seq`` is BELOW the watermark, so a seq floor says nothing about
+        them. The ordering is the whole argument -- this transaction runs
+        strictly BEFORE the export opens its read snapshot, so
+        ``floor_xmin <= xmin(export snapshot)``, and any transaction still in
+        flight at that snapshot has ``txid >= xmin(export snapshot) >=
+        floor_xmin``. Holding prune-log's txid bound at or below
+        ``floor_xmin`` therefore keeps every row compensation will want.
     - Two unscoped exports of one target race to publish, and the loser's
       package describes a window the winner's watermark already claims.
 
@@ -847,6 +860,8 @@ def _claim_export_lease(
     A row whose ``heartbeat_at`` has gone unrefreshed for
     ``_STALE_RUN_SECONDS`` belongs to a run that died; the ``WHERE`` lets it
     be taken over, with a warning, rather than blocking this target forever.
+    A takeover rewrites both floors: they describe the run that now holds the
+    lease, and a dead run's promises are nobody's.
     A heartbeat this build cannot even READ is treated as live and refused
     outright, before the claim is attempted: an unreadable row is a reason to
     stop, never a reason to assume the other run is dead. Scoped
@@ -870,19 +885,28 @@ def _claim_export_lease(
                 "fix or remove the sync_export_runs row by hand"
             )
         floor_seq = _captured_through_seq(source, conn, _capture_gate(source, conn)[0])
+        # Read on THIS connection, in THIS transaction -- the one that runs
+        # strictly before the export opens its read snapshot. See the
+        # docstring for why that ordering is the whole guarantee.
+        snapshot = source.current_snapshot(conn)
+        floor_xmin = source.snapshot_xmin(snapshot) if snapshot else None
         cursor = conn.execute(
             source.sql(
                 "INSERT INTO sync_export_runs "
                 "(target_env, run_id, package_id, started_at, heartbeat_at, "
-                "floor_seq) VALUES (?, ?, ?, ?, ?, ?) "
+                "floor_seq, floor_xmin) VALUES (?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT (target_env) DO UPDATE SET "
                 "run_id = excluded.run_id, package_id = excluded.package_id, "
                 "started_at = excluded.started_at, "
                 "heartbeat_at = excluded.heartbeat_at, "
-                "floor_seq = excluded.floor_seq "
+                "floor_seq = excluded.floor_seq, "
+                "floor_xmin = excluded.floor_xmin "
                 "WHERE sync_export_runs.heartbeat_at < ?"
             ),
-            (target_env, run_id, run_id, moment, moment, floor_seq, cutoff),
+            (
+                target_env, run_id, run_id, moment, moment, floor_seq,
+                floor_xmin, cutoff,
+            ),
         )
         if int(cursor.rowcount or 0) != 1:
             holder = source.fetch(conn, held, (target_env,)) or previous

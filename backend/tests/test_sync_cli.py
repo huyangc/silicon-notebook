@@ -1880,6 +1880,11 @@ def test_prune_log_active_lease_narrows_the_seq_bound(tmp_path, monkeypatch, cap
         assert exit_code == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["min_seq"] == 50
+        # SQLite has no txid dimension at all: sync_export_runs.floor_xmin is
+        # NULL on every SQLite row (by construction) and must never make
+        # prune-log refuse or otherwise change behavior there -- the txid
+        # bound stays None regardless of how many active leases exist.
+        assert payload["min_txid"] is None
         assert payload["deleted"] == 1
         assert payload["active_leases"] == [
             {"target_env": "prod-tokyo", "floor_seq": 50}

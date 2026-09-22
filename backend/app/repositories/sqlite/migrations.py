@@ -4643,9 +4643,25 @@ class SqliteMigrator:
           not exist yet. The row is therefore inserted BEFORE the export takes
           its read snapshot, with ``floor_seq`` = the change log's ``MAX(seq)``
           at that moment -- a lower bound on the watermark this run will
-          eventually publish. prune-log's seq floor is the minimum over the
-          captured watermarks AND every live lease's ``floor_seq``, so nothing
-          a running export still needs is deleted underneath it.
+          eventually publish -- and ``floor_xmin`` = the same instant's
+          ``pg_snapshot_xmin(pg_current_snapshot())``. The two bound the two
+          dimensions prune-log deletes along, and ``floor_seq`` alone is not
+          enough: the compensation window is bounded by ``txid``, not by
+          ``seq``, so a lease that only pins a seq floor still lets prune-log
+          delete a row whose ``seq`` is above the floor but whose ``txid`` is
+          below the xmin the running export will compensate from.
+          ``floor_xmin`` is taken in the lease's own transaction, which
+          necessarily starts BEFORE the export's read snapshot, so it is
+          ``<=`` that snapshot's xmin -- and every transaction that is still
+          in flight at the export's snapshot and commits afterwards has a
+          ``txid >= `` it. It is NULL on SQLite, which has no txid dimension
+          at all (``sync_change_log.txid`` is NULL on every row this backend
+          writes, and its single-writer ordering leaves no gap to compensate).
+          prune-log's seq floor is the minimum over the captured watermarks
+          AND every live lease's ``floor_seq``; its txid floor is the minimum
+          over the captured watermarks' snapshot xmins AND every live lease's
+          ``floor_xmin``. So nothing a running export still needs is deleted
+          underneath it, along either dimension.
         - a second unscoped export to the same target. Two of them would race
           to publish a watermark, and the loser's package would describe a
           window that the winner's watermark says was already exported. The
@@ -4684,7 +4700,8 @@ class SqliteMigrator:
                     package_id TEXT NOT NULL,
                     started_at TEXT NOT NULL,
                     heartbeat_at TEXT NOT NULL,
-                    floor_seq INTEGER NOT NULL DEFAULT 0
+                    floor_seq INTEGER NOT NULL DEFAULT 0,
+                    floor_xmin INTEGER
                 );
             """)
 

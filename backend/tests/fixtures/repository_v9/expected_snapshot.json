@@ -2511,7 +2511,7 @@
       },
       {
         "name": "sync_export_runs",
-        "sql_sha256": "9ce62cf3dfee98a835c00fa71576b04c4b03adabc7a679f7128eb008584586f9",
+        "sql_sha256": "f8b0687766a8b6ccbf258c410f7c74bc4eacb1b3413dbb6b030930e433a20504",
         "type": "table"
       },
       {

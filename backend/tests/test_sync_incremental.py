@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1470,3 +1471,23 @@ def test_a_superseded_run_never_deletes_its_successors_lease(baseline, monkeypat
     with pytest.raises(RuntimeError, match="boom"):
         _export(baseline["settings"], baseline["out"])
     assert _lease(repo)["run_id"] == "successor"
+
+
+def test_the_lease_has_no_transaction_floor_on_sqlite(baseline, monkeypatch):
+    """``floor_xmin`` is the PostgreSQL half of the lease's protection. SQLite
+    has no ``txid`` (the column is always NULL there) and no in-flight window
+    for the next export to compensate for, so NULL is the honest value rather
+    than a placeholder zero -- which prune-log would then have to treat as a
+    real bound."""
+    seen: list[Any] = []
+    real = export_module._assemble
+
+    def hooked(*args, **kwargs):
+        seen.append(_lease(baseline["repo"])["floor_xmin"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(export_module, "_assemble", hooked)
+
+    _export(baseline["settings"], baseline["out"])
+
+    assert seen == [None]

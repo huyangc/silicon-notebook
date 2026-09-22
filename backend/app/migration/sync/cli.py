@@ -440,7 +440,7 @@ def _load_export_leases(source: _Source, conn: Any) -> list[dict[str, Any]]:
     rows = source.fetch(
         conn,
         "SELECT target_env, run_id, package_id, started_at, heartbeat_at, "
-        "floor_seq FROM sync_export_runs ORDER BY target_env",
+        "floor_seq, floor_xmin FROM sync_export_runs ORDER BY target_env",
     )
     now = datetime.now(timezone.utc)
     for row in rows:
@@ -602,8 +602,11 @@ def _cmd_status(args: argparse.Namespace, settings: Settings) -> int:
         print("  （无）")
     for row in state["runs"]:
         dead_note = "，已死" if row["dead"] else ""
+        xmin_note = (
+            f"，floor_xmin={row['floor_xmin']}" if row.get("floor_xmin") is not None else ""
+        )
         print(
-            f"  -> {row['target_env']}: floor_seq={row['floor_seq']} "
+            f"  -> {row['target_env']}: floor_seq={row['floor_seq']}{xmin_note} "
             f"开始于 {row['started_at']}，心跳于 {row['heartbeat_at']}{dead_note}"
         )
     print("已引入的包（本环境作为目标）：")
@@ -1137,13 +1140,28 @@ def _prune_log_bounds(
 
     ``min_xmin`` is ``None`` on SQLite -- there is no PostgreSQL compensation
     window to bound there (``sync_change_log.txid`` is NULL on every row; see
-    docs/incremental-sync-design.md §7 "导出水位"), and is computed from
-    ``sync_export_state`` alone -- leases carry no snapshot of their own (§7
-    "在途导出租约"). Raises :class:`SyncPruneError` when NOT A SINGLE target
-    has a ``captured = 1`` watermark: that is the one case with no safe upper
-    bound to compute from anything, as opposed to some targets abstaining
-    while others (captured watermarks OR live leases) still supply one. A
-    live lease alone, with no captured watermark at all, does not lift this
+    docs/incremental-sync-design.md §7 "导出水位"), and no lease ever
+    contributes to it there either (``sync_export_runs.floor_xmin`` is NULL
+    on every SQLite row, by construction -- there is no txid dimension to
+    bound). On PostgreSQL ``min_xmin`` is taken over the SAME two sources as
+    ``min_seq``: the captured watermarks' snapshot xmins, and every LIVE
+    lease's ``floor_xmin`` (the xmin of the snapshot the lease's own claiming
+    transaction saw, taken before the export's read snapshot -- so it is
+    ``<=`` that snapshot's xmin, and every transaction still in flight at the
+    export's snapshot and committing afterwards has ``txid >= floor_xmin``;
+    docs/incremental-sync-design.md §7 "在途导出租约"). A live PostgreSQL
+    lease whose ``floor_xmin`` is ``NULL`` -- which should never happen; the
+    lease-claiming transaction always reads one -- is NOT skipped or
+    defaulted: this function has no safe number to guess, so it raises
+    :class:`SyncPruneError` naming every such lease, for as long as that
+    lease stays live. A DEAD lease's ``floor_xmin`` (NULL or not) is ignored
+    the same way its ``floor_seq`` is.
+
+    Raises :class:`SyncPruneError` when NOT A SINGLE target has a
+    ``captured = 1`` watermark: that is the one case with no safe upper bound
+    to compute from anything, as opposed to some targets abstaining while
+    others (captured watermarks OR live leases) still supply one. A live
+    lease alone, with no captured watermark at all, does not lift this
     refusal -- a lease is a bound on what a FUTURE watermark will be, not a
     substitute for one already published, so there would still be nothing
     proven safe to delete.
@@ -1179,10 +1197,10 @@ def _prune_log_bounds(
         min_xmin = None
 
     leases = _load_export_leases(source, conn)
+    live_leases = [row for row in leases if not row["dead"]]
     active_leases = [
         {"target_env": row["target_env"], "floor_seq": int(row["floor_seq"])}
-        for row in leases
-        if not row["dead"]
+        for row in live_leases
     ]
     dead_leases = [
         {"target_env": row["target_env"], "heartbeat_at": row["heartbeat_at"]}
@@ -1191,6 +1209,22 @@ def _prune_log_bounds(
     ]
     if active_leases:
         min_seq = min(min_seq, min(row["floor_seq"] for row in active_leases))
+    if source.is_postgres and live_leases:
+        missing_floor_xmin = [
+            row for row in live_leases if row.get("floor_xmin") is None
+        ]
+        if missing_floor_xmin:
+            names = "、".join(
+                sorted(str(row["target_env"]) for row in missing_floor_xmin)
+            )
+            raise SyncPruneError(
+                f"以下目标环境的在途导出租约没有 floor_xmin（target: {names}）：这不应该出现"
+                "（只有旧版本写下的租约行才会这样），拒绝在缺失信息上猜测一个 txid 下界。"
+                "等这次导出发布水位、或它的心跳超过一小时被判定为死租约后再重试。"
+            )
+        min_xmin = min(
+            [min_xmin, *(int(row["floor_xmin"]) for row in live_leases)]
+        )
     return min_seq, min_xmin, active_leases, dead_leases
 
 
