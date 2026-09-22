@@ -65,6 +65,7 @@ from app.services.agent_profile_job import (
 )
 from app.services.ask_execution import AskCancellationRegistry, AskExecutionCoordinator
 from app.services.ask_modes import ASK_MODES
+from app.services.ask_service import AskService
 from app.services.notebook_sharing import NotebookSharingService
 
 NOW = "2026-08-18T00:00:00+00:00"
@@ -2388,3 +2389,230 @@ def test_report_half_survives_a_full_load_of_empty_search_summaries(harness):
         "满额空检索摘要不得把报告段饿死到一行都渲染不出"
     )
     assert len(block) <= AGENT_PROFILE_USAGE_SECTION_MAX_CHARS * 1.35
+
+
+# ----------------------------------------------- PR-3 T7: the synchronous seat
+#
+# 同步 `POST /notebooks/{id}/ask` 与 MCP `ask_notebook` 共用 `RepositoryFacade.ask`
+# → `AskService.ask_current`。这一组钉的是那个新座位:接线在、arity 对、落点在
+# 答案交付之后、fail-open,以及三条链拿到的参数与 durable 面逐字同源。
+
+
+class _SyncAskDouble:
+    """`AskService.ask_current` 的最小协作者集合(镜像 test_pending_actions 的
+    `_FakeSyncAsk`):以未绑定函数调用真实的 `ask_current`,只替换它用到的那几个
+    协作者——要钉的是钩子落在哪一刻、带什么参数,不是引擎行为。"""
+
+    def __init__(self, noted, *, mode_id="reasoning", boom=None, notify_boom=None):
+        self.noted = noted
+        self._mode_id = mode_id
+        self._boom = boom
+        self.finished: list = []
+        self.event_log = SimpleNamespace(
+            logger=SimpleNamespace(exception=lambda *a, **k: None)
+        )
+        if notify_boom is None:
+            self.note_ask_completed = (
+                lambda nb, uid, mode_id: noted.append((nb, uid, mode_id))
+            )
+        else:
+            def _raise(nb, uid, mode_id):
+                noted.append((nb, uid, mode_id))
+                raise notify_boom
+            self.note_ask_completed = _raise
+
+    def current_user_id(self):
+        return USER_A
+
+    def _resolve_ask_mode(self, mode):
+        return SimpleNamespace(id=self._mode_id)
+
+    def validate_reasoning_submission(self, notebook_id, payload):
+        return None
+
+    def begin_job_current(self, notebook_id, payload, mode, cancel_event, *,
+                          submitted_via=""):
+        return "askjob-sync", "conv-sync"
+
+    def ask(self, notebook_id, payload, *, user_id, job_id, cancel_event):
+        if self._boom is not None:
+            raise self._boom
+        return SimpleNamespace(answer_id="ans-sync")
+
+    def finish_job(self, job_id, status, *, answer_id="", error=""):
+        self.finished.append(status)
+
+    # 钩子本身用**真的**那一份:double 只替换协作者,不替换被测行为(fail-open
+    # 与「座位为 None 就是 no-op」都住在这个方法里)。
+    _note_ask_completed = AskService._note_ask_completed
+
+
+def _run_sync_ask(monkeypatch, double, *, mode="graph"):
+    import app.services.ask_service as ask_service_module
+
+    monkeypatch.setattr(
+        ask_service_module, "publish_snapshot", lambda user_id: None
+    )
+    return ask_service_module.AskService.ask_current(
+        double, NOTEBOOK_ID, SimpleNamespace(mode=mode)
+    )
+
+
+def test_a_synchronous_ask_signals_the_chain_with_the_normalised_engine_id(
+    monkeypatch,
+):
+    """同步面每交付一个答案就通知一次,三个实参与 `ask_jobs` 那一行同源:
+    notebook_id、真正的提问者、**归一之后**的引擎 id。
+
+    第三个实参刻意用 `mode.id` 而不是 `payload.mode`:退役别名("graph"/"fast")
+    由 `_resolve_ask_mode` 归一到 "chunk",直接透传 payload 会让 `mode_id ==
+    "reasoning"` 闸拿到一个 `ask_jobs.mode` 里根本不存在的字符串。这里的 double
+    正是那种形态——payload 报 "graph",引擎实跑 "reasoning"。"""
+    noted: list = []
+    double = _SyncAskDouble(noted, mode_id="reasoning")
+
+    response = _run_sync_ask(monkeypatch, double, mode="graph")
+
+    assert response.answer_id == "ans-sync"
+    assert noted == [(NOTEBOOK_ID, USER_A, "reasoning")]
+    assert double.finished == ["done"]
+
+
+def test_a_synchronous_ask_notifies_after_the_terminal_job_row(monkeypatch):
+    """钩子落在**答案已落库、终态 job 行已提交**之后——绝不在交付之前。"""
+    order: list = []
+    noted: list = []
+    double = _SyncAskDouble(noted)
+    double.finish_job = lambda job_id, status, *, answer_id="", error="": (
+        order.append(("finish", status))
+    )
+    double.note_ask_completed = lambda nb, uid, mode_id: order.append(("note",))
+
+    _run_sync_ask(monkeypatch, double)
+
+    assert order == [("finish", "done"), ("note",)]
+
+
+def test_a_cancelled_or_failed_synchronous_ask_says_nothing(monkeypatch):
+    """取消与失败都没有交付答案,也就没有「这次提问」可记——两条出口在钩子
+    之前就已经 raise。计上失败的一轮会让坏掉的模型服务自己推着阈值走。"""
+    from app.services.ask_service import AskCancelled
+
+    for boom in (AskCancelled(), RuntimeError("engine down")):
+        noted: list = []
+        double = _SyncAskDouble(noted, boom=boom)
+        with pytest.raises(type(boom)):
+            _run_sync_ask(monkeypatch, double)
+        assert noted == []
+        assert double.finished == [
+            "cancelled" if isinstance(boom, AskCancelled) else "failed"
+        ]
+
+
+def test_a_failing_notification_never_turns_a_delivered_answer_into_an_error(
+    monkeypatch,
+):
+    """fail-open:这一句活在 `ask_current` 的 try 之内,而那个 try 的
+    `except BaseException` 会把 job 判成 failed 并上抛。异常从钩子里逃出去就等于
+    把一个已经答完的提问改判成错误(还会多写一条 failed 终态行)。"""
+    noted: list = []
+    double = _SyncAskDouble(noted, notify_boom=RuntimeError("bookkeeping down"))
+
+    response = _run_sync_ask(monkeypatch, double)
+
+    assert response.answer_id == "ans-sync"
+    assert noted == [(NOTEBOOK_ID, USER_A, "reasoning")]
+    assert double.finished == ["done"], "记账失败不得再写一条 failed 终态"
+
+
+def test_the_runtime_actually_wires_the_synchronous_completion_seat():
+    """`repository_runtime.py` 是生产里这个座位唯一的来源。删掉那一行,整仓
+    测试仍会全绿(所有行为用例都自己接线),而同步与 MCP 两类提问重新零计数
+    ——照 `test_the_runtime_actually_wires_the_access_seat` 的先例钉成静态断言。
+
+    还要钉「交的就是 `_note_ask_completed` 本身」:换成别的可调用(例如某条链
+    自己的 `note_ask_completed`)等于绕开 `mode_id == "reasoning"` 闸和三条链
+    各自独立的 try。"""
+    import ast
+
+    from app.services import repository_runtime as rr
+
+    tree = ast.parse(Path(rr.__file__).read_text(encoding="utf-8"))
+    seats = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.keyword)
+        and node.arg == "note_ask_completed"
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "_note_ask_completed"
+        and isinstance(node.value.value, ast.Name)
+        and node.value.value.id == "self"
+    ]
+    assert len(seats) == 1, (
+        "AskService 的 note_ask_completed 座位必须接 self._note_ask_completed,"
+        "且只接一次——0 个说明同步/MCP 提问重新零计数,2 个说明有人复制了接线"
+    )
+
+
+def test_a_synchronous_repository_ask_reaches_all_three_memory_chains(
+    tmp_path, monkeypatch
+):
+    """端到端(真 facade、真 runtime、真 `repo.ask`——`POST /notebooks/{id}/ask`
+    与 MCP `ask_notebook` 两条路由体里就是这一句):chunk 模式下 P1 与 P3 各被
+    通知一次,P2(经验蒸馏)被 `mode_id == "reasoning"` 闸挡住。
+
+    三条链的参数在这里才真正可核对:P1 拿 (notebook_id, user_id),P2 只拿
+    notebook_id,P3 只拿 user_id,而 user_id 必须与这一行 `ask_jobs.created_by`
+    同源——不是「某个非空字符串」。"""
+    from app.models.schemas import NotebookCreate
+    from app.services.embedding import FakeEmbedder
+    from app.services.sqlite_repository import SQLiteRepository
+    from tests.ask_testkit import seed_ask_evidence
+    from tests.model_testkit import bind_all_embedding_clients, bind_chat_client
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'sync.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("EMBED_DIM", "16")
+
+    class _AnswerClient:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return json.dumps({"answer": "ok.", "grounded": False})
+
+    repo = SQLiteRepository(Settings())
+    bind_all_embedding_clients(repo, FakeEmbedder(dim=16))
+    bind_chat_client(repo, "ask_answer", _AnswerClient())
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    seed_ask_evidence(repo, notebook.id)
+
+    noted: list = []
+    runtime = repo._runtime
+    runtime.agent_profile_jobs = SimpleNamespace(
+        note_ask_completed=lambda nb, uid: noted.append(("p1", nb, uid))
+    )
+    runtime.retrieval_experience_jobs = SimpleNamespace(
+        note_ask_completed=lambda nb: noted.append(("p2", nb))
+    )
+    runtime.search_profile_jobs = SimpleNamespace(
+        note_ask_completed=lambda uid: noted.append(("p3", uid))
+    )
+
+    response = repo.ask(
+        notebook.id, AskRequest(question="q", mode="chunk"), submitted_via="web"
+    )
+    assert response.conversation_id
+
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT created_by, mode FROM ask_jobs WHERE conversation_id=?",
+            (response.conversation_id,),
+        ).fetchone()
+    asker, stored_mode = row["created_by"], row["mode"]
+    assert stored_mode == "chunk"
+
+    assert noted == [("p1", notebook.id, asker), ("p3", asker)], (
+        "chunk 模式:P1 与 P3 各恰好一次、参数与 ask_jobs 那一行同源;P2 被 "
+        "reasoning 闸挡住(否则采样只取 reasoning run,同一批旧 run 会被反复"
+        "付钱蒸馏)"
+    )

@@ -571,6 +571,25 @@ all of them share that service's one scheduler and one concurrency budget.
 window sizes, batch sizes, and local ANN threads do not create another model
 gate.
 
+**After an upgrade, regenerate `.local/model-services.toml` or add bindings for
+the newly introduced workloads by hand.** A `[bindings]` file is normally
+generated once and then carried across versions, so every **new** workload
+starts life unbound in every existing deployment. An unbound workload simply
+resolves to "no service" in the registry and the whole chain fails soft — no
+error anywhere, just a feature that silently does nothing (an unbound
+`agent_profile_consolidate`, for instance, makes every background consolidation
+run behind "AI 对这个库的理解" settle as `failed:模型未配置，无法整理`). The
+backend therefore emits one WARNING line before READY naming every chat
+workload nothing is bound to (Chinese label plus workload id); on top of that,
+`agent_profile_consolidate` and `retrieval_experience_distill` each get their
+own line ("特性已开但模型未绑定") when their feature flag
+(`AGENT_PROFILE_ENABLED`, `RETRIEVAL_EXPERIENCE_ENABLED`) is on. A deployment
+with an empty `MODEL_SERVICES_CONFIG` is exempt — that is the supported offline
+runtime and it already has its own startup notice.
+`scripts/migrate_legacy_model_env.py` walks every workload when regenerating
+the file; adding the missing `[bindings]` lines by hand works just as well.
+These are warnings only and never refuse to start.
+
 Auto mode (the simplified interface) always uses step-by-step reasoning
 (`reasoning`) at standard effort, going through the same `/ask/intent` intent
 preview (reusing the `reasoning_agent` workload) that the advanced interface
@@ -1218,7 +1237,7 @@ AGENT_PROFILE_BASE_TRIGGER   # accumulated source changes before the shared base
 AGENT_PROFILE_OVERLAY_TRIGGER # completed Ask jobs before one member's private overlay (retrieval_notes/usage_gaps) is re-consolidated; a completed deep report reaches this threshold immediately (default 10)
 AGENT_CALL_LOG_ENABLED       # records one row per notebook-scoped MCP tool call an Agent makes (who, when, under which capability), readable and clearable by that member alone under "Agent 记录" (default true; false writes nothing at all — the check precedes the transaction). Layered UNDER AGENT_PROFILE_ENABLED rather than independent of it: this ledger's only reader is a panel whose entry button does not render while that gate is off, so recording with it off would accumulate rows nobody can open. Reading and clearing an existing ledger follow NEITHER switch — flipping this off means "stop recording", never "hide or freeze what was already recorded". The ledger still never reaches a prompt (the consolidation read pins kind='note' in SQL) and never triggers consolidation
 RETRIEVAL_EXPERIENCE_ENABLED # shared distillation gate for the retrieval-strategy experience library's two chains (Agentic Memory P2, partitioned by notebook since 2026-09-22): whether finished asks are ever read and distilled into retrieval_experiences at all (default true — a deployment may distill and observe without ever injecting, see RETRIEVAL_EXPERIENCE_INJECT_ENABLED below)
-RETRIEVAL_EXPERIENCE_INJECT_ENABLED # independent injection gate for the same library, shared by both partitions: whether the distilled block is ever added to the plan/reflect prompt (default **false** — off until the deployment has observed enough distilled entries to judge the effect; false is byte-identical to the feature not existing on the injection side: no read, no block, no trace step)
+RETRIEVAL_EXPERIENCE_INJECT_ENABLED # independent injection gate for the same library, shared by both partitions: whether the distilled block is ever added to the plan/reflect prompt (**default true since 2026-09-22**, false before that — once the library is partitioned per notebook, what a run gets injected is first and foremost its own notebook's experience, and a local trial run verified the whole chain end to end: 10 reasoning asks in one notebook distilled entries, and with the gate on the trace showed an `experience` step with `notebook_entries>0`. Setting it to false returns to "distill but never inject": the injection side is byte-identical to the feature not existing — no read, no block, no trace step — while distillation keeps collecting data; note it also removes the consult_memory action from the reflect enum, see the line below)
 RETRIEVAL_EXPERIENCE_TRIGGER # accumulated completed asks (across every notebook and user) before one GLOBAL-partition distillation batch runs (default 40; ge=1)
 RETRIEVAL_EXPERIENCE_NOTEBOOK_TRIGGER # accumulated completed reasoning asks for a single notebook before one NOTEBOOK-partition distillation batch runs (added 2026-09-22; default 10; ge=1)
 REASONING_CONSULT_MEMORY_ENABLED # per-scenario kill switch (defense in depth) for the consult_memory reflect action (Agentic Memory P4); the action's actual availability gate is `retrieval_effort` in {deep, thorough, exhaustive} AND RETRIEVAL_EXPERIENCE_INJECT_ENABLED being on — this flag alone flipping true never makes the action appear if the injection flag above is off (default true)

@@ -501,6 +501,89 @@ async def test_ask_tool_reuses_formal_ask_and_rejects_retired_graph_alias(mcp_en
     assert "ask_answer" in repo._runtime.models._test_chat_calls
 
 
+@pytest.mark.anyio
+async def test_ask_notebook_signals_the_three_completion_memory_chains(mcp_env):
+    """Agentic Memory PR-3(T7):MCP 的提问也算数。
+
+    ``ask_notebook`` 经 ``RepositoryFacade.ask`` → ``AskService.ask_current``,
+    在 PR-3 之前那一层从不触发 ``_note_ask_completed``,于是三条记忆链路对
+    Agent 的提问完全零计数——而 Agent 的提问恰恰是「这个库越用越熟」最主要的
+    输入。这里走的是**生产接线**:``create_app()`` 的完成观察者 host 加三个内建
+    observer,所以它同时钉住 host 那条路(不只是直连兜底)。
+
+    chunk 模式:P1(按人按库)与 P3(按人)各恰好一次,P2(经验蒸馏)被
+    ``mode_id == "reasoning"`` 闸挡住。三条链拿到的参数各不相同,差异本身就是
+    它们隐私边界不同的证据。
+    """
+    from app.services.sqlite_repository import _now
+
+    repo = repository()
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+            "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("mcp-note-source", mcp_env["notebook"].id, "Evidence", "markdown",
+             "extracted", "parsed", "n.md", "", 0, "", "", "textbook", now, now),
+        )
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("mcp-note-chunk", mcp_env["notebook"].id, "mcp-note-source",
+             "evidence exists in this notebook", "1", "[]", now),
+        )
+
+    class _AnswerClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return '{"answer":"Evidence exists [k1].","grounded":true}'
+
+    bind_chat_client(repo, "ask_answer", _AnswerClient())
+
+    noted: list = []
+    runtime = repo._runtime
+    assert runtime.ask_completed_observers is not None, (
+        "生产 app 必须接上完成观察者 host——座位空了这条用例就退化成只钉直连"
+        "兜底路径,而生产走的是另一条"
+    )
+    runtime.agent_profile_jobs = SimpleNamespace(
+        note_ask_completed=lambda nb, uid: noted.append(("p1", nb, uid))
+    )
+    runtime.retrieval_experience_jobs = SimpleNamespace(
+        note_ask_completed=lambda nb: noted.append(("p2", nb))
+    )
+    runtime.search_profile_jobs = SimpleNamespace(
+        note_ask_completed=lambda uid: noted.append(("p3", uid))
+    )
+
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        answer = _payload(await client.call(
+            "ask_notebook", {"question": "What evidence exists?", "mode": "chunk"}
+        ))
+    assert answer["conversation_id"]
+
+    # 提问者 = 这条 ask_jobs 行的 created_by(token 背后的那个人),不是「某个
+    # 非空字符串」——这是 P1/P3 的边界本身。
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT created_by, mode, submitted_via FROM ask_jobs "
+            "WHERE conversation_id=? ORDER BY created_at DESC LIMIT 1",
+            (answer["conversation_id"],),
+        ).fetchone()
+    assert row["submitted_via"] == "mcp" and row["mode"] == "chunk"
+    assert row["created_by"] == mcp_env["alice"].id
+
+    assert noted == [
+        ("p1", mcp_env["notebook"].id, mcp_env["alice"].id),
+        ("p3", mcp_env["alice"].id),
+    ], "MCP 提问必须推进 P1/P3 各一次;chunk 模式下 P2 被 reasoning 闸挡住"
+
+
 def _fake_notebook_summary(mcp_env):
     return mcp_env["notebook"].model_copy(update={"ask_available": True})
 

@@ -477,23 +477,57 @@ def test_fullwidth_latin_and_halfwidth_katakana_are_not_chinese():
     assert classify_ask_language("这个库支持哪些格式？请列出全部！") == "zh"
 
 
-def test_sync_ask_paths_deliberately_do_not_notify_inference():
-    """codex #535 R4 P2 的驳回护栏:同步 ask(ask_current——POST /ask 与 MCP
-    ask_notebook 的路径)刻意不触发三条 note_ask_completed 链,P1 起的登记
-    口径（见 `docs/product-and-api.md`「同步 POST /ask 不计入覆盖层触发计数」）。若有人接入,
-    本用例红,提醒他那是在改三条链共同的计数语义、需单独过评审。"""
+def test_sync_ask_paths_notify_the_three_memory_chains():
+    """PR-3·T7 起,同步面(ask_current —— POST /ask 与 MCP ask_notebook 的共同
+    收口)也触发三条 note_ask_completed 链。这条用例是上一版
+    ``test_sync_ask_paths_deliberately_do_not_notify_inference`` 的正向翻面:
+    当时的口径是「同步不计入」,而本机试跑证明 MCP 侧的提问恰恰是这三条链最重要
+    的输入,零计数是缺陷。
+
+    钉的是三件事,每一件都是实测过的静默变异:调用还在(删掉它 → 两类提问重新
+    零计数,没有别的用例会红)、**恰好三个位置实参**(少一个在生产抛 TypeError,
+    被 fail-open 吞掉、三条链一起静默死亡)、第三个实参是**归一之后的引擎 id**
+    ``mode.id`` 而不是 ``payload.mode``(别名未归一时 "graph"/"fast" 会绕过
+    ``mode_id == "reasoning"`` 闸,与 ``ask_jobs.mode`` 不同源)。"""
     import ast
     from pathlib import Path
 
-    source = Path("backend/app/services/ask_service.py").read_text("utf-8")
+    from app.services import ask_service as ask_service_module
+
+    source = Path(ask_service_module.__file__).read_text("utf-8")
     tree = ast.parse(source)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "ask_current":
-            body_src = ast.get_source_segment(source, node) or ""
-            assert "note_ask_completed" not in body_src
-            break
-    else:  # pragma: no cover
-        raise AssertionError("ask_current not found")
+    target = next(
+        (
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "ask_current"
+        ),
+        None,
+    )
+    assert target is not None, "ask_current not found"
+    calls = [
+        node for node in ast.walk(target)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_note_ask_completed"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+    ]
+    assert len(calls) == 1, (
+        "ask_current 里必须恰有一次 self._note_ask_completed(...):0 次说明同步与 "
+        "MCP 两类提问重新零计数,2 次说明有人在某条出口上又抄了一遍(双计)"
+    )
+    call = calls[0]
+    assert len(call.args) == 3 and not call.keywords, ast.dump(call)
+    assert [getattr(arg, "id", None) for arg in call.args[:2]] == [
+        "notebook_id", "user_id",
+    ], ast.dump(call)
+    mode_arg = call.args[2]
+    assert (
+        isinstance(mode_arg, ast.Attribute)
+        and mode_arg.attr == "id"
+        and isinstance(mode_arg.value, ast.Name)
+        and mode_arg.value.id == "mode"
+    ), ast.dump(mode_arg)
 
 
 def test_kana_bearing_questions_are_never_chinese():

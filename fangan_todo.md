@@ -117,9 +117,15 @@
       KG-only run 零开销，所以只登记：把装配期结果沿 `baseline_sink` 带出来复用即可省两次。
 - [ ] **Prompt 三层化后的 per-notebook 定制与 self-evo**：接缝只有 `fragment_text()`；L1 片段分
       两类（A 类离线 GEPA + 人审，B 类只改示例槽位），尚未拍板开放。
-- [ ] **Agentic Memory 注入开闸与 A/B**：经验库已改按笔记本分区（PR-1，规格
-      `docs/superpowers/specs/2026-09-22-retrieval-experience-per-notebook-design_zh.md`）；
-      PR-2 界面（P1 面板小节、立即整理、清空）与 PR-3 开闸待做；注入默认仍关闭。
+- [ ] **Agentic Memory 注入的真实 A/B 观测**：按笔记本分区一系列已收官（PR-1 #769 分区、
+      PR-2 #771 界面、PR-3 本 PR 开闸；规格
+      `docs/superpowers/specs/2026-09-22-retrieval-experience-per-notebook-design_zh.md`）。
+      PR-3 合入后 `RETRIEVAL_EXPERIENCE_INJECT_ENABLED` 默认开，本机试跑证明链路通（同一个库
+      10 次 reasoning 提问蒸出 2 条，开闸后轨迹 `experience` 步 `notebook_entries=2`）。
+      **剩余**：真实 A/B 观测——这次试跑验证的是链路与条目可用，不是检索效果提升；效果按
+      条目的 `adopted` 计数看采纳率（`adopted` 只在条目真正送达且模型那一轮点名了该动作时
+      递增），需要生产上跑够量才谈得上。觉得每 reflect 轮重复注入的 token 不划算的部署把
+      注入闸设回 false 即逐字回到「只蒸馏不注入」。
 - [ ] **全局回答的 👍/👎 反馈未进管理端提问分析 / 笔记本分析口径**：`POST
       /global-ask/jobs/{job_id}/feedback` 把评分写进该任务 `global_ask_jobs.payload_json` 的
       `feedback` 字段（首次写入为准），并发一个内容无关事件 `global_ask_feedback`；两者都不落
