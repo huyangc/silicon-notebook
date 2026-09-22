@@ -117,7 +117,9 @@
       KG-only run 零开销，所以只登记：把装配期结果沿 `baseline_sink` 带出来复用即可省两次。
 - [ ] **Prompt 三层化后的 per-notebook 定制与 self-evo**：接缝只有 `fragment_text()`；L1 片段分
       两类（A 类离线 GEPA + 人审，B 类只改示例槽位），尚未拍板开放。
-- [ ] **Agentic Memory 注入开闸与 A/B**：P1–P4 已合入，注入默认关闭，开闸是独立决定。
+- [ ] **Agentic Memory 注入开闸与 A/B**：经验库已改按笔记本分区（PR-1，规格
+      `docs/superpowers/specs/2026-09-22-retrieval-experience-per-notebook-design_zh.md`）；
+      PR-2 界面（P1 面板小节、立即整理、清空）与 PR-3 开闸待做；注入默认仍关闭。
 - [ ] **全局回答的 👍/👎 反馈未进管理端提问分析 / 笔记本分析口径**：`POST
       /global-ask/jobs/{job_id}/feedback` 把评分写进该任务 `global_ask_jobs.payload_json` 的
       `feedback` 字段（首次写入为准），并发一个内容无关事件 `global_ask_feedback`；两者都不落
