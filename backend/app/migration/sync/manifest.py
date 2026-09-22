@@ -591,6 +591,9 @@ _LOCAL: tuple[TableSyncSpec, ...] = (
     # 目标端就会把别人的行变更当成自己的待导出增量。
     TableSyncSpec("sync_capture_control", SyncClass.LOCAL, notes="PR-3a 捕获开关"),
     TableSyncSpec("sync_change_log", SyncClass.LOCAL, notes="PR-3a 变更日志"),
+    # PR-3b 在途导出租约（SQLite v85 / PostgreSQL 0065）：一行 = 本环境此刻正在
+    # 跑的一次不限定范围的导出。比上面几张更本地——它不是记账，是一次活着的运行。
+    TableSyncSpec("sync_export_runs", SyncClass.LOCAL, notes="PR-3b 在途导出租约"),
 )
 
 SYNC_MANIFEST: tuple[TableSyncSpec, ...] = _SYNCED + _SYNCED_WITH_MAPPING + _LOCAL

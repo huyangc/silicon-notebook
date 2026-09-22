@@ -847,6 +847,14 @@ _TABLES = (
     # replication key.
     TableSpec("sync_capture_control", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 106),
     TableSpec("sync_change_log", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 107),
+    # SQLite v85 / PostgreSQL 0065: the in-flight export lease, one row per
+    # target environment, held only while an export is actually running here.
+    # More local than any of the tables above -- it is not even durable state,
+    # it is a live run -- so the same treatment: LOCAL_EPHEMERAL, no
+    # replication key. Copying it across the shadow pair would hand the target
+    # a lease for a run that is not happening on it, which would block that
+    # environment's own exports and hold its prune-log floor down.
+    TableSpec("sync_export_runs", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 108),
 )
 
 MANIFEST = Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)

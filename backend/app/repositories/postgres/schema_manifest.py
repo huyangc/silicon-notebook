@@ -127,6 +127,7 @@ POSTGRES_BUSINESS_TABLES = (
     "sources",
     "sync_capture_control",
     "sync_change_log",
+    "sync_export_runs",
     "sync_export_state",
     "sync_import_progress",
     "sync_imports",

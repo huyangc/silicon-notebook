@@ -692,8 +692,32 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     # migrations/0065_sync_export_snapshot.sql. Two columns appended to
     # sync_export_state (their presence is already pinned by the column-set
     # assertion above; their types, nullability and defaults are pinned here),
-    # plus the non-unique index the compensation pass range-scans.
+    # the non-unique index the compensation pass range-scans, and the
+    # sync_export_runs in-flight export lease.
     with postgres_database.connect() as conn:
+        lease_columns = {
+            row["column_name"]: row
+            for row in conn.execute(
+                "SELECT column_name,data_type,is_nullable,column_default,"
+                "collation_name FROM information_schema.columns "
+                "WHERE table_schema=current_schema() "
+                "AND table_name='sync_export_runs'"
+            ).fetchall()
+        }
+        lease_pk = conn.execute(
+            "SELECT array_agg(kcu.column_name::text ORDER BY "
+            "kcu.ordinal_position) AS columns "
+            "FROM information_schema.table_constraints tc "
+            "JOIN information_schema.key_column_usage kcu "
+            "ON kcu.constraint_name=tc.constraint_name "
+            "AND kcu.table_schema=tc.table_schema "
+            "WHERE tc.constraint_type='PRIMARY KEY' "
+            "AND tc.table_schema=current_schema() "
+            "AND tc.table_name='sync_export_runs'"
+        ).fetchone()
+        lease_rows = conn.execute(
+            "SELECT COUNT(*) AS n FROM sync_export_runs"
+        ).fetchone()["n"]
         snapshot_columns = {
             row["column_name"]: row
             for row in conn.execute(
@@ -748,6 +772,35 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     # (a strict operator clause implies IS NOT NULL), so the compensation scan
     # can still use it.
     assert txid_index["predicate"] == "txid IS NOT NULL"
+    # The in-flight export lease. Column set pinned as a whole, same reason as
+    # the v63 tables above: a column added on one backend without the other
+    # must fail here even though no per-column assertion below names it.
+    assert set(lease_columns) == {
+        "target_env", "run_id", "package_id", "started_at", "heartbeat_at",
+        "floor_seq",
+    }
+    # PRIMARY KEY (target_env) IS the mutual exclusion between two unscoped
+    # exports to the same target -- not an incidental identity column.
+    assert lease_pk is not None and list(lease_pk["columns"]) == ["target_env"]
+    for column_name in ("target_env", "run_id", "package_id"):
+        assert lease_columns[column_name]["data_type"] == "text"
+        assert lease_columns[column_name]["is_nullable"] == "NO"
+        assert lease_columns[column_name]["collation_name"] == "C"
+    for column_name in ("started_at", "heartbeat_at"):
+        moment = lease_columns[column_name]
+        assert moment["data_type"] == "timestamp with time zone"
+        # Both NOT NULL and both without a default: a lease is only ever
+        # written by an export that knows when it started and when it last
+        # beat, and "no heartbeat yet" must not be representable -- the
+        # staleness rule reads this column and nothing else.
+        assert moment["is_nullable"] == "NO"
+        assert moment["column_default"] is None
+    floor_seq = lease_columns["floor_seq"]
+    assert floor_seq["data_type"] == "bigint"
+    assert floor_seq["is_nullable"] == "NO"
+    assert floor_seq["column_default"] == "0"
+    # The migration starts no export, so it leaves no lease behind.
+    assert lease_rows == 0
     assert ledger_versions == [
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
         22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,

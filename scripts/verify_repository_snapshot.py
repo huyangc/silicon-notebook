@@ -4883,9 +4883,23 @@ MIGRATION_MANIFEST[(83, 84)] = {
 # exported_snapshot (that export's pg_current_snapshot()::text, always NULL on
 # SQLite) -- plus one non-unique PARTIAL index on sync_change_log(txid, seq)
 # WHERE txid IS NOT NULL, which on SQLite is an index over nothing (txid is
-# NULL on every row this backend writes) and therefore also stays empty. No
-# table, trigger or view, and no backfill: both defaults are already the right
-# value for every pre-existing watermark row.
+# NULL on every row this backend writes) and therefore also stays empty, plus
+# one new adapter-internal table, sync_export_runs (the in-flight export
+# lease). No trigger or view, and no backfill: both column defaults are
+# already the right value for every pre-existing watermark row, and the lease
+# table describes running exports, of which a just-migrated database has none
+# -- so it clears "migration-added-table-not-empty" the same way v84's gate
+# table does.
+SYNC_EXPORT_RUNS_TABLES = {
+    "sync_export_runs": """CREATE TABLE sync_export_runs (
+                    target_env TEXT NOT NULL PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    package_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    heartbeat_at TEXT NOT NULL,
+                    floor_seq INTEGER NOT NULL DEFAULT 0
+                )""",
+}
 SYNC_EXPORT_SNAPSHOT_COLUMNS = {
     "sync_export_state": {
         "captured": ("captured", "INTEGER", 1, "0", 0),
@@ -4918,6 +4932,10 @@ MIGRATION_MANIFEST = {
         **manifest,
         "tables": {
             **manifest["tables"],
+            # Unconditional, unlike the ALTERed sync_export_state text beside
+            # it: no lineage has sync_export_runs before this hop, so every
+            # one of them creates it here.
+            **SYNC_EXPORT_RUNS_TABLES,
             **(
                 SYNC_CONTROL_TABLES_V85
                 if "sync_export_state" in manifest["tables"]
@@ -4936,7 +4954,7 @@ MIGRATION_MANIFEST = {
     for key, manifest in MIGRATION_MANIFEST.items()
 }
 MIGRATION_MANIFEST[(84, 85)] = {
-    "tables": {}, "columns": SYNC_EXPORT_SNAPSHOT_COLUMNS,
+    "tables": SYNC_EXPORT_RUNS_TABLES, "columns": SYNC_EXPORT_SNAPSHOT_COLUMNS,
     "indexes": SYNC_EXPORT_SNAPSHOT_INDEXES, "triggers": {}, "views": {},
 }
 
