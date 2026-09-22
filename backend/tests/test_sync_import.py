@@ -2316,3 +2316,191 @@ def test_this_package_finishing_during_preflight_is_simply_already_applied(
     assert report.tables == {}
     assert _sync_import_row(target, report.package_id)["status"] == "done"
     assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 1
+
+
+# ------------------------------- taking over ANOTHER package's running row
+
+
+def test_taking_over_another_packages_run_retires_it(
+    source, target, tmp_path
+):
+    """--take-over on somebody else's run is a REPLACEMENT, not a handover.
+    Leaving that row alive would let a later run resume its older snapshot on
+    top of this newer one, so it is retired exactly like a failed package."""
+    older = _export(source, tmp_path / "out1")
+    older_id = _manifest(older)["package_id"]
+    _open_running_row(
+        target["repo"],
+        older_id,
+        started_at=_now_text(),
+        heartbeat_at="2026-01-01T09:00:00+00:00",
+    )
+    with target["repo"]._write() as db:
+        db.execute(
+            "INSERT INTO sync_import_progress(package_id,table_name,rows_applied,"
+            "completed_at) VALUES(?,?,?,?)",
+            (older_id, "notebooks", 1, MOMENT),
+        )
+        db.execute(
+            "UPDATE sync_imports SET report_json=? WHERE package_id=?",
+            (
+                json.dumps(
+                    {
+                        "package_created_at": _manifest(older)["created_at"],
+                        "heartbeat_at": "2026-01-01T09:00:00+00:00",
+                    }
+                ),
+                older_id,
+            ),
+        )
+    newer = _export(source, tmp_path / "out2")
+
+    report = _import(target, newer, take_over=True)
+
+    assert report.error == ""
+    retired = _sync_import_row(target, older_id)
+    assert retired["status"] == "superseded"
+    assert json.loads(retired["report_json"])["superseded_by"] == report.package_id
+    assert _progress_count(target, older_id) == 0
+    assert any(
+        "still marked running" in warning and older_id in warning
+        for warning in report.warnings
+    )
+
+
+def test_taking_over_a_newer_run_with_an_older_package_is_refused(
+    source, target, tmp_path
+):
+    """Taking over another run is not a licence to apply an older snapshot
+    after a newer one. The ordering check happens first, in the same
+    transaction, and refuses before anything is retired."""
+    older = _export(source, tmp_path / "out1")
+    newer = _export(source, tmp_path / "out2")
+    newer_id = _manifest(newer)["package_id"]
+    _open_running_row(target["repo"], newer_id, started_at=_now_text())
+    with target["repo"]._write() as db:
+        db.execute(
+            "UPDATE sync_imports SET report_json=? WHERE package_id=?",
+            (
+                json.dumps({"package_created_at": _manifest(newer)["created_at"]}),
+                newer_id,
+            ),
+        )
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, older, take_over=True)
+
+    message = str(failure.value)
+    assert newer_id in message
+    assert "not newer" in message
+    assert _sync_import_row(target, newer_id)["status"] == "running"
+    assert _sync_import_row(target, _manifest(older)["package_id"]) is None
+
+
+def test_taking_over_this_packages_own_run_keeps_its_progress(
+    source, target, package, monkeypatch
+):
+    """Its own abandoned run is a CONTINUATION. The progress rows are exactly
+    what makes the resume cheap, so taking it over must not drop them."""
+    _fail_partway(target, package, monkeypatch)
+    package_id = _manifest(package)["package_id"]
+    with target["repo"]._write() as db:
+        db.execute(
+            "UPDATE sync_imports SET status='running', finished_at=NULL "
+            "WHERE package_id=?",
+            (package_id,),
+        )
+    before = _progress_count(target, package_id)
+    assert before > 0
+
+    report = _import(target, package, take_over=True)
+
+    assert report.error == ""
+    assert _sync_import_row(target, package_id)["status"] == "done"
+    assert report.tables["notebooks"].resumed is True
+    assert any(
+        "own running sync_imports row" in warning for warning in report.warnings
+    )
+
+
+# --------------------------------- an outcome nobody can see is not a success
+
+
+def _break_close_import_row(monkeypatch, only_status: str | None = None):
+    from app.migration.sync import import_ as module
+
+    real = module._close_import_row
+
+    def explode(backend, package_id, status, report):
+        if only_status is None or status == only_status:
+            raise RuntimeError("simulated: the target went away")
+        return real(backend, package_id, status, report)
+
+    monkeypatch.setattr(module, "_close_import_row", explode)
+
+
+def test_a_done_that_cannot_be_recorded_fails_the_run(
+    source, target, package, monkeypatch
+):
+    """The rows and files landed, but sync_imports still says 'running' --
+    which blocks the next import of this source environment and leaves no
+    trace of why. Returning a success report for that is how an operator
+    finds out days later."""
+    _break_close_import_row(monkeypatch, only_status="done")
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, package)
+
+    message = str(failure.value)
+    assert "could not be recorded" in message
+    assert "--take-over" in message
+    assert _sync_import_row(target, _manifest(package)["package_id"])["status"] == (
+        "running"
+    )
+    # The content really did land; only the bookkeeping did not.
+    assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 1
+
+
+def test_the_unrecorded_outcome_is_visible_in_the_written_report(
+    source, target, package, monkeypatch
+):
+    """``_report`` freezes ledger.warnings into a tuple, so a report built
+    before this warning would not carry it. The on-disk report is the only
+    place left to read what happened, so it has to."""
+    _break_close_import_row(monkeypatch, only_status="done")
+
+    with pytest.raises(SyncImportError):
+        _import(target, package)
+
+    written = [p for p in package.iterdir() if p.name.startswith("import-report-")]
+    assert written
+    document = json.loads(written[0].read_text(encoding="utf-8"))
+    assert any(
+        "could not record sync_imports.status=done" in warning
+        for warning in document["warnings"]
+    )
+
+
+def test_a_failing_run_still_reports_its_own_exception_not_the_bookkeeping(
+    source, target, package, monkeypatch
+):
+    """On the failure path the caller is already re-raising the exception that
+    got us here. Replacing it with "and also the bookkeeping failed" loses the
+    only diagnosis anyone wanted."""
+    from app.migration.sync import import_ as module
+
+    real = module._apply_table
+
+    def explode(backend, conn, table, context):
+        if table == "sources":
+            raise RuntimeError("the original diagnosis")
+        return real(backend, conn, table, context)
+
+    monkeypatch.setattr(module, "_apply_table", explode)
+    _break_close_import_row(monkeypatch, only_status="failed")
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, package)
+
+    assert "the original diagnosis" in str(failure.value)
+    assert "went away" not in str(failure.value)

@@ -111,6 +111,19 @@ _COPY_BLOCK = 1 << 20
 # working directory. See _sweep_stale_staging.
 _STALE_STAGING_SECONDS = 3600
 
+# Liveness marker a running export keeps touching at its staging root. It is
+# NOT the staging directory's own mtime: writes land in ``rows/`` and
+# ``files/`` subdirectories, which never touches the root, so a big export
+# that takes longer than _STALE_STAGING_SECONDS would otherwise look abandoned
+# to a second export and be deleted out from under itself. Removed before the
+# rename, so it never ships inside a package.
+_HEARTBEAT_NAME = ".heartbeat"
+# Floor on how often the marker is re-touched. The export beats far more often
+# than this asks; the throttle keeps a per-row beat down to one clock read per
+# _HEARTBEAT_ROWS rows.
+_HEARTBEAT_INTERVAL_SECONDS = 60
+_HEARTBEAT_ROWS = 4096
+
 # Table and column names all come from the sync manifest and the database's
 # own catalog, never from a caller. Validated anyway before interpolation,
 # because these are the only identifiers this module cannot parameterize.
@@ -655,12 +668,30 @@ class _PackageWriter:
         self.checksums: dict[str, str] = {}
         self.bytes_written = 0
         self.write_order: list[str] = []
+        self._heartbeat = root / _HEARTBEAT_NAME
+        self._beat_at = 0.0
+        self.beat(force=True)
+
+    def beat(self, *, force: bool = False) -> None:
+        """Re-touch the liveness marker (throttled). Never recorded: the
+        marker is not package content, so it stays out of ``checksums``,
+        ``write_order`` and ``bytes_written``."""
+        now = time.monotonic()
+        if not force and now - self._beat_at < _HEARTBEAT_INTERVAL_SECONDS:
+            return
+        self._heartbeat.touch()
+        self._beat_at = now
+
+    def finish(self) -> None:
+        """Drop the liveness marker, immediately before the rename. From here
+        on the staging directory holds exactly the package's own files."""
+        self._heartbeat.unlink(missing_ok=True)
 
     @contextmanager
     def lines(self, relative: str) -> Iterator[Any]:
         path = self._prepared(relative)
         digest = hashlib.sha256()
-        counter = {"size": 0}
+        counter = {"size": 0, "rows": 0}
         with path.open("wb") as handle:
 
             def write(payload: str) -> None:
@@ -668,9 +699,15 @@ class _PackageWriter:
                 handle.write(data)
                 digest.update(data)
                 counter["size"] += len(data)
+                counter["rows"] += 1
+                # One table can outrun the staleness window on its own, so the
+                # beat cannot wait for the table to finish.
+                if counter["rows"] % _HEARTBEAT_ROWS == 0:
+                    self.beat()
 
             yield write
         self._recorded(relative, digest.hexdigest(), counter["size"])
+        self.beat()
 
     def document(self, relative: str, payload: Any, *, checksum: bool = True) -> str:
         """Write one JSON document and return its sha256."""
@@ -706,7 +743,11 @@ class _PackageWriter:
                 target.write(block)
                 digest.update(block)
                 size += len(block)
+                # A single attachment can be large enough to outlast the
+                # staleness window by itself.
+                self.beat()
         self._recorded(relative, digest.hexdigest(), size)
+        self.beat()
         return True
 
     def _prepared(self, relative: str) -> Path:
@@ -969,17 +1010,40 @@ def _advance_watermark(
 # ------------------------------------------------------------------- export
 
 
+def _staging_is_abandoned(path: Path, cutoff: float) -> bool:
+    """Whether this staging directory belongs to no live run.
+
+    The ``.heartbeat`` marker answers it when present. Its absence means one
+    of two things, and both land on the root mtime: debris from a version
+    older than the marker, or a run that died between ``mkdir`` and the
+    writer's first beat -- a window of microseconds, whose root mtime is then
+    the moment of that mkdir and therefore already the right answer.
+    """
+    try:
+        return (path / _HEARTBEAT_NAME).stat().st_mtime <= cutoff
+    except OSError:
+        pass
+    try:
+        return path.stat().st_mtime <= cutoff
+    except OSError:
+        return False
+
+
 def _sweep_stale_staging(out_dir: Path, source_env: str) -> list[str]:
     """Remove this source's ABANDONED ``.tmp`` staging directories.
 
     A staging directory belongs either to a run that died before its rename or
     to a run happening right now -- the two are indistinguishable by name, and
     two exports of the same source environment into one output directory is a
-    thing operators do. Liveness is therefore decided by age: only staging
-    older than ``_STALE_STAGING_SECONDS`` is swept, which is far longer than
-    the gap between one export's writes, so a concurrent run's directory is
-    never removed out from under it. Another source environment's debris is
-    left alone entirely; it is not ours to judge.
+    thing operators do. Liveness is decided by the ``.heartbeat`` marker the
+    running export keeps touching (see ``_PackageWriter.beat``), NOT by the
+    staging directory's own mtime: every byte an export writes lands in
+    ``rows/`` or ``files/``, which never updates the root's mtime, so a big
+    export running longer than ``_STALE_STAGING_SECONDS`` would look abandoned
+    by that measure and a second export would delete it mid-run. Debris left
+    by a version that predates the marker has no ``.heartbeat`` at all; for
+    those, and only those, the root mtime is the fallback. Another source
+    environment's debris is left alone entirely; it is not ours to judge.
     """
     if not out_dir.is_dir():
         return []
@@ -993,10 +1057,7 @@ def _sweep_stale_staging(out_dir: Path, source_env: str) -> list[str]:
             and path.name.endswith(".tmp")
         ):
             continue
-        try:
-            if path.stat().st_mtime > cutoff:
-                continue  # young enough to be a run still in progress
-        except OSError:
+        if not _staging_is_abandoned(path, cutoff):
             continue
         shutil.rmtree(path, ignore_errors=True)
         warnings.append(
@@ -1160,6 +1221,7 @@ def _assemble(
         },
         checksum=False,
     )
+    writer.finish()
     writer.root.rename(final_dir)
     _advance_watermark(source, target_env, package_id, exported_at)
     return ExportReport(

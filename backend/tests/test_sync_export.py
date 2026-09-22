@@ -841,15 +841,31 @@ def _aged(path: Path, seconds: float) -> Path:
     return path
 
 
+def _staging(out_dir: Path, tag: str, *, root_age: float, beat_age: float | None) -> Path:
+    """A staging directory in a chosen state of liveness. ``beat_age=None``
+    means no ``.heartbeat`` at all -- debris from before the marker existed."""
+    path = out_dir / f"sync-{SOURCE_ENV}-0-0-{tag}.tmp"
+    (path / "rows").mkdir(parents=True)
+    (path / "rows" / "chunks.jsonl").write_text("{}\n")
+    if beat_age is not None:
+        heartbeat = path / export_module._HEARTBEAT_NAME
+        heartbeat.touch()
+        _aged(heartbeat, beat_age)
+    _aged(path, root_age)
+    return path
+
+
+OLD = 3600 + 60
+NEW = 5.0
+
+
 def test_an_abandoned_staging_directory_is_swept_and_reported(seeded, tmp_path):
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    stale = out_dir / f"sync-{SOURCE_ENV}-0-0-deadbeef.tmp"
-    (stale / "rows").mkdir(parents=True)
-    _aged(stale, export_module._STALE_STAGING_SECONDS + 60)
+    stale = _staging(out_dir, "deadbeef", root_age=OLD, beat_age=OLD)
     foreign = out_dir / "sync-elsewhere-0-0-cafebabe.tmp"
     foreign.mkdir()
-    _aged(foreign, export_module._STALE_STAGING_SECONDS + 60)
+    _aged(foreign, OLD)
 
     report = _export(seeded["settings"], out_dir, [seeded["exported"]])
 
@@ -857,6 +873,54 @@ def test_an_abandoned_staging_directory_is_swept_and_reported(seeded, tmp_path):
     assert foreign.exists(), "another source environment's debris is not ours to remove"
     assert len(report.warnings) == 1
     assert stale.name in report.warnings[0]
+
+
+def test_a_long_running_export_is_not_swept_despite_an_old_root_mtime(
+    seeded, tmp_path
+):
+    """The finding this replaced a root-mtime check for: an export writes into
+    rows/ and files/, which never updates the staging ROOT's mtime. An export
+    running longer than the staleness window therefore looks abandoned by that
+    measure, and a second export would delete it mid-run. The heartbeat is
+    what distinguishes 'old directory' from 'no longer running'."""
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    running = _staging(out_dir, "beefcafe", root_age=OLD, beat_age=NEW)
+
+    report = _export(seeded["settings"], out_dir, [seeded["exported"]])
+
+    assert running.is_dir(), "a beating export must survive the sweep"
+    assert (running / "rows" / "chunks.jsonl").read_text() == "{}\n"
+    assert report.warnings == ()
+
+
+def test_a_dead_export_is_swept_even_though_its_root_mtime_is_fresh(seeded, tmp_path):
+    """The mirror case: a recently-created staging directory whose heartbeat
+    stopped an hour ago is debris, however young the root looks."""
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    dead = _staging(out_dir, "0badf00d", root_age=NEW, beat_age=OLD)
+
+    report = _export(seeded["settings"], out_dir, [seeded["exported"]])
+
+    assert not dead.exists()
+    assert len(report.warnings) == 1
+    assert dead.name in report.warnings[0]
+
+
+def test_pre_heartbeat_debris_still_falls_back_to_the_root_mtime(seeded, tmp_path):
+    """Staging left by a version older than the marker has no .heartbeat. It
+    must still be sweepable, and a fresh one must still be spared."""
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    legacy_old = _staging(out_dir, "11111111", root_age=OLD, beat_age=None)
+    legacy_new = _staging(out_dir, "22222222", root_age=NEW, beat_age=None)
+
+    report = _export(seeded["settings"], out_dir, [seeded["exported"]])
+
+    assert not legacy_old.exists()
+    assert legacy_new.is_dir()
+    assert len(report.warnings) == 1
 
 
 def test_a_concurrent_runs_staging_directory_is_left_alone(seeded, tmp_path):
@@ -1066,3 +1130,38 @@ def test_a_group_reachable_only_through_a_group_admins_edge_still_travels(
     assert "grp-admins-only" in {
         row["group_id"] for row in _rows(package, "group_members")
     }
+
+
+def test_a_running_export_keeps_its_heartbeat_and_ships_without_it(
+    seeded, tmp_path, monkeypatch
+):
+    """The sweep's liveness signal is only real if the exporter actually
+    maintains it -- and the marker must not survive into the package."""
+    beats: list[int] = []
+    seen: list[bool] = []
+    original_beat = export_module._PackageWriter.beat
+    original_users = export_module._write_users
+
+    def spy_beat(self, *, force=False):
+        beats.append(1)
+        return original_beat(self, force=force)
+
+    def spy_users(source, conn, writer, user_ids):
+        # Mid-export: the staging directory must be claimed.
+        seen.append((writer.root / export_module._HEARTBEAT_NAME).is_file())
+        return original_users(source, conn, writer, user_ids)
+
+    monkeypatch.setattr(export_module._PackageWriter, "beat", spy_beat)
+    monkeypatch.setattr(export_module, "_write_users", spy_users)
+    report = _export(seeded["settings"], tmp_path / "out", [seeded["exported"]])
+
+    assert seen == [True], "the export never claimed its staging directory"
+    assert len(beats) > len(synced_tables()), "the marker is not being refreshed"
+    assert not (report.package_dir / export_module._HEARTBEAT_NAME).exists()
+    assert export_module._HEARTBEAT_NAME not in json.loads(
+        (report.package_dir / CHECKSUMS_NAME).read_text(encoding="utf-8")
+    )
+    assert not any(
+        path.name == export_module._HEARTBEAT_NAME
+        for path in report.package_dir.rglob("*")
+    )
