@@ -2136,6 +2136,104 @@ def test_an_unresolvable_business_key_collision_is_named_not_raised_as_sql(
     assert "('chunk_id', 'question')" in message
 
 
+# ------------------------------ row ownership: a primary key is not trustworthy
+
+
+def test_a_colliding_primary_key_under_a_different_target_notebook_is_refused(
+    source, target, package
+):
+    """codex #772 round 12: ``knowledge_objects`` carries no unique key beyond
+    its primary key and is not ``seed_only``, so ``ON CONFLICT (id) DO
+    UPDATE`` would happily rewrite an existing target row -- notebook_id
+    included -- if the package ever reuses that id. ``_TargetKeys.present``
+    cannot catch this by itself: for a NOTEBOOK-scoped table it only
+    preloads keys already inside the package's OWN notebook set
+    (``_TargetKeys.__init__``), so a same-id row under a DIFFERENT, purely
+    local target notebook reads as "does not exist yet" right up until the
+    database's own conflict target collides with it. The package's fixture
+    carries a ``knowledge_objects`` row with id ``ko-1``; planting a target
+    row with the SAME id under a notebook this package never mentions
+    reproduces codex's exact scenario, and the import must refuse rather
+    than reattribute it."""
+    repo = target["repo"]
+    local_notebook = repo.create_notebook(NotebookCreate(name="local-only")).id
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
+            "owner,payload,evidence,source_id,created_at,updated_at,"
+            "last_reviewed) VALUES(?,?,'concept','approved','',"
+            "'{\"local\":true}','[]','',?,?,'')",
+            ("ko-1", local_notebook, MOMENT, MOMENT),
+        )
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, package)
+
+    message = str(failure.value)
+    assert "knowledge_objects" in message
+    assert "ko-1" in message
+
+    row = _one(
+        repo,
+        "SELECT notebook_id, payload FROM knowledge_objects WHERE id=?",
+        ("ko-1",),
+    )
+    assert row["notebook_id"] == local_notebook
+    assert row["payload"] == '{"local":true}'
+    assert (
+        _sync_import_row(target, _manifest(package)["package_id"])["status"]
+        == "failed"
+    )
+
+
+def test_a_colliding_primary_key_under_a_different_target_parent_is_refused(
+    source, target, package
+):
+    """The PARENT-scope variant of the guard above: ``source_elements`` is
+    scoped through ``source_id`` -> ``sources``, not through its own
+    notebook_id column. A target row with the package's own
+    ``source_elements`` id, but pointing at a LOCAL source the package never
+    carries, must be refused the same way -- checked against
+    ``context.parent_key_sets["sources"]`` (this package's own copy of
+    ``sources``' primary keys, computed by ``_verify_row_scopes`` in
+    preflight) rather than against ``context.manifest.notebooks``."""
+    colliding = _rows(package, "source_elements")[0]
+    colliding_id = colliding["id"]
+
+    repo = target["repo"]
+    local_notebook = repo.create_notebook(NotebookCreate(name="local-only")).id
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,created_at,"
+            "updated_at) VALUES(?,?,?,?,?,?)",
+            ("src-local-only", local_notebook, "本地来源", "upload", MOMENT, MOMENT),
+        )
+        db.execute(
+            "INSERT INTO source_elements(id,source_id,element_type,"
+            "location_label,text,created_at) VALUES(?,?,'paragraph','',?,?)",
+            (colliding_id, "src-local-only", "本地内容", MOMENT),
+        )
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, package)
+
+    message = str(failure.value)
+    assert "source_elements" in message
+    assert colliding_id in message
+
+    row = _one(
+        repo,
+        "SELECT source_id, text FROM source_elements WHERE id=?",
+        (colliding_id,),
+    )
+    assert row["source_id"] == "src-local-only"
+    assert row["text"] == "本地内容"
+    assert (
+        _sync_import_row(target, _manifest(package)["package_id"])["status"]
+        == "failed"
+    )
+
+
 # ------------------------- a target-owned memory's derived closure survives
 
 
