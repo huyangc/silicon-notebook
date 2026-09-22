@@ -928,6 +928,167 @@ def test_an_upload_named_with_unicode_and_spaces_round_trips(source, target, tmp
     assert report.files_copied >= 1
 
 
+# ------------------------------------------------------- symlink escape (r13)
+
+
+def _rebuild_checksums(package: Path) -> None:
+    """Recompute ``checksums.json`` (and ``manifest.checksums_sha256``) from
+    what is physically on disk right now, the exact same way
+    ``_verify_checksums`` derives its own on-disk file set (``Path.rglob`` +
+    ``Path.is_file()``, which follows a symlink to a FILE but never descends
+    into a symlink to a DIRECTORY). Used after hand-planting a symlink into an
+    exported package so the package's checksum chain still closes on its own
+    terms -- what has to refuse the import is the symlink check itself, not a
+    stale-digest mismatch that would refuse it for an unrelated reason."""
+    recorded: dict[str, str] = {}
+    for path in package.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(package).as_posix()
+        if relative in (MANIFEST_NAME, CHECKSUMS_NAME):
+            continue
+        recorded[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+    (package / CHECKSUMS_NAME).write_text(
+        json.dumps(recorded, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+    )
+    checksums_sha256 = hashlib.sha256(
+        (package / CHECKSUMS_NAME).read_bytes()
+    ).hexdigest()
+    document = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))
+    document["checksums_sha256"] = checksums_sha256
+    (package / MANIFEST_NAME).write_text(
+        json.dumps(document, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+    )
+
+
+def test_a_symlink_planted_under_files_is_refused(source, target, tmp_path):
+    """codex #772 r13 P1. ``_verify_checksums``'s own file-set check walks the
+    package with ``Path.rglob("*")`` + ``Path.is_file()``, which never
+    descends into a symlinked directory -- so a symlink to a directory OUTSIDE
+    the package, planted under ``files/notebooks/<id>/``, is invisible to it:
+    neither the symlink's presence nor anything behind it is ever
+    checksummed. ``shutil.copytree`` (what the installer used to run) follows
+    exactly such a symlink, so the target's notebook storage could receive an
+    unverified host file. A plain symlink to a file outside the package is
+    planted too, for the same class of bug. The package is re-checksummed
+    exactly as ``_verify_checksums`` would compute it (``_rebuild_checksums``)
+    -- which naturally omits everything behind the directory symlink, and for
+    the file symlink records the digest of whatever it currently resolves to
+    -- so nothing about the checksum chain itself is what refuses this
+    import; only the symlink check can."""
+    package = _export(source, tmp_path / "out")
+    notebook_id = source["exported"]
+    origin = package / "files" / "notebooks" / notebook_id
+    assert origin.is_dir()
+
+    outside_dir = tmp_path / "outside-secret-dir"
+    outside_dir.mkdir()
+    (outside_dir / "secret.txt").write_text(
+        "TOP SECRET DIRECTORY CONTENT", encoding="utf-8"
+    )
+    (origin / "evil-dir").symlink_to(outside_dir, target_is_directory=True)
+
+    outside_file = tmp_path / "outside-secret-file.txt"
+    outside_file.write_text("TOP SECRET FILE CONTENT", encoding="utf-8")
+    (origin / "evil-file.txt").symlink_to(outside_file)
+
+    _rebuild_checksums(package)
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, package)
+
+    # The guard's own wording, not just the word "symlink" -- the test's own
+    # tmp_path is named after this test FUNCTION ("...symlink_planted..."),
+    # so a bare "symlink" in str(failure.value) would pass even if the guard
+    # never fired and something else in the traceback merely echoed the path.
+    assert "which is never valid package content" in str(failure.value)
+    assert "evil-dir" in str(failure.value) or "evil-file.txt" in str(failure.value)
+    assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 0
+    storage = Path(target["settings"].storage_dir)
+    installed_files = list(storage.rglob("*")) if storage.exists() else []
+    assert not any(path.name == "secret.txt" for path in installed_files)
+    assert not any(path.name == "evil-file.txt" for path in installed_files)
+    assert not any("SECRET" in path.read_text(encoding="utf-8", errors="ignore")
+                   for path in installed_files if path.is_file())
+    assert not any(path.name.endswith(".sync-tmp") for path in installed_files)
+
+
+def test_assert_no_symlinks_names_the_offending_path(tmp_path):
+    """``_assert_no_symlinks``, isolated: a symlink anywhere in the package
+    tree -- not only under ``files/**`` -- is refused by name."""
+    from app.migration.sync.import_ import _assert_no_symlinks
+
+    package = tmp_path / "pkg"
+    (package / "files" / "notebooks" / "nb-1").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (package / "files" / "notebooks" / "nb-1" / "link").symlink_to(
+        outside, target_is_directory=True
+    )
+
+    with pytest.raises(SyncImportError) as failure:
+        _assert_no_symlinks(package)
+
+    assert "which is never valid package content" in str(failure.value)
+    assert "files/notebooks/nb-1/link" in str(failure.value)
+
+
+def test_assert_files_match_checksums_rejects_an_unlisted_file(tmp_path):
+    """``_assert_files_match_checksums``, isolated: a regular file physically
+    present under ``files/**`` but absent from ``checksums.json`` is refused,
+    independent of ``_verify_checksums``'s own (whole-package) comparison --
+    this is what a directory-symlink attack alone cannot slip past once the
+    file it hides is *not* behind a symlink."""
+    from app.migration.sync.import_ import _assert_files_match_checksums
+
+    package = tmp_path / "pkg"
+    notebook_dir = package / "files" / "notebooks" / "nb-1"
+    notebook_dir.mkdir(parents=True)
+    (notebook_dir / "extra.txt").write_text("unlisted", encoding="utf-8")
+
+    with pytest.raises(SyncImportError) as failure:
+        _assert_files_match_checksums(package, {})
+
+    assert "files/notebooks/nb-1/extra.txt" in str(failure.value)
+
+
+def test_assert_files_match_checksums_rejects_a_missing_file(tmp_path):
+    """The other direction: a path ``checksums.json`` lists that is not a
+    regular file on disk (missing, or the wrong type) is refused too."""
+    from app.migration.sync.import_ import _assert_files_match_checksums
+
+    package = tmp_path / "pkg"
+    package.mkdir()
+
+    with pytest.raises(SyncImportError) as failure:
+        _assert_files_match_checksums(
+            package, {"files/notebooks/nb-1/gone.txt": "deadbeef"}
+        )
+
+    assert "not a regular file" in str(failure.value)
+
+
+def test_an_untracked_file_under_files_is_refused(source, target, package):
+    """A regular file physically present under ``files/**`` but missing from
+    ``checksums.json`` must refuse the import outright -- whichever check
+    catches it first (``_verify_checksums``'s whole-package comparison runs
+    before ``_assert_files_match_checksums`` in the same import), nothing may
+    be copied, because the installer only ever reads the paths
+    ``checksums.json`` actually lists."""
+    notebook_id = source["exported"]
+    origin = package / "files" / "notebooks" / notebook_id
+    (origin / "not-in-manifest.bin").write_bytes(b"unlisted content")
+
+    with pytest.raises(SyncImportError):
+        _import(target, package)
+
+    assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 0
+    storage = Path(target["settings"].storage_dir)
+    installed_files = list(storage.rglob("*")) if storage.exists() else []
+    assert not any(path.name == "not-in-manifest.bin" for path in installed_files)
+    assert not any(path.name.endswith(".sync-tmp") for path in installed_files)
+
+
 def test_an_empty_manifest_notebooks_list_is_refused(source, target, package):
     """codex #772 r9 P1 (row-range validity). ``manifest.notebooks`` is not
     checksummed, so it cannot be trusted as the definition of this package's

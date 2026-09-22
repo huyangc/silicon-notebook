@@ -107,8 +107,16 @@ renamed, or deleted:
   ``checksums.json`` -- is checked against a narrow character whitelist
   (``app.migration.sync.package.is_safe_identifier``/``is_safe_relative_path``)
   and, for the two file roots, the JOINED path is resolved and asserted to
-  stay inside its package/storage root. A package that fails this leaves the
-  target untouched.
+  stay inside its package/storage root. No symlink -- file or directory -- is
+  ever valid package content: the exporter never writes one, and a directory
+  symlink planted under either file root is invisible to
+  ``_verify_checksums``'s ``Path.rglob`` walk (it does not recurse into one),
+  so it is refused by name, on its own, before anything is checksummed or
+  staged. Only the files ``checksums.json`` actually lists get copied at
+  install time (``_install_files``), file by file, never ``shutil.copytree``
+  over a package directory -- so nothing the checksummed manifest does not
+  cover can ever reach a target's storage regardless of what else is sitting
+  in that directory. A package that fails this leaves the target untouched.
 - **row-range validity** (``_verify_row_scopes``): since ``manifest.notebooks``
   cannot be trusted, the notebook set a package actually covers is instead
   read from ``rows/notebooks.jsonl`` -- which IS checksummed -- and every
@@ -149,6 +157,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
 import shutil
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -1253,6 +1262,88 @@ def _assert_within(base: Path, candidate: Path, *, what: str) -> Path:
     return resolved_base
 
 
+def _assert_no_symlinks(package_dir: Path) -> None:
+    """Refuse a package that plants a symlink -- file or directory -- anywhere
+    in its tree.
+
+    ``_verify_checksums``'s file-set comparison walks the package with
+    ``Path.rglob("*")`` and keeps only ``Path.is_file()`` entries. That
+    follows a symlink's target to decide whether it "is a file", but it does
+    NOT recurse into a symlinked directory at all (``rglob`` never descends
+    through one) -- so a directory symlink planted under
+    ``files/notebooks/<id>/`` or ``files/assets/<id>/``, pointing outside the
+    package, is invisible to that comparison: neither its presence nor
+    anything under it is ever checksummed. ``shutil.copytree`` follows
+    exactly such a symlink when installing, so without this check a crafted
+    package could make the installer copy unverified host files into a
+    notebook's storage (codex #772 r13 P1).
+
+    ``os.walk(..., followlinks=False)`` does not descend into a symlinked
+    directory either, but it still LISTS one as an entry of its parent before
+    skipping it, which is enough to catch it here without ever reading
+    whatever it points at. A symlink is never legitimate package content --
+    the exporter writes plain files and directories only -- so any is refused
+    outright, named by its package-relative path, before a single byte of the
+    package is trusted.
+    """
+    for dirpath, dirnames, filenames in os.walk(package_dir, followlinks=False):
+        current = Path(dirpath)
+        for name in (*dirnames, *filenames):
+            candidate = current / name
+            if candidate.is_symlink():
+                relative = candidate.relative_to(package_dir).as_posix()
+                raise SyncImportError(
+                    "package contains a symlink, which is never valid package "
+                    f"content: {relative}"
+                )
+
+
+def _assert_files_match_checksums(
+    package_dir: Path, checksums: Mapping[str, str]
+) -> None:
+    """Bidirectionally check ``files/**`` against ``checksums.json``, scoped
+    to the two file roots the installer actually reads from
+    (``_install_files``).
+
+    A second, independently-implemented pass over the same invariant
+    ``_verify_checksums`` already enforces whole-package (this one walks with
+    ``os.walk(..., followlinks=False)`` instead of ``Path.rglob``, and only
+    looks under ``files/``) -- not because it can see something that one
+    structurally cannot (both skip a symlinked directory's contents the same
+    way; ``_assert_no_symlinks``, which runs before this, is what actually
+    closes that gap), but as defence in depth scoped to exactly what
+    ``_install_files`` reads from: every path ``checksums.json`` lists under
+    ``files/`` must be a regular file on disk, and every regular file
+    physically present under ``files/`` must be listed -- either direction
+    failing means the installer's per-file copy (which iterates
+    ``checksums.json``, not the filesystem) would either skip real content or
+    reach for a path that is not there.
+    """
+    manifest_files = {path for path in checksums if path.startswith(f"{FILES_DIR}/")}
+    for relative in sorted(manifest_files):
+        if not (package_dir / relative).is_file():
+            raise SyncImportError(
+                f"{CHECKSUMS_NAME} lists {relative!r} but it is not a regular "
+                "file on disk"
+            )
+    on_disk: set[str] = set()
+    files_root = package_dir / FILES_DIR
+    if files_root.is_dir():
+        for dirpath, _dirnames, filenames in os.walk(files_root, followlinks=False):
+            current = Path(dirpath)
+            for name in filenames:
+                candidate = current / name
+                if candidate.is_file():
+                    on_disk.add(candidate.relative_to(package_dir).as_posix())
+    missing = sorted(manifest_files - on_disk)
+    extra = sorted(on_disk - manifest_files)
+    if missing or extra:
+        raise SyncImportError(
+            f"{FILES_DIR}/** does not match {CHECKSUMS_NAME}: missing={missing}, "
+            f"unrecorded={extra}"
+        )
+
+
 def _verify_package_paths(
     package_dir: Path,
     manifest: _PackageManifest,
@@ -1269,7 +1360,7 @@ def _verify_package_paths(
     what the package's rows say (``_verify_row_scopes`` does that, and needs
     a database handle for primary-key names, so it runs later in phase 1b).
 
-    Four things get checked, all filesystem-only:
+    Six things get checked, all filesystem-only:
 
     - every id in ``manifest.notebooks``, and ``manifest.package_id`` itself
       (both later become directory-name components -- the notebook id under
@@ -1280,6 +1371,10 @@ def _verify_package_paths(
       (defence in depth: ``_verify_checksums`` already requires every key to
       equal a real on-disk relative path, which can never lexically contain
       ``..``, but this does not rely on that invariant holding);
+    - no symlink -- file or directory -- may exist anywhere in the package
+      tree (``_assert_no_symlinks``);
+    - ``files/**`` and ``checksums.json`` must agree bidirectionally, scoped
+      to the two file roots (``_assert_files_match_checksums``);
     - every directory actually present under ``files/notebooks/`` and
       ``files/assets/`` must have an ``is_safe_identifier`` name, whether or
       not ``manifest.notebooks`` mentions it;
@@ -1310,6 +1405,9 @@ def _verify_package_paths(
         raise SyncImportError(
             f"{CHECKSUMS_NAME} carries unsafe relative path(s): {bad_paths}"
         )
+
+    _assert_no_symlinks(package_dir)
+    _assert_files_match_checksums(package_dir, checksums)
 
     storage_dir = Path(settings.storage_dir)
     for root in (NOTEBOOK_FILES_DIR, ASSET_FILES_DIR):
@@ -3473,11 +3571,25 @@ def _install_files(context: _Context, *, verify: bool) -> None:
     left alone: "absent from the package" is how a notebook with no uploads
     looks, and it must not be read as "delete whatever the target has".
 
+    Copied file BY file, from ``checksums.json``'s own listing for this
+    notebook/root -- never ``shutil.copytree`` over the package's
+    ``files/<root>/<notebook_id>/`` directory. ``copytree`` follows any
+    symlink it finds inside that directory; a checksummed, per-file copy
+    cannot, because a path that is not in ``checksums.json`` is simply never
+    read, no matter what else a crafted package planted alongside it (codex
+    #772 r13 P1 -- ``_verify_package_paths`` already refuses a package that
+    contains a symlink at all, or whose ``files/**`` does not exactly match
+    ``checksums.json``; this is what makes that guarantee hold at the byte
+    level too). Each source and destination is re-resolved and asserted to
+    stay inside the package/staging root right before its own copy, so this
+    holds even if a caller reached this function without preflight having
+    run.
+
     The directory each swap displaces is kept as ``<name>.sync-old`` and is
     only deleted once phase 5 has succeeded (``_commit_files``); until then
     ``_rollback_files`` can put it back. ``verify`` re-hashes every installed
-    file against ``checksums.json`` -- off by default because preflight
-    already hashed the same bytes in this same run.
+    file, WHILE copying it, against ``checksums.json`` -- off by default
+    because preflight already hashed the same bytes in this same run.
 
     Every directory is reconciled first (``_reconcile_staging``), because a
     run killed inside the two-rename swap leaves the previous attempt's
@@ -3488,19 +3600,22 @@ def _install_files(context: _Context, *, verify: bool) -> None:
     copied = 0
     for notebook_id in context.manifest.notebooks:
         for root in _FILE_ROOTS:
-            origin = context.package_dir / FILES_DIR / root / notebook_id
+            package_root = context.package_dir / FILES_DIR / root
+            origin = package_root / notebook_id
             destination = storage / root / notebook_id
             # Belt and suspenders: _verify_package_paths already refused an
-            # unsafe notebook id, and a symlink escape under either root,
+            # unsafe notebook id, and any symlink anywhere in the package,
             # before any of this ran -- re-asserted here so staging,
             # reconciliation, rename, and delete never run against a path
             # this function alone computed and trusted.
-            _assert_within(
-                context.package_dir / FILES_DIR / root, origin, what="package file path"
-            )
+            _assert_within(package_root, origin, what="package file path")
             _assert_within(storage / root, destination, what="storage destination path")
             inherited = _reconcile_staging(context, destination)
-            if not origin.is_dir():
+            prefix = f"{FILES_DIR}/{root}/{notebook_id}/"
+            entries = sorted(
+                relative for relative in context.checksums if relative.startswith(prefix)
+            )
+            if not entries:
                 continue
             staged = destination.with_name(destination.name + _STAGED_SUFFIX)
             retired = _retired_path(destination, context.manifest.package_id)
@@ -3511,12 +3626,28 @@ def _install_files(context: _Context, *, verify: bool) -> None:
             # path separator that pathlib would have rejected already.
             _assert_within(storage / root, staged, what="staged file path")
             _assert_within(storage / root, retired, what="retired file path")
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(origin, staged)
-            installed = [path for path in sorted(staged.rglob("*")) if path.is_file()]
-            if verify:
-                _verify_installed(context, staged, root, notebook_id, installed)
-            copied += len(installed)
+            staged.mkdir(parents=True, exist_ok=True)
+            installed = 0
+            for relative in entries:
+                source = context.package_dir / relative
+                _assert_within(package_root, source, what="package file path")
+                target = staged / relative[len(prefix) :]
+                _assert_within(staged, target, what="staged file path")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if verify:
+                    digest = hashlib.sha256()
+                    with source.open("rb") as handle, target.open("wb") as out:
+                        for block in iter(lambda: handle.read(1 << 20), b""):
+                            digest.update(block)
+                            out.write(block)
+                    if digest.hexdigest() != context.checksums.get(relative):
+                        raise SyncImportError(
+                            f"package file failed its checksum on install: {relative}"
+                        )
+                else:
+                    shutil.copy2(source, target)
+                installed += 1
+            copied += installed
             if inherited:
                 # The retired copy is ALREADY the pre-import original, kept by
                 # a previous attempt. Renaming the current destination onto it
@@ -3533,23 +3664,6 @@ def _install_files(context: _Context, *, verify: bool) -> None:
                 # restore it and then delete what it just restored.
                 context.installed.append((destination, retired))
     context.ledger.files_copied = copied
-
-
-def _verify_installed(
-    context: _Context,
-    staged: Path,
-    root: str,
-    notebook_id: str,
-    installed: Sequence[Path],
-) -> None:
-    for path in installed:
-        relative = (
-            f"{FILES_DIR}/{root}/{notebook_id}/{path.relative_to(staged).as_posix()}"
-        )
-        if _digest(path) != context.checksums.get(relative):
-            raise SyncImportError(
-                f"package file failed its checksum on install: {relative}"
-            )
 
 
 def _reconcile_staging(context: _Context, destination: Path) -> bool:
