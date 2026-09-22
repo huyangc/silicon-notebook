@@ -1291,8 +1291,12 @@ class RepositoryRuntime:
             for notebook_id in ids:
                 try:
                     self.agent_profile_jobs.note_ask_completed(notebook_id, user_id)
-                except Exception:  # noqa: BLE001 — 已交付的答案不因后台记账而改判
-                    _log.exception("agent profile global-ask notification failed")
+                except Exception as exc:  # noqa: BLE001 — 已交付的答案不因后台记账而改判
+                    # Class name only: no exception text or traceback in logs.
+                    _log.warning(
+                        "agent profile global-ask notification failed: %s",
+                        type(exc).__name__,
+                    )
 
         def _note_experience() -> None:
             self.retrieval_experience_jobs.note_ask_completed("")
@@ -1310,8 +1314,10 @@ class RepositoryRuntime:
             for label, chain in chains:
                 try:
                     chain()
-                except Exception:  # noqa: BLE001 — 同上
-                    _log.exception("%s global-ask notification failed", label)
+                except Exception as exc:  # noqa: BLE001 — 同上
+                    _log.warning(
+                        "%s global-ask notification failed: %s", label, type(exc).__name__
+                    )
             return
         context = AskCompletedObserverCallContext(
             notification=CompletedAskNotification(
@@ -1340,17 +1346,25 @@ class RepositoryRuntime:
         """Direct-constructor compatibility until every non-app root injects a host."""
         try:
             self.agent_profile_jobs.note_ask_completed(notebook_id, user_id)
-        except Exception:  # noqa: BLE001 — 已交付的答案不因后台记账而改判
-            _log.exception("agent profile ask-completed notification failed")
+        except Exception as exc:  # noqa: BLE001 — 已交付的答案不因后台记账而改判
+            # Class name only: no exception text or traceback in logs.
+            _log.warning(
+                "agent profile ask-completed notification failed: %s", type(exc).__name__
+            )
         try:
             if mode_id == "reasoning":
                 self.retrieval_experience_jobs.note_ask_completed(notebook_id)
-        except Exception:  # noqa: BLE001 — 同上
-            _log.exception("retrieval experience ask-completed notification failed")
+        except Exception as exc:  # noqa: BLE001 — 同上
+            _log.warning(
+                "retrieval experience ask-completed notification failed: %s",
+                type(exc).__name__,
+            )
         try:
             self.search_profile_jobs.note_ask_completed(user_id)
-        except Exception:  # noqa: BLE001 — 同上
-            _log.exception("search profile ask-completed notification failed")
+        except Exception as exc:  # noqa: BLE001 — 同上
+            _log.warning(
+                "search profile ask-completed notification failed: %s", type(exc).__name__
+            )
 
     def _active_source_ids_snapshot(self) -> "set[str]":
         """内存活跃源快照(H2/H3/H4/H5 的 Python 后置减法用)= 活跃租约(process_source 在途)

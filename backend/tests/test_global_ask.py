@@ -844,17 +844,33 @@ def test_a_delivered_global_answer_notes_completion_once_with_every_participant(
     assert notes == []
 
 
-def test_a_failing_completion_note_leaves_the_delivered_answer_untouched(setup):
+def test_a_failing_completion_note_leaves_the_delivered_answer_untouched(setup, caplog):
     service, _, _, _ = setup
 
+    noted = Event()
+
     def explode(ids, user, mode, *, anchor):
-        raise RuntimeError("bookkeeping down")
+        noted.set()
+        raise RuntimeError("bookkeeping down at /private/path")
 
     service.note_ask_completed = explode
-    job = service.start(GlobalAskRequest(question="compare"), user_id="u")
-    result = finished(service, job)
+    with caplog.at_level("WARNING", logger="silicon_notebook.global_ask"):
+        job = service.start(GlobalAskRequest(question="compare"), user_id="u")
+        result = finished(service, job)
+        assert noted.wait(5)
+        # The receipt is written by the worker right after the hook raises;
+        # give that thread its turn before reading the records.
+        for _ in range(500):
+            if any("post-completion" in r.getMessage() for r in caplog.records):
+                break
+            Event().wait(0.01)
     assert result.status == "done"
     assert result.answer is not None and result.answer.answer == "answer"
+    # The receipt is content-free: the exception class, no text, no traceback.
+    failures = [r for r in caplog.records if "post-completion notification failed" in r.getMessage()]
+    assert len(failures) == 1 and failures[0].exc_info is None
+    assert "RuntimeError" in failures[0].getMessage()
+    assert "/private/path" not in caplog.text
 
 
 def test_a_done_write_that_did_not_win_never_notes_completion(setup):
