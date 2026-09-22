@@ -9,7 +9,6 @@ import os
 import signal
 import subprocess
 import sys
-import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1116,6 +1115,11 @@ def test_linux_capture_requires_sigusr1_to_be_caught(tmp_path):
         },
     )
     sent = []
+    # Frozen clock: the capture's very first budget check (``clock() >=
+    # capture_deadline``) runs before the SigCgt probe, and on a slow CI runner
+    # the real default budget once expired there, turning this assertion into
+    # ``'deadline' == 'signal_unavailable'``. What this test pins is the SigCgt
+    # rule, not the budget, so time simply does not pass here.
     result = process.capture_thread_dump(
         88,
         tmp_path,
@@ -1124,6 +1128,8 @@ def test_linux_capture_requires_sigusr1_to_be_caught(tmp_path):
         pidfd_open_fn=lambda *_args: 123,
         pidfd_send_fn=lambda *_args: sent.append(True),
         platform="linux",
+        clock=lambda: 0.0,
+        sleeper=lambda _seconds: None,
     )
     assert result["status"] == "signal_unavailable"
     assert sent == []
@@ -1423,64 +1429,112 @@ def test_capture_no_growth_is_bounded_partial_deadline(tmp_path):
     assert result["bytes"] == 0
 
 
+class _SteppedClock:
+    """A monotonic clock that advances only through the capture's own ``sleeper``.
+
+    ``capture_thread_dump`` reads time through ``clock()`` and waits through
+    ``sleeper()``; feeding it both from one object makes every wait advance
+    time by exactly the amount the capture asked for, so a budget of 0.5s is
+    spent poll by poll in the test's script rather than by the host scheduler.
+    """
+
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    def sleep(self, seconds: float) -> None:
+        self.value += max(0.0, float(seconds))
+
+
+class _ScriptedTarget:
+    """The signalled process, driven from the capture's ``sleeper`` hook.
+
+    Each poll of the quiescence loop ends in one ``sleeper`` call; the target
+    performs its next write there, so the loop observes exactly one scripted
+    state per poll. ``chunks`` is the finite dump a real ``faulthandler`` would
+    append; ``endless`` keeps appending forever, the "still writing when the
+    budget ends" shape the deadline-partial branch exists for.
+    """
+
+    def __init__(self, dump, clock, *, chunks=(), endless: bytes | None = None):
+        self.dump = dump
+        self.clock = clock
+        self.pending = list(chunks)
+        self.endless = endless
+        self.signalled = 0
+
+    def send(self, _pidfd, _signal, _siginfo, _flags) -> None:
+        self.signalled += 1
+
+    def sleep(self, seconds: float) -> None:
+        self.clock.sleep(seconds)
+        if self.pending:
+            payload = self.pending.pop(0)
+        elif self.endless is not None:
+            payload = self.endless
+        else:
+            return
+        with self.dump.open("ab") as handle:
+            handle.write(payload)
+
+
 def test_capture_waits_for_quiescence_and_marks_deadline_partial(tmp_path):
+    """Quiescence, then the deadline-partial outcome, under a controlled clock.
+
+    This test used to race real writer threads (15ms / 5ms sleeps) against a
+    real 0.5s / 0.06s budget, and on a slow CI runner the budget expired
+    before the writer had produced ``chunk-3`` (PR #774, shard backend-1).
+    The budgets and every assertion are unchanged; what changed is that time
+    now only passes inside the capture's ``sleeper`` and the target writes
+    inside that same hook, so the outcome no longer depends on how the host
+    schedules two threads.
+    """
     process = load_process_module()
     dump = tmp_path / "thread-dumps.log"
     dump.write_bytes(b"")
-    writers = []
 
-    def send_bursts(_pidfd, _signal, _siginfo, _flags):
-        def write():
-            for index in range(4):
-                with dump.open("ab") as handle:
-                    handle.write(f"chunk-{index}\n".encode())
-                time.sleep(0.015)
-
-        thread = threading.Thread(target=write)
-        thread.start()
-        writers.append(thread)
-
+    clock = _SteppedClock()
+    bursts = _ScriptedTarget(
+        dump, clock, chunks=[f"chunk-{index}\n".encode() for index in range(4)],
+    )
     complete = process.capture_thread_dump(
         88,
         tmp_path,
         proc=CaptureProc([8] * 20),
         expected_identity={"pid": 88, "starttime_ticks": 8},
         pidfd_open_fn=_fake_pidfd_open,
-        pidfd_send_fn=send_bursts,
+        pidfd_send_fn=bursts.send,
         platform="linux",
         timeout=0.5,
+        clock=clock,
+        sleeper=bursts.sleep,
     )
-    for writer in writers:
-        writer.join(timeout=1)
+    assert bursts.signalled == 1
+    assert bursts.pending == []
     assert complete["status"] == "ok"
     assert complete["complete"] is True
     assert "chunk-3" in complete["dump"]
+    # Four growth polls plus the stable-poll run: well inside the 0.5s budget,
+    # which is the point -- a finite dump completes without touching the deadline.
+    assert clock.value < 0.5
 
-    stop = threading.Event()
-
-    def send_continuous(_pidfd, _signal, _siginfo, _flags):
-        def write():
-            while not stop.is_set():
-                with dump.open("ab") as handle:
-                    handle.write(b"growing\n")
-                time.sleep(0.005)
-
-        thread = threading.Thread(target=write)
-        thread.start()
-        writers.append(thread)
-
+    clock = _SteppedClock()
+    growing = _ScriptedTarget(dump, clock, endless=b"growing\n")
     partial = process.capture_thread_dump(
         88,
         tmp_path,
         proc=CaptureProc([8] * 50),
         expected_identity={"pid": 88, "starttime_ticks": 8},
         pidfd_open_fn=_fake_pidfd_open,
-        pidfd_send_fn=send_continuous,
+        pidfd_send_fn=growing.send,
         platform="linux",
         timeout=0.06,
+        clock=clock,
+        sleeper=growing.sleep,
     )
-    stop.set()
-    writers[-1].join(timeout=1)
+    assert growing.signalled == 1
     assert partial["status"] == "partial"
     assert partial["identity_verified"] is True
     assert partial["complete"] is False
