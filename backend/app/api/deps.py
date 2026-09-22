@@ -750,6 +750,12 @@ async def user_or_agent_scope(
             )
         except PermissionError:
             raise HTTPException(status_code=404, detail=not_found_detail)
+        if write:
+            # 镜像写入围栏也盖 Agent 令牌通道(codex #770 r1 P1)。`write` 对 Agent
+            # 主体的**权限**判定确实被忽略(scope 说了算,见 docstring),但围栏问的
+            # 不是权限而是「这次写碰不碰同步层的表」,与主体是谁无关;MCP 面的
+            # `refuse_if_mirrored` 管不到这条 HTTP 路径(它直接进 knowhow_api)。
+            await _raise_if_mirrored(notebook_id)
         owner = UserProfile(
             id=principal.owner_id, email="", display_name=principal.profile_name,
             role="user",
@@ -781,10 +787,8 @@ async def user_or_agent_scope(
             # 只挂在 `write=True` 上:`write=False` 的读分支拿的是读权谓词,围栏与它
             # 无关(安全方法豁免的同一条理由)。
             #
-            # ⚠ Agent 分支**不**在这里挡:它的围栏在 `mcp_tools/_shared` 那一侧
-            # (`refuse_if_mirrored`,由 `put_knowhow_cell_code` 自己调),因为那条分支
-            # 根本不看 `write` —— 见本函数 docstring 里「``write`` is IGNORED for an
-            # Agent principal」那一段。两侧都有,只是各在各的入口。
+            # Agent 令牌分支在上面同样按 `write` 挡(两条通道同一道围栏);MCP 面的
+            # `refuse_if_mirrored` 只盖 MCP 工具,盖不到这两条 HTTP 路由。
             await _raise_if_mirrored(notebook_id)
         marker = set_request_user(user)
         try:
