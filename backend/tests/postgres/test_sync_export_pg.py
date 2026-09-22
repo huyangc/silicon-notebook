@@ -459,3 +459,43 @@ def test_two_no_sqlite_pk_tables_keyset_page_correctly_on_postgres(
         )
         assert keys == sorted(keys), f"{table}: keyset pages must come out in key order"
         assert report.table_counts[table] == 25
+
+
+# ---------------------------------------------------------- capture watermark
+
+
+def test_captured_through_seq_reads_the_change_log_high_water_mark_on_postgres(
+    repository, export_settings, tmp_path
+):
+    """SQLite lane (tests/test_sync_export.py) already covers the read
+    itself; this only pins that the PostgreSQL gate (a real ``boolean``
+    column, not SQLite's 0/1 INTEGER) and its ``bigint GENERATED ... AS
+    IDENTITY`` seq work the same way through ``_Source``."""
+    notebook = _seed(repository, "capture-watermark")
+    with repository._write() as db:
+        db.execute(
+            "INSERT INTO sync_capture_control (singleton, enabled, enabled_at) "
+            "VALUES (1, true, now())"
+        )
+        for _ in range(5):
+            db.execute(
+                "INSERT INTO sync_change_log "
+                "(table_name, key_json, operation, changed_at) "
+                "VALUES ('notebooks', '{}'::jsonb, 'upsert', now())"
+            )
+
+    report = export_notebooks(
+        export_settings,
+        target_env=TARGET_ENV,
+        out_dir=tmp_path / "out",
+        notebook_ids=[notebook],
+        source_env=SOURCE_ENV,
+    )
+
+    assert report.captured_through_seq == 5
+    with repository._connect() as db:
+        row = db.execute(
+            "SELECT exported_through_seq FROM sync_export_state WHERE target_env=%s",
+            (TARGET_ENV,),
+        ).fetchone()
+    assert row["exported_through_seq"] == 5

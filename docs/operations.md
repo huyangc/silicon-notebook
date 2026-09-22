@@ -608,13 +608,15 @@ required.
 
 ## Cross-environment notebook sync
 
-`scripts/cli.sh sync export/import/status` moves notebook content (materials, vectors, KG,
-Knowhow, memory) from one deployment to another, one-way: the source writes, the target only
+`scripts/cli.sh sync export/import/status/capture` moves notebook content (materials, vectors,
+KG, Knowhow, memory) from one deployment to another, one-way: the source writes, the target only
 interacts with what it received. It does not touch user-interaction data (conversations,
 answers, feedback, reports, global ask, activity, wishes). See
 [the design doc](./incremental-sync-design.md) for scope, identity mapping, the target-side
-write fence, and the package format; PR-2 ships full-notebook export/import only (no change
-log yet, so every export is a full snapshot even when a prior watermark exists).
+write fence, and the package format; every export through PR-3a is still a full snapshot (no
+incremental *reader* yet) even once change capture is on and a package's manifest keeps writing
+`from_seq=to_seq=0` -- capture only starts a local record of what it could have captured, which
+PR-3b's incremental exporter will read.
 
 ```bash
 # Source environment: name it once, then export every live, non-mirror notebook.
@@ -715,6 +717,52 @@ the package touched — `kg_index`/`kg_viz` are derived artifacts and do not tra
 package (§6 of the design doc); see
 [Offline / off-host scale builds](./operations.md#offline--off-host-scale-builds-scriptsbuild_scale_indexpy).
 PR-4 is expected to automate queuing this.
+
+### Change capture (`sync capture`)
+
+Every deployment ships with 46 AFTER INSERT/UPDATE/DELETE triggers on the synced tables
+(§7 of the design doc), but they are gated OFF by default: a fresh v84/0064 migration does not
+seed the `sync_capture_control` row, so nothing is logged until an operator runs `sync capture
+enable`. Until PR-3b's incremental exporter exists, turning capture on has no effect on what
+`sync export` produces (every export is still a full snapshot) — it only starts a local record
+of the change-log seq each export could have captured through, which `sync status` and
+`ExportReport.captured_through_seq` surface. There is no reason to enable it before PR-3b ships
+unless you want that record building up in advance; there is also no harm in leaving it off.
+
+```bash
+PYTHONPATH=backend python scripts/sync_notebooks.py capture enable --json
+PYTHONPATH=backend python scripts/sync_notebooks.py capture status --json
+PYTHONPATH=backend python scripts/sync_notebooks.py capture disable --json
+```
+
+**When to enable**: before the export you want to treat as the last full baseline an
+incremental package (once PR-3b ships) can build on. `enable` clears every row in
+`sync_export_state` — a package produced before capture was on is a snapshot the change log has
+no record of, so it can never be extended into an incremental package — meaning the *next*
+export to every target is forced back to full, re-establishing a log-backed baseline. Enabling
+when it is already on is a no-op (it does not move `enabled_at` and does not re-clear
+watermarks), so re-running it after an ambiguous exit code is safe.
+
+**What disabling costs**: `disable` clears both `sync_export_state` and `sync_change_log`. The
+log stops growing the moment it commits, so the next export after a disable is a full snapshot
+again, exactly like the very first export ever taken — there is no way to "pause and resume"
+capture without losing the log's continuity. Disabling when it is already off is a no-op.
+
+**Cost while the gate is on**: not free, but small under normal write volume — see §7's
+measurement table (roughly 1.2×–3.9× on a 20k-row bulk insert, backend-dependent; SQLite's
+relative overhead is larger because its unpatched baseline is already very fast). Expect it to
+matter for bulk imports/backfills that write tens of thousands of rows in one transaction, not
+for interactive use.
+
+**Log growth**: `sync_change_log` only grows for now — PR-3b ships the compaction (fold
+same-key changes) and retention policy (drop log rows older than every target's minimum
+watermark) described in §7/§9 of the design doc. Until then, an operator who enables capture
+well before PR-3b ships should expect the table to grow unbounded and plan storage accordingly,
+or leave capture off until closer to when PR-3b lands.
+
+Upgrading a large deployment to v84/0064 also has its own operational note — see [the design
+doc's §7 "升级窗口"](./incremental-sync-design.md#7-源端变更捕获) for the lock-window estimate on
+`knowledge_object_sources`/`community_members`'s new primary keys before running the migration.
 
 ## PostgreSQL notebook-aware lexical indexes
 

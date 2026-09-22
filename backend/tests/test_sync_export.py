@@ -1055,6 +1055,89 @@ def test_export_writes_the_target_watermark(seeded, tmp_path):
     assert row is not None
     assert row["exported_through_seq"] == 0
     assert row["package_id"] == report.package_id
+    # The capture gate is off by default on every freshly migrated database
+    # (app.migration.sync.capture's own docstring): there is nothing safe to
+    # call "captured through" yet, so both the report and the watermark it
+    # wrote must read 0, never a stale high-water mark.
+    assert report.captured_through_seq == 0
+
+
+def test_export_watermark_reads_the_change_log_high_water_mark_when_the_gate_is_open(
+    seeded, tmp_path
+):
+    """docs/incremental-sync-design.md §7: with capture ON, the watermark
+    this export writes -- and the report it returns -- must be the change
+    log's MAX(seq) as of this export's own read snapshot, not 0."""
+    with seeded["repo"]._write() as db:
+        db.execute(
+            "INSERT INTO sync_capture_control (singleton, enabled, enabled_at) "
+            "VALUES (1, 1, ?)",
+            (MOMENT,),
+        )
+        for _ in range(4):
+            db.execute(
+                "INSERT INTO sync_change_log "
+                "(table_name, key_json, operation, changed_at) "
+                "VALUES ('notebooks', '{}', 'upsert', ?)",
+                (MOMENT,),
+            )
+
+    report = _export(seeded["settings"], tmp_path / "out", [seeded["exported"]])
+
+    assert report.captured_through_seq == 4
+    with seeded["repo"]._connect() as db:
+        row = db.execute(
+            "SELECT exported_through_seq FROM sync_export_state WHERE target_env=?",
+            (TARGET_ENV,),
+        ).fetchone()
+    assert row["exported_through_seq"] == 4
+
+
+def test_export_watermark_ignores_change_log_rows_written_after_the_snapshot(
+    seeded, tmp_path, monkeypatch
+):
+    """A row inserted into the log after this export's read() snapshot was
+    taken must not bump the watermark it writes -- the whole point of
+    reading MAX(seq) inside the same snapshot as the row scan (see
+    _captured_through_seq's docstring)."""
+    with seeded["repo"]._write() as db:
+        db.execute(
+            "INSERT INTO sync_capture_control (singleton, enabled, enabled_at) "
+            "VALUES (1, 1, ?)",
+            (MOMENT,),
+        )
+        db.execute(
+            "INSERT INTO sync_change_log "
+            "(table_name, key_json, operation, changed_at) "
+            "VALUES ('notebooks', '{}', 'upsert', ?)",
+            (MOMENT,),
+        )
+
+    real_captured_through_seq = export_module._captured_through_seq
+
+    def fake_captured_through_seq(source, conn):
+        # Simulate a concurrent writer landing a new change-log row between
+        # this export's snapshot being opened and this read -- the read
+        # itself must still only ever see what the snapshot saw.
+        with seeded["repo"]._write() as db:
+            db.execute(
+                "INSERT INTO sync_change_log "
+                "(table_name, key_json, operation, changed_at) "
+                "VALUES ('notebooks', '{}', 'upsert', ?)",
+                (MOMENT,),
+            )
+        return real_captured_through_seq(source, conn)
+
+    monkeypatch.setattr(
+        export_module, "_captured_through_seq", fake_captured_through_seq
+    )
+
+    report = _export(seeded["settings"], tmp_path / "out", [seeded["exported"]])
+
+    # The read() snapshot was opened (and every other table already scanned)
+    # before the concurrent insert above landed, so REPEATABLE READ / SQLite's
+    # WAL snapshot must still report only the one row that existed then.
+    assert report.captured_through_seq == 1
 
 
 def test_a_second_full_export_overwrites_the_watermark(seeded, tmp_path):
