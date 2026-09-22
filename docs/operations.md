@@ -833,17 +833,30 @@ by `changed_at` is kept even if the other conditions would otherwise allow delet
 `sync_export_state` minimums are taken **only over targets with a `captured` watermark**: a target
 that has never exported, or whose last export fell back to full with capture off, simply does not
 vote on the bound — it does not drag the bound down to zero and block pruning for everyone else. A
-DEAD lease (heartbeat older than an hour, or unreadable) does not vote either — it is named in the
-output (`dead_leases`, and "忽略的死租约" in the human summary) but excluded from the bound, the
-same abstention the watermark side already has. The command refuses outright, naming the problem,
-only when **no target at all** has a `captured` watermark — a live lease alone does not lift that
-refusal, because it bounds a watermark not yet published rather than standing in for one already
-published. A LIVE PostgreSQL lease with `floor_xmin` NULL (should never happen — the claiming
-transaction always reads one) is a separate refusal: rather than guess a number, `prune-log` names
-that target and refuses outright for as long as the lease stays live. `--dry-run` reports the row
-count that would be deleted without deleting anything. A real (non-`--dry-run`) delete runs in
-batches of 5000 rows, each its own transaction, so pruning a log that has gone unpruned for a long
-time does not hold one long-running transaction or a single unbounded `DELETE`; the report's
+DEAD lease (heartbeat older than an hour, or unreadable) does not vote either — it is excluded from
+the bound, the same abstention the watermark side already has. A real (non-`--dry-run`) run does
+not stop at excluding it: it DELETES the row, inside the same locked transaction that computed the
+bounds (SQLite `begin_immediate`; PostgreSQL `SELECT ... FROM sync_export_runs FOR UPDATE` over
+every lease row, live and dead, before reading anything), matched by the exact `(target_env,
+run_id)` it just classified as dead — never by re-checking `heartbeat_at` a second time, because the
+DELETE must act on the SAME judgment the bound computation made under the same lock, not a fresh one
+a moving clock could disagree with. This makes expiry irreversible: a stalled export that resumes
+after being away for over an hour finds its lease gone and refuses to publish (`export lease ... was
+taken over`, the same ownership check described above) — if you see that error, the fix is simply to
+re-run `sync export`, not to wait for the stalled one. The human summary prints "已删除死租约"
+(deleted) for a real run and a "会被删除" (would be deleted) variant under `--dry-run`, which
+classifies and reports dead leases (`dead_leases`, now including `run_id`) exactly the same way but
+never deletes — it runs read-only (`source.read()`), takes no lock, and writes nothing. The command
+refuses outright, naming the problem, only when **no target at all** has a `captured` watermark — a
+live lease alone does not lift that refusal, because it bounds a watermark not yet published rather
+than standing in for one already published. A LIVE PostgreSQL lease with `floor_xmin` NULL (should
+never happen — the claiming transaction always reads one) is a separate refusal: rather than guess a
+number, `prune-log` names that target and refuses outright for as long as the lease stays live.
+`--dry-run` reports the row count that would be deleted without deleting anything. A real
+(non-`--dry-run`) delete of `sync_change_log` rows runs in batches of 5000, each its own transaction
+(separate from, and after, the bounds-and-lease-eviction transaction — change-log rows are never
+claimed by a lease, so they need no lock against one), so pruning a log that has gone unpruned for a
+long time does not hold one long-running transaction or a single unbounded `DELETE`; the report's
 `batches` field says how many ran.
 
 ### Change capture (`sync capture`)

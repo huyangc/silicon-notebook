@@ -1103,12 +1103,33 @@ class SyncPruneError(RuntimeError):
 
 
 def _prune_log_bounds(
-    source: _Source, conn: Any
+    source: _Source, conn: Any, *, lock: bool = False
 ) -> tuple[int, int | None, list[dict[str, Any]], list[dict[str, Any]]]:
     """``(min_seq, min_xmin, active_leases, dead_leases)`` -- the two upper
     bounds ``_prune_log``'s ``DELETE``/``COUNT`` predicate is built from,
     plus the lease rows that fed (or did not feed) ``min_seq``
     (docs/incremental-sync-design.md §7 "保留策略"/"在途导出租约").
+
+    ``dead_leases`` are classified here but NOT deleted here -- eviction is
+    the caller's job (``_prune_log``'s real, non-``dry-run`` branch), because
+    it must happen in the SAME locked transaction this function ran in, and
+    this function has no opinion on whether its caller intends to write
+    anything at all (``--dry-run`` calls it too, read-only). See ``lock``
+    below and codex #784 r6 for why "classify" and "evict" being two
+    different statements, let alone two different transactions, is exactly
+    the bug this shape closes.
+
+    ``lock=True`` -- used by the real run, never by ``--dry-run`` -- takes a
+    PostgreSQL ``SELECT ... FOR UPDATE`` over EVERY ``sync_export_runs`` row
+    (live and dead alike) before any of the reads below, so this function's
+    view of which leases are dead cannot be invalidated by a concurrent lease
+    claim or publish (both of which lock their OWN target's row the same
+    way) before the caller's ``DELETE`` commits. On SQLite the caller's own
+    ``begin_immediate`` already provides the same serialization (one writer
+    at a time), so this flag is a no-op there. Checked AFTER
+    ``_require_v85_schema`` on purpose: locking a table that might not exist
+    would itself raise a raw driver error, and the schema check already
+    gives that gap a named diagnosis.
 
     Checks ``_require_v85_schema`` FIRST, before anything below names
     ``captured``/``exported_snapshot`` or queries ``sync_export_runs``: those
@@ -1133,10 +1154,23 @@ def _prune_log_bounds(
       window that ends at its lease's ``floor_seq``, a lower bound on the
       watermark it has not published yet -- rows above that floor are not
       safe to delete even though no watermark says so yet. A DEAD lease
-      (crashed run, stale heartbeat) is excluded from the bound -- it no
-      longer represents work in progress -- but is still returned, in
-      ``dead_leases``, so the caller can name it in the report rather than
-      silently ignoring it.
+      (crashed run, or a stale heartbeat that has NOT been refreshed since --
+      see below) is excluded from the bound -- it no longer represents work
+      in progress -- and is returned, in ``dead_leases`` (now carrying
+      ``run_id`` too, not just ``target_env``/``heartbeat_at``), so the real
+      run's caller can delete it BY THAT EXACT ``(target_env, run_id)`` pair
+      in the same locked transaction (making its expiry irreversible -- a
+      stalled export that resumes afterwards finds no lease row at all and
+      refuses to publish, the same as if it had been taken over; see
+      docs/incremental-sync-design.md §7 "在途导出租约"). Deleting a dead
+      lease was NOT always this function's contract: earlier versions only
+      EXCLUDED dead leases from the bound and left the row in place, which
+      let a stalled export that later resumed and refreshed its own
+      unchanged ``heartbeat_at`` look live again to the ownership check a
+      publish performs -- passing that check with a snapshot for which this
+      very function had already, correctly, allowed the rows it needed to be
+      pruned. Deleting the row the moment it is classified dead is what
+      closes that window: there is no state left for a resurrection to find.
 
     ``min_xmin`` is ``None`` on SQLite -- there is no PostgreSQL compensation
     window to bound there (``sync_change_log.txid`` is NULL on every row; see
@@ -1203,7 +1237,11 @@ def _prune_log_bounds(
         for row in live_leases
     ]
     dead_leases = [
-        {"target_env": row["target_env"], "heartbeat_at": row["heartbeat_at"]}
+        {
+            "target_env": row["target_env"],
+            "run_id": row["run_id"],
+            "heartbeat_at": row["heartbeat_at"],
+        }
         for row in leases
         if row["dead"]
     ]
@@ -1294,46 +1332,79 @@ def _prune_log(
     source: _Source, *, keep_days: int, dry_run: bool
 ) -> dict[str, Any]:
     """Delete (or, with ``dry_run``, count) ``sync_change_log`` rows no
-    future export could still need (docs/incremental-sync-design.md §7
-    "保留策略").
+    future export could still need, and evict any DEAD ``sync_export_runs``
+    lease found along the way (docs/incremental-sync-design.md §7
+    "保留策略"/"在途导出租约"; codex #784 r6).
 
-    The bounds (``min_seq``/``min_xmin``) are computed ONCE, in a single
-    read-only pass (``source.read()``) -- not re-derived per batch below.
-    That is safe, not merely convenient: both bounds only ever move in the
-    direction that WIDENS what may legally be deleted (a later, more-advanced
-    ``captured=1`` watermark raises ``min_seq``/``min_xmin``; nothing ever
-    lowers them once written -- see ``_advance_watermark``'s own monotonic
-    clamp). A bound fixed at the start of this call is therefore never less
-    safe than one recomputed mid-run; at worst a concurrent export that
-    advances a watermark while this command is still deleting simply leaves
-    a few more now-safe-to-delete rows for the NEXT ``prune-log`` to catch,
-    which is the same "safe to under-delete, never to over-delete" property
-    a single-transaction design would have had, achieved without holding one
-    long transaction (or one giant single-statement ``DELETE``) over a log
-    that may hold millions of rows after a long gap without pruning.
+    ``--dry-run`` reads only, in ``source.read()``: bounds are computed by
+    ``_prune_log_bounds(..., lock=False)``, dead leases are named (they would
+    be evicted by a real run) but never deleted, and the row count is one
+    ``COUNT(*)`` against the same clause a real run's batches would use.
 
-    The real (non-``dry-run``) deletion is therefore CHUNKED:
+    The REAL run computes the bounds AND evicts every dead lease it found
+    inside ONE locked write transaction: SQLite takes ``begin_immediate``,
+    PostgreSQL locks every ``sync_export_runs`` row with ``FOR UPDATE``
+    (``_prune_log_bounds(..., lock=True)``) before reading anything. This is
+    what makes a dead lease's expiry irreversible instead of racy: without
+    the lock, a lease this call sees as dead (heartbeat stale for over an
+    hour) could be refreshed by the stalled export resuming, moments after
+    this call reads it and before it deletes it -- the ownership check a
+    later publish performs would then find a live-looking, unmodified lease
+    row and let that export publish a watermark built from a snapshot whose
+    compensation window this very call already excluded from the bound (and
+    may already have pruned rows out of). Locking BEFORE reading, and
+    deleting each dead lease by its exact ``(target_env, run_id)`` in the
+    SAME transaction the classification ran in, closes that gap: either this
+    transaction's lock wins and the lease is gone before the stalled export's
+    own lock-and-verify at publish time can see it, or the export's lock
+    (claim or publish) wins and holds the row until it commits, so this call
+    (which acquires its lock afterward) reads a state that already reflects
+    whatever that export just did. There is no interleaving where both see a
+    stale, still-there row. The eviction ``DELETE`` matches ``(target_env,
+    run_id)`` ALONE -- it does not repeat the ``heartbeat_at`` staleness
+    check -- because the lock already guarantees nothing else touched this
+    row between the classification and the delete; re-deriving "is it dead"
+    a second time from a fresh clock read would let the two computations
+    (which rows were EXCLUDED from the bound vs. which rows get DELETED)
+    disagree over something as fragile as which side of a moving cutoff
+    "now" falls on, and they must always be exactly the same set.
+
+    The bounds (``min_seq``/``min_xmin``) themselves are computed ONCE, not
+    re-derived per change-log batch below. That is safe, not merely
+    convenient: both bounds only ever move in the direction that WIDENS what
+    may legally be deleted (a later, more-advanced ``captured=1`` watermark
+    raises ``min_seq``/``min_xmin``; nothing ever lowers them once written --
+    see ``_advance_watermark``'s own monotonic clamp). A bound fixed at the
+    start of this call is therefore never less safe than one recomputed
+    mid-run; at worst a concurrent export that advances a watermark while
+    this command is still deleting simply leaves a few more now-safe-to-
+    delete rows for the NEXT ``prune-log`` to catch, which is the same "safe
+    to under-delete, never to over-delete" property a single bounds-
+    computing transaction has, regardless of how many separate transactions
+    the actual row deletions run in afterward.
+
+    The real run's change-log deletion is therefore still CHUNKED, and still
+    OUTSIDE the bounds-and-eviction transaction (it does not need that lock
+    -- ``sync_change_log`` rows are never claimed by a lease):
     ``_prune_log_delete_batch`` runs in its own transaction, repeatedly,
     until a batch deletes fewer than ``_PRUNE_LOG_BATCH_SIZE`` rows (the
     signal that nothing matching is left) or zero (nothing did). Row counts
     accumulate across batches into the returned ``deleted``; ``batches``
     counts how many non-empty batches ran, so an operator watching a large
     prune can see it make progress rather than one command blocking for an
-    unknown time. ``--dry-run`` needs none of this: it is one read-only
-    ``COUNT(*)`` against the SAME clause the batches would use, inside
-    ``source.read()``, so it never writes and therefore never needs
-    batching.
+    unknown time.
     """
-    with source.read() as conn:
-        _require_capture_tables(source, conn)
-        min_seq, min_xmin, active_leases, dead_leases = _prune_log_bounds(source, conn)
     threshold = _moment(
         source, datetime.now(timezone.utc) - timedelta(days=keep_days)
     )
-    clause, params = _prune_log_clause(source, min_seq, min_xmin, threshold)
 
     if dry_run:
         with source.read() as conn:
+            _require_capture_tables(source, conn)
+            min_seq, min_xmin, active_leases, dead_leases = _prune_log_bounds(
+                source, conn
+            )
+            clause, params = _prune_log_clause(source, min_seq, min_xmin, threshold)
             count = source.fetch(
                 conn,
                 source.sql(f"SELECT COUNT(*) AS n FROM sync_change_log WHERE {clause}"),
@@ -1350,6 +1421,22 @@ def _prune_log(
             "active_leases": active_leases,
             "dead_leases": dead_leases,
         }
+
+    with source.write() as conn:
+        if not source.is_postgres:
+            SqliteDatabase.begin_immediate(conn)
+        _require_capture_tables(source, conn)
+        min_seq, min_xmin, active_leases, dead_leases = _prune_log_bounds(
+            source, conn, lock=True
+        )
+        for row in dead_leases:
+            conn.execute(
+                source.sql(
+                    "DELETE FROM sync_export_runs WHERE target_env = ? AND run_id = ?"
+                ),
+                (row["target_env"], row["run_id"]),
+            )
+    clause, params = _prune_log_clause(source, min_seq, min_xmin, threshold)
 
     deleted = 0
     batches = 0
@@ -1402,10 +1489,16 @@ def _cmd_prune_log(args: argparse.Namespace, settings: Settings) -> int:
         print(f"在途导出：{len(result['active_leases'])} 个（{parts}）")
     if result["dead_leases"]:
         parts = "；".join(
-            f"target {row['target_env']}, 心跳于 {row['heartbeat_at']}"
+            f"target {row['target_env']}, run {row['run_id']}"
             for row in result["dead_leases"]
         )
-        print(f"忽略的死租约：{len(result['dead_leases'])} 个（{parts}），未参与本次判据")
+        if result["dry_run"]:
+            print(
+                f"死租约：{len(result['dead_leases'])} 个（{parts}）——未参与本次判据，"
+                "真的执行（去掉 --dry-run）时会被删除"
+            )
+        else:
+            print(f"已删除死租约：{len(result['dead_leases'])} 个（{parts}）")
     return 0
 
 

@@ -1550,3 +1550,128 @@ def test_the_lease_has_no_transaction_floor_on_sqlite(baseline, monkeypatch):
     _export(baseline["settings"], baseline["out"])
 
     assert seen == [None]
+
+
+# ------------------------------------------------- GLOBAL parents seed with
+
+
+def test_a_membership_change_carries_its_group_row(baseline):
+    """``group_members.group_id`` references ``groups.id`` on both backends.
+    The GLOBAL seed set is resolved from the notebooks this package touches,
+    so a window that only edited a MEMBERSHIP touches none and the seed comes
+    out empty -- and the package would carry a member row whose group is
+    nowhere in the chain.
+
+    The group's id is in ``group_members``' own sync key, which is why it can
+    be collected before ``groups`` is written (copy_rank puts the parent
+    first).
+
+    变异验证: 去掉 ``_GLOBAL_KEY_PARENTS`` 那一趟(不把父键并进种子集合),
+    本条必须报红。
+    """
+    repo = baseline["repo"]
+    with repo._write() as db:
+        # A group no notebook grants to: the notebook-driven seed query can
+        # never reach it.
+        db.execute(
+            "INSERT INTO groups(id,name,kind,description,created_by,created_at,"
+            "updated_at,owner_id) VALUES(?,?,?,?,?,?,?,?)",
+            ("grp-orphan", "orphan", "team", "", "user-local", MOMENT, MOMENT, "member-1"),
+        )
+    _export(baseline["settings"], baseline["out"])  # baseline the new group away
+
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO group_members(group_id,user_id,role,added_at,added_by) "
+            "VALUES(?,?,?,?,?)",
+            ("grp-orphan", "member-1", "member", MOMENT, "user-local"),
+        )
+
+    report = _export(baseline["settings"], baseline["out"])
+
+    assert report.notebooks == (), "the window must touch no notebook at all"
+    members = {(row["group_id"], row["user_id"])
+               for row in _rows(report.package_dir, "group_members")}
+    assert ("grp-orphan", "member-1") in members
+    assert "grp-orphan" in _ids(report.package_dir, "groups")
+
+
+def test_a_new_group_grant_carries_its_group_row(baseline):
+    """The same gap reached from a NOTEBOOK-scoped table: a grant whose
+    principal is a group names a ``groups`` row, and the notebook-driven seed
+    query only finds it if that grant was already committed when the seed
+    ran -- which for a grant created INSIDE this window it was not, on a
+    notebook the package is seeing for the first time.
+
+    变异验证: 去掉 ``notebook_grants`` 的 observer, 本条必须报红。
+    """
+    repo = baseline["repo"]
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO groups(id,name,kind,description,created_by,created_at,"
+            "updated_at,owner_id) VALUES(?,?,?,?,?,?,?,?)",
+            ("grp-late", "late", "team", "", "user-local", MOMENT, MOMENT, "member-1"),
+        )
+    _export(baseline["settings"], baseline["out"])
+
+    real_global_keys = export_module._global_keys
+
+    def stale(source, conn, notebooks):
+        # The seed query as it would have run a moment earlier -- before the
+        # grant below existed. Without the row observer the package would
+        # then carry the grant and not the group.
+        resolved = real_global_keys(source, conn, notebooks)
+        resolved["granted_group_ids"] = tuple(
+            value for value in resolved["granted_group_ids"] if value != "grp-late"
+        )
+        return resolved
+
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO notebook_grants(id,notebook_id,principal_type,"
+            "principal_id,role,created_by,created_at) VALUES(?,?,?,?,?,?,?)",
+            ("g-late", baseline["alpha"], "group", "grp-late", "reader",
+             "user-local", MOMENT),
+        )
+
+    original = export_module._global_keys
+    export_module._global_keys = stale
+    try:
+        report = _export(baseline["settings"], baseline["out"])
+    finally:
+        export_module._global_keys = original
+
+    assert "g-late" in _ids(report.package_dir, "notebook_grants")
+    assert "grp-late" in _ids(report.package_dir, "groups")
+
+
+# ------------------------------------------------------- heartbeat cannot heal
+
+
+def test_a_heartbeat_never_recreates_a_lease_row(baseline, monkeypatch):
+    """``sync prune-log`` deletes DEAD lease rows under a lock before it uses
+    the surviving floors. If a heartbeat could recreate one, a stalled export
+    would resurrect a lease whose protection had already been spent -- the
+    log rows it was holding down are gone by then. Losing a lease has to be
+    irreversible, so the heartbeat is an UPDATE that matches nothing and says
+    so.
+
+    变异验证: 把 ``_refresh_export_lease`` 换成 upsert, 本条必须报红。
+    """
+    repo = baseline["repo"]
+    warnings: list[str] = []
+    with repo._write() as db:
+        db.execute("DELETE FROM sync_export_runs WHERE target_env=?", (TARGET_ENV,))
+
+    export_module._refresh_export_lease(
+        _source_for(baseline["settings"]), TARGET_ENV, "ghost-run", warnings
+    )
+
+    assert _lease(repo) == {}
+    assert warnings and "lease lost" in warnings[0]
+
+
+def _source_for(settings):
+    return export_module._Source(
+        settings, Path(export_module.__file__).resolve().parents[4]
+    )

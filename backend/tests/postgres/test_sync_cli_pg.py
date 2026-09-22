@@ -659,6 +659,130 @@ def test_prune_log_refuses_when_an_active_lease_has_no_floor_xmin_on_postgres(
         database.close()
 
 
+def test_prune_log_evicts_a_dead_lease_on_postgres(cli_settings, root_dir, capsys):
+    """codex #784 r6, PostgreSQL half: a real (non-dry-run) prune-log run
+    deletes a dead lease's row, not merely excludes it from the bound --
+    otherwise a stalled export that resumes and refreshes its own unchanged
+    heartbeat would look live again to the publish ownership check, with a
+    snapshot whose compensation window this very call already pruned rows
+    out from under."""
+    _migrate(cli_settings)
+    database = PostgresDatabase(cli_settings, root_dir)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_export_state "
+                "(target_env, exported_through_seq, exported_at, package_id, "
+                "captured, exported_snapshot) VALUES (%s, %s, %s, %s, %s, %s)",
+                ("prod-tokyo", 100, "2026-01-01T00:00:00+00:00", "pkg-abc", True, "60:70:"),
+            )
+        dead_heartbeat = datetime.now(timezone.utc) - timedelta(hours=2)
+        _seed_export_lease(
+            database,
+            target_env="prod-osaka",
+            run_id="run-dead",
+            floor_seq=10,
+            heartbeat_moment=dead_heartbeat,
+        )
+        old = datetime.now(timezone.utc) - timedelta(days=40)
+        _insert_log_row(database, root_dir, cli_settings, seq=90, txid=1, changed_at=old)
+
+        args = cli.build_parser().parse_args(["prune-log", "--json"])
+        exit_code = cli._cmd_prune_log(args, cli_settings)
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["active_leases"] == []
+        assert len(payload["dead_leases"]) == 1
+        assert payload["dead_leases"][0]["target_env"] == "prod-osaka"
+        assert payload["dead_leases"][0]["run_id"] == "run-dead"
+
+        with database.connect() as conn:
+            remaining = conn.execute(
+                "SELECT COUNT(*) AS n FROM sync_export_runs"
+            ).fetchone()
+            assert remaining["n"] == 0
+    finally:
+        database.close()
+
+
+def test_prune_log_locks_every_lease_row_before_deleting_dead_ones_on_postgres(
+    cli_settings, root_dir, monkeypatch
+):
+    """The real run's bounds-and-eviction transaction locks every
+    ``sync_export_runs`` row (``SELECT ... FOR UPDATE``, no ``WHERE`` --
+    live and dead alike) BEFORE reading anything, so a concurrent lease
+    claim/heartbeat refresh cannot slip in between classification and the
+    ``DELETE``. Probe it directly: hook ``cli._prune_log_bounds`` to try an
+    ``UPDATE`` on the dead lease's own row from a second connection, with a
+    short ``lock_timeout``, while the real call's own lock is still held
+    (the outer ``write()`` transaction has not committed yet) -- it must
+    block.
+
+    变异验证: 去掉 `_prune_log_bounds` 里 PostgreSQL 的 `FOR UPDATE` 语句，
+    本条必须报红（探针的 UPDATE 立刻成功，没有被挡住）。
+    """
+    import psycopg
+
+    _migrate(cli_settings)
+    database = PostgresDatabase(cli_settings, root_dir)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_export_state "
+                "(target_env, exported_through_seq, exported_at, package_id, "
+                "captured, exported_snapshot) VALUES (%s, %s, %s, %s, %s, %s)",
+                ("prod-tokyo", 100, "2026-01-01T00:00:00+00:00", "pkg-abc", True, "60:70:"),
+            )
+        dead_heartbeat = datetime.now(timezone.utc) - timedelta(hours=2)
+        _seed_export_lease(
+            database,
+            target_env="prod-osaka",
+            run_id="run-dead",
+            floor_seq=10,
+            heartbeat_moment=dead_heartbeat,
+        )
+
+        probes: list[str] = []
+        real_bounds = cli._prune_log_bounds
+
+        def hooked(source, conn, **kwargs):
+            result = real_bounds(source, conn, **kwargs)
+            if kwargs.get("lock"):
+                # Probed AFTER the FOR UPDATE has run and while the outer
+                # write() transaction is still open -- exactly the window
+                # the lock exists to close.
+                with psycopg.connect(cli_settings.database_url) as other:
+                    other.execute("SET LOCAL lock_timeout = '400ms'")
+                    try:
+                        other.execute(
+                            "UPDATE sync_export_runs SET heartbeat_at = now() "
+                            "WHERE target_env = %s",
+                            ("prod-osaka",),
+                        )
+                        other.commit()
+                        probes.append("acquired")
+                    except psycopg.errors.LockNotAvailable as exc:
+                        probes.append(f"blocked: {exc}")
+            return result
+
+        monkeypatch.setattr(cli, "_prune_log_bounds", hooked)
+
+        args = cli.build_parser().parse_args(["prune-log"])
+        exit_code = cli._cmd_prune_log(args, cli_settings)
+        assert exit_code == 0
+
+        assert probes, "the locked bounds call never ran"
+        assert probes[0].startswith("blocked"), probes
+
+        with database.connect() as conn:
+            remaining = conn.execute(
+                "SELECT COUNT(*) AS n FROM sync_export_runs"
+            ).fetchone()
+            assert remaining["n"] == 0
+    finally:
+        database.close()
+
+
 def test_status_lists_export_runs_on_postgres(cli_settings, root_dir, capsys):
     _migrate(cli_settings)
     database = PostgresDatabase(cli_settings, root_dir)
