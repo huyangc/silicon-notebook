@@ -551,15 +551,19 @@ SQLite 的相对开销比 PostgreSQL 明显：SQLite 基线本身极快（进程
 - **保留策略**落地为 `sync prune-log [--keep-days N]`（`N` 默认 30）：候选日志行必须同时满足
   三个条件——`seq` ≤ `min(全部 captured = 1 水位的 exported_through_seq ∪ 全部活租约的
   floor_seq)`（活租约见下「在途导出租约」，取的是这两个集合合起来的最小值，不是分别取最小
-  再相加）；PostgreSQL 上还要求 `txid < pg_snapshot_xmin(S)` 对全部 `captured = 1` 的
-  `exported_snapshot` 取最小；`changed_at` 早于 `now() - N 天`。取最小值只看 `captured = 1`
+  再相加）；PostgreSQL 上还要求 `txid < min(全部 captured = 1 水位的 exported_snapshot 取
+  pg_snapshot_xmin ∪ 全部活租约的 floor_xmin)`——两条判据同一套「水位集合并租约集合再取最小」
+  的形状，只是分别护着 seq 与 txid 两个维度（SQLite 恒无 txid 维度，`floor_xmin` 也恒
+  NULL，这半条判据不存在）；`changed_at` 早于 `now() - N 天`。取最小值只看 `captured = 1`
   的水位行与活租约：没有 `captured = 1` 水位、也没有活租约的目标环境（从未成功导出过，或最
   近一次落到全量且门是关的，眼下也没有导出在跑）**不参与**这几次取最小值——它对保留策略
   「弃权」，而不是把上限硬拖到 0 逼停清理。只有**一个 `captured = 1` 的水位都不存在**时整条
   命令才拒绝并点名原因（活租约本身不构成安全上限，见下）——这种情况下不是某个目标环境的上限
   不明确，而是根本没有任何安全上限可以取，任何 seq 边界都是虚假的安全感。死租约（心跳超过
   1 小时，见下）不参与取最小值，但仍然在 `prune-log` 的输出里点名，提醒运维那是一个可能已经
-  崩溃、需要看一眼的导出。
+  崩溃、需要看一眼的导出。PostgreSQL 上一条**活**租约的 `floor_xmin` 若是 `NULL`——正常不该
+  出现，只有旧版本写下的租约行才会这样——`prune-log` 不会猜一个数顶上去：它拒绝整条命令、
+  点名这个 target，直到这条租约发布水位或被判定为死租约。
 
 ### 在途导出租约
 
@@ -567,9 +571,19 @@ SQLite 的相对开销比 PostgreSQL 明显：SQLite 基线本身极快（进程
 （v85/0065）占一行租约。这张表存在是因为一次还没发布水位的导出，对两件事是不可见的：
 
 - **`sync prune-log`**：这次导出即将读到的日志行，此刻看起来仍然「可删」——它将要发布的水位
-  还不存在，日志行没有任何水位指向它们。租约带的 `floor_seq`（占用那一刻快照可见的
-  `MAX(seq)`）是这次导出最终会发布的水位的下界，prune-log 因此把它并入取最小值的候选集合
-  （见上「保留策略」），不会删掉一个正在跑的导出还需要的行。
+  还不存在，日志行没有任何水位指向它们。租约带两个下界，都在占用租约的**这同一个事务**里
+  读出：`floor_seq` = 那一刻日志的 `MAX(seq)`（这次导出最终会发布的 `exported_through_seq`
+  的下界）、`floor_xmin` = 这个事务自己的 `pg_snapshot_xmin(pg_current_snapshot())`（SQLite
+  恒 `NULL`：没有 `txid` 维度，也没有「在途、之后才提交」的窗口需要补偿）。prune-log 的
+  seq 下界与 txid 下界因此都取「全部 `captured` 水位 ∪ 全部活租约」合起来的最小值（见上
+  「保留策略」）。`floor_xmin` 保护的是**下一次**导出的补偿窗口，这是 `floor_seq` 做不到的：
+  补偿窗口重读的是 `seq` 低于水位的日志行（见上「导出水位」「增量窗口」），seq 下界对这些行
+  完全没有约束力，只有 `floor_xmin` 能护住它们。这条判据成立只靠一个顺序事实：占用租约的
+  事务严格早于导出打开自己的读快照，所以 `floor_xmin ≤ xmin(导出快照)`；而导出快照建立时
+  仍在途、之后才提交的事务，其 `txid ≥ xmin(导出快照) ≥ floor_xmin`——把 prune-log 的 txid
+  下界钉在 `floor_xmin` 或更低，就留住了补偿窗口将来会要的每一行。死租约被接管时两个
+  floor 一并用新占用者的值重写——它们描述的是现在持有租约的这次跑，死掉的那次跑的承诺
+  不该再算数。
 - **同一 target 的第二次不限定范围导出**：两个导出各自发布水位会互相踩踏——后发布的那个的
   条件写（见上「前驱校验」）会失败，但那时它已经白读了一遍快照、白写了一整个包。租约把这个
   冲突提前到导出刚开始的时候拒绝，而不是让它跑到最后才发现白干。
@@ -582,12 +596,12 @@ SQLite 的相对开销比 PostgreSQL 明显：SQLite 基线本身极快（进程
 
 ```sql
 INSERT INTO sync_export_runs
-    (target_env, run_id, package_id, started_at, heartbeat_at, floor_seq)
-VALUES (?, ?, ?, ?, ?, ?)
+    (target_env, run_id, package_id, started_at, heartbeat_at, floor_seq, floor_xmin)
+VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (target_env) DO UPDATE SET
     run_id = excluded.run_id, package_id = excluded.package_id,
     started_at = excluded.started_at, heartbeat_at = excluded.heartbeat_at,
-    floor_seq = excluded.floor_seq
+    floor_seq = excluded.floor_seq, floor_xmin = excluded.floor_xmin
 WHERE sync_export_runs.heartbeat_at < <陈旧截止>
 ```
 
@@ -749,14 +763,15 @@ sync import <package_dir> [--create-missing-users] [--dry-run] [--importer-user 
     # 只接受 mode=full 的 v2 包；mode=incremental 的包（或 deletes/kg_epochs 非空）在预检阶段
     # 就被拒绝，错误点名 base_package_id/from_seq/to_seq 并指向 PR-3c。
 sync status [--json]      # 本库的导出水位（每个目标环境）、在途导出租约（§7「在途导出租约」，
-                           # target/started_at/heartbeat_at/floor_seq/是否已死）、已引入的包与
-                           # 变更捕获开关状态；落后的笔记本清单在 PR-4
+                           # target/started_at/heartbeat_at/floor_seq/floor_xmin/是否已死）、
+                           # 已引入的包与变更捕获开关状态；落后的笔记本清单在 PR-4
 sync capture enable [--json]   # 打开源端变更捕获；清空 sync_export_state（下一次导出必是全量）
 sync capture disable [--json]  # 关闭变更捕获；清空 sync_export_state 与 sync_change_log
 sync capture status [--json]   # 开关状态、enabled_at/disabled_at、日志行数与 seq 范围
 sync prune-log [--keep-days N] [--dry-run] [--json]
-    # §7「保留策略」的判据（含在途导出租约的 floor_seq）；没有任何 captured=1 水位时拒绝并
-    # 点名原因；死租约不参与判据但在输出里点名
+    # §7「保留策略」的判据（seq/txid 下界都含在途导出租约的 floor_seq/floor_xmin）；没有任何
+    # captured=1 水位时拒绝并点名原因；死租约不参与判据但在输出里点名；PostgreSQL 上活租约
+    # 缺 floor_xmin（不应该出现）时整条命令拒绝并点名该租约
 ```
 
 `export` 不需要用户显式区分全量与增量，模式由上面的判定规则自动选（§7「模式判定」）；

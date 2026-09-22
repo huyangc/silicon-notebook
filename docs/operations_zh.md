@@ -667,16 +667,22 @@ PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --j
 不可能再需要」的日志行。一行要**同时**满足三个条件才会被删：它的 `seq` 小于等于
 (a) 全部 `captured` 水位里最小的 `exported_through_seq` 与 (b) 全部**活着**的
 `sync_export_runs` 租约（还没发布水位的在途导出，见设计文档 §7「在途导出租约」）的
-`floor_seq` 这两者合起来的最小值；在 PostgreSQL 上，它的 `txid` 还要小于全部 `captured`
-水位的 `exported_snapshot` 取 `pg_snapshot_xmin` 后的最小值（租约不带快照，不参与这一半）；
-它的 `changed_at` 早于 `--keep-days`（默认 30）指定的天数（哪怕前面的条件都满足，一行按
-`changed_at` 还不够旧也会被留下）。`captured` 水位那两次取最小值**只看带 `captured` 水位的
-目标环境**：一个从未导出过、或者最近一次因为捕获关着而落到了全量的目标环境，对这个上限
-「弃权」，不参与取最小——不会因为它没有 `captured` 水位就把上限硬拖到 0、挡住所有别的目标
-环境的清理。死租约（心跳超过一小时，或读不出来）同样不参与取最小——会在输出里点名
-（`dead_leases`，人读摘要里是「忽略的死租约」），但不进入判据，跟水位一侧的「弃权」是同一
-逻辑。只有**一个 `captured` 水位都不存在**时，命令才会直接拒绝并点名——单独一个活租约不能
-顶替这个前提，因为它是在给一个还没发布的水位设下界，不是替代一个已经发布的水位。`--dry-run`
+`floor_seq` 这两者合起来的最小值；在 PostgreSQL 上，它的 `txid` 还要小于
+(a) 全部 `captured` 水位的 `exported_snapshot` 取 `pg_snapshot_xmin` 后的最小值 与
+(b) 全部活租约的 `floor_xmin` 这两者合起来的最小值——`floor_xmin` 是占用租约的**同一个
+事务**里读到的值，那个事务严格早于导出自己的读快照，这个先后顺序正是 `floor_xmin` 能当下界
+用的全部理由，也是 `floor_seq` 单独做不到的事：它护住的是**下一次**导出补偿窗口要重读的、
+`seq` 低于水位的那些日志行（详见设计文档 §7「在途导出租约」）；它的 `changed_at` 早于
+`--keep-days`（默认 30）指定的天数（哪怕前面的条件都满足，一行按 `changed_at` 还不够旧也会
+被留下）。`captured` 水位那两次取最小值**只看带 `captured` 水位的目标环境**：一个从未导出
+过、或者最近一次因为捕获关着而落到了全量的目标环境，对这个上限「弃权」，不参与取最小——不会
+因为它没有 `captured` 水位就把上限硬拖到 0、挡住所有别的目标环境的清理。死租约（心跳超过
+一小时，或读不出来）同样不参与取最小——会在输出里点名（`dead_leases`，人读摘要里是「忽略的
+死租约」），但不进入判据，跟水位一侧的「弃权」是同一逻辑。只有**一个 `captured` 水位都不
+存在**时，命令才会直接拒绝并点名——单独一个活租约不能顶替这个前提，因为它是在给一个还没
+发布的水位设下界，不是替代一个已经发布的水位。PostgreSQL 上一条**活**租约若是 `floor_xmin`
+为 `NULL`（正常不该出现——占用租约的事务总会读到一个），`prune-log` 不会猜一个数顶上去：
+它点名这个 target、直接拒绝整条命令，直到这条租约发布水位或被判定为死租约。`--dry-run`
 只报告会删掉多少行，不真的删。真正执行删除时按每批 5000 行分批、每批各自一个事务，避免清理
 一段长期没清过的日志时占住一个长事务或跑一条不设上限的 `DELETE`；报告里的 `batches`
 字段是实际跑了几批。
@@ -735,8 +741,9 @@ PYTHONPATH=backend python scripts/sync_notebooks.py capture disable --json
   `exported_through_seq` 还没有超过本次。任何一条校验不成立，说明另一次导出已经先发布过
   了——这次的水位写入被拒绝，刚落盘的包目录也会被删掉，不会留下一个没有任何水位指向它的包。
 
-`sync prune-log` 的 seq 下界同样尊重在途导出的租约（`floor_seq`），和尊重 `captured` 水位
-是同一套逻辑——见下面「`sync prune-log`」一节。
+`sync prune-log` 的 seq 下界与（PostgreSQL 上的）txid 下界同样尊重在途导出的租约
+（`floor_seq`、`floor_xmin`），和尊重 `captured` 水位是同一套逻辑——见下面
+「`sync prune-log`」一节。
 
 **关闭的代价**：`disable` 会同时清空 `sync_export_state` 与 `sync_change_log`。日志从这一刻
 起不再增长，所以关闭之后的下一次导出又是一次全量快照，跟从未开过时一样——没有「暂停后再续上」

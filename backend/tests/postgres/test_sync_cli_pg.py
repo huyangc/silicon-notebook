@@ -507,14 +507,23 @@ def _seed_export_lease(
     run_id: str = "run-1",
     package_id: str = "pkg-inflight",
     floor_seq: int,
+    floor_xmin: int | None = None,
     heartbeat_moment: datetime,
 ) -> None:
     with database.write() as conn:
         conn.execute(
             "INSERT INTO sync_export_runs "
-            "(target_env, run_id, package_id, started_at, heartbeat_at, floor_seq) "
-            "VALUES (%s, %s, %s, %s, %s, %s)",
-            (target_env, run_id, package_id, heartbeat_moment, heartbeat_moment, floor_seq),
+            "(target_env, run_id, package_id, started_at, heartbeat_at, floor_seq, "
+            "floor_xmin) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (
+                target_env,
+                run_id,
+                package_id,
+                heartbeat_moment,
+                heartbeat_moment,
+                floor_seq,
+                floor_xmin,
+            ),
         )
 
 
@@ -532,7 +541,13 @@ def test_prune_log_active_lease_narrows_the_seq_bound_on_postgres(
                 ("prod-tokyo", 100, "2026-01-01T00:00:00+00:00", "pkg-abc", True, "50:60:"),
             )
         _seed_export_lease(
-            database, floor_seq=50, heartbeat_moment=datetime.now(timezone.utc)
+            database,
+            floor_seq=50,
+            # Below the watermark's snapshot xmin (60) so this test is only
+            # about the seq dimension -- the txid-dimension case (floor_xmin
+            # narrowing/refusing) has its own tests below.
+            floor_xmin=30,
+            heartbeat_moment=datetime.now(timezone.utc),
         )
         old = datetime.now(timezone.utc) - timedelta(days=40)
         _insert_log_row(database, root_dir, cli_settings, seq=40, txid=1, changed_at=old)
@@ -543,6 +558,7 @@ def test_prune_log_active_lease_narrows_the_seq_bound_on_postgres(
         assert exit_code == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["min_seq"] == 50
+        assert payload["min_txid"] == 30
         assert payload["deleted"] == 1
         assert payload["active_leases"] == [
             {"target_env": "prod-tokyo", "floor_seq": 50}
@@ -558,6 +574,91 @@ def test_prune_log_active_lease_narrows_the_seq_bound_on_postgres(
         database.close()
 
 
+def test_prune_log_active_lease_narrows_the_txid_bound_on_postgres(
+    cli_settings, root_dir, capsys
+):
+    """codex r4: a lease pins two dimensions, not just seq -- floor_xmin is
+    taken in the lease's own claiming transaction, which starts before the
+    running export's read snapshot, so it is a lower bound on the txid the
+    export will eventually compensate from. A row whose txid is still >= the
+    lease's floor_xmin must survive even though its seq is well under every
+    other bound."""
+    _migrate(cli_settings)
+    database = PostgresDatabase(cli_settings, root_dir)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_export_state "
+                "(target_env, exported_through_seq, exported_at, package_id, "
+                "captured, exported_snapshot) VALUES (%s, %s, %s, %s, %s, %s)",
+                ("prod-tokyo", 100, "2026-01-01T00:00:00+00:00", "pkg-abc", True, "60:70:"),
+            )
+        _seed_export_lease(
+            database,
+            floor_seq=500,
+            floor_xmin=40,
+            heartbeat_moment=datetime.now(timezone.utc),
+        )
+        old = datetime.now(timezone.utc) - timedelta(days=40)
+        # seq well under both the watermark (100) and the lease (500), but
+        # txid=45 >= the lease's floor_xmin=40: must survive.
+        _insert_log_row(database, root_dir, cli_settings, seq=90, txid=45, changed_at=old)
+        # Same shape, txid=30 < floor_xmin=40: eligible.
+        _insert_log_row(database, root_dir, cli_settings, seq=91, txid=30, changed_at=old)
+
+        args = cli.build_parser().parse_args(["prune-log", "--json"])
+        exit_code = cli._cmd_prune_log(args, cli_settings)
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        # min(watermark xmin=60, lease floor_xmin=40) == 40.
+        assert payload["min_txid"] == 40
+        assert payload["deleted"] == 1
+
+        with database.connect() as conn:
+            remaining = {
+                row["seq"]
+                for row in conn.execute("SELECT seq FROM sync_change_log").fetchall()
+            }
+            assert remaining == {90}
+    finally:
+        database.close()
+
+
+def test_prune_log_refuses_when_an_active_lease_has_no_floor_xmin_on_postgres(
+    cli_settings, root_dir, capsys
+):
+    """A live PostgreSQL lease with floor_xmin=NULL should never happen (the
+    claiming transaction always reads one), but prune-log must not guess a
+    number for it -- it refuses outright, naming the target, for as long as
+    that lease stays live."""
+    _migrate(cli_settings)
+    database = PostgresDatabase(cli_settings, root_dir)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_export_state "
+                "(target_env, exported_through_seq, exported_at, package_id, "
+                "captured, exported_snapshot) VALUES (%s, %s, %s, %s, %s, %s)",
+                ("prod-tokyo", 100, "2026-01-01T00:00:00+00:00", "pkg-abc", True, "60:70:"),
+            )
+        # floor_xmin omitted -> NULL, simulating a row an older build wrote.
+        _seed_export_lease(
+            database,
+            target_env="prod-osaka",
+            floor_seq=10,
+            heartbeat_moment=datetime.now(timezone.utc),
+        )
+
+        args = cli.build_parser().parse_args(["prune-log"])
+        exit_code = cli._cmd_prune_log(args, cli_settings)
+        assert exit_code == 2
+        err = capsys.readouterr().err
+        assert "prod-osaka" in err
+        assert "floor_xmin" in err
+    finally:
+        database.close()
+
+
 def test_status_lists_export_runs_on_postgres(cli_settings, root_dir, capsys):
     _migrate(cli_settings)
     database = PostgresDatabase(cli_settings, root_dir)
@@ -566,6 +667,7 @@ def test_status_lists_export_runs_on_postgres(cli_settings, root_dir, capsys):
             database,
             target_env="prod-tokyo",
             floor_seq=42,
+            floor_xmin=37,
             heartbeat_moment=datetime.now(timezone.utc),
         )
         _seed_export_lease(
@@ -583,9 +685,17 @@ def test_status_lists_export_runs_on_postgres(cli_settings, root_dir, capsys):
         payload = json.loads(capsys.readouterr().out)
         runs_by_target = {row["target_env"]: row for row in payload["runs"]}
         assert runs_by_target["prod-tokyo"]["floor_seq"] == 42
+        assert runs_by_target["prod-tokyo"]["floor_xmin"] == 37
         assert runs_by_target["prod-tokyo"]["dead"] is False
         assert runs_by_target["prod-osaka"]["floor_seq"] == 7
+        assert runs_by_target["prod-osaka"]["floor_xmin"] is None
         assert runs_by_target["prod-osaka"]["dead"] is True
+
+        human_args = cli.build_parser().parse_args(["status"])
+        exit_code = cli._cmd_status(human_args, cli_settings)
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "floor_xmin=37" in out
     finally:
         database.close()
 

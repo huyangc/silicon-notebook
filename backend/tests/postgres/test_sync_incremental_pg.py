@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -492,3 +493,41 @@ def test_two_connections_racing_for_an_empty_lease_row_produce_one_winner(
     assert "run-a" in str(failure.value)
     # ...and the loser did not overwrite the winner's row.
     assert _lease(repo)["run_id"] == "run-a"
+
+
+def test_the_lease_records_a_transaction_floor_below_the_export_snapshot(
+    baseline, monkeypatch
+):
+    """``floor_seq`` cannot protect the next export's COMPENSATION window:
+    that window re-reads log rows whose ``seq`` is BELOW the watermark, so a
+    seq floor says nothing about them. ``floor_xmin`` does, and only because
+    of the ORDER -- the lease transaction runs strictly before the export
+    opens its read snapshot, so its xmin cannot be above that snapshot's, and
+    every transaction still in flight at the snapshot carries a txid at or
+    above it.
+
+    Asserted end to end: the lease's ``floor_xmin`` against the xmin of the
+    snapshot this very export goes on to publish in
+    ``sync_export_state.exported_snapshot``.
+
+    变异验证: 领取租约时不写 ``floor_xmin``(留 NULL), 本条必须报红。
+    """
+    from app.migration.sync import export as export_module
+    from app.migration.sync.export import _Source
+
+    seen: list[Any] = []
+    real = export_module._assemble
+
+    def hooked(*args, **kwargs):
+        seen.append(_lease(baseline["repo"])["floor_xmin"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(export_module, "_assemble", hooked)
+
+    report = _export(baseline["settings"], baseline["out"])
+
+    assert seen and seen[0] is not None, "the lease carries no transaction floor"
+    published = _watermark(baseline["repo"])["exported_snapshot"]
+    assert published, "the watermark carries no snapshot to compare against"
+    assert int(seen[0]) <= _Source.snapshot_xmin(str(published))
+    assert report.captured is True

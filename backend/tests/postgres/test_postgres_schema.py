@@ -787,6 +787,12 @@ def test_packaged_index_migration_phases_are_exact():
     for column in ("started_at", "heartbeat_at"):
         assert f"  {column} timestamp with time zone NOT NULL,\n" in v65_ddl_only
     assert "floor_seq bigint NOT NULL DEFAULT 0" in v65_ddl_only
+    # The txid floor. Nullable and default-less on purpose: SQLite has no txid
+    # dimension and leaves it NULL, and a 0 default would read as "pin from
+    # transaction 0 onwards" rather than "this lease pins no txid".
+    assert "  floor_xmin bigint,\n" in v65_ddl_only
+    assert "floor_xmin bigint NOT NULL" not in v65_ddl_only
+    assert "floor_xmin bigint DEFAULT" not in v65_ddl_only
     # No backfill UPDATE, and nothing touching the change log's rows.
     assert "UPDATE sync_export_state" not in v65_ddl_only
     assert "sync_change_log" not in v65_ddl_only.replace(

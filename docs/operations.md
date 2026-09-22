@@ -823,22 +823,28 @@ one already running — could possibly still need. A row qualifies for deletion 
 of the following hold: its `seq` is at or below the minimum of (a) `exported_through_seq` across
 every `sync_export_state` row with `captured` true and (b) `floor_seq` across every LIVE
 `sync_export_runs` lease (an in-flight export that has not published its watermark yet -- see the
-design doc's §7 "在途导出租约"); on PostgreSQL, its `txid` is below the minimum `pg_snapshot_xmin`
-of every `captured` row's `exported_snapshot` (leases carry no snapshot of their own and do not
-enter this half); and its `changed_at` is older than `--keep-days` (default 30 — a row young
-enough by `changed_at` is kept even if the other conditions would otherwise allow deleting it).
-Both `sync_export_state` minimums are taken **only over targets with a `captured` watermark**: a
-target that has never exported, or whose last export fell back to full with capture off, simply
-does not vote on the bound — it does not drag the bound down to zero and block pruning for
-everyone else. A DEAD lease (heartbeat older than an hour, or unreadable) does not vote either —
-it is named in the output (`dead_leases`, and "忽略的死租约" in the human summary) but excluded
-from the bound, the same abstention the watermark side already has. The command refuses outright,
-naming the problem, only when **no target at all** has a `captured` watermark — a live lease alone
-does not lift that refusal, because it bounds a watermark not yet published rather than standing
-in for one already published. `--dry-run` reports the row count that would be deleted without
-deleting anything. A real (non-`--dry-run`) delete runs in batches of 5000 rows, each its own
-transaction, so pruning a log that has gone unpruned for a long time does not hold one long-running
-transaction or a single unbounded `DELETE`; the report's `batches` field says how many ran.
+design doc's §7 "在途导出租约"); on PostgreSQL, its `txid` is below the minimum of (a)
+`pg_snapshot_xmin` of every `captured` row's `exported_snapshot` and (b) `floor_xmin` across every
+live lease (taken in the SAME transaction that claimed the lease, which runs strictly before the
+export's own read snapshot -- see the design doc for why that ordering makes `floor_xmin` a valid
+lower bound on the compensation window the NEXT export will read, something `floor_seq` alone
+cannot protect); and its `changed_at` is older than `--keep-days` (default 30 — a row young enough
+by `changed_at` is kept even if the other conditions would otherwise allow deleting it). Both
+`sync_export_state` minimums are taken **only over targets with a `captured` watermark**: a target
+that has never exported, or whose last export fell back to full with capture off, simply does not
+vote on the bound — it does not drag the bound down to zero and block pruning for everyone else. A
+DEAD lease (heartbeat older than an hour, or unreadable) does not vote either — it is named in the
+output (`dead_leases`, and "忽略的死租约" in the human summary) but excluded from the bound, the
+same abstention the watermark side already has. The command refuses outright, naming the problem,
+only when **no target at all** has a `captured` watermark — a live lease alone does not lift that
+refusal, because it bounds a watermark not yet published rather than standing in for one already
+published. A LIVE PostgreSQL lease with `floor_xmin` NULL (should never happen — the claiming
+transaction always reads one) is a separate refusal: rather than guess a number, `prune-log` names
+that target and refuses outright for as long as the lease stays live. `--dry-run` reports the row
+count that would be deleted without deleting anything. A real (non-`--dry-run`) delete runs in
+batches of 5000 rows, each its own transaction, so pruning a log that has gone unpruned for a long
+time does not hold one long-running transaction or a single unbounded `DELETE`; the report's
+`batches` field says how many ran.
 
 ### Change capture (`sync capture`)
 
@@ -907,8 +913,9 @@ Two more guarantees round out the same publish path (design doc §7 "在途导�
   package it just finished writing to disk is deleted rather than left dangling with nothing
   pointing at it.
 
-`sync prune-log`'s seq bound also respects an in-flight export's lease (its `floor_seq`) the same
-way it respects a `captured` watermark -- see "`sync prune-log`" below.
+`sync prune-log`'s seq AND txid bounds also respect an in-flight export's lease (`floor_seq` and,
+on PostgreSQL, `floor_xmin`) the same way they respect a `captured` watermark -- see
+"`sync prune-log`" below.
 
 **What disabling costs**: `disable` clears both `sync_export_state` and `sync_change_log`. The
 log stops growing the moment it commits, so the next export after a disable is a full snapshot

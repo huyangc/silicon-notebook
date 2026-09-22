@@ -112,6 +112,12 @@ def test_deployed_v84_database_verifies_sync_export_snapshot(tmp_path):
             ("started_at", "TEXT", 1, None, 0),
             ("heartbeat_at", "TEXT", 1, None, 0),
             ("floor_seq", "INTEGER", 1, "0", 0),
+            # Nullable and default-less on purpose: SQLite has no txid
+            # dimension for a lease to pin (sync_change_log.txid is NULL on
+            # every row this backend writes), so the column exists only for
+            # catalog parity and stays NULL here. A 0 default would read as
+            # "pin everything from transaction 0 onwards".
+            ("floor_xmin", "INTEGER", 0, None, 0),
         ]
         assert upgraded_db.execute(
             "SELECT COUNT(*) FROM sync_export_runs"
