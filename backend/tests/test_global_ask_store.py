@@ -239,3 +239,45 @@ def test_set_feedback_updates_legacy_payload_with_no_feedback_key_at_all(store):
                    (json.dumps(payload, ensure_ascii=False), value.job_id))
     updated = store.set_feedback(value.job_id, "user-a", "useful")
     assert updated is not None and updated.feedback == "useful"
+
+
+def _seed_participants(store):
+    """nb-a owned by user-a; nb-b owned by user-b with no grant to user-a."""
+    now = "2026-09-20T00:00:00Z"
+    with store.database.write() as db:
+        for user in ("user-a", "user-b"):
+            db.execute(store._sql(
+                "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?)"
+            ), (user, f"{user}@x", user, "user", "active", now, now))
+        for nb, owner in (("nb-a", "user-a"), ("nb-b", "user-b")):
+            db.execute(store._sql(
+                "INSERT INTO notebooks(id,name,created_by,status,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?)"
+            ), (nb, f"NB {nb}", owner, "ready", now, now))
+
+
+def test_guarded_admin_job_record_applies_the_owner_rule_and_names_readable_participants(store):
+    """管理员(reader=None)拿到记录与 owner 仍可读的库名;owner 自助读取在任一
+    参与库不可读时得到 None——与全局页 get_job 同一条规则,且在同一事务里判定。"""
+    _seed_participants(store)
+    value = job(status="running")
+    store.create(value, "user-a", "request-a", "payload", "web", new_conversation=True)
+    value.status = "done"
+    assert store.save(value, "user-a")
+
+    with store.guarded_admin_job_record(value.job_id, "user-a", reader_id=None) as record:
+        assert record is not None
+        assert record["job"].job_id == value.job_id
+        assert record["submitted_via"] == "web"
+        assert record["notebook_names"] == {"nb-a": "NB nb-a"}
+    with store.guarded_admin_job_record(value.job_id, "user-a", reader_id="user-a") as record:
+        assert record is None
+    with store.guarded_admin_job_record(value.job_id, "user-b", reader_id=None) as record:
+        assert record is None
+
+    with store.database.write() as db:
+        db.execute(store._sql("UPDATE notebooks SET created_by=? WHERE id=?"), ("user-a", "nb-b"))
+    with store.guarded_admin_job_record(value.job_id, "user-a", reader_id="user-a") as record:
+        assert record is not None
+        assert record["notebook_names"] == {"nb-a": "NB nb-a", "nb-b": "NB nb-b"}

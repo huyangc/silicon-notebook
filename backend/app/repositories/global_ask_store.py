@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from app.core.capability_tokens import (
@@ -38,9 +39,16 @@ def _transition_now() -> str:
 
 
 class GlobalAskStore:
-    def __init__(self, database, *, marker="?"):
+    def __init__(self, database, *, marker="?", access_sql=None, read_authority_lock=None):
         self.database = database
         self.marker = marker
+        # The backend's read-authority SQL module (``read_access_clause`` /
+        # ``read_access_params`` / ``NOTEBOOK_LIVE_SQL``; placeholder styles
+        # mirror ``marker``) and, on PostgreSQL, the ``lock_reader_access_on``
+        # helper that takes ``FOR SHARE`` on one reader's whole authority chain.
+        # Only ``guarded_admin_job_record`` consumes them.
+        self._access_sql = access_sql
+        self._read_authority_lock = read_authority_lock
         self._history_projection = (
             "payload_json::jsonb->>'question' AS question, "
             "COALESCE(payload_json::jsonb->'answer'->>'answer', "
@@ -432,6 +440,75 @@ class GlobalAskStore:
                 "UPDATE global_ask_jobs SET status='interrupted',updated_at=? "
                 "WHERE status='running'"
             ), (_transition_now(),))
+
+    @contextmanager
+    def guarded_admin_job_record(self, job_id, owner_id, *, reader_id):
+        """``admin_job_record`` under the activity-detail locking invariant.
+
+        The notebook twin (``guarded_ask_detail``) leases the notebook root
+        ``FOR KEY SHARE`` and the reader's authority chain ``FOR SHARE`` and
+        keeps both until the API has assembled its response, so a revocation
+        or deletion that lands mid-request cannot leave an answer in flight
+        that the caller was no longer entitled to. This does the same for a
+        global job: one transaction reads the job row (``FOR SHARE``), leases
+        every live participant notebook (``FOR KEY SHARE``, which conflicts
+        with whole-notebook deletion's ``FOR UPDATE``), resolves the names the
+        OWNER can still read, and -- for the owner's self-service read -- locks
+        each participant's authority chain and refuses unless every
+        participant is still readable. On SQLite ``database.write()`` is the
+        process-level write lock, so the same statements serialize without
+        row locks.
+
+        ``reader_id`` is ``None`` for an administrator, who keeps the audit
+        record after the owner lost a participant; otherwise it is the owner.
+        """
+        share = " FOR SHARE" if self.marker == "%s" else ""
+        key_share = " FOR KEY SHARE" if self.marker == "%s" else ""
+        access = self._access_sql
+        with self.database.write() as db:
+            row = db.execute(self._sql(
+                "SELECT * FROM global_ask_jobs WHERE id=? AND user_id=?" + share
+            ), (job_id, owner_id)).fetchone()
+            if row is None:
+                yield None
+                return
+            job = self._job(row)
+            ids = list(dict.fromkeys(job.resolved_notebook_ids))
+            names = {}
+            readable = set()
+            if ids and access is not None:
+                placeholders = ",".join("?" for _ in ids)
+                live = {
+                    r["id"]: r for r in db.execute(self._sql(
+                        f"SELECT nb.id,nb.name,nb.created_by FROM notebooks nb "
+                        f"WHERE nb.id IN ({placeholders}) AND nb.{access.NOTEBOOK_LIVE_SQL}"
+                        + key_share
+                    ), tuple(ids)).fetchall()
+                }
+                readable = {
+                    r["id"] for r in db.execute(self._sql(
+                        f"SELECT nb.id FROM notebooks nb WHERE nb.id IN ({placeholders}) AND "
+                        + access.read_access_clause()
+                        + f" AND nb.{access.NOTEBOOK_LIVE_SQL}"
+                    ), (*ids, *access.read_access_params(owner_id))).fetchall()
+                }
+                names = {nb_id: live[nb_id]["name"] for nb_id in ids if nb_id in readable}
+                if reader_id is not None and self._read_authority_lock is not None:
+                    for nb_id in ids:
+                        if nb_id in readable and not self._read_authority_lock(
+                            db, nb_id, reader_id,
+                            notebook_owner_id=live[nb_id]["created_by"],
+                        ):
+                            readable.discard(nb_id)
+            if reader_id is not None and not set(ids) <= readable:
+                yield None
+                return
+            yield {
+                "job": job,
+                "error_detail": row["error_detail"] or "",
+                "submitted_via": row["submitted_via"] or "",
+                "notebook_names": names,
+            }
 
     def admin_job_record(self, job_id, user_id):
         """One job as the administrator activity detail reads it: the owner's

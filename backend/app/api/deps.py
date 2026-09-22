@@ -112,13 +112,6 @@ def retrieval_experience_jobs_service():
     return repository()._runtime.retrieval_experience_jobs  # type: ignore[attr-defined]
 
 
-def notebook_read_authority_store():
-    """The raw sharing STORE (``readable_notebook_ids`` /
-    ``readable_notebook_names``), the same seat the global Ask service reads
-    its ``can_read_many`` from. ``notebook_sharing_repository()`` returns the
-    sharing *service*, which does not expose these two batch reads."""
-    return repository()._runtime.sharing_store  # type: ignore[attr-defined]
-
 def global_ask_repository():
     """The global Ask store itself, for the administrator activity detail: it
     reads one owner's job with its admin-only record columns and applies its

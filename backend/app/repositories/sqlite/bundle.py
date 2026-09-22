@@ -9,6 +9,7 @@ from app.core.config import Settings
 from app.repositories.bundle import PersistenceBundle
 from app.repositories.global_ask_store import GlobalAskStore
 from app.repositories.ports import RepositorySeams
+from app.repositories.sqlite import access_sql as sqlite_access_sql
 from app.repositories.sqlite.agent_observation_store import AgentObservationStore
 from app.repositories.sqlite.agent_profile_store import AgentProfileStore
 from app.repositories.sqlite.ask_state_store import AskStateStore
@@ -146,7 +147,7 @@ class SqlitePersistenceBundleFactory:
             current_user_id=lambda: identity.current_user().id,
         )
         ask_state = AskStateStore(database, seams)
-        global_ask = GlobalAskStore(database)
+        global_ask = GlobalAskStore(database, access_sql=sqlite_access_sql)
         unified_kg = UnifiedKgStore(database, seams.now)
         model_status = ModelStatusStore(database)
         agent_profile = AgentProfileStore(
