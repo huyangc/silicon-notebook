@@ -166,6 +166,13 @@ def _forbidden_hits(path: Path) -> list[tuple[str, str, int]]:
             violations.append(("属性", node.attr, node.lineno))
         elif isinstance(node, ast.arg) and node.arg in _FORBIDDEN_NAMES:
             violations.append(("形参", node.arg, node.lineno))
+        elif isinstance(node, ast.ExceptHandler) and node.name in _FORBIDDEN_NAMES:
+            # ``except Exception as notebook_id:`` 绑定的也是一个名字,而且
+            # ``ast.ExceptHandler.name`` 是**裸字符串**,不是 ``ast.Name``——
+            # 上面那条 ``ctx`` 判据看不见它。归入「赋值目标」:它与
+            # ``notebook_id = ...`` 是同一件事(在本模块里造一个绑定),只是
+            # 语法糖不同。
+            violations.append(("赋值目标", node.name, node.lineno))
         elif isinstance(node, ast.keyword) and node.arg in _FORBIDDEN_NAMES:
             # 2026-09-22 新增的第五种形态。它与「形参」是两件事:``ast.arg`` 是
             # 「本模块声明了一个叫这个名字的参数」,``ast.keyword`` 是「本模块
@@ -475,8 +482,19 @@ def test_the_job_modules_exemption_never_lets_the_name_be_bound_or_declared():
         "class _MutantObservation:\n"
         '    notebook_id: str = ""\n'
     )
+    # ``except ... as notebook_id`` 是同一件事的第三种语法糖,而它在 AST 里是
+    # 处理器上的一个**裸字符串**属性,不是 ``ast.Name``——按 ``ctx`` 判读写的
+    # 那条分支根本看不见它。
+    caught = _mutated_job_module(
+        "def _mutant_caught(fn):\n"
+        "    try:\n"
+        "        return fn()\n"
+        "    except Exception as notebook_id:\n"
+        "        return notebook_id\n"
+    )
     assert [kind for kind, _name, _line in binding] == ["赋值目标"], binding
     assert [kind for kind, _name, _line in declaration] == ["赋值目标"], declaration
+    assert [kind for kind, _name, _line in caught] == ["赋值目标"], caught
 
 
 def test_the_job_modules_exemption_is_not_vacuous():

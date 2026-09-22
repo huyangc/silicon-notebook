@@ -1536,7 +1536,7 @@ def test_a_full_waiting_room_refuses_the_newcomer_and_keeps_everyone_in_line():
 
     assert len(service._queue) == _MAX_QUEUED_PARTITIONS
     assert list(service._queue)[0] == "nb-000", "最先排上的必须还在队头"
-    # 进不来的每个库各被拒一次(一次完成最多一条事件),而且事件只有数量。
+    # 进不来的每个库各被拒一次,事件只有数量。
     refusals = [event for event in events.emitted if event.get("reason") == "queue_full"]
     assert len(refusals) == libraries - _MAX_QUEUED_PARTITIONS
     for event in refusals:
@@ -1545,6 +1545,59 @@ def test_a_full_waiting_room_refuses_the_newcomer_and_keeps_everyone_in_line():
         assert "nb-" not in repr(event), event
     # 被拒的库计数原封不动。
     assert service._notebook_pending[f"nb-{libraries - 1:03d}"] == 2
+
+
+def test_a_library_refused_over_and_over_is_reported_once_per_saturated_period():
+    """饱和期的事件上界:**每个库每个饱和期一条**,不是每次提问一条
+    (T2 评审轮 2,P2;实测 20000 次提问发了 12830 条,每条还带一次文件追加
+    和一条 WARNING)。
+
+    「被拒」是容量信号,不是事件流:同一个库在等待室满着的时候每完成一次提问
+    都会被拒,但那说的还是同一件事。标记在它**真的拿到批次**时清掉——所以
+    第二个饱和期会有第二条。
+    """
+    events = _Events()
+    service = _service([], _REPLY, events=events, settings=_NotebooksOnlySettings())
+    service._running = True
+
+    for index in range(_MAX_QUEUED_PARTITIONS):
+        for _ in range(2):
+            service.note_ask_completed(f"nb-{index:03d}")
+    assert len(service._queue) == _MAX_QUEUED_PARTITIONS
+    baseline = len(events.emitted)
+
+    # 一个排不进去的库连续五次完成提问:五次被拒,一条事件。
+    for _ in range(5):
+        service.note_ask_completed("late-comer")
+    refusals = [
+        event for event in events.emitted[baseline:]
+        if event.get("reason") == "queue_full"
+    ]
+    assert len(refusals) == 1, refusals
+    assert refusals[0]["dropped"] == 1
+    assert service._notebook_pending["late-comer"] == 5   # 积压一次没丢
+
+    # 它终于拿到批次(手工腾位 + 排队 + 认领),标记清掉;下一个饱和期重新
+    # 报一条。
+    service._queue.clear()
+    service._queued.clear()
+    service._running = False
+    assert service._enqueue_locked("late-comer") is True
+    assert "late-comer" in service._refused, "入队本身不清标记,认领才清"
+    claimed = service._claim_next_locked()
+    assert claimed == ("late-comer", 5)
+    assert "late-comer" not in service._refused
+    for index in range(_MAX_QUEUED_PARTITIONS):
+        for _ in range(2):
+            service.note_ask_completed(f"nb-{index:03d}")
+    before_second = len(events.emitted)
+    for _ in range(3):
+        service.note_ask_completed("late-comer")
+    second = [
+        event for event in events.emitted[before_second:]
+        if event.get("reason") == "queue_full"
+    ]
+    assert len(second) == 1, second
 
 
 def test_a_crowded_waiting_room_never_starves_the_global_chain(monkeypatch):
@@ -1590,6 +1643,49 @@ def test_a_crowded_waiting_room_never_starves_the_global_chain(monkeypatch):
     drain_events = len(events.emitted) - seeded_events
     assert drain_events <= cycles, drain_events
     assert service._notebook_pending == {}
+
+
+def test_under_saturation_the_global_seat_yields_every_other_batch(monkeypatch):
+    """T2 评审轮 2 的 P2:优先座位在**吞吐跟不上到达**时会把笔记本链挤到零。
+
+    仿真的正是那个条件——每 40 次提问只跑得完一批,也就是全局计数在每一次
+    槽位空出来时都已经过阈值。严格优先下这一格是 200 个库 0 批(评审实测);
+    弱让位(上一批是全局、且有库在等 → 让一位)把它变成交替:笔记本至少拿到
+    全局批次数的一半,而全局一次都没有被饿到。
+
+    宽松条件下不受影响那一半由别的用例钉(队列空时全局照样立刻认领)。
+    """
+    events = _Events()
+    service = _service([], _REPLY, settings=_PartitionSettings(), events=events)
+    claimed: list[str] = []
+    monkeypatch.setattr(
+        service, "_submit_claimed",
+        lambda partition, snapshot: claimed.append(partition),
+    )
+
+    libraries = 4          # 4 个库 × 每轮 10 次 = 每轮 40 次到达 = 全局阈值
+    rounds = 40
+    longest_queue = 0
+    for _ in range(rounds):
+        service._running = True                    # 上一批还在跑
+        for index in range(libraries):
+            for _ in range(10):                    # 单库阈值 10
+                service.note_ask_completed(f"nb-{index}")
+        longest_queue = max(longest_queue, len(service._queue))
+        service._running = False                   # 那一批退出
+        service._maybe_requeue()                   # 只接下一批
+
+    assert len(claimed) == rounds, claimed
+    global_batches = claimed.count("")
+    notebook_batches = len(claimed) - global_batches
+    assert global_batches >= 1, "全局链路仍然必须跑得到"
+    assert notebook_batches >= global_batches / 2, (global_batches, notebook_batches)
+    # 交替的直接证据:没有任何两批连着都是全局的。
+    assert not any(
+        left == "" and right == ""
+        for left, right in zip(claimed, claimed[1:])
+    ), claimed
+    assert longest_queue <= _MAX_QUEUED_PARTITIONS
 
 
 def test_a_notebook_batch_earned_while_busy_runs_when_the_slot_frees(monkeypatch):
