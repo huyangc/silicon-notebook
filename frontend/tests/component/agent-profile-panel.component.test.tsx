@@ -9,7 +9,7 @@
 //   · 重新整理:点完立刻不可点并换成「整理中…」,解除**只认服务端证据**;
 //   · 409:后端那句人话原样上屏,并重取一次拿到新的 revision;
 //   · 总闸:关掉时入口按钮一个节点都不渲染。
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -20,19 +20,27 @@ vi.mock("../../features/agent-profile/profile-api.ts", () => ({
   rebuildUnderstanding: vi.fn(),
   fetchAgentObservations: vi.fn(),
   clearAgentObservations: vi.fn(),
+  fetchExperiencePartition: vi.fn(),
+  distillExperiencePartition: vi.fn(),
+  clearExperiencePartition: vi.fn(),
 }));
 
 import {
   clearAgentObservations,
+  clearExperiencePartition,
   clearUnderstandingBlock,
+  distillExperiencePartition,
   fetchAgentObservations,
+  fetchExperiencePartition,
   fetchUnderstanding,
   rebuildUnderstanding,
   saveUnderstandingBlock,
 } from "../../features/agent-profile/profile-api.ts";
 import { AgentProfilePanel } from "../../app/agent-profile-panel.tsx";
 import { humanizedError } from "../../app/errors.ts";
+import { EXPERIENCE_ACTION_NOTE_MS } from "../../features/agent-profile/profile-model.ts";
 import type {
+  ExperiencePartitionResponse,
   UnderstandingBlock,
   UnderstandingResponse,
 } from "../../features/agent-profile/profile-model.ts";
@@ -66,6 +74,9 @@ const mockClear = vi.mocked(clearUnderstandingBlock);
 const mockRebuild = vi.mocked(rebuildUnderstanding);
 const mockFetchObservations = vi.mocked(fetchAgentObservations);
 const mockClearObservations = vi.mocked(clearAgentObservations);
+const mockFetchExperiences = vi.mocked(fetchExperiencePartition);
+const mockDistill = vi.mocked(distillExperiencePartition);
+const mockClearExperiences = vi.mocked(clearExperiencePartition);
 
 beforeEach(() => {
   mockFetch.mockResolvedValue(response());
@@ -74,6 +85,9 @@ beforeEach(() => {
   mockRebuild.mockResolvedValue({ started: true });
   mockFetchObservations.mockResolvedValue({ enabled: true, items: [], calls_enabled: true, calls: [] });
   mockClearObservations.mockResolvedValue({ removed: 0 });
+  mockFetchExperiences.mockResolvedValue(experiences());
+  mockDistill.mockResolvedValue({ started: true });
+  mockClearExperiences.mockResolvedValue({ removed: 0 });
 });
 
 test("可写成员：两档都渲染，五块齐全（服务端没回的补成空块）", async () => {
@@ -875,6 +889,350 @@ test("Agent 记录：清空某个 Agent 的调用记录只带 call，不动它�
   expect(await screen.findByText("还没有 Agent 调用过这个库")).toBeInTheDocument();
   // 线索那一侧原样还在——这正是按 kind 收窄要保住的东西。
   expect(screen.getByText("常按型号查参数表")).toBeInTheDocument();
+});
+
+// ------------------------------------------------------ 「检索经验」(PR-2)
+//
+// 第四张卡。与「Agent 记录」同一套折叠 + 懒加载形态,但两个管理动作**不是**轮询式
+// 长任务:服务端没有可查的状态字段,所以按下期间禁用 + 进行态文案,返回即还原,
+// 结果落在按钮旁边(AGENTS.md Interactive feedback),不是页面顶部的横幅。
+
+function experiences(
+  over: Partial<ExperiencePartitionResponse> = {},
+): ExperiencePartitionResponse {
+  return {
+    enabled: true,
+    count: 2,
+    updated_at: new Date().toISOString(),
+    can_manage: true,
+    entries: [
+      {
+        action: "exact_lookup",
+        polarity: "bad",
+        rationale: "型号写全了也常常查不到",
+        support: 3,
+        adopted: 0,
+        updated_at: new Date().toISOString(),
+      },
+      {
+        action: "search_chunks",
+        polarity: "good",
+        rationale: "直接在原文里找参数更稳",
+        support: 7,
+        adopted: 0,
+        updated_at: new Date().toISOString(),
+      },
+    ],
+    ...over,
+  };
+}
+
+async function openExperiences(user: ReturnType<typeof userEvent.setup>) {
+  await screen.findByRole("heading", { name: "AI 对这个库的理解" });
+  await user.click(screen.getByText("检索经验"));
+}
+
+/**
+ * 这张卡自己那一块 DOM。按钮查询必须收在卡内:面板里五个块各有一颗「清空」,
+ * 全局查会撞上它们 —— 而撞上本身就说明这些断言必须说清「是哪一颗」。
+ */
+function experienceCard(): HTMLElement {
+  return screen.getByText("检索经验").closest("details") as HTMLElement;
+}
+
+test("检索经验：折叠面板默认收起，展开前一次请求都不发", async () => {
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await screen.findByRole("heading", { name: "AI 对这个库的理解" });
+
+  expect(screen.getByText("检索经验")).toBeInTheDocument();
+  expect(mockFetchExperiences).not.toHaveBeenCalled();
+});
+
+test("检索经验：展开后列表渲染，动作 id 译成界面词且一个字都不上屏", async () => {
+  const user = userEvent.setup();
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await openExperiences(user);
+
+  await waitFor(() => expect(mockFetchExperiences).toHaveBeenCalledWith("nb1"));
+  // 动作词 · 好用/不好用 · 理由 · 支持数,四段齐全。
+  expect(await screen.findByText("精查")).toBeInTheDocument();
+  expect(screen.getByText("不好用")).toBeInTheDocument();
+  expect(screen.getByText("型号写全了也常常查不到")).toBeInTheDocument();
+  expect(screen.getByText("3 次提问支持")).toBeInTheDocument();
+  expect(screen.getByText("段落")).toBeInTheDocument();
+  expect(screen.getByText("好用")).toBeInTheDocument();
+  expect(screen.getByText("7 次提问支持")).toBeInTheDocument();
+  // 后端的封闭词表 id 是英文枚举名,对用户没有意义 —— 一个都不许直出。
+  expect(screen.queryByText(/exact_lookup/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/search_chunks/)).not.toBeInTheDocument();
+  // `adopted` v1 恒 0,刻意不上屏:一个永远是 0 的数字会被读成「从来没被用过」。
+  expect(screen.queryByText(/0 次/)).not.toBeInTheDocument();
+});
+
+test("检索经验：认不出的动作 id 退回中性词，不泄漏原值", async () => {
+  const user = userEvent.setup();
+  mockFetchExperiences.mockResolvedValue(
+    experiences({
+      count: 1,
+      entries: [
+        {
+          action: "some_plugin_action",
+          polarity: "good",
+          rationale: "这个库里这样查得到",
+          support: 1,
+          adopted: 0,
+          updated_at: new Date().toISOString(),
+        },
+      ],
+    }),
+  );
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await openExperiences(user);
+
+  expect(await screen.findByText("其他")).toBeInTheDocument();
+  expect(screen.queryByText(/some_plugin_action/)).not.toBeInTheDocument();
+});
+
+test("检索经验：头部一句给出条数与最近更新", async () => {
+  const user = userEvent.setup();
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await openExperiences(user);
+
+  expect(
+    await screen.findByText("这个库攒下的检索经验：2 条，最近更新 刚刚"),
+  ).toBeInTheDocument();
+});
+
+test("检索经验：从没攒出过东西时头部说「还没有更新过」，列表给空态", async () => {
+  const user = userEvent.setup();
+  mockFetchExperiences.mockResolvedValue(
+    experiences({ count: 0, updated_at: null, entries: [] }),
+  );
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await openExperiences(user);
+
+  expect(
+    await screen.findByText("这个库攒下的检索经验：0 条，还没有更新过"),
+  ).toBeInTheDocument();
+  expect(screen.getByText("还没有攒下经验，多提几次问题后再来看")).toBeInTheDocument();
+});
+
+test("检索经验：「立即整理」按下即不可点并换成「整理中…」，结果落在按钮旁", async () => {
+  const user = userEvent.setup();
+  let release!: (value: { started: boolean }) => void;
+  mockDistill.mockImplementationOnce(
+    () => new Promise((resolve) => { release = resolve; }),
+  );
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await openExperiences(user);
+  await screen.findByText("精查");
+
+  await user.click(within(experienceCard()).getByRole("button", { name: "立即整理" }));
+  // 请求在飞的那段窗口按钮也不能连点。
+  const busy = within(experienceCard()).getByRole("button", { name: "整理中…" });
+  expect(busy).toBeDisabled();
+  expect(within(experienceCard()).getByRole("button", { name: "清空" })).toBeDisabled();
+
+  release({ started: true });
+  // 结果就在按钮旁边,不是页面顶部的横幅;按钮本身还原,可以再点。
+  expect(await screen.findByText("已开始整理，稍后展开刷新")).toBeInTheDocument();
+  expect(within(experienceCard()).getByRole("button", { name: "立即整理" })).toBeEnabled();
+});
+
+test("检索经验：「已开始整理，稍后展开刷新」说到做到 —— 收起再展开真的重取一次", async () => {
+  const user = userEvent.setup();
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await openExperiences(user);
+  await screen.findByText("精查");
+  expect(mockFetchExperiences).toHaveBeenCalledTimes(1);
+
+  await user.click(within(experienceCard()).getByRole("button", { name: "立即整理" }));
+  await screen.findByText("已开始整理，稍后展开刷新");
+
+  await user.click(screen.getByText("检索经验"));   // 收起
+  await user.click(screen.getByText("检索经验"));   // 再展开
+  await waitFor(() => expect(mockFetchExperiences).toHaveBeenCalledTimes(2));
+});
+
+test("检索经验：整理撞 409 时，后端那句人话原样落在按钮旁", async () => {
+  const user = userEvent.setup();
+  mockDistill.mockRejectedValueOnce(humanizedError("正在整理，请稍后再试", 409));
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await openExperiences(user);
+  await screen.findByText("精查");
+
+  await user.click(within(experienceCard()).getByRole("button", { name: "立即整理" }));
+
+  expect(await screen.findByText("正在整理，请稍后再试")).toBeInTheDocument();
+  // 失败不改变列表,也不把按钮永久禁用。
+  expect(within(experienceCard()).getByRole("button", { name: "立即整理" })).toBeEnabled();
+  expect(screen.getByText("型号写全了也常常查不到")).toBeInTheDocument();
+});
+
+test("检索经验：清空是两步确认，确认后列表清空并在按钮旁报出清掉几条", async () => {
+  const user = userEvent.setup();
+  mockClearExperiences.mockResolvedValueOnce({ removed: 2 });
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await openExperiences(user);
+  await screen.findByText("精查");
+
+  await user.click(within(experienceCard()).getByRole("button", { name: "清空" }));
+  expect(mockClearExperiences).not.toHaveBeenCalled();
+  expect(within(experienceCard()).getByRole("button", { name: "取消" })).toBeInTheDocument();
+
+  mockFetchExperiences.mockResolvedValueOnce(
+    experiences({ count: 0, updated_at: null, entries: [] }),
+  );
+  await user.click(within(experienceCard()).getByRole("button", { name: "确认清空" }));
+
+  await waitFor(() => expect(mockClearExperiences).toHaveBeenCalledWith("nb1"));
+  expect(await screen.findByText("已清空 2 条")).toBeInTheDocument();
+  expect(screen.queryByText("型号写全了也常常查不到")).not.toBeInTheDocument();
+  expect(screen.getByText("还没有攒下经验，多提几次问题后再来看")).toBeInTheDocument();
+});
+
+test("检索经验：清空可以取消，一个请求都不发", async () => {
+  const user = userEvent.setup();
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await openExperiences(user);
+  await screen.findByText("精查");
+
+  await user.click(within(experienceCard()).getByRole("button", { name: "清空" }));
+  await user.click(within(experienceCard()).getByRole("button", { name: "取消" }));
+
+  expect(mockClearExperiences).not.toHaveBeenCalled();
+  expect(within(experienceCard()).getByRole("button", { name: "清空" })).toBeInTheDocument();
+});
+
+test("检索经验：这条链路关掉时卡内只有一句话，两个按钮一个都不渲染", async () => {
+  const user = userEvent.setup();
+  mockFetchExperiences.mockResolvedValue(
+    experiences({ enabled: false, count: 0, updated_at: null, entries: [] }),
+  );
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await openExperiences(user);
+
+  // 措辞与面板总闸关掉时那一句**逐字相同**:同一类状态在一个面板里出现两种说法,
+  // 会让人以为是两回事。
+  expect(await within(experienceCard()).findByText("这项功能当前未开启。")).toBeInTheDocument();
+  expect(within(experienceCard()).queryByRole("button", { name: "立即整理" })).not.toBeInTheDocument();
+  expect(within(experienceCard()).queryByRole("button", { name: "清空" })).not.toBeInTheDocument();
+  // 「已关闭」不能被渲染成「还没攒下」—— 那是两回事。
+  expect(screen.queryByText("还没有攒下经验，多提几次问题后再来看")).not.toBeInTheDocument();
+});
+
+test("检索经验：没有管理权时条目照常可见，只是两个按钮不渲染", async () => {
+  const user = userEvent.setup();
+  mockFetchExperiences.mockResolvedValue(experiences({ can_manage: false }));
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await openExperiences(user);
+
+  // 条目对全体成员可见是拍板过的一条:看得见,但动不了。
+  expect(await screen.findByText("型号写全了也常常查不到")).toBeInTheDocument();
+  expect(within(experienceCard()).queryByRole("button", { name: "立即整理" })).not.toBeInTheDocument();
+  expect(within(experienceCard()).queryByRole("button", { name: "清空" })).not.toBeInTheDocument();
+});
+
+test("检索经验：读取失败时人话上屏", async () => {
+  const user = userEvent.setup();
+  mockFetchExperiences.mockRejectedValue(humanizedError("网络不太好，请稍后重试", 500));
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await openExperiences(user);
+
+  expect(await screen.findByText("网络不太好，请稍后重试")).toBeInTheDocument();
+});
+
+test("检索经验：结果提示自走计时器 —— 到时自行消失，失败那一句留着不走", async () => {
+  // AGENTS.md Interactive feedback:结果落在按钮紧邻处,并由它自己的计时器清除。
+  // 一句不走的结果在第二次按下时与上一次长得一模一样,于是「真的又做了一次」
+  // 读起来就成了「没反应」。
+  //
+  // ⚠ 这条用例用 fireEvent 而不是 userEvent:userEvent 自带的延迟要靠真实时钟推进,
+  // 与这里的假时钟互锁(实测整条用例挂死 15s 超时,还会把后面两条一起拖垮)。
+  vi.useFakeTimers();
+  try {
+    render(<AgentProfilePanel notebookId="nb1" />);
+    await vi.waitFor(() => expect(screen.getByText("检索经验")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("检索经验"));
+    await vi.waitFor(() => expect(screen.getByText("精查")).toBeInTheDocument());
+
+    fireEvent.click(within(experienceCard()).getByRole("button", { name: "立即整理" }));
+    await vi.waitFor(() =>
+      expect(screen.getByText("已开始整理，稍后展开刷新")).toBeInTheDocument(),
+    );
+    // 差一点还在 —— 钉住的是「停留一段时间」,不是「渲染完就没了」。
+    await vi.advanceTimersByTimeAsync(EXPERIENCE_ACTION_NOTE_MS - 500);
+    expect(screen.getByText("已开始整理，稍后展开刷新")).toBeInTheDocument();
+    await vi.advanceTimersByTimeAsync(500);
+    await vi.waitFor(() =>
+      expect(screen.queryByText("已开始整理，稍后展开刷新")).not.toBeInTheDocument(),
+    );
+
+    // 失败那一句是要读完、可能还要照着做的信息,不给它设消失时间。
+    mockDistill.mockRejectedValueOnce(humanizedError("正在整理，请稍后再试", 409));
+    fireEvent.click(within(experienceCard()).getByRole("button", { name: "立即整理" }));
+    await vi.waitFor(() =>
+      expect(screen.getByText("正在整理，请稍后再试")).toBeInTheDocument(),
+    );
+    await vi.advanceTimersByTimeAsync(EXPERIENCE_ACTION_NOTE_MS * 3);
+    expect(screen.getByText("正在整理，请稍后再试")).toBeInTheDocument();
+
+    // 下一次按下立刻清掉上一次的结果 —— 计时器是补充,不是替代。
+    fireEvent.click(within(experienceCard()).getByRole("button", { name: "立即整理" }));
+    await vi.waitFor(() =>
+      expect(screen.queryByText("正在整理，请稍后再试")).not.toBeInTheDocument(),
+    );
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("检索经验：代次守卫 —— 先发的读最后返回时，旧快照不得盖掉清空后的结果", async () => {
+  // 可达路径(不是假想的竞态):整理排上之后卡片记着「下次展开要重取」,用户在
+  // 清空请求还在飞的时候收起再展开 —— 于是展开触发的读与清空后的重取同时在飞。
+  // 没有代次守卫时,先发的那一次若最后返回,会把已经删掉的条目复活到界面上。
+  const user = userEvent.setup();
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await openExperiences(user);
+  await screen.findByText("精查");
+
+  await user.click(within(experienceCard()).getByRole("button", { name: "立即整理" }));
+  await screen.findByText("已开始整理，稍后展开刷新");
+
+  let releaseClear!: () => void;
+  mockClearExperiences.mockImplementationOnce(
+    () => new Promise<{ removed: number }>((resolve) => {
+      releaseClear = () => resolve({ removed: 2 });
+    }),
+  );
+  await user.click(within(experienceCard()).getByRole("button", { name: "清空" }));
+  await user.click(within(experienceCard()).getByRole("button", { name: "确认清空" }));
+  await waitFor(() => expect(mockClearExperiences).toHaveBeenCalledTimes(1));
+
+  // 展开触发的那一次读:攥着清空**之前**的旧快照,且最后才返回。
+  let releaseStaleRead!: () => void;
+  mockFetchExperiences.mockImplementationOnce(
+    () => new Promise<ExperiencePartitionResponse>((resolve) => {
+      releaseStaleRead = () => resolve(experiences());
+    }),
+  );
+  await user.click(screen.getByText("检索经验"));   // 收起
+  await user.click(screen.getByText("检索经验"));   // 再展开 → 读(旧快照)在飞
+  await waitFor(() => expect(mockFetchExperiences).toHaveBeenCalledTimes(2));
+
+  // 清空返回 → 它自己的重取拿到清空后的真实状态。
+  mockFetchExperiences.mockResolvedValueOnce(
+    experiences({ count: 0, updated_at: null, entries: [] }),
+  );
+  releaseClear();
+  expect(await screen.findByText("已清空 2 条")).toBeInTheDocument();
+  await screen.findByText("还没有攒下经验，多提几次问题后再来看");
+
+  // 旧快照这时才回来 —— 必须整份丢弃,不得让已删除的条目复活。
+  releaseStaleRead();
+  await waitFor(() => expect(mockFetchExperiences).toHaveBeenCalledTimes(3));
+  expect(screen.queryByText("型号写全了也常常查不到")).not.toBeInTheDocument();
+  expect(screen.getByText("还没有攒下经验，多提几次问题后再来看")).toBeInTheDocument();
 });
 
 test("Agent 记录：调用取满上限时提示还有更早的没显示", async () => {

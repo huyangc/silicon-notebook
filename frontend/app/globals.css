@@ -9714,8 +9714,11 @@ button.tag:hover {
   padding: 13px 14px;
 }
 
-/* 折叠头:整条 <summary> 就是点击目标,右侧的箭头随展开翻转。 */
-.understanding-observations > summary {
+/* 折叠头:整条 <summary> 就是点击目标,右侧的箭头随展开翻转。两张折叠卡
+   (Agent 记录 / 检索经验)共用这一套,各自点名而不是新造一个公共类——改名要
+   连带改 JSX,加一个选择器不动任何既有行为。 */
+.understanding-observations > summary,
+.understanding-experiences > summary {
   cursor: pointer;
   list-style: none;
   display: flex;
@@ -9723,11 +9726,13 @@ button.tag:hover {
   gap: 10px;
 }
 
-.understanding-observations > summary::-webkit-details-marker {
+.understanding-observations > summary::-webkit-details-marker,
+.understanding-experiences > summary::-webkit-details-marker {
   display: none;
 }
 
-.understanding-observations > summary > .understanding-module-title {
+.understanding-observations > summary > .understanding-module-title,
+.understanding-experiences > summary > .understanding-module-title {
   flex: 1 1 auto;
 }
 
@@ -9737,7 +9742,8 @@ button.tag:hover {
   transition: transform .15s ease;
 }
 
-.understanding-observations[open] .understanding-summary-chevron {
+.understanding-observations[open] .understanding-summary-chevron,
+.understanding-experiences[open] .understanding-summary-chevron {
   transform: rotate(180deg);
 }
 
@@ -9939,6 +9945,94 @@ button.tag:hover {
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
+}
+
+/* 「检索经验」卡(PR-2)。每一行是一句完整的话:动作词 + 好/不好 + 理由 + 支持数。
+   四段用同一条 flex 行排,窄宽度下理由整段换行而不把行拆成碎片。 */
+.understanding-experience-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.understanding-experience-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 9px;
+  border-radius: 10px;
+  padding: 9px 11px;
+  background: #fbfcfe;
+}
+
+.understanding-experience-action {
+  flex: none;
+  color: #1b2430;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* 好用 / 不好用。两支色都取自既有的变量:绿用全站 `--green`,不好用走提醒档
+   (`--warning-*`)而不是错误档——「这种查法在这个库不灵」是一条经验,不是故障。
+   「好用」那一档没有成套的 bg/border 变量(:root 只有 --green 一支),底色按同
+   色系配一份浅色,不新造第二支绿。 */
+.understanding-experience-mark {
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.understanding-experience-mark.is-good {
+  border-color: #b7ddcb;
+  color: var(--green);
+  background: #eef8f3;
+}
+
+.understanding-experience-mark.is-bad {
+  border-color: var(--warning-border);
+  color: var(--warning);
+  background: var(--warning-bg);
+}
+
+.understanding-experience-rationale {
+  flex: 1 1 220px;
+  min-width: 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.understanding-experience-support {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 两个管理动作靠左贴着列表,不像 Agent 记录那样右对齐:它们旁边还要放结果那
+   一句话,右对齐会把那句话推到卡外边缘、离按钮反而更远。 */
+.understanding-experience-toolbar {
+  justify-content: flex-start;
+}
+
+/* 动作结果落在按钮**紧邻处**(AGENTS.md Interactive feedback),不是页面顶部的
+   横幅——横幅会滚出视野,第二次点还重复同一句,真效果反而读成「没反应」。 */
+.understanding-action-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.understanding-action-note.is-error {
+  color: var(--danger);
+  font-weight: 650;
 }
 
 .understanding-agent-card {

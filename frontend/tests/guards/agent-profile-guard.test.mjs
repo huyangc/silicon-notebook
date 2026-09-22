@@ -68,6 +68,29 @@ test("「重新整理」带非平凡的 disabled，且钉住那个在飞标志",
   assert.deepEqual(offenders, []);
 });
 
+// 「立即整理」(PR-2「检索经验」)走的是同一条红线,但**不是**同一个入口:上面那条
+// 按 `onRebuild(scope)` 认身份,认不到这颗按钮。它的形态差别也是实的——服务端这条
+// 链路没有可轮询的状态字段,所以忙碌位只覆盖「请求在飞」那一段、返回即还原,而不是
+// 像「重新整理」那样按轮询证据解除。相同的那一半(点完立刻不可点、进行态文案按这个
+// 动作的语义写)照钉:摘掉 disabled、或把它换成恒假,都必须报红。
+test("「立即整理」带非平凡的 disabled，且钉住那个在飞标志", () => {
+  const matched = buttonsMatching(jsxElements(panel, "button"), "startDistill()");
+  assert.ok(matched.length > 0, "没找到「立即整理」按钮（入口被改名或删除？守卫失效）");
+
+  const offenders = [];
+  for (const element of matched) {
+    const disabled = element.bindings?.disabled ?? element.attributes?.disabled;
+    if (disabled === undefined) {
+      offenders.push("缺 disabled —— 整理请求在飞时按钮必须不可点");
+    } else if (TRIVIALLY_FALSE.has(String(disabled).trim())) {
+      offenders.push(`disabled=${disabled} 恒假，等于没写`);
+    } else if (!String(disabled).includes("busy")) {
+      offenders.push(`disabled=${disabled} 里没有在飞标志 busy`);
+    }
+  }
+  assert.deepEqual(offenders, []);
+});
+
 test("进行态文案按这个动作的语义写，不是笼统的「处理中」", () => {
   const source = panel.getFullText();
   assert.ok(source.includes("整理中…"), "缺进行态文案：整理中…");
@@ -174,6 +197,9 @@ test("面板只经 profile-api 发请求：不拼 URL、不碰 api-client、不�
       "rebuildUnderstanding",
       "fetchAgentObservations",
       "clearAgentObservations",
+      "fetchExperiencePartition",
+      "distillExperiencePartition",
+      "clearExperiencePartition",
     ]),
   );
 

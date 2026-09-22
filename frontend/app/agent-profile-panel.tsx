@@ -42,13 +42,16 @@ import {
   type ReactNode,
   type SyntheticEvent,
 } from "react";
-import { Bot, ChevronDown, RefreshCw, Search, Sparkles } from "lucide-react";
+import { Bot, ChevronDown, Lightbulb, RefreshCw, Search, Sparkles } from "lucide-react";
 
 import { toUserMessage } from "./errors.ts";
 import {
   clearAgentObservations,
+  clearExperiencePartition,
   clearUnderstandingBlock,
+  distillExperiencePartition,
   fetchAgentObservations,
+  fetchExperiencePartition,
   fetchUnderstanding,
   rebuildUnderstanding,
   saveUnderstandingBlock,
@@ -58,6 +61,7 @@ import {
   AGENT_OBSERVATION_SAMPLE_MAX,
   AGENT_PROFILE_VALUE_MAX_CHARS,
   BASE_LABELS,
+  EXPERIENCE_ACTION_NOTE_MS,
   OVERLAY_LABELS,
   PROFILE_BLOCK_HINTS,
   PROFILE_BLOCK_TITLES,
@@ -70,6 +74,9 @@ import {
   collapseCallRuns,
   draftIsStale,
   evidenceSourceIds,
+  experienceActionLabel,
+  experienceHeadline,
+  experiencePolarityLabel,
   groupCallsByAgent,
   groupObservationsByAgent,
   isUnderstandingChainBusy,
@@ -82,6 +89,7 @@ import {
   type AgentCall,
   type AgentObservation,
   type AgentRecordKind,
+  type ExperiencePartitionResponse,
   type UnderstandingBlock,
   type UnderstandingDraft,
   type UnderstandingJobStatus,
@@ -648,6 +656,269 @@ function AgentObservationSection({ notebookId }: { notebookId: string }) {
 }
 
 /**
+ * 一个动作做完之后落在**按钮旁边**的那句话。
+ *
+ * `failed` 分开存而不是靠文案猜:成功与失败要的可访问角色不同(status vs alert),
+ * 颜色也不同,而两者的文本都来自服务端/本地文案,没有任何可判别的形状。
+ */
+type ActionNote = { text: string; failed: boolean } | null;
+
+/**
+ * 一句「刚才那下做成了什么」,外加它自己的计时器(`AGENTS.md` Interactive feedback
+ * 基线:结果落在控件紧邻处,并由它自己清除)。
+ *
+ * 清除有三个时机,一个都不能少:到时、下一次按下(调用方按下时先置 null)、以及
+ * 组件卸载——effect 的 cleanup 同时覆盖后两者,因为换一份新的 note 会让 effect
+ * 重跑,先把上一把计时器拆掉,不会攒下一串到期就把新结果抹掉的旧计时器。
+ *
+ * 失败那一句**不计时**(见 `EXPERIENCE_ACTION_NOTE_MS` 的注释):它是要读完的信息,
+ * 不是一次性的确认。
+ */
+function useActionNote(): [ActionNote, (next: ActionNote) => void] {
+  const [note, setNote] = useState<ActionNote>(null);
+  useEffect(() => {
+    if (!note || note.failed) return;
+    const timer = window.setTimeout(() => setNote(null), EXPERIENCE_ACTION_NOTE_MS);
+    return () => window.clearTimeout(timer);
+  }, [note]);
+  return [note, setNote];
+}
+
+function ActionNoteLine({ note }: { note: ActionNote }) {
+  if (!note) return null;
+  return (
+    <span
+      className={note.failed ? "understanding-action-note is-error" : "understanding-action-note"}
+      role={note.failed ? "alert" : "status"}
+    >
+      {note.text}
+    </span>
+  );
+}
+
+/**
+ * 「检索经验」——PR-2 的第四张卡:这个库自己攒下的查法经验(哪种查法好用/不好用)。
+ *
+ * 与上面三档的形态关系,以及每一处「为什么这样而不是那样」:
+ *
+ * · **折叠 + 首次展开才拉取**,与「Agent 记录」逐字同一条口径(多数用户不会点开,
+ *   跟着面板无条件加载是白付一次查询),连代次守卫一起镜像过来:请求返回时若已经
+ *   不是最新那一次,结果整份丢弃,不拿旧快照盖新结果。
+ *
+ * · **两个管理动作都不是后台长任务的轮询形态**。服务端这条链路没有可查的状态字段
+ *   (契约里只有 `{"started": true}`),所以界面**不轮询、也不宣布结局**:按下期间
+ *   按钮禁用并换成进行态文案,请求返回即还原,结果落在按钮旁边那一行——`AGENTS.md`
+ *   Interactive feedback 要的「结果落在按钮自身或紧邻处」,不是页面顶部的横幅。
+ *
+ * · 「已开始整理，稍后展开刷新」这句话必须是**真的**:整理是异步的,立刻重取只会
+ *   拿回同一份旧列表。所以成功之后记一个 `refreshOnOpen`,下次收起再展开时真的
+ *   重取一次——否则那句话就是在教用户做一件不起作用的事。
+ *
+ * · `enabled=false`(这条链路的总闸)时卡内只有一句话,两个按钮一个都不渲染:一颗
+ *   注定 409 的按钮比没有按钮更糟(#616 R3 的原话)。`can_manage=false` 同理——
+ *   读权成员照样看得见条目(条目对全体成员可见是拍板过的),只是不能动它们。
+ */
+function ExperienceSection({ notebookId }: { notebookId: string }) {
+  const [data, setData] = useState<ExperiencePartitionResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [distilling, setDistilling] = useState(false);
+  const [distillNote, setDistillNote] = useActionNote();
+  const [clearing, setClearing] = useState(false);
+  const [clearNote, setClearNote] = useActionNote();
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  // 「整理已经排上了」之后,下一次展开要真的重取(见上面模块注释第三条)。
+  const [refreshOnOpen, setRefreshOnOpen] = useState(false);
+  const loadEpochRef = useRef(0);
+
+  const load = useCallback(async () => {
+    const epoch = ++loadEpochRef.current;
+    setLoading(true);
+    setError("");
+    try {
+      const next = await fetchExperiencePartition(notebookId);
+      if (epoch === loadEpochRef.current) {
+        setData(next);
+        setRefreshOnOpen(false);
+      }
+    } catch (err) {
+      if (epoch === loadEpochRef.current) {
+        setError(toUserMessage(err, "没能读到检索经验，请稍后重试"));
+      }
+    } finally {
+      if (epoch === loadEpochRef.current) setLoading(false);
+    }
+  }, [notebookId]);
+
+  function onToggle(event: SyntheticEvent<HTMLDetailsElement>) {
+    if (event.currentTarget.open && (data === null || refreshOnOpen) && !loading) {
+      void load();
+    }
+  }
+
+  // 两个动作互斥:清空在飞时整理没有意义(整理的输入正在被删),整理在飞时清空会
+  // 把刚排上的那一批的结果删成半截。
+  const busy = distilling || clearing;
+
+  async function startDistill() {
+    // 忙碌位在 await **之前**置上:请求在飞的那段窗口按钮也不能连点。
+    setDistilling(true);
+    setDistillNote(null);
+    setClearNote(null);
+    try {
+      await distillExperiencePartition(notebookId);
+      setDistillNote({ text: "已开始整理，稍后展开刷新", failed: false });
+      setRefreshOnOpen(true);
+    } catch (err) {
+      // 409 的两种来历(总闸关掉、已经有一次在跑)后端都写成了人话,原样上屏。
+      setDistillNote({
+        text: toUserMessage(err, "现在没能开始整理，请稍后重试"),
+        failed: true,
+      });
+    } finally {
+      setDistilling(false);
+    }
+  }
+
+  async function clearPartition() {
+    setConfirmingClear(false);
+    setClearing(true);
+    setClearNote(null);
+    setDistillNote(null);
+    try {
+      const result = await clearExperiencePartition(notebookId);
+      // 删掉的条数来自服务端,不拿界面上那份可能已经过期的列表长度充数。
+      setClearNote({ text: `已清空 ${result.removed} 条`, failed: false });
+      await load();
+    } catch (err) {
+      setClearNote({ text: toUserMessage(err, "没能清空，请稍后重试"), failed: true });
+    } finally {
+      setClearing(false);
+    }
+  }
+
+  const count = data?.count ?? 0;
+
+  return (
+    <details
+      className="understanding-module understanding-observations understanding-experiences"
+      onToggle={onToggle}
+    >
+      <summary className="understanding-module-head">
+        <span className="understanding-module-title">
+          <span className="understanding-module-icon" aria-hidden="true"><Lightbulb size={15} /></span>
+          <span className="understanding-module-name">检索经验</span>
+          <span className="understanding-scope-chip">笔记本里的每个人</span>
+          {count > 0 ? <span className="understanding-count-chip">{count}</span> : null}
+        </span>
+        <ChevronDown size={16} className="understanding-summary-chevron" aria-hidden="true" />
+      </summary>
+      <div className="understanding-module-body">
+        {error ? (
+          <p className="understanding-note is-error" role="alert">{error}</p>
+        ) : null}
+        {loading && data === null ? <p className="understanding-note">加载中…</p> : null}
+        {data !== null && !data.enabled ? (
+          <p className="understanding-note">这项功能当前未开启。</p>
+        ) : null}
+        {data !== null && data.enabled ? (
+          <>
+            <p className="understanding-note">
+              {experienceHeadline(data.count, data.updated_at)}
+            </p>
+            <p className="understanding-module-hint">
+              AI 提问时用过的查法里，哪些在这个库好用、哪些不好用。笔记本里的每个人看到的都是同一份。
+            </p>
+            {data.entries.length === 0 ? (
+              <p className="understanding-empty">还没有攒下经验，多提几次问题后再来看</p>
+            ) : (
+              <ul className="understanding-experience-list">
+                {data.entries.map((entry, index) => {
+                  const polarity = experiencePolarityLabel(entry.polarity);
+                  return (
+                    <li
+                      className="understanding-experience-row"
+                      key={`${entry.action}-${entry.polarity}-${index}`}
+                    >
+                      <span className="understanding-experience-action">
+                        {experienceActionLabel(entry.action)}
+                      </span>
+                      {/* 好坏认不出时整段不显示(不编第三个词),见 experiencePolarityLabel。 */}
+                      {polarity ? (
+                        <span
+                          className={
+                            entry.polarity === "good"
+                              ? "understanding-experience-mark is-good"
+                              : "understanding-experience-mark is-bad"
+                          }
+                        >
+                          {polarity}
+                        </span>
+                      ) : null}
+                      <span className="understanding-experience-rationale">{entry.rationale}</span>
+                      <span className="understanding-experience-support">
+                        {entry.support} 次提问支持
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            {data.can_manage ? (
+              <div className="understanding-observations-toolbar understanding-experience-toolbar">
+                <div className="understanding-block-actions">
+                  <button
+                    type="button"
+                    className="sort-button"
+                    disabled={busy}
+                    title={busy ? "整理进行中" : "现在就让 AI 把最近的查法整理成经验"}
+                    onClick={() => { void startDistill(); }}
+                  >
+                    <RefreshCw size={14} className={distilling ? "busy-spin" : undefined} />
+                    {distilling ? "整理中…" : "立即整理"}
+                  </button>
+                  <ActionNoteLine note={distillNote} />
+                  {confirmingClear ? (
+                    <>
+                      <button
+                        type="button"
+                        className="sort-button danger-text"
+                        disabled={busy}
+                        onClick={() => { void clearPartition(); }}
+                      >
+                        {clearing ? "清空中…" : "确认清空"}
+                      </button>
+                      <button
+                        type="button"
+                        className="sort-button"
+                        disabled={busy}
+                        onClick={() => setConfirmingClear(false)}
+                      >
+                        取消
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className="sort-button"
+                      disabled={busy}
+                      onClick={() => setConfirmingClear(true)}
+                    >
+                      清空
+                    </button>
+                  )}
+                  <ActionNoteLine note={clearNote} />
+                </div>
+              </div>
+            ) : null}
+          </>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
+/**
  * 面板主体。外层(page.tsx)负责浮动窗与标题栏,这里只管内容——同 `SchemaManager`
  * 与 `KgAnalysisView` 的分工。
  */
@@ -897,6 +1168,11 @@ export function AgentProfilePanel({
       <div className="understanding-panel">
         <p className="understanding-note">这项功能当前未开启。</p>
         <AgentObservationSection notebookId={notebookId} />
+        {/* 「检索经验」跟着 Agent 记录一起留下,理由逐字相同:它有**自己**那把
+            开关(两条链路不是同一个部署项),这一把关掉时那一份可能照常在攒,
+            而且已经攒下的条目本来就允许清空——在这里整块不挂,等于让一份用户
+            有权删除的数据在浏览器里既看不到也删不掉。 */}
+        <ExperienceSection notebookId={notebookId} />
       </div>
     );
   }
@@ -954,6 +1230,7 @@ export function AgentProfilePanel({
         resolveSourceTitle={resolveSourceTitle}
       />
       <AgentObservationSection notebookId={notebookId} />
+      <ExperienceSection notebookId={notebookId} />
     </div>
   );
 }

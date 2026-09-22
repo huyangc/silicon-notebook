@@ -1997,8 +1997,11 @@ Agent 维护一份低成本、经 LLM 巡固的、关于笔记本的理解摘要
 | `PUT /notebooks/{id}/understanding/{label}`（`scope: "shared"|"mine"`） | `shared` 需要等同 owner 的 `agent_profile:write` 能力；`mine` 只需读权 + 该覆盖层的行级归属 |
 | `DELETE /notebooks/{id}/understanding/{label}?scope=` | 与写端点相同的权限口径；清空取值但保留该行与其历史 |
 | `POST /notebooks/{id}/understanding/rebuild`（`{scope}`） | 与写端点相同的权限口径；手动认领并重跑该链路的巡固，忙碌或总闸关闭时 409 |
+| `GET /notebooks/{id}/understanding/experiences` | 任意有读权的成员；这本笔记本自己那一份[检索策略经验](#检索策略经验)（下一节），返回 `enabled`（跟随 `RETRIEVAL_EXPERIENCE_ENABLED`，**不是**上面那把总闸）、`count`、`updated_at`（分区内最新，空分区为 `null`）、`can_manage`（纯能力位，与 `can_edit_base` 同口径：镜像库不并进来，围栏只挡下面两个写端点）与 `entries`；条目按 `(support desc, updated_at desc, id asc)` 排，最多 `RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES`（100）条，每条只含 `action`/`polarity`/`rationale`/`support`/`adopted`/`updated_at`——条目 id、情境指纹与出处 run id 一律不下发 |
+| `POST /notebooks/{id}/understanding/experiences/distill` | 需要 `agent_profile:write`（同共享底座；无此能力 404）；手动排一次该库的整理，单飞占用时 409（与手动重建共用同一句文案），`RETRIEVAL_EXPERIENCE_ENABLED` 关闭时 409（另一句）；镜像库被围栏拦下时 409 且 detail 是带 `sync_origin` 的对象 |
+| `DELETE /notebooks/{id}/understanding/experiences` | 与上一行相同的权限口径；清空**这本笔记本**那一份（全局分区与别的库一行不动），返回 `{"removed": n}`。**总闸关闭时照常可删**——关开关说的是「从现在起不再记」，不是把记过的行变成既看不到也删不掉的东西 |
 
-`AGENT_PROFILE_ENABLED`（默认 true）是唯一总闸，同时管住注入、巡固触发与两个 API 面的可见性——关闭后处处逐字回到接入前：不注入、不记 trace 步、不排巡固，API 不是 404 而是返回 `enabled=false` 且两个列表为空（让前端能区分「关了」与「还没形成理解」），重建端点 409。
+`AGENT_PROFILE_ENABLED`（默认 true）是**理解块这一侧**的唯一总闸（上表最后三行的检索经验跟随另一把独立开关 `RETRIEVAL_EXPERIENCE_ENABLED`，见下一节），同时管住注入、巡固触发与两个 API 面的可见性——关闭后处处逐字回到接入前：不注入、不记 trace 步、不排巡固，API 不是 404 而是返回 `enabled=false` 且两个列表为空（让前端能区分「关了」与「还没形成理解」），重建端点 409。
 
 **Agent 观察记录喂覆盖层，且不可信（Agentic Memory P3）。** 持有 `agent_observation:write` scope
 的外部 Agent 可随时调用 MCP 工具 `add_observation`，向自己在这个 `(笔记本, 用户)` 下的观察
@@ -2111,7 +2114,9 @@ not-found 分支）**仍然留一行**。两个理由都是刻意的。一是它
 
 **服务端确定性推送的步级提示（Agentic Memory P4，T6）。** 一条独立的、零 LLM 的机制，**只**受注入闸（`RETRIEVAL_EXPERIENCE_INJECT_ENABLED`）门控——不要求任何档位，因为它不占用额外反思轮：服务端自己在四个已埋点的动作分支（`ppr`/`exact_lookup`/`expand`/`follow_chain`——这四个分支的派发代码本来就会算出「本轮新增了几条」这个确定性计数，作为自己既有账目的一部分）之一记录到该动作在本 run 内**第二次**连续零新增调用时，往 reflect 循环回喂给模型的账目摘要里追加一句话。这句提示会点名该动作、说明零命中已经连续几次，并**逐字引用**（不改写）经验库里与该动作、该 run 当前情境匹配度最高的一条 `bad` 极性条目的理由（相似度地板与本特性其余各处一致；库里找不到匹配的 `bad` 条目就不提示——一句没有内容的提示比不提示更糟）。整个 run 至多提示两次，是四个被跟踪动作**合计**的总闸（不是每个动作各两次）——这个上限存在的理由是防止四个通道同时停摆时，一轮反思的账目摘要被四条提示同时拉长。一个动作一旦被提示过，本 run 内不会再被第二次提示，不管它之后又累计了多少次零命中。这句提示套的是一个固定的中文模板，这里逐字照抄代码里的写法——`（提示:「{动作}」这类动作在当前场景已连续 {N} 次未拿到新证据;以往打法经验:「{rationale}」。可考虑改用其他动作。）`——被引用的理由原样嵌入（已经受写入侧 `RETRIEVAL_EXPERIENCE_RATIONALE_MAX_CHARS`——被动块依赖的同一个 160 字符上限——约束过，这里是复用既有上限，不是新开一个），动作名走的是模型自己 schema 里用的那套拼写（`_ACTION_IDS`），不是内部 trace-step 拼写。全程 fail-open：读经验库、给情境打分、拼句子都是对本轮反思已经在内存里的数据做的纯函数计算，链路上任何一步读失败都只是这一轮不提示，不会打断反思循环。
 
-**只经由轨迹可见。** v1 不为它新增 `AskResponse` 字段，也不做管理面板——一张全局的、跨用户的、带 `support`/`adopted` 计数的封闭词表表，即便已经封闭化，也仍然是关于别人用量的信息，所以唯一面向用户的界面是轨迹里的一步轻量展示（界面标签「打法」），报告送达条数与字符数，与集合地图同一条「集合地图式内部脚手架」登记口径。P4 的 `consult_memory` 有自己独立的轨迹步（界面标签「回想」，刻意与「打法」和 Memory 召回步的「记忆」都不同名），报告的是**这次调用自己**渲染之后新送达的条数（修复轮 spec④，不是累计总数）；P4 的步级提示不新增任何轨迹步类型——它搭在既有的 reflect 账目摘要文本里，与「已确认方向未执行」的披露走的是同一条路。面向管理员查看库内容的界面留给后续阶段。
+**只经由轨迹可见。** v1 不为它新增 `AskResponse` 字段，也不做管理面板——一张全局的、跨用户的、带 `support`/`adopted` 计数的封闭词表表，即便已经封闭化，也仍然是关于别人用量的信息，所以唯一面向用户的界面是轨迹里的一步轻量展示（界面标签「打法」），报告送达条数与字符数，与集合地图同一条「集合地图式内部脚手架」登记口径。P4 的 `consult_memory` 有自己独立的轨迹步（界面标签「回想」，刻意与「打法」和 Memory 召回步的「记忆」都不同名），报告的是**这次调用自己**渲染之后新送达的条数（修复轮 spec④，不是累计总数）；P4 的步级提示不新增任何轨迹步类型——它搭在既有的 reflect 账目摘要文本里，与「已确认方向未执行」的披露走的是同一条路。
+
+**界面（2026-09-22 起）：P1 理解面板第四张卡「检索经验」。** 上面那句「不做管理面板」针对的是**全局**那一张跨用户的表，按笔记本分区之后它对**本库那一份**不再成立：分区里的条目由这个库自己的提问蒸出、由这个库全体成员共享，所以把它摆给这些成员看不再是「关于别人用量」的信息。卡片读 `GET /notebooks/{id}/understanding/experiences`（三个端点连同权限口径列在上一节「端点与角色矩阵」那张表的末尾三行），每行显示动作词 + 好用/不好用 + 一句理由 + 支持它的提问数；`agent_profile:write` 成员另有「立即整理」与「清空」两个动作。**全局分区仍然没有界面**——面向管理员查看全局库内容的界面留给后续阶段。
 
 | 项 | 数值 |
 | --- | --- |
@@ -2451,6 +2456,9 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - `PUT /api/notebooks/{id}/understanding/{label}` body `{scope: "shared"|"mine", value, expected_revision}` —— `shared` 需要 `agent_profile:write` 能力，`mine` 只需读权 + 行级归属；超过 400 字符上限返回 422，`expected_revision` 过期返回 409
 - `DELETE /api/notebooks/{id}/understanding/{label}?scope=&expected_revision=` —— 与写端点相同的权限口径与同一套乐观并发：`expected_revision` 为界面上看到过的版本号（必填；过期 409）；清空取值但保留该行与其历史
 - `POST /api/notebooks/{id}/understanding/rebuild` body `{scope}` —— 与写端点相同的权限口径；忙碌或 `AGENT_PROFILE_ENABLED` 关闭时返回 409
+- `GET /api/notebooks/{id}/understanding/experiences` —— 这本笔记本自己那一份检索策略经验；任意有读权的成员；返回 `enabled`（跟随 `RETRIEVAL_EXPERIENCE_ENABLED`）、`count`、`updated_at`、`can_manage`、`entries`——见[检索策略经验](#检索策略经验)
+- `POST /api/notebooks/{id}/understanding/experiences/distill` —— 需要 `agent_profile:write`（无此能力 404）；手动排一次整理，单飞占用或 `RETRIEVAL_EXPERIENCE_ENABLED` 关闭时返回 409（两种文案不同）
+- `DELETE /api/notebooks/{id}/understanding/experiences` —— 权限口径同上；清空这本笔记本那一份，返回 `{removed}`；总闸关闭时照常可删
 - `GET /api/notebooks/{id}/knowledge-types`、`GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`、`PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
 - `GET /api/notebooks/{id}/graph`
 - Knowhow 表：`GET|POST /api/notebooks/{id}/knowhow`、`GET|PATCH|DELETE .../knowhow/{table_id}`、`POST .../knowhow/{table_id}/reproject`——另有导入（`POST .../knowhow/import/preview`、`POST .../knowhow/import`）、列/行/格编辑（`POST .../knowhow/{table_id}/columns`、`PATCH|DELETE .../columns/{column_id}`、`POST .../knowhow/{table_id}/rows`、`DELETE .../rows/{row_id}`、`PATCH .../rows/{row_id}/cells/{column_id}`）、Excel 模板往返（`GET .../knowhow/{table_id}/template`、`POST .../knowhow/{table_id}/append` 配 `mode=preview|commit`）、显式的建议式表达优化（`POST .../rows/{row_id}/cells/{column_id}/optimize`）、带全库推理取证的单行空列补全建议（`POST .../knowhow/{table_id}/rows/{row_id}/complete`，可选 `target_column_ids`，返回 `retrieval_mode` + `retrieval_scope` + `retrieval_status` + `reasoning_trace` + `evidence` + `suggestions`），以及确定性/LLM 辅助的格子格式化（`POST .../rows/{row_id}/cells/{column_id}/reformat`）。官方网页端使用对应的 `optimize/stream`、`complete/stream` 与 `reformat/stream` 变体；JSON 路由保持兼容。

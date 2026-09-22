@@ -235,3 +235,118 @@ class AgentObservationsCleared(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     removed: int
+
+
+# ---------------------------------------------------------------------------
+# Agentic Memory P2, per-notebook partitioning (PR-2 / T5): 「检索经验」 — this
+# notebook's own slice of the retrieval-strategy experience library. Every
+# member of the notebook READS it (the entries carry no source, no question
+# text and no person: see ``RetrievalExperienceStorePort``'s structural
+# privacy argument); managing it — one manual consolidation, or clearing the
+# slice — takes ``agent_profile:write``, the same admin tier the shared
+# understanding base takes.
+#
+# Deliberately NOT a variant of ``UnderstandingBlockOut``: a block is a
+# sentence about THIS library, an entry here is a conclusion about a SHAPE of
+# question ("with a question like this, that retrieval action was/was not
+# worth using"). One model over both would invite a renderer to show them in
+# the same voice.
+# ---------------------------------------------------------------------------
+
+
+class ExperienceEntryOut(BaseModel):
+    """One distilled entry, projected for display.
+
+    Four of the store's columns are absent, and each absence is the contract
+    rather than an oversight:
+
+    * ``id`` — a content hash over the situation fingerprint and the
+      partition. Nothing on this API accepts an entry id (both management
+      actions work on the whole slice), so publishing it would hand out a
+      stable handle to an internal fingerprint and nothing to do with it.
+    * ``situation`` — the eight-key fingerprint itself. It is the one field
+      that describes the SHAPE of other members' questions; design §13-Q2
+      decided to show the conclusion, not the fingerprint it was drawn from.
+    * ``provenance`` — run ids belonging to other members' asks.
+    * ``notebook_id`` — the whole response IS one notebook's slice; repeating
+      it per row says nothing and invites a renderer to put a library id on a
+      screen.
+
+    ``adopted`` rides along even though the first panel only renders
+    ``support``: it is the FIRST key of the eviction ordering, so "why did
+    this entry survive while that one was trimmed" stays answerable from the
+    response instead of from the database.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Closed action vocabulary (``retrieve`` / ``ppr`` / ``exact_lookup`` /
+    #: …), served RAW like every other enum on this API. The browser owns the
+    #: user-facing wording, and an id it does not know renders as a generic
+    #: word rather than reaching a screen as an identifier.
+    action: str
+    #: ``good`` / ``bad`` — the other closed vocabulary, same rule.
+    polarity: str
+    rationale: str
+    support: int
+    adopted: int
+    updated_at: str
+
+
+class ExperiencePartitionResponse(BaseModel):
+    """``GET /notebooks/{id}/understanding/experiences``.
+
+    ``enabled=false`` (``RETRIEVAL_EXPERIENCE_ENABLED`` off, or a composition
+    root that never wired the store) carries ``count=0`` and no entries rather
+    than 404 — the same "off" vs "on but nothing learned yet" distinction
+    ``UnderstandingResponse`` draws, and the panel needs both words.
+
+    ``count``, ``updated_at`` and ``entries`` all come from ONE read of the
+    slice, so a response can never claim a count that its own list
+    contradicts. The read is bounded by the slice's own row ceiling
+    (``RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES``), which is also what
+    eviction trims to — so "the list is the slice" holds except in the window
+    between a distillation's write and its eviction, where the count reported
+    is the one the reader can actually see.
+
+    ``updated_at`` is the newest entry's timestamp, or ``None`` for an empty
+    slice — never an empty string, because "never updated" and "updated at an
+    unknown time" have to stay tellable apart by a browser that renders it.
+
+    ``can_manage`` gates the two management actions below; ``False`` means the
+    panel renders no buttons at all rather than buttons that would 404. It is
+    a PURE CAPABILITY bit — the mirror-write fence is deliberately not folded
+    into it, exactly as it is not folded into ``can_edit_base``: a mirrored
+    notebook's members have lost no permission, and the fence's own 409
+    (carrying ``sync_origin``) explains what actually happened better than a
+    button that quietly went missing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    count: int = 0
+    updated_at: str | None = None
+    can_manage: bool = False
+    entries: list[ExperienceEntryOut] = Field(default_factory=list)
+
+
+class ExperienceDistillStarted(BaseModel):
+    """``POST /notebooks/{id}/understanding/experiences/distill`` response.
+
+    Only ever ``True``: "nothing was scheduled for you" is a 409 with a
+    sentence, not a ``started=false`` a caller has to notice. Same shape and
+    same reasoning as ``UnderstandingRebuildResponse``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    started: bool
+
+
+class ExperiencePartitionCleared(BaseModel):
+    """``DELETE /notebooks/{id}/understanding/experiences`` response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    removed: int

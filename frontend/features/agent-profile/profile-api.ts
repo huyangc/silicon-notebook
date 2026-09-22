@@ -14,6 +14,7 @@ import { requestJson } from "../../app/api-client.ts";
 import type {
   AgentObservationsResponse,
   AgentRecordKind,
+  ExperiencePartitionResponse,
   UnderstandingBlock,
   UnderstandingResponse,
   UnderstandingScope,
@@ -109,6 +110,53 @@ export function clearAgentObservations(
   const query = params.toString();
   return requestJson<{ removed: number }>(
     `/notebooks/${notebookId}/agent-observations${query ? `?${query}` : ""}`,
+    { ...options, method: "DELETE" },
+  );
+}
+
+/**
+ * 读这个库攒下的检索经验(PR-2)。挂在同一个 `understanding` 路由家族下,复用它的
+ * 读权判据——所以这里也没有第二套鉴权面要前端操心。
+ *
+ * 总闸关掉时后端回 `enabled:false` + 空列表(不是 404),与上面两个读端点同一口径。
+ */
+export function fetchExperiencePartition(
+  notebookId: string,
+): Promise<ExperiencePartitionResponse> {
+  return requestJson<ExperiencePartitionResponse>(
+    `/notebooks/${notebookId}/understanding/experiences`,
+    options,
+  );
+}
+
+/**
+ * 手动整理一次。返回即「已经排上」,不是「已经做完」——与 `rebuildUnderstanding`
+ * 同一语义,但这条链路服务端**没有**可轮询的状态字段,所以界面不轮询、也不宣布
+ * 结局,只说「已经开始」。
+ *
+ * 两种 409 都由后端写成人话(带 `X-User-Message`,经 `errors.ts` 原样透出):
+ * 总闸关掉、以及已经有一次整理在跑。
+ */
+export function distillExperiencePartition(
+  notebookId: string,
+): Promise<{ started: boolean }> {
+  return requestJson<{ started: boolean }>(
+    `/notebooks/${notebookId}/understanding/experiences/distill`,
+    { ...options, method: "POST" },
+  );
+}
+
+/**
+ * 清空这个库攒下的检索经验,返回删掉的条数。
+ *
+ * 总闸关掉时**照样允许清空**(后端刻意如此):关开关是「从现在起不再攒」,不是
+ * 「把攒过的藏起来」——与 Agent 记录那条逐字同一个道理。
+ */
+export function clearExperiencePartition(
+  notebookId: string,
+): Promise<{ removed: number }> {
+  return requestJson<{ removed: number }>(
+    `/notebooks/${notebookId}/understanding/experiences`,
     { ...options, method: "DELETE" },
   );
 }
