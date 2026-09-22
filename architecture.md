@@ -1,6 +1,6 @@
 # silicon-notebook 架构
 
-更新日期：2026-08-22
+更新日期：2026-09-22
 
 本文记录当前已经由代码与绿色回归测试固定的运行时边界。部署配置说明以 `docs/deployment-and-configuration.md` / `_zh.md` 为准，默认值与校验由 `backend/app/core/config.py` 拥有；`.env.example` 只提供常用部署模板。产品操作说明以 `docs/product-and-api.md` / `_zh.md` 为准；协作约束由 `AGENTS.md` 路由到对应权威文档。架构整改采用 contract-first strangler，不用文档中的目标结构反向描述尚未发生的迁移。
 

@@ -261,7 +261,7 @@ full-distribution snapshot (`db_write_lock_stats`, unfiltered but a point-in-tim
 view) — a call site can be busy without ever crossing the threshold, and that only shows up
 in the second table. Tune the capture threshold with `DB_WRITE_LOCK_WARN_MS` (default 200).
 
-**Log viewer — `/dev/logs`.** A read-only debug page that visualizes these JSONL channels (LLM channel in v1). The left list is filterable by kind / status / model with full-text search; the detail pane shows exactly what was sent to the LLM (the `system` / `user` messages and the `schema_hint`) alongside the model's response, token usage, and latency. It is served by gated backend endpoints under `/api/debug/logs/...` — set `DEBUG_LOGS_ENABLED=false` to hide them.
+**Log viewer — `/dev/logs`.** A read-only debug page that visualizes these JSONL channels (LLM channel in v1). The left list is filterable by kind / status / model with full-text search; the detail pane shows exactly what was sent to the LLM (the `system` / `user` messages and the `schema_hint`) alongside the model's response, token usage, and latency. It is served by gated backend endpoints under `/api/debug/logs/...`, which stay disabled until `DEBUG_LOGS_ENABLED=true` is set explicitly (default off, because full LLM records can contain private source material).
 
 ## SQLite → PostgreSQL forward shadow
 
@@ -551,6 +551,7 @@ For a large source, throughput and reliability are dominated by a few levers:
      --work-dir /protected/path/postgres-migration \
      --apply \
      --activate-env /absolute/path/to/.env \
+     --source-timezone <IANA zone of the SQLite host> \
      --confirm-service-stopped
    ```
 
@@ -997,7 +998,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py question-index --notebook-id n
 PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 ```
 
-The `embed` subcommand re-fills only the chunk and KG-node vectors that are *missing* (e.g. after a throttled run left gaps). It requires `--notebook-id` and a configured service binding for the `chunk_embedding` workload — being a vector-backfill command, it ignores `--allow-no-embed` and errors out if that workload is unbound.
+The `embed` subcommand re-fills only the chunk, element, and KG-node vectors that are *missing* (e.g. after a throttled run left gaps). It requires `--notebook-id` and at least a configured service binding for the `chunk_embedding` workload; element and KG-node vectors are skipped when `source_element_embedding` or `knowledge_object_embedding` is unbound. Being a vector-backfill command, it ignores `--allow-no-embed` and errors out if `chunk_embedding` is unbound.
 
 The `vectors-to-blob` subcommand is a one-time storage migration: embedding vectors used to be stored as JSON text in SQLite, which means loading hundreds of thousands of rows into a matrix (index builds, retrieval cold start) spends most of its time in `json.loads`. New writes are now stored as raw float32 BLOBs (`np.frombuffer` reinterprets them with zero parsing), and every reader already accepts either format — so this command is optional but recommended after upgrading: it re-encodes any pre-existing JSON-text rows across all four embeddings tables (`chunk_embeddings`, `knowledge_embeddings`, `element_embeddings`, `relation_embeddings`) in place, in batched transactions (5,000 rows/commit) with progress printed per table. It does **not** compute new vectors (so it needs no model-service binding) and is idempotent/restartable — re-running it converts nothing further, since it only selects rows SQLite still types as `text`. Use `--notebook-id` to scope it to one library or `--all-notebooks` to convert every notebook in the database. The `json.loads`/re-encode step (the single-core bottleneck at millions-of-rows scale) is parallelized across `--workers` processes (default `min(32, cpu_count())`; `--workers 1` uses no process pool at all) — the main process still owns every DB read/write, so SQLite stays single-writer. If the worker pool crashes it falls back to a serial pass automatically rather than losing the run.
 
@@ -1034,7 +1035,7 @@ The `reparse` subcommand fixes a class of historical leftover: sources that were
 
 Only an uncatchable end (`kill -9`, OOM kill, power loss, host reboot) can leave the task row stuck in progress. The offline command deliberately does not clear it — it cannot tell whether that row belongs to a backend that is still running — so it reports the existing task (stage, completed/total, last update) and exits with status 2 instead of a database error. If the last-update timestamp has been frozen for a long time, the row is leftover: **restarting the backend clears it** (startup recovery settles every task left in progress by a previous process, along with stranded parses and projections). If instead it is genuinely running (another `batch_ingest` process, or an analysis started from the web UI), wait for it and re-run.
 
-**MRL truncation quality spike (`app.eval.mrl_truncation`).** Answers "how much retrieval quality do we lose if we truncate stored embeddings to their first 1024/2048 dimensions (+ re-normalize)?" — the gate for both shrinking in-process vector memory (~4× at 4096→1024) and for pgvector HNSW indexing (which caps at 2000/4000 dims). Read-only, streams the DB in blocks (bounded memory on million-row tables), and always prints the per-table embedding row counts for the notebook first.
+**MRL truncation quality spike (`app.eval.mrl_truncation`).** Answers "how much retrieval quality do we lose if we truncate stored embeddings to their first 1024/2048 dimensions (+ re-normalize)?" — the gate for both shrinking in-process vector memory (~4× at 4096→1024) and for pgvector HNSW indexing (which caps at 2000/4000 dims). Read-only, streams the DB in blocks (bounded memory on million-row tables), and always prints the per-table embedding row counts for the notebook first. It reads SQLite only (`--db` takes a SQLite path, defaulting to `Settings.sqlite_path`); a PostgreSQL deployment cannot point it at its `DATABASE_URL` and must run the quality check on a representative SQLite copy instead.
 
 ```bash
 # neighbor-preservation mode (default): zero API calls, works on any notebook —
