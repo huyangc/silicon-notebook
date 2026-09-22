@@ -440,3 +440,55 @@ def test_the_export_lease_round_trips_on_postgres(baseline):
     assert [w for w in report.warnings if "dead export lease" in w]
     assert _lease(repo) == {}
     assert report.run_id == report.package_id
+
+
+def test_two_connections_racing_for_an_empty_lease_row_produce_one_winner(
+    baseline,
+):
+    """The case the previous shape got wrong (codex #784 r2). With NO lease
+    row yet, two exports both read nothing -- PostgreSQL cannot lock a row
+    that does not exist -- so a read-then-upsert let the second overwrite the
+    first's live lease and both runs continued. The claim is now one
+    ``INSERT ... ON CONFLICT ... WHERE heartbeat_at < <cutoff>`` and only a
+    rowcount of 1 counts: the insert wins outright on an empty table, and the
+    second transaction re-evaluates that WHERE against the row the winner
+    just committed.
+
+    Two separate ``_Source`` handles, i.e. two connections, in the order that
+    pins the outcome.
+
+    变异验证: 去掉 ``DO UPDATE ... WHERE sync_export_runs.heartbeat_at < ?``,
+    本条必须报红(第二个导出抢走了活租约)。
+    """
+    from datetime import datetime, timezone
+    from pathlib import Path as _Path
+
+    from app.migration.sync.export import (
+        SyncExportError,
+        _claim_export_lease,
+        _Source,
+    )
+
+    repo = baseline["repo"]
+    with repo._write() as db:
+        db.execute("DELETE FROM sync_export_runs WHERE target_env = %s", (TARGET_ENV,))
+
+    root = _Path(__file__).resolve().parents[3]
+    first = _Source(baseline["settings"], root)
+    second = _Source(baseline["settings"], root)
+    try:
+        assert _claim_export_lease(
+            first, TARGET_ENV, "run-a", datetime.now(timezone.utc)
+        ) == []
+        with pytest.raises(SyncExportError) as failure:
+            _claim_export_lease(
+                second, TARGET_ENV, "run-b", datetime.now(timezone.utc)
+            )
+    finally:
+        first.close()
+        second.close()
+
+    assert "already running" in str(failure.value)
+    assert "run-a" in str(failure.value)
+    # ...and the loser did not overwrite the winner's row.
+    assert _lease(repo)["run_id"] == "run-a"

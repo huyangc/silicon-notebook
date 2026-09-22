@@ -1407,3 +1407,66 @@ def test_a_scoped_export_neither_takes_nor_is_blocked_by_a_lease(baseline):
     assert report.scoped is True
     assert report.run_id == ""
     assert _lease(baseline["repo"])["run_id"] == "other-run"
+
+
+def test_an_unreadable_heartbeat_is_treated_as_a_live_lease(baseline):
+    """A lease row this build cannot read the heartbeat of is a reason to
+    stop, never a reason to assume the other run is dead. Refused BEFORE the
+    claim is attempted, so the answer does not depend on how the backend
+    happens to order a malformed value against the staleness cutoff."""
+    with baseline["repo"]._write() as db:
+        db.execute(
+            "INSERT INTO sync_export_runs(target_env, run_id, package_id, "
+            "started_at, heartbeat_at, floor_seq) VALUES(?,?,?,?,?,?)",
+            (TARGET_ENV, "broken-run", "broken-run", MOMENT, "not-a-time", 0),
+        )
+
+    with pytest.raises(SyncExportError) as failure:
+        _export(baseline["settings"], baseline["out"])
+
+    assert "not a readable timestamp" in str(failure.value)
+    assert _lease(baseline["repo"])["run_id"] == "broken-run"
+
+
+def test_a_superseded_run_never_deletes_its_successors_lease(baseline, monkeypatch):
+    """A run whose lease was judged dead and taken over can still be alive
+    and finish. Both places that drop a lease -- the publish transaction and
+    the abort path -- therefore match on ``run_id``, so the late finisher
+    removes its OWN row or nothing, never the successor's.
+
+    变异验证: 把两处 DELETE 的 ``AND run_id = ?`` 去掉, 本条必须报红。
+    """
+    repo = baseline["repo"]
+
+    def supersede() -> None:
+        with repo._write() as db:
+            db.execute(
+                "UPDATE sync_export_runs SET run_id='successor', "
+                "package_id='successor' WHERE target_env=?",
+                (TARGET_ENV,),
+            )
+
+    # ... on the publish path.
+    real_advance = export_module._advance_watermark
+    monkeypatch.setattr(
+        export_module,
+        "_advance_watermark",
+        lambda *a, **k: (supersede(), real_advance(*a, **k))[1],
+    )
+    _export(baseline["settings"], baseline["out"])
+    assert _lease(repo)["run_id"] == "successor"
+    monkeypatch.undo()
+
+    # ... and on the abort path. The successor row is cleared first so this
+    # export can take a lease of its own, then superseded mid-run again.
+    with repo._write() as db:
+        db.execute("DELETE FROM sync_export_runs WHERE target_env=?", (TARGET_ENV,))
+
+    def explode(*_args, **_kwargs):
+        supersede()
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(export_module, "_write_users", explode)
+    with pytest.raises(RuntimeError, match="boom"):
+        _export(baseline["settings"], baseline["out"])
+    assert _lease(repo)["run_id"] == "successor"

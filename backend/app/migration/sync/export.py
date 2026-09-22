@@ -23,7 +23,7 @@ import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -828,45 +828,49 @@ def _claim_export_lease(
       the watermark this run will publish -- and prune-log takes its floor as
       the minimum over the watermarks AND every live lease.
     - Two unscoped exports of one target race to publish, and the loser's
-      package describes a window the winner's watermark already claims. The
-      PRIMARY KEY on ``target_env`` is the mutual exclusion: the second one
-      finds a live row and refuses here, before it has read or written
-      anything.
+      package describes a window the winner's watermark already claims.
 
-    A row whose ``heartbeat_at`` has gone unrefreshed for ``_STALE_RUN_
-    SECONDS`` belongs to a run that died; it is replaced with a warning
-    rather than being allowed to block this target forever. Scoped
+    The claim is ONE STATEMENT, and ``rowcount == 1`` is the only thing that
+    means "mine" (codex #784 r2). An earlier shape read the row ``FOR UPDATE``
+    and then upserted, which is wrong on PostgreSQL in exactly the case the
+    lease exists for: two exports starting when NO row exists both read
+    nothing -- ``FOR UPDATE`` cannot lock a row that is not there -- and the
+    second's unconditional upsert then overwrote the first's live lease, with
+    both runs continuing. ``INSERT ... ON CONFLICT (target_env) DO UPDATE ...
+    WHERE sync_export_runs.heartbeat_at < <stale cutoff>`` has no such gap:
+    the insert wins outright when the table is empty, and a second
+    transaction arriving behind it re-evaluates that ``WHERE`` against the
+    row the winner just committed, sees a fresh heartbeat, and updates
+    nothing. Both backends support the ``WHERE`` on ``DO UPDATE``; SQLite
+    runs the same statement under ``BEGIN IMMEDIATE``.
+
+    A row whose ``heartbeat_at`` has gone unrefreshed for
+    ``_STALE_RUN_SECONDS`` belongs to a run that died; the ``WHERE`` lets it
+    be taken over, with a warning, rather than blocking this target forever.
+    A heartbeat this build cannot even READ is treated as live and refused
+    outright, before the claim is attempted: an unreadable row is a reason to
+    stop, never a reason to assume the other run is dead. Scoped
     (``--notebook``) exports never call this: they are not on the chain, they
     publish no watermark, and there is nothing for them to race over.
     """
     moment = _moment_for(source, started_at)
+    cutoff = _moment_for(source, started_at - timedelta(seconds=_STALE_RUN_SECONDS))
     warnings: list[str] = []
     with source.write() as conn:
         source.begin_immediate(conn)
-        statement = (
-            "SELECT run_id, package_id, started_at, heartbeat_at "
-            "FROM sync_export_runs WHERE target_env = ?"
-        )
-        if source.is_postgres:
-            statement += " FOR UPDATE"
-        rows = source.fetch(conn, statement, (target_env,))
-        if rows:
-            age = _age_seconds(rows[0]["heartbeat_at"], started_at)
-            if age is None or age <= _STALE_RUN_SECONDS:
-                raise SyncExportError(
-                    f"an export for target {target_env!r} is already running "
-                    f"(run {str(rows[0]['run_id'])!r}, started "
-                    f"{rows[0]['started_at']}, last heartbeat "
-                    f"{rows[0]['heartbeat_at']}); wait for it to finish, or "
-                    "remove its sync_export_runs row if you know it is dead"
-                )
-            warnings.append(
-                f"replaced a dead export lease for target {target_env!r} "
-                f"(run {str(rows[0]['run_id'])!r}, last heartbeat "
-                f"{rows[0]['heartbeat_at']}, {int(age)}s ago)"
+        held = "SELECT run_id, started_at, heartbeat_at FROM sync_export_runs WHERE target_env = ?"
+        # Read only to phrase the messages below; it decides nothing, which
+        # is why the claim does not depend on it being atomic with anything.
+        previous = source.fetch(conn, held, (target_env,))
+        if previous and _age_seconds(previous[0]["heartbeat_at"], started_at) is None:
+            raise SyncExportError(
+                f"target {target_env!r} holds an export lease whose "
+                f"heartbeat_at ({previous[0]['heartbeat_at']!r}) is not a "
+                "readable timestamp; refusing to assume that run is dead -- "
+                "fix or remove the sync_export_runs row by hand"
             )
         floor_seq = _captured_through_seq(source, conn, _capture_gate(source, conn)[0])
-        conn.execute(
+        cursor = conn.execute(
             source.sql(
                 "INSERT INTO sync_export_runs "
                 "(target_env, run_id, package_id, started_at, heartbeat_at, "
@@ -875,10 +879,32 @@ def _claim_export_lease(
                 "run_id = excluded.run_id, package_id = excluded.package_id, "
                 "started_at = excluded.started_at, "
                 "heartbeat_at = excluded.heartbeat_at, "
-                "floor_seq = excluded.floor_seq"
+                "floor_seq = excluded.floor_seq "
+                "WHERE sync_export_runs.heartbeat_at < ?"
             ),
-            (target_env, run_id, run_id, moment, moment, floor_seq),
+            (target_env, run_id, run_id, moment, moment, floor_seq, cutoff),
         )
+        if int(cursor.rowcount or 0) != 1:
+            holder = source.fetch(conn, held, (target_env,)) or previous
+            detail = (
+                f"run {str(holder[0]['run_id'])!r}, started "
+                f"{holder[0]['started_at']}, last heartbeat "
+                f"{holder[0]['heartbeat_at']}"
+                if holder
+                else "holder unknown"
+            )
+            raise SyncExportError(
+                f"an export for target {target_env!r} is already running "
+                f"({detail}); wait for it to finish, or remove its "
+                "sync_export_runs row if you know it is dead"
+            )
+        if previous:
+            age = _age_seconds(previous[0]["heartbeat_at"], started_at) or 0.0
+            warnings.append(
+                f"replaced a dead export lease for target {target_env!r} "
+                f"(run {str(previous[0]['run_id'])!r}, last heartbeat "
+                f"{previous[0]['heartbeat_at']}, {int(age)}s ago)"
+            )
     return warnings
 
 

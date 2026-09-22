@@ -350,6 +350,45 @@ def test_export_json_includes_captured_flag(tmp_path, monkeypatch, capsys):
     assert payload["captured"] is True
 
 
+def test_export_human_output_includes_lease_run_id(tmp_path, monkeypatch, capsys):
+    _settings(tmp_path, monkeypatch, sync_env="dev")
+    monkeypatch.setattr(
+        cli, "export_notebooks", lambda *a, **k: _empty_export_report(run_id="pkg-id")
+    )
+    exit_code = cli.main(["export", "--target", "prod-tokyo", "--out", str(tmp_path)])
+    assert exit_code == 0
+    assert "租约 run_id: pkg-id" in capsys.readouterr().out
+
+
+def test_export_human_output_omits_run_id_line_for_a_scoped_export(
+    tmp_path, monkeypatch, capsys
+):
+    """A ``--notebook``-scoped export takes no lease (``run_id`` is empty) --
+    the line must not appear at all rather than print an empty id."""
+    _settings(tmp_path, monkeypatch, sync_env="dev")
+    monkeypatch.setattr(
+        cli, "export_notebooks", lambda *a, **k: _empty_export_report(run_id="", scoped=True)
+    )
+    exit_code = cli.main(
+        ["export", "--target", "prod-tokyo", "--out", str(tmp_path), "--notebook", "nb-a"]
+    )
+    assert exit_code == 0
+    assert "租约 run_id" not in capsys.readouterr().out
+
+
+def test_export_json_includes_run_id(tmp_path, monkeypatch, capsys):
+    _settings(tmp_path, monkeypatch, sync_env="dev")
+    monkeypatch.setattr(
+        cli, "export_notebooks", lambda *a, **k: _empty_export_report(run_id="pkg-id")
+    )
+    exit_code = cli.main(
+        ["export", "--target", "prod-tokyo", "--out", str(tmp_path), "--json"]
+    )
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["run_id"] == "pkg-id"
+
+
 def test_export_human_output_includes_incremental_fields(tmp_path, monkeypatch, capsys):
     _settings(tmp_path, monkeypatch, sync_env="dev")
     report = _empty_export_report(
@@ -794,6 +833,90 @@ def test_status_reports_captured_watermark_and_snapshot_xmin(
     out = capsys.readouterr().out
     assert "captured=true" in out
     assert "snapshot xmin=50" in out
+
+
+def test_status_lists_export_runs_with_dead_flag(tmp_path, monkeypatch, capsys):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        _seed_export_lease(
+            database,
+            target_env="prod-tokyo",
+            run_id="run-live",
+            package_id="pkg-live",
+            floor_seq=42,
+            heartbeat_moment=_old_moment(0),
+        )
+        dead_heartbeat = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        ).isoformat()
+        _seed_export_lease(
+            database,
+            target_env="prod-osaka",
+            run_id="run-dead",
+            package_id="pkg-dead",
+            floor_seq=7,
+            heartbeat_moment=dead_heartbeat,
+        )
+    finally:
+        database.close()
+
+    exit_code = cli.main(["status", "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    runs_by_target = {row["target_env"]: row for row in payload["runs"]}
+    assert runs_by_target["prod-tokyo"]["floor_seq"] == 42
+    assert runs_by_target["prod-tokyo"]["dead"] is False
+    assert runs_by_target["prod-osaka"]["floor_seq"] == 7
+    assert runs_by_target["prod-osaka"]["dead"] is True
+    assert payload["runs_note"] is None
+
+    exit_code = cli.main(["status"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "在途导出" in out
+    assert "prod-tokyo" in out
+    assert "floor_seq=42" in out
+    assert "prod-osaka" in out
+    assert "已死" in out
+
+
+def test_status_degrades_runs_section_when_export_runs_table_is_missing(
+    tmp_path, monkeypatch, capsys
+):
+    """``sync_export_runs`` degrading must be independent of the
+    ``sync_export_state`` column degrade -- drop only the lease table here
+    and confirm the watermark section still reads its full v85 shape."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            conn.execute("DROP TABLE sync_export_runs")
+
+        exit_code = cli.main(["status", "--json"])
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["runs"] == []
+        assert "v85/0065" in payload["runs_note"]
+        assert "sync_export_runs" in payload["runs_note"]
+        # The watermark section is unaffected: it has its own, independent
+        # column-level check and this database still has both v85 columns.
+        assert payload["exports"] == []
+        assert payload["exports_note"] is None
+
+        exit_code = cli.main(["status"])
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "在途导出" in out
+        assert "v85/0065" in out
+    finally:
+        database.close()
 
 
 def test_status_human_readable_output_on_empty_database(tmp_path, monkeypatch, capsys):
@@ -1548,6 +1671,31 @@ def _old_moment(days: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
 
+def _seed_export_lease(
+    database,
+    *,
+    target_env: str = "prod-tokyo",
+    run_id: str = "run-1",
+    package_id: str = "pkg-inflight",
+    floor_seq: int,
+    heartbeat_moment: str,
+) -> None:
+    with database.write() as conn:
+        conn.execute(
+            "INSERT INTO sync_export_runs "
+            "(target_env, run_id, package_id, started_at, heartbeat_at, floor_seq) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                target_env,
+                run_id,
+                package_id,
+                heartbeat_moment,
+                heartbeat_moment,
+                floor_seq,
+            ),
+        )
+
+
 def test_prune_log_rejects_when_no_captured_watermark_exists(
     tmp_path, monkeypatch, capsys
 ):
@@ -1706,6 +1854,86 @@ def test_prune_log_only_captured_watermarks_vote_on_the_minimum(
                 "SELECT COUNT(*) AS n FROM sync_change_log"
             ).fetchone()
             assert remaining["n"] == 0
+    finally:
+        database.close()
+
+
+def test_prune_log_active_lease_narrows_the_seq_bound(tmp_path, monkeypatch, capsys):
+    """An in-flight (not-yet-published) export's lease is a lower bound on
+    the watermark it will eventually publish -- prune-log must not delete
+    rows above the lease's floor_seq even though a captured watermark alone
+    would allow it."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        _seed_captured_watermark(database, exported_through_seq=100)
+        _seed_export_lease(
+            database, floor_seq=50, heartbeat_moment=_old_moment(0)
+        )
+        old = _old_moment(40)
+        _insert_log_row(database, seq=40, changed_at=old)  # <= 50: eligible
+        _insert_log_row(database, seq=60, changed_at=old)  # > 50, <= 100: held back by the lease
+
+        exit_code = cli.main(["prune-log", "--json"])
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["min_seq"] == 50
+        assert payload["deleted"] == 1
+        assert payload["active_leases"] == [
+            {"target_env": "prod-tokyo", "floor_seq": 50}
+        ]
+        assert payload["dead_leases"] == []
+
+        with database.connect() as conn:
+            remaining = {
+                row["seq"]
+                for row in conn.execute("SELECT seq FROM sync_change_log").fetchall()
+            }
+            assert remaining == {60}
+    finally:
+        database.close()
+
+
+def test_prune_log_dead_lease_does_not_participate_but_is_named(
+    tmp_path, monkeypatch, capsys
+):
+    """A lease whose heartbeat has gone stale (>1h) no longer represents a
+    run in progress and must not hold the deletion bound down -- but it is
+    still reported so an operator can see it (and clean it up / investigate
+    the crashed run)."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        _seed_captured_watermark(database, exported_through_seq=100)
+        dead_heartbeat = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        ).isoformat()
+        _seed_export_lease(
+            database, target_env="prod-osaka", floor_seq=10, heartbeat_moment=dead_heartbeat
+        )
+        old = _old_moment(40)
+        _insert_log_row(database, seq=90, changed_at=old)
+
+        exit_code = cli.main(["prune-log", "--json"])
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["min_seq"] == 100  # the dead lease's floor_seq=10 did not narrow it
+        assert payload["deleted"] == 1
+        assert payload["active_leases"] == []
+        assert len(payload["dead_leases"]) == 1
+        assert payload["dead_leases"][0]["target_env"] == "prod-osaka"
+
+        exit_code = cli.main(["prune-log", "--dry-run"])
+        assert exit_code == 0
+        # Nothing left to prune on the second call, but the human summary
+        # must still name the dead lease.
+        out = capsys.readouterr().out
+        assert "忽略的死租约" in out
+        assert "prod-osaka" in out
     finally:
         database.close()
 
@@ -1878,6 +2106,57 @@ def test_prune_log_reports_missing_v85_columns_and_exits_2(
         assert "v85/0065" in err
         assert "captured" in err
         assert "exported_snapshot" in err
+    finally:
+        database.close()
+
+
+def test_prune_log_reports_missing_export_runs_table_only(
+    tmp_path, monkeypatch, capsys
+):
+    """The lease table is checked independently of the two columns -- a
+    database with the columns but not ``sync_export_runs`` (should not
+    happen in practice, since both land in the same migration, but the two
+    facts are still verified and reported separately) names only the table,
+    not a phantom column complaint."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            conn.execute("DROP TABLE sync_export_runs")
+
+        exit_code = cli.main(["prune-log"])
+        assert exit_code == 2
+        err = capsys.readouterr().err
+        assert "v85/0065" in err
+        assert "缺表" in err
+        assert "sync_export_runs" in err
+        assert "缺列" not in err
+    finally:
+        database.close()
+
+
+def test_prune_log_reports_missing_v85_columns_and_table_together(
+    tmp_path, monkeypatch, capsys
+):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        _drop_export_state_v85_columns(database)
+        with database.write() as conn:
+            conn.execute("DROP TABLE sync_export_runs")
+
+        exit_code = cli.main(["prune-log"])
+        assert exit_code == 2
+        err = capsys.readouterr().err
+        assert "v85/0065" in err
+        assert "缺列" in err
+        assert "captured" in err
+        assert "缺表" in err
+        assert "sync_export_runs" in err
     finally:
         database.close()
 
