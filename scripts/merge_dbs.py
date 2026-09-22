@@ -257,6 +257,12 @@ SKIP_SECONDARY_TABLES = [
     # 搅在一起(副库对某个目标环境的导出水位、副库自己跑过的导入历史,统统不是
     # primary 的事实),与 auth_transactions 同款,只保 primary、丢副库那份。
     "sync_export_state", "sync_imports", "sync_import_progress",
+    # v84 源端变更捕获:开关(sync_capture_control)与变更日志(sync_change_log)
+    # 同理 —— 日志记的是**副库自己**的行变更,合进来会被 primary 当成自己待导出
+    # 的增量;开关行更不能合(副库开着不代表 primary 该开)。合并本身也不写日志:
+    # primary 库里不存在捕获开关行时门就是关的,开着捕获做 merge 的部署会照常
+    # 把合并写入记成本地变更,这正是期望语义。
+    "sync_capture_control", "sync_change_log",
 ]
 
 # 导入后清空(引用可再生的 kg_index 产物, 逼部署侧干净重建)

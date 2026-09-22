@@ -2336,9 +2336,11 @@ class KnowledgeStore:
         """Forward maintenance (P0-4 reverse index) for FRESH inserts — rows
         never had prior entries, so a plain batched INSERT suffices (no
         DELETE-first)."""
+        # OR IGNORE: v84 gave this table a composite key (object_id,
+        # source_id) -- a repeated pair is the same row.
         connection.executemany(
-            "INSERT INTO knowledge_object_sources (object_id, source_id, notebook_id) "
-            "VALUES (?, ?, ?)",
+            "INSERT OR IGNORE INTO knowledge_object_sources "
+            "(object_id, source_id, notebook_id) VALUES (?, ?, ?)",
             rows,
         )
 
@@ -2583,9 +2585,11 @@ class KnowledgeStore:
         )
         source_ids = cls.source_ids_from_evidence(evidence_json)
         if source_ids:
+            # OR IGNORE: v84 gave this table a composite key (object_id,
+            # source_id) -- a repeated pair is the same row.
             connection.executemany(
-                "INSERT INTO knowledge_object_sources (object_id, source_id, notebook_id) "
-                "VALUES (?, ?, ?)",
+                "INSERT OR IGNORE INTO knowledge_object_sources "
+                "(object_id, source_id, notebook_id) VALUES (?, ?, ?)",
                 [(object_id, sid, notebook_id) for sid in source_ids],
             )
 

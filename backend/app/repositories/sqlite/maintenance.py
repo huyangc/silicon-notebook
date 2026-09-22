@@ -2103,9 +2103,11 @@ class SQLiteMaintenanceAdapter:
                 for sid in KnowledgeStore.source_ids_from_evidence(row["evidence"])
             ]
             if kos_rows:
+                # OR IGNORE: v84 gave this table a composite key (object_id,
+                # source_id) -- a repeated pair is the same row.
                 db.executemany(
-                    "INSERT INTO knowledge_object_sources (object_id, source_id, notebook_id) "
-                    "VALUES (?, ?, ?)",
+                    "INSERT OR IGNORE INTO knowledge_object_sources "
+                    "(object_id, source_id, notebook_id) VALUES (?, ?, ?)",
                     kos_rows,
                 )
         return len(batch), len(kos_rows), batch[-1]["id"]

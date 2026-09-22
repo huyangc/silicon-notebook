@@ -566,6 +566,14 @@ _NOT_NOTEBOOK_SCOPED = frozenset({
     "group_members", "agent_profiles", "model_service_status",
     "system_model_service_status", "extension_runtime_toggles",
     "concept_whitelist", "wishes", "wish_votes",
+    # ``sync_change_log`` HAS a notebook_id column but is deliberately exempt:
+    # the rows a deleted notebook leaves behind ARE the deletion, and the next
+    # incremental export is what has to carry them to the other environment.
+    # Deleting them with the notebook would silently drop the deletion from
+    # every target that has not synced yet. It is environment-local
+    # bookkeeping, not notebook content, and its lifetime is owned by the
+    # capture gate (``sync capture disable`` clears the whole log).
+    "sync_change_log",
 })
 # ⚠ ``retrieval_experiences`` left this set at SQLite v79: it now HAS a
 # ``notebook_id`` column (a partition key, still no foreign key into

@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 63
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 64
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -69,10 +69,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 63
-    assert migrator.migrate() == 63
-    assert migrator.current_version() == 63
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 63
+    assert migrator.migrate() == 64
+    assert migrator.migrate() == 64
+    assert migrator.current_version() == 64
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 64
 
 
 @pytest.mark.postgres_integration
@@ -80,7 +80,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 63
+    assert migrator.migrate() == 64
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -163,7 +163,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 63
+        assert PostgresMigrator(databases[1]).migrate() == 64
     finally:
         for database in databases:
             database.close()
@@ -251,6 +251,7 @@ def test_packaged_index_migration_phases_are_exact():
         (61, "global_ask_job_record_parity"),
         (62, "global_ask_job_sampling"),
         (63, "sync_control_tables"),
+        (64, "sync_change_capture"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -695,6 +696,34 @@ def test_packaged_index_migration_phases_are_exact():
     # ONE partial unique index — the browser re-POST attach path. Same
     # nullable-column + partial-index park shape as 0033's
     # idx_agent_observations_request; no table, FK or existing-shape change.
+    # Migration 64 (source-side change capture): ONE index, the change log's
+    # (table_name, seq) read path. The two composite keys it gives
+    # knowledge_object_sources / community_members arrive as PRIMARY KEY
+    # constraints (PostgreSQL backs those with their own index), not as
+    # CREATE INDEX, which is exactly why they do not show up here.
+    assert index_declarations(64) == [(False, "idx_sync_change_log_table_seq")]
+    v64_ddl_only = "\n".join(
+        line for line in migrations[64].sql.splitlines()
+        if not line.strip().startswith("--")
+    )
+    assert (
+        "ADD CONSTRAINT pk_knowledge_object_sources PRIMARY KEY (object_id, source_id)"
+        in v64_ddl_only
+    )
+    assert (
+        "ADD CONSTRAINT pk_community_members PRIMARY KEY (community_id, canonical_id)"
+        in v64_ddl_only
+    )
+    # De-duplicate BEFORE taking the key, or an upgrade of a database that
+    # already holds duplicates fails on the ALTER instead.
+    for table in ("knowledge_object_sources", "community_members"):
+        assert v64_ddl_only.index(f"DELETE FROM {table} a") < v64_ddl_only.index(
+            f"ALTER TABLE {table}\n  ADD CONSTRAINT pk_{table}"
+        )
+    # The gate row is never seeded by the migration.
+    assert "INSERT INTO sync_capture_control" not in v64_ddl_only
+    assert v64_ddl_only.count("CREATE TRIGGER sync_capture_") == 46
+
     assert index_declarations(50) == [(True, "idx_ask_jobs_client_request")]
     v50_ddl_only = "\n".join(
         line for line in migrations[50].sql.splitlines()

@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from app.migration.sync.capture import expected_sqlite_trigger_names
+
 
 ROOT = Path(__file__).resolve().parents[2]
 VERIFIER_PATH = ROOT / "scripts" / "verify_repository_snapshot.py"
@@ -48,6 +50,69 @@ FIXTURE_SECRETS = (
 )
 
 
+def _rollback_v84(db: sqlite3.Connection) -> None:
+    """Undo _migration_84 (source-side change capture, parity with PostgreSQL
+    0064_sync_change_capture.sql) before forging any older deployed schema:
+    the 138 capture triggers, the change log's index and the two composite
+    unique indexes that give knowledge_object_sources / community_members a
+    row identity, then the two new tables. The trigger names come from the
+    same generator the migration runs, so a table added to the sync manifest
+    later cannot leave a trigger behind here."""
+    for name in sorted(expected_sqlite_trigger_names()):
+        db.execute(f'DROP TRIGGER "{name}"')
+    db.execute("DROP INDEX uq_community_members_sync_key")
+    db.execute("DROP INDEX uq_knowledge_object_sources_sync_key")
+    db.execute("DROP INDEX idx_sync_change_log_table_seq")
+    db.execute("DROP TABLE sync_change_log")
+    db.execute("DROP TABLE sync_capture_control")
+
+
+def test_deployed_v83_database_verifies_sync_capture(tmp_path):
+    """A deployed v83 database is missing exactly _migration_84's addition:
+    two adapter-internal tables, three indexes and one capture trigger per
+    synced business table per operation. The gate table stays empty (the
+    migration seeds no control row), and no business row changes -- the
+    fixture's two knowledge_object_sources rows hold no duplicate for the
+    de-duplication step to collapse."""
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as upgraded_db:
+        tables = {
+            row[0]
+            for row in upgraded_db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert {"sync_capture_control", "sync_change_log"} <= tables
+        assert upgraded_db.execute(
+            "SELECT COUNT(*) FROM sync_capture_control"
+        ).fetchone()[0] == 0
+        installed = {
+            row[0]
+            for row in upgraded_db.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' "
+                "AND name LIKE 'sync_capture_%'"
+            )
+        }
+        assert installed == set(expected_sqlite_trigger_names())
+        assert len(installed) == 138
+
+    with sqlite3.connect(database) as rollback:
+        _rollback_v84(rollback)
+        rollback.execute("PRAGMA user_version = 83")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 83
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+
+
 def _rollback_v83(db: sqlite3.Connection) -> None:
     """Undo _migration_83 (sync_export_state, sync_imports,
     sync_import_progress -- the adapter-internal cross-environment sync
@@ -55,6 +120,7 @@ def _rollback_v83(db: sqlite3.Connection) -> None:
     before forging any older deployed schema. Drop the FK child
     (sync_import_progress) before its parent (sync_imports); sync_export_state
     has no FK either way."""
+    _rollback_v84(db)
     db.execute("DROP TABLE sync_import_progress")
     db.execute("DROP TABLE sync_imports")
     db.execute("DROP TABLE sync_export_state")

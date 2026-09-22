@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=83, postgres_version=63, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=84, postgres_version=64, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -839,6 +839,14 @@ _TABLES = (
     TableSpec("sync_export_state", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 103),
     TableSpec("sync_imports", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 104),
     TableSpec("sync_import_progress", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 105),
+    # SQLite v84 / PostgreSQL 0064: source-side change capture. The gate row
+    # and the change log describe writes made in THIS environment, for THIS
+    # environment's own incremental exports -- same reasoning as the three
+    # v83 control tables above. Copying a log across the shadow pair would
+    # hand the target a queue of changes it never made; LOCAL_EPHEMERAL, no
+    # replication key.
+    TableSpec("sync_capture_control", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 106),
+    TableSpec("sync_change_log", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 107),
 )
 
 MANIFEST = Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)

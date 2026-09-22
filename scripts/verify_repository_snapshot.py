@@ -63,6 +63,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.core.config import Settings
+from app.migration.sync.capture import sqlite_trigger_sql
 from app.repositories.sqlite.anchor_normalization import sqlite_js_trim_expression
 from app.services.model_registry import WORKLOADS, SystemModelServiceRegistry
 from app.services.sqlite_repository import (
@@ -4807,6 +4808,72 @@ MIGRATION_MANIFEST = {
 MIGRATION_MANIFEST[(82, 83)] = {
     "tables": SYNC_CONTROL_TABLES, "columns": {}, "indexes": {},
     "triggers": {}, "views": {},
+}
+
+
+# v84: source-side change capture (parity with PostgreSQL
+# 0064_sync_change_capture.sql) -- two more adapter-internal tables, three
+# indexes and 138 AFTER-row triggers (three per synced business table). No
+# column change to any existing table: the row identity the migration gives
+# knowledge_object_sources and community_members is carried by a UNIQUE INDEX,
+# precisely so SQLite does not have to rebuild those tables (a rebuild would
+# rewrite their stored CREATE TABLE text and register here as the hard
+# "schema-sql-changed" difference). The migration seeds no row into
+# sync_capture_control, so both new tables stay empty and clear the
+# "migration-added-table-not-empty" check.
+SYNC_CAPTURE_TABLES = {
+    "sync_capture_control": """CREATE TABLE sync_capture_control (
+                    singleton INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1),
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    enabled_at TEXT,
+                    disabled_at TEXT
+                )""",
+    "sync_change_log": """CREATE TABLE sync_change_log (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    table_name TEXT NOT NULL,
+                    key_json TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    parent_key TEXT,
+                    notebook_id TEXT,
+                    txid INTEGER,
+                    changed_at TEXT NOT NULL
+                )""",
+}
+SYNC_CAPTURE_INDEXES = {
+    "idx_sync_change_log_table_seq": (
+        "CREATE INDEX idx_sync_change_log_table_seq\n"
+        "                    ON sync_change_log(table_name, seq)"
+    ),
+    "uq_knowledge_object_sources_sync_key": (
+        "CREATE UNIQUE INDEX uq_knowledge_object_sources_sync_key\n"
+        "                    ON knowledge_object_sources(object_id, source_id)"
+    ),
+    "uq_community_members_sync_key": (
+        "CREATE UNIQUE INDEX uq_community_members_sync_key\n"
+        "                    ON community_members(community_id, canonical_id)"
+    ),
+}
+# Rendered from the same generator the migration executes, so this manifest
+# cannot drift from what _migration_84 actually installs -- and the count is
+# asserted, because a generator that silently produced fewer triggers would
+# otherwise make this expectation shrink right along with it.
+SYNC_CAPTURE_TRIGGERS = {
+    name: sql for name, (_table, sql) in sqlite_trigger_sql().items()
+}
+assert len(SYNC_CAPTURE_TRIGGERS) == 138, len(SYNC_CAPTURE_TRIGGERS)
+MIGRATION_MANIFEST = {
+    (key[0], 84, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **SYNC_CAPTURE_TABLES},
+        "indexes": {**manifest["indexes"], **SYNC_CAPTURE_INDEXES},
+        "triggers": {**manifest["triggers"], **SYNC_CAPTURE_TRIGGERS},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(83, 84)] = {
+    "tables": SYNC_CAPTURE_TABLES, "columns": {},
+    "indexes": SYNC_CAPTURE_INDEXES, "triggers": SYNC_CAPTURE_TRIGGERS,
+    "views": {},
 }
 
 if __name__ == "__main__":

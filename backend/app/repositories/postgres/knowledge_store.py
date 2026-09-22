@@ -2578,10 +2578,12 @@ class KnowledgeStore:
         """Forward maintenance (P0-4 reverse index) for FRESH inserts — rows
         never had prior entries, so a plain batched INSERT suffices (no
         DELETE-first)."""
+        # ON CONFLICT DO NOTHING: 0064 gave this table a composite primary key
+        # (object_id, source_id) -- a repeated pair is the same row.
         execute_many(
             connection,
             "INSERT INTO knowledge_object_sources (object_id, source_id, notebook_id) "
-            "VALUES (%s, %s, %s)",
+            "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
             rows,
         )
 
@@ -2797,10 +2799,12 @@ class KnowledgeStore:
         )
         source_ids = cls.source_ids_from_evidence(evidence_json)
         if source_ids:
+            # ON CONFLICT DO NOTHING: 0064 gave this table a composite primary
+            # key (object_id, source_id) -- a repeated pair is the same row.
             execute_many(
                 connection,
                 "INSERT INTO knowledge_object_sources (object_id, source_id, notebook_id) "
-                "VALUES (%s, %s, %s)",
+                "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
                 [(object_id, sid, notebook_id) for sid in source_ids],
             )
 
