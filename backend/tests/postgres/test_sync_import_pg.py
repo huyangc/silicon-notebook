@@ -21,7 +21,7 @@ import pytest
 
 from app.core.config import Settings
 from app.migration.sync.export import export_notebooks
-from app.migration.sync.import_ import import_package
+from app.migration.sync.import_ import SyncImportError, import_package
 from app.models.schemas import NotebookCreate
 from app.repositories.ports import UploadedSourceFile
 from tests.postgres.conftest import _isolated_postgres_scope
@@ -401,3 +401,122 @@ def test_a_postgres_package_lands_in_a_sqlite_target(postgres_package, tmp_path)
         assert bytes(vector["vector"]) == VECTOR
     finally:
         repo.close()
+
+
+# ------------------- two source environments racing the same notebook id
+
+
+def _interleave_at_preflight(monkeypatch, run) -> None:
+    """Same seam the SQLite suite uses (tests/test_sync_import.py) to make
+    the genuinely-hard-to-schedule race between two source environments'
+    preflight-to-claim windows deterministic: run the OTHER import once,
+    right after this one's own ``_preflight`` call returns, before it
+    proceeds to ``_claim_import``. Sequential simulation rather than real
+    threads -- both are legitimate ways to exercise the race, and this one
+    is deterministic."""
+    from app.migration.sync import import_ as module
+
+    real = module._preflight
+    state = {"interleaved": False}
+
+    def preflight_then_interleave(backend, conn, context):
+        outcome = real(backend, conn, context)
+        if not state["interleaved"]:
+            state["interleaved"] = True
+            run()
+        return outcome
+
+    monkeypatch.setattr(module, "_preflight", preflight_then_interleave)
+
+
+def _race_library(
+    tmp_path: Path, base_url: str, label: str, notebook_id: str, source_env: str
+) -> Path:
+    """A second, independent PostgreSQL schema whose only notebook carries a
+    caller-chosen id -- needed to put two DIFFERENT source environments'
+    packages in a race over the SAME not-yet-mirrored notebook id, which
+    ``postgres_package``'s randomly-generated notebook id cannot set up.
+    ``created_by`` is left NULL (the column is nullable, and the FK it
+    carries permits NULL) so this does not also need an identity-mapping
+    setup that is irrelevant to the race under test."""
+    from app.repositories.postgres.repository import PostgresRepository
+
+    with _isolated_postgres_scope(base_url) as scope:
+        settings = _postgres_settings(scope.url, tmp_path / f"{label}-storage")
+        repo = PostgresRepository(settings)
+        try:
+            with repo._write() as db:
+                db.execute(
+                    "INSERT INTO notebooks(id,name,purpose,primary_domain,status,"
+                    "created_by,created_at,updated_at) "
+                    "VALUES(%s,%s,%s,%s,%s,NULL,%s,%s)",
+                    (notebook_id, label, "", "Semiconductor", "draft", MOMENT, MOMENT),
+                )
+            report = export_notebooks(
+                settings,
+                target_env=TARGET_ENV,
+                out_dir=tmp_path / f"out-{label}",
+                notebook_ids=[notebook_id],
+                source_env=source_env,
+            )
+        finally:
+            repo.close()
+    return report.package_dir
+
+
+def _package_id(package: Path) -> str:
+    return json.loads(
+        (package / "manifest.json").read_text(encoding="utf-8")
+    )["package_id"]
+
+
+def _sync_import_status(repo, package_id: str) -> str | None:
+    row = _one(
+        repo, "SELECT status FROM sync_imports WHERE package_id=%s", (package_id,)
+    )
+    return row["status"] if row else None
+
+
+def test_two_source_environments_racing_the_same_notebook_id_the_loser_is_refused(
+    target, tmp_path, monkeypatch
+):
+    """codex #772 round 14 P1's PostgreSQL half: two DIFFERENT source
+    environments' packages racing to import the SAME not-yet-mirrored
+    notebook id both pass ``_preflight``'s foreign-notebook check on a
+    snapshot that genuinely has no row for it either way, and
+    ``_claim_import``'s ``pg_advisory_xact_lock(hashtext(source_env))`` does
+    not serialize the two against each other -- it is scoped to ONE source
+    environment. ``_reserve_notebooks`` closes it by claiming the notebook id
+    itself inside the declaration transaction: whichever package finishes
+    first while the other's claim window is still open wins, and the loser's
+    own claim must find the id already spoken for and refuse by name rather
+    than silently reattribute the winner's mirror."""
+    import os
+
+    base_url = os.environ.get("TEST_POSTGRES_URL")
+    if not base_url:
+        pytest.skip("TEST_POSTGRES_URL is not configured")
+
+    notebook_id = "shared-nb-pg-race"
+    package_a = _race_library(tmp_path, base_url, "race-a", notebook_id, "env-a")
+    package_b = _race_library(tmp_path, base_url, "race-b", notebook_id, "env-b")
+
+    _interleave_at_preflight(
+        monkeypatch, lambda: import_package(target["settings"], package_b)
+    )
+
+    with pytest.raises(SyncImportError) as failure:
+        import_package(target["settings"], package_a)
+
+    message = str(failure.value)
+    assert notebook_id in message
+    assert "env-b" in message
+
+    repo = target["repo"]
+    row = _one(
+        repo, "SELECT sync_origin, status FROM notebooks WHERE id=%s", (notebook_id,)
+    )
+    assert row["sync_origin"] == "env-b"
+    assert row["status"] == "draft"
+    assert _sync_import_status(repo, _package_id(package_a)) is None
+    assert _sync_import_status(repo, _package_id(package_b)) == "done"

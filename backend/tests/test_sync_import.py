@@ -2896,6 +2896,166 @@ def test_this_package_finishing_during_preflight_is_simply_already_applied(
     assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 1
 
 
+# ------------------ two source environments racing the same notebook id
+
+
+OTHER_SOURCE_ENV_A = "env-a"
+OTHER_SOURCE_ENV_B = "env-b"
+
+
+def _library(tmp_path, label: str, notebook_id: str, user_id: str) -> dict:
+    """A second, independent library whose only notebook carries a
+    caller-chosen id -- needed to put two DIFFERENT source environments'
+    packages in a race over the SAME not-yet-mirrored notebook id, which the
+    ``source`` fixture's randomly-generated notebook ids cannot set up. Its
+    one user shares ALICE's username so ``build_user_mapping`` resolves
+    ``notebooks.created_by`` against the ``target`` fixture's existing alice
+    rather than tripping the FAIL policy before the scenario under test is
+    even reached."""
+    settings = _settings(tmp_path / label)
+    repo = SQLiteRepository(settings)
+    _add_user(repo, user_id, ALICE[2])
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+            "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            (notebook_id, label, "", "Semiconductor", "draft", user_id, MOMENT, MOMENT),
+        )
+    return {"repo": repo, "settings": settings, "exported": notebook_id}
+
+
+def _export_from(library: dict, out_dir: Path, source_env: str) -> Path:
+    report = export_notebooks(
+        library["settings"],
+        target_env=TARGET_ENV,
+        out_dir=out_dir,
+        notebook_ids=[library["exported"]],
+        source_env=source_env,
+    )
+    return report.package_dir
+
+
+def test_a_notebook_id_claimed_by_another_source_env_during_preflight_blocks_the_declaration(
+    target, tmp_path, monkeypatch
+):
+    """codex #772 round 14 P1. Two DIFFERENT source environments' packages
+    racing to import the SAME not-yet-mirrored notebook id both pass
+    _preflight's foreign-notebook check: it reads a snapshot with no row for
+    that id at all, for BOTH of them, because neither has written one yet.
+    _claim_import's advisory lock does not close this either -- it is scoped
+    to ONE source environment, so two different source environments never
+    serialize against each other through it. _reserve_notebooks closes the
+    window by claiming the notebook id itself, atomically with the
+    declaration: package B finishes entirely while package A's preflight-to-
+    claim window is held open, and A's own claim must then find the id
+    already spoken for and refuse -- naming the conflicting sync_origin,
+    not silently reattributing B's mirror."""
+    notebook_id = "shared-nb-1"
+    library_a = _library(tmp_path, "race-a1", notebook_id, "user-a1")
+    library_b = _library(tmp_path, "race-b1", notebook_id, "user-b1")
+    try:
+        package_a = _export_from(library_a, tmp_path / "out-a1", OTHER_SOURCE_ENV_A)
+        package_b = _export_from(library_b, tmp_path / "out-b1", OTHER_SOURCE_ENV_B)
+
+        _interleave_at_preflight(monkeypatch, lambda: _import(target, package_b))
+
+        with pytest.raises(SyncImportError) as failure:
+            _import(target, package_a)
+
+        message = str(failure.value)
+        assert notebook_id in message
+        assert OTHER_SOURCE_ENV_B in message
+
+        row = _one(
+            target["repo"], "SELECT sync_origin, status FROM notebooks WHERE id=?",
+            (notebook_id,),
+        )
+        assert row["sync_origin"] == OTHER_SOURCE_ENV_B
+        assert row["status"] == "draft"
+        assert _sync_import_row(target, _manifest(package_a)["package_id"]) is None
+        assert _sync_import_row(target, _manifest(package_b)["package_id"])["status"] == "done"
+    finally:
+        library_a["repo"].close()
+        library_b["repo"].close()
+
+
+def test_the_same_race_the_other_way_around_also_refuses_the_loser(
+    target, tmp_path, monkeypatch
+):
+    """The mirror image of the test above: whichever source environment's
+    package finishes first while the OTHER's claim window is still open wins
+    the notebook id, regardless of which one is A and which is B. Pins that
+    _reserve_notebooks is symmetric rather than only catching one specific
+    ordering."""
+    notebook_id = "shared-nb-2"
+    library_a = _library(tmp_path, "race-a2", notebook_id, "user-a2")
+    library_b = _library(tmp_path, "race-b2", notebook_id, "user-b2")
+    try:
+        package_a = _export_from(library_a, tmp_path / "out-a2", OTHER_SOURCE_ENV_A)
+        package_b = _export_from(library_b, tmp_path / "out-b2", OTHER_SOURCE_ENV_B)
+
+        _interleave_at_preflight(monkeypatch, lambda: _import(target, package_a))
+
+        with pytest.raises(SyncImportError) as failure:
+            _import(target, package_b)
+
+        message = str(failure.value)
+        assert notebook_id in message
+        assert OTHER_SOURCE_ENV_A in message
+
+        row = _one(
+            target["repo"], "SELECT sync_origin FROM notebooks WHERE id=?",
+            (notebook_id,),
+        )
+        assert row["sync_origin"] == OTHER_SOURCE_ENV_A
+        assert _sync_import_row(target, _manifest(package_b)["package_id"]) is None
+    finally:
+        library_a["repo"].close()
+        library_b["repo"].close()
+
+
+def test_a_reserved_but_unfinished_notebook_still_blocks_a_different_source_env(
+    target, tmp_path, monkeypatch
+):
+    """Once _claim_import's reservation has committed -- even if the rest of
+    that run then crashes and leaves it 'failed' -- the notebook id stays
+    claimed for that source environment. A later, completely ordinary
+    attempt (no interleaving needed) from a DIFFERENT source environment must
+    still be refused, not merely a concurrently-racing one."""
+    notebook_id = "shared-nb-3"
+    library_a = _library(tmp_path, "race-a3", notebook_id, "user-a3")
+    library_b = _library(tmp_path, "race-b3", notebook_id, "user-b3")
+    try:
+        package_a = _export_from(library_a, tmp_path / "out-a3", OTHER_SOURCE_ENV_A)
+        package_b = _export_from(library_b, tmp_path / "out-b3", OTHER_SOURCE_ENV_B)
+
+        from app.migration.sync import import_ as module
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("simulated crash right after the claim")
+
+        monkeypatch.setattr(module, "_prune_snapshot", boom)
+        with pytest.raises(SyncImportError):
+            _import(target, package_a)
+        monkeypatch.undo()
+
+        assert _sync_import_row(target, _manifest(package_a)["package_id"])["status"] == "failed"
+        row = _one(
+            target["repo"], "SELECT sync_origin, status FROM notebooks WHERE id=?",
+            (notebook_id,),
+        )
+        assert row["sync_origin"] == OTHER_SOURCE_ENV_A
+        assert row["status"] == "importing"
+
+        with pytest.raises(SyncImportError) as failure:
+            _import(target, package_b)
+        assert notebook_id in str(failure.value)
+        assert OTHER_SOURCE_ENV_A in str(failure.value)
+    finally:
+        library_a["repo"].close()
+        library_b["repo"].close()
+
+
 # ------------------------------- taking over ANOTHER package's running row
 
 
