@@ -110,8 +110,10 @@ def test_unified_graph_concept_level_cached(repo):
     g = repo.unified_graph(nb.id, level="concept")
     assert len(g["nodes"]) == 2 and len(g["edges"]) == 1
     assert g["total_nodes"] == 2 and g["truncated"] is False   # metadata for "widen range"
-    # the full graph is cached (same object); unified_graph wraps it with metadata
-    assert repo._unified_graph_full(nb.id, "concept") is repo._unified_cache[(nb.id,"concept")]
+    # the full graph is cached (same object); unified_graph wraps it with metadata.
+    # codex #772 R16 P2: the cache value is (graph_seq_row_version, graph) so a
+    # cross-process writer's version bump is detected on the next read.
+    assert repo._unified_graph_full(nb.id, "concept") is repo._unified_cache[(nb.id,"concept")][1]
 
 
 def test_unified_graph_limit_returns_core_subgraph(repo):

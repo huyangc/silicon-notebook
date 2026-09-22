@@ -572,19 +572,33 @@ class KnowledgeLifecycleService:
 
         ``_invalidate_unified_cache`` is DIFFERENT and stays. It evicts
         ``self.unified_cache`` (``_unified_graph_full``'s
-        ``(notebook_id, level)``-keyed dict, no version component of ANY
-        kind — not kg_mutation_seq, not kg_reset_epoch). ``invalidate_kg``
-        (what this call delegates to) is the ONLY eviction path for that
+        ``(notebook_id, level)``-keyed dict) explicitly, in THIS process, at
+        the commit boundary — the synchronous guarantee a next-read version
+        compare cannot give, because it fires before any other request in
+        this process can observe a stale entry at all. ``invalidate_kg``
+        (what this call delegates to) is the PRIMARY eviction path for that
         cache — it is not a seq-aliasing patch alongside the other two, it
-        is the single mechanism. Dropping it would leave a warm
-        ``/unified-kg`` response serving the pre-delete graph indefinitely
-        (until some unrelated write on the same notebook happens to evict
-        it) — an outright wrong answer, not merely a version-aliasing risk
-        epoch could ever close. See
+        is the single same-process mechanism. Dropping it would leave a warm
+        ``/unified-kg`` response serving the pre-delete graph until the next
+        read happens to notice the version moved — an observable staleness
+        window, not merely an aliasing risk epoch could ever close. See
         ``test_knowledge_lifecycle_delegation.py::
         test_delete_notebook_kg_evicts_the_warm_unified_graph_cache`` for
         the behavioural proof and kg_mutation.py's FULL CENSUS entry for
         delete_notebook_kg for the full seq-vs-epoch writeup.
+
+        codex #772 R16 P2 added a SECOND, independent leg: each cache entry
+        now also carries the ``graph_seq_row`` version it was computed under
+        (``_unified_graph_full`` / ``_unified_graph_version``), so a read
+        whose version has moved recomputes even with no explicit invalidate
+        call in sight. That leg exists for writers ``_invalidate_unified_
+        cache`` structurally cannot reach — an out-of-process writer (the
+        cross-environment sync importer) that commits straight into
+        ``unified_kg_state`` without ever running this process's mutation
+        entry points. It does not replace this method or narrow its
+        red line: every existing ``_invalidate_unified_cache`` call site
+        stays, because the version leg only self-heals on the NEXT read,
+        while this method evicts immediately.
         """
         self.get_notebook(notebook_id)
         # codex #663 R7/R8 P1 — the fence, stated precisely:
@@ -841,9 +855,12 @@ class KnowledgeLifecycleService:
                 "writer is refilling the graph faster than the drain "
                 "empties it"
             )
-        # P0-1 (post-review): unified_cache has NO version component of its
-        # own — invalidate_kg is its only eviction path, not a redundant
-        # seq-aliasing patch. See this method's own docstring.
+        # P0-1 (post-review): invalidate_kg is the PRIMARY, immediate,
+        # same-process eviction path for unified_cache — codex #772 R16 P2's
+        # graph_seq_row version leg (see _unified_graph_full /
+        # _unified_graph_version) only self-heals on the NEXT read and exists
+        # for out-of-process writers this call cannot reach, so it does not
+        # make this call redundant. See this method's own docstring.
         self._invalidate_unified_cache(notebook_id)
         # T-5a: rows removed by the pre-reset drain belong to this call's
         # deletion just as much as the final pass's (R16 P2: `totals` may
@@ -947,11 +964,14 @@ class KnowledgeLifecycleService:
             if deleted:
                 # codex #663 R1 P1: evict the warm ``/unified-kg`` graph
                 # cache AFTER each page's commit (same commit-then-evict
-                # ordering as the final pass). ``unified_cache`` carries NO
-                # version component — invalidate_kg is its only eviction
-                # path — so without this a warm entry keeps serving the
-                # pre-drain graph for the whole drain, and indefinitely if
-                # the drain aborts before the final pass's own eviction.
+                # ordering as the final pass). invalidate_kg is unified_
+                # cache's PRIMARY, immediate eviction path — without this a
+                # warm entry keeps serving the pre-drain graph for the whole
+                # drain. codex #772 R16 P2's graph_seq_row version leg (see
+                # _unified_graph_full) would still self-heal a later read
+                # once this transaction's own seq bump lands, but only on
+                # the NEXT read of that entry — not the same guarantee this
+                # per-page eviction gives concurrent readers mid-drain.
                 self._invalidate_unified_cache(notebook_id)
                 for name, n in deleted.items():
                     drained[name] = drained.get(name, 0) + n
@@ -4400,11 +4420,32 @@ class KnowledgeLifecycleService:
             "truncated": len(sliced["nodes"]) < total_nodes,
         }
 
+    def _unified_graph_version(self, notebook_id: str) -> Tuple[int, int, int, int]:
+        """O(1) version identity for ``self.unified_cache`` entries — the same
+        ``(kg_mutation_seq, cluster_mutation_seq, mention_seq, kg_reset_epoch)``
+        quadruple every other unified-graph consumer already keys on (see
+        ``UnifiedKgStorePort.graph_seq_row``'s docstring for the full write-path
+        coverage census). codex #772 R16 P2: an online cross-environment package
+        importer (batch 3 sync) writes straight into this process's database —
+        including this very ``unified_kg_state`` row — through its own
+        transactions, never through this process's mutation entry points, so
+        none of the ``_invalidate_unified_cache`` call sites ever fire for that
+        write. A cache keyed on the bare ``(notebook_id, level)`` pair would
+        then serve the pre-import graph indefinitely on an already-warm
+        process. Folding this store-read version into the cache value makes a
+        stale entry self-evict on its next read instead — the design note in
+        ``docs/incremental-sync-design.md`` §6 calls this out as the
+        target-process in-memory memo a sync importer must not rely on being
+        invalidated by its own write."""
+        with self._connect() as db:
+            return self.unified_kg.graph_seq_row(db, notebook_id)
+
     def _unified_graph_full(self, notebook_id: str, level: str = "concept") -> dict:
         self.get_notebook(notebook_id)
+        version = self._unified_graph_version(notebook_id)
         cached = self.unified_cache.get((notebook_id, level))
-        if cached is not None:
-            return cached
+        if cached is not None and cached[0] == version:
+            return cached[1]
         from app.services.kg_merge import derive_unified_graph
         with self._connect() as db:
             nrows = self.knowledge.unified_graph_rows(db, notebook_id)
@@ -4416,7 +4457,7 @@ class KnowledgeLifecycleService:
             cids = {n["id"] for n in g["nodes"] if n["object_type"] == "concept"}
             g = {"nodes": [n for n in g["nodes"] if n["object_type"] == "concept"],
                  "edges": [e for e in g["edges"] if e["source_object_id"] in cids and e["target_object_id"] in cids]}
-        self.unified_cache[(notebook_id, level)] = g
+        self.unified_cache[(notebook_id, level)] = (version, g)
         return g
 
     def _viz_dict(self, idx):

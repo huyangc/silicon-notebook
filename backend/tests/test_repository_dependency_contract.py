@@ -138,6 +138,11 @@ LIFECYCLE_STORE_CALLS = {
         "community_reports",
         "community_rows_for_summary",
         "concept_clusters_count",
+        # codex #772 r16: `_unified_graph_version` reads the four-part graph
+        # version so a cross-process writer (the sync importer) invalidates
+        # `unified_cache` -- one primary-key read, the seam every other unified
+        # graph consumer already uses.
+        "graph_seq_row",
         "distinct_cluster_count",
         "finish_rebuild_state",
         "insert_canonical_scratch_rows",

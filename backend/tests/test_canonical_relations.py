@@ -149,7 +149,11 @@ def test_annotation_does_not_stick_to_unified_cache(repo):
     assert any(e.get("source_count") for e in g1["edges"])
     cached = repo._unified_cache.get((nb.id, "object"))
     assert cached is not None
-    assert all("support_count" not in e for e in cached["edges"])
+    # codex #772 R16 P2: the cache value is now (graph_seq_row_version, graph)
+    # so a cross-process writer's version bump can be detected on the next
+    # read — see knowledge_lifecycle.py::_unified_graph_full.
+    _version, cached_graph = cached
+    assert all("support_count" not in e for e in cached_graph["edges"])
 
 
 def _ids_by_name(repo, nb_id, name):
