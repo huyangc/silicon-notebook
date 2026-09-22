@@ -101,6 +101,7 @@ from app.migration.sync.package import (
     PACKAGE_FORMAT_VERSION,
     USERS_NAME,
     decode_row,
+    decode_value,
     json_document,
     rows_path,
 )
@@ -174,6 +175,27 @@ _FILES_PHASE = "__files__"
 # a process that is gone: no import holds a row open for hours without writing
 # progress. Taking it over is reported as a warning, never done silently.
 _STALE_RUNNING_HOURS = 6
+
+# What an operator has to do next for every user ``--create-missing-users``
+# minted. Nothing in this repository links an external identity to a local
+# account by matching usernames: ``AuthStore._complete`` refuses an unmapped
+# identity with ``identity_not_linked``, and the enrollment purpose refuses a
+# username that is already taken (``check_name``) -- which a created user's is.
+# The only way in is an administrator issuing a 'recover' grant naming that
+# account (``AuthStore.issue_grant``, surfaced at ``POST
+# /admin/auth/grants``), which the person then completes through the external
+# provider. Until then the account exists and owns rows but nobody can sign in
+# to it. Said in the report rather than implemented here: minting an identity
+# binding from a username match is precisely the trust decision that flow
+# exists to keep out of automation's hands.
+_CREATED_USERS_NEED_A_GRANT = (
+    "{count} user(s) were created for this import and have NO way to sign in "
+    "yet: they carry no credentials and no external identity binding, and "
+    "nothing links one by username. An administrator must issue a 'recover' "
+    "grant for each (POST /admin/auth/grants, purpose='recover'), which the "
+    "person completes through the external provider. See "
+    "user_mapping.created for the ids."
+)
 
 # Detailed skip entries kept in the report. Beyond this only the count grows,
 # so a package that skips a million rows still produces a readable report.
@@ -259,6 +281,11 @@ _UNMAPPED_POLICY: dict[tuple[str, str], UnmappedPolicy] = {
     ("knowhow_milestones", "created_by"): UnmappedPolicy.IMPORTER,
     ("knowhow_changes", "actor"): UnmappedPolicy.IMPORTER,
     ("groups", "created_by"): UnmappedPolicy.IMPORTER,
+    # Required for totality, but unreachable in practice: groups is seed_only,
+    # so the only write is an INSERT, and _STATIC_INSERT_OVERRIDES clears the
+    # whole invitation capability on every insert. The rule is kept because a
+    # mapped column without one is a hard failure by design, and because the
+    # policy and the override happen to agree on the value.
     ("groups", "invite_created_by"): UnmappedPolicy.NULL,
     # Design doc §3.2 offers "an admin member of that group at the target"
     # before falling back to the importer. That leg is unreachable for the
@@ -819,6 +846,10 @@ class _Context:
     # seed_only parent gate (``_SEED_PARENT``). Only what this process did;
     # ``_created_parents`` unions it with what an earlier attempt recorded.
     created_parents: dict[str, set[str]] = field(default_factory=dict)
+    # package ids recorded 'done' at the target, read once before the file
+    # phase so _reconcile_staging can tell an abandoned retired directory
+    # (its package finished) from one a live run still owns.
+    finished_packages: frozenset[str] = frozenset()
 
 
 def _row_key(row: Mapping[str, Any], primary_key: Sequence[str]) -> str:
@@ -1442,10 +1473,34 @@ def _target_owned(table: str) -> frozenset[str]:
     return frozenset(spec_for(table).target_owned_columns)
 
 
+# Columns a NEWLY inserted row of this table takes from the import rather
+# than from the package, for tables whose overrides do not depend on the run.
+#
+# ``groups``: the invitation capability (0035_group_invite.sql -- the raw
+# token plus its two metadata columns, all three of which GroupStore reads
+# back: ``join_by_invite`` resolves a group BY ``invite_token`` and
+# ``_group_row`` renders the other two). An invitation is a live, unexpiring
+# capability to join: carrying the source's token across would let anyone
+# holding a link minted in the OTHER environment walk into this one's group,
+# and the partial UNIQUE index on the column would additionally make two
+# environments' groups collide on it. An imported group therefore arrives with
+# no active link, exactly as a freshly created one does; a group admin here
+# mints their own.
+_STATIC_INSERT_OVERRIDES: dict[str, dict[str, Any]] = {
+    "groups": {
+        "invite_token": None,
+        "invite_created_at": None,
+        "invite_created_by": None,
+    },
+}
+
+
 def _insert_overrides(table: str, context: _Context) -> dict[str, Any]:
     """Values a NEWLY inserted row takes from this import rather than from the
-    package. Only ``notebooks`` has any, and every one of them is a
-    target-owned column (§5) that must not arrive carrying the source's value:
+    package -- each one a decision this environment owns and the source cannot
+    make for it.
+
+    ``notebooks`` is the run-dependent one:
 
     - ``sync_origin``: stamped at INSERT, not only in phase 5, so a crash
       between the two never leaves a row that looks like a local notebook.
@@ -1455,15 +1510,17 @@ def _insert_overrides(table: str, context: _Context) -> dict[str, Any]:
       mirror precisely because of that), and carrying the source's token
       across would publish a link nobody at this environment created.
       ``copy_notebook`` mints a fresh token for the same reason.
+
+    Everything else comes from ``_STATIC_INSERT_OVERRIDES``.
     """
-    if table != "notebooks":
-        return {}
-    return {
-        "sync_origin": context.manifest.source_env,
-        "status": _IMPORT_IN_FLIGHT_STATUS,
-        "is_shared": 0,
-        "share_token": None,
-    }
+    if table == "notebooks":
+        return {
+            "sync_origin": context.manifest.source_env,
+            "status": _IMPORT_IN_FLIGHT_STATUS,
+            "is_shared": 0,
+            "share_token": None,
+        }
+    return dict(_STATIC_INSERT_OVERRIDES.get(table, {}))
 
 
 def _value_encoder(backend: _Backend, conn: Any, table: str):
@@ -1614,6 +1671,116 @@ def _record_created_parents(
         )
 
 
+# A child table whose rows the SOURCE owns outright (§5: "源端产生的记忆行以
+# 源端为准"), as ``child -> (column pointing at the parent, parent table)``.
+#
+# Upsert alone is not enough for these two, and not only for policy reasons:
+# both carry a UNIQUE constraint BESIDES their primary key --
+# ``uq_memory_revisions_memory_id_revision (memory_id, revision)`` and
+# ``uq_memory_provenance_memory_id (memory_id)``. A target-side confirmation
+# or edit of a mirrored memory mints a row with a NEW id but the SAME
+# (memory_id, revision), so the package's row conflicts on the id index and
+# the target's row conflicts on the other one -- ``ON CONFLICT (id) DO
+# UPDATE`` then raises a unique violation and fails the whole import. Deleting
+# what the source no longer has, before inserting, is both the §5 semantics
+# and the only way the statement can succeed at all.
+#
+# ``memory_embeddings`` is deliberately absent: its primary key IS
+# ``memory_id`` and it has no second unique index, so an upsert already
+# replaces the target's row. ``memory_items`` itself is absent too -- the
+# target's own memories live in that table beside the mirrored ones and must
+# not be touched, which is exactly why the prune is scoped to the parent ids
+# the package carries.
+_SOURCE_AUTHORITATIVE: dict[str, tuple[str, str]] = {
+    "memory_provenance": ("memory_id", "memory_items"),
+    "memory_revisions": ("memory_id", "memory_items"),
+}
+
+# Ceiling on one pruning DELETE's bind list (parents + retained ids together).
+# Well under SQLite's SQLITE_MAX_VARIABLE_NUMBER and cheap to plan on
+# PostgreSQL, while still deleting many parents per statement.
+_PRUNE_BINDS = 500
+
+
+def _package_column(context: _Context, table: str, column: str) -> Iterator[Any]:
+    """Stream one column out of a package rows file. Read from the package
+    rather than from what this run happens to have applied, so a resumed run
+    and a fresh one compute the same set."""
+    for row in _iter_lines(context.package_dir / rows_path(table)):
+        yield decode_value(row.get(column))
+
+
+def _prune_superseded(
+    backend: _Backend, conn: Any, table: str, context: _Context, primary_key: Sequence[str]
+) -> int:
+    """Delete the target's rows for this table that the package no longer has,
+    scoped to the parents the package carries.
+
+    A parent the package does NOT carry is untouched: those are the target's
+    own memories, which §5 leaves alone. A parent the package DOES carry has
+    its whole child set replaced by the package's, including the case where
+    the package carries none for it.
+    """
+    child_column, parent_table = _SOURCE_AUTHORITATIVE[table]
+    if len(primary_key) != 1:
+        raise SyncImportError(
+            f"{table}: source-authoritative pruning needs a single-column "
+            f"primary key, found {tuple(primary_key)}"
+        )
+    key = primary_key[0]
+    retained: dict[Any, set[Any]] = {}
+    for row in _iter_lines(context.package_dir / rows_path(table)):
+        parent = decode_value(row.get(child_column))
+        retained.setdefault(parent, set()).add(decode_value(row.get(key)))
+    parents = [
+        parent
+        for parent in _package_column(context, parent_table, "id")
+        if parent is not None and parent != ""
+    ]
+    deleted = 0
+    for batch in _prune_batches(parents, retained):
+        keep = sorted(
+            {item for parent in batch for item in retained.get(parent, ())}, key=repr
+        )
+        parent_slots = ",".join("?" for _ in batch)
+        statement = (
+            f"DELETE FROM {_ident(table)} "
+            f"WHERE {_ident(child_column)} IN ({parent_slots})"
+        )
+        params: list[Any] = list(batch)
+        if keep:
+            statement += f" AND {_ident(key)} NOT IN ({','.join('?' for _ in keep)})"
+            params.extend(keep)
+        cursor = conn.execute(backend.sql(statement), tuple(params))
+        deleted += max(0, int(getattr(cursor, "rowcount", 0) or 0))
+    if deleted:
+        context.ledger.warn(
+            f"{table}: removed {deleted} target row(s) the source no longer "
+            "has; the source environment owns this table's rows for the "
+            "memories it carries (docs/incremental-sync-design.md §5)"
+        )
+    return deleted
+
+
+def _prune_batches(
+    parents: Sequence[Any], retained: Mapping[Any, set[Any]]
+) -> Iterator[list[Any]]:
+    """Group parents so that one DELETE's parent slots plus its retained-id
+    slots stay under ``_PRUNE_BINDS``. A single parent with more retained
+    children than that still gets its own statement -- correctness first."""
+    batch: list[Any] = []
+    binds = 0
+    for parent in parents:
+        cost = 1 + len(retained.get(parent, ()))
+        if batch and binds + cost > _PRUNE_BINDS:
+            yield batch
+            batch, binds = [], 0
+        batch.append(parent)
+        binds += cost
+    if batch:
+        yield batch
+
+
 def _apply_table(
     backend: _Backend, conn: Any, table: str, context: _Context
 ) -> TableOutcome:
@@ -1646,6 +1813,8 @@ def _apply_table(
 
     if not primary_key:
         _replace_scope(backend, conn, table, context)
+    if table in _SOURCE_AUTHORITATIVE:
+        _prune_superseded(backend, conn, table, context, primary_key)
     known = _TargetKeys(backend, conn, table, primary_key, context)
     seed_parent = _SEED_PARENT.get(table)
     seedable = (
@@ -1794,7 +1963,29 @@ def _apply_rows(backend: _Backend, context: _Context, done: set[str]) -> None:
 _FILE_ROOTS = (NOTEBOOK_FILES_DIR, ASSET_FILES_DIR)
 
 _STAGED_SUFFIX = ".sync-tmp"
-_RETIRED_SUFFIX = ".sync-old"
+# A retired directory names the package that retired it. Without the id, a
+# LATER package's reconciliation cannot tell "my own interrupted swap, adopt
+# it" from "somebody else's leftovers, do not touch". The prefix is what a
+# scan matches on; the id is what decides ownership.
+_RETIRED_PREFIX = ".sync-old-"
+
+
+def _retired_path(destination: Path, package_id: str) -> Path:
+    return destination.with_name(destination.name + _RETIRED_PREFIX + package_id)
+
+
+def _retired_siblings(destination: Path) -> list[tuple[Path, str]]:
+    """``(path, owning package id)`` for every retired copy of this directory,
+    whoever left it."""
+    prefix = destination.name + _RETIRED_PREFIX
+    parent = destination.parent
+    if not parent.is_dir():
+        return []
+    return sorted(
+        (path, path.name[len(prefix) :])
+        for path in parent.iterdir()
+        if path.is_dir() and path.name.startswith(prefix)
+    )
 
 
 def _install_files(context: _Context, *, verify: bool) -> None:
@@ -1826,7 +2017,7 @@ def _install_files(context: _Context, *, verify: bool) -> None:
             if not origin.is_dir():
                 continue
             staged = destination.with_name(destination.name + _STAGED_SUFFIX)
-            retired = destination.with_name(destination.name + _RETIRED_SUFFIX)
+            retired = _retired_path(destination, context.manifest.package_id)
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(origin, staged)
             installed = [path for path in sorted(staged.rglob("*")) if path.is_file()]
@@ -1870,39 +2061,63 @@ def _verify_installed(
 
 def _reconcile_staging(context: _Context, destination: Path) -> bool:
     """Resolve what a run killed inside the swap left behind, and report
-    whether a usable ``.sync-old`` was inherited.
+    whether a usable retired copy of THIS package was inherited.
 
-    The swap is: copy into ``.sync-tmp``, rename destination to ``.sync-old``,
-    rename ``.sync-tmp`` onto the destination, and (only after phase 5)
-    delete ``.sync-old``. A process killed at any point leaves one of:
+    The swap is: copy into ``.sync-tmp``, rename the destination to
+    ``.sync-old-<package_id>``, rename ``.sync-tmp`` onto the destination,
+    and (only after phase 5) delete the retired copy. A process killed at any
+    point leaves one of:
 
     - ``.sync-tmp`` present: killed during or right after the copy, before the
       destination was touched. Discard it; nothing was displaced.
-    - ``.sync-old`` present AND the destination present: killed after both
-      renames, before the cleanup. The destination already holds new content
-      and ``.sync-old`` is still the pre-import original -- the one thing a
-      rollback needs. It is adopted, not overwritten, and this run's commit
-      or rollback disposes of it.
-    - ``.sync-old`` present and the destination MISSING: killed between the
-      two renames. Put it back; the destination is the original again.
+    - this package's retired copy present AND the destination present: killed
+      after both renames, before the cleanup. The destination already holds
+      new content and the retired copy is still the pre-import original -- the
+      one thing a rollback needs. It is adopted, not overwritten, and this
+      run's commit or rollback disposes of it.
+    - this package's retired copy present and the destination MISSING: killed
+      between the two renames. Put it back; the destination is the original
+      again.
+
+    A retired copy belonging to a DIFFERENT package is never adopted -- this
+    run knows nothing about what it contains or what rolling it back would
+    mean. If that package finished (``sync_imports.status='done'``) its
+    retired copy is dead weight and is removed; otherwise it is left exactly
+    where it is, for the run that owns it or for an operator. Either way it is
+    reported.
     """
     staged = destination.with_name(destination.name + _STAGED_SUFFIX)
-    retired = destination.with_name(destination.name + _RETIRED_SUFFIX)
     if staged.exists():
         shutil.rmtree(staged, ignore_errors=True)
-    if not retired.exists():
+    mine: Path | None = None
+    for path, owner in _retired_siblings(destination):
+        if owner == context.manifest.package_id:
+            mine = path
+            continue
+        if owner in context.finished_packages:
+            shutil.rmtree(path, ignore_errors=True)
+            context.ledger.warn(
+                f"removed {path.name}: package {owner} finished without "
+                "dropping the directory it replaced"
+            )
+            continue
+        context.ledger.warn(
+            f"left {path.name} alone: package {owner} has not finished, so "
+            "this run does not know whether that copy is still needed"
+        )
+    if mine is None:
         return False
     if not destination.exists():
-        retired.rename(destination)
+        mine.rename(destination)
         context.ledger.warn(
-            f"restored {destination.name} from a previous run that was "
-            "interrupted mid-swap"
+            f"restored {destination.name} from a previous run of this package "
+            "that was interrupted mid-swap"
         )
         return False
-    context.installed.append((destination, retired))
+    context.installed.append((destination, mine))
     context.ledger.warn(
         f"adopted the retired copy of {destination.name} left by a previous "
-        "run that was interrupted before it could clean up"
+        "run of this package that was interrupted before it could clean up"
     )
     return True
 
@@ -2105,6 +2320,15 @@ def import_package(
     Preflight already hashed the same bytes in this same run, so it is off by
     default and exists for an operator who wants the copy itself checked.
 
+    ``create_missing_users`` mints a local account for every package user this
+    environment does not have, so their rows keep an author. **Those accounts
+    cannot be signed in to until an administrator issues a 'recover' grant for
+    each** (``POST /admin/auth/grants``, ``purpose='recover'``, completed by
+    the person through the external provider). No code here binds an external
+    identity by matching usernames -- see ``_CREATED_USERS_NEED_A_GRANT`` for
+    why that is deliberate. The report says so too, in ``warnings``, and the
+    ids are in ``user_mapping.created``.
+
     **A SQLite target must be quiesced** -- see the module docstring. The
     report carries a warning whenever the target is SQLite.
 
@@ -2208,6 +2432,8 @@ def _import(
     if create_missing_users:
         created = _create_missing_users(backend, mapping.unmatched)
         context.users.update(created)
+        if created:
+            ledger.warn(_CREATED_USERS_NEED_A_GRANT.format(count=len(created)))
     elif mapping.unmatched:
         ledger.warn(
             f"{len(mapping.unmatched)} package user(s) have no target "
@@ -2225,6 +2451,7 @@ def _import(
     try:
         with backend.read() as conn:
             done = _completed_steps(backend, conn, manifest.package_id)
+            context.finished_packages = _finished_packages(backend, conn)
         _apply_rows(backend, context, done)          # phase 3
         if _FILES_PHASE in done:
             ledger.warn(
@@ -2246,13 +2473,30 @@ def _import(
             raise
         raise SyncImportError(f"import failed: {exc}") from exc
 
-    report = _report(manifest, ledger, result)
-    _settle(backend, context, "done", report)
+    # Dropping the replaced directories comes BEFORE the run is recorded done.
+    # The other order leaks: a crash in between would leave a package marked
+    # done -- which the next run short-circuits on as already_applied -- with
+    # its retired directories still on disk and nothing left that will ever
+    # come back for them. This way the crash leaves the run un-finished, the
+    # rerun resumes, and reconciliation cleans up.
     try:
         _commit_files(backend, context)
     except OSError as exc:  # pragma: no cover - filesystem failure path
         ledger.warn(f"could not drop the replaced storage directories: {exc}")
+    report = _report(manifest, ledger, result)
+    _settle(backend, context, "done", report)
     return report
+
+
+def _finished_packages(backend: _Backend, conn: Any) -> frozenset[str]:
+    """Package ids this environment has finished applying. Used only to decide
+    whether another package's retired storage directory is still wanted."""
+    return frozenset(
+        str(row["package_id"])
+        for row in backend.stream(
+            conn, "SELECT package_id FROM sync_imports WHERE status = 'done'"
+        )
+    )
 
 
 def _settle(

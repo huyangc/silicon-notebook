@@ -1010,7 +1010,8 @@ def test_the_file_phase_runs_after_the_rows_and_rolls_back(
 
     assert installed[0].read_bytes() == b"target-side edit"
     assert not any(
-        path.name.endswith((".sync-old", ".sync-tmp")) for path in storage.rglob("*")
+        ".sync-old-" in path.name or path.name.endswith(".sync-tmp")
+        for path in storage.rglob("*")
     )
     # The rows of the failed run are still there: they are atomic per table
     # and were never what got rolled back.
@@ -1159,19 +1160,28 @@ def _notebook_storage(target, notebook_id: str) -> Path:
     return Path(target["settings"].storage_dir) / "notebooks" / notebook_id
 
 
+def _retired(destination: Path, package: Path) -> Path:
+    """Where the swap parks the directory it displaces, for the package that
+    displaced it. The owning package id is part of the name on purpose."""
+    return destination.with_name(
+        destination.name + ".sync-old-" + _manifest(package)["package_id"]
+    )
+
+
 def test_a_swap_interrupted_after_both_renames_is_reconciled(
     source, target, package, tmp_path
 ):
-    """Killed after the destination was replaced but before ``.sync-old`` was
-    dropped: the destination already holds new content and ``.sync-old`` is
-    the only copy of the original, so it is adopted rather than overwritten."""
+    """Killed after the destination was replaced but before the retired copy
+    was dropped: the destination already holds new content and the retired
+    copy is the only copy of the original, so it is adopted, not overwritten."""
     _import(target, package)
     destination = _notebook_storage(target, source["exported"])
-    retired = destination.with_name(destination.name + ".sync-old")
+    second = _export(source, tmp_path / "out2")
+    retired = _retired(destination, second)
     retired.mkdir()
     (retired / "original.txt").write_bytes(b"pre-import original")
 
-    report = _import(target, _export(source, tmp_path / "out2"))
+    report = _import(target, second)
 
     assert report.error == ""
     assert not retired.exists()
@@ -1187,17 +1197,67 @@ def test_a_swap_interrupted_between_the_renames_is_put_back(
     copy took its place: the original is put back and the run proceeds."""
     _import(target, package)
     destination = _notebook_storage(target, source["exported"])
-    retired = destination.with_name(destination.name + ".sync-old")
+    second = _export(source, tmp_path / "out2")
+    retired = _retired(destination, second)
     shutil.rmtree(destination)
     retired.mkdir()
     (retired / "original.txt").write_bytes(b"pre-import original")
 
-    report = _import(target, _export(source, tmp_path / "out2"))
+    report = _import(target, second)
 
     assert report.error == ""
     assert not retired.exists()
     assert destination.is_dir()
     assert any("interrupted mid-swap" in w for w in report.warnings)
+
+
+def test_a_finished_packages_leftover_is_swept_not_adopted(
+    source, target, package, tmp_path
+):
+    """The leak the commit order closes: a run killed between "replace the
+    directory" and "drop what it replaced" leaves a retired copy behind. The
+    package that owns it is already recorded done, so nothing will come back
+    for it -- a later import removes it, and never rolls back into it."""
+    first = _import(target, package)
+    destination = _notebook_storage(target, source["exported"])
+    orphan = destination.with_name(
+        destination.name + ".sync-old-" + first.package_id
+    )
+    orphan.mkdir()
+    (orphan / "stale.txt").write_bytes(b"left by a finished package")
+
+    report = _import(target, _export(source, tmp_path / "out2"))
+
+    assert report.error == ""
+    assert not orphan.exists()
+    assert any(
+        f"removed {orphan.name}" in warning for warning in report.warnings
+    )
+    assert destination.is_dir()
+
+
+def test_another_packages_unfinished_leftover_is_left_alone(
+    source, target, package, tmp_path
+):
+    """A retired copy whose package has NOT finished may still be the only
+    thing that run can roll back into. This import does not know what it holds,
+    so it neither adopts nor deletes it -- it reports it."""
+    _import(target, package)
+    destination = _notebook_storage(target, source["exported"])
+    foreign = destination.with_name(destination.name + ".sync-old-other-package")
+    foreign.mkdir()
+    (foreign / "not-mine.txt").write_bytes(b"another run may still need this")
+
+    report = _import(target, _export(source, tmp_path / "out2"))
+
+    assert report.error == ""
+    assert (foreign / "not-mine.txt").read_bytes() == b"another run may still need this"
+    assert any(
+        f"left {foreign.name} alone" in warning for warning in report.warnings
+    )
+    # ... and it was not treated as this run's own rollback source: the
+    # destination holds the package's files, not the foreign directory's.
+    assert not (destination / "not-mine.txt").exists()
 
 
 def test_a_leftover_staging_directory_is_discarded(
@@ -1213,7 +1273,10 @@ def test_a_leftover_staging_directory_is_discarded(
 
     assert report.error == ""
     assert not staged.exists()
-    assert not destination.with_name(destination.name + ".sync-old").exists()
+    assert not any(
+        path.name.startswith(destination.name + ".sync-old-")
+        for path in destination.parent.iterdir()
+    )
 
 
 # ------------------------------------------------------- group_admins grants
@@ -1244,4 +1307,186 @@ def test_a_group_admins_grant_maps_through_the_group_mapping(
     assert grant["principal_type"] == "group_admins"
     assert grant["principal_id"] == "grp-b", (
         "a group_admins principal must be remapped like a group principal"
+    )
+
+
+# ------------------------------------------- the source owns a memory's history
+
+
+def _add_revision(
+    repo, memory_id: str, revision: int, summary: str, actor: str
+) -> str:
+    """One memory revision, the shape both environments mint when somebody
+    confirms or edits a memory. ``(memory_id, revision)`` is UNIQUE, so the
+    two sides independently producing "revision 2" is exactly the collision
+    under test -- same pair, different id."""
+    revision_id = f"rev-{summary}"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO memory_revisions(id,memory_id,revision,title,content_md,"
+            "tags_json,status,promotion_state,changed_by,change_reason,created_at) "
+            "VALUES(?,?,?,?,?,'[]','confirmed','none',?,'',?)",
+            (revision_id, memory_id, revision, summary, summary, actor, MOMENT),
+        )
+    return revision_id
+
+
+def _memory_id(repo, notebook_id: str) -> str:
+    return _one(
+        repo, "SELECT id FROM memory_items WHERE notebook_id=?", (notebook_id,)
+    )["id"]
+
+
+def test_the_source_owns_the_revision_history_of_the_memories_it_carries(
+    source, target, package, tmp_path
+):
+    """Both environments edit the same mirrored memory, so each mints its own
+    revision 2 under a different id. ``ON CONFLICT (id) DO UPDATE`` alone would
+    hit uq_memory_revisions_memory_id_revision and fail the whole import; §5
+    says the source wins, so the target's is removed first."""
+    _import(target, package)
+    memory = _memory_id(source["repo"], source["exported"])
+    assert memory == _memory_id(target["repo"], source["exported"])
+    _add_revision(source["repo"], memory, 2, "source-edit", ALICE[0])
+    _add_revision(target["repo"], memory, 2, "target-edit", ALICE[1])
+
+    report = _import(target, _export(source, tmp_path / "out2"))
+
+    assert report.error == ""
+    rows = _fetch(
+        target["repo"],
+        "SELECT id, revision FROM memory_revisions WHERE memory_id=? "
+        "ORDER BY revision",
+        (memory,),
+    )
+    assert [str(row["id"]) for row in rows] == [
+        str(row["id"])
+        for row in _fetch(
+            source["repo"],
+            "SELECT id FROM memory_revisions WHERE memory_id=? ORDER BY revision",
+            (memory,),
+        )
+    ]
+    assert "rev-target-edit" not in {str(row["id"]) for row in rows}
+    assert any("the source no longer has" in warning for warning in report.warnings)
+
+
+def test_a_memory_the_package_does_not_carry_keeps_its_own_history(
+    source, target, package, tmp_path
+):
+    """The prune is scoped to the parents the package carries. A memory the
+    target's own users created lives in the same table and must not be
+    touched by it (§5: the target's own memory rows are not in the source's
+    change log at all)."""
+    _import(target, package)
+    repo = target["repo"]
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,"
+            "title,content_md,tags_json,created_at,updated_at) "
+            "VALUES(?,?,?,'external_agent','confirmed','本地记忆','正文','[]',?,?)",
+            ("mem-local", source["exported"], ALICE[1], MOMENT, MOMENT),
+        )
+    _add_revision(repo, "mem-local", 1, "local-only", ALICE[1])
+
+    report = _import(target, _export(source, tmp_path / "out2"))
+
+    assert report.error == ""
+    assert _count(
+        repo, "SELECT COUNT(*) FROM memory_revisions WHERE memory_id=?", ("mem-local",)
+    ) == 1
+    assert _count(
+        repo, "SELECT COUNT(*) FROM memory_items WHERE id=?", ("mem-local",)
+    ) == 1
+
+
+# --------------------------------------------------- an imported group's invite
+
+
+def test_an_imported_group_arrives_with_no_invitation_link(
+    source, target, tmp_path
+):
+    """An invitation is a live capability to join. Carrying the source's token
+    across would let anyone holding a link minted in the OTHER environment walk
+    into this one's group."""
+    with source["repo"]._write() as db:
+        db.execute(
+            "UPDATE groups SET invite_token=?, invite_created_at=?, "
+            "invite_created_by=? WHERE id=?",
+            ("invite-from-source", MOMENT, ALICE[0], "grp-a"),
+        )
+    with target["repo"]._write() as db:
+        db.execute("DELETE FROM group_members")
+        db.execute("DELETE FROM groups")
+    # Exported AFTER the token exists, so the package really carries it and
+    # the assertions below are about the importer, not about an empty column.
+    package = _export(source, tmp_path / "out-invite")
+    assert _rows(package, "groups")[0]["invite_token"] == "invite-from-source"
+
+    report = _import(target, package)
+
+    assert report.groups_created == ("shared-team",)
+    row = _one(
+        target["repo"],
+        "SELECT invite_token, invite_created_at, invite_created_by FROM groups "
+        "WHERE id=?",
+        ("grp-a",),
+    )
+    assert row["invite_token"] is None
+    assert row["invite_created_at"] is None
+    assert row["invite_created_by"] is None
+    # ... and the source's link really is dead here, through the seam a
+    # recipient would actually use.
+    store = target["repo"]._runtime.groups
+    assert store.join_by_invite("invite-from-source", user_id=ALICE[1]) is None
+
+
+# ------------------------------------------- created users cannot sign in yet
+
+
+def test_created_users_are_reported_as_needing_a_recovery_grant(
+    source, target, package
+):
+    """Nothing in this repository binds an external identity to a local account
+    by matching usernames, so a user this import mints owns rows but cannot be
+    signed in to. The report has to say so -- the CLI prints warnings and puts
+    them in --json, so one warning covers both surfaces."""
+    report = _import(target, package, create_missing_users=True)
+
+    assert report.user_mapping.created
+    grant = [w for w in report.warnings if "recover" in w]
+    assert grant, report.warnings
+    assert "/admin/auth/grants" in grant[0]
+    assert grant[0] in json.dumps(report.as_json(), ensure_ascii=False)
+
+
+def test_the_replaced_directories_are_dropped_before_the_run_is_recorded_done(
+    source, target, package, tmp_path, monkeypatch
+):
+    """Order matters, not just eventual cleanup. Marking the package done
+    first would mean a crash in between leaves a done package -- which the
+    next run short-circuits as already_applied -- with retired directories
+    nothing will ever come back for."""
+    from app.migration.sync import import_ as module
+
+    _import(target, package)
+    storage = Path(target["settings"].storage_dir)
+    seen: list[tuple[str, list[str]]] = []
+    real = module._settle
+
+    def observe(backend, context, status, report):
+        seen.append(
+            (
+                status,
+                [path.name for path in storage.rglob("*") if ".sync-old-" in path.name],
+            )
+        )
+        return real(backend, context, status, report)
+
+    monkeypatch.setattr(module, "_settle", observe)
+    report = _import(target, _export(source, tmp_path / "out2"))
+
+    assert report.error == ""
+    assert seen == [("done", [])], (
+        "no retired directory may still exist when the run is recorded done"
     )

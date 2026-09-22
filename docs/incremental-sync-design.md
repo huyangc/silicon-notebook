@@ -133,8 +133,10 @@ users 不同步但导入时可能**创建**：见 §4。
 - 映射键是 `users.username`。导出包携带源端用户表的投影 `(id, username, display_name, role)`
   仅供映射，不写入目标端 users。
 - 导入时先构造 `source_user_id → target_user_id`：目标端按 username 精确匹配；匹配不到时，
-  若 `--create-missing-users` 打开则按源端投影建一个无凭据的本地用户（外部认证首次登录时
-  由现有 `external_identities` 绑定逻辑认领），否则按 §3.2 表内规则处理。
+  若 `--create-missing-users` 打开则按源端投影建一个无凭据的本地用户，否则按 §3.2 表内规则
+  处理。**建出来的账号不能自动认领**：外部认证对未绑定身份报 `identity_not_linked`，注册又
+  拒绝已占用的 username，所以导入报告要把这批用户单独列出并提示管理员按既有的恢复授权/
+  身份绑定流程处理；导入器不做自动绑定。
 - 组按 `groups.name` 匹配，匹配不到则创建；匹配上的组把源端 `groups.id` 重映射为目标端 id
   （`groups.name` 没有唯一索引，不重映射会以源 id 再插一份，下次导入撞歧义）。目标端同名组
   重复、或源组 id 与目标端另一个名字的组撞 id，都硬失败。
