@@ -1196,6 +1196,13 @@ class AskService:
 
         取消之后到达的步不落库:与流式一致(那边是「不投递」),一次已被取消的提问
         不该继续往它的 job 上追加轨迹。
+
+        **登记:这个 INSERT 确实仍在请求线程上,而提问完成钩子不是。** 两者形状不
+        同,不是同一个取舍抄两遍:这里是一轮里每个步骤各一次的短写(一条
+        append-only 的单行 INSERT,写完就走),而且它必须同步——轨迹要按 seq 有序、
+        要在答案返回之前就已经在库里,交给后台只会换来乱序与「响应带着一段库里还
+        没有的轨迹」。钩子那边是**过阈值之后**可能一次等满 ``db_busy_timeout_ms``
+        的读+写,而且没有任何人在等它的结果,所以只有它该搬走。
         """
         def on_trace(step) -> None:
             if cancel_event is not None and cancel_event.is_set():
@@ -1247,6 +1254,10 @@ class AskService:
 
         全局问答(``GlobalAskService``)直调 ``AskService.ask``,两个钩子都不经过
         ——它对三条链路仍然零计数,这是本轮**登记不做**的范围,不是遗漏。
+
+        进程退出时在途的通知随后台 worker 一起丢掉,**代价为零**:三条链路推的都
+        是进程内计数器(见 ``search_profile_job`` 模块 docstring 里同一条登记),
+        重启本来就从零开始,丢掉的至多是一次推迟的阈值,从来不是正确性。
 
         被调方 ``RepositoryRuntime._note_ask_completed`` 才是三条链路真正的分发
         点(P1 巡固、P2 经验蒸馏的 ``mode_id == "reasoning"`` 闸、P3 偏好归纳都在

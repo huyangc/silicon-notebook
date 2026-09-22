@@ -1042,17 +1042,22 @@ def _cached_partition(store, signal, key: str) -> List[dict]:
     """
     with _EXPERIENCE_CACHE_LOCK:
         if _experience_cache_owner_matches(store):
+            # 两个槽位判命中的写法刻意取齐:容器可能还不存在(``.get`` 给 None /
+            # ``partitions`` 键尚未建),槽位里存的则一定是本函数自己写进去的
+            # ``(signal, entries)``。所以只有一道「槽位在不在」的防御 + 一次
+            # 签名比较,两层同款——一层多一道 isinstance、另一层没有,读的人
+            # 就得猜是哪一层还可能被别处写脏。
+            partitions = _EXPERIENCE_CACHE.get("partitions")
             if not key:
                 cached = _EXPERIENCE_CACHE.get("global")
-                if isinstance(cached, tuple) and cached[0] == signal:
-                    return cached[1]
+            elif isinstance(partitions, OrderedDict):
+                cached = partitions.get(key)
             else:
-                partitions = _EXPERIENCE_CACHE.get("partitions")
-                if isinstance(partitions, OrderedDict) and key in partitions:
-                    cached = partitions[key]
-                    if cached[0] == signal:
-                        partitions.move_to_end(key)
-                        return cached[1]
+                cached = None
+            if cached is not None and cached[0] == signal:
+                if key:
+                    partitions.move_to_end(key)  # type: ignore[union-attr]
+                return cached[1]
     limit = (
         RETRIEVAL_EXPERIENCE_MAX_ENTRIES if not key
         else RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES
@@ -2218,7 +2223,10 @@ def _zero_hit_nudge_for(
 
     存在的理由是分层要**同时**把合并列表和分界下标交给纯函数,而 run() 里那处
     调用不该长出一段取数代码:纯函数保持纯(用例直接喂列表),取数保持一处(一次
-    ``version_signal()`` 装两层)。
+    ``version_signal(notebook_id)`` 装两层)。
+
+    ⚠ 这是 reflect 循环里**每一轮**都可能走到的取数点(``_consultable_rows``
+    同理),不是每 run 一次——分区签名那笔账正是为这个频率算的。
     """
     primary, fallback = _cached_experience_layers(store, notebook_id)
     return _zero_hit_nudge_note(

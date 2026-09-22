@@ -305,8 +305,8 @@ class RetrievalExperienceStore:
         the SQLite method, including the refusal to clamp a negative delta and
         the deliberate refusal to touch ``updated_at`` — see the SQLite
         mirror's docstring for why: that column is the eviction tie-break AND
-        half of ``version_signal()``'s memo key, so an adoption must stay
-        invisible to both."""
+        one component of ``version_signal(...)``'s memo key, so an adoption must
+        stay invisible to both."""
         ids = [str(item) for item in experience_ids if str(item)]
         if int(delta) < 0:
             raise ValueError(
@@ -390,7 +390,10 @@ class RetrievalExperienceStore:
         injection side's memo key for one run. See the SQLite mirror for why
         the revision exists (offset-carrying text MAX is not a content
         identity), why the two halves are returned separately, why one grouped
-        aggregate rather than two statements, and why an adoption is
+        aggregate rather than two statements, why the partition index only
+        LOCATES the rows (``MAX(updated_at)`` still visits them, bounded at
+        ~400 rather than the whole table), why the caller pays this per
+        reflect turn rather than once per run, and why an adoption is
         deliberately invisible here.
 
         ``::text`` rather than the raw ``timestamptz``: the value is only ever

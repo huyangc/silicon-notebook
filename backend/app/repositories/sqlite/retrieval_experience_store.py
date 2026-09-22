@@ -346,8 +346,8 @@ class RetrievalExperienceStore:
         at the call site, which clamping would hide.
 
         ⚠ Deliberately does NOT touch ``updated_at``. That column is the last
-        tie-break of the eviction ordering, and it is also half of
-        ``version_signal()``'s memo key — letting an adoption refresh it would
+        tie-break of the eviction ordering, and it is also one component of
+        ``version_signal(...)``'s memo key — letting an adoption refresh it would
         make a frequently-injected entry immortal AND invalidate the
         injection-side memo on every single run that adopts anything, which
         defeats the memo's entire purpose. An adoption is therefore invisible
@@ -444,14 +444,24 @@ class RetrievalExperienceStore:
         injection side's memo key for one run. Each is
         ``(mutation revision, row count, newest updated_at)``.
 
-        ONE aggregate, scoped by ``notebook_id IN (?, '')`` so the planner
-        answers it from ``idx_retrieval_experiences_notebook`` (the
-        ``(notebook_id, id)`` index ``read_partition`` already requires)
-        instead of scanning a table that now grows with the number of
-        notebooks that have traffic. ``GROUP BY notebook_id`` rather than two
-        statements: the two halves must describe the SAME instant, or a
-        distillation landing between them hands the caller a pair of layers
-        taken from two different versions of the table.
+        ONE aggregate, scoped by ``notebook_id IN (?, '')`` so
+        ``idx_retrieval_experiences_notebook`` (the ``(notebook_id, id)``
+        index ``read_partition`` already requires) LOCATES the two
+        partitions' rows instead of the statement scanning a table that now
+        grows with the number of notebooks that have traffic. It is not a
+        covering index for this statement — ``updated_at`` is not in it, so
+        the located rows are still visited for ``MAX``. The win is the size
+        of that visited set: at most ~400 rows (300 global + 100 notebook),
+        independent of how many notebooks exist. ``GROUP BY notebook_id``
+        rather than two statements: the two halves must describe the SAME
+        instant, or a distillation landing between them hands the caller a
+        pair of layers taken from two different versions of the table.
+
+        ⚠ The caller pays this **per reflect turn per consumer**, not once
+        per run: the passive block at planning, plus ``_zero_hit_nudge_for``
+        and ``_consultable_rows`` every time the reflect loop reaches them
+        (up to 50 turns at ``exhaustive``). That is why the scoping mattered
+        enough to change a port signature for.
 
         The halves are returned separately because the global partition is
         read by every run in the process while the notebook half is not:

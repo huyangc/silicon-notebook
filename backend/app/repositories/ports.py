@@ -5689,13 +5689,23 @@ class RetrievalExperienceStorePort(Protocol):
         PR-3). Before the injection gate defaulted on, this was one unscoped
         ``COUNT(*) + MAX(updated_at)`` over the whole table and one revision
         counter for the whole store. Both stopped being affordable at the same
-        moment: every reasoning ask now pays this call, the table is no longer
-        one bounded number of rows (it is 300 for the global partition plus up
-        to 100 per notebook with traffic), and a single whole-store signal made
-        ANY notebook's distillation invalidate EVERY notebook's cached
-        snapshot. The predicate is ``notebook_id IN (<partition>, '')``, which
-        both backends answer from the ``(notebook_id, id)`` index that
-        ``read_partition`` already requires.
+        moment: the table is no longer one bounded number of rows (it is 300
+        for the global partition plus up to 100 per notebook with traffic),
+        a single whole-store signal made ANY notebook's distillation
+        invalidate EVERY notebook's cached snapshot, and — the part worth
+        being precise about — this is **not** a once-per-run call. It is
+        once per injection consumer per reflect turn: the passive block once
+        at planning, then ``_zero_hit_nudge_for`` and ``_consultable_rows``
+        each time the reflect loop reaches them, i.e. up to the run's step
+        ceiling (50 at ``exhaustive``).
+
+        The predicate is ``notebook_id IN (<partition>, '')``. Both backends
+        use the ``(notebook_id, id)`` index ``read_partition`` already
+        requires to LOCATE the two partitions' rows; ``MAX(updated_at)`` is
+        not in that index, so the rows are still visited to compute it. That
+        is the point of the scoping rather than a defeat of it: the visited
+        set goes from the whole table to at most ~400 rows (300 + 100) no
+        matter how many notebooks the deployment has.
 
         Returning the two halves SEPARATELY rather than one combined signal is
         what lets the caller memoise each layer on its own: the global layer is

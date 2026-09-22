@@ -82,7 +82,9 @@ _CALLABLE_OPERATION = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,79}$")
 # 是产品坏了。两个池各自有独立容量,互不占用。
 #
 # 刻意**不进闸**的两类:
-#   * `ask-*`  —— 用户在线等的交互路径,排队即体感卡死;
+#   * `ask-*`  —— 用户在线等的交互路径,排队即体感卡死。**一个例外**:
+#     `ask-completed-*` 是答案交付**之后**的记账,没有任何人在等它,所以它按
+#     量级归轻活池(见下面那条注释);
 #   * `report-*` —— worker 内已有 `ReportGenerationGate` 整篇准入闸,再套一层
 #     只会让两把闸的容量互相干扰。
 _HEAVY_MAINTENANCE_OPERATIONS = frozenset({
@@ -117,6 +119,16 @@ _LIGHT_MAINTENANCE_OPERATIONS = frozenset({
     "knowhow-project",
     "knowhow-legacy-reproject",
     "knowhow-asset-sweep",
+    # 一次提问交付之后推进三条记忆链路的记账(同步/MCP 面从 `ask_current` 交出来
+    # 的;流式面在自己的 worker 里直接调)。进**轻活**池不是为了限流,是为了
+    # **复用**:每一次同步提问都起一条新 daemon 线程,就等于每一次都新开一个
+    # SQLite 连接(连接缓存是 threading.local,开一次要跑 7 条 PRAGMA),而这条
+    # 记账本身只是一次有界读+写。长驻 worker 让线程与连接都复用掉。
+    # 代价是它现在会排队——可以接受,因为**没有人在等它**:答案早已交付,这与
+    # `ask-*` 那条「用户在线等、排队即体感卡死」的理由正好相反。量级也对得上:
+    # 与 agentprofile/retrievalexperience 同一档的有界工作,而且过阈值之后触发的
+    # 恰恰就是那两条链自己的 job。
+    "ask-completed",
 })
 # 批 3·W1 PR-3(D-2 已定):第三个池,判据同上两池同轴——量级差。删除既不是
 # LLM 扇出型重活(会被小时级重建饿死,而删除是用户已点过确认的操作),也不是
