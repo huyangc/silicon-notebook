@@ -42,14 +42,25 @@ inside the one snapshot the row scan itself uses. Reading the log on a second
 connection would describe a different instant than the rows the package
 carries, which is the same mistake the compensation window exists to undo.
 
-Memory: compaction is per table and the dict is dropped before the next table
-is touched (``export`` calls ``compact``/``table_delta`` in one loop body), so
-the peak is the number of DISTINCT KEYS ONE table saw in this window -- not
-the number of log rows, and not the whole window. For a daily export that is
-the day's edited rows of the single busiest table; for the first export after
-a long gap it can approach that table's row count, which is the same order of
-magnitude a full export of the table already materializes one page at a time.
-An export is an offline tool and this is an accepted ceiling (§11).
+Memory, by what is actually held at once:
+
+- The compaction dict for ONE table: key text -> final operation, dropped
+  before the next table is touched. This is the peak, and it is the number of
+  DISTINCT KEYS that table saw in the window (not log rows, not the window).
+  For a daily export that is the day's edited rows of the single busiest
+  table; after a long gap it can approach that table's row count.
+- ONE BATCH of read-back rows (``_ID_BATCH`` divided by the key's width).
+  Rows are written to the package as they are read and dropped with the
+  batch -- ``table_delta`` never accumulates a table's rows, which is the
+  whole point of it taking writer callbacks instead of returning lists.
+- The compensation window, whole, for the export's duration -- key identities
+  only, one entry per log row a transaction in flight at the previous
+  snapshot wrote (see ``compensation_rows`` for when that stops being small).
+- One ``FileRequest`` per changed ``sources``/``notebook_assets`` row: the
+  file phase runs after the read snapshot closes and cannot ask again.
+
+An export is an offline tool and the first of these is an accepted ceiling
+(§11).
 """
 
 from __future__ import annotations
@@ -66,12 +77,19 @@ from app.migration.sync.database import (
     _batched,
     _quoted,
 )
-from app.migration.sync.manifest import ScopeKind, scope_chain, spec_for
+from app.migration.shadow.manifest import MANIFEST as _SHADOW_MANIFEST
+from app.migration.sync.manifest import (
+    ScopeKind,
+    scope_chain,
+    spec_for,
+    synced_tables,
+)
 from app.migration.sync.package import (
     ASSET_FILES_DIR,
     NOTEBOOK_FILES_DIR,
     delete_entry,
     is_safe_identifier,
+    is_safe_relative_path,
     notebook_assets_dir,
     notebook_files_dir,
 )
@@ -109,15 +127,14 @@ _COMPENSATION_WINDOW_SQL = (
     "ORDER BY seq"
 )
 
-# Lifecycle states in which a notebook's rows are mid-copy/mid-delete/mid-import
-# and no snapshot of them is a coherent notebook. Same value list as
-# ``export._NOT_LIVE_STATUSES``; kept as its own name here so a reader of this
-# module can see the predicate it applies without chasing the import.
-_NOT_LIVE_STATUSES = ("copying", "deleting", "importing")
-
+# What a touched notebook can be, as far as this window is concerned. There is
+# deliberately no "mid-copy / mid-delete / mid-import" state: ``notebooks.
+# status`` is a TARGET-owned column and a source-side lifecycle state says
+# nothing about what the target should hold. Skipping on it would drop exactly
+# the changes made during that window while the watermark moved past them --
+# see ``export._select_notebooks`` for the full argument.
 LIVE = "live"
 MIRROR = "mirror"
-NOT_LIVE = "not_live"
 MISSING = "missing"
 
 
@@ -169,25 +186,60 @@ class FileRequest:
     stem: str = ""
 
 
+# How many downgraded keys one table names in its warning before the message
+# switches to a count. A window that downgrades thousands of keys has one
+# problem, not thousands, and an operator report has to stay readable.
+_DOWNGRADE_SAMPLES = 5
+
+
 @dataclass
 class TableDelta:
-    """What one table contributes to an incremental package."""
+    """What one table contributed to an incremental package.
 
-    # Raw source rows (still in the database's own shape -- the caller runs
-    # them through ``_row_encoder``), ordered by canonical key text.
-    rows: list[dict[str, Any]] = field(default_factory=list)
-    # ``deletes.jsonl`` entries, same ordering.
-    deletes: list[dict[str, Any]] = field(default_factory=list)
-    # Live, non-mirror notebooks this table's contribution belongs to.
+    COUNTS AND SETS ONLY -- the rows and delete entries themselves went
+    straight to the package writer as they were produced (see
+    ``table_delta``). The one list still held here is ``files``: one entry per
+    changed ``sources``/``notebook_assets`` row, because the file phase runs
+    after the read snapshot closes and cannot ask again."""
+
+    rows: int = 0
+    deletes: int = 0
+    # Live, non-mirror notebooks this table's contribution belongs to -- rows
+    # AND deletes, so the caller re-sends a ``notebooks`` row for each.
     notebooks: set[str] = field(default_factory=set)
     # Only ever non-empty for the ``notebooks`` table itself.
     deleted_notebooks: set[str] = field(default_factory=set)
     files: list[FileRequest] = field(default_factory=list)
     # Log rows dropped because they belong to a mirrored notebook.
     skipped_mirror: int = 0
-    # notebook id -> why its changes were left out (not-live lifecycle state).
+    # notebook id -> why its changes were left out (mirror, today the only
+    # reason a notebook that exists is skipped).
     skipped: dict[str, str] = field(default_factory=dict)
+    # Upserts whose row was gone at read-back time, and a bounded sample of
+    # their keys. Counted rather than one warning per key.
+    downgraded: int = 0
+    _samples: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
+    def note_downgrade(self, table: str, texts: Sequence[str]) -> None:
+        self.downgraded += len(texts)
+        for text in texts:
+            if len(self._samples) < _DOWNGRADE_SAMPLES:
+                self._samples.append(text)
+
+    def sealed(self, table: str) -> "TableDelta":
+        """Fold the bounded counters into the warning text. Called once per
+        table, after the last batch, so the message can say how many keys it
+        is really talking about."""
+        if self.downgraded:
+            more = self.downgraded - len(self._samples)
+            tail = f" (+{more} more)" if more > 0 else ""
+            self.warnings.append(
+                f"{table}: {self.downgraded} key(s) logged as upserts no longer "
+                f"exist in the export snapshot and were exported as deletes: "
+                f"{', '.join(self._samples)}{tail}"
+            )
+        return self
 
 
 # ------------------------------------------------------------- watermark row
@@ -263,12 +315,24 @@ def compensation_rows(
     """The whole compensation window (see the module docstring), grouped by
     table and left in ``seq`` order inside each group.
 
-    Materialized once for the entire export rather than per table: it is ONE
-    index range over the transactions that were in flight at the previous
-    export's snapshot, and splitting it per table would turn one small scan
-    into 46 of them. Empty on SQLite, and empty for a watermark with no stored
-    snapshot (a pre-v85/0065 row -- which ``export`` never treats as
-    resumable anyway, since ``captured`` is 0 there)."""
+    Materialized once for the entire export rather than per table, and held
+    whole: these rows carry key identities only (no payload), and their count
+    is the number of log rows written by transactions that were still in
+    flight at the previous export's snapshot -- normally a handful. Splitting
+    the read per table would turn one scan into 46 of them.
+
+    The cost is NOT unconditionally small. ``txid >= xmin(S_prev)`` is a cheap
+    index range only while that ``xmin`` is recent; a long-running or
+    ``idle in transaction`` session on the source holds the snapshot's ``xmin``
+    down, and the range then widens towards the whole log, with one
+    ``pg_visible_in_snapshot`` call per row scanned. The rows RETURNED stay
+    few either way (only genuinely invisible ones qualify), so this degrades
+    into a slow export rather than a large one -- and the fix is on the
+    database side (do not leave transactions open), not here.
+
+    Empty on SQLite, and empty for a watermark with no stored snapshot (a
+    pre-v85/0065 row -- which ``export`` never treats as resumable anyway,
+    since ``captured`` is 0 there)."""
     if not source.is_postgres or not watermark.exported_snapshot:
         return {}
     xmin = source.snapshot_xmin(watermark.exported_snapshot)
@@ -353,9 +417,12 @@ def read_rows_by_key(
     dialect (``(x) IN ((1))`` parses as ordinary parentheses) and spelling it
     that way would only obscure what runs.
 
-    The batch size divides the placeholder budget by the key's width, so a
-    two-column key sends half as many rows per statement rather than twice as
-    many placeholders (SQLITE_MAX_VARIABLE_NUMBER is 999 on older builds).
+    ``keys`` is ONE batch: callers that walk a whole window size their
+    batches with ``key_batches`` first, because the batch is also the unit of
+    memory -- its rows are written out and dropped before the next batch is
+    read. The loop below still chunks, as a backstop for a caller (the
+    ``notebooks`` re-send) whose key list is small and bounded by the number
+    of notebooks rather than by the window.
     """
     if not keys:
         return {}
@@ -404,6 +471,14 @@ def resolve_parent_notebooks(
     """Resolve a PARENT-scoped table's parent keys to notebook ids, one
     batched statement per hop of ``scope_chain`` (not one per row).
 
+    Every hop compares parent keys as the database hands them back, and the
+    de-duplication/ordering here sorts them with ``str`` as the key. That is
+    sound only because every PARENT chain's parent key is a single TEXT column
+    today (uuid-shaped ids on ``sources``, ``knowhow_tables``,
+    ``knowhow_rows``, ``memory_items``); ``sync_key`` already refuses a
+    multi-column parent key, and a future numeric one would need this
+    comparison revisited rather than left to ``str``.
+
     A parent row that is already gone resolves to ``None`` and stays ``None``
     for the rest of the walk: its child's delete is an orphan whose notebook
     the SOURCE can no longer name, and this module records that rather than
@@ -450,8 +525,9 @@ def resolve_parent_notebooks(
 
 
 class NotebookState:
-    """Current lifecycle/mirror state of the notebooks an incremental window
-    touches, resolved in batches and cached for the whole export.
+    """Whether each notebook an incremental window touches is this
+    environment's own, a mirror of another one, or already gone -- resolved in
+    batches and cached for the whole export.
 
     Cached rather than re-queried per table because the same handful of
     notebooks is touched by table after table, and the answer must not move
@@ -473,20 +549,17 @@ class NotebookState:
             placeholders = ",".join("?" for _ in batch)
             rows = self._source.fetch(
                 self._conn,
-                "SELECT id, status, sync_origin FROM notebooks "
+                "SELECT id, sync_origin FROM notebooks "
                 f"WHERE id IN ({placeholders})",
                 batch,
             )
             for row in rows:
                 origin = str(row["sync_origin"] or "")
-                status = str(row["status"] or "")
-                if origin:
-                    state = (MIRROR, f"mirror of {origin!r}; a mirror cannot be a source")
-                elif status in _NOT_LIVE_STATUSES:
-                    state = (NOT_LIVE, f"status={status!r}")
-                else:
-                    state = (LIVE, "")
-                self._known[str(row["id"])] = state
+                self._known[str(row["id"])] = (
+                    (MIRROR, f"mirror of {origin!r}; a mirror cannot be a source")
+                    if origin
+                    else (LIVE, "")
+                )
         for notebook_id in wanted:
             self._known.setdefault(notebook_id, (MISSING, "no such notebook"))
 
@@ -499,6 +572,17 @@ class NotebookState:
 # ------------------------------------------------------------------- deltas
 
 
+def key_batches(texts: Sequence[str], width: int) -> Iterator[tuple[str, ...]]:
+    """Slice an ordered list of canonical key texts into statement-sized
+    chunks, dividing the placeholder budget by the key's WIDTH so a
+    two-column key sends half as many rows per statement rather than twice as
+    many placeholders (SQLITE_MAX_VARIABLE_NUMBER is 999 on older builds).
+
+    The batch is also the unit of memory: one batch's rows are read, written
+    and dropped before the next is read (see ``table_delta``)."""
+    return _batched(tuple(texts), max(1, _ID_BATCH // max(1, width)))
+
+
 def table_delta(
     source: Any,
     conn: Any,
@@ -508,18 +592,27 @@ def table_delta(
     key_columns: Sequence[str],
     changes: Mapping[str, Change],
     notebooks: NotebookState,
+    emit_row: Any,
+    emit_delete: Any,
 ) -> TableDelta:
-    """Turn one table's compacted window into the rows, deletes, notebook
-    attribution and file requests the package needs.
+    """Turn one table's compacted window into rows, deletes, notebook
+    attribution and file requests, HANDING EACH ONE STRAIGHT TO THE WRITER.
 
-    Four rules this function is the single home of:
+    Streaming rather than returning lists: the package's whole point is that
+    one table's window can be large, and buffering its rows would put the
+    entire changed set of the busiest table in memory on top of the
+    compaction dict. Rows go out in canonical key order -- the keys are sorted
+    once, batched in that order, and each batch is read, emitted and dropped
+    -- so the file is byte-reproducible without a global sort.
+
+    Five rules this function is the single home of:
 
     - A final ``upsert`` whose row cannot be read back in this snapshot is
-      DOWNGRADED to a delete with a warning. It should not happen (the delete
-      that removed the row would have been logged too, and would have won the
-      compaction); if it does, shipping a delete is the conservative answer --
-      shipping nothing would leave the target holding a row the source no
-      longer has.
+      DOWNGRADED to a delete. It should not happen (the delete that removed
+      the row would have been logged too, and would have won the compaction);
+      if it does, shipping a delete is the conservative answer -- shipping
+      nothing would leave the target holding a row the source no longer has.
+      Counted, with a bounded sample of keys, rather than one warning per key.
     - A ``seed_only`` table's deletes are NOT exported at all (§5 "授权只播种"):
       the target owns membership and sharing decisions made after the first
       import, so a source-side revocation must not travel. The same rule
@@ -528,61 +621,80 @@ def table_delta(
       mirror's content came from some other source environment, and
       re-exporting it would launder that environment's rows into this one's
       name and make two environments each other's upstream.
-    - A change attributed to a notebook in a mid-copy/mid-delete/mid-import
-      state is dropped with a reason, the same predicate a full export's
-      notebook selection applies.
+    - Every notebook this table contributes a row OR a delete for is a
+      notebook the package DECLARES (``delta.notebooks``), so the caller
+      re-sends its ``notebooks`` row. A package that says "delete this chunk"
+      without declaring the notebook it belongs to would be describing a
+      notebook outside its own scope.
+    - The notebook of a deleted ``notebooks`` row goes to
+      ``deleted_notebooks`` instead: it is gone, so there is no current state
+      to re-send, and it is not a notebook this package carries.
     """
     delta = TableDelta()
     if not changes:
         return delta
-    scope = spec_for(table).scope
+    spec = spec_for(table)
+    scope = spec.scope
     if scope is None:
         raise SyncExportError(f"{table}: LOCAL table has no export scope")
-    seed_only = spec_for(table).seed_only
 
-    upserts = {text: change for text, change in changes.items()
-               if change.operation == OPERATION_UPSERT}
-    deletes = {text: change for text, change in changes.items()
-               if change.operation == OPERATION_DELETE}
-    rows = read_rows_by_key(
-        source, conn, table, columns, key_columns,
-        [change.key for change in upserts.values()],
+    upsert_texts = sorted(
+        text for text, change in changes.items()
+        if change.operation == OPERATION_UPSERT
     )
-    for text in sorted(set(upserts) - set(rows)):
-        delta.warnings.append(
-            f"{table}: {text} was logged as an upsert but no longer exists in "
-            "the export snapshot; exported as a delete instead"
+    delete_texts = [
+        text for text, change in changes.items()
+        if change.operation == OPERATION_DELETE
+    ]
+    for batch in key_batches(upsert_texts, len(key_columns)):
+        rows = read_rows_by_key(
+            source, conn, table, columns, key_columns,
+            [changes[text].key for text in batch],
         )
-        deletes[text] = upserts.pop(text)
-
-    attribution = _attribute(
-        source, conn, table, scope, upserts, deletes, rows, key_columns
-    )
-    notebooks.prime([value for value in attribution.values() if value])
-
-    for text in sorted(upserts):
-        notebook_id = attribution.get(text)
-        state = _classify(notebook_id, notebooks, delta)
-        if state in (MIRROR, NOT_LIVE):
-            continue
-        row = rows[text]
-        delta.rows.append(row)
-        if notebook_id and state == LIVE:
-            delta.notebooks.add(notebook_id)
-            delta.files.extend(_file_requests(table, row, notebook_id))
-    if seed_only:
-        return delta
-    for text in sorted(deletes):
-        change = deletes[text]
-        notebook_id = attribution.get(text)
-        if _classify(notebook_id, notebooks, delta) in (MIRROR, NOT_LIVE):
-            continue
-        delta.deletes.append(
-            delete_entry(table, change.key, notebook_id, change.parent_key)
+        gone = [text for text in batch if text not in rows]
+        if gone:
+            delta.note_downgrade(table, gone)
+            delete_texts.extend(gone)
+        present = [text for text in batch if text in rows]
+        attribution = _attribute(
+            source, conn, table, scope, present, changes, rows, key_columns
         )
-        if table == "notebooks":
-            delta.deleted_notebooks.add(str(change.key[key_columns[0]]))
-    return delta
+        notebooks.prime([value for value in attribution.values() if value])
+        for text in present:
+            notebook_id = attribution.get(text)
+            state = _classify(notebook_id, notebooks, delta)
+            if state == MIRROR:
+                continue
+            row = rows[text]
+            emit_row(row)
+            delta.rows += 1
+            if notebook_id and state == LIVE:
+                delta.notebooks.add(notebook_id)
+                delta.files.extend(_file_requests(table, row, notebook_id))
+        del rows
+
+    if spec.seed_only:
+        return delta.sealed(table)
+    for batch in key_batches(sorted(delete_texts), len(key_columns)):
+        attribution = _attribute(
+            source, conn, table, scope, batch, changes, {}, key_columns
+        )
+        notebooks.prime([value for value in attribution.values() if value])
+        for text in batch:
+            change = changes[text]
+            notebook_id = attribution.get(text)
+            state = _classify(notebook_id, notebooks, delta)
+            if state == MIRROR:
+                continue
+            emit_delete(
+                delete_entry(table, change.key, notebook_id, change.parent_key)
+            )
+            delta.deletes += 1
+            if table == "notebooks":
+                delta.deleted_notebooks.add(str(change.key[key_columns[0]]))
+            elif notebook_id and state == LIVE:
+                delta.notebooks.add(notebook_id)
+    return delta.sealed(table)
 
 
 def _classify(
@@ -591,20 +703,17 @@ def _classify(
     """The state that decides whether one attributed change travels, recording
     the reason on the delta when it does not.
 
-    ``MIRROR`` and ``NOT_LIVE`` are dropped. ``MISSING`` travels -- a window
-    that deleted a notebook, or a row whose notebook was deleted with it, must
-    still be able to tell the target so -- but it is NOT counted as a notebook
-    this package carries: there is nothing left to carry. A row with no
-    notebook at all (GLOBAL scope, or a PARENT orphan whose chain is gone)
-    reports ``MISSING`` for the same reason."""
+    ``MIRROR`` is the only drop. ``MISSING`` travels -- a window that deleted
+    a notebook, or a row whose notebook was deleted with it, must still be
+    able to tell the target so -- but it is NOT counted as a notebook this
+    package carries: there is nothing left to carry. A row with no notebook at
+    all (GLOBAL scope, or a PARENT orphan whose chain is gone) reports
+    ``MISSING`` for the same reason."""
     if not notebook_id:
         return MISSING
     state, reason = notebooks.state(notebook_id)
     if state == MIRROR:
         delta.skipped_mirror += 1
-        delta.skipped[notebook_id] = reason
-        return state
-    if state == NOT_LIVE:
         delta.skipped[notebook_id] = reason
     return state
 
@@ -614,38 +723,43 @@ def _attribute(
     conn: Any,
     table: str,
     scope: Any,
-    upserts: Mapping[str, Change],
-    deletes: Mapping[str, Change],
-    rows: Mapping[str, dict[str, Any]],
+    texts: Sequence[str],
+    changes: Mapping[str, Change],
+    rows: Mapping[str, Mapping[str, Any]],
     key_columns: Sequence[str],
 ) -> dict[str, str | None]:
-    """``key text -> notebook id`` for one table's window.
+    """``key text -> notebook id`` for ONE batch of this table's window.
 
-    NOTEBOOK scope reads the notebook off the live row when there is one and
-    off the log row otherwise (a delete has no row left to read). PARENT
-    scope resolves the row's own parent pointer for an upsert and the log's
-    ``parent_key`` for a delete, both through one batched ``scope_chain``
-    walk. GLOBAL scope has no notebook by definition."""
+    ``rows`` carries the rows read back for an upsert batch and is empty for
+    a delete batch -- a delete has no row left to read, so everything has to
+    come off the log entry. NOTEBOOK scope reads the notebook off the live row
+    when there is one and off the log row otherwise; PARENT scope resolves the
+    row's own parent pointer for an upsert and the log's ``parent_key`` for a
+    delete, both through one batched ``scope_chain`` walk per batch; GLOBAL
+    scope has no notebook by definition."""
     if scope.kind is ScopeKind.GLOBAL:
-        return {text: None for text in (*upserts, *deletes)}
+        return {text: None for text in texts}
     if scope.kind is ScopeKind.NOTEBOOK:
         attribution: dict[str, str | None] = {}
-        for text, change in upserts.items():
-            value = rows[text].get(scope.column)
-            attribution[text] = str(value) if value else change.notebook_id
-        for text, change in deletes.items():
+        for text in texts:
+            change = changes[text]
+            row = rows.get(text)
+            if row is not None:
+                value = row.get(scope.column)
+                attribution[text] = str(value) if value else change.notebook_id
+                continue
             # ``notebooks``' own scope column IS its key, so a delete of the
             # notebook row can name its notebook even if the log row did not.
-            fallback = (
+            attribution[text] = change.notebook_id or (
                 str(change.key[key_columns[0]]) if table == "notebooks" else None
             )
-            attribution[text] = change.notebook_id or fallback
         return attribution
     pointers: dict[str, Any] = {}
-    for text in upserts:
-        pointers[text] = rows[text].get(scope.column)
-    for text, change in deletes.items():
-        pointers[text] = change.parent_key
+    for text in texts:
+        row = rows.get(text)
+        pointers[text] = (
+            row.get(scope.column) if row is not None else changes[text].parent_key
+        )
     resolved = resolve_parent_notebooks(
         source, conn, table, [value for value in pointers.values() if value]
     )
@@ -658,69 +772,140 @@ def _attribute(
 # --------------------------------------------------------------------- files
 
 
+# The file columns the export's file phase knows how to carry, as
+# ``{(table, column): storage subdirectory}``. Cross-checked below against the
+# shadow manifest, exactly the way ``import_._STORAGE_PATH_COLUMNS`` is, so a
+# newly declared path column on a synced table cannot slip through un-exported
+# -- the failure it would otherwise cause is silent and one-sided: the rows
+# travel, the bytes they point at do not.
+_EXPORTED_PATH_COLUMNS: dict[tuple[str, str], str] = {
+    ("sources", "file_path"): NOTEBOOK_FILES_DIR,
+}
+
+# The one synced table whose bytes are NOT reachable through a path column.
+# ``notebook_assets`` stores them as ``<asset id>.<extension>`` under
+# ``storage/assets/<notebook>/`` (``AssetService.path_for``), and the
+# extension comes from a mime table this package may not import and must not
+# duplicate. So an asset row asks for its id as a STEM and the file phase
+# carries whatever ``<id>.*`` is on disk. Registered here, next to the path
+# columns, so the two mechanisms are visible in one place rather than one of
+# them being an unexplained special case inside a function.
+_STEM_TABLES: dict[str, tuple[str, str]] = {
+    "notebook_assets": ("id", ASSET_FILES_DIR),
+}
+
+
+def _check_path_columns_are_covered() -> None:
+    declared = {
+        (spec.name, column)
+        for spec in _SHADOW_MANIFEST.tables
+        if spec.name in set(synced_tables())
+        for column in spec.path_columns
+    }
+    missing = sorted(declared - set(_EXPORTED_PATH_COLUMNS))
+    extra = sorted(set(_EXPORTED_PATH_COLUMNS) - declared)
+    if missing or extra:
+        raise RuntimeError(
+            "_EXPORTED_PATH_COLUMNS must cover exactly the shadow manifest's "
+            f"path columns on synced tables: missing={missing}, stale={extra}. "
+            "An incremental package carries only the files its changed rows "
+            "point at, so an uncovered path column means those rows travel "
+            "without their bytes."
+        )
+
+
+_check_path_columns_are_covered()
+
+
 def _file_requests(
     table: str, row: Mapping[str, Any], notebook_id: str
 ) -> list[FileRequest]:
     """The on-disk files ONE upserted row points at.
 
-    ``sources.file_path`` is the only path column the shadow manifest declares
-    on a synced table, and it holds the source host's absolute path -- which
-    is this host, since we are the source, so it resolves directly.
-    ``notebook_assets`` declares none: its bytes are named
-    ``<asset id>.<extension>`` under ``storage/assets/<notebook>/`` by
-    ``AssetService.path_for``, and the extension comes from a mime table this
-    package may not import (and must not duplicate, or the two copies drift).
-    So an asset row asks for its id as a STEM and the file phase takes
-    whatever ``<id>.*`` is actually on disk -- which is also the honest
-    answer if a deployment ever stores a second derivative beside it.
-
     Resolution is deferred to the file phase on purpose: it touches the
     filesystem, and the filesystem is not part of the read snapshot (see
     ``export._write_files`` for the same reasoning)."""
-    if table == "sources":
-        value = row.get("file_path")
+    requests: list[FileRequest] = []
+    for (owner, column), root in _EXPORTED_PATH_COLUMNS.items():
+        if owner != table:
+            continue
+        value = row.get(column)
         if isinstance(value, str) and value:
-            return [FileRequest(NOTEBOOK_FILES_DIR, notebook_id, path=value)]
-        return []
-    if table == "notebook_assets":
-        asset_id = str(row.get("id") or "")
-        if asset_id:
-            return [FileRequest(ASSET_FILES_DIR, notebook_id, stem=asset_id)]
-    return []
+            requests.append(FileRequest(root, notebook_id, path=value))
+    stem_rule = _STEM_TABLES.get(table)
+    if stem_rule is not None:
+        column, root = stem_rule
+        stem = str(row.get(column) or "")
+        if stem:
+            requests.append(FileRequest(root, notebook_id, stem=stem))
+    return requests
+
+
+_PACKAGE_DIR_FOR = {
+    NOTEBOOK_FILES_DIR: notebook_files_dir,
+    ASSET_FILES_DIR: notebook_assets_dir,
+}
 
 
 def resolve_file_requests(
-    storage_dir: Path, requests: Sequence[FileRequest]
-) -> tuple[list[tuple[str, Path]], list[str]]:
-    """``([(package-relative path, source path)], warnings)`` for the file
+    storage_dir: Path, root_dir: Path, requests: Sequence[FileRequest]
+) -> tuple[list[tuple[str, Path]], list[str], list[str]]:
+    """``([(package path, source path)], missing, warnings)`` for the file
     phase, de-duplicated and ordered by the package path.
 
     Runs AFTER the read snapshot closes, so the answers describe the disk as
-    the copy will find it. Two refusals rather than silent surprises: a path
-    column pointing outside its own notebook's storage root is reported and
-    skipped (this environment's rows should never say that, and splicing such
-    a path into a package path would be a traversal), and an id that is not a
-    safe single path segment is never globbed with."""
-    package_dir_for = {
-        NOTEBOOK_FILES_DIR: notebook_files_dir,
-        ASSET_FILES_DIR: notebook_assets_dir,
-    }
+    the copy will find it.
+
+    A path column's value is normalized the way both backends normalize it --
+    ``resolve_path``: absolute as given, relative against ``root_dir`` -- and
+    only then asked whether it belongs to its own notebook. Legacy rows
+    predating the absolute-path convention are relative, and skipping the
+    normalization would send every one of them to ``missing`` while their
+    bytes sat right there on disk.
+
+    Anything the phase cannot carry lands in MISSING, not merely in a warning:
+    ``missing`` is the manifest field an importer reads to know the package is
+    knowingly incomplete, and a row whose bytes did not travel is exactly that
+    -- whether the file was absent, the path pointed outside the notebook, or
+    an asset id matched nothing. The package-relative name recorded for it is
+    the one the IMPORTER will look for (``files/<root>/<notebook>/<basename>``
+    -- ``import_._rebase_storage_paths`` re-anchors on the basename), so the
+    two sides name the same gap. A name that is not a safe package-relative
+    path is not recorded at all, only warned about: it must never reach
+    ``checksums.json`` or the manifest.
+    """
     found: dict[str, Path] = {}
+    missing: list[str] = []
     warnings: list[str] = []
     for request in requests:
         base = Path(storage_dir) / request.root / request.notebook_id
-        prefix = package_dir_for[request.root](request.notebook_id)
+        prefix = _PACKAGE_DIR_FOR[request.root](request.notebook_id)
         if request.path:
             origin = Path(request.path)
+            if not origin.is_absolute():
+                origin = Path(root_dir) / origin
             try:
                 relative = origin.relative_to(base)
             except ValueError:
-                warnings.append(
-                    f"{request.root}/{request.notebook_id}: {request.path!r} is "
-                    "not under this notebook's storage root and was not carried"
+                _record_gap(
+                    missing, warnings, f"{prefix}/{Path(request.path).name}",
+                    f"{request.root}/{request.notebook_id}: {request.path!r} does "
+                    "not resolve under this notebook's storage root; its bytes "
+                    "were not carried",
                 )
                 continue
-            found[f"{prefix}/{relative.as_posix()}"] = origin
+            package_path = f"{prefix}/{relative.as_posix()}"
+            if not is_safe_relative_path(package_path):
+                # ``relative_to`` is LEXICAL: a value like
+                # "<base>/../../etc/passwd" is "under" base as text. The
+                # package-relative path is what would be written to disk and
+                # into checksums.json, so it gets the real check.
+                warnings.append(
+                    f"{request.root}/{request.notebook_id}: {request.path!r} "
+                    "would land outside the package and was not carried"
+                )
+                continue
+            found[package_path] = origin
             continue
         if not is_safe_identifier(request.stem):
             warnings.append(
@@ -728,7 +913,30 @@ def resolve_file_requests(
                 "a safe file name and its bytes were not carried"
             )
             continue
-        for origin in sorted(base.glob(f"{request.stem}.*")):
-            if origin.is_file():
-                found[f"{prefix}/{origin.name}"] = origin
-    return sorted(found.items()), warnings
+        matched = [path for path in sorted(base.glob(f"{request.stem}.*"))
+                   if path.is_file()]
+        if not matched:
+            _record_gap(
+                missing, warnings, f"{prefix}/{request.stem}",
+                f"{request.root}/{request.notebook_id}: no file named "
+                f"{request.stem}.* is on disk for this row",
+            )
+            continue
+        for origin in matched:
+            package_path = f"{prefix}/{origin.name}"
+            if is_safe_relative_path(package_path):
+                found[package_path] = origin
+            else:
+                warnings.append(
+                    f"{request.root}/{request.notebook_id}: {origin.name!r} is "
+                    "not a safe package path and was not carried"
+                )
+    return sorted(found.items()), missing, warnings
+
+
+def _record_gap(
+    missing: list[str], warnings: list[str], package_path: str, reason: str
+) -> None:
+    warnings.append(reason)
+    if is_safe_relative_path(package_path):
+        missing.append(package_path)

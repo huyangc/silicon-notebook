@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from app.core.config import Settings
+from app.migration.sync import export as export_module
 from app.migration.sync.export import ExportReport, export_notebooks
 from app.migration.sync.import_ import SyncImportError
 from app.migration.sync.package import (
@@ -715,3 +716,330 @@ def test_the_importer_refuses_an_incremental_package_and_names_pr_3c(
     assert MODE_INCREMENTAL in message
     assert report.base_package_id in message
     assert f"from_seq={report.from_seq}" in message
+
+
+# ------------------------------------------------------- watermark monotonic
+
+
+def test_pruning_the_log_below_the_watermark_never_moves_it_backwards(baseline):
+    """``sync prune-log`` deletes log rows at or below every captured
+    watermark, so a quiet environment's log can end up EMPTY and ``MAX(seq)``
+    reads 0 -- below the watermark it was pruned against. The watermark must
+    stay where it is: letting it fall back would re-open a window over seq
+    values that were already exported AND no longer exist, and the export
+    after that would think it had never seen them.
+
+    变异验证: 把 ``to_seq`` 的 ``max(..., W)`` 钳制去掉(直接用
+    ``captured_through_seq``), 本条必须报红。
+    """
+    repo = baseline["repo"]
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET name='alpha v2' WHERE id=?", (baseline["alpha"],))
+    first = _export(baseline["settings"], baseline["out"])
+    assert first.mode == MODE_INCREMENTAL
+    watermark = _watermark(repo)["exported_through_seq"]
+    assert watermark == first.to_seq > 0
+
+    with repo._write() as db:
+        db.execute("DELETE FROM sync_change_log")
+
+    second = _export(baseline["settings"], baseline["out"])
+
+    assert second.mode == MODE_INCREMENTAL
+    assert second.captured_through_seq == 0, "the log really is empty"
+    assert second.to_seq == watermark
+    assert second.from_seq == watermark + 1
+    assert second.empty is True
+    assert _watermark(repo)["exported_through_seq"] == watermark
+
+    # ...and the chain picks up exactly where it left off. SQLite's
+    # AUTOINCREMENT never reuses a seq, so the next change is numbered above
+    # the watermark and lands inside the next window.
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET name='alpha v3' WHERE id=?", (baseline["alpha"],))
+    third = _export(baseline["settings"], baseline["out"])
+
+    assert third.from_seq == watermark + 1
+    assert third.to_seq > watermark
+    assert [row["name"] for row in _rows(third.package_dir, "notebooks")] == ["alpha v3"]
+
+
+# ----------------------------------------------------- lifecycle status rule
+
+
+def test_a_mid_copy_notebooks_changes_still_travel(baseline):
+    """``notebooks.status`` is target-owned; a source-side ``copying`` is a
+    moment in a local process, not a statement about what the target should
+    hold. Dropping the window's changes for it while the watermark moved past
+    them would lose them permanently.
+
+    变异验证: 把 status 过滤加回 ``NotebookState``/``_classify``, 本条必须报红。
+    """
+    repo = baseline["repo"]
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET status='copying', name='alpha busy' WHERE id=?",
+            (baseline["alpha"],),
+        )
+
+    report = _export(baseline["settings"], baseline["out"])
+
+    assert baseline["alpha"] in report.notebooks
+    assert baseline["alpha"] not in report.skipped
+    assert [row["name"] for row in _rows(report.package_dir, "notebooks")] == [
+        "alpha busy"
+    ]
+
+
+# --------------------------------------------- deletes declare their notebook
+
+
+def test_a_delete_only_window_still_declares_its_notebook(baseline):
+    """A package that says "delete this chunk" without declaring the notebook
+    the chunk belongs to would be describing a notebook outside its own
+    scope, and the importer's manifest/rows equality check would have nothing
+    to verify that scope against.
+
+    变异验证: 去掉 delete 分支里的 ``delta.notebooks.add``, 本条必须报红。
+    """
+    repo = baseline["repo"]
+    with repo._connect() as db:
+        chunk = db.execute(
+            "SELECT id FROM chunks WHERE notebook_id=? ORDER BY id LIMIT 1",
+            (baseline["alpha"],),
+        ).fetchone()
+    with repo._write() as db:
+        db.execute("DELETE FROM chunks WHERE id=?", (chunk["id"],))
+
+    report = _export(baseline["settings"], baseline["out"])
+
+    assert report.notebooks == (baseline["alpha"],)
+    assert _manifest(report.package_dir)["notebooks"] == [baseline["alpha"]]
+    assert _ids(report.package_dir, "notebooks") == {baseline["alpha"]}
+    assert report.deletes == len(_deletes(report.package_dir)) >= 1
+
+
+# ------------------------------------------------------------- capture gate
+
+
+def test_the_gate_moving_mid_export_refuses_to_claim_captured(
+    baseline, monkeypatch
+):
+    """``sync capture disable`` CLEARS the change log. A disable + enable pair
+    while an export runs leaves ``enabled`` looking exactly as the read
+    snapshot found it, while everything the next window would have described
+    is gone. The watermark is still written -- the seq and snapshot are true
+    facts about this run -- but it must not claim to be resumable.
+
+    变异验证: 去掉 ``_advance_watermark`` 里的控制行重读(直接写
+    ``captured=gate[0]``), 本条必须报红。
+    """
+    repo = baseline["repo"]
+    real = export_module._advance_watermark
+
+    def hooked(*args, **kwargs):
+        with repo._write() as db:
+            db.execute(
+                "UPDATE sync_capture_control SET enabled=0, disabled_at=? "
+                "WHERE singleton=1",
+                ("2026-02-01T00:00:00+00:00",),
+            )
+            db.execute(
+                "UPDATE sync_capture_control SET enabled=1, enabled_at=? "
+                "WHERE singleton=1",
+                ("2026-02-01T00:00:01+00:00",),
+            )
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(export_module, "_advance_watermark", hooked)
+
+    report = _export(baseline["settings"], baseline["out"])
+
+    assert report.watermark_advanced is True
+    assert report.captured is False
+    assert [w for w in report.warnings if "capture gate changed" in w]
+    assert _watermark(repo)["captured"] == 0
+
+    monkeypatch.undo()
+    assert _export(baseline["settings"], baseline["out"]).mode == MODE_FULL
+
+
+def test_an_untouched_gate_still_claims_captured(baseline):
+    """The other half: nothing moved, so the generation the write transaction
+    re-reads is the one the snapshot saw and the watermark is resumable."""
+    report = _export(baseline["settings"], baseline["out"])
+
+    assert report.captured is True
+    assert not [w for w in report.warnings if "capture gate" in w]
+    assert _watermark(baseline["repo"])["captured"] == 1
+
+
+# --------------------------------------------------------------- asset files
+
+
+def test_an_assets_bytes_travel_by_stem(baseline):
+    """``notebook_assets`` declares no path column: its bytes are
+    ``<asset id>.<ext>`` under ``storage/assets/<notebook>/``, and the
+    extension comes from a mime table this package may not import. The file
+    phase therefore carries whatever ``<id>.*`` is on disk -- and nothing
+    else in that directory."""
+    repo = baseline["repo"]
+    storage = Path(baseline["settings"].storage_dir) / "assets" / baseline["alpha"]
+    storage.mkdir(parents=True, exist_ok=True)
+    (storage / "asset-wanted.png").write_bytes(b"\x89PNG wanted")
+    (storage / "asset-other.png").write_bytes(b"\x89PNG other")
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO notebook_assets(id,notebook_id,filename,mime,size,"
+            "created_by,created_at) VALUES(?,?,?,?,?,?,?)",
+            ("asset-wanted", baseline["alpha"], "p.png", "image/png", 11,
+             "user-local", MOMENT),
+        )
+
+    report = _export(baseline["settings"], baseline["out"])
+
+    carried = sorted(
+        str(path.relative_to(report.package_dir))
+        for path in (report.package_dir / "files").rglob("*")
+        if path.is_file()
+    )
+    assert f"files/assets/{baseline['alpha']}/asset-wanted.png" in carried
+    assert not [name for name in carried if "asset-other" in name]
+
+
+# ------------------------------------------- resolve_file_requests, directly
+
+
+def _requests(tmp_path):
+    from app.migration.sync import incremental as module
+
+    return module, tmp_path / "storage", tmp_path / "root"
+
+
+def test_a_relative_path_column_is_resolved_against_the_root(tmp_path):
+    """Legacy ``sources.file_path`` rows predate the absolute-path convention
+    and both backends resolve them against ``root_dir``
+    (``sqlite/database.py::resolve_path``). Skipping that normalization would
+    report every such row as missing while its bytes sat right there.
+
+    变异验证: 去掉 ``resolve_file_requests`` 的 ``is_absolute`` 归一, 本条必须报红。
+    """
+    module, storage, root = _requests(tmp_path)
+    base = storage / "notebooks" / "nb-1"
+    base.mkdir(parents=True)
+    (base / "note.txt").write_bytes(b"body")
+    relative = (base / "note.txt").relative_to(root.parent)
+
+    entries, missing, warnings = module.resolve_file_requests(
+        storage, root.parent, [module.FileRequest("notebooks", "nb-1", path=str(relative))]
+    )
+
+    assert entries == [("files/notebooks/nb-1/note.txt", base / "note.txt")]
+    assert (missing, warnings) == ([], [])
+
+
+def test_a_path_outside_the_notebook_root_is_reported_as_missing(tmp_path):
+    module, storage, root = _requests(tmp_path)
+
+    entries, missing, warnings = module.resolve_file_requests(
+        storage, root, [module.FileRequest("notebooks", "nb-1", path="/elsewhere/x.txt")]
+    )
+
+    assert entries == []
+    assert missing == ["files/notebooks/nb-1/x.txt"]
+    assert warnings and "does not resolve" in warnings[0]
+
+
+def test_a_traversal_path_is_refused_and_not_even_recorded(tmp_path):
+    """``Path.relative_to`` is LEXICAL: ``<base>/../../etc/passwd`` IS
+    "under" base as text. The package-relative path is what would be written
+    to disk and into checksums.json, so it gets the real check -- and a
+    refused path must not reach ``missing_files`` either, since that is a
+    manifest field naming package paths.
+
+    变异验证: 去掉包内相对路径的 ``is_safe_relative_path`` 检查, 本条必须报红。
+    """
+    module, storage, root = _requests(tmp_path)
+    evil = storage / "notebooks" / "nb-1" / ".." / ".." / ".." / "etc" / "passwd"
+
+    entries, missing, warnings = module.resolve_file_requests(
+        storage, root, [module.FileRequest("notebooks", "nb-1", path=str(evil))]
+    )
+
+    assert entries == []
+    assert missing == []
+    assert warnings and "outside the package" in warnings[0]
+
+
+def test_an_asset_id_that_matches_nothing_is_reported_as_missing(tmp_path):
+    module, storage, root = _requests(tmp_path)
+    (storage / "assets" / "nb-1").mkdir(parents=True)
+
+    entries, missing, warnings = module.resolve_file_requests(
+        storage, root, [module.FileRequest("assets", "nb-1", stem="asset-1")]
+    )
+
+    assert entries == []
+    assert missing == ["files/assets/nb-1/asset-1"]
+    assert warnings and "no file named" in warnings[0]
+
+
+def test_an_unsafe_asset_id_is_never_globbed_with(tmp_path):
+    module, storage, root = _requests(tmp_path)
+
+    entries, missing, warnings = module.resolve_file_requests(
+        storage, root, [module.FileRequest("assets", "nb-1", stem="../evil")]
+    )
+
+    assert (entries, missing) == ([], [])
+    assert warnings and "not a safe file name" in warnings[0]
+
+
+# --------------------------------------------------- path-column reconciliation
+
+
+def test_an_unhandled_path_column_fails_the_module_guard(monkeypatch):
+    """An incremental package carries only the files its changed rows point
+    at, so a path column the export file phase does not know about is a
+    silent, one-sided loss: the rows travel, their bytes do not. Same shape
+    as ``import_._check_path_columns_are_covered``."""
+    from app.migration.sync import incremental as module
+
+    monkeypatch.setattr(module, "_EXPORTED_PATH_COLUMNS", {})
+    with pytest.raises(RuntimeError) as failure:
+        module._check_path_columns_are_covered()
+    assert "sources" in str(failure.value) and "file_path" in str(failure.value)
+
+    monkeypatch.setattr(
+        module,
+        "_EXPORTED_PATH_COLUMNS",
+        {("sources", "file_path"): "notebooks", ("chunks", "made_up"): "notebooks"},
+    )
+    with pytest.raises(RuntimeError) as failure:
+        module._check_path_columns_are_covered()
+    assert "made_up" in str(failure.value)
+
+
+# --------------------------------------------------------- bounded warnings
+
+
+def test_many_vanished_upserts_produce_one_bounded_warning(baseline):
+    """A window that downgrades hundreds of keys has ONE problem, not
+    hundreds, and an operator report has to stay readable."""
+    repo = baseline["repo"]
+    with repo._write() as db:
+        for index in range(12):
+            db.execute(
+                "INSERT INTO sync_change_log "
+                "(table_name, key_json, operation, notebook_id, changed_at) "
+                "VALUES ('chunks', ?, 'upsert', ?, ?)",
+                (json.dumps({"id": f"ghost-{index:02d}"}), baseline["alpha"], MOMENT),
+            )
+
+    report = _export(baseline["settings"], baseline["out"])
+
+    downgrades = [w for w in report.warnings if "no longer exist" in w]
+    assert len(downgrades) == 1
+    assert "12 key(s)" in downgrades[0]
+    assert "+7 more" in downgrades[0]
+    assert len(_deletes(report.package_dir)) == 12

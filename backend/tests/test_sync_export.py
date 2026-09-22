@@ -1048,10 +1048,22 @@ def test_a_mirror_notebook_is_skipped_and_reported(seeded, tmp_path):
     assert seeded["exported"] in report.notebooks
 
 
-@pytest.mark.parametrize("status", ["copying", "deleting"])
-def test_a_notebook_mid_copy_or_mid_delete_is_skipped(seeded, tmp_path, status):
-    """Its rows are half-written or half-removed; no snapshot of them is a
-    coherent notebook, so it must be reported, not exported."""
+@pytest.mark.parametrize("status", ["copying", "deleting", "importing"])
+def test_a_notebook_mid_copy_or_mid_delete_is_still_exported(seeded, tmp_path, status):
+    """``notebooks.status`` is a TARGET-owned column -- import never
+    overwrites it and publishing a mirror sets it to ``draft`` -- so a
+    source-side lifecycle state says nothing about what the target should
+    hold, and the export's read snapshot is a coherent view of the rows
+    either way.
+
+    Skipping on it would be actively harmful now that an unscoped export
+    advances the watermark: a baseline taken while a notebook was mid-copy
+    would drop the whole notebook, and an incremental window would drop
+    exactly the changes made during that window while the watermark moved
+    past them. Mirror is the only reason a notebook that exists is left out.
+
+    变异验证: 把 status 过滤加回 ``_select_notebooks``, 本条必须报红。
+    """
     repo = seeded["repo"]
     with repo._write() as db:
         db.execute(
@@ -1060,9 +1072,9 @@ def test_a_notebook_mid_copy_or_mid_delete_is_skipped(seeded, tmp_path, status):
 
     report = _export(seeded["settings"], tmp_path / "out", None)
 
-    assert report.skipped[seeded["other"]] == f"status={status!r}"
-    assert seeded["other"] not in report.notebooks
-    assert report.table_counts["notebooks"] == 1
+    assert seeded["other"] not in report.skipped
+    assert seeded["other"] in report.notebooks
+    assert report.table_counts["notebooks"] == 2
 
 
 def test_an_unknown_notebook_id_is_reported_not_raised(repo, settings, tmp_path):
@@ -1298,7 +1310,7 @@ def test_export_watermark_ignores_change_log_rows_written_after_the_snapshot(
 
     real_captured_through_seq = export_module._captured_through_seq
 
-    def fake_captured_through_seq(source, conn):
+    def fake_captured_through_seq(source, conn, gate_open):
         # Simulate a concurrent writer landing a new change-log row between
         # this export's snapshot being opened and this read -- the read
         # itself must still only ever see what the snapshot saw.
@@ -1309,7 +1321,7 @@ def test_export_watermark_ignores_change_log_rows_written_after_the_snapshot(
                 "VALUES ('notebooks', '{}', 'upsert', ?)",
                 (MOMENT,),
             )
-        return real_captured_through_seq(source, conn)
+        return real_captured_through_seq(source, conn, gate_open)
 
     monkeypatch.setattr(
         export_module, "_captured_through_seq", fake_captured_through_seq

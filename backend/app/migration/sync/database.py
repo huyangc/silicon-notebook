@@ -37,6 +37,7 @@ import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from app.core.database_url import database_identity
@@ -46,8 +47,6 @@ from app.migration.sync.package import encode_value, utc_timestamp_text
 from app.repositories.postgres.schema_manifest import POSTGRES_ROWID_ORDINAL_TABLES
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from pathlib import Path
-
     from app.core.config import Settings
 
 
@@ -132,6 +131,12 @@ class _Source:
     needs raw rows in the database's own shape."""
 
     def __init__(self, settings: "Settings", root_dir: Path) -> None:
+        # Kept, not just forwarded: a legacy ``sources.file_path`` can be
+        # RELATIVE, and both backends resolve such a value against this same
+        # root (``sqlite/database.py::resolve_path``). The export's file phase
+        # has to apply the identical rule or it would look for the bytes in
+        # the wrong place -- see ``incremental.resolve_file_requests``.
+        self.root_dir = Path(root_dir)
         self.scheme = database_identity(settings.database_url).scheme
         if self.scheme == "postgresql":
             from app.repositories.postgres.database import PostgresDatabase
