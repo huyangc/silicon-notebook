@@ -409,10 +409,10 @@ def test_max_two_nudges_per_run_across_different_actions(repo):
 
 
 class _CountingExperienceStore:
-    """包一层真 store,只数 ``version_signal()`` 被调用几次,其余方法原样代理。
+    """包一层真 store,只数 ``version_signal(nb)`` 被调用几次,其余方法原样代理。
 
     修复轮 spec⑤/Q-P2-1:``_cached_experiences`` 每次被调用都会先算一次
-    ``version_signal()`` 才能查缓存命不命中,所以数它的调用次数就是数
+    ``version_signal(nb)`` 才能查缓存命不命中,所以数它的调用次数就是数
     "代码路径有没有走到读经验库这一步"的忠实计数器,不受进程级 memo 命中与
     否影响。
     """
@@ -421,9 +421,9 @@ class _CountingExperienceStore:
         self._inner = inner
         self.version_signal_calls = 0
 
-    def version_signal(self):
+    def version_signal(self, notebook_id):
         self.version_signal_calls += 1
-        return self._inner.version_signal()
+        return self._inner.version_signal(notebook_id)
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -433,11 +433,11 @@ def test_nudge_precheck_skips_the_cache_read_when_no_action_qualifies(repo):
     """修复轮 spec⑤/Q-P2-1:阈值判断前移到纯内存——没有任何动作达标的轮次,
     ``_zero_hit_nudge_note`` 不该被调用,更不该多读一次经验库快照。
 
-    ``version_signal()`` 在整条 run 里预期恰好被调用一次:run() 顶部"被动
+    ``version_signal(nb)`` 在整条 run 里预期恰好被调用一次:run() 顶部"被动
     打法块"那次固定读取。分区之后它要装**两层**快照(本库分区 + 全局分区
-    回退),但两层共用同一个签名(``_cached_experience_layers``),所以聚合
-    查询仍然只有一次。这里只安排一次 exact_lookup 未命中(阈值是 2),nudge
-    路径的纯内存判断应该在读库之前就短路。
+    回退),但一次调用就把两层的签名一起取回(``_cached_experience_layers``),
+    所以聚合查询仍然只有一次。这里只安排一次 exact_lookup 未命中(阈值是 2),
+    nudge 路径的纯内存判断应该在读库之前就短路。
 
     变异验证:把 ``_zero_hit_nudge_ready`` 的调用从 ``if`` 条件里删掉(总是
     进 try 块),这条用例会翻红(``version_signal_calls`` 变成 2)。
@@ -462,8 +462,8 @@ def test_nudge_precheck_does_read_again_once_the_threshold_is_crossed(repo):
     经验库——证明上一条用例通过不是因为整条 nudge 机制失效,而是"没有动作
     达标时不读"这一条精确规则在起作用。
 
-    下界是 2:被动块那一处占掉 1 次,nudge 路径自己装两层再占 1 次——两层
-    共用一个签名,所以每个消费点各只付一次聚合查询。"""
+    下界是 2:被动块那一处占掉 1 次,nudge 路径自己装两层再占 1 次——一次调用
+    取回两层的签名,所以每个消费点各只付一次聚合查询。"""
     notebook, _oid = _seed(repo)
     _write_experience(repo, "exact_lookup",
                       "bad", "exact_lookup rarely finds this shape.")
@@ -485,7 +485,7 @@ def test_fail_open_on_a_broken_experience_store(repo):
     notebook, _oid = _seed(repo)
 
     class _BrokenStore:
-        def version_signal(self):
+        def version_signal(self, notebook_id):
             raise RuntimeError("boom")
 
         def read_partition(self, *_args, **_kwargs):
@@ -514,7 +514,7 @@ def test_cancellation_during_the_nudge_lookup_still_propagates(repo):
     notebook, _oid = _seed(repo)
 
     class _CancellingStore:
-        def version_signal(self):
+        def version_signal(self, notebook_id):
             raise AskCancelled("user pressed stop")
 
     llm = _SeqLLM([

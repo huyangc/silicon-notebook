@@ -2408,6 +2408,7 @@ class _SyncAskDouble:
         self._mode_id = mode_id
         self._boom = boom
         self.finished: list = []
+        self.submitted: list = []
         self.event_log = SimpleNamespace(
             logger=SimpleNamespace(exception=lambda *a, **k: None)
         )
@@ -2434,7 +2435,8 @@ class _SyncAskDouble:
                           submitted_via=""):
         return "askjob-sync", "conv-sync"
 
-    def ask(self, notebook_id, payload, *, user_id, job_id, cancel_event):
+    def ask(self, notebook_id, payload, *, user_id, job_id, cancel_event,
+            on_trace=None):
         if self._boom is not None:
             raise self._boom
         return SimpleNamespace(answer_id="ans-sync")
@@ -2445,17 +2447,52 @@ class _SyncAskDouble:
     # 钩子本身用**真的**那一份:double 只替换协作者,不替换被测行为(fail-open
     # 与「座位为 None 就是 no-op」都住在这个方法里)。
     _note_ask_completed = AskService._note_ask_completed
+    # 轨迹 sink 同理:真的那一份,只是这个 double 的 `ask` 从不回调它。
+    _durable_trace_sink = AskService._durable_trace_sink
 
 
-def _run_sync_ask(monkeypatch, double, *, mode="graph"):
+def _run_sync_ask(monkeypatch, double, *, mode="graph", submit=None):
+    """跑真的 `ask_current`。
+
+    默认把 `background_jobs.submit` 换成**同线程**执行并记下 job 名:这一组用例
+    钉的是「通知带什么参数、在哪一刻发出」,让它同步跑掉才看得见。「不在请求线程上
+    跑」那条性质由 `test_the_completion_notification_never_runs_on_the_request_thread`
+    单独用真线程 + barrier 钉住,不靠这个替身。"""
     import app.services.ask_service as ask_service_module
+    from app.services import background_jobs
 
     monkeypatch.setattr(
         ask_service_module, "publish_snapshot", lambda user_id: None
     )
+    if submit is None:
+        def submit(fn, *args, name=None, **kwargs):
+            double.submitted.append(name)
+            fn(*args, **kwargs)
+            return None
+    monkeypatch.setattr(background_jobs, "submit", submit)
     return ask_service_module.AskService.ask_current(
         double, NOTEBOOK_ID, SimpleNamespace(mode=mode)
     )
+
+
+def _join_completion_jobs(monkeypatch) -> list:
+    """包住**真的** `background_jobs.submit`,收集提问完成钩子那几个句柄。
+
+    端到端用例要等后台跑完才能断言,但不能把整个进程的后台提交都改成同步——
+    同一次请求里还有别的 job 在用它。"""
+    from app.services import background_jobs
+
+    real = background_jobs.submit
+    handles: list = []
+
+    def _submit(fn, *args, name=None, **kwargs):
+        handle = real(fn, *args, name=name, **kwargs)
+        if name and name.startswith("ask-completed-"):
+            handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(background_jobs, "submit", _submit)
+    return handles
 
 
 def test_a_synchronous_ask_signals_the_chain_with_the_normalised_engine_id(
@@ -2476,6 +2513,9 @@ def test_a_synchronous_ask_signals_the_chain_with_the_normalised_engine_id(
     assert response.answer_id == "ans-sync"
     assert noted == [(NOTEBOOK_ID, USER_A, "reasoning")]
     assert double.finished == ["done"]
+    # 后台 job 带名字提交:没名字它在诊断里就是一条匿名 `background_job`,
+    # 而 `_SAFE_ASK_JOB_NAMES` 那张表存在的理由正是「提问路径的 job 不许匿名」。
+    assert double.submitted == ["ask-completed-reasoning"]
 
 
 def test_a_synchronous_ask_notifies_after_the_terminal_job_row(monkeypatch):
@@ -2523,6 +2563,75 @@ def test_a_failing_notification_never_turns_a_delivered_answer_into_an_error(
     assert response.answer_id == "ans-sync"
     assert noted == [(NOTEBOOK_ID, USER_A, "reasoning")]
     assert double.finished == ["done"], "记账失败不得再写一条 failed 终态"
+
+
+def test_the_completion_notification_never_runs_on_the_request_thread(
+    monkeypatch,
+):
+    """P1(质量评审):钩子不得在请求线程上同步跑完。
+
+    三条链路里第三条过阈值之后是**同步**的读+写,还压在一把进程级锁上,最坏等满
+    `db_busy_timeout_ms`(默认 30 秒);扩展观察者那条路的预算同样是秒级、且对已经
+    进入的回调不做超时。留在请求线程上,一次已经落库、job 行已经 `done` 的提问会
+    在客户端那里变成超时失败,连 `finally` 里那次 `publish_snapshot` 都被压住。
+
+    判据用 barrier 而不是「量一下耗时」:钩子被挡在闸门后,而 `ask_current` 已经
+    把答案返回了——这直接说明它不在同一条线程上;放行之后它照常跑到,说明交出去
+    的不是一个被丢掉的通知。"""
+    import threading
+
+    released = threading.Event()
+    finished = threading.Event()
+    ran_on: list = []
+    noted: list = []
+    double = _SyncAskDouble(noted)
+
+    def _note(nb, uid, mode_id):
+        assert released.wait(timeout=5)
+        ran_on.append(threading.get_ident())
+        noted.append((nb, uid, mode_id))
+        finished.set()
+
+    double.note_ask_completed = _note
+
+    handles: list = []
+
+    def _submit(fn, *args, name=None, **kwargs):
+        double.submitted.append(name)
+        thread = threading.Thread(target=fn, name=name, daemon=True)
+        handles.append(thread)
+        thread.start()
+        return thread
+
+    response = _run_sync_ask(monkeypatch, double, submit=_submit)
+
+    # 答案已经回到调用方手上,而钩子还被挡在闸门后面。
+    assert response.answer_id == "ans-sync"
+    assert double.finished == ["done"]
+    assert noted == [], "钩子跑完了才返回 = 它还在请求线程上"
+
+    released.set()
+    assert finished.wait(timeout=5)
+    handles[0].join(timeout=5)
+    assert noted == [(NOTEBOOK_ID, USER_A, "reasoning")], "交出去的通知不能被丢掉"
+    assert ran_on and ran_on[0] != threading.get_ident()
+
+
+def test_a_notification_that_cannot_even_be_submitted_keeps_the_answer(
+    monkeypatch,
+):
+    """提交本身失败(池已关闭等)同样 fail-open——答案已经交给用户了。"""
+    noted: list = []
+    double = _SyncAskDouble(noted)
+
+    def _submit(fn, *args, name=None, **kwargs):
+        raise RuntimeError("executor is closed")
+
+    response = _run_sync_ask(monkeypatch, double, submit=_submit)
+
+    assert response.answer_id == "ans-sync"
+    assert double.finished == ["done"], "提交失败不得再写一条 failed 终态"
+    assert noted == []
 
 
 def test_the_runtime_actually_wires_the_synchronous_completion_seat():
@@ -2597,11 +2706,17 @@ def test_a_synchronous_repository_ask_reaches_all_three_memory_chains(
     runtime.search_profile_jobs = SimpleNamespace(
         note_ask_completed=lambda uid: noted.append(("p3", uid))
     )
+    completion_jobs = _join_completion_jobs(monkeypatch)
 
     response = repo.ask(
         notebook.id, AskRequest(question="q", mode="chunk"), submitted_via="web"
     )
     assert response.conversation_id
+    # 钩子跑在交付之后的后台 job 上,所以断言之前要等它跑完(等的是**这几个**
+    # 句柄,不是把全进程的后台提交改成同步)。
+    assert completion_jobs, "同步提问必须提交一个提问完成 job"
+    for handle in completion_jobs:
+        handle.join(timeout=10)
 
     with repo._connect() as db:
         row = db.execute(

@@ -2471,9 +2471,7 @@ class RepositoryRuntime:
                 # Agentic Memory PR-3(T7):同步 `POST /ask` 与 MCP
                 # `ask_notebook` 的提问完成钩子。⚠ 三参,与协调器那个座位同一份
                 # bound method、同一条边界;交的是 `_note_ask_completed` 本身,
-                # `ask_current` 只负责在答案交付之后调它一次。删掉这一行整仓
-                # 测试仍会全绿而生产两类提问重新零计数——由
-                # `test_agent_profile_job_overlay.py` 的静态接线守卫钉住。
+                # `ask_current` 只负责在答案交付之后把它交给后台跑一次。
                 note_ask_completed=self._note_ask_completed,
             )
         return self.ask

@@ -90,6 +90,15 @@ def test_ask_early_exit_flags_are_frozen():
     assert prose_only["llm_mode"] != "deterministic"
     assert "没有可检索的来源" not in prose_only["conclusion"]
 
+    # PR-3 起同步面也接了轨迹 sink,于是两条**早退**分支的响应必须带上那时已经
+    # 落库的 intent 步(`streamed_pre_trace`)。`null` 是接 sink 之前的形态:
+    # 响应否认一段它自己刚写进 `ask_trace_steps` 的轨迹,重开这条会话就会看到
+    # 响应里没有的步骤。
+    for case in ("unconfigured_model", "no_collections"):
+        trace = cases[case]["response"]["reasoning_trace"]
+        assert trace, f"{case}:早退响应必须带上已落库的那几步"
+        assert trace[0]["step_type"] == "intent", case
+
 
 def test_current_repository_runtime_matches_the_frozen_ask_oracle():
     generated = _generator_module().collect_ask_goldens()

@@ -1850,11 +1850,19 @@ class AgentProfileConsolidationService:
         and a missing identity silently bumping the base counter would let a
         per-member event fire the notebook-wide chain.
 
-        ⚠ The synchronous ``POST /ask`` endpoint deliberately does NOT call
-        this. It creates no ``ask_jobs`` row, which is the same reason the
-        admin usage overview counts questions from ``ask_jobs`` submissions
-        rather than from conversations — one definition of "an ask happened",
-        not two that disagree.
+        ⚠ Since 2026-09-22 (PR-3, T7) ALL THREE ask surfaces reach this:
+        ``POST /ask/stream`` through ``AskExecutionCoordinator``, and both the
+        synchronous ``POST /ask`` and the MCP ``ask_notebook`` through
+        ``AskService._note_ask_completed`` (see that docstring for why exactly
+        one notification per delivered answer falls out of the job lifecycle
+        rather than out of de-duplication). The previous note here — "the
+        synchronous endpoint deliberately does not call this, it creates no
+        ``ask_jobs`` row" — was false on both halves: that surface has run
+        through the same durable job lifecycle since the blocking surface was
+        unified, and MCP asks are exactly the input this chain exists to learn
+        from. Counting still matches the admin usage overview: one definition
+        of "an ask happened" (a durable ``ask_jobs`` submission that reached
+        ``done``), not two that disagree.
 
         ⚠ Residual CLOSED in P2-T3 (was codex #520 R5): a completion landing
         AFTER the member's removal used to recreate the job row

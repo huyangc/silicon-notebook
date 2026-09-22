@@ -483,7 +483,9 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 `RETRIEVAL_EXPERIENCE_ENABLED`）为开时，各自再单独一行「特性已开但模型未绑定」。
 `MODEL_SERVICES_CONFIG` 留空的离线部署不刷这些告警（那是受支持的降级形态，已有自己的提示）。
 `scripts/migrate_legacy_model_env.py` 会遍历全部 workload 重新生成配置，也可以直接在
-`[bindings]` 里补上缺的几行。这些告警只是告警，绝不会拒绝启动。
+`[bindings]` 里补上缺的几行。这些告警只是告警，绝不会拒绝启动。管理页的模型服务状态是按
+**物理服务**组织的，未绑定的工作负载不会产生任何一行，因此「哪些工作负载没绑定」目前以启动
+日志为准。
 自动模式（简化界面）固定使用逐步推理（`reasoning`）标准档，与高级界面选择 `reasoning` 时走同一条
 `/ask/intent` 意图预检（复用 `reasoning_agent` workload），不涉及额外的模型服务配置。该 workload
 未绑定或调用失败时，问题理解 fail-open 为空合同、按清晰问题继续以逐步推理执行，不再有通用问答兜底。

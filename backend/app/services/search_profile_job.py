@@ -60,11 +60,19 @@ own for one integer per user, or a column on ``user_profiles`` this feature
 does not otherwise need.
 
 **Fail-open in full.** This hangs off a hook that fires AFTER an answer has
-already been delivered (``AskExecutionCoordinator.start``'s ``worker()``,
-via ``RepositoryRuntime._note_ask_completed``); a delivered answer must never
-be affected by a background preference-inference failure. Every ordinary
+already been delivered, on every ask surface: the streaming coordinator's
+``worker()`` and — since PR-3 (T7) — the background job ``ask_current``
+submits for a finished synchronous/MCP ask, both through
+``RepositoryRuntime._note_ask_completed``. A delivered answer must never be
+affected by a background preference-inference failure. Every ordinary
 exception is logged and swallowed; ``KeyboardInterrupt``/``SystemExit`` keep
 propagating.
+
+**Never on a request thread.** Past the threshold this service's bounded
+read-then-write runs SYNCHRONOUSLY under a process-local lock, so it can wait
+out a write-lock contention window (``db_busy_timeout_ms``). Both callers
+therefore hand it to ``background_jobs.submit`` — what this module depends on
+is that submission, not which particular thread runs it.
 """
 from __future__ import annotations
 
@@ -229,13 +237,17 @@ class SearchProfileInferenceService:
         language value itself — NEVER a question, a notebook id or a user
         id.
 
-        ``user_id`` is deliberately absent from the payload: this hook runs
-        inside the same worker thread ``AskExecutionCoordinator`` submitted
-        for the ask that triggered it, which already carries that person's
-        ``_log_owner`` ContextVar (``background_jobs.submit`` copies it via
-        ``copy_context()``) — so the per-user event log already routes this
-        line to the right person's own log directory without the payload
-        needing to name them a second time.
+        ``user_id`` is deliberately absent from the payload: every caller
+        reaches this through a ``background_jobs.submit`` whose
+        ``copy_context()`` runs on the thread that served the ask, so the
+        asker's ``_log_owner`` ContextVar (set from the request context) is
+        already in scope here — the per-user event log routes this line to the
+        right person's own directory without the payload naming them a second
+        time. What this relies on is exactly those two things: the request
+        context having set the owner, and the hand-off copying the context.
+        Not "which thread": the streaming surface runs inside the ask's own
+        worker while the synchronous/MCP surface runs in a job submitted after
+        delivery, and both satisfy the same two premises.
         """
         try:
             self.event_log.emit(

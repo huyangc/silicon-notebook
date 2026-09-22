@@ -45,6 +45,10 @@ _SAFE_JOB_PREFIXES = (
     ("conflictresolve-", "conflictresolve"),
     ("agentprofile-", "agentprofile"),
     ("retrievalexperience-", "retrievalexperience"),
+    # 一次提问交付之后的三条记忆链路通知(同步/MCP 面从 ask_current 交出来的)。
+    # 只为了让它在诊断里有名字:这个 operation 不在任何池的集合里,所以和别的
+    # 非维护 job 一样走每任务 daemon 线程,不进闸。
+    ("ask-completed-", "ask-completed"),
     ("catalog-", "catalog"),
     ("mergereview-", "mergereview"),
     ("report-plan-", "report-plan"),

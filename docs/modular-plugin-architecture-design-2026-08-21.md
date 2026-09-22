@@ -434,7 +434,7 @@ prepare durable turn
 **v1 明确不开放的两个扩展点**（初稿只推迟了前者，本版两个都推迟并写明前置条件）：
 
 - `ask.mode_provider`：贡献新的完整 Ask mode。开放前置条件——① retrieval contributor 与 auditor 两类语义已在生产稳定至少一个真实插件周期；② mode 契约面同批接入：`scripts/check_ask_modes_contract.py`（backend `AskMode.streaming` ↔ frontend `streamsTrace` 锁同步）、持久化 mode ID 稳定与退役别名（`_RETIRED_MODES` 先例）、禁用后的明确 unavailable 行为；③ `ui_mode=auto` 的"隐藏控件必须在请求侧强制默认值"契约覆盖新 mode 的全部控件。
-- `synthesis.guidance`：贡献合成提示。这是全设计风险最高的扩展点——仓库刚为"用户回答偏好"与"检索经验注入"建立了极端保守的门（`origin="job"` 值绝不注入、风格块结构上不含 source/notebook/scope 词并有反向守卫、注入闸默认 false 待验证）。一个允许插件向合成 prompt 注入内容的通用点直接跨过这些门的精神。开放前置条件——同款护栏成为扩展点合同的一部分：schema 验证、独立预算、结构性不含 scope/来源词的守卫、部署级注入闸默认关、不能覆盖问题/scope/citation/安全指令；且至少一个第一方消费者先以非插件形态验证过收益。
+- `synthesis.guidance`：贡献合成提示。这是全设计风险最高的扩展点——仓库刚为"用户回答偏好"与"检索经验注入"建立了极端保守的门（`origin="job"` 值绝不注入、风格块结构上不含 source/notebook/scope 词并有反向守卫、检索经验的注入闸与蒸馏闸分开且可单独关掉——它在 2026-09-22 按笔记本分区并本机验证链路后才翻为默认开，见 `docs/superpowers/specs/2026-09-22-retrieval-experience-per-notebook-design_zh.md` §13-Q3）。一个允许插件向合成 prompt 注入内容的通用点直接跨过这些门的精神。开放前置条件——同款护栏成为扩展点合同的一部分：schema 验证、独立预算、结构性不含 scope/来源词的守卫、部署级注入闸默认关（一个**插件**贡献的合成提示与本仓自己那条封闭词表的检索经验不是同一类风险，所以这里的默认值不跟着经验库翻）、不能覆盖问题/scope/citation/安全指令；且至少一个第一方消费者先以非插件形态验证过收益。
 
 ### 6.5 Deep Report
 

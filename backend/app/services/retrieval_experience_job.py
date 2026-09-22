@@ -54,14 +54,17 @@ reader knowing were considered:
 * **In-process ABA on the injection-side memo — closed, not just registered
   (codex #524 R12 P2).** The injection side (``reasoning_retrieval.py``)
   memoises the rendered block against
-  ``RetrievalExperienceStorePort.version_signal()`` — ``(mutation revision,
-  row count, MAX(updated_at))``. The two DB-derived halves alone are not a
-  content identity: ``updated_at`` is offset-carrying ISO text compared
-  lexicographically, so a UTC-offset change or a clock step backwards could
-  make a real update invisible, and a batch that evicts as many rows as it
-  writes could leave both unchanged. The first element — an in-process
-  monotonic revision the store bumps on every ``upsert_experience`` /
-  ``evict_to_limit`` — closes the whole class for in-process writes, which is
+  ``RetrievalExperienceStorePort.version_signal(notebook_id)`` — one
+  ``(mutation revision, row count, MAX(updated_at))`` per partition the run
+  reads (its own and the global fallback), all from one scoped aggregate.
+  The two DB-derived halves alone are not a content identity: ``updated_at``
+  is offset-carrying ISO text compared lexicographically, so a UTC-offset
+  change or a clock step backwards could make a real update invisible, and a
+  batch that evicts as many rows as it writes could leave both unchanged. The
+  first element — an in-process monotonic revision the store bumps on every
+  ``upsert_experience`` / ``evict_to_limit``, counted PER PARTITION since
+  2026-09-22 so one library's batch cannot invalidate another's cached
+  snapshot — closes the whole class for in-process writes, which is
   exactly the boundary the cache lives at (its key also requires the same
   live store object via weakref). Cross-process writes are still covered
   only by the DB halves; the only cross-process writer is the offline

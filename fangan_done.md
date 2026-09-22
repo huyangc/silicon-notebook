@@ -915,8 +915,9 @@ function_length_ceiling` 里（`ask_chunk` / `_run_reasoning_stage` / `_draft_re
   仍允许**：关开关是从现在起不记，不是把记过的藏起来。
 - 提问完成钩子原先只挂在 durable 协调器上，同步 `POST /notebooks/{id}/ask` 与 MCP
   `ask_notebook` 都直接调 `repo.ask(...)`，三条链路（P1 巡固、经验蒸馏、回答偏好归纳）对这两类
-  提问全部零计数。已在 `RepositoryFacade.ask` 补上记账；durable 路径调的是 `service.ask`，不会
-  双计。MCP 是一等写入侧——Agent 的提问正是「越用越熟」的输入。
+  提问全部零计数。已在 `AskService.ask_current`（同步 `/ask` 与 MCP `ask_notebook` 的共同层）补上
+  记账，答案交付之后交由后台队列执行；同步/MCP 两条路径的轨迹步同样落 `ask_trace_steps`，所以
+  蒸馏读得到它们。durable 路径不会双计。MCP 是一等写入侧——Agent 的提问正是「越用越熟」的输入。
 - 未绑定工作负载现在会在启动时被点名：`[bindings]` 文件通常只生成一次就跨版本沿用，每个新增
   workload 在既有部署里天生未绑定，而注册表对未绑定只返回「无服务」、全链路 fail-soft，于是
   「特性开着、作业每次落 `failed:模型未配置`」在日志里一个字都没有。READY 之前一行 WARNING
