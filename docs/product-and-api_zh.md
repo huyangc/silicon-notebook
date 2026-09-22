@@ -2429,6 +2429,14 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 前七个上限均定义在 `backend/app/services/conversation_public_view.py`。
 
+## 站内使用手册
+
+`/manual` 把仓库里的[用户使用手册](./user-manual_zh.md)整篇渲染成一个站内页面，头像菜单的
+「使用手册」指向它。与公开分享页一样，它不经登录门。正文由 Next.js 路由在**构建期**从
+`docs/user-manual_zh.md` 读入并预渲染为静态页——离线打包只带走 `.next` 产物、不带 `docs/`
+目录，所以手册改动要重新构建前端才生效。标题锚点按 GitHub 的 slug 口径生成，手册手写的目录
+在仓库与站内两边都能跳；指向仓库其它 Markdown 文档的相对链接在站内按纯文本呈现，不留死链。
+
 ## 许愿墙与全局提问分析
 
 登录用户可从全局 `/wishes` 进入**许愿墙**，它不隶属于某一本笔记本。所有用户都能发布 `bug`（问题反馈）和 `feature`（功能需求），只有管理员能发布 `plan`（更新计划）。标题会去除首尾空白、不能为空，最多 120 字符；详细说明同样会去除首尾空白、不能为空，最多 4,000 字符。每位用户对每条问题反馈或功能需求最多一票，再按一次即取消；更新计划不参与点赞。每条内容都带一个由管理员掌握的处理状态 `status`：`open`（待处理，出生值）、`in_progress`（处理中）、`done`（已完成）或 `declined`（不采纳）。只有管理员能通过 `PUT /api/wishes/{wish_id}/status` 改它，其他人得到 403。内容的作者或任一管理员可以用 `PATCH /api/wishes/{wish_id}` 修改类型/标题/详细说明（部分字段、未知字段被拒绝、至少一个字段、与新建相同的去空白与长度规则，改成更新计划同样只限管理员），并用 `DELETE /api/wishes/{wish_id}` 删除（204，点赞随之清除）；其他用户两者都得到 403，内容不存在则为 404。默认 `priority` 排序先展示更新计划，再把待处理/处理中排在已完成/不采纳之前，然后按问题/需求的点赞数降序，最后用发布时间与 id 做稳定的新到旧排序；`latest` 只按发布时间排序，不看状态。列表使用 offset 分页，默认每页 50 条，单页上限为 100，可按 `kind` 与 `status` 筛选。完整 HTTP 端点为 `GET /api/wishes`、`POST /api/wishes`、`PATCH /api/wishes/{wish_id}`、`DELETE /api/wishes/{wish_id}`、`PUT /api/wishes/{wish_id}/status` 与 `POST /api/wishes/{wish_id}/vote`。

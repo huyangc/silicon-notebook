@@ -122,6 +122,7 @@ Extension SDK 的 baseline-preserving retrieval host 会执行实时 capability 
 
 | 需求 | 文档 |
 | --- | --- |
+| 面向使用者的操作说明：上传、提问、报告、分享、群组 | [用户使用手册](./docs/user-manual_zh.md) |
 | 产品行为、检索、Memory/MCP、knowhow、API、限制 | [产品与 API 参考](./docs/product-and-api_zh.md) |
 | 面向用户的中文界面用词 | [界面词汇约定](./docs/ui-vocabulary.md) |
 | 安装、生产部署、模型服务、配置项 | [部署与配置](./docs/deployment-and-configuration_zh.md) |

@@ -149,6 +149,15 @@ test("菜单提供许愿墙与管理员提问分析入口", async () => {
   expect(screen.getByRole("menuitem", { name: "提问分析" })).toHaveAttribute("href", "/admin/questions");
 });
 
+test("菜单提供站内使用手册入口", async () => {
+  const user = userEvent.setup();
+  renderMenu();
+
+  await user.click(screen.getByRole("button", { name: "账户菜单" }));
+
+  expect(screen.getByRole("menuitem", { name: "使用手册" })).toHaveAttribute("href", "/manual");
+});
+
 test("Agent 接入是账户菜单的一级入口,不必先进私有记忆", async () => {
   const user = userEvent.setup();
   renderMenu();

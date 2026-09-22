@@ -123,6 +123,7 @@ The Extension SDK's baseline-preserving retrieval host applies live capability d
 
 | Need | Document |
 | --- | --- |
+| End-user walkthrough (Chinese): upload, ask, reports, sharing, groups | [User manual](./docs/user-manual_zh.md) |
 | Product behavior, retrieval, Memory/MCP, knowhow, APIs, limits | [Product and API reference](./docs/product-and-api.md) |
 | User-visible Chinese terminology | [UI vocabulary contract](./docs/ui-vocabulary.md) |
 | Installation, production deployment, model services, settings | [Deployment and configuration](./docs/deployment-and-configuration.md) |

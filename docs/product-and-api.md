@@ -3179,6 +3179,16 @@ One knowingly-unbounded leftover remains, recorded rather than papered over: row
 
 The first seven live in `backend/app/services/conversation_public_view.py`.
 
+## In-app user manual
+
+`/manual` renders the repository's [user manual](./user-manual_zh.md) (Chinese) as an in-app page;
+the account menu's 「使用手册」 entry points to it. Like the public share pages it sits outside the
+login gate. The Next.js route reads `docs/user-manual_zh.md` at **build time** and prerenders a
+static page — the offline bundle ships only the `.next` output, not `docs/`, so a manual change
+takes effect after the frontend is rebuilt. Heading anchors follow GitHub's slug rules so the
+hand-written table of contents works both on the repository and in the app; relative links to
+other repository Markdown documents render as plain text instead of dead links.
+
 ## Wish wall and global question analysis
 
 The authenticated global **Wish Wall** at `/wishes` is independent of notebooks. Any user may publish a `bug` or `feature` item; only an administrator may publish a `plan`. Titles are trimmed, required, and limited to 120 characters; details are trimmed, required, and limited to 4,000 characters. A user has at most one vote on each bug or feature, and pressing the same vote control again removes that vote. Plans do not accept votes. Every item carries an administrator-owned `status`: `open` (the birth value), `in_progress`, `done`, or `declined`. Only an administrator may change it, via `PUT /api/wishes/{wish_id}/status`; anyone else receives 403. The author of an item, or any administrator, may edit its kind/title/content with `PATCH /api/wishes/{wish_id}` (partial body, unknown fields rejected, at least one field required, the same trim/length rules as creation, and the plan-is-admin-only rule applies to a kind change) and delete it with `DELETE /api/wishes/{wish_id}` (204; the item's votes go with it). Other users receive 403 on both; a missing item is 404. The default `priority` order places plans first, then open/in-progress work above done/declined work, then bugs/features by vote count descending, and finally uses newest-first/id as a stable tie break; `latest` orders by publication time only and ignores status. Lists are offset-paginated with a default page size of 50 and a maximum page size of 100, filterable by `kind` and by `status`. The full HTTP surface is `GET /api/wishes`, `POST /api/wishes`, `PATCH /api/wishes/{wish_id}`, `DELETE /api/wishes/{wish_id}`, `PUT /api/wishes/{wish_id}/status`, and `POST /api/wishes/{wish_id}/vote`.
