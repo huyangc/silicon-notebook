@@ -233,7 +233,7 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # docs/incremental-sync-design.md section 5). No table, index, FK or unique
 # surface change, and no backfill -- every pre-existing row is local, which is
 # exactly what the default records.
-SCHEMA_VERSION = 81
+SCHEMA_VERSION = 82
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -4410,6 +4410,44 @@ class SqliteMigrator:
                 "(SELECT c.submitted_via FROM global_ask_conversations c "
                 "WHERE c.id=global_ask_jobs.conversation_id),'') "
                 "WHERE submitted_via=''"
+            )
+
+    def _migration_82(self) -> None:
+        """The post-completion learning chains sample global Ask jobs too,
+        paired with PostgreSQL ``0062_global_ask_job_sampling.sql``.
+
+        Three background readers now walk ``global_ask_jobs`` by actor
+        (``user_id``) or by ``status`` + engine, ordered by recency; the
+        table's existing indexes all key on ``conversation_id`` and serve none
+        of them. ``mode`` comes out of ``payload_json`` into a real column so
+        the "done reasoning runs" read narrows on the index instead of
+        parsing every finished job's payload; backfilled from the payload
+        (only empty rows, so the ladder stays re-runnable). Two non-unique
+        indexes: ``(user_id, created_at, id)`` for the per-member reads and
+        ``(status, mode, created_at, id)`` for the global experience chain.
+        No table, foreign key or unique-surface change.
+
+        The COLUMN is the authority for a job's engine from here on; the
+        ``mode`` key that stays inside ``payload_json`` is the response body's
+        copy (``GlobalAskJob.mode``) and only re-reads historical rows. Both
+        are written from the same ``job.mode`` in ``GlobalAskStore.create`` and
+        nothing rewrites either afterwards.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "global_ask_jobs", "mode", "TEXT NOT NULL DEFAULT ''"
+            )
+            db.execute(
+                "UPDATE global_ask_jobs SET mode=COALESCE("
+                "json_extract(payload_json,'$.mode'),'') WHERE mode=''"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_global_ask_jobs_user_created\n"
+                "                 ON global_ask_jobs(user_id, created_at, id)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_global_ask_jobs_status_mode_created\n"
+                "                 ON global_ask_jobs(status, mode, created_at, id)"
             )
 
     def _seed(self) -> None:

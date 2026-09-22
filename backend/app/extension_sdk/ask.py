@@ -51,13 +51,24 @@ class AskCompletedAvailabilityContext:
 
 @dataclass(frozen=True, slots=True)
 class AskCompletedExtensionContext:
-    """Per-contribution projection; absent identities are structurally hidden."""
+    """Per-contribution projection; absent identities are structurally hidden.
+
+    ``scope`` is ``"notebook"`` for a notebook Ask and ``"global"`` for a
+    global (cross-library) Ask. For a global Ask ``notebook`` is the run's
+    naming anchor and ``notebooks`` lists every participant library the run
+    touched -- but only for a contribution that holds the agent-profile
+    notification capability, the one capability that already sees notebook
+    identity; every other contribution gets an empty tuple, exactly as it
+    gets ``notebook=None``. A notebook Ask always carries an empty tuple.
+    """
 
     mode_id: str
     actor: ActorRef | None
     notebook: NotebookRef | None
     access: AskCompletedAccess | None
     deadline_monotonic: float
+    scope: str = "notebook"
+    notebooks: tuple[NotebookRef, ...] = ()
 
 
 class AskCompletedObserver(Protocol):

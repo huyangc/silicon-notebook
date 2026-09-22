@@ -571,3 +571,158 @@ def test_repository_runtime_supplies_its_call_scoped_content_free_event_sink():
     assert [kind for kind, *_ in captured] == ["observer"]
     assert captured[0][2] is runtime.event_log.emit
     assert emitted == []
+
+
+def _runtime_for_global(host):
+    calls: list[tuple] = []
+    runtime = object.__new__(RepositoryRuntime)
+    runtime.ask_completed_observers = host
+    runtime.agent_profile_jobs = SimpleNamespace(
+        note_ask_completed=lambda nb, uid: calls.append(("profile", nb, uid))
+    )
+    runtime.retrieval_experience_jobs = SimpleNamespace(
+        note_ask_completed=lambda nb: calls.append(("experience", nb))
+    )
+    runtime.search_profile_jobs = SimpleNamespace(
+        note_ask_completed=lambda uid: calls.append(("search", uid))
+    )
+    runtime.database = _ConnectionProbe()
+    runtime.event_log = SimpleNamespace(emit=lambda *_: None)
+    runtime.settings = SimpleNamespace(
+        ask_post_completion_extension_timeout_seconds=30.0,
+    )
+    return runtime, calls
+
+
+def test_global_ask_completion_sends_one_notification_with_every_participant():
+    """A finished global Ask advances the SAME three chains a notebook ask
+    does, attributed for a cross-library run: the overlay once per participant
+    library behind ONE agent-profile capability, the experience chain once
+    into the global partition (reasoning only), the search profile once per
+    ask -- and one notification, not one per library."""
+    captured = []
+
+    class ObserverHost:
+        def observe_application(self, context, *, event_sink=None):
+            captured.append(context)
+
+    runtime, calls = _runtime_for_global(ObserverHost())
+    runtime._note_global_ask_completed(
+        ["nb-b", "nb-a", "nb-b"], "user-1", "reasoning", anchor="nb-anchor",
+    )
+
+    assert len(captured) == 1
+    notification = captured[0].notification
+    assert notification.scope == "global"
+    # The anchor is the run's nominal active, NOT the first attributed library.
+    assert notification.notebook_id == "nb-anchor"
+    assert notification.notebook_ids == ("nb-b", "nb-a")
+    assert notification.actor_id == "user-1" and notification.mode_id == "reasoning"
+    captured[0].agent_profile.notify()
+    captured[0].retrieval_experience.notify()
+    captured[0].search_profile.notify()
+    assert calls == [
+        ("profile", "nb-b", "user-1"), ("profile", "nb-a", "user-1"),
+        ("experience", ""), ("search", "user-1"),
+    ]
+
+    captured.clear()
+    runtime._note_global_ask_completed(["nb-a"], "user-1", "chunk", anchor="nb-a")
+    assert captured[0].retrieval_experience is None
+    assert captured[0].notification.mode_id == "chunk"
+
+    # No library touched (every leg skipped): the person's ask still counts
+    # for the experience partition, the search profile and the observers;
+    # only the overlay loop is empty.
+    captured.clear(); calls.clear()
+    runtime._note_global_ask_completed([], "user-1", "reasoning", anchor="nb-anchor")
+    assert captured[0].notification.notebook_id == "nb-anchor"
+    assert captured[0].notification.notebook_ids == ()
+    captured[0].agent_profile.notify()
+    captured[0].retrieval_experience.notify()
+    captured[0].search_profile.notify()
+    assert calls == [("experience", ""), ("search", "user-1")]
+
+    captured.clear()
+    runtime._note_global_ask_completed([], "user-1", "reasoning")
+    runtime._note_global_ask_completed(["nb-a"], "", "reasoning", anchor="nb-a")
+    assert captured == []
+
+
+def test_global_ask_completion_without_a_host_calls_the_three_chains_directly():
+    runtime, calls = _runtime_for_global(None)
+    runtime._note_global_ask_completed(["nb-a", "nb-b"], "user-1", "reasoning", anchor="nb-a")
+    assert calls == [
+        ("profile", "nb-a", "user-1"), ("profile", "nb-b", "user-1"),
+        ("experience", ""), ("search", "user-1"),
+    ]
+    calls.clear()
+    runtime._note_global_ask_completed(["nb-a"], "user-1", "chunk", anchor="nb-a")
+    assert calls == [("profile", "nb-a", "user-1"), ("search", "user-1")]
+    calls.clear()
+    runtime._note_global_ask_completed([], "user-1", "reasoning", anchor="nb-a")
+    assert calls == [("experience", ""), ("search", "user-1")]
+
+    # One chain failing never eats the others (per-chain isolation).
+    runtime.agent_profile_jobs = SimpleNamespace(
+        note_ask_completed=lambda *_: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    calls.clear()
+    runtime._note_global_ask_completed(["nb-a"], "user-1", "reasoning", anchor="nb-a")
+    assert calls == [("experience", ""), ("search", "user-1")]
+
+
+def test_global_notification_projects_scope_to_every_observer_and_participants_only_behind_agent_profile():
+    """A global Ask's notification reaches plugins as ONE context per observer:
+    every observer learns ``scope="global"``; only the agent-profile capability
+    (the one that already sees notebook identity) gets the participant list,
+    with ``notebook`` still the anchor."""
+    contexts = {}
+    calls: list[str] = []
+
+    class Observer:
+        def __init__(self, label: str) -> None:
+            self.label = label
+
+        def observe(self, context):
+            contexts[self.label] = context
+            return context.access.notify()
+
+    capabilities = {
+        "obs.agent": ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
+        "obs.search": ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY,
+    }
+    bundles = tuple(
+        _bundle(contribution_id, ASK_COMPLETED_OBSERVER_POINT, ContributionKind.OBSERVER,
+                Observer(label), requires=(capability,))
+        for (contribution_id, capability), label in zip(
+            capabilities.items(), ("agent", "search"), strict=True)
+    )
+    runtime = build_extension_runtime(
+        bundles,
+        capability_decisions={
+            capability: lambda context: Availability.available()
+            for capability in capabilities.values()
+        },
+    )
+    call_context = replace(
+        _call_context(calls, mode_id="chunk"),
+        notification=CompletedAskNotification(
+            "user-1", "notebook-1", "chunk",
+            notebook_ids=("notebook-1", "notebook-2"), scope="global",
+        ),
+    )
+    runtime.ask_completed_observers.observe_application(call_context)
+
+    assert calls == ["agent", "search"]
+    assert contexts["agent"].scope == "global"
+    assert contexts["agent"].notebook.id == "notebook-1"
+    assert [ref.id for ref in contexts["agent"].notebooks] == ["notebook-1", "notebook-2"]
+    assert contexts["search"].scope == "global"
+    assert contexts["search"].notebook is None
+    assert contexts["search"].notebooks == ()
+
+    # A notebook Ask carries the defaults, so an unchanged plugin sees nothing new.
+    contexts.clear(); calls.clear()
+    runtime.ask_completed_observers.observe_application(_call_context(calls, mode_id="chunk"))
+    assert contexts["agent"].scope == "notebook" and contexts["agent"].notebooks == ()

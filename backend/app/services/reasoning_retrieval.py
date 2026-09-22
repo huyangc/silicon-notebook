@@ -1102,6 +1102,17 @@ def _cached_experiences(store, notebook_id: str = "") -> List[dict]:
     )
 
 
+def _experience_partition_for_run(notebook_id) -> str:
+    """The partition THIS run reads: the notebook's own for a notebook ask,
+    the global partition (``""``) for a global run. A global run's
+    ``notebook_id`` is only its naming anchor -- one participant among many,
+    with no retrieval privilege -- so reading that library's partition would
+    inject one library's tactics into a federated run and, symmetrically,
+    the run's own completion is filed under the global partition
+    (``RepositoryRuntime._note_global_ask_completed``)."""
+    return "" if subjectless_run_active() else notebook_id
+
+
 def _cached_experience_layers(store, notebook_id) -> Tuple[List[dict], List[dict]]:
     """一次 ``version_signal(...)`` 取回 ``(本库分区, 全局分区)`` 两层快照。
 
@@ -2228,7 +2239,8 @@ def _zero_hit_nudge_for(
     ⚠ 这是 reflect 循环里**每一轮**都可能走到的取数点(``_consultable_rows``
     同理),不是每 run 一次——分区签名那笔账正是为这个频率算的。
     """
-    primary, fallback = _cached_experience_layers(store, notebook_id)
+    primary, fallback = _cached_experience_layers(
+        store, _experience_partition_for_run(notebook_id))
     return _zero_hit_nudge_note(
         zero_hit_by_action, nudged_actions, [*primary, *fallback], situation,
         primary_count=len(primary))
@@ -2243,7 +2255,8 @@ def _consultable_rows(
     与 ``_zero_hit_nudge_for`` 同款外壳、同一条理由:合并列表与分界下标一起
     交给 ``select_consultable``,本库分区的条目在同分同支持度时赢。
     """
-    primary, fallback = _cached_experience_layers(store, notebook_id)
+    primary, fallback = _cached_experience_layers(
+        store, _experience_partition_for_run(notebook_id))
     return select_consultable(
         [*primary, *fallback], situation, exclude_ids=exclude_ids,
         zero_hit_actions=zero_hit_actions, primary_count=len(primary),
@@ -4750,7 +4763,8 @@ class ReasoningRetriever:
                         limits.effort if limits is not None else ""),
                 )
                 primary, fallback = _cached_experience_layers(
-                    self.retrieval_experiences, notebook_id)
+                    self.retrieval_experiences,
+                    _experience_partition_for_run(notebook_id))
                 selection = select_experiences_layered(
                     primary, fallback, situation)
                 experience_entries = list(selection.entries)

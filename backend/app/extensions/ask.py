@@ -224,16 +224,10 @@ class AskCompletedObserverHost:
                     duration_ms=_elapsed_ms(self._clock, started),
                 )
                 continue
-            actor, notebook = _observer_identities(
-                notification, frozen.access_capability
-            )
             try:
                 receipt = contribution.implementation.observe(
-                    AskCompletedExtensionContext(
-                        notification.mode_id,
-                        actor,
-                        notebook,
-                        access,
+                    _extension_context(
+                        notification, frozen.access_capability, access,
                         call_context.deadline_monotonic,
                     )
                 )
@@ -284,6 +278,9 @@ def _valid_notification(value: object) -> bool:
         and bool(value.notebook_id)
         and type(value.mode_id) is str
         and bool(_STABLE_CODE.fullmatch(value.mode_id))
+        and value.scope in ("notebook", "global")
+        and type(value.notebook_ids) is tuple
+        and all(type(item) is str and bool(item) for item in value.notebook_ids)
     )
 
 
@@ -309,15 +306,34 @@ def _observer_port(
     return None
 
 
+def _extension_context(
+    notification: CompletedAskNotification,
+    capability: str | None,
+    access: object,
+    deadline_monotonic: float,
+) -> AskCompletedExtensionContext:
+    """The per-contribution projection: identities by capability, plus the
+    run's scope and (agent-profile capability only) its participant libraries."""
+    actor, notebook, notebooks = _observer_identities(notification, capability)
+    return AskCompletedExtensionContext(
+        notification.mode_id, actor, notebook, access, deadline_monotonic,
+        scope=notification.scope, notebooks=notebooks,
+    )
+
+
 def _observer_identities(
     notification: CompletedAskNotification,
     capability: str | None,
-) -> tuple[ActorRef | None, NotebookRef | None]:
+) -> tuple[ActorRef | None, NotebookRef | None, tuple[NotebookRef, ...]]:
     if capability == ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY:
-        return ActorRef(notification.actor_id), NotebookRef(notification.notebook_id)
+        return (
+            ActorRef(notification.actor_id),
+            NotebookRef(notification.notebook_id),
+            tuple(NotebookRef(value) for value in notification.notebook_ids),
+        )
     if capability == ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY:
-        return ActorRef(notification.actor_id), None
-    return None, None
+        return ActorRef(notification.actor_id), None, ()
+    return None, None, ()
 
 
 def _core_notify(port: object) -> Callable[[], None] | None:

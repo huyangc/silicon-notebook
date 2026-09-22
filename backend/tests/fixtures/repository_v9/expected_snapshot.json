@@ -1405,6 +1405,16 @@
         "type": "index"
       },
       {
+        "name": "idx_global_ask_jobs_status_mode_created",
+        "sql_sha256": "ef079771f91ef62bd560a13481f8969038079b5616638a6712dc26309d1315f3",
+        "type": "index"
+      },
+      {
+        "name": "idx_global_ask_jobs_user_created",
+        "sql_sha256": "c269930bdc4375edf4a068119b01197bfcb47c48c9d653050a576cc716d8784d",
+        "type": "index"
+      },
+      {
         "name": "idx_global_ask_request",
         "sql_sha256": "dfdbafb41881455ea1ab7fbb685b6fef859000284efd15b839593a6f9eb4535d",
         "type": "index"
@@ -2131,7 +2141,7 @@
       },
       {
         "name": "global_ask_jobs",
-        "sql_sha256": "77a3b0102d4fac75862d59446010129645b7e99025b91da0ff770d04194a4bdf",
+        "sql_sha256": "e3dea39721397293e47b155b4aa097ae9bd3ffb904ecfa043123c5baae90af94",
         "type": "table"
       },
       {
@@ -2515,6 +2525,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 81
+    "user_version": 82
   }
 }

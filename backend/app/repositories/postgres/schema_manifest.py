@@ -354,7 +354,16 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # owning conversation's recorded value (only empty rows are touched); the
 # other three stay '' for historical rows. No table, index, FK or
 # unique-surface change.
+# SQLite v82 / PostgreSQL 0062 add global_ask_jobs.mode (text COLLATE "C" NOT
+# NULL DEFAULT '', backfilled from payload_json) plus two NON-UNIQUE indexes,
+# idx_global_ask_jobs_user_created (user_id, created_at, id) and
+# idx_global_ask_jobs_status_mode_created (status, mode, created_at, id), plus
+# (PostgreSQL only) the GIN expression index idx_global_ask_jobs_participants
+# over payload_json::jsonb->'resolved_notebook_ids' that answers the overlay
+# sampler's "participant list contains this notebook" containment, so the
+# post-completion learning chains can sample global asks without walking the
+# table. No table, FK or unique-surface change.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=81,
-    postgres_version=61,
+    sqlite_version=82,
+    postgres_version=62,
 )
