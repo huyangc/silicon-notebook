@@ -98,7 +98,7 @@ import secrets
 import shutil
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -112,7 +112,11 @@ from app.migration.sync.export import (
     _quoted,
 )
 from app.migration.sync.export import _Source as _Backend
-from app.migration.sync.identity import UserProjection, build_user_mapping
+from app.migration.sync.identity import (
+    UserMapping,
+    UserProjection,
+    build_user_mapping,
+)
 from app.migration.sync.manifest import (
     MappingKind,
     ScopeKind,
@@ -202,10 +206,13 @@ _REPORT_PREFIX = "import-report-"
 # pair in this schema, and the guard tests pin the synced table roster).
 _FILES_PHASE = "__files__"
 
-# A ``sync_imports`` row still 'running' this long after it started belongs to
-# a process that is gone: no import holds a row open for hours without writing
-# progress. Taking it over is reported as a warning, never done silently.
-_STALE_RUNNING_HOURS = 6
+# Where a running import records that it is still alive. Refreshed inside
+# every transaction that writes progress, so "is that other import dead?" is
+# answered by evidence of work rather than by a timeout on when it STARTED --
+# a long import is not an abandoned one, and the two are indistinguishable
+# from started_at alone. No duration is treated as proof of death here: the
+# importer reports the other run's last heartbeat and an operator decides.
+_HEARTBEAT_AT_KEY = "heartbeat_at"
 
 # ``sync_imports.status``. 'superseded' marks a failed package that a NEWER
 # package of the same source environment has since been declared over: its
@@ -1366,6 +1373,57 @@ def _build_group_mapping(
     return mapping, created
 
 
+def _assert_required_identities_resolve(
+    context: _Context,
+    mapping: UserMapping,
+    package_users: Sequence[UserProjection],
+    *,
+    create_missing_users: bool,
+) -> None:
+    """Refuse, before anything is written, a package whose FAIL-policy
+    references cannot be resolved.
+
+    ``_UNMAPPED_POLICY``'s FAIL rule aborts the whole import the moment a row
+    carrying that column is applied -- and by then phase 3a has already
+    DELETED the rows this package does not carry. The target would be left
+    stripped of content by a run that was never going to finish. Every FAIL
+    column is therefore resolved up front, against the same mapping the row
+    phase will use, while the only thing that has happened is reading.
+
+    A dry run raises here too rather than warning: "this package cannot be
+    imported" is the answer a dry run exists to produce, and reporting it as a
+    warning among others is how an operator misses it.
+    """
+    resolvable = set(mapping.matched)
+    if create_missing_users:
+        resolvable.update(user.id for user in mapping.unmatched)
+    usernames = {user.id: user.username for user in package_users}
+    required = sorted(
+        column
+        for column, policy in _UNMAPPED_POLICY.items()
+        if policy is UnmappedPolicy.FAIL
+    )
+    problems: list[str] = []
+    for table, column in required:
+        unresolved: set[str] = set()
+        for value in _package_column(context, table, column):
+            if isinstance(value, str) and value and value not in resolvable:
+                unresolved.add(value)
+        for value in sorted(unresolved):
+            username = usernames.get(value)
+            who = f"username={username!r}" if username else "not in users.jsonl"
+            problems.append(f"{table}.{column}={value!r} ({who})")
+    if not problems:
+        return
+    raise SyncImportError(
+        "this package cannot be imported: these references have no "
+        "counterpart in the target environment, and their rule is 'fail' "
+        "(docs/incremental-sync-design.md §3.2), so the import would abort "
+        f"partway through. {problems}. Re-run with --create-missing-users, or "
+        "create those users at the target first."
+    )
+
+
 def _create_missing_users(
     backend: _Backend, unmatched: Sequence[UserProjection]
 ) -> dict[str, str]:
@@ -1428,6 +1486,9 @@ class _PriorImport:
     # unreadable -- an ordering question that cannot be answered, never one
     # silently answered "yes".
     created_at: datetime | None
+    # When this run last committed work, out of report_json. ``None`` for a
+    # row that has not committed anything yet (or is not running).
+    heartbeat_at: datetime | None
     has_progress: bool
 
 
@@ -1454,15 +1515,16 @@ def _prior_imports(
                 status=str(row["status"]),
                 started_at=_read_moment(row["started_at"]),
                 created_at=_recorded_created_at(row["report_json"]),
+                heartbeat_at=_recorded_moment(row["report_json"], _HEARTBEAT_AT_KEY),
                 has_progress=package_id in with_progress,
             )
         )
     return tuple(prior)
 
 
-def _recorded_created_at(report_json: Any) -> datetime | None:
-    """``package_created_at`` out of a stored report. psycopg hands back a
-    decoded ``dict`` for jsonb; SQLite hands back text."""
+def _recorded_moment(report_json: Any, key: str) -> datetime | None:
+    """One timestamp out of a stored report. psycopg hands back a decoded
+    ``dict`` for jsonb; SQLite hands back text."""
     document = report_json
     if isinstance(document, (str, bytes)):
         try:
@@ -1471,7 +1533,11 @@ def _recorded_created_at(report_json: Any) -> datetime | None:
             return None
     if not isinstance(document, dict):
         return None
-    return _read_moment(document.get(_PACKAGE_CREATED_AT_KEY))
+    return _read_moment(document.get(key))
+
+
+def _recorded_created_at(report_json: Any) -> datetime | None:
+    return _recorded_moment(report_json, _PACKAGE_CREATED_AT_KEY)
 
 
 def _reject_backwards_snapshot(
@@ -1519,10 +1585,12 @@ def _reject_backwards_snapshot(
 
 
 def _claim_import(
-    backend: _Backend, context: _Context, *, resume: bool
-) -> None:
+    backend: _Backend, context: _Context, *, resume: bool, take_over: bool
+) -> bool:
     """Take ownership of this source environment's import slot and open (or
     re-open) this package's ``sync_imports`` row, in ONE write transaction.
+    Returns True when the package turns out to be already applied in full, in
+    which case nothing was claimed and nothing must be written.
 
     The check and the claim have to be one transaction or they are not a
     check: two importers that both read "nothing is running" would both then
@@ -1531,12 +1599,20 @@ def _claim_import(
     SQLite gets the same guarantee from ``write()``'s process-wide writer
     lock (and, across processes, from the database file's own write lock).
 
+    Everything preflight decided about ORDER is decided again here, on the
+    rows read under that lock. Preflight runs on a snapshot taken before the
+    lock exists, so between the two another importer can finish a newer
+    package -- and the whole point of the ordering rules is that applying an
+    older snapshot after a newer one rolls the mirror back. A check made
+    outside the lock that admits the package is not a check.
+
     A row already 'running' for this source environment blocks the run.
-    ``resume=True`` is the operator saying "that process is gone, this is the
-    same package continuing" -- it is never assumed, because assuming it turns
-    a genuine concurrent import into silent interleaving. A row that has been
-    'running' longer than ``_STALE_RUNNING_HOURS`` is taken over regardless,
-    with a warning.
+    ``take_over=True`` is the operator saying "that process is gone"; it is
+    never inferred. There is no duration after which this module declares
+    another run dead on its own -- a long import is not an abandoned one, and
+    guessing wrong means two importers interleaving on the same target. The
+    refusal quotes the other run's last heartbeat so the person deciding has
+    the one fact that actually bears on it.
 
     Declaring a package also RETIRES the half-applied ones it replaces. A
     'failed' package of the same source environment that still has progress
@@ -1549,7 +1625,6 @@ def _claim_import(
     """
     manifest = context.manifest
     now = datetime.now(timezone.utc)
-    stale_before = now - timedelta(hours=_STALE_RUNNING_HOURS)
     mine = _read_moment(manifest.created_at)
     with backend.write() as conn:
         if backend.is_postgres:
@@ -1560,6 +1635,12 @@ def _claim_import(
         own = next(
             (row for row in prior if row.package_id == manifest.package_id), None
         )
+        if own is not None and own.status == _STATUS_DONE:
+            # Unconditional, and before anything else: another importer
+            # finished this very package between preflight and this lock.
+            # There is nothing to claim, nothing to resume and nothing to
+            # refuse -- it is simply already applied.
+            return True
         if own is not None and own.status == _STATUS_SUPERSEDED:
             raise SyncImportError(
                 f"package {manifest.package_id} was superseded by a newer "
@@ -1567,33 +1648,29 @@ def _claim_import(
                 "progress has been dropped; it can no longer be resumed. "
                 "Export a current package instead."
             )
-        if resume and own is not None and own.status == _STATUS_DONE:
-            raise SyncImportError(
-                f"package {manifest.package_id} is already recorded done; "
-                "there is nothing to resume."
-            )
+        _reject_backwards_snapshot(prior, context)
         for row in prior:
             if row.status != _STATUS_RUNNING:
                 continue
             other = row.package_id
-            if row.started_at is not None and row.started_at < stale_before:
+            heartbeat = (
+                row.heartbeat_at.isoformat()
+                if row.heartbeat_at is not None
+                else "never (it has not committed any step yet)"
+            )
+            if take_over:
                 context.ledger.warn(
-                    f"took over a sync_imports row for package {other} that has "
-                    f"been 'running' since {row.started_at.isoformat()}; the "
-                    "process that opened it is assumed gone"
-                )
-                continue
-            if other == manifest.package_id and resume:
-                context.ledger.warn(
-                    "resumed a package whose previous run is still marked "
-                    "'running'; --resume asserts that process is gone"
+                    f"took over the running sync_imports row for package "
+                    f"{other}; its last committed step was at {heartbeat}, and "
+                    "take_over asserts that process is gone"
                 )
                 continue
             raise SyncImportError(
                 f"an import from {manifest.source_env!r} is still running "
-                f"(package_id {other}); refusing to interleave two imports of "
-                "the same source environment. If that process is gone, re-run "
-                "with resume=True (--resume)."
+                f"(package_id {other}); its last committed step was at "
+                f"{heartbeat}. Refusing to interleave two imports of the same "
+                "source environment. If that process is really gone, re-run "
+                "with take_over=True (--take-over)."
             )
         _supersede_outstanding(backend, conn, context, prior, mine, now)
         conn.execute(
@@ -1613,9 +1690,10 @@ def _claim_import(
                 manifest.from_seq,
                 manifest.to_seq,
                 _moment(backend, now),
-                json.dumps({_PACKAGE_CREATED_AT_KEY: manifest.created_at}),
+                _running_report_json(manifest.created_at, now),
             ),
         )
+    return False
 
 
 def _supersede_outstanding(
@@ -1706,11 +1784,16 @@ def _completed_steps(backend: _Backend, conn: Any, package_id: str) -> set[str]:
 def _record_progress(
     backend: _Backend,
     conn: Any,
-    package_id: str,
+    context: _Context,
     step: str,
     rows_applied: int,
     completed_at: datetime,
 ) -> None:
+    """Record one completed step AND refresh this run's heartbeat, in the
+    caller's transaction. The two belong together: the heartbeat's whole
+    meaning is "this import committed work at that moment", so it must be
+    written by the same commit that made the work durable, never by a
+    background tick that could keep beating for a run that is wedged."""
     conn.execute(
         backend.sql(
             "INSERT INTO sync_import_progress "
@@ -1720,7 +1803,30 @@ def _record_progress(
             "rows_applied = excluded.rows_applied, "
             "completed_at = excluded.completed_at"
         ),
-        (package_id, step, rows_applied, _moment(backend, completed_at)),
+        (context.manifest.package_id, step, rows_applied, _moment(backend, completed_at)),
+    )
+    conn.execute(
+        backend.sql(
+            f"UPDATE sync_imports SET report_json = {_json_cast(backend)} "
+            "WHERE package_id = ?"
+        ),
+        (
+            _running_report_json(context.manifest.created_at, completed_at),
+            context.manifest.package_id,
+        ),
+    )
+
+
+def _running_report_json(created_at: str, heartbeat: datetime) -> str:
+    """``report_json`` for a row that is still running: which snapshot it is
+    applying, and when it last committed anything."""
+    return json.dumps(
+        {
+            _PACKAGE_CREATED_AT_KEY: created_at,
+            _HEARTBEAT_AT_KEY: heartbeat.isoformat(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
     )
 
 
@@ -1919,7 +2025,7 @@ def _record_created_parents(
         _record_progress(
             backend,
             conn,
-            context.manifest.package_id,
+            context,
             _created_step(table, parent_id),
             0,
             moment,
@@ -2418,7 +2524,6 @@ def _row_batches(path: Path) -> Iterator[list[dict[str, Any]]]:
 
 
 def _apply_rows(backend: _Backend, context: _Context, done: set[str]) -> None:
-    package_id = context.manifest.package_id
     resumed = done & set(synced_tables())  # bookkeeping steps are not tables
     if resumed:
         context.ledger.warn(
@@ -2438,7 +2543,7 @@ def _apply_rows(backend: _Backend, context: _Context, done: set[str]) -> None:
             _record_progress(
                 backend,
                 conn,
-                package_id,
+                context,
                 table,
                 outcome.inserted + outcome.updated,
                 datetime.now(timezone.utc),
@@ -2703,7 +2808,7 @@ def _prune_snapshot(backend: _Backend, context: _Context, done: set[str]) -> Non
             _record_progress(
                 backend,
                 conn,
-                context.manifest.package_id,
+                context,
                 step,
                 removed,
                 datetime.now(timezone.utc),
@@ -2923,7 +3028,7 @@ def _commit_files(backend: _Backend, context: _Context) -> None:
         _record_progress(
             backend,
             conn,
-            context.manifest.package_id,
+            context,
             _FILES_PHASE,
             context.ledger.files_copied,
             datetime.now(timezone.utc),
@@ -3070,6 +3175,7 @@ def import_package(
     dry_run: bool = False,
     importer_user_id: str | None = None,
     resume: bool = False,
+    take_over: bool = False,
     verify_files: bool = False,
 ) -> ImportReport:
     """Apply one full export package to the backend ``settings`` names.
@@ -3078,13 +3184,19 @@ def import_package(
     the run would do, and writes nothing -- not to the database, and not into
     the package directory either (a package may be shared or read-only).
 
-    ``resume`` is the operator asserting that an earlier run of THIS package,
-    whose ``sync_imports`` row is still marked 'running', is gone. Without it
-    a still-running row for the same source environment refuses the run, so a
-    genuinely concurrent import can never interleave. A row left 'failed' (the
-    ordinary outcome of a crash this process caught) always resumes without
-    the flag, from ``sync_import_progress`` -- but only while it is still the
-    newest package declared for its source environment.
+    A row left 'failed' (the ordinary outcome of a crash this process caught)
+    resumes from ``sync_import_progress`` on its own, while it is still the
+    newest package declared for its source environment; ``resume`` exists for
+    the CLI to say so explicitly.
+
+    ``take_over`` is the operator asserting that a run whose ``sync_imports``
+    row is still marked 'running' is gone. Nothing infers that: a running row
+    refuses this run and the refusal quotes that run's last heartbeat -- the
+    timestamp of the last step it actually committed -- so the person deciding
+    has the fact that bears on it. There is no timeout after which this module
+    declares another import dead, because a long import and an abandoned one
+    look identical from the outside and guessing wrong means two importers
+    interleaving on one target.
 
     **``sync_imports.status`` takes four values.** ``running`` is a claim in
     flight; ``done`` is applied in full; ``failed`` is a run that broke and
@@ -3136,6 +3248,7 @@ def import_package(
             dry_run=dry_run,
             importer_user_id=importer_user_id,
             resume=resume,
+            take_over=take_over,
             verify_files=verify_files,
         )
     finally:
@@ -3151,6 +3264,7 @@ def _import(
     dry_run: bool,
     importer_user_id: str | None,
     resume: bool,
+    take_over: bool,
     verify_files: bool,
 ) -> ImportReport:
     manifest = _read_manifest(package_dir)
@@ -3185,13 +3299,20 @@ def _import(
         if _preflight(backend, conn, context):
             return _report(manifest, ledger, _EMPTY_MAPPING, already_applied=True)
         context.importer_user_id = _resolve_importer(backend, conn, importer_user_id)
+        package_users = _package_users(package_dir)
         try:
             mapping = build_user_mapping(
-                _package_users(package_dir), _target_users(backend, conn)
+                package_users, _target_users(backend, conn)
             )
         except ValueError as exc:
             raise SyncImportError(f"identity mapping is ambiguous: {exc}") from None
         groups, groups_to_create = _build_group_mapping(backend, conn, context)
+        _assert_required_identities_resolve(
+            context,
+            mapping,
+            package_users,
+            create_missing_users=create_missing_users,
+        )
 
     context.users = dict(mapping.matched)
     context.groups = groups
@@ -3216,8 +3337,6 @@ def _import(
             dry_run=True,
         )
 
-    _claim_import(backend, context, resume=resume)
-
     def outcome() -> UserMappingResult:
         """The mapping as it stands right now. Built on demand rather than
         once up front because creating the missing users happens INSIDE the
@@ -3230,6 +3349,9 @@ def _import(
                 user.username for user in mapping.unmatched if user.id not in created
             ),
         )
+
+    if _claim_import(backend, context, resume=resume, take_over=take_over):
+        return _report(manifest, ledger, outcome(), already_applied=True)
 
     try:
         # Creating users is the first step of the PROTECTED phase, not a step

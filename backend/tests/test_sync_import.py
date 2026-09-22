@@ -567,14 +567,83 @@ def test_an_unmappable_owner_fails_the_import_and_leaves_no_rows(
     with pytest.raises(SyncImportError) as failure:
         _import(target, report.package_dir)
 
-    assert "notebooks.created_by" in str(failure.value)
+    message = str(failure.value)
+    assert "notebooks.created_by" in message
+    assert CAROL[0] in message and CAROL[1] in message
     assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 0
     assert _count(target["repo"], "SELECT COUNT(*) FROM sources") == 0
-    status = _one(
+    # Refused before anything was claimed, so there is no row to settle.
+    assert _one(
         target["repo"], "SELECT status FROM sync_imports WHERE package_id=?",
         (report.package_id,),
+    ) is None
+
+
+def test_an_unmappable_owner_is_refused_before_the_sweep_touches_anything(
+    source, target, package, tmp_path
+):
+    """The FAIL rule aborts the run the moment a row carrying that column is
+    applied -- and by then phase 3a has already DELETED what the package does
+    not carry. A target that already mirrors this notebook would be stripped
+    by a run that was never going to finish, so the check happens while the
+    only thing that has happened is reading."""
+    _import(target, package)
+    repo = target["repo"]
+    before = _counts(repo, "notebooks", "sources", "chunks", "knowhow_rows")
+    assert before["chunks"] > 0
+    with source["repo"]._write() as db:
+        # ... and give the sweep something it WOULD have deleted, so a check
+        # that ran too late would be visible as missing rows.
+        db.execute(
+            "DELETE FROM chunks WHERE notebook_id=?", (source["exported"],)
+        )
+        db.execute(
+            "UPDATE notebooks SET created_by=? WHERE id=?",
+            (CAROL[0], source["exported"]),
+        )
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, _export(source, tmp_path / "out3"))
+
+    assert "notebooks.created_by" in str(failure.value)
+    assert _counts(repo, "notebooks", "sources", "chunks", "knowhow_rows") == before
+
+
+def test_a_dry_run_fails_on_an_unresolvable_required_identity(
+    source, target, tmp_path
+):
+    """"This package cannot be imported" is the answer a dry run exists to
+    produce. Reporting it as one warning among others is how it gets missed."""
+    with source["repo"]._write() as db:
+        db.execute(
+            "UPDATE notebooks SET created_by=? WHERE id=?",
+            (CAROL[0], source["exported"]),
+        )
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, _export(source, tmp_path / "out3"), dry_run=True)
+
+    assert "notebooks.created_by" in str(failure.value)
+
+
+def test_create_missing_users_satisfies_the_required_identities(
+    source, target, tmp_path
+):
+    with source["repo"]._write() as db:
+        db.execute(
+            "UPDATE notebooks SET created_by=? WHERE id=?",
+            (CAROL[0], source["exported"]),
+        )
+
+    report = _import(
+        target, _export(source, tmp_path / "out3"), create_missing_users=True
     )
-    assert status["status"] == "failed"
+
+    assert report.error == ""
+    assert _one(
+        target["repo"], "SELECT created_by FROM notebooks WHERE id=?",
+        (source["exported"],),
+    )["created_by"] in set(report.user_mapping.created.values())
 
 
 def test_create_missing_users_makes_the_unmatched_ones_local(
@@ -922,12 +991,17 @@ def test_a_second_package_refreshes_without_clobbering_the_target(
 # ------------------------------------------------------- concurrency and resume
 
 
-def _open_running_row(repo, package_id: str, *, started_at: str) -> None:
+def _open_running_row(
+    repo, package_id: str, *, started_at: str, heartbeat_at: str = ""
+) -> None:
+    payload = {"package_created_at": "2026-01-01T00:00:00+00:00"}
+    if heartbeat_at:
+        payload["heartbeat_at"] = heartbeat_at
     with repo._write() as db:
         db.execute(
             "INSERT INTO sync_imports(package_id,source_env,from_seq,to_seq,status,"
-            "started_at,finished_at,report_json) VALUES(?,?,0,0,'running',?,NULL,'{}')",
-            (package_id, SOURCE_ENV, started_at),
+            "started_at,finished_at,report_json) VALUES(?,?,0,0,'running',?,NULL,?)",
+            (package_id, SOURCE_ENV, started_at, json.dumps(payload)),
         )
 
 
@@ -945,39 +1019,77 @@ def test_a_concurrent_import_of_the_same_source_is_refused(
     assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 0
 
 
-def test_the_same_package_does_not_resume_a_running_row_by_default(
-    source, target, package
-):
-    """A row still marked 'running' for THIS package means either a live
-    process or a dead one, and the importer cannot tell. Guessing "dead"
-    would interleave two live imports, so it refuses until told."""
+def test_a_running_row_is_never_taken_over_on_a_guess(source, target, package):
+    """A row still marked 'running' means either a live process or a dead one,
+    and no elapsed time tells the two apart -- a long import looks exactly
+    like an abandoned one. So the importer refuses, hands over the one fact
+    that bears on the decision (when that run last committed a step), and
+    waits to be told."""
+    beat = "2026-01-01T09:00:00+00:00"
     _open_running_row(
-        target["repo"], _manifest(package)["package_id"], started_at=_now_text()
+        target["repo"],
+        _manifest(package)["package_id"],
+        started_at=_now_text(),
+        heartbeat_at=beat,
     )
 
     with pytest.raises(SyncImportError) as failure:
         _import(target, package)
 
-    assert "--resume" in str(failure.value)
+    message = str(failure.value)
+    assert "--take-over" in message
+    assert beat in message, "the refusal has to quote the other run's heartbeat"
     assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 0
+    # Even --resume does not take a running row: resume is for a FAILED one.
+    with pytest.raises(SyncImportError):
+        _import(target, package, resume=True)
 
-    report = _import(target, package, resume=True)
+    report = _import(target, package, take_over=True)
 
     assert report.error == ""
     assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 1
-    assert any("resume" in warning for warning in report.warnings)
+    assert any(beat in warning for warning in report.warnings)
 
 
-def test_a_long_dead_running_row_is_taken_over_with_a_warning(
-    source, target, package
+def test_a_running_row_that_never_committed_says_so(source, target, package):
+    _open_running_row(target["repo"], "other-package", started_at=_now_text())
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, package)
+
+    assert "has not committed any step yet" in str(failure.value)
+
+
+def test_the_heartbeat_advances_with_every_committed_step(
+    source, target, package, monkeypatch
 ):
-    stale = (datetime.now(timezone.utc) - timedelta(hours=7)).isoformat()
-    _open_running_row(target["repo"], "abandoned-package", started_at=stale)
+    """The heartbeat is written by the same commit that makes the work
+    durable, never by a background tick -- a tick would keep beating for a run
+    that is wedged, which is precisely the case it exists to expose."""
+    from app.migration.sync import import_ as module
 
-    report = _import(target, package)
+    beats: list[str] = []
+    real = module._apply_table
 
-    assert report.error == ""
-    assert any("abandoned-package" in warning for warning in report.warnings)
+    def observe(backend, conn, table, context):
+        outcome = real(backend, conn, table, context)
+        row = _one(
+            target["repo"], "SELECT report_json FROM sync_imports WHERE package_id=?",
+            (context.manifest.package_id,),
+        )
+        if row is not None:
+            beats.append(json.loads(row["report_json"]).get("heartbeat_at") or "")
+        return outcome
+
+    monkeypatch.setattr(module, "_apply_table", observe)
+    _import(target, package)
+
+    # Read from OUTSIDE each write transaction, so what they show is what was
+    # committed by the previous table -- strictly increasing across the run.
+    committed = [beat for beat in beats if beat]
+    assert len(committed) > 2
+    assert committed == sorted(committed)
+    assert len(set(committed)) > 1
 
 
 def _now_text() -> str:
@@ -2133,3 +2245,74 @@ def test_the_snapshot_is_recorded_from_the_moment_the_package_is_declared(
     _import(target, package)
 
     assert seen and seen[0].get("package_created_at") == _manifest(package)["created_at"]
+
+
+# --------------------------------------- the ordering check under the lock
+
+
+def _interleave_at_preflight(monkeypatch, run) -> None:
+    """Let another importer finish between this run's preflight and its claim.
+
+    Preflight reads a snapshot taken before the declaration lock exists, so
+    that window is real; simulating it here is how the lock-held re-check gets
+    a test at all."""
+    from app.migration.sync import import_ as module
+
+    real = module._preflight
+    state = {"interleaved": False}
+
+    def preflight_then_interleave(backend, conn, context):
+        outcome = real(backend, conn, context)
+        if not state["interleaved"]:
+            # Once: the interleaved import runs through this same seam.
+            state["interleaved"] = True
+            run()
+        return outcome
+
+    monkeypatch.setattr(module, "_preflight", preflight_then_interleave)
+
+
+def test_a_newer_package_finishing_during_preflight_blocks_the_declaration(
+    source, target, tmp_path, monkeypatch
+):
+    """The ordering rules only mean anything if they hold at the moment the
+    package is declared. Checking once, outside the lock, admits exactly the
+    package the rules exist to keep out."""
+    older = _export(source, tmp_path / "out1")
+    newer = _export(source, tmp_path / "out2")
+    _interleave_at_preflight(monkeypatch, lambda: _import(target, newer))
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, older)
+
+    message = str(failure.value)
+    assert _manifest(newer)["package_id"] in message
+    assert "roll the mirror back" in message
+    assert _sync_import_row(target, _manifest(older)["package_id"]) is None
+
+
+def test_this_package_finishing_during_preflight_is_simply_already_applied(
+    source, target, package, monkeypatch
+):
+    """The same window, with the other importer applying THIS package. There
+    is nothing to claim, nothing to resume and nothing to refuse -- and the
+    short-circuit must not depend on anyone passing --resume."""
+    from app.migration.sync import import_ as module
+
+    real = module._preflight
+    state = {"done": False}
+
+    def preflight_then_interleave(backend, conn, context):
+        outcome = real(backend, conn, context)
+        if not state["done"]:
+            state["done"] = True
+            _import(target, package)
+        return outcome
+
+    monkeypatch.setattr(module, "_preflight", preflight_then_interleave)
+    report = _import(target, package)
+
+    assert report.already_applied
+    assert report.tables == {}
+    assert _sync_import_row(target, report.package_id)["status"] == "done"
+    assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 1

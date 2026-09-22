@@ -667,6 +667,14 @@ is still the latest one for its `source_env`; a `failed` package that has since 
 `superseded` by a newer export cannot be resumed (see the `status` value domain below) — export
 and import a fresh package instead.
 
+`--take-over` explicitly claims a `sync_imports` row that is still `running`, for when the
+process that opened it is actually dead (crashed host, killed process) rather than merely slow.
+There is no automatic time-based takeover — use it only after confirming the row is dead: run
+`sync status` and check that row's heartbeat (`心跳:` in the human summary, `report_json.
+heartbeat_at` in `--json`), which import_package refreshes on every table it commits. A `-`
+heartbeat means the row was claimed but never got past its first commit. Taking over a row that
+is not actually dead risks two processes writing the same package concurrently.
+
 A failed precondition prints the reason and exits 2 without writing anything: schema pair
 mismatch, `EMBED_RUNTIME_DIM` mismatch, a checksum failure, or — the actual target-collision
 check — **the package carries a notebook id that already exists on the target and that
@@ -691,8 +699,11 @@ against whichever backend `DATABASE_URL` currently selects. `sync_imports.status
 failed and was then replaced by a newer, already-applied package from the same `source_env`
 (its `sync_import_progress` rows are cleared and it can no longer be `--resume`d); the
 human-readable summary appends "（被 `<package_id>` 取代）" ("superseded by `<package_id>`") for
-those rows, reading it from `report_json.superseded_by`. `--json` carries `status` (and
-`report_json`, `superseded_by` included) unchanged from the row.
+those rows, reading it from `report_json.superseded_by`. For a `running` row the summary instead
+appends "，心跳: `<heartbeat_at>`" (or `-` before the first commit) from `report_json.
+heartbeat_at` — this is the evidence to check before deciding whether `--take-over` is safe.
+`--json` carries `status` and the full `report_json` (including `superseded_by`/`heartbeat_at`
+when present) unchanged from the row.
 
 Every subcommand exits 2 on any failure (one line on stderr, no traceback) and 0 on success,
 including `already_applied`. `--json` prints the underlying export/import report or status

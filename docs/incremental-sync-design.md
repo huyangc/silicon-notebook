@@ -284,8 +284,10 @@ sync status [--json]      # 本库的导出水位（每个目标环境）与已�
 1. 预检：schema pair 相等、`EMBED_RUNTIME_DIM` 相等、包校验和通过、源环境标识与已有
    镜像一致（包里每个笔记本若在目标端已存在，其 `sync_origin` 必须等于源环境标识；本地库或
    来自别的源环境的镜像都拒绝并点名）。**不按名字查重**：笔记本名本来就不唯一。同一
-   `source_env` 已有 running 的导入则拒绝；同一个包续跑必须显式 `--resume`，running 行超过
-   6 小时视为陈旧可接管。包的新旧按 `manifest.created_at`（PR-3 起叠加 to_seq）：比同
+   `source_env` 已有 running 的导入则拒绝，错误里带对方的 `heartbeat_at`（每表提交刷新）；
+   只有操作者确认对方进程已死后显式 `--take-over` 才接管，不按运行时长推断。同一个包续跑
+   必须显式 `--resume`。FAIL 策略的用户引用（notebooks.created_by、memory_items.created_by）
+   在预检里就校验，dry-run 同样硬失败，绝不在删除相位之后才发现。包的新旧按 `manifest.created_at`（PR-3 起叠加 to_seq）：比同
    `source_env` 最近一次 done 的包更旧的包拒绝导入（不能让目标端倒退）；声明一个更新的包时，
    同源 `failed` 且带进度的旧包被标成 `superseded` 并清掉进度行，之后不能再 `--resume`，
    避免旧进度与新快照拼成混合状态。`sync_imports.status` 值域：running / done / failed /

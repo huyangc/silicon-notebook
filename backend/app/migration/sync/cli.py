@@ -151,6 +151,7 @@ def _cmd_import(args: argparse.Namespace, settings: Settings) -> int:
             importer_user_id=args.importer_user,
             resume=args.resume,
             verify_files=args.verify_files,
+            take_over=args.take_over,
         )
     except SyncImportError as exc:
         print(f"sync import: {exc}", file=sys.stderr)
@@ -301,15 +302,18 @@ def _cmd_status(args: argparse.Namespace, settings: Settings) -> int:
         print("  （无）")
     for row in state["imports"]:
         finished_at = row["finished_at"] if row["finished_at"] is not None else "-"
-        superseded = ""
+        suffix = ""
         if row["status"] == "superseded":
             superseded_by = row["report_json"].get("superseded_by")
             if superseded_by:
-                superseded = f"（被 {superseded_by} 取代）"
+                suffix = f"（被 {superseded_by} 取代）"
+        elif row["status"] == "running":
+            heartbeat_at = row["report_json"].get("heartbeat_at") or "-"
+            suffix = f"，心跳: {heartbeat_at}"
         print(
             f"  {row['package_id']} 来自 {row['source_env']}：{row['status']}，"
             f"{row['notebooks']} 个笔记本，开始于 {row['started_at']}，"
-            f"结束于 {finished_at}{superseded}"
+            f"结束于 {finished_at}{suffix}"
         )
     return 0
 
@@ -370,6 +374,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="verify_files",
         help="导入每个文件时二次校验 sha256，而不是只信任包的 checksums.json",
+    )
+    import_parser.add_argument(
+        "--take-over",
+        action="store_true",
+        dest="take_over",
+        help="显式接管同一 source_env 一个仍是 running 的导入；仅当已经确认那个"
+        "进程真的死了才用——用 `sync status` 看该行的心跳（heartbeat_at）判断，"
+        "不要凭经过的时间猜测",
     )
     import_parser.add_argument("--json", action="store_true", dest="as_json")
     import_parser.set_defaults(handler=_cmd_import)
