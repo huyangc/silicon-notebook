@@ -1,23 +1,29 @@
 """Operator CLI for cross-environment notebook sync
 (docs/incremental-sync-design.md §8).
 
-Four subcommand groups:
+Five subcommand groups:
 
 - ``export`` calls :func:`app.migration.sync.export.export_notebooks`.
 - ``import`` calls :func:`app.migration.sync.import_.import_package`.
 - ``status`` reads the adapter-internal bookkeeping tables
   (``sync_export_state``, ``sync_imports``) those two engines maintain, plus
-  the capture section below.
+  the capture section below -- through :class:`app.migration.sync.database._Source`,
+  same as every other subcommand in this module. It used to hand-roll its own
+  third PostgreSQL/SQLite branch instead (a debt docs/incremental-sync-design.md
+  §11 tracked); that branch is gone as of this module version.
 - ``capture enable|disable|status`` reads and writes ``sync_capture_control``/
-  ``sync_change_log`` directly, through :class:`app.migration.sync.export._Source`
-  for backend dispatch -- this is the one piece of sync logic that lives in
+  ``sync_change_log`` directly, through :class:`app.migration.sync.database._Source`
+  for backend dispatch -- this is one of the two pieces of sync logic that live in
   this module rather than being a thin wrapper over ``export.py``/
   ``import_.py``: ``enable``/``disable``'s transaction (the gate flip, and
   the idempotent-vs-first-time clearing of ``sync_export_state``/
   ``sync_change_log``) is implemented here (see ``_capture_enable``/
   ``_capture_disable``), because neither engine owns the capture control
-  tables. Everything else in this module stays argument parsing, exit codes,
-  and human/JSON report rendering only.
+  tables.
+- ``prune-log`` (see ``_prune_log``) is the other piece implemented directly
+  here, for the same reason: log retention is not owned by ``export.py`` or
+  ``import_.py`` either. Everything else in this module stays argument
+  parsing, exit codes, and human/JSON report rendering only.
 """
 
 from __future__ import annotations
@@ -27,16 +33,14 @@ import dataclasses
 import json
 import os
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from app.core.config import Settings
-from app.core.database_url import database_identity
 from app.migration.sync.database import SyncExportError, _Source
 from app.migration.sync.export import ExportReport, export_notebooks
 from app.migration.sync.import_ import SyncImportError, _moment, import_package
-from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.sqlite.database import SqliteDatabase
 
 ROOT_DIR = Path(__file__).resolve().parents[4]
@@ -118,6 +122,15 @@ def _export_report_as_json(report: ExportReport) -> dict[str, Any]:
         "bytes_written": report.bytes_written,
         "mode": report.mode,
         "captured_through_seq": report.captured_through_seq,
+        "from_seq": report.from_seq,
+        "to_seq": report.to_seq,
+        "base_package_id": report.base_package_id,
+        "scoped": report.scoped,
+        "watermark_advanced": report.watermark_advanced,
+        "deletes": report.deletes,
+        "deleted_notebooks": list(report.deleted_notebooks),
+        "skipped_mirror_changes": report.skipped_mirror_changes,
+        "empty": report.empty,
         "warnings": list(report.warnings),
         "missing_files": list(report.missing_files),
     }
@@ -142,6 +155,7 @@ def _cmd_export(args: argparse.Namespace, settings: Settings) -> int:
             out_dir=Path(args.out),
             notebook_ids=tuple(args.notebook) if args.notebook else None,
             source_env=source_env,
+            full=args.full,
         )
     except SyncExportError as exc:
         print(f"sync export: {exc}", file=sys.stderr)
@@ -152,8 +166,25 @@ def _cmd_export(args: argparse.Namespace, settings: Settings) -> int:
     print(f"导出包: {report.package_dir}")
     print(f"包 id: {report.package_id}")
     print(f"模式: {report.mode}")
+    print(f"序号区间: from_seq={report.from_seq}, to_seq={report.to_seq}")
+    if report.base_package_id:
+        print(f"续接自包: {report.base_package_id}")
     print(f"本次快照捕获到的变更日志水位: seq={report.captured_through_seq}")
+    if report.scoped:
+        print("范围: 按 --notebook 限定，本次未推进水位")
+    elif not report.watermark_advanced:
+        print("水位未推进")
+    if report.empty:
+        print("窗口为空，仍产出空增量包；水位已推进。")
     print(f"笔记本: {len(report.notebooks)} 个")
+    if report.deleted_notebooks:
+        print(f"已删除的笔记本: {len(report.deleted_notebooks)} 个")
+        for notebook_id in report.deleted_notebooks:
+            print(f"  {notebook_id}")
+    if report.deletes:
+        print(f"删除行数: {report.deletes}")
+    if report.skipped_mirror_changes:
+        print(f"跳过的镜像笔记本变更: {report.skipped_mirror_changes} 条")
     if report.skipped:
         print(f"跳过的笔记本: {len(report.skipped)} 个")
         for notebook_id, reason in sorted(report.skipped.items()):
@@ -261,55 +292,40 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
     """Read ``sync_export_state``/``sync_imports`` on whichever backend
     ``settings.database_url`` names.
 
-    Every statement issued here is a plain ``SELECT`` -- nothing is written --
-    but, unlike ``export.py``'s ``_Source.read()``, the connection is not
-    opened inside an explicit ``READ ONLY`` transaction: this is a short
-    status query against adapter-internal bookkeeping tables, not part of
-    either sync engine's own read/write contract, so it does not need that
-    engine's consistent-snapshot guarantee.
-
-    The change-log triggers landed in PR-3a (``app.migration.sync.capture``);
-    reading the log itself for an incremental export is PR-3b. This function
-    still hand-rolls its own PostgreSQL/SQLite branch rather than going
-    through ``_Source`` -- unlike ``_load_capture_status`` below, which does
-    -- a known duplication tracked as a TODO in docs/incremental-sync-design.md
-    §11, not fixed here to keep this change scoped to what it was asked to
-    do.
+    Every statement issued here is a plain ``SELECT`` -- nothing is written.
+    Goes through :class:`app.migration.sync.database._Source`, the same
+    facade ``_load_capture_status`` below uses: this function used to
+    hand-roll its own third PostgreSQL/SQLite branch instead, a duplication
+    docs/incremental-sync-design.md §11 tracked as a TODO for this PR to fix,
+    which is what this version does. ``source.read()`` opens PostgreSQL's
+    ``REPEATABLE READ, READ ONLY`` / SQLite's deferred ``BEGIN`` the same way
+    ``_load_capture_status`` does; a short read-only status query does not
+    need that consistency any more than the capture section already sitting
+    next to it does, so there is no reason for the two to differ.
     """
-    is_postgres = database_identity(settings.database_url).scheme == "postgresql"
     exports_sql = (
-        "SELECT target_env, exported_through_seq, exported_at, package_id "
-        "FROM sync_export_state ORDER BY target_env"
+        "SELECT target_env, exported_through_seq, exported_at, package_id, "
+        "captured, exported_snapshot FROM sync_export_state ORDER BY target_env"
     )
     imports_sql = (
         "SELECT package_id, source_env, status, started_at, finished_at, "
         "report_json FROM sync_imports ORDER BY started_at DESC"
     )
-
-    def _read(conn: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        missing = _missing_sync_tables(conn, is_postgres=is_postgres)
-        if missing:
-            raise SyncStatusError(
-                "本环境尚未迁移到 v83/0063（缺表: " + "、".join(sorted(missing)) + "）；"
-                "先启动一次后端完成 schema 迁移，或手动执行相应迁移脚本，再重试。"
-            )
-        exports = [dict(row) for row in conn.execute(exports_sql).fetchall()]
-        imports = [dict(row) for row in conn.execute(imports_sql).fetchall()]
-        return exports, imports
-
-    if is_postgres:
-        database: Any = PostgresDatabase(settings, ROOT_DIR)
-        try:
-            with database.connect() as conn:
-                exports, imports = _read(conn)
-        finally:
-            database.close()
-    else:
-        database = SqliteDatabase(settings, ROOT_DIR)
-        try:
-            exports, imports = _read(database.connect())
-        finally:
-            database.close()
+    source = _Source(settings, ROOT_DIR)
+    try:
+        with source.read() as conn:
+            missing = _missing_sync_tables(conn, is_postgres=source.is_postgres)
+            if missing:
+                raise SyncStatusError(
+                    "本环境尚未迁移到 v83/0063（缺表: " + "、".join(sorted(missing)) + "）；"
+                    "先启动一次后端完成 schema 迁移，或手动执行相应迁移脚本，再重试。"
+                )
+            exports = source.fetch(conn, exports_sql)
+            imports = source.fetch(conn, imports_sql)
+    finally:
+        source.close()
+    for row in exports:
+        row["captured"] = bool(row["captured"])
     for row in imports:
         report = row.get("report_json")
         if isinstance(report, str):
@@ -338,9 +354,15 @@ def _cmd_status(args: argparse.Namespace, settings: Settings) -> int:
     if not state["exports"]:
         print("  （无）")
     for row in state["exports"]:
+        snapshot_note = ""
+        if row["exported_snapshot"]:
+            xmin = _Source.snapshot_xmin(str(row["exported_snapshot"]))
+            snapshot_note = f"，snapshot xmin={xmin}"
+        captured_note = "true" if row["captured"] else "false"
         print(
             f"  -> {row['target_env']}: seq={row['exported_through_seq']} "
-            f"于 {row['exported_at']}（包 {row['package_id']}）"
+            f"于 {row['exported_at']}（包 {row['package_id']}，captured="
+            f"{captured_note}{snapshot_note}）"
         )
     print("已引入的包（本环境作为目标）：")
     if not state["imports"]:
@@ -818,6 +840,178 @@ def _cmd_capture_status(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- prune-log
+
+
+class SyncPruneError(RuntimeError):
+    """``sync prune-log`` refused to run.
+
+    Distinct from :class:`SyncCaptureError` (missing v84/0064 tables, the
+    same diagnosis every other capture-touching command gives) and from a
+    plain "nothing to do": this is the retention rule itself refusing,
+    because no target's watermark has ``captured = 1`` at all (see
+    ``_prune_log_bounds``), or because a ``captured = 1`` watermark carries
+    no ``exported_snapshot`` on PostgreSQL, which should never happen and
+    would make the txid bound below unsafe to compute if it were tolerated.
+    """
+
+
+def _prune_log_bounds(source: _Source, conn: Any) -> tuple[int, int | None]:
+    """``(min_seq, min_xmin)`` -- the two upper bounds ``_prune_log``'s
+    ``DELETE``/``COUNT`` predicate is built from
+    (docs/incremental-sync-design.md §7 "保留策略").
+
+    Both are taken **only** over ``sync_export_state`` rows with
+    ``captured = 1``: a target that has never exported, or whose latest
+    export fell back to full with the capture gate off, has no change-log
+    window behind its watermark at all and simply abstains from voting on
+    either bound -- it must not drag ``min_seq`` down to some earlier,
+    unrelated number and block pruning for every target that DOES have a
+    safe bound (that would be the bug: one stale/never-exported target
+    holding retention hostage for the entire log).
+
+    ``min_xmin`` is ``None`` on SQLite -- there is no PostgreSQL compensation
+    window to bound there (``sync_change_log.txid`` is NULL on every row; see
+    docs/incremental-sync-design.md §7 "导出水位"). Raises
+    :class:`SyncPruneError` when NOT A SINGLE target has a ``captured = 1``
+    watermark: that is the one case with no safe upper bound to compute from
+    anything, as opposed to some targets abstaining while others still
+    supply a bound.
+    """
+    rows = source.fetch(
+        conn,
+        source.sql(
+            "SELECT exported_through_seq, exported_snapshot FROM sync_export_state "
+            "WHERE captured = ?"
+        ),
+        (True,),
+    )
+    if not rows:
+        raise SyncPruneError(
+            "没有任何目标环境的导出水位带 captured=1：没有任何日志行有安全的删除"
+            "上限可言——不是某个目标环境的上限不明确，而是根本没有可以依据的水位。"
+            "先在变更捕获开着的前提下对至少一个目标环境跑一次导出，建立一个"
+            "captured=1 的水位，再重试。"
+        )
+    min_seq = min(int(row["exported_through_seq"]) for row in rows)
+    if not source.is_postgres:
+        return min_seq, None
+    missing_snapshot = [row for row in rows if not row["exported_snapshot"]]
+    if missing_snapshot:
+        raise SyncPruneError(
+            "sync_export_state 中存在 captured=1 但 exported_snapshot 为空的水位行"
+            "（数据不一致，不应该出现）：拒绝在不完整的快照信息上做保留判定。"
+        )
+    min_xmin = min(
+        _Source.snapshot_xmin(str(row["exported_snapshot"])) for row in rows
+    )
+    return min_seq, min_xmin
+
+
+def _prune_log_clause(
+    source: _Source, min_seq: int, min_xmin: int | None, threshold: Any
+) -> tuple[str, list[Any]]:
+    """The shared ``WHERE`` clause and its bind params for both the
+    ``--dry-run`` ``COUNT`` and the real ``DELETE``, so the two can never
+    drift apart into counting one thing and deleting another.
+
+    The ``txid`` condition is included only on PostgreSQL: ``sync_change_log
+    .txid`` is NULL on every SQLite row, and SQL's ``NULL < x`` is never
+    true, so a ``txid < ?`` clause included unconditionally would silently
+    refuse to delete anything on SQLite rather than doing what the seq/
+    changed_at conditions alone already correctly decide there.
+    """
+    parts = ["seq <= ?"]
+    params: list[Any] = [min_seq]
+    if source.is_postgres:
+        parts.append("txid < ?")
+        params.append(min_xmin)
+    parts.append("changed_at < ?")
+    params.append(threshold)
+    return " AND ".join(parts), params
+
+
+def _prune_log(
+    source: _Source, *, keep_days: int, dry_run: bool
+) -> dict[str, Any]:
+    """Delete (or, with ``dry_run``, count) ``sync_change_log`` rows no
+    future export could still need (docs/incremental-sync-design.md §7
+    "保留策略").
+
+    One transaction either way: the watermark bounds are read and acted on
+    (deleted, or counted) inside the SAME transaction, so a concurrent
+    export that advances a watermark mid-run cannot leave this command
+    computing a bound from a state that no longer holds by the time it acts.
+    ``--dry-run`` uses ``source.read()`` (a consistent snapshot, nothing
+    written); a real run uses ``source.write()`` with
+    ``SqliteDatabase.begin_immediate`` first on SQLite, the same convention
+    ``_capture_enable``/``_capture_disable`` use for a guarded write.
+    """
+    threshold = _moment(
+        source, datetime.now(timezone.utc) - timedelta(days=keep_days)
+    )
+    if dry_run:
+        with source.read() as conn:
+            _require_capture_tables(source, conn)
+            min_seq, min_xmin = _prune_log_bounds(source, conn)
+            clause, params = _prune_log_clause(source, min_seq, min_xmin, threshold)
+            count = source.fetch(
+                conn,
+                source.sql(f"SELECT COUNT(*) AS n FROM sync_change_log WHERE {clause}"),
+                params,
+            )[0]["n"]
+        return {
+            "dry_run": True,
+            "deleted": 0,
+            "would_delete": int(count),
+            "keep_days": keep_days,
+            "min_seq": min_seq,
+            "min_txid": min_xmin,
+        }
+
+    with source.write() as conn:
+        if not source.is_postgres:
+            SqliteDatabase.begin_immediate(conn)
+        _require_capture_tables(source, conn)
+        min_seq, min_xmin = _prune_log_bounds(source, conn)
+        clause, params = _prune_log_clause(source, min_seq, min_xmin, threshold)
+        cursor = conn.execute(
+            source.sql(f"DELETE FROM sync_change_log WHERE {clause}"), tuple(params)
+        )
+        deleted = cursor.rowcount
+    return {
+        "dry_run": False,
+        "deleted": int(deleted),
+        "would_delete": 0,
+        "keep_days": keep_days,
+        "min_seq": min_seq,
+        "min_txid": min_xmin,
+    }
+
+
+def _cmd_prune_log(args: argparse.Namespace, settings: Settings) -> int:
+    source = _Source(settings, ROOT_DIR)
+    try:
+        result = _prune_log(source, keep_days=args.keep_days, dry_run=args.dry_run)
+    except (SyncCaptureError, SyncPruneError) as exc:
+        print(f"sync prune-log: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        source.close()
+    if args.as_json:
+        _print_json(result)
+        return 0
+    if result["dry_run"]:
+        print(f"预检（--dry-run）：会删除 {result['would_delete']} 行，不会真的删除。")
+    else:
+        print(f"已删除 {result['deleted']} 行。")
+    bound_note = f"seq<={result['min_seq']}"
+    if result["min_txid"] is not None:
+        bound_note += f"，txid<{result['min_txid']}"
+    print(f"保留天数: {result['keep_days']} 天；删除上限: {bound_note}")
+    return 0
+
+
 # --------------------------------------------------------------------- CLI
 
 
@@ -842,6 +1036,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--source-env",
         default=None,
         help="源环境标识；省略则取 SILICON_NOTEBOOK_SYNC_ENV",
+    )
+    export_parser.add_argument(
+        "--full",
+        action="store_true",
+        help="强制全量导出，即使该 target 有可用的增量水位；仍会正常推进水位"
+        "（与 --notebook 同时给出时，--notebook 的规则优先：永不推进水位）",
     )
     export_parser.add_argument("--json", action="store_true", dest="as_json")
     export_parser.set_defaults(handler=_cmd_export)
@@ -931,6 +1131,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="按 COUNT(*) 精确计数，而不是默认的近似值（会全表扫描，大库慎用）",
     )
     capture_status_parser.set_defaults(handler=_cmd_capture_status)
+
+    prune_log_parser = subparsers.add_parser(
+        "prune-log",
+        help="清理不再被任何目标环境的 captured 水位需要的变更日志行"
+        "（docs/incremental-sync-design.md §7「保留策略」）",
+    )
+    prune_log_parser.add_argument(
+        "--keep-days",
+        type=int,
+        default=30,
+        help="早于此天数（按 changed_at）的日志行才会被删除，默认 30",
+    )
+    prune_log_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只报告会删除多少行，不真的删除",
+    )
+    prune_log_parser.add_argument("--json", action="store_true", dest="as_json")
+    prune_log_parser.set_defaults(handler=_cmd_prune_log)
 
     return parser
 
