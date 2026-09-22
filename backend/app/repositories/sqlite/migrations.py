@@ -4621,14 +4621,18 @@ class SqliteMigrator:
         forever. On SQLite the column stays NULL -- one writer at a time means
         ``seq`` order and commit order are the same and no such gap exists.
 
-        ``idx_sync_change_log_txid`` serves exactly that compensation pass: it
-        turns ``txid >= pg_snapshot_xmin(previous snapshot)`` into a range
-        scan over a small tail of the log rather than a walk of the whole
-        table. SQLite leaves ``txid`` NULL on every row, so the index is inert
-        there; it is created anyway to keep the two backends' catalogs
-        symmetric (the snapshot verifier and the PostgreSQL catalog guard both
-        compare index sets, and a backend-conditional index would have to be
-        special-cased in both).
+        ``idx_sync_change_log_txid`` serves exactly that compensation pass,
+        whose predicate is ``seq <= watermark AND txid >= xmin`` -- two
+        ranges, in opposite directions, neither of them an equality prefix for
+        the other. ``txid`` leads because it is the selective half; ``seq``
+        is a second KEY column so the other half is evaluated inside the index
+        scan instead of after a heap fetch per candidate row. The index is
+        PARTIAL on ``txid IS NOT NULL``: SQLite writes NULL into that column
+        on every row, so here the index stays empty and costs no B-tree insert
+        per captured write, while on PostgreSQL every row qualifies and
+        ``txid >= x`` implies the predicate. Created on both backends all the
+        same -- one catalog shape, nothing for the snapshot verifier or the
+        PostgreSQL catalog guard to special-case.
 
         No new table and no backfill: both columns' defaults ARE the correct
         value for every pre-existing row.
@@ -4642,7 +4646,8 @@ class SqliteMigrator:
             )
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sync_change_log_txid\n"
-                "                    ON sync_change_log(txid)"
+                "                    ON sync_change_log(txid, seq)\n"
+                "                    WHERE txid IS NOT NULL"
             )
 
     def _seed(self) -> None:

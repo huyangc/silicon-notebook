@@ -1901,7 +1901,7 @@
       },
       {
         "name": "idx_sync_change_log_txid",
-        "sql_sha256": "37ffe67e5063f4098c465138a554aa58da94044f6030312515456ba39fd9f13c",
+        "sql_sha256": "cb399db4c5b9fd6188b7a0710f8bb7f08edf35d15042681a0957d27202e96775",
         "type": "index"
       },
       {

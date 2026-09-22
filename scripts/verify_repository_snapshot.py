@@ -4881,9 +4881,11 @@ MIGRATION_MANIFEST[(83, 84)] = {
 # 0065_sync_export_snapshot.sql). Two columns appended to sync_export_state --
 # captured (was the capture gate open when this watermark was written) and
 # exported_snapshot (that export's pg_current_snapshot()::text, always NULL on
-# SQLite) -- plus one non-unique index on sync_change_log(txid). No table,
-# trigger or view, and no backfill: both defaults are already the right value
-# for every pre-existing watermark row.
+# SQLite) -- plus one non-unique PARTIAL index on sync_change_log(txid, seq)
+# WHERE txid IS NOT NULL, which on SQLite is an index over nothing (txid is
+# NULL on every row this backend writes) and therefore also stays empty. No
+# table, trigger or view, and no backfill: both defaults are already the right
+# value for every pre-existing watermark row.
 SYNC_EXPORT_SNAPSHOT_COLUMNS = {
     "sync_export_state": {
         "captured": ("captured", "INTEGER", 1, "0", 0),
@@ -4893,7 +4895,8 @@ SYNC_EXPORT_SNAPSHOT_COLUMNS = {
 SYNC_EXPORT_SNAPSHOT_INDEXES = {
     "idx_sync_change_log_txid": (
         "CREATE INDEX idx_sync_change_log_txid\n"
-        "                    ON sync_change_log(txid)"
+        "                    ON sync_change_log(txid, seq)\n"
+        "                    WHERE txid IS NOT NULL"
     ),
 }
 # The CREATE TABLE text SQLite stores after the two appends, spelled out the

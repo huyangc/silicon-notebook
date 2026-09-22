@@ -733,11 +733,21 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert exported_snapshot["column_default"] is None
     assert exported_snapshot["collation_name"] == "C"
     assert txid_index is not None
-    assert list(txid_index["columns"]) == ["txid"]
+    # Both key columns, txid leading: the compensation window is
+    # "seq <= watermark AND txid >= xmin", two ranges in opposite directions
+    # with no equality prefix between them. txid leads because it is the
+    # selective half; seq is in the index so its half is applied during the
+    # index scan instead of after a heap fetch per candidate row.
+    assert list(txid_index["columns"]) == ["txid", "seq"]
     assert txid_index["indisunique"] is False
     assert txid_index["amname"] == "btree"
-    # Total, not partial: the compensation pass bounds itself by txid alone.
-    assert txid_index["predicate"] is None
+    # Partial, and that is what keeps one catalog shape usable on both
+    # backends: SQLite writes NULL into txid on every row, so there the index
+    # holds nothing and costs no B-tree insert per captured write. Here every
+    # row qualifies, and the planner derives the predicate from "txid >= x"
+    # (a strict operator clause implies IS NOT NULL), so the compensation scan
+    # can still use it.
+    assert txid_index["predicate"] == "txid IS NOT NULL"
     assert ledger_versions == [
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
         22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
