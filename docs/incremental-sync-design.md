@@ -197,8 +197,10 @@ users 不同步但导入时可能**创建**：见 §4。
   导入前置检查读两端配置并比对，不一致硬失败。
 - KG 按笔记本以 `(kg_reset_epoch, kg_mutation_seq)` 做版本：epoch 变了，导入对该笔记本执行
   「整体替换」（先按 `delete_notebook_graph_rows` 的表集清空，再整批插入）；epoch 没变，
-  按变更日志增量 upsert/删除。`unified_kg_state` 行原样搬运，目标端进程内 memo 的 key 折进
-  了 seq/epoch，会自动失效。
+  按变更日志增量 upsert/删除。`unified_kg_state` 行搬运时 `kg_mutation_seq` 不原样写，而是
+  `max(目标端现值, 包内值) + 1`：目标端与源端各自变更可能凑出相同的版本元组，只有让每次导入
+  严格推进目标端的 seq，服务进程里按 `graph_seq_row` 版本校验的 unified 图缓存才必然失效，
+  且 seq 永不倒退；其余列（kg_reset_epoch 等）原样搬。
 - 人工审核字段（knowledge_objects 的 status/owner/last_reviewed）随行同步；目标端不允许
   改（§5）。
 - `kg_index`/`kg_viz`/`kg_index_partitions` 不拷贝，目标端按现有 scale build 流程重建；
@@ -301,7 +303,9 @@ sync status [--json]      # 本库的导出水位（每个目标环境）与已�
    `source_env` 已有 running 的导入则拒绝，错误里带对方的 `heartbeat_at`（每表提交刷新）；
    只有操作者确认对方进程已死后显式 `--take-over` 才接管，不按运行时长推断。同一个包续跑
    必须显式 `--resume`。FAIL 策略的用户引用（notebooks.created_by、memory_items.created_by）
-   在预检里就校验，dry-run 同样硬失败，绝不在删除相位之后才发现。包的新旧按 `manifest.created_at`（PR-3 起叠加 to_seq）：比同
+   在预检里就校验，dry-run 同样硬失败，绝不在删除相位之后才发现。声明事务里除了预留笔记本行，
+   还写一条 `__reserved__` 进度行：预留后、任何表处理前失败的包也算「有未完成工作」，同源更新
+   的包必须覆盖它的笔记本才能取代它。包的新旧按 `manifest.created_at`（PR-3 起叠加 to_seq）：比同
    `source_env` 最近一次 done 的包更旧的包拒绝导入（不能让目标端倒退）；声明一个更新的包时，
    同源 `failed` 且带进度的旧包被标成 `superseded` 并清掉进度行，之后不能再 `--resume`，
    避免旧进度与新快照拼成混合状态。`sync_imports.status` 值域：running / done / failed /

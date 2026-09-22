@@ -199,7 +199,19 @@ class TableSyncSpec:
 
 _SYNCED: tuple[TableSyncSpec, ...] = (
     # 笔记本本体
-    TableSyncSpec("unified_kg_state", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec(
+        "unified_kg_state",
+        SyncClass.SYNCED,
+        notes=(
+            "kg_mutation_seq 不按普通列原样搬：它是 knowledge_lifecycle.py "
+            "_unified_graph_version 缓存版本四元组的一支，原样搬会让目标端凑出"
+            "一个自己缓存过的版本、旧图永远命中缓存（codex #772 round 17 "
+            "P1）。import_.py::_upsert_statement 对这一列特例：目标端严格推进"
+            "到 max(现值, 包内值)+1（首插时是 包内值+1），永不倒退、永不原样"
+            "覆盖。同表其它列（含 kg_reset_epoch）仍原样搬。"
+        ),
+        scope=_NOTEBOOK_SCOPE,
+    ),
     # 材料
     TableSyncSpec(
         "source_elements",
