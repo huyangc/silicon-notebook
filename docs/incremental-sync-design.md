@@ -218,9 +218,10 @@ users 不同步但导入时可能**创建**：见 §4。
 ## 7. 源端变更捕获
 
 状态：schema、触发器与开关已实现（PR-3a，`app.migration.sync.capture`/`capture_contract`，
-SQLite v84 / PostgreSQL 0064）；按日志读增量、压缩、`deletes` 重放已实现（PR-3b，
-SQLite v85 / PostgreSQL 0065）；`kg_epoch` 折叠延后，本 PR 的 `kg_epochs.jsonl` 仍是空文件
-（见下「压缩」与 §11）。
+SQLite v84 / PostgreSQL 0064）；导出端（按日志读窗口、压缩、产出 `deletes.jsonl`）由 PR-3b
+实现（SQLite v85 / PostgreSQL 0065，进行中，见 §10）；`deletes.jsonl` 的重放是导入端的工作，
+留给 PR-3c。`kg_epoch` 折叠延后，本 PR 的 `kg_epochs.jsonl` 仍是空文件（见下「压缩」与
+§11）。
 
 ### 控制行门
 
@@ -385,11 +386,20 @@ SQLite 的相对开销比 PostgreSQL 明显：SQLite 基线本身极快（进程
      「上次快照建立时仍在途、之后才提交」的事务写下的日志行：它们的 `seq` 比 W 还小（发号
      早于上次导出结束），但上次导出的快照看不见它们，这次的主窗口（`seq > W`）也不会再覆盖
      它们——不补这一步就会永久漏掉（原理见上面「`txid`」一节：`MAX(seq)` 不是安全的续跑点）。
-     靠新索引 `idx_sync_change_log_txid(txid)`（v85/0065）做范围扫描。这一步的前提是
-     `sync_change_log.seq` 对应的序列（`sync_change_log_seq_seq`）是 `CACHE 1`（IDENTITY 列
-     默认值，未被手改过）：只有 `nextval` 全局按时间单调发放，「`seq` 更小的行即使晚提交，
-     其 `txid` 也不会比同一发号窗口内更大 `seq` 的行更靠后」这条关系才成立，缓存更大的序列
-     会打乱它。
+     靠新索引 `idx_sync_change_log_txid(txid, seq) WHERE txid IS NOT NULL`（v85/0065；复合
+     索引，不是单列索引——补偿查询是 `seq <= W AND txid >= xmin` 两个方向相反的范围条件，
+     只索引 `txid` 一列会让 `seq <= W` 这一半退化成回表逐行过滤，等于扫掉整段本该被 `seq`
+     剪掉的窗口；`WHERE txid IS NOT NULL` 是局部索引，在 SQLite 上 `txid` 恒 NULL，这个索引
+     恒为空，建索引与维护成本都是常数）做范围扫描。补偿窗口的正确性只靠
+     PostgreSQL 快照可见性本身：一行在 S_prev 快照里不可见，当且仅当写它的事务
+     `txid >= pg_snapshot_xmin(S_prev)`（这正是 MVCC 快照判定可见性的定义，
+     `pg_visible_in_snapshot`/`pg_snapshot_xmin` 只是把这条判据暴露成能查的 SQL），跟 `seq`
+     由哪种缓存策略的序列发放**无关**。`sync_change_log.seq` 对应的序列是 `CACHE 1`
+     （IDENTITY 列默认值，未被手改过）保证的是另一件更弱、也和正确性无关的事：`nextval`
+     按发放时间单调，让 `from_seq`/`to_seq`、包目录名、按 `seq` 排序的日志读起来对运维有
+     意义（缓存更大的序列会让并发连接成批预领号，`seq` 顺序与发放时间顺序脱节，运维看着
+     seq 区间会觉得和实际发生的时间对不上，但补偿窗口本身不会因此算错）。`CACHE 1` 是纵深
+     防御，不是补偿窗口正确性的前提。
   3. SQLite 不需要补偿窗口，也不用 `txid`（该列恒 NULL）：写者是单进程按业务写路径串行
      写（deferred BEGIN），没有多事务并发、没有 REPEATABLE READ 快照、也没有「已发号未提交」
      的窗口——`seq`（`AUTOINCREMENT`）在同一个写事务里分配并随事务一起提交，分配顺序与
@@ -423,25 +433,41 @@ SQLite 的相对开销比 PostgreSQL 明显：SQLite 基线本身极快（进程
   `ExportReport.skipped_mirror_changes`（镜像笔记本的内容来自另一个源端，把它身上的变更再
   导出回去没有意义，也不该反向污染别的同步链）。`notebooks` 表自己的 delete 日志 →
   `deleted_notebooks` 列表 + `deletes.jsonl` 一条；其子表的删除行仍照常各自导出，不因为父
-  笔记本已经不在就跳过。
+  笔记本已经不在就跳过。增量包为**每一个在本包里携带任何行**的笔记本补发一条 `notebooks`
+  行——从表里回读它当前的完整状态，即使 `notebooks` 表自己这次窗口内没有变化（例如只有一本
+  笔记本的 `chunks` 被改了，`notebooks` 行本身没动，也照样为它补发）。这保持了
+  `manifest.notebooks ⇔ rows/notebooks.jsonl`（§8「安全边界」）这条对全量包与增量包同样成立
+  的不变量：包里出现任何一行的笔记本，`rows/notebooks.jsonl` 里必须有它对应的一条。
+  `deleted_notebooks` 里的笔记本不补这条行——它们已经在源端不在了，没有「当前状态」可读。
 
 - **文件**：只复制本包 upsert 涉及的 `sources`/`notebook_assets` 行指向的文件，按 shadow
   manifest 的 `path_columns` 相对 storage 根落到 `files/notebooks|assets/<nb>/...`；被删行
   指向的文件本包不处理，由 PR-3c 在目标端按目标行路径删除。
 
-- **模式判定**（`sync export` 不需要用户区分全量与增量）：门开 且 该 `--target` 的水位行
-  存在 且 `captured = 1` 且没给 `--full`/`--notebook` ⇒ 增量；否则全量（全量导出同样写
-  `captured`（等于门当时是否开）、`exported_snapshot`、`to_seq = MAX(seq) 快照可见`）。
-  `--notebook` 与增量互斥：给了 `--notebook` 就强制全量。窗口为空也照常产出一个空增量包
-  （各 `rows/*.jsonl`/`deletes.jsonl`/`kg_epochs.jsonl` 都是空文件），水位仍然推进，报告标
+- **模式判定**（`sync export` 不需要用户区分全量与增量）：没给 `--notebook` 时，门开 且 该
+  `--target` 的水位行存在 且 `captured = 1` 且没给 `--full` ⇒ 增量；否则全量。两种情况都
+  推进该 target 的水位（全量导出同样写 `captured`（等于门当时是否开）、`exported_snapshot`、
+  `to_seq = MAX(seq) 快照可见`）——因为它们都覆盖了「此刻全部存活非镜像笔记本」，有资格代表
+  这个 target 已经完整看到了这里。窗口为空也照常产出一个空增量包（各
+  `rows/*.jsonl`/`deletes.jsonl`/`kg_epochs.jsonl` 都是空文件），水位仍然推进，报告标
   `empty`——保证导出链不断，目标端总能按 `base_package_id` 把连续的包接起来。
 
-- **保留策略**落地为 `sync prune-log [--keep-days N]`：候选日志行必须同时满足三个条件——
-  `seq` ≤ 全部 `captured = 1` 水位里最小的 `exported_through_seq`；PostgreSQL 上还要求
-  `txid < pg_snapshot_xmin(S)` 对全部 `captured = 1` 的 `exported_snapshot` 取最小；
-  `changed_at` 早于 `now() - N 天`。任一目标环境还没有 `captured = 1` 的水位（从未成功导出
-  过，或最近一次落到全量且门是关的）时整条命令拒绝并点名原因，不猜测上限——那种情况下任何
-  seq 边界都是虚假的安全感，清了可能让那个目标环境的下一次增量永久漏掉一段。
+  给了 `--notebook` 时（不论是否同时给 `--full`）：导出永远全量、且**永远不推进水位**——
+  manifest 写 `base_package_id=''`、`from_seq=to_seq=0`，该 target 在 `sync_export_state` 里
+  的行原样不动。这不是遗漏：`--notebook` 缩小的是笔记本子集，水位却是「这个 target 已经完整
+  看到过多远」的承诺；如果限定笔记本的导出也推进水位，日志里属于**没被选中的其它笔记本**、
+  发生在这次导出之前的变更就会永久落在下一次增量窗口（`seq > W`）之外——它们既不在这次的
+  子集包里，也再不会被任何一次增量窗口捕获到。只有覆盖当前全部存活非镜像笔记本的导出才配
+  推进水位。
+
+- **保留策略**落地为 `sync prune-log [--keep-days N]`（`N` 默认 30）：候选日志行必须同时满足
+  三个条件——`seq` ≤ 全部 `captured = 1` 水位里最小的 `exported_through_seq`；PostgreSQL 上还
+  要求 `txid < pg_snapshot_xmin(S)` 对全部 `captured = 1` 的 `exported_snapshot` 取最小；
+  `changed_at` 早于 `now() - N 天`。取最小值只看 `captured = 1` 的水位行：没有 `captured = 1`
+  水位的目标环境（从未成功导出过，或最近一次落到全量且门是关的）**不参与**这两次取最小值——
+  它对保留策略「弃权」，而不是把上限硬拖到 0 逼停清理。只有**一个 `captured = 1` 的水位都
+  不存在**时整条命令才拒绝并点名原因——这种情况下不是某个目标环境的上限不明确，而是根本没
+  有任何安全上限可以取，任何 seq 边界都是虚假的安全感。
 
 ### 升级窗口
 
@@ -462,6 +488,19 @@ v84/0064 迁移在**一个事务**里做完 schema 变更，其中两步在大�
   `ADD CONSTRAINT ... PRIMARY KEY` 改成 `... PRIMARY KEY USING INDEX <index_name>`——这是一条
   运维建议，本 PR 的迁移文件仍然是普通的 `ADD CONSTRAINT ... PRIMARY KEY`（`CREATE INDEX
   CONCURRENTLY` 不能出现在迁移的单一事务里，两者不能直接合并成同一条自动化路径）。
+
+v85/0065 迁移本身很轻（两条 `ADD COLUMN`），但只要这个部署**开过**变更捕获，它就有自己的
+锁顾虑：`CREATE INDEX idx_sync_change_log_txid ON sync_change_log (txid, seq) WHERE txid IS
+NOT NULL` 是普通（非 `CONCURRENTLY`）建索引，建完之前持有 `sync_change_log` 上的 SHARE 锁；
+门开着时全部 46 张
+同步表的每一次业务写都会经触发器往这张表写一行，这些写会排在建索引后面等。启动期迁移走
+应用自己的连接池，池的默认值（`POSTGRES_STATEMENT_TIMEOUT_SECONDS=30`、
+`POSTGRES_LOCK_TIMEOUT_SECONDS=5`，见 `docs/deployment-and-configuration.md`）是按请求路径
+上的查询定的，不是按建索引定的：日志表大到建索引跑得比这两个上限还久时，迁移会被掐断，
+服务启动失败，且只要底层原因没解决，每次重启都会复现同一个失败。运维步骤见
+`docs/operations.md`「变更捕获」一节：升级前先 `sync capture disable`（顺带清空
+`sync_change_log`，建在空表上的索引瞬间建完）→ 跑 v85/0065 迁移 → `sync capture enable` →
+下一次导出全量重建基线。只有从未开过捕获、或日志还很小的部署，才能不走这一套直接升级。
 
 ## 8. 导出包与导入相位
 
@@ -492,10 +531,14 @@ v85/0065 起，全量导出也在同一次读快照内记下 `exported_through_s
 增量导出是 `from_seq = W + 1`（W 是上次水位 `exported_through_seq`）、`to_seq` 等于本次
 `exported_through_seq`（快照可见的 `MAX(seq)`，不是窗口内最大值）的包：`rows/<table>.jsonl`
 只含窗口内变更过的键压缩后的终态（§7），不是全表扫描；`deletes.jsonl` 只含窗口内终态为
-删除的键；`files/**` 只含本次 upsert 行新增或变更指向的文件。窗口为空时同样产出一个完整
-的包（各 `rows/*.jsonl`/`deletes.jsonl`/`kg_epochs.jsonl` 都是空文件），`manifest.json` 里
-`notebooks`/`deleted_notebooks` 也可能为空，水位仍照常推进——保证导出链连续：目标端总能
-按 `base_package_id` 把连续的包接起来，不会因为某次没有变化就断链。
+删除的键；`files/**` 只含本次 upsert 行新增或变更指向的文件。`rows/notebooks.jsonl` 是
+例外：它为每个在本包里携带任何行的笔记本都补发一条从表里回读的当前完整状态，不管
+`notebooks` 本身在这次窗口内有没有变化（§7「笔记本范围与镜像」），保持
+`manifest.notebooks ⇔ rows/notebooks.jsonl` 不变量；`deleted_notebooks` 里的笔记本不补行。
+窗口为空时同样产出一个完整的包（各 `rows/*.jsonl`/`deletes.jsonl`/`kg_epochs.jsonl` 都是
+空文件），`manifest.json` 里 `notebooks`/`deleted_notebooks` 也可能为空，水位仍照常推进——
+保证导出链连续：目标端总能按 `base_package_id` 把连续的包接起来，不会因为某次没有变化就
+断链。
 
 行编码（`rows/<table>.jsonl` 每行一个 JSON 对象，键是列名）采用 **SQLite 形态**作为可移植
 表示，这样目标端是 SQLite 时原样落库，是 PostgreSQL 时复用 `app.migration.shadow.transform`
@@ -533,8 +576,9 @@ CLI 形态（`scripts/cli.py` 的 `sync` 命令组）：
 
 ```
 sync export --target <env> --out <dir> [--notebook <id>]... [--source-env <name>] [--full] [--json]
-    # 模式判定见 §7「模式判定」：门开 且 该 target 有 captured=1 的水位 且未给 --full/--notebook
-    # 时增量，否则全量。--notebook 强制全量（与增量互斥）。--full 强制全量，用于重建基线。
+    # 模式判定见 §7「模式判定」：不给 --notebook 时，门开 且该 target 有 captured=1 的水位 且
+    # 未给 --full ⇒ 增量，否则全量；两种都推进水位。给了 --notebook（不论是否同时给 --full）：
+    # 永远全量、永远不推进水位（manifest base_package_id=''、from_seq=to_seq=0）。
 sync import <package_dir> [--create-missing-users] [--dry-run] [--importer-user <id>]
     [--resume] [--verify-files] [--json]
     # --resume：同一个包断点续跑必须显式给；--verify-files：文件二次 sha256
@@ -551,7 +595,8 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
 
 `export` 不需要用户显式区分全量与增量，模式由上面的判定规则自动选（§7「模式判定」）；
 `sync status`/`sync capture status` 能看到当前库处于哪种前提下。`--notebook` 限定导出范围，
-且和增量互斥——给了它就强制走全量路径。`import` 幂等：同一个包重复导入不产生副作用；
+永远强制走全量路径，且永远不推进水位——不是「和增量互斥」这么简单，是它产出的包本身就不
+计入这个 target 的导出链（见 §7「模式判定」）。`import` 幂等：同一个包重复导入不产生副作用；
 `--dry-run` 只做预检与身份映射并输出报告。`sync capture` 见 §7「控制行门」与
 `docs/operations.md` 的开关 runbook；`sync prune-log` 见 §7「保留策略」与
 `docs/operations.md` 对应小节。
@@ -616,7 +661,7 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
 | PR-1 | 本文；`architecture.md` §2.1.1 ERD；同步范围 manifest 与全覆盖守卫；`notebooks.sync_origin` 成对迁移；能力表写入围栏；username 映射的纯函数与测试 | 已合入 #770 |
 | PR-2 | 按笔记本全量导出/导入 CLI（§8 的 `from_seq=0` 特例），manifest 的 `scope` 字段，含文件、身份映射、校验和对账、`sync_export_state` 水位表 | 已合入 #772 |
 | PR-3a | 源端 `sync_change_log` schema 与 46 张表的触发器（`app.migration.sync.capture`，SQLite v84 / PostgreSQL 0064）；两张无主键表补复合键，导出/导入改走 keyed upsert；`sync capture enable/disable/status` 开关与导出水位记账 | 已合入 #783 |
-| PR-3b | 按日志读的增量导出（含 PostgreSQL 快照补偿窗口，SQLite v85 / PostgreSQL 0065）、日志压缩（按 (table,key) 折终态，`kg_epoch` 行不折叠）、`deletes` 按包重放、包格式 v2、`sync export --full`、`sync prune-log` 保留策略；导入端只做最小兼容（接受 v2 全量包，拒绝增量包并指向 PR-3c）；`kg_epoch` 整体替换的折叠优化延后（见 §11） | 进行中 |
+| PR-3b | 按日志读的增量导出（含 PostgreSQL 快照补偿窗口，SQLite v85 / PostgreSQL 0065）、日志压缩（按 (table,key) 折终态，`kg_epoch` 行不折叠）、产出 `deletes.jsonl`、包格式 v2、`sync export --full`、`sync prune-log` 保留策略；导入端只做最小兼容（接受 v2 全量包，拒绝增量包并指向 PR-3c，`deletes.jsonl` 的重放留给 PR-3c）；`kg_epoch` 整体替换的折叠优化延后（见 §11） | 进行中 |
 | PR-3c | 增量导入：增量包重放（deletes 按键删除、文件合并而非整目录替换、孤儿删除按目标端父链归属解析）、笔记本删除的跨环境传播 | 待办 |
 | PR-4 | 落后笔记本巡检、runbook，前端镜像标注 | 待办 |
 

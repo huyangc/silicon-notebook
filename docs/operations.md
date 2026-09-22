@@ -620,12 +620,19 @@ write fence, and the package format (§7 for the change-log window, §8 for the 
 the last successful export to that `--target`, §7 of the design doc). It runs incremental only
 when change capture is on, the last export to that target left a `captured` watermark, and
 neither `--full` nor `--notebook` was given; missing any of those three falls back to full.
-`--full` forces a full export even when an incremental one would otherwise run. `--notebook`
-(repeatable) narrows an export to specific notebooks and always forces full too — narrowing
-scope and reading a log window are different operations, and this CLI does not combine them.
-**Today's importer only accepts full packages** (§8 of the design doc); an incremental package
-has to wait for PR-3c — see "Operating a daily export cadence" below for what that means in
-practice.
+`--full` forces a full export even when an incremental one would otherwise run; it still
+advances the watermark normally. `--notebook` (repeatable) narrows an export to specific
+notebooks, always runs it as a full export, and **never advances the watermark** for that
+`--target` — even combined with `--full` — its manifest carries `base_package_id=''` and
+`from_seq=to_seq=0`, and `sync_export_state` for that target is left untouched. This is not an
+oversight: the watermark is a promise that this target has seen *every* live, non-mirror
+notebook up to a point; if a notebook-scoped export advanced it, a change to some *other*
+notebook that happened before this export — one that never made it into this package — would
+fall permanently outside every later incremental window (`seq > W`), with no package that ever
+picks it back up. Only an export that covers the full current notebook set is entitled to
+advance the watermark. **Today's importer only accepts full packages** (§8 of the design doc);
+an incremental package has to wait for PR-3c — see "Operating a daily export cadence" below for
+what that means in practice.
 
 ```bash
 # Source environment: name it once, enable capture, then run the first (full) export --
@@ -643,7 +650,8 @@ PYTHONPATH=backend python scripts/sync_notebooks.py export \
 PYTHONPATH=backend python scripts/sync_notebooks.py export \
   --target prod-tokyo --out /srv/silicon-notebook/sync/outgoing --full --json
 
-# Or scope one export to specific notebooks (always full; repeatable):
+# Or scope one export to specific notebooks (always full, never advances the watermark;
+# repeatable):
 PYTHONPATH=backend python scripts/sync_notebooks.py export \
   --target prod-tokyo --out /srv/silicon-notebook/sync/outgoing \
   --notebook nb-aaa --notebook nb-bbb --json
@@ -691,7 +699,10 @@ Upgrading to schema v85/0065 resets every target's watermark to `captured=false`
 new; rows written before the upgrade predate it and have no change-log window behind them). The
 first export to each target after that upgrade is therefore full no matter what change capture
 was doing before the upgrade — this is expected, not a gap to work around; the next export after
-that goes back to incremental on its own.
+that goes back to incremental on its own. **If capture has ever been enabled on this deployment,
+read "Change capture" below before running this migration** — the new index it adds can lock out
+writes on a large log for longer than the connection pool's own timeouts allow, and the safe
+sequence is to disable capture first.
 
 Use `--full` to deliberately reset a target's baseline without touching the capture gate or the
 watermark table directly — for example after a long gap, or simply to hand over a package that
@@ -707,13 +718,13 @@ form above does not preload it, so export `DATABASE_URL`/`SILICON_NOTEBOOK_STORA
 `export` needs a `source_env`: pass `--source-env` explicitly, or set
 `SILICON_NOTEBOOK_SYNC_ENV` once per deployment so routine exports do not repeat it. Missing
 both exits 2 with a message naming the variable. `--notebook <id>` (repeatable) narrows an
-export to specific notebooks and always forces `mode=full` (see mode selection above); omit it
-to export everything live and non-mirror, in whichever mode gets selected. `--full` forces a
-full export without narrowing the notebook set. A completed export always advances this
-environment's watermark for that `--target`, whether it ran full or incremental and whether or
-not `--notebook` was used. Both the human-readable summary and `--json` report print `mode`,
-`from_seq`, `to_seq`, `base_package_id` (empty for a full export), `deletes` (row count),
-`deleted_notebooks`, and `empty`.
+export to specific notebooks, always runs it as `mode=full`, and never advances this
+environment's watermark for that `--target` (see mode selection above); omit it to export
+everything live and non-mirror, in whichever mode gets selected, advancing the watermark
+normally. `--full` without `--notebook` forces a full export and still advances the watermark.
+Both the human-readable summary and `--json` report print `mode`, `from_seq`, `to_seq`,
+`base_package_id` (empty for a full export or any `--notebook`-scoped export), `deletes` (row
+count), `deleted_notebooks`, and `empty`.
 
 `import` is idempotent: re-running the same package directory short-circuits with
 `already_applied` (exit 0) instead of re-applying rows. `--dry-run` stops after identity
@@ -796,16 +807,17 @@ compaction an incremental export does — that folding happens per export, in me
 the *package*, and does not remove the underlying log rows (another target with an older
 watermark may still need them). `prune-log` deletes log rows that no future export could
 possibly still need. A row qualifies for deletion only when **all** of the following hold: its
-`seq` is at or below every target's minimum `captured` watermark (the minimum
-`exported_through_seq` across every `sync_export_state` row with `captured` true); on
-PostgreSQL, its `txid` is below every target's minimum watermark snapshot's xmin
-(`pg_snapshot_xmin` of that row's `exported_snapshot`); and its `changed_at` is older than
-`--keep-days` (a row young enough by `changed_at` is kept even if the first two conditions would
-otherwise allow deleting it). If **any** target has never produced a `captured` watermark —
-never exported, or its last export fell back to full with capture off — the command refuses
-outright and names that target: without a captured watermark there is no safe upper bound for
-it, and pruning under a guess could permanently break that target's next incremental export.
-`--dry-run` reports the row count that would be deleted without deleting anything.
+`seq` is at or below the minimum `exported_through_seq` across every `sync_export_state` row
+with `captured` true; on PostgreSQL, its `txid` is below the minimum `pg_snapshot_xmin` of every
+`captured` row's `exported_snapshot`; and its `changed_at` is older than `--keep-days` (default
+30 — a row young enough by `changed_at` is kept even if the first two conditions would otherwise
+allow deleting it). Both minimums are taken **only over targets with a `captured` watermark**: a
+target that has never exported, or whose last export fell back to full with capture off, simply
+does not vote on the bound — it does not drag the bound down to zero and block pruning for
+everyone else. The command refuses outright, naming the problem, only when **no target at all**
+has a `captured` watermark — there is then no safe upper bound to compute from anything, not
+just an unclear one for a single target. `--dry-run` reports the row count that would be deleted
+without deleting anything.
 
 ### Change capture (`sync capture`)
 
@@ -863,10 +875,23 @@ still means unbounded growth; there is no automatic retention.
 Upgrading a large deployment to v84/0064 also has its own operational note — see [the design
 doc's §7 "升级窗口"](./incremental-sync-design.md#7-源端变更捕获) for the lock-window estimate on
 `knowledge_object_sources`/`community_members`'s new primary keys before running the migration.
-Upgrading further to v85/0065 (two `ADD COLUMN`s on `sync_export_state` plus one new index on
-`sync_change_log.txid`) is much lighter and does not need the same lock-window planning; its
-operational consequence is purely about watermarks, not locks — see "Operating a daily export
-cadence" above.
+
+**Upgrading to v85/0065 has its own lock concern if capture has ever been on.** The migration's
+`CREATE INDEX idx_sync_change_log_txid ON sync_change_log (txid, seq) WHERE txid IS NOT NULL`
+is a plain (non `CONCURRENTLY`) index build, which holds a SHARE lock on `sync_change_log`
+until it finishes;
+while the gate is open, every business write to any of the 46 synced tables also writes a row to
+that same table via its trigger, so those writes queue behind the index build for its entire
+duration. Startup migrations run over the application's own connection pool, whose defaults
+(`POSTGRES_STATEMENT_TIMEOUT_SECONDS=30`, `POSTGRES_LOCK_TIMEOUT_SECONDS=5`) were sized for
+request-path queries, not index builds — on a `sync_change_log` table large enough for the build
+to run past either bound, the migration gets cut off, the service fails to start, and it fails
+the same way on every subsequent restart until the underlying cause is addressed. **Operational
+steps**: before upgrading, run `sync capture disable` (this also clears `sync_change_log`, so
+the index build on an empty table completes instantly) → run the v85/0065 migration → run
+`sync capture enable` → the next export to every target is full and re-establishes the baseline
+(§7 "导出水位"/"模式判定" of the design doc). Only a deployment that has never enabled capture,
+or whose log is still small, can upgrade directly without this dance.
 
 ## PostgreSQL notebook-aware lexical indexes
 

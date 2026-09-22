@@ -68,7 +68,13 @@ def test_deployed_v84_database_verifies_sync_export_snapshot(tmp_path):
     sync_export_state.exported_snapshot (nullable), plus
     idx_sync_change_log_txid. No row changes -- the fixture holds no watermark
     row, and both defaults are what a pre-existing one would have had to take
-    anyway."""
+    anyway.
+
+    The index is partial on ``txid IS NOT NULL`` and SQLite writes NULL into
+    that column on every row, so on this backend it is an index over nothing:
+    ``PRAGMA index_list`` reports it as present and partial, and
+    ``index_info`` still names both key columns even though no row qualifies.
+    """
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
     upgraded = module.SQLiteRepository(
@@ -82,10 +88,17 @@ def test_deployed_v84_database_verifies_sync_export_snapshot(tmp_path):
         }
         assert columns["captured"] == ("INTEGER", 1, "0")
         assert columns["exported_snapshot"] == ("TEXT", 0, None)
-        assert upgraded_db.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' "
-            "AND name='idx_sync_change_log_txid'"
-        ).fetchone()[0] == 1
+        indexes = {
+            row[1]: row[4]  # name -> partial flag
+            for row in upgraded_db.execute("PRAGMA index_list(sync_change_log)")
+        }
+        assert indexes["idx_sync_change_log_txid"] == 1
+        assert [
+            row[2]
+            for row in upgraded_db.execute(
+                "PRAGMA index_info(idx_sync_change_log_txid)"
+            )
+        ] == ["txid", "seq"]
 
     with sqlite3.connect(database) as rollback:
         _rollback_v85(rollback)

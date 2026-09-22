@@ -749,7 +749,17 @@ def test_packaged_index_migration_phases_are_exact():
     txid_contract = EXPECTED_OPERATIONAL_INDEXES["idx_sync_change_log_txid"]
     assert txid_contract.table == "sync_change_log"
     assert txid_contract.unique is False
-    assert txid_contract.keys == (("txid",),)
+    # TWO key columns, txid first. The compensation window is
+    # "seq <= watermark AND txid >= xmin": two opposite-direction ranges, so
+    # neither is an equality prefix for the other. With txid alone the seq
+    # half can only be applied after a heap fetch per candidate row -- the
+    # whole window -- so seq must ride along in the index.
+    assert txid_contract.keys == (("txid",), ("seq",))
+    # PARTIAL, and the predicate has to survive the DDL parser the same way:
+    # on SQLite txid is NULL on every row, so this index holds nothing and
+    # costs no B-tree insert per captured write, while on PostgreSQL every row
+    # qualifies and "txid >= x" implies the predicate.
+    assert txid_contract.predicate_tokens == ("txid", "is", "not", "null")
     v65_ddl_only = "\n".join(
         line for line in migrations[65].sql.splitlines()
         if not line.strip().startswith("--")
@@ -761,7 +771,7 @@ def test_packaged_index_migration_phases_are_exact():
     # either. A '' default would make "no snapshot" indistinguishable from an
     # empty one at read time.
     assert "exported_snapshot text COLLATE \"C\" NOT NULL" not in v65_ddl_only
-    assert "ON sync_change_log (txid)" in v65_ddl_only
+    assert "ON sync_change_log (txid, seq) WHERE txid IS NOT NULL" in v65_ddl_only
     # No new table, no backfill UPDATE, and nothing touching the change log's
     # rows -- this migration is columns plus one index.
     assert "CREATE TABLE" not in v65_ddl_only

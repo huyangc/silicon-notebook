@@ -30,9 +30,20 @@ ALTER TABLE sync_export_state
   ADD COLUMN exported_snapshot text COLLATE "C";
 
 -- The compensation pass reads "seq <= watermark AND txid >= the previous
--- snapshot's xmin", so txid is the whole access path: a range scan over a
--- small tail of the log rather than a walk of the whole table. Created on
--- SQLite too, where txid is always NULL and the index is inert, so the two
--- backends' catalogs stay symmetric.
+-- snapshot's xmin" -- TWO ranges, in opposite directions, and neither column
+-- can be an equality prefix for the other. txid leads because it is the
+-- selective one (a small tail of recently-written transactions), and seq
+-- rides along as a second key column so the "seq <= watermark" half is
+-- evaluated inside the index scan. On a (txid) index alone every row of that
+-- txid range has to be fetched from the heap before the seq half can discard
+-- it, which is the whole window.
+--
+-- Partial on txid IS NOT NULL: on PostgreSQL every captured row has a txid,
+-- so the predicate excludes nothing and "txid >= x" implies it (the planner's
+-- predicate test derives IS NOT NULL from any strict operator clause), while
+-- on SQLite txid is ALWAYS NULL, so the index stays empty and costs no B-tree
+-- insert per captured write. The index is still created on both backends --
+-- one catalog shape, no backend-conditional DDL for the snapshot verifier and
+-- the PostgreSQL catalog guard to special-case.
 CREATE INDEX idx_sync_change_log_txid
-    ON sync_change_log (txid);
+    ON sync_change_log (txid, seq) WHERE txid IS NOT NULL;

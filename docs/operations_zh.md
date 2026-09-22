@@ -505,10 +505,15 @@ Knowhow、记忆）从一个部署搬到另一个部署，**单向**：源端写
 `sync export` 不需要运维显式选模式，两种包二选一：**全量**（表扫描，`from_seq=0`）或
 **增量**（读该 `--target` 上次成功导出以来的 `sync_change_log` 窗口，设计文档 §7）。只有
 同时满足三个条件才走增量：变更捕获开着、该 target 上一次导出留下的水位带 `captured`、
-且没给 `--full`/`--notebook`；三者缺一都回退到全量。`--full` 强制全量，即使本来会走增量。
-`--notebook`（可重复）把一次导出限定到指定笔记本，同样强制全量——缩小范围与读日志窗口是
-两件不同的事，这个 CLI 不把它们合在一起。**目前导入器只接受全量包**（设计文档 §8）；增量
-包要等 PR-3c——下面「按天导出的操作节奏」说明这在实践中意味着什么。
+且没给 `--full`/`--notebook`；三者缺一都回退到全量。`--full` 强制全量，即使本来会走增量，
+仍然正常推进水位。`--notebook`（可重复）把一次导出限定到指定笔记本，永远强制全量、且**永远
+不推进水位**（即使同时给了 `--full`）——manifest 写 `base_package_id=''`、`from_seq=to_seq=0`，
+该 target 在 `sync_export_state` 里的行原样不动。这不是疏漏：水位是「这个 target 已经完整
+看到过多远」的承诺，若限定笔记本的导出也推进水位，日志里**没被选中的其它笔记本**在这次
+导出之前发生的变更就会永久落在下一次增量窗口（`seq > W`）之外——既不在这次的子集包里，
+也再不会被任何一次增量窗口捕获到。只有覆盖当前全部存活非镜像笔记本的导出才配推进水位。
+**目前导入器只接受全量包**（设计文档 §8）；增量包要等 PR-3c——下面「按天导出的操作节奏」
+说明这在实践中意味着什么。
 
 ```bash
 # 源环境：设置一次环境标识，开启捕获，再跑第一次（全量）导出——这是之后每次增量导出的基线。
@@ -525,7 +530,7 @@ PYTHONPATH=backend python scripts/sync_notebooks.py export \
 PYTHONPATH=backend python scripts/sync_notebooks.py export \
   --target prod-tokyo --out /srv/silicon-notebook/sync/outgoing --full --json
 
-# 或只导出指定笔记本（恒为全量；可重复传 --notebook）：
+# 或只导出指定笔记本（恒为全量、永远不推进水位；可重复传 --notebook）：
 PYTHONPATH=backend python scripts/sync_notebooks.py export \
   --target prod-tokyo --out /srv/silicon-notebook/sync/outgoing \
   --notebook nb-aaa --notebook nb-bbb --json
@@ -566,7 +571,8 @@ PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --j
 升级到 schema v85/0065 会把每个目标环境的水位重置为 `captured=false`（这是新列，升级之前
 写下的水位行没有这一列、背后也没有变更日志窗口）。升级之后对每个目标的第一次导出因此必然
 是全量，不管升级前捕获是开是关——这是预期行为，不需要额外处理；那之后的下一次导出会自己
-回到增量。
+回到增量。**如果这个部署曾经开过捕获，跑这个迁移之前先看下面「变更捕获」一节**——它加的
+那个索引在日志表很大时会让锁窗口超过连接池自己的超时，安全的顺序是先关掉捕获。
 
 用 `--full` 可以在不动捕获开关、不直接改水位表的前提下，主动重置某个目标的基线——比如隔了
 很久没导出过，或者单纯想给出一个自包含、不依赖 `base_package_id` 链上任何更早的包就能导入
@@ -580,11 +586,11 @@ PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --j
 
 `export` 需要 `source_env`：显式传 `--source-env`，或按部署设置一次
 `SILICON_NOTEBOOK_SYNC_ENV`，日常导出就不用每次重复。两者都没有则退出 2 并提示需要设置
-的变量。`--notebook <id>`（可重复）把一次导出限定到指定笔记本，且恒强制 `mode=full`（见上
-面的模式判定）；省略则导出全部存活、非镜像笔记本，模式按判定规则自动选。`--full` 在不限定
-笔记本范围的前提下强制全量。无论跑的是全量还是增量、无论是否用了 `--notebook`，一次成功
-的导出都会推进本环境对该 `--target` 的水位。人读摘要与 `--json` 报告都会打印 `mode`、
-`from_seq`、`to_seq`、`base_package_id`（全量包为空）、`deletes`（条数）、
+的变量。`--notebook <id>`（可重复）把一次导出限定到指定笔记本，恒强制 `mode=full`（见上面
+的模式判定），且**不推进**本环境对该 `--target` 的水位；省略它则导出全部存活、非镜像
+笔记本，模式按判定规则自动选，并正常推进水位。`--full`（不带 `--notebook`）强制全量，同样
+正常推进水位。人读摘要与 `--json` 报告都会打印 `mode`、`from_seq`、`to_seq`、
+`base_package_id`（全量包与任何 `--notebook` 限定的导出都为空）、`deletes`（条数）、
 `deleted_notebooks`、`empty`。
 
 `import` 幂等：重复引入同一个包目录会短路为 `already_applied`（退出 0），不会重新应用行。
@@ -651,11 +657,13 @@ PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --j
 一行要**同时**满足三个条件才会被删：它的 `seq` 小于等于全部 `captured` 水位里最小的
 `exported_through_seq`；在 PostgreSQL 上，它的 `txid` 还要小于全部 `captured` 水位的
 `exported_snapshot` 取 `pg_snapshot_xmin` 后的最小值；它的 `changed_at` 早于
-`--keep-days` 指定的天数（哪怕前两条都满足，一行按 `changed_at` 还不够旧也会被留下）。
-只要**任何一个**目标环境从未产生过 `captured` 水位——从未导出过，或者它最近一次导出因为
-捕获关着而落到了全量——命令会直接拒绝并点名那个目标：没有 captured 水位就没有安全的上限，
-按猜测清理可能永久弄坏那个目标下一次增量导出的窗口。`--dry-run` 只报告会删掉多少行，不
-真的删。
+`--keep-days`（默认 30）指定的天数（哪怕前两条都满足，一行按 `changed_at` 还不够旧也会被
+留下）。这两次取最小值**只看带 `captured` 水位的目标环境**：一个从未导出过、或者最近一次
+因为捕获关着而落到了全量的目标环境，对这个上限「弃权」，不参与取最小——不会因为它没有
+`captured` 水位就把上限硬拖到 0、挡住所有别的目标环境的清理。只有**一个 `captured` 水位都
+不存在**（没有任何目标环境成功做过一次带快照的导出）时，命令才会直接拒绝并点名——这不是
+某一个目标环境的上限不明确，而是根本没有任何安全上限可以取。`--dry-run` 只报告会删掉多少
+行，不真的删。
 
 ### 变更捕获（`sync capture`）
 
@@ -702,10 +710,21 @@ PYTHONPATH=backend python scripts/sync_notebooks.py capture disable --json
 
 大库升级到 v84/0064 本身也有一条运维提示——迁移会给 `knowledge_object_sources`/
 `community_members` 现场补主键，运行迁移前先看
-[设计文档 §7「升级窗口」](./incremental-sync-design.md#7-源端变更捕获)估计锁窗口。再往上
-升级到 v85/0065（`sync_export_state` 加两列、`sync_change_log.txid` 加一个索引）轻得多，
-不需要同样的锁窗口评估；它的运维影响纯粹是水位层面的，不是锁——见上面「按天导出的操作
-节奏」。
+[设计文档 §7「升级窗口」](./incremental-sync-design.md#7-源端变更捕获)估计锁窗口。
+
+**升级到 v85/0065，只要这个部署开过捕获，就有它自己的锁顾虑。** 迁移里的
+`CREATE INDEX idx_sync_change_log_txid ON sync_change_log (txid, seq) WHERE txid IS NOT NULL`
+是一条普通（非 `CONCURRENTLY`）的建索引语句，建完之前会一直持有 `sync_change_log` 上的
+SHARE 锁；门开着
+期间，全部 46 张同步表的每一次业务写都会经触发器往这同一张表写一行，这些写就会排在建索引
+后面等。启动期迁移走的是应用自己的连接池，池的默认值（`POSTGRES_STATEMENT_TIMEOUT_SECONDS=30`、
+`POSTGRES_LOCK_TIMEOUT_SECONDS=5`）是按请求路径上的查询定的，不是按建索引定的——日志表大到
+建索引跑得比这两个上限还久时，迁移会被掐断，服务启动失败，而且只要底层原因不解决，每次
+重启都会复现同一个失败。**运维步骤**：升级前先跑一次 `sync capture disable`（它顺带清空
+`sync_change_log`，建在空表上的索引瞬间建完）→ 跑 v85/0065 迁移 →
+`sync capture enable` → 每个目标环境的下一次导出都会是全量，重新建立基线（设计文档 §7
+「导出水位」/「模式判定」）。只有从未开过捕获、或者日志还很小的部署，才能不走这一套直接
+升级。
 
 ## PostgreSQL notebook-aware 词法索引
 
