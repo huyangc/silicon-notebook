@@ -277,6 +277,20 @@ def _export(source, out_dir: Path) -> Path:
     return report.package_dir
 
 
+def _export_notebooks(source, out_dir: Path, notebook_ids: list) -> Path:
+    """Like ``_export``, but for a package covering a caller-chosen set of
+    notebooks -- the supersede/coverage tests need a package wider than the
+    single-notebook default."""
+    report = export_notebooks(
+        source["settings"],
+        target_env=TARGET_ENV,
+        out_dir=out_dir,
+        notebook_ids=notebook_ids,
+        source_env=SOURCE_ENV,
+    )
+    return report.package_dir
+
+
 @pytest.fixture
 def package(source, tmp_path):
     return _export(source, tmp_path / "out")
@@ -2121,6 +2135,106 @@ def test_a_newer_package_supersedes_a_half_applied_older_one(
         with pytest.raises(SyncImportError) as failure:
             _import(target, first, **kwargs)
         assert "Export a current package instead." in str(failure.value)
+
+
+def test_superseding_a_failed_package_requires_covering_its_notebooks(
+    source, target, tmp_path, monkeypatch
+):
+    """codex #772 r8: a failed package's own ``manifest.notebooks`` is
+    recorded in its ``report_json``. Superseding it drops its progress with
+    nothing left to ever finish it, so a package that is merely NEWER is not
+    enough to stand in for it -- it must also cover every notebook the
+    retired one did, or the notebooks it does not carry are silently
+    stranded."""
+    both = _export_notebooks(
+        source, tmp_path / "out-both", [source["exported"], source["base"]]
+    )
+    _fail_partway(target, both, monkeypatch)
+    both_id = _manifest(both)["package_id"]
+    assert _sync_import_row(target, both_id)["status"] == "failed"
+    assert _progress_count(target, both_id) > 0
+    stored = json.loads(_sync_import_row(target, both_id)["report_json"])
+    assert sorted(stored["notebooks"]) == sorted(
+        [source["exported"], source["base"]]
+    )
+
+    narrower = _export(source, tmp_path / "out-narrow")  # only source["exported"]
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, narrower)
+
+    message = str(failure.value)
+    assert both_id in message
+    assert source["base"] in message
+    # ... refused before anything about the old package was touched.
+    assert _sync_import_row(target, both_id)["status"] == "failed"
+    assert _progress_count(target, both_id) > 0
+    assert _sync_import_row(target, _manifest(narrower)["package_id"]) is None
+
+    wider = _export_notebooks(
+        source, tmp_path / "out-wide", [source["exported"], source["base"]]
+    )
+    report = _import(target, wider)
+
+    assert report.error == ""
+    retired = _sync_import_row(target, both_id)
+    assert retired["status"] == "superseded"
+    assert json.loads(retired["report_json"])["superseded_by"] == report.package_id
+
+
+def test_superseding_transfers_the_created_group_marker_so_members_still_seed(
+    source, target, tmp_path, monkeypatch
+):
+    """codex #772 r8: ``groups`` has no in-row marker of its own for "this
+    import chain created this group" -- that fact lives only in
+    ``sync_import_progress`` as a ``__created__:groups:<id>`` step
+    (``_created_parents``). If a superseding package drops it with the rest
+    of the retired package's progress instead of moving it across, the group
+    row is still there (seed_only leaves an existing row alone) but nothing
+    says THIS chain made it, so ``group_members`` -- gated on exactly that
+    fact -- skips every row for it as "already existed at the target"."""
+    with target["repo"]._write() as db:
+        db.execute("DELETE FROM group_members")
+        db.execute("DELETE FROM groups")
+
+    first = _export(source, tmp_path / "out1")
+    _fail_partway(target, first, monkeypatch, table="group_members")
+    first_id = _manifest(first)["package_id"]
+    assert _sync_import_row(target, first_id)["status"] == "failed"
+    steps = {
+        str(row["table_name"])
+        for row in _fetch(
+            target["repo"],
+            "SELECT table_name FROM sync_import_progress WHERE package_id=?",
+            (first_id,),
+        )
+    }
+    assert "__created__:groups:grp-a" in steps
+    assert _count(target["repo"], "SELECT COUNT(*) FROM groups WHERE id='grp-a'") == 1
+    assert _count(target["repo"], "SELECT COUNT(*) FROM group_members") == 0
+
+    second = _export(source, tmp_path / "out2")
+    report = _import(target, second)
+
+    assert report.error == ""
+    second_id = _manifest(second)["package_id"]
+    assert _sync_import_row(target, first_id)["status"] == "superseded"
+    # The group row itself was already there from the failed run; this run's
+    # own pass over `groups` just finds it and skips it (seed_only) -- the
+    # created-fact this run relies on to seed group_members came from the
+    # TRANSFERRED marker, not from anything this run's own `groups` step did.
+    assert report.tables["groups"].inserted == 0
+    assert report.tables["group_members"].inserted == 1
+    assert _count(
+        target["repo"],
+        "SELECT COUNT(*) FROM group_members WHERE group_id='grp-a'",
+    ) == 1
+    marker = _one(
+        target["repo"],
+        "SELECT package_id FROM sync_import_progress WHERE table_name=?",
+        ("__created__:groups:grp-a",),
+    )
+    assert marker["package_id"] == second_id
 
 
 def test_a_superseded_package_is_refused_even_with_nothing_applied_yet(

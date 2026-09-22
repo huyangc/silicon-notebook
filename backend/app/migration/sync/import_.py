@@ -1490,6 +1490,11 @@ class _PriorImport:
     # row that has not committed anything yet (or is not running).
     heartbeat_at: datetime | None
     has_progress: bool
+    # This row's own manifest.notebooks, out of report_json. ``None`` when the
+    # row predates this bookkeeping or its JSON is unreadable -- a coverage
+    # question that cannot be answered, never one silently treated as "covers
+    # everything" or "covers nothing" (see ``_supersede_outstanding``).
+    notebooks: tuple[str, ...] | None
 
 
 def _prior_imports(
@@ -1517,6 +1522,7 @@ def _prior_imports(
                 created_at=_recorded_created_at(row["report_json"]),
                 heartbeat_at=_recorded_moment(row["report_json"], _HEARTBEAT_AT_KEY),
                 has_progress=package_id in with_progress,
+                notebooks=_recorded_notebooks(row["report_json"]),
             )
         )
     return tuple(prior)
@@ -1538,6 +1544,25 @@ def _recorded_moment(report_json: Any, key: str) -> datetime | None:
 
 def _recorded_created_at(report_json: Any) -> datetime | None:
     return _recorded_moment(report_json, _PACKAGE_CREATED_AT_KEY)
+
+
+def _recorded_notebooks(report_json: Any) -> tuple[str, ...] | None:
+    """This row's own ``manifest.notebooks``, read back out of a stored
+    report. ``None`` when the row predates this bookkeeping (written by both
+    ``_running_report_json`` and the full ``ImportReport.as_json``) or its
+    JSON is unreadable."""
+    document = report_json
+    if isinstance(document, (str, bytes)):
+        try:
+            document = json.loads(document)
+        except ValueError:
+            return None
+    if not isinstance(document, dict):
+        return None
+    notebooks = document.get("notebooks")
+    if not isinstance(notebooks, list):
+        return None
+    return tuple(str(item) for item in notebooks)
 
 
 def _reject_backwards_snapshot(
@@ -1690,9 +1715,14 @@ def _claim_import(
             and row.has_progress
             and row.package_id != manifest.package_id
         ]
-        _supersede_outstanding(
-            backend, conn, context, [*outstanding, *taken_over], mine, now
-        )
+        # Declared BEFORE the supersede, not after: a retired package's
+        # transferred `__created__:groups:*` progress rows are re-pointed at
+        # THIS package_id (``_transfer_created_group_markers``), and
+        # ``sync_import_progress.package_id`` is a foreign key into
+        # ``sync_imports.package_id`` -- the row that key points at has to
+        # exist before anything can be re-pointed at it. The whole thing is
+        # still one transaction, so a refusal inside ``_supersede_outstanding``
+        # rolls this INSERT back along with everything else.
         conn.execute(
             backend.sql(
                 "INSERT INTO sync_imports "
@@ -1710,8 +1740,11 @@ def _claim_import(
                 manifest.from_seq,
                 manifest.to_seq,
                 _moment(backend, now),
-                _running_report_json(manifest.created_at, now),
+                _running_report_json(manifest.created_at, now, manifest.notebooks),
             ),
+        )
+        _supersede_outstanding(
+            backend, conn, context, [*outstanding, *taken_over], mine, now
         )
     return False
 
@@ -1736,9 +1769,19 @@ def _supersede_outstanding(
     ordering check is the same too -- taking over someone else's run is not a
     licence to apply an older snapshot after a newer one.
 
+    A package is also refused as the superseder of one whose recorded
+    notebooks it does not fully cover. The half-applied package's progress is
+    about to be dropped -- retiring it is a promise that nothing further will
+    ever apply the rest of ITS notebooks, and only a package that carries all
+    of them can stand in for that promise. Without this, superseding a
+    two-notebook failed package with a one-notebook package would silently
+    strand the other notebook: nothing declared for this source environment
+    would ever finish it, and nothing would say so.
+
     Runs inside the claim's transaction, so a package is never declared
     without the retirement that makes declaring it safe."""
     manifest = context.manifest
+    mine_notebooks = set(manifest.notebooks)
     for row in outstanding:
         if mine is None or row.created_at is None or mine <= row.created_at:
             state = (
@@ -1754,7 +1797,28 @@ def _supersede_outstanding(
                 "), so there is no order in which applying both is meaningful. "
                 "Finish or export past that package first."
             )
+        if row.notebooks is None:
+            # Predates this bookkeeping (or its report_json is unreadable):
+            # there is nothing to compare against, so the coverage question
+            # cannot be answered. Warned, not refused -- refusing forever
+            # would make an old row permanently unsupersedable.
+            context.ledger.warn(
+                f"package {row.package_id} carries no recorded notebook list "
+                "to check coverage against before superseding it"
+            )
+            continue
+        missing = sorted(set(row.notebooks) - mine_notebooks)
+        if missing:
+            raise SyncImportError(
+                f"package {row.package_id} covered notebook(s) {missing} that "
+                f"this package ({manifest.package_id}) does not carry. "
+                "Superseding it would drop its progress on those notebooks "
+                "with nothing left to ever finish them. Export a package "
+                "that covers those notebooks too, or --resume "
+                f"{row.package_id} first."
+            )
     for row in outstanding:
+        _transfer_created_group_markers(backend, conn, context, row.package_id)
         conn.execute(
             backend.sql(
                 "DELETE FROM sync_import_progress WHERE package_id = ?"
@@ -1798,6 +1862,71 @@ def _supersede_outstanding(
         context.ledger.warn(
             f"package {row.package_id} was superseded by this newer one{taken}; "
             "its partial progress was dropped and it can no longer be resumed"
+        )
+
+
+def _transfer_created_group_markers(
+    backend: _Backend, conn: Any, context: _Context, old_package_id: str
+) -> None:
+    """Move a retired package's ``__created__:groups:<id>`` markers onto the
+    package that supersedes it, instead of dropping them with the rest of its
+    progress.
+
+    The rest of ``old_package_id``'s progress genuinely describes completed
+    STEPS the new package is about to redo from scratch (phase 3a/3b start
+    over for every table), so dropping it is correct. A created-group marker
+    is a different kind of fact: it is not a step the new run repeats, it is
+    the durable record that SOME earlier attempt of this import chain already
+    inserted group ``<id>`` and its members have not been seeded yet
+    (``_created_parents``, the ``_SEED_PARENT`` gate). ``groups`` is
+    ``seed_only``, so once the group row exists the superseding package's own
+    pass over ``groups`` finds it already there and never re-records the
+    fact -- if the marker were dropped instead of moved, ``group_members``
+    would find the group missing from ``_created_parents`` and skip every row
+    for it as "already existed at the target", exactly as if this import
+    chain had never created that group at all.
+
+    A notebook's equivalent fact needs no such transfer: it lives in the
+    notebook row's own ``status``/``sync_origin`` (``_IMPORT_IN_FLIGHT_STATUS``),
+    which is read straight from ``notebooks`` and is already keyed by
+    ``source_env``+id, not by ``package_id`` -- retiring the old package
+    row does not touch it.
+
+    Uses Python's ``str.startswith`` rather than SQL ``LIKE`` for the prefix
+    match, same reason as ``_created_parents``: the prefix contains ``_``
+    characters, which ``LIKE`` reads as single-character wildcards."""
+    prefix = _CREATED_STEP_PREFIX + "groups" + ":"
+    new_package_id = context.manifest.package_id
+    already_theirs = {
+        str(row["table_name"])
+        for row in backend.fetch(
+            conn,
+            "SELECT table_name FROM sync_import_progress WHERE package_id = ?",
+            (new_package_id,),
+        )
+        if str(row["table_name"]).startswith(prefix)
+    }
+    markers = [
+        str(row["table_name"])
+        for row in backend.fetch(
+            conn,
+            "SELECT table_name FROM sync_import_progress WHERE package_id = ?",
+            (old_package_id,),
+        )
+        if str(row["table_name"]).startswith(prefix)
+    ]
+    for step in markers:
+        if step in already_theirs:
+            # The new package's own earlier attempt already recorded the same
+            # group; nothing to move, and the caller's DELETE drops the old
+            # duplicate along with the rest of the retired progress.
+            continue
+        conn.execute(
+            backend.sql(
+                "UPDATE sync_import_progress SET package_id = ? "
+                "WHERE package_id = ? AND table_name = ?"
+            ),
+            (new_package_id, old_package_id, step),
         )
 
 
@@ -1852,19 +1981,30 @@ def _record_progress(
             "WHERE package_id = ?"
         ),
         (
-            _running_report_json(context.manifest.created_at, completed_at),
+            _running_report_json(
+                context.manifest.created_at, completed_at, context.manifest.notebooks
+            ),
             context.manifest.package_id,
         ),
     )
 
 
-def _running_report_json(created_at: str, heartbeat: datetime) -> str:
+def _running_report_json(
+    created_at: str, heartbeat: datetime, notebooks: Sequence[str]
+) -> str:
     """``report_json`` for a row that is still running: which snapshot it is
-    applying, and when it last committed anything."""
+    applying, when it last committed anything, and which notebooks it covers.
+
+    ``notebooks`` is written here (not only in the final ``ImportReport``) so
+    that a package taken over while still 'running' -- never reaching the
+    ``except`` handler that builds the full report -- still leaves behind
+    enough to answer "does the package that supersedes this one cover
+    everything this one covered?" (``_supersede_outstanding``)."""
     return json.dumps(
         {
             _PACKAGE_CREATED_AT_KEY: created_at,
             _HEARTBEAT_AT_KEY: heartbeat.isoformat(),
+            "notebooks": list(notebooks),
         },
         ensure_ascii=False,
         sort_keys=True,
