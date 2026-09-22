@@ -6,10 +6,12 @@ bare migrated ``SqliteDatabase``, mirroring ``test_agent_profile_store.py``'s
 rationale: this file proves the STORE primitive in isolation, and the
 distillation service that drives it has its own file.
 
-The table has no foreign key in either direction and no tenancy column, so
-these tests seed nothing at all — which is itself worth noticing, because it is
-the structural fact that makes deep copy unable to reach the table and makes
-``scripts/merge_dbs.py`` classify it as a global union table.
+The table has no foreign key in either direction, so these tests seed no
+notebook, no user and no run — and a partition id here is just a string nobody
+has to have created. That is not an accident of the fixture: it is why a
+deleted notebook's partition has to be cleared by an explicit registry entry
+rather than by a cascade, and why ``scripts/merge_dbs.py`` still classifies the
+table as a global union table after SQLite v79 gave it a ``notebook_id``.
 """
 from __future__ import annotations
 
@@ -289,7 +291,7 @@ def test_eviction_drops_unused_entries_before_thinly_supported_ones(store, clock
     _seed(store, clock, "rx_thin", adopted=0, support=1, at="2026-08-03T00:00:00+00:00")
 
     assert store.evict_to_limit(2) == 1
-    surviving = {row["id"] for row in store.read_all(50)}
+    surviving = {row["id"] for row in store.read_partition("", 50)}
     # ``adopted`` outranks ``support``: the single-run entry someone actually
     # acted on survives, the never-adopted single-run entry does not.
     assert surviving == {"rx_used", "rx_backed"}
@@ -315,7 +317,7 @@ def test_eviction_breaks_ties_by_id_not_by_insertion_order(store, clock):
     for name in ("rx_ccc", "rx_bbb", "rx_aaa"):
         _seed(store, clock, name, adopted=0, support=1, at="2026-08-01T00:00:00+00:00")
     assert store.evict_to_limit(2) == 1
-    assert {row["id"] for row in store.read_all(50)} == {"rx_bbb", "rx_ccc"}
+    assert {row["id"] for row in store.read_partition("", 50)} == {"rx_bbb", "rx_ccc"}
 
 
 def test_eviction_is_a_no_op_below_the_limit(store, clock):
@@ -328,7 +330,7 @@ def test_note_adopted_only_touches_the_named_entries(store, clock):
     _seed(store, clock, "rx_a", adopted=0, support=1, at="2026-08-01T00:00:00+00:00")
     _seed(store, clock, "rx_b", adopted=0, support=1, at="2026-08-01T00:00:00+00:00")
     assert store.note_adopted(["rx_a"]) == 1
-    by_id = {row["id"]: row for row in store.read_all(50)}
+    by_id = {row["id"]: row for row in store.read_partition("", 50)}
     assert by_id["rx_a"]["adopted"] == 1
     assert by_id["rx_b"]["adopted"] == 0
 
@@ -339,11 +341,11 @@ def test_note_adopted_refuses_a_negative_delta(store, clock):
         store.note_adopted(["rx_a"], -1)
 
 
-def test_read_all_is_deterministically_ordered_and_bounded(store, clock):
+def test_read_partition_is_deterministically_ordered_and_bounded(store, clock):
     for name in ("rx_c", "rx_a", "rx_b"):
         _seed(store, clock, name, adopted=0, support=1, at="2026-08-01T00:00:00+00:00")
-    assert [row["id"] for row in store.read_all(50)] == ["rx_a", "rx_b", "rx_c"]
-    assert [row["id"] for row in store.read_all(2)] == ["rx_a", "rx_b"]
+    assert [row["id"] for row in store.read_partition("", 50)] == ["rx_a", "rx_b", "rx_c"]
+    assert [row["id"] for row in store.read_partition("", 2)] == ["rx_a", "rx_b"]
 
 
 def test_a_stored_row_round_trips_to_its_own_content_addressed_id(store):
@@ -453,3 +455,168 @@ def test_a_write_moves_the_signal_even_when_the_db_halves_cannot_see_it(store, c
     after = store.version_signal()
     assert after[1:] == before[1:]     # DB 两元对这次写完全失明
     assert after[0] > before[0]        # 修订元看得见
+
+
+# ----------------------------------------------------- SQLite v79: partitions
+
+
+def _seed_in(store, clock, entry_id: str, partition: str, *, at: str):
+    clock.value = at
+    store.upsert_experience(
+        entry_id,
+        situation=SITUATION,
+        action="ppr",
+        polarity="good",
+        rationale="x",
+        provenance=[f"{entry_id}-run"],
+        provenance_max=50,
+        replace_conclusion=False,
+        notebook_id=partition,
+    )
+
+
+def test_a_partitioned_read_sees_only_its_own_partition(store, clock):
+    """The whole point of v79, stated as the smallest possible property.
+
+    Three partitions, one entry each. Each read has to return exactly one row,
+    and the global read must not act as "everything" — the failure this pins is
+    a predicate accidentally dropped from ``read_partition``, which would still
+    look right on any fixture that only ever wrote one partition.
+    """
+    _seed_in(store, clock, "rx_g", "", at="2026-08-01T00:00:00+00:00")
+    _seed_in(store, clock, "rx_a", "nb-a", at="2026-08-01T00:00:00+00:00")
+    _seed_in(store, clock, "rx_b", "nb-b", at="2026-08-01T00:00:00+00:00")
+
+    assert [row["id"] for row in store.read_partition("", 50)] == ["rx_g"]
+    assert [row["id"] for row in store.read_partition("nb-a", 50)] == ["rx_a"]
+    assert [row["id"] for row in store.read_partition("nb-b", 50)] == ["rx_b"]
+    assert store.read_partition("nb-never-written", 50) == []
+
+
+def test_a_row_reports_the_partition_it_was_written_into(store, clock):
+    _seed_in(store, clock, "rx_g", "", at="2026-08-01T00:00:00+00:00")
+    _seed_in(store, clock, "rx_a", "nb-a", at="2026-08-01T00:00:00+00:00")
+    assert store.read_experience("rx_g")["notebook_id"] == ""
+    assert store.read_experience("rx_a")["notebook_id"] == "nb-a"
+
+
+def test_a_merge_into_an_existing_entry_leaves_its_partition_alone(store, clock):
+    """The UPDATE branch must not touch ``notebook_id``.
+
+    The id already encodes the partition, so a merge that rewrote the column
+    could only ever move an entry to a partition its own id does not describe —
+    and it would do so silently, because every counter would still add up.
+    """
+    _seed_in(store, clock, "rx_a", "nb-a", at="2026-08-01T00:00:00+00:00")
+    store.upsert_experience(
+        "rx_a",
+        situation=SITUATION,
+        action="ppr",
+        polarity="bad",
+        rationale="改写结论",
+        provenance=["rx_a-run-2"],
+        provenance_max=50,
+        replace_conclusion=True,
+        notebook_id="nb-somewhere-else",
+    )
+    assert store.read_experience("rx_a")["notebook_id"] == "nb-a"
+    assert [row["id"] for row in store.read_partition("nb-a", 50)] == ["rx_a"]
+
+
+def test_eviction_stays_inside_the_partition_it_was_asked_about(store, clock):
+    """The failure this pins is the expensive one: a busy notebook trimming
+    somebody else's entries.
+
+    ``nb-a`` is three rows over a cap of one. The global partition's two rows
+    are OLDER and equally unadopted, so a whole-table eviction — or one with
+    the predicate on the count but not on the inner select — would delete them
+    first and leave ``nb-a`` untouched, reporting a perfectly plausible count.
+    """
+    _seed_in(store, clock, "rx_g1", "", at="2026-07-01T00:00:00+00:00")
+    _seed_in(store, clock, "rx_g2", "", at="2026-07-02T00:00:00+00:00")
+    for index, name in enumerate(("rx_a1", "rx_a2", "rx_a3", "rx_a4")):
+        _seed_in(store, clock, name, "nb-a", at=f"2026-08-0{index + 1}T00:00:00+00:00")
+
+    assert store.evict_to_limit(1, "nb-a") == 3
+    assert [row["id"] for row in store.read_partition("nb-a", 50)] == ["rx_a4"]
+    assert [row["id"] for row in store.read_partition("", 50)] == ["rx_g1", "rx_g2"]
+
+
+def test_count_answers_one_partition_or_the_whole_table(store, clock):
+    _seed_in(store, clock, "rx_g", "", at="2026-08-01T00:00:00+00:00")
+    _seed_in(store, clock, "rx_a", "nb-a", at="2026-08-01T00:00:00+00:00")
+    _seed_in(store, clock, "rx_b", "nb-b", at="2026-08-01T00:00:00+00:00")
+
+    assert store.count() == 3            # no argument = the whole table
+    assert store.count(None) == 3
+    assert store.count("") == 1          # "" is a partition, not "everything"
+    assert store.count("nb-a") == 1
+    assert store.count("nb-missing") == 0
+
+
+def test_the_global_partitions_id_is_byte_identical_to_the_pre_v79_one():
+    """The compatibility guarantee behind "v79 recomputes nothing", pinned as
+    a LITERAL rather than as a comparison against the code that produces it.
+
+    ``rx_dfd8a477f74a873ffe793e595d6af03b`` was computed by the pre-v79
+    implementation for this exact (situation, action) — before ``partition``
+    existed as a parameter at all. A test that re-derived the expectation from
+    today's ``experience_id`` would pass no matter how the payload changed;
+    this one fails the moment the global branch stops hashing what v54's rows
+    were filed under, which is the moment every already-deployed database and
+    every cross-deployment ``merge_dbs`` union quietly starts duplicating
+    entries instead of collapsing them.
+    """
+    from app.services.retrieval_experience_projection import experience_id
+
+    assert experience_id(SITUATION, "ppr") == "rx_dfd8a477f74a873ffe793e595d6af03b"
+    assert experience_id(SITUATION, "ppr", "") == (
+        "rx_dfd8a477f74a873ffe793e595d6af03b"
+    )
+
+
+def test_each_partition_files_the_same_conclusion_under_its_own_id():
+    """Same situation, same action, three partitions, three ids — and the
+    non-global ones are pinned as literals too, because changing the payload's
+    shape silently re-keys every notebook's entries into rows nothing will ever
+    read again.
+    """
+    from app.services.retrieval_experience_projection import experience_id
+
+    ids = {
+        partition: experience_id(SITUATION, "ppr", partition)
+        for partition in ("", "nb-a", "nb-b")
+    }
+    assert len(set(ids.values())) == 3
+    assert ids["nb-a"] == "rx_58aa1795e12131b8167acabbefb9787d"
+    assert ids["nb-b"] == "rx_4d2dd051cc05566f2920344be94c8ea3"
+
+
+def test_two_partitions_hold_the_same_conclusion_as_two_independent_rows(
+    store, clock
+):
+    """The store-level consequence of the id branch above: the same
+    (situation, action) written into two partitions is two rows with
+    independent counters, not one row whose evidence is pooled.
+    """
+    from app.services.retrieval_experience_projection import experience_id
+
+    for partition, support in (("nb-a", 1), ("nb-b", 3)):
+        store.upsert_experience(
+            experience_id(SITUATION, "ppr", partition),
+            situation=SITUATION,
+            action="ppr",
+            polarity="good",
+            rationale="x",
+            provenance=[f"{partition}-run-{index}" for index in range(support)],
+            provenance_max=50,
+            replace_conclusion=False,
+            notebook_id=partition,
+        )
+
+    a = store.read_partition("nb-a", 50)
+    b = store.read_partition("nb-b", 50)
+    assert [row["support"] for row in a] == [1]
+    assert [row["support"] for row in b] == [3]
+    assert a[0]["id"] != b[0]["id"]
+    assert store.count() == 2

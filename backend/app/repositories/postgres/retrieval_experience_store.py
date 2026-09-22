@@ -1,5 +1,6 @@
-"""PostgreSQL row persistence for Agentic Memory P2's deployment-GLOBAL
-retrieval-strategy experience library (``retrieval_experiences``).
+"""PostgreSQL row persistence for Agentic Memory P2's retrieval-strategy
+experience library (``retrieval_experiences``), partitioned by notebook since
+schema 0059.
 
 A behavioural mirror of ``app/repositories/sqlite/retrieval_experience_store``:
 same method names, same bounds, same return shapes (``situation`` decoded to a
@@ -11,8 +12,8 @@ serialisation, and ``COLLATE "C"`` on the ordering key so a non-C-collated
 database pages in the same order SQLite does.
 
 See ``RetrievalExperienceStorePort`` in ``app/repositories/ports.py`` for the
-contract, including why a store with no tenancy column at all is the right
-shape here and what carries its isolation argument instead.
+contract, including why ``notebook_id`` is a partition key rather than a
+tenancy column and what carries the isolation argument instead.
 """
 from __future__ import annotations
 
@@ -68,29 +69,28 @@ class RetrievalExperienceStore:
             "provenance": [
                 str(item) for item in (json_value(row["provenance_json"], []) or [])
             ],
+            "notebook_id": row["notebook_id"],
             "created_at": iso_timestamp(row["created_at"]),
             "updated_at": iso_timestamp(row["updated_at"]),
         }
 
-    def read_all(self, limit: int) -> list[dict]:
-        """The whole library. Bounded RETURN, UNBOUNDED SCAN — see the SQLite
-        mirror's docstring for why an index here is deliberately deferred
-        (registered, not overlooked) rather than added: the score this table
-        is read for is a set-overlap comparison no index answers, and the row
-        count is capped small enough by eviction that a full scan costs
-        nothing a query run once every ``RETRIEVAL_EXPERIENCE_TRIGGER``
-        completed asks would notice.
+    def read_partition(self, notebook_id: str, limit: int) -> list[dict]:
+        """ONE partition (``""`` = the global one) — see the SQLite mirror's
+        docstring for why the index this read uses arrived with v79 / 0059
+        rather than with the original table, and why the read is an equality
+        never a prefix or a union.
 
         ``ORDER BY id COLLATE "C"`` rather than a bare ``ORDER BY id``: the ids
         are lowercase hex, so any sane collation agrees today — but the SQLite
         mirror orders by raw byte value, and pinning the collation is what
-        keeps "two reads over an unchanged table are byte-identical ACROSS
+        keeps "two reads over an unchanged partition are byte-identical ACROSS
         backends" true rather than accidentally true.
         """
         with self.database.connect() as db:
             rows = db.execute(
-                'SELECT * FROM retrieval_experiences ORDER BY id COLLATE "C" LIMIT %s',
-                (max(0, int(limit)),),
+                "SELECT * FROM retrieval_experiences WHERE notebook_id=%s "
+                'ORDER BY id COLLATE "C" LIMIT %s',
+                (str(notebook_id or ""), max(0, int(limit))),
             ).fetchall()
         return [self._experience_row(row) for row in rows]
 
@@ -113,9 +113,11 @@ class RetrievalExperienceStore:
         provenance: Sequence[str],
         provenance_max: int,
         replace_conclusion: bool,
+        notebook_id: str = "",
     ) -> dict:
         """Create or merge ONE entry — see the port docstring for the merge
-        semantics. This backend's specifics:
+        semantics, including why ``notebook_id`` is written on the INSERT
+        branch only. This backend's specifics:
 
         ⚠ The read that decides the merge takes ``FOR UPDATE``. SQLite gets the
         same guarantee from ``begin_immediate``'s process-wide write lock;
@@ -165,8 +167,9 @@ class RetrievalExperienceStore:
                 insert_cursor = db.execute(
                     "INSERT INTO retrieval_experiences "
                     "(id,situation_json,action,polarity,rationale,support,"
-                    "adopted,provenance_json,created_at,updated_at) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,0,%s,%s,%s) "
+                    "adopted,provenance_json,notebook_id,created_at,"
+                    "updated_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,0,%s,%s,%s,%s) "
                     "ON CONFLICT (id) DO NOTHING",
                     (
                         experience_id,
@@ -176,6 +179,7 @@ class RetrievalExperienceStore:
                         rationale,
                         len(fresh),
                         jsonb(fresh),
+                        str(notebook_id or ""),
                         now,
                         now,
                     ),
@@ -258,14 +262,21 @@ class RetrievalExperienceStore:
             )
         return cursor.rowcount
 
-    def evict_to_limit(self, max_entries: int) -> int:
-        """Trim to ``max_entries`` rows, ascending by
+    def evict_to_limit(self, max_entries: int, notebook_id: str = "") -> int:
+        """Trim ONE partition to ``max_entries`` rows, ascending by
         ``(adopted, support, updated_at, id)``. Returns the row count deleted.
 
         One statement rather than SQLite's count-then-delete pair: PostgreSQL
         can name the survivors directly as "the first ``max_entries`` in the
         REVERSED ordering", so there is no window in which a concurrent insert
         could invalidate a separately computed overflow.
+
+        ⚠ The ``notebook_id`` predicate belongs on the INNER select, which is
+        the only place it can express "the best ``max_entries`` OF THIS
+        PARTITION". Moved to the outer ``DELETE`` instead, the ``OFFSET`` would
+        still be counted over the whole table, so a partition under its own cap
+        could have rows deleted the moment some other partition grew — see the
+        SQLite mirror for the same trap stated from the count side.
 
         ⚠ Note the ordering is ``DESC`` here while the SQLite mirror's is
         ``ASC``, and the two still delete the same rows: SQLite takes the
@@ -276,22 +287,31 @@ class RetrievalExperienceStore:
         about which of several tied entries survived.
         """
         keep = max(0, int(max_entries))
+        partition = str(notebook_id or "")
         with self.database.write() as db:
             cursor = db.execute(
                 "DELETE FROM retrieval_experiences WHERE id IN ("
-                "SELECT id FROM retrieval_experiences "
+                "SELECT id FROM retrieval_experiences WHERE notebook_id=%s "
                 "ORDER BY adopted DESC, support DESC, updated_at DESC, "
                 'id COLLATE "C" DESC OFFSET %s)',
-                (keep,),
+                (partition, keep),
             )
         self._mutations += 1
         return cursor.rowcount
 
-    def count(self) -> int:
+    def count(self, notebook_id: str | None = None) -> int:
+        """One partition's rows, or (``None``) the whole table's."""
         with self.database.connect() as db:
-            row = db.execute(
-                "SELECT COUNT(*) AS n FROM retrieval_experiences"
-            ).fetchone()
+            if notebook_id is None:
+                row = db.execute(
+                    "SELECT COUNT(*) AS n FROM retrieval_experiences"
+                ).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT COUNT(*) AS n FROM retrieval_experiences "
+                    "WHERE notebook_id=%s",
+                    (str(notebook_id),),
+                ).fetchone()
         return int(row["n"])
 
     def version_signal(self) -> tuple[int, int, str]:

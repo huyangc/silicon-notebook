@@ -322,6 +322,50 @@ def test_post_union_eviction_recaps_the_experience_library(fresh_db):
     assert survivors_min is not None
 
 
+def test_post_union_eviction_recaps_each_partition_against_its_own_cap(fresh_db):
+    """SQLite v79:收容必须**逐分区**各算各的,不是整表一刀切。
+
+    这里刻意让每个笔记本分区的行看起来都比全局分区"更没价值"(全局那批
+    adopted/support 都更高)。整表一刀切会把两个库的分区整个删光、全局分区
+    一行不动,而返回的条数看上去完全合理——那正是这条用例要挡住的形态。
+    """
+    conn = fresh_db
+    rows = (
+        [("", index, 5, 5) for index in range(320)]
+        + [("nb-a", index, 0, 0) for index in range(140)]
+        + [("nb-b", index, 0, 0) for index in range(30)]
+    )
+    for partition, index, support, adopted in rows:
+        conn.execute(
+            "INSERT INTO retrieval_experiences"
+            "(id, situation_json, action, polarity, rationale, support,"
+            " adopted, provenance_json, notebook_id, created_at, updated_at)"
+            " VALUES (?, '{}', 'ppr', 'bad', '', ?, ?, '[]', ?,"
+            " '2026-08-01T00:00:00+00:00', '2026-08-01T00:00:00+00:00')",
+            (f"rx-{partition}-{index:04d}", support, adopted, partition),
+        )
+    conn.commit()
+
+    # 20 (全局 320→300) + 40 (nb-a 140→100) + 0 (nb-b 30 未超 100)
+    assert merge_dbs._evict_experiences_to_limit(conn) == 60
+    counts = dict(
+        conn.execute(
+            "SELECT notebook_id, COUNT(*) FROM retrieval_experiences "
+            "GROUP BY notebook_id"
+        ).fetchall()
+    )
+    assert counts == {"": 300, "nb-a": 100, "nb-b": 30}
+
+
+def test_the_offline_notebook_cap_matches_the_runtime_protocol_constant():
+    """与全局上限那条同款:离线脚本从 ports 直接取常量,这里钉住它取的确实是
+    分区上限而不是又一份手抄数字。"""
+    from app.repositories.ports import RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES
+
+    offline_default = merge_dbs._evict_experiences_to_limit.__defaults__[1]
+    assert offline_default == RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES
+
+
 def test_merge_core_actually_wires_the_post_union_eviction():
     """接线守卫:上面那条测的是 helper 本身,直接调用绕过了 merge_core——把
     调用点删掉它照样绿(变异实测)。这里按源码钉住 merge_core 真的在 GLOBAL_UNION

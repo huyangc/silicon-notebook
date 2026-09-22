@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=78, postgres_version=58, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=79, postgres_version=59, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -686,11 +686,15 @@ _TABLES = (
         85,
         "timestamptz",
     ),
-    # SQLite v54 / PostgreSQL v32: Agentic Memory P2's deployment-global
-    # retrieval-strategy experience library. It has NO parent at all — no
-    # notebook_id, no owner, no foreign key of any kind — so the appended rank
-    # is FK-consistent by construction, and it has no incoming foreign key
-    # either (it stays a leaf table).
+    # SQLite v54 / PostgreSQL v32: Agentic Memory P2's retrieval-strategy
+    # experience library, partitioned by notebook since SQLite v79 /
+    # PostgreSQL 0059. It still has NO parent — the v79 ``notebook_id`` is a
+    # partition key with NO foreign key into ``notebooks`` (deletion clears a
+    # partition through the explicit phase-3 registry instead), and there is
+    # no owner column — so the appended rank stays FK-consistent by
+    # construction, and it has no incoming foreign key either (it stays a leaf
+    # table). v79's index is deliberately non-unique, so the unique-surface
+    # set below is unchanged by that hop.
     #
     # The declared replication key is the table's single-column, CONTENT-
     # ADDRESSED primary key, and that equality is the park precondition (see

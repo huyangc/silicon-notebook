@@ -5394,22 +5394,40 @@ class AgentProfileStorePort(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Agentic Memory P2 (A / T5): the deployment-GLOBAL retrieval-strategy
-# experience library.
+# Agentic Memory P2 (A / T5): the retrieval-strategy experience library,
+# partitioned by notebook since SQLite v79 / PostgreSQL 0059 — one partition
+# per notebook, plus the ``''`` global partition that predates the hop and
+# still serves as every new library's cold-start fallback.
 # ---------------------------------------------------------------------------
 
-#: Hard ceiling on how many experience entries the deployment keeps. When the
-#: table grows past it, the distillation run evicts ascending by
-#: ``(adopted, support, updated_at)`` — unused entries first, then thinly
-#: supported ones, and only then by age.
+#: Hard ceiling on how many experience entries the GLOBAL partition
+#: (``notebook_id = ''``) keeps. When it grows past this, the distillation run
+#: evicts ascending by ``(adopted, support, updated_at)`` — unused entries
+#: first, then thinly supported ones, and only then by age.
 #:
 #: The number is small on purpose and is a QUALITY bound, not a storage one.
-#: Every read of this table is a bounded full scan (there is no index, and no
-#: query narrows it), and the injection side scores every row against the
-#: current situation in memory; a library of tens of thousands of entries would
-#: not make the advice better, it would make the top-k a lottery among near
-#: duplicates while costing a scan on a hot path.
+#: Every read of this table is a bounded scan over one partition, and the
+#: injection side scores every row it got back against the current situation in
+#: memory; a library of tens of thousands of entries would not make the advice
+#: better, it would make the top-k a lottery among near duplicates while
+#: costing a scan on a hot path.
 RETRIEVAL_EXPERIENCE_MAX_ENTRIES = 300
+
+#: The same ceiling for ONE notebook's partition (``notebook_id`` non-empty).
+#: Smaller than the global one because a single library's entries are drawn
+#: from a single library's traffic: the shapes of question it sees are fewer,
+#: so a bigger cap would buy near duplicates rather than coverage.
+#:
+#: ⚠ The TABLE total is therefore no longer bounded by one constant — it is
+#: ``RETRIEVAL_EXPERIENCE_MAX_ENTRIES + this × (notebooks with traffic)``. That
+#: is registered, not overlooked (design doc Sec 3): every read still narrows
+#: to ONE partition through the v79 index, so no reader's cost grows with the
+#: number of notebooks; only the table's disk footprint does.
+#:
+#: A protocol constant rather than an env knob, mirroring the global ceiling
+#: above: ``scripts/merge_dbs.py`` trims a merged database to the same two
+#: numbers offline, where no deployment configuration is loaded at all.
+RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES = 100
 
 #: How many opaque run ids ONE entry retains as provenance. This set is what
 #: makes distillation idempotent: a run id already listed does not increment
@@ -5440,31 +5458,55 @@ RETRIEVAL_EXPERIENCE_RATIONALE_MAX_CHARS = 160
 
 class RetrievalExperienceStorePort(Protocol):
     """Durable rows for ``retrieval_experiences`` — Agentic Memory P2's
-    deployment-GLOBAL retrieval-strategy experience library.
+    retrieval-strategy experience library, PARTITIONED BY NOTEBOOK since
+    SQLite v79 / PostgreSQL 0059.
 
-    ⚠ This is the only store in the repository with NO tenancy column at all:
-    no ``notebook_id``, no ``created_by``, no ``owner_id``. That is the point
-    of the table and also the reason its safety argument has to be a different
-    one from every other store here. Everywhere else, isolation is a predicate
-    in the SQL text (``memory_items.created_by``, ``agent_notebook_profile``'s
-    ``owner_id IN ('', ?)``). There is no predicate to write here, so the
-    isolation is instead STRUCTURAL and lives one layer up, in what may become
-    a row at all: the distillation input is projected to
-    ``RunObservation`` — a frozen dataclass whose every field is an ``int``, a
-    ``bool`` or a closed ``Literal``, with no free-text field anywhere in its
-    reachable shape — so the model that writes ``rationale`` has never seen a
-    question, an answer, a document title or an id. See
-    ``app/services/retrieval_experience_projection.py``.
+    ``notebook_id`` is a PARTITION KEY, not a tenancy column in the sense the
+    rest of this file uses the word. ``''`` is the global partition (every row
+    written before v79, and everything the deployment-wide distillation chain
+    writes); a non-empty value is one notebook's own partition, shared by ALL
+    of that notebook's members. There is still no ``created_by`` and no
+    ``owner_id``: an entry belongs to a library, never to a person.
+
+    ⚠ The safety argument is therefore still not "a predicate in the SQL
+    text". Partitioning narrows who can see an entry, but what makes an entry
+    safe to see at all is STRUCTURAL and lives one layer up, in what may become
+    a row: the distillation input is projected to ``RunObservation`` — a frozen
+    dataclass whose every field is an ``int``, a ``bool`` or a closed
+    ``Literal``, with no free-text field anywhere in its reachable shape — so
+    the model that writes ``rationale`` has never seen a question, an answer, a
+    document title or an id. The partition id is passed to the store as a
+    parameter and never reaches that projection. See
+    ``app/services/retrieval_experience_projection.py`` and the privacy guard
+    ``backend/tests/test_retrieval_experience_privacy_guard.py``.
 
     Every read here is bounded by construction: a primary-key point lookup, or
-    a full scan over a table whose row count is hard-capped at
-    ``RETRIEVAL_EXPERIENCE_MAX_ENTRIES`` (the injection side scores rows in
-    memory rather than asking the database to rank them — the situation
-    similarity is a set overlap over closed enum values, which no index can
-    answer).
+    a scan over ONE partition, whose row count is hard-capped at
+    ``RETRIEVAL_EXPERIENCE_MAX_ENTRIES`` (global) or
+    ``RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES`` (a notebook's own). The
+    injection side scores the rows it got back in memory rather than asking the
+    database to rank them — the situation similarity is a set overlap over
+    closed enum values, which no index can answer.
     """
 
-    def read_all(self, limit: int) -> list[dict]: ...
+    def read_partition(self, notebook_id: str, limit: int) -> list[dict]:
+        """ONE partition's entries, ordered by ``id``.
+
+        ``notebook_id=""`` reads the global partition, and reads NOTHING else:
+        a partitioned read is an equality predicate, never a prefix or a
+        union. A caller that wants "this notebook's entries, then the global
+        ones as a fallback" makes two calls and merges them itself, so the
+        precedence between the two is decided where the product rule lives
+        rather than buried in a store method.
+
+        The ``limit`` bounds what comes BACK; the distillation's own eviction
+        bounds how big a partition ever gets. ``ORDER BY id`` (the content
+        hash) rather than by any counter — the caller ranks in memory, and a
+        stable order makes two reads over an unchanged partition
+        byte-identical, which is what lets the injection side memoise the
+        result.
+        """
+        ...
     def read_experience(self, experience_id: str) -> dict | None: ...
     def upsert_experience(
         self,
@@ -5477,14 +5519,26 @@ class RetrievalExperienceStorePort(Protocol):
         provenance: Sequence[str],
         provenance_max: int,
         replace_conclusion: bool,
+        notebook_id: str = "",
     ) -> dict:
         """Create or merge ONE entry, keyed by its content-addressed id.
 
-        ⚠ ``experience_id`` is computed by the CALLER (from ``situation`` and
-        ``action``, via ``retrieval_experience_projection.experience_id``) and
-        is never re-derived here. It is passed in rather than computed inside
-        so the hash function has exactly one definition — the same one the
-        injection side and the merge tool reason about.
+        ⚠ ``experience_id`` is computed by the CALLER (from ``situation``,
+        ``action`` and the PARTITION, via
+        ``retrieval_experience_projection.experience_id``) and is never
+        re-derived here. It is passed in rather than computed inside so the
+        hash function has exactly one definition — the same one the injection
+        side and the merge tool reason about.
+
+        ⚠ ``notebook_id`` is written only on the INSERT branch, and the merge
+        branch never touches it. That is not an omission: the id the caller
+        computed already encodes the partition, so a row reached by that id is
+        by construction in that partition, and an UPDATE of the column could
+        only ever be a no-op or a corruption. A caller that passes an id
+        computed for one partition together with a different ``notebook_id``
+        gets an entry filed where the id says, which the store cannot detect —
+        the one invariant both are derived from lives at the single call site
+        in ``retrieval_experience_job.py``.
 
         ``situation`` is serialised here rather than by the caller, with sorted
         keys, so both backends store the same canonical text and a row read
@@ -5536,9 +5590,16 @@ class RetrievalExperienceStorePort(Protocol):
         """
         ...
 
-    def evict_to_limit(self, max_entries: int) -> int:
-        """Trim the table to ``max_entries`` rows, ascending by
+    def evict_to_limit(self, max_entries: int, notebook_id: str = "") -> int:
+        """Trim ONE partition to ``max_entries`` rows, ascending by
         ``(adopted, support, updated_at, id)``; returns the row count deleted.
+
+        ⚠ Both the count and the delete are confined to ``notebook_id``. A
+        whole-table trim would be a data-loss bug now rather than a policy
+        choice: a busy notebook's partition would evict the global partition's
+        entries (or another notebook's) purely for having been written later,
+        and the caller — which just distilled ONE partition — has no evidence
+        about any other.
 
         ``id`` is the final tie-break so the deletion is deterministic even
         when three entries were written in the same second by the same batch
@@ -5548,7 +5609,17 @@ class RetrievalExperienceStorePort(Protocol):
         """
         ...
 
-    def count(self) -> int: ...
+    def count(self, notebook_id: str | None = None) -> int:
+        """Row count — for ONE partition, or (``None``) for the whole table.
+
+        The two are different questions and both have a caller: a partition's
+        count is what an eviction policy and an operator-facing "what has this
+        library learned" reading are about, while the table total is what a
+        storage-footprint check is about. ``None`` rather than a second method
+        name because "no partition asked for" is exactly the absent-argument
+        case, and ``""`` already means the global partition.
+        """
+        ...
 
     def version_signal(self) -> tuple[int, int, str]:
         """``(mutation revision, row count, newest updated_at)``, for the injection side's memo.

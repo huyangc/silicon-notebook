@@ -60,7 +60,7 @@ def store(request) -> ExtensionToggleStore:
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 58
+    assert PostgresMigrator(database).migrate() == 59
     return ExtensionToggleStore(database)
 
 

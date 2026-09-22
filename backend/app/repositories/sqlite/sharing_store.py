@@ -108,14 +108,19 @@ _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type = 'knowhow'"
 # notebook and belong with the rest of its knowledge. Do not "fix" either
 # file to match the other.
 #
-# `retrieval_experiences` (Agentic Memory P2, schema v53) is absent for a
-# structurally different reason and is NOT a decision this snapshot could make
-# either way: it is deployment-GLOBAL — it has no `notebook_id` column and no
-# owner column at all, so every query in this list is built on a predicate it
-# does not have. Deep copy cannot reach it, the same sentence that already
-# covers `groups`/`group_members`. Its rows are general tactics for HOW to
-# search rather than anything belonging to a notebook, so a copy inherits them
-# by simply existing in the same deployment.
+# `retrieval_experiences` (Agentic Memory P2) is absent DELIBERATELY, and
+# since schema v79 that is a decision rather than a structural impossibility:
+# the table now carries a `notebook_id` PARTITION column, so the predicate this
+# list is built on does exist and a copy COULD be written. It is not, mirroring
+# `agent_notebook_profile` (Agentic Memory P1, absent from this list for the
+# same reason): an entry says "in this shape of question, this retrieval action
+# did or did not pay off IN THIS LIBRARY", and that conclusion was measured
+# against the original's traffic, its members and its own corpus. A copy starts
+# with none of that, so the honest state for its partition is empty — it earns
+# its own entries from its own runs. The `''` global partition needs no
+# decision at all: it belongs to no notebook, and a copy inherits it by simply
+# living in the same deployment, the same sentence that already covers
+# `groups`/`group_members`.
 #
 # Deliberately PRESENT but re-evaluated, not replayed: `notebook_bases`
 # (multi-domain base libraries, schema v20 — followups spec A6). A mount edge

@@ -335,7 +335,13 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # timestamp in this table family is text on PostgreSQL too (0056) and the
 # watermark must compare against global_ask_jobs.created_at under the
 # canonical (created_at, id) order.
+# SQLite v79 / PostgreSQL 0059 add retrieval_experiences.notebook_id (NOT NULL
+# DEFAULT '', '' = the global partition every pre-existing row falls into) plus
+# the NON-UNIQUE idx_retrieval_experiences_notebook. No new table, foreign key
+# or unique surface, and no backfill pass: the default IS the backfill and no
+# content-addressed id is recomputed (the global partition's hash input stays
+# byte-identical).
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=78,
-    postgres_version=58,
+    sqlite_version=79,
+    postgres_version=59,
 )

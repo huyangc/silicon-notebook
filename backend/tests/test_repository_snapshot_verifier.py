@@ -48,7 +48,43 @@ FIXTURE_SECRETS = (
 )
 
 
+def _rollback_v79(db: sqlite3.Connection) -> None:
+    db.execute("DROP INDEX idx_retrieval_experiences_notebook")
+    db.execute("ALTER TABLE retrieval_experiences DROP COLUMN notebook_id")
+
+
+def test_deployed_v78_database_verifies_retrieval_experience_partition(tmp_path):
+    """A deployed v78 database is missing exactly _migration_79's addition:
+    `retrieval_experiences.notebook_id` plus its non-unique index.
+
+    The hop is as narrow as a hop can be — one column with a NOT NULL default
+    that is also its own backfill, and one index. `changed_tables` must stay
+    empty: the migration rewrites no row, and in particular recomputes no
+    content-addressed id (the global partition's hash input is unchanged by
+    construction). A non-empty list here would mean the partition column
+    arrived together with a data pass nobody declared.
+    """
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+
+    with sqlite3.connect(database) as rollback:
+        _rollback_v79(rollback)
+        rollback.execute("PRAGMA user_version = 78")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 78
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+
+
 def _rollback_v78(db: sqlite3.Connection) -> None:
+    _rollback_v79(db)
     for table in ("auth_identity_audit","auth_policy_audit","auth_transactions","external_identities","auth_policy"):
         db.execute(f"DROP TABLE {table}")
     db.execute("DROP INDEX idx_users_local_login_name")

@@ -1,0 +1,43 @@
+-- Mirror SQLite v79: partition retrieval_experiences by notebook.
+--
+-- 0032 created this table with NO tenancy column at all and argued the case in
+-- its own header. This migration narrows that decision by exactly one grade --
+-- entries become per-notebook, still per-nobody -- so read 0032 first:
+-- everything it says about the content-addressed primary key (item 1), the
+-- deliberately absent second unique surface (item 2), the leaf-table status
+-- (item 3) and the opaque provenance list (item 5) still holds verbatim.
+--
+-- '' is the GLOBAL partition: every pre-existing row falls into it, which is
+-- why the DEFAULT is the whole backfill and not a single id is recomputed. The
+-- partition joins the content-addressed hash input ONLY for a non-empty
+-- partition (see retrieval_experience_projection.experience_id), so a global
+-- entry's id here is byte-identical to the one a database that predates this
+-- hop already stores -- which is what keeps scripts/merge_dbs.py's
+-- cross-deployment INSERT OR IGNORE union correct rather than merely
+-- plausible, and what makes "the id can be re-verified from the row" survive
+-- the hop on both backends.
+--
+-- COLLATE "C" for the same reason every other identifier column in this schema
+-- carries it: the column is only ever compared for exact equality against a
+-- bound parameter, never against another column, so no implicit-collation
+-- conflict can arise, and the index below then pages in byte order on a
+-- database whose default collation is linguistic.
+ALTER TABLE retrieval_experiences
+  ADD COLUMN notebook_id text COLLATE "C" NOT NULL DEFAULT '';
+
+-- NON-UNIQUE on purpose, and that is not a relaxation of 0032 item 2. Two
+-- partitions holding an entry for the same (situation, action) is the
+-- DEFINITION of partitioning; a unique index over notebook_id alone would
+-- forbid a second entry per notebook, and one over (notebook_id,
+-- situation_json, action) would add a second unique surface the shadow
+-- replicator has to park by hand -- for nothing, since the content-addressed
+-- primary key already carries the partition.
+--
+-- 0032 item 7 refused a secondary index because every read was "scan the whole
+-- table and score it in memory". That premise is what this migration changes:
+-- reads are now per partition, so WHERE notebook_id = ? is a genuine predicate
+-- an index can answer, and the table's total row count is no longer one small
+-- cap but the global cap plus one per-notebook cap for every notebook with
+-- traffic.
+CREATE INDEX idx_retrieval_experiences_notebook
+  ON retrieval_experiences(notebook_id);

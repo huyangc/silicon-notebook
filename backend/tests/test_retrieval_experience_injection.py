@@ -250,7 +250,7 @@ def test_the_block_reaches_plan_and_every_reflect_round(repo):
     assert steps[0].summary == "带上以往检索攒下的打法"
     assert steps[0].detail == {"entries": 1, "chars": len(
         render_experience_block(select_experiences(
-            repo.retrieval_experiences.read_all(300), _situation())))}
+            repo.retrieval_experiences.read_partition("", 300), _situation())))}
 
 
 def test_an_entry_about_a_different_shape_of_question_is_not_injected(repo):
@@ -445,7 +445,7 @@ def test_store_failure_is_fail_open_and_records_no_step(repo):
         def version_signal(self):
             raise RuntimeError("experience library is down")
 
-        def read_all(self, limit):
+        def read_partition(self, notebook_id, limit):
             raise RuntimeError("experience library is down")
 
     retriever.retrieval_experiences = _BrokenStore()
@@ -676,8 +676,8 @@ def test_a_failing_adoption_write_does_not_break_the_run(repo):
         def version_signal(self):
             return real.version_signal()
 
-        def read_all(self, limit):
-            return real.read_all(limit)
+        def read_partition(self, notebook_id, limit):
+            return real.read_partition(notebook_id, limit)
 
         def note_adopted(self, ids, delta=1):
             raise RuntimeError("write path is down")
@@ -707,9 +707,9 @@ def test_the_library_is_read_once_per_version_not_once_per_run(repo):
         def version_signal(self):
             return real.version_signal()
 
-        def read_all(self, limit):
+        def read_partition(self, notebook_id, limit):
             self.reads += 1
-            return real.read_all(limit)
+            return real.read_partition(notebook_id, limit)
 
         def note_adopted(self, ids, delta=1):
             return real.note_adopted(ids, delta)
@@ -825,7 +825,7 @@ def test_the_memo_never_serves_another_stores_entries():
         def version_signal(self):
             return (1, "2026-08-19T00:00:00+00:00")   # 两个 store 刻意同签名
 
-        def read_all(self, limit):
+        def read_partition(self, notebook_id, limit):
             return list(self._rows)
 
     a = _FixedStore("A 库的打法")

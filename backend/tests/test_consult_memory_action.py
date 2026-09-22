@@ -450,7 +450,7 @@ def test_budget_cap_is_configurable(repo):
 
 def test_zero_new_io_during_the_action(repo):
     """动作期间:``read_blocks`` 0 次新增调用(复用 run() 已读的原始行),
-    ``store.read_all`` 因进程级 memo 0 次新增调用。"""
+    ``store.read_partition`` 因进程级 memo 0 次新增调用。"""
     notebook = _seed(repo)
     _write_experience(repo, "ppr", "bad", RATIONALE_PPR)
     _write_profile_block(
@@ -461,27 +461,27 @@ def test_zero_new_io_during_the_action(repo):
     retriever = _retriever(repo, llm, owner_id="u1")
 
     read_blocks_calls = []
-    read_all_calls = []
+    read_partition_calls = []
     orig_read_blocks = retriever.agent_profile.read_blocks
-    orig_read_all = retriever.retrieval_experiences.read_all
+    orig_read_partition = retriever.retrieval_experiences.read_partition
 
     def counted_read_blocks(*args, **kwargs):
         read_blocks_calls.append(1)
         return orig_read_blocks(*args, **kwargs)
 
-    def counted_read_all(*args, **kwargs):
-        read_all_calls.append(1)
-        return orig_read_all(*args, **kwargs)
+    def counted_read_partition(*args, **kwargs):
+        read_partition_calls.append(1)
+        return orig_read_partition(*args, **kwargs)
 
     retriever.agent_profile.read_blocks = counted_read_blocks
-    retriever.retrieval_experiences.read_all = counted_read_all
+    retriever.retrieval_experiences.read_partition = counted_read_partition
 
     _run(retriever, notebook, "deep")
 
     # run() itself reads each store exactly once at the top; two
     # consult_memory calls must not add any further reads.
     assert read_blocks_calls == [1]
-    assert read_all_calls == [1]
+    assert read_partition_calls == [1]
 
 
 # --------------------------------------------------- ⑥ 纯函数:select/render

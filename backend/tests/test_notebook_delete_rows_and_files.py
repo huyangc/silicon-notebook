@@ -322,6 +322,44 @@ def test_phase3_and_phase4_converge_to_zero_across_every_unit(repo):
         ).fetchone()["c"] == 0
 
 
+def test_deleting_a_notebook_clears_only_its_experience_partition(repo):
+    """SQLite v79: `retrieval_experiences` has NO foreign key into `notebooks`,
+    so nothing cascades its partition away — the phase-3 registry entry is the
+    only thing that clears it.
+
+    The two rows that must SURVIVE are the point: the `''` global partition
+    (which belongs to no notebook and is every new library's cold-start
+    fallback) and another notebook's partition. A filter that matched "not this
+    notebook" the wrong way round, or one that treated `''` as a wildcard,
+    would pass a test that only seeded the deleted library's own rows.
+    """
+    _seed_user_and_notebook(repo)
+    _seed_user_and_notebook(repo, notebook_id="nb2", owner="u2")
+    with repo._runtime.database.write() as db:
+        for entry_id, partition in (
+            ("rx-nb1", "nb1"), ("rx-nb2", "nb2"), ("rx-global", ""),
+        ):
+            db.execute(
+                "INSERT INTO retrieval_experiences (id,situation_json,action,"
+                "polarity,rationale,support,adopted,provenance_json,"
+                "notebook_id,created_at,updated_at) "
+                "VALUES (?,'{}','ppr','good','x',1,0,'[]',?,?,?)",
+                (entry_id, partition, NOW, NOW),
+            )
+
+    job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
+    repo._runtime.notebook_delete.run(job["id"])
+
+    with repo._runtime.database.connect() as db:
+        surviving = {
+            row["id"]: row["notebook_id"]
+            for row in db.execute(
+                "SELECT id, notebook_id FROM retrieval_experiences"
+            ).fetchall()
+        }
+    assert surviving == {"rx-nb2": "nb2", "rx-global": ""}
+
+
 def test_phase3_never_deletes_answers_before_phase5_reads_it_for_archival(repo):
     """回归钉（实现期发现，design 文档正文未点名——见 notebook_delete_tables
     模块 docstring）：``answers`` 不是四张归档输入表之一，但相位 5 的 ask

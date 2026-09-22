@@ -987,7 +987,7 @@ def _cached_experiences(store) -> List[dict]:
             and _EXPERIENCE_CACHE.get("signal") == signal
         ):
             return _EXPERIENCE_CACHE.get("entries")  # type: ignore[return-value]
-    entries = list(store.read_all(RETRIEVAL_EXPERIENCE_MAX_ENTRIES))
+    entries = list(store.read_partition("", RETRIEVAL_EXPERIENCE_MAX_ENTRIES))
     with _EXPERIENCE_CACHE_LOCK:
         # 后写者赢:两个 run 同时未命中时都会读一次,写回的是同一份内容(签名相同)
         # 或更新的那一份(签名不同)。都不是错误,而抢锁读表会把一次 I/O 变成串行点。
