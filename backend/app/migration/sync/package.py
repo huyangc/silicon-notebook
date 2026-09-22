@@ -179,18 +179,35 @@ def is_safe_identifier(value: str) -> bool:
     return bool(_SAFE_IDENTIFIER_RE.match(value))
 
 
+def is_safe_path_segment(value: str) -> bool:
+    """True when ``value`` can be ONE segment of a package-relative path.
+
+    Looser than ``is_safe_identifier`` on purpose: the last segment of a
+    ``files/**`` path is an uploaded file's name, which ``stored_upload_name``
+    keeps as the user typed it -- ``研究.pdf``, ``meeting notes.pdf`` -- so a
+    character whitelist here would reject packages the exporter itself
+    produced (codex #772 r10). What a segment must NOT be is what lets it
+    leave its directory: empty, ``.``/``..``, or carrying a separator or NUL.
+    Containment is proven separately by resolving the path against its root."""
+    if not value or value in (".", ".."):
+        return False
+    return "/" not in value and "\\" not in value and "\x00" not in value
+
+
 def is_safe_relative_path(value: str) -> bool:
     """True when ``value`` is a package-relative, ``/``-separated path (the
     shape ``checksums.json``'s keys and ``rows_path()``/``notebook_files_dir()``/
     ``notebook_assets_dir()`` take) whose every segment is
-    ``is_safe_identifier``. Refuses an empty string, a leading ``/`` or
+    ``is_safe_path_segment``. Refuses an empty string, a leading ``/`` or
     ``\\`` (absolute on POSIX or Windows), and a Windows drive prefix
-    (``C:...``) -- and, through the per-segment check, any ``..`` hop."""
+    (``C:...``) -- and, through the per-segment check, any ``..`` hop.
+    Notebook and package ids are held to the stricter ``is_safe_identifier``
+    by the importer's preflight; this function only guards traversal."""
     if not value or value.startswith("/") or value.startswith("\\"):
         return False
     if len(value) >= 2 and value[1] == ":":
         return False
-    return all(is_safe_identifier(segment) for segment in value.split("/"))
+    return all(is_safe_path_segment(segment) for segment in value.split("/"))
 
 
 def encode_row(row: dict[str, Any]) -> dict[str, Any]:

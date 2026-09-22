@@ -886,6 +886,48 @@ def test_checksums_json_with_a_traversal_path_is_refused():
     assert "unsafe" in str(failure.value)
 
 
+def test_an_upload_named_with_unicode_and_spaces_round_trips(source, target, tmp_path):
+    """codex #772 r10 P1: ``stored_upload_name`` keeps the user's file name
+    (``研究 笔记.txt``), so the ``files/**`` segments of a package the exporter
+    itself wrote carry Unicode and spaces. The path guard must refuse
+    traversal, not legitimate names -- an ASCII whitelist on every segment
+    rejected the exporter's own output."""
+    from app.migration.sync.package import is_safe_path_segment, is_safe_relative_path
+
+    assert is_safe_relative_path("files/notebooks/nb-1/src-1_研究 笔记.txt")
+    assert is_safe_relative_path("files/assets/nb-1/图 1 (final).png")
+    assert not is_safe_relative_path("files/notebooks/../victim/x")
+    assert not is_safe_relative_path("/etc/passwd")
+    assert not is_safe_path_segment("..") and not is_safe_path_segment("")
+    assert not is_safe_path_segment("a\\b") and not is_safe_path_segment("a\x00b")
+
+    # Distinct bytes: uploads are deduplicated by content hash (v30), so the
+    # fixture's ``note.txt`` payload would fold this upload into that source.
+    source["repo"].upload_sources(
+        source["exported"],
+        [
+            UploadedSourceFile(
+                file_name="研究 笔记.txt",
+                content_type="text/plain",
+                content="研究笔记：第一节\n".encode("utf-8") * 4,
+                doc_type="",
+                doc_type_explicit=False,
+            )
+        ],
+    )
+    package = _export(source, tmp_path / "unicode-out")
+    origin = package / "files" / "notebooks" / source["exported"]
+    named = [p for p in origin.rglob("*") if p.is_file() and "研究 笔记" in p.name]
+    assert named, "the exporter must carry the upload under its real name"
+
+    report = _import(target, package)
+    installed = Path(target["settings"].storage_dir) / "notebooks" / source["exported"]
+    mirrored = installed / named[0].relative_to(origin)
+    assert mirrored.is_file()
+    assert mirrored.read_bytes() == named[0].read_bytes()
+    assert report.files_copied >= 1
+
+
 def test_an_empty_manifest_notebooks_list_is_refused(source, target, package):
     """codex #772 r9 P1 (row-range validity). ``manifest.notebooks`` is not
     checksummed, so it cannot be trusted as the definition of this package's
