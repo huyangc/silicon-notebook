@@ -9824,6 +9824,7 @@ button.tag:hover {
 
 .understanding-block-actions .sort-button,
 .understanding-observations-toolbar .sort-button,
+.understanding-experience-toolbar .sort-button,
 .understanding-agent-head .sort-button,
 .understanding-stale .sort-button {
   min-height: 30px;
@@ -10016,10 +10017,16 @@ button.tag:hover {
   white-space: nowrap;
 }
 
-/* 两个管理动作靠左贴着列表,不像 Agent 记录那样右对齐:它们旁边还要放结果那
-   一句话,右对齐会把那句话推到卡外边缘、离按钮反而更远。 */
+/* 两个管理动作的底栏。与 Agent 记录那条(`.understanding-observations-toolbar`)
+   同形但**不借用它的类名**:两处对齐方式已经不同,共用一个名字只会让下一次改其中
+   一处时另一处跟着动。这里靠左贴着列表——它们旁边还要放结果那一句话,右对齐会把
+   那句话推到卡外边缘、离按钮反而更远。 */
 .understanding-experience-toolbar {
+  display: flex;
   justify-content: flex-start;
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
 }
 
 /* 动作结果落在按钮**紧邻处**(AGENTS.md Interactive feedback),不是页面顶部的

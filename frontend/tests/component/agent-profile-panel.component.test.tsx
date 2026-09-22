@@ -1187,6 +1187,80 @@ test("检索经验：结果提示自走计时器 —— 到时自行消失，失
   }
 });
 
+test("检索经验：展开触发的慢读返回，不得把它在飞期间排上的那次整理的重取意图清掉", async () => {
+  // codex #772 P3 的交错,逐步复现:展开的读还在飞 → 用户点「立即整理」成功(记下
+  // 「下次展开要重取」)→ 那次慢读才返回。早先把这一位写成「读成功时清掉」,于是
+  // 慢读顺手把它清成 false,「稍后展开刷新」承诺的重取永远不会发生。
+  //
+  // 交错必须搭在**第二次**读上:首次读还在飞的时候列表还没渲染,「立即整理」那颗
+  // 按钮根本不存在,点不到。所以先让首次读正常回来,再用「收起-展开」触发一次慢读。
+  const user = userEvent.setup();
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await openExperiences(user);
+  await screen.findByText("精查");
+
+  let releaseSecondRead!: () => void;
+  mockFetchExperiences.mockImplementationOnce(
+    () => new Promise<ExperiencePartitionResponse>((resolve) => {
+      releaseSecondRead = () => resolve(experiences());
+    }),
+  );
+  await user.click(within(experienceCard()).getByRole("button", { name: "立即整理" }));
+  await screen.findByText("已开始整理，稍后展开刷新");
+  await user.click(screen.getByText("检索经验"));   // 收起
+  await user.click(screen.getByText("检索经验"));   // 展开 → 第二次读在飞(消费掉那次意图)
+  await waitFor(() => expect(mockFetchExperiences).toHaveBeenCalledTimes(2));
+
+  // 慢读还没回来的这段窗口里,用户又点了一次整理 —— 新的意图记在这里。
+  await user.click(within(experienceCard()).getByRole("button", { name: "立即整理" }));
+  await waitFor(() => expect(mockDistill).toHaveBeenCalledTimes(2));
+  releaseSecondRead();
+  await waitFor(() => expect(screen.getByText("精查")).toBeInTheDocument());
+
+  // 慢读返回**不得**吃掉刚记下的那次意图:再收起展开,必须真的重取第三次。
+  await user.click(screen.getByText("检索经验"));   // 收起
+  await user.click(screen.getByText("检索经验"));   // 展开
+  await waitFor(() => expect(mockFetchExperiences).toHaveBeenCalledTimes(3));
+});
+
+test("检索经验：读失败时那次重取意图放回去，不被一次网络抖动永久吃掉", async () => {
+  const user = userEvent.setup();
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await openExperiences(user);
+  await screen.findByText("精查");
+
+  await user.click(within(experienceCard()).getByRole("button", { name: "立即整理" }));
+  await screen.findByText("已开始整理，稍后展开刷新");
+
+  mockFetchExperiences.mockRejectedValueOnce(humanizedError("网络不太好，请稍后重试", 500));
+  await user.click(screen.getByText("检索经验"));   // 收起
+  await user.click(screen.getByText("检索经验"));   // 展开 → 这次读失败
+  expect(await screen.findByText("网络不太好，请稍后重试")).toBeInTheDocument();
+
+  // 意图还没兑现 —— 再展开一次必须仍然重取(否则 data 非空,此后永远不再读)。
+  await user.click(screen.getByText("检索经验"));
+  await user.click(screen.getByText("检索经验"));
+  await waitFor(() => expect(mockFetchExperiences).toHaveBeenCalledTimes(3));
+});
+
+test("检索经验：卡片收起时两步确认复位，下次展开不会迎面撞上「确认清空」", async () => {
+  const user = userEvent.setup();
+  render(<AgentProfilePanel notebookId="nb1" />);
+  await openExperiences(user);
+  await screen.findByText("精查");
+
+  await user.click(within(experienceCard()).getByRole("button", { name: "清空" }));
+  expect(within(experienceCard()).getByRole("button", { name: "确认清空" })).toBeInTheDocument();
+
+  await user.click(screen.getByText("检索经验"));   // 收起 = 放弃这一步
+  await user.click(screen.getByText("检索经验"));   // 再展开
+
+  await screen.findByText("精查");
+  expect(within(experienceCard()).queryByRole("button", { name: "确认清空" })).not.toBeInTheDocument();
+  expect(within(experienceCard()).getByRole("button", { name: "清空" })).toBeInTheDocument();
+  expect(mockClearExperiences).not.toHaveBeenCalled();
+});
+
 test("检索经验：代次守卫 —— 先发的读最后返回时，旧快照不得盖掉清空后的结果", async () => {
   // 可达路径(不是假想的竞态):整理排上之后卡片记着「下次展开要重取」,用户在
   // 清空请求还在飞的时候收起再展开 —— 于是展开触发的读与清空后的重取同时在飞。

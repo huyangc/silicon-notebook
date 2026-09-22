@@ -30,8 +30,14 @@ from app.repositories.ports import (
 )
 from app.services import background_jobs
 from app.services.retrieval_experience_job import (
+    _MANUAL_DISTILL_COOLDOWN_SECONDS,
     _MAX_QUEUED_PARTITIONS,
     _offered_entries,
+    MANUAL_DISTILL_BUSY,
+    MANUAL_DISTILL_COOLDOWN,
+    MANUAL_DISTILL_DISABLED,
+    MANUAL_DISTILL_INVALID,
+    MANUAL_DISTILL_STARTED,
     RetrievalExperienceDistillationService,
     distillation_wiring_active,
     parse_distillation_reply,
@@ -1726,14 +1732,14 @@ def test_distill_now_is_refused_while_the_feature_is_off_and_costs_nothing():
         event_log=_Events(),
     )
 
-    assert service.distill_now("nb-a") is False
+    assert service.distill_now("nb-a") == MANUAL_DISTILL_DISABLED
     assert ask_state.calls == []
     assert models.client.prompts == []
     assert service._running is False
 
 
 def test_distill_now_claims_the_slot_once_and_then_reports_busy(monkeypatch):
-    """第二次按钮不是第二个写者:单飞槽位被占时返回 False,而不是排第二批。"""
+    """第二次按钮不是第二个写者:单飞槽位被占时回 ``busy``,而不是排第二批。"""
     submitted = []
     monkeypatch.setattr(
         background_jobs, "submit",
@@ -1742,9 +1748,9 @@ def test_distill_now_claims_the_slot_once_and_then_reports_busy(monkeypatch):
     )
     service = _service([], _REPLY)
 
-    assert service.distill_now("nb-a") is True
+    assert service.distill_now("nb-a") == MANUAL_DISTILL_STARTED
     assert submitted == [(("nb-a",), "retrievalexperience-notebook")]
-    assert service.distill_now("nb-a") is False
+    assert service.distill_now("nb-a") == MANUAL_DISTILL_BUSY
     assert len(submitted) == 1
     # 手动触发不消费任何分区的积压:它是**额外**的一批,不是那个库攒的那一批。
     assert service._pending == 0
@@ -1758,15 +1764,99 @@ def test_distill_now_refuses_a_missing_partition_rather_than_running_the_global_
     events = _Events()
     service = _service([], _REPLY, events=events)
 
-    assert service.distill_now("") is False
-    assert service.distill_now(None) is False
-    assert service.distill_now(12345) is False
+    assert service.distill_now("") == MANUAL_DISTILL_INVALID
+    assert service.distill_now(None) == MANUAL_DISTILL_INVALID
+    assert service.distill_now(12345) == MANUAL_DISTILL_INVALID
 
     assert service._running is False, "被拒的调用不得占住单飞槽位"
     assert [event["reason"] for event in events.emitted] == ["invalid_partition"] * 3
     for event in events.emitted:
         assert event["partition"] == "notebook"
         assert "12345" not in repr(event), "事件不带那个不可信的值"
+
+
+def test_distill_now_cools_down_after_a_finished_batch_with_no_new_asks(monkeypatch):
+    """按钮不是「每按一次买一次模型调用」。
+
+    一批跑完之后、这个库又没有新的提问,再按一次只会把同一批 run 重读一遍、
+    什么也写不出来——却照付一次有界模型调用。冷却期内直接拒,并记一条
+    ``reason="cooldown"`` 的 skipped 事件(只带封闭的分区词,不带 id)。
+    """
+    submitted = []
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda fn, *args, name=None, notify_pending=False, **kwargs:
+            submitted.append(args),
+    )
+    events = _Events()
+    service = _service([], _REPLY, events=events)
+
+    assert service.distill_now("nb-a") == MANUAL_DISTILL_STARTED
+    service.run("nb-a")                     # 那一批跑完(假 submit 没真的起线程)
+    assert service._running is False
+    events.emitted.clear()
+
+    assert service.distill_now("nb-a") == MANUAL_DISTILL_COOLDOWN
+    assert len(submitted) == 1, "冷却期内不得再排一批"
+    assert [event["reason"] for event in events.emitted] == ["cooldown"]
+    assert events.emitted[0]["partition"] == "notebook"
+    assert "nb-a" not in repr(events.emitted[0]), "事件不带分区 id"
+
+    # 冷却是**这个库**自己的:别的库照按不误。
+    assert service.distill_now("nb-b") == MANUAL_DISTILL_STARTED
+
+
+def test_pending_asks_override_the_cooldown(monkeypatch):
+    """有新提问就一定放行——冷却挡的是「没有新输入还要付钱」,不是「刚跑过」。
+
+    两个条件的组合方向是 pending **压过** 冷却,不是叠加:一个库刚跑完一批、
+    随后又来了一次提问,那一次提问正是新的一批该看的东西。
+    """
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda fn, *args, name=None, notify_pending=False, **kwargs: None,
+    )
+    service = _service([], _REPLY)
+
+    assert service.distill_now("nb-a") == MANUAL_DISTILL_STARTED
+    service.run("nb-a")
+    assert service.distill_now("nb-a") == MANUAL_DISTILL_COOLDOWN
+
+    service.note_ask_completed("nb-a")      # 一次新提问,远不到阈值
+    assert service._notebook_pending["nb-a"] == 1
+    assert service.distill_now("nb-a") == MANUAL_DISTILL_STARTED
+
+
+def test_a_restart_leaves_the_button_usable(monkeypatch):
+    """§13-Q4 的兜底场景:重启后 pending 归零,但 ``_last_finished`` 也是空的。
+
+    空字典必须读成「没冷却」而不是「很久以前跑过」——否则这个按钮恰恰在它唯一
+    存在理由(重启丢了计数)的那一刻失灵。
+    """
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda fn, *args, name=None, notify_pending=False, **kwargs: None,
+    )
+    service = _service([], _REPLY)          # 全新进程的形态:两个字典都是空的
+
+    assert service._notebook_pending == {}
+    assert service._last_finished == {}
+    assert service.distill_now("nb-a") == MANUAL_DISTILL_STARTED
+
+
+def test_the_cooldown_expires_on_the_monotonic_clock(monkeypatch):
+    """冷却是**时长**,量在单调钟上——墙钟被回拨不会把按钮冻住。"""
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda fn, *args, name=None, notify_pending=False, **kwargs: None,
+    )
+    service = _service([], _REPLY)
+    service.run("nb-a")
+    assert service.distill_now("nb-a") == MANUAL_DISTILL_COOLDOWN
+
+    # 把那条记录推到冷却窗口之外(等价于「过了十分钟」),不睡真的时间。
+    service._last_finished["nb-a"] -= _MANUAL_DISTILL_COOLDOWN_SECONDS + 1
+    assert service.distill_now("nb-a") == MANUAL_DISTILL_STARTED
 
 
 def test_the_kill_switch_stops_the_counters_before_they_move():

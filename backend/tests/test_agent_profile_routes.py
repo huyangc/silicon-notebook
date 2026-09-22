@@ -15,12 +15,16 @@
 
 检索经验(P2,文件末尾一节)矩阵覆盖:
 * 全体成员可读,列表按 ``(support desc, updated_at desc, id asc)``,投影只含
-  六个字段(``id``/``situation``/``provenance`` 不上屏);
+  六个字段(``id``/``situation``/``provenance`` 不上屏);``updated_at`` 按真
+  时刻比而不是按字符串,解析不出的排最后且不当「最近更新」;
+* 取数宽度是分区上限的两倍、截断跑在排序之后——分区暂时超上限时露出来的是
+  support 最高的 100 条,不是 id 序的前 100 条;
 * ``can_manage`` 是纯能力位,跟 ``agent_profile:write`` 走——owner True、只读
   成员 False;镜像围栏**不**并进它(与 ``can_edit_base`` 同口径),只挡两个写端点;
 * 经验总闸(``RETRIEVAL_EXPERIENCE_ENABLED=false``)关时 ``GET`` 回
   ``enabled=false`` 且**不查表**,``POST .../distill`` 409,``DELETE`` 照常能删;
-* ``distill`` 的两种 409(关闸 / 单飞占用)文案不同;
+* ``distill`` 的三种 409(关闸 / 单飞占用 / 冷却)文案各不相同;冷却只在该库
+  没有待处理提问时生效,有新提问立刻放行;
 * ``DELETE`` 只清本库那一份,全局分区与别的库一行不动;
 * 写端点无 ``agent_profile:write`` → 404,陌生人三个端点一律 404;
 * 路由注册顺序:``DELETE .../understanding/experiences`` 必须落进经验端点,
@@ -637,7 +641,14 @@ def _experience_store():
     """
     from app.api import deps
 
-    return deps.repository()._runtime.retrieval_experiences
+    return deps.repository().retrieval_experiences
+
+
+def _experience_jobs():
+    """同一份蒸馏 service(``distill_now`` 与它的冷却状态都挂在这个实例上)。"""
+    from app.api import deps
+
+    return deps.repository()._runtime.retrieval_experience_jobs
 
 
 def _seed_experience(
@@ -667,7 +678,9 @@ def _seed_experience(
         polarity=polarity,
         rationale=rationale,
         provenance=[f"{experience_id}-run-{index}" for index in range(support)],
-        provenance_max=60,
+        # 插入分支写的 support 是**留存后**那一段的长度,所以保留上限必须放得下
+        # 想要的 support;生产里那个数是 60,这里按需放宽,不改被测的任何语义。
+        provenance_max=max(60, support),
         replace_conclusion=True,
         notebook_id=notebook_id,
     )
@@ -679,7 +692,9 @@ def test_every_reader_sees_the_list_ordered_and_only_owner_can_manage(
     """§13-Q2:条目给全体成员看;管理动作按 ``agent_profile:write``。
 
     排序是 ``(support desc, updated_at desc, id asc)``——三级都要被这一条压住,
-    所以种子里 b/c 同 support 不同时间、c/d 同 support 同时间不同 id。
+    所以种子里 b/c 同 support 不同时间、c/d 同 support 同时间不同 id。⚠ 那对
+    同时刻的行给的是**不同的 rationale**:给成一样的话,第三级键换成任何别的
+    顺序(甚至不排)这条用例都照样绿,``id asc`` 就成了一个没被钉住的契约。
     """
     client = _client(tmp_path, monkeypatch)
     owner, _owner_id = _new_user(client)
@@ -687,9 +702,19 @@ def test_every_reader_sees_the_list_ordered_and_only_owner_can_manage(
     reader, _reader_id = _readonly_member(client, owner, notebook_id)
     store = _experience_store()
 
-    _seed_experience(store, notebook_id, "b-old", support=2, when="2026-09-20T09:00:00+08:00")
-    _seed_experience(store, notebook_id, "d-tie", support=2, when="2026-09-21T09:00:00+08:00")
-    _seed_experience(store, notebook_id, "c-tie", support=2, when="2026-09-21T09:00:00+08:00")
+    _seed_experience(
+        store, notebook_id, "b-old", rationale="这条更早",
+        support=2, when="2026-09-20T09:00:00+08:00",
+    )
+    # 写入顺序刻意与 id 序相反:第三级键若没生效,出来的就是这个写入序。
+    _seed_experience(
+        store, notebook_id, "d-tie", rationale="同刻里 id 靠后的",
+        support=2, when="2026-09-21T09:00:00+08:00",
+    )
+    _seed_experience(
+        store, notebook_id, "c-tie", rationale="同刻里 id 靠前的",
+        support=2, when="2026-09-21T09:00:00+08:00",
+    )
     _seed_experience(
         store,
         notebook_id,
@@ -712,9 +737,9 @@ def test_every_reader_sees_the_list_ordered_and_only_owner_can_manage(
     assert body["can_manage"] is False
     assert [entry["rationale"] for entry in body["entries"]] == [
         "这类问题里精查基本白跑",   # support=5
-        "这类问题先宽后窄更省步数",  # support=2, 09-21, id "c-tie"
-        "这类问题先宽后窄更省步数",  # support=2, 09-21, id "d-tie"
-        "这类问题先宽后窄更省步数",  # support=2, 09-20
+        "同刻里 id 靠前的",         # support=2, 09-21, id "c-tie"
+        "同刻里 id 靠后的",         # support=2, 09-21, id "d-tie"
+        "这条更早",                 # support=2, 09-20
     ]
     assert [entry["updated_at"] for entry in body["entries"]] == [
         "2026-09-19T09:00:00+08:00",
@@ -753,8 +778,74 @@ def test_empty_partition_reports_null_updated_at(tmp_path, monkeypatch):
     }
 
 
-def test_list_is_capped_at_the_partition_ceiling(tmp_path, monkeypatch):
-    """取数宽度就是分区自己的行上限,不是一个另选的界面数字。"""
+def test_updated_at_compares_real_instants_not_strings(tmp_path, monkeypatch):
+    """带偏移的 ISO 文本不能按字典序比大小。
+
+    ``08:00+00:00`` 比 ``09:00+08:00`` 晚了七小时,字典序却把后者排在前面。
+    偏移会因为改时区、夏令时、或者一次跨环境同步而在同一个分区里出现两种,
+    所以「最近更新」必须解析成真时刻再比。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id = _new_user(client)
+    notebook_id = _notebook(client, owner)
+    store = _experience_store()
+
+    _seed_experience(
+        store, notebook_id, "earlier", rationale="其实更早",
+        when="2026-09-21T09:00:00+08:00",       # = 01:00Z
+    )
+    _seed_experience(
+        store, notebook_id, "later", rationale="其实更晚",
+        when="2026-09-21T08:00:00+00:00",       # = 08:00Z,字典序反而靠前
+    )
+
+    body = client.get(
+        f"/api/notebooks/{notebook_id}/{_EXPERIENCES}", headers=owner
+    ).json()
+    # 顶层「最近更新」原样回那一条的原始字符串,不重新格式化。
+    assert body["updated_at"] == "2026-09-21T08:00:00+00:00"
+    # 同 support 时 ``updated_at desc`` 也按真时刻排。
+    assert [entry["rationale"] for entry in body["entries"]] == [
+        "其实更晚", "其实更早",
+    ]
+
+
+def test_an_unparseable_updated_at_sorts_last_and_never_becomes_the_newest(
+    tmp_path, monkeypatch
+):
+    """解析不出时刻的行排最后,也绝不当「最近更新」。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id = _new_user(client)
+    notebook_id = _notebook(client, owner)
+    store = _experience_store()
+
+    _seed_experience(
+        store, notebook_id, "ok", rationale="正常的一条",
+        when="2026-09-21T09:00:00+08:00",
+    )
+    _seed_experience(
+        store, notebook_id, "broken", rationale="时间戳坏掉的一条", when="不是时间",
+    )
+
+    body = client.get(
+        f"/api/notebooks/{notebook_id}/{_EXPERIENCES}", headers=owner
+    ).json()
+    assert body["count"] == 2
+    assert body["updated_at"] == "2026-09-21T09:00:00+08:00"
+    assert [entry["rationale"] for entry in body["entries"]] == [
+        "正常的一条", "时间戳坏掉的一条",
+    ]
+
+
+def test_read_width_is_twice_the_ceiling_so_truncation_follows_the_sort(
+    tmp_path, monkeypatch
+):
+    """取数宽度是上限的**两倍**,截断跑在排序之后。
+
+    淘汰在蒸馏写完之后才跑,分区因此可以短暂地多于 100 行。这时候让 store 按
+    ``id``(内容哈希)序只给 100 行,截掉的是与 support 毫无关系的一批——界面
+    会安安静静地丢掉这个库最被验证的几条经验。
+    """
     from app.repositories.ports import RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES
 
     client = _client(tmp_path, monkeypatch)
@@ -772,7 +863,45 @@ def test_list_is_capped_at_the_partition_ceiling(tmp_path, monkeypatch):
 
     got = client.get(f"/api/notebooks/{notebook_id}/{_EXPERIENCES}", headers=owner)
     assert got.status_code == 200, got.text
-    assert captured == [(notebook_id, RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES)]
+    assert captured == [(notebook_id, 2 * RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES)]
+
+
+def test_an_over_ceiling_partition_shows_the_best_supported_hundred(
+    tmp_path, monkeypatch
+):
+    """分区暂时超出上限时,露出来的是 support 最高的那 100 条。
+
+    种子刻意让 support 与 id 序**反着走**:高 support 的那些 id 排在最后,
+    先截后排的实现会把它们一条不剩地丢掉。
+    """
+    from app.repositories.ports import RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES
+
+    cap = RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id = _new_user(client)
+    notebook_id = _notebook(client, owner)
+    store = _experience_store()
+
+    total = cap + 20
+    for index in range(total):
+        _seed_experience(
+            store,
+            notebook_id,
+            f"e-{index:04d}",          # id 升序
+            rationale=f"第 {index} 条",
+            support=index + 1,         # support 也升序 —— 与 id 序正好相反的取舍
+        )
+
+    body = client.get(
+        f"/api/notebooks/{notebook_id}/{_EXPERIENCES}", headers=owner
+    ).json()
+    assert store.count(notebook_id) == total, "淘汰还没跑,分区确实超了上限"
+    assert body["count"] == cap
+    assert len(body["entries"]) == cap
+    # 头尾两条就足以说明截的是哪一端:support 最高的在最前,露出的最低一条是
+    # 第 21 条(前 20 条被截掉),而不是 id 序的前 100 条。
+    assert body["entries"][0]["support"] == total
+    assert body["entries"][-1]["support"] == total - cap + 1
 
 
 def test_experience_gate_closed_is_transparent_on_get_and_reads_nothing(
@@ -831,14 +960,47 @@ def test_manual_distill_claims_the_single_flight_and_409s_while_busy(
     assert busy.json()["detail"] == "正在整理，请稍候"
 
 
+def test_manual_distill_409s_during_the_cooldown_with_its_own_wording(
+    tmp_path, monkeypatch
+):
+    """刚整理过、又没有新提问 → 409,且是**第三句**话。
+
+    这个按钮每按一次买一次有界模型调用;没有新输入的一批只会把同一堆 run 再
+    读一遍、什么也写不出来。三种拒绝(关闸 / 忙 / 冷却)必须是三句不同的话,
+    否则用户分不清「再等等」和「去提个问」。
+    """
+    import time
+
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id = _new_user(client)
+    notebook_id = _notebook(client, owner)
+    _fake_submit(monkeypatch)
+    # 等价于「这个库刚跑完一批」,不真的跑一趟蒸馏(那要配模型)。
+    _experience_jobs()._last_finished[notebook_id] = time.monotonic()
+
+    cooling = client.post(
+        f"/api/notebooks/{notebook_id}/{_EXPERIENCES}/distill", headers=owner
+    )
+    assert cooling.status_code == 409, cooling.text
+    assert cooling.headers.get("X-User-Message") == "1"
+    assert cooling.json()["detail"] == "刚整理过，暂时没有新的提问，请稍后再试"
+
+    # 有新提问就放行——冷却挡的是「没有新输入还要付钱」,不是「刚跑过」。
+    _experience_jobs().note_ask_completed(notebook_id)
+    allowed = client.post(
+        f"/api/notebooks/{notebook_id}/{_EXPERIENCES}/distill", headers=owner
+    )
+    assert allowed.status_code == 200, allowed.text
+    assert allowed.json() == {"started": True}
+
+
 def test_manual_distill_409s_with_its_own_wording_when_the_gate_is_closed(
     tmp_path, monkeypatch
 ):
     """关闸与忙碌是两句话。
 
-    ``distill_now`` 对两者返回同一个 ``False``(它自己的 docstring 说这是刻意
-    的),所以把它们分开的只有路由里那一句闸——没有它,一个关掉经验蒸馏的
-    部署会告诉用户「正在整理」。
+    ``distill_now`` 自己区分不出「路由还没判闸」这一层,所以把它们分开的是
+    路由里那一句闸——没有它,一个关掉经验蒸馏的部署会告诉用户「正在整理」。
     """
     client = _client(tmp_path, monkeypatch, retrieval_experience_enabled=False)
     owner, _owner_id = _new_user(client)

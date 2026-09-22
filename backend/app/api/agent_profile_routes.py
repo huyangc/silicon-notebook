@@ -58,6 +58,8 @@ P2(PR-2)再加三个端点:``GET``/``POST .../distill``/``DELETE
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.deps import (
@@ -109,7 +111,14 @@ from app.services.agent_profile_block import (
 )
 from app.services.agent_profile_job import BASE_CHAIN_OWNER, BASE_LABELS, OVERLAY_LABELS
 from app.services.reasoning_retrieval import profile_wiring_active
-from app.services.retrieval_experience_job import distillation_wiring_active
+from app.services.retrieval_experience_job import (
+    MANUAL_DISTILL_BUSY,
+    MANUAL_DISTILL_COOLDOWN,
+    MANUAL_DISTILL_DISABLED,
+    MANUAL_DISTILL_INVALID,
+    MANUAL_DISTILL_STARTED,
+    distillation_wiring_active,
+)
 
 
 router = APIRouter()
@@ -124,9 +133,24 @@ _VALUE_TOO_LONG_MESSAGE = f"内容过长，最多 {AGENT_PROFILE_VALUE_MAX_CHARS
 _UNKNOWN_KIND_MESSAGE = "要清空的记录种类不对，请刷新页面后重试"
 #: 检索经验那把**另外**的总闸关着时,「立即整理」的 409 文案。与上面那句刻意
 #: 分开:那一句说的是「不能编辑」,而这个按钮并不编辑任何东西,它排的是一次整理。
-#: (「已经有一条在跑」不在这里另起一句——它复用 ``_REBUILD_BUSY_MESSAGE``,
-#: 见 ``distill_notebook_experiences``。)
 _EXPERIENCE_DISABLED_MESSAGE = "这项功能当前未开启，暂时无法整理"
+#: 冷却期内的拒绝:刚跑过一批、而且这个库此后再没有新的提问。文案必须同时说清
+#: 「刚整理过」与「没有新的提问」两件事——只说前者,用户会以为再等一会就能按;
+#: 只说后者,他会以为自己刚才那次提问没被记下。
+_EXPERIENCE_COOLDOWN_MESSAGE = "刚整理过，暂时没有新的提问，请稍后再试"
+#: ``distill_now`` 的每一种拒绝各配一句话。**没有兜底项**:新增一种理由而忘了
+#: 配文案会在路由里当场 KeyError,而不是安静地说一句不对的话。
+#: ``MANUAL_DISTILL_DISABLED`` 在这条路由上其实到不了(handler 里那一句
+#: ``_experiences_wiring_active`` 先拦下),仍然列在这里——这张表要对得起
+#: ``distill_now`` 的返回集合,而不是对得起某一个调用点。
+#: 「已经有一条在跑」复用 ``_REBUILD_BUSY_MESSAGE``:对按按钮的人来说那与手动
+#: 重建是同一件事,不该因为按的是哪张卡上的按钮就换一种说法。
+_MANUAL_DISTILL_MESSAGES = {
+    MANUAL_DISTILL_DISABLED: _EXPERIENCE_DISABLED_MESSAGE,
+    MANUAL_DISTILL_BUSY: _REBUILD_BUSY_MESSAGE,
+    MANUAL_DISTILL_COOLDOWN: _EXPERIENCE_COOLDOWN_MESSAGE,
+    MANUAL_DISTILL_INVALID: "无法开始整理，请刷新页面后重试",
+}
 
 #: 允许出现在 ``DELETE .../agent-observations?kind=`` 上的两个值。空串(清全部)
 #: 不在其中——它是**缺省**,不是一个要被认出来的值,见该端点的说明。
@@ -276,10 +300,37 @@ def _experiences_wiring_active(store) -> bool:
 
     两把开关相互独立(``RETRIEVAL_EXPERIENCE_ENABLED`` vs
     ``AGENT_PROFILE_ENABLED``),共用一个判据会让「只开理解块、不开经验蒸馏」
-    的部署得到一个半开状态。``store is None``(组合根没装配)与关闸在这里是
-    同一件事,由 ``distillation_wiring_active`` 一处判定。
+    的部署得到一个半开状态。
     """
     return distillation_wiring_active(get_settings(), store)
+
+
+#: 解析不出时刻的 ``updated_at`` 用的哨兵:降序排在所有真实时刻之后,并且
+#: 永远不会被当成「分区里最新的那一条」。
+_UNDATED = float("-inf")
+
+
+def _experience_instant(value: str) -> float:
+    """``updated_at`` 文本 → 可比较的时刻;解析不出的回 ``_UNDATED``。
+
+    ⚠ **不按字符串比大小。** 两个后端写的是带偏移的本地 ISO 文本,而字典序只在
+    偏移恒等时才与时间序一致——改时区、夏令时切换、以及一次跨环境同步过来的
+    行,都能让「更晚的那一条排在前面」。注入侧的 ``version_signal`` 用字典序
+    ``MAX()`` 是另一回事(它只要一个会变的指纹,不要一个真的时刻);这里要排给
+    人看,就得是真的时刻。
+
+    天真时间(没有偏移)按**本地**时区解释——store 的 ``now`` 写的就是本地时
+    间,缺偏移的只可能是更早版本留下的行,把它当 UTC 会凭空平移几个小时。
+    返回 ``float`` 而不是 ``datetime``:aware 与 naive 的 ``datetime`` 相互比较
+    会抛 ``TypeError``,而一个分区里两种都有并非不可能,排序不该为此炸掉。
+    """
+    try:
+        moment = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return _UNDATED
+    if moment.tzinfo is None:
+        moment = moment.astimezone()
+    return moment.timestamp()
 
 
 def _experience_out(row: dict) -> ExperienceEntryOut:
@@ -294,22 +345,46 @@ def _experience_out(row: dict) -> ExperienceEntryOut:
 
 
 def _ordered_experiences(rows: list[dict]) -> list[ExperienceEntryOut]:
-    """按 ``(support desc, updated_at desc, id asc)`` 排序后投影。
+    """按 ``(support desc, updated_at desc, id asc)`` 排序,截到分区上限后投影。
 
     排序在**这里**而不是在 store 里:``read_partition`` 按 ``id`` 出行是它自己
     的契约(内容哈希序,让注入侧能对两次读做字节级比较并 memo),而这份顺序是
     **界面**的——「最多人验证过的排在前面」。让 store 多一个排序参数会把一个
     展示决定焊进一条注入侧依赖其稳定性的读。
 
+    ⚠ **截断必须发生在排序之后**,这正是调用点多读一倍行的理由。淘汰是在蒸馏
+    写完之后才跑的,所以分区可以短暂地多于上限;这时候让 store 按 ``id`` 序
+    截到 100,截掉的是内容哈希恰好靠后的那些行,而它们与 support 高低毫无关系
+    ——界面会丢掉这个库最被验证的几条经验,还完全看不出来。
+
     三趟稳定排序而不是一个复合键:``updated_at`` 要降序、``id`` 要升序,而
     ``reverse=True`` 在 Python 的稳定排序里**不会**打乱相等元素的既有次序,所以
-    「先按次要键排、再按主要键排」逐字得到那个三级序。对一个上限 100 行的分区
-    来说,这比给字符串键造一个可取负的替身诚实得多。
+    「先按次要键排、再按主要键排」逐字得到那个三级序。对两百行来说,这比给
+    字符串键造一个可取负的替身诚实得多。
     """
     ordered = sorted(rows, key=lambda row: str(row.get("id") or ""))
-    ordered.sort(key=lambda row: str(row.get("updated_at") or ""), reverse=True)
+    ordered.sort(
+        key=lambda row: _experience_instant(str(row.get("updated_at") or "")),
+        reverse=True,
+    )
     ordered.sort(key=lambda row: int(row.get("support") or 0), reverse=True)
-    return [_experience_out(row) for row in ordered]
+    return [
+        _experience_out(row)
+        for row in ordered[:RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES]
+    ]
+
+
+def _newest_updated_at(entries: list[ExperienceEntryOut]) -> "str | None":
+    """这份清单里最新的 ``updated_at`` 原文;没有一条解析得出时刻则 ``None``。
+
+    取自**响应真正列出的那些条目**,不是读回来的全部行——``count`` 也是,两者
+    因此描述同一批东西。原样回原始字符串而不是回解析后的时刻:时区与精度是
+    行自己的,后端没有理由在这里替浏览器重新格式化一遍。
+    """
+    dated = [entry for entry in entries if _experience_instant(entry.updated_at) > _UNDATED]
+    if not dated:
+        return None
+    return max(dated, key=lambda entry: _experience_instant(entry.updated_at)).updated_at
 
 
 def _can_manage_experiences(notebook_id: str, user_id: str) -> bool:
@@ -319,9 +394,10 @@ def _can_manage_experiences(notebook_id: str, user_id: str) -> bool:
     「凡走 ``notebook_capability_allowed`` 的**写**路径在它之后再调一次围栏;
     只读投影不调」逐字一致。这个 bool 答的是「这个人有没有这项能力」——镜像库
     上他的权限一点没少,少的是那个库此刻能不能被写;把两件事塞进一个布尔,
-    它们就再也分不开了。围栏该说的话由两个写端点自己说:按下去得到的是带
-    ``sync_origin`` 的 409,那句话比一个消失的按钮更准确地解释了发生了什么
-    (「这库是从 X 同步来的镜像」),而按钮消失只会让人以为自己没有权限。
+    它们就再也分不开了。围栏该说的话由两个写端点自己说:被它拦下的 409 带着
+    ``sync_origin``。⚠ 前端**目前**并不解析那个字段,统一回落到通用 409 文案;
+    这是独立于本端点的一项已登记待办(所有走围栏的写端点同此),不是这三个端点
+    自己的形态。
     """
     return notebook_capability_allowed("agent_profile:write", notebook_id, user_id)
 
@@ -349,18 +425,24 @@ def get_notebook_experiences(
         # 已经决定了「什么都不可做」,两次查询的结果都无关紧要。
         return ExperiencePartitionResponse(enabled=False)
     # 一次读,三个字段全部由它派生:``count`` 与 ``entries`` 因此不可能自相矛盾
-    # (「说有 7 条、只列出 5 条」)。取数宽度就是分区自己的行上限,也正是淘汰
-    # 修剪到的那个数,所以除了「刚写完、还没淘汰」那个窗口之外,列表就是分区
-    # 全体;而在那个窗口里报出的也是读者真能看见的条数。
+    # (「说有 7 条、只列出 5 条」)。
+    #
+    # ⚠ 取数宽度是上限的**两倍**,不是上限本身。淘汰跑在蒸馏写完之后,所以分区
+    # 可以短暂地多于 100 行;按 ``id``(内容哈希)序只读 100 行,会在排序之前就
+    # 把一批与 support 毫无关系的行丢掉。多读一倍再在内存里排序、截断,让「露出
+    # 来的是 support 最高的那 100 条」在那个窗口里也成立。两倍是够用的裕量:一次
+    # 蒸馏批次最多写进几条,而淘汰紧随其后。
     entries = _ordered_experiences(
-        store.read_partition(notebook_id, RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES)
+        store.read_partition(
+            notebook_id, 2 * RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES
+        )
     )
     return ExperiencePartitionResponse(
         enabled=True,
         count=len(entries),
-        # 空分区给 ``None`` 而不是空串:「从来没更新过」与「更新时间不详」对一个
-        # 要把它渲染成时间的浏览器是两件事。
-        updated_at=max((entry.updated_at for entry in entries), default="") or None,
+        # 空分区(或一条时刻都解析不出来)给 ``None`` 而不是空串:「从来没更新过」
+        # 与「更新时间不详」对一个要把它渲染成时间的浏览器是两件事。
+        updated_at=_newest_updated_at(entries),
         can_manage=_can_manage_experiences(notebook_id, user.id),
         entries=entries,
     )
@@ -381,14 +463,13 @@ def distill_notebook_experiences(
     store = retrieval_experience_store()
     if not _experiences_wiring_active(store):
         raise user_error(409, _EXPERIENCE_DISABLED_MESSAGE)
-    # ``distill_now`` 对「关闸」与「忙」返回同一个 False(它自己的 docstring 说
-    # 这是刻意的:两者都是「没为你排上」)。上面那一句闸是把这两者分开的**唯一**
-    # 手段——没有它,一个关掉了经验蒸馏的部署会告诉用户「正在整理」。
-    # 忙碌那一句与手动重建共用 ``_REBUILD_BUSY_MESSAGE``:对按按钮的人来说
-    # 「已经有一次整理在跑」是同一件事,不该因为按的是哪张卡上的按钮就换一种
-    # 说法(与 ``_DISABLED_MESSAGE`` 三端点共用一句同一条理由)。
-    if not retrieval_experience_jobs_service().distill_now(notebook_id):
-        raise user_error(409, _REBUILD_BUSY_MESSAGE)
+    outcome = retrieval_experience_jobs_service().distill_now(notebook_id)
+    if outcome != MANUAL_DISTILL_STARTED:
+        # 查表而不是 if/elif 链:``_MANUAL_DISTILL_MESSAGES`` 与
+        # ``MANUAL_DISTILL_*`` 那组常量一一对应,新增一种拒绝理由而忘了配文案
+        # 会在这里当场 KeyError(500),而不是安静地复用一句不对的话——与
+        # ``deps.py`` 能力表「响亮失败,不许落到宽松默认值」同一条口径。
+        raise user_error(409, _MANUAL_DISTILL_MESSAGES[outcome])
     return ExperienceDistillStarted(started=True)
 
 
@@ -402,9 +483,6 @@ def clear_notebook_experiences(
 ) -> ExperiencePartitionCleared:
     _require_experience_manager(notebook_id, user)
     store = retrieval_experience_store()
-    if store is None:
-        # 组合根压根没装配经验库:没有行,也就没有可删的行。
-        return ExperiencePartitionCleared(removed=0)
     # ⚠ 刻意**不**判总闸(模块 docstring 第三条):关开关是「从现在起不再记」,
     # 不是「把记过的藏起来、还删不掉」。
     #

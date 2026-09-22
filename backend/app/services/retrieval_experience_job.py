@@ -204,6 +204,28 @@ _NOTEBOOK_ID_SHAPE = re.compile(r"\bnb-[0-9a-f]{6,}")
 #: event per library.
 _MAX_QUEUED_PARTITIONS = 64
 
+#: How long after a partition's batch FINISHED the manual "distil now" button
+#: refuses to schedule another one for it — but only while that library has no
+#: pending asks at all (see ``distill_now``). Ten minutes: the button exists
+#: for design §13-Q4's restart case ("the counters are process-local, so a
+#: restart can strand a backlog"), not as a way to bill one bounded model call
+#: per click. Without it, every press pays for a batch that re-reads the same
+#: asks and, having nothing new to absorb, writes nothing.
+_MANUAL_DISTILL_COOLDOWN_SECONDS = 600
+
+#: ``distill_now``'s four outcomes. A string rather than the old ``bool``
+#: because three different "no batch was scheduled for you" cases have to
+#: become three different sentences on a button: the pre-PR-2 conflation was
+#: fine while nothing rendered it, and stopped being fine the moment something
+#: did. ``invalid_partition`` is the fifth and is unreachable from the HTTP
+#: endpoint (the partition is a path segment), kept because ``distill_now`` is
+#: callable from anywhere.
+MANUAL_DISTILL_STARTED = "started"
+MANUAL_DISTILL_DISABLED = "disabled"
+MANUAL_DISTILL_BUSY = "busy"
+MANUAL_DISTILL_COOLDOWN = "cooldown"
+MANUAL_DISTILL_INVALID = "invalid_partition"
+
 
 def distillation_wiring_active(settings: Any, store: Any) -> bool:
     """Whether the distillation chain is wired at all (kill switch + store).
@@ -324,6 +346,22 @@ class RetrievalExperienceDistillationService:
         # exit (``_rearm_locked``) and nowhere else, so its size costs nothing
         # on the ask path.
         self._notebook_pending: dict[str, int] = {}
+        # When each partition's last batch FINISHED (``time.monotonic``), for
+        # the manual button's cooldown only. PROCESS-LOCAL and empty after a
+        # restart, and that is the behaviour design §13-Q4 asks for rather than
+        # a gap: a restart is exactly when the pending counters were lost and
+        # the button has to be pressable again, so an empty dict must read as
+        # "no cooldown", never as "cooled down long ago".
+        #
+        # Monotonic, not wall clock: a cooldown is a duration, and a clock
+        # stepped backwards (NTP, DST on a naive clock) would otherwise freeze
+        # the button for however far it jumped.
+        #
+        # Bounded the same way ``_notebook_pending`` is — one short id and one
+        # float per library that has actually run a batch in this process,
+        # which is a subset of the libraries with traffic. Registered, not
+        # cleaned up, for the same reason.
+        self._last_finished: dict[str, float] = {}
         self._running = False
         # NOTEBOOK partitions waiting for the slot, oldest first, de-duplicated
         # by the companion set: a library that crosses its threshold twice
@@ -407,8 +445,9 @@ class RetrievalExperienceDistillationService:
         except Exception:  # noqa: BLE001 — never break a delivered answer
             _log.exception("retrieval experience trigger failed")
 
-    def distill_now(self, notebook_id: str) -> bool:
-        """Distil ONE partition right now; ``False`` = disabled, or busy.
+    def distill_now(self, notebook_id: str) -> str:
+        """Distil ONE partition right now; returns one of the
+        ``MANUAL_DISTILL_*`` outcomes above.
 
         The manual control the P2 module docstring anticipated (design doc §8's
         button, wired in PR-2). It gates ITSELF on
@@ -418,11 +457,31 @@ class RetrievalExperienceDistillationService:
         is how a disabled feature keeps running" was written there before this
         caller existed.
 
-        ``False`` deliberately conflates "turned off" with "already running":
-        both mean "no batch was scheduled for you", neither is an error, and
-        the interface's answer to both is the same sentence. It pays nothing
-        beyond the two flag reads — no query, no model call — which is what
-        makes it safe to wire behind a button.
+        ⚠ **A refusal is never an error and each refusal is its own word.**
+        This returned a bare ``False`` for every refusal until PR-2 put a
+        button on it, and the conflation stopped being harmless the moment
+        something had to render it: "the feature is off", "one is already
+        running" and "you just ran one" call for three different sentences,
+        and one of them is the difference between a user waiting and a user
+        pressing again. Nothing here raises.
+
+        ⚠ **The cooldown is the bill, not the politeness.** Every press costs
+        one bounded model call over a sample of that library's most recent
+        asks, so pressing twice with nothing in between pays twice to absorb
+        the same runs and write nothing. Within
+        ``_MANUAL_DISTILL_COOLDOWN_SECONDS`` of this partition's last finished
+        batch the button is refused — **unless that library has pending asks**,
+        which is the one case where a new batch genuinely has new input. Note
+        which way the two conditions compose: pending traffic OVERRIDES the
+        cooldown, it does not add to it.
+
+        That same asymmetry is what keeps the §13-Q4 restart case working.
+        After a restart the pending counters are gone (they are process-local,
+        which is the whole reason this button exists) — but so is
+        ``_last_finished``, so an unknown partition reads as "not cooling
+        down" and the very first press goes through. An empty dict must never
+        be read as "finished long ago"; it means "this process has not run a
+        batch for that library at all".
 
         ⚠ A missing or non-string partition is REFUSED, not defaulted to the
         global one (T2 review round, P3). This button hangs off one library's
@@ -435,14 +494,31 @@ class RetrievalExperienceDistillationService:
         refusing to trust.
         """
         if not distillation_wiring_active(self.settings, self.experiences):
-            return False
+            return MANUAL_DISTILL_DISABLED
         if not isinstance(notebook_id, str) or not notebook_id:
             self._emit(
                 "skipped", latency_ms=0, reason="invalid_partition",
                 partition="notebook",
             )
-            return False
-        return self.start(notebook_id)
+            return MANUAL_DISTILL_INVALID
+        with self._lock:
+            finished = self._last_finished.get(notebook_id)
+            cooling = (
+                self._pending_locked(notebook_id) == 0
+                and finished is not None
+                and (time.monotonic() - finished) < _MANUAL_DISTILL_COOLDOWN_SECONDS
+            )
+        if cooling:
+            # Outside the lock, like every other emit in this class. The event
+            # carries the closed partition LABEL only, never the id — the same
+            # rule the rest of this chain's telemetry follows.
+            self._emit(
+                "skipped", latency_ms=0, reason="cooldown", partition="notebook",
+            )
+            return MANUAL_DISTILL_COOLDOWN
+        if not self.start(notebook_id):
+            return MANUAL_DISTILL_BUSY
+        return MANUAL_DISTILL_STARTED
 
     # ------------------------------------------------- the waiting-room state
     # Every method below runs WITH ``_lock`` held (``_locked`` suffix) and does
@@ -795,6 +871,13 @@ class RetrievalExperienceDistillationService:
                 raise
             _log.exception("retrieval experience distillation failed")
         finally:
+            # 这一批(不论成功、早退还是失败)到此为止——记下完成时刻,供手动
+            # 「立即整理」的冷却判据。记在**所有**退出路径上而不只是成功路径:
+            # 冷却问的是「刚刚为这个库跑过一趟吗」,而一趟因关闸/未配置模型早退
+            # 的批次同样已经把这个库看过一遍,连按十次也不会有不同结果。
+            # ``claimed_here`` 与它无关——直接调 ``run()`` 也是真的跑过一批。
+            with self._lock:
+                self._last_finished[partition] = time.monotonic()
             if claimed_here:
                 with self._lock:
                     self._running = False
