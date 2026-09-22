@@ -124,6 +124,11 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // 打开被 import 到的每个文件——它只消费 import 说明符与文件扩展名，不做任何
   // 源码位置/顺序查询。
   "tests/guards/extension-module-graph-guard.test.mjs",
+  // 只读 docs/user-manual_zh.md——站内 `/manual` 页在构建期整篇渲染的那份用户手册。
+  // 断言手册手写目录里的每个锚点都能命中某个标题(按页面自己的 headingSlug 口径)。
+  // 它是一份 Markdown 文档、不是生产源码;对它只做整篇正则匹配,不做位置/顺序查询。
+  // 对 manual-view.tsx 的断言全部经 RTL 渲染。
+  "tests/component/manual-view.component.test.tsx",
   // 门禁接线断言(X9 PR-B T3):读 scripts/check_extended.sh 与 scripts/check_contracts.sh
   // 两个 bash 脚本，确认样板 UI 守卫 lane 与 --extra-root 参数真的接上了。shell 脚本
   // 没有可消费的 AST(与 globals.css 那批同一条理由),grep 式的字符串包含判据是唯一

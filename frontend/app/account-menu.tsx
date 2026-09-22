@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   BarChart3,
   Bookmark,
+  BookOpen,
   Bot,
   ChevronDown,
   KeyRound,
@@ -172,6 +173,15 @@ export function AccountMenu({
           >
             <HeartHandshake size={16} />
             <span>许愿墙</span>
+          </a>
+          <a
+            className="user-logout"
+            role="menuitem"
+            href="/manual"
+            title="上传、提问、深度报告、分享与群组的操作说明"
+          >
+            <BookOpen size={16} />
+            <span>使用手册</span>
           </a>
           <button
             className="user-logout"

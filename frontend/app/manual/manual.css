@@ -1,0 +1,105 @@
+/* 站内「使用手册」页(/manual)。外壳与公开分享页同一尺度(880px 居中),正文排版
+   用站内既有 token;表格/代码块沿用 globals.css 的 .answer-table-wrap / .answer-code。 */
+
+.manual-page {
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--ink);
+}
+
+.manual-body {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 32px 24px 96px;
+  font-size: 15px;
+  line-height: 1.75;
+}
+
+.manual-body h1 {
+  font-size: 28px;
+  line-height: 1.3;
+  margin: 0 0 16px;
+}
+
+.manual-body h2 {
+  font-size: 21px;
+  line-height: 1.35;
+  margin: 44px 0 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.manual-body h3 {
+  font-size: 17px;
+  margin: 28px 0 10px;
+}
+
+.manual-body h4 {
+  font-size: 15px;
+  margin: 20px 0 8px;
+}
+
+/* 目录锚点跳转时,标题不要顶到视口最上沿贴着浏览器边。 */
+.manual-body h1,
+.manual-body h2,
+.manual-body h3,
+.manual-body h4 {
+  scroll-margin-top: 16px;
+}
+
+.manual-body p,
+.manual-body ul,
+.manual-body ol {
+  margin: 0 0 12px;
+}
+
+.manual-body li + li {
+  margin-top: 4px;
+}
+
+.manual-body a {
+  color: var(--blue);
+}
+
+.manual-body hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 32px 0;
+}
+
+.manual-body code {
+  font-size: 0.92em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--soft);
+}
+
+.manual-body pre code {
+  padding: 0;
+  background: none;
+}
+
+.manual-body strong {
+  font-weight: 650;
+}
+
+/* 指向仓库其它开发者文档的相对链接在站内没有落点,按普通文字呈现。 */
+.manual-doc-ref {
+  color: var(--muted);
+}
+
+@media (max-width: 640px) {
+  .manual-body {
+    padding: 20px 16px 64px;
+    font-size: 14.5px;
+  }
+
+  .manual-body h1 {
+    font-size: 24px;
+  }
+
+  .manual-body h2 {
+    font-size: 19px;
+    margin-top: 32px;
+  }
+}
