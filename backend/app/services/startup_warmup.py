@@ -601,6 +601,13 @@ def _unbound_workload_warnings(settings: object, models: object) -> tuple[str, .
     still be noise about a state the operator chose, so it stays ONE line, not
     forty.
 
+    Workload ids and their labels are a closed, in-code vocabulary and are
+    always safe to name. The stale ids on the last line are not — they are
+    arbitrary TOML keys copied out of the deployment's file, so they go through
+    ``model_registry.loggable_id_list``, the same sanitiser the startup refusal
+    uses: anything not shaped like a workload id collapses into a counted
+    placeholder rather than putting a path (or a forged extra line) in the log.
+
     Fail-open like ``_pool_budget_warning`` above and for the same reason: a
     diagnostic must never be able to change the shape of a startup that would
     otherwise succeed. Any settings double or provider stub that lacks these
@@ -608,7 +615,7 @@ def _unbound_workload_warnings(settings: object, models: object) -> tuple[str, .
     a startup failure.
     """
     try:
-        from app.services.model_registry import WORKLOADS
+        from app.services.model_registry import WORKLOADS, loggable_id_list
 
         if not models.registry.services():
             # 只说现象:判据是「注册表里一个可用服务都没有」,而不是读到了空的
@@ -650,7 +657,7 @@ def _unbound_workload_warnings(settings: object, models: object) -> tuple[str, .
         if stale:
             lines.append(
                 "model-bindings: MODEL_SERVICES_CONFIG 的 [bindings]/[thinking] 里有"
-                f"未知或已退役的 id，已忽略：{'，'.join(stale)}。"
+                f"未知或已退役的 id，已忽略：{loggable_id_list(stale)}。"
                 "请删除这些行；MODEL_BINDINGS_STRICT 为 false 才降级为本条告警，"
                 "默认会因此拒绝启动。"
             )
