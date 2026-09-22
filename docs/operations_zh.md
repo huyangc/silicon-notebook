@@ -547,6 +547,13 @@ PYTHONPATH=backend python scripts/sync_notebooks.py status --json
 包有效；一个 `failed` 包如果已经被更新的导出取代（变成 `superseded`，见下面 `status` 值域
 说明），就不能再续跑——需要重新导出一个新包再导入。
 
+`--take-over` 显式接管一个还是 `running` 的 `sync_imports` 行，用于那个打开它的进程其实
+已经死了（主机崩了、进程被杀）而不只是跑得慢的情况。这里**没有**按时间自动接管的机制——
+只有确认那一行真的死了才用：跑一次 `sync status`，看那一行的心跳（人读摘要里的「心跳:」，
+`--json` 里的 `report_json.heartbeat_at`，`import_package` 每提交一张表就刷新一次）。心跳
+是 `-` 说明这行刚被认领、还没跑过第一次提交。接管一个其实没死的行，会让两个进程并发写
+同一个包。
+
 预检失败会打印原因并退出 2，不写入任何东西：schema pair 不一致、`EMBED_RUNTIME_DIM` 不
 一致、校验和失败，或者——真正的目标端冲突判定——**包里携带的笔记本 id 在目标端已经存在，
 且那个笔记本的 `sync_origin` 不等于本包的 `source_env`**（纯本地笔记本，或者别的源环境的
@@ -563,8 +570,10 @@ PYTHONPATH=backend python scripts/sync_notebooks.py status --json
 `sync_imports.status` 取值四选一：`running`、`done`、`failed`、`superseded`——`superseded`
 表示这个包的导入曾经失败，之后被同一 `source_env` 更新的、已成功应用的包取代（它的
 `sync_import_progress` 断点行已清空，也不能再 `--resume`）；人读摘要对这类行会附一句
-「被 `<package_id>` 取代」，取值来自 `report_json.superseded_by`。`--json` 原样带
-`status`（以及 `report_json`，其中就含 `superseded_by`），不做改写。
+「被 `<package_id>` 取代」，取值来自 `report_json.superseded_by`。对 `running` 行，摘要改附
+「，心跳: `<heartbeat_at>`」（第一次提交之前是 `-`），取值来自 `report_json.heartbeat_at`——
+这就是判断 `--take-over` 是否安全要看的证据。`--json` 原样带 `status` 与完整的
+`report_json`（有的话含 `superseded_by`/`heartbeat_at`），不做改写。
 
 所有子命令失败都退出 2（stderr 一行，无堆栈），成功（包括 `already_applied`）退出 0。
 `--json` 把底层的导出/引入报告或状态快照整个打印成一个 JSON 对象，而不是人读摘要；需要

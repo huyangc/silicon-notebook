@@ -124,6 +124,7 @@ def test_build_parser_parses_import():
             "user-1",
             "--resume",
             "--verify-files",
+            "--take-over",
             "--json",
         ]
     )
@@ -134,6 +135,7 @@ def test_build_parser_parses_import():
     assert args.importer_user == "user-1"
     assert args.resume is True
     assert args.verify_files is True
+    assert args.take_over is True
     assert args.as_json is True
 
 
@@ -144,6 +146,7 @@ def test_build_parser_import_defaults():
     assert args.importer_user is None
     assert args.resume is False
     assert args.verify_files is False
+    assert args.take_over is False
     assert args.as_json is False
 
 
@@ -317,6 +320,7 @@ def test_import_passes_arguments_and_prints_json(tmp_path, monkeypatch, capsys):
         "importer_user_id": "user-9",
         "resume": False,
         "verify_files": False,
+        "take_over": False,
     }
     payload = json.loads(capsys.readouterr().out)
     assert payload["notebooks"] == ["nb-1"]
@@ -357,6 +361,21 @@ def test_import_resume_and_verify_files_are_forwarded(tmp_path, monkeypatch):
     assert exit_code == 0
     assert captured["resume"] is True
     assert captured["verify_files"] is True
+    assert captured["take_over"] is False
+
+
+def test_import_take_over_is_forwarded(tmp_path, monkeypatch):
+    _settings(tmp_path, monkeypatch)
+    captured: dict = {}
+
+    def fake_import(settings_arg, package_dir, **kwargs):
+        captured.update(kwargs)
+        return _empty_import_report()
+
+    monkeypatch.setattr(cli, "import_package", fake_import)
+    exit_code = cli.main(["import", str(tmp_path / "pkg"), "--take-over"])
+    assert exit_code == 0
+    assert captured["take_over"] is True
 
 
 def test_import_real_run_human_output_includes_tables_and_files(
@@ -590,6 +609,119 @@ def test_status_human_output_flags_superseded_row_with_replacement_id(
     assert "pkg-old" in out
     assert "superseded" in out
     assert "被 pkg-new 取代" in out
+
+
+def test_status_human_output_shows_heartbeat_for_running_row(
+    tmp_path, monkeypatch, capsys
+):
+    """A `running` row's heartbeat (refreshed on every table commit, per
+    import_.py) lives in report_json.heartbeat_at -- not a dedicated column --
+    same place `superseded_by` lives. The human summary must surface it so an
+    operator can tell a live import from a dead one before reaching for
+    --take-over."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_imports "
+                "(package_id, source_env, from_seq, to_seq, status, started_at, "
+                "finished_at, report_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "pkg-live",
+                    "prod-shanghai",
+                    0,
+                    0,
+                    "running",
+                    "2026-01-02T00:00:00+00:00",
+                    None,
+                    json.dumps(
+                        {
+                            "package_created_at": "2026-01-02T00:00:00+00:00",
+                            "heartbeat_at": "2026-01-02T00:03:00+00:00",
+                        }
+                    ),
+                ),
+            )
+    finally:
+        database.close()
+
+    exit_code = cli.main(["status"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "pkg-live" in out
+    assert "心跳: 2026-01-02T00:03:00+00:00" in out
+
+
+def test_status_human_output_shows_dash_when_running_row_has_no_heartbeat_yet(
+    tmp_path, monkeypatch, capsys
+):
+    """A just-claimed running row (before the first table commit refreshes
+    heartbeat_at) must not crash the summary -- it prints "-", same fallback
+    as a missing finished_at."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_imports "
+                "(package_id, source_env, from_seq, to_seq, status, started_at, "
+                "finished_at, report_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "pkg-fresh",
+                    "prod-shanghai",
+                    0,
+                    0,
+                    "running",
+                    "2026-01-02T00:00:00+00:00",
+                    None,
+                    json.dumps({"package_created_at": "2026-01-02T00:00:00+00:00"}),
+                ),
+            )
+    finally:
+        database.close()
+
+    exit_code = cli.main(["status"])
+    assert exit_code == 0
+    assert "心跳: -" in capsys.readouterr().out
+
+
+def test_status_json_carries_heartbeat_unchanged(tmp_path, monkeypatch, capsys):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_imports "
+                "(package_id, source_env, from_seq, to_seq, status, started_at, "
+                "finished_at, report_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "pkg-live",
+                    "prod-shanghai",
+                    0,
+                    0,
+                    "running",
+                    "2026-01-02T00:00:00+00:00",
+                    None,
+                    json.dumps({"heartbeat_at": "2026-01-02T00:03:00+00:00"}),
+                ),
+            )
+    finally:
+        database.close()
+
+    exit_code = cli.main(["status", "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["imports"][0]["report_json"]["heartbeat_at"] == "2026-01-02T00:03:00+00:00"
 
 
 def test_status_json_carries_status_unchanged_including_superseded(
