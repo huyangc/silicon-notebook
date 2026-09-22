@@ -53,7 +53,10 @@ reader knowing were considered:
   An entry with higher ``support`` sorts first among tied-similarity
   candidates on the injection side (``select_experiences``) and survives
   eviction longer (``evict_to_limit`` removes the LOWEST ``(adopted,
-  support, updated_at)`` first) — so an entry that has already accumulated
+  support, updated_at)`` first, WITHIN ONE PARTITION — since schema v79 the
+  library is partitioned, entries compete for survival only against the
+  entries of the same partition, never against another library's or against
+  the global fallback's) — so an entry that has already accumulated
   support is both more likely to be shown again and less likely to be
   evicted before it accumulates more. A newer entry about a genuinely
   useful but less frequently observed shape of question has a structurally

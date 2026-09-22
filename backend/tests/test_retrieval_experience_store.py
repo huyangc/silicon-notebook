@@ -503,9 +503,11 @@ def test_a_row_reports_the_partition_it_was_written_into(store, clock):
 def test_a_merge_into_an_existing_entry_leaves_its_partition_alone(store, clock):
     """The UPDATE branch must not touch ``notebook_id``.
 
-    The id already encodes the partition, so a merge that rewrote the column
-    could only ever move an entry to a partition its own id does not describe —
-    and it would do so silently, because every counter would still add up.
+    The id already encodes the partition, so there is nothing for the column
+    to become: a merge reached by that id is by construction in that
+    partition. The conclusion and the counters move; the partition does not.
+    (A caller that passes a DIFFERENT partition is not exercising this path at
+    all — it is refused; see the mismatch test below.)
     """
     _seed_in(store, clock, "rx_a", "nb-a", at="2026-08-01T00:00:00+00:00")
     store.upsert_experience(
@@ -517,10 +519,12 @@ def test_a_merge_into_an_existing_entry_leaves_its_partition_alone(store, clock)
         provenance=["rx_a-run-2"],
         provenance_max=50,
         replace_conclusion=True,
-        notebook_id="nb-somewhere-else",
+        notebook_id="nb-a",
     )
-    assert store.read_experience("rx_a")["notebook_id"] == "nb-a"
-    assert [row["id"] for row in store.read_partition("nb-a", 50)] == ["rx_a"]
+    row = store.read_experience("rx_a")
+    assert row["notebook_id"] == "nb-a"
+    assert row["polarity"] == "bad"
+    assert [entry["id"] for entry in store.read_partition("nb-a", 50)] == ["rx_a"]
 
 
 def test_eviction_stays_inside_the_partition_it_was_asked_about(store, clock):
@@ -620,3 +624,131 @@ def test_two_partitions_hold_the_same_conclusion_as_two_independent_rows(
     assert [row["support"] for row in b] == [3]
     assert a[0]["id"] != b[0]["id"]
     assert store.count() == 2
+
+
+# ------------------------------------- v79 review follow-ups: argument shapes
+
+
+def test_writing_a_global_id_into_a_notebook_partition_is_refused(store, clock):
+    """P2-1: the one cross-partition mistake the store CAN see, so it must.
+
+    The id says "global", the argument says "nb-a". The two can only disagree
+    if the caller derived them from different values — and the merge branch is
+    reading the stored row anyway, so catching it costs nothing. Writing
+    instead would fold one library's evidence into the shared entry with every
+    counter still adding up, which is the shape nothing downstream could ever
+    detect.
+    """
+    from app.services.retrieval_experience_projection import experience_id
+
+    global_id = experience_id(SITUATION, "ppr")
+    _seed_in(store, clock, global_id, "", at="2026-08-01T00:00:00+00:00")
+    before = store.read_experience(global_id)
+
+    with pytest.raises(ValueError, match="partition mismatch"):
+        store.upsert_experience(
+            global_id,
+            situation=SITUATION,
+            action="ppr",
+            polarity="bad",
+            rationale="来自另一个分区的结论",
+            provenance=["nb-a-run"],
+            provenance_max=50,
+            replace_conclusion=True,
+            notebook_id="nb-a",
+        )
+
+    # "refused" has to mean the table did not move — not merely that the call
+    # returned an error after writing.
+    assert store.read_experience(global_id) == before
+    assert store.count() == 1
+    assert store.read_partition("nb-a", 50) == []
+
+
+def test_the_mismatch_error_never_names_the_entry(store, clock):
+    """The message is a reported surface; a content-addressed id is the hash
+    of a situation fingerprint and has no business in one."""
+    from app.services.retrieval_experience_projection import experience_id
+
+    entry_id = experience_id(SITUATION, "ppr", "nb-a")
+    _seed_in(store, clock, entry_id, "nb-a", at="2026-08-01T00:00:00+00:00")
+    with pytest.raises(ValueError) as caught:
+        store.upsert_experience(
+            entry_id,
+            situation=SITUATION,
+            action="ppr",
+            polarity="good",
+            rationale="x",
+            provenance=["run"],
+            provenance_max=50,
+            replace_conclusion=False,
+            notebook_id="nb-b",
+        )
+    assert entry_id not in str(caught.value)
+    assert "nb-a" not in str(caught.value) and "nb-b" not in str(caught.value)
+
+
+@pytest.mark.parametrize("partition", [None, 0, b"", ["nb-a"]])
+def test_a_non_string_partition_is_refused_rather_than_coerced(store, partition):
+    """P2-2: ``None`` must not read as the global partition.
+
+    ``str(x or "")`` would turn a lost notebook id into ``""`` — a REAL
+    partition, the shared one. Reading it would serve the wrong library's
+    advice; evicting it would delete from the shared library. Both are
+    silent, so the argument shape is refused at the door instead.
+    """
+    with pytest.raises(TypeError):
+        store.read_partition(partition, 50)
+    with pytest.raises(TypeError):
+        store.evict_to_limit(1, partition)
+
+
+def test_count_alone_still_accepts_none_as_the_whole_table(store, clock):
+    """The registered asymmetry: ``None`` is a legal argument to ``count`` and
+    only to ``count``. It is the absent-argument case there, and the whole
+    table is a real question; for the other two there is no such thing as
+    acting on every partition at once."""
+    _seed_in(store, clock, "rx_g", "", at="2026-08-01T00:00:00+00:00")
+    _seed_in(store, clock, "rx_a", "nb-a", at="2026-08-01T00:00:00+00:00")
+    assert store.count(None) == 2
+    assert store.count() == 2
+    assert store.count("") == 1
+
+
+def test_a_partitioned_read_seeks_one_partition_instead_of_walking_the_table(
+    store, clock
+):
+    """P3-2: the v79 index is ``(notebook_id, id)``, and this is what the
+    second column buys.
+
+    ``WHERE notebook_id = ? ORDER BY id`` is every read of this table, and the
+    trap is that it looks fine either way: ``id`` is the PRIMARY KEY, so its
+    autoindex already supplies the order, and with a ``notebook_id``-only
+    index SQLite happily answers this by walking the WHOLE table through that
+    autoindex and applying the partition as a filter — no sort, no complaint,
+    and no benefit from partitioning on the read side at all (measured: the
+    plan is ``SCAN ... USING INDEX sqlite_autoindex_...``). The trailing
+    column is what turns it into ``SEARCH ... USING COVERING INDEX
+    (notebook_id=?)``.
+
+    Asserted against the planner rather than against the index DDL, because
+    the DDL is exactly the thing a future edit would change while believing
+    the read is unaffected.
+    """
+    for index in range(40):
+        _seed_in(
+            store, clock, f"rx_a{index:04d}", "nb-a",
+            at="2026-08-01T00:00:00+00:00",
+        )
+    with store.database.connect() as connection:
+        plan = " ".join(
+            str(row["detail"])
+            for row in connection.execute(
+                "EXPLAIN QUERY PLAN SELECT * FROM retrieval_experiences "
+                "WHERE notebook_id=? ORDER BY id LIMIT ?",
+                ("nb-a", 50),
+            ).fetchall()
+        )
+    assert "idx_retrieval_experiences_notebook" in plan, plan
+    assert "SEARCH" in plan.upper(), plan
+    assert "TEMP B-TREE" not in plan.upper(), plan

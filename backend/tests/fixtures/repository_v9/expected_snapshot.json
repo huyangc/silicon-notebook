@@ -1794,7 +1794,7 @@
       },
       {
         "name": "idx_retrieval_experiences_notebook",
-        "sql_sha256": "800263e02087dc406cbf97f16866de1611f1a7e3937c770c8bcec2bf20695b85",
+        "sql_sha256": "163e123e438f31c581d20cec0e5b43b346d05ab2daa89c031a1663e17e7e80f7",
         "type": "index"
       },
       {

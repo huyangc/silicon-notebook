@@ -39,5 +39,22 @@ ALTER TABLE retrieval_experiences
 -- an index can answer, and the table's total row count is no longer one small
 -- cap but the global cap plus one per-notebook cap for every notebook with
 -- traffic.
+--
+-- The trailing `id` is not padding. Every read is
+-- `WHERE notebook_id = ? ORDER BY id COLLATE "C"`, and phase-3 notebook
+-- deletion pages the same partition by id, so the index that answers the
+-- predicate should also supply the order -- otherwise the alternative plan
+-- (walk the primary key, which is already id-ordered, and filter) stays
+-- competitive and partitioning buys nothing on the read side. Both columns
+-- already carry COLLATE "C" on the table, so the index's own order IS the
+-- order those statements ask for, even on a database whose default collation
+-- is linguistic.
+--
+-- The SQLite mirror pins this through EXPLAIN QUERY PLAN. This side does NOT
+-- assert a plan: PostgreSQL's planner legitimately chooses between this index
+-- and the id-ordered primary key depending on statistics, so an
+-- index-name-in-the-plan assertion here would be a flake rather than a
+-- guarantee. What IS pinned on this side is the index's definition -- both
+-- columns, in this order.
 CREATE INDEX idx_retrieval_experiences_notebook
-  ON retrieval_experiences(notebook_id);
+  ON retrieval_experiences(notebook_id, id);

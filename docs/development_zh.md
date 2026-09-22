@@ -86,7 +86,8 @@ SQLite v76 / PostgreSQL 0056 新增用户所有的全局会话和任务表，提
 
 SQLite v78 / PostgreSQL 0058 将本地登录名与稳定用户名分离，新增单例认证策略、外部身份绑定、短期浏览器认证事务以及策略/身份审计表，并给会话补充认证来源、外部 subject 与绝对过期时间。
 
-SQLite v79 / PostgreSQL 0059 给 `retrieval_experiences` 加 `notebook_id` 分区列（`TEXT NOT NULL DEFAULT ''`，`''` = 全局分区）与非唯一索引 `idx_retrieval_experiences_notebook`，把检索策略经验库按笔记本分区；不新增表、外键或 unique surface，也不跑回填——默认值即回填，且不重算任何内容寻址 id（全局分区的哈希输入按构造逐字节不变）。
+SQLite v79 / PostgreSQL 0059 给 `retrieval_experiences` 加 `notebook_id` 分区列（`TEXT NOT NULL DEFAULT ''`，`''` = 全局分区）与非唯一索引 `idx_retrieval_experiences_notebook(notebook_id, id)`（尾列 `id` 承接每次读取的 `ORDER BY id`：只有带上它，分区读才是「直接定位到这个分区、按 id 序走完」的覆盖索引 seek，而不是借主键顺序把整表走一遍再按分区过滤），把检索策略经验库按笔记本分区；不新增表、外键或 unique surface，也不跑回填——默认值即回填，且不重算任何内容寻址 id（全局分区的哈希输入按构造逐字节不变）。
+
 SQLite v41 新增 `knowledge_source_fact_backfills`，以「可见来源 + 来源代次」记录显式离线历史投影的游标、计数、投影版本、稳定不完整原因、独立运维失败码和终态；`knowledge_source_facts.projection_origin` 显式区分在线抽取与历史投影，在线事实即使已失去融合全局对象仍会被保留并计数。命令每本 notebook 只先构建一次来源反查索引，后续运行复用其完成标记，再按来源做有界对象 keyset 分页，每页一个短写事务。只有 owner 与全部证据元素都能证明属于该来源的历史对象才会进入来源事实；混合或缺失来源的旧数据只记为 `incomplete`，绝不猜测。审计会独立对账有效 KG 代次、投影版本和持久事实数量，不信任账本上的 `complete`；它只输出聚合计数与有界 source id，不输出证据原文。深复制用同一来源代次映射重写事实、证据绑定与终态账本，并生成副本本地的 completed KG run，因此副本可独立审计或强制修复，不保留对原 notebook 运维抽取历史的依赖。这仍是只写准备阶段，不改变在线 Ask 读路径。
 
 SQLite v42 新增 notebook 级 `source_index_backfills` 执行账本。来源反查索引的每个有界 keyset 页面都在同一个短事务里写索引行并推进游标/计数，因此进程重启会从最后已提交页面继续，而不是先清空 notebook 再重来。账本固定 `kg_mutation_seq`；代次漂移只记录稳定的 `kg_generation_changed` 并保持快速路径标记为 false，下次运行再按新代次从头构建。当前完成标记会被规范化成完成账本，不重写索引行。账本不保存证据正文或原始异常。PostgreSQL v20 为配对 schema。

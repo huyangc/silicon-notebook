@@ -42,6 +42,23 @@ def _canonical_situation(situation: Mapping[str, Any]) -> dict:
     return dict(situation)
 
 
+def _partition_argument(value: object) -> str:
+    """Refuse a non-string partition argument instead of coercing it — the
+    SQLite mirror's ``_partition_argument`` carries the full reasoning, and
+    the two must agree: ``None`` silently becoming ``""`` would send a read,
+    or an eviction, at the SHARED global partition.
+
+    ``count`` is the registered exception on both backends; ``None`` there
+    means the whole table.
+    """
+    if not isinstance(value, str):
+        raise TypeError(
+            "retrieval experience partition must be a string; "
+            f"got {type(value).__name__}"
+        )
+    return value
+
+
 class RetrievalExperienceStore:
     def __init__(
         self,
@@ -85,12 +102,25 @@ class RetrievalExperienceStore:
         mirror orders by raw byte value, and pinning the collation is what
         keeps "two reads over an unchanged partition are byte-identical ACROSS
         backends" true rather than accidentally true.
+
+        ⚠ That same ``COLLATE "C"`` is why the 0059 index is declared over
+        ``(notebook_id, id)`` with both columns already ``COLLATE "C"``: the
+        index's own order then IS the order this statement asks for, so one
+        index can answer the predicate AND supply the order. Unlike the SQLite
+        mirror, no test asserts a PLAN here — this planner legitimately
+        weighs that index against the id-ordered primary key by statistics,
+        so a plan assertion would be a flake. The index DEFINITION is what is
+        pinned on this side.
+
+        A non-string ``notebook_id`` is refused rather than coerced; see
+        ``_partition_argument``.
         """
+        partition = _partition_argument(notebook_id)
         with self.database.connect() as db:
             rows = db.execute(
                 "SELECT * FROM retrieval_experiences WHERE notebook_id=%s "
                 'ORDER BY id COLLATE "C" LIMIT %s',
-                (str(notebook_id or ""), max(0, int(limit))),
+                (partition, max(0, int(limit))),
             ).fetchall()
         return [self._experience_row(row) for row in rows]
 
@@ -117,7 +147,19 @@ class RetrievalExperienceStore:
     ) -> dict:
         """Create or merge ONE entry — see the port docstring for the merge
         semantics, including why ``notebook_id`` is written on the INSERT
-        branch only. This backend's specifics:
+        branch only and why a mismatch on the merge branch is an error rather
+        than a silent no-op. This backend's specifics:
+
+        ⚠ Both merge-branch reads pull ``notebook_id`` alongside the two
+        columns they already needed — no extra statement — so the
+        cross-partition case can be REFUSED (see the SQLite mirror for the
+        failure it closes). The second read matters as much as the first: on
+        the lost-the-conflict path it is the WINNER's row, and the winner may
+        be in a different partition than this caller believes it is writing
+        to. The raise happens before any UPDATE, inside the write
+        transaction, so the refused call rolls back to a byte-identical table
+        — including the ``ON CONFLICT DO NOTHING`` insert attempt, which by
+        definition changed nothing on that path.
 
         ⚠ The read that decides the merge takes ``FOR UPDATE``. SQLite gets the
         same guarantee from ``begin_immediate``'s process-wide write lock;
@@ -152,14 +194,15 @@ class RetrievalExperienceStore:
         ``fresh``/``added``/``merged``, for the same reason.
         """
         now = self.now()
+        partition = _partition_argument(notebook_id)
         keep = max(1, int(provenance_max))
         incoming = list(
             reversed([str(item) for item in provenance if str(item)])
         )
         with self.database.write() as db:
             row = db.execute(
-                "SELECT support, provenance_json FROM retrieval_experiences "
-                "WHERE id=%s FOR UPDATE",
+                "SELECT support, provenance_json, notebook_id "
+                "FROM retrieval_experiences WHERE id=%s FOR UPDATE",
                 (experience_id,),
             ).fetchone()
             if row is None:
@@ -179,20 +222,27 @@ class RetrievalExperienceStore:
                         rationale,
                         len(fresh),
                         jsonb(fresh),
-                        str(notebook_id or ""),
+                        partition,
                         now,
                         now,
                     ),
                 )
                 inserted = insert_cursor.rowcount == 1
                 row = db.execute(
-                    "SELECT support, provenance_json FROM retrieval_experiences "
-                    "WHERE id=%s FOR UPDATE",
+                    "SELECT support, provenance_json, notebook_id "
+                    "FROM retrieval_experiences WHERE id=%s FOR UPDATE",
                     (experience_id,),
                 ).fetchone()
             else:
                 inserted = False
             if row is not None and not inserted:
+                if str(row["notebook_id"] or "") != partition:
+                    # No id in the message, same reason as the SQLite mirror:
+                    # a content-addressed key is the hash of a situation
+                    # fingerprint, and it has no business in a log line.
+                    raise ValueError(
+                        "retrieval experience partition mismatch"
+                    )
                 known = [
                     str(item)
                     for item in (json_value(row["provenance_json"], []) or [])
@@ -285,9 +335,13 @@ class RetrievalExperienceStore:
         only because the ordering is TOTAL — which is what the ``id`` tie-break
         is for. Drop it on either side and the two backends start disagreeing
         about which of several tied entries survived.
+
+        A non-string ``notebook_id`` is refused rather than coerced, and it
+        matters most here: a lost id coerced to ``""`` would trim the SHARED
+        library instead of the caller's own. See ``_partition_argument``.
         """
         keep = max(0, int(max_entries))
-        partition = str(notebook_id or "")
+        partition = _partition_argument(notebook_id)
         with self.database.write() as db:
             cursor = db.execute(
                 "DELETE FROM retrieval_experiences WHERE id IN ("
@@ -300,7 +354,12 @@ class RetrievalExperienceStore:
         return cursor.rowcount
 
     def count(self, notebook_id: str | None = None) -> int:
-        """One partition's rows, or (``None``) the whole table's."""
+        """One partition's rows, or (``None``) the whole table's.
+
+        ⚠ The ONE method here where ``None`` is a legal argument rather than a
+        refused one — see ``_partition_argument`` and the port docstring for
+        why the asymmetry is deliberate.
+        """
         with self.database.connect() as db:
             if notebook_id is None:
                 row = db.execute(

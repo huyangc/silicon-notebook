@@ -4543,9 +4543,12 @@ MIGRATION_MANIFEST[(77, 78)] = {
 
 # v79: retrieval_experiences.notebook_id, the partition key that turns v54's
 # deployment-global experience library into one partition per notebook ('' =
-# global). One column plus ONE NON-UNIQUE index; no table, no foreign key, no
-# unique surface, and no backfill pass -- the NOT NULL DEFAULT '' is the whole
-# migration's data story, and no content-addressed id is recomputed.
+# global). One column plus ONE NON-UNIQUE index over (notebook_id, id) -- the
+# trailing column serves the ORDER BY every read of the table issues; no
+# table, no foreign key, no unique surface (the index is non-unique, which the
+# shadow manifest's own note explains), and no backfill pass -- the
+# NOT NULL DEFAULT '' is the whole migration's data story, and no
+# content-addressed id is recomputed.
 #
 # The column entry is consulted for a lineage whose database ALREADY HAS the
 # table (every hop from v54 onwards, which after the v54 broadcast is every key
@@ -4563,7 +4566,7 @@ RETRIEVAL_EXPERIENCE_PARTITION_COLUMNS = {
 RETRIEVAL_EXPERIENCE_PARTITION_INDEXES = {
     "idx_retrieval_experiences_notebook": (
         "CREATE INDEX idx_retrieval_experiences_notebook\n"
-        "                 ON retrieval_experiences(notebook_id)"
+        "                 ON retrieval_experiences(notebook_id, id)"
     ),
 }
 RETRIEVAL_EXPERIENCE_PARTITION_TABLES = {

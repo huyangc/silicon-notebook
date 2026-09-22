@@ -5505,6 +5505,12 @@ class RetrievalExperienceStorePort(Protocol):
         stable order makes two reads over an unchanged partition
         byte-identical, which is what lets the injection side memoise the
         result.
+
+        ⚠ ``notebook_id`` must BE a string. ``None`` raises ``TypeError``
+        rather than being read as the global partition: ``""`` is a real
+        partition — the shared one — so coercing a lost id would silently
+        serve one library's advice to another instead of failing. Same rule in
+        ``evict_to_limit``; ``count`` is the one registered exception.
         """
         ...
     def read_experience(self, experience_id: str) -> dict | None: ...
@@ -5531,14 +5537,20 @@ class RetrievalExperienceStorePort(Protocol):
         side and the merge tool reason about.
 
         ⚠ ``notebook_id`` is written only on the INSERT branch, and the merge
-        branch never touches it. That is not an omission: the id the caller
-        computed already encodes the partition, so a row reached by that id is
-        by construction in that partition, and an UPDATE of the column could
-        only ever be a no-op or a corruption. A caller that passes an id
-        computed for one partition together with a different ``notebook_id``
-        gets an entry filed where the id says, which the store cannot detect —
-        the one invariant both are derived from lives at the single call site
-        in ``retrieval_experience_job.py``.
+        branch never UPDATEs it — but it does READ it, and a disagreement is
+        an error. The id the caller computed already encodes the partition, so
+        "this id exists, in a different partition" can only mean the caller
+        derived the id and the column from different values. Both backends
+        therefore raise ``ValueError("retrieval experience partition
+        mismatch")`` before any statement mutates a row, and the surrounding
+        write transaction rolls back, so a refused call leaves the table
+        byte-identical. The column is read off the SELECT the merge branch
+        already issues, so the check costs no extra round trip.
+
+        The message carries no id on purpose: a content-addressed key is the
+        hash of a situation fingerprint, and an exception string is a reported
+        surface. What it does carry is enough — "these two inputs disagree" is
+        a caller bug, and the caller knows which entry it was writing.
 
         ``situation`` is serialised here rather than by the caller, with sorted
         keys, so both backends store the same canonical text and a row read
@@ -5606,11 +5618,28 @@ class RetrievalExperienceStorePort(Protocol):
         (SQLite's clock is second-granular — the ``memory_revisions`` lesson).
         Without it, "which of the tied entries survived" would differ between
         two runs over identical data, and between the two backends.
+
+        ⚠ ``notebook_id`` must BE a string; ``None`` raises ``TypeError``.
+        The rule matters more here than anywhere else in this port — a lost id
+        coerced to ``""`` would not merely read the wrong partition, it would
+        DELETE from the shared one.
         """
         ...
 
     def count(self, notebook_id: str | None = None) -> int:
         """Row count — for ONE partition, or (``None``) for the whole table.
+
+        ⚠ This is the ONE method on this port where ``None`` is a legal
+        argument rather than a ``TypeError``, and the asymmetry with
+        ``read_partition``/``evict_to_limit`` is deliberate rather than an
+        oversight. Those two ACT on a partition, so there is no such thing as
+        "all of them at once" for them to mean — ``None`` there can only be a
+        lost id, and coercing it to ``""`` aims a read or a delete at the
+        shared library. Counting, by contrast, has a real whole-table question
+        behind it (storage footprint, which no single partition answers), and
+        ``None`` is the natural spelling of "no partition asked for" while
+        ``""`` keeps meaning the global partition. Adding a second method name
+        for it would make two spellings of one question instead.
 
         The two are different questions and both have a caller: a partition's
         count is what an eviction policy and an operator-facing "what has this
