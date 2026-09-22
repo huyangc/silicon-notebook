@@ -1201,6 +1201,18 @@ def _prune_log_bounds(
     proven safe to delete.
     """
     _require_v85_schema(source, conn)
+    if lock and source.is_postgres:
+        # Row locks over EVERY lease (live and dead alike), taken before any
+        # read below and held until the caller's transaction commits. A
+        # concurrent claim (INSERT ... ON CONFLICT DO UPDATE) or heartbeat
+        # UPDATE on any of these rows now waits behind this call, so the
+        # dead/live classification and the eviction that follows are one
+        # atomic decision. Rows that do not exist yet cannot be locked, but
+        # a brand-new lease is by definition live and only raises the bound.
+        source.fetch(
+            conn,
+            "SELECT target_env FROM sync_export_runs ORDER BY target_env FOR UPDATE",
+        )
     rows = source.fetch(
         conn,
         source.sql(
