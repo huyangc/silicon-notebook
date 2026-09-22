@@ -370,10 +370,24 @@ SQLite 的相对开销比 PostgreSQL 明显：SQLite 基线本身极快（进程
   水位背后是否真的有一段变更日志与快照做后盾：门开着、日志覆盖了这次导出时是 1；门关着、
   或读到的是升级前遗留的旧水位行，都是 0。`exported_snapshot`（`pg_current_snapshot()::text`，
   SQLite 恒 NULL，v85/0065 新增列）是导出当时的 PostgreSQL 快照文本，供下一次导出计算补偿
-  窗口。`exported_through_seq` 仍在导出器的读快照内读 `SELECT COALESCE(MAX(seq), 0) FROM
-  sync_change_log`（门关着时不读，直接记 0，`captured` 同时记 0）。水位只在导出包完整落盘并
-  写好校验和之后才推进（`_advance_watermark` 在 `writer.finish()`/`rename` 之后调用），中途
-  失败不推进，所以重跑总是安全的。
+  窗口。`exported_through_seq` 在导出器的读快照内读 `SELECT COALESCE(MAX(seq), 0) FROM
+  sync_change_log`（门关着时不读，直接记 0，`captured` 同时记 0），但写回水位表的不是这个
+  裸读数，而是 `max(这次读到的 MAX(seq), 水位表里已有的 exported_through_seq)`：`sync
+  prune-log` 可能已经把这个 target 的水位以下的日志行删空，届时裸 `MAX(seq)` 会落到 0，
+  `max()` 保证水位只会前进不会倒退（§7「模式判定」的 `to_seq` 是同一个数）。水位只在导出包
+  完整落盘并写好校验和之后才推进（`_advance_watermark` 在 `writer.finish()`/`rename` 之后
+  调用），中途失败不推进，所以重跑总是安全的。
+
+- **门世代**：`captured` 不是单纯抄一下「导出这一刻门是不是开着」。导出在 `source.read()`
+  的读快照里读一次门的状态，记成一对 `(enabled, enabled_at)`——这一对是门的「世代」：
+  `sync capture disable` 会清空整张 `sync_change_log`，`disable` 之后紧跟一次 `enable`
+  会让 `enabled` 这个布尔值看起来和读快照那一刻一模一样，但窗口本该覆盖的日志已经被清空
+  重来，`enabled_at` 是唯一能分辨「还是我读到的那扇门」与「门已经转过一圈」的信号。写水位的
+  事务（`_advance_watermark`）落盘前会在自己的事务里重新读一次这一对，与读快照时记下的比较：
+  不一致就把这次的 `captured` 降成 0（`exported_through_seq`/`exported_snapshot` 仍然如实
+  写——它们是这次导出真实看到的事实，只是不再承诺日志能接得上），报告里追加一条 warning，
+  下一次导出照常回退到全量。这段窗口很窄（导出全程 vs. 一次 `disable`+`enable`），但正确性
+  不该靠窗口窄来赌，所以每次都重读重比。
 
 - **增量窗口**：设上次水位为 W（`exported_through_seq`）、上次快照为 S_prev
   （`exported_snapshot`）。
@@ -398,7 +412,15 @@ SQLite 的相对开销比 PostgreSQL 明显：SQLite 基线本身极快（进程
      按发放时间单调，让 `from_seq`/`to_seq`、包目录名、按 `seq` 排序的日志读起来对运维有
      意义（缓存更大的序列会让并发连接成批预领号，`seq` 顺序与发放时间顺序脱节，运维看着
      seq 区间会觉得和实际发生的时间对不上，但补偿窗口本身不会因此算错）。`CACHE 1` 是纵深
-     防御，不是补偿窗口正确性的前提。
+     防御，不是补偿窗口正确性的前提。真正判定一行是否属于补偿窗口的只是
+     `NOT pg_visible_in_snapshot(...)` 这一条可见性判据；`txid >= xmin(S_prev)` 只是给这条
+     判据配的访问路径（把它变成 `idx_sync_change_log_txid` 上的一段索引范围），去掉这个下界
+     结果仍然正确，只是会退化成扫全表。这段成本因此**不是恒小**：`xmin(S_prev)` 只有在「近」
+     的时候才是一段廉价的索引范围——源库上如果有长事务或 `idle in transaction` 的会话压着，
+     这个 `xmin` 会被钉在很久以前，索引范围随之整段变宽，补偿窗口要逐行跑
+     `pg_visible_in_snapshot` 才能筛出真正满足条件的行；**退化的是耗时，不是内存**（返回的
+     行数仍然只是真正符合条件的那一小撮），修法在数据库侧——别让事务或连接空闲着不提交/不
+     回滚，不在这段查询本身。
   3. SQLite 不需要补偿窗口，也不用 `txid`（该列恒 NULL）：写者是单进程按业务写路径串行
      写（deferred BEGIN），没有多事务并发、没有 REPEATABLE READ 快照、也没有「已发号未提交」
      的窗口——`seq`（`AUTOINCREMENT`）在同一个写事务里分配并随事务一起提交，分配顺序与
@@ -408,8 +430,24 @@ SQLite 的相对开销比 PostgreSQL 明显：SQLite 基线本身极快（进程
   同表的主窗口行之前），把同一 `(table, key)` 的多条日志折成一条终态操作，只看窗口内最后
   一次 upsert/delete。`operation='kg_epoch'` 的行在压缩阶段直接忽略——本 PR 不做 epoch 折叠，
   它不是正确性前提，逐行的 upsert/delete 日志本身已经完整覆盖了同一批变化，折叠只是省掉
-  「整体替换」这一条指令（延后理由与何时值得做见 §11）。内存量级是该表本次窗口内出现过的
-  不同键数，不是总日志行数；这是离线导出工具，可接受。
+  「整体替换」这一条指令（延后理由与何时值得做见 §11）。
+
+  内存按实际同时持有的东西算，而不是笼统一句「可接受」：
+  - 压缩字典**按表**持有——每张表一份 `键文本 → 终态操作`，处理下一张表之前丢弃；峰值是该表
+    本次窗口内出现过的**不同键数**，不是总日志行数（同一个键改了很多次也只占一个条目）。
+  - 终态回读的行与生成的 `deletes.jsonl` 行都是**流式写入包**、不缓冲：`table_delta` 按键分
+    批批量回读（一批的大小是既有 `_ID_BATCH` 折算到这张表主键宽度），读到即写、写完即扔，
+    从不在内存里攒起一整张表的行；`deletes.jsonl` 在整个循环外面只开一次文件句柄，各表产生
+    的删除行随时追加，同样不在内存里攒列表。
+  - 补偿窗口**整份常驻**，贯穿这次导出的全程——但它只装键身份（`table_name`/`key_json`/
+    `operation`/`parent_key`/`notebook_id`/`seq`），不装行内容，条目数是「上次快照建立时仍在
+    途、之后才提交」的事务写下的日志行数，正常情况下是个位数到几十条。
+  - 每个变更过的 `sources`/`notebook_assets` 行对应**一条** `FileRequest`——文件相位在读快照
+    关闭之后才跑，答案不能来自快照内的状态，所以这些请求必须先攒起来，量级等于本次窗口内
+    变更的文件指针数。
+
+  这是离线导出工具单次调用内的开销，量级由本次窗口的写入量决定，不随 `sync_change_log` 的
+  总行数增长（§11 有更完整的一段）。
 
 - **终态解析成包内容**：upsert 按键批量回读当前行（复合键 `IN` 列表，两端语法一致），复用
   既有 `_row_encoder` 写 `rows/<table>.jsonl`；键在快照里回读不到但日志给的终态是 upsert
@@ -450,11 +488,30 @@ SQLite 的相对开销比 PostgreSQL 明显：SQLite 基线本身极快（进程
   没有「当前状态」可读。
 
 - **文件**：只复制本包 upsert 涉及的 `sources`/`notebook_assets` 行指向的文件，相对 storage
-  根落到 `files/notebooks|assets/<nb>/...`；`sources.file_path` 走 shadow manifest 的
-  `path_columns`，`notebook_assets` 表没有路径列——它的文件是
-  `storage/assets/<nb>/<asset id>.<ext>`（`AssetService.path_for` 命名，扩展名来自一张这个包
-  不导入的 mime 表），导出按 `<id>.*` 匹配磁盘上实际存在的文件。被删行指向的文件本包不处理，
-  由 PR-3c 在目标端按目标行路径删除。
+  根落到 `files/notebooks|assets/<nb>/...`。两条不同的取文件规则各自登记在
+  `incremental._EXPORTED_PATH_COLUMNS`（`{(表, 列): 子目录}`）与 `_STEM_TABLES`（`{表: (id列,
+  子目录)}`）里，模块加载期有一个守卫把 `_EXPORTED_PATH_COLUMNS` 与 shadow manifest 声明的
+  `path_columns` 逐项对账，新声明一列路径却没登记会在导入这个模块时就报错，而不是悄悄把行
+  导出却漏掉它指向的字节：
+  - `sources.file_path` 走 shadow manifest 的 `path_columns`——这一列的值就是文件的存放路径。
+    历史行的 `file_path` 是相对路径（早于「统一存绝对路径」这个约定），按两端 `resolve_path`
+    同一套口径归一（绝对路径原样、相对路径相对 `root_dir`）之后，才判它是否落在这本笔记本自己
+    的 storage 根下——不归一化就直接判断，会把这些合法的历史行全部误判成「不在这本笔记本名
+    下」，明明字节就在磁盘上。
+  - `notebook_assets` 表没有路径列——它的文件是 `storage/assets/<nb>/<asset id>.<ext>`
+    （`AssetService.path_for` 命名，扩展名来自一张这个包不导入、也不该重复的 mime 表），导出
+    只拿到行的 `id` 当 stem，按 `<asset id>.*` 匹配磁盘上实际存在的文件（可能不止一个，全部
+    带走）。
+
+  两条规则算出的目标文件都还要过 `is_safe_relative_path`：算出的包内相对路径本身必须是安全的
+  （非空、不含 `..`、不含分隔符外的穿越），这是对将要写进 `checksums.json`/磁盘的字符串做的
+  真实检查，跟「这段路径按字面看是不是落在某个前缀下」（`Path.relative_to` 是词法比较，对
+  `"<base>/../../etc/passwd"` 这种输入会给出误导的答案）是两件事。**归属判不出**（历史相对
+  路径按 `resolve_path` 归一后仍然不落在这本笔记本自己的 storage 根下）或者**glob 零命中**
+  （`notebook_assets` 按 `<id>.*` 在磁盘上什么都没找到）——两种情况都不是致命错误，行照常进
+  `rows/<table>.jsonl`，只是这一份字节进不了包，记进 manifest 的 `missing_files`（导入端据此
+  知道这个包是「知情地不完整」，而不是事后才发现一个悬空的附件）。被删行指向的文件本包不
+  处理，由 PR-3c 在目标端按目标行路径删除。
 
 - **模式判定**（`sync export` 不需要用户区分全量与增量）：没给 `--notebook` 时，门开 且 该
   `--target` 的水位行存在 且 `captured = 1` 且没给 `--full` ⇒ 增量；否则全量。两种情况都
@@ -519,6 +576,14 @@ NOT NULL` 是普通（非 `CONCURRENTLY`）建索引，建完之前持有 `sync_
 
 ## 8. 导出包与导入相位
 
+导出侧的实现分三个模块，依赖方向是单向的一条链——`app.migration.sync.database`（读写句柄、
+`_Source` 门面、keyset SQL、行编码这些两边都要用的原语）在最底层；
+`app.migration.sync.incremental`（本 PR 新增：窗口读取、压缩、归属解析、文件请求）建在它
+之上；`app.migration.sync.export`（模式判定、装配、水位）在最上层，只负责在全量表扫描和
+`incremental` 的窗口结果之间选择，装配成包、写 manifest、推进水位，不自己拼 SQL。`database`
+被拆成独立模块正是为了让这条链不成环：`incremental` 要用这些原语，`export` 又要调用
+`incremental` 做模式判定的增量分支，两边共同依赖的东西必须蹲在两者下面。
+
 导出包是一个目录：
 
 ```
@@ -541,10 +606,16 @@ sync-<source_env>-<from_seq>-<to_seq>-<package_id 前 8 位>/
 
 全量导出是 `from_seq = 0` 的特例，行来自表扫描而不是日志；它的 `to_seq` 不再恒为 0——从
 v85/0065 起，全量导出也在同一次读快照内记下 `exported_through_seq`（见 §7「模式判定」），
-`to_seq` 跟着这次捕获到的水位走，`captured` 记这个水位当时门是否开着。
+`to_seq` 跟着这次捕获到的水位走，`captured` 记这个水位当时门是否开着。表扫描侧挑哪些笔记本
+入包与增量侧同一条规则（§7「笔记本范围与镜像」）：只按镜像跳过，不查 `status`——`status` 是
+目标端自有列，源端此刻处在 `copying`/`deleting`/`importing` 说明不了目标该不该有这份内容，
+一个全量基线如果按 `status` 跳过某本笔记本，跳过的不是「稍后再补」，是这本笔记本从这条同步
+链上永久消失，直到运维显式用 `--notebook` 单独补一次。
 
-增量导出是 `from_seq = W + 1`（W 是上次水位 `exported_through_seq`）、`to_seq` 等于本次
-`exported_through_seq`（快照可见的 `MAX(seq)`，不是窗口内最大值）的包：`rows/<table>.jsonl`
+增量导出是 `from_seq = W + 1`（W 是上次水位 `exported_through_seq`）、`to_seq =
+max(快照可见的 MAX(seq), W)` 的包（不是窗口内最大值，也不是裸的 `MAX(seq)`——`sync
+prune-log` 可能已经把水位以下的日志行清空，那时裸 `MAX(seq)` 会读到 0 甚至低于 W，`max()`
+钳住的是水位单调不倒退这条约束；见上面「导出水位」）：`rows/<table>.jsonl`
 只含窗口内变更过的键压缩后的终态（§7），不是全表扫描；`deletes.jsonl` 只含窗口内终态为
 删除的键；`files/**` 只含本次 upsert 行新增或变更指向的文件。`rows/notebooks.jsonl` 是
 例外：它为每个在本包里携带任何行的笔记本都补发一条从表里回读的当前完整状态，不管
@@ -554,6 +625,13 @@ v85/0065 起，全量导出也在同一次读快照内记下 `exported_through_s
 空文件），`manifest.json` 里 `notebooks`/`deleted_notebooks` 也可能为空，水位仍照常推进——
 保证导出链连续：目标端总能按 `base_package_id` 把连续的包接起来，不会因为某次没有变化就
 断链。
+
+`deletes.jsonl` 的行序是导出主循环的顺序——非 GLOBAL 表按 `copy_rank`，然后 `notebooks`，
+最后是 GLOBAL 表——这个顺序确定（同一次导出、同样的窗口内容，两次跑出来的文件字节相等），
+但**不是外键安全序**：`copy_rank` 排的是父表先于子表的插入序，删除通常要反过来（子表先于
+父表）才不会撞外键，导出侧不会为了这一个文件重排整个循环。把 `deletes.jsonl` 按安全的顺序
+重放是导入端的工作（PR-3c），它有目标端的 catalog 可以现查外键关系；导出端只保证行序可预测、
+不保证行序可直接拿去执行。
 
 行编码（`rows/<table>.jsonl` 每行一个 JSON 对象，键是列名）采用 **SQLite 形态**作为可移植
 表示，这样目标端是 SQLite 时原样落库，是 PostgreSQL 时复用 `app.migration.shadow.transform`
@@ -702,10 +780,10 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
 - 孤儿删除的目标端归属规则交 PR-3c：PARENT scope 表的 delete 日志若父行也已经被删，
   `deletes.jsonl` 该行的 `notebook_id` 写 `null`（§7「归属」）；按目标端当时仍存活的父链
   解析真实归属、并把解析不出的孤儿删除当作 no-op，是导入端（PR-3c）的工作，导出端不猜测。
-- 增量压缩的内存量级：§7「压缩」是按表在内存里把窗口内的日志折成 `(table, key)` → 终态操作
-  的映射，量级是该表本次窗口内出现过的不同键数，不是窗口内的日志总行数（同一个键被改了很
-  多次也只占一个条目）。这是离线导出工具单次调用内的开销，运维按导出周期的写入量估算即可，
-  不随 `sync_change_log` 表的总行数增长。
+- 增量压缩的内存量级：完整的按组件核算见 §7「压缩」——按表持有的压缩字典、流式写入不缓冲的
+  行与删除条目、整份常驻但只装键身份的补偿窗口、每个变更文件一条的请求列表。这是离线导出
+  工具单次调用内的开销，运维按导出周期的写入量估算即可，不随 `sync_change_log` 表的总行数
+  增长。
 - 升级到 v85/0065 之后，每个目标环境现有的水位行 `captured` 都会是 0（新列，迁移不回填）：
   没有 `captured=1` 的水位就没有变更日志与快照做后盾，第一次导出必然回退到全量（§7「模式
   判定」）。这是预期行为，不是迁移遗漏——运维不需要为此做任何手动操作，下一次 `sync export`

@@ -854,16 +854,29 @@ to full, re-establishing a log-backed baseline. Enabling when it is already on i
 does not move `enabled_at` and does not re-clear watermarks), so re-running it after an
 ambiguous exit code is safe.
 
-**Do not run `sync capture enable` while a `sync export` is in flight.** `_advance_watermark`
-writes `sync_export_state` only after that export finishes, so an `enable` that clears the table
-partway through an already-running export does not stop it -- that export still completes and
-still writes its watermark, but it reads `captured_through_seq` from a snapshot taken before the
-gate opened, so the seq it writes back is 0 and `captured` is false for that one export (the
-correct answer for a run that started before capture was on, but not what an operator watching
-`enable` run moments earlier would expect: a `captured=false` watermark right after enabling
-looks like nothing happened, and forces that target's *next* export back to full too). There is
-no code-level guard against this interleaving; treat it as an operational rule (quiesce or wait
-out any running export before enabling) rather than something the CLI enforces.
+**Running `sync capture enable`/`disable` while a `sync export` is in flight is self-correcting,
+not merely something to avoid.** The export reads the gate as a generation pair (`enabled`,
+`enabled_at`) at the start of its read snapshot, and the transaction that writes the watermark
+(`_advance_watermark`) re-reads that same pair and compares it against what the export started
+with, before deciding whether to claim `captured`:
+- Gate closed when the export's snapshot began, `enable` runs moments later: `captured_through_seq`
+  is read from a snapshot that predates the log being trustworthy, so `captured` is false for that
+  one export regardless of what the gate does afterward (correct -- the log genuinely does not
+  cover this run) -- and it forces that target's *next* export back to full too, which can look
+  like "nothing happened" if you were watching `enable` run moments earlier even though the run
+  did what it should.
+- Gate open when the export's snapshot began, and a `disable`+`enable` pair completes before the
+  watermark is written: the re-read generation no longer matches (the second `enable`'s
+  `enabled_at` is new), so this export's `captured` is downgraded to 0 -- even though the boolean
+  `enabled` looks unchanged -- and the report carries a warning naming both generations it saw.
+  `exported_through_seq`/`exported_snapshot` are still recorded faithfully; only the "the log
+  covers this" promise is withdrawn. That target's next export is full.
+
+Neither case leaves a `captured=true` watermark the log can no longer back -- there is no window
+where this interleaving silently corrupts the incremental chain. Quiescing exports around a
+`capture enable`/`disable` call is still good operational hygiene (it avoids the surprise of an
+unexpected `captured=false` watermark and the extra full export it costs), but it is not required
+for correctness the way it used to be.
 
 **What disabling costs**: `disable` clears both `sync_export_state` and `sync_change_log`. The
 log stops growing the moment it commits, so the next export after a disable is a full snapshot
