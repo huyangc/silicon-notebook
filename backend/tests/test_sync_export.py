@@ -605,6 +605,109 @@ def test_sync_key_refuses_when_a_registered_key_disagrees_with_the_catalog_pk(
     assert "disagrees" in str(excinfo.value)
 
 
+def test_sync_key_refuses_a_registered_key_that_only_reorders_the_catalog_pk(
+    seeded, monkeypatch
+):
+    """Same column SET, different ORDER, and it still has to refuse.
+
+    Order is part of the key: the capture triggers build ``key_json`` by
+    naming the columns in their order, so ``{"notebook_id": …,
+    "element_id": …}`` and ``{"element_id": …, "notebook_id": …}`` are two
+    different identities for one row. A set-only comparison would wave this
+    through and the target would then match nothing. The message prints both
+    tuples so the reader can see which side moved.
+    """
+    from app.migration.sync import manifest as manifest_module
+
+    real_spec_for = manifest_module.spec_for
+    real_spec = real_spec_for("chunk_elements")
+    reordered = dataclasses.replace(
+        real_spec, key=("element_id", "notebook_id", "chunk_id")
+    )
+    monkeypatch.setattr(
+        export_module,
+        "spec_for",
+        lambda table: reordered if table == "chunk_elements" else real_spec_for(table),
+    )
+
+    source = export_module._Source(seeded["settings"], Path(__file__).resolve().parents[2])
+    try:
+        with source.read() as conn:
+            catalog = source._catalog_primary_key(conn, "chunk_elements")
+            with pytest.raises(SyncExportError) as excinfo:
+                source.sync_key(conn, "chunk_elements")
+    finally:
+        source.close()
+
+    # The mutation really is a pure reorder, not a different column set.
+    assert set(catalog) == set(reordered.key) and tuple(catalog) != reordered.key
+    message = str(excinfo.value)
+    assert "chunk_elements" in message and "disagrees" in message
+    assert str(tuple(catalog)) in message
+    assert str(reordered.key) in message
+
+
+@pytest.mark.parametrize(
+    "ddl,columns,why",
+    [
+        (
+            "CREATE UNIQUE INDEX uq_probe_partial ON chunk_questions "
+            "(notebook_id, chunk_id) WHERE source_id != ''",
+            ("notebook_id", "chunk_id"),
+            "partial: uniqueness only holds for rows matching the predicate",
+        ),
+        (
+            "CREATE UNIQUE INDEX uq_probe_expression ON chunk_questions "
+            "(notebook_id, lower(chunk_id))",
+            ("notebook_id", "chunk_id"),
+            "expression key: lower(chunk_id) being unique is not chunk_id "
+            "being unique",
+        ),
+    ],
+)
+def test_has_unique_surface_rejects_an_index_that_does_not_enforce_the_set(
+    seeded, ddl, columns, why
+):
+    """``_has_unique_surface`` must answer for the column set the caller is
+    about to match rows by, not for anything the catalog merely calls
+    UNIQUE. Both indexes below exist, are flagged unique, and mention exactly
+    the wanted columns -- and neither guarantees those columns identify one
+    row."""
+    with seeded["repo"]._write() as db:
+        db.execute(ddl)
+
+    source = export_module._Source(seeded["settings"], Path(__file__).resolve().parents[2])
+    try:
+        with source.read() as conn:
+            assert source._has_unique_surface(conn, "chunk_questions", columns) is False
+    finally:
+        source.close()
+
+
+def test_has_unique_surface_accepts_a_plain_unique_index(seeded):
+    """The positive control for the two rejections above: the same columns,
+    a plain total unique index, and it is accepted -- so those tests fail for
+    the reason they claim and not because the probe answers False for
+    everything."""
+    with seeded["repo"]._write() as db:
+        db.execute(
+            "CREATE UNIQUE INDEX uq_probe_plain ON chunk_questions "
+            "(notebook_id, chunk_id)"
+        )
+
+    source = export_module._Source(seeded["settings"], Path(__file__).resolve().parents[2])
+    try:
+        with source.read() as conn:
+            assert (
+                source._has_unique_surface(
+                    conn, "chunk_questions", ("notebook_id", "chunk_id")
+                )
+                is True
+            )
+    finally:
+        source.close()
+
+
 def test_ordinal_is_never_exported(seeded, tmp_path):
     report = _export(seeded["settings"], tmp_path / "out", [seeded["exported"]])
     manifest = _manifest(report.package_dir)

@@ -800,6 +800,23 @@ def _ident(name: str) -> str:
         raise SyncImportError(str(exc)) from None
 
 
+def _sync_key(backend: _Backend, conn: Any, table: str) -> tuple[str, ...]:
+    """``_Source.sync_key`` re-raised in this module's error type.
+
+    That resolver is shared with the exporter and therefore raises
+    ``SyncExportError`` -- for "no key at all", for a manifest key the target
+    catalog does not actually enforce, and for a manifest/catalog
+    disagreement. All three are import-side failures when they happen here
+    (the TARGET's schema is the one that drifted), and an import caller
+    catches ``SyncImportError`` only. The message is carried across
+    unchanged: it already names the table and what is wrong with its key.
+    Same shape as ``_ident`` above."""
+    try:
+        return backend.sync_key(conn, table)
+    except SyncExportError as exc:
+        raise SyncImportError(str(exc)) from None
+
+
 def _moment(backend: _Backend, value: datetime) -> Any:
     """A timestamp in the shape the target's control tables take: an aware
     ``datetime`` for PostgreSQL's ``timestamptz``, ISO text for SQLite."""
@@ -1002,6 +1019,16 @@ class _TargetKeys:
     - NOTEBOOK-scoped: ONE query up front for the package's notebooks. These
       are the big tables, and every one of them has a notebook column to
       filter on, so the set is bounded by what this import is about to write.
+      Since v84 that includes ``knowledge_object_sources`` and
+      ``community_members``: they now resolve a row identity (their
+      registered ``TableSyncSpec.key``, backed by a unique surface on both
+      backends), so they take the same whole-partition preload every other
+      NOTEBOOK-scoped table takes instead of the whole-scope replace they used
+      to get. The preloaded set is one tuple per existing row of those tables
+      in the package's notebooks -- sized by the KG of the notebooks being
+      imported (object/source pairs, community memberships), which for a
+      large graph is the same order as ``chunks`` or ``knowledge_objects``
+      and is already the shape this class is built for.
     - GLOBAL-scoped: ONE query for the whole table. The three GLOBAL tables
       (groups, group_members, object_schemas) are environment-level registries
       whose size is bounded by the organisation, not by content.
@@ -1263,9 +1290,9 @@ def _apply_optional_refs(
     if not spec.optional_refs or not rows:
         return rows
     kept = rows
-    own_key = context.backend.sync_key(conn, table)
+    own_key = _sync_key(context.backend, conn, table)
     for column, referenced in spec.optional_refs:
-        key = context.backend.sync_key(conn, referenced)
+        key = _sync_key(context.backend, conn, referenced)
         if len(key) != 1:
             raise SyncImportError(
                 f"{table}.{column}: optional ref into {referenced!r} whose "
@@ -1705,7 +1732,7 @@ def _verify_row_scopes(
         own_key_column = ""
         own_keys: set[str] = set()
         if collect_own_keys:
-            key_columns = backend.sync_key(conn, table)
+            key_columns = _sync_key(backend, conn, table)
             if len(key_columns) != 1:
                 raise SyncImportError(
                     f"{table}: named as a PARENT scope's parent_table but its "
@@ -3466,7 +3493,7 @@ def _apply_table(
     spec = spec_for(table)
     entry = context.manifest.tables[table]
     columns = _package_columns(backend, conn, table, context)
-    primary_key = backend.sync_key(conn, table)
+    primary_key = _sync_key(backend, conn, table)
     owned = _target_owned(table)
     update_columns = [
         column
@@ -3818,7 +3845,7 @@ def _prune_table(
     # phase DELETES, so it is exactly where a stale ownership assumption
     # would do the most damage. See _assert_notebooks_still_ours's docstring.
     _assert_notebooks_still_ours(backend, conn, context)
-    primary_key = backend.sync_key(conn, table)
+    primary_key = _sync_key(backend, conn, table)
     carried = {
         tuple(decode_value(row.get(column)) for column in primary_key)
         for row in _iter_lines(context.package_dir / rows_path(table))

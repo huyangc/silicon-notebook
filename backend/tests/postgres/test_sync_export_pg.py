@@ -499,3 +499,137 @@ def test_captured_through_seq_reads_the_change_log_high_water_mark_on_postgres(
             (TARGET_ENV,),
         ).fetchone()
     assert row["exported_through_seq"] == 5
+
+
+# ------------------------------------------- unique-surface probe (PG shapes)
+
+
+@pytest.fixture
+def probe_source(seeded):
+    """A ``_Source`` on the seeded scope, for calling the catalog probes
+    directly. The unique-surface rules are pure catalog reads, so they do not
+    need a whole export run to exercise -- but they DO need PostgreSQL, since
+    three of the four shapes below (INCLUDE payload columns, expression key
+    columns, an index left NOT VALID) have no SQLite equivalent."""
+    from app.migration.sync.export import _Source
+
+    source = _Source(seeded["settings"], Path(__file__).resolve().parents[3])
+    try:
+        yield source
+    finally:
+        source.close()
+
+
+def test_has_unique_surface_ignores_include_payload_columns(seeded, probe_source):
+    """``UNIQUE (notebook_id) INCLUDE (chunk_id)`` enforces uniqueness of
+    notebook_id ALONE. The INCLUDE column rides along in the index for
+    covering reads and is not part of the constraint at all, so this index
+    must not answer for the pair -- reading ``indkey`` without honouring
+    ``indnkeyatts`` is exactly how it would."""
+    with seeded["repo"]._write() as db:
+        db.execute(
+            "CREATE UNIQUE INDEX uq_probe_include ON chunk_questions "
+            "(notebook_id) INCLUDE (chunk_id)"
+        )
+
+    with probe_source.read() as conn:
+        assert (
+            probe_source._has_unique_surface(
+                conn, "chunk_questions", ("notebook_id", "chunk_id")
+            )
+            is False
+        )
+        # Positive control: it DOES answer for its real key column.
+        assert (
+            probe_source._has_unique_surface(conn, "chunk_questions", ("notebook_id",))
+            is True
+        )
+
+
+def test_has_unique_surface_rejects_an_expression_key_column(seeded, probe_source):
+    """``UNIQUE (notebook_id, lower(chunk_id))`` guarantees the LOWERCASED
+    chunk_id is unique within a notebook, which is not the same statement as
+    chunk_id being unique. ``indkey`` carries a 0 for the expression column;
+    the whole index has to be discarded, not just that position -- keeping
+    the rest would leave ``{notebook_id}`` looking like a unique surface it
+    is not."""
+    with seeded["repo"]._write() as db:
+        db.execute(
+            "CREATE UNIQUE INDEX uq_probe_expression ON chunk_questions "
+            "(notebook_id, lower(chunk_id))"
+        )
+
+    with probe_source.read() as conn:
+        assert (
+            probe_source._has_unique_surface(
+                conn, "chunk_questions", ("notebook_id", "chunk_id")
+            )
+            is False
+        )
+        assert (
+            probe_source._has_unique_surface(conn, "chunk_questions", ("notebook_id",))
+            is False
+        )
+
+
+def test_has_unique_surface_rejects_an_invalid_index(seeded, probe_source):
+    """An index left behind by a failed ``CREATE INDEX CONCURRENTLY`` is
+    flagged unique in the catalog but is neither used by the planner nor
+    enforced by the executor. ``indisvalid``/``indisready`` are what tell the
+    two apart. (Forged here by clearing the flag directly: making a real
+    CONCURRENTLY build fail mid-flight is not something a test can arrange
+    deterministically. That catalog write needs superuser, which both the
+    local lane and CI's ``postgres:16`` service run as; anywhere else this
+    skips rather than failing for an unrelated reason.)"""
+    with seeded["repo"]._connect() as db:
+        if not db.execute(
+            "SELECT usesuper FROM pg_user WHERE usename = current_user"
+        ).fetchone()["usesuper"]:
+            pytest.skip("forging an invalid index needs a superuser connection")
+
+    with seeded["repo"]._write() as db:
+        db.execute(
+            "CREATE UNIQUE INDEX uq_probe_invalid ON chunk_questions "
+            "(notebook_id, chunk_id)"
+        )
+
+    with probe_source.read() as conn:
+        assert (
+            probe_source._has_unique_surface(
+                conn, "chunk_questions", ("notebook_id", "chunk_id")
+            )
+            is True
+        ), "positive control: a healthy index of the same shape is accepted"
+
+    with seeded["repo"]._write() as db:
+        db.execute(
+            "UPDATE pg_index SET indisvalid = false "
+            "WHERE indexrelid = 'uq_probe_invalid'::regclass"
+        )
+
+    with probe_source.read() as conn:
+        assert (
+            probe_source._has_unique_surface(
+                conn, "chunk_questions", ("notebook_id", "chunk_id")
+            )
+            is False
+        )
+
+
+def test_has_unique_surface_rejects_a_partial_index(seeded, probe_source):
+    """Same rule as the SQLite lane's, restated on this backend because the
+    catalog column is a different one (``indpred``, not ``PRAGMA
+    index_list``'s ``partial``)."""
+    with seeded["repo"]._write() as db:
+        db.execute(
+            "CREATE UNIQUE INDEX uq_probe_partial ON chunk_questions "
+            "(notebook_id, chunk_id) WHERE source_id != ''"
+        )
+
+    with probe_source.read() as conn:
+        assert (
+            probe_source._has_unique_surface(
+                conn, "chunk_questions", ("notebook_id", "chunk_id")
+            )
+            is False
+        )

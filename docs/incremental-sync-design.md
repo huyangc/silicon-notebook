@@ -283,6 +283,15 @@ SQLite v84 / PostgreSQL 0064）；按日志读增量、压缩、`deletes`/`kg_ep
   REPEATABLE READ 快照里可能整体不可见也可能部分可见，`txid` 让增量导出能对「快照边界正好
   切在一个事务中间」的窗口做补偿判断。SQLite 没有等价物，`txid` 恒为 NULL，PR-3b 的这一步
   是 PostgreSQL 独有的关切。
+
+  具体是这样丢行的：`seq` 在 INSERT 时由序列发放，而行是在 COMMIT 时才**可见**，两个顺序
+  不一致。写入方 A 取到 `seq=100` 尚未提交，写入方 B 取到 `seq=101` 并先提交；导出的
+  REPEATABLE READ 快照此刻建立，看得见 101、看不见 100，`MAX(seq)` 于是是 101。若把 101
+  当成「下次从 101 之后继续读」的续跑点，A 的那条变更就**永久**跳过了——日志本身没丢，丢
+  的是窗口。所以 `exported_through_seq`（§「导出水位」）在 PR-3a 里只是「这次导出看到了多远」
+  的记录，不是续跑点；PR-3b 的增量读必须用 `txid` 配合快照的 `xmin` 框定窗口：快照建立时仍
+  在途的事务，其日志行不论 `seq` 多少都要留给下一轮重读。`export.py` 的
+  `_captured_through_seq`/`_advance_watermark` 两处 docstring 记着同一件事。
 - 两张原本没有主键的表（`knowledge_object_sources`、`community_members`）在 v84/0064 里各补一
   个复合键：`(object_id, source_id)`、`(community_id, canonical_id)`（后者与
   `reap_derived_generations_page` 的行身份一致——`community_id` 每一代重铸、全库唯一）。SQLite
@@ -317,6 +326,33 @@ SQLite 的相对开销比 PostgreSQL 明显：SQLite 基线本身极快（进程
 着还要再慢一截（多一次真实的 INSERT），但两种状态都不是数量级的减速——在正常写入吞吐量下
 （远小于每秒两万行的批量导入）可以忽略；对批量导入/回填这类单事务写几万行的场景，运维应该
 知道打开变更捕获会让那批写入慢 1.2×–3.9×（视后端而定）。
+
+### 取舍：控制行门，而不是 enable/disable 时建删触发器
+
+上表里门关着的那一行是这个取舍的代价：倍率看着不小（SQLite 2.6×、PostgreSQL 1.2×），但绝对
+量是 20000 行几十毫秒。这条路径上真正花时间的是解析、切块、向量化与模型调用，每行多一次
+`EXISTS` 探测淹没在里面；一次交互式写入（几行到几百行）的增量在微秒级。把触发器随开关建删
+就能把这一行降到基线，我们没有这么做，理由有三条：
+
+- **两端同一个机制。** 控制行是一张表里的一行，SQLite 与 PostgreSQL 的读法、写法、事务语义
+  完全一样；建删触发器则是两套 DDL、两种 DDL 事务性（SQLite 的 `DROP TRIGGER` 与
+  PostgreSQL 的 `DROP TRIGGER ... ON` 在锁与可回滚性上并不对称），开关本身就会长出第三份
+  后端分支。
+- **触发器集合恒定，守卫才能做精确集合比对。** `postgres_catalog` 的漂移守卫要求业务表上的
+  非内部触发器**恰好等于**生成器那一套（名、所在表、`pg_get_triggerdef()` 全文、函数体
+  `prosrc` 全文），`scripts/verify_repository_snapshot.py` 同样把 138 条 SQLite 触发器的
+  `sqlite_master` 文本逐字钉住。若触发器随开关出现/消失，这两处都得接受「有」和「无」两种
+  合法形态，也就再也说不出「多一条/少一条都是漂移」——而少一条触发器正是最危险的故障：那张
+  表悄悄停止被捕获，下一次增量导出漏掉它的变更且不报错。
+- **enable/disable 不是 DDL。** 控制行让开关是一条 `UPDATE`，跑在普通应用连接上，和清水位、
+  清日志同一个事务里原子完成；建删触发器需要表级 DDL 权限与 `ACCESS EXCLUSIVE` 锁，在生产
+  库上把一个运维开关变成一次需要维护窗口的迁移级操作。
+
+放弃的方案就是它的镜像：`enable` 时建 138/46 条触发器、`disable` 时删掉。何时值得回头改：
+当门关着的开销在**真实入库路径**上能被测出来——也就是说，不是上面这种孤立的 20000 行
+`executemany` 微基准，而是在生产形态的解析+向量化+写库全链路上，关着门与完全没有触发器之间
+出现可复现的差异。真出现了，守卫的形态问题仍然要先解决（最可能的做法是把「当前开关状态」
+一并喂给守卫，让它按状态选择期望集合，而不是放松成两种都接受）。
 
 ### 导出水位
 
@@ -518,6 +554,17 @@ PR-3b 用的记账。`--notebook` 限定导出范围。`import` 幂等：同一�
   行数。登记，暂不认为是问题（机制与别的大表相同，PR-2 起这些表的导入内存量级本就以这个数量
   级为基准），但运维在内存紧张的目标环境上导入超大 KG 库时应该知道这两张表现在也计入这块
   内存开销。
+- `postgres_catalog._expected_capture_ddl` 只认**行首**语句：它逐条扫迁移文本里的
+  `CREATE [OR REPLACE] FUNCTION sync_capture_*` / `CREATE TRIGGER sync_capture_*` /
+  `DROP FUNCTION|TRIGGER ...`，按出现顺序做字典赋值与删除（后来的定义覆盖先前的，DROP 从期望集
+  移除）。这是刻意的——`--` 注释里的同样字眼不该被当成 DDL——代价是：将来若有迁移把
+  `CREATE TRIGGER sync_capture_x` 缩进写在 `DO $$ ... $$` 块里，解析器看不见它，期望集里就少一
+  条，而线上 catalog 里有。守卫会因此报 drift（安全方向：宁可多报也不漏报），但报错会指向
+  「manifest 与期望集不符」而不是「你缩进了」。真要写这种迁移，先让它顶格出现，或者扩展解析器
+  并在这里更新记录。
+- `scripts/generate_sync_capture_migration.py --check` 比对的是**整个 0064 文件**，不只是生成
+  的那一半：渲染时手写前缀是原样保留的，所以「committed ≠ rendered」只可能来自生成的那一半漂
+  移；但 `--check` 打印的 diff 是全文 diff，读的人应该知道这一点。
 - `TableOutcome.updated`（`ImportReport`/CLI「更新」计数）在 `_apply_table` 里是按「这个键在
   目标端预取的键集合（`_TargetKeys.present`）里已经存在」来判定的，不是按 upsert 语句实际改动
   了哪些列——一行即使内容与目标端已有的完全相同，只要它的主键已经存在就计入「更新」。这对
