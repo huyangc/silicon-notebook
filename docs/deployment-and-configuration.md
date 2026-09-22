@@ -576,11 +576,12 @@ id and the backend refuses to start.** Whenever `MODEL_SERVICES_CONFIG` is
 non-empty, `[bindings]` must cover every workload (all three kinds — chat,
 embedding, rerank) and must not name an id that is not a workload (a
 misspelling, or one retired by an upgrade such as `graph_chain_verify`). Either
-one and the process exits non-zero, and the **exception message** is one
-readable line stating why:
+one and the process exits non-zero, and the backend log — which is also stderr,
+since `prod.sh`/`backend.sh` append it to the same file — carries one readable
+line stating why, with no traceback:
 
 ```
-model-bindings: 缺少绑定的工作负载：库理解整理（agent_profile_consolidate），检索打法总结（retrieval_experience_distill）；已退役、升级后请删除的绑定：graph_chain_verify（[bindings]/[thinking]）；未知、疑似拼写错误的绑定：ask_anwser（[bindings]）。请在 /etc/silicon/model-services.toml 的 [bindings]/[thinking] 补齐/删除后重启；确需临时放行设 MODEL_BINDINGS_STRICT=false（仅告警）。
+model-bindings: 缺少绑定的工作负载：库理解整理（agent_profile_consolidate），检索打法总结（retrieval_experience_distill）；已退役、升级后请删除的绑定：graph_chain_verify（[bindings]/[thinking]）；未知、疑似拼写错误的绑定：ask_anwser（[bindings]）。请在 MODEL_SERVICES_CONFIG 指向的文件的 [bindings]/[thinking] 补齐/删除后重启；确需临时放行设 MODEL_BINDINGS_STRICT=false（仅告警）。
 ```
 
 Every segment is listed in full (sorted by id, workloads with their Chinese
@@ -591,15 +592,19 @@ found in — an id that exists only in `[thinking]` is not findable in
 `[bindings]`. The message carries ids, labels and table names only — never a
 secret or an endpoint.
 
-That is the **exception message** (the traceback uvicorn prints): it names the
-configuration file by absolute path and echoes the file's stale ids verbatim.
-**The line written to the startup log carries no path**: it says
-"MODEL_SERVICES_CONFIG 指向的文件" instead, and a stale id read out of the file
-is echoed only when it is shaped like a workload id (`^[a-z0-9_]{1,64}$`) —
-anything else collapses into `<无法显示的键名>×N`. Workload ids and their
-Chinese labels are a closed in-code vocabulary and appear on both sides. Other
-model-configuration errors (unreadable file, invalid service fields) get one
-fixed sentence in the log and no exception text at all.
+**That line never prints the configuration file's path** — it says
+"MODEL_SERVICES_CONFIG 指向的文件", so look the TOML up through that environment
+variable. The backend runs as `uvicorn … >>"$BACKEND_LOG" 2>&1`, which makes
+stderr the log file, so a failed startup prints this one line instead of raising
+a traceback. For the same reason a stale id read out of the file is echoed only
+when it is shaped like a workload id (`^[a-z0-9_]{1,64}$`); anything else
+collapses into a counted `<无法显示的键名>×N` with its table — a TOML key holding
+a path or a newline would otherwise write a private path into the log, or forge
+a whole extra line. Workload ids and their Chinese labels are a closed in-code
+vocabulary and are always named. Other model-configuration errors (unreadable
+file, missing secret, invalid service fields) stop the process the same way but
+print only the fixed sentence `模型服务配置无效（MODEL_SERVICES_CONFIG 指向的文件解析失败）`,
+with no exception text at all; which line is wrong is read from the file itself.
 
 The check lives in registry loading, so **hot reload runs
 through the same gate**: an edit that deletes a binding line is rejected, the

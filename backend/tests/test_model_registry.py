@@ -741,23 +741,23 @@ def test_non_strict_load_keeps_the_stale_ids_for_the_startup_warning(tmp_path):
 
 
 def test_the_deployment_docs_quote_the_refusal_message_verbatim():
-    """zh/en 两份部署文档里的样例必须与**异常消息**逐字相同。
+    """zh/en 两份部署文档里的样例必须与**运维实际看到的那一行**逐字相同。
 
-    钉的是 `describe_binding_gap`(带路径的那一面),因为文档引的就是运维会在
-    traceback 里看到的那段。日志那一面由 `loggable_binding_gap` 渲染、内容刻意
-    更窄(无路径、陈旧 id 需过形状校验),文档在样例下方用文字说明差异而不是再
-    贴一段——两段样例会立刻开始互相漂移。
+    钉的是 `loggable_binding_gap`,不是 `describe_binding_gap`:后端以
+    `uvicorn … >>"$BACKEND_LOG" 2>&1` 启动,stderr 就是日志文件,所以 main 的预检
+    不让带路径的 `ModelBindingGapError` 逃出去,而是 `SystemExit(exc.loggable())`
+    ——日志与 stderr 拿到的是同一行脱敏文本。文档要引的就是那一行;贴带路径的
+    版本会让运维照着一个他根本看不到的形态去对。
 
     这条消息是运维遇到拒启时唯一的指引,文档抄错一个字(少一段、连接符不同、
     落点标注漏了)就会把人引到错误的表上去改。样例拿 `==` 比,不是 `in`。
     """
-    produced = describe_binding_gap(
+    produced = loggable_binding_gap(
         ["agent_profile_consolidate", "retrieval_experience_distill"],
         {
             "graph_chain_verify": {"[bindings]", "[thinking]"},
             "ask_anwser": {"[bindings]"},
         },
-        "/etc/silicon/model-services.toml",
     )
     root = Path(__file__).resolve().parents[2] / "docs"
     for name in (

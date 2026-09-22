@@ -476,10 +476,11 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 **绑定表在启动时被硬校验：缺一个工作负载或多一个未知 id，后端直接拒绝启动。**
 只要 `MODEL_SERVICES_CONFIG` 非空，`[bindings]` 就必须覆盖全部工作负载（chat / embedding /
 rerank 三类都算），且不得出现不是工作负载的 id（拼错的，或版本升级后已退役的，如
-`graph_chain_verify`）。任一条不满足，进程以非零码退出，**异常消息**是一整句可读的原因：
+`graph_chain_verify`）。任一条不满足，进程以非零码退出，后端日志（以及 stderr，`prod.sh` /
+`backend.sh` 把它追加进同一个日志文件）里是一整句可读的原因，没有 traceback：
 
 ```
-model-bindings: 缺少绑定的工作负载：库理解整理（agent_profile_consolidate），检索打法总结（retrieval_experience_distill）；已退役、升级后请删除的绑定：graph_chain_verify（[bindings]/[thinking]）；未知、疑似拼写错误的绑定：ask_anwser（[bindings]）。请在 /etc/silicon/model-services.toml 的 [bindings]/[thinking] 补齐/删除后重启；确需临时放行设 MODEL_BINDINGS_STRICT=false（仅告警）。
+model-bindings: 缺少绑定的工作负载：库理解整理（agent_profile_consolidate），检索打法总结（retrieval_experience_distill）；已退役、升级后请删除的绑定：graph_chain_verify（[bindings]/[thinking]）；未知、疑似拼写错误的绑定：ask_anwser（[bindings]）。请在 MODEL_SERVICES_CONFIG 指向的文件的 [bindings]/[thinking] 补齐/删除后重启；确需临时放行设 MODEL_BINDINGS_STRICT=false（仅告警）。
 ```
 
 各段都会列全（按 id 字典序，工作负载带中文标签），所以一次就能改完，不必逐条重启试错。陈旧
@@ -487,11 +488,14 @@ id 按「已退役」与「疑似拼错」分开写，因为这两种要做的�
 表——只写在 `[thinking]` 里的陈旧 id，在 `[bindings]` 里是翻不到的。消息里只有 id、中文标签和
 表名，不含任何密钥或 endpoint。
 
-上面是**异常消息**（uvicorn 打出来的那段 traceback），它带配置文件的绝对路径、并原样列出文件
-里写的陈旧 id。**同时写进启动日志的那一行不含路径**：位置只说「MODEL_SERVICES_CONFIG 指向的
-文件」，来自配置文件的陈旧 id 只有形如 workload id（`^[a-z0-9_]{1,64}$`）时才原样记，其余折叠
-成 `<无法显示的键名>×N`。工作负载 id 与中文标签是代码里的封闭词表，两边都照记。其它模型配置
-错误（文件读不了、服务字段非法等）日志里只有一行固定文案，异常文本一个字都不进日志。
+**这一行不会打印配置文件的路径**——它写的是「MODEL_SERVICES_CONFIG 指向的文件」，请照着这个
+环境变量去找那份 TOML。原因是后端以 `uvicorn … >>"$BACKEND_LOG" 2>&1` 启动，stderr 就是日志
+文件，所以启动失败不再抛 traceback，只打印这一行。同理，来自配置文件的陈旧 id 只有形如
+workload id（`^[a-z0-9_]{1,64}$`）时才原样列出，其余折叠成 `<无法显示的键名>×N`（带表名和计数）
+——一个含路径或换行的 TOML 键否则就能把私有路径写进日志、甚至伪造出一整行假日志。工作负载 id
+与中文标签是代码里的封闭词表，照记。其它模型配置错误（文件读不了、密钥没填、服务字段非法）
+同样停进程，但只打印一行固定文案 `模型服务配置无效（MODEL_SERVICES_CONFIG 指向的文件解析失败）`，
+异常文本一个字都不出现——具体哪一行错了，照着那个路径去看文件。
 
 这条校验做在注册表加载里，因此**热重载走的是同一把闸**：线上
 编辑 `model-services.toml` 删错一行，新配置被拒、旧注册表原样保留，服务不会带着半张绑定表继续
