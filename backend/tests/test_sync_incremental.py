@@ -1429,47 +1429,106 @@ def test_an_unreadable_heartbeat_is_treated_as_a_live_lease(baseline):
     assert _lease(baseline["repo"])["run_id"] == "broken-run"
 
 
-def test_a_superseded_run_never_deletes_its_successors_lease(baseline, monkeypatch):
-    """A run whose lease was judged dead and taken over can still be alive
-    and finish. Both places that drop a lease -- the publish transaction and
-    the abort path -- therefore match on ``run_id``, so the late finisher
-    removes its OWN row or nothing, never the successor's.
+def test_a_superseded_run_does_not_publish_and_leaves_no_package(
+    baseline, monkeypatch
+):
+    """An export that stalls past the lease's staleness window has its lease
+    taken over; the successor finishes and publishes. When the original then
+    wakes up its package describes an OLDER snapshot -- and on the full
+    branch its sequence can be EQUAL to the successor's, which the
+    ``exported_through_seq <= excluded`` guard would happily let through. It
+    would overwrite a newer watermark with an older ``exported_snapshot``,
+    and on PostgreSQL that silently drops the next export's compensation
+    window for transactions the successor already accounted for.
 
-    变异验证: 把两处 DELETE 的 ``AND run_id = ?`` 去掉, 本条必须报红。
+    So the publish transaction checks the lease is still ours, before writing
+    anything.
+
+    变异验证: 去掉 ``_advance_watermark`` 里的 ``_require_lease`` 调用,
+    本条必须报红(旧导出用同 seq 覆盖了接替者的水位)。
     """
     repo = baseline["repo"]
+    real = export_module._advance_watermark
 
-    def supersede() -> None:
+    def supersede(*args, **kwargs):
+        # The successor takes the lease over and publishes its own watermark
+        # at the SAME sequence -- the case the seq guard cannot see.
         with repo._write() as db:
             db.execute(
                 "UPDATE sync_export_runs SET run_id='successor', "
                 "package_id='successor' WHERE target_env=?",
                 (TARGET_ENV,),
             )
+            db.execute(
+                "UPDATE sync_export_state SET package_id='successor-pkg' "
+                "WHERE target_env=?",
+                (TARGET_ENV,),
+            )
+        return real(*args, **kwargs)
 
-    # ... on the publish path.
-    real_advance = export_module._advance_watermark
-    monkeypatch.setattr(
-        export_module,
-        "_advance_watermark",
-        lambda *a, **k: (supersede(), real_advance(*a, **k))[1],
-    )
-    _export(baseline["settings"], baseline["out"])
+    monkeypatch.setattr(export_module, "_advance_watermark", supersede)
+    before = _package_dirs(baseline["out"])
+
+    with pytest.raises(SyncExportError) as failure:
+        _export(baseline["settings"], baseline["out"], full=True)
+
+    message = str(failure.value)
+    assert "was taken over by run" in message and "successor" in message
+    assert _package_dirs(baseline["out"]) == before
+    assert _watermark(repo)["package_id"] == "successor-pkg"
+    # The abandoned run also did not take the successor's lease with it.
     assert _lease(repo)["run_id"] == "successor"
-    monkeypatch.undo()
 
-    # ... and on the abort path. The successor row is cleared first so this
-    # export can take a lease of its own, then superseded mid-run again.
-    with repo._write() as db:
-        db.execute("DELETE FROM sync_export_runs WHERE target_env=?", (TARGET_ENV,))
+
+def test_a_lease_already_released_by_a_successor_also_refuses_the_publish(
+    baseline, monkeypatch
+):
+    """The successor deletes the lease in the very transaction that publishes
+    its watermark, so a missing row means "somebody else already finished" --
+    the same verdict as a different ``run_id``, not an invitation to
+    publish."""
+    repo = baseline["repo"]
+    real = export_module._advance_watermark
+
+    def released(*args, **kwargs):
+        with repo._write() as db:
+            db.execute("DELETE FROM sync_export_runs WHERE target_env=?", (TARGET_ENV,))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(export_module, "_advance_watermark", released)
+
+    with pytest.raises(SyncExportError) as failure:
+        _export(baseline["settings"], baseline["out"])
+
+    assert "already published and released" in str(failure.value)
+
+
+def test_an_aborted_superseded_run_never_deletes_its_successors_lease(
+    baseline, monkeypatch
+):
+    """The abort path drops a lease too, and it matches on ``run_id`` for the
+    same reason: a run whose lease was taken over can still be alive and can
+    still fail, and it must remove its OWN row or nothing.
+
+    变异验证: 把 ``_release_export_lease`` 的 ``AND run_id = ?`` 去掉,
+    本条必须报红。
+    """
+    repo = baseline["repo"]
 
     def explode(*_args, **_kwargs):
-        supersede()
+        with repo._write() as db:
+            db.execute(
+                "UPDATE sync_export_runs SET run_id='successor', "
+                "package_id='successor' WHERE target_env=?",
+                (TARGET_ENV,),
+            )
         raise RuntimeError("boom")
 
     monkeypatch.setattr(export_module, "_write_users", explode)
+
     with pytest.raises(RuntimeError, match="boom"):
         _export(baseline["settings"], baseline["out"])
+
     assert _lease(repo)["run_id"] == "successor"
 
 

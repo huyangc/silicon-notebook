@@ -634,6 +634,47 @@ def _captured_through_seq(source: _Source, conn: Any, gate_open: bool) -> int:
     return int(row["max_seq"])
 
 
+def _require_lease(source: _Source, conn: Any, target_env: str, run_id: str) -> None:
+    """Refuse to publish unless this run STILL holds the target's lease.
+
+    The hole this closes (codex #784 r5): an export that stalls past
+    ``_STALE_RUN_SECONDS`` has its lease taken over, the successor finishes
+    and publishes, and then the original wakes up. Its package describes an
+    older snapshot, and on the full branch its sequence can be EQUAL to the
+    successor's -- so the ``exported_through_seq <= excluded`` guard lets it
+    through and it overwrites a newer watermark with an older
+    ``exported_snapshot``. On PostgreSQL that silently drops the next
+    export's compensation window for any transaction the successor had
+    already accounted for: those log rows may since have been pruned, and
+    nothing will look for them again.
+
+    Read ``FOR UPDATE`` on PostgreSQL, inside the publish transaction and
+    after it has already taken the gate's row lock, so the lease cannot be
+    taken over between this check and the commit. A MISSING row is the same
+    verdict as a different ``run_id``: the successor deletes the lease in the
+    very transaction that publishes its watermark, so "no lease" means
+    "somebody else already finished".
+
+    This is also what keeps the full branch's ``<=`` safe rather than merely
+    permissive. Equality can now only come from THIS run (nobody else holds
+    the lease), which is the re-publish case a re-run of one export is
+    allowed to perform; a different run reaching the same sequence is
+    rejected here, before the comparison is ever reached.
+    """
+    statement = "SELECT run_id FROM sync_export_runs WHERE target_env = ?"
+    if source.is_postgres:
+        statement += " FOR UPDATE"
+    rows = source.fetch(conn, statement, (target_env,))
+    held = str(rows[0]["run_id"]) if rows else ""
+    if held == run_id:
+        return
+    raise SyncExportError(
+        f"export lease for target {target_env!r} was taken over by run "
+        f"{held or '(none -- already published and released)'!r}; this "
+        "package is not published"
+    )
+
+
 def _advance_watermark(
     source: _Source,
     target_env: str,
@@ -677,6 +718,10 @@ def _advance_watermark(
     but ``captured`` goes to 0, which costs one full export and loses nothing.
     Returns ``(captured, reason)``; ``reason`` is empty when the gate held.
 
+    Before either, ``_require_lease`` confirms this run still owns the
+    target's export lease -- see it for the stalled-then-superseded export
+    that guard exists for.
+
     That comparison is only worth anything if the gate cannot move between
     the re-read and the commit, so this block TAKES THE LOCK FIRST:
     ``begin_immediate`` on SQLite (one writer at a time, across processes --
@@ -695,6 +740,9 @@ def _advance_watermark(
     - Full: the stored seq may not move backwards, so the upsert carries
       ``WHERE sync_export_state.exported_through_seq <= excluded....``. A
       baseline that lost a race against a newer one is refused the same way.
+      The ``<=`` (rather than ``<``) is safe because ``_require_lease`` has
+      already established that nobody else holds this target's lease: an
+      EQUAL sequence can only be this same run re-publishing.
 
     Raises ``SyncExportError`` in both cases; the caller deletes the package
     it just published, because a package no watermark points at is worse than
@@ -714,6 +762,7 @@ def _advance_watermark(
     with source.write() as conn:
         source.begin_immediate(conn)
         now = _capture_gate(source, conn, lock=True)
+        _require_lease(source, conn, target_env, run_id)
         captured = bool(gate[0]) and now == gate
         if gate[0] and not captured:
             reason = (
