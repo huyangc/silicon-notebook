@@ -904,7 +904,20 @@ Two more guarantees round out the same publish path (design doc §7 "在途导�
   (`sync_export_runs`) before it opens its read snapshot. A second unscoped export to the same
   target while the first is still running is refused outright, naming the holder's `run_id`,
   `started_at`, and `heartbeat_at`; a lease whose heartbeat has gone unrefreshed for over an hour
-  is treated as dead and replaced (with a warning), not blocked on forever.
+  is treated as dead and replaced (with a warning), not blocked on forever. If the export the lease
+  was taken from is not actually dead -- just stalled past the hour and still running -- it does not
+  get to publish once it resumes: the transaction that writes the watermark locks and re-checks that
+  `sync_export_runs.run_id` is still its own (`FOR UPDATE` on PostgreSQL, under the same
+  `BEGIN IMMEDIATE` on SQLite) before writing anything. A lease that has since been taken over, or
+  already deleted by the successor after it published, means this run refuses to publish, deletes
+  the package it just finished writing, and reports `export lease ... was taken over`. **A stalled
+  export that resumes after being taken over will never publish — see it fail this way and just
+  re-run `sync export`**, rather than waiting for it to succeed on its own. (Why a `seq` match alone
+  is not enough: the resumed run's `seq` can equal the successor's published watermark, but its own
+  read snapshot is older, so it is missing transactions that were in flight at its snapshot, that the
+  successor's later snapshot saw commit and folded in — and that `prune-log` may have already
+  deleted on the strength of the successor's watermark. Letting the stalled run publish over that
+  watermark would erase those transactions from the chain with no seq-based check able to notice.)
 - **The publish itself is a conditional write, checked against its predecessor**, not a
   last-writer-wins upsert: an incremental export's watermark write requires the row's
   `package_id` to still be the `base_package_id` this package was built against; a full export's

@@ -735,7 +735,16 @@ PYTHONPATH=backend python scripts/sync_notebooks.py capture disable --json
 - **同一 target 的两次导出互斥**：不限定范围的导出在开读快照之前先占一个租约
   （`sync_export_runs`）。同一 target 上第二个不限定范围的导出，若第一个还在跑，会被直接
   拒绝，并点名对方的 `run_id`、`started_at`、`heartbeat_at`；心跳超过一小时没刷新的租约视为
-  死租约，会被接管（带一条 warning），不会一直卡住这个 target。
+  死租约，会被接管（带一条 warning），不会一直卡住这个 target。租约被拿走的那次导出如果其实
+  没死——只是卡过了一小时、后来自己又恢复了——恢复之后也发布不了：写水位的事务落笔之前会先锁
+  住并重新校验 `sync_export_runs.run_id` 是不是还是自己（PostgreSQL 用 `FOR UPDATE`，SQLite
+  在同一个 `BEGIN IMMEDIATE` 下校验）。这一行如果已经被接管、或者已经被接替者发布水位之后
+  删掉，这次跑就不发布，删掉自己刚写完的包，报错 `export lease ... was taken over`。**被接管
+  的导出恢复后不会发布，运维看到这个报错直接重跑一次 `sync export` 就行**，不用等它自己成功。
+  （为什么光比 `seq` 不够：恢复的这次跑，它的 `seq` 可能和接替者已经发布的水位一样，但它自己
+  的读快照更旧——接替者的快照更晚，等到了它快照里还在途的那些事务提交、纳入了包，`prune-log`
+  甚至可能已经按接替者的水位把这些事务对应的日志行清理掉了。让卡住的这次跑覆盖过去，会把这些
+  已经进链的事务从基线上抹掉，光比 `seq` 相不相等看不出这个问题。）
 - **发布本身是条件写，对着前驱校验**，不是后写者胜出：增量导出写水位要求这一行此刻的
   `package_id` 仍然是这个包出发时记的 `base_package_id`；全量导出要求现存的
   `exported_through_seq` 还没有超过本次。任何一条校验不成立，说明另一次导出已经先发布过

@@ -531,3 +531,69 @@ def test_the_lease_records_a_transaction_floor_below_the_export_snapshot(
     assert published, "the watermark carries no snapshot to compare against"
     assert int(seen[0]) <= _Source.snapshot_xmin(str(published))
     assert report.captured is True
+
+
+def test_a_superseded_run_does_not_publish_on_postgres(baseline, monkeypatch):
+    """PostgreSQL's half of codex #784 r5. Two things are asserted together,
+    because they are one guarantee: the publish transaction refuses when the
+    lease is no longer this run's, and it holds that row ``FOR UPDATE`` while
+    it decides, so the lease cannot be taken over between the check and the
+    commit.
+
+    变异验证: 去掉 ``_advance_watermark`` 的 ``_require_lease`` 调用 → 拒绝
+    断言报红; 去掉 ``_require_lease`` 里的 ``FOR UPDATE`` → 锁探针断言报红。
+    """
+    import psycopg
+
+    from app.migration.sync import export as export_module
+    from app.migration.sync.export import SyncExportError
+
+    repo = baseline["repo"]
+    probes: list[str] = []
+    real_lease = export_module._require_lease
+    real_advance = export_module._advance_watermark
+
+    def locked(source, conn, target_env, run_id):
+        try:
+            real_lease(source, conn, target_env, run_id)
+        finally:
+            # After the FOR UPDATE ran, while the publish transaction is open.
+            with psycopg.connect(baseline["url"]) as other:
+                other.execute("SET LOCAL lock_timeout = '400ms'")
+                try:
+                    other.execute(
+                        "UPDATE sync_export_runs SET run_id = 'thief' "
+                        "WHERE target_env = %s",
+                        (TARGET_ENV,),
+                    )
+                    other.commit()
+                    probes.append("acquired")
+                except psycopg.errors.LockNotAvailable as exc:
+                    probes.append(f"blocked: {exc}")
+
+    def supersede(*args, **kwargs):
+        with repo._write() as db:
+            db.execute(
+                "UPDATE sync_export_runs SET run_id='successor', "
+                "package_id='successor' WHERE target_env=%s",
+                (TARGET_ENV,),
+            )
+            db.execute(
+                "UPDATE sync_export_state SET package_id='successor-pkg' "
+                "WHERE target_env=%s",
+                (TARGET_ENV,),
+            )
+        return real_advance(*args, **kwargs)
+
+    monkeypatch.setattr(export_module, "_require_lease", locked)
+    monkeypatch.setattr(export_module, "_advance_watermark", supersede)
+    before = {path.name for path in baseline["out"].iterdir()}
+
+    with pytest.raises(SyncExportError) as failure:
+        _export(baseline["settings"], baseline["out"], full=True)
+
+    assert "was taken over by run" in str(failure.value)
+    assert "successor" in str(failure.value)
+    assert {path.name for path in baseline["out"].iterdir()} == before
+    assert _watermark(repo)["package_id"] == "successor-pkg"
+    assert probes and probes[0].startswith("blocked"), probes
