@@ -625,8 +625,10 @@ advances the watermark normally. `--notebook` (repeatable) narrows an export to 
 notebooks, always runs it as a full export, and **never advances the watermark** for that
 `--target` — even combined with `--full` — its manifest carries `base_package_id=''` and
 `from_seq=to_seq=0`, and `sync_export_state` for that target is left untouched. This is not an
-oversight: the watermark is a promise that this target has seen *every* live, non-mirror
-notebook up to a point; if a notebook-scoped export advanced it, a change to some *other*
+oversight: the watermark is a promise that this target has seen *every* non-mirror
+notebook up to a point (source-side `status` such as `copying`/`deleting`/`importing` does not
+gate this any more than it gates a normal export -- see the design doc's §7 "笔记本范围与镜像");
+if a notebook-scoped export advanced it, a change to some *other*
 notebook that happened before this export — one that never made it into this package — would
 fall permanently outside every later incremental window (`seq > W`), with no package that ever
 picks it back up. Only an export that covers the full current notebook set is entitled to
@@ -704,6 +706,14 @@ read "Change capture" below before running this migration** — the new index it
 writes on a large log for longer than the connection pool's own timeouts allow, and the safe
 sequence is to disable capture first.
 
+This checkout also moves the package format from v1 to v2 (`manifest.json`'s `format_version`).
+`sync import` refuses any package whose `format_version` it does not recognize, so a v1 package
+produced by an older (PR-2/PR-3a-era) checkout can no longer be imported once this checkout is
+running the target side — re-export it from the source environment instead (a source running this
+checkout produces v2 automatically; there is no converter for an existing v1 file). If a v1
+package is still in flight — exported but not yet imported — when you upgrade the target, discard
+it and re-export from source once the source side is upgraded too.
+
 Use `--full` to deliberately reset a target's baseline without touching the capture gate or the
 watermark table directly — for example after a long gap, or simply to hand over a package that
 is self-contained and importable without any earlier package in its `base_package_id` chain. A
@@ -720,8 +730,9 @@ form above does not preload it, so export `DATABASE_URL`/`SILICON_NOTEBOOK_STORA
 both exits 2 with a message naming the variable. `--notebook <id>` (repeatable) narrows an
 export to specific notebooks, always runs it as `mode=full`, and never advances this
 environment's watermark for that `--target` (see mode selection above); omit it to export
-everything live and non-mirror, in whichever mode gets selected, advancing the watermark
-normally. `--full` without `--notebook` forces a full export and still advances the watermark.
+every non-mirror notebook (source-side `status` is not a filter -- only `sync_origin` is), in
+whichever mode gets selected, advancing the watermark normally. `--full` without `--notebook`
+forces a full export and still advances the watermark.
 Both the human-readable summary and `--json` report print `mode`, `from_seq`, `to_seq`,
 `base_package_id` (empty for a full export or any `--notebook`-scoped export), `deletes` (row
 count), `deleted_notebooks`, and `empty`.

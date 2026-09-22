@@ -243,9 +243,8 @@ SQLite v84 / PostgreSQL 0064）；导出端（按日志读窗口、压缩、产�
     日志已经不可能覆盖的区间；留着旧日志行同样会让 `enable` 之后第一次导出读到的
     `exported_through_seq`（下条）混进关闭期间就已经过期的 seq。关闭之后的下一次导出与从未
     开启过时一样，是一次全量快照。已关闭（或从未开启过）时同样幂等。
-- 两条命令与 `status` 全部经 `export.py` 的 `_Source` 门面做后端分派，没有另起第四份
-  PostgreSQL/SQLite if/else（§11 记的技术债只剩 `cli.py` 读 `sync_export_state`/`sync_imports`
-  那一段尚未搬过去）。
+- 两条命令、`sync prune-log` 与 `status` 全部经 `app.migration.sync.database` 的 `_Source` 门面
+  做后端分派，没有另起第四份 PostgreSQL/SQLite if/else。
 
 ### 变更日志
 
@@ -428,36 +427,52 @@ SQLite 的相对开销比 PostgreSQL 明显：SQLite 基线本身极快（进程
   object_schemas）的 delete 不导出（§5「授权只播种」——目标端撤销过的授权本就不该被源端的
   删除日志再插回来，这条规则同时约束 upsert 不覆盖与 delete 不传播）。
 
-- **笔记本范围与镜像**：窗口内出现变更、且此刻是存活非镜像的笔记本才计入 `notebooks`；
-  镜像笔记本（`sync_origin` 非空）产生的日志行整批跳过、不进包，计入
+- **笔记本范围与镜像**：窗口内出现变更、且此刻不是镜像的笔记本就计入 `notebooks`——全量与
+  增量导出都**只按镜像跳过，不再按 `status`（`copying`/`deleting`/`importing` 等）跳过**。
+  `status` 是目标端自有列（§5「目标端自有列」：`target_owned_columns` 登记，导入从不覆盖，
+  收尾时统一翻成 `draft`），源端此刻的 `status` 只是一个过程态，不代表这份内容不该被同步：
+  按状态跳过一次全量导出会把这本笔记本整段内容都丢掉；按状态跳过一次增量导出，会让它在被
+  跳过的那次窗口里发生的变更永久漏出这条增量链——下一次窗口从新的水位往后读，不会回头补
+  救。镜像笔记本（`sync_origin` 非空）产生的日志行仍然整批跳过、不进包，计入
   `ExportReport.skipped_mirror_changes`（镜像笔记本的内容来自另一个源端，把它身上的变更再
-  导出回去没有意义，也不该反向污染别的同步链）。`notebooks` 表自己的 delete 日志 →
-  `deleted_notebooks` 列表 + `deletes.jsonl` 一条；其子表的删除行仍照常各自导出，不因为父
-  笔记本已经不在就跳过。增量包为**每一个在本包里携带任何行**的笔记本补发一条 `notebooks`
-  行——从表里回读它当前的完整状态，即使 `notebooks` 表自己这次窗口内没有变化（例如只有一本
-  笔记本的 `chunks` 被改了，`notebooks` 行本身没动，也照样为它补发）。这保持了
+  导出回去没有意义，也不该反向污染别的同步链）；`ExportReport.skipped` 现在只剩两种原因：
+  镜像、以及请求的笔记本 id 不存在（`--notebook` 点了一个不存在的 id）。`notebooks` 表自己的
+  delete 日志 → `deleted_notebooks` 列表 + `deletes.jsonl` 一条；其子表的删除行仍照常各自
+  导出，不因为父笔记本已经不在就跳过。增量包为**每一个在本包里携带任何行**的笔记本补发一条
+  `notebooks` 行——从表里回读它当前的完整状态，即使 `notebooks` 表自己这次窗口内没有变化
+  （例如只有一本笔记本的 `chunks` 被改了，`notebooks` 行本身没动，也照样为它补发）。这保持了
   `manifest.notebooks ⇔ rows/notebooks.jsonl`（§8「安全边界」）这条对全量包与增量包同样成立
-  的不变量：包里出现任何一行的笔记本，`rows/notebooks.jsonl` 里必须有它对应的一条。
-  `deleted_notebooks` 里的笔记本不补这条行——它们已经在源端不在了，没有「当前状态」可读。
+  的不变量：包里出现任何一行的笔记本，`rows/notebooks.jsonl` 里必须有它对应的一条；
+  `deletes.jsonl` 每一条非空 `notebook_id` 同样落在这个声明范围内——该表的这一行已经让它的
+  笔记本被「在本包里携带任何行」的规则捕获，从而拿到一条 `rows/notebooks.jsonl` 记录，
+  §8「安全边界」的「包只能动它声明过的笔记本」对删除条目同样成立，删除条目不是例外。
+  `deleted_notebooks` 里的笔记本不补这条行、也不在这个声明范围内——它们已经在源端不在了，
+  没有「当前状态」可读。
 
-- **文件**：只复制本包 upsert 涉及的 `sources`/`notebook_assets` 行指向的文件，按 shadow
-  manifest 的 `path_columns` 相对 storage 根落到 `files/notebooks|assets/<nb>/...`；被删行
-  指向的文件本包不处理，由 PR-3c 在目标端按目标行路径删除。
+- **文件**：只复制本包 upsert 涉及的 `sources`/`notebook_assets` 行指向的文件，相对 storage
+  根落到 `files/notebooks|assets/<nb>/...`；`sources.file_path` 走 shadow manifest 的
+  `path_columns`，`notebook_assets` 表没有路径列——它的文件是
+  `storage/assets/<nb>/<asset id>.<ext>`（`AssetService.path_for` 命名，扩展名来自一张这个包
+  不导入的 mime 表），导出按 `<id>.*` 匹配磁盘上实际存在的文件。被删行指向的文件本包不处理，
+  由 PR-3c 在目标端按目标行路径删除。
 
 - **模式判定**（`sync export` 不需要用户区分全量与增量）：没给 `--notebook` 时，门开 且 该
   `--target` 的水位行存在 且 `captured = 1` 且没给 `--full` ⇒ 增量；否则全量。两种情况都
   推进该 target 的水位（全量导出同样写 `captured`（等于门当时是否开）、`exported_snapshot`、
-  `to_seq = MAX(seq) 快照可见`）——因为它们都覆盖了「此刻全部存活非镜像笔记本」，有资格代表
+  `to_seq = MAX(seq) 快照可见`）——因为它们都覆盖了「此刻全部非镜像笔记本」，有资格代表
   这个 target 已经完整看到了这里。窗口为空也照常产出一个空增量包（各
   `rows/*.jsonl`/`deletes.jsonl`/`kg_epochs.jsonl` 都是空文件），水位仍然推进，报告标
-  `empty`——保证导出链不断，目标端总能按 `base_package_id` 把连续的包接起来。
+  `empty`——保证导出链不断，目标端总能按 `base_package_id` 把连续的包接起来。`sync prune-log`
+  把日志清到某个水位以下之后，若这次导出恰好没有新变更，`to_seq` 会被钳在该水位不倒退
+  （上面「导出水位」一节），于是 `from_seq = W + 1` 会大于 `to_seq = W`——这不是错误，是空
+  窗口增量包的约定形态：区间为空，两端仍然指向同一条链，不是数据损坏。
 
   给了 `--notebook` 时（不论是否同时给 `--full`）：导出永远全量、且**永远不推进水位**——
   manifest 写 `base_package_id=''`、`from_seq=to_seq=0`，该 target 在 `sync_export_state` 里
   的行原样不动。这不是遗漏：`--notebook` 缩小的是笔记本子集，水位却是「这个 target 已经完整
   看到过多远」的承诺；如果限定笔记本的导出也推进水位，日志里属于**没被选中的其它笔记本**、
   发生在这次导出之前的变更就会永久落在下一次增量窗口（`seq > W`）之外——它们既不在这次的
-  子集包里，也再不会被任何一次增量窗口捕获到。只有覆盖当前全部存活非镜像笔记本的导出才配
+  子集包里，也再不会被任何一次增量窗口捕获到。只有覆盖当前全部非镜像笔记本的导出才配
   推进水位。
 
 - **保留策略**落地为 `sync prune-log [--keep-days N]`（`N` 默认 30）：候选日志行必须同时满足
@@ -554,7 +569,9 @@ v85/0065 起，全量导出也在同一次读快照内记下 `exported_through_s
 
 安全边界：`manifest.json` 最后写、不在 checksums 内，所以**不可信**。导入的笔记本范围由
 `rows/notebooks.jsonl` 导出并要求与 manifest 一致；每张 notebook scope 表的行必须落在该范围内，
-parent scope 表的父键必须出现在包内父表里。笔记本 id 与包 id 只允许 `[A-Za-z0-9._-]`、不含
+parent scope 表的父键必须出现在包内父表里；`deletes.jsonl` 每条非空 `notebook_id` 同样必须落在
+这个范围内——包只能动它声明过的笔记本，删除条目不是例外（§7「笔记本范围与镜像」）。笔记本 id
+与包 id 只允许 `[A-Za-z0-9._-]`、不含
 `..`、不以 `.` 开头；`files/**` 相对路径的每一段只挡穿越（非空、不是 `.`/`..`、不含分隔符与
 NUL），因为上传件文件名保留用户原名（Unicode、空格都合法），再由 `resolve()` 证明落在对应的
 storage 根或包目录内；这些校验都在预检、任何写入或删除之前。主键同样不可信：写事务里
@@ -604,8 +621,12 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
 导入相位（借 `copy_notebook` 的相位契约）：
 
 1. 预检：manifest `mode` 先分支——`mode=incremental`（或 `deletes`/`kg_epochs` 非空）一律拒绝，
-   错误点名该包的 `base_package_id`/`from_seq`/`to_seq` 并指向 PR-3c；`mode=full` 才继续走下面
-   这些检查，`to_seq` 不再要求为 0。schema pair 相等、`EMBED_RUNTIME_DIM` 相等、包校验和通过、
+   错误点名该包的 `base_package_id`/`from_seq`/`to_seq` 并指向 PR-3c；manifest 里出现
+   `mode=full`/`incremental` 以外的未知值同样在这一步拒绝（读 manifest 时就报，不等到下面
+   这些检查）。`mode=full` 但 `from_seq != 0` 的包（一个自称全量、却带着增量包才有的非零窗口
+   起点的包，形态本身自相矛盾，只可能是构造或损坏的 manifest）同样拒绝，不当作增量处理、也不
+   当作全量放行——`mode=full` 才继续走下面这些检查，`to_seq` 不再要求为 0（`from_seq` 仍然
+   要求为 0，这正是这条新增拒绝规则的另一半）。schema pair 相等、`EMBED_RUNTIME_DIM` 相等、包校验和通过、
    源环境标识与已有镜像一致（包里每个笔记本若在目标端已存在，其 `sync_origin` 必须等于源环境
    标识；本地库或来自别的源环境的镜像都拒绝并点名）。**不按名字查重**：笔记本名本来就不唯一。
    同一 `source_env` 已有 running 的导入则拒绝，错误里带对方的 `heartbeat_at`（每表提交刷新）；
@@ -673,10 +694,6 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
   在导入时把 origin 为 ask_answer 的记忆标成「来源在源环境」。
 - username 映射是否需要大小写不敏感：取决于两套认证服务给同一个人的 username 是否完全
   一致；不一致会命中「created_by 映射不到，整个包不导入」。
-- PR-3a 顺手，部分完成：`cli.py` 的 `sync capture enable/disable/status` 改走 `export.py` 的
-  `_Source` 门面而不是自己再写一份 PostgreSQL/SQLite if/else；`_load_sync_status` 读
-  `sync_export_state`/`sync_imports` 那一段独立的第三份后端分派由 PR-3b 搬过去，同样改走
-  `_Source` 门面。
 - `kg_epoch` 折叠延后：§7「压缩」阶段直接忽略 `operation='kg_epoch'` 的日志行，本 PR 的
   `kg_epochs.jsonl` 恒为空文件。这不是正确性缺口——逐行的 upsert/delete 日志已经完整覆盖了
   同一批 KG 重建产生的变化，折叠只是把它们合并成一条「整体替换」指令，省掉重放大量单行

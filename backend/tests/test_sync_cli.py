@@ -95,6 +95,7 @@ def test_build_parser_parses_export():
             "nb-b",
             "--source-env",
             "dev",
+            "--full",
             "--json",
         ]
     )
@@ -103,6 +104,7 @@ def test_build_parser_parses_export():
     assert args.out == "/tmp/out"
     assert args.notebook == ["nb-a", "nb-b"]
     assert args.source_env == "dev"
+    assert args.full is True
     assert args.as_json is True
 
 
@@ -110,6 +112,7 @@ def test_build_parser_export_notebook_defaults_to_none():
     args = cli.build_parser().parse_args(["export", "--target", "t", "--out", "/tmp/out"])
     assert args.notebook is None
     assert args.source_env is None
+    assert args.full is False
     assert args.as_json is False
 
 
@@ -241,11 +244,42 @@ def test_export_defaults_source_env_from_settings_and_prints_json(tmp_path, monk
         "out_dir": tmp_path / "out",
         "notebook_ids": None,
         "source_env": "prod-shanghai",
+        "full": False,
     }
     payload = json.loads(capsys.readouterr().out)
     assert payload["package_id"] == "pkg-id"
     assert payload["notebooks"] == ["nb-1"]
     assert payload["table_counts"] == {"sources": 3, "chunks": 0}
+
+
+def test_export_full_flag_is_forwarded(tmp_path, monkeypatch):
+    _settings(tmp_path, monkeypatch, sync_env="dev")
+    captured: dict = {}
+
+    def fake_export(settings_arg, **kwargs):
+        captured.update(kwargs)
+        return _empty_export_report()
+
+    monkeypatch.setattr(cli, "export_notebooks", fake_export)
+    exit_code = cli.main(
+        ["export", "--target", "prod-tokyo", "--out", str(tmp_path), "--full"]
+    )
+    assert exit_code == 0
+    assert captured["full"] is True
+
+
+def test_export_full_flag_defaults_to_false(tmp_path, monkeypatch):
+    _settings(tmp_path, monkeypatch, sync_env="dev")
+    captured: dict = {}
+
+    def fake_export(settings_arg, **kwargs):
+        captured.update(kwargs)
+        return _empty_export_report()
+
+    monkeypatch.setattr(cli, "export_notebooks", fake_export)
+    exit_code = cli.main(["export", "--target", "prod-tokyo", "--out", str(tmp_path)])
+    assert exit_code == 0
+    assert captured["full"] is False
 
 
 def test_export_human_output_includes_mode(tmp_path, monkeypatch, capsys):
@@ -283,6 +317,93 @@ def test_export_json_includes_captured_through_seq(tmp_path, monkeypatch, capsys
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["captured_through_seq"] == 7
+
+
+def test_export_human_output_includes_incremental_fields(tmp_path, monkeypatch, capsys):
+    _settings(tmp_path, monkeypatch, sync_env="dev")
+    report = _empty_export_report(
+        mode="incremental",
+        from_seq=8,
+        to_seq=15,
+        base_package_id="pkg-old",
+        deletes=3,
+        deleted_notebooks=("nb-gone",),
+        skipped_mirror_changes=2,
+    )
+    monkeypatch.setattr(cli, "export_notebooks", lambda *a, **k: report)
+    exit_code = cli.main(["export", "--target", "prod-tokyo", "--out", str(tmp_path)])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "序号区间: from_seq=8, to_seq=15" in out
+    assert "续接自包: pkg-old" in out
+    assert "已删除的笔记本: 1 个" in out
+    assert "nb-gone" in out
+    assert "删除行数: 3" in out
+    assert "跳过的镜像笔记本变更: 2 条" in out
+
+
+def test_export_human_output_reports_empty_incremental_window(
+    tmp_path, monkeypatch, capsys
+):
+    _settings(tmp_path, monkeypatch, sync_env="dev")
+    report = _empty_export_report(mode="incremental", from_seq=9, to_seq=8, empty=True)
+    monkeypatch.setattr(cli, "export_notebooks", lambda *a, **k: report)
+    exit_code = cli.main(["export", "--target", "prod-tokyo", "--out", str(tmp_path)])
+    assert exit_code == 0
+    assert "窗口为空，仍产出空增量包；水位已推进。" in capsys.readouterr().out
+
+
+def test_export_human_output_reports_scoped_export_does_not_advance_watermark(
+    tmp_path, monkeypatch, capsys
+):
+    _settings(tmp_path, monkeypatch, sync_env="dev")
+    report = _empty_export_report(scoped=True, watermark_advanced=False)
+    monkeypatch.setattr(cli, "export_notebooks", lambda *a, **k: report)
+    exit_code = cli.main(
+        [
+            "export",
+            "--target",
+            "prod-tokyo",
+            "--out",
+            str(tmp_path),
+            "--notebook",
+            "nb-a",
+        ]
+    )
+    assert exit_code == 0
+    assert "本次未推进水位" in capsys.readouterr().out
+
+
+def test_export_json_includes_incremental_and_scoped_fields(tmp_path, monkeypatch, capsys):
+    _settings(tmp_path, monkeypatch, sync_env="dev")
+    report = _empty_export_report(
+        mode="incremental",
+        from_seq=8,
+        to_seq=15,
+        base_package_id="pkg-old",
+        deletes=3,
+        deleted_notebooks=("nb-gone",),
+        skipped_mirror_changes=2,
+        scoped=False,
+        watermark_advanced=True,
+        empty=False,
+    )
+    monkeypatch.setattr(cli, "export_notebooks", lambda *a, **k: report)
+    exit_code = cli.main(
+        ["export", "--target", "prod-tokyo", "--out", str(tmp_path), "--json"]
+    )
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["mode"] == "incremental"
+    assert payload["from_seq"] == 8
+    assert payload["to_seq"] == 15
+    assert payload["base_package_id"] == "pkg-old"
+    assert payload["deletes"] == 3
+    assert payload["deleted_notebooks"] == ["nb-gone"]
+    assert payload["skipped_mirror_changes"] == 2
+    assert payload["scoped"] is False
+    assert payload["watermark_advanced"] is True
+    assert payload["empty"] is False
 
 
 def test_export_explicit_source_env_overrides_settings(tmp_path, monkeypatch):
@@ -580,6 +701,8 @@ def test_status_lists_export_watermark_and_import_row(tmp_path, monkeypatch, cap
             "exported_through_seq": 42,
             "exported_at": "2026-01-01T00:00:00+00:00",
             "package_id": "pkg-abc",
+            "captured": False,
+            "exported_snapshot": None,
         }
     ]
     assert len(payload["imports"]) == 1
@@ -588,6 +711,58 @@ def test_status_lists_export_watermark_and_import_row(tmp_path, monkeypatch, cap
     assert imported["source_env"] == "prod-shanghai"
     assert imported["status"] == "done"
     assert imported["notebooks"] == 2
+
+
+def test_status_reports_captured_watermark_and_snapshot_xmin(
+    tmp_path, monkeypatch, capsys
+):
+    """SQLite never has a real PostgreSQL snapshot, but ``captured``/
+    ``exported_snapshot`` are ordinary columns _load_sync_status now reads
+    regardless of backend -- pin the shape here with a hand-crafted snapshot
+    text (the same grammar ``_Source.snapshot_xmin`` parses), and leave the
+    PostgreSQL-native round trip to tests/postgres/test_sync_cli_pg.py."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_export_state "
+                "(target_env, exported_through_seq, exported_at, package_id, "
+                "captured, exported_snapshot) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "prod-tokyo",
+                    42,
+                    "2026-01-01T00:00:00+00:00",
+                    "pkg-abc",
+                    1,
+                    "50:60:55",
+                ),
+            )
+    finally:
+        database.close()
+
+    exit_code = cli.main(["status", "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["exports"] == [
+        {
+            "target_env": "prod-tokyo",
+            "exported_through_seq": 42,
+            "exported_at": "2026-01-01T00:00:00+00:00",
+            "package_id": "pkg-abc",
+            "captured": True,
+            "exported_snapshot": "50:60:55",
+        }
+    ]
+
+    exit_code = cli.main(["status"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "captured=true" in out
+    assert "snapshot xmin=50" in out
 
 
 def test_status_human_readable_output_on_empty_database(tmp_path, monkeypatch, capsys):
@@ -914,6 +1089,8 @@ def test_status_degrades_capture_section_when_v84_tables_are_missing(
                 "exported_through_seq": 0,
                 "exported_at": "2026-01-01T00:00:00+00:00",
                 "package_id": "pkg-old",
+                "captured": False,
+                "exported_snapshot": None,
             }
         ]
         assert payload["imports"] == []
@@ -1261,6 +1438,262 @@ def test_capture_enable_missing_capture_tables_gives_named_message(
     err = capsys.readouterr().err
     assert "v84/0064" in err
     assert "sync_capture_control" in err
+
+
+# ---------------------------------------------------------------- prune-log
+
+
+def test_build_parser_parses_prune_log_defaults():
+    args = cli.build_parser().parse_args(["prune-log"])
+    assert args.command == "prune-log"
+    assert args.keep_days == 30
+    assert args.dry_run is False
+    assert args.as_json is False
+
+
+def test_build_parser_parses_prune_log_explicit_flags():
+    args = cli.build_parser().parse_args(
+        ["prune-log", "--keep-days", "7", "--dry-run", "--json"]
+    )
+    assert args.keep_days == 7
+    assert args.dry_run is True
+    assert args.as_json is True
+
+
+def _seed_captured_watermark(
+    database,
+    *,
+    target_env: str = "prod-tokyo",
+    exported_through_seq: int,
+    captured: int = 1,
+) -> None:
+    with database.write() as conn:
+        conn.execute(
+            "INSERT INTO sync_export_state "
+            "(target_env, exported_through_seq, exported_at, package_id, captured) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                target_env,
+                exported_through_seq,
+                "2026-01-01T00:00:00+00:00",
+                f"pkg-{target_env}",
+                captured,
+            ),
+        )
+
+
+def _insert_log_row(database, *, seq: int, changed_at: str) -> None:
+    with database.write() as conn:
+        conn.execute(
+            "INSERT INTO sync_change_log "
+            "(seq, table_name, key_json, operation, changed_at) "
+            "VALUES (?, 'notebooks', '{}', 'upsert', ?)",
+            (seq, changed_at),
+        )
+
+
+def _old_moment(days: int) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+
+def test_prune_log_rejects_when_no_captured_watermark_exists(
+    tmp_path, monkeypatch, capsys
+):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        # A watermark row exists, but with captured=0 -- it does not count.
+        _seed_captured_watermark(
+            database, exported_through_seq=10, captured=0
+        )
+        exit_code = cli.main(["prune-log"])
+        assert exit_code == 2
+        err = capsys.readouterr().err
+        assert "captured=1" in err
+    finally:
+        database.close()
+
+
+def test_prune_log_missing_capture_tables_gives_named_message(
+    tmp_path, monkeypatch, capsys
+):
+    """A database that predates v84/0064 (here: never migrated at all) must
+    name the missing capture tables, same diagnosis every other capture-
+    touching command gives -- checked BEFORE the captured-watermark rule, so
+    an un-migrated database never gets the (misleading) "no captured
+    watermark" message instead."""
+    _settings(tmp_path, monkeypatch)
+    exit_code = cli.main(["prune-log"])
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "v84/0064" in err
+    assert "sync_change_log" in err
+
+
+def test_prune_log_dry_run_reports_count_without_deleting(tmp_path, monkeypatch, capsys):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        _seed_captured_watermark(database, exported_through_seq=100)
+        old = _old_moment(40)
+        _insert_log_row(database, seq=1, changed_at=old)
+        _insert_log_row(database, seq=2, changed_at=old)
+
+        exit_code = cli.main(["prune-log", "--dry-run", "--json"])
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["dry_run"] is True
+        assert payload["would_delete"] == 2
+        assert payload["deleted"] == 0
+
+        with database.connect() as conn:
+            remaining = conn.execute(
+                "SELECT COUNT(*) AS n FROM sync_change_log"
+            ).fetchone()
+            assert remaining["n"] == 2  # dry-run deleted nothing
+    finally:
+        database.close()
+
+
+def test_prune_log_real_run_deletes_eligible_rows_only(tmp_path, monkeypatch, capsys):
+    """Three rows: one eligible on every condition (deleted), one whose seq
+    is past the watermark (kept), one recent enough by changed_at to be kept
+    even though its seq qualifies -- proves the AND of seq/changed_at, not
+    just seq alone, decides eligibility."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        _seed_captured_watermark(database, exported_through_seq=100)
+        old = _old_moment(40)
+        recent = _old_moment(1)
+        _insert_log_row(database, seq=1, changed_at=old)  # eligible
+        _insert_log_row(database, seq=200, changed_at=old)  # seq beyond watermark
+        _insert_log_row(database, seq=2, changed_at=recent)  # too recent
+
+        exit_code = cli.main(["prune-log", "--json"])
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["dry_run"] is False
+        assert payload["deleted"] == 1
+        assert payload["min_seq"] == 100
+        assert payload["min_txid"] is None
+
+        with database.connect() as conn:
+            remaining = {
+                row["seq"]
+                for row in conn.execute("SELECT seq FROM sync_change_log").fetchall()
+            }
+            assert remaining == {200, 2}
+    finally:
+        database.close()
+
+
+def test_prune_log_default_keep_days_is_30(tmp_path, monkeypatch, capsys):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        _seed_captured_watermark(database, exported_through_seq=100)
+        _insert_log_row(database, seq=1, changed_at=_old_moment(31))  # deleted
+        _insert_log_row(database, seq=2, changed_at=_old_moment(29))  # kept
+
+        exit_code = cli.main(["prune-log", "--json"])
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["deleted"] == 1
+        assert payload["keep_days"] == 30
+
+        with database.connect() as conn:
+            remaining = {
+                row["seq"]
+                for row in conn.execute("SELECT seq FROM sync_change_log").fetchall()
+            }
+            assert remaining == {2}
+    finally:
+        database.close()
+
+
+def test_prune_log_only_captured_watermarks_vote_on_the_minimum(
+    tmp_path, monkeypatch, capsys
+):
+    """A target with NO captured watermark (here: never exported, so no row
+    at all) must not drag the bound down -- only the captured=1 target's
+    seq=100 sets the ceiling. This is the guard
+    ``_prune_log_bounds``'s ``WHERE captured = ?`` filter exists for: dropping
+    that filter would let an uncaptured/low watermark block pruning for
+    everyone."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        _seed_captured_watermark(
+            database, target_env="prod-tokyo", exported_through_seq=100, captured=1
+        )
+        _seed_captured_watermark(
+            database, target_env="prod-osaka", exported_through_seq=5, captured=0
+        )
+        old = _old_moment(40)
+        _insert_log_row(database, seq=50, changed_at=old)
+
+        exit_code = cli.main(["prune-log", "--json"])
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["min_seq"] == 100
+        assert payload["deleted"] == 1
+
+        with database.connect() as conn:
+            remaining = conn.execute(
+                "SELECT COUNT(*) AS n FROM sync_change_log"
+            ).fetchone()
+            assert remaining["n"] == 0
+    finally:
+        database.close()
+
+
+def test_prune_log_human_output(tmp_path, monkeypatch, capsys):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        _seed_captured_watermark(database, exported_through_seq=100)
+        _insert_log_row(database, seq=1, changed_at=_old_moment(40))
+
+        exit_code = cli.main(["prune-log"])
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "已删除 1 行。" in out
+        assert "保留天数: 30 天" in out
+        assert "seq<=100" in out
+    finally:
+        database.close()
+
+
+def test_prune_log_dry_run_human_output(tmp_path, monkeypatch, capsys):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        _seed_captured_watermark(database, exported_through_seq=100)
+        _insert_log_row(database, seq=1, changed_at=_old_moment(40))
+
+        exit_code = cli.main(["prune-log", "--dry-run"])
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "会删除 1 行，不会真的删除。" in out
+    finally:
+        database.close()
 
 
 # --------------------------------------------------------------------- misc

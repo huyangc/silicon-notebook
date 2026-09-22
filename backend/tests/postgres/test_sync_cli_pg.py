@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -97,6 +98,8 @@ def test_status_reads_watermark_and_import_row_from_postgres(
             "exported_through_seq": 7,
             "exported_at": "2026-01-01T00:00:00+00:00",
             "package_id": "pkg-abc",
+            "captured": False,
+            "exported_snapshot": None,
         }
     ]
     assert isinstance(payload["exports"][0]["exported_at"], str)
@@ -210,3 +213,166 @@ def test_concurrent_enable_reports_exactly_one_first_time_enable(cli_settings):
     # Both must agree on the SAME enabled_at -- the winner's -- proving
     # neither silently clobbered the other's timestamp.
     assert first["enabled_at"] == second["enabled_at"]
+
+
+# ------------------------------------------------------------- status: captured
+
+
+def test_status_reports_captured_watermark_and_snapshot_on_postgres(
+    cli_settings, root_dir, capsys
+):
+    """SQLite's lane (tests/test_sync_cli.py) already pins the shape with a
+    hand-crafted snapshot string; this is the real thing -- a genuine
+    PostgreSQL ``boolean`` column and a snapshot text this deployment's own
+    ``pg_current_snapshot()`` grammar produced, round-tripped through
+    ``_load_sync_status``."""
+    _migrate(cli_settings)
+    database = PostgresDatabase(cli_settings, root_dir)
+    try:
+        with database.write() as conn:
+            snapshot = conn.execute(
+                "SELECT pg_current_snapshot()::text AS snapshot"
+            ).fetchone()["snapshot"]
+            conn.execute(
+                "INSERT INTO sync_export_state "
+                "(target_env, exported_through_seq, exported_at, package_id, "
+                "captured, exported_snapshot) VALUES (%s, %s, %s, %s, %s, %s)",
+                ("prod-tokyo", 42, "2026-01-01T00:00:00+00:00", "pkg-abc", True, snapshot),
+            )
+    finally:
+        database.close()
+
+    args = cli.build_parser().parse_args(["status", "--json"])
+    exit_code = cli._cmd_status(args, cli_settings)
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["exports"] == [
+        {
+            "target_env": "prod-tokyo",
+            "exported_through_seq": 42,
+            "exported_at": "2026-01-01T00:00:00+00:00",
+            "package_id": "pkg-abc",
+            "captured": True,
+            "exported_snapshot": snapshot,
+        }
+    ]
+
+    human_args = cli.build_parser().parse_args(["status"])
+    exit_code = cli._cmd_status(human_args, cli_settings)
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "captured=true" in out
+    assert f"snapshot xmin={_Source.snapshot_xmin(snapshot)}" in out
+
+
+# ---------------------------------------------------------------- prune-log
+
+
+def _insert_log_row(
+    database, root_dir, cli_settings, *, seq: int, txid: int, changed_at: datetime
+) -> None:
+    with database.write() as conn:
+        conn.execute(
+            "INSERT INTO sync_change_log "
+            "(seq, table_name, key_json, operation, txid, changed_at) "
+            "VALUES (%s, 'notebooks', '{}'::jsonb, 'upsert', %s, %s)",
+            (seq, txid, changed_at),
+        )
+
+
+def test_prune_log_deletes_only_rows_below_both_the_seq_and_txid_bounds(
+    cli_settings, root_dir
+):
+    """A ``captured=1`` watermark with ``exported_snapshot`` xmin=50 and
+    ``exported_through_seq=100``: a row with seq<=100 AND txid<50 old enough
+    by ``changed_at`` is eligible; a row with seq<=100 but txid>=50 must
+    survive -- that is the row that proves the txid condition, not just the
+    seq one, is actually applied (docs/incremental-sync-design.md §7 "保留
+    策略"; the compensation-window reasoning behind requiring both is §7
+    "导出水位"/txid). A row past the seq bound survives regardless."""
+    _migrate(cli_settings)
+    database = PostgresDatabase(cli_settings, root_dir)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_export_state "
+                "(target_env, exported_through_seq, exported_at, package_id, "
+                "captured, exported_snapshot) VALUES (%s, %s, %s, %s, %s, %s)",
+                (
+                    "prod-tokyo",
+                    100,
+                    "2026-01-01T00:00:00+00:00",
+                    "pkg-abc",
+                    True,
+                    "50:60:",
+                ),
+            )
+        old = datetime.now(timezone.utc) - timedelta(days=40)
+        # seq<=100, txid<50, old enough: the only row a correct run deletes.
+        _insert_log_row(database, root_dir, cli_settings, seq=10, txid=20, changed_at=old)
+        # seq<=100 but txid>=50 (still "in flight" as far as the stored
+        # snapshot is concerned): must survive. If the txid condition were
+        # dropped this row would be deleted too -- see the mutation check
+        # this test's docstring/report references.
+        _insert_log_row(database, root_dir, cli_settings, seq=90, txid=55, changed_at=old)
+        # seq beyond the watermark: must survive regardless of txid/age.
+        _insert_log_row(database, root_dir, cli_settings, seq=200, txid=10, changed_at=old)
+
+        source = _Source(cli_settings, root_dir)
+        try:
+            result = cli._prune_log(source, keep_days=30, dry_run=False)
+        finally:
+            source.close()
+        assert result["deleted"] == 1
+        assert result["min_seq"] == 100
+        assert result["min_txid"] == 50
+
+        with database.connect() as conn:
+            remaining = {
+                row["seq"]
+                for row in conn.execute(
+                    "SELECT seq FROM sync_change_log"
+                ).fetchall()
+            }
+        assert remaining == {90, 200}
+    finally:
+        database.close()
+
+
+def test_prune_log_dry_run_does_not_delete_on_postgres(cli_settings, root_dir):
+    _migrate(cli_settings)
+    database = PostgresDatabase(cli_settings, root_dir)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_export_state "
+                "(target_env, exported_through_seq, exported_at, package_id, "
+                "captured, exported_snapshot) VALUES (%s, %s, %s, %s, %s, %s)",
+                (
+                    "prod-tokyo",
+                    100,
+                    "2026-01-01T00:00:00+00:00",
+                    "pkg-abc",
+                    True,
+                    "50:60:",
+                ),
+            )
+        old = datetime.now(timezone.utc) - timedelta(days=40)
+        _insert_log_row(database, root_dir, cli_settings, seq=10, txid=20, changed_at=old)
+
+        source = _Source(cli_settings, root_dir)
+        try:
+            result = cli._prune_log(source, keep_days=30, dry_run=True)
+        finally:
+            source.close()
+        assert result["dry_run"] is True
+        assert result["would_delete"] == 1
+        assert result["deleted"] == 0
+
+        with database.connect() as conn:
+            remaining = conn.execute(
+                "SELECT COUNT(*) AS n FROM sync_change_log"
+            ).fetchone()
+            assert remaining["n"] == 1
+    finally:
+        database.close()
