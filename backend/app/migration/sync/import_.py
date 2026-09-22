@@ -293,6 +293,23 @@ _REPORT_PREFIX = "import-report-"
 # pair in this schema, and the guard tests pin the synced table roster).
 _FILES_PHASE = "__files__"
 
+# ``sync_import_progress.table_name`` for the claim-time notebook reservation
+# (``_reserve_notebooks``), written in the SAME transaction as the reservation
+# itself (codex #772 round 17 P2). Without it, a crash between that commit and
+# the first table's own progress row leaves ``importing``-status notebook rows
+# behind with NO ``sync_import_progress`` row for this package at all --
+# ``_prior_imports``' ``has_progress`` (built from ``SELECT DISTINCT
+# package_id FROM sync_import_progress``) reads False, so a same-source
+# package that does not even cover those notebooks passes
+# ``_supersede_outstanding``'s coverage check and retires this one, and a
+# re-export of the original package is then refused as older than a package
+# that never actually finished them -- the notebooks are stuck ``importing``
+# forever. Not a table name (same non-collision guarantee as ``_FILES_PHASE``
+# above) and never read back as one: ``_apply_rows``/``_prune_snapshot`` only
+# ever check ``done`` against ``synced_tables()`` members or
+# ``_prune_step(table)`` keys, neither of which this string can equal.
+_RESERVATION_STEP = "__reserved__"
+
 # Where a running import records that it is still alive. Refreshed inside
 # every transaction that writes progress, so "is that other import dead?" is
 # answered by evidence of work rather than by a timeout on when it STARTED --
@@ -858,6 +875,73 @@ def _postgres_columns(backend: _Backend, conn: Any, table: str):
     return columns
 
 
+# Column-level VALUES/SET overrides, keyed by (table, column) -- see
+# ``_upsert_statement``'s docstring-equivalent comment below for why
+# ``unified_kg_state.kg_mutation_seq`` is the one entry (codex #772 round 17
+# P1). Every other column of every other table is carried across verbatim
+# through the ordinary ``excluded.<column>`` path; this table is a small,
+# explicit escape hatch rather than a generic per-column rule engine, because
+# a generic mechanism would hide how rare this need actually is.
+#
+# The VALUES-side text is a template with one ``{placeholder}`` slot for the
+# parameter mark ("?" today; kept as a template rather than a literal "?" so
+# a future backend with a different mark still gets this right); the SET-side
+# builder gets ``is_postgres`` to choose ``GREATEST`` over SQLite's
+# two-argument scalar ``MAX``.
+_UPSERT_VALUE_OVERRIDES: dict[tuple[str, str], str] = {
+    ("unified_kg_state", "kg_mutation_seq"): "({placeholder} + 1)",
+}
+
+
+def _upsert_set_override(
+    table: str, column: str, *, is_postgres: bool
+) -> str | None:
+    """The ON CONFLICT DO UPDATE SET expression for a column in
+    ``_UPSERT_VALUE_OVERRIDES``, or ``None`` for the ordinary
+    ``excluded.<column>`` copy-across.
+
+    ``unified_kg_state.kg_mutation_seq`` is one leg of the four-column
+    cache-version quadruple ``_unified_graph_version`` in
+    ``app/services/knowledge_lifecycle.py`` reads to decide whether
+    ``self.unified_cache`` still matches the stored graph (see
+    ``UnifiedKgStorePort.graph_seq_row``'s docstring for the full write-path
+    census). A verbatim ``excluded.kg_mutation_seq`` copy-across would let an
+    import land a value that happens to equal a quadruple the target process
+    already has cached under a different mutation history -- the version
+    compare would then hit, and a stale graph would be served forever (codex
+    #772 round 17 P1).
+
+    Importing instead ALWAYS strictly advances the target's own counter past
+    both what it already had and what the package carries:
+
+    - a fresh row (no conflict): ``package_value + 1``
+    - an existing row (conflict): ``MAX(target_value, package_value) + 1``
+
+    Both are one upsert. The VALUES tuple bakes the "+1" into the proposed
+    row (``_UPSERT_VALUE_OVERRIDES``), so a plain INSERT -- no ON CONFLICT
+    firing -- already writes ``package_value + 1``: that is the fresh-row
+    case above, with no separate code path needed. Because that same VALUES
+    tuple is what ``excluded.kg_mutation_seq`` reads during a conflict (SQL's
+    ``excluded`` pseudo-table is literally the row that would have been
+    inserted -- there is no way to give it a different value than what
+    VALUES computed), ``excluded.kg_mutation_seq`` already equals
+    ``package_value + 1`` on that branch too. So the SET expression reads
+    ``MAX(target.kg_mutation_seq + 1, excluded.kg_mutation_seq)`` rather than
+    ``MAX(target.kg_mutation_seq, excluded.kg_mutation_seq) + 1`` -- the two
+    are algebraically identical (adding a constant to both arguments of MAX
+    shifts the result by that constant) but only the first is expressible
+    without a second, un-transformed copy of the package value, which a
+    single ``INSERT ... ON CONFLICT`` statement's shared VALUES tuple cannot
+    provide. ``kg_reset_epoch`` and every other column of this table are
+    still carried across verbatim, exactly as before.
+    """
+    if (table, column) != ("unified_kg_state", "kg_mutation_seq"):
+        return None
+    fn = "GREATEST" if is_postgres else "MAX"
+    qualified = f"{_ident(table)}.{_ident(column)}"
+    return f"{fn}({qualified} + 1, excluded.{_ident(column)})"
+
+
 def _upsert_statement(
     table: str,
     columns: Sequence[str],
@@ -865,9 +949,15 @@ def _upsert_statement(
     update_columns: Sequence[str],
     *,
     seed_only: bool,
+    is_postgres: bool,
 ) -> str:
     names = ", ".join(_ident(column) for column in columns)
-    placeholders = ", ".join("?" for _ in columns)
+    placeholders = ", ".join(
+        _UPSERT_VALUE_OVERRIDES.get((table, column), "{placeholder}").format(
+            placeholder="?"
+        )
+        for column in columns
+    )
     head = f"INSERT INTO {_ident(table)} ({names}) VALUES ({placeholders})"
     if not primary_key:
         # No conflict target to name. Only reachable for the primary-key-less
@@ -883,7 +973,12 @@ def _upsert_statement(
     if not update_columns:
         return f"{head} ON CONFLICT ({conflict}) DO NOTHING"
     assignments = ", ".join(
-        f"{_ident(column)} = excluded.{_ident(column)}" for column in update_columns
+        f"{_ident(column)} = "
+        + (
+            _upsert_set_override(table, column, is_postgres=is_postgres)
+            or f"excluded.{_ident(column)}"
+        )
+        for column in update_columns
     )
     return f"{head} ON CONFLICT ({conflict}) DO UPDATE SET {assignments}"
 
@@ -2187,6 +2282,19 @@ def _claim_import(
         # itself stop a DIFFERENT source environment's concurrent claim of
         # the same not-yet-mirrored notebook id (codex #772 round 14 P1).
         _reserve_notebooks(backend, conn, context)
+        # In the SAME transaction as the reservation above, not a later one:
+        # a crash between this commit and the first table's own progress row
+        # must not leave a reserved notebook with NO sync_import_progress row
+        # at all for this package -- see _RESERVATION_STEP's docstring for
+        # what that silently breaks (codex #772 round 17 P2).
+        _record_progress(
+            backend,
+            conn,
+            context,
+            _RESERVATION_STEP,
+            len(context.reserved_notebooks),
+            now,
+        )
     return False
 
 
@@ -3345,7 +3453,12 @@ def _apply_table(
         if column not in primary_key and column not in owned
     ]
     statement = _upsert_statement(
-        table, columns, primary_key, update_columns, seed_only=spec.seed_only
+        table,
+        columns,
+        primary_key,
+        update_columns,
+        seed_only=spec.seed_only,
+        is_postgres=backend.is_postgres,
     )
     overrides = _insert_overrides(table, context)
     encode = _value_encoder(backend, conn, table)

@@ -2250,12 +2250,21 @@ def test_the_reconciliation_records_a_resumable_step_per_table(
 
 
 def test_a_failure_while_creating_users_still_settles_the_run(
-    source, target, package, tmp_path
+    source, target, tmp_path
 ):
     """Creating users writes to the target and can fail. It happens after the
     sync_imports row is claimed, so it has to be inside the protected phase --
     otherwise the row is stranded at 'running' and every later import from the
-    same source environment is refused as a concurrent one."""
+    same source environment is refused as a concurrent one.
+
+    The "next import" below is exported AFTER the crashed one, not before it
+    (unlike most of this suite's fixture-provided ``package``): since codex
+    #772 round 17 P2, the crashed run's claim-time ``__reserved__`` progress
+    row gives it ``has_progress=True``, so ``_supersede_outstanding`` now
+    requires whatever comes next to be actually newer and to cover the same
+    notebook -- an OLDER, pre-crash export of the same notebook is correctly
+    refused by that ordering check, which is a different mechanism than the
+    'still running' concurrency check this test is actually about."""
     with source["repo"]._write() as db:
         db.execute("UPDATE users SET username='' WHERE id=?", (BOB[0],))
     unnamed = _export(source, tmp_path / "out2")
@@ -2272,7 +2281,8 @@ def test_a_failure_while_creating_users_still_settles_the_run(
     assert [p for p in unnamed.iterdir() if p.name.startswith("import-report-")]
     # ... and the next import from the same source environment is not refused
     # as a concurrent one.
-    report = _import(target, package)
+    resync = _export(source, tmp_path / "out3")
+    report = _import(target, resync)
     assert report.error == ""
     assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 1
 
@@ -3353,3 +3363,268 @@ def test_a_failing_run_still_reports_its_own_exception_not_the_bookkeeping(
 
     assert "the original diagnosis" in str(failure.value)
     assert "went away" not in str(failure.value)
+
+
+# --------------------------------------------------------- codex #772 r17
+
+
+def test_import_advances_kg_mutation_seq_past_a_crafted_version_alias(
+    source, target, tmp_path
+):
+    """codex #772 round 17 P1. ``unified_kg_state.kg_mutation_seq`` is one leg
+    of the four-column cache-version quadruple
+    ``KnowledgeLifecycleService._unified_graph_version`` reads to decide
+    whether ``self.unified_cache`` still matches the stored graph. A verbatim
+    ``excluded.kg_mutation_seq`` copy on import could write a value that
+    happens to equal a version the target process already has cached under a
+    DIFFERENT mutation history -- the cache-hit compare would then hit and
+    serve a stale graph forever.
+
+    Crafts exactly that collision: the target's row is set, by hand, to the
+    SAME quadruple the second package is about to carry, and the cache is
+    warmed under that crafted version BEFORE the import runs -- so a bare
+    verbatim copy would leave the post-import row indistinguishable from what
+    is already cached.
+
+    变异验证: 把 ``_upsert_set_override`` 对 ``("unified_kg_state",
+    "kg_mutation_seq")`` 的特例去掉(改回普通 ``excluded.kg_mutation_seq`` 直
+    传),本条必须报红 -- 第二次读到的还是导入前的单节点图,且
+    ``kg_mutation_seq`` 落在包内原样值而不是 ``max(旧,包内)+1``。
+    """
+    notebook_id = source["repo"].create_notebook(NotebookCreate(name="kg seq alias")).id
+    source["repo"].store_kg(
+        notebook_id, None,
+        [{"local_id": "C1", "object_type": "concept",
+          "payload": {"name": "Alpha"}, "evidence": []}],
+        [],
+    )
+    first = _export_notebooks(source, tmp_path / "out1", [notebook_id])
+    report1 = _import(target, first)
+    assert report1.error == ""
+
+    source["repo"].store_kg(
+        notebook_id, None,
+        [{"local_id": "C2", "object_type": "concept",
+          "payload": {"name": "Beta"}, "evidence": []}],
+        [],
+    )
+    second = _export_notebooks(source, tmp_path / "out2", [notebook_id])
+    package_row = next(
+        row for row in _rows(second, "unified_kg_state")
+        if row["notebook_id"] == notebook_id
+    )
+
+    # Craft the alias: the target's CURRENT row becomes byte-for-byte the
+    # quadruple the package is about to carry.
+    with target["repo"]._write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET kg_mutation_seq=?, "
+            "cluster_mutation_seq=?, mention_seq=?, kg_reset_epoch=? "
+            "WHERE notebook_id=?",
+            (
+                package_row["kg_mutation_seq"],
+                package_row["cluster_mutation_seq"],
+                package_row["mention_seq"],
+                package_row["kg_reset_epoch"],
+                notebook_id,
+            ),
+        )
+
+    # Warm the cache under the crafted (pre-import) version: one node.
+    warm = target["repo"].unified_graph(notebook_id, level="concept")
+    assert len(warm["nodes"]) == 1
+    assert (notebook_id, "concept") in target["repo"]._unified_cache
+
+    report2 = _import(target, second)
+    assert report2.error == ""
+
+    fresh = target["repo"].unified_graph(notebook_id, level="concept")
+    assert len(fresh["nodes"]) == 2, (
+        "a verbatim kg_mutation_seq copy would alias the crafted version and "
+        "keep serving the pre-import (1-node) cached graph"
+    )
+
+    row = _one(
+        target["repo"],
+        "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
+        (notebook_id,),
+    )
+    # Crafted so the target's pre-import value already equals the package's:
+    # max(old, package) + 1 == package_row["kg_mutation_seq"] + 1 here.
+    assert row["kg_mutation_seq"] == package_row["kg_mutation_seq"] + 1
+
+
+def test_a_fresh_notebooks_first_import_still_bumps_kg_mutation_seq_past_the_package(
+    source, target, tmp_path
+):
+    """codex #772 round 17 P1, the fresh-insert leg: a notebook the target has
+    never mirrored before takes the ``INSERT`` branch of the upsert, not the
+    ``ON CONFLICT DO UPDATE`` branch -- so the ``MAX``/``GREATEST`` SET clause
+    never runs for it. Only the VALUES tuple's own ``+1`` makes a first-ever
+    import land ``package_value + 1`` instead of the bare package value.
+
+    变异验证: dropping ``_UPSERT_VALUE_OVERRIDES`` (the VALUES-side ``+1``)
+    while leaving the ON CONFLICT SET override in place makes this assertion
+    fail, even though the two tests above still pass -- they both overwrite
+    the target's row with a crafted value right after this first import, so
+    neither one actually observes what the fresh INSERT itself wrote.
+    """
+    notebook_id = source["repo"].create_notebook(NotebookCreate(name="kg seq fresh insert")).id
+    source["repo"].store_kg(
+        notebook_id, None,
+        [{"local_id": "C1", "object_type": "concept",
+          "payload": {"name": "Alpha"}, "evidence": []}],
+        [],
+    )
+    package = _export_notebooks(source, tmp_path / "out1", [notebook_id])
+    package_row = next(
+        row for row in _rows(package, "unified_kg_state")
+        if row["notebook_id"] == notebook_id
+    )
+
+    report = _import(target, package)
+    assert report.error == ""
+
+    row = _one(
+        target["repo"],
+        "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
+        (notebook_id,),
+    )
+    assert row["kg_mutation_seq"] == package_row["kg_mutation_seq"] + 1
+
+
+def test_import_never_regresses_kg_mutation_seq_below_the_targets_own_value(
+    source, target, tmp_path
+):
+    """codex #772 round 17 P1, the other half: the target's OWN
+    ``kg_mutation_seq`` can legitimately run ahead of the next package's raw
+    value -- a mirrored notebook's own users can write to it locally between
+    syncs. Importing must still strictly advance past whichever of the two is
+    larger, never fall back to a bare ``package_value + 1`` that regresses
+    below what the target already had.
+
+    变异验证: a mutation that bakes ``+1`` into the VALUES tuple but drops the
+    ``MAX``/``GREATEST`` against the target's existing value in the ON
+    CONFLICT SET clause (i.e. always writes ``package_value + 1`` regardless
+    of the target's own row) makes this assertion fail -- the crafted-alias
+    test above alone does not catch that particular mutation, because there
+    the target's pre-import value is set EQUAL to the package's, so
+    ``max(old, package)`` and a bare ``package`` coincide.
+    """
+    notebook_id = source["repo"].create_notebook(NotebookCreate(name="kg seq no regress")).id
+    source["repo"].store_kg(
+        notebook_id, None,
+        [{"local_id": "C1", "object_type": "concept",
+          "payload": {"name": "Alpha"}, "evidence": []}],
+        [],
+    )
+    first = _export_notebooks(source, tmp_path / "out1", [notebook_id])
+    report1 = _import(target, first)
+    assert report1.error == ""
+
+    # The target's own users push its kg_mutation_seq far ahead of anything
+    # the next (much smaller-seq) package will carry.
+    with target["repo"]._write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET kg_mutation_seq=100 WHERE notebook_id=?",
+            (notebook_id,),
+        )
+
+    second = _export_notebooks(source, tmp_path / "out2", [notebook_id])
+    package_row = next(
+        row for row in _rows(second, "unified_kg_state")
+        if row["notebook_id"] == notebook_id
+    )
+    assert package_row["kg_mutation_seq"] < 100, (
+        "the test needs the package's raw value to be smaller than the "
+        "target's own -- otherwise it cannot tell MAX from a bare copy"
+    )
+
+    report2 = _import(target, second)
+    assert report2.error == ""
+
+    row = _one(
+        target["repo"],
+        "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
+        (notebook_id,),
+    )
+    assert row["kg_mutation_seq"] == 101
+
+
+def test_a_crash_right_after_reservation_still_blocks_a_narrower_same_source_package(
+    source, target, tmp_path, monkeypatch
+):
+    """codex #772 round 17 P2. A crash between ``_reserve_notebooks``'s commit
+    and the first table's own progress row must not leave a package with
+    ``importing``-status notebooks and ``has_progress=False`` for
+    ``_prior_imports`` -- that combination lets a same-source package which
+    does not cover those notebooks retire the failed one through
+    ``_supersede_outstanding`` without ever finishing them, silently
+    stranding the notebooks in ``importing`` forever, and a later re-export of
+    the original package is then refused as older than a package that never
+    actually finished applying them. The claim-time ``__reserved__`` progress
+    row closes the gap: it is written in the SAME transaction as the
+    reservation, so ``has_progress`` reads True even when nothing else ever
+    committed.
+
+    变异验证: 去掉 ``_claim_import`` 里那条 ``_record_progress(...,
+    _RESERVATION_STEP, ...)`` 调用,本条必须报红 -- 更窄的包不再被拒绝。
+    """
+    both = _export_notebooks(
+        source, tmp_path / "out-both", [source["exported"], source["base"]]
+    )
+
+    from app.migration.sync import import_ as module
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("simulated crash right after the claim")
+
+    monkeypatch.setattr(module, "_prune_snapshot", boom)
+    with pytest.raises(SyncImportError):
+        _import(target, both)
+    monkeypatch.undo()
+
+    both_id = _manifest(both)["package_id"]
+    assert _sync_import_row(target, both_id)["status"] == "failed"
+    steps = {
+        str(row["table_name"])
+        for row in _fetch(
+            target["repo"],
+            "SELECT table_name FROM sync_import_progress WHERE package_id=?",
+            (both_id,),
+        )
+    }
+    # No table ever applied -- only the claim-time reservation marker.
+    assert steps == {"__reserved__"}
+    assert _progress_count(target, both_id) > 0
+    for notebook_id in (source["exported"], source["base"]):
+        row = _one(
+            target["repo"], "SELECT status FROM notebooks WHERE id=?", (notebook_id,)
+        )
+        assert row["status"] == "importing"
+
+    # A narrower, same-source package that does NOT cover source["base"] must
+    # be refused rather than silently superseding the crashed run.
+    narrower = _export(source, tmp_path / "out-narrow")  # only source["exported"]
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, narrower)
+    message = str(failure.value)
+    assert both_id in message
+    assert source["base"] in message
+    assert _sync_import_row(target, both_id)["status"] == "failed"
+    assert _progress_count(target, both_id) > 0
+
+    # A covering, same-source package retires it and publishes both notebooks.
+    wider = _export_notebooks(
+        source, tmp_path / "out-wide", [source["exported"], source["base"]]
+    )
+    report = _import(target, wider)
+
+    assert report.error == ""
+    retired = _sync_import_row(target, both_id)
+    assert retired["status"] == "superseded"
+    for notebook_id in (source["exported"], source["base"]):
+        row = _one(
+            target["repo"], "SELECT status FROM notebooks WHERE id=?", (notebook_id,)
+        )
+        assert row["status"] != "importing"
