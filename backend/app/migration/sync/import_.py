@@ -118,6 +118,31 @@ renamed, or deleted:
   target-side mirror-collision guard in ``_preflight``, so that guard is
   reasoning about the package's real scope rather than what its manifest
   claims.
+
+A row's PRIMARY KEY is not trustworthy either, and that one is not something
+preflight can settle once against the package alone -- it can only be caught
+against the TARGET, table by table, as each upsert is about to run. Ids are
+exported verbatim and never reissued per environment, so a package can
+legitimately reuse a primary key the target already holds under a completely
+different notebook (or, for a PARENT-scoped table, a different parent row).
+Nothing stops ``INSERT ... ON CONFLICT (pk) DO UPDATE`` from rewriting that
+pre-existing row's scope column right along with the rest of it, and
+``_TargetKeys.present`` cannot see the collision coming -- for a
+NOTEBOOK/GLOBAL-scoped table it only preloads keys already inside THIS
+package's own notebook set, so a same-PK row belonging to someone else's
+notebook reads as "does not exist yet" right up until the database's own
+conflict target collides with it. **row-ownership validity**
+(``_assert_target_ownership``, called from ``_apply_table`` once per batch,
+before the upsert, inside the same per-table write transaction) closes this:
+an unscoped lookup by primary key against the target, checked against
+``context.manifest.notebooks`` (NOTEBOOK scope) or ``context.parent_key_sets``
+(PARENT scope, populated by ``_verify_row_scopes`` during preflight) --
+refusing the whole import by name, table, key, and both scope values, rather
+than silently reattributing an existing row. Not needed for a ``seed_only``
+table (its upsert is a bare ``ON CONFLICT DO NOTHING``, which never touches a
+pre-existing row regardless of who owns it) or a table with no primary key
+(replaced wholesale by notebook in ``_replace_scope``, never upserted through
+a conflict target that could straddle scopes).
 """
 
 from __future__ import annotations
@@ -152,6 +177,7 @@ from app.migration.sync.manifest import (
     ScopeKind,
     SyncClass,
     SYNC_MANIFEST,
+    TableScope,
     spec_for,
     synced_tables,
 )
@@ -966,6 +992,13 @@ class _Context:
     # rows reachable from them survive the snapshot sweep. Resolved once, at
     # the start of the reconcile phase, from state the import does not change.
     protected_sources: frozenset[str] = frozenset()
+    # Package-side primary-key sets for every table named as a PARENT scope's
+    # ``parent_table`` (plus ``"notebooks"``), as ``_verify_row_scopes``
+    # computed them from the package's own rows during preflight. Reused by
+    # ``_assert_target_ownership`` as "the parent keys this package actually
+    # carries" -- never re-derived from ``manifest.json``, which is not
+    # trustworthy (module docstring).
+    parent_key_sets: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
 def _row_key(row: Mapping[str, Any], primary_key: Sequence[str]) -> str:
@@ -1343,7 +1376,7 @@ def _verify_columns(backend: _Backend, conn: Any, manifest: _PackageManifest) ->
 
 def _verify_row_scopes(
     backend: _Backend, conn: Any, package_dir: Path, manifest: _PackageManifest
-) -> None:
+) -> dict[str, frozenset[str]]:
     """Refuse a package whose rows reach outside the notebook set it claims.
 
     ``manifest.notebooks`` is not checksummed (see the module docstring), so
@@ -1378,6 +1411,14 @@ def _verify_row_scopes(
     nothing, and it runs before ``_preflight``'s mirror-collision guard, so
     that guard sees the package's real scope rather than what its manifest
     claims.
+
+    Returns the package-side primary-key sets it collected for every table
+    named as somebody else's PARENT ``parent_table`` (``_PARENT_SCOPE_TARGETS``,
+    plus ``"notebooks"``). The row-ownership guard in ``_apply_table``
+    (``_assert_target_ownership``) reuses this as "the parent keys this
+    package actually carries" -- the set a PARENT-scoped table's existing
+    target-side rows must be attributed into -- rather than re-streaming the
+    same package files a second time.
     """
     notebook_ids: set[str] = set()
     for row in _iter_lines(package_dir / rows_path("notebooks")):
@@ -1442,6 +1483,8 @@ def _verify_row_scopes(
         if collect_own_keys:
             parent_key_sets[table] = own_keys
 
+    return {table: frozenset(keys) for table, keys in parent_key_sets.items()}
+
 
 def _preflight(backend: _Backend, conn: Any, context: _Context) -> bool:
     """The refusals that need the target. Returns True when this package was
@@ -1473,7 +1516,9 @@ def _preflight(backend: _Backend, conn: Any, context: _Context) -> bool:
     # already-applied short-circuit right below, so a package whose manifest
     # lies about its scope is refused the same way whether or not it happens
     # to share a package_id with something already recorded.
-    _verify_row_scopes(backend, conn, context.package_dir, manifest)
+    context.parent_key_sets = _verify_row_scopes(
+        backend, conn, context.package_dir, manifest
+    )
 
     for row in backend.fetch(
         conn,
@@ -2771,6 +2816,104 @@ def _probe_unique_key(
                 )
 
 
+def _assert_target_ownership(
+    backend: _Backend,
+    conn: Any,
+    table: str,
+    scope: TableScope,
+    primary_key: Sequence[str],
+    keys: Sequence[tuple[Any, ...]],
+    context: _Context,
+) -> None:
+    """Refuse a package row whose primary key already belongs, at the
+    target, to a notebook (or PARENT-scope owner) outside this package.
+
+    ``manifest.json`` is not the only thing about a package that cannot be
+    trusted (module docstring) -- neither can a row's PRIMARY KEY. Ids are
+    exported verbatim, never reissued per environment, so a package can
+    legitimately reuse a primary key the target already has under a
+    completely different notebook. When it does, ``ON CONFLICT (pk) DO
+    UPDATE`` in ``_upsert_statement`` rewrites that pre-existing row's scope
+    column right along with everything else it touches -- silently
+    reattributing someone else's row into this package's notebook (codex
+    #772 round 12, reproduced against ``knowledge_objects``).
+
+    ``_TargetKeys.present`` cannot catch this by itself: for a
+    NOTEBOOK/GLOBAL-scoped table it only preloads keys already inside THIS
+    package's own notebook set (``_TargetKeys.__init__``), so a same-PK row
+    that belongs to a different notebook is invisible to it and reads as
+    "does not exist yet" even though the database's own conflict target is
+    about to collide with it. This runs a second, UNSCOPED-by-notebook
+    lookup keyed only on the primary key -- ``WHERE pk[0] IN (...)``, refined
+    in Python exactly like ``_probe_unique_key`` -- and checks every
+    existing row's own scope value against the set this package actually
+    carries:
+
+    - NOTEBOOK scope: the row's own scope column must be one of
+      ``context.manifest.notebooks``.
+    - PARENT scope: the row's own scope column must be one of the primary
+      keys ``context.parent_key_sets`` recorded for ``scope.parent_table`` --
+      this package's own copy of the parent table, computed once by
+      ``_verify_row_scopes`` during preflight.
+
+    Never called for a ``seed_only`` table (its upsert is a bare
+    ``ON CONFLICT DO NOTHING``, so a pre-existing row -- whoever it belongs
+    to -- is never touched) or for a table with no primary key (replaced
+    wholesale by notebook in ``_replace_scope``, never upserted through a
+    conflict target that could straddle scopes) -- the caller only reaches
+    here for a table where neither exemption applies.
+    """
+    if scope.kind is ScopeKind.NOTEBOOK:
+        allowed = set(context.manifest.notebooks)
+    elif scope.kind is ScopeKind.PARENT:
+        allowed = context.parent_key_sets.get(scope.parent_table)
+        if allowed is None:
+            raise SyncImportError(
+                f"{table}: no package-side primary-key set was recorded for "
+                f"its PARENT scope's parent table {scope.parent_table!r} "
+                "-- _verify_row_scopes must run, in synced_tables() order, "
+                "before this table is applied"
+            )
+    else:
+        # Unreachable today: every GLOBAL-scoped table in SYNC_MANIFEST is
+        # seed_only, and the caller never reaches here for one. Kept as an
+        # explicit refusal rather than a silent bypass, so a future GLOBAL
+        # table that is NOT seed_only fails loudly instead of skipping this
+        # guard by accident.
+        raise SyncImportError(
+            f"{table}: GLOBAL-scoped and not seed_only; row-ownership is "
+            "undefined for that combination -- add a rule here in the same "
+            "change that adds such a table"
+        )
+    wanted = set(keys)
+    if not wanted:
+        return
+    projection = ", ".join(
+        _ident(column) for column in (*primary_key, scope.column)
+    )
+    leading = sorted({key[0] for key in wanted}, key=repr)
+    for chunk in _batched(leading):
+        placeholders = ",".join("?" for _ in chunk)
+        for row in backend.fetch(
+            conn,
+            f"SELECT {projection} FROM {_ident(table)} "
+            f"WHERE {_ident(primary_key[0])} IN ({placeholders})",
+            chunk,
+        ):
+            found = tuple(row[column] for column in primary_key)
+            if found not in wanted:
+                continue
+            theirs = str(row[scope.column] or "")
+            if theirs not in allowed:
+                raise SyncImportError(
+                    f"{table}: primary key {found} already exists at the "
+                    f"target under {scope.column}={theirs!r}, which is "
+                    "outside this package's scope. Refusing to reattribute "
+                    "an existing row to this import; resolve the collision "
+                    "at the target before re-importing."
+                )
+
+
 def _apply_table(
     backend: _Backend, conn: Any, table: str, context: _Context
 ) -> TableOutcome:
@@ -2812,6 +2955,14 @@ def _apply_table(
         _replace_scope(backend, conn, table, context)
     if table in _SOURCE_AUTHORITATIVE:
         _prune_superseded(backend, conn, table, context, primary_key)
+    # A seed_only upsert is a bare ON CONFLICT DO NOTHING, so a pre-existing
+    # row is never touched regardless of who it belongs to; a keyless table
+    # is replaced wholesale above rather than upserted. Neither can reattribute
+    # someone else's row, so neither needs the ownership recheck below.
+    check_ownership = bool(primary_key) and not spec.seed_only
+    scope = spec.scope
+    if check_ownership and scope is None:
+        raise SyncImportError(f"{table}: no import scope to verify row ownership against")
     known = _TargetKeys(backend, conn, table, primary_key, context)
     seed_parent = _SEED_PARENT.get(table)
     seedable = (
@@ -2857,6 +3008,15 @@ def _apply_table(
                 backend, conn, table, unique_keys, kept, primary_key
             )
         keys = [tuple(row.get(column) for column in primary_key) for row in kept]
+        if check_ownership:
+            # Before the upsert, in this same write transaction: an existing
+            # target row whose primary key this batch is about to write, but
+            # whose own scope value falls outside this package, must not be
+            # silently reattributed by ON CONFLICT DO UPDATE.
+            assert scope is not None  # narrowed above alongside check_ownership
+            _assert_target_ownership(
+                backend, conn, table, scope, primary_key, keys, context
+            )
         present = known.present(keys) if primary_key else set()
         params: list[tuple[Any, ...]] = []
         fresh: list[tuple[Any, ...]] = []

@@ -263,7 +263,9 @@ sync-<source_env>-<from_seq>-<to_seq>-<package_id 前 8 位>/
 parent scope 表的父键必须出现在包内父表里。笔记本 id 与包 id 只允许 `[A-Za-z0-9._-]`、不含
 `..`、不以 `.` 开头；`files/**` 相对路径的每一段只挡穿越（非空、不是 `.`/`..`、不含分隔符与
 NUL），因为上传件文件名保留用户原名（Unicode、空格都合法），再由 `resolve()` 证明落在对应的
-storage 根或包目录内；这些校验都在预检、任何写入或删除之前。
+storage 根或包目录内；这些校验都在预检、任何写入或删除之前。主键同样不可信：写事务里
+upsert 之前按主键回查目标端已有行的归属（notebook scope 比 notebook_id，parent scope 比父键），
+不属于包内范围的碰撞一律拒绝，不能让一条构造的行把别的本地笔记本的行劫持进镜像。
 
 导入端按目标后端选择转换：SQLite 目标只解码 `$bytes`；PostgreSQL 目标按 `postgres_catalog`
 读到的列类型调用 `transform_sqlite_value`。upsert 语句两端同形：
