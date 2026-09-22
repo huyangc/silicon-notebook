@@ -285,7 +285,11 @@ sync status [--json]      # 本库的导出水位（每个目标环境）与已�
    镜像一致（包里每个笔记本若在目标端已存在，其 `sync_origin` 必须等于源环境标识；本地库或
    来自别的源环境的镜像都拒绝并点名）。**不按名字查重**：笔记本名本来就不唯一。同一
    `source_env` 已有 running 的导入则拒绝；同一个包续跑必须显式 `--resume`，running 行超过
-   6 小时视为陈旧可接管。
+   6 小时视为陈旧可接管。包的新旧按 `manifest.created_at`（PR-3 起叠加 to_seq）：比同
+   `source_env` 最近一次 done 的包更旧的包拒绝导入（不能让目标端倒退）；声明一个更新的包时，
+   同源 `failed` 且带进度的旧包被标成 `superseded` 并清掉进度行，之后不能再 `--resume`，
+   避免旧进度与新快照拼成混合状态。`sync_imports.status` 值域：running / done / failed /
+   superseded。
 2. 身份映射（§4），产出映射表与跳过清单。
 3. 文件（在行相位之后执行，行已提交才动磁盘）：`files/notebooks/<id>/` 与 `files/assets/<id>/`
    各自先落到 `<目标目录>.sync-tmp/`，用预检算过的摘要（不重复读整包），原子 rename 到位、旧目录

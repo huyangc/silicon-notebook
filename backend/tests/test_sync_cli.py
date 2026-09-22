@@ -62,6 +62,7 @@ def _empty_import_report(**overrides) -> ImportReport:
     fields = dict(
         package_id="pkg-id",
         source_env="dev",
+        package_created_at="2026-01-01T00:00:00+00:00",
         already_applied=False,
         dry_run=False,
         notebooks=(),
@@ -549,6 +550,83 @@ def test_status_human_output_prints_dash_for_missing_finished_at(
     exit_code = cli.main(["status"])
     assert exit_code == 0
     assert "结束于 -" in capsys.readouterr().out
+
+
+def test_status_human_output_flags_superseded_row_with_replacement_id(
+    tmp_path, monkeypatch, capsys
+):
+    """A `failed` import that a newer, already-applied package from the same
+    source_env replaced is reported as `superseded`, carrying the replacing
+    package_id in report_json.superseded_by -- the human summary must surface
+    that id, not just the bare status word."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_imports "
+                "(package_id, source_env, from_seq, to_seq, status, started_at, "
+                "finished_at, report_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "pkg-old",
+                    "prod-shanghai",
+                    0,
+                    0,
+                    "superseded",
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:05:00+00:00",
+                    json.dumps({"notebooks": [], "superseded_by": "pkg-new"}),
+                ),
+            )
+    finally:
+        database.close()
+
+    exit_code = cli.main(["status"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "pkg-old" in out
+    assert "superseded" in out
+    assert "被 pkg-new 取代" in out
+
+
+def test_status_json_carries_status_unchanged_including_superseded(
+    tmp_path, monkeypatch, capsys
+):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_imports "
+                "(package_id, source_env, from_seq, to_seq, status, started_at, "
+                "finished_at, report_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "pkg-old",
+                    "prod-shanghai",
+                    0,
+                    0,
+                    "superseded",
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:05:00+00:00",
+                    json.dumps({"notebooks": [], "superseded_by": "pkg-new"}),
+                ),
+            )
+    finally:
+        database.close()
+
+    exit_code = cli.main(["status", "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["imports"]) == 1
+    row = payload["imports"][0]
+    assert row["status"] == "superseded"
+    assert row["report_json"]["superseded_by"] == "pkg-new"
 
 
 def test_status_missing_sync_tables_gives_named_message(tmp_path, monkeypatch, capsys):

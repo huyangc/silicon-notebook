@@ -662,7 +662,10 @@ copied file's sha256 during the import instead of trusting the package's `checks
 `--resume` must be passed explicitly to continue an import that was interrupted partway (its
 `sync_imports` row is still `running`): without it, a second `import` of a package from the
 same `source_env` is refused outright, so an operator cannot accidentally interleave two
-unrelated packages from the same source.
+unrelated packages from the same source. `--resume` only works against a `failed` package that
+is still the latest one for its `source_env`; a `failed` package that has since been
+`superseded` by a newer export cannot be resumed (see the `status` value domain below) — export
+and import a fresh package instead.
 
 A failed precondition prints the reason and exits 2 without writing anything: schema pair
 mismatch, `EMBED_RUNTIME_DIM` mismatch, a checksum failure, or — the actual target-collision
@@ -670,7 +673,9 @@ check — **the package carries a notebook id that already exists on the target 
 notebook's `sync_origin` is not this package's `source_env`** (a purely local notebook, or a
 mirror of a *different* source environment, is never overwritten by an import; this is an id
 match, not a name lookup, so a same-named-but-different-id notebook on the target is not a
-conflict).
+conflict). A package is also rejected when its `created_at` is **older** than the most recent
+`done` package from the same `source_env`: applying it would move the target backwards behind
+content it already has.
 
 When the target backend is SQLite, `import` requires the application to be stopped first (the
 importer writes outside the backend's own request-serialized write path); `status`/`--dry-run`
@@ -681,7 +686,13 @@ language doc you're reading; this is not a separate flag or code path, just what
 
 `status` lists, read-only: this environment's export watermark per target (`sync_export_state`)
 and every package this environment has imported with its outcome (`sync_imports`). It works
-against whichever backend `DATABASE_URL` currently selects.
+against whichever backend `DATABASE_URL` currently selects. `sync_imports.status` is one of
+`running`, `done`, `failed`, or `superseded` — `superseded` means this package's import had
+failed and was then replaced by a newer, already-applied package from the same `source_env`
+(its `sync_import_progress` rows are cleared and it can no longer be `--resume`d); the
+human-readable summary appends "（被 `<package_id>` 取代）" ("superseded by `<package_id>`") for
+those rows, reading it from `report_json.superseded_by`. `--json` carries `status` (and
+`report_json`, `superseded_by` included) unchanged from the row.
 
 Every subcommand exits 2 on any failure (one line on stderr, no traceback) and 0 on success,
 including `already_applied`. `--json` prints the underlying export/import report or status
