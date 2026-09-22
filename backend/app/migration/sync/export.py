@@ -83,14 +83,6 @@ __all__ = [
 ]
 
 
-# A notebook is skipped, not exported, while one of these lifecycle states is
-# in flight: its rows are mid-copy, mid-delete or mid-import and no snapshot of
-# them is a coherent notebook. Same predicate as the repositories'
-# NOTEBOOK_LIVE_SQL, restated here because this package may not import them --
-# the two must stay equal value for value.
-_NOT_LIVE_STATUSES = ("copying", "deleting", "importing")
-
-
 # Block size for copying a notebook's files while hashing them in one pass.
 _COPY_BLOCK = 1 << 20
 
@@ -119,7 +111,10 @@ class ExportReport:
     package_id: str
     # Notebook ids actually written into the package, sorted.
     notebooks: tuple[str, ...]
-    # notebook id -> why it was left out (mirror / not live / unknown id).
+    # notebook id -> why it was left out. Two reasons only: it is a mirror of
+    # another environment, or the caller named an id this database does not
+    # have. A notebook's lifecycle ``status`` is NOT one of them -- see
+    # _select_notebooks.
     skipped: Mapping[str, str]
     # table name -> rows written, for every synced table (0 included, so the
     # report and the package's file set describe the same thing).
@@ -131,10 +126,12 @@ class ExportReport:
     # full/notebook_ids arguments -- never by the caller directly.
     mode: str
     # The change log's high-water seq visible inside THIS export's read
-    # snapshot, or 0 when the capture gate was off at that moment. Equal to
-    # ``to_seq`` in both modes; kept as its own field because it is what
-    # ``sync_export_state.exported_through_seq`` stores and the CLI has
-    # printed it under this name since PR-3a.
+    # snapshot, as observed -- 0 when the capture gate was off at that moment.
+    # An OBSERVATION, not the watermark: ``sync prune-log`` may legitimately
+    # empty the log at or below an existing watermark, and then this reads
+    # LOWER than ``to_seq``, which is clamped so a watermark never moves
+    # backwards. Kept under this name because the CLI has printed it since
+    # PR-3a.
     captured_through_seq: int = 0
     # The window this package covers. A full baseline: 0 .. this export's
     # captured_through_seq (the rows come from a table scan, so "from" is the
@@ -153,6 +150,13 @@ class ExportReport:
     # true otherwise (a full baseline advances it too -- that is what makes
     # the NEXT export incremental).
     watermark_advanced: bool = True
+    # What this run actually wrote to sync_export_state.captured -- i.e.
+    # whether the NEXT export may resume from the watermark this one left.
+    # Normally "the gate was open", but _advance_watermark downgrades it to
+    # False when the gate moved mid-export (see its docstring), so this is
+    # the recorded truth rather than the gate reading. Always False for a
+    # scoped export, which writes no watermark at all.
+    captured: bool = False
     # Incremental only: the package_id the previous watermark named, so a
     # target can chain packages without guessing. Empty for a full package.
     base_package_id: str = ""
@@ -304,9 +308,22 @@ def _select_notebooks(
 
     A mirror (``sync_origin != ''``) is never a source: re-exporting one would
     launder another environment's notebook into this environment's name and
-    make the two sides each other's upstream.
+    make the two sides each other's upstream. That is the ONLY reason a
+    notebook that exists is left behind.
+
+    ``status`` is deliberately not consulted. It is a TARGET-owned column
+    (``TableSyncSpec.target_owned_columns``): import never overwrites it and
+    the publish step flips a mirror to ``draft``, so a source-side
+    ``copying``/``deleting``/``importing`` says nothing about what the target
+    should hold -- it is a moment in a local process, and the export's read
+    snapshot is a coherent view of the rows either way. Skipping on it would
+    be actively harmful now that the watermark advances: a baseline taken
+    while a notebook was mid-copy would drop the whole notebook, and an
+    incremental window would drop exactly the changes made during that
+    window, with the watermark moving past them regardless
+    (docs/incremental-sync-design.md §7 "笔记本范围与镜像").
     """
-    statement = "SELECT id, status, sync_origin FROM notebooks"
+    statement = "SELECT id, sync_origin FROM notebooks"
     found: dict[str, dict[str, Any]] = {}
     if requested is None:
         for row in source.stream(conn, f"{statement} ORDER BY id"):
@@ -327,8 +344,6 @@ def _select_notebooks(
             skipped[notebook_id] = (
                 f"mirror of {str(row['sync_origin'])!r}; a mirror cannot be a source"
             )
-        elif str(row["status"]) in _NOT_LIVE_STATUSES:
-            skipped[notebook_id] = f"status={str(row['status'])!r}"
         else:
             exported.append(notebook_id)
     for notebook_id in requested or ():
@@ -532,23 +547,32 @@ def _write_changed_files(
 # ----------------------------------------------------------------- watermark
 
 
-def _capture_gate_open(source: _Source, conn: Any) -> bool:
-    """Whether source-side change capture is on, as of this read snapshot.
+def _capture_gate(source: _Source, conn: Any) -> tuple[bool, Any]:
+    """``(is the gate open, when it was last opened)`` -- the capture gate's
+    GENERATION, read once per export and passed around from there.
 
-    Both the watermark this export writes and the mode it runs in hang off
-    this one answer, and both must hang off the SAME one: a gate flipped
-    between two reads would let an export record "captured" for a window the
-    log does not actually cover."""
-    return bool(
-        source.fetch(
-            conn,
-            "SELECT 1 AS gate_open FROM sync_capture_control "
-            "WHERE singleton = 1 AND enabled",
-        )
+    The flag alone is not enough to promise a window is covered. ``sync
+    capture disable`` clears the change log, and a ``disable`` + ``enable``
+    pair during an export leaves the flag exactly as this read found it while
+    having thrown away everything the window was going to describe.
+    ``enabled_at`` moves on every ``enable``, so the pair is what distinguishes
+    "still the gate I read" from "a gate that has been round the loop since".
+    ``_advance_watermark`` re-reads it in its own write transaction and
+    refuses to claim ``captured`` when it has moved.
+
+    A missing control row (capture never turned on) answers ``(False, None)``,
+    which compares equal to itself across the export the same way.
+    """
+    rows = source.fetch(
+        conn,
+        "SELECT enabled, enabled_at FROM sync_capture_control WHERE singleton = 1",
     )
+    if not rows:
+        return False, None
+    return bool(rows[0]["enabled"]), rows[0]["enabled_at"]
 
 
-def _captured_through_seq(source: _Source, conn: Any) -> int:
+def _captured_through_seq(source: _Source, conn: Any, gate_open: bool) -> int:
     """The change log's high-water ``seq`` visible in THIS read snapshot, or
     0 when the capture gate is off.
 
@@ -579,7 +603,7 @@ def _captured_through_seq(source: _Source, conn: Any) -> int:
     first half (one writer at a time means ``seq`` order is commit order),
     and stores NULL for the second.
     """
-    if not _capture_gate_open(source, conn):
+    if not gate_open:
         return 0
     row = source.fetch(
         conn, "SELECT COALESCE(MAX(seq), 0) AS max_seq FROM sync_change_log"
@@ -592,17 +616,23 @@ def _advance_watermark(
     target_env: str,
     package_id: str,
     exported_at: datetime,
-    captured_through_seq: int,
+    exported_through_seq: int,
     *,
-    captured: bool,
+    gate: tuple[bool, Any],
     snapshot: str | None,
-) -> None:
+) -> tuple[bool, str]:
     """Upsert this target's watermark, only once the package is complete on
     disk (§7): a failed export must leave the watermark where it was so a
     re-run is always safe.
 
+    ``exported_through_seq`` is the caller's ``to_seq`` -- the package's own
+    claim, which is this snapshot's ``MAX(seq)`` clamped so it can never fall
+    below the watermark already stored (see ``_assemble``). The package and
+    the watermark must name the same point, or a reader of the chain and a
+    reader of this table would disagree about where the source got to.
+
     Three columns together are what the NEXT export resumes from:
-    ``exported_through_seq`` (this snapshot's ``MAX(seq)``),
+    ``exported_through_seq``,
     ``exported_snapshot`` (this transaction's ``pg_current_snapshot()``, NULL
     on SQLite) and ``captured`` (whether the gate was open, i.e. whether
     there is a log behind that seq at all). ``captured = 0`` is what makes a
@@ -611,12 +641,32 @@ def _advance_watermark(
     the gap. Written for a FULL export too -- that is what lets the export
     after it be incremental.
 
+    ``captured`` is decided HERE, not by the caller, because the gate can move
+    while the export runs. The control row is re-read inside this very write
+    transaction and compared against the generation the read snapshot saw
+    (``_capture_gate``): a ``disable`` + ``enable`` pair in between leaves the
+    flag looking unchanged while having emptied the change log, so a
+    watermark claiming ``captured`` would send the NEXT export resuming into
+    a log that no longer holds the window. On any disagreement the watermark
+    is still written -- the seq and snapshot are true facts about this run --
+    but ``captured`` goes to 0, which costs one full export and loses nothing.
+    Returns ``(captured, reason)``; ``reason`` is empty when the gate held.
+
     See ``_captured_through_seq`` for why the seq alone is not a resume
     point on PostgreSQL, and ``incremental.compensation_rows`` for what the
     snapshot is used for."""
     moment: Any = exported_at if source.is_postgres else exported_at.isoformat()
-    flag: Any = captured if source.is_postgres else int(captured)
+    reason = ""
     with source.write() as conn:
+        now = _capture_gate(source, conn)
+        captured = bool(gate[0]) and now == gate
+        if gate[0] and not captured:
+            reason = (
+                "the capture gate changed while this export ran (read "
+                f"{gate!r}, now {now!r}); the watermark is recorded but not "
+                "marked captured, so the next export will be a full one"
+            )
+        flag: Any = captured if source.is_postgres else int(captured)
         conn.execute(
             source.sql(
                 "INSERT INTO sync_export_state "
@@ -630,8 +680,9 @@ def _advance_watermark(
                 "captured = excluded.captured, "
                 "exported_snapshot = excluded.exported_snapshot"
             ),
-            (target_env, captured_through_seq, moment, package_id, flag, snapshot),
+            (target_env, exported_through_seq, moment, package_id, flag, snapshot),
         )
+    return captured, reason
 
 
 # ------------------------------------------------------------------- export
@@ -859,26 +910,46 @@ def _full_rows(
     )
 
 
-def _write_delta_rows(
-    writer: _PackageWriter,
-    users: _UserIds,
-    table: str,
-    columns: Sequence[str],
-    rows: Sequence[Mapping[str, Any]],
-) -> int:
-    """Write one incremental table's rows through the SAME encoder a full
-    export uses, projecting each row down to the package's column set (the
-    read may have carried a key column that the package does not export)."""
-    encode = _row_encoder(table, columns)
-    user_columns, principal_columns = _identity_columns(table)
-    written = 0
-    with writer.lines(rows_path(table)) as write:
-        for row in rows:
-            projected = {name: row[name] for name in columns}
-            users.observe(projected, user_columns, principal_columns)
-            write(json_line(encode(projected)))
-            written += 1
-    return written
+class _RowSink:
+    """One incremental table's row writer: the SAME encoder a full export
+    uses, plus the ``users.jsonl`` closure and an optional record of which
+    keys were written.
+
+    Each row is projected down to the package's column set -- the read may
+    have carried a key column the package does not export -- and handed to
+    the open ``writer.lines`` handle immediately, so no table's rows are ever
+    all in memory at once. ``key_columns`` is passed only for the two table
+    groups whose extra rows are computed FROM what the window already wrote
+    (``notebooks``, and the GLOBAL seed); everywhere else tracking keys would
+    be exactly the accumulation this design avoids.
+    """
+
+    def __init__(
+        self,
+        write: Any,
+        users: _UserIds,
+        table: str,
+        columns: Sequence[str],
+        key_columns: Sequence[str] | None = None,
+    ) -> None:
+        self._write = write
+        self._users = users
+        self._columns = tuple(columns)
+        self._encode = _row_encoder(table, columns)
+        self._identity = _identity_columns(table)
+        self._key_columns = key_columns
+        self.rows = 0
+        self.keys: set[str] = set()
+
+    def __call__(self, row: Mapping[str, Any]) -> None:
+        projected = {name: row[name] for name in self._columns}
+        self._users.observe(projected, *self._identity)
+        self._write(json_line(self._encode(projected)))
+        self.rows += 1
+        if self._key_columns is not None:
+            self.keys.add(
+                incremental.key_text(incremental.row_key(row, self._key_columns))
+            )
 
 
 def _incremental_rows(
@@ -893,9 +964,9 @@ def _incremental_rows(
     Table order is copy_rank, with two deliberate deferrals, because two
     table groups cannot be written until the package's notebook set is known:
 
-    - ``notebooks`` last-but-one, so every notebook carrying ANY row in this
-      package gets a ``notebooks`` row even when the notebook itself did not
-      change. That keeps ``manifest.notebooks`` equal to
+    - ``notebooks`` last-but-one, so every notebook carrying ANY row or
+      delete in this package gets a ``notebooks`` row even when the notebook
+      itself did not change. That keeps ``manifest.notebooks`` equal to
       ``rows/notebooks.jsonl``, the invariant the importer's preflight has
       always checked, instead of making an incremental package the one shape
       where the two legitimately disagree.
@@ -905,6 +976,14 @@ def _incremental_rows(
     Only the file-creation order inside the package moves; the manifest's
     table map is sorted and the importer walks tables by copy_rank out of the
     manifest, never by directory listing.
+
+    ``deletes.jsonl`` is opened ONCE around the whole loop and appended to as
+    each table produces its entries, so the run never holds the window's
+    delete list either. Its line order is therefore the loop's: non-GLOBAL
+    tables by copy_rank, then ``notebooks``, then the GLOBAL tables. That is
+    deterministic but NOT foreign-key-safe ordering; replaying deletes in a
+    safe order is PR-3c's problem, which has the target's catalog to do it
+    with.
     """
     compensation = incremental.compensation_rows(source, conn, watermark)
     notebook_state = incremental.NotebookState(source, conn)
@@ -913,78 +992,99 @@ def _incremental_rows(
     notebooks: set[str] = set()
     deleted_notebooks: set[str] = set()
     skipped: dict[str, str] = {}
-    delete_entries: list[dict[str, Any]] = []
     files: list[Any] = []
     warnings: list[str] = []
-    mirror_changes = 0
+    counters = {"deletes": 0, "mirror": 0}
     deferred: list[str] = []
 
-    def absorb(table: str, delta: Any, columns, extra: Sequence[Mapping] = ()) -> None:
-        nonlocal mirror_changes
-        rows = list(delta.rows) + list(extra)
-        table_counts[table] = _write_delta_rows(writer, users, table, columns, rows)
-        table_entries[table] = _table_entry(writer, table, columns, table_counts[table])
+    def absorb(table: str, delta: Any, sink: _RowSink, columns) -> None:
+        table_counts[table] = sink.rows
+        table_entries[table] = _table_entry(writer, table, columns, sink.rows)
         notebooks.update(delta.notebooks)
         deleted_notebooks.update(delta.deleted_notebooks)
-        delete_entries.extend(delta.deletes)
         files.extend(delta.files)
         warnings.extend(delta.warnings)
-        mirror_changes += delta.skipped_mirror
+        counters["deletes"] += delta.deletes
+        counters["mirror"] += delta.skipped_mirror
         for notebook_id, reason in delta.skipped.items():
             skipped.setdefault(notebook_id, reason)
 
-    def delta_for(table: str) -> tuple[Any, tuple[str, ...], tuple[str, ...]]:
-        columns = _exported_columns(source, source.columns(conn, table), table)
-        key_columns = source.sync_key(conn, table)
-        # A key column the package does not export still has to be READ, or
-        # the row could not be matched back to the log entry that named it.
-        read_columns = columns + tuple(
-            name for name in key_columns if name not in columns
+    with writer.lines(DELETES_NAME) as write_delete:
+
+        def emit_delete(entry: Mapping[str, Any]) -> None:
+            write_delete(json_line(entry))
+
+        def process(table: str, *, track_keys: bool = False, extra: Any = None):
+            columns = _exported_columns(source, source.columns(conn, table), table)
+            key_columns = source.sync_key(conn, table)
+            # A key column the package does not export still has to be READ,
+            # or the row could not be matched back to the log entry that
+            # named it.
+            read_columns = columns + tuple(
+                name for name in key_columns if name not in columns
+            )
+            changes = incremental.compact(
+                source, conn, table, watermark, compensation
+            )
+            with writer.lines(rows_path(table)) as write:
+                sink = _RowSink(
+                    write, users, table, columns,
+                    key_columns if track_keys else None,
+                )
+                delta = incremental.table_delta(
+                    source,
+                    conn,
+                    table=table,
+                    columns=read_columns,
+                    key_columns=key_columns,
+                    changes=changes,
+                    notebooks=notebook_state,
+                    emit_row=sink,
+                    emit_delete=emit_delete,
+                )
+                del changes
+                if extra is not None:
+                    for row in extra(delta, sink, columns, key_columns):
+                        sink(row)
+            absorb(table, delta, sink, columns)
+
+        for table in synced_tables():
+            if table == "notebooks" or _scope_of(table).kind is ScopeKind.GLOBAL:
+                deferred.append(table)
+                continue
+            process(table)
+
+        process(
+            "notebooks",
+            track_keys=True,
+            extra=lambda delta, sink, columns, key_columns: _backfilled_notebooks(
+                source, conn, delta, columns, key_columns, notebooks, sink.keys
+            ),
         )
-        changes = incremental.compact(source, conn, table, watermark, compensation)
-        delta = incremental.table_delta(
-            source,
-            conn,
-            table=table,
-            columns=read_columns,
-            key_columns=key_columns,
-            changes=changes,
-            notebooks=notebook_state,
-        )
-        return delta, columns, key_columns
 
-    for table in synced_tables():
-        if table == "notebooks" or _scope_of(table).kind is ScopeKind.GLOBAL:
-            deferred.append(table)
-            continue
-        delta, columns, _key_columns = delta_for(table)
-        absorb(table, delta, columns)
+        global_keys = _global_keys(source, conn, sorted(notebooks))
+        for table in deferred:
+            if table == "notebooks":
+                continue
+            process(
+                table,
+                track_keys=True,
+                extra=lambda delta, sink, columns, key_columns, name=table: (
+                    _global_seed_rows(
+                        source, conn, name, columns, key_columns,
+                        sink.keys, global_keys,
+                    )
+                ),
+            )
 
-    delta, columns, key_columns = delta_for("notebooks")
-    absorb("notebooks", delta, columns, _backfilled_notebooks(
-        source, conn, delta, columns, key_columns, notebooks
-    ))
-
-    global_keys = _global_keys(source, conn, sorted(notebooks))
-    for table in deferred:
-        if table == "notebooks":
-            continue
-        delta, columns, key_columns = delta_for(table)
-        absorb(table, delta, columns, _global_seed_rows(
-            source, conn, table, columns, key_columns, delta.rows, global_keys,
-        ))
-
-    with writer.lines(DELETES_NAME) as write:
-        for entry in delete_entries:
-            write(json_line(entry))
     return _Rows(
         notebooks=tuple(sorted(notebooks)),
         skipped=skipped,
         table_counts=table_counts,
         table_entries=table_entries,
-        deletes=len(delete_entries),
+        deletes=counters["deletes"],
         deleted_notebooks=tuple(sorted(deleted_notebooks)),
-        skipped_mirror_changes=mirror_changes,
+        skipped_mirror_changes=counters["mirror"],
         warnings=warnings,
         file_plan=files,
     )
@@ -997,9 +1097,10 @@ def _backfilled_notebooks(
     columns: Sequence[str],
     key_columns: Sequence[str],
     notebooks: set[str],
+    present: set[str],
 ) -> list[Mapping[str, Any]]:
     """The ``notebooks`` rows this package owes for notebooks it carries rows
-    of but whose own row did not change inside the window.
+    or deletes for but whose own row did not change inside the window.
 
     Without them ``manifest.notebooks`` (every notebook the package touches)
     and ``rows/notebooks.jsonl`` (only the ones that changed) would disagree,
@@ -1008,12 +1109,9 @@ def _backfilled_notebooks(
 
     Folds this table's OWN notebooks into ``notebooks`` first -- it runs
     before the caller absorbs the delta, and a notebook that changed only in
-    the ``notebooks`` table has to end up declared too."""
+    the ``notebooks`` table has to end up declared too. ``present`` is what
+    the window already wrote to this file, so a notebook is never sent twice."""
     notebooks.update(delta.notebooks)
-    present = {
-        incremental.key_text(incremental.row_key(row, key_columns))
-        for row in delta.rows
-    }
     wanted = [
         {key_columns[0]: notebook_id}
         for notebook_id in sorted(notebooks)
@@ -1031,7 +1129,7 @@ def _global_seed_rows(
     table: str,
     columns: Sequence[str],
     key_columns: Sequence[str],
-    already: Sequence[Mapping[str, Any]],
+    present: set[str],
     global_keys: Mapping[str, tuple[str, ...]],
 ) -> list[Mapping[str, Any]]:
     """A GLOBAL table's SEED rows: the groups/object types the package's
@@ -1043,16 +1141,12 @@ def _global_seed_rows(
     table is ``seed_only``, so re-sending an unchanged row is a no-op there
     (§3), and the window's own upserts are preferred over the seed scan for
     any key both produce."""
-    seen = {
-        incremental.key_text(incremental.row_key(row, key_columns))
-        for row in already
-    }
     query = _table_query(source, conn, table, columns)
     extra: dict[str, Mapping[str, Any]] = {}
     for batch in _batched(list(global_keys[_global_scope(table)[1]]), _ID_BATCH):
         for row in _scan(source, conn, query, batch):
             text = incremental.key_text(incremental.row_key(row, key_columns))
-            if text not in seen:
+            if text not in present:
                 extra[text] = row
     return [extra[text] for text in sorted(extra)]
 
@@ -1081,7 +1175,8 @@ def _assemble(
         # snapshot taken after the log had been read would describe a
         # different instant than the package's own contents.
         snapshot = source.current_snapshot(conn)
-        gate_open = _capture_gate_open(source, conn)
+        gate = _capture_gate(source, conn)
+        gate_open = gate[0]
         # A scoped export is never a link in the chain, so it neither reads
         # the watermark nor writes one.
         watermark = (
@@ -1100,7 +1195,7 @@ def _assemble(
         user_count = _write_users(source, conn, writer, sorted(users.ids))
         with writer.lines(KG_EPOCHS_NAME):
             pass  # PR-3b does not fold KG resets; see incremental.OPERATION_KG_EPOCH.
-        captured_through_seq = _captured_through_seq(source, conn)
+        captured_through_seq = _captured_through_seq(source, conn, gate_open)
 
     mode = MODE_INCREMENTAL if resumable else MODE_FULL
     if scoped:
@@ -1110,8 +1205,15 @@ def _assemble(
     elif resumable:
         assert watermark is not None
         from_seq = watermark.exported_through_seq + 1
-        # max(): prune-log can legitimately empty the log below a watermark,
-        # which drops MAX(seq) to 0. The watermark must never move backwards.
+        # max(): ``sync prune-log`` deletes log rows at or below every
+        # captured watermark, so a quiet environment's log can end up EMPTY
+        # and MAX(seq) reads 0 -- lower than the watermark it was pruned
+        # against. Clamping here (and storing this, not the raw observation,
+        # in _advance_watermark below) is what keeps the watermark monotonic:
+        # letting it fall back would re-open a window over seq values that
+        # have already been exported AND no longer exist. An empty window then
+        # spells from_seq = W + 1 > to_seq = W, which is the honest way to say
+        # "this package covers no sequence range at all".
         to_seq = max(captured_through_seq, watermark.exported_through_seq)
         base_package_id = watermark.package_id
     else:
@@ -1122,11 +1224,14 @@ def _assemble(
     run_warnings = list(warnings) + produced.warnings
     storage_dir = Path(settings.storage_dir)
     if resumable:
-        requests, file_warnings = incremental.resolve_file_requests(
-            storage_dir, produced.file_plan
+        requests, unresolved, file_warnings = incremental.resolve_file_requests(
+            storage_dir, source.root_dir, produced.file_plan
         )
         run_warnings.extend(file_warnings)
         file_count, missing_files = _write_changed_files(writer, requests)
+        # Files the phase could not even attempt are the same kind of gap as
+        # one that vanished mid-copy, and the manifest reports them together.
+        missing_files = sorted(set(missing_files) | set(unresolved))
     else:
         file_count, missing_files = _write_files(
             writer, storage_dir, produced.file_plan
@@ -1173,16 +1278,21 @@ def _assemble(
     writer.finish()
     final_dir = out_dir / package_dir_name(source_env, from_seq, to_seq, package_id)
     writer.root.rename(final_dir)
+    captured = False
     if not scoped:
-        _advance_watermark(
+        # ``to_seq``, not the raw observation: the package and the watermark
+        # must name the same point, and that point may never move backwards.
+        captured, gate_warning = _advance_watermark(
             source,
             target_env,
             package_id,
             exported_at,
-            captured_through_seq,
-            captured=gate_open,
+            to_seq,
+            gate=gate,
             snapshot=snapshot,
         )
+        if gate_warning:
+            run_warnings.append(gate_warning)
     return ExportReport(
         package_dir=final_dir,
         package_id=package_id,
@@ -1199,6 +1309,7 @@ def _assemble(
         deletes=produced.deletes,
         deleted_notebooks=produced.deleted_notebooks,
         skipped_mirror_changes=produced.skipped_mirror_changes,
+        captured=captured,
         empty=resumable and produced.deletes == 0
         and not any(produced.table_counts.values()),
         scoped=scoped,

@@ -259,32 +259,6 @@ def delete_entry(
     }
 
 
-def read_delete_entry(payload: Any) -> tuple[str, dict[str, Any], str | None, str | None]:
-    """Inverse of ``delete_entry``: ``(table, key, notebook_id, parent_key)``.
-
-    Refuses anything that is not the exact shape written above rather than
-    filling in defaults -- a ``deletes.jsonl`` line is an instruction to
-    DELETE rows at the target, so a line this reader cannot fully understand
-    must stop the import, never be applied with a guessed table or an empty
-    key (which would match every row).
-    """
-    if not isinstance(payload, dict):
-        raise ValueError(f"delete entry is not a JSON object: {payload!r}")
-    table = payload.get("table")
-    key = payload.get("key")
-    if not isinstance(table, str) or not table:
-        raise ValueError(f"delete entry has no table: {payload!r}")
-    if not isinstance(key, dict) or not key:
-        raise ValueError(f"delete entry for {table!r} has no key: {payload!r}")
-    notebook_id = payload.get("notebook_id")
-    parent_key = payload.get("parent_key")
-    if notebook_id is not None and not isinstance(notebook_id, str):
-        raise ValueError(f"delete entry for {table!r} has a non-text notebook_id")
-    if parent_key is not None and not isinstance(parent_key, str):
-        raise ValueError(f"delete entry for {table!r} has a non-text parent_key")
-    return table, dict(key), notebook_id or None, parent_key or None
-
-
 def encode_row(row: dict[str, Any]) -> dict[str, Any]:
     return {name: encode_value(value) for name, value in row.items()}
 
