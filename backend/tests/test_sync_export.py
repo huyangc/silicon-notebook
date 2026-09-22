@@ -1028,3 +1028,41 @@ def test_a_complete_package_reports_no_missing_files(seeded, tmp_path):
     report = _export(seeded["settings"], tmp_path / "out", [seeded["exported"]])
 
     assert _manifest(report.package_dir)["missing_files"] == []
+
+
+def test_a_group_reachable_only_through_a_group_admins_edge_still_travels(
+    seeded, tmp_path
+):
+    """`group_admins` is the same group reached over a narrower edge (only its
+    role='admin' members -- app.repositories.group_rows.GROUP_PRINCIPAL_TYPES).
+    Scoping GLOBAL groups by `principal_type = 'group'` alone would leave a
+    notebook shared only with a group's administrators exporting no group row
+    at all, and the grant would land at the target pointing at nothing."""
+    repo = seeded["repo"]
+    moment = "2026-01-01T00:00:00+00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO groups(id,name,kind,description,created_by,created_at,"
+            "updated_at,owner_id) VALUES(?,?,?,?,?,?,?,?)",
+            ("grp-admins-only", "admins-only", "team", "", "user-local", moment,
+             moment, "user-local"),
+        )
+        db.execute(
+            "INSERT INTO group_members(group_id,user_id,role,added_at,added_by) "
+            "VALUES(?,?,?,?,?)",
+            ("grp-admins-only", "user-local", "admin", moment, "user-local"),
+        )
+        db.execute(
+            "INSERT INTO notebook_grants(id,notebook_id,principal_type,"
+            "principal_id,role,created_by,created_at) VALUES(?,?,?,?,?,?,?)",
+            ("g-admins-only", seeded["exported"], "group_admins",
+             "grp-admins-only", "editor", "user-local", moment),
+        )
+
+    report = _export(seeded["settings"], tmp_path / "out", [seeded["exported"]])
+    package = report.package_dir
+
+    assert "grp-admins-only" in {row["id"] for row in _rows(package, "groups")}
+    assert "grp-admins-only" in {
+        row["group_id"] for row in _rows(package, "group_members")
+    }

@@ -19,7 +19,9 @@ CI 里比行为测试更快、更精确地指出出事的那一行——但角�
 1. **读侧「这行还不算存在」谓词**——单点收敛进
    ``postgres/access_sql.NOTEBOOK_LIVE_SQL`` /
    ``sqlite/access_sql.NOTEBOOK_LIVE_SQL``(均为
-   ``"status NOT IN ('copying','deleting')"``)。折的是 40 处站点
+   ``"status NOT IN ('copying','deleting','importing')"``——``importing`` 是
+   跨环境导入器的在途哨兵,PR-2 加入;它与 ``copying`` 在**读侧**同义,在写侧
+   不同义,理由见 ``access_sql.py`` 常量上方的注释)。折的是 40 处站点
    (``postgres/`` 20 + ``sqlite/`` 20,本次逐行枚举见规格 §T-1/摸底 5)。
    任何非常量站点再出现裸的 ``status != 'copying'`` / ``status <> 'copying'``
    (不论空格、``!=``/``<>``)都是回归——常量之外不该再有第二份拼写。
@@ -377,7 +379,10 @@ def test_diag_db_notebook_live_predicate_matches_access_sql():
 
     assert pg_access_sql.NOTEBOOK_LIVE_SQL == sqlite_access_sql.NOTEBOOK_LIVE_SQL
     assert diag_common.NOTEBOOK_LIVE_SQL == pg_access_sql.NOTEBOOK_LIVE_SQL
-    assert diag_common.NOTEBOOK_LIVE_SQL == "status NOT IN ('copying','deleting')"
+    assert (
+        diag_common.NOTEBOOK_LIVE_SQL
+        == "status NOT IN ('copying','deleting','importing')"
+    )
 
     # frozenset 的状态集合必须与 SQL 常量里 `NOT IN (...)` 的状态列表逐值一致,
     # 两份副本不能各说各话。

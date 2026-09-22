@@ -37,13 +37,15 @@ a report on disk -- and a re-run picks up from there. Failure granularity is
 the whole package: a package either ends applied in full or is left resumable.
 Nothing partially applies "some notebooks" and reports success.
 
-**A notebook this run inserts is created ``status='copying'``**, which
-``NOTEBOOK_LIVE_SQL`` hides, and is flipped to the ordinary ``draft`` in phase
-5. A half-imported notebook is therefore never visible. Re-syncing a notebook
-the target ALREADY mirrors does not hide it: ``status`` is a target-owned
-column (§5) and is never overwritten for an existing row, so an established
-mirror stays readable while it is refreshed. That is the accepted trade-off --
-the alternative is taking a live mirror offline for every sync.
+**A notebook this run inserts is created ``status='importing'``**, a state of
+its own that ``NOTEBOOK_LIVE_SQL`` hides and phase 5 flips to the ordinary
+``draft``. A half-imported notebook is therefore never visible -- and never
+mistaken for a half-COPY, which the deep copy's stale-copy sweeper physically
+deletes (see ``_IMPORT_IN_FLIGHT_STATUS``). Re-syncing a notebook the target
+ALREADY mirrors does not hide it: ``status`` is a target-owned column (§5) and
+is never overwritten for an existing row, so an established mirror stays
+readable while it is refreshed. That is the accepted trade-off -- the
+alternative is taking a live mirror offline for every sync.
 
 **A SQLite target must be quiesced.** SQLite has one writer: an import holds
 that writer for the duration of each table, and the application's own writes
@@ -117,15 +119,34 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 _ROW_BATCH = 1000
 
 # The lifecycle state a notebook this run INSERTS is created in, and the one
-# phase 5 flips it to. ``notebooks.status`` only ever holds 'draft' (the
-# default every create path writes), 'copying' or 'deleting'; the first two of
-# those are the in-flight markers ``NOTEBOOK_LIVE_SQL`` hides, which is
-# exactly what a notebook whose rows are still arriving needs to be. The
-# deep-copy path uses the same 'copying' marker for the same reason
-# (services/notebook_sharing.py), so no new state had to be invented and the
-# existing sweeper's predicate already understands it.
-_IMPORT_IN_FLIGHT_STATUS = "copying"
+# phase 5 flips it to. ``importing`` is hidden by ``NOTEBOOK_LIVE_SQL`` (both
+# backends' access_sql.py), which is exactly what a notebook whose rows are
+# still arriving needs to be.
+#
+# It is deliberately NOT the deep copy's ``copying`` marker, even though the
+# two look alike on the read side. ``copying``'s WRITE-side meaning is "this
+# is a half-copy, garbage, physically delete it":
+# ``SharingStore.sweep_stale_copies`` reaps every ``status='copying'`` row
+# whose ``created_at`` is older than ``notebook_copy_stale_seconds``, and a
+# mirrored notebook's ``created_at`` comes from the SOURCE environment, so it
+# is almost always already past that cutoff. Sharing the marker would let the
+# sweeper delete a notebook mid-import. A half-imported notebook is not
+# garbage -- it is resumable -- so it gets its own state, and the sweeper's
+# predicate never matches it.
+#
+# It doubles as the durable "this run created this row" fact the seed_only
+# gate below needs: it survives a crash, and phase 5 is the only thing that
+# clears it.
+_IMPORT_IN_FLIGHT_STATUS = "importing"
 _IMPORT_FINAL_STATUS = "draft"
+
+# notebook_grants.principal_type values whose principal_id is a groups.id.
+# Restated from app.repositories.group_rows.GROUP_PRINCIPAL_TYPES, which this
+# package's import whitelist keeps it from importing. 'group_admins' is the
+# same group reached over a narrower edge (only its role='admin' members), so
+# it maps through the group mapping exactly like 'group' -- anything else
+# leaves every admin-only grant pointing at a source-side id.
+_GROUP_PRINCIPAL_TYPES = frozenset({"group", "group_admins"})
 
 # A user created by ``--create-missing-users``: no credentials, and the same
 # placeholder email shape external-auth enrollment mints
@@ -794,6 +815,10 @@ class _Context:
     # Notebook directories swapped in by the file phase, as
     # (destination, retired) -- retired is kept until phase 5 succeeds.
     installed: list[tuple[Path, Path]] = field(default_factory=list)
+    # parent table -> primary keys THIS run inserted into it, for the
+    # seed_only parent gate (``_SEED_PARENT``). Only what this process did;
+    # ``_created_parents`` unions it with what an earlier attempt recorded.
+    created_parents: dict[str, set[str]] = field(default_factory=dict)
 
 
 def _row_key(row: Mapping[str, Any], primary_key: Sequence[str]) -> str:
@@ -843,7 +868,7 @@ def _map_row(
             principal = str(row.get("principal_type") or "")
             if principal == "user":
                 resolved = context.users.get(value)
-            elif principal == "group":
+            elif principal in _GROUP_PRINCIPAL_TYPES:
                 resolved = context.groups.get(value)
             else:
                 # 'everyone' (and any future non-identity principal) is not an
@@ -1492,6 +1517,103 @@ def _value_encoder(backend: _Backend, conn: Any, table: str):
     return encode
 
 
+# An authorization/membership table, the column pointing at the row it
+# authorizes, and the table that row lives in. These are seeded ONLY together
+# with a parent this import created: once the target owns a notebook or a
+# group, who may read it is the target's decision, and a re-sync must not
+# resurrect a membership an administrator there revoked, nor push the source's
+# member list into a group that already existed here.
+#
+# ``seed_only`` alone does not say this. It is row-level ("do not overwrite a
+# row that exists"), which still INSERTS a row the target deleted -- exactly
+# the revoked-membership case. The parent gate is the missing half.
+#
+# ``object_schemas`` is deliberately absent: it is an environment-level
+# registry owned by no parent row, so plain row-level seed_only is the whole
+# rule for it (§3.1).
+_SEED_PARENT: dict[str, tuple[str, str]] = {
+    "notebook_members": ("notebook_id", "notebooks"),
+    "notebook_grants": ("notebook_id", "notebooks"),
+    "group_members": ("group_id", "groups"),
+}
+
+# ``sync_import_progress.table_name`` prefix for "this package created parent
+# row X". Not a table name and can never collide with one. Used only for
+# parents that have no durable in-row marker of their own -- see
+# ``_created_parents``.
+_CREATED_STEP_PREFIX = "__created__:"
+
+# Parent tables whose created-set has to be written to sync_import_progress.
+# ``notebooks`` is NOT one: a notebook this run created wears
+# ``_IMPORT_IN_FLIGHT_STATUS`` until phase 5, which is already a durable,
+# per-row, crash-surviving marker -- and there can be thousands of notebooks
+# in one package, which would be thousands of progress rows. ``groups`` has no
+# such column, and a package carries only the handful of groups its notebooks'
+# grants reference, so recording those explicitly is cheap.
+_PERSISTED_CREATED_PARENTS = frozenset({"groups"})
+
+
+def _created_step(parent_table: str, parent_id: str) -> str:
+    return f"{_CREATED_STEP_PREFIX}{parent_table}:{parent_id}"
+
+
+def _created_parents(
+    backend: _Backend, conn: Any, parent_table: str, context: _Context
+) -> set[str]:
+    """Which rows of ``parent_table`` THIS package created -- including in an
+    earlier, crashed attempt of the same package, because the gate has to give
+    the same answer before and after a resume."""
+    if parent_table == "notebooks":
+        found: set[str] = set()
+        for batch in _batched(list(context.manifest.notebooks)):
+            placeholders = ",".join("?" for _ in batch)
+            for row in backend.fetch(
+                conn,
+                f"SELECT id FROM notebooks WHERE id IN ({placeholders}) "
+                "AND status = ? AND sync_origin = ?",
+                (
+                    *batch,
+                    _IMPORT_IN_FLIGHT_STATUS,
+                    context.manifest.source_env,
+                ),
+            ):
+                found.add(str(row["id"]))
+        return found
+    # Read the package's whole progress list and filter in Python rather than
+    # with LIKE: the prefix contains '_' characters, which LIKE reads as
+    # single-character wildcards, and a bounded list (one row per synced table
+    # plus one per created group) is not worth a pattern this module would
+    # then have to escape correctly on two dialects.
+    prefix = _CREATED_STEP_PREFIX + parent_table + ":"
+    persisted = {
+        str(row["table_name"])[len(prefix) :]
+        for row in backend.fetch(
+            conn,
+            "SELECT table_name FROM sync_import_progress WHERE package_id = ?",
+            (context.manifest.package_id,),
+        )
+        if str(row["table_name"]).startswith(prefix)
+    }
+    return persisted | context.created_parents.get(parent_table, set())
+
+
+def _record_created_parents(
+    backend: _Backend, conn: Any, context: _Context, table: str
+) -> None:
+    if table not in _PERSISTED_CREATED_PARENTS:
+        return
+    moment = datetime.now(timezone.utc)
+    for parent_id in sorted(context.created_parents.get(table, set())):
+        _record_progress(
+            backend,
+            conn,
+            context.manifest.package_id,
+            _created_step(table, parent_id),
+            0,
+            moment,
+        )
+
+
 def _apply_table(
     backend: _Backend, conn: Any, table: str, context: _Context
 ) -> TableOutcome:
@@ -1525,6 +1647,13 @@ def _apply_table(
     if not primary_key:
         _replace_scope(backend, conn, table, context)
     known = _TargetKeys(backend, conn, table, primary_key, context)
+    seed_parent = _SEED_PARENT.get(table)
+    seedable = (
+        _created_parents(backend, conn, seed_parent[1], context)
+        if seed_parent is not None
+        else None
+    )
+    records_created = table in _PERSISTED_CREATED_PARENTS
 
     inserted = updated = skipped = 0
     for batch in _row_batches(context.package_dir / rows_path(table)):
@@ -1539,6 +1668,22 @@ def _apply_table(
             prepared.append(row)
         kept = _apply_optional_refs(table, prepared, context, conn)
         skipped += len(prepared) - len(kept)
+        if seedable is not None:
+            column, parent = seed_parent  # type: ignore[misc]
+            allowed: list[dict[str, Any]] = []
+            for row in kept:
+                if str(row.get(column) or "") in seedable:
+                    allowed.append(row)
+                    continue
+                skipped += 1
+                context.ledger.skip(
+                    table,
+                    _row_key(row, primary_key),
+                    f"{parent} row {row.get(column)!r} already existed at the "
+                    "target; authorization rows are seeded only with the "
+                    "parent this import created",
+                )
+            kept = allowed
         if not kept:
             continue
         keys = [tuple(row.get(column) for column in primary_key) for row in kept]
@@ -1554,6 +1699,8 @@ def _apply_table(
             if not exists:
                 values.update(overrides)
                 fresh.append(key)
+                if records_created and len(primary_key) == 1:
+                    context.created_parents.setdefault(table, set()).add(str(key[0]))
             params.append(tuple(encode(column, values.get(column)) for column in columns))
             if exists:
                 updated += 1
@@ -1612,7 +1759,7 @@ def _row_batches(path: Path) -> Iterator[list[dict[str, Any]]]:
 
 def _apply_rows(backend: _Backend, context: _Context, done: set[str]) -> None:
     package_id = context.manifest.package_id
-    resumed = done & set(synced_tables())
+    resumed = done & set(synced_tables())  # bookkeeping steps are not tables
     if resumed:
         context.ledger.warn(
             f"{len(resumed)} table(s) were already complete from an earlier run "
@@ -1624,6 +1771,10 @@ def _apply_rows(backend: _Backend, context: _Context, done: set[str]) -> None:
             continue
         with backend.write() as conn:
             outcome = _apply_table(backend, conn, table, context)
+            # In the SAME transaction as the rows it describes: "this package
+            # created group G" and the G row itself must commit together, or a
+            # crash between them makes the gate lie on the way back.
+            _record_created_parents(backend, conn, context, table)
             _record_progress(
                 backend,
                 conn,
@@ -1659,6 +1810,11 @@ def _install_files(context: _Context, *, verify: bool) -> None:
     ``_rollback_files`` can put it back. ``verify`` re-hashes every installed
     file against ``checksums.json`` -- off by default because preflight
     already hashed the same bytes in this same run.
+
+    Every directory is reconciled first (``_reconcile_staging``), because a
+    run killed inside the two-rename swap leaves the previous attempt's
+    leftovers here and this one has to read them correctly rather than pile
+    another rename on top.
     """
     storage = Path(context.settings.storage_dir)
     copied = 0
@@ -1666,7 +1822,7 @@ def _install_files(context: _Context, *, verify: bool) -> None:
         for root in _FILE_ROOTS:
             origin = context.package_dir / FILES_DIR / root / notebook_id
             destination = storage / root / notebook_id
-            _sweep_staging(destination)
+            inherited = _reconcile_staging(context, destination)
             if not origin.is_dir():
                 continue
             staged = destination.with_name(destination.name + _STAGED_SUFFIX)
@@ -1677,10 +1833,21 @@ def _install_files(context: _Context, *, verify: bool) -> None:
             if verify:
                 _verify_installed(context, staged, root, notebook_id, installed)
             copied += len(installed)
-            if destination.exists():
+            if inherited:
+                # The retired copy is ALREADY the pre-import original, kept by
+                # a previous attempt. Renaming the current destination onto it
+                # would both fail (POSIX rename refuses a non-empty target
+                # directory) and destroy the only copy rollback can restore,
+                # so the destination is simply replaced in place.
+                shutil.rmtree(destination, ignore_errors=True)
+            elif destination.exists():
                 destination.rename(retired)
             staged.rename(destination)
-            context.installed.append((destination, retired))
+            if not inherited:
+                # An inherited pair is already registered by
+                # _reconcile_staging; registering it twice would make rollback
+                # restore it and then delete what it just restored.
+                context.installed.append((destination, retired))
     context.ledger.files_copied = copied
 
 
@@ -1701,14 +1868,43 @@ def _verify_installed(
             )
 
 
-def _sweep_staging(destination: Path) -> None:
-    """Remove a ``.sync-tmp`` left by a crashed run. A ``.sync-old`` is left
-    alone: a crash between the swap and phase 5 means the destination already
-    holds this package's bytes, and this run's own rollback/commit owns the
-    retired copy from here on."""
+def _reconcile_staging(context: _Context, destination: Path) -> bool:
+    """Resolve what a run killed inside the swap left behind, and report
+    whether a usable ``.sync-old`` was inherited.
+
+    The swap is: copy into ``.sync-tmp``, rename destination to ``.sync-old``,
+    rename ``.sync-tmp`` onto the destination, and (only after phase 5)
+    delete ``.sync-old``. A process killed at any point leaves one of:
+
+    - ``.sync-tmp`` present: killed during or right after the copy, before the
+      destination was touched. Discard it; nothing was displaced.
+    - ``.sync-old`` present AND the destination present: killed after both
+      renames, before the cleanup. The destination already holds new content
+      and ``.sync-old`` is still the pre-import original -- the one thing a
+      rollback needs. It is adopted, not overwritten, and this run's commit
+      or rollback disposes of it.
+    - ``.sync-old`` present and the destination MISSING: killed between the
+      two renames. Put it back; the destination is the original again.
+    """
     staged = destination.with_name(destination.name + _STAGED_SUFFIX)
+    retired = destination.with_name(destination.name + _RETIRED_SUFFIX)
     if staged.exists():
         shutil.rmtree(staged, ignore_errors=True)
+    if not retired.exists():
+        return False
+    if not destination.exists():
+        retired.rename(destination)
+        context.ledger.warn(
+            f"restored {destination.name} from a previous run that was "
+            "interrupted mid-swap"
+        )
+        return False
+    context.installed.append((destination, retired))
+    context.ledger.warn(
+        f"adopted the retired copy of {destination.name} left by a previous "
+        "run that was interrupted before it could clean up"
+    )
+    return True
 
 
 def _rollback_files(context: _Context) -> None:

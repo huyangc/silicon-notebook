@@ -69,7 +69,14 @@
 # 语义是「专指半拷贝去物理删掉它」/「置位」,和这条「还不算存在」的读侧谓词不同义。
 # `deleting` 目前没有任何行会命中(批 3·W1 T-2 之前没有代码会写这个值),
 # 所以本次折叠是纯粹的单点化,行为零变化。
-NOTEBOOK_LIVE_SQL = "status NOT IN ('copying','deleting')"
+# `importing` 是跨环境导入器(`app.migration.sync.import_`)在行还在陆续落库
+# 期间挂的哨兵,收尾时翻成 `draft`。它**不是** `copying` 的同义词,刻意另起一个
+# 值:`copying` 的写侧语义是「半拷贝是垃圾,去物理删掉它」——`sweep_stale_copies`
+# 会按 `status='copying' AND created_at<cutoff` 整删,而镜像行的 created_at 来自
+# 源环境、几乎必然早于任何阈值,共用同一个值等于让清道夫随时删掉正在导入的库。
+# 半导入的库是**可续跑**的,不是垃圾。读侧两者同义(都「还不算存在」),所以只有
+# 这条谓词收它。
+NOTEBOOK_LIVE_SQL = "status NOT IN ('copying','deleting','importing')"
 
 # 成员探测:该用户在 notebook_members 里是否有行。
 MEMBER_PROBE_SQL = (
