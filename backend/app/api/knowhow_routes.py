@@ -15,8 +15,10 @@ from starlette.concurrency import run_in_threadpool
 from app.api.deps import (
     content_overview_service,
     get_current_user,
+    mirrored_notebook_error,
     notebook_access_repository as _kh_access,
     notebook_capability_allowed,
+    notebook_mirror_fence,
     repository,
     require_notebook_capability,
     require_notebook_read,
@@ -1500,6 +1502,21 @@ def transfer_knowhow_table(
         "knowhow:write", payload.target_notebook_id, principal.identity_id
     ):
         raise HTTPException(status_code=404, detail="Notebook not found")
+    # 镜像写入围栏(设计文档 docs/incremental-sync-design.md §5)。两端各判一次,
+    # 而且判据不同:
+    #   * **目标库两种 mode 都判** —— copy 与 move 都会在目标库落一张新表,那是
+    #     同步层内容;
+    #   * **源库只在 move 时判** —— copy 不动源库(它那一半走的本来就是读权),
+    #     move 才会拆投影、删源表。
+    # 顺序与所有装饰器端点一致:权限先判(上面两段,未授权仍 404),越过之后才谈围栏。
+    for fenced_notebook_id in (
+        (payload.target_notebook_id,)
+        if payload.mode == "copy"
+        else (notebook_id, payload.target_notebook_id)
+    ):
+        mirrored = notebook_mirror_fence("knowhow:write", fenced_notebook_id)
+        if mirrored:
+            raise mirrored_notebook_error(mirrored)
     try:
         # 复用既有 helper（同 reproject 路由 routes.py:583-586 的「只做存在性+
         # 归属校验、丢弃返回值」用法）：它自己的 docstring 持有「'从未存在' 与

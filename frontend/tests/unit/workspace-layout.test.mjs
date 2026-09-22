@@ -249,7 +249,8 @@ test("group admins get the content-management bits on a notebook that is still `
   assert.deepEqual(workspaceCapabilities("reader", "user", true), {
     canWriteNotebook: true,
     canGovernKnowledge: true,
-    // ⚠ 挂载配置 + 链接分享**恒 owner**(notebook:configure,P2-T2 评审 P0):组管理员
+    // ⚠ 挂载配置(notebook:mount)与链接分享(notebook:configure)**都恒 owner**
+    // (P2-T2 评审 P0;跨环境同步 §5 把它们拆成两个能力名,级别一个字没变):组管理员
     // 有内容管理权,但 access 仍是 reader → canConfigureNotebook 为 **false**。
     canConfigureNotebook: false,
     canManageReports: true,
@@ -276,7 +277,9 @@ test("group admins get the content-management bits on a notebook that is still `
 
 test("canConfigureNotebook is owner-only — content-management权 never unlocks it", () => {
   // P2-T2 评审 P0:挂载配置(参考库增删)与链接分享是 owner 对本库检索范围/对外处置的
-  // 配置,后端 notebook:configure 恒 owner,不随内容管理权翻给组管理员。判据只看 access。
+  // 配置,后端 notebook:mount / notebook:configure 都恒 owner,不随内容管理权翻给组
+  // 管理员。这一个前端标志刻意覆盖两格——它们级别相同,界面上也是同一批入口。
+  // 判据只看 access。
   assert.equal(workspaceCapabilities("owner", "user").canConfigureNotebook, true);
   // 组管理员(reader + can_manage_content=true)有内容写权,但配置权仍为 false。
   assert.equal(workspaceCapabilities("reader", "user", true).canConfigureNotebook, false);

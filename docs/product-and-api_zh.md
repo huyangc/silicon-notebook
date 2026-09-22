@@ -527,8 +527,8 @@ P2 兑现了这两格。内容管理能力（来源增删/重解析、构建触�
 `role='admin'` 的有效授权边（谓词唯一定义点 `access_sql.NOTEBOOK_ADMIN_SQL`，它复用读权的
 受限三臂外加 `role='admin'` 并排除 `everyone`）。组管理员因此能经浏览器管理内容与共享。
 
-**`notebook:manage` 到底覆盖什么**——它是 `PATCH /notebooks/{id}` 加三个授权边端点，而那个
-PATCH 编辑的是笔记本的整份**描述性画像**，不只是改名:`NotebookUpdate` 收 `name`、`purpose`、
+**`notebook:manage` 到底覆盖什么**——它是 `PATCH /notebooks/{id}` 加 `POST /notebooks/{id}/tier`，
+而那个 PATCH 编辑的是笔记本的整份**描述性画像**，不只是改名:`NotebookUpdate` 收 `name`、`purpose`、
 `primary_domain`、`target_users`、`expected_questions`、`source_types`、`taxonomy`、
 `access_scope` 八个字段。本页早先写作「改名」，那是「PATCH 那个端点」的简写，不该被读成字段
 清单。使这件事安全的是下面两条性质，它们是**承重的**而不是碰巧成立:
@@ -552,9 +552,9 @@ MCP 的 `list_notebooks` / `select_notebook` 提供给外部 Agent（截断到 5
 
 分享界面据此新增「组管理员可管理这本笔记本」勾选：勾上就在 `(group, viewer)` 之外追加一条
 `(group_admins, admin)` 边；撤销共享时同组两行一起删，共享清单把两行折叠成一条并标注管理权。
-**但两类 owner 专属能力刻意不翻**：`notebook:delete`（删库，爆炸半径整本库且 owner 不可
-撤销）与 `notebook:configure`（挂载配置 + `share_token` 链接分享）恒 owner——见下文
-「挂载配置与链接分享恒 owner」。**Agent/MCP 面也一个字不动**：`sources:write` /
+**但三类 owner 专属能力刻意不翻**：`notebook:delete`（删库，爆炸半径整本库且 owner 不可
+撤销）、`notebook:mount`（挂载配置）与 `notebook:configure`（`share_token` 链接分享）恒
+owner——见下文「挂载配置与链接分享恒 owner」。**Agent/MCP 面也一个字不动**：`sources:write` /
 `sources:delete` / `maintenance:execute` 仍是 owner-only 红线——长期 token 是独立凭据，其
 owner 可能在签发后很久才被授管理权，MCP 写工具删文档的爆炸半径正是这道 owner 门当初要防的。
 浏览器 HTTP 面已放宽 admin、Agent token 面没有，是刻意分歧不是疏漏，组管理员的写权只在浏览器
@@ -609,19 +609,19 @@ Notebook；仅有 `group_admins` 边的库不向普通成员披露。owner 与�
 | `POST /groups/{id}/invite-link/rotate` | 组管理员（系统管理员恢复旁路） | 原子换新 token，旧链接立即停止解析 |
 | `POST /group-invites/{token}/join` | 已登录 | 原子加入为 `member`；已有角色幂等保留；无效/已撤销/组已删除统一 404 |
 | `GET /users/resolve?username=` | 任何登录用户 | 按用户名**精确**查，只返回 id/用户名/显示名 |
-| `GET /notebooks/{id}/grants` | `notebook:manage` | 该库全部授权边，四类主体如实返回 |
-| `POST /notebooks/{id}/grants` | `notebook:manage` **且**目标组组管理员 | 只收 `group` / `group_admins` 两个主体 |
-| `DELETE /notebooks/{id}/grants/{grant_id}` | `notebook:manage` | 笔记本维度撤销 |
+| `GET /notebooks/{id}/grants` | `notebook:grant` | 该库全部授权边，四类主体如实返回 |
+| `POST /notebooks/{id}/grants` | `notebook:grant` **且**目标组组管理员 | 只收 `group` / `group_admins` 两个主体 |
+| `DELETE /notebooks/{id}/grants/{grant_id}` | `notebook:grant` | 笔记本维度撤销 |
 | `GET /groups/{id}/shared-notebooks` | 群组成员（系统管理员旁路） | 本组成员可见的共享知识库清单 |
 | `DELETE /groups/{id}/shared-notebooks/{nb}` | 组管理员 | 组维度撤销，删掉指向本组的**全部**边 |
-| `POST /notebooks/{id}/share-requests` | `notebook:manage` **且**目标组**普通成员** | **P2** 提交共享申请；目标组的**组管理员**会被 403 拒绝——他直接走 `POST /notebooks/{id}/grants` 发边，永远不经这张表。幂等（撞在飞申请返回既有 pending，不是 409） |
-| `GET /notebooks/{id}/share-requests` | `notebook:manage` | **P2** 请求者本人对本库发起过的申请（弹窗回显待审批/已驳回） |
+| `POST /notebooks/{id}/share-requests` | `notebook:grant` **且**目标组**普通成员** | **P2** 提交共享申请；目标组的**组管理员**会被 403 拒绝——他直接走 `POST /notebooks/{id}/grants` 发边，永远不经这张表。幂等（撞在飞申请返回既有 pending，不是 409） |
+| `GET /notebooks/{id}/share-requests` | `notebook:grant` | **P2** 请求者本人对本库发起过的申请（弹窗回显待审批/已驳回） |
 | `GET /me/share-requests` | 已登录 | **P2** **我**发起的、仍**待审批**的全部申请，跨笔记本。它是撤回端点的另一半：同一条授权轴（`requested_by`）、不挂任何笔记本能力，所以**已失去管理权**的申请人仍找得到、撤得掉自己的提议。刻意**不**挂在 `/notebooks/{id}/…` 下——那个维度已经有一份 manage 门的清单，一个维度只能有一套口径。只回 pending：已决定的申请撤不回来，列出来只会白扩披露面 |
 | `DELETE /notebooks/{id}/share-requests/{rid}` | 已登录，**且这条申请是你提的** | **P2** 撤回**待审批**申请（整行删，不是第三个状态）；已决定 409、不存在 404。⚠ **刻意没有 notebook 能力依赖**：授权轴是**申请归属**而不是当前的库权限。批准会拒绝已失去管理权的申请人，撤回若也要求管理权，这类申请就**既批不了也撤不掉**，永远卡在审核队列里 |
 | `GET /groups/{id}/share-requests` | 组管理员 | **P2** 审核队列：共享给本组的待审批申请清单 |
 | `POST /groups/{id}/share-requests/{rid}/approve` | 组管理员 | **P2** 同一写事务写 `(group, viewer)` 边并标 approved；已共享幂等；不存在/已决定 404 |
 | `POST /groups/{id}/share-requests/{rid}/reject` | 组管理员 | **P2** 标 rejected、不写边；申请者可对同库同组重新发起 |
-| `GET /notebooks/{id}/share` | `notebook:configure` | 只读；见下。⚠ **恒 owner，不是 `notebook:manage`**——链接分享是库主对本库对外处置的配置，不随内容管理权转移 |
+| `GET /notebooks/{id}/share` | `notebook:configure` | 只读；见下。⚠ **恒 owner，不是 `notebook:grant`**——链接分享是库主对本库对外处置的配置，不随内容管理权转移 |
 
 有几条边界必须写明：
 
@@ -658,7 +658,7 @@ Notebook；仅有 `group_admins` 边的库不向普通成员披露。owner 与�
 「申请 → 组管理员审批」。**方向轴要看清**：请求者是这本库的 manage 权（owner/admin）持有者、
 对目标组**只是普通成员**；组管理员分享进**自己管理**的组永远走既有 grants 端点、不经这张表。
 
-- 申请是**双重条件**：对库有 manage（依赖层 `notebook:manage` 挡）＋是目标组成员（端点体内查
+- 申请是**双重条件**：对库有管理权（依赖层 `notebook:grant` 挡）＋是目标组成员（端点体内查
   `user_group_role` 非空，普通成员即可）。非成员与「组不存在」同为 **404**（群组可见性口径，不
   泄露组的存在性）。
 - 状态机 `pending → approved/rejected` **单向**。**撤回不是第三个状态**：申请者对**待审批**申请走
@@ -697,8 +697,8 @@ Notebook；仅有 `group_admins` 边的库不向普通成员披露。owner 与�
 ### 挂载配置与链接分享恒 owner（P2）
 
 P2 把内容管理权翻给了组管理员，但**挂载配置与 `share_token` 链接分享**刻意留在 owner——它们是 owner
-对本库检索范围与对外处置的配置，不随内容管理权转移，在能力表里单列一格 `notebook:configure`（恒
-owner，不并进 `notebook:manage`）。两条硬理由：
+对本库检索范围与对外处置的配置，不随内容管理权转移，在能力表里各占一格 `notebook:mount` 与
+`notebook:configure`（都恒 owner，都不并进 `notebook:manage`）。两条硬理由：
 
 - **挂载配置**：`mount_sql` 的「同 owner 候选」是按被挂库 owner 解析的。组管理员若能改挂载，就能经
   `GET /notebooks/{id}/mountable` 枚举出库主**从未共享**的全部私有库名、`PUT .../bases` 把它们挂进这本
@@ -707,9 +707,45 @@ owner，不并进 `notebook:manage`）。两条硬理由：
   `DELETE /notebooks/{id}/share`（撤链接分享）会**连带踢掉全部只读成员**（`clear_share` 清
   `notebook_members`），爆炸半径超出内容管理，刻意留在 `notebook:configure`。
 
-所以「组管理员能管共享」= 能管**授权边**（grants），**不**等于能动挂载或链接分享：`notebook:manage`
-覆盖改名（`PATCH /notebooks/{id}`）＋授权边管理（`GET`/`POST`/`DELETE /notebooks/{id}/grants`），
-`notebook:configure` 覆盖挂载（`bases` / `mountable`）与链接分享（`share` / `mounted-by-count`）。
+所以「组管理员能管共享」= 能管**授权边**（grants），**不**等于能动挂载或链接分享：
+`notebook:grant` 覆盖授权边管理（`GET`/`POST`/`DELETE /notebooks/{id}/grants` 与两个
+`share-requests` 端点），`notebook:manage` 覆盖描述性画像（`PATCH /notebooks/{id}`）与 tier 切换，
+`notebook:mount` 覆盖挂载配置（`PUT .../bases`、`mountable`、`mounted-by-count`），
+`notebook:configure` 覆盖链接分享（`share`）。只读的 `GET /notebooks/{id}/bases` 投影留在
+`notebook:configure`：它答的是「这本库此刻挂了什么」，镜像笔记本上照样要渲染得出来。
+
+`notebook:grant`、`notebook:mount` 与 `scale_index:write` 是被下面那道跨环境同步围栏分别从
+`notebook:manage` / `notebook:configure` / `kg:write` 拆出来的，**级别一个字没变**（grant 与
+scale_index 各与其母格同为 admin，mount 与 configure 同为 owner）；拆的理由是旧的三个能力名
+各自混着「改同步层内容」与「改目标端自有状态」两类端点，一格答不了两件事。
+`scale_index:write` 承载 `POST .../scale-index/rebuild` 与 `POST .../scale-index/cancel`。
+
+### 镜像笔记本拒绝内容写入（`409 notebook_mirrored`）
+
+`notebooks.sync_origin`（SQLite v79 / PostgreSQL 0059，`NOT NULL DEFAULT ''`）非空表示这本笔记本
+是从别的环境同步来的**镜像**，值是源环境标识，并经 `NotebookSummary.sync_origin` 在列表与详情
+两条投影上下发。
+
+凡是端点会改写同步层内容的能力，在镜像上一律返回 **409**，`detail` 为
+`{"code": "notebook_mirrored", "sync_origin": "<值>"}`。用 409 而不是 403：请求者的权限没有问题，
+是**目标资源此刻的状态**不接受这次写入——目标端改了也活不过下一次导入，替代方案是静默数据丢失。
+挡：`sources:write`、`kg:write`、`knowhow:write`、`knowledge:write`、`catalog:write`、
+`notebook:manage`、`notebook:mount`、`notebook:delete`（镜像只能由导入器退役）。放行：
+`notebook:grant` 与 `notebook:configure`（目标端自己的可见性由目标端管理，`share_token` 是目标端
+自有列）、`scale_index:write`（检索索引是目标端自有的派生产物，不在同步闭包里，重建又恰恰是目标端
+唯一的修复手段）、`reports:write`、`agent_profile:write`，以及全部读、问答、报告、反馈与记忆候选路径。
+
+**安全方法一律豁免。** 这张表的谓词是「该能力的**写**端点会不会改同步层内容」，所以挡的能力底下
+的 `GET`/`HEAD`/`OPTIONS` 永远不被围栏碰：`GET .../scale-index/status`、
+`GET .../unified-kg/merges/review-job`（在 `kg:write` 下）与 `GET .../mountable`、
+`GET .../mounted-by-count`（在 `notebook:mount` 下）在镜像上照常返回。正是这条豁免让能力归属可以
+只按写来定——只读端点跟着它服务的那个写走，不必为它再劈一个还得重新论证级别的新能力名。
+
+围栏叠在能力守卫**之上**，绝不跑在它前面：未授权的调用者仍然拿 404，所以 409 不会变成一条
+「这本库存在、而且是从某个环境同步来的」的泄露通道。复制一本被分享的镜像得到的是**本地**
+笔记本——`copy_notebook` 把 `sync_origin` 写成 ''——副本完全可写。Agent/MCP 面对每个会写同步层
+内容的工具（来源、构建、维护、knowhow 格子代码）带同一道围栏；`add_observation` 与
+`propose_memory` 豁免，因为那些行是目标端用户自己的交互数据。
 
 ### 读权 ⇒ 可挂载，以及借入挂载的「未共享门」
 
@@ -2543,7 +2579,7 @@ provider 返回 Markdown 和按顺序排列的已签发句柄。核心对每个�
 
 部署插件可以贡献按笔记本选择的索引管线；其 `pipeline_id` 以插件 id 命名空间化，描述符只暴露 label、description、version 与两个 override flag。parser 路由仍由启动时冻结的 ProviderChain 自动决定，用户只能选择 indexing pipeline，不能选择 parser。`GET /api/notebooks/{id}/indexing-pipeline` 对 reader 可读，返回净化后的当前选择、该笔记本可见的 option 列表，以及 `available` / `missing` / `pending` 等状态布尔；绝不泄露插件路径、capability 名、异常栈或 loader reason。`PATCH /api/notebooks/{id}/indexing-pipeline` 挂 `kg:write`，因此 owner 与组内容管理员都可切换 desired pipeline，纯 reader 保持只读。
 
-笔记本设置界面刻意拆成两档：owner 与内容管理员都能编辑笔记本元数据并切换索引管线，但只有 owner 能读取/修改参考库挂载，因为 `notebook:configure` 仍然是 owner-only。纯只读成员也能通过同一个“设置”入口看到当前索引管线与状态的只读视图。任何管线切换都必须明确确认“将重建全库索引”。PATCH 先独立提交 desired `(pipeline_id, version, 不透明 generation)`，再认领既有持久 `kg_build_jobs` rebuild 单飞并立即返回 `pending + job_id`；worker 依次执行有界的整库 chunk 计划、可选的 core-owned KG 运行，以及合格库的 scale rebuild。迟到 worker 只有仍持有完全相同 generation 时才能发布；超界/失败会把 desired 代次保留为 pending，GET 投影 `rebuild_status=failed`，设置界面同时提供同管线重试与一键切回内建。**大库锁定切换到自定义管线（批 3·W3，决策 D3）**：活跃对象数超过 `INDEXING_PIPELINE_SWITCH_MAX_OBJECTS`（默认 20 万——按 WR-2 病灶规模的专用阈值，刻意不用低三个数量级的拷贝阈值）时，`begin()` 在落任何 desired 之前拒绝**非内建目标**的变更（409 带明确文案、什么都没保存、当前索引不受影响）。**切回内建保持放行**：卡在缺席/失败自定义管线上的大库，`require_write_admission` 让全部写入 fail-closed，切回内建是唯一自助出口——恢复重建即便再失败也只回到 retryable 态，不会更糟。干净态的无变化幂等保存仍走早退返回 200（卡死 pending 态本就到不了无变化早退，它的切回内建走豁免通道）。GET 投影新增服务端真值 `large_library_locked`：设置面板只禁用自定义管线选项与「重试当前管线」按钮，切回内建保持可点并就地说明。完整重构（拆每源事务 + 代次指针发布）排到有真实需求时。
+笔记本设置界面刻意拆成两档：owner 与内容管理员都能编辑笔记本元数据并切换索引管线，但只有 owner 能读取/修改参考库挂载——读挂载走 `notebook:configure`、改挂载走 `notebook:mount`，两者都恒 owner。纯只读成员也能通过同一个“设置”入口看到当前索引管线与状态的只读视图。任何管线切换都必须明确确认“将重建全库索引”。PATCH 先独立提交 desired `(pipeline_id, version, 不透明 generation)`，再认领既有持久 `kg_build_jobs` rebuild 单飞并立即返回 `pending + job_id`；worker 依次执行有界的整库 chunk 计划、可选的 core-owned KG 运行，以及合格库的 scale rebuild。迟到 worker 只有仍持有完全相同 generation 时才能发布；超界/失败会把 desired 代次保留为 pending，GET 投影 `rebuild_status=failed`，设置界面同时提供同管线重试与一键切回内建。**大库锁定切换到自定义管线（批 3·W3，决策 D3）**：活跃对象数超过 `INDEXING_PIPELINE_SWITCH_MAX_OBJECTS`（默认 20 万——按 WR-2 病灶规模的专用阈值，刻意不用低三个数量级的拷贝阈值）时，`begin()` 在落任何 desired 之前拒绝**非内建目标**的变更（409 带明确文案、什么都没保存、当前索引不受影响）。**切回内建保持放行**：卡在缺席/失败自定义管线上的大库，`require_write_admission` 让全部写入 fail-closed，切回内建是唯一自助出口——恢复重建即便再失败也只回到 retryable 态，不会更糟。干净态的无变化幂等保存仍走早退返回 200（卡死 pending 态本就到不了无变化早退，它的切回内建走豁免通道）。GET 投影新增服务端真值 `large_library_locked`：设置面板只禁用自定义管线选项与「重试当前管线」按钮，切回内建保持可点并就地说明。完整重构（拆每源事务 + 代次指针发布）排到有真实需求时。
 
 处于 `pending` 时，普通来源上传/重解析、手工 KG build 与 scale rebuild 写入全部 fail-closed。worker 会校验所有用户可见导入来源的有界 chunk proposal，在发布事务外计算 embedding，再把每个来源的 chunks、反向行、向量、KG payload、来源事实与抽取结果写入不可见的 durable notebook stage。隐藏 Memory/Knowhow 合成产物由 core 管理、读取时按 actor SQL 隔离，不进入可选策略，也不进入 stage。单来源畸形 chunk proposal 会带一条稳定且无内容的 warning 回退内建 chunker；整库护栏超限不会写入 live product。若当前选中的插件缺席或不可用，界面会给出“切回内建”的恢复路径，同时不影响对旧已发布产物的普通读取。
 

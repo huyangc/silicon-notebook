@@ -153,13 +153,19 @@ async def require_notebook_delete(
     与其它三道守卫同一条"不泄露存在性"口径——放宽的**唯一**一点是 owner 对
     自己正在删除中（或拷贝中）的库仍然"看得见"这一行。**不要**把这道守卫
     挂到除 DELETE 端点以外的任何路由上；其它写端点必须继续用
-    `require_notebook_write`/`require_notebook_capability`。"""
+    `require_notebook_write`/`require_notebook_capability`。
+
+    ⚠ 镜像写入围栏在这里**手工应用**（`_CAPABILITY_MIRROR_FENCE["notebook:delete"]`
+    是 True，但这道守卫不经能力工厂，拿不到工厂产出的包装）。顺序与工厂那边逐字相同：
+    先 owner 判定（非 owner 仍 404，不泄露存在性），通过之后才谈镜像。镜像只能由
+    导入器退役——目标端删掉它只会让下一次导入把整本库重新造出来。"""
     allowed = await run_in_threadpool(
         notebook_access_repository().user_owns_notebook_regardless_of_lifecycle,
         notebook_id, user.id,
     )
     if not allowed:
         raise HTTPException(status_code=404, detail="Notebook not found")
+    await _raise_if_mirrored(notebook_id)
     return notebook_id
 
 
@@ -275,32 +281,55 @@ async def require_notebook_read(
 # 收回成员自建报告的开关——那条路径由 report_routes.py 的行级判定负责。
 #
 # P2-T2 翻的**恰好是这六格**(裁决 P2-1):sources/kg/knowhow/knowledge/catalog
-# 五个内容写 + notebook:manage(= `PATCH /notebooks/{id}` + 三个授权边端点,设计 §4
-# 组管理员矩阵)。⚠ 那个 PATCH 编辑的是**整份描述性画像**(`NotebookUpdate` 的八个字段)
-# 而不只是改名——「改名」是端点的简写,别读成字段清单(codex #519 R10)。安全性靠两条:
-# 八个字段没有一个参与授权判定(授权只在 `access_sql.py`),且 `extra="forbid"` 挡住了
-# 生命周期列。反向护栏 `backend/tests/test_notebook_update_authorization_free.py`。
+# 五个内容写 + notebook:manage。⚠ manage 的 `PATCH /notebooks/{id}` 编辑的是**整份
+# 描述性画像**(`NotebookUpdate` 的八个字段)而不只是改名——「改名」是端点的简写,别读成
+# 字段清单(codex #519 R10)。安全性靠两条:八个字段没有一个参与授权判定(授权只在
+# `access_sql.py`),且 `extra="forbid"` 挡住了生命周期列。反向护栏
+# `backend/tests/test_notebook_update_authorization_free.py`。
 # 留在 "owner" 的**恰好是这三格**:
 #   * `notebook:delete` —— 删库的爆炸半径是整本库且 owner 无法撤销,不随组管理员走;
-#   * `notebook:configure` —— **挂载配置 + 链接分享,P2-T2 评审 P0 拆出来的新格**。
-#     mount_sql 的「同 owner 候选」安全论证建立在「只有 owner 改挂载」上;能力翻转
-#     作废了它——组管理员 Bob 对共享库 N(owner Alice)有 manage,若 mount 端点也翻
-#     admin,他就能 `GET /notebooks/N/mountable` 列出 Alice **从未共享的**全部私有库
-#     名、`PUT /notebooks/N/bases` 把 Alice 的私有库挂进 N、再经 active-notebook 代理
-#     端点读到全文(基线全 404)。链接分享同理:组管理员能替 Alice 铸公开链接、组外
-#     任意人整本 copy。设计 §4 的组管理员矩阵是「改名 + 管理授权边」,**挂载配置与
-#     share_token 链接分享都不在其中**——它们是 owner 对本库检索范围与对外处置的配置,
-#     不随内容管理权转移。故单列一格恒 owner,不与 notebook:manage 合并(合并会让这
-#     两类端点跟着 manage 一起翻 admin)。
+#   * `notebook:configure` —— **链接分享,P2-T2 评审 P0 拆出来的新格**(GET/POST/DELETE
+#     `/notebooks/{id}/share`)。组管理员能替 Alice 铸公开链接、组外任意人整本 copy,
+#     正是那次评审复现的 P0;撤链接还连带踢掉全部只读成员。设计 §4 的组管理员矩阵是
+#     「改名 + 管理授权边」,**share_token 链接分享不在其中**——它是 owner 对本库对外
+#     处置的配置,不随内容管理权转移。故单列一格恒 owner,不与 notebook:manage 合并
+#     (合并会让这类端点跟着 manage 一起翻 admin)。
 #   * `reports:write` —— P1-T3b 起已无端点消费(报告转成行级 created_by 判定),
 #     它现在只是一个**留给 P2/P3 组管理员批量管理动作**的名字。翻它既不会放开也不会
 #     收回任何东西(没有消费点),所以刻意保持 "owner":让这个名字在真正长出消费点
 #     那天,由那次改动显式决定它属于哪一档,而不是被这次批量翻格顺手带走。
 #
-# ⚠ notebook:configure 解析到 **owner 档**(与 notebook:delete 同,复用
-# require_notebook_write / user_can_access_notebook),所以能力值域仍是 {owner, admin}
-# ——它不新增第三档,只是把两个 owner-only 端点从 notebook:manage 拆出来单独命名,
-# 好让「哪些端点恒 owner」在能力表上一眼可见、且不会被下一次批量翻格顺手带走。
+# ⚠ notebook:configure 与 notebook:mount 都解析到 **owner 档**(与 notebook:delete 同,
+# 复用 require_notebook_write / user_can_access_notebook),所以能力值域仍是
+# {owner, admin}——它们不新增第三档,只是把 owner-only 端点从 notebook:manage 拆出来
+# 单独命名,好让「哪些端点恒 owner」在能力表上一眼可见、且不会被下一次批量翻格顺手带走。
+#
+# ⚠ **跨环境同步 §5 的两格再拆分**(docs/incremental-sync-design.md)。下方的
+# `_CAPABILITY_MIRROR_FENCE` 要按能力名回答「这个端点会不会改写同步层内容」,而两个
+# 旧能力名各自混着两类端点,一格答不了两件事,所以按那条轴再拆一次(**级别一个字
+# 没变**,拆前拆后同一批端点解析到同一道级别守卫):
+#   * `notebook:grant`(admin,从 notebook:manage 拆出)—— `group_routes.py` 的授权边
+#     端点(GET/POST /notebooks/{id}/grants、DELETE .../grants/{grant_id}、POST 与 GET
+#     .../share-requests)。它们写的是**目标端自己的可见性**,镜像上照常放行:设计 §5
+#     明确「目标端自己的可见性由目标端管理;导入只在首次创建笔记本时写入源端授权,
+#     之后不覆盖」。`notebook:manage` 留给 `PATCH /notebooks/{id}` 与
+#     `POST /notebooks/{id}/tier`——它们改的是**同步来的**描述性字段与 tier,是同步层
+#     内容,镜像上要挡。
+#   * `notebook:mount`(owner,从 notebook:configure 拆出)—— `PUT /notebooks/{id}/bases`、
+#     `GET .../mountable`、`GET .../mounted-by-count`。挂载配置写 `notebook_bases`,
+#     属同步层,镜像上要挡(那两条 GET 只为「改挂载」服务,归同一格;它们本身是安全
+#     方法,因而仍然照常返回——见围栏表上方的安全方法豁免)。`notebook:configure`
+#     留给链接分享(`GET`/`POST`/`DELETE /notebooks/{id}/share`)与只读的挂载投影
+#     `GET /notebooks/{id}/bases`——share_token 是**目标端自有列**,不随同步走;
+#     `GET bases` 答的是「这本库此刻挂了什么」,镜像上照样要显示得出来。
+#     ⚠ 两格拆开**不是**放宽:mount 与 configure 同为 owner 档,P2-T2 评审 P0 的那套
+#     论证(mountable 枚举库主全部私有库名、PUT bases 把私有库挂进共享库经代理端点读
+#     全文)逐字仍然成立,只是现在写在 notebook:mount 这一格上。
+#   * `scale_index:write`(admin,从 kg:write 拆出)—— `POST .../scale-index/rebuild`
+#     与 `POST .../scale-index/cancel`。检索索引(`kg_index/` `kg_viz/` 工件)是**目标端
+#     自有的派生产物**,不在同步闭包里(设计 §6),所以它必须能在镜像上重建——否则一本
+#     镜像库会永远停在导入那一刻的索引上,而重建又恰恰是目标端唯一的修复手段。
+#     `kg:write` 留给真正写 KG 行的端点(构建、候选审核、schema 编辑)。
 #
 # ⚠ 第六个消费点同样是**响应投影**:Agentic Memory P1(T6)的
 # `agent_profile_routes.py::GET .../understanding` 里的 `can_edit_base` 字段,由
@@ -314,12 +343,140 @@ _CAPABILITY_LEVELS: dict[str, str] = {
     "knowhow:write": "admin",
     "knowledge:write": "admin",
     "catalog:write": "admin",
+    "scale_index:write": "admin",
     "reports:write": "owner",
     "notebook:manage": "admin",
+    "notebook:grant": "admin",
     "notebook:configure": "owner",
+    "notebook:mount": "owner",
     "notebook:delete": "owner",
     "agent_profile:write": "admin",
 }
+
+
+# --------------------------------------------------------------------------
+# 目标端写入围栏(跨环境增量同步,docs/incremental-sync-design.md §5)。
+#
+# `notebooks.sync_origin` 非空 ⇒ 这本笔记本是从别的环境**同步来的镜像**。镜像上任何
+# 会改写同步层内容的操作都必须被拒绝:目标端改了也留不住,下一次导入会原样覆盖回去,
+# 而用户得到的是「我明明改过」的静默数据丢失。
+#
+# 这张表与 `_CAPABILITY_LEVELS` **键集合相同**(守卫测试钉死),值的含义只有一句:
+# **这个能力的端点会不会改写同步层内容**。它是一条与「谁有权」正交的轴,所以单开一张
+# 表而不是给级别值域加第三档——级别答「你是不是有权改」,围栏答「这本库的内容还允不允许
+# 被改」,两个问题的答案互不蕴含(镜像的 owner 权限一点没少,他仍然能分享、能授权、能
+# 提问,只是不能改同步来的内容)。
+#
+# 判定顺序是**先级别后围栏**,不可交换:未授权的人对镜像必须仍然拿 404(与对本地库
+# 逐字相同,不泄露存在性),只有已经越过级别守卫的人才有资格看到 409 与 `sync_origin`。
+#
+# ⚠ **安全方法一律豁免**(HTTP `GET` / `HEAD` / `OPTIONS`)。这张表的谓词是「该能力的
+# **端点**会不会改写同步层内容」,而一个 GET 永远不会——所以包装依赖先看
+# `request.method`,是安全方法就根本不查 `sync_origin`。
+#
+# 这不是权宜之计,而是让归属与豁免各管各的那一条缝:**按能力归类**天然是粗粒度的
+# (一个能力名底下既有写端点也有只为那个写服务的读端点——`GET .../scale-index/status`、
+# `GET .../unified-kg/merges/review-job` 在 `kg:write` 下,`GET .../mountable`、
+# `GET .../mounted-by-count` 在 `notebook:mount` 下)。没有这条豁免,唯一的出路是为每
+# 一条这样的 GET 再劈一个能力名,能力表会因为一条与权限无关的轴而不断分裂,而每一格
+# 都还得重新论证一次自己的级别。有了它,**归属只按写来定**,读端点跟着它服务的那个写
+# 走,一格都不用挪。
+#
+# 反方向也成立:一条会改状态的 `POST`/`PUT`/`PATCH`/`DELETE` 永远拿不到豁免,所以
+# 「把写端点伪装成 GET」这种事做不到——FastAPI 的方法来自路由声明,不来自请求体。
+#
+# 挡(True)的八格,逐格的理由(下面每一句说的都是那一格里的**非安全方法**):
+#   * `sources:write` / `kg:write` / `knowhow:write` / `knowledge:write` /
+#     `catalog:write` —— 材料、向量、KG、Knowhow 表、知识治理产物,全部在同步闭包里;
+#   * `notebook:manage` —— `PATCH /notebooks/{id}` 与 `POST .../tier` 改的是同步来的
+#     描述性画像与 tier(§5 点名的「笔记本改名与元数据编辑、tier 切换」);
+#   * `notebook:mount` —— 挂载配置写 `notebook_bases`,属同步层;
+#   * `notebook:delete` —— §5 点名:镜像只能由导入器退役,目标端删掉它只会让下一次
+#     导入把整本库重新造出来。⚠ 这一格的**实际消费点不是能力工厂**:DELETE 端点挂的
+#     是独立守卫 `require_notebook_delete`(理由见它自己的 docstring),围栏在那道守卫
+#     体内单独应用。这一格留在表里是为了让「删库在镜像上也被挡」这件事在表上可见,
+#     并让键集合保持与 `_CAPABILITY_LEVELS` 相等。
+#
+# 放行(False)的五格:
+#   * `notebook:grant` —— 目标端自己的可见性由目标端管理(§5 明文放行);
+#   * `notebook:configure` —— 链接分享的 `share_token` 是目标端自有列,不随同步走;
+#   * `scale_index:write` —— 检索索引是目标端自有的派生产物,不在同步闭包里(设计 §6),
+#     镜像必须能重建它,否则索引会永远停在导入那一刻且无从修复;
+#   * `reports:write` —— 报告是交互数据,不同步(§1 的非同步清单);
+#   * `agent_profile:write` —— 理解底座是目标端用户用出来的,同样不在同步闭包里。
+#
+# ⚠ 新增能力名时这张表**必须同时加一格**,否则 `require_notebook_capability` 当场
+# KeyError——与能力表同一条「响亮失败,不许落到宽松默认值」的口径。
+# ⚠ 这里的 True 只对**非安全方法**生效(见上面的安全方法豁免):一格取 True 说的是
+# 「这个能力底下的写端点会改同步层内容」,不是「这个能力底下的一切请求都挡」。
+_CAPABILITY_MIRROR_FENCE: dict[str, bool] = {
+    "sources:write": True,
+    "kg:write": True,
+    "knowhow:write": True,
+    "knowledge:write": True,
+    "catalog:write": True,
+    "scale_index:write": False,
+    "reports:write": False,
+    "notebook:manage": True,
+    "notebook:grant": False,
+    "notebook:configure": False,
+    "notebook:mount": True,
+    "notebook:delete": True,
+    "agent_profile:write": False,
+}
+
+
+#: HTTP 方法里语义上「不改变服务端状态」的那一批(RFC 9110 §9.2.1)。围栏对它们
+#: 一律豁免——理由写在 `_CAPABILITY_MIRROR_FENCE` 上方。刻意只列这三个:`TRACE` 虽然
+#: 也安全但本应用根本不提供,写进来只会是一条无主条目。
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+#: 镜像围栏拒绝时的 HTTP 码与 detail 形状(设计文档 §5)。409 而不是 403:请求者的
+#: 权限没有问题,是**目标资源此刻的状态**不接受这次写入——与「正在删除中」「已有一个
+#: 构建在跑」同一族。
+#:
+#: detail 形状与 `knowhow_routes.py` 的 `knowhow_history_stale` 那一族对齐:
+#: `{"code", "message", "sync_origin"}`。`code` 给前端分支,`message` 是可直接展示的
+#: 中文文案,`sync_origin` 让「镜像自 <源环境>」这句话不必再发一次请求去问。
+#:
+#: ⚠ **刻意不带 `X-User-Message`**:那个头是 `user_error()` 的标记,而 `user_error()`
+#: 的 detail 是**裸字符串**(见本文件末尾「用户可见文案的出处标记」一节——前端靠这个
+#: 头判断「4xx 的 detail 能不能原样显示」)。结构化 detail 是另一族:前端按 `code` 分
+#: 支、拿 `message` 显示,本来就不会去原样打印整个 detail 对象,所以那个头在这里没有
+#: 消费者。与 `knowhow_history_stale` / `knowhow_history_inconsistent` 逐字同款。
+_MIRRORED_STATUS = 409
+_MIRRORED_CODE = "notebook_mirrored"
+
+
+def _mirror_message(origin: str) -> str:
+    return f"此笔记本是从 {origin} 同步的镜像，内容只能在源环境修改"
+
+
+def _mirror_detail(origin: str) -> dict[str, str]:
+    return {
+        "code": _MIRRORED_CODE,
+        "message": _mirror_message(origin),
+        "sync_origin": origin,
+    }
+
+
+async def _raise_if_mirrored(notebook_id: str) -> None:
+    """已越过级别守卫之后的第二道判定:镜像 ⇒ 409。
+
+    单独成函数而不是内联,是因为它有**三个**调用形态:能力工厂产出的包装依赖、
+    `require_notebook_delete` 这个不经能力工厂的独立守卫,以及 `user_or_agent_scope`
+    的会话写分支(第三条鉴权通道,承载 `knowhow_agent_routes` 的格子代码写)。三处
+    必须逐字同义。
+
+    ⚠ 调用方负责**只在非安全方法上调它**(包装依赖按 `request.method` 判,另外两处
+    的消费端点本来就只有写方法)。这个函数自己不看方法:它拿不到 `Request`,而把
+    `Request` 传进来只为了在三个调用点里的两个恒真的分支上再判一次,不值当。
+    """
+    origin = await run_in_threadpool(
+        notebook_access_repository().notebook_sync_origin, notebook_id
+    )
+    if origin:
+        raise HTTPException(status_code=_MIRRORED_STATUS, detail=_mirror_detail(origin))
 
 
 @lru_cache
@@ -336,13 +493,52 @@ def require_notebook_capability(capability: str):
     每一档都**直接复用**对应守卫的函数本体——同一个函数对象,行为逐字相同
     (未授权 → 404,不泄露存在性)。刻意不在这里重写判定逻辑:两档各只有一份实现,
     这个工厂只做「能力名 → 哪一份」的查表。
+
+    ⚠ 被 ``_CAPABILITY_MIRROR_FENCE`` 标记的能力**不**直接返回裸档位守卫,而是返回一个
+    按能力名缓存的包装依赖:先 await 那一份档位守卫(级别判定、404 口径一个字不改),
+    再看 ``request.method``——安全方法(GET/HEAD/OPTIONS)到此为止,非安全方法才多查
+    一次 ``sync_origin``,非空则 409。包装是**加法**——判定逻辑仍然只有档位守卫那一份,
+    这里只是在它之后串一条与权限正交的状态判定。
     """
     level = _CAPABILITY_LEVELS[capability]
     if level == "owner":
-        return require_notebook_write
-    if level == "admin":
-        return require_notebook_admin
-    raise AssertionError(f"unknown notebook capability level: {level!r}")  # pragma: no cover
+        level_guard = require_notebook_write
+    elif level == "admin":
+        level_guard = require_notebook_admin
+    else:
+        raise AssertionError(  # pragma: no cover
+            f"unknown notebook capability level: {level!r}"
+        )
+    if not _CAPABILITY_MIRROR_FENCE[capability]:
+        return level_guard
+
+    async def guard(
+        request: Request,
+        notebook_id: str,
+        user: UserProfile = Depends(get_current_user),
+    ) -> str:
+        await level_guard(notebook_id, user)
+        # 安全方法豁免:围栏表答的是「这个能力的端点会不会改同步层内容」,而一个 GET
+        # 永远不会。完整理由(为什么豁免放在这里而不是把每条只读端点劈成新能力名)
+        # 写在 `_CAPABILITY_MIRROR_FENCE` 上方。
+        if request.method.upper() in _SAFE_METHODS:
+            return notebook_id
+        await _raise_if_mirrored(notebook_id)
+        return notebook_id
+
+    guard.__doc__ = (
+        f"档位守卫 + 镜像写入围栏(能力名 {capability!r},级别 {level!r})。\n\n"
+        "顺序:级别判定(未授权 → 404,不泄露存在性)→ 安全方法直接放行 → "
+        "非安全方法查 sync_origin,非空 → 409 notebook_mirrored。"
+        "两张表见 api/deps.py 的 _CAPABILITY_LEVELS 与 _CAPABILITY_MIRROR_FENCE。"
+    )
+    # FastAPI 按 callable 身份做每请求依赖去重,而外层的 @lru_cache 保证同一能力名
+    # 恒返回这**同一个** ``guard`` 对象——两条性质缺一不可,由
+    # test_notebook_capability_guard 的身份断言钉住。名字带上能力名,好让
+    # /openapi.json 与异常回溯里分得清是哪一格拒绝的。
+    guard.__name__ = f"require_{capability.replace(':', '_')}_unmirrored"
+    guard.__qualname__ = guard.__name__
+    return guard
 
 
 # 工厂挂 @lru_cache 的理由写在这里而不是工厂 docstring:P0 阶段每个能力都返回
@@ -380,6 +576,44 @@ def notebook_capability_allowed(capability: str, notebook_id: str, user_id: str)
             notebook_id, user_id
         )
     raise AssertionError(f"unknown notebook capability level: {level!r}")  # pragma: no cover
+
+
+def notebook_mirror_fence(capability: str, notebook_id: str) -> "str | None":
+    """镜像写入围栏的纯函数版本(非 ``Depends``),与工厂共用同一张
+    ``_CAPABILITY_MIRROR_FENCE``。
+
+    返回 ``sync_origin``(即「这次写入该被挡」)或 ``None``(放行)。
+    **刻意不返回 bool**:调用点要把源环境标识放进 409 的 detail 里,返回布尔会逼它
+    再查一次库,而那次查询与本次之间又是一个窗口。
+
+    为什么与 ``notebook_capability_allowed`` 并列而不是合进去:后者的返回值语义是
+    「这个用户有没有这项能力」,它同时驱动**只读投影**(knowledge_routes 的
+    ``can_edit``、agent_profile 的 ``can_edit_base``)——那些投影答的是权限,不该被
+    镜像状态改写(镜像上用户的权限一点没少)。把围栏塞进那个 bool 会让两件事再也
+    分不开。所以:凡是走 ``notebook_capability_allowed`` 的**写**路径,在它之后**再
+    调一次**本函数;只读投影不调。
+
+    ⚠ 它**刻意不带 method 形参**,因而没有包装依赖那条安全方法豁免:本函数的调用点
+    全部是体内自查的**写**路径(source 的 parse/delete、knowhow 的表转移、插件 URL
+    导入口、理解底座写),豁免在那里恒不命中。加一个恒不命中的形参只会让调用点每次
+    都要想一遍「我该传什么」,并给「把它用在读路径上」开一个口子——而读路径本来就不
+    该调它。
+
+    未知能力名同样当场 ``KeyError``,与另外两条同口径。
+    """
+    if not _CAPABILITY_MIRROR_FENCE[capability]:
+        return None
+    origin = notebook_access_repository().notebook_sync_origin(notebook_id)
+    return origin or None
+
+
+def mirrored_notebook_error(origin: str) -> HTTPException:
+    """把 ``notebook_mirror_fence`` 的返回值变成路由层要抛的那个异常。
+
+    存在的理由是**形状只有一份**:409 与 ``{"code": ..., "sync_origin": ...}`` 这个
+    detail 是前端解析的契约(设计文档 §5),散在各个体内自查点手拼迟早分叉。
+    """
+    return HTTPException(status_code=_MIRRORED_STATUS, detail=_mirror_detail(origin))
 
 
 # 向后兼容别名——**刻意删除**(P0-T2)。所有路由消费点已迁移到
@@ -538,6 +772,20 @@ async def user_or_agent_scope(
         allowed = await run_in_threadpool(guard, notebook_id, user.id)
         if not allowed:
             raise HTTPException(status_code=404, detail=not_found_detail)
+        if write:
+            # 镜像写入围栏,第三条鉴权通道(跨环境同步 §5)。这条分支承载的是
+            # `knowhow_agent_routes` 的 PUT/DELETE 格子代码,口径取 `knowhow:write`
+            # 那一格——`knowhow_cell_code` 在笔记本内容闭包里(见 sharing_store 的
+            # 深拷贝表清单),镜像上写进去的附件活不过下一次导入。
+            #
+            # 只挂在 `write=True` 上:`write=False` 的读分支拿的是读权谓词,围栏与它
+            # 无关(安全方法豁免的同一条理由)。
+            #
+            # ⚠ Agent 分支**不**在这里挡:它的围栏在 `mcp_tools/_shared` 那一侧
+            # (`refuse_if_mirrored`,由 `put_knowhow_cell_code` 自己调),因为那条分支
+            # 根本不看 `write` —— 见本函数 docstring 里「``write`` is IGNORED for an
+            # Agent principal」那一段。两侧都有,只是各在各的入口。
+            await _raise_if_mirrored(notebook_id)
         marker = set_request_user(user)
         try:
             principal = session_audit_principal(user)

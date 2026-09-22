@@ -48,7 +48,54 @@ FIXTURE_SECRETS = (
 )
 
 
+def _rollback_v80(db: sqlite3.Connection) -> None:
+    """Undo _migration_80 (notebooks.sync_origin, parity with PostgreSQL
+    0060_notebook_sync_origin.sql) before forging any older deployed schema:
+    one pure column addition, no index to drop -- same shape as _rollback_v73.
+
+    Every older rollback helper chains through here first (via _rollback_v79):
+    a forged "deployed v74" database that still carried v80's column would make
+    the verifier's per-column manifest check see one fewer added column than
+    the (74, 80) manifest entry declares, and the failure would read as a
+    manifest bug rather than as an incomplete forgery."""
+    db.execute("ALTER TABLE notebooks DROP COLUMN sync_origin")
+
+
+def test_deployed_v79_database_verifies_notebook_sync_origin(tmp_path):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as upgraded_db:
+        columns = {
+            row[1]: row for row in upgraded_db.execute("PRAGMA table_info(notebooks)")
+        }
+        # Every pre-existing row is local, and '' is what records that -- the
+        # migration deliberately has no backfill to get wrong. Read here, on the
+        # freshly upgraded database, rather than after verify_snapshot: the
+        # verifier runs against its own copy and leaves this file untouched.
+        assert columns["sync_origin"][2] == "TEXT"
+        assert columns["sync_origin"][3] == 1
+        assert columns["sync_origin"][4] == "''"
+        assert [
+            row[0]
+            for row in upgraded_db.execute(
+                "SELECT DISTINCT sync_origin FROM notebooks"
+            )
+        ] == [""]
+    with sqlite3.connect(database) as rollback:
+        _rollback_v80(rollback)
+        rollback.execute("PRAGMA user_version = 79")
+    result = module.verify_snapshot(database, storage)
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 79
+    assert result.final_user_version == module.SCHEMA_VERSION
+
+
 def _rollback_v79(db: sqlite3.Connection) -> None:
+    _rollback_v80(db)
     db.execute("DROP INDEX idx_retrieval_experiences_notebook")
     db.execute("ALTER TABLE retrieval_experiences DROP COLUMN notebook_id")
 
@@ -81,7 +128,6 @@ def test_deployed_v78_database_verifies_retrieval_experience_partition(tmp_path)
     assert result.source_user_version == 78
     assert result.final_user_version == module.SCHEMA_VERSION
     assert result.changed_tables == []
-
 
 def _rollback_v78(db: sqlite3.Connection) -> None:
     _rollback_v79(db)

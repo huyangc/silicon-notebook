@@ -645,8 +645,8 @@ tier** — owner ∪ an effective `role='admin'` grant edge (predicate definitio
 arms plus `role='admin'` and excludes `everyone`). A group admin can therefore
 manage content and sharing through the browser.
 
-**What `notebook:manage` actually covers** — it is `PATCH /notebooks/{id}` plus the
-three grant endpoints, and the PATCH edits the notebook's whole **descriptive
+**What `notebook:manage` actually covers** — it is `PATCH /notebooks/{id}` plus
+`POST /notebooks/{id}/tier`, and the PATCH edits the notebook's whole **descriptive
 profile**, not just its name: `NotebookUpdate` accepts `name`, `purpose`,
 `primary_domain`, `target_users`, `expected_questions`, `source_types`, `taxonomy`
 and `access_scope`. Earlier revisions of this page said "rename", which was
@@ -684,9 +684,10 @@ admins may manage this notebook" checkbox accordingly: ticking it appends a
 `(group_admins, admin)` edge beside `(group, viewer)`; unsharing removes both
 same-group rows together, and the share list folds them into one entry marked with
 management rights. **But two owner-only capabilities deliberately do not flip**:
-`notebook:delete` (deleting a whole library, un-revocable by the owner) and
-`notebook:configure` (mount configuration + `share_token` link sharing) stay owner
-— see "Mount configuration and link sharing stay owner-only" below. **The Agent/MCP
+`notebook:delete` (deleting a whole library, un-revocable by the owner),
+`notebook:mount` (mount configuration) and `notebook:configure` (`share_token` link
+sharing) stay owner — see "Mount configuration and link sharing stay owner-only"
+below. **The Agent/MCP
 surface is also untouched**: `sources:write` / `sources:delete` /
 `maintenance:execute` remain owner-only — a long-lived token is a separate
 credential whose owner may have been granted admin long after it was issued, and
@@ -767,19 +768,19 @@ endpoints), plus one read-only addition on the notebook router.
 | `POST /groups/{id}/invite-link/rotate` | group admin (admin recovery bypass) | atomically replace the token; the old link stops resolving immediately |
 | `POST /group-invites/{token}/join` | signed in | atomically join as `member`; idempotently preserves an existing role; invalid/revoked/deleted tokens are 404 |
 | `GET /users/resolve?username=` | any signed-in user | exact username lookup, returns id/username/display name only |
-| `GET /notebooks/{id}/grants` | `notebook:manage` | every edge on the library, all four principal types |
-| `POST /notebooks/{id}/grants` | `notebook:manage` **and** group admin | only `group` / `group_admins` principals |
-| `DELETE /notebooks/{id}/grants/{grant_id}` | `notebook:manage` | notebook-side revocation |
+| `GET /notebooks/{id}/grants` | `notebook:grant` | every edge on the library, all four principal types |
+| `POST /notebooks/{id}/grants` | `notebook:grant` **and** group admin | only `group` / `group_admins` principals |
+| `DELETE /notebooks/{id}/grants/{grant_id}` | `notebook:grant` | notebook-side revocation |
 | `GET /groups/{id}/shared-notebooks` | group member (admin bypass) | member-visible inventory of libraries shared with this group |
 | `DELETE /groups/{id}/shared-notebooks/{nb}` | group admin | group-side revocation; removes every edge pointing at this group |
-| `POST /notebooks/{id}/share-requests` | `notebook:manage` **and** target-group **plain member** | **P2** submit a share request; a group's *admin* is refused with 403 — he shares directly via `POST /notebooks/{id}/grants` and never goes through this table. Idempotent (an in-flight request returns the existing pending row, not a 409) |
-| `GET /notebooks/{id}/share-requests` | `notebook:manage` | **P2** the requester's own requests on this library (dialog echoes pending/rejected) |
+| `POST /notebooks/{id}/share-requests` | `notebook:grant` **and** target-group **plain member** | **P2** submit a share request; a group's *admin* is refused with 403 — he shares directly via `POST /notebooks/{id}/grants` and never goes through this table. Idempotent (an in-flight request returns the existing pending row, not a 409) |
+| `GET /notebooks/{id}/share-requests` | `notebook:grant` | **P2** the requester's own requests on this library (dialog echoes pending/rejected) |
 | `GET /me/share-requests` | signed in | **P2** every **pending** request *I* filed, across all notebooks. The counterpart of the withdraw endpoint: same authorization axis (`requested_by`), no notebook capability at all, so a requester who has since lost management rights can still find and withdraw their own proposal. Deliberately **not** mounted under `/notebooks/{id}/…` — that dimension already has a manage-gated list and must keep one meaning. Pending only: a decided request cannot be withdrawn, so listing it would only widen disclosure |
 | `DELETE /notebooks/{id}/share-requests/{rid}` | signed in, **and the request is yours** | **P2** withdraw a **pending** request (whole-row delete, not a third status); already-decided is 409, missing is 404. ⚠ **Deliberately carries no notebook capability dependency**: the authorization axis is request ownership, not current library rights. Since approval refuses a requester who has since lost manage rights, requiring manage here too would make such a request neither approvable nor withdrawable — permanently stuck in the reviewer's queue |
 | `GET /groups/{id}/share-requests` | group admin | **P2** the review queue: pending requests to share into this group |
 | `POST /groups/{id}/share-requests/{rid}/approve` | group admin | **P2** write the `(group, viewer)` edge and mark approved in one transaction; idempotent if already shared; missing/decided is 404 |
 | `POST /groups/{id}/share-requests/{rid}/reject` | group admin | **P2** mark rejected, write no edge; the requester may re-submit for the same (library, group) |
-| `GET /notebooks/{id}/share` | `notebook:configure` | read-only; see below. ⚠ **owner-only, not `notebook:manage`** — link sharing is the owner's disposition of the library toward the outside world and does not travel with content-management rights |
+| `GET /notebooks/{id}/share` | `notebook:configure` | read-only; see below. ⚠ **owner-only, not `notebook:grant`** — link sharing is the owner's disposition of the library toward the outside world and does not travel with content-management rights |
 
 Several boundaries are worth stating explicitly:
 
@@ -864,7 +865,7 @@ target group; a group admin sharing into a group **they administer** always uses
 existing grants endpoint and never touches this table.
 
 - The request is a **double condition**: manage rights on the library (enforced by
-  the `notebook:manage` dependency) **and** membership of the target group (checked
+  the `notebook:grant` dependency) **and** membership of the target group (checked
   in the endpoint body as a non-empty `user_group_role`; a plain member is enough).
   A non-member gets the same **404** as "the group does not exist" (group visibility
   rule — the existence of the group is not disclosed).
@@ -904,8 +905,9 @@ existing grants endpoint and never touches this table.
 P2 flipped content management to group admins, but **mount configuration and
 `share_token` link sharing** deliberately stay with the owner — they configure the
 owner's own retrieval scope and outward disposal, do not transfer with content
-management, and get their own capability cell `notebook:configure` (owner-only, not
-folded into `notebook:manage`). Two hard reasons:
+management, and get their own capability cells `notebook:mount` and
+`notebook:configure` (both owner-only, neither folded into `notebook:manage`). Two
+hard reasons:
 
 - **Mount configuration**: `mount_sql`'s "same-owner candidate" is resolved by the
   *mounted* library's owner. A group admin who could edit mounts would enumerate the
@@ -919,10 +921,60 @@ folded into `notebook:manage`). Two hard reasons:
   management, so it deliberately stays under `notebook:configure`.
 
 So "a group admin can manage sharing" means managing **grant edges**, **not** touching
-mounts or links: `notebook:manage` covers rename (`PATCH /notebooks/{id}`) plus
-grant-edge management (`GET`/`POST`/`DELETE /notebooks/{id}/grants`), while
-`notebook:configure` covers mounts (`bases` / `mountable`) and link sharing (`share` /
-`mounted-by-count`).
+mounts or links: `notebook:grant` covers grant-edge management
+(`GET`/`POST`/`DELETE /notebooks/{id}/grants` and the two `share-requests` endpoints),
+`notebook:manage` covers the descriptive profile (`PATCH /notebooks/{id}`) and tier
+switching, `notebook:mount` covers mount configuration (`PUT .../bases`, `mountable`,
+`mounted-by-count`), and `notebook:configure` covers link sharing (`share`). The
+read-only `GET /notebooks/{id}/bases` projection stays under `notebook:configure`:
+it answers "what is mounted right now", which a mirrored notebook must still be able
+to render.
+
+`notebook:grant`, `notebook:mount` and `scale_index:write` were split out of
+`notebook:manage`, `notebook:configure` and `kg:write` by the cross-environment sync
+fence below — **their tiers did not change** (grant and scale_index are admin like
+their parents, mount is owner like configure); the split exists because each old name
+mixed endpoints that write synced content with endpoints that write target-local
+state, and one cell cannot answer both questions. `scale_index:write` carries
+`POST .../scale-index/rebuild` and `POST .../scale-index/cancel`.
+
+### Mirrored notebooks refuse content writes (`409 notebook_mirrored`)
+
+`notebooks.sync_origin` (SQLite v79 / PostgreSQL 0059, `NOT NULL DEFAULT ''`) is
+non-empty when the notebook is a **mirror** imported from another environment; the
+value names that source environment and is surfaced on `NotebookSummary.sync_origin`
+in both the list and the detail projection.
+
+Any capability whose endpoints rewrite synced content is refused on a mirror with
+**409** and a `detail` of `{"code": "notebook_mirrored", "sync_origin": "<value>"}`.
+409 rather than 403: the caller's permission is fine, the *resource's current state*
+refuses the write — a target-side edit would not survive the next import, so the
+alternative is silent data loss. Refused: `sources:write`, `kg:write`,
+`knowhow:write`, `knowledge:write`, `catalog:write`, `notebook:manage`,
+`notebook:mount`, `notebook:delete` (a mirror is retired by the importer, not here).
+Allowed: `notebook:grant` and `notebook:configure` (the target environment manages
+its own visibility, and `share_token` is a target-local column), `scale_index:write`
+(a retrieval index is a target-local derived artifact outside the sync closure, and
+rebuilding it is the target end's only repair), `reports:write`, `agent_profile:write`,
+plus every read, Ask, report, feedback and memory-candidate path.
+
+**Safe methods are always exempt.** The table's predicate is "do this capability's
+*write* endpoints rewrite synced content", so a `GET`/`HEAD`/`OPTIONS` under a refused
+capability is never fenced — `GET .../scale-index/status` and
+`GET .../unified-kg/merges/review-job` (under `kg:write`), `GET .../mountable` and
+`GET .../mounted-by-count` (under `notebook:mount`) all answer normally on a mirror.
+That exemption is what keeps capability assignment driven by the write alone: a
+read-only endpoint stays with the write it serves instead of forcing yet another
+capability name whose tier would have to be re-argued.
+
+The fence sits **on top of** the capability guard and never before it: an unauthorized
+caller still gets 404, so the 409 never becomes a channel that discloses a notebook's
+existence or where it was synced from. Copying a shared mirror produces a **local**
+notebook — `copy_notebook` writes `sync_origin=''` — so the copy is fully writable.
+The Agent/MCP surface carries the same fence on every tool that writes synced content
+(sources, builds, maintenance, knowhow cell code); `add_observation` and
+`propose_memory` are exempt, because those rows are the target user's own interaction
+data.
 
 ### Read access implies mountability, and the borrowed-mount gate
 
@@ -3284,7 +3336,7 @@ The provider returns Markdown plus an ordered tuple of issued handles. Core admi
 
 Deployment plugins may contribute notebook-scoped indexing pipelines whose ids are namespaced under their plugin id and whose descriptors expose only label, description, version, and the two override flags. Parser routing stays on the startup-frozen ProviderChain; users choose only the indexing pipeline, never a parser. `GET /api/notebooks/{id}/indexing-pipeline` is reader-visible and returns the sanitized current selection plus the notebook-local option list and booleans such as `available`, `missing`, and `pending`; it never leaks plugin paths, capability names, stack traces, or loader reasons. `PATCH /api/notebooks/{id}/indexing-pipeline` is admitted by `kg:write`, so owners and group content-managers may switch the desired pipeline while pure readers remain read-only.
 
-The notebook settings surface is intentionally split. Owners and content-managers may edit notebook metadata and switch the indexing pipeline, but only owners may load or mutate mounted reference libraries because `notebook:configure` remains owner-only. Pure readers still get a read-only settings view that shows the current pipeline and status. Any pipeline change requires an explicit full-rebuild confirmation. PATCH first commits desired `(pipeline_id, version, opaque generation)`, then claims the existing durable `kg_build_jobs` rebuild single-flight and returns `pending` plus its `job_id`; the worker performs the bounded whole-notebook chunk plan, optional core-owned KG run, and eligible scale rebuild. A late worker can publish only while its exact generation still owns the selection. A failed/oversized plan leaves the desired generation pending; GET projects `rebuild_status=failed`, and notebook settings offers both same-pipeline retry and one-click builtin recovery. **Large libraries are locked out of switching to a custom pipeline (batch-3-W3, decision D3)**: when a notebook's active-object count exceeds `INDEXING_PIPELINE_SWITCH_MAX_OBJECTS` (default 200k — a dedicated threshold at the WR-2 failure scale, deliberately not the tiny copy threshold), `begin()` refuses any **non-builtin** target before persisting intent (409 with explicit copy, nothing saved, the current index unaffected). **Reverting to builtin stays allowed** — a large notebook stuck on an absent/failed custom selection has every write fail-closed by `require_write_admission`, and the builtin revert is its only self-service exit; a recovery rebuild that fails again merely returns to the retryable state. An unchanged clean-state save still short-circuits to 200 (a stuck-pending state never matches the unchanged fast path — its revert goes through the exemption instead). GET carries the server truth as `large_library_locked`; the settings panel disables only the custom-pipeline options and the same-pipeline retry button, keeps builtin recovery clickable, and explains inline. The full restructure (per-source transactions + generation-pointer publish) is deferred until real demand.
+The notebook settings surface is intentionally split. Owners and content-managers may edit notebook metadata and switch the indexing pipeline, but only owners may load or mutate mounted reference libraries — reading mounts is `notebook:configure`, changing them is `notebook:mount`, and both remain owner-only. Pure readers still get a read-only settings view that shows the current pipeline and status. Any pipeline change requires an explicit full-rebuild confirmation. PATCH first commits desired `(pipeline_id, version, opaque generation)`, then claims the existing durable `kg_build_jobs` rebuild single-flight and returns `pending` plus its `job_id`; the worker performs the bounded whole-notebook chunk plan, optional core-owned KG run, and eligible scale rebuild. A late worker can publish only while its exact generation still owns the selection. A failed/oversized plan leaves the desired generation pending; GET projects `rebuild_status=failed`, and notebook settings offers both same-pipeline retry and one-click builtin recovery. **Large libraries are locked out of switching to a custom pipeline (batch-3-W3, decision D3)**: when a notebook's active-object count exceeds `INDEXING_PIPELINE_SWITCH_MAX_OBJECTS` (default 200k — a dedicated threshold at the WR-2 failure scale, deliberately not the tiny copy threshold), `begin()` refuses any **non-builtin** target before persisting intent (409 with explicit copy, nothing saved, the current index unaffected). **Reverting to builtin stays allowed** — a large notebook stuck on an absent/failed custom selection has every write fail-closed by `require_write_admission`, and the builtin revert is its only self-service exit; a recovery rebuild that fails again merely returns to the retryable state. An unchanged clean-state save still short-circuits to 200 (a stuck-pending state never matches the unchanged fast path — its revert goes through the exemption instead). GET carries the server truth as `large_library_locked`; the settings panel disables only the custom-pipeline options and the same-pipeline retry button, keeps builtin recovery clickable, and explains inline. The full restructure (per-source transactions + generation-pointer publish) is deferred until real demand.
 
 While `pending`, ordinary source upload/reparse, manual KG build, and scale rebuild writes fail closed. The worker validates bounded chunk proposals for every user-visible ingestion source, computes embeddings outside any publication transaction, and persists each source's chunks, reverse rows, vectors, KG payload, source facts, and extraction outcome into an invisible durable notebook stage. Hidden Memory/Knowhow synthetic products are core-owned, actor-scoped at read time, excluded from the selectable strategy, and never enter that stage. A malformed per-source chunk proposal degrades that source to the builtin chunker with a stable content-free warning; a whole-notebook bound breach writes no live product. A missing or unavailable selected plugin exposes a revert-to-builtin path without preventing ordinary reads of the previously published artifacts.
 

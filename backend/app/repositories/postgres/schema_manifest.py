@@ -345,6 +345,6 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # backfill pass: the default IS the backfill and no content-addressed id is
 # recomputed (the global partition's hash input stays byte-identical).
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=79,
-    postgres_version=59,
+    sqlite_version=80,
+    postgres_version=60,
 )

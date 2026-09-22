@@ -220,11 +220,20 @@ def test_every_suppressed_ledger_record_is_re_booked_in_the_same_module() -> Non
             ):
                 suppresses = True
             # 位置形态:run_sync(_selected_notebook, ctx, repo, scope, False)
+            #
+            # ⚠ 判的是 ``record`` **那一个位置**(run_sync 的第 5 个实参 = 被调
+            # helper 的第 4 个形参),不是「实参里出现过任何一个 False」。后者曾经
+            # 等价,因为那两个 helper 当时只有 ``record`` 一个布尔形参;
+            # ``_writable_notebook`` 长出第二个布尔(``fenced``,镜像写入围栏的
+            # 豁免开关)之后就不再等价——一个 ``fenced=False`` 会被宽判据误读成
+            # 「关掉了记账」,逼着调用点为了绕开守卫而改写法,而守卫本身仍然什么都
+            # 没看对。位置判据既不误报,也照样抓得住真正在 ``record`` 位置传 False。
             if target == "run_sync" and node.args:
                 first = getattr(node.args[0], "id", "")
-                if first in {"_selected_notebook", "_writable_notebook"} and any(
-                    isinstance(arg, ast.Constant) and arg.value is False
-                    for arg in node.args
+                record_arg = node.args[4] if len(node.args) > 4 else None
+                if first in {"_selected_notebook", "_writable_notebook"} and (
+                    isinstance(record_arg, ast.Constant)
+                    and record_arg.value is False
                 ):
                     suppresses = True
         if suppresses and not rebooks:

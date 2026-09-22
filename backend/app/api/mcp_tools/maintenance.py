@@ -1,5 +1,6 @@
 """Knowledge/retrieval build and status MCP tools."""
 
+from functools import partial
 from typing import Any, Callable
 
 import anyio
@@ -115,8 +116,15 @@ def register_maintenance_tools(
         if when not in ("now", "idle"):
             raise ValueError("when must be one of: now, idle")
         repo = repository_provider()
+        # ``fenced=False``: a retrieval index is a TARGET-LOCAL derived artifact
+        # outside the cross-environment sync closure (design doc
+        # docs/incremental-sync-design.md section 6), so a mirrored notebook must
+        # be able to rebuild it — rebuilding is the target end's only repair for
+        # a stale index. The owner gate is unchanged. The browser twin says the
+        # same thing through its own capability cell ``scale_index:write``;
+        # ``build_kg`` above keeps the fence because it writes knowledge rows.
         principal, notebook_id = await anyio.to_thread.run_sync(
-            _writable_notebook, ctx, repo, "maintenance:execute"
+            partial(_writable_notebook, ctx, repo, "maintenance:execute", fenced=False)
         )
 
         def run() -> dict[str, Any]:

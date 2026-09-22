@@ -246,6 +246,21 @@ class NotebookSummary(BaseModel):
     # 配合来源列表 total_count 显示「文档 X / 上限」)。owner 为 admin 时前端另按角色显示
     # 「不限」,不消费此数值。
     document_limit: int = 0
+    # 非空 ⇒ 这本笔记本是从别的环境**同步来的镜像**,值是源环境标识
+    # (`notebooks.sync_origin`,SQLite v79 / PostgreSQL 0059)。
+    #
+    # 列表与详情两条路径都带:两条取行 SQL 都是 `SELECT notebooks.*`,所以这一列
+    # 随行到达,零新增查询。
+    #
+    # 消费方是前端:镜像上「会改写同步层内容」的入口要隐藏/禁用,并在来源面板顶部
+    # 标注「镜像自 <sync_origin>」(设计文档 docs/incremental-sync-design.md §5)。
+    #
+    # ⚠ 与 `can_manage_content` 同一条口径:**UI 信号不是授权判定**。真正的拒绝由
+    # `api/deps.py::_CAPABILITY_MIRROR_FENCE` 那道围栏在能力守卫之后给出
+    # (409 `notebook_mirrored`),投影只决定「要不要把入口画出来」。
+    #
+    # 默认 "" = 本地笔记本,即这一列存在之前的逐字行为。
+    sync_origin: str = ""
 
 
 class ShareResponse(BaseModel):

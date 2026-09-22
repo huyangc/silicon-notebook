@@ -4239,7 +4239,7 @@ export default function Home() {
     const modalLease = rootModals.issue("notebook-share", rootModals.captureWorkspaceOwner());
     if (!modalLease || modalLease.owner.kind !== "workspace") return;
     // 链接分享(GET/POST/DELETE /share)是 notebook:configure(**恒 owner**,P2-T2 评审
-    // P0)。组管理员只到「共享给群组」一节(授权边管理 = notebook:manage),不该也不能
+    // P0)。组管理员只到「共享给群组」一节(授权边管理 = notebook:grant),不该也不能
     // 读链接态——`getShareState` 对他会 404。所以非 owner 直接渲染空链接态(不发 GET),
     // 弹窗里的链接分享区另由 canConfigureNotebook 收起,只留群组授权区(它自己拉 grants)。
     if (!capabilities.canConfigureNotebook) {

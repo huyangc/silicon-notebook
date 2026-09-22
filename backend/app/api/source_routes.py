@@ -10,8 +10,10 @@ from starlette.formparsers import MultiPartException, MultiPartParser
 
 from app.api.deps import (
     get_current_user,
+    mirrored_notebook_error,
     notebook_access_repository,
     notebook_capability_allowed,
+    notebook_mirror_fence,
     notebook_store_port,
     repository,
     require_notebook_capability,
@@ -509,6 +511,12 @@ def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) 
         "sources:write", notebook_id, user.id
     ):
         raise HTTPException(status_code=404, detail="Source not found")
+    # 镜像写入围栏,与装饰器端点同序:权限先判(未授权仍 404,不泄露存在性),
+    # 通过之后才谈「这本库的内容还允不允许被改」。重解析会重写 chunks/elements,
+    # 全在同步闭包里。
+    mirrored = notebook_mirror_fence("sources:write", notebook_id)
+    if mirrored:
+        raise mirrored_notebook_error(mirrored)
     try:
         # This URL carries only source_id, so the request dependency cannot
         # establish notebook-scoped model diagnostics. Resolve first, then bind
@@ -961,6 +969,10 @@ def delete_source(source_id: str, user: UserProfile = Depends(get_current_user))
         "sources:write", notebook_id, user.id
     ):
         raise HTTPException(status_code=404, detail="Source not found")
+    # 镜像写入围栏,与 parse_source 逐字同款(同一条理由,同一个顺序)。
+    mirrored = notebook_mirror_fence("sources:write", notebook_id)
+    if mirrored:
+        raise mirrored_notebook_error(mirrored)
     try:
         source_repository().delete_source(source_id)
     except KeyError:

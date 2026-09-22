@@ -86,7 +86,7 @@ def core_stores(request) -> CoreStores:
     postgres_settings = request.getfixturevalue("postgres_settings")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 59
+    assert PostgresMigrator(postgres_database).migrate() == 60
     yield CoreStores(
         database=postgres_database,
         identity=PostgresIdentityStore(postgres_database, postgres_settings),
@@ -748,6 +748,51 @@ def test_notebook_mount_and_sharing_semantics(core_stores: CoreStores):
     core_stores.sharing.clear_share(personal_id)
     assert core_stores.sharing.find_by_token(token) is None
     assert core_stores.sharing.list_members(personal_id) == []
+
+
+def test_notebook_sync_origin_round_trips_and_reaches_the_summary(
+    core_stores: CoreStores,
+):
+    """镜像标记(SQLite v79 / PostgreSQL 0059)在 PG 侧的往返 + 投影。
+
+    三件事一次钉完,因为它们是同一条链的三段,断在哪一段都只表现为「前端看不到镜像」:
+      ① 默认 '' —— 每一行既有笔记本都是本地库,迁移刻意没有回填可写错;
+      ② `set_notebook_sync_origin` 写进去、`notebook_sync_origin` 读回来;
+      ③ `NotebookSummaryQuery.from_row` 把它投影到 `NotebookSummary.sync_origin`
+         —— 取行 SQL 是 `SELECT notebooks.*`,所以这一列随行到达、零新增查询,
+         但「构造性成立」不等于「真的成立」:`from_row` 里漏写一行赋值,两条路径
+         (列表与详情)会**同时**恒空,而前端据它决定要不要把写入口画出来。
+
+    这条是 SQLite 侧 `test_notebook_capability_guard.py` 那几条的 PG 孪生:两个后端
+    的 store 各自一份实现,只测一边等于只证明了一边。
+    """
+    owner = core_stores.identity.create_user("s00123456", "password-sync")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Mirrored"), owner.id
+    )
+    summaries = NotebookSummaryQuery(core_stores.database, _EmptySummaryQueries())
+
+    assert core_stores.sharing.notebook_sync_origin(notebook_id) == ""
+    with core_stores.database.connect() as connection:
+        local = summaries.from_row(connection, core_stores.notebooks.get_row(notebook_id))
+    assert local.sync_origin == ""
+
+    core_stores.sharing.set_notebook_sync_origin(notebook_id, "prod-shanghai")
+    assert core_stores.sharing.notebook_sync_origin(notebook_id) == "prod-shanghai"
+    with core_stores.database.connect() as connection:
+        mirrored = summaries.from_row(
+            connection, core_stores.notebooks.get_row(notebook_id)
+        )
+    assert mirrored.sync_origin == "prod-shanghai"
+
+    # 摘掉标记同样生效(导入器把一本库退出同步关系时走的正是这条),而且回到的是
+    # '' 而不是 NULL —— 这一列 NOT NULL,读侧不需要一份 None 兜底。
+    core_stores.sharing.set_notebook_sync_origin(notebook_id, "")
+    assert core_stores.sharing.notebook_sync_origin(notebook_id) == ""
+
+    # 不存在的行返回 '' 而不是抛:围栏跑在能力守卫**之后**,并发删库的正确答案是让
+    # 下游那次写入自己撞 404,不是让围栏变成第二个存在性判定。
+    assert core_stores.sharing.notebook_sync_origin("nb-does-not-exist") == ""
 
 
 def _pg_group(core_stores: CoreStores, group_id: str, owner_id: str) -> str:
@@ -2257,7 +2302,7 @@ def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 59
+    assert PostgresMigrator(postgres_database).migrate() == 60
     local_zone = ZoneInfo("America/Los_Angeles")
     naive_local = datetime(2026, 7, 22, 3, 0, 0)
     expected_utc = naive_local.replace(tzinfo=local_zone).astimezone(timezone.utc)
@@ -2340,7 +2385,7 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 59
+    assert PostgresMigrator(postgres_database).migrate() == 60
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 60}
     )
@@ -2412,7 +2457,7 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
     from app.repositories.postgres import sharing_store as pg_sharing_store
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 59
+    assert PostgresMigrator(postgres_database).migrate() == 60
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 120}
     )

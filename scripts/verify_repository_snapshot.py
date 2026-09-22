@@ -4615,5 +4615,36 @@ MIGRATION_MANIFEST[(78, 79)] = {
     "views": {},
 }
 
+
+# v80: the mirrored-notebook marker (parity with PostgreSQL
+# 0060_notebook_sync_origin.sql). One plain TEXT column, no table, index,
+# trigger or view, and no backfill -- every pre-existing row is local, which
+# the '' default already records.
+NOTEBOOK_SYNC_ORIGIN_COLUMNS = {
+    "notebooks": {
+        "sync_origin": ("sync_origin", "TEXT", 1, "''", 0),
+    },
+}
+MIGRATION_MANIFEST = {
+    (key[0], 80, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "notebooks": {
+                **manifest["columns"].get("notebooks", {}),
+                **NOTEBOOK_SYNC_ORIGIN_COLUMNS["notebooks"],
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(79, 80)] = {
+    "tables": {},
+    "columns": NOTEBOOK_SYNC_ORIGIN_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

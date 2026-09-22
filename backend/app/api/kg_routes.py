@@ -357,10 +357,16 @@ def unified_kg_status(notebook_id: str) -> UnifiedKgStatus:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.post("/notebooks/{notebook_id}/scale-index/rebuild", dependencies=[Depends(require_notebook_capability("kg:write"))])
+@router.post("/notebooks/{notebook_id}/scale-index/rebuild", dependencies=[Depends(require_notebook_capability("scale_index:write"))])
 def rebuild_scale_index(notebook_id: str, body: RebuildScaleIndexRequest = RebuildScaleIndexRequest()) -> dict:
     """在线重建 scale 检索索引(base-tier / 已建过)。when=now 立即后台/idle 低峰调度;
-    mode=auto(fold/full 自选)|fold|full。400 若参数非法,409 若不合格,404 若缺。"""
+    mode=auto(fold/full 自选)|fold|full。400 若参数非法,409 若不合格,404 若缺。
+
+    ⚠ 能力名是 `scale_index:write` 而不是 `kg:write`(级别同为 admin,权限一个字没变)。
+    拆出来是为了**镜像笔记本**:检索索引(`kg_index/` / `kg_viz/` 工件)是目标端自有的
+    派生产物,不在跨环境同步闭包里(设计 docs/incremental-sync-design.md §6),所以它
+    必须能在镜像上重建——重建恰恰是目标端唯一的修复手段,跟着 `kg:write` 一起被围栏
+    挡掉会让一本镜像库永远停在导入那一刻的索引上。见 deps.py 两张表上方的注释。"""
     if body.when not in ("now", "idle"):
         raise HTTPException(status_code=400, detail="when must be one of: now, idle")
     if body.mode not in ("auto", "fold", "full"):
@@ -373,9 +379,12 @@ def rebuild_scale_index(notebook_id: str, body: RebuildScaleIndexRequest = Rebui
         raise HTTPException(status_code=409, detail=str(exc))
 
 
-@router.post("/notebooks/{notebook_id}/scale-index/cancel", dependencies=[Depends(require_notebook_capability("kg:write"))])
+@router.post("/notebooks/{notebook_id}/scale-index/cancel", dependencies=[Depends(require_notebook_capability("scale_index:write"))])
 def cancel_scale_index(notebook_id: str) -> dict:
-    """取消检索索引:排队中→出队;构建中→拒绝(不可打断)。"""
+    """取消检索索引:排队中→出队;构建中→拒绝(不可打断)。
+
+    与 rebuild 同格 `scale_index:write`:取消的是那次重建,两者必须同权同围栏,
+    否则镜像上会出现「建得起来、取消不掉」。"""
     try:
         return repository().cancel_scale_index(notebook_id)
     except KeyError:

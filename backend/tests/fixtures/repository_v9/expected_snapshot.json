@@ -400,6 +400,7 @@
         "markdown"
       ],
       "status": "active",
+      "sync_origin": "",
       "target_users": "circuit designers",
       "taxonomy": [
         "amplifier",
@@ -912,6 +913,7 @@
           "markdown"
         ],
         "status": "active",
+        "sync_origin": "",
         "target_users": "circuit designers",
         "taxonomy": [
           "amplifier",
@@ -2399,7 +2401,7 @@
       },
       {
         "name": "notebooks",
-        "sql_sha256": "5a750c7a829872cc38b5d1f2bce4bd8f280828ac7d7e4836717b19736c341b04",
+        "sql_sha256": "0aba25e8505a7bfde0a5dd78b2d175a21ea57e84967ad6b83dd6677ec0fec420",
         "type": "table"
       },
       {
@@ -2513,6 +2515,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 79
+    "user_version": 80
   }
 }
