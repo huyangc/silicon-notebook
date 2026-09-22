@@ -54,6 +54,13 @@ from app.services.pending_bus import pending_bus
 
 logger = logging.getLogger("silicon_notebook.startup")
 
+# The one thing a non-binding model-configuration failure is allowed to say.
+# Fixed text on purpose: the loader's own messages can carry the configured
+# absolute path, a service id, an api_key_env name or a fragment of the file,
+# and this string goes to BOTH the log and stderr (which prod.sh/backend.sh
+# append to the backend log).  Which line is wrong is read from the file.
+_MODEL_CONFIG_INVALID = "模型服务配置无效（MODEL_SERVICES_CONFIG 指向的文件解析失败）"
+
 # Routes reachable BEFORE warm-up finishes (everything else 503s until ready):
 # the anonymous liveness/readiness probes + API docs. CORS preflight (OPTIONS)
 # is always allowed so the browser can even learn about the 503.
@@ -190,18 +197,25 @@ def _model_bindings_preflight(settings: Settings) -> None:
     为什么在这里而不是等仓库构造时抛:`run_startup` 把任何异常都收进 readiness,
     进程照样活着、对外 503,日志里只剩一句被脱敏成「database initialization
     failed」的 ValueError——运维既拿不到原因也拿不到非零退出码。放在 create_app
-    里,同一条 `SystemModelServiceRegistry.load` 先跑一遍:异常继续往上抛,
-    uvicorn 起不来并以非零码退出,同时往日志里补一行可读的原因。
+    里,同一条 `SystemModelServiceRegistry.load` 先跑一遍:进程以非零码退出,同时
+    留下一行可读的原因。
 
-    **异常与日志是两个面,内容刻意不同**(AGENTS.md:private paths、exception
-    text 不进日志)。终止进程的那个异常保留完整消息,含 MODEL_SERVICES_CONFIG
-    的绝对路径和文件里原样的陈旧 id——它是异常不是日志,而且运维要拿它去改文件。
-    写进日志的是 `loggable()`:同一份诊断,但只说设置项名不说路径,且来自配置文件
-    的键名必须长得像 workload id 才原样记,否则折叠成 `<无法显示的键名>`。
+    **逃逸启动的异常本身就是日志**:`scripts/prod.sh` 与 `scripts/backend.sh` 都把
+    uvicorn 的 stderr 追加进后端日志文件,所以一条 traceback 等于把异常文本写进了
+    日志——而 `ModelBindingGapError` 的消息刻意带着 MODEL_SERVICES_CONFIG 的绝对
+    路径和文件里原样的陈旧 id(键名可以含换行,足以在日志里伪造出一整行)。因此这里
+    不重抛它,而是 `raise SystemExit(exc.loggable()) from None`:退出码仍是 1,
+    stderr 只有脱敏后的那一行,没有 traceback、没有异常链,与写进 logger 的那行
+    同一口径(AGENTS.md:private paths、exception text 不进日志)。
 
-    只有绑定表的问题会重新抛出(靠 `ModelBindingGapError` 这个类型判定,不靠
-    匹配消息文本)。其余模型配置错误(密钥缺失、TOML 语法等)在这里只记一行固定
-    文案、不带异常文本,仍由既有路径决定失败时机——这次改动不扩大拒启的范围。
+    异常对象本身仍然带路径——`load()` 的其它调用方(eval CLI、热重载)需要它,
+    热重载那侧已经改用 `loggable()` 记日志。只是**不让它从 main 逃出去**。
+
+    其余模型配置错误(密钥缺失、TOML 语法错、服务字段非法)走同样的形状:一行固定
+    文案 + `SystemExit`。文案是**固定**的,因为那些异常可能带路径、服务 id、
+    api_key_env 名甚至文件片段,一个字都不能进 stderr;具体是哪一条,运维照着
+    MODEL_SERVICES_CONFIG 去看文件。一份解析不了的模型配置本来也不该把服务拉起来
+    再对外 503。
 
     作用范围要留意:`app = create_app()` 是模块级的(这正是 `uvicorn
     app.main:app` 必定触发预检的原因),所以任何 `import app.main` 都会跑这个
@@ -217,15 +231,14 @@ def _model_bindings_preflight(settings: Settings) -> None:
     try:
         SystemModelServiceRegistry.load(settings)
     except ModelBindingGapError as exc:
-        logger.error("%s", exc.loggable())
-        raise
+        message = exc.loggable()
+        logger.error("%s", message)
+        raise SystemExit(message) from None
     except ValueError:
         # 固定文案:loader 的其它 ValueError 可能带路径、服务 id、api_key_env
-        # 名甚至文件片段,一律不进日志;完整原因随异常走既有路径。
-        logger.error(
-            "模型服务配置无效（MODEL_SERVICES_CONFIG 指向的文件解析失败），"
-            "详情见异常信息"
-        )
+        # 名甚至文件片段,一律不进日志、也一律不进 stderr。
+        logger.error(_MODEL_CONFIG_INVALID)
+        raise SystemExit(_MODEL_CONFIG_INVALID) from None
 
 
 def create_app() -> FastAPI:

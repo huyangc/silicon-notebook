@@ -14,6 +14,10 @@ import ast
 import inspect
 import json
 import logging
+import os
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -87,44 +91,46 @@ def test_empty_config_passes_because_offline_mode_is_a_supported_runtime():
     assert _model_bindings_preflight(_settings()) is None
 
 
-def test_a_missing_binding_logs_the_message_and_refuses_to_build_the_app(
+def test_a_missing_binding_logs_the_message_and_stops_the_process(
     monkeypatch, tmp_path, caplog
 ):
-    """异常带路径、日志不带:两个面同样可读,披露范围不同。
+    """终止进程的那个异常也是日志,所以它和 logger 那行必须同一口径。
 
-    AGENTS.md 禁止 private path 与 exception text 进日志。终止进程的异常不是
-    日志,它要带上文件路径好让运维直接去改;写进日志的那行只说设置项名。
+    `scripts/prod.sh` / `scripts/backend.sh` 把 uvicorn 的 stderr 追加进后端
+    日志文件,一条 traceback 就等于把异常文本写进了日志。预检因此把
+    `ModelBindingGapError` 换成 `SystemExit(exc.loggable())`:退出码照旧,
+    stderr 只剩脱敏后的那一行。
     """
     monkeypatch.setenv("PREFLIGHT_KEY", "secret")
     config = _config(tmp_path, omit={"kg_glean", "memory_embedding"})
     settings = _settings(config)
 
     with caplog.at_level(logging.ERROR, logger="silicon_notebook.startup"):
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(SystemExit) as exc_info:
             _model_bindings_preflight(settings)
 
+    # 运维往上翻要能一眼看到原因,所以两处同样点名到工作负载(封闭词表,可记)。
     message = str(exc_info.value)
+    logged = [record.getMessage() for record in caplog.records]
+    assert logged == [message]
     assert "知识补充抽取（kg_glean）" in message
     assert "记忆向量（memory_embedding）" in message
-    assert config in message
-
-    # 运维往上翻要能一眼看到原因,所以日志里同样点名到工作负载(封闭词表,可记)。
-    logged = [record.getMessage() for record in caplog.records]
-    assert len(logged) == 1
-    assert "知识补充抽取（kg_glean）" in logged[0]
-    assert "记忆向量（memory_embedding）" in logged[0]
-    assert "MODEL_SERVICES_CONFIG 指向的文件" in logged[0]
-    # 日志既不带配置路径,也不带异常整句。
-    assert config not in logged[0]
-    assert str(tmp_path) not in logged[0]
-    assert message not in logged[0]
+    assert "MODEL_SERVICES_CONFIG 指向的文件" in message
+    # 两处都不带配置路径;异常链也被切断,原异常不会跟着 traceback 一起出去。
+    assert config not in message
+    assert str(tmp_path) not in message
+    # `from None` 切断异常链:__cause__ 为空且 __suppress_context__ 为真,解释器
+    # 因此不会在 stderr 上顺带打印原异常(那条带路径)。真进程的证据见下面的
+    # subprocess 用例。
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__suppress_context__ is True
 
 
 def test_a_stale_binding_alone_is_enough_to_refuse(monkeypatch, tmp_path):
     monkeypatch.setenv("PREFLIGHT_KEY", "secret")
     settings = _settings(_config(tmp_path, extra='graph_chain_verify = "chat"\n'))
 
-    with pytest.raises(ValueError, match="graph_chain_verify"):
+    with pytest.raises(SystemExit, match="graph_chain_verify"):
         _model_bindings_preflight(settings)
 
 
@@ -135,8 +141,10 @@ def test_a_stale_key_that_is_not_shaped_like_an_id_never_reaches_the_log(
 
     合法形状的键(`ask_anwser`)照记——运维要靠它找到那一行;带引号/空格/换行
     /路径的键会折叠成一个计数占位符,否则一个精心构造的键就能往日志里注入
-    标点、换行甚至一条假日志行。异常那一面不做这个折叠:它要如实说出文件里
-    写的是什么。
+    标点、换行甚至一条假日志行。stderr 同理:它也会被追加进后端日志。
+
+    `ModelBindingGapError` 本身仍然如实说出文件里写的是什么(见
+    `test_model_registry`),只是不让它从 main 逃出去。
     """
     monkeypatch.setenv("PREFLIGHT_KEY", "secret")
     hostile = '/etc/silicon/secret.toml\nERROR fake line'
@@ -146,13 +154,14 @@ def test_a_stale_key_that_is_not_shaped_like_an_id_never_reaches_the_log(
     ))
 
     with caplog.at_level(logging.ERROR, logger="silicon_notebook.startup"):
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(SystemExit) as exc_info:
             _model_bindings_preflight(settings)
 
-    assert hostile in str(exc_info.value)
+    assert hostile not in str(exc_info.value)
 
     logged = [record.getMessage() for record in caplog.records]
     assert len(logged) == 1
+    assert logged[0] == str(exc_info.value)
     assert "ask_anwser（[bindings]）" in logged[0]
     assert "<无法显示的键名>×1（[bindings]）" in logged[0]
     assert "secret.toml" not in logged[0]
@@ -174,29 +183,33 @@ def test_the_escape_hatch_downgrades_the_refusal_to_a_started_service(
     assert _model_bindings_preflight(settings) is None
 
 
-def test_other_model_configuration_errors_stay_on_their_existing_path(
+def test_other_model_configuration_errors_get_one_fixed_sentence_and_no_more(
     monkeypatch, tmp_path, caplog
 ):
-    """本次改动不扩大拒启范围:密钥缺失仍由既有路径决定失败时机。
+    """密钥缺失、TOML 语法错等:同样停进程,但只说一句固定文案。
 
-    预检只记一行**固定文案**就放行——重新抛出的只有绑定表的问题。这里的异常
-    文本可能带路径、服务 id、api_key_env 名甚至文件片段,所以一个字都不进日志
-    (AGENTS.md);完整原因随异常走既有路径。把「TOML 语法错」「密钥没填」也在
-    这里拒掉会改变一批既有部署的失败形态,属于另一件事。
+    这些 loader 异常可能带路径、服务 id、api_key_env 名甚至文件片段,而 stderr
+    会被追加进后端日志——所以异常文本一个字都不许出去,日志与 stderr 都只有这
+    一句。具体哪一行错了,运维照着 MODEL_SERVICES_CONFIG 去看文件。
     """
     monkeypatch.delenv("PREFLIGHT_KEY", raising=False)
     config = _config(tmp_path)
     settings = _settings(config)
 
     with caplog.at_level(logging.ERROR, logger="silicon_notebook.startup"):
-        assert _model_bindings_preflight(settings) is None
+        with pytest.raises(SystemExit) as exc_info:
+            _model_bindings_preflight(settings)
 
     logged = [record.getMessage() for record in caplog.records]
-    assert logged == [
-        "模型服务配置无效（MODEL_SERVICES_CONFIG 指向的文件解析失败），详情见异常信息"
-    ]
+    assert logged == ["模型服务配置无效（MODEL_SERVICES_CONFIG 指向的文件解析失败）"]
+    assert str(exc_info.value) == logged[0]
     assert "PREFLIGHT_KEY" not in logged[0]
     assert config not in logged[0]
+    # `from None` 切断异常链:__cause__ 为空且 __suppress_context__ 为真,解释器
+    # 因此不会在 stderr 上顺带打印原异常(那条带路径)。真进程的证据见下面的
+    # subprocess 用例。
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__suppress_context__ is True
 
 
 def _create_app_tree() -> ast.FunctionDef:
@@ -275,3 +288,103 @@ def test_create_app_runs_the_preflight_before_it_builds_anything():
     assert _statement_index(create_app, calls[0]) < _statement_index(
         create_app, built[0]
     ), "预检必须跑在 FastAPI(...) 构造之前"
+
+
+# ---------------------------------------------------------------------------
+# 真实子进程:caplog 只看得到 logger,看不到逃逸的异常。而 `scripts/prod.sh` 与
+# `scripts/backend.sh` 都用 `>>"$BACKEND_LOG" 2>&1` 启 uvicorn,所以 **stderr
+# 就是后端日志**——一条 traceback 等于把异常文本写进了日志。下面两条用真进程
+# 断言 stderr 的实际字节,是这条边界唯一不靠推理的证据。
+# ---------------------------------------------------------------------------
+
+
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+
+
+def _boot(config: str, **overrides: str) -> subprocess.CompletedProcess:
+    """`import app.main`(= `uvicorn app.main:app` 走的那条路)跑在真子进程里。"""
+    environment = {
+        "PATH": os.defpath,
+        "PYTHONPATH": str(_BACKEND_DIR),
+        "PYTHONIOENCODING": "utf-8",
+        "SILICON_NOTEBOOK_ENV_FILE": "",
+        "ALLOW_NO_ENV_FILE": "1",
+        "EXTENSIONS_CONFIG": "",
+        "MINERU_MODE": "off",
+        "MINERU_API_TOKEN": "",
+        "MODEL_SERVICES_CONFIG": config,
+        "PREFLIGHT_KEY": "secret",
+        **overrides,
+    }
+    return subprocess.run(
+        [sys.executable, "-c", "import app.main"],
+        cwd=str(_BACKEND_DIR),
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_a_missing_binding_stops_the_real_process_without_a_traceback(tmp_path):
+    """真进程:退出码 1,stderr 只有脱敏那一行。
+
+    `SystemExit(str)` 让解释器打印消息并以 1 退出,不打印 traceback。断言的是
+    「没有 Traceback、没有 ModelBindingGapError 这个类名、没有配置路径」——
+    三者任何一个出现在 stderr,都等于出现在了生产的后端日志文件里。
+    """
+    config = _config(tmp_path, omit={"kg_glean"}, extra='graph_chain_verify = "chat"\n')
+
+    result = _boot(config)
+
+    assert result.returncode == 1
+    assert "model-bindings: " in result.stderr
+    assert "知识补充抽取（kg_glean）" in result.stderr
+    assert "graph_chain_verify（[bindings]）" in result.stderr
+    assert "MODEL_SERVICES_CONFIG 指向的文件" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert "ModelBindingGapError" not in result.stderr
+    assert config not in result.stderr
+    assert str(tmp_path) not in result.stderr
+
+
+def test_a_hostile_stale_key_cannot_forge_a_line_in_the_backend_log(tmp_path):
+    """真进程:构造出来的键名既进不了 stderr,也伪造不出额外的日志行。"""
+    hostile = "/etc/silicon/secret.toml\nERROR forged line"
+    config = _config(
+        tmp_path, extra=f'{json.dumps(hostile)} = "chat"\n'
+    )
+
+    result = _boot(config)
+
+    assert result.returncode == 1
+    assert "<无法显示的键名>×1（[bindings]）" in result.stderr
+    assert "/etc/silicon" not in result.stderr
+    assert "forged line" not in result.stderr
+
+
+def test_other_configuration_errors_print_only_the_fixed_sentence(tmp_path):
+    """真进程:密钥缺失同样停进程,stderr 只有那一句,不含 api_key_env 名。"""
+    config = _config(tmp_path)
+
+    result = _boot(config, PREFLIGHT_KEY="")
+
+    assert result.returncode == 1
+    assert result.stderr.strip().endswith(
+        "模型服务配置无效（MODEL_SERVICES_CONFIG 指向的文件解析失败）"
+    )
+    assert "Traceback" not in result.stderr
+    assert "ValueError" not in result.stderr
+    assert "PREFLIGHT_KEY" not in result.stderr
+    assert config not in result.stderr
+
+
+def test_a_complete_binding_table_lets_the_real_process_import_cleanly(tmp_path):
+    """对照组:同一条路径在配置正确时照常 import 成功,退出码 0。
+
+    没有它,上面三条也会在「预检根本没跑」时全绿。
+    """
+    result = _boot(_config(tmp_path))
+
+    assert result.returncode == 0, result.stderr
+    assert "model-bindings: " not in result.stderr
