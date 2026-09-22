@@ -690,7 +690,11 @@ def test_the_watermark_records_the_seq_the_snapshot_and_the_gate(baseline):
 
     third = _watermark(baseline["repo"])
     assert third["captured"] == 0
-    assert third["exported_through_seq"] == 0
+    # A closed gate is reported through ``captured``; the seq itself stays
+    # monotonic (clamped to the previous watermark, never 0 while a higher
+    # watermark exists), so prune-log's minimum and the next chain link are
+    # not dragged backwards by a gate that happened to be closed.
+    assert third["exported_through_seq"] == second["exported_through_seq"]
 
 
 # ------------------------------------------------------------ import side
@@ -762,6 +766,33 @@ def test_pruning_the_log_below_the_watermark_never_moves_it_backwards(baseline):
     assert third.from_seq == watermark + 1
     assert third.to_seq > watermark
     assert [row["name"] for row in _rows(third.package_dir, "notebooks")] == ["alpha v3"]
+
+
+def test_a_full_rebaseline_after_pruning_never_moves_the_watermark_backwards(baseline):
+    """The full branch is on the chain too: ``sync export --full`` after
+    ``sync prune-log`` emptied the log reads MAX(seq) = 0 and must keep the
+    existing watermark (the incremental arm above already pins this; this
+    arm is what the full branch's own clamp answers to).
+
+    变异验证: 去掉全量分支的 ``max(..., W)`` 钳制, 本条必须报红。
+    """
+    repo = baseline["repo"]
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET name='alpha v2' WHERE id=?", (baseline["alpha"],))
+    first = _export(baseline["settings"], baseline["out"])
+    watermark = _watermark(repo)["exported_through_seq"]
+    assert watermark == first.to_seq > 0
+
+    with repo._write() as db:
+        db.execute("DELETE FROM sync_change_log")
+
+    rebased = _export(baseline["settings"], baseline["out"], full=True)
+
+    assert rebased.mode == MODE_FULL
+    assert rebased.captured_through_seq == 0
+    assert rebased.to_seq == watermark
+    assert rebased.watermark_advanced is True
+    assert _watermark(repo)["exported_through_seq"] == watermark
 
 
 # ----------------------------------------------------- lifecycle status rule

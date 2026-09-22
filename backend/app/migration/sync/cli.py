@@ -175,7 +175,7 @@ def _cmd_export(args: argparse.Namespace, settings: Settings) -> int:
     elif not report.watermark_advanced:
         print("水位未推进")
     if report.empty:
-        print("窗口为空，仍产出空增量包；水位已推进。")
+        print("窗口为空，仍产出空增量包；水位已记录。")
     print(f"笔记本: {len(report.notebooks)} 个")
     if report.deleted_notebooks:
         print(f"已删除的笔记本: {len(report.deleted_notebooks)} 个")
@@ -478,10 +478,11 @@ def _capture_log_count_approx(
     tradeoff for never scanning.
     SQLite has no equivalent statistics catalog this cheap: ``MAX(seq) -
     MIN(seq) + 1`` is used instead, an upper bound on the true row count
-    (``seq`` never repeats, and nothing but a full ``sync capture disable``
-    ever deletes a log row within one generation of the log, so this is
-    exact in the common case and only ever over-counts, never
-    under-counts, if that assumption is ever violated).
+    (``seq`` never repeats; the only deleters are ``sync capture disable``,
+    which empties the log, and ``sync prune-log``, which removes a
+    contiguous prefix so MIN(seq) simply moves up -- either way the bound
+    stays exact in the common case and can only ever over-count, never
+    under-count).
     """
     if source.is_postgres:
         row = source.fetch(
