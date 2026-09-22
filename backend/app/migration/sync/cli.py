@@ -77,6 +77,31 @@ class SyncCaptureError(RuntimeError):
         self.missing_tables = missing_tables
 
 
+class SyncSchemaColumnsError(RuntimeError):
+    """A sync subcommand needed a COLUMN a later migration adds, on a table
+    that already exists from an earlier one -- distinct from
+    :class:`SyncStatusError`/:class:`SyncCaptureError` (a missing TABLE)
+    because the table-existence guards those two classes back do not catch
+    this: ``sync_export_state`` exists from v83/0063, but ``captured``/
+    ``exported_snapshot`` are v85/0065 columns, so a v83 or v84 database has
+    the table and still raises a raw "no such column"/"column ... does not
+    exist" driver error the moment a query names them. This gives that
+    failure the same kind of named diagnosis the table-level guards already
+    give theirs.
+
+    ``missing_columns`` mirrors :class:`SyncCaptureError`'s ``missing_tables``
+    for the same reason: a caller that wants to degrade gracefully (``sync
+    status``'s watermark section, see ``_load_sync_status``) reads it back
+    structured instead of parsing the message apart.
+    """
+
+    def __init__(
+        self, message: str, *, missing_columns: frozenset[str] = frozenset()
+    ) -> None:
+        super().__init__(message)
+        self.missing_columns = missing_columns
+
+
 def _jsonable(value: Any) -> Any:
     if dataclasses.is_dataclass(value):
         return {
@@ -121,6 +146,7 @@ def _export_report_as_json(report: ExportReport) -> dict[str, Any]:
         "file_count": report.file_count,
         "bytes_written": report.bytes_written,
         "mode": report.mode,
+        "captured": report.captured,
         "captured_through_seq": report.captured_through_seq,
         "from_seq": report.from_seq,
         "to_seq": report.to_seq,
@@ -170,6 +196,7 @@ def _cmd_export(args: argparse.Namespace, settings: Settings) -> int:
     if report.base_package_id:
         print(f"续接自包: {report.base_package_id}")
     print(f"本次快照捕获到的变更日志水位: seq={report.captured_through_seq}")
+    print(f"本次水位 captured={'true' if report.captured else 'false'}")
     if report.scoped:
         print("范围: 按 --notebook 限定，本次未推进水位")
     elif not report.watermark_advanced:
@@ -288,6 +315,53 @@ def _missing_sync_tables(conn: Any, *, is_postgres: bool) -> set[str]:
     return set(_SYNC_TABLES) - found
 
 
+# The two v85/0065 columns every reader of ``sync_export_state`` beyond the
+# plain v83/0063 four (``target_env``, ``exported_through_seq``,
+# ``exported_at``, ``package_id``) depends on. A set, not a tuple, because
+# both callers below only ever need set difference against it.
+_EXPORT_STATE_V85_COLUMNS = frozenset({"captured", "exported_snapshot"})
+
+
+def _missing_export_state_columns(conn: Any, *, is_postgres: bool) -> set[str]:
+    """Which of ``_EXPORT_STATE_V85_COLUMNS`` ``sync_export_state`` does NOT
+    have -- empty on a v85/0065+ database.
+
+    Column-level, not table-level: ``_missing_sync_tables`` above already
+    guards the TABLE (v83/0063); this guards columns two later migrations
+    (v85/0065) added to a table that migration never touched otherwise. A
+    v83 or v84 database has the table and fails this check, which is exactly
+    the gap ``SyncSchemaColumnsError`` exists to diagnose by name instead of
+    letting a raw driver error through the first time a caller SELECTs one of
+    these columns.
+    """
+    if is_postgres:
+        rows = conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'sync_export_state' "
+            "AND column_name IN ('captured', 'exported_snapshot')"
+        ).fetchall()
+        found = {str(row["column_name"]) for row in rows}
+    else:
+        rows = conn.execute("PRAGMA table_info(sync_export_state)").fetchall()
+        found = {str(row["name"]) for row in rows}
+    return set(_EXPORT_STATE_V85_COLUMNS) - found
+
+
+def _require_export_state_v85_columns(source: _Source, conn: Any) -> None:
+    """Raise :class:`SyncSchemaColumnsError` unless ``sync_export_state`` has
+    both v85/0065 columns. Callers that must not proceed without them
+    (``sync prune-log`` -- see ``_prune_log_bounds``) use this; ``sync
+    status`` does not, because it degrades instead of refusing (see
+    ``_load_sync_status``)."""
+    missing = _missing_export_state_columns(conn, is_postgres=source.is_postgres)
+    if missing:
+        raise SyncSchemaColumnsError(
+            "本环境尚未迁移到 v85/0065（缺列: " + "、".join(sorted(missing)) + "）；"
+            "先启动一次后端完成 schema 迁移，或手动执行相应迁移脚本，再重试。",
+            missing_columns=frozenset(missing),
+        )
+
+
 def _load_sync_status(settings: Settings) -> dict[str, Any]:
     """Read ``sync_export_state``/``sync_imports`` on whichever backend
     ``settings.database_url`` names.
@@ -302,10 +376,27 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
     ``_load_capture_status`` does; a short read-only status query does not
     need that consistency any more than the capture section already sitting
     next to it does, so there is no reason for the two to differ.
+
+    The v83/0063 TABLE check (``_missing_sync_tables``) still raises
+    ``SyncStatusError``, same as before: no table at all means this section
+    has nothing whatsoever to show. Missing v85/0065 COLUMNS on that table --
+    a v83 or v84 database -- is different: the four v83 columns still read
+    fine, so this DEGRADES (each export row carries only those four; no
+    ``captured``/``exported_snapshot`` keys) rather than failing the whole
+    command the way a raw "no such column" error would, matching the
+    ``sync capture`` section's own already-established degrade-not-fail
+    stance on a v84-missing database (``_capture_section_for_status``). The
+    returned dict's ``exports_note`` names the gap when degraded, ``None``
+    otherwise, so both renderers below (and any JSON consumer) can tell the
+    two shapes apart without inspecting individual rows.
     """
-    exports_sql = (
+    exports_sql_v85 = (
         "SELECT target_env, exported_through_seq, exported_at, package_id, "
         "captured, exported_snapshot FROM sync_export_state ORDER BY target_env"
+    )
+    exports_sql_v83 = (
+        "SELECT target_env, exported_through_seq, exported_at, package_id "
+        "FROM sync_export_state ORDER BY target_env"
     )
     imports_sql = (
         "SELECT package_id, source_env, status, started_at, finished_at, "
@@ -314,18 +405,30 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
     source = _Source(settings, ROOT_DIR)
     try:
         with source.read() as conn:
-            missing = _missing_sync_tables(conn, is_postgres=source.is_postgres)
-            if missing:
+            missing_tables = _missing_sync_tables(conn, is_postgres=source.is_postgres)
+            if missing_tables:
                 raise SyncStatusError(
-                    "本环境尚未迁移到 v83/0063（缺表: " + "、".join(sorted(missing)) + "）；"
+                    "本环境尚未迁移到 v83/0063（缺表: " + "、".join(sorted(missing_tables)) + "）；"
                     "先启动一次后端完成 schema 迁移，或手动执行相应迁移脚本，再重试。"
                 )
-            exports = source.fetch(conn, exports_sql)
+            missing_columns = _missing_export_state_columns(
+                conn, is_postgres=source.is_postgres
+            )
+            if missing_columns:
+                exports = source.fetch(conn, exports_sql_v83)
+                exports_note = (
+                    "captured/snapshot 需 v85/0065（缺列: "
+                    + "、".join(sorted(missing_columns))
+                    + "）；先启动一次后端完成 schema 迁移可看到完整信息。"
+                )
+            else:
+                exports = source.fetch(conn, exports_sql_v85)
+                for row in exports:
+                    row["captured"] = bool(row["captured"])
+                exports_note = None
             imports = source.fetch(conn, imports_sql)
     finally:
         source.close()
-    for row in exports:
-        row["captured"] = bool(row["captured"])
     for row in imports:
         report = row.get("report_json")
         if isinstance(report, str):
@@ -335,7 +438,7 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
                 report = {}
         row["report_json"] = report or {}
         row["notebooks"] = len(row["report_json"].get("notebooks", []) or [])
-    return {"exports": exports, "imports": imports}
+    return {"exports": exports, "exports_note": exports_note, "imports": imports}
 
 
 def _cmd_status(args: argparse.Namespace, settings: Settings) -> int:
@@ -351,13 +454,31 @@ def _cmd_status(args: argparse.Namespace, settings: Settings) -> int:
         _print_json(state)
         return 0
     print("导出水位（本环境作为源）：")
+    if state.get("exports_note"):
+        print(f"  （{state['exports_note']}）")
     if not state["exports"]:
         print("  （无）")
     for row in state["exports"]:
+        if "captured" not in row:
+            # Degraded shape (see _load_sync_status's docstring): only the
+            # four v83/0063 columns are available, exports_note above
+            # already explained why.
+            print(
+                f"  -> {row['target_env']}: seq={row['exported_through_seq']} "
+                f"于 {row['exported_at']}（包 {row['package_id']}）"
+            )
+            continue
         snapshot_note = ""
         if row["exported_snapshot"]:
-            xmin = _Source.snapshot_xmin(str(row["exported_snapshot"]))
-            snapshot_note = f"，snapshot xmin={xmin}"
+            try:
+                xmin = _Source.snapshot_xmin(str(row["exported_snapshot"]))
+                snapshot_note = f"，snapshot xmin={xmin}"
+            except SyncExportError:
+                # A malformed exported_snapshot (should never happen -- see
+                # _prune_log_bounds's own guard against it) must not abort
+                # the rest of `status`; one row's unreadable snapshot is a
+                # one-line hint, not a reason to hide every other row.
+                snapshot_note = "，snapshot 解析失败"
         captured_note = "true" if row["captured"] else "false"
         print(
             f"  -> {row['target_env']}: seq={row['exported_through_seq']} "
@@ -862,7 +983,14 @@ def _prune_log_bounds(source: _Source, conn: Any) -> tuple[int, int | None]:
     ``DELETE``/``COUNT`` predicate is built from
     (docs/incremental-sync-design.md §7 "保留策略").
 
-    Both are taken **only** over ``sync_export_state`` rows with
+    Checks ``_require_export_state_v85_columns`` FIRST, before the ``SELECT``
+    below ever names ``captured``/``exported_snapshot``: those are v85/0065
+    columns, and a v83/0063 or v84/0064 database has the table but not them,
+    which would otherwise surface as a raw "no such column"/"column ... does
+    not exist" driver error instead of the named diagnosis
+    :class:`SyncSchemaColumnsError` gives.
+
+    Both bounds are taken **only** over ``sync_export_state`` rows with
     ``captured = 1``: a target that has never exported, or whose latest
     export fell back to full with the capture gate off, has no change-log
     window behind its watermark at all and simply abstains from voting on
@@ -879,6 +1007,7 @@ def _prune_log_bounds(source: _Source, conn: Any) -> tuple[int, int | None]:
     anything, as opposed to some targets abstaining while others still
     supply a bound.
     """
+    _require_export_state_v85_columns(source, conn)
     rows = source.fetch(
         conn,
         source.sql(
@@ -932,6 +1061,45 @@ def _prune_log_clause(
     return " AND ".join(parts), params
 
 
+# Rows per DELETE batch. A constant, not tunable from the CLI: this is an
+# implementation detail of how the delete is chunked, not a retention
+# parameter (that is --keep-days). 5000 keeps one batch's transaction short
+# on a log that has gone unpruned for a long time, at the cost of more round
+# trips than a single unbounded DELETE -- the right tradeoff for a command
+# that is run interactively/from cron, not on a hot path.
+_PRUNE_LOG_BATCH_SIZE = 5000
+
+
+def _prune_log_delete_batch(
+    source: _Source, clause: str, params: Sequence[Any]
+) -> int:
+    """Delete UP TO ``_PRUNE_LOG_BATCH_SIZE`` rows matching ``clause`` and
+    return how many it actually deleted, in its OWN transaction (SQLite:
+    ``write()`` + ``begin_immediate``, the same convention every other
+    guarded write in this module uses; PostgreSQL: ``write()``'s own
+    transaction).
+
+    ``DELETE ... WHERE seq IN (SELECT seq FROM ... WHERE <clause> ORDER BY
+    seq LIMIT N)`` rather than a bare ``DELETE ... WHERE <clause> LIMIT N``
+    because neither backend's ``DELETE`` supports ``LIMIT`` directly (SQLite
+    only with a compile-time option this codebase does not rely on;
+    PostgreSQL never) -- the subquery picks the rows, the outer statement
+    deletes exactly those.
+    """
+    with source.write() as conn:
+        if not source.is_postgres:
+            SqliteDatabase.begin_immediate(conn)
+        cursor = conn.execute(
+            source.sql(
+                "DELETE FROM sync_change_log WHERE seq IN ("
+                "SELECT seq FROM sync_change_log WHERE "
+                f"{clause} ORDER BY seq LIMIT {_PRUNE_LOG_BATCH_SIZE})"
+            ),
+            tuple(params),
+        )
+        return int(cursor.rowcount)
+
+
 def _prune_log(
     source: _Source, *, keep_days: int, dry_run: bool
 ) -> dict[str, Any]:
@@ -939,23 +1107,43 @@ def _prune_log(
     future export could still need (docs/incremental-sync-design.md §7
     "保留策略").
 
-    One transaction either way: the watermark bounds are read and acted on
-    (deleted, or counted) inside the SAME transaction, so a concurrent
-    export that advances a watermark mid-run cannot leave this command
-    computing a bound from a state that no longer holds by the time it acts.
-    ``--dry-run`` uses ``source.read()`` (a consistent snapshot, nothing
-    written); a real run uses ``source.write()`` with
-    ``SqliteDatabase.begin_immediate`` first on SQLite, the same convention
-    ``_capture_enable``/``_capture_disable`` use for a guarded write.
+    The bounds (``min_seq``/``min_xmin``) are computed ONCE, in a single
+    read-only pass (``source.read()``) -- not re-derived per batch below.
+    That is safe, not merely convenient: both bounds only ever move in the
+    direction that WIDENS what may legally be deleted (a later, more-advanced
+    ``captured=1`` watermark raises ``min_seq``/``min_xmin``; nothing ever
+    lowers them once written -- see ``_advance_watermark``'s own monotonic
+    clamp). A bound fixed at the start of this call is therefore never less
+    safe than one recomputed mid-run; at worst a concurrent export that
+    advances a watermark while this command is still deleting simply leaves
+    a few more now-safe-to-delete rows for the NEXT ``prune-log`` to catch,
+    which is the same "safe to under-delete, never to over-delete" property
+    a single-transaction design would have had, achieved without holding one
+    long transaction (or one giant single-statement ``DELETE``) over a log
+    that may hold millions of rows after a long gap without pruning.
+
+    The real (non-``dry-run``) deletion is therefore CHUNKED:
+    ``_prune_log_delete_batch`` runs in its own transaction, repeatedly,
+    until a batch deletes fewer than ``_PRUNE_LOG_BATCH_SIZE`` rows (the
+    signal that nothing matching is left) or zero (nothing did). Row counts
+    accumulate across batches into the returned ``deleted``; ``batches``
+    counts how many non-empty batches ran, so an operator watching a large
+    prune can see it make progress rather than one command blocking for an
+    unknown time. ``--dry-run`` needs none of this: it is one read-only
+    ``COUNT(*)`` against the SAME clause the batches would use, inside
+    ``source.read()``, so it never writes and therefore never needs
+    batching.
     """
+    with source.read() as conn:
+        _require_capture_tables(source, conn)
+        min_seq, min_xmin = _prune_log_bounds(source, conn)
     threshold = _moment(
         source, datetime.now(timezone.utc) - timedelta(days=keep_days)
     )
+    clause, params = _prune_log_clause(source, min_seq, min_xmin, threshold)
+
     if dry_run:
         with source.read() as conn:
-            _require_capture_tables(source, conn)
-            min_seq, min_xmin = _prune_log_bounds(source, conn)
-            clause, params = _prune_log_clause(source, min_seq, min_xmin, threshold)
             count = source.fetch(
                 conn,
                 source.sql(f"SELECT COUNT(*) AS n FROM sync_change_log WHERE {clause}"),
@@ -965,25 +1153,27 @@ def _prune_log(
             "dry_run": True,
             "deleted": 0,
             "would_delete": int(count),
+            "batches": 0,
             "keep_days": keep_days,
             "min_seq": min_seq,
             "min_txid": min_xmin,
         }
 
-    with source.write() as conn:
-        if not source.is_postgres:
-            SqliteDatabase.begin_immediate(conn)
-        _require_capture_tables(source, conn)
-        min_seq, min_xmin = _prune_log_bounds(source, conn)
-        clause, params = _prune_log_clause(source, min_seq, min_xmin, threshold)
-        cursor = conn.execute(
-            source.sql(f"DELETE FROM sync_change_log WHERE {clause}"), tuple(params)
-        )
-        deleted = cursor.rowcount
+    deleted = 0
+    batches = 0
+    while True:
+        batch_deleted = _prune_log_delete_batch(source, clause, params)
+        if batch_deleted == 0:
+            break
+        deleted += batch_deleted
+        batches += 1
+        if batch_deleted < _PRUNE_LOG_BATCH_SIZE:
+            break
     return {
         "dry_run": False,
-        "deleted": int(deleted),
+        "deleted": deleted,
         "would_delete": 0,
+        "batches": batches,
         "keep_days": keep_days,
         "min_seq": min_seq,
         "min_txid": min_xmin,
@@ -994,7 +1184,7 @@ def _cmd_prune_log(args: argparse.Namespace, settings: Settings) -> int:
     source = _Source(settings, ROOT_DIR)
     try:
         result = _prune_log(source, keep_days=args.keep_days, dry_run=args.dry_run)
-    except (SyncCaptureError, SyncPruneError) as exc:
+    except (SyncCaptureError, SyncPruneError, SyncSchemaColumnsError) as exc:
         print(f"sync prune-log: {exc}", file=sys.stderr)
         return 2
     finally:
@@ -1005,7 +1195,7 @@ def _cmd_prune_log(args: argparse.Namespace, settings: Settings) -> int:
     if result["dry_run"]:
         print(f"预检（--dry-run）：会删除 {result['would_delete']} 行，不会真的删除。")
     else:
-        print(f"已删除 {result['deleted']} 行。")
+        print(f"已删除 {result['deleted']} 行（{result['batches']} 批）。")
     bound_note = f"seq<={result['min_seq']}"
     if result["min_txid"] is not None:
         bound_note += f"，txid<{result['min_txid']}"
@@ -1014,6 +1204,24 @@ def _cmd_prune_log(args: argparse.Namespace, settings: Settings) -> int:
 
 
 # --------------------------------------------------------------------- CLI
+
+
+def _keep_days(value: str) -> int:
+    """``argparse`` ``type=`` for ``--keep-days``: a non-negative integer, or
+    a usage error (argparse turns ``ArgumentTypeError`` into an ``exit(2)``
+    with a message naming the bad value, before ``_cmd_prune_log`` ever
+    runs) -- a negative value would build ``now() - N days`` INTO THE
+    FUTURE, silently keeping every row regardless of age instead of the
+    "too young to prune" floor ``--keep-days`` is supposed to be."""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"--keep-days 必须是非负整数，得到 {value!r}"
+        ) from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"--keep-days 必须是非负整数，得到 {value!r}")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1140,9 +1348,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prune_log_parser.add_argument(
         "--keep-days",
-        type=int,
+        type=_keep_days,
         default=30,
-        help="早于此天数（按 changed_at）的日志行才会被删除，默认 30",
+        help="早于此天数（按 changed_at）的日志行才会被删除，默认 30；必须是非负整数",
     )
     prune_log_parser.add_argument(
         "--dry-run",

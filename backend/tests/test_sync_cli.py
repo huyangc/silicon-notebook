@@ -319,6 +319,37 @@ def test_export_json_includes_captured_through_seq(tmp_path, monkeypatch, capsys
     assert payload["captured_through_seq"] == 7
 
 
+def test_export_human_output_includes_captured_flag(tmp_path, monkeypatch, capsys):
+    _settings(tmp_path, monkeypatch, sync_env="dev")
+    monkeypatch.setattr(
+        cli, "export_notebooks", lambda *a, **k: _empty_export_report(captured=True)
+    )
+    exit_code = cli.main(["export", "--target", "prod-tokyo", "--out", str(tmp_path)])
+    assert exit_code == 0
+    assert "本次水位 captured=true" in capsys.readouterr().out
+
+
+def test_export_human_output_captured_false_by_default(tmp_path, monkeypatch, capsys):
+    _settings(tmp_path, monkeypatch, sync_env="dev")
+    monkeypatch.setattr(cli, "export_notebooks", lambda *a, **k: _empty_export_report())
+    exit_code = cli.main(["export", "--target", "prod-tokyo", "--out", str(tmp_path)])
+    assert exit_code == 0
+    assert "本次水位 captured=false" in capsys.readouterr().out
+
+
+def test_export_json_includes_captured_flag(tmp_path, monkeypatch, capsys):
+    _settings(tmp_path, monkeypatch, sync_env="dev")
+    monkeypatch.setattr(
+        cli, "export_notebooks", lambda *a, **k: _empty_export_report(captured=True)
+    )
+    exit_code = cli.main(
+        ["export", "--target", "prod-tokyo", "--out", str(tmp_path), "--json"]
+    )
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["captured"] is True
+
+
 def test_export_human_output_includes_incremental_fields(tmp_path, monkeypatch, capsys):
     _settings(tmp_path, monkeypatch, sync_env="dev")
     report = _empty_export_report(
@@ -1460,6 +1491,25 @@ def test_build_parser_parses_prune_log_explicit_flags():
     assert args.as_json is True
 
 
+def test_build_parser_prune_log_accepts_zero_keep_days():
+    args = cli.build_parser().parse_args(["prune-log", "--keep-days", "0"])
+    assert args.keep_days == 0
+
+
+def test_build_parser_prune_log_rejects_negative_keep_days(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        cli.build_parser().parse_args(["prune-log", "--keep-days", "-1"])
+    assert excinfo.value.code == 2
+    assert "--keep-days" in capsys.readouterr().err
+
+
+def test_build_parser_prune_log_rejects_non_integer_keep_days(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        cli.build_parser().parse_args(["prune-log", "--keep-days", "abc"])
+    assert excinfo.value.code == 2
+    assert "--keep-days" in capsys.readouterr().err
+
+
 def _seed_captured_watermark(
     database,
     *,
@@ -1672,7 +1722,7 @@ def test_prune_log_human_output(tmp_path, monkeypatch, capsys):
         exit_code = cli.main(["prune-log"])
         assert exit_code == 0
         out = capsys.readouterr().out
-        assert "已删除 1 行。" in out
+        assert "已删除 1 行（1 批）。" in out
         assert "保留天数: 30 天" in out
         assert "seq<=100" in out
     finally:
@@ -1692,6 +1742,180 @@ def test_prune_log_dry_run_human_output(tmp_path, monkeypatch, capsys):
         assert exit_code == 0
         out = capsys.readouterr().out
         assert "会删除 1 行，不会真的删除。" in out
+    finally:
+        database.close()
+
+
+def test_prune_log_deletes_in_batches_when_more_than_the_batch_size_qualifies(
+    tmp_path, monkeypatch, capsys
+):
+    """P2-3: the real (non-dry-run) delete is chunked at
+    ``cli._PRUNE_LOG_BATCH_SIZE`` rows per transaction -- seed more than one
+    batch's worth of eligible rows and assert every one of them is gone and
+    more than one batch ran."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        total = cli._PRUNE_LOG_BATCH_SIZE + 500
+        _seed_captured_watermark(database, exported_through_seq=total + 100)
+        old = _old_moment(40)
+        with database.write() as conn:
+            conn.executemany(
+                "INSERT INTO sync_change_log "
+                "(seq, table_name, key_json, operation, changed_at) "
+                "VALUES (?, 'notebooks', '{}', 'upsert', ?)",
+                [(seq, old) for seq in range(1, total + 1)],
+            )
+
+        exit_code = cli.main(["prune-log", "--json"])
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["deleted"] == total
+        assert payload["batches"] > 1
+
+        with database.connect() as conn:
+            remaining = conn.execute(
+                "SELECT COUNT(*) AS n FROM sync_change_log"
+            ).fetchone()
+            assert remaining["n"] == 0
+    finally:
+        database.close()
+
+
+def _drop_export_state_v85_columns(database) -> None:
+    """Simulate a v83/0063 or v84/0064 database (``sync_export_state``
+    exists, but not the v85/0065 ``captured``/``exported_snapshot`` columns)
+    on a fully-migrated SQLite file -- SQLite 3.35+ supports
+    ``ALTER TABLE ... DROP COLUMN``, so this drops just those two columns
+    rather than requiring a separate never-migrated-that-far fixture."""
+    with database.write() as conn:
+        conn.execute("ALTER TABLE sync_export_state DROP COLUMN captured")
+        conn.execute("ALTER TABLE sync_export_state DROP COLUMN exported_snapshot")
+
+
+def test_status_degrades_watermark_section_when_v85_columns_are_missing(
+    tmp_path, monkeypatch, capsys
+):
+    """P1: a v83/v84-shaped database (sync_export_state exists, captured/
+    exported_snapshot columns do not) must not raise a raw "no such column"
+    error out of `sync status` -- the watermark section degrades to the four
+    v83 columns and names the gap; imports still read normally."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_export_state "
+                "(target_env, exported_through_seq, exported_at, package_id) "
+                "VALUES (?, ?, ?, ?)",
+                ("prod-tokyo", 42, "2026-01-01T00:00:00+00:00", "pkg-abc"),
+            )
+            conn.execute(
+                "INSERT INTO sync_imports "
+                "(package_id, source_env, from_seq, to_seq, status, started_at, "
+                "finished_at, report_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "pkg-xyz",
+                    "prod-shanghai",
+                    0,
+                    0,
+                    "done",
+                    "2026-01-02T00:00:00+00:00",
+                    "2026-01-02T00:05:00+00:00",
+                    json.dumps({"notebooks": ["nb-1"]}),
+                ),
+            )
+        _drop_export_state_v85_columns(database)
+
+        exit_code = cli.main(["status", "--json"])
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["exports"] == [
+            {
+                "target_env": "prod-tokyo",
+                "exported_through_seq": 42,
+                "exported_at": "2026-01-01T00:00:00+00:00",
+                "package_id": "pkg-abc",
+            }
+        ]
+        assert "captured" not in payload["exports"][0]
+        assert "v85/0065" in payload["exports_note"]
+        assert "captured" in payload["exports_note"]
+        assert len(payload["imports"]) == 1
+        assert payload["imports"][0]["package_id"] == "pkg-xyz"
+
+        exit_code = cli.main(["status"])
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "prod-tokyo" in out
+        assert "v85/0065" in out
+        assert "已引入的包" in out
+        assert "pkg-xyz" in out
+    finally:
+        database.close()
+
+
+def test_prune_log_reports_missing_v85_columns_and_exits_2(
+    tmp_path, monkeypatch, capsys
+):
+    """P1: prune-log reads captured/exported_snapshot straight away (to find
+    its deletion bound) and must refuse, named, rather than surface a raw
+    driver error, when the database predates v85/0065."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        _drop_export_state_v85_columns(database)
+
+        exit_code = cli.main(["prune-log"])
+        assert exit_code == 2
+        err = capsys.readouterr().err
+        assert "v85/0065" in err
+        assert "captured" in err
+        assert "exported_snapshot" in err
+    finally:
+        database.close()
+
+
+def test_status_human_output_degrades_on_unparseable_snapshot(
+    tmp_path, monkeypatch, capsys
+):
+    """P3-4: a malformed exported_snapshot (should never happen in practice
+    -- _prune_log_bounds guards the write side -- but a hand-edited or
+    corrupted row is exactly the case a diagnostic tool must survive) must
+    not abort the rest of `status`; it degrades to a one-line hint on that
+    row only."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_export_state "
+                "(target_env, exported_through_seq, exported_at, package_id, "
+                "captured, exported_snapshot) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "prod-tokyo",
+                    42,
+                    "2026-01-01T00:00:00+00:00",
+                    "pkg-abc",
+                    1,
+                    "not-a-snapshot",
+                ),
+            )
+
+        exit_code = cli.main(["status"])
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "prod-tokyo" in out
+        assert "snapshot 解析失败" in out
+        assert "已引入的包" in out
     finally:
         database.close()
 

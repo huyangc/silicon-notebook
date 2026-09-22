@@ -376,3 +376,122 @@ def test_prune_log_dry_run_does_not_delete_on_postgres(cli_settings, root_dir):
             assert remaining["n"] == 1
     finally:
         database.close()
+
+
+# ------------------------------------------------------- v85/0065 column guard
+
+
+def _drop_export_state_v85_columns(database) -> None:
+    """PostgreSQL analogue of the SQLite lane's fixture: simulate a
+    v83/0063 or v84/0064 database on a fully-migrated schema by dropping just
+    the two v85/0065 columns off ``sync_export_state``."""
+    with database.write() as conn:
+        conn.execute("ALTER TABLE sync_export_state DROP COLUMN captured")
+        conn.execute("ALTER TABLE sync_export_state DROP COLUMN exported_snapshot")
+
+
+def test_status_degrades_watermark_section_when_v85_columns_are_missing_on_postgres(
+    cli_settings, root_dir, capsys
+):
+    """P1 on PostgreSQL: the column guard reads ``information_schema.columns``
+    (the SQLite lane exercises ``PRAGMA table_info`` instead) -- pin that the
+    real thing works, not just the SQLite branch."""
+    _migrate(cli_settings)
+    database = PostgresDatabase(cli_settings, root_dir)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_export_state "
+                "(target_env, exported_through_seq, exported_at, package_id) "
+                "VALUES (%s, %s, %s, %s)",
+                ("prod-tokyo", 42, "2026-01-01T00:00:00+00:00", "pkg-abc"),
+            )
+        _drop_export_state_v85_columns(database)
+
+        args = cli.build_parser().parse_args(["status", "--json"])
+        exit_code = cli._cmd_status(args, cli_settings)
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["exports"] == [
+            {
+                "target_env": "prod-tokyo",
+                "exported_through_seq": 42,
+                "exported_at": "2026-01-01T00:00:00+00:00",
+                "package_id": "pkg-abc",
+            }
+        ]
+        assert "captured" not in payload["exports"][0]
+        assert "v85/0065" in payload["exports_note"]
+    finally:
+        database.close()
+
+
+def test_prune_log_reports_missing_v85_columns_on_postgres(
+    cli_settings, root_dir, capsys
+):
+    _migrate(cli_settings)
+    database = PostgresDatabase(cli_settings, root_dir)
+    try:
+        _drop_export_state_v85_columns(database)
+
+        args = cli.build_parser().parse_args(["prune-log"])
+        exit_code = cli._cmd_prune_log(args, cli_settings)
+        assert exit_code == 2
+        err = capsys.readouterr().err
+        assert "v85/0065" in err
+        assert "captured" in err
+        assert "exported_snapshot" in err
+    finally:
+        database.close()
+
+
+# ------------------------------------------------------------- batched delete
+
+
+def test_prune_log_deletes_in_batches_on_postgres(
+    cli_settings, root_dir, monkeypatch, capsys
+):
+    """P2-3 on PostgreSQL: each batch is its own transaction there too. The
+    batch size is monkeypatched down to keep this a fast integration test --
+    the SQLite lane already proves the real 5000-row default end to end."""
+    monkeypatch.setattr(cli, "_PRUNE_LOG_BATCH_SIZE", 3)
+    _migrate(cli_settings)
+    database = PostgresDatabase(cli_settings, root_dir)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_export_state "
+                "(target_env, exported_through_seq, exported_at, package_id, "
+                "captured, exported_snapshot) VALUES (%s, %s, %s, %s, %s, %s)",
+                ("prod-tokyo", 100, "2026-01-01T00:00:00+00:00", "pkg-abc", True, "50:60:"),
+            )
+        old = datetime.now(timezone.utc) - timedelta(days=40)
+        total = 10
+        with database.write() as conn:
+            for seq in range(1, total + 1):
+                conn.execute(
+                    "INSERT INTO sync_change_log "
+                    "(seq, table_name, key_json, operation, txid, changed_at) "
+                    "VALUES (%s, 'notebooks', '{}'::jsonb, 'upsert', %s, %s)",
+                    # txid must be BELOW the seeded watermark's xmin (50) --
+                    # NULL (the column's default) would fail "txid < 50" as
+                    # UNKNOWN and delete nothing, the same trap the txid-bound
+                    # test above avoids with an explicit value.
+                    (seq, 1, old),
+                )
+
+        args = cli.build_parser().parse_args(["prune-log", "--json"])
+        exit_code = cli._cmd_prune_log(args, cli_settings)
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["deleted"] == total
+        # 10 rows at 3 per batch: 3, 3, 3, 1 -- four batches.
+        assert payload["batches"] == 4
+
+        with database.connect() as conn:
+            remaining = conn.execute(
+                "SELECT COUNT(*) AS n FROM sync_change_log"
+            ).fetchone()
+            assert remaining["n"] == 0
+    finally:
+        database.close()
