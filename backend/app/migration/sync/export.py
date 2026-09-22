@@ -76,10 +76,19 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 
 # A notebook is skipped, not exported, while one of these lifecycle states is
-# in flight: its rows are mid-copy or mid-delete and no snapshot of them is a
-# coherent notebook. Same predicate as the repositories' NOTEBOOK_LIVE_SQL,
-# restated here because this package may not import them.
-_NOT_LIVE_STATUSES = ("copying", "deleting")
+# in flight: its rows are mid-copy, mid-delete or mid-import and no snapshot of
+# them is a coherent notebook. Same predicate as the repositories'
+# NOTEBOOK_LIVE_SQL, restated here because this package may not import them --
+# the two must stay equal value for value.
+_NOT_LIVE_STATUSES = ("copying", "deleting", "importing")
+
+# notebook_grants.principal_type values whose principal_id is a groups.id.
+# Restated from app.repositories.group_rows.GROUP_PRINCIPAL_TYPES, which this
+# package's import whitelist keeps it from importing. 'group_admins' is the
+# SAME group reached over a narrower edge (only its role='admin' members), so
+# it scopes and maps exactly like 'group'; treating it as anything else drops
+# every admin-only grant on the floor.
+_GROUP_PRINCIPAL_TYPES = ("group", "group_admins")
 
 # Ceiling on one ``IN (...)`` list. Notebook counts are small, but a scan of
 # every notebook in a large environment must not build one statement with
@@ -446,7 +455,9 @@ _GLOBAL_SCOPES: dict[str, tuple[str, str]] = {
 _GLOBAL_KEY_QUERIES: dict[str, tuple[str, ...]] = {
     "granted_group_ids": (
         "SELECT DISTINCT principal_id AS value FROM notebook_grants "
-        "WHERE principal_type = 'group' AND notebook_id IN ({placeholders})",
+        "WHERE principal_type IN ("
+        + ", ".join(f"'{kind}'" for kind in _GROUP_PRINCIPAL_TYPES)
+        + ") AND notebook_id IN ({placeholders})",
     ),
     "referenced_object_types": (
         "SELECT DISTINCT object_type AS value FROM knowledge_objects "

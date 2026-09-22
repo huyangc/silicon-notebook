@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -417,7 +418,7 @@ def test_a_notebook_is_hidden_until_the_run_finishes(source, target, package):
     finally:
         monkeypatch.undo()
 
-    assert observed["status"] == "copying"
+    assert observed["status"] == "importing"
     # sync_origin is stamped by the INSERT itself, not only by the later
     # _stamp_mirrors pass -- a crash in between must never leave a row that
     # reads as a local notebook.
@@ -616,9 +617,14 @@ def test_a_group_matched_by_name_is_reused_not_duplicated(source, target, packag
     assert grant["principal_id"] == "grp-b", (
         "the grant must point at the TARGET's group, not the source's id"
     )
-    member = _one(repo, "SELECT group_id, user_id FROM group_members", ())
-    assert member["group_id"] == "grp-b"
-    assert member["user_id"] == ALICE[1]
+    # ... and the group the target already had keeps ITS membership list.
+    # group_members is seeded only alongside a group this import created; a
+    # group that predates the import belongs to this environment, and pushing
+    # the source's roster into it would hand people access nobody here granted.
+    assert _count(repo, "SELECT COUNT(*) FROM group_members") == 0
+    assert report.tables["group_members"].skipped == 1
+    reasons = [row for row in report.skipped_rows if row.table == "group_members"]
+    assert reasons and "already existed at the target" in reasons[0].reason
 
 
 def test_a_group_the_target_lacks_is_created(source, target, package):
@@ -632,6 +638,11 @@ def test_a_group_the_target_lacks_is_created(source, target, package):
     group = _one(target["repo"], "SELECT id, owner_id FROM groups", ())
     assert group["id"] == "grp-a"
     assert group["owner_id"] == ALICE[1]
+    # A group this import CREATED is seeded with its source-side roster: the
+    # target has no opinion about a group it has never seen.
+    member = _one(target["repo"], "SELECT group_id, user_id FROM group_members", ())
+    assert member["group_id"] == "grp-a"
+    assert member["user_id"] == ALICE[1]
 
 
 # ------------------------------------------------------------ optional refs
@@ -1028,3 +1039,209 @@ def test_a_sqlite_target_is_told_to_quiesce(source, target, package):
     report = _import(target, package)
 
     assert any("single writer" in warning for warning in report.warnings)
+
+
+# --------------------------------------------- seeding only with the parent
+
+
+def test_a_revoked_membership_is_not_resurrected_by_the_next_package(
+    source, target, package, tmp_path
+):
+    """The case row-level seed_only alone gets wrong. "Do not overwrite an
+    existing row" still INSERTS a row the target deleted, so an administrator
+    who revoked a share would find it back after the next sync. Authorization
+    rows are seeded only alongside a parent THIS import created."""
+    _add_user(target["repo"], "user-b-bob", BOB[1])
+    first = _import(target, package)
+    repo = target["repo"]
+    notebook = source["exported"]
+    assert first.tables["notebook_members"].inserted == 1
+    assert first.tables["notebook_grants"].inserted == 1
+    with repo._write() as db:
+        db.execute("DELETE FROM notebook_members WHERE notebook_id=?", (notebook,))
+        db.execute("DELETE FROM notebook_grants WHERE notebook_id=?", (notebook,))
+
+    second = _import(target, _export(source, tmp_path / "out2"))
+
+    assert _count(repo, "SELECT COUNT(*) FROM notebook_members") == 0
+    assert _count(repo, "SELECT COUNT(*) FROM notebook_grants") == 0
+    assert second.tables["notebook_members"].inserted == 0
+    assert second.tables["notebook_members"].skipped == 1
+    assert second.tables["notebook_grants"].skipped == 1
+    reasons = {row.reason for row in second.skipped_rows}
+    assert any("already existed at the target" in reason for reason in reasons)
+
+
+def test_the_parent_created_fact_survives_a_crash_between_groups_and_members(
+    source, target, package, monkeypatch
+):
+    """``groups`` and ``group_members`` are separate transactions, so the fact
+    "this import created group G" has to outlive the process. It is recorded
+    in sync_import_progress in the same transaction as the group row."""
+    from app.migration.sync import import_ as module
+
+    with target["repo"]._write() as db:
+        db.execute("DELETE FROM group_members")
+        db.execute("DELETE FROM groups")
+    real = module._apply_table
+
+    def fail_on_group_members(backend, conn, table, context):
+        if table == "group_members":
+            raise RuntimeError("simulated crash between groups and its members")
+        return real(backend, conn, table, context)
+
+    monkeypatch.setattr(module, "_apply_table", fail_on_group_members)
+    with pytest.raises(SyncImportError):
+        _import(target, package)
+    steps = {
+        str(row["table_name"])
+        for row in _fetch(target["repo"], "SELECT table_name FROM sync_import_progress")
+    }
+    assert "__created__:groups:grp-a" in steps
+
+    monkeypatch.setattr(module, "_apply_table", real)
+    report = _import(target, package)
+
+    # The resumed run skipped `groups` entirely, so the created-set can only
+    # have come from the progress row -- and the members still seed.
+    assert report.tables["groups"].resumed is True
+    assert report.tables["group_members"].inserted == 1
+    assert _count(target["repo"], "SELECT COUNT(*) FROM group_members") == 1
+
+
+# ------------------------------------------------ the import sentinel is its own
+
+
+def test_the_stale_copy_sweeper_does_not_reap_an_importing_notebook(
+    source, target, package, monkeypatch
+):
+    """`sweep_stale_copies` deletes every status='copying' notebook older than
+    the copy timeout, and a mirror's created_at comes from the SOURCE, so it is
+    past any timeout the moment it lands. Sharing the deep copy's sentinel
+    would let the sweeper delete a notebook mid-import."""
+    from app.migration.sync import import_ as module
+
+    repo = target["repo"]
+    store = repo._runtime.sharing_store
+    reaped: list[str] = []
+    real = module._publish_notebooks
+
+    def sweep_then_publish(backend, context):
+        reaped.extend(store.sweep_stale_copies())
+        return real(backend, context)
+
+    monkeypatch.setattr(module, "_publish_notebooks", sweep_then_publish)
+    report = _import(target, package)
+
+    assert reaped == [], "the sweeper must not see an import as a half-copy"
+    assert report.error == ""
+    assert _count(
+        repo, "SELECT COUNT(*) FROM notebooks WHERE id=?", (source["exported"],)
+    ) == 1
+
+
+def test_the_import_sentinel_is_hidden_by_the_live_predicate():
+    """The state the importer parks a notebook in must be one the read-side
+    visibility predicate hides, or a half-imported notebook is openable."""
+    from app.migration.sync.import_ import _IMPORT_IN_FLIGHT_STATUS
+    from app.repositories.postgres import access_sql as pg_access_sql
+    from app.repositories.sqlite import access_sql as sqlite_access_sql
+
+    for module in (pg_access_sql, sqlite_access_sql):
+        assert f"'{_IMPORT_IN_FLIGHT_STATUS}'" in module.NOTEBOOK_LIVE_SQL
+    assert _IMPORT_IN_FLIGHT_STATUS != "copying"
+
+
+# ------------------------------------------------- interrupted file swaps
+
+
+def _notebook_storage(target, notebook_id: str) -> Path:
+    return Path(target["settings"].storage_dir) / "notebooks" / notebook_id
+
+
+def test_a_swap_interrupted_after_both_renames_is_reconciled(
+    source, target, package, tmp_path
+):
+    """Killed after the destination was replaced but before ``.sync-old`` was
+    dropped: the destination already holds new content and ``.sync-old`` is
+    the only copy of the original, so it is adopted rather than overwritten."""
+    _import(target, package)
+    destination = _notebook_storage(target, source["exported"])
+    retired = destination.with_name(destination.name + ".sync-old")
+    retired.mkdir()
+    (retired / "original.txt").write_bytes(b"pre-import original")
+
+    report = _import(target, _export(source, tmp_path / "out2"))
+
+    assert report.error == ""
+    assert not retired.exists()
+    assert destination.is_dir()
+    assert any(path.is_file() for path in destination.rglob("*"))
+    assert any("adopted the retired copy" in w for w in report.warnings)
+
+
+def test_a_swap_interrupted_between_the_renames_is_put_back(
+    source, target, package, tmp_path
+):
+    """Killed after the destination was renamed aside but before the staged
+    copy took its place: the original is put back and the run proceeds."""
+    _import(target, package)
+    destination = _notebook_storage(target, source["exported"])
+    retired = destination.with_name(destination.name + ".sync-old")
+    shutil.rmtree(destination)
+    retired.mkdir()
+    (retired / "original.txt").write_bytes(b"pre-import original")
+
+    report = _import(target, _export(source, tmp_path / "out2"))
+
+    assert report.error == ""
+    assert not retired.exists()
+    assert destination.is_dir()
+    assert any("interrupted mid-swap" in w for w in report.warnings)
+
+
+def test_a_leftover_staging_directory_is_discarded(
+    source, target, package, tmp_path
+):
+    _import(target, package)
+    destination = _notebook_storage(target, source["exported"])
+    staged = destination.with_name(destination.name + ".sync-tmp")
+    staged.mkdir()
+    (staged / "half-copied.txt").write_bytes(b"abandoned")
+
+    report = _import(target, _export(source, tmp_path / "out2"))
+
+    assert report.error == ""
+    assert not staged.exists()
+    assert not destination.with_name(destination.name + ".sync-old").exists()
+
+
+# ------------------------------------------------------- group_admins grants
+
+
+def test_a_group_admins_grant_maps_through_the_group_mapping(
+    source, target, tmp_path
+):
+    """`group_admins` is the same group reached over a narrower edge (only its
+    role='admin' members). It has to scope and map exactly like `group`, or
+    every admin-only grant arrives pointing at a source-side id."""
+    with source["repo"]._write() as db:
+        db.execute(
+            "INSERT INTO notebook_grants(id,notebook_id,principal_type,"
+            "principal_id,role,created_by,created_at) VALUES(?,?,?,?,?,?,?)",
+            ("grant-admins", source["exported"], "group_admins", "grp-a",
+             "editor", ALICE[0], MOMENT),
+        )
+
+    report = _import(target, _export(source, tmp_path / "out3"))
+
+    assert report.error == ""
+    grant = _one(
+        target["repo"],
+        "SELECT principal_type, principal_id FROM notebook_grants WHERE id=?",
+        ("grant-admins",),
+    )
+    assert grant["principal_type"] == "group_admins"
+    assert grant["principal_id"] == "grp-b", (
+        "a group_admins principal must be remapped like a group principal"
+    )

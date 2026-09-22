@@ -176,8 +176,10 @@ users 不同步但导入时可能**创建**：见 §4。
 - 目标端自有列：manifest 的 `target_owned_columns` 登记导入时对已存在行不覆盖的列，
   notebooks 为 status、is_shared、share_token、sync_origin。首插时这些列也由目标端给值，不用
   源端的：`sync_origin` = 源环境标识；`is_shared` = 0、`share_token` = NULL（链接分享是目标端
-  自有决定，与 copy_notebook 先例同款）；`status` 在导入期间为 `copying`（列表隐藏，避免
-  用户看到空壳笔记本），收尾翻成 `draft`。授权边表只在首次创建笔记本时写入源端授权，之后
+  自有决定，与 copy_notebook 先例同款）；`status` 在导入期间为 `importing`（`NOTEBOOK_LIVE_SQL`
+  隐藏它，避免用户看到空壳笔记本；不复用 `copying`，因为 `sweep_stale_copies` 会按源端的
+  created_at 把它当陈旧半拷贝物理删掉），收尾翻成 `draft`。授权表（members/grants/group_members）
+  只在父行（笔记本/组）由本次导入创建时播种，目标端撤销过的授权不会被下一个包插回。授权边表只在首次创建笔记本时写入源端授权，之后
   不覆盖。
 - 前端对镜像笔记本隐藏或禁用上述入口，并在来源面板顶部标注「镜像自 <sync_origin>」；
   按钮反馈规则遵循 `AGENTS.md` Interactive feedback。
@@ -292,7 +294,7 @@ sync status [--json]      # 本库的导出水位（每个目标环境）与已�
    两条过渡规则：`sources.file_path` 按 shadow manifest 的 `path_columns` 重锚到目标端的
    storage 根（包里是源主机的绝对路径）；没有主键的 knowledge_object_sources 与
    community_members 按包内笔记本删后整批插入（PR-3 补复合主键后改为 upsert）。
-5. 收尾：文件目录正式替换（`.sync-old` 到此才删）；把涉及的笔记本 `status` 从 `copying`
+5. 收尾：文件目录正式替换（`.sync-old` 到此才删）；把涉及的笔记本 `status` 从 `importing`
    翻成 `draft`，`sync_origin` 再补打一次（第二条腿，首插时已带）；`sync_imports` 置 done；
    写导入报告（写盘失败降级为 warning）。大库的 scale 重建由运维按 operations 文档手动跑，
    PR-4 自动化。
