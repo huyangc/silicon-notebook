@@ -7,16 +7,9 @@
 ## 统一命令入口
 
 用 `bash scripts/cli.sh --help` 或 `npm run cli -- --help` 查看按用途分组的运维命令。
-`batch` 接受原 `batch_ingest.py` 的全部阶段和参数，`batch-ingest` 是兼容别名。例如：
-
-```bash
-bash scripts/cli.sh batch ingest --input-dir ./papers --notebook-name "资料库"
-bash scripts/cli.sh scale inspect --notebook nb-xxx
-bash scripts/cli.sh extensions check
-bash scripts/cli.sh diag incident
-```
-
-其他分组见[命令索引](../scripts/README.md#统一-cli-入口)。旧脚本继续支持，尾部参数、
+[命令索引](../scripts/README.md#统一-cli-入口)集中维护分组目录与最小示例，本节维护操作边界。
+`batch` 接受原 `batch_ingest.py` 的全部阶段和参数，`batch-ingest` 是兼容别名。
+旧脚本继续支持，尾部参数、
 退出码、锁、确认标志和信号处理均保持原意。Shell/Python 入口保留调用目录，输入/输出
 参数中的相对路径含义不变（npm 按项目根运行）。普通应用命令不自动启动插件配套服务；
 显式的 `extensions services start` 负责启动。
@@ -175,6 +168,9 @@ python3 scripts/diag.py incident --pid <backend-pid>
 `.local/diagnostics/` 工件。
 
 ### 七命令诊断速查
+
+新增 notebook API 路径时，在 `backend/app/core/diagnostics_runtime.py` 登记精确安全路径形状。
+未登记的深层路径只能降级为 `/api/notebooks/{id}/{redacted}`，不得为保留路径而放宽到回显原始 id。
 
 `scripts/diag.py` 只提供以下七个命令：
 

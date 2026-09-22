@@ -84,14 +84,11 @@ def test_词汇文档与守卫登记相同的前端生产扫描面():
         _ROOT / "frontend" / "features",
     }
     assert set(guard.FRONTEND_PRODUCTION_DIRS) == expected
-    for relative_path in (
-        "docs/ui-vocabulary.md",
-        "docs/product-and-api.md",
-        "docs/product-and-api_zh.md",
-    ):
-        text = (_ROOT / relative_path).read_text(encoding="utf-8")
-        assert "frontend/app" in text
-        assert "frontend/features" in text
+    # The vocabulary reference owns guard implementation details; product
+    # references route readers there instead of maintaining another scope list.
+    vocabulary = (_ROOT / "docs/ui-vocabulary.md").read_text(encoding="utf-8")
+    assert "frontend/app" in vocabulary
+    assert "frontend/features" in vocabulary
 
 
 def test_每个词表条目要么被守卫覆盖要么有豁免理由():

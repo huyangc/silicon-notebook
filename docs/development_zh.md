@@ -2,11 +2,9 @@
 
 [返回 README](../README_zh.md) · [English](./development.md)
 
-本文保留面向贡献者的架构摘要、验证门、工作流、测试架构和文档维护契约。[AGENTS.md](../AGENTS.md) 是精简的编码 Agent 入口与文档路由；详细运行时架构以 [architecture.md](../architecture.md) 为准。
-
-外部 Agent MCP 面由一个 API-owned registration host 和启动期冻结目录组成：`app.api.mcp_tools` 的固定 bundle 被捕获为精确 28-tool 面，`mcp_server.PUBLIC_TOOLS` 就是这份活目录，`CORE_TOOLS` 是同一份清单的结构化别名——不存在第二份手抄。core handler 保持既有 validation/auth/I/O 顺序，复用实时权威、owner-write、progress 与 output 边界。异常只映射稳定公开码；注册/listing 为零 repository/model 工作。原先「追加显式信任的进程内 `agent.tool_provider` contributor 标量 descriptor」那一半零消费者，已整体移除。
-
-深度报告后端批量导出是首个真实 single Provider 消费者。Repository 负责授权和已完成行收窄，释放连接后才把最小不可变批次交给启动冻结的 `report.exporter` host。默认内建 Markdown provider 是默认 topology 的唯一 provider，不存在 fallback formatter；core 校验完整有序结果并继续拥有文件名冲突策略与 ZIP 构造。浏览器既有单篇 Markdown 本地下载刻意保持不变，不属于后端 provider 路径。
+本文拥有开发护栏、schema/迁移编写、验证、工作流与文档维护规则。
+[AGENTS.md](../AGENTS.md) 是精简的 Agent 入口；运行时架构由
+[architecture.md](../architecture.md) 拥有。
 
 ## 数值上限与截断
 
@@ -18,395 +16,140 @@
 
 ## 架构边界
 
-- 模块化扩展底座与 Phase-1 retrieval host 合同已经生效。稳定跨层值放在 `backend/app/domain`；repository ports 不得依赖 services，静态图保持无环，repositories→services 债务上限只许下降。 `ReasoningRetriever.run` 只在首轮处拆分：`_new_run_state` 构造显式 `_ReasoningRunState`，`_run_first_round` 按合同顺序驱动 `_first_round_*` 阶段（精查 seed 在 PPR seed 之后，补种预算 `max_steps // 2`）。长期行为由意图、PPR、精确检索、兜底、方向补种账目、枚举与合成的聚焦测试承担；仅用于证明拆分逐字等价的黄金快照已经退役。低依赖 SDK 拥有类型合同，`backend/app/extensions` 拥有冻结 registry、实时 capability 判定与共享 host，唯一外层组合根是 `app.bootstrap`；workflow 只依赖 domain host port。availability probe 无 I/O，manifest 声明与实时判定只投影窄 capability port；一个 capability 不可用时只关闭对应 contribution，独立 contributor 仍运行；invocation 路由和 core admission policy 启动时快照。空路径或无适用 contribution 时在任何工作前原样返回 baseline。内建 proposal 用请求内存做权威复验，其他未解析 proposal 至多走一次 core-owned batch hydrate，禁止 per-hit N+1；畸形插件 fail-open，强合同 lane 可用 atomic admission。Selected-source graph 与 generated-question recall 已分别成为 `selected_evidence` / `chunk_candidates` 的前两个内建 contributor。Graph bridge 保留 legacy activation result，故 attestation、rollout、scope drift、duplicate-support overlay、独立预算、status 与 fail-closed 行为等价；Ask/Report 已删除 graph service 直调。Generated-question bridge 私有持有 query/index/settings 与 `(scored, ids, matrix)`，固定在 MMR/fusion 前，在隔离 copy 上暂存 collision support，并只在 host 接纳后提交；`off`、trigger 已满足、空索引、越界、失败与 `shadow` 都保持原 baseline，`on` 只追加原 chunk。SQLite/PostgreSQL scan 在 `LIMIT` 前应用 notebook/source 与 retrieval-run actor 的私有 Memory 谓词，actor 不进入 event。连接探针在持有 transaction/pool lease 时于 host fan-out 前阻断，PostgreSQL conformance 强制 pool size 1；核心取消在单/多 query 路径都传播。插件实现不得 import 具体 repository、facade 或 runtime。G1 守卫固定这些规则，facade 公开面只可收缩。新增扩展点先读[设计](./superpowers/specs/2026-08-21-modular-plugin-architecture-design.md)与[历史交付记录](./superpowers/plans/2026-08-21-modular-plugin-architecture-delivery-plan.md)。模块化扩展 PR 保留两路独立 subagent review；Codex 评审、CI 与 rebase 合入要求统一遵循当前[开发流程](#开发流程)。 `scripts/check_architecture_boundaries.py`（G1 contracts 泳道）另持有三条登记在 `scripts/architecture_boundary_baseline.json` 的零余量棘轮：`app.core`/`app.models` → `app.services` 的 import allowlist（当前为空；裸 `import app`、`from app import services`、`import app.services` 都算）、所列热点函数的逐函数行数上限，以及 `repositories/ports.py` 的 Protocol 方法总数（按该模块自己的 `Protocol` import 别名解析，`from typing import Protocol as P` 躲不过）。三者任一收缩都必须在同一改动里下调 baseline。两条生产检索 lane（所选来源图与生成问题召回）都识别休眠：工作流已知特性未配置、且 `RetrievalContributorHostPort.has_contributions` 答该 invocation 上没有其他 contribution 存活时，lane 在构造任何 call/context 之前原样返回 baseline；已注册但此刻不可用的 contributor 仍进入 host。admin 停用闸把同一条无环 import 纪律叠在这份冻结 registry 之上：它的 frozenset 持有者放在 `app.core.extension_admission`（仅标准库、读路径无锁），正是因为 extension 层与 API 层都已经依赖 `app.core`；registry 从不直接 import 它，只经一个注入的 `disabled_ids_provider` callable 消费——`app.extensions.default_extension_runtime` 把这个 callable 绑定到该持有者的读函数；`app.bootstrap.create_application_repository` 是唯一 prime 它的地方，因此任何经普通路径组合出来的进程（服务、CLI、批处理）从一开始就带着数据库的真实状态，而不是空默认。
-- 生产来源 ingestion 只走启动冻结的 self-hosted MinerU → MinerU cloud → builtin ProviderChain。Link 用 `after`/`before` 边和稳定 ID tie-break 表序，禁止整数 priority；整条 core route plan 在实时 availability 与 provider I/O 前冻结，因此配置 self-hosted 后即使失败也不能打开公共云。Probe 最多做一次远端解析与纯映射且没有持久化/资产端口；workbook 对账与 core admission 先于 accepted materializer。URL 本地 fallback 复用一次 request-local 下载，同一来源的锁覆盖资产替换到 element/chunk marker 发布。旧 dispatcher 与 facade parser patch seam 已退役，禁止重建双路。
-- `backend/app/application` 持有低依赖的不可变 stage envelope；模块级 import allowlist 当前只开放 application、core.ask_retrieval_policy、domain.cancellation、models.ask，裸 root import 与无别名的 allowed-submodule import 都会绑定 `app`、因此禁止；显式 alias 的 allowed submodule 可用。未来合同必须显式扩展，不能放开一个存在实现层反向边的整包。Ask reasoning 显式跨越 prepare、retrieval-evidence、response-draft 与 committed-answer 边界；冻结的响应 envelope 独占传递 typed response 对象图，不做破坏共享 citation 身份的 JSON/deepcopy。response draft 由可注入的 `ResponseDraftStage` 产出（入口 `execute_response_draft_stage`，输出类型不符即失败），默认实现 `DefaultResponseDraftStage` 就是既有内联的合成/绑定逻辑，只收一份冻结的 `ResponseDraftInput`，**经 envelope** 够不到 repository/model client/settings/持久化座位——出厂默认实现仍经 `self` 使用 AskService 自己的座位，注入实现只得到 envelope + runtime，且进入前由编排器复核权威；取消在 seam 前与提交边界各检查一次；提交边界按 prepared 复核 mode 与身份元数据（`notebook_id`/`question`/`conversation_id`/`user_id`/`job_id`/`asked_at`，与 stage 拿到的同一份冻结 `PreparedReasoningAsk` 逐字段比对，不一致即 `StageBoundaryError`，防止注入实现把答案悄悄写进另一个 job/conversation/notebook），`model_errors` 由 core 在 stage 返回后、检索 ContextVar reset 之前从请求局部报警 sink 统一填充，stage 不必也不应自己写它。runtime 权威交叉绑定同一个 source scope、`ask_reasoning` 请求级 run（也就是 leaf-I/O semaphore 的所有者）、取消 token、非空持久化 actor、trace sink 和 AskService 注入的同一个无 I/O 连接探针；service 与 typed retrieval seam 各自校验 run kind/actor。Stage 边界违约必须作为核心错误响亮失败，不能伪装成可选检索 miss。Report 的可变 `ReasoningResult` 工作副本继续保留；只有既有 KG/chunk/element/PPR leaf 调用取得 run slot，任何 stage wrapper 都不得持有数据库连接或外层 slot。
-- Deep Report 以独立的不可变 application envelope 交接 confirmed planning、generated sections、core final audit 与 committed completion。Planning/generation 各保留新 retrieval run，typed 边界逐次校验同一 scope/run/cancellation/actor/probe，不移动任何 leaf slot；可变 evidence/id-map 只做独占所有权转移，不 JSON/deepcopy。多节 all-retrieval → 一次 synthesis → 并行 drafting、单节零 synthesis、final editor、claim ledger、citation remap、整篇 image batch、零正文失败与 retry 均由 core 按原序拥有，final audit 禁止改写章节 Markdown。SQLite/PostgreSQL 用 `status='generating'` 的同构 CAS 发布 `done`，取消同样只可从非终态 CAS 到 `cancelled`，只有完成 CAS 成功才产生 `CommittedReport`；manual/auto generation 在 coordinator 汇入同一路径，并先释放 generation gate 与 scope/retrieval/model 上下文。随后内建 `report.completed_observer` 通过一个 opaque at-most-once access 保留既有 agent-profile 信号，最后才注销取消注册以保留既有 active-job 窗口；它不能改持久产物或启动 retrieval/model。
-- 流式 Ask 的完成后处理只使用一个启动冻结的 `ask.completed_observer` host。持久答案、job 终态、取消注销和浏览器 final 事件先于它，sentinel 在其后。三个内建 observer 保持 agent-profile → retrieval-experience（仅 reasoning）→ search-profile 的既有串行行为和成本，分别独立 fail-open，并只获 notebook+actor / 零身份 / actor。Connection probe 在插件执行前拒绝仍持 transaction/pool lease 的调用；普通失败不能反转 `done`，终态后 hook 不读取请求取消。同步 POST Ask 与 MCP Ask 仍不计入该完成口径，service 只依赖 domain host port，不依赖 SDK/registry/concrete host。
-- Point-specific proposal source 与通用 admission reader 是两个独立 domain port。Selected-source graph 的权威复验只读请求级内存 map，零新增 DB/leaf；只有其他未解析 proposal 才调用一次 repository-runtime reader，并在 SQL 返回行之前应用 notebook/source 谓词。Report fallback 读取必须取得共享 retrieval leaf gate。SQL 始终按 actor 过滤 Memory source，包括没有冻结 scope 的兼容调用；可见来源和 notebook-wide Knowhow 仍可进入。
-- 后端 endpoint body 位于由 `backend/app/api/routes.py` 组合的领域 FastAPI router；聚合层只负责 composition/order，不承载产品 handler，也不提供兼容导出。边界测试直接检查领域 router 的 endpoint 所有权，并以语义 AST 检查聚合组合声明；不要假设 `include_router()` 一定把子路由平铺，因为新版 FastAPI 会保留惰性的 included-router 节点。领域 Pydantic model 位于 `backend/app/models/`；`backend/app/models/schemas.py` 是旧导入的兼容 facade，re-export 同一批 model object。
-- 唯一 repository factory 按 `DATABASE_URL` 选择 `SQLiteRepository` 或 `PostgresRepository`；两者组合相同运行时边界。`RepositoryFacade` 是注入 `RepositoryRuntime` bundle 之上的后端中立 facade。application service 不拼装主业务库 SQL、不判断 dialect，也不 import 对侧 adapter。store 独占 product SQL 与 raw row selection；既定 application/query component 可组装 domain/application projection，例如 `NotebookSummaryQuery.from_row`。SQLite 保留 migration/maintenance 兼容 wrapper，PostgreSQL 拥有有界 Psycopg pool 和 checksummed migration。facade 操作仍是显式兼容 adapter 或源码守卫验证的单跳委托，真实目标必须与 ownership manifest 一致；这些单跳委托由 ownership manifest 固定。依赖方向固定为 factory/wrapper → facade → runtime → services → stores。`sqlite_identity.py` 与 `sqlite_notebook_sharing.py` 保留为兼容 re-export shim，请求 Context、`_COPY_CHUNK`、`_remap_json_ids` 等旧导出继续可 import。facade 公开面有逐方法调用者账本（`docs/superpowers/plans/2026-08-23-facade-retirement-ledger.md`，由只读脚本 `scripts/audit_facade_callers.py` 可重新生成），把每个公开成员分类为 `keep`/`test-only`/`ambiguous`/`retire-now`；退役按账本分批推进，每次都要同步 `scripts/architecture_boundary_baseline.json::facade_public_surface` 与 `scripts/generate_repository_contract_fixtures.py --rebaseline-surface` 的产出。
-- notebook 授权判定收敛在每后端一个唯一定义点 `backend/app/repositories/{sqlite,postgres}/access_sql.py`（镜像 `mount_sql.py`，两份文件占位符风格互为镜像、必须同修）。写权 owner-only、管理权 owner∪`role='admin'` 有效授权边（`NOTEBOOK_ADMIN_SQL`，复用读权的受限三臂＋`role='admin'`、排除 `everyone`）、读权 owner∪只读成员∪有效授权边（`notebook_grants` 的 user/group/group_admins/everyone 四值精确白名单，停车行因而 fail-safe），三者成 `写权 ⊆ 管理权 ⊆ 读权` 包含链，这条不对称是安全边界；Memory 读/检索 SQL 里的「owner∨成员」子句同源派生，memory store 的三段式 `FOR SHARE`/三态站点按 allowlist 刻意保留、扩读权时须手动同步。读权⇒可挂载（`mount_sql.MOUNT_VALID_EXPR`），但**受限**授权（everyone 以外）只在挂载方笔记本自身未被共享时生效——这道未共享门堵的是把借来的参考库转手再分享；`tier='base'` 与 everyone 不受此限。API 写端点经 `app/api/deps.py::require_notebook_capability("<能力>")` 按 13 个能力名归类，值域 `{owner, admin}`（P2 把六个内容管理能力 `sources:write`/`kg:write`/`knowhow:write`/`knowledge:write`/`catalog:write`＋`notebook:manage` 翻 admin，`notebook:configure`（链接分享）／`notebook:mount`（挂载配置）／`notebook:delete`／`reports:write` 恒 owner；未知能力名 import 期 `KeyError`）。同一批键上还有第二张表 `deps._CAPABILITY_MIRROR_FENCE`，答的是与权限正交的另一问「这个能力的端点会不会改写同步层内容」：会的在镜像笔记本（`notebooks.sync_origin` 非空）上返回 `409 {"code", "message", "sync_origin"}`（`notebook_mirrored`），且恒在级别守卫**之后**判（未授权者仍拿 404），安全方法（`GET`/`HEAD`/`OPTIONS`）一律豁免——谓词问的是该能力的**写**端点。`notebook:grant`、`notebook:mount` 与 `scale_index:write` 正是因为这条轴横切了旧的 `notebook:manage`／`notebook:configure`／`kg:write` 三格才拆出来的，拆分不改任何级别，体内自查经 `notebook_capability_allowed(capability, ...)` 吃同一张表；新写端点不得挂裸 owner 守卫。守卫：`backend/tests/test_access_sql_contract.py`（双后端自省 parity/占位符方向/内联形状扫描/两段式 allowlist）与 `test_notebook_capability_guard.py`（AST 标识符扫描＋空转保护）。群组知识共享（设计稿 `docs/superpowers/specs/2026-08-17-group-knowledge-sharing-design_zh.md`）扩读权谓词、翻能力映射表，端点声明不动（Agent/MCP 面刻意不翻；P2 另增成员贡献审批流 `notebook_share_requests`：成员对自己 manage 的库、向只是成员的组提交申请，组管理员批准即同事务插 `(group, viewer)` 边，`status` 精确匹配三值、撤回走整行 `DELETE`）——**深度报告是唯一登记的例外**：共享笔记本的成员可以建**自己的**报告，而报告按创建者隔离，这个形状表达不成一个 notebook 级能力。9 个报告写端点因此改挂 `require_notebook_read` ＋ 体内行级 `reports.created_by == 当前用户`（`report_routes.py::_own_report_or_404`；凡路径含 `{report_id}` 的端点都必须调用它，有 AST 守卫钉住），列表/导出按同一谓词在 SQL 里收窄，别人的报告与「不存在」同为 404。`reports:write` 保留在能力表里但当前零消费点，留给 P2 的组管理员管理动作；免登录分享页每次请求实时复核创建者的读权，失权即链接失效。
-- 一次检索 run 的参与集可以经 `backend/app/services/retrieval_participants.py` 被**替换**（不是收窄），而这份覆盖只在检索消费边界生效：允许 import 它的只有七个检索读者（`retrieval_candidates`、`graph_retrieval`、`collection_catalog`、`collection_enumeration`、`communities`、`evidence_context`、`chunk_federation`，仍是七个），允许安装覆盖的只有 `global_run.py`——`global_ask.py` 只**构造** `ParticipantOverride`（那是一次与 `can_read_many` 同处的鉴权动作），一个座位都不装，由 `test_global_ask_never_installs_seats_itself` 反向钉住；同理，`subjectless=` 这句「这次 run 没有当前库」的唯一写入口也只在 `global_run.py`（`source_scope.py` 里同名转发豁免），读口按问题分工：`subjectless_run_active()` 答 MODE 问题（私有 Memory、`index_required`、所选来源图、提示词的对等规则、工作簿臂参与集、引用归属归一），`peer_scope_ceiling_active()` 答 FILTERING 问题（`filter_retrieval_items`、`follow_chain` 的天花板判定）——冻结来源清单无论这次 run 有没有主体都必须生效；所有鉴权路径继续调真实挂载谓词（`resolve_participants`/`mount_sql.py`，与权限检查共用）；每份覆盖自带已过 `can_read_many` 的 `attested_actor_id`，在 actor 不符的 run 里、在没有 retrieval run 时、或为它声明的名义 active 之外的笔记本解析，一律 raise 而不是静默回落。收窄仍是另一个问题，归 `source_scope.py`，而且覆盖逃不出它：座位仍然对结果跑一遍 `notebook_in_scope`，所以库勾选可以把覆盖集再收窄、永远不能扩张。进程级图缓存（`fed_rxgraph`、`ppr_graph`、`scale_combined`）的键带上覆盖的内容无关指纹，且指纹放在族后缀**之前**，这样既有的按族驱逐仍然匹配得到。检索路径遍地是刻意的 fail-soft `except Exception`，所以身份复核的失败以 `app/domain/retrieval_control.py::ParticipantOverrideError` 抛出：一份人工核出的**登记清单**（守卫测试里的 `_SEAT_FAILSOFT_SITES`，即 try 体能触达座位的那些 handler）与 `AskCancelled` 并列 re-raise 它；预检则落在 `chunk_federation._bounded_participants` 的首行——它是每个联邦消费方读参与集的唯一入口，跑在父线程、在所有 fail-soft 之外、在任何生产者被调用之前，所以这一处刻意**不**登记进 `_SEAT_FAILSOFT_SITES`（它必须保持不被 try 包住）。新增一个能触达座位的 fail-soft handler 必须同 diff 登记。守卫：`backend/tests/test_participant_override_guard.py` 把读者白名单钉成**相等**（少一个读者就是接线被悄悄回退），禁止任何非白名单模块从再导出方 import 覆盖的公开名，钉住写入方白名单（含 `as` 改名的调用），对每个鉴权文件双向断言——既不 import 覆盖模块、也仍然在调活的谓词，并钉住组合根注入下去的参与集谓词必须是真实挂载谓词的属性引用、不得是别的可调用。`evidence_context` 是唯一一个自己也带鉴权调用点的读者——`knowledge_context` 的 canonical 折叠范围经覆盖解析，而 `collection_item_citations` 在元素水合前复核成员资格——所以守卫另按**函数作用域**把两者钉开：鉴权作用域仍然直调 `self.notebooks.participant_notebook_ids` 且其中不出现任何 `resolve_*`，经覆盖解析的作用域集合恰好等于 `{knowledge_context}`。
-- 离线生产维护统一通过 `open_maintenance_cli_repository`：PostgreSQL 停服确认/能力拒绝必须早于 factory 构造，随后由独立非池化 session 持有 fail-fast advisory lock，任何退出路径都关闭 repository。`BatchMaintenancePort` 是可移植编排契约；SQLite 文本向量转换保留为独立物理格式 port。PostgreSQL keyset 的谓词与排序都使用 `COLLATE "C"`，读取一页后释放数据库连接再等待模型；来源清单按 phase 排除隐藏投影源。离线 full gate 不连接 PostgreSQL，真实覆盖放在独立 PostgreSQL 16 lane。
-- 与在役服务**并存**的离线 scale 构建（`app/services/scale_build_cli.py` /
-  `scripts/build_scale_index.py`）走另一条组合根，不用 `open_maintenance_cli_repository`：
-  它没有停服闸，所以必须显式关掉那两件停服闸此前替它兜住的事——bundle 的 `_initialize`
-  会跑迁移（对在役库执行未预期 DDL）并**无条件 UPDATE** user-local 的 admin 凭据
-  （salt 每次随机，异机 `.env` 缺 `ADMIN_PASSWORD` 时静默改掉生产密码）。因此
-  `PostgresPersistenceBundleFactory(migrate=False, seed=False)` 是**阻塞级**要求，
-  两个开关默认仍为 `True`、既有全部调用方零变化；扩展 host 座位取自 `bootstrap` 的
-  `application_repository_hosts`，与服务端同一份，构建用的 indexing pipeline 才不会漂。
-  组装之前先用裸连接比对 `silicon_schema_migrations` 的 `max(version)` 与本 checkout
-  的迁移数，不等就退出。互斥是 T-W1 的 per-notebook 跨进程锁（session 级双参 advisory
-  lock），不是数据库级维护锁——所以它与 `batch_ingest index` 的停服通道可以共存，后者
-  拿不到 per-nb 锁时转成可读 busy 错误。工件发布对**三个根**（`kg_index`、`kg_viz`、
-  `kg_index_partitions`）统一走 `ScaleArtifactStore.prepare_staging_directory` /
-  `swap_staging_directory`：不许出现「主原子、其余裸拷」。服务进程自己那条独立
-  viz 重建也在这份契约里——`save_viz` 与其它根一样先暂存再原子换入，且整个
-  「构建 + 发布」期间持有同一把 per-notebook claim，因此 `export` 不会再拷到写了
-  一半的 viz 根，`import` 也不会再把它从写入方脚下 rename 或退休；拿不到 claim 就
-  让路（该产物只是辅助，下次触发自然重试），SQLite 的 `UNSUPPORTED` 哨兵则保持
-  该后端一贯的进程内行为。`import` 的每一个毁灭性动作——每次 swap、包省略某根时的
-  退休、每根的回滚、每根的 `.old` 清理——都在动盘之前复验 claim，验不过就既不
-  rename 也不删除。校验还会拒绝「必需 `.npy` 的头部或 `graph.npz` 的形状读不回来」
-  的包：文件在场却被截断，此前被当成「没检查」跳过，于是这种包照样发布、顶掉健康的
-  活索引，随后才被 `load_scale_index` 拒读，笔记本就此没有 scale 核；而 manifest
-  没有声明某个数组的期望条数、或声明了包里根本不带的那个数组，仍然放行（老索引依旧
-  有效）。服务进程暖着的那份**独立 viz** 缓存也按与伴生产物同一套失效——它的
-  `version`/`cluster_seq` 闸都由数据库派生，同版本 `import` 一个都不动，所以缓存
-  命中时会再 stat 一次 viz 根的 `manifest.json`，把盘上这一代与条目缓存时记下的那一
-  代比对：被替换就重新加载，被退休（确认根不在）就逐出该条目、退回「没有独立 viz」
-  的既有路径，「问不出来」（适配器没有探针，或这次 stat 失败）维持 fail-soft。因此
-  替换或退休 `kg_viz` 无需重启服务即可生效。
-- `prepare_selected_source_graph.py` 把可移植维护操作编排成全 notebook 部署状态机：持久来源反查索引页、持久 source-fact 代次、低成本版本/计数工件探针（失配时才做有界重建）及独立事实审计都在离线维护锁内完成。receipt 无正文且不是权威状态。只有 repository 关闭后脚本才能原子写入四个不可见 shadow 环境变量；任一阶段失败都保留原 env 文件。再次进入会重新验证权威状态并跳过当前代次/工件，不在大库上重复已完成工作。
-- `RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference。其他可变运行态（storage root、embedder、语言 cache、构建集合、Ask cancellation registry 与工件 cache）由 runtime 持有；完成组合后替换受支持的兼容属性时，所有已持有它们的消费者都会同步更新。Ask/report 同步提交失败会把已经创建的持久化 job/report 标记为 failed、注销 cancellation entry，再把提交异常重新抛出；成功 worker 的次序与既有 Ask 事务 checkpoint 不变。组合按领域拆分：`RepositoryRuntime.__init__` 只按顺序调用模块级 `_build_*` 领域构造函数（外加它自己的两把 `threading.Lock()`），再把每个返回的 frozen bundle 的字段逐条显式挂到自己身上，一个座位一行。调用顺序即依赖拓扑——构造函数只接收更早的 bundle，绝不接收 runtime 本身，因此写不出回指组合根的环；唯一允许的runtime 绑定输入是窄的迟绑定 callable（当前用户访问器、`ask_service` 访问器与 `_note_ask_completed`）。进程级副作用（scheduler 校验、event logger、`kg_scheduler.initialize`）与那唯一一次持久化 bundle 构造保持原有顺序；`backend/tests/test_repository_runtime_composition.py` 冻结已挂载属性集合并钉住这两条规则。
-- 内置 KG 关系统一由 `backend/app/domain/kg/edge_schema.py` 的有类型注册表治理（`backend/app/services/kg/edge_schema.py` 只是 re-export shim，不得在那里声明新 EdgeSpec）。核心抽取 fail-closed；graph/PPR/canonical/relation 与 Ask 证据上下文消费者过滤历史非法 core 端点，同时保留连接管理员扩展类型的已知边；`EDGE_SCHEMA_VERSION` 进入 scale/PPR 工件 identity。可选关系补全按模式和来源代次的持久 keyset 水位逐页推进，通过索引化且契约合法的 relation `EXISTS` 优先 anchor，并只使用同源、有界 overfetch 的 FTS/ANN 候选及 section/pair/batch/字符护栏。每个任务只 hydrate 当前有界对象及其受限证据 ID；未完水位重新入队，启动时恢复当前代次的 pending 状态；模式改变用同一 generation-CAS 事务先发布新模式可恢复游标，再把旧模式游标标为 `stale`。proposal 与 verification 在数据库事务外完成，最后在短写事务内复核代次、归属、存在性，保存 verifier 看到的同一段服务端 excerpt 并幂等写入；非法零值护栏 fail-closed 且不推进水位。检索来源保存为按 producer 累积的 support record，选择层不得从 score 反推来源。
-- 超大所选来源图伴生产物与旧 scale 目录分离。离线 builder 通过 source-first 有界投影每次只读取并发布一个可见来源 partition，用恒定大小的伴生根 manifest 与每个 partition 绑定主 manifest version，校验所有 payload 文件摘要，并用确定性哈希路径让运行时只打开所选来源。配对以**一次构建**为单位，不是以 version 为单位：每次构建都给主 manifest 打上唯一的 `build_id`，并把它作为 `parent_build_id` 写进同一次构建发布的伴生根与每个 partition manifest；reader、离线 `import`/`export` 校验以及那个廉价的就绪探针都要求两者同时相等。同版本重发是受支持的操作，因此单靠 version 分不开两次构建——`import` 在伴生 rename 之后、主索引 rename 之前被打断，或在线重建在主 swap 之后丢掉 claim，都会留下两个 version 相同的混代对。这个键出现之前写下的产物有一侧或两侧没有 id，仍按 version 配对（older-index-stays-valid），代价是这类产物在一次 rebuild 或 fold 重发两根之前，仍保留原来的同版本盲区。reader 在 payload I/O 前先用所有所选小 manifest 预检累计 node/nnz/cross-edge 护栏。本地 CSR 行携带对象类型/chunk 身份；只选一个来源时直接复用其落盘 CSR，所选并集则使用数组化稀疏组合和一次受限 cross-edge 分配。来源自有的跨 partition 关系只有在并集再次校验两端及中央 edge registry 后才接纳；候选排名使用局部 Top-K，不做全量 Python 排序。旧版、缺失、损坏、越界或 identity 失配伴生产物只返回 capability unavailable，绝不授权整图事后过滤。full rebuild 与 delta fold 都会重发伴生产物并失效其专用 single-flight LRU。跨进程发布则靠伴生 manifest 的 stat 探针失效，而这个探针是**三态**：一个签名、确认「根不在」、或者「这次问不出来」。确认不在——同版本 import 省略伴生根时正是这个形态，因为它会把活着的根**退休**；一次 ENOENT 还不算数：发布是两次 rename、根会瞬时不可见，只有 `.old` 也不在了才算落定（viz 独立缓存同一口径）——立刻逐出该 notebook 的全部缓存条目并降级为 capability unavailable；「问不出来」（适配器没有探针，或这次 stat 失败）维持 fail-soft 继续服务。把这两者混为一谈，正是退休后的伴生产物能一直服务到进程重启的原因。运行时 reader 只供统一 Ask/Report 激活服务消费，不可用时 fail closed 回 B。
-- 所选来源质量边界刻意拆开：`app.eval.selected_source_graph` 负责 golden case 评测与 observation 解析；`app.services.source_graph_quality` 负责 production 使用的版本化、无正文 attestation schema/verification；`app.services.source_graph_rollout` 负责纯函数式 off/shadow/allowlist/hash/on 决策。production module 禁止 import `app.eval`。套件冻结 model/sampling/corpus/scope/source alias，把 citation anchor 逐项绑定 evidence provenance，先检查硬隔离与 baseline preservation，再比较质量/成本，并同时检查逐案例和汇总。激活钉死 canonical golden 摘要，自定义 golden 只作诊断；production 会重算所有无正文逐案例/汇总护栏，corpus/model 任一 pin 缺失均 fail closed。attestation 摘要只检测意外修改，受信路径所有权仍归部署负责。只有统一激活服务 import rollout decision；Ask/Report consumer 不得实现第二套 gate。
-- `SelectedSourceGraphActivationService` 仍是唯一的所选来源图激活算法，但 Ask/深度报告只能经共享 host 的内建 contributor 与 core-private 请求 bridge 到达它。调用方必须先完成并冻结历史 `B` 再调用 host；服务只读取服务端冻结、真正收窄的 `include` scope，构建有界 snapshot，依次尝试在线 scoped PPR/邻居 membership，并在必要时读取按来源 partition 伴生产物，最后复验每个返回 source id，再把 `G` 交给 `BaselineProtectedEnrichmentService`。全范围/全选在 snapshot I/O 前直接返回；默认不可见 shadow 返回 `B`，质量批准的 active 模式返回 `B + G`，任何失败都返回 `B`。状态对象只属于内部观测，不得进入 Ask/报告 payload、轨迹、stream 或 UI；禁止新增第二套 rollout parser、workflow 级 service 直调、直接图 consumer 或客户端 narrowed 判据。
-- 重构前创建的数据库可原样加载。`scripts/verify_repository_snapshot.py` 使用精确的逐版本 migration manifest 与稳定 seed manifest，对 SQLite URI 路径做百分号编码，只在临时 backup 上构造 repository；cleanup 失败时只报告保留的 backup 路径，不输出私有行。它校验原 DB/WAL metadata 以及 SHM 的存在性和大小；连接 live WAL 时只豁免 SHM mtime，因为 SQLite 可能重建它。
-- 逐步推理的来源身份查找是纯身份 repository 操作，不读取来源正文、摘要、元素、KG payload 或 embedding。两个 adapter 都按稳定的 `(created_at,id)` 顺序分页读取可见且已授权的来源目录，并使用部分索引 `idx_sources_visible_identity`：`(notebook_id, created_at, id) WHERE source_type NOT IN ('memory','knowhow')`。消费这份目录的服务层解析器已随「模型判断来源」一并移除，因此 `visible_source_identity_rows_bounded` 目前没有生产调用方；索引与两侧实现仍予保留，因为检索范围依旧以 `(notebook_id,source_id)` key 表达，且空来源 id 集合表示空、绝不表示不限制。
+运行时所有权与数据流以 [architecture.md](../architecture.md) 为准；修改对应功能前，
+阅读其中的 [Repository 组合](../architecture.md#22-repository-组合与兼容-facade)、
+[前端边界](../architecture.md#24-前端边界) 与 [核心数据流](../architecture.md#3-核心数据流)。
+公开行为和精确数值上限由 [产品/API](./product-and-api_zh.md) 拥有，操作步骤由
+[运维文档](./operations_zh.md) 拥有。以下只保留贡献者必须遵守的约束，不再重复实现历史。
 
-schema 变更继续由 `SqliteMigrator` 的版本门管理：追加新的 `_migration_N`、同步提升
-`SCHEMA_VERSION`，绝不能修改已经封版的旧 migration。启动恢复、稳定 seed 与管理员升级
-保持在版本门之外，每次启动都会执行。
+### 依赖、授权与状态所有权
 
-SQLite 迁移是单向的：`SqliteMigrator.migrate()` 遇到已标记 `PRAGMA user_version`
-比当前运行版本 `SCHEMA_VERSION` 更新的数据库时会拒绝启动——记录日志并抛出
-`RuntimeError`，同时点名这两个数字（文案含「schema contains a future version」，与
-PostgreSQL 账本守卫同一关键词），让降级部署在启动时就快速失败，而不是悄悄用一个
-自己看不懂的 schema 跑下去。就绪端点只报脱敏后的「database initialization failed」，
-两个版本号要看后端日志。版本号恰好等于 `SCHEMA_VERSION` 时仍然不跑任何迁移。唯一受支持的
-回退方式是恢复升级前的备份，或重新部署一个 `SCHEMA_VERSION` 不低于该库版本号的
-构建——没有反向迁移。
+- 保持 `factory/wrapper → facade → runtime → services → stores`。store 独占业务 SQL
+  与原始行选择；application/query 组件可以组装领域投影。service 不分支判断 dialect，
+  不导入另一 adapter。稳定跨层值放在 `backend/app/domain`，repository ports 不依赖
+  services，静态依赖图无环。领域 router 拥有端点实现，`app/api/routes.py` 只做组合；
+  兼容 facade 重导出原对象，不新增第二套实现。
+- extension SDK 保持依赖轻量。只有 `app.bootstrap` 连接 adapter 与
+  `backend/app/extensions`；workflow 消费领域 host port，plugin 不导入具体 repository、
+  facade 或 runtime。availability probe 不做 I/O，capability port 保持窄投影，
+  某 contribution 不可用不能关闭其他独立贡献。保留启动冻结的路由/准入、无贡献时原样
+  返回 baseline、有界批量 hydration、取消传播与不得持连接执行的边界。
+  扩展编写和 UI 包约束见 [部署扩展 SOP](./deployment-extensions-sop_zh.md)。
+  模块化扩展 PR 仍需两次独立 subagent review，并遵守 [评审与 CI 流程](#开发流程)。
+- `backend/app/application` 的 application stage envelope 保持不可变、依赖轻量。
+  有意扩展显式 import allowlist，不放开会绑定 `app` 的裸根 import。Ask/Report stage
+  接缝保持精确 source scope、retrieval run、actor、取消 token 和 connection probe
+  的身份；在既有边界重验授权，违反契约直接失败。stage wrapper 不持数据库连接或外层
+  leaf-I/O 槽位；core 拥有最终审计与落库。终态后 observer 不得改写已提交产物或
+  逆转 `done`；`report.completed_observer` 另不得启动检索/模型工作。修改 Ask 完成
+  路径时保留其既有 observer 顺序、失败隔离与成本。
+- G1 的 `scripts/check_architecture_boundaries.py` 守住
+  `scripts/architecture_boundary_baseline.json`：repositories→services 债务与 facade
+  表面只减不增，core/models→services import、列出的热点函数长度、repository
+  Protocol 方法数均无预留空间；缩小时同批下调 baseline。退役 facade 成员按
+  [调用方台账](./superpowers/plans/2026-08-23-facade-retirement-ledger.md) 逐批进行，
+  用 `scripts/audit_facade_callers.py` 复现，并同步 ownership/surface fixture：
+  `scripts/generate_repository_contract_fixtures.py --rebaseline-surface`。
+- 两种 adapter 的 `access_sql.py` 与 `mount_sql.py` 判据同步维护。新的 notebook 写
+  端点走 `require_notebook_capability(...)`；在 body 中才解析身份的路径也使用同一
+  capability 表及独立 mirror-write fence。先授权再返回镜像写错误，保留已登记的
+  报告创建者私有权限例外。不得根据空/null principal id 猜 grant 种类或绕过实时读权；
+  读判据扩展时同步更新 Memory 授权锁位 allowlist。access-SQL 与
+  notebook-capability 守卫负责验证。
+- participant 集合替换只由 `retrieval_participants.py` 在检索消费边界提供，
+  `global_run.py` 是唯一安装者。授权仍走真实 mount/read 判据，`source_scope.py`
+  只能收窄已证明的集合。保留精确 reader/writer allowlist、actor/run 绑定、无内容
+  cache fingerprint 和 `ParticipantOverrideError` 传播。新增可读该上下文的
+  fail-soft handler 必须登记到 `_SEAT_FAILSOFT_SITES`；`_bounded_participants`
+  必须在这些 handler 外先验证。模式问题 `subjectless_run_active` 与过滤问题
+  `peer_scope_ceiling_active` 分开判断。安全边界由
+  `test_participant_override_guard.py` 守住。
+- 可变运行态归 `RepositoryRuntime`，`REPORT_CANCELLATIONS` 是刻意保留的进程全局
+  例外，与 coordinator 和兼容函数共享同一身份。领域 builder 只接较早的 frozen
+  bundle，不接 runtime 本身；保留窄迟绑定 accessor 与启动副作用顺序。组合后受支持
+  的替换必须同步到所有既有消费者。
+- KG edge 定义只放在 `domain/kg/edge_schema.py`，service shim 不定义新 `EdgeSpec`。
+  production 不导入 `app.eval`，不从分数重建 provenance，不新增第二套 selected-source
+  rollout parser/activation 路径。新增检索贡献保持冻结 baseline，先授权再 hydration；
+  工件与来源范围身份由服务端拥有。
+- 停服维护使用 `open_maintenance_cli_repository`，先做 factory 前安全检查，再取得
+  独立 session 锁；模型调用前释放页读连接，最终始终关闭 repository。在线 scale CLI
+  使用独立组合根，强制 `migrate=False, seed=False`，组合前验证 schema，并持
+  per-notebook claim 到发布完成。全部工件根及回滚/退役复用 staging/swap 与 claim
+  检查，不得原地覆盖活目录。操作步骤见 [运维文档](./operations_zh.md)。
 
-当前 schema 版本为 81。这里指 SQLite schema。已提交的 v9 兼容 fixture 会经由 v10–v81 migration 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 覆盖交互式规整 anchor 成员检查的归一化表达式索引，v22 增加持久化的 notebook 级 KG 构建任务，v23 增加每用户最新模型服务状态，v24 增加 kg_canonical_scratch，v25 清除旧用户模型凭据并新增部署级模型服务状态，v26 增加 knowhow 变更流水/里程碑，v27 增加 sources.chunked_at，v28 增加文档数量上限 schema，v29 确定性清理重复 cluster membership 并安装唯一索引，v30 增加 sources(notebook_id, file_hash) 内容哈希去重索引（上传去重 / batch_ingest 续跑），v31 只增加 inert、无 payload 的 shadow_change_log 与 shadow_capture_control 内部表，v32 增加 reports.understanding_json，持久化深度报告的问题理解确认契约，v33 增加 `(notebook_id, source_object_id/target_object_id, id)` 覆盖索引，供关系词法补召回稳定地做有界 keyset 查询，v34 增加关系补全水位与对象 keyset 索引，v35 增加浏览器提交时间 `ask_jobs.asked_at` 供生成中会话重连，v36 增加 KG 质量分析的三张预计算产物表（kg_community_edges、kg_source_profiles 与产物账本 kg_analysis_artifacts）；rebuild_communities 整体重写它们，账本逐份记下产物建于哪个 kg_mutation_seq；发布是原子的——板块划分、community_seq 戳与三张产物表在同一个写事务里提交，而喂给它们的全表读全部待在那个事务之外（SQLite 写锁是进程级的）。三张表都不带 level 列——社区层的新鲜度闸本身不分 level，产物描述的 level 记在账本 payload 里；v37 增加 `source_elements` 上按 `(source_id, element_type, created_at, id)` 的索引，供有界、按类型的集合枚举（公式/表格/图片/代码块清单）；v38 增加部分可见来源身份索引 `idx_sources_visible_identity`：`sources(notebook_id, created_at, id)`，排除隐藏的 Memory/Knowhow 投影；v39 增加命令目录抽取的 `catalog_jobs`（每次运行一行，带按来源的 `queued`/`running` 条件唯一索引——那就是跨进程单飞守卫）与 `catalog_candidates`（每条抽取结果或被接地校验拦下的条目一行，按 job 内 `position` 做 keyset 排序）；`catalog_jobs.source_generation` 记下任务创建时刻的来源元素代次，来源被重新解析后这一轮候选整批作废，不会被确认成文档里已经不存在的内容。`catalog_candidates.job_id` **刻意不加外键**：候选直接挂在 notebooks/sources 上级联删除，而一条指向 catalog_jobs 的入向外键会让它不再是叶表，那个 source_id 单列守卫就没有可用的正向 shadow 停车方案了。v39 还在既有表上装了本迁移唯一的一个索引 `idx_knowhow_tables_nb_title`：`knowhow_tables(notebook_id, title, created_at, id)`，让按标题解析目标表变成一次索引定位——前两列等值 seek，后两列直接给出 `(created_at, id)` 的 tie-break 顺序，不再在 apply 的持锁窗口里把该 notebook 下每一张表都读一遍。SQLite v40 增加不可变的 `knowledge_source_facts` 与规范化 `knowledge_source_fact_elements` 绑定；写入方在全局 KG 同一事务内校验当前 running 抽取代次和每个证据元素的来源，替换时同事务清除旧代次；`global_object_id` 刻意不加外键，避免全局融合/治理抹掉来源事实。本迁移只启用存储与写生命周期，读取由后续 PR 激活。PostgreSQL v20 是配对业务 schema。临时 shadow 边界已有 preflight/control/guard、run-bound 原子 snapshot、有界可续跑 baseline COPY/H0，以及 fail-stop 单消费者正向 replicator 原语。replicator 连续校验全局 seq、在短只读 snapshot 仅为 upsert hydration 当前行，delete 保持 key-only 且 hydrated bytes 为零；同一 stable key 在 accepted prefix 内保留最后 event 并按全局最后 seq 排序，raw seq/checkpoint 仍连续，每个 identity 的最终 actual apply 覆盖 synthetic dependency contribution，只有 dependency-only identity 才引用计数一次 synthetic 行及其 bytes；短读窗口若在 allocated high-water 前结束，会在 hydration/apply 前立即判为 suffix gap；满窗口低于 high-water 时在同一 snapshot 探测相邻 seq，缺失即失败；PG apply 事务 claim worker 后、业务 DML 前复查既有 run/direction poison；poison 发布在 binding/checkpoint 校验后锁定检查该方向任意既有记录，完全相同视为 ACK-loss 成功，不同则 stale 且绝不新增第二条，再重新锁定 ledger+81 表并复核 snapshot source/target、live target identity 与精确 catalog后，把业务收敛、脱敏 progress 与 checkpoint CAS 同事务提交。批次硬上限为 4096 events/64 MiB；仅一个 final bundle 可独占超限，同 key replacement 若在已有其他 actual bundle 时使 bytes 超限则回滚并延后。FK 父闭包只读同一验证 source snapshot，每事件最多 64 行；固定 v32 图按 FK constraint branch 计数的上界为 12 个 row slots，依赖行计入 bytes且批内去重，不扫描 suffix log。PG 只延后 FK/UNIQUE ordering SQLSTATE，CHECK/NOT NULL 立即 poison；精确 PG32 catalog 的 110 个 unique surface 通过 NULL、按其他唯一列的非 NULL 等值/NULL `IS NULL` 与固定 predicate 定域的确定性 text/bigint 候选（`C` collation 文本 max 拼 `chr(1)`，或先走可索引 bigint MIN/MAX 快速路径选择 min−1/max+1，仅在两个 int64 边界都占用时扫描首个 gap），或仅限无入向 FK 且有 accepted current-final 恢复行的叶表同事务 delete/reinsert 来解 cycle。停车状态按 `(unique surface, row identity)` 跟踪；每个 stagnant pass 会停车所有可独立停车的冲突，final apply 成功会清除该 identity 的所有停车面。限制为 8 passes、32 actual statements/apply、16384 actual statements 总量；每次候选查询都计入预算，ordering、statement、pass、`ProgramLimitExceeded`/`DataError` 候选搜索与候选 UPDATE 容量耗尽保持 non-poison，`QueryCanceled` 保持瞬态并整事务重试，最终窗口不可停车的 UNIQUE 冲突则按最早实际 seq poison。worker 从 256 events/8 MiB 自适应倍增至硬上限，仍 ordering-blocked 时 non-poison；ack-loss 与 poison publication 使用相同 identity 绑定，snapshot 与业务 apply 前均要求 `progress.applied_seq == checkpoint.last_seq`。每个有效 batch 结局恰好记录一条脱敏 metric，batch events 使用实际 accepted/observed raw-event 数并尽可能保留 retries。瞬态错误整事务有界重试，SQLite path/file binding 失败使用专用 identity 异常而不依赖文本分类；这一分类只在 `open_fresh_live_sqlite` 调用边界生效：非瞬态 `sqlite3.OperationalError` 同样归为 binding 失败，locked、busy、interrupted open 仍按瞬态整批重试，后续 SQLite operational error 保持原 schema/query 分类；已证明的确定性错误在实际阻断 seq 写一条脱敏 poison 后停止。显式运维 CLI 已提供 preflight/start-forward/status/verify；前台 worker 使用数据库时钟排他 lease、SIGTERM/INT 批次边界，并只在 FULL 校验、barrier/replay/poison、至少 7 天/100,000 events tail 等边界之后保守清理。`SHADOW_DATABASE_URL` 单独设置仍不启动同步，且只有该 CLI 可以读取；本阶段不含 cutover、反向复制或自动 active URL 交换。
+### 前端实现护栏
 
-SQLite v76 / PostgreSQL 0056 新增用户所有的全局会话和任务表，提供幂等请求与每会话单个运行任务的唯一约束；删除会话会级联删除其任务。SQLite v77 / PostgreSQL 0057 再给这些全局会话加上公开分享 token 与读取水位（`share_token`、`shared_through_at`、`shared_through_id` 三列均可空，外加已发放 token 上的部分唯一索引）——与 SQLite v52 / PostgreSQL 0030 加在笔记本会话上的形状相同；之所以重复一份而不是复用 `conversations`，是因为全局会话不属于任何笔记本，而那张表的 `notebook_id` 非空且外键到 notebooks。
+- workspace hook 独占领域状态，壳层只消费 readonly view 与具名 command，不传递其他
+  领域 setter。保留精确 actor/notebook/generation 所有权、迟到响应拒绝、删除 tombstone、
+  single-flight 与既有请求预算。导航只脱离持久任务，显式 Stop 才取消。新增 notebook
+  owner 登记在 `notebookTransitionSteps`，统一走 `notebook-transition.ts` 的
+  begin/commit/settle 路径，root-modal 清理仍在首位。
+- `api-client.ts` 拥有 HTTP mechanics，领域 API 模块拥有 endpoint policy；生产
+  `fetch` 只能在共享 transport。根弹窗使用 `use-root-modal-coordinator.ts` lease：
+  异步前 issue，仅向当前 owner publish；被覆盖的弹窗 inert/ARIA-hidden，提交后确认
+  底层 lease 仍有效才归还焦点。关闭弹窗不能释放动作仍在飞的互斥。
+- 复用来源/图谱 renderer 和 readonly props，不把领域状态搬进呈现组件。UI extension
+  declaration 只投影元数据，在启动/构建期冻结，并受精确 tuple、capability、UI mode
+  与 owner 门控。新增贡献后运行 `scripts/generate_ui_extension_contract.py` 更新
+  `backend/tests/fixtures/ui_extension_contract.json`，通过 `--check` 对账。
+  内建 registry 的 import 闭包保持 `.ts` 以兼容 Node 测试。本地 UI 包遵守
+  [扩展 SOP](./deployment-extensions-sop_zh.md) 及独立部署验收门，不放宽基础仓库
+  的零插件 registry 断言。
+- 修改群组/Schema 面板时保留既有样式与行为守卫，不复制 CSS 或使用未定义类名。
+  Schema 选择/草稿身份是 `(object_type, proposal-status)`，写入回调只向发起时的
+  pane 提交可见结果，`SchemaWriteOutcome` 的 `confirmed`、`unconfirmed` 与
+  `failed` 三值不可合并；已提交但未确认的写入不得提示为失败并要求重试。
+- `globals.css` 只保留一条元素级按下基线：
+  `button:not(:disabled):not([aria-disabled="true"]):active`，使用 `opacity: .7` 与
+  `filter: brightness(.88)`，不加 `transform`、`translate`、`scale`、`rotate`
+  或基线 `transition`，避免几何变化吞掉边缘点击或覆盖定位。动作结果落在所按控件
+  本身或紧邻处，页面横幅不能单独充当反馈；长任务在飞时另需禁用或替换控件。
+- 复制结果复用 `copy-result.ts` 的 `useCopyResult`，按所复制 token/item 的身份分格，
+  身份变化时 reset，由共享 timer 恢复 idle。JSX 保留字面量结果类，
+  `button.copy-result-copied` / `button.copy-result-failed` 同时声明 background
+  与 hover 规则。失败时仅在 `input.value === link` 仍成立后选中紧邻只读输入框。
+  `button-press-feedback-guard`、`long-task-button-guard`、
+  `command-catalog-button-guard` 与复制结果组件测试共同守护。
+- Secure Context 限定 API 必须有共享退路：前端 id 走 `client-request-id.ts` 的
+  `newClientRequestId()`，复制走 `copy-text.ts` 的 `copyTextSafely()`。
+  发请求前的提交准备也要放进错误边界，使同步异常能还原草稿并释放忙碌状态。
+  `secure-context-api-guard.test.mjs` 守住 HTTP 内网部署。
+- 问答输入区停止键复用 `stop-control.tsx` 的 `STOP_CONTROL_CLASS` 与 `StopGlyph`，
+  只显示图标，语义写入 `aria-label`/`title`，停止中禁用；报告带字动作行只复用图标。
+  停止后轮次的判据与文案只来自 `stopped-turn.tsx`，被停止的 notebook 轮次不得作为
+  可重发的 storage 草稿复活。全局问答复用既有会话对账与 missing-job 路径，调用点
+  不另算替换/历史状态。
+- 共享流使用 `task_stream.py::deliver_ask_events` 与浏览器 `ndjson-stream.ts` 行读取，
+  route 模块不互相导入。`yieldToPaint` 保留后台标签页需要的 timer 兜底。权限变动走
+  `use-notebook-collection.ts::refreshAfterAccessChange` 与壳层窄
+  `reconcileOpenNotebook` effect，使已打开工作区与列表一起对账。
 
-SQLite v78 / PostgreSQL 0058 将本地登录名与稳定用户名分离，新增单例认证策略、外部身份绑定、短期浏览器认证事务以及策略/身份审计表，并给会话补充认证来源、外部 subject 与绝对过期时间。
+### Schema 与迁移编写
 
-SQLite v79 / PostgreSQL 0059 给 `retrieval_experiences` 加 `notebook_id` 分区列（`TEXT NOT NULL DEFAULT ''`，`''` = 全局分区）与非唯一索引 `idx_retrieval_experiences_notebook(notebook_id, id)`（尾列 `id` 承接每次读取的 `ORDER BY id`：只有带上它，分区读才是「直接定位到这个分区、按 id 序走完」的覆盖索引 seek，而不是借主键顺序把整表走一遍再按分区过滤），把检索策略经验库按笔记本分区；不新增表、外键或 unique surface，也不跑回填——默认值即回填，且不重算任何内容寻址 id（全局分区的哈希输入按构造逐字节不变）。
+- SQLite schema 变更新增 `_migration_N`，同步提升
+  [migrator](../backend/app/repositories/sqlite/migrations.py) 的 `SCHEMA_VERSION`；
+  不修改已封存迁移。启动恢复、稳定 seed 与管理员原地升级不进入版本门，每次启动照跑。
+- PostgreSQL 在 [migrations](../backend/app/repositories/postgres/migrations/) 追加
+  连续编号 SQL，并同步 [POSTGRES_SCHEMA_MANIFEST](../backend/app/repositories/postgres/schema_manifest.py)。
+  [migrator](../backend/app/repositories/postgres/migrator.py) 在迁移锁下验证 checksum
+  与 ledger，不能改写已应用 SQL。当前版本号与逐版本 DDL 以这些可执行源文件为准。
+- 同时保留新库与升级行为、null/default 语义、归属、keyset 排序/collation、
+  FK/cascade/unique surface 和复制/清理分类。表特有的设计理由写在引入它的迁移旁；
+  同批更新受影响的 schema/seed/snapshot fixture 与 migration manifest，不能
+  重设旧兼容 fixture 的基线来掩盖升级破坏。
+- SQLite 迁移单向：数据库 `PRAGMA user_version` 超前时以
+  `schema contains a future version` 拒绝启动；PostgreSQL 同样拒绝超前 ledger。
+  readiness 只暴露脱敏的初始化失败。恢复使用升级前备份或兼容/更新的程序，
+  不执行反向迁移。执行与切换步骤见 [运维文档](./operations_zh.md)。
+- 冻结的 [v9 fixture](../backend/tests/fixtures/repository_v9/) 与
+  `scripts/verify_repository_snapshot.py` 保留升级兼容验证。snapshot 校验只在临时
+  backup 上构造 repository，验证精确逐版本迁移与稳定 seed，并保持原始 DB/WAL
+  metadata 及 SHM 存在性/大小不变（只有 live-WAL 的 SHM mtime 可不同），不记录私有行。
 
-SQLite v80 / PostgreSQL 0060 给 `notebooks` 增加 `sync_origin`（`NOT NULL DEFAULT ''`，PostgreSQL 侧 `COLLATE "C"`）：非空表示这本笔记本是从别的环境同步来的镜像，值是源环境标识，目标端写入围栏据此拒绝内容变更。
-
-SQLite v81 / PostgreSQL 0061 给 `global_ask_jobs` 增加四列（`submitted_via`、`asked_at`、`updated_at`、`error_detail`，均为 `TEXT NOT NULL DEFAULT ''`，PostgreSQL 侧 `COLLATE "C"`），让全局问答作业留下与笔记本内 `ask_jobs` 一行同样口径的记录：`submitted_via` 从所属会话已记录的值回填（只改空行），`asked_at`/`updated_at`/`error_detail` 历史行留空串，不做重建。不新增表、索引、外键或 unique surface。
-
-SQLite v41 新增 `knowledge_source_fact_backfills`，以「可见来源 + 来源代次」记录显式离线历史投影的游标、计数、投影版本、稳定不完整原因、独立运维失败码和终态；`knowledge_source_facts.projection_origin` 显式区分在线抽取与历史投影，在线事实即使已失去融合全局对象仍会被保留并计数。命令每本 notebook 只先构建一次来源反查索引，后续运行复用其完成标记，再按来源做有界对象 keyset 分页，每页一个短写事务。只有 owner 与全部证据元素都能证明属于该来源的历史对象才会进入来源事实；混合或缺失来源的旧数据只记为 `incomplete`，绝不猜测。审计会独立对账有效 KG 代次、投影版本和持久事实数量，不信任账本上的 `complete`；它只输出聚合计数与有界 source id，不输出证据原文。深复制用同一来源代次映射重写事实、证据绑定与终态账本，并生成副本本地的 completed KG run，因此副本可独立审计或强制修复，不保留对原 notebook 运维抽取历史的依赖。这仍是只写准备阶段，不改变在线 Ask 读路径。
-
-SQLite v42 新增 notebook 级 `source_index_backfills` 执行账本。来源反查索引的每个有界 keyset 页面都在同一个短事务里写索引行并推进游标/计数，因此进程重启会从最后已提交页面继续，而不是先清空 notebook 再重来。账本固定 `kg_mutation_seq`；代次漂移只记录稳定的 `kg_generation_changed` 并保持快速路径标记为 false，下次运行再按新代次从头构建。当前完成标记会被规范化成完成账本，不重写索引行。账本不保存证据正文或原始异常。PostgreSQL v20 为配对 schema。
-
-SQLite v43 新增可撤销的报告公开分享 token。SQLite v44 新增 `chunks.question_indexed_at` 与归属原 chunk 的 `chunk_questions`，用于可选的生成问题检索补充；删除/重解析级联清理，深复制会重写 chunk/source/notebook 身份。PostgreSQL v22 为配对业务 schema。SQLite v45 新增可空的 `user_profiles.ui_mode` 列，承载每用户界面模式偏好（默认「自动」/「高级」）；列或 profile 行缺失时读路径回落「自动」，PostgreSQL v23 为配对业务 schema。正向 shadow 当前使用 SQLite54/PG32/epoch1、81 张业务表、110 个 unique surface，固定 FK 图的分支计数闭包上界为 12 个 row slot。
-
-SQLite v46 增加 element→chunk 反查索引 `chunk_elements`、它的 notebook 级执行账本 `chunk_element_backfills`，以及分叉读路径的 `unified_kg_state.chunk_elements_indexed` 标记。`chunks.element_ids` 存的是正向关系，所以「哪些 chunk 含这个证据元素」过去要按索引代次全量扫该 notebook 的 chunk 行并逐行解 JSON；复合主键 `(notebook_id, element_id, chunk_id)` 把它变成有界点查，额外那条 `chunk_id` 索引只为服务 `chunks` 的级联删除。活库够得着的每条 chunk 写路径都在与 chunk 行**同一个写事务**内维护反查行，删除来源/重新解析/改写 knowhow 格子经该级联带走旧行。唯一已登记的豁免是整本深拷贝：它不复制 `unified_kg_state`，副本 marker 恒缺失、走旧全量路径。迁移只建空表；历史行只由显式离线的 `backfill-chunk-elements` 阶段投影，其账本形状与 `kg_generation_changed` fail-closed 规则同 `source_index_backfills`，同样不存 chunk 正文或原始异常。标记仍为 false 的 notebook 逐字保持旧的整库扫描路径。PostgreSQL v24 为配对 schema。
-
-SQLite v47 新增以 `(notebook_id, object_type)` 为主键的 `notebook_object_schemas`，承载笔记本本地的图谱对象类型定义；全局 `object_schemas` 继续作为管理员维护的默认基线。生效注册表以 notebook 行覆盖同名全局类型，因此本地 `disabled` 只屏蔽当前笔记本。每条本地定义还保留创建者用于归属/审计，实际授权仍由实时 notebook owner/read 守卫执行。PostgreSQL v25 为配对 schema，正向 shadow manifest 同步纳入这张业务表。
-
-SQLite v48 新增可空的 `sources.agent_profile_id` 出处列，记录某份来源是 Agent（而不是人）添加的。NULL 是承载语义的取值——它表示「这是人添加的」——因此不做任何回填：已部署的每一行按定义都是用户添加。该列刻意不建索引、不加唯一约束，也不对 `agent_profiles` 建外键：MCP `delete_source` 背后的权限判定是一次主键单行读取，没有任何地方枚举「这个 Agent 的来源」，出处必须比 profile 行活得更久，而一条入向外键还会给正向 shadow 的父闭包多加一条边。该列只在 INSERT 分支写入，所以同内容去重复用既有行时保留首写者的出处，笔记本深拷贝则显式清空它。`SourceSummary` 与来源详情模型把它投影成 `agent_created` 布尔。PostgreSQL v26 为配对 schema；由于该列不新增表、索引、约束或外键边，它没有改动当代的正向 shadow 不变量（74 张业务表、100 个 unique surface、分支计数闭包上界 12 个 row slot）。
-
-SQLite v49 新增群组知识共享的三张表。`groups` 记一个群组的名称、`kind`（`project`｜`department`｜`domain`——只是**分类标签**，影响谁能建组与界面文案，不影响任何权限机制）与说明；`group_members` 以 `(group_id, user_id)` 为主键把用户映射到群组并带两级组内角色（`member`｜`admin`），另按 `user_id` 建索引服务「我在哪几个组里」这个方向；`notebook_grants` 每行是一条**生效中**的授权边 `(notebook_id, principal_type, principal_id, role)`，`principal_type ∈ {user, group, group_admins, everyone}`、`role ∈ {viewer, admin}`。所有取值枚举一律在应用层校验，schema 刻意不加 CHECK；`principal_id` 是**多态**引用（user id｜group id｜`everyone` 存空串），也刻意不对 principal 建外键——正向 shadow 的静态停车方案要求这两列里至少有一列保持裸文本列。
-
-这个形状有两条不可省的推论。其一，`principal_id` 必须保持 `NOT NULL DEFAULT ''`：NULL 不参与唯一比较，`everyone` 行会整个逃出 `UNIQUE (notebook_id, principal_type, principal_id)`——重复授权可累积、撤销撤不干净；而 NOT NULL 还把 shadow 的停车列让给了 `principal_type`（SENTINEL_TEXT）。其二，`everyone` 的判据只能写 `principal_type='everyone'` 的四值精确匹配，绝不能从 `principal_id` 推断（`IS NULL`／`=''` 都不行）：停车会给冲突行的 `principal_type` 暂写一个哨兵串，精确匹配正是让停车行 fail-safe（谁也匹配不上）的原因。`UNIQUE` 的隐式索引已覆盖 `notebook_id` 前缀查找，因此不另建 notebook 单列索引；`idx_notebook_grants_principal`（`(principal_type, principal_id)`）服务「这个组被授权了哪些库」这个方向。笔记本深拷贝**不带**授权边，照 `notebook_members` 先例——访问控制状态不是知识，副本由新 owner 重新授权。删组在**同一个写事务**里清掉指向该组的授权行（`principal_id` 无外键，数据库替不了这件事）；合库可能复活的孤儿边由 `scripts/merge_dbs.py` 清扫。
-
-PostgreSQL v27 为配对 schema。由于 v49/v27 新增三张表与一条 UNIQUE 约束，正向 shadow 的不变量变为 77 张业务表、104 个 unique surface；分支计数闭包上界仍为 12 个 row slot（三张表都是浅层）。
-
-SQLite v50 新增成员贡献审批流表 `notebook_share_requests`——`notebook_grants` 的兄弟表，刻意独立于 grants 表，好让判定谓词零 status 过滤。普通成员对**自己 manage 的库**、向自己**只是普通成员**的目标组提交申请（组管理员分享进自己管理的组永远走既有 grants 端点、不经这张表），组管理员审批时在**同一写事务**里插入 `(group, viewer)` 授权边并更新状态。状态机 `pending → approved/rejected` 单向：撤回是申请者走整行 `DELETE`（仅 `pending` 时），不写第三个状态，两个 FK 均 CASCADE，深拷贝不带申请。`decided_at` 只允许写 SQL `NULL` 或 ISO 时间戳，绝不写空串——它是本表唯一进入正向 shadow 的可空时间列，PG 的 `timestamptz` 收到 `''` 会直接类型报错，且刻意不登记进 `POSTGRES_EMPTY_TIME_SENTINELS`。部分唯一索引 `uq_share_requests_one_pending`（`(notebook_id, group_id, status) WHERE status = 'pending'`）保证同一 (库, 组) 至多一条在飞申请，创建端点撞它时幂等返回既有 pending 行、而非 409；`status` 一律精确匹配 `pending`/`approved`/`rejected`，绝不用 `!=` 当判据。PostgreSQL v28 为配对 schema；由于 v50/v28 新增一张表与一条部分 UNIQUE 索引，正向 shadow 的不变量变为 78 张业务表、106 个 unique surface；分支计数闭包上界仍为 12 个 row slot（新表也是浅层）。
-
-SQLite v51 新增 Agent 库理解的两张表 `agent_notebook_profile` 与 `agent_profile_jobs`，承载「AI 对这个库的理解」——一份低成本、经 LLM 巡固的、关于笔记本的理解摘要。`agent_notebook_profile` 以 `(notebook_id, owner_id, label)` 为主键存五个 label 块：三个共享底座块（`corpus_shape`／`key_entities`／`corpus_gaps`，`owner_id=''`，来源变更累计到阈值后由按笔记本的巡固 job 刷新）与两个每成员覆盖层块（`retrieval_notes`／`usage_gaps`，`owner_id` 为该成员用户 id，该成员完成足够多次提问或一次深度报告后刷新）。`owner_id` 沿用 v49/v27 `notebook_grants.principal_id` 的先例：`NOT NULL DEFAULT ''` 而非 nullable，刻意不对 `users` 建外键，也不对它或 `label` 加 CHECK 约束。`agent_profile_jobs` 是每条链路一行的状态/计数器表，以 `(notebook_id, owner_id)` 为主键；单飞由主键行 CAS 承担，不另建唯一索引。两张表的 replication key 都逐字等于声明主键，因此正向 shadow 自动按 `REPLICATION_KEY` 停车，不需要哨兵列，也不需要 `_UNIQUE_PREDICATES` 条目。`agent_notebook_profile.history_json` 是与块更新同一写事务内追加的有界环形 before/after 历史，代替独立的变更历史表——P1 界面只有看/改/清空/手动重建，没有历史回看，一张可查询流水表买不到任何 P1 能力。笔记本深拷贝不带这两张表：副本从零重新形成自己的理解，job 行是与 `catalog_jobs` 同理的过程状态。PostgreSQL v29 为配对 schema。由于 v51/v29 又新增两张（同样浅层的）表，正向 shadow 的不变量变为 80 张业务表、108 个 unique surface；分支计数闭包上界仍为 12 个 row slot。
-
-SQLite v52 给 `conversations` 增加问答会话公开分享的三列：`share_token`（可空，部分唯一索引 `idx_conversations_share_token WHERE share_token IS NOT NULL` 只覆盖已发放的 token，NULL 停车与 `notebooks.share_token`／`reports.share_token` 同款）、读取水位 `shared_through_at`（时刻字面值，不是外键——存 answer id 会在该 answer 删除后失去意义）与展示用 `shared_through_id`。token 挂在会话行上而非侧表（同 `_migration_43` 报告 token 先例，会话删除即带走公开链接）。笔记本深拷贝无需处理这三列：`_COPY_VALIDATED_TABLES` 本就不含 `conversations`，故它们永不随副本走，也无从清空——迁移注释写明了这条，以防后来者照 notebooks/reports 先例加多余清空。PostgreSQL v30 为配对 schema。由于 v52/v30 只给既有表加列、不加表也不加外键，正向 shadow 的业务表数不变（仍 80 张），只是新增的这条部分唯一索引把 unique surface 从 108 抬到 109；分支计数闭包上界仍为 12 个 row slot。
-
-SQLite v53 新增 `agent_profile_jobs.claim_token`（Agentic Memory P2）：巡固链路的**认领代际**，一列 `TEXT NOT NULL DEFAULT ''`，每次 `claim` 现铸一个新值，并由 `settle` 与 `write_block` 一起当作 CAS 条件的一部分。它关掉 P1 只按 `status` 做单飞留下的 ABA——成员被移出再加回来会得到一行主键逐字相同、`runs` 回到 0 的新行，旧 worker 的 settle 因此会落在替身行上（消费掉新 run 的快照），它的写入也能通过只看「行在不在」的存在性检查。删除+重建必然换 token，「我认领的那一行」与「现在这一行」从此可区分。`settle` 的返回值也因此从二值变三值：`settled`、`gone`（行没了——只有成员移出会删它，调用方必须把这一轮重建出来的块清掉）与 `superseded`（行还在，但属于更晚的一次认领——调用方**绝不能**清，新一代可能已经写好了自己的块）。不新增表、索引或 unique surface，故正向 shadow 的不变量保持 80 张业务表、109 个 unique surface、12 个 row slot。PostgreSQL v31 为配对 schema。
-
-SQLite v54 新增 `retrieval_experiences`（Agentic Memory P2）：**部署级全局**的检索策略经验库。一条经验说的是「在**这类问题形态**下，**这个检索动作**值得／不值得用」，外加一句模型撰写的理由、一个 `support`（多少次 run 支持这条结论）与一个 `adopted`（注入之后模型真的选了这个动作多少次）。本表在 v54 创建时**没有** `notebook_id`、没有 owner 列、两个方向都没有外键（v79 加了 `notebook_id` 分区列，见下文；owner 列与两向外键仍然不存在，合并分类也不变）：它存的是「怎么查」的通用打法，不是任何人的内容——所以笔记本深拷贝结构上够不着它（与 `groups`/`group_members` 同一句论证），`scripts/merge_dbs.py` 把它归进全局并集表。主键是单列**内容寻址** `TEXT`——「情境指纹 + 动作」的确定性哈希——这既让跨独立部署的并集是安全的（递增 id 会在主键冲突时静默丢行），也因为声明的 replication key 与它逐字相等，让它唯一那个 unique surface 自动落 `REPLICATION_KEY` 停车：无哨兵列、无 `_UNIQUE_PREDICATES` 条目。v54 刻意不建索引：行数有硬上限，读路径只有主键点查与一次有界全扫；v79 才是加索引的那一跳——分区谓词出现后，索引终于有可答的东西。由于 v54/v32 又新增一张（无父、叶）表，正向 shadow 的不变量变为 81 张业务表、110 个 unique surface；分支计数闭包上界仍为 12 个 row slot。PostgreSQL v32 为配对 schema，当前配对为 SQLite54/PG32/epoch1。
-
-SQLite v55 一次迁移落两样（Agentic Memory P3）：叶表 `agent_observations`（一个出向 FK 到 `notebooks`、无入向 FK——外部 Agent 按 `(笔记本, 用户)` 的观察队列，环形淘汰，只喂不可信的覆盖层巡固 prompt）与可空列 `user_profiles.search_profile_json`（每用户检索/回答风格偏好文档；`NULL`＝从未设置过，与 `ui_mode` 同一套契约）。`agent_observations` 的幂等唯一索引 `idx_agent_observations_request`（`(notebook_id, owner_id, agent_profile_id, client_request_id) WHERE client_request_id IS NOT NULL`）与 `idx_conversations_share_token` 同款走 NULL 停车；另有一条非唯一索引 `idx_agent_observations_scope` 支撑环形淘汰删除与有界读取，不计入 unique surface。`user_profiles.search_profile_json` 不新增 unique surface、外键或 JSON 列登记（与 `ui_mode` 同等对待）。由于 v55/v33 又新增一张只带出向 FK 的叶表，正向 shadow 的不变量变为 82 张业务表、112 个 unique surface（新表声明的 PK 加它唯一那条部分索引）；分支计数闭包上界仍为 12 个 row slot。PostgreSQL v33 为该阶段配对 schema。
-
-SQLite v56 / PostgreSQL v34 增加生效中的 `groups.owner_id` 指针。存量群组从当前管理员中确定性选择 owner（仅当 `created_by` 仍是管理员时优先创建者），不会把已降级或已退出的创建者重新拉回；新群组同时写创建者与 owner。转让在同一群组根事务内把目标成员提升为管理员，并让原 owner 保留管理员；转让完成前，owner 成员行不可降级、移出或自助退出。该列不新增表、索引、外键或 unique surface，因此正向 shadow 仍是 82 张业务表、112 个 unique surface、12 个 row slot；当前配对为 SQLite56/PG34/epoch1。
-
-SQLite v57 / PostgreSQL v35 在群组根行增加可重复使用的邀请 capability：可空的
-`invite_token`、`invite_created_at`、`invite_created_by`，以及仅覆盖非空 token 的部分唯一
-索引 `idx_groups_invite_token`。token 留在 `groups` 上，使有权管理员能重新打开并复制同一条
-生效链接；换新或撤销会原子清除旧权限，删组则随根行一起删除。时间字段只能是 SQL NULL 或
-ISO 时刻，绝不能写空串。本迁移不加表、不加外键；正向 shadow 不变量为 82 张业务表、113 个
-unique surface、12 个 row slot，当前配对为 SQLite57/PG35/epoch1。
-
-SQLite v58 / PostgreSQL v36 增加可插拔索引管线列：`notebooks.indexing_pipeline` 是可空的
-期望选择（`NULL` 表示 builtin），`indexing_pipeline_version`、
-`indexing_pipeline_generation` 与 `indexing_pipeline_job_id` 是非空权威列；
-`unified_kg_state` 与 `extraction_runs` 同时增加已发布产物身份对
-`(indexing_pipeline_id, indexing_pipeline_version)`。本迁移不新增表、外键或 unique
-surface。
-
-SQLite v59 / PostgreSQL v37 增加持久化的 `indexing_pipeline_stages` 与
-`indexing_pipeline_stage_sources`。两表都归类为 `TableClass.LOCAL_EPHEMERAL`：它们存在于
-两套 schema 并计入 schema 完整性，但正向 shadow 的 copy/capture/apply 不传输某个后端本地
-worker 的 lease 状态。该配对共 84 张应用表（82 张复制表 +
-2 张本地 stage 表）、113 个复制面 unique surface，FK 分支计数上界仍为 12 个 row slot。
-
-SQLite v60 / PostgreSQL v38 增加 `agent_observations.kind`：`'note'` 是 Agent 经
-`add_observation` 自己写下的短句（本迁移之前唯一可能存在的行，所以默认值就是历史真相，
-不需要回填），`'call'` 是一次落到该笔记本上的工具调用记账。只加一列——不加表、索引、
-外键与 unique surface——因此该配对为 SQLite60/PG38/epoch1，应用表仍是 84 张、复制面
-unique surface 仍是 113 个、FK 上界仍是 12 个 row slot。环形淘汰与巡固读取都按 `kind`
-分开，调用记账因此既挤不掉已写下的短句，也进不了模型 prompt。
-
-SQLite v61 / PostgreSQL v39（热路径修复批 1）增加索引，服务生产审计发现的、此前整段
-扫描的查询族：`concept_clusters(notebook_id, canonical_id)`、
-`concept_clusters(notebook_id, lower(canonical_name))`、三条反向 FK 覆盖
-（`extraction_runs.notebook_id`、`knowledge_source_fact_elements.notebook_id`、
-`memory_items.notebook_id`）、`knowledge_relations(notebook_id, source_object_id,
-target_object_id, edge_type)`，以及服务 `hidden_source_ids` 的 partial 索引
-`sources(notebook_id, source_type) WHERE source_type IN ('memory','knowhow')`——
-PostgreSQL 侧六组共八条全加，SQLite 侧加其中五组共七条。PostgreSQL 独有第六组
-`chunks(source_id, ordinal)`：SQLite 的规划器不会用一条以 rowid 收尾的二级索引消去
-`ORDER BY rowid` 的排序步骤（经实测验证——既有的 `idx_chunks_source` 本来就免费给出
-这份顺序，SQLite 侧同构的索引只会让每次写 chunk 多付一棵 B 树、换不回任何读侧收益，
-一旦真被规划器选中甚至比不建还差），因此刻意不建——细节见 `_migration_61` 的
-docstring。不加表、不加列、不加外键、不加 unique surface，因此配对仍是
-SQLite61/PG39/epoch1，应用表仍是 84 张、复制面 unique surface 仍是 113 个、FK 上界
-仍是 12 个 row slot。生产上已有数据的 PostgreSQL 库应先用
-`scripts/build_hotpath_indexes.py --apply`（`CREATE INDEX CONCURRENTLY`）在线建好
-这八条索引，迁移里的 `CREATE INDEX IF NOT EXISTS` 才落成 no-op 的账本记录。运维步骤
-见 `docs/deployment-and-configuration_zh.md` 的热路径索引一节。`idx_chunks_source`
-（0003 迁移加的旧索引）现在已被新的 `idx_chunks_source_ordinal` 完全覆盖，属已登记
-的写放大冗余债，本批不下线——细节见 0039 迁移的头注释。
-
-SQLite v62 / PostgreSQL v40 增加 `idx_ask_jobs_creator_activity`，按创建者、归一后的
-`created_at` 绝对时刻表达式与 `id` 建立降序复合索引。索引表达式与跨笔记本「提问概览」
-查询逐字同形（包括不可解析时间的哨兵），所以每页能在 `LIMIT` 处停止，不再全表扫描
-`ask_jobs` 或为用户全部历史建立临时排序。它不增加表、外键或 unique surface；彼时配对为
-SQLite62/PG40/epoch1。
-
-PostgreSQL v42（`0042_hotpath_batch2_search_indexes.sql`，热路径修复批 2）新增
-`idx_knowledge_objects_nb_payload_trgm`（notebook 域复合 partial GIN trigram 索引：
-btree_gin 的 `public.text_ops` 令 `notebook_id` 前置于 `((payload::text) COLLATE "C")`，
-`WHERE status != 'deprecated'`，与 `idx_knowledge_objects_nb_name_trgm` 同形——强制的
-notebook 等值在索引访问内相交，而非先建全局位图；服务集合页搜索的 knowledge 腿）与
-`idx_source_elements_nonblank`（非空元素资格谓词上的部分 btree，服务体检 H5）。迁移
-同时安装 btree_gin（与 0002 装 pg_trgm 同一 trusted-extension 形式），并校验任何同名
-先存索引——INVALID 残留或异形名字冲突让迁移响亮失败，而不是被 `IF NOT EXISTS` 静默
-跳过。本批刻意不动 SQLite。不增加表、外键或 unique surface；彼时配对为
-SQLite63/PG42/epoch1。
-
-SQLite v63 / PostgreSQL v41 增加 `extension_runtime_toggles`：部署插件的运行时启停开关加
-审计（谁、何时）。无行 = 启用，因此从未有管理员碰过这张表的部署行为与这张表出现之前
-逐字节相同。它双向都不带外键（`plugin_id` 是 `EXTENSIONS_CONFIG` 里的标识符，不是任何
-别的表的一行）也不加二级索引——这张表恒定只有几十行（每个被管理员碰过开关的插件一行），
-管理页面列出每一行、闸的刷新读（`enabled = false`）都只是一次廉价顺序扫描；`enabled`
-不在主键里，主键索引原本就服务不了这个过滤条件。闸本身求值时**不读**这张表：每次
-contribution/capability 判定读的是进程内快照，这张表只是快照背后的持久层，写入后立即
-让快照失效重建，其它进程靠低频轮询收敛——判定因此保持零 I/O，不会退化成每次判定打一次
-数据库。`enabled` 声明为 PostgreSQL `boolean`，不是本仓库通常「SQLite 整数开关 →
-PostgreSQL bigint」的惯例——因为这一列唯一的外部契约就是管理 API 层直接读出的 JSON
-字段 `runtime_enabled: bool`，没有别的内部读者需要跟 bigint 惯例对齐。SQLite 侧孪生的
-`enabled INTEGER` 列不加 `CHECK (enabled IN (0,1))`，与本 schema 其它 INTEGER 标志位列
-一致；0/1 之外的值会在 `sqlite_to_postgres.py` 的 `bool` 转换分支硬失败，而不是被悄悄
-折算，这是接受的取舍而非疏漏。v63/v41 只多加一张（叶、无父）表，配对随之变为 85 张应用表、114
-个复制面 unique surface（新表声明的主键就是它唯一的 unique surface）；FK 分支计数上界仍是
-12 个 row slot。PostgreSQL migration v41 是配对 schema，彼时配对为 SQLite 63 / PostgreSQL
-41 / epoch 1。
-
-PostgreSQL v43（`0043_concept_cluster_keyset_index.sql`，热路径修复批 3）新增
-`idx_clusters_nb_canonical_member`：`concept_clusters(notebook_id, canonical_id,
-member_object_id)`；SQLite v64 加同一条索引（parity，`_migration_64`）。它服务
-`concept_cluster_detail_rows`/`concept_cluster_member_total` 的概念详情 hub 簇
-keyset 分页——既有的 `idx_clusters_nb_canonical`（v39/v61）只覆盖
-`notebook_id=?, canonical_id=?` 等值前缀，hub 概念的后续分页（第二页起）此前要对
-整段匹配结果排序一次，才能应用 `ORDER BY member_object_id` 的 keyset 谓词与
-`LIMIT`；把 member_object_id 并进同一条索引后，planner 能直接按索引序取出结果，
-免去这一步排序。三列都是已窄化的 text，普通（非 partial）btree 构建是秒级的，
-没有 v42 payload trigram 索引那类 GIN 顾虑（fastupdate、分钟级构建、两位数 GB
-体积）。PostgreSQL 侧迁移同样在建索引前校验任何同名先存索引（与迁移 0042 同一
-DO 块模式，codex #636 R1 P2）。既有的 `idx_clusters_nb_canonical` 现在是这条新
-索引的严格前缀，登记为写放大冗余债、本批不下线——沿用迁移 0039 头注释里
-`idx_chunks_source` 的先例。不增加表、列、外键或 unique surface，配对仍是同样的
-85 张应用表、114 个复制面 unique surface、12 个 row slot 上界；彼时配对为
-SQLite 64 / PostgreSQL 43 / epoch 1。
-
-SQLite v65 / PostgreSQL v44 新增 `retained_user_activity`：它是不带 notebook
-外键、在删除笔记本事务内写入的最小用户分析投影，只包含活动归属、状态、显示元数据与
-删除/到期时间；答案、引用、轨迹、来源正文和报告正文绝不进入这张表。actor/owner 两条
-keyset 索引与活动流排序同形（包括 PostgreSQL 显式的 `record_id COLLATE "C"`），
-expiry 索引用于启动/删除路径清理。这个无父叶表只新增一张
-复制业务表和一个主键 unique surface，不增加 FK 边；当前配对为 SQLite 65 /
-PostgreSQL 44 / epoch 1，共 86 张应用表、115 个复制面 unique surface，闭包上界仍为
-12 个 row slot。
-
-SQLite v66 / PostgreSQL v45 新增可空的 `sources.uploaded_by`，并为可见来源新增
-`(uploaded_by, created_at, id)` 部分活动索引。新可见来源记录实际当前用户；
-Memory/Knowhow 投影与深拷贝行不记录上传活动。旧 schema 没有保留真实上传者，
-因此既有可见来源只能尽力回填为笔记本所有者。本次不增加表、外键或 unique surface；
-当前配对为 SQLite 66 / PostgreSQL 45 / epoch 1，仍为 86 张应用表、115 个复制面
-unique surface 与 12 个 row slot 闭包上界。
-
-SQLite v67 与 PostgreSQL v46 新增全局 `wishes` 和 `wish_votes` 表。
-`wishes.author_id` 与点赞的复合身份都引用 `users`；删除许愿内容会级联清除点赞，
-删除作者仍受外键限制。点赞主键 `(wish_id, user_id)` 是“每位用户每条内容一票”的
-数据库级守卫。两种 adapter 共用同一 `WishStorePort`，shadow manifest 也纳入这两张
-业务表。当前 shadow 合同因此为 88 张业务表、117 个复制面 unique surface，祖先闭包
-上界仍为 12 个 row slot。此时 schema 配对为 SQLite 67 / PostgreSQL 46 / epoch 1。
-
-SQLite v68 / PostgreSQL v47（批 3·W1 PR-2，seq 语义统一）新增
-`unified_kg_state.kg_reset_epoch`：一个持久化、只增不减的按笔记本计数器，记录
-「这个笔记本的 KG 被清空过几次」。唯一写者是 `delete_notebook_graph_rows`——它现在
-把该行**原地重置**（在 KG 分析总览「无历史」判据读取的每一列上，都与新建笔记本的
-出生行逐字节相同），而不是删掉重建，并在同一事务里推进这一列。默认值 0、只增不减。
-本次不增加表、外键或 unique surface；当前配对为 SQLite 68 / PostgreSQL 47 /
-epoch 1，仍为 88 张业务表、117 个复制面 unique surface 与 12 个 row slot 闭包上界。
-
-PostgreSQL v48（`0048_source_search_trgm_indexes.sql`，热路径修复批 4）新增来源页签
-服务端检索背后的三条 notebook 域复合 GIN trgm 索引：`idx_sources_nb_title_file_trgm`
-建在 `sources(notebook_id, lower(title), lower(file_name))` 上并按
-`source_type NOT IN ('memory','knowhow')` partial，另加
-`idx_source_authors_nb_name_trgm` 与 `idx_source_paper_meta_nb_ptitle_trgm`。它与一处
-**两端同构**的查询改写配套：`list_sources_page` 的 q 过滤从「两条 `LIKE` 加两个跨表
-`EXISTS` 的布尔 OR」改为「id 半连接一个三腿 `UNION`」，每条腿都以自己表的
-`notebook_id=` 等值打头，因而各自可索引。生产实测症状是 4.9 万 source 的 notebook 上
-带 q 的 COUNT 单次 363ms（且页查询共用同一份 where，一次请求付两遍）：planner 对跨表 OR
-选了 hashed subplan，每次执行都把 `source_authors` 21 万行、`source_paper_meta` 3.9 万行
-整表materialize；「2 字符与 7 字符 needle 耗时几乎相同（360ms vs 363ms）」这条判据说明
-瓶颈是全表扫而非 LIKE 匹配。SQLite 只拿改写、**不加索引**——它没有 GIN trgm 的等价物，
-`LIKE '%…%'` 也吃不到 B-tree 前缀——所以 `SQLITE_SCHEMA_VERSION` 不动、v48 仍与 SQLite
-v68 配对；这一「PostgreSQL-only」分歧与迁移 0042 为批 2 登记的是同一种。三键复合是刻意
-选择：多列 GIN 允许每条 `LIKE` 腿只约束 `(notebook_id, 自己那个 trgm 键)`，对同一条索引
-扫两次再 BitmapOr，已由 live EXPLAIN 验证。另有两个后续变体经实测后否决：文档记录的
-备选「用两条双键索引代替复合索引」因此本就不需要、也帮不上忙——两条索引各自仍带同一个
-`notebook_id` 键，单次扫描成本一样；以及把查询里的 `OR` 拆成两条
-单 arm UNION 腿（选择性 needle 上是打平，短 needle 上实测更差——多出的第四条 Append 分支
-意味着模式短到提取不出 trigram 时要对 `sources` 再全扫一遍）。两项实测取舍写在迁移头注释里
-而不是留给后来人重新发现：短于 3 个字符的 needle 提取不出任何 trigram 键（这也是基准表里
-唯一一处页查询劣化，23.6ms→33.1ms，而按「一次用户动作」计仍快 3.4 倍）；以及 GIN 的
-fastupdate pending list 在 `VACUUM` 合并之前会把 GIN 的代价估算抬高约十倍，足以让 PostgreSQL
-拒用自己刚建好的索引——这个假象一度误导了本批第一轮的计划实测，现已写进
-`docs/operations_zh.md` 供运维参考。迁移 0048 重复了 0042 的 btree_gin
-守卫，并在建索引前校验任何同名先存索引。不增加表、列、外键或 unique surface；当前配对为
-SQLite 68 / PostgreSQL 48 / epoch 1，仍为 88 张业务表、117 个复制面 unique surface 与
-12 个 row slot 闭包上界。
-
-SQLite v69 / PostgreSQL v49（批 3·W1 PR-3 阶段 A，删库作业化；热路径批 4
-的纯索引迁移 0048 先落 master，本迁移因此从 48 改号为 49）新增设计规格
-§1.4 登记的三条 FK/keyset 反查索引——`idx_agent_tokens_default_notebook`（补上
-47 条 L1 外键里唯一缺前导索引的那一条，`agent_access_tokens.default_notebook_id`；
-此前删库的外键级联探查在这张表上是全表扫）、`idx_knowhow_cell_code_column`、
-`idx_conversations_notebook`——以及两张新表 `notebook_delete_jobs` 与
-`notebook_delete_files`：删除 tombstone 的后台作业载体，以及它的来源文件路径
-暂存侧表。两张表刻意不外键到 `notebooks`（扫尾「作业行在、notebooks 行不在」
-的特例需要这个状态在数据面可表达——见 PostgreSQL 迁移文件自身的头注释），
-`notebook_delete_jobs` 另带一个部分唯一索引
-（`idx_notebook_delete_jobs_one_active`，作 tombstone 自身 CAS 单飞的纵深防御）。
-当前配对为 SQLite 69 / PostgreSQL 49 / epoch 1，共 90 张业务表、120 个复制面
-unique surface，12 个 row slot 闭包上界不变（两张新表都是叶表、无入向外键，
-不影响最深闭包链）。
-
-SQLite v70 / PostgreSQL v50 增加提问提交的幂等键：可空列 `ask_jobs.client_request_id`
-与部分唯一索引 `idx_ask_jobs_client_request`（`(created_by, client_request_id) WHERE
-client_request_id IS NOT NULL`）。官方浏览器每次提交铸一个键（沿用推理预检的按标签页
-镜像 id），每次 `/ask/stream` POST 都带上；`AskStateStorePort.begin_or_attach_durable_job`
-遇到重复键返回既有 job 而不是插第二行，coordinator 随后从存储把该 job 流回客户端
-（以它的 id 发 `started`、回放已持久化的轨迹、再把已存答案作为 `final` 或按行状态发
-`cancelled`/`error`），不再跑第二个引擎。列刻意可空且无哨兵默认值、索引刻意为部分
-索引——与 `agent_observations.client_request_id`（v55/0033）同一套 NULL 停车形状——
-无键的行（所有迁移前旧行、MCP、脚本、同步 `/ask`）根本不参与该面；不回填。
-`created_by` 作索引首列，别的账号的键永远接不到本用户的 job；同一用户在另一笔记本
-已用过的键会被拒绝（`AskRequestKeyConflict`，以 `error` 事件结束流）而不是接回。
-不加表、不加外键；正向 shadow 不变量变为 90 张业务表、121 个复制面 unique surface，
-12 个 row slot 闭包上界不变。
-
-批 3 W2 PR-1(SQLite v71 / PostgreSQL 0051)加入簇图代次化 schema 半部:
-三张派生表的行级 `generation` 列、`unified_kg_state` 代次控制块(双
-published 指针/只增取号器/在飞认领对/催收落库标记)、以及三建五删的簇
-索引整改(四列唯一取代三列唯一;两条会劫走谓词读者计划的严格前缀索引
-一并退役)。行全 0 代、指针全 0 时读者结果逐字节不变;复制唯一面数量
-不变(四列唯一顶替三列唯一)。
-
-用户总览使用信号(SQLite v72 / PostgreSQL 0052)加入可空 `users.last_seen_at`
-(见规格 `docs/superpowers/specs/2026-09-07-admin-usage-overview-usage-signals-
-design_zh.md` §3 B1、§7 决策 1):不回填,NULL 表示"迁移后尚未上线",与"很久
-以前上线过"是两个不同的陈述。写路径在 `identity_store` 的会话 touch 同一写
-事务里一并更新,复用既有 300s 节流(`auth_session_touch_interval_seconds`),
-单调不回退;与 `auth_sessions.last_seen_at` 不同,登出/吊销不删这一列。不加
-表、不加索引、不加外键,`list_user_usage` 的一次性全表聚合直接读该列。
-
-许愿墙处理状态(SQLite v73 / PostgreSQL 0053)加入 `wishes.status`(`text NOT
-NULL DEFAULT 'open'`):由管理员掌握的内容状态(`open` / `in_progress` / `done` /
-`declined`)。默认值就是全部回填——迁移前的每条内容按定义仍是待处理——不跑数据
-遍历。取值集合钉在 API 模型(`app.models.wishes.WishStatus`)而不是 CHECK 约束,
-与 `kind` 的既有做法一致。`WishStorePort` 新增 `update_wish`(作者或管理员;改成
-更新计划仍只限管理员)、`delete_wish`(作者或管理员;点赞在同一事务删除)与
-`set_wish_status`(仅管理员),归属判断都在行锁内完成;`list_wishes` 增加
-`status` 筛选,`priority` 排序把已完成/不采纳沉到待处理之下。不加表、不加索引、
-不加外键。
-
-提问调用方式(SQLite v74 / PostgreSQL 0054)给 `ask_jobs`、`reports` 与
-`retained_user_activity` 各加一列 `submitted_via`(`text NOT NULL DEFAULT ''`)。
-取值只由建出这一行的服务端入口决定,以显式关键字参数一路下传,绝不从客户端请求
-模型或环境请求上下文里读:登录会话鉴权的 `/ask`、`/ask/stream` 与 `/reports`
-路由传 `web`,MCP `ask_notebook` 传 `mcp`。空串表示「未记录」,也就是全部回填——
-迁移前的行没有可靠信号能说明它从哪个入口进来,所以不做推断;不传参的进程内调用方
-(例如 `app/eval/inference.py`)同样记 `''`。删除笔记本时该值随留存投影一并复制。
-取值集合钉在 API 模型(`app.models.ask.StoredSubmittedVia`,即入口字面量
-`SubmittedVia` 加上 `''`)而不是 CHECK 约束;响应模型、管理员查询参数与全部写入
-签名都引用这两个别名,并有一条静态测试要求每个 HTTP/MCP 入口传字面量取值。不加表、
-不加索引、不加外键;管理员提问分析的等值筛选沿用它本来就在做的三路 `UNION ALL`
-全扫。该批次配对为 SQLite 74 / PostgreSQL 54 / epoch 1。
-
-笔记本元信息刷新（SQLite v75 / PostgreSQL 0055）新增 `notebooks.name_auto`
-与 `metadata_generation`。标题和描述独立记录是否自动维护：显式编辑某个字段就
-清除该字段的自动标记，手动填写占位标题或清空描述也同样生效。刷新在短事务中
-领取递增代次，写回时只更新代次仍为最新且仍标记为自动的字段。历史占位标题会
-标记为自动；其他历史标题因无法还原作者身份，保守保留为手动。现有 `purpose_auto`
-值保持不变。当前配对为 SQLite 75 / PostgreSQL 55 / epoch 1。
-
-只能在应用/API 与后台 writer 停止后执行：
-
-```bash
-PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-facts \
-  --notebook-id nb-... [--force] [--confirm-service-stopped]
-PYTHONPATH=backend python scripts/audit_source_facts.py \
-  --db .local/silicon_notebook.db --notebook nb-...
-```
-
-全部 notebook 用 `--all-notebooks` 代替 `--notebook-id`。PostgreSQL 必须传 `--confirm-service-stopped`，它只是运维确认，不会自动停服务；审计改用 `--database-url`。两种审计都是事务/连接只读，任一可见来源仍为 missing、running、failed、incomplete 或对账不一致时返回非零。
-
-SQLite v34 新增 `(source_id,id)` 对象 keyset 索引和带来源代次的
-`kg_relation_completion_state` 持久水位；v35 增加 `ask_jobs.asked_at`；v36 增加 KG 质量分析的三张预计算产物表；v37
-新增 `source_elements` 上 `(source_id, element_type, created_at, id)` 索引；v38
-新增部分索引 `idx_sources_visible_identity`；v39
-增加命令目录抽取的 `catalog_jobs`（含来源代次列 `source_generation`）／`catalog_candidates`；
-PostgreSQL v19 与之对等；v40/v41 的来源事实写入与回填尚不改变检索读取。
-
-Verifier 在 SQLite 只读 snapshot 记录 `Hv`，把规范化事实流式写入 owner-private 临时 spool，释放 SQLite 后才等待 PG checkpoint；随后固定 PostgreSQL `REPEATABLE READ, READ ONLY` snapshot 的 `Ht`，并用第二个 SQLite 事务扫描 `(Hv, Hseen]` 的全部 retained dirty key，只排除这些可证明的 concurrent key。PG retention barrier 一直保留到报告事务提交。Structural 校验覆盖精确 catalog、稳定 key 集与规范化哈希、源/目标外键、unique/cascade 和 storage root 内文件引用；Full 再覆盖选定领域投影、float32 bytes/dimension/norm/抽样 cosine，以及固定中英检索集（recall@12 下降不超过 1 个百分点、top-10 overlap 不低于 0.90、citation/source id 集合完全一致）。Cutover 还会在报告前复核 SQLite 仍 write-frozen，并要求 `Hv=Ht=MAX(seq)`、零 concurrent key、100% coverage 和前一轮完整 full/cutover 报告。持久报告只含安全表名、stable key hash、类别、计数和固定摘要；干净报告只能 supersede 同级或更强等级已覆盖的 drift。
-
-Baseline snapshot 发布要求 owner-only 的真实目录并以 0600 独占创建临时文件。Snapshot/live fence 必须 fresh 打开当前 SQLite 路径，不复用 repository 线程缓存连接，并跨 open/transaction 及 snapshot 发布/PG commit 前复核 resolved path 与 device/inode。COPY 的所有业务 SQL 全限定到 run 绑定 schema，在每个关键绑定处短暂 `BEGIN IMMEDIATE` 复核 live capture 仍启用；JSONB prefix proof 只在 JSON 子树内把有限 int/float/Decimal 统一成精确十进制语义，普通 SQL 数值列仍保持类型差异。Resume 使用有界 named server cursor，长阶段受 statement timeout 与取消轮询约束；起始/最终按 checksummed migration 派生契约完整验证 v32 表、列、约束、operational/GIN index 与 `public.pg_trgm`，逐批仅做轻量控制验证，且最终 81 表 proof/`ANALYZE` 不持有 SQLite 栅栏。
-
-最终 live SQLite fence 是跨 commit 的 lease：只在 PG 双锁/run/table lock 与 81 表长 proof/`ANALYZE` 完成后取得，保持到 PG H0 checkpoint + run progress 事务实际提交成功再释放；PG 失败不落 H0 并释放 SQLite，持 fence 时不得再等待 PG pool/advisory lock 或执行长 proof。
-
-- `frontend/app/page.tsx` 只承担 notebook workspace 编排，不再持有全部共享模型和面板实现。API/视图类型与常量位于 `workspace-model.ts`，答案/引用/推理轨迹位于 `answer-panel.tsx`，内置 KG 类型文案/样式位于 `kg-type-model.ts`，图谱和答案共用 `kg-type-mark.tsx` 渲染。`use-source-library.ts` 已成为来源行/检索范围、分页、详情元素、重解析/删除状态、tombstone 与解析轮询的唯一 owner。壳层只提交既有 notebook/source 成对首屏快照，并消费只读状态、具名命令和窄刷新事件；hook 不接收其他 workspace 领域的 setter。
-- `frontend/app/notebook-transition.ts` 是「打开笔记本」的单一 transition 编排（纯逻辑，无 React/DOM/网络）。全部 `begin` 先按声明序跑完再判拒绝（短路会让排在后面的 owner 连 begin 都没跑过）→ `enter` → `load` → `isCurrent` → `apply` → 各步可选 `commit`（按声明序）→ `conclude`；随后对已 begin 成功的步骤按**逆 begin 序** settle 恰好一次：成功传 outcome，拒绝、并行取数失败、任一守门判否与异常一律传 `null` 回滚（异常随后原样抛出）。被顶替的旧 transition 只 settle 自己铸出的那批 ticket，绝不碰更晚 transition 刚建立的 owner。`page.tsx::notebookTransitionSteps` 是各 owner `begin`/可选 `commit`/`settle` 的唯一登记点，新增 owner 只加一项；root-modal 那一步必须排第一——它的 close sink 是暂存批次的唯一清理路径。`openNotebook` 只保留自己的 prologue 与 plan 声明，四个相位落在具名 helper 里。请求数、workspace epoch 语义、迟到响应丢弃、tombstone、history 处理与失败落点逐字不变。回归门：`frontend/tests/guards/notebook-transition-guard.test.mjs` 与 `frontend/tests/unit/notebook-transition.test.mjs`。
-- `frontend/app/use-ask-session.ts` 已成为 Ask 草稿/对话、意图预检与确认、持久 stream/reconnect、会话历史/tombstone、会话 mutation 和回答反馈的唯一 owner。打开 notebook 时，壳层仍执行既有 notebook/source 成对读取，随后通过显式 hook command 恰好读取一次会话列表、至多一次最新详情。导航只 detach durable job，不自动取消；同一 actor 重新打开该 notebook 时，恢复先接回被 detach 的在途 run——`started` 之前它没有 durable 会话，只能凭 hook 的本地 run 记录接回并继续读同一条 transport；`started` 之后按其 durable 会话恢复，只有详情仍报告该 job 活动时才接回在线流（详情已终态就不再接回，避免 final 事件把同一轮再落一次）——没有在途 run 时才恢复最新详情。同一笔记本可以同时挂着多条 detached 记录（换会话再问），恢复先接回最新提交的那条；在离开期间、`started` 之前失败的记录保留到下次恢复，届时报错并把问题退回输入框（`started` 之后的传输失败不算提问失败，交给历史/重连）；接手意图预检的 durable run 沿用预检的提交序号；恢复期间 run 已完成则直接用它自己的 final 响应在本地投影那一轮（不多发列表/详情请求，恢复仍保持恰好一次列表、至多一次详情）；接回时连同该 run 提交时的引擎与检索档位一起恢复。同库内打开某个会话（含点击当前会话）同样接回绑在该会话上的脱开记录；绑在已删除（tombstone）会话上的脱开记录在删除时与恢复前被丢弃，绝不复活。推理模式的意图预检/澄清确认同样只被 detach 而不中止：预检在离开期间继续，意图清晰就直接启动 durable run（不写任何可见状态），需要澄清就把契约记在本地 run 记录里；重开笔记本时按阶段接回——继续显示「理解中」、重新弹出澄清确认，或接回它已启动的 durable run。这两个阶段没有服务端痕迹，hook 还把它们按「一次提交一条记录」（带随机 id，同一本笔记本可并存多条）镜像到本标签页的 `sessionStorage`（`ask-intent-persist.ts`）：同一标签页整页刷新后，恢复笔记本接回最新一条、打开某个会话接回绑在该会话上的那条——理解阶段重新发起一次理解请求，澄清阶段直接重开确认卡（契约形状先校验，坏条目整条丢弃）；停止/取消、会话被删除或预检失败退回草稿时即清除，切到自动模式只清除高级界面留下的记录（见下面的逐条规则）；交接给 durable run 时记录改为 `handoff`（带确认后的意图）并保留到服务端发回 `started` 为止——这段窗口里刷新，恢复时先对照刚加载的历史（活动 job 或已落轮的同一 `asked_at`+问题；列表或详情没能加载成功就不对照，镜像留到下一次恢复），服务端已持有就只退役镜像；否则按镜像里的同一个 `client_request_id` 重发这次提交——后端要么接回原 POST 已经建好的 job，要么建出它从未建成的那一个（见 `docs/product-and-api_zh.md`），刷新后的标签页直接接回流，而不是把问题退回输入框。流未 `started` 就结束（失败/停止）同样退役；hook 在页内卸载时把尚未 `started` 的交接流一并中止（保留镜像交给下一个实例对账）。提交时先按记录 id 拿到 Web Locks（标签页关闭即释放）再写镜像，续上之前也先拿锁：浏览器复制标签页会连 `sessionStorage` 一起复制，拿不到锁的副本自行删除、不重复续上；hook 卸载先退役续体再放锁。哪些记录可以续，按每条记录**提交时所在的界面**逐条判定（每条记录都带这个标记；version 1 的旧条目说不出自己来自哪个界面，按非法整条丢弃）：自动模式只丢高级界面留下的记录——它们可能带着自动模式看不见、也改不了的收窄检索范围——自己留下的照常续；高级界面两种都续。切到自动模式这个动作本身同一条规则：取消高级界面在途的理解/澄清并清掉它们的镜像，自动模式自己的工作原样留存，所以「自动 → 高级 → 自动」往返切换不会吃掉用户的问题。刻意不用跨标签页共享的 `localStorage`。显式停止在必要时等到 `started`/job id，恰好取消一次后才 abort 本地 transport，被停止的 run 不再被接回。同步取消端点没有可强制的整请求数据库期限，因此浏览器只保留一条权威取消请求直到服务端响应，不以客户端 timer 提前释放重试权。意图预检与执行复用同一份冻结 source/base scope。hook 按 exact actor/notebook/workspace owner 接纳可见状态、按 actor/notebook identity 校准持久历史，不暴露 raw setter，也不接管壳层的 Memory answer-link 批次或跨域 callback。
-- `frontend/app/use-report-workspace.ts` 已成为报告列表/详情、按需首读、列表/详情互斥轮询、意图/大纲提交、生成/取消/重试、分享、导出选择与删除 tombstone 的唯一 owner。打开 notebook 或非报告页签保持零 report I/O；进入报告页恰好拉一次列表，待确认中心焦点在列表 settle 后至多拉一次详情。导航只 detach 后台任务，不自动取消。exact actor/notebook/view owner 拒绝迟到可见提交，成功删除始终写 actor+notebook tombstone 以保证 A→B→A 收敛；创建冻结 source/base scope，每次写命令重验 live manage 权限。hook 只暴露 readonly view 和具名 command，只依赖 report/pure contract，保持既有请求数与六秒轮询节奏。
-- `frontend/app/use-kg-workspace.ts` 是三个各自可独立测试的领域 owner 之上的薄组合层——`use-kg-knowledge.ts`（Knowledge 行/类型/筛选/分页/重复项/上下文）、`use-kg-schema.ts`（Schema view/mutation）与 `use-kg-graph.ts`（统一图搜索/范围/节点、合并审阅/tombstone 及持久 KG build/relink/rebuild/delete 追踪），共用 `use-kg-owner.ts` 里唯一那份 actor/notebook/generation 门；四者合起来仍是这些状态的唯一 owner。三个领域彼此不 import，门本身不持有任何领域状态、也不 import 任何 API 模块：owner 变更时的清空、invalidate 与新 owner 认领都由组合层把门的扇出路由进各领域自己的具名 command，绝不是把某个领域的 setter 交给另一个领域。`page.tsx` 看到的仍是一份命名空间视图（`.knowledge` / `.schema` / `.graph`）加扁平命令面。打开 notebook 时 Knowledge、Schema、图内容仍保持惰性，只执行维护状态恢复探针——共用按笔记本任务槽的每种维护各一条（重新合并、补上关联、删除知识图谱），其中删除知识图谱那条是随该种类新增的唯一一次读取。exact actor/notebook/generation 拒绝迟到可见提交，actor+notebook identity 让维护认领与合并决定 tombstone 在 A→B→A 后收敛；每条写命令重验 live policy，只读成员零合并审阅恢复/写请求，各类轮询保持既有节奏并单飞。hook 只暴露 readonly view 与具名 command，只依赖 Knowledge/KG/pure contract，保持既有请求数。
-- `frontend/app/use-notebook-collection.ts` 已成为 actor-scoped notebook rows、有界集合搜索、筛选/排序/视图/菜单、issued/published 清单水位、访问权对账、editor/delete、默认创建 single-flight 与 notebook 删除 tombstone 的唯一 owner。壳层保留既有 model-status + health + notebook-list + system-config composite bundle，sidecar settle 后才用 opaque hook ticket 提交清单；打开 notebook 仍不新增 collection read。搜索保持 250ms gate 与模块级四条服务端工作上限；actor 替换同步隐藏旧 rows/dialog，分阶段写重验 live row authority，成功删除在派生刷新前写 actor tombstone，A→B→A 与 delete 前 list 都不能复活卡片。hook 只暴露 readonly view、具名 command 与窄 shell effect。
-- `frontend/app/use-root-modal-coordinator.ts` 已成为 root dialog presentation lease、typed slot conflict/layer、actor/workspace/source generation、topmost 裁决与安全焦点归还的唯一 owner。它只 import React，不拥有领域 payload、权限、busy、API、repository、timeout、interval 或 poll。异步 opener 在读取前 issue frozen lease，只在 exact owner/issue 仍当前时 publish；workspace transition 与 actor replacement 同步隐藏旧 slot，合法 info overlay 与 primary conflict group 相互独立。协调器本身不增加请求、timer 或 mount-time read。全局问答通过窄展示适配器使用 actor 级 `global-ask` primary slot；关闭租约保留已挂载的聊天状态，仅最上层全屏视图进入原生模态模式。
-- `frontend/app/use-promotion-queue.ts` 与 `frontend/app/use-edge-review-queue.ts`（PR-5 分片 1）已成为从 `page.tsx` 的 `Home` 搬出的「内容审核」与「关系审核」两个 root-modal 队列的唯一 owner：候选/边行数据、busy 与单飞 operationRef。开窗走 issue → await 取数 → publish 的冻结票据，请求期间切了 actor/notebook，publish 会拒绝，陈旧数据不会落进新开的窗口。决策命令（`decidePromotion` / `decideEdge`）在每次 await 之后重验票据归属，仍持有票据才刷新队列（晋升还会顺带刷新 notebook collection）；close sink 的 `clearQueue` 只清可见载荷，绝不释放单飞闸或复位 busy，关闭弹窗因此不会让同一候选被批准两次。`usePromotionQueue` 按 actor 归属（`captureActorOwner`）；`useEdgeReviewQueue` 按 workspace 归属（`captureWorkspaceOwner`），其 view 多带一个 `total`——服务端报的真实队列长度，独立于被 `limit` 截断的 `edges` 当前页。两者接触协调器都只经 `Pick<RootModalCoordinator, …>` 的窄结构类型。门：`frontend/tests/guards/root-modal-boundary.test.mjs`。
-- `frontend/app/source-list-panel.tsx`（PR-5 分片 2）是来源栏「本库来源」那一段从 `page.tsx` 搬出后的唯一呈现方：搜索表单（含「搜索中…」在途文案）、滚动的来源列表（检索勾选框、解析状态点、异常徽标、KG/Agent 徽标、原始链接、删除）与底部 `Pagination`。它返回 Fragment，两个 div 仍是 `.sources-body` 的直接子节点——滚动算术（`flex:1 1 auto/min-height:0/overflow:auto`）与 `workspace.side_panel` 扩展点「固定区排在滚动列表之前」这条不变量都靠这层直接父子关系。props 全部显式：只读视图值 + 具名回调（`onSubmitSearch`/`onToggleSource`/`onOpenSource`/`onDeleteSource`/`onPage`），不接 `sourceLibrary` 整体、不接 page 的 setter、`reportError` 也不过界。它收的是 `uiMode` 原值而非算好的 `advanced` 布尔，来源行的 `isAdvanced(uiMode)` 修饰类判据才钉得住；收 `notebookId` 原值，搜索按钮的禁用谓词与搬家前一字不差。在途请求纪律（世代、abort、owner 窗口守卫、`sourcesPageLoading`）全部留在 `use-source-library.ts`。`compactSourceTitle` 与 `SUPPORTED_SOURCE_EXT_GROUP` 迁至 `frontend/app/source-title.ts`，与 `page.tsx` 共用同一份定义。门：`frontend/tests/component/source-list-panel.component.test.tsx`，以及重指向后的 `base-scope-wiring` / `ui-mode-wiring` / `source-agent-badge-guard` / `anomaly-guard` / `source-library-boundary`。
-- `frontend/app/kg-graph-view.tsx`（PR-5 分片 3）是全屏知识图谱视图从 `page.tsx` 搬出后的唯一呈现方：左栏（搜索、范围、类型过滤、待确认合并）、`ForceGraph2D` 画布（仍是 `dynamic(..., { ssr: false })`，节点/连线的模块级绘制函数随之迁入，标识不随渲染变化）与右栏概念详情。状态、ref（`kgCanvasRef`/`kgGraphRef`/`kgDetailRef`、`kgSize`）、memo、effect 与命令编排全部留在 `page.tsx` 与 KG hooks；组件只收一份 `Pick<KgWorkspace["graph"], …>` 的只读视图字段加具名回调，并把 `<KgAnalysisView>` 作为 `children` 渲染在固定定位 section 内原来的位置，图谱分析浮层的层叠与 lease 行为不变。刻意保留两个 `selectKgNode` 入口（画布 `onSelectCanvasNode` 是浮空 promise、总览 `onSelectOverviewNode` 带 `.catch(reportError)`），合并会改变失败呈现。与 `page.tsx` 知识库浏览器共用的叶子迁至 `frontend/app/kg-object-cards.tsx`（`kgNodeName`、`KgOccurrenceCard`、`KgProcedureStepCard`、`fieldLabel`），`formatRelativeTime` 迁至 `frontend/app/relative-time.ts`，各自单一定义、不回指页面。门：`frontend/tests/component/kg-graph-view.component.test.tsx`，以及重指向后的 `kg-relink-wiring-guard` / `kg-rebuild-wiring-guard` / `kg-delete-wiring-guard`（「删除知识图谱」：POST 前先认领任务槽、按 job id 配对的轮询、按笔记本作用域的按钮旁结果）/ `kg-workspace-boundary` / `long-task-button-guard`（按模块查找）/ `root-modal-boundary`（page 不得再有静态 `aria-modal`、不得回填 `kg-view`/`ForceGraph2D`）/ `architecture-boundaries`（`KG_TYPE_STYLE` 消费方随绘制函数迁移）。
-- `frontend/features/extension-sdk` 是唯一 build-time workspace UI registry/host，canonical slot 只有 `workspace.side_panel` 与 `source.detail_section`。首个 production 条目是既有 Agent Profile 入口：它渲染成来源栏固定区（滚动的来源列表之上）的一行入口，不给工作区加独立一列，样式复用既有按钮类与 `:root` token、不写颜色字面量；插件点击前不做 profile I/O，只经 exact-owner `openUnderstanding` action 委托既有根层 modal/data owner。workspace 成功提交后每个 actor generation 读取一次 `/system/extensions`；集合页、未登录、空 registry 在 request/controller/timer 前短路，同 actor 切库复用投影并同步失效旧入口/action。精确 tuple、实时 availability、核心 `workspaceCapabilities`、normalized UI mode 与当前 actor/notebook/workspace owner 全真才渲染。服务端只投影闭合脱敏元数据；props 只含 readonly 摘要与审过的窄 action。parity 测试保持 non-vacuous。新增 contribution 后跑 `scripts/generate_ui_extension_contract.py` 刷新 `backend/tests/fixtures/ui_extension_contract.json`，contracts lane 以 `--check` 对账。
-- 构建期私有 UI 插件包经 `frontend/features/extension-sdk` 下三个 registry 模块装载：`registry.ts`（内建目录；整条 import 闭包必须保持 `.ts`，因为 `node --test` 对 `.tsx` 报 `Unknown file extension`，且两个 node 泳道测试文件直接 import 它）、`workspace-registry.ts`（经 `defineWorkspaceUiRegistry` 合并内建与本地——本地条目因此走内建那套 id/形状/去重校验，不享豁免）、以及生成、被 `.gitignore` 忽略的 `registry.local.ts`（零插件时是空数组存根）。`SILICON_NOTEBOOK_UI_PLUGINS`（`:` 分隔的本地包目录列表）与 `npm run sync:ui-plugins`——挂进 `postinstall` 与五个 `pre*` 钩子（`predev`/`prebuild`/`prestart`/`pretest`/`prelint`）——驱动 `frontend/scripts/sync-ui-plugins.mjs`：校验通过的包被复制到 `frontend/features/ext-<name>/`（同样被忽略，带 `.ui-plugin-origin` 标记文件以便下次同步能安全删除它），并重新生成 `registry.local.ts`。插件包是扁平目录（无子目录，dotfile 跳过），目录名匹配 `^[a-z][a-z0-9-]*$` 且不以 `ext-` 开头；只允许 `.ts`/`.tsx` 文件加恰好一份 `ui-plugin.json` 清单和恰好一个 `workspace-plugin.ts`/`.tsx` 入口文件（导出清单 `component` 字段指名的组件）。出现 `package.json` 或 `node_modules` 一律拒绝——根 `tsconfig.json` 的 `exclude: ["node_modules"]` 只排除 `frontend/node_modules`，插件自带的依赖树会被 `next build` 的类型检查整个吞进去，还会引入第二个 React 实例——出现 CSS 文件同样拒绝，插件视觉必须复用既有类与 `:root` token。插件源码只能 import `../extension-sdk/contracts.ts`、`../extension-sdk/ui.tsx`、裸 `react`、裸 `lucide-react`，外加同包兄弟 `./x.ts(x)`——绝不能 import `../extension-sdk/api.ts`：宿主按该 contribution 自己的 `pluginId` 经 `actions.api` 注入端口，插件若能直接 import `api.ts` 就能构造出另一个插件的端口。复制进来的插件代码会被扫 `app`/`features` 的同一批全仓守卫扫到，含 `scripts/check_ui_vocabulary.py` 与 9 个基于 `appSourceModules()` 的守卫——尤其是 `errors-guard.test.mjs`：它是精确计数普查，`APPROVED_*` 清单是仓库外的包登记不进去的，所以插件绝不能读 `error.message`/`.error`/`.error_message`、也不能 `throw new Error("中文…")`，用户可见文案改用 `api.userMessage(error, fallback)`。另一道守卫（AST 语义扫描，覆盖插件包里的**每个** `.ts`/`.tsx` 而不只是入口）拦住兄弟插件模块里的侧信道——`setTimeout`/`setInterval`、动态 `import(`、`WebSocket`、`EventSource`、`XMLHttpRequest` 与 `navigator.sendBeacon`；直接 `fetch(` 归全仓 `api-boundary` 守卫（它本就对每个模块普查过，两处各写一遍只会让将来放宽其中一处时没人发现另一处还在拦）。注入的 `api` 端口仍是唯一被批准的 I/O 出口，它的三个请求方法都是 `async`，越界路径以 **rejection** 到达调用方而不是同步抛，所以 `await` 与 `.catch()` 两种写法都接得住。插件开弹窗只能用 `ExtensionModal`，并把整份 `context` 与 `actions` 原样传给它：窗口位置记忆的存储键是 `extension.<pluginId>.<storageKey>.window`，两段都由 SDK 拼、插件改不了——`extension.` 前缀隔离插件与核心弹窗，`pluginId` 段隔离插件与插件（少了它，两个包各写一个 `storageKey="search"` 就共用同一格记忆、互相顶掉位置）。插件弹窗经**一格通用的** `"extension"` slot 接入核心 root-dialog 裁决：核心的 slot 联合类型里不出现任何插件名（否则每装一个插件就要给公网仓库打补丁），认领由壳层按 **contribution id** 记录，host 只把 `context.dialog`（`{ open, topmost, zIndex }`）投影给持有它的那条 contribution。因此插件不留自己的 `open` 状态：`actions.openDialog()` 提出申请、`context.dialog.open` 是答复、`actions.closeDialog()` 释放，冲突的 primary 弹窗、切库与登出都由核心替它关掉。同一时刻只有一个插件弹窗可见（同一个插件的两条 contribution 不会一起开），被盖住的弹窗变成 `inert`/`aria-hidden` 且焦点归还归协调器，而 `closeDialog` 对非当前持有者一律拒绝——一次迟到的回调关不掉别人的弹窗。另一条 contribution 调 `openDialog()` 会先关掉当前持有者的弹窗、再把那一格重新登记给自己（codex #578 R7 P2）：焦点归还目标也随之换成新持有者自己的触发按钮，不会停在旧持有者身上。`source.detail_section` 的 contribution 现由宿主结构性拒绝开弹窗（codex #578 R4 P2，不再只是约定）：该槽位下 `openDialog`/`closeDialog` 是不触达壳层的拒绝函数（开发模式打一句 `console.warn`），`context.dialog` 无论壳层报告的持有者是谁都恒为冻结的 CLOSED 视图，`ExtensionModal` 若被插件在这个槽位下渲染会直接 `throw TypeError`——那个槽位的宿主自己就是 `FloatingModalCard`（`position: fixed` 相对它解析），且握着与之互斥的 `source-detail` primary lease。守卫：`frontend/tests/component/extension-plugin-surface.component.test.tsx`、`tests/component/use-root-modal-coordinator.component.test.tsx`，以及 `tests/guards/extension-ui-boundary.test.mjs` 里的接线断言。`actions` 与 `context` 每帧都是新对象（owner 闸每次渲染都重新冻结），绝不能进 `useEffect`/`useMemo` 依赖数组；`actions.api` 按 `pluginId` 记忆、可以放进依赖数组；`refreshSources()` 在 owner 闸此后关闭时静默 resolve，真失败时 reject，所以插件只应在自己的动作完成之后调用一次，并且必须 `catch` 住 rejection、不能放任它无人处理。装了私有插件的树跑基座的 `npm run test` 不会通过：`extension-ui-host.component.test.tsx` 钉的正是「零插件时合并 registry 与内建目录逐字相同、长度为 1」这条 registry 拆分唯一要证明的性质，不得为了容纳本地插件放宽成 `>= 1`。私有部署的验收改为：`frontend/.local/ui-extension-contract.json` 与后端 `GET /api/system/extensions` 投影对账，加一次干净的 `npm run build` 与 `npm run lint`（两者的类型检查都覆盖 `features/ext-*/`；build 那遍会静默跳过 `*.test.*`/`*.spec.*` 命名的文件，`npm run lint` 不会）。 端到端的插件接入流程见 [`docs/deployment-extensions-sop_zh.md`](deployment-extensions-sop_zh.md)。
-- 来源详情进入同一 frozen primary issue 水位；来源目录审阅是唯一与其兼容共存的 primary 上层。任何被覆盖的 root dialog（包括来源详情与图谱分析）在重新成为 topmost 前都必须 inert/ARIA-hidden。焦点不使用 timer，只在提交后的 layout 阶段复核预期底层 lease 与 inert 祖先均已收敛后归还。
-- 群组管理是集合层独立工作台 `frontend/app/groups-page.tsx`；`.group-page-*` 壳层复用集合页的 token、控件、字体、间距与响应式断点，并由五条页面级不变量兜住。⓪**页面标题在顶栏，页面里不再有第二处**：「群组」原本以 28px 躺在顶栏下方 44px 空白之后，而顶栏同时还在说「群组工作台」——同一句话说了两遍、中间隔着一整条空带。现在它就是顶栏 `.brand-title` 那一格（SN 徽标旁，16px 不变，替换掉该视图下的 `silicon-notebook`），副标题改成 `成员、共享与审批`。该视图下这一格必须**真的**渲染成 `<h1>` 而不是看起来像标题的 `div`——页面里已经没有别的标题，整页会失去标题层级；`.brand-title` 因此必须写 `margin: 0`（浏览器给 h1 的默认 0.67em 外边距会把 56px 顶栏顶变形，已实测两种形态下顶栏同为 56px）。页面顶部留白同时从 `.page` 的 44px 收到 24px：那 44px 是给「开头一个 28px 标题」留的呼吸，首行只剩一条 42px 工具行时它就是一条没有内容的空带。⓪′**「返回主页」只有一个控件、一份样式**：工作区与群组页两处点下去都是 `showCollection()`、都回到笔记本列表，所以共用 `.back-home-button`（原 `.notebook-home`，声明逐字不变）；群组页此前自己长了一条灰色文字链，同一个动作在两个页面上长成两种东西。改类名要同时改 `page.tsx` 与 `groups-page.tsx` 两个调用点。①**1200px 测量线量在不带内边距的块上**：cap 挂在 `.group-page > *` 上，与 `.collection-title` / `.notebook-grid` 同款——它们是 `.page` 的子块、自身没有内边距。它**不能**挪到 `.group-page` 上：那个元素继承着 `.page` 的 `padding: 44px 24px`，全局 `* { box-sizing: border-box }` 会把这 48px 吃进 cap 里，内容只剩 1152px，在 ≥1248px 的视口上比兄弟页每边窄 24px。子项还必须显式写 `width: 100%`：auto 左右外边距会关掉网格子项的 stretch，只给 `max-width` 会让它塌成 fit-content。②`.group-page` 自己必须写 `align-content: start`：它被 `.app` 的 `1fr` 行拉满视口高度，而网格 auto 行默认 stretch，会把短页签（成员／设置）的页头凭空撑开几十像素。③**不得挂 `globals.css` 里没有规则的 class**：页面此前有 7 处装饰性的 `<span className="eyebrow">`，而 `.eyebrow` 规则从来不存在，于是它们以继承来的 16px 正文字号裸奔在各级标题上方；`tsc` 不检查 className 字符串，testing-library 只看文本，没有任何门禁会红。以上每一条都不报错、只是长错了。「共享给群组」仍位于 `frontend/app/notebook-group-share.tsx`，使用紧凑 `.group-*` 行：横向布局属于 `.group-row` 而非内联样式，只读标签使用 `.group-chip` 而非 42px 主按钮 `.new-pill`。`group-layout-guard.test.mjs` 继续守紧凑行；`frontend/tests/guards/group-page-style-guard.test.mjs` 守上面五条页面级不变量（走整棵 AST 收每一个静态 `className` token——刻意不按标签名枚举，那种清单会让新标签静默逃逸——逐个要求 `globals.css` 里真的存在同名类选择器，再钉住 `.group-page > *` 的三条声明、`.group-page` 的 `align-content: start`、`.group-page` 自己不得出现 `max-width`、两个调用点都用共享的 `.back-home-button` 且 `.group-page-back` 不得复活，以及 groups-page.tsx 里没有 `<h1>` 而顶栏那一格是 `<h1>`）；`groups-page.component.test.tsx` 覆盖独立工作台。两道门都不检查间距与配色数值——那是设计取舍，不是不变量。
-- **只读/群组共享库的顶栏身份行**：`ReaderNotebookBadge` 的那一行由 `globals.css` 的 `.reader-badge-row` 排版，**恒不换行**。它此前用 `.tag-row`（`flex-wrap: wrap`），而 `.workspace-header` 是固定 72px 单行——标题 + 徽章 + 一句长说明换成三行、在 72px 里垂直居中，标题那一行就被推到可视区**之上**（静态量过：内容高 141px vs 容器 72px），群组共享库点进去整份库名一个像素都看不见，说明文字还漏到标题栏外面盖住下方内容。标题用 `.reader-badge-title`（`width:auto` 解开 `.notebook-title-input` 的 `width:100%`，`min-width:0` + 省略号，被压缩的是它、不是徽章）；身份标注是**状态**不是主操作，用轻量的 `.reader-badge-chip` 而不是 42px 实心黑主按钮 `.new-pill`（后者摆在 26px 库名旁会把主角盖过去）。身份解释只进 tooltip，不在顶栏占一行——「怎么停止访问」这类指引尤其不该常驻，群组共享本来就没有自助退出。回归门：`frontend/tests/guards/reader-badge-layout-guard.test.mjs`（CSS 侧钉不换行与省略，jsdom 没有排版量不到那 141px）+ `frontend/tests/component/notebook-reader-actions.component.test.tsx`（结构侧钉库名在、用的是 `.reader-badge-row`、行内无 `.tool-hint`）。
-- **「图谱 Schema」面板**（`frontend/app/schema-manager.tsx` + 纯逻辑 `schema-manager-model.ts`）是「作用范围 → 类型清单 → 选中类型的定义」三段式两栏工作台，替换掉原来那条把归纳候选、生效类型与新增表单首尾相接、且每个已有类型都常驻摊开成六个输入框的竖列——看与改是两件事，现在分在两栏里。四条版式不变量兜住它。①**弹窗宽度必须写成 `.utility-modal-card.schema-modal-card`**：`.source-modal-card, .utility-modal-card { width: min(680px, 100%) }` 在 `globals.css` 里排在后面，同为 (0,1,0) 时后来者胜，单类声明会被整条吃掉——实测右栏只剩 334px，六个输入框挤成一团，而两栏版式的前提正是右栏放得下全宽表单。②**`.schema-modal-body` 必须定高**（`height: min(660px, 70vh)` + `grid-template-rows: minmax(0, 1fr)`）：两栏各自滚动要求父容器有确定高度；写成 `max-height` 时那条 `1fr` 行退回内容高，把清单栏底部那排「新增类型」/「从当前笔记本归纳候选类型」顶出 `overflow: hidden` 的裁切线，而那是这个面板**唯一**的写入口，被裁掉就等于整个面板只剩只读。定高的附带好处是右栏在只读／编辑／新增之间切换时弹窗不再忽高忽低，拖动过的窗口位置也不跳。③**清单行先压显示名、最后才动类型标识**（`flex-shrink` 100 对 1）：标识是这一行的身份、也是 API 上的键，把 `process_window` 截成 `process_wind…` 而旁边「工艺窗口」四个字完好无损，正好把该留的和该让的弄反了。④**状态徽章不得再挂 `severity-low`**：`globals.css` 里只有 `.severity-high` / `.severity-medium`，low 那条规则从来不存在，于是「已启用」长期以默认 `.tag` 裸奔——`tsc` 不检查 className 字符串、testing-library 只看文本、jsdom 不做级联，没有任何既有门禁会红。判据因此收成构造性的「面板里出现的每一个 class 名都必须在样式表里真的有规则」。窄视口（≤900px）另换一种滚动模型：两栏竖排后由整块面板一起滚、清单自己限高，否则下半段分不到可用高度，只读定义连动作那一排都露不出来。行为侧还有三条。**清单行的身份是「类型 + 是不是候选」，不是 `object_type`**：后端刻意让一条还没批准的候选在批准前不遮蔽继承来的同名类型，于是 `list_notebook_object_schemas` 对这种情况同时返回继承行（active）与候选行（proposed）；只按类型名认行，`find` 必然命中继承那一行，两行同时高亮而候选的归纳理由与批准／拒绝永远够不着，审批那条路整条断掉（codex #614 R1 P2）。批准会把一行从候选变成生效类型、身份随之改变，所以批准成功后要显式把选中项换成新身份，否则右栏会在成功的那一刻空掉。**写动作的完成回调必须核对「人还在不在原地」**：清单行刻意在写入在飞期间仍然可点（只读浏览不该被一次写入冻住），代价是完成回调会晚于用户的下一次导航到达。不核对就会做两件都错的事——把人从他刚点开的类型拽回原来那一行，以及把失败提示挂在**另一个**类型旁边；后者正是`AGENTS.md` 那条「动作结果落在按钮自身或紧邻处」要消灭的形态，提示还在、只是长在错的地方，比不提示更糟（codex #614 R2 P2）。判据与 `use-kg-schema.ts` 里 `owns(owner) && ownsOperation(...)` 同源，只是这一层的身份是「面板此刻停在哪一格」；已落库的草稿仍无条件丢弃（它不再是用户未提交的输入），而忙碌文案记的是**哪一行**在提交而不是一个布尔，否则「保存中…」会跟着跑到用户刚点开的另一行上。其余两条：编辑草稿按行身份分格留存（编辑中切到别的类型再切回来不丢输入；脏判据是「草稿与服务端定义逐字不同」，保存成功后两者自然相等、清单行上那颗「未保存」圆点自己熄灭，因此不需要另写一条会吞掉续打字符的清草稿路径），以及 `useKgSchema` 的 `patchSchema`/`createSchema`/`deleteSchema` 返回 **三值回执**（`SchemaWriteOutcome`）——`confirmed` 的条件与那句 `notify(...)` 逐字相同（写成功 + 清单已重新拉回 + 这一格仍归本次操作），面板据此决定退回只读态、清空新增表单，还是保留输入并在按钮紧邻处说明原因；吞掉结果再让面板去猜，正是「新增撞重名却把输入清光」这类问题的来源。**中间那一档 `unconfirmed` 不能并进 `failed`**：那一支的写已经落库，只是这一格没能确认（重载失败，或写成功之后权限/视图换了人）；并进去界面就会对一次已经生效的写入说「失败，请重试」，而重试会撞重名 409，删除同理会留下一行删不掉的陈旧条目（codex #614 R4 P2）。发起前就被挡下的那一支是真的什么都没发生，归 `failed`。点清单行永远落在只读态，哪怕这一行还留着脏草稿——点一行是导航动作不是编辑动作，草稿由圆点、只读态那句提醒和「继续编辑」三处交代。门：`frontend/tests/guards/schema-panel-style-guard.test.mjs`（上面四条，逐条做过变异验证）、`frontend/tests/component/schema-manager.component.test.tsx`（三态、草稿分格、回执与权限）、`frontend/tests/unit/schema-manager-model.test.mjs`（分组、脏判据、标签与校验）。
-- **按钮的按下反馈是元素级基线，不逐类补**：`globals.css` 的 `button:not(:disabled):not([aria-disabled="true"]):active` 给全站按钮统一按下态（`opacity: .7` + `filter: brightness(.88)`），松手由 `:active` 自动还原。缺陷来源是群组成员页的邀请链接「复制」：按钮纹丝不动，唯一反馈是页面顶部那条会滚出视口的 notice 横幅，于是被判定「没生效」。判据刻意钉在元素上而不是类上——前端有 40 多个按钮类（`.new-pill` / `.sort-button` / `.icon-button` / `.index-cta` / `.kh-*-button` …），逐类补必漏，而漏掉的那一颗就是下一个同样的缺陷；收窄成 `.new-pill:active` 会让以后新写的按钮重新失去反馈。**一个改几何的属性都不能用**（`transform` / `translate` / `scale` / `rotate` 全部出局）：按下期间的几何就是**命中测试**用的几何，按钮一缩，落在原边缘附近的那次按压就滑出按钮，mouseup 命中父元素，而 click 派发到 mousedown 与 mouseup 的最近公共祖先——按钮的 onClick 干脆不触发。浏览器实测（400px 宽按钮 + `scale: 0.98`，在左边缘内 1px 处按下）：mousedown → 按钮、mouseup → 父元素、按钮 click 计数 0；正中间按下正常触发；换成 opacity + filter 后同一个边缘坐标计数 1（codex #612 R4 P2）。缩 2% 在 400px 的 `.notebook-card-main` / `button.chat-session-card` 上就是每边 4px 的「吞点击」条带，而它吞掉的正是这条基线要消灭的那件事。`translate` 同理，1px 也会在上边缘吃掉 1px。另有一条独立理由：`transform` 简写还会替换掉按钮自己的定位 transform，`.answer-image-preview-step` 的 `translateY(-50%)` 因此在按下时跳位约 22px（codex #612 R1 P2）——禁掉整类属性后两条一起消失。选的是变淡 + 压暗而不是改背景色：背景要按每个类的配色分别调，且 `.new-pill` 是近黑底（#050505），往暗调根本看不见；变淡对近黑底同样成立（透到白底上就是灰），压暗则负责浅色描边按钮那一侧；两项叠加对深浅两种底色、对 42px 药丸与整块卡片按钮同样成立。刻意不加 `transition`——各按钮类自带的 `transition` 声明会整条覆盖它，反而只在部分按钮上生效。`:disabled` 排除在外：给禁用按钮按下反馈等于告诉用户「点得动」。按下态只回答「点上了没有」；动作**结果**必须落在按钮自身或紧邻处：文案 复制→已复制／复制失败，配色 `button.copy-result-copied` / `button.copy-result-failed`（写在 `button.` 上而不是逐个壳层，(0,1,1) 足以压过 `.new-pill`/`.sort-button`/`.report-action` 各自 (0,1,0) 的底色；两条规则各自还要带一个 `:hover` 变体——`.report-action:hover:not(:disabled)` 是 (0,3,0)，而刚点完那一秒指针必然停在按钮上，不压回来结果配色当场被悬停态吃掉）；紧邻有只读链接框的调用点在失败时还要 focus + select 它，用户当场就能 ⌘C——但**先核对框里还是不是那条链接**：剪贴板那一步可以挂很久（权限提示、非安全上下文），期间侧栏没有禁用，用户切了群组，`inviteLinkRef` 就指向新群组的输入框，旧的失败去选中它，用户 ⌘C 拿到的是**另一个群组**的邀请链接（codex #612 R3 P2）。判据比对 `input.value === link` 而不是比对节点：React 会把同位置同类型的 `<input>` 复用给新群组，节点相等骗不过去。核对不过时，旧操作不碰新渲染的链接。群组页的复制动作也不再写共享的页面级 notice：刚按下的按钮是唯一结果反馈，因此工作台顶部不会再多出一条常驻横幅。page.tsx 那两处走的是按 token 分格的 ref map，token 一换旧格位就被 React 的 ref cleanup 置 null，天然没有这条竞态。因为结果态是 JS 状态、不像 `:active` 那样松手自动还原，必须到点回到 idle，否则「已复制」会一直挂着，下一次点击反而看不出变化。这份计时只有一处：`frontend/app/copy-result.ts` 的 `useCopyResult`，五个调用点（群组邀请链接、笔记本分享弹窗的链接、「已分享」弹窗每行的链接、报告分享链接、报告正文）共用它。它刻意只做 hook 不做组件：结果的 class 必须以**字面量**留在各自 JSX 里，包进组件或拼模板串，className 采集就只看得见一个变量，group-page-style-guard 与 button-press-feedback-guard 当场空转；壳层与忙碌态文案三处本就不同。`useCopyResult` 的 `key` 必须是**被复制的那个东西**的身份（邀请 token、分享 token；报告那两颗只叫得出报告 id，见下），不是按钮的槽位名：一来列表要分格——「已分享」弹窗每行一颗复制按钮，共用一格状态会让整列一起变绿；二来结果要挂 1.6s，这期间内容可能被换掉——切群组、重新生成邀请链接、在报告间切换，都会让同一颗按钮指向**另一条**链接，key 写成固定串时新链接会顶着上一条的「已复制」出现，而它根本没被复制过（codex #612 R2 P2）。有一处叫不出身份：报告分享链接的 token 由 `use-report-workspace` 在点击时现取，视图渲染时手里只有报告 id，于是 1.6s 停留期内「取消分享 → 再分享」发出的**新** token 会顶着旧链接的「已复制」出现——而它根本没被复制过；若 `toggleShare` 顺带做的那次自动复制还失败了，按钮就在说反话（codex #612 R5 P2）。这类叫不出新身份的调用点改用 `useCopyResult().reset()`，挂在「身份换了」的那个信号上——这里是 `shared` 翻面（换 token 必经 `shared: false`）。刻意**不**做的是「每次尝试开始时先清空结果」：想让清空落屏需要一次空档帧，而 React 会把 await 前后的两次 setState 合成一次渲染，要稳定看见就得再引入动画；「这一次点击有没有被接住」本来就由 `:active` 回答，结果态回答的是「现在剪贴板里有没有这条链接」，重复点时它照样是真话。长任务另有既有约束：在飞期间禁用或整排换控件（`long-task-button-guard` / `command-catalog-button-guard`）。门：`frontend/tests/guards/button-press-feedback-guard.test.mjs`（元素级选择器恰好一条、排除 `:disabled`、至少两项不碰几何的视觉变化、不得声明任何几何属性；一张按 onClick 源码文本认身份的表逐颗钉住五个复制入口的结果类；结果配色有 `background` 且有 `:hover` 变体；回 idle 的定时器只在 copy-result.ts 里、三个调用模块都import 了它）、`groups-page.component.test.tsx` 与 `copy-result-feedback.component.test.tsx`（真渲染点击：成功→「已复制」并自动还原，失败→「复制失败」，owner 返回 null 时不闪结果，以及结果只落在按下的那一颗上）。
-- **不许裸调 Secure Context 限定的浏览器 API**：`crypto.randomUUID`、`navigator.clipboard`、Service Worker 等只在 HTTPS 或 localhost 下存在，而本产品的常见部署正是 `http://<内网 IP>:3000`——那里它们是 `undefined`，调用即同步抛 `TypeError`；本机（localhost）与 CI（Node / jsdom 都自带）永远是绿的，只有生产会炸。2026-09-21 的事故：全局问答提交路径裸调 `crypto.randomUUID()`，生产上每一次提问都在发出请求之前就死了——通用问答无声卡住，逐步推理被外层 catch 接成一句毫不相干的「问题理解没能完成，请重试」，排查方向因此被带偏了一整轮。规则：前端生成的 id 一律走 `frontend/app/client-request-id.ts` 的 `newClientRequestId()`（`randomUUID` → 不受 Secure Context 限制的 `crypto.getRandomValues` 拼 UUID v4 → 时间戳 + `Math.random`，从不抛）；复制走 `frontend/app/copy-text.ts` 的 `copyTextSafely()`（自带隐藏 textarea 退路）。提交路径上「发请求之前」的每一句也必须在 try 里：那里同步抛错会让 `flight` / `submitting` 永不复位。门：`frontend/tests/guards/secure-context-api-guard.test.mjs`（`crypto.randomUUID` 只许出现在 client-request-id.ts，且它必须带 `getRandomValues` 退路）、`tests/unit/client-request-id.test.mjs`、`global-ask.component.test.tsx`（摘掉 `randomUUID` 后两种引擎照常提交；同步失败时问题回输入框、输入区解锁）。
-- **停止键全站只有一份，且只有图标**：问答输入区的停止键与发送键共用同一个位置，外观与图标只从 `frontend/app/stop-control.tsx` 取——`STOP_CONTROL_CLASS`（`globals.css` 的 `button.stop-control`：浅红底 + 红描边）加 `<StopGlyph />`（实心方块）；各调用点只补尺寸与圆角。按钮面上不写字：带字的停止键比发送键宽一倍，全局问答小窗（440px）里曾被挤到工具条第二行最左、独占一行；此刻按下去会停掉什么（停止 / 停止中… / 取消问题理解 / 中断生成）写在 `aria-label` 与 `title` 上，停止中再把图标换成转圈并禁用。带字的动作行（报告的「取消生成」）只取 `<StopGlyph />`、不取底色。全局问答的工具条同时改成两栏网格：左栏（范围 + 引擎 + 检索档位）放不下就在栏内换行，发送 / 停止键恒在右下角。门：`frontend/tests/guards/stop-control-guard.test.mjs`（lucide 的 `Square` 只在 stop-control.tsx 里导入；两个问答输入区都用共享类与图标；外观规则只声明一次、旧的 `.send-button.stop` 不回潮）与 `global-ask.component.test.tsx`（停止键无文字、挂共享类、不在左栏里）。
-- **停止之后的那一轮也只有一种风格**：判据、提示与「编辑问题」入口只从 `frontend/app/stopped-turn.tsx` 取——`hasProcessOutput(steps)`（轨迹里除 `intent` / `start` 两类前置步之外还有没有别的步）、`StoppedTurnNotice`、`STOPPED_TURN_TEXT`。两个问答面各自只负责把「停止」接到这条规则上：还没有过程输出 → 问题回输入框、不留记录；已有过程输出 → 这一轮留在对话里，下一次提问替换它。笔记本内问答的记录是 `use-ask-session.ts` 里只活在 React state 的 `stoppedTurn`（**不进** sessionStorage 镜像、不挂 run record——「被停止的问题不得作为可重发草稿复活」那条不变量因此原样成立），可见性按 owner key + 会话 id 派生；全局问答的记录是持久的 `cancelled` 作业，替换走 `POST /ask` 的 `replaces_job_id`（与建新作业同一事务、同一把会话行锁，只许会话最新且 `cancelled` 的那条），「无过程输出即停止」走 `cancel?discard=true`——它只丢弃被那次调用停下来的作业，响应也可能丢，别的标签页还可能先动手。**与服务端对账只有一处接缝**（`use-global-ask.ts` 的 `readConversation` / `applyConversation` / `dropConversationIdentity` / `discardJob`）：停止并丢弃之后、取消失败之后、带替换或带停止的提交失败之后、轮询读到 404 之后，一律重读会话、以它为准——轮次与「更早的问答」游标取自同一份第一页，会话不在了就退回「还没有会话」并同步历史列表游标；调用点不得各自推算「删没删」「游标退几格」。新增问答面不得自带第二套判据或文案。用例：`use-ask-session.component.test.tsx`（情形一保留 / 仅 `start` 步仍是情形二 / 编辑不清记录 / 下一次提交即替换 / 切会话清除 / 取消失败仍可重试）、`global-ask.component.test.tsx`（问题即刻上屏、理解步实时并交接、三个阶段的停止、替换与失败回退）、`backend/tests/global_ask_replace_cases.py`（SQLite 与 PostgreSQL 跑同一份清单）。
-- **全局问答的推送流叠在持久作业之上，不替换它**：`GET /api/global-ask/jobs/{id}/stream`（NDJSON：`started` → 全量快照 → `progress` → `final` | `gone`，5 秒空行保活）只是「正在看的客户端」的加速通道（空闲连接在事件循环上 `asyncio.sleep` 等下一帧、不占线程：这条流在每个盯着运行中作业的页面上整轮常开，按笔记本那条流的写法每条空闲连接会长期占住 asyncio 默认线程池的一个槽位）；`POST /ask` 建作业、`GET /jobs/{id}` 轮询、MCP 的轨迹分页、`client_request_id` 回放与取消端点一概不变，断开连接绝不取消作业。本进程内在跑的作业走内存分发（`backend/app/services/global_ask_feed.py` 的 `JobFeed`：订阅时的快照与每次发布都在同一把锁下求值，所以中途接入的读者不会漏步；`progress` 带**绝对** `trace_offset`，读者按 `trace[:offset] + steps` 应用、跳过有缺口的帧，重复投递因此无害），不受轨迹落盘节流约束；别的进程里的作业与已结束的作业由 `global-ask-follow` 线程每 0.5 秒读库跟随。终态帧一律取自**数据库**（`final` 或 `gone`），由结束作业的那一方发出（worker 收尾、`cancel()`），feed 在第一个终态关闭。「停止并丢弃」期间终态归取消方独占（`_discarding`）：worker 退栈可能快过「写 cancelled → 删行」，它在这段空档里发出的 `final(cancelled)` 会把 feed 永久关掉、真正成立的 `gone` 再也发不出去。有读者的本地 feed 另带一个低频看门狗（`global-ask-feed-watch`，每 feed 一个、随 feed 结束）：多进程部署下别的进程处理的取消只改了行，够不着本进程的 feed 与 worker，而流开着时前端不轮询——看门狗读到行已离开 `running` 就通知本地 worker 并从库里取终态收尾。每一帧发出之前复核读权（无人在看不查，在 feed 锁外）。投递循环 `deliver_ask_events` 住在 `app/api/task_stream.py`，笔记本内问答与全局问答共用（路由模块之间不得互相 import）。前端（`use-global-ask.ts`）先接流、流不可用 / 出错 / 无终态即断就退回**一行未改**的轮询；`gone` 与轮询的 404 走同一个 `reconcileMissingJob`。三条 NDJSON 传输共用 `frontend/app/ndjson-stream.ts` 的逐行读取；其中两条（笔记本内问答的流、`requestTaskStream`）在帧与帧之间调 `yieldToPaint` 让出一次重绘，全局问答的推送流刻意不调（推送帧本来就是一块网络数据一帧）。`yieldToPaint` 必须带定时器兜底：后台标签页暂停 `requestAnimationFrame`，只等它的读取循环会卡死（笔记本内问答的流曾因此在隐藏页里停在「启动检索」）。用例：`backend/tests/test_global_ask_stream.py`、`frontend/tests/unit/ndjson-stream.test.mjs`、`global-ask.component.test.tsx` 的流式一组。
-- **访问权变动之后必须连当前工作区一起对账**：独立群组页里的退出、移出成员、删组或撤销共享都可能使此前打开的 Notebook 失权。`use-notebook-collection.ts::refreshAfterAccessChange` 独占一次 list read 与 issued/published 水位，再经窄 effect 调壳层唯一的 `reconcileOpenNotebook(remaining)`；「退出只读共享」与群组页的 `onChanged` 共用这条 command。远端撤销没有推送通道，只在标签页重新可见时节流复核；取数失败不执行对账。这是尽力而为不是保证，回归门在 `frontend/tests/guards/group-sharing-guard.test.mjs`。
-- workspace HTTP 职责按领域模块拆分。共享 `frontend/app/api-client.ts` transport 负责 HTTP mechanics，领域模块保留 endpoint policy。来源读写由 source-library owner 编排，精确的 user/notebook/workspace generation 会拒绝迟到 UI 提交，同时允许已发出的写请求安全完成；打开 notebook 仍是一次成对 notebook + 首个来源页读取，解析轮询仍保持原 point-read 节奏，且没有引入全局状态库。`frontend/tests/guards/api-boundary.test.mjs` 用语义扫描禁止 transport core 外的生产 `fetch`。
-- 结构回归测试只使用 public HTTP contract 或显式 domain seam，不得绑定 private aggregate helper、源码位置、行数或 route/model 总数。FastAPI lifespan/application lifecycle composition 仍是独立债务。
+以前的逐版本叙述和交付说明可查阅
+[精简前历史](https://github.com/huyangc/silicon-notebook/blob/403b796f/docs/development_zh.md#架构边界)。
+这些只供追溯；现状以上面链接的运行时契约、迁移源文件和运维步骤为准。
 
 ## 验证
 

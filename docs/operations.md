@@ -7,17 +7,10 @@ This runbook covers logs, live diagnostics, MinerU, offline ingestion, retrieval
 ## Unified command entry
 
 Use `bash scripts/cli.sh --help` or `npm run cli -- --help` to discover the grouped
-operator commands. `batch` accepts every existing `batch_ingest.py` phase and option;
-`batch-ingest` is an alias. For example:
-
-```bash
-bash scripts/cli.sh batch ingest --input-dir ./papers --notebook-name Papers
-bash scripts/cli.sh scale inspect --notebook nb-xxx
-bash scripts/cli.sh extensions check
-bash scripts/cli.sh diag incident
-```
-
-The [command index](../scripts/README.md#统一-cli-入口) maps the other groups.
+operator commands. The [command index](../scripts/README.md#统一-cli-入口) owns
+the group catalog and minimal examples; this section owns the operating boundaries.
+`batch` accepts every existing `batch_ingest.py` phase and option;
+`batch-ingest` is an alias.
 Existing scripts remain supported; their trailing arguments, exit codes, locking,
 confirmation flags and signal handling are retained. The shell/Python entry keeps
 the caller's working directory, so relative input/output arguments keep their meaning
@@ -217,6 +210,10 @@ questions/answers, prompts or model messages, Memory/Knowhow content, SQL text o
 parameters, authorization headers, cookies, tokens, secrets, raw command lines, or local
 variables. Even sanitized output should be reviewed before it is shared outside the
 trusted team.
+
+New notebook API paths must register their exact safe shape in
+`backend/app/core/diagnostics_runtime.py`. Unknown deep paths remain
+`/api/notebooks/{id}/{redacted}`; do not widen the templates to echo raw identifiers.
 
 The incident path needs no root privileges or third-party Python packages, does not import
 `app`, and never restarts or terminates a process. All diagnostic commands are read-only

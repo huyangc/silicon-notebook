@@ -2,11 +2,9 @@
 
 [Back to README](../README.md) · [中文说明](./development_zh.md)
 
-This document preserves the contributor-facing architecture summary, verification gate, workflow, test architecture, and documentation-maintenance contract. [AGENTS.md](../AGENTS.md) is the short coding-agent entry point and document router; [architecture.md](../architecture.md) owns the detailed runtime architecture.
-
-The external-Agent MCP surface has one API-owned registration host and a startup-frozen catalog: the fixed bundles under `app.api.mcp_tools` captured as the exact 28-tool surface. `mcp_server.PUBLIC_TOOLS` is that live catalog, and `CORE_TOOLS` is the same list under its structural name -- there is no second, hand-maintained copy. Core handlers preserve their validation/auth/I/O order and use the same live authority, owner-write, progress, and output boundaries. Exceptions map to stable public codes. Registration/listing performs zero repository/model work. The former external `agent.tool_provider` descriptor-append half had no consumer and has been removed.
-
-Deep Report backend batch export is the first real single-Provider consumer. The repository owns authorization and completed-row selection, releases its connection, and passes a minimal immutable batch to the startup-frozen `report.exporter` host. The default built-in Markdown provider is the only default provider; there is no fallback formatter. Core validates the complete ordered result and retains filename collision policy and ZIP construction. The existing browser-only single-report Markdown download is deliberately unchanged and is not a backend provider path.
+This document owns contributor guardrails, schema/migration authoring, verification,
+workflow, and documentation maintenance. [AGENTS.md](../AGENTS.md) is the short agent
+entry point; [architecture.md](../architecture.md) owns runtime architecture.
 
 ## Numeric limits and truncation
 
@@ -20,890 +18,174 @@ fixtures in tests are outside this rule.
 
 ## Architecture Boundaries
 
-- The modular-extension foundation and Phase-1 retrieval host contract are enforced. Stable cross-layer values live in `backend/app/domain`; repository ports cannot import services, the static graph stays acyclic, and repository-to-service debt ceilings may only fall. `ReasoningRetriever.run` is split at the first round only: `_new_run_state` builds the explicit `_ReasoningRunState`, and `_run_first_round` drives the `_first_round_*` phases in the contract order (exact-lookup seed after the PPR seed, coverage pass budget `max_steps // 2`). Focused intent, PPR, exact-lookup, fallback, coverage-ledger, enumeration, and synthesis tests own the durable behavior; the refactor-only byte-for-byte golden snapshot has been retired. The dependency-light SDK owns typed contracts; `backend/app/extensions` owns the frozen registry, live capability decisions, and shared host; `app.bootstrap` is the only outer root that joins extensions to adapters. Workflows depend on the domain host port, not the registry. Availability probes are I/O-free, manifest declarations plus live decisions project only narrow capability ports, and an unavailable capability disables only its contribution while independent contributors remain active. Invocation routing and core admission policy are startup snapshots. The empty/no-applicable path returns the exact baseline before any work. Bounded proposals use request-memory authority for built-ins and at most one core-owned batch hydrate for unresolved peers, never per-hit N+1; malformed contributions fail open and strong lanes may use atomic admission. Selected-source graph and generated-question recall are the first built-ins, on `selected_evidence` and `chunk_candidates`. The graph bridge retains the legacy activation result, preserving attestation, rollout, scope drift, duplicate-support overlay, independent budget, status, and fail-closed behavior; Ask/Report no longer call the graph service directly. The generated-question bridge owns query/index/settings and `(scored, ids, matrix)` privately, remains before MMR/fusion, stages collision supports on an isolated copy, and commits only after host admission. `off`, satisfied-trigger, empty, overflow, failure, and `shadow` keep the exact baseline; `on` only appends original chunks. Its SQLite/PostgreSQL scan applies notebook/source and retrieval-run actor private-Memory predicates before `LIMIT`, while actor identity stays out of events. Connection probes block host fan-out while a transaction/pooled lease is held; PostgreSQL conformance forces pool size 1. Core cancellation propagates through single and multi-query paths. Plugin implementations may not import concrete repositories, facade, or runtime. The G1 architecture guard enforces these rules and facade surface may shrink but not grow. See [the design](./superpowers/specs/2026-08-21-modular-plugin-architecture-design.md) and [historical delivery record](./superpowers/plans/2026-08-21-modular-plugin-architecture-delivery-plan.md). Modular-extension PRs retain two independent subagent reviews; the current [Development Workflow](#development-workflow) owns Codex review, CI, and rebase merge requirements. `scripts/check_architecture_boundaries.py` (the G1 contracts lane) additionally holds three zero-slack ratchets recorded in `scripts/architecture_boundary_baseline.json`: the `app.core`/`app.models` → `app.services` import allowlist (currently empty; bare `import app`, `from app import services` and `import app.services` all count), the per-function line ceilings of the listed hot functions, and the total Protocol-method count of `repositories/ports.py` (resolved through the module's own `Protocol` import aliases, so `from typing import Protocol as P` cannot dodge it). Shrinking any of them requires lowering the baseline in the same change. Both production retrieval lanes (selected-source graph and generated-question recall) are dormant-aware: when the workflow already knows the feature is unconfigured and `RetrievalContributorHostPort.has_contributions` reports nothing else surviving on that invocation, the lane returns the baseline before any call or context is built; a registered-but-unavailable contributor still goes through the host. The admin-disable admission gate layers the same acyclic-import discipline on top of that frozen registry: its frozenset holder lives in `app.core.extension_admission` (stdlib only, lock-free reads) precisely because both the extension layer and the API layer already depend on `app.core`; the registry never imports it directly, consuming it only through an injected `disabled_ids_provider` callable that `app.extensions.default_extension_runtime` binds to that holder's read function; and `app.bootstrap.create_application_repository` is the sole place that primes it, so every process composed through the ordinary path — server, CLI, or batch job — starts admitted from the database's actual state rather than the empty default.
-- Production source ingestion uses one startup-frozen self-hosted MinerU → MinerU cloud → built-in ProviderChain. Links declare `after`/`before` edges and stable-ID ties instead of integer priority. The complete core route plan is frozen before live availability or provider I/O, so a failed configured self-hosted link can never open public cloud. Probes may perform one remote parse and pure mapping but receive no persistence/asset port; workbook reconciliation and core admission precede the accepted materializer. URL local fallbacks reuse one request-local download, and the per-source lock covers asset replacement through element/chunk-marker publication. The legacy dispatcher and facade parser patch seam are retired; do not recreate a dual route.
-- `backend/app/application` owns dependency-light immutable stage envelopes and a module-level import allowlist currently limited to `application`, `core.ask_retrieval_policy`, `domain.cancellation`, and `models.ask`; bare root imports and unaliased allowed-submodule imports are forbidden because both bind `app`, while explicit submodule aliases remain legal. Future contracts extend the list deliberately rather than opening a package with implementation back-edges. Ask reasoning crosses explicit prepare, retrieval-evidence, response-draft, and committed-answer boundaries; frozen response envelopes transfer the exclusive typed response graph without JSON/deep-copy identity loss. The response draft is produced by an injectable `ResponseDraftStage` (entered through `execute_response_draft_stage`, which rejects any other output type); the shipped `DefaultResponseDraftStage` is the previously inline synthesis/binding logic, receives one frozen `ResponseDraftInput`, and reaches no repository, model client, settings, or persistence seat *through that envelope* -- the shipped default still uses `AskService`'s own seats via `self`, since it is a method of the service, while an injected implementation gets only the envelope and the runtime, and both are admitted to the seam only after the orchestrator re-verifies authority immediately beforehand. Cancellation is checked once before the seam and once at the commit boundary. The commit boundary re-verifies `mode` and every identity field the draft envelope carries (`notebook_id`, `question`, `conversation_id`, `user_id`, `job_id`, `asked_at`) against the same frozen `PreparedReasoningAsk` the stage was handed, so an injected stage cannot silently persist the answer into a different job, conversation, or notebook than the one it was asked to serve; `model_errors` is filled by core from the request-local model-error sink right after the stage returns and before the retrieval ContextVars reset, so a stage does not need to (and should not) set it itself. Its runtime authority cross-binds the exact source scope, `ask_reasoning` request-local run (and therefore its leaf-I/O semaphore), cancellation token, non-empty persistence actor, trace sink, and the injected I/O-free connection probe by identity; the service and typed retrieval seam independently validate run kind/actor. Stage-boundary violations are loud core failures, not optional retrieval misses. The legacy mutable `ReasoningResult` remains available to Report working copies, and only existing KG/chunk/element/PPR leaf calls acquire the run slot; no stage wrapper holds a database connection or an outer slot.
-- Deep Report uses its own immutable application envelopes for confirmed planning, generated sections, core final audit, and committed completion. Planning and generation each retain a fresh retrieval run; exact scope/run/cancellation/actor/probe authorities are checked at every typed boundary without moving any leaf slot. Mutable evidence/id maps transfer by exclusive ownership rather than JSON/deep copy. Multi-section all-retrieval → one synthesis → parallel drafting, the single-section zero-synthesis path, final editor, claim ledger, citation remap, report-wide image batch, zero-body failure, and retry remain core-owned and order-equivalent; final audit cannot rewrite section Markdown. SQLite/PostgreSQL publish `done` through one `status='generating'` CAS, cancellation likewise CASes only a non-terminal row, and only a successful completion yields a `CommittedReport`. Manual and auto-generation converge in the coordinator after generation gate and scope/retrieval/model contexts are released. Then the built-in `report.completed_observer` invokes the historical agent-profile signal through one opaque at-most-once access; cancellation registration is removed afterward to preserve the existing active-job window. That point may not rewrite durable artifacts or start retrieval/model work.
-- Streaming Ask post-completion uses one startup-frozen `ask.completed_observer` host. The durable answer, terminal job row, cancellation unregister, and browser final event precede it; the sentinel follows. Three built-in observers preserve the existing sequential agent-profile → retrieval-experience (reasoning only) → search-profile behavior and cost, with independent failure isolation and notebook+actor / zero-identity / actor-only capability projections. Connection probes reject held transactions or pooled leases before plugin execution. Ordinary failures cannot reverse `done`; post-terminal hooks do not inspect request cancellation. Synchronous POST Ask and MCP Ask remain outside this completion count, and services depend only on domain host ports rather than SDK/registry/concrete hosts.
-- Point-specific proposal sources and the generic admission reader are separate domain ports. Selected-source graph authority resolves from its request-local map with zero added DB/leaf work; only unresolved proposals call the repository-runtime reader, once, with notebook/source predicates applied in SQL before rows are returned. Report fallback reads acquire the shared retrieval leaf gate. The SQL always filters Memory sources by actor, including compatibility calls with no frozen scope; visible sources and notebook-wide Knowhow remain eligible.
-- Backend endpoint bodies live in domain FastAPI routers composed by `backend/app/api/routes.py`; the aggregate is composition-only and owns router order, not product handlers or compatibility exports. Boundary tests inspect endpoint ownership on the domain routers and verify the aggregate's composition declaration semantically; they do not assume `include_router()` flattens child routes, because newer FastAPI versions retain lazy included-router nodes. Domain Pydantic models live under `backend/app/models/`; `backend/app/models/schemas.py` is a legacy compatibility facade that re-exports the same model objects for old imports.
-- One repository factory selects `SQLiteRepository` or `PostgresRepository` from `DATABASE_URL`; both compose the same runtime boundary. `RepositoryFacade` is backend-neutral over an injected `RepositoryRuntime` bundle. Application services do not assemble product SQL, inspect dialects, or import the opposite adapter. Stores own product SQL and raw row selection; established application/query components may assemble domain/application projections such as `NotebookSummaryQuery.from_row`. SQLite retains its compatibility migration/maintenance wrapper and PostgreSQL owns a bounded Psycopg pool plus checksummed migrations. Every facade operation is an explicit compatibility adapter or belongs to the source-checked one-hop delegates whose real targets match the ownership manifest. The dependency direction is factory/wrapper → facade → runtime → services → stores. `sqlite_identity.py` and `sqlite_notebook_sharing.py` remain compatibility re-export shims, and the legacy request-context, `_COPY_CHUNK`, and `_remap_json_ids` exports stay importable. The facade's public surface has a per-method caller ledger (`docs/superpowers/plans/2026-08-23-facade-retirement-ledger.md`, reproducible via the read-only `scripts/audit_facade_callers.py`) classifying every public member `keep`/`test-only`/`ambiguous`/`retire-now`; retirement proceeds batch by batch off that ledger, syncing `scripts/architecture_boundary_baseline.json::facade_public_surface` and `scripts/generate_repository_contract_fixtures.py --rebaseline-surface`'s output each time.
-- Notebook authorization predicates have one definition point per backend: `backend/app/repositories/{sqlite,postgres}/access_sql.py` (mirroring `mount_sql.py`; placeholder-style mirrors, always changed together). Write is owner-only, management is owner ∪ an effective `role='admin'` grant edge (`NOTEBOOK_ADMIN_SQL`, reusing the read predicate's restricted three arms plus `role='admin'` and excluding `everyone`), and read is owner ∪ read-only member ∪ an effective `notebook_grants` edge (`user`/`group`/`group_admins`/`everyone`, matched against that exact four-value whitelist so shadow-parked rows fail safe) — that `write ⊆ management ⊆ read` asymmetry is a security boundary, and the owner-or-member clauses embedded in Memory read/search SQL derive from the same fragments; the deliberately kept three-step `FOR SHARE`/three-state sites in the memory stores are pinned by an allowlist and must be extended by hand whenever the read predicate widens. Read access implies mountability, but a *restricted* grant (anything short of `everyone`) only mounts while the mounting notebook itself is unshared — that unshared gate stops a borrowed library from being re-shared onward; `tier='base'`/`everyone` bases are exempt. API write endpoints declare a named capability via `app/api/deps.py::require_notebook_capability(...)` (thirteen names across the frozen `{owner, admin}` value domain — P2 flipped the six content-management capabilities `sources:write`/`kg:write`/`knowhow:write`/`knowledge:write`/`catalog:write` + `notebook:manage` to admin, while `notebook:configure` (link sharing), `notebook:mount` (mount config), `notebook:delete`, and `reports:write` stay owner-only; an unregistered name raises `KeyError` at import time). A second table on the same keys, `deps._CAPABILITY_MIRROR_FENCE`, answers the orthogonal question "do this capability's endpoints rewrite synced content?" and refuses those on a mirrored notebook (`notebooks.sync_origin` non-empty) with `409 {"code", "message", "sync_origin"}` (`notebook_mirrored`), always *after* the level guard so an unauthorized caller still gets 404, and never for a safe method (`GET`/`HEAD`/`OPTIONS`) — the predicate is about a capability's *write* endpoints. `notebook:grant`, `notebook:mount` and `scale_index:write` exist because that axis cuts across the old `notebook:manage`/`notebook:configure`/`kg:write` cells; splitting them changed no tier, and body-level checks that resolve `notebook_id` from another id go through `notebook_capability_allowed(capability, ...)` against the same table. New write endpoints must use the capability factory, never a bare owner guard. Guards: `backend/tests/test_access_sql_contract.py` (introspective cross-backend parity, placeholder-direction checks, inline-shape scan, two-step allowlist) and `test_notebook_capability_guard.py` (AST identifier scan with empty-scan protection). Group knowledge sharing (design: `docs/superpowers/specs/2026-08-17-group-knowledge-sharing-design_zh.md`) extended the read predicate and flipped those capability levels without touching endpoint declarations (the Agent/MCP surface deliberately did not flip, and P2 adds the `notebook_share_requests` member-contribution approval flow: a member requests sharing a library they manage into a group they only belong to, a group admin approves by inserting the `(group, viewer)` edge in one transaction, and `status` is exact-matched `pending`/`approved`/`rejected` with withdrawal a whole-row `DELETE`) — **except deep reports**, the one registered exception: members of a shared notebook create their own reports and reports are private to their creator, so the nine report write endpoints declare `require_notebook_read` plus an in-body row-level `reports.created_by == current user` check (`report_routes.py::_own_report_or_404`, required by an AST guard on every `{report_id}` route), list/export narrow by the same predicate in SQL, and another member's report answers 404 exactly like a missing one. `reports:write` remains registered with no consumer, reserved for P2 group-admin management actions; the anonymous share page re-checks the creator's live read access per request.
-- A retrieval run's participant set can be REPLACED (not narrowed) through `backend/app/services/retrieval_participants.py`, and that override takes effect only at the retrieval consumption boundary: the seven retrieval readers (`retrieval_candidates`, `graph_retrieval`, `collection_catalog`, `collection_enumeration`, `communities`, `evidence_context`, `chunk_federation` — still seven) are the only modules allowed to import it, `global_run.py` is the only module allowed to install one — `global_ask.py` merely CONSTRUCTS a `ParticipantOverride` (an authorization act that belongs beside `can_read_many`) and installs no seat at all, pinned in reverse by `test_global_ask_never_installs_seats_itself`; likewise the `subjectless=` keyword, the single way to state "this run has no current library", appears only in `global_run.py` (with a same-named forwarding exemption inside `source_scope.py`), and its readers are split by QUESTION: `subjectless_run_active()` answers the MODE question (private Memory, `index_required`, the selected-source graph lane, the prompt's peer-authority rules, the workbook lane's participant list, citation-origin normalisation) while `peer_scope_ceiling_active()` answers the FILTERING question (`filter_retrieval_items`, `follow_chain`'s ceiling test) — a frozen source list must bind whether or not the run has a subject. Every authorization site keeps calling the real mount predicate (`resolve_participants`/`mount_sql.py`, shared with permission checks), and each override carries the `attested_actor_id` whose `can_read_many` already passed — resolving it against a different run actor, outside a retrieval run, or for a notebook other than the nominal active it declares raises instead of falling back. Narrowing remains a separate question owned by `source_scope.py`, and an override never escapes it: the seat still runs `notebook_in_scope` over the result, so the library checkboxes can shrink an override but never widen it. Process-level graph caches (`fed_rxgraph`, `ppr_graph`, `scale_combined`) carry the override's content-free fingerprint in their keys, placed before the family suffix so the existing key-family evictions still match. Because the retrieval path is deliberately full of fail-soft `except Exception` handlers, the attestation failure is raised as `app/domain/retrieval_control.py::ParticipantOverrideError`: a hand-audited, registered set of handlers (`_SEAT_FAILSOFT_SITES` in the guard test — the ones whose `try` body can reach a seat read) re-raise it beside `AskCancelled`, and `chunk_federation._bounded_participants` — the single entry through which every federated consumer reaches the seat, running in the parent thread outside every fail-soft frame — calls `assert_override_matches_run()` on its first line, before any producer runs; that site is deliberately absent from `_SEAT_FAILSOFT_SITES` because it must stay unwrapped. Adding a fail-soft handler that can reach a seat read means registering it in the same change. Guard: `backend/tests/test_participant_override_guard.py` pins the frozen reader whitelist as an EQUALITY (a reader that stops importing it is a silently reverted wiring), forbids any non-whitelisted module from importing the override's public names out of a re-exporting module, pins the writer whitelist including aliased calls, asserts for every authorization file both that it does not import the override and that it still calls the live predicate, and pins that the participant predicate injected by the composition root is an attribute reference to the real mount predicate rather than any other callable. `evidence_context` is the one reader that also hosts an authorization call of its own — `knowledge_context` resolves the canonical fold's range through the override, while `collection_item_citations` rechecks membership before element hydration — so the guard additionally pins those two apart by FUNCTION SCOPE: the authorization scope still calls `self.notebooks.participant_notebook_ids` directly and contains no `resolve_*`, and the set of scopes that resolve through the override equals `{knowledge_context}`.
-- Offline production maintenance uses `open_maintenance_cli_repository`: PostgreSQL confirmation/capability rejection happens before factory construction, the command then owns an independent-session fail-fast advisory lock, and repository close is unconditional. `BatchMaintenancePort` is the portable orchestration contract; SQLite text-vector conversion is a separate physical-format port. PostgreSQL keyset predicates and ordering both use `COLLATE "C"`, and model calls happen after page reads release database connections. Batch source inventories exclude hidden projection sources according to phase. The offline full gate never contacts PostgreSQL; real coverage belongs to the dedicated PostgreSQL 16 lane.
-- The offline scale build that runs **beside** a live service (`app/services/scale_build_cli.py` / `scripts/build_scale_index.py`) uses a different composition root, not `open_maintenance_cli_repository`: it has no stopped-service gate, so it must explicitly disable the two things that gate used to cover. The bundle's `_initialize` runs migrations (unscheduled DDL against a serving database) and **unconditionally UPDATEs** the user-local admin credential (a fresh random salt every time, so an off-host `.env` without `ADMIN_PASSWORD` silently resets the production password). `PostgresPersistenceBundleFactory(migrate=False, seed=False)` is therefore a blocking requirement; both switches default to `True` and every existing caller is unchanged. Extension host seats come from `bootstrap.application_repository_hosts`, the same list the server composes with, so the pipeline a build runs under cannot drift. Before composing anything, a bare connection compares `max(version)` in `silicon_schema_migrations` against this checkout's migration count and refuses on drift. Mutual exclusion is T-W1's per-notebook cross-process claim (a session-level two-argument advisory lock), not the database-wide maintenance lock — which is why it coexists with `batch_ingest index`'s stopped-service channel, and why that channel turns a refused per-notebook claim into a readable busy error. Publication goes through `ScaleArtifactStore.prepare_staging_directory` / `swap_staging_directory` for **all three roots** (`kg_index`, `kg_viz`, `kg_index_partitions`): never "the main root atomically and the rest copied over the live tree". The serving process's own standalone viz rebuild is inside that contract too — `save_viz` stages and swaps like every other root, and the rebuild holds the same per-notebook claim across build *and* publish, so `export` can no longer copy a half-written viz root and `import` can no longer rename or retire one out from under the writer; a claim it cannot take makes the rebuild give way (the artifact is advisory and the next trigger retries), and the SQLite `UNSUPPORTED` sentinel keeps that backend's historical in-process behaviour. Every destructive `import` step re-verifies the claim immediately beforehand — each swap, the retirement of a root the package omits, each root's rollback and each root's `.old` cleanup — and a refusal renames and deletes nothing. Validation refuses a package whose required `.npy` header or `graph.npz` shape cannot be read back: a present-but-truncated array used to be skipped as "unchecked", so the package published over a healthy live index and only then failed `load_scale_index`, leaving the notebook with no scale core; a manifest that declares no count for an array, or declares one for an array the package does not carry, still passes (older-index-stays-valid). A serving process's warm **standalone viz** cache is invalidated the same way the source-partition companion is — its `version`/`cluster_seq` gates are database-derived and a same-version `import` moves neither, so a cache hit re-stats the viz root's `manifest.json` and compares that disk generation with the one recorded when the entry was cached: a replaced root reloads, a retired root (confirmed absent — one ENOENT is not enough: the two-rename publish sequence makes the root transiently invisible, so absence counts only when `.old` is gone too, for this cache and the companion cache alike) is evicted and the notebook falls back to the existing "no standalone viz" path, and "could not tell" (no probe on the adapter, or a stat that failed) stays fail-soft. Replacing or retiring `kg_viz` therefore takes effect without restarting the service.
-- `prepare_selected_source_graph.py` composes the portable maintenance operations as an all-notebook deployment state machine: durable reverse-index pages, durable source-fact generations, cheap version/count artifact probes with bounded rebuild on mismatch, and an independent fact audit all complete under the offline-maintenance lock. The receipt is content-free and non-authoritative. Only after repository close may the script atomically write the four invisible-shadow env assignments; any phase failure preserves the prior env file. Re-entry revalidates authoritative state and skips current generations/artifacts instead of replaying large-library work.
-- `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state (storage root, embedder, language caches, build sets, Ask cancellation registry, and artifact caches) is runtime-owned; replacing supported compatibility properties after composition updates every retained consumer. Synchronous Ask/report submission failures mark the already-created durable job/report failed, unregister the cancellation entry, and re-raise the submission error; successful worker ordering and the existing Ask transaction checkpoints remain unchanged. Its composition is split by domain: `RepositoryRuntime.__init__` only calls the module-level `_build_*` domain constructors (plus its own two `threading.Lock()`s) in order and mounts each returned frozen bundle's fields on itself with one explicit line per seat. Call order is the dependency topology — a builder takes earlier bundles and never the runtime itself, so a cycle back into the composition root cannot be spelled; the only permitted runtime-bound inputs are narrow late-bound callables (the current-user accessor, the `ask_service` accessor and `_note_ask_completed`). Process-level side effects (scheduler validation, event logger, `kg_scheduler.initialize`) and the one persistence bundle keep their exact historical order; `backend/tests/test_repository_runtime_composition.py` freezes the mounted attribute set and both rules.
-- Built-in KG relations are governed by one typed registry in `backend/app/domain/kg/edge_schema.py` (`backend/app/services/kg/edge_schema.py` is a re-export shim; new `EdgeSpec` entries must not be declared there). Core extraction is fail-closed; graph/PPR/canonical/relation and Ask evidence-context consumers filter invalid historical core pairs while preserving known edges attached to administrator-defined extension types. `EDGE_SCHEMA_VERSION` participates in scale/PPR artifact identities. Optional completion advances mode-specific persistent source-generation keyset pages, prioritizes anchors through indexed contract-valid relation `EXISTS`, and uses only bounded same-source FTS/ANN candidates plus section/pair/batch/character rails. Each job hydrates only its bounded objects and their capped evidence IDs; unfinished watermarks re-enqueue and startup recovers current pending generations. A mode change atomically publishes the newly active mode's recoverable cursor before retiring the old cursor as `stale`. Proposal and verification run outside database transactions; a short final write rechecks generation/ownership/existence, persists the exact server excerpt seen by the verifier, and inserts idempotently. Invalid zero rails fail closed without advancing. Retrieval origin is represented as accumulated producer support records; selection never reconstructs provenance from scores.
-- Large selected-source graph companions are separate from the legacy scale directory. The offline builder reads and publishes one visible source partition at a time through source-first bounded projections, binds the constant-size companion root and every partition to the main manifest version, hashes every payload file, and uses a deterministic hash path so runtime can open only selected sources. Pairing is per *build*, not per version: every build stamps its main manifest with a unique `build_id` and copies it onto the companion root and every partition manifest it publishes in the same pass as `parent_build_id`, and the reader, the offline `import`/`export` checks and the cheap readiness probe all require both to match. Republishing the same `version` is a supported operation, so the version alone cannot separate two builds — an `import` interrupted after the companion rename but before the main one, or an online rebuild that loses its claim after the main swap, leaves a mixed pair whose two versions are equal. Roots written before this key carry no id on one or both sides and keep pairing on `version` alone (older-index-stays-valid), with the residual that such a pair keeps the old same-version blind spot until one rebuild or fold republishes both roots. Before payload I/O, the reader preflights every selected small manifest against cumulative node/nnz/cross-edge rails. Per-partition local CSR rows carry object types/chunk identities; one selected source reuses its persisted CSR, while a selected union uses array-oriented sparse composition and one bounded cross-edge allocation. Source-owned cross-partition relations are admitted only after the union revalidates both endpoints and the central edge registry. Candidate ranking applies partial Top-K rather than a full Python sort. Legacy/missing/corrupt/over-limit/mismatched companions are capability-unavailable and never authorize whole-graph post-filtering. Full rebuild and delta fold both republish the companion and invalidate its dedicated single-flight LRU. A cross-process publish invalidates it through the companion manifest's stat probe instead, and that probe is three-valued: a signature, a confirmed-ABSENT root, or "could not tell". Confirmed absent — the shape a same-version import that omits the companion produces, since it *retires* the live root — drops every cached scope of that notebook immediately and degrades to capability-unavailable; "could not tell" (no probe on the adapter, or a stat that failed) stays fail-soft and keeps serving. Collapsing those two is what let a retired companion serve until the process restarted. The runtime reader is consumed only by the shared Ask/Report activation service and fails closed to B when unavailable.
-- The selected-source quality boundary is split deliberately: `app.eval.selected_source_graph` owns golden-case evaluation and observation parsing, while `app.services.source_graph_quality` owns the versioned content-free attestation schema/verification used by production, and `app.services.source_graph_rollout` owns pure off/shadow/allowlist/hash/on decisions. Production modules never import `app.eval`. The suite freezes model/sampling/corpus/scope/source aliases, binds citation anchors to evidence provenance, evaluates hard isolation and baseline preservation before quality/cost deltas, and checks both each case and the aggregate. Activation pins the canonical golden digest; custom golden files remain diagnostic only. Production recomputes every content-free case/aggregate rail, and missing corpus/model pins fail closed. The attestation digest detects accidental mutation only; trusted-path ownership remains a deployment responsibility. Only the shared activation service imports the rollout decision; Ask/Report consumers do not implement a second gate.
-- `SelectedSourceGraphActivationService` remains the only graph-activation algorithm, but Ask/Report reach it only through the built-in selected-source graph contributor and its core-private request bridge. Callers must finish and freeze historical `B` before invoking the host; the service reads only a server-frozen, genuinely narrowed `include` scope, builds the bounded snapshot, tries online scoped PPR/neighbor memberships and then the source-partition companion when needed, rechecks every returned source id, and passes `G` through `BaselineProtectedEnrichmentService`. Whole/all-selected scopes return before snapshot I/O. Default invisible shadow returns `B`; approved active modes return `B + G`; every failure returns `B`. Status is internal observability only and may not enter public payloads, traces, streams, or UI. Do not add a second rollout parser, a workflow-level service call, another graph consumer, or a client-computed narrowing rule.
-- Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
-- Reasoning source identity lookup is an identity-only repository operation: it reads no source text, summaries, elements, KG payloads, or embeddings. Both adapters page the visible authorized roster in stable `(created_at,id)` order through the partial `idx_sources_visible_identity` index on `(notebook_id, created_at, id) WHERE source_type NOT IN ('memory','knowhow')`. The service resolver that consumed this roster is gone with the model-inferred source scope, so `visible_source_identity_rows_bounded` currently has no production caller; the index and both implementations are kept because retrieval scope is still expressed as `(notebook_id,source_id)` keys and an empty source-id set means empty rather than unrestricted.
+Runtime ownership and data flow belong to [architecture.md](../architecture.md).
+Use its [repository composition](../architecture.md#22-repository-组合与兼容-facade),
+[frontend boundaries](../architecture.md#24-前端边界), and
+[core data flows](../architecture.md#3-核心数据流) when changing those surfaces.
+Public behavior and exact numeric rails belong to [product/API](./product-and-api.md);
+operational procedures belong to [operations](./operations.md). The rules below are
+contributor constraints, not a second implementation history.
 
-Schema changes remain version-gated behind `SqliteMigrator`: append a new
-`_migration_N`, bump `SCHEMA_VERSION`, and never modify a sealed migration.
-Startup recovery, stable seeds, and administrator upgrades run every boot
-outside that version gate.
+### Dependencies, authority, and state ownership
 
-SQLite migrations are one-way. `SqliteMigrator.migrate()` refuses to start
-against a database whose stamped `PRAGMA user_version` is newer than the
-running build's `SCHEMA_VERSION`: it logs and raises a `RuntimeError` naming
-both numbers ("schema contains a future version", the same phrase the
-PostgreSQL ledger guard uses), so a downgraded binary fails fast at startup
-instead of silently running against a schema it does not understand. The
-readiness endpoint only reports the redacted "database initialization failed";
-the numbers are in the backend log. A database stamped exactly
-at `SCHEMA_VERSION` still runs no migrations. The only supported way back is
-to restore the pre-upgrade backup, or redeploy a build whose `SCHEMA_VERSION`
-is at least the database's — there is no reverse migration.
+- Preserve `factory/wrapper → facade → runtime → services → stores`. Stores own
+  product SQL and raw rows; application/query components may assemble domain projections.
+  Services neither inspect dialects nor import the opposite adapter. Stable cross-layer
+  values live in `backend/app/domain`; repository ports cannot import services, and the
+  static dependency graph stays acyclic. Domain routers own endpoint bodies;
+  `app/api/routes.py` only composes them. Compatibility facades re-export existing objects
+  rather than creating a second implementation.
+- Keep extension SDK contracts dependency-light. `app.bootstrap` alone joins adapters
+  to `backend/app/extensions`; workflows consume domain host ports, and plugins never
+  import concrete repositories, facade, or runtime. Availability probes stay I/O-free,
+  projected capability ports stay narrow, and an unavailable contributor cannot disable
+  independent contributions. Preserve frozen routing/admission, the exact no-contribution
+  baseline, bounded batch hydration, cancellation, and the no-held-connection boundary.
+  Extension authoring and UI-package constraints live in the
+  [deployment extension SOP](./deployment-extensions-sop.md). Modular-extension PRs
+  require two independent subagent reviews as well as the
+  [normal review and CI policy](#development-workflow).
+- Application stage envelopes under `backend/app/application` stay immutable and
+  dependency-light. Extend its explicit import allowlist deliberately; do not allow bare
+  root imports that bind `app`. Ask/Report stage seams must preserve the exact source
+  scope, retrieval run, actor, cancellation token, and connection probe. Revalidate
+  authority at the existing boundaries; violations fail loudly. Stage wrappers hold
+  neither a database connection nor an outer leaf-I/O slot. Core owns final audit and
+  persistence. Post-terminal observers cannot rewrite committed artifacts or reverse
+  `done`; `report.completed_observer` also cannot start retrieval/model work. Keep Ask's
+  existing observer order, failure isolation and cost when changing its completion path.
+- `scripts/check_architecture_boundaries.py` enforces the G1 ratchets in
+  `scripts/architecture_boundary_baseline.json`: repository-to-service debt and facade
+  surface cannot grow; core/model-to-service imports, listed hot-function lengths, and
+  repository Protocol-method counts have zero slack. Lower the baseline in the same
+  change whenever one shrinks. Retire facade members against the
+  [caller ledger](./superpowers/plans/2026-08-23-facade-retirement-ledger.md), reproduced
+  by `scripts/audit_facade_callers.py`; update the ownership/surface fixtures with
+  `scripts/generate_repository_contract_fixtures.py --rebaseline-surface`.
+- Keep both adapters' `access_sql.py` and `mount_sql.py` predicates aligned. New notebook
+  write endpoints use `require_notebook_capability(...)`; body-resolved identities use
+  the same capability table, including its independent mirror-write fence. Preserve
+  authorization-before-mirror-error ordering and the registered creator-owned report
+  exception. Do not infer a grant kind from a nullable/empty principal id or bypass
+  live read authority. Update the Memory authorization lock-site allowlist whenever
+  the read predicate widens. The access-SQL and notebook-capability guards own these checks.
+- Participant replacement belongs to `retrieval_participants.py`, only at retrieval
+  consumption boundaries; `global_run.py` is its only installer. Authorization still
+  uses the real mount/read predicate, and `source_scope.py` can narrow but never widen
+  the attested set. Keep the exact reader/writer allowlists, actor/run binding,
+  content-free cache fingerprint, and `ParticipantOverrideError` propagation.
+  Register any new fail-soft handler that can read the seat in `_SEAT_FAILSOFT_SITES`;
+  `_bounded_participants` must validate outside those handlers. Mode checks
+  (`subjectless_run_active`) and filtering checks (`peer_scope_ceiling_active`) remain
+  separate. `test_participant_override_guard.py` owns this security boundary.
+- `RepositoryRuntime` owns mutable operational state; `REPORT_CANCELLATIONS` is the
+  explicit process-global exception shared by identity with the coordinator and
+  compatibility functions. Domain builders take earlier frozen bundles, never the
+  runtime itself; retain the narrow late-bound accessors and startup side-effect order.
+  Supported post-composition replacements must reach every retained consumer.
+- Keep KG edge definitions in `domain/kg/edge_schema.py`; the service shim declares no
+  new `EdgeSpec`. Production never imports `app.eval`, reconstructs provenance from
+  scores, or adds a second selected-source rollout parser/activation path. New
+  retrieval contributions preserve the frozen baseline and authorization before
+  hydration; artifact and source-scope identities remain server-owned.
+- Stopped-service maintenance uses `open_maintenance_cli_repository`, acquires its
+  independent-session lock after the pre-factory safety checks, releases page-read
+  connections before model work, and always closes. The live scale CLI instead uses
+  its own composition root with `migrate=False, seed=False`, verifies schema before
+  composition, and holds the per-notebook claim through publication. Reuse the shared
+  artifact staging/swap and claim checks for every root, including rollback/retirement;
+  never patch a live tree in place. See the [operational SOP](./operations.md).
 
-The current schema version is 81. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v81 and remains readable. Global Ask adds user-owned conversation
-and task tables (SQLite v76 / PostgreSQL 0056), with idempotent request and single-running-task
-unique indexes and conversation deletion cascading to its jobs; SQLite v77 / PostgreSQL 0057 then
-adds the public share token and read watermark (`share_token`, `shared_through_at`,
-`shared_through_id`, all nullable, plus a partial unique index on the issued token) to those global
-conversations — the same shape SQLite v52 / PostgreSQL 0030 put on notebook conversations, repeated
-because a global session belongs to no notebook. SQLite v78 / PostgreSQL 0058 separates local login
-names from stable user names, adds the singleton authentication policy, external-identity bindings,
-short-lived browser authentication transactions, and policy/identity audit tables, and extends sessions
-with their authentication source, external subject, and absolute expiry. SQLite v79 / PostgreSQL 0059
-adds `retrieval_experiences.notebook_id` (`TEXT NOT NULL DEFAULT ''`, `''` = the global partition) plus
-the non-unique `idx_retrieval_experiences_notebook(notebook_id, id)` — the trailing `id` serves the
-`ORDER BY id` every read of the table issues, and only with it does a partitioned read become a
-covering seek into one partition rather than a walk of the whole table through the primary key with
-`notebook_id` as a filter — partitioning the retrieval-strategy experience
-library by notebook; no new table, foreign key or unique surface, and no backfill pass — the default is
-the backfill, and no content-addressed id is recomputed because the global partition's hash input is
-unchanged by construction. SQLite v80 / PostgreSQL 0060
-adds `notebooks.sync_origin` (`NOT NULL DEFAULT ''`, `COLLATE "C"` on PostgreSQL): non-empty marks the
-notebook a mirror imported from another environment and names that source environment, which the
-target-side write fence keys off. SQLite v81 / PostgreSQL 0061 add four columns to `global_ask_jobs`
-(`submitted_via`, `asked_at`, `updated_at`, `error_detail`, all `TEXT NOT NULL DEFAULT ''`, `COLLATE
-"C"` on PostgreSQL) so a global Ask job leaves the same per-job record a notebook `ask_jobs` row
-leaves: `submitted_via` is backfilled from the owning conversation's recorded value (only empty rows
-are touched), and `asked_at`/`updated_at`/`error_detail` stay `''` on historical rows, which is not
-reconstructed. No table, index, foreign key or unique-surface change. Those migrations
-cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
-Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
-(v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
-reference-library mounts plus promotion targets (v20), and the normalized
-interactive-reformat anchor-membership expression index (v21); v22 adds durable
-notebook-scoped KG build jobs; v23 added per-user latest model-service status;
-v24 adds the kg_canonical_scratch table for the write-lock-slimming cluster-map
-swap; v25 irreversibly scrubs stored per-user model credentials and legacy
-status, then adds deployment-wide model-service health persistence keyed by
-service ID; v26 adds knowhow table change history and named milestones; v27 adds
-the sources.chunked_at completion marker so an extracted-but-chunkless source's
-history is decidable (a legitimate zero-chunk parse versus an interrupted chunk
-build); v28 adds the app_settings key/value table and the nullable
-user_profiles.upload_document_limit column backing the per-notebook document
-limit; v29 deterministically deduplicates cluster memberships and installs the
-unique membership index; v30 adds the sources(notebook_id, file_hash) index
-backing content-hash upload dedup and batch_ingest resume. SQLite v31 adds only the
-inert, payload-free shadow_change_log and shadow_capture_control internal
-tables; run-scoped guard/capture/freeze DDL is installed separately. Guards
-enforce uniqueness immediately after installation, while capture/freeze
-behavior stays disabled until the run control state enables it. SQLite v32 adds
-reports.understanding_json for the durable question-understanding contract;
-SQLite v33 adds covering `(notebook_id, source_object_id/target_object_id, id)`
-relation indexes for stable, bounded lexical-relation keyset recall. SQLite v34
-adds the indexed `kg_relation_completion_state` source-generation watermark and
-the `(source_id,id)` object keyset index. SQLite v35 adds the browser-captured
-`ask_jobs.asked_at` instant for reconnecting to in-flight questions. SQLite v36
-adds the three KG-quality-analysis precompute product tables
-(kg_community_edges, kg_source_profiles and the kg_analysis_artifacts product
-ledger); rebuild_communities rewrites all three wholesale and stamps every ledger
-row with the kg_mutation_seq it was built at. Publication is atomic across the
-community layer too: the board partition, its community_seq stamp and all three
-product tables commit in one write transaction, while every full-table read that
-feeds them stays outside it (the SQLite write lock is process-wide). None of the
-three carries a level column: the community layer's freshness gate is not
-level-scoped, so the level a product set describes is recorded in the ledger
-payload instead. SQLite v37 adds the indexed `(source_id, element_type,
-created_at, id)` ordering on `source_elements` for bounded, per-type collection
-enumeration (formula/table/image/code_block listings). SQLite v38 adds the
-partial visible-source identity index `idx_sources_visible_identity` on
-`sources(notebook_id, created_at, id)` excluding hidden Memory/Knowhow projections.
-SQLite v39 adds the
-command-catalog extraction tables `catalog_jobs` (one row per run, carrying the
-per-source `queued`/`running` partial unique index that is the cross-process
-single-flight guard) and `catalog_candidates` (one reviewable row per extracted
-or grounding-rejected entry, keyset-ordered by a per-job `position`).
-`catalog_jobs.source_generation` records the source element generation the run
-was created against, so a reparse expires that run's candidates rather than
-letting them be confirmed into content the document no longer holds.
-v39 also installs `idx_knowhow_tables_nb_title` on
-`knowhow_tables(notebook_id, title, created_at, id)` — the migration's only
-index on a pre-existing table — so by-title target resolution seeks on
-`(notebook_id, title)` and takes its `(created_at, id)` tie-break straight from
-the index, rather than reading every table row in the notebook inside the
-locked apply window.
-`catalog_candidates.job_id` deliberately carries no foreign key: the rows
-cascade from notebooks/sources directly, and an incoming foreign key would make
-`catalog_jobs` a non-leaf table, leaving its single-column `source_id` guard
-with no static parking strategy for the forward shadow.
-SQLite v40 adds immutable `knowledge_source_facts` rows plus normalized
-`knowledge_source_fact_elements` bindings. The ingestion writer validates the
-current running extraction generation and every cited element's source inside
-the global-KG transaction; replacement clears the prior generation in that
-same transaction. The global object id is intentionally not a foreign key, so
-later fusion/governance cannot erase source truth. This migration adds storage
-and write lifecycle only; retrieval reads are activated by later PRs.
-SQLite v41 adds `knowledge_source_fact_backfills`, a per-visible-source,
-source-generation ledger for an explicit offline historical projection. The
-backfill first builds the source reverse index once per notebook (and reuses
-its completed marker on later runs), then uses
-bounded source-first object pages and one short write transaction per page.
-Only objects whose owner and every cited element are provably from that source
-are projected; ambiguous legacy provenance is counted as `incomplete` and is
-never guessed. An explicit `projection_origin` distinguishes live ingestion
-facts from historical projections; a live fact remains counted even if its
-fused global object has since been deleted. Cursor, counts, stable incomplete
-reason, separate operational failure code, projection version, and terminal
-status are restartable and auditable without exposing evidence text.
-The audit independently reconciles the effective KG generation, projection
-version, and persisted-fact count instead of trusting a `complete` ledger row.
-Deep notebook copies remap facts, bindings, and terminal ledgers through one
-source-generation map and synthesize a copy-local completed KG run. The copy
-can therefore be audited or force-repaired without retaining the original
-notebook's operational extraction history.
-SQLite v42 adds `source_index_backfills`, the notebook-level execution ledger
-for rebuilding `knowledge_object_sources`. Each bounded keyset page writes its
-index rows and advances the cursor/counters in the same short transaction, so
-a process restart resumes the last committed page instead of clearing the
-notebook and starting again. The row is pinned to `kg_mutation_seq`; drift
-records the stable `kg_generation_changed` code and leaves the fast-path marker
-false, while the next invocation resets against the new generation. A current
-completed marker is normalized into a completed ledger without rewriting index
-rows. The ledger stores no evidence text or raw exception. This remains a
-write-only preparation step; online Ask behavior is unchanged. SQLite v43 adds
-revocable public-report sharing tokens. SQLite v44 adds
-`chunks.question_indexed_at` and the source-owned `chunk_questions` table for
-the optional generated-question retrieval supplement; question rows cascade
-with their original chunk and notebook copies remap their
-chunk/source/notebook identities. PostgreSQL migration v22 is the paired
-schema. SQLite v45 adds the nullable `user_profiles.ui_mode` column backing the
-per-user interface mode preference (`auto` default / `advanced`); readers fall
-back to `auto` when the column or profile row is absent. PostgreSQL migration
-v23 is the paired schema.
-SQLite v46 adds `chunk_elements`, the element -> chunk reverse index, its
-notebook-level execution ledger `chunk_element_backfills`, and the
-`unified_kg_state.chunk_elements_indexed` marker that forks the read path.
-`chunks.element_ids` stores the forward direction, so the per-query "which
-chunks contain this evidence element" lookup used to scan every chunk row of
-the notebook and JSON-decode each one per index generation; the composite
-primary key `(notebook_id, element_id, chunk_id)` turns that into a bounded
-point lookup, and the extra `chunk_id` index exists only to serve the cascade
-from `chunks`. Every chunk write path a live notebook can reach maintains the reverse rows
-inside the same write transaction as the chunk rows, and source
-delete/reparse/knowhow cell rewrite removes them through that cascade. Whole-
-notebook deep copy is the one registered exemption: it does not copy
-`unified_kg_state`, so a copy's marker is always absent and it reads through
-the legacy scan. The migration creates empty
-tables only; historical rows are projected exclusively by the explicit offline
-`backfill-chunk-elements` phase, whose ledger has the same shape and the same
-`kg_generation_changed` fail-closed rule as `source_index_backfills` and stores
-no chunk text or raw exception. Notebooks whose marker is still false keep the
-legacy whole-notebook scan byte-for-byte. PostgreSQL migration v24 is the
-paired schema.
+### Frontend implementation guardrails
 
-SQLite v47 adds `notebook_object_schemas`, keyed by
-`(notebook_id, object_type)`, for notebook-local graph-type definitions. The
-global `object_schemas` table remains the administrator-managed baseline.
-Effective registries overlay the notebook row on the same global type; a local
-`disabled` row therefore suppresses that type only in its notebook. Local rows
-also retain their creator for ownership/audit, while authorization continues
-to be enforced by live notebook owner/read guards. PostgreSQL migration v25 is
-the paired schema, and the forward-shadow manifest includes the new business
-table.
+- Workspace hooks own their domain state. The shell consumes readonly views and named
+  commands, never another domain's setters. Preserve exact actor/notebook/generation
+  ownership, late-response rejection, deletion tombstones, single-flight work and
+  existing request budgets. Navigation detaches durable work; explicit Stop cancels it.
+  Register new notebook owners in `notebookTransitionSteps` and use the single
+  `notebook-transition.ts` begin/commit/settle path; keep root-modal cleanup first.
+- Use `api-client.ts` for HTTP mechanics and domain API modules for endpoint policy;
+  production `fetch` outside the shared transport is forbidden. Root dialogs use
+  `use-root-modal-coordinator.ts` leases: issue before async work, publish only for
+  the current owner, make covered dialogs inert/ARIA-hidden, and return focus only
+  after commit when the underlying lease is still current. Do not release an action's
+  in-flight guard merely because its dialog closed.
+- Reuse shared source/graph renderers and readonly props; do not move domain state
+  into presentation components. UI extension declarations remain metadata-only,
+  startup/build-frozen, and gated by exact tuple, capability, UI mode and owner.
+  After adding a contribution, regenerate `backend/tests/fixtures/ui_extension_contract.json`
+  with `scripts/generate_ui_extension_contract.py` and pass its `--check` contract.
+  Keep the built-in registry's import closure `.ts` for Node tests. Local UI packages
+  follow the [extension SOP](./deployment-extensions-sop.md), including its separate
+  deployment acceptance gate; do not weaken the base zero-plugin registry assertion.
+- Changes to group or schema panels must preserve their style and behavior guards,
+  rather than duplicating CSS or using undeclared classes. Schema selection/drafts
+  use `(object_type, proposal-status)` identity, writes commit visible results only
+  to the originating pane, and `SchemaWriteOutcome` keeps `confirmed`, `unconfirmed`
+  and `failed` distinct. A committed but unconfirmed write must not be presented as
+  a failed write that should be retried.
+- Keep exactly one element-level press baseline in `globals.css`:
+  `button:not(:disabled):not([aria-disabled="true"]):active`, using `opacity: .7` and
+  `filter: brightness(.88)`. No `transform`, `translate`, `scale`, `rotate` or baseline
+  `transition`: geometry changes can swallow edge clicks and override positioning.
+  Show action outcomes on the pressed control or immediately beside it; a page banner
+  alone is insufficient. Long-running controls also stay disabled/replaced in flight.
+- Clipboard feedback uses `useCopyResult` from `copy-result.ts`, keyed to the copied
+  token/item and reset when its identity changes; its shared timer returns to idle.
+  Keep literal result classes in JSX and `button.copy-result-copied` /
+  `button.copy-result-failed` background and hover rules. On failure, select an adjacent
+  read-only input only if `input.value === link` still holds. The
+  `button-press-feedback-guard`, `long-task-button-guard`,
+  `command-catalog-button-guard`, and copy-result component tests enforce this contract.
+- Secure-Context-only browser APIs require shared fallbacks: client ids use
+  `newClientRequestId()` from `client-request-id.ts`; clipboard writes use
+  `copyTextSafely()` from `copy-text.ts`. Include pre-request submission setup inside
+  the error boundary so synchronous failures restore the draft and release busy state.
+  `secure-context-api-guard.test.mjs` guards the supported HTTP LAN deployment.
+- Composer stop controls use `STOP_CONTROL_CLASS` and `StopGlyph` from
+  `stop-control.tsx`, remain icon-only with `aria-label`/`title`, and disable while
+  stopping. Labelled report action rows reuse only the glyph. Stopped-turn detection
+  and copy come from `stopped-turn.tsx`; a stopped notebook turn must not reappear as
+  a resendable storage draft. Reuse the existing Global Ask conversation reconciliation
+  and missing-job paths rather than calculating replacement/history state at callers.
+- Shared streams use `task_stream.py::deliver_ask_events` and the browser
+  `ndjson-stream.ts` line reader; route modules do not import each other.
+  `yieldToPaint` retains its timer fallback for background tabs. Access changes use
+  `use-notebook-collection.ts::refreshAfterAccessChange` and the shell's narrow
+  `reconcileOpenNotebook` effect so an open workspace is reconciled with its list.
 
-SQLite v48 adds the nullable `sources.agent_profile_id` provenance column, which
-records that an Agent (rather than a person) added a source. NULL is the
-load-bearing value — it means "a person added this" — so nothing is backfilled:
-every already-deployed row is user-added by definition. It deliberately carries
-no index, no unique constraint, and no foreign key to `agent_profiles`: the
-permission check behind the MCP `delete_source` tool is a single-row primary-key
-read, nothing enumerates "sources of this agent", provenance must outlive the
-profile row, and an incoming FK would add an edge to the forward-shadow parent
-closure. The column is written on the INSERT branch only, so content-hash dedupe
-that reuses an existing row keeps the first writer's provenance and a notebook
-deep copy clears it outright. `SourceSummary` and the source detail models
-project it as the `agent_created` boolean. PostgreSQL migration v26 is the paired
-schema; because the column adds no table, index, constraint, or FK edge, it left
-the forward-shadow invariants of its generation (74 business tables, 100 unique
-surfaces, a branch-counted bound of 12 row slots) unchanged.
+### Schema and migration authoring
 
-SQLite v49 adds the three group-knowledge-sharing tables. `groups` carries a
-group's name, `kind` (`project` | `department` | `domain` — a classification
-label that changes who may create the group and the interface wording, never the
-permission mechanism) and description. `group_members` maps users to groups with
-a two-level in-group role (`member` | `admin`), keyed by `(group_id, user_id)`
-and indexed on `user_id` for the "which groups am I in" direction.
-`notebook_grants` holds one row per live authorization edge —
-`(notebook_id, principal_type, principal_id, role)` with `principal_type ∈
-{user, group, group_admins, everyone}` and `role ∈ {viewer, admin}`. Every enum
-is validated in the application layer, deliberately without CHECK constraints,
-and `principal_id` is a **polymorphic** reference (user id, group id, or the
-empty string for `everyone`) that intentionally carries no principal foreign key:
-the forward shadow's static parking strategy requires at least one of those two
-columns to stay a bare text column.
+- SQLite schema changes append `_migration_N` and bump `SCHEMA_VERSION` in
+  [the migrator](../backend/app/repositories/sqlite/migrations.py); never modify a
+  sealed migration. Startup recovery, stable seeds and administrator upgrades remain
+  outside the version gate and run every boot.
+- PostgreSQL migrations append a gap-free numbered SQL file under
+  [migrations](../backend/app/repositories/postgres/migrations/) and update
+  [POSTGRES_SCHEMA_MANIFEST](../backend/app/repositories/postgres/schema_manifest.py).
+  The [migrator](../backend/app/repositories/postgres/migrator.py) validates checksums
+  and the ledger under its migration lock; never rewrite an applied SQL file.
+  Current version numbers and per-version DDL are owned by these executable sources.
+- Preserve fresh-install and upgrade behavior, null/default semantics, ownership,
+  keyset ordering/collation, FK/cascade/unique surfaces, and copy/cleanup classification.
+  Record table-specific design reasons beside the migration that introduces them.
+  Update affected schema/seed/snapshot fixtures and migration manifests in the same
+  change; do not rebaseline an old compatibility fixture to hide upgrade breakage.
+- SQLite migrations are one-way. A database's future `PRAGMA user_version` fails
+  startup with `schema contains a future version`; PostgreSQL similarly rejects a
+  future ledger version. Readiness exposes only the redacted initialization failure.
+  Recovery requires a pre-upgrade backup or a compatible/newer binary, not a reverse
+  migration. See [migration execution and cutover](./operations.md#sqlite--postgresql-stopped-snapshot-migration-and-cutover).
+- The frozen [v9 fixture](../backend/tests/fixtures/repository_v9/) and
+  `scripts/verify_repository_snapshot.py` retain upgrade compatibility. Snapshot
+  verification constructs repositories only on a temporary backup, checks exact
+  per-version migrations/stable seeds and preserves the original DB/WAL metadata
+  plus SHM existence/size (only live-WAL SHM mtime may differ); it never logs private rows.
 
-Two consequences of that shape are load-bearing. First, `principal_id` must stay
-`NOT NULL DEFAULT ''`: NULL does not participate in unique comparison, so an
-`everyone` row would escape `UNIQUE (notebook_id, principal_type, principal_id)`
-altogether — duplicate grants would accumulate and a revocation would not fully
-revoke — and NOT NULL is also what hands the shadow's parking column to
-`principal_type` (SENTINEL_TEXT). Second, the `everyone` test must be the exact
-four-value match `principal_type = 'everyone'` and must never be inferred from
-`principal_id` (neither `IS NULL` nor `= ''`), because parking temporarily writes
-a sentinel string into a conflicting row's `principal_type`, and exact matching
-is what makes a parked row fail safe (it matches nothing). The `UNIQUE` implicit
-index already covers `notebook_id` prefix lookups, so no separate notebook index
-exists; `idx_notebook_grants_principal` on `(principal_type, principal_id)`
-serves the "which notebooks is this group granted" direction. Notebook deep copy
-deliberately does **not** carry authorization edges, following the
-`notebook_members` precedent — access-control state is not knowledge, and the
-copy's new owner re-grants it. Deleting a group clears the grant rows pointing at
-it inside the same write transaction, because `principal_id` has no foreign key
-to enforce that; `scripts/merge_dbs.py` sweeps the orphan edges a union merge can
-otherwise resurrect.
-
-PostgreSQL migration v27 is the paired schema. Because v49/v27 adds three tables
-and one UNIQUE constraint, the forward-shadow invariants move to 77 business
-tables and 104 unique surfaces; the branch-counted bound stays at exactly 12 row
-slots (all three tables are shallow).
-
-SQLite v50 adds `notebook_share_requests`, the member-contribution approval-flow
-table — a sibling of `notebook_grants` deliberately kept out of the grant table
-so the decision predicate stays status-filter-free. A plain member requests
-sharing a library **they manage** into a group they are only a **member** of; a
-group admin approves, inserting the `(group, viewer)` edge and updating the row
-status in one write transaction. The state machine is one-directional
-`pending → approved/rejected` (withdrawal is a whole-row `DELETE` by the requester
-while `pending`, never a third status), both FKs cascade, and deep copy carries no
-requests. `decided_at` may only be written as SQL `NULL` or an ISO timestamp,
-never the empty string, because it is the one nullable time column this table
-contributes to the forward shadow and PostgreSQL's `timestamptz` would type-error
-on `''`; it is deliberately not in `POSTGRES_EMPTY_TIME_SENTINELS`. The partial
-unique index `uq_share_requests_one_pending`
-(`(notebook_id, group_id, status) WHERE status = 'pending'`) caps one in-flight
-request per (library, group), and the create endpoint returns the existing pending
-row idempotently on conflict rather than 409ing; `status` is exact-matched against
-`pending`/`approved`/`rejected`, never `!=`. PostgreSQL migration v28 is the paired
-schema; because v50/v28 adds one table and one partial UNIQUE index, the
-forward-shadow invariants moved to 78 business tables and 106 unique surfaces, the
-branch-counted bound staying at exactly 12 row slots (the new table is shallow
-too).
-
-SQLite v51 adds the two agent-understanding tables `agent_notebook_profile` and
-`agent_profile_jobs` backing "AI 对这个库的理解" — a low-cost, LLM-consolidated
-summary of what the agent has learned about a notebook. `agent_notebook_profile`
-holds five label blocks keyed by `(notebook_id, owner_id, label)`: three shared
-base-layer blocks (`corpus_shape`/`key_entities`/`corpus_gaps`, `owner_id=''`,
-refreshed by a per-notebook consolidation job once accumulated source changes
-cross a threshold) and two per-member overlay blocks (`retrieval_notes`/
-`usage_gaps`, `owner_id` = that member's user id, refreshed once that member
-completes enough Ask jobs or a deep report). `owner_id` follows the
-`notebook_grants.principal_id` precedent from v49/v27: `NOT NULL DEFAULT ''`
-rather than nullable, with no foreign key to `users` and no CHECK constraint on
-it or on `label`. `agent_profile_jobs` is a one-row-per-chain status/counter
-table keyed by `(notebook_id, owner_id)`; single-flight is a primary-key-row
-compare-and-swap rather than a separate unique index. Both tables' replication
-key equals their declared primary key exactly, so the forward shadow parks them
-by `REPLICATION_KEY` with no sentinel column and no `_UNIQUE_PREDICATES` entry.
-`agent_notebook_profile.history_json` is a bounded ring buffer of before/after
-entries appended in the same write transaction as the block update, in place of
-a separate change-history table — v1 offers no history-browsing UI, so a
-queryable table would add manifest/copy-rank/parking overhead for no reachable
-capability. Notebook deep copy carries neither table: a copy starts with no
-consolidated understanding of its own, and job rows are transient process state
-like `catalog_jobs`. PostgreSQL migration v29 is the paired schema. Because
-v51/v29 adds two more (shallow) tables, the forward-shadow invariants move to
-80 business tables and 108 unique surfaces; the branch-counted bound remains
-exactly 12 row slots.
-
-SQLite v52 adds three conversation public-sharing columns to `conversations`:
-`share_token` (nullable, partial unique index `idx_conversations_share_token
-WHERE share_token IS NOT NULL` covering issued tokens only, NULL-parking like
-`notebooks.share_token`/`reports.share_token`), the read watermark
-`shared_through_at` (a literal timestamp value, not a foreign key — storing an
-answer id would go meaningless once that answer is deleted), and the
-display-only `shared_through_id`. The token lives on the conversation row rather
-than a side table (the `_migration_43` report-token precedent; a deleted
-conversation takes its public link with it). Notebook deep copy needs no
-handling for these columns: `_COPY_VALIDATED_TABLES` does not include
-`conversations`, so they never travel with a copy and there is nothing to
-clear — the migration comment records this so nobody adds a redundant clear by
-analogy with the notebooks/reports siblings. PostgreSQL migration v30 is the
-paired schema. Because v52/v30 only adds columns to an existing table, with no
-new table and no foreign key, the business-table count is unchanged (still 80);
-the new partial unique index alone raises the unique-surface count from 108 to
-109, and the branch-counted bound remains exactly 12 row slots.
-
-SQLite v53 adds `agent_profile_jobs.claim_token` (Agentic Memory P2): the
-consolidation chain's claim GENERATION, a `TEXT NOT NULL DEFAULT ''` column
-minted afresh on every `claim` and carried as part of the compare-and-swap by
-both `settle` and `write_block`. It closes an ABA in P1's status-only
-single-flight — a member removed and re-added gets a job row with the same
-primary key and a `runs` counter back at 0, so a stale worker's settle used to
-land on the replacement row (consuming the new run's snapshot) and its writes
-used to pass a bare existence check. Because a delete plus recreate always
-changes the token, "the row I claimed" and "the row that is here now" are now
-distinguishable. `settle` consequently returns three outcomes rather than a
-bool: `settled`, `gone` (no row — only member removal deletes it, so the
-caller wipes the blocks it just recreated) and `superseded` (a row, but a later
-claim's — the caller must NOT wipe, since the newer generation may already have
-written its own blocks). No new table, index or unique surface, so the
-forward-shadow invariants are unchanged at 80 business tables, 109 unique
-surfaces and 12 row slots. PostgreSQL migration v31 is the paired schema.
-
-SQLite v54 adds `retrieval_experiences` (Agentic Memory P2): the
-deployment-GLOBAL retrieval-strategy experience library. One entry says "in
-this shape of question, this retrieval action is / is not worth reaching for",
-plus a short model-written rationale, a `support` count of the runs backing it
-and an `adopted` count of the times the model actually picked that action after
-the entry was injected. As created here the table carries no `notebook_id`, no
-owner column and no foreign key in either direction: it stores general tactics
-for HOW to search, never anyone's content, so notebook deep copy cannot reach
-it (the same structural sentence that covers `groups`/`group_members`) and
-`scripts/merge_dbs.py` classifies it as a global union table. (SQLite v79
-partitions the table by notebook — see that entry below; the owner column and
-the absent foreign keys stay absent, and the merge classification does not
-move.) Its primary key
-is a single CONTENT-ADDRESSED `TEXT` column — the deterministic hash of
-(situation fingerprint, action) — which is what makes that union safe across
-independent deployments (an incrementing id would silently drop rows on a
-primary-key collision) and, because the declared replication key equals it
-verbatim, also what parks its one unique surface on `REPLICATION_KEY` with no
-sentinel column and no `_UNIQUE_PREDICATES` entry. It creates no index: the row
-count is hard-capped, and the only two read paths are a primary-key point
-lookup and a bounded-return, unbounded-scan read (index deferred — SQLite v79
-is the hop that adds one, together with the partition predicate that gives an
-index something to answer). Because v54/v32 adds one more (leaf, parentless)
-table, the forward-shadow invariants move to 81 business tables and 110 unique
-surfaces; the branch-counted bound remains exactly 12 row slots. PostgreSQL
-migration v32 is the paired schema, and the current pairing is
-SQLite 54 / PostgreSQL 32 / epoch 1.
-
-SQLite v55 adds two things in one migration (Agentic Memory P3): the leaf
-table `agent_observations` (one outgoing FK to `notebooks`, no incoming FK —
-an external Agent's per-`(notebook, owner)` observation log, ring-bounded and
-consumed only by the untrusted overlay-consolidation prompt) and a nullable
-`user_profiles.search_profile_json` column (the per-user search/answer style
-preference document; NULL means "never set", same contract as `ui_mode`).
-`agent_observations`'s idempotency unique index,
-`idx_agent_observations_request` on
-`(notebook_id, owner_id, agent_profile_id, client_request_id)
-WHERE client_request_id IS NOT NULL`, parks on NULL the same way
-`idx_conversations_share_token` does; a second, non-unique index,
-`idx_agent_observations_scope`, supports the ring-eviction delete and the
-bounded reads but adds nothing to the unique surface count.
-`user_profiles.search_profile_json` adds no unique surface, FK, or JSON
-column registration (same treatment as `ui_mode`). Because v55/v33 adds one
-more leaf table with only an outgoing FK, the forward-shadow invariants move
-to 82 business tables and 112 unique surfaces (the new table's declared PK
-plus its one partial index); the branch-counted bound remains exactly 12 row
-slots. PostgreSQL migration v33 is the paired schema, and the current
-pairing is SQLite 55 / PostgreSQL 33 / epoch 1.
-
-SQLite v56 / PostgreSQL v34 adds the live `groups.owner_id` pointer. Existing
-groups choose a current admin deterministically (preferring `created_by` only
-when that creator is still an admin); new groups write creator and owner together. Owner
-transfer promotes the target member to admin and keeps the former owner as admin
-inside the same group-root transaction. The owner member row cannot be demoted,
-removed, or used for self-leave until transfer completes. This adds no table,
-index, foreign key, or unique surface, so the forward-shadow invariants remain
-82 business tables, 112 unique surfaces, and 12 row slots. The current pairing
-is SQLite 56 / PostgreSQL 34 / epoch 1.
-
-SQLite v57 / PostgreSQL v35 adds the group's reusable invitation capability on
-the aggregate root: nullable `invite_token`, `invite_created_at`, and
-`invite_created_by`, plus partial unique index `idx_groups_invite_token WHERE
-invite_token IS NOT NULL`. Keeping the token on `groups` lets an authorized
-administrator reopen and copy the same live link; rotating or revoking clears
-the previous authority atomically, and deleting the group removes it with the
-root row. The timestamp is SQL NULL or an ISO instant, never an empty string.
-No table or foreign key is added; the forward-shadow invariants are 82 business
-tables, 113 unique surfaces, and 12 row slots. The current pairing is SQLite 57
-/ PostgreSQL 35 / epoch 1.
-
-SQLite v58 / PostgreSQL v36 adds the pluggable-indexing-pipeline columns:
-`notebooks.indexing_pipeline` is the nullable desired selection (`NULL` means
-builtin), while `indexing_pipeline_version`, `indexing_pipeline_generation`,
-and `indexing_pipeline_job_id` are non-null authority columns. The published
-product identity pair `(indexing_pipeline_id, indexing_pipeline_version)` is
-also added to `unified_kg_state` and `extraction_runs`. This migration adds no
-table, foreign key, or unique surface.
-
-SQLite v59 / PostgreSQL v37 adds durable `indexing_pipeline_stages` and
-`indexing_pipeline_stage_sources`. Both are `TableClass.LOCAL_EPHEMERAL`: they
-exist in both schemas and count toward schema totality, but forward-shadow
-copy/capture/apply never transfers a backend-local worker's lease state. The
-This pairing has 84 application
-tables (82 replicated plus 2 local staging tables), 113 replicated unique
-surfaces, and a 12-row-slot branch-counted foreign-key bound.
-
-SQLite v60 / PostgreSQL v38 adds `agent_observations.kind`: `'note'` for a
-line an Agent wrote through `add_observation` (every row that could exist
-before this hop, hence the default is the historical truth and no backfill
-runs), `'call'` for one recorded tool call against that notebook. One column
-only — no table, index, foreign key, or unique surface — so that
-pairing stayed SQLite 60 / PostgreSQL 38 / epoch 1 with the same 84 application
-tables, 113 replicated unique surfaces, and 12-row-slot bound. Ring eviction
-and the consolidation read are both scoped by `kind`, so call accounting can
-neither evict written notes nor reach a model prompt.
-
-SQLite v61 / PostgreSQL v39 (hot-path fix batch 1) adds indexes for query
-families a production audit found scanning without one:
-`concept_clusters(notebook_id, canonical_id)`,
-`concept_clusters(notebook_id, lower(canonical_name))`, three reverse-FK
-covers (`extraction_runs.notebook_id`,
-`knowledge_source_fact_elements.notebook_id`, `memory_items.notebook_id`),
-`knowledge_relations(notebook_id, source_object_id, target_object_id,
-edge_type)`, and a partial `sources(notebook_id, source_type) WHERE
-source_type IN ('memory','knowhow')` index backing `hidden_source_ids` — six
-query-family groups, eight indexes total on PostgreSQL; five of the six
-groups (seven of the eight indexes) on SQLite. PostgreSQL alone also adds
-`chunks(source_id, ordinal)`: SQLite's planner does not eliminate an
-`ORDER BY rowid` sort through a rowid-suffixed secondary index (verified
-empirically — a plain `idx_chunks_source` already gives this ordering for
-free, so the SQLite twin would cost a write-side B-tree for no read benefit
-and, when actually selected by the planner, for negative benefit versus not
-building it at all), so it is deliberately not added — see `_migration_61`'s
-docstring. No table, column, foreign key, or unique surface changes, so the
-pairing stays SQLite 61 / PostgreSQL 39 / epoch 1 with the same 84
-application tables, 113 replicated unique surfaces, and 12-row-slot bound.
-On PostgreSQL, an already-populated production database should have these
-eight indexes built online first with `scripts/build_hotpath_indexes.py
---apply` (`CREATE INDEX CONCURRENTLY`); the migration's plain `CREATE INDEX
-IF NOT EXISTS` then applies as a no-op ledger entry. See
-`docs/deployment-and-configuration.md`'s hot-path index section for the
-operator SOP. `idx_chunks_source` (added in migration 0003) is now fully
-covered by the new `idx_chunks_source_ordinal` and is registered
-write-amplification debt, not dropped in this batch — see migration
-0039's header comment.
-
-SQLite v62 / PostgreSQL v40 adds `idx_ask_jobs_creator_activity` on creator,
-the normalized absolute `created_at` expression, and `id`, in descending
-keyset order. The expression exactly matches the creator-wide question
-overview query, including its unresolved-timestamp sentinel, so every page can
-stop at `LIMIT` without a global `ask_jobs` scan or a temporary full-history
-sort. This adds no table, foreign key, or unique surface; the schema pair was
-SQLite 62 / PostgreSQL 40 / epoch 1 at that point.
-
-PostgreSQL v42 (`0042_hotpath_batch2_search_indexes.sql`, hot-path fix batch 2)
-adds `idx_knowledge_objects_nb_payload_trgm` (a notebook-scoped composite
-partial GIN trigram index — `notebook_id` via btree_gin's `public.text_ops`
-leading `((payload::text) COLLATE "C")`, `WHERE status != 'deprecated'`,
-mirroring `idx_knowledge_objects_nb_name_trgm`'s shape so the mandatory
-notebook equality intersects inside index access instead of building a global
-bitmap; serving the collection search's knowledge leg) and
-`idx_source_elements_nonblank` (a partial btree over the non-blank element
-eligibility predicate, serving checkup H5). The migration installs btree_gin
-(same trusted-extension form as 0002's pg_trgm) and validates any pre-existing
-same-named index — an INVALID residue or a wrong-shape name collision fails
-the migration loudly instead of being silently skipped by `IF NOT EXISTS`.
-SQLite is deliberately untouched by this batch. No table, foreign key, or
-unique surface changes; the schema pair was SQLite 63 / PostgreSQL 42 /
-epoch 1 at that point.
-
-SQLite v63 / PostgreSQL v41 adds `extension_runtime_toggles`: the deployment-
-plugin runtime enable/disable switch plus audit (who, when). No row means
-enabled, so a deployment where no administrator has touched this table
-behaves exactly as before the table existed. It has no foreign key in either
-direction (`plugin_id` is an `EXTENSIONS_CONFIG` identifier, not a row in any
-other table) and no secondary index — the table only ever holds a few dozen
-rows (one per plugin an administrator has ever toggled), so both the admin
-page's full listing and the admission-refresh read (`enabled = false`) are a
-cheap sequential scan; `enabled` is not part of the primary key, so the
-primary key index could not have served that filter anyway. The admission
-gate itself reads none of this at evaluation time — every contribution/
-capability check reads an in-process snapshot, this table is only the
-durable layer behind it, refreshed immediately on write and polled by other
-processes at low frequency; that keeps the check zero-I/O instead of one
-query per evaluation. `enabled` is declared PostgreSQL `boolean`, not this
-repository's usual SQLite-integer-flag-to-`bigint` convention, because its
-only external contract is the JSON `runtime_enabled: bool` field the admin
-API layer reads straight off it — there is no shared internal reader to keep
-aligned with the bigint convention instead. SQLite's twin `enabled INTEGER`
-column carries no `CHECK (enabled IN (0,1))`, matching every other INTEGER
-flag column in this schema; a 0/1-violating value there hard-fails
-`sqlite_to_postgres.py`'s `bool` transform branch instead of being silently
-coerced, an accepted tradeoff rather than an oversight. Because v63/v41 adds
-one more (leaf, parentless)
-table, the forward-shadow invariants move to 85 application tables and 114
-replicated unique surfaces (the new table's declared PK is its only unique
-surface); the branch-counted bound remains exactly 12 row slots. PostgreSQL
-migration v41 is the paired schema; the schema pair was SQLite 63 /
-PostgreSQL 41 / epoch 1 at that point.
-
-PostgreSQL v43 (`0043_concept_cluster_keyset_index.sql`, hot-path fix batch 3)
-adds `idx_clusters_nb_canonical_member` on `concept_clusters(notebook_id,
-canonical_id, member_object_id)`; SQLite v64 adds the identical index (parity,
-`_migration_64`). It serves `concept_cluster_detail_rows`/
-`concept_cluster_member_total`'s concept-detail hub-cluster keyset page: the
-pre-existing `idx_clusters_nb_canonical` (v39/v61) only covers the
-`notebook_id=?, canonical_id=?` equality prefix, so a hub concept's later
-pages (after the first) paid an explicit Sort over the whole matching slice
-before the `ORDER BY member_object_id` keyset predicate and `LIMIT` could
-trim it down; the trailing `member_object_id` key lets the planner walk the
-same index in that order directly, with no separate sort step. A plain
-(non-partial) three-column btree over already-narrow text columns — no
-GIN-specific concerns (fastupdate, multi-minute builds, double-digit-GB
-footprint) like v42's payload trigram index — builds in seconds even at
-production scale. On PostgreSQL, the migration also validates any
-pre-existing same-named index before creating (same DO-block pattern as
-migration 0042's, codex #636 R1 P2). The pre-existing `idx_clusters_nb_canonical`
-is now a strict prefix of the new index and is registered write-amplification
-debt, not dropped in this batch — same convention as `idx_chunks_source`'s
-retirement note in migration 0039's own header comment. No table, column,
-foreign key, or unique surface changes, so that pairing stayed at 85
-application tables, 114 replicated unique surfaces, and a 12-row-slot bound;
-the schema pair at that point was SQLite 64 / PostgreSQL 43 / epoch 1.
-
-SQLite v65 / PostgreSQL v44 adds `retained_user_activity`, the notebook-FK-free,
-content-minimal user-analysis projection written in the notebook-delete transaction.
-It contains only activity attribution/status/display metadata and explicit deletion/
-expiry timestamps; answer/citation/trace/source-body/report-body data never enters it.
-The actor/owner keyset indexes mirror the Activity query order, including PostgreSQL's
-explicit `record_id COLLATE "C"`, and the expiry index backs startup/delete-path
-pruning. This leaf table adds one replicated primary-key
-unique surface and no FK edge, so the current pair is SQLite 65 / PostgreSQL 44 /
-epoch 1 with 86 application tables, 115 replicated unique surfaces, and the same
-12-row-slot closure bound.
-
-SQLite v66 / PostgreSQL v45 adds nullable `sources.uploaded_by` plus the
-partial `(uploaded_by, created_at, id)` activity index for visible sources.
-New visible rows stamp the actual current user; Memory/Knowhow projections and
-deep-copy rows remain un-attributed. Existing visible rows are backfilled
-best-effort to their notebook owner because older schemas retained no upload
-actor. This adds no table, foreign key, or unique surface, so the current pair
-is SQLite 66 / PostgreSQL 45 / epoch 1 with 86 application tables, 115
-replicated unique surfaces, and the same 12-row-slot closure bound.
-
-SQLite v67 and PostgreSQL v46 add the global `wishes` and `wish_votes` tables.
-`wishes.author_id` and the composite vote identity both reference `users`; deleting
-a wish cascades its votes, while deleting an author remains restricted. The vote
-primary key `(wish_id, user_id)` is the database-level one-vote-per-user guard.
-Both adapters expose the same `WishStorePort`, and the shadow manifest includes
-both new business tables. The resulting current shadow contract is 88 business
-tables, 117 replicated unique surfaces, and the unchanged 12-row-slot ancestor
-bound. The schema pair at that point was SQLite 67 / PostgreSQL 46 / epoch 1.
-
-SQLite v68 / PostgreSQL v47 (batch 3 W1 PR-2, seq-semantics unification) adds
-`unified_kg_state.kg_reset_epoch`, a persistent, monotonically-increasing
-per-notebook counter for "how many times has this notebook's KG been reset to
-empty." Its one writer is `delete_notebook_graph_rows`, which now RESETS the
-row in place — matching a freshly created notebook's birth-row shape on every
-column the KG-analysis "no history" contract reads — instead of dropping it,
-and advances this column in the same transaction. It is DEFAULT 0 and never
-decreases. This adds no table, foreign key, or unique surface, so the current
-pair is SQLite 68 / PostgreSQL 47 / epoch 1 with the same 88 business tables,
-117 replicated unique surfaces, and 12-row-slot closure bound.
-
-PostgreSQL v48 (`0048_source_search_trgm_indexes.sql`, hot-path fix batch 4)
-adds the three notebook-scoped composite GIN trigram indexes behind the source
-tab's server-side search: `idx_sources_nb_title_file_trgm` on
-`sources(notebook_id, lower(title), lower(file_name))` partial on
-`source_type NOT IN ('memory','knowhow')`, `idx_source_authors_nb_name_trgm`,
-and `idx_source_paper_meta_nb_ptitle_trgm`. It pairs with a query rewrite that
-lands on BOTH backends: `list_sources_page`'s `q` filter changes from a
-cross-table `OR` of two `LIKE` arms and two `EXISTS` subqueries into an id
-semi-join over a three-leg `UNION`, each leg rooted at its own table's
-`notebook_id=` equality and therefore separately indexable. The production
-symptom was a 363ms COUNT on a 49k-source notebook (paid twice per request,
-since the page query reuses the same WHERE fragment): the planner answered the
-cross-table OR with hashed subplans that materialized all 210k `source_authors`
-rows and all 39k `source_paper_meta` rows per execution, which a
-two-character-vs-seven-character equal-cost measurement (360ms vs 363ms)
-identified as full scans rather than LIKE evaluation. SQLite gets the rewrite
-but NO index — it has no GIN trigram equivalent and `LIKE '%…%'` cannot use a
-B-tree prefix — so `SQLITE_SCHEMA_VERSION` is untouched and v48 stays paired
-with SQLite v68; that PostgreSQL-only split is the same one migration 0042
-registered for batch 2. The three-key composite is deliberate: a multi-column
-GIN lets each `LIKE` arm constrain `(notebook_id, its own trigram key)` and
-BitmapOr two scans of the one index, verified by live EXPLAIN. Two follow-up
-variants were measured and rejected: the documented fallback, two two-key
-indexes instead of the composite, was therefore not needed and would not have
-helped — each would still carry the same `notebook_id` key at the same
-per-scan cost — and splitting the query's `OR` into two single-arm UNION legs
-(a wash on selective needles, measurably worse on short ones, because a
-fourth Append branch means a second full pass over `sources`
-whenever the pattern is too short for trigram extraction). Two measured
-trade-offs are registered in the migration's own header rather than discovered
-later: a needle shorter than three characters yields no trigram keys at all
-(the one page-query regression in the benchmark, 23.6ms to 33.1ms, against a
-3.4x improvement per user action); and a GIN's fastupdate pending list inflates
-every GIN cost estimate roughly tenfold until a `VACUUM` merges it, which is
-enough to make PostgreSQL reject its own freshly built index — an artifact that
-misled this batch's own first round of plan measurements and is now documented
-in `docs/operations.md` for operators. Migration 0048 re-guards
-btree_gin (same form as 0042's) and validates any pre-existing same-named index
-before creating. No table, column, foreign key, or unique surface changes, so
-the current pair is SQLite 68 / PostgreSQL 48 / epoch 1 with the same 88
-business tables, 117 replicated unique surfaces, and 12-row-slot closure bound.
-
-SQLite v69 / PostgreSQL v49 (batch 3 W1 PR-3 Phase A, delete-jobization;
-renumbered from 48 after hot-path batch 4's index-only 0048 landed first) adds
-three FK/keyset-covering indexes design doc Sec 1.4 registers as
-prerequisites for the delete-job work — `idx_agent_tokens_default_notebook`
-(closes the one L1 FK column, `agent_access_tokens.default_notebook_id`,
-that previously had no leading index, so a notebook-deletion FK cascade
-probe was a full table scan), `idx_knowhow_cell_code_column`, and
-`idx_conversations_notebook` — plus two new tables, `notebook_delete_jobs`
-and `notebook_delete_files`, the delete tombstone's background job carrier
-and its source-file-path staging side table. Both tables deliberately carry
-no foreign key to `notebooks` (the sweep's "job row present, notebooks row
-absent" special case needs that state to stay representable — see the
-PostgreSQL migration's own header comment), and `notebook_delete_jobs`
-carries one partial unique index (`idx_notebook_delete_jobs_one_active`,
-defense-in-depth behind the tombstone's own CAS single-flight). The current
-pair is SQLite 69 / PostgreSQL 49 / epoch 1 with 90 business tables, 120
-replicated unique surfaces, and the unchanged 12-row-slot closure bound (both
-new tables are leaves with no incoming FK, so the deepest closure chain is
-unaffected).
-
-SQLite v70 / PostgreSQL v50 add the Ask submission idempotency key: a nullable
-`ask_jobs.client_request_id` column plus the partial unique index
-`idx_ask_jobs_client_request` over `(created_by, client_request_id) WHERE
-client_request_id IS NOT NULL`. The official browser mints one key per
-submission (the reasoning preflight's per-tab mirror id) and sends it on every
-`/ask/stream` POST; `AskStateStorePort.begin_or_attach_durable_job` returns the
-existing job for a repeated key instead of inserting a second row, and the
-coordinator then streams that job from the store (`started` with its ids, the
-persisted trace, then the saved answer as `final` or the row's
-`cancelled`/`error`) rather than running a second engine. The column is
-deliberately nullable with no sentinel default and the index deliberately
-partial — the same NULL-park shape as `agent_observations.client_request_id`
-(v55/0033) — so a keyless row (every pre-migration row, MCP, scripts, the
-synchronous `/ask`) simply does not participate in the surface; nothing is
-backfilled. `created_by` leads the index so another account's key can never
-attach to this user's job, and a key the same user already spent in another
-notebook is refused (`AskRequestKeyConflict`, an `error` event) rather than
-attached. No table or foreign key is added; the forward-shadow invariants become
-90 business tables, 121 replicated unique surfaces, and the unchanged
-12-row-slot closure bound.
-
-Batch 3 W2 PR-1 (SQLite v71 / PostgreSQL 0051) adds the generational
-cluster/community swap schema half: row-level `generation` columns on the
-three derived-graph tables, the `unified_kg_state` generational control
-block (two published pointers, the monotonic claim counter, the in-flight
-claim pair, the durable catch-up marker), and the cluster index rework
-(three generation-aware replacements created, five superseded indexes
-dropped — the four-column unique replaces the three-column one, and two
-strict-prefix indexes that would hijack the predicated readers' plans are
-retired with it). Reader results are byte-identical while every row is at
-generation 0 and both pointers are 0. The replicated unique surface count
-is unchanged (one four-column unique replaces one three-column unique).
-
-The admin usage overview usage-signals batch (SQLite v72 / PostgreSQL 0052)
-adds a nullable `users.last_seen_at` (design doc `docs/superpowers/specs/
-2026-09-07-admin-usage-overview-usage-signals-design_zh.md` Sec 3 B1, Sec 7
-decision 1): nothing is backfilled — NULL means "has not signed in since this
-migration ran", a distinct claim from "signed in a long time ago". The write
-path updates it in `identity_store`'s existing session-touch write
-transaction, reusing the same 300s throttle
-(`auth_session_touch_interval_seconds`) and staying monotonic; unlike
-`auth_sessions.last_seen_at`, this column survives logout/revocation. No
-table, index or foreign key is added — `list_user_usage`'s one-shot
-aggregate reads the column directly.
-
-The wish-wall lifecycle batch (SQLite v73 / PostgreSQL 0053) adds
-`wishes.status` (`text NOT NULL DEFAULT 'open'`): the administrator-owned
-state of an item (`open` / `in_progress` / `done` / `declined`). The default
-is the whole backfill — every pre-existing wish is by definition still open —
-so no data pass runs. The accepted value set is pinned by the API model
-(`app.models.wishes.WishStatus`) rather than a CHECK constraint, the same way
-`kind` already is. `WishStorePort` grows `update_wish` (author or admin;
-promoting to `plan` stays admin-only), `delete_wish` (author or admin; votes
-are deleted in the same transaction) and `set_wish_status` (admin only), each
-deciding ownership under the row lock, plus a `status` filter on
-`list_wishes`; the `priority` order sinks done/declined rows below open ones.
-No table, index or foreign key is added.
-
-The question submission-surface batch (SQLite v74 / PostgreSQL 0054) adds
-`submitted_via` (`text NOT NULL DEFAULT ''`) to `ask_jobs`, `reports` and
-`retained_user_activity`. The value is decided only by the server entry point
-that created the row and is passed down as an explicit keyword argument, never
-read from a client request model or ambient request context: the
-session-authenticated `/ask`, `/ask/stream` and `/reports` routes pass `web`,
-and MCP `ask_notebook` passes `mcp`. The empty string means "not recorded" and
-is also the whole backfill: pre-existing rows carry no reliable signal about
-their entry point, so none is inferred. In-process callers that pass nothing
-(for example `app/eval/inference.py`) also record `''`. Notebook deletion copies
-the value into the retained projection. The accepted set is pinned by the API
-model (`app.models.ask.StoredSubmittedVia`, which extends the entry-point
-literals `SubmittedVia` with `''`) rather than a CHECK constraint; response
-models, the admin query parameter and every write signature reference those
-two aliases, and a static test requires each HTTP/MCP entry point to pass a
-literal value. No table,
-index or foreign key is added; the administrator question overview's equality
-filter runs over the same three-way `UNION ALL` scan it already performs. The
-pair for that batch is SQLite 74 / PostgreSQL 54 / epoch 1.
-
-Notebook metadata refresh (SQLite v75 / PostgreSQL 0055) adds `notebooks.name_auto`
-and `metadata_generation`. Title and description ownership are independent:
-an explicit edit clears that field's auto flag, including a placeholder title
-or an empty description. Metadata refresh reserves an increasing generation in
-a short transaction and publishes only while its generation is current and the
-target field is still automatic. Legacy placeholder titles become automatic;
-all other old titles remain manual because their authorship cannot be recovered.
-Existing `purpose_auto` values are preserved. The current pair is SQLite 75 /
-PostgreSQL 55 / epoch 1.
-
-Run it only while application/background writers are stopped:
-
-```bash
-PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-facts \
-  --notebook-id nb-... [--force] [--confirm-service-stopped]
-PYTHONPATH=backend python scripts/audit_source_facts.py \
-  --db .local/silicon_notebook.db --notebook nb-...
-```
-
-Use `--all-notebooks` instead of `--notebook-id` for a whole deployment.
-`--confirm-service-stopped` is required for PostgreSQL and only records the
-operator assertion; it does not stop services. The PostgreSQL audit alternative
-is `--database-url`, and both audit paths are transaction/read-only. The audit
-exits nonzero while any visible source is missing, running, failed,
-incomplete, or fails an integrity reconciliation.
-
-PostgreSQL migration v30 is the current paired
-business schema. The temporary
-shadow boundary now includes a SELECT-only UTF8-first preflight, redacted
-identity-bound confirmation, an owned/checksummed removable PostgreSQL control
-schema, revision CAS, and two independently committed reports for the four
-logical-key guards across the exact 81-table epoch-1 manifest. It also includes
-run-bound atomic SQLite snapshots and bounded resumable baseline COPY: each
-batch commits with its prefix checkpoint, resume proves that exact target
-prefix without truncating or deleting business rows, seven historical rowids
-copy as explicit ordinals and their catalog-resolved identity sequences reseed,
-and the final forward checkpoint advances atomically to snapshot H0 after the
-v30 ledger, FK, guard, and ANALYZE checks. Snapshot publication requires an
-owner-only real directory and exclusive 0600 temporary creation. COPY fully
-qualifies business SQL to the run-bound schema, revalidates enabled live SQLite
-capture under a short `BEGIN IMMEDIATE` at every critical binding, uses a fresh
-dedicated connection to the currently named SQLite file rather than the
-repository thread cache, and binds/rechecks its resolved path and device/inode
-across open and immediately before publication/PG commit. JSONB prefix proof
-normalizes only JSON numeric leaves to exact finite decimal semantics; ordinary
-SQL numeric columns remain type-distinct. It uses bounded
-named server cursors plus statement timeouts/cancellation polls, and performs
-full initial/final migration-derived validation of v32 tables, columns,
-constraints, operational/GIN indexes, and `public.pg_trgm`; per-batch validation
-is intentionally lightweight. The final SQLite fence is acquired only after
-the long PG proof/ANALYZE phase and is retained until the PG H0 checkpoint and
-run-progress transaction has actually committed; PG failure publishes no H0
-and releases SQLite. A fail-stop forward replicator primitive now consumes the
-global SQLite sequence contiguously, hydrates current rows only for upserts
-under a short read snapshot, keeps deletes key-only with zero hydrated bytes,
-and commits ordered target rows with its checkpoint after re-locking the
-ledger/all business tables and revalidating the exact catalog. Repeated
-stable keys in the accepted prefix coalesce to the last event and are emitted
-in global last-seq order; raw seq/checkpoint continuity remains unchanged. For
-each identity, the final actual apply overrides any synthetic dependency
-contribution; only dependency-only identities contribute one reference-counted
-synthetic row and its bytes. A short read window ending below the allocated
-high-water is an immediate suffix gap before hydration/apply; a full window
-below high-water probes the adjacent sequence in the same snapshot and fails
-if it is absent. Snapshot and pre-apply gates both require
-`progress.applied_seq` to equal the checkpoint. It uses a
-single lease, capped whole-transaction retries, actual-seq poison records, and
-redacted metrics. Batches are hard-capped at 4,096 events/64 MiB: only one final
-bundle may exceed the byte cap, and a same-key replacement that grows past the
-cap rolls back and defers when another actual bundle is already accepted. FK
-parents come only from the verified current source snapshot through a
-64-row-per-event, byte-counted, batch-deduplicated closure;
-the fixed v32 graph has a branch-counted bound of exactly 12 row slots and no
-suffix-log evidence scan is used. Savepoints defer only FK/UNIQUE ordering
-SQLSTATEs; CHECK/NOT NULL poison immediately. Exact PG32 catalog plans cover all
-110 unique surfaces using NULL; deterministic candidates scoped by indexable
-equality for non-NULL values and `IS NULL` for NULL values on the other unique
-columns plus the fixed predicate (`C`-collated text max plus `chr(1)`, or an
-indexable bigint MIN/MAX fast path choosing min−1/max+1 and scanning the first
-gap only when both int64 bounds are occupied); or same-transaction
-delete/reinsert only for no-incoming-FK leaves with an accepted current-final
-restore row. Parked state is tracked per unique surface and row identity; each
-stagnant pass parks every independently parkable conflict, and a successful
-final apply clears all surfaces parked for that identity. Deferred work is
-capped at 8 passes, 32 actual statements per apply, and 16,384 actual
-statements total. Every SAVEPOINT/ROLLBACK/RELEASE, DML, and candidate query
-counts toward that budget. Ordering, statement, pass, and
-`ProgramLimitExceeded`/`DataError` candidate-search or candidate-update
-capacity exhaustion stays non-poison; `QueryCanceled` remains transient and
-retries the whole transaction. An unparkable UNIQUE at the final source window
-poisons its earliest actual event seq. The worker
-doubles its 256-event/8-MiB window through the hard caps after ordering-blocked; hard-cap
-exhaustion remains non-poison. After claiming the worker, the apply transaction
-rechecks existing poison for that run/direction before any business DML. Poison
-publication also locks and inspects every existing run/direction poison after
-binding/checkpoint validation: an exact replay is ACK-loss success, while a
-differing record is stale and never creates a second poison. SQLite path/file
-binding failures use a dedicated identity error instead of message-based
-conversion classification. At the `open_fresh_live_sqlite` call boundary,
-non-transient `sqlite3.OperationalError` is also a binding failure; locked,
-busy, and interrupted opens remain transient whole-batch retries, and later
-SQLite operational errors keep their existing schema/query classifications.
-Apply, ambiguous commit recognition, and poison
-publication bind snapshot source/target plus the live target identity.
-
-The verifier opens a SQLite read snapshot at `Hv`, streams normalized facts to
-an owner-private disposable spool, releases SQLite before waiting for the PG
-checkpoint, then pins a PostgreSQL `REPEATABLE READ, READ ONLY` snapshot at
-`Ht`. A second SQLite transaction scans every retained dirty key in
-`(Hv, Hseen]`; only those keys are excluded from strict comparison, and the PG
-retention barrier remains live until the report commits. Structural checks
-cover the exact catalog, stable key sets and normalized hashes, source/target
-foreign keys, cascade/unique semantics, and storage-root-confined file
-references. Full checks add selected domain projections, float32
-byte/dimension/norm and sampled-cosine invariants, plus the fixed mixed
-Chinese/English retrieval set with recall@12 loss at most one percentage
-point, top-10 overlap at least 0.90, and exact citation/source-id sets. Cutover
-additionally rechecks that SQLite is still write-frozen, requires
-`Hv=Ht=MAX(seq)`, zero concurrent keys, 100% coverage, and a preceding complete
-full/cutover report. Persistent reports contain only safe table names, hashed
-stable keys, categories, counts, and fixed summaries; a clean report
-supersedes drift only at the same or a stronger verification level.
-
-The explicit operator CLI now owns preflight/start-forward/status/verify and
-the foreground worker lifecycle. The worker holds one database-clock lease,
-finishes its current atomic batch on SIGTERM/INT, and performs conservative
-retention only behind FULL verification, verifier/replay/poison barriers, seven
-days, and 100,000 tail events. Every valid batch outcome emits exactly one
-redacted metric; batch events use the actual accepted/observed raw-event count
-rather than lag, and retries are retained whenever observable.
-`SHADOW_DATABASE_URL` remains inert by itself and is read only by that CLI.
-Cutover, reverse replication, and automatic active-URL changes are not part of
-this phase. Safety-critical PG
-control mutations always take the migration lock, then the control lock, then
-validate the exact live control catalog. A live SQLite transition acquires the
-PG pool, both locks, and the run row before its short `BEGIN IMMEDIATE`, so it
-never waits for a PG pool or advisory lock while holding SQLite.
-- `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, built-in KG labels/styles live in `kg-type-model.ts`, and graph/answer rendering shares `kg-type-mark.tsx`. `use-source-library.ts` now exclusively owns source rows/scope, paging, detail elements, reparse/delete state, tombstones, and parse polling. The shell commits the existing paired notebook/source opening snapshot and consumes only readonly state, named commands, and narrow refresh effects; the hook never receives another workspace domain's setters.
-- `frontend/app/notebook-transition.ts` is the single transition that orchestrates opening a notebook (pure logic — no React, DOM, or network). Every step's `begin` runs in declaration order and refusal is decided only afterwards (short-circuiting would leave later owners un-begun); then `enter` → `load` → `isCurrent` → `apply` → each step's optional `commit` in declaration order → `conclude`; then every successfully begun step is settled exactly once, in **reverse** begin order, with the committed outcome or `null` for a rollback. Refusal, a failed parallel read, supersession at either guard, and a thrown error converge on that one rollback path (the error is rethrown verbatim), and a superseded transition settles only the tickets it minted itself. `page.tsx::notebookTransitionSteps` is the single registration point for every owner's `begin`/optional `commit`/`settle`, so adding an owner is one list entry; the root-modal step must stay first because its close sink is the only cleanup path for staged intake. `openNotebook` keeps only its prologue and the plan declaration, with the four phases in named helpers. Request counts, workspace-epoch semantics, late-response rejection, tombstones, history handling, and the failure landing spot are unchanged. Gates: `frontend/tests/guards/notebook-transition-guard.test.mjs` and `frontend/tests/unit/notebook-transition.test.mjs`.
-- `frontend/app/use-ask-session.ts` exclusively owns the Ask draft/transcript, intent preview/confirmation, durable stream and reconnect, conversation history/tombstones, session mutations, and answer feedback. Notebook opening keeps the existing paired notebook/source read in the shell, then performs exactly one conversation-list read and at most one latest-detail read through an explicit hook command. Navigation detaches durable work without cancellation; when the same actor reopens that notebook, restore first re-attaches the detached in-flight run — before `started` it has no durable conversation, so only the hook's local run record can bring it back on the same transport; after `started` it restores that durable conversation and re-attaches the live stream only while the restored detail still reports that job as active (a terminal detail is left alone, so the final event cannot append the same turn twice) — and falls back to the latest detail only when no run is in flight. One notebook may hold several detached records at once (open another session and ask again); restore re-attaches the most recently submitted one, a record that failed while away and before `started` is kept until the next restore reports the failure and hands the question back as the draft (a post-`started` transport failure is not a failed question — history/reconnect own the job), a durable run handed over from an intent preview keeps the preview's submission order, and a run that settles during the restore is projected locally from its own final response (no extra list/detail request — restore keeps its one-list, at-most-one-detail bound); re-attaching also restores the engine and retrieval effort the run was submitted with. Opening a session inside the same notebook (including the current one) likewise re-attaches the detached work bound to that conversation; detached records bound to a tombstoned conversation are dropped at deletion time and before any restore, never resurrected. A reasoning-mode intent preview or clarification review is likewise detached, not aborted: the preview keeps running while the user is away, a clear intent starts the durable run directly (touching no visible state), and a requested clarification is recorded on the local run record; reopening the notebook re-attaches whichever phase it is in — the "理解中" turn, the review dialog, or the durable run it already started. Because these two phases leave no server-side trace, the hook also mirrors them into this tab's `sessionStorage` as one record per submission (random id; several may coexist for one notebook — `ask-intent-persist.ts`): after a full reload of the same tab, restoring the notebook resumes the newest record and opening a session resumes the record bound to that conversation — re-issuing the understanding request (preview phase) or re-opening the review dialog (review phase, contract shape validated first; malformed entries are dropped whole). The mirror is dropped on Stop/cancel, conversation deletion, and when a failed preview hands the question back; a switch to automatic mode drops only the records the advanced surface left (see the per-record rule below); on hand-off to the durable run it turns into a `handoff` record (carrying the confirmed intent) that stays until the server acknowledges `started` — a reload in that window first reconciles against the detail just loaded (an active job or a landed turn with the same `asked_at` + question; if the list or detail read did not succeed, nothing is reconciled and the mirror waits for the next restore) and merely retires the mirror if the server already holds the question; otherwise it re-sends that submission under the same `client_request_id` the mirror carries, so the backend either attaches to the job the original POST already created or creates the single job it never did (see `docs/product-and-api.md`), and the reloaded tab attaches to the stream instead of handing the question back as a draft. A stream that ends without ever starting (failure, Stop) retires the mirror too, and an in-app unmount aborts a not-yet-`started` hand-off stream while leaving its mirror for the next instance to reconcile. The submitting tab takes a Web Lock named by the record id (released when the tab closes) BEFORE writing the mirror, and a resuming tab claims it first too: browsers copy `sessionStorage` into a duplicated tab, and a copy that cannot take the lock deletes its own entry instead of resuming twice; an in-app unmount retires the continuation before releasing its lock. Which records may resume is decided per record by the surface each was SUBMITTED in (every record carries that flag; a version-1 entry cannot say, and is dropped as invalid): automatic mode drops only the records the advanced surface left — those may carry a scope the user narrowed where automatic mode cannot see it — and resumes its own, while the advanced surface resumes both. The switch to automatic mode itself follows the same rule: it cancels the advanced surface's in-flight previews/reviews and drops their mirrors, and leaves automatic mode's own work alone, so an automatic → advanced → automatic round trip keeps the user's question. Tab-shared `localStorage` is deliberately not used. Explicit Stop waits for `started` when necessary, cancels exactly once, then aborts the local transport; a stopped run is never re-attached. The synchronous cancellation endpoint has no enforceable whole-request database deadline, so the browser keeps one authoritative cancellation request in flight until the server answers instead of releasing retry authority on a client timer. Intent preview and execution share one frozen source/base scope. The hook admits visible state by exact actor/notebook/workspace owner, reconciles durable history by actor/notebook identity, exposes no raw setters, and does not own the shell's Memory answer-link batching or cross-domain callbacks.
-- `frontend/app/use-report-workspace.ts` exclusively owns report list/detail state, lazy entry loading, mutually exclusive list/detail polling, intent and outline submissions, generation/cancel/retry, sharing, export selection, and deletion tombstones. Notebook opening and non-report tabs perform zero report I/O; entering Reports performs one list read, and a pending-center focus reads one detail after the list settles. Navigation detaches background work without cancellation. Exact actor/notebook/view owners reject stale visible commits, while successful deletes always record an actor+notebook tombstone for A→B→A convergence. Creation freezes source/base scopes and every write command rechecks live manage authority. The hook exposes readonly views and named commands, imports only report/pure contracts, and preserves existing request counts and the six-second poll cadence.
-- `frontend/app/use-kg-workspace.ts` is a thin composition layer over three independently testable domain owners — `use-kg-knowledge.ts` (Knowledge rows/types/filter/page/duplicates/context), `use-kg-schema.ts` (Schema views and mutations) and `use-kg-graph.ts` (unified-graph search/range/node state, merge review/tombstones, and durable KG build/relink/rebuild/delete tracking) — over the single actor/notebook/generation gate in `use-kg-owner.ts`; together they exclusively own all of it. The three domains never import each other, and the gate holds no domain state and imports no API module: clear-on-owner-change, invalidate and adopt-new-owner are the composition layer routing the gate's fan-out into each domain's own named command, never a setter handed between domains. `page.tsx` still sees one namespaced view (`.knowledge` / `.schema` / `.graph`) plus the flat command surface. Notebook opening keeps Knowledge, Schema, and graph content lazy and performs only the maintenance-status recovery probes — one per maintenance kind sharing the per-notebook slot (rebuild, relink, KG delete); the KG delete probe is the one read added with that kind. Exact actor/notebook/generation owners reject stale visible commits; actor+notebook identity preserves durable maintenance claims and merge-decision tombstones across A→B→A. Every write command rechecks live policy, readers perform no merge-review recovery/write I/O, and all graph/review/build/maintenance polls are single-flight at the existing cadences. The hook exposes readonly views and named commands, imports only Knowledge/KG/pure contracts, and preserves existing request counts.
-- `frontend/app/use-notebook-collection.ts` exclusively owns actor-scoped notebook rows, bounded collection search, filter/sort/view/menu state, issued/published list watermarks, access reconciliation, editor/delete state, default creation single-flight, and notebook deletion tombstones. The shell keeps the existing model-status + health + notebook-list + system-configuration composite bundle and commits its list through an opaque hook ticket only after the sidecars settle; notebook opening still adds no collection read. Search retains the 250 ms gate and the module-wide four-request server-work ceiling. Actor replacement synchronously hides the prior rows and dialogs, staged writes recheck live row authority, and a successful delete records its actor tombstone before derived refresh so A→B→A and pre-delete list responses cannot resurrect it. The hook exposes readonly views, named commands, and narrow shell effects.
-- `frontend/app/use-root-modal-coordinator.ts` exclusively owns root-dialog presentation leases, typed slot conflicts/layers, actor/workspace/source generations, topmost arbitration, and safe focus return. It imports React only and owns no domain payload, permission, busy state, API, repository, timeout, interval, or poll. Domain code issues a frozen lease before an asynchronous opener and publishes it only if the exact owner and issue remain current; workspace transitions and actor replacement synchronously hide old slots, while legal info overlays remain independent of the primary-dialog conflict group. The coordinator adds no request, timer, or mount-time read. Global Ask uses the actor-owned `global-ask` primary slot through a narrow presentation adapter; closing its lease preserves the mounted chat state, and only its topmost fullscreen view enters native modal mode.
-- `frontend/app/use-promotion-queue.ts` and `frontend/app/use-edge-review-queue.ts` (PR-5 slice 1) exclusively own the "content review" and "relation review" root-modal queues extracted from `page.tsx`'s `Home`: candidate/edge rows, busy, and a single-flight operation ref. Opening issues a frozen root-modal lease, awaits the queue fetch, then publishes only if the lease is still current — a workspace/actor switch mid-fetch never lands stale data in a newly opened window. Deciding (`decidePromotion`/`decideEdge`) rechecks lease ownership after every await and only refreshes the queue (and, for promotions, the notebook collection) while it still owns the lease; the close sink's `clearQueue` only clears the visible payload and never releases the single-flight ref or resets busy, so closing the modal can never let the same candidate be approved twice. `usePromotionQueue` is actor-scoped (owner: `captureActorOwner`); `useEdgeReviewQueue` is workspace-scoped (owner: `captureWorkspaceOwner`) and its view carries an extra `total` — the server's true queue size, independent of the `limit`-bounded page in `edges`. Both take the root-modal coordinator only through a narrow `Pick<RootModalCoordinator, …>` structural type. Gate: `frontend/tests/guards/root-modal-boundary.test.mjs`.
-- `frontend/app/source-list-panel.tsx` (PR-5 slice 2) exclusively renders the source panel's "local sources" segment extracted from `page.tsx`: the search form (with its `搜索中…` busy label), the scrolling source list (scope checkbox, parse-status dot, anomaly badges, KG/Agent badges, external link, delete) and the `Pagination` footer. It returns a Fragment so both divs stay direct children of `.sources-body` — the scroll arithmetic (`flex:1 1 auto/min-height:0/overflow:auto`) and the `workspace.side_panel` outlet's "fixed area above the scrolling list" invariant both depend on that direct parentage. Every prop is explicit: readonly view values plus named callbacks (`onSubmitSearch`, `onToggleSource`, `onOpenSource`, `onDeleteSource`, `onPage`); no `sourceLibrary` object, no page setter, and no `reportError` crosses the boundary. It takes the raw `uiMode` (not a precomputed `advanced` boolean) so the row's `isAdvanced(uiMode)` modifier stays pinnable, and the raw `notebookId` so the search button's disabled predicate is unchanged. All request discipline (in-flight generation, abort, owner-window guards, `sourcesPageLoading`) stays in `use-source-library.ts`. `compactSourceTitle` and `SUPPORTED_SOURCE_EXT_GROUP` moved to `frontend/app/source-title.ts` to keep a single definition shared with `page.tsx`. Gates: `frontend/tests/component/source-list-panel.component.test.tsx`, plus the re-pointed `base-scope-wiring` / `ui-mode-wiring` / `source-agent-badge-guard` / `anomaly-guard` / `source-library-boundary` assertions.
-- `frontend/app/kg-graph-view.tsx` (PR-5 slice 3) exclusively renders the full-screen knowledge-graph view extracted from `page.tsx`: the rail (search, scope select, type chips, pending merge candidates), the `ForceGraph2D` canvas (kept as `dynamic(..., { ssr: false })`, with the module-level node/link painters that moved with it so their identities do not change per render), and the concept-detail column. State, refs (`kgCanvasRef`/`kgGraphRef`/`kgDetailRef`, `kgSize`), memos, effects and command orchestration stay in `page.tsx` and the KG hooks; the component receives a `Pick<KgWorkspace["graph"], …>` of read-only view fields plus named callbacks, and renders `<KgAnalysisView>` from its `children` slot at the same position inside the fixed section so the analysis overlay's stacking and lease behaviour are unchanged. Two `selectKgNode` entry points are kept on purpose (`onSelectCanvasNode` floating promise vs `onSelectOverviewNode` with `.catch(reportError)`) because merging them would change failure presentation. Leaves shared with `page.tsx`'s knowledge browser moved to `frontend/app/kg-object-cards.tsx` (`kgNodeName`, `KgOccurrenceCard`, `KgProcedureStepCard`, `fieldLabel`) and `formatRelativeTime` to `frontend/app/relative-time.ts`, each a single definition with no import back into the page. Gates: `frontend/tests/component/kg-graph-view.component.test.tsx`, plus the re-pointed `kg-relink-wiring-guard` / `kg-rebuild-wiring-guard` / `kg-delete-wiring-guard` (「删除知识图谱」: slot claim before POST, job-id-matched poll, notebook-scoped inline result) / `kg-workspace-boundary` / `long-task-button-guard` (per-module lookup) / `root-modal-boundary` (page asserts no static `aria-modal` and no `kg-view`/`ForceGraph2D` backfill) / `architecture-boundaries` (`KG_TYPE_STYLE` consumer moved with the painters).
-- `frontend/features/extension-sdk` is the sole build-time workspace UI registry/host. Only `workspace.side_panel` and `source.detail_section` are canonical. The first production entry is the existing Agent Profile launcher: it renders as a compact entry row inside the sources panel's fixed area (above the scrolling source list) and never adds a dedicated workspace column; its styling reuses existing button classes and `:root` tokens with no colour literals. The plugin performs no profile I/O until click and delegates an exact-owner `openUnderstanding` action to the existing root modal/data owner. A committed workspace loads `/system/extensions` once per actor generation; collection, signed-out, and empty-registry paths short-circuit before requests/controllers/timers, while same-actor notebook transitions reuse the projection and synchronously invalidate old visible entries/actions. Rendering requires exact static tuple, live availability, core `workspaceCapabilities`, normalized UI mode, and the current actor/notebook/workspace owner. The projection remains metadata-only and closed; props remain readonly summaries plus reviewed narrow actions. Parity tests remain non-vacuous. After adding a contribution, run `scripts/generate_ui_extension_contract.py` to refresh `backend/tests/fixtures/ui_extension_contract.json`; the contracts lane reconciles it with `--check`.
-- Deployment-time UI plugin packages load through three registry modules under `frontend/features/extension-sdk`: `registry.ts` (the built-in catalog; its whole import closure stays `.ts`, because `node --test` reports `Unknown file extension` for `.tsx` and two node-lane test files import this module directly), `workspace-registry.ts` (merges built-in with local through `defineWorkspaceUiRegistry`, so a local entry gets no exemption from the built-in's id/shape/dedup validation), and the generated, gitignored `registry.local.ts` (an empty-array stub when no plugin is configured). `SILICON_NOTEBOOK_UI_PLUGINS` — a `:`-separated list of local package directories — and `npm run sync:ui-plugins`, wired into `postinstall` plus the five `pre*` hooks (`predev`/`prebuild`/`prestart`/`pretest`/`prelint`), drive `frontend/scripts/sync-ui-plugins.mjs`: it copies each validated package into `frontend/features/ext-<name>/` (also gitignored, marked with a `.ui-plugin-origin` file so a later sync can safely remove it) and regenerates `registry.local.ts`. A plugin package is a flat directory (no subdirectories, dotfiles skipped) whose name matches `^[a-z][a-z0-9-]*$` and does not start with `ext-`; it contains only `.ts`/`.tsx` files plus exactly one `ui-plugin.json` manifest and exactly one `workspace-plugin.ts`/`.tsx` entry file naming the exported component the manifest's `component` field points at. A `package.json` or `node_modules` directory is rejected outright — the base `tsconfig.json`'s `exclude: ["node_modules"]` only covers `frontend/node_modules`, so a plugin's own dependency tree would otherwise be swept whole into `next build`'s type-check, and it would introduce a second React instance — and so is any CSS file, since a plugin's visuals must reuse existing classes and `:root` tokens. Plugin source may import only `../extension-sdk/contracts.ts`, `../extension-sdk/ui.tsx`, bare `react`, bare `lucide-react`, and same-package sibling `./x.ts(x)` files — never `../extension-sdk/api.ts`: the host injects a port scoped to the contribution's own `pluginId` via `actions.api`, and a plugin able to import `api.ts` directly could construct another plugin's port. Copied plugin code is swept by the same repository-wide guards that scan `app`/`features`, including `scripts/check_ui_vocabulary.py` and the nine `appSourceModules()`-based guards — most notably `errors-guard.test.mjs`, an exact-count sweep whose `APPROVED_*` allowlists a package outside this repository cannot register into, so a plugin must never read `error.message`/`.error`/`.error_message` or `throw new Error("...")` with Chinese text; it calls `api.userMessage(error, fallback)` for user-facing text instead. A companion guard — a semantic AST scan covering *every* `.ts`/`.tsx` in a plugin package, not just its entry — forbids side channels inside sibling plugin modules: `setTimeout`/`setInterval`, dynamic `import(`, `WebSocket`, `EventSource`, `XMLHttpRequest` and `navigator.sendBeacon`. Direct `fetch(` belongs to the repository-wide `api-boundary` guard instead, which already sweeps every module; spelling it in both places would only mean that loosening one of them goes unnoticed while the other still blocks. The injected `api` port remains the only sanctioned I/O surface, and its three request methods are `async`, so a confined-path violation arrives as a **rejection** rather than a synchronous throw — both `await` and `.catch()` catch it. A plugin that opens a dialog must use `ExtensionModal`, passing its whole `context` and `actions` through: the window-position memory key is `extension.<pluginId>.<storageKey>.window`, and both leading segments are composed by the SDK and are not the plugin's to change — the `extension.` prefix separates plugins from core dialogs, and the `pluginId` segment separates plugins from each other (without it, two packages each choosing `storageKey="search"` would share one memory slot and overwrite each other's position). Plugin dialogs go through the core root-dialog coordinator via one **generic** `"extension"` slot: core's slot union names no plugin (that would mean patching the public tree per install), so the claim is recorded by the shell as a **contribution id** and the host projects `context.dialog` — `{ open, topmost, zIndex }` — only onto the contribution that holds it. A plugin therefore keeps no `open` state of its own: `actions.openDialog()` asks, `context.dialog.open` answers, `actions.closeDialog()` releases, and core closes the dialog on a conflicting primary, a notebook switch, or sign-out. One plugin dialog is visible at a time (two contributions of the same plugin do not both open), a covered dialog becomes `inert`/`aria-hidden` with focus return owned by the coordinator, and `closeDialog` is refused for anything that is not the current holder so a stale callback cannot close someone else's dialog. A different contribution calling `openDialog()` closes the current holder's dialog first and re-registers the slot to itself (codex #578 R7 P2), so the focus-return target moves to the new holder's own trigger instead of staying on the previous holder's. `source.detail_section` contributions cannot open dialogs at all — the host refuses this structurally, not by convention (codex #578 R4 P2): in that slot `openDialog`/`closeDialog` are refusal functions that never reach the shell (a dev-mode `console.warn` fires), `context.dialog` is unconditionally the closed view regardless of what the shell reports as the holder, and `ExtensionModal` throws a `TypeError` if a plugin renders it there anyway — that slot's host is itself a `FloatingModalCard` (so `position: fixed` would resolve against it) and holds the conflicting `source-detail` primary lease. Gates: `frontend/tests/component/extension-plugin-surface.component.test.tsx`, `tests/component/use-root-modal-coordinator.component.test.tsx`, and the wiring assertions in `tests/guards/extension-ui-boundary.test.mjs`. `actions` and `context` are fresh objects on every render (the owner gate is re-frozen each pass) and must never sit inside a `useEffect`/`useMemo` dependency array, while `actions.api` is memoized per `pluginId` and is safe there; `refreshSources()` resolves silently once the owner gate has since closed and otherwise rejects on a genuine load failure, so a plugin must call it at most once, after its own action completes, and must `catch` the rejection rather than let it go unhandled. A checked-out tree with private plugins configured does not pass the base repository's `npm run test`: `extension-ui-host.component.test.tsx` pins "the merged registry equals the built-in catalog, length 1, with zero plugins configured" as the one property the registry split exists to prove, and it must never be loosened to `>= 1` to accommodate a local plugin. A private deployment's acceptance gate is instead reconciling `frontend/.local/ui-extension-contract.json` against the backend `GET /api/system/extensions` projection, plus a clean `npm run build` and `npm run lint` (both type-check `features/ext-*/`; the build's pass silently skips `*.test.*`/`*.spec.*`-named files, `npm run lint` does not). The end-to-end plugin procedure lives in [`docs/deployment-extensions-sop.md`](deployment-extensions-sop.md).
-- Source detail participates in the same frozen primary issue watermark. Its source catalog review is the only compatible primary overlay; every covered root dialog, including source detail and KG analysis, is inert and ARIA-hidden until it becomes topmost again. Focus return runs without a timer in the post-commit layout phase and rechecks both the expected underlying lease and absence of an inert ancestor.
-- Workspace HTTP ownership is split into domain modules. The shared `frontend/app/api-client.ts` transport owns HTTP mechanics; domain modules retain endpoint policy. Source reads and mutations are coordinated by the source-library owner, whose exact user/notebook/workspace generation rejects late UI commits while allowing already-started writes to finish safely. The initial notebook open still performs one paired notebook + first-source-page read, unchanged polling keeps the same point-read cadence, and no global state library was added. `frontend/tests/guards/api-boundary.test.mjs` semantically forbids production `fetch` outside the transport core.
-- Group management is the collection-level `frontend/app/groups-page.tsx` workspace; its `.group-page-*` shell reuses the collection page's tokens, controls, typography, spacing, and responsive breakpoints. Five page-level invariants hold it there. (0) **The page title lives in the top bar, and the page itself no longer has one.** "群组" used to sit at 28px below 44px of blank space while the top bar simultaneously read "群组工作台" — the same sentence twice with an empty band between them. It is now the top bar's `.brand-title` slot next to the SN mark (unchanged 16px, replacing `silicon-notebook` on this view), with the subtitle changed to `成员、共享与审批`. On this view that slot must actually render as an `<h1>`, not a heading-shaped `div`: the page has no other heading left, so the whole heading level would vanish. `.brand-title` therefore needs `margin: 0` — a browser's default `0.67em` h1 margin deforms the 56px bar (measured: 56px in both the h1 and div forms). The page's top padding also drops from `.page`'s 44px to 24px, because those 44px buy breathing room for an opening 28px title and the first row is now a 42px toolbar. (0′) **"返回主页" is one control with one style.** The workspace and the group page both call `showCollection()` and both return to the notebook list, so they share `.back-home-button` (formerly `.notebook-home`, declarations byte-identical); the group page used to grow its own grey text link, so one action looked like two different things. Renaming the class means changing both call sites (`page.tsx` and `groups-page.tsx`). (1) **The 1200px measure is applied to a padding-free box.** The cap lives on `.group-page > *`, mirroring `.collection-title` / `.notebook-grid`, which are children of `.page` and carry no padding of their own. It must not move onto `.group-page`: that element inherits `.page`'s `padding: 44px 24px`, and the global `* { box-sizing: border-box }` then eats those 48px out of the cap, leaving 1152px of content — visibly 24px narrower per side than the sibling page at viewports of 1248px and up. Each child also needs an explicit `width: 100%`, because auto inline margins switch off a grid item's stretch and a bare `max-width` collapses it to fit-content. (2) `.group-page` itself needs `align-content: start`: it is stretched to the full viewport height by `.app`'s `1fr` row, and auto grid rows stretch by default, which inflates the header of short tabs (members / settings) by tens of pixels. (3) **No class may be attached that has no rule in `globals.css`.** The page previously carried seven decorative `<span className="eyebrow">` labels for which no `.eyebrow` rule has ever existed, so they rendered at the inherited 16px body size above every heading; `tsc` does not check className strings and testing-library only reads text, so nothing failed. Neither of these three fails loudly — they just render wrong. The notebook share dialog remains `frontend/app/notebook-group-share.tsx` and uses compact `.group-*` rows. In those rows horizontal layout belongs to `.group-row`, never an inline style; read-only labels use `.group-chip`, not the 42px primary `.new-pill`. `frontend/tests/guards/group-layout-guard.test.mjs` remains the compact-row regression gate, `frontend/tests/guards/group-page-style-guard.test.mjs` gates the three page-level invariants above (it walks the whole AST for every static `className` token — deliberately not a per-tag list, which lets a new tag slip through — and requires each one to exist as a class selector in `globals.css`, then pins the `.group-page > *` declarations, `.group-page`'s `align-content: start`, the absence of `max-width` on `.group-page` itself, that both call sites use the shared `.back-home-button` and that `.group-page-back` never comes back, and that groups-page.tsx has no `<h1>` while the top-bar slot is one), while `groups-page.component.test.tsx` covers the independent workspace. Neither gate checks spacing or colour values — those are design choices, not invariants.
-- The reader/group-shared notebook's workspace header identity row (`ReaderNotebookBadge`) is laid out by `globals.css`'s `.reader-badge-row` and **never wraps**. It used to use `.tag-row` (`flex-wrap: wrap`) while `.workspace-header` is a fixed 72px single row, so title + badge + a long explanation wrapped onto three lines centred inside 72px and pushed the title line *above* the visible area (measured: 141px of content in a 72px box) — opening a group-shared notebook showed none of its name, and the explanation bled out over the content below. The title uses `.reader-badge-title` (`width:auto` undoes `.notebook-title-input`'s `width:100%`, plus `min-width:0` and an ellipsis, so the title is what compresses, not the badge); the identity marker is a **status**, not a primary action, so it uses the light `.reader-badge-chip` rather than the 42px solid `.new-pill`, which next to a 26px title outshouts the name itself. The explanation lives only in a tooltip — especially the "how to stop access" guidance, which group sharing has no self-service path for anyway. Gates: `frontend/tests/guards/reader-badge-layout-guard.test.mjs` (the no-wrap/ellipsis contract in CSS, since jsdom has no layout engine) and `frontend/tests/component/notebook-reader-actions.component.test.tsx` (the structural premises).
-- **The 「图谱 Schema」 panel** (`frontend/app/schema-manager.tsx` plus the pure logic in `schema-manager-model.ts`) is a two-column workbench laid out as scope → type list → selected type's definition. It replaces the single column that ran induced proposals, active types, and the create form end to end while every existing type sat permanently expanded into six inputs — reading and editing are two different jobs and now live in two different columns. Four layout invariants hold it up. ① **The dialog width must be written as `.utility-modal-card.schema-modal-card`**: `.source-modal-card, .utility-modal-card { width: min(680px, 100%) }` comes later in `globals.css`, and at equal (0,1,0) specificity the later rule wins, so a single-class declaration is swallowed whole — measured, the right column drops to 334px and the six inputs crush together, while the whole point of two columns is that the right one fits a full-width form. ② **`.schema-modal-body` must have a fixed height** (`height: min(660px, 70vh)` plus `grid-template-rows: minmax(0, 1fr)`): two independently scrolling columns need a definite parent height, and with `max-height` the `1fr` row falls back to content height and pushes the list column's footer — `新增类型` and `从当前笔记本归纳候选类型` — past the `overflow: hidden` clip. That footer is the panel's *only* write entry point, so clipping it leaves the panel read-only. The fixed height also stops the dialog from jumping as the right column switches between read, edit, and create. ③ **The list row compresses the display name first and the type identifier last** (`flex-shrink` 100 vs 1): the identifier is the row's identity and the API key, and truncating `process_window` to `process_wind…` while the four-character display name survives intact gets the priority exactly backwards. ④ **The status badge must not carry `severity-low` again**: `globals.css` only ever had `.severity-high` / `.severity-medium`, so 「已启用」 rendered with the bare `.tag` style for a long time — `tsc` does not check className strings, testing-library only reads text, and jsdom does not cascade, so no existing gate could go red. The check is therefore constructive: every class name used in the panel must have a real rule in the stylesheet. Narrow viewports (≤900px) switch scrolling models: once the columns stack, the whole panel scrolls as one and only the list keeps its own cap, otherwise the lower half gets no usable height and the read-only definition cannot even show its action row. Three behavioural invariants go with them. **A list row's identity is "type plus whether it is a proposal", not `object_type`**: the backend deliberately lets a not-yet-approved proposal avoid shadowing the inherited type of the same name, so `list_notebook_object_schemas` returns both the inherited (active) row and the proposal row; keying on the type alone makes `find` resolve to the inherited row, highlights both, and puts the proposal's rationale and approve/reject permanently out of reach — the whole review path breaks (codex #614 R1 P2). Approving moves a row from proposal to active and therefore changes its identity, so the selection must be moved to the new identity explicitly or the right column blanks out at the moment the write succeeds. **A write's completion handler must check that the user is still where the action was fired.** List rows stay clickable while a write is in flight on purpose — read-only browsing should not be frozen by one write — and the cost is that the completion arrives after the user's next navigation. Without the check it does two wrong things: it drags the user back from the type they just opened, and it renders the failure next to a *different* type — exactly the shape `AGENTS.md` forbids, feedback that exists but grew in the wrong place, which is worse than none (codex #614 R2 P2). The predicate mirrors `owns(owner) && ownsOperation(...)` in `use-kg-schema.ts`, with "which pane the panel is on" as this layer's identity; a committed draft is still dropped unconditionally (it is no longer unsubmitted input), and the busy label records *which row* is submitting rather than a boolean, or "保存中…" follows the user onto whichever row they just opened. The other two: edit drafts are kept per row identity (switching to another type mid-edit and back loses no typing; "dirty" means the draft differs from the server definition character for character, so a successful save makes them equal and the row's unsaved dot goes out on its own — no separate clear-the-draft path that could swallow characters typed while the request was in flight), and `useKgSchema`'s `patchSchema` / `createSchema` / `deleteSchema` return a **three-valued receipt** (`SchemaWriteOutcome`) whose `confirmed` condition is character-for-character the one guarding that `notify(...)` call (write succeeded, list reloaded, the slot still belongs to this operation). The panel uses it to decide whether to fall back to the read view, clear the create form, or keep the input and explain next to the button; swallowing the outcome and letting the panel guess is exactly what produces "the create hit a duplicate name and wiped the form". **The middle value `unconfirmed` must not collapse into `failed`**: that branch's write did land, it just could not be confirmed here (the reload failed, or permissions/scope changed after the server committed). Collapsing it makes the panel tell the user a write that already took effect "failed, retry" — and the retry hits a duplicate 409, while the delete equivalent leaves an undeletable stale row (codex #614 R4 P2). The branch that is refused before anything is sent really did nothing, and stays `failed`. Clicking a list row always lands on the read view even when that row still holds a dirty draft — clicking a row is navigation, not editing, and the draft is accounted for by the dot, the read-view notice, and `继续编辑`. Gates: `frontend/tests/guards/schema-panel-style-guard.test.mjs` (the four above, each mutation-tested), `frontend/tests/component/schema-manager.component.test.tsx` (the three panes, per-type drafts, receipts, permissions), and `frontend/tests/unit/schema-manager-model.test.mjs` (grouping, the dirty predicate, labels, validation).
-- **Press feedback is an element-level baseline, never patched class by class.** `globals.css`'s `button:not(:disabled):not([aria-disabled="true"]):active` gives every button the same pressed state (`opacity: .7` plus `filter: brightness(.88)`), and `:active` restores it on release. The defect that produced this rule was the invite-link 「复制」 button on the group members page: the button did not move at all, and its only feedback was the notice banner at the top of the page, which scrolls out of view — so the copy read as having done nothing. The selector is deliberately pinned to the element rather than to classes: the frontend has more than forty button classes (`.new-pill`, `.sort-button`, `.icon-button`, `.index-cta`, `.kh-*-button`, …), per-class styling reliably misses one, and the one it misses is the next instance of this same defect; narrowing it to `.new-pill:active` silently drops the guarantee for every button written afterwards. No geometry-changing property may appear here — `transform`, `translate`, `scale`, and `rotate` are all out. The geometry during a press *is* the hit-tested geometry: shrink the button and a press that started near the original edge slides out from under it, mouseup lands on the parent, and the click is dispatched to the nearest common ancestor of the mousedown and mouseup targets — so the button's own onClick never fires. Measured in a browser (400px-wide button with `scale: 0.98`, pressed 1px inside its left edge): mousedown → button, mouseup → parent, button click count 0; pressing dead centre fires normally; and with opacity + filter the same edge coordinate counts 1 (codex #612 R4 P2). A 2% shrink on the 400px `.notebook-card-main` / `button.chat-session-card` is a 4px-per-side click-swallowing strip, and what it swallows is precisely the thing this baseline exists to eliminate. `translate` has the same problem, eating 1px at the top edge. A second, independent reason: the `transform` shorthand also replaces a button's own positioning transform, which made `.answer-image-preview-step`'s `translateY(-50%)` jump about 22px on press (codex #612 R1 P2) — banning the whole property class removes both at once. It fades and dims rather than changing background colour, because a background has to be tuned per class and `.new-pill` is near-black (#050505), where darkening is invisible; fading holds on a near-black fill too (it goes grey against the white behind it) while dimming covers the light outlined buttons, and together they hold for both a 42px pill and a whole card button. It deliberately declares no `transition`: the individual button classes carry their own `transition` declarations, which would override it wholesale and leave the animation working on only some buttons. `:disabled` is excluded — press feedback on a disabled control claims it is live. Press feedback only answers "did the click register"; the action's *outcome* must land on the control itself or right beside it: label 复制 → 已复制 / 复制失败 and colour `button.copy-result-copied` / `button.copy-result-failed`. Those are written on `button.` rather than per shell, because (0,1,1) already outranks the (0,1,0) fills of `.new-pill`, `.sort-button`, and `.report-action` regardless of source order; each also needs a `:hover` variant, since `.report-action:hover:not(:disabled)` is (0,3,0) and the pointer is necessarily still on the button for the second after the click, so without it the hover state eats the result colour. Call sites that have a read-only link input next to them also focus+select it on failure, so ⌘C works immediately — but only after checking that the input still holds that same link. The clipboard step can stay pending for a long time (permission prompt, insecure context), the sidebar is not disabled meanwhile, and once the user switches groups `inviteLinkRef` points at the new group's input; selecting it from the old failure hands the user a different group's invitation link on ⌘C (codex #612 R3 P2). The check compares `input.value === link` rather than node identity, because React reuses the same `<input>` node for the new group, so a node comparison passes when it should not; when the check fails, the stale operation leaves the newly rendered link untouched. On the group page, copying never also writes the shared page-level notice: the pressed button is the sole result feedback, so a second banner cannot remain pinned above the workspace. The two page.tsx sites use a ref map keyed by token, whose stale slot React's ref cleanup sets to null, so they never had this race. Because that outcome is JS state and does not restore itself the way `:active` does, it must clear itself on a timer; otherwise 「已复制」 stays pinned to the button and the next click shows no change at all. That timer exists once, in `frontend/app/copy-result.ts`'s `useCopyResult`, shared by all five call sites (group invite link, the notebook share dialog's link, each row of the 「已分享」 dialog, the report share link, and the report body). It is deliberately a hook and not a component: the result classes must stay literal in each JSX site, because wrapping them in a component or interpolating them into a template string leaves the className collectors seeing only a variable, which silently empties both group-page-style-guard and button-press-feedback-guard — and the three shells and their busy labels differ anyway. Its `key` must be the identity of the thing being copied (invite token, share token; the two report buttons can only name the report id — see below) rather than a slot name, for two reasons. Lists need separating: the 「已分享」 dialog renders one copy button per row, and a single unkeyed state would light the whole column green. And the result is held for 1.6s, during which the content behind the button can change — switching groups, regenerating the invite, moving between reports — so a fixed key makes the new link appear already wearing the previous link's 「已复制」 even though it was never copied (codex #612 R2 P2); keying by token or id falls back to idle automatically. One call site cannot name the identity: the report share link's token is fetched by `use-report-workspace` at click time, so the view holds only the report id at render. Within the 1.6s hold, unsharing and resharing issues a *new* token while the key stays the same, and the new link appears already wearing the old one's 「已复制」 — a link that was never copied, and outright backwards if the automatic copy inside `toggleShare` failed (codex #612 R5 P2). Call sites that cannot name the new identity use `useCopyResult().reset()` instead, hung off whatever signals that the identity changed — here the `shared` flag flipping, since issuing a new token always passes through `shared: false`. What is deliberately *not* done is clearing the result at the start of each attempt: making that clear actually paint needs an empty frame, and React coalesces the two setState calls either side of the await into one render, so it would take an animation to see reliably — while "did this click register" is already answered by `:active`, and the result state answers a different question ("is this link in the clipboard now"), which stays true on a repeat click. Long-running actions keep their existing constraint of disabling or replacing the control while in flight (`long-task-button-guard` / `command-catalog-button-guard`). Gates: `frontend/tests/guards/button-press-feedback-guard.test.mjs` (exactly one element-level selector, `:disabled` excluded, at least two geometry-free visual properties, no geometry property at all; a table keyed on onClick source text pins the result classes of all five copy entry points; the result colours must declare `background` and carry a `:hover` variant; the reset timer exists only in copy-result.ts and every call-site module imports it), plus `groups-page.component.test.tsx` and `copy-result-feedback.component.test.tsx` (real clicks: success → 「已复制」 then automatic restore, failure → 「复制失败」, no result flash when the owner returns null, and the result landing only on the button that was pressed).
-- **Never call a Secure-Context-only browser API bare.** `crypto.randomUUID`, `navigator.clipboard`, Service Workers and friends exist only under HTTPS or on localhost, and a common deployment of this product is `http://<LAN IP>:3000` — there they are `undefined` and calling them throws a synchronous `TypeError`; the local machine (localhost) and CI (Node and jsdom both ship them) stay green, so only production breaks. The 2026-09-21 incident: Global Ask's submission path called `crypto.randomUUID()` bare, so in production every question died before its request was sent — the general engine hung silently, and step-by-step reasoning had the throw caught by an outer handler and reported as an unrelated "问题理解没能完成，请重试", which sent the investigation the wrong way for a whole round. Rule: every client-made id comes from `newClientRequestId()` in `frontend/app/client-request-id.ts` (`randomUUID` → a UUID v4 built from `crypto.getRandomValues`, which is NOT secure-context-restricted → timestamp + `Math.random`; it never throws), and copying goes through `copyTextSafely()` in `frontend/app/copy-text.ts` (hidden-textarea fallback built in). Every statement that runs before the request on a submission path must also sit inside the `try`: a synchronous throw there leaves `flight` / `submitting` set forever. Gates: `frontend/tests/guards/secure-context-api-guard.test.mjs` (`crypto.randomUUID` may appear only in client-request-id.ts, which must carry the `getRandomValues` fallback), `tests/unit/client-request-id.test.mjs`, and `global-ask.component.test.tsx` (both engines still submit with `randomUUID` removed; a synchronous failure returns the question and unlocks the composer).
-- **There is one stop control, and it is icon-only.** The stop button of an ask composer shares its slot with the send button; its look and glyph come only from `frontend/app/stop-control.tsx` — `STOP_CONTROL_CLASS` (`button.stop-control` in `globals.css`: pale red fill, red border) plus `<StopGlyph />` (a filled square). Call sites add size and radius only. The face carries no text: a labelled stop button is twice as wide as the send button, and in the 440px global-ask window it used to wrap onto a row of its own at the far left of the toolbar. What pressing it stops right now (stop / stopping… / cancel question understanding / abort generation) lives in `aria-label` and `title`; while stopping, the glyph becomes a spinner and the button is disabled. A labelled action row (the report's "cancel generation") takes `<StopGlyph />` only, not the fill. The global-ask toolbar is a two-column grid for the same reason: the left column (scope + engine + retrieval effort) wraps inside itself, and the send / stop button stays bottom-right. Gates: `frontend/tests/guards/stop-control-guard.test.mjs` (lucide's `Square` is imported only in stop-control.tsx; both ask composers use the shared class and glyph; the look is declared once and the old `.send-button.stop` does not return) and `global-ask.component.test.tsx` (the stop button has no text, carries the shared class, and is not inside the left column).
-- **The turn a stop leaves behind has one style too.** The discriminator, the notice and the 「编辑问题」 affordance come only from `frontend/app/stopped-turn.tsx` — `hasProcessOutput(steps)` (is there any trace step other than the `intent` / `start` preamble), `StoppedTurnNotice`, `STOPPED_TURN_TEXT`. Each ask surface only wires Stop to that rule: no process output yet → the question returns to the input and no record stays; process output already shown → the turn stays in the transcript and the next submission replaces it. The notebook Ask's record is `stoppedTurn` in `use-ask-session.ts`, React state only (**never** written to the sessionStorage mirror or a run record, so the invariant "a stopped question never comes back as a resendable draft" holds unchanged), with visibility derived from owner key + conversation id. Global Ask's record is the durable `cancelled` job; replacement goes through `replaces_job_id` on `POST /ask` (same transaction and same conversation row lock as the insert, only the conversation's newest `cancelled` job), and "stopped before any output" goes through `cancel?discard=true` — which only discards a job that very call stopped; its response can also be lost, and another tab may act first. **Reconciling with the server has exactly one seam** (`readConversation` / `applyConversation` / `dropConversationIdentity` / `discardJob` in `use-global-ask.ts`): after a stop-and-discard, after a failed cancel, after a failed submission that carried a replacement or a pending Stop, and after a poll that reads 404, the client re-reads the conversation and takes it as the truth — turns and the older-turns cursor come from the same first page, and a conversation that is gone drops the view back to "no conversation yet" and moves the history cursor with it. Call sites must not work out "was it deleted" or "how far does the cursor move" on their own. A new ask surface must not bring a second discriminator or copy. Tests: `use-ask-session.component.test.tsx` (Case A keeps the turn / a `start`-only run is still Case B / edit keeps the record / the next submission replaces it / switching sessions clears it / a failed cancel stays retryable), `global-ask.component.test.tsx` (question on screen at once, live understanding steps and hand-off, stop in all three phases, replacement and failure fallback), `backend/tests/global_ask_replace_cases.py` (one case list run on SQLite and PostgreSQL).
-- **Global Ask's push stream sits on top of the durable job; it does not replace it.** `GET /api/global-ask/jobs/{id}/stream` (NDJSON: `started` → full snapshot → `progress` → `final` | `gone`, a blank keepalive line every 5 s) is only an accelerator for a client that is looking (an idle connection waits for its next frame with `asyncio.sleep` on the event loop and holds no thread: this stream stays open for a whole run on every page watching a running job, and the notebook stream's way of waiting would park one slot of asyncio's default executor per idle connection); `POST /ask` creating the job, `GET /jobs/{id}` polling, MCP trace paging, `client_request_id` replay and the cancel endpoint are all unchanged, and a disconnect never cancels a job. A job running in this process is fanned out from memory (`JobFeed` in `backend/app/services/global_ask_feed.py`: the subscribe-time snapshot and every publish are evaluated under one lock, so a reader that joins mid-run cannot miss a step; `progress` carries an **absolute** `trace_offset`, readers apply `trace[:offset] + steps` and skip a gapped frame, which makes re-delivery harmless) and is not bound by the trace persistence throttle; a job in another process, or one that already ended, is followed from the store by a `global-ask-follow` thread every 0.5 s. The terminal frame always comes from the **database** (`final` or `gone`) and is published by whoever ends the job (the worker's wrap-up, `cancel()`); the feed closes at the first terminal. During a stop-and-discard the terminal belongs to the cancelling request alone (`_discarding`): the worker can unwind faster than "write cancelled → delete the row", and a `final(cancelled)` it published in that gap would close the feed for good, so the `gone` that is actually true could never be sent. A watched local feed also carries one low-frequency watchdog (`global-ask-feed-watch`, one per feed, dying with it): in a multi-process deployment a cancel handled by another process only updates the row — it cannot reach this process's feed or worker, and the browser does not poll while the stream is open — so when the row has left `running` the watchdog signals the local worker and ends the feed from the store. Read access is re-checked before every frame that leaves (not while nobody is watching; outside the feed lock). The delivery loop `deliver_ask_events` lives in `app/api/task_stream.py` and is shared by the notebook Ask and Global Ask (route modules must not import each other). The browser (`use-global-ask.ts`) attaches the stream first and falls back to the **unchanged** poll loop when the stream is unavailable, errors, or ends without a terminal frame; `gone` and the poll's 404 share one `reconcileMissingJob`. All three NDJSON transports share the line reader in `frontend/app/ndjson-stream.ts`; two of them (the notebook Ask stream and `requestTaskStream`) call `yieldToPaint` between frames, and Global Ask's push stream deliberately does not (a pushed frame already arrives as one network chunk). `yieldToPaint` must keep its timer fallback: a background tab suspends `requestAnimationFrame`, and a read loop that only waits for it stalls (the notebook Ask stream used to sit at its first step in a hidden page for exactly this reason). Tests: `backend/tests/test_global_ask_stream.py`, `frontend/tests/unit/ndjson-stream.test.mjs`, and the streaming group in `global-ask.component.test.tsx`.
-- An access-rights change must reconcile the **open workspace**, not just the list. The independent group page can remove membership, a group, or a grant and thereby pull the notebook the user had open out from under them. `use-notebook-collection.ts::refreshAfterAccessChange` owns the one-list read and its issued/published watermarks, then invokes the shell's narrow `reconcileOpenNotebook(remaining)` effect; read-only-share leave and the group page's `onChanged` use that same command. A revocation made elsewhere has no push channel and is re-checked when the tab becomes visible again (throttled; a failed fetch skips reconciliation) — best effort, not a guarantee. Gate: `frontend/tests/guards/group-sharing-guard.test.mjs`.
-- Boundary regression tests use public HTTP contracts or explicit domain seams, never private aggregate helpers, source positions, line counts, or total route/model counts. FastAPI lifespan/application lifecycle composition remains separate debt.
+Earlier per-version narratives and delivery explanations remain available in the
+[pre-consolidation history](https://github.com/huyangc/silicon-notebook/blob/403b796f/docs/development.md#architecture-boundaries).
+They are historical evidence; current runtime rules, migration sources and operational
+procedures linked above take precedence.
 
 ## Verification
 

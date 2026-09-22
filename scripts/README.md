@@ -39,21 +39,11 @@ npm run cli -- batch ingest --input-dir ./papers --notebook-name "资料库"
 信号语义；数据参数中的相对路径仍相对于调用目录。完整参数继续由原命令的 `--help`
 维护，顶层/分组帮助不加载应用、插件或 `.env`。
 
-应用类命令通过共享启动器在 Python 启动前合并仓库 `backend`、进程和 `.env` 中的
-`PYTHONPATH`，具体优先级见[部署配置](../docs/deployment-and-configuration_zh.md#统一-python-启动环境)。
-`diag` 等离线诊断，以及自行管理 `--env-file`/显式数据库参数的工具保留原配置策略，
-不会被统一入口预先灌入根 `.env`；详见[运维约定](../docs/operations_zh.md#统一命令入口)。
-
-原 `.py` / `python -m app.scripts...` 路径和参数继续可用，但直接调用仍遵守原来的
-环境准备要求；需要自动读取插件路径时使用统一入口。`extensions check` 使用正式插件
-发现器检查导入与设置，不构造数据库、不启动配套服务；它不证明远端服务就绪或管理员
-运行时开关状态。不得靠清空 `EXTENSIONS_CONFIG` 或跳过失败插件使批处理继续。
-
-本次合并的是公开命令目录和启动环境，内部实现仍按职责分文件。`maintain chunks`
-会重建分块，`batch embed` 只补缺失向量；`maintain kg-embeddings` 有专用的多轮补缺；
-`maintain reextract` / `denoise` 保留强制重做或删除的原有行为；`scale` 的在线并存锁与
-`batch index` 的停服锁也不互换。开发检查、fixture 生成、基准测试、示例和带硬编码目标的
-历史一次性脚本不自动注册到运维菜单。
+应用命令与独立工具的环境选择、插件检查边界及不同维护操作的锁语义，统一见
+[运维约定](../docs/operations_zh.md#统一命令入口)；Python 路径合并优先级见
+[部署配置](../docs/deployment-and-configuration_zh.md#统一-python-启动环境)。
+原脚本路径继续可用，需要部署环境和插件路径时优先使用统一入口。
+不得靠清空 `EXTENSIONS_CONFIG` 或跳过失败插件使批处理继续。
 
 ---
 
@@ -356,72 +346,23 @@ KG 对象向量在 `store_kg` 入库时嵌入;并发过高被限流漏掉的,用
 
 ### 卡顿发生时的首选命令
 
-生产目标是 Ubuntu 24.04，在仓库根通过 `npm run start` 启动前端与单 Uvicorn worker。
-不要先 restart/stop；请在卡顿**正在发生时** SSH 到主机采集：
+在卡顿仍发生时，从生产主机仓库根目录运行，先采集再决定是否重启：
 
 ```bash
-ssh <production-host>
-cd <silicon-notebook-repository>
 python3 scripts/diag.py incident
-```
-
-若输出的 `Missing/degraded evidence` 表明 PID 自动发现 missing/ambiguous/incomplete，
-从服务管理器或监听信息取得仍在运行的后端 PID 后重试：
-
-```bash
+# 自动发现无法唯一确定后端进程时，使用已核实的 PID：
 python3 scripts/diag.py incident --pid <backend-pid>
 ```
 
-默认 stdout 是一段最多 **32 KiB** 的 UTF-8 文本，可整体复制。所有采集共享最长 10 秒
-deadline，DB 部分最多使用其中一秒。后端每两秒原子刷新
-`.local/diagnostics/runtime.json`；超过六秒即按 stale 处理，不用其活跃工作字段下高置信
-结论。`SIGUSR1` 只触发不终止进程的全线程 Python 栈 dump，不含 locals，后端继续运行。
-采集使用 `.local/diagnostics/incident.lock`，线程栈追加到有 8 MiB retention 上限的
-`.local/diagnostics/thread-dumps.log`；只读 DB 临时快照位于
-`.local/diagnostics/db-snapshots/`。运行时只接受当前用户拥有的 `0700` diagnostics 目录与
-同用户拥有、单硬链接、普通文件类型的 `0600` heartbeat/dump 文件；不安全的已有工件或目录路径
-替换只会让诊断降级，不会跟随链接、阻塞于特殊文件或截断敌对目标。
-
-报告最多给出三个按证据强度排序的假设。`high` / `medium` / `low` 是置信标签，不是根因
-宣判；先看 `Confidence-ranked diagnoses`，再核对 `Observations`、`Relevant stacks`、
-`Database and host signals` 与 `Log metadata`。`Missing/degraded evidence` 会明确列出 stale
-snapshot、PID/权限/信号问题、DB busy/locked/deadline、日志 malformed/corrupt 或竞态；该来源
-会被排除，其余证据仍保留。空闲服务没有有效多信号结论是正常结果，应在卡顿时重跑。
-
-`incident` 纯 stdlib、不 import app、不需要 root 或第三方包，不发送终止信号、不重启、
-不执行 maintenance 或自动修复。所有诊断对业务数据只读：不执行 delete/写库、
-checkpoint/vacuum/analyze/reindex/migration；只允许维护上述有界 `.local/diagnostics/` 工件。
-可复制报告只挑选元数据：notebook/request/job 引用分配本报告内假名，其它原始不透明 id 省略；绝不包含原始 id/用户文件名、request body、
-来源/Ask/prompt/模型消息/Memory/Knowhow 正文、SQL 文本或参数、authorization/cookie/token/secret、
-原始命令行或局部变量。脱敏输出发给可信团队之外的人之前仍须人工复核。
-新增 notebook API 路径时必须同步登记运行时诊断的精确安全路径形状；未登记的深层路径只会降级为
-`/api/notebooks/{id}/{redacted}`，不得为了保留可读路径而放宽到回显原始不透明 id。
+报告只用于诊断，不执行业务写入或自动修复。采集边界、隐私过滤、缺失证据与
+结果解读统一见[运维：现场采集](../docs/operations_zh.md#生产事故即时采集)。
 
 ### `diag.py` 七命令矩阵
 
-| 命令 | 用途 | 边界 / 委托 |
-|---|---|---|
-| `python3 scripts/diag.py incident` | 卡顿现场的首选有界采集；必要时加 `--pid <backend-pid>`，删除分析也可显式加 `--notebook <id>`。 | Ubuntu/Linux 活体证据；纯 stdlib、app-free → `diag_incident.py`。 |
-| `python3 scripts/diag.py slow --since 24 --deep` | 历史慢因：请求/事件/LLM 延迟、规模画像、reasoning/PPR 与 scale-index 审计；`--deep` 增加可能耗时数分钟的只读 DB 检查。裸 `python3 scripts/diag.py` 仍等于 `slow`。 | 离线、纯 stdlib、app-free → `diag_slow.py`。 |
-| `python3 scripts/diag.py latency --last 500` | `ask_stage` 的逐阶段 P50/P95/max。 | 离线、纯 stdlib、app-free；口径与 `app/eval/ask_latency.py` 一致。 |
-| `python3 scripts/diag.py locks --top 20` | 按调用点汇总 SQLite 写锁的 wait/hold 分布。 | 离线、纯 stdlib、app-free；读取 `db_write_lock_slow` / `db_write_lock_stats` 事件。 |
-| `python3 scripts/diag.py open --local .local` | 打开笔记本的查询/端点延迟、计数缓存冷成本、pending 子查询与 mutation-sequence churn。 | 离线、纯 stdlib、app-free → `diag_open_latency.py`。 |
-| `python3 scripts/diag.py db --db .local/silicon_notebook.db` | SQLite/WAL/表/FK 索引/query plan 的有界源端无副作用证据。 | 离线、纯 stdlib、app-free → `diag_db.py`。 |
-| `python3 scripts/diag.py base-recall [active_notebook_id] --db .local/silicon_notebook.db` | 用元数据诊断挂载 base 的可用性与最近报告的 tier 引用计数。 | 有界、源端无副作用的 SQLite 快照；纯 stdlib、app-free → `diag_base_report.py`；不执行检索或回显查询/正文。 |
-
-`base-recall` 复用 `diag_db.py` 的 `O_NOATIME` pin、非阻塞共享锁、源文件身份复核和有界 DB/WAL
-拷贝，只在诊断自己拥有的快照上运行固定聚合投影。它不构造 repository、不加载 application、
-不迁移、也不用 SQLite 打开源库；安全边界不可用时仅输出 category-only 降级信息。stdout 是一段
-最多 32 KiB 的 UTF-8 固定字段报告，只含计数、状态和本次报告内假名，不含原始 notebook/user/
-report/object/chunk id、标题、问题、正文、文件名、路径、异常、凭据或 secret。
-
-历史日志读取覆盖并去重 `requests` / `events` / `llm` 的 legacy `<channel>.jsonl`、daily
-`<channel>-YYYY-MM-DD.jsonl`、daily gzip `<channel>-YYYY-MM-DD.jsonl.gz` 与下一层 per-user
-目录；读取受时间窗、记录数、输入字节和总 deadline 约束，malformed/截断会进入降级信息。
-
-既有独立引擎脚本仍可直接运行，旧运维笔记与 cron 不受影响；新操作优先使用上表七命令。
-`bench_sqlite_writes.py`（合成写吞吐基准）与 `replay_retrieval.py`（检索回归对照）不属于
-生产 DFX 命令，见下表。
+`incident`、`slow`、`latency`、`locks`、`open`、`db`、`base-recall` 的用途、
+示例与运行边界见[运维：七命令诊断速查](../docs/operations_zh.md#七命令诊断速查)。
+用 `python3 scripts/diag.py --help` 选择命令，再看相应子命令帮助。
+原独立脚本继续兼容既有运维笔记与 cron；基准测试和检索回放另见下文。
 
 ### `diag_pg_hotpaths.py` —— PostgreSQL 生产热路径自查（不进上面七命令矩阵）
 
