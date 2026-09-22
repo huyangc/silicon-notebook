@@ -7,7 +7,7 @@
 **Tech Stack:** hnswlib、numpy、pytest。解释器 `/opt/homebrew/Caskroom/miniconda/base/bin/python`;测试在 worktree `backend/`。
 
 ## Global Constraints
-- 依据 [review P1-5/6/7](../../kg-scale-retrieval-review.md)、[[comparative-retrieval-collapse]]。
+- 依据 [review P1-5/6/7](../specs/2026-07-01-kg-scale-retrieval-review.md)、[[comparative-retrieval-collapse]]。
 - 边生成是**离线 build/聚类期**;正确性=同义/变体连通性 ≥ 旧实现(小规模等价,大规模不再丢)。
 - 不改边的消费方(`_gather_kg_graph` 的 extra_edges / `cluster_seeds`);只改边**怎么算出来**。
 

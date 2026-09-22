@@ -1,7 +1,7 @@
 # 检索索引生命周期重设计:index 与 tier 解耦、大小库统一、增量 fold + 全量重建
 
 > 日期：2026-07-01 · 状态：设计已确认(Q1–Q6),待写实现计划(Phase 1)。
-> 关联 review：[docs/kg-scale-retrieval-review.md](../../kg-scale-retrieval-review.md)。
+> 关联 review：[docs/superpowers/specs/2026-07-01-kg-scale-retrieval-review.md](./2026-07-01-kg-scale-retrieval-review.md)。
 > 已落地前置：PR#129(scale_ppr combined 图缓存 + splice 向量化)、PR#130(base chunk ANN,`chunk_ann_enabled`)、PR#134(在线重建 scale 索引入口,base-tier 后台)。
 
 ---

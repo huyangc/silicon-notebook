@@ -7,7 +7,7 @@
 
 日期：2026-08-21
 状态：实施稿（取代同名初稿；供实现，实施后由最终 review 收口）
-依据：`docs/architecture-review-2026-08-21.md`；初稿；初稿评审意见（Claude，2026-08-21）
+依据：`docs/superpowers/specs/2026-08-21-architecture-review.md`；初稿；初稿评审意见（Claude，2026-08-21）
 
 本文设计的是 **silicon-notebook 应用内部的功能扩展机制**，不是 Codex/IDE 插件。目标是优化当前代码仓的高内聚、低耦合能力，并让后续功能可以通过新增受治理的插件接入摄取、检索、Ask、Deep Report、知识处理和 UI 主流程。
 
@@ -776,7 +776,7 @@ PR gate 至少检查：
 
 ## 14. 迁移方案
 
-具体 PR 边界、subagent review、CI 与合入流水见[交付与 PR 流水计划](./modular-plugin-architecture-delivery-plan-2026-08-21.md)。Phase 是迁移波次，不等同于单个 PR。
+具体 PR 边界、subagent review、CI 与合入流水见[交付与 PR 流水计划](../plans/2026-08-21-modular-plugin-architecture-delivery-plan.md)。Phase 是迁移波次，不等同于单个 PR。
 
 ### 并行轨道 F：前端状态所有权 hooks（Phase 0 之后即可启动，不等 SDK）
 

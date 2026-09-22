@@ -2,7 +2,7 @@
 """跨栈契约:前端 answer-panel.tsx 的三张清单标签表必须逐字等于「后端标签 + 『清单』」，
 且三张表的渲染值在全域内互不重名。
 
-集合枚举工具（design doc `docs/reasoning-enumeration-tools-design.md` §2.4/2.6/§6.2）的元素 /
+集合枚举工具（design doc `docs/superpowers/specs/2026-07-28-reasoning-enumeration-tools-design.md` §2.4/2.6/§6.2）的元素 /
 知识对象 / 来源清单名有三份真源：后端 `backend/app/services/reasoning_retrieval.py` 的
 `_ELEMENT_KIND_LABELS` / `_KG_OBJECT_LABELS` / `_SOURCE_COLLECTION_LABELS`（trace summary 与账目
 回喂用它们拼「XX清单」）与前端 `frontend/app/answer-panel.tsx` 的 `ELEMENT_KIND_LIST_LABELS` /

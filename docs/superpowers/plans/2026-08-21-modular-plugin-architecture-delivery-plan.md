@@ -3,10 +3,10 @@
 > **注记（2026-08-23）**：`answer.audit`、`report.audit`、`source.element_enricher`、
 > `knowledge.candidate_projector` 与 `agent.tool_provider`（外部 provider descriptor 追加那一半）
 > 五个扩展点已因零消费者移除。本文保留原始交付记录，不代表当前代码状态。
-> 本文中的 squash 流程及已完成 PR 记录保留当时事实；后续 PR 的评审、CI 与合入方式统一遵循[当前开发流程](./development_zh.md#开发流程)，使用 `--rebase`。
+> 本文中的 squash 流程及已完成 PR 记录保留当时事实；后续 PR 的评审、CI 与合入方式统一遵循[当前开发流程](../../development_zh.md#开发流程)，使用 `--rebase`。
 
 日期：2026-08-21
-依据：[`modular-plugin-architecture-design-2026-08-21.md`](./modular-plugin-architecture-design-2026-08-21.md)
+依据：[`2026-08-21-modular-plugin-architecture-design.md`](../specs/2026-08-21-modular-plugin-architecture-design.md)
 
 ## 1. 决策
 

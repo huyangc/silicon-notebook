@@ -69,7 +69,7 @@ attrs 形态；gold 人工策展；推理分层（extends / Level 0–4 / Hypoth
 
 ## PR-3 待办中心露出「问答进行中」
 
-真源 `docs/in-progress-action-resilience-design.md` §6.3（可选项）。`repository.pending_actions(user_id)`
+真源 `docs/superpowers/specs/2026-07-08-in-progress-action-resilience-design.md` §6.3（可选项）。`repository.pending_actions(user_id)`
 聚合新增当前用户 `ask_jobs` 中 `running`/`queued` 项（notebook 名 + 提问摘要 + 开始时间），SSE
 `pending_bus` 在 job 起止时推事件；`pending-center.tsx` 新分组「进行中的提问」，点击走原子
 notebook opener 打开对应会话并复用既有接回逻辑。契约登记进 `docs/product-and-api*.md`；测试：

@@ -2,7 +2,7 @@
 
 > REQUIRED SUB-SKILL: superpowers:subagent-driven-development。
 
-**背景**:全局审计(docs/kg-perf-audit-16c64g.md)P0 项中,建索引解决不了的三块查询时 O(N):
+**背景**:全局审计(docs/superpowers/specs/2026-07-02-kg-perf-audit-16c64g.md)P0 项中,建索引解决不了的三块查询时 O(N):
 1. **关系检索无候选界定**(P0-1/2):`_retrieve_relations_scored`/`_relations_with_names` 全量 relations⋈objects⋈objects JOIN + 逐行解析;经 `_mix_retrieve` 的 overlay 挂在**默认 chunk 问答路径**(`chunk_kg_overlay_enabled` 默认 True + rerank 已配),每问必付。
 2. **两个未缓存全库扫描**(P0-5):`_ent_chunk_map`(49万 evidence + 百万 chunk element_ids 全解析,PPR 回退每查询付)与 `_kg_source_chunks`(百万 chunk 全扫+集合交,mix/graph 每查询付)。
 3. **边审查队列全图介数中心性**(P0-3):`review_queue` 每请求同步建全图跑 Brandes O(V·E),分钟级。
@@ -62,4 +62,4 @@
 
 ## 收尾
 - opus 全分支终审 → rebase → push → PR(引用审计文档条目号;PR 描述交代 overlay 路径的每问收益)。
-- 审计文档 docs/kg-perf-audit-16c64g.md(在主 checkout,未提交)随本 PR 一并提交入库。
+- 审计文档 docs/superpowers/specs/2026-07-02-kg-perf-audit-16c64g.md(在主 checkout,未提交)随本 PR 一并提交入库。

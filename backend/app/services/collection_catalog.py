@@ -1,7 +1,7 @@
 """Typed-collection map: how many of each enumerable collection are in scope.
 
 The map is the *地图层* of the reasoning enumeration tools (design doc
-``docs/reasoning-enumeration-tools-design.md`` §2.2).  A step-by-step reasoning
+``docs/superpowers/specs/2026-07-28-reasoning-enumeration-tools-design.md`` §2.2).  A step-by-step reasoning
 run injects one short line of counts into its plan/reflect context so the model
 can decide whether enumerating a collection is worth an action at all — the
 counts are the cheap thing, the enumeration is the expensive thing.
