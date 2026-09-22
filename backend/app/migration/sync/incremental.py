@@ -133,7 +133,9 @@ _COMPENSATION_WINDOW_SQL = (
 # nothing about what the target should hold. Skipping on it would drop exactly
 # the changes made during that window while the watermark moved past them --
 # see ``export._select_notebooks`` for the full argument.
-LIVE = "live"
+# This environment's own notebook, still here. Deliberately NOT "live": the
+# lifecycle ``status`` column plays no part in the answer (see NotebookState).
+PRESENT = "present"
 MIRROR = "mirror"
 MISSING = "missing"
 
@@ -221,7 +223,7 @@ class TableDelta:
     _samples: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
-    def note_downgrade(self, table: str, texts: Sequence[str]) -> None:
+    def note_downgrade(self, texts: Sequence[str]) -> None:
         self.downgraded += len(texts)
         for text in texts:
             if len(self._samples) < _DOWNGRADE_SAMPLES:
@@ -558,7 +560,7 @@ class NotebookState:
                 self._known[str(row["id"])] = (
                     (MIRROR, f"mirror of {origin!r}; a mirror cannot be a source")
                     if origin
-                    else (LIVE, "")
+                    else (PRESENT, "")
                 )
         for notebook_id in wanted:
             self._known.setdefault(notebook_id, (MISSING, "no such notebook"))
@@ -638,6 +640,14 @@ def table_delta(
     if scope is None:
         raise SyncExportError(f"{table}: LOCAL table has no export scope")
 
+    # One table's parent-key -> notebook memo, shared by every batch of this
+    # table (upserts AND deletes). Without it a table whose rows fan in to a
+    # handful of parents -- 100k chunks under 10 sources -- would re-ask the
+    # parent chain once per batch, which is two statements per hop per 500
+    # rows for an answer that cannot change inside the read snapshot. Scoped
+    # to the table and dropped with it: the keyspace is this table's distinct
+    # parents, not the database's. Same shape as ``NotebookState``.
+    parents: dict[Any, str | None] = {}
     upsert_texts = sorted(
         text for text, change in changes.items()
         if change.operation == OPERATION_UPSERT
@@ -653,11 +663,12 @@ def table_delta(
         )
         gone = [text for text in batch if text not in rows]
         if gone:
-            delta.note_downgrade(table, gone)
+            delta.note_downgrade(gone)
             delete_texts.extend(gone)
         present = [text for text in batch if text in rows]
         attribution = _attribute(
-            source, conn, table, scope, present, changes, rows, key_columns
+            source, conn, table, scope, present, changes, rows, key_columns,
+            parents,
         )
         notebooks.prime([value for value in attribution.values() if value])
         for text in present:
@@ -668,7 +679,7 @@ def table_delta(
             row = rows[text]
             emit_row(row)
             delta.rows += 1
-            if notebook_id and state == LIVE:
+            if notebook_id and state == PRESENT:
                 delta.notebooks.add(notebook_id)
                 delta.files.extend(_file_requests(table, row, notebook_id))
         del rows
@@ -677,7 +688,7 @@ def table_delta(
         return delta.sealed(table)
     for batch in key_batches(sorted(delete_texts), len(key_columns)):
         attribution = _attribute(
-            source, conn, table, scope, batch, changes, {}, key_columns
+            source, conn, table, scope, batch, changes, {}, key_columns, parents
         )
         notebooks.prime([value for value in attribution.values() if value])
         for text in batch:
@@ -692,7 +703,7 @@ def table_delta(
             delta.deletes += 1
             if table == "notebooks":
                 delta.deleted_notebooks.add(str(change.key[key_columns[0]]))
-            elif notebook_id and state == LIVE:
+            elif notebook_id and state == PRESENT:
                 delta.notebooks.add(notebook_id)
     return delta.sealed(table)
 
@@ -727,6 +738,7 @@ def _attribute(
     changes: Mapping[str, Change],
     rows: Mapping[str, Mapping[str, Any]],
     key_columns: Sequence[str],
+    parents: dict[Any, str | None],
 ) -> dict[str, str | None]:
     """``key text -> notebook id`` for ONE batch of this table's window.
 
@@ -735,8 +747,12 @@ def _attribute(
     come off the log entry. NOTEBOOK scope reads the notebook off the live row
     when there is one and off the log row otherwise; PARENT scope resolves the
     row's own parent pointer for an upsert and the log's ``parent_key`` for a
-    delete, both through one batched ``scope_chain`` walk per batch; GLOBAL
-    scope has no notebook by definition."""
+    delete, both through one batched ``scope_chain`` walk -- but only for the
+    parent keys ``parents`` has not already answered. That memo is the
+    table's, not the batch's, so a table whose rows share a few parents pays
+    for the chain once rather than once per batch; a parent that resolved to
+    ``None`` is remembered as ``None`` and not re-asked either. GLOBAL scope
+    has no notebook by definition."""
     if scope.kind is ScopeKind.GLOBAL:
         return {text: None for text in texts}
     if scope.kind is ScopeKind.NOTEBOOK:
@@ -760,11 +776,13 @@ def _attribute(
         pointers[text] = (
             row.get(scope.column) if row is not None else changes[text].parent_key
         )
-    resolved = resolve_parent_notebooks(
-        source, conn, table, [value for value in pointers.values() if value]
-    )
+    unknown = [
+        value for value in pointers.values() if value and value not in parents
+    ]
+    if unknown:
+        parents.update(resolve_parent_notebooks(source, conn, table, unknown))
     return {
-        text: (resolved.get(value) if value else None)
+        text: (parents.get(value) if value else None)
         for text, value in pointers.items()
     }
 

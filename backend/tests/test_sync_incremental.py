@@ -17,6 +17,7 @@ import pytest
 
 from app.core.config import Settings
 from app.migration.sync import export as export_module
+from app.migration.sync import incremental as incremental_module
 from app.migration.sync.export import ExportReport, export_notebooks
 from app.migration.sync.import_ import SyncImportError
 from app.migration.sync.package import (
@@ -1074,3 +1075,78 @@ def test_many_vanished_upserts_produce_one_bounded_warning(baseline):
     assert "12 key(s)" in downgrades[0]
     assert "+7 more" in downgrades[0]
     assert len(_deletes(report.package_dir)) == 12
+
+
+# ------------------------------------------------------ parent-chain memo
+
+
+def test_one_parent_chain_lookup_serves_every_batch_of_a_table(
+    baseline, monkeypatch
+):
+    """A PARENT-scoped table's rows fan IN: 100k chunks hang off a handful of
+    sources. Resolving the chain per batch would re-ask the parent table once
+    per 500 rows for an answer that cannot change inside the read snapshot,
+    so the memo is per TABLE, not per batch.
+
+    Forced to two batches by shrinking the batch size, with two rows sharing
+    one parent -- the parent table must be asked exactly once.
+
+    变异验证: 去掉 ``table_delta`` 的 ``parents`` memo(让 ``_attribute`` 每批
+    自己 ``resolve_parent_notebooks``), 本条必须报红(两次查询)。
+    """
+    repo = baseline["repo"]
+    with repo._connect() as db:
+        source_id = db.execute(
+            "SELECT id FROM sources WHERE notebook_id=? LIMIT 1", (baseline["alpha"],)
+        ).fetchone()["id"]
+    with repo._write() as db:
+        for index in range(2):
+            db.execute(
+                "INSERT INTO source_elements(id, source_id, element_type, "
+                "location_label, text, metadata, created_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (f"el-{index}", source_id, "paragraph", "p1", f"body {index}",
+                 "{}", MOMENT),
+            )
+
+    monkeypatch.setattr(incremental_module, "_ID_BATCH", 1)
+    probes: list[str] = []
+    real_fetch = export_module._Source.fetch
+
+    def counting_fetch(self, conn, statement, params=()):
+        if 'FROM "sources"' in statement and 'WHERE "id" IN' in statement:
+            probes.append(statement)
+        return real_fetch(self, conn, statement, params)
+
+    monkeypatch.setattr(export_module._Source, "fetch", counting_fetch)
+
+    report = _export(baseline["settings"], baseline["out"])
+
+    assert {"el-0", "el-1"} <= _ids(report.package_dir, "source_elements"), (
+        "both rows must really have gone through the PARENT attribution path"
+    )
+    assert len(probes) == 1, (
+        f"the parent chain was walked {len(probes)} times; the per-table memo "
+        "must answer the second batch"
+    )
+
+
+# ------------------------------------------------------- repository anchor
+
+
+def test_the_exporters_repository_root_is_the_facades(settings, repo):
+    """``sources.file_path`` may be relative, and ``resolve_file_requests``
+    resolves it against ``_Source.root_dir`` the way
+    ``sqlite/database.py::resolve_path`` resolves it against the root the
+    REPOSITORY was built with. That copy is only correct while the two
+    anchors -- ``migration/sync/export.py``'s ``parents[4]`` and
+    ``services/repository_facade.py``'s ``parents[3]`` -- name the same
+    directory; a file moving between packages would silently break it."""
+    source = export_module._Source(
+        settings, Path(export_module.__file__).resolve().parents[4]
+    )
+    try:
+        assert source.root_dir == repo.root_dir
+        assert (source.root_dir / "backend" / "app" / "migration").is_dir()
+    finally:
+        source.close()

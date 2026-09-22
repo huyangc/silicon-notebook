@@ -756,7 +756,9 @@ def export_notebooks(
 ) -> ExportReport:
     """Write one export package under ``out_dir`` and return its report.
 
-    ``notebook_ids=None`` means "every live, non-mirror notebook". An EMPTY
+    ``notebook_ids=None`` means "every non-mirror notebook" -- a notebook's
+    lifecycle ``status`` is not a filter here, see ``_select_notebooks``. An
+    EMPTY
     sequence is rejected rather than treated as None: an empty package is
     never what a caller meant, and a ``--notebook`` list that silently became
     empty upstream would otherwise produce a package that imports cleanly and
@@ -772,7 +774,8 @@ def export_notebooks(
       ever pick them up again.
     - ``full=True``, or no usable watermark for this target (capture gate
       closed, no watermark row, or one whose ``captured`` is 0) -> a full
-      BASELINE package over every live notebook. It advances the watermark,
+      BASELINE package over every non-mirror notebook. It advances the
+      watermark,
       which is what makes the next export incremental.
     - otherwise -> an INCREMENTAL package built from the change log.
 
@@ -786,7 +789,7 @@ def export_notebooks(
     if notebook_ids is not None and not notebook_ids:
         raise SyncExportError(
             "notebook_ids is an empty selection; pass None to export every "
-            "live notebook"
+            "non-mirror notebook"
         )
     root_dir = Path(__file__).resolve().parents[4]
     source = _Source(settings, root_dir)
