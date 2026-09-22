@@ -270,13 +270,22 @@ class RetrievalExperienceDistillationService:
     ⚠ The GLOBAL partition is NOT in that queue, and that asymmetry is load
     bearing (T2 review round, P1). It has its own seat: whenever the slot frees
     and the deployment-wide counter is over its threshold, the global chain is
-    claimed FIRST, ahead of every waiting library. When it shared the queue,
-    hundreds of ready libraries could hold it behind them indefinitely — a
-    deployment busy enough to need the global fallback was exactly the one that
-    never produced it. The priority costs the libraries nothing measurable: the
-    global chain can only be ready once per ``RETRIEVAL_EXPERIENCE_TRIGGER``
-    completed asks, so it takes at most one slot out of every forty asks' worth
-    of batches.
+    claimed ahead of every waiting library. When it shared the queue, hundreds
+    of ready libraries could hold it behind them indefinitely — a deployment
+    busy enough to need the global fallback was exactly the one that never
+    produced it.
+
+    ⚠ The priority is STRICT only while the deployment can distil faster than
+    it accumulates, and it yields one turn when it cannot (T2 review round 2,
+    P2). The alternation rule, in full: the global chain goes first whenever it
+    is ready, EXCEPT when it took the previous batch and at least one library
+    is waiting — then that library goes. So with slack the global chain is
+    never delayed, and under saturation (throughput at or below one batch per
+    ``RETRIEVAL_EXPERIENCE_TRIGGER`` asks, where the global counter is over its
+    threshold every single time the slot frees) the two chains alternate and
+    the libraries take at least half the batches. Strict priority there meant
+    200 libraries sharing zero batches; no priority meant the global chain
+    starving. Neither can happen now.
     """
 
     def __init__(
@@ -323,6 +332,16 @@ class RetrievalExperienceDistillationService:
         # global partition is deliberately absent — see the class docstring.
         self._queue: "deque[str]" = deque()
         self._queued: set[str] = set()
+        # Libraries the full room has already turned away and REPORTED. It
+        # bounds the capacity signal to one event per library per saturated
+        # period; membership is cleared when that library's batch is claimed.
+        # Bounded by the queue's overflow, and every entry is also a key of
+        # ``_notebook_pending``.
+        self._refused: set[str] = set()
+        # Whether the previous claim was the global chain's. The whole of the
+        # weak yield in ``_claim_next_locked`` — one bool, so "global went
+        # last" can cost it exactly one turn and never two.
+        self._last_claimed_global = False
 
     # ------------------------------------------------------------- triggering
     def note_ask_completed(self, notebook_id: str) -> None:
@@ -430,14 +449,25 @@ class RetrievalExperienceDistillationService:
     # no I/O of any kind: the whole point of the queue is that deciding what
     # runs next is a few dict and deque operations inside one critical section,
     # while everything that can block (submitting, emitting) happens outside it.
+    def _notebook_threshold(self) -> int:
+        """The per-library trigger count — the SAME number for every library.
+
+        Split out from ``_threshold`` so a pass over many libraries can read it
+        once (``_rearm_locked``) instead of once per key: the value depends on
+        which CHAIN a partition belongs to, never on which library it is.
+        """
+        return max(1, int(
+            getattr(self.settings, "retrieval_experience_notebook_trigger", 10)
+        ))
+
     def _threshold(self, partition: str) -> int:
         """This partition's trigger count, floored at 1 (0 would schedule a
         bounded LLM call on every single ask)."""
-        setting = (
-            "retrieval_experience_notebook_trigger" if partition
-            else "retrieval_experience_trigger"
-        )
-        return max(1, int(getattr(self.settings, setting, 10 if partition else 40)))
+        if partition:
+            return self._notebook_threshold()
+        return max(1, int(
+            getattr(self.settings, "retrieval_experience_trigger", 40)
+        ))
 
     def _pending_locked(self, partition: str) -> int:
         if partition:
@@ -453,8 +483,15 @@ class RetrievalExperienceDistillationService:
         The notebook half POPS rather than assigning 0: a library with no
         further traffic should leave no key behind, so the dict stays the size
         of live traffic rather than of the notebook table.
+
+        ⚠ It also clears this library's "already reported as refused" mark: it
+        just got its batch, so the NEXT time a full room turns it away is a new
+        fact and deserves its own event. That pairing is what bounds the event
+        stream to "once per library per saturated period" instead of "once per
+        completed ask" (T2 review round 2, P2).
         """
         if partition:
+            self._refused.discard(partition)
             return self._notebook_pending.pop(partition, 0)
         snapshot, self._pending = self._pending, 0
         return snapshot
@@ -471,9 +508,20 @@ class RetrievalExperienceDistillationService:
         """Put a ready NOTEBOOK partition in the waiting room.
 
         ``True`` = it has a place in line (including "it already did");
-        ``False`` = the room is full and it was REFUSED. A refusal costs the
-        library nothing: its counter is untouched, so the next ``_rearm_locked``
-        pass — or its next completed ask — offers it again.
+        ``False`` = the room is full, this library was REFUSED, **and this is
+        the first refusal since its last batch** — so the caller should report
+        it. A refusal costs the library nothing: its counter is untouched, so
+        the next ``_rearm_locked`` pass — or its next completed ask — offers it
+        again.
+
+        ⚠ A repeat refusal returns ``True``. That reads backwards for a moment
+        and is the point: the boolean answers "does the caller have something
+        NEW to say", not "did this one get in". Under saturation a library is
+        turned away on every single completed ask, and reporting each one
+        turned a capacity signal into one log line + one file append per ask
+        (measured: 12830 events across 20000 asks). The mark is cleared when
+        that library's batch is finally claimed (``_consume_locked``), so a
+        second saturated period does get a second event.
 
         De-duplicating is not an optimisation: two queued batches for the same
         library would read almost the same forty runs, and the second would
@@ -489,6 +537,9 @@ class RetrievalExperienceDistillationService:
         if partition in self._queued:
             return True
         if len(self._queue) >= _MAX_QUEUED_PARTITIONS:
+            if partition in self._refused:
+                return True                 # 已经报过一次,不再重复报
+            self._refused.add(partition)
             return False
         self._queue.append(partition)
         self._queued.add(partition)
@@ -510,12 +561,17 @@ class RetrievalExperienceDistillationService:
         ``_enqueue_locked`` touches only the queue — so iterating it directly
         is safe.
 
-        Returns how many libraries the full room turned away, for ONE
-        aggregated event; the caller emits it outside the lock.
+        Returns how many libraries the full room turned away FOR THE FIRST TIME
+        since their last batch, for ONE aggregated event; the caller emits it
+        outside the lock. A library that was already reported as refused is not
+        counted again — see ``_enqueue_locked``.
         """
+        # 阈值对整趟是常量,提到循环外:一趟要走遍每个活跃库的计数,而每次
+        # 取阈值都要读一次 settings(T2 评审轮 2,P3)。
+        threshold = self._notebook_threshold()
         refused = 0
-        for partition in self._notebook_pending:
-            if self._ready_locked(partition) and not self._enqueue_locked(partition):
+        for partition, pending in self._notebook_pending.items():
+            if pending >= threshold and not self._enqueue_locked(partition):
                 refused += 1
         return refused
 
@@ -533,16 +589,30 @@ class RetrievalExperienceDistillationService:
         it is, it goes next. A shared FIFO gave the opposite guarantee — the
         more libraries a deployment had, the longer the global fallback waited,
         without bound.
+
+        ⚠ …with ONE weak yield: if the global chain took the previous batch and
+        libraries are waiting, it stands aside for one (T2 review round 2, P2).
+        Unconditional priority is only cheap while batches are cheaper than
+        arrivals; a deployment whose throughput is one batch per forty asks is
+        exactly a deployment where the global chain is ready EVERY time the
+        slot frees, and there it took every batch — 200 libraries, zero. The
+        yield makes the two chains alternate under saturation (libraries get at
+        least half the batches) and changes nothing when there is slack: with
+        an empty queue, or after any notebook batch, the global claim is
+        immediate as before. It is still unstarvable — one yield, never two,
+        because the flag is set the moment the global chain does run.
         """
         if self._running:
             return None
-        if self._ready_locked(""):
+        global_ready = self._ready_locked("")
+        if global_ready and not (self._queue and self._last_claimed_global):
             partition = ""
         elif self._queue:
             partition = self._queue.popleft()
             self._queued.discard(partition)
         else:
             return None
+        self._last_claimed_global = not partition
         self._running = True
         return partition, self._consume_locked(partition)
 

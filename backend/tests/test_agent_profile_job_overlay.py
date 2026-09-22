@@ -2172,8 +2172,16 @@ def test_the_host_seat_hands_the_distillation_trigger_its_notebook():
     在交付之后抛 ``TypeError`` ——被 fail-open 吞掉,于是两条蒸馏链路一起静默
     死亡,没有任何地方会红。
 
-    所以这条钉的是三件事:座位还在、lambda 仍然零参(host 的调用约定)、而它
-    体内那次调用**恰好带一个**位置实参且就是 ``notebook_id``。
+    所以这条钉的是四件事:座位还在、lambda 仍然零参(host 的调用约定)、它体内
+    那次调用**恰好带一个**位置实参且就是 ``notebook_id``,以及这个座位仍然被
+    ``mode_id == "reasoning"`` 的三元闸圈着。
+
+    第四件同样是评审实测出来的漏网变异(T2 评审轮 2,P2):删掉那个
+    ``if mode_id == "reasoning" else None``,252 条相关用例全绿——而语义是
+    chunk/graph 模式的提问也开始推进蒸馏计数,于是采样(只取 reasoning run)与
+    计数不再同谓词,同一批旧 run 会被反复付钱蒸馏。compat 路径上那条闸有
+    ``test_the_runtime_counts_only_reasoning_asks_toward_distillation`` 钉着,
+    生产路径上在这之前没有。
     """
     import ast
     from pathlib import Path as _Path
@@ -2223,6 +2231,41 @@ def test_the_host_seat_hands_the_distillation_trigger_its_notebook():
     assert isinstance(call.args[0], ast.Name) and call.args[0].id == "notebook_id", (
         ast.dump(call.args[0])
     )
+
+    # 这个座位必须是 ``retrieval_experience=`` 的取值,而且住在
+    # ``... if mode_id == "reasoning" else None`` 的 body 分支里。
+    seat = next(
+        (
+            keyword for keyword in ast.walk(target)
+            if isinstance(keyword, ast.keyword)
+            and keyword.arg == "retrieval_experience"
+            and any(child is lam for child in ast.walk(keyword.value))
+        ),
+        None,
+    )
+    assert seat is not None, (
+        "P2 触发的 lambda 必须挂在 retrieval_experience 这个座位上——换个座位"
+        "名等于把它接到另一条链路的能力上"
+    )
+    gate = seat.value
+    assert isinstance(gate, ast.IfExp), (
+        "retrieval_experience 座位必须被 mode_id 三元闸圈住:去掉它,chunk/graph"
+        "模式的提问也会推进蒸馏计数,而采样只取 reasoning run——同一批旧 run 会"
+        "被反复付钱蒸馏,且没有任何用例会红"
+    )
+    assert any(child is lam for child in ast.walk(gate.body)), (
+        "lambda 必须在三元闸的 body 分支(条件成立时)里,不是 orelse"
+    )
+    test = gate.test
+    assert (
+        isinstance(test, ast.Compare)
+        and isinstance(test.left, ast.Name)
+        and test.left.id == "mode_id"
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.Eq)
+        and isinstance(test.comparators[0], ast.Constant)
+        and test.comparators[0].value == "reasoning"
+    ), ast.dump(test)
 
 
 def test_the_runtime_counts_only_reasoning_asks_toward_distillation():
