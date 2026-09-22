@@ -1,33 +1,22 @@
-"""Per-notebook FULL export packages -- the ``from_seq = 0`` special case of
-docs/incremental-sync-design.md §8.
+"""Export packages: a FULL table scan of the selected notebooks, or the
+INCREMENTAL window ``incremental.py`` reads out of the source change log
+(docs/incremental-sync-design.md §7 "模式判定" and §8).
 
-PR-2 has no source-side change log yet, so every export here is a table scan
-over the notebooks being taken across, and both sequence numbers in the
-package name and manifest are 0. PR-3 adds the incremental path on top of the
-same package format; only where the rows come from changes.
+This module owns the decision between those two, the package's file layout and
+the watermark; it does not own the SQL. The source database handle, the
+scope/keyset SQL and the portable row encoding live in
+``app.migration.sync.database``, which both this module and ``incremental.py``
+build on -- see that module's docstring for why the split exists.
 
 Layering: this module is part of ``app.migration.sync``, whose import
 whitelist (guarded by ``tests/test_sync_manifest.py``) deliberately keeps the
-package free of services and repository facades. The exporter therefore talks
-to the two ``Database`` classes directly and reads its own primary-key catalog,
-instead of going through a repository -- an export must be able to run as an
+package free of services and repository facades, so an export can run as an
 offline tool against a quiesced database without composing the application.
-
-Column TYPES, unlike primary keys, are not read from the live database. They
-come from ``app.migration.shadow.postgres_catalog.EXPECTED_COLUMNS``, the
-contract parsed out of the PostgreSQL migration DDL, and the SAME contract is
-applied to a SQLite source. SQLite is dynamically typed and declares
-``created_at TEXT``, so a SQLite source has no type information of its own;
-sniffing types out of the values would make a column's encoding depend on what
-happens to be stored in it, and two environments holding the same notebook
-would produce different packages.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
-import re
 import shutil
 import time
 import uuid
@@ -39,40 +28,59 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
-from app.core.database_url import database_identity
-from app.migration.shadow.postgres_catalog import EXPECTED_COLUMNS
-from app.migration.sync.manifest import (
-    MappingKind,
-    ScopeKind,
-    scope_chain,
-    spec_for,
-    synced_tables,
+from app.migration.sync import incremental
+from app.migration.sync.database import (
+    _GLOBAL_KEY_QUERIES,
+    _ID_BATCH,
+    _Source,
+    SyncExportError,
+    _batched,
+    _exported_columns,
+    _global_scope,
+    _parent_join_clause,
+    _quoted,
+    _row_encoder,
+    _scan,
+    _scope_of,
+    _table_query,
 )
+from app.migration.sync.manifest import MappingKind, ScopeKind, spec_for, synced_tables
 from app.migration.sync.package import (
     ASSET_FILES_DIR,
     CHECKSUMS_NAME,
     DELETES_NAME,
     KG_EPOCHS_NAME,
     MANIFEST_NAME,
+    MODE_FULL,
+    MODE_INCREMENTAL,
     NOTEBOOK_FILES_DIR,
     PACKAGE_FORMAT_VERSION,
     USERS_NAME,
-    encode_value,
     json_document,
     json_line,
     notebook_assets_dir,
     notebook_files_dir,
     package_dir_name,
     rows_path,
-    utc_timestamp_text,
 )
-from app.repositories.postgres.schema_manifest import (
-    POSTGRES_ROWID_ORDINAL_TABLES,
-    POSTGRES_SCHEMA_MANIFEST,
-)
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.core.config import Settings
+
+# Re-exported for the callers that reach for the backend facade and the SQL
+# helpers by their historical home (``import_``, ``cli``, and the export
+# tests). Kept as names rather than a shim layer so there is still exactly one
+# definition of each.
+__all__ = [
+    "ExportReport",
+    "SyncExportError",
+    "_Source",
+    "_batched",
+    "_parent_join_clause",
+    "_quoted",
+    "export_notebooks",
+]
 
 
 # A notebook is skipped, not exported, while one of these lifecycle states is
@@ -82,26 +90,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # the two must stay equal value for value.
 _NOT_LIVE_STATUSES = ("copying", "deleting", "importing")
 
-# notebook_grants.principal_type values whose principal_id is a groups.id.
-# Restated from app.repositories.group_rows.GROUP_PRINCIPAL_TYPES, which this
-# package's import whitelist keeps it from importing. 'group_admins' is the
-# SAME group reached over a narrower edge (only its role='admin' members), so
-# it scopes and maps exactly like 'group'; treating it as anything else drops
-# every admin-only grant on the floor.
-_GROUP_PRINCIPAL_TYPES = ("group", "group_admins")
-
-# Ceiling on one ``IN (...)`` list. Notebook counts are small, but a scan of
-# every notebook in a large environment must not build one statement with
-# thousands of placeholders (SQLite's SQLITE_MAX_VARIABLE_NUMBER, and
-# PostgreSQL's planning cost for a huge constant array).
-_ID_BATCH = 500
-
-# Rows per keyset page. Each page is an INDEPENDENT, fully-exhausted statement
-# ending in ``LIMIT``, so this bounds what the driver materializes AND gives
-# the rows file a deterministic order (the pages walk the primary key). It is
-# not a ``fetchmany`` size against one open cursor: that would bound the
-# client buffer but leave the order of a large table up to the planner.
-_PAGE_ROWS = 1000
 
 # Block size for copying a notebook's files while hashing them in one pass.
 _COPY_BLOCK = 1 << 20
@@ -124,20 +112,6 @@ _HEARTBEAT_NAME = ".heartbeat"
 _HEARTBEAT_INTERVAL_SECONDS = 60
 _HEARTBEAT_ROWS = 4096
 
-# Table and column names all come from the sync manifest and the database's
-# own catalog, never from a caller. Validated anyway before interpolation,
-# because these are the only identifiers this module cannot parameterize.
-_SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-_JSON_TYPE = "jsonb"
-_TIMESTAMP_TYPE = "timestamp with time zone"
-
-
-class SyncExportError(RuntimeError):
-    """An export could not be produced. Never raised for a skipped notebook
-    (that is a reported outcome, not a failure) -- only for a malformed
-    request or a source database that cannot answer the export's questions."""
-
 
 @dataclass(frozen=True)
 class ExportReport:
@@ -152,17 +126,49 @@ class ExportReport:
     table_counts: Mapping[str, int]
     file_count: int
     bytes_written: int
-    # Always "full" in PR-3a: there is no incremental *reader* yet, so an
-    # existing watermark for this target does NOT turn the run into an
-    # incremental one -- it is overwritten by another full package. The field
-    # exists now so PR-3b's "incremental" is a new value, not a new field.
+    # package.MODE_FULL or package.MODE_INCREMENTAL. Decided by _assemble from
+    # the capture gate, this target's watermark row and the caller's
+    # full/notebook_ids arguments -- never by the caller directly.
     mode: str
     # The change log's high-water seq visible inside THIS export's read
-    # snapshot, or 0 when the capture gate was off at that moment. Local
-    # recordkeeping only (mirrors sync_export_state.exported_through_seq,
-    # see _advance_watermark) -- the on-disk package format is untouched:
-    # manifest.json still writes from_seq=to_seq=0 (PR-3b changes that).
+    # snapshot, or 0 when the capture gate was off at that moment. Equal to
+    # ``to_seq`` in both modes; kept as its own field because it is what
+    # ``sync_export_state.exported_through_seq`` stores and the CLI has
+    # printed it under this name since PR-3a.
     captured_through_seq: int = 0
+    # The window this package covers. A full baseline: 0 .. this export's
+    # captured_through_seq (the rows come from a table scan, so "from" is the
+    # beginning of time). Incremental: previous watermark + 1 .. the same.
+    # A SCOPED package (see ``scoped``) claims 0 .. 0: it is not a link in
+    # any chain, so it must not look like one.
+    from_seq: int = 0
+    to_seq: int = 0
+    # True when the caller named the notebooks (``--notebook``). Such a
+    # package covers a chosen subset, never "everything that changed", so it
+    # is always full and never touches this target's watermark -- advancing
+    # it would push every OTHER notebook's changes below the next window's
+    # floor and lose them permanently.
+    scoped: bool = False
+    # Whether this run moved sync_export_state. False for a scoped export,
+    # true otherwise (a full baseline advances it too -- that is what makes
+    # the NEXT export incremental).
+    watermark_advanced: bool = True
+    # Incremental only: the package_id the previous watermark named, so a
+    # target can chain packages without guessing. Empty for a full package.
+    base_package_id: str = ""
+    # Rows written to deletes.jsonl.
+    deletes: int = 0
+    # Notebooks whose own ``notebooks`` row was deleted inside the window.
+    # They are NOT in ``notebooks`` (there is nothing left to export), but a
+    # target still has to hear about them.
+    deleted_notebooks: tuple[str, ...] = ()
+    # Change-log rows dropped because they belong to a mirrored notebook.
+    skipped_mirror_changes: int = 0
+    # An incremental package whose window held no change at all. Still a
+    # complete, importable package with a package_id and an advanced
+    # watermark: the export chain stays continuous, so a target never has to
+    # tell "nothing changed" from "a package went missing".
+    empty: bool = False
     # Non-fatal conditions an operator should see, e.g. a stale staging
     # directory left by an earlier crashed run and removed by this one.
     warnings: tuple[str, ...] = ()
@@ -170,644 +176,6 @@ class ExportReport:
     # copying. Reported rather than raised: a source file deleted by a
     # concurrent notebook edit must not throw away a whole export.
     missing_files: tuple[str, ...] = ()
-
-
-def _quoted(name: str) -> str:
-    if not _SAFE_IDENT.match(name):
-        raise SyncExportError(f"unsafe SQL identifier from catalog: {name!r}")
-    return f'"{name}"'
-
-
-def _batched(
-    values: Sequence[Any], size: int = _ID_BATCH
-) -> Iterator[tuple[Any, ...]]:
-    """Slice a bind list into statement-sized chunks. Not str-only: the
-    importer batches primary-key values through this too, and a composite key
-    column can be an integer as easily as text."""
-    for start in range(0, len(values), size):
-        yield tuple(values[start : start + size])
-
-
-def _contracts(table: str) -> Mapping[str, Any]:
-    contracts = EXPECTED_COLUMNS.get(table)
-    if not contracts:
-        raise SyncExportError(
-            f"{table}: no column contract in the PostgreSQL migration DDL "
-            "(app.migration.shadow.postgres_catalog)"
-        )
-    return contracts
-
-
-def _columns_of_type(table: str, columns: Sequence[str], data_type: str) -> frozenset:
-    contracts = _contracts(table)
-    return frozenset(
-        name
-        for name in columns
-        if name in contracts and contracts[name].data_type == data_type
-    )
-
-
-# --------------------------------------------------------------- source db
-
-
-class _Source:
-    """Read/write handle over whichever backend ``settings`` names, with the
-    one dialect difference the exporter actually hits (``?`` vs ``%s``) shimmed
-    in a single place. Deliberately not an ORM or a repository: the exporter
-    needs raw rows in the database's own shape."""
-
-    def __init__(self, settings: "Settings", root_dir: Path) -> None:
-        self.scheme = database_identity(settings.database_url).scheme
-        if self.scheme == "postgresql":
-            from app.repositories.postgres.database import PostgresDatabase
-
-            self._database: Any = PostgresDatabase(settings, root_dir)
-        else:
-            from app.repositories.sqlite.database import SqliteDatabase
-
-            self._database = SqliteDatabase(settings, root_dir)
-
-    @property
-    def is_postgres(self) -> bool:
-        return self.scheme == "postgresql"
-
-    def close(self) -> None:
-        close = getattr(self._database, "close", None)
-        if close is not None:
-            close()
-
-    def sql(self, statement: str) -> str:
-        """Translate the module's ``?`` placeholders for PostgreSQL. Safe as a
-        blind replace because no statement here contains a literal ``?`` or a
-        ``LIKE`` pattern."""
-        return statement.replace("?", "%s") if self.is_postgres else statement
-
-    @staticmethod
-    def _require_bare(conn: Any) -> Any:
-        """Reject a read-budget wrapper.
-
-        Both backends wrap ``connect()``'s result when a per-request read
-        budget is in scope, and that wrapper prepends its own statement to
-        every ``execute`` -- on PostgreSQL a ``set_config('statement_timeout',
-        ..., true)``, which would steal the "first statement of the
-        transaction" slot that ``SET TRANSACTION`` needs, and would then cap
-        every page of a hours-long export at a request deadline. An export is
-        an offline operation; it must not be running inside a request budget
-        at all, so this is a loud failure rather than a silent downgrade.
-        """
-        if getattr(conn, "budget", None) is not None:
-            raise SyncExportError(
-                "an export must not run inside a request read budget: the "
-                "budgeted connection wrapper re-times every statement and "
-                "would truncate the export's own snapshot"
-            )
-        return conn
-
-    @contextmanager
-    def read(self) -> Iterator[Any]:
-        """One read connection holding ONE consistent snapshot of the ROWS.
-
-        Every table is read inside this window, so a package can never contain
-        a chunk whose source row was deleted halfway through the run. Files
-        are deliberately copied AFTER it closes -- see ``_write_files``.
-
-        PostgreSQL: ``SET TRANSACTION`` is issued as the first statement of
-        the transaction psycopg opens lazily -- the pool hands out an idle
-        connection (``_restore_client_defaults`` rolls back and resets
-        isolation/read_only before yielding), so no statement has run yet and
-        the SET is legal. ``statement_timeout`` is then lifted for this
-        transaction only: a whole-notebook scan can legitimately outlive the
-        serving deadline the pool configures, the same reason the knowhow
-        projection lock lifts it (``postgres/database.py``). ``SET LOCAL`` and
-        ``SET TRANSACTION`` both last exactly one transaction, and the next
-        borrower is reset again anyway, so nothing needs restoring.
-
-        SQLite: a deferred ``BEGIN``; WAL then pins the snapshot at the first
-        read and holds it until commit.
-        """
-        if self.is_postgres:
-            with self._database.connect() as conn:
-                self._require_bare(conn)
-                conn.execute(
-                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
-                )
-                conn.execute("SET LOCAL statement_timeout = 0")
-                yield conn
-            return
-        conn = self._require_bare(self._database.connect())
-        started = not conn.in_transaction
-        if started:
-            conn.execute("BEGIN")
-        try:
-            yield conn
-        except BaseException:
-            if started:
-                conn.rollback()
-            raise
-        else:
-            if started:
-                conn.commit()
-
-    @contextmanager
-    def write(self) -> Iterator[Any]:
-        with self._database.write() as conn:
-            yield conn
-
-    def fetch(
-        self, conn: Any, statement: str, params: Sequence[Any] = ()
-    ) -> list[dict[str, Any]]:
-        """Run one statement the caller has already bounded (``LIMIT``, or a
-        single-row lookup) and return its rows."""
-        cursor = conn.execute(self.sql(statement), tuple(params))
-        return [dict(row) for row in cursor.fetchall()]
-
-    def stream(
-        self, conn: Any, statement: str, params: Sequence[Any] = ()
-    ) -> Iterator[dict[str, Any]]:
-        """Iterate an UNBOUNDED statement without materializing it.
-
-        PostgreSQL needs a named (server-side) cursor for this: an ordinary
-        psycopg cursor fetches the whole result before the first row is
-        visible. SQLite's cursor is already lazy.
-        """
-        if self.is_postgres:
-            with conn.cursor(name=f"sync_export_{uuid.uuid4().hex}") as cursor:
-                cursor.execute(self.sql(statement), tuple(params))
-                for row in cursor:
-                    yield dict(row)
-            return
-        for row in conn.execute(self.sql(statement), tuple(params)):
-            yield dict(row)
-
-    def current_snapshot(self, conn: Any) -> str | None:
-        """This transaction's visibility snapshot as PostgreSQL's own text
-        form (``xmin:xmax:xip1,xip2,...``), or ``None`` on SQLite.
-
-        Must be called on the CALLER'S read connection, inside the window
-        ``read()`` opened: under ``REPEATABLE READ`` the snapshot is the one
-        every statement of that transaction sees, and it is only meaningful
-        as a record of THAT window. Taken on a different connection it would
-        describe a different (later) view, and the next export's compensation
-        pass would silently skip whatever committed in between.
-
-        The value is stored in ``sync_export_state.exported_snapshot`` so the
-        NEXT export can find the transactions that were still in flight here
-        and committed afterwards -- their ``sync_change_log`` rows carry a
-        ``seq`` below this run's watermark yet became visible only later, so a
-        plain ``seq > watermark`` window would skip them forever
-        (docs/incremental-sync-design.md §7).
-
-        SQLite has no equivalent and needs none: one writer at a time means
-        ``seq`` order is commit order, so the log has no such gap. ``None``
-        is the honest answer there, not a placeholder.
-        """
-        if not self.is_postgres:
-            return None
-        rows = self.fetch(conn, "SELECT pg_current_snapshot()::text AS snapshot")
-        return str(rows[0]["snapshot"])
-
-    @staticmethod
-    def snapshot_xmin(snapshot: str) -> int:
-        """The ``xmin`` of a stored ``pg_snapshot`` text -- the oldest
-        transaction id that was still in flight when it was taken, and
-        therefore the lower bound of the next export's compensation window
-        (``txid >= xmin``, a range scan over ``idx_sync_change_log_txid``).
-
-        Parsed in Python rather than handed to ``pg_snapshot_xmin()`` because
-        the caller needs this number as a BIND PARAMETER for that range scan:
-        a function call around the stored text would be opaque to the planner
-        at plan time, while a plain integer bound keeps it an index range.
-        The snapshot text is a closed, documented format --
-        ``xmin:xmax:xip1,xip2,...``, all decimal, the xip list possibly empty
-        -- so anything else is a corrupted or hand-edited watermark row and
-        is refused rather than guessed at.
-        """
-        parts = snapshot.split(":")
-        if (
-            len(parts) != 3
-            or not parts[0].isdigit()
-            or not parts[1].isdigit()
-            or (parts[2] and not all(item.isdigit() for item in parts[2].split(",")))
-        ):
-            raise SyncExportError(
-                "sync_export_state.exported_snapshot is not a PostgreSQL "
-                f"snapshot (expected 'xmin:xmax:xip', got {snapshot!r})"
-            )
-        return int(parts[0])
-
-    def columns(self, conn: Any, table: str) -> tuple[str, ...]:
-        """The table's column names in its own column order. Only the NAMES
-        are read live; types come from the migration DDL contract (see the
-        module docstring)."""
-        if self.is_postgres:
-            rows = self.fetch(
-                conn,
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_schema = current_schema() AND table_name = ? "
-                "ORDER BY ordinal_position",
-                (table,),
-            )
-            found = tuple(str(row["column_name"]) for row in rows)
-        else:
-            rows = self.fetch(conn, f"PRAGMA table_info({_quoted(table)})")
-            found = tuple(str(row["name"]) for row in rows)
-        if not found:
-            raise SyncExportError(f"source database has no table {table!r}")
-        return found
-
-    def _catalog_primary_key(self, conn: Any, table: str) -> tuple[str, ...]:
-        """The table's primary-key columns, in key order, or ``()`` when the
-        table has none. Read from the catalog rather than hard-coded, so a
-        parent join and a keyset page follow the real key and a later schema
-        change cannot leave a stale literal behind. Catalog-only -- callers
-        that need a row identity for a table with no catalog primary key
-        want ``sync_key`` instead, which also consults the sync manifest."""
-        if self.is_postgres:
-            rows = self.fetch(
-                conn,
-                "SELECT a.attname AS name FROM pg_index i "
-                "CROSS JOIN LATERAL unnest(i.indkey::smallint[]) "
-                "WITH ORDINALITY AS k(attnum, ord) "
-                "JOIN pg_attribute a "
-                "ON a.attrelid = i.indrelid AND a.attnum = k.attnum "
-                "WHERE i.indrelid = ?::regclass AND i.indisprimary "
-                "ORDER BY k.ord",
-                (table,),
-            )
-            return tuple(str(row["name"]) for row in rows)
-        rows = self.fetch(conn, f"PRAGMA table_info({_quoted(table)})")
-        keyed = sorted(
-            (int(row["pk"]), str(row["name"])) for row in rows if int(row["pk"]) > 0
-        )
-        return tuple(name for _position, name in keyed)
-
-    def _has_unique_surface(
-        self, conn: Any, table: str, columns: Sequence[str]
-    ) -> bool:
-        """Whether the LIVE catalog backs ``columns`` with a unique index or
-        constraint whose KEY columns are exactly that column set (order does
-        not matter -- uniqueness is a property of the set).
-
-        Used to guard a ``TableSyncSpec.key`` fallback: a registered key is
-        only a real row identity if the schema actually enforces it is
-        unique, not merely a claim in the manifest. Four kinds of index look
-        unique in the catalog but do not enforce what this caller needs, and
-        all four are rejected:
-
-        - PARTIAL (``indpred`` / SQLite's ``partial`` flag): uniqueness holds
-          only for rows satisfying a predicate this check does not evaluate.
-        - EXPRESSION keys (a ``0`` in ``indkey``): what is unique is the value
-          of some expression, not the column, so two rows can share the
-          column values this caller is about to match on.
-        - INCLUDE payload columns (everything past ``indnkeyatts``): they ride
-          along in the index but are not part of the uniqueness at all, so an
-          index on ``UNIQUE (a) INCLUDE (b)`` must not answer for ``(a, b)``.
-        - NOT VALID / NOT READY (``indisvalid``/``indisready``): a failed or
-          still-building ``CREATE INDEX CONCURRENTLY`` leaves an index the
-          planner ignores and the executor does not enforce.
-
-        SQLite has no INCLUDE columns and no invalid-index state, so only the
-        partial rule applies there. Its ``origin='pk'`` entries DO count: for
-        a WITHOUT ROWID or composite-primary-key table the primary key is a
-        real unique surface, and ``sync_key`` would have returned it from
-        ``_catalog_primary_key`` before ever reaching here anyway.
-        """
-        wanted = frozenset(columns)
-        if self.is_postgres:
-            rows = self.fetch(
-                conn,
-                "SELECT i.indexrelid AS relid, i.indnkeyatts AS keyatts, "
-                "k.attnum AS attnum, k.ord AS ord, a.attname AS name "
-                "FROM pg_index i "
-                "CROSS JOIN LATERAL unnest(i.indkey::smallint[]) "
-                "WITH ORDINALITY AS k(attnum, ord) "
-                "LEFT JOIN pg_attribute a "
-                "ON a.attrelid = i.indrelid AND a.attnum = k.attnum "
-                "WHERE i.indrelid = ?::regclass AND i.indisunique "
-                "AND i.indpred IS NULL AND i.indisvalid AND i.indisready",
-                (table,),
-            )
-            by_index: dict[Any, set[str]] = {}
-            expression_indexes: set[Any] = set()
-            for row in rows:
-                relid = row["relid"]
-                if int(row["ord"]) > int(row["keyatts"]):
-                    continue  # INCLUDE payload, not part of the uniqueness
-                if int(row["attnum"]) == 0:
-                    # An expression key column. The whole index is unusable as
-                    # a column-set identity, not just this one position.
-                    expression_indexes.add(relid)
-                    continue
-                by_index.setdefault(relid, set()).add(str(row["name"]))
-            return any(
-                frozenset(cols) == wanted
-                for relid, cols in by_index.items()
-                if relid not in expression_indexes
-            )
-        for index in self.fetch(conn, f"PRAGMA index_list({_quoted(table)})"):
-            if int(index["unique"]) != 1 or int(index["partial"] or 0) == 1:
-                continue
-            info = self.fetch(
-                conn, f"PRAGMA index_info({_quoted(str(index['name']))})"
-            )
-            if any(row["name"] is None for row in info):
-                continue  # an expression key column, same rule as PostgreSQL
-            if frozenset(str(row["name"]) for row in info) == wanted:
-                return True
-        return False
-
-    def sync_key(self, conn: Any, table: str) -> tuple[str, ...]:
-        """The table's synchronization key, in key order: the columns the
-        capture triggers, the exporter's keyset pages, and the importer's
-        upsert/prune all agree identify one row.
-
-        The catalog primary key is the answer whenever the table has one.
-        For the two tables that do not (``knowledge_object_sources``,
-        ``community_members`` -- SQLite cannot add a primary key to an
-        existing table in place, so v84 gives them a UNIQUE index instead of
-        a PRIMARY KEY; PostgreSQL 0064 gives them a real one), the columns
-        registered on ``TableSyncSpec.key`` are the answer, but only after
-        confirming the live catalog actually backs that column set with a
-        unique index/constraint -- a manifest claim with no enforcement
-        behind it on THIS database is a schema/manifest drift, not a usable
-        key.
-
-        When both a catalog primary key and a registered ``key`` exist they
-        must be the SAME ORDERED TUPLE, not merely the same column set. Order
-        is part of the key here for the same reason it is in
-        ``app.migration.sync.capture.key_columns``: the capture triggers build
-        ``key_json`` by naming the columns in their order, so the same set in
-        a different order produces a different JSON object for the same row,
-        and a log written under one order matches nothing when read under the
-        other. A later migration that gives a registered table a real primary
-        key must update the manifest in the same change, and reordering one
-        side is exactly as much of a break as renaming a column.
-
-        Every synced table must resolve to a non-empty key; this is a hard
-        error rather than an empty-tuple return so a caller can never again
-        fall through to an unkeyed code path.
-        """
-        catalog = self._catalog_primary_key(conn, table)
-        declared = spec_for(table).key
-        if catalog and declared and tuple(catalog) != tuple(declared):
-            raise SyncExportError(
-                f"{table}: TableSyncSpec.key disagrees with the catalog "
-                f"primary key (order is part of the key): "
-                f"manifest={tuple(declared)} catalog={tuple(catalog)}"
-            )
-        if catalog:
-            return catalog
-        if not declared:
-            raise SyncExportError(
-                f"{table}: no primary key in the catalog and no "
-                "TableSyncSpec.key registered; every synced table must "
-                "resolve to a synchronization key"
-            )
-        if not self._has_unique_surface(conn, table, declared):
-            raise SyncExportError(
-                f"{table}: TableSyncSpec.key {declared} has no covering "
-                "unique index/constraint on this catalog; the manifest key "
-                "and the live schema have drifted"
-            )
-        return declared
-
-
-# ------------------------------------------------------------- row encoding
-
-
-def _row_encoder(table: str, columns: Sequence[str]):
-    """Return ``row -> portable row`` for one table, keyed BY COLUMN.
-
-    Three classes, decided from the migration DDL contract and never from the
-    value: a ``jsonb`` column travels as text; a ``timestamp with time zone``
-    column travels as UTC ISO text, with NULL staying NULL (a missing instant
-    is not the empty string -- ``POSTGRES_EMPTY_TIME_SENTINELS`` columns such
-    as ``knowledge_objects.last_reviewed`` write ``null`` here too, and the
-    importer decides what its own backend stores for "no time"); everything
-    else goes through ``encode_value`` for the two shapes JSON cannot carry
-    natively, bytes and bool.
-    """
-    json_columns = _columns_of_type(table, columns, _JSON_TYPE)
-    timestamp_columns = _columns_of_type(table, columns, _TIMESTAMP_TYPE)
-
-    def encode(row: dict[str, Any]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for name, value in row.items():
-            if name in timestamp_columns:
-                result[name] = utc_timestamp_text(value)
-            elif name in json_columns:
-                result[name] = _json_text(value)
-            else:
-                result[name] = encode_value(value)
-        return result
-
-    return encode
-
-
-def _json_text(value: Any) -> Any:
-    """A JSON column's portable form: text, or NULL. psycopg hands back a
-    decoded ``list``/``dict`` for ``jsonb``; SQLite already holds text.
-    ``sort_keys`` because ``jsonb`` has no key order of its own to preserve,
-    so sorting is what makes two exports of one row byte-identical."""
-    if value is None or isinstance(value, str):
-        return value
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
-
-
-def _exported_columns(
-    source: _Source, columns: Sequence[str], table: str
-) -> tuple[str, ...]:
-    """Column names this table contributes to the package. The PostgreSQL
-    ``ordinal`` identity column of a rowid-ordinal table is dropped: it is a
-    backend-local surrogate for SQLite's rowid and the target reassigns its
-    own (§8)."""
-    if source.is_postgres and table in POSTGRES_ROWID_ORDINAL_TABLES:
-        return tuple(name for name in columns if name != "ordinal")
-    return tuple(columns)
-
-
-# --------------------------------------------------------------- scope SQL
-
-
-# This registry's key set must stay equal to the manifest's GLOBAL synced-layer
-# table set: when tests/test_sync_manifest.py's pinned GLOBAL roster changes,
-# an entry has to be added or removed HERE in the same change. The scoping rule
-# lives here rather than in the manifest on purpose -- PR-3's change-capture
-# trigger only needs a scope's parent key, and the importer needs no scoping at
-# all, so the exporter is the only consumer. tests/test_sync_export.py guards
-# both that equality and this table's agreement with _GLOBAL_KEY_QUERIES.
-#
-# A GLOBAL table has no column of its own saying which notebook a row belongs
-# to; each is reached over a DIFFERENT reference edge out of the exported
-# notebooks (see each table's TableSyncSpec.notes):
-#
-#   groups / group_members -- the group grants of the exported notebooks.
-#   object_schemas         -- the object types those notebooks' knowledge
-#                             objects and per-notebook schema overrides name.
-#                             Its own notebook_id has been '' for every row
-#                             since v47, so a notebook-scoped filter would
-#                             export nothing at all.
-#
-# ``(filter column on the GLOBAL table, name of the key set to bind)``.
-_GLOBAL_SCOPES: dict[str, tuple[str, str]] = {
-    "groups": ("id", "granted_group_ids"),
-    "group_members": ("group_id", "granted_group_ids"),
-    "object_schemas": ("object_type", "referenced_object_types"),
-}
-
-# How each key set above is collected from the exported notebooks. One entry
-# may have several queries; their results are unioned.
-_GLOBAL_KEY_QUERIES: dict[str, tuple[str, ...]] = {
-    "granted_group_ids": (
-        "SELECT DISTINCT principal_id AS value FROM notebook_grants "
-        "WHERE principal_type IN ("
-        + ", ".join(f"'{kind}'" for kind in _GROUP_PRINCIPAL_TYPES)
-        + ") AND notebook_id IN ({placeholders})",
-    ),
-    "referenced_object_types": (
-        "SELECT DISTINCT object_type AS value FROM knowledge_objects "
-        "WHERE notebook_id IN ({placeholders})",
-        "SELECT DISTINCT object_type AS value FROM notebook_object_schemas "
-        "WHERE notebook_id IN ({placeholders})",
-    ),
-}
-
-
-def _scope_of(table: str):
-    """This table's ``TableScope``. ``None`` is the LOCAL sentinel, which the
-    exporter must never reach -- it only ever walks ``synced_tables()``."""
-    scope = spec_for(table).scope
-    if scope is None:
-        raise SyncExportError(f"{table}: LOCAL table has no export scope")
-    return scope
-
-
-def _global_scope(table: str) -> tuple[str, str]:
-    scope = _GLOBAL_SCOPES.get(table)
-    if scope is None:
-        raise SyncExportError(
-            f"{table}: GLOBAL table has no registered scoping rule; add one to "
-            "_GLOBAL_SCOPES (and its key query) in the same change as the "
-            "manifest entry"
-        )
-    return scope
-
-
-def _parent_join_clause(source: _Source, conn: Any, table: str) -> tuple[str, str]:
-    """``(JOIN clauses, filtering "<alias>.<column>")`` for a PARENT-scoped
-    table: follow its ``scope_chain`` up to the ancestor that carries a
-    notebook column. The chain can be more than one hop
-    (``knowhow_cell_code`` -> ``knowhow_rows`` -> ``knowhow_tables``). Each
-    hop joins on the parent's real primary key read from the catalog, not on
-    a hard-coded ``id``, so a schema change cannot leave a stale literal here.
-    """
-    chain = scope_chain(table)
-    joins: list[str] = []
-    for index, (_child, child_column, parent) in enumerate(chain):
-        parent_key = source.sync_key(conn, parent)
-        if len(parent_key) != 1:
-            raise SyncExportError(
-                f"{table}: parent {parent!r} has the primary key {parent_key}; "
-                "a scope chain can only follow a single-column key"
-            )
-        joins.append(
-            f"JOIN {_quoted(parent)} t{index + 1} "
-            f"ON t{index + 1}.{_quoted(parent_key[0])} "
-            f"= t{index}.{_quoted(child_column)}"
-        )
-    root_column = _scope_of(chain[-1][2]).column
-    return " ".join(joins), f"t{len(chain)}.{_quoted(root_column)}"
-
-
-@dataclass(frozen=True)
-class _TableQuery:
-    # "SELECT <cols> FROM <table> t0 <joins>"
-    prefix: str
-    # The "<alias>.<column>" the scope key list is matched against.
-    filtered: str
-    # Synchronization key, in key order. Always non-empty -- sync_key()
-    # raises for a table that cannot resolve one.
-    key_columns: tuple[str, ...]
-    # ORDER BY list, already alias-qualified.
-    order_by: str
-
-
-def _table_query(
-    source: _Source, conn: Any, table: str, columns: Sequence[str]
-) -> _TableQuery:
-    """Resolve this table's scope and key against the catalog ONCE per table,
-    so a multi-page, multi-batch scan does not re-read the catalog."""
-    projection = ", ".join(f"t0.{_quoted(name)}" for name in columns)
-    head = f"SELECT {projection} FROM {_quoted(table)} t0"
-    scope = _scope_of(table)
-    if scope.kind is ScopeKind.NOTEBOOK:
-        joins, filtered = "", f"t0.{_quoted(scope.column)}"
-    elif scope.kind is ScopeKind.PARENT:
-        joins, filtered = _parent_join_clause(source, conn, table)
-    else:
-        joins, filtered = "", f"t0.{_quoted(_global_scope(table)[0])}"
-    key_columns = source.sync_key(conn, table)
-    return _TableQuery(
-        prefix=f"{head} {joins}".rstrip(),
-        filtered=filtered,
-        key_columns=key_columns,
-        order_by=", ".join(f"t0.{_quoted(name)}" for name in key_columns),
-    )
-
-
-def _scan(
-    source: _Source, conn: Any, query: _TableQuery, batch: Sequence[str]
-) -> Iterator[dict[str, Any]]:
-    """Yield one scope batch's rows in synchronization-key order.
-
-    Every synced table pages by keyset -- ``(key...) > (last key...)`` as an
-    SQL row value, supported by SQLite >= 3.15 and PostgreSQL -- so each
-    statement is bounded and the order is the key's. This includes the two
-    tables with no catalog primary key of their own
-    (``knowledge_object_sources``, ``community_members``): ``sync_key``
-    resolves their ``TableSyncSpec.key`` instead, guarded to only ever return
-    a column set the live catalog actually backs with a unique index/
-    constraint (v84/0064), so the same paging logic applies to them too.
-
-    Measured on PostgreSQL (120k rows per table, two notebooks, EXPLAIN
-    (ANALYZE, BUFFERS) on the first page and on page ~50) before this shape
-    was settled: no page re-sorts or re-scans the filtered set. Every page is
-    an index scan of the CHILD table's own primary key with the cursor as an
-    Index Cond, and the scope predicate resolves per row -- a filter for a
-    NOTEBOOK table, a Memoized parent index lookup for a one-hop PARENT table
-    (999 cache hits per 1000-row page), a per-row parent index scan plus a
-    Materialized two-row scan for the two-hop case. Page 50 costs the same as
-    page 1 (chunks 0.38 vs 0.48 ms, source_elements 0.26 vs 0.55 ms,
-    knowhow_cells 0.70 vs 0.71 ms), so the per-page cost is O(page), not
-    O(table). Batching by PARENT key instead was considered and rejected on
-    those numbers: the deepest chain's parent (knowhow_rows) has as many rows
-    as the child, so a parent-id list would need pagination of its own and
-    would buy nothing -- and no index exists solely to serve an export.
-    """
-    placeholders = ",".join("?" for _ in batch)
-    where = f"{query.filtered} IN ({placeholders})"
-    keys = ", ".join(f"t0.{_quoted(name)}" for name in query.key_columns)
-    cursor: tuple[Any, ...] | None = None
-    while True:
-        statement = f"{query.prefix} WHERE {where}"
-        params = list(batch)
-        if cursor is not None:
-            statement += f" AND ({keys}) > ({','.join('?' for _ in cursor)})"
-            params.extend(cursor)
-        statement += f" ORDER BY {query.order_by} LIMIT {_PAGE_ROWS}"
-        page = source.fetch(conn, statement, params)
-        if not page:
-            return
-        yield from page
-        advanced = tuple(page[-1][name] for name in query.key_columns)
-        if advanced == cursor:
-            raise SyncExportError(
-                f"keyset cursor did not advance past {advanced!r}; the primary "
-                "key read from the catalog is not unique"
-            )
-        cursor = advanced
-        if len(page) < _PAGE_ROWS:
-            return
 
 
 # ----------------------------------------------------------- package writer
@@ -1137,7 +505,47 @@ def _write_files(
     return copied, missing
 
 
+def _write_changed_files(
+    writer: _PackageWriter, entries: Sequence[tuple[str, Path]]
+) -> tuple[int, list[str]]:
+    """The incremental counterpart of ``_write_files``: copy only the files
+    the package's own upserted rows point at, already resolved to
+    ``(package-relative path, source path)`` by
+    ``incremental.resolve_file_requests``.
+
+    Same placement as the full path -- after the read snapshot closes -- and
+    the same treatment of a file that vanished in between: reported through
+    ``missing_files``, never fatal. What a package does NOT carry here is the
+    bytes of a DELETED row; those are removed at the target from the target's
+    own row paths when PR-3c replays ``deletes.jsonl``, because the source no
+    longer has the row that would say which file to remove."""
+    copied = 0
+    missing: list[str] = []
+    for relative, origin in entries:
+        if writer.copy_file(relative, origin):
+            copied += 1
+        else:
+            missing.append(relative)
+    return copied, missing
+
+
 # ----------------------------------------------------------------- watermark
+
+
+def _capture_gate_open(source: _Source, conn: Any) -> bool:
+    """Whether source-side change capture is on, as of this read snapshot.
+
+    Both the watermark this export writes and the mode it runs in hang off
+    this one answer, and both must hang off the SAME one: a gate flipped
+    between two reads would let an export record "captured" for a window the
+    log does not actually cover."""
+    return bool(
+        source.fetch(
+            conn,
+            "SELECT 1 AS gate_open FROM sync_capture_control "
+            "WHERE singleton = 1 AND enabled",
+        )
+    )
 
 
 def _captured_through_seq(source: _Source, conn: Any) -> int:
@@ -1153,33 +561,25 @@ def _captured_through_seq(source: _Source, conn: Any) -> int:
     open with no log entry to prove it, so 0 (never a stale high-water mark)
     is the only honest answer (docs/incremental-sync-design.md §7).
 
-    ⚠ PR-3b: THIS NUMBER IS NOT A SAFE RESUME POINT ON PostgreSQL, and
-    ``_advance_watermark`` stores it as one only because PR-3a never reads
-    the log back. ``seq`` is handed out by a sequence at INSERT time, but a
-    row becomes VISIBLE at COMMIT time, and those two orders are not the
-    same. Concretely: writer A takes ``seq = 100`` and is still
-    uncommitted when this export's REPEATABLE READ snapshot is taken;
-    writer B takes ``seq = 101`` and commits before it. The snapshot sees
-    101 and not 100, ``MAX(seq)`` is 101, and a later incremental export
-    resuming from ``> 101`` skips A's change forever -- silently, because
-    nothing is missing from the log itself, only from the window we chose.
+    THIS NUMBER IS THE WATERMARK, AND IT IS A RESUME POINT ONLY TOGETHER WITH
+    THE SNAPSHOT STORED BESIDE IT. On PostgreSQL ``seq`` is handed out by a
+    sequence at INSERT time while a row becomes VISIBLE at COMMIT time, and
+    those two orders are not the same: writer A can hold ``seq = 100``
+    uncommitted while writer B takes ``seq = 101`` and commits first, so this
+    snapshot sees 101 and not 100 and ``MAX(seq)`` is 101. Resuming from
+    ``seq > 101`` alone would skip A's change forever -- silently, because
+    nothing is missing from the log itself, only from the window.
 
-    That gap is the entire reason ``sync_change_log.txid`` exists
-    (``pg_current_xact_id()``, NULL on SQLite, which has no concurrent
-    writers to lose). PR-3b's incremental read must not resume from ``seq``
-    alone: it has to bound the window by the snapshot's ``xmin`` -- rows
-    whose ``txid`` was still in flight when this snapshot was taken have to
-    be re-read by the next run regardless of their ``seq``. Whoever
-    implements that read should change this function's contract (and the
-    column this writes) rather than layering a correction on top of a
-    number that was never a resume point.
+    That is why ``_advance_watermark`` stores ``exported_snapshot``
+    (``pg_current_snapshot()``) next to this number, and why
+    ``incremental.compensation_rows`` re-reads, on the next run, exactly the
+    log rows whose ``txid`` was still in flight at this snapshot -- whatever
+    their ``seq``. The pair ``(exported_through_seq, exported_snapshot)`` is
+    the resume point; neither half is one on its own. SQLite needs only the
+    first half (one writer at a time means ``seq`` order is commit order),
+    and stores NULL for the second.
     """
-    gate_open = source.fetch(
-        conn,
-        "SELECT 1 AS gate_open FROM sync_capture_control "
-        "WHERE singleton = 1 AND enabled",
-    )
-    if not gate_open:
+    if not _capture_gate_open(source, conn):
         return 0
     row = source.fetch(
         conn, "SELECT COALESCE(MAX(seq), 0) AS max_seq FROM sync_change_log"
@@ -1193,34 +593,44 @@ def _advance_watermark(
     package_id: str,
     exported_at: datetime,
     captured_through_seq: int,
+    *,
+    captured: bool,
+    snapshot: str | None,
 ) -> None:
     """Upsert this target's watermark, only once the package is complete on
     disk (§7): a failed export must leave the watermark where it was so a
     re-run is always safe.
 
-    What gets stored is ``_captured_through_seq``'s snapshot-visible
-    ``MAX(seq)``, and that function's docstring explains why, on PostgreSQL,
-    it is a RECORD of how far this export saw rather than a point the next
-    one may resume from: a concurrent writer holding a lower ``seq`` can
-    commit after our snapshot was taken, so resuming from ``> this`` would
-    drop its change. PR-3a is unaffected -- every package is a full snapshot
-    and nothing reads the log back (``manifest.json`` still writes
-    ``from_seq = to_seq = 0``). PR-3b is where it matters, and it has to
-    bound its window with ``sync_change_log.txid`` / the snapshot's ``xmin``
-    before treating any stored seq as a starting point."""
+    Three columns together are what the NEXT export resumes from:
+    ``exported_through_seq`` (this snapshot's ``MAX(seq)``),
+    ``exported_snapshot`` (this transaction's ``pg_current_snapshot()``, NULL
+    on SQLite) and ``captured`` (whether the gate was open, i.e. whether
+    there is a log behind that seq at all). ``captured = 0`` is what makes a
+    watermark unusable as a resume point without making it a lie: it still
+    records what this export saw, it just refuses to promise the log covers
+    the gap. Written for a FULL export too -- that is what lets the export
+    after it be incremental.
+
+    See ``_captured_through_seq`` for why the seq alone is not a resume
+    point on PostgreSQL, and ``incremental.compensation_rows`` for what the
+    snapshot is used for."""
     moment: Any = exported_at if source.is_postgres else exported_at.isoformat()
+    flag: Any = captured if source.is_postgres else int(captured)
     with source.write() as conn:
         conn.execute(
             source.sql(
                 "INSERT INTO sync_export_state "
-                "(target_env, exported_through_seq, exported_at, package_id) "
-                "VALUES (?, ?, ?, ?) "
+                "(target_env, exported_through_seq, exported_at, package_id, "
+                "captured, exported_snapshot) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT (target_env) DO UPDATE SET "
                 "exported_through_seq = excluded.exported_through_seq, "
                 "exported_at = excluded.exported_at, "
-                "package_id = excluded.package_id"
+                "package_id = excluded.package_id, "
+                "captured = excluded.captured, "
+                "exported_snapshot = excluded.exported_snapshot"
             ),
-            (target_env, captured_through_seq, moment, package_id),
+            (target_env, captured_through_seq, moment, package_id, flag, snapshot),
         )
 
 
@@ -1291,14 +701,29 @@ def export_notebooks(
     out_dir: Path,
     notebook_ids: Sequence[str] | None,
     source_env: str,
+    full: bool = False,
 ) -> ExportReport:
-    """Write one full export package under ``out_dir`` and return its report.
+    """Write one export package under ``out_dir`` and return its report.
 
     ``notebook_ids=None`` means "every live, non-mirror notebook". An EMPTY
     sequence is rejected rather than treated as None: an empty package is
     never what a caller meant, and a ``--notebook`` list that silently became
     empty upstream would otherwise produce a package that imports cleanly and
     carries nothing.
+
+    Three shapes, and the caller does not pick between them directly
+    (docs/incremental-sync-design.md §7 "模式判定"):
+
+    - ``notebook_ids`` given -> a SCOPED full package. It carries exactly the
+      named notebooks and does NOT advance this target's watermark: a
+      watermark earned by exporting two notebooks would put every other
+      notebook's changes below the next window's floor, where nothing would
+      ever pick them up again.
+    - ``full=True``, or no usable watermark for this target (capture gate
+      closed, no watermark row, or one whose ``captured`` is 0) -> a full
+      BASELINE package over every live notebook. It advances the watermark,
+      which is what makes the next export incremental.
+    - otherwise -> an INCREMENTAL package built from the change log.
 
     The package is assembled in a sibling ``.tmp`` directory and renamed into
     place only after ``manifest.json`` is written last, so a reader can treat
@@ -1322,6 +747,7 @@ def export_notebooks(
             out_dir=Path(out_dir),
             notebook_ids=notebook_ids,
             source_env=source_env,
+            full=full,
         )
     finally:
         source.close()
@@ -1335,11 +761,16 @@ def _export(
     out_dir: Path,
     notebook_ids: Sequence[str] | None,
     source_env: str,
+    full: bool,
 ) -> ExportReport:
     package_id = uuid.uuid4().hex
     exported_at = datetime.now(timezone.utc)
-    final_dir = out_dir / package_dir_name(source_env, 0, 0, package_id)
-    staging_dir = final_dir.with_name(final_dir.name + ".tmp")
+    # The staging name is fixed before the window is known, because the
+    # directory has to exist before the first byte is written; the FINAL name
+    # carries the real ``from``/``to`` and is computed by _assemble. Keeping
+    # the ``0-0`` spelling here also keeps the staging sweep's prefix/suffix
+    # rule (``sync-<env>-...tmp``) matching what earlier versions left behind.
+    staging_dir = out_dir / (package_dir_name(source_env, 0, 0, package_id) + ".tmp")
     out_dir.mkdir(parents=True, exist_ok=True)
     warnings = _sweep_stale_staging(out_dir, source_env)
     staging_dir.mkdir()
@@ -1353,14 +784,277 @@ def _export(
             notebook_ids=notebook_ids,
             package_id=package_id,
             exported_at=exported_at,
-            final_dir=final_dir,
+            out_dir=out_dir,
             warnings=warnings,
+            full=full,
         )
     except BaseException:
         # A half-written package must never be left where the next run would
         # sweep it and report it as someone else's crash.
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise
+
+
+@dataclass
+class _Rows:
+    """What one mode's row phase produced. The two paths (full table scan,
+    change-log window) differ only in how they fill this in; everything after
+    it -- users, checksums, manifest, rename, watermark -- is shared."""
+
+    notebooks: tuple[str, ...]
+    skipped: dict[str, str]
+    table_counts: dict[str, int]
+    table_entries: dict[str, dict[str, Any]]
+    deletes: int
+    deleted_notebooks: tuple[str, ...]
+    skipped_mirror_changes: int
+    warnings: list[str]
+    # Full: the notebook ids whose storage roots are copied wholesale.
+    # Incremental: the ``incremental.FileRequest`` list for the changed rows.
+    # Resolved in the file phase, after the read snapshot closes.
+    file_plan: Any
+
+
+def _table_entry(writer: _PackageWriter, table: str, columns, written: int) -> dict:
+    return {
+        "columns": list(columns),
+        "rows": written,
+        "sha256": writer.checksums[rows_path(table)],
+    }
+
+
+def _full_rows(
+    source: _Source,
+    conn: Any,
+    writer: _PackageWriter,
+    users: _UserIds,
+    notebook_ids: Sequence[str] | None,
+) -> _Rows:
+    """The table-scan path: every row of every synced table that belongs to
+    the selected notebooks. ``deletes.jsonl`` is empty by construction -- a
+    full package states what EXISTS, and the importer reconciles by deleting
+    whatever it holds that the package does not carry."""
+    selection = _select_notebooks(source, conn, notebook_ids)
+    global_keys = _global_keys(source, conn, selection.exported)
+    table_counts: dict[str, int] = {}
+    table_entries: dict[str, dict[str, Any]] = {}
+    for table in synced_tables():
+        columns, written = _write_table(
+            source, conn, writer, table, selection.exported, global_keys, users
+        )
+        table_counts[table] = written
+        table_entries[table] = _table_entry(writer, table, columns, written)
+    with writer.lines(DELETES_NAME):
+        pass
+    return _Rows(
+        notebooks=selection.exported,
+        skipped=dict(selection.skipped),
+        table_counts=table_counts,
+        table_entries=table_entries,
+        deletes=0,
+        deleted_notebooks=(),
+        skipped_mirror_changes=0,
+        warnings=[],
+        file_plan=list(selection.exported),
+    )
+
+
+def _write_delta_rows(
+    writer: _PackageWriter,
+    users: _UserIds,
+    table: str,
+    columns: Sequence[str],
+    rows: Sequence[Mapping[str, Any]],
+) -> int:
+    """Write one incremental table's rows through the SAME encoder a full
+    export uses, projecting each row down to the package's column set (the
+    read may have carried a key column that the package does not export)."""
+    encode = _row_encoder(table, columns)
+    user_columns, principal_columns = _identity_columns(table)
+    written = 0
+    with writer.lines(rows_path(table)) as write:
+        for row in rows:
+            projected = {name: row[name] for name in columns}
+            users.observe(projected, user_columns, principal_columns)
+            write(json_line(encode(projected)))
+            written += 1
+    return written
+
+
+def _incremental_rows(
+    source: _Source,
+    conn: Any,
+    writer: _PackageWriter,
+    users: _UserIds,
+    watermark: Any,
+) -> _Rows:
+    """The change-log path (docs/incremental-sync-design.md §7).
+
+    Table order is copy_rank, with two deliberate deferrals, because two
+    table groups cannot be written until the package's notebook set is known:
+
+    - ``notebooks`` last-but-one, so every notebook carrying ANY row in this
+      package gets a ``notebooks`` row even when the notebook itself did not
+      change. That keeps ``manifest.notebooks`` equal to
+      ``rows/notebooks.jsonl``, the invariant the importer's preflight has
+      always checked, instead of making an incremental package the one shape
+      where the two legitimately disagree.
+    - the GLOBAL tables last, because their seed set (``_global_keys``) is
+      resolved FROM the exported notebooks.
+
+    Only the file-creation order inside the package moves; the manifest's
+    table map is sorted and the importer walks tables by copy_rank out of the
+    manifest, never by directory listing.
+    """
+    compensation = incremental.compensation_rows(source, conn, watermark)
+    notebook_state = incremental.NotebookState(source, conn)
+    table_counts: dict[str, int] = {}
+    table_entries: dict[str, dict[str, Any]] = {}
+    notebooks: set[str] = set()
+    deleted_notebooks: set[str] = set()
+    skipped: dict[str, str] = {}
+    delete_entries: list[dict[str, Any]] = []
+    files: list[Any] = []
+    warnings: list[str] = []
+    mirror_changes = 0
+    deferred: list[str] = []
+
+    def absorb(table: str, delta: Any, columns, extra: Sequence[Mapping] = ()) -> None:
+        nonlocal mirror_changes
+        rows = list(delta.rows) + list(extra)
+        table_counts[table] = _write_delta_rows(writer, users, table, columns, rows)
+        table_entries[table] = _table_entry(writer, table, columns, table_counts[table])
+        notebooks.update(delta.notebooks)
+        deleted_notebooks.update(delta.deleted_notebooks)
+        delete_entries.extend(delta.deletes)
+        files.extend(delta.files)
+        warnings.extend(delta.warnings)
+        mirror_changes += delta.skipped_mirror
+        for notebook_id, reason in delta.skipped.items():
+            skipped.setdefault(notebook_id, reason)
+
+    def delta_for(table: str) -> tuple[Any, tuple[str, ...], tuple[str, ...]]:
+        columns = _exported_columns(source, source.columns(conn, table), table)
+        key_columns = source.sync_key(conn, table)
+        # A key column the package does not export still has to be READ, or
+        # the row could not be matched back to the log entry that named it.
+        read_columns = columns + tuple(
+            name for name in key_columns if name not in columns
+        )
+        changes = incremental.compact(source, conn, table, watermark, compensation)
+        delta = incremental.table_delta(
+            source,
+            conn,
+            table=table,
+            columns=read_columns,
+            key_columns=key_columns,
+            changes=changes,
+            notebooks=notebook_state,
+        )
+        return delta, columns, key_columns
+
+    for table in synced_tables():
+        if table == "notebooks" or _scope_of(table).kind is ScopeKind.GLOBAL:
+            deferred.append(table)
+            continue
+        delta, columns, _key_columns = delta_for(table)
+        absorb(table, delta, columns)
+
+    delta, columns, key_columns = delta_for("notebooks")
+    absorb("notebooks", delta, columns, _backfilled_notebooks(
+        source, conn, delta, columns, key_columns, notebooks
+    ))
+
+    global_keys = _global_keys(source, conn, sorted(notebooks))
+    for table in deferred:
+        if table == "notebooks":
+            continue
+        delta, columns, key_columns = delta_for(table)
+        absorb(table, delta, columns, _global_seed_rows(
+            source, conn, table, columns, key_columns, delta.rows, global_keys,
+        ))
+
+    with writer.lines(DELETES_NAME) as write:
+        for entry in delete_entries:
+            write(json_line(entry))
+    return _Rows(
+        notebooks=tuple(sorted(notebooks)),
+        skipped=skipped,
+        table_counts=table_counts,
+        table_entries=table_entries,
+        deletes=len(delete_entries),
+        deleted_notebooks=tuple(sorted(deleted_notebooks)),
+        skipped_mirror_changes=mirror_changes,
+        warnings=warnings,
+        file_plan=files,
+    )
+
+
+def _backfilled_notebooks(
+    source: _Source,
+    conn: Any,
+    delta: Any,
+    columns: Sequence[str],
+    key_columns: Sequence[str],
+    notebooks: set[str],
+) -> list[Mapping[str, Any]]:
+    """The ``notebooks`` rows this package owes for notebooks it carries rows
+    of but whose own row did not change inside the window.
+
+    Without them ``manifest.notebooks`` (every notebook the package touches)
+    and ``rows/notebooks.jsonl`` (only the ones that changed) would disagree,
+    and that equality is a security check, not bookkeeping: it is what stops a
+    package from carrying rows for a notebook it never declared.
+
+    Folds this table's OWN notebooks into ``notebooks`` first -- it runs
+    before the caller absorbs the delta, and a notebook that changed only in
+    the ``notebooks`` table has to end up declared too."""
+    notebooks.update(delta.notebooks)
+    present = {
+        incremental.key_text(incremental.row_key(row, key_columns))
+        for row in delta.rows
+    }
+    wanted = [
+        {key_columns[0]: notebook_id}
+        for notebook_id in sorted(notebooks)
+        if incremental.key_text({key_columns[0]: notebook_id}) not in present
+    ]
+    found = incremental.read_rows_by_key(
+        source, conn, "notebooks", columns, key_columns, wanted
+    )
+    return [found[text] for text in sorted(found)]
+
+
+def _global_seed_rows(
+    source: _Source,
+    conn: Any,
+    table: str,
+    columns: Sequence[str],
+    key_columns: Sequence[str],
+    already: Sequence[Mapping[str, Any]],
+    global_keys: Mapping[str, tuple[str, ...]],
+) -> list[Mapping[str, Any]]:
+    """A GLOBAL table's SEED rows: the groups/object types the package's
+    notebooks reference, exactly as a full export resolves them.
+
+    An incremental package carries these even when they did not change, for
+    the same reason a full one does -- a notebook arriving at the target for
+    the first time needs the group its grants point at to exist. Every GLOBAL
+    table is ``seed_only``, so re-sending an unchanged row is a no-op there
+    (§3), and the window's own upserts are preferred over the seed scan for
+    any key both produce."""
+    seen = {
+        incremental.key_text(incremental.row_key(row, key_columns))
+        for row in already
+    }
+    query = _table_query(source, conn, table, columns)
+    extra: dict[str, Mapping[str, Any]] = {}
+    for batch in _batched(list(global_keys[_global_scope(table)[1]]), _ID_BATCH):
+        for row in _scan(source, conn, query, batch):
+            text = incremental.key_text(incremental.row_key(row, key_columns))
+            if text not in seen:
+                extra[text] = row
+    return [extra[text] for text in sorted(extra)]
 
 
 def _assemble(
@@ -1373,40 +1067,70 @@ def _assemble(
     notebook_ids: Sequence[str] | None,
     package_id: str,
     exported_at: datetime,
-    final_dir: Path,
+    out_dir: Path,
     warnings: Sequence[str],
+    full: bool,
 ) -> ExportReport:
     users = _UserIds()
-    table_counts: dict[str, int] = {}
-    table_entries: dict[str, dict[str, Any]] = {}
+    scoped = notebook_ids is not None
 
     with source.read() as conn:
-        selection = _select_notebooks(source, conn, notebook_ids)
-        global_keys = _global_keys(source, conn, selection.exported)
-        for table in synced_tables():
-            columns, written = _write_table(
-                source, conn, writer, table, selection.exported, global_keys, users
-            )
-            table_counts[table] = written
-            table_entries[table] = {
-                "columns": list(columns),
-                "rows": written,
-                "sha256": writer.checksums[rows_path(table)],
-            }
+        # FIRST statement of the transaction that needs a snapshot, so on
+        # PostgreSQL this both reads and PINS the visibility snapshot every
+        # later statement here shares -- including the change-log window. A
+        # snapshot taken after the log had been read would describe a
+        # different instant than the package's own contents.
+        snapshot = source.current_snapshot(conn)
+        gate_open = _capture_gate_open(source, conn)
+        # A scoped export is never a link in the chain, so it neither reads
+        # the watermark nor writes one.
+        watermark = (
+            None if scoped else incremental.read_watermark(source, conn, target_env)
+        )
+        resumable = (
+            not full
+            and gate_open
+            and watermark is not None
+            and watermark.captured
+        )
+        if resumable:
+            produced = _incremental_rows(source, conn, writer, users, watermark)
+        else:
+            produced = _full_rows(source, conn, writer, users, notebook_ids)
         user_count = _write_users(source, conn, writer, sorted(users.ids))
-        with writer.lines(DELETES_NAME):
-            pass  # PR-3a reads the log for its watermark only; deletes/kg
-            # epochs are not replayed from it until PR-3b's incremental
-            # reader exists.
         with writer.lines(KG_EPOCHS_NAME):
-            pass
+            pass  # PR-3b does not fold KG resets; see incremental.OPERATION_KG_EPOCH.
         captured_through_seq = _captured_through_seq(source, conn)
+
+    mode = MODE_INCREMENTAL if resumable else MODE_FULL
+    if scoped:
+        # A subset package makes no claim about a sequence range: it is not on
+        # the chain, so a reader must not be able to mistake it for one.
+        from_seq, to_seq, base_package_id = 0, 0, ""
+    elif resumable:
+        assert watermark is not None
+        from_seq = watermark.exported_through_seq + 1
+        # max(): prune-log can legitimately empty the log below a watermark,
+        # which drops MAX(seq) to 0. The watermark must never move backwards.
+        to_seq = max(captured_through_seq, watermark.exported_through_seq)
+        base_package_id = watermark.package_id
+    else:
+        from_seq, to_seq, base_package_id = 0, captured_through_seq, ""
 
     # Outside the row snapshot: rows first, then the files they point at (see
     # _write_files).
-    file_count, missing_files = _write_files(
-        writer, Path(settings.storage_dir), selection.exported
-    )
+    run_warnings = list(warnings) + produced.warnings
+    storage_dir = Path(settings.storage_dir)
+    if resumable:
+        requests, file_warnings = incremental.resolve_file_requests(
+            storage_dir, produced.file_plan
+        )
+        run_warnings.extend(file_warnings)
+        file_count, missing_files = _write_changed_files(writer, requests)
+    else:
+        file_count, missing_files = _write_files(
+            writer, storage_dir, produced.file_plan
+        )
     checksums_sha256 = writer.document(
         CHECKSUMS_NAME, dict(sorted(writer.checksums.items())), checksum=False
     )
@@ -1426,10 +1150,15 @@ def _assemble(
                 "postgres_version": POSTGRES_SCHEMA_MANIFEST.postgres_version,
             },
             "embed_runtime_dim": int(settings.embed_runtime_dim),
-            "from_seq": 0,
-            "to_seq": 0,
-            "notebooks": list(selection.exported),
-            "tables": table_entries,
+            "mode": mode,
+            "from_seq": from_seq,
+            "to_seq": to_seq,
+            "base_package_id": base_package_id,
+            "notebooks": list(produced.notebooks),
+            "deleted_notebooks": list(produced.deleted_notebooks),
+            "tables": produced.table_entries,
+            "deletes": produced.deletes,
+            "kg_epochs": 0,
             "users": user_count,
             "files": file_count,
             # Package-relative paths the exporter could not read. Carried in
@@ -1442,20 +1171,38 @@ def _assemble(
         checksum=False,
     )
     writer.finish()
+    final_dir = out_dir / package_dir_name(source_env, from_seq, to_seq, package_id)
     writer.root.rename(final_dir)
-    _advance_watermark(
-        source, target_env, package_id, exported_at, captured_through_seq
-    )
+    if not scoped:
+        _advance_watermark(
+            source,
+            target_env,
+            package_id,
+            exported_at,
+            captured_through_seq,
+            captured=gate_open,
+            snapshot=snapshot,
+        )
     return ExportReport(
         package_dir=final_dir,
         package_id=package_id,
-        notebooks=selection.exported,
-        skipped=MappingProxyType(dict(sorted(selection.skipped.items()))),
-        table_counts=MappingProxyType(dict(sorted(table_counts.items()))),
+        notebooks=produced.notebooks,
+        skipped=MappingProxyType(dict(sorted(produced.skipped.items()))),
+        table_counts=MappingProxyType(dict(sorted(produced.table_counts.items()))),
         file_count=file_count,
         bytes_written=writer.bytes_written,
-        mode="full",
+        mode=mode,
         captured_through_seq=captured_through_seq,
-        warnings=tuple(warnings),
+        from_seq=from_seq,
+        to_seq=to_seq,
+        base_package_id=base_package_id,
+        deletes=produced.deletes,
+        deleted_notebooks=produced.deleted_notebooks,
+        skipped_mirror_changes=produced.skipped_mirror_changes,
+        empty=resumable and produced.deletes == 0
+        and not any(produced.table_counts.values()),
+        scoped=scoped,
+        watermark_advanced=not scoped,
+        warnings=tuple(run_warnings),
         missing_files=tuple(missing_files),
     )

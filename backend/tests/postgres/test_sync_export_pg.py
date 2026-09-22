@@ -220,7 +220,25 @@ def test_the_unexported_notebook_contributes_no_row(seeded):
     assert not leaked, leaked
 
 
-def test_export_writes_the_target_watermark(seeded):
+def test_export_writes_the_target_watermark(seeded, export_settings, tmp_path):
+    """Taken UNSCOPED on purpose: a ``--notebook`` export covers a subset and
+    deliberately leaves the watermark alone (PR-3b), so the fixture's own
+    scoped package is not the one that writes this row."""
+    # The fixture's own export was SCOPED, so it must have left no watermark
+    # row at all -- the contrast that makes the assertions below meaningful.
+    with seeded["repo"]._connect() as db:
+        assert db.execute(
+            "SELECT 1 FROM sync_export_state WHERE target_env=%s", (TARGET_ENV,)
+        ).fetchone() is None
+
+    report = export_notebooks(
+        export_settings,
+        target_env=TARGET_ENV,
+        out_dir=tmp_path / "watermark-out",
+        notebook_ids=None,
+        source_env=SOURCE_ENV,
+    )
+
     with seeded["repo"]._connect() as db:
         row = db.execute(
             "SELECT * FROM sync_export_state WHERE target_env=%s", (TARGET_ENV,)
@@ -228,8 +246,14 @@ def test_export_writes_the_target_watermark(seeded):
 
     assert row is not None
     assert row["exported_through_seq"] == 0
-    assert row["package_id"] == seeded["report"].package_id
+    assert row["package_id"] == report.package_id
     assert row["exported_at"].tzinfo is not None
+    # The capture gate is closed on a freshly migrated database, so this
+    # watermark is explicitly NOT one an incremental window may resume from.
+    assert row["captured"] is False
+    # The snapshot text IS recorded either way -- it describes this export's
+    # read window, which is a fact about this run, not a promise about the log.
+    assert ":" in str(row["exported_snapshot"])
 
 
 def test_a_missing_instant_is_null_not_an_empty_string(seeded):
@@ -309,7 +333,10 @@ def test_current_snapshot_returns_this_transactions_snapshot(seeded):
         source.close()
 
     assert isinstance(snapshot, str)
-    assert re.fullmatch(r"\d+:\d+:(\d+(,\d+)*)?", snapshot), snapshot
+    # re.ASCII on purpose, same as snapshot_xmin's own check: \d without it
+    # also matches every non-ASCII decimal script, which would make this
+    # shape assertion weaker than the parser it is meant to describe.
+    assert re.fullmatch(r"\d+:\d+:(?:\d+(?:,\d+)*)?", snapshot, re.ASCII), snapshot
     parsed = _Source.snapshot_xmin(snapshot)
     assert parsed == int(native_xmin)
     assert parsed <= int(native_xmax)
@@ -444,7 +471,7 @@ def test_two_no_sqlite_pk_tables_keyset_page_correctly_on_postgres(
     proving is that the ``(pk...) > (last pk...)`` cursor neither skips a row
     at a page boundary nor repeats one, not that PostgreSQL can hold 1000+
     rows."""
-    from app.migration.sync import export as export_module
+    from app.migration.sync import database as database_module
 
     notebook = _seed(repository, "paged")
     with repository._write() as db:
@@ -471,7 +498,7 @@ def test_two_no_sqlite_pk_tables_keyset_page_correctly_on_postgres(
                 (f"can-page-{index:03d}", notebook, f"comm-page-{index:03d}", "n"),
             )
 
-    monkeypatch.setattr(export_module, "_PAGE_ROWS", 4)
+    monkeypatch.setattr(database_module, "_PAGE_ROWS", 4)
     report = export_notebooks(
         export_settings, target_env=TARGET_ENV, out_dir=tmp_path / "paged",
         notebook_ids=[notebook], source_env=SOURCE_ENV,
@@ -518,17 +545,42 @@ def test_captured_through_seq_reads_the_change_log_high_water_mark_on_postgres(
         export_settings,
         target_env=TARGET_ENV,
         out_dir=tmp_path / "out",
-        notebook_ids=[notebook],
+        notebook_ids=None,
         source_env=SOURCE_ENV,
     )
 
     assert report.captured_through_seq == 5
     with repository._connect() as db:
         row = db.execute(
-            "SELECT exported_through_seq FROM sync_export_state WHERE target_env=%s",
+            "SELECT exported_through_seq, captured FROM sync_export_state "
+            "WHERE target_env=%s",
             (TARGET_ENV,),
         ).fetchone()
     assert row["exported_through_seq"] == 5
+    assert row["captured"] is True
+
+    # ...and a SCOPED export taken afterwards leaves that row exactly as it
+    # is: its coverage is a chosen subset, so its watermark would hide every
+    # other notebook's changes below the next window's floor.
+    with repository._write() as db:
+        db.execute(
+            "INSERT INTO sync_change_log "
+            "(table_name, key_json, operation, changed_at) "
+            "VALUES ('notebooks', '{}'::jsonb, 'upsert', now())"
+        )
+    export_notebooks(
+        export_settings,
+        target_env=TARGET_ENV,
+        out_dir=tmp_path / "out",
+        notebook_ids=[notebook],
+        source_env=SOURCE_ENV,
+    )
+    with repository._connect() as db:
+        after = db.execute(
+            "SELECT exported_through_seq FROM sync_export_state WHERE target_env=%s",
+            (TARGET_ENV,),
+        ).fetchone()
+    assert after["exported_through_seq"] == 5
 
 
 # ------------------------------------------- unique-surface probe (PG shapes)

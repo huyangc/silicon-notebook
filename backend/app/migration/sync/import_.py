@@ -1,5 +1,11 @@
 """Full-package import -- the target side of docs/incremental-sync-design.md
-§8's ``from_seq = 0`` special case.
+§8, for ``mode=full`` packages only.
+
+A full package is a SNAPSHOT of the notebooks it names, and every phase below
+treats it as one. From package format 2 it may carry a non-zero ``to_seq``
+(the change-log watermark its export saw); what it may never carry is an
+incremental payload, which ``_reject_incremental_payload`` refuses outright
+and PR-3c is where it gets applied.
 
 ``import_package`` applies one package written by ``app.migration.sync.export``
 to whichever backend ``settings.database_url`` names. The module name has a
@@ -194,13 +200,13 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from app.migration.shadow.manifest import MANIFEST as _SHADOW_MANIFEST
-from app.migration.sync.export import (
+from app.migration.sync.database import (
     SyncExportError,
     _batched,
     _parent_join_clause,
     _quoted,
 )
-from app.migration.sync.export import _Source as _Backend
+from app.migration.sync.database import _Source as _Backend
 from app.migration.sync.identity import (
     UserMapping,
     UserProjection,
@@ -222,6 +228,8 @@ from app.migration.sync.package import (
     FILES_DIR,
     KG_EPOCHS_NAME,
     MANIFEST_NAME,
+    MODE_FULL,
+    MODE_INCREMENTAL,
     NOTEBOOK_FILES_DIR,
     PACKAGE_FORMAT_VERSION,
     USERS_NAME,
@@ -699,6 +707,16 @@ class _PackageManifest:
     created_at: str
     from_seq: int
     to_seq: int
+    # ``package.MODE_FULL``/``MODE_INCREMENTAL``. A v1 package predates the
+    # field entirely and is read as full, which is what every v1 package was.
+    mode: str
+    # Incremental only: the package whose watermark this one continues from.
+    # Reported in the refusal below so an operator can see WHICH chain the
+    # package belongs to without opening it.
+    base_package_id: str
+    # Notebooks the source deleted inside this package's window. Read (rather
+    # than ignored) so the refusal can name them; PR-3c applies them.
+    deleted_notebooks: tuple[str, ...]
     embed_runtime_dim: int
     sqlite_version: int
     postgres_version: int
@@ -734,6 +752,12 @@ def _read_manifest(package_dir: Path) -> _PackageManifest:
             f"unsupported package format_version {version!r}; this build reads "
             f"{PACKAGE_FORMAT_VERSION}"
         )
+    mode = document.get("mode")
+    if mode is not None and mode not in (MODE_FULL, MODE_INCREMENTAL):
+        raise SyncImportError(
+            f"{MANIFEST_NAME} declares the unknown mode {mode!r}; expected "
+            f"{MODE_FULL!r} or {MODE_INCREMENTAL!r}"
+        )
     pair = document.get("schema_pair") or {}
     tables = {}
     for name, entry in (document.get("tables") or {}).items():
@@ -749,6 +773,11 @@ def _read_manifest(package_dir: Path) -> _PackageManifest:
         created_at=str(document.get("created_at") or ""),
         from_seq=int(document.get("from_seq") or 0),
         to_seq=int(document.get("to_seq") or 0),
+        mode=str(document.get("mode") or MODE_FULL),
+        base_package_id=str(document.get("base_package_id") or ""),
+        deleted_notebooks=tuple(
+            str(item) for item in document.get("deleted_notebooks") or ()
+        ),
         embed_runtime_dim=int(document.get("embed_runtime_dim") or 0),
         sqlite_version=int(pair.get("sqlite_version") or 0),
         postgres_version=int(pair.get("postgres_version") or 0),
@@ -1393,24 +1422,46 @@ def _verify_checksums(package_dir: Path, manifest: _PackageManifest) -> dict[str
 def _reject_incremental_payload(
     package_dir: Path, manifest: "_PackageManifest"
 ) -> None:
-    """codex #772 r18 P2: this build (PR-2) imports full snapshots only. A
-    non-zero ``from_seq``/``to_seq`` range names an incremental package —
-    even one whose ``deletes.jsonl``/``kg_epochs.jsonl`` happen to be empty —
-    and every downstream phase (declaration, table apply, file swap) treats
-    the package as a full reconciliation: importing it as one would silently
-    drop everything the source wrote outside the claimed range. Checked
-    first, so the range is rejected before a single row is written or
-    deleted."""
-    if manifest.from_seq != 0 or manifest.to_seq != 0:
+    """This build imports ``mode=full`` packages only (§8 "导入相位" step 1).
+
+    What is being refused changed shape in PR-3b. Until format 2 there was no
+    ``mode`` field and the only signal was the sequence range, so a non-zero
+    ``from_seq``/``to_seq`` had to be treated as "incremental" (codex #772
+    r18 P2). A v2 FULL package now legitimately carries ``to_seq > 0`` -- it
+    records the change-log watermark the export saw, which is what lets the
+    NEXT export be incremental -- so the range no longer identifies anything
+    and ``mode`` does. ``from_seq > 0`` is still refused on its own: only an
+    incremental package starts above zero, and a package claiming a floor
+    while declaring itself full is self-contradictory, not a shape to guess at.
+
+    The refusal names ``base_package_id``/``from_seq``/``to_seq`` because that
+    is what an operator needs to find the chain this package belongs to and
+    the full baseline it continues from. ``deletes.jsonl``/``kg_epochs.jsonl``
+    are checked independently of the manifest for the same reason they always
+    were: ``manifest.json`` is written last and is NOT covered by
+    ``checksums.json``, so a package could declare ``mode=full`` and still
+    carry delete instructions. Every downstream phase (declaration, table
+    apply, file swap) treats the package as a full reconciliation of the
+    notebooks it names, so any of these getting through would silently drop
+    whatever the source wrote outside the claimed range. Checked first, before
+    a single row is written or deleted."""
+    if manifest.mode != MODE_FULL or manifest.from_seq != 0:
         raise SyncImportError(
-            "本版本只支持全量包（from_seq/to_seq 必须为 0），"
-            f"得到 from_seq={manifest.from_seq}, to_seq={manifest.to_seq}"
+            f"本版本只支持 mode={MODE_FULL} 的包，增量包由 PR-3c 应用；得到 "
+            f"mode={manifest.mode!r}, from_seq={manifest.from_seq}, "
+            f"to_seq={manifest.to_seq}, base_package_id="
+            f"{manifest.base_package_id!r}"
+            + (
+                f", deleted_notebooks={list(manifest.deleted_notebooks)}"
+                if manifest.deleted_notebooks
+                else ""
+            )
         )
     for name in (DELETES_NAME, KG_EPOCHS_NAME):
         if any(True for _ in _iter_lines(package_dir / name)):
             raise SyncImportError(
                 f"{name} is not empty: this build imports full packages only "
-                "(docs/incremental-sync-design.md §10, PR-3 adds the "
+                "(docs/incremental-sync-design.md §8, PR-3c adds the "
                 "incremental path)"
             )
 

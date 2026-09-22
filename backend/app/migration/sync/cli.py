@@ -33,12 +33,8 @@ from typing import Any, Mapping, Sequence
 
 from app.core.config import Settings
 from app.core.database_url import database_identity
-from app.migration.sync.export import (
-    ExportReport,
-    SyncExportError,
-    _Source,
-    export_notebooks,
-)
+from app.migration.sync.database import SyncExportError, _Source
+from app.migration.sync.export import ExportReport, export_notebooks
 from app.migration.sync.import_ import SyncImportError, _moment, import_package
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.sqlite.database import SqliteDatabase
