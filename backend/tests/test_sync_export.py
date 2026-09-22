@@ -708,6 +708,56 @@ def test_has_unique_surface_accepts_a_plain_unique_index(seeded):
         source.close()
 
 
+def test_current_snapshot_is_none_on_sqlite(seeded):
+    """SQLite has no transaction snapshot to record, and ``None`` is the
+    honest answer rather than a placeholder: one writer at a time means
+    ``sync_change_log.seq`` order IS commit order, so the incremental window
+    has no in-flight gap to compensate for (§7)."""
+    source = export_module._Source(seeded["settings"], Path(__file__).resolve().parents[2])
+    try:
+        with source.read() as conn:
+            assert source.current_snapshot(conn) is None
+    finally:
+        source.close()
+
+
+@pytest.mark.parametrize(
+    "snapshot,expected",
+    [
+        ("100:100:", 100),
+        ("12:34:", 12),
+        ("12:34:12,20,33", 12),
+        ("0:0:", 0),
+    ],
+)
+def test_snapshot_xmin_reads_the_first_field(snapshot, expected):
+    """The stored ``pg_snapshot`` text is ``xmin:xmax:xip1,xip2,...`` and the
+    compensation window's lower bound is its first field -- with or without an
+    in-progress list."""
+    assert export_module._Source.snapshot_xmin(snapshot) == expected
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        "",
+        "100",
+        "100:200",
+        "100:200:300:400",
+        "abc:200:",
+        "100:xyz:",
+        "100:200:300,bad",
+        "100:200: 300",
+    ],
+)
+def test_snapshot_xmin_refuses_anything_that_is_not_a_snapshot(snapshot):
+    """A watermark row whose snapshot text is corrupt must stop the export,
+    not silently yield a bound that would skip changes: every field is
+    checked, not just the one that gets returned."""
+    with pytest.raises(SyncExportError):
+        export_module._Source.snapshot_xmin(snapshot)
+
+
 def test_ordinal_is_never_exported(seeded, tmp_path):
     report = _export(seeded["settings"], tmp_path / "out", [seeded["exported"]])
     manifest = _manifest(report.package_dir)

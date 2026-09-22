@@ -4876,5 +4876,66 @@ MIGRATION_MANIFEST[(83, 84)] = {
     "views": {},
 }
 
+
+# v85: the incremental exporter's watermark state (parity with PostgreSQL
+# 0065_sync_export_snapshot.sql). Two columns appended to sync_export_state --
+# captured (was the capture gate open when this watermark was written) and
+# exported_snapshot (that export's pg_current_snapshot()::text, always NULL on
+# SQLite) -- plus one non-unique index on sync_change_log(txid). No table,
+# trigger or view, and no backfill: both defaults are already the right value
+# for every pre-existing watermark row.
+SYNC_EXPORT_SNAPSHOT_COLUMNS = {
+    "sync_export_state": {
+        "captured": ("captured", "INTEGER", 1, "0", 0),
+        "exported_snapshot": ("exported_snapshot", "TEXT", 0, None, 0),
+    },
+}
+SYNC_EXPORT_SNAPSHOT_INDEXES = {
+    "idx_sync_change_log_txid": (
+        "CREATE INDEX idx_sync_change_log_txid\n"
+        "                    ON sync_change_log(txid)"
+    ),
+}
+# The CREATE TABLE text SQLite stores after the two appends, spelled out the
+# way the v81/v82 hops spell global_ask_jobs'. Conditional for the same
+# reason: a lineage that already HAS sync_export_state in `pre` reaches this
+# hop through the per-column check below, and listing the table as an addition
+# there would demand an addition that never happens
+# ("manifest-addition-missing"). Only a lineage starting below v83 creates the
+# table on the way here, and for those the text must be the ALTERed one.
+SYNC_CONTROL_TABLES_V85 = {
+    "sync_export_state": SYNC_CONTROL_TABLES["sync_export_state"].replace(
+        "package_id TEXT NOT NULL DEFAULT ''\n                )",
+        "package_id TEXT NOT NULL DEFAULT ''\n                "
+        ", captured INTEGER NOT NULL DEFAULT 0, exported_snapshot TEXT)",
+    ),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 85, *key[2:]): {
+        **manifest,
+        "tables": {
+            **manifest["tables"],
+            **(
+                SYNC_CONTROL_TABLES_V85
+                if "sync_export_state" in manifest["tables"]
+                else {}
+            ),
+        },
+        "columns": {
+            **manifest["columns"],
+            "sync_export_state": {
+                **manifest["columns"].get("sync_export_state", {}),
+                **SYNC_EXPORT_SNAPSHOT_COLUMNS["sync_export_state"],
+            },
+        },
+        "indexes": {**manifest["indexes"], **SYNC_EXPORT_SNAPSHOT_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(84, 85)] = {
+    "tables": {}, "columns": SYNC_EXPORT_SNAPSHOT_COLUMNS,
+    "indexes": SYNC_EXPORT_SNAPSHOT_INDEXES, "triggers": {}, "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

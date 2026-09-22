@@ -496,35 +496,82 @@ python scripts/migrate_sqlite_to_postgres.py \
 
 ## 跨环境笔记本同步
 
-`scripts/cli.sh sync export/import/status/capture` 把笔记本内容（材料、向量、KG、Knowhow、
-记忆）从一个部署搬到另一个部署，**单向**：源端写，目标端只对同步来的内容做交互。它不涉及
-用户交互数据（问答、回答、反馈、报告、全局问答、活动留痕、许愿墙）。范围、身份映射、
-目标端写入围栏与包格式见[设计文档](./incremental-sync-design.md)；到 PR-3a 为止，无论变更
-捕获是否开启，每次导出仍是全量快照（还没有增量*读取*器），包的 manifest 仍然固定写
-`from_seq=to_seq=0`——捕获开启只是开始本地记一笔「这次导出本来可以捕获到哪里」，供 PR-3b
-的增量导出器读取。
+`scripts/cli.sh sync export/import/status/capture/prune-log` 把笔记本内容（材料、向量、KG、
+Knowhow、记忆）从一个部署搬到另一个部署，**单向**：源端写，目标端只对同步来的内容做交互。
+它不涉及用户交互数据（问答、回答、反馈、报告、全局问答、活动留痕、许愿墙）。范围、身份
+映射、目标端写入围栏与包格式见[设计文档](./incremental-sync-design.md)（§7 变更日志窗口、
+§8 包格式）。
+
+`sync export` 不需要运维显式选模式，两种包二选一：**全量**（表扫描，`from_seq=0`）或
+**增量**（读该 `--target` 上次成功导出以来的 `sync_change_log` 窗口，设计文档 §7）。只有
+同时满足三个条件才走增量：变更捕获开着、该 target 上一次导出留下的水位带 `captured`、
+且没给 `--full`/`--notebook`；三者缺一都回退到全量。`--full` 强制全量，即使本来会走增量。
+`--notebook`（可重复）把一次导出限定到指定笔记本，同样强制全量——缩小范围与读日志窗口是
+两件不同的事，这个 CLI 不把它们合在一起。**目前导入器只接受全量包**（设计文档 §8）；增量
+包要等 PR-3c——下面「按天导出的操作节奏」说明这在实践中意味着什么。
 
 ```bash
-# 源环境：设置一次环境标识，再导出全部存活、非镜像笔记本。
+# 源环境：设置一次环境标识，开启捕获，再跑第一次（全量）导出——这是之后每次增量导出的基线。
 export SILICON_NOTEBOOK_SYNC_ENV=prod-shanghai
+PYTHONPATH=backend python scripts/sync_notebooks.py capture enable --json
 PYTHONPATH=backend python scripts/sync_notebooks.py export \
-  --target prod-tokyo --out /srv/silicon-notebook/sync/outgoing --json
+  --target prod-tokyo --out /srv/silicon-notebook/sync/outgoing --json   # mode=full, captured=true
 
-# 或只导出指定笔记本（可重复传 --notebook）：
+# 之后每次用同一条命令导出，自动就是增量：
+PYTHONPATH=backend python scripts/sync_notebooks.py export \
+  --target prod-tokyo --out /srv/silicon-notebook/sync/outgoing --json   # mode=incremental
+
+# 无论水位状态如何，强制来一次全量（比如重建基线）：
+PYTHONPATH=backend python scripts/sync_notebooks.py export \
+  --target prod-tokyo --out /srv/silicon-notebook/sync/outgoing --full --json
+
+# 或只导出指定笔记本（恒为全量；可重复传 --notebook）：
 PYTHONPATH=backend python scripts/sync_notebooks.py export \
   --target prod-tokyo --out /srv/silicon-notebook/sync/outgoing \
   --notebook nb-aaa --notebook nb-bbb --json
 
 # 目标环境：把包目录搬过去，先 --dry-run 再真正引入。
+# （目前只有 mode=full 的包能真正被引入——见下面的操作节奏说明）
 PYTHONPATH=backend python scripts/sync_notebooks.py import \
-  /srv/silicon-notebook/sync/incoming/sync-prod-shanghai-0-0-<id> --dry-run --json
+  /srv/silicon-notebook/sync/incoming/sync-prod-shanghai-0-42-<id> --dry-run --json
 PYTHONPATH=backend python scripts/sync_notebooks.py import \
-  /srv/silicon-notebook/sync/incoming/sync-prod-shanghai-0-0-<id> \
+  /srv/silicon-notebook/sync/incoming/sync-prod-shanghai-0-42-<id> \
   --create-missing-users --verify-files --json
 
 # 任一端：查看导出水位与已引入的包。
 PYTHONPATH=backend python scripts/sync_notebooks.py status --json
+
+# 定期执行：清掉不再被任何目标环境的 captured 水位需要的日志行。
+PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --json
 ```
+
+### 按天导出的操作节奏
+
+1. 在源端执行一次 `sync capture enable`，在你想当作新基线的那次导出**之前**。这会清空每个
+   目标环境的水位，所以每个目标的下一次导出都会被强制打回全量，不管之前跑的是什么。
+2. 那次全量导出的报告 `captured=true`——它的水位背后现在有一段变更日志做后盾。
+3. 之后每次导出，只要捕获保持开着、且没有什么强制走全量（`--full`、`--notebook`，或水位
+   丢了 `captured`），不用加任何参数就自动是增量。
+4. 把包目录搬到目标环境，跟搬全量包一样（`scp`/rsync/对象存储——用现有的传输方式）。
+5. **在 PR-3c 上线之前，增量包无法被引入。** `sync import` 在预检阶段就会拒绝
+   `mode=incremental` 的包，任何东西都不写，错误信息会点名被拒包的
+   `base_package_id`/`from_seq`/`to_seq`。在 PR-3c 的导入器落地之前，增量包可以先放在目标端
+   落地的地方不动——每天跑 `sync export` 本身不要求把每个包都立刻引入；只有*源端*的水位
+   需要不断推进，下一次导出才能继续保持增量。
+6. 一次窗口为空的增量导出仍会产出一个包（`rows/*.jsonl`、`deletes.jsonl`、`kg_epochs.jsonl`
+   都在，只是空文件），水位照样推进——报告的 `empty` 字段会说明这一点。这保证导出链不断：
+   每个包的 `base_package_id` 都指向它接续的上一个包，某一天没有变化不会打断下一次导出的
+   链条。
+
+升级到 schema v85/0065 会把每个目标环境的水位重置为 `captured=false`（这是新列，升级之前
+写下的水位行没有这一列、背后也没有变更日志窗口）。升级之后对每个目标的第一次导出因此必然
+是全量，不管升级前捕获是开是关——这是预期行为，不需要额外处理；那之后的下一次导出会自己
+回到增量。
+
+用 `--full` 可以在不动捕获开关、不直接改水位表的前提下，主动重置某个目标的基线——比如隔了
+很久没导出过，或者单纯想给出一个自包含、不依赖 `base_package_id` 链上任何更早的包就能导入
+的包。`--full` 导出仍然正常推进水位，所以它之后的下一次导出（如果捕获开着）会自动回到
+增量。
 
 `scripts/cli.sh sync export|import|status ...` 等价，且走共享 Python 启动环境（预加载仓库根
 `.env`）；上面的独立 `scripts/sync_notebooks.py` 形态不预加载它，需要自行导出
@@ -533,14 +580,19 @@ PYTHONPATH=backend python scripts/sync_notebooks.py status --json
 
 `export` 需要 `source_env`：显式传 `--source-env`，或按部署设置一次
 `SILICON_NOTEBOOK_SYNC_ENV`，日常导出就不用每次重复。两者都没有则退出 2 并提示需要设置
-的变量。`--notebook <id>`（可重复）把一次全量导出限定到指定笔记本；省略则导出全部存活、
-非镜像笔记本。无论是否用了 `--notebook`，一次成功的导出都会推进本环境对该 `--target` 的
-水位。
+的变量。`--notebook <id>`（可重复）把一次导出限定到指定笔记本，且恒强制 `mode=full`（见上
+面的模式判定）；省略则导出全部存活、非镜像笔记本，模式按判定规则自动选。`--full` 在不限定
+笔记本范围的前提下强制全量。无论跑的是全量还是增量、无论是否用了 `--notebook`，一次成功
+的导出都会推进本环境对该 `--target` 的水位。人读摘要与 `--json` 报告都会打印 `mode`、
+`from_seq`、`to_seq`、`base_package_id`（全量包为空）、`deletes`（条数）、
+`deleted_notebooks`、`empty`。
 
 `import` 幂等：重复引入同一个包目录会短路为 `already_applied`（退出 0），不会重新应用行。
 `--dry-run` 只做到身份映射与预检为止，不写入任何数据，只输出会发生什么——正式引入前务必
-先跑一次。`--create-missing-users` 为源端每个在目标端按 `username` 找不到匹配的用户创建
-一个无凭据本地用户（设计文档 §4）；不加它时，引用不到的用户按各表自己的规则处理（跳过该
+先跑一次。`mode=incremental` 的包（或者 `deletes`/`kg_epochs` 非空的包）在预检阶段就会被
+拒绝，什么都不写；错误信息点名被拒包的 `base_package_id`/`from_seq`/`to_seq` 并指向
+PR-3c——增量导入器在那一步才上线。`--create-missing-users` 为源端每个在目标端按 `username`
+找不到匹配的用户创建一个无凭据本地用户（设计文档 §4）；不加它时，引用不到的用户按各表自己的规则处理（跳过该
 行、置空该列，或视列而定使整个笔记本导入失败）。`--verify-files` 在导入时对每个复制的文件
 再做一次 sha256 校验，不只信任包自带的 `checksums.json`——更慢，包经过不受信或可能损耗的
 传输通道时用它。`--resume` 必须显式传才能续跑一个中断了一半的导入（它在 `sync_imports` 里
@@ -586,16 +638,33 @@ PYTHONPATH=backend python scripts/sync_notebooks.py status --json
 [离线 / 异机 scale 构建](./operations_zh.md#离线--异机-scale-构建scriptsbuild_scale_indexpy)。
 PR-4 计划把这一步接入自动排队。
 
+### `sync prune-log`
+
+```bash
+PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --dry-run --json
+PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --json
+```
+
+`sync_change_log` 只靠写入增长，没有东西会自动从里面删——包括增量导出做的压缩：那次折叠
+发生在单次导出内存里，是为了缩小那次产出的**包**，不会删掉底层的日志行（另一个水位更旧的
+目标环境可能还需要它们）。`prune-log` 删除的是「未来任何一次导出都不可能再需要」的日志行。
+一行要**同时**满足三个条件才会被删：它的 `seq` 小于等于全部 `captured` 水位里最小的
+`exported_through_seq`；在 PostgreSQL 上，它的 `txid` 还要小于全部 `captured` 水位的
+`exported_snapshot` 取 `pg_snapshot_xmin` 后的最小值；它的 `changed_at` 早于
+`--keep-days` 指定的天数（哪怕前两条都满足，一行按 `changed_at` 还不够旧也会被留下）。
+只要**任何一个**目标环境从未产生过 `captured` 水位——从未导出过，或者它最近一次导出因为
+捕获关着而落到了全量——命令会直接拒绝并点名那个目标：没有 captured 水位就没有安全的上限，
+按猜测清理可能永久弄坏那个目标下一次增量导出的窗口。`--dry-run` 只报告会删掉多少行，不
+真的删。
+
 ### 变更捕获（`sync capture`）
 
 每个部署都自带同步层全部 46 张表的 AFTER INSERT/UPDATE/DELETE 触发器（设计文档 §7；SQLite
 上是 138 条——每表每种操作各一条，因为 SQLite 没有合并写法的 "AFTER INSERT OR UPDATE OR
-DELETE"；PostgreSQL 上是 46 条，每表一条），但默认是
-**关**的：全新迁移到 v84/0064 不会播种 `sync_capture_control` 这一行，运维显式执行
-`sync capture enable` 之前什么都不记。在 PR-3b 的增量导出器落地之前，开不开捕获对
-`sync export` 产出什么没有任何影响（每次导出仍是全量快照）——它只是开始在本地记一笔「这次
-导出本来能捕获到变更日志的哪个 seq」，供 `sync status` 与 `ExportReport.captured_through_seq`
-读取。PR-3b 上线之前没有理由现在就开，除非你想提前把这份记录攒起来；不开也没有坏处。
+DELETE"；PostgreSQL 上是 46 条，每表一条），但默认是**关**的：全新迁移不会播种
+`sync_capture_control` 这一行，运维显式执行 `sync capture enable` 之前什么都不记。门开着，
+`sync export` 就会读这份日志自动产出增量包（见上「跨环境笔记本同步」）；门关着，每次导出
+都是全量快照，日志也不增长。
 
 ```bash
 PYTHONPATH=backend python scripts/sync_notebooks.py capture enable --json
@@ -603,20 +672,20 @@ PYTHONPATH=backend python scripts/sync_notebooks.py capture status --json
 PYTHONPATH=backend python scripts/sync_notebooks.py capture disable --json
 ```
 
-**什么时候开**：在你想当作「增量的全量基线」的那次导出**之前**。`enable` 会清空
-`sync_export_state` 的全部行——开启之前产出的包，是变更日志完全没有记录的一份快照，永远不能
-被接成增量包，所以每个目标环境的**下一次**导出会被强制打回全量，重新建立一条日志能完整覆盖
-的基线。已经开着时再执行 `enable` 是空操作（不会挪动 `enabled_at`，也不会再清一次水位），
-对一次退出码含糊的调用不放心时重新跑一遍是安全的。
+**什么时候开**：在你想当作「新基线」的那次导出**之前**——之后每次增量包都从它续起。
+`enable` 会清空 `sync_export_state` 的全部行——开启之前产出的包，是变更日志完全没有记录的
+一份快照，永远不能被接成增量包，所以每个目标环境的**下一次**导出会被强制打回全量，重新
+建立一条日志能完整覆盖的基线。已经开着时再执行 `enable` 是空操作（不会挪动 `enabled_at`，
+也不会再清一次水位），对一次退出码含糊的调用不放心时重新跑一遍是安全的。
 
 **导出进行中不要执行 `sync capture enable`。** `_advance_watermark` 只在一次导出跑完之后才写
 `sync_export_state`，所以在一次已经在跑的导出中途执行 `enable` 清空这张表，并不会让那次导出
 停下来——它照样跑完、照样写水位，但它读 `captured_through_seq` 用的是门打开之前就已经固定的
-快照，所以写回去的 seq 是 0（对一次「开始于捕获开启之前」的导出而言这个答案是对的，但如果运维
-几分钟前刚执行过 `enable`，这次导出结束后水位却是 0，看起来会像什么都没发生）。目前没有代码
-层面的守卫挡这种交叠；把它当作一条运维规则处理（开启捕获前先让在跑的导出跑完或先停掉），而不是
-指望 CLI 自己挡住。PR-3b 的增量导出基线校验应该在上线前明确覆盖这种情形（登记在那里，这里不
-修）。
+快照，所以写回去的 seq 是 0、这次的 `captured` 也是 false（对一次「开始于捕获开启之前」的
+导出而言这个答案是对的，但如果运维几分钟前刚执行过 `enable`，这次导出结束后水位却是
+`captured=false`，看起来会像什么都没发生，而且会让这个目标**下一次**导出也被打回全量）。
+目前没有代码层面的守卫挡这种交叠；把它当作一条运维规则处理（开启捕获前先让在跑的导出跑完
+或先停掉），而不是指望 CLI 自己挡住。
 
 **关闭的代价**：`disable` 会同时清空 `sync_export_state` 与 `sync_change_log`。日志从这一刻
 起不再增长，所以关闭之后的下一次导出又是一次全量快照，跟从未开过时一样——没有「暂停后再续上」
@@ -626,13 +695,17 @@ PYTHONPATH=backend python scripts/sync_notebooks.py capture disable --json
 上大约 1.2×–3.9×，视后端而定；SQLite 的相对开销更大，因为它没打补丁的基线本来就非常快）。
 对一次性写几万行的批量导入/回填场景会有感，日常交互使用不会。
 
-**日志增长**：`sync_change_log` 目前只增不减——PR-3b 才交付压缩（同一键多次变更折叠）与保留
-策略（早于所有目标环境最小水位的日志行清理），设计文档 §7/§9 有描述。在那之前如果提前很久
-就开了捕获，应该预期这张表无上限增长并规划好存储，或者等接近 PR-3b 落地时再开。
+**日志增长**：导出会把一段窗口压缩成每个变更键一条，但这只是缩小那次产出的包，不会缩小
+`sync_change_log` 本身——水位更旧的另一个目标环境可能还需要那些被新目标折叠掉的行。定期
+（在你关心的每个目标都有一个覆盖到想清理的行的 `captured` 水位之后）跑一次上面的
+`sync prune-log`。一直开着捕获却从不清理，日志依然会无上限增长——没有自动的保留策略。
 
 大库升级到 v84/0064 本身也有一条运维提示——迁移会给 `knowledge_object_sources`/
 `community_members` 现场补主键，运行迁移前先看
-[设计文档 §7「升级窗口」](./incremental-sync-design.md#7-源端变更捕获)估计锁窗口。
+[设计文档 §7「升级窗口」](./incremental-sync-design.md#7-源端变更捕获)估计锁窗口。再往上
+升级到 v85/0065（`sync_export_state` 加两列、`sync_change_log.txid` 加一个索引）轻得多，
+不需要同样的锁窗口评估；它的运维影响纯粹是水位层面的，不是锁——见上面「按天导出的操作
+节奏」。
 
 ## PostgreSQL notebook-aware 词法索引
 

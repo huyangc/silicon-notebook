@@ -395,7 +395,21 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # (which cannot add a primary key to an existing table). See
 # app/migration/sync/capture.py -- both backends' capture DDL is generated
 # from there, never hand-written twice.
+# SQLite v85 / PostgreSQL 0065 add the two watermark columns the incremental
+# exporter reads back -- sync_export_state.captured (boolean NOT NULL DEFAULT
+# false: was the capture gate open while this watermark was written, i.e. does
+# the log really cover everything up to exported_through_seq) and
+# sync_export_state.exported_snapshot (text COLLATE "C", nullable: that
+# export's pg_current_snapshot()::text, so the next one can compensate for
+# transactions that held a lower seq but committed after the snapshot; SQLite
+# has no equivalent and leaves it NULL) -- plus the NON-UNIQUE index
+# idx_sync_change_log_txid(txid) that makes the compensation pass a range
+# scan. Both columns are adapter-internal, like the 0063/0064 tables that
+# carry them. No table, FK or unique-surface change, and no backfill: the
+# defaults are the correct value for every pre-existing watermark row (a row
+# written before this migration has no snapshot, so it must read as
+# not-captured and force one more full export).
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=84,
-    postgres_version=64,
+    sqlite_version=85,
+    postgres_version=65,
 )

@@ -50,6 +50,55 @@ FIXTURE_SECRETS = (
 )
 
 
+def _rollback_v85(db: sqlite3.Connection) -> None:
+    """Undo _migration_85 (the incremental exporter's watermark state, parity
+    with PostgreSQL 0065_sync_export_snapshot.sql) before forging any older
+    deployed schema: the change log's txid index, then the two columns
+    appended to sync_export_state. Dropping the columns restores
+    sqlite_master's stored CREATE TABLE text byte-for-byte, which is what lets
+    the v83/v84 hops keep expecting the un-ALTERed table."""
+    db.execute("DROP INDEX idx_sync_change_log_txid")
+    db.execute("ALTER TABLE sync_export_state DROP COLUMN exported_snapshot")
+    db.execute("ALTER TABLE sync_export_state DROP COLUMN captured")
+
+
+def test_deployed_v84_database_verifies_sync_export_snapshot(tmp_path):
+    """A deployed v84 database is missing exactly _migration_85's addition:
+    sync_export_state.captured (NOT NULL DEFAULT 0) and
+    sync_export_state.exported_snapshot (nullable), plus
+    idx_sync_change_log_txid. No row changes -- the fixture holds no watermark
+    row, and both defaults are what a pre-existing one would have had to take
+    anyway."""
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as upgraded_db:
+        columns = {
+            row[1]: (row[2], row[3], row[4])
+            for row in upgraded_db.execute("PRAGMA table_info(sync_export_state)")
+        }
+        assert columns["captured"] == ("INTEGER", 1, "0")
+        assert columns["exported_snapshot"] == ("TEXT", 0, None)
+        assert upgraded_db.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' "
+            "AND name='idx_sync_change_log_txid'"
+        ).fetchone()[0] == 1
+
+    with sqlite3.connect(database) as rollback:
+        _rollback_v85(rollback)
+        rollback.execute("PRAGMA user_version = 84")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 84
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+
+
 def _rollback_v84(db: sqlite3.Connection) -> None:
     """Undo _migration_84 (source-side change capture, parity with PostgreSQL
     0064_sync_change_capture.sql) before forging any older deployed schema:
@@ -58,6 +107,7 @@ def _rollback_v84(db: sqlite3.Connection) -> None:
     row identity, then the two new tables. The trigger names come from the
     same generator the migration runs, so a table added to the sync manifest
     later cannot leave a trigger behind here."""
+    _rollback_v85(db)
     for name in sorted(expected_sqlite_trigger_names()):
         db.execute(f'DROP TRIGGER "{name}"')
     db.execute("DROP INDEX uq_community_members_sync_key")

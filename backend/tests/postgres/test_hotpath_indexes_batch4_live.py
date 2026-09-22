@@ -251,7 +251,7 @@ def test_install_builds_the_three_new_indexes_and_is_idempotent(postgres_databas
     # true no-op ledger entry once the offline CONCURRENTLY builder already
     # built the indexes online -- and its validation DO block accepts them
     # (that is this test's accept-path coverage).
-    assert PostgresMigrator(postgres_database).migrate() == 64
+    assert PostgresMigrator(postgres_database).migrate() == 65
     after_migration = inspect_hotpath_indexes(database_url, schema=schema)
     assert after_migration == state
 
@@ -500,7 +500,7 @@ def test_search_plan_matrix_uses_the_live_indexes_and_adapter_union(postgres_dat
     tests below/above still own separate database worlds because they mutate
     the schema. A named check is attached to any failure for case-level triage.
     """
-    assert PostgresMigrator(postgres_database).migrate() == 64
+    assert PostgresMigrator(postgres_database).migrate() == 65
     notebook_id = _seed_search_corpus(postgres_database)
     checks = (
         (
@@ -561,7 +561,7 @@ def test_migration_rejects_a_same_named_wrong_shape_index(postgres_database):
     assert migrator.migrate(target_version=47) == 47
     with postgres_database.write() as db:
         db.execute("DROP INDEX idx_sources_nb_title_file_trgm")
-    assert migrator.migrate() == 64
+    assert migrator.migrate() == 65
 
 
 @pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch4")
@@ -586,7 +586,7 @@ def test_migration_rejects_a_gin_missing_the_partial_predicate(postgres_database
     assert migrator.migrate(target_version=47) == 47
     with postgres_database.write() as db:
         db.execute("DROP INDEX idx_sources_nb_title_file_trgm")
-    assert migrator.migrate() == 64
+    assert migrator.migrate() == 65
 
 
 @pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch4")
@@ -637,7 +637,7 @@ def test_migration_rejects_an_invalid_same_named_index(postgres_database):
     assert migrator.migrate(target_version=47) == 47
     with postgres_database.write() as db:
         db.execute("DROP INDEX idx_sources_nb_title_file_trgm")
-    assert migrator.migrate() == 64
+    assert migrator.migrate() == 65
 
 
 @pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch4")
@@ -661,7 +661,7 @@ def test_migration_accepts_a_prebuilt_index_with_reloptions(postgres_database):
         db.execute(
             "ALTER INDEX idx_sources_nb_title_file_trgm SET (fastupdate = off)"
         )
-    assert migrator.migrate() == 64
+    assert migrator.migrate() == 65
     schema = _schema_of(postgres_database)
     state = inspect_hotpath_indexes(
         postgres_database.settings.database_url, schema=schema
