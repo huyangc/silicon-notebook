@@ -132,9 +132,38 @@ def _insert_report(connection, report_id, notebook_id, created_by, created_at, *
     )
 
 
+def _insert_global_conversation(connection, conv_id, user_id, created_at, *,
+                                 submitted_via="web") -> None:
+    connection.execute(
+        "INSERT INTO global_ask_conversations "
+        "(id,user_id,title,scope_json,submitted_via,created_at,updated_at) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+        (conv_id, user_id, "", jsonb({"mode": "all", "notebook_ids": []}),
+         submitted_via, created_at.isoformat(), created_at.isoformat()),
+    )
+
+
+def _insert_global_ask(connection, job_id, conv_id, user_id, created_at, *,
+                        question="全局问题？", mode="chunk", status="done",
+                        submitted_via="web", error_detail="",
+                        notebook_ids=None) -> None:
+    payload = {"question": question, "mode": mode}
+    if notebook_ids is not None:
+        payload["resolved_notebook_ids"] = list(notebook_ids)
+    connection.execute(
+        "INSERT INTO global_ask_jobs "
+        "(id,conversation_id,user_id,client_request_id,request_json,status,"
+        "payload_json,created_at,submitted_via,asked_at,updated_at,error_detail) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (job_id, conv_id, user_id, None, jsonb({}), status,
+         jsonb(payload), created_at.isoformat(),
+         submitted_via, "", created_at.isoformat(), error_detail),
+    )
+
+
 @pytest.fixture
 def store(postgres_database, postgres_settings):
-    assert PostgresMigrator(postgres_database).migrate() == 60
+    assert PostgresMigrator(postgres_database).migrate() == 61
     return PostgresQueryStore(postgres_database, postgres_settings)
 
 
@@ -264,7 +293,7 @@ def test_admin_question_overview_combines_ask_and_report(postgres_database, stor
 
     result = store.list_admin_questions(query="稳定", limit=50)
     assert result["stats"] == {
-        "total": 1, "asks": 0, "reports": 1, "active_users": 1,
+        "total": 1, "asks": 0, "reports": 1, "active_users": 1, "global_asks": 0,
     }
     assert result["items"][0]["id"] == "report-global"
     assert isinstance(result["items"][0]["created_at"], str)
@@ -288,7 +317,7 @@ def test_admin_question_overview_combines_ask_and_report(postgres_database, stor
 
     retained = store.list_admin_questions(limit=50)
     assert retained["stats"] == {
-        "total": 2, "asks": 1, "reports": 1, "active_users": 1,
+        "total": 2, "asks": 1, "reports": 1, "active_users": 1, "global_asks": 0,
     }
     assert {item["id"] for item in retained["items"]} == {
         "ask-global", "report-global",
@@ -337,7 +366,7 @@ def test_admin_question_overview_submitted_via_filter_and_stats(
 
     everything = store.list_admin_questions(limit=50)
     assert everything["stats"] == {
-        "total": 5, "asks": 4, "reports": 1, "active_users": 1,
+        "total": 5, "asks": 4, "reports": 1, "active_users": 1, "global_asks": 0,
     }
     by_id = {item["id"]: item for item in everything["items"]}
     assert by_id["ask-web"]["submitted_via"] == "web"
@@ -348,7 +377,7 @@ def test_admin_question_overview_submitted_via_filter_and_stats(
 
     mcp_only = store.list_admin_questions(submitted_via="mcp", limit=50)
     assert mcp_only["stats"] == {
-        "total": 2, "asks": 2, "reports": 0, "active_users": 1,
+        "total": 2, "asks": 2, "reports": 0, "active_users": 1, "global_asks": 0,
     }
     assert {item["id"] for item in mcp_only["items"]} == {
         "ask-mcp", "ask-retained-mcp",
@@ -356,11 +385,115 @@ def test_admin_question_overview_submitted_via_filter_and_stats(
 
     web_only = store.list_admin_questions(submitted_via="web", limit=50)
     assert web_only["stats"] == {
-        "total": 2, "asks": 1, "reports": 1, "active_users": 1,
+        "total": 2, "asks": 1, "reports": 1, "active_users": 1, "global_asks": 0,
     }
     assert {item["id"] for item in web_only["items"]} == {
         "ask-web", "report-web",
     }
+
+
+def test_admin_question_overview_includes_global_ask_jobs(postgres_database, store):
+    """PG 孪生(与 SQLite 侧 test_admin_questions.py 同一条理由):一条全局问答
+    在总览里现身为 type=ask、scope=global,notebook_id/notebook_name 为空,
+    submitted_via 来自自己的列;stats.asks 把它计入,stats.global_asks 单独
+    计数;scope 过滤能把它与笔记本内提问分开。"""
+    question = "跨库比较两个电路的噪声"
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u1")
+        _insert_notebook(connection, "n1", "u1")
+        _insert_ask(connection, "ask-n1", "n1", "u1", NOW, question="笔记本内提问")
+        _insert_global_conversation(connection, "gconv-1", "u1", NOW, submitted_via="mcp")
+        _insert_global_ask(
+            connection, "gask-1", "gconv-1", "u1", NOW,
+            question=question, submitted_via="mcp",
+        )
+
+    everything = store.list_admin_questions(limit=50)
+    global_item = next(item for item in everything["items"] if item["id"] == "gask-1")
+    assert global_item["type"] == "ask"
+    assert global_item["scope"] == "global"
+    assert global_item["notebook_id"] == ""
+    assert global_item["notebook_name"] == ""
+    assert global_item["submitted_via"] == "mcp"
+    assert global_item["question"] == question
+    assert everything["stats"]["asks"] == 2
+    assert everything["stats"]["global_asks"] == 1
+
+    scoped_global = store.list_admin_questions(scope="global", limit=50)
+    assert {item["id"] for item in scoped_global["items"]} == {"gask-1"}
+    assert scoped_global["stats"]["global_asks"] == 1
+
+    scoped_notebook = store.list_admin_questions(scope="notebook", limit=50)
+    assert "gask-1" not in {item["id"] for item in scoped_notebook["items"]}
+    assert scoped_notebook["stats"]["global_asks"] == 0
+
+
+def test_global_ask_job_appears_in_activity_feed_and_excluded_by_notebook_id(
+    postgres_database, store,
+):
+    """PG 孪生(与 SQLite 侧 test_admin_user_activity.py 同一条理由):全局问答
+    与笔记本内提问同为 type=ask,按 (created_at DESC, id DESC) 一起归并;
+    notebook_id 恒为空,显式选库时不出现。"""
+    older = NOW
+    newer = datetime(2026, 8, 1, 11, 0, 0, tzinfo=timezone.utc)
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u1")
+        _insert_notebook(connection, "n1", "u1")
+        _insert_ask(connection, "ask-old", "n1", "u1", older, question="旧的笔记本内提问")
+        _insert_global_conversation(connection, "gconv-2", "u1", newer)
+        _insert_global_ask(connection, "gask-2", "gconv-2", "u1", newer, question="更新的全局问题")
+
+    mixed = store.list_user_activity("u1", limit=50)
+    assert [item["id"] for item in mixed["items"]] == ["gask-2", "ask-old"]
+    global_item = mixed["items"][0]
+    assert global_item["type"] == "ask"
+    assert global_item["scope"] == "global"
+    assert global_item["notebook_id"] == ""
+    assert global_item["question"] == "更新的全局问题"
+    assert global_item["answer_id"] == "gask-2"
+
+    ask_only = store.list_user_activity("u1", activity_type="ask", limit=50)
+    assert [item["id"] for item in ask_only["items"]] == ["gask-2", "ask-old"]
+
+    scoped = store.list_user_activity("u1", notebook_id="n1", limit=50)
+    assert [item["id"] for item in scoped["items"]] == ["ask-old"]
+
+
+def test_self_service_global_feed_filters_unreadable_participants_before_limit(
+    postgres_database, store,
+):
+    """PG 孪生(与 SQLite 侧同名用例同一条理由):参与库读权谓词在 LIMIT 之前,
+    limit=1 逐页走时可读行全部可达、不可读行从不出现;管理员审计不过滤。"""
+    old = NOW
+    mid = datetime(2026, 8, 1, 11, 0, 0, tzinfo=timezone.utc)
+    new = datetime(2026, 8, 1, 12, 0, 0, tzinfo=timezone.utc)
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u1")
+        _insert_notebook(connection, "n-live", "u1")
+        # n-gone is never inserted: a deleted notebook is physically gone.
+        _insert_global_conversation(connection, "gc-1", "u1", old)
+        _insert_global_ask(connection, "g-old", "gc-1", "u1", old, notebook_ids=["n-live"])
+        _insert_global_ask(connection, "g-mid", "gc-1", "u1", mid,
+                           notebook_ids=["n-live", "n-gone"])
+        _insert_global_ask(connection, "g-new", "gc-1", "u1", new, notebook_ids=["n-live"])
+
+    seen, cursor = [], None
+    for _ in range(5):
+        page = store.list_user_activity(
+            "u1", activity_type="ask", limit=1,
+            before_ts=cursor["ts"] if cursor else None,
+            before_id=cursor["id"] if cursor else None,
+        )
+        seen.extend(item["id"] for item in page["items"])
+        if not page["has_more"]:
+            break
+        cursor = page["next_cursor"]
+    assert seen == ["g-new", "g-old"]
+
+    audit = store.list_user_activity(
+        "u1", activity_type="ask", include_inaccessible_questions=True, limit=50,
+    )
+    assert [item["id"] for item in audit["items"]] == ["g-new", "g-mid", "g-old"]
 
 
 def test_activity_type_filter_applies_before_limit_and_paginates_all_questions(

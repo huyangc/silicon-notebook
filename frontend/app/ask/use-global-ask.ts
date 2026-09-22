@@ -160,7 +160,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
   const turnsFlight = useRef(false);
   const historyVersion = useRef(0);
   const historyNeedsRefresh = useRef(false);
-  const retryRequest = useRef<{ key: string; id: string } | null>(null);
+  const retryRequest = useRef<{ key: string; id: string; askedAt: string } | null>(null);
   const currentId = useRef(conversationId);
   currentId.current = conversationId;
   const currentScope = useRef(scope);
@@ -682,12 +682,15 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     // 进幂等键：同一个问题「替换 A」与「不替换」是两次不同的提交。
     replaces = replaceableTurn(currentTurns.current)?.job_id;
     const key = JSON.stringify({ question, scope, conversationId, mode: submissionMode, edited, replaces });
-    if (retryRequest.current?.key !== key) retryRequest.current = { key, id: newClientRequestId() };
+    if (retryRequest.current?.key !== key) {
+      retryRequest.current = { key, id: newClientRequestId(), askedAt: new Date().toISOString() };
+    }
       const payload = {
         question,
         notebook_scope: scope,
         conversation_id: conversationId || undefined,
         client_request_id: retryRequest.current.id,
+        asked_at: retryRequest.current.askedAt,
         mode: submissionMode,
         intent,
         retrieval_effort: GLOBAL_ASK_RETRIEVAL_EFFORT,

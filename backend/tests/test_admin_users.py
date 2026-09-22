@@ -551,6 +551,92 @@ def test_list_user_usage_failed_counts_retained_branch(repo):
     assert usage["reports_failed"] == 1
 
 
+def _insert_global_conversation(db, conv_id, user_id, created_at, *,
+                                 submitted_via="web") -> None:
+    db.execute(
+        "INSERT INTO global_ask_conversations "
+        "(id,user_id,title,scope_json,submitted_via,created_at,updated_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (conv_id, user_id, "", '{"mode":"all","notebook_ids":[]}', submitted_via,
+         created_at, created_at),
+    )
+
+
+def _insert_global_ask(db, job_id, conv_id, user_id, created_at, *,
+                        status="done", error_detail="") -> None:
+    db.execute(
+        "INSERT INTO global_ask_jobs "
+        "(id,conversation_id,user_id,client_request_id,request_json,status,"
+        "payload_json,created_at,submitted_via,asked_at,updated_at,error_detail) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (job_id, conv_id, user_id, None, "{}", status,
+         '{"question":"全局问题"}', created_at, "web", "", created_at, error_detail),
+    )
+
+
+def test_list_user_usage_counts_global_ask_conversations_and_questions(repo):
+    """全局问答与笔记本内问答同一套用量口径(与 SQLite query_store 里逐字同一
+    条理由):global_ask_conversations 并入 conversations,global_ask_jobs 并入
+    questions/questions_30d/questions_failed。"""
+    now = datetime.now(timezone.utc)
+
+    def bare(dt: datetime) -> str:
+        return dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+    created_now = bare(now)
+    recent = bare(now - timedelta(days=5))
+    old = bare(now - timedelta(days=40))
+
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("u1", "u1@x", "U1", "user", "active", "a00000001", created_now, created_now),
+        )
+        _insert_global_conversation(db, "gc-1", "u1", created_now)
+        _insert_global_ask(db, "g-recent", "gc-1", "u1", recent, status="completed")
+        _insert_global_ask(db, "g-old", "gc-1", "u1", old, status="completed")
+        _insert_global_ask(db, "g-failed", "gc-1", "u1", created_now, status="failed")
+
+    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    assert usage["conversations"] == 1
+    assert usage["questions"] == 3
+    # recent + created_now(g-failed) 在 30 天窗口内;old(40 天前)在窗外。
+    assert usage["questions_30d"] == 2
+    assert usage["questions_failed"] == 1
+
+
+def test_list_user_usage_last_active_moves_to_newer_global_job(repo):
+    """一个更晚的全局问答作业应把 last_active 往前推,与笔记本内提问同一批
+    候选参与排序(见 query_store.py 的 activity_candidates)。"""
+    now = "2026-07-07T00:00:00"
+    later = "2026-07-08T00:00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("u1", "u1@x", "U1", "user", "active", "a00000001", now, now),
+        )
+        db.execute(
+            "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)", ("n1", "n1", "u1", "ready", now, now),
+        )
+        db.execute(
+            "INSERT INTO ask_jobs "
+            "(id,notebook_id,created_by,mode,question,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("j1", "n1", "u1", "chunk", "q?", "completed", now, now),
+        )
+    assert next(row for row in repo.list_user_usage() if row["id"] == "u1")["last_active"] == now
+
+    with repo._write() as db:
+        _insert_global_conversation(db, "gc-2", "u1", later)
+        _insert_global_ask(db, "g-newer", "gc-2", "u1", later)
+
+    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    assert usage["last_active"] == later
+
+
 def test_list_user_usage_kg_builds_counts_all_statuses_excludes_empty_creator(repo):
     """B4:所有状态都算(与 questions 含失败/取消同口径);created_by 空串
     (早期/异常写入)不算有效用户键。"""

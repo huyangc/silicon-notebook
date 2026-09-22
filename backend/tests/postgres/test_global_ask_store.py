@@ -12,7 +12,7 @@ pytestmark = pytest.mark.postgres_integration
 
 @pytest.fixture
 def store(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 60
+    assert PostgresMigrator(postgres_database).migrate() == 61
     return GlobalAskStore(postgres_database, marker="%s")
 
 
@@ -237,6 +237,101 @@ def test_set_feedback_updates_a_legacy_row_with_no_feedback_key_at_all(store):
         )
     updated = store.set_feedback(value.job_id, "user-a", "useful")
     assert updated is not None and updated.feedback == "useful"
+
+
+def test_pg_create_persists_submitted_via_asked_at_and_updated_at(store):
+    """记录平权(PostgreSQL 0061)的 PG 孪生:``create`` 把 submitted_via/
+    asked_at 写进自己的列,``updated_at`` 起步等于 ``created_at``。"""
+    value = job()
+    value.asked_at = "2026-09-20T00:00:00+00:00"
+    store.create(value, "user-a", "request-a", "payload", "mcp", new_conversation=True)
+    with store.database.connect() as db:
+        row = db.execute(
+            "SELECT submitted_via, asked_at, created_at, updated_at "
+            "FROM global_ask_jobs WHERE id=%s", (value.job_id,),
+        ).fetchone()
+    assert row["submitted_via"] == "mcp"
+    assert row["asked_at"] == "2026-09-20T00:00:00+00:00"
+    assert row["updated_at"] == row["created_at"]
+    reread = store.job(value.job_id, "user-a")
+    assert reread.asked_at == "2026-09-20T00:00:00+00:00"
+    assert reread.updated_at == row["created_at"]
+
+
+def test_pg_save_writes_error_detail_and_moves_updated_at(store, monkeypatch):
+    import app.repositories.global_ask_store as store_module
+
+    value = job()
+    store.create(value, "user-a", "request-a", "payload", "web", new_conversation=True)
+    monkeypatch.setattr(
+        store_module, "_transition_now", lambda: "2026-09-21T00:00:00+00:00"
+    )
+    value.status = "failed"
+    assert store.save(value, "user-a", error_detail="RuntimeError: boom")
+    reread = store.job(value.job_id, "user-a")
+    assert reread.updated_at == "2026-09-21T00:00:00+00:00"
+    with store.database.connect() as db:
+        row = db.execute(
+            "SELECT error_detail FROM global_ask_jobs WHERE id=%s", (value.job_id,),
+        ).fetchone()
+    assert row["error_detail"] == "RuntimeError: boom"
+
+
+def test_pg_save_progress_bumps_updated_at(store, monkeypatch):
+    import app.repositories.global_ask_store as store_module
+
+    value = job()
+    store.create(value, "user-a", "request-a", "payload", "web", new_conversation=True)
+    monkeypatch.setattr(
+        store_module, "_transition_now", lambda: "2026-09-21T01:00:00+00:00"
+    )
+    value.searched_notebook_ids = ["nb-a"]
+    assert store.save_progress(value, "user-a")
+    reread = store.job(value.job_id, "user-a")
+    assert reread.updated_at == "2026-09-21T01:00:00+00:00"
+
+
+def test_pg_set_feedback_writes_feedback_at_and_first_write_wins(store):
+    value = job()
+    store.create(value, "user-a", "request-a", "payload", "web", new_conversation=True)
+    value.status = "done"
+    assert store.save(value, "user-a")
+    updated = store.set_feedback(value.job_id, "user-a", "useful")
+    assert updated.feedback_at != ""
+    first_feedback_at = updated.feedback_at
+    again = store.set_feedback(value.job_id, "user-a", "not_useful")
+    assert again.feedback_at == first_feedback_at
+    assert again.feedback == "useful"
+
+
+def test_pg_recover_stamps_updated_at(store, monkeypatch):
+    import app.repositories.global_ask_store as store_module
+
+    value = job()
+    store.create(value, "user-a", "request-a", "payload", "web", new_conversation=True)
+    monkeypatch.setattr(
+        store_module, "_transition_now", lambda: "2026-09-21T02:00:00+00:00"
+    )
+    store.recover()
+    reread = store.job(value.job_id, "user-a")
+    assert reread.status == "interrupted"
+    assert reread.updated_at == "2026-09-21T02:00:00+00:00"
+
+
+def test_pg_admin_job_record_returns_record_and_none_for_foreign_or_missing_job(store):
+    value = job()
+    store.create(value, "user-a", "request-a", "payload", "mcp", new_conversation=True)
+    value.status = "failed"
+    assert store.save(value, "user-a", error_detail="RuntimeError: boom")
+
+    record = store.admin_job_record(value.job_id, "user-a")
+    assert record is not None
+    assert record["error_detail"] == "RuntimeError: boom"
+    assert record["submitted_via"] == "mcp"
+    assert record["job"].job_id == value.job_id
+
+    assert store.admin_job_record(value.job_id, "user-b") is None
+    assert store.admin_job_record("no-such-job", "user-a") is None
 
 
 def test_postgres_global_batch_authority_and_source_ceiling(store, monkeypatch):

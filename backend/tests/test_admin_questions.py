@@ -65,7 +65,9 @@ def test_admin_questions_combines_ask_and_report_with_filters(client):
     response = client.get("/api/admin/questions", headers=admin)
     assert response.status_code == 200
     body = response.json()
-    assert body["stats"] == {"total": 2, "asks": 1, "reports": 1, "active_users": 1}
+    assert body["stats"] == {
+        "total": 2, "asks": 1, "reports": 1, "active_users": 1, "global_asks": 0,
+    }
     assert {item["type"] for item in body["items"]} == {"ask", "report"}
     assert all(item["username"] == "d00000004" for item in body["items"])
     assert all(item["notebook_name"] == "模拟电路" for item in body["items"])
@@ -78,7 +80,9 @@ def test_admin_questions_combines_ask_and_report_with_filters(client):
 
     filtered = client.get("/api/admin/questions?kind=report&q=稳定", headers=admin).json()
     assert filtered["total"] == 1
-    assert filtered["stats"] == {"total": 1, "asks": 0, "reports": 1, "active_users": 1}
+    assert filtered["stats"] == {
+        "total": 1, "asks": 0, "reports": 1, "active_users": 1, "global_asks": 0,
+    }
     assert filtered["items"][0]["question"] == "分析放大器稳定性"
 
     # 批 3·W1 PR-3:DELETE 现在是 202(tombstone CAS 立即返回),实际归档由
@@ -87,7 +91,9 @@ def test_admin_questions_combines_ask_and_report_with_filters(client):
     from app.services import background_jobs
     background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
     retained = client.get("/api/admin/questions", headers=admin).json()
-    assert retained["stats"] == {"total": 2, "asks": 1, "reports": 1, "active_users": 1}
+    assert retained["stats"] == {
+        "total": 2, "asks": 1, "reports": 1, "active_users": 1, "global_asks": 0,
+    }
     assert {item["id"] for item in retained["items"]} == {"ask-global", "report-global"}
     assert all(item["notebook_name"] == "模拟电路" for item in retained["items"])
     retained_ask = next(item for item in retained["items"] if item["type"] == "ask")
@@ -141,14 +147,18 @@ def test_admin_questions_filters_by_submitted_via(client):
     web_only = client.get(
         "/api/admin/questions?submitted_via=web", headers=admin
     ).json()
-    assert web_only["stats"] == {"total": 1, "asks": 1, "reports": 0, "active_users": 1}
+    assert web_only["stats"] == {
+        "total": 1, "asks": 1, "reports": 0, "active_users": 1, "global_asks": 0,
+    }
     assert [item["id"] for item in web_only["items"]] == ["ask-web"]
     assert web_only["items"][0]["submitted_via"] == "web"
 
     mcp_only = client.get(
         "/api/admin/questions?submitted_via=mcp", headers=admin
     ).json()
-    assert mcp_only["stats"] == {"total": 2, "asks": 1, "reports": 1, "active_users": 1}
+    assert mcp_only["stats"] == {
+        "total": 2, "asks": 1, "reports": 1, "active_users": 1, "global_asks": 0,
+    }
     assert {item["id"] for item in mcp_only["items"]} == {"ask-mcp", "report-mcp"}
     assert all(item["submitted_via"] == "mcp" for item in mcp_only["items"])
 
@@ -173,3 +183,71 @@ def test_admin_questions_filters_by_submitted_via(client):
     ).json()
     assert [item["id"] for item in retained_web["items"]] == ["ask-web"]
     assert retained_web["items"][0]["submitted_via"] == "web"
+
+
+def test_admin_questions_includes_global_ask_jobs(client):
+    """一条全局问答(global_ask_conversations + global_ask_jobs)在总览里现身:
+    type=ask、scope=global、notebook_id/notebook_name 为空、submitted_via 来自
+    列。stats.asks 把它计入,并且 stats.global_asks 单独计数一次。scope 过滤
+    与 submitted_via 过滤、q 全文搜索、kind=report 排除都要覆盖到。"""
+    user_headers, user_id = _register(client, "d00000006")
+    from app.api.deps import repository
+
+    now = "2026-09-16T08:00:00+00:00"
+    question = "跨库比较两个电路的噪声"
+    with repository()._write() as db:
+        db.execute(
+            "INSERT INTO global_ask_conversations"
+            "(id,user_id,title,scope_json,submitted_via,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("gconv-1", user_id, "", '{"mode":"all","notebook_ids":[]}', "mcp", now, now),
+        )
+        db.execute(
+            "INSERT INTO global_ask_jobs"
+            "(id,conversation_id,user_id,client_request_id,request_json,status,"
+            "payload_json,created_at,submitted_via,asked_at,updated_at,error_detail) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("gask-1", "gconv-1", user_id, None, "{}", "done",
+             f'{{"question":"{question}"}}', now, "mcp", "", now, ""),
+        )
+
+    admin = _admin(client)
+    response = client.get("/api/admin/questions", headers=admin)
+    assert response.status_code == 200
+    body = response.json()
+    global_item = next(item for item in body["items"] if item["id"] == "gask-1")
+    assert global_item["type"] == "ask"
+    assert global_item["scope"] == "global"
+    assert global_item["notebook_id"] == ""
+    assert global_item["notebook_name"] == ""
+    assert global_item["submitted_via"] == "mcp"
+    assert global_item["question"] == question
+    assert body["stats"]["asks"] == 1
+    assert body["stats"]["global_asks"] == 1
+
+    scoped_global = client.get(
+        "/api/admin/questions?scope=global", headers=admin
+    ).json()
+    assert {item["id"] for item in scoped_global["items"]} == {"gask-1"}
+    assert scoped_global["stats"]["global_asks"] == 1
+
+    scoped_notebook = client.get(
+        "/api/admin/questions?scope=notebook", headers=admin
+    ).json()
+    assert "gask-1" not in {item["id"] for item in scoped_notebook["items"]}
+    assert scoped_notebook["stats"]["global_asks"] == 0
+
+    mcp_filtered = client.get(
+        "/api/admin/questions?submitted_via=mcp", headers=admin
+    ).json()
+    assert "gask-1" in {item["id"] for item in mcp_filtered["items"]}
+
+    q_filtered = client.get(
+        "/api/admin/questions?q=跨库", headers=admin
+    ).json()
+    assert {item["id"] for item in q_filtered["items"]} == {"gask-1"}
+
+    report_only = client.get(
+        "/api/admin/questions?kind=report", headers=admin
+    ).json()
+    assert "gask-1" not in {item["id"] for item in report_only["items"]}

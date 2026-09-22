@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.core.capability_tokens import (
     GLOBAL_CONVERSATION_SHARE_PREFIX,
@@ -25,6 +25,16 @@ from app.repositories.ports import (
 # cannot drift from the order the public page renders in.
 GLOBAL_JOBS_ORDER_ASC = "ORDER BY created_at ASC,id ASC"
 GLOBAL_JOBS_ORDER_DESC = "ORDER BY created_at DESC,id DESC"
+
+
+def _transition_now() -> str:
+    """The ``updated_at`` stamp of one row transition.
+
+    Same clock and same spelling as the service's ``created_at`` stamp (an
+    aware UTC ISO instant), so the two columns of one row compare under the
+    same text order and the admin readers cast both the same way.
+    """
+    return datetime.now(timezone.utc).isoformat()
 
 
 class GlobalAskStore:
@@ -77,12 +87,14 @@ class GlobalAskStore:
             return None
         result = GlobalAskJob.model_validate_json(row["payload_json"])
         result.status = row["status"]
-        # The submission's idempotency id lives in its own column, not in the
-        # payload; a narrower SELECT simply does not carry it.
-        try:
-            result.client_request_id = row["client_request_id"] or ""
-        except (KeyError, IndexError):
-            pass
+        # The submission's idempotency id and the two record-parity instants
+        # live in their own columns, not in the payload; a narrower SELECT
+        # simply does not carry them.
+        for field in ("client_request_id", "asked_at", "updated_at"):
+            try:
+                setattr(result, field, row[field] or "")
+            except (KeyError, IndexError):
+                pass
         if result.status == "interrupted":
             result.error = "服务已重启，请重新提交问题。"
         return result
@@ -169,12 +181,18 @@ class GlobalAskStore:
                 job.created_at = self._after_latest_job(db, job.conversation_id, job.created_at)
                 if replaces_job_id:
                     self._discard_replaced(db, job, user_id, replaces_job_id)
+            # ``updated_at`` starts equal to ``created_at``: a running job's last
+            # transition IS its admission, exactly as ``ask_jobs`` stamps both
+            # columns with the same ``now`` on insert.
+            job.updated_at = job.created_at
             db.execute(self._sql(
                 "INSERT INTO global_ask_jobs"
-                "(id,conversation_id,user_id,client_request_id,request_json,status,payload_json,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?)"
+                "(id,conversation_id,user_id,client_request_id,request_json,status,"
+                "payload_json,created_at,submitted_via,asked_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)"
             ), (job.job_id, job.conversation_id, user_id, request_id or None,
-                request_json, job.status, job.model_dump_json(), job.created_at))
+                request_json, job.status, job.model_dump_json(), job.created_at,
+                submitted_via, job.asked_at, job.updated_at))
             db.execute(self._sql(
                 "UPDATE global_ask_conversations SET scope_json=?,updated_at=? WHERE id=? AND user_id=?"
             ), (job.notebook_scope.model_dump_json(), job.created_at, job.conversation_id, user_id))
@@ -270,12 +288,28 @@ class GlobalAskStore:
             return stamp
         return bumped.isoformat()
 
-    def save(self, job, user_id):
+    def save(self, job, user_id, *, error_detail=""):
+        """Move a running job to its terminal state.
+
+        ``updated_at`` is stamped here, in the same statement: it is the finish
+        instant of the row, the one ``ask_jobs.updated_at`` has always recorded.
+        ``error_detail`` is the raw ``ExceptionType: message`` of a failed run
+        -- administrator diagnostics only, so it goes into its own column and
+        never into ``payload_json`` (the owner-facing body, whose ``error`` stays
+        the fixed Chinese sentence). Stamped onto the object too, so the value
+        the caller keeps publishing equals what the row now says.
+        """
+        # Stamped onto the object only when THIS write won: the loser of a
+        # cancel/finish race must not carry an instant the row never had.
+        stamp = _transition_now()
+        payload = job.model_copy(update={"updated_at": stamp}).model_dump_json()
         with self.database.write() as db:
             cursor = db.execute(self._sql(
-                "UPDATE global_ask_jobs SET status=?,payload_json=? "
-                "WHERE id=? AND user_id=? AND status='running'"
-            ), (job.status, job.model_dump_json(), job.job_id, user_id))
+                "UPDATE global_ask_jobs SET status=?,payload_json=?,updated_at=?,"
+                "error_detail=? WHERE id=? AND user_id=? AND status='running'"
+            ), (job.status, payload, stamp, error_detail or "", job.job_id, user_id))
+        if cursor.rowcount == 1:
+            job.updated_at = stamp
         return cursor.rowcount == 1
 
     def save_progress(self, job, user_id):
@@ -295,11 +329,16 @@ class GlobalAskStore:
             "trace",
         }, mode="json")
         expression = "(payload_json::jsonb || ?::jsonb)::text" if self.marker == "%s" else "json_patch(payload_json, ?)"
+        # A progress save is a transition too: ``ask_jobs.updated_at`` moves on
+        # every trace append, so the global row's last-touch instant does as well.
+        stamp = _transition_now()
         with self.database.write() as db:
             cursor = db.execute(self._sql(
-                f"UPDATE global_ask_jobs SET payload_json={expression} "
+                f"UPDATE global_ask_jobs SET payload_json={expression},updated_at=? "
                 "WHERE id=? AND user_id=? AND status='running'"
-            ), (json.dumps(patch, ensure_ascii=False), job.job_id, user_id))
+            ), (json.dumps(patch, ensure_ascii=False), stamp, job.job_id, user_id))
+        if cursor.rowcount == 1:
+            job.updated_at = stamp
         return cursor.rowcount == 1
 
     def set_feedback(self, job_id, user_id, rating):
@@ -318,7 +357,11 @@ class GlobalAskStore:
         fresh error. Any other case (written now, or already carrying a prior
         rating) returns the current row.
         """
-        patch = json.dumps({"feedback": rating}, ensure_ascii=False)
+        # ``feedback_at`` rides in the same patch: the notebook ``feedback`` row
+        # records when the rating was given, so the global rating does too.
+        patch = json.dumps(
+            {"feedback": rating, "feedback_at": _transition_now()}, ensure_ascii=False,
+        )
         expression = "(payload_json::jsonb || ?::jsonb)::text" if self.marker == "%s" else "json_patch(payload_json, ?)"
         empty_feedback = (
             "(payload_json::jsonb->>'feedback' IS NULL OR payload_json::jsonb->>'feedback' = '')"
@@ -381,8 +424,37 @@ class GlobalAskStore:
             ), (conversation_id, user_id)).rowcount == 1
 
     def recover(self):
+        # The settlement is a transition like any other: ``ask_jobs`` stamps
+        # ``updated_at`` when startup recovery marks a row interrupted, so the
+        # global row records when it was settled too.
         with self.database.write() as db:
-            db.execute("UPDATE global_ask_jobs SET status='interrupted' WHERE status='running'")
+            db.execute(self._sql(
+                "UPDATE global_ask_jobs SET status='interrupted',updated_at=? "
+                "WHERE status='running'"
+            ), (_transition_now(),))
+
+    def admin_job_record(self, job_id, user_id):
+        """One job as the administrator activity detail reads it: the owner's
+        job plus the two per-row facts the owner-facing ``GlobalAskJob`` never
+        carries -- the raw failure text and the submission surface.
+
+        ``user_id`` is the OWNER (the viewed user), not the reader: the caller
+        decides who may read (admin, or the owner under a live read re-check)
+        exactly as ``guarded_ask_detail`` does for a notebook job. Returns
+        ``None`` when the row does not belong to that owner, so a foreign job
+        is indistinguishable from a missing one.
+        """
+        with self.database.connect() as db:
+            row = db.execute(self._sql(
+                "SELECT * FROM global_ask_jobs WHERE id=? AND user_id=?"
+            ), (job_id, user_id)).fetchone()
+        if row is None:
+            return None
+        return {
+            "job": self._job(row),
+            "error_detail": row["error_detail"] or "",
+            "submitted_via": row["submitted_via"] or "",
+        }
 
     # ------------------------------------------------------------------
     # public conversation sharing -- the global twin of

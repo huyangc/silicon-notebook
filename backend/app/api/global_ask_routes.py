@@ -47,7 +47,13 @@ def _call(method, *args, **kwargs):
 
 @router.post("/ask", response_model=GlobalAskJob, status_code=202)
 def ask_global(payload: GlobalAskRequest, user: UserProfile = Depends(get_current_user)):
-    return _call(global_ask_service().start, payload, user_id=user.id)
+    # Literal ``submitted_via``, never the parameter default: every real HTTP /
+    # MCP entry point declares its own submission surface (the same rule the
+    # notebook ``/ask`` routes follow), so the per-job record can never fall
+    # back to "not recorded" because a default silently changed.
+    return _call(
+        global_ask_service().start, payload, user_id=user.id, submitted_via="web",
+    )
 
 
 @router.post("/intent", response_model=QueryIntentContract)

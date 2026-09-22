@@ -463,13 +463,28 @@ class SharingStore:
             ).fetchone()
         return row is not None
 
-    def readable_notebook_names(self, user_id: str) -> dict[str, str]:
-        """Narrow live global scope; no summary/count/index hydration."""
+    def readable_notebook_names(
+        self, user_id: str, notebook_ids: Sequence[str] | None = None,
+    ) -> dict[str, str]:
+        """Narrow live global scope; no summary/count/index hydration.
+
+        ``notebook_ids`` narrows the read to those ids (a detail view naming a
+        handful of participants must not walk every library the user can read);
+        ``None`` keeps the whole readable scope.
+        """
+        ids = list(dict.fromkeys(notebook_ids)) if notebook_ids is not None else None
+        if ids is not None and not ids:
+            return {}
+        narrowing = ""
+        params: tuple = ()
+        if ids is not None:
+            narrowing = " AND nb.id IN (" + ",".join("%s" for _ in ids) + ")"
+            params = tuple(ids)
         with self.database.connect() as connection:
             rows = connection.execute(
                 "SELECT nb.id,nb.name FROM notebooks nb WHERE " + read_access_clause()
-                + f" AND nb.{NOTEBOOK_LIVE_SQL} ORDER BY nb.id",
-                read_access_params(user_id),
+                + f" AND nb.{NOTEBOOK_LIVE_SQL}{narrowing} ORDER BY nb.id",
+                (*read_access_params(user_id), *params),
             ).fetchall()
         return {row["id"]: row["name"] for row in rows}
 

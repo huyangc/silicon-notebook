@@ -23,6 +23,9 @@ export type ActivityTypeFilter = "" | "ask" | "source" | "report";
 
 export type ActivityAsk = {
   type: "ask";
+  /** "notebook"（笔记本内问答，默认）或 "global"（全局问答——不属于任何笔记本，
+   *  `notebook_id` 恒为空串，参与的库集合在详情端点 `AskDetail.notebook_ids` 给出）。 */
+  scope?: "notebook" | "global";
   id: string;
   notebook_id: string;
   created_at: string;
@@ -99,6 +102,10 @@ export type ActivityResponse = {
 // 答案组件复用,这里刻意留 unknown,不重新声明它们的形状。
 export type AskDetail = {
   job_id: string;
+  /** "notebook"（默认）或 "global"。global 时 `notebook_id`/`notebook_name` 为
+   *  空串，参与的库列在 `notebook_ids`，`notebook_names` 给出其中当前仍可被
+   *  该用户读到的库名（已删除或已失权的库不在其中，界面按 id 回落）。 */
+  scope?: "notebook" | "global";
   notebook_id: string;
   conversation_id: string;
   question: string;
@@ -113,6 +120,8 @@ export type AskDetail = {
   notebook_name?: string;
   notebook_deleted_at?: string;
   retained_until?: string;
+  notebook_ids?: string[];
+  notebook_names?: Record<string, string>;
 };
 
 // 右栏「选中报告」详情。字段与后端 ReportActivityDetail（backend/app/models/admin.py，

@@ -175,9 +175,17 @@ class AdminUserNotebook(BaseModel):
 
 
 class ActivityAsk(BaseModel):
-    """一条「提问」活动条目,数据来自 ask_jobs + answers。"""
+    """一条「提问」活动条目,数据来自 ask_jobs + answers,或 global_ask_jobs。
+
+    ``scope`` 区分两种提问:``notebook`` 是笔记本内问答(``notebook_id`` 非空),
+    ``global`` 是全局问答——它不属于任何笔记本,``notebook_id`` 恒为空串,
+    参与的库集合在详情端点(``AskDetail.notebook_ids``)里给出。两者在活动流
+    里同为 ``type="ask"``:全局问答与笔记本内问答用同一套引擎,只在检索方式上
+    不同,所以记录口径也是同一种。
+    """
 
     type: Literal["ask"] = "ask"
+    scope: Literal["notebook", "global"] = "notebook"
     id: str
     notebook_id: str
     created_at: str
@@ -266,9 +274,16 @@ class ActivityResponse(BaseModel):
 
 
 class AdminQuestionItem(BaseModel):
-    """One cross-user question submission from Ask or Deep Report."""
+    """One cross-user question submission from Ask, global Ask or Deep Report.
+
+    ``scope`` is ``global`` for a global Ask job (``type="ask"``, no notebook:
+    ``notebook_id`` and ``notebook_name`` are empty) and ``notebook`` for
+    everything else. A global job counts as an Ask question in ``stats.asks``
+    and additionally in ``stats.global_asks``.
+    """
 
     type: Literal["ask", "report"]
+    scope: Literal["notebook", "global"] = "notebook"
     id: str
     user_id: str
     username: str
@@ -285,6 +300,8 @@ class AdminQuestionStats(BaseModel):
     asks: int = 0
     reports: int = 0
     active_users: int = 0
+    # Global Ask jobs under the current filter; a subset of ``asks``.
+    global_asks: int = 0
 
 
 class AdminQuestionsResponse(BaseModel):
@@ -367,6 +384,10 @@ class AskDetail(BaseModel):
     """
 
     job_id: str
+    # ``global`` 时 ``notebook_id``/``notebook_name`` 为空串,参与的库列在
+    # ``notebook_ids``,``notebook_names`` 给出其中当前仍可被该用户读到的库名
+    # (已删除或已失权的库不在其中,前端按 id 回落)。
+    scope: Literal["notebook", "global"] = "notebook"
     notebook_id: str
     conversation_id: str = ""
     question: str = ""
@@ -381,6 +402,8 @@ class AskDetail(BaseModel):
     notebook_name: str = ""
     notebook_deleted_at: str = ""
     retained_until: str = ""
+    notebook_ids: List[str] = Field(default_factory=list)
+    notebook_names: Dict[str, str] = Field(default_factory=dict)
 
     @field_validator("trace", mode="before")
     @classmethod

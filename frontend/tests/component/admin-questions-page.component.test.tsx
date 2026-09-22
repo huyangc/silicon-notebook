@@ -46,7 +46,7 @@ const page = {
       created_at: "2026-08-30T09:00:00+08:00",
     },
   ],
-  stats: { total: 2, asks: 1, reports: 1, active_users: 2 },
+  stats: { total: 2, asks: 1, reports: 1, active_users: 2, global_asks: 0 },
   total: 2,
   offset: 0,
   limit: 50,
@@ -209,11 +209,65 @@ test("加载中重复选择当前来源不会作废在途结果", async () => {
   render(<AdminQuestionsPage />);
   await waitFor(() => expect(mocks.fetchAdminQuestions).toHaveBeenCalledTimes(1));
 
-  await user.click(screen.getByRole("button", { name: "全部" }));
+  await user.click(within(screen.getByRole("group", { name: "提问来源" })).getByRole("button", { name: "全部" }));
   resolveCurrent(page);
 
   expect(await screen.findByText("这个市场的主要竞争者是谁？")).toBeInTheDocument();
   expect(mocks.fetchAdminQuestions).toHaveBeenCalledTimes(1);
+});
+
+test("全局问答条目展示专属汇总卡片、笔记本列与来源角标", async () => {
+  mocks.fetchAdminQuestions.mockResolvedValue({
+    ...page,
+    items: [
+      ...page.items,
+      {
+        type: "ask",
+        scope: "global",
+        id: "gask-1",
+        user_id: "user-1",
+        username: "小林",
+        notebook_id: "",
+        notebook_name: "",
+        question: "所有笔记本里谁提到了这个方案？",
+        status: "completed",
+        created_at: "2026-08-31T11:00:00+08:00",
+      },
+    ],
+    stats: { ...page.stats, total: 3, asks: 2, global_asks: 1 },
+    total: 3,
+  });
+  render(<AdminQuestionsPage />);
+
+  expect(await screen.findByText("所有笔记本里谁提到了这个方案？")).toBeInTheDocument();
+  const statsSection = screen.getByRole("region", { name: "提问汇总" });
+  const globalCard = within(statsSection).getByText("全局问答").closest("article");
+  expect(globalCard).not.toBeNull();
+  expect(within(globalCard!).getByText("1")).toBeInTheDocument();
+  const table = await screen.findByRole("table");
+  const rows = within(table).getAllByRole("row").slice(1);
+  const globalRow = rows.find((row) => within(row).queryByText("所有笔记本里谁提到了这个方案？"));
+  expect(globalRow).toBeTruthy();
+  expect(within(globalRow!).getByText("全局")).toBeInTheDocument();
+  expect(within(globalRow!).getByText("全局问答")).toBeInTheDocument();
+});
+
+test("按全局范围筛选时带参重新加载并回到第一页", async () => {
+  mocks.fetchAdminQuestions.mockResolvedValue({ ...page, total: 120 });
+  const user = userEvent.setup();
+  render(<AdminQuestionsPage />);
+  await screen.findByText("这个市场的主要竞争者是谁？");
+
+  await user.click(screen.getByRole("button", { name: "下一页" }));
+  await waitFor(() => expect(mocks.fetchAdminQuestions).toHaveBeenLastCalledWith(
+    expect.objectContaining({ offset: 50 }),
+  ));
+
+  const scopeGroup = screen.getByRole("group", { name: "提问范围" });
+  await user.click(within(scopeGroup).getByRole("button", { name: "全局" }));
+  await waitFor(() => expect(mocks.fetchAdminQuestions).toHaveBeenLastCalledWith(
+    expect.objectContaining({ scope: "global", offset: 0 }),
+  ));
 });
 
 test("搜索 rail 按 Unicode 字符计数且不会静默截断 emoji", async () => {

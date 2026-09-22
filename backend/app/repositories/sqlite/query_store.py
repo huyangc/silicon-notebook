@@ -782,10 +782,17 @@ class QueryStore:
             ).fetchall():
                 sources[row["k"]] = int(row["c"] or 0)
                 storage_bytes[row["k"]] = int(row["b"] or 0)
+            # 全局问答与笔记本内问答同一口径:global_ask_conversations /
+            # global_ask_jobs 按 user_id 并入会话数、提问数、近 30 天与失败数——
+            # 两者用同一套引擎、只在检索方式上不同,用量当然也是同一种提问。
             conversations = {
                 row["k"]: row["c"]
                 for row in db.execute(
-                    "SELECT created_by AS k, COUNT(*) AS c FROM conversations GROUP BY created_by"
+                    "SELECT k,SUM(c) AS c FROM ("
+                    "SELECT created_by AS k,COUNT(*) AS c FROM conversations GROUP BY created_by "
+                    "UNION ALL "
+                    "SELECT user_id AS k,COUNT(*) AS c FROM global_ask_conversations "
+                    "GROUP BY user_id) t GROUP BY k"
                 ).fetchall()
             }
             questions = {
@@ -793,6 +800,8 @@ class QueryStore:
                 for row in db.execute(
                     "SELECT k,SUM(c) AS c FROM ("
                     "SELECT created_by AS k,COUNT(*) AS c FROM ask_jobs GROUP BY created_by "
+                    "UNION ALL "
+                    "SELECT user_id AS k,COUNT(*) AS c FROM global_ask_jobs GROUP BY user_id "
                     "UNION ALL "
                     "SELECT a.actor_id AS k,COUNT(*) AS c "
                     "FROM retained_user_activity a WHERE a.activity_type='ask' "
@@ -837,6 +846,10 @@ class QueryStore:
                     f"WHERE {_absolute_instant('created_at')}>={_questions_30d_floor_sql} "
                     "GROUP BY created_by "
                     "UNION ALL "
+                    "SELECT user_id AS k,COUNT(*) AS c FROM global_ask_jobs "
+                    f"WHERE {_absolute_instant('created_at')}>={_questions_30d_floor_sql} "
+                    "GROUP BY user_id "
+                    "UNION ALL "
                     "SELECT a.actor_id AS k,COUNT(*) AS c FROM retained_user_activity a "
                     "WHERE a.activity_type='ask' "
                     "AND julianday(a.expires_at)>julianday('now') "
@@ -854,6 +867,9 @@ class QueryStore:
                     "SELECT k,SUM(c) AS c FROM ("
                     "SELECT created_by AS k,COUNT(*) AS c FROM ask_jobs "
                     "WHERE status='failed' GROUP BY created_by "
+                    "UNION ALL "
+                    "SELECT user_id AS k,COUNT(*) AS c FROM global_ask_jobs "
+                    "WHERE status='failed' GROUP BY user_id "
                     "UNION ALL "
                     "SELECT a.actor_id AS k,COUNT(*) AS c FROM retained_user_activity a "
                     "WHERE a.activity_type='ask' AND a.status='failed' "
@@ -941,7 +957,7 @@ class QueryStore:
             # updated_at，避免用户离开后仍因解析/生成完成而被显示成刚刚活跃。
             #
             # SQLite 的时间列混有裸 UTC 与带 offset 的 ISO 串，不能直接 MAX(text)。
-            # 每一类先按用户压成一个候选，再只在至多 4×用户数的候选上做窗口
+            # 每一类先按用户压成一个候选，再只在至多 5×用户数的候选上做窗口
             # 排序；_absolute_instant 与活动流的排序/游标使用同一条绝对时间
             # 判据。SQLite 对单个 MIN/MAX aggregate 的 bare columns 保证取自
             # 胜出行，因此 m/activity_id 与 MAX(sort_instant) 属于同一条活动；
@@ -958,6 +974,10 @@ class QueryStore:
                 "SELECT j.created_by AS k,j.created_at AS m,"
                 f"MAX({_absolute_instant('j.created_at')}) AS sort_instant,"
                 "'ask:'||j.id AS activity_id FROM ask_jobs j GROUP BY j.created_by "
+                "UNION ALL "
+                "SELECT g.user_id AS k,g.created_at AS m,"
+                f"MAX({_absolute_instant('g.created_at')}) AS sort_instant,"
+                "'global_ask:'||g.id AS activity_id FROM global_ask_jobs g GROUP BY g.user_id "
                 "UNION ALL "
                 "SELECT r.created_by AS k,r.created_at AS m,"
                 f"MAX({_absolute_instant('r.created_at')}) AS sort_instant,"
@@ -1049,11 +1069,21 @@ class QueryStore:
         offset: int = 0,
         limit: int = ADMIN_QUESTIONS_DEFAULT_LIMIT,
         submitted_via: StoredSubmittedVia | None = None,
+        scope: str | None = None,
     ) -> dict[str, Any]:
-        """Cross-user Ask/Deep-Report question overview for administrators."""
+        """Cross-user Ask / global Ask / Deep-Report question overview for
+        administrators.
+
+        A global Ask job is an ``ask`` row with ``scope='global'``: it belongs
+        to no notebook (``notebook_id``/``notebook_name`` empty) and its
+        question lives in ``payload_json``. It is the same kind of question as
+        a notebook one (same engine, different retrieval), so it counts in
+        ``asks`` and is additionally counted in ``global_asks``. ``scope``
+        narrows to one of the two families.
+        """
         cte = (
             "WITH questions AS ("
-            "SELECT 'ask' AS type,a.id,a.created_by AS user_id,"
+            "SELECT 'ask' AS type,'notebook' AS scope,a.id,a.created_by AS user_id,"
             "COALESCE(NULLIF(u.username,''),a.created_by) AS username,"
             "a.notebook_id,COALESCE(n.name,'') AS notebook_name,"
             "COALESCE(NULLIF(ans.question,''),a.question) AS question,"
@@ -1062,14 +1092,22 @@ class QueryStore:
             "LEFT JOIN answers ans ON ans.id=a.answer_id "
             "LEFT JOIN notebooks n ON n.id=a.notebook_id "
             "UNION ALL "
-            "SELECT 'report' AS type,r.id,r.created_by AS user_id,"
+            "SELECT 'ask' AS type,'global' AS scope,g.id,g.user_id,"
+            "COALESCE(NULLIF(u.username,''),g.user_id) AS username,"
+            "'' AS notebook_id,'' AS notebook_name,"
+            "COALESCE(json_extract(g.payload_json,'$.question'),'') AS question,"
+            "g.status,g.created_at,g.submitted_via FROM global_ask_jobs g "
+            "JOIN users u ON u.id=g.user_id "
+            "UNION ALL "
+            "SELECT 'report' AS type,'notebook' AS scope,r.id,r.created_by AS user_id,"
             "COALESCE(NULLIF(u.username,''),r.created_by) AS username,"
             "r.notebook_id,COALESCE(n.name,'') AS notebook_name,r.question,"
             "r.status,r.created_at,r.submitted_via FROM reports r "
             "JOIN users u ON u.id=r.created_by "
             "LEFT JOIN notebooks n ON n.id=r.notebook_id "
             "UNION ALL "
-            "SELECT h.activity_type AS type,h.record_id AS id,h.actor_id AS user_id,"
+            "SELECT h.activity_type AS type,'notebook' AS scope,h.record_id AS id,"
+            "h.actor_id AS user_id,"
             "COALESCE(NULLIF(u.username,''),h.actor_id) AS username,"
             "h.notebook_id,h.notebook_name,h.question,h.status,h.created_at,"
             "h.submitted_via "
@@ -1085,6 +1123,9 @@ class QueryStore:
         if kind is not None:
             where += " AND type=?"
             params.append(kind)
+        if scope is not None:
+            where += " AND scope=?"
+            params.append(scope)
         if user_id is not None:
             where += " AND user_id=?"
             params.append(user_id)
@@ -1101,13 +1142,14 @@ class QueryStore:
                 + "SELECT COUNT(*) AS total,"
                 "SUM(CASE WHEN type='ask' THEN 1 ELSE 0 END) AS asks,"
                 "SUM(CASE WHEN type='report' THEN 1 ELSE 0 END) AS reports,"
+                "SUM(CASE WHEN scope='global' THEN 1 ELSE 0 END) AS global_asks,"
                 "COUNT(DISTINCT user_id) AS active_users FROM questions "
                 + where,
                 params,
             ).fetchone()
             rows = db.execute(
                 cte
-                + "SELECT type,id,user_id,username,notebook_id,notebook_name,"
+                + "SELECT type,scope,id,user_id,username,notebook_id,notebook_name,"
                 "question,status,created_at,submitted_via FROM questions "
                 + where
                 + f" ORDER BY {_absolute_instant('created_at')} DESC,id DESC LIMIT ? OFFSET ?",
@@ -1117,6 +1159,7 @@ class QueryStore:
             "total": int(stats["total"] or 0),
             "asks": int(stats["asks"] or 0),
             "reports": int(stats["reports"] or 0),
+            "global_asks": int(stats["global_asks"] or 0),
             "active_users": int(stats["active_users"] or 0),
         }
         return {"items": [dict(row) for row in rows], "stats": totals, "total": totals["total"]}
@@ -1368,6 +1411,46 @@ class QueryStore:
                     [*ask_params, fetch_limit],
                 ).fetchall()
 
+            # 1b. 全局问答:与提问同一类(同一套引擎、只在检索方式上不同),按提交者
+            # user_id 取;它不属于任何笔记本,所以显式选库时不出现,混合流与只看提问
+            # 时都纳入。本人自助读取与笔记本内提问同一条规则:参与库集合必须整体仍
+            # 可读,否则这一行不出现——详情端点对 owner 正是这样 404 的,列表若列出
+            # 一条点开必失败的行,就成了活动流里唯一的报错条。判定与笔记本臂一样在
+            # SQL 里、LIMIT **之前**生效(参与库列表在 payload_json 里,用 json_each
+            # 展开后逐库套同一份 read_access_clause),页因此不会被过滤掉的行吞掉,
+            # has_more/游标也就与其他四臂同义。管理员审计不过滤(与已失权共享库提问
+            # 同口径)。
+            # 失败原文在 error_detail 列(与 ask_jobs.error 同一口径,只给管理员);
+            # 该列上线前的失败行回落到 payload 里给用户看的那句,与详情端点同一条回退。
+            global_rows = []
+            if activity_type in (None, "ask") and notebook_id is None:
+                global_access_clause = ""
+                global_params: list[Any] = [user_id]
+                if not include_inaccessible_questions:
+                    global_access_clause = (
+                        " AND NOT EXISTS(SELECT 1 FROM json_each("
+                        "json_extract(payload_json,'$.resolved_notebook_ids')) p "
+                        "WHERE NOT EXISTS(SELECT 1 FROM notebooks nb WHERE nb.id=p.value AND "
+                        + access_sql.read_access_clause()
+                        + f" AND nb.{access_sql.NOTEBOOK_LIVE_SQL}))"
+                    )
+                    global_params.extend(access_sql.read_access_params(user_id))
+                global_range_clause, global_range_params = _range_and_cursor_clause("")
+                global_params.extend(global_range_params)
+                global_rows = db.execute(
+                    "SELECT id, conversation_id, created_at, asked_at, status, "
+                    "submitted_via, "
+                    "COALESCE(NULLIF(error_detail,''), CASE WHEN status='failed' "
+                    "THEN json_extract(payload_json,'$.error') END, '') AS error_detail, "
+                    "COALESCE(json_extract(payload_json,'$.question'),'') AS question, "
+                    "COALESCE(json_extract(payload_json,'$.mode'),'') AS mode, "
+                    f"{_absolute_instant('created_at')} AS sort_instant "
+                    "FROM global_ask_jobs "
+                    f"WHERE user_id = ?{global_access_clause}{global_range_clause} "
+                    f"ORDER BY {_absolute_instant('created_at')} DESC, id DESC LIMIT ?",
+                    [*global_params, fetch_limit],
+                ).fetchall()
+
             # 2. 来源:sources 没有 created_by 列,靠"该用户自己的笔记本 id"限定范围
             # (与 list_user_notebooks 完全同口径)。必须带
             # VISIBLE_SOURCE_TYPES_PREDICATE 排除隐藏合成源(memory 派生源按创建者
@@ -1515,6 +1598,25 @@ class QueryStore:
                     "submitted_via": row["submitted_via"],
                 })
             )
+        for row in global_rows:
+            pool.append(
+                (row["sort_instant"], row["id"], {
+                    "type": "ask",
+                    "scope": "global",
+                    "id": row["id"],
+                    "notebook_id": "",
+                    "created_at": row["created_at"],
+                    "asked_at": row["asked_at"],
+                    "conversation_id": row["conversation_id"],
+                    "question": row["question"],
+                    "mode": row["mode"],
+                    "status": row["status"],
+                    # 全局回答的身份就是它的作业(见 global_ask.py 的完成分支)。
+                    "answer_id": row["id"] if row["status"] == "done" else "",
+                    "error": row["error_detail"],
+                    "submitted_via": row["submitted_via"],
+                })
+            )
         for row in source_rows:
             pool.append(
                 (row["sort_instant"], row["id"], {
@@ -1626,6 +1728,7 @@ class QueryStore:
         pool.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
         has_more = (
             len(ask_rows) > limit
+            or len(global_rows) > limit
             or len(source_rows) > limit
             or len(report_rows) > limit
             or len(retained_rows) > limit

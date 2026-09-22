@@ -114,6 +114,14 @@ function AskDetailPane({
         retained_until: detail.retained_until || item.retained_until,
       }
     : item;
+  const isGlobal = detail?.scope === "global" || item.scope === "global";
+  // 全局问答的引用来自多个笔记本:把详情端点给出的库名并入引用小卡片消费的那份
+  // 映射(该用户当前仍可读到的库),否则跨库引用只能显示 id。
+  const mergedNotebookNames = detail?.notebook_names
+    ? { ...notebookNames, ...detail.notebook_names }
+    : notebookNames;
+  const participantNotebooks = (detail?.notebook_ids ?? [])
+    .map((id) => mergedNotebookNames[id] || id);
   return (
     <div className="activity-detail-body">
       <div className="activity-detail-head">
@@ -121,12 +129,19 @@ function AskDetailPane({
         {userFacingModeLabel(item.mode) ? (
           <span className="activity-chip">{userFacingModeLabel(item.mode)}</span>
         ) : null}
+        {isGlobal ? <span className="activity-chip">全局</span> : null}
         <span className="activity-detail-time">
           {formatQuestionTime(item.asked_at || item.created_at, now)}
         </span>
       </div>
       <h2 className="activity-detail-title">{activityTitle(item)}</h2>
       <RetainedActivityNotice item={retentionItem} now={now} />
+      {isGlobal && participantNotebooks.length > 0 ? (
+        <dl className="activity-detail-facts">
+          <dt>参与笔记本</dt>
+          <dd title={participantNotebooks.join("、")}>{participantNotebooks.join("、")}</dd>
+        </dl>
+      ) : null}
       {error ? <div className="errorbar">{error}</div> : null}
       {loading ? <div className="empty">加载中…</div> : null}
       {!loading && !error && failure ? (
@@ -154,7 +169,7 @@ function AskDetailPane({
             // 等价（见其 JSDoc）。管理员查看他人活动本就是只读排障场景，宁可不显示
             // 附图，也不给一颗必然 404 的图片请求或误导性的直连。
             notebookId={null}
-            notebookNames={notebookNames}
+            notebookNames={mergedNotebookNames}
             scaleIndexStatus={null}
           />
         </div>

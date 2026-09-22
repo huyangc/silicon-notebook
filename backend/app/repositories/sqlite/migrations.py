@@ -233,7 +233,7 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # docs/incremental-sync-design.md section 5). No table, index, FK or unique
 # surface change, and no backfill -- every pre-existing row is local, which is
 # exactly what the default records.
-SCHEMA_VERSION = 80
+SCHEMA_VERSION = 81
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -4369,6 +4369,47 @@ class SqliteMigrator:
         with self._connect() as db:
             self.add_column_if_missing(
                 db, "notebooks", "sync_origin", "TEXT NOT NULL DEFAULT ''"
+            )
+
+    def _migration_81(self) -> None:
+        """Record-parity columns for global Ask jobs, paired with PostgreSQL
+        ``0061_global_ask_job_record_parity.sql``.
+
+        A global job must leave the same record a notebook ``ask_jobs`` row
+        leaves, so the four per-job facts that only ``ask_jobs`` carried move
+        onto ``global_ask_jobs`` as plain columns (never inside ``payload_json``,
+        which is the owner-facing response body):
+
+        * ``submitted_via`` -- the submission surface of THIS turn. It was only
+          ever stamped on the conversation, so a web-started conversation that
+          was continued over MCP read ``web`` for every turn. Backfilled from the
+          conversation: that value was recorded by a server entry point at the
+          time, not inferred, and it is exactly what the product has attributed
+          those turns to until now. Only empty rows are touched, so the ladder
+          stays re-runnable over a database that already carries the column.
+        * ``asked_at`` -- the browser-captured submission instant
+          (``ask_jobs.asked_at``); display metadata, never an ordering key.
+        * ``updated_at`` -- the last transition instant; the finish time of a
+          terminal job, which ``ask_jobs.updated_at`` has always recorded and a
+          global job could not recover at all. ``''`` for historical rows: their
+          finish instant was never written anywhere and is not reconstructed.
+        * ``error_detail`` -- the raw ``f"{type(exc).__name__}: {exc}"`` of a
+          failed run, the administrator-only diagnostic ``ask_jobs.error``
+          keeps. The owner-facing ``payload_json.error`` stays the fixed Chinese
+          sentence; this column is read by the admin detail endpoint only.
+
+        No index, table, foreign key or unique surface changes.
+        """
+        with self._connect() as db:
+            for column in ("submitted_via", "asked_at", "updated_at", "error_detail"):
+                self.add_column_if_missing(
+                    db, "global_ask_jobs", column, "TEXT NOT NULL DEFAULT ''"
+                )
+            db.execute(
+                "UPDATE global_ask_jobs SET submitted_via=COALESCE("
+                "(SELECT c.submitted_via FROM global_ask_conversations c "
+                "WHERE c.id=global_ask_jobs.conversation_id),'') "
+                "WHERE submitted_via=''"
             )
 
     def _seed(self) -> None:

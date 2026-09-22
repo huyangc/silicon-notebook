@@ -133,6 +133,166 @@ def _insert_report(db, report_id, notebook_id, created_by, created_at, *,
     )
 
 
+def _insert_global_conversation(db, conv_id, user_id, created_at, *,
+                                 submitted_via="web") -> None:
+    db.execute(
+        "INSERT INTO global_ask_conversations "
+        "(id,user_id,title,scope_json,submitted_via,created_at,updated_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (conv_id, user_id, "", '{"mode":"all","notebook_ids":[]}', submitted_via,
+         created_at, created_at),
+    )
+
+
+def _insert_global_ask(db, job_id, conv_id, user_id, created_at, *,
+                        question="跨库问题？", mode="chunk", status="done",
+                        asked_at="", submitted_via="web", error_detail="",
+                        notebook_ids=None) -> None:
+    payload = {"question": question, "mode": mode}
+    if notebook_ids is not None:
+        payload["resolved_notebook_ids"] = list(notebook_ids)
+    db.execute(
+        "INSERT INTO global_ask_jobs "
+        "(id,conversation_id,user_id,client_request_id,request_json,status,"
+        "payload_json,created_at,submitted_via,asked_at,updated_at,error_detail) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (job_id, conv_id, user_id, None, "{}", status,
+         json.dumps(payload, ensure_ascii=False),
+         created_at, submitted_via, asked_at, created_at, error_detail),
+    )
+
+
+def test_self_service_global_feed_filters_unreadable_participants_before_limit(repo):
+    """本人自助视图:参与库集合整体仍可读的全局问答才出现,判定在 LIMIT 之前——
+    一条参与库已删的行夹在两条可读行中间、limit=1 逐页走,可读的两条都翻得到、
+    不可读的那条从不出现、has_more 只在真有下一条时为真;管理员审计三条全见。
+    (规格评审曾复现:后过滤会让整页被吞、has_more 假阴。)"""
+    with repo._write() as db:
+        _insert_user(db, "u1", "a00000001")
+        _insert_notebook(db, "n-live", "u1")
+        # n-gone is never inserted: a deleted notebook is physically gone.
+        _insert_global_conversation(db, "gc-1", "u1", "2026-08-01T09:00:00")
+        _insert_global_ask(db, "g-old", "gc-1", "u1", "2026-08-01T09:00:00",
+                           notebook_ids=["n-live"])
+        _insert_global_ask(db, "g-mid", "gc-1", "u1", "2026-08-01T10:00:00",
+                           notebook_ids=["n-live", "n-gone"])
+        _insert_global_ask(db, "g-new", "gc-1", "u1", "2026-08-01T11:00:00",
+                           notebook_ids=["n-live"])
+
+    seen, cursor = [], None
+    for _ in range(5):
+        page = repo.list_user_activity(
+            "u1", activity_type="ask", limit=1,
+            before_ts=cursor["ts"] if cursor else None,
+            before_id=cursor["id"] if cursor else None,
+        )
+        seen.extend(item["id"] for item in page["items"])
+        if not page["has_more"]:
+            break
+        cursor = page["next_cursor"]
+    assert seen == ["g-new", "g-old"]
+
+    audit = repo.list_user_activity(
+        "u1", activity_type="ask", include_inaccessible_questions=True, limit=50,
+    )
+    assert [item["id"] for item in audit["items"]] == ["g-new", "g-mid", "g-old"]
+
+
+def test_global_ask_job_appears_in_mixed_and_ask_feed(repo):
+    """全局问答与笔记本内问答同为 type=ask,在混合流与只看提问时都出现;
+    scope=global、notebook_id 恒为空、submitted_via 来自自己的列、done 时
+    answer_id 等于作业自身 id。"""
+    with repo._write() as db:
+        _insert_user(db, "u1", "a00000001")
+        _insert_notebook(db, "n1", "u1")
+        _insert_ask(db, "ask-1", "n1", "u1", "2026-08-01T09:00:00")
+        _insert_global_conversation(db, "gc-1", "u1", "2026-08-01T10:00:00")
+        _insert_global_ask(
+            db, "gask-1", "gc-1", "u1", "2026-08-01T10:00:00",
+            question="跨库对比噪声", status="done", submitted_via="mcp",
+        )
+
+    mixed = repo.list_user_activity("u1", limit=50)
+    assert [item["id"] for item in mixed["items"]] == ["gask-1", "ask-1"]
+    global_item = mixed["items"][0]
+    assert global_item["type"] == "ask"
+    assert global_item["scope"] == "global"
+    assert global_item["notebook_id"] == ""
+    assert global_item["question"] == "跨库对比噪声"
+    assert global_item["answer_id"] == "gask-1"
+    assert global_item["submitted_via"] == "mcp"
+    assert global_item["error"] == ""
+
+    ask_only = repo.list_user_activity("u1", activity_type="ask", limit=50)
+    assert [item["id"] for item in ask_only["items"]] == ["gask-1", "ask-1"]
+
+
+def test_global_ask_job_failed_carries_error_detail_and_no_answer_id(repo):
+    """未完成/失败的全局作业没有 answer_id;error 取自 error_detail 列,与
+    ask_jobs.error 同一口径。"""
+    with repo._write() as db:
+        _insert_user(db, "u1", "a00000001")
+        _insert_global_conversation(db, "gc-2", "u1", "2026-08-01T09:00:00")
+        _insert_global_ask(
+            db, "gask-2", "gc-2", "u1", "2026-08-01T09:00:00",
+            status="failed", error_detail="RuntimeError: boom",
+        )
+
+    result = repo.list_user_activity("u1", activity_type="ask", limit=50)
+    [item] = result["items"]
+    assert item["status"] == "failed"
+    assert item["answer_id"] == ""
+    assert item["error"] == "RuntimeError: boom"
+
+
+def test_global_ask_job_excluded_when_notebook_id_filter_given(repo):
+    """全局问答不属于任何笔记本:显式选库时不应出现。"""
+    with repo._write() as db:
+        _insert_user(db, "u1", "a00000001")
+        _insert_notebook(db, "n1", "u1")
+        _insert_ask(db, "ask-1", "n1", "u1", "2026-08-01T09:00:00")
+        _insert_global_conversation(db, "gc-3", "u1", "2026-08-01T10:00:00")
+        _insert_global_ask(db, "gask-3", "gc-3", "u1", "2026-08-01T10:00:00")
+
+    scoped = repo.list_user_activity("u1", notebook_id="n1", limit=50)
+    assert [item["id"] for item in scoped["items"]] == ["ask-1"]
+
+
+def test_global_ask_job_merges_with_notebook_asks_and_paginates(repo):
+    """全局问答按 (created_at DESC, id DESC) 与笔记本内提问同一套归并与
+    keyset 分页,不因为不属于任何笔记本就单独排一份。"""
+    with repo._write() as db:
+        _insert_user(db, "u1", "a00000001")
+        _insert_notebook(db, "n1", "u1")
+        _insert_ask(db, "ask-old", "n1", "u1", "2026-08-01T08:00:00")
+        _insert_global_conversation(db, "gc-4", "u1", "2026-08-01T09:00:00")
+        _insert_global_ask(db, "gask-4", "gc-4", "u1", "2026-08-01T09:00:00")
+        _insert_ask(db, "ask-new", "n1", "u1", "2026-08-01T10:00:00")
+
+    expected_order = ["ask-new", "gask-4", "ask-old"]
+    seen: list[str] = []
+    cursor_ts = None
+    cursor_id = None
+    pages = 0
+    while True:
+        pages += 1
+        assert pages <= 10, "pagination did not terminate"
+        page = repo.list_user_activity(
+            "u1", activity_type="ask",
+            before_ts=cursor_ts, before_id=cursor_id, limit=1,
+        )
+        seen.extend(item["id"] for item in page["items"])
+        if not page["has_more"]:
+            assert page["next_cursor"] is None
+            break
+        assert page["next_cursor"] is not None
+        cursor_ts = page["next_cursor"]["ts"]
+        cursor_id = page["next_cursor"]["id"]
+
+    assert seen == expected_order
+    assert len(seen) == len(set(seen)), "duplicate item across pages"
+
+
 def test_merges_three_types_in_time_descending_order(repo):
     with repo._write() as db:
         _insert_user(db, "u1", "a00000001")

@@ -132,12 +132,27 @@
       （汇总一行 + 特性已开却未绑定的各占一行），笔记本面板「AI 对这个库的理解」会显示
       `模型未配置` 的失败原因。后续可在 `/model-services/status` 的 payload 里带一份未绑定
       清单，并在该面板加一行显示；本期只登记，不做前端。
-- [ ] **全局回答的 👍/👎 反馈未进管理端提问分析 / 笔记本分析口径**：`POST
+- [ ] **全局回答的 👍/👎 反馈仍未进管理端提问分析 / 笔记本分析口径的聚合**：`POST
       /global-ask/jobs/{job_id}/feedback` 把评分写进该任务 `global_ask_jobs.payload_json` 的
-      `feedback` 字段（首次写入为准），并发一个内容无关事件 `global_ask_feedback`；两者都不落
-      笔记本内问答用的 `feedback` 表，因此管理端「提问分析」报告与笔记本分析面板现有的反馈
-      统计都看不到这批数据。要并进同一份统计口径，需要决定是新增一条跨表聚合，还是把全局
-      反馈也镜像写一份进 `feedback` 表（后者要解决它没有 `answers` 行外键可挂的问题）。
+      `feedback` 字段（首次写入为准），并发一个内容无关事件 `global_ask_feedback`；记录口径
+      对齐改动（本次改动，SQLite v81 / PostgreSQL 0061 给 `global_ask_jobs` 新增的是
+      `submitted_via`/`asked_at`/`updated_at`/`error_detail` 四个物理列，不含反馈）顺带给同一个
+      `payload_json` 补上了 `feedback_at`（写入反馈的瞬间，与 `feedback` 同一次首写、随 patch
+      一起落进 `payload_json`，不是新的 schema 列），但反馈本身仍只落在 `global_ask_jobs`，不进
+      笔记本内问答用的 `feedback` 表，因此管理端「提问分析」报告与笔记本分析面板现有的反馈统计
+      仍看不到这批数据、也没有聚合面。要并进同一份统计口径，需要决定是新增一条跨表聚合，还是
+      把全局反馈也镜像写一份进 `feedback` 表（后者要解决它没有 `answers` 行外键可挂的问题）；
+      这是产品决定，尚未拍板。
+- [ ] **全局问答的问答后学习链、进行中提问铃铛与删库后可读性未做**：记录口径对齐改动（SQLite
+      v81 / PostgreSQL 0061）只让全局问答留下与笔记本内问答同一份记录，没有触碰以下几处——都需要
+      单独的产品决定：(a) 笔记本内问答完成后触发的问答后学习链（Agentic Memory overlay
+      `note_ask_completed`、经验库蒸馏、检索画像推断、post-completion extension host）不对全局
+      run 触发，原因是这些学习链按笔记本归属挂载，而全局问答横跨多个库、没有单一归属可挂；(b)
+      待办铃铛「进行中的提问」不列出正在运行的全局作业；(c) 全局会话的所有者一旦其中任一参与
+      笔记本被删除，整条会话对所有者即变 404（没有留存投影、没有到期规则）——笔记本内问答有
+      `retained_user_activity` 留存投影，全局问答没有对应机制；(d) `ask_stage` / `retrieval_run_stats`
+      事件给全局 run 打的仍是某个锚点笔记本 id，没有专门的全局标记。全局反馈的聚合面缺口见
+      上一条，不在此重复登记。
 - [ ] **无图披露步文案「构建知识图谱」→「整理知识图谱」**：`reasoning_retrieval.py` 那条
       `kg_unavailable` 披露步的 `summary` 违反界面词汇表，但它被 `docs/product-and-api*.md`
       逐字冻结（文档明写「含其中的半角逗号」）、并被 `tests/fixtures/repository_contract/

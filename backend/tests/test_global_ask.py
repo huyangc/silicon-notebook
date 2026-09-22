@@ -676,6 +676,65 @@ def test_job_errors_never_expose_raw_exception_content(setup, failure_stage):
     assert "secret" not in service.get_job(job.job_id, user_id="u").model_dump_json()
 
 
+def test_failed_run_records_raw_error_detail_for_admin_only(setup):
+    """记录平权:owner-facing ``job.error`` 保持固定文案,原始异常文本单独进
+    ``error_detail`` 列,只有 ``admin_job_record`` 这条管理员通道能读到它。"""
+    service, _, _, _ = setup
+
+    def fail(*args):
+        raise RuntimeError("boom")
+
+    service.ask.retrieve = fail
+    job = service.start(GlobalAskRequest(question="q"), user_id="u")
+    result = finished(service, job)
+    assert result.status == "failed"
+    assert result.error == "回答未完成，请检查模型服务和资料状态后重试。"
+    record = service.store.admin_job_record(job.job_id, "u")
+    assert record is not None
+    assert record["error_detail"] == "RuntimeError: boom"
+
+
+def test_asked_at_flows_from_request_to_persisted_job(setup):
+    service, _, _, _ = setup
+    job = service.start(
+        GlobalAskRequest(question="q", asked_at="2026-09-20T00:00:00+00:00"),
+        user_id="u",
+    )
+    assert job.asked_at == "2026-09-20T00:00:00+00:00"
+    finished(service, job)
+    assert service.get_job(job.job_id, user_id="u").asked_at == "2026-09-20T00:00:00+00:00"
+
+
+def test_replay_with_different_asked_at_returns_the_same_job_not_409(setup):
+    """``asked_at`` 是展示元数据,不是请求身份的一部分(见
+    ``_REQUEST_IDENTITY_EXCLUDES``):同一个 ``client_request_id`` 换一个
+    ``asked_at`` 重放,必须原样拿回同一个作业,而不是 409。"""
+    service, _, _, _ = setup
+    first = service.start(
+        GlobalAskRequest(
+            question="q", client_request_id="idem-1",
+            asked_at="2026-09-20T00:00:00+00:00",
+        ),
+        user_id="u",
+    )
+    again = service.start(
+        GlobalAskRequest(
+            question="q", client_request_id="idem-1",
+            asked_at="2026-09-20T01:00:00+00:00",
+        ),
+        user_id="u",
+    )
+    assert again.job_id == first.job_id
+    assert again.asked_at == first.asked_at
+
+
+def test_global_ask_request_asked_at_requires_offset_but_accepts_z():
+    with pytest.raises(Exception):
+        GlobalAskRequest(question="q", asked_at="2026-09-22T10:00:00")
+    accepted = GlobalAskRequest(question="q", asked_at="2026-09-22T10:00:00Z")
+    assert accepted.asked_at == "2026-09-22T10:00:00Z"
+
+
 def test_submit_feedback_authority_rating_and_completion_gates(setup):
     """``submit_feedback`` reuses ``get_job``'s own authority check (same 404
     for a foreign or nonexistent job), then adds its two own gates: a legal

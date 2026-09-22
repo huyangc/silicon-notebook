@@ -620,10 +620,18 @@ class QueryStore:
             ).fetchall():
                 sources[row["k"]] = int(row["c"] or 0)
                 storage_bytes[row["k"]] = int(row["b"] or 0)
+            # 全局问答与笔记本内问答同一口径(与 SQLite 侧逐字同一条理由):
+            # global_ask_conversations / global_ask_jobs 按 user_id 并入会话数、
+            # 提问数、近 30 天与失败数。global_ask_jobs.created_at 是 text(0056),
+            # 比较点上显式转 timestamptz。
             conversations = {
                 row["k"]: row["c"]
                 for row in db.execute(
-                    "SELECT created_by AS k, COUNT(*) AS c FROM conversations GROUP BY created_by"
+                    "SELECT k,SUM(c) AS c FROM ("
+                    "SELECT created_by AS k,COUNT(*) AS c FROM conversations GROUP BY created_by "
+                    "UNION ALL "
+                    "SELECT user_id AS k,COUNT(*) AS c FROM global_ask_conversations "
+                    "GROUP BY user_id) t GROUP BY k"
                 ).fetchall()
             }
             questions = {
@@ -631,6 +639,8 @@ class QueryStore:
                 for row in db.execute(
                     "SELECT k,SUM(c) AS c FROM ("
                     "SELECT created_by AS k,COUNT(*) AS c FROM ask_jobs GROUP BY created_by "
+                    "UNION ALL "
+                    "SELECT user_id AS k,COUNT(*) AS c FROM global_ask_jobs GROUP BY user_id "
                     "UNION ALL "
                     "SELECT a.actor_id AS k,COUNT(*) AS c "
                     "FROM retained_user_activity a "
@@ -668,6 +678,10 @@ class QueryStore:
                     "WHERE created_at>=CURRENT_TIMESTAMP - INTERVAL '30 days' "
                     "GROUP BY created_by "
                     "UNION ALL "
+                    "SELECT user_id AS k,COUNT(*) AS c FROM global_ask_jobs "
+                    "WHERE NULLIF(created_at,'')::timestamptz>=CURRENT_TIMESTAMP - INTERVAL '30 days' "
+                    "GROUP BY user_id "
+                    "UNION ALL "
                     "SELECT a.actor_id AS k,COUNT(*) AS c FROM retained_user_activity a "
                     "WHERE a.activity_type='ask' AND a.expires_at>CURRENT_TIMESTAMP "
                     "AND a.created_at>=CURRENT_TIMESTAMP - INTERVAL '30 days' "
@@ -685,6 +699,9 @@ class QueryStore:
                     "SELECT k,SUM(c) AS c FROM ("
                     "SELECT created_by AS k,COUNT(*) AS c FROM ask_jobs "
                     "WHERE status='failed' GROUP BY created_by "
+                    "UNION ALL "
+                    "SELECT user_id AS k,COUNT(*) AS c FROM global_ask_jobs "
+                    "WHERE status='failed' GROUP BY user_id "
                     "UNION ALL "
                     "SELECT a.actor_id AS k,COUNT(*) AS c FROM retained_user_activity a "
                     "WHERE a.activity_type='ask' AND a.status='failed' "
@@ -767,8 +784,8 @@ class QueryStore:
                     "GROUP BY user_id"
                 ).fetchall()
             }
-            # 与 SQLite 侧同一口径:最近一次上传可见来源、提交提问或发起深度
-            # 报告。created_at 表示用户触发动作的时刻；updated_at 可能由后台
+            # 与 SQLite 侧同一口径:最近一次上传可见来源、提交提问(含全局问答)
+            # 或发起深度报告。created_at 表示用户触发动作的时刻；updated_at 可能由后台
             # worker 在用户离开后继续推进，不能拿来冒充用户活跃。
             active = {
                 row["k"]: (
@@ -784,6 +801,9 @@ class QueryStore:
                     "UNION ALL "
                     "SELECT created_by AS k,MAX(COALESCE(created_at,%s)) AS m "
                     "FROM ask_jobs GROUP BY created_by "
+                    "UNION ALL "
+                    "SELECT user_id AS k,MAX(NULLIF(created_at,'')::timestamptz) AS m "
+                    "FROM global_ask_jobs GROUP BY user_id "
                     "UNION ALL "
                     "SELECT created_by AS k,MAX(created_at) AS m "
                     "FROM reports GROUP BY created_by "
@@ -856,11 +876,19 @@ class QueryStore:
         offset: int = 0,
         limit: int = ADMIN_QUESTIONS_DEFAULT_LIMIT,
         submitted_via: StoredSubmittedVia | None = None,
+        scope: str | None = None,
     ) -> dict[str, Any]:
-        """PostgreSQL twin of SQLite's cross-user question overview."""
+        """PostgreSQL twin of SQLite's cross-user question overview.
+
+        The global Ask arm mirrors the SQLite one (``scope='global'``, no
+        notebook, question from ``payload_json``); ``created_at`` is text on
+        this table (0056) and is cast so the UNION and the ORDER BY see one
+        ``timestamptz`` column.
+        """
         cte = (
             "WITH questions AS ("
-            "SELECT 'ask'::text AS type,a.id,a.created_by AS user_id,"
+            "SELECT 'ask'::text AS type,'notebook'::text AS scope,a.id,"
+            "a.created_by AS user_id,"
             "COALESCE(NULLIF(u.username,''),a.created_by) AS username,"
             "a.notebook_id,COALESCE(n.name,'') AS notebook_name,"
             "COALESCE(NULLIF(ans.question,''),a.question) AS question,"
@@ -869,14 +897,23 @@ class QueryStore:
             "LEFT JOIN answers ans ON ans.id=a.answer_id "
             "LEFT JOIN notebooks n ON n.id=a.notebook_id "
             "UNION ALL "
-            "SELECT 'report'::text AS type,r.id,r.created_by AS user_id,"
+            "SELECT 'ask'::text AS type,'global'::text AS scope,g.id,g.user_id,"
+            "COALESCE(NULLIF(u.username,''),g.user_id) AS username,"
+            "''::text AS notebook_id,''::text AS notebook_name,"
+            "COALESCE(g.payload_json::jsonb->>'question','') AS question,"
+            "g.status,NULLIF(g.created_at,'')::timestamptz AS created_at,g.submitted_via "
+            "FROM global_ask_jobs g JOIN users u ON u.id=g.user_id "
+            "UNION ALL "
+            "SELECT 'report'::text AS type,'notebook'::text AS scope,r.id,"
+            "r.created_by AS user_id,"
             "COALESCE(NULLIF(u.username,''),r.created_by) AS username,"
             "r.notebook_id,COALESCE(n.name,'') AS notebook_name,r.question,"
             "r.status,r.created_at,r.submitted_via FROM reports r "
             "JOIN users u ON u.id=r.created_by "
             "LEFT JOIN notebooks n ON n.id=r.notebook_id "
             "UNION ALL "
-            "SELECT h.activity_type AS type,h.record_id AS id,h.actor_id AS user_id,"
+            "SELECT h.activity_type AS type,'notebook'::text AS scope,"
+            "h.record_id AS id,h.actor_id AS user_id,"
             "COALESCE(NULLIF(u.username,''),h.actor_id) AS username,"
             "h.notebook_id,h.notebook_name,h.question,h.status,h.created_at,"
             "h.submitted_via "
@@ -892,6 +929,9 @@ class QueryStore:
         if kind is not None:
             where += " AND type=%s"
             params.append(kind)
+        if scope is not None:
+            where += " AND scope=%s"
+            params.append(scope)
         if user_id is not None:
             where += " AND user_id=%s"
             params.append(user_id)
@@ -908,13 +948,14 @@ class QueryStore:
                 + "SELECT COUNT(*) AS total,"
                 "SUM(CASE WHEN type='ask' THEN 1 ELSE 0 END) AS asks,"
                 "SUM(CASE WHEN type='report' THEN 1 ELSE 0 END) AS reports,"
+                "SUM(CASE WHEN scope='global' THEN 1 ELSE 0 END) AS global_asks,"
                 "COUNT(DISTINCT user_id) AS active_users FROM questions "
                 + where,
                 params,
             ).fetchone()
             rows = db.execute(
                 cte
-                + "SELECT type,id,user_id,username,notebook_id,notebook_name,"
+                + "SELECT type,scope,id,user_id,username,notebook_id,notebook_name,"
                 "question,status,created_at,submitted_via FROM questions "
                 + where
                 + f" ORDER BY {_absolute_instant('created_at')} DESC,"
@@ -925,6 +966,7 @@ class QueryStore:
             "total": int(stats["total"] or 0),
             "asks": int(stats["asks"] or 0),
             "reports": int(stats["reports"] or 0),
+            "global_asks": int(stats["global_asks"] or 0),
             "active_users": int(stats["active_users"] or 0),
         }
         items = [dict(row) for row in rows]
@@ -1171,6 +1213,44 @@ class QueryStore:
                     [*ask_params, fetch_limit],
                 ).fetchall()
 
+            # 1b. 全局问答(理由同 SQLite 侧):按提交者 user_id 取,不属于任何笔记本,
+            # 显式选库时不出现;本人自助读取按参与库集合整体可读过滤——谓词在子查询
+            # 里、LIMIT 之前生效(jsonb_array_elements_text 展开参与库,逐库套同一份
+            # read_access_clause),与 SQLite 侧同形;管理员审计不过滤。
+            # created_at 是 text,先在子查询里转成 timestamptz(空串经 NULLIF 变
+            # NULL,由外层 ``_absolute_instant`` 的 COALESCE 兜底,与兄弟臂同一形态),
+            # 外层的范围 / 游标 / 排序谓词才能与其他三类用同一份 ``_range_and_cursor_clause``。
+            global_rows = []
+            if activity_type in (None, "ask") and notebook_id is None:
+                global_access_clause = ""
+                global_params: list[Any] = [user_id]
+                if not include_inaccessible_questions:
+                    global_access_clause = (
+                        " AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements_text("
+                        "COALESCE(payload_json::jsonb->'resolved_notebook_ids','[]'::jsonb)) p "
+                        "WHERE NOT EXISTS(SELECT 1 FROM notebooks nb WHERE nb.id=p.value AND "
+                        + access_sql.read_access_clause()
+                        + f" AND nb.{access_sql.NOTEBOOK_LIVE_SQL}))"
+                    )
+                    global_params.extend(access_sql.read_access_params(user_id))
+                global_range_clause, global_range_params = _range_and_cursor_clause("")
+                global_params.extend(global_range_params)
+                global_rows = db.execute(
+                    "SELECT id, conversation_id, created_at, asked_at, status, "
+                    "submitted_via, error_detail, question, mode FROM ("
+                    "SELECT id, conversation_id, NULLIF(created_at,'')::timestamptz AS created_at, "
+                    "asked_at, status, submitted_via, "
+                    "COALESCE(NULLIF(error_detail,''), CASE WHEN status='failed' "
+                    "THEN payload_json::jsonb->>'error' END, '') AS error_detail, "
+                    "COALESCE(payload_json::jsonb->>'question','') AS question, "
+                    "COALESCE(payload_json::jsonb->>'mode','') AS mode "
+                    f"FROM global_ask_jobs WHERE user_id = %s{global_access_clause}) g "
+                    f"WHERE 1=1{global_range_clause} "
+                    f"ORDER BY {_absolute_instant('created_at')} DESC, "
+                    "id COLLATE \"C\" DESC LIMIT %s",
+                    [*global_params, fetch_limit],
+                ).fetchall()
+
             # 2. 来源:sources 没有 created_by 列,靠"该用户自己的笔记本 id"限定范围
             # (与 list_user_notebooks 同口径),VISIBLE_SOURCE_TYPES_PREDICATE 排除
             # 隐藏合成源,source_paper_meta LEFT JOIN 一次带出 is_paper/paper_title。
@@ -1308,6 +1388,25 @@ class QueryStore:
                     "submitted_via": row["submitted_via"],
                 }
             )
+        for row in global_rows:
+            pool.append(
+                {
+                    "type": "ask",
+                    "scope": "global",
+                    "id": row["id"],
+                    "notebook_id": "",
+                    "created_at": row["created_at"],
+                    "asked_at": row["asked_at"],
+                    "conversation_id": row["conversation_id"],
+                    "question": row["question"],
+                    "mode": row["mode"],
+                    "status": row["status"],
+                    # 全局回答的身份就是它的作业(见 global_ask.py 的完成分支)。
+                    "answer_id": row["id"] if row["status"] == "done" else "",
+                    "error": row["error_detail"],
+                    "submitted_via": row["submitted_via"],
+                }
+            )
         for row in source_rows:
             pool.append(
                 {
@@ -1425,6 +1524,7 @@ class QueryStore:
         )
         has_more = (
             len(ask_rows) > limit
+            or len(global_rows) > limit
             or len(source_rows) > limit
             or len(report_rows) > limit
             or len(retained_rows) > limit

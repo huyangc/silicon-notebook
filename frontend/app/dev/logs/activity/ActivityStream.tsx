@@ -66,6 +66,9 @@ function ActivityRow({
         {item.type === "ask" && userFacingModeLabel(item.mode) ? (
           <span className="activity-chip">{userFacingModeLabel(item.mode)}</span>
         ) : null}
+        {item.type === "ask" && item.scope === "global" ? (
+          <span className="activity-chip">全局</span>
+        ) : null}
         {item.type === "source" && item.source_type ? (
           <span className="activity-chip">{item.source_type}</span>
         ) : null}

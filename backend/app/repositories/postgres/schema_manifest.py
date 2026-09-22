@@ -344,7 +344,17 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # what partitioning MEANS. No new table, foreign key or unique surface, and no
 # backfill pass: the default IS the backfill and no content-addressed id is
 # recomputed (the global partition's hash input stays byte-identical).
+# SQLite v80 / PostgreSQL 0060 add notebooks.sync_origin (NOT NULL DEFAULT '',
+# COLLATE "C"): non-empty marks a notebook a mirror imported from another
+# environment. No table, index, FK or unique-surface change, and no backfill.
+# SQLite v81 / PostgreSQL 0061 add the four record-parity columns to
+# global_ask_jobs -- submitted_via, asked_at, updated_at, error_detail (all
+# text COLLATE "C" NOT NULL DEFAULT '') -- so a global Ask job leaves the same
+# per-job record an ask_jobs row leaves. submitted_via is backfilled from the
+# owning conversation's recorded value (only empty rows are touched); the
+# other three stay '' for historical rows. No table, index, FK or
+# unique-surface change.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=80,
-    postgres_version=60,
+    sqlite_version=81,
+    postgres_version=61,
 )
