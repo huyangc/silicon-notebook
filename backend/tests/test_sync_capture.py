@@ -23,16 +23,20 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import sqlite3
+from datetime import datetime
 
 import pytest
 
 from app.core.config import Settings
+from app.migration.shadow.postgres_catalog import EXPECTED_CAPTURE_DDL
 from app.migration.sync.capture import (
-    POSTGRES_CAPTURE_FUNCTION,
+    expected_postgres_function_names,
     expected_postgres_trigger_names,
     expected_sqlite_trigger_names,
     key_columns,
+    postgres_function_body,
     postgres_function_sql,
     postgres_trigger_sql,
     sqlite_trigger_sql,
@@ -44,6 +48,9 @@ from app.services.sqlite_repository import SQLiteRepository
 
 
 NOW = "2026-09-23T00:00:00+00:00"
+# The shape ``SQLiteMigrator._now()`` produces:
+# datetime.now(timezone.utc).isoformat() -> microseconds and an explicit offset.
+_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\+00:00")
 
 _MIGRATION_0064 = (
     pathlib.Path(__file__).resolve().parents[1]
@@ -116,30 +123,64 @@ def _seed_source(repo, notebook_id: str, source_id: str = "src-1") -> str:
 
 
 def test_the_postgres_migration_carries_the_generated_text_verbatim():
-    """0064 里的函数与每条触发器都必须与生成器输出逐字相同。"""
+    """0064 里的每个函数与每条触发器都必须与生成器输出逐字相同。"""
     text = _MIGRATION_0064.read_text(encoding="utf-8")
 
-    assert postgres_function_sql() + ";" in text
     missing = [
         name
-        for name, (_table, sql) in postgres_trigger_sql().items()
+        for name, (_table, sql) in (
+            list(postgres_function_sql().items()) + list(postgres_trigger_sql().items())
+        )
         if sql + ";" not in text
     ]
     assert missing == [], missing
 
 
-def test_the_postgres_migration_declares_no_trigger_beyond_the_generated_set():
+def test_the_catalog_guards_parse_of_the_migration_equals_the_generator():
+    """守卫不导入生成器(会成环), 它自己解析 0064。这条把「解析结果 == 生成器
+    输出」钉死, 链条才闭合: 生成器 ≡ 0064(上一条) ≡ 守卫的期望(这一条)。"""
+    parsed_triggers, parsed_bodies = EXPECTED_CAPTURE_DDL
+
+    assert parsed_triggers == {
+        name: sql for name, (_table, sql) in postgres_trigger_sql().items()
+    }
+    assert parsed_bodies == {
+        name: postgres_function_body(table)
+        for name, (table, _sql) in postgres_function_sql().items()
+    }
+
+
+def test_the_postgres_migration_declares_nothing_beyond_the_generated_set():
     """反向: 文件里不许有生成器之外的 CREATE TRIGGER / CREATE FUNCTION。"""
     text = _MIGRATION_0064.read_text(encoding="utf-8")
-    declared = {
+    triggers = {
         line.split()[2]
         for line in text.splitlines()
         if line.startswith("CREATE TRIGGER ")
     }
+    functions = {
+        line.split()[2].split("(")[0]
+        for line in text.splitlines()
+        if line.startswith("CREATE FUNCTION ")
+    }
 
-    assert declared == set(expected_postgres_trigger_names())
-    assert text.count("CREATE FUNCTION ") == 1
-    assert f"CREATE FUNCTION {POSTGRES_CAPTURE_FUNCTION}()" in text
+    assert triggers == set(expected_postgres_trigger_names())
+    assert functions == set(expected_postgres_function_names())
+    assert text.count("CREATE FUNCTION ") == 46
+
+
+def test_no_generated_statement_materializes_a_whole_row():
+    """行级触发器绝不整行序列化: 捕获只要键列与 scope 列。``to_jsonb(NEW)``
+    会把 chunk_embeddings/knowledge_embeddings 的 bytea 向量、chunks.text 每写
+    一行都序列化一遍。"""
+    rendered = [sql for _name, (_table, sql) in postgres_function_sql().items()]
+    rendered += [sql for _name, (_table, sql) in sqlite_trigger_sql().items()]
+
+    for sql in rendered:
+        assert "to_jsonb(" not in sql
+        assert "row_to_json(" not in sql
+        assert "jsonb_object_agg(" not in sql
+        assert "TG_ARGV" not in sql
 
 
 def test_the_generated_trigger_sets_cover_every_synced_table():
@@ -147,10 +188,82 @@ def test_the_generated_trigger_sets_cover_every_synced_table():
 
     assert len(tables) == 46
     assert len(expected_postgres_trigger_names()) == 46
+    assert len(expected_postgres_function_names()) == 46
     assert len(expected_sqlite_trigger_names()) == 138
     assert {table for _name, (table, _sql) in sqlite_trigger_sql().items()} == set(
         tables
     )
+
+
+# 四条**手写**的触发器全文, 每条覆盖一种 scope/形态。它们是独立于生成器的锚:
+# 上面的用例都拿生成器的输出去比对别处, 所以生成器自己改错了(键列少一列、
+# notebook 读成了 parent、门丢了)那些用例会跟着一起变、一起绿。这四条不会 ——
+# 改生成器就必须回到这里逐字确认, 这正是要求的人类复核动作。
+_HANDWRITTEN_SQLITE_TRIGGERS = {
+    # NOTEBOOK scope, insert: notebook 直接读行上的 notebook_id, parent 为 NULL。
+    "sync_capture_chunks_insert": (
+        'CREATE TRIGGER "sync_capture_chunks_insert" AFTER INSERT ON "chunks" '
+        "BEGIN INSERT INTO sync_change_log (table_name, key_json, operation, "
+        "parent_key, notebook_id, changed_at) SELECT 'chunks', "
+        "json_object('id', NEW.\"id\"), 'upsert', NULL, NEW.\"notebook_id\", "
+        "strftime('%Y-%m-%dT%H:%M:%f','now') || '000+00:00' WHERE EXISTS "
+        "(SELECT 1 FROM sync_capture_control WHERE singleton = 1 AND enabled = 1); END"
+    ),
+    # PARENT scope, delete: parent_key 记父行 id, notebook_id 留空(导出时再解析)。
+    "sync_capture_source_elements_delete": (
+        'CREATE TRIGGER "sync_capture_source_elements_delete" AFTER DELETE ON '
+        '"source_elements" BEGIN INSERT INTO sync_change_log (table_name, '
+        "key_json, operation, parent_key, notebook_id, changed_at) SELECT "
+        "'source_elements', json_object('id', OLD.\"id\"), 'delete', "
+        "OLD.\"source_id\", NULL, strftime('%Y-%m-%dT%H:%M:%f','now') || "
+        "'000+00:00' WHERE EXISTS (SELECT 1 FROM sync_capture_control WHERE "
+        "singleton = 1 AND enabled = 1); END"
+    ),
+    # GLOBAL scope, update: 两列都空; 键变化时先记 OLD 的 delete 再记 upsert。
+    "sync_capture_groups_update": (
+        'CREATE TRIGGER "sync_capture_groups_update" AFTER UPDATE ON "groups" '
+        "BEGIN INSERT INTO sync_change_log (table_name, key_json, operation, "
+        "parent_key, notebook_id, changed_at) SELECT 'groups', "
+        "json_object('id', OLD.\"id\"), 'delete', NULL, NULL, "
+        "strftime('%Y-%m-%dT%H:%M:%f','now') || '000+00:00' WHERE EXISTS "
+        "(SELECT 1 FROM sync_capture_control WHERE singleton = 1 AND enabled = 1) "
+        'AND (OLD."id" IS NOT NEW."id"); INSERT INTO sync_change_log (table_name, '
+        "key_json, operation, parent_key, notebook_id, changed_at) SELECT "
+        "'groups', json_object('id', NEW.\"id\"), 'upsert', NULL, NULL, "
+        "strftime('%Y-%m-%dT%H:%M:%f','now') || '000+00:00' WHERE EXISTS "
+        "(SELECT 1 FROM sync_capture_control WHERE singleton = 1 AND enabled = 1); END"
+    ),
+    # unified_kg_state update: 第三条语句是 kg_epoch, 只在 kg_reset_epoch 变化时记。
+    "sync_capture_unified_kg_state_update": (
+        'CREATE TRIGGER "sync_capture_unified_kg_state_update" AFTER UPDATE ON '
+        '"unified_kg_state" BEGIN INSERT INTO sync_change_log (table_name, '
+        "key_json, operation, parent_key, notebook_id, changed_at) SELECT "
+        "'unified_kg_state', json_object('notebook_id', OLD.\"notebook_id\"), "
+        "'delete', NULL, OLD.\"notebook_id\", "
+        "strftime('%Y-%m-%dT%H:%M:%f','now') || '000+00:00' WHERE EXISTS "
+        "(SELECT 1 FROM sync_capture_control WHERE singleton = 1 AND enabled = 1) "
+        'AND (OLD."notebook_id" IS NOT NEW."notebook_id"); '
+        "INSERT INTO sync_change_log (table_name, key_json, operation, "
+        "parent_key, notebook_id, changed_at) SELECT 'unified_kg_state', "
+        "json_object('notebook_id', NEW.\"notebook_id\"), 'upsert', NULL, "
+        "NEW.\"notebook_id\", strftime('%Y-%m-%dT%H:%M:%f','now') || '000+00:00' "
+        "WHERE EXISTS (SELECT 1 FROM sync_capture_control WHERE singleton = 1 "
+        "AND enabled = 1); INSERT INTO sync_change_log (table_name, key_json, "
+        "operation, parent_key, notebook_id, changed_at) SELECT "
+        "'unified_kg_state', json_object('notebook_id', NEW.\"notebook_id\"), "
+        "'kg_epoch', NULL, NEW.\"notebook_id\", "
+        "strftime('%Y-%m-%dT%H:%M:%f','now') || '000+00:00' WHERE EXISTS "
+        "(SELECT 1 FROM sync_capture_control WHERE singleton = 1 AND enabled = 1) "
+        'AND (OLD."kg_reset_epoch" IS NOT NEW."kg_reset_epoch"); END'
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_HANDWRITTEN_SQLITE_TRIGGERS))
+def test_the_generator_matches_the_handwritten_trigger_text(name):
+    generated = sqlite_trigger_sql()[name][1]
+
+    assert generated == _HANDWRITTEN_SQLITE_TRIGGERS[name]
 
 
 def test_the_sqlite_triggers_are_created_without_if_not_exists():
@@ -338,7 +451,11 @@ def test_an_open_gate_logs_insert_update_and_delete(repo):
     assert all(row["parent_key"] is None for row in rows)
     # SQLite has no transaction id to record; the column exists for parity.
     assert all(row["txid"] is None for row in rows)
-    assert all(row["changed_at"].endswith("Z") for row in rows)
+    # changed_at 与库里其它时间戳同形 (_now(): 微秒 + "+00:00"), 不是自成一体的
+    # "…Z"——同一张表里两种时间形态, 文本比较与排序就会在边界上骗人。
+    for row in rows:
+        assert _TIMESTAMP.fullmatch(row["changed_at"]), row["changed_at"]
+        assert datetime.fromisoformat(row["changed_at"]).tzinfo is not None
 
 
 def test_a_key_change_logs_the_old_identity_as_a_delete(repo):
@@ -444,3 +561,14 @@ def test_writing_the_same_object_source_pair_twice_keeps_one_row(repo):
         assert db.execute(
             "SELECT COUNT(*) FROM knowledge_object_sources"
         ).fetchone()[0] == 1
+
+
+def test_the_idempotent_write_still_refuses_a_broken_row(repo):
+    """``ON CONFLICT(object_id, source_id) DO NOTHING`` 只吞那一个冲突。换成
+    ``INSERT OR IGNORE`` 的话, NOT NULL 违例也会被静静吞掉 —— 那正是把坏行变成
+    「什么都没发生」的写法。"""
+    notebook_id = _seed_notebook(repo)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        with repo._write() as db:
+            KnowledgeStore.insert_object_source_rows(db, [(None, "s-1", notebook_id)])

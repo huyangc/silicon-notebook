@@ -907,11 +907,12 @@ class KgBuildJobStore:
                                 "INSERT INTO kg_objects_fts(object_id,notebook_id,name) "
                                 "VALUES (?,?,?)", (row["id"], notebook_id, name),
                             )
-                    # OR IGNORE: v84 gave this table a composite key
-                    # (object_id, source_id) -- a repeated pair is the same row.
+                    # ON CONFLICT(object_id, source_id) DO NOTHING: only the
+                    # v84 composite key's conflict is swallowed, nothing else.
                     db.executemany(
-                        "INSERT OR IGNORE INTO knowledge_object_sources "
-                        "(object_id,source_id,notebook_id) VALUES (?,?,?)",
+                        "INSERT INTO knowledge_object_sources "
+                        "(object_id,source_id,notebook_id) VALUES (?,?,?) "
+                        "ON CONFLICT(object_id, source_id) DO NOTHING",
                         [
                             (row["object_id"], row["source_id"], notebook_id)
                             for row in kg.get("object_sources") or []

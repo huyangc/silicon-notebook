@@ -151,9 +151,11 @@ an unscoped lookup by primary key against the target, checked against
 refusing the whole import by name, table, key, and both scope values, rather
 than silently reattributing an existing row. Not needed for a ``seed_only``
 table (its upsert is a bare ``ON CONFLICT DO NOTHING``, which never touches a
-pre-existing row regardless of who owns it) or a table with no primary key
-(replaced wholesale by notebook in ``_replace_scope``, never upserted through
-a conflict target that could straddle scopes).
+pre-existing row regardless of who owns it) -- every synced table now
+resolves a synchronization key (``app.migration.sync.export._Source.
+sync_key``, PR-3a) and is upserted through it, so this check applies
+uniformly rather than exempting a "no primary key" case that no longer
+exists.
 
 A notebook id itself has the same problem one level up, and ``manifest.json``
 being untrustworthy is exactly why: two packages from DIFFERENT source
@@ -963,9 +965,11 @@ def _upsert_statement(
     )
     head = f"INSERT INTO {_ident(table)} ({names}) VALUES ({placeholders})"
     if not primary_key:
-        # No conflict target to name. Only reachable for the primary-key-less
-        # tables handled by the replace path below, which has already removed
-        # the rows this insert is about to write.
+        # No conflict target to name. Unreachable in practice as of PR-3a:
+        # every synced table resolves a non-empty synchronization key (see
+        # app.migration.sync.export._Source.sync_key), so ``_apply_table``
+        # never calls this with an empty ``primary_key``. Kept as a
+        # defensive fallback rather than an assertion.
         return head
     if seed_only:
         # Bare DO NOTHING rather than a named conflict target: a seed_only
@@ -1259,9 +1263,9 @@ def _apply_optional_refs(
     if not spec.optional_refs or not rows:
         return rows
     kept = rows
-    own_key = context.backend.primary_key(conn, table)
+    own_key = context.backend.sync_key(conn, table)
     for column, referenced in spec.optional_refs:
-        key = context.backend.primary_key(conn, referenced)
+        key = context.backend.sync_key(conn, referenced)
         if len(key) != 1:
             raise SyncImportError(
                 f"{table}.{column}: optional ref into {referenced!r} whose "
@@ -1645,9 +1649,10 @@ def _verify_row_scopes(
     ``knowhow_tables``, ``knowhow_rows``) -- never a full table's rows in
     memory, so a chunks-sized table costs O(1) extra space here.
 
-    Runs against the target only for ``backend.primary_key`` (a PARENT
-    table's key column names, read from the live catalog like every other
-    schema fact in this module) -- it reads no target DATA and writes
+    Runs against the target only for ``backend.sync_key`` (a PARENT table's
+    key column names, read from the live catalog -- or the sync manifest's
+    fallback for the two tables with no catalog primary key -- like every
+    other schema fact in this module) -- it reads no target DATA and writes
     nothing, and it runs before ``_preflight``'s mirror-collision guard, so
     that guard sees the package's real scope rather than what its manifest
     claims.
@@ -1700,7 +1705,7 @@ def _verify_row_scopes(
         own_key_column = ""
         own_keys: set[str] = set()
         if collect_own_keys:
-            key_columns = backend.primary_key(conn, table)
+            key_columns = backend.sync_key(conn, table)
             if len(key_columns) != 1:
                 raise SyncImportError(
                     f"{table}: named as a PARENT scope's parent_table but its "
@@ -3347,10 +3352,8 @@ def _assert_target_ownership(
 
     Never called for a ``seed_only`` table (its upsert is a bare
     ``ON CONFLICT DO NOTHING``, so a pre-existing row -- whoever it belongs
-    to -- is never touched) or for a table with no primary key (replaced
-    wholesale by notebook in ``_replace_scope``, never upserted through a
-    conflict target that could straddle scopes) -- the caller only reaches
-    here for a table where neither exemption applies.
+    to -- is never touched) -- the caller only reaches here for a table
+    where that exemption does not apply.
     """
     if scope.kind is ScopeKind.NOTEBOOK:
         allowed = set(context.manifest.notebooks)
@@ -3463,7 +3466,7 @@ def _apply_table(
     spec = spec_for(table)
     entry = context.manifest.tables[table]
     columns = _package_columns(backend, conn, table, context)
-    primary_key = backend.primary_key(conn, table)
+    primary_key = backend.sync_key(conn, table)
     owned = _target_owned(table)
     update_columns = [
         column
@@ -3483,20 +3486,17 @@ def _apply_table(
 
     unique_keys = (
         ()
-        if spec.seed_only or not primary_key
+        if spec.seed_only
         # A seed_only table inserts with a bare ON CONFLICT DO NOTHING, which
-        # cannot raise on any index; a keyless table has no upsert at all.
+        # cannot raise on any index.
         else _unique_keys(backend, conn, table, primary_key)
     )
-    if not primary_key:
-        _replace_scope(backend, conn, table, context)
     if table in _SOURCE_AUTHORITATIVE:
         _prune_superseded(backend, conn, table, context, primary_key)
     # A seed_only upsert is a bare ON CONFLICT DO NOTHING, so a pre-existing
-    # row is never touched regardless of who it belongs to; a keyless table
-    # is replaced wholesale above rather than upserted. Neither can reattribute
-    # someone else's row, so neither needs the ownership recheck below.
-    check_ownership = bool(primary_key) and not spec.seed_only
+    # row is never touched regardless of who it belongs to. It cannot
+    # reattribute someone else's row, so it needs no ownership recheck below.
+    check_ownership = not spec.seed_only
     scope = spec.scope
     if check_ownership and scope is None:
         raise SyncImportError(f"{table}: no import scope to verify row ownership against")
@@ -3554,11 +3554,11 @@ def _apply_table(
             _assert_target_ownership(
                 backend, conn, table, scope, primary_key, keys, context
             )
-        present = known.present(keys) if primary_key else set()
+        present = known.present(keys)
         params: list[tuple[Any, ...]] = []
         fresh: list[tuple[Any, ...]] = []
         for row, key in zip(kept, keys, strict=True):
-            exists = bool(primary_key) and key in present
+            exists = key in present
             if exists and key and table == "notebooks" and str(key[0]) in context.reserved_notebooks:
                 # This row's primary key already exists at the target, but
                 # only because _reserve_notebooks put it there moments ago in
@@ -3589,74 +3589,6 @@ def _apply_table(
         )
     _rebuild_sqlite_fts(backend, conn, table, context)
     return TableOutcome(inserted=inserted, updated=updated, skipped=skipped)
-
-
-def _replace_scope(
-    backend: _Backend, conn: Any, table: str, context: _Context
-) -> None:
-    """A table the target schema gives no primary key (knowledge_object_sources,
-    community_members -- design doc §2 registers them, §7 defers adding one to
-    PR-3) cannot be upserted row by row. A FULL package carries every row those
-    tables have for the notebooks it covers, so the idempotent equivalent is to
-    clear this package's notebooks out of the table first and insert afresh.
-    Only defensible while the table is notebook-scoped, which is asserted."""
-    scope = spec_for(table).scope
-    if scope is None or scope.kind is not ScopeKind.NOTEBOOK:
-        raise SyncImportError(
-            f"{table}: the target has no primary key for it and its scope is "
-            f"not notebook-local, so an idempotent import is undefined"
-        )
-    context.ledger.warn(
-        f"{table} has no primary key at the target; this package's notebooks "
-        "were replaced wholesale in it rather than upserted"
-    )
-    if table in _SOURCE_LINK and context.protected_sources:
-        # The wholesale clear has to spare a target-owned memory source's
-        # rows for the same reason the snapshot sweep does. With no primary
-        # key to delete by, the surviving rows are decided here and the rest
-        # are deleted by full-row equality -- the same shape _prune_table
-        # uses, and one that needs no unbounded NOT IN list.
-        _delete_unprotected_rows(backend, conn, table, context)
-        return
-    for batch in _batched(list(context.manifest.notebooks)):
-        placeholders = ",".join("?" for _ in batch)
-        conn.execute(
-            backend.sql(
-                f"DELETE FROM {_ident(table)} "
-                f"WHERE {_ident(scope.column)} IN ({placeholders})"
-            ),
-            tuple(batch),
-        )
-
-
-def _delete_unprotected_rows(
-    backend: _Backend, conn: Any, table: str, context: _Context
-) -> None:
-    columns = [
-        name
-        for name in backend.columns(conn, table)
-        if not (name == "ordinal" and table in POSTGRES_ROWID_ORDINAL_TABLES)
-    ]
-    statement = _scope_select(backend, conn, table, columns, source_link=True)
-    doomed: list[tuple[Any, ...]] = []
-    for batch in _batched(list(context.manifest.notebooks)):
-        placeholders = ",".join("?" for _ in batch)
-        for row in backend.stream(
-            conn, statement.format(placeholders=placeholders), batch
-        ):
-            if str(row[_SOURCE_LINK_COLUMN] or "") in context.protected_sources:
-                continue
-            doomed.append(tuple(row[name] for name in columns))
-    if not doomed:
-        return
-    predicate = " AND ".join(f"{_ident(name)} = ?" for name in columns)
-    for start in range(0, len(doomed), _ROW_BATCH):
-        _executemany(
-            backend,
-            conn,
-            f"DELETE FROM {_ident(table)} WHERE {predicate}",
-            doomed[start : start + _ROW_BATCH],
-        )
 
 
 def _row_batches(path: Path) -> Iterator[list[dict[str, Any]]]:
@@ -3751,11 +3683,6 @@ def _prunable_tables(backend: _Backend, conn: Any) -> tuple[str, ...]:
             continue
         scope = spec.scope
         if scope is None or scope.kind is ScopeKind.GLOBAL:
-            continue
-        if not backend.primary_key(conn, table):
-            # No primary key: _replace_scope already cleared and re-inserted
-            # this table's rows for the package's notebooks, which IS the
-            # reconciliation.
             continue
         chosen.append(table)
     return tuple(chosen)
@@ -3891,7 +3818,7 @@ def _prune_table(
     # phase DELETES, so it is exactly where a stale ownership assumption
     # would do the most damage. See _assert_notebooks_still_ours's docstring.
     _assert_notebooks_still_ours(backend, conn, context)
-    primary_key = backend.primary_key(conn, table)
+    primary_key = backend.sync_key(conn, table)
     carried = {
         tuple(decode_value(row.get(column)) for column in primary_key)
         for row in _iter_lines(context.package_dir / rows_path(table))

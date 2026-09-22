@@ -15,8 +15,9 @@ from typing import Any
 from app.migration.shadow.manifest import replication_guard_specs
 from app.migration.shadow.types import Manifest
 from app.migration.sync.capture_contract import (
-    POSTGRES_CAPTURE_FUNCTION,
+    expected_postgres_functions,
     expected_postgres_triggers,
+    postgres_function_name,
 )
 from app.repositories.postgres.migrator import load_migrations
 from app.repositories.postgres.schema_manifest import (
@@ -456,6 +457,39 @@ def _expected_indexes(
     return result
 
 
+_CAPTURE_TRIGGER = re.compile(
+    rf"^CREATE TRIGGER (sync_capture_{_IDENT})\b[^;]*;", re.M
+)
+_CAPTURE_FUNCTION = re.compile(
+    rf"^CREATE FUNCTION (sync_capture_{_IDENT})\(\)[^$]*"
+    r"\$(?P<tag>[a-z_][a-z0-9_]*)\$(?P<body>.*?)\$(?P=tag)\$\s*;",
+    re.M | re.S,
+)
+
+
+def _expected_capture_ddl() -> tuple[dict[str, str], dict[str, str]]:
+    """``({trigger_name: CREATE TRIGGER sql}, {function_name: plpgsql body})``
+    read straight out of the packaged migrations.
+
+    Same principle as every other expectation in this module: the migration
+    DDL is the contract, and the live catalog is checked against it. The other
+    half of the chain -- that the packaged DDL is exactly what
+    ``app.migration.sync.capture`` generates -- is pinned by
+    backend/tests/test_sync_capture.py, which is also why this module can
+    parse the file instead of importing the generator (the generator reads
+    this module's parsed primary keys, so importing it here would be a cycle).
+    """
+    triggers: dict[str, str] = {}
+    bodies: dict[str, str] = {}
+    for migration in _MIGRATIONS:
+        for match in _CAPTURE_TRIGGER.finditer(migration.sql):
+            triggers[match.group(1)] = match.group(0).rstrip(";")
+        for match in _CAPTURE_FUNCTION.finditer(migration.sql):
+            bodies[match.group(1)] = match.group("body")
+    return triggers, bodies
+
+
+EXPECTED_CAPTURE_DDL = _expected_capture_ddl()
 EXPECTED_CONSTRAINTS = _expected_constraints()
 EXPECTED_COLUMNS = _expected_columns()
 EXPECTED_OPERATIONAL_INDEXES = _expected_indexes(EXPECTED_COLUMNS)
@@ -690,6 +724,18 @@ def _validate_identity_sequences(
             raise ValueError(f"{_SCHEMA_LABEL} identity sequence contract drifted")
 
 
+def _collapse_sql_whitespace(value: str) -> str:
+    """Whitespace is not structural here; everything else is.
+
+    Deliberately NOT case-folding and NOT touching quoted text: a capture
+    statement's table-name and operation literals (``'chunks'``,
+    ``'upsert'``) carry meaning, and folding case would make ``'UPSERT'``
+    compare equal to ``'upsert'``. Same rule as
+    ``app.migration.shadow.capture._normalize_sql``.
+    """
+    return " ".join(value.split())
+
+
 def _validate_capture_triggers(
     conn: Any,
     *,
@@ -697,25 +743,50 @@ def _validate_capture_triggers(
     catalog_tables: tuple[str, ...],
 ) -> None:
     """The non-internal triggers on business tables must be EXACTLY the sync
-    change-capture set (``app.migration.sync.capture``).
+    change-capture set (``app.migration.sync.capture``), by NAME and by BODY.
 
     Before source-side change capture existed the rule here was "no
-    non-internal trigger at all". It is still an exact-set rule, rather than
-    a prefix or a minimum: one extra trigger
-    (someone's audit hook), one missing trigger (a table that silently stops
-    being captured, which would make the next incremental export skip its
-    changes without failing), or a trigger repointed at another function all
-    count as drift. ``tgenabled`` must be ``'O'`` -- a disabled trigger fires
-    for nobody, which is the missing-trigger case wearing a different hat.
+    non-internal trigger at all". It is still an exact-set rule, rather than a
+    prefix or a minimum: one extra trigger (someone's audit hook), one missing
+    trigger (a table that silently stops being captured, which would make the
+    next incremental export skip its changes without failing), or a trigger
+    repointed at another function all count as drift. ``tgenabled`` must be
+    ``'O'`` -- a disabled trigger fires for nobody, which is the
+    missing-trigger case wearing a different hat.
 
-    The function identity is checked per trigger rather than separately: every
-    expected trigger has to resolve to ``sync_capture_row`` in this same
-    schema, declared as a plain (``prokind='f'``), SECURITY INVOKER function.
+    Names alone are not enough, because everything that matters about capture
+    lives in the body: which columns go into ``key_json``, which column is
+    read as the notebook, whether the gate is consulted at all. A function
+    edited in place keeps its name, so this compares ``pg_proc.prosrc``
+    against the packaged migration's function body and
+    ``pg_get_triggerdef()`` against its ``CREATE TRIGGER`` statement -- both
+    after collapsing whitespace, and after dropping the schema qualifier the
+    deparse adds (the business schema is not fixed: the shadow migration and
+    the test lane both run in schemas of their own).
+
+    Each function must also be a plain (``prokind='f'``), SECURITY INVOKER,
+    plpgsql function owned by this same schema.
     """
-    expected = expected_postgres_triggers()
+    expected_triggers = expected_postgres_triggers()
+    expected_functions = expected_postgres_functions()
+    expected_trigger_sql, expected_function_bodies = EXPECTED_CAPTURE_DDL
+    if set(expected_trigger_sql) != set(expected_triggers) or set(
+        expected_function_bodies
+    ) != set(expected_functions):
+        raise ValueError(
+            f"{_SCHEMA_LABEL} packaged capture DDL does not cover the synced tables"
+        )
+    schema_prefixes = (f"{business_schema}.", f'"{business_schema}".')
+
+    def unqualify(value: str) -> str:
+        for prefix in schema_prefixes:
+            value = value.replace(prefix, "")
+        return value
+
     rows = conn.execute(
         "SELECT g.tgname,t.relname AS table_name,g.tgenabled,"
-        "p.proname,p.prokind,p.prosecdef,pn.nspname AS function_schema "
+        "pg_get_triggerdef(g.oid) AS definition,"
+        "p.proname,pn.nspname AS function_schema "
         "FROM pg_trigger g JOIN pg_class t ON t.oid=g.tgrelid "
         "JOIN pg_namespace n ON n.oid=t.relnamespace "
         "JOIN pg_proc p ON p.oid=g.tgfoid "
@@ -724,23 +795,48 @@ def _validate_capture_triggers(
         "ORDER BY g.tgname",
         (business_schema, list(catalog_tables)),
     ).fetchall()
-    actual = {
+    actual_triggers = {
         str(_value(row, "tgname", 0)): str(_value(row, "table_name", 1))
         for row in rows
     }
-    if len(rows) != len(actual) or actual != expected:
+    if len(rows) != len(actual_triggers) or actual_triggers != expected_triggers:
         raise ValueError(f"{_SCHEMA_LABEL} business table trigger set drifted")
     for row in rows:
+        name = str(_value(row, "tgname", 0))
+        table = str(_value(row, "table_name", 1))
         if (
-            str(_value(row, "proname", 3)) != POSTGRES_CAPTURE_FUNCTION
-            or str(_value(row, "function_schema", 6)) != business_schema
-            or str(_value(row, "prokind", 4)) != "f"
-            or bool(_value(row, "prosecdef", 5))
+            str(_value(row, "proname", 4)) != postgres_function_name(table)
+            or str(_value(row, "function_schema", 5)) != business_schema
             or str(_value(row, "tgenabled", 2)) != "O"
+            or _collapse_sql_whitespace(unqualify(str(_value(row, "definition", 3))))
+            != _collapse_sql_whitespace(expected_trigger_sql[name])
         ):
             raise ValueError(
                 f"{_SCHEMA_LABEL} business table trigger definition drifted"
             )
+
+    function_rows = conn.execute(
+        "SELECT p.proname,p.prokind,p.prosecdef,l.lanname,p.prosrc "
+        "FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
+        "JOIN pg_language l ON l.oid=p.prolang "
+        "WHERE n.nspname=%s AND p.proname=ANY(%s) ORDER BY p.proname",
+        (business_schema, list(expected_functions)),
+    ).fetchall()
+    actual_functions = {str(_value(row, "proname", 0)) for row in function_rows}
+    if len(function_rows) != len(actual_functions) or actual_functions != set(
+        expected_functions
+    ):
+        raise ValueError(f"{_SCHEMA_LABEL} capture function set drifted")
+    for row in function_rows:
+        name = str(_value(row, "proname", 0))
+        if (
+            str(_value(row, "prokind", 1)) != "f"
+            or bool(_value(row, "prosecdef", 2))
+            or str(_value(row, "lanname", 3)) != "plpgsql"
+            or _collapse_sql_whitespace(str(_value(row, "prosrc", 4)))
+            != _collapse_sql_whitespace(expected_function_bodies[name])
+        ):
+            raise ValueError(f"{_SCHEMA_LABEL} capture function definition drifted")
 
 
 def validate_postgres_business_catalog(

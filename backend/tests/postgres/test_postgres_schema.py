@@ -722,7 +722,13 @@ def test_packaged_index_migration_phases_are_exact():
         )
     # The gate row is never seeded by the migration.
     assert "INSERT INTO sync_capture_control" not in v64_ddl_only
+    # One function and one trigger per synced table, and no whole-row
+    # serialization anywhere: a generic TG_ARGV-driven function would have to
+    # to_jsonb(NEW) the entire row (bytea vectors, chunk text) on every write.
     assert v64_ddl_only.count("CREATE TRIGGER sync_capture_") == 46
+    assert v64_ddl_only.count("CREATE FUNCTION sync_capture_") == 46
+    assert "to_jsonb(" not in v64_ddl_only
+    assert "TG_ARGV" not in v64_ddl_only
 
     assert index_declarations(50) == [(True, "idx_ask_jobs_client_request")]
     v50_ddl_only = "\n".join(

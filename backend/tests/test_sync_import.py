@@ -211,10 +211,11 @@ def source(tmp_path):
                 "principal_id,role,created_by,created_at) VALUES(?,?,?,?,?,?,?)",
                 ("grant-1", exported, "group", "grp-a", "reader", ALICE[0], MOMENT),
             )
-            # The two synced tables the target schema gives NO primary key
-            # (design doc §2 registers them, §7 defers adding one). They can
-            # only be replaced wholesale, so a second import of the same
-            # notebook is exactly where a mistake would double their rows.
+            # The two synced tables with no PostgreSQL primary key of their
+            # own (PR-3a keys them via TableSyncSpec.key instead -- a SQLite
+            # UNIQUE index / a PostgreSQL primary key, v84/0064). A second
+            # import of the same notebook is exactly where a mistake in that
+            # upsert/prune path would double their rows.
             db.execute(
                 "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
                 "owner,payload,evidence,source_id,created_at,updated_at,"
@@ -1396,8 +1397,10 @@ def test_a_second_package_refreshes_without_clobbering_the_target(
 ):
     """The re-sync case the whole design turns on: a mirror the target has
     been living with for a while gets a newer package. Content must move;
-    everything the target owns must survive; and the two tables with no
-    primary key must be replaced rather than accumulated."""
+    everything the target owns must survive; and knowledge_object_sources /
+    community_members (no PostgreSQL primary key of their own, so keyed via
+    ``TableSyncSpec.key`` -- see PR-3a) must be upserted and pruned exactly
+    like every other synced table, not accumulated."""
     first = _import(target, package)
     repo = target["repo"]
     notebook = source["exported"]
@@ -1449,13 +1452,86 @@ def test_a_second_package_refreshes_without_clobbering_the_target(
         "SELECT role FROM notebook_members WHERE notebook_id=? AND user_id=?",
         (notebook, ALICE[1]),
     )["role"] == "editor"
-    # The primary-key-less tables were replaced, not appended to.
+    # knowledge_object_sources/community_members were upserted and pruned by
+    # sync key, not appended to.
     after = _counts(
         repo, "knowledge_object_sources", "community_members", "notebook_members"
     )
     assert after == before
     assert before["knowledge_object_sources"] == 1
     assert before["community_members"] == 1
+
+
+def test_sync_key_tables_are_pruned_when_the_source_no_longer_has_the_row(
+    source, target, package, tmp_path
+):
+    """PR-3a gives knowledge_object_sources/community_members a real sync key
+    (``TableSyncSpec.key`` backed by a SQLite UNIQUE index -- v84 -- and a
+    PostgreSQL primary key -- 0064), so they are now upserted and pruned by
+    ``_apply_table``/``_prune_table`` exactly like every other synced table.
+    A row the SOURCE deletes must disappear at the target on the next sync,
+    the same way a deleted chunk or knowledge object already does."""
+    _import(target, package)
+    repo = target["repo"]
+    notebook = source["exported"]
+    assert _count(
+        repo, "SELECT COUNT(*) FROM knowledge_object_sources WHERE notebook_id=?",
+        (notebook,),
+    ) == 1
+    assert _count(
+        repo, "SELECT COUNT(*) FROM community_members WHERE notebook_id=?",
+        (notebook,),
+    ) == 1
+
+    with source["repo"]._write() as db:
+        db.execute(
+            "DELETE FROM knowledge_object_sources WHERE notebook_id=?", (notebook,)
+        )
+        db.execute(
+            "DELETE FROM community_members WHERE notebook_id=?", (notebook,)
+        )
+
+    report = _import(target, _export(source, tmp_path / "out2"))
+
+    assert report.error == ""
+    assert _count(
+        repo, "SELECT COUNT(*) FROM knowledge_object_sources WHERE notebook_id=?",
+        (notebook,),
+    ) == 0
+    assert _count(
+        repo, "SELECT COUNT(*) FROM community_members WHERE notebook_id=?",
+        (notebook,),
+    ) == 0
+
+
+@pytest.mark.parametrize(
+    "table,index_name",
+    [
+        ("knowledge_object_sources", "uq_knowledge_object_sources_sync_key"),
+        ("community_members", "uq_community_members_sync_key"),
+    ],
+)
+def test_sync_key_import_refuses_when_the_target_unique_index_is_dropped(
+    target, package, table, index_name
+):
+    """Mutation verification, target side: this table has no PostgreSQL
+    primary key, so ``_Backend.sync_key`` (``app.migration.sync.export.
+    _Source.sync_key``) falls back to ``TableSyncSpec.key`` and re-checks
+    the TARGET catalog actually backs it with a unique index/constraint.
+    Drop that index and the import must refuse by name rather than upsert
+    through a conflict target the database does not actually enforce is
+    unique. The top-level ``import_package`` wraps any non-``SyncImportError``
+    exception raised inside the run into a ``SyncImportError`` (see its own
+    ``except BaseException`` clause), so this table name still has to survive
+    that wrap for the refusal to be diagnosable."""
+    with target["repo"]._write() as db:
+        db.execute(f"DROP INDEX {index_name}")
+
+    with pytest.raises(SyncImportError) as excinfo:
+        _import(target, package)
+
+    assert table in str(excinfo.value)
+    assert "unique" in str(excinfo.value).lower()
 
 
 # ------------------------------------------------------- concurrency and resume

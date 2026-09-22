@@ -2336,11 +2336,14 @@ class KnowledgeStore:
         """Forward maintenance (P0-4 reverse index) for FRESH inserts — rows
         never had prior entries, so a plain batched INSERT suffices (no
         DELETE-first)."""
-        # OR IGNORE: v84 gave this table a composite key (object_id,
-        # source_id) -- a repeated pair is the same row.
+        # ON CONFLICT(object_id, source_id) DO NOTHING, not OR IGNORE:
+        # v84 gave this table that composite key and a repeated pair is
+        # the same row, but a NOT NULL or foreign-key violation still has
+        # to raise (same rule as the PostgreSQL twin).
         connection.executemany(
-            "INSERT OR IGNORE INTO knowledge_object_sources "
-            "(object_id, source_id, notebook_id) VALUES (?, ?, ?)",
+            "INSERT INTO knowledge_object_sources "
+            "(object_id, source_id, notebook_id) VALUES (?, ?, ?) "
+            "ON CONFLICT(object_id, source_id) DO NOTHING",
             rows,
         )
 
@@ -2585,11 +2588,12 @@ class KnowledgeStore:
         )
         source_ids = cls.source_ids_from_evidence(evidence_json)
         if source_ids:
-            # OR IGNORE: v84 gave this table a composite key (object_id,
-            # source_id) -- a repeated pair is the same row.
+            # ON CONFLICT(object_id, source_id) DO NOTHING: only the v84
+            # composite key's conflict is swallowed, nothing else.
             connection.executemany(
-                "INSERT OR IGNORE INTO knowledge_object_sources "
-                "(object_id, source_id, notebook_id) VALUES (?, ?, ?)",
+                "INSERT INTO knowledge_object_sources "
+                "(object_id, source_id, notebook_id) VALUES (?, ?, ?) "
+                "ON CONFLICT(object_id, source_id) DO NOTHING",
                 [(object_id, sid, notebook_id) for sid in source_ids],
             )
 

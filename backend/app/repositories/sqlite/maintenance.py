@@ -1536,9 +1536,13 @@ class SQLiteMaintenanceAdapter:
                 for source_id in KnowledgeStore.source_ids_from_evidence(row["evidence"])
             ]
             if kos_rows:
+                # Was a blanket OR IGNORE before v84 (this table had no unique
+                # surface at all); now the conflict it swallows is the named
+                # composite key and only that, matching the PostgreSQL twin.
                 db.executemany(
-                    "INSERT OR IGNORE INTO knowledge_object_sources "
-                    "(object_id,source_id,notebook_id) VALUES (?,?,?)",
+                    "INSERT INTO knowledge_object_sources "
+                    "(object_id,source_id,notebook_id) VALUES (?,?,?) "
+                    "ON CONFLICT(object_id, source_id) DO NOTHING",
                     kos_rows,
                 )
             scanned = int(progress["objects_scanned"]) + len(batch)
@@ -2103,11 +2107,12 @@ class SQLiteMaintenanceAdapter:
                 for sid in KnowledgeStore.source_ids_from_evidence(row["evidence"])
             ]
             if kos_rows:
-                # OR IGNORE: v84 gave this table a composite key (object_id,
-                # source_id) -- a repeated pair is the same row.
+                # ON CONFLICT(object_id, source_id) DO NOTHING: only the v84
+                # composite key's conflict is swallowed, nothing else.
                 db.executemany(
-                    "INSERT OR IGNORE INTO knowledge_object_sources "
-                    "(object_id, source_id, notebook_id) VALUES (?, ?, ?)",
+                    "INSERT INTO knowledge_object_sources "
+                    "(object_id, source_id, notebook_id) VALUES (?, ?, ?) "
+                    "ON CONFLICT(object_id, source_id) DO NOTHING",
                     kos_rows,
                 )
         return len(batch), len(kos_rows), batch[-1]["id"]

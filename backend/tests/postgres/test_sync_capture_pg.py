@@ -3,8 +3,8 @@
 SQLite 泳道 (tests/test_sync_capture.py) 已经钉住生成器文本、行身份与触发器
 语义。这里只覆盖**按后端会分叉**的那一段:
 
-- 一个 plpgsql 函数 ``sync_capture_row`` 带三个 ``TG_ARGV`` 参数, 而不是每表
-  一份函数体;
+- 每张表一份 plpgsql 函数 ``sync_capture_<table>``, 键列写死在函数体里, 绝不
+  ``to_jsonb(NEW)`` 整行物化;
 - ``txid`` 真的被写进去 (SQLite 没有可记的事务 id, 那边恒为 NULL) —— 增量导出
   靠它区分「已提交」与「快照时仍在途」的变更;
 - 0064 的去重 + ``ALTER TABLE ... ADD PRIMARY KEY`` 在已有重复行的库上必须先
@@ -20,10 +20,10 @@ import json
 import pytest
 
 from app.migration.sync.capture import (
-    POSTGRES_CAPTURE_FUNCTION,
+    expected_postgres_functions,
     expected_postgres_trigger_names,
     expected_postgres_triggers,
-    postgres_function_sql,
+    postgres_function_body,
 )
 
 
@@ -93,16 +93,17 @@ def _seed_source(database, notebook_id: str, source_id: str = "src-1") -> str:
 # ------------------------------------------------------------- 安装结果
 
 
-def test_the_migration_installs_the_generated_function_and_triggers(migrated):
+def test_the_migration_installs_the_generated_functions_and_triggers(migrated):
     with migrated.connect() as conn:
-        function = conn.execute(
-            "SELECT p.prokind, p.prosecdef, l.lanname, "
-            "pg_get_functiondef(p.oid) AS definition "
-            "FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
-            "JOIN pg_language l ON l.oid=p.prolang "
-            "WHERE n.nspname=current_schema() AND p.proname=%s",
-            (POSTGRES_CAPTURE_FUNCTION,),
-        ).fetchall()
+        functions = {
+            row["proname"]: row
+            for row in conn.execute(
+                "SELECT p.proname, p.prokind, p.prosecdef, l.lanname, p.prosrc "
+                "FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
+                "JOIN pg_language l ON l.oid=p.prolang "
+                "WHERE n.nspname=current_schema() AND p.proname LIKE 'sync_capture%'"
+            ).fetchall()
+        }
         triggers = {
             row["tgname"]: row["table_name"]
             for row in conn.execute(
@@ -113,14 +114,37 @@ def test_the_migration_installs_the_generated_function_and_triggers(migrated):
             ).fetchall()
         }
 
-    assert len(function) == 1
-    assert function[0]["prokind"] == "f"
-    assert function[0]["prosecdef"] is False
-    assert function[0]["lanname"] == "plpgsql"
+    expected_functions = expected_postgres_functions()
+    assert set(functions) == set(expected_functions)
+    assert len(functions) == 46
     assert triggers == expected_postgres_triggers()
     assert len(triggers) == 46
-    # 一份函数体, 每表差异只在 TG_ARGV 上。
-    assert "TG_ARGV[0]" in postgres_function_sql()
+    for name, row in functions.items():
+        assert row["prokind"] == "f"
+        assert row["prosecdef"] is False
+        assert row["lanname"] == "plpgsql"
+        # prosrc 就是生成器的函数体, 一字不差 —— 守卫比对的也是这份文本。
+        assert row["prosrc"] == postgres_function_body(expected_functions[name])
+
+
+def test_no_installed_function_materializes_a_whole_row(migrated):
+    """行级捕获绝不整行序列化: chunk_embeddings/knowledge_embeddings 的 bytea
+    向量、chunks.text 不该因为「记了一次变更」就被读出来一遍。"""
+    with migrated.connect() as conn:
+        sources = [
+            row["prosrc"]
+            for row in conn.execute(
+                "SELECT p.prosrc FROM pg_proc p "
+                "JOIN pg_namespace n ON n.oid=p.pronamespace "
+                "WHERE n.nspname=current_schema() AND p.proname LIKE 'sync_capture%'"
+            ).fetchall()
+        ]
+
+    assert len(sources) == 46
+    for source in sources:
+        assert "to_jsonb(" not in source
+        assert "row_to_json(" not in source
+        assert "TG_ARGV" not in source
 
 
 def test_the_migration_takes_the_two_composite_primary_keys(migrated):
@@ -362,7 +386,7 @@ def test_the_catalog_guard_rejects_a_foreign_trigger(migrated):
     with migrated.write() as conn:
         conn.execute(
             "CREATE TRIGGER audit_hook AFTER INSERT ON sources "
-            "FOR EACH ROW EXECUTE FUNCTION sync_capture_row('id','notebook','notebook_id')"
+            "FOR EACH ROW EXECUTE FUNCTION sync_capture_sources()"
         )
 
     with pytest.raises(ValueError, match="trigger set drifted"):
@@ -408,4 +432,48 @@ def test_the_catalog_guard_rejects_a_disabled_capture_trigger(migrated):
         conn.execute(f"ALTER TABLE {table} DISABLE TRIGGER {name}")
 
     with pytest.raises(ValueError, match="trigger definition drifted"):
+        _validate(migrated)
+
+
+def test_the_catalog_guard_rejects_an_edited_function_body(migrated):
+    """变异(内容维度): 名字、所在表、指向的函数全都不变, 只把函数体里记进
+    key_json 的键列换掉。名字维度看不见这种改动 —— 但它会让日志记下一个不是
+    行身份的东西, 增量导入据此匹配不到任何行。"""
+    body = postgres_function_body("sources").replace(
+        "jsonb_build_object('id', NEW.\"id\")",
+        "jsonb_build_object('id', NEW.\"title\")",
+    )
+    assert "NEW.\"title\"" in body  # 变异真的落进去了
+    with migrated.write() as conn:
+        conn.execute(
+            "CREATE OR REPLACE FUNCTION sync_capture_sources() RETURNS trigger "
+            f"LANGUAGE plpgsql AS $edited${body}$edited$"
+        )
+
+    with pytest.raises(ValueError, match="capture function definition drifted"):
+        _validate(migrated)
+
+
+def test_the_catalog_guard_rejects_a_narrowed_trigger_event_set(migrated):
+    """变异(内容维度): 触发器名字、所在表、函数都对, 但只在 INSERT 上触发 ——
+    那张表的 update/delete 从此不进日志, 目标端永远看不到改名与删除。"""
+    with migrated.write() as conn:
+        conn.execute("DROP TRIGGER sync_capture_sources ON sources")
+        conn.execute(
+            "CREATE TRIGGER sync_capture_sources AFTER INSERT ON sources "
+            "FOR EACH ROW EXECUTE FUNCTION sync_capture_sources()"
+        )
+
+    with pytest.raises(ValueError, match="trigger definition drifted"):
+        _validate(migrated)
+
+
+def test_the_catalog_guard_rejects_a_dropped_capture_function(migrated):
+    """变异: 删掉一个捕获函数。DROP FUNCTION 必须 CASCADE(触发器依赖它), 所以
+    先报的是触发器集合那条 —— 这里钉的是「函数消失不会被当成无事发生」, 两个
+    维度里哪一个先开口不重要。"""
+    with migrated.write() as conn:
+        conn.execute("DROP FUNCTION sync_capture_sources() CASCADE")
+
+    with pytest.raises(ValueError, match="drifted"):
         _validate(migrated)
