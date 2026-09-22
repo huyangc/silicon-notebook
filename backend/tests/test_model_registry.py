@@ -9,8 +9,10 @@ from app.core.config import Settings
 from app.services.model_registry import (
     BINDING_GAP_PREFIX,
     WORKLOADS,
+    ModelBindingGapError,
     SystemModelServiceRegistry,
     describe_binding_gap,
+    loggable_binding_gap,
 )
 
 
@@ -739,7 +741,12 @@ def test_non_strict_load_keeps_the_stale_ids_for_the_startup_warning(tmp_path):
 
 
 def test_the_deployment_docs_quote_the_refusal_message_verbatim():
-    """zh/en 两份部署文档里的样例消息必须与真实输出逐字相同。
+    """zh/en 两份部署文档里的样例必须与**异常消息**逐字相同。
+
+    钉的是 `describe_binding_gap`(带路径的那一面),因为文档引的就是运维会在
+    traceback 里看到的那段。日志那一面由 `loggable_binding_gap` 渲染、内容刻意
+    更窄(无路径、陈旧 id 需过形状校验),文档在样例下方用文字说明差异而不是再
+    贴一段——两段样例会立刻开始互相漂移。
 
     这条消息是运维遇到拒启时唯一的指引,文档抄错一个字(少一段、连接符不同、
     落点标注漏了)就会把人引到错误的表上去改。样例拿 `==` 比,不是 `in`。
@@ -763,3 +770,71 @@ def test_the_deployment_docs_quote_the_refusal_message_verbatim():
             if line.startswith(BINDING_GAP_PREFIX)
         ]
         assert quoted == [produced], name
+
+
+def test_the_log_rendering_drops_the_path_and_any_key_it_cannot_vouch_for():
+    """日志那一面:无路径,且来自配置文件的键名必须过形状校验才原样出现。
+
+    AGENTS.md 禁止 private path 与异常文本进日志。工作负载 id 与中文标签是代码
+    里的封闭词表,照记;陈旧 id 是部署文件里的任意 TOML 键,只有长得像 workload
+    id 才可信——否则一个构造出来的键就能往日志里塞进路径、标点甚至换行。
+    """
+    unknown = {
+        "graph_chain_verify": {"[bindings]"},
+        "ask_anwser": {"[bindings]"},
+        "/etc/silicon/secret.toml\nERROR fake": {"[thinking]"},
+        "Has Spaces": {"[thinking]"},
+    }
+    logged = loggable_binding_gap(["kg_glean"], unknown)
+
+    assert logged.startswith(BINDING_GAP_PREFIX)
+    assert "知识补充抽取（kg_glean）" in logged
+    assert "已退役、升级后请删除的绑定：graph_chain_verify（[bindings]）" in logged
+    assert (
+        "未知、疑似拼写错误的绑定：ask_anwser（[bindings]），"
+        "<无法显示的键名>×2（[thinking]）" in logged
+    )
+    assert "请在 MODEL_SERVICES_CONFIG 指向的文件的 [bindings]/[thinking] " in logged
+    assert "/etc/silicon" not in logged
+    assert "ERROR fake" not in logged
+    assert "Has Spaces" not in logged
+    assert "\n" not in logged
+
+
+def test_the_exception_rendering_keeps_the_path_and_the_file_s_own_spelling():
+    """异常那一面反过来:它要带路径、要原样说出文件里写的是什么。
+
+    终止进程的异常不是日志,运维正是要靠它去改那个文件——把键名折叠掉,人就
+    找不到那一行了。两面的差别由 `main._model_bindings_preflight` 落实。
+    """
+    unknown = {"Has Spaces": {"[thinking]"}}
+    raised = describe_binding_gap(
+        ["kg_glean"], unknown, "/etc/silicon/model-services.toml"
+    )
+
+    assert "Has Spaces（[thinking]）" in raised
+    assert "/etc/silicon/model-services.toml" in raised
+    assert "无法显示的键名" not in raised
+
+
+def test_the_strict_refusal_is_its_own_exception_type_carrying_both_renderings(
+    tmp_path,
+):
+    """拒启用专门的异常类型,启动期不靠匹配消息文本来分流。
+
+    仍然是 ValueError 的子类,所以既有的「模型配置坏了」处理一个都不用改。
+    """
+    path = _write_config(
+        tmp_path / "models.toml",
+        _all_services() + "\n" + _bindings(omit={"kg_glean"}),
+    )
+
+    with pytest.raises(ModelBindingGapError) as exc_info:
+        SystemModelServiceRegistry.load(_settings(path, strict=True), _ALL_KEYS)
+
+    error = exc_info.value
+    assert isinstance(error, ValueError)
+    assert str(error) != error.loggable()
+    assert str(path) in str(error)
+    assert str(path) not in error.loggable()
+    assert "知识补充抽取（kg_glean）" in error.loggable()
