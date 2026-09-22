@@ -1520,10 +1520,13 @@ def test_sync_key_import_refuses_when_the_target_unique_index_is_dropped(
     the TARGET catalog actually backs it with a unique index/constraint.
     Drop that index and the import must refuse by name rather than upsert
     through a conflict target the database does not actually enforce is
-    unique. The top-level ``import_package`` wraps any non-``SyncImportError``
-    exception raised inside the run into a ``SyncImportError`` (see its own
-    ``except BaseException`` clause), so this table name still has to survive
-    that wrap for the refusal to be diagnosable."""
+    unique. The resolver is shared with the exporter and raises
+    ``SyncExportError``; every call site in the importer goes through
+    ``_sync_key``, which re-raises it as ``SyncImportError`` carrying the same
+    message (the top-level ``except BaseException`` in ``import_package``
+    would also catch it, but a caller must not have to rely on that blanket
+    wrap to get this module's own error type -- see
+    ``test_sync_key_call_sites_raise_the_import_error_type`` below)."""
     with target["repo"]._write() as db:
         db.execute(f"DROP INDEX {index_name}")
 
@@ -1532,6 +1535,35 @@ def test_sync_key_import_refuses_when_the_target_unique_index_is_dropped(
 
     assert table in str(excinfo.value)
     assert "unique" in str(excinfo.value).lower()
+
+
+def test_sync_key_call_sites_raise_the_import_error_type(target):
+    """``_sync_key`` is the seam: the shared resolver's ``SyncExportError``
+    becomes this module's ``SyncImportError``, message unchanged.
+
+    Without it, the four call sites let an EXPORT error escape from an
+    IMPORT run, and only ``import_package``'s outermost ``except
+    BaseException`` turned it into something a caller could catch -- which
+    means any code path that calls into the importer below that level (a
+    resume, a preflight, a future caller) would have seen the wrong type.
+    """
+    from app.migration.sync.export import SyncExportError
+    from app.migration.sync.import_ import _Backend, _sync_key
+
+    with target["repo"]._write() as db:
+        db.execute("DROP INDEX uq_knowledge_object_sources_sync_key")
+
+    backend = _Backend(target["settings"], Path(__file__).resolve().parents[2])
+    try:
+        with backend.read() as conn:
+            with pytest.raises(SyncImportError) as excinfo:
+                _sync_key(backend, conn, "knowledge_object_sources")
+            # The seam converts; it does not also re-wrap or re-word.
+            assert not isinstance(excinfo.value, SyncExportError)
+            assert "knowledge_object_sources" in str(excinfo.value)
+            assert "unique" in str(excinfo.value).lower()
+    finally:
+        backend.close()
 
 
 # ------------------------------------------------------- concurrency and resume

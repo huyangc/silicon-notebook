@@ -389,34 +389,73 @@ class _Source:
         self, conn: Any, table: str, columns: Sequence[str]
     ) -> bool:
         """Whether the LIVE catalog backs ``columns`` with a unique index or
-        constraint covering EXACTLY that column set (order does not matter).
+        constraint whose KEY columns are exactly that column set (order does
+        not matter -- uniqueness is a property of the set).
+
         Used to guard a ``TableSyncSpec.key`` fallback: a registered key is
         only a real row identity if the schema actually enforces it is
-        unique, not merely a claim in the manifest. Partial/predicate unique
-        indexes do not count -- their uniqueness only holds for rows
-        satisfying a predicate this check does not evaluate."""
+        unique, not merely a claim in the manifest. Four kinds of index look
+        unique in the catalog but do not enforce what this caller needs, and
+        all four are rejected:
+
+        - PARTIAL (``indpred`` / SQLite's ``partial`` flag): uniqueness holds
+          only for rows satisfying a predicate this check does not evaluate.
+        - EXPRESSION keys (a ``0`` in ``indkey``): what is unique is the value
+          of some expression, not the column, so two rows can share the
+          column values this caller is about to match on.
+        - INCLUDE payload columns (everything past ``indnkeyatts``): they ride
+          along in the index but are not part of the uniqueness at all, so an
+          index on ``UNIQUE (a) INCLUDE (b)`` must not answer for ``(a, b)``.
+        - NOT VALID / NOT READY (``indisvalid``/``indisready``): a failed or
+          still-building ``CREATE INDEX CONCURRENTLY`` leaves an index the
+          planner ignores and the executor does not enforce.
+
+        SQLite has no INCLUDE columns and no invalid-index state, so only the
+        partial rule applies there. Its ``origin='pk'`` entries DO count: for
+        a WITHOUT ROWID or composite-primary-key table the primary key is a
+        real unique surface, and ``sync_key`` would have returned it from
+        ``_catalog_primary_key`` before ever reaching here anyway.
+        """
         wanted = frozenset(columns)
         if self.is_postgres:
             rows = self.fetch(
                 conn,
-                "SELECT i.indexrelid AS relid, a.attname AS name FROM pg_index i "
-                "CROSS JOIN LATERAL unnest(i.indkey::smallint[]) AS k(attnum) "
-                "JOIN pg_attribute a "
+                "SELECT i.indexrelid AS relid, i.indnkeyatts AS keyatts, "
+                "k.attnum AS attnum, k.ord AS ord, a.attname AS name "
+                "FROM pg_index i "
+                "CROSS JOIN LATERAL unnest(i.indkey::smallint[]) "
+                "WITH ORDINALITY AS k(attnum, ord) "
+                "LEFT JOIN pg_attribute a "
                 "ON a.attrelid = i.indrelid AND a.attnum = k.attnum "
                 "WHERE i.indrelid = ?::regclass AND i.indisunique "
-                "AND i.indpred IS NULL",
+                "AND i.indpred IS NULL AND i.indisvalid AND i.indisready",
                 (table,),
             )
             by_index: dict[Any, set[str]] = {}
+            expression_indexes: set[Any] = set()
             for row in rows:
-                by_index.setdefault(row["relid"], set()).add(str(row["name"]))
-            return any(frozenset(cols) == wanted for cols in by_index.values())
+                relid = row["relid"]
+                if int(row["ord"]) > int(row["keyatts"]):
+                    continue  # INCLUDE payload, not part of the uniqueness
+                if int(row["attnum"]) == 0:
+                    # An expression key column. The whole index is unusable as
+                    # a column-set identity, not just this one position.
+                    expression_indexes.add(relid)
+                    continue
+                by_index.setdefault(relid, set()).add(str(row["name"]))
+            return any(
+                frozenset(cols) == wanted
+                for relid, cols in by_index.items()
+                if relid not in expression_indexes
+            )
         for index in self.fetch(conn, f"PRAGMA index_list({_quoted(table)})"):
-            if int(index["unique"]) != 1 or int(index.get("partial", 0) or 0) == 1:
+            if int(index["unique"]) != 1 or int(index["partial"] or 0) == 1:
                 continue
             info = self.fetch(
                 conn, f"PRAGMA index_info({_quoted(str(index['name']))})"
             )
+            if any(row["name"] is None for row in info):
+                continue  # an expression key column, same rule as PostgreSQL
             if frozenset(str(row["name"]) for row in info) == wanted:
                 return True
         return False
@@ -435,20 +474,30 @@ class _Source:
         confirming the live catalog actually backs that column set with a
         unique index/constraint -- a manifest claim with no enforcement
         behind it on THIS database is a schema/manifest drift, not a usable
-        key. When both a catalog primary key and a registered ``key`` exist
-        they must name the same columns (a later migration that gives a
-        registered table a real primary key must update the manifest in the
-        same change, or this catches the disagreement instead of silently
-        preferring one). Every synced table must resolve to a non-empty key;
-        this is a hard error rather than an empty-tuple return so a caller
-        can never again fall through to an unkeyed code path.
+        key.
+
+        When both a catalog primary key and a registered ``key`` exist they
+        must be the SAME ORDERED TUPLE, not merely the same column set. Order
+        is part of the key here for the same reason it is in
+        ``app.migration.sync.capture.key_columns``: the capture triggers build
+        ``key_json`` by naming the columns in their order, so the same set in
+        a different order produces a different JSON object for the same row,
+        and a log written under one order matches nothing when read under the
+        other. A later migration that gives a registered table a real primary
+        key must update the manifest in the same change, and reordering one
+        side is exactly as much of a break as renaming a column.
+
+        Every synced table must resolve to a non-empty key; this is a hard
+        error rather than an empty-tuple return so a caller can never again
+        fall through to an unkeyed code path.
         """
         catalog = self._catalog_primary_key(conn, table)
         declared = spec_for(table).key
-        if catalog and declared and frozenset(catalog) != frozenset(declared):
+        if catalog and declared and tuple(catalog) != tuple(declared):
             raise SyncExportError(
-                f"{table}: TableSyncSpec.key {declared} disagrees with the "
-                f"catalog primary key {catalog}"
+                f"{table}: TableSyncSpec.key disagrees with the catalog "
+                f"primary key (order is part of the key): "
+                f"manifest={tuple(declared)} catalog={tuple(catalog)}"
             )
         if catalog:
             return catalog
@@ -1047,6 +1096,27 @@ def _captured_through_seq(source: _Source, conn: Any) -> int:
     "captured through": rows may have changed since the last time it was
     open with no log entry to prove it, so 0 (never a stale high-water mark)
     is the only honest answer (docs/incremental-sync-design.md §7).
+
+    ⚠ PR-3b: THIS NUMBER IS NOT A SAFE RESUME POINT ON PostgreSQL, and
+    ``_advance_watermark`` stores it as one only because PR-3a never reads
+    the log back. ``seq`` is handed out by a sequence at INSERT time, but a
+    row becomes VISIBLE at COMMIT time, and those two orders are not the
+    same. Concretely: writer A takes ``seq = 100`` and is still
+    uncommitted when this export's REPEATABLE READ snapshot is taken;
+    writer B takes ``seq = 101`` and commits before it. The snapshot sees
+    101 and not 100, ``MAX(seq)`` is 101, and a later incremental export
+    resuming from ``> 101`` skips A's change forever -- silently, because
+    nothing is missing from the log itself, only from the window we chose.
+
+    That gap is the entire reason ``sync_change_log.txid`` exists
+    (``pg_current_xact_id()``, NULL on SQLite, which has no concurrent
+    writers to lose). PR-3b's incremental read must not resume from ``seq``
+    alone: it has to bound the window by the snapshot's ``xmin`` -- rows
+    whose ``txid`` was still in flight when this snapshot was taken have to
+    be re-read by the next run regardless of their ``seq``. Whoever
+    implements that read should change this function's contract (and the
+    column this writes) rather than layering a correction on top of a
+    number that was never a resume point.
     """
     gate_open = source.fetch(
         conn,
@@ -1070,7 +1140,18 @@ def _advance_watermark(
 ) -> None:
     """Upsert this target's watermark, only once the package is complete on
     disk (§7): a failed export must leave the watermark where it was so a
-    re-run is always safe."""
+    re-run is always safe.
+
+    What gets stored is ``_captured_through_seq``'s snapshot-visible
+    ``MAX(seq)``, and that function's docstring explains why, on PostgreSQL,
+    it is a RECORD of how far this export saw rather than a point the next
+    one may resume from: a concurrent writer holding a lower ``seq`` can
+    commit after our snapshot was taken, so resuming from ``> this`` would
+    drop its change. PR-3a is unaffected -- every package is a full snapshot
+    and nothing reads the log back (``manifest.json`` still writes
+    ``from_seq = to_seq = 0``). PR-3b is where it matters, and it has to
+    bound its window with ``sync_change_log.txid`` / the snapshot's ``xmin``
+    before treating any stored seq as a starting point."""
     moment: Any = exported_at if source.is_postgres else exported_at.isoformat()
     with source.write() as conn:
         conn.execute(
