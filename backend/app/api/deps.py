@@ -84,6 +84,24 @@ def ask_stream_repository() -> AskStreamPort:
 def global_ask_service():
     return repository()._runtime.global_ask_service()  # type: ignore[attr-defined]
 
+def retrieval_experience_store():
+    """检索经验库的行存储席位(Agentic Memory P2,按 notebook 分区)。
+
+    ``None`` 是合法返回值——窄测试替身与离线 CLI 组合根本就不装配它,
+    ``distillation_wiring_active(settings, store)`` 把「没装配」与「总闸关」
+    判成同一件事,所以路由层不需要在这里再分一次叉。
+    """
+    return repository()._runtime.retrieval_experiences  # type: ignore[attr-defined]
+
+def retrieval_experience_jobs_service():
+    """蒸馏 service 席位:界面「立即整理」按钮唯一的入口(``distill_now``)。
+
+    与 store 分两个席位取,而不是从这个 service 上摘 ``experiences``:读列表
+    / 清空只需要行,和「有没有一条链路在跑」无关;合成一个入口会让读路径拿到
+    一个它不该调用的 ``start()``。
+    """
+    return repository()._runtime.retrieval_experience_jobs  # type: ignore[attr-defined]
+
 def _bearer_token(request: Request) -> str:
     header = request.headers.get("Authorization", "")
     if header.lower().startswith("bearer "):

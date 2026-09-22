@@ -463,3 +463,122 @@ export function collapseCallRuns(items: readonly AgentCall[]): AgentCallRun[] {
   }
   return runs;
 }
+
+// ---------------------------------------------------------------------------
+// P2(PR-2)——「检索经验」:这个库自己攒下的检索经验,面板里的第四张卡。
+//
+// 与上面三档的关系:那三档是**话**(AI 整理出的结论 / 本人写的心得 / Agent 写的
+// 线索),这一档是**做法**——哪种查法在这个库里好用、哪种不好用。服务端按
+// (动作, 好坏) 收敛成一条条短记录,界面只读 + 两个管理动作,没有逐条编辑。
+// ---------------------------------------------------------------------------
+
+/**
+ * 一条记录。`action` 是后端的封闭词表 id(与推理轨迹的步类型同源),**一个字都
+ * 不上屏**——下面 `experienceActionLabel` 把它译成界面词,认不出的一律走中性兜底。
+ *
+ * `adopted` 刻意读进来但不渲染:v1 服务端恒写 0(采纳计数还没有写入方),把一个
+ * 永远是 0 的数字摆上界面会被读成「这条经验从来没被用过」,而真相是「还没开始记」。
+ * 字段留在类型里是为了让它开始有值的那一天,前端不必先补一次形状。
+ */
+export type ExperienceEntry = {
+  action: string;
+  polarity: string;
+  rationale: string;
+  support: number;
+  adopted: number;
+  updated_at: string;
+};
+
+/**
+ * `GET .../understanding/experiences` 的响应,逐字对齐后端响应模型。
+ *
+ * 两把开关分开:`enabled` 是这条链路的总闸(关掉时服务端回空列表 + count 0,
+ * 界面只说一句「已关闭」),`can_manage` 是这个人能不能动它(写权 + 镜像围栏)。
+ * 读权任何成员都有——条目对全体成员可见是设计里明确拍板过的一条。
+ *
+ * `updated_at` 为 `null` = 这个库还没攒出过任何一条(不是「时间未知」)。
+ */
+export type ExperiencePartitionResponse = {
+  enabled: boolean;
+  count: number;
+  updated_at: string | null;
+  can_manage: boolean;
+  entries: ExperienceEntry[];
+};
+
+/**
+ * 动作 id → 界面词。取值与 `app/reasoning-trace.ts` 的步标签**同一口径**:同一件事
+ * 在轨迹里叫什么,在这里就叫什么,否则用户会以为是两回事。
+ *
+ * ⚠ `read_document` 在轨迹里叫「取样」,这里写「整篇取样」:轨迹是一串步、上下文
+ * 足够,而这里每一行是独立的一句话,光说「取样」看不出取的是什么。
+ */
+export const EXPERIENCE_ACTION_LABELS: Readonly<Record<string, string>> = {
+  retrieve: "检索",
+  ppr: "漫游",
+  exact_lookup: "精查",
+  expand: "扩展",
+  expand_community: "对比",
+  follow_chain: "推导",
+  enumerate: "枚举",
+  outline: "大纲",
+  search_chunks: "段落",
+  read_document: "整篇取样",
+};
+
+/**
+ * 认不出的动作 id 退回一个中性词,**绝不**把 id 直接上屏。部署侧插件可以带来这张
+ * 表里没有的动作,那不是异常——与 `callCapabilityLabel` / 全站 `label()` 同一条口径
+ * (未命中永不泄漏原值,见 raw-enum-fallback 守卫)。
+ */
+export const EXPERIENCE_UNKNOWN_ACTION_LABEL = "其他";
+
+export function experienceActionLabel(action: string): string {
+  return EXPERIENCE_ACTION_LABELS[action] ?? EXPERIENCE_UNKNOWN_ACTION_LABEL;
+}
+
+/** 好坏两个值的界面词。后端是封闭词表,只有这两个。 */
+export const EXPERIENCE_POLARITY_LABELS: Readonly<Record<string, string>> = {
+  good: "好用",
+  bad: "不好用",
+};
+
+/**
+ * 认不出的好坏值回空串,由渲染方整段不显示。
+ *
+ * 这里刻意不给中性兜底词:动作认不出时「其他」仍然是一句真话(确实是别的某种查法),
+ * 而好坏只有两个值,编不出第三个不说谎的词——与其猜,不如那一行少一段。
+ */
+export function experiencePolarityLabel(polarity: string): string {
+  return EXPERIENCE_POLARITY_LABELS[polarity] ?? "";
+}
+
+/**
+ * 动作结果那句话在按钮旁边停留多久(毫秒)。
+ *
+ * `AGENTS.md` 的 Interactive feedback 基线要的是「结果落在控件自身或紧邻处,并
+ * 由它自己的计时器清除」——常驻不走的一句话,第二次按下时会与上一次的结果长得
+ * 一模一样,于是「真的又做了一次」读起来就成了「没反应」。
+ *
+ * 只对**成功**那一句计时。失败那一句留到下一次按下才清:成功是一次性的确认,
+ * 而失败是用户要读完、可能还要照着做的信息,给它设一个消失时间是在藏话。
+ *
+ * 6 秒:够读完一句十来个字的中文,又短到不会挂到用户已经在做下一件事的时候。
+ */
+export const EXPERIENCE_ACTION_NOTE_MS = 6000;
+
+/**
+ * 卡片头部那一句。纯函数放在这里而不是组件里,理由与本模块开头那段一致:
+ * 「没有更新过」与「更新时间读不出来」这两种边界只有单测钉得住。
+ *
+ * 三种形态:
+ *   · 有时间且解析得出来 → 「…：N 条，最近更新 3 小时前」
+ *   · `updated_at` 为 null(这个库还没攒出过东西)→ 「…：N 条，还没有更新过」
+ *   · 有时间但解析不出来(脏数据)→ 只报条数。不编一个时间,也不谎称「还没有」。
+ */
+export function experienceHeadline(count: number, updatedAt: string | null): string {
+  const head = `这个库攒下的检索经验：${count} 条`;
+  if (!updatedAt) return `${head}，还没有更新过`;
+  const when = observationRelativeTime(updatedAt);
+  return when ? `${head}，最近更新 ${when}` : head;
+}

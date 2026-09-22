@@ -17,9 +17,15 @@ import {
   PROFILE_LABEL_ORDER,
   busyForNotebook,
   claimNotebookSlot,
+  EXPERIENCE_ACTION_LABELS,
+  EXPERIENCE_POLARITY_LABELS,
+  EXPERIENCE_UNKNOWN_ACTION_LABEL,
   draftIsStale,
   emptyUnderstandingBlock,
   evidenceSourceIds,
+  experienceActionLabel,
+  experienceHeadline,
+  experiencePolarityLabel,
   isUnderstandingChainBusy,
   orderedUnderstandingBlocks,
   releaseNotebookClaim,
@@ -171,4 +177,43 @@ test("忙碌位用的就是那份共享实现，不是又抄了一遍", () => {
   assert.equal(busyForNotebook, sharedBusyForNotebook);
   assert.equal(claimNotebookSlot, sharedClaimNotebookSlot);
   assert.equal(releaseNotebookClaim, sharedReleaseNotebookClaim);
+});
+
+// —— 「检索经验」(PR-2)——————————————————————————————————————————————————
+//
+// 这一档的纯逻辑同样是「不看渲染就能证明」的那类:词表不泄漏原值、头部那一句的
+// 三种边界。渲染那一半在 tests/component/agent-profile-panel.component.test.tsx。
+
+test("动作词表与推理轨迹的步标签同口径，认不出的退回中性词", () => {
+  assert.deepEqual(Object.keys(EXPERIENCE_ACTION_LABELS).sort(), [
+    "enumerate", "exact_lookup", "expand", "expand_community", "follow_chain",
+    "outline", "ppr", "read_document", "retrieve", "search_chunks",
+  ]);
+  assert.equal(experienceActionLabel("exact_lookup"), "精查");
+  assert.equal(experienceActionLabel("expand_community"), "对比");
+  assert.equal(experienceActionLabel("search_chunks"), "段落");
+  // 部署侧插件可以带来这张表里没有的动作 —— 那不是异常,但原值一个字都不许上屏。
+  assert.equal(experienceActionLabel("some_plugin_action"), EXPERIENCE_UNKNOWN_ACTION_LABEL);
+  assert.equal(experienceActionLabel(""), EXPERIENCE_UNKNOWN_ACTION_LABEL);
+  for (const label of Object.values(EXPERIENCE_ACTION_LABELS)) {
+    assert.ok(/[一-鿿]/.test(label), `${label} 不是中文界面词`);
+  }
+});
+
+test("好坏只有两个值，认不出时回空串（不编第三个词）", () => {
+  assert.deepEqual(EXPERIENCE_POLARITY_LABELS, { good: "好用", bad: "不好用" });
+  assert.equal(experiencePolarityLabel("good"), "好用");
+  assert.equal(experiencePolarityLabel("bad"), "不好用");
+  // 动作认不出时「其他」仍是一句真话,好坏认不出时编不出不说谎的词 —— 那一段不显示。
+  assert.equal(experiencePolarityLabel("neutral"), "");
+  assert.equal(experiencePolarityLabel(""), "");
+});
+
+test("头部那一句：有更新时间 / 从没攒出过 / 时间读不出来，是三种话", () => {
+  const justNow = new Date().toISOString();
+  assert.equal(experienceHeadline(2, justNow), "这个库攒下的检索经验：2 条，最近更新 刚刚");
+  // null 不是「时间未知」,是这个库还没攒出过任何一条。
+  assert.equal(experienceHeadline(0, null), "这个库攒下的检索经验：0 条，还没有更新过");
+  // 脏数据:不编一个时间,也不谎称「还没有」—— 只报条数。
+  assert.equal(experienceHeadline(3, "not-a-time"), "这个库攒下的检索经验：3 条");
 });

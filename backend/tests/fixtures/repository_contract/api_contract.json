@@ -4260,6 +4260,119 @@
           "title": "Evidence",
           "type": "object"
         },
+        "ExperienceDistillStarted": {
+          "additionalProperties": false,
+          "description": "``POST /notebooks/{id}/understanding/experiences/distill`` response.\n\nOnly ever ``True``: \"nothing was scheduled for you\" is a 409 with a\nsentence, not a ``started=false`` a caller has to notice. Same shape and\nsame reasoning as ``UnderstandingRebuildResponse``.",
+          "properties": {
+            "started": {
+              "title": "Started",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "started"
+          ],
+          "title": "ExperienceDistillStarted",
+          "type": "object"
+        },
+        "ExperienceEntryOut": {
+          "additionalProperties": false,
+          "description": "One distilled entry, projected for display.\n\nFour of the store's columns are absent, and each absence is the contract\nrather than an oversight:\n\n* ``id`` — a content hash over the situation fingerprint and the\n  partition. Nothing on this API accepts an entry id (both management\n  actions work on the whole slice), so publishing it would hand out a\n  stable handle to an internal fingerprint and nothing to do with it.\n* ``situation`` — the eight-key fingerprint itself. It is the one field\n  that describes the SHAPE of other members' questions; design §13-Q2\n  decided to show the conclusion, not the fingerprint it was drawn from.\n* ``provenance`` — run ids belonging to other members' asks.\n* ``notebook_id`` — the whole response IS one notebook's slice; repeating\n  it per row says nothing and invites a renderer to put a library id on a\n  screen.\n\n``adopted`` rides along even though the first panel only renders\n``support``: it is the FIRST key of the eviction ordering, so \"why did\nthis entry survive while that one was trimmed\" stays answerable from the\nresponse instead of from the database.",
+          "properties": {
+            "action": {
+              "title": "Action",
+              "type": "string"
+            },
+            "adopted": {
+              "title": "Adopted",
+              "type": "integer"
+            },
+            "polarity": {
+              "title": "Polarity",
+              "type": "string"
+            },
+            "rationale": {
+              "title": "Rationale",
+              "type": "string"
+            },
+            "support": {
+              "title": "Support",
+              "type": "integer"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "polarity",
+            "rationale",
+            "support",
+            "adopted",
+            "updated_at"
+          ],
+          "title": "ExperienceEntryOut",
+          "type": "object"
+        },
+        "ExperiencePartitionCleared": {
+          "additionalProperties": false,
+          "description": "``DELETE /notebooks/{id}/understanding/experiences`` response.",
+          "properties": {
+            "removed": {
+              "title": "Removed",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "removed"
+          ],
+          "title": "ExperiencePartitionCleared",
+          "type": "object"
+        },
+        "ExperiencePartitionResponse": {
+          "additionalProperties": false,
+          "description": "``GET /notebooks/{id}/understanding/experiences``.\n\n``enabled=false`` (``RETRIEVAL_EXPERIENCE_ENABLED`` off, or a composition\nroot that never wired the store) carries ``count=0`` and no entries rather\nthan 404 — the same \"off\" vs \"on but nothing learned yet\" distinction\n``UnderstandingResponse`` draws, and the panel needs both words.\n\n``count``, ``updated_at`` and ``entries`` all come from ONE read of the\nslice, so a response can never claim a count that its own list\ncontradicts. The read is bounded by the slice's own row ceiling\n(``RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES``), which is also what\neviction trims to — so \"the list is the slice\" holds except in the window\nbetween a distillation's write and its eviction, where the count reported\nis the one the reader can actually see.\n\n``updated_at`` is the newest entry's timestamp, or ``None`` for an empty\nslice — never an empty string, because \"never updated\" and \"updated at an\nunknown time\" have to stay tellable apart by a browser that renders it.\n\n``can_manage`` gates the two management actions below; ``False`` means the\npanel renders no buttons at all rather than buttons that would 404. It is\na PURE CAPABILITY bit — the mirror-write fence is deliberately not folded\ninto it, exactly as it is not folded into ``can_edit_base``: a mirrored\nnotebook's members have lost no permission, and the fence's own 409\n(carrying ``sync_origin``) explains what actually happened better than a\nbutton that quietly went missing.",
+          "properties": {
+            "can_manage": {
+              "default": false,
+              "title": "Can Manage",
+              "type": "boolean"
+            },
+            "count": {
+              "default": 0,
+              "title": "Count",
+              "type": "integer"
+            },
+            "enabled": {
+              "title": "Enabled",
+              "type": "boolean"
+            },
+            "entries": {
+              "items": {
+                "$ref": "#/components/schemas/ExperienceEntryOut"
+              },
+              "title": "Entries",
+              "type": "array"
+            },
+            "updated_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Updated At"
+            }
+          },
+          "required": [
+            "enabled"
+          ],
+          "title": "ExperiencePartitionResponse",
+          "type": "object"
+        },
         "ExternalEvidenceConflict": {
           "properties": {
             "external_says": {
@@ -26295,6 +26408,121 @@
             }
           },
           "summary": "Get Understanding"
+        }
+      },
+      "/api/notebooks/{notebook_id}/understanding/experiences": {
+        "delete": {
+          "operationId": "clear_notebook_experiences_api_notebooks__notebook_id__understanding_experiences_delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ExperiencePartitionCleared"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Clear Notebook Experiences"
+        },
+        "get": {
+          "operationId": "get_notebook_experiences_api_notebooks__notebook_id__understanding_experiences_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ExperiencePartitionResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Notebook Experiences"
+        }
+      },
+      "/api/notebooks/{notebook_id}/understanding/experiences/distill": {
+        "post": {
+          "operationId": "distill_notebook_experiences_api_notebooks__notebook_id__understanding_experiences_distill_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ExperienceDistillStarted"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Distill Notebook Experiences"
         }
       },
       "/api/notebooks/{notebook_id}/understanding/rebuild": {
