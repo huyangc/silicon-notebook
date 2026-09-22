@@ -12,7 +12,7 @@ from app.services.model_work import model_artifact_scope
 from app.models.identity import UserProfile
 from app.bootstrap import application_extension_runtime, create_application_repository
 from app.domain.report_export import ReportExporterHostPort
-from app.repositories.ports import AdminQueryRepository, ExtensionToggleStorePort, GroupStorePort, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, NotebookStorePort, SourceRepository, AskStreamPort, AskStateStorePort, McpMemoryRepository, MemoryRepository, WishStorePort
+from app.repositories.ports import AdminQueryRepository, ExtensionToggleStorePort, GroupStorePort, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, NotebookStorePort, RetrievalExperienceStorePort, SourceRepository, AskStreamPort, AskStateStorePort, McpMemoryRepository, MemoryRepository, WishStorePort
 
 
 @lru_cache
@@ -84,23 +84,33 @@ def ask_stream_repository() -> AskStreamPort:
 def global_ask_service():
     return repository()._runtime.global_ask_service()  # type: ignore[attr-defined]
 
-def retrieval_experience_store():
+def retrieval_experience_store() -> RetrievalExperienceStorePort:
     """检索经验库的行存储席位(Agentic Memory P2,按 notebook 分区)。
 
-    ``None`` 是合法返回值——窄测试替身与离线 CLI 组合根本就不装配它,
-    ``distillation_wiring_active(settings, store)`` 把「没装配」与「总闸关」
-    判成同一件事,所以路由层不需要在这里再分一次叉。
+    走 facade **已有的** ``retrieval_experiences`` 属性,不用 ``_runtime``——
+    公开面上已经有这一格,绕过它去取同一个对象只会让 facade 的消费点账目对不上。
+    座位在 bundle 里是必填的(``RetrievalExperienceStorePort``,不是
+    ``| None``),所以调用点不需要判空;``distillation_wiring_active`` 里那条
+    ``store is not None`` 是给窄测试替身留的,不是这条路径的形态。
+
+    ⚠ 取行之前先读该端口的 docstring:这里的 ``notebook_id`` 是**分区键**,
+    不是本文件其它 store 给你的那种租户谓词。
     """
-    return repository()._runtime.retrieval_experiences  # type: ignore[attr-defined]
+    return repository().retrieval_experiences
+
 
 def retrieval_experience_jobs_service():
     """蒸馏 service 席位:界面「立即整理」按钮唯一的入口(``distill_now``)。
+
+    这一格 facade 上**没有**,所以走 ``_runtime``——facade 的公开面只许收缩,
+    为一个消费点加一格属性是反方向的。
 
     与 store 分两个席位取,而不是从这个 service 上摘 ``experiences``:读列表
     / 清空只需要行,和「有没有一条链路在跑」无关;合成一个入口会让读路径拿到
     一个它不该调用的 ``start()``。
     """
     return repository()._runtime.retrieval_experience_jobs  # type: ignore[attr-defined]
+
 
 def _bearer_token(request: Request) -> str:
     header = request.headers.get("Authorization", "")

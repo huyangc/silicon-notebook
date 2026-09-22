@@ -303,23 +303,30 @@ class ExperiencePartitionResponse(BaseModel):
 
     ``count``, ``updated_at`` and ``entries`` all come from ONE read of the
     slice, so a response can never claim a count that its own list
-    contradicts. The read is bounded by the slice's own row ceiling
-    (``RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES``), which is also what
-    eviction trims to — so "the list is the slice" holds except in the window
-    between a distillation's write and its eviction, where the count reported
-    is the one the reader can actually see.
+    contradicts. ``entries`` is **the ``RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES``
+    best-supported entries**, not "the first N rows": the read deliberately
+    takes twice that ceiling and the ordering is applied before the
+    truncation, because eviction runs AFTER a distillation writes and a slice
+    can therefore sit briefly above its ceiling. Truncating first would drop
+    rows by content hash — an order with no relationship to ``support`` at
+    all — and the panel would silently lose exactly the entries the library
+    has verified most.
 
-    ``updated_at`` is the newest entry's timestamp, or ``None`` for an empty
-    slice — never an empty string, because "never updated" and "updated at an
-    unknown time" have to stay tellable apart by a browser that renders it.
+    ``updated_at`` is the newest entry's timestamp, or ``None`` when the list
+    is empty (or carries no parseable timestamp at all) — never an empty
+    string, because "never updated" and "updated at an unknown time" have to
+    stay tellable apart by a browser that renders it. It describes the entries
+    this response lists, which is the same set ``count`` counts.
 
     ``can_manage`` gates the two management actions below; ``False`` means the
     panel renders no buttons at all rather than buttons that would 404. It is
     a PURE CAPABILITY bit — the mirror-write fence is deliberately not folded
     into it, exactly as it is not folded into ``can_edit_base``: a mirrored
-    notebook's members have lost no permission, and the fence's own 409
-    (carrying ``sync_origin``) explains what actually happened better than a
-    button that quietly went missing.
+    notebook's members have lost no permission. The fence answers on the write
+    endpoints instead, with a 409 that carries ``sync_origin``; the browser
+    does not parse that field today and falls back to its generic 409 wording,
+    which is a registered item independent of these endpoints (it holds for
+    every fenced write endpoint alike).
     """
 
     model_config = ConfigDict(extra="forbid")

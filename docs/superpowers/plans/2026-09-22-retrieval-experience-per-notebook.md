@@ -220,6 +220,40 @@
 delete 只清本库分区且全局分区不动、镜像围栏。API 面变化跑 `tests/test_openapi*`/契约快照
 （`grep -rln "agent-observations" backend/tests` 找齐）。
 
+## PR-2 之后的本机试跑发现（2026-09-22，为 PR-3 定范围）
+
+在 worktree 起 8010 试跑实例（deepseek-flash，仓库 docs 作语料，一个笔记本 15 次 reasoning 提问）：
+
+1. **同步 `POST /notebooks/{id}/ask` 与 MCP `ask_notebook` 都直接调 `repo.ask(...)`，不经过
+   `AskExecutionCoordinator`，因此从不触发 `_note_ask_completed`**——P1 覆盖层巡固、经验蒸馏、
+   回答偏好归纳三条链路对这两类提问全部零计数。只有网页走的 `ask/stream`（durable 协调器）会计。
+   MCP 是一等写入侧（Agent 的提问正是「越用越熟」的输入），这是缺陷。
+2. **主 checkout 的 `.local/model-services.toml` 生成于 P1/P2 之前，缺 `agent_profile_consolidate`
+   与 `retrieval_experience_distill` 两个绑定**；注册表对未绑定工作负载返回 `None`、无任何启动告警，
+   P1 巡固作业直接落 `failed:模型未配置，无法整理`。生产大概率同样过期——这就是 P1 本机
+   `runs=0`/生产没动静的真因。`scripts/migrate_legacy_model_env.py` 本身会遍历全部 WORKLOADS，
+   重新生成即可；但缺少告警意味着下一个新增工作负载会重蹈覆辙。
+3. 每题固定形状的歧义问题会被意图闸 422 拦下（正常行为，试跑脚本跳过）。
+
+# PR-3 开闸与两处缺陷修复（分支 `claude/experience-partition-enable`）
+
+- **T7 提问完成钩子覆盖同步与 MCP 路径（opus）**：在 `RepositoryFacade.ask`（同步 `/ask` 与 MCP
+  `ask_notebook` 的共同入口）返回后调用 `runtime._note_ask_completed(notebook_id, user_id, mode_id)`；
+  durable 路径调的是 `service.ask`，不会双计。fail-open 口径同协调器（已交付的答案不因记账失败改判）。
+  用例：同步 `/ask` 与 MCP 各一条，断言三条链路的 `note_ask_completed` 被调且参数正确；durable 路径
+  仍只调一次。`test_agent_profile_job_overlay.py` 的 AST 守卫扩到这个新座位（同样钉 `mode_id == "reasoning"` 门）。
+- **T8 未绑定工作负载启动告警（sonnet）**：`startup_warmup` 在 READY 之前对每个 chat 工作负载检查
+  `models.configured(id)`；未绑定的按 `_WORKLOAD_LABELS` 列一条 WARNING（一行汇总，不逐条刷屏），
+  其中 `agent_profile_consolidate` / `retrieval_experience_distill` 在对应特性开关为开时升格为
+  独立一行「特性已开但模型未绑定」。同时给 `/admin` 模型服务状态页已有的未配置态加同一句提示
+  （若该页已能显示未绑定则不改前端）。文档：`docs/deployment-and-configuration*.md` 加「升级后重新
+  生成 model-services.toml 或补两行绑定」的运维提示。
+- **T9 注入闸默认值**：本机试跑（走 `ask/stream`）确认单库分区真的蒸出条目、开闸后 trace 出现
+  `experience` 步且 `notebook_entries>0` 后，把 `retrieval_experience_inject_enabled` 默认改 `True`，
+  `REASONING_CONSULT_MEMORY_ENABLED` 不动；文档 zh/en（deployment、product-and-api、设计文档 §12-Q3 与
+  新规格 §13-Q3）与 `fangan_todo.md:120` 收官。若试跑蒸不出条目（全 NOOP），默认值**不翻**，
+  只合 T7/T8，并把原因写进 fangan_todo。
+
 ## T6 — 前端面板（opus）
 
 `frontend/features/agent-profile/profile-model.ts`：类型 + `EXPERIENCE_ACTION_LABELS`

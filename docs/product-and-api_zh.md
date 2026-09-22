@@ -1997,8 +1997,8 @@ Agent 维护一份低成本、经 LLM 巡固的、关于笔记本的理解摘要
 | `PUT /notebooks/{id}/understanding/{label}`（`scope: "shared"|"mine"`） | `shared` 需要等同 owner 的 `agent_profile:write` 能力；`mine` 只需读权 + 该覆盖层的行级归属 |
 | `DELETE /notebooks/{id}/understanding/{label}?scope=` | 与写端点相同的权限口径；清空取值但保留该行与其历史 |
 | `POST /notebooks/{id}/understanding/rebuild`（`{scope}`） | 与写端点相同的权限口径；手动认领并重跑该链路的巡固，忙碌或总闸关闭时 409 |
-| `GET /notebooks/{id}/understanding/experiences` | 任意有读权的成员；这本笔记本自己那一份[检索策略经验](#检索策略经验)（下一节），返回 `enabled`（跟随 `RETRIEVAL_EXPERIENCE_ENABLED`，**不是**上面那把总闸）、`count`、`updated_at`（分区内最新，空分区为 `null`）、`can_manage`（纯能力位，与 `can_edit_base` 同口径：镜像库不并进来，围栏只挡下面两个写端点）与 `entries`；条目按 `(support desc, updated_at desc, id asc)` 排，最多 `RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES`（100）条，每条只含 `action`/`polarity`/`rationale`/`support`/`adopted`/`updated_at`——条目 id、情境指纹与出处 run id 一律不下发 |
-| `POST /notebooks/{id}/understanding/experiences/distill` | 需要 `agent_profile:write`（同共享底座；无此能力 404）；手动排一次该库的整理，单飞占用时 409（与手动重建共用同一句文案），`RETRIEVAL_EXPERIENCE_ENABLED` 关闭时 409（另一句）；镜像库被围栏拦下时 409 且 detail 是带 `sync_origin` 的对象 |
+| `GET /notebooks/{id}/understanding/experiences` | 任意有读权的成员；这本笔记本自己那一份[检索策略经验](#检索策略经验)（下一节），返回 `enabled`（跟随 `RETRIEVAL_EXPERIENCE_ENABLED`，**不是**上面那把总闸）、`count`、`updated_at`（所列条目里最新的那个，空清单为 `null`；按解析出的真实时刻比，不按字符串字典序）、`can_manage`（纯能力位，与 `can_edit_base` 同口径：镜像库不并进来，围栏只挡下面两个写端点）与 `entries`；条目按 `(support desc, updated_at desc, id asc)` 排，返回**support 最高的至多 `RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES`（100）条**——服务端读两倍上限再排序截断，因为淘汰跑在蒸馏写完之后、分区可以短暂超出上限，先截后排会按内容哈希丢掉与 support 无关的一批。每条只含 `action`/`polarity`/`rationale`/`support`/`adopted`/`updated_at`——条目 id、情境指纹与出处 run id 一律不下发 |
+| `POST /notebooks/{id}/understanding/experiences/distill` | 需要 `agent_profile:write`（同共享底座；无此能力 404）；手动排一次该库的整理。三种 409 各有各的文案：单飞占用（与手动重建共用同一句）、`RETRIEVAL_EXPERIENCE_ENABLED` 关闭、**冷却**——该库上一批整理完成不足 10 分钟**且**此后没有新的完成提问时拒绝（每按一次都要付一次有界模型调用，没有新输入的一批只会重读同一批提问；有待处理提问则不受冷却限制，这正是进程内计数被重启清零后按钮仍然可用的那条路径）。镜像库被围栏拦下时 409 且 detail 是带 `sync_origin` 的对象 |
 | `DELETE /notebooks/{id}/understanding/experiences` | 与上一行相同的权限口径；清空**这本笔记本**那一份（全局分区与别的库一行不动），返回 `{"removed": n}`。**总闸关闭时照常可删**——关开关说的是「从现在起不再记」，不是把记过的行变成既看不到也删不掉的东西 |
 
 `AGENT_PROFILE_ENABLED`（默认 true）是**理解块这一侧**的唯一总闸（上表最后三行的检索经验跟随另一把独立开关 `RETRIEVAL_EXPERIENCE_ENABLED`，见下一节），同时管住注入、巡固触发与两个 API 面的可见性——关闭后处处逐字回到接入前：不注入、不记 trace 步、不排巡固，API 不是 404 而是返回 `enabled=false` 且两个列表为空（让前端能区分「关了」与「还没形成理解」），重建端点 409。
@@ -2457,7 +2457,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - `DELETE /api/notebooks/{id}/understanding/{label}?scope=&expected_revision=` —— 与写端点相同的权限口径与同一套乐观并发：`expected_revision` 为界面上看到过的版本号（必填；过期 409）；清空取值但保留该行与其历史
 - `POST /api/notebooks/{id}/understanding/rebuild` body `{scope}` —— 与写端点相同的权限口径；忙碌或 `AGENT_PROFILE_ENABLED` 关闭时返回 409
 - `GET /api/notebooks/{id}/understanding/experiences` —— 这本笔记本自己那一份检索策略经验；任意有读权的成员；返回 `enabled`（跟随 `RETRIEVAL_EXPERIENCE_ENABLED`）、`count`、`updated_at`、`can_manage`、`entries`——见[检索策略经验](#检索策略经验)
-- `POST /api/notebooks/{id}/understanding/experiences/distill` —— 需要 `agent_profile:write`（无此能力 404）；手动排一次整理，单飞占用或 `RETRIEVAL_EXPERIENCE_ENABLED` 关闭时返回 409（两种文案不同）
+- `POST /api/notebooks/{id}/understanding/experiences/distill` —— 需要 `agent_profile:write`（无此能力 404）；手动排一次整理，单飞占用、`RETRIEVAL_EXPERIENCE_ENABLED` 关闭、或冷却期内（上一批完成不足 10 分钟且无新提问）返回 409，三种文案各不相同
 - `DELETE /api/notebooks/{id}/understanding/experiences` —— 权限口径同上；清空这本笔记本那一份，返回 `{removed}`；总闸关闭时照常可删
 - `GET /api/notebooks/{id}/knowledge-types`、`GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`、`PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
 - `GET /api/notebooks/{id}/graph`

@@ -1,11 +1,12 @@
-// 「AI 对这个库的理解」面板(P1-T7)——后端四个端点的全栈对等界面。
+// 「AI 对这个库的理解」面板(P1-T7,PR-2 加第四张卡)——后端那一族端点的全栈对等界面
+// (理解四个 + Agent 记录两个 + 检索经验三个)。
 //
 // 形态选择与理由:
 //
 // · 入口由 build-time workspace UI registry 的首个真实 contribution 提供。插件只
 //   委托 exact-owner `openUnderstanding` action；本文件仍是理解数据、busy 与轮询的
-//   唯一 owner，入口本身在点击前不发领域请求。只读成员同样可见，因为后端四个端点
-//   都走 notebook read，而“本人那一份”本来就允许读者维护。
+//   唯一 owner，入口本身在点击前不发领域请求。只读成员同样可见，因为这一族端点的
+//   读都走 notebook read，而“本人那一份”本来就允许读者维护。
 //
 // · **两档共用一个 `UnderstandingChain` 子组件**。两档的差别只有三处(标题、能不能
 //   编辑、写哪个 scope),复制两份的唯一后果是下次改保存逻辑时改漏一边。
@@ -13,15 +14,17 @@
 // · **清空是两步确认,不是 `window.confirm`。** 与群组面板同一条口径:一次误点不该
 //   决定一段已经攒了很久的内容;而原生确认框在浮动窗里还会把焦点整个抢走。
 //
-// 版式(与独立群组页同一次整改的同一条口径,见 group-page-style-guard):三档内容
-// (共享理解 / 我的检索心得 / Agent 记录)各自是一张**带头部的卡**,不再是三段
-// `.stack` 平铺。平铺的代价是具体的、不是审美问题:
+// 版式(与独立群组页同一次整改的同一条口径,见 group-page-style-guard):四档内容
+// (共享理解 / 我的检索心得 / Agent 记录 / 检索经验)各自是一张**带头部的卡**,
+// 不再是几段 `.stack` 平铺。后两张是折叠卡,默认收起、首次展开才发第一次请求。
+// 平铺的代价是具体的、不是审美问题:
 //
-//   · 三档的**边界看不出来**。五个块 + 五个块 + 一段折叠记录全是同一种白底方框,
+//   · 各档的**边界看不出来**。五个块 + 五个块 + 两段折叠清单全是同一种白底方框,
 //     滚到中间时无从判断手里这一块属于哪一档、会被谁看到。
 //   · 「这一档给谁看」原先只写在说明文字里。共享 vs 只有自己是这个面板最要命的
 //     一条区分(改错地方 = 把只给自己的话写给全笔记本看),它必须是一眼可见的
-//     固定标记,而不是一段要读完才知道的话。
+//     固定标记,而不是一段要读完才知道的话。四张卡的头部因此各带一个范围徽标
+//     ——「检索经验」那张是全体成员可见,与共享底座同一档,不是「仅自己可见」。
 //   · 「重新整理」原先是标题下面孤零零的一颗按钮,与它作用的那一档没有视觉从属
 //     关系;放进模块头部之后,它作用在哪一档不需要解释。
 //
@@ -32,6 +35,10 @@
 // 不可点并换成「整理中…」;忙碌位存的是**哪个库在忙**(共享的 `notebook-busy-set`,
 // 不是裸布尔);解除**按证据**——只有轮询读到服务端说这条链不在跑了才解除,另设
 // 轮询尝试上限,超限走中性文案而不猜结局。
+//
+// 「检索经验」那张卡的「立即整理」**刻意不走这一套**:服务端那条链路没有可查的
+// 状态字段,能轮询的东西根本不存在,所以它只在请求在飞的那段窗口禁用,返回即还原,
+// 结果落在按钮旁边并自走计时器(理由写在 `ExperienceSection` 的注释里)。
 "use client";
 
 import {
@@ -711,8 +718,9 @@ function ActionNoteLine({ note }: { note: ActionNote }) {
  *   Interactive feedback 要的「结果落在按钮自身或紧邻处」,不是页面顶部的横幅。
  *
  * · 「已开始整理，稍后展开刷新」这句话必须是**真的**:整理是异步的,立刻重取只会
- *   拿回同一份旧列表。所以成功之后记一个 `refreshOnOpen`,下次收起再展开时真的
- *   重取一次——否则那句话就是在教用户做一件不起作用的事。
+ *   拿回同一份旧列表。所以成功之后记一个 `refreshOnOpenRef`,下次收起再展开时真的
+ *   重取一次——否则那句话就是在教用户做一件不起作用的事。那一位为什么是 ref、
+ *   为什么只在发出重取的那一刻清掉,见它自己的注释。
  *
  * · `enabled=false`(这条链路的总闸)时卡内只有一句话,两个按钮一个都不渲染:一颗
  *   注定 409 的按钮比没有按钮更糟(#616 R3 的原话)。`can_manage=false` 同理——
@@ -728,32 +736,53 @@ function ExperienceSection({ notebookId }: { notebookId: string }) {
   const [clearNote, setClearNote] = useActionNote();
   const [confirmingClear, setConfirmingClear] = useState(false);
   // 「整理已经排上了」之后,下一次展开要真的重取(见上面模块注释第三条)。
-  const [refreshOnOpen, setRefreshOnOpen] = useState(false);
+  //
+  // ⚠ 这一位是 ref 而不是 state,而且**只在真正发出那次重取的那一刻**清掉。
+  // 早先写成「读成功时清掉」有一个真实的交错(codex #772 P3):展开触发的慢读还在
+  // 飞,用户点了「立即整理」把它置上,那次慢读随后返回、把它一并清成 false——于是
+  // 「稍后展开刷新」承诺的那次重取永远不会发生,而界面还在那儿教用户去展开。
+  // 清除点收到 onToggle 里之后,一次读**只会**清掉它自己消费的那一次意图。
+  const refreshOnOpenRef = useRef(false);
   const loadEpochRef = useRef(0);
 
+  /** 返回这次读的结果有没有被采用(代次落后、或请求失败都是 `false`)。 */
   const load = useCallback(async () => {
     const epoch = ++loadEpochRef.current;
     setLoading(true);
     setError("");
     try {
       const next = await fetchExperiencePartition(notebookId);
-      if (epoch === loadEpochRef.current) {
-        setData(next);
-        setRefreshOnOpen(false);
-      }
+      if (epoch !== loadEpochRef.current) return false;
+      setData(next);
+      return true;
     } catch (err) {
       if (epoch === loadEpochRef.current) {
         setError(toUserMessage(err, "没能读到检索经验，请稍后重试"));
       }
+      return false;
     } finally {
       if (epoch === loadEpochRef.current) setLoading(false);
     }
   }, [notebookId]);
 
   function onToggle(event: SyntheticEvent<HTMLDetailsElement>) {
-    if (event.currentTarget.open && (data === null || refreshOnOpen) && !loading) {
-      void load();
+    if (!event.currentTarget.open) {
+      // 收起 = 放弃这一步。两步确认停在「确认清空」上而卡片被收起时,下次展开
+      // 迎面就是一颗破坏性按钮的确认态,而用户并不记得自己按过第一下。
+      setConfirmingClear(false);
+      return;
     }
+    if (loading) return;
+    const consuming = refreshOnOpenRef.current;
+    if (data !== null && !consuming) return;
+    // 意图在**发出**这次读时消费掉,不等它回来:等回来清就会误伤在它在飞期间
+    // 新排上的那一次整理(见上面那段)。
+    refreshOnOpenRef.current = false;
+    void load().then((applied) => {
+      // 这次读没成功(网络抖了一下)——意图还没兑现,放回去,免得一次瞬时失败
+      // 把「稍后展开刷新」永久吃掉(此后 data 非空,再展开也不会重取)。
+      if (!applied && consuming) refreshOnOpenRef.current = true;
+    });
   }
 
   // 两个动作互斥:清空在飞时整理没有意义(整理的输入正在被删),整理在飞时清空会
@@ -768,7 +797,7 @@ function ExperienceSection({ notebookId }: { notebookId: string }) {
     try {
       await distillExperiencePartition(notebookId);
       setDistillNote({ text: "已开始整理，稍后展开刷新", failed: false });
-      setRefreshOnOpen(true);
+      refreshOnOpenRef.current = true;
     } catch (err) {
       // 409 的两种来历(总闸关掉、已经有一次在跑)后端都写成了人话,原样上屏。
       setDistillNote({
@@ -801,7 +830,7 @@ function ExperienceSection({ notebookId }: { notebookId: string }) {
 
   return (
     <details
-      className="understanding-module understanding-observations understanding-experiences"
+      className="understanding-module understanding-experiences"
       onToggle={onToggle}
     >
       <summary className="understanding-module-head">
@@ -865,7 +894,7 @@ function ExperienceSection({ notebookId }: { notebookId: string }) {
               </ul>
             )}
             {data.can_manage ? (
-              <div className="understanding-observations-toolbar understanding-experience-toolbar">
+              <div className="understanding-experience-toolbar">
                 <div className="understanding-block-actions">
                   <button
                     type="button"
