@@ -1146,6 +1146,36 @@ def test_an_incremental_payload_is_refused_by_this_build(source, target, package
     assert "full packages only" in str(failure.value)
 
 
+def test_a_nonzero_seq_range_is_refused_even_with_empty_deletes_and_epochs(
+    source, target, package
+):
+    """codex #772 r18 P2. This build (PR-2) imports full snapshots only. A
+    package's ``deletes.jsonl``/``kg_epochs.jsonl`` being empty is not proof
+    of that -- an exporter (or a hand-crafted package) can carry a non-zero
+    ``from_seq``/``to_seq`` range with nothing in either incremental payload
+    file. Every downstream phase (declaration, table apply, file swap) treats
+    an imported package as a full reconciliation of the notebook, so
+    importing such a package as one would silently drop everything the
+    source wrote outside the claimed range. ``manifest.json`` is not itself
+    checksummed (see ``test_an_embedding_dimension_mismatch_is_refused``
+    above), so this needs no ``_reseal``.
+
+    变异验证: 去掉 ``_reject_incremental_payload`` 里的 ``from_seq``/``to_seq``
+    断言,本条必须报红(目标端把这个包当全量对账接收)。
+    """
+    document = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))
+    document["to_seq"] = 5
+    (package / MANIFEST_NAME).write_text(
+        json.dumps(document, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+    )
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, package)
+
+    assert "from_seq/to_seq" in str(failure.value)
+    assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 0
+
+
 def test_a_notebook_the_target_owns_locally_is_never_overwritten(
     source, target, package
 ):

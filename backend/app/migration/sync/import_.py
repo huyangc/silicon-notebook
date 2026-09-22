@@ -1356,7 +1356,22 @@ def _verify_checksums(package_dir: Path, manifest: _PackageManifest) -> dict[str
     return {str(key): str(value) for key, value in recorded.items()}
 
 
-def _reject_incremental_payload(package_dir: Path) -> None:
+def _reject_incremental_payload(
+    package_dir: Path, manifest: "_PackageManifest"
+) -> None:
+    """codex #772 r18 P2: this build (PR-2) imports full snapshots only. A
+    non-zero ``from_seq``/``to_seq`` range names an incremental package —
+    even one whose ``deletes.jsonl``/``kg_epochs.jsonl`` happen to be empty —
+    and every downstream phase (declaration, table apply, file swap) treats
+    the package as a full reconciliation: importing it as one would silently
+    drop everything the source wrote outside the claimed range. Checked
+    first, so the range is rejected before a single row is written or
+    deleted."""
+    if manifest.from_seq != 0 or manifest.to_seq != 0:
+        raise SyncImportError(
+            "本版本只支持全量包（from_seq/to_seq 必须为 0），"
+            f"得到 from_seq={manifest.from_seq}, to_seq={manifest.to_seq}"
+        )
     for name in (DELETES_NAME, KG_EPOCHS_NAME):
         if any(True for _ in _iter_lines(package_dir / name)):
             raise SyncImportError(
@@ -4456,8 +4471,8 @@ def _import(
 ) -> ImportReport:
     manifest = _read_manifest(package_dir)
     # Phase 1a: the package on its own, with no database handle open.
+    _reject_incremental_payload(package_dir, manifest)
     checksums = _verify_checksums(package_dir, manifest)
-    _reject_incremental_payload(package_dir)
     _verify_package_paths(package_dir, manifest, checksums, settings)
 
     ledger = _Ledger()

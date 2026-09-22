@@ -1174,11 +1174,26 @@ class CandidateRetrievalService(_RetrievalState):
             "element_ids": json.loads(r["element_ids"] or "[]"),
         } for r in rows]
     def _vector_matrix_version(self, db: object, notebook_id: str, table: str):
-        """(table, count, max created_at) version tuple for a notebook's `table`
-        embeddings — the same cheap aggregate query _vector_matrix uses to key
-        its cache. Factored out so callers can `peek()` cache warmth (e.g. the
-        large-notebook cold-matrix guard in _retrieve_relations_scored) without
-        duplicating the SQL or paying for the (potentially GB-scale) loader.
+        """(table, count, max created_at, kg seq quadruple, runtime dim) version
+        tuple for a notebook's `table` embeddings — the same cheap aggregate
+        query _vector_matrix uses to key its cache. Factored out so callers can
+        `peek()` cache warmth (e.g. the large-notebook cold-matrix guard in
+        _retrieve_relations_scored) without duplicating the SQL or paying for
+        the (potentially GB-scale) loader.
+
+        codex #772 r18 P2: (COUNT, MAX(created_at)) alone misses an online
+        cross-environment package import that *replaces* this notebook's
+        mirrored vectors in place — same row count, and an importer batches
+        writes under one `created_at`/`now()` that can tie or fall behind the
+        pre-import max, so neither aggregate need change. Folding in
+        `unified_kg.graph_seq_row`'s (kg_mutation_seq, cluster_mutation_seq,
+        mention_seq, kg_reset_epoch) quadruple closes that gap: every import
+        advances `kg_mutation_seq` past both the target's and the package's
+        prior value (see `migration/sync/import_.py`), so a same-count,
+        same-max-timestamp replacement still changes this version tuple and
+        the cached matrix self-evicts on its next read — the same
+        cross-process-write pattern `KnowledgeLifecycleService.
+        _unified_graph_version` documents for the unified-graph cache.
 
         Includes the runtime truncation dim (T3 / 风险 R4): the cached matrix
         lives in the runtime similarity space, so flipping EMBED_RUNTIME_DIM
@@ -1188,7 +1203,11 @@ class CandidateRetrievalService(_RetrievalState):
         stay in sync with the real cache by construction."""
         from app.services.vector_index import resolve_runtime_dim
         ver = self.embeddings.version_row(db, notebook_id, table)
-        return (table, ver["c"], ver["ts"], resolve_runtime_dim(self.settings))
+        return (
+            table, ver["c"], ver["ts"],
+            *self.unified_kg.graph_seq_row(db, notebook_id),
+            resolve_runtime_dim(self.settings),
+        )
     def _vector_matrix(self, db: object, notebook_id: str,
                        table: str, id_col: str):
         """Cached (ids, normalized float32 matrix) for a notebook's embeddings.

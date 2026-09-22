@@ -199,8 +199,9 @@ users 不同步但导入时可能**创建**：见 §4。
   「整体替换」（先按 `delete_notebook_graph_rows` 的表集清空，再整批插入）；epoch 没变，
   按变更日志增量 upsert/删除。`unified_kg_state` 行搬运时 `kg_mutation_seq` 不原样写，而是
   `max(目标端现值, 包内值) + 1`：目标端与源端各自变更可能凑出相同的版本元组，只有让每次导入
-  严格推进目标端的 seq，服务进程里按 `graph_seq_row` 版本校验的 unified 图缓存才必然失效，
-  且 seq 永不倒退；其余列（kg_reset_epoch 等）原样搬。
+  严格推进目标端的 seq，服务进程里按 `graph_seq_row` 版本校验的 unified 图缓存与检索向量
+  矩阵缓存（其版本元组同样折进这四元组）才必然失效，且 seq 永不倒退；其余列（kg_reset_epoch
+  等）原样搬。PR-2 的导入器只接受 `from_seq == to_seq == 0` 的全量包，预检里拒绝其它区间。
 - 人工审核字段（knowledge_objects 的 status/owner/last_reviewed）随行同步；目标端不允许
   改（§5）。
 - `kg_index`/`kg_viz`/`kg_index_partitions` 不拷贝，目标端按现有 scale build 流程重建；

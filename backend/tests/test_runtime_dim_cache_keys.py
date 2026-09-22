@@ -174,3 +174,55 @@ def test_runtime_dim_zero_roundtrip_restores_versions(repo, monkeypatch):
     assert repo._cluster_input_version(nb.id) == v0
     with repo._connect() as db:
         assert repo._vector_matrix_version(db, nb.id, "knowledge_embeddings") == m0
+
+
+# ── 5. cross-process kg_mutation_seq advance (codex #772 r18 P2) ────────────
+
+def test_vector_matrix_version_changes_when_kg_mutation_seq_advances_underneath(repo):
+    """(COUNT, MAX(created_at)) alone misses a cross-process sync importer that
+    REPLACES a notebook's mirrored embedding rows in place: the row count is
+    unchanged and the importer can carry a ``created_at``/``now()`` that ties
+    or falls behind the pre-import max, so neither aggregate need move. Such
+    an importer writes through its own transactions, never through this
+    process's ``_vector_cache`` invalidation call sites, so a bare
+    (count, max-ts) version would keep an already-warm matrix cache serving
+    the pre-import vectors forever.
+
+    ``_vector_matrix_version`` now folds in ``unified_kg.graph_seq_row``'s
+    (kg_mutation_seq, cluster_mutation_seq, mention_seq, kg_reset_epoch)
+    quadruple, which every import advances (``migration/sync/import_.py``).
+    This guard warms the matrix cache, then — via a SEPARATE connection, like
+    a cross-process writer — bumps only ``kg_mutation_seq`` (no embedding rows
+    touched at all), and asserts the version and warm-peek both flip.
+
+    变异验证: 把 ``_vector_matrix_version`` 里 ``*self.unified_kg.graph_seq_row(...)``
+    那段去掉,本条必须报红(版本不变,``_vector_matrix_warm`` 仍判暖)。
+    """
+    nb = repo.create_notebook(NotebookCreate(name="b"))
+    _seed_embeddings(repo, nb.id, n=2, dim=32)
+
+    with repo._connect() as db:
+        v0 = repo._vector_matrix_version(db, nb.id, "knowledge_embeddings")
+        repo._vector_matrix(db, nb.id, "knowledge_embeddings", "object_id")
+        assert repo._vector_matrix_warm(db, nb.id, "knowledge_embeddings") is True
+
+    # A cross-process importer's own transaction, on its own connection —
+    # bumps unified_kg_state.kg_mutation_seq WITHOUT touching
+    # knowledge_embeddings at all, so COUNT/MAX(created_at) stay identical.
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, dirty, kg_mutation_seq, updated_at) "
+            "VALUES (?, 0, 1, '2020-01-01T00:00:00') "
+            "ON CONFLICT(notebook_id) DO UPDATE SET "
+            "kg_mutation_seq=unified_kg_state.kg_mutation_seq+1",
+            (nb.id,),
+        )
+
+    with repo._connect() as db:
+        v1 = repo._vector_matrix_version(db, nb.id, "knowledge_embeddings")
+        assert v1 != v0, (
+            "cross-process 导入器推进 kg_mutation_seq 后,向量矩阵版本必须变化"
+        )
+        assert repo._vector_matrix_warm(db, nb.id, "knowledge_embeddings") is False, (
+            "导入后旧版本矩阵不得再判暖 —— 否则大库守卫会放行、命中导入前的旧矩阵"
+        )
