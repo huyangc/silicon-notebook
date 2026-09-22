@@ -394,3 +394,68 @@ def test_a_late_added_timestamptz_column_exports_as_utc_text(
 
     assert len(rows) == 1
     assert rows[0]["derived_building_claimed_at"] == "2026-01-01T00:00:00+00:00"
+
+
+# --------------------------------- knowledge_object_sources/community_members
+
+
+def test_two_no_sqlite_pk_tables_keyset_page_correctly_on_postgres(
+    repository, export_settings, tmp_path, monkeypatch
+):
+    """knowledge_object_sources and community_members get a REAL PostgreSQL
+    PRIMARY KEY from 0064 (unlike the SQLite lane, which cannot add one to an
+    existing table in place and backs their ``TableSyncSpec.key`` with a
+    UNIQUE index instead -- see tests/test_sync_export.py). Confirm the
+    ordinary catalog-primary-key keyset path (``_scan``) pages them
+    correctly now that PR-3a removed their old one-notebook-at-a-time
+    streaming branch. Shrinks the page instead of seeding thousands of rows,
+    the same trick tests/test_sync_export.py's
+    ``test_keyset_paging_covers_every_row_exactly_once`` uses: what needs
+    proving is that the ``(pk...) > (last pk...)`` cursor neither skips a row
+    at a page boundary nor repeats one, not that PostgreSQL can hold 1000+
+    rows."""
+    from app.migration.sync import export as export_module
+
+    notebook = _seed(repository, "paged")
+    with repository._write() as db:
+        source_id = db.execute(
+            "SELECT id FROM sources WHERE notebook_id=%s LIMIT 1", (notebook,)
+        ).fetchone()["id"]
+        db.execute(
+            "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
+            "owner,payload,evidence,source_id,created_at,updated_at,"
+            "last_reviewed) VALUES(%s,%s,'concept','approved','','{}','[]','',"
+            "now(),now(),NULL)",
+            ("ko-paged", notebook),
+        )
+        for index in range(25):
+            db.execute(
+                "INSERT INTO knowledge_object_sources(object_id, source_id, "
+                "notebook_id) VALUES (%s, %s, %s)",
+                ("ko-paged", f"{source_id}-page-{index:03d}", notebook),
+            )
+            db.execute(
+                "INSERT INTO community_members(canonical_id, notebook_id, "
+                "level, community_id, canonical_name, centrality) "
+                "VALUES (%s, %s, 0, %s, %s, 0.0)",
+                (f"can-page-{index:03d}", notebook, f"comm-page-{index:03d}", "n"),
+            )
+
+    monkeypatch.setattr(export_module, "_PAGE_ROWS", 4)
+    report = export_notebooks(
+        export_settings, target_env=TARGET_ENV, out_dir=tmp_path / "paged",
+        notebook_ids=[notebook], source_env=SOURCE_ENV,
+    )
+
+    for table, key_of in (
+        ("knowledge_object_sources", lambda row: (row["object_id"], row["source_id"])),
+        ("community_members", lambda row: (row["community_id"], row["canonical_id"])),
+    ):
+        rows = _rows(report.package_dir, table)
+        keys = [key_of(row) for row in rows]
+        assert len(keys) == 25 > 4, "the page size must be smaller than the row count"
+        assert len(set(keys)) == len(keys), (
+            f"{table}: a row was written twice across a page boundary"
+        )
+        assert keys == sorted(keys), f"{table}: keyset pages must come out in key order"
+        assert report.table_counts[table] == 25

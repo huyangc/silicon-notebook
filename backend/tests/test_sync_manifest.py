@@ -541,6 +541,102 @@ def test_declared_columns_exist_in_sqlite_schema(sqlite_table_columns):
     assert not problems, "; ".join(problems)
 
 
+# ----------------------------------------- key <-> 目标唯一面 (SQLite 模板侧)
+
+
+def _sqlite_catalog_primary_key(
+    conn: sqlite3.Connection, table: str
+) -> tuple[str, ...]:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    keyed = sorted((row[5], row[1]) for row in rows if row[5] > 0)
+    return tuple(name for _position, name in keyed)
+
+
+def _sqlite_unique_column_sets(
+    conn: sqlite3.Connection, table: str
+) -> list[frozenset[str]]:
+    """Every column set the SQLite catalog enforces as unique for ``table``:
+    the primary key (if any) plus every non-partial UNIQUE index. Mirrors
+    ``app.migration.sync.export._Source._has_unique_surface`` at test time,
+    over the SESSION'S SCHEMA TEMPLATE rather than a live export/import run
+    -- see ``sqlite_table_columns`` above for why this fixture reads the
+    template instead of running the migration ladder itself."""
+    sets: list[frozenset[str]] = []
+    pk = _sqlite_catalog_primary_key(conn, table)
+    if pk:
+        sets.append(frozenset(pk))
+    for index in conn.execute(f"PRAGMA index_list({table})").fetchall():
+        # index_list columns: seq, name, unique, origin, partial.
+        if not index[2] or (len(index) > 4 and index[4]):
+            continue
+        columns = frozenset(
+            row[2] for row in conn.execute(f"PRAGMA index_info({index[1]})").fetchall()
+        )
+        sets.append(columns)
+    return sets
+
+
+def test_registered_sync_key_has_a_covering_unique_surface_in_sqlite(
+    _sqlite_schema_template,
+):
+    """A registered ``TableSyncSpec.key`` is only a usable row identity if the
+    LIVE SQLite schema actually enforces it is unique --
+    ``app.migration.sync.export._Source.sync_key`` re-checks exactly this at
+    runtime (SQLite cannot add a primary key to
+    knowledge_object_sources/community_members in place, so v84 backs their
+    registered key with a UNIQUE index instead), and this guard catches the
+    same drift at test time rather than only when an export/import runs.
+    A table with NO registered key must instead have a real catalog primary
+    key -- the manifest's ``key`` fallback exists only for the tables that
+    declare one.
+    """
+    conn = sqlite3.connect(f"file:{_sqlite_schema_template}?mode=ro", uri=True)
+    try:
+        problems: list[str] = []
+        for table in synced_tables():
+            spec = spec_for(table)
+            unique_sets = _sqlite_unique_column_sets(conn, table)
+            if spec.key:
+                if frozenset(spec.key) not in unique_sets:
+                    problems.append(
+                        f"{table}: TableSyncSpec.key {spec.key} has no covering "
+                        "unique index/constraint in the SQLite template (found "
+                        f"{[sorted(s) for s in unique_sets]})"
+                    )
+            elif not _sqlite_catalog_primary_key(conn, table):
+                problems.append(
+                    f"{table}: no TableSyncSpec.key and no catalog primary key "
+                    "in the SQLite template -- the sync layer has no row "
+                    "identity for it"
+                )
+    finally:
+        conn.close()
+    assert not problems, "; ".join(problems)
+
+
+def test_registered_sync_key_guard_actually_detects_a_missing_unique_surface():
+    """Mutation verification for the guard above: build an in-memory SQLite
+    table shaped like a registered-key table but WITHOUT the unique index
+    that is supposed to back it, and confirm ``_sqlite_unique_column_sets``
+    does not manufacture a match -- i.e. that the guard would actually catch
+    a real drift rather than passing vacuously no matter what the catalog
+    says."""
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE t (a TEXT NOT NULL, b TEXT NOT NULL)")
+        # No unique index at all yet: the declared key must not be reported
+        # as covered.
+        assert frozenset(("a", "b")) not in _sqlite_unique_column_sets(conn, "t")
+        # A unique index over a DIFFERENT column set must not count either.
+        conn.execute("CREATE UNIQUE INDEX uq_t_a ON t(a)")
+        assert frozenset(("a", "b")) not in _sqlite_unique_column_sets(conn, "t")
+        # Only the matching unique index makes it pass.
+        conn.execute("CREATE UNIQUE INDEX uq_t_ab ON t(a, b)")
+        assert frozenset(("a", "b")) in _sqlite_unique_column_sets(conn, "t")
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------- 外键父表先于子表 (copy_rank)
 
 

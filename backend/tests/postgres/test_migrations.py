@@ -5,7 +5,10 @@ import threading
 
 import pytest
 
-from app.migration.sync.capture import expected_postgres_triggers
+from app.migration.sync.capture import (
+    expected_postgres_functions,
+    expected_postgres_triggers,
+)
 from tests.postgres.conftest import _safe_ascii_text
 
 
@@ -591,8 +594,8 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     # v64 (source-side change capture) — see
     # migrations/0064_sync_change_capture.sql. Two more adapter-internal
     # tables, the log's index, the composite primary key the two previously
-    # keyless synced tables now carry, one plpgsql function and one row
-    # trigger per synced business table. The generated text itself is pinned
+    # keyless synced tables now carry, and one plpgsql function plus one row
+    # trigger PER synced business table. The generated text itself is pinned
     # against the generator in tests/test_sync_capture.py; what is checked
     # here is the shape the migration leaves in the catalog.
     with postgres_database.connect() as conn:
@@ -621,11 +624,15 @@ def test_packaged_migrations_apply_in_order(postgres_database):
                 "GROUP BY tc.table_name"
             ).fetchall()
         }
-        capture_function = conn.execute(
-            "SELECT p.prokind,p.prosecdef FROM pg_proc p "
-            "JOIN pg_namespace n ON n.oid=p.pronamespace "
-            "WHERE n.nspname=current_schema() AND p.proname='sync_capture_row'"
-        ).fetchall()
+        capture_functions = {
+            row["proname"]: row
+            for row in conn.execute(
+                "SELECT p.proname,p.prokind,p.prosecdef FROM pg_proc p "
+                "JOIN pg_namespace n ON n.oid=p.pronamespace "
+                "WHERE n.nspname=current_schema() "
+                "AND p.proname LIKE 'sync\\_capture%'"
+            ).fetchall()
+        }
         capture_triggers = {
             row["tgname"]: row["table_name"]
             for row in conn.execute(
@@ -669,9 +676,11 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert txid["is_nullable"] == "YES"
     for column_name in ("table_name", "operation", "parent_key", "notebook_id"):
         assert capture_columns[("sync_change_log", column_name)]["collation_name"] == "C"
-    assert len(capture_function) == 1
-    assert capture_function[0]["prokind"] == "f"
-    assert capture_function[0]["prosecdef"] is False
+    assert set(capture_functions) == set(expected_postgres_functions())
+    assert len(capture_functions) == 46
+    for row in capture_functions.values():
+        assert row["prokind"] == "f"
+        assert row["prosecdef"] is False
     assert capture_triggers == expected_postgres_triggers()
     assert len(capture_triggers) == 46
     # The gate row is NOT seeded: an absent row reads as disabled.

@@ -2566,692 +2566,692 @@
       },
       {
         "name": "sync_capture_canonical_relations_delete",
-        "sql_sha256": "0be16dee1a73e6b72e2ef1c3777fe43b1e477adf98eba0f087b87df3765e71c3",
+        "sql_sha256": "5c91c5762d274ad6af6d102ee4f736d375674335d845445af32d0a6b4cc5c1ec",
         "type": "trigger"
       },
       {
         "name": "sync_capture_canonical_relations_insert",
-        "sql_sha256": "42a128f19f7aeb332d48768bb82a50d62fd7cae21e45929d92c8c26bc3f8e641",
+        "sql_sha256": "a302b6fc212434fe7365892e31d708652c80e7b385c762d92ddbdb26b3fcdbf5",
         "type": "trigger"
       },
       {
         "name": "sync_capture_canonical_relations_update",
-        "sql_sha256": "20cc1d154445e6a3b2a6330faff8c17e419f182d75006d03ebde79ecb3316900",
+        "sql_sha256": "265908ac619672c124946957ad8ad24f0eac26c60486a73cbe7cf287ac521754",
         "type": "trigger"
       },
       {
         "name": "sync_capture_chunk_elements_delete",
-        "sql_sha256": "ec6afa79c44d311fd8949f331c90b23e27367261ca457104a0800262c09bb75c",
+        "sql_sha256": "c6730414608bead6b2976270817c8b3d2639010abd493a7d025f290106781c37",
         "type": "trigger"
       },
       {
         "name": "sync_capture_chunk_elements_insert",
-        "sql_sha256": "13e2deea15915927ef379b7c4c4fab91182563776a1ed3fd80c3f3e5a8361d43",
+        "sql_sha256": "938232d86da25ebbe15d4ec4b88ccc4db0bbe1bcf559788ebfc5f6fd8a9692b0",
         "type": "trigger"
       },
       {
         "name": "sync_capture_chunk_elements_update",
-        "sql_sha256": "6bc62783dc015fdab0ec5b4dbd8317e84b23017fa28ddb06e2ad255dc3f22d7e",
+        "sql_sha256": "ca551c3cc118ec79c014ceff6569d197bb24c377b81ae8c3199fb0f4c35b6182",
         "type": "trigger"
       },
       {
         "name": "sync_capture_chunk_embeddings_delete",
-        "sql_sha256": "cede1acafb43b0efc5386f93c8205f5d5b84f45c1dd32b1922686981fa277cc3",
+        "sql_sha256": "fc0577ccfcc08432a4ab9fd6dd264f753572352c7b270326257588e4937b2034",
         "type": "trigger"
       },
       {
         "name": "sync_capture_chunk_embeddings_insert",
-        "sql_sha256": "54d979276fe763319012ff0384901f30d9442083d3bf601026ddd9af35ffc29d",
+        "sql_sha256": "1b8905a69e37eedaf31eefb82703983d1a857b93a4684ac5d1b93aee07ab7967",
         "type": "trigger"
       },
       {
         "name": "sync_capture_chunk_embeddings_update",
-        "sql_sha256": "adfd2e895822528b6f207468399ac1d854c46e750a5f4d4f906710187339d59f",
+        "sql_sha256": "311b3adc8e6dc63ea29668a15c07310f4486f0d492fbbf5f1bed6ffef31eac4e",
         "type": "trigger"
       },
       {
         "name": "sync_capture_chunk_questions_delete",
-        "sql_sha256": "d56af4cdc8b4f682242f126ee919ccfc303810af6273d5ebec00d0e38e9c5e31",
+        "sql_sha256": "d50c8caf28caced22b8d864c3b18a4c7d77383b1e919103e69ebeba75abd3095",
         "type": "trigger"
       },
       {
         "name": "sync_capture_chunk_questions_insert",
-        "sql_sha256": "d156f101d7b0c1d6d319102a9ee1e35bb427469345400996d66e43346fc1a347",
+        "sql_sha256": "e5153eedcfeec04cf3d05a3dd052031d3475b6a02d998188365860a7c8c36f9f",
         "type": "trigger"
       },
       {
         "name": "sync_capture_chunk_questions_update",
-        "sql_sha256": "7479310c7e1d803cd7475f63fe0b569b25a4b438d970f8f841606df51370d060",
+        "sql_sha256": "749dc3a819ebeeefb17be19fc8a9707fdd052628ebc9264fcb9263536f63c3e9",
         "type": "trigger"
       },
       {
         "name": "sync_capture_chunks_delete",
-        "sql_sha256": "f0114b220498d03952860e5edd41ab6c156c7c5a275b0a9fb985880c14982e0e",
+        "sql_sha256": "1d62489268d1370567e75502d801278c08e0baa314c721a75483277c3e32afc8",
         "type": "trigger"
       },
       {
         "name": "sync_capture_chunks_insert",
-        "sql_sha256": "51da7671f87e8b1e0ab53c3c9cefe14d2b4df54774bb51ff4b7177cf2d7902df",
+        "sql_sha256": "8eaf0cbcb28ca6ecedd2ca6543876cbec98044396ffac4b34549dc2d86da128a",
         "type": "trigger"
       },
       {
         "name": "sync_capture_chunks_update",
-        "sql_sha256": "428f4fc8736e9a349a2e1468975af93bbde2ca3d662d75768d1f9ca93159a385",
+        "sql_sha256": "84f683fe49808f00b5c440e437c02562021e7322ee88f783051320f8c0d24eb2",
         "type": "trigger"
       },
       {
         "name": "sync_capture_communities_delete",
-        "sql_sha256": "0cb18b186a48f8d23cf9654c103ec6ec14cefbe67bde38910070288915ae30a7",
+        "sql_sha256": "87ee8816af1e808dace5cb765cbdad49dd439ee9ede541e29c499ea17694183d",
         "type": "trigger"
       },
       {
         "name": "sync_capture_communities_insert",
-        "sql_sha256": "de4734c8ef7a75bc9b7f9406037827c92cefd6b234b2beeb1b479cdc2fd0298d",
+        "sql_sha256": "d98ef7572cd703c5e456cc90507cebfe573d4f4d22561f1df9dcf8f337aed903",
         "type": "trigger"
       },
       {
         "name": "sync_capture_communities_update",
-        "sql_sha256": "6b0fc9fcda3c9b13ca9a993d57be71b305f2bcfe1789740572b47d8341374518",
+        "sql_sha256": "07ae774dc93433475b7201c4da8eac8db516107f7ea642e063094c9061603fd4",
         "type": "trigger"
       },
       {
         "name": "sync_capture_community_members_delete",
-        "sql_sha256": "01aa7cacae686c87bc29ef63e0e98cf7c8b2019e979c8b1d4c25a51039035c5b",
+        "sql_sha256": "73c54b9c0b19e67be966bd31ab36df6706841f243eff71db81799403109de7e2",
         "type": "trigger"
       },
       {
         "name": "sync_capture_community_members_insert",
-        "sql_sha256": "55361ff4b11d070ef6f90608f8910ff6b3f5b8d8e067321db35a2caec8970787",
+        "sql_sha256": "b7a019e84aef36bc4a1424bcbb8430b0feb6625768649ce8a94444106a9aebb1",
         "type": "trigger"
       },
       {
         "name": "sync_capture_community_members_update",
-        "sql_sha256": "99af9811ca704bdff5b6a050448c5058b218c74e3a6ca66c4ddaa0d647902f28",
+        "sql_sha256": "b0e00b67c6abbf7506af5c0815fc49f76b364519110b0981b8d3c38aff5c8d2a",
         "type": "trigger"
       },
       {
         "name": "sync_capture_concept_clusters_delete",
-        "sql_sha256": "317bfd4a6add4ba3ef9f47e66f68ea9f5d6861935f7662deb006e7336c969e93",
+        "sql_sha256": "02ad545363b845b6f66b7aad174f2a95b3de6f18de3469a9d4d1e63928f28daf",
         "type": "trigger"
       },
       {
         "name": "sync_capture_concept_clusters_insert",
-        "sql_sha256": "14dd35b192392ea52b57ce92c1995dcbae5db231d3ef2204a1c6208e23a9a7b7",
+        "sql_sha256": "24a8c44bc6be3777ee6f60db6699c226cb52def03b1bd3c41a4816c129579863",
         "type": "trigger"
       },
       {
         "name": "sync_capture_concept_clusters_update",
-        "sql_sha256": "4d6646077f5b78661906d4dccf698848e6cafa257176281bbd6a4f2345a8c272",
+        "sql_sha256": "c66bac552acf29458b6627aaa63abd0d5316e935fbad84178e49c0c186adbf65",
         "type": "trigger"
       },
       {
         "name": "sync_capture_concept_comentions_delete",
-        "sql_sha256": "535f8499eebcacd5b0dc7382d6149fe4be4127089ae845301b838a5567f47a35",
+        "sql_sha256": "4335dd230a18f7c74ecb3311f6ae0724f7a751e4f7dfee8b6f2780caa1a0d2b0",
         "type": "trigger"
       },
       {
         "name": "sync_capture_concept_comentions_insert",
-        "sql_sha256": "484ca125f0205f5a55d7353c76a1b420d5036334ad10437bbe2cb0053c6feea5",
+        "sql_sha256": "254892cbab55b3e272d7b21505742a16e9a26786823b9289efbb299812e91477",
         "type": "trigger"
       },
       {
         "name": "sync_capture_concept_comentions_update",
-        "sql_sha256": "34745a607b51f25fb4918ffc6d488c26fe2626600c6446853e71a6cbcb7d8060",
+        "sql_sha256": "38e2de9cfd8064883101390259d6a524f0147f54af2e622684e06f5d48d69092",
         "type": "trigger"
       },
       {
         "name": "sync_capture_element_embeddings_delete",
-        "sql_sha256": "33a38793244ea480c206d919c9e114dc500ebb6961e25c666ebefd33610705fd",
+        "sql_sha256": "3ad04de87fa319991826a86f3dd8757f0a5b1758d9b9040208266cee84239e5d",
         "type": "trigger"
       },
       {
         "name": "sync_capture_element_embeddings_insert",
-        "sql_sha256": "da79f641eef582f341027787a4a6fca5df4c3f32900a02273f91cc4e8fd550f4",
+        "sql_sha256": "8e4a40ca0311827f4b18c5b66663cb9087f85b7e020a6a903db9e408b80470db",
         "type": "trigger"
       },
       {
         "name": "sync_capture_element_embeddings_update",
-        "sql_sha256": "0d5edea536de91175b64b8d8211015ac3cf62c8efc5643fe6934d8e5b98e231f",
+        "sql_sha256": "31270ee75c52565d9ba5abd5c374f966cb1818387a82c64ef14a7fc1e8690248",
         "type": "trigger"
       },
       {
         "name": "sync_capture_group_members_delete",
-        "sql_sha256": "67273f27f01bea20863b6f1dd708931c3cbaff3bab9f08c17ddd28120c9acc6e",
+        "sql_sha256": "c930cd8d9ca9f629335cb420920e7a9250db2ab20e27a08db183acb6f147d802",
         "type": "trigger"
       },
       {
         "name": "sync_capture_group_members_insert",
-        "sql_sha256": "526fc5cb629bb3cf579fad40fbc5fa073ca82c4b19424b97972a2bc680606b72",
+        "sql_sha256": "e108635af2c002e02a5567e405ca5dd716f30c1bd0c9e041c2194683169af96a",
         "type": "trigger"
       },
       {
         "name": "sync_capture_group_members_update",
-        "sql_sha256": "e09e359d997bb82c21579d4122a55b60e4303d82e709f204f0b285ed7a0e964c",
+        "sql_sha256": "6b59aec0eaca52db81835932891d8f4bafc27c3d9fa263951ef8af057b7f33b7",
         "type": "trigger"
       },
       {
         "name": "sync_capture_groups_delete",
-        "sql_sha256": "e6b2d61d9110692c2af40a14905ee50ce5d6121cfe83827fbf84b6a70d5710d7",
+        "sql_sha256": "20098f181e221364f5da8616e5d9c26623d7d43e2f625fbb74af76d7cce511f5",
         "type": "trigger"
       },
       {
         "name": "sync_capture_groups_insert",
-        "sql_sha256": "7b1a01f98ea842535cf1bc8f63b6c72dc1ff3c152c9771a516112508acf3235e",
+        "sql_sha256": "ecd8160514da80ea1b8eb38d4e85b23f7a8dab54fc1fa2ad3e3a7cb5f2ba81ca",
         "type": "trigger"
       },
       {
         "name": "sync_capture_groups_update",
-        "sql_sha256": "40fb3028fd04d9501989efb108556928a5617b6b0d9e3837df9016f07c4648bc",
+        "sql_sha256": "f72343bf8e5db04c1b50420d1d371ead823feadc7cf7b0010e5e696cb0fa88d7",
         "type": "trigger"
       },
       {
         "name": "sync_capture_kg_analysis_artifacts_delete",
-        "sql_sha256": "324e1fcd0e9ceb1472ea9b73f551ef90675bd3cac35b8db76c588bd8c38dcb48",
+        "sql_sha256": "db9946b22a9e103bbbe5cb626e15a36e8bce6e7337739dd5c8d4f25b08a79ab6",
         "type": "trigger"
       },
       {
         "name": "sync_capture_kg_analysis_artifacts_insert",
-        "sql_sha256": "bcdfbd1463cccc90da77a8ad52b908722e957b438bca7e2b182814263118ab87",
+        "sql_sha256": "ca6efb048db3586229aab3d0e340e3253fb8b2e8a32eb580b2f8082eb05ca327",
         "type": "trigger"
       },
       {
         "name": "sync_capture_kg_analysis_artifacts_update",
-        "sql_sha256": "853ee484b2d3170478ee9e46896aaacace95728c94f074a4a67316e3bdccc6b4",
+        "sql_sha256": "89d9df8bcb549e8ba71d29c0d3d6b88b2da7593a5945d99bd4ee5e3b0caf4e76",
         "type": "trigger"
       },
       {
         "name": "sync_capture_kg_community_edges_delete",
-        "sql_sha256": "14b016863c90d1773bd6bbcd8219754170e65b6aa40317448b9d4694d07005ab",
+        "sql_sha256": "29f160b6a7a1dff0133e30c4d3e1723e4d24c4e8b554242e24e1161ff3a06dc9",
         "type": "trigger"
       },
       {
         "name": "sync_capture_kg_community_edges_insert",
-        "sql_sha256": "2789fece0c7a240eda8600607c78a5cf5c32a42724b675e581ccce530cd21671",
+        "sql_sha256": "6e7d53e71fa2e732840bc5322b4eaa484ecaf98f57418757d67ef0ae1b8416c5",
         "type": "trigger"
       },
       {
         "name": "sync_capture_kg_community_edges_update",
-        "sql_sha256": "72595681be7ccbc40f576f76814a1a3f923e04f4183c832ace5542dfcc9cc285",
+        "sql_sha256": "beca671afa4e45c071d0e344159b2ccc000a2b96de6cda2170e127aebff8fd7e",
         "type": "trigger"
       },
       {
         "name": "sync_capture_kg_source_profiles_delete",
-        "sql_sha256": "4a68181cfd7afb778c3a6f54dcd57dcd949d3865f9f6cc5bb43c71c438e2fdb3",
+        "sql_sha256": "0d7dd22bf5e1b755662328f670721dc776e299cd56cb65b211e53a72a30e2a21",
         "type": "trigger"
       },
       {
         "name": "sync_capture_kg_source_profiles_insert",
-        "sql_sha256": "f0e365545f10fbb7165a58008e22454896ff7b9c70eb6348b82f222b42c92675",
+        "sql_sha256": "1863e388ea2eade142bf45524c945a30b7cb96c8a10b6de377a23f5f6f89ceba",
         "type": "trigger"
       },
       {
         "name": "sync_capture_kg_source_profiles_update",
-        "sql_sha256": "f51897d6a50d9fabc587649b690fdbf183e5762a4ede728bccba04b27638bee5",
+        "sql_sha256": "fe5a5d75798566b8a7c9a9bf316e145765232429e2e8be225dcb96ce08a3a9f6",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_cell_code_delete",
-        "sql_sha256": "f0f7cd4ed36e5c961e20eb4ebfb075b83cb8db569b0af772e821f5c1556cc599",
+        "sql_sha256": "2a884dc6733d1e100dac28d890f0e27550abf712b978659ca4f645029587e5b4",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_cell_code_insert",
-        "sql_sha256": "59b7848c1d40d01ec9b741297378bfabff15955e2fc14cb3856b79c052d752fc",
+        "sql_sha256": "a3965285a22de535e4b3878ee23a85415d874ffb0e901fc2fff96bc1275b69fc",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_cell_code_update",
-        "sql_sha256": "508efbe86931517d74214b9661a3caf84bff291937cada7abdadbb42d87c7e98",
+        "sql_sha256": "0261b3d727801657ee882a0ef9b18a4b422ec8745f3a97f1a83cdf2589942f21",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_cells_delete",
-        "sql_sha256": "284e377781cd1d675f3c5dd00697ea4c72575e4940d2cffc9d825905550e643b",
+        "sql_sha256": "6e521b438bcc8efe5afed74eb268763f24db76a68d01af4ca2b6077be5bf12bd",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_cells_insert",
-        "sql_sha256": "d4e83f49a0aec764432ecf7843e88c14b11d560439af5b7efe73dedbb18dcb5b",
+        "sql_sha256": "33f295c84df4782c68f92c89e9398c22a6c307995322290ede764588f9143a34",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_cells_update",
-        "sql_sha256": "5c4449910bae8dda739ade1719867f95cc58c0bd6b617df576306cce7c07ffbf",
+        "sql_sha256": "6088e7ad2caf7d84ebce5fa6e557bc55771562fb0826a03fc4c16e4a6d9c76ca",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_changes_delete",
-        "sql_sha256": "1dbe63c6b37d65f614d6eb1f1c9ecb1e7b23187d152ab82244aa7cbee9fd0993",
+        "sql_sha256": "40a00d42c005d6fc2192e571abee129743f2b5e1d0f2977bec0165c36e48be11",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_changes_insert",
-        "sql_sha256": "5a6b2a60369a1aeb22c0bc5d487541be353e92de111c2bb41c9e5c89625e6b5b",
+        "sql_sha256": "653eafe2ccfa8fd810c59a8c0ed89fb1822d5b7f46154839e1047ba791f6bcf5",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_changes_update",
-        "sql_sha256": "c9f53c72f0d6352597de20201c55446c9d6fe021beefd7df53b73f3dd3dd6101",
+        "sql_sha256": "1da40f35314748fec29b58c38323626d65283ff3495d673f7f096477b07ea0a3",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_columns_delete",
-        "sql_sha256": "cbdc79d8f9221a094cbfbbc1ca2a76db498fc5827b17e6297c60504e3a1ae81e",
+        "sql_sha256": "952d28ea43c83d1ae21cfcf120348b720b1ec95bbe63c5a95243b4092a852bab",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_columns_insert",
-        "sql_sha256": "5d4af2c7a22235bbd4838ba3355a780e3561aae5e7d2070aa63a9c5491c28ac9",
+        "sql_sha256": "56c0757f0f20fd70c42a639e937ea06c8e620bca0d0c576d92e3a20f6a7a65e0",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_columns_update",
-        "sql_sha256": "e2a8e27ad8b32d2de7877314255055dc874fa37979621d048d66447b091ed357",
+        "sql_sha256": "522e63214a9dfa73a91ea517550dff67c7c403b58607b525c0e2b10d135db122",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_milestones_delete",
-        "sql_sha256": "7e104969f0150bbcb3b0503ce6343069368ea69c3b89baf634f599ffa7aa4d37",
+        "sql_sha256": "58a7bca7041d0e134cf35f47176babdfec2ae6703679de71b5ae145c64f551dc",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_milestones_insert",
-        "sql_sha256": "f88e4090aa5649a092c316c9c475014c2be38d825093c46a9e06526241ef6e57",
+        "sql_sha256": "9d67987b80b3ec831c7f190e2461f2f942877b2d8a754c25dc9ca2e24129172f",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_milestones_update",
-        "sql_sha256": "daeb1ba4b4bfb6b04835d908e79c0ef6f8e8a7880031b5c44a92d1bfd5e5850d",
+        "sql_sha256": "0e15ee26f7a7d53988cf1a5d5b3e2deffd6b0dca397099b33cd78870545f18bd",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_rows_delete",
-        "sql_sha256": "af818b5b51a893cc5903c92abc7d9eed51cd4a9bc5b92cefa96ae313f64975ce",
+        "sql_sha256": "65be4680286ccbd800e314ed2c60d7cac56a2dacd697c5d5f9cd9cca46eeab3b",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_rows_insert",
-        "sql_sha256": "c79a61717e8e58b1487eda3647c7934087fa6f1c3f17de59d197025ebf306288",
+        "sql_sha256": "f1df4e5901bc5cde34e45c2d707a2cc6d49087995249088fa2e5ed6649912b67",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_rows_update",
-        "sql_sha256": "a331aaccf7b5b931061d72c1ea31198a37eac90c45f3627e05cab08c5b45aaf3",
+        "sql_sha256": "7b11c5f4216dbadece9ead8c64fe799761ce67faabf247d7a51297422dbfc52d",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_tables_delete",
-        "sql_sha256": "24238bc2bb6a591155772834fbbe57330ab47ba479e6a915413b70ba6ae6928e",
+        "sql_sha256": "462e688a765a8aceee48252e61716fde4a7d9e95502af2a443b6adfcea905f5f",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_tables_insert",
-        "sql_sha256": "cd25dced6c6231e9526a8720b63f84206a38e6e07c599fa62e2dfe21b3aa3b9f",
+        "sql_sha256": "cc0b392b1da0e3d37b9ddb9b4d90f1233b90aecdb9653bc7e95fe82fda930aaa",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowhow_tables_update",
-        "sql_sha256": "500871c3ef1bff23009624c22bc96d1bbe86d5ad7b6feef253a98986b893af30",
+        "sql_sha256": "2b5d04bdb42c100f5e6c1956ab67685d61b90767faa9f705726aa8afae17afcb",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowledge_embeddings_delete",
-        "sql_sha256": "ba5f11b805fa45bb72432108fd8ad703f9397b8e2968ff67a5327d34e6f86a21",
+        "sql_sha256": "c988d87c6756edfa93eda99f710bf4845a14964a2786fe481ccba929323e3a63",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowledge_embeddings_insert",
-        "sql_sha256": "163d23ef1ead4e6df92477661af3b393bc4f15a82fdb01946d6d6c9bfadb8f99",
+        "sql_sha256": "4ce73f4cec14a1295d5a6d399d91fe474740f8ec205cce1bf6a258038d908040",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowledge_embeddings_update",
-        "sql_sha256": "181dcd8537e1ec64c5bcb078b9a3cbc98348f20e4593306be88137dc0b946cb9",
+        "sql_sha256": "66fd5556083bcfefea02a3668912522ca040d7d3e424a07e5b9fea1eeca8da9a",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowledge_object_sources_delete",
-        "sql_sha256": "29a3c2a2357d91157dd4b82615a72fb5f65320a624bd782c804daf7f68447b17",
+        "sql_sha256": "d0964b855f5d34968d63f9bcfee121278780ed8d912a9b009eb3913a7c497ecc",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowledge_object_sources_insert",
-        "sql_sha256": "0461439abc614a866cf8d203e474b011b6339d37d3f8b24355eeeb5e0c280f33",
+        "sql_sha256": "8f3492703366b7077921e1f23e9b7df3ed99166edd5ad74d3684752a442e2277",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowledge_object_sources_update",
-        "sql_sha256": "42818db3968e2bc12d83d69c45d97eaf1f125d9bbb462fc40c49de52c637cc18",
+        "sql_sha256": "54c53c24af5a261b51bd3ed90cd36f518e385831c4d307514ddd030ace6ab527",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowledge_objects_delete",
-        "sql_sha256": "13190d0a9b463265720f7c61342a8e03db161969247bbaaf7c7eaa1d99992fae",
+        "sql_sha256": "408f1d909526c00dd5906bb546aafd348a8d8cd05ae7cb262859a1f66f3a1708",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowledge_objects_insert",
-        "sql_sha256": "3c2b3d2693e3ad7756580a24e8b450ee0feb932875898778233e34d67397bb84",
+        "sql_sha256": "8340c6c914856724340ea4fa30ed0edbf2e8f08f29ad4168c2f1525365aa1bc4",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowledge_objects_update",
-        "sql_sha256": "45549d8c48a3d840deb611c4490209ecbfa4da4df264aad8dee1944d5665d32d",
+        "sql_sha256": "22c6d7726fee57451587ea92f479d6159c96722215c617cd6eb4fd9c79ea4229",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowledge_relations_delete",
-        "sql_sha256": "f4ff246a7c56b873f341aded536499ceda4df95842a7cf4efde595c74f34b313",
+        "sql_sha256": "c612ab1ab54d61a5a74881996c057af2801d44def8007cac1d959839593e105a",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowledge_relations_insert",
-        "sql_sha256": "f0dcece3c9ea4eaadcb865d2031e923c30417e28c8224b5e8c3d3cb92427cb7a",
+        "sql_sha256": "de0b7e8b5e7893c17b72bec17fd19667b2eec672c8a0d3cf95adf07fc7e0a603",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowledge_relations_update",
-        "sql_sha256": "a37ee127ae93140b25ffde50c91b3afe3048f57813b1f923e1599993c4937c58",
+        "sql_sha256": "de1b806e51f294821f76df4ec74aaa82bea9e6fa9f5491f57301987ef5fcb64b",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowledge_source_fact_elements_delete",
-        "sql_sha256": "5309d656487ba9b7c2711c0ee7b71859e6d2c3f07d53e73194ca13009fdec747",
+        "sql_sha256": "e9f49be3dd8e35580f27bc2bc6d1601340f8a591a42dc0ad2dd770edd94c0fe5",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowledge_source_fact_elements_insert",
-        "sql_sha256": "8957b5689c47297148fd44a7fbe0fe3d8b515c9862b6ff8c6a7862be282ad847",
+        "sql_sha256": "1baed41c2e8d87969e0fd7bca7f4d7ad6f11066b180eac6e6270ec3726913657",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowledge_source_fact_elements_update",
-        "sql_sha256": "70a4a358136fd2269db0a719f7339a55afa070be219c6caa1da39f8217b68d93",
+        "sql_sha256": "97308b438571deb53abe16c8b2b1796239a267475145bbe20fd20e1fa775e93e",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowledge_source_facts_delete",
-        "sql_sha256": "804c1b1710d9c6d733d62705e3b03bd5d90796ebad181bf6b5b62d5941f6453c",
+        "sql_sha256": "f658b5660fdc427d00652f0b5d1fea30a6ed8b9ecab5943b9058f5a163233609",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowledge_source_facts_insert",
-        "sql_sha256": "f788081aad512c35db3f46b7cbdc6d00a9fa61001096ac40237ca0fcb61d6a45",
+        "sql_sha256": "dc71dbdc331188bcf6090710cc7595a2df2d2b860e8d67aa1b6d51243258bd66",
         "type": "trigger"
       },
       {
         "name": "sync_capture_knowledge_source_facts_update",
-        "sql_sha256": "21ccc99b8585dff28fe27ad25477b64ef3f48bedb4a9d056244224ea55c5187c",
+        "sql_sha256": "b21ba95ad09c2a7deb952e8f2a17615d173729661d8f843d8883f31ee064e2e4",
         "type": "trigger"
       },
       {
         "name": "sync_capture_memory_embeddings_delete",
-        "sql_sha256": "a28a70ce2d4931ba461a18e992323f1a6c3004d757f314577331f36316e87899",
+        "sql_sha256": "a11c2d4c860680a0cfcb0135ab2fdcfd15057e748eb6648e751a4febcb145a7c",
         "type": "trigger"
       },
       {
         "name": "sync_capture_memory_embeddings_insert",
-        "sql_sha256": "e9046cdf7ce1c43a80f4528ba0aec286bb656a24ef60e8225c3546dc41376e4f",
+        "sql_sha256": "368f4764ca2855d55babf472cca4aacbe09d205a0316dfbd39560dbf69216877",
         "type": "trigger"
       },
       {
         "name": "sync_capture_memory_embeddings_update",
-        "sql_sha256": "6b9f26cf72aed5faa912d469f860ad5d10d9ea6d9b4e7d88c300617b0163fb93",
+        "sql_sha256": "e1b0b84490cbff420115339ddcf557f9dc1469769307e7d3648c112396a86fda",
         "type": "trigger"
       },
       {
         "name": "sync_capture_memory_items_delete",
-        "sql_sha256": "1fcc78c76d63d1579cde34ac9d613d32906e4c3c1546e42f2cae9fae9d232ef6",
+        "sql_sha256": "40c3d380dfd340b40f82a9cd9433e1f52e779b9a5c51ea4ea18549d999a667f7",
         "type": "trigger"
       },
       {
         "name": "sync_capture_memory_items_insert",
-        "sql_sha256": "51c406633e876570bdb879b14745c1bb27518fb7f434108c86211dc57f40eba9",
+        "sql_sha256": "736ea214401688eecdbfa534db08b83f4d6111eeb66d765a9debd103b1ece182",
         "type": "trigger"
       },
       {
         "name": "sync_capture_memory_items_update",
-        "sql_sha256": "0b8a80f78ffbfeac6cc5eea8b01b20733738dd12f512bfaeaeac5ea281b6856c",
+        "sql_sha256": "d46ef96b73190cdd674918bbb1751ef3499dc5a11e1baf91bc4919ead753d1a6",
         "type": "trigger"
       },
       {
         "name": "sync_capture_memory_provenance_delete",
-        "sql_sha256": "801cf7e84edbf912237ad8ea88413beb12bd04b6389680411ac8502272a89b14",
+        "sql_sha256": "f2894e44bb5d795c77e33fb7a448302b1e6babc175033ff740a4a132697ccfeb",
         "type": "trigger"
       },
       {
         "name": "sync_capture_memory_provenance_insert",
-        "sql_sha256": "9673765b7fd1fe775ab62ff26bcb8ca4ab786e21a599efb1579a739c17aa6621",
+        "sql_sha256": "1266775bd2c3f2f9d9103efe37b953aefc01d706551941d9366593a9d61db367",
         "type": "trigger"
       },
       {
         "name": "sync_capture_memory_provenance_update",
-        "sql_sha256": "d8b150fc8ad6ab84ce0d0e6a3d71876036b963b9b0e38a943b5626053a602c4e",
+        "sql_sha256": "da0edba63c1ef9e8c6b569b6adcfc9912adf33340c8a64faafb1b5cc4181567b",
         "type": "trigger"
       },
       {
         "name": "sync_capture_memory_revisions_delete",
-        "sql_sha256": "85ba436210f328f7cbeda680090be26617eb0acdb327ffa35153bcae7a5da4dc",
+        "sql_sha256": "020c72916bb16e56a45915d37ebaae09c4262cd03f42dcbf9cb9fe477e4b958a",
         "type": "trigger"
       },
       {
         "name": "sync_capture_memory_revisions_insert",
-        "sql_sha256": "dbfe7d68b9b48c91ef1916245aca53935a5422b6bd888906412285c5a17acbad",
+        "sql_sha256": "ee4e26710ce56616fdbbc9376e4aae589ce69066d7d05def20b7cf212f3499ce",
         "type": "trigger"
       },
       {
         "name": "sync_capture_memory_revisions_update",
-        "sql_sha256": "ced9d181539a800f7d009c15d5da659d81ecc0f30fe6cd84f35e71a26e33d154",
+        "sql_sha256": "5dca11f8b6096156be9e035237acc4c4ed6e6a6723eb09a356df5aa80706a862",
         "type": "trigger"
       },
       {
         "name": "sync_capture_mention_edges_delete",
-        "sql_sha256": "ef2b5a8d6e19d49bc3b8f982b60abe7a725c557bb0eb40cd2f57427fe931a45e",
+        "sql_sha256": "7fa7ae34445b2bb5b370d5e94ea0869f6cd6a0299ae154f2b32ccc7b9c475b9f",
         "type": "trigger"
       },
       {
         "name": "sync_capture_mention_edges_insert",
-        "sql_sha256": "e9ba2871281fb8f068cab4d37e6a33b40c855b5a839a2caf4f60382c6c6a6114",
+        "sql_sha256": "7e1f7c3a50ce6c3f4a44058369e97822c893fa49d87ee8dd13740e669ca3cbcf",
         "type": "trigger"
       },
       {
         "name": "sync_capture_mention_edges_update",
-        "sql_sha256": "692d3c3fb5df8ee49178b1813751cabde5bf2a2640f39afef4b68ff509010e9d",
+        "sql_sha256": "6149593b643481c12df0a7b1327ba2e17ae05d8b3a636d7597c77e1cc5b15fb4",
         "type": "trigger"
       },
       {
         "name": "sync_capture_notebook_assets_delete",
-        "sql_sha256": "fe7bb5a4c57ee96100bb486c7ee852073b8148592b4cb45a31b3cb43d401deab",
+        "sql_sha256": "35c131cd351fec2133ea2be43b9208a026624a3bcef032a7ede066e6bd7d290a",
         "type": "trigger"
       },
       {
         "name": "sync_capture_notebook_assets_insert",
-        "sql_sha256": "bdda405ee30b8fbf15083a45ec0725a1d17bcc44e1a447c90564ac6dfafbde6b",
+        "sql_sha256": "d285377b081ed3b05ddf835bb7a030e8fa102bcfe4bc7ad93ca5b60b2dcab2c3",
         "type": "trigger"
       },
       {
         "name": "sync_capture_notebook_assets_update",
-        "sql_sha256": "7fdb69b2d1558e5830a6b6b11944ed37def2f28f387ce844bceef40d68ebbee3",
+        "sql_sha256": "039979818bfdccd19169d3ea5a0f1beadf198a49b0cc501e91f0726bb8eb9d93",
         "type": "trigger"
       },
       {
         "name": "sync_capture_notebook_bases_delete",
-        "sql_sha256": "a14406df5fc977dc89dcdb80d611633ee46e796a5deed8907ae3f0d283a11cad",
+        "sql_sha256": "13c6220878cc6d78b70f0f09863442156d416f9a3a5b0e8a01780629a6785734",
         "type": "trigger"
       },
       {
         "name": "sync_capture_notebook_bases_insert",
-        "sql_sha256": "011ce66fe438110f0e53928e5cf6cc7afed7e21f9d902dddcbe83338d65a9c77",
+        "sql_sha256": "116e19d7e68e9036d9463f29f2ec97216546b898876c2b9ebefef10360dcbf01",
         "type": "trigger"
       },
       {
         "name": "sync_capture_notebook_bases_update",
-        "sql_sha256": "174810033224a3f193a77efb712eb2ff4a621d55bbb2ff72f433c0e4865448df",
+        "sql_sha256": "7aa9d5eeb930dd1216a0e4a51d6248a698b351ee94074dded994d47e25598dc3",
         "type": "trigger"
       },
       {
         "name": "sync_capture_notebook_grants_delete",
-        "sql_sha256": "b780018a84b9fbc73546a812917ac5c7a92c5f9d6e9854439bafab83b1b32ace",
+        "sql_sha256": "f58e2745418cf4a5ee7349f3a6663df3f66523291b2b48828d3e07bc7fc1df7e",
         "type": "trigger"
       },
       {
         "name": "sync_capture_notebook_grants_insert",
-        "sql_sha256": "cd0e461a5c07c5f11b01a1c642c6d4c712151512033054b70197694bc1b26006",
+        "sql_sha256": "48a1ab6ee1760af714d294caa906369515006343e0b1368c6446e661ebef23be",
         "type": "trigger"
       },
       {
         "name": "sync_capture_notebook_grants_update",
-        "sql_sha256": "c1baa6ae351dc7e7ffd583d368e1aac5e950b1aa5d9ab32cc6544a5795e253b5",
+        "sql_sha256": "47edcb2d798f2e136a11a08105c0161729f5ebc560306bfd91eddab877fe7927",
         "type": "trigger"
       },
       {
         "name": "sync_capture_notebook_members_delete",
-        "sql_sha256": "f02acab60b8dd9673acdd0032538c0c1147cbec3665300a35eae55756efdad7f",
+        "sql_sha256": "bacb9e9a5e1d3619a5c0615787f48313b8db7931657a758e997072750c0308a4",
         "type": "trigger"
       },
       {
         "name": "sync_capture_notebook_members_insert",
-        "sql_sha256": "842862344a628588d73afb47c7b32b12c2bcf683c84fb6761f66e396bc1e08e7",
+        "sql_sha256": "211965165282f4d4faa29cd60a7bb3995ae6009cd44f8501e255db916eba42e6",
         "type": "trigger"
       },
       {
         "name": "sync_capture_notebook_members_update",
-        "sql_sha256": "395d06d9176f93572f18b3eeade6947fed04d59a7ccf8eb263f2fe2f8d160563",
+        "sql_sha256": "8b830d93fc9e59b4618798e5908aa4e6de541eb30991433e6defef773605cb1d",
         "type": "trigger"
       },
       {
         "name": "sync_capture_notebook_object_schemas_delete",
-        "sql_sha256": "7d6c9e3923d325bebc78af6876a2ef03f921522ce23fd50e4c1048ec15295b3b",
+        "sql_sha256": "a401466b4ba23ff5071796939ff44bd274d9c56fad6f564a785db3b504d2245c",
         "type": "trigger"
       },
       {
         "name": "sync_capture_notebook_object_schemas_insert",
-        "sql_sha256": "b34dd0e948c453dfc0060833bee19bb93029b97098d4f53093ce94d29fb63b58",
+        "sql_sha256": "189d2248d3ef67be2165bad2835357e505fa25a1d6e0834e10665eb6ff709718",
         "type": "trigger"
       },
       {
         "name": "sync_capture_notebook_object_schemas_update",
-        "sql_sha256": "76b00340f10a98ed96f4dabc7ab6909266ccf28398c3192b5e4b90a29ce0033d",
+        "sql_sha256": "279d9ee0b9beb5e8a2a92b5a7c9d2972ae4625c63869d4da251d9461ebef0976",
         "type": "trigger"
       },
       {
         "name": "sync_capture_notebooks_delete",
-        "sql_sha256": "fd860772d5d99d4205ce70c0e29146a5cfbdadebebd19c9ef625731435cd12c8",
+        "sql_sha256": "5692e0ce23c232a3dc4f8a46a2b2176870a79b6c642434c351d9716eea90579e",
         "type": "trigger"
       },
       {
         "name": "sync_capture_notebooks_insert",
-        "sql_sha256": "3758b7e5e1713585eba7420f883032d4cbc8928bb6f28704baa8aa89aeda9d4c",
+        "sql_sha256": "00d887edacec8e79ed16b47a8c1775378dceb2e6074b1fdd9090413478baa93d",
         "type": "trigger"
       },
       {
         "name": "sync_capture_notebooks_update",
-        "sql_sha256": "2bf96e59a0ad78cd149d7cad01ad1b3b7c4b3702b587f2a32b2da7c0fa19f0c7",
+        "sql_sha256": "0feb605cb173afcaa99bbe1865332099361404680f2392c4ddfd5186e9ac3218",
         "type": "trigger"
       },
       {
         "name": "sync_capture_object_schemas_delete",
-        "sql_sha256": "c7a99fff65549d791594fa4d4e1a439c3bead1ac0f9282cc8321ba4d0ad8f6c7",
+        "sql_sha256": "edf6bd39ede5f9411a7fa2f4c3ac6ea420af2272e2681e726f5d5f115a749a08",
         "type": "trigger"
       },
       {
         "name": "sync_capture_object_schemas_insert",
-        "sql_sha256": "5207a07ee6c490ea00c20e71d29c6fb01debccf8042acaebada17cf8a536014f",
+        "sql_sha256": "621bbc457b4e32bb843816dc32b68fa9aae80de302ea4dc971ff6d279706d2c1",
         "type": "trigger"
       },
       {
         "name": "sync_capture_object_schemas_update",
-        "sql_sha256": "fe90800701f718300b56f2605fc08be410290a47b89d9a0b7e1646669b88aed9",
+        "sql_sha256": "dda96fbae9ee1108cdba2306af47b1a81373c6a116994bb588116e426d0c7dca",
         "type": "trigger"
       },
       {
         "name": "sync_capture_relation_embeddings_delete",
-        "sql_sha256": "b8b7b56749c4133d421d92ca0181e98de86389df178865a7dd09ffe9aeba2c63",
+        "sql_sha256": "977beb0c2e5de644ea84eb54105d78f962b2a773d3dc8c2b0c09a4f746cca92d",
         "type": "trigger"
       },
       {
         "name": "sync_capture_relation_embeddings_insert",
-        "sql_sha256": "363c1e2653aff183bcda96365276b0e600d39500161408a13d513e88dbeb874c",
+        "sql_sha256": "82091f61aeacb5286fc454ffc2151649f5a7516167af2f47fb30bfb4bd750c26",
         "type": "trigger"
       },
       {
         "name": "sync_capture_relation_embeddings_update",
-        "sql_sha256": "aa8e5f1327446065d87dc930d00f1f57cbf5e52dc6b386e7f647e3e565616141",
+        "sql_sha256": "c3dbf45c6566f4446a9b907ee3495a31d74ce59d4f8ee24cfd0b6883e7964510",
         "type": "trigger"
       },
       {
         "name": "sync_capture_source_authors_delete",
-        "sql_sha256": "b04160f4f5e499d63151b34859550c781d459acab3b7d2039bcfaf1393b77650",
+        "sql_sha256": "f5b3afc57e0e262b9e25fe1148e26a776d4adbb5408cfbcb6a92b80f3baa46e1",
         "type": "trigger"
       },
       {
         "name": "sync_capture_source_authors_insert",
-        "sql_sha256": "50ec7b537de0541f9ed42bb764da2af457256f106fea143fbefeebec36b9175f",
+        "sql_sha256": "cb7434e55f7ad33f4d26ee70db1e3dd0074d7c0888a1fa7c25f3e1f12c4b32e8",
         "type": "trigger"
       },
       {
         "name": "sync_capture_source_authors_update",
-        "sql_sha256": "434fa61e53465615627044893b2ae00eabf80eb88f66d7041d08f59782501f50",
+        "sql_sha256": "ead4816262539d6f219efb1a3f16406322ab7a209b25aa6aba518ce07ebe13b0",
         "type": "trigger"
       },
       {
         "name": "sync_capture_source_elements_delete",
-        "sql_sha256": "348e13cc3f22331244de753eb717ba3599d3e0083b51289c7e9ceb8c8630d88e",
+        "sql_sha256": "f4c472346a0f5839095a8e0c126f6e12706f9ee4d6054062b8fb605c7f145483",
         "type": "trigger"
       },
       {
         "name": "sync_capture_source_elements_insert",
-        "sql_sha256": "d992ad789dfa542f54f6f2bf22ded7c28547252ecb97e04393a5ab93a2f8cf4b",
+        "sql_sha256": "237eb5cf0e217b90ce66e84c94a7d0ab0b70d06d914107699d1b56f332dbd266",
         "type": "trigger"
       },
       {
         "name": "sync_capture_source_elements_update",
-        "sql_sha256": "d3479fc9ae565bc26d4bcde79485b35bf5c04edb9824b6b6b79c8e07b3cebac3",
+        "sql_sha256": "7e69c5452fe498f94aa41b0957d2d31ffabb2540b86ea5a6d1e84b70221e16d7",
         "type": "trigger"
       },
       {
         "name": "sync_capture_source_paper_meta_delete",
-        "sql_sha256": "9485357ead0e944d76d0581fc70b9ae79da4445d3832046cc431bab5ba136f4e",
+        "sql_sha256": "2fad65506ed59ed20d1f7abafc9382da638b1e04f53594450f41914d8d81ece2",
         "type": "trigger"
       },
       {
         "name": "sync_capture_source_paper_meta_insert",
-        "sql_sha256": "0885fbf88786b2724d965b41998055b76ff7a7ec94563cd4514ffae3db72b087",
+        "sql_sha256": "b6814ce4e7cca992c7239166d951998b9597c797eef042d86afa1627e21ce0b9",
         "type": "trigger"
       },
       {
         "name": "sync_capture_source_paper_meta_update",
-        "sql_sha256": "695c705165f2ce152a31a3fa4e6faa86f5aba59b84129261ef5450b786c6857f",
+        "sql_sha256": "ce9d534d512e5770f937315efc9f82576f73b66d22dd1eff5162a7d8beffc424",
         "type": "trigger"
       },
       {
         "name": "sync_capture_sources_delete",
-        "sql_sha256": "0a587dcb71c0ae1f44765056824345fc51f4734c5de08d3607c777031138b730",
+        "sql_sha256": "cc0efa004babca0762798d597b5e0f79789a2125237f771629a17132a8570d3b",
         "type": "trigger"
       },
       {
         "name": "sync_capture_sources_insert",
-        "sql_sha256": "cc09aff7e7002f10c76a7d6453cc763530d2e6650ca567817e0b21258070121c",
+        "sql_sha256": "b4c685db26d4756f2a4829301316ca0fbff85f923b5eb96524f049c37ac39cbe",
         "type": "trigger"
       },
       {
         "name": "sync_capture_sources_update",
-        "sql_sha256": "5329110279a235a462d7ca512939bd9302ded3a30f8321c13ce7c2176b5f6f7d",
+        "sql_sha256": "119181a76d3bdeaec46bcb48681ad548f763ee52c45b8b564a96ae80254e21a7",
         "type": "trigger"
       },
       {
         "name": "sync_capture_unified_kg_state_delete",
-        "sql_sha256": "e5ccac5792b3926276e694bddf499ca21320ffb0724e24bad1bc6a429ecb5a32",
+        "sql_sha256": "f0602351af967395552c597490f57691979307d6dd2a2a9a3ebe67ffeaabf6c2",
         "type": "trigger"
       },
       {
         "name": "sync_capture_unified_kg_state_insert",
-        "sql_sha256": "95e0e6f0b1c436c4feba586ce199a21793d21f145cf1ff4e9921e29a991dbdd0",
+        "sql_sha256": "12036b656a9b42928d79c6d435fdd4a8095eca38c50af77b229f0fe12d0db137",
         "type": "trigger"
       },
       {
         "name": "sync_capture_unified_kg_state_update",
-        "sql_sha256": "3de221cc0912d6e2246c970bbe6155f6bcc9e724e32ec0f5437b93bbee47f7fd",
+        "sql_sha256": "960650cbc4eea653fbccf0d5e87818b14f7e4e418c9211d7724f6dc57431f7ed",
         "type": "trigger"
       }
     ],

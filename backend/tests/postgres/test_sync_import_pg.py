@@ -356,6 +356,154 @@ def test_reapplying_the_same_rows_takes_the_do_update_branch(
     )["sync_origin"] == SOURCE_ENV
 
 
+# ------------------------------- knowledge_object_sources/community_members
+#
+# PostgreSQL 0064 gives these two tables a REAL primary key (unlike the
+# SQLite lane, which cannot add one to an existing table in place and backs
+# ``TableSyncSpec.key`` with a UNIQUE index instead). On this backend
+# ``_Source.sync_key`` therefore resolves them off the ordinary catalog
+# primary-key path -- the manifest ``key`` fallback and its unique-surface
+# check are never exercised here, only on SQLite (tests/test_sync_export.py,
+# tests/test_sync_import.py, tests/test_sync_manifest.py). What this section
+# proves is that PR-3a's removal of their old ``_replace_scope``
+# special-case did not change end-to-end behaviour on the backend where
+# these two tables always had an ordinary key shape to upsert/prune by.
+
+
+@pytest.fixture
+def sync_key_source(tmp_path):
+    """A SECOND, independent PostgreSQL schema kept open for the whole test
+    (unlike ``postgres_package``, whose scope closes once that fixture
+    returns) -- these tests export it, mutate it, and export it again."""
+    import os
+
+    from app.repositories.postgres.repository import PostgresRepository
+
+    base_url = os.environ.get("TEST_POSTGRES_URL")
+    if not base_url:
+        pytest.skip("TEST_POSTGRES_URL is not configured")
+    with _isolated_postgres_scope(base_url) as scope:
+        settings = _postgres_settings(scope.url, tmp_path / "sync-key-source-storage")
+        repo = PostgresRepository(settings)
+        try:
+            yield {"repo": repo, "settings": settings}
+        finally:
+            repo.close()
+
+
+def _seed_sync_key_rows(repo, notebook_id: str, object_id: str, suffix: str) -> None:
+    """One row each in knowledge_object_sources/community_members.
+    ``object_id`` must already exist in ``knowledge_objects`` -- ``_seed()``
+    (this file's shared fixture helper) already creates one with id
+    ``f"ko-{name}"``, so callers pass that rather than this function
+    creating a second, colliding one."""
+    with repo._write() as db:
+        source_id = db.execute(
+            "SELECT id FROM sources WHERE notebook_id=%s LIMIT 1", (notebook_id,)
+        ).fetchone()["id"]
+        db.execute(
+            "INSERT INTO knowledge_object_sources(object_id, source_id, "
+            "notebook_id) VALUES (%s, %s, %s)",
+            (object_id, source_id, notebook_id),
+        )
+        db.execute(
+            "INSERT INTO community_members(canonical_id, notebook_id, level, "
+            "community_id, canonical_name, centrality) "
+            "VALUES (%s, %s, 0, %s, %s, 0.0)",
+            (f"can-{suffix}", notebook_id, f"comm-{suffix}", "n"),
+        )
+
+
+def _export_sync_key_source(source, tmp_path, out_name: str, notebook_id: str) -> Path:
+    report = export_notebooks(
+        source["settings"],
+        target_env=TARGET_ENV,
+        out_dir=tmp_path / out_name,
+        notebook_ids=[notebook_id],
+        source_env=SOURCE_ENV,
+    )
+    return report.package_dir
+
+
+def _sync_key_counts(repo, notebook_id: str) -> dict[str, int]:
+    return {
+        table: int(
+            _one(
+                repo, f"SELECT COUNT(*) AS n FROM {table} WHERE notebook_id=%s",
+                (notebook_id,),
+            )["n"]
+        )
+        for table in ("knowledge_object_sources", "community_members")
+    }
+
+
+def test_sync_key_tables_are_idempotent_on_reimport_pg(
+    target, sync_key_source, tmp_path
+):
+    """A second import of the SAME package must upsert, not double, the two
+    tables' rows -- the PG-side counterpart of tests/test_sync_import.py's
+    ``test_a_second_package_refreshes_without_clobbering_the_target``."""
+    repo = sync_key_source["repo"]
+    notebook = _seed(repo, "sync-key-idem", placeholder="%s", no_time=None)
+    _seed_sync_key_rows(repo, notebook, "ko-sync-key-idem", "idem")
+    package = _export_sync_key_source(sync_key_source, tmp_path, "out1", notebook)
+
+    first = import_package(target["settings"], package)
+    assert first.error == ""
+    before = _sync_key_counts(target["repo"], notebook)
+    assert before == {"knowledge_object_sources": 1, "community_members": 1}
+
+    # Reset the target's bookkeeping the way a resumed/rerun would, and
+    # reapply the SAME package.
+    with target["repo"]._write() as db:
+        db.execute(
+            "DELETE FROM sync_import_progress WHERE package_id=%s",
+            (first.package_id,),
+        )
+        db.execute(
+            "UPDATE sync_imports SET status='failed' WHERE package_id=%s",
+            (first.package_id,),
+        )
+    second = import_package(target["settings"], package)
+
+    assert second.error == ""
+    assert _sync_key_counts(target["repo"], notebook) == before
+
+
+def test_sync_key_tables_are_pruned_when_the_source_no_longer_has_the_row_pg(
+    target, sync_key_source, tmp_path
+):
+    """A row the SOURCE deletes must disappear at the target on the next
+    sync -- the PG-side counterpart of tests/test_sync_import.py's
+    ``test_sync_key_tables_are_pruned_when_the_source_no_longer_has_the_row``."""
+    repo = sync_key_source["repo"]
+    notebook = _seed(repo, "sync-key-prune", placeholder="%s", no_time=None)
+    _seed_sync_key_rows(repo, notebook, "ko-sync-key-prune", "prune")
+
+    first_package = _export_sync_key_source(sync_key_source, tmp_path, "out1", notebook)
+    first = import_package(target["settings"], first_package)
+    assert first.error == ""
+    assert _sync_key_counts(target["repo"], notebook) == {
+        "knowledge_object_sources": 1, "community_members": 1,
+    }
+
+    with repo._write() as db:
+        db.execute(
+            "DELETE FROM knowledge_object_sources WHERE notebook_id=%s", (notebook,)
+        )
+        db.execute(
+            "DELETE FROM community_members WHERE notebook_id=%s", (notebook,)
+        )
+
+    second_package = _export_sync_key_source(sync_key_source, tmp_path, "out2", notebook)
+    second = import_package(target["settings"], second_package)
+
+    assert second.error == ""
+    assert _sync_key_counts(target["repo"], notebook) == {
+        "knowledge_object_sources": 0, "community_members": 0,
+    }
+
+
 # ----------------------------------------------------- PG package -> SQLite target
 
 

@@ -14,12 +14,17 @@ Shape (both backends):
 
 - ``sync_capture_control`` is a one-row gate. The row is NOT seeded by the
   migration; capture stays off until an operator turns it on (PR-3c's
-  ``sync capture enable``). Every trigger re-reads the gate per row, so
-  turning it off costs one extra index probe per business write and nothing
-  else.
+  ``sync capture enable``). Every trigger re-reads the gate per row.
 - ``sync_change_log`` is an append-only, environment-local log of row
   identities (never row payloads): ``(table_name, key_json, operation,
   parent_key, notebook_id, txid, changed_at)`` ordered by ``seq``.
+
+Every capture statement names the row's key columns literally -- SQLite
+``json_object('id', NEW."id")``, PostgreSQL ``jsonb_build_object('id',
+NEW."id")`` -- and reads the scope column straight off ``NEW``/``OLD``. No
+statement here ever materializes a whole row (``to_jsonb(NEW)`` and friends),
+because a synced row can be a bytea embedding vector or a full chunk text and
+capture must not pay for reading it.
 
 Per-row attribution follows ``TableSyncSpec.scope``:
 
@@ -49,6 +54,14 @@ unique surface (a UNIQUE INDEX on SQLite, which cannot add a primary key to
 an existing table, and a PRIMARY KEY on PostgreSQL). ``key_columns`` below
 cross-checks a registered key against the PostgreSQL catalog so the two can
 never drift apart silently.
+
+Cost, with the gate CLOSED (the state every deployment is in until an
+operator turns capture on): on PostgreSQL every modified row still enters the
+AFTER-trigger event queue, still costs one plpgsql function invocation, and
+still runs the one-row ``EXISTS`` probe on the gate before returning; the
+shadow migration's bulk COPY pays that per copied row too. On SQLite each
+statement's ``WHERE EXISTS`` gate is evaluated per affected row. That is
+small but it is not nothing, and it is not zero-cost.
 """
 
 from __future__ import annotations
@@ -59,11 +72,13 @@ from app.migration.shadow.postgres_catalog import EXPECTED_CONSTRAINTS
 from app.migration.sync.capture_contract import (
     CONTROL_TABLE,
     LOG_TABLE,
-    POSTGRES_CAPTURE_FUNCTION,
     SQLITE_TRIGGER_OPERATIONS,
+    expected_postgres_function_names,
+    expected_postgres_functions,
     expected_postgres_trigger_names,
     expected_postgres_triggers,
     expected_sqlite_trigger_names,
+    postgres_function_name,
     postgres_trigger_name,
     sqlite_trigger_name,
 )
@@ -76,11 +91,13 @@ from app.migration.sync.manifest import ScopeKind, spec_for, synced_tables
 __all__ = [
     "CONTROL_TABLE",
     "LOG_TABLE",
-    "POSTGRES_CAPTURE_FUNCTION",
+    "expected_postgres_function_names",
+    "expected_postgres_functions",
     "expected_postgres_trigger_names",
     "expected_postgres_triggers",
     "expected_sqlite_trigger_names",
     "key_columns",
+    "postgres_function_body",
     "postgres_function_sql",
     "postgres_trigger_sql",
     "sqlite_trigger_sql",
@@ -101,7 +118,14 @@ _POSTGRES_LOG_COLUMNS = (
 # SQLite has no transaction id to record; ``txid`` stays NULL there and the
 # incremental exporter's in-flight-transaction compensation (PR-3b) is a
 # PostgreSQL-only concern.
-_SQLITE_NOW = "strftime('%Y-%m-%dT%H:%M:%fZ','now')"
+#
+# ``%f`` is seconds-with-milliseconds, so three zeros pad it out to the
+# microsecond precision every other timestamp in a SQLite database carries
+# (``app.repositories.sqlite.migrations._now`` ->
+# ``datetime.now(timezone.utc).isoformat()``). Same shape, same offset
+# spelling, so a change-log timestamp sorts and compares against a business
+# row's ``updated_at`` as plain text without a reformat step.
+_SQLITE_NOW = "strftime('%Y-%m-%dT%H:%M:%f','now') || '000+00:00'"
 _SQLITE_GATE = (
     f"EXISTS (SELECT 1 FROM {CONTROL_TABLE} WHERE singleton = 1 AND enabled = 1)"
 )
@@ -161,11 +185,14 @@ def _scope_expressions(table: str, row_alias: str) -> tuple[str, str]:
     return "NULL", "NULL"
 
 
-def _sqlite_key_json(table: str, row_alias: str) -> str:
+def _key_json(table: str, row_alias: str, builder: str) -> str:
     arguments: list[str] = []
     for column in key_columns(table):
         arguments.extend((_literal(column), f"{row_alias}.{_quote(column)}"))
-    return f"json_object({', '.join(arguments)})"
+    return f"{builder}({', '.join(arguments)})"
+
+
+# ------------------------------------------------------------------ SQLite
 
 
 def _sqlite_log_statement(
@@ -179,7 +206,7 @@ def _sqlite_log_statement(
     gate = _SQLITE_GATE if predicate is None else f"{_SQLITE_GATE} AND ({predicate})"
     return (
         f"INSERT INTO {LOG_TABLE} ({_SQLITE_LOG_COLUMNS}) SELECT "
-        f"{_literal(table)}, {_sqlite_key_json(table, row_alias)}, "
+        f"{_literal(table)}, {_key_json(table, row_alias, 'json_object')}, "
         f"{_literal(operation)}, {parent}, {notebook}, {_SQLITE_NOW} "
         f"WHERE {gate};"
     )
@@ -239,104 +266,115 @@ def sqlite_trigger_sql() -> dict[str, tuple[str, str]]:
     return triggers
 
 
-_POSTGRES_FUNCTION_SQL = f"""\
-CREATE FUNCTION {POSTGRES_CAPTURE_FUNCTION}() RETURNS trigger
-LANGUAGE plpgsql AS $sync_capture_row$
-DECLARE
-  key_columns text[] := string_to_array(TG_ARGV[0], ',');
-  scope_kind text := TG_ARGV[1];
-  scope_column text := TG_ARGV[2];
-  old_row jsonb;
-  new_row jsonb;
-  old_key jsonb;
-  new_key jsonb;
-  xact bigint;
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM {CONTROL_TABLE} WHERE singleton = 1 AND enabled
-  ) THEN
-    RETURN NULL;
-  END IF;
-  xact := pg_current_xact_id()::text::bigint;
-  IF TG_OP <> 'INSERT' THEN
-    old_row := to_jsonb(OLD);
-    SELECT jsonb_object_agg(key_column, old_row -> key_column) INTO old_key
-      FROM unnest(key_columns) AS key_column;
-  END IF;
-  IF TG_OP <> 'DELETE' THEN
-    new_row := to_jsonb(NEW);
-    SELECT jsonb_object_agg(key_column, new_row -> key_column) INTO new_key
-      FROM unnest(key_columns) AS key_column;
-  END IF;
-  IF TG_OP = 'DELETE'
-     OR (TG_OP = 'UPDATE' AND old_key IS DISTINCT FROM new_key) THEN
-    INSERT INTO {LOG_TABLE} ({_POSTGRES_LOG_COLUMNS})
-    VALUES (TG_TABLE_NAME, old_key, 'delete',
-            CASE WHEN scope_kind = 'parent' THEN old_row ->> scope_column END,
-            CASE WHEN scope_kind = 'notebook' THEN old_row ->> scope_column END,
-            xact, now());
-  END IF;
-  IF TG_OP <> 'DELETE' THEN
-    INSERT INTO {LOG_TABLE} ({_POSTGRES_LOG_COLUMNS})
-    VALUES (TG_TABLE_NAME, new_key, 'upsert',
-            CASE WHEN scope_kind = 'parent' THEN new_row ->> scope_column END,
-            CASE WHEN scope_kind = 'notebook' THEN new_row ->> scope_column END,
-            xact, now());
-    IF TG_TABLE_NAME = '{_KG_EPOCH_TABLE}' AND (
-         (TG_OP = 'INSERT' AND (new_row ->> '{_KG_EPOCH_COLUMN}')::bigint > 0)
-         OR (TG_OP = 'UPDATE'
-             AND (old_row -> '{_KG_EPOCH_COLUMN}')
-                 IS DISTINCT FROM (new_row -> '{_KG_EPOCH_COLUMN}'))
-       ) THEN
-      INSERT INTO {LOG_TABLE} ({_POSTGRES_LOG_COLUMNS})
-      VALUES (TG_TABLE_NAME, new_key, 'kg_epoch',
-              CASE WHEN scope_kind = 'parent' THEN new_row ->> scope_column END,
-              CASE WHEN scope_kind = 'notebook' THEN new_row ->> scope_column END,
-              xact, now());
-    END IF;
-  END IF;
-  RETURN NULL;
-END;
-$sync_capture_row$"""
+# -------------------------------------------------------------- PostgreSQL
 
 
-def postgres_function_sql() -> str:
-    """The one plpgsql function every PostgreSQL capture trigger executes.
+def _postgres_log_statement(
+    table: str, row_alias: str, operation: str, indent: str
+) -> str:
+    parent, notebook = _scope_expressions(table, row_alias)
+    return (
+        f"{indent}INSERT INTO {LOG_TABLE} ({_POSTGRES_LOG_COLUMNS})\n"
+        f"{indent}VALUES ({_literal(table)}, "
+        f"{_key_json(table, row_alias, 'jsonb_build_object')}, "
+        f"{_literal(operation)},\n"
+        f"{indent}        {parent}, {notebook}, xact, now());"
+    )
 
-    One function rather than 46 generated ones: the per-table differences are
-    exactly the three trigger arguments (key columns, scope kind, scope
-    column), which ``postgres_trigger_sql`` passes through ``TG_ARGV``.
 
-    Cost note: with the gate open the function materializes ``to_jsonb(row)``
-    once per changed row, which on a wide table (embeddings, payloads) is not
-    free. That is the price of reading an arbitrary key column without
-    dynamic SQL; with the gate closed the function returns after a single
-    one-row index probe and never touches the row at all.
+def _postgres_key_changed(table: str) -> str:
+    return "\n       OR ".join(
+        f"OLD.{_quote(column)} IS DISTINCT FROM NEW.{_quote(column)}"
+        for column in key_columns(table)
+    )
+
+
+def postgres_function_body(table: str) -> str:
+    """The plpgsql body of ``sync_capture_<table>``, exactly as
+    ``pg_proc.prosrc`` stores it (the text between the dollar-quote tags).
+
+    ``OLD`` is only ever referenced inside a branch that already established
+    ``TG_OP`` is UPDATE or DELETE. plpgsql evaluates an ``IF`` condition as one
+    SQL expression with no short-circuit, so a flat
+    ``TG_OP = 'UPDATE' AND OLD.x ...`` would touch ``OLD`` on an INSERT too;
+    the nesting below is what keeps that from happening.
     """
-    return _POSTGRES_FUNCTION_SQL
+    epoch = _quote(_KG_EPOCH_COLUMN)
+    lines = [
+        "",
+        "DECLARE",
+        "  xact bigint;",
+        "BEGIN",
+        "  IF NOT EXISTS (",
+        f"    SELECT 1 FROM {CONTROL_TABLE} WHERE singleton = 1 AND enabled",
+        "  ) THEN",
+        "    RETURN NULL;",
+        "  END IF;",
+        "  xact := pg_current_xact_id()::text::bigint;",
+        "  IF TG_OP = 'DELETE' THEN",
+        _postgres_log_statement(table, "OLD", "delete", "    "),
+        "    RETURN NULL;",
+        "  END IF;",
+        "  IF TG_OP = 'UPDATE' THEN",
+        f"    IF {_postgres_key_changed(table)} THEN",
+        _postgres_log_statement(table, "OLD", "delete", "      "),
+        "    END IF;",
+        "  END IF;",
+        _postgres_log_statement(table, "NEW", "upsert", "  "),
+    ]
+    if table == _KG_EPOCH_TABLE:
+        lines.extend(
+            [
+                "  IF TG_OP = 'INSERT' THEN",
+                f"    IF NEW.{epoch} > 0 THEN",
+                _postgres_log_statement(table, "NEW", "kg_epoch", "      "),
+                "    END IF;",
+                "  ELSE",
+                f"    IF OLD.{epoch} IS DISTINCT FROM NEW.{epoch} THEN",
+                _postgres_log_statement(table, "NEW", "kg_epoch", "      "),
+                "    END IF;",
+                "  END IF;",
+            ]
+        )
+    lines.extend(["  RETURN NULL;", "END;", ""])
+    return "\n".join(lines)
+
+
+def postgres_function_sql() -> dict[str, tuple[str, str]]:
+    """``{function_name: (table, CREATE FUNCTION sql)}`` -- one trigger
+    function per synced table.
+
+    Per-table rather than one shared ``TG_ARGV``-driven function: see
+    ``capture_contract.postgres_function_name`` for why (a generic function
+    cannot name a key column without ``to_jsonb`` of the entire row).
+    """
+    functions: dict[str, tuple[str, str]] = {}
+    for table in synced_tables():
+        name = postgres_function_name(table)
+        tag = f"${name}$"
+        functions[name] = (
+            table,
+            f"CREATE FUNCTION {name}() RETURNS trigger\n"
+            f"LANGUAGE plpgsql AS {tag}{postgres_function_body(table)}{tag}",
+        )
+    return functions
 
 
 def postgres_trigger_sql() -> dict[str, tuple[str, str]]:
     """``{trigger_name: (table, CREATE TRIGGER sql)}`` for all synced tables.
 
-    One AFTER INSERT OR UPDATE OR DELETE row trigger per table, all executing
-    ``sync_capture_row`` with that table's key columns and notebook scope.
+    The event list is spelled ``INSERT OR DELETE OR UPDATE`` -- PostgreSQL's
+    own canonical order, the one ``pg_get_triggerdef()`` prints. Writing it
+    that way means the catalog guard can compare the deparsed definition
+    against this very string after nothing more than dropping the schema
+    qualifier and collapsing whitespace.
     """
     triggers: dict[str, tuple[str, str]] = {}
     for table in synced_tables():
-        scope = spec_for(table).scope
-        assert scope is not None  # synced_tables() never yields a LOCAL table
         name = postgres_trigger_name(table)
-        arguments = ", ".join(
-            (
-                _literal(",".join(key_columns(table))),
-                _literal(scope.kind.value),
-                _literal(scope.column),
-            )
-        )
         triggers[name] = (
             table,
-            f"CREATE TRIGGER {name} AFTER INSERT OR UPDATE OR DELETE ON {table} "
-            f"FOR EACH ROW EXECUTE FUNCTION {POSTGRES_CAPTURE_FUNCTION}({arguments})",
+            f"CREATE TRIGGER {name} AFTER INSERT OR DELETE OR UPDATE ON {table} "
+            f"FOR EACH ROW EXECUTE FUNCTION {postgres_function_name(table)}()",
         )
     return triggers

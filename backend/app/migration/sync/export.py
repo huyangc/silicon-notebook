@@ -131,8 +131,6 @@ _SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _JSON_TYPE = "jsonb"
 _TIMESTAMP_TYPE = "timestamp with time zone"
-# Types that cannot appear in an ORDER BY used as a deterministic tiebreak.
-_UNORDERABLE_TYPES = frozenset({_JSON_TYPE, "bytea"})
 
 
 class SyncExportError(RuntimeError):
@@ -355,11 +353,13 @@ class _Source:
             raise SyncExportError(f"source database has no table {table!r}")
         return found
 
-    def primary_key(self, conn: Any, table: str) -> tuple[str, ...]:
+    def _catalog_primary_key(self, conn: Any, table: str) -> tuple[str, ...]:
         """The table's primary-key columns, in key order, or ``()`` when the
         table has none. Read from the catalog rather than hard-coded, so a
         parent join and a keyset page follow the real key and a later schema
-        change cannot leave a stale literal behind."""
+        change cannot leave a stale literal behind. Catalog-only -- callers
+        that need a row identity for a table with no catalog primary key
+        want ``sync_key`` instead, which also consults the sync manifest."""
         if self.is_postgres:
             rows = self.fetch(
                 conn,
@@ -378,6 +378,87 @@ class _Source:
             (int(row["pk"]), str(row["name"])) for row in rows if int(row["pk"]) > 0
         )
         return tuple(name for _position, name in keyed)
+
+    def _has_unique_surface(
+        self, conn: Any, table: str, columns: Sequence[str]
+    ) -> bool:
+        """Whether the LIVE catalog backs ``columns`` with a unique index or
+        constraint covering EXACTLY that column set (order does not matter).
+        Used to guard a ``TableSyncSpec.key`` fallback: a registered key is
+        only a real row identity if the schema actually enforces it is
+        unique, not merely a claim in the manifest. Partial/predicate unique
+        indexes do not count -- their uniqueness only holds for rows
+        satisfying a predicate this check does not evaluate."""
+        wanted = frozenset(columns)
+        if self.is_postgres:
+            rows = self.fetch(
+                conn,
+                "SELECT i.indexrelid AS relid, a.attname AS name FROM pg_index i "
+                "CROSS JOIN LATERAL unnest(i.indkey::smallint[]) AS k(attnum) "
+                "JOIN pg_attribute a "
+                "ON a.attrelid = i.indrelid AND a.attnum = k.attnum "
+                "WHERE i.indrelid = ?::regclass AND i.indisunique "
+                "AND i.indpred IS NULL",
+                (table,),
+            )
+            by_index: dict[Any, set[str]] = {}
+            for row in rows:
+                by_index.setdefault(row["relid"], set()).add(str(row["name"]))
+            return any(frozenset(cols) == wanted for cols in by_index.values())
+        for index in self.fetch(conn, f"PRAGMA index_list({_quoted(table)})"):
+            if int(index["unique"]) != 1 or int(index.get("partial", 0) or 0) == 1:
+                continue
+            info = self.fetch(
+                conn, f"PRAGMA index_info({_quoted(str(index['name']))})"
+            )
+            if frozenset(str(row["name"]) for row in info) == wanted:
+                return True
+        return False
+
+    def sync_key(self, conn: Any, table: str) -> tuple[str, ...]:
+        """The table's synchronization key, in key order: the columns the
+        capture triggers, the exporter's keyset pages, and the importer's
+        upsert/prune all agree identify one row.
+
+        The catalog primary key is the answer whenever the table has one.
+        For the two tables that do not (``knowledge_object_sources``,
+        ``community_members`` -- SQLite cannot add a primary key to an
+        existing table in place, so v84 gives them a UNIQUE index instead of
+        a PRIMARY KEY; PostgreSQL 0064 gives them a real one), the columns
+        registered on ``TableSyncSpec.key`` are the answer, but only after
+        confirming the live catalog actually backs that column set with a
+        unique index/constraint -- a manifest claim with no enforcement
+        behind it on THIS database is a schema/manifest drift, not a usable
+        key. When both a catalog primary key and a registered ``key`` exist
+        they must name the same columns (a later migration that gives a
+        registered table a real primary key must update the manifest in the
+        same change, or this catches the disagreement instead of silently
+        preferring one). Every synced table must resolve to a non-empty key;
+        this is a hard error rather than an empty-tuple return so a caller
+        can never again fall through to an unkeyed code path.
+        """
+        catalog = self._catalog_primary_key(conn, table)
+        declared = spec_for(table).key
+        if catalog and declared and frozenset(catalog) != frozenset(declared):
+            raise SyncExportError(
+                f"{table}: TableSyncSpec.key {declared} disagrees with the "
+                f"catalog primary key {catalog}"
+            )
+        if catalog:
+            return catalog
+        if not declared:
+            raise SyncExportError(
+                f"{table}: no primary key in the catalog and no "
+                "TableSyncSpec.key registered; every synced table must "
+                "resolve to a synchronization key"
+            )
+        if not self._has_unique_surface(conn, table, declared):
+            raise SyncExportError(
+                f"{table}: TableSyncSpec.key {declared} has no covering "
+                "unique index/constraint on this catalog; the manifest key "
+                "and the live schema have drifted"
+            )
+        return declared
 
 
 # ------------------------------------------------------------- row encoding
@@ -512,7 +593,7 @@ def _parent_join_clause(source: _Source, conn: Any, table: str) -> tuple[str, st
     chain = scope_chain(table)
     joins: list[str] = []
     for index, (_child, child_column, parent) in enumerate(chain):
-        parent_key = source.primary_key(conn, parent)
+        parent_key = source.sync_key(conn, parent)
         if len(parent_key) != 1:
             raise SyncExportError(
                 f"{table}: parent {parent!r} has the primary key {parent_key}; "
@@ -533,35 +614,11 @@ class _TableQuery:
     prefix: str
     # The "<alias>.<column>" the scope key list is matched against.
     filtered: str
-    # Primary key, in key order. Empty for the two legacy keyless tables.
+    # Synchronization key, in key order. Always non-empty -- sync_key()
+    # raises for a table that cannot resolve one.
     key_columns: tuple[str, ...]
     # ORDER BY list, already alias-qualified.
     order_by: str
-
-    @property
-    def is_keyed(self) -> bool:
-        return bool(self.key_columns)
-
-
-def _fallback_order(table: str, columns: Sequence[str]) -> tuple[str, ...]:
-    """Deterministic ordering for a table with NO primary key. Every scalar
-    column, which for these two tables is all of them -- ordering by the whole
-    row is the only total order available when there is no key, and without a
-    total order two exports of one static database would not agree byte for
-    byte. PR-3 gives these tables composite primary keys (design doc §7) and
-    this branch then disappears."""
-    contracts = _contracts(table)
-    orderable = tuple(
-        name
-        for name in columns
-        if name in contracts and contracts[name].data_type not in _UNORDERABLE_TYPES
-    )
-    if not orderable:
-        raise SyncExportError(
-            f"{table}: no primary key and no orderable column, so its rows "
-            "cannot be written in a reproducible order"
-        )
-    return orderable
 
 
 def _table_query(
@@ -578,24 +635,28 @@ def _table_query(
         joins, filtered = _parent_join_clause(source, conn, table)
     else:
         joins, filtered = "", f"t0.{_quoted(_global_scope(table)[0])}"
-    key_columns = source.primary_key(conn, table)
-    order = key_columns or _fallback_order(table, columns)
+    key_columns = source.sync_key(conn, table)
     return _TableQuery(
         prefix=f"{head} {joins}".rstrip(),
         filtered=filtered,
         key_columns=key_columns,
-        order_by=", ".join(f"t0.{_quoted(name)}" for name in order),
+        order_by=", ".join(f"t0.{_quoted(name)}" for name in key_columns),
     )
 
 
 def _scan(
     source: _Source, conn: Any, query: _TableQuery, batch: Sequence[str]
 ) -> Iterator[dict[str, Any]]:
-    """Yield one scope batch's rows in primary-key order.
+    """Yield one scope batch's rows in synchronization-key order.
 
-    Keyed tables page by keyset -- ``(pk...) > (last pk...)`` as an SQL row
-    value, supported by SQLite >= 3.15 and PostgreSQL -- so each statement is
-    bounded and the order is the key's.
+    Every synced table pages by keyset -- ``(key...) > (last key...)`` as an
+    SQL row value, supported by SQLite >= 3.15 and PostgreSQL -- so each
+    statement is bounded and the order is the key's. This includes the two
+    tables with no catalog primary key of their own
+    (``knowledge_object_sources``, ``community_members``): ``sync_key``
+    resolves their ``TableSyncSpec.key`` instead, guarded to only ever return
+    a column set the live catalog actually backs with a unique index/
+    constraint (v84/0064), so the same paging logic applies to them too.
 
     Measured on PostgreSQL (120k rows per table, two notebooks, EXPLAIN
     (ANALYZE, BUFFERS) on the first page and on page ~50) before this shape
@@ -611,24 +672,9 @@ def _scan(
     those numbers: the deepest chain's parent (knowhow_rows) has as many rows
     as the child, so a parent-id list would need pagination of its own and
     would buy nothing -- and no index exists solely to serve an export.
-
-    The two keyless tables
-    (``knowledge_object_sources``, ``community_members``) cannot page that
-    way; they are read one notebook at a time through a genuinely streaming
-    cursor, ordered by the whole row. That costs ONE statement per exported
-    notebook for each of those two tables, so a whole-environment export pays
-    it proportionally to the notebook count rather than to the row count --
-    acceptable at PR-2's scale and closed out when PR-3 gives both tables
-    composite primary keys (design doc §7) and they join the keyset path.
     """
     placeholders = ",".join("?" for _ in batch)
     where = f"{query.filtered} IN ({placeholders})"
-    if not query.is_keyed:
-        yield from source.stream(
-            conn, f"{query.prefix} WHERE {where} ORDER BY {query.order_by}", batch
-        )
-        return
-
     keys = ", ".join(f"t0.{_quoted(name)}" for name in query.key_columns)
     cursor: tuple[Any, ...] | None = None
     while True:
@@ -895,11 +941,9 @@ def _write_table(
         else notebooks
     )
     query = _table_query(source, conn, table, columns)
-    # A keyless table is read one scope key at a time (see _scan).
-    batch_size = _ID_BATCH if query.is_keyed else 1
     written = 0
     with writer.lines(rows_path(table)) as write:
-        for batch in _batched(list(keys), batch_size):
+        for batch in _batched(list(keys), _ID_BATCH):
             for row in _scan(source, conn, query, batch):
                 users.observe(row, user_columns, principal_columns)
                 write(json_line(encode(row)))

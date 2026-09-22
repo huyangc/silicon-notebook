@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -489,10 +490,36 @@ def test_parent_scoped_knowhow_cells_follow_the_two_hop_chain(seeded, tmp_path):
     assert report.table_counts["knowhow_cells"] == expected
 
 
-def test_keyless_tables_are_still_scoped_and_written(seeded, tmp_path):
-    """knowledge_object_sources and community_members have no primary key, so
-    they take the exporter's streaming branch instead of keyset paging. They
-    must still be scoped, and still produce a file."""
+def _seed_kos_and_community_members(repo, notebook_id: str, suffix: str) -> None:
+    """One row each in the two tables PR-3a/0064 gives no PostgreSQL primary
+    key -- SQLite backs their registered ``TableSyncSpec.key`` with a UNIQUE
+    index instead (v84), which ``_Source.sync_key`` reads as their row
+    identity. No FK enforces object_id/source_id/community_id, so the values
+    only need to be unique per test, not resolvable rows elsewhere."""
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_object_sources(object_id, source_id, "
+            "notebook_id) VALUES (?, ?, ?)",
+            (f"obj-{suffix}", f"src-{suffix}", notebook_id),
+        )
+        db.execute(
+            "INSERT INTO community_members(canonical_id, notebook_id, level, "
+            "community_id, canonical_name, centrality) VALUES (?, ?, ?, ?, ?, ?)",
+            (f"can-{suffix}", notebook_id, 0, f"comm-{suffix}", "name", 0.0),
+        )
+
+
+def test_two_no_pg_pk_tables_now_use_the_keyset_path(seeded, tmp_path):
+    """knowledge_object_sources and community_members still have no
+    PostgreSQL-shaped primary key in the SQLite catalog (v84 gives them a
+    UNIQUE index instead -- SQLite cannot add a primary key to an existing
+    table in place), but PR-3a's ``TableSyncSpec.key`` fallback makes
+    ``_Source.sync_key`` resolve one anyway, so they now page through the
+    SAME keyset code path (``_scan``) as every other synced table rather
+    than the old one-notebook-at-a-time streaming branch. Scoping and file
+    output must still be correct."""
+    _seed_kos_and_community_members(seeded["repo"], seeded["exported"], "keep")
+    _seed_kos_and_community_members(seeded["repo"], seeded["other"], "drop")
     report = _export(seeded["settings"], tmp_path / "out", [seeded["exported"]])
 
     for table in ("knowledge_object_sources", "community_members"):
@@ -502,15 +529,80 @@ def test_keyless_tables_are_still_scoped_and_written(seeded, tmp_path):
                 if int(row["pk"]) > 0
             ]
         assert not keyed, (
-            f"{table} gained a primary key -- drop it from this test and let "
-            "the keyset path cover it (PR-3 is expected to do exactly that)"
+            f"{table} gained a real PostgreSQL-style primary key in the "
+            "SQLite catalog -- update this test's framing"
         )
         expected = _count(
             seeded["repo"], f"SELECT COUNT(*) FROM {table} WHERE notebook_id=?",
             (seeded["exported"],),
         )
+        assert expected == 1, "seed must produce exactly one row for the exported notebook"
         assert report.table_counts[table] == expected
+        rows = _rows(report.package_dir, table)
+        assert len(rows) == expected
         assert (report.package_dir / rows_path(table)).is_file()
+
+
+@pytest.mark.parametrize(
+    "table,index_name",
+    [
+        ("knowledge_object_sources", "uq_knowledge_object_sources_sync_key"),
+        ("community_members", "uq_community_members_sync_key"),
+    ],
+)
+def test_sync_key_export_refuses_when_the_backing_unique_index_is_dropped(
+    seeded, tmp_path, table, index_name
+):
+    """Mutation verification for ``_Source.sync_key``'s catalog check: this
+    table has no PostgreSQL-shaped primary key, so its row identity comes
+    entirely from ``TableSyncSpec.key`` PLUS the live catalog actually
+    enforcing that column set is unique (v84's UNIQUE index). Drop the index
+    that backs it -- the manifest claim is now unenforced -- and the export
+    must refuse by name rather than silently exporting rows keyed by a
+    column set the database itself does not guarantee is unique."""
+    with seeded["repo"]._write() as db:
+        db.execute(f"DROP INDEX {index_name}")
+
+    with pytest.raises(SyncExportError) as excinfo:
+        _export(seeded["settings"], tmp_path / "out", [seeded["exported"]])
+
+    assert table in str(excinfo.value)
+    assert "unique" in str(excinfo.value).lower()
+
+
+def test_sync_key_refuses_when_a_registered_key_disagrees_with_the_catalog_pk(
+    seeded, monkeypatch
+):
+    """Mutation verification for ``_Source.sync_key``'s other guard: a table
+    that HAS a catalog primary key but whose (hypothetically misregistered)
+    ``TableSyncSpec.key`` names different columns must refuse rather than
+    silently prefer one over the other -- capture triggers, the exporter and
+    the importer all have to agree on ONE row identity, and a manifest that
+    disagrees with the live schema is a drift nothing downstream can safely
+    guess its way past."""
+    from app.migration.sync import manifest as manifest_module
+
+    real_spec_for = manifest_module.spec_for
+    real_sources_spec = real_spec_for("sources")
+    bogus_sources_spec = dataclasses.replace(
+        real_sources_spec, key=("not_a_real_key_column",)
+    )
+    monkeypatch.setattr(
+        export_module,
+        "spec_for",
+        lambda table: bogus_sources_spec if table == "sources" else real_spec_for(table),
+    )
+
+    source = export_module._Source(seeded["settings"], Path(__file__).resolve().parents[2])
+    try:
+        with source.read() as conn:
+            with pytest.raises(SyncExportError) as excinfo:
+                source.sync_key(conn, "sources")
+    finally:
+        source.close()
+
+    assert "sources" in str(excinfo.value)
+    assert "disagrees" in str(excinfo.value)
 
 
 def test_ordinal_is_never_exported(seeded, tmp_path):

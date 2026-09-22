@@ -1195,12 +1195,12 @@ class UnifiedKgStore:
                 "VALUES (?,?,?,?,?,?,?)",
                 (cid, notebook_id, level, json.dumps(members), len(members), now,
                  generation))
-            # OR IGNORE: v84 gave this table a composite key (community_id,
-            # canonical_id) -- a repeated pair is the same row.
+            # ON CONFLICT(community_id, canonical_id) DO NOTHING: only the
+            # v84 composite key's conflict is swallowed, nothing else.
             db.executemany(
-                "INSERT OR IGNORE INTO community_members "
+                "INSERT INTO community_members "
                 "(canonical_id, notebook_id, level, community_id, canonical_name, centrality, generation) "
-                "VALUES (?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(community_id, canonical_id) DO NOTHING",
                 [(m, notebook_id, level, cid, names.get(m, m), deg.get(m, 0.0),
                   generation) for m in members])
 
@@ -1238,12 +1238,12 @@ class UnifiedKgStore:
                 "FROM community_members "
                 "WHERE notebook_id=? AND level != ? AND generation=?",
                 (notebook_id, exclude_level, from_generation)).fetchall()
-            # OR IGNORE: v84 gave this table a composite key (community_id,
-            # canonical_id) -- a repeated pair is the same row.
+            # ON CONFLICT(community_id, canonical_id) DO NOTHING: only the
+            # v84 composite key's conflict is swallowed, nothing else.
             db.executemany(
-                "INSERT OR IGNORE INTO community_members "
+                "INSERT INTO community_members "
                 "(canonical_id, notebook_id, level, community_id, canonical_name, centrality, generation) "
-                "VALUES (?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(community_id, canonical_id) DO NOTHING",
                 [(m["canonical_id"], notebook_id, m["level"],
                   remap[str(m["community_id"])], m["canonical_name"],
                   m["centrality"], to_generation)
