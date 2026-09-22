@@ -649,7 +649,7 @@ def test_global_ask_completion_sends_one_notification_with_every_participant():
     assert captured == []
 
 
-def test_global_ask_completion_without_a_host_calls_the_three_chains_directly():
+def test_global_ask_completion_without_a_host_calls_the_three_chains_directly(caplog):
     runtime, calls = _runtime_for_global(None)
     runtime._note_global_ask_completed(["nb-a", "nb-b"], "user-1", "reasoning", anchor="nb-a")
     assert calls == [
@@ -665,11 +665,37 @@ def test_global_ask_completion_without_a_host_calls_the_three_chains_directly():
 
     # One chain failing never eats the others (per-chain isolation).
     runtime.agent_profile_jobs = SimpleNamespace(
-        note_ask_completed=lambda *_: (_ for _ in ()).throw(RuntimeError("boom"))
+        note_ask_completed=lambda *_: (_ for _ in ()).throw(
+            RuntimeError("secret /private/path")
+        )
     )
     calls.clear()
-    runtime._note_global_ask_completed(["nb-a"], "user-1", "reasoning", anchor="nb-a")
+    with caplog.at_level("WARNING", logger="silicon_notebook.repository_runtime"):
+        runtime._note_global_ask_completed(["nb-a"], "user-1", "reasoning", anchor="nb-a")
     assert calls == [("experience", ""), ("search", "user-1")]
+    _assert_content_free_failure_log(caplog, "secret /private/path")
+
+    # The notebook twin's compat path keeps the same content-free receipt.
+    caplog.clear()
+    calls.clear()
+    with caplog.at_level("WARNING", logger="silicon_notebook.repository_runtime"):
+        runtime._note_ask_completed("nb-a", "user-1", "reasoning")
+    assert calls == [("experience", "nb-a"), ("search", "user-1")]
+    _assert_content_free_failure_log(caplog, "secret /private/path")
+
+
+def _assert_content_free_failure_log(caplog, secret: str) -> None:
+    """The failure receipt names the exception CLASS and nothing else: no
+    exception text (which may carry SQL, source content or private paths)
+    and no traceback (AGENTS.md: exception text stays out of logs)."""
+    failures = [record for record in caplog.records if "notification failed" in record.getMessage()]
+    assert len(failures) == 1
+    record = failures[0]
+    assert record.levelname == "WARNING"
+    assert record.exc_info is None
+    assert "RuntimeError" in record.getMessage()
+    assert secret not in record.getMessage()
+    assert secret not in caplog.text
 
 
 def test_global_notification_projects_scope_to_every_observer_and_participants_only_behind_agent_profile():

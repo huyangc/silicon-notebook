@@ -1872,8 +1872,11 @@ class GlobalAskService:
             self.note_ask_completed(
                 ordered, user_id, job.mode, anchor=job.resolved_notebook_ids[0],
             )
-        except Exception:  # noqa: BLE001 - an answer was delivered; keep it that way
-            _LOG.exception("global ask post-completion notification failed")
+        except Exception as exc:  # noqa: BLE001 - an answer was delivered; keep it that way
+            # Class name only: no exception text or traceback in logs.
+            _LOG.warning(
+                "global ask post-completion notification failed: %s", type(exc).__name__
+            )
 
     def _validate_citations(self, citations, evidence, source_ceiling, event=None,
                             *, siblings=None):
