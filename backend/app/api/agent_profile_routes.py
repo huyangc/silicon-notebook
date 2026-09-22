@@ -43,7 +43,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.deps import (
     get_current_user,
+    mirrored_notebook_error,
     notebook_capability_allowed,
+    notebook_mirror_fence,
     repository,
     require_notebook_read,
     user_error,
@@ -126,6 +128,14 @@ def _owner_for_scope(scope: str, notebook_id: str, user: UserProfile) -> str:
             "agent_profile:write", notebook_id, user.id
         ):
             raise HTTPException(status_code=404, detail="Notebook not found")
+        # 镜像写入围栏,与所有装饰器端点同序(权限先判)。今天
+        # ``_CAPABILITY_MIRROR_FENCE["agent_profile:write"]`` 是 False——理解底座是
+        # 目标端用户自己用出来的,不在同步闭包里——所以这一句恒为 no-op。**刻意写在
+        # 这里而不是省掉**:归属只登记在那张表上一处,哪天那一格翻成 True,这条写路径
+        # 自动跟随,而不是变成一个「表上说挡、实际放行」的漏点。
+        mirrored = notebook_mirror_fence("agent_profile:write", notebook_id)
+        if mirrored:
+            raise mirrored_notebook_error(mirrored)
         return BASE_CHAIN_OWNER
     return user.id
 
@@ -314,6 +324,10 @@ def rebuild_understanding(
             "agent_profile:write", notebook_id, user.id
         ):
             raise HTTPException(status_code=404, detail="Notebook not found")
+        # 镜像写入围栏,与 `_owner_for_scope` 逐字同款(同一条理由写在那里)。
+        mirrored = notebook_mirror_fence("agent_profile:write", notebook_id)
+        if mirrored:
+            raise mirrored_notebook_error(mirrored)
         started = jobs.start_base(notebook_id)
     else:
         started = jobs.start_overlay(notebook_id, user.id)

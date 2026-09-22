@@ -405,6 +405,23 @@ class SharingStore:
             ).fetchall()
         return (owner["username"] if owner and owner["username"] else "", [r["title"] for r in rows])
 
+    def notebook_sync_origin(self, notebook_id: str) -> str:
+        """`sqlite/sharing_store.py::notebook_sync_origin` 的镜像——为什么不带
+        生命周期过滤、为什么行缺失返回 '' 而不是抛,完整理由写在那一份里。"""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT sync_origin FROM notebooks WHERE id=%s", (notebook_id,)
+            ).fetchone()
+        return str(row["sync_origin"] or "") if row is not None else ""
+
+    def set_notebook_sync_origin(self, notebook_id: str, origin: str) -> None:
+        """`sqlite/sharing_store.py::set_notebook_sync_origin` 的镜像。"""
+        with self.database.write() as connection:
+            connection.execute(
+                "UPDATE notebooks SET sync_origin=%s WHERE id=%s",
+                (origin, notebook_id),
+            )
+
     def user_can_access_notebook(self, notebook_id: str, user_id: str) -> bool:
         """写权:仅 owner。谓词见 `access_sql.NOTEBOOK_WRITE_SQL`。"""
         with self.database.connect() as connection:

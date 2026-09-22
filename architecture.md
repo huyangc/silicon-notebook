@@ -41,6 +41,190 @@
 - 开发和生产环境通过 `DATABASE_URL` 显式选择 PostgreSQL；完全未配置该项时，代码仍以 `.local/silicon_notebook.db` 的 SQLite 数据库兜底。原始来源文件默认位于 `.local/storage`。DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。PostgreSQL 是默认部署选项，SQLite 仍受支持。`SHADOW_DATABASE_URL` 不选择 active backend，单独设置也不启动同步；只有临时 `migration/shadow` 运维组合根会把它作为 PostgreSQL target 读取。
 - SQLite 使用标准库 `sqlite3`、WAL 与 `busy_timeout`，模型向量存 float32 BLOB。PostgreSQL 使用有界 Psycopg pool、数据库事务/row/advisory lock 支持跨进程访问，向量存 float32 `bytea`；不安装也不需要 pgvector。
 
+### 2.1.1 数据表组织
+
+规范定义在 `backend/app/repositories/postgres/migrations/`（SQLite 是镜像）。组织原则：
+**notebook 是数据分片与权限过滤的边界**——notebook 级的表带 `notebook_id` 列，子表
+（source_elements、knowhow 的列/行/格、memory 的修订/来源/向量等约三分之一的表）经父表
+归属；只有全局问答、许愿墙、认证与系统配置不落在任何 notebook 下。用户不直接拥有数据，
+而是通过「拥有或被授权的 notebook」间接拥有。读/管/写三种权限的唯一定义点是 `repositories/*/access_sql.py`：写权 = owner
+（`notebooks.created_by`）；管理权 = owner ∪ `role='admin'` 的授权边；读权 = owner ∪
+`notebook_members` 有行 ∪ 有效授权边（`notebook_grants.principal_type` ∈ user/group/everyone）。
+`notebook_bases` 让一个 notebook 挂载另一个（如 `tier='base'` 的公共基础库），读侧查询
+顺着它把基础库内容并入。原始文件与附件本体在磁盘（`sources.file_path`），库里只存元数据。
+向量各自单表单列 `bytea`（chunk/element/knowledge/memory/relation）；memory_embeddings 只按
+`memory_id` 归属，其余四张带 `notebook_id`。
+
+下图只画主干 26 张表；聚类、社群、合并/冲突候选、建图与索引作业、Knowhow 历史、
+认证等约 70 张辅助表沿同一 `notebook_id` 归属规则挂在对应节点下，此处省略。
+
+```mermaid
+erDiagram
+  users ||--o| user_profiles : "偏好"
+  users ||--o{ notebooks : "created_by 拥有"
+  users ||--o{ notebook_members : "成员"
+  notebooks ||--o{ notebook_members : "成员"
+  notebooks ||--o{ notebook_grants : "授权边"
+  users |o--o{ notebook_grants : "principal=user"
+  groups |o--o{ notebook_grants : "principal=group"
+  groups ||--o{ group_members : "组员"
+  users ||--o{ group_members : "组员"
+  notebooks ||--o{ notebook_bases : "挂载基础库"
+  agent_access_tokens }o--o{ notebooks : "agent_token_notebooks"
+  notebooks ||--o{ sources : "材料"
+  sources ||--o{ source_elements : "解析出"
+  sources ||--o{ chunks : "切成"
+  chunks ||--|| chunk_embeddings : "向量"
+  notebooks ||--o{ knowledge_objects : "图谱节点"
+  knowledge_objects ||--o{ knowledge_relations : "起点或终点"
+  knowledge_objects }o--o{ sources : "knowledge_object_sources"
+  notebooks ||--o{ conversations : "会话"
+  conversations ||--o{ answers : "回答"
+  conversations ||--o{ ask_jobs : "执行状态"
+  answers ||--o{ feedback : "评价"
+  answers |o--o{ memory_items : "存为记忆"
+  notebooks ||--o{ memory_items : "记忆"
+  notebooks ||--o{ reports : "报告"
+  notebooks ||--o{ knowhow_tables : "含 columns rows cells"
+  users ||--o{ global_ask_conversations : "全局问答"
+  global_ask_conversations ||--o{ global_ask_jobs : "作业"
+
+  users {
+    text id PK
+    text email
+    text role
+    text status
+  }
+  user_profiles {
+    text user_id FK
+    text memory_mode
+    jsonb model_settings
+  }
+  groups {
+    text id PK
+    text created_by FK
+    text kind
+  }
+  group_members {
+    text group_id FK
+    text user_id FK
+    text role
+  }
+  notebooks {
+    text id PK
+    text created_by FK "拥有者"
+    text tier "personal 或 base"
+    int is_shared
+    text share_token
+    text status
+  }
+  notebook_members {
+    text notebook_id FK
+    text user_id FK
+    text role "reader 等"
+  }
+  notebook_grants {
+    text notebook_id FK
+    text principal_type "user group everyone"
+    text principal_id
+    text role "reader 或 admin"
+  }
+  notebook_bases {
+    text notebook_id FK
+    text base_notebook_id FK
+  }
+  agent_access_tokens {
+    text id PK
+    text agent_profile_id FK
+    text token_hash
+    text default_notebook_id FK
+  }
+  sources {
+    text id PK
+    text notebook_id FK
+    text source_type
+    text parse_status
+    text file_path "文件在磁盘"
+    text file_hash
+  }
+  source_elements {
+    text id PK
+    text source_id FK
+    text element_type
+    jsonb metadata
+  }
+  chunks {
+    text id PK
+    text notebook_id FK
+    text source_id FK
+    jsonb element_ids
+  }
+  chunk_embeddings {
+    text chunk_id PK
+    text notebook_id FK
+    bytea vector
+  }
+  knowledge_objects {
+    text id PK
+    text notebook_id FK
+    text object_type
+    jsonb payload
+  }
+  knowledge_relations {
+    text id PK
+    text source_object_id FK
+    text target_object_id FK
+    text edge_type
+  }
+  conversations {
+    text id PK
+    text notebook_id FK
+    text created_by FK
+  }
+  answers {
+    text id PK
+    text notebook_id FK
+    text conversation_id FK
+    jsonb payload
+  }
+  ask_jobs {
+    text id PK
+    text conversation_id FK
+    text status
+    jsonb trace_json
+  }
+  feedback {
+    text answer_id FK
+    text rating
+  }
+  memory_items {
+    text id PK
+    text notebook_id FK
+    text source_answer_id FK
+    text status
+  }
+  reports {
+    text id PK
+    text notebook_id FK
+    jsonb sections_json
+  }
+  knowhow_tables {
+    text id PK
+    text notebook_id FK
+    text title
+  }
+  global_ask_conversations {
+    text id PK
+    text user_id FK
+    text scope_json "覆盖哪些本子"
+  }
+  global_ask_jobs {
+    text id PK
+    text conversation_id FK
+    text status
+  }
+```
+
 ### 2.2 Repository 组合与兼容 facade
 
 `backend/app/services/repository_facade.py` 中的 `RepositoryFacade` 是后端中立 facade；唯一 factory 根据已验证的 `DATABASE_URL` 构造 `SQLiteRepository` 或 `PostgresRepository`，两者注入同一个 `RepositoryRuntime` 组合边界。公共方法只保留显式兼容 adapter 或单跳委托，不再通过 mixin 继承复用实现。AST guard 会验证每个委托的真实目标与 ownership manifest 一致；依赖方向单向：factory/wrapper → facade → runtime → application services → stores；service/store 不得反向 import facade、判断 SQL dialect 或 import 对侧 adapter。facade 公开面有逐方法调用者账本（`docs/superpowers/plans/2026-08-23-facade-retirement-ledger.md`，由只读普查脚本 `scripts/audit_facade_callers.py` 重新生成），把每个公开成员按生产/脚本/测试三桶调用数分类为 `keep`/`test-only`/`ambiguous`/`retire-now`；退役按账本分批推进，每次退役需同步 `scripts/architecture_boundary_baseline.json::facade_public_surface` 与 `scripts/generate_repository_contract_fixtures.py --rebaseline-surface` 产出的 `facade_surface.json`/`ownership_manifest.py`。
@@ -599,7 +783,7 @@ before 写回到目标点（行/列**原样复用 id**，引用跳转与代码�
 | Repository stores | `backend/app/repositories/`（`sqlite/`、`postgres/`、`source_files.py`、`filesystem/`、`ports.py`） | 每种 SQL 只在所属 adapter；两套 bundle 实现同一 ports，application 不判断 dialect。 |
 | Identity | `backend/app/repositories/sqlite/identity_store.py` | 用户、session、管理员用量与 v24 用户模型配置清理兼容；不再提供运行时个人模型配置；`sqlite_identity.py` 为兼容 shim。 |
 | 系统模型服务 | `backend/app/services/model_registry.py`、`model_provider.py`、`model_scheduler.py`、`model_circuit_breaker.py` + model-service status/admin routes | 部署 TOML 绑定 workload；provider 独占 adapter 解析，scheduler 按物理服务独占容量/队列/熔断；状态只读脱敏，admin 探测显式执行，support id 关联维护日志。 |
-| Sharing | `backend/app/services/notebook_sharing.py` + `backend/app/repositories/sqlite/sharing_store.py` | share token、reader 权限、深拷贝与补偿/恢复；`sqlite_notebook_sharing.py` 为兼容 shim。授权谓词唯一定义点在 `repositories/{sqlite,postgres}/access_sql.py`（双后端镜像）：三条谓词成严格包含链 `写权 ⊆ 管理权 ⊆ 读权`——写权 owner-only、管理权 owner∪`role='admin'` 有效授权边（`NOTEBOOK_ADMIN_SQL`，复用受限三臂+`role='admin'`、排除 everyone）、读权 owner∪成员∪四值授权边；Memory 读侧 SQL 的嵌入片段同源派生。API 写端点经 `api/deps.py::require_notebook_capability` 按 9 个能力名归类，值域 `{owner, admin}`（P2 把六个内容写能力＋`notebook:manage` 翻 admin，`notebook:configure`／`notebook:delete`／`reports:write` 恒 owner，Agent/MCP 面刻意不翻，73 个端点声明不动；守卫见 `test_access_sql_contract.py` / `test_notebook_capability_guard.py`）。群组／成员／授权边的行持久化在 `repositories/{sqlite,postgres}/group_store.py`（与 `sharing_store.py` 并列，同一层），策略集中在 `api/group_routes.py`（群组可见性 404 口径、发边双重条件、不对称撤销、系统管理员运维旁路，以及 P2 成员贡献审批流 `notebook_share_requests` 的 6 个端点：状态机 pending→approved/rejected、撤回=DELETE 整行、创建撞防重复 pending 索引时幂等）；`mount_sql.py` 仍是参与集解析的唯一定义点，只是有效性谓词加了「受限读权 + 挂载方未被共享」这一支。深度报告是唯一不能表达成单个 notebook 级能力的写面（成员建自己的报告），改由 `require_notebook_read` + 体内行级 `created_by` 校验承担。 |
+| Sharing | `backend/app/services/notebook_sharing.py` + `backend/app/repositories/sqlite/sharing_store.py` | share token、reader 权限、深拷贝与补偿/恢复；`sqlite_notebook_sharing.py` 为兼容 shim。授权谓词唯一定义点在 `repositories/{sqlite,postgres}/access_sql.py`（双后端镜像）：三条谓词成严格包含链 `写权 ⊆ 管理权 ⊆ 读权`——写权 owner-only、管理权 owner∪`role='admin'` 有效授权边（`NOTEBOOK_ADMIN_SQL`，复用受限三臂+`role='admin'`、排除 everyone）、读权 owner∪成员∪四值授权边；Memory 读侧 SQL 的嵌入片段同源派生。API 写端点经 `api/deps.py::require_notebook_capability` 按 13 个能力名归类，值域 `{owner, admin}`（P2 把六个内容写能力＋`notebook:manage` 翻 admin，`notebook:configure`（链接分享与只读的挂载投影）／`notebook:mount`（挂载配置）／`notebook:delete`／`reports:write` 恒 owner，Agent/MCP 面刻意不翻；守卫见 `test_access_sql_contract.py` / `test_notebook_capability_guard.py`）。同一批键上的第二张表 `_CAPABILITY_MIRROR_FENCE` 是与权限正交的一轴——「这个能力的端点会不会改写同步层内容」，会的在镜像笔记本（`notebooks.sync_origin` 非空）上恒在级别守卫之后返回 `409 notebook_mirrored`，但只对非安全方法生效（GET/HEAD/OPTIONS 即使挂在挡的能力下也放行）；`notebook:grant`（授权边端点）、`notebook:mount` 与 `scale_index:write`（目标端自有的检索索引重建，镜像上必须可用）就是被这条轴从 `notebook:manage`／`notebook:configure`／`kg:write` 拆出来的，级别不变。`user_or_agent_scope` 的写分支与 MCP 内容写工具接同一围栏；设计与分层见 `docs/incremental-sync-design.md`。群组／成员／授权边的行持久化在 `repositories/{sqlite,postgres}/group_store.py`（与 `sharing_store.py` 并列，同一层），策略集中在 `api/group_routes.py`（群组可见性 404 口径、发边双重条件、不对称撤销、系统管理员运维旁路，以及 P2 成员贡献审批流 `notebook_share_requests` 的 6 个端点：状态机 pending→approved/rejected、撤回=DELETE 整行、创建撞防重复 pending 索引时幂等）；`mount_sql.py` 仍是参与集解析的唯一定义点，只是有效性谓词加了「受限读权 + 挂载方未被共享」这一支。深度报告是唯一不能表达成单个 notebook 级能力的写面（成员建自己的报告），改由 `require_notebook_read` + 体内行级 `created_by` 校验承担。 |
 | KG | `backend/app/services/kg/`、`kg_ingest.py`、`kg_merge.py` | 抽取、证据、图、PPR、质量与合并；`maintenance_jobs.py` 拥有 relink/rebuild 任务编排，算法仍归 lifecycle。 |
 | Retrieval / Ask | `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py`、`structured_retrieval.py`、`retrieval_run.py`、`collection_catalog.py`、`collection_enumeration.py`、`core/ask_retrieval_policy.py`、`ask_modes.py` 与 facade 中的兼容方法 | 分数、grounding、tier 次序与集合完整性保持分离；mode registry 是 mode 真源，effort policy 是档位与枚举阈值真源；retrieval run 是单轮 embedding 复用与报告叶子扇出的边界。 |
 | Reports | `backend/app/services/report_engine.py` + `backend/app/services/reports/` | 两阶段后台 job，保持 outline 审阅、取消与 section progress 语义；policy 与无内容观测从编排器分离。 |

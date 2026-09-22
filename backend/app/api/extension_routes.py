@@ -69,7 +69,9 @@ from app.services import source_ingestion
 from app.api.task_stream import task_stream_response
 from app.api.deps import (
     get_current_user,
+    mirrored_notebook_error,
     notebook_capability_allowed,
+    notebook_mirror_fence,
     require_notebook_capability,
     require_notebook_read,
     user_error,
@@ -174,6 +176,15 @@ def _authorized_notebook(capability: str, notebook_id: str) -> str:
         raise HTTPException(status_code=404, detail="Notebook not found")
     if not notebook_capability_allowed(capability, notebook_id, user.id):
         raise HTTPException(status_code=404, detail="Notebook not found")
+    # The target-end write fence (docs/incremental-sync-design.md section 5),
+    # applied in the same order the decorator guards use: authorization first
+    # (denial is still 404 and still discloses nothing), then the resource's own
+    # state. A plugin port is the one write surface that never passes through
+    # ``require_notebook_capability``, so without this line the URL importer
+    # would be the single door left open into a mirrored notebook.
+    mirrored = notebook_mirror_fence(capability, notebook_id)
+    if mirrored:
+        raise mirrored_notebook_error(mirrored)
     return notebook_id
 
 

@@ -756,3 +756,80 @@ def test_agent_token_malformed_bearer_returns_401(tmp_path, monkeypatch):
     )
 
     assert resp.status_code == 401
+
+
+# ===========================================================================
+# Group D: 跨环境同步 §5 —— 镜像笔记本上的格子代码写
+# ===========================================================================
+#
+# 这条路由走的是**第三条鉴权通道**:`deps.user_or_agent_scope`。它既不是能力工厂的
+# 包装依赖(URL 上根本没有 notebook_id,守卫挂不上去),也不是 `mcp_tools` 那一侧的
+# `refuse_if_mirrored`——所以围栏在它的会话写分支里是**第三处**手抄的实现,必须单独
+# 有用例,否则「另外两处都改了、这处漏了」在结构上完全看不出来。
+
+
+def _mark_mirror(nb: str, origin: str = "prod-shanghai") -> str:
+    _app_repo()._runtime.sharing_store.set_notebook_sync_origin(nb, origin)
+    return origin
+
+
+def test_session_cell_code_write_is_refused_on_a_mirrored_notebook(
+    tmp_path, monkeypatch,
+):
+    """镜像上,会话用户的 PUT 与 DELETE 都 409;读照常 200。
+
+    `knowhow_cell_code` 在笔记本内容闭包里(`sharing_store` 的深拷贝表清单),所以
+    目标端写进去的附件活不过下一次导入。判据取 `knowhow:write` 那一格——这条路由的
+    scope 名是 `knowhow:code`,但那是**Agent 面的 scope**,与围栏表的能力名不是同一
+    套命名;围栏问的是「这次写碰的是不是同步层的表」,答案由表决定,不由 scope 名决定。
+
+    读(GET)必须照常:围栏拦的是写,不是使用。少了这一条断言,一个把整条路由挡死的
+    实现照样能让上面两个 409 变绿。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner_h, nb, table, row, col = _seed(client, "a00002090")
+    url = f"/api/agent/knowhow/rows/{row['id']}/cells/{col}/code"
+    # 先在**本地**状态下写一份,好让下面的 DELETE 有东西可删——否则 DELETE 的 409
+    # 可能只是「本来就没有这条附件」。
+    assert client.put(
+        url, headers=owner_h, json={"code_text": "print('x')", "language": "python"}
+    ).status_code == 200
+    origin = _mark_mirror(nb)
+
+    put_resp = client.put(
+        url, headers=owner_h, json={"code_text": "print('mirror')", "language": "python"}
+    )
+    assert put_resp.status_code == 409, put_resp.text
+    assert put_resp.json()["detail"]["code"] == "notebook_mirrored"
+    assert put_resp.json()["detail"]["sync_origin"] == origin
+    assert put_resp.json()["detail"]["message"]
+
+    delete_resp = client.delete(url, headers=owner_h)
+    assert delete_resp.status_code == 409, delete_resp.text
+    assert delete_resp.json()["detail"]["code"] == "notebook_mirrored"
+
+    # 读不受影响,而且读回来的仍是镜像化之前那一份——两次写都没有落库。
+    read_resp = client.get(url, headers=owner_h)
+    assert read_resp.status_code == 200, read_resp.text
+    assert read_resp.json()["code_text"] == "print('x')"
+
+
+def test_session_cell_code_write_is_unaffected_on_a_local_notebook(
+    tmp_path, monkeypatch,
+):
+    """本地库上 PUT 200 / DELETE 204 —— 围栏是条件分支,不是对这条路由的全局收紧。
+
+    没有这一条,一个在 `user_or_agent_scope` 的写分支里无条件抛 409 的实现会在上面
+    那条里全绿。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner_h, nb, table, row, col = _seed(client, "a00002091")
+    url = f"/api/agent/knowhow/rows/{row['id']}/cells/{col}/code"
+
+    put_resp = client.put(
+        url, headers=owner_h, json={"code_text": "print('local')", "language": "python"}
+    )
+    assert put_resp.status_code == 200, put_resp.text
+    assert put_resp.json()["status"] == "implemented"
+    assert client.delete(url, headers=owner_h).status_code == 204
+    assert client.get(url, headers=owner_h).json()["status"] == "none"

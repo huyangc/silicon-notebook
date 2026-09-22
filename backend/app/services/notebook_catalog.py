@@ -335,6 +335,10 @@ class NotebookSummaryQuery:
             taxonomy=_list("taxonomy"),
             access_scope=row["access_scope"] if "access_scope" in keys else "",
             tier=row["tier"] if "tier" in keys else "personal",
+            # 镜像标记(SQLite v79 / PostgreSQL 0059)。取行 SQL 都是
+            # `SELECT notebooks.*`,所以列表与详情两条路径同时拿到它,零新增查询;
+            # `in keys` 的兜底与相邻字段同款,喂的是快照/旧行投影那类不带全列的行。
+            sync_origin=str(row["sync_origin"] or "") if "sync_origin" in keys else "",
             kg_ready=self.has_kg(connection, row["id"]),
             base_kg_available=bool(base_kg_ids),
             base_kg_notebook_ids=base_kg_ids,

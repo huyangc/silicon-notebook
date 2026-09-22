@@ -8548,6 +8548,11 @@
               "title": "Status",
               "type": "string"
             },
+            "sync_origin": {
+              "default": "",
+              "title": "Sync Origin",
+              "type": "string"
+            },
             "target_users": {
               "default": "",
               "title": "Target Users",
@@ -19751,7 +19756,7 @@
       },
       "/api/notebooks/{notebook_id}/bases": {
         "get": {
-          "description": "本 notebook 挂载的参考库。含 active=False 的失效边(被挂库易主 / 公共库被\n降级),前端置灰展示——边保留是为了对方恢复后自动生效。",
+          "description": "本 notebook 挂载的参考库。含 active=False 的失效边(被挂库易主 / 公共库被\n降级),前端置灰展示——边保留是为了对方恢复后自动生效。\n\n⚠ 这条**只读**投影刻意留在 notebook:configure(恒 owner,不带镜像围栏),而不是\n跟着 PUT 一起归到 notebook:mount:它答的是「这本库此刻挂了什么」,镜像上照样要\n显示得出来。挂载配置的**写**与只对写有意义的候选/影响面查询才归 notebook:mount\n(见 deps.py 两张表上方的注释)。",
           "operationId": "list_notebook_bases_route_api_notebooks__notebook_id__bases_get",
           "parameters": [
             {
@@ -19793,7 +19798,7 @@
           "summary": "List Notebook Bases Route"
         },
         "put": {
-          "description": "全量替换挂载集合。只接受本 notebook 的可挂候选 ∪ 当前已挂载的 id(含失效边),\n其余一律 400 —— 挂载边不是授权凭证,写入侧也要挡。可挂候选共四支:公共知识库、\n同 owner 的库、被挂库上有「全员可读」授权的库,以及本笔记本 owner 有受限读权\n(只读共享或点名/群组授权)且**本笔记本自身尚未被共享**的库。最后那道未共享门\n堵的是转手再分享:借来的参考库不能随着本笔记本再被共享出去。\n写权限本身由 require_notebook_capability(\"notebook:configure\")(**恒 owner**,\n404 on denial)在依赖层挡;这里只做候选集校验,不重复手工判断写权限。\n⚠ 挂载配置刻意**不随内容管理权翻给组管理员**(P2-T2 评审 P0):候选集\n(mountable_notebooks)按**被挂库 owner** `a.created_by` 解析,含「同 owner」支——\n组管理员若能改挂载,就能把库主从未共享的私有库挂进来经代理端点读全文。\n见 deps.py `_CAPABILITY_LEVELS` 上 notebook:configure 那条注释。\n\n并入\"当前已挂载的 id\"是刻意的:mountable_notebooks 与失效边的判定谓词\n(MOUNT_VALID_EXPR)是同一个表达式,所以一条失效边(被挂库降级/易主、共享被撤销,\n或本笔记本自身被共享而关闭了借入边之后)永远不会出现在 mountable 里。前端编辑表单原样重新提交\"保留这条失效边不变\"的挂载集合\n(不做任何前端过滤 —— 那会静默删掉设计上刻意保留、等对方重新发布后自动恢复的边)\n时,若只拿 mountable 当白名单会把这个合法保留动作也 400 掉,导致表单永久存不了。\n并入的是\"已挂载\"而非\"任意 id\",所以仍然拒绝新挂一个从未属于本笔记本的无效 id。",
+          "description": "全量替换挂载集合。只接受本 notebook 的可挂候选 ∪ 当前已挂载的 id(含失效边),\n其余一律 400 —— 挂载边不是授权凭证,写入侧也要挡。可挂候选共四支:公共知识库、\n同 owner 的库、被挂库上有「全员可读」授权的库,以及本笔记本 owner 有受限读权\n(只读共享或点名/群组授权)且**本笔记本自身尚未被共享**的库。最后那道未共享门\n堵的是转手再分享:借来的参考库不能随着本笔记本再被共享出去。\n写权限本身由 require_notebook_capability(\"notebook:mount\")(**恒 owner**,\n404 on denial)在依赖层挡;这里只做候选集校验,不重复手工判断写权限。\n⚠ 挂载配置刻意**不随内容管理权翻给组管理员**(P2-T2 评审 P0):候选集\n(mountable_notebooks)按**被挂库 owner** `a.created_by` 解析,含「同 owner」支——\n组管理员若能改挂载,就能把库主从未共享的私有库挂进来经代理端点读全文。\n见 deps.py `_CAPABILITY_LEVELS` 上 notebook:mount 那条注释。\n⚠ notebook:mount 还带**镜像写入围栏**:`notebook_bases` 属同步层,所以同步来的\n镜像笔记本上这条 PUT 返回 409 `notebook_mirrored`(级别判定先跑,未授权仍 404)。\n\n并入\"当前已挂载的 id\"是刻意的:mountable_notebooks 与失效边的判定谓词\n(MOUNT_VALID_EXPR)是同一个表达式,所以一条失效边(被挂库降级/易主、共享被撤销,\n或本笔记本自身被共享而关闭了借入边之后)永远不会出现在 mountable 里。前端编辑表单原样重新提交\"保留这条失效边不变\"的挂载集合\n(不做任何前端过滤 —— 那会静默删掉设计上刻意保留、等对方重新发布后自动恢复的边)\n时,若只拿 mountable 当白名单会把这个合法保留动作也 400 掉,导致表单永久存不了。\n并入的是\"已挂载\"而非\"任意 id\",所以仍然拒绝新挂一个从未属于本笔记本的无效 id。",
           "operationId": "set_notebook_bases_route_api_notebooks__notebook_id__bases_put",
           "parameters": [
             {
@@ -23679,7 +23684,7 @@
       },
       "/api/notebooks/{notebook_id}/mountable": {
         "get": {
-          "description": "可挂候选 = 公共知识库 ∪ 同 owner 的库 ∪ 有「全员可读」授权的库 ∪\n(本库 owner 有受限读权的库,且仅当本笔记本自身尚未被共享)。\n\n最后一支的未共享门堵的是转手再分享:借来的参考库不能随着本笔记本再被共享出去。\n\n⚠ 恒 owner(notebook:configure):候选按**被挂库 owner** `a.created_by` 解析,\n「同 owner」支会列出库主的**全部私有库**(含从未共享的)。组管理员若能调它,就拿到\n了库主全部私有库名的枚举——所以这条与 PUT bases 一起是 owner-only(P2-T2 评审 P0)。\n\n响应模型是 `MountableNotebook` 而不是 `NotebookRef`:每个候选还带一个 `origin`\n(base / mine / shared),让挂载选择器能如实分组——群组共享放开之后,别人 owner\n的库也会出现在这份候选里,只按 `tier` 分组会把它们标成「我的笔记本」。\n\n刻意挂在 {notebook_id} 下而非 /notebooks/mountable —— 后者会与既有的\n/notebooks/{notebook_id} 争路由匹配(FastAPI 按声明序,静态段必须先注册)。",
+          "description": "可挂候选 = 公共知识库 ∪ 同 owner 的库 ∪ 有「全员可读」授权的库 ∪\n(本库 owner 有受限读权的库,且仅当本笔记本自身尚未被共享)。\n\n最后一支的未共享门堵的是转手再分享:借来的参考库不能随着本笔记本再被共享出去。\n\n⚠ 恒 owner(notebook:mount):候选按**被挂库 owner** `a.created_by` 解析,\n「同 owner」支会列出库主的**全部私有库**(含从未共享的)。组管理员若能调它,就拿到\n了库主全部私有库名的枚举——所以这条与 PUT bases 一起是 owner-only(P2-T2 评审 P0)。\n它只为「改挂载」这一个动作服务(候选集就是那次 PUT 的白名单),所以与 PUT 同格,\n连同镜像围栏一起:镜像上挂载配置本来就改不了,列候选没有意义。\n\n响应模型是 `MountableNotebook` 而不是 `NotebookRef`:每个候选还带一个 `origin`\n(base / mine / shared),让挂载选择器能如实分组——群组共享放开之后,别人 owner\n的库也会出现在这份候选里,只按 `tier` 分组会把它们标成「我的笔记本」。\n\n刻意挂在 {notebook_id} 下而非 /notebooks/mountable —— 后者会与既有的\n/notebooks/{notebook_id} 争路由匹配(FastAPI 按声明序,静态段必须先注册)。",
           "operationId": "mountable_notebooks_route_api_notebooks__notebook_id__mountable_get",
           "parameters": [
             {
@@ -23723,7 +23728,7 @@
       },
       "/api/notebooks/{notebook_id}/mounted-by-count": {
         "get": {
-          "description": "删除确认弹窗专用(spec §6):有多少笔记本正在把本 notebook 挂为参考库——\nON DELETE CASCADE 会连同这些边一起清空且不可撤销,用户点删除前必须看到影响面。\n它只喂 owner-only 的删除确认流,自身语义是 owner-scoped,故归 notebook:configure\n(恒 owner)——与 DELETE 同为 owner-only,不随内容管理权翻给组管理员(P2-T2 评审)。\n计数本身不泄露库名/token,归 configure 是为了让这个「与 DELETE 同权」的旧承诺在\n翻格后仍然成立,而不是留在 notebook:manage 上被顺带翻成 admin。",
+          "description": "删除确认弹窗专用(spec §6):有多少笔记本正在把本 notebook 挂为参考库——\nON DELETE CASCADE 会连同这些边一起清空且不可撤销,用户点删除前必须看到影响面。\n它只喂 owner-only 的删除确认流,自身语义是 owner-scoped,故归 notebook:mount\n(恒 owner)——与 DELETE 同为 owner-only,不随内容管理权翻给组管理员(P2-T2 评审)。\n计数本身不泄露库名/token,归这一格是为了让这个「与 DELETE 同权」的旧承诺在翻格后\n仍然成立,而不是留在 notebook:manage 上被顺带翻成 admin。\n⚠ 与 DELETE 同权的这条承诺现在连**镜像围栏**一起继承:镜像只能由导入器退役,\nDELETE 在镜像上 409,喂它的这条计数同样 409——两者一致才不会出现「弹窗打得开、\n确认按钮必然失败」。",
           "operationId": "mounted_by_count_route_api_notebooks__notebook_id__mounted_by_count_get",
           "parameters": [
             {
@@ -24828,7 +24833,7 @@
       },
       "/api/notebooks/{notebook_id}/scale-index/cancel": {
         "post": {
-          "description": "取消检索索引:排队中→出队;构建中→拒绝(不可打断)。",
+          "description": "取消检索索引:排队中→出队;构建中→拒绝(不可打断)。\n\n与 rebuild 同格 `scale_index:write`:取消的是那次重建,两者必须同权同围栏,\n否则镜像上会出现「建得起来、取消不掉」。",
           "operationId": "cancel_scale_index_api_notebooks__notebook_id__scale_index_cancel_post",
           "parameters": [
             {
@@ -24870,7 +24875,7 @@
       },
       "/api/notebooks/{notebook_id}/scale-index/rebuild": {
         "post": {
-          "description": "在线重建 scale 检索索引(base-tier / 已建过)。when=now 立即后台/idle 低峰调度;\nmode=auto(fold/full 自选)|fold|full。400 若参数非法,409 若不合格,404 若缺。",
+          "description": "在线重建 scale 检索索引(base-tier / 已建过)。when=now 立即后台/idle 低峰调度;\nmode=auto(fold/full 自选)|fold|full。400 若参数非法,409 若不合格,404 若缺。\n\n⚠ 能力名是 `scale_index:write` 而不是 `kg:write`(级别同为 admin,权限一个字没变)。\n拆出来是为了**镜像笔记本**:检索索引(`kg_index/` / `kg_viz/` 工件)是目标端自有的\n派生产物,不在跨环境同步闭包里(设计 docs/incremental-sync-design.md §6),所以它\n必须能在镜像上重建——重建恰恰是目标端唯一的修复手段,跟着 `kg:write` 一起被围栏\n挡掉会让一本镜像库永远停在导入那一刻的索引上。见 deps.py 两张表上方的注释。",
           "operationId": "rebuild_scale_index_api_notebooks__notebook_id__scale_index_rebuild_post",
           "parameters": [
             {
@@ -25087,7 +25092,7 @@
           "summary": "Unshare Notebook Route"
         },
         "get": {
-          "description": "当前的分享链接状态。**只读**——打开分享弹窗不该铸出一条链接。\n\n与 POST/DELETE 同为 owner-only(notebook:configure):它回传 `share_token`——一条\n只要拿到就能整本 copy/join 的持有型凭证。组管理员即便有内容管理权也不该读到它\n(会把库主对外处置的链接转手泄露出去,P2-T2 评审 P0)。「共享给群组」那一节的\n授权边管理走独立的 notebook:manage(GET/POST/DELETE /grants),前端因此对组管理员\n跳过这条 GET、只渲染群组授权区(见 page.tsx openShareModal)。\n\n没有 token 时返回空串且**不计算**规模统计。理由见 `ShareState` 的模型注释\n(「只想共享给群组」的用户不该因为打开了一次弹窗就被发一条分享链接)。",
+          "description": "当前的分享链接状态。**只读**——打开分享弹窗不该铸出一条链接。\n\n与 POST/DELETE 同为 owner-only(notebook:configure):它回传 `share_token`——一条\n只要拿到就能整本 copy/join 的持有型凭证。组管理员即便有内容管理权也不该读到它\n(会把库主对外处置的链接转手泄露出去,P2-T2 评审 P0)。「共享给群组」那一节的\n授权边管理走独立的 notebook:grant(GET/POST/DELETE /grants),前端因此对组管理员\n跳过这条 GET、只渲染群组授权区(见 page.tsx openShareModal)。\n\n没有 token 时返回空串且**不计算**规模统计。理由见 `ShareState` 的模型注释\n(「只想共享给群组」的用户不该因为打开了一次弹窗就被发一条分享链接)。",
           "operationId": "share_state_route_api_notebooks__notebook_id__share_get",
           "parameters": [
             {
@@ -26205,7 +26210,7 @@
       },
       "/api/notebooks/{notebook_id}/tier": {
         "post": {
-          "description": "Set a notebook's federation tier: 'base'(发布为公共知识库,可被任何笔记本\n挂载为参考库) 或 'personal'(撤回发布)。**不再全局唯一** —— 每个领域可以有自己\n的公共知识库。\n\n⚠ 能力档留在 `notebook:manage`(P2-T2 后 = admin,组管理员可过守卫),但体内\n还有一道**系统管理员**门(`user.role != \"admin\"`):发布公共库始终只有系统\n管理员能做,组管理员过了能力守卫也会被这道 403 挡住。它不与 `notebook:configure`\n(挂载/链接分享,恒 owner)同轴——那批是 owner 对自己库的配置,这里是系统级\n发布,两道门的判据不同,刻意不合并。",
+          "description": "Set a notebook's federation tier: 'base'(发布为公共知识库,可被任何笔记本\n挂载为参考库) 或 'personal'(撤回发布)。**不再全局唯一** —— 每个领域可以有自己\n的公共知识库。\n\n⚠ 能力档留在 `notebook:manage`(P2-T2 后 = admin,组管理员可过守卫),但体内\n还有一道**系统管理员**门(`user.role != \"admin\"`):发布公共库始终只有系统\n管理员能做,组管理员过了能力守卫也会被这道 403 挡住。它不与 `notebook:configure`\n(链接分享)/ `notebook:mount`(挂载配置)同轴——那两批是 owner 对自己库的配置,\n这里是系统级发布,判据不同,刻意不合并。\n\n⚠ tier 是**同步来的**字段,所以这条端点随 `notebook:manage` 一起带镜像写入围栏:\n镜像上改 tier 返回 409 `notebook_mirrored`(见 deps.py 的 `_CAPABILITY_MIRROR_FENCE`)。",
           "operationId": "set_notebook_tier_api_notebooks__notebook_id__tier_post",
           "parameters": [
             {
@@ -28315,6 +28320,7 @@
       "shared_from": "",
       "source_types": [],
       "status": "draft",
+      "sync_origin": "",
       "target_users": "",
       "taxonomy": [],
       "tier": "personal"

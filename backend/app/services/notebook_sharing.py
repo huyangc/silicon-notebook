@@ -96,6 +96,11 @@ def _reset_copied_notebook_row(
         indexing_pipeline_generation="",
         indexing_pipeline_job_id="",
         metadata_generation=0,
+        # 副本是**本地**笔记本,即便被拷的是一本镜像(设计文档
+        # docs/incremental-sync-design.md §5:「复制笔记本的产物是本地笔记本,允许;
+        # 但复制不带 sync_origin」)。照抄源库这一列会让副本也被写入围栏挡住,而它
+        # 根本不在任何同步关系里——下一次导入不会碰它,新 owner 却再也改不动它。
+        sync_origin="",
     )
 
 
@@ -1130,6 +1135,14 @@ class NotebookSharingService:
         复刻;P1 群组授权扩展读权时,那份复刻不会跟随(正是这次委托要防的)。
         """
         return self._store.user_can_read_notebook(notebook_id, user_id)
+
+    def notebook_sync_origin(self, notebook_id: str) -> str:
+        """镜像来源标识(空 = 本地库)。目标端写入围栏的读侧,一跳直接委托 store。
+
+        与上面三条访问守卫**并列而不同类**:那三条答「谁能写」,这一条答「这本库的
+        内容还能不能被写」。围栏叠在能力守卫之上,所以这里不带任何权限判定。
+        """
+        return self._store.notebook_sync_origin(notebook_id)
 
     def user_can_read_source(self, source_id: str, user_id: str) -> bool:
         notebook_id = self._store.source_notebook_id(source_id)

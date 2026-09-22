@@ -1002,10 +1002,11 @@ def test_an_admin_grant_widens_management_but_never_deletion(tmp_path, monkeypat
     """P2-T2 的能力翻转在这条路由矩阵上的样子——**逐格**说清哪几格翻了。
 
     这条取代了 P1 的「授权边的 role 写成 admin 也一个字的写权都不给」:那句话在 P2
-    之后**不再为真**,是刻意的边界放宽(裁决 P2-1),不是回归。翻的是 `notebook:manage`
-    那几格(改库信息 / 设 tier / 看授权边清单);`DELETE /notebooks/{id}` 挂
-    `notebook:delete`,`/share` 与 `/bases`、`/mountable` 挂 `notebook:configure`
-    (P2-T2 评审 P0),这三类恒 owner,组管理员照旧 404。
+    之后**不再为真**,是刻意的边界放宽(裁决 P2-1),不是回归。翻的是内容管理那几格
+    (改库信息 / 设 tier = `notebook:manage`,看授权边清单 = `notebook:grant`);
+    `DELETE /notebooks/{id}` 挂 `notebook:delete`,`/share` 挂 `notebook:configure`,
+    `/bases`、`/mountable` 挂 `notebook:mount`(P2-T2 评审 P0 立、跨环境同步 §5 拆名,
+    **级别一个字没变**),这几类恒 owner,组管理员照旧 404。
 
     ⚠ 「组管理员能删掉库主的整本笔记本」是本次改动最贵的失手形态,所以删库那一格
     **单独断言**而不是混在循环里——它失败时的信息必须直接说出这件事。
@@ -1031,8 +1032,9 @@ def test_an_admin_grant_widens_management_but_never_deletion(tmp_path, monkeypat
     )
 
     assert client.get(f"/api/notebooks/{notebook_id}", headers=member).status_code == 200
-    # notebook:manage 那几格 —— 组管理员放行(不是 404)。/share **不在这里**:它已归
-    # notebook:configure(恒 owner),下面单独断言 404。
+    # 内容管理那几格(manage / grant)—— 组管理员放行(不是 404)。/share 与
+    # /bases、/mountable **不在这里**:它们归恒 owner 的 notebook:configure /
+    # notebook:mount,下面单独断言 404。
     for method, suffix, payload in (
         ("patch", "", {"name": "组管理员改的名"}),
         ("post", "/tier", {"tier": "personal"}),
@@ -1046,7 +1048,9 @@ def test_an_admin_grant_widens_management_but_never_deletion(tmp_path, monkeypat
         )
         assert response.status_code != 404, (method, suffix, response.status_code, response.text)
 
-    # notebook:configure 那几格(挂载配置 + 链接分享)—— 组管理员一律 404(P2-T2 评审 P0)。
+    # 恒 owner 的那几格(挂载配置 = notebook:mount,链接分享 = notebook:configure)
+    # —— 组管理员一律 404(P2-T2 评审 P0;跨环境同步 §5 把它们拆成两个能力名之后,
+    # 这批 404 一个字没变)。
     for method, suffix, payload in (
         ("get", "/bases", None),
         ("get", "/mountable", None),
@@ -1982,7 +1986,7 @@ def test_can_manage_content_survives_the_member_row_dedup(tmp_path, monkeypatch,
     assert detail["granted_via"] == []
     assert detail["can_manage_content"] is True
     # 且它确实能用:内容管理档端点放行(改名 = notebook:manage)。⚠ 不用 mounted-by-count
-    # ——它是 notebook:configure(恒 owner),组管理员对它 404,拿它当「管理档」会测反。
+    # ——它归恒 owner 的 notebook:mount,组管理员对它 404,拿它当「管理档」会测反。
     assert client.patch(
         f"/api/notebooks/{notebook_id}", json={"name": "probe"}, headers=deputy
     ).status_code == 200

@@ -824,7 +824,7 @@ def _selected_notebook(
         _record_agent_call(repo, principal, notebook_id, scope)
     return principal, notebook_id
 def _writable_notebook(
-    ctx: Context, repo: Any, scope: str, record: bool = True
+    ctx: Context, repo: Any, scope: str, record: bool = True, fenced: bool = True
 ) -> tuple[AgentPrincipal, str]:
     """``_selected_notebook`` plus the OWNER-ONLY write gate.
 
@@ -904,6 +904,30 @@ def _writable_notebook(
           (paired with ``test_source_writes_are_refused_in_a_read_only_
           shared_notebook``, the write this gate DOES refuse under the same
           share).
+
+    ⚠ The **mirror fence** (``refuse_if_mirrored``, applied below) is a third,
+    orthogonal axis, and the two bypasses above split differently on it:
+
+    * ``put_knowhow_cell_code`` DOES get the fence, applied at its own call
+      site: ``knowhow_cell_code`` is inside the notebook content closure an
+      import replaces wholesale, so an attachment written on a mirror is data
+      the next sync silently destroys.
+    * ``add_observation`` (and ``propose_memory``, on
+      ``_selected_notebook`` likewise) does NOT: those rows are the TARGET
+      user's own interaction data, keyed by the calling member's own id, and
+      the design doc's section 5 names memory candidates among the entries the
+      fence explicitly lets through — both environments' rows coexist because
+      ids never collide.
+
+    ``fenced=False`` opts one caller out of the mirror check while keeping the
+    owner gate — exactly one tool passes it, ``build_retrieval_index``, and the
+    reason is the HTTP twin's: a retrieval index is a TARGET-LOCAL derived
+    artifact outside the sync closure (design doc section 6), so a mirror must
+    be able to rebuild it. The browser side expresses the same split by putting
+    those two endpoints on their own capability ``scale_index:write``; this
+    surface has no capability table, so it says it with this argument.
+    ``build_kg`` keeps the fence: it writes knowledge rows, which an import
+    does replace.
     """
     # ``record=False``: the call ledger only books calls that cleared EVERY
     # gate, and this helper's owner-only check below is the second one. A
@@ -916,8 +940,63 @@ def _writable_notebook(
             "this write operation requires owning the notebook; the token "
             "owner only has read access here"
         )
+    if fenced:
+        refuse_if_mirrored(repo, notebook_id)
     # ``record=False`` 再往下传一层:``delete_source`` 在这道闸之后**还有**一道
     # 鉴权(只许删 Agent 自己添加的资料),由它自己在那道闸之后记(codex #616 R6 P2)。
     if record:
         _record_agent_call(repo, principal, notebook_id, scope)
     return principal, notebook_id
+
+
+class MirroredNotebookError(RuntimeError):
+    """This notebook is a mirror of another environment's; its synced content
+    is not writable here (docs/incremental-sync-design.md section 5).
+
+    A distinct type rather than ``PermissionError`` because it is a different
+    answer: the caller's permissions are fine, the *resource* refuses the write
+    — the same split the browser surface expresses as 409 ``notebook_mirrored``
+    rather than 404/403. ``sync_origin`` is carried on the exception so a tool
+    can name the source environment, exactly like the HTTP ``detail`` does.
+
+    The message says the same thing the HTTP ``detail``'s ``message`` says
+    (``deps._mirror_message``), in English because every message on this surface
+    is written for an Agent rather than for the browser UI — the two must not
+    drift into telling the same user two different stories about why a write
+    was refused.
+    """
+
+    def __init__(self, sync_origin: str) -> None:
+        self.sync_origin = sync_origin
+        super().__init__(
+            f"this notebook is a mirror synced from {sync_origin!r}; its "
+            "content can only be changed in that source environment"
+        )
+
+
+def refuse_if_mirrored(repo: Any, notebook_id: str) -> None:
+    """The Agent/MCP half of the target-end write fence.
+
+    Applied AFTER every authorization gate, for the same reason the browser
+    fence runs after the capability guard: a principal who may not touch this
+    notebook at all must keep getting the authorization answer, not a message
+    telling them the notebook exists and where it was synced from.
+
+    Placed inside ``_writable_notebook`` so every current and future consumer
+    of that gate inherits it without its author doing anything — the same
+    "one choke point" property ``_record_agent_call`` relies on. The two write
+    tools that deliberately bypass ``_writable_notebook`` call this directly
+    (``put_knowhow_cell_code``) or deliberately do not (``add_observation``);
+    both choices are recorded at those call sites.
+
+    ⚠ Read through ``_runtime.sharing`` rather than as a facade method (the
+    precedent is ``maintenance.py``'s ``repo._runtime.models``): the facade's
+    public surface is a ratcheted contract that may only shrink
+    (``scripts/architecture_boundary_baseline.json::facade_public_surface``),
+    and this fence does not need a seat on it — it reads the one store that
+    already owns the column, the same store ``deps.notebook_access_repository()``
+    hands the browser surface.
+    """
+    origin = repo._runtime.sharing.notebook_sync_origin(notebook_id)
+    if origin:
+        raise MirroredNotebookError(str(origin))

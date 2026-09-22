@@ -15,6 +15,7 @@ from ._shared import (
     _owner_request_context,
     _run_with_progress,
     _selected_notebook,
+    refuse_if_mirrored,
 )
 
 
@@ -129,6 +130,16 @@ def register_knowhow_tools(
         principal, notebook_id = await anyio.to_thread.run_sync(
             _selected_notebook, ctx, repo, "knowhow:code"
         )
+        # The target-end write fence, applied directly because this tool
+        # deliberately does NOT go through ``_writable_notebook`` (design doc
+        # §⑥-4 keeps ``knowhow:code`` entirely scope-driven; see that helper's
+        # docstring for why). The two decisions are orthogonal and both hold:
+        # a read-only member may still attach code, and NOBODY may attach it to
+        # a mirrored notebook — ``knowhow_cell_code`` is inside the notebook
+        # content closure that the importer replaces wholesale
+        # (``sharing_store``'s copy table list), so an attachment written here
+        # would be silently overwritten by the next import.
+        await anyio.to_thread.run_sync(refuse_if_mirrored, repo, notebook_id)
 
         def run() -> dict[str, Any]:
             with _owner_request_context(principal):

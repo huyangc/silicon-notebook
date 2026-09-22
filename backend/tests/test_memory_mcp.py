@@ -5583,3 +5583,131 @@ def test_the_whole_or_nothing_rule_is_enforced_by_both_shrink_mechanisms():
     assert _sanitize_output(
         {"url": url, "label": "y"}, stats, field_limits={"url": 40},
     ) == {"label": "y"}
+
+
+# --- target-end write fence: mirrored notebooks (cross-environment sync §5) --
+#
+# `notebooks.sync_origin` non-empty means this notebook is a MIRROR imported
+# from another environment. The browser surface answers 409 `notebook_mirrored`
+# (see `backend/tests/test_notebook_capability_guard.py`); the Agent/MCP surface
+# has its own gate (`mcp_tools/_shared.refuse_if_mirrored`), and these tests pin
+# the split it makes, because the split is NOT the same one the owner-only gate
+# makes and the two are easy to conflate.
+
+
+def _mark_notebook_mirrored(notebook_id: str, origin: str = "prod-shanghai") -> str:
+    """Stamp a notebook as a mirror through the store the importer itself uses.
+
+    There is no user-facing write path for this column on purpose — only the
+    cross-environment importer writes it, and it goes through the repository
+    layer precisely so it bypasses the fence it is installing.
+    """
+    runtime = repository()._runtime
+    runtime.sharing_store.set_notebook_sync_origin(notebook_id, origin)
+    assert runtime.sharing.notebook_sync_origin(notebook_id) == origin
+    return origin
+
+
+@pytest.mark.anyio
+async def test_agent_content_writes_are_refused_on_a_mirrored_notebook(
+    mcp_env, scheduled_jobs
+):
+    """Alice OWNS this notebook and holds every source scope — and still cannot
+    write, because it is a mirror.
+
+    This is the property that makes the fence a separate axis from the
+    owner-only gate above: permission is not what is missing here. A source
+    added, re-parsed or deleted on a mirror does not survive the next import,
+    so allowing it would be silent data loss rather than a mere race.
+
+    Reads stay open (a mirror is a library you use, just not one you edit), and
+    that read is also what proves the refusals above are the fence talking and
+    not a broken token.
+    """
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    seeded = _seed_cited_source(repo, notebook_id, "mirrored-notebook")
+    _mark_notebook_mirrored(notebook_id)
+    token = _agent_token(mcp_env, _SOURCE_FULL)
+
+    async with OfficialMcpClient(mcp_env["app"], token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        assert not (await client.call(
+            "get_source_status", {"source_id": seeded["source_id"]}
+        )).isError
+        assert (await client.call("add_source_text", {
+            "title": "镜像", "content_md": "镜像上写不进来",
+        })).isError
+        assert (await client.call(
+            "reparse_source", {"source_id": seeded["source_id"]}
+        )).isError
+        assert (await client.call(
+            "delete_source", {"source_id": seeded["source_id"]}
+        )).isError
+
+    assert _source_row_exists(repo, seeded["source_id"])
+    assert len(repo.list_sources(notebook_id)) == 1
+    assert scheduled_jobs == []
+
+
+@pytest.mark.anyio
+async def test_agent_knowhow_code_write_is_refused_on_a_mirrored_notebook(mcp_env):
+    """`knowhow:code` splits the OTHER way on the two axes, and that is the
+    whole point of pinning it.
+
+    It bypasses the owner-only gate on purpose (a read-only member may attach
+    cell code — see the test above), but it does NOT bypass the mirror fence:
+    `knowhow_cell_code` is inside the notebook content closure an import
+    replaces wholesale, so an attachment written here is data the next sync
+    destroys. A single "is this an Agent write?" flag could not express both
+    answers, which is why the fence is applied at this tool's own call site
+    rather than folded into `_writable_notebook`.
+    """
+    notebook_id = mcp_env["notebook"].id
+    table_id, row_id, method_id = _seed_knowhow_table(notebook_id)
+    _mark_notebook_mirrored(notebook_id)
+    token = _agent_token(mcp_env, ["knowledge:read", "knowhow:code"])
+
+    async with OfficialMcpClient(mcp_env["app"], token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        assert (await client.call("put_knowhow_cell_code", {
+            "row_id": row_id, "column_id": method_id,
+            "code_text": "print('mirror')", "language": "python",
+        })).isError
+        # Reading the same row still works — the fence refuses writes, not use.
+        row = _payload(await client.call("get_knowhow_row", {"row_id": row_id}))
+        assert row["code"] == []
+
+
+@pytest.mark.anyio
+async def test_agent_observations_are_still_accepted_on_a_mirrored_notebook(
+    mcp_env,
+):
+    """The deliberate exemption: `add_observation` keeps working on a mirror.
+
+    Those rows are the TARGET user's own interaction data, keyed by the calling
+    member's own id, read back only into that same member's own overlay — they
+    are not part of what an import replaces, and ids from the two environments
+    never collide, so both sides' rows simply coexist. Design doc section 5
+    names memory candidates in the same exempt group for the same reason.
+
+    Pinned as its own test because over-fencing is a regression too: a fence
+    that swept in every Agent write would silence a member's own Agent in every
+    mirrored library, with nothing in the response explaining why.
+    """
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    _mark_notebook_mirrored(notebook_id)
+    token = _agent_token(mcp_env, _OBSERVATION_WRITE)
+
+    async with OfficialMcpClient(mcp_env["app"], token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        accepted = _payload(await client.call("add_observation", {
+            "text": "Mirrored library: exact_lookup worked here too.",
+            "client_request_id": "obs-mirrored-1",
+        }))
+
+    assert accepted["accepted"] is True
+    assert len(repo.agent_observations.list_observations(
+        notebook_id, mcp_env["alice"].id, limit=10
+    )) == 1

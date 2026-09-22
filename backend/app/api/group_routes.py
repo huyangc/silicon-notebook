@@ -17,7 +17,7 @@
    群组维度,笔记本的读写守卫一个字不动。
 
 2. **授权边的创建是双重条件**(设计文档决策 9):请求者既要对这本笔记本有管理权
-   (由 `require_notebook_capability("notebook:manage")` 在依赖层挡住),又要是目标
+   (由 `require_notebook_capability("notebook:grant")` 在依赖层挡住),又要是目标
    群组的组管理员(在路由体内查)。少任何一半都不许发边,而且两半的失败形态要说清
    缺的是哪一半——「403」本身不告诉用户该去找谁。这里的 403 不退化成 404:能走到
    这一步说明请求者对这本库有管理权,库的存在性对他本来就不是秘密。
@@ -554,7 +554,7 @@ def leave_group_route(
 @router.get(
     "/notebooks/{notebook_id}/grants",
     response_model=List[NotebookGrantItem],
-    dependencies=[Depends(require_notebook_capability("notebook:manage"))],
+    dependencies=[Depends(require_notebook_capability("notebook:grant"))],
 )
 def list_notebook_grants_route(notebook_id: str) -> List[NotebookGrantItem]:
     """这本库上的全部授权边。
@@ -572,7 +572,7 @@ def list_notebook_grants_route(notebook_id: str) -> List[NotebookGrantItem]:
 @router.post(
     "/notebooks/{notebook_id}/grants",
     response_model=NotebookGrantItem,
-    dependencies=[Depends(require_notebook_capability("notebook:manage"))],
+    dependencies=[Depends(require_notebook_capability("notebook:grant"))],
 )
 def create_notebook_grant_route(
     notebook_id: str,
@@ -626,7 +626,7 @@ def create_notebook_grant_route(
 @router.delete(
     "/notebooks/{notebook_id}/grants/{grant_id}",
     status_code=204,
-    dependencies=[Depends(require_notebook_capability("notebook:manage"))],
+    dependencies=[Depends(require_notebook_capability("notebook:grant"))],
 )
 def delete_notebook_grant_route(notebook_id: str, grant_id: str) -> None:
     """从笔记本维度撤销一条边。库的管理者即可,不要求他也是那个组的管理员。
@@ -688,7 +688,7 @@ def delete_group_shared_notebook_route(
 @router.post(
     "/notebooks/{notebook_id}/share-requests",
     response_model=ShareRequestItem,
-    dependencies=[Depends(require_notebook_capability("notebook:manage"))],
+    dependencies=[Depends(require_notebook_capability("notebook:grant"))],
 )
 def create_share_request_route(
     notebook_id: str,
@@ -757,7 +757,7 @@ def create_share_request_route(
 @router.get(
     "/notebooks/{notebook_id}/share-requests",
     response_model=List[ShareRequestItem],
-    dependencies=[Depends(require_notebook_capability("notebook:manage"))],
+    dependencies=[Depends(require_notebook_capability("notebook:grant"))],
 )
 def list_my_share_requests_route(
     notebook_id: str, user: UserProfile = Depends(get_current_user)

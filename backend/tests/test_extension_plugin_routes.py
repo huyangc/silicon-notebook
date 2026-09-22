@@ -1199,24 +1199,46 @@ def test_plugin_route_with_only_the_read_gate_mounts(
 
 
 def test_notebook_gate_set_is_derived_from_the_capability_table():
-    """The accepted gates are exactly core's three guards, derived not listed.
+    """The accepted gates are exactly what the capability table yields, plus read.
 
     ``extension_routes`` may not *name* the two bare level guards (a route-file
     guard forbids it), so it asks the capability factory for each registered
     capability instead. This test names them — a test file is not scanned — and
     pins the result, so a derivation that silently returned a smaller or wider
-    set than core's own three would fail here rather than at some future
-    plugin's mount.
+    set than the capability table's own would fail here rather than at some
+    future plugin's mount.
+
+    Since the target-end write fence (docs/incremental-sync-design.md section 5)
+    the set is no longer just three objects: a fenced capability resolves to its
+    own per-capability wrapper (level guard first, then the mirror check), so the
+    expected set is "one object per fenced capability, plus the two bare level
+    guards the unfenced ones still resolve to, plus read". Built here from the
+    same two tables rather than hard-coded, because hard-coding it would mean
+    editing this test on every future capability — but pinned by the three
+    structural assertions below, so a derivation that collapsed to a single
+    shared object, or that quietly dropped the level guards, still fails.
     """
 
     from app.api import deps
     from app.api.extension_routes import _notebook_gates
 
-    assert _notebook_gates() == {
-        deps.require_notebook_write,
-        deps.require_notebook_admin,
-        deps.require_notebook_read,
-    }
+    gates = _notebook_gates()
+    expected = {
+        deps.require_notebook_capability(capability)
+        for capability in deps._CAPABILITY_LEVELS
+    } | {deps.require_notebook_read}
+    assert gates == expected
+
+    fenced = {c for c, on in deps._CAPABILITY_MIRROR_FENCE.items() if on}
+    unfenced = set(deps._CAPABILITY_LEVELS) - fenced
+    # Unfenced capabilities still resolve to the bare level guards themselves.
+    assert {deps.require_notebook_write, deps.require_notebook_admin} <= gates
+    # Every fenced capability contributes its OWN distinct wrapper — one shared
+    # wrapper would make a per-capability fence unimplementable.
+    assert len(gates) == len(fenced) + len(
+        {deps._CAPABILITY_LEVELS[c] for c in unfenced}
+    ) + 1
+    assert deps.require_notebook_read in gates
 
 
 def test_router_missing_the_notebook_gate_fails_to_mount(
@@ -2154,6 +2176,65 @@ def test_url_import_maps_unconfigured_parser_to_400(
     )
     assert response.status_code == 400
     assert "X-User-Message" not in response.headers
+
+
+def test_plugin_url_import_is_refused_on_a_mirrored_notebook(
+    tmp_path, monkeypatch, frozen_runtime_reset
+):
+    """The plugin port inherits the target-end write fence, 409 and all.
+
+    This port is the one write surface that never passes through
+    ``require_notebook_capability`` — a plugin declares its own gate and calls
+    ``url_sources.import_urls``, and core proves the capability separately in
+    ``_authorized_notebook``. Without the fence applied there too, installing a
+    plugin would be enough to reopen every mirrored notebook to source writes,
+    which is the one hole a capability-table fence cannot see.
+
+    The refusal must be core's own shape, not something the plugin dressed up:
+    same 409, same ``code``/``message``/``sync_origin`` detail the browser
+    endpoints return, and no ``X-User-Message`` (a structured detail is not
+    display-ready copy — same rule ``test_url_import_maps_unconfigured_parser_
+    to_400`` pins one axis over).
+    """
+
+    from app.services import remote_sources
+    from app.services.remote_sources import PdfProbe
+
+    client = _client(tmp_path, monkeypatch, env={"MINERU_API_TOKEN": "tok"})
+    monkeypatch.setattr(
+        remote_sources, "probe_pdf", lambda url, **kw: PdfProbe(True, "", 1, "d.pdf")
+    )
+    headers = _auth(client, "z00133013")
+    notebook_id = _notebook(client, headers)
+    local_id = _notebook(client, headers)
+    from app.api.deps import repository
+
+    repository()._runtime.sharing_store.set_notebook_sync_origin(
+        notebook_id, "prod-shanghai"
+    )
+
+    refused = client.post(
+        f"{_MOUNT}/notebooks/{notebook_id}/import",
+        json={"urls": ["https://a/d.pdf"]},
+        headers=headers,
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["code"] == "notebook_mirrored"
+    assert refused.json()["detail"]["sync_origin"] == "prod-shanghai"
+    assert refused.json()["detail"]["message"]
+    assert "X-User-Message" not in refused.headers
+    # Nothing was imported — the fence runs before any source row is written.
+    assert repository().list_sources(notebook_id) == []
+
+    # The same plugin route on a LOCAL notebook is untouched: the fence is a
+    # branch, not a new global refusal on this port.
+    allowed = client.post(
+        f"{_MOUNT}/notebooks/{local_id}/import",
+        json={"urls": ["https://a/d.pdf"]},
+        headers=headers,
+    )
+    assert allowed.status_code == 200, allowed.text
+    assert len(allowed.json()["created"]) == 1
 
 
 def _trusted_proxy_probe_client(tmp_path, monkeypatch):

@@ -36,7 +36,7 @@ import type { NotebookSummary } from "./workspace-model.ts";
  * 组管理员的行内改名(群组知识共享 P2-T2 评审 P2-4)。
  *
  * 改名走 PATCH /notebooks/{id}（notebook:manage,组管理员 ✓,后端实测 200)——**不是**
- * 那个 fused 编辑器(它连挂载配置一起拉,是 owner-only 的 notebook:configure)。所以
+ * 那个 fused 编辑器(它连挂载配置一起拉,是 owner-only 的 notebook:mount)。所以
  * owner 的顶栏输入框与组管理员的这个共用同一个 PATCH-only handler,只是渲染位置不同:
  * owner 走 page.tsx 自己的 <input>,组管理员走**徽章内**的这个,好保住「可管理·来自
  * 群组《X》」的身份标注。纯只读成员不传它(下面按 can_manage_content 才启用)。
@@ -174,7 +174,7 @@ type NotebookMenuActionsProps = {
  * - 组管理员 / 群组共享的只读成员(reader + `granted_via`):只有「由组管理员管理」
  *   说明,**没有编辑信息、没有删除、没有退出**。⚠ 组管理员的「编辑信息」刻意**不在
  *   这里**(P2-T2 评审 P2-4 修正):卡片菜单的「编辑信息」打开的是那个 fused 编辑器
- *   (`openNotebookEditor` 连挂载配置一起拉,是 owner-only 的 notebook:configure),
+ *   (`openNotebookEditor` 连挂载配置一起拉,是 owner-only 的 notebook:mount),
  *   给组管理员画出来点了会在 listMountable 上 404。组管理员改名走**工作区顶栏**的
  *   行内输入框(PATCH-only,见 ReaderNotebookBadge.rename)——那条不碰挂载配置;
  * - 只读共享(分享链接、非群组):退出共享。

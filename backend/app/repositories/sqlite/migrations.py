@@ -226,7 +226,14 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # notebook_id as a filter. Design doc
 # docs/superpowers/specs/2026-09-22-retrieval-experience-per-notebook-
 # design_zh.md Sec 3.
-SCHEMA_VERSION = 79
+# v80 adds notebooks.sync_origin (TEXT NOT NULL DEFAULT ''), paired with
+# PostgreSQL 0060_notebook_sync_origin.sql. Non-empty marks the notebook a
+# mirror imported from another environment, and the value is that source
+# environment's identifier; the target-side write fence keys off it (see
+# docs/incremental-sync-design.md section 5). No table, index, FK or unique
+# surface change, and no backfill -- every pre-existing row is local, which is
+# exactly what the default records.
+SCHEMA_VERSION = 80
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -4347,6 +4354,21 @@ class SqliteMigrator:
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_retrieval_experiences_notebook\n"
                 "                 ON retrieval_experiences(notebook_id, id)"
+            )
+
+
+    def _migration_80(self) -> None:
+        """Mark notebooks that are mirrors of another environment's notebooks.
+
+        Paired with PostgreSQL ``0060_notebook_sync_origin.sql``. Empty means
+        "local notebook"; a non-empty value is the source environment's
+        identifier, and the target-side write fence
+        (``api/deps.py::_CAPABILITY_MIRROR_FENCE``) refuses content mutations on
+        such a notebook so the next import cannot silently overwrite them.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "notebooks", "sync_origin", "TEXT NOT NULL DEFAULT ''"
             )
 
     def _seed(self) -> None:

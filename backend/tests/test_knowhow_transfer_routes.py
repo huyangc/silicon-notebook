@@ -269,3 +269,102 @@ def test_table_from_another_notebook_is_404(client, repo):
     )
     assert resp.status_code == 404, resp.text
     assert repo.get_knowhow_table(tid_in_b)["notebook_id"] == nb_b
+
+
+# --- 跨环境同步 §5:镜像笔记本上的表转移 -----------------------------------
+#
+# 这条路由是**唯一**一个一次请求碰两本笔记本的 knowhow 写,所以它的围栏也是唯一一个
+# 要判两次、而且两次判据不同的:
+#   * 目标库 **copy 与 move 都判** —— 两种 mode 都会在目标库落一张新表;
+#   * 源库 **只有 move 判** —— copy 不动源库(源侧走的本来就是读权),move 才拆投影删表。
+# 写成两条用例,是因为「把源侧也无条件挡上」与「把目标侧漏掉」这两种失手各自只会让
+# 其中一条红。
+
+
+def _mark_mirror(nb: str, origin: str = "prod-shanghai") -> str:
+    from app.api.deps import repository
+
+    repository()._runtime.sharing_store.set_notebook_sync_origin(nb, origin)
+    return origin
+
+
+def test_copy_into_a_mirrored_target_is_refused_but_out_of_one_is_allowed(
+    client, repo
+):
+    """copy:**源**是镜像照常放行,**目标**是镜像 409。
+
+    方向性是这条用例的全部内容。从镜像里把一张表 copy 出去是纯读——它不动镜像一个
+    字节,还恰恰是目标端「我想基于同步来的内容干活」的正路;把它一起挡掉会让镜像库
+    变成一座取不出东西的孤岛。反过来,copy 进镜像落的是一张新表,下一次导入会把它
+    连同整本库一起换掉。
+    """
+    h = _login(client, "z00000001")
+    mirrored = client.post("/api/notebooks", json={"name": "镜像"}, headers=h).json()["id"]
+    local = client.post("/api/notebooks", json={"name": "本地"}, headers=h).json()["id"]
+    origin = _mark_mirror(mirrored)
+
+    # 源=镜像、目标=本地:放行,而且真的把表建出来了(不是「没红就算过」)。
+    out_of_mirror = client.post(
+        f"/api/notebooks/{mirrored}/knowhow/{_table(repo, mirrored)}/transfer",
+        json={"target_notebook_id": local, "mode": "copy"},
+        headers=h,
+    )
+    assert out_of_mirror.status_code == 200, out_of_mirror.text
+    assert repo.get_knowhow_table(
+        out_of_mirror.json()["new_table_id"]
+    )["notebook_id"] == local
+
+    # 源=本地、目标=镜像:409,且目标侧一张表都没多。
+    before = len(repo.list_knowhow_tables(mirrored))
+    into_mirror = client.post(
+        f"/api/notebooks/{local}/knowhow/{_table(repo, local)}/transfer",
+        json={"target_notebook_id": mirrored, "mode": "copy"},
+        headers=h,
+    )
+    assert into_mirror.status_code == 409, into_mirror.text
+    assert into_mirror.json()["detail"]["code"] == "notebook_mirrored"
+    assert into_mirror.json()["detail"]["sync_origin"] == origin
+    assert len(repo.list_knowhow_tables(mirrored)) == before
+
+
+def test_move_out_of_a_mirrored_source_is_refused(client, repo):
+    """move:**源**是镜像也要 409——这正是 copy 那一半刻意不挡的地方。
+
+    move 会把源表删掉,而源表是同步来的内容:目标端删得掉,下一次导入又原样搬回来,
+    中间那段时间用户以为自己整理过了。一个只判目标库的实现会在这里放行,而 copy 的
+    用例对它完全无感。
+    """
+    h = _login(client, "z00000002")
+    mirrored = client.post("/api/notebooks", json={"name": "镜像"}, headers=h).json()["id"]
+    local = client.post("/api/notebooks", json={"name": "本地"}, headers=h).json()["id"]
+    origin = _mark_mirror(mirrored)
+    tid = _table(repo, mirrored)
+
+    resp = client.post(
+        f"/api/notebooks/{mirrored}/knowhow/{tid}/transfer",
+        json={"target_notebook_id": local, "mode": "move"},
+        headers=h,
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"] == {
+        "code": "notebook_mirrored",
+        "message": resp.json()["detail"]["message"],
+        "sync_origin": origin,
+    }
+    # 源表原封不动——围栏在任何写入发生**之前**就拦住了。
+    assert repo.get_knowhow_table(tid)["notebook_id"] == mirrored
+
+
+def test_transfer_between_two_local_notebooks_is_unaffected(client, repo):
+    """两本本地库之间照常——围栏是条件分支,不是对这条路由的全局收紧。"""
+    h = _login(client, "z00000003")
+    src = client.post("/api/notebooks", json={"name": "src"}, headers=h).json()["id"]
+    dst = client.post("/api/notebooks", json={"name": "dst"}, headers=h).json()["id"]
+    tid = _table(repo, src)
+    resp = client.post(
+        f"/api/notebooks/{src}/knowhow/{tid}/transfer",
+        json={"target_notebook_id": dst, "mode": "move"},
+        headers=h,
+    )
+    assert resp.status_code == 200, resp.text
+    assert repo.get_knowhow_table(resp.json()["new_table_id"])["notebook_id"] == dst

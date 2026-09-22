@@ -146,7 +146,7 @@ test("同一本库、只差 can_manage_content:纯只读成员仍写「只读」
 
 test("卡片菜单:组管理员只有「由组管理员管理」——没有编辑/删除/退出", () => {
   // ⚠ P2-T2 评审 P2-4 修正:卡片菜单的「编辑信息」打开的是那个 fused 编辑器
-  // (openNotebookEditor 连挂载配置一起拉,是 owner-only 的 notebook:configure),
+  // (openNotebookEditor 连挂载配置一起拉,是 owner-only 的 notebook:mount),
   // 给组管理员画出来点了会在 listMountable 上 404。所以卡片菜单对组管理员**不给**
   // 编辑信息——他改名走工作区顶栏的行内输入框(见下一条),那条是 PATCH-only。
   render(

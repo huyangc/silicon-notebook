@@ -491,6 +491,34 @@ class SharingStore:
             ]
         return (owner["username"] if owner and owner["username"] else "", titles)
 
+    # ----------------------------------------------------- mirror provenance
+    def notebook_sync_origin(self, notebook_id: str) -> str:
+        """这本笔记本的镜像来源标识;本地库(以及不存在的行)返回 ''。
+
+        刻意**不**带 `NOTEBOOK_LIVE_SQL`:唯一消费点是目标端写入围栏
+        (`api/deps.py::_CAPABILITY_MIRROR_FENCE`),而它跑在能力守卫之后——生命周期
+        过滤已经由那道守卫做过了。围栏自己再过滤一次只会把「正在删除中的镜像」读成
+        本地库,从而放行一次它本该拒绝的写。
+
+        行不存在返回 '' 而不是抛,同样是因为它跑在守卫之后:守卫放行意味着这一行当时
+        存在,并发删掉之后正确答案是「让下游那条写入自己撞 404/409」,不是让围栏变成
+        第二个存在性判定。
+        """
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT sync_origin FROM notebooks WHERE id = ?", (notebook_id,)
+            ).fetchone()
+        return str(row["sync_origin"] or "") if row is not None else ""
+
+    def set_notebook_sync_origin(self, notebook_id: str, origin: str) -> None:
+        """打上/摘掉镜像标记。写入方是跨环境导入器(它走 repository 层,不经服务层
+        围栏);产品里没有任何用户面入口。"""
+        with self.database.write(operation="sqlite.notebook.sync_origin") as db:
+            db.execute(
+                "UPDATE notebooks SET sync_origin = ? WHERE id = ?",
+                (origin, notebook_id),
+            )
+
     # ------------------------------------------------------- access & members
     def user_can_access_notebook(self, notebook_id: str, user_id: str) -> bool:
         """写权:仅 owner。谓词见 `access_sql.NOTEBOOK_WRITE_SQL`。"""
