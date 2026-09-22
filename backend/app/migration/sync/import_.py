@@ -3886,9 +3886,17 @@ def _install_files(context: _Context, *, verify: bool) -> None:
     """Install each notebook's ``storage/`` directories from the package.
 
     A full package carries a notebook's whole directory, so the target's copy
-    is REPLACED rather than merged. A directory the package does not carry is
-    left alone: "absent from the package" is how a notebook with no uploads
-    looks, and it must not be read as "delete whatever the target has".
+    is REPLACED rather than merged. An EMPTY snapshot -- ``checksums.json``
+    lists no files at all under this notebook/root, because the source
+    deleted its last upload or attachment since the previous package -- is
+    still a real snapshot and still replaces whatever the target has, via the
+    same staged/retired swap, just with an empty staged directory; skipping
+    it here would leave the target's stale files behind forever even though
+    the reconcile phase already deleted the rows that pointed at them (codex
+    #772 r15 P2). The only case this function truly does nothing for is when
+    the target ALSO has nothing at this path -- no retired copy inherited
+    from an interrupted run, and no existing directory -- so a notebook that
+    has never had an upload does not get an empty directory conjured for it.
 
     Copied file BY file, from ``checksums.json``'s own listing for this
     notebook/root -- never ``shutil.copytree`` over the package's
@@ -3934,7 +3942,12 @@ def _install_files(context: _Context, *, verify: bool) -> None:
             entries = sorted(
                 relative for relative in context.checksums if relative.startswith(prefix)
             )
-            if not entries:
+            if not entries and not inherited and not destination.exists():
+                # The package carries no files here AND the target has
+                # nothing at this path either (no retired copy inherited from
+                # an interrupted run, no existing directory) -- there is
+                # nothing to replace, so nothing is created. This is the
+                # ordinary "notebook has never had an upload" shape.
                 continue
             staged = destination.with_name(destination.name + _STAGED_SUFFIX)
             retired = _retired_path(destination, context.manifest.package_id)

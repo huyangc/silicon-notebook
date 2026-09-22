@@ -2091,6 +2091,117 @@ def test_rows_the_source_deleted_are_removed_from_the_mirror(
     assert any("no longer carries" in warning for warning in report.warnings)
 
 
+def _delete_the_last_upload_and_attachment(source) -> None:
+    """Delete the exported notebook's only source row and only attachment row
+    -- and the disk files they own -- so the NEXT full package carries an
+    empty (but present) ``checksums.json`` listing for both file roots."""
+    notebook = source["exported"]
+    doomed_source = _one(
+        source["repo"],
+        "SELECT id, file_path FROM sources WHERE notebook_id=?",
+        (notebook,),
+    )
+    picture = Path(source["settings"].storage_dir) / "assets" / notebook / "picture.png"
+    with source["repo"]._write() as db:
+        db.execute("DELETE FROM sources WHERE id=?", (doomed_source["id"],))
+        db.execute("DELETE FROM notebook_assets WHERE id=?", ("asset-1",))
+    Path(doomed_source["file_path"]).unlink()
+    picture.unlink()
+
+
+def test_an_emptied_directory_is_still_a_snapshot_and_replaces_the_mirror(
+    source, target, package, tmp_path
+):
+    """A full package is a snapshot (see the test above) and that holds even
+    when a notebook/root's own listing in ``checksums.json`` is empty -- the
+    source deleted its last upload and its last attachment, not merely
+    stopped mentioning the notebook. ``_install_files`` must not read "no
+    entries" as "package carries nothing here" and leave the target's stale
+    copy in place forever, even though the reconcile phase above already
+    deleted the rows that pointed at it (codex #772 r15 P2)."""
+    _import(target, package)
+    storage = Path(target["settings"].storage_dir)
+    notebook_dir = storage / "notebooks" / source["exported"]
+    asset_dir = storage / "assets" / source["exported"]
+    assert any(path.is_file() for path in notebook_dir.rglob("*"))
+    assert any(path.is_file() for path in asset_dir.rglob("*"))
+
+    _delete_the_last_upload_and_attachment(source)
+    second = _export(source, tmp_path / "out2")
+    checksums = json.loads((second / CHECKSUMS_NAME).read_text(encoding="utf-8"))
+    notebook_prefix = f"files/notebooks/{source['exported']}/"
+    asset_prefix = f"files/assets/{source['exported']}/"
+    # The precondition this test actually exercises: the package still knows
+    # about both roots -- neither prefix is simply absent -- it just lists no
+    # files under them.
+    assert not any(key.startswith(notebook_prefix) for key in checksums)
+    assert not any(key.startswith(asset_prefix) for key in checksums)
+
+    report = _import(target, second)
+
+    assert report.error == ""
+    assert not any(path.is_file() for path in notebook_dir.rglob("*"))
+    assert not any(path.is_file() for path in asset_dir.rglob("*"))
+    assert not any(
+        ".sync-old-" in path.name or path.name.endswith(".sync-tmp")
+        for path in storage.rglob("*")
+    )
+
+
+def test_a_failed_import_of_an_emptied_snapshot_restores_the_old_files(
+    source, target, package, tmp_path, monkeypatch
+):
+    """The empty-snapshot swap goes through the same staged/retired/rollback
+    machinery as a populated one (see
+    test_the_file_phase_runs_after_the_rows_and_rolls_back) -- a failure after
+    the file phase must put the target's old files back, not leave them
+    gone."""
+    from app.migration.sync import import_ as module
+
+    _import(target, package)
+    storage = Path(target["settings"].storage_dir)
+    notebook_dir = storage / "notebooks" / source["exported"]
+    asset_dir = storage / "assets" / source["exported"]
+    before_notebook = sorted(
+        (path.relative_to(notebook_dir), path.read_bytes())
+        for path in notebook_dir.rglob("*")
+        if path.is_file()
+    )
+    before_asset = sorted(
+        (path.relative_to(asset_dir), path.read_bytes())
+        for path in asset_dir.rglob("*")
+        if path.is_file()
+    )
+    assert before_notebook and before_asset
+
+    _delete_the_last_upload_and_attachment(source)
+    second = _export(source, tmp_path / "out2")
+
+    def explode(backend, context):
+        raise RuntimeError("simulated failure after the empty-snapshot swap")
+
+    monkeypatch.setattr(module, "_publish_notebooks", explode)
+    with pytest.raises(SyncImportError):
+        _import(target, second)
+
+    after_notebook = sorted(
+        (path.relative_to(notebook_dir), path.read_bytes())
+        for path in notebook_dir.rglob("*")
+        if path.is_file()
+    )
+    after_asset = sorted(
+        (path.relative_to(asset_dir), path.read_bytes())
+        for path in asset_dir.rglob("*")
+        if path.is_file()
+    )
+    assert after_notebook == before_notebook
+    assert after_asset == before_asset
+    assert not any(
+        ".sync-old-" in path.name or path.name.endswith(".sync-tmp")
+        for path in storage.rglob("*")
+    )
+
+
 def test_the_reconciliation_never_reaches_another_notebook(
     source, target, package, tmp_path
 ):
