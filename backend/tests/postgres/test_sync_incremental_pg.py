@@ -298,7 +298,9 @@ def test_two_exports_write_two_different_snapshots(baseline):
     third = _watermark(baseline["repo"])
 
     assert third["captured"] is False
-    assert third["exported_through_seq"] == 0
+    # The closed gate is reported through ``captured``; the seq stays clamped
+    # to the previous watermark so the chain never moves backwards.
+    assert third["exported_through_seq"] == second["exported_through_seq"]
     assert third["exported_snapshot"] != second["exported_snapshot"]
 
 

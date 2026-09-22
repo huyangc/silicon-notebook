@@ -350,7 +350,7 @@ def test_export_human_output_reports_empty_incremental_window(
     monkeypatch.setattr(cli, "export_notebooks", lambda *a, **k: report)
     exit_code = cli.main(["export", "--target", "prod-tokyo", "--out", str(tmp_path)])
     assert exit_code == 0
-    assert "窗口为空，仍产出空增量包；水位已推进。" in capsys.readouterr().out
+    assert "窗口为空，仍产出空增量包；水位已记录。" in capsys.readouterr().out
 
 
 def test_export_human_output_reports_scoped_export_does_not_advance_watermark(

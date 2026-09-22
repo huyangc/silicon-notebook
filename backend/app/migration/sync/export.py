@@ -1217,7 +1217,15 @@ def _assemble(
         to_seq = max(captured_through_seq, watermark.exported_through_seq)
         base_package_id = watermark.package_id
     else:
-        from_seq, to_seq, base_package_id = 0, captured_through_seq, ""
+        # A full re-baseline (``--full``, a closed gate, or a watermark that
+        # predates capture) is still a link in the chain and is subject to
+        # the same clamp: after ``sync prune-log`` emptied the log, MAX(seq)
+        # reads 0 and must not drag an existing watermark back down.
+        from_seq, base_package_id = 0, ""
+        to_seq = max(
+            captured_through_seq,
+            watermark.exported_through_seq if watermark is not None else 0,
+        )
 
     # Outside the row snapshot: rows first, then the files they point at (see
     # _write_files).
