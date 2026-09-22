@@ -814,6 +814,43 @@ def test_session_cell_code_write_is_refused_on_a_mirrored_notebook(
     assert read_resp.json()["code_text"] == "print('x')"
 
 
+def test_agent_token_cell_code_write_is_refused_on_a_mirrored_notebook(
+    tmp_path, monkeypatch,
+):
+    """镜像上,持 `knowhow:code` scope 的 Agent 令牌 PUT 与 DELETE 也 409(codex #770
+    r1 P1:此前只有会话通道接了围栏,`snm_` 令牌走 `user_or_agent_scope` 的 Agent
+    分支,直接进 knowhow_api,MCP 面的 `refuse_if_mirrored` 管不到它)。读照常 200,
+    且读回的是镜像化之前那一份。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner_h, nb, table, row, col = _seed(client, "a00002092")
+    owner_id = _user_id(client, owner_h)
+    issued = _issue_token(
+        owner_id, ["knowledge:read", "knowhow:code"], nb, name="MirrorAgent"
+    )
+    agent_h = _agent_headers(issued.token)
+    url = f"/api/agent/knowhow/rows/{row['id']}/cells/{col}/code"
+    assert client.put(
+        url, headers=agent_h, json={"code_text": "print('x')", "language": "python"}
+    ).status_code == 200
+    origin = _mark_mirror(nb)
+
+    put_resp = client.put(
+        url, headers=agent_h, json={"code_text": "print('mirror')", "language": "python"}
+    )
+    assert put_resp.status_code == 409, put_resp.text
+    assert put_resp.json()["detail"]["code"] == "notebook_mirrored"
+    assert put_resp.json()["detail"]["sync_origin"] == origin
+
+    delete_resp = client.delete(url, headers=agent_h)
+    assert delete_resp.status_code == 409, delete_resp.text
+    assert delete_resp.json()["detail"]["code"] == "notebook_mirrored"
+
+    read_resp = client.get(url, headers=agent_h)
+    assert read_resp.status_code == 200, read_resp.text
+    assert read_resp.json()["code_text"] == "print('x')"
+
+
 def test_session_cell_code_write_is_unaffected_on_a_local_notebook(
     tmp_path, monkeypatch,
 ):
