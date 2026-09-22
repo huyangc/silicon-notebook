@@ -96,7 +96,7 @@ import hashlib
 import json
 import secrets
 import shutil
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -1649,6 +1649,7 @@ def _claim_import(
                 "Export a current package instead."
             )
         _reject_backwards_snapshot(prior, context)
+        taken_over: list[_PriorImport] = []
         for row in prior:
             if row.status != _STATUS_RUNNING:
                 continue
@@ -1658,12 +1659,22 @@ def _claim_import(
                 if row.heartbeat_at is not None
                 else "never (it has not committed any step yet)"
             )
-            if take_over:
+            if take_over and other == manifest.package_id:
+                # This package's own abandoned run. Taking it over is
+                # continuing it, not replacing it: the progress rows are
+                # exactly what makes the resume cheap, so they stay.
                 context.ledger.warn(
-                    f"took over the running sync_imports row for package "
-                    f"{other}; its last committed step was at {heartbeat}, and "
+                    "took over this package's own running sync_imports row; "
+                    f"its last committed step was at {heartbeat}, and "
                     "take_over asserts that process is gone"
                 )
+                continue
+            if take_over:
+                # Somebody ELSE's run. It is retired below, after the same
+                # ordering check every other retirement goes through -- taking
+                # over another run is not a licence to apply an older snapshot
+                # after a newer one.
+                taken_over.append(row)
                 continue
             raise SyncImportError(
                 f"an import from {manifest.source_env!r} is still running "
@@ -1672,7 +1683,16 @@ def _claim_import(
                 "source environment. If that process is really gone, re-run "
                 "with take_over=True (--take-over)."
             )
-        _supersede_outstanding(backend, conn, context, prior, mine, now)
+        outstanding = [
+            row
+            for row in prior
+            if row.status == _STATUS_FAILED
+            and row.has_progress
+            and row.package_id != manifest.package_id
+        ]
+        _supersede_outstanding(
+            backend, conn, context, [*outstanding, *taken_over], mine, now
+        )
         conn.execute(
             backend.sql(
                 "INSERT INTO sync_imports "
@@ -1700,28 +1720,36 @@ def _supersede_outstanding(
     backend: _Backend,
     conn: Any,
     context: _Context,
-    prior: Sequence[_PriorImport],
+    outstanding: Sequence[_PriorImport],
     mine: datetime | None,
     now: datetime,
 ) -> None:
-    """Retire the half-applied failed packages this declaration replaces, or
-    refuse if this package is not the newer one. Runs inside the claim's
-    transaction, so a package is never declared without the retirement that
-    makes declaring it safe."""
+    """Retire the half-applied packages of OTHER ids this declaration
+    replaces, or refuse if this package is not the newer one.
+
+    Two kinds arrive here, and they get the same treatment because they are
+    the same situation: a package that failed partway and still holds
+    progress, and a package still marked running whose process the operator
+    has just declared gone with ``--take-over``. Either way some prefix of an
+    older snapshot is applied and nobody is going to finish it, so leaving the
+    row alive would let a later run resume it ON TOP of this newer one. The
+    ordering check is the same too -- taking over someone else's run is not a
+    licence to apply an older snapshot after a newer one.
+
+    Runs inside the claim's transaction, so a package is never declared
+    without the retirement that makes declaring it safe."""
     manifest = context.manifest
-    outstanding = [
-        row
-        for row in prior
-        if row.status == _STATUS_FAILED
-        and row.has_progress
-        and row.package_id != manifest.package_id
-    ]
     for row in outstanding:
         if mine is None or row.created_at is None or mine <= row.created_at:
+            state = (
+                "failed partway through and still holds progress"
+                if row.status == _STATUS_FAILED
+                else "is still marked running and you asked to take it over"
+            )
             raise SyncImportError(
-                f"package {row.package_id} failed partway through and still "
-                "holds progress for this source environment. This package is "
-                f"not newer than it ({manifest.created_at or '<unknown>'} vs "
+                f"package {row.package_id} {state} for this source "
+                "environment. This package is not newer than it "
+                f"({manifest.created_at or '<unknown>'} vs "
                 f"{row.created_at.isoformat() if row.created_at else '<unknown>'}"
                 "), so there is no order in which applying both is meaningful. "
                 "Finish or export past that package first."
@@ -1754,9 +1782,22 @@ def _supersede_outstanding(
                 row.package_id,
             ),
         )
+        taken = (
+            ""
+            if row.status == _STATUS_FAILED
+            else (
+                " (it was still marked running; its last committed step was at "
+                + (
+                    row.heartbeat_at.isoformat()
+                    if row.heartbeat_at is not None
+                    else "never"
+                )
+                + ")"
+            )
+        )
         context.ledger.warn(
-            f"package {row.package_id} was superseded by this newer one; its "
-            "partial progress was dropped and it can no longer be resumed"
+            f"package {row.package_id} was superseded by this newer one{taken}; "
+            "its partial progress was dropped and it can no longer be resumed"
         )
 
 
@@ -3390,8 +3431,16 @@ def _import(
         # task must still leave the run's state recorded, or the next attempt
         # sees a row stuck at 'running' and refuses without --resume.
         _rollback_files(context)
-        failure = _report(manifest, ledger, outcome(), error=str(exc) or repr(exc))
-        _settle(backend, context, "failed", failure)
+        # Bound to a local, not read out of the lambda: Python unbinds an
+        # ``except ... as exc`` name at the end of its block, and the builder
+        # must stay callable for as long as _settle needs it.
+        message = str(exc) or repr(exc)
+        _settle(
+            backend,
+            context,
+            _STATUS_FAILED,
+            lambda: _report(manifest, ledger, outcome(), error=message),
+        )
         if isinstance(exc, SyncImportError) or not isinstance(exc, Exception):
             raise
         raise SyncImportError(f"import failed: {exc}") from exc
@@ -3406,9 +3455,12 @@ def _import(
         _commit_files(backend, context)
     except OSError as exc:  # pragma: no cover - filesystem failure path
         ledger.warn(f"could not drop the replaced storage directories: {exc}")
-    report = _report(manifest, ledger, outcome())
-    _settle(backend, context, "done", report)
-    return report
+    return _settle(
+        backend,
+        context,
+        _STATUS_DONE,
+        lambda: _report(manifest, ledger, outcome()),
+    )
 
 
 def _finished_packages(backend: _Backend, conn: Any) -> frozenset[str]:
@@ -3423,12 +3475,12 @@ def _finished_packages(backend: _Backend, conn: Any) -> frozenset[str]:
 
 
 def _settle(
-    backend: _Backend, context: _Context, status: str, report: ImportReport
-) -> None:
-    """Record the run's outcome, on both the success and the failure path, and
-    never let recording it become the failure. On the failure path the caller
-    is already re-raising the original exception, and an error here would
-    replace it with a less informative one.
+    backend: _Backend,
+    context: _Context,
+    status: str,
+    build: "Callable[[], ImportReport]",
+) -> ImportReport:
+    """Record the run's outcome and return the report that describes it.
 
     ``status`` is ``done`` or ``failed`` here; those are the only two outcomes
     a RUN produces. The other two values in the column are written elsewhere:
@@ -3436,12 +3488,44 @@ def _settle(
     ``superseded`` by ``_supersede_outstanding`` when a newer package retires
     a failed one. The report goes into ``report_json`` either way, and carries
     the package's own ``created_at`` -- which is what every later import of
-    this source environment orders itself against."""
+    this source environment orders itself against.
+
+    **A ``done`` that cannot be recorded is a failure of the run**, not a
+    footnote to it. The rows and files are applied, but ``sync_imports`` still
+    says 'running' for this package -- which blocks the next import of this
+    source environment until somebody passes ``--take-over``, and leaves no
+    trace of why. Swallowing that would hand the caller a success report for a
+    run whose outcome nobody can see, so it is raised and the CLI exits
+    non-zero.
+
+    The ``failed`` path still swallows it: the caller is already re-raising
+    the exception that got us here, and replacing that with "and also the
+    bookkeeping failed" loses the only diagnosis anyone wanted.
+
+    ``build`` is a callable rather than a finished report because ``_report``
+    freezes ``ledger.warnings`` into a tuple: a report built before this
+    function's own warnings would not carry them, which is exactly how a
+    warning about an unrecorded outcome would end up invisible.
+    """
+    recording: Exception | None = None
     try:
-        _close_import_row(backend, context.manifest.package_id, status, report)
-    except Exception as exc:  # noqa: BLE001 - reported, never raised over the original
+        _close_import_row(backend, context.manifest.package_id, status, build())
+    except Exception as exc:  # noqa: BLE001 - reported, and re-raised below for 'done'
+        recording = exc
         context.ledger.warn(f"could not record sync_imports.status={status}: {exc}")
-    _write_report_file(context, report)
+    # Rebuilt here so it carries the warning above; _write_report_file may add
+    # one of its own, which the returned report then carries in turn.
+    _write_report_file(context, build())
+    if recording is not None and status == _STATUS_DONE:
+        raise SyncImportError(
+            "the import applied cleanly but its outcome could not be recorded "
+            f"({recording}). sync_imports still says "
+            f"{_STATUS_RUNNING!r} for package {context.manifest.package_id}, so "
+            "the next import of this source environment will refuse until this "
+            "row is closed out; re-run with take_over=True (--take-over) once "
+            "the database is reachable."
+        ) from recording
+    return build()
 
 
 __all__ = [
