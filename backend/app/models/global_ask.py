@@ -10,6 +10,7 @@ from app.models.ask import (
     TraceStep,
     ASK_QUESTION_MAX_CHARS,
     CONVERSATION_TITLE_MAX_CHARS,
+    validate_asked_at_value,
 )
 from app.core.ask_retrieval_policy import DEFAULT_RETRIEVAL_EFFORT, RetrievalEffort
 
@@ -46,6 +47,10 @@ class GlobalAskRequest(BaseModel):
     # new job (``GlobalAskStore.create``). Part of the request's identity, so a
     # retry under the same ``client_request_id`` replays instead of re-deleting.
     replaces_job_id: str | None = Field(default=None, max_length=GLOBAL_ASK_ID_MAX_CHARS)
+    # Browser-captured submission instant, the same display-only metadata the
+    # notebook ``AskRequest.asked_at`` records; never an ordering key. Same
+    # rule (ISO-8601 with an offset, or empty), same validator.
+    asked_at: str = Field(default="", max_length=64)
 
     @field_validator("question")
     @classmethod
@@ -53,6 +58,11 @@ class GlobalAskRequest(BaseModel):
         if not value.strip():
             raise ValueError("请输入问题。")
         return value
+
+    @field_validator("asked_at")
+    @classmethod
+    def validate_asked_at(cls, value):
+        return validate_asked_at_value(value)
 
 class GlobalAskIntentPreviewRequest(BaseModel):
     """Understand a global reasoning question before any job or conversation exists.
@@ -159,6 +169,17 @@ class GlobalAskJob(BaseModel):
     # ``GlobalAskService.start`` on the job it returns; the owner is the only
     # reader of a job, and the public share projection never sees this field.
     client_request_id: str = ""
+    # Record parity with a notebook ``ask_jobs`` row (SQLite v81 / PostgreSQL
+    # 0061). ``asked_at`` is the browser-captured submission instant and
+    # ``updated_at`` the last transition instant (the finish time of a terminal
+    # job); both live in their own columns like ``client_request_id`` and are
+    # filled from the row on read. ``feedback_at`` is the instant the rating
+    # was written, kept beside ``feedback`` in the payload -- the notebook
+    # ``feedback`` row has a ``created_at``, so a global rating records one too.
+    # All three read back "" on rows written before the columns existed.
+    asked_at: str = ""
+    updated_at: str = ""
+    feedback_at: str = ""
 
 
 # D1-1 read-side projections: prefer the new ``answer``/``trace`` shape and

@@ -959,6 +959,49 @@ test("服务重启中断的提问在没有失败原文时说明中断，徽章�
 });
 
 
+// 全局问答(跨笔记本)活动条目:流里带「全局」角标，详情右栏另外列出参与的笔记本
+// (按详情端点给出的库名,该用户当前读不到名字的库回落到 id)。
+test("全局问答条目在活动流与详情里标出范围与参与笔记本", async () => {
+  const user = userEvent.setup();
+  // 刻意只给 nb-1 一条笔记本——nb-2 不在这份名录里，用来验证详情端点没给名字的
+  // 参与笔记本(nb-2)按 id 原样显示，而不是巧合地从别处凑出一个名字。
+  mocks.fetchUserNotebooks.mockResolvedValue([NOTEBOOKS[0]]);
+  mocks.fetchUserActivity.mockResolvedValue(page([
+    { ...ask("g1", "所有笔记本里谁提到了这个方案？"), scope: "global", notebook_id: "" },
+  ]));
+  mocks.fetchUserAskDetail.mockResolvedValue({
+    job_id: "g1",
+    scope: "global",
+    notebook_id: "",
+    conversation_id: "conv-g1",
+    question: "所有笔记本里谁提到了这个方案？",
+    mode: "reasoning",
+    status: "done",
+    asked_at: "2026-08-04T10:29:00",
+    answered_at: "2026-08-04T10:31:00",
+    error: "",
+    trace: [],
+    answer: null,
+    notebook_ids: ["nb-1", "nb-2"],
+    notebook_names: { "nb-1": "电路" },
+  });
+  view();
+
+  const row = await screen.findByText("所有笔记本里谁提到了这个方案？");
+  expect(within(row.closest("button")!).getByText("全局")).toBeInTheDocument();
+
+  await user.click(row);
+
+  await waitFor(() => {
+    expect(mocks.fetchUserAskDetail).toHaveBeenCalledWith("user-1", "g1");
+  });
+  expect(await screen.findByText("参与笔记本")).toBeInTheDocument();
+  const participants = screen.getByText("参与笔记本").closest("dl")!.querySelector("dd")!;
+  expect(participants).toHaveTextContent("电路");
+  expect(participants).toHaveTextContent("nb-2");
+});
+
+
 // 回归门:失败区块的显示条件与下面空态的显示条件曾经不互补——「状态还没推进
 // 到 failed,但已经带着一条错误原文」这种边界会让两边条件都不满足,右栏空白一片。
 // 现在失败区块只看 failed(有原文显示原文，否则固定文案)，空态排除它，这种边界

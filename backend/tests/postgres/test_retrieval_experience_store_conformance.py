@@ -89,7 +89,7 @@ def retrieval_experience_harness(request) -> RetrievalExperienceHarness:
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 60
+    assert PostgresMigrator(database).migrate() == 61
     # Nothing is seeded: this table has no foreign key in either direction, so
     # a partition id here is just a string nobody has to have created. Since
     # 0059 that column exists (a PARTITION key, not a tenancy column and still

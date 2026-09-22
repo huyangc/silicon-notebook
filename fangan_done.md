@@ -797,6 +797,12 @@ function_length_ceiling` 里（`ask_chunk` / `_run_reasoning_stage` / `_draft_re
 座位都不装；`subjectless=` 这个关键字只许出现在 `global_run.py`（`source_scope.py` 的同名转发
 豁免）；检索读者白名单仍是**七个**，按相等断言钉住。
 
+本次改动：全局问答作业现在留下与笔记本内问答**同一份记录**（SQLite v81 / PostgreSQL 0061 给
+`global_ask_jobs` 补 `submitted_via`/`asked_at`/`updated_at`/`error_detail` 四列，只在检索方式上
+不同），因此管理端「提问分析」「用户活动」「用量总览」都能看到全局问答——分别是 `scope=global`
+的问题行、`type=ask`/`scope=global` 的活动条目与详情里的「参与笔记本」、以及并入的 `questions`/
+`questions_30d`/`last_active`/`conversations` 计数。
+
 ## 42. 全局问答的两种引擎与 reasoning 的问题理解预检（2026-09-20）
 
 - `mode` 走引擎自己的注册表（含退役别名），`chunk` 默认、`reasoning` 可选；部署扩展引擎一律 422

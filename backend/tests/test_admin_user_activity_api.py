@@ -147,6 +147,60 @@ def _insert_report(db, report_id, notebook_id, created_by, created_at, *,
     )
 
 
+def _insert_global_conversation(db, conv_id, user_id, created_at, *,
+                                 submitted_via="web") -> None:
+    db.execute(
+        "INSERT INTO global_ask_conversations "
+        "(id,user_id,title,scope_json,submitted_via,created_at,updated_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (conv_id, user_id, "", '{"mode":"all","notebook_ids":[]}', submitted_via,
+         created_at, created_at),
+    )
+
+
+def _global_job_payload(job_id, conv_id, question, *, status="done",
+                         notebook_ids=None, answer=None, response=None,
+                         mode="chunk", created_at="2026-09-01T09:00:00+00:00") -> str:
+    """A ``GlobalAskJob``-shaped payload -- ``admin_job_record`` round-trips
+    this through ``GlobalAskJob.model_validate_json``, so every field it
+    requires (``job_id``, ``conversation_id``, ``status``, ``question``,
+    ``created_at``, ``notebook_scope``, ``resolved_notebook_ids``) must be
+    present, unlike the raw ``json_extract`` reads the list endpoints use."""
+    notebook_ids = notebook_ids or []
+    payload: dict = {
+        "job_id": job_id,
+        "conversation_id": conv_id,
+        "status": status,
+        "question": question,
+        "created_at": created_at,
+        "notebook_scope": {
+            "mode": "include" if notebook_ids else "all",
+            "notebook_ids": notebook_ids,
+        },
+        "resolved_notebook_ids": notebook_ids,
+        "searched_notebook_ids": notebook_ids,
+        "mode": mode,
+    }
+    if answer is not None:
+        payload["answer"] = answer
+    if response is not None:
+        payload["response"] = response
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _insert_global_ask(db, job_id, conv_id, user_id, created_at, *,
+                        payload_json, status="done", asked_at="",
+                        submitted_via="web", error_detail="") -> None:
+    db.execute(
+        "INSERT INTO global_ask_jobs "
+        "(id,conversation_id,user_id,client_request_id,request_json,status,"
+        "payload_json,created_at,submitted_via,asked_at,updated_at,error_detail) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (job_id, conv_id, user_id, None, "{}", status, payload_json,
+         created_at, submitted_via, asked_at, created_at, error_detail),
+    )
+
+
 def _insert_member(db, notebook_id, user_id) -> None:
     db.execute(
         "INSERT INTO notebook_members (notebook_id,user_id,role,added_at) "
@@ -732,6 +786,169 @@ def test_ask_detail_unknown_job_404(client):
     uid_a = _me(client, a)
     resp = client.get(f"/api/admin/users/{uid_a}/asks/does-not-exist", headers=a)
     assert resp.status_code == 404
+
+
+# --- GET /admin/users/{user_id}/asks/{job_id} -- global Ask jobs -----------
+
+
+def test_global_ask_detail_admin_sees_scope_notebook_names_and_answer(client):
+    """管理员读一条全局问答详情:scope=global、notebook_id 空、notebook_ids/
+    notebook_names 给出参与库,answer 是完整的 AskResponse 载荷。活动流里同一
+    条也要带 scope=global 与来自列的 submitted_via。"""
+    owner = _auth(client, 90)
+    owner_id = _me(client, owner)
+    admin = _auth_admin(client)
+    nb_id = _create_notebook(client, owner, "NB-global-detail")
+    with _repo()._write() as db:
+        _insert_global_conversation(
+            db, "gconv-1", owner_id, "2026-09-01T09:00:00+00:00", submitted_via="mcp",
+        )
+        payload = _global_job_payload(
+            "gask-1", "gconv-1", "跨库比较两个电路的噪声",
+            notebook_ids=[nb_id],
+            answer={
+                "answer": "综合回答", "citations": [], "answer_id": "gask-1",
+                "answered_at": "2026-09-01T09:05:00+00:00", "conclusion": "结论",
+            },
+        )
+        _insert_global_ask(
+            db, "gask-1", "gconv-1", owner_id, "2026-09-01T09:00:00+00:00",
+            payload_json=payload, submitted_via="mcp",
+        )
+
+    resp = client.get(f"/api/admin/users/{owner_id}/asks/gask-1", headers=admin)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scope"] == "global"
+    assert body["notebook_id"] == ""
+    assert body["notebook_ids"] == [nb_id]
+    assert body["notebook_names"] == {nb_id: "NB-global-detail"}
+    assert body["answer"]["answer"] == "综合回答"
+    assert body["answer"]["citations"] == []
+    assert body["answer"]["answer_id"] == "gask-1"
+    assert body["answered_at"] == "2026-09-01T09:05:00+00:00"
+
+    activity = client.get(
+        f"/api/admin/users/{owner_id}/activity?activity_type=ask", headers=admin,
+    )
+    assert activity.status_code == 200
+    [item] = [row for row in activity.json()["items"] if row["id"] == "gask-1"]
+    assert item["scope"] == "global"
+    assert item["submitted_via"] == "mcp"
+
+
+def test_global_ask_detail_failed_job_error_detail_admin_only(client):
+    """失败原文只给管理员;本人自助读取拿空串,与笔记本内提问同一条判据。"""
+    owner = _auth(client, 91)
+    owner_id = _me(client, owner)
+    admin = _auth_admin(client)
+    with _repo()._write() as db:
+        _insert_global_conversation(db, "gconv-2", owner_id, "2026-09-01T09:00:00+00:00")
+        payload = _global_job_payload("gask-2", "gconv-2", "失败的问题", status="failed")
+        _insert_global_ask(
+            db, "gask-2", "gconv-2", owner_id, "2026-09-01T09:00:00+00:00",
+            payload_json=payload, status="failed", error_detail="RuntimeError: boom",
+        )
+
+    admin_body = client.get(
+        f"/api/admin/users/{owner_id}/asks/gask-2", headers=admin
+    ).json()
+    assert admin_body["status"] == "failed"
+    assert admin_body["error"] == "RuntimeError: boom"
+
+    self_body = client.get(
+        f"/api/admin/users/{owner_id}/asks/gask-2", headers=owner
+    ).json()
+    assert self_body["status"] == "failed"
+    assert self_body["error"] == ""
+
+
+def test_global_ask_detail_self_404_after_participant_notebook_deleted(client):
+    """所有者自助读取应用 ``GlobalAskService.get_job`` 同一条规则:参与库集合
+    必须整体仍可读,否则 404——即便管理员仍保留完整审计历史。"""
+    owner = _auth(client, 92)
+    owner_id = _me(client, owner)
+    nb_id = _create_notebook(client, owner, "NB-global-participant")
+    with _repo()._write() as db:
+        _insert_global_conversation(db, "gconv-3", owner_id, "2026-09-01T09:00:00+00:00")
+        payload = _global_job_payload(
+            "gask-3", "gconv-3", "参与库问题", notebook_ids=[nb_id],
+        )
+        _insert_global_ask(
+            db, "gask-3", "gconv-3", owner_id, "2026-09-01T09:00:00+00:00",
+            payload_json=payload,
+        )
+
+    still_readable = client.get(f"/api/admin/users/{owner_id}/asks/gask-3", headers=owner)
+    assert still_readable.status_code == 200
+
+    assert client.delete(f"/api/notebooks/{nb_id}", headers=owner).status_code == 202
+    from app.services import background_jobs
+    background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
+
+    gone = client.get(f"/api/admin/users/{owner_id}/asks/gask-3", headers=owner)
+    assert gone.status_code == 404
+    # The activity detail and the global page itself apply ONE owner rule
+    # (every participant still readable); the two must agree, or a turn the
+    # global page refuses would open from the activity page.
+    assert client.get("/api/global-ask/jobs/gask-3", headers=owner).status_code == 404
+    # And the owner's own activity feed no longer lists it: listing a row whose
+    # detail is guaranteed to fail would be the one error bar in the feed.
+    feed = client.get(
+        f"/api/admin/users/{owner_id}/activity", params={"activity_type": "ask"},
+        headers=owner,
+    )
+    assert "gask-3" not in [item["id"] for item in feed.json()["items"]]
+
+    admin = _auth_admin(client)
+    still_visible_to_admin = client.get(
+        f"/api/admin/users/{owner_id}/asks/gask-3", headers=admin
+    )
+    assert still_visible_to_admin.status_code == 200
+
+
+def test_global_ask_detail_forbidden_for_other_regular_user(client):
+    owner = _auth(client, 93)
+    owner_id = _me(client, owner)
+    other = _auth(client, 94)
+    with _repo()._write() as db:
+        _insert_global_conversation(db, "gconv-4", owner_id, "2026-09-01T09:00:00+00:00")
+        payload = _global_job_payload("gask-4", "gconv-4", "别人的全局问题")
+        _insert_global_ask(
+            db, "gask-4", "gconv-4", owner_id, "2026-09-01T09:00:00+00:00",
+            payload_json=payload,
+        )
+
+    resp = client.get(f"/api/admin/users/{owner_id}/asks/gask-4", headers=other)
+    assert resp.status_code == 403
+
+
+def test_global_ask_detail_legacy_response_shape_returns_as_answer(client):
+    """旧引擎写下的行只有 ``response``(GlobalAskAnswer 形状),没有
+    ``answer``——详情端点仍把它当 ``answer`` 字段交给前端,走与公开页同一条
+    退化分支。"""
+    owner = _auth(client, 95)
+    owner_id = _me(client, owner)
+    with _repo()._write() as db:
+        _insert_global_conversation(db, "gconv-5", owner_id, "2026-09-01T09:00:00+00:00")
+        payload = _global_job_payload(
+            "gask-5", "gconv-5", "旧引擎问题",
+            response={
+                "answer_id": "gask-5", "question": "旧引擎问题", "answer": "旧答案",
+                "created_at": "2026-09-01T09:05:00+00:00",
+                "notebook_scope": {"mode": "all", "notebook_ids": []},
+                "resolved_notebook_ids": [], "searched_notebook_ids": [],
+                "cited_notebook_ids": [],
+            },
+        )
+        _insert_global_ask(
+            db, "gask-5", "gconv-5", owner_id, "2026-09-01T09:00:00+00:00",
+            payload_json=payload,
+        )
+
+    body = client.get(f"/api/admin/users/{owner_id}/asks/gask-5", headers=owner).json()
+    assert body["answer"]["answer"] == "旧答案"
+    assert body["answered_at"] == "2026-09-01T09:05:00+00:00"
 
 
 def test_ask_detail_does_not_load_full_conversation_history(client, monkeypatch):

@@ -76,6 +76,12 @@ export type GlobalJob = {
   feedback?: string;
   /** 这条作业提交时带的幂等 id。响应丢失后重读会话时，凭它认出「这条是我提交的」。 */
   client_request_id?: string;
+  /** 浏览器提交这条提问的时刻(ISO-8601 带时区偏移)。旧作业没有这一列时为空串。 */
+  asked_at?: string;
+  /** 这条作业最近一次状态迁移的时刻(终态作业即完成时刻)。旧作业没有这一列时为空串。 */
+  updated_at?: string;
+  /** 这条反馈写入的时刻,与 `feedback` 同落一行。旧作业没有这一列时为空串。 */
+  feedback_at?: string;
 };
 export type GlobalConversation = {
   id: string;
@@ -125,6 +131,9 @@ export const askGlobal = (input: {
   notebook_scope: GlobalScope;
   conversation_id?: string;
   client_request_id: string;
+  /** 浏览器提交这条提问的时刻(ISO-8601 带时区偏移)。与笔记本内问答的 `asked_at`
+   *  同一条规则:纯展示用的元数据,从不作为排序依据。 */
+  asked_at?: string;
   /** 省略即后端默认 "chunk"。未知或扩展引擎后端 422（全局问答不挂部署扩展引擎）。 */
   mode?: string;
   /** 「逐步推理」的问题理解结果。预检说需要澄清时由用户在审阅卡里补齐后回传。 */

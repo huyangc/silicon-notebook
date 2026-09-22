@@ -58,8 +58,8 @@ at `SCHEMA_VERSION` still runs no migrations. The only supported way back is
 to restore the pre-upgrade backup, or redeploy a build whose `SCHEMA_VERSION`
 is at least the database's — there is no reverse migration.
 
-The current schema version is 80. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v80 and remains readable. Global Ask adds user-owned conversation
+The current schema version is 81. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v81 and remains readable. Global Ask adds user-owned conversation
 and task tables (SQLite v76 / PostgreSQL 0056), with idempotent request and single-running-task
 unique indexes and conversation deletion cascading to its jobs; SQLite v77 / PostgreSQL 0057 then
 adds the public share token and read watermark (`share_token`, `shared_through_at`,
@@ -79,7 +79,12 @@ the backfill, and no content-addressed id is recomputed because the global parti
 unchanged by construction. SQLite v80 / PostgreSQL 0060
 adds `notebooks.sync_origin` (`NOT NULL DEFAULT ''`, `COLLATE "C"` on PostgreSQL): non-empty marks the
 notebook a mirror imported from another environment and names that source environment, which the
-target-side write fence keys off. Those migrations
+target-side write fence keys off. SQLite v81 / PostgreSQL 0061 add four columns to `global_ask_jobs`
+(`submitted_via`, `asked_at`, `updated_at`, `error_detail`, all `TEXT NOT NULL DEFAULT ''`, `COLLATE
+"C"` on PostgreSQL) so a global Ask job leaves the same per-job record a notebook `ask_jobs` row
+leaves: `submitted_via` is backfilled from the owning conversation's recorded value (only empty rows
+are touched), and `asked_at`/`updated_at`/`error_detail` stay `''` on historical rows, which is not
+reconstructed. No table, index, foreign key or unique-surface change. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain

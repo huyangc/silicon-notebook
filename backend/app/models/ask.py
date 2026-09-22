@@ -408,15 +408,26 @@ class AskRequest(BaseModel):
     @field_validator("asked_at")
     @classmethod
     def validate_asked_at(cls, value: str) -> str:
-        if not value:
-            return ""
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise ValueError("asked_at must be an ISO-8601 timestamp") from exc
-        if parsed.tzinfo is None:
-            raise ValueError("asked_at must include a timezone offset")
-        return value
+        return validate_asked_at_value(value)
+
+
+def validate_asked_at_value(value: str) -> str:
+    """The one ``asked_at`` rule, shared by the notebook and the global request.
+
+    Empty means "not captured". Anything else must be an ISO-8601 instant WITH
+    a timezone offset: the value is display metadata rendered in the reader's
+    own timezone, and a naive stamp would be shown as a different instant on
+    every machine that reads it back.
+    """
+    if not value:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("asked_at must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("asked_at must include a timezone offset")
+    return value
 
 
 class AnswerAnchor(BaseModel):

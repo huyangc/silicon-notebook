@@ -4646,5 +4646,64 @@ MIGRATION_MANIFEST[(79, 80)] = {
     "views": {},
 }
 
+
+# v81: record parity for global Ask jobs (parity with PostgreSQL
+# 0061_global_ask_job_record_parity.sql). Four plain TEXT columns on
+# global_ask_jobs, no table, index, trigger or view. submitted_via is backfilled
+# from the owning conversation's recorded value; the fixture holds no global
+# rows, so no row-level expectation changes.
+GLOBAL_ASK_JOB_RECORD_COLUMNS = {
+    "global_ask_jobs": {
+        "submitted_via": ("submitted_via", "TEXT", 1, "''", 0),
+        "asked_at": ("asked_at", "TEXT", 1, "''", 0),
+        "updated_at": ("updated_at", "TEXT", 1, "''", 0),
+        "error_detail": ("error_detail", "TEXT", 1, "''", 0),
+    },
+}
+# The ALTERed CREATE TABLE text SQLite stores after the four appends, spelled
+# out the same way the v77 hop spells global_ask_conversations'. Conditional
+# like the v79 block, not unconditional like v77: by now the manifest also
+# holds (76, …)+ hops whose lineage already HAS the table, and listing it as
+# an addition there would demand an addition that never happens
+# ("manifest-addition-missing"). Only a lineage that starts below v76 creates
+# global_ask_jobs on the way here, and for those the text must be the
+# ALTERed one.
+GLOBAL_ASK_TABLES_V81 = {
+    "global_ask_jobs": GLOBAL_ASK_TABLES["global_ask_jobs"].replace(
+        "created_at TEXT NOT NULL\n                )",
+        "created_at TEXT NOT NULL\n                , submitted_via TEXT NOT NULL DEFAULT '',"
+        " asked_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '',"
+        " error_detail TEXT NOT NULL DEFAULT '')",
+    ),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 81, *key[2:]): {
+        **manifest,
+        "tables": {
+            **manifest["tables"],
+            **(
+                GLOBAL_ASK_TABLES_V81
+                if "global_ask_jobs" in manifest["tables"]
+                else {}
+            ),
+        },
+        "columns": {
+            **manifest["columns"],
+            "global_ask_jobs": {
+                **manifest["columns"].get("global_ask_jobs", {}),
+                **GLOBAL_ASK_JOB_RECORD_COLUMNS["global_ask_jobs"],
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(80, 81)] = {
+    "tables": {},
+    "columns": GLOBAL_ASK_JOB_RECORD_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

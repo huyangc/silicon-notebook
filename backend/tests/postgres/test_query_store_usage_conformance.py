@@ -128,9 +128,35 @@ def _insert_group_member(connection, group_id, user_id) -> None:
     )
 
 
+def _insert_global_conversation(connection, conv_id, user_id, created_at, *,
+                                 submitted_via="web") -> None:
+    # scope_json/request_json/payload_json are plain TEXT columns on this
+    # table (0056), not jsonb -- no ::jsonb cast, unlike most other json_
+    # columns in this schema.
+    connection.execute(
+        "INSERT INTO global_ask_conversations "
+        "(id,user_id,title,scope_json,submitted_via,created_at,updated_at) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+        (conv_id, user_id, "", '{"mode":"all","notebook_ids":[]}', submitted_via,
+         created_at.isoformat(), created_at.isoformat()),
+    )
+
+
+def _insert_global_ask(connection, job_id, conv_id, user_id, created_at, *,
+                        status: str = "completed") -> None:
+    connection.execute(
+        "INSERT INTO global_ask_jobs "
+        "(id,conversation_id,user_id,client_request_id,request_json,status,"
+        "payload_json,created_at,submitted_via,asked_at,updated_at,error_detail) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (job_id, conv_id, user_id, None, "{}", status, '{"question":"q?"}',
+         created_at.isoformat(), "web", "", created_at.isoformat(), ""),
+    )
+
+
 @pytest.fixture
 def store(postgres_database, postgres_settings):
-    assert PostgresMigrator(postgres_database).migrate() == 60
+    assert PostgresMigrator(postgres_database).migrate() == 61
     return PostgresQueryStore(postgres_database, postgres_settings)
 
 
@@ -441,6 +467,59 @@ def test_failed_counts_retained_branch(postgres_database, store):
     )
     assert usage["questions_failed"] == 1
     assert usage["reports_failed"] == 1
+
+
+def test_global_ask_rows_count_toward_conversations_questions_and_failures(
+    postgres_database, store,
+):
+    """PG 孪生(与 SQLite 侧 test_admin_users.py 同一条理由):全局问答与笔记本内
+    问答同一套用量口径——global_ask_conversations 并入 conversations,
+    global_ask_jobs 并入 questions/questions_30d/questions_failed。"""
+    now = datetime.now(timezone.utc)
+    recent = now - timedelta(days=5)
+    old = now - timedelta(days=40)
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u-global-usage")
+        _insert_global_conversation(connection, "gc-1", "u-global-usage", now)
+        _insert_global_ask(connection, "g-recent", "gc-1", "u-global-usage", recent)
+        _insert_global_ask(connection, "g-old", "gc-1", "u-global-usage", old)
+        _insert_global_ask(
+            connection, "g-failed", "gc-1", "u-global-usage", now, status="failed",
+        )
+
+    usage = next(row for row in store.list_user_usage() if row["id"] == "u-global-usage")
+    assert usage["conversations"] == 1
+    assert usage["questions"] == 3
+    # recent + now(g-failed) 在 30 天窗口内;old(40 天前)在窗外。
+    assert usage["questions_30d"] == 2
+    assert usage["questions_failed"] == 1
+
+
+def test_global_ask_job_moves_last_active_forward(postgres_database, store):
+    """一个更晚的全局问答作业应把 last_active 往前推,与笔记本内提问同一批
+    候选参与排序。"""
+    older = NOW
+    newer = datetime(2026, 8, 2, 10, 0, 0, tzinfo=timezone.utc)
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u-global-last-active")
+        _insert_notebook(connection, "n-global-last-active", "u-global-last-active")
+        _insert_ask(
+            connection, "j-older", "n-global-last-active", "u-global-last-active",
+            older,
+        )
+    before = next(
+        row for row in store.list_user_usage() if row["id"] == "u-global-last-active"
+    )
+    assert before["last_active"] == older.isoformat()
+
+    with postgres_database.write() as connection:
+        _insert_global_conversation(connection, "gc-2", "u-global-last-active", newer)
+        _insert_global_ask(connection, "g-newer", "gc-2", "u-global-last-active", newer)
+
+    after = next(
+        row for row in store.list_user_usage() if row["id"] == "u-global-last-active"
+    )
+    assert after["last_active"] == newer.isoformat()
 
 
 def test_kg_builds_counts_all_statuses_excludes_empty_creator(postgres_database, store):

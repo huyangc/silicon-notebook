@@ -26,7 +26,7 @@ test("调用方式筛选以 submitted_via 查询参数发出，未选时不带�
   globalThis.fetch = async (url) => {
     urls.push(new URL(String(url), "http://localhost"));
     return new Response(JSON.stringify({
-      items: [], stats: { total: 0, asks: 0, reports: 0, active_users: 0 },
+      items: [], stats: { total: 0, asks: 0, reports: 0, active_users: 0, global_asks: 0 },
       total: 0, offset: 0, limit: 50,
     }), { status: 200, headers: { "Content-Type": "application/json" } });
   };
@@ -38,6 +38,27 @@ test("调用方式筛选以 submitted_via 查询参数发出，未选时不带�
     assert.equal(urls[0].searchParams.get("submitted_via"), "mcp");
     assert.equal(urls[0].searchParams.get("kind"), "ask");
     assert.equal(urls[1].searchParams.has("submitted_via"), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("范围筛选以 scope 查询参数发出，未选时不带该参数", async () => {
+  const originalFetch = globalThis.fetch;
+  const urls = [];
+  globalThis.fetch = async (url) => {
+    urls.push(new URL(String(url), "http://localhost"));
+    return new Response(JSON.stringify({
+      items: [], stats: { total: 0, asks: 0, reports: 0, active_users: 0, global_asks: 0 },
+      total: 0, offset: 0, limit: 50,
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    await fetchAdminQuestions({ scope: "global" });
+    await fetchAdminQuestions({});
+    assert.equal(urls.length, 2);
+    assert.equal(urls[0].searchParams.get("scope"), "global");
+    assert.equal(urls[1].searchParams.has("scope"), false);
   } finally {
     globalThis.fetch = originalFetch;
   }

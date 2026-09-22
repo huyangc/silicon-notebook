@@ -10,8 +10,10 @@ from app.api.deps import (
     analysis_issue_repository,
     extension_toggle_repository,
     get_current_user,
+    global_ask_repository,
     model_status_service,
     identity_repository,
+    notebook_read_authority_store,
     repository,
     require_notebook_capability,
     user_error,
@@ -60,6 +62,7 @@ from app.models.admin import (
     ADMIN_QUESTIONS_QUERY_MAX_CHARS,
 )
 from app.models.ask import SubmittedVia
+from app.models.global_ask import global_answer_trace
 from app.models.identity import UserProfile
 from app.models.model_services import ModelServiceStatusItem, ModelServicesStatus
 from app.models.sources import PaginatedSources
@@ -367,9 +370,14 @@ def list_admin_questions(
         ADMIN_QUESTIONS_DEFAULT_LIMIT, ge=1, le=ADMIN_QUESTIONS_MAX_LIMIT
     ),
     submitted_via: Optional[SubmittedVia] = Query(None),
+    scope: Optional[Literal["notebook", "global"]] = Query(None),
     user: UserProfile = Depends(get_current_user),
 ) -> AdminQuestionsResponse:
-    """Cross-user question overview spanning Ask and Deep Report."""
+    """Cross-user question overview spanning Ask, global Ask and Deep Report.
+
+    ``scope`` narrows to notebook-bound rows (Ask jobs and Deep Reports) or to
+    global Ask jobs; omitted keeps both. A global job is ``kind=ask``.
+    """
     _require_activity_enabled()
     if user.role != "admin":
         raise user_error(403, "仅管理员可查看全局提问分析")
@@ -380,6 +388,7 @@ def list_admin_questions(
         offset=offset,
         limit=limit,
         submitted_via=submitted_via,
+        scope=scope,
     )
     return AdminQuestionsResponse(
         items=[AdminQuestionItem(**item) for item in result["items"]],
@@ -656,7 +665,70 @@ def get_admin_user_ask_detail(
                 retained_until=job.get("retained_until") or "",
             )
     except KeyError:
+        pass
+    # Not a notebook job of this user: the same id space serves global Ask jobs
+    # (``gask-…``), which live in their own table and leave the same record.
+    record = global_ask_repository().admin_job_record(job_id, user_id)
+    if record is None:
         raise HTTPException(status_code=404, detail="ask job not found")
+    return _global_ask_detail(record, owner_id=user_id, viewer=user)
+
+
+def _global_ask_detail(record: dict, *, owner_id: str, viewer: UserProfile) -> AskDetail:
+    """The global twin of the notebook branch above, same reader rule.
+
+    An administrator keeps the complete audit history: the job is returned even
+    after the owner has lost read access to a participant library (the
+    notebook branch likewise keeps a revoked shared-library question for the
+    administrator). The owner reading their own activity gets exactly the
+    owner-facing rule ``GlobalAskService.get_job`` applies -- every participant
+    must still be readable, otherwise 404 -- so an activity detail can never
+    show them a global answer the global page itself refuses to open.
+
+    ``error`` is the raw ``error_detail`` column (admin-only via
+    ``_activity_failure_text``); a failed row written before that column existed
+    falls back to its owner-facing sentence so the administrator still sees the
+    recorded failure rather than nothing. The answer is the shared engine's
+    ``AskResponse`` payload; a job written before the engine switch carries the
+    legacy ``response`` shape, handed through under the same field so the
+    detail pane's degradation branches cover it as the public page's do.
+    """
+    job = record["job"]
+    notebook_ids = list(job.resolved_notebook_ids)
+    sharing = notebook_read_authority_store()
+    if viewer.role != "admin":
+        readable = sharing.readable_notebook_ids(notebook_ids, owner_id)
+        if not set(notebook_ids).issubset(readable):
+            raise HTTPException(status_code=404, detail="ask job not found")
+    names = sharing.readable_notebook_names(owner_id, notebook_ids)
+    if job.answer is not None:
+        answer = job.answer.model_dump(mode="json")
+        answered_at = job.answer.answered_at or ""
+    elif job.response is not None:
+        answer = job.response.model_dump(mode="json")
+        answered_at = job.response.created_at or ""
+    else:
+        answer, answered_at = None, ""
+    failure = record["error_detail"] or (job.error or "" if job.status == "failed" else "")
+    return AskDetail(
+        job_id=job.job_id,
+        scope="global",
+        notebook_id="",
+        conversation_id=job.conversation_id,
+        question=job.question,
+        mode=job.mode,
+        status=job.status,
+        asked_at=job.asked_at or "",
+        answered_at=answered_at,
+        error=_activity_failure_text(viewer, failure),
+        trace=[step.model_dump(mode="json") for step in global_answer_trace(job)],
+        answer=answer,
+        notebook_ids=notebook_ids,
+        notebook_names={
+            notebook_id: names[notebook_id]
+            for notebook_id in notebook_ids if notebook_id in names
+        },
+    )
 
 
 @router.get(

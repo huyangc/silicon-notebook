@@ -1,5 +1,5 @@
-"""AST guard: every entry point that can create an ask_jobs/reports row must
-say which submission surface created it.
+"""AST guard: every entry point that can create an ask_jobs/reports/
+global_ask_jobs row must say which submission surface created it.
 
 ``submitted_via`` (app.models.ask.SubmittedVia/StoredSubmittedVia) is a
 keyword-only, non-request-model argument threaded explicitly through the
@@ -11,6 +11,14 @@ route or MCP tool that forgets it compiles fine and silently records ""
 ("not recorded") forever, indistinguishable from a legacy pre-migration row.
 This test scans the production entry-point surface for exactly that mistake
 so it fails loudly at review time instead of silently at runtime.
+
+The global Ask job record (SQLite v81 / PostgreSQL 0061) carries the same
+per-row ``submitted_via`` column, written the same way: a literal keyword
+wherever ``global_ask_service().start(...)`` is invoked -- directly in the
+MCP tool (app/api/mcp_tools/global_ask.py), and indirectly through the
+``_call(...)`` forwarding helper in the HTTP route
+(app/api/global_ask_routes.py) -- scanned here alongside the three
+``repo.<attr>(...)`` call shapes above.
 """
 from __future__ import annotations
 
@@ -29,6 +37,30 @@ API_ROOT = ROOT / "app" / "api"
 # attach_existing / repository_facade.start_ask_stream).
 _TARGET_ATTRS = frozenset({"ask", "create_report", "start_ask_stream"})
 _VALID_VALUES = frozenset({"web", "mcp"})
+
+# The global Ask twin: `global_ask_service().start(...)` creates a
+# global_ask_jobs row the same way `.ask(...)` creates an ask_jobs one (see
+# GlobalAskStore.create / app.services.global_ask.GlobalAskService.start), so
+# it must carry the same literal `submitted_via` keyword. Its receiver is not
+# the `repo` local the three attrs above are narrowed to -- it is the
+# call expression `global_ask_service()` itself (app.api.deps).
+_GLOBAL_ASK_TARGET_ATTR = "start"
+_GLOBAL_ASK_RECEIVER = "global_ask_service()"
+_GLOBAL_ASK_METHOD_REF = f"{_GLOBAL_ASK_RECEIVER}.{_GLOBAL_ASK_TARGET_ATTR}"
+
+# app/api/global_ask_routes.py never calls `.start(...)` directly: every route
+# in that file goes through a local `_call(method, *args, **kwargs): return
+# method(*args, **kwargs)` indirection (grep-verified -- the ONLY definition of
+# a function literally named `_call` under app/api/), so the AST never has a
+# `Call` node whose `.func` is the `.start` attribute itself. The keyword
+# lives one level out, on the `_call(global_ask_service().start, payload,
+# user_id=user.id, submitted_via="web")` call, with the bound method passed
+# BY REFERENCE as the first positional argument. Matching only direct
+# `global_ask_service().start(...)` calls (as the MCP tool at
+# app/api/mcp_tools/global_ask.py does) would miss this indirection entirely
+# -- verified by temporarily deleting the literal from global_ask_routes.py
+# and confirming the guard still passed before this second pattern was added.
+_INDIRECT_CALL_FUNC_NAME = "_call"
 
 
 def _unparse(node: ast.AST) -> str:
@@ -51,20 +83,37 @@ def _is_true_constant(node: "ast.AST | None") -> bool:
 
 def _iter_candidate_calls():
     """Yield (relative_path, scope_label, attr, call) for every call in
-    backend/app/api/**/*.py whose attribute name is one of ``_TARGET_ATTRS``
-    AND whose receiver is the repository handle these routes/tools all bind
-    to a local named ``repo`` (``repo = repository()`` / ``repo =
-    notebook_catalog_repository()`` etc., grep-verified against every call
-    site at authoring time -- see the module docstring above). Narrowing to
-    this receiver spelling is deliberate scope-narrowing per the task spec:
-    the api/ tree has other objects with an ``ask`` attribute name that are
-    NOT ask_jobs entry points (e.g. plain dict-shaped payloads), and without
-    this narrowing the guard would need per-callsite exemptions instead of a
-    single structural rule. If a future entry point binds its repository
-    handle to a different local name, this guard's self-check below
+    backend/app/api/**/*.py that creates an ask_jobs/reports/global_ask_jobs
+    row, in one of three shapes:
+
+    1. ``repo.<attr>(...)`` where ``<attr>`` is one of ``_TARGET_ATTRS`` and
+       the receiver is the repository handle these routes/tools all bind to a
+       local named ``repo`` (``repo = repository()`` / ``repo =
+       notebook_catalog_repository()`` etc., grep-verified against every call
+       site at authoring time -- see the module docstring above).
+    2. ``global_ask_service().start(...)`` -- a DIRECT call, receiver
+       ``_GLOBAL_ASK_RECEIVER``, attribute ``_GLOBAL_ASK_TARGET_ATTR`` -- the
+       shape the MCP tool (app/api/mcp_tools/global_ask.py) uses.
+    3. ``_call(global_ask_service().start, ..., submitted_via=...)`` -- the
+       HTTP route's shape (app/api/global_ask_routes.py): the method is
+       passed BY REFERENCE as the first positional argument to the file's own
+       ``_call(method, *args, **kwargs)`` indirection helper, so there is no
+       ``Call`` node whose ``.func`` is the ``.start`` attribute itself; the
+       ``submitted_via`` keyword lives on the outer ``_call(...)`` node
+       instead. Yielding THAT node (not the referenced-but-uncalled
+       ``.start`` attribute) is what lets ``_kwarg`` find it.
+
+    Narrowing to these three exact shapes is deliberate scope-narrowing per
+    the task spec: the api/ tree has other objects with an ``ask``/``start``
+    attribute name that are NOT ask_jobs/global_ask_jobs entry points (e.g.
+    plain dict-shaped payloads), and without this narrowing the guard would
+    need per-callsite exemptions instead of a small set of structural rules.
+    If a future entry point binds its repository handle to a different local
+    name, calls the global service through a different receiver expression,
+    or renames the indirection helper, this guard's self-check below
     (``compliant_count`` / both values present) will start failing FIRST
     because the real entry points would silently drop out of the scan --
-    that failure is the signal to widen the receiver match here.
+    that failure is the signal to widen the match here.
     """
     for path in sorted(API_ROOT.rglob("*.py")):
         if "__pycache__" in path.parts:
@@ -76,11 +125,22 @@ def _iter_candidate_calls():
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
-            if not isinstance(func, ast.Attribute) or func.attr not in _TARGET_ATTRS:
-                continue
-            if _unparse(func.value) != "repo":
-                continue
-            yield rel, scopes.get(node, "<module>"), func.attr, node
+            if isinstance(func, ast.Attribute):
+                receiver = _unparse(func.value)
+                if func.attr in _TARGET_ATTRS and receiver == "repo":
+                    yield rel, scopes.get(node, "<module>"), func.attr, node
+                elif (
+                    func.attr == _GLOBAL_ASK_TARGET_ATTR
+                    and receiver == _GLOBAL_ASK_RECEIVER
+                ):
+                    yield rel, scopes.get(node, "<module>"), func.attr, node
+            elif (
+                isinstance(func, ast.Name)
+                and func.id == _INDIRECT_CALL_FUNC_NAME
+                and node.args
+                and _unparse(node.args[0]) == _GLOBAL_ASK_METHOD_REF
+            ):
+                yield rel, scopes.get(node, "<module>"), _GLOBAL_ASK_TARGET_ATTR, node
 
 
 def test_every_ask_report_entry_point_records_submitted_via():
@@ -113,9 +173,11 @@ def test_every_ask_report_entry_point_records_submitted_via():
 
     # 自检：防止扫描范围本身写错导致上面的断言空转（比如 API_ROOT 拼错、接收者
     # 名称收窄过头扫不到任何调用点）。真实合规调用点见 app/api/ask_routes.py 的
-    # `.ask(...)`/`.start_ask_stream(...)`、app/api/report_routes.py 的
-    # `.create_report(...)`、app/api/mcp_tools/memory_context.py 的 `.ask(...)`。
-    assert compliant_count >= 4, (
+    # `.ask(...)`/`.start_ask_stream(...)`（两处）、app/api/report_routes.py 的
+    # `.create_report(...)`、app/api/mcp_tools/memory_context.py 的 `.ask(...)`、
+    # app/api/mcp_tools/global_ask.py 的直接调用 `global_ask_service().start(...)`、
+    # app/api/global_ask_routes.py 经 `_call(...)` 间接转发的同一个 `.start(...)`。
+    assert compliant_count >= 6, (
         f"只扫到 {compliant_count} 个合规调用点，守卫可能没有真的扫描到入口"
         "（检查 API_ROOT / 接收者收窄规则是否与当前代码脱节）"
     )

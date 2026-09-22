@@ -48,6 +48,50 @@ FIXTURE_SECRETS = (
 )
 
 
+def _rollback_v81(db: sqlite3.Connection) -> None:
+    """Undo _migration_81 (the four record-parity columns on global_ask_jobs,
+    parity with PostgreSQL 0061_global_ask_job_record_parity.sql) before
+    forging any older deployed schema: four pure column additions, no index
+    to drop -- same shape as _rollback_v80.
+
+    Every older rollback helper chains through here first (via _rollback_v80):
+    a forged "deployed v79" database that still carried v81's columns would
+    make the verifier's per-column manifest check see four more added columns
+    than the (79, 81) manifest entry declares."""
+    for column in ("error_detail", "updated_at", "asked_at", "submitted_via"):
+        db.execute(f"ALTER TABLE global_ask_jobs DROP COLUMN {column}")
+
+
+def test_deployed_v80_database_verifies_global_ask_job_record_parity(tmp_path):
+    """A deployed v80 database is missing exactly _migration_81's addition:
+    four TEXT NOT NULL DEFAULT '' columns on global_ask_jobs and nothing else.
+    The fixture holds no global rows, so the submitted_via backfill touches no
+    row and `changed_tables` must stay empty."""
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as upgraded_db:
+        columns = {
+            row[1]: row
+            for row in upgraded_db.execute("PRAGMA table_info(global_ask_jobs)")
+        }
+        for column in ("submitted_via", "asked_at", "updated_at", "error_detail"):
+            assert columns[column][2] == "TEXT"
+            assert columns[column][3] == 1
+            assert columns[column][4] == "''"
+    with sqlite3.connect(database) as rollback:
+        _rollback_v81(rollback)
+        rollback.execute("PRAGMA user_version = 80")
+    result = module.verify_snapshot(database, storage)
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 80
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+
+
 def _rollback_v80(db: sqlite3.Connection) -> None:
     """Undo _migration_80 (notebooks.sync_origin, parity with PostgreSQL
     0060_notebook_sync_origin.sql) before forging any older deployed schema:
@@ -58,6 +102,7 @@ def _rollback_v80(db: sqlite3.Connection) -> None:
     the verifier's per-column manifest check see one fewer added column than
     the (74, 80) manifest entry declares, and the failure would read as a
     manifest bug rather than as an incomplete forgery."""
+    _rollback_v81(db)
     db.execute("ALTER TABLE notebooks DROP COLUMN sync_origin")
 
 

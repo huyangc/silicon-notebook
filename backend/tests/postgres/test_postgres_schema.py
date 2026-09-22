@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 60
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 61
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -69,10 +69,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 60
-    assert migrator.migrate() == 60
-    assert migrator.current_version() == 60
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 60
+    assert migrator.migrate() == 61
+    assert migrator.migrate() == 61
+    assert migrator.current_version() == 61
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 61
 
 
 @pytest.mark.postgres_integration
@@ -80,7 +80,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 60
+    assert migrator.migrate() == 61
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -163,7 +163,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 60
+        assert PostgresMigrator(databases[1]).migrate() == 61
     finally:
         for database in databases:
             database.close()
@@ -248,6 +248,7 @@ def test_packaged_index_migration_phases_are_exact():
         (58, "auth_sunset"),
         (59, "retrieval_experience_notebook"),
         (60, "notebook_sync_origin"),
+        (61, "global_ask_job_record_parity"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:

@@ -39,7 +39,7 @@
           "type": "object"
         },
         "ActivityAsk": {
-          "description": "一条「提问」活动条目,数据来自 ask_jobs + answers。",
+          "description": "一条「提问」活动条目,数据来自 ask_jobs + answers,或 global_ask_jobs。\n\n``scope`` 区分两种提问:``notebook`` 是笔记本内问答(``notebook_id`` 非空),\n``global`` 是全局问答——它不属于任何笔记本,``notebook_id`` 恒为空串,\n参与的库集合在详情端点(``AskDetail.notebook_ids``)里给出。两者在活动流\n里同为 ``type=\"ask\"``:全局问答与笔记本内问答用同一套引擎,只在检索方式上\n不同,所以记录口径也是同一种。",
           "properties": {
             "answer_id": {
               "default": "",
@@ -96,6 +96,15 @@
             "retained_until": {
               "default": "",
               "title": "Retained Until",
+              "type": "string"
+            },
+            "scope": {
+              "default": "notebook",
+              "enum": [
+                "notebook",
+                "global"
+              ],
+              "title": "Scope",
               "type": "string"
             },
             "status": {
@@ -631,7 +640,7 @@
           "type": "object"
         },
         "AdminQuestionItem": {
-          "description": "One cross-user question submission from Ask or Deep Report.",
+          "description": "One cross-user question submission from Ask, global Ask or Deep Report.\n\n``scope`` is ``global`` for a global Ask job (``type=\"ask\"``, no notebook:\n``notebook_id`` and ``notebook_name`` are empty) and ``notebook`` for\neverything else. A global job counts as an Ask question in ``stats.asks``\nand additionally in ``stats.global_asks``.",
           "properties": {
             "created_at": {
               "title": "Created At",
@@ -651,6 +660,15 @@
             },
             "question": {
               "title": "Question",
+              "type": "string"
+            },
+            "scope": {
+              "default": "notebook",
+              "enum": [
+                "notebook",
+                "global"
+              ],
+              "title": "Scope",
               "type": "string"
             },
             "status": {
@@ -708,6 +726,11 @@
             "asks": {
               "default": 0,
               "title": "Asks",
+              "type": "integer"
+            },
+            "global_asks": {
+              "default": 0,
+              "title": "Global Asks",
               "type": "integer"
             },
             "reports": {
@@ -2057,10 +2080,24 @@
               "title": "Notebook Id",
               "type": "string"
             },
+            "notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Notebook Ids",
+              "type": "array"
+            },
             "notebook_name": {
               "default": "",
               "title": "Notebook Name",
               "type": "string"
+            },
+            "notebook_names": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "title": "Notebook Names",
+              "type": "object"
             },
             "question": {
               "default": "",
@@ -2070,6 +2107,15 @@
             "retained_until": {
               "default": "",
               "title": "Retained Until",
+              "type": "string"
+            },
+            "scope": {
+              "default": "notebook",
+              "enum": [
+                "notebook",
+                "global"
+              ],
+              "title": "Scope",
               "type": "string"
             },
             "status": {
@@ -4697,6 +4743,11 @@
                 }
               ]
             },
+            "asked_at": {
+              "default": "",
+              "title": "Asked At",
+              "type": "string"
+            },
             "cited_notebook_ids": {
               "items": {
                 "type": "string"
@@ -4738,6 +4789,11 @@
             "feedback": {
               "default": "",
               "title": "Feedback",
+              "type": "string"
+            },
+            "feedback_at": {
+              "default": "",
+              "title": "Feedback At",
               "type": "string"
             },
             "job_id": {
@@ -4816,6 +4872,11 @@
               },
               "title": "Trace",
               "type": "array"
+            },
+            "updated_at": {
+              "default": "",
+              "title": "Updated At",
+              "type": "string"
             }
           },
           "required": [
@@ -4832,6 +4893,12 @@
         },
         "GlobalAskRequest": {
           "properties": {
+            "asked_at": {
+              "default": "",
+              "maxLength": 64,
+              "title": "Asked At",
+              "type": "string"
+            },
             "client_request_id": {
               "anyOf": [
                 {
@@ -14229,7 +14296,7 @@
       },
       "/api/admin/questions": {
         "get": {
-          "description": "Cross-user question overview spanning Ask and Deep Report.",
+          "description": "Cross-user question overview spanning Ask, global Ask and Deep Report.\n\n``scope`` narrows to notebook-bound rows (Ask jobs and Deep Reports) or to\nglobal Ask jobs; omitted keeps both. A global job is ``kind=ask``.",
           "operationId": "list_admin_questions_api_admin_questions_get",
           "parameters": [
             {
@@ -14320,6 +14387,26 @@
                   }
                 ],
                 "title": "Submitted Via"
+              }
+            },
+            {
+              "in": "query",
+              "name": "scope",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "notebook",
+                      "global"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Scope"
               }
             }
           ],

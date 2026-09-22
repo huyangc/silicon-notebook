@@ -2131,7 +2131,7 @@
       },
       {
         "name": "global_ask_jobs",
-        "sql_sha256": "2acb63510b72adc0d5cbd7543a194d9f3a9db7062500679318eb409423ba4212",
+        "sql_sha256": "77a3b0102d4fac75862d59446010129645b7e99025b91da0ff770d04194a4bdf",
         "type": "table"
       },
       {
@@ -2515,6 +2515,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 80
+    "user_version": 81
   }
 }

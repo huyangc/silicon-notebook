@@ -10,8 +10,12 @@ export type AdminQuestionKind = "ask" | "report";
 
 export type AdminQuestionSubmittedVia = SubmittedVia;
 
+/** 「笔记本内」还是「全局」提问；报告恒为 "notebook"（没有全局报告）。 */
+export type AdminQuestionScope = "notebook" | "global";
+
 export type AdminQuestionItem = {
   type: AdminQuestionKind;
+  scope: AdminQuestionScope;
   submitted_via: "" | SubmittedVia;
   id: string;
   user_id: string;
@@ -28,6 +32,8 @@ export type AdminQuestionStats = {
   asks: number;
   reports: number;
   active_users: number;
+  /** 当前筛选下的全局问答数，是 `asks` 的子集。 */
+  global_asks: number;
 };
 
 export type AdminQuestionsPage = {
@@ -40,6 +46,7 @@ export type AdminQuestionsPage = {
 
 export async function fetchAdminQuestions(filters: {
   kind?: AdminQuestionKind;
+  scope?: AdminQuestionScope;
   submittedVia?: AdminQuestionSubmittedVia;
   userId?: string;
   query?: string;
@@ -55,6 +62,7 @@ export async function fetchAdminQuestions(filters: {
     limit: String(limit),
   });
   if (filters.kind) query.set("kind", filters.kind);
+  if (filters.scope) query.set("scope", filters.scope);
   if (filters.submittedVia) query.set("submitted_via", filters.submittedVia);
   if (filters.userId) query.set("user_id", filters.userId);
   if (filters.query) query.set("q", filters.query);

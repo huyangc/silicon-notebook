@@ -1,6 +1,6 @@
 "use client";
 
-import { FileText, MessageCircleQuestion, Search, Users } from "lucide-react";
+import { FileText, Globe, MessageCircleQuestion, Search, Users } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { fetchMe } from "../../auth.ts";
@@ -13,6 +13,7 @@ import {
   ADMIN_QUESTIONS_QUERY_MAX_CHARS,
   fetchAdminQuestions,
   type AdminQuestionKind,
+  type AdminQuestionScope,
   type AdminQuestionSubmittedVia,
   type AdminQuestionsPage,
 } from "./api.ts";
@@ -53,6 +54,7 @@ export default function AdminQuestionsPage() {
   const [authorized, setAuthorized] = useState<boolean | null>(null);
   const [users, setUsers] = useState<AdminUserUsage[]>([]);
   const [kind, setKind] = useState<AdminQuestionKind | "">("");
+  const [scope, setScope] = useState<AdminQuestionScope | "">("");
   const [submittedVia, setSubmittedVia] = useState<AdminQuestionSubmittedVia | "">("");
   const [userId, setUserId] = useState("");
   const [searchDraft, setSearchDraft] = useState("");
@@ -91,6 +93,7 @@ export default function AdminQuestionsPage() {
     try {
       const page = await fetchAdminQuestions({
         kind: kind || undefined,
+        scope: scope || undefined,
         submittedVia: submittedVia || undefined,
         userId: userId || undefined,
         query,
@@ -102,7 +105,7 @@ export default function AdminQuestionsPage() {
       if (generation !== requestGeneration.current) return;
       setState({ kind: "error", notice: toUserMessage(error, "提问分析加载失败，请重试") });
     }
-  }, [authorized, kind, submittedVia, userId, query, offset]);
+  }, [authorized, kind, scope, submittedVia, userId, query, offset]);
 
   useEffect(() => { void initialize(); }, [initialize]);
   useEffect(() => { void load(); }, [load]);
@@ -125,6 +128,13 @@ export default function AdminQuestionsPage() {
     ++requestGeneration.current;
     setOffset(0);
     setKind(next);
+  }
+
+  function changeScope(next: AdminQuestionScope | "") {
+    if (next === scope) return;
+    ++requestGeneration.current;
+    setOffset(0);
+    setScope(next);
   }
 
   function changeSubmittedVia(next: AdminQuestionSubmittedVia | "") {
@@ -169,6 +179,11 @@ export default function AdminQuestionsPage() {
               <button type="button" className={kind === "ask" ? "active" : ""} onClick={() => changeKind("ask")}>问答</button>
               <button type="button" className={kind === "report" ? "active" : ""} onClick={() => changeKind("report")}>深度报告</button>
             </div>
+            <div className="questions-kind-tabs" role="group" aria-label="提问范围">
+              <button type="button" className={scope === "" ? "active" : ""} onClick={() => changeScope("")}>全部</button>
+              <button type="button" className={scope === "notebook" ? "active" : ""} onClick={() => changeScope("notebook")}>笔记本内</button>
+              <button type="button" className={scope === "global" ? "active" : ""} onClick={() => changeScope("global")}>全局</button>
+            </div>
             <label>调用方式
               <select value={submittedVia} onChange={(event) => changeSubmittedVia(event.target.value as AdminQuestionSubmittedVia | "")}>
                 <option value="">全部</option>
@@ -198,6 +213,7 @@ export default function AdminQuestionsPage() {
               <article><MessageCircleQuestion size={19} /><div><strong>{state.page.stats.total}</strong><span>全部提问</span></div></article>
               <article><MessageCircleQuestion size={19} /><div><strong>{state.page.stats.asks}</strong><span>问答</span></div></article>
               <article><FileText size={19} /><div><strong>{state.page.stats.reports}</strong><span>深度报告</span></div></article>
+              <article><Globe size={19} /><div><strong>{state.page.stats.global_asks}</strong><span>全局问答</span></div></article>
               <article><Users size={19} /><div><strong>{state.page.stats.active_users}</strong><span>活跃用户</span></div></article>
             </section>
 
@@ -212,11 +228,14 @@ export default function AdminQuestionsPage() {
                     <tbody>
                       {state.page.items.map((item) => (
                         <tr key={`${item.type}-${item.id}`}>
-                          <td><span className={`questions-kind questions-kind-${item.type}`}>{item.type === "ask" ? "问答" : "深度报告"}</span></td>
+                          <td>
+                            <span className={`questions-kind questions-kind-${item.type}`}>{item.type === "ask" ? "问答" : "深度报告"}</span>
+                            {item.scope === "global" && <span className="questions-scope questions-scope-global">全局</span>}
+                          </td>
                           <td><span className={`questions-via questions-via-${item.submitted_via || "unknown"}`}>{submittedViaLabel(item.submitted_via)}</span></td>
                           <td className="questions-question">{item.question}</td>
                           <td>{item.username}</td>
-                          <td>{item.notebook_name || "已删除的笔记本"}</td>
+                          <td>{item.scope === "global" ? "全局问答" : (item.notebook_name || "已删除的笔记本")}</td>
                           <td><span className="questions-status">{statusLabel(item.status)}</span></td>
                           <td className="questions-time">{formattedTime(item.created_at)}</td>
                         </tr>

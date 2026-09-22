@@ -423,7 +423,11 @@ class _RunState:
 _RETRIEVAL_THREAD_PREFIX = "global-ask-retrieve"
 # Fields that ride along with a request without identifying it; see
 # ``GlobalAskService._same_request``.
-_REQUEST_IDENTITY_EXCLUDES = frozenset({"intent"})
+# ``asked_at`` is display metadata (the browser's submission instant), not a
+# choice the user made: a client that re-stamps it on an honest retry under the
+# same ``client_request_id`` is still resubmitting the same question. See
+# ``_same_request`` for why ``intent`` is out as well.
+_REQUEST_IDENTITY_EXCLUDES = frozenset({"intent", "asked_at"})
 
 
 def _payload_notebook_ids(payload: Any, key: str) -> list[str]:
@@ -602,8 +606,11 @@ class GlobalAskService:
             raise GlobalAskError(404, "对话不存在，请刷新列表。")
         return row
 
-    def _save_if_open(self, job, user_id, *, progress=False):
+    def _save_if_open(self, job, user_id, *, progress=False, error_detail=""):
         """No detached worker may reopen persistence after runtime shutdown.
+
+        ``error_detail`` is the raw failure text of a terminal ``failed`` save
+        (see ``GlobalAskStore.save``); progress saves never carry one.
 
         ⛔ THE LOCK GUARDS THE FLAG, NOT THE WRITE. ``self._lock`` is the
         process-level lock ``_retrieval_window`` and admission also take, so
@@ -623,7 +630,9 @@ class GlobalAskService:
         with self._lock:
             if self._closed:
                 return False
-        return self.store.save_progress(job, user_id) if progress else self.store.save(job, user_id)
+        if progress:
+            return self.store.save_progress(job, user_id)
+        return self.store.save(job, user_id, error_detail=error_detail)
 
     def _history(self, conversation, ids, user_id, allowed, authority_check):
         """``(history, user_history)`` in the shapes the engine already speaks.
@@ -960,6 +969,7 @@ class GlobalAskService:
                 status="running", question=payload.question, created_at=_now(),
                 notebook_scope=scope, resolved_notebook_ids=ids,
                 mode=spec.id, client_request_id=payload.client_request_id or "",
+                asked_at=payload.asked_at,
                 # ⛔ CLAMPED, not carried. ``deep`` multiplies the reasoning
                 # round ceiling, and every round federates over the whole
                 # participant set: eight libraries at the deep round count does
@@ -1036,7 +1046,9 @@ class GlobalAskService:
                         self._live.pop(job.job_id, None)
                     job.status = "failed"
                     job.error = "任务未能启动，请重新提交问题。"
-                    self.store.save(job, user_id)
+                    self.store.save(
+                        job, user_id, error_detail=f"{type(exc).__name__}: {exc}",
+                    )
                     # A reader may already have subscribed in the window between
                     # the row existing and the worker failing to start. Nothing
                     # will ever publish to this feed again: end it, so that
@@ -1605,7 +1617,13 @@ class GlobalAskService:
                 exc.message if isinstance(exc, GlobalAskError)
                 else "回答未完成，请检查模型服务和资料状态后重试。"
             )
-            self._save_if_open(job, user_id)
+            # The raw text still gets RECORDED -- in its own admin-only column,
+            # the same ``ExceptionType: message`` shape ``ask_jobs.error``
+            # keeps -- so a failed global run is diagnosable from the database
+            # exactly like a failed notebook run.
+            self._save_if_open(
+                job, user_id, error_detail=f"{type(exc).__name__}: {exc}",
+            )
         finally:
             # The terminal frame comes from the STORE and goes out BEFORE the
             # feed is dropped: every branch above has already written its own
