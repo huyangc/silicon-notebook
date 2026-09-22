@@ -1,5 +1,6 @@
 import pytest
 from app.core.config import Settings
+from app.services import ask_service as ask_service_module
 from app.services.sqlite_repository import SQLiteRepository, _now
 
 
@@ -540,6 +541,11 @@ class _FakeSyncAsk:
 
     def finish_job(self, job_id, status, *, answer_id="", error=""):
         self.calls.append(("finish", status))
+
+    # PR-3 T7 的提问完成钩子用**真的**那一份(未绑定调用要求 double 自带它);
+    # 这个 double 不接 ``note_ask_completed`` 座位,所以它天然 no-op——本文件
+    # 钉的是推送落点,记忆链路的落点在 test_agent_profile_job_overlay.py。
+    _note_ask_completed = ask_service_module.AskService._note_ask_completed
 
 
 def _sync_ask_calls(monkeypatch, *, response=None, boom=None):

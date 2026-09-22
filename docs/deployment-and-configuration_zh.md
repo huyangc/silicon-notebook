@@ -472,6 +472,18 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 不必连带关掉笔记本理解巡固）映射到物理服务。多个 workload
 可以共用一个服务，它们也会共用该服务唯一的调度器和并发预算。`max_concurrency`
 是唯一的模型容量参数；来源作业数、窗口大小、batch 大小与本地 ANN 线程都不会再创建模型 gate。
+
+**升级后请重新生成 `.local/model-services.toml`，或手工补齐新增工作负载的绑定。**
+`[bindings]` 文件通常只生成一次就跨版本沿用，因此每个**新增**的 workload 在既有部署里天生
+是未绑定状态；未绑定的 workload 在注册表里只解析为「无服务」，整条链路 fail-soft，不报错，
+表现是对应功能静默不工作（例如 `agent_profile_consolidate` 未绑定时，「AI 对这个库的理解」
+的后台巡固每次都落 `failed:模型未配置，无法整理`）。启动时后端会在 READY 之前用一行 WARNING
+点名所有没有绑定的 chat workload（中文标签 + workload id）；其中 `agent_profile_consolidate`
+与 `retrieval_experience_distill` 在对应特性开关（`AGENT_PROFILE_ENABLED`、
+`RETRIEVAL_EXPERIENCE_ENABLED`）为开时，各自再单独一行「特性已开但模型未绑定」。
+`MODEL_SERVICES_CONFIG` 留空的离线部署不刷这些告警（那是受支持的降级形态，已有自己的提示）。
+`scripts/migrate_legacy_model_env.py` 会遍历全部 workload 重新生成配置，也可以直接在
+`[bindings]` 里补上缺的几行。这些告警只是告警，绝不会拒绝启动。
 自动模式（简化界面）固定使用逐步推理（`reasoning`）标准档，与高级界面选择 `reasoning` 时走同一条
 `/ask/intent` 意图预检（复用 `reasoning_agent` workload），不涉及额外的模型服务配置。该 workload
 未绑定或调用失败时，问题理解 fail-open 为空合同、按清晰问题继续以逐步推理执行，不再有通用问答兜底。
@@ -978,7 +990,7 @@ AGENT_PROFILE_BASE_TRIGGER   # 共享底座层（corpus_shape/key_entities/corpu
 AGENT_PROFILE_OVERLAY_TRIGGER # 该成员私有覆盖层（retrieval_notes/usage_gaps）重新巡固前累计的已完成提问次数；已完成的深度报告直接达阈（默认 10）
 AGENT_CALL_LOG_ENABLED       # Agent 每次经 MCP 落到某个笔记本上的工具调用记一行（哪个 Agent、什么时候、按哪一档能力），只有该成员自己能在「Agent 记录」里查看与清空（默认 true；false 时零写入，判据在开事务之前）。**叠在 AGENT_PROFILE_ENABLED 之上**而不是与它并列：这份记账唯一的读处就是那个面板，而总闸关掉时它的入口按钮一个节点都不渲染，所以总闸关着还记就是在攒没人打开得了的行。读与清空**两把闸都不跟随**——关掉它是「从现在起不记」，绝不是「把已经记下的藏起来或冻住」。记账仍然既不进 prompt（巡固读取在 SQL 里钉死 kind='note'），也不触发任何巡固
 RETRIEVAL_EXPERIENCE_ENABLED # 检索策略经验库（Agentic Memory P2，2026-09-22 起按笔记本分区）两条蒸馏链路共用的总闸：是否读取已完成提问并蒸馏进 retrieval_experiences（默认 true——部署可以只蒸馏、只观测而从不注入，见下面的 RETRIEVAL_EXPERIENCE_INJECT_ENABLED）
-RETRIEVAL_EXPERIENCE_INJECT_ENABLED # 同一份经验库的独立注入闸，两个分区共用：蒸出的块是否会被加进 plan/reflect prompt（默认 **false**——先攒够观测数据再决定是否开启；关闭时在注入侧逐字等于该特性不存在：不读表、不拼块、不记 trace 步）
+RETRIEVAL_EXPERIENCE_INJECT_ENABLED # 同一份经验库的独立注入闸，两个分区共用：蒸出的块是否会被加进 plan/reflect prompt（**2026-09-22 起默认 true**，此前为 false——按笔记本分区之后注入的首先是本库自己攒下的经验，本机试跑已验证整条链路：同一个库 10 次 reasoning 提问后蒸出条目，开闸后轨迹里出现 `experience` 步且 `notebook_entries>0`。设为 false 即回到「只蒸馏、不注入」：注入侧逐字等于该特性不存在——不读表、不拼块、不记 trace 步，蒸馏照常攒数据；注意这同时会让 consult_memory 动作从 reflect 枚举里消失，见下一行）
 REASONING_CONSULT_MEMORY_ENABLED # consult_memory reflect 动作（Agentic Memory P4）的按场景 kill switch（纵深防御）；这个动作真正的可用性闸是「retrieval_effort 为 deep/thorough/exhaustive 之一 且 RETRIEVAL_EXPERIENCE_INJECT_ENABLED 也开着」——单独把这个开关打开、注入闸仍关着时，动作不会出现（默认 true）
 REASONING_MAX_CONSULT_MEMORY # 每 run 的 consult_memory 调用次数上限（默认 2；ge=0）
 RETRIEVAL_EXPERIENCE_TRIGGER # 全局分区链路蒸馏一批前需累计的已完成提问数（跨所有笔记本与用户；默认 40；ge=1）

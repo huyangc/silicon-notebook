@@ -1165,17 +1165,26 @@ class Settings(BaseSettings):
     # 是把一次后台整理变成随每次提问触发的同步成本。
     user_search_profile_trigger: int = Field(
         20, ge=1, validation_alias="USER_SEARCH_PROFILE_TRIGGER")
-    # Agentic Memory P2:部署级**全局**的检索策略经验库。两把闸刻意**分开**,
-    # 因为蒸馏与注入是两个独立的决定,而且它们的风险完全不同:蒸馏只是往一张
-    # 没有任何用户可见面的表里攒行(默认 **开**,先把数据攒起来),注入才会改变
-    # 每一次真实提问的规划提示(默认 **关**,等观测)。设计文档的风险条目明说
-    # 「效果不好可以只留蒸馏观测、不注入」——那正是这两个默认值。
+    # Agentic Memory P2:检索策略经验库(2026-09-22 起按笔记本分区)。两把闸
+    # 刻意**分开**,因为蒸馏与注入是两个独立的决定:蒸馏只是往一张没有任何
+    # 用户可见面的表里攒行,注入才会改变每一次真实提问的规划提示。设计文档的
+    # 风险条目明说「效果不好可以只留蒸馏观测、不注入」——这两把闸分开正是为了
+    # 让那条退路一直存在。
     # 关掉 ``RETRIEVAL_EXPERIENCE_ENABLED`` 即完全回到接入前:不读 ask 轨迹、
     # 不排蒸馏任务、不发模型调用、零额外查询。
     retrieval_experience_enabled: bool = Field(
         True, validation_alias="RETRIEVAL_EXPERIENCE_ENABLED")
+    # 注入闸。**2026-09-22 起默认开**(PR-3 翻的默认值,原为关):按笔记本分区
+    # 之后,注入进一次 run 的首先是**这个库自己**攒下的经验,而不再是一张跨库
+    # 全局表——「这个库里哪种动作好用」正是产品要的那句话,冷启动才回退到全局
+    # 分区。本机试跑验证过整条链路:deepseek-flash、仓库 docs 作语料,同一个库
+    # 走 ``ask/stream`` 的 10 次 reasoning 提问后触发单库分区蒸馏
+    # (``runs=10, situations=1, written=2``——``retrieve/bad`` 与 ``ppr/good``
+    # 各拿到 10 次 run 支持),开闸后两次提问的轨迹都出现 ``experience`` 步且
+    # ``entries=2, notebook_entries=2``。关掉它即回到「只蒸馏、不注入」:注入
+    # 侧逐字等于该特性不存在(不读表、不拼块、不记 trace 步),蒸馏照常攒数据。
     retrieval_experience_inject_enabled: bool = Field(
-        False, validation_alias="RETRIEVAL_EXPERIENCE_INJECT_ENABLED")
+        True, validation_alias="RETRIEVAL_EXPERIENCE_INJECT_ENABLED")
     # 蒸馏的触发阈值(确定性闸,零模型调用):**全局**累计完成提问数。与两条巡固
     # 链路的阈值同款 ``ge=1``——0 会让每一次提问都排一次有界 LLM 调用,那不是
     # 「学得更快」,是把一个后台整理变成随每次问答触发的成本。

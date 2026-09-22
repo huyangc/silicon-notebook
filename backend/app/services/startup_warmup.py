@@ -555,6 +555,80 @@ def _pool_budget_warning(settings: object) -> str | None:
         return None
 
 
+#: Chat workloads whose own feature flag can be ON while nothing is bound to
+#: them. Each entry is ``(workload id, settings flag)``. These get their own
+#: WARNING line on top of the summary one, because "the operator switched this
+#: feature on and it silently does nothing" is a different — and louder —
+#: condition than "this workload was never wired up". Both members were added
+#: by Agentic Memory P1/P2, i.e. AFTER most deployments generated their
+#: ``model-services.toml``, which is exactly how a stale file turns a feature
+#: the operator believes is running into a job that only ever settles as
+#: ``failed:模型未配置，无法整理``.
+_FEATURE_GATED_CHAT_WORKLOADS: tuple[tuple[str, str], ...] = (
+    ("agent_profile_consolidate", "agent_profile_enabled"),
+    ("retrieval_experience_distill", "retrieval_experience_enabled"),
+)
+
+
+def _unbound_workload_warnings(settings: object, models: object) -> tuple[str, ...]:
+    """Return the startup WARNING lines for chat workloads nothing is bound to.
+
+    Why this exists: the registry answers an unbound workload with ``None`` and
+    every caller fails soft, so a ``model-services.toml`` generated before a
+    workload existed produces no error anywhere — only a feature that quietly
+    never runs. A binding file is generated once and then carried across
+    upgrades, so every NEW workload starts life unbound in every existing
+    deployment. One summary line names all of them at once rather than one line
+    per workload: an operator scrolling a boot log reads a single sentence, not
+    a screen of near-identical warnings.
+
+    A deployment with NO model services at all is exempt. An empty
+    ``MODEL_SERVICES_CONFIG`` is the supported offline/deterministic runtime
+    (the same claim ``RuntimeModelProvider.primary_unconfigured`` makes) and already
+    has its own startup notice from ``main._env_file_preflight``; listing every
+    chat workload there would be noise about a state the operator chose.
+
+    Fail-open like ``_pool_budget_warning`` above and for the same reason: a
+    diagnostic must never be able to change the shape of a startup that would
+    otherwise succeed. Any settings double or provider stub that lacks these
+    attributes yields no warnings rather than an ``AttributeError`` reported as
+    a startup failure.
+    """
+    try:
+        from app.services.model_registry import WORKLOADS
+
+        if not models.registry.services():
+            return ()
+        unbound = tuple(
+            workload
+            for workload in WORKLOADS.values()
+            if workload.kind == "chat" and not models.configured(workload.id)
+        )
+        if not unbound:
+            return ()
+        listed = "，".join(
+            f"{workload.display_label}（{workload.id}）" for workload in unbound
+        )
+        lines = [
+            "model-bindings: 以下 chat 工作负载在 MODEL_SERVICES_CONFIG 的 "
+            f"[bindings] 里没有绑定，对应功能会静默不可用：{listed}。"
+            "升级后请重新生成 model-services.toml 或补齐新增工作负载的绑定。"
+        ]
+        unbound_ids = {workload.id: workload for workload in unbound}
+        for workload_id, flag in _FEATURE_GATED_CHAT_WORKLOADS:
+            workload = unbound_ids.get(workload_id)
+            if workload is None or not bool(getattr(settings, flag, False)):
+                continue
+            lines.append(
+                "model-bindings: 特性已开但模型未绑定："
+                f"{workload.display_label}（{workload.id}）"
+                "——请在 model-services.toml 的 [bindings] 补绑定或重新生成配置"
+            )
+        return tuple(lines)
+    except Exception:  # noqa: BLE001 — diagnostic-only; never affects startup
+        return ()
+
+
 def run_startup(lease: object | None) -> object | None:
     """Construct the repository, recover interrupted work, warm caches, and
     then mark the service ready. Any exception is captured into readiness and
@@ -671,6 +745,15 @@ def run_startup(lease: object | None) -> object | None:
                         "startup: scheduled %d pending relation-completion source(s)",
                         resumed,
                     )
+        # Loud before READY, not after: an operator who reads only up to the
+        # readiness line must still see that a feature they switched on has no
+        # model behind it. Never a refusal to start — an unbound workload
+        # degrades one feature, while refusing to boot takes the whole service.
+        for binding_warning in _unbound_workload_warnings(
+            getattr(repo, "settings", None),
+            getattr(getattr(repo, "_runtime", None), "models", None),
+        ):
+            logger.warning(binding_warning)
         logger.info(
             "startup: READY — %d notebook(s) warmed; %d scale index(es), "
             "%d ANN handle(s), %d PPR core(s) preloaded",

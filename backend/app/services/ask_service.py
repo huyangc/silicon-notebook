@@ -834,6 +834,7 @@ class AskService:
         ),
         overview_sources=None,
         overview_source_generation=None,
+        note_ask_completed: "Callable[[str, str, str], None] | None" = None,
     ) -> None:
         self.ask_state = ask_state
         self.overview_sources = overview_sources
@@ -906,6 +907,12 @@ class AskService:
         self.ask_engine_participant_notebooks = ask_engine_participant_notebooks
         self.ask_engine_visible_sources = ask_engine_visible_sources
         self.ask_engine_hidden_sources = ask_engine_hidden_sources
+        # Agentic Memory PR-3(T7):同步/MCP 提问完成之后推进三条记忆链路的窄
+        # seam(``RepositoryRuntime._note_ask_completed``,形态同上面的
+        # ``current_user_id``:一个运行时绑定的可调用,服务本身不认识运行时)。
+        # ``None`` ⇒ 与这个座位出现之前逐字相同——窄测试替身与离线组合根照旧
+        # 可构造。落点与「恰好通知一次」的论证见 ``_note_ask_completed``。
+        self.note_ask_completed = note_ask_completed
 
     def _ask_modes(self):
         host = getattr(self, "ask_engine_host", None)
@@ -1151,9 +1158,48 @@ class AskService:
                 )
                 raise error
             self.finish_job(job_id, "done", answer_id=answer_id)
+            # 答案已落库、终态 job 行已提交、响应已在手上——只剩返回。这一句
+            # 的位置与「恰好一次」的论证见 ``_note_ask_completed``。
+            self._note_ask_completed(notebook_id, user_id, mode.id)
             return response
         finally:
             publish_snapshot(user_id)
+
+    def _note_ask_completed(
+        self, notebook_id: str, user_id: str, mode_id: str
+    ) -> None:
+        """同步提问面的「提问完成」钩子 —— 三条记忆链路的另一个触发点。
+
+        **两条路各自恰好通知一次**,这条性质是构造出来的,不是靠去重:
+
+        * 同步面(``POST /notebooks/{id}/ask`` 与 MCP ``ask_notebook``,两者都经
+          ``RepositoryFacade.ask``)是**唯一**会走到 ``ask_current`` 的调用方,
+          所以这里每次交付恰好触发一次;
+        * 流式/持久面(``AskExecutionCoordinator.start``)调的是引擎入口
+          ``AskService.ask``,压根不经过 ``ask_current``,它在 worker 的 ``done``
+          分支里调自己那份 ``_note_ask_completed``——两条路不嵌套,也就没有双计;
+        * 重新接上一条在途提问(``attach_existing``/``_follow``)只是把原 worker
+          已经计过数的那条 job 重放给浏览器,不执行也不记账。
+
+        被调方 ``RepositoryRuntime._note_ask_completed`` 才是三条链路真正的分发
+        点(P1 巡固、P2 经验蒸馏的 ``mode_id == "reasoning"`` 闸、P3 偏好归纳都在
+        那一层),这里不复制它的任何判断。
+
+        fail-open:这一句挂在**答案已经交付**之后,记账失败只记日志。它落在
+        ``ask_current`` 的 ``try`` 之内,而那个 ``try`` 的 ``except BaseException``
+        会把 job 判成 failed 并上抛——异常从这里逃出去就等于把一个已经答完的提问
+        改判成错误,所以吞在这里,不指望被交付方自己规矩(与协调器同一条理由)。
+        取消与失败两条出口在这一句之前就已经 ``raise``,永远到不了这里。
+        """
+        notify = getattr(self, "note_ask_completed", None)
+        if notify is None:
+            return
+        try:
+            notify(notebook_id, user_id, mode_id)
+        except Exception:  # noqa: BLE001 — 已交付的答案不因后台记账而改判
+            self.event_log.logger.exception(
+                "ask completion notification failed for notebook %s", notebook_id
+            )
 
     def ask_chunk_current(
         self, notebook_id: str, payload: AskRequest, cancel_event: CancelEvent = None

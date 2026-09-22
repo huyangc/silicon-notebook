@@ -885,3 +885,47 @@ function_length_ceiling` 里（`ask_chunk` / `_run_reasoning_stage` / `_draft_re
 - 投影**零改动**逐字复用 `conversation_public_view` 白名单：不显示库名、不出任何可寻址 id、不出
   `skipped/degraded/resolved` 回执、不出 `trace`/`intent`。新旧两种作业形状都能投影，旧形状缺
   `asked_at`/`answered_at`/`evidence_level` 走投影既有的退化分支。
+
+## 46. 检索策略经验库按笔记本分区：本库自己的打法、界面可见、注入默认开（2026-09-22）
+
+- 表 `retrieval_experiences` 增 `notebook_id` 分区列（`''` = 全局分区）。一个笔记本的条目只由
+  该笔记本自己的 reasoning 提问蒸出、只注入该笔记本自己的 run，**全体成员共享**；全局分区继续
+  由原有那条部署级链路独立蒸馏，作为新库冷启动与条目不足时的回退。不做「本库条目晋升为全局」：
+  两条链路各看各的样本批次，是两次独立的统计结论。
+- 触发是两条并行的进程内计数：全局仍是 `RETRIEVAL_EXPERIENCE_TRIGGER`（40），单库是
+  `RETRIEVAL_EXPERIENCE_NOTEBOOK_TRIGGER`（**10**，用户裁决「10 次就已经有很长的轨迹」）。
+  单库阈值**小于**批读取上限 40 是刻意的：相邻两批约 30 条 run 重叠，重复计数由 provenance
+  去重吸收（`support` 只对尚未出现在条目 provenance 里的 run 递增）。单飞槽位保证同一时刻只跑
+  一批，饱和时两条链路严格交替；笔记本分区进一个 64 项有界去重队列，队满落 `reason=queue_full`
+  的 skip 事件且同一饱和期内只报一次。分区上限：全局 300、单库 100（协议常量，不是 env）。
+- 隐私边界收窄一个粒度而不是被打开：从「不知道是谁、也不知道是哪个库」变成「不知道是谁，知道
+  是哪个库，且只有这个库的成员读得到」。条目仍无主题、无来源、无 `created_by`。分区 id 只作为
+  内容寻址主键的哈希输入之一与取数/写入的路由参数参与，**不进** `RunObservation`/prompt 正文；
+  隐私守卫的禁键表因此只对 job 模块开一条**显式形参白名单**，并新增判据八/九钉住这条。全局分区
+  的 id 哈希输入逐字不变（笔记本分区才追加 `partition` 键），换来零重算迁移与 `merge_dbs.py`
+  对旧库的逐字兼容。
+- 注入侧先取本库分区按当前情境打分（相似度地板 0.5，`(notebook_id, version_signal)` 分区 LRU
+  64 项），名额未满再从全局分区补齐，跨分区仍保持同动作唯一——**本库条目优先是产品规则**。
+  轨迹步 `experience` 的 detail 增 `notebook_entries`（送达行里来自本库分区的条数，0 表示这次
+  全靠全局回退）。从未攒出自己分区的新库自然退化为纯全局，行为与分区化之前逐字相同。
+- 界面是 P1「AI 对这个库的理解」面板的第四张卡：`GET/POST/DELETE
+  /notebooks/{id}/understanding/experiences`。读列表只要读权；「立即整理」与「清空」要
+  `agent_profile:write`（与「重新整理」同一口径）并过镜像围栏。动作 id 是封闭词表，后端原样
+  返回、前端用自己的词表映射成中文——id 不上屏。总闸关时卡内只显示「此功能已关闭」，但**清空
+  仍允许**：关开关是从现在起不记，不是把记过的藏起来。
+- 提问完成钩子原先只挂在 durable 协调器上，同步 `POST /notebooks/{id}/ask` 与 MCP
+  `ask_notebook` 都直接调 `repo.ask(...)`，三条链路（P1 巡固、经验蒸馏、回答偏好归纳）对这两类
+  提问全部零计数。已在 `RepositoryFacade.ask` 补上记账；durable 路径调的是 `service.ask`，不会
+  双计。MCP 是一等写入侧——Agent 的提问正是「越用越熟」的输入。
+- 未绑定工作负载现在会在启动时被点名：`[bindings]` 文件通常只生成一次就跨版本沿用，每个新增
+  workload 在既有部署里天生未绑定，而注册表对未绑定只返回「无服务」、全链路 fail-soft，于是
+  「特性开着、作业每次落 `failed:模型未配置`」在日志里一个字都没有。READY 之前一行 WARNING
+  汇总全部未绑定 chat workload（中文标签 + id），`agent_profile_consolidate` /
+  `retrieval_experience_distill` 在各自特性开关为开时再各占一行。空 `MODEL_SERVICES_CONFIG`
+  的离线部署豁免；告警 fail-open，绝不拒启。
+- `RETRIEVAL_EXPERIENCE_INJECT_ENABLED` 默认从 false 翻为 **true**。理由是作用域变了而不是风险
+  变小：分区之前一张跨库全局表说不出任何一句关于「这个库」的话。本机试跑（deepseek-flash、仓库
+  docs 作语料）10 次 reasoning 提问蒸出 `runs=10, situations=1, written=2`，开闸后轨迹出现
+  `experience` 步且 `entries=2, notebook_entries=2`。每 reflect 轮重复注入那约 3 万字符的成本
+  没有变小，两把闸因此仍然分开——设回 false 即逐字回到「只蒸馏、不注入」。真实 A/B（按
+  `adopted` 看采纳率）仍登记在 `fangan_todo.md`。

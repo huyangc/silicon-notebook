@@ -43,7 +43,7 @@ master 之上无其它提交）。实现计划 `docs/superpowers/plans/2026-09-2
   （`backend/app/services/reasoning_retrieval.py:971`）；三个消费点：任务级注入
   （`:4576`）、consult_memory（`:6735`）、步级零命中提示（`:7155`）；采用回写 `note_adopted`
   （`:7612`）。注入判据 `experience_wiring_active` = `RETRIEVAL_EXPERIENCE_INJECT_ENABLED`
-  （默认 **false**）∧ store 在。
+  （本文写作时默认 **false**；PR-3 翻为 **true**，见 §13-Q3）∧ store 在。
 - 注入点已经拿着当前 `notebook_id`（P1 理解块同一处 `read_blocks(notebook_id, ...)`，
   `reasoning_retrieval.py:4534`）。全局问答引擎 `global_run.py`/`global_ask.py` 不构造
   `ReasoningRetriever`、不接 `retrieval_experiences`，不受本文影响。
@@ -147,7 +147,8 @@ master 之上无其它提交）。实现计划 `docs/superpowers/plans/2026-09-2
 - 采用回写 `note_adopted(ids)` 不变：id 已带分区。
 - trace 步 `experience` 的 detail 增加 `notebook_entries`（送达行里来自本库分区的条数），
   不带正文。
-- 注入闸仍是 `RETRIEVAL_EXPERIENCE_INJECT_ENABLED` 一把；本文不改默认值（§13-Q3）。
+- 注入闸仍是 `RETRIEVAL_EXPERIENCE_INJECT_ENABLED` 一把；PR-1 不改默认值，PR-3 把它翻成
+  默认 `true`（证据与理由见 §13-Q3）。
 
 ## 6. 隐私与守卫
 
@@ -206,7 +207,7 @@ master 之上无其它提交）。实现计划 `docs/superpowers/plans/2026-09-2
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `RETRIEVAL_EXPERIENCE_ENABLED` | true（不变） | 两条蒸馏链路共用的总闸 |
-| `RETRIEVAL_EXPERIENCE_INJECT_ENABLED` | false（不变，§13-Q3） | 注入闸，两个分区共用 |
+| `RETRIEVAL_EXPERIENCE_INJECT_ENABLED` | **true**（PR-3 翻的默认值，原 false，见 §13-Q3） | 注入闸，两个分区共用 |
 | `RETRIEVAL_EXPERIENCE_TRIGGER` | 40（不变） | 全局链路阈值 |
 | `RETRIEVAL_EXPERIENCE_NOTEBOOK_TRIGGER` | **10**，`ge=1` | 单库链路阈值：该库累计完成的 reasoning 提问数 |
 
@@ -271,6 +272,17 @@ master 之上无其它提交）。实现计划 `docs/superpowers/plans/2026-09-2
   看到「这个库里别人问过哪种形状的问题」这一层聚合信息。
 - **Q3 注入闸默认值（已拍板）**：PR-1 不动默认 false；落地后先在本机用 deepseek-flash 对
   提问最多的两个库跑出条目、开闸看 A/B（`fangan_todo.md:120` 那条），再单独 PR 翻默认。
+  **2026-09-22 PR-3 已翻为默认 `true`。** 证据（本机试跑，worktree 起 8010 实例、
+  deepseek-flash、仓库 docs 作语料）：同一个库走 `ask/stream` 的 10 次 reasoning 提问后，
+  单库分区蒸馏产出 `runs=10, situations=1, written=2`（`retrieve/bad` 与 `ppr/good` 各拿到
+  10 次 run 支持）；把注入闸打开后，接下来两次提问的轨迹都出现 `experience` 步，detail 为
+  `entries=2, notebook_entries=2`——送达的两条全部来自本库分区，不是全局回退。这正是 Q3
+  当初要等的那件事：分区化之前全局库说不出任何一句关于「这个库」的话，翻默认没有意义。
+  `REASONING_CONSULT_MEMORY_ENABLED` 不动（仍默认 true，它本就不是这条判据的独立一支）。
+  仍未做、登记为剩余工作的是**真实 A/B 观测**：这次试跑验证的是链路通与条目可用，不是
+  检索效果提升；效果按 `adopted` 计数看采纳率，需要生产上跑够量才谈得上。每 reflect 轮
+  重复注入那约 3 万字符（§9 上方两笔账的第二笔）的成本没有变小，关掉注入闸仍逐字回到
+  「只蒸馏不注入」。
 - **Q4 计数持久化（已拍板）**：v1 进程内 + 手动「立即整理」按钮（PR-2）；若生产观察到重启
   频繁到攒不满阈值，再加一张 `(notebook_id, pending, last_distilled_at)` 游标表。
 - **Q5 数值（已拍板，阈值经用户改定）**：单库阈值 **10**、单库上限 100、LRU 64 分区。
@@ -280,4 +292,6 @@ master 之上无其它提交）。实现计划 `docs/superpowers/plans/2026-09-2
 - **PR-1 后端**：迁移 + store 分区读写/淘汰 + 取数谓词 + job 双链路 + 注入合并读取 + 守卫
   + 删除/深拷贝/合库 + 四份文档。可独立合入，注入闸不动。
 - **PR-2 界面**：P1 面板小节 + `distill_now` 端点 + 清空。
-- **PR-3（拍板后）**：本机 A/B 结果 → 翻注入闸默认值，或按结果调 §9 数值。
+- **PR-3（已完成）**：本机试跑结果 → 翻注入闸默认值（§13-Q3），外加试跑期间暴露的两处
+  缺陷：提问完成钩子覆盖同步 `/ask` 与 MCP 路径，以及未绑定工作负载的启动告警。§9 数值
+  未调整。

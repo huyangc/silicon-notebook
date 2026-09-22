@@ -1180,15 +1180,14 @@ class RepositoryRuntime:
         Mirrors what both persistence bundles already do with ``identity``."""
         return self.identity.current_user().id
 
-    # codex #535 R4 P2(驳回,登记决定):本通知只由流式 AskExecutionCoordinator
-    # 触发,同步 `POST /notebooks/{id}/ask` 与 MCP `ask_notebook`(经
-    # ask_current)刻意**不**接入——这是 P1 就登记的口径（`docs/product-and-api.md`「Agent 库
-    # 理解」条:「同步 POST /ask 不计入覆盖层触发计数」),P2 经验库与 P3 语言
-    # 归纳共用同一个钩子、同一条边界。接同步路径要么在 ask_current 里再挂一次
-    # (流式路径包着它,会双计),要么把钩子下沉进 ask_current 并让流式去重——
-    # 两者都在改三条链共同的计数语义,不是 P3 单方面能拍的;如放开,单独一件
-    # 事过评审。反向护栏:test_search_profile_job.py 的
-    # test_sync_ask_paths_deliberately_do_not_notify_inference。
+    # 触发面(2026-09-22 PR-3·T7 起扩到全部三个提问面,推翻 codex #535 R4 P2 当时
+    # 登记的「同步不计入」口径):流式 AskExecutionCoordinator 的 done 分支、同步
+    # `POST /notebooks/{id}/ask`、MCP `ask_notebook`。后两者经 `RepositoryFacade.ask`
+    # → `AskService.ask_current`,那一层是**只有它们**才经过的唯一收口,流式面调
+    # 的是引擎入口 `AskService.ask`,不嵌套、不双计(论证见 `ask_service.py` 的
+    # `AskService._note_ask_completed` docstring)。改这条边界就是在改三条链共同
+    # 的计数语义,接线由 test_agent_profile_job_overlay.py 的静态守卫钉住。
+    # 当时的理由是 MCP 侧的提问恰恰是「越用越熟」最重要的输入,零计数是缺陷。
     def _note_ask_completed(
         self, notebook_id: str, user_id: str, mode_id: str = "reasoning"
     ) -> None:
@@ -2469,6 +2468,13 @@ class RepositoryRuntime:
                 ),
                 ask_engine_visible_sources=self.source_store.all_visible_source_ids,
                 ask_engine_hidden_sources=self.source_store.hidden_source_ids,
+                # Agentic Memory PR-3(T7):同步 `POST /ask` 与 MCP
+                # `ask_notebook` 的提问完成钩子。⚠ 三参,与协调器那个座位同一份
+                # bound method、同一条边界;交的是 `_note_ask_completed` 本身,
+                # `ask_current` 只负责在答案交付之后调它一次。删掉这一行整仓
+                # 测试仍会全绿而生产两类提问重新零计数——由
+                # `test_agent_profile_job_overlay.py` 的静态接线守卫钉住。
+                note_ask_completed=self._note_ask_completed,
             )
         return self.ask
 
