@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 from app.core.config import Settings
 from app.services import ask_service as ask_service_module
 from app.services.sqlite_repository import SQLiteRepository, _now
@@ -518,6 +519,12 @@ class _FakeSyncAsk:
         self.calls = calls
         self._response = response
         self._boom = boom
+        # 真的 `_note_ask_completed` / `_durable_trace_sink` 在 fail-open 分支里
+        # 会读它。这个 double 走不到那些分支,但少了它一条本该被记下来的失败会
+        # 变成 AttributeError,把 fail-open 反过来变成一次崩溃。
+        self.event_log = SimpleNamespace(
+            logger=SimpleNamespace(exception=lambda *a, **k: None)
+        )
 
     def current_user_id(self):
         return "user-sync"
@@ -533,7 +540,8 @@ class _FakeSyncAsk:
         self.calls.append(("begin", notebook_id, mode))
         return "askjob-sync", "conv-sync"
 
-    def ask(self, notebook_id, payload, *, user_id, job_id, cancel_event):
+    def ask(self, notebook_id, payload, *, user_id, job_id, cancel_event,
+            on_trace=None):
         self.calls.append(("ask", job_id, user_id))
         if self._boom is not None:
             raise self._boom
@@ -546,6 +554,9 @@ class _FakeSyncAsk:
     # 这个 double 不接 ``note_ask_completed`` 座位,所以它天然 no-op——本文件
     # 钉的是推送落点,记忆链路的落点在 test_agent_profile_job_overlay.py。
     _note_ask_completed = ask_service_module.AskService._note_ask_completed
+    # 同理,同步面的轨迹 sink 也用真的那一份;这个 double 的 `ask` 从不回调
+    # `on_trace`,所以它只是被构造出来、不写任何行。
+    _durable_trace_sink = ask_service_module.AskService._durable_trace_sink
 
 
 def _sync_ask_calls(monkeypatch, *, response=None, boom=None):

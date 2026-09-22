@@ -325,6 +325,13 @@ def test_note_adopted_refuses_a_negative_delta(retrieval_experience_harness):
         harness.store.note_adopted(["rx_one"], -1)
 
 
+def _signal(harness, partition: str = ""):
+    """This partition's own half of ``version_signal``. The method returns
+    ``(this partition, the global partition)`` so one aggregate serves a run
+    that reads both; ``partition=""`` makes the two halves identical."""
+    return harness.store.version_signal(partition)[0]
+
+
 def test_the_version_signal_tracks_inserts_updates_and_evictions(
     retrieval_experience_harness,
 ):
@@ -341,11 +348,10 @@ def test_the_version_signal_tracks_inserts_updates_and_evictions(
     alone).
     """
     harness = retrieval_experience_harness
-    empty = harness.store.version_signal()
-    assert empty == (0, 0, "")
+    assert harness.store.version_signal("") == ((0, 0, ""), (0, 0, ""))
 
     _upsert(harness, "rx_one", provenance=["run-1"])
-    inserted = harness.store.version_signal()
+    inserted = _signal(harness)
     assert inserted[1] == 1 and inserted[2] != ""
     assert inserted[0] > 0          # codex #524 R12:进程内修订元
 
@@ -356,14 +362,14 @@ def test_the_version_signal_tracks_inserts_updates_and_evictions(
         harness, "rx_one", provenance=["run-2"], replace_conclusion=True,
         rationale="换了一个结论",
     )
-    updated = harness.store.version_signal()
+    updated = _signal(harness)
     assert updated[1] == 1 and updated[1:] != inserted[1:]
     assert updated[0] > inserted[0]
 
     _upsert(harness, "rx_two", provenance=["run-3"])
-    before_evict = harness.store.version_signal()
+    before_evict = _signal(harness)
     assert harness.store.evict_to_limit(1) == 1
-    after_evict = harness.store.version_signal()
+    after_evict = _signal(harness)
     assert after_evict[1] == 1
     assert after_evict[0] > before_evict[0]
 
@@ -387,10 +393,10 @@ def test_an_adoption_is_deliberately_invisible_to_the_version_signal(
     """
     harness = retrieval_experience_harness
     _upsert(harness, "rx_one", provenance=["run-1"])
-    before = harness.store.version_signal()
+    before = _signal(harness)
     harness.clock.value = LATER
     harness.store.note_adopted(["rx_one"])
-    assert harness.store.version_signal() == before
+    assert _signal(harness) == before
 
 
 # ----------------------------------------------------- PostgreSQL 0059
@@ -432,6 +438,35 @@ def test_the_partition_predicate_confines_both_reads_and_evictions(
     assert harness.store.count() == 3
     assert harness.store.count("") == 2
     assert harness.store.count("nb-a") == 1
+
+
+def test_the_signal_is_scoped_to_the_two_partitions_a_run_reads(
+    retrieval_experience_harness,
+):
+    """PR-3(注入默认开)要求的分区签名,在 PG 侧证一遍。
+
+    值得单开一条而不是信 SQLite 镜像:这里的 ``MAX(updated_at)`` 是
+    ``timestamptz::text``,``GROUP BY notebook_id`` 之后每组各渲染各的,漏掉
+    分组或把谓词写丢都会让两半互相串味。
+    """
+    harness = retrieval_experience_harness
+    _upsert(harness, "rx_g1", provenance=["rx_g1-run"], notebook_id="")
+    harness.clock.value = LATER
+    _upsert(harness, "rx_a1", provenance=["rx_a1-run"], notebook_id="nb-a")
+
+    own, shared = harness.store.version_signal("nb-a")
+    assert own[1] == 1 and shared[1] == 1
+    assert own[2] != shared[2], "两块各渲染各的 MAX(updated_at)"
+
+    empty_own, still_shared = harness.store.version_signal("nb-never-written")
+    assert empty_own[1:] == (0, "")
+    assert still_shared == shared
+    assert harness.store.version_signal("") == (shared, shared)
+
+    # 别的库蒸馏不动本库、也不动全局。
+    before = harness.store.version_signal("nb-a")
+    _upsert(harness, "rx_b1", provenance=["rx_b1-run"], notebook_id="nb-b")
+    assert harness.store.version_signal("nb-a") == before
 
 
 def test_writing_a_global_id_into_a_notebook_partition_is_refused(

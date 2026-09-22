@@ -133,7 +133,25 @@
         "llm_mode": "deterministic",
         "mode": "reasoning",
         "model_errors": [],
-        "reasoning_trace": null,
+        "reasoning_trace": [
+          {
+            "detail": {
+              "assumptions": [],
+              "completeness_required": false,
+              "constraints": [],
+              "entities": [],
+              "excluded_topics": [],
+              "expected_output": "",
+              "mandatory_topics": [],
+              "resolved_question": "fixture gain",
+              "result_scope": "ranked",
+              "retrieval_effort": "standard"
+            },
+            "duration_ms": null,
+            "step_type": "intent",
+            "summary": "已按确认后的问题理解开始检索"
+          }
+        ],
         "related_knowledge": [],
         "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
@@ -173,7 +191,25 @@
         "llm_mode": "deterministic",
         "mode": "reasoning",
         "model_errors": [],
-        "reasoning_trace": null,
+        "reasoning_trace": [
+          {
+            "detail": {
+              "assumptions": [],
+              "completeness_required": false,
+              "constraints": [],
+              "entities": [],
+              "excluded_topics": [],
+              "expected_output": "",
+              "mandatory_topics": [],
+              "resolved_question": "fixture gain",
+              "result_scope": "ranked",
+              "retrieval_effort": "standard"
+            },
+            "duration_ms": null,
+            "step_type": "intent",
+            "summary": "已按确认后的问题理解开始检索"
+          }
+        ],
         "related_knowledge": [],
         "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
@@ -972,7 +1008,25 @@
             "workload_label": ""
           }
         ],
-        "reasoning_trace": null,
+        "reasoning_trace": [
+          {
+            "detail": {
+              "assumptions": [],
+              "completeness_required": false,
+              "constraints": [],
+              "entities": [],
+              "excluded_topics": [],
+              "expected_output": "",
+              "mandatory_topics": [],
+              "resolved_question": "fixture gain",
+              "result_scope": "ranked",
+              "retrieval_effort": "standard"
+            },
+            "duration_ms": null,
+            "step_type": "intent",
+            "summary": "已按确认后的问题理解开始检索"
+          }
+        ],
         "related_knowledge": [],
         "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
@@ -1025,7 +1079,25 @@
             "workload_label": ""
           }
         ],
-        "reasoning_trace": null,
+        "reasoning_trace": [
+          {
+            "detail": {
+              "assumptions": [],
+              "completeness_required": false,
+              "constraints": [],
+              "entities": [],
+              "excluded_topics": [],
+              "expected_output": "",
+              "mandatory_topics": [],
+              "resolved_question": "fixture gain",
+              "result_scope": "ranked",
+              "retrieval_effort": "standard"
+            },
+            "duration_ms": null,
+            "step_type": "intent",
+            "summary": "已按确认后的问题理解开始检索"
+          }
+        ],
         "related_knowledge": [],
         "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",

@@ -450,3 +450,182 @@ def test_reasoning_trace_omits_memory_step_without_hits(tmp_path, monkeypatch):
         if event["event"] == "progress" and event["step"]["step_type"] == "intent"
     )
     assert intent["duration_ms"] is None
+
+
+def test_the_synchronous_ask_surface_persists_the_same_trace_as_the_stream(
+    tmp_path, monkeypatch
+):
+    """PR-3 同源缺口:同步 `POST /ask` 与 MCP `ask_notebook` 也要把轨迹落进
+    `ask_trace_steps`。
+
+    这一条之前是空的——`ask_current` 调引擎时不传 `on_trace`,于是同步面跑完一轮
+    reasoning 后那张表里一步都没有(本机试跑:流式 job 24 步、同步 job 0 步)。它
+    不只是「重开会话看不到轨迹」:三条记忆链路的**样本**正是从这张表读的
+    (`recent_completed_ask_runs` / `recent_user_ask_traces`),而 PR-3 刚让这两类
+    提问开始推进计数——计数在走、样本是空的,等于「越用越熟」只剩计数器。
+
+    判据刻意是**与流式面逐字相同的序列**,不是一张手抄的步骤名单:轨迹词汇会随
+    引擎演进,手抄的名单要么很快过期、要么被放宽成「非空」。同一个库、同一个
+    问题、同一批假模型,两条面各跑一次,持久化下来的 step_type 序列必须一致。
+    合成的 `start` 步只上流不落库(基线语义),所以它在两边都不出现。
+    """
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "")
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "")
+    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "")
+    monkeypatch.setenv("EMBED_PROVIDER", "")
+
+    from app.core.config import get_settings
+    from app.api import ask_routes
+    from app.main import create_app
+    from app.models.memory import MemoryHit
+    from app.services.memory_retrieval import MemoryRetriever
+
+    get_settings.cache_clear()
+    ask_routes.repository.cache_clear()
+
+    monkeypatch.setattr(
+        MemoryRetriever,
+        "notebook_memory_hits",
+        lambda self, user_id, notebook_id, query, limit=8: [
+            MemoryHit(memory_id="m1", title="签核偏好", text="先跑静态时序",
+                      status="confirmed", authority=3, score=0.42),
+        ],
+    )
+
+    client = TestClient(create_app())
+    notebook_id = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+
+    from app.core.config import get_settings as _gs
+    from app.services.embedding import FakeEmbedder
+    repo = ask_routes.repository()
+    bind_all_embedding_clients(repo, FakeEmbedder(dim=_gs().embed_dim))
+    llm = _ReasoningLLM()
+    bind_chat_client(repo, "reasoning_agent", llm)
+    bind_chat_client(repo, "ask_answer", llm)
+    repo.store_kg(notebook_id, None, [
+        {"local_id": "K1", "object_type": "concept",
+         "payload": {"name": "RTL到GDSII流程概述"}, "evidence": []}
+    ], [])
+
+    def _body():
+        contract = client.post(
+            f"/api/notebooks/{notebook_id}/ask/intent",
+            json={"question": "RTL到GDSII流程"},
+        ).json()
+        return {
+            "question": "RTL到GDSII流程",
+            "mode": "reasoning",
+            "intent": {
+                "contract": contract,
+                "resolved_question": contract["resolved_question"],
+                "answers": [],
+            },
+        }
+
+    def _persisted(job_id):
+        with repo._connect() as db:
+            return [
+                json.loads(row["step_json"])["step_type"]
+                for row in db.execute(
+                    "SELECT step_json FROM ask_trace_steps WHERE job_id=? "
+                    "ORDER BY seq ASC",
+                    (job_id,),
+                ).fetchall()
+            ]
+
+    streamed = client.post(
+        f"/api/notebooks/{notebook_id}/ask/stream", json=_body()
+    )
+    assert streamed.status_code == 200
+    events = [
+        json.loads(line) for line in streamed.text.splitlines() if line.strip()
+    ]
+    stream_job = events[0]["job_id"]
+    stream_kinds = _persisted(stream_job)
+    assert stream_kinds, "流式面本来就落库——它空了说明这条用例的前提没搭起来"
+    assert "start" not in stream_kinds      # 合成步只上流,不落库
+
+    blocking = client.post(f"/api/notebooks/{notebook_id}/ask", json=_body())
+    assert blocking.status_code == 200
+    conversation_id = blocking.json()["conversation_id"]
+    with repo._connect() as db:
+        sync_job = db.execute(
+            "SELECT id FROM ask_jobs WHERE conversation_id=? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (conversation_id,),
+        ).fetchone()["id"]
+    assert sync_job != stream_job
+
+    assert _persisted(sync_job) == stream_kinds, (
+        "同步面持久化的轨迹必须与流式面逐字一致——空的那种形态就是 PR-3 之前的"
+        "缺口:计数在走、样本是空的"
+    )
+    # durable 面不双写:流式那条 job 的轨迹没有因为同步面也接上 sink 而变长。
+    assert _persisted(stream_job) == stream_kinds
+    # 响应自带的 trace 与落库的那份同源(重开会话回放的正是后者)。
+    assert [
+        step["step_type"] for step in blocking.json()["reasoning_trace"]
+    ] == stream_kinds
+
+    # MCP 的 ask_notebook 与上面这条路由体里是**同一句**
+    # `repo.ask(notebook_id, payload, submitted_via=...)`(memory_context.py),
+    # 唯一的差别是那个字面量。这里就按它那句调一次:MCP 的提问同样落轨迹,
+    # 而不是「看起来应该也会」。(MCP 传输层本身由 test_memory_mcp.py 覆盖。)
+    from app.models.schemas import AskRequest
+
+    mcp_response = repo.ask(
+        notebook_id, AskRequest(**_body()), submitted_via="mcp"
+    )
+    with repo._connect() as db:
+        mcp_job = db.execute(
+            "SELECT id, submitted_via FROM ask_jobs WHERE conversation_id=? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (mcp_response.conversation_id,),
+        ).fetchone()
+    assert mcp_job["submitted_via"] == "mcp"
+    assert _persisted(mcp_job["id"]) == stream_kinds
+
+
+def test_the_synchronous_trace_sink_is_fail_open_and_stops_after_a_cancel():
+    """落轨迹这件事不得改变一次提问的结局。
+
+    两条性质各自都是实测过的静默事故形态:store 抛出时若不吞,一次跑到一半的
+    提问会因为「写轨迹失败」整轮失败(``error_policies.json`` 的
+    ``append_ask_trace`` 就是为此存在的);取消之后仍然追加,则是往一条已经终态
+    的 job 上继续写行——与流式面「取消后不再投递」不一致。"""
+    import threading
+    from types import SimpleNamespace
+
+    from app.services.ask_service import AskService
+
+    written: list = []
+    logged: list = []
+    service = AskService.__new__(AskService)
+    service.ask_state = SimpleNamespace(
+        append_trace=lambda nb, job, step, uid: written.append((nb, job, step, uid))
+    )
+    service.event_log = SimpleNamespace(
+        logger=SimpleNamespace(exception=lambda *a, **k: logged.append(a))
+    )
+    cancel_event = threading.Event()
+    sink = service._durable_trace_sink("nb-1", "job-1", "user-1", cancel_event)
+
+    sink(SimpleNamespace(model_dump=lambda: {"step_type": "intent"}))
+    assert written == [("nb-1", "job-1", {"step_type": "intent"}, "user-1")], (
+        "四个实参必须与协调器那份逐字同形"
+    )
+
+    service.ask_state.append_trace = lambda *a: (_ for _ in ()).throw(
+        RuntimeError("store down")
+    )
+    sink(SimpleNamespace(model_dump=lambda: {"step_type": "reflect"}))
+    assert logged, "持久化失败必须记一条日志,而不是静默"
+
+    written.clear()
+    service.ask_state.append_trace = lambda nb, job, step, uid: written.append(step)
+    cancel_event.set()
+    sink(SimpleNamespace(model_dump=lambda: {"step_type": "answer"}))
+    assert written == [], "取消之后到达的步不再落库"

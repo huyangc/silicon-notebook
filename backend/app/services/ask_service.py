@@ -85,6 +85,7 @@ from app.models.knowledge import (
     KnowledgeFieldValue,
     KnowledgeRecord,
 )
+from app.services import background_jobs
 from app.services.ask_followup import (
     FollowupResolution,
     current_followup_resolution,
@@ -1139,6 +1140,9 @@ class AskService:
                     user_id=user_id,
                     job_id=job_id,
                     cancel_event=cancel_event,
+                    on_trace=self._durable_trace_sink(
+                        notebook_id, job_id, user_id, cancel_event
+                    ),
                 )
             except AskCancelled:
                 self.finish_job(job_id, "cancelled")
@@ -1165,40 +1169,115 @@ class AskService:
         finally:
             publish_snapshot(user_id)
 
+    def _durable_trace_sink(
+        self, notebook_id: str, job_id: str, user_id: str, cancel_event
+    ) -> "Callable[[Any], None]":
+        """同步提问面的轨迹落库端 —— 与 durable 协调器同形的 ``on_trace``。
+
+        没有它,同步 ``POST /ask`` 与 MCP ``ask_notebook`` 跑完一轮 reasoning 之后
+        ``ask_trace_steps`` 里一步都没有(本机试跑:流式 job 24 步、同步 job 0 步)。
+        而三条记忆链路的**样本**正是从那张表读的
+        (``recent_completed_ask_runs`` / ``recent_user_ask_traces``):PR-3 的完成
+        钩子让这两类提问开始推进计数,轨迹却是空的,于是「Agent 用得越多、这个库
+        越懂它」只剩计数器在走。计数与样本必须来自同一次提问。
+
+        与 ``ask_execution.py`` 里那份逐字同形:同一个 ``model_dump()`` 投影、同一
+        次 ``ask_state.append_trace(notebook_id, job_id, payload_step, user_id)``、
+        同一条 fail-open(轨迹持久化失败记日志吞掉,绝不拖垮一次正在跑的提问 —— 见
+        ``error_policies.json`` 的 ``append_ask_trace``)。两条面各自持有自己的
+        sink,``ask_current`` 与协调器互不经过对方,所以不会双写。流式那份还要多做
+        一件事(把同一个 payload 投上交付队列),同步面没有队列,这就是两份的**全部**
+        差别,也是没有把它们合成一个的原因。
+
+        **不**复用 ``append_trace_fail_open``:那是 API 层的窄 seam,调用方手上只有
+        一个 job id,于是它给冻结 port 签名喂两个空串。这里两个真值都在手上,喂空
+        串等于对着 port 撒谎——今天两个后端的 SQL 都只按 job_id 落行,而那是实现
+        细节,不是契约。
+
+        取消之后到达的步不落库:与流式一致(那边是「不投递」),一次已被取消的提问
+        不该继续往它的 job 上追加轨迹。
+        """
+        def on_trace(step) -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                return
+            payload_step = step.model_dump()
+            try:
+                self.ask_state.append_trace(
+                    notebook_id, job_id, payload_step, user_id
+                )
+            except Exception:  # noqa: BLE001 — 轨迹持久化失败绝不拖垮 ask
+                self.event_log.logger.exception(
+                    "append_ask_trace failed for %s", job_id
+                )
+
+        return on_trace
+
     def _note_ask_completed(
         self, notebook_id: str, user_id: str, mode_id: str
     ) -> None:
         """同步提问面的「提问完成」钩子 —— 三条记忆链路的另一个触发点。
 
-        **两条路各自恰好通知一次**,这条性质是构造出来的,不是靠去重:
+        **交给后台,请求线程零阻塞。** 这是与协调器同一条理由的另一半:那边把
+        通知放在 ``final`` 事件**之后**,是为了「通知永远不能延迟或先于交付」;
+        同步面没有事件队列,答案就是 ``return response`` 本身,所以同一条理由在
+        这里的写法只能是**把通知挪出请求线程**。三条链路里第三条
+        (``SearchProfileInferenceService.note_ask_completed``)过阈值之后的
+        读+写是**同步的**,还压在一把进程级锁上,最坏要等满 ``db_busy_timeout_ms``
+        (默认 30 秒);扩展观察者那条路的预算同样是秒级、且对**已经进入**的回调
+        不做超时。留在请求线程上就意味着:一次已经落库、job 行已经 ``done`` 的
+        提问,在客户端那里变成一次超时失败——连 ``finally`` 里那次
+        ``publish_snapshot`` 都被一起压住,铃铛上还会留着一条「进行中」。
+
+        ``background_jobs.submit`` 在**调用线程**里 ``copy_context()``,所以请求
+        用户与日志归属那两个 ContextVar 照常跟过去——P3 按人分流事件与 per-user
+        模型选择都依赖它们,换成裸线程会静默落到系统默认那个身份上。提交本身失败
+        (池关闭等)只记日志:答案已经交给用户了。
+
+        **两条路各自恰好通知一次**,这条性质由 job 生命周期保证,不是靠去重:
 
         * 同步面(``POST /notebooks/{id}/ask`` 与 MCP ``ask_notebook``,两者都经
-          ``RepositoryFacade.ask``)是**唯一**会走到 ``ask_current`` 的调用方,
-          所以这里每次交付恰好触发一次;
+          ``RepositoryFacade.ask``)是**唯一**会走到 ``ask_current`` 的调用方;
         * 流式/持久面(``AskExecutionCoordinator.start``)调的是引擎入口
-          ``AskService.ask``,压根不经过 ``ask_current``,它在 worker 的 ``done``
-          分支里调自己那份 ``_note_ask_completed``——两条路不嵌套,也就没有双计;
+          ``AskService.ask``,不经过 ``ask_current``,它在 worker 的 ``done``
+          分支里调自己那份 ``_note_ask_completed``。协调器若哪天改走
+          ``ask_current``,它会先撞上第二条 ``ask_jobs`` 行(``begin_job_current``
+          无条件建 job)——双计在变成双计之前就已经是一个看得见的错;
         * 重新接上一条在途提问(``attach_existing``/``_follow``)只是把原 worker
           已经计过数的那条 job 重放给浏览器,不执行也不记账。
+
+        全局问答(``GlobalAskService``)直调 ``AskService.ask``,两个钩子都不经过
+        ——它对三条链路仍然零计数,这是本轮**登记不做**的范围,不是遗漏。
 
         被调方 ``RepositoryRuntime._note_ask_completed`` 才是三条链路真正的分发
         点(P1 巡固、P2 经验蒸馏的 ``mode_id == "reasoning"`` 闸、P3 偏好归纳都在
         那一层),这里不复制它的任何判断。
 
-        fail-open:这一句挂在**答案已经交付**之后,记账失败只记日志。它落在
-        ``ask_current`` 的 ``try`` 之内,而那个 ``try`` 的 ``except BaseException``
-        会把 job 判成 failed 并上抛——异常从这里逃出去就等于把一个已经答完的提问
-        改判成错误,所以吞在这里,不指望被交付方自己规矩(与协调器同一条理由)。
-        取消与失败两条出口在这一句之前就已经 ``raise``,永远到不了这里。
+        后台体里连 ``AskCancelled`` 一起吞(它是 ``Exception`` 的子类):它是被调方
+        的控制流,而这里的前提是**答案已经交付**——放它出去只能变成一次对已答提问
+        的错误改判(在把钩子留在请求线程的写法里,那就是一个 409)。取消与失败两条
+        出口在调用点之前就已经 ``raise``,永远到不了这里。
         """
         notify = getattr(self, "note_ask_completed", None)
         if notify is None:
             return
+
+        def _notify_in_background() -> None:
+            try:
+                notify(notebook_id, user_id, mode_id)
+            except Exception:  # noqa: BLE001 — 已交付的答案不因后台记账而改判
+                self.event_log.logger.exception(
+                    "ask completion notification failed for notebook %s",
+                    notebook_id,
+                )
+
         try:
-            notify(notebook_id, user_id, mode_id)
-        except Exception:  # noqa: BLE001 — 已交付的答案不因后台记账而改判
+            background_jobs.submit(
+                _notify_in_background, name=f"ask-completed-{mode_id}"
+            )
+        except Exception:  # noqa: BLE001 — 提交失败同样不改判已交付的答案
             self.event_log.logger.exception(
-                "ask completion notification failed for notebook %s", notebook_id
+                "ask completion notification could not be submitted for %s",
+                notebook_id,
             )
 
     def ask_chunk_current(
@@ -4771,12 +4850,12 @@ class AskService:
                 on_trace(step)
 
         def streamed_pre_trace() -> "list[TraceStep] | None":
-            """短路返回要带上的轨迹:客户端已经看到的那几步。
+            """短路返回要带上的轨迹:已经交出去的那几步。
 
-            有 `on_trace` 就说明 intent(以及命中时的 memory)已经推送出去了 ——
-            final 事件不带它们,就是在替换在途 turn 的同一刻把用户刚看着走过的
-            轨迹抹掉,历史里也留不下。没有流消费者的直调则保持原状:空轨迹仍然
-            表示「agentic loop 没跑」。"""
+            有 `on_trace` 就说明 intent(及命中时的 memory)已经交付——流式面推给
+            了客户端,同步/MCP 面(PR-3 起)落进了 `ask_trace_steps`;短路返回不带
+            它们,就是让响应否认自己刚写下的轨迹。真正无消费者的直调(报告引擎等)
+            保持原状:空轨迹仍表示「agentic loop 没跑」。"""
             return pre_trace if on_trace is not None else None
 
         structured_batch = None

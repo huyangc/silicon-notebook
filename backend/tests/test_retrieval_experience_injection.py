@@ -458,7 +458,7 @@ def test_store_failure_is_fail_open_and_records_no_step(repo):
     retriever, limits = _retriever(repo, llm)
 
     class _BrokenStore:
-        def version_signal(self):
+        def version_signal(self, notebook_id):
             raise RuntimeError("experience library is down")
 
         def read_partition(self, notebook_id, limit):
@@ -482,7 +482,7 @@ def test_cancellation_during_the_read_still_propagates(repo):
     retriever, limits = _retriever(repo, llm)
 
     class _CancellingStore:
-        def version_signal(self):
+        def version_signal(self, notebook_id):
             raise AskCancelled("user pressed stop")
 
     retriever.retrieval_experiences = _CancellingStore()
@@ -689,8 +689,8 @@ def test_a_failing_adoption_write_does_not_break_the_run(repo):
     real = repo.retrieval_experiences
 
     class _WriteFails:
-        def version_signal(self):
-            return real.version_signal()
+        def version_signal(self, notebook_id):
+            return real.version_signal(notebook_id)
 
         def read_partition(self, notebook_id, limit):
             return real.read_partition(notebook_id, limit)
@@ -723,8 +723,8 @@ def test_the_library_is_read_once_per_version_not_once_per_run(repo):
         def __init__(self):
             self.reads = 0
 
-        def version_signal(self):
-            return real.version_signal()
+        def version_signal(self, notebook_id):
+            return real.version_signal(notebook_id)
 
         def read_partition(self, notebook_id, limit):
             self.reads += 1
@@ -841,8 +841,9 @@ def test_the_memo_never_serves_another_stores_entries():
                 "situation": _situation(),
             }]
 
-        def version_signal(self):
-            return (1, "2026-08-19T00:00:00+00:00")   # 两个 store 刻意同签名
+        def version_signal(self, notebook_id):
+            signal = (0, 1, "2026-08-19T00:00:00+00:00")  # 两个 store 刻意同签名
+            return signal, signal
 
         def read_partition(self, notebook_id, limit):
             return list(self._rows)
@@ -970,15 +971,26 @@ def test_the_switch_off_run_issues_no_partition_read_at_all(repo):
 
 
 class _PartitionCountingStore:
-    """只记 ``read_partition(partition, limit)`` 调用的假 store。签名可改,
-    用来验证「签名一变整份缓存失效」。"""
+    """只记 ``read_partition(partition, limit)`` 调用的假 store。
+
+    ``version_signal(nb)`` 按真 store 的契约返回 ``(本分区签名, 全局分区签名)``;
+    ``bump(partition)`` 只动那一个分区的签名,用来验证「谁写了谁失效」。
+    """
+
+    _ROWS = (1, "2026-08-19T00:00:00+00:00")
 
     def __init__(self):
-        self.signal = (1, "2026-08-19T00:00:00+00:00")
+        self.writes: dict = {}
         self.reads: list = []
 
-    def version_signal(self):
-        return self.signal
+    def bump(self, partition: str) -> None:
+        self.writes[partition] = self.writes.get(partition, 0) + 1
+
+    def _signal(self, partition: str):
+        return (self.writes.get(partition, 0), *self._ROWS)
+
+    def version_signal(self, notebook_id):
+        return self._signal(notebook_id), self._signal("")
 
     def read_partition(self, notebook_id, limit):
         self.reads.append((notebook_id, limit))
@@ -1026,11 +1038,11 @@ def test_the_partition_cache_is_lru_bounded_and_keeps_the_global_slot():
     assert store.reads == [], "刚用过的分区与全局分区都该还在"
 
 
-def test_a_changed_version_signal_invalidates_every_partition():
-    """签名是**全表**的,所以任何分区被写过都让整份缓存(含全局)失效。
+def test_another_notebooks_distillation_does_not_invalidate_this_one():
+    """失效是**按分区**的:B 库蒸出一条,A 库与全局层的快照都还算数。
 
-    刻意不做每分区签名:那要么多发 N 次聚合查询,要么给 store 加一个只有缓存
-    用得上的方法,换来的只是「别的库刚蒸完时本库少读一次表」这点收益。
+    PR-1 那版签名是全表一个数,任何库写一条就让所有库的快照一起作废——注入闸
+    默认关时那只是理论损耗,PR-3 默认开之后每条 reasoning 提问都要付这笔账。
     """
     from app.services.reasoning_retrieval import _cached_experiences
 
@@ -1043,11 +1055,37 @@ def test_a_changed_version_signal_invalidates_every_partition():
     _cached_experiences(store, "nb-a")
     assert store.reads == []
 
-    store.signal = (2, "2026-08-20T00:00:00+00:00")
+    store.bump("nb-b")
     store.reads.clear()
     _cached_experiences(store, "")
     _cached_experiences(store, "nb-a")
-    assert [partition for partition, _limit in store.reads] == ["", "nb-a"]
+    assert store.reads == [], "别的库蒸馏不得让本库与全局层重读"
+
+
+def test_a_write_to_a_partition_invalidates_exactly_that_partition():
+    """谁写了谁失效:本库写 ⇒ 只有本库重读;全局分区写 ⇒ 只有全局层重读。
+
+    两层各按**自己**的签名判命中,所以全局链路蒸出一批不会让进程里每个笔记本
+    分区陪着重读一遍——那批写入一行本库条目都没改。
+    """
+    from app.services.reasoning_retrieval import _cached_experiences
+
+    _reset_memo()
+    store = _PartitionCountingStore()
+    _cached_experiences(store, "")
+    _cached_experiences(store, "nb-a")
+
+    store.bump("nb-a")
+    store.reads.clear()
+    _cached_experiences(store, "")
+    _cached_experiences(store, "nb-a")
+    assert [partition for partition, _limit in store.reads] == ["nb-a"]
+
+    store.bump("")
+    store.reads.clear()
+    _cached_experiences(store, "")
+    _cached_experiences(store, "nb-a")
+    assert [partition for partition, _limit in store.reads] == [""]
 
 
 def test_a_dead_store_can_never_serve_its_successors_partitions():
@@ -1177,12 +1215,12 @@ def test_a_partition_that_is_not_a_string_is_refused():
 
 
 def test_the_two_layers_are_loaded_under_one_signature():
-    """每个消费点只付**一次** ``version_signal()``。
+    """每个消费点只付**一次** ``version_signal(...)``,并从那一次拿到两层各自的
+    签名。
 
-    它是 COUNT + MAX 的全表聚合,分区后表可达「300 + 100 × 有流量的库数」行,
-    每层各算一次就是把最贵的那一步翻倍。顺带挡住一个更隐蔽的洞:两层各算各的
-    签名时,两次之间落一笔蒸馏写入会让第二次的新签名把第一次刚装进去的分区整份
-    清掉,于是这一对快照落在两个不同的表版本上。
+    它是一次按索引取两组的聚合,每层各发一次就是把最贵的那一步翻倍。顺带挡住
+    一个更隐蔽的洞:两层各发各的查询时,两次之间落一笔蒸馏写入会让这一对快照
+    落在两个不同的表版本上。
     """
     from app.services.reasoning_retrieval import _cached_experience_layers
 
@@ -1193,9 +1231,9 @@ def test_the_two_layers_are_loaded_under_one_signature():
             super().__init__()
             self.signal_calls = 0
 
-        def version_signal(self):
+        def version_signal(self, notebook_id):
             self.signal_calls += 1
-            return self.signal
+            return super().version_signal(notebook_id)
 
     store = _SignalCounting()
     primary, fallback = _cached_experience_layers(store, "nb-a")

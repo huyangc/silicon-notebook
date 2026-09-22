@@ -1269,8 +1269,9 @@ def test_the_experience_cache_never_serves_a_store_twin(monkeypatch):
         def __init__(self, rows):
             self.rows = rows
             self.reads = 0
-        def version_signal(self):
-            return (1, "2026-01-01T00:00:00")
+        def version_signal(self, notebook_id):
+            signal = (0, 1, "2026-01-01T00:00:00")
+            return signal, signal
         def read_partition(self, notebook_id, limit):
             self.reads += 1
             return list(self.rows)

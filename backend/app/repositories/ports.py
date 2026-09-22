@@ -5671,15 +5671,42 @@ class RetrievalExperienceStorePort(Protocol):
         """
         ...
 
-    def version_signal(self) -> tuple[int, int, str]:
-        """``(mutation revision, row count, newest updated_at)``, for the injection side's memo.
+    def version_signal(
+        self, notebook_id: str
+    ) -> tuple[tuple[int, int, str], tuple[int, int, str]]:
+        """The injection side's memo key for ONE run, as
+        ``(this partition's signal, the global partition's signal)``. Each
+        signal is ``(mutation revision, row count, newest updated_at)``.
 
         Agentic Memory P2 (T6). One cheap aggregate lets a run decide whether
         the library it already scored is still the library on disk, instead of
         re-hydrating a few hundred rows and re-parsing their JSON on every
-        single run. Both halves are load-bearing — see either backend's
-        implementation for which change each one catches, and for why an
-        ``adopted`` bump is deliberately invisible to it.
+        single run. All three components are load-bearing — see either
+        backend's implementation for which change each one catches, and for
+        why an ``adopted`` bump is deliberately invisible to them.
+
+        **Scoped to the two partitions a run can actually read** (2026-09-22,
+        PR-3). Before the injection gate defaulted on, this was one unscoped
+        ``COUNT(*) + MAX(updated_at)`` over the whole table and one revision
+        counter for the whole store. Both stopped being affordable at the same
+        moment: every reasoning ask now pays this call, the table is no longer
+        one bounded number of rows (it is 300 for the global partition plus up
+        to 100 per notebook with traffic), and a single whole-store signal made
+        ANY notebook's distillation invalidate EVERY notebook's cached
+        snapshot. The predicate is ``notebook_id IN (<partition>, '')``, which
+        both backends answer from the ``(notebook_id, id)`` index that
+        ``read_partition`` already requires.
+
+        Returning the two halves SEPARATELY rather than one combined signal is
+        what lets the caller memoise each layer on its own: the global layer is
+        read by every run in the process, so folding it into a per-notebook
+        signal would make switching notebooks — not writing anything — throw
+        that shared snapshot away on every single run. ``notebook_id=""`` is
+        the global partition itself, so both halves are then the same signal.
+
+        Cross-process writes stay covered exactly as before: the revision is
+        process-local, and the two DB-derived components are what another
+        worker's write moves.
         """
         ...
 

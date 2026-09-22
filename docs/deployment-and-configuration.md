@@ -588,7 +588,10 @@ with an empty `MODEL_SERVICES_CONFIG` is exempt — that is the supported offlin
 runtime and it already has its own startup notice.
 `scripts/migrate_legacy_model_env.py` walks every workload when regenerating
 the file; adding the missing `[bindings]` lines by hand works just as well.
-These are warnings only and never refuse to start.
+These are warnings only and never refuse to start. The admin model-service
+status page is organised by **physical service**, so an unbound workload
+produces no row there at all; the startup log is currently the authority on
+which workloads are unbound.
 
 Auto mode (the simplified interface) always uses step-by-step reasoning
 (`reasoning`) at standard effort, going through the same `/ask/intent` intent

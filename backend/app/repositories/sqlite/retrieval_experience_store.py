@@ -93,7 +93,14 @@ class RetrievalExperienceStore:
         # 一次真实更新可以不改变这两个数,注入侧缓存就永久陈旧。计数器只在
         # 本进程有效,而缓存键本就含"同一个活 store 对象"(弱引用),两者恰好
         # 同界;跨进程写入仍由 (count, max) 兜底,与修复前一致。
-        self._mutations = 0
+        #
+        # 2026-09-22(PR-3 注入默认开):计数**按分区**记,不再是全表一个数。
+        # 一个进程同时服务很多库,全表一个计数意味着任何一个库蒸出一条就把所有
+        # 库的注入缓存一起作废——注入闸默认关时这只是理论损耗,默认开之后它是
+        # 每条 reasoning 提问都要付的账。键是分区 id、值是该分区的写次数;每个
+        # 键只是一个 int,进程见过多少库就有多少键(与注入侧那份按行数计的 LRU
+        # 快照不是一个量级,不设上界)。
+        self._mutations: dict[str, int] = {}
         # No ``new_id`` seam on purpose. Every id in this table is
         # CONTENT-ADDRESSED and computed by the caller from the entry's own
         # (situation, action) — a random id would break both the primary key's
@@ -101,6 +108,23 @@ class RetrievalExperienceStore:
         # union in scripts/merge_dbs.py. Taking the seam and not using it would
         # invite exactly the wrong reflex from the next person to add a write
         # path here.
+
+    def _bump_revision(self, partition: str) -> None:
+        """Record one write against ``partition``. Callers pass the partition
+        they actually wrote, never ``""`` as a stand-in for "somewhere"."""
+        self._mutations[partition] = self._mutations.get(partition, 0) + 1
+
+    def _revision(self, partition: str) -> int:
+        """How many writes THIS partition has taken in this process.
+
+        Strictly this partition's own — not summed with the global one, even
+        though every run reads both. ``version_signal`` hands the two halves
+        back separately precisely so each layer can be memoised against the
+        writes that can actually change IT: folding the global partition's
+        count into a notebook's revision would make a global-chain batch
+        re-read every notebook partition in the process for no content change.
+        """
+        return self._mutations.get(partition, 0)
 
     def read_partition(self, notebook_id: str, limit: int) -> list[dict]:
         """ONE partition (``""`` = the global one). Bounded RETURN, bounded
@@ -309,7 +333,7 @@ class RetrievalExperienceStore:
             ).fetchone()
         # 无论落在哪个分支都 bump:少数"什么都没改"的调用多付一次聚合读,
         # 换掉"哪个分支算写"的分支追踪——那正是会随下一个分支悄悄漂移的账。
-        self._mutations += 1
+        self._bump_revision(partition)
         return _experience_row(result)
 
     def note_adopted(self, experience_ids: Sequence[str], delta: int = 1) -> int:
@@ -390,7 +414,7 @@ class RetrievalExperienceStore:
                 "ORDER BY adopted ASC, support ASC, updated_at ASC, id ASC LIMIT ?)",
                 (partition, overflow),
             )
-        self._mutations += 1
+        self._bump_revision(partition)
         return cursor.rowcount
 
     def count(self, notebook_id: str | None = None) -> int:
@@ -413,9 +437,27 @@ class RetrievalExperienceStore:
                 ).fetchone()
         return int(row["n"])
 
-    def version_signal(self) -> tuple[int, int, str]:
-        """``(mutation revision, row count, newest updated_at)`` — the
-        injection side's memo key.
+    def version_signal(
+        self, notebook_id: str
+    ) -> tuple[tuple[int, int, str], tuple[int, int, str]]:
+        """``(this partition's signal, the global partition's signal)`` — the
+        injection side's memo key for one run. Each is
+        ``(mutation revision, row count, newest updated_at)``.
+
+        ONE aggregate, scoped by ``notebook_id IN (?, '')`` so the planner
+        answers it from ``idx_retrieval_experiences_notebook`` (the
+        ``(notebook_id, id)`` index ``read_partition`` already requires)
+        instead of scanning a table that now grows with the number of
+        notebooks that have traffic. ``GROUP BY notebook_id`` rather than two
+        statements: the two halves must describe the SAME instant, or a
+        distillation landing between them hands the caller a pair of layers
+        taken from two different versions of the table.
+
+        The halves are returned separately because the global partition is
+        read by every run in the process while the notebook half is not:
+        folding them into one number would make merely switching notebooks
+        invalidate the shared global snapshot. When ``notebook_id`` is ``""``
+        it IS the global partition and both halves are the same signal.
 
         The count alone misses an in-place UPDATE (a re-distilled entry keeps
         its content-addressed id), and the max alone misses an eviction
@@ -438,9 +480,24 @@ class RetrievalExperienceStore:
         neither rendered into the prompt block nor part of the selection
         ordering, so a memo that misses it still serves identical rows.
         """
+        partition = _partition_argument(notebook_id)
         with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT COUNT(*) AS n, COALESCE(MAX(updated_at), '') AS m "
-                "FROM retrieval_experiences"
-            ).fetchone()
-        return self._mutations, int(row["n"]), str(row["m"] or "")
+            rows = connection.execute(
+                "SELECT notebook_id, COUNT(*) AS n, "
+                "COALESCE(MAX(updated_at), '') AS m "
+                "FROM retrieval_experiences WHERE notebook_id IN (?, '') "
+                "GROUP BY notebook_id",
+                (partition,),
+            ).fetchall()
+        # An empty partition produces no group row at all, which is why the
+        # default is built here rather than read off the result.
+        totals = {
+            str(row["notebook_id"] or ""): (int(row["n"]), str(row["m"] or ""))
+            for row in rows
+        }
+        shared = totals.get("", (0, ""))
+        own = totals.get(partition, (0, ""))
+        return (
+            (self._revision(partition), own[0], own[1]),
+            (self._revision(""), shared[0], shared[1]),
+        )

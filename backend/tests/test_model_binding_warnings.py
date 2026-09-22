@@ -1,8 +1,10 @@
 """PR-3·T8:启动时点名「没有任何模型服务绑定」的 chat 工作负载。
 
 `_unbound_workload_warnings` 是纯函数(只读注册表与两个 settings 布尔),这里
-直接单测它,不经由完整的 `run_startup`/真实模型配置。`run_startup` 侧的接线只是
-READY 日志之前的一圈 `logger.warning(...)`。
+直接单测它,不经由完整的 `run_startup`/真实模型配置。`run_startup` 侧的接线是
+READY 日志之前的一圈 `logger.warning(...)`——它是这个函数**唯一**的消费点,所以
+另配一条 AST 守卫钉住那一圈还在、且仍在 READY 之前;没有它,把那五行删掉整仓
+依然全绿,这条诊断就只剩一份没人调用的实现。
 
 这条告警存在的理由是一次真实事故:主 checkout 的 `.local/model-services.toml`
 生成于 Agentic Memory P1/P2 之前,缺 `agent_profile_consolidate` 与
@@ -10,8 +12,11 @@ READY 日志之前的一圈 `logger.warning(...)`。
 全链路 fail-soft,于是「特性开着、作业每次都落 failed:模型未配置」这件事在启动
 日志里一个字都没有。
 """
+import ast
+import inspect
 from types import SimpleNamespace
 
+from app.services import startup_warmup
 from app.services.model_registry import WORKLOADS
 from app.services.startup_warmup import _unbound_workload_warnings
 
@@ -113,3 +118,39 @@ def test_diagnostic_never_raises_on_a_minimal_double():
     settings_less = _unbound_workload_warnings(None, _models({"ask_answer"}))
     assert len(settings_less) == 1
     assert "问答回答（ask_answer）" in settings_less[0]
+
+
+def _run_startup_tree() -> ast.FunctionDef:
+    tree = ast.parse(inspect.getsource(startup_warmup))
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "run_startup":
+            return node
+    raise AssertionError("run_startup 不见了")
+
+
+def test_run_startup_still_emits_these_warnings_before_the_ready_line():
+    """接线守卫:`run_startup` 恰好调用一次这个诊断,且在 READY 之前。
+
+    这个函数只有这一个消费点,删掉那五行整仓仍然全绿——守卫在这里,是因为
+    「告警在 READY 之后才打」与「压根没打」对一个只往上翻到就绪行的运维者
+    是同一件事,而两者都不会让任何断言变红。
+    """
+    run_startup = _run_startup_tree()
+    calls = [
+        node
+        for node in ast.walk(run_startup)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_unbound_workload_warnings"
+    ]
+    assert len(calls) == 1, "唯一消费点:多一处或少一处都要重新想清楚顺序"
+
+    ready_lines = [
+        node.lineno
+        for node in ast.walk(run_startup)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value.startswith("startup: READY")
+    ]
+    assert len(ready_lines) == 1
+    assert calls[0].lineno < ready_lines[0], "告警必须打在 READY 那行之前"

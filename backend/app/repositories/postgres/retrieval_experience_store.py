@@ -71,7 +71,17 @@ class RetrievalExperienceStore:
         # No ``new_id`` seam, same note as the SQLite mirror: every id in this
         # table is CONTENT-ADDRESSED and computed by the caller.
         # codex #524 R12 P2:进程内单调修订计数(镜像 SQLite 侧,理由见彼处)。
-        self._mutations = 0
+        # 2026-09-22:按**分区**记,不再是全表一个数——理由同样见 SQLite 侧。
+        self._mutations: dict[str, int] = {}
+
+    def _bump_revision(self, partition: str) -> None:
+        """Record one write against ``partition``. Mirror of the SQLite side."""
+        self._mutations[partition] = self._mutations.get(partition, 0) + 1
+
+    def _revision(self, partition: str) -> int:
+        """How many writes THIS partition has taken in this process. Mirror of
+        the SQLite side, including why it is not summed with the global one."""
+        return self._mutations.get(partition, 0)
 
     @staticmethod
     def _experience_row(row) -> dict:
@@ -287,7 +297,7 @@ class RetrievalExperienceStore:
             result = db.execute(
                 "SELECT * FROM retrieval_experiences WHERE id=%s", (experience_id,)
             ).fetchone()
-        self._mutations += 1
+        self._bump_revision(partition)
         return self._experience_row(result)
 
     def note_adopted(self, experience_ids: Sequence[str], delta: int = 1) -> int:
@@ -350,7 +360,7 @@ class RetrievalExperienceStore:
                 'id COLLATE "C" DESC OFFSET %s)',
                 (partition, keep),
             )
-        self._mutations += 1
+        self._bump_revision(partition)
         return cursor.rowcount
 
     def count(self, notebook_id: str | None = None) -> int:
@@ -373,22 +383,37 @@ class RetrievalExperienceStore:
                 ).fetchone()
         return int(row["n"])
 
-    def version_signal(self) -> tuple[int, int, str]:
-        """``(mutation revision, row count, newest updated_at)`` — the
-        injection side's memo key. See the SQLite mirror for why the revision
-        exists (offset-carrying text MAX is not a content identity).
-
-        See the SQLite mirror for why both halves are needed and why an
-        adoption is deliberately invisible here.
+    def version_signal(
+        self, notebook_id: str
+    ) -> tuple[tuple[int, int, str], tuple[int, int, str]]:
+        """``(this partition's signal, the global partition's signal)`` — the
+        injection side's memo key for one run. See the SQLite mirror for why
+        the revision exists (offset-carrying text MAX is not a content
+        identity), why the two halves are returned separately, why one grouped
+        aggregate rather than two statements, and why an adoption is
+        deliberately invisible here.
 
         ``::text`` rather than the raw ``timestamptz``: the value is only ever
         compared for equality against the previously observed one, and a
         rendered string compares identically on both backends, so the memo key
         has one shape instead of one per driver.
         """
+        partition = _partition_argument(notebook_id)
         with self.database.connect() as db:
-            row = db.execute(
-                "SELECT COUNT(*) AS n, COALESCE(MAX(updated_at)::text, '') AS m "
-                "FROM retrieval_experiences"
-            ).fetchone()
-        return self._mutations, int(row["n"]), str(row["m"] or "")
+            rows = db.execute(
+                "SELECT notebook_id, COUNT(*) AS n, "
+                "COALESCE(MAX(updated_at)::text, '') AS m "
+                "FROM retrieval_experiences WHERE notebook_id IN (%s, '') "
+                "GROUP BY notebook_id",
+                (partition,),
+            ).fetchall()
+        totals = {
+            str(row["notebook_id"] or ""): (int(row["n"]), str(row["m"] or ""))
+            for row in rows
+        }
+        shared = totals.get("", (0, ""))
+        own = totals.get(partition, (0, ""))
+        return (
+            (self._revision(partition), own[0], own[1]),
+            (self._revision(""), shared[0], shared[1]),
+        )

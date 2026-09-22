@@ -374,6 +374,16 @@ def test_a_stored_row_round_trips_to_its_own_content_addressed_id(store):
     assert experience_id(row["situation"], row["action"]) == entry_id
 
 
+def _signal(store, partition: str = ""):
+    """This partition's own half of ``version_signal``.
+
+    The method returns ``(this partition, the global partition)`` so one
+    aggregate serves a run that reads both; tests about one partition want the
+    first half, and ``partition=""`` makes both halves the same tuple anyway.
+    """
+    return store.version_signal(partition)[0]
+
+
 def test_the_version_signal_tracks_inserts_updates_and_evictions(store, clock):
     """The injection side's memo key:
     ``(mutation revision, row count, newest updated_at)``.
@@ -385,10 +395,10 @@ def test_the_version_signal_tracks_inserts_updates_and_evictions(store, clock):
     halves cannot see (lexicographic MAX over offset-carrying text under a
     UTC-offset change or clock step, same-signature evict+insert batches).
     """
-    assert store.version_signal() == (0, 0, "")
+    assert store.version_signal("") == ((0, 0, ""), (0, 0, ""))
 
     _seed(store, clock, "rx_one", adopted=0, support=1, at="2026-08-01T00:00:00+00:00")
-    inserted = store.version_signal()
+    inserted = _signal(store)
     assert inserted[1:] == (1, "2026-08-01T00:00:00+00:00")
     assert inserted[0] > 0
 
@@ -403,14 +413,14 @@ def test_the_version_signal_tracks_inserts_updates_and_evictions(store, clock):
         provenance_max=50,
         replace_conclusion=True,
     )
-    updated = store.version_signal()
+    updated = _signal(store)
     assert updated[1:] == (1, "2026-08-02T00:00:00+00:00")
     assert updated[0] > inserted[0]
 
     _seed(store, clock, "rx_two", adopted=0, support=1, at="2026-08-03T00:00:00+00:00")
-    before_evict = store.version_signal()
+    before_evict = _signal(store)
     assert store.evict_to_limit(1) == 1
-    after_evict = store.version_signal()
+    after_evict = _signal(store)
     assert after_evict[1] == 1
     assert after_evict[0] > before_evict[0]
 
@@ -431,17 +441,17 @@ def test_an_adoption_is_deliberately_invisible_to_the_version_signal(store, cloc
     prove nothing.
     """
     _seed(store, clock, "rx_one", adopted=0, support=1, at="2026-08-01T00:00:00+00:00")
-    before = store.version_signal()
+    before = _signal(store)
     clock.value = "2026-08-19T00:00:00+00:00"
     store.note_adopted(["rx_one"])
-    assert store.version_signal() == before
+    assert _signal(store) == before
 
 
 def test_a_write_moves_the_signal_even_when_the_db_halves_cannot_see_it(store, clock):
     """codex #524 R12 P2:不推时钟做一次 replace_conclusion——count 与
     MAX(updated_at) 都纹丝不动,只有进程内修订能让注入缓存看见这次更新。"""
     _seed(store, clock, "rx_one", adopted=0, support=1, at="2026-08-01T00:00:00+00:00")
-    before = store.version_signal()
+    before = _signal(store)
     store.upsert_experience(
         "rx_one",
         situation=SITUATION,
@@ -452,7 +462,7 @@ def test_a_write_moves_the_signal_even_when_the_db_halves_cannot_see_it(store, c
         provenance_max=50,
         replace_conclusion=True,
     )
-    after = store.version_signal()
+    after = _signal(store)
     assert after[1:] == before[1:]     # DB 两元对这次写完全失明
     assert after[0] > before[0]        # 修订元看得见
 
@@ -491,6 +501,42 @@ def test_a_partitioned_read_sees_only_its_own_partition(store, clock):
     assert [row["id"] for row in store.read_partition("nb-a", 50)] == ["rx_a"]
     assert [row["id"] for row in store.read_partition("nb-b", 50)] == ["rx_b"]
     assert store.read_partition("nb-never-written", 50) == []
+
+
+def test_the_signal_is_scoped_to_the_two_partitions_a_run_reads(store, clock):
+    """一次提问只读「本库 + 全局」两个分区,签名就只能看见这两块。
+
+    这是 PR-3(注入默认开)必须做的那一条:默认开之后每条 reasoning 提问都付
+    一次 ``version_signal``,若它仍是全表 COUNT/MAX,一个进程里任何一个库蒸出
+    一条就会让**所有**库的注入缓存作废,而且那次聚合还要扫过所有库的分区。
+    """
+    _seed_in(store, clock, "rx_g", "", at="2026-08-01T00:00:00+00:00")
+    _seed_in(store, clock, "rx_a", "nb-a", at="2026-08-02T00:00:00+00:00")
+
+    own, shared = store.version_signal("nb-a")
+    assert own[1:] == (1, "2026-08-02T00:00:00+00:00")
+    assert shared[1:] == (1, "2026-08-01T00:00:00+00:00")
+
+    # 从没写过的库:自己那半是空的,全局那半照常。
+    empty_own, still_shared = store.version_signal("nb-never-written")
+    assert empty_own[1:] == (0, "")
+    assert still_shared == shared
+
+    # ``""`` 就是全局分区本身,两半是同一个签名。
+    assert store.version_signal("") == (shared, shared)
+
+    # 别的库蒸馏:nb-a 与全局两半都不动——这正是缓存不再被连累的判据。
+    before_a, before_shared = store.version_signal("nb-a")
+    _seed_in(store, clock, "rx_b", "nb-b", at="2026-08-03T00:00:00+00:00")
+    assert store.version_signal("nb-a") == (before_a, before_shared)
+
+    # 本库写只动本库那半;全局写只动全局那半。
+    _seed_in(store, clock, "rx_a2", "nb-a", at="2026-08-04T00:00:00+00:00")
+    after_a, after_shared = store.version_signal("nb-a")
+    assert after_a != before_a and after_shared == before_shared
+    _seed_in(store, clock, "rx_g2", "", at="2026-08-05T00:00:00+00:00")
+    final_a, final_shared = store.version_signal("nb-a")
+    assert final_a == after_a and final_shared != after_shared
 
 
 def test_a_row_reports_the_partition_it_was_written_into(store, clock):

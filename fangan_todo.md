@@ -126,6 +126,12 @@
       条目的 `adopted` 计数看采纳率（`adopted` 只在条目真正送达且模型那一轮点名了该动作时
       递增），需要生产上跑够量才谈得上。觉得每 reflect 轮重复注入的 token 不划算的部署把
       注入闸设回 false 即逐字回到「只蒸馏不注入」。
+- [ ] **模型服务状态页不显示未绑定的工作负载**：`/admin` 的模型服务状态是 service-centric 的
+      （按物理服务列出它承载的 workload），未绑定的工作负载不产生任何一行，所以「升级后缺了
+      两个绑定」这件事在页面上看不出来。当前唯一的提示面是启动日志里的 `model-bindings:` 告警
+      （汇总一行 + 特性已开却未绑定的各占一行），笔记本面板「AI 对这个库的理解」会显示
+      `模型未配置` 的失败原因。后续可在 `/model-services/status` 的 payload 里带一份未绑定
+      清单，并在该面板加一行显示；本期只登记，不做前端。
 - [ ] **全局回答的 👍/👎 反馈未进管理端提问分析 / 笔记本分析口径**：`POST
       /global-ask/jobs/{job_id}/feedback` 把评分写进该任务 `global_ask_jobs.payload_json` 的
       `feedback` 字段（首次写入为准），并发一个内容无关事件 `global_ask_feedback`；两者都不落

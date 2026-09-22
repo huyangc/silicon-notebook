@@ -925,15 +925,22 @@ def experience_wiring_active(settings, experience_store) -> bool:
     plan 注入、reflect 注入、轨迹步、采用回写六个消费点,各写一份判据就会剩下
     「不注入了,但每 run 还在读那张表」这类半关状态。
 
-    ⚠ 判据是 ``retrieval_experience_inject_enabled``(默认 **False**),**不是**
-    蒸馏那把 ``retrieval_experience_enabled``(默认 True)。两把闸刻意分开:攒数据
-    与改变每一次真实提问的规划提示是两个独立的决定,而「蒸馏开、注入关」正是本
-    特性的默认形态。拿蒸馏那把闸当判据会让整个部署在没人同意的情况下开始注入。
+    ⚠ 判据是 ``retrieval_experience_inject_enabled``,**不是**蒸馏那把
+    ``retrieval_experience_enabled``。两把闸刻意分开:攒数据与改变每一次真实提问
+    的规划提示是两个独立的决定。两者**今天都默认开**(注入闸 2026-09-22 随按
+    笔记本分区翻的默认值,见 ``config.py`` 那两个字段的注释),所以拿蒸馏那把闸
+    当判据不再会「在没人同意的情况下开始注入」,而是会让一个明确把注入关掉、只
+    想留蒸馏观测的部署继续被注入——同一个洞,换了个方向。
 
     ``experience_store is None`` 是「这个调用方没接线」的拼写(镜像 P1 与两个集合
     服务):knowhow 智能补全与窄测试替身照旧构造得出 ``ReasoningRetriever``,只是
     那条 run 与接入前逐字相同。
     """
+    # ⚠ ``False`` 是**取不到这个属性时**的保守回退,不是产品默认值:产品默认在
+    # ``config.py``(今天是 True)。窄测试替身常拿一个只带几个字段的
+    # ``SimpleNamespace`` 当 settings,回退成「不注入」让那种 run 与接入前逐字
+    # 相同;回退成 True 会让一个根本没打算测注入的替身开始读表。翻默认值时**不**
+    # 跟着翻这一处。
     return bool(
         getattr(settings, "retrieval_experience_inject_enabled", False)
         and experience_store is not None
@@ -968,21 +975,18 @@ _EXPERIENCE_RUN_MODE = "reasoning"
 
 # 进程级经验库快照。表从 2026-09-22 起按 ``notebook_id`` **分区**(``''`` 是全局
 # 分区),所以缓存也按分区存:一个进程同时服务很多库,一份「整表快照」既不存在也
-# 没意义。有效性判据仍是 store 身份 + 一次 ``version_signal()``(行数 + 最新
-# updated_at)——它是**全表**的签名,所以任何分区被写过都会让**整份**缓存失效。
+# 没意义。有效性判据是 store 身份 + **该分区自己**的 ``version_signal(...)`` 分量
+# (行数 + 最新 updated_at + 进程内写次数)。
 #
-# ⚠ 「整份失效」的代价要说清楚,它不是零:失效频率随有流量的库数 N **线性**增长
-# (任何一个库蒸出一条,所有库的快照一起作废),所以 memo 的命中率随 N 衰减,极端
-# 情况下退化成「每 run 都重读」。接受它是因为真正的账在**查询**上而不在命中率上
-# ——一次 miss 的代价是两条按主键分区扫描(至多 300 / 100 行的封闭枚举值行),而
-# 每 run 无论命中与否都要付的那次 ``version_signal()`` 聚合,走
-# ``_cached_experience_layers`` 之后每个消费点只剩**一次**。要把失效做成按分区的,
-# 就得给 store 加一个只有缓存用得上的分区签名方法、或每 run 多发 N 次聚合,换来的
-# 只是「别的库刚蒸完时本库少扫一次分区」。
+# 失效因此是**按分区**的:B 库蒸出一条不会让 A 库的快照作废,也不会让两个库共读
+# 的全局层作废。PR-1 那版把签名做成全表一个数,代价是失效频率随有流量的库数 N
+# 线性增长;注入闸默认关时那只是理论损耗,PR-3 默认开之后它变成每条 reasoning
+# 提问都要付的账,所以连同那次全表聚合一起改掉了(见
+# ``RetrievalExperienceStorePort.version_signal``)。
 #
 # 换来的是:每 run 从「读回至多 300+100 行 + 每行两次 JSON 反序列化 + 逐行打分」
-# 降到「一次聚合查询 + 逐行打分」。刻意**不做** TTL:TTL 会让刚蒸出来的条目要等
-# 一段时间才生效,而这条判据是精确的、代价也只有一次聚合。
+# 降到「一次按索引取两组的聚合查询 + 逐行打分」。刻意**不做** TTL:TTL 会让刚蒸
+# 出来的条目要等一段时间才生效,而这条判据是精确的、代价也只有一次聚合。
 #
 # 分区项走 LRU 上界:进程见过的库数没有天花板(一个部署几千个库很正常),无界字典
 # 会把一份「有界的注入成本」悄悄变成一条随流量增长的内存泄漏。全局分区**不进** LRU
@@ -992,13 +996,14 @@ _EXPERIENCE_CACHE_LOCK = threading.Lock()
 #: 是一个进程稳态下可以接受的常数上界。
 _EXPERIENCE_CACHE_MAX_PARTITIONS = 64
 #: 单一字典,因为用例(以及任何想清干净的调用方)只需要 ``.clear()`` 一处就能把
-#: 整份缓存——身份、签名、全局分区、LRU——一起归零。键:``store_ref``/``signal``/
-#: ``global``/``partitions``(``OrderedDict``,最近使用的在尾)。
+#: 整份缓存——身份、全局分区、LRU——一起归零。键:``store_ref``/``global``/
+#: ``partitions``(``OrderedDict``,最近使用的在尾)。两个快照槽存的都是
+#: ``(signal, entries)``:签名跟着它描述的那个分区走,而不是整份缓存一个。
 _EXPERIENCE_CACHE: Dict[str, object] = {}
 
 
-def _experience_cache_fresh(store, signal) -> bool:
-    """当前缓存是否属于 ``store`` 且签名仍是 ``signal``。**必须持锁调用**。
+def _experience_cache_owner_matches(store) -> bool:
+    """当前缓存是否属于 ``store``。**必须持锁调用**。
 
     codex #524 R7→R11 P2:store 身份用**弱引用**而不是 id()——id() 在旧 store
     被回收后可以被新对象复用,配上恰好相同的 (行数, 最新时间) 签名就会把 A 库的
@@ -1006,11 +1011,7 @@ def _experience_cache_fresh(store, signal) -> bool:
     store`` 就再也不可能为真;两个活对象则本来就不共享身份。
     """
     ref = _EXPERIENCE_CACHE.get("store_ref")
-    return (
-        ref is not None
-        and ref() is store  # type: ignore[operator]
-        and _EXPERIENCE_CACHE.get("signal") == signal
-    )
+    return ref is not None and ref() is store  # type: ignore[operator]
 
 
 def _experience_partition_key(notebook_id) -> str:
@@ -1030,23 +1031,28 @@ def _experience_partition_key(notebook_id) -> str:
 
 
 def _cached_partition(store, signal, key: str) -> List[dict]:
-    """在**已经算好的** ``signal`` 下取一个分区的快照(命中即返回,否则读一次)。
+    """在**该分区自己的** ``signal`` 下取它的快照(命中即返回,否则读一次)。
 
     签名由调用方传进来而不是在这里算,是为了让「装两层」只付一次
-    ``version_signal()`` 聚合查询,也让两层落在**同一个**签名下——各算各的话,
-    两次之间落一笔写就会让第二层把第一层刚装进去的快照整份清掉。
+    ``version_signal(...)`` 聚合查询,也让两层落在**同一次**读出来的签名对上
+    ——各发各的查询的话,两次之间落一笔蒸馏写就会让这对快照来自表的两个版本。
+
+    每个分区各存各的签名,所以一个分区失效不会连累另一个;整份缓存只在换了
+    store 对象时才清空。
     """
     with _EXPERIENCE_CACHE_LOCK:
-        if _experience_cache_fresh(store, signal):
+        if _experience_cache_owner_matches(store):
             if not key:
                 cached = _EXPERIENCE_CACHE.get("global")
-                if cached is not None:
-                    return cached  # type: ignore[return-value]
+                if isinstance(cached, tuple) and cached[0] == signal:
+                    return cached[1]
             else:
                 partitions = _EXPERIENCE_CACHE.get("partitions")
                 if isinstance(partitions, OrderedDict) and key in partitions:
-                    partitions.move_to_end(key)
-                    return partitions[key]
+                    cached = partitions[key]
+                    if cached[0] == signal:
+                        partitions.move_to_end(key)
+                        return cached[1]
     limit = (
         RETRIEVAL_EXPERIENCE_MAX_ENTRIES if not key
         else RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES
@@ -1055,18 +1061,17 @@ def _cached_partition(store, signal, key: str) -> List[dict]:
     with _EXPERIENCE_CACHE_LOCK:
         # 后写者赢:两个 run 同时未命中时都会读一次,写回的是同一份内容(签名相同)
         # 或更新的那一份(签名不同)。都不是错误,而抢锁读表会把一次 I/O 变成串行点。
-        if not _experience_cache_fresh(store, signal):
+        if not _experience_cache_owner_matches(store):
             _EXPERIENCE_CACHE.clear()
             _EXPERIENCE_CACHE["store_ref"] = weakref.ref(store)
-            _EXPERIENCE_CACHE["signal"] = signal
         if not key:
-            _EXPERIENCE_CACHE["global"] = entries
+            _EXPERIENCE_CACHE["global"] = (signal, entries)
         else:
             partitions = _EXPERIENCE_CACHE.get("partitions")
             if not isinstance(partitions, OrderedDict):
                 partitions = OrderedDict()
                 _EXPERIENCE_CACHE["partitions"] = partitions
-            partitions[key] = entries
+            partitions[key] = (signal, entries)
             partitions.move_to_end(key)
             while len(partitions) > _EXPERIENCE_CACHE_MAX_PARTITIONS:
                 partitions.popitem(last=False)
@@ -1086,29 +1091,34 @@ def _cached_experiences(store, notebook_id: str = "") -> List[dict]:
     下游 ``select_experiences_layered``/``render_experience_block`` 都是纯函数。
     """
     key = _experience_partition_key(notebook_id)
-    return _cached_partition(store, tuple(store.version_signal()), key)
+    own_signal, global_signal = store.version_signal(key)
+    return _cached_partition(
+        store, tuple(global_signal if not key else own_signal), key
+    )
 
 
 def _cached_experience_layers(store, notebook_id) -> Tuple[List[dict], List[dict]]:
-    """一次 ``version_signal()`` 取回 ``(本库分区, 全局分区)`` 两层快照。
+    """一次 ``version_signal(...)`` 取回 ``(本库分区, 全局分区)`` 两层快照。
 
-    注入侧每个消费点都只能付**一次**聚合查询:``version_signal()`` 是
-    COUNT + MAX 的全表聚合,分区之后这张表可以到「300 + 100 × 有流量的库数」
-    行,每个消费点算两次就是把最贵的那一步翻倍。顺带修掉的是一个更隐蔽的洞:
-    两层各算各的签名时,两次之间落一笔蒸馏写入会让第二次的新签名把第一次刚
-    装进缓存的分区整份清掉,于是这一对快照在**两个**不同的表版本上——本库层
-    的条目可能已经被全局层那次失效冲掉了。
+    注入侧每个消费点都只能付**一次**聚合查询:每条 reasoning 提问都要付它,
+    而这张表分区之后可以到「300 + 100 × 有流量的库数」行,每个消费点算两次
+    就是把最贵的那一步翻倍。顺带修掉的是一个更隐蔽的洞:两层各发各的查询时,
+    两次之间落一笔蒸馏写入会让这一对快照落在**两个**不同的表版本上。
+
+    store 一次返回两个分区各自的签名(不是一个合并数),所以每层各按自己的
+    签名判命中:别的库蒸馏不会碰到本库,本库蒸馏也不会把全体 run 共读的
+    全局层冲掉。
 
     ``notebook_id == ""`` 的调用方(不属于任何库)没有本库层,返回空的第一层
     而不是把全局层塞两遍:后者会让下游把同一批行既算成本库又算成回退,轨迹上
     的 ``notebook_entries`` 当场说谎。
     """
     key = _experience_partition_key(notebook_id)
-    signal = tuple(store.version_signal())
-    fallback = _cached_partition(store, signal, "")
+    own_signal, global_signal = store.version_signal(key)
+    fallback = _cached_partition(store, tuple(global_signal), "")
     if not key:
         return [], fallback
-    return _cached_partition(store, signal, key), fallback
+    return _cached_partition(store, tuple(own_signal), key), fallback
 
 
 # trace summary 会上屏,所以清单名必须是界面词。刻意**不**复用后端
@@ -4718,8 +4728,9 @@ class ReasoningRetriever:
         # 用户自己的勾选,而这条约束是结构性的(动作词表里没有任何范围类动作,
         # 条目本身也没有来源/库字段可渲染),不是提示词里的一句请求。
         #
-        # fail-open 且**不记 skip 步**,同理由:关闭态是默认形态,没蒸出东西
-        # 的部署(常态)每一轮多一条「无」步是纯噪声。
+        # fail-open 且**不记 skip 步**:注入闸今天默认开,但「这个库还没蒸出
+        # 任何条目」仍是新库的常态(单库阈值是 10 次 reasoning 提问),给那种
+        # run 每一轮多记一条「无」步是纯噪声。
         experience_block = ""
         experience_entries: List = []
         if experience_wiring_active(self.settings, self.retrieval_experiences):

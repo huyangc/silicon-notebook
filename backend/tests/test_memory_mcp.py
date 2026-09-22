@@ -502,7 +502,9 @@ async def test_ask_tool_reuses_formal_ask_and_rejects_retired_graph_alias(mcp_en
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_signals_the_three_completion_memory_chains(mcp_env):
+async def test_ask_notebook_signals_the_three_completion_memory_chains(
+    mcp_env, monkeypatch
+):
     """Agentic Memory PR-3(T7):MCP 的提问也算数。
 
     ``ask_notebook`` 经 ``RepositoryFacade.ask`` → ``AskService.ask_current``,
@@ -558,6 +560,22 @@ async def test_ask_notebook_signals_the_three_completion_memory_chains(mcp_env):
         note_ask_completed=lambda uid: noted.append(("p3", uid))
     )
 
+    # 钩子跑在交付之后的后台 job 上(它不得压在请求线程上,见
+    # test_agent_profile_job_overlay.py 的 barrier 用例),所以这里包住真的
+    # submit 收集那几个句柄,断言之前 join——而不是把全进程的后台提交改成同步。
+    from app.services import background_jobs
+
+    real_submit = background_jobs.submit
+    completion_jobs: list = []
+
+    def _submit(fn, *args, name=None, **kwargs):
+        handle = real_submit(fn, *args, name=name, **kwargs)
+        if name and name.startswith("ask-completed-"):
+            completion_jobs.append(handle)
+        return handle
+
+    monkeypatch.setattr(background_jobs, "submit", _submit)
+
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
         _payload(await client.call(
             "select_notebook", {"notebook_id": mcp_env["notebook"].id}
@@ -566,6 +584,9 @@ async def test_ask_notebook_signals_the_three_completion_memory_chains(mcp_env):
             "ask_notebook", {"question": "What evidence exists?", "mode": "chunk"}
         ))
     assert answer["conversation_id"]
+    assert completion_jobs, "MCP 提问必须提交一个提问完成 job"
+    for handle in completion_jobs:
+        handle.join(timeout=10)
 
     # 提问者 = 这条 ask_jobs 行的 created_by(token 背后的那个人),不是「某个
     # 非空字符串」——这是 P1/P3 的边界本身。
