@@ -328,6 +328,14 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "真实响应由 test_agent_profile_routes.py 的忙碌 409、冷却 409(含「有新提问"
         "即放行」)与关闸 409 三条用例覆盖(断言 X-User-Message + 逐字文案)。"
     ),
+    "app/api/agent_profile_routes.py::clear_notebook_experiences": (
+        "唯一动态 detail 是与 rebuild_understanding / distill_notebook_experiences 共用的"
+        "同一个中文模块常量 _REBUILD_BUSY_MESSAGE(正在整理，请稍候),无插值、无异常"
+        "原文。它挡的是「清空撞上正在跑的那一批」:那一批会把结果 upsert 回刚被清空的"
+        "分区,对用户就是「删了又回来」。真实响应由 test_agent_profile_routes.py::"
+        "test_clear_is_refused_while_a_batch_is_running 覆盖(断言 409 + X-User-Message"
+        " + 逐字文案 + 行数不变)。"
+    ),
     "app/api/agent_profile_routes.py::clear_agent_observations": (
         "唯一动态 detail 是与 update_understanding_block 等三个端点共享的同一个中文"
         "模块常量 _DISABLED_MESSAGE（这项功能当前未开启，暂时无法编辑），无插值、"

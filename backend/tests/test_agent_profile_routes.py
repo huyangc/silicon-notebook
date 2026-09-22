@@ -25,7 +25,8 @@
   ``enabled=false`` 且**不查表**,``POST .../distill`` 409,``DELETE`` 照常能删;
 * ``distill`` 的三种 409(关闸 / 单飞占用 / 冷却)文案各不相同;冷却只在该库
   没有待处理提问时生效,有新提问立刻放行;
-* ``DELETE`` 只清本库那一份,全局分区与别的库一行不动;
+* ``DELETE`` 只清本库那一份,全局分区与别的库一行不动;该分区正在整理(或排着
+  队)时 ``DELETE`` 409 且一行不删——否则那一批会把结果写回刚被清空的分区;
 * 写端点无 ``agent_profile:write`` → 404,陌生人三个端点一律 404;
 * 路由注册顺序:``DELETE .../understanding/experiences`` 必须落进经验端点,
   不能被 ``/understanding/{label}`` 抢走(会变成一个 422)。
@@ -1048,6 +1049,49 @@ def test_clear_removes_only_this_notebooks_slice(tmp_path, monkeypatch):
     )
     assert again.status_code == 200, again.text
     assert again.json() == {"removed": 0}
+
+
+def test_clear_is_refused_while_a_batch_is_running(tmp_path, monkeypatch):
+    """codex #771 R1 P2:清空不能与正在跑的那一批抢同一个分区。
+
+    那一批此刻可能正卡在模型调用上,清完之后它会把结果 upsert 回来——用户看到
+    「已清空 N 条」,刷新一下行又回来了,看起来就像删除没生效。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id = _new_user(client)
+    notebook_id = _notebook(client, owner)
+    store = _experience_store()
+    _seed_experience(store, notebook_id, "in-flight")
+    _fake_submit(monkeypatch)
+
+    started = client.post(
+        f"/api/notebooks/{notebook_id}/{_EXPERIENCES}/distill", headers=owner
+    )
+    assert started.status_code == 200, started.text
+
+    refused = client.delete(
+        f"/api/notebooks/{notebook_id}/{_EXPERIENCES}", headers=owner
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.headers.get("X-User-Message") == "1"
+    assert refused.json()["detail"] == "正在整理，请稍候"
+    assert store.count(notebook_id) == 1, "被拒的清空一行都不许删"
+
+    # 别的库不受影响——挡的是**这个**分区,不是「有任何一批在跑就都不许清」。
+    other_notebook = _notebook(client, owner, name="另一个库")
+    _seed_experience(store, other_notebook, "elsewhere")
+    assert client.delete(
+        f"/api/notebooks/{other_notebook}/{_EXPERIENCES}", headers=owner
+    ).status_code == 200
+
+    # 那一批跑完(本机没配模型,run 早退并释放槽位)之后,清空照常。
+    _experience_jobs().run(notebook_id)
+    cleared = client.delete(
+        f"/api/notebooks/{notebook_id}/{_EXPERIENCES}", headers=owner
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json() == {"removed": 1}
+    assert store.count(notebook_id) == 0
 
 
 def test_clear_still_works_while_the_gate_is_closed(tmp_path, monkeypatch):

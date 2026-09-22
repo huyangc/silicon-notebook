@@ -708,9 +708,10 @@ function ActionNoteLine({ note }: { note: ActionNote }) {
  *
  * 与上面三档的形态关系,以及每一处「为什么这样而不是那样」:
  *
- * · **折叠 + 首次展开才拉取**,与「Agent 记录」逐字同一条口径(多数用户不会点开,
- *   跟着面板无条件加载是白付一次查询),连代次守卫一起镜像过来:请求返回时若已经
- *   不是最新那一次,结果整份丢弃,不拿旧快照盖新结果。
+ * · **折叠 + 展开才拉取**,与「Agent 记录」同一条口径(多数用户不会点开,跟着面板
+ *   无条件加载是白付一次查询),连代次守卫一起镜像过来:请求返回时若已经不是最新
+ *   那一次,结果整份丢弃,不拿旧快照盖新结果。与那一张的差别只有一处:这一张**每次**
+ *   展开都重取,理由见 `onToggle`。
  *
  * · **两个管理动作都不是后台长任务的轮询形态**。服务端这条链路没有可查的状态字段
  *   (契约里只有 `{"started": true}`),所以界面**不轮询、也不宣布结局**:按下期间
@@ -718,9 +719,8 @@ function ActionNoteLine({ note }: { note: ActionNote }) {
  *   Interactive feedback 要的「结果落在按钮自身或紧邻处」,不是页面顶部的横幅。
  *
  * · 「已开始整理，稍后展开刷新」这句话必须是**真的**:整理是异步的,立刻重取只会
- *   拿回同一份旧列表。所以成功之后记一个 `refreshOnOpenRef`,下次收起再展开时真的
- *   重取一次——否则那句话就是在教用户做一件不起作用的事。那一位为什么是 ref、
- *   为什么只在发出重取的那一刻清掉,见它自己的注释。
+ *   拿回同一份旧列表,所以**每次展开都重取**(见 `onToggle` 的注释:记「该不该刷新」
+ *   的意图位躲不开一个兑现不了的承诺)。否则那句话就是在教用户做一件不起作用的事。
  *
  * · `enabled=false`(这条链路的总闸)时卡内只有一句话,两个按钮一个都不渲染:一颗
  *   注定 409 的按钮比没有按钮更糟(#616 R3 的原话)。`can_manage=false` 同理——
@@ -735,31 +735,19 @@ function ExperienceSection({ notebookId }: { notebookId: string }) {
   const [clearing, setClearing] = useState(false);
   const [clearNote, setClearNote] = useActionNote();
   const [confirmingClear, setConfirmingClear] = useState(false);
-  // 「整理已经排上了」之后,下一次展开要真的重取(见上面模块注释第三条)。
-  //
-  // ⚠ 这一位是 ref 而不是 state,而且**只在真正发出那次重取的那一刻**清掉。
-  // 早先写成「读成功时清掉」有一个真实的交错(codex #772 P3):展开触发的慢读还在
-  // 飞,用户点了「立即整理」把它置上,那次慢读随后返回、把它一并清成 false——于是
-  // 「稍后展开刷新」承诺的那次重取永远不会发生,而界面还在那儿教用户去展开。
-  // 清除点收到 onToggle 里之后,一次读**只会**清掉它自己消费的那一次意图。
-  const refreshOnOpenRef = useRef(false);
   const loadEpochRef = useRef(0);
 
-  /** 返回这次读的结果有没有被采用(代次落后、或请求失败都是 `false`)。 */
   const load = useCallback(async () => {
     const epoch = ++loadEpochRef.current;
     setLoading(true);
     setError("");
     try {
       const next = await fetchExperiencePartition(notebookId);
-      if (epoch !== loadEpochRef.current) return false;
-      setData(next);
-      return true;
+      if (epoch === loadEpochRef.current) setData(next);
     } catch (err) {
       if (epoch === loadEpochRef.current) {
         setError(toUserMessage(err, "没能读到检索经验，请稍后重试"));
       }
-      return false;
     } finally {
       if (epoch === loadEpochRef.current) setLoading(false);
     }
@@ -772,17 +760,16 @@ function ExperienceSection({ notebookId }: { notebookId: string }) {
       setConfirmingClear(false);
       return;
     }
-    if (loading) return;
-    const consuming = refreshOnOpenRef.current;
-    if (data !== null && !consuming) return;
-    // 意图在**发出**这次读时消费掉,不等它回来:等回来清就会误伤在它在飞期间
-    // 新排上的那一次整理(见上面那段)。
-    refreshOnOpenRef.current = false;
-    void load().then((applied) => {
-      // 这次读没成功(网络抖了一下)——意图还没兑现,放回去,免得一次瞬时失败
-      // 把「稍后展开刷新」永久吃掉(此后 data 非空,再展开也不会重取)。
-      if (!applied && consuming) refreshOnOpenRef.current = true;
-    });
+    // **每次展开都重取**,不记「这次该不该刷新」的意图位(codex #771 R1 P2)。
+    // 记意图那一版有一个兑现不了的承诺:整理还在后台跑的时候用户收起再展开,意图
+    // 被那一次读消费掉、读回来的却还是旧列表,此后再展开都不重取——而界面一直在
+    // 那儿写着「稍后展开刷新」。任何「只刷新一次」的形态都躲不开这个洞,因为界面
+    // 根本无从知道那次整理落库没有(服务端这条链路没有可查的状态)。
+    //
+    // 代价是一次多余的读:反复开合会逐次发请求。这是有界的(一次点击一次轻查询),
+    // 而且慢读不会串——代次守卫让只有最新那一次的结果被采用。懒加载那条红线仍然
+    // 成立:展开之前一个请求都不发。
+    void load();
   }
 
   // 两个动作互斥:清空在飞时整理没有意义(整理的输入正在被删),整理在飞时清空会
@@ -797,7 +784,6 @@ function ExperienceSection({ notebookId }: { notebookId: string }) {
     try {
       await distillExperiencePartition(notebookId);
       setDistillNote({ text: "已开始整理，稍后展开刷新", failed: false });
-      refreshOnOpenRef.current = true;
     } catch (err) {
       // 409 的两种来历(总闸关掉、已经有一次在跑)后端都写成了人话,原样上屏。
       setDistillNote({

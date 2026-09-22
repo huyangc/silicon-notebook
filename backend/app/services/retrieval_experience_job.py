@@ -375,6 +375,12 @@ class RetrievalExperienceDistillationService:
         # cleaned up, for the same reason.
         self._last_finished: dict[str, float] = {}
         self._running = False
+        # WHICH partition holds the slot, or ``None`` when nobody does. A
+        # companion to ``_running`` rather than a replacement for it: ``''`` is
+        # a real partition (the global one), so the flag cannot be folded into
+        # "is the partition None". Only ``is_active`` reads it — the
+        # single-flight logic itself never needed to know whose batch it was.
+        self._running_partition: "str | None" = None
         # NOTEBOOK partitions waiting for the slot, oldest first, de-duplicated
         # by the companion set: a library that crosses its threshold twice
         # while a batch is in flight has ONE batch waiting, not two (the second
@@ -487,6 +493,16 @@ class RetrievalExperienceDistillationService:
         which way the two conditions compose: pending traffic OVERRIDES the
         cooldown, it does not add to it.
 
+        ⚠ Which is why this method CONSUMES that library's backlog when it
+        claims (``_claim_manual_locked``) instead of delegating to ``start()``,
+        whose contract is to leave the counters alone. With the backlog left
+        standing, one single ask below the threshold pins ``pending`` at a
+        non-zero value forever, that value overrides the cooldown on every
+        press, and the cooldown protects nothing at all — press, press, press,
+        three model calls over one unchanged sample. After a manual batch the
+        account is settled, and "pending" again means what the override reads
+        it as: **an ask that arrived since the last batch looked**.
+
         That same asymmetry is what keeps the §13-Q4 restart case working.
         After a restart the pending counters are gone (they are process-local,
         which is the whole reason this button exists) — but so is
@@ -520,6 +536,10 @@ class RetrievalExperienceDistillationService:
                 and finished is not None
                 and (time.monotonic() - finished) < _MANUAL_DISTILL_COOLDOWN_SECONDS
             )
+            # 认领 + 消费在**同一个**临界区,与 ``note_ask_completed`` 逐字同一
+            # 条理由(见那里的注释)。这条路径因此不再走 ``start()``:那个共享
+            # 入口刻意不消费积压,而不消费正是冷却被绕开的机制。
+            claimed = None if cooling else self._claim_manual_locked(notebook_id)
         if cooling:
             # Outside the lock, like every other emit in this class. The event
             # carries the closed partition LABEL only, never the id — the same
@@ -528,9 +548,39 @@ class RetrievalExperienceDistillationService:
                 "skipped", latency_ms=0, reason="cooldown", partition="notebook",
             )
             return MANUAL_DISTILL_COOLDOWN
-        if not self.start(notebook_id):
+        if claimed is None:
             return MANUAL_DISTILL_BUSY
+        # Submit outside the lock, exactly as the automatic path does; a
+        # failure in here restores BOTH the slot and the consumed backlog.
+        self._submit_claimed(notebook_id, claimed)
         return MANUAL_DISTILL_STARTED
+
+    def is_active(self, notebook_id: str) -> bool:
+        """Is a batch for this partition running right now, or waiting to?
+
+        A lock-held read of two fields and nothing else — no I/O, no side
+        effect. It exists for ONE caller: the "clear this library's
+        experiences" endpoint, which otherwise races a batch that is sitting in
+        ``chat_json()`` and will ``upsert`` its answer into the partition the
+        user just emptied. The user sees the delete succeed and the rows come
+        back.
+
+        ⚠ It narrows that window; it does not close it. The endpoint's check
+        and its delete are two statements, so a batch claimed in between still
+        writes afterwards. Closing it properly would need a fence the store
+        itself honours (a partition generation, bumped on delete and verified
+        inside the distillation's write transaction) — registered, deliberately
+        not built here: the remaining window is microseconds against the
+        seconds-long window this removes, and the failure mode is a few entries
+        reappearing, not corruption.
+
+        ``''`` is answered honestly (it asks about the global chain) rather
+        than specially — no caller passes it today, and inventing a "no" for it
+        would be the kind of silent falsehood the partition rules exist to
+        prevent.
+        """
+        with self._lock:
+            return self._running_partition == notebook_id or notebook_id in self._queued
 
     # ------------------------------------------------- the waiting-room state
     # Every method below runs WITH ``_lock`` held (``_locked`` suffix) and does
@@ -702,7 +752,37 @@ class RetrievalExperienceDistillationService:
             return None
         self._last_claimed_global = not partition
         self._running = True
+        self._running_partition = partition
         return partition, self._consume_locked(partition)
+
+    def _claim_manual_locked(self, partition: str) -> "int | None":
+        """手动按钮的认领:占住单飞槽位并消费该库的积压。``None`` = 槽位被占。
+
+        与 ``_claim_next_locked`` 刻意是两个方法:那一个回答「接下来该轮到谁」
+        (全局优先、弱让位、从等待室取),这一个的分区是用户点的那一个。它因此
+        **不碰** ``_last_claimed_global``——一次手动整理不该改写两条链路之间的
+        轮转账。
+
+        ⚠ **消费是这个方法存在的理由。** ``start()`` 刻意不消费(它的 docstring
+        说手动一批是「额外的」),而冷却的判据是「pending 为 0」——两条规则撞在
+        一起,一次**低于阈值**的提问就让 pending 永远停在 1,于是每一次点击都
+        压过冷却、对同一批输入再买一次模型调用。手动跑完就该把这个库的账结清:
+        这一批看的正是那些提问。
+
+        ⚠ 顺带把它从等待室里摘掉。它正要现在就跑,留着那张号等于让同一个库紧接
+        着再跑一批几乎完全重叠的样本——正是等待室去重要防的那件事;摘掉之后它
+        的积压也不会凭空多出一批(积压已经在这里结清了)。
+
+        提交失败由 ``_submit_claimed`` 恢复槽位与积压,与自动路径共用同一段。
+        """
+        if self._running:
+            return None
+        self._running = True
+        self._running_partition = partition
+        if partition in self._queued:
+            self._queued.discard(partition)
+            self._queue.remove(partition)
+        return self._consume_locked(partition)
 
     def _maybe_requeue(self) -> None:
         """Hand the freed slot to the next waiting partition.
@@ -753,6 +833,7 @@ class RetrievalExperienceDistillationService:
         except BaseException:
             with self._lock:
                 self._running = False
+                self._running_partition = None
                 self._restore_locked(partition, snapshot)
             self._emit(
                 "failed", latency_ms=0, reason="job_submission_failed",
@@ -784,6 +865,7 @@ class RetrievalExperienceDistillationService:
             if self._running:
                 return False
             self._running = True
+            self._running_partition = partition
         try:
             background_jobs.submit(
                 self.run,
@@ -794,6 +876,7 @@ class RetrievalExperienceDistillationService:
         except BaseException:
             with self._lock:
                 self._running = False
+                self._running_partition = None
             self._emit(
                 "failed", latency_ms=0, reason="job_submission_failed",
                 partition=_partition_label(partition),
@@ -893,6 +976,7 @@ class RetrievalExperienceDistillationService:
             if claimed_here:
                 with self._lock:
                     self._running = False
+                    self._running_partition = None
                 # codex #524 R4 P2:释放后原子复查积压——busy 期间攒满的整批
                 # 若得不到后续流量会永远滞留。复用与 note_ask_completed 同一
                 # 临界区形态(认领+消费原子),fail-open。分区化之后这里还负责
