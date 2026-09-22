@@ -46,7 +46,7 @@ COMMANDS = {
     ("database", "merge"): Command("merge_dbs.py", "离线合并数据库"),
     ("database", "retrieval-indexes"): Command("build_postgres_retrieval_indexes.py", "构建 PostgreSQL 检索索引"),
     ("database", "hotpath-indexes"): Command("build_hotpath_indexes.py", "构建 PostgreSQL 热路径索引"),
-    ("sync",): Command("sync_notebooks.py", "跨环境笔记本内容同步：导出、引入与水位查询"),
+    ("sync",): Command("sync_notebooks.py", "跨环境笔记本内容同步：导出、引入、水位查询与变更捕获开关"),
     ("migrate", "model-env"): Command("migrate_legacy_model_env.py", "迁移旧模型环境配置", False),
     ("source", "mineru-batch"): Command("mineru_batch_parse.py", "批量解析 PDF 为 Markdown", False),
     ("source", "embed-images"): Command("embed_md_images.py", "将 Markdown 图片转换为内嵌图片", False),

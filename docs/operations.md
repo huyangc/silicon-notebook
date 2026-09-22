@@ -720,8 +720,10 @@ PR-4 is expected to automate queuing this.
 
 ### Change capture (`sync capture`)
 
-Every deployment ships with 46 AFTER INSERT/UPDATE/DELETE triggers on the synced tables
-(§7 of the design doc), but they are gated OFF by default: a fresh v84/0064 migration does not
+Every deployment ships with AFTER INSERT/UPDATE/DELETE triggers on all 46 synced tables
+(§7 of the design doc; 138 triggers on SQLite -- one per operation per table, since SQLite has no
+combined "AFTER INSERT OR UPDATE OR DELETE" -- and 46 on PostgreSQL, one per table), but they are
+gated OFF by default: a fresh v84/0064 migration does not
 seed the `sync_capture_control` row, so nothing is logged until an operator runs `sync capture
 enable`. Until PR-3b's incremental exporter exists, turning capture on has no effect on what
 `sync export` produces (every export is still a full snapshot) — it only starts a local record
@@ -742,6 +744,18 @@ no record of, so it can never be extended into an incremental package — meanin
 export to every target is forced back to full, re-establishing a log-backed baseline. Enabling
 when it is already on is a no-op (it does not move `enabled_at` and does not re-clear
 watermarks), so re-running it after an ambiguous exit code is safe.
+
+**Do not run `sync capture enable` while a `sync export` is in flight.** `_advance_watermark`
+writes `sync_export_state` only after that export finishes, so an `enable` that clears the table
+partway through an already-running export does not stop it -- that export still completes and
+still writes its watermark, but it reads `captured_through_seq` from a snapshot taken before the
+gate opened, so the seq it writes back is 0 (the correct answer for a run that started before
+capture was on, but not what an operator watching `enable` run moments earlier would expect: a
+0 watermark right after enabling looks like nothing happened). There is no code-level guard
+against this interleaving today; treat it as an operational rule (quiesce or wait out any running
+export before enabling) rather than something the CLI enforces. PR-3b's incremental-export
+baseline validation should cover this case explicitly before it ships (tracked there, not fixed
+here).
 
 **What disabling costs**: `disable` clears both `sync_export_state` and `sync_change_log`. The
 log stops growing the moment it commits, so the next export after a disable is a full snapshot

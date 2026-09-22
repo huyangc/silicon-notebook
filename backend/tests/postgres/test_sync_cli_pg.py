@@ -10,11 +10,14 @@ SQLite 那样是存文本、读回来还要 ``json.loads``），``_load_sync_sta
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
 from app.core.config import Settings
 from app.migration.sync import cli
+from app.migration.sync.export import _Source
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.repository import PostgresRepository
 
@@ -162,3 +165,48 @@ def test_capture_enable_then_disable_round_trips_on_postgres(cli_settings, capsy
     assert exit_code == 0
     again = json.loads(capsys.readouterr().out)
     assert again["already_disabled"] is True
+
+
+def test_concurrent_enable_reports_exactly_one_first_time_enable(cli_settings):
+    """Two genuinely concurrent ``sync capture enable`` calls, racing on a
+    PostgreSQL schema where the control row does not exist yet (the normal
+    starting state -- the migration never seeds it): exactly one must
+    observe ``already_enabled: False`` (it wrote the row) and the other
+    ``already_enabled: True`` (it saw the first one's row already there).
+
+    This is exactly the race a naive "SELECT, then branch, then INSERT ...
+    ON CONFLICT" implementation gets wrong when the row does not exist yet:
+    ``SELECT ... FOR UPDATE`` has nothing to lock before any row exists, so
+    both racers would read "not enabled" and both would report a first-time
+    enable, with whichever commits last silently overwriting the other's
+    ``enabled_at``. ``_capture_enable`` instead makes the enabled-vs-
+    idempotent decision from the single ``INSERT ... ON CONFLICT DO UPDATE
+    ... RETURNING enabled_at`` statement itself (see its docstring), which
+    PostgreSQL's own row lock on the conflicting key serializes correctly
+    regardless of whether the row existed beforehand.
+    """
+    _migrate(cli_settings)
+    root_dir = Path(__file__).resolve().parents[3]
+
+    def _enable() -> dict:
+        source = _Source(cli_settings, root_dir)
+        try:
+            return cli._capture_enable(source)
+        finally:
+            source.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = [future.result() for future in [
+            pool.submit(_enable), pool.submit(_enable)
+        ]]
+
+    already_enabled_flags = sorted(
+        [first["already_enabled"], second["already_enabled"]]
+    )
+    assert already_enabled_flags == [False, True], (
+        f"exactly one of the two concurrent enables must report a "
+        f"first-time transition, got {first!r} and {second!r}"
+    )
+    # Both must agree on the SAME enabled_at -- the winner's -- proving
+    # neither silently clobbered the other's timestamp.
+    assert first["enabled_at"] == second["enabled_at"]
