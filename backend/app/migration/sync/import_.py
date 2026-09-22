@@ -88,6 +88,36 @@ directly instead of composing a repository facade -- an import must be able to
 run as an offline tool against a quiesced target. It reuses the exporter's
 backend handle and catalog readers rather than growing a second copy of them
 (``tests/test_sync_manifest.py`` guards the package's import whitelist).
+
+**``manifest.json`` is not trustworthy.** ``checksums.json`` covers every
+package file EXCEPT the manifest itself (it is the package-complete marker,
+written last -- see ``_verify_checksums``), so nothing in ``manifest.json``
+carries any integrity guarantee beyond "this is the file the exporter last
+wrote before the run either finished or was interrupted". In particular
+``manifest.notebooks`` is not proof of which notebooks this package actually
+carries, and a value in it is not proof it is safe to splice into a
+filesystem path. Two independent checks carry that weight instead, both run
+in preflight before any database handle is opened or any file is staged,
+renamed, or deleted:
+
+- **path safety** (``_verify_package_paths``): every identifier this package
+  lets get joined onto a trusted base path -- ``manifest.notebooks``,
+  ``manifest.package_id``, the directory names actually present under
+  ``files/notebooks/`` and ``files/assets/``, and every key in
+  ``checksums.json`` -- is checked against a narrow character whitelist
+  (``app.migration.sync.package.is_safe_identifier``/``is_safe_relative_path``)
+  and, for the two file roots, the JOINED path is resolved and asserted to
+  stay inside its package/storage root. A package that fails this leaves the
+  target untouched.
+- **row-range validity** (``_verify_row_scopes``): since ``manifest.notebooks``
+  cannot be trusted, the notebook set a package actually covers is instead
+  read from ``rows/notebooks.jsonl`` -- which IS checksummed -- and every
+  other synced table's rows are streamed and checked to fall inside that set
+  (NOTEBOOK-scoped tables directly, PARENT-scoped tables one hop at a time
+  against their already-verified parent's primary keys). This runs before the
+  target-side mirror-collision guard in ``_preflight``, so that guard is
+  reasoning about the package's real scope rather than what its manifest
+  claims.
 """
 
 from __future__ import annotations
@@ -137,6 +167,8 @@ from app.migration.sync.package import (
     USERS_NAME,
     decode_row,
     decode_value,
+    is_safe_identifier,
+    is_safe_relative_path,
     json_document,
     rows_path,
 )
@@ -292,6 +324,20 @@ class SyncImportError(RuntimeError):
     """A package could not be applied. Every preflight rejection and every
     unrecoverable row-phase failure raises this with a reason that names the
     table, column or file at fault."""
+
+
+# Every table named as a PARENT scope's ``parent_table`` somewhere in the
+# manifest -- ``sources``, ``memory_items``, ``knowhow_tables``,
+# ``knowhow_rows`` today. ``_verify_row_scopes`` needs to know, for each
+# synced table in turn, whether it must also collect its OWN primary-key set
+# (because a later table's PARENT scope will need it) -- derived from the
+# manifest rather than hand-listed, so a new PARENT scope automatically
+# widens this set in the same change that adds it.
+_PARENT_SCOPE_TARGETS: frozenset[str] = frozenset(
+    spec.scope.parent_table
+    for spec in SYNC_MANIFEST
+    if spec.scope is not None and spec.scope.kind is ScopeKind.PARENT
+)
 
 
 class UnmappedPolicy(StrEnum):
@@ -1154,6 +1200,114 @@ def _reject_incremental_payload(package_dir: Path) -> None:
             )
 
 
+def _assert_within(base: Path, candidate: Path, *, what: str) -> Path:
+    """Resolve ``candidate`` and refuse it if it does not stay inside
+    ``base``. The character whitelist (``is_safe_identifier``) already
+    refuses ``..`` and an absolute path lexically; this is the second,
+    independent layer that catches what the whitelist cannot see -- a
+    component that passes the whitelist and still resolves outside ``base``
+    through a symlink planted at a trusted location. Returns ``base``'s own
+    resolved form so a caller checking several candidates against the same
+    base does not re-resolve it each time.
+    """
+    resolved_base = base.resolve()
+    resolved = candidate.resolve()
+    if resolved != resolved_base and resolved_base not in resolved.parents:
+        raise SyncImportError(
+            f"{what} resolves outside its expected root: {candidate} -> "
+            f"{resolved} (expected under {resolved_base})"
+        )
+    return resolved_base
+
+
+def _verify_package_paths(
+    package_dir: Path,
+    manifest: _PackageManifest,
+    checksums: Mapping[str, str],
+    settings: "Settings",
+) -> None:
+    """Refuse, before any database handle is open and before a single file is
+    staged, renamed, or deleted, any identifier this package would splice
+    into a filesystem path.
+
+    ``manifest.json`` is not covered by ``checksums.json`` (see the module
+    docstring), so ``manifest.notebooks`` is exactly as untrusted as an
+    attacker's own text and is checked here on its own terms -- not against
+    what the package's rows say (``_verify_row_scopes`` does that, and needs
+    a database handle for primary-key names, so it runs later in phase 1b).
+
+    Four things get checked, all filesystem-only:
+
+    - every id in ``manifest.notebooks``, and ``manifest.package_id`` itself
+      (both later become directory-name components -- the notebook id under
+      ``files/notebooks/``/``files/assets/`` and the storage roots, the
+      package id in ``.sync-old-<package_id>``/``.sync-tmp``'s sibling
+      naming) must be ``is_safe_identifier``;
+    - every key ``checksums.json`` carries must be ``is_safe_relative_path``
+      (defence in depth: ``_verify_checksums`` already requires every key to
+      equal a real on-disk relative path, which can never lexically contain
+      ``..``, but this does not rely on that invariant holding);
+    - every directory actually present under ``files/notebooks/`` and
+      ``files/assets/`` must have an ``is_safe_identifier`` name, whether or
+      not ``manifest.notebooks`` mentions it;
+    - for every notebook id, the package-side and storage-side paths
+      ``_install_files`` will read from and write to are resolved and
+      asserted to stay inside the package's ``files/<root>/`` directory and
+      the target's ``storage/<root>/`` directory respectively -- this is what
+      catches a directory that passes the character whitelist but is
+      actually a symlink pointing outside either root.
+    """
+    bad_ids = sorted(
+        notebook_id
+        for notebook_id in manifest.notebooks
+        if not is_safe_identifier(notebook_id)
+    )
+    if bad_ids:
+        raise SyncImportError(
+            f"manifest.notebooks carries unsafe notebook id(s): {bad_ids}"
+        )
+    if manifest.package_id and not is_safe_identifier(manifest.package_id):
+        raise SyncImportError(
+            f"manifest.package_id is not a safe identifier: {manifest.package_id!r}"
+        )
+    bad_paths = sorted(
+        relative for relative in checksums if not is_safe_relative_path(relative)
+    )
+    if bad_paths:
+        raise SyncImportError(
+            f"{CHECKSUMS_NAME} carries unsafe relative path(s): {bad_paths}"
+        )
+
+    storage_dir = Path(settings.storage_dir)
+    for root in (NOTEBOOK_FILES_DIR, ASSET_FILES_DIR):
+        package_root = package_dir / FILES_DIR / root
+        if package_root.is_dir():
+            bad_entries = sorted(
+                entry.name
+                for entry in package_root.iterdir()
+                if not is_safe_identifier(entry.name)
+            )
+            if bad_entries:
+                raise SyncImportError(
+                    f"{FILES_DIR}/{root} carries unsafe director(ies): {bad_entries}"
+                )
+        storage_root = storage_dir / root
+        for notebook_id in manifest.notebooks:
+            _assert_within(
+                package_root,
+                package_root / notebook_id,
+                what=f"package file path for notebook {notebook_id!r} under {root!r}",
+            )
+            _assert_within(
+                storage_root,
+                storage_root / notebook_id,
+                what=(
+                    f"storage destination path for notebook {notebook_id!r} "
+                    f"under {root!r}"
+                ),
+            )
+
+
 # --------------------------------------------------- phase 1b -- against the target
 
 
@@ -1187,6 +1341,108 @@ def _verify_columns(backend: _Backend, conn: Any, manifest: _PackageManifest) ->
         )
 
 
+def _verify_row_scopes(
+    backend: _Backend, conn: Any, package_dir: Path, manifest: _PackageManifest
+) -> None:
+    """Refuse a package whose rows reach outside the notebook set it claims.
+
+    ``manifest.notebooks`` is not checksummed (see the module docstring), so
+    it is not used here as the definition of "this package's notebooks" --
+    ``rows/notebooks.jsonl`` IS checksummed, and its primary keys are. This
+    first asserts the two sets are equal (catching a manifest that claims
+    fewer OR more notebooks than the package's own rows carry), then streams
+    every other synced table once and requires each row's scope value to
+    fall inside that set:
+
+    - NOTEBOOK-scoped: the row's own scope column must be one of the
+      notebook ids.
+    - PARENT-scoped: the row's scope column must be a primary key this
+      package's copy of ``scope.parent_table`` actually carries. Checked one
+      hop at a time against each table's immediate parent (``TableScope``'s
+      own ``parent_table``, not a hand-rolled walk of it) -- sound by
+      induction, because ``synced_tables()`` orders a declared FK parent
+      before its children, so a PARENT table's own scope has already been
+      verified, and therefore everything it stands for, by the time a table
+      scoped through it is reached.
+    - GLOBAL-scoped: not checked -- a GLOBAL table's rows are not attributed
+      to any one notebook (design doc §3).
+
+    Streamed table by table, keeping only the small id sets four tables need
+    as somebody else's parent (``sources``, ``memory_items``,
+    ``knowhow_tables``, ``knowhow_rows``) -- never a full table's rows in
+    memory, so a chunks-sized table costs O(1) extra space here.
+
+    Runs against the target only for ``backend.primary_key`` (a PARENT
+    table's key column names, read from the live catalog like every other
+    schema fact in this module) -- it reads no target DATA and writes
+    nothing, and it runs before ``_preflight``'s mirror-collision guard, so
+    that guard sees the package's real scope rather than what its manifest
+    claims.
+    """
+    notebook_ids: set[str] = set()
+    for row in _iter_lines(package_dir / rows_path("notebooks")):
+        value = str(row.get("id") or "")
+        if value:
+            notebook_ids.add(value)
+    declared = set(manifest.notebooks)
+    missing = sorted(declared - notebook_ids)
+    extra = sorted(notebook_ids - declared)
+    if missing or extra:
+        raise SyncImportError(
+            "manifest.notebooks does not match rows/notebooks.jsonl's primary "
+            f"keys: manifest-only={missing}, rows-only={extra}"
+        )
+
+    parent_key_sets: dict[str, set[str]] = {"notebooks": notebook_ids}
+    for table in synced_tables():
+        if table == "notebooks":
+            continue
+        spec = spec_for(table)
+        scope = spec.scope
+        if scope is None or scope.kind is ScopeKind.GLOBAL:
+            continue
+        if scope.kind is ScopeKind.NOTEBOOK:
+            allowed = notebook_ids
+        else:
+            allowed = parent_key_sets.get(scope.parent_table)
+            if allowed is None:
+                # synced_tables() orders a declared FK parent before its
+                # children (tests/test_sync_manifest.py asserts this for
+                # every edge inside the synced set), so this table's parent
+                # must already have been visited. Reaching here is a bug in
+                # that ordering guarantee, not a package problem.
+                raise SyncImportError(
+                    f"{table}: PARENT scope into {scope.parent_table!r}, whose "
+                    "own rows were not scanned before this table"
+                )
+        collect_own_keys = table in _PARENT_SCOPE_TARGETS
+        own_key_column = ""
+        own_keys: set[str] = set()
+        if collect_own_keys:
+            key_columns = backend.primary_key(conn, table)
+            if len(key_columns) != 1:
+                raise SyncImportError(
+                    f"{table}: named as a PARENT scope's parent_table but its "
+                    f"primary key {key_columns} is not a single column"
+                )
+            own_key_column = key_columns[0]
+
+        bad: set[str] = set()
+        for row in _iter_lines(package_dir / rows_path(table)):
+            value = str(row.get(scope.column) or "")
+            if value not in allowed:
+                bad.add(value)
+            if collect_own_keys:
+                own_keys.add(str(row.get(own_key_column) or ""))
+        if bad:
+            raise SyncImportError(
+                f"{table}.{scope.column} carries value(s) outside this "
+                f"package's scope: {sorted(bad)[:20]}"
+            )
+        if collect_own_keys:
+            parent_key_sets[table] = own_keys
+
+
 def _preflight(backend: _Backend, conn: Any, context: _Context) -> bool:
     """The refusals that need the target. Returns True when this package was
     already applied in full. The package's own integrity has already been
@@ -1212,6 +1468,12 @@ def _preflight(backend: _Backend, conn: Any, context: _Context) -> bool:
             "(docs/incremental-sync-design.md §6)"
         )
     _verify_columns(backend, conn, manifest)
+    # Row-range validity is checked before ANY target-side decision that
+    # reasons about "this package's notebooks" -- including the
+    # already-applied short-circuit right below, so a package whose manifest
+    # lies about its scope is refused the same way whether or not it happens
+    # to share a package_id with something already recorded.
+    _verify_row_scopes(backend, conn, context.package_dir, manifest)
 
     for row in backend.fetch(
         conn,
@@ -3068,11 +3330,27 @@ def _install_files(context: _Context, *, verify: bool) -> None:
         for root in _FILE_ROOTS:
             origin = context.package_dir / FILES_DIR / root / notebook_id
             destination = storage / root / notebook_id
+            # Belt and suspenders: _verify_package_paths already refused an
+            # unsafe notebook id, and a symlink escape under either root,
+            # before any of this ran -- re-asserted here so staging,
+            # reconciliation, rename, and delete never run against a path
+            # this function alone computed and trusted.
+            _assert_within(
+                context.package_dir / FILES_DIR / root, origin, what="package file path"
+            )
+            _assert_within(storage / root, destination, what="storage destination path")
             inherited = _reconcile_staging(context, destination)
             if not origin.is_dir():
                 continue
             staged = destination.with_name(destination.name + _STAGED_SUFFIX)
             retired = _retired_path(destination, context.manifest.package_id)
+            # staged/retired are ``destination`` with only its final name
+            # segment changed (``Path.with_name``), so they share its parent
+            # and this reasserts nothing new about traversal -- it does
+            # confirm with_name/with_package_id did not somehow produce a
+            # path separator that pathlib would have rejected already.
+            _assert_within(storage / root, staged, what="staged file path")
+            _assert_within(storage / root, retired, what="retired file path")
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(origin, staged)
             installed = [path for path in sorted(staged.rglob("*")) if path.is_file()]
@@ -3452,6 +3730,7 @@ def _import(
     # Phase 1a: the package on its own, with no database handle open.
     checksums = _verify_checksums(package_dir, manifest)
     _reject_incremental_payload(package_dir)
+    _verify_package_paths(package_dir, manifest, checksums, settings)
 
     ledger = _Ledger()
     context = _Context(
