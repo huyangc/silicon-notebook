@@ -1490,3 +1490,184 @@ def test_the_replaced_directories_are_dropped_before_the_run_is_recorded_done(
     assert seen == [("done", [])], (
         "no retired directory may still exist when the run is recorded done"
     )
+
+
+# ------------------------------------------------ SQLite's lexical index
+
+
+def _fts_chunk_ids(repo, notebook_id: str) -> set[str]:
+    return {
+        str(row["chunk_id"])
+        for row in _fetch(
+            repo, "SELECT chunk_id FROM chunks_fts WHERE notebook_id=?", (notebook_id,)
+        )
+    }
+
+
+def test_imported_chunks_are_reachable_by_lexical_search(
+    source, target, package
+):
+    """``chunks_fts`` and ``kg_objects_fts`` have no triggers -- every writer
+    maintains them by hand. An importer that skips that lands a mirror with
+    vector recall but permanently invisible to lexical search, and nothing
+    would ever notice (the vector side has a self-heal probe, FTS has none)."""
+    _import(target, package)
+    repo = target["repo"]
+    notebook = source["exported"]
+
+    chunks = {
+        str(row["id"])
+        for row in _fetch(repo, "SELECT id FROM chunks WHERE notebook_id=?", (notebook,))
+    }
+    assert chunks
+    assert _fts_chunk_ids(repo, notebook) == chunks
+    # ... and the index really answers a MATCH, not just holds rows.
+    hits = _fetch(
+        repo,
+        "SELECT chunk_id FROM chunks_fts WHERE notebook_id=? AND chunks_fts MATCH ?",
+        (notebook, "alpha"),
+    )
+    assert {str(row["chunk_id"]) for row in hits} <= chunks
+    assert hits
+
+
+def test_a_knowledge_object_reaches_the_object_index(source, target, package):
+    _import(target, package)
+    notebook = source["exported"]
+
+    # ko-1's payload has no name, so it is correctly absent; give the index
+    # something to hold and re-import to prove the projection runs.
+    with source["repo"]._write() as db:
+        db.execute(
+            "UPDATE knowledge_objects SET payload=? WHERE id=?",
+            ('{"name": "硅晶圆"}', "ko-1"),
+        )
+    import tempfile
+
+    _import(target, _export(source, Path(tempfile.mkdtemp()) / "out"))
+
+    rows = _fetch(
+        target["repo"],
+        "SELECT object_id, name FROM kg_objects_fts WHERE notebook_id=?",
+        (notebook,),
+    )
+    assert [(str(row["object_id"]), str(row["name"])) for row in rows] == [
+        ("ko-1", "硅晶圆")
+    ]
+
+
+# ---------------------------------------- a full package is a snapshot
+
+
+def test_rows_the_source_deleted_are_removed_from_the_mirror(
+    source, target, package, tmp_path
+):
+    """Upsert only ever adds and overwrites, so without a reconciliation pass
+    a mirror accumulates every chunk, element and knowhow cell the source ever
+    deleted. A FULL package is a snapshot: what it does not carry for the
+    notebooks it covers is gone."""
+    _import(target, package)
+    repo = target["repo"]
+    notebook = source["exported"]
+    doomed_source = _one(
+        source["repo"], "SELECT id FROM sources WHERE notebook_id=?", (notebook,)
+    )["id"]
+    doomed_row = _one(
+        source["repo"],
+        "SELECT r.id AS id FROM knowhow_rows r JOIN knowhow_tables t "
+        "ON t.id=r.table_id WHERE t.notebook_id=?",
+        (notebook,),
+    )["id"]
+    before = _counts(repo, "chunks", "source_elements", "knowhow_rows", "knowhow_cells")
+    assert _fts_chunk_ids(repo, notebook)
+    with source["repo"]._write() as db:
+        db.execute("DELETE FROM sources WHERE id=?", (doomed_source,))
+        db.execute("DELETE FROM knowhow_rows WHERE id=?", (doomed_row,))
+
+    report = _import(target, _export(source, tmp_path / "out2"))
+
+    assert report.error == ""
+    after = _counts(repo, "chunks", "source_elements", "knowhow_rows", "knowhow_cells")
+    assert after["chunks"] == 0 and before["chunks"] > 0
+    assert after["source_elements"] == 0 and before["source_elements"] > 0
+    assert after["knowhow_rows"] == 0 and before["knowhow_rows"] > 0
+    assert after["knowhow_cells"] == 0 and before["knowhow_cells"] > 0
+    assert _count(repo, "SELECT COUNT(*) FROM sources WHERE id=?", (doomed_source,)) == 0
+    # The lexical index follows the rows, in the same transaction.
+    assert _fts_chunk_ids(repo, notebook) == set()
+    assert any("no longer carries" in warning for warning in report.warnings)
+
+
+def test_the_reconciliation_never_reaches_another_notebook(
+    source, target, package, tmp_path
+):
+    """The sweep is scoped to the notebooks the package covers. A notebook
+    this package says nothing about -- the target's own, or a mirror of a
+    different slice -- must be untouched by it."""
+    _import(target, package)
+    repo = target["repo"]
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+            "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            ("nb-local", "本地库", "", "Semiconductor", "draft", "user-local",
+             MOMENT, MOMENT),
+        )
+        db.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,created_at,"
+            "updated_at) VALUES(?,?,?,?,?,?)",
+            ("src-local", "nb-local", "本地材料", "file", MOMENT, MOMENT),
+        )
+
+    _import(target, _export(source, tmp_path / "out2"))
+
+    assert _count(repo, "SELECT COUNT(*) FROM sources WHERE id=?", ("src-local",)) == 1
+    assert _count(repo, "SELECT COUNT(*) FROM notebooks WHERE id=?", ("nb-local",)) == 1
+
+
+def test_the_reconciliation_records_a_resumable_step_per_table(
+    source, target, package
+):
+    _import(target, package)
+
+    steps = {
+        str(row["table_name"])
+        for row in _fetch(target["repo"], "SELECT table_name FROM sync_import_progress")
+    }
+    assert "__prune__:chunks" in steps
+    # ... and the tables the sweep deliberately skips have no step at all.
+    assert "__prune__:memory_items" not in steps
+    assert "__prune__:notebooks" not in steps
+    assert "__prune__:notebook_grants" not in steps
+    assert "__prune__:groups" not in steps
+
+
+# ------------------------------------------ a failure after the claim settles
+
+
+def test_a_failure_while_creating_users_still_settles_the_run(
+    source, target, package, tmp_path
+):
+    """Creating users writes to the target and can fail. It happens after the
+    sync_imports row is claimed, so it has to be inside the protected phase --
+    otherwise the row is stranded at 'running' and every later import from the
+    same source environment is refused as a concurrent one."""
+    with source["repo"]._write() as db:
+        db.execute("UPDATE users SET username='' WHERE id=?", (BOB[0],))
+    unnamed = _export(source, tmp_path / "out2")
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, unnamed, create_missing_users=True)
+
+    assert "no username" in str(failure.value)
+    row = _one(
+        target["repo"], "SELECT status FROM sync_imports WHERE package_id=?",
+        (_manifest(unnamed)["package_id"],),
+    )
+    assert row["status"] == "failed"
+    assert [p for p in unnamed.iterdir() if p.name.startswith("import-report-")]
+    # ... and the next import from the same source environment is not refused
+    # as a concurrent one.
+    report = _import(target, package)
+    assert report.error == ""
+    assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 1
