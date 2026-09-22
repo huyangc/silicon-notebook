@@ -1,13 +1,23 @@
 """Operator CLI for cross-environment notebook sync
 (docs/incremental-sync-design.md §8).
 
-Three subcommands, each a thin wrapper over this package's already-reviewed
-engines -- ``export`` calls :func:`app.migration.sync.export.export_notebooks`,
-``import`` calls :func:`app.migration.sync.import_.import_package`, and
-``status`` reads the two adapter-internal bookkeeping tables
-(``sync_export_state``, ``sync_imports``) those engines maintain. This module
-adds no sync logic of its own: argument parsing, exit codes, and human/JSON
-report rendering only.
+Four subcommand groups:
+
+- ``export`` calls :func:`app.migration.sync.export.export_notebooks`.
+- ``import`` calls :func:`app.migration.sync.import_.import_package`.
+- ``status`` reads the adapter-internal bookkeeping tables
+  (``sync_export_state``, ``sync_imports``) those two engines maintain, plus
+  the capture section below.
+- ``capture enable|disable|status`` reads and writes ``sync_capture_control``/
+  ``sync_change_log`` directly, through :class:`app.migration.sync.export._Source`
+  for backend dispatch -- this is the one piece of sync logic that lives in
+  this module rather than being a thin wrapper over ``export.py``/
+  ``import_.py``: ``enable``/``disable``'s transaction (the gate flip, and
+  the idempotent-vs-first-time clearing of ``sync_export_state``/
+  ``sync_change_log``) is implemented here (see ``_capture_enable``/
+  ``_capture_disable``), because neither engine owns the capture control
+  tables. Everything else in this module stays argument parsing, exit codes,
+  and human/JSON report rendering only.
 """
 
 from __future__ import annotations
@@ -29,7 +39,7 @@ from app.migration.sync.export import (
     _Source,
     export_notebooks,
 )
-from app.migration.sync.import_ import SyncImportError, import_package
+from app.migration.sync.import_ import SyncImportError, _moment, import_package
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.sqlite.database import SqliteDatabase
 
@@ -52,7 +62,19 @@ class SyncCaptureError(RuntimeError):
     database that predates v84/0064_sync_change_capture.sql gets a named
     diagnosis instead of a raw "no such table"/"relation does not exist"
     driver error, the same reasoning as ``SyncStatusError`` for the older
-    v83/0063 tables."""
+    v83/0063 tables.
+
+    ``missing_tables`` carries the same information ``str(self)`` already
+    prose-describes, structured -- so a caller that wants to degrade
+    gracefully instead of failing outright (``_cmd_status``'s capture
+    section, see below) does not have to parse the message back apart.
+    """
+
+    def __init__(
+        self, message: str, *, missing_tables: frozenset[str] = frozenset()
+    ) -> None:
+        super().__init__(message)
+        self.missing_tables = missing_tables
 
 
 def _jsonable(value: Any) -> Any:
@@ -250,10 +272,13 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
     either sync engine's own read/write contract, so it does not need that
     engine's consistent-snapshot guarantee.
 
-    TODO(PR-3): once the change-log triggers land, this and ``_Source``'s
-    read-connection setup should probably share one small connection facade
-    instead of each hand-rolling the PostgreSQL/SQLite branch (tracked in
-    docs/incremental-sync-design.md).
+    The change-log triggers landed in PR-3a (``app.migration.sync.capture``);
+    reading the log itself for an incremental export is PR-3b. This function
+    still hand-rolls its own PostgreSQL/SQLite branch rather than going
+    through ``_Source`` -- unlike ``_load_capture_status`` below, which does
+    -- a known duplication tracked as a TODO in docs/incremental-sync-design.md
+    §11, not fixed here to keep this change scoped to what it was asked to
+    do.
     """
     is_postgres = database_identity(settings.database_url).scheme == "postgresql"
     exports_sql = (
@@ -303,11 +328,13 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
 
 def _cmd_status(args: argparse.Namespace, settings: Settings) -> int:
     state = _load_sync_status(settings)
-    # Same read function `sync capture status` uses -- see
-    # _load_capture_status's docstring. Loaded after the v83 tables are
-    # confirmed present so a pre-v83 database still gets that named
-    # diagnosis rather than one about the newer v84 capture tables.
-    state["capture"] = _load_capture_status(settings)
+    # Same read function `sync capture status` uses under a healthy read --
+    # see _load_capture_status's docstring -- but degraded rather than
+    # raised on a v84/0064 capture-tables-missing database: the export
+    # watermark and import sections above already read fine off the v83
+    # tables, and one missing section must not turn this whole command into
+    # a hard failure. See _capture_section_for_status's docstring.
+    state["capture"] = _capture_section_for_status(settings, exact=args.exact_count)
     if args.as_json:
         _print_json(state)
         return 0
@@ -337,7 +364,7 @@ def _cmd_status(args: argparse.Namespace, settings: Settings) -> int:
             f"{row['notebooks']} 个笔记本，开始于 {row['started_at']}，"
             f"结束于 {finished_at}{suffix}"
         )
-    _print_capture_status(state["capture"])
+    _print_capture_section(state["capture"])
     return 0
 
 
@@ -345,17 +372,18 @@ def _cmd_status(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def _missing_capture_tables(conn: Any, *, is_postgres: bool) -> set[str]:
+    in_list = ", ".join(f"'{name}'" for name in _CAPTURE_TABLES)
     if is_postgres:
         rows = conn.execute(
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema = current_schema() "
-            "AND table_name IN ('sync_capture_control', 'sync_change_log')"
+            f"AND table_name IN ({in_list})"
         ).fetchall()
         found = {str(row["table_name"]) for row in rows}
     else:
         rows = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' "
-            "AND name IN ('sync_capture_control', 'sync_change_log')"
+            f"AND name IN ({in_list})"
         ).fetchall()
         found = {str(row["name"]) for row in rows}
     return set(_CAPTURE_TABLES) - found
@@ -366,17 +394,23 @@ def _require_capture_tables(source: _Source, conn: Any) -> None:
     if missing:
         raise SyncCaptureError(
             "本环境尚未迁移到 v84/0064（缺表: " + "、".join(sorted(missing)) + "）；"
-            "先启动一次后端完成 schema 迁移，或手动执行相应迁移脚本，再重试。"
+            "先启动一次后端完成 schema 迁移，或手动执行相应迁移脚本，再重试。",
+            missing_tables=frozenset(missing),
         )
 
 
 def _capture_control_row(source: _Source, conn: Any) -> dict[str, Any] | None:
     """The one ``sync_capture_control`` row, or ``None`` when the migration
     left it unseeded (its own docstring: an absent row reads exactly like a
-    disabled one). Callers that only care about on/off can treat the two the
-    same; callers that need "never enabled" told apart from "disabled" --
-    ``_capture_enable``'s/``_capture_disable``'s idempotency check -- use
-    this directly instead of ``_capture_status_payload``'s collapsed shape.
+    disabled one).
+
+    Read-only: a plain, unlocked ``SELECT``. Used by the status paths
+    (``sync status``/``sync capture status``), which only ever read.
+    ``_capture_enable``/``_capture_disable`` do NOT use this -- they need to
+    both read the current state and act on it atomically against a
+    concurrent enable/disable, which a separate read-then-write pair cannot
+    guarantee (see their own docstrings for the single-statement
+    ``RETURNING``-based mechanism that replaces it).
     """
     rows = source.fetch(
         conn,
@@ -393,20 +427,85 @@ def _capture_control_row(source: _Source, conn: Any) -> dict[str, Any] | None:
     }
 
 
-def _capture_log_stats(source: _Source, conn: Any) -> dict[str, Any]:
+def _capture_log_range(source: _Source, conn: Any) -> dict[str, Any]:
+    """``{"min_seq", "max_seq"}``, ``None``/``None`` on an empty log.
+
+    MIN and MAX in one statement so PostgreSQL's planner rewrites each into
+    its own Index Only Scan against ``idx_sync_change_log_table_seq``'s
+    ``seq`` ordering rather than a sequential scan of the log -- confirmed
+    with ``EXPLAIN`` against a populated table (pasted into this change's
+    report, not carried in the repo)."""
     row = source.fetch(
-        conn,
-        "SELECT COUNT(*) AS log_rows, MIN(seq) AS min_seq, MAX(seq) AS max_seq "
-        "FROM sync_change_log",
+        conn, "SELECT MIN(seq) AS min_seq, MAX(seq) AS max_seq FROM sync_change_log"
     )[0]
+    return {"min_seq": row["min_seq"], "max_seq": row["max_seq"]}
+
+
+def _capture_log_count_approx(
+    source: _Source, conn: Any, log_range: Mapping[str, Any]
+) -> int:
+    """A cheap, non-exact row count for the log -- never a scan of the table.
+
+    PostgreSQL: ``pg_class.reltuples``, the planner's own row-count estimate
+    (refreshed by autovacuum/``ANALYZE``, not by this read). It can lag
+    right after a bulk change (e.g. a ``sync capture disable`` that just
+    deleted every row) until the next autovacuum run; that lag is the
+    tradeoff for never scanning.
+    SQLite has no equivalent statistics catalog this cheap: ``MAX(seq) -
+    MIN(seq) + 1`` is used instead, an upper bound on the true row count
+    (``seq`` never repeats, and nothing but a full ``sync capture disable``
+    ever deletes a log row within one generation of the log, so this is
+    exact in the common case and only ever over-counts, never
+    under-counts, if that assumption is ever violated).
+    """
+    if source.is_postgres:
+        row = source.fetch(
+            conn,
+            "SELECT reltuples FROM pg_class WHERE oid = 'sync_change_log'::regclass",
+        )[0]
+        return max(int(row["reltuples"]), 0)
+    return int(log_range["max_seq"]) - int(log_range["min_seq"]) + 1
+
+
+def _capture_log_count_exact(source: _Source, conn: Any) -> int:
+    return int(
+        source.fetch(conn, "SELECT COUNT(*) AS n FROM sync_change_log")[0]["n"]
+    )
+
+
+def _capture_log_snapshot(
+    source: _Source, conn: Any, *, exact: bool = False
+) -> dict[str, Any]:
+    """``{"min_seq", "max_seq", "log_rows", "log_rows_exact"}``.
+
+    Cheap by default: MIN/MAX (index probes, see ``_capture_log_range``)
+    plus an approximate count that never scans the table
+    (``_capture_log_count_approx``). ``exact=True`` (``--exact-count``)
+    additionally pays for a real ``COUNT(*)`` -- a full scan of the log,
+    which on a deployment that has run change capture for a while can be
+    the single most expensive thing ``sync status``/``sync capture status``
+    do, which is why it is opt-in rather than the default. An empty log
+    (``min_seq is None``) never needs either count: 0 is exact regardless.
+    """
+    log_range = _capture_log_range(source, conn)
+    if log_range["min_seq"] is None:
+        return {**log_range, "log_rows": 0, "log_rows_exact": True}
+    if exact:
+        return {
+            **log_range,
+            "log_rows": _capture_log_count_exact(source, conn),
+            "log_rows_exact": True,
+        }
     return {
-        "log_rows": int(row["log_rows"]),
-        "min_seq": row["min_seq"],
-        "max_seq": row["max_seq"],
+        **log_range,
+        "log_rows": _capture_log_count_approx(source, conn, log_range),
+        "log_rows_exact": False,
     }
 
 
-def _capture_status_payload(source: _Source, conn: Any) -> dict[str, Any]:
+def _capture_status_payload(
+    source: _Source, conn: Any, *, exact: bool = False
+) -> dict[str, Any]:
     """One shape, shared by ``sync capture status`` and the capture section
     ``sync status`` appends to its own output -- see ``_load_capture_status``.
     """
@@ -415,11 +514,11 @@ def _capture_status_payload(source: _Source, conn: Any) -> dict[str, Any]:
         "enabled": control["enabled"] if control else False,
         "enabled_at": control["enabled_at"] if control else None,
         "disabled_at": control["disabled_at"] if control else None,
-        **_capture_log_stats(source, conn),
+        **_capture_log_snapshot(source, conn, exact=exact),
     }
 
 
-def _load_capture_status(settings: Settings) -> dict[str, Any]:
+def _load_capture_status(settings: Settings, *, exact: bool = False) -> dict[str, Any]:
     """Open a read connection over whichever backend ``settings`` names and
     return ``_capture_status_payload``'s shape.
 
@@ -432,18 +531,21 @@ def _load_capture_status(settings: Settings) -> dict[str, Any]:
     try:
         with source.read() as conn:
             _require_capture_tables(source, conn)
-            return _capture_status_payload(source, conn)
+            return _capture_status_payload(source, conn, exact=exact)
     finally:
         source.close()
 
 
 def _format_log_range(payload: Mapping[str, Any]) -> str:
-    """``"0 行"`` or ``"N 行（seq A–B）"`` -- shared by every place that
-    prints ``log_rows``/``min_seq``/``max_seq`` so an empty log never prints
-    a literal ``None`` seq."""
+    """``"0 行"`` or ``"N 行（seq A–B）"`` (``"约 N 行..."`` when
+    ``log_rows_exact`` is false) -- shared by every place that prints
+    ``log_rows``/``min_seq``/``max_seq`` so an empty log never prints a
+    literal ``None`` seq and an approximate count is never shown as if it
+    were exact."""
     if not payload["log_rows"]:
         return "0 行"
-    return f"{payload['log_rows']} 行（seq {payload['min_seq']}–{payload['max_seq']}）"
+    prefix = "" if payload.get("log_rows_exact", True) else "约 "
+    return f"{prefix}{payload['log_rows']} 行（seq {payload['min_seq']}–{payload['max_seq']}）"
 
 
 def _print_capture_status(capture: Mapping[str, Any]) -> None:
@@ -456,59 +558,122 @@ def _print_capture_status(capture: Mapping[str, Any]) -> None:
     print(f"  变更日志: {_format_log_range(capture)}")
 
 
-def _capture_moment(source: _Source, value: datetime) -> Any:
-    """A timestamp in the shape ``sync_capture_control`` stores it: an aware
-    ``datetime`` for PostgreSQL's ``timestamptz``, ISO text for SQLite -- the
-    same convention ``import_.py``'s own ``_moment`` helper uses for its
-    control-table timestamps."""
-    return value if source.is_postgres else value.isoformat()
+def _capture_section_for_status(
+    settings: Settings, *, exact: bool = False
+) -> dict[str, Any]:
+    """The capture section ``sync status`` (not ``sync capture status``)
+    appends to its own output.
+
+    Unlike ``sync capture status``, which exits 2 when the v84/0064 capture
+    tables are missing -- an operator asking specifically about capture
+    wants that failure -- ``sync status`` degrades instead: it exists to
+    show whatever it CAN read (export watermarks, imported packages) even on
+    a database that has not been migrated past v83/0063 yet, and one missing
+    section must not turn that whole, otherwise-successful read into a
+    hard failure. On a healthy read this returns ``_load_capture_status``'s
+    shape unchanged; on a missing-tables read it returns a small diagnostic
+    object instead (``missing_tables`` + the same prose ``detail`` the
+    raised ``SyncCaptureError`` carries) that the human/JSON renderers below
+    both know how to recognize.
+    """
+    try:
+        return _load_capture_status(settings, exact=exact)
+    except SyncCaptureError as exc:
+        return {"missing_tables": sorted(exc.missing_tables), "detail": str(exc)}
+
+
+def _print_capture_section(capture: Mapping[str, Any]) -> None:
+    if "missing_tables" in capture:
+        print(f"变更捕获：{capture['detail']}")
+        return
+    _print_capture_status(capture)
 
 
 def _capture_enable(source: _Source) -> dict[str, Any]:
     """Turn the capture gate on inside one write transaction.
 
     Idempotent: an already-enabled gate is left exactly as it is --
-    ``enabled_at`` does not move and no export watermark is cleared -- so
-    running ``enable`` twice in a row (an operator retrying after an
-    ambiguous exit code, say) never re-triggers the "next export is full"
-    consequence below a second time.
+    ``enabled_at`` does not move and nothing is cleared -- so running
+    ``enable`` twice in a row (an operator retrying after an ambiguous exit
+    code, say) never re-triggers the consequences below a second time.
+
+    The enabled-vs-idempotent decision is made ATOMICALLY by the first
+    statement, not by a separate ``SELECT`` before it: a plain
+    read-then-branch has a real race between two concurrent ``enable``
+    calls when the control row does not exist yet (the common case -- the
+    row is never seeded by the migration) -- both would read "not
+    enabled" and both would report a first-time enable, and whichever
+    commits last would silently clobber the other's ``enabled_at`` with its
+    own ON CONFLICT DO UPDATE. Instead, the ``INSERT ... ON CONFLICT DO
+    UPDATE ... RETURNING enabled_at`` below preserves the EXISTING row's
+    ``enabled_at`` (referenced by table name, which in an upsert's SET/
+    RETURNING clauses means "before this statement", as opposed to
+    ``excluded.*`` for "the row this statement proposed") whenever the
+    existing row was already enabled, and returns it -- so comparing the
+    returned value against this call's own ``moment`` tells the two cases
+    apart without ever needing a prior read, on either backend (the SQL is
+    portable). Once this statement returns, this transaction holds
+    PostgreSQL's row lock (or SQLite's write lock) on the singleton row
+    until commit, so the subsequent clears below can never race a second
+    enable/disable. ``SqliteDatabase.begin_immediate`` is still taken first
+    to close the (much smaller) window between a *cross-process* SQLite
+    reader and this transaction's own first write statement, matching the
+    convention other guarded writes in this codebase use (see its
+    docstring) -- PostgreSQL needs no such extra step because ``write()``
+    already opens a real transaction there.
 
     Turning capture on for the first time invalidates every existing export
     watermark: a package produced before this moment was a full snapshot of
     rows the change log has no record of, so it can never be extended with
-    an incremental slice read from the log. ``sync_export_state`` is cleared
-    so the next export for every target runs full again and establishes a
-    log-backed baseline (docs/incremental-sync-design.md §7).
+    an incremental slice read from the log. ``sync_export_state`` is
+    cleared so the next export for every target runs full again and
+    establishes a log-backed baseline (docs/incremental-sync-design.md §7).
+    ``sync_change_log`` is cleared too -- capture just forced a full
+    baseline, so there is nothing in the log worth keeping, and this mops
+    up any residual rows a long-running write transaction might commit
+    AFTER a previous ``disable`` already ran (``disable`` cannot see or
+    clear a row that has not committed yet; the next ``enable`` can, and
+    does). This is the asymmetry between the two: ``disable`` clears
+    best-effort at the moment it runs, ``enable`` guarantees a clean slate.
     """
-    moment = _capture_moment(source, datetime.now(timezone.utc))
+    moment = _moment(source, datetime.now(timezone.utc))
     with source.write() as conn:
+        if not source.is_postgres:
+            SqliteDatabase.begin_immediate(conn)
         _require_capture_tables(source, conn)
-        control = _capture_control_row(source, conn)
-        if control and control["enabled"]:
-            return {
-                "already_enabled": True,
-                "enabled_at": control["enabled_at"],
-                "cleared_export_watermarks": 0,
-                **_capture_log_stats(source, conn),
-            }
-        cleared = source.fetch(
-            conn, "SELECT COUNT(*) AS rows FROM sync_export_state"
-        )[0]["rows"]
-        conn.execute(
+        row = source.fetch(
+            conn,
             source.sql(
                 "INSERT INTO sync_capture_control (singleton, enabled, enabled_at) "
                 "VALUES (1, ?, ?) "
                 "ON CONFLICT (singleton) DO UPDATE SET "
-                "enabled = excluded.enabled, enabled_at = excluded.enabled_at"
+                "enabled = excluded.enabled, "
+                "enabled_at = CASE WHEN sync_capture_control.enabled "
+                "THEN sync_capture_control.enabled_at ELSE excluded.enabled_at END "
+                "RETURNING enabled_at"
             ),
             (True, moment),
-        )
-        conn.execute("DELETE FROM sync_export_state")
+        )[0]
+        already_enabled = row["enabled_at"] != moment
+        if already_enabled:
+            return {
+                "already_enabled": True,
+                "enabled_at": row["enabled_at"],
+                "cleared_export_watermarks": 0,
+                "cleared_log_rows": 0,
+                **_capture_log_snapshot(source, conn),
+            }
+        cleared_exports = conn.execute("DELETE FROM sync_export_state").rowcount
+        cleared_log = conn.execute("DELETE FROM sync_change_log").rowcount
         return {
             "already_enabled": False,
             "enabled_at": moment,
-            "cleared_export_watermarks": int(cleared),
-            **_capture_log_stats(source, conn),
+            "cleared_export_watermarks": cleared_exports,
+            "cleared_log_rows": cleared_log,
+            "min_seq": None,
+            "max_seq": None,
+            "log_rows": 0,
+            "log_rows_exact": True,
         }
 
 
@@ -516,49 +681,76 @@ def _capture_disable(source: _Source) -> dict[str, Any]:
     """Turn the capture gate off inside one write transaction.
 
     Idempotent the same way ``_capture_enable`` is: a gate that is already
-    disabled, or was never enabled at all, is left untouched.
+    disabled, or was never enabled at all, is left untouched. The already-
+    disabled-vs-transitioning decision is made the same atomic,
+    single-statement way ``_capture_enable`` makes its own (see that
+    docstring for why a read-then-branch is not safe): ``UPDATE ...
+    RETURNING disabled_at`` preserves the OLD ``disabled_at`` when the row
+    was already disabled and only writes the new one when it was actually
+    enabled a moment ago (``sync_capture_control.enabled`` in the CASE
+    reads the pre-update value, standard SQL UPDATE semantics on both
+    backends). No row matching at all (never enabled -- the common
+    starting state) is its own, unambiguous "already disabled" case.
 
-    Disabling clears BOTH ``sync_export_state`` and ``sync_change_log``: the
-    log stops growing the moment this commits, so leaving old export
-    watermarks in place would make a future re-enable think it can resume an
-    incremental sequence the log can no longer back, and leaving old log
-    rows in place would let a stale seq leak into a later export's
-    ``captured_through_seq`` reading. The next export after a disable is a
-    full snapshot, exactly like the very first export ever taken.
+    Disabling clears BOTH ``sync_export_state`` and ``sync_change_log`` --
+    best-effort, at the moment this transaction commits: the log stops
+    growing from here, so leaving old export watermarks in place would make
+    a future re-enable think it can resume an incremental sequence the log
+    can no longer back, and leaving old log rows in place would let a stale
+    seq leak into a later export's ``captured_through_seq`` reading. "Best-
+    effort" because a write transaction that is already in flight when this
+    commits, and only commits its own change-log row afterward, is
+    invisible to this DELETE -- ``_capture_enable``'s docstring explains why
+    the NEXT ``enable`` is where that residual row is guaranteed to be
+    swept up instead. The next export after a disable is a full snapshot,
+    exactly like the very first export ever taken.
     """
-    moment = _capture_moment(source, datetime.now(timezone.utc))
+    moment = _moment(source, datetime.now(timezone.utc))
     with source.write() as conn:
+        if not source.is_postgres:
+            SqliteDatabase.begin_immediate(conn)
         _require_capture_tables(source, conn)
-        control = _capture_control_row(source, conn)
-        if not control or not control["enabled"]:
-            return {
-                "already_disabled": True,
-                "disabled_at": control["disabled_at"] if control else None,
-                "cleared_export_watermarks": 0,
-                "cleared_log_rows": 0,
-                **_capture_log_stats(source, conn),
-            }
-        cleared_exports = source.fetch(
-            conn, "SELECT COUNT(*) AS rows FROM sync_export_state"
-        )[0]["rows"]
-        cleared_log = source.fetch(
-            conn, "SELECT COUNT(*) AS rows FROM sync_change_log"
-        )[0]["rows"]
-        conn.execute(
+        rows = source.fetch(
+            conn,
             source.sql(
-                "UPDATE sync_capture_control SET enabled = ?, disabled_at = ? "
-                "WHERE singleton = 1"
+                "UPDATE sync_capture_control SET "
+                "enabled = ?, "
+                "disabled_at = CASE WHEN sync_capture_control.enabled "
+                "THEN ? ELSE sync_capture_control.disabled_at END "
+                "WHERE singleton = 1 "
+                "RETURNING disabled_at"
             ),
             (False, moment),
         )
-        conn.execute("DELETE FROM sync_export_state")
-        conn.execute("DELETE FROM sync_change_log")
+        if not rows:
+            return {
+                "already_disabled": True,
+                "disabled_at": None,
+                "cleared_export_watermarks": 0,
+                "cleared_log_rows": 0,
+                **_capture_log_snapshot(source, conn),
+            }
+        disabled_at = rows[0]["disabled_at"]
+        already_disabled = disabled_at != moment
+        if already_disabled:
+            return {
+                "already_disabled": True,
+                "disabled_at": disabled_at,
+                "cleared_export_watermarks": 0,
+                "cleared_log_rows": 0,
+                **_capture_log_snapshot(source, conn),
+            }
+        cleared_exports = conn.execute("DELETE FROM sync_export_state").rowcount
+        cleared_log = conn.execute("DELETE FROM sync_change_log").rowcount
         return {
             "already_disabled": False,
             "disabled_at": moment,
-            "cleared_export_watermarks": int(cleared_exports),
-            "cleared_log_rows": int(cleared_log),
-            **_capture_log_stats(source, conn),
+            "cleared_export_watermarks": cleared_exports,
+            "cleared_log_rows": cleared_log,
+            "min_seq": None,
+            "max_seq": None,
+            "log_rows": 0,
+            "log_rows_exact": True,
         }
 
 
@@ -582,6 +774,7 @@ def _cmd_capture_enable(args: argparse.Namespace, settings: Settings) -> int:
             f"已清空导出水位: {result['cleared_export_watermarks']} 条"
             "（此前的全量包早于本次捕获，不能再当增量基线，下一次导出会是全量）。"
         )
+        print(f"已清空变更日志: {result['cleared_log_rows']} 行。")
     print(f"变更日志: {_format_log_range(result)}")
     return 0
 
@@ -611,7 +804,7 @@ def _cmd_capture_disable(args: argparse.Namespace, settings: Settings) -> int:
 
 def _cmd_capture_status(args: argparse.Namespace, settings: Settings) -> int:
     try:
-        capture = _load_capture_status(settings)
+        capture = _load_capture_status(settings, exact=args.exact_count)
     except SyncCaptureError as exc:
         print(f"sync capture status: {exc}", file=sys.stderr)
         return 2
@@ -694,6 +887,13 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="查看本环境的导出水位与已引入的包"
     )
     status_parser.add_argument("--json", action="store_true", dest="as_json")
+    status_parser.add_argument(
+        "--exact-count",
+        action="store_true",
+        dest="exact_count",
+        help="变更日志按 COUNT(*) 精确计数，而不是默认的近似值"
+        "（会全表扫描，大库慎用）",
+    )
     status_parser.set_defaults(handler=_cmd_status)
 
     capture_parser = subparsers.add_parser(
@@ -705,7 +905,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     capture_enable_parser = capture_subparsers.add_parser(
         "enable",
-        help="开启变更捕获；首次开启会清空本环境的导出水位（下一次导出会是全量）",
+        help="开启变更捕获；首次开启会清空本环境的导出水位与变更日志"
+        "（下一次导出会是全量）",
     )
     capture_enable_parser.add_argument("--json", action="store_true", dest="as_json")
     capture_enable_parser.set_defaults(handler=_cmd_capture_enable)
@@ -720,6 +921,12 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="查看变更捕获的开关状态与日志行数"
     )
     capture_status_parser.add_argument("--json", action="store_true", dest="as_json")
+    capture_status_parser.add_argument(
+        "--exact-count",
+        action="store_true",
+        dest="exact_count",
+        help="按 COUNT(*) 精确计数，而不是默认的近似值（会全表扫描，大库慎用）",
+    )
     capture_status_parser.set_defaults(handler=_cmd_capture_status)
 
     return parser

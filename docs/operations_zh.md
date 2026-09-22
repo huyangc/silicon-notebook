@@ -588,7 +588,9 @@ PR-4 计划把这一步接入自动排队。
 
 ### 变更捕获（`sync capture`）
 
-每个部署都自带同步层 46 张表的 AFTER INSERT/UPDATE/DELETE 触发器（设计文档 §7），但默认是
+每个部署都自带同步层全部 46 张表的 AFTER INSERT/UPDATE/DELETE 触发器（设计文档 §7；SQLite
+上是 138 条——每表每种操作各一条，因为 SQLite 没有合并写法的 "AFTER INSERT OR UPDATE OR
+DELETE"；PostgreSQL 上是 46 条，每表一条），但默认是
 **关**的：全新迁移到 v84/0064 不会播种 `sync_capture_control` 这一行，运维显式执行
 `sync capture enable` 之前什么都不记。在 PR-3b 的增量导出器落地之前，开不开捕获对
 `sync export` 产出什么没有任何影响（每次导出仍是全量快照）——它只是开始在本地记一笔「这次
@@ -606,6 +608,15 @@ PYTHONPATH=backend python scripts/sync_notebooks.py capture disable --json
 被接成增量包，所以每个目标环境的**下一次**导出会被强制打回全量，重新建立一条日志能完整覆盖
 的基线。已经开着时再执行 `enable` 是空操作（不会挪动 `enabled_at`，也不会再清一次水位），
 对一次退出码含糊的调用不放心时重新跑一遍是安全的。
+
+**导出进行中不要执行 `sync capture enable`。** `_advance_watermark` 只在一次导出跑完之后才写
+`sync_export_state`，所以在一次已经在跑的导出中途执行 `enable` 清空这张表，并不会让那次导出
+停下来——它照样跑完、照样写水位，但它读 `captured_through_seq` 用的是门打开之前就已经固定的
+快照，所以写回去的 seq 是 0（对一次「开始于捕获开启之前」的导出而言这个答案是对的，但如果运维
+几分钟前刚执行过 `enable`，这次导出结束后水位却是 0，看起来会像什么都没发生）。目前没有代码
+层面的守卫挡这种交叠；把它当作一条运维规则处理（开启捕获前先让在跑的导出跑完或先停掉），而不是
+指望 CLI 自己挡住。PR-3b 的增量导出基线校验应该在上线前明确覆盖这种情形（登记在那里，这里不
+修）。
 
 **关闭的代价**：`disable` 会同时清空 `sync_export_state` 与 `sync_change_log`。日志从这一刻
 起不再增长，所以关闭之后的下一次导出又是一次全量快照，跟从未开过时一样——没有「暂停后再续上」

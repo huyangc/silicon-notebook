@@ -154,6 +154,12 @@ def test_build_parser_parses_status():
     args = cli.build_parser().parse_args(["status", "--json"])
     assert args.command == "status"
     assert args.as_json is True
+    assert args.exact_count is False
+
+
+def test_build_parser_parses_status_exact_count():
+    args = cli.build_parser().parse_args(["status", "--exact-count"])
+    assert args.exact_count is True
 
 
 def test_build_parser_parses_capture_enable():
@@ -175,6 +181,12 @@ def test_build_parser_parses_capture_status():
     assert args.command == "capture"
     assert args.capture_command == "status"
     assert args.as_json is True
+    assert args.exact_count is False
+
+
+def test_build_parser_parses_capture_status_exact_count():
+    args = cli.build_parser().parse_args(["capture", "status", "--exact-count"])
+    assert args.exact_count is True
 
 
 def test_build_parser_capture_requires_a_subcommand():
@@ -244,6 +256,33 @@ def test_export_human_output_includes_mode(tmp_path, monkeypatch, capsys):
     exit_code = cli.main(["export", "--target", "prod-tokyo", "--out", str(tmp_path)])
     assert exit_code == 0
     assert "模式: full" in capsys.readouterr().out
+
+
+def test_export_human_output_includes_captured_through_seq(tmp_path, monkeypatch, capsys):
+    _settings(tmp_path, monkeypatch, sync_env="dev")
+    monkeypatch.setattr(
+        cli,
+        "export_notebooks",
+        lambda *a, **k: _empty_export_report(captured_through_seq=42),
+    )
+    exit_code = cli.main(["export", "--target", "prod-tokyo", "--out", str(tmp_path)])
+    assert exit_code == 0
+    assert "seq=42" in capsys.readouterr().out
+
+
+def test_export_json_includes_captured_through_seq(tmp_path, monkeypatch, capsys):
+    _settings(tmp_path, monkeypatch, sync_env="dev")
+    monkeypatch.setattr(
+        cli,
+        "export_notebooks",
+        lambda *a, **k: _empty_export_report(captured_through_seq=7),
+    )
+    exit_code = cli.main(
+        ["export", "--target", "prod-tokyo", "--out", str(tmp_path), "--json"]
+    )
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["captured_through_seq"] == 7
 
 
 def test_export_explicit_source_env_overrides_settings(tmp_path, monkeypatch):
@@ -832,9 +871,86 @@ def test_status_json_includes_capture_section(tmp_path, monkeypatch, capsys):
         "enabled_at": None,
         "disabled_at": None,
         "log_rows": 0,
+        "log_rows_exact": True,
         "min_seq": None,
         "max_seq": None,
     }
+
+
+def test_status_degrades_capture_section_when_v84_tables_are_missing(
+    tmp_path, monkeypatch, capsys
+):
+    """A database migrated only as far as v83/0063 (capture tables not yet
+    applied) must still answer `sync status` for its watermark and import
+    sections -- the capture section degrades to a diagnostic object instead
+    of turning the whole command into a hard failure."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_export_state "
+                "(target_env, exported_through_seq, exported_at, package_id) "
+                "VALUES (?, ?, ?, ?)",
+                ("prod-tokyo", 0, "2026-01-01T00:00:00+00:00", "pkg-old"),
+            )
+        with database.write() as conn:
+            # Simulate a database that predates v84/0064: drop the capture
+            # tables the triggers reference, exactly as the coordinator's
+            # scenario describes -- everything else about the schema is
+            # v84-shaped (migrated, current SCHEMA_VERSION), only these two
+            # tables are gone.
+            conn.execute("DROP TABLE sync_capture_control")
+            conn.execute("DROP TABLE sync_change_log")
+
+        exit_code = cli.main(["status", "--json"])
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["exports"] == [
+            {
+                "target_env": "prod-tokyo",
+                "exported_through_seq": 0,
+                "exported_at": "2026-01-01T00:00:00+00:00",
+                "package_id": "pkg-old",
+            }
+        ]
+        assert payload["imports"] == []
+        assert payload["capture"]["missing_tables"] == [
+            "sync_capture_control",
+            "sync_change_log",
+        ]
+        assert "v84/0064" in payload["capture"]["detail"]
+
+        exit_code = cli.main(["status"])
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "prod-tokyo" in out
+        assert "变更捕获：本环境尚未迁移到 v84/0064" in out
+    finally:
+        database.close()
+
+
+def test_capture_status_still_exits_2_when_v84_tables_are_missing(
+    tmp_path, monkeypatch, capsys
+):
+    """Unlike `sync status`, `sync capture status` asks specifically about
+    capture -- it must keep failing loudly rather than degrade."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            conn.execute("DROP TABLE sync_capture_control")
+            conn.execute("DROP TABLE sync_change_log")
+
+        exit_code = cli.main(["capture", "status", "--json"])
+        assert exit_code == 2
+        assert capsys.readouterr().out == ""
+    finally:
+        database.close()
 
 
 # ------------------------------------------------------------------ capture
@@ -1034,8 +1150,86 @@ def test_capture_status_reports_enabled_state_and_log_range(tmp_path, monkeypatc
         payload = json.loads(capsys.readouterr().out)
         assert payload["enabled"] is True
         assert payload["log_rows"] == 3
+        assert payload["log_rows_exact"] is False
         assert payload["min_seq"] == 1
         assert payload["max_seq"] == 3
+    finally:
+        database.close()
+
+
+def test_capture_status_approximate_count_over_counts_across_a_gap_and_exact_count_does_not(
+    tmp_path, monkeypatch, capsys
+):
+    """SQLite's approximate count (``MAX(seq) - MIN(seq) + 1``) is an upper
+    bound, not always the true row count: deleting a row out of the middle
+    of the log's seq range (something PR-3a's own code never does, but the
+    approximation is documented as an upper bound rather than exact for
+    exactly this reason) creates a gap the approximation cannot see.
+    ``--exact-count`` must still report the true row count."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        cli.main(["capture", "enable"])
+        capsys.readouterr()
+        with database.write() as conn:
+            for _ in range(5):
+                conn.execute(
+                    "INSERT INTO sync_change_log "
+                    "(table_name, key_json, operation, changed_at) "
+                    "VALUES ('notebooks', '{}', 'upsert', '2026-01-01T00:00:00+00:00')"
+                )
+            # Punch a hole in the middle of the seq range (seq 3 of 1..5):
+            # min=1, max=5, true row count=4, approximate=5-1+1=5.
+            conn.execute("DELETE FROM sync_change_log WHERE seq = 3")
+
+        exit_code = cli.main(["capture", "status", "--json"])
+        assert exit_code == 0
+        approx = json.loads(capsys.readouterr().out)
+        assert approx["log_rows"] == 5
+        assert approx["log_rows_exact"] is False
+        assert approx["min_seq"] == 1
+        assert approx["max_seq"] == 5
+
+        exit_code = cli.main(["capture", "status", "--json", "--exact-count"])
+        assert exit_code == 0
+        exact = json.loads(capsys.readouterr().out)
+        assert exact["log_rows"] == 4
+        assert exact["log_rows_exact"] is True
+        assert exact["min_seq"] == 1
+        assert exact["max_seq"] == 5
+    finally:
+        database.close()
+
+
+def test_capture_status_human_output_marks_approximate_counts(
+    tmp_path, monkeypatch, capsys
+):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        cli.main(["capture", "enable"])
+        capsys.readouterr()
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_change_log "
+                "(table_name, key_json, operation, changed_at) "
+                "VALUES ('notebooks', '{}', 'upsert', '2026-01-01T00:00:00+00:00')"
+            )
+
+        exit_code = cli.main(["capture", "status"])
+        assert exit_code == 0
+        approx_out = capsys.readouterr().out
+        assert "约 1 行" in approx_out
+
+        exit_code = cli.main(["capture", "status", "--exact-count"])
+        assert exit_code == 0
+        exact_out = capsys.readouterr().out
+        assert "约" not in exact_out
+        assert "1 行" in exact_out
     finally:
         database.close()
 
