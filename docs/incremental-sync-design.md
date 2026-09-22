@@ -296,6 +296,12 @@ sync status [--json]      # 本库的导出水位（每个目标环境）与已�
    两条过渡规则：`sources.file_path` 按 shadow manifest 的 `path_columns` 重锚到目标端的
    storage 根（包里是源主机的绝对路径）；没有主键的 knowledge_object_sources 与
    community_members 按包内笔记本删后整批插入（PR-3 补复合主键后改为 upsert）。
+   全量包还有一个**对账删除**相位（逆序、每表一个事务、进 `sync_import_progress`）：对每张
+   notebook/parent scope 且非 seed_only 的同步表，删除属于包内笔记本、但主键不在包内的目标端
+   行——源端删掉的材料、KG 行、Knowhow 行在下一次全量后消失。例外：memory_items 及其三张子表
+   不对账，因为目标端用户在镜像上自建的记忆与源端删掉的记忆没有标记可分（§5 允许共存），
+   源端删除留给 PR-3 的删除日志精确重放。SQLite 目标在 chunks/knowledge_objects 的事务内重建
+   `chunks_fts`/`kg_objects_fts`（它们是手工维护的虚表）；PG 的 GIN 在列上自动维护。
 5. 收尾：文件目录正式替换（`.sync-old` 到此才删）；把涉及的笔记本 `status` 从 `importing`
    翻成 `draft`，`sync_origin` 再补打一次（第二条腿，首插时已带）；`sync_imports` 置 done；
    写导入报告（写盘失败降级为 warning）。大库的 scale 重建由运维按 operations 文档手动跑，

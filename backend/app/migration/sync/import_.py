@@ -19,15 +19,29 @@ Phases, and what each one actually guarantees:
 3. **Rows.** One transaction per table, in ``synced_tables()`` order, with the
    table's ``sync_import_progress`` row written inside that same transaction.
    A crash therefore loses at most the table that was in flight, and a re-run
-   re-applies only tables that never completed.
+   re-applies only tables that never completed. A SQLite target's two
+   hand-maintained FTS5 indexes are re-projected in the same transaction as
+   the table they index (``_SQLITE_FTS_REBUILD``).
+3b. **Reconcile.** A full package is a SNAPSHOT, and upsert only ever adds and
+   overwrites, so a second pass -- children before parents, one transaction
+   and one ``sync_import_progress`` step per table -- deletes the rows the
+   target holds for this package's notebooks that the package does not carry.
+   Without it a mirror accumulates every chunk, element and knowhow cell the
+   source ever deleted. **``memory_items`` and its revision/provenance/
+   embedding rows are exempt**: the target's users create memories on a mirror
+   and §5 lets those coexist, but nothing on a memory row says which side made
+   it, so a "not in the package" sweep cannot tell a source-side deletion from
+   a target-side creation and would destroy the second. Source-side memory
+   deletions wait for PR-3's change log, which replays them by key instead of
+   inferring them. The report says so in ``warnings`` every run.
 4. **Files.** After the rows, because a row is what makes a file meaningful
    and a crash between them must not leave installed bytes with no row. Each
    notebook directory is staged beside its destination and swapped in; the
    directory it replaced is kept as ``.sync-old`` until phase 5 has succeeded,
    and is swapped BACK if anything in between fails.
 5. **Finish.** Flip the notebooks this run inserted out of their in-flight
-   ``copying`` state, stamp them as mirrors, close the ``sync_imports`` row,
-   drop the retired file directories, write the report.
+   state, stamp them as mirrors, drop the retired file directories, close the
+   ``sync_imports`` row, write the report.
 
 **Atomicity, stated honestly.** There is no transaction spanning the run. Rows
 are atomic per table; files are atomic per notebook directory and are rolled
@@ -78,6 +92,7 @@ from app.migration.shadow.manifest import MANIFEST as _SHADOW_MANIFEST
 from app.migration.sync.export import (
     SyncExportError,
     _batched,
+    _parent_join_clause,
     _quoted,
 )
 from app.migration.sync.export import _Source as _Backend
@@ -1781,6 +1796,69 @@ def _prune_batches(
         yield batch
 
 
+# SQLite's two hand-maintained FTS5 virtual tables, as
+# ``base table -> (fts table, rebuild INSERT ... SELECT)``.
+#
+# ``chunks_fts`` and ``kg_objects_fts`` have NO triggers (only
+# ``memory_items_fts`` does -- migrations.py builds three for it), so every
+# writer maintains them by hand: ``ChunkStore.insert_rows`` writes chunk rows,
+# ``KnowledgeLifecycle`` writes object rows, and each bulk path that bypasses
+# those -- ``knowhow_transfer_store`` for a transferred table,
+# ``notebook_sharing`` for a deep copy -- re-does it explicitly, in the same
+# transaction, for exactly this reason. An importer is another such path: land
+# the rows without these and the mirror has vector recall but is permanently
+# invisible to lexical search, with no self-healing probe to notice (the
+# vector side has one, FTS does not). The shadow manifest classifies both as
+# REBUILT for the same reason: they are derived, and rebuilding them is always
+# the right answer.
+#
+# Rebuild, not merge: DELETE the package's notebooks out of the index and
+# re-project the base table as it stands. That makes the operation idempotent
+# and makes a resumed or twice-run phase converge, where an INSERT-only patch
+# would duplicate rows in a table with no unique constraint to stop it.
+#
+# The ``name`` projection mirrors knowledge_lifecycle.py's fts_rows exactly:
+# ``payload -> 'name'``, and only when it is non-blank.
+# PostgreSQL needs none of this -- its lexical indexes are GIN indexes ON the
+# column, maintained by the row write itself.
+_SQLITE_FTS_REBUILD: dict[str, tuple[str, str]] = {
+    "chunks": (
+        "chunks_fts",
+        "INSERT INTO chunks_fts(chunk_id, notebook_id, text) "
+        "SELECT id, notebook_id, COALESCE(text, '') FROM chunks "
+        "WHERE notebook_id IN ({placeholders})",
+    ),
+    "knowledge_objects": (
+        "kg_objects_fts",
+        "INSERT INTO kg_objects_fts(object_id, notebook_id, name) "
+        "SELECT id, notebook_id, json_extract(payload, '$.name') "
+        "FROM knowledge_objects WHERE notebook_id IN ({placeholders}) "
+        "AND TRIM(COALESCE(json_extract(payload, '$.name'), '')) <> ''",
+    ),
+}
+
+
+def _rebuild_sqlite_fts(
+    backend: _Backend, conn: Any, table: str, context: _Context
+) -> None:
+    """Re-project this table's SQLite lexical index for the package's
+    notebooks, inside the caller's transaction. A no-op on PostgreSQL and for
+    every table that has no hand-maintained index."""
+    if backend.is_postgres:
+        return
+    entry = _SQLITE_FTS_REBUILD.get(table)
+    if entry is None or not context.manifest.notebooks:
+        return
+    index, insert = entry
+    for batch in _batched(list(context.manifest.notebooks)):
+        placeholders = ",".join("?" for _ in batch)
+        conn.execute(
+            f"DELETE FROM {_ident(index)} WHERE notebook_id IN ({placeholders})",
+            tuple(batch),
+        )
+        conn.execute(insert.format(placeholders=placeholders), tuple(batch))
+
+
 def _apply_table(
     backend: _Backend, conn: Any, table: str, context: _Context
 ) -> TableOutcome:
@@ -1882,6 +1960,7 @@ def _apply_table(
             f"{table}: accounted for {inserted + updated + skipped} rows but the "
             f"package manifest declares {entry.rows}"
         )
+    _rebuild_sqlite_fts(backend, conn, table, context)
     return TableOutcome(inserted=inserted, updated=updated, skipped=skipped)
 
 
@@ -1953,6 +2032,169 @@ def _apply_rows(backend: _Backend, context: _Context, done: set[str]) -> None:
                 datetime.now(timezone.utc),
             )
         context.ledger.tables[table] = outcome
+
+
+# --------------------------------------------- phase 3b -- snapshot reconcile
+
+
+# Tables the full-snapshot prune deliberately leaves alone, beyond the ones
+# the filter below already excludes by shape (GLOBAL scope, seed_only, no
+# primary key):
+#
+# - ``notebooks``: the package's notebook list IS the scope of the whole
+#   import. "A notebook of this package that the package does not carry" is
+#   not a thing, and retiring a mirror is an operator decision (§5), not a
+#   side effect of syncing a different one.
+# - ``memory_items`` and its three child tables: the target's users create
+#   memories on a mirror, and §5 explicitly lets those coexist with the
+#   source's. Nothing on a memory row says which side made it, so a
+#   notebook-scoped "not in the package" sweep cannot tell "the source
+#   deleted this" from "the target created this" -- and it would silently
+#   destroy the second. Source-side deletions of memories therefore wait for
+#   PR-3's change log, which replays them by key instead of inferring them.
+#   ``memory_provenance``/``memory_revisions`` still get the narrower,
+#   parent-scoped ``_SOURCE_AUTHORITATIVE`` prune, which only ever touches
+#   memories the package actually carries.
+_SNAPSHOT_PRUNE_EXEMPT = frozenset(
+    {
+        "notebooks",
+        "memory_items",
+        "memory_embeddings",
+        "memory_provenance",
+        "memory_revisions",
+    }
+)
+
+_PRUNE_STEP_PREFIX = "__prune__:"
+
+
+def _prune_step(table: str) -> str:
+    return f"{_PRUNE_STEP_PREFIX}{table}"
+
+
+def _prunable_tables(backend: _Backend, conn: Any) -> tuple[str, ...]:
+    """Synced tables the snapshot prune covers, children before parents.
+
+    Reverse ``synced_tables()`` order: that ordering puts a declared foreign
+    key's parent before its child, so walking it backwards deletes a child
+    before the parent it points at and no delete has to rely on ON DELETE
+    CASCADE firing the way this module happens to expect.
+    """
+    chosen: list[str] = []
+    for table in reversed(synced_tables()):
+        spec = spec_for(table)
+        if table in _SNAPSHOT_PRUNE_EXEMPT or spec.seed_only:
+            continue
+        scope = spec.scope
+        if scope is None or scope.kind is ScopeKind.GLOBAL:
+            continue
+        if not backend.primary_key(conn, table):
+            # No primary key: _replace_scope already cleared and re-inserted
+            # this table's rows for the package's notebooks, which IS the
+            # reconciliation.
+            continue
+        chosen.append(table)
+    return tuple(chosen)
+
+
+def _scope_select(
+    backend: _Backend, conn: Any, table: str, columns: Sequence[str]
+) -> str:
+    """``SELECT <columns> FROM <table>`` restricted to a bind list of notebook
+    ids, following the table's scope -- its own column, or the join chain up
+    to the ancestor that has one. Reuses the exporter's join builder so the
+    two sides resolve a scope the same way."""
+    projection = ", ".join(f"t0.{_ident(column)}" for column in columns)
+    head = f"SELECT {projection} FROM {_ident(table)} t0"
+    scope = spec_for(table).scope
+    if scope is None:
+        raise SyncImportError(f"{table}: LOCAL table has no import scope")
+    if scope.kind is ScopeKind.NOTEBOOK:
+        return f"{head} WHERE t0.{_ident(scope.column)} IN ({{placeholders}})"
+    try:
+        joins, filtered = _parent_join_clause(backend, conn, table)
+    except SyncExportError as exc:
+        raise SyncImportError(str(exc)) from None
+    return f"{head} {joins} WHERE {filtered} IN ({{placeholders}})"
+
+
+def _prune_table(
+    backend: _Backend, conn: Any, table: str, context: _Context
+) -> int:
+    """Delete the target's rows of ``table`` that belong to this package's
+    notebooks but are not in the package. Returns how many went."""
+    primary_key = backend.primary_key(conn, table)
+    carried = {
+        tuple(decode_value(row.get(column)) for column in primary_key)
+        for row in _iter_lines(context.package_dir / rows_path(table))
+    }
+    statement = _scope_select(backend, conn, table, primary_key)
+    stale: list[tuple[Any, ...]] = []
+    for batch in _batched(list(context.manifest.notebooks)):
+        placeholders = ",".join("?" for _ in batch)
+        for row in backend.stream(
+            conn, statement.format(placeholders=placeholders), batch
+        ):
+            key = tuple(row[column] for column in primary_key)
+            if key not in carried:
+                stale.append(key)
+    if not stale:
+        return 0
+    predicate = " AND ".join(f"{_ident(column)} = ?" for column in primary_key)
+    # Full-key equality through executemany rather than an IN list: it is the
+    # one form that works for a composite primary key on both dialects, and
+    # the rows reaching it are by definition only the stale ones.
+    for start in range(0, len(stale), _ROW_BATCH):
+        _executemany(
+            backend,
+            conn,
+            f"DELETE FROM {_ident(table)} WHERE {predicate}",
+            stale[start : start + _ROW_BATCH],
+        )
+    _rebuild_sqlite_fts(backend, conn, table, context)
+    return len(stale)
+
+
+def _prune_snapshot(backend: _Backend, context: _Context, done: set[str]) -> None:
+    """Make each reconciled table hold exactly what the package says.
+
+    A full package is a snapshot, so a row the target has for one of the
+    package's notebooks and the package does not is a row the source deleted.
+    Upsert alone can never notice that -- it only ever adds and overwrites --
+    so a mirror would accumulate every chunk, element and knowhow cell the
+    source ever removed.
+    """
+    total = 0
+    with backend.read() as conn:
+        tables = _prunable_tables(backend, conn)
+    for table in tables:
+        step = _prune_step(table)
+        if step in done:
+            continue
+        with backend.write() as conn:
+            removed = _prune_table(backend, conn, table, context)
+            _record_progress(
+                backend,
+                conn,
+                context.manifest.package_id,
+                step,
+                removed,
+                datetime.now(timezone.utc),
+            )
+        total += removed
+    if total:
+        context.ledger.warn(
+            f"removed {total} target row(s) this full package no longer "
+            "carries for the notebooks it covers"
+        )
+    context.ledger.warn(
+        "memory_items and its revision/provenance/embedding rows are NOT "
+        "reconciled against the package: the target's own memories live in "
+        "those tables beside the mirrored ones and carry no marker that "
+        "separates them, so a source-side memory deletion is replayed by "
+        "PR-3's change log rather than inferred here "
+        "(docs/incremental-sync-design.md §5)"
+    )
 
 
 # ----------------------------------------------------------- phase 4 -- files
@@ -2429,30 +2671,42 @@ def _import(
 
     _claim_import(backend, context, resume=resume)
 
-    if create_missing_users:
-        created = _create_missing_users(backend, mapping.unmatched)
-        context.users.update(created)
-        if created:
-            ledger.warn(_CREATED_USERS_NEED_A_GRANT.format(count=len(created)))
-    elif mapping.unmatched:
-        ledger.warn(
-            f"{len(mapping.unmatched)} package user(s) have no target "
-            "counterpart; references to them follow their table's rule "
-            "(docs/incremental-sync-design.md §3.2)"
+    def outcome() -> UserMappingResult:
+        """The mapping as it stands right now. Built on demand rather than
+        once up front because creating the missing users happens INSIDE the
+        protected phase below, and the failure path has to be able to report
+        whatever had been created when it broke."""
+        return UserMappingResult(
+            matched=MappingProxyType(dict(mapping.matched)),
+            created=MappingProxyType(dict(created)),
+            unmatched=tuple(
+                user.username for user in mapping.unmatched if user.id not in created
+            ),
         )
-    result = UserMappingResult(
-        matched=MappingProxyType(dict(mapping.matched)),
-        created=MappingProxyType(created),
-        unmatched=tuple(
-            user.username for user in mapping.unmatched if user.id not in created
-        ),
-    )
 
     try:
+        # Creating users is the first step of the PROTECTED phase, not a step
+        # before it. It writes to the target and it can fail -- a package user
+        # with no username is refused right here -- and anything that fails
+        # after the sync_imports row is claimed must leave that row 'failed'
+        # with a report, or the next run of this source environment is refused
+        # as a concurrent import until somebody passes --resume.
+        if create_missing_users:
+            created.update(_create_missing_users(backend, mapping.unmatched))
+            context.users.update(created)
+            if created:
+                ledger.warn(_CREATED_USERS_NEED_A_GRANT.format(count=len(created)))
+        elif mapping.unmatched:
+            ledger.warn(
+                f"{len(mapping.unmatched)} package user(s) have no target "
+                "counterpart; references to them follow their table's rule "
+                "(docs/incremental-sync-design.md §3.2)"
+            )
         with backend.read() as conn:
             done = _completed_steps(backend, conn, manifest.package_id)
             context.finished_packages = _finished_packages(backend, conn)
         _apply_rows(backend, context, done)          # phase 3
+        _prune_snapshot(backend, context, done)      # phase 3b
         if _FILES_PHASE in done:
             ledger.warn(
                 "the file phase was already complete from an earlier run of "
@@ -2467,7 +2721,7 @@ def _import(
         # task must still leave the run's state recorded, or the next attempt
         # sees a row stuck at 'running' and refuses without --resume.
         _rollback_files(context)
-        failure = _report(manifest, ledger, result, error=str(exc) or repr(exc))
+        failure = _report(manifest, ledger, outcome(), error=str(exc) or repr(exc))
         _settle(backend, context, "failed", failure)
         if isinstance(exc, SyncImportError) or not isinstance(exc, Exception):
             raise
@@ -2483,7 +2737,7 @@ def _import(
         _commit_files(backend, context)
     except OSError as exc:  # pragma: no cover - filesystem failure path
         ledger.warn(f"could not drop the replaced storage directories: {exc}")
-    report = _report(manifest, ledger, result)
+    report = _report(manifest, ledger, outcome())
     _settle(backend, context, "done", report)
     return report
 
