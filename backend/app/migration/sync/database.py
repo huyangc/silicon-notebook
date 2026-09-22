@@ -233,6 +233,31 @@ class _Source:
         with self._database.write() as conn:
             yield conn
 
+    def begin_immediate(self, conn: Any) -> None:
+        """Take this backend's WRITE lock as the FIRST statement of a
+        ``write()`` block, so a check made inside it and the write that
+        follows are atomic against other PROCESSES too.
+
+        SQLite: ``BEGIN IMMEDIATE``. Its per-process ``write_lock`` does not
+        help here -- an offline export and the ``sync capture`` CLI are two
+        processes on one file, and without this the SELECT that reads the
+        capture gate would run outside any transaction, letting the other
+        process commit between "read the gate" and "write the watermark".
+
+        PostgreSQL: a no-op. ``write()`` is already inside a transaction and
+        the lock that matters there is a ROW lock (``FOR UPDATE`` on the
+        control row), not a database-wide one; taking anything broader would
+        serialize unrelated writers for the length of a watermark commit.
+
+        Must be called before any other statement in the block -- SQLite
+        raises if a transaction is already open.
+        """
+        if self.is_postgres:
+            return
+        from app.repositories.sqlite.database import SqliteDatabase
+
+        SqliteDatabase.begin_immediate(conn)
+
     def fetch(
         self, conn: Any, statement: str, params: Sequence[Any] = ()
     ) -> list[dict[str, Any]]:

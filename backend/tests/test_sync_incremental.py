@@ -11,6 +11,7 @@ app.migration.sync.export 的模式判定)。对应 docs/incremental-sync-design
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,7 @@ import pytest
 from app.core.config import Settings
 from app.migration.sync import export as export_module
 from app.migration.sync import incremental as incremental_module
-from app.migration.sync.export import ExportReport, export_notebooks
+from app.migration.sync.export import ExportReport, SyncExportError, export_notebooks
 from app.migration.sync.import_ import SyncImportError
 from app.migration.sync.package import (
     DELETES_NAME,
@@ -1150,3 +1151,259 @@ def test_the_exporters_repository_root_is_the_facades(settings, repo):
         assert (source.root_dir / "backend" / "app" / "migration").is_dir()
     finally:
         source.close()
+
+
+# ----------------------------------------------- publishing under contention
+
+
+def _package_dirs(out_dir: Path) -> set[str]:
+    return {path.name for path in out_dir.iterdir()} if out_dir.is_dir() else set()
+
+
+def test_the_watermark_write_holds_the_write_lock_across_the_gate_read(
+    baseline, monkeypatch
+):
+    """The gate re-read only proves anything if the gate cannot move between
+    it and the commit. SQLite's per-process ``write_lock`` does not give that
+    -- an offline export and the ``sync capture`` CLI are two PROCESSES on one
+    file -- so the watermark's ``write()`` block opens with
+    ``BEGIN IMMEDIATE``. Probed here with a second, raw connection (the same
+    thing another process would be), which must be locked out.
+
+    变异验证: 去掉 ``_advance_watermark`` 里的 ``source.begin_immediate(conn)``,
+    本条必须报红(探针拿到了写锁)。
+    """
+    import sqlite3
+
+    db_path = str(baseline["settings"].database_url).removeprefix("sqlite:///")
+    probes: list[str] = []
+    real_gate = export_module._capture_gate
+
+    def hooked(source, conn, *, lock=False):
+        if lock:
+            other = sqlite3.connect(db_path, timeout=0)
+            try:
+                other.execute("BEGIN IMMEDIATE")
+                other.execute(
+                    "UPDATE sync_capture_control SET enabled = 1 WHERE singleton = 1"
+                )
+                other.commit()
+                probes.append("acquired")
+            except sqlite3.OperationalError as exc:
+                probes.append(f"blocked: {exc}")
+            finally:
+                other.close()
+        return real_gate(source, conn, lock=lock)
+
+    monkeypatch.setattr(export_module, "_capture_gate", hooked)
+
+    report = _export(baseline["settings"], baseline["out"])
+
+    assert probes, "the locked gate read never ran"
+    assert probes[0].startswith("blocked"), probes
+    assert report.captured is True
+
+
+def test_an_incremental_export_refuses_to_publish_over_a_moved_watermark(
+    baseline, monkeypatch
+):
+    """Two exports of one target can overlap. The watermark is a CHAIN, not a
+    latest-writer-wins cell: publishing over a row that is no longer this
+    package's declared base would orphan whatever export put it there -- a
+    reader walking the chain by ``base_package_id`` would step straight past
+    that package.
+
+    变异验证: 把条件 UPDATE 换回无条件 UPSERT, 本条必须报红。
+    """
+    repo = baseline["repo"]
+    base = _watermark(repo)["package_id"]
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET name='alpha v2' WHERE id=?", (baseline["alpha"],))
+    real = export_module._advance_watermark
+
+    def hooked(*args, **kwargs):
+        with repo._write() as db:
+            db.execute(
+                "UPDATE sync_export_state SET package_id='another-export' "
+                "WHERE target_env=?",
+                (TARGET_ENV,),
+            )
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(export_module, "_advance_watermark", hooked)
+    before = _package_dirs(baseline["out"])
+
+    with pytest.raises(SyncExportError) as failure:
+        _export(baseline["settings"], baseline["out"])
+
+    assert "watermark moved during export" in str(failure.value)
+    assert base in str(failure.value)
+    # The package it had already renamed into place is gone: a package no
+    # watermark points at is worse than no package at all.
+    assert _package_dirs(baseline["out"]) == before
+    assert _watermark(repo)["package_id"] == "another-export"
+
+
+def test_a_full_export_refuses_to_drag_the_watermark_backwards(
+    baseline, monkeypatch
+):
+    """The same race on the full branch, where there is no base package to
+    compare: the guard is that the stored sequence may not move backwards.
+
+    变异验证: 去掉 UPSERT 的 ``WHERE ... exported_through_seq <= excluded...``,
+    本条必须报红。
+    """
+    repo = baseline["repo"]
+    real = export_module._advance_watermark
+
+    def hooked(*args, **kwargs):
+        with repo._write() as db:
+            db.execute(
+                "UPDATE sync_export_state SET exported_through_seq = 9999, "
+                "package_id='newer-export' WHERE target_env=?",
+                (TARGET_ENV,),
+            )
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(export_module, "_advance_watermark", hooked)
+    before = _package_dirs(baseline["out"])
+
+    with pytest.raises(SyncExportError) as failure:
+        _export(baseline["settings"], baseline["out"], full=True)
+
+    assert "watermark moved during export" in str(failure.value)
+    assert _package_dirs(baseline["out"]) == before
+    row = _watermark(repo)
+    assert (row["exported_through_seq"], row["package_id"]) == (9999, "newer-export")
+
+
+def test_an_uncontended_publish_still_succeeds_on_both_branches(baseline):
+    """The guards above must not refuse the ordinary case: the incremental
+    UPDATE matches its own base, and the full UPSERT's ``<=`` allows an equal
+    sequence (a re-baseline with no new changes)."""
+    with baseline["repo"]._write() as db:
+        db.execute("UPDATE notebooks SET name='alpha v2' WHERE id=?", (baseline["alpha"],))
+
+    incremental_report = _export(baseline["settings"], baseline["out"])
+    assert incremental_report.mode == MODE_INCREMENTAL
+    assert _watermark(baseline["repo"])["package_id"] == incremental_report.package_id
+
+    full_report = _export(baseline["settings"], baseline["out"], full=True)
+    assert full_report.mode == MODE_FULL
+    assert full_report.to_seq == incremental_report.to_seq
+    assert _watermark(baseline["repo"])["package_id"] == full_report.package_id
+
+
+# ------------------------------------------------------------ export lease
+
+
+def _lease(repo) -> dict:
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT * FROM sync_export_runs WHERE target_env=?", (TARGET_ENV,)
+        ).fetchone()
+    return dict(row) if row is not None else {}
+
+
+def _plant_lease(repo, *, age_seconds: float, run_id: str = "other-run") -> None:
+    moment = (
+        datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    ).isoformat()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sync_export_runs(target_env, run_id, package_id, "
+            "started_at, heartbeat_at, floor_seq) VALUES(?,?,?,?,?,?) "
+            "ON CONFLICT(target_env) DO UPDATE SET run_id=excluded.run_id, "
+            "heartbeat_at=excluded.heartbeat_at",
+            (TARGET_ENV, run_id, run_id, moment, moment, 0),
+        )
+
+
+def test_a_second_export_of_one_target_is_refused_while_the_first_runs(baseline):
+    """Two unscoped exports of one target race to publish, and the loser's
+    package describes a window the winner's watermark already claims as
+    exported. ``sync_export_runs``' PRIMARY KEY is the mutual exclusion, and
+    it is taken BEFORE the read snapshot so the refusal costs nothing.
+
+    变异验证: 去掉 ``_claim_export_lease`` 的存活租约检查, 本条必须报红。
+    """
+    before = _package_dirs(baseline["out"])
+    _plant_lease(baseline["repo"], age_seconds=5)
+
+    with pytest.raises(SyncExportError) as failure:
+        _export(baseline["settings"], baseline["out"])
+
+    message = str(failure.value)
+    assert "already running" in message and "other-run" in message
+    # Nothing was created, not even a staging directory.
+    assert _package_dirs(baseline["out"]) == before
+    assert _lease(baseline["repo"])["run_id"] == "other-run"
+
+
+def test_a_dead_lease_is_replaced_with_a_warning(baseline):
+    """A run that crashed stops refreshing its heartbeat. Its lease must not
+    block the target forever -- it is taken over, loudly."""
+    _plant_lease(baseline["repo"], age_seconds=export_module._STALE_RUN_SECONDS + 60)
+
+    report = _export(baseline["settings"], baseline["out"])
+
+    assert [w for w in report.warnings if "dead export lease" in w]
+    assert "other-run" in " ".join(report.warnings)
+    assert _lease(baseline["repo"]) == {}
+
+
+def test_the_lease_is_released_by_the_same_transaction_that_publishes(baseline):
+    report = _export(baseline["settings"], baseline["out"])
+
+    assert report.run_id == report.package_id
+    assert _lease(baseline["repo"]) == {}
+    assert _watermark(baseline["repo"])["package_id"] == report.package_id
+
+
+def test_a_failed_export_releases_its_lease(baseline, monkeypatch):
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(export_module, "_write_users", explode)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _export(baseline["settings"], baseline["out"])
+
+    assert _lease(baseline["repo"]) == {}
+
+
+def test_the_lease_records_a_floor_for_prune_log(baseline, monkeypatch):
+    """``floor_seq`` is a lower bound on the watermark this run will publish,
+    so ``sync prune-log`` can keep the log rows the run is about to read --
+    they look prunable otherwise, because that watermark does not exist yet."""
+    repo = baseline["repo"]
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET name='alpha v2' WHERE id=?", (baseline["alpha"],))
+    with repo._connect() as db:
+        high_water = db.execute(
+            "SELECT COALESCE(MAX(seq), 0) AS seq FROM sync_change_log"
+        ).fetchone()["seq"]
+    seen: list[int] = []
+    real = export_module._assemble
+
+    def hooked(*args, **kwargs):
+        seen.append(int(_lease(repo)["floor_seq"]))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(export_module, "_assemble", hooked)
+
+    _export(baseline["settings"], baseline["out"])
+
+    assert seen == [high_water] and high_water > 0
+
+
+def test_a_scoped_export_neither_takes_nor_is_blocked_by_a_lease(baseline):
+    """A ``--notebook`` export publishes no watermark, so there is nothing
+    for it to race over and nothing for it to hold."""
+    _plant_lease(baseline["repo"], age_seconds=5)
+
+    report = _export(baseline["settings"], baseline["out"], [baseline["alpha"]])
+
+    assert report.scoped is True
+    assert report.run_id == ""
+    assert _lease(baseline["repo"])["run_id"] == "other-run"

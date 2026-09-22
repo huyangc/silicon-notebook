@@ -150,6 +150,9 @@ class ExportReport:
     # true otherwise (a full baseline advances it too -- that is what makes
     # the NEXT export incremental).
     watermark_advanced: bool = True
+    # This run's ``sync_export_runs`` lease id (the package id). Empty for a
+    # scoped export, which takes no lease.
+    run_id: str = ""
     # What this run actually wrote to sync_export_state.captured -- i.e.
     # whether the NEXT export may resume from the watermark this one left.
     # Normally "the gate was open", but _advance_watermark downgrades it to
@@ -192,12 +195,18 @@ class _PackageWriter:
     "manifest.json is written last" checkable rather than a claim about
     timestamps."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, on_beat: Any = None) -> None:
         self.root = root
         self.checksums: dict[str, str] = {}
         self.bytes_written = 0
         self.write_order: list[str] = []
         self._heartbeat = root / _HEARTBEAT_NAME
+        # Refreshes the DATABASE lease alongside the on-disk marker, so the
+        # two liveness signals a crashed export leaves behind (a staging
+        # directory and a sync_export_runs row) go stale together instead of
+        # one of them outliving the other. None for a scoped export, which
+        # takes no lease.
+        self._on_beat = on_beat
         self._beat_at = 0.0
         self.beat(force=True)
 
@@ -210,6 +219,8 @@ class _PackageWriter:
             return
         self._heartbeat.touch()
         self._beat_at = now
+        if self._on_beat is not None:
+            self._on_beat()
 
     def finish(self) -> None:
         """Drop the liveness marker, immediately before the rename. From here
@@ -547,7 +558,7 @@ def _write_changed_files(
 # ----------------------------------------------------------------- watermark
 
 
-def _capture_gate(source: _Source, conn: Any) -> tuple[bool, Any]:
+def _capture_gate(source: _Source, conn: Any, *, lock: bool = False) -> tuple[bool, Any]:
     """``(is the gate open, when it was last opened)`` -- the capture gate's
     GENERATION, read once per export and passed around from there.
 
@@ -562,11 +573,23 @@ def _capture_gate(source: _Source, conn: Any) -> tuple[bool, Any]:
 
     A missing control row (capture never turned on) answers ``(False, None)``,
     which compares equal to itself across the export the same way.
+
+    ``lock=True`` is for the re-read inside the watermark's write transaction:
+    on PostgreSQL it takes a ROW lock on the control row, so a concurrent
+    ``sync capture enable``/``disable`` (both write that row) waits until the
+    watermark is committed instead of slipping between the re-read and the
+    INSERT. Not needed for the snapshot-side read, which is allowed to be a
+    moment in time -- it is the value the write transaction compares against.
+    A row that does not exist cannot be locked and does not need to be: no
+    row means the gate is closed, and an ``enable`` that inserts one
+    afterwards is simply later than this export.
     """
-    rows = source.fetch(
-        conn,
-        "SELECT enabled, enabled_at FROM sync_capture_control WHERE singleton = 1",
+    statement = (
+        "SELECT enabled, enabled_at FROM sync_capture_control WHERE singleton = 1"
     )
+    if lock and source.is_postgres:
+        statement += " FOR UPDATE"
+    rows = source.fetch(conn, statement)
     if not rows:
         return False, None
     return bool(rows[0]["enabled"]), rows[0]["enabled_at"]
@@ -620,6 +643,8 @@ def _advance_watermark(
     *,
     gate: tuple[bool, Any],
     snapshot: str | None,
+    base_package_id: str,
+    run_id: str,
 ) -> tuple[bool, str]:
     """Upsert this target's watermark, only once the package is complete on
     disk (§7): a failed export must leave the watermark where it was so a
@@ -652,13 +677,43 @@ def _advance_watermark(
     but ``captured`` goes to 0, which costs one full export and loses nothing.
     Returns ``(captured, reason)``; ``reason`` is empty when the gate held.
 
+    That comparison is only worth anything if the gate cannot move between
+    the re-read and the commit, so this block TAKES THE LOCK FIRST:
+    ``begin_immediate`` on SQLite (one writer at a time, across processes --
+    the export and the ``sync capture`` CLI are two of them), and a ``FOR
+    UPDATE`` row lock on the control row on PostgreSQL. ``capture
+    enable``/``disable`` both write that row, so either they land before this
+    read or they wait for this commit; there is no third case.
+
+    The write itself is CONDITIONAL, because two exports of one target can
+    overlap and the watermark is a chain, not a latest-writer-wins cell:
+
+    - Incremental: the row must still be the package this one declares as its
+      ``base_package_id``. If another export replaced it in the meantime,
+      publishing over it would orphan that export's package -- the chain
+      would skip it -- so this run fails instead and its package is removed.
+    - Full: the stored seq may not move backwards, so the upsert carries
+      ``WHERE sync_export_state.exported_through_seq <= excluded....``. A
+      baseline that lost a race against a newer one is refused the same way.
+
+    Raises ``SyncExportError`` in both cases; the caller deletes the package
+    it just published, because a package no watermark points at is worse than
+    no package at all.
+
+    The in-flight lease (``sync_export_runs``) is released in THIS
+    transaction, so "the watermark is published" and "this target is free
+    again" become true at the same instant -- a crash between the two could
+    otherwise leave a lease with no run behind it, blocking the target for an
+    hour.
+
     See ``_captured_through_seq`` for why the seq alone is not a resume
     point on PostgreSQL, and ``incremental.compensation_rows`` for what the
     snapshot is used for."""
     moment: Any = exported_at if source.is_postgres else exported_at.isoformat()
     reason = ""
     with source.write() as conn:
-        now = _capture_gate(source, conn)
+        source.begin_immediate(conn)
+        now = _capture_gate(source, conn, lock=True)
         captured = bool(gate[0]) and now == gate
         if gate[0] and not captured:
             reason = (
@@ -667,22 +722,204 @@ def _advance_watermark(
                 "marked captured, so the next export will be a full one"
             )
         flag: Any = captured if source.is_postgres else int(captured)
+        values = (exported_through_seq, moment, package_id, flag, snapshot)
+        if base_package_id:
+            cursor = conn.execute(
+                source.sql(
+                    "UPDATE sync_export_state SET "
+                    "exported_through_seq = ?, exported_at = ?, package_id = ?, "
+                    "captured = ?, exported_snapshot = ? "
+                    "WHERE target_env = ? AND package_id = ?"
+                ),
+                (*values, target_env, base_package_id),
+            )
+            if int(cursor.rowcount or 0) == 0:
+                raise SyncExportError(
+                    f"watermark moved during export: base {base_package_id!r} "
+                    f"is no longer the watermark of target {target_env!r}; "
+                    "another export published over it, so this package would "
+                    "leave a gap in the chain"
+                )
+        else:
+            cursor = conn.execute(
+                source.sql(
+                    "INSERT INTO sync_export_state "
+                    "(target_env, exported_through_seq, exported_at, package_id, "
+                    "captured, exported_snapshot) "
+                    "VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT (target_env) DO UPDATE SET "
+                    "exported_through_seq = excluded.exported_through_seq, "
+                    "exported_at = excluded.exported_at, "
+                    "package_id = excluded.package_id, "
+                    "captured = excluded.captured, "
+                    "exported_snapshot = excluded.exported_snapshot "
+                    "WHERE sync_export_state.exported_through_seq "
+                    "<= excluded.exported_through_seq"
+                ),
+                (target_env, *values),
+            )
+            if int(cursor.rowcount or 0) == 0:
+                raise SyncExportError(
+                    f"watermark moved during export: target {target_env!r} is "
+                    f"already at a sequence above {exported_through_seq}; "
+                    "another export published over it and this package would "
+                    "drag the watermark backwards"
+                )
         conn.execute(
             source.sql(
-                "INSERT INTO sync_export_state "
-                "(target_env, exported_through_seq, exported_at, package_id, "
-                "captured, exported_snapshot) "
-                "VALUES (?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT (target_env) DO UPDATE SET "
-                "exported_through_seq = excluded.exported_through_seq, "
-                "exported_at = excluded.exported_at, "
-                "package_id = excluded.package_id, "
-                "captured = excluded.captured, "
-                "exported_snapshot = excluded.exported_snapshot"
+                "DELETE FROM sync_export_runs "
+                "WHERE target_env = ? AND run_id = ?"
             ),
-            (target_env, exported_through_seq, moment, package_id, flag, snapshot),
+            (target_env, run_id),
         )
     return captured, reason
+
+
+# ------------------------------------------------------------------ lease
+
+
+# How long a lease row may go un-refreshed before a new export treats it as a
+# DEAD run to replace rather than a live one to refuse. Deliberately the SAME
+# constant as the staging directory's: one beat refreshes both the ``.tmp``
+# marker and this row, so they are two views of one liveness signal and must
+# not be able to disagree about which runs are alive.
+_STALE_RUN_SECONDS = _STALE_STAGING_SECONDS
+
+
+def _moment_for(source: _Source, value: datetime) -> Any:
+    """One instant in whichever shape this backend's timestamp columns take:
+    a ``datetime`` for PostgreSQL ``timestamptz``, ISO text for SQLite."""
+    return value if source.is_postgres else value.isoformat()
+
+
+def _age_seconds(stored: Any, now: datetime) -> float | None:
+    """Seconds since a stored timestamp, or None when it cannot be read.
+
+    Unreadable is NOT "old": a lease row whose timestamp this build cannot
+    parse is treated as live, so a corrupted row makes an export refuse
+    loudly rather than silently steal a lease from a run that is still
+    going."""
+    if isinstance(stored, datetime):
+        moment = stored
+    elif isinstance(stored, str) and stored:
+        try:
+            moment = datetime.fromisoformat(stored)
+        except ValueError:
+            return None
+    else:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return (now - moment).total_seconds()
+
+
+def _claim_export_lease(
+    source: _Source, target_env: str, run_id: str, started_at: datetime
+) -> list[str]:
+    """Take this target's in-flight export lease, BEFORE the read snapshot.
+
+    Two things go wrong without it, and neither is visible to the run that
+    causes them (docs/incremental-sync-design.md §7):
+
+    - ``sync prune-log`` deletes log rows at or below the smallest captured
+      watermark. A running export's watermark does not exist yet, so the rows
+      it is about to read still look prunable. The lease carries
+      ``floor_seq`` -- the log's ``MAX(seq)`` at claim time, a lower bound on
+      the watermark this run will publish -- and prune-log takes its floor as
+      the minimum over the watermarks AND every live lease.
+    - Two unscoped exports of one target race to publish, and the loser's
+      package describes a window the winner's watermark already claims. The
+      PRIMARY KEY on ``target_env`` is the mutual exclusion: the second one
+      finds a live row and refuses here, before it has read or written
+      anything.
+
+    A row whose ``heartbeat_at`` has gone unrefreshed for ``_STALE_RUN_
+    SECONDS`` belongs to a run that died; it is replaced with a warning
+    rather than being allowed to block this target forever. Scoped
+    (``--notebook``) exports never call this: they are not on the chain, they
+    publish no watermark, and there is nothing for them to race over.
+    """
+    moment = _moment_for(source, started_at)
+    warnings: list[str] = []
+    with source.write() as conn:
+        source.begin_immediate(conn)
+        statement = (
+            "SELECT run_id, package_id, started_at, heartbeat_at "
+            "FROM sync_export_runs WHERE target_env = ?"
+        )
+        if source.is_postgres:
+            statement += " FOR UPDATE"
+        rows = source.fetch(conn, statement, (target_env,))
+        if rows:
+            age = _age_seconds(rows[0]["heartbeat_at"], started_at)
+            if age is None or age <= _STALE_RUN_SECONDS:
+                raise SyncExportError(
+                    f"an export for target {target_env!r} is already running "
+                    f"(run {str(rows[0]['run_id'])!r}, started "
+                    f"{rows[0]['started_at']}, last heartbeat "
+                    f"{rows[0]['heartbeat_at']}); wait for it to finish, or "
+                    "remove its sync_export_runs row if you know it is dead"
+                )
+            warnings.append(
+                f"replaced a dead export lease for target {target_env!r} "
+                f"(run {str(rows[0]['run_id'])!r}, last heartbeat "
+                f"{rows[0]['heartbeat_at']}, {int(age)}s ago)"
+            )
+        floor_seq = _captured_through_seq(source, conn, _capture_gate(source, conn)[0])
+        conn.execute(
+            source.sql(
+                "INSERT INTO sync_export_runs "
+                "(target_env, run_id, package_id, started_at, heartbeat_at, "
+                "floor_seq) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (target_env) DO UPDATE SET "
+                "run_id = excluded.run_id, package_id = excluded.package_id, "
+                "started_at = excluded.started_at, "
+                "heartbeat_at = excluded.heartbeat_at, "
+                "floor_seq = excluded.floor_seq"
+            ),
+            (target_env, run_id, run_id, moment, moment, floor_seq),
+        )
+    return warnings
+
+
+def _refresh_export_lease(source: _Source, target_env: str, run_id: str) -> None:
+    """Push this run's ``heartbeat_at`` forward. Best effort: a failed
+    heartbeat must never take down an export that is otherwise fine -- the
+    worst it costs is that a LATER export may judge this lease dead, and the
+    conditional publish in ``_advance_watermark`` still refuses to let two
+    runs overwrite each other's watermark."""
+    try:
+        with source.write() as conn:
+            conn.execute(
+                source.sql(
+                    "UPDATE sync_export_runs SET heartbeat_at = ? "
+                    "WHERE target_env = ? AND run_id = ?"
+                ),
+                (
+                    _moment_for(source, datetime.now(timezone.utc)),
+                    target_env,
+                    run_id,
+                ),
+            )
+    except Exception:  # noqa: BLE001 - see the docstring
+        pass
+
+
+def _release_export_lease(source: _Source, target_env: str, run_id: str) -> None:
+    """Drop this run's lease. Best effort, and matched on ``run_id`` so a run
+    that was already declared dead and replaced cannot delete its
+    successor's row on the way out."""
+    try:
+        with source.write() as conn:
+            conn.execute(
+                source.sql(
+                    "DELETE FROM sync_export_runs "
+                    "WHERE target_env = ? AND run_id = ?"
+                ),
+                (target_env, run_id),
+            )
+    except Exception:  # noqa: BLE001 - an abort path must not raise again
+        pass
 
 
 # ------------------------------------------------------------------- export
@@ -819,20 +1056,37 @@ def _export(
 ) -> ExportReport:
     package_id = uuid.uuid4().hex
     exported_at = datetime.now(timezone.utc)
+    scoped = notebook_ids is not None
+    # Claimed BEFORE anything is read or created: a refused export must leave
+    # no staging directory and must not have touched the read snapshot. A
+    # scoped export takes no lease -- it is not on the chain (see
+    # _claim_export_lease).
+    warnings = [] if scoped else _claim_export_lease(
+        source, target_env, package_id, exported_at
+    )
     # The staging name is fixed before the window is known, because the
     # directory has to exist before the first byte is written; the FINAL name
     # carries the real ``from``/``to`` and is computed by _assemble. Keeping
     # the ``0-0`` spelling here also keeps the staging sweep's prefix/suffix
     # rule (``sync-<env>-...tmp``) matching what earlier versions left behind.
     staging_dir = out_dir / (package_dir_name(source_env, 0, 0, package_id) + ".tmp")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    warnings = _sweep_stale_staging(out_dir, source_env)
-    staging_dir.mkdir()
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        warnings.extend(_sweep_stale_staging(out_dir, source_env))
+        staging_dir.mkdir()
+    except BaseException:
+        if not scoped:
+            _release_export_lease(source, target_env, package_id)
+        raise
+    on_beat = (
+        None if scoped
+        else lambda: _refresh_export_lease(source, target_env, package_id)
+    )
     try:
         return _assemble(
             source,
             settings=settings,
-            writer=_PackageWriter(staging_dir),
+            writer=_PackageWriter(staging_dir, on_beat),
             target_env=target_env,
             source_env=source_env,
             notebook_ids=notebook_ids,
@@ -844,8 +1098,13 @@ def _export(
         )
     except BaseException:
         # A half-written package must never be left where the next run would
-        # sweep it and report it as someone else's crash.
+        # sweep it and report it as someone else's crash -- and the lease it
+        # was holding must not block the re-run either. The publish path
+        # deletes the lease in the SAME transaction as the watermark, so
+        # reaching here means it never published.
         shutil.rmtree(staging_dir, ignore_errors=True)
+        if not scoped:
+            _release_export_lease(source, target_env, package_id)
         raise
 
 
@@ -1293,15 +1552,26 @@ def _assemble(
     if not scoped:
         # ``to_seq``, not the raw observation: the package and the watermark
         # must name the same point, and that point may never move backwards.
-        captured, gate_warning = _advance_watermark(
-            source,
-            target_env,
-            package_id,
-            exported_at,
-            to_seq,
-            gate=gate,
-            snapshot=snapshot,
-        )
+        try:
+            captured, gate_warning = _advance_watermark(
+                source,
+                target_env,
+                package_id,
+                exported_at,
+                to_seq,
+                gate=gate,
+                snapshot=snapshot,
+                base_package_id=base_package_id,
+                run_id=package_id,
+            )
+        except SyncExportError:
+            # The package is on disk under its final name but no watermark
+            # names it, and nothing ever will -- a reader walking the chain
+            # by base_package_id would step straight past it. Remove it
+            # rather than leave a package that looks complete and is not
+            # reachable.
+            shutil.rmtree(final_dir, ignore_errors=True)
+            raise
         if gate_warning:
             run_warnings.append(gate_warning)
     return ExportReport(
@@ -1325,6 +1595,7 @@ def _assemble(
         and not any(produced.table_counts.values()),
         scoped=scoped,
         watermark_advanced=not scoped,
+        run_id="" if scoped else package_id,
         warnings=tuple(run_warnings),
         missing_files=tuple(missing_files),
     )

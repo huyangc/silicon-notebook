@@ -311,3 +311,132 @@ def test_a_scoped_export_leaves_the_watermark_alone_on_postgres(baseline):
 
     assert report.scoped is True and report.watermark_advanced is False
     assert _watermark(baseline["repo"]) == before
+
+
+# --------------------------------------------- publishing under contention
+
+
+def test_the_gate_row_is_locked_until_the_watermark_commits(baseline, monkeypatch):
+    """PostgreSQL's half of the same guarantee. SQLite serializes writers with
+    ``BEGIN IMMEDIATE``; here the lock that matters is a ROW lock on
+    ``sync_capture_control`` (``SELECT ... FOR UPDATE``), because taking
+    anything broader would serialize unrelated writers for the length of a
+    watermark commit. ``sync capture enable``/``disable`` both write that row,
+    so either they land before the re-read or they wait for the commit.
+
+    变异验证: 去掉 ``_capture_gate`` 的 ``FOR UPDATE``, 本条必须报红(探针的
+    UPDATE 立刻成功, 没有被挡住)。
+    """
+    import psycopg
+    from app.migration.sync import export as export_module
+
+    probes: list[str] = []
+    real_gate = export_module._capture_gate
+
+    def hooked(source, conn, *, lock=False):
+        gate = real_gate(source, conn, lock=lock)
+        if lock:
+            # Probed AFTER the FOR UPDATE has run and while the export's
+            # transaction is still open -- that is the whole window the lock
+            # exists to close.
+            with psycopg.connect(baseline["url"]) as other:
+                other.execute("SET LOCAL lock_timeout = '400ms'")
+                try:
+                    other.execute(
+                        "UPDATE sync_capture_control SET enabled = true "
+                        "WHERE singleton = 1"
+                    )
+                    other.commit()
+                    probes.append("acquired")
+                except psycopg.errors.LockNotAvailable as exc:
+                    probes.append(f"blocked: {exc}")
+        return gate
+
+    monkeypatch.setattr(export_module, "_capture_gate", hooked)
+
+    report = _export(baseline["settings"], baseline["out"])
+
+    assert probes, "the locked gate read never ran"
+    assert probes[0].startswith("blocked"), probes
+    assert report.captured is True
+
+
+def test_an_incremental_export_refuses_to_publish_over_a_moved_watermark_on_pg(
+    baseline, monkeypatch
+):
+    from app.migration.sync import export as export_module
+    from app.migration.sync.export import SyncExportError
+
+    repo = baseline["repo"]
+    base = _watermark(repo)["package_id"]
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET name=%s WHERE id=%s", ("alpha v2", baseline["alpha"])
+        )
+    real = export_module._advance_watermark
+
+    def hooked(*args, **kwargs):
+        with repo._write() as db:
+            db.execute(
+                "UPDATE sync_export_state SET package_id='another-export' "
+                "WHERE target_env=%s",
+                (TARGET_ENV,),
+            )
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(export_module, "_advance_watermark", hooked)
+    before = {path.name for path in baseline["out"].iterdir()}
+
+    with pytest.raises(SyncExportError) as failure:
+        _export(baseline["settings"], baseline["out"])
+
+    assert "watermark moved during export" in str(failure.value)
+    assert base in str(failure.value)
+    assert {path.name for path in baseline["out"].iterdir()} == before
+    assert _watermark(repo)["package_id"] == "another-export"
+
+
+# ------------------------------------------------------------ export lease
+
+
+def _lease(repo) -> dict:
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT * FROM sync_export_runs WHERE target_env=%s", (TARGET_ENV,)
+        ).fetchone()
+    return dict(row) if row is not None else {}
+
+
+def test_the_export_lease_round_trips_on_postgres(baseline):
+    """PostgreSQL's ``timestamptz``/``bigint`` shapes, and the ``FOR UPDATE``
+    on the lease row, go through the same claim/refresh/release path as
+    SQLite's TEXT/INTEGER ones. A live row refuses the second export; the
+    winner's row is gone once its watermark is published."""
+    from app.migration.sync.export import SyncExportError
+
+    repo = baseline["repo"]
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sync_export_runs(target_env, run_id, package_id, "
+            "started_at, heartbeat_at, floor_seq) "
+            "VALUES(%s, 'other-run', 'other-run', now(), now(), 0)",
+            (TARGET_ENV,),
+        )
+
+    with pytest.raises(SyncExportError) as failure:
+        _export(baseline["settings"], baseline["out"])
+    assert "already running" in str(failure.value)
+    assert _lease(repo)["run_id"] == "other-run"
+
+    with repo._write() as db:
+        db.execute(
+            "UPDATE sync_export_runs SET heartbeat_at = now() - interval '2 hours' "
+            "WHERE target_env = %s",
+            (TARGET_ENV,),
+        )
+
+    report = _export(baseline["settings"], baseline["out"])
+
+    assert [w for w in report.warnings if "dead export lease" in w]
+    assert _lease(repo) == {}
+    assert report.run_id == report.package_id
