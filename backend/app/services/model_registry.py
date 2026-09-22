@@ -252,10 +252,15 @@ WORKLOADS = workload_map(
 )
 
 
-# Prefix on the one aggregated binding diagnostic.  Startup matches on it to
-# tell "this deployment's [bindings] table is wrong" apart from every other
-# model-configuration failure, so keep it in sync with describe_binding_gap.
+# Prefix shared by the aggregated binding diagnostic in both of its renderings
+# (exception and log line), so an operator grepping a boot log finds the same
+# marker either way.  Startup tells this failure apart from every other
+# model-configuration failure by the EXCEPTION TYPE below, never by this text.
 BINDING_GAP_PREFIX = "model-bindings: "
+
+# A workload id as this code spells them.  Ids read back out of a deployment's
+# TOML are matched against it before they may appear in a log line.
+_LOGGABLE_ID_RE = re.compile(r"[a-z0-9_]{1,64}\Z")
 
 # Workload ids that once existed and may still appear in deployed
 # MODEL_SERVICES_CONFIG files ([bindings]/[thinking]) generated from earlier
@@ -319,6 +324,39 @@ _LEGACY_MODEL_ACTIVATION_VARS = (
     "RERANK_MODEL",
     "RERANK_API_STYLE",
 )
+
+
+class ModelBindingGapError(ValueError):
+    """The startup refusal: this deployment's [bindings]/[thinking] is wrong.
+
+    A ``ValueError`` subclass so every existing handler of a bad model
+    configuration keeps working unchanged. It exists as its own type because
+    the preflight has to tell THIS failure (refuse to start) apart from every
+    other loader failure (log and let the existing path decide) — a decision
+    that used to be made by matching the message prefix, which would break the
+    moment the wording changed.
+
+    It also carries the structured gap, because the two audiences need two
+    different renderings: ``str(exc)`` names the configured path and echoes the
+    file's ids verbatim, while :meth:`loggable` does neither.
+    """
+
+    def __init__(
+        self,
+        unbound: Sequence[str],
+        unknown: Mapping[str, Iterable[str]],
+        config_path: object,
+    ) -> None:
+        self._unbound = tuple(unbound)
+        self._unknown = {
+            workload_id: tuple(sorted(tables))
+            for workload_id, tables in unknown.items()
+        }
+        super().__init__(describe_binding_gap(unbound, unknown, config_path))
+
+    def loggable(self) -> str:
+        """The same diagnosis with no private path and no foreign key text."""
+        return loggable_binding_gap(self._unbound, self._unknown)
 
 
 class SystemModelServiceRegistry:
@@ -445,7 +483,7 @@ class SystemModelServiceRegistry:
 
         missing, unknown = binding_gap(bindings, unknown_ids)
         if (missing or unknown) and settings.model_bindings_strict:
-            raise ValueError(describe_binding_gap(missing, unknown_ids, path))
+            raise ModelBindingGapError(missing, unknown_ids, path)
         return cls(services, bindings, thinking_modes, unknown)
 
     def service(self, service_id: str) -> ModelServiceDefinition:
@@ -505,25 +543,19 @@ def binding_gap(
     )
 
 
-def describe_binding_gap(
+def _render_binding_gap(
     unbound: Sequence[str],
     unknown: Mapping[str, Iterable[str]],
-    config_path: object,
+    *,
+    where: str,
+    safe: bool,
 ) -> str:
-    """One readable line naming every half in full, with no secret material.
+    """Shared body of the two binding-gap renderings.
 
-    Deliberately one line and deliberately exhaustive: this is the message an
-    operator sees INSTEAD of a started service, so it has to be actionable on
-    its own — which ids to add, which to delete, in which table, in which file.
-    Only ids, their Chinese labels and the table names appear; the
-    configuration's URLs and api_key_env values never do.
-
-    Stale ids are split by ``RETIRED_WORKLOADS`` because the two halves need
-    opposite actions from the reader: a retired id means "your file predates
-    this upgrade, delete the line", while anything else is almost always a
-    typo the operator still has to find. Each id carries the table(s) it was
-    found in — an id that lives only in ``[thinking]`` cannot be fixed by
-    reading ``[bindings]``.
+    ``where`` is spliced into "请在 <where> [bindings]/[thinking] …" and carries
+    its own trailing 的 so each caller can get the spacing its phrasing needs.
+    ``safe`` decides whether ids that came out of the configuration file may be
+    echoed verbatim. See the two public wrappers for which is which.
     """
     def _listed(ids: list[str]) -> str:
         return "，".join(
@@ -534,6 +566,22 @@ def describe_binding_gap(
     stale = sorted(unknown)
     retired = [workload_id for workload_id in stale if workload_id in RETIRED_WORKLOADS]
     mistyped = [workload_id for workload_id in stale if workload_id not in RETIRED_WORKLOADS]
+    unprintable: list[str] = []
+    if safe:
+        # A TOML key is arbitrary text.  Only ids shaped like a workload id may
+        # be echoed; everything else collapses into one counted placeholder so
+        # a crafted key cannot inject punctuation, newlines or a path into a
+        # log line.  Retired ids come from OUR ledger, never from the file, so
+        # they are already known-safe.
+        unprintable = [
+            workload_id
+            for workload_id in mistyped
+            if not _LOGGABLE_ID_RE.fullmatch(workload_id)
+        ]
+        mistyped = [
+            workload_id for workload_id in mistyped if workload_id not in unprintable
+        ]
+
     segments: list[str] = []
     if unbound:
         segments.append("缺少绑定的工作负载：" + "，".join(
@@ -542,13 +590,79 @@ def describe_binding_gap(
         ))
     if retired:
         segments.append("已退役、升级后请删除的绑定：" + _listed(retired))
-    if mistyped:
-        segments.append("未知、疑似拼写错误的绑定：" + _listed(mistyped))
+    if mistyped or unprintable:
+        listed = _listed(mistyped)
+        if unprintable:
+            tables = sorted({
+                table
+                for workload_id in unprintable
+                for table in unknown[workload_id]
+            })
+            placeholder = (
+                f"<无法显示的键名>×{len(unprintable)}（{'/'.join(tables)}）"
+            )
+            listed = f"{listed}，{placeholder}" if listed else placeholder
+        segments.append("未知、疑似拼写错误的绑定：" + listed)
     return (
         BINDING_GAP_PREFIX
         + "；".join(segments)
-        + f"。请在 {config_path} 的 [bindings]/[thinking] 补齐/删除后重启；"
+        + f"。请在 {where} [bindings]/[thinking] 补齐/删除后重启；"
         "确需临时放行设 MODEL_BINDINGS_STRICT=false（仅告警）。"
+    )
+
+
+def describe_binding_gap(
+    unbound: Sequence[str],
+    unknown: Mapping[str, Iterable[str]],
+    config_path: object,
+) -> str:
+    """The EXCEPTION message: names the configuration file by absolute path.
+
+    This is what an operator sees INSTEAD of a started service, so it has to be
+    actionable on its own — which ids to add, which to delete, in which table,
+    in which file — and it echoes the offending ids exactly as the file spells
+    them so they can be found. It carries no credential material: only ids,
+    their Chinese labels, the table names and the configured path.
+
+    That path is precisely why this string must never reach the log. An
+    exception that terminates the process is allowed to name private paths; a
+    log line is not (AGENTS.md). ``loggable_binding_gap`` renders the same
+    content for that side.
+
+    Stale ids are split by ``RETIRED_WORKLOADS`` because the two halves need
+    opposite actions from the reader: a retired id means "your file predates
+    this upgrade, delete the line", while anything else is almost always a
+    typo the operator still has to find. Each id carries the table(s) it was
+    found in — an id that lives only in ``[thinking]`` cannot be fixed by
+    reading ``[bindings]``.
+    """
+    return _render_binding_gap(
+        unbound, unknown, where=f"{config_path} 的", safe=False
+    )
+
+
+def loggable_binding_gap(
+    unbound: Sequence[str], unknown: Mapping[str, Iterable[str]]
+) -> str:
+    """The LOG line: same diagnosis, nothing that came from outside the code.
+
+    Two differences from ``describe_binding_gap``, both required by AGENTS.md's
+    rule that private paths and exception text stay out of the log:
+
+    * the configured path is replaced by the setting's NAME, so the line says
+      which file to open without disclosing where it lives;
+    * stale ids, which are arbitrary keys copied out of that file, are echoed
+      only when they are shaped like a workload id; the rest collapse into one
+      counted ``<无法显示的键名>`` placeholder.
+
+    Workload ids and their labels are a closed, in-code vocabulary and are
+    always safe to name — naming them is the entire point of the diagnostic.
+    """
+    return _render_binding_gap(
+        unbound,
+        unknown,
+        where="MODEL_SERVICES_CONFIG 指向的文件的",
+        safe=True,
     )
 
 

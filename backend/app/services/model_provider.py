@@ -42,6 +42,7 @@ from app.core.model_safety import (
 from app.services.cancellation import AskCancelled
 from app.services.embedding import FakeEmbedder
 from app.services.model_registry import (
+    ModelBindingGapError,
     ModelServiceDefinition,
     SystemModelServiceRegistry,
     WorkloadSpec,
@@ -905,9 +906,13 @@ class RuntimeModelProvider:
                     raise ValueError("MODEL_SERVICES_CONFIG has no model services")
             except Exception as exc:
                 self._config_signature = signature
+                # A binding gap renders itself for the log: its exception text
+                # carries the configured absolute path and the file's own keys,
+                # neither of which may be logged (AGENTS.md).  Every other
+                # loader error keeps the pre-existing reporting.
                 logger.error(
                     "model service config reload rejected; keeping previous configuration: %s",
-                    exc,
+                    exc.loggable() if isinstance(exc, ModelBindingGapError) else exc,
                 )
                 try:
                     self.event_log.emit({

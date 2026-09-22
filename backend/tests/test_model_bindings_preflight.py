@@ -12,6 +12,7 @@ initialization failed」的 ValueError——运维既拿不到原因,也拿不�
 """
 import ast
 import inspect
+import json
 import logging
 
 import pytest
@@ -89,8 +90,14 @@ def test_empty_config_passes_because_offline_mode_is_a_supported_runtime():
 def test_a_missing_binding_logs_the_message_and_refuses_to_build_the_app(
     monkeypatch, tmp_path, caplog
 ):
+    """异常带路径、日志不带:两个面同样可读,披露范围不同。
+
+    AGENTS.md 禁止 private path 与 exception text 进日志。终止进程的异常不是
+    日志,它要带上文件路径好让运维直接去改;写进日志的那行只说设置项名。
+    """
     monkeypatch.setenv("PREFLIGHT_KEY", "secret")
-    settings = _settings(_config(tmp_path, omit={"kg_glean", "memory_embedding"}))
+    config = _config(tmp_path, omit={"kg_glean", "memory_embedding"})
+    settings = _settings(config)
 
     with caplog.at_level(logging.ERROR, logger="silicon_notebook.startup"):
         with pytest.raises(ValueError) as exc_info:
@@ -99,10 +106,18 @@ def test_a_missing_binding_logs_the_message_and_refuses_to_build_the_app(
     message = str(exc_info.value)
     assert "知识补充抽取（kg_glean）" in message
     assert "记忆向量（memory_embedding）" in message
-    # 异常会被 uvicorn 打成 traceback,但运维往上翻要能一眼看到原因:日志里必须
-    # 有同一条整句,而不是只剩一个 ValueError 的类名。
+    assert config in message
+
+    # 运维往上翻要能一眼看到原因,所以日志里同样点名到工作负载(封闭词表,可记)。
     logged = [record.getMessage() for record in caplog.records]
-    assert any("kg_glean" in line and "memory_embedding" in line for line in logged)
+    assert len(logged) == 1
+    assert "知识补充抽取（kg_glean）" in logged[0]
+    assert "记忆向量（memory_embedding）" in logged[0]
+    assert "MODEL_SERVICES_CONFIG 指向的文件" in logged[0]
+    # 日志既不带配置路径,也不带异常整句。
+    assert config not in logged[0]
+    assert str(tmp_path) not in logged[0]
+    assert message not in logged[0]
 
 
 def test_a_stale_binding_alone_is_enough_to_refuse(monkeypatch, tmp_path):
@@ -111,6 +126,38 @@ def test_a_stale_binding_alone_is_enough_to_refuse(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="graph_chain_verify"):
         _model_bindings_preflight(settings)
+
+
+def test_a_stale_key_that_is_not_shaped_like_an_id_never_reaches_the_log(
+    monkeypatch, tmp_path, caplog
+):
+    """陈旧 id 是配置文件里的任意 TOML 键,不能原样进日志。
+
+    合法形状的键(`ask_anwser`)照记——运维要靠它找到那一行;带引号/空格/换行
+    /路径的键会折叠成一个计数占位符,否则一个精心构造的键就能往日志里注入
+    标点、换行甚至一条假日志行。异常那一面不做这个折叠:它要如实说出文件里
+    写的是什么。
+    """
+    monkeypatch.setenv("PREFLIGHT_KEY", "secret")
+    hostile = '/etc/silicon/secret.toml\nERROR fake line'
+    settings = _settings(_config(
+        tmp_path,
+        extra=f'ask_anwser = "chat"\n{json.dumps(hostile)} = "chat"\n',
+    ))
+
+    with caplog.at_level(logging.ERROR, logger="silicon_notebook.startup"):
+        with pytest.raises(ValueError) as exc_info:
+            _model_bindings_preflight(settings)
+
+    assert hostile in str(exc_info.value)
+
+    logged = [record.getMessage() for record in caplog.records]
+    assert len(logged) == 1
+    assert "ask_anwser（[bindings]）" in logged[0]
+    assert "<无法显示的键名>×1（[bindings]）" in logged[0]
+    assert "secret.toml" not in logged[0]
+    assert "ERROR fake line" not in logged[0]
+    assert "\n" not in logged[0]
 
 
 def test_the_escape_hatch_downgrades_the_refusal_to_a_started_service(
@@ -132,16 +179,24 @@ def test_other_model_configuration_errors_stay_on_their_existing_path(
 ):
     """本次改动不扩大拒启范围:密钥缺失仍由既有路径决定失败时机。
 
-    预检只补一行可读日志就放行——重新抛出的只有绑定表的问题。把「TOML 语法
-    错」「密钥没填」也在这里拒掉会改变一批既有部署的失败形态,属于另一件事。
+    预检只记一行**固定文案**就放行——重新抛出的只有绑定表的问题。这里的异常
+    文本可能带路径、服务 id、api_key_env 名甚至文件片段,所以一个字都不进日志
+    (AGENTS.md);完整原因随异常走既有路径。把「TOML 语法错」「密钥没填」也在
+    这里拒掉会改变一批既有部署的失败形态,属于另一件事。
     """
     monkeypatch.delenv("PREFLIGHT_KEY", raising=False)
-    settings = _settings(_config(tmp_path))
+    config = _config(tmp_path)
+    settings = _settings(config)
 
     with caplog.at_level(logging.ERROR, logger="silicon_notebook.startup"):
         assert _model_bindings_preflight(settings) is None
 
-    assert any("PREFLIGHT_KEY" in r.getMessage() for r in caplog.records)
+    logged = [record.getMessage() for record in caplog.records]
+    assert logged == [
+        "模型服务配置无效（MODEL_SERVICES_CONFIG 指向的文件解析失败），详情见异常信息"
+    ]
+    assert "PREFLIGHT_KEY" not in logged[0]
+    assert config not in logged[0]
 
 
 def _create_app_tree() -> ast.FunctionDef:

@@ -190,11 +190,18 @@ def _model_bindings_preflight(settings: Settings) -> None:
     为什么在这里而不是等仓库构造时抛:`run_startup` 把任何异常都收进 readiness,
     进程照样活着、对外 503,日志里只剩一句被脱敏成「database initialization
     failed」的 ValueError——运维既拿不到原因也拿不到非零退出码。放在 create_app
-    里,同一条 `SystemModelServiceRegistry.load` 先跑一遍:消息原样进日志,异常
-    继续往上抛,uvicorn 起不来并以非零码退出。
+    里,同一条 `SystemModelServiceRegistry.load` 先跑一遍:异常继续往上抛,
+    uvicorn 起不来并以非零码退出,同时往日志里补一行可读的原因。
 
-    只有绑定表的问题会重新抛出。其余模型配置错误(密钥缺失、TOML 语法等)在这里
-    只补一行可读日志,仍由既有路径决定失败时机——这次改动不扩大拒启的范围。
+    **异常与日志是两个面,内容刻意不同**(AGENTS.md:private paths、exception
+    text 不进日志)。终止进程的那个异常保留完整消息,含 MODEL_SERVICES_CONFIG
+    的绝对路径和文件里原样的陈旧 id——它是异常不是日志,而且运维要拿它去改文件。
+    写进日志的是 `loggable()`:同一份诊断,但只说设置项名不说路径,且来自配置文件
+    的键名必须长得像 workload id 才原样记,否则折叠成 `<无法显示的键名>`。
+
+    只有绑定表的问题会重新抛出(靠 `ModelBindingGapError` 这个类型判定,不靠
+    匹配消息文本)。其余模型配置错误(密钥缺失、TOML 语法等)在这里只记一行固定
+    文案、不带异常文本,仍由既有路径决定失败时机——这次改动不扩大拒启的范围。
 
     作用范围要留意:`app = create_app()` 是模块级的(这正是 `uvicorn
     app.main:app` 必定触发预检的原因),所以任何 `import app.main` 都会跑这个
@@ -203,17 +210,22 @@ def _model_bindings_preflight(settings: Settings) -> None:
     `scripts/check*.sh` 已经 export 空的 MODEL_SERVICES_CONFIG,不受影响。
     """
     from app.services.model_registry import (
-        BINDING_GAP_PREFIX,
+        ModelBindingGapError,
         SystemModelServiceRegistry,
     )
 
     try:
         SystemModelServiceRegistry.load(settings)
-    except ValueError as exc:
-        message = str(exc)
-        logger.error("模型服务配置无效：%s", message)
-        if message.startswith(BINDING_GAP_PREFIX):
-            raise
+    except ModelBindingGapError as exc:
+        logger.error("%s", exc.loggable())
+        raise
+    except ValueError:
+        # 固定文案:loader 的其它 ValueError 可能带路径、服务 id、api_key_env
+        # 名甚至文件片段,一律不进日志;完整原因随异常走既有路径。
+        logger.error(
+            "模型服务配置无效（MODEL_SERVICES_CONFIG 指向的文件解析失败），"
+            "详情见异常信息"
+        )
 
 
 def create_app() -> FastAPI:
