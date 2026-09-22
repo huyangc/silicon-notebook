@@ -37,12 +37,29 @@ from __future__ import annotations
 import base64
 import json
 import re
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
 # Bumped only when the layout or encoding below changes incompatibly; import
 # preflight rejects a package whose format_version it does not know.
-PACKAGE_FORMAT_VERSION = 1
+#
+# 2 (PR-3b): ``manifest.json`` gains ``mode``, ``base_package_id``,
+# ``deleted_notebooks``, ``deletes`` and ``kg_epochs``, and ``from_seq``/
+# ``to_seq`` stop being hard-wired zeros -- a v2 ``mode=full`` package now
+# carries the change-log watermark this export saw. The ROW ENCODING and the
+# directory layout are byte-for-byte what v1 had, so a v2 full package is a v1
+# full package plus manifest fields; what a v1 reader could not do is tell a
+# full package from an incremental one, which is exactly why the version moved.
+PACKAGE_FORMAT_VERSION = 2
+
+# ``manifest.mode``. A full package reconciles the notebooks it names (the
+# importer deletes target rows the package does not carry); an incremental one
+# carries only the window's final states plus ``deletes.jsonl`` and must never
+# be replayed as a reconciliation -- see ``import_._reject_incremental_payload``
+# until PR-3c teaches the importer to apply one.
+MODE_FULL = "full"
+MODE_INCREMENTAL = "incremental"
 
 MANIFEST_NAME = "manifest.json"
 CHECKSUMS_NAME = "checksums.json"
@@ -208,6 +225,64 @@ def is_safe_relative_path(value: str) -> bool:
     if len(value) >= 2 and value[1] == ":":
         return False
     return all(is_safe_path_segment(segment) for segment in value.split("/"))
+
+
+def delete_entry(
+    table: str,
+    key: Mapping[str, Any],
+    notebook_id: str | None,
+    parent_key: str | None,
+) -> dict[str, Any]:
+    """One ``deletes.jsonl`` line: the row identity the source dropped inside
+    this package's window, plus what the exporter could say about where it
+    belonged (docs/incremental-sync-design.md §8).
+
+    ``key`` is the row's synchronization key as a column -> value mapping, the
+    same shape ``sync_change_log.key_json`` carries -- NOT a positional tuple,
+    because the two backends spell that JSON object's key order differently
+    (SQLite ``json_object`` keeps the declaration order, PostgreSQL ``jsonb``
+    normalizes it) and a reader must be able to match by column name rather
+    than by position.
+
+    ``notebook_id`` is deliberately nullable: a PARENT-scoped row whose parent
+    chain was deleted in the same window has no notebook left to resolve to,
+    and the exporter records that honestly instead of guessing (§7 "归属";
+    PR-3c resolves such an orphan delete against the TARGET's parent chain).
+    ``parent_key`` carries the change log's own ``parent_key`` so PR-3c has
+    something to resolve WITH.
+    """
+    return {
+        "table": table,
+        "key": dict(key),
+        "notebook_id": notebook_id or None,
+        "parent_key": parent_key or None,
+    }
+
+
+def read_delete_entry(payload: Any) -> tuple[str, dict[str, Any], str | None, str | None]:
+    """Inverse of ``delete_entry``: ``(table, key, notebook_id, parent_key)``.
+
+    Refuses anything that is not the exact shape written above rather than
+    filling in defaults -- a ``deletes.jsonl`` line is an instruction to
+    DELETE rows at the target, so a line this reader cannot fully understand
+    must stop the import, never be applied with a guessed table or an empty
+    key (which would match every row).
+    """
+    if not isinstance(payload, dict):
+        raise ValueError(f"delete entry is not a JSON object: {payload!r}")
+    table = payload.get("table")
+    key = payload.get("key")
+    if not isinstance(table, str) or not table:
+        raise ValueError(f"delete entry has no table: {payload!r}")
+    if not isinstance(key, dict) or not key:
+        raise ValueError(f"delete entry for {table!r} has no key: {payload!r}")
+    notebook_id = payload.get("notebook_id")
+    parent_key = payload.get("parent_key")
+    if notebook_id is not None and not isinstance(notebook_id, str):
+        raise ValueError(f"delete entry for {table!r} has a non-text notebook_id")
+    if parent_key is not None and not isinstance(parent_key, str):
+        raise ValueError(f"delete entry for {table!r} has a non-text parent_key")
+    return table, dict(key), notebook_id or None, parent_key or None
 
 
 def encode_row(row: dict[str, Any]) -> dict[str, Any]:

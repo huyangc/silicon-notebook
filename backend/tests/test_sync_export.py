@@ -1,6 +1,5 @@
-"""守卫: 按笔记本的全量导出器 (app.migration.sync.export) 与包格式
-(app.migration.sync.package)。对应 docs/incremental-sync-design.md §8 的
-``from_seq = 0`` 特例。
+"""守卫: 全量导出路径 (app.migration.sync.export 的表扫描那一支) 与包格式
+(app.migration.sync.package)。增量那一支在 tests/test_sync_incremental.py。
 
 本文件是 SQLite 泳道；PostgreSQL 泳道在 tests/postgres/test_sync_export_pg.py,
 那边盯的是两端行编码的差异(jsonb → 文本、timestamptz → UTC ISO 文本、bytea →
@@ -21,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from app.core.config import Settings
+from app.migration.sync import database as database_module
 from app.migration.sync import export as export_module
 from app.migration.sync.export import (
     ExportReport,
@@ -588,7 +588,7 @@ def test_sync_key_refuses_when_a_registered_key_disagrees_with_the_catalog_pk(
         real_sources_spec, key=("not_a_real_key_column",)
     )
     monkeypatch.setattr(
-        export_module,
+        database_module,
         "spec_for",
         lambda table: bogus_sources_spec if table == "sources" else real_spec_for(table),
     )
@@ -625,7 +625,7 @@ def test_sync_key_refuses_a_registered_key_that_only_reorders_the_catalog_pk(
         real_spec, key=("element_id", "notebook_id", "chunk_id")
     )
     monkeypatch.setattr(
-        export_module,
+        database_module,
         "spec_for",
         lambda table: reordered if table == "chunk_elements" else real_spec_for(table),
     )
@@ -748,12 +748,20 @@ def test_snapshot_xmin_reads_the_first_field(snapshot, expected):
         "100:xyz:",
         "100:200:300,bad",
         "100:200: 300",
+        # Non-ASCII digits. ``str.isdigit()`` is True for both of these, and
+        # ``int()`` accepts only the second -- so a field-by-field isdigit()
+        # check would have let "²:0:" through and then raised a bare
+        # ValueError out of snapshot_xmin instead of SyncExportError, while
+        # "١٢:5:" would have been silently accepted as xmin=12.
+        "²:0:",
+        "١٢:5:",
     ],
 )
 def test_snapshot_xmin_refuses_anything_that_is_not_a_snapshot(snapshot):
     """A watermark row whose snapshot text is corrupt must stop the export,
-    not silently yield a bound that would skip changes: every field is
-    checked, not just the one that gets returned."""
+    not silently yield a bound that would skip changes: the whole string is
+    matched against the ASCII-decimal grammar, not just the field that gets
+    returned, and the failure is always ``SyncExportError``."""
     with pytest.raises(SyncExportError):
         export_module._Source.snapshot_xmin(snapshot)
 
@@ -817,12 +825,12 @@ def test_global_scope_registry_tracks_the_manifest():
         and spec.scope is not None
         and spec.scope.kind is ScopeKind.GLOBAL
     }
-    assert set(export_module._GLOBAL_SCOPES) == manifest_global
+    assert set(database_module._GLOBAL_SCOPES) == manifest_global
 
 
 def test_every_global_scope_names_a_key_set_that_exists():
-    named = {key_set for _column, key_set in export_module._GLOBAL_SCOPES.values()}
-    assert named == set(export_module._GLOBAL_KEY_QUERIES), (
+    named = {key_set for _column, key_set in database_module._GLOBAL_SCOPES.values()}
+    assert named == set(database_module._GLOBAL_KEY_QUERIES), (
         "a GLOBAL table pointing at a key set with no query would silently "
         "export zero rows"
     )
@@ -1199,7 +1207,10 @@ def test_a_failed_export_leaves_no_staging_directory(seeded, tmp_path, monkeypat
 
 
 def test_export_writes_the_target_watermark(seeded, tmp_path):
-    report = _export(seeded["settings"], tmp_path / "out", [seeded["exported"]])
+    """An UNSCOPED export -- ``notebook_ids=None`` -- is the only kind that
+    advances the watermark. A ``--notebook`` export deliberately does not;
+    that is pinned separately in tests/test_sync_incremental.py."""
+    report = _export(seeded["settings"], tmp_path / "out", None)
 
     with seeded["repo"]._connect() as db:
         row = db.execute(
@@ -1208,11 +1219,25 @@ def test_export_writes_the_target_watermark(seeded, tmp_path):
     assert row is not None
     assert row["exported_through_seq"] == 0
     assert row["package_id"] == report.package_id
+    assert report.watermark_advanced is True
+    assert report.scoped is False
     # The capture gate is off by default on every freshly migrated database
     # (app.migration.sync.capture's own docstring): there is nothing safe to
     # call "captured through" yet, so both the report and the watermark it
     # wrote must read 0, never a stale high-water mark.
     assert report.captured_through_seq == 0
+    assert row["captured"] == 0
+    assert row["exported_snapshot"] is None
+
+    # The contrast: a scoped export of the same database leaves this row
+    # untouched rather than restamping it with its own package id.
+    scoped = _export(seeded["settings"], tmp_path / "scoped-out", [seeded["exported"]])
+    assert scoped.watermark_advanced is False
+    with seeded["repo"]._connect() as db:
+        after = db.execute(
+            "SELECT package_id FROM sync_export_state WHERE target_env=?", (TARGET_ENV,)
+        ).fetchone()
+    assert after["package_id"] == report.package_id
 
 
 def test_export_watermark_reads_the_change_log_high_water_mark_when_the_gate_is_open(
@@ -1235,15 +1260,20 @@ def test_export_watermark_reads_the_change_log_high_water_mark_when_the_gate_is_
                 (MOMENT,),
             )
 
-    report = _export(seeded["settings"], tmp_path / "out", [seeded["exported"]])
+    report = _export(seeded["settings"], tmp_path / "out", None)
 
     assert report.captured_through_seq == 4
+    assert report.to_seq == 4
     with seeded["repo"]._connect() as db:
         row = db.execute(
-            "SELECT exported_through_seq FROM sync_export_state WHERE target_env=?",
+            "SELECT exported_through_seq, captured FROM sync_export_state "
+            "WHERE target_env=?",
             (TARGET_ENV,),
         ).fetchone()
     assert row["exported_through_seq"] == 4
+    # The gate was open for this export, so the watermark is one an
+    # incremental window may resume from (v85/0065's ``captured``).
+    assert row["captured"] == 1
 
 
 def test_export_watermark_ignores_change_log_rows_written_after_the_snapshot(
@@ -1299,8 +1329,8 @@ def test_export_watermark_ignores_change_log_rows_written_after_the_snapshot(
 
 
 def test_a_second_full_export_overwrites_the_watermark(seeded, tmp_path):
-    first = _export(seeded["settings"], tmp_path / "out", [seeded["exported"]])
-    second = _export(seeded["settings"], tmp_path / "out", [seeded["exported"]])
+    first = _export(seeded["settings"], tmp_path / "out", None)
+    second = _export(seeded["settings"], tmp_path / "out", None)
 
     assert second.package_id != first.package_id
     assert second.mode == "full"
@@ -1330,7 +1360,7 @@ def test_keyset_paging_covers_every_row_exactly_once(seeded, tmp_path, monkeypat
                  "", "[]", MOMENT),
             )
 
-    monkeypatch.setattr(export_module, "_PAGE_ROWS", 4)
+    monkeypatch.setattr(database_module, "_PAGE_ROWS", 4)
     report = _export(seeded["settings"], tmp_path / "out", [notebook])
     ids = [row["id"] for row in _rows(report.package_dir, "chunks")]
     expected = _count(repo, "SELECT COUNT(*) FROM chunks WHERE notebook_id=?", (notebook,))
@@ -1344,7 +1374,7 @@ def test_keyset_paging_covers_every_row_exactly_once(seeded, tmp_path, monkeypat
 def test_a_page_sized_export_still_matches_a_single_page_one(seeded, tmp_path, monkeypatch):
     """Paging must not change the bytes: the same rows in the same order."""
     whole = _export(seeded["settings"], tmp_path / "whole", [seeded["exported"]])
-    monkeypatch.setattr(export_module, "_PAGE_ROWS", 1)
+    monkeypatch.setattr(database_module, "_PAGE_ROWS", 1)
     paged = _export(seeded["settings"], tmp_path / "paged", [seeded["exported"]])
 
     assert {t: e["sha256"] for t, e in _manifest(whole.package_dir)["tables"].items()} == {

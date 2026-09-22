@@ -891,6 +891,9 @@ def test_verify_package_paths_rejects_an_unsafe_notebook_id():
         created_at=MOMENT,
         from_seq=0,
         to_seq=0,
+        mode="full",
+        base_package_id="",
+        deleted_notebooks=(),
         embed_runtime_dim=1,
         sqlite_version=1,
         postgres_version=1,
@@ -930,6 +933,9 @@ def test_checksums_json_with_a_traversal_path_is_refused():
         created_at=MOMENT,
         from_seq=0,
         to_seq=0,
+        mode="full",
+        base_package_id="",
+        deleted_notebooks=(),
         embed_runtime_dim=1,
         sqlite_version=1,
         postgres_version=1,
@@ -1207,25 +1213,33 @@ def test_an_incremental_payload_is_refused_by_this_build(source, target, package
     assert "full packages only" in str(failure.value)
 
 
-def test_a_nonzero_seq_range_is_refused_even_with_empty_deletes_and_epochs(
+def test_an_incremental_mode_package_is_refused_with_empty_deletes_and_epochs(
     source, target, package
 ):
-    """codex #772 r18 P2. This build (PR-2) imports full snapshots only. A
-    package's ``deletes.jsonl``/``kg_epochs.jsonl`` being empty is not proof
-    of that -- an exporter (or a hand-crafted package) can carry a non-zero
-    ``from_seq``/``to_seq`` range with nothing in either incremental payload
-    file. Every downstream phase (declaration, table apply, file swap) treats
-    an imported package as a full reconciliation of the notebook, so
-    importing such a package as one would silently drop everything the
-    source wrote outside the claimed range. ``manifest.json`` is not itself
-    checksummed (see ``test_an_embedding_dimension_mismatch_is_refused``
-    above), so this needs no ``_reseal``.
+    """codex #772 r18 P2, restated for format 2. This build imports full
+    snapshots only, and a package's ``deletes.jsonl``/``kg_epochs.jsonl``
+    being empty is not proof that it is one -- an exporter (or a hand-crafted
+    package) can declare ``mode=incremental`` with nothing in either
+    incremental payload file. Every downstream phase (declaration, table
+    apply, file swap) treats an imported package as a full reconciliation of
+    the notebook, so importing such a package as one would silently drop
+    everything the source wrote outside the claimed range. ``manifest.json``
+    is not itself checksummed (see
+    ``test_an_embedding_dimension_mismatch_is_refused`` above), so this needs
+    no ``_reseal``.
 
-    变异验证: 去掉 ``_reject_incremental_payload`` 里的 ``from_seq``/``to_seq``
+    What is NOT a signal any more: ``to_seq > 0``. A v2 FULL package carries
+    the change-log watermark its export saw, which is exactly what lets the
+    next export be incremental -- see the sibling test below.
+
+    变异验证: 去掉 ``_reject_incremental_payload`` 里的 ``mode``/``from_seq``
     断言,本条必须报红(目标端把这个包当全量对账接收)。
     """
     document = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))
-    document["to_seq"] = 5
+    document["mode"] = "incremental"
+    document["from_seq"] = 6
+    document["to_seq"] = 11
+    document["base_package_id"] = "base-pkg-1"
     (package / MANIFEST_NAME).write_text(
         json.dumps(document, ensure_ascii=False, sort_keys=True), encoding="utf-8"
     )
@@ -1233,8 +1247,54 @@ def test_a_nonzero_seq_range_is_refused_even_with_empty_deletes_and_epochs(
     with pytest.raises(SyncImportError) as failure:
         _import(target, package)
 
-    assert "from_seq/to_seq" in str(failure.value)
+    message = str(failure.value)
+    assert "incremental" in message
+    assert "base-pkg-1" in message
+    assert "from_seq=6" in message and "to_seq=11" in message
     assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 0
+
+
+def test_a_full_v2_package_with_a_captured_watermark_still_imports(
+    source, target, package
+):
+    """The other half of the rule above: from format 2 on, a FULL package
+    records the change-log watermark its export saw in ``to_seq``, so a
+    non-zero ``to_seq`` must NOT be refused. Refusing it would make every
+    package produced by a source with change capture turned on unimportable.
+
+    变异验证: 把 ``_reject_incremental_payload`` 的判据改回 ``to_seq != 0``,
+    本条必须报红。
+    """
+    document = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert document["mode"] == "full"
+    document["to_seq"] = 42
+    (package / MANIFEST_NAME).write_text(
+        json.dumps(document, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+    )
+
+    report = _import(target, package)
+
+    assert report.notebooks
+    assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == len(
+        report.notebooks
+    )
+
+
+def test_an_unknown_manifest_mode_is_refused(source, target, package):
+    """A mode this build does not know is refused outright rather than
+    falling through to the full path: ``manifest.json`` is not checksummed,
+    so an unrecognized value is either a newer exporter or a tampered file,
+    and both are reasons to stop."""
+    document = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))
+    document["mode"] = "partial"
+    (package / MANIFEST_NAME).write_text(
+        json.dumps(document, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+    )
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, package)
+
+    assert "partial" in str(failure.value)
 
 
 def test_a_notebook_the_target_owns_locally_is_never_overwritten(
