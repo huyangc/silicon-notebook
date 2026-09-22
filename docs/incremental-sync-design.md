@@ -311,8 +311,9 @@ SQLite v84 / PostgreSQL 0064）；按日志读增量、压缩、`deletes`/`kg_ep
 门同样按受影响行数各评估一次。shadow 迁移的批量 `bulk_copy` 走 PostgreSQL 的 `COPY`，行触发器
 会逐行执行，COPY 复制大表时这个逐行代价按行数线性累加。
 
-实测（2026-09-23，本机，`chunks` 表 20000 行 `executemany` 批量插入，3 次取中位数；脚本未入
-库，一次性测量）：
+实测（2026-09-23，本机 macOS 27.0 arm64，SQLite 3.53.2 / PostgreSQL 16.15，`chunks` 表 20000 行
+`executemany` 批量插入，3 次取中位数；脚本 `scripts/measure_sync_capture_cost.py --backend sqlite|postgres`
+可复跑，输出自带平台与后端版本）：
 
 | 状态 | SQLite | PostgreSQL |
 | --- | --- | --- |
