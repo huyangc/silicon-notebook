@@ -105,6 +105,12 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     # 之前,否则 None 先吞掉 rebuild,把它误归一成 understanding/{id}。
     ("understanding",),
     ("understanding", "rebuild"),
+    # 检索经验(Agentic Memory P2·PR-2)。同样是固定字面量,必须与 "rebuild"
+    # 一样排在通配 None 末段之前,否则 "experiences" 会被当成一个 label 打成
+    # understanding/{id}。三段那条("experiences","distill")也要单列——末段是
+    # 字面量,路径里没有任何用户内容,整条可原样进诊断快照。
+    ("understanding", "experiences"),
+    ("understanding", "experiences", "distill"),
     ("understanding", None),
     # Agent 观察管理(Agentic Memory P3-T5)。固定字面量单段:GET 的 limit 与
     # DELETE 的 agent_profile_id 都在查询串里,路径本身无用户内容,整条可原样

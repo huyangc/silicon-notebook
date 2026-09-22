@@ -635,6 +635,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.analysis_issue_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.content_overview_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.extension_toggle_repository', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.global_ask_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.group_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.identity_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.memory_preview_client', kind='attribute', target='_runtime'),
@@ -644,8 +645,10 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_access_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_catalog_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_delete_repository', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_question_suggestions_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_sharing_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_store_port', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.retrieval_experience_jobs_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.wish_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='_runtime'),
@@ -653,6 +656,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>._optimize_knowhow_cell', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>._prepare_complete_knowhow_row', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.optimize_knowhow_cell_stream', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/mcp_tools/_shared.py', scope='<module>.refuse_if_mirrored', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/mcp_tools/maintenance.py', scope='<module>.register_maintenance_tools.build_kg.run', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._report_llm_ready', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.export_reports_endpoint', kind='attribute', target='_runtime'),
@@ -2989,6 +2993,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/mcp_tools/_shared.py', scope='<module>._live_principal', kind='attribute', target='refresh_agent_principal'),
+            ConsumerSite(path='backend/app/api/mcp_tools/global_ask.py', scope='<module>._authorize', kind='attribute', target='refresh_agent_principal'),
         ),
         patches=(
         ),
@@ -3233,6 +3238,16 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.maintenance.<lambda>', kind='attribute', target='retrieval'),
             ConsumerSite(path='scripts/reflect_shadow_rig.py', scope='<module>._search_corpus_facts', kind='attribute', target='retrieval'),
             ConsumerSite(path='scripts/replay_retrieval.py', scope='<module>.record_run', kind='attribute', target='retrieval'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='retrieval_experiences',
+        owner='RepositoryRuntime.retrieval_experiences',
+        kind='property',
+        consumers=(
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.retrieval_experience_store', kind='attribute', target='retrieval_experiences'),
         ),
         patches=(
         ),

@@ -463,7 +463,7 @@
     "owner": "NotebookStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', *, guard_name, name: 'str', purpose: 'str') -> 'None'"
+    "signature": "(self, notebook_id: 'str', *, guard_name, guard_generation: 'int', name: 'str', purpose: 'str') -> 'None'"
   },
   "_as_retrieved": {
     "consumers": [
@@ -1545,6 +1545,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
+        "scope": "<module>.global_ask_service",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
         "scope": "<module>.group_repository",
         "target": "_runtime"
       },
@@ -1599,6 +1605,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
+        "scope": "<module>.notebook_question_suggestions_service",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
         "scope": "<module>.notebook_sharing_repository",
         "target": "_runtime"
       },
@@ -1606,6 +1618,12 @@
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
         "scope": "<module>.notebook_store_port",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
+        "scope": "<module>.retrieval_experience_jobs_service",
         "target": "_runtime"
       },
       {
@@ -1648,6 +1666,12 @@
         "kind": "attribute",
         "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.optimize_knowhow_cell_stream",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/_shared.py",
+        "scope": "<module>.refuse_if_mirrored",
         "target": "_runtime"
       },
       {
@@ -9076,6 +9100,12 @@
         "path": "backend/app/api/mcp_tools/_shared.py",
         "scope": "<module>._live_principal",
         "target": "refresh_agent_principal"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/global_ask.py",
+        "scope": "<module>._authorize",
+        "target": "refresh_agent_principal"
       }
     ],
     "kind": "method",
@@ -9877,6 +9907,21 @@
     ],
     "kind": "property",
     "owner": "RetrievalService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self)"
+  },
+  "retrieval_experiences": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
+        "scope": "<module>.retrieval_experience_store",
+        "target": "retrieval_experiences"
+      }
+    ],
+    "kind": "property",
+    "owner": "RepositoryRuntime.retrieval_experiences",
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self)"

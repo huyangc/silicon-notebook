@@ -314,6 +314,20 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "（正在整理，请稍候），无插值、无异常原文；真实响应由"
         "test_agent_profile_routes.py 的忙碌 409 与关闸 409 用例覆盖（断言逐字文案）。"
     ),
+    "app/api/agent_profile_routes.py::distill_notebook_experiences": (
+        "四处动态 detail 全是本文件顶部维护的中文模块常量,无插值、无异常原文:"
+        "_EXPERIENCE_DISABLED_MESSAGE(这项功能当前未开启，暂时无法整理)、"
+        "_REBUILD_BUSY_MESSAGE(正在整理，请稍候——与 rebuild_understanding 共用"
+        "同一句,「已经有一次整理在跑」对按按钮的人是同一件事)、"
+        "_EXPERIENCE_COOLDOWN_MESSAGE(刚整理过，暂时没有新的提问，请稍后再试)、"
+        "_EXPERIENCE_UNAVAILABLE_MESSAGE(无法开始整理，请刷新页面后重试)。"
+        "派发是一串**逐支 if**,不是查表:哪一支给哪一句在 AST 上看得见;而"
+        "「漏掉 distill_now 的某一种结果」由同文件的 import 期断言"
+        "_HANDLED_DISTILL_OUTCOMES == MANUAL_DISTILL_OUTCOMES 挡住。抽成常量而不"
+        "内联字面量,与同文件其余四个端点同一条理由——同一句用户文案只留一份。"
+        "真实响应由 test_agent_profile_routes.py 的忙碌 409、冷却 409(含「有新提问"
+        "即放行」)与关闸 409 三条用例覆盖(断言 X-User-Message + 逐字文案)。"
+    ),
     "app/api/agent_profile_routes.py::clear_agent_observations": (
         "唯一动态 detail 是与 update_understanding_block 等三个端点共享的同一个中文"
         "模块常量 _DISABLED_MESSAGE（这项功能当前未开启，暂时无法编辑），无插值、"

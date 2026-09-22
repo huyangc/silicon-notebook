@@ -116,6 +116,7 @@ from app.services.retrieval_experience_job import (
     MANUAL_DISTILL_COOLDOWN,
     MANUAL_DISTILL_DISABLED,
     MANUAL_DISTILL_INVALID,
+    MANUAL_DISTILL_OUTCOMES,
     MANUAL_DISTILL_STARTED,
     distillation_wiring_active,
 )
@@ -138,19 +139,26 @@ _EXPERIENCE_DISABLED_MESSAGE = "这项功能当前未开启，暂时无法整理
 #: 「刚整理过」与「没有新的提问」两件事——只说前者,用户会以为再等一会就能按;
 #: 只说后者,他会以为自己刚才那次提问没被记下。
 _EXPERIENCE_COOLDOWN_MESSAGE = "刚整理过，暂时没有新的提问，请稍后再试"
-#: ``distill_now`` 的每一种拒绝各配一句话。**没有兜底项**:新增一种理由而忘了
-#: 配文案会在路由里当场 KeyError,而不是安静地说一句不对的话。
-#: ``MANUAL_DISTILL_DISABLED`` 在这条路由上其实到不了(handler 里那一句
-#: ``_experiences_wiring_active`` 先拦下),仍然列在这里——这张表要对得起
-#: ``distill_now`` 的返回集合,而不是对得起某一个调用点。
-#: 「已经有一条在跑」复用 ``_REBUILD_BUSY_MESSAGE``:对按按钮的人来说那与手动
-#: 重建是同一件事,不该因为按的是哪张卡上的按钮就换一种说法。
-_MANUAL_DISTILL_MESSAGES = {
-    MANUAL_DISTILL_DISABLED: _EXPERIENCE_DISABLED_MESSAGE,
-    MANUAL_DISTILL_BUSY: _REBUILD_BUSY_MESSAGE,
-    MANUAL_DISTILL_COOLDOWN: _EXPERIENCE_COOLDOWN_MESSAGE,
-    MANUAL_DISTILL_INVALID: "无法开始整理，请刷新页面后重试",
-}
+#: ``MANUAL_DISTILL_INVALID`` 的兜底句。这条路由走不到它(分区是路径段,不可能
+#: 为空),但 ``distill_now`` 是可以从别处调的,所以这一支仍然要有一句人话。
+_EXPERIENCE_UNAVAILABLE_MESSAGE = "无法开始整理，请刷新页面后重试"
+
+#: ``distill_notebook_experiences`` 的分支覆盖到的结果集合,在 import 期与
+#: ``distill_now`` 的返回全集对账。一条 ``if/elif`` 链**漏掉**新增的一种结果只
+#: 会安静地落到兜底那句——那正是这条断言要挡的:在 job 模块加一种结果而忘了在
+#: 这里给它一句话,进程起不来,而不是在生产里说错话。形态与 ``models/
+#: agent_profile.py`` 里 ``UnderstandingLabel`` / ``PROFILE_LABEL_ORDER`` 的
+#: import 期断言逐字相同。
+_HANDLED_DISTILL_OUTCOMES = frozenset({
+    MANUAL_DISTILL_STARTED,
+    MANUAL_DISTILL_BUSY,
+    MANUAL_DISTILL_COOLDOWN,
+    MANUAL_DISTILL_DISABLED,
+    MANUAL_DISTILL_INVALID,
+})
+assert _HANDLED_DISTILL_OUTCOMES == MANUAL_DISTILL_OUTCOMES, (
+    "distill_notebook_experiences must answer every distill_now outcome"
+)
 
 #: 允许出现在 ``DELETE .../agent-observations?kind=`` 上的两个值。空串(清全部)
 #: 不在其中——它是**缺省**,不是一个要被认出来的值,见该端点的说明。
@@ -463,13 +471,20 @@ def distill_notebook_experiences(
     store = retrieval_experience_store()
     if not _experiences_wiring_active(store):
         raise user_error(409, _EXPERIENCE_DISABLED_MESSAGE)
+    # 逐支 if 而不是一张查表:每一句 409 的文案在 AST 上都看得见是哪一支给的
+    # (``test_user_error`` 的静态扫描读的就是这个),而「漏掉一种结果」由上面那
+    # 条 import 期断言挡住,不靠运行时的 KeyError。
     outcome = retrieval_experience_jobs_service().distill_now(notebook_id)
+    if outcome == MANUAL_DISTILL_BUSY:
+        raise user_error(409, _REBUILD_BUSY_MESSAGE)
+    if outcome == MANUAL_DISTILL_COOLDOWN:
+        raise user_error(409, _EXPERIENCE_COOLDOWN_MESSAGE)
+    if outcome == MANUAL_DISTILL_DISABLED:
+        # 到不了(上面那一句闸先拦下),写出来是为了这一串分支对得起
+        # ``distill_now`` 的返回集合,而不是只对得起这一个调用点。
+        raise user_error(409, _EXPERIENCE_DISABLED_MESSAGE)
     if outcome != MANUAL_DISTILL_STARTED:
-        # 查表而不是 if/elif 链:``_MANUAL_DISTILL_MESSAGES`` 与
-        # ``MANUAL_DISTILL_*`` 那组常量一一对应,新增一种拒绝理由而忘了配文案
-        # 会在这里当场 KeyError(500),而不是安静地复用一句不对的话——与
-        # ``deps.py`` 能力表「响亮失败,不许落到宽松默认值」同一条口径。
-        raise user_error(409, _MANUAL_DISTILL_MESSAGES[outcome])
+        raise user_error(409, _EXPERIENCE_UNAVAILABLE_MESSAGE)
     return ExperienceDistillStarted(started=True)
 
 
