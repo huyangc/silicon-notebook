@@ -112,9 +112,12 @@ def _situation(**overrides) -> dict:
 
 
 def _write_experience(repo, action, polarity, rationale, *, situation=None,
-                      provenance=None):
+                      provenance=None, partition=""):
+    """``partition=""`` is the global partition; a non-empty one is a single
+    notebook's own (2026-09-22). The id and the column must be derived from
+    the SAME partition — both stores raise on a disagreement."""
     situation = situation or _situation()
-    entry_id = experience_id(situation, action)
+    entry_id = experience_id(situation, action, partition)
     repo.retrieval_experiences.upsert_experience(
         entry_id,
         situation=situation,
@@ -124,6 +127,7 @@ def _write_experience(repo, action, polarity, rationale, *, situation=None,
         provenance=list(provenance) if provenance else ["run-1"],
         provenance_max=60,
         replace_conclusion=True,
+        notebook_id=partition,
     )
     _reset_memo()
     return entry_id
@@ -139,7 +143,7 @@ def _write_experience(repo, action, polarity, rationale, *, situation=None,
 _PASSIVE_FILLER_ACTIONS = ("retrieve", "expand", "expand_community")
 
 
-def _write_many_experiences(repo, extra):
+def _write_many_experiences(repo, extra, *, partition=""):
     """Seed exactly enough entries that the passive block's top-3 fills up
     with ``_PASSIVE_FILLER_ACTIONS`` (highest support, via a longer
     provenance list), leaving ``extra`` (a list of
@@ -148,11 +152,12 @@ def _write_many_experiences(repo, extra):
     situation = _situation()
     for action in _PASSIVE_FILLER_ACTIONS:
         _write_experience(repo, action, "good", f"{action} tends to help here.",
-                          situation=situation,
+                          situation=situation, partition=partition,
                           provenance=[f"filler-{action}-{i}" for i in range(20)])
     for index, (action, polarity, rationale) in enumerate(extra):
         _write_experience(
             repo, action, polarity, rationale, situation=situation,
+            partition=partition,
             provenance=[f"extra-{action}-{i}" for i in range(len(extra) - index)])
     return situation
 
@@ -479,9 +484,13 @@ def test_zero_new_io_during_the_action(repo):
     _run(retriever, notebook, "deep")
 
     # run() itself reads each store exactly once at the top; two
-    # consult_memory calls must not add any further reads.
+    # consult_memory calls must not add any further reads. The experience
+    # store is read TWICE there rather than once because the library is
+    # partitioned per notebook (2026-09-22): this notebook's own partition
+    # plus the global fallback. Both land in the process-level memo, so the
+    # consult_memory turns still add nothing.
     assert read_blocks_calls == [1]
-    assert read_partition_calls == [1]
+    assert read_partition_calls == [1, 1]
 
 
 # --------------------------------------------------- ⑥ 纯函数:select/render
@@ -588,10 +597,12 @@ def test_a_broken_experience_store_read_skips_the_turn_instead_of_failing_the_ru
                    {"next_action": "answer", "sufficient": True}])
     retriever = _retriever(repo, llm)
 
-    def _boom(store):
+    def _boom(store, notebook_id):
         raise RuntimeError("experience store went away")
 
-    monkeypatch.setattr(rr, "_cached_experiences", _boom)
+    # 2026-09-22:取数入口是「一次签名装两层」的 ``_cached_experience_layers``,
+    # 被动块与 consult 都走它,所以炸这一个就同时炸掉两条读路径。
+    monkeypatch.setattr(rr, "_cached_experience_layers", _boom)
     result, _limits = _run(retriever, notebook, "deep")
     skip_reasons = [
         s.detail.get("reason") for s in result.trace if s.step_type == "skip"
@@ -637,10 +648,12 @@ def test_the_zero_hit_priority_set_filters_to_positive_counts():
     import app.services.reasoning_retrieval as rr
 
     source = inspect.getsource(rr.ReasoningRetriever.run)
-    call_start = source.index("select_consultable(")
+    # 2026-09-22 起 run() 调的是取数外壳 ``_consultable_rows``(一次签名装两层
+    # 再交给 ``select_consultable``);要钉的表达式仍然逐字在这个调用点上。
+    call_start = source.index("_consultable_rows(")
     call_src = source[call_start:call_start + 600]
     assert "zero_hit_by_action.items() if c > 0" in call_src, (
-        "select_consultable 的 zero_hit_actions 必须按正计数过滤"
+        "consult 取数外壳的 zero_hit_actions 必须按正计数过滤"
     )
 
 
@@ -747,3 +760,85 @@ def test_the_accum_passed_to_a_later_render_holds_only_delivered_rows(repo, monk
 # 分支。两处差一,就是 prompt 摆出一个必然被 skip 的动作(白烧一轮反思),或反过来
 # 提前一轮摘掉它。判据用「模型硬选那个已耗尽的动作」而不是「它没被选」——后者在
 # 动作根本没被请求时恒真。
+
+
+# ---------------------------------------- ⑧ 按笔记本分区(2026-09-22)
+
+def test_consult_memory_reads_this_notebooks_own_partition(repo):
+    """差集面读「本库 ∪ 全局」:整个库都写在**本库分区**时,行为与全部写在
+    全局分区时逐点相同——被动块先占走三条,consult 还回第四条。
+
+    变异验证:把 ``_experience_rows`` 改回只读全局分区,这条会翻红(本库分区
+    一条也读不到,consult 只会记一条 ``consult_memory_nothing_new``)。
+    """
+    notebook = _seed(repo)
+    _write_many_experiences(
+        repo, [("ppr", "bad", RATIONALE_PPR)], partition=notebook.id)
+    llm = _SeqLLM([{"next_action": "consult_memory"},
+                   {"next_action": "answer", "sufficient": True}])
+    retriever = _retriever(repo, llm)
+    result, _ = _run(retriever, notebook, "deep")
+
+    steps = _steps(result, "consult_memory")
+    assert len(steps) == 1
+    assert steps[0].detail["entries"] == 1
+    assert RATIONALE_PPR in llm.reflect_prompts[1]
+
+
+def test_consult_memory_never_returns_another_notebooks_partition(repo):
+    """隔离:另一个库的分区条目既不进被动块,也不进 consult 的差集面。"""
+    notebook = _seed(repo)
+    other = repo.create_notebook(NotebookCreate(name="别的库"))
+    _write_many_experiences(
+        repo, [("ppr", "bad", RATIONALE_PPR)], partition=other.id)
+    llm = _SeqLLM([{"next_action": "consult_memory"},
+                   {"next_action": "answer", "sufficient": True}])
+    retriever = _retriever(repo, llm)
+    result, _ = _run(retriever, notebook, "deep")
+
+    skips = [s for s in _steps(result, "skip")
+             if s.detail.get("reason") == "consult_memory_nothing_new"]
+    assert len(skips) == 1, "没有任何本库/全局条目可还 ⇒ 记一条 nothing_new"
+    transcript = "\n".join(llm.reflect_prompts + llm.plan_prompts)
+    assert RATIONALE_PPR not in transcript
+    assert CONSULT_HEADER not in transcript
+
+
+def test_select_consultable_prefers_the_primary_layer_on_a_tie():
+    """同情境、同动作、同支持度、都不是零命中动作时,本库那条赢。
+
+    两条 id 刻意选成「本库那条字典序更大」:排序最后一位是 id 升序,所以不分层
+    时必然选中 ``rx-aaa``(下面的对照断言钉住了这一点)。分层位排在相似度与
+    支持度**之后**——更近或证据更足的全局条目仍然更有用,分层只裁决那些本来
+    分不出高下的行。
+    """
+    situation = _situation()
+    local = {"id": "rx-zzz", "situation": situation, "action": "ppr",
+             "polarity": "bad", "rationale": "本库版", "support": 1}
+    shared = {"id": "rx-aaa", "situation": situation, "action": "ppr",
+              "polarity": "bad", "rationale": "全局版", "support": 1}
+    merged = [local, shared]
+
+    picked = select_consultable(merged, situation, primary_count=1)
+    assert [row["id"] for row in picked] == ["rx-zzz"]
+    # 对照:不分层时 id 说了算,还回来的是全局那条。
+    assert [row["id"] for row in select_consultable(merged, situation)] == [
+        "rx-aaa"]
+
+
+def test_consult_memory_returns_this_notebooks_row_over_the_shared_twin(repo):
+    """端到端:被动块占满三个名额后,consult 在两条同分同支持度的 ppr 之间
+    必须还回**本库**那条。"""
+    notebook = _seed(repo)
+    _write_many_experiences(
+        repo, [("ppr", "bad", RATIONALE_PPR)], partition=notebook.id)
+    _write_experience(repo, "ppr", "bad", "Shared fallback tactic for ppr.")
+    llm = _SeqLLM([{"next_action": "consult_memory"},
+                   {"next_action": "answer", "sufficient": True}])
+    retriever = _retriever(repo, llm)
+    result, _ = _run(retriever, notebook, "deep")
+
+    steps = _steps(result, "consult_memory")
+    assert len(steps) == 1 and steps[0].detail["entries"] == 1
+    assert RATIONALE_PPR in llm.reflect_prompts[1]
+    assert "Shared fallback tactic for ppr." not in llm.reflect_prompts[1]

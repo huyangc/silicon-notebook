@@ -196,13 +196,16 @@ def _seed(repo):
     return notebook, object_id
 
 
-def _write_experience(repo, action, polarity, rationale, *, situation=None):
+def _write_experience(repo, action, polarity, rationale, *, situation=None,
+                      partition=""):
+    """``partition=""`` 是全局分区,非空是某个笔记本自己的分区(2026-09-22)。
+    id 与列必须由同一个 partition 算出来,两侧 store 在不一致时直接 ValueError。"""
     situation = situation or _situation()
-    entry_id = experience_id(situation, action)
+    entry_id = experience_id(situation, action, partition)
     repo.retrieval_experiences.upsert_experience(
         entry_id, situation=situation, action=action, polarity=polarity,
         rationale=rationale, provenance=["run-1"], provenance_max=60,
-        replace_conclusion=True,
+        replace_conclusion=True, notebook_id=partition,
     )
     _reset_memo()
     return entry_id
@@ -431,8 +434,10 @@ def test_nudge_precheck_skips_the_cache_read_when_no_action_qualifies(repo):
     ``_zero_hit_nudge_note`` 不该被调用,更不该多读一次经验库快照。
 
     ``version_signal()`` 在整条 run 里预期恰好被调用一次:run() 顶部"被动
-    打法块"那次固定读取。这里只安排一次 exact_lookup 未命中(阈值是 2),
-    nudge 路径的纯内存判断应该在读库之前就短路。
+    打法块"那次固定读取。分区之后它要装**两层**快照(本库分区 + 全局分区
+    回退),但两层共用同一个签名(``_cached_experience_layers``),所以聚合
+    查询仍然只有一次。这里只安排一次 exact_lookup 未命中(阈值是 2),nudge
+    路径的纯内存判断应该在读库之前就短路。
 
     变异验证:把 ``_zero_hit_nudge_ready`` 的调用从 ``if`` 条件里删掉(总是
     进 try 块),这条用例会翻红(``version_signal_calls`` 变成 2)。
@@ -455,7 +460,10 @@ def test_nudge_precheck_skips_the_cache_read_when_no_action_qualifies(repo):
 def test_nudge_precheck_does_read_again_once_the_threshold_is_crossed(repo):
     """对照组:两次真连续零命中确实达到阈值时,nudge 路径必须真的去读一次
     经验库——证明上一条用例通过不是因为整条 nudge 机制失效,而是"没有动作
-    达标时不读"这一条精确规则在起作用。"""
+    达标时不读"这一条精确规则在起作用。
+
+    下界是 2:被动块那一处占掉 1 次,nudge 路径自己装两层再占 1 次——两层
+    共用一个签名,所以每个消费点各只付一次聚合查询。"""
     notebook, _oid = _seed(repo)
     _write_experience(repo, "exact_lookup",
                       "bad", "exact_lookup rarely finds this shape.")
@@ -519,3 +527,93 @@ def test_cancellation_during_the_nudge_lookup_still_propagates(repo):
 
     with pytest.raises(AskCancelled):
         _run(retriever, notebook, "standard")
+
+
+def test_the_nudge_reads_this_notebooks_own_partition(repo):
+    """2026-09-22 分区:步级提示读「本库 ∪ 全局」,所以只写在**本库分区**的
+    那条「坏」经验必须照样被引用。
+
+    变异验证:把 ``_experience_rows`` 改回只读全局分区,这条会翻红——库里
+    一条全局条目都没有,提示将无理由可讲而整条不触发。
+    """
+    notebook, _oid = _seed(repo)
+    _write_experience(repo, "exact_lookup", "bad",
+                      "exact_lookup rarely finds this shape.",
+                      partition=notebook.id)
+    llm = _SeqLLM([
+        {"next_action": "exact_lookup", "exact_term": "set_db"},
+        {"next_action": "exact_lookup", "exact_term": "get_db"},
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever = _retriever(repo, llm)
+    _run(retriever, notebook, "standard")
+
+    assert llm.reflect_prompts[2].count("已连续") == 1
+    assert "exact_lookup rarely finds this shape." in llm.reflect_prompts[2]
+
+
+def test_the_nudge_never_quotes_another_notebooks_partition(repo):
+    """隔离:另一个库的分区条目既不进提示,也不进被动打法块。"""
+    notebook, _oid = _seed(repo)
+    other = repo.create_notebook(NotebookCreate(name="别的库"))
+    _write_experience(repo, "exact_lookup", "bad",
+                      "Another library's own tactic.", partition=other.id)
+    llm = _SeqLLM([
+        {"next_action": "exact_lookup", "exact_term": "set_db"},
+        {"next_action": "exact_lookup", "exact_term": "get_db"},
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever = _retriever(repo, llm)
+    _run(retriever, notebook, "standard")
+
+    transcript = "\n".join(llm.reflect_prompts + llm.plan_prompts)
+    assert "Another library's own tactic." not in transcript
+    assert "已连续" not in transcript, "没有可引用的理由就不该提示"
+
+
+def test_worst_experience_prefers_the_primary_layer_on_a_tie():
+    """同情境、同动作、同支持度时,本库那条赢——不是 id 的哈希赢。
+
+    两条 id 刻意选成「全局那条字典序更大」:``worst_experience_for`` 取最大键,
+    所以不分层时必然选中 ``rx-zzz``(下面的对照断言钉住了这一点)。只提示一条,
+    所以这个平局不是边角——本库与全局对同一个动作得出同一条结论,正是分区库的
+    常态形状。
+    """
+    from app.services.retrieval_experience_block import worst_experience_for
+
+    situation = _situation()
+    local = _bad_entry("ppr", "本库版", situation=situation, entry_id="rx-aaa")
+    shared = _bad_entry("ppr", "全局版", situation=situation, entry_id="rx-zzz")
+    merged = [local, shared]
+
+    assert worst_experience_for(
+        merged, situation, "ppr", primary_count=1)["id"] == "rx-aaa"
+    # 对照:不分层时 id 说了算,选中的是全局那条。
+    assert worst_experience_for(merged, situation, "ppr")["id"] == "rx-zzz"
+
+
+def test_the_nudge_quotes_this_notebooks_reason_over_the_shared_one(repo):
+    """端到端:两层对同一个动作各有一条同分同支持度的「坏」经验时,提示引用
+    的必须是**本库**那条。
+
+    被动打法块也只会渲染本库那条(跨层同动作唯一),所以「全局版」这四个字在
+    整份 transcript 里出现,就只可能是提示选错了层。
+    """
+    notebook, _oid = _seed(repo)
+    _write_experience(repo, "exact_lookup", "bad",
+                      "This library keeps its commands elsewhere.",
+                      partition=notebook.id)
+    _write_experience(repo, "exact_lookup", "bad",
+                      "Shared fallback tactic for exact_lookup.")
+    llm = _SeqLLM([
+        {"next_action": "exact_lookup", "exact_term": "set_db"},
+        {"next_action": "exact_lookup", "exact_term": "get_db"},
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever = _retriever(repo, llm)
+    _run(retriever, notebook, "standard")
+
+    transcript = "\n".join(llm.reflect_prompts + llm.plan_prompts)
+    assert transcript.count("已连续") == 1, "前提:提示确实触发过一次"
+    assert "This library keeps its commands elsewhere." in transcript
+    assert "Shared fallback tactic for exact_lookup." not in transcript
