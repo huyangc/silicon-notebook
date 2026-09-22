@@ -473,19 +473,39 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 可以共用一个服务，它们也会共用该服务唯一的调度器和并发预算。`max_concurrency`
 是唯一的模型容量参数；来源作业数、窗口大小、batch 大小与本地 ANN 线程都不会再创建模型 gate。
 
-**升级后请重新生成 `.local/model-services.toml`，或手工补齐新增工作负载的绑定。**
-`[bindings]` 文件通常只生成一次就跨版本沿用，因此每个**新增**的 workload 在既有部署里天生
-是未绑定状态；未绑定的 workload 在注册表里只解析为「无服务」，整条链路 fail-soft，不报错，
+**绑定表在启动时被硬校验：缺一个工作负载或多一个未知 id，后端直接拒绝启动。**
+只要 `MODEL_SERVICES_CONFIG` 非空，`[bindings]` 就必须覆盖全部工作负载（chat / embedding /
+rerank 三类都算），且不得出现不是工作负载的 id（拼错的，或版本升级后已退役的，如
+`graph_chain_verify`）。任一条不满足，进程以非零码退出，日志里是一整句可读的原因：
+
+```
+model-bindings: 缺少绑定的工作负载：库理解整理（agent_profile_consolidate）, 检索打法总结（retrieval_experience_distill）；未知或已退役的绑定：graph_chain_verify。请在 /etc/silicon/model-services.toml 的 [bindings] 补齐/删除后重启；确需临时放行设 MODEL_BINDINGS_STRICT=false（仅告警）。
+```
+
+两段都会列全（按 id 字典序，带中文标签），所以一次就能改完，不必逐条重启试错；消息里只有
+id 与标签，不含任何密钥或 endpoint。这条校验做在注册表加载里，因此**热重载走的是同一把闸**：
+线上编辑 `model-services.toml` 删错一行，新配置被拒、旧注册表原样保留，服务不会带着半张绑定
+表继续跑。
+
+这条规则的由来：未绑定的 workload 在注册表里只解析为「无服务」，整条链路 fail-soft，不报错，
 表现是对应功能静默不工作（例如 `agent_profile_consolidate` 未绑定时，「AI 对这个库的理解」
-的后台巡固每次都落 `failed:模型未配置，无法整理`）。启动时后端会在 READY 之前用一行 WARNING
-点名所有没有绑定的 chat workload（中文标签 + workload id）；其中 `agent_profile_consolidate`
-与 `retrieval_experience_distill` 在对应特性开关（`AGENT_PROFILE_ENABLED`、
-`RETRIEVAL_EXPERIENCE_ENABLED`）为开时，各自再单独一行「特性已开但模型未绑定」。
-`MODEL_SERVICES_CONFIG` 留空的离线部署不刷这些告警（那是受支持的降级形态，已有自己的提示）。
-`scripts/migrate_legacy_model_env.py` 会遍历全部 workload 重新生成配置，也可以直接在
-`[bindings]` 里补上缺的几行。这些告警只是告警，绝不会拒绝启动。管理页的模型服务状态是按
-**物理服务**组织的，未绑定的工作负载不会产生任何一行，因此「哪些工作负载没绑定」目前以启动
-日志为准。
+的后台巡固每次都落 `failed:模型未配置，无法整理`）。`[bindings]` 文件通常只生成一次就跨版本
+沿用，于是每个**新增**的 workload 在既有部署里天生是未绑定状态——静默降级直接落到最终用户
+身上。**升级后请重新生成 `.local/model-services.toml`，或手工补齐新增工作负载的绑定；**
+`scripts/migrate_legacy_model_env.py` 会遍历全部 workload 生成配置（它只能绑定旧 `.env` 真的
+配过的服务，绑不全时会当场警告说明启动会被拒），也可以直接在 `[bindings]` 里补上缺的几行。
+
+`MODEL_BINDINGS_STRICT=false` 把同一条诊断从「拒绝启动」降级为「启动告警」，用于升级期临时
+放行——它不是产品默认，也不改变「未绑定的工作负载静默不可用」这个事实。放行档下，后端在
+READY 之前用一行 WARNING 点名所有没有绑定的 chat workload（中文标签 + workload id），再用一行
+点名被忽略的未知/已退役 id；其中 `agent_profile_consolidate` 与 `retrieval_experience_distill`
+在对应特性开关（`AGENT_PROFILE_ENABLED`、`RETRIEVAL_EXPERIENCE_ENABLED`）为开时，各自再单独
+一行「特性已开但模型未绑定」。
+
+`MODEL_SERVICES_CONFIG` 留空是另一回事：那是受支持的离线 / 确定性模式，严格闸对它没有意见
+（否则所有开发环境与 `scripts/check.sh` 都会起不来），只在 READY 之前打一行 WARNING 说明所有
+需要模型的功能将降级为确定性回复。管理页的模型服务状态是按**物理服务**组织的，未绑定的工作
+负载不会产生任何一行，因此「哪些工作负载没绑定」以启动日志 / 启动失败消息为准。
 自动模式（简化界面）固定使用逐步推理（`reasoning`）标准档，与高级界面选择 `reasoning` 时走同一条
 `/ask/intent` 意图预检（复用 `reasoning_agent` workload），不涉及额外的模型服务配置。该 workload
 未绑定或调用失败时，问题理解 fail-open 为空合同、按清晰问题继续以逐步推理执行，不再有通用问答兜底。

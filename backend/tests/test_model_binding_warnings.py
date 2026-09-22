@@ -90,13 +90,43 @@ def test_only_the_feature_that_is_switched_on_gets_promoted():
     assert "库理解整理（agent_profile_consolidate）" not in warnings[1]
 
 
-def test_deployment_with_no_model_services_at_all_is_exempt():
-    """空 MODEL_SERVICES_CONFIG 是受支持的离线运行时(与
-    ``primary_unconfigured`` 同一条判据),已有自己的启动提示;在那里逐条列出
-    全部 chat 工作负载只是噪音。"""
-    assert _unbound_workload_warnings(
+def test_deployment_with_no_model_services_at_all_gets_exactly_one_line():
+    """空 MODEL_SERVICES_CONFIG 是受支持的离线运行时(与 ``primary_unconfigured``
+    同一条判据):逐条列出全部 chat 工作负载只是噪音,但「所有需要模型的功能都在
+    走确定性回复」这件事必须在 READY 之前说一次——PR-4 之前它一个字都不打,而
+    严格闸刻意不管这个形态(它是选出来的降级,不是配错)。"""
+    warnings = _unbound_workload_warnings(
         _settings(), _models(CHAT_WORKLOAD_IDS, services=0)
-    ) == ()
+    )
+
+    assert len(warnings) == 1
+    assert "未配置模型服务" in warnings[0]
+    assert "降级为确定性回复" in warnings[0]
+    # 离线模式不点名任何工作负载,也不提严格闸。
+    assert "ask_answer" not in warnings[0]
+    assert "MODEL_BINDINGS_STRICT" not in warnings[0]
+
+
+def test_stale_binding_ids_get_their_own_line_naming_them():
+    """放行档下被丢弃的未知/已退役 id 必须在启动日志里点名——丢弃≠无声。"""
+    models = _models(frozenset())
+    models.registry.unknown_bindings = lambda: ("ask_anwser", "graph_chain_verify")
+
+    warnings = _unbound_workload_warnings(_settings(), models)
+
+    assert len(warnings) == 1
+    assert "ask_anwser, graph_chain_verify" in warnings[0]
+    assert "MODEL_BINDINGS_STRICT" in warnings[0]
+
+
+def test_a_registry_without_the_stale_id_reader_still_gets_the_other_lines():
+    """兼容读法:老 provider 替身没有 unknown_bindings,只丢这一行,不丢全部。"""
+    warnings = _unbound_workload_warnings(
+        _settings(), _models({"agent_profile_consolidate"})
+    )
+
+    assert len(warnings) == 2
+    assert "库理解整理（agent_profile_consolidate）" in warnings[0]
 
 
 def test_only_chat_workloads_are_checked():

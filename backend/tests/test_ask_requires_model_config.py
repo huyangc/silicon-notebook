@@ -11,11 +11,23 @@ from app.services.sqlite_repository import (
 
 
 def _settings(tmp_path, *, model_services_config: str = "") -> Settings:
+    """Repository settings with ``MODEL_BINDINGS_STRICT`` off, deliberately.
+
+    This whole module tests the DEGRADED behavior of a deployment whose
+    ``[bindings]`` does not cover the workload a request needs: the answer must
+    surface a ``missing_config`` model error instead of silently producing
+    something. Under the product default that configuration is refused at
+    startup (``main._model_bindings_preflight``), so the only way the runtime
+    state under test can still exist is the documented escape hatch — which is
+    exactly what these settings select. The strict gate itself is covered in
+    ``test_model_registry``.
+    """
     return Settings(
         _env_file=None,
         database_url=f"sqlite:///{tmp_path}/t.db",
         storage_dir=str(tmp_path / "st"),
         model_services_config=model_services_config,
+        model_bindings_strict=False,
         mineru_mode="off",
         event_log_enabled=False,
         llm_log_enabled=False,

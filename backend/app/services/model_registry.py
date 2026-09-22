@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 from types import MappingProxyType
 import tomllib
-from typing import Literal, Mapping
+from typing import Iterable, Literal, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
@@ -252,18 +252,31 @@ WORKLOADS = workload_map(
 )
 
 
+# Prefix on the one aggregated binding diagnostic.  Startup matches on it to
+# tell "this deployment's [bindings] table is wrong" apart from every other
+# model-configuration failure, so keep it in sync with describe_binding_gap.
+BINDING_GAP_PREFIX = "model-bindings: "
+
 # Workload ids that once existed and may still appear in deployed
 # MODEL_SERVICES_CONFIG files ([bindings]/[thinking]) generated from earlier
-# checked-in examples or the legacy migration script.  They are ACCEPTED and
-# DROPPED during load — the same upgrade contract as ask_modes._RETIRED_MODES:
-# retiring a capability must never brick startup for a configuration that was
-# valid before the upgrade.  Entries here carry no behavior; nothing reads a
-# retired binding after load.
+# checked-in examples or the legacy migration script.  A retired id no longer
+# gets the silent-drop treatment ask_modes._RETIRED_MODES still gives a retired
+# ask mode: under the user's ruling a stale binding is exactly the "多配置了
+# 哪些" half of the startup check and is named in the refusal.  The set stays
+# as the retirement ledger and as the reason the escape hatch exists — an
+# upgrade that retires a workload can be rolled out with
+# MODEL_BINDINGS_STRICT=false, which drops these entries and warns instead.
 RETIRED_WORKLOADS = frozenset({
     # graph ask mode retired (this branch); its chain-verification workload
     # went with it.  verify_chain_edges survives as an unwired library helper.
     "graph_chain_verify",
 })
+
+if RETIRED_WORKLOADS & set(WORKLOADS):
+    # Import-time, because a workload id that is both live and retired makes
+    # the startup diagnostic lie in both directions: the catalog demands a
+    # binding the ledger says to delete.
+    raise ValueError("retired workload ledger overlaps the live catalog")
 
 _SERVICE_ID_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -312,12 +325,16 @@ class SystemModelServiceRegistry:
         services: Mapping[str, ModelServiceDefinition],
         bindings: Mapping[str, str],
         thinking_modes: Mapping[str, ThinkingMode] | None = None,
+        unknown_binding_ids: Sequence[str] = (),
     ) -> None:
         self._services = MappingProxyType(dict(services))
         self._bindings = MappingProxyType(dict(bindings))
         self._thinking_modes = MappingProxyType(
             dict(thinking_modes or {})
         )
+        # Retained only so a non-strict startup can still NAME what it ignored.
+        # Nothing routes on these; they are not workloads.
+        self._unknown_binding_ids = tuple(sorted(set(unknown_binding_ids)))
         grouped: dict[str, list[WorkloadSpec]] = {service_id: [] for service_id in services}
         for workload_id, service_id in bindings.items():
             grouped[service_id].append(WORKLOADS[workload_id])
@@ -381,14 +398,16 @@ class SystemModelServiceRegistry:
             services[definition.id] = definition
 
         bindings: dict[str, str] = {}
+        unknown_ids: list[str] = []
         for workload_id, service_id in raw_bindings.items():
-            if workload_id in RETIRED_WORKLOADS:
-                # Dropped BEFORE every other check: the referenced service may
-                # itself have been removed alongside the retired workload, and
-                # a retired entry must not fail any validation it used to pass.
-                continue
             if workload_id not in WORKLOADS:
-                raise ValueError(f"unknown model workload binding: {workload_id}")
+                # Collected BEFORE every other check rather than raised on the
+                # spot: a retired entry may point at a service that was removed
+                # with it, and an operator fixing a stale file deserves ONE
+                # message listing every id to delete plus every workload to
+                # add, not a one-at-a-time crawl through restarts.
+                unknown_ids.append(str(workload_id))
+                continue
             if not isinstance(service_id, str) or service_id not in services:
                 raise ValueError(
                     f"model workload {workload_id} references unknown service {service_id}"
@@ -400,11 +419,13 @@ class SystemModelServiceRegistry:
 
         thinking_modes: dict[str, ThinkingMode] = {}
         for workload_id, raw_mode in raw_thinking.items():
-            if workload_id in RETIRED_WORKLOADS:
-                continue
             workload = WORKLOADS.get(workload_id)
             if workload is None:
-                raise ValueError(f"unknown model thinking workload: {workload_id}")
+                # Same ledger as [bindings] above, for the same reason: a
+                # retired workload is normally removed from both tables at
+                # once, so both halves belong in one diagnostic.
+                unknown_ids.append(str(workload_id))
+                continue
             if workload.kind != "chat":
                 raise ValueError(
                     f"model thinking mode is only valid for chat workload {workload_id}"
@@ -414,7 +435,13 @@ class SystemModelServiceRegistry:
                     f"model workload {workload_id} has an invalid thinking mode"
                 )
             thinking_modes[workload_id] = raw_mode  # type: ignore[assignment]
-        return cls(services, bindings, thinking_modes)
+
+        missing, unknown = binding_gap(bindings, unknown_ids)
+        if (missing or unknown) and bool(
+            getattr(settings, "model_bindings_strict", True)
+        ):
+            raise ValueError(describe_binding_gap(missing, unknown, path))
+        return cls(services, bindings, thinking_modes, unknown)
 
     def service(self, service_id: str) -> ModelServiceDefinition:
         return self._services[service_id]
@@ -439,6 +466,57 @@ class SystemModelServiceRegistry:
 
     def workloads_for(self, service_id: str) -> tuple[WorkloadSpec, ...]:
         return self._workloads_by_service.get(service_id, ())
+
+    def unknown_bindings(self) -> tuple[str, ...]:
+        """Ids this file binds that are not workloads, sorted, for diagnostics.
+
+        Non-empty only when MODEL_BINDINGS_STRICT is off — strict load refuses
+        to build a registry that would have to carry them.
+        """
+        return self._unknown_binding_ids
+
+
+def binding_gap(
+    bound: Iterable[str], unknown: Iterable[str]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split a parsed binding table into (unbound workloads, stale ids).
+
+    Both halves are sorted by id so a deployment reading two consecutive boot
+    logs can diff them. ``bound`` is measured against EVERY workload kind, not
+    just chat: an unbound embedding or rerank workload degrades retrieval just
+    as silently as an unbound chat one.
+    """
+    return (
+        tuple(sorted(set(WORKLOADS).difference(bound))),
+        tuple(sorted(set(unknown))),
+    )
+
+
+def describe_binding_gap(
+    missing: Sequence[str], unknown: Sequence[str], config_path: object
+) -> str:
+    """One readable line naming both halves in full, with no secret material.
+
+    Deliberately one line and deliberately exhaustive: this is the message an
+    operator sees INSTEAD of a started service, so it has to be actionable on
+    its own — which ids to add, which to delete, in which file. Only ids and
+    their Chinese labels appear; the configuration's URLs and api_key_env
+    values never do.
+    """
+    segments: list[str] = []
+    if missing:
+        segments.append("缺少绑定的工作负载：" + ", ".join(
+            f"{WORKLOADS[workload_id].display_label}（{workload_id}）"
+            for workload_id in missing
+        ))
+    if unknown:
+        segments.append("未知或已退役的绑定：" + ", ".join(unknown))
+    return (
+        BINDING_GAP_PREFIX
+        + "；".join(segments)
+        + f"。请在 {config_path} 的 [bindings] 补齐/删除后重启；"
+        "确需临时放行设 MODEL_BINDINGS_STRICT=false（仅告警）。"
+    )
 
 
 def _effective_environ(

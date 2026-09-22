@@ -1180,6 +1180,13 @@ max_concurrency = 2
         database_url=f"sqlite:///{database}",
         storage_dir=str(storage),
         model_services_config=model_services_config,
+        # The fixture registry deliberately defines ONE chat service and binds
+        # only the chat workloads (and, for the missing_ask_answer oracle, one
+        # fewer): these goldens exist to freeze how ask behaves against a
+        # partially configured deployment. That is the shape MODEL_BINDINGS_STRICT
+        # refuses at startup, so the generator selects the documented escape
+        # hatch rather than pretending the deployment is complete.
+        model_bindings_strict=False,
         embed_dim=4,
         mineru_mode="off",
         mineru_api_url="",

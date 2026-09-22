@@ -571,7 +571,7 @@ _FEATURE_GATED_CHAT_WORKLOADS: tuple[tuple[str, str], ...] = (
 
 
 def _unbound_workload_warnings(settings: object, models: object) -> tuple[str, ...]:
-    """Return the startup WARNING lines for chat workloads nothing is bound to.
+    """Return the startup WARNING lines about this deployment's [bindings].
 
     Why this exists: the registry answers an unbound workload with ``None`` and
     every caller fails soft, so a ``model-services.toml`` generated before a
@@ -582,11 +582,18 @@ def _unbound_workload_warnings(settings: object, models: object) -> tuple[str, .
     per workload: an operator scrolling a boot log reads a single sentence, not
     a screen of near-identical warnings.
 
-    A deployment with NO model services at all is exempt. An empty
-    ``MODEL_SERVICES_CONFIG`` is the supported offline/deterministic runtime
-    (the same claim ``RuntimeModelProvider.primary_unconfigured`` makes) and already
-    has its own startup notice from ``main._env_file_preflight``; listing every
-    chat workload there would be noise about a state the operator chose.
+    Since ``MODEL_BINDINGS_STRICT`` (default on) turns exactly these two
+    conditions into a refusal to start, every line below is reachable only in a
+    deployment that switched the gate off — plus the offline notice, which
+    strict mode deliberately never covers.
+
+    A deployment with NO model services at all is not silently exempt any more:
+    an empty ``MODEL_SERVICES_CONFIG`` is the supported offline/deterministic
+    runtime (the same claim ``RuntimeModelProvider.primary_unconfigured``
+    makes), but "everything that needs a model is answering deterministically"
+    is worth one line before READY. Listing each unbound chat workload there
+    would still be noise about a state the operator chose, so it stays ONE
+    line, not forty.
 
     Fail-open like ``_pool_budget_warning`` above and for the same reason: a
     diagnostic must never be able to change the shape of a startup that would
@@ -598,31 +605,46 @@ def _unbound_workload_warnings(settings: object, models: object) -> tuple[str, .
         from app.services.model_registry import WORKLOADS
 
         if not models.registry.services():
-            return ()
+            return (
+                "model-bindings: 未配置模型服务（MODEL_SERVICES_CONFIG 为空）——"
+                "所有需要模型的功能将降级为确定性回复。",
+            )
         unbound = tuple(
             workload
             for workload in WORKLOADS.values()
             if workload.kind == "chat" and not models.configured(workload.id)
         )
-        if not unbound:
-            return ()
-        listed = "，".join(
-            f"{workload.display_label}（{workload.id}）" for workload in unbound
-        )
-        lines = [
-            "model-bindings: 以下 chat 工作负载在 MODEL_SERVICES_CONFIG 的 "
-            f"[bindings] 里没有绑定，对应功能会静默不可用：{listed}。"
-            "升级后请重新生成 model-services.toml 或补齐新增工作负载的绑定。"
-        ]
-        unbound_ids = {workload.id: workload for workload in unbound}
-        for workload_id, flag in _FEATURE_GATED_CHAT_WORKLOADS:
-            workload = unbound_ids.get(workload_id)
-            if workload is None or not bool(getattr(settings, flag, False)):
-                continue
+        lines: list[str] = []
+        if unbound:
+            listed = "，".join(
+                f"{workload.display_label}（{workload.id}）" for workload in unbound
+            )
             lines.append(
-                "model-bindings: 特性已开但模型未绑定："
-                f"{workload.display_label}（{workload.id}）"
-                "——请在 model-services.toml 的 [bindings] 补绑定或重新生成配置"
+                "model-bindings: 以下 chat 工作负载在 MODEL_SERVICES_CONFIG 的 "
+                f"[bindings] 里没有绑定，对应功能会静默不可用：{listed}。"
+                "升级后请重新生成 model-services.toml 或补齐新增工作负载的绑定。"
+            )
+            unbound_ids = {workload.id: workload for workload in unbound}
+            for workload_id, flag in _FEATURE_GATED_CHAT_WORKLOADS:
+                workload = unbound_ids.get(workload_id)
+                if workload is None or not bool(getattr(settings, flag, False)):
+                    continue
+                lines.append(
+                    "model-bindings: 特性已开但模型未绑定："
+                    f"{workload.display_label}（{workload.id}）"
+                    "——请在 model-services.toml 的 [bindings] 补绑定或重新生成配置"
+                )
+        # Appended last so the existing lines keep their positions, and read
+        # through a tolerant accessor: a provider double predating this member
+        # must lose THIS line, not every line above it.
+        reader = getattr(models.registry, "unknown_bindings", None)
+        stale = tuple(reader()) if callable(reader) else ()
+        if stale:
+            lines.append(
+                "model-bindings: MODEL_SERVICES_CONFIG 的 [bindings]/[thinking] 里有"
+                f"未知或已退役的 id，已忽略：{', '.join(stale)}。"
+                "请删除这些行；MODEL_BINDINGS_STRICT 为 false 才降级为本条告警，"
+                "默认会因此拒绝启动。"
             )
         return tuple(lines)
     except Exception:  # noqa: BLE001 — diagnostic-only; never affects startup
@@ -747,8 +769,10 @@ def run_startup(lease: object | None) -> object | None:
                     )
         # Loud before READY, not after: an operator who reads only up to the
         # readiness line must still see that a feature they switched on has no
-        # model behind it. Never a refusal to start — an unbound workload
-        # degrades one feature, while refusing to boot takes the whole service.
+        # model behind it. Never a refusal to start from HERE — by the time a
+        # repository exists the strict gate in main._model_bindings_preflight
+        # has already run, so anything left is either the offline mode or a
+        # deployment that explicitly set MODEL_BINDINGS_STRICT=false.
         for binding_warning in _unbound_workload_warnings(
             getattr(repo, "settings", None),
             getattr(getattr(repo, "_runtime", None), "models", None),
