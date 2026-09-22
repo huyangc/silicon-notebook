@@ -16,24 +16,40 @@ Phases, and what each one actually guarantees:
    mirror of some other environment", and the identity mapping.
 2. **Identity mapping.** §4. Reads only; users the target lacks are created at
    the start of phase 3, so a dry run creates nothing.
-3. **Rows.** One transaction per table, in ``synced_tables()`` order, with the
-   table's ``sync_import_progress`` row written inside that same transaction.
-   A crash therefore loses at most the table that was in flight, and a re-run
-   re-applies only tables that never completed. A SQLite target's two
-   hand-maintained FTS5 indexes are re-projected in the same transaction as
-   the table they index (``_SQLITE_FTS_REBUILD``).
-3b. **Reconcile.** A full package is a SNAPSHOT, and upsert only ever adds and
-   overwrites, so a second pass -- children before parents, one transaction
-   and one ``sync_import_progress`` step per table -- deletes the rows the
-   target holds for this package's notebooks that the package does not carry.
+3a. **Reconcile.** A full package is a SNAPSHOT, and upsert only ever adds
+   and overwrites, so a pass -- children before parents, one transaction and
+   one ``sync_import_progress`` step per table -- deletes the rows the target
+   holds for this package's notebooks that the package does not carry.
    Without it a mirror accumulates every chunk, element and knowhow cell the
-   source ever deleted. **``memory_items`` and its revision/provenance/
-   embedding rows are exempt**: the target's users create memories on a mirror
-   and §5 lets those coexist, but nothing on a memory row says which side made
-   it, so a "not in the package" sweep cannot tell a source-side deletion from
-   a target-side creation and would destroy the second. Source-side memory
-   deletions wait for PR-3's change log, which replays them by key instead of
-   inferring them. The report says so in ``warnings`` every run.
+   source ever deleted.
+
+   It runs BEFORE the upsert, not after, because a primary key is not a
+   table's only identity. ``chunk_questions`` is unique on
+   ``(chunk_id, question)``, ``knowhow_cells`` on ``(row_id, column_id)``, and
+   so on: a source that deleted a row and made an equivalent one gives that
+   row a new primary key and the same business key, so an upsert keyed on the
+   primary key inserts a SECOND row and the unique index rejects it. Sweeping
+   first removes the superseded row while it is still the only one. What the
+   sweep cannot remove -- a collision against a row it is not allowed to touch
+   -- is caught by name before the statement runs (``_assert_no_unique_key_
+   collision``) rather than surfacing as a constraint error.
+
+   **``memory_items`` and its revision/provenance/embedding rows are exempt**:
+   the target's users create memories on a mirror and §5 lets those coexist,
+   but nothing on a memory row says which side made it, so a "not in the
+   package" sweep cannot tell a source-side deletion from a target-side
+   creation and would destroy the second. Source-side memory deletions wait
+   for PR-3's change log, which replays them by key instead of inferring them.
+   **The closure of a target-owned memory source is exempt too** -- confirming
+   a memory on a mirror materializes a synthetic source with its own elements,
+   chunks, vectors and objects (``_protected_sources``). The report says both
+   in ``warnings``.
+3b. **Rows.** One transaction per table, in ``synced_tables()`` order, with
+   the table's ``sync_import_progress`` row written inside that same
+   transaction. A crash therefore loses at most the table that was in flight,
+   and a re-run re-applies only tables that never completed. A SQLite
+   target's two hand-maintained FTS5 indexes are re-projected in the same
+   transaction as the table they index (``_SQLITE_FTS_REBUILD``).
 4. **Files.** After the rows, because a row is what makes a file meaningful
    and a crash between them must not leave installed bytes with no row. Each
    notebook directory is staged beside its destination and swapped in; the
@@ -865,6 +881,10 @@ class _Context:
     # phase so _reconcile_staging can tell an abandoned retired directory
     # (its package finished) from one a live run still owns.
     finished_packages: frozenset[str] = frozenset()
+    # Target-owned synthetic memory sources in the package's notebooks; the
+    # rows reachable from them survive the snapshot sweep. Resolved once, at
+    # the start of the reconcile phase, from state the import does not change.
+    protected_sources: frozenset[str] = frozenset()
 
 
 def _row_key(row: Mapping[str, Any], primary_key: Sequence[str]) -> str:
@@ -1859,6 +1879,129 @@ def _rebuild_sqlite_fts(
         conn.execute(insert.format(placeholders=placeholders), tuple(batch))
 
 
+def _unique_keys(
+    backend: _Backend, conn: Any, table: str, primary_key: Sequence[str]
+) -> tuple[tuple[str, ...], ...]:
+    """The table's UNIQUE constraints other than its primary key, read from
+    the target's catalog.
+
+    A primary key is not a table's only identity, and an upsert only knows
+    about one of them. Reading the rest from the catalog rather than listing
+    them here means a constraint added by a later migration is covered the day
+    it exists, with no second roster to keep in step.
+
+    PARTIAL unique indexes are skipped on purpose: their constraint only binds
+    rows satisfying a predicate this module does not evaluate (today
+    ``notebooks.share_token``, ``sources.memory_id``, ``groups.invite_token``
+    and ``memory_items(created_by, source_answer_id)``), so treating them as
+    unconditional would reject imports over collisions the database would
+    never raise.
+    """
+    key_set = set(primary_key)
+    found: list[tuple[str, ...]] = []
+    if backend.is_postgres:
+        rows = backend.fetch(
+            conn,
+            "SELECT i.indexrelid AS oid, "
+            "  (SELECT array_agg(a.attname ORDER BY k.ord) FROM "
+            "     unnest(i.indkey::smallint[]) WITH ORDINALITY AS k(attnum, ord) "
+            "     JOIN pg_attribute a ON a.attrelid = i.indrelid "
+            "       AND a.attnum = k.attnum) AS names "
+            "FROM pg_index i WHERE i.indrelid = ?::regclass "
+            "AND i.indisunique AND NOT i.indisprimary AND i.indpred IS NULL",
+            (table,),
+        )
+        for row in rows:
+            names = tuple(str(name) for name in (row["names"] or ()))
+            if names and set(names) != key_set:
+                found.append(names)
+        return tuple(found)
+    for index in backend.fetch(conn, f"PRAGMA index_list({_ident(table)})"):
+        if int(index["unique"]) != 1 or int(index["partial"] or 0) == 1:
+            continue
+        if str(index["origin"]) == "pk":
+            continue
+        names = tuple(
+            str(column["name"])
+            for column in backend.fetch(
+                conn, f"PRAGMA index_info({_ident(str(index['name']))})"
+            )
+        )
+        if names and set(names) != key_set:
+            found.append(names)
+    return tuple(found)
+
+
+def _assert_no_unique_key_collision(
+    backend: _Backend,
+    conn: Any,
+    table: str,
+    keys: Sequence[tuple[str, ...]],
+    rows: Sequence[Mapping[str, Any]],
+    primary_key: Sequence[str],
+) -> None:
+    """Refuse, by name, a package row that would collide with a target row on
+    a UNIQUE constraint other than the primary key.
+
+    The reconcile phase removes most of these before they can happen: a row
+    the source replaced is gone by the time the replacement is inserted. What
+    reaches here is a collision against a row the sweep is NOT allowed to
+    touch -- something in the exempt set, or under a target-owned source's
+    protection. That is a genuine conflict between the two environments, and
+    the useful outcome is an error naming the table, the key and both row ids,
+    not an ``IntegrityError`` from the driver with neither.
+    """
+    for key in keys:
+        wanted: dict[tuple[Any, ...], tuple[Any, ...]] = {}
+        for row in rows:
+            if any(column not in row for column in key):
+                break
+            wanted[tuple(row[column] for column in key)] = tuple(
+                row.get(column) for column in primary_key
+            )
+        else:
+            _probe_unique_key(
+                backend, conn, table, key, wanted, primary_key
+            )
+
+
+def _probe_unique_key(
+    backend: _Backend,
+    conn: Any,
+    table: str,
+    key: Sequence[str],
+    wanted: Mapping[tuple[Any, ...], tuple[Any, ...]],
+    primary_key: Sequence[str],
+) -> None:
+    if not wanted:
+        return
+    projection = ", ".join(
+        _ident(column) for column in (*primary_key, *key) if column
+    )
+    leading = sorted({item[0] for item in wanted}, key=repr)
+    for chunk in _batched(leading):
+        placeholders = ",".join("?" for _ in chunk)
+        for row in backend.fetch(
+            conn,
+            f"SELECT {projection} FROM {_ident(table)} "
+            f"WHERE {_ident(key[0])} IN ({placeholders})",
+            chunk,
+        ):
+            found = tuple(row[column] for column in key)
+            mine = wanted.get(found)
+            if mine is None:
+                continue
+            theirs = tuple(row[column] for column in primary_key)
+            if theirs != mine:
+                raise SyncImportError(
+                    f"{table}: the package's row {mine} and the target's row "
+                    f"{theirs} both claim {tuple(key)}={found}, and the "
+                    "target's row is one this import must not remove "
+                    "(an exempt table, or under a target-owned memory "
+                    "source). Resolve it at the target before re-importing."
+                )
+
+
 def _apply_table(
     backend: _Backend, conn: Any, table: str, context: _Context
 ) -> TableOutcome:
@@ -1889,6 +2032,13 @@ def _apply_table(
     overrides = _insert_overrides(table, context)
     encode = _value_encoder(backend, conn, table)
 
+    unique_keys = (
+        ()
+        if spec.seed_only or not primary_key
+        # A seed_only table inserts with a bare ON CONFLICT DO NOTHING, which
+        # cannot raise on any index; a keyless table has no upsert at all.
+        else _unique_keys(backend, conn, table, primary_key)
+    )
     if not primary_key:
         _replace_scope(backend, conn, table, context)
     if table in _SOURCE_AUTHORITATIVE:
@@ -1933,6 +2083,10 @@ def _apply_table(
             kept = allowed
         if not kept:
             continue
+        if unique_keys:
+            _assert_no_unique_key_collision(
+                backend, conn, table, unique_keys, kept, primary_key
+            )
         keys = [tuple(row.get(column) for column in primary_key) for row in kept]
         present = known.present(keys) if primary_key else set()
         params: list[tuple[Any, ...]] = []
@@ -1983,6 +2137,14 @@ def _replace_scope(
         f"{table} has no primary key at the target; this package's notebooks "
         "were replaced wholesale in it rather than upserted"
     )
+    if table in _SOURCE_LINK and context.protected_sources:
+        # The wholesale clear has to spare a target-owned memory source's
+        # rows for the same reason the snapshot sweep does. With no primary
+        # key to delete by, the surviving rows are decided here and the rest
+        # are deleted by full-row equality -- the same shape _prune_table
+        # uses, and one that needs no unbounded NOT IN list.
+        _delete_unprotected_rows(backend, conn, table, context)
+        return
     for batch in _batched(list(context.manifest.notebooks)):
         placeholders = ",".join("?" for _ in batch)
         conn.execute(
@@ -1991,6 +2153,36 @@ def _replace_scope(
                 f"WHERE {_ident(scope.column)} IN ({placeholders})"
             ),
             tuple(batch),
+        )
+
+
+def _delete_unprotected_rows(
+    backend: _Backend, conn: Any, table: str, context: _Context
+) -> None:
+    columns = [
+        name
+        for name in backend.columns(conn, table)
+        if not (name == "ordinal" and table in POSTGRES_ROWID_ORDINAL_TABLES)
+    ]
+    statement = _scope_select(backend, conn, table, columns, source_link=True)
+    doomed: list[tuple[Any, ...]] = []
+    for batch in _batched(list(context.manifest.notebooks)):
+        placeholders = ",".join("?" for _ in batch)
+        for row in backend.stream(
+            conn, statement.format(placeholders=placeholders), batch
+        ):
+            if str(row[_SOURCE_LINK_COLUMN] or "") in context.protected_sources:
+                continue
+            doomed.append(tuple(row[name] for name in columns))
+    if not doomed:
+        return
+    predicate = " AND ".join(f"{_ident(name)} = ?" for name in columns)
+    for start in range(0, len(doomed), _ROW_BATCH):
+        _executemany(
+            backend,
+            conn,
+            f"DELETE FROM {_ident(table)} WHERE {predicate}",
+            doomed[start : start + _ROW_BATCH],
         )
 
 
@@ -2097,14 +2289,114 @@ def _prunable_tables(backend: _Backend, conn: Any) -> tuple[str, ...]:
     return tuple(chosen)
 
 
+# How a row of this table reaches the ``sources`` row it was derived from, as
+# a SQL expression over the alias ``t0``. Used to spare a target-owned
+# synthetic memory source's closure from the snapshot sweep -- see
+# ``_protected_sources``. A table absent from here has no path to a source at
+# all, or has one this module does not follow; see that function's docstring
+# for the boundary.
+_SOURCE_LINK_COLUMN = "__sync_source__"
+
+_DIRECT_SOURCE_TABLES = (
+    "chunks",
+    "chunk_questions",
+    "element_embeddings",
+    "knowledge_object_sources",
+    "knowledge_objects",
+    "knowledge_relations",
+    "knowledge_source_facts",
+    "knowledge_source_fact_elements",
+    "kg_source_profiles",
+    "notebook_assets",
+    "source_authors",
+    "source_elements",
+    "source_paper_meta",
+)
+
+_SOURCE_LINK: dict[str, str] = {
+    # The source row itself.
+    "sources": 't0."id"',
+    # Reached through the chunk / object / relation the row hangs off, for the
+    # three vector-ish tables that carry no source_id of their own.
+    "chunk_embeddings": (
+        '(SELECT c."source_id" FROM "chunks" c WHERE c."id" = t0."chunk_id")'
+    ),
+    "chunk_elements": (
+        '(SELECT c."source_id" FROM "chunks" c WHERE c."id" = t0."chunk_id")'
+    ),
+    "knowledge_embeddings": (
+        '(SELECT o."source_id" FROM "knowledge_objects" o '
+        'WHERE o."id" = t0."object_id")'
+    ),
+    "relation_embeddings": (
+        '(SELECT r."source_id" FROM "knowledge_relations" r '
+        'WHERE r."id" = t0."relation_id")'
+    ),
+    **{table: 't0."source_id"' for table in _DIRECT_SOURCE_TABLES},
+}
+
+
+def _protected_sources(
+    backend: _Backend, conn: Any, context: _Context
+) -> frozenset[str]:
+    """Sources in the package's notebooks that the TARGET owns, and whose
+    derived rows the snapshot sweep must not touch.
+
+    Confirming a memory on a mirror runs ``ingest_memory_source``, which
+    materializes a synthetic ``source_type='memory'`` row pointing at that
+    memory, plus its elements, chunks, vectors and knowledge objects. Those
+    rows are in the package's notebooks and are not in the package, so a
+    notebook-scoped sweep would read them as "the source deleted these" and
+    destroy a memory's entire retrievable form on every sync. A source is the
+    target's exactly when it is synthetic AND its memory is not one the
+    package carries -- a synthetic source for a MIRRORED memory does come from
+    the package and is reconciled normally.
+
+    **Known boundary**: only rows that reach a source are spared. The KG
+    aggregates aggregated ACROSS sources -- communities, community_members,
+    concept_clusters, canonical_relations, concept_comentions, mention_edges,
+    kg_community_edges -- carry no source id, so a local memory's
+    contribution to them is swept and comes back on the target's next KG
+    rebuild (§6 already requires one after an import). Registered here rather
+    than papered over.
+    """
+    package_memories = {
+        value
+        for value in _package_column(context, "memory_items", "id")
+        if isinstance(value, str) and value
+    }
+    protected: set[str] = set()
+    for batch in _batched(list(context.manifest.notebooks)):
+        placeholders = ",".join("?" for _ in batch)
+        for row in backend.stream(
+            conn,
+            "SELECT id, memory_id FROM sources "
+            f"WHERE notebook_id IN ({placeholders}) AND source_type = 'memory'",
+            batch,
+        ):
+            memory = str(row["memory_id"] or "")
+            if memory and memory not in package_memories:
+                protected.add(str(row["id"]))
+    return frozenset(protected)
+
+
 def _scope_select(
-    backend: _Backend, conn: Any, table: str, columns: Sequence[str]
+    backend: _Backend,
+    conn: Any,
+    table: str,
+    columns: Sequence[str],
+    *,
+    source_link: bool = False,
 ) -> str:
     """``SELECT <columns> FROM <table>`` restricted to a bind list of notebook
     ids, following the table's scope -- its own column, or the join chain up
     to the ancestor that has one. Reuses the exporter's join builder so the
-    two sides resolve a scope the same way."""
-    projection = ", ".join(f"t0.{_ident(column)}" for column in columns)
+    two sides resolve a scope the same way. ``source_link`` adds the row's
+    owning source id as an extra projected column."""
+    projected = [f"t0.{_ident(column)}" for column in columns]
+    if source_link:
+        projected.append(f"{_SOURCE_LINK[table]} AS {_ident(_SOURCE_LINK_COLUMN)}")
+    projection = ", ".join(projected)
     head = f"SELECT {projection} FROM {_ident(table)} t0"
     scope = spec_for(table).scope
     if scope is None:
@@ -2128,13 +2420,20 @@ def _prune_table(
         tuple(decode_value(row.get(column)) for column in primary_key)
         for row in _iter_lines(context.package_dir / rows_path(table))
     }
-    statement = _scope_select(backend, conn, table, primary_key)
+    linked = table in _SOURCE_LINK and bool(context.protected_sources)
+    statement = _scope_select(
+        backend, conn, table, primary_key, source_link=linked
+    )
     stale: list[tuple[Any, ...]] = []
     for batch in _batched(list(context.manifest.notebooks)):
         placeholders = ",".join("?" for _ in batch)
         for row in backend.stream(
             conn, statement.format(placeholders=placeholders), batch
         ):
+            if linked and str(
+                row[_SOURCE_LINK_COLUMN] or ""
+            ) in context.protected_sources:
+                continue
             key = tuple(row[column] for column in primary_key)
             if key not in carried:
                 stale.append(key)
@@ -2167,6 +2466,14 @@ def _prune_snapshot(backend: _Backend, context: _Context, done: set[str]) -> Non
     total = 0
     with backend.read() as conn:
         tables = _prunable_tables(backend, conn)
+        context.protected_sources = _protected_sources(backend, conn, context)
+    if context.protected_sources:
+        context.ledger.warn(
+            f"{len(context.protected_sources)} target-owned memory source(s) "
+            "and the rows derived from them were spared the reconciliation; "
+            "their contribution to the cross-source KG aggregates is not "
+            "(see _protected_sources)"
+        )
     for table in tables:
         step = _prune_step(table)
         if step in done:
@@ -2705,8 +3012,8 @@ def _import(
         with backend.read() as conn:
             done = _completed_steps(backend, conn, manifest.package_id)
             context.finished_packages = _finished_packages(backend, conn)
-        _apply_rows(backend, context, done)          # phase 3
-        _prune_snapshot(backend, context, done)      # phase 3b
+        _prune_snapshot(backend, context, done)      # phase 3a
+        _apply_rows(backend, context, done)          # phase 3b
         if _FILES_PHASE in done:
             ledger.warn(
                 "the file phase was already complete from an earlier run of "

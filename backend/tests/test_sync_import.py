@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1671,3 +1672,266 @@ def test_a_failure_while_creating_users_still_settles_the_run(
     report = _import(target, package)
     assert report.error == ""
     assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 1
+
+
+# ------------------------------------- identity is not only the primary key
+
+
+def _add_question(repo, chunk_id: str, notebook_id: str, question: str) -> str:
+    """One chunk question. ``(chunk_id, question)`` is UNIQUE, so replacing a
+    question with an equivalent one under a NEW id is the shape that breaks an
+    upsert keyed on the primary key alone."""
+    question_id = f"q-{uuid.uuid4().hex[:8]}"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO chunk_questions(id,notebook_id,source_id,chunk_id,"
+            "question,vector,created_at) "
+            "SELECT ?,?,source_id,?,?,?,? FROM chunks WHERE id=?",
+            (question_id, notebook_id, chunk_id, question, b"", MOMENT, chunk_id),
+        )
+    return question_id
+
+
+def test_a_row_reborn_under_a_new_id_with_the_same_business_key_imports(
+    source, target, package, tmp_path
+):
+    """The reconcile phase has to run BEFORE the upsert. chunk_questions is
+    unique on (chunk_id, question): a source that deleted a question and
+    re-derived the same text gives it a new primary key and the same business
+    key, so upserting first inserts a second row and the unique index rejects
+    it. Sweeping first removes the superseded row while it is still alone."""
+    chunk = _one(
+        source["repo"],
+        "SELECT id FROM chunks WHERE notebook_id=? ORDER BY id LIMIT 1",
+        (source["exported"],),
+    )["id"]
+    first_id = _add_question(source["repo"], chunk, source["exported"], "为什么?")
+    _import(target, _export(source, tmp_path / "out1"))
+    assert _count(
+        target["repo"], "SELECT COUNT(*) FROM chunk_questions WHERE id=?", (first_id,)
+    ) == 1
+
+    with source["repo"]._write() as db:
+        db.execute("DELETE FROM chunk_questions WHERE id=?", (first_id,))
+    second_id = _add_question(source["repo"], chunk, source["exported"], "为什么?")
+    assert second_id != first_id
+
+    report = _import(target, _export(source, tmp_path / "out2"))
+
+    assert report.error == ""
+    rows = _fetch(
+        target["repo"],
+        "SELECT id, question FROM chunk_questions WHERE chunk_id=?",
+        (chunk,),
+    )
+    assert [(str(row["id"]), str(row["question"])) for row in rows] == [
+        (second_id, "为什么?")
+    ]
+
+
+def test_the_unique_key_roster_is_read_from_the_target_catalog():
+    """Read from the catalog, not from a list in this module -- and partial
+    indexes are skipped, because their constraint only binds rows satisfying a
+    predicate the importer does not evaluate."""
+    from app.migration.sync.import_ import _Backend, _unique_keys
+
+    import tempfile
+
+    root = Path(tempfile.mkdtemp())
+    settings = _settings(root)
+    repo = SQLiteRepository(settings)
+    try:
+        backend = _Backend(settings, Path(__file__).resolve().parents[2])
+        try:
+            with backend.read() as conn:
+                assert _unique_keys(backend, conn, "chunk_questions", ("id",)) == (
+                    ("chunk_id", "question"),
+                )
+                assert _unique_keys(backend, conn, "knowhow_cells", ("id",)) == (
+                    ("row_id", "column_id"),
+                )
+                assert _unique_keys(backend, conn, "chunks", ("id",)) == ()
+                # Partial: notebooks.share_token and sources.memory_id.
+                assert _unique_keys(backend, conn, "notebooks", ("id",)) == ()
+                assert _unique_keys(backend, conn, "sources", ("id",)) == ()
+        finally:
+            backend.close()
+    finally:
+        repo.close()
+
+
+def test_an_unresolvable_business_key_collision_is_named_not_raised_as_sql(
+    source, target, package, tmp_path
+):
+    """A collision the sweep is not allowed to resolve -- here forced by
+    pointing the target's row at a chunk the sweep protects -- has to come
+    back as a sentence naming both rows, not as a driver IntegrityError."""
+    from app.migration.sync import import_ as module
+
+    chunk = _one(
+        source["repo"],
+        "SELECT id FROM chunks WHERE notebook_id=? ORDER BY id LIMIT 1",
+        (source["exported"],),
+    )["id"]
+    _add_question(source["repo"], chunk, source["exported"], "同一个问题")
+    _import(target, package)
+    second = _export(source, tmp_path / "out2")
+    # Stand in for "the sweep may not touch this row" by disabling the sweep
+    # for this table only; what is under test is the collision REPORT.
+    monkeypatch = pytest.MonkeyPatch()
+    real = module._prune_table
+
+    def skip_questions(backend, conn, table, context):
+        return 0 if table == "chunk_questions" else real(backend, conn, table, context)
+
+    with target["repo"]._write() as db:
+        db.execute(
+            "INSERT INTO chunk_questions(id,notebook_id,source_id,chunk_id,"
+            "question,vector,created_at) "
+            "SELECT ?,?,source_id,?,?,?,? FROM chunks WHERE id=?",
+            ("q-target-own", source["exported"], chunk, "同一个问题", b"", MOMENT,
+             chunk),
+        )
+    try:
+        monkeypatch.setattr(module, "_prune_table", skip_questions)
+        with pytest.raises(SyncImportError) as failure:
+            _import(target, second)
+    finally:
+        monkeypatch.undo()
+
+    message = str(failure.value)
+    assert "chunk_questions" in message
+    assert "q-target-own" in message
+    assert "('chunk_id', 'question')" in message
+
+
+# ------------------------- a target-owned memory's derived closure survives
+
+
+def _materialize_local_memory(repo, notebook_id: str) -> dict[str, str]:
+    """What ``ingest_memory_source`` leaves behind when a user confirms a
+    memory on a mirror: a synthetic source pointing at that memory, plus the
+    element/chunk/vector/object closure derived from it. Written as raw rows
+    because the service seam needs a model to embed with."""
+    ids = {
+        "memory": "mem-target-own",
+        "source": "src-memory-synthetic",
+        "element": "el-memory-synthetic",
+        "chunk": "ch-memory-synthetic",
+        "object": "ko-memory-synthetic",
+    }
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,"
+            "title,content_md,tags_json,created_at,updated_at) "
+            "VALUES(?,?,?,'external_agent','confirmed','本地记忆','正文','[]',?,?)",
+            (ids["memory"], notebook_id, ALICE[1], MOMENT, MOMENT),
+        )
+        db.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,memory_id,"
+            "created_at,updated_at) VALUES(?,?,?,'memory',?,?,?)",
+            (ids["source"], notebook_id, "本地记忆", ids["memory"], MOMENT, MOMENT),
+        )
+        db.execute(
+            "INSERT INTO source_elements(id,source_id,element_type,"
+            "location_label,text,created_at) VALUES(?,?,'paragraph','','正文',?)",
+            (ids["element"], ids["source"], MOMENT),
+        )
+        db.execute(
+            "INSERT INTO chunks(id,notebook_id,source_id,text,created_at) "
+            "VALUES(?,?,?,?,?)",
+            (ids["chunk"], notebook_id, ids["source"], "正文", MOMENT),
+        )
+        db.execute(
+            "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES(?,?,?)",
+            (ids["chunk"], notebook_id, "正文"),
+        )
+        db.execute(
+            "INSERT INTO chunk_embeddings(chunk_id,notebook_id,vector,created_at) "
+            "VALUES(?,?,?,?)",
+            (ids["chunk"], notebook_id, bytes(range(8)), MOMENT),
+        )
+        db.execute(
+            "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,owner,"
+            "payload,evidence,source_id,created_at,updated_at,last_reviewed) "
+            "VALUES(?,?,'concept','approved','','{}','[]',?,?,?,'')",
+            (ids["object"], notebook_id, ids["source"], MOMENT, MOMENT),
+        )
+        db.execute(
+            "INSERT INTO knowledge_object_sources(object_id,source_id,notebook_id) "
+            "VALUES(?,?,?)",
+            (ids["object"], ids["source"], notebook_id),
+        )
+    return ids
+
+
+def test_a_target_owned_memorys_derived_rows_survive_the_reconciliation(
+    source, target, package, tmp_path
+):
+    """Confirming a memory on a mirror materializes a synthetic source with a
+    whole closure hanging off it. Those rows are in the package's notebooks
+    and are not in the package, so a naive sweep destroys a local memory's
+    entire retrievable form on every single sync."""
+    _import(target, package)
+    repo = target["repo"]
+    notebook = source["exported"]
+    local = _materialize_local_memory(repo, notebook)
+    doomed_source = _one(
+        source["repo"],
+        "SELECT id FROM sources WHERE notebook_id=? AND source_type<>'memory'",
+        (notebook,),
+    )["id"]
+    with source["repo"]._write() as db:
+        db.execute("DELETE FROM sources WHERE id=?", (doomed_source,))
+
+    report = _import(target, _export(source, tmp_path / "out2"))
+
+    assert report.error == ""
+    # Everything derived from the target's own memory is still there ...
+    for table, column, value in (
+        ("sources", "id", local["source"]),
+        ("source_elements", "id", local["element"]),
+        ("chunks", "id", local["chunk"]),
+        ("chunk_embeddings", "chunk_id", local["chunk"]),
+        ("knowledge_objects", "id", local["object"]),
+        ("knowledge_object_sources", "object_id", local["object"]),
+        ("memory_items", "id", local["memory"]),
+    ):
+        assert _count(
+            repo, f"SELECT COUNT(*) FROM {table} WHERE {column}=?", (value,)
+        ) == 1, table
+    assert local["chunk"] in _fts_chunk_ids(repo, notebook)
+    # ... and the ordinary source the SOURCE deleted is still swept.
+    assert _count(
+        repo, "SELECT COUNT(*) FROM sources WHERE id=?", (doomed_source,)
+    ) == 0
+    assert _count(
+        repo, "SELECT COUNT(*) FROM chunks WHERE source_id=?", (doomed_source,)
+    ) == 0
+    assert any("target-owned memory source" in w for w in report.warnings)
+
+
+def test_a_synthetic_source_for_a_MIRRORED_memory_is_not_protected(
+    source, target, package, tmp_path
+):
+    """The protection is "synthetic AND its memory is not one the package
+    carries". A synthetic source for a memory the package DOES carry came from
+    the package and is reconciled like anything else -- otherwise the sweep
+    could never retire one the source deleted."""
+    _import(target, package)
+    repo = target["repo"]
+    notebook = source["exported"]
+    mirrored_memory = _memory_id(repo, notebook)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,memory_id,"
+            "created_at,updated_at) VALUES(?,?,?,'memory',?,?,?)",
+            ("src-mirrored-memory", notebook, "镜像记忆", mirrored_memory,
+             MOMENT, MOMENT),
+        )
+
+    _import(target, _export(source, tmp_path / "out2"))
+
+    assert _count(
+        repo, "SELECT COUNT(*) FROM sources WHERE id=?", ("src-mirrored-memory",)
+    ) == 0
