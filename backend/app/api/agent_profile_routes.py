@@ -498,6 +498,19 @@ def clear_notebook_experiences(
 ) -> ExperiencePartitionCleared:
     _require_experience_manager(notebook_id, user)
     store = retrieval_experience_store()
+    # ⚠ 有一批正在跑(或正排着队)时不清空,回 409。那一批此刻可能正卡在
+    # ``chat_json()`` 上,清完之后它会把结果 upsert 回这个分区:用户看到「已清空
+    # N 条」,刷新一下行又回来了——一个看起来像「删除没生效」的假象。复用
+    # ``_REBUILD_BUSY_MESSAGE``:对用户来说这与按下「立即整理」撞上同一批是同
+    # 一件事,「正在整理」正是该说的那句。
+    #
+    # ⚠ 这**缩小**窗口,不消除窗口:检查与删除是两条语句,恰在其间被认领的
+    # 一批仍然会在之后写入。真正关死它需要 store 自己认的栅栏(分区代次,删除
+    # 时递增、蒸馏写事务里复核)——登记在案、刻意没做:剩下的窗口是微秒级,而
+    # 被这一句挡掉的是整整一次模型调用那么长,且失败形态是几条条目重新出现,
+    # 不是数据损坏。
+    if retrieval_experience_jobs_service().is_active(notebook_id):
+        raise user_error(409, _REBUILD_BUSY_MESSAGE)
     # ⚠ 刻意**不**判总闸(模块 docstring 第三条):关开关是「从现在起不再记」,
     # 不是「把记过的藏起来、还删不掉」。
     #

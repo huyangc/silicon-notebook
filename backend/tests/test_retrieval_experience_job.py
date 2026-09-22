@@ -1827,6 +1827,92 @@ def test_pending_asks_override_the_cooldown(monkeypatch):
     assert service.distill_now("nb-a") == MANUAL_DISTILL_STARTED
 
 
+def test_a_manual_batch_settles_the_backlog_so_the_cooldown_can_bite(monkeypatch):
+    """codex #771 R1 P2:不消费积压时冷却形同虚设。
+
+    ``start()`` 刻意不动计数,而冷却的判据是「pending 为 0」。两条规则撞在一起,
+    一次**低于阈值**的提问就把 pending 永远钉在 1,于是每一次点击都压过冷却、
+    对同一批输入再买一次模型调用。手动认领因此要像自动路径一样结清这个库的账。
+    """
+    submitted = []
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda fn, *args, name=None, notify_pending=False, **kwargs:
+            submitted.append(args),
+    )
+    service = _service([], _REPLY)
+
+    service.note_ask_completed("nb-a")                 # 一次提问,远不到阈值 10
+    assert service._notebook_pending["nb-a"] == 1
+
+    assert service.distill_now("nb-a") == MANUAL_DISTILL_STARTED
+    # 认领即结清:这一批看的正是那一次提问。
+    assert "nb-a" not in service._notebook_pending
+    service.run("nb-a")
+
+    # 立刻再点 —— 这一次冷却真的挡住了(修复前这里是 STARTED,第二次模型调用)
+    assert service.distill_now("nb-a") == MANUAL_DISTILL_COOLDOWN
+    assert len(submitted) == 1
+
+    # 又来一次提问 → 有新输入,放行。
+    service.note_ask_completed("nb-a")
+    assert service.distill_now("nb-a") == MANUAL_DISTILL_STARTED
+    assert len(submitted) == 2
+
+
+def test_a_manual_claim_takes_the_partition_out_of_the_waiting_room(monkeypatch):
+    """手动认领要顺带摘掉等待室里的那张号。
+
+    留着它,这一批跑完之后 ``_maybe_requeue`` 会立刻再排一批——同一个库、几乎
+    完全重叠的样本、零积压,正是等待室去重要防的那件事。
+    """
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda fn, *args, name=None, notify_pending=False, **kwargs: None,
+    )
+    service = _service([], _REPLY)
+    # 先占住槽位,让 nb-a 攒够阈值后只能排队。
+    service.start("")
+    for _ in range(10):
+        service.note_ask_completed("nb-a")
+    assert list(service._queue) == ["nb-a"]
+
+    # 释放槽位但不走 requeue,模拟「队里还排着 nb-a 时用户按了按钮」。
+    with service._lock:
+        service._running = False
+        service._running_partition = None
+
+    assert service.distill_now("nb-a") == MANUAL_DISTILL_STARTED
+    assert list(service._queue) == []
+    assert "nb-a" not in service._queued
+    assert "nb-a" not in service._notebook_pending
+
+
+def test_is_active_reports_the_running_and_the_queued_partition(monkeypatch):
+    """``is_active`` 是清空端点唯一的判据:正在跑、或排着队,都算「在动」。"""
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda fn, *args, name=None, notify_pending=False, **kwargs: None,
+    )
+    service = _service([], _REPLY)
+    assert service.is_active("nb-a") is False
+
+    assert service.distill_now("nb-a") == MANUAL_DISTILL_STARTED
+    assert service.is_active("nb-a") is True
+    # 只对**那一个**分区为真:别的库、以及全局分区,都不受这一批影响。
+    assert service.is_active("nb-b") is False
+    assert service.is_active("") is False
+
+    # 排队中的分区同样算「在动」——它马上就会拿到槽位并写回这个分区。
+    for _ in range(10):
+        service.note_ask_completed("nb-b")
+    assert list(service._queue) == ["nb-b"]
+    assert service.is_active("nb-b") is True
+
+    service.run("nb-a")                      # 那一批跑完,槽位与队列都被结算
+    assert service.is_active("nb-a") is False
+
+
 def test_a_restart_leaves_the_button_usable(monkeypatch):
     """§13-Q4 的兜底场景:重启后 pending 归零,但 ``_last_finished`` 也是空的。
 
