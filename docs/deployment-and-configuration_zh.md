@@ -977,11 +977,12 @@ AGENT_PROFILE_ENABLED        # 「AI 对这个库的理解」总闸：同时管�
 AGENT_PROFILE_BASE_TRIGGER   # 共享底座层（corpus_shape/key_entities/corpus_gaps）重新巡固前累计的来源变更次数（默认 5）
 AGENT_PROFILE_OVERLAY_TRIGGER # 该成员私有覆盖层（retrieval_notes/usage_gaps）重新巡固前累计的已完成提问次数；已完成的深度报告直接达阈（默认 10）
 AGENT_CALL_LOG_ENABLED       # Agent 每次经 MCP 落到某个笔记本上的工具调用记一行（哪个 Agent、什么时候、按哪一档能力），只有该成员自己能在「Agent 记录」里查看与清空（默认 true；false 时零写入，判据在开事务之前）。**叠在 AGENT_PROFILE_ENABLED 之上**而不是与它并列：这份记账唯一的读处就是那个面板，而总闸关掉时它的入口按钮一个节点都不渲染，所以总闸关着还记就是在攒没人打开得了的行。读与清空**两把闸都不跟随**——关掉它是「从现在起不记」，绝不是「把已经记下的藏起来或冻住」。记账仍然既不进 prompt（巡固读取在 SQL 里钉死 kind='note'），也不触发任何巡固
-RETRIEVAL_EXPERIENCE_ENABLED # 部署级全局检索策略经验库（Agentic Memory P2）的蒸馏总闸：是否读取已完成提问并蒸馏进 retrieval_experiences（默认 true——部署可以只蒸馏、只观测而从不注入，见下面的 RETRIEVAL_EXPERIENCE_INJECT_ENABLED）
-RETRIEVAL_EXPERIENCE_INJECT_ENABLED # 同一份经验库的独立注入闸：蒸出的块是否会被加进 plan/reflect prompt（默认 **false**——先攒够观测数据再决定是否开启；关闭时在注入侧逐字等于该特性不存在：不读表、不拼块、不记 trace 步）
+RETRIEVAL_EXPERIENCE_ENABLED # 检索策略经验库（Agentic Memory P2，2026-09-22 起按笔记本分区）两条蒸馏链路共用的总闸：是否读取已完成提问并蒸馏进 retrieval_experiences（默认 true——部署可以只蒸馏、只观测而从不注入，见下面的 RETRIEVAL_EXPERIENCE_INJECT_ENABLED）
+RETRIEVAL_EXPERIENCE_INJECT_ENABLED # 同一份经验库的独立注入闸，两个分区共用：蒸出的块是否会被加进 plan/reflect prompt（默认 **false**——先攒够观测数据再决定是否开启；关闭时在注入侧逐字等于该特性不存在：不读表、不拼块、不记 trace 步）
 REASONING_CONSULT_MEMORY_ENABLED # consult_memory reflect 动作（Agentic Memory P4）的按场景 kill switch（纵深防御）；这个动作真正的可用性闸是「retrieval_effort 为 deep/thorough/exhaustive 之一 且 RETRIEVAL_EXPERIENCE_INJECT_ENABLED 也开着」——单独把这个开关打开、注入闸仍关着时，动作不会出现（默认 true）
 REASONING_MAX_CONSULT_MEMORY # 每 run 的 consult_memory 调用次数上限（默认 2；ge=0）
-RETRIEVAL_EXPERIENCE_TRIGGER # 蒸馏一批前需累计的已完成提问数（部署级全局，跨所有笔记本与用户；默认 40；ge=1）
+RETRIEVAL_EXPERIENCE_TRIGGER # 全局分区链路蒸馏一批前需累计的已完成提问数（跨所有笔记本与用户；默认 40；ge=1）
+RETRIEVAL_EXPERIENCE_NOTEBOOK_TRIGGER # 笔记本分区链路蒸馏一批前，单个笔记本需累计的已完成 reasoning 提问数（2026-09-22 新增；默认 10；ge=1）
 USER_SEARCH_PROFILE_ENABLED  # 每用户检索/回答风格偏好文档总闸（Agentic Memory P3 B 线）：后台归纳、Ask 规划/答案注入、`PATCH /me/search-profile` 可写性都由它决定（默认 true；关闭后注入/写入两侧处处逐字回到接入前——不归纳、不注入、`PATCH` 409——但 `GET /me` 仍照常返回该行上已存在的取值，不会伪造成 `search_profile: null`）
 USER_SEARCH_PROFILE_TRIGGER  # 确定性、零 LLM 的 `answer_language` 归纳任务再次运行前，该用户需累计的已完成提问数（默认 20；ge=1）
 CHUNK_RECALL                 # chunk 大召回数（默认 200；mix 候选池 / 无 rerank 时 MMR 候选）
