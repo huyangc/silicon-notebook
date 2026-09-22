@@ -427,17 +427,24 @@ def _capture_control_row(source: _Source, conn: Any) -> dict[str, Any] | None:
     }
 
 
+_CAPTURE_LOG_RANGE_SQL = (
+    "SELECT (SELECT MIN(seq) FROM sync_change_log) AS min_seq, "
+    "(SELECT MAX(seq) FROM sync_change_log) AS max_seq"
+)
+
+
 def _capture_log_range(source: _Source, conn: Any) -> dict[str, Any]:
     """``{"min_seq", "max_seq"}``, ``None``/``None`` on an empty log.
 
-    MIN and MAX in one statement so PostgreSQL's planner rewrites each into
-    its own Index Only Scan against ``idx_sync_change_log_table_seq``'s
-    ``seq`` ordering rather than a sequential scan of the log -- confirmed
-    with ``EXPLAIN`` against a populated table (pasted into this change's
-    report, not carried in the repo)."""
-    row = source.fetch(
-        conn, "SELECT MIN(seq) AS min_seq, MAX(seq) AS max_seq FROM sync_change_log"
-    )[0]
+    Two scalar subqueries, deliberately NOT ``SELECT MIN(seq), MAX(seq)`` in
+    one aggregate: SQLite only applies its min/max index optimization to a
+    query whose single aggregate is one MIN or one MAX, so the combined form
+    is a full ``SCAN sync_change_log`` (codex #783 r1). As two scalar
+    subqueries each endpoint is one primary-key probe on both backends
+    (PostgreSQL rewrites each into an Index Only Scan + LIMIT 1).
+    ``_CAPTURE_LOG_RANGE_SQL`` is shared with the test that pins the SQLite
+    query plan."""
+    row = source.fetch(conn, _CAPTURE_LOG_RANGE_SQL)[0]
     return {"min_seq": row["min_seq"], "max_seq": row["max_seq"]}
 
 
