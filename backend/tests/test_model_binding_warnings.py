@@ -145,12 +145,27 @@ def test_run_startup_still_emits_these_warnings_before_the_ready_line():
     ]
     assert len(calls) == 1, "唯一消费点:多一处或少一处都要重新想清楚顺序"
 
-    ready_lines = [
-        node.lineno
+    ready_markers = [
+        node
         for node in ast.walk(run_startup)
         if isinstance(node, ast.Constant)
         and isinstance(node.value, str)
         and node.value.startswith("startup: READY")
     ]
-    assert len(ready_lines) == 1
-    assert calls[0].lineno < ready_lines[0], "告警必须打在 READY 那行之前"
+    assert len(ready_markers) == 1
+    # 顺序按**源码顺序的节点位置**比,不按行号:行号是诊断元数据,不是身份
+    # (仓库策略 test_test_architecture_policy 的 line-number-identity 判据)。
+    # ``ast.walk`` 是广度优先、不保证源码顺序,所以自己按子节点顺序做一次前序遍历。
+    in_source_order = list(_source_order(run_startup))
+    assert in_source_order.index(calls[0]) < in_source_order.index(ready_markers[0]), (
+        "告警必须打在 READY 那行之前"
+    )
+
+
+def _source_order(node: ast.AST):
+    """Pre-order traversal following ``ast.iter_child_nodes`` -- the order the
+    statements appear in the source -- so two nodes can be compared by position
+    without ever reading their line numbers."""
+    yield node
+    for child in ast.iter_child_nodes(node):
+        yield from _source_order(child)
