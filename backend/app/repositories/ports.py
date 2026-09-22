@@ -3588,25 +3588,37 @@ class AskStateStorePort(Protocol):
     # plus, per step, the action type / human summary / duration / one count.
     # Never an answer body, never Memory content, never evidence text.
     def recent_completed_ask_runs(
-        self, *, job_limit: int, step_limit: int
+        self, *, job_limit: int, step_limit: int, notebook_id: str | None = None
     ) -> list[dict]: ...
-    # ⚠ Agentic Memory P2 (T5) — the DELIBERATELY UNSCOPED read on this port,
-    # and the only one. It takes no ``notebook_id`` and no ``user_id`` because
-    # it feeds the deployment-GLOBAL retrieval-experience library: what that
+    # ⚠ Agentic Memory P2 (T5) — the read on this port with NO ``user_id``,
+    # and the only one. It feeds the retrieval-experience library: what that
     # library learns is "in this shape of question, this retrieval action pays
     # off", a statement about tactics that would be worthless if it could only
     # be drawn from one person's runs.
     #
+    # ⚠ ``notebook_id`` (Agentic Memory P2, per-notebook partitioning) is the
+    # PARTITION the caller is distilling for, not a tenancy check: ``None``
+    # samples the whole deployment (the global partition's chain), a string
+    # adds ``notebook_id = ?``/``= %s`` to the job statement so one library's
+    # chain sees only its own runs. Both callers are the same distillation
+    # worker, and NEITHER of them gets a ``user_id`` — narrowing to a library
+    # is a product decision about whose advice this is, narrowing to a person
+    # is the thing this read must never be able to do. What comes back is
+    # byte-identical in shape either way, because the projection below is
+    # unchanged by the predicate.
+    #
     # It therefore CANNOT borrow the safety argument of the two reads above,
     # and must not be mistaken for a relative of them. Theirs is a predicate in
-    # the SQL text. This one's is the PROJECTION: the rows come back through
+    # the SQL text that decides WHOSE material a per-member product may quote.
+    # This one's safety is the PROJECTION: the rows come back through
     # ``project_run_row``/``project_run_step``, which keep an opaque run id, a
     # closed-vocabulary engine mode, per step an action type / one count / one
     # duration, and — from the ``intent`` step alone — a situation made of
     # bools, small ints and closed enum values. No question, no summary, no
-    # ``created_by``, no ``notebook_id``, no timestamp. Nothing that comes out
-    # of here can identify a person, a library or a topic, which is why it is
-    # safe to aggregate across all of them.
+    # ``created_by``, no ``notebook_id``, no timestamp. That holds with the
+    # partition predicate exactly as it held without one: the predicate picks
+    # which runs are counted, it never widens what survives of a run. Nothing
+    # that comes out of here can identify a person or a topic.
     #
     # ⚠ It must never appear in ANY of the agent-profile chains' port
     # allowlists. Both of those chains are defined by what they may NOT reach —

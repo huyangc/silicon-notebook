@@ -752,3 +752,141 @@ def test_a_partitioned_read_seeks_one_partition_instead_of_walking_the_table(
     assert "idx_retrieval_experiences_notebook" in plan, plan
     assert "SEARCH" in plan.upper(), plan
     assert "TEMP B-TREE" not in plan.upper(), plan
+
+
+# ============================================================================
+# 取数侧:``AskStateStore.recent_completed_ask_runs`` 的**可选**分区谓词
+# ============================================================================
+#
+# 它不是这张表的方法,但它是这条链路的另一半取数面,而且两侧 store 各写一遍
+# SQL——所以它的行为断言跟着 T2 落在这里,而不是散在某条服务层用例的替身里。
+# PostgreSQL 的同款断言在 ``tests/postgres/test_content_store_conformance.py``。
+
+_ASK_NOW = "2026-09-22T00:00:00+00:00"
+
+
+def _ask_state(tmp_path, store):
+    """复用 store fixture 已经迁移好的那个库,再挂一个 AskStateStore 上去。"""
+    from types import SimpleNamespace
+
+    from app.repositories.sqlite.ask_state_store import AskStateStore
+
+    return AskStateStore(
+        store.database,
+        SimpleNamespace(now=lambda: _ASK_NOW, new_id=lambda prefix: f"{prefix}-1"),
+    )
+
+
+def _seed_tenants(store, notebook_ids):
+    """``ask_jobs`` 有外键,所以这两张表得先有行——而 ``retrieval_experiences``
+    两头都没有外键,这正是它的分区必须靠显式登记删除、而不是靠级联的原因。"""
+    with store.database.write() as db:
+        db.execute(
+            "INSERT OR IGNORE INTO users(id,email,display_name,role,status,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+            ("user-x", "x@example.test", "X", "user", "active", _ASK_NOW, _ASK_NOW),
+        )
+        for notebook_id in notebook_ids:
+            db.execute(
+                "INSERT OR IGNORE INTO notebooks(id,name,purpose,primary_domain,"
+                "status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (notebook_id, notebook_id, "", "engineering", "ready", "user-x",
+                 _ASK_NOW, _ASK_NOW),
+            )
+
+
+def _seed_ask(store, job_id, *, notebook_id, mode="reasoning", status="done"):
+    """一条已完成的提问 + 两条轨迹步,直接写 SQL。
+
+    绕开 ``begin_durable_job`` 是刻意的:这里要钉的是**读**的谓词,走写侧会把
+    会话生命周期拖进一条关于取数的用例里。
+    """
+    import json
+
+    _seed_tenants(store, [notebook_id])
+    with store.database.write() as db:
+        db.execute(
+            "INSERT INTO ask_jobs(id,notebook_id,conversation_id,created_by,mode,"
+            "question,status,trace_json,answer_id,error,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,'','','',?,?)",
+            (job_id, notebook_id, f"conv-{job_id}", "user-x", mode,
+             f"{notebook_id} 里的问题", status, _ASK_NOW, _ASK_NOW),
+        )
+        steps = (
+            {"step_type": "intent", "summary": "已开始检索",
+             "detail": {"resolved_question": "原问题", "result_scope": "ranked",
+                        "completeness_required": False,
+                        "retrieval_effort": "standard", "entities": ["a"],
+                        "constraints": [], "excluded_topics": [],
+                        "mandatory_topics": []}},
+            {"step_type": "ppr", "summary": "扩展", "detail": {"count": 0}},
+        )
+        for seq, step in enumerate(steps):
+            db.execute(
+                "INSERT INTO ask_trace_steps(job_id,seq,step_json,created_at) "
+                "VALUES (?,?,?,?)",
+                (job_id, seq, json.dumps(step, ensure_ascii=False), _ASK_NOW),
+            )
+
+
+def test_the_run_sample_confines_itself_to_one_notebook_when_asked(tmp_path, store):
+    """单库链路的取数:``AND notebook_id = ?`` 在 SQL 里,不是 Python 侧过滤。
+
+    三条断言合起来才是判据:不传谓词时两个库都在(全局链路一个字没变)、传了
+    只剩那个库、传一个没有 run 的库得到空列表(而不是悄悄退回全表)。
+    """
+    ask_state = _ask_state(tmp_path, store)
+    _seed_ask(store, "job-a", notebook_id="nb-a")
+    _seed_ask(store, "job-b", notebook_id="nb-b")
+
+    everything = ask_state.recent_completed_ask_runs(job_limit=40, step_limit=600)
+    assert {row["run_id"] for row in everything} == {"job-a", "job-b"}
+
+    only_a = ask_state.recent_completed_ask_runs(
+        job_limit=40, step_limit=600, notebook_id="nb-a"
+    )
+    assert [row["run_id"] for row in only_a] == ["job-a"]
+    assert len(only_a[0]["steps"]) == 2
+
+    assert ask_state.recent_completed_ask_runs(
+        job_limit=40, step_limit=600, notebook_id="nb-nobody"
+    ) == []
+
+
+def test_the_partitioned_sample_projects_exactly_what_the_global_one_does(
+    tmp_path, store
+):
+    """谓词决定**哪些 run 被数**,绝不改变一条 run 留下什么。
+
+    这是分区化对隐私保证的全部承诺:投影面一个字节都没动,所以模型看到的东西
+    与分区落地前同形——没有问题原文、没有 ``created_by``、没有 ``notebook_id``。
+    """
+    ask_state = _ask_state(tmp_path, store)
+    _seed_ask(store, "job-a", notebook_id="nb-a")
+
+    partitioned = ask_state.recent_completed_ask_runs(
+        job_limit=40, step_limit=600, notebook_id="nb-a"
+    )
+    unpartitioned = ask_state.recent_completed_ask_runs(job_limit=40, step_limit=600)
+
+    assert partitioned == unpartitioned
+    assert set(partitioned[0]) == {"run_id", "mode", "steps"}
+    rendered = repr(partitioned)
+    assert "nb-a" not in rendered
+    assert "原问题" not in rendered and "里的问题" not in rendered
+    assert "user-x" not in rendered
+
+
+def test_the_partitioned_sample_still_refuses_unfinished_and_non_reasoning_runs(
+    tmp_path, store
+):
+    """既有的两道闸在谓词之后仍然成立——分区不是一条把它们绕开的新入口。"""
+    ask_state = _ask_state(tmp_path, store)
+    _seed_ask(store, "job-done", notebook_id="nb-a")
+    _seed_ask(store, "job-failed", notebook_id="nb-a", status="failed")
+    _seed_ask(store, "job-chunk", notebook_id="nb-a", mode="chunk")
+
+    rows = ask_state.recent_completed_ask_runs(
+        job_limit=40, step_limit=600, notebook_id="nb-a"
+    )
+    assert [row["run_id"] for row in rows] == ["job-done"]

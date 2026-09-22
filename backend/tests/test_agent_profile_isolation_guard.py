@@ -294,8 +294,9 @@ OBSERVATION_READ_METHODS = ("recent_observations", "list_observations")
 OWNER_PREDICATE_TOKENS = ("owner_id = ?", "owner_id = %s",
                           "owner_id=?", "owner_id=%s")
 
-#: P2-T5:``AskStateStorePort`` 上那条**刻意没有任何 user/notebook 谓词**的读。
-#: 它服务的是部署级全局的检索经验库,安全性来自投影(``project_run_row`` /
+#: P2-T5:``AskStateStorePort`` 上那条**刻意没有 user 谓词**的读(2026-09-22 起
+#: 它多了一个**可选**的 notebook 分区谓词:全局链路不传、单库链路传;user 那一维
+#: 仍然没有,也没有地方可放)。它服务的是检索经验库,安全性来自投影(``project_run_row`` /
 #: ``project_run_step``:不透明 run id + 封闭枚举 + 计数,没有问题、没有 summary、
 #: 没有 created_by),而**不是**来自谓词——所以层三对它不成立,它也绝不能被当成
 #: `TRACE_READ_METHODS` 的兄弟。反向护栏见

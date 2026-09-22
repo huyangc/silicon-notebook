@@ -2079,7 +2079,7 @@ def test_the_runtime_actually_wires_the_access_seat():
 def test_direct_constructor_completion_compat_fans_out_to_three_chains():
     """codex 复核(P2-T5 修复轮裁决 9):`_note_ask_completed` 是两条巡固/蒸馏链路
     唯一的触发点。P1 链(agent-profile 覆盖层)按人按库触发、带两个参数;P2 链
-    (检索经验蒸馏)是部署级全局计数器、零参数——两次调用必须都在,且必须各自
+    (检索经验蒸馏)按库触发、带一个 notebook_id——两次调用必须都在,且必须各自
     落在独立的 ``try`` 块里,否则一条链路抛出的异常会把另一条的计数也吞掉(即使
     两条链路各自内部都 fail-open,"一条链坏掉不连坐另一条"这条性质必须由调用点
     自己成立,不能靠被调方的内部约定)。照 ``test_the_runtime_actually_wires_the_
@@ -2137,8 +2137,8 @@ def test_direct_constructor_completion_compat_fans_out_to_three_chains():
     )
     assert "self.retrieval_experience_jobs.note_ask_completed" in owning_try, (
         "P2 经验库蒸馏的触发调用不在任何 try 块内,或已从 _note_ask_completed "
-        "中丢失——这条链路是部署级全局计数器,一旦这里的调用被删掉,蒸馏永远不会"
-        "被触发,且没有任何其它测试会报红。"
+        "中丢失——这条链路的两个计数器(全局分区与该库分区)都只由它推进,一旦"
+        "这里的调用被删掉,蒸馏永远不会被触发,且没有任何其它测试会报红。"
     )
     assert "self.search_profile_jobs.note_ask_completed" in owning_try
     assert (
@@ -2151,11 +2151,78 @@ def test_direct_constructor_completion_compat_fans_out_to_three_chains():
         and owning_try["self.search_profile_jobs.note_ask_completed"]
         is not owning_try["self.retrieval_experience_jobs.note_ask_completed"]
     )
-    # P1 链带参(notebook_id, user_id),P2 链零参——这条差异本身就是两条链路
-    # 触发语义不同的证据(一个按人按库,一个是部署级全局计数器)。
+    # 三条链拿到的参数**各不相同**,而差异本身就是它们边界不同的证据:
+    # P1 按人按库(notebook_id, user_id);P2 自 2026-09-22 按笔记本分区起收
+    # **一个** notebook_id(经验库按库分区,但永远不收 user_id——见
+    # `retrieval_experience_job` 模块 docstring 与隐私守卫);P3 只收 user_id
+    # (一个人的语言不因笔记本而变)。
     assert call_args["self.agent_profile_jobs.note_ask_completed"] == 2
-    assert call_args["self.retrieval_experience_jobs.note_ask_completed"] == 0
+    assert call_args["self.retrieval_experience_jobs.note_ask_completed"] == 1
     assert call_args["self.search_profile_jobs.note_ask_completed"] == 1
+
+
+def test_the_host_seat_hands_the_distillation_trigger_its_notebook():
+    """T2 评审轮 P2:上面那条守卫只扫 ``_note_ask_completed_compat``——而**生产**
+    走的是另一条路。
+
+    真正跑在流式提问后面的是 observer host 那条:``retrieval_experience`` 座位
+    包着一个零参 lambda(``_AskCompletedAccess`` 的契约就是零参 ``notify()``),
+    分区 id 只能从闭包里带进去。评审实测的变异是把那个 lambda 体改回零参调用
+    ``note_ask_completed()``:全仓测试仍然全绿,而生产每一次 reasoning 提问都会
+    在交付之后抛 ``TypeError`` ——被 fail-open 吞掉,于是两条蒸馏链路一起静默
+    死亡,没有任何地方会红。
+
+    所以这条钉的是三件事:座位还在、lambda 仍然零参(host 的调用约定)、而它
+    体内那次调用**恰好带一个**位置实参且就是 ``notebook_id``。
+    """
+    import ast
+    from pathlib import Path as _Path
+
+    from app.services import repository_runtime
+
+    tree = ast.parse(_Path(repository_runtime.__file__).read_text(encoding="utf-8"))
+    target = next(
+        (
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_note_ask_completed"
+        ),
+        None,
+    )
+    assert target is not None, "repository_runtime.py 必须定义 _note_ask_completed"
+
+    def _is_p2_call(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "note_ask_completed"
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "retrieval_experience_jobs"
+        )
+
+    lambdas = [
+        lam for lam in ast.walk(target)
+        if isinstance(lam, ast.Lambda)
+        and any(_is_p2_call(child) for child in ast.walk(lam.body))
+    ]
+    assert len(lambdas) == 1, (
+        "host 路径上必须恰有一个包着 P2 触发调用的 lambda——0 个说明座位没了"
+        "(生产永远不蒸馏),2 个说明有人复制了一份接线"
+    )
+    lam = lambdas[0]
+    assert not lam.args.args and not lam.args.kwonlyargs, (
+        "_AskCompletedAccess 调用的是零参 notify(),这个 lambda 也必须零参"
+    )
+    calls = [child for child in ast.walk(lam.body) if _is_p2_call(child)]
+    assert len(calls) == 1
+    call = calls[0]
+    assert len(call.args) == 1 and not call.keywords, (
+        "P2 触发必须**带一个**位置实参:零参调用在生产每次提问都抛 TypeError,"
+        "并被 fail-open 吞掉——两条蒸馏链路静默死亡,没有测试会红"
+    )
+    assert isinstance(call.args[0], ast.Name) and call.args[0].id == "notebook_id", (
+        ast.dump(call.args[0])
+    )
 
 
 def test_the_runtime_counts_only_reasoning_asks_toward_distillation():

@@ -990,9 +990,10 @@ def _build_agent_jobs(
         retrieval_experience_jobs=RetrievalExperienceDistillationService(
             settings=foundation.settings,
             experiences=seats.retrieval_experiences,
-            # ⚠ 同一个 ask_state 座位,读的却是**没有任何用户/笔记本谓词**的那条
-            # 方法(``recent_completed_ask_runs``)。它的安全性不来自谓词,而来自
-            # 投影——见 ports.py 上那段说明与 retrieval_experience_projection.py。
+            # ⚠ 同一个 ask_state 座位,读的却是**没有任何用户谓词**的那条方法
+            # (``recent_completed_ask_runs``;笔记本谓词是可选的,全局链路不传、
+            # 单库链路传)。它的安全性不来自谓词,而来自投影——见 ports.py 上那段
+            # 说明与 retrieval_experience_projection.py。
             ask_state=seats.ask_state,
             models=foundation.models,
             event_log=foundation.event_log,
@@ -1193,12 +1194,15 @@ class RepositoryRuntime:
     ) -> None:
         """一次提问完成之后要推进的**三条**后台链路。
 
-        它们是三个不同的特性,拿到的数据也刻意不同:P1 的巡固被告知是**哪位成员
-        在哪个库**(它写的正是那个人在那个库的覆盖层块),P2 的经验库蒸馏则连一个
-        参数都不收——那张表是部署级全局的,一个知道「这是谁的提问」的触发器,离
-        「记下这是谁的提问」只有一次重构之远。P3(T7)的检索偏好归纳只收**这个人
-        是谁**,不收 notebook_id——一个人的语言不因笔记本而变,归纳按人、跨库累计
-        (见 ``search_profile_job`` 模块 docstring)。
+        它们是三个不同的特性,拿到的数据也刻意不同,而**差在哪一维**正是三条链
+        各自的隐私边界:P1 的巡固被告知是**哪位成员在哪个库**(它写的正是那个人
+        在那个库的覆盖层块);P2 的经验库蒸馏只收 **notebook_id**、永远不收
+        user_id——2026-09-22 起经验库按笔记本分区,「这个库里哪种打法好用」要由
+        该库全体成员共享,但「这是谁问的」仍然离「记下这是谁问的」只有一次重构
+        之远(经验库这一侧的守卫见 ``retrieval_experience_job`` 模块 docstring
+        与 ``test_retrieval_experience_privacy_guard.py``);P3(T7)的检索偏好
+        归纳反过来只收**这个人是谁**,不收 notebook_id——一个人的语言不因笔记本
+        而变,归纳按人、跨库累计(见 ``search_profile_job`` 模块 docstring)。
 
         三次调用**各自**用 try 包住,不是写成一个元组表达式:三边虽然都自己
         fail-open,但那是它们各自的实现细节,而这里要保证的是「一条链坏掉不会顺带
@@ -1224,7 +1228,9 @@ class RepositoryRuntime:
             ),
             retrieval_experience=(
                 _AskCompletedAccess(
-                    self.retrieval_experience_jobs.note_ask_completed
+                    lambda: self.retrieval_experience_jobs.note_ask_completed(
+                        notebook_id
+                    )
                 )
                 if mode_id == "reasoning"
                 else None
@@ -1250,7 +1256,7 @@ class RepositoryRuntime:
             _log.exception("agent profile ask-completed notification failed")
         try:
             if mode_id == "reasoning":
-                self.retrieval_experience_jobs.note_ask_completed()
+                self.retrieval_experience_jobs.note_ask_completed(notebook_id)
         except Exception:  # noqa: BLE001 — 同上
             _log.exception("retrieval experience ask-completed notification failed")
         try:

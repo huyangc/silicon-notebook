@@ -1189,6 +1189,16 @@ class Settings(BaseSettings):
     # 但把默认值对齐到批次大小是把重叠窗口压到最小,而不是放大它。
     retrieval_experience_trigger: int = Field(
         40, ge=1, validation_alias="RETRIEVAL_EXPERIENCE_TRIGGER")
+    # 单库链路的触发阈值:**这一个笔记本**累计完成的 reasoning 提问数。同款
+    # ``ge=1``,同款进程内计数(按 notebook 一个计数器,重启归零)。
+    # ⚠ 默认 10 **小于**批读取上限 ``RETRIEVAL_EXPERIENCE_BATCH_RUNS``(40),
+    # 与全局阈值「与批上限对齐」的取法**刻意相反**:一个库攒满 40 次提问要很久,
+    # 而 10 次已经够看出这个库里哪种打法好用(2026-09-22 用户裁决)。相邻两批
+    # 因此有约 30 条 run 重叠,重复计数由 provenance 去重吸收——``support`` 只
+    # 对尚未出现在条目 provenance 里的 run 递增,所以重叠的代价是模型多看一遍
+    # 同样的样本,不是证据被虚增。
+    retrieval_experience_notebook_trigger: int = Field(
+        10, ge=1, validation_alias="RETRIEVAL_EXPERIENCE_NOTEBOOK_TRIGGER")
     # 推理模式(交互式,用户在线等)专用的 per-call LLM 超时/重试,与批量抽取
     # 的全局 openai_compat_* 解耦：单步更短超时 + 更少重试，避免卡死时久等。
     reasoning_timeout_seconds: int = Field(90, validation_alias="REASONING_TIMEOUT_SECONDS")
