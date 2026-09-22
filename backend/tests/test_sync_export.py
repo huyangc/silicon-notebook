@@ -1241,6 +1241,11 @@ def test_export_watermark_ignores_change_log_rows_written_after_the_snapshot(
     # before the concurrent insert above landed, so REPEATABLE READ / SQLite's
     # WAL snapshot must still report only the one row that existed then.
     assert report.captured_through_seq == 1
+    # Evidence the hook really ran (otherwise the assertion above would hold
+    # vacuously): the concurrent insert IS in the log after the export.
+    with seeded["repo"]._connect() as db:
+        log_rows = db.execute("SELECT COUNT(*) FROM sync_change_log").fetchone()[0]
+    assert log_rows == 2
 
 
 def test_a_second_full_export_overwrites_the_watermark(seeded, tmp_path):
