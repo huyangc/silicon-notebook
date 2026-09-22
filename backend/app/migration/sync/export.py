@@ -152,11 +152,17 @@ class ExportReport:
     table_counts: Mapping[str, int]
     file_count: int
     bytes_written: int
-    # Always "full" in PR-2: there is no change log to read from yet, so an
+    # Always "full" in PR-3a: there is no incremental *reader* yet, so an
     # existing watermark for this target does NOT turn the run into an
     # incremental one -- it is overwritten by another full package. The field
-    # exists now so PR-3's "incremental" is a new value, not a new field.
+    # exists now so PR-3b's "incremental" is a new value, not a new field.
     mode: str
+    # The change log's high-water seq visible inside THIS export's read
+    # snapshot, or 0 when the capture gate was off at that moment. Local
+    # recordkeeping only (mirrors sync_export_state.exported_through_seq,
+    # see _advance_watermark) -- the on-disk package format is untouched:
+    # manifest.json still writes from_seq=to_seq=0 (PR-3b changes that).
+    captured_through_seq: int = 0
     # Non-fatal conditions an operator should see, e.g. a stale staging
     # directory left by an earlier crashed run and removed by this one.
     warnings: tuple[str, ...] = ()
@@ -1029,8 +1035,38 @@ def _write_files(
 # ----------------------------------------------------------------- watermark
 
 
+def _captured_through_seq(source: _Source, conn: Any) -> int:
+    """The change log's high-water ``seq`` visible in THIS read snapshot, or
+    0 when the capture gate is off.
+
+    Read inside the SAME ``source.read()`` snapshot the row scan itself
+    uses, via the ``conn`` that snapshot handed out -- never a later
+    connection -- so this number describes exactly the data that ended up in
+    the package, not anything captured after the export's own consistent
+    view was taken. A closed gate means there is nothing safe to call
+    "captured through": rows may have changed since the last time it was
+    open with no log entry to prove it, so 0 (never a stale high-water mark)
+    is the only honest answer (docs/incremental-sync-design.md §7).
+    """
+    gate_open = source.fetch(
+        conn,
+        "SELECT 1 AS gate_open FROM sync_capture_control "
+        "WHERE singleton = 1 AND enabled",
+    )
+    if not gate_open:
+        return 0
+    row = source.fetch(
+        conn, "SELECT COALESCE(MAX(seq), 0) AS max_seq FROM sync_change_log"
+    )[0]
+    return int(row["max_seq"])
+
+
 def _advance_watermark(
-    source: _Source, target_env: str, package_id: str, exported_at: datetime
+    source: _Source,
+    target_env: str,
+    package_id: str,
+    exported_at: datetime,
+    captured_through_seq: int,
 ) -> None:
     """Upsert this target's watermark, only once the package is complete on
     disk (§7): a failed export must leave the watermark where it was so a
@@ -1047,7 +1083,7 @@ def _advance_watermark(
                 "exported_at = excluded.exported_at, "
                 "package_id = excluded.package_id"
             ),
-            (target_env, 0, moment, package_id),
+            (target_env, captured_through_seq, moment, package_id),
         )
 
 
@@ -1222,9 +1258,12 @@ def _assemble(
             }
         user_count = _write_users(source, conn, writer, sorted(users.ids))
         with writer.lines(DELETES_NAME):
-            pass  # PR-2 has no change log, so no deletes to replay.
+            pass  # PR-3a reads the log for its watermark only; deletes/kg
+            # epochs are not replayed from it until PR-3b's incremental
+            # reader exists.
         with writer.lines(KG_EPOCHS_NAME):
-            pass  # ... and no KG epoch resets either.
+            pass
+        captured_through_seq = _captured_through_seq(source, conn)
 
     # Outside the row snapshot: rows first, then the files they point at (see
     # _write_files).
@@ -1267,7 +1306,9 @@ def _assemble(
     )
     writer.finish()
     writer.root.rename(final_dir)
-    _advance_watermark(source, target_env, package_id, exported_at)
+    _advance_watermark(
+        source, target_env, package_id, exported_at, captured_through_seq
+    )
     return ExportReport(
         package_dir=final_dir,
         package_id=package_id,
@@ -1277,6 +1318,7 @@ def _assemble(
         file_count=file_count,
         bytes_written=writer.bytes_written,
         mode="full",
+        captured_through_seq=captured_through_seq,
         warnings=tuple(warnings),
         missing_files=tuple(missing_files),
     )

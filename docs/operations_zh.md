@@ -496,11 +496,13 @@ python scripts/migrate_sqlite_to_postgres.py \
 
 ## 跨环境笔记本同步
 
-`scripts/cli.sh sync export/import/status` 把笔记本内容（材料、向量、KG、Knowhow、记忆）
-从一个部署搬到另一个部署，**单向**：源端写，目标端只对同步来的内容做交互。它不涉及
+`scripts/cli.sh sync export/import/status/capture` 把笔记本内容（材料、向量、KG、Knowhow、
+记忆）从一个部署搬到另一个部署，**单向**：源端写，目标端只对同步来的内容做交互。它不涉及
 用户交互数据（问答、回答、反馈、报告、全局问答、活动留痕、许愿墙）。范围、身份映射、
-目标端写入围栏与包格式见[设计文档](./incremental-sync-design.md)；PR-2 只交付整本笔记本
-的全量导出/引入（还没有变更日志，即使已有水位，每次导出仍是全量快照）。
+目标端写入围栏与包格式见[设计文档](./incremental-sync-design.md)；到 PR-3a 为止，无论变更
+捕获是否开启，每次导出仍是全量快照（还没有增量*读取*器），包的 manifest 仍然固定写
+`from_seq=to_seq=0`——捕获开启只是开始本地记一笔「这次导出本来可以捕获到哪里」，供 PR-3b
+的增量导出器读取。
 
 ```bash
 # 源环境：设置一次环境标识，再导出全部存活、非镜像笔记本。
@@ -583,6 +585,43 @@ PYTHONPATH=backend python scripts/sync_notebooks.py status --json
 `kg_index`/`kg_viz` 是派生工件，不随包走（设计文档 §6）；见
 [离线 / 异机 scale 构建](./operations_zh.md#离线--异机-scale-构建scriptsbuild_scale_indexpy)。
 PR-4 计划把这一步接入自动排队。
+
+### 变更捕获（`sync capture`）
+
+每个部署都自带同步层 46 张表的 AFTER INSERT/UPDATE/DELETE 触发器（设计文档 §7），但默认是
+**关**的：全新迁移到 v84/0064 不会播种 `sync_capture_control` 这一行，运维显式执行
+`sync capture enable` 之前什么都不记。在 PR-3b 的增量导出器落地之前，开不开捕获对
+`sync export` 产出什么没有任何影响（每次导出仍是全量快照）——它只是开始在本地记一笔「这次
+导出本来能捕获到变更日志的哪个 seq」，供 `sync status` 与 `ExportReport.captured_through_seq`
+读取。PR-3b 上线之前没有理由现在就开，除非你想提前把这份记录攒起来；不开也没有坏处。
+
+```bash
+PYTHONPATH=backend python scripts/sync_notebooks.py capture enable --json
+PYTHONPATH=backend python scripts/sync_notebooks.py capture status --json
+PYTHONPATH=backend python scripts/sync_notebooks.py capture disable --json
+```
+
+**什么时候开**：在你想当作「增量的全量基线」的那次导出**之前**。`enable` 会清空
+`sync_export_state` 的全部行——开启之前产出的包，是变更日志完全没有记录的一份快照，永远不能
+被接成增量包，所以每个目标环境的**下一次**导出会被强制打回全量，重新建立一条日志能完整覆盖
+的基线。已经开着时再执行 `enable` 是空操作（不会挪动 `enabled_at`，也不会再清一次水位），
+对一次退出码含糊的调用不放心时重新跑一遍是安全的。
+
+**关闭的代价**：`disable` 会同时清空 `sync_export_state` 与 `sync_change_log`。日志从这一刻
+起不再增长，所以关闭之后的下一次导出又是一次全量快照，跟从未开过时一样——没有「暂停后再续上」
+这回事，续不上日志的连续性。已经关着时再执行 `disable` 是空操作。
+
+**开着时的成本**：不是零成本，但正常写入量下很小——见设计文档 §7 的实测表（20k 行批量插入
+上大约 1.2×–3.9×，视后端而定；SQLite 的相对开销更大，因为它没打补丁的基线本来就非常快）。
+对一次性写几万行的批量导入/回填场景会有感，日常交互使用不会。
+
+**日志增长**：`sync_change_log` 目前只增不减——PR-3b 才交付压缩（同一键多次变更折叠）与保留
+策略（早于所有目标环境最小水位的日志行清理），设计文档 §7/§9 有描述。在那之前如果提前很久
+就开了捕获，应该预期这张表无上限增长并规划好存储，或者等接近 PR-3b 落地时再开。
+
+大库升级到 v84/0064 本身也有一条运维提示——迁移会给 `knowledge_object_sources`/
+`community_members` 现场补主键，运行迁移前先看
+[设计文档 §7「升级窗口」](./incremental-sync-design.md#7-源端变更捕获)估计锁窗口。
 
 ## PostgreSQL notebook-aware 词法索引
 

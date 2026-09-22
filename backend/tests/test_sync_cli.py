@@ -156,6 +156,32 @@ def test_build_parser_parses_status():
     assert args.as_json is True
 
 
+def test_build_parser_parses_capture_enable():
+    args = cli.build_parser().parse_args(["capture", "enable", "--json"])
+    assert args.command == "capture"
+    assert args.capture_command == "enable"
+    assert args.as_json is True
+
+
+def test_build_parser_parses_capture_disable():
+    args = cli.build_parser().parse_args(["capture", "disable"])
+    assert args.command == "capture"
+    assert args.capture_command == "disable"
+    assert args.as_json is False
+
+
+def test_build_parser_parses_capture_status():
+    args = cli.build_parser().parse_args(["capture", "status", "--json"])
+    assert args.command == "capture"
+    assert args.capture_command == "status"
+    assert args.as_json is True
+
+
+def test_build_parser_capture_requires_a_subcommand():
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["capture"])
+
+
 def test_build_parser_requires_a_subcommand():
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args([])
@@ -779,6 +805,268 @@ def test_status_json_missing_sync_tables_also_exits_2(tmp_path, monkeypatch, cap
     exit_code = cli.main(["status", "--json"])
     assert exit_code == 2
     assert capsys.readouterr().out == ""
+
+
+def test_status_human_output_includes_capture_section(tmp_path, monkeypatch, capsys):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    exit_code = cli.main(["status"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "变更捕获：" in out
+    assert "从未开启过" in out
+
+
+def test_status_json_includes_capture_section(tmp_path, monkeypatch, capsys):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    exit_code = cli.main(["status", "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["capture"] == {
+        "enabled": False,
+        "enabled_at": None,
+        "disabled_at": None,
+        "log_rows": 0,
+        "min_seq": None,
+        "max_seq": None,
+    }
+
+
+# ------------------------------------------------------------------ capture
+
+
+def _seed_watermark(database, target_env: str = "prod-tokyo") -> None:
+    with database.write() as conn:
+        conn.execute(
+            "INSERT INTO sync_export_state "
+            "(target_env, exported_through_seq, exported_at, package_id) "
+            "VALUES (?, ?, ?, ?)",
+            (target_env, 0, "2026-01-01T00:00:00+00:00", "pkg-old"),
+        )
+
+
+def test_capture_enable_turns_on_the_gate_and_clears_export_watermarks(
+    tmp_path, monkeypatch, capsys
+):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        _seed_watermark(database)
+        _seed_watermark(database, target_env="prod-osaka")
+
+        exit_code = cli.main(["capture", "enable", "--json"])
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["already_enabled"] is False
+        assert payload["cleared_export_watermarks"] == 2
+        assert payload["enabled_at"] is not None
+        assert payload["log_rows"] == 0
+
+        with database.connect() as conn:
+            control = conn.execute(
+                "SELECT enabled, enabled_at FROM sync_capture_control WHERE singleton=1"
+            ).fetchone()
+            assert control["enabled"] == 1
+            assert control["enabled_at"] == payload["enabled_at"]
+            remaining = conn.execute("SELECT COUNT(*) AS n FROM sync_export_state").fetchone()
+            assert remaining["n"] == 0
+    finally:
+        database.close()
+
+
+def test_capture_enable_is_idempotent_and_does_not_reclear_watermarks(
+    tmp_path, monkeypatch, capsys
+):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        exit_code = cli.main(["capture", "enable", "--json"])
+        assert exit_code == 0
+        first = json.loads(capsys.readouterr().out)
+
+        # A watermark written AFTER capture is already on: a second `enable`
+        # must leave it alone, or the idempotency guarantee (no observable
+        # effect on an already-enabled gate) would be broken by exactly the
+        # side effect this test exists to catch.
+        _seed_watermark(database)
+
+        exit_code = cli.main(["capture", "enable", "--json"])
+        assert exit_code == 0
+        second = json.loads(capsys.readouterr().out)
+        assert second["already_enabled"] is True
+        assert second["enabled_at"] == first["enabled_at"]
+        assert second["cleared_export_watermarks"] == 0
+
+        with database.connect() as conn:
+            remaining = conn.execute("SELECT COUNT(*) AS n FROM sync_export_state").fetchone()
+            assert remaining["n"] == 1
+    finally:
+        database.close()
+
+
+def test_capture_enable_human_output_reports_cleared_watermarks(
+    tmp_path, monkeypatch, capsys
+):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        _seed_watermark(database)
+        exit_code = cli.main(["capture", "enable"])
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "变更捕获已开启" in out
+        assert "已清空导出水位: 1 条" in out
+    finally:
+        database.close()
+
+
+def test_capture_disable_clears_watermarks_and_log(tmp_path, monkeypatch, capsys):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        cli.main(["capture", "enable"])
+        capsys.readouterr()
+        _seed_watermark(database)
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_change_log "
+                "(table_name, key_json, operation, changed_at) "
+                "VALUES ('notebooks', '{}', 'upsert', '2026-01-01T00:00:00+00:00')"
+            )
+
+        exit_code = cli.main(["capture", "disable", "--json"])
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["already_disabled"] is False
+        assert payload["cleared_export_watermarks"] == 1
+        assert payload["cleared_log_rows"] == 1
+        assert payload["log_rows"] == 0
+
+        with database.connect() as conn:
+            control = conn.execute(
+                "SELECT enabled, disabled_at FROM sync_capture_control WHERE singleton=1"
+            ).fetchone()
+            assert control["enabled"] == 0
+            assert control["disabled_at"] == payload["disabled_at"]
+            assert conn.execute(
+                "SELECT COUNT(*) AS n FROM sync_export_state"
+            ).fetchone()["n"] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) AS n FROM sync_change_log"
+            ).fetchone()["n"] == 0
+    finally:
+        database.close()
+
+
+def test_capture_disable_is_idempotent_when_never_enabled(tmp_path, monkeypatch, capsys):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    exit_code = cli.main(["capture", "disable", "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["already_disabled"] is True
+    assert payload["disabled_at"] is None
+    assert payload["cleared_export_watermarks"] == 0
+    assert payload["cleared_log_rows"] == 0
+
+
+def test_capture_disable_is_idempotent_once_already_disabled(tmp_path, monkeypatch, capsys):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    cli.main(["capture", "enable"])
+    capsys.readouterr()
+    cli.main(["capture", "disable"])
+    first = capsys.readouterr().out
+
+    exit_code = cli.main(["capture", "disable", "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["already_disabled"] is True
+    assert payload["disabled_at"] is not None
+    assert "已关闭" in first
+
+
+def test_capture_disable_human_output_when_never_enabled(tmp_path, monkeypatch, capsys):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    exit_code = cli.main(["capture", "disable"])
+    assert exit_code == 0
+    assert "本来就是关闭的" in capsys.readouterr().out
+
+
+def test_capture_status_reports_enabled_state_and_log_range(tmp_path, monkeypatch, capsys):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        cli.main(["capture", "enable"])
+        capsys.readouterr()
+        with database.write() as conn:
+            for _ in range(3):
+                conn.execute(
+                    "INSERT INTO sync_change_log "
+                    "(table_name, key_json, operation, changed_at) "
+                    "VALUES ('notebooks', '{}', 'upsert', '2026-01-01T00:00:00+00:00')"
+                )
+
+        exit_code = cli.main(["capture", "status", "--json"])
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["enabled"] is True
+        assert payload["log_rows"] == 3
+        assert payload["min_seq"] == 1
+        assert payload["max_seq"] == 3
+    finally:
+        database.close()
+
+
+def test_capture_status_human_output_on_a_disabled_never_enabled_gate(
+    tmp_path, monkeypatch, capsys
+):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    exit_code = cli.main(["capture", "status"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "关闭" in out
+    assert "从未开启过" in out
+    assert "变更日志: 0 行" in out
+
+
+def test_capture_enable_missing_capture_tables_gives_named_message(
+    tmp_path, monkeypatch, capsys
+):
+    """A database that predates v84/0064 (here: never migrated at all) must
+    name the missing capture tables instead of surfacing a raw sqlite3 "no
+    such table" driver error."""
+    _settings(tmp_path, monkeypatch)
+    exit_code = cli.main(["capture", "enable"])
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "v84/0064" in err
+    assert "sync_capture_control" in err
 
 
 # --------------------------------------------------------------------- misc

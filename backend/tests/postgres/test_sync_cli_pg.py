@@ -128,3 +128,37 @@ def test_status_missing_sync_tables_gives_named_message_on_postgres(
     )
     with pytest.raises(cli.SyncStatusError, match="v83/0063"):
         cli._load_sync_status(settings)
+
+
+def test_capture_enable_then_disable_round_trips_on_postgres(cli_settings, capsys):
+    """SQLite lane (tests/test_sync_cli.py) already covers enable/disable's
+    behavior (idempotency, watermark/log clearing) in full; this only pins
+    that the same code path works against PostgreSQL's real ``boolean``
+    ``enabled`` column and ``timestamptz`` moments through ``_Source``."""
+    _migrate(cli_settings)
+
+    args = cli.build_parser().parse_args(["capture", "enable", "--json"])
+    exit_code = cli._cmd_capture_enable(args, cli_settings)
+    assert exit_code == 0
+    enabled = json.loads(capsys.readouterr().out)
+    assert enabled["already_enabled"] is False
+    assert enabled["enabled_at"] is not None
+
+    status_args = cli.build_parser().parse_args(["capture", "status", "--json"])
+    exit_code = cli._cmd_capture_status(status_args, cli_settings)
+    assert exit_code == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["enabled"] is True
+
+    disable_args = cli.build_parser().parse_args(["capture", "disable", "--json"])
+    exit_code = cli._cmd_capture_disable(disable_args, cli_settings)
+    assert exit_code == 0
+    disabled = json.loads(capsys.readouterr().out)
+    assert disabled["already_disabled"] is False
+    assert disabled["disabled_at"] is not None
+
+    # And disable is idempotent, same as the SQLite lane pins in full.
+    exit_code = cli._cmd_capture_disable(disable_args, cli_settings)
+    assert exit_code == 0
+    again = json.loads(capsys.readouterr().out)
+    assert again["already_disabled"] is True
