@@ -1774,7 +1774,7 @@ class PostgresMaintenanceAdapter:
                     db,
                     "INSERT INTO knowledge_object_sources "
                     "(object_id,source_id,notebook_id) VALUES (%s,%s,%s) "
-                    "ON CONFLICT DO NOTHING",
+                    "ON CONFLICT (object_id, source_id) DO NOTHING",
                     rows,
                 )
             scanned = int(progress["objects_scanned"]) + len(batch)
@@ -2317,7 +2317,7 @@ class PostgresMaintenanceAdapter:
                 db,
                 "INSERT INTO knowledge_object_sources "
                 "(object_id,source_id,notebook_id) VALUES (%s,%s,%s) "
-                "ON CONFLICT DO NOTHING",
+                "ON CONFLICT (object_id, source_id) DO NOTHING",
                 rows,
             )
         return len(batch), len(rows), str(batch[-1]["id"])

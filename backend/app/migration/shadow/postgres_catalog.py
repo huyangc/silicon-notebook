@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -457,19 +458,64 @@ def _expected_indexes(
     return result
 
 
-_CAPTURE_TRIGGER = re.compile(
-    rf"^CREATE TRIGGER (sync_capture_{_IDENT})\b[^;]*;", re.M
-)
-_CAPTURE_FUNCTION = re.compile(
-    rf"^CREATE FUNCTION (sync_capture_{_IDENT})\(\)[^$]*"
-    r"\$(?P<tag>[a-z_][a-z0-9_]*)\$(?P<body>.*?)\$(?P=tag)\$\s*;",
+# One alternation rather than a regex per statement kind, because the four
+# statements have to be applied in the order they appear: a later migration
+# that replaces or drops a capture object only wins if it is seen after the
+# one that created it.
+_CAPTURE_STATEMENT = re.compile(
+    rf"^(?:"
+    rf"(?P<created_trigger_sql>CREATE TRIGGER"
+    rf" (?P<created_trigger>sync_capture_{_IDENT})\b[^;]*;)"
+    rf"|DROP TRIGGER (?:IF EXISTS )?(?P<dropped_trigger>sync_capture_{_IDENT})\b[^;]*;"
+    rf"|CREATE (?:OR REPLACE )?FUNCTION"
+    rf" (?P<created_function>sync_capture_{_IDENT})\(\)[^$]*"
+    r"\$(?P<tag>[a-z_][a-z0-9_]*)\$(?P<body>.*?)\$(?P=tag)\$\s*;"
+    rf"|DROP FUNCTION (?:IF EXISTS )?(?P<dropped_function>sync_capture_{_IDENT})\b[^;]*;"
+    rf")",
     re.M | re.S,
 )
 
 
-def _expected_capture_ddl() -> tuple[dict[str, str], dict[str, str]]:
+def _capture_ddl_from(
+    sql_texts: Iterable[str],
+) -> tuple[dict[str, str], dict[str, str]]:
     """``({trigger_name: CREATE TRIGGER sql}, {function_name: plpgsql body})``
-    read straight out of the packaged migrations.
+    for a sequence of migration texts, applied in order.
+
+    A later migration overrides an earlier one by plain dict assignment --
+    ``CREATE OR REPLACE FUNCTION sync_capture_x`` leaves the LAST body as the
+    expectation, exactly as the live catalog would hold it, and a repeated
+    ``CREATE TRIGGER`` behaves the same way. Retirement is the mirror image:
+    ``DROP FUNCTION [IF EXISTS] sync_capture_x`` / ``DROP TRIGGER [IF EXISTS]
+    sync_capture_x`` remove the name from the expectation, so a migration that
+    retires a table's capture makes the guard expect its absence rather than
+    keep demanding an object the schema no longer has. (Whether such a table
+    may still be in the sync manifest is a separate question, and
+    ``_validate_capture_triggers`` answers it: the parsed name set must equal
+    the manifest-derived one.)
+
+    Only statements at the start of a line are seen, so the same words inside
+    a ``--`` comment are not mistaken for DDL.
+    """
+    triggers: dict[str, str] = {}
+    bodies: dict[str, str] = {}
+    for text in sql_texts:
+        for match in _CAPTURE_STATEMENT.finditer(text):
+            if match.group("created_trigger"):
+                triggers[match.group("created_trigger")] = match.group(
+                    "created_trigger_sql"
+                ).rstrip(";")
+            elif match.group("dropped_trigger"):
+                triggers.pop(match.group("dropped_trigger"), None)
+            elif match.group("created_function"):
+                bodies[match.group("created_function")] = match.group("body")
+            else:
+                bodies.pop(match.group("dropped_function"), None)
+    return triggers, bodies
+
+
+def _expected_capture_ddl() -> tuple[dict[str, str], dict[str, str]]:
+    """The capture DDL the packaged migrations end up declaring.
 
     Same principle as every other expectation in this module: the migration
     DDL is the contract, and the live catalog is checked against it. The other
@@ -479,14 +525,7 @@ def _expected_capture_ddl() -> tuple[dict[str, str], dict[str, str]]:
     parse the file instead of importing the generator (the generator reads
     this module's parsed primary keys, so importing it here would be a cycle).
     """
-    triggers: dict[str, str] = {}
-    bodies: dict[str, str] = {}
-    for migration in _MIGRATIONS:
-        for match in _CAPTURE_TRIGGER.finditer(migration.sql):
-            triggers[match.group(1)] = match.group(0).rstrip(";")
-        for match in _CAPTURE_FUNCTION.finditer(migration.sql):
-            bodies[match.group(1)] = match.group("body")
-    return triggers, bodies
+    return _capture_ddl_from(migration.sql for migration in _MIGRATIONS)
 
 
 EXPECTED_CAPTURE_DDL = _expected_capture_ddl()
@@ -727,11 +766,17 @@ def _validate_identity_sequences(
 def _collapse_sql_whitespace(value: str) -> str:
     """Whitespace is not structural here; everything else is.
 
-    Deliberately NOT case-folding and NOT touching quoted text: a capture
-    statement's table-name and operation literals (``'chunks'``,
-    ``'upsert'``) carry meaning, and folding case would make ``'UPSERT'``
-    compare equal to ``'upsert'``. Same rule as
+    Deliberately NOT case-folding: a capture statement's table-name and
+    operation literals (``'chunks'``, ``'upsert'``) carry meaning, and folding
+    case would make ``'UPSERT'`` compare equal to ``'upsert'``. Same rule as
     ``app.migration.shadow.capture._normalize_sql``.
+
+    This is a blunt collapse, though -- it does not know where a string
+    literal starts, so whitespace INSIDE one is collapsed too, and
+    ``'a  b'`` would compare equal to ``'a b'``. That is safe only because
+    no literal in the generated capture DDL contains whitespace at all (they
+    are table names and the four operation words). A generated statement that
+    ever needs a literal with a space in it needs a real tokenizer here first.
     """
     return " ".join(value.split())
 

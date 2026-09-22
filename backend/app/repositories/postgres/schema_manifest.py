@@ -382,9 +382,13 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # SQLite v84 / PostgreSQL 0064 add source-side change capture: two more
 # adapter-internal tables (sync_capture_control, the one-row gate, seeded by
 # no migration; sync_change_log, the append-only row-identity log plus
-# idx_sync_change_log_table_seq), the plpgsql function sync_capture_row and
-# one row trigger per synced business table (46 on PostgreSQL, 138 on SQLite
-# -- three per table there). It also gives the two synced tables that never
+# idx_sync_change_log_table_seq), and, per synced business table, one plpgsql
+# function sync_capture_<table> plus one same-named AFTER-row trigger that
+# executes it -- 46 of each on PostgreSQL, against 138 triggers on SQLite
+# (three per table, since SQLite has no combined INSERT OR DELETE OR UPDATE).
+# Per-table functions, not one shared TG_ARGV-driven one: a generic function
+# would have to to_jsonb(NEW) the whole row to read an arbitrary key column.
+# It also gives the two synced tables that never
 # had a row identity one: knowledge_object_sources (object_id, source_id)
 # and community_members (community_id, canonical_id), de-duplicated first,
 # then backed by a PRIMARY KEY on PostgreSQL and a UNIQUE INDEX on SQLite

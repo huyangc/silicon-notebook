@@ -112,6 +112,8 @@ PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   "$ROOT_DIR/scripts/check_architecture_boundaries.py" --root "$ROOT_DIR"
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   "$ROOT_DIR/scripts/generate_ui_extension_contract.py" --check
+PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
+  "$ROOT_DIR/scripts/generate_sync_capture_migration.py" --check
 
 PYTHONPATH="$ROOT_DIR/backend:$ROOT_DIR" "$PYTHON_BIN" \
   -m pytest -p no:cacheprovider --durations=30 \

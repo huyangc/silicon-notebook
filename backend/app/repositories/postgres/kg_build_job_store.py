@@ -870,14 +870,16 @@ class KgBuildJobStore:
                             for row in kg.get("objects") or []
                         ],
                     )
-                    # ON CONFLICT DO NOTHING: 0064 gave this table a composite
-                    # primary key (object_id, source_id) -- a repeated pair is
-                    # the same row.
+                    # ON CONFLICT (object_id, source_id) DO NOTHING: 0064 gave
+                    # this table that composite primary key and a repeated pair
+                    # is the same row. The target is named, not inferred: only
+                    # that one conflict is swallowed, and any other constraint
+                    # still raises (same rule as the SQLite twin).
                     execute_many(
                         connection,
                         "INSERT INTO knowledge_object_sources "
                         "(object_id,source_id,notebook_id) VALUES (%s,%s,%s) "
-                        "ON CONFLICT DO NOTHING",
+                        "ON CONFLICT (object_id, source_id) DO NOTHING",
                         [
                             (row["object_id"], row["source_id"], notebook_id)
                             for row in kg.get("object_sources") or []

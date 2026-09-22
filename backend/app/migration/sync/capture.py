@@ -150,12 +150,25 @@ def _literal(value: str) -> str:
 def key_columns(table: str) -> tuple[str, ...]:
     """The columns that identify one row of ``table`` in the change log.
 
+    ORDER IS PART OF THE KEY, and the comparison below is between ordered
+    tuples on purpose. ``key_json`` is built by naming the columns in this
+    order, so two spellings of the same column set produce two different
+    JSON objects for the same row -- a log written under one order and read
+    back under the other matches nothing. That makes a same-set,
+    different-order change a real break, not a cosmetic one, and this
+    function refuses it rather than silently picking a side.
+
     The PostgreSQL primary key parsed out of the packaged migration DDL is
     the answer for every table that has one. ``TableSyncSpec.key`` is the
     registered answer for a table that has none, and when both exist they
     must agree -- a registered key that no longer matches the catalog would
     make the capture triggers log one identity while the exporter/importer
     matched rows by another.
+
+    The SQLite side of that parity is not checked here (this module never
+    opens a database); ``tests/test_sync_manifest.py`` holds each table's
+    SQLite primary key to this same ordered tuple, so a migration that
+    changes one backend's key without the other fails there.
     """
     declared = spec_for(table).key
     catalog = _PRIMARY_KEY_COLUMNS.get(table, ())
@@ -347,6 +360,18 @@ def postgres_function_sql() -> dict[str, tuple[str, str]]:
     Per-table rather than one shared ``TG_ARGV``-driven function: see
     ``capture_contract.postgres_function_name`` for why (a generic function
     cannot name a key column without ``to_jsonb`` of the entire row).
+
+    No ``SET search_path``, deliberately. These are SECURITY INVOKER
+    functions, so they already run with the writer's own privileges, and the
+    two unqualified names in the body (``sync_capture_control``,
+    ``sync_change_log``) are meant to resolve the way every other statement in
+    that session resolves them: to the schema the write is happening in. That
+    is what makes the scheme work per schema -- the shadow migration's target
+    schema and each test lane's disposable schema carry their own gate row and
+    their own log, and a write into one is never captured into another's log.
+    Pinning ``search_path`` to one schema would send every schema's captures
+    into that one log, which is the opposite of what a per-environment control
+    plane needs.
     """
     functions: dict[str, tuple[str, str]] = {}
     for table in synced_tables():

@@ -4,10 +4,13 @@
 -- one AFTER-row trigger per synced business table.
 --
 -- Everything below the "generated" marker is rendered by
--- backend/app/migration/sync/capture.py and pinned byte-for-byte by
+--     python3 scripts/generate_sync_capture_migration.py
+-- out of backend/app/migration/sync/capture.py, and pinned byte-for-byte by
+-- that script's --check (contracts lane) and by
 -- backend/tests/test_sync_capture.py. Do not hand-edit it: change the
 -- generator and re-render, so the SQLite triggers, this file, the snapshot
--- verifier's expectations and the catalog drift guard cannot disagree.
+-- verifier's expectations and the catalog drift guard cannot disagree. The
+-- hand-written half above the marker is preserved verbatim by that script.
 -- app/migration/shadow/postgres_catalog.py parses the function bodies and
 -- trigger statements straight out of THIS file and holds the live catalog to
 -- them, so a hand-edit here is not a shortcut -- it is a schema change.
