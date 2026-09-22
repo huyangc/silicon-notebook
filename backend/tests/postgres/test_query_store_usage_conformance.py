@@ -156,7 +156,7 @@ def _insert_global_ask(connection, job_id, conv_id, user_id, created_at, *,
 
 @pytest.fixture
 def store(postgres_database, postgres_settings):
-    assert PostgresMigrator(postgres_database).migrate() == 61
+    assert PostgresMigrator(postgres_database).migrate() == 62
     return PostgresQueryStore(postgres_database, postgres_settings)
 
 

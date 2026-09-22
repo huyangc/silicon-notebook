@@ -45,6 +45,7 @@
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -317,6 +318,27 @@ ACCESS_CHECK_METHODS = ("user_can_read_notebook",)
 #: 二种含义。
 USER_PREDICATE_TOKENS = ("created_by = ?", "created_by = %s",
                          "created_by=?", "created_by=%s")
+#: 2026-09-22 起这三条读各多一条读 ``global_ask_jobs`` 的语句(该成员的全局问答,
+#: 与笔记本内提问同为「这个人对这个库的使用」)。那张表的发起人列叫 ``user_id``,
+#: 但 ``user_id`` **不**具备 ``created_by`` 那种「出现即唯一含义」的性质
+#: (``notebook_members.user_id`` 也叫这个名),所以它只对**读 global_ask_jobs
+#: 的那条语句**生效:一条读 ``ask_jobs`` 的语句里出现 ``user_id = ?`` 不算数
+#: ——把笔记本臂改成 JOIN notebook_members 过滤,层三照样红。
+GLOBAL_ACTOR_PREDICATE_TOKENS = ("user_id = ?", "user_id = %s",
+                                 "user_id=?", "user_id=%s")
+
+
+def _predicate_tokens_for(sql: str) -> tuple[str, ...]:
+    """层三认哪组谓词,由这条语句读的表决定,不由调用方决定。
+
+    一条同时读 ``ask_jobs`` 的语句(哪怕 ``global_ask_jobs`` 也在里面)仍按
+    ``created_by`` 判——只有**只**读全局表的语句才换列名。
+    """
+    reads_global = re.search(r"\bglobal_ask_jobs\b", sql) is not None
+    reads_notebook = re.search(r"(?<!global_)\bask_jobs\b", sql) is not None
+    if reads_global and not reads_notebook:
+        return GLOBAL_ACTOR_PREDICATE_TOKENS
+    return USER_PREDICATE_TOKENS
 
 
 def _functions(path: Path) -> dict[str, ast.AST]:
@@ -493,7 +515,7 @@ def test_the_trace_read_carries_the_user_predicate_in_sql(
         "读不到的形状。"
     )
     for sql in statements:
-        assert any(token in sql for token in USER_PREDICATE_TOKENS), (
+        assert any(token in sql for token in _predicate_tokens_for(sql)), (
             f"{backend}.{method_name} 里有一条读不带 `created_by` 谓词:\n"
             f"  {' '.join(sql.split())[:200]}\n"
             "覆盖层的输入必须在**语句层面**只包含发起人自己的行。Python 侧过滤不算"

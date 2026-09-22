@@ -18,6 +18,7 @@ from app.core.ask_retrieval_policy import DEFAULT_RETRIEVAL_EFFORT
 # sweep below is bounded by it so one click can never deserialize more turns
 # than a public read of the same conversation already does.
 from app.domain.conversation_public_view import MAX_TURNS
+from app.domain.global_ask_attribution import touched_notebook_ids
 from app.models.ask import AskRequest, QueryIntentContract
 from app.models.global_ask import (
     GlobalAskIntentPreviewRequest, GlobalAskJob, GlobalAskRequest,
@@ -524,12 +525,18 @@ def _public_turn_row(job: Any) -> dict[str, Any]:
 
 class GlobalAskService:
     def __init__(self, *, store, notebooks, can_read, sources, settings, ask=None,
-                 can_read_many=None, event_log=None):
+                 can_read_many=None, event_log=None, note_ask_completed=None):
         self.store = store
         self.notebooks = notebooks
         self.can_read = can_read
         self.can_read_many = can_read_many
         self.sources = sources
+        # The post-completion learning chains a notebook ask advances
+        # (``RepositoryRuntime._note_global_ask_completed``), called with
+        # ``(attributed notebook ids, user_id, mode_id, anchor=nominal active)``
+        # after a job has been persisted ``done``. ``None`` (library/test
+        # construction) is a no-op.
+        self.note_ask_completed = note_ask_completed
         # The ONE single-library engine. A global run is the same engine under
         # a participant override, not a second retrieval and synthesis stack.
         self.ask = ask
@@ -1602,9 +1609,12 @@ class GlobalAskService:
 
     def _run(self, job, user_id, history, user_history, event, allowed,
              authority_check, source_ceiling, followup=None, intent=None):
+        delivered = False
         try:
-            self._execute(job, user_id, history, user_history, event, allowed,
-                          authority_check, source_ceiling, followup, intent)
+            delivered = self._execute(
+                job, user_id, history, user_history, event, allowed,
+                authority_check, source_ceiling, followup, intent,
+            )
         except AskCancelled:
             job.status, job.response, job.answer = "cancelled", None, None
             self._save_if_open(job, user_id)
@@ -1648,6 +1658,15 @@ class GlobalAskService:
                 self._workers.pop(job.job_id, None)
                 self._feeds.pop(job.job_id, None)
                 self._live.pop(job.job_id, None)
+            # The post-completion learning chains run LAST: after the terminal
+            # row, after the push stream's terminal frame and after the job has
+            # left the live registry -- the same "never ahead of the browser's
+            # final event" rule the notebook worker keeps
+            # (``AskExecutionCoordinator``; ``docs/development.md`` host
+            # contract). Only a delivered ``done`` answer counts; a cancelled
+            # or failed run says nothing about how this person searches.
+            if delivered:
+                self._note_completed(job, user_id)
 
     def _execute(self, job, user_id, history, user_history, event, allowed,
                  authority_check, source_ceiling, followup, intent):
@@ -1825,7 +1844,36 @@ class GlobalAskService:
         # keeping the streamed copy too would double the persisted payload.
         job.trace = []
         job.status = "done"
-        self._save_if_open(job, user_id)
+        # True only when THIS write moved the row to ``done``: a shutdown or a
+        # concurrent transition that already took the row leaves nothing to
+        # learn from, and ``_run`` fires the learning chains only on True.
+        return self._save_if_open(job, user_id)
+
+    def _note_completed(self, job, user_id):
+        """Hand the finished run to the learning chains, fail-open.
+
+        The libraries handed over follow ``touched_notebook_ids`` -- the ONE
+        attribution rule the overlay sampler's global arm applies as well, so
+        a library is told "this member finished an Ask in you" exactly when
+        that member's overlay sample will contain the run.
+        """
+        if self.note_ask_completed is None:
+            return
+        try:
+            ordered = touched_notebook_ids(
+                job.resolved_notebook_ids, job.searched_notebook_ids,
+                job.cited_notebook_ids,
+                [entry.notebook_id for entry in job.skipped_notebooks],
+            )
+            # The anchor (``nominal_active``, the run's naming library) is
+            # handed over on its own: it identifies the run to observers even
+            # when the attributed list is empty (every leg skipped), and it is
+            # not necessarily the first attributed library.
+            self.note_ask_completed(
+                ordered, user_id, job.mode, anchor=job.resolved_notebook_ids[0],
+            )
+        except Exception:  # noqa: BLE001 - an answer was delivered; keep it that way
+            _LOG.exception("global ask post-completion notification failed")
 
     def _validate_citations(self, citations, evidence, source_ceiling, event=None,
                             *, siblings=None):

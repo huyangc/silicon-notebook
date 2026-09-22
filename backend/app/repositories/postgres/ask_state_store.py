@@ -20,7 +20,33 @@ from app.models.ask import (
     FeedbackResponse,
     StoredSubmittedVia,
 )
+from app.domain.global_ask_attribution import attribution_sql
+
+# One shared newest-first step budget over a ``candidates`` CTE carrying a jsonb
+# ``trace`` column (SQLite twin in sqlite/ask_state_store.py): ``budget`` is
+# what remains for each row after the newer rows took theirs (``%s`` binds
+# ``step_limit``). Non-array traces count as 0 and read back as ``[]``.
+_TRACE_BUDGET_POSTGRES = (
+    "SELECT id, status, created_at, question, resolved_json, searched_json, "
+    "cited_json, skipped_json, "
+    "GREATEST(0, %s - (SUM(CASE WHEN jsonb_typeof(trace) = 'array' "
+    "THEN jsonb_array_length(trace) ELSE 0 END) OVER "
+    "(ORDER BY created_at DESC, id DESC ROWS UNBOUNDED PRECEDING) "
+    "- CASE WHEN jsonb_typeof(trace) = 'array' THEN jsonb_array_length(trace) ELSE 0 END)) "
+    "AS budget, CASE WHEN jsonb_typeof(trace) = 'array' THEN trace ELSE '[]'::jsonb END AS trace "
+    "FROM candidates"
+)
+_RUN_BUDGET_POSTGRES = _TRACE_BUDGET_POSTGRES.replace(
+    "SELECT id, status, created_at, question, resolved_json, searched_json, "
+    "cited_json, skipped_json, ",
+    "SELECT id, mode, created_at, ",
+)
+from app.repositories.ask_sample_merge import (
+    merge_ask_samples as _merge_ask_samples,
+    merge_run_samples as _merge_run_samples,
+)
 from app.repositories.ports import (
+    merge_sampled_rows,
     AskRequestKeyConflict,
     ConversationBusyError,
     ConversationHasNoShareableAnswer,
@@ -522,23 +548,64 @@ class AskStateStore:
                 )
                 for row in job_rows
             ]
-            if not asks:
-                return []
             by_job = {ask["job_id"]: ask for ask in asks}
-            placeholders = ",".join("%s" for _ in by_job)
-            step_rows = db.execute(
-                "SELECT t.job_id AS job_id, t.step_json AS step_json "
-                "FROM ask_trace_steps t JOIN ask_jobs j ON j.id = t.job_id "
-                f"WHERE j.notebook_id = %s AND j.created_by = %s AND t.job_id IN ({placeholders}) "
-                "ORDER BY j.created_at DESC, j.id DESC, t.seq ASC LIMIT %s",
-                (notebook_id, user_id, *by_job.keys(), step_limit),
+            step_rows = []
+            if asks:
+                placeholders = ",".join("%s" for _ in by_job)
+                step_rows = db.execute(
+                    "SELECT t.job_id AS job_id, t.step_json AS step_json "
+                    "FROM ask_trace_steps t JOIN ask_jobs j ON j.id = t.job_id "
+                    f"WHERE j.notebook_id = %s AND j.created_by = %s AND t.job_id IN ({placeholders}) "
+                    "ORDER BY j.created_at DESC, j.id DESC, t.seq ASC LIMIT %s",
+                    (notebook_id, user_id, *by_job.keys(), step_limit),
+                ).fetchall()
+            # The member's GLOBAL asks that touched this notebook (SQLite twin:
+            # same actor predicate in the SQL text, same bounds, same projection,
+            # same ``reasoning_trace``-else-``trace`` read, runs regardless of the
+            # notebook arm; the participant test differs, see below). ORDER BY
+            # the BARE column: ``created_at`` is ``text COLLATE "C"`` holding UTC
+            # ISO stamps, so byte order is time order and the 0062 index
+            # ``(user_id, created_at, id)`` serves the sort; an expression such
+            # as ``NULLIF(...)::timestamptz`` would defeat it and sort the heap.
+            # Attribution predicate BEFORE ``LIMIT`` (SQLite twin); the ``@>``
+            # containments inside it are what ``idx_global_ask_jobs_participants``
+            # answers.
+            attributed, binds = attribution_sql(dialect="postgres", marker="%s")
+            # One newest-first step budget across the sampled jobs, applied
+            # before any trace element leaves the database (SQLite twin); one
+            # string literal for the isolation guard.
+            global_rows = db.execute(
+                (
+                    "WITH candidates AS ("
+                    "SELECT id, status, created_at, "
+                    "payload_json::jsonb->>'question' AS question, "
+                    "COALESCE(payload_json::jsonb->'answer'->'reasoning_trace', "
+                    "payload_json::jsonb->'trace', '[]'::jsonb) AS trace, "
+                    "payload_json::jsonb->'resolved_notebook_ids' AS resolved_json, "
+                    "payload_json::jsonb->'searched_notebook_ids' AS searched_json, "
+                    "payload_json::jsonb->'cited_notebook_ids' AS cited_json, "
+                    "payload_json::jsonb->'skipped_notebooks' AS skipped_json "
+                    "FROM global_ask_jobs WHERE user_id = %s "
+                    "AND {attributed} "
+                    "ORDER BY created_at DESC, id DESC LIMIT %s), "
+                    "budgeted AS ({budget}) "
+                    "SELECT id, status, created_at, question, resolved_json, searched_json, "
+                    "cited_json, skipped_json, "
+                    "(SELECT COALESCE(jsonb_agg(t.e ORDER BY t.n), '[]'::jsonb) FROM "
+                    "jsonb_array_elements(budgeted.trace) WITH ORDINALITY AS t(e, n) "
+                    "WHERE t.n <= budgeted.budget) AS trace_json "
+                    "FROM budgeted ORDER BY created_at DESC, id DESC"
+                ).format(attributed=attributed, budget=_TRACE_BUDGET_POSTGRES),
+                (user_id, *([notebook_id] * binds), job_limit, step_limit),
             ).fetchall()
         for row in step_rows:
             step = project_trace_step(json_value(row["step_json"], None))
             target = by_job.get(str(row["job_id"]))
             if step is not None and target is not None:
                 target["steps"].append(step)
-        return asks
+        return _merge_ask_samples(
+            asks, global_rows, job_limit, step_limit, notebook_id=notebook_id,
+        )
 
     def recent_completed_ask_runs(
         self, *, job_limit: int, step_limit: int, notebook_id: str | None = None
@@ -561,7 +628,7 @@ class AskStateStore:
         partition_params: tuple = () if notebook_id is None else (str(notebook_id),)
         with self.database.connect() as db:
             job_rows = db.execute(
-                "SELECT id, mode FROM ask_jobs WHERE status = 'done' "
+                "SELECT id, mode, created_at FROM ask_jobs WHERE status = 'done' "
                 # codex #524 R3 P2:只采样可注入的模式——经验只经
                 # ReasoningRetriever(mode 恒 reasoning)注入,chunk/graph run
                 # 学出的确定性行为翻成 reflect 建议既不可执行,还会在非
@@ -572,23 +639,44 @@ class AskStateStore:
                 (*partition_params, job_limit),
             ).fetchall()
             runs = [project_run_row(row["id"], row["mode"]) for row in job_rows]
-            if not runs:
-                return []
-            by_run = {run["run_id"]: run for run in runs}
-            placeholders = ",".join("%s" for _ in by_run)
-            step_rows = db.execute(
-                "SELECT t.job_id AS job_id, t.step_json AS step_json "
-                "FROM ask_trace_steps t JOIN ask_jobs j ON j.id = t.job_id "
-                f"WHERE t.job_id IN ({placeholders}) "
-                "ORDER BY j.created_at DESC, j.id DESC, t.seq ASC LIMIT %s",
-                (*by_run.keys(), step_limit),
-            ).fetchall()
+            stamps = {str(row["id"]): iso_timestamp(row["created_at"]) for row in job_rows}
+            step_rows = []
+            if runs:
+                by_run = {run["run_id"]: run for run in runs}
+                placeholders = ",".join("%s" for _ in by_run)
+                step_rows = db.execute(
+                    "SELECT t.job_id AS job_id, t.step_json AS step_json "
+                    "FROM ask_trace_steps t JOIN ask_jobs j ON j.id = t.job_id "
+                    f"WHERE t.job_id IN ({placeholders}) "
+                    "ORDER BY j.created_at DESC, j.id DESC, t.seq ASC LIMIT %s",
+                    (*by_run.keys(), step_limit),
+                ).fetchall()
+            # Global reasoning runs: the GLOBAL partition only (SQLite twin).
+            global_rows = []
+            if notebook_id is None:
+                global_rows = db.execute(
+                    (
+                        "WITH candidates AS ("
+                        "SELECT id, mode, created_at, "
+                        "COALESCE(payload_json::jsonb->'answer'->'reasoning_trace', '[]'::jsonb) AS trace "
+                        "FROM global_ask_jobs WHERE status = 'done' AND mode = 'reasoning' "
+                        "ORDER BY created_at DESC, id DESC LIMIT %s), "
+                        "budgeted AS ({budget}) "
+                        "SELECT id, mode, created_at, "
+                        "(SELECT COALESCE(jsonb_agg(t.e ORDER BY t.n), '[]'::jsonb) FROM "
+                        "jsonb_array_elements(budgeted.trace) WITH ORDINALITY AS t(e, n) "
+                        "WHERE t.n <= budgeted.budget) AS trace_json "
+                        "FROM budgeted ORDER BY created_at DESC, id DESC"
+                    ).format(budget=_RUN_BUDGET_POSTGRES),
+                    (job_limit, step_limit),
+                ).fetchall()
+        by_run = {run["run_id"]: run for run in runs}
         for row in step_rows:
             step = project_run_step(json_value(row["step_json"], None))
             target = by_run.get(str(row["job_id"]))
             if step is not None and target is not None:
                 target["steps"].append(step)
-        return runs
+        return _merge_run_samples(runs, stamps, global_rows, job_limit, step_limit)
 
     def recent_user_report_traces(
         self,
@@ -690,12 +778,25 @@ class AskStateStore:
         limit = max(1, int(limit))
         with self.database.connect() as db:
             rows = db.execute(
-                "SELECT question FROM ask_jobs "
+                "SELECT question, created_at FROM ask_jobs "
                 "WHERE created_by = %s AND status = 'done' "
                 "ORDER BY created_at DESC, id DESC LIMIT %s",
                 (user_id, limit),
             ).fetchall()
-        return [{"language": classify_ask_language(row["question"])} for row in rows]
+            # The same person's global asks (SQLite twin): same actor predicate
+            # in the SQL text, question text discarded in this method.
+            global_rows = db.execute(
+                "SELECT payload_json::jsonb->>'question' AS question, created_at "
+                "FROM global_ask_jobs WHERE user_id = %s AND status = 'done' "
+                "ORDER BY created_at DESC, id DESC LIMIT %s",
+                (user_id, limit),
+            ).fetchall()
+        sampled = merge_sampled_rows(
+            [{"question": r["question"], "created_at": iso_timestamp(r["created_at"])} for r in rows]
+            + [dict(r) for r in global_rows],
+            limit=limit, created_at_of=lambda r: r["created_at"], id_of=lambda r: "",
+        )
+        return [{"language": classify_ask_language(row["question"])} for row in sampled]
 
     def ask_job_detail(self, job_id: str) -> dict:
         with self.database.connect() as db:

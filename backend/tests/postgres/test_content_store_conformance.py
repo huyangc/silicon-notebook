@@ -365,7 +365,7 @@ def content_harness(request) -> ContentHarness:
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 61
+    assert PostgresMigrator(database).migrate() == 62
     _seed_catalog(database)
     yield ContentHarness(
         database=database,
@@ -1429,7 +1429,7 @@ def test_postgres_bulk_delete_cannot_remove_a_concurrently_continued_conversatio
     from app.repositories.postgres.database import PostgresDatabase
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 61
+    assert PostgresMigrator(postgres_database).migrate() == 62
     _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresAskStateStore(postgres_database, seams)
@@ -1563,7 +1563,7 @@ def test_postgres_final_save_and_explicit_delete_do_not_deadlock_or_orphan(
     from app.repositories.postgres.database import PostgresDatabase
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 61
+    assert PostgresMigrator(postgres_database).migrate() == 62
     _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresAskStateStore(postgres_database, seams)
@@ -1691,7 +1691,7 @@ def test_postgres_report_cancel_commit_beats_blocked_terminal_write(
     from app.repositories.postgres.database import PostgresDatabase
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 61
+    assert PostgresMigrator(postgres_database).migrate() == 62
     _seed_catalog(postgres_database)
     seams = _seams()
     report = PostgresReportStore(
@@ -1926,7 +1926,7 @@ def test_postgres_code_mutation_wins_against_conditional_transfer_delete(
     """Code is fingerprinted business state and locks the table aggregate."""
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 61
+    assert PostgresMigrator(postgres_database).migrate() == 62
     _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
@@ -2370,7 +2370,7 @@ def test_postgres_memory_search_filters_scope_before_candidate_limit(
     from app.repositories.postgres.migrator import PostgresMigrator
     from psycopg.types.json import Jsonb
 
-    assert PostgresMigrator(postgres_database).migrate() == 61
+    assert PostgresMigrator(postgres_database).migrate() == 62
     _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresMemoryStore(
@@ -2455,7 +2455,7 @@ def test_postgres_memory_search_total_is_exact_beyond_candidate_page(
     from app.repositories.postgres.migrator import PostgresMigrator
     from psycopg.types.json import Jsonb
 
-    assert PostgresMigrator(postgres_database).migrate() == 61
+    assert PostgresMigrator(postgres_database).migrate() == 62
     _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresMemoryStore(
@@ -2597,7 +2597,7 @@ def test_postgres_projector_commits_terminal_knowhow_graph(
     from app.repositories.postgres.source_store import SourceStore
     from app.services.knowhow.projection import KnowhowProjector
 
-    assert PostgresMigrator(postgres_database).migrate() == 61
+    assert PostgresMigrator(postgres_database).migrate() == 62
     _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
@@ -2714,7 +2714,7 @@ def test_postgres_projector_and_delete_leave_no_projection_orphans(
     from app.repositories.postgres.source_store import SourceStore
     from app.services.knowhow.projection import KnowhowProjector
 
-    assert PostgresMigrator(postgres_database).migrate() == 61
+    assert PostgresMigrator(postgres_database).migrate() == 62
     _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
@@ -2831,7 +2831,7 @@ def test_postgres_delete_route_cleans_source_created_after_initial_snapshot(
     from app.repositories.postgres.source_store import SourceStore
     from app.services.knowhow.projection import KnowhowProjector
 
-    assert PostgresMigrator(postgres_database).migrate() == 61
+    assert PostgresMigrator(postgres_database).migrate() == 62
     _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
@@ -2946,7 +2946,7 @@ def test_postgres_two_projectors_serialize_whole_pass_and_newest_wins(
     from app.repositories.postgres.source_store import SourceStore
     from app.services.knowhow.projection import KnowhowProjector
 
-    assert PostgresMigrator(postgres_database).migrate() == 61
+    assert PostgresMigrator(postgres_database).migrate() == 62
     _seed_catalog(postgres_database)
     seams = _seams()
 
@@ -3065,7 +3065,7 @@ def test_postgres_source_elements_for_chunking_extracts_metadata_keys(
     from app.repositories.postgres.chunk_store import ChunkStore
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 61
+    assert PostgresMigrator(postgres_database).migrate() == 62
     _seed_catalog(postgres_database)
     mark = "%s"
     with postgres_database.write() as connection:
@@ -3125,7 +3125,7 @@ def _asset_gc_maintenance(postgres_database, tmp_path):
 def _asset_gc_fixture(postgres_database, tmp_path):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 61
+    assert PostgresMigrator(postgres_database).migrate() == 62
     _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresKnowhowStore(
@@ -3223,7 +3223,7 @@ def test_postgres_source_elements_after_walk_equals_the_whole_source_read(
     from app.repositories.postgres.migrator import PostgresMigrator
     from app.repositories.postgres.source_store import SourceStore
 
-    assert PostgresMigrator(postgres_database).migrate() == 61
+    assert PostgresMigrator(postgres_database).migrate() == 62
     _seed_catalog(postgres_database)
     seams = _seams()
     mark = "%s"
@@ -3318,3 +3318,132 @@ def test_postgres_sweep_still_consults_history_when_a_candidate_is_not_live(
 
     assert scans["history"], "活格子判不下来时必须继续扫历史"
     assert store.get_notebook_asset(asset_id) is not None
+
+
+def _seed_global_ask(connection, job_id, user_id, created_at, *, notebook_ids,
+                     question="global?", status="done", mode="reasoning", steps=(),
+                     searched=None, cited=(), skipped=()):
+    mark = "%s"
+    connection.execute(
+        "INSERT INTO global_ask_conversations(id,user_id,title,scope_json,submitted_via,"
+        f"created_at,updated_at) VALUES ({','.join([mark] * 7)}) ON CONFLICT (id) DO NOTHING",
+        (f"conv-{user_id}", user_id, "", "{}", "web", created_at, created_at),
+    )
+    payload = {
+        "job_id": job_id, "conversation_id": f"conv-{user_id}", "status": status,
+        "question": question, "created_at": created_at, "mode": mode,
+        "notebook_scope": {"mode": "include", "notebook_ids": list(notebook_ids)},
+        "resolved_notebook_ids": list(notebook_ids),
+        "searched_notebook_ids": list(notebook_ids) if searched is None else list(searched),
+        "cited_notebook_ids": list(cited),
+        "skipped_notebooks": [{"notebook_id": nb, "reason": "timeout"} for nb in skipped],
+        "answer": {"answer": "a", "reasoning_trace": list(steps)},
+    }
+    connection.execute(
+        "INSERT INTO global_ask_jobs(id,conversation_id,user_id,client_request_id,request_json,"
+        "status,payload_json,created_at,submitted_via,asked_at,updated_at,error_detail,mode) "
+        f"VALUES ({','.join([mark] * 13)})",
+        (job_id, f"conv-{user_id}", user_id, None, "{}", status,
+         json.dumps(payload, ensure_ascii=False), created_at, "web", "", created_at, "", mode),
+    )
+
+
+def test_the_three_samplers_also_see_global_asks(content_harness):
+    """PostgreSQL twin of ``tests/test_ask_sample_global_arms.py``: the
+    member's global asks that touched the notebook enter the overlay sample
+    (actor predicate in SQL), global reasoning runs enter the GLOBAL experience
+    partition only, and the person's global questions enter the language
+    sample -- same bounds, same projections as the notebook arm."""
+    step = {"step_type": "retrieve", "summary": "g", "detail": {"count": 1}, "duration_ms": 5}
+    mine, _conv = content_harness.ask.begin_durable_job(
+        "nb-content", AskRequest(question="这是中文问题"), "reasoning", "user-content"
+    )
+    content_harness.ask.finish_job(mine, "done")
+    with content_harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,status,created_at,"
+            "updated_at,username,password_hash,password_salt,password_iterations) "
+            f"VALUES ({','.join(['%s'] * 11)})",
+            ("user-other", "other@example.test", "Other", "user", "active",
+             NOW, NOW, "o00123457", "", "", 0),
+        )
+        _seed_global_ask(connection, "gask-mine", "user-content", "2026-07-24T00:00:00+00:00",
+                         notebook_ids=["nb-content", "nb-other"],
+                         question="an english question about circuits", steps=[step])
+        _seed_global_ask(connection, "gask-elsewhere", "user-content", "2026-07-25T00:00:00+00:00",
+                         notebook_ids=["nb-other"], question="elsewhere")
+        _seed_global_ask(connection, "gask-other", "user-other", "2026-07-26T00:00:00+00:00",
+                         notebook_ids=["nb-content"], question="someone else")
+    ask = content_harness.ask
+    traces = ask.recent_user_ask_traces("nb-content", "user-content", job_limit=10, step_limit=600)
+    assert [row["job_id"] for row in traces] == ["gask-mine", mine]
+    assert traces[0]["question"] == "an english question about circuits"
+    assert [s["summary"] for s in traces[0]["steps"]] == ["g"]
+
+    runs = ask.recent_completed_ask_runs(job_limit=40, step_limit=600)
+    assert [run["run_id"] for run in runs][:3] == ["gask-other", "gask-elsewhere", "gask-mine"]
+    assert all(set(run) == {"run_id", "mode", "steps"} for run in runs)
+    partitioned = ask.recent_completed_ask_runs(job_limit=40, step_limit=600, notebook_id="nb-content")
+    assert not any(run["run_id"].startswith("gask-") for run in partitioned)
+
+    # The two global questions are newer than every seeded ask of this user
+    # (both are English), the notebook ask seeded above is Chinese, and a
+    # foreign user's global question never enters the sample.
+    languages = ask.recent_user_ask_languages("user-content", limit=30)
+    assert languages[:3] == [{"language": "en"}, {"language": "en"}, {"language": "zh"}]
+
+    # The core scenario: a member whose only asks in a library were global.
+    with content_harness.database.write() as connection:
+        _insert_notebook_row = connection.execute
+        _insert_notebook_row(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+            "created_at,updated_at,tier) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            ("nb-global-only", "Global only", "", "engineering", "ready", "user-content",
+             NOW, NOW, "personal"),
+        )
+        _seed_global_ask(connection, "gask-only", "user-content", "2026-07-27T00:00:00+00:00",
+                         notebook_ids=["nb-global-only"], steps=[step])
+    only = ask.recent_user_ask_traces("nb-global-only", "user-content", job_limit=10, step_limit=600)
+    assert [row["job_id"] for row in only] == ["gask-only"]
+    assert [s["summary"] for s in only[0]["steps"]] == ["g"]
+
+
+def test_the_postgres_attribution_predicate_agrees_with_the_python_rule_and_runs_before_the_limit(
+    content_harness,
+):
+    """PostgreSQL twin of the SQLite parity + starvation tests: the SQL spelling
+    of ``touched_notebook_ids`` (``attribution_sql(dialect="postgres")``) selects
+    exactly the rows the Python rule accepts, and it applies before ``LIMIT``."""
+    from app.domain.global_ask_attribution import touched_notebook_ids
+
+    cases = {
+        "searched": dict(notebook_ids=["nb-content", "nb-x"], searched=["nb-x"]),
+        "cited": dict(notebook_ids=["nb-content", "nb-x"], searched=[], cited=["nb-x"]),
+        "resolved-only": dict(notebook_ids=["nb-content", "nb-x"], searched=["nb-content"]),
+        "no-call-not-skipped": dict(notebook_ids=["nb-content", "nb-x"], searched=[]),
+        "no-call-skipped": dict(notebook_ids=["nb-content", "nb-x"], searched=[], skipped=["nb-x"]),
+        "not-a-participant": dict(notebook_ids=["nb-content"], searched=["nb-content"]),
+    }
+    with content_harness.database.write() as connection:
+        for index, (name, spec) in enumerate(cases.items()):
+            _seed_global_ask(connection, f"gask-{name}", "user-content",
+                             f"2026-08-{index + 1:02d}T00:00:00+00:00", question=name, **spec)
+        for i in range(5):
+            _seed_global_ask(connection, f"gask-noise-{i}", "user-content",
+                             f"2026-09-0{i + 1}T00:00:00+00:00",
+                             notebook_ids=["nb-content", "nb-x"], searched=["nb-content"])
+    ask = content_harness.ask
+    sampled = {row["job_id"] for row in ask.recent_user_ask_traces(
+        "nb-x", "user-content", job_limit=50, step_limit=600)}
+    expected = {
+        f"gask-{name}" for name, spec in cases.items()
+        if "nb-x" in touched_notebook_ids(
+            spec["notebook_ids"], spec.get("searched", spec["notebook_ids"]),
+            spec.get("cited", []), spec.get("skipped", []))
+    }
+    assert sampled == expected == {"gask-searched", "gask-cited", "gask-no-call-not-skipped"}
+    # Starvation guard: five newer runs merely resolved nb-x; a window of two
+    # still surfaces the qualifying older runs.
+    window = [row["job_id"] for row in ask.recent_user_ask_traces(
+        "nb-x", "user-content", job_limit=2, step_limit=600)]
+    assert window == ["gask-no-call-not-skipped", "gask-cited"]

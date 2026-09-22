@@ -58,12 +58,37 @@ from app.models.ask import (
     FeedbackResponse,
     StoredSubmittedVia,
 )
+from app.domain.global_ask_attribution import attribution_sql
+
+# One shared newest-first step budget over a ``candidates`` CTE that carries a
+# JSON ``trace`` column: ``budget`` is what remains for each row after the newer
+# rows took theirs (``?`` binds ``step_limit``). Non-array traces count as 0.
+_TRACE_BUDGET_SQLITE = (
+    "SELECT id, status, created_at, question, resolved_json, searched_json, "
+    "cited_json, skipped_json, "
+    "MAX(0, ? - (SUM(CASE WHEN json_type(trace) = 'array' "
+    "THEN json_array_length(trace) ELSE 0 END) OVER "
+    "(ORDER BY created_at DESC, id DESC ROWS UNBOUNDED PRECEDING) "
+    "- CASE WHEN json_type(trace) = 'array' THEN json_array_length(trace) ELSE 0 END)) "
+    "AS budget, CASE WHEN json_type(trace) = 'array' THEN trace ELSE '[]' END AS trace "
+    "FROM candidates"
+)
+_RUN_BUDGET_SQLITE = _TRACE_BUDGET_SQLITE.replace(
+    "SELECT id, status, created_at, question, resolved_json, searched_json, "
+    "cited_json, skipped_json, ",
+    "SELECT id, mode, created_at, ",
+)
+from app.repositories.ask_sample_merge import (
+    merge_ask_samples as _merge_ask_samples,
+    merge_run_samples as _merge_run_samples,
+)
 from app.repositories.ports import (
     AskRequestKeyConflict,
     ConversationBusyError,
     ConversationHasNoShareableAnswer,
     ConversationShareWatermarkStale,
     PreparedAskTurn,
+    merge_sampled_rows,
     project_ask_row,
     project_report_attempt,
     project_report_row,
@@ -607,23 +632,73 @@ class AskStateStore:
                 )
                 for row in job_rows
             ]
-            if not asks:
-                return []
             by_job = {ask["job_id"]: ask for ask in asks}
-            placeholders = ",".join("?" for _ in by_job)
-            step_rows = db.execute(
-                "SELECT t.job_id AS job_id, t.step_json AS step_json "
-                "FROM ask_trace_steps t JOIN ask_jobs j ON j.id = t.job_id "
-                f"WHERE j.notebook_id = ? AND j.created_by = ? AND t.job_id IN ({placeholders}) "
-                "ORDER BY j.created_at DESC, j.id DESC, t.seq ASC LIMIT ?",
-                (notebook_id, user_id, *by_job.keys(), step_limit),
+            step_rows = []
+            if asks:
+                placeholders = ",".join("?" for _ in by_job)
+                step_rows = db.execute(
+                    "SELECT t.job_id AS job_id, t.step_json AS step_json "
+                    "FROM ask_trace_steps t JOIN ask_jobs j ON j.id = t.job_id "
+                    f"WHERE j.notebook_id = ? AND j.created_by = ? AND t.job_id IN ({placeholders}) "
+                    "ORDER BY j.created_at DESC, j.id DESC, t.seq ASC LIMIT ?",
+                    (notebook_id, user_id, *by_job.keys(), step_limit),
+                ).fetchall()
+            # The member's GLOBAL asks that touched this notebook: same actor
+            # predicate in the SQL text (``user_id`` is the global table's
+            # actor column), same bounds, same projection. The trace is read
+            # the way ``global_answer_trace`` reads it -- the finished answer's
+            # ``reasoning_trace``, else the streamed ``trace`` a running or
+            # stopped job still carries. A member whose only asks in this
+            # library were global ones must still get a sample, so this arm
+            # runs whether or not the notebook arm found anything. The array
+            # type guard keeps a hand-imported scalar from aborting the read.
+            # The attribution predicate (``global_ask_attribution.attribution_sql``,
+            # the SQL spelling of ``touched_notebook_ids``) runs BEFORE ``LIMIT``:
+            # filtering after it would let the newest runs that merely
+            # resolved this library fill the window and starve it of the older
+            # runs that really searched it.
+            attributed, binds = attribution_sql(dialect="sqlite", marker="?")
+            # The step ceiling is ONE budget across the sampled jobs, spent
+            # newest first (the notebook arm's ``ORDER BY … LIMIT step_limit``
+            # twin): a window sum of each job's trace length says how much the
+            # newer jobs already used, and each trace is sliced to what is
+            # left BEFORE it leaves the database. A per-job slice would let 40
+            # jobs move 40 × step_limit elements.
+            # ONE string literal (``.format``, not an f-string): the isolation
+            # guard reads each SQL-shaped literal of this method on its own,
+            # and the ``user_id = ?`` predicate must be in the same literal as
+            # every SELECT it protects.
+            global_rows = db.execute(
+                (
+                    "WITH candidates AS ("
+                    "SELECT id, status, created_at, "
+                    "json_extract(payload_json,'$.question') AS question, "
+                    "COALESCE(json_extract(payload_json,'$.answer.reasoning_trace'), "
+                    "json_extract(payload_json,'$.trace'), '[]') AS trace, "
+                    "json_extract(payload_json,'$.resolved_notebook_ids') AS resolved_json, "
+                    "json_extract(payload_json,'$.searched_notebook_ids') AS searched_json, "
+                    "json_extract(payload_json,'$.cited_notebook_ids') AS cited_json, "
+                    "json_extract(payload_json,'$.skipped_notebooks') AS skipped_json "
+                    "FROM global_ask_jobs WHERE user_id = ? "
+                    "AND {attributed} "
+                    "ORDER BY created_at DESC, id DESC LIMIT ?), "
+                    "budgeted AS ({budget}) "
+                    "SELECT id, status, created_at, question, resolved_json, searched_json, "
+                    "cited_json, skipped_json, "
+                    "(SELECT json_group_array(json(value)) FROM json_each(budgeted.trace) "
+                    "WHERE key < budgeted.budget) AS trace_json "
+                    "FROM budgeted ORDER BY created_at DESC, id DESC"
+                ).format(attributed=attributed, budget=_TRACE_BUDGET_SQLITE),
+                (user_id, *([notebook_id] * binds), job_limit, step_limit),
             ).fetchall()
         for row in step_rows:
             step = project_trace_step(row["step_json"])
             target = by_job.get(str(row["job_id"]))
             if step is not None and target is not None:
                 target["steps"].append(step)
-        return asks
+        return _merge_ask_samples(
+            asks, global_rows, job_limit, step_limit, notebook_id=notebook_id,
+        )
 
     def recent_completed_ask_runs(
         self, *, job_limit: int, step_limit: int, notebook_id: str | None = None
@@ -677,7 +752,7 @@ class AskStateStore:
         partition_params: tuple = () if notebook_id is None else (str(notebook_id),)
         with self.database.connect() as db:
             job_rows = db.execute(
-                "SELECT id, mode FROM ask_jobs WHERE status = 'done' "
+                "SELECT id, mode, created_at FROM ask_jobs WHERE status = 'done' "
                 # codex #524 R3 P2:只采样可注入的模式——经验只经
                 # ReasoningRetriever(mode 恒 reasoning)注入,chunk/graph run
                 # 学出的确定性行为翻成 reflect 建议既不可执行,还会在非
@@ -688,23 +763,43 @@ class AskStateStore:
                 (*partition_params, job_limit),
             ).fetchall()
             runs = [project_run_row(row["id"], row["mode"]) for row in job_rows]
-            if not runs:
-                return []
-            by_run = {run["run_id"]: run for run in runs}
-            placeholders = ",".join("?" for _ in by_run)
-            step_rows = db.execute(
-                "SELECT t.job_id AS job_id, t.step_json AS step_json "
-                "FROM ask_trace_steps t JOIN ask_jobs j ON j.id = t.job_id "
-                f"WHERE t.job_id IN ({placeholders}) "
-                "ORDER BY j.created_at DESC, j.id DESC, t.seq ASC LIMIT ?",
-                (*by_run.keys(), step_limit),
-            ).fetchall()
+            stamps = {str(row["id"]): row["created_at"] for row in job_rows}
+            step_rows = []
+            if runs:
+                by_run = {run["run_id"]: run for run in runs}
+                placeholders = ",".join("?" for _ in by_run)
+                step_rows = db.execute(
+                    "SELECT t.job_id AS job_id, t.step_json AS step_json "
+                    "FROM ask_trace_steps t JOIN ask_jobs j ON j.id = t.job_id "
+                    f"WHERE t.job_id IN ({placeholders}) "
+                    "ORDER BY j.created_at DESC, j.id DESC, t.seq ASC LIMIT ?",
+                    (*by_run.keys(), step_limit),
+                ).fetchall()
+            # Global (cross-library) reasoning runs belong to the GLOBAL
+            # partition only: sampled here when no partition is named, never
+            # for a library's own chain. Same projection, no actor column read.
+            global_rows = []
+            if notebook_id is None:
+                global_rows = db.execute(
+                    "WITH candidates AS ("
+                    "SELECT id, mode, created_at, "
+                    "COALESCE(json_extract(payload_json,'$.answer.reasoning_trace'), '[]') AS trace "
+                    "FROM global_ask_jobs WHERE status = 'done' AND mode = 'reasoning' "
+                    "ORDER BY created_at DESC, id DESC LIMIT ?), "
+                    f"budgeted AS ({_RUN_BUDGET_SQLITE}) "
+                    "SELECT id, mode, created_at, "
+                    "(SELECT json_group_array(json(value)) FROM json_each(budgeted.trace) "
+                    "WHERE key < budgeted.budget) AS trace_json "
+                    "FROM budgeted ORDER BY created_at DESC, id DESC",
+                    (job_limit, step_limit),
+                ).fetchall()
+        by_run = {run["run_id"]: run for run in runs}
         for row in step_rows:
             step = project_run_step(row["step_json"])
             target = by_run.get(str(row["job_id"]))
             if step is not None and target is not None:
                 target["steps"].append(step)
-        return runs
+        return _merge_run_samples(runs, stamps, global_rows, job_limit, step_limit)
 
     def recent_user_report_traces(
         self,
@@ -829,7 +924,7 @@ class AskStateStore:
         limit = max(1, int(limit))
         with self.database.connect() as db:
             rows = db.execute(
-                "SELECT question FROM ask_jobs "
+                "SELECT question, created_at FROM ask_jobs "
                 "WHERE created_by = ? AND status = 'done' "
                 # codex #535 R10 P2:julianday 先行——created_at 文本序在 offset
                 # 混排(DST/合库)下不是时间序,采样会漏掉更新的问题;与 PG 的
@@ -837,7 +932,19 @@ class AskStateStore:
                 "ORDER BY julianday(created_at) DESC, id DESC LIMIT ?",
                 (user_id, limit),
             ).fetchall()
-        return [{"language": classify_ask_language(row["question"])} for row in rows]
+            # The same person's global asks are asks too; same actor predicate
+            # in the SQL text, same closed bucket, question text discarded here.
+            global_rows = db.execute(
+                "SELECT json_extract(payload_json,'$.question') AS question, created_at "
+                "FROM global_ask_jobs WHERE user_id = ? AND status = 'done' "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (user_id, limit),
+            ).fetchall()
+        sampled = merge_sampled_rows(
+            [dict(row) for row in rows] + [dict(row) for row in global_rows],
+            limit=limit, created_at_of=lambda r: r["created_at"], id_of=lambda r: "",
+        )
+        return [{"language": classify_ask_language(row["question"])} for row in sampled]
 
     def ask_job_detail(self, job_id: str) -> dict:
         with self.database.connect() as db:

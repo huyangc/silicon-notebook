@@ -807,3 +807,71 @@ def test_submit_feedback_route(setup, monkeypatch):
         assert feedback.json()["feedback"] == "useful"
         invalid = client.post(f"/api/global-ask/jobs/{job_id}/feedback", json={"rating": "bogus"})
         assert invalid.status_code == 422
+
+
+def test_a_delivered_global_answer_notes_completion_once_with_every_participant(setup):
+    """The post-completion chains fire AFTER the terminal ``done`` row, once,
+    with every participant library -- and never for a failed run."""
+    service, _, _, _ = setup
+    notes = []
+    noted = Event()
+
+    def record(ids, user, mode, *, anchor):
+        notes.append((ids, user, mode, anchor))
+        noted.set()
+
+    service.note_ask_completed = record
+    job = service.start(GlobalAskRequest(question="compare"), user_id="u")
+    assert finished(service, job).status == "done"
+    # ``finished`` returns once the row is terminal and the job left the live
+    # registry, which happens BEFORE the hook runs (by design: the hook is the
+    # last thing the worker does), so wait for the callback itself.
+    assert noted.wait(5), "completion hook never ran"
+    assert notes == [(["a", "b"], "u", "chunk", "a")]
+
+    notes.clear()
+    original = service.ask.ask
+
+    def failing(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    service.ask.ask = failing
+    try:
+        failed = service.start(GlobalAskRequest(question="again"), user_id="u")
+        assert finished(service, failed).status == "failed"
+    finally:
+        service.ask.ask = original
+    assert notes == []
+
+
+def test_a_failing_completion_note_leaves_the_delivered_answer_untouched(setup):
+    service, _, _, _ = setup
+
+    def explode(ids, user, mode, *, anchor):
+        raise RuntimeError("bookkeeping down")
+
+    service.note_ask_completed = explode
+    job = service.start(GlobalAskRequest(question="compare"), user_id="u")
+    result = finished(service, job)
+    assert result.status == "done"
+    assert result.answer is not None and result.answer.answer == "answer"
+
+
+def test_a_done_write_that_did_not_win_never_notes_completion(setup):
+    """``_execute`` reports whether ITS write moved the row to ``done``; a
+    shutdown or a concurrent transition that already took the row leaves
+    nothing to learn from, so the chains stay silent even though the answer
+    exists in the store."""
+    service, _, _, _ = setup
+    notes = []
+    service.note_ask_completed = lambda ids, user, mode, **kw: notes.append((ids, user, mode))
+    original = service._save_if_open
+
+    def lost_race(job, user_id, **kwargs):
+        won = original(job, user_id, **kwargs)
+        return False if job.status == "done" else won
+
+    service._save_if_open = lost_race
+    job = service.start(GlobalAskRequest(question="compare"), user_id="u")
+    assert finished(service, job).status == "done"
+    assert notes == []

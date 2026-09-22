@@ -196,11 +196,11 @@ class GlobalAskStore:
             db.execute(self._sql(
                 "INSERT INTO global_ask_jobs"
                 "(id,conversation_id,user_id,client_request_id,request_json,status,"
-                "payload_json,created_at,submitted_via,asked_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?)"
+                "payload_json,created_at,submitted_via,asked_at,updated_at,mode) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
             ), (job.job_id, job.conversation_id, user_id, request_id or None,
                 request_json, job.status, job.model_dump_json(), job.created_at,
-                submitted_via, job.asked_at, job.updated_at))
+                submitted_via, job.asked_at, job.updated_at, job.mode))
             db.execute(self._sql(
                 "UPDATE global_ask_conversations SET scope_json=?,updated_at=? WHERE id=? AND user_id=?"
             ), (job.notebook_scope.model_dump_json(), job.created_at, job.conversation_id, user_id))

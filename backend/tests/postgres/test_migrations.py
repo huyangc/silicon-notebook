@@ -264,7 +264,7 @@ def test_packaged_migration_refuses_non_utf_database_before_any_ddl(
 def test_packaged_migrations_apply_in_order(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert len(PostgresMigrator(postgres_database).migrations) == 61
+    assert len(PostgresMigrator(postgres_database).migrations) == 62
     migrator = PostgresMigrator(postgres_database)
     assert migrator.migrate(target_version=2) == 2
     with postgres_database.connect() as conn:
@@ -308,7 +308,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_chunks_text_trgm" not in indexes
     for version in (3, 4, 5, 6, 7, 8, 9, 10, 11):
         assert migrator.migrate(target_version=version) == version
-    assert migrator.migrate() == 61
+    assert migrator.migrate() == 62
     with postgres_database.connect() as conn:
         final_indexes = {
             row["indexname"]
@@ -480,7 +480,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
         22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
         41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58,
-        59, 60, 61,
+        59, 60, 61, 62,
     ]
 
 
@@ -514,8 +514,8 @@ def test_auth_sunset_migration_preserves_legacy_password_and_session(
             "VALUES ('legacy-session','legacy-user',now(),now()+interval '1 day',now())"
         )
 
-    assert migrator.migrate() == 61
-    assert migrator.migrate() == 61
+    assert migrator.migrate() == 62
+    assert migrator.migrate() == 62
     with postgres_database.connect() as connection:
         users = {
             row["id"]: row for row in connection.execute(
@@ -615,7 +615,7 @@ def test_notebook_object_schema_migration_relocates_legacy_rows(postgres_databas
             ),
         )
 
-    assert migrator.migrate() == 61
+    assert migrator.migrate() == 62
     with postgres_database.connect() as connection:
         relocated = connection.execute(
             "SELECT notebook_id,object_type,status,created_by "
@@ -678,7 +678,7 @@ def test_source_agent_provenance_column_is_nullable_and_unconstrained(
             "AND column_name='agent_profile_id'"
         ).fetchone() is None
 
-    assert migrator.migrate() == 61
+    assert migrator.migrate() == 62
     with postgres_database.connect() as connection:
         column = connection.execute(
             "SELECT data_type,is_nullable,column_default,collation_name "
@@ -753,7 +753,7 @@ def test_cluster_membership_migration_dedupes_before_unique_guard(postgres_datab
                 ],
             )
 
-    assert migrator.migrate() == 61
+    assert migrator.migrate() == 62
     with postgres_database.connect() as connection:
         rows = connection.execute(
             "SELECT id,canonical_id FROM concept_clusters "

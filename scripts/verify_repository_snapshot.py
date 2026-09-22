@@ -4705,5 +4705,60 @@ MIGRATION_MANIFEST[(80, 81)] = {
     "views": {},
 }
 
+
+# v82: the learning chains sample global Ask jobs (parity with PostgreSQL
+# 0062_global_ask_job_sampling.sql). One TEXT column (backfilled from the
+# payload; the fixture holds no global rows) and two non-unique indexes.
+GLOBAL_ASK_JOB_SAMPLING_COLUMNS = {
+    "global_ask_jobs": {
+        "mode": ("mode", "TEXT", 1, "''", 0),
+    },
+}
+GLOBAL_ASK_JOB_SAMPLING_INDEXES = {
+    "idx_global_ask_jobs_user_created": (
+        "CREATE INDEX idx_global_ask_jobs_user_created\n"
+        "                 ON global_ask_jobs(user_id, created_at, id)"
+    ),
+    "idx_global_ask_jobs_status_mode_created": (
+        "CREATE INDEX idx_global_ask_jobs_status_mode_created\n"
+        "                 ON global_ask_jobs(status, mode, created_at, id)"
+    ),
+}
+GLOBAL_ASK_TABLES_V82 = {
+    "global_ask_jobs": GLOBAL_ASK_TABLES_V81["global_ask_jobs"].replace(
+        " error_detail TEXT NOT NULL DEFAULT '')",
+        " error_detail TEXT NOT NULL DEFAULT '', mode TEXT NOT NULL DEFAULT '')",
+    ),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 82, *key[2:]): {
+        **manifest,
+        "tables": {
+            **manifest["tables"],
+            **(
+                GLOBAL_ASK_TABLES_V82
+                if "global_ask_jobs" in manifest["tables"]
+                else {}
+            ),
+        },
+        "columns": {
+            **manifest["columns"],
+            "global_ask_jobs": {
+                **manifest["columns"].get("global_ask_jobs", {}),
+                **GLOBAL_ASK_JOB_SAMPLING_COLUMNS["global_ask_jobs"],
+            },
+        },
+        "indexes": {**manifest["indexes"], **GLOBAL_ASK_JOB_SAMPLING_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(81, 82)] = {
+    "tables": {},
+    "columns": GLOBAL_ASK_JOB_SAMPLING_COLUMNS,
+    "indexes": GLOBAL_ASK_JOB_SAMPLING_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

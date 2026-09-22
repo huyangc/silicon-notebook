@@ -6,7 +6,7 @@ import threading
 import time
 import weakref
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from app.core.config import Settings
 from app.domain.model_artifacts import set_model_artifact_lifecycle_epoch_reader
@@ -1245,6 +1245,95 @@ class RepositoryRuntime:
         )
         host.observe_application(context, event_sink=self.event_log.emit)
 
+    def _note_global_ask_completed(
+        self, notebook_ids: Sequence[str], user_id: str, mode_id: str = "reasoning",
+        *, anchor: str = "",
+    ) -> None:
+        """``_note_ask_completed`` for one finished GLOBAL Ask.
+
+        The same three chains, attributed the way a cross-library run can be:
+
+        * P1 (agent profile overlay) -- once per library the run actually
+          RETRIEVED FROM or cited (``GlobalAskService._note_completed`` hands
+          over exactly those), so for each one this member "finished an Ask in
+          this notebook". The overlay's trace sampler reads the member's global
+          asks that touched that library alongside their notebook asks.
+        * P2 (retrieval experience) -- once, into the GLOBAL partition (``""``):
+          a federated run's tactics describe no single library, and that is
+          the partition a global run reads (see ``reasoning_retrieval``).
+          Reasoning runs only, as for notebook asks.
+        * P3 (search profile) -- once per ask: it counts asks per PERSON, and
+          this was one ask.
+
+        With an observer host, ONE notification per completed ask (as a
+        notebook ask sends one), carrying the run's ANCHOR (its
+        ``nominal_active``, passed separately -- it is not derived from the
+        attributed list, which may not start with it and may be empty) as
+        ``notebook_id`` and the attributed libraries in ``notebook_ids`` with
+        ``scope="global"``; the agent-profile port notifies every attributed
+        library behind that single capability. An ask that touched NO library
+        (every leg skipped) still counts for the person's search profile, the
+        global experience partition and the observers -- only the overlay loop
+        is empty. Fail-open and per-chain isolated exactly like the notebook
+        twin.
+        """
+        ids = [str(value) for value in dict.fromkeys(notebook_ids) if str(value)]
+        anchor = str(anchor or "") or (ids[0] if ids else "")
+        if not anchor or not user_id:
+            return
+
+        def _note_profiles() -> None:
+            # Per-LIBRARY isolation, by the same rule the three chains get
+            # per-chain isolation in ``_note_ask_completed``: one library's
+            # failing note must not eat the next library's count, and that
+            # property is established here rather than trusted to the job's
+            # own fail-open.
+            for notebook_id in ids:
+                try:
+                    self.agent_profile_jobs.note_ask_completed(notebook_id, user_id)
+                except Exception:  # noqa: BLE001 — 已交付的答案不因后台记账而改判
+                    _log.exception("agent profile global-ask notification failed")
+
+        def _note_experience() -> None:
+            self.retrieval_experience_jobs.note_ask_completed("")
+
+        def _note_search_profile() -> None:
+            self.search_profile_jobs.note_ask_completed(user_id)
+
+        chains = [
+            ("agent profile", _note_profiles),
+            *([("retrieval experience", _note_experience)] if mode_id == "reasoning" else []),
+            ("search profile", _note_search_profile),
+        ]
+        host = self.ask_completed_observers
+        if host is None:
+            for label, chain in chains:
+                try:
+                    chain()
+                except Exception:  # noqa: BLE001 — 同上
+                    _log.exception("%s global-ask notification failed", label)
+            return
+        context = AskCompletedObserverCallContext(
+            notification=CompletedAskNotification(
+                actor_id=user_id,
+                notebook_id=anchor,
+                mode_id=mode_id,
+                notebook_ids=tuple(ids),
+                scope="global",
+            ),
+            agent_profile=_AskCompletedAccess(_note_profiles),
+            retrieval_experience=(
+                _AskCompletedAccess(_note_experience) if mode_id == "reasoning" else None
+            ),
+            search_profile=_AskCompletedAccess(_note_search_profile),
+            connection_probe=self.database,
+            deadline_monotonic=(
+                time.monotonic()
+                + self.settings.ask_post_completion_extension_timeout_seconds
+            ),
+        )
+        host.observe_application(context, event_sink=self.event_log.emit)
+
     def _note_ask_completed_compat(
         self, notebook_id: str, user_id: str, mode_id: str
     ) -> None:
@@ -2365,6 +2454,10 @@ class RepositoryRuntime:
                     ask=self.ask_service(),
                     settings=self.settings,
                     event_log=self.event_log,
+                    # The same three post-completion chains a notebook ask
+                    # advances, attributed for a cross-library run (see
+                    # ``_note_global_ask_completed``).
+                    note_ask_completed=self._note_global_ask_completed,
                 )
         return self._global_ask
 

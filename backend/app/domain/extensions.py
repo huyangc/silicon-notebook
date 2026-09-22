@@ -240,11 +240,19 @@ ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY = (
 
 @dataclass(frozen=True)
 class CompletedAskNotification:
-    """The smallest core notification needed by the three built-in observers."""
+    """The smallest core notification needed by the three built-in observers.
+
+    ``scope`` is ``"notebook"`` for a notebook Ask and ``"global"`` for a
+    global (cross-library) Ask; for the latter ``notebook_id`` is the run's
+    naming anchor (the first participant) and ``notebook_ids`` lists every
+    participant library. A notebook Ask leaves ``notebook_ids`` empty.
+    """
 
     actor_id: str
     notebook_id: str
     mode_id: str
+    notebook_ids: tuple[str, ...] = ()
+    scope: str = "notebook"
 
 
 class AgentProfileAskCompletedPort(Protocol):

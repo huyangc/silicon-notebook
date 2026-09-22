@@ -1246,3 +1246,19 @@ def test_the_two_layers_are_loaded_under_one_signature():
     empty_primary, shared = _cached_experience_layers(store, "")
     assert empty_primary == []
     assert shared == [{"id": "rx-global"}]
+
+
+def test_a_global_run_reads_the_global_experience_partition_only():
+    """A global run's ``notebook_id`` is only its naming anchor; the experience
+    layers it reads must be the global partition's, and the completion is
+    filed there too (``RepositoryRuntime._note_global_ask_completed``)."""
+    from app.services.reasoning_retrieval import _experience_partition_for_run
+    from app.services.source_scope import source_scope_context
+
+    assert _experience_partition_for_run("nb-anchor") == "nb-anchor"
+    with source_scope_context(
+        "nb-anchor", None, None,
+        notebook_source_ceilings={"nb-anchor": frozenset(), "nb-peer": frozenset()},
+        subjectless=True,
+    ):
+        assert _experience_partition_for_run("nb-anchor") == ""

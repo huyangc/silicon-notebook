@@ -48,6 +48,47 @@ FIXTURE_SECRETS = (
 )
 
 
+def _rollback_v82(db: sqlite3.Connection) -> None:
+    """Undo _migration_82 (global_ask_jobs.mode + two non-unique indexes,
+    parity with PostgreSQL 0062_global_ask_job_sampling.sql) before forging
+    any older deployed schema; every older helper chains through here first
+    (via _rollback_v81)."""
+    db.execute("DROP INDEX idx_global_ask_jobs_user_created")
+    db.execute("DROP INDEX idx_global_ask_jobs_status_mode_created")
+    db.execute("ALTER TABLE global_ask_jobs DROP COLUMN mode")
+
+
+def test_deployed_v81_database_verifies_global_ask_job_sampling(tmp_path):
+    """A deployed v81 database is missing exactly _migration_82's addition:
+    one TEXT NOT NULL DEFAULT '' column and two indexes on global_ask_jobs.
+    The fixture holds no global rows, so `changed_tables` stays empty."""
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as upgraded_db:
+        columns = {
+            row[1]: row
+            for row in upgraded_db.execute("PRAGMA table_info(global_ask_jobs)")
+        }
+        assert columns["mode"][2] == "TEXT" and columns["mode"][3] == 1
+        indexes = {
+            row[1] for row in upgraded_db.execute("PRAGMA index_list(global_ask_jobs)")
+        }
+        assert {"idx_global_ask_jobs_user_created",
+                "idx_global_ask_jobs_status_mode_created"} <= indexes
+    with sqlite3.connect(database) as rollback:
+        _rollback_v82(rollback)
+        rollback.execute("PRAGMA user_version = 81")
+    result = module.verify_snapshot(database, storage)
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 81
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+
+
 def _rollback_v81(db: sqlite3.Connection) -> None:
     """Undo _migration_81 (the four record-parity columns on global_ask_jobs,
     parity with PostgreSQL 0061_global_ask_job_record_parity.sql) before
@@ -58,6 +99,7 @@ def _rollback_v81(db: sqlite3.Connection) -> None:
     a forged "deployed v79" database that still carried v81's columns would
     make the verifier's per-column manifest check see four more added columns
     than the (79, 81) manifest entry declares."""
+    _rollback_v82(db)
     for column in ("error_detail", "updated_at", "asked_at", "submitted_via"):
         db.execute(f"ALTER TABLE global_ask_jobs DROP COLUMN {column}")
 

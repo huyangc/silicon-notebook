@@ -3593,6 +3593,12 @@ class AskStateStorePort(Protocol):
     # ``project_trace_step``: what comes back is the member's own question text
     # plus, per step, the action type / human summary / duration / one count.
     # Never an answer body, never Memory content, never evidence text.
+    #
+    # The member's GLOBAL asks that touched this notebook (a ``global_ask_jobs``
+    # row whose ``resolved_notebook_ids`` contains it) are part of "this
+    # member's own use of it" and are sampled too, under the same two bounds
+    # and the same projection; that arm carries ``user_id = ?`` in its SQL text
+    # (the global table's actor column), which the same guard pins.
     def recent_completed_ask_runs(
         self, *, job_limit: int, step_limit: int, notebook_id: str | None = None
     ) -> list[dict]: ...
@@ -3606,8 +3612,11 @@ class AskStateStorePort(Protocol):
     # PARTITION the caller is distilling for, not a tenancy check: ``None``
     # samples the whole deployment (the global partition's chain), a string
     # adds ``notebook_id = ?``/``= %s`` to the job statement so one library's
-    # chain sees only its own runs. Both callers are the same distillation
-    # worker, and NEITHER of them gets a ``user_id`` — narrowing to a library
+    # chain sees only its own runs. Global (cross-library) reasoning runs are
+    # filed under the global partition ONLY: the ``None`` read samples them
+    # alongside notebook runs, a partitioned read never does -- a federated
+    # run's tactics describe no single library. Both callers are the same
+    # distillation worker, and NEITHER of them gets a ``user_id`` — narrowing to a library
     # is a product decision about whose advice this is, narrowing to a person
     # is the thing this read must never be able to do. What comes back is
     # byte-identical in shape either way, because the projection below is
@@ -5065,6 +5074,48 @@ def project_ask_row(
         "created_at": str(created_at or ""),
         "steps": [],
     }
+
+
+def _sample_recency_key(created_at: object) -> tuple:
+    """Newest-first sort key over the two instant spellings the samples mix:
+    ``ask_jobs.created_at`` (an ISO string on SQLite, a ``datetime`` rendered
+    to ISO on PostgreSQL) and ``global_ask_jobs.created_at`` (ISO text with an
+    offset on both). Parsed instants sort by absolute time; an unparsable one
+    sorts last, never raises."""
+    from datetime import datetime, timezone
+
+    text = str(created_at or "")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return (0, 0.0)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (1, parsed.timestamp())
+
+
+def merge_sampled_rows(rows: list, *, limit: int, created_at_of, id_of) -> list:
+    """Newest-first merge of already-bounded samples from two tables, cut to
+    ``limit``. Both arms were each limited to ``limit`` in SQL, so the merged
+    head is exactly the ``limit`` newest rows across both."""
+    ordered = sorted(
+        rows,
+        key=lambda row: (_sample_recency_key(created_at_of(row)), str(id_of(row))),
+        reverse=True,
+    )
+    return ordered[: max(1, int(limit))]
+
+
+def cap_sampled_steps(rows: list, *, step_limit: int, key: str = "steps") -> list:
+    """Enforce one total step budget newest-first, in place: rows arrive
+    newest first, so what falls off is the OLDEST row's tail -- the same
+    property the single-table ``ORDER BY … LIMIT step_limit`` gave."""
+    remaining = max(1, int(step_limit))
+    for row in rows:
+        steps = list(row.get(key) or [])
+        row[key] = steps[:remaining] if remaining > 0 else []
+        remaining -= len(row[key])
+    return rows
 
 
 def project_report_row(report_id: object, question: object, created_at: object) -> dict:
