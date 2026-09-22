@@ -4,10 +4,23 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _reset_pools():
+    """Fresh pools AND quiescent counters on both sides of every test.
+
+    ``reset`` shuts the pools down without joining their threads, and the
+    active/waiting counters are process globals: a task the previous test
+    released at its very end can still be between ``result()`` and its
+    ``finally`` decrement when this test starts reading ``stats()``. Under the
+    parallel gate that showed up as ``job_active == 2`` and ``active == 1``
+    where the tests expect 1 and 0. Waiting for idle (a condition notified at
+    every decrement, not a sleep) makes every ``stats()`` assertion below a
+    statement about this test's own tasks.
+    """
     from app.services.kg import scheduler
     scheduler.reset()
+    assert scheduler.wait_idle(5), "scheduler counters did not settle before the test"
     yield
     scheduler.reset()
+    assert scheduler.wait_idle(5), "scheduler counters did not settle after the test"
 
 
 def _peak_counter():

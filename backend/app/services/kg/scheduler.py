@@ -31,8 +31,10 @@ _job_max = 0
 # In-flight (active) task counters — a submitted callable inc's on start and
 # dec's in finally, so these reflect tasks *running right now*, not merely
 # spawned threads. Guarded by _active_lock (separate from the pool _lock so a
-# stats() read never contends with pool (re)build).
-_active_lock = threading.Lock()
+# stats() read never contends with pool (re)build). It is a Condition so
+# ``wait_idle`` can be told, rather than poll, when a counter drops: every
+# site that decrements a counter notifies it.
+_active_lock = threading.Condition()
 _window_active = 0
 _job_active = 0
 _window_waiting = 0
@@ -88,6 +90,7 @@ def submit_window(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Fu
         finally:
             with _active_lock:
                 _window_active -= 1
+                _active_lock.notify_all()
 
     try:
         fut = _window_pool.submit(ctx.run, _run)
@@ -96,6 +99,7 @@ def submit_window(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Fu
             if not ticket["started"]:
                 ticket["started"] = True
                 _window_waiting -= 1
+                _active_lock.notify_all()
         raise
 
     def _cancelled_before_start(completed: cf.Future) -> None:
@@ -106,6 +110,7 @@ def submit_window(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Fu
             if not ticket["started"]:
                 ticket["started"] = True
                 _window_waiting -= 1
+                _active_lock.notify_all()
 
     fut.add_done_callback(_cancelled_before_start)
     return fut
@@ -135,6 +140,7 @@ def submit_job(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Futur
         finally:
             with _active_lock:
                 _job_active -= 1
+                _active_lock.notify_all()
 
     try:
         fut = _job_pool.submit(_run)
@@ -143,6 +149,7 @@ def submit_job(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Futur
             if not ticket["started"]:
                 ticket["started"] = True
                 _job_waiting -= 1
+                _active_lock.notify_all()
         raise
 
     def _cancelled_before_start(completed: cf.Future) -> None:
@@ -153,6 +160,7 @@ def submit_job(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Futur
             if not ticket["started"]:
                 ticket["started"] = True
                 _job_waiting -= 1
+                _active_lock.notify_all()
 
     fut.add_done_callback(_cancelled_before_start)
     fut.add_done_callback(_log_job_exception)
@@ -213,6 +221,28 @@ def stats() -> dict:
             "job_active": _job_active, "job_max": _job_max,
             "job_waiting": _job_waiting,
         }
+
+
+def wait_idle(timeout: float) -> bool:
+    """Block, bounded, until no task is running or waiting in either pool.
+
+    Test-visible seam (the only consumer is the scheduler test fixture): the
+    counters are process globals and ``reset``/``configure`` shut the pools
+    down WITHOUT joining their threads, so a task that a previous test left
+    finishing may still reach its ``finally`` decrement after the next test
+    has begun -- which is exactly the ``job_active == 2`` / ``active == 1``
+    reading those tests saw under the parallel gate. Waiting on the condition
+    here (notified at every decrement site) is deterministic where a sleep
+    would only shrink the window. Returns False on timeout.
+    """
+    with _active_lock:
+        return _active_lock.wait_for(
+            lambda: (
+                _window_active == 0 and _job_active == 0
+                and _window_waiting == 0 and _job_waiting == 0
+            ),
+            timeout=timeout,
+        )
 
 
 def _log_job_exception(fut: cf.Future) -> None:
