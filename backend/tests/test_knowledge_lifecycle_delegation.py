@@ -12,6 +12,7 @@ new service modules never import the facade.
 from __future__ import annotations
 
 import ast
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -165,6 +166,98 @@ def test_delete_notebook_kg_evicts_the_warm_unified_graph_cache(repo):
         "cached pre-delete graph"
     )
     assert after["edges"] == []
+
+
+def test_unified_graph_cache_detects_a_cross_process_kg_write(repo, monkeypatch):
+    """codex #772 R16 P2: an online cross-environment package importer (batch
+    3 sync) writes straight into ``unified_kg_state`` and ``knowledge_objects``
+    through its OWN transactions on the same database file, never through
+    this process's mutation entry points — so none of the
+    ``_invalidate_unified_cache`` call sites fire for that write. Before this
+    fix, ``self.unified_cache`` was keyed on the bare ``(notebook_id,
+    level)`` pair with no version check at all
+    (``test_delete_notebook_kg_evicts_the_warm_unified_graph_cache`` above
+    covers the explicit-invalidation leg; this covers the leg that method
+    cannot reach), so an already-warm process would keep serving the
+    pre-import graph forever. ``_unified_graph_full`` now stores a
+    ``(graph_seq_row_version, graph)`` pair and recomputes whenever the
+    store's version has moved, even with no explicit invalidate call in
+    sight — and stays a cache hit (no recompute) when the version has not
+    moved.
+
+    变异锚点:把 ``_unified_graph_full`` 的版本比对退回旧的 ``cached is not
+    None``(丢弃 ``cached[0] == version`` 那一截),本条必须报红——第二次读到
+    的仍是导入前的两节点图,``derive_unified_graph`` 调用计数也不会变成 2。
+    """
+    lifecycle = repo._runtime.knowledge_lifecycle
+    notebook = repo.create_notebook(
+        NotebookCreate(name="cross-process kg version")
+    )
+    repo.store_kg(
+        notebook.id, None,
+        [
+            {"local_id": "C1", "object_type": "concept",
+             "payload": {"name": "Alpha"}, "evidence": []},
+            {"local_id": "C2", "object_type": "concept",
+             "payload": {"name": "Beta"}, "evidence": []},
+        ],
+        [],
+    )
+
+    from app.services import kg_merge
+
+    calls = {"n": 0}
+    original = kg_merge.derive_unified_graph
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(kg_merge, "derive_unified_graph", counting)
+
+    # Warm the cache: this READ populates self.unified_cache[(nb, "concept")].
+    warm = repo.unified_graph(notebook.id, level="concept")
+    assert len(warm["nodes"]) == 2
+    assert calls["n"] == 1
+
+    # A same-version re-read must stay a cache hit.
+    still_warm = repo.unified_graph(notebook.id, level="concept")
+    assert len(still_warm["nodes"]) == 2
+    assert calls["n"] == 1, "a second read with no KG write must not recompute"
+
+    # Simulate the cross-environment importer: writes land straight on the
+    # database file through a brand-new connection/transaction this process
+    # never sees and never calls _invalidate_unified_cache for.
+    now = lifecycle._now()
+    conn = sqlite3.connect(repo.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO knowledge_objects "
+            "(id, notebook_id, object_type, status, payload, "
+            "created_at, updated_at) "
+            "VALUES (?, ?, 'concept', 'approved', ?, ?, ?)",
+            ("K-imported", notebook.id, '{"name": "Gamma"}', now, now),
+        )
+        conn.execute(
+            "UPDATE unified_kg_state SET kg_mutation_seq = kg_mutation_seq + 1 "
+            "WHERE notebook_id = ?",
+            (notebook.id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    imported = repo.unified_graph(notebook.id, level="concept")
+    assert len(imported["nodes"]) == 3, (
+        "a read after a cross-process KG write must see the imported node, "
+        "not a stale cache entry"
+    )
+    assert calls["n"] == 2, "the version mismatch must trigger exactly one recompute"
+
+    # A further read with no more writes must go back to being a cache hit.
+    again = repo.unified_graph(notebook.id, level="concept")
+    assert len(again["nodes"]) == 3
+    assert calls["n"] == 2, "an unchanged version must not recompute again"
 
 
 def _imports(path: Path) -> set[str]:
