@@ -260,8 +260,9 @@ sync-<source_env>-<from_seq>-<to_seq>-<package_id 前 8 位>/
 
 安全边界：`manifest.json` 最后写、不在 checksums 内，所以**不可信**。导入的笔记本范围由
 `rows/notebooks.jsonl` 导出并要求与 manifest 一致；每张 notebook scope 表的行必须落在该范围内，
-parent scope 表的父键必须出现在包内父表里。所有拼进文件系统路径的标识符（笔记本 id、
-`files/**` 相对路径）只允许 `[A-Za-z0-9._-]`、不含 `..`、不以 `.` 开头，且解析后必须落在对应的
+parent scope 表的父键必须出现在包内父表里。笔记本 id 与包 id 只允许 `[A-Za-z0-9._-]`、不含
+`..`、不以 `.` 开头；`files/**` 相对路径的每一段只挡穿越（非空、不是 `.`/`..`、不含分隔符与
+NUL），因为上传件文件名保留用户原名（Unicode、空格都合法），再由 `resolve()` 证明落在对应的
 storage 根或包目录内；这些校验都在预检、任何写入或删除之前。
 
 导入端按目标后端选择转换：SQLite 目标只解码 `$bytes`；PostgreSQL 目标按 `postgres_catalog`
