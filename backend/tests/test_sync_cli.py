@@ -1897,17 +1897,28 @@ def test_prune_log_active_lease_narrows_the_seq_bound(tmp_path, monkeypatch, cap
                 for row in conn.execute("SELECT seq FROM sync_change_log").fetchall()
             }
             assert remaining == {60}
+            # Eviction targets DEAD leases only -- a live one must survive a
+            # real (non-dry-run) prune-log run untouched.
+            surviving = conn.execute(
+                "SELECT target_env FROM sync_export_runs"
+            ).fetchall()
+            assert [row["target_env"] for row in surviving] == ["prod-tokyo"]
     finally:
         database.close()
 
 
-def test_prune_log_dead_lease_does_not_participate_but_is_named(
+def test_prune_log_dead_lease_does_not_narrow_the_bound_but_is_evicted(
     tmp_path, monkeypatch, capsys
 ):
     """A lease whose heartbeat has gone stale (>1h) no longer represents a
-    run in progress and must not hold the deletion bound down -- but it is
-    still reported so an operator can see it (and clean it up / investigate
-    the crashed run)."""
+    run in progress and must not hold the deletion bound down. The real
+    (non-dry-run) run also EVICTS it -- codex #784 r6: leaving a dead
+    lease's row in place let a stalled export that later resumed and
+    refreshed its own unchanged heartbeat look live again to the publish
+    ownership check, passing it with a snapshot whose compensation window
+    prune-log had already (correctly) pruned rows out of. Deleting the row
+    the moment it is classified dead closes that window -- there is nothing
+    left for the resurrection to find."""
     settings = _settings(tmp_path, monkeypatch)
     repository = SQLiteRepository(settings)
     repository.close()
@@ -1918,7 +1929,11 @@ def test_prune_log_dead_lease_does_not_participate_but_is_named(
             datetime.now(timezone.utc) - timedelta(hours=2)
         ).isoformat()
         _seed_export_lease(
-            database, target_env="prod-osaka", floor_seq=10, heartbeat_moment=dead_heartbeat
+            database,
+            target_env="prod-osaka",
+            run_id="run-dead",
+            floor_seq=10,
+            heartbeat_moment=dead_heartbeat,
         )
         old = _old_moment(40)
         _insert_log_row(database, seq=90, changed_at=old)
@@ -1929,16 +1944,164 @@ def test_prune_log_dead_lease_does_not_participate_but_is_named(
         assert payload["min_seq"] == 100  # the dead lease's floor_seq=10 did not narrow it
         assert payload["deleted"] == 1
         assert payload["active_leases"] == []
-        assert len(payload["dead_leases"]) == 1
-        assert payload["dead_leases"][0]["target_env"] == "prod-osaka"
+        assert payload["dead_leases"] == [
+            {
+                "target_env": "prod-osaka",
+                "run_id": "run-dead",
+                "heartbeat_at": dead_heartbeat,
+            }
+        ]
+
+        # The lease row itself is gone -- eviction, not just exclusion from
+        # the bound.
+        with database.connect() as conn:
+            remaining = conn.execute(
+                "SELECT COUNT(*) AS n FROM sync_export_runs"
+            ).fetchone()
+            assert remaining["n"] == 0
+    finally:
+        database.close()
+
+
+def test_prune_log_deletes_a_dead_lease_even_if_its_heartbeat_is_refreshed_between_classification_and_delete(
+    tmp_path, monkeypatch, capsys
+):
+    """codex #784 r6: the eviction ``DELETE`` matches ``(target_env,
+    run_id)`` alone and never re-checks ``heartbeat_at``. Re-deriving "is it
+    dead" a second time at delete time -- instead of trusting the
+    classification this same locked transaction already made -- is exactly
+    the bug: a stalled export resuming and refreshing its own lease's
+    heartbeat between classification and delete would then save a lease this
+    call had already excluded from the bound (and possibly already pruned
+    rows out from under). Simulate that landing directly, inside the same
+    transaction, right where the lock is supposed to make it impossible in
+    production -- this pins the DELETE's own contract regardless of the
+    lock."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        _seed_captured_watermark(database, exported_through_seq=100)
+        dead_heartbeat = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        ).isoformat()
+        _seed_export_lease(
+            database,
+            target_env="prod-osaka",
+            run_id="run-dead",
+            floor_seq=10,
+            heartbeat_moment=dead_heartbeat,
+        )
+
+        real_bounds = cli._prune_log_bounds
+
+        def _refresh_then_return(source, conn, **kwargs):
+            result = real_bounds(source, conn, **kwargs)
+            # The lock (begin_immediate on SQLite, FOR UPDATE on PostgreSQL)
+            # is supposed to make this impossible from another connection;
+            # done here, on the SAME connection/transaction right after
+            # classification, to exercise the DELETE's own contract in
+            # isolation from the locking that would normally prevent it.
+            conn.execute(
+                "UPDATE sync_export_runs SET heartbeat_at = ? WHERE target_env = ?",
+                (datetime.now(timezone.utc).isoformat(), "prod-osaka"),
+            )
+            return result
+
+        monkeypatch.setattr(cli, "_prune_log_bounds", _refresh_then_return)
+
+        exit_code = cli.main(["prune-log"])
+        assert exit_code == 0
+
+        with database.connect() as conn:
+            remaining = conn.execute(
+                "SELECT COUNT(*) AS n FROM sync_export_runs"
+            ).fetchone()
+            # Deleted despite the fresh heartbeat -- the DELETE trusted the
+            # classification instead of re-deriving it.
+            assert remaining["n"] == 0
+    finally:
+        database.close()
+
+
+def test_prune_log_human_output_names_an_evicted_dead_lease(
+    tmp_path, monkeypatch, capsys
+):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        _seed_captured_watermark(database, exported_through_seq=100)
+        dead_heartbeat = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        ).isoformat()
+        _seed_export_lease(
+            database,
+            target_env="prod-osaka",
+            run_id="run-dead",
+            floor_seq=10,
+            heartbeat_moment=dead_heartbeat,
+        )
+
+        exit_code = cli.main(["prune-log"])
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "已删除死租约" in out
+        assert "prod-osaka" in out
+        assert "run-dead" in out
+    finally:
+        database.close()
+
+
+def test_prune_log_dry_run_names_a_dead_lease_as_not_yet_deleted(
+    tmp_path, monkeypatch, capsys
+):
+    """``--dry-run`` classifies dead leases the same way a real run does, but
+    must never evict them -- the row must still be there afterwards, and the
+    wording must say it WOULD be deleted, not that it was."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        _seed_captured_watermark(database, exported_through_seq=100)
+        dead_heartbeat = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        ).isoformat()
+        _seed_export_lease(
+            database,
+            target_env="prod-osaka",
+            run_id="run-dead",
+            floor_seq=10,
+            heartbeat_moment=dead_heartbeat,
+        )
+
+        exit_code = cli.main(["prune-log", "--dry-run", "--json"])
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["dead_leases"] == [
+            {
+                "target_env": "prod-osaka",
+                "run_id": "run-dead",
+                "heartbeat_at": dead_heartbeat,
+            }
+        ]
+        with database.connect() as conn:
+            remaining = conn.execute(
+                "SELECT COUNT(*) AS n FROM sync_export_runs"
+            ).fetchone()
+            assert remaining["n"] == 1  # dry-run must not evict it
 
         exit_code = cli.main(["prune-log", "--dry-run"])
         assert exit_code == 0
-        # Nothing left to prune on the second call, but the human summary
-        # must still name the dead lease.
         out = capsys.readouterr().out
-        assert "忽略的死租约" in out
+        assert "死租约" in out
         assert "prod-osaka" in out
+        assert "run-dead" in out
+        assert "会被删除" in out
+        assert "已删除死租约" not in out
     finally:
         database.close()
 

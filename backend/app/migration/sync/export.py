@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 from app.migration.sync import incremental
 from app.migration.sync.database import (
     _GLOBAL_KEY_QUERIES,
+    _GROUP_PRINCIPAL_TYPES,
     _ID_BATCH,
     _Source,
     SyncExportError,
@@ -655,6 +656,13 @@ def _require_lease(source: _Source, conn: Any, target_env: str, run_id: str) -> 
     very transaction that publishes its watermark, so "no lease" means
     "somebody else already finished".
 
+    This check is only ever "the row exists and the id matches". Losing a
+    lease is made IRREVERSIBLE elsewhere: ``sync prune-log`` removes dead
+    lease rows under a lock before it uses the surviving floors, and
+    ``_refresh_export_lease`` is an UPDATE that can never recreate one. So a
+    stalled export cannot heartbeat its way back into a lease whose
+    protection has already been spent.
+
     This is also what keeps the full branch's ``<=`` safe rather than merely
     permissive. Equality can now only come from THIS run (nobody else holds
     the lease), which is the re-publish case a re-run of one export is
@@ -981,15 +989,28 @@ def _claim_export_lease(
     return warnings
 
 
-def _refresh_export_lease(source: _Source, target_env: str, run_id: str) -> None:
-    """Push this run's ``heartbeat_at`` forward. Best effort: a failed
-    heartbeat must never take down an export that is otherwise fine -- the
-    worst it costs is that a LATER export may judge this lease dead, and the
-    conditional publish in ``_advance_watermark`` still refuses to let two
-    runs overwrite each other's watermark."""
+def _refresh_export_lease(
+    source: _Source, target_env: str, run_id: str, warnings: list[str]
+) -> None:
+    """Push this run's ``heartbeat_at`` forward.
+
+    UPDATE ONLY, matched on ``run_id``, and deliberately never an upsert.
+    ``sync prune-log`` deletes DEAD lease rows under a lock before it uses
+    the remaining floors; if a heartbeat could recreate the row, a stalled
+    export would resurrect a lease prune-log had already decided to ignore,
+    and the log rows that lease was protecting would already be gone. Losing
+    a lease has to be irreversible, so a heartbeat that matches nothing
+    reports it and changes nothing -- the publish then fails in
+    ``_require_lease``, which is the outcome the operator needs to see.
+
+    Best effort otherwise: a failed heartbeat must never take down an export
+    that is otherwise fine. The worst a missed beat costs is that a LATER
+    export judges this lease dead, and the lease check plus the conditional
+    publish still keep two runs from overwriting each other's watermark.
+    """
     try:
         with source.write() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 source.sql(
                     "UPDATE sync_export_runs SET heartbeat_at = ? "
                     "WHERE target_env = ? AND run_id = ?"
@@ -1000,6 +1021,13 @@ def _refresh_export_lease(source: _Source, target_env: str, run_id: str) -> None
                     run_id,
                 ),
             )
+            if int(cursor.rowcount or 0) == 0 and not any(
+                "lease lost" in warning for warning in warnings
+            ):
+                warnings.append(
+                    f"lease lost: target {target_env!r} no longer holds run "
+                    f"{run_id!r}; this export will refuse to publish"
+                )
     except Exception:  # noqa: BLE001 - see the docstring
         pass
 
@@ -1177,9 +1205,14 @@ def _export(
         if not scoped:
             _release_export_lease(source, target_env, package_id)
         raise
+    # The beat appends to the SAME list ``_assemble`` was handed, and every
+    # beat happens before that list is folded into the report -- so a lease
+    # lost mid-run is reported by the run that lost it.
     on_beat = (
         None if scoped
-        else lambda: _refresh_export_lease(source, target_env, package_id)
+        else lambda: _refresh_export_lease(
+            source, target_env, package_id, warnings
+        )
     )
     try:
         return _assemble(
@@ -1205,6 +1238,31 @@ def _export(
         if not scoped:
             _release_export_lease(source, target_env, package_id)
         raise
+
+
+# Rows this package carries that REFERENCE a GLOBAL row which must travel
+# with them, even when that row itself did not change and no exported
+# notebook points at it. Without this an incremental package can carry a
+# ``group_members`` row whose ``groups`` parent is nowhere -- both backends
+# declare ``group_members.group_id -> groups.id`` -- because the seed set is
+# resolved from the touched NOTEBOOKS, and a window that only edited a
+# membership touches none.
+#
+# ``group_members``' parent id is in its own SYNC KEY ``(group_id, user_id)``,
+# which is what lets it be collected from the compacted window without
+# reading a row -- and therefore before ``groups`` is written, since
+# copy_rank puts the parent first.
+_GLOBAL_KEY_PARENTS: dict[str, tuple[str, str]] = {
+    "group_members": ("group_id", "granted_group_ids"),
+}
+
+# The same gap reached from a NOTEBOOK-scoped table: a grant whose principal
+# is a group names a ``groups`` row that the notebook-driven seed query would
+# only find if that grant were already committed when the seed ran. Collected
+# from the rows this package actually writes, which is why _RowSink takes an
+# observer.
+_PRINCIPAL_SEED_TABLE = "notebook_grants"
+_PRINCIPAL_SEED_KEY_SET = "granted_group_ids"
 
 
 @dataclass
@@ -1292,6 +1350,7 @@ class _RowSink:
         table: str,
         columns: Sequence[str],
         key_columns: Sequence[str] | None = None,
+        observe: Any = None,
     ) -> None:
         self._write = write
         self._users = users
@@ -1299,12 +1358,18 @@ class _RowSink:
         self._encode = _row_encoder(table, columns)
         self._identity = _identity_columns(table)
         self._key_columns = key_columns
+        # Called with each row as it is written, for the one table whose rows
+        # name a GLOBAL row that has to travel with them (see
+        # _PRINCIPAL_SEED_TABLE). Streaming, like everything else here.
+        self._observe = observe
         self.rows = 0
         self.keys: set[str] = set()
 
     def __call__(self, row: Mapping[str, Any]) -> None:
         projected = {name: row[name] for name in self._columns}
         self._users.observe(projected, *self._identity)
+        if self._observe is not None:
+            self._observe(projected)
         self._write(json_line(self._encode(projected)))
         self.rows += 1
         if self._key_columns is not None:
@@ -1357,6 +1422,12 @@ def _incremental_rows(
     warnings: list[str] = []
     counters = {"deletes": 0, "mirror": 0}
     deferred: list[str] = []
+    # GLOBAL key sets this package needs seeded BEYOND what the touched
+    # notebooks resolve to -- see _GLOBAL_KEY_PARENTS.
+    extra_global: dict[str, set[str]] = {}
+    # Compactions taken early (for the pass above) and reused when their
+    # table is actually written, so the change log is read once per table.
+    cached_changes: dict[str, Any] = {}
 
     def absorb(table: str, delta: Any, sink: _RowSink, columns) -> None:
         table_counts[table] = sink.rows
@@ -1375,7 +1446,13 @@ def _incremental_rows(
         def emit_delete(entry: Mapping[str, Any]) -> None:
             write_delete(json_line(entry))
 
-        def process(table: str, *, track_keys: bool = False, extra: Any = None):
+        def process(
+            table: str,
+            *,
+            track_keys: bool = False,
+            extra: Any = None,
+            observe: Any = None,
+        ):
             columns = _exported_columns(source, source.columns(conn, table), table)
             key_columns = source.sync_key(conn, table)
             # A key column the package does not export still has to be READ,
@@ -1384,13 +1461,16 @@ def _incremental_rows(
             read_columns = columns + tuple(
                 name for name in key_columns if name not in columns
             )
-            changes = incremental.compact(
-                source, conn, table, watermark, compensation
-            )
+            changes = cached_changes.pop(table, None)
+            if changes is None:
+                changes = incremental.compact(
+                    source, conn, table, watermark, compensation
+                )
             with writer.lines(rows_path(table)) as write:
                 sink = _RowSink(
                     write, users, table, columns,
                     key_columns if track_keys else None,
+                    observe,
                 )
                 delta = incremental.table_delta(
                     source,
@@ -1409,11 +1489,43 @@ def _incremental_rows(
                         sink(row)
             absorb(table, delta, sink, columns)
 
+        def seed_group(value: Any) -> None:
+            if value:
+                extra_global.setdefault(_PRINCIPAL_SEED_KEY_SET, set()).add(
+                    str(value)
+                )
+
+        def observe_grant(row: Mapping[str, Any]) -> None:
+            if str(row.get("principal_type") or "") in _GROUP_PRINCIPAL_TYPES:
+                seed_group(row.get("principal_id"))
+
         for table in synced_tables():
             if table == "notebooks" or _scope_of(table).kind is ScopeKind.GLOBAL:
                 deferred.append(table)
                 continue
-            process(table)
+            process(
+                table,
+                observe=observe_grant if table == _PRINCIPAL_SEED_TABLE else None,
+            )
+
+        # Before any GLOBAL table is written: pull the parent ids out of the
+        # deferred tables' own keys, so the parent (written first, by
+        # copy_rank) can carry them. The compaction is kept and reused rather
+        # than the log being read twice.
+        for table, (column, key_set) in _GLOBAL_KEY_PARENTS.items():
+            if table not in deferred:
+                continue
+            cached_changes[table] = incremental.compact(
+                source, conn, table, watermark, compensation
+            )
+            for change in cached_changes[table].values():
+                if change.operation == incremental.OPERATION_UPSERT:
+                    if key_set == _PRINCIPAL_SEED_KEY_SET:
+                        seed_group(change.key.get(column))
+                    else:
+                        extra_global.setdefault(key_set, set()).add(
+                            str(change.key[column])
+                        )
 
         process(
             "notebooks",
@@ -1424,6 +1536,10 @@ def _incremental_rows(
         )
 
         global_keys = _global_keys(source, conn, sorted(notebooks))
+        for key_set, values in extra_global.items():
+            global_keys[key_set] = tuple(
+                sorted(set(global_keys.get(key_set, ())) | values)
+            )
         for table in deferred:
             if table == "notebooks":
                 continue

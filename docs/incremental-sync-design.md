@@ -491,6 +491,18 @@ SQLite 的相对开销比 PostgreSQL 明显：SQLite 基线本身极快（进程
   object_schemas）的 delete 不导出（§5「授权只播种」——目标端撤销过的授权本就不该被源端的
   删除日志再插回来，这条规则同时约束 upsert 不覆盖与 delete 不传播）。
 
+  GLOBAL 表的种子集合（`granted_group_ids` 等）本是按「本包触及的笔记本」解析出来的（§3「scope
+  说明」），但增量包里一条 GLOBAL 行的父引用不一定落在这个集合里：`group_members.group_id`
+  指向 `groups.id`，如果这次窗口只改了成员关系（谁加入/退出了某个组），触及的笔记本集合可能
+  一个都没有——那一批 `group_members` 的 upsert 行按笔记本反查种子集合，链上就会凭空出现一批
+  无父的成员行（它们引用的 `group_id` 没有任何 `groups` 行随包带上）。增量导出因此额外把两条
+  来源并进 `granted_group_ids`：① 本包 `group_members` upsert 行自己的 `group_id`——在这张表
+  的同步键里，不用回读整行就能拿到，`copy_rank` 保证 `groups` 先于 `group_members` 写，种子
+  集合在写 `groups` 之前就已经确定；② 本包 `notebook_grants` upsert 行里 `principal_type` 为
+  组的那些行的 `principal_id`——一条这样的 grant 可能是本窗口内新建的，笔记本反查的种子查询
+  看不到它。两条来源里的组都按 seed_only 规则导入，代价是这个组的其余成员行会随包一起带上——
+  和全量导出「一个组只要被引用就整份带上」的口径是一致的，不是额外放宽。
+
 - **笔记本范围与镜像**：窗口内出现变更、且此刻不是镜像的笔记本就计入 `notebooks`——全量与
   增量导出都**只按镜像跳过，不再按 `status`（`copying`/`deleting`/`importing` 等）跳过**。
   `status` 是目标端自有列（§5「目标端自有列」：`target_owned_columns` 登记，导入从不覆盖，
@@ -578,6 +590,20 @@ SQLite 的相对开销比 PostgreSQL 明显：SQLite 基线本身极快（进程
   出现，只有旧版本写下的租约行才会这样——`prune-log` 不会猜一个数顶上去：它拒绝整条命令、
   点名这个 target，直到这条租约发布水位或被判定为死租约。
 
+  死租约不只是「不参与取最小值」这么轻——真正执行（非 `--dry-run`）的那一次 `prune-log` 会把
+  它删掉，在算完下界的**同一个已加锁的事务**里（SQLite `begin_immediate`；PostgreSQL 先
+  `SELECT ... FROM sync_export_runs FOR UPDATE` 锁住全部租约行，活的死的都锁，再读水位与租约
+  算下界），按 `(target_env, run_id)` 精确删除，不重新核对 `heartbeat_at`。这让「判死」变得
+  不可逆：卡住超过一小时又恢复的导出，此刻它的租约行已经不在了，发布时的归属校验
+  （见上「导出水位」「前驱校验」）会因为找不到这一行、或行已经换了别人的 `run_id` 而拒绝
+  （`export lease ... was taken over` / 无租约可验），运维看到这个报错直接重跑一次
+  `sync export` 即可。删除不重新核对心跳，是因为**分类**（判它死）与**删除**必须是同一份
+  判断：如果删除时用一条新的 `heartbeat_at < 截止` 条件重新问一遍现在是不是还死着，锁再严也
+  救不了这个设计——`WHERE` 里比较的「现在」是删除语句自己临时算的，跟分类那一刻锁着算出来的
+  「现在」是两次独立的判断，理论上可以不一致；而按精确的 `(target_env, run_id)` 删除，删的
+  永远是分类那一刻锁着认定死了的那一行，两者天然是同一个判断。`--dry-run` 只分类、不加锁、
+  不删除——它用 `source.read()`，输出里把这些死租约点名，说明「真的执行会被删除」。
+
 ### 在途导出租约
 
 一次不限定范围（没给 `--notebook`）的导出，在开读快照**之前**先在 `sync_export_runs`
@@ -631,7 +657,13 @@ WHERE sync_export_runs.heartbeat_at < <陈旧截止>
 
 心跳与包写入相位既有的 staging `.heartbeat` 文件由同一次 beat 刷新（`export._PackageWriter.beat`
 的节流窗口同样适用于这里），所以一个仍在正常写包的导出，租约与 staging 心跳同步续期；一个
-崩溃的导出两者一起停止刷新。租约在发布水位的**同一个事务**里删除（见上「前驱校验」），失败
+崩溃的导出两者一起停止刷新。心跳刷新是**纯 `UPDATE`**（`WHERE target_env = ? AND run_id = ?`），
+绝不写成 upsert——`sync prune-log` 会在加锁之后删掉死租约（见下「保留策略」），如果心跳刷新
+能把已经被删掉的行重新建回来，一个卡住又恢复的导出就会复活一把 prune-log 已经决定不再保护
+的租约，而那把租约本该护住的日志行这时可能已经不在了。丢失租约必须是不可逆的：心跳刷新如果
+一行都没改到（`UPDATE` 的 `rowcount = 0`），只记一条 `lease lost` 警告，不重建这一行，接下来
+的发布会在归属校验那一步（见上「导出水位」「前驱校验」）失败——这正是运维需要看到的结果。
+租约在发布水位的**同一个事务**里删除（见上「前驱校验」），失败
 或中止路径也尽力删除——但两条删除路径都带 `WHERE target_env = ? AND run_id = ?`：只删自己
 这次跑的那一行。这是给「租约已经被判死、被新导出接管，旧 run 才姗姗来迟地结束」这个场景准备
 的——旧 run 的收尾删除只会删掉它自己那行（此刻这一行早已经不是它的了，`run_id` 对不上，删除
@@ -786,8 +818,9 @@ sync capture disable [--json]  # 关闭变更捕获；清空 sync_export_state �
 sync capture status [--json]   # 开关状态、enabled_at/disabled_at、日志行数与 seq 范围
 sync prune-log [--keep-days N] [--dry-run] [--json]
     # §7「保留策略」的判据（seq/txid 下界都含在途导出租约的 floor_seq/floor_xmin）；没有任何
-    # captured=1 水位时拒绝并点名原因；死租约不参与判据但在输出里点名；PostgreSQL 上活租约
-    # 缺 floor_xmin（不应该出现）时整条命令拒绝并点名该租约
+    # captured=1 水位时拒绝并点名原因；死租约不参与判据，且非 --dry-run 时在同一把锁下被删除
+    # （过期不可逆，见 §7「在途导出租约」）；PostgreSQL 上活租约缺 floor_xmin（不应该出现）时
+    # 整条命令拒绝并点名该租约
 ```
 
 `export` 不需要用户显式区分全量与增量，模式由上面的判定规则自动选（§7「模式判定」）；
