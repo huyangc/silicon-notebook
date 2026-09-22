@@ -1683,6 +1683,10 @@ class Settings(BaseSettings):
     )
     # Reserved for the later shadow-sync phase. It never changes the active backend.
     shadow_database_url: str | None = Field(None, validation_alias="SHADOW_DATABASE_URL")
+    # This deployment's name in cross-environment notebook sync (e.g. "prod-shanghai").
+    # `scripts/cli.sh sync export` defaults to it as source_env; empty means the
+    # operator must pass --source-env explicitly on every export.
+    sync_env: str = Field("", validation_alias="SILICON_NOTEBOOK_SYNC_ENV")
     postgres_pool_min_size: int = Field(1, validation_alias="POSTGRES_POOL_MIN_SIZE")
     postgres_pool_max_size: int = Field(10, validation_alias="POSTGRES_POOL_MAX_SIZE")
     postgres_pool_acquire_timeout_seconds: int = Field(

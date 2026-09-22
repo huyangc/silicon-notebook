@@ -251,6 +251,12 @@ SKIP_SECONDARY_TABLES = [
     # 删除进度对 primary 毫无意义,只会留下指向一本 primary 里根本不存在的笔记本
     # 的孤儿作业行。
     "notebook_delete_jobs", "notebook_delete_files",
+    # v83 跨环境同步控制表:导出水位(sync_export_state)与导入进度/结果
+    # (sync_imports、sync_import_progress)是**本部署**对外部环境的记账 ——
+    # 属于 primary 部署/本次运行的状态。合进副库那份会把两个部署各自的同步账目
+    # 搅在一起(副库对某个目标环境的导出水位、副库自己跑过的导入历史,统统不是
+    # primary 的事实),与 auth_transactions 同款,只保 primary、丢副库那份。
+    "sync_export_state", "sync_imports", "sync_import_progress",
 ]
 
 # 导入后清空(引用可再生的 kg_index 产物, 逼部署侧干净重建)

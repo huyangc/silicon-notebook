@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=82, postgres_version=62, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=83, postgres_version=63, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -825,6 +825,20 @@ _TABLES = (
     _table("auth_policy_audit", ("id",), ReplicationKeyKind.DECLARED_PK, 100, "timestamptz"),
     TableSpec("auth_transactions", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 101),
     _table("auth_identity_audit", ("id",), ReplicationKeyKind.DECLARED_PK, 102, "timestamptz"),
+    # SQLite v83 / PostgreSQL 0063: cross-environment notebook sync control
+    # state. Each environment's own export watermark and import progress is
+    # local to that environment -- copying or replaying it across the shadow
+    # migration's source/target pair would mean one backend's sync
+    # bookkeeping about OTHER environments silently overwrites the other
+    # backend's, which is nonsensical for a per-environment control plane.
+    # Same treatment as auth_transactions above: LOCAL_EPHEMERAL, no
+    # replication key. sync_imports is still listed before
+    # sync_import_progress, keeping the writing convention consistent with FK
+    # direction elsewhere in this tuple -- that rank is not consumed by any
+    # guard for a LOCAL_EPHEMERAL table.
+    TableSpec("sync_export_state", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 103),
+    TableSpec("sync_imports", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 104),
+    TableSpec("sync_import_progress", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 105),
 )
 
 MANIFEST = Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)

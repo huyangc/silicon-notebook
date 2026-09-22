@@ -28,8 +28,11 @@ from app.migration.sync.manifest import (
     SYNC_MANIFEST,
     MappedColumn,
     MappingKind,
+    ScopeKind,
     SyncClass,
+    TableScope,
     local_tables,
+    scope_chain,
     spec_for,
     synced_tables,
 )
@@ -123,6 +126,26 @@ def test_local_tables_are_never_seed_only():
             )
 
 
+def test_local_tables_have_no_optional_refs():
+    for spec in SYNC_MANIFEST:
+        if spec.sync_class is SyncClass.LOCAL:
+            assert not spec.optional_refs, (
+                f"{spec.name} 是 LOCAL 但 optional_refs 非空: {spec.optional_refs}"
+            )
+
+
+def test_local_tables_have_no_scope():
+    for spec in SYNC_MANIFEST:
+        if spec.sync_class is SyncClass.LOCAL:
+            assert spec.scope is None, f"{spec.name} 是 LOCAL 但 scope 非 None: {spec.scope}"
+
+
+def test_synced_layer_tables_have_a_scope():
+    for spec in SYNC_MANIFEST:
+        if spec.sync_class in (SyncClass.SYNCED, SyncClass.SYNCED_WITH_MAPPING):
+            assert spec.scope is not None, f"{spec.name}: 同步层/边界层表必须设置 scope"
+
+
 def test_notebooks_target_owned_columns_are_pinned():
     assert spec_for("notebooks").target_owned_columns == (
         "status",
@@ -139,6 +162,16 @@ def test_seed_only_registry_is_pinned():
         "notebook_grants",
         "groups",
         "group_members",
+        "object_schemas",
+    }
+
+
+def test_optional_refs_registry_is_pinned():
+    optional_refs = {
+        spec.name: spec.optional_refs for spec in SYNC_MANIFEST if spec.optional_refs
+    }
+    assert optional_refs == {
+        "notebook_bases": (("base_notebook_id", "notebooks"),),
     }
 
 
@@ -159,6 +192,243 @@ def test_memory_items_mapped_columns_are_pinned():
     assert spec_for("memory_items").mapped_columns == (
         MappedColumn("created_by", MappingKind.USER),
         MappedColumn("confirmed_by", MappingKind.USER),
+    )
+
+
+# ------------------------------------------------------------------- scope
+
+
+def _synced_layer_specs():
+    return [
+        spec
+        for spec in SYNC_MANIFEST
+        if spec.sync_class in (SyncClass.SYNCED, SyncClass.SYNCED_WITH_MAPPING)
+    ]
+
+
+def _parent_scoped_specs():
+    return [spec for spec in _synced_layer_specs() if spec.scope.kind is ScopeKind.PARENT]
+
+
+def test_global_scope_registry_is_pinned():
+    """The only three synced-layer tables whose scope is GLOBAL (not scoped
+    to a single notebook, see their TableSyncSpec.notes): groups/
+    group_members (scoped by the authorization edges of the notebooks being
+    exported) and object_schemas (an environment-global registry owned by
+    no single notebook -- its only writer hardcodes notebook_id='' and its
+    reads never filter by notebook; see migrations/
+    0025_notebook_object_schemas.sql, which already moved every non-empty-
+    notebook_id row out into notebook_object_schemas). Any other synced/
+    synced_with_mapping table landing here by accident (e.g. a NOTEBOOK
+    table someone forgot to set scope=... on) must fail this test."""
+    global_names = {
+        spec.name for spec in _synced_layer_specs() if spec.scope.kind is ScopeKind.GLOBAL
+    }
+    assert global_names == {"groups", "group_members", "object_schemas"}
+
+
+def test_notebook_scope_column_is_notebook_id_except_the_notebooks_root():
+    for spec in _synced_layer_specs():
+        if spec.scope.kind is not ScopeKind.NOTEBOOK:
+            continue
+        if spec.name == "notebooks":
+            assert spec.scope.column == "id", (
+                "notebooks is the root of the scope chain: its own primary "
+                "key answers 'which notebook', not a notebook_id column"
+            )
+        else:
+            assert spec.scope.column == "notebook_id", spec.name
+
+
+def test_notebook_scope_column_exists_in_sqlite_schema(sqlite_table_columns):
+    for spec in _synced_layer_specs():
+        if spec.scope.kind is not ScopeKind.NOTEBOOK:
+            continue
+        real_columns = sqlite_table_columns.get(spec.name, set())
+        assert spec.scope.column in real_columns, (
+            f"{spec.name}.{spec.scope.column} (NOTEBOOK scope) 不是真实列"
+        )
+
+
+def test_notebook_scope_column_is_not_null_without_default():
+    """NOTEBOOK scope means "this column reliably names the row's
+    notebook". A nullable or DEFAULTed notebook_id can't back that promise
+    -- a DEFAULT lets rows exist that were never actually given a real
+    notebook while still satisfying NOT NULL. object_schemas.notebook_id is
+    exactly that shape (``text NOT NULL DEFAULT ''``, see
+    0001_initial.sql) and was wrongly scoped NOTEBOOK before this revision
+    (it is GLOBAL now, see test_global_scope_registry_is_pinned) -- this
+    guard is what would have caught that misclassification: it is the only
+    synced-layer table whose notebook_id column has a DEFAULT. notebooks
+    itself is exempt: it has no notebook_id column at all, its scope column
+    is "id"."""
+    definitions = _parse_notebook_id_column_definitions(_MIGRATIONS_DIR)
+    problems: list[str] = []
+    for spec in _synced_layer_specs():
+        if spec.scope.kind is not ScopeKind.NOTEBOOK or spec.name == "notebooks":
+            continue
+        definition = definitions.get(spec.name)
+        if definition is None:
+            problems.append(f"{spec.name}: 找不到 notebook_id 列定义")
+            continue
+        upper = definition.upper()
+        if "NOT NULL" not in upper:
+            problems.append(f"{spec.name}.notebook_id 不是 NOT NULL: {definition!r}")
+        if "DEFAULT" in upper:
+            problems.append(
+                f"{spec.name}.notebook_id 带 DEFAULT，不能作为可靠的归属键: {definition!r}"
+            )
+    assert not problems, "; ".join(problems)
+
+
+def test_parent_scope_column_exists_in_sqlite_schema(sqlite_table_columns):
+    for spec in _parent_scoped_specs():
+        real_columns = sqlite_table_columns.get(spec.name, set())
+        assert spec.scope.column in real_columns, (
+            f"{spec.name}.{spec.scope.column} (PARENT scope) 不是真实列"
+        )
+
+
+def test_parent_scope_table_is_non_empty_and_paired_with_a_column():
+    for spec in _parent_scoped_specs():
+        assert spec.scope.column, f"{spec.name}: PARENT scope 缺列名"
+        assert spec.scope.parent_table, f"{spec.name}: PARENT scope 缺父表"
+
+
+def test_parent_scope_parent_table_is_in_the_synced_layer():
+    synced_layer_names = {spec.name for spec in _synced_layer_specs()}
+    for spec in _parent_scoped_specs():
+        assert spec.scope.parent_table in synced_layer_names, (
+            f"{spec.name}: PARENT scope 的父表 {spec.scope.parent_table!r} "
+            "不在同步层/边界层里"
+        )
+
+
+def test_parent_scope_edge_is_a_declared_foreign_key():
+    """(child, column, parent) for every PARENT-scoped table must be a real
+    ``REFERENCES`` edge in the PG migrations -- proves ``scope`` did not just
+    invent a relationship, and that it names the right column (not merely
+    some column pointing at the right parent). knowhow_changes.table_id and
+    knowhow_milestones.table_id both declare
+    ``REFERENCES knowhow_tables(id)`` (0008_master_v28_features.sql), so no
+    exemption is needed here: every PARENT edge in the current manifest is a
+    declared FK."""
+    edges = _parse_foreign_key_edges(_MIGRATIONS_DIR)
+    missing = [
+        (spec.name, spec.scope.column, spec.scope.parent_table)
+        for spec in _parent_scoped_specs()
+        if (spec.name, spec.scope.column, spec.scope.parent_table) not in edges
+    ]
+    assert not missing, (
+        f"这些 PARENT scope 边在 PG 迁移里没有声明为外键: {missing}"
+    )
+
+
+def test_scope_chain_succeeds_for_every_non_global_synced_table():
+    """scope_chain() must resolve to a NOTEBOOK table (no exception) for
+    every synced-layer table that isn't itself GLOBAL -- proves there is no
+    dangling PARENT edge, no cycle, and no chain over 4 hops anywhere in the
+    real manifest, not just in the two constructed cases below."""
+    for spec in _synced_layer_specs():
+        if spec.scope.kind is ScopeKind.GLOBAL:
+            continue
+        scope_chain(spec.name)  # must not raise
+
+
+def test_scope_chain_knowhow_cell_code_walks_to_knowhow_tables():
+    assert scope_chain("knowhow_cell_code") == (
+        ("knowhow_cell_code", "row_id", "knowhow_rows"),
+        ("knowhow_rows", "table_id", "knowhow_tables"),
+    )
+
+
+def test_scope_chain_notebook_scoped_table_is_empty():
+    assert scope_chain("chunks") == ()
+
+
+def test_scope_chain_global_table_raises():
+    with pytest.raises(ValueError):
+        scope_chain("groups")
+
+
+class _FakeSpec:
+    def __init__(self, scope):
+        self.scope = scope
+
+
+def _patch_by_name(monkeypatch, fake_by_name: dict) -> None:
+    monkeypatch.setattr(
+        sync_manifest_module,
+        "_BY_NAME",
+        {**sync_manifest_module._BY_NAME, **fake_by_name},
+    )
+
+
+def test_scope_chain_cycle_raises(monkeypatch):
+    fake_by_name = {
+        "a": _FakeSpec(TableScope(ScopeKind.PARENT, column="b_id", parent_table="b")),
+        "b": _FakeSpec(TableScope(ScopeKind.PARENT, column="a_id", parent_table="a")),
+    }
+    _patch_by_name(monkeypatch, fake_by_name)
+    with pytest.raises(ValueError, match="cycles back"):
+        scope_chain("a")
+
+
+def test_scope_chain_too_long_raises(monkeypatch):
+    fake_by_name = {
+        "p0": _FakeSpec(TableScope(ScopeKind.PARENT, column="p1_id", parent_table="p1")),
+        "p1": _FakeSpec(TableScope(ScopeKind.PARENT, column="p2_id", parent_table="p2")),
+        "p2": _FakeSpec(TableScope(ScopeKind.PARENT, column="p3_id", parent_table="p3")),
+        "p3": _FakeSpec(TableScope(ScopeKind.PARENT, column="p4_id", parent_table="p4")),
+        "p4": _FakeSpec(TableScope(ScopeKind.PARENT, column="p5_id", parent_table="p5")),
+        "p5": _FakeSpec(TableScope(ScopeKind.NOTEBOOK, column="notebook_id")),
+    }
+    _patch_by_name(monkeypatch, fake_by_name)
+    with pytest.raises(ValueError, match="exceeds 4 hops"):
+        scope_chain("p0")
+
+
+def test_scope_chain_unknown_parent_table_raises_valueerror_not_keyerror(monkeypatch):
+    """spec_for's bare KeyError for a parent_table absent from the manifest
+    must come out of scope_chain as a point-named ValueError, not leak
+    through unconverted."""
+    fake_by_name = {
+        "q0": _FakeSpec(
+            TableScope(ScopeKind.PARENT, column="ghost_id", parent_table="does_not_exist")
+        ),
+    }
+    _patch_by_name(monkeypatch, fake_by_name)
+    with pytest.raises(ValueError, match="unknown table"):
+        scope_chain("q0")
+
+
+def test_scope_chain_local_table_raises(monkeypatch):
+    fake_by_name = {"local0": _FakeSpec(None)}
+    _patch_by_name(monkeypatch, fake_by_name)
+    with pytest.raises(ValueError, match="LOCAL"):
+        scope_chain("local0")
+
+
+def test_new_sync_control_tables_are_registered_local():
+    """sync_export_state/sync_imports/sync_import_progress: PR-2 同步控制表，
+    由并行任务落地 migrations/schema_manifest/shadow manifest/fixtures；这里
+    预先把它们登记为 LOCAL，钉死不能被误分类为同步层。"""
+    for name in ("sync_export_state", "sync_imports", "sync_import_progress"):
+        assert spec_for(name).sync_class is SyncClass.LOCAL, name
+
+
+def test_parent_table_sorts_before_child_in_synced_tables_order():
+    order = {name: index for index, name in enumerate(synced_tables())}
+    violations = [
+        (spec.name, spec.scope.parent_table)
+        for spec in _parent_scoped_specs()
+        if spec.name in order
+        and spec.scope.parent_table in order
+        and order[spec.scope.parent_table] >= order[spec.name]
+    ]
+    assert not violations, (
+        "这些 PARENT scope 表的父表在 synced_tables() 里没有排在它前面 "
+        f"(child, parent): {violations}"
     )
 
 
@@ -286,13 +556,15 @@ def _strip_sql_comments(text: str) -> str:
     return re.sub(r"--[^\n]*", "", text)
 
 
-def _parse_foreign_key_edges(migrations_dir: pathlib.Path) -> set[tuple[str, str]]:
-    """Return {(child_table, parent_table)} for every ``REFERENCES`` in every
-    ``*.sql`` migration, whether it is a table-level ``FOREIGN KEY (...)
-    REFERENCES parent(...)`` (inline in ``CREATE TABLE`` or in a later
-    ``ALTER TABLE ... ADD CONSTRAINT``) or a column-level ``col ...
-    REFERENCES parent(id)`` shorthand. Self-references are dropped."""
-    edges: set[tuple[str, str]] = set()
+def _parse_foreign_key_edges(migrations_dir: pathlib.Path) -> set[tuple[str, str, str]]:
+    """Return {(child_table, column, parent_table)} for every declared
+    foreign key in every ``*.sql`` migration: both the table-level
+    ``FOREIGN KEY (col) REFERENCES parent`` form (inline in ``CREATE TABLE``
+    or in a later ``ALTER TABLE ... ADD CONSTRAINT``) and the column-level
+    ``col ... REFERENCES parent(id)`` shorthand. Self-references are
+    dropped."""
+    edges: set[tuple[str, str, str]] = set()
+    fk_form = re.compile(r"FOREIGN KEY\s*\(\s*(\w+)\s*\)\s*REFERENCES\s+(\w+)")
     for path in sorted(migrations_dir.glob("*.sql")):
         text = _strip_sql_comments(path.read_text())
         for statement in text.split(";"):
@@ -307,11 +579,45 @@ def _parse_foreign_key_edges(migrations_dir: pathlib.Path) -> set[tuple[str, str
                 child = alter_match.group(1)
             else:
                 continue
-            for parent_match in re.finditer(r"REFERENCES\s+(\w+)", stripped):
-                parent = parent_match.group(1)
+            for column, parent in fk_form.findall(stripped):
                 if parent != child:
-                    edges.add((child, parent))
+                    edges.add((child, column, parent))
+            # Column-level shorthand: "col type ... REFERENCES parent(...)"
+            # all on one physical line, with no "FOREIGN KEY" keyword (which
+            # would instead be caught -- possibly wrapped onto the next
+            # line -- by fk_form above; skipping any line containing it
+            # here avoids misreading "FOREIGN" itself as a column name).
+            for line in stripped.splitlines():
+                if "FOREIGN KEY" in line:
+                    continue
+                shorthand = re.match(r"\s*(\w+)\s+\S.*\bREFERENCES\s+(\w+)\s*\(", line)
+                if shorthand:
+                    column, parent = shorthand.group(1), shorthand.group(2)
+                    if parent != child:
+                        edges.add((child, column, parent))
     return edges
+
+
+def _parse_notebook_id_column_definitions(migrations_dir: pathlib.Path) -> dict[str, str]:
+    """Return {table: raw column-definition text} for every table's own
+    ``notebook_id`` column, read straight out of its ``CREATE TABLE`` body.
+    Used by test_notebook_scope_column_is_not_null_without_default to prove
+    a NOTEBOOK-scoped table's notebook_id can't silently mean "no real
+    notebook" (NOT NULL with no DEFAULT)."""
+    definitions: dict[str, str] = {}
+    for path in sorted(migrations_dir.glob("*.sql")):
+        text = _strip_sql_comments(path.read_text())
+        for statement in text.split(";"):
+            stripped = statement.strip()
+            create_match = re.match(r"CREATE TABLE (\w+)\s*\(", stripped)
+            if not create_match:
+                continue
+            table = create_match.group(1)
+            for line in stripped.splitlines():
+                m = re.match(r"\s*notebook_id\s+(.*)$", line)
+                if m:
+                    definitions[table] = m.group(1)
+    return definitions
 
 
 def test_foreign_key_parents_have_lower_copy_rank_than_children_when_both_synced():
@@ -324,7 +630,7 @@ def test_foreign_key_parents_have_lower_copy_rank_than_children_when_both_synced
     assert edges, "外键解析结果为空，说明解析逻辑本身坏了（应有一百多条边）"
 
     violations = []
-    for child, parent in sorted(edges):
+    for child, _column, parent in sorted(edges):
         if child not in synced or parent not in synced:
             continue
         if shadow_ranks[parent] >= shadow_ranks[child]:
@@ -345,6 +651,24 @@ def test_foreign_key_parents_have_lower_copy_rank_than_children_when_both_synced
 _ALLOWED_EXACT_MODULES = {
     "app.repositories.postgres.schema_manifest",
     "app.migration.shadow.manifest",
+    # PR-2 (app.migration.sync.export): an export runs as an offline tool
+    # against a quiesced database, so it composes the two Database classes
+    # itself instead of a repository facade. These five are the entire seam
+    # that needs -- backend selection, the two connection sources, the
+    # PG->SQLite raw-row projection every other PG raw-row port already uses,
+    # and Settings for typing. Services and repository facades stay out.
+    "app.core.config",
+    "app.core.database_url",
+    "app.migration.shadow.postgres_catalog",
+    "app.repositories.postgres.database",
+    "app.repositories.sqlite.database",
+    # PR-2 (app.migration.sync.import_): the importer converts the package's
+    # SQLite-shaped values into typed PostgreSQL parameters with the shadow
+    # transform, and marks imported notebooks as mirrors through the two
+    # backends' sharing stores (the only writers of notebooks.sync_origin).
+    "app.migration.shadow.transform",
+    "app.repositories.postgres.sharing_store",
+    "app.repositories.sqlite.sharing_store",
 }
 
 

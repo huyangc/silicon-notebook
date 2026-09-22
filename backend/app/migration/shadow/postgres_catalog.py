@@ -359,6 +359,13 @@ def _column_contract(definition: str) -> ColumnContract:
     )
 
 
+# One ``ADD COLUMN [IF NOT EXISTS] <name> <definition>`` action, already
+# separated from its siblings by ``_split_top_level``.
+_ADD_COLUMN = re.compile(
+    rf"^ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?({_IDENT})\s+(.+)$", re.I | re.S
+)
+
+
 def _expected_columns() -> dict[str, dict[str, ColumnContract]]:
     result: dict[str, dict[str, ColumnContract]] = {}
     for migration in _MIGRATIONS:
@@ -373,14 +380,26 @@ def _expected_columns() -> dict[str, dict[str, ColumnContract]]:
                     continue
                 columns[match.group(1)] = _column_contract(match.group(2))
         for alter in re.finditer(
-            rf"\bALTER\s+TABLE\s+({_IDENT})\s+ADD\s+COLUMN\s+"
-            rf"(?:IF\s+NOT\s+EXISTS\s+)?({_IDENT})\s+([^;]+);",
-            text,
-            re.I | re.S,
+            rf"\bALTER\s+TABLE\s+({_IDENT})\s+([^;]+);", text, re.I | re.S
         ):
-            result.setdefault(alter.group(1), {})[alter.group(2)] = _column_contract(
-                alter.group(3)
-            )
+            table = alter.group(1)
+            # One ALTER TABLE may carry SEVERAL comma-separated actions:
+            # ``ADD COLUMN a ..., ADD COLUMN b ...``. Reading only the first
+            # one -- and swallowing its siblings as part of its definition --
+            # silently dropped ten synced-layer columns from this contract and
+            # mis-read notebooks.indexing_pipeline as NOT NULL, because the
+            # trailing "NOT NULL" of a LATER column landed inside the first
+            # column's definition text. Split on top-level commas and contract
+            # each ADD COLUMN separately; every other action (ADD CONSTRAINT,
+            # ALTER COLUMN, DROP COLUMN) is not a column definition and is
+            # skipped here exactly as it was before.
+            for item in _split_top_level(alter.group(2)):
+                added = _ADD_COLUMN.match(item)
+                if added is None:
+                    continue
+                result.setdefault(table, {})[added.group(1)] = _column_contract(
+                    added.group(2)
+                )
     return result
 
 

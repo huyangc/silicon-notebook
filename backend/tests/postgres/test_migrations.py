@@ -264,7 +264,7 @@ def test_packaged_migration_refuses_non_utf_database_before_any_ddl(
 def test_packaged_migrations_apply_in_order(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert len(PostgresMigrator(postgres_database).migrations) == 62
+    assert len(PostgresMigrator(postgres_database).migrations) == 63
     migrator = PostgresMigrator(postgres_database)
     assert migrator.migrate(target_version=2) == 2
     with postgres_database.connect() as conn:
@@ -308,7 +308,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_chunks_text_trgm" not in indexes
     for version in (3, 4, 5, 6, 7, 8, 9, 10, 11):
         assert migrator.migrate(target_version=version) == version
-    assert migrator.migrate() == 62
+    assert migrator.migrate() == 63
     with postgres_database.connect() as conn:
         final_indexes = {
             row["indexname"]
@@ -476,11 +476,122 @@ def test_packaged_migrations_apply_in_order(postgres_database):
         assert column["is_nullable"] == "NO"
         assert column["column_default"] == "''::text"
         assert column["collation_name"] == "C"
+    # v63 (cross-environment sync control tables) — see
+    # migrations/0063_sync_control_tables.sql. Three adapter-internal tables,
+    # not replicated business data. Check existence, primary keys, the
+    # child->parent FK cascade, and the bigint/jsonb column types.
+    with postgres_database.connect() as conn:
+        sync_columns = {
+            (row["table_name"], row["column_name"]): row
+            for row in conn.execute(
+                "SELECT table_name,column_name,data_type,is_nullable,"
+                "column_default,collation_name FROM information_schema.columns "
+                "WHERE table_name IN "
+                "('sync_export_state','sync_imports','sync_import_progress')"
+            ).fetchall()
+        }
+        sync_pks = {
+            row["table_name"]: list(row["columns"])
+            for row in conn.execute(
+                "SELECT tc.table_name, array_agg(kcu.column_name::text ORDER BY "
+                "kcu.ordinal_position) AS columns "
+                "FROM information_schema.table_constraints tc "
+                "JOIN information_schema.key_column_usage kcu "
+                "ON kcu.constraint_name=tc.constraint_name "
+                "AND kcu.table_schema=tc.table_schema "
+                "WHERE tc.constraint_type='PRIMARY KEY' AND tc.table_schema=current_schema() "
+                "AND tc.table_name IN "
+                "('sync_export_state','sync_imports','sync_import_progress') "
+                "GROUP BY tc.table_name"
+            ).fetchall()
+        }
+        sync_fk = conn.execute(
+            "SELECT tc.constraint_name, rc.delete_rule, ccu.table_name AS "
+            "referenced_table "
+            "FROM information_schema.table_constraints tc "
+            "JOIN information_schema.referential_constraints rc "
+            "ON rc.constraint_name=tc.constraint_name AND rc.constraint_schema=tc.table_schema "
+            "JOIN information_schema.constraint_column_usage ccu "
+            "ON ccu.constraint_name=tc.constraint_name AND ccu.table_schema=tc.table_schema "
+            "WHERE tc.constraint_type='FOREIGN KEY' AND tc.table_schema=current_schema() "
+            "AND tc.table_name='sync_import_progress'"
+        ).fetchone()
+    assert sync_pks == {
+        "sync_export_state": ["target_env"],
+        "sync_imports": ["package_id"],
+        "sync_import_progress": ["package_id", "table_name"],
+    }
+    # Column-set pin, symmetric with the SQLite side's full-text
+    # sqlite_master.sql pin (SYNC_CONTROL_TABLES in
+    # scripts/verify_repository_snapshot.py): a column silently added to or
+    # dropped from the PostgreSQL migration without a matching SQLite change
+    # must fail here even though no single per-column assertion below names it.
+    sync_table_columns: dict[str, set[str]] = {}
+    for table_name, column_name in sync_columns:
+        sync_table_columns.setdefault(table_name, set()).add(column_name)
+    assert sync_table_columns == {
+        "sync_export_state": {
+            "target_env", "exported_through_seq", "exported_at", "package_id",
+        },
+        "sync_imports": {
+            "package_id", "source_env", "from_seq", "to_seq", "status",
+            "started_at", "finished_at", "report_json",
+        },
+        "sync_import_progress": {
+            "package_id", "table_name", "rows_applied", "completed_at",
+        },
+    }
+    assert sync_fk is not None
+    assert sync_fk["referenced_table"] == "sync_imports"
+    assert sync_fk["delete_rule"] == "CASCADE"
+    # The four primary-key text columns must all be COLLATE "C" -- byte
+    # ordering/equality has to match SQLite's, same rule as every other
+    # id-like text column in this schema (e.g. notebooks.sync_origin above).
+    for table_name, column_name in (
+        ("sync_export_state", "target_env"),
+        ("sync_imports", "package_id"),
+        ("sync_import_progress", "package_id"),
+        ("sync_import_progress", "table_name"),
+    ):
+        assert sync_columns[(table_name, column_name)]["collation_name"] == "C", (
+            table_name, column_name,
+        )
+    export_seq = sync_columns[("sync_export_state", "exported_through_seq")]
+    assert export_seq["data_type"] == "bigint"
+    assert export_seq["is_nullable"] == "NO"
+    assert export_seq["column_default"] == "0"
+    exported_at = sync_columns[("sync_export_state", "exported_at")]
+    assert exported_at["data_type"] == "timestamp with time zone"
+    assert exported_at["is_nullable"] == "NO"
+    package_id_default = sync_columns[("sync_export_state", "package_id")]
+    assert package_id_default["data_type"] == "text"
+    assert package_id_default["is_nullable"] == "NO"
+    assert package_id_default["column_default"] == "''::text"
+    assert package_id_default["collation_name"] == "C"
+    report_json = sync_columns[("sync_imports", "report_json")]
+    assert report_json["data_type"] == "jsonb"
+    assert report_json["is_nullable"] == "NO"
+    assert report_json["column_default"] == "'{}'::jsonb"
+    status = sync_columns[("sync_imports", "status")]
+    assert status["data_type"] == "text"
+    assert status["is_nullable"] == "NO"
+    assert status["column_default"] == "'running'::text"
+    assert status["collation_name"] == "C"
+    finished_at = sync_columns[("sync_imports", "finished_at")]
+    assert finished_at["data_type"] == "timestamp with time zone"
+    assert finished_at["is_nullable"] == "YES"
+    rows_applied = sync_columns[("sync_import_progress", "rows_applied")]
+    assert rows_applied["data_type"] == "bigint"
+    assert rows_applied["is_nullable"] == "NO"
+    assert rows_applied["column_default"] == "0"
+    completed_at = sync_columns[("sync_import_progress", "completed_at")]
+    assert completed_at["data_type"] == "timestamp with time zone"
+    assert completed_at["is_nullable"] == "YES"
     assert ledger_versions == [
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
         22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
         41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58,
-        59, 60, 61, 62,
+        59, 60, 61, 62, 63,
     ]
 
 
@@ -514,8 +625,8 @@ def test_auth_sunset_migration_preserves_legacy_password_and_session(
             "VALUES ('legacy-session','legacy-user',now(),now()+interval '1 day',now())"
         )
 
-    assert migrator.migrate() == 62
-    assert migrator.migrate() == 62
+    assert migrator.migrate() == 63
+    assert migrator.migrate() == 63
     with postgres_database.connect() as connection:
         users = {
             row["id"]: row for row in connection.execute(
@@ -615,7 +726,7 @@ def test_notebook_object_schema_migration_relocates_legacy_rows(postgres_databas
             ),
         )
 
-    assert migrator.migrate() == 62
+    assert migrator.migrate() == 63
     with postgres_database.connect() as connection:
         relocated = connection.execute(
             "SELECT notebook_id,object_type,status,created_by "
@@ -678,7 +789,7 @@ def test_source_agent_provenance_column_is_nullable_and_unconstrained(
             "AND column_name='agent_profile_id'"
         ).fetchone() is None
 
-    assert migrator.migrate() == 62
+    assert migrator.migrate() == 63
     with postgres_database.connect() as connection:
         column = connection.execute(
             "SELECT data_type,is_nullable,column_default,collation_name "
@@ -753,7 +864,7 @@ def test_cluster_membership_migration_dedupes_before_unique_guard(postgres_datab
                 ],
             )
 
-    assert migrator.migrate() == 62
+    assert migrator.migrate() == 63
     with postgres_database.connect() as connection:
         rows = connection.execute(
             "SELECT id,canonical_id FROM concept_clusters "

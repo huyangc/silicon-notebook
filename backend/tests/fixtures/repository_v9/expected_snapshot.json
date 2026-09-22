@@ -2480,6 +2480,21 @@
         "type": "table"
       },
       {
+        "name": "sync_export_state",
+        "sql_sha256": "82c06bfb973b70c6a3e551b6de6769493e863fd08f6470247fbbbfb0b5f893fb",
+        "type": "table"
+      },
+      {
+        "name": "sync_import_progress",
+        "sql_sha256": "5fcff7c08f698dc6f8c9d2a3d4698da9a5b3c48f7a32483281c8163b27ce4c84",
+        "type": "table"
+      },
+      {
+        "name": "sync_imports",
+        "sql_sha256": "bbdc93525162d878283c486941bfb5dc8086a309e9c2ec39456a6472b3aefeb9",
+        "type": "table"
+      },
+      {
         "name": "system_model_service_status",
         "sql_sha256": "e16364cc714469070d4a35fd34f5870ccc811a8ec9c4ab4d34f4d91b2d1ae495",
         "type": "table"
@@ -2525,6 +2540,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 82
+    "user_version": 83
   }
 }

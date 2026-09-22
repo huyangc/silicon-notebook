@@ -243,6 +243,10 @@ Uvicorn worker 的普通部署。若部署疑似卡住，请保持服务运行�
 `postgresql://...` 和会被规范化的旧别名 `postgres://...`。不支持的 scheme、建连、
 migration 或 warmup 失败都 fail closed，不会回落到另一数据库。`SHADOW_DATABASE_URL`
 不会选择 active backend，单独设置也不会启动同步；只有显式 forward-shadow CLI 会读取它。
+`SILICON_NOTEBOOK_SYNC_ENV` 是另一个独立的配置项，给本部署在**跨环境笔记本同步**里
+命名（如 `prod-shanghai`），供 `scripts/cli.sh sync export/import/status` 使用；详见
+[运维文档](./operations_zh.md#跨环境笔记本同步)与[同步设计文档](./incremental-sync-design.md)。
+它只是 `export` 的默认 `source_env`，其余场景不生效。
 
 ```dotenv
 # 开发和生产的默认部署；替换为实际连接信息
@@ -676,6 +680,7 @@ DB_WRITE_LOCK_FLUSH_SECONDS # 周期性 db_write_lock_stats 快照的发出间�
 SQLITE_CACHE_SIZE_KB    # 每连接 SQLite 页缓存(KB,负值=KB)。连接按线程复用,总内存≈线程数×|值|（默认 -16384）
 DATABASE_URL            # 当前数据库 URL；开发/生产使用 PostgreSQL；未配置兜底：sqlite:///.local/silicon_notebook.db
 SILICON_NOTEBOOK_STORAGE_DIR   # 上传文件存储目录（默认 .local/storage）
+SILICON_NOTEBOOK_SYNC_ENV      # 本部署在跨环境笔记本同步里的名字（默认空；见运维文档）
 ```
 
 Ask 同步取消端点可能跨越多个数据库事务，也可能等待进程内写锁或后端特有的连接锁。

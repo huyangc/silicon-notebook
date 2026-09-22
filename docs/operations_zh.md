@@ -494,6 +494,79 @@ python scripts/migrate_sqlite_to_postgres.py \
 `expires_at` 读闸才是权威边界：即使一个长期运行的进程尚未遇到启动或下一次删除这两个
 物理清理时机，行到期后也立刻不再进入管理员统计、活动流和详情；无需人工运行维护命令。
 
+## 跨环境笔记本同步
+
+`scripts/cli.sh sync export/import/status` 把笔记本内容（材料、向量、KG、Knowhow、记忆）
+从一个部署搬到另一个部署，**单向**：源端写，目标端只对同步来的内容做交互。它不涉及
+用户交互数据（问答、回答、反馈、报告、全局问答、活动留痕、许愿墙）。范围、身份映射、
+目标端写入围栏与包格式见[设计文档](./incremental-sync-design.md)；PR-2 只交付整本笔记本
+的全量导出/引入（还没有变更日志，即使已有水位，每次导出仍是全量快照）。
+
+```bash
+# 源环境：设置一次环境标识，再导出全部存活、非镜像笔记本。
+export SILICON_NOTEBOOK_SYNC_ENV=prod-shanghai
+PYTHONPATH=backend python scripts/sync_notebooks.py export \
+  --target prod-tokyo --out /srv/silicon-notebook/sync/outgoing --json
+
+# 或只导出指定笔记本（可重复传 --notebook）：
+PYTHONPATH=backend python scripts/sync_notebooks.py export \
+  --target prod-tokyo --out /srv/silicon-notebook/sync/outgoing \
+  --notebook nb-aaa --notebook nb-bbb --json
+
+# 目标环境：把包目录搬过去，先 --dry-run 再真正引入。
+PYTHONPATH=backend python scripts/sync_notebooks.py import \
+  /srv/silicon-notebook/sync/incoming/sync-prod-shanghai-0-0-<id> --dry-run --json
+PYTHONPATH=backend python scripts/sync_notebooks.py import \
+  /srv/silicon-notebook/sync/incoming/sync-prod-shanghai-0-0-<id> \
+  --create-missing-users --verify-files --json
+
+# 任一端：查看导出水位与已引入的包。
+PYTHONPATH=backend python scripts/sync_notebooks.py status --json
+```
+
+`scripts/cli.sh sync export|import|status ...` 等价，且走共享 Python 启动环境（预加载仓库根
+`.env`）；上面的独立 `scripts/sync_notebooks.py` 形态不预加载它，需要自行导出
+`DATABASE_URL`/`SILICON_NOTEBOOK_STORAGE_DIR`/`SILICON_NOTEBOOK_SYNC_ENV`，或用你自己的
+`--env-file` 包装。
+
+`export` 需要 `source_env`：显式传 `--source-env`，或按部署设置一次
+`SILICON_NOTEBOOK_SYNC_ENV`，日常导出就不用每次重复。两者都没有则退出 2 并提示需要设置
+的变量。`--notebook <id>`（可重复）把一次全量导出限定到指定笔记本；省略则导出全部存活、
+非镜像笔记本。无论是否用了 `--notebook`，一次成功的导出都会推进本环境对该 `--target` 的
+水位。
+
+`import` 幂等：重复引入同一个包目录会短路为 `already_applied`（退出 0），不会重新应用行。
+`--dry-run` 只做到身份映射与预检为止，不写入任何数据，只输出会发生什么——正式引入前务必
+先跑一次。`--create-missing-users` 为源端每个在目标端按 `username` 找不到匹配的用户创建
+一个无凭据本地用户（设计文档 §4）；不加它时，引用不到的用户按各表自己的规则处理（跳过该
+行、置空该列，或视列而定使整个笔记本导入失败）。`--verify-files` 在导入时对每个复制的文件
+再做一次 sha256 校验，不只信任包自带的 `checksums.json`——更慢，包经过不受信或可能损耗的
+传输通道时用它。`--resume` 必须显式传才能续跑一个中断了一半的导入（它在 `sync_imports` 里
+的行还是 `running`）：不传的话，同一个 `source_env` 的第二次 `import` 会被直接拒绝，防止
+误把两个不相关的包接到一起。
+
+预检失败会打印原因并退出 2，不写入任何东西：schema pair 不一致、`EMBED_RUNTIME_DIM` 不
+一致、校验和失败，或者——真正的目标端冲突判定——**包里携带的笔记本 id 在目标端已经存在，
+且那个笔记本的 `sync_origin` 不等于本包的 `source_env`**（纯本地笔记本，或者别的源环境的
+镜像，都不会被导入覆盖；这是按 id 判断，不是按名字查重，所以目标端一个同名但 id 不同的
+笔记本不构成冲突）。
+
+目标后端是 SQLite 时，`import` 要求先停止应用再执行（导入器写在后端自己的请求串行写路径
+之外）；`status`/`--dry-run` 不需要。报告里带了这条提示时，人读摘要会原样打印出来（在
+"警告:" 之下）——这不是单独的开关或代码路径，就是 `import_package` 写进报告里的内容。
+
+`status` 只读列出：本环境对每个目标环境的导出水位（`sync_export_state`）与本环境已引入的
+每个包及其结果（`sync_imports`）。它作用于 `DATABASE_URL` 当前选中的后端。
+
+所有子命令失败都退出 2（stderr 一行，无堆栈），成功（包括 `already_applied`）退出 0。
+`--json` 把底层的导出/引入报告或状态快照整个打印成一个 JSON 对象，而不是人读摘要；需要
+`skipped_rows`、`warnings`、`missing_files` 打印摘要之外的细节时用它做脚本化处理。
+
+正式（非 `--dry-run`）导入完成后，对包里涉及的大库手动跑一次 scale 索引构建——
+`kg_index`/`kg_viz` 是派生工件，不随包走（设计文档 §6）；见
+[离线 / 异机 scale 构建](./operations_zh.md#离线--异机-scale-构建scriptsbuild_scale_indexpy)。
+PR-4 计划把这一步接入自动排队。
+
 ## PostgreSQL notebook-aware 词法索引
 
 PostgreSQL 词法 SQL 始终带 `notebook_id`，但旧的单表达式 trgm 索引无法在索引访问阶段利用

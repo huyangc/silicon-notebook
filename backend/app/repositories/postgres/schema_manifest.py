@@ -125,6 +125,9 @@ POSTGRES_BUSINESS_TABLES = (
     "source_index_backfills",
     "source_paper_meta",
     "sources",
+    "sync_export_state",
+    "sync_import_progress",
+    "sync_imports",
     "system_model_service_status",
     "unified_kg_state",
     "user_profiles",
@@ -211,6 +214,7 @@ POSTGRES_JSON_COLUMNS = frozenset(
         "source_elements.metadata",
         "source_paper_meta.keywords",
         "source_paper_meta.raw_json",
+        "sync_imports.report_json",
         "user_profiles.domain_focus",
         "user_profiles.model_settings",
     }
@@ -363,7 +367,14 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # sampler's "participant list contains this notebook" containment, so the
 # post-completion learning chains can sample global asks without walking the
 # table. No table, FK or unique-surface change.
+# SQLite v83 / PostgreSQL 0063 add three adapter-internal sync control
+# tables -- sync_export_state, sync_imports, sync_import_progress -- for
+# cross-environment notebook sync export/import bookkeeping. Not replicated
+# business data (see migration/shadow/manifest.py's LOCAL_EPHEMERAL
+# registration): each environment's own export watermark and import
+# progress is local to that environment. No column, index or FK change to
+# any existing table.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=82,
-    postgres_version=62,
+    sqlite_version=83,
+    postgres_version=63,
 )

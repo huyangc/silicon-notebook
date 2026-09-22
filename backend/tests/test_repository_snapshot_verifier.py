@@ -48,11 +48,59 @@ FIXTURE_SECRETS = (
 )
 
 
+def _rollback_v83(db: sqlite3.Connection) -> None:
+    """Undo _migration_83 (sync_export_state, sync_imports,
+    sync_import_progress -- the adapter-internal cross-environment sync
+    control tables, parity with PostgreSQL 0063_sync_control_tables.sql)
+    before forging any older deployed schema. Drop the FK child
+    (sync_import_progress) before its parent (sync_imports); sync_export_state
+    has no FK either way."""
+    db.execute("DROP TABLE sync_import_progress")
+    db.execute("DROP TABLE sync_imports")
+    db.execute("DROP TABLE sync_export_state")
+
+
+def test_deployed_v82_database_verifies_sync_control_tables(tmp_path):
+    """A deployed v82 database is missing exactly _migration_83's addition:
+    the three adapter-internal sync control tables, with no rows to backfill
+    (they carry no pre-existing state)."""
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as upgraded_db:
+        tables = {
+            row[0]
+            for row in upgraded_db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert {
+            "sync_export_state",
+            "sync_imports",
+            "sync_import_progress",
+        } <= tables
+
+    with sqlite3.connect(database) as rollback:
+        _rollback_v83(rollback)
+        rollback.execute("PRAGMA user_version = 82")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 82
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+
+
 def _rollback_v82(db: sqlite3.Connection) -> None:
     """Undo _migration_82 (global_ask_jobs.mode + two non-unique indexes,
     parity with PostgreSQL 0062_global_ask_job_sampling.sql) before forging
     any older deployed schema; every older helper chains through here first
     (via _rollback_v81)."""
+    _rollback_v83(db)
     db.execute("DROP INDEX idx_global_ask_jobs_user_created")
     db.execute("DROP INDEX idx_global_ask_jobs_status_mode_created")
     db.execute("ALTER TABLE global_ask_jobs DROP COLUMN mode")
