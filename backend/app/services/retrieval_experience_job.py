@@ -1,16 +1,29 @@
-"""Agentic Memory P2 (A / T5): the distillation chain for the deployment-GLOBAL
-retrieval-strategy experience library.
+"""Agentic Memory P2 (A / T5): the distillation chain for the
+retrieval-strategy experience library, PARTITIONED BY NOTEBOOK since SQLite
+v79 / PostgreSQL 0059.
 
-Design doc §6.1. Every N completed asks across the whole deployment, ONE
-bounded model call looks at aggregated statistics from the most recent runs
-plus the entries the library already holds for similar situations, and decides
-what — if anything — to record.
+Design doc §6.1, and the partitioning design doc
+``docs/superpowers/specs/2026-09-22-retrieval-experience-per-notebook-design_zh.md``
+§4. TWO chains run through this one worker, parameterised by a partition id:
+the deployment-wide chain (partition ``''``, every N completed asks anywhere)
+and one chain per notebook (that library's own partition, every N completed
+asks in it). Either way ONE bounded model call looks at aggregated statistics
+from the most recent runs plus the entries that partition already holds for
+similar situations, and decides what — if anything — to record.
 
 ⚠ **The privacy is structural, not a prompt rule** — the same sentence the
-agent-profile base chain opens with, but carrying more weight here because
-there is no tenancy predicate to fall back on. This chain reads ONE thing,
-``recent_completed_ask_runs``, which has no user and no notebook predicate by
-design; what makes that safe is the SHAPE of what comes back. Every run is
+agent-profile base chain opens with, and it did not weaken when the partition
+arrived. The boundary moved by exactly one notch and no further: this chain
+now knows WHICH LIBRARY an ask belonged to, and still does not know WHO asked
+it. The partition id is a parameter and only ever a parameter — it picks the
+rows the read counts and the column the write lands in, and it reaches
+``RunObservation`` / ``ObservedRun`` / ``render_observations`` /
+``render_existing`` / the prompt exactly never. A partitioned batch's prompt
+is byte-identical to a global batch's over the same runs; the privacy guard
+pins that at runtime (criterion nine) rather than leaving it to review.
+
+What makes the observed runs safe is unchanged and is still the SHAPE of what
+comes back from the one read, ``recent_completed_ask_runs``: every run is
 projected to ``RunObservation``, whose reachable fields are ints, bools and
 closed ``Literal``s and nothing else, so the model that writes an entry's
 ``rationale`` has never seen a question, an answer, a document title, a
@@ -21,7 +34,11 @@ Because of that, the rule for this file is short and absolute: it may read a
 run only through ``project_run``, and it may never reach for the ask/answer
 stores itself. A privacy guard scans this module and the projection module
 TOGETHER for exactly that reason — moving a forbidden read from one to the
-other must not help.
+other must not help. That guard's forbidden-name table still contains
+``notebook_id``, with ONE narrow exemption for this module: the name may be a
+parameter, a read of that parameter, or a keyword argument's name, and
+nothing else — ``row["notebook_id"]``, ``.notebook_id`` and the bare string
+are violations here exactly as they are in the other two modules.
 
 Terminal-state discipline is simpler than the agent-profile chains': the
 single-flight slot is a process-local flag rather than a durable row, so a run
@@ -72,6 +89,7 @@ import logging
 import re
 import threading
 import time
+from collections import deque
 from typing import Any, Mapping, Sequence
 
 from app.core.model_values import as_text
@@ -79,6 +97,7 @@ from app.repositories.ports import (
     RETRIEVAL_EXPERIENCE_BATCH_RUNS,
     RETRIEVAL_EXPERIENCE_BATCH_STEPS,
     RETRIEVAL_EXPERIENCE_MAX_ENTRIES,
+    RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES,
     RETRIEVAL_EXPERIENCE_PROVENANCE_MAX,
     RETRIEVAL_EXPERIENCE_RATIONALE_MAX_CHARS,
     AskStateStorePort,
@@ -153,6 +172,38 @@ _OPS = frozenset({"ADD", "UPDATE", "NOOP"})
 #: failure while keeping the entry.
 _ID_SHAPE = re.compile(r"[0-9a-fA-F]{16,}")
 
+#: The SECOND id tripwire, added with per-notebook partitioning. The run above
+#: needs SIXTEEN hex characters before it fires, and this repository's notebook
+#: ids are a ``nb-`` prefix plus a SHORTER hex run (a real one on the author's
+#: machine: ``nb-a73f16940c``, ten hex characters) — so the general tripwire
+#: would have watched a partition id go past without a word. Either pattern
+#: matching DISCARDS the entry, for the same reason the first one does: an id
+#: in a rationale is evidence that the input narrowing failed, and this feature
+#: gained a new id to narrow away the moment it gained partitions.
+#:
+#: Defence in depth, not the main guarantee: the model is shown no id at all
+#: (the partition never enters the prompt — module docstring, privacy-guard
+#: criterion nine), so this pattern should be unreachable, and the day it fires
+#: is the day something above it broke.
+_NOTEBOOK_ID_SHAPE = re.compile(r"\bnb-[0-9a-f]{6,}")
+
+#: How many NOTEBOOK partitions may wait for the single-flight slot at once.
+#: (The global partition never queues — see ``_claim_next_locked``.) Small on
+#: purpose: the queue exists so a burst across many libraries does not lose the
+#: batches it earned, NOT so a deployment can accumulate hours of backlog — a
+#: distillation that runs an hour late is reading a sample of runs its own
+#: threshold count no longer describes.
+#:
+#: ⚠ A full room REFUSES the newcomer; it never evicts a waiter (T2 review
+#: round, P1). Dropping from the head is what the first version did, and the
+#: head is also where the claim pops from — so under sustained pressure the
+#: room churned instead of draining, and every refusal cost an event. Refusing
+#: instead costs the newcomer nothing: its pending counter is untouched, so the
+#: next re-arm (or its next completed ask) puts it back in line, and the
+#: refusals of one pass are reported as ONE aggregated count rather than one
+#: event per library.
+_MAX_QUEUED_PARTITIONS = 64
+
 
 def distillation_wiring_active(settings: Any, store: Any) -> bool:
     """Whether the distillation chain is wired at all (kill switch + store).
@@ -172,11 +223,60 @@ def distillation_wiring_active(settings: Any, store: Any) -> bool:
     )
 
 
+def _partition_label(partition: str) -> str:
+    """The closed value an event may carry about a batch's partition.
+
+    TWO words, and never an id. The event log is a different disclosure
+    surface from the table: a stream of ``partition="nb-…"`` values beside
+    their timestamps would let an operator reconstruct which libraries are
+    busy and when they changed shape, which is the aggregate ``_emit``'s
+    counts-only rule exists to withhold. "Which of the two chains ran" is what
+    operations actually needs, and it is all that is published.
+    """
+    return "notebook" if partition else "global"
+
+
+def _partition_cap(partition: str) -> int:
+    """The row ceiling for ONE partition — 300 global, 100 per notebook.
+
+    Read from the partition rather than passed in by the caller: eviction and
+    the "existing entries" read must use the SAME number (reading 300 rows out
+    of a partition capped at 100 would offer the model entries the next
+    eviction is about to remove), and one function is how they cannot drift.
+    """
+    return (
+        RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES if partition
+        else RETRIEVAL_EXPERIENCE_MAX_ENTRIES
+    )
+
+
 class RetrievalExperienceDistillationService:
-    """Global threshold gate, in-process single flight, one bounded call.
+    """Per-partition threshold gates, ONE in-process single flight, one bounded
+    call per batch.
 
     Backend-neutral by construction (ports and plain callables only), so it
     lives on the neutral repository runtime beside its P1 sibling.
+
+    ⚠ ONE single-flight slot for ALL partitions, not one per partition. Two
+    reasons, both structural: two batches writing ``retrieval_experiences``
+    concurrently would interleave their eviction passes over a table they both
+    trim, and a deployment where ten libraries cross their threshold in the
+    same minute would bill ten model calls at once. Waiting NOTEBOOK partitions
+    go into a bounded, de-duplicated queue instead
+    (``_MAX_QUEUED_PARTITIONS``), which is why a library that reached its
+    threshold while another batch was in flight still gets its batch — just
+    later.
+
+    ⚠ The GLOBAL partition is NOT in that queue, and that asymmetry is load
+    bearing (T2 review round, P1). It has its own seat: whenever the slot frees
+    and the deployment-wide counter is over its threshold, the global chain is
+    claimed FIRST, ahead of every waiting library. When it shared the queue,
+    hundreds of ready libraries could hold it behind them indefinitely — a
+    deployment busy enough to need the global fallback was exactly the one that
+    never produced it. The priority costs the libraries nothing measurable: the
+    global chain can only be ready once per ``RETRIEVAL_EXPERIENCE_TRIGGER``
+    completed asks, so it takes at most one slot out of every forty asks' worth
+    of batches.
     """
 
     def __init__(
@@ -193,98 +293,316 @@ class RetrievalExperienceDistillationService:
         self.ask_state = ask_state
         self.models = models
         self.event_log = event_log
-        # ⚠ The threshold counter is PROCESS-LOCAL and resets on restart.
+        # ⚠ The threshold counters are PROCESS-LOCAL and reset on restart.
         # Registered, not overlooked: the library is a pure increment, so a
         # restart costs at most one skipped distillation round and never
-        # correctness. Persisting it would mean either a table of its own for a
-        # single integer, or squeezing a deployment-wide counter into a
-        # per-notebook table — the second is how a global fact ends up
-        # attributed to whichever notebook happened to be first.
+        # correctness. Persisting them would mean a cursor table of its own
+        # (design doc §13-Q4 parks that until production shows restarts are
+        # frequent enough to starve the threshold).
         self._lock = threading.Lock()
+        # The GLOBAL partition's counter keeps its old name: every existing
+        # reader of ``_pending`` means this one.
         self._pending = 0
+        # One counter per notebook that has had a completed reasoning ask IN
+        # THIS PROCESS. A key appears on that library's first such ask; it is
+        # removed when that library's batch is CLAIMED, and otherwise stays
+        # until the process exits — a library that stops at nine asks keeps its
+        # key and its nine. That is registered rather than cleaned up (T2
+        # review round, P2): the key is a short id and a small int, five
+        # thousand of them are on the order of half a megabyte, and the
+        # alternative (expiring counters) would silently discard backlog that
+        # a library is still entitled to. The dict is walked once per worker
+        # exit (``_rearm_locked``) and nowhere else, so its size costs nothing
+        # on the ask path.
+        self._notebook_pending: dict[str, int] = {}
         self._running = False
+        # NOTEBOOK partitions waiting for the slot, oldest first, de-duplicated
+        # by the companion set: a library that crosses its threshold twice
+        # while a batch is in flight has ONE batch waiting, not two (the second
+        # would read a sample almost entirely overlapping the first). The
+        # global partition is deliberately absent — see the class docstring.
+        self._queue: "deque[str]" = deque()
+        self._queued: set[str] = set()
 
     # ------------------------------------------------------------- triggering
-    def note_ask_completed(self) -> None:
-        """One ask finished somewhere in this deployment.
+    def note_ask_completed(self, notebook_id: str) -> None:
+        """One reasoning ask finished, in the library this id names.
 
         ⚠ FAIL-OPEN IN FULL, and it hangs off a hook that fires AFTER an answer
         has already been delivered: a delivered answer must never be affected by
         a background bookkeeping failure. Every ordinary exception is logged and
         swallowed; ``KeyboardInterrupt``/``SystemExit`` keep propagating.
 
-        Takes no notebook and no user argument — not because they are
-        unavailable at the call site, but because this chain must not have them.
-        A trigger that knew whose ask it was would be one refactor away from
-        being a trigger that recorded it.
+        ⚠ It takes the notebook and STILL takes no user argument, and the
+        asymmetry is the whole of this feature's privacy position. P2 shipped
+        with a zero-argument signature and the note "a trigger that knew whose
+        ask it was would be one refactor away from being a trigger that
+        recorded it" — 2026-09-22 overturns that for the LIBRARY half only
+        (design doc §12 deviation ①), because recording "in this library, this
+        tactic pays off" is exactly what was asked for, and it is a statement
+        about a shared corpus rather than about a person. The per-person half
+        of the old argument stands untouched: there is no ``user_id`` here, and
+        there is nowhere for one to go.
+        What keeps the widening honest is not this signature. It is that the id
+        goes into exactly three places — a read predicate, a written column and
+        an id hash — and into ``RunObservation``/``ObservedRun``/the prompt
+        never; the privacy guard's criteria eight and nine pin both halves.
+
+        Both counters move: the deployment-wide one (which feeds the global
+        fallback partition) and this library's own. Each crosses its own
+        threshold on its own schedule, so one completed ask can arm two
+        batches — they still run one at a time, through the shared slot.
         """
         try:
             if not distillation_wiring_active(self.settings, self.experiences):
                 return
-            trigger = max(1, int(
-                getattr(self.settings, "retrieval_experience_trigger", 40)
-            ))
+            partition = notebook_id if isinstance(notebook_id, str) else ""
+            refused = False
             with self._lock:
+                # 全局计数每次都 +1,但全局分区**不排队**:它在认领时单独优先
+                # 判定(``_claim_next_locked``),所以拥挤的等待室饿不死它。
                 self._pending += 1
-                if self._pending < trigger:
-                    return
+                if partition:
+                    self._notebook_pending[partition] = (
+                        self._notebook_pending.get(partition, 0) + 1
+                    )
+                    if self._ready_locked(partition):
+                        refused = not self._enqueue_locked(partition)
                 # codex #524 R1/R2/R3 P2 三轮收敛出的形态:单飞认领与快照消费
                 # 必须在**同一个**临界区完成——消费晚于认领哪怕一个锁间隙,
                 # 快 worker 就可能已经跑完并释放槽位,并发的下一次完成会看到
                 # 「阈值仍未被消费」而排出第二个重复批次(双份模型账单)。
-                # busy 时不消费(保留整批,下一次完成补触发);提交失败在
-                # _submit_claimed 里恢复计数并释放槽位。
-                if self._running:
-                    return
-                self._running = True
-                snapshot = self._pending
-                self._pending = 0
-            self._submit_claimed(snapshot)
+                # busy 时只入队、不消费(整批留在计数里,出队时才结算);提交
+                # 失败在 _submit_claimed 里恢复计数并释放槽位。
+                claimed = self._claim_next_locked()
+            if refused:
+                # 一次完成最多一条事件,而且是**计数**不是名单——排队被拒是
+                # 容量信号,不是某个库的事件。只有笔记本分区会排队,所以标签
+                # 恒为 ``notebook``。
+                self._emit(
+                    "skipped", latency_ms=0, reason="queue_full", dropped=1,
+                    partition="notebook",
+                )
+            if claimed is not None:
+                self._submit_claimed(*claimed)
         except Exception:  # noqa: BLE001 — never break a delivered answer
             _log.exception("retrieval experience trigger failed")
 
+    def distill_now(self, notebook_id: str) -> bool:
+        """Distil ONE partition right now; ``False`` = disabled, or busy.
+
+        The manual control the P2 module docstring anticipated (design doc §8's
+        button, wired in PR-2). It gates ITSELF on
+        ``distillation_wiring_active`` rather than trusting ``start()`` to do
+        it — ``start()``'s docstring has always said the shared entry point
+        does not self-gate, and "a caller that believes this method self-gates
+        is how a disabled feature keeps running" was written there before this
+        caller existed.
+
+        ``False`` deliberately conflates "turned off" with "already running":
+        both mean "no batch was scheduled for you", neither is an error, and
+        the interface's answer to both is the same sentence. It pays nothing
+        beyond the two flag reads — no query, no model call — which is what
+        makes it safe to wire behind a button.
+
+        ⚠ A missing or non-string partition is REFUSED, not defaulted to the
+        global one (T2 review round, P3). This button hangs off one library's
+        panel, so an empty id here means the id was lost between the endpoint
+        and this call — and "distil the deployment-wide library instead" is the
+        most plausible-looking wrong answer available: it would succeed, bill a
+        model call, and write entries into the partition every library reads.
+        The ``skipped`` event says only that a call named no partition; it
+        carries no value, because the value is exactly the thing this method is
+        refusing to trust.
+        """
+        if not distillation_wiring_active(self.settings, self.experiences):
+            return False
+        if not isinstance(notebook_id, str) or not notebook_id:
+            self._emit(
+                "skipped", latency_ms=0, reason="invalid_partition",
+                partition="notebook",
+            )
+            return False
+        return self.start(notebook_id)
+
+    # ------------------------------------------------- the waiting-room state
+    # Every method below runs WITH ``_lock`` held (``_locked`` suffix) and does
+    # no I/O of any kind: the whole point of the queue is that deciding what
+    # runs next is a few dict and deque operations inside one critical section,
+    # while everything that can block (submitting, emitting) happens outside it.
+    def _threshold(self, partition: str) -> int:
+        """This partition's trigger count, floored at 1 (0 would schedule a
+        bounded LLM call on every single ask)."""
+        setting = (
+            "retrieval_experience_notebook_trigger" if partition
+            else "retrieval_experience_trigger"
+        )
+        return max(1, int(getattr(self.settings, setting, 10 if partition else 40)))
+
+    def _pending_locked(self, partition: str) -> int:
+        if partition:
+            return self._notebook_pending.get(partition, 0)
+        return self._pending
+
+    def _ready_locked(self, partition: str) -> bool:
+        return self._pending_locked(partition) >= self._threshold(partition)
+
+    def _consume_locked(self, partition: str) -> int:
+        """Take this partition's whole backlog and zero it.
+
+        The notebook half POPS rather than assigning 0: a library with no
+        further traffic should leave no key behind, so the dict stays the size
+        of live traffic rather than of the notebook table.
+        """
+        if partition:
+            return self._notebook_pending.pop(partition, 0)
+        snapshot, self._pending = self._pending, 0
+        return snapshot
+
+    def _restore_locked(self, partition: str, snapshot: int) -> None:
+        if partition:
+            self._notebook_pending[partition] = (
+                self._notebook_pending.get(partition, 0) + snapshot
+            )
+            return
+        self._pending += snapshot
+
+    def _enqueue_locked(self, partition: str) -> bool:
+        """Put a ready NOTEBOOK partition in the waiting room.
+
+        ``True`` = it has a place in line (including "it already did");
+        ``False`` = the room is full and it was REFUSED. A refusal costs the
+        library nothing: its counter is untouched, so the next ``_rearm_locked``
+        pass — or its next completed ask — offers it again.
+
+        De-duplicating is not an optimisation: two queued batches for the same
+        library would read almost the same forty runs, and the second would
+        spend a model call re-deriving conclusions the first just wrote (the
+        provenance de-duplication keeps that from inflating ``support``, but
+        nothing refunds the call).
+
+        The global partition is refused outright — it does not wait in line at
+        all, it is claimed ahead of the queue (see ``_claim_next_locked``).
+        """
+        if not partition:
+            return False
+        if partition in self._queued:
+            return True
+        if len(self._queue) >= _MAX_QUEUED_PARTITIONS:
+            return False
+        self._queue.append(partition)
+        self._queued.add(partition)
+        return True
+
+    def _rearm_locked(self) -> int:
+        """Offer every over-threshold library a place in line; count refusals.
+
+        The safety net the pre-partition ``_maybe_requeue`` was: a backlog that
+        is ready but NOT queued (the room was full when it arrived, or its
+        submission failed) would otherwise sit there until that library happens
+        to be used again. Only called on a worker's way out, so the walk over
+        live counters costs nothing on the ask path.
+
+        ⚠ Insertion order, NOT sorted: determinism here only has to mean "the
+        same pass twice produces the same queue", which dict order already
+        gives, and sorting put an ``O(n log n)`` over every live counter inside
+        the lock (T2 review round, P2). Nothing in the loop mutates the dict —
+        ``_enqueue_locked`` touches only the queue — so iterating it directly
+        is safe.
+
+        Returns how many libraries the full room turned away, for ONE
+        aggregated event; the caller emits it outside the lock.
+        """
+        refused = 0
+        for partition in self._notebook_pending:
+            if self._ready_locked(partition) and not self._enqueue_locked(partition):
+                refused += 1
+        return refused
+
+    def _claim_next_locked(self) -> "tuple[str, int] | None":
+        """Claim the slot for the next partition to run, consuming its backlog.
+
+        Returns ``(partition, snapshot)`` for the caller to submit OUTSIDE the
+        lock, or ``None`` when the slot is taken or nobody is ready. Claim and
+        consume happen here, together, for the reason spelled out in
+        ``note_ask_completed``.
+
+        ⚠ The GLOBAL partition is checked FIRST and never from the queue. That
+        ordering is what makes starving it structurally impossible: it is ready
+        only once per ``RETRIEVAL_EXPERIENCE_TRIGGER`` completed asks, and when
+        it is, it goes next. A shared FIFO gave the opposite guarantee — the
+        more libraries a deployment had, the longer the global fallback waited,
+        without bound.
+        """
+        if self._running:
+            return None
+        if self._ready_locked(""):
+            partition = ""
+        elif self._queue:
+            partition = self._queue.popleft()
+            self._queued.discard(partition)
+        else:
+            return None
+        self._running = True
+        return partition, self._consume_locked(partition)
+
     def _maybe_requeue(self) -> None:
-        """Re-arm a full pending batch left behind by a busy window.
+        """Hand the freed slot to the next waiting partition.
 
         Same critical-section shape as ``note_ask_completed`` — claim and
         consume atomically, submit outside the lock. Fail-open: a stranded
         batch is an optimization loss, never an error surface.
         """
         try:
-            trigger = max(1, int(
-                getattr(self.settings, "retrieval_experience_trigger", 40)
-            ))
             with self._lock:
-                if self._running or self._pending < trigger:
-                    return
-                self._running = True
-                snapshot = self._pending
-                self._pending = 0
-            self._submit_claimed(snapshot)
+                refused = self._rearm_locked()
+                claimed = self._claim_next_locked()
+            if refused:
+                # 一趟至多一条,而且只报**数量**:一个 300 个就绪库的部署每次
+                # 轮转会拒掉两百多次,逐个发事件就是一场事件风暴,而运维要看的
+                # 是「等待室满了多少」这一个数(T2 评审轮 P1)。
+                self._emit(
+                    "skipped", latency_ms=0, reason="queue_full",
+                    dropped=refused, partition="notebook",
+                )
+            if claimed is not None:
+                self._submit_claimed(*claimed)
         except Exception:  # noqa: BLE001 — requeue is best-effort
             _log.exception("retrieval experience requeue failed")
 
-    def _submit_claimed(self, snapshot: int) -> None:
+    def _submit_claimed(self, partition: str, snapshot: int) -> None:
         """Submit the worker for a claim ALREADY taken by the caller.
 
         The caller consumed ``snapshot`` pending completions inside the same
         critical section that set ``_running`` — on a submission failure both
         must be restored, or the signals are lost and the slot is stranded.
+        The restored backlog is still over its threshold, so the next completed
+        ask in that partition re-enqueues it.
+
+        ⚠ A failure here also leaves whatever else is in the waiting room
+        waiting: nothing re-arms until the next completed ask (or the next
+        worker's exit) comes along. Fail-open and registered — the cost is a
+        deferred optimisation, never a wrong entry — and a submission that
+        cannot start a thread is a condition the next ask will hit too.
         """
         try:
             background_jobs.submit(
                 self.run,
-                name="retrievalexperience-global",
+                partition,
+                name=f"retrievalexperience-{_partition_label(partition)}",
                 notify_pending=False,
             )
         except BaseException:
             with self._lock:
                 self._running = False
-                self._pending += snapshot
-            self._emit("failed", latency_ms=0, reason="job_submission_failed")
+                self._restore_locked(partition, snapshot)
+            self._emit(
+                "failed", latency_ms=0, reason="job_submission_failed",
+                partition=_partition_label(partition),
+            )
             raise
 
-    def start(self) -> bool:
+    def start(self, partition: str = "") -> bool:
         """Claim the single-flight slot and submit the worker; ``False`` = busy.
 
         The claim happens HERE, before the thread exists — the same order as
@@ -295,10 +613,14 @@ class RetrievalExperienceDistillationService:
 
         ⚠ This method does not consult ``distillation_wiring_active``: it is
         the shared entry point, and each caller gates itself
-        (``note_ask_completed`` checks before counting). A future manual
-        "distil now" control must check at its own layer — a caller that
-        believes this method self-gates is how a disabled feature keeps
-        running.
+        (``note_ask_completed`` checks before counting, ``distill_now`` checks
+        before delegating here). A caller that believes this method self-gates
+        is how a disabled feature keeps running.
+
+        ⚠ It does NOT consume any partition's pending counter, because it did
+        not reach a threshold — a manual run is extra, not instead of the
+        batch that library was accumulating. The queue is untouched too: this
+        claim jumps whatever is waiting, which is the point of a button.
         """
         with self._lock:
             if self._running:
@@ -307,25 +629,36 @@ class RetrievalExperienceDistillationService:
         try:
             background_jobs.submit(
                 self.run,
-                name="retrievalexperience-global",
+                partition,
+                name=f"retrievalexperience-{_partition_label(partition)}",
                 notify_pending=False,
             )
         except BaseException:
             with self._lock:
                 self._running = False
-            self._emit("failed", latency_ms=0, reason="job_submission_failed")
+            self._emit(
+                "failed", latency_ms=0, reason="job_submission_failed",
+                partition=_partition_label(partition),
+            )
             raise
         return True
 
     # --------------------------------------------------------------- the run
-    def run(self) -> None:
-        """One distillation batch. Never raises to the job runner.
+    def run(self, partition: str = "") -> None:
+        """One distillation batch, for ONE partition. Never raises to the job
+        runner.
 
-        Reads the deployment's most recent completed asks, aggregates them by
+        Reads that partition's most recent completed asks (the whole
+        deployment's when ``partition`` is empty), aggregates them by
         situation, shows the model the busiest situations alongside the entries
-        the library already holds for similar ones, and applies whatever comes
-        back — after validating it against the closed vocabularies, which is
-        where a malformed reply dies.
+        that same partition already holds for similar ones, and applies
+        whatever comes back — after validating it against the closed
+        vocabularies, which is where a malformed reply dies.
+
+        ⚠ ``partition`` defaults to the global one so that a bare ``run()``
+        keeps its pre-partition meaning: every direct call in the tests, and
+        any caller written before partitions existed, distils the deployment
+        library exactly as it used to.
 
         Every exit path releases the single-flight flag, ``BaseException``
         included: ``KeyboardInterrupt``/``SystemExit`` inherit from it and sail
@@ -350,6 +683,7 @@ class RetrievalExperienceDistillationService:
         moved one method over.
         """
         started = time.monotonic()
+        label = _partition_label(partition)
 
         def latency_ms() -> int:
             return int((time.monotonic() - started) * 1000)
@@ -359,25 +693,33 @@ class RetrievalExperienceDistillationService:
 
         try:
             if not distillation_wiring_active(self.settings, self.experiences):
-                self._emit("skipped", latency_ms=latency_ms(), reason="disabled")
+                self._emit(
+                    "skipped", latency_ms=latency_ms(), reason="disabled",
+                    partition=label,
+                )
                 return
             if self.ask_state is None:
-                self._emit("skipped", latency_ms=latency_ms(), reason="not_wired")
+                self._emit(
+                    "skipped", latency_ms=latency_ms(), reason="not_wired",
+                    partition=label,
+                )
                 return
             if not self.models.configured(RETRIEVAL_EXPERIENCE_WORKLOAD):
                 # Checked before the read: an unconfigured deployment should
                 # pay nothing to learn it is unconfigured.
                 self._emit(
-                    "skipped", latency_ms=latency_ms(), reason="model_unavailable"
+                    "skipped", latency_ms=latency_ms(),
+                    reason="model_unavailable", partition=label,
                 )
                 return
-            outcome = self._distill()
-            self._emit("done", latency_ms=latency_ms(), **outcome)
+            outcome = self._distill(partition)
+            self._emit("done", latency_ms=latency_ms(), partition=label, **outcome)
         except BaseException as exc:  # noqa: BLE001 — see docstring
             self._emit(
                 "failed",
                 latency_ms=latency_ms(),
                 reason=type(exc).__name__,
+                partition=label,
             )
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
@@ -388,11 +730,14 @@ class RetrievalExperienceDistillationService:
                     self._running = False
                 # codex #524 R4 P2:释放后原子复查积压——busy 期间攒满的整批
                 # 若得不到后续流量会永远滞留。复用与 note_ask_completed 同一
-                # 临界区形态(认领+消费原子),fail-open。
+                # 临界区形态(认领+消费原子),fail-open。分区化之后这里还负责
+                # 把等待队列里的下一个分区接上,所以一次突发之后每个攒够的库
+                # 都会依次轮到,而不是只有最后那一个。
                 self._maybe_requeue()
 
-    def _distill(self) -> dict:
-        runs = self._observe()
+    def _distill(self, partition: str = "") -> dict:
+        cap = _partition_cap(partition)
+        runs = self._observe(partition)
         if not runs:
             return {"runs": 0, "situations": 0, "written": 0, "evicted": 0}
         groups = _group_by_situation(runs)
@@ -400,9 +745,7 @@ class RetrievalExperienceDistillationService:
             return {
                 "runs": len(runs), "situations": 0, "written": 0, "evicted": 0,
             }
-        existing = self.experiences.read_partition(
-            "", RETRIEVAL_EXPERIENCE_MAX_ENTRIES
-        )
+        existing = self.experiences.read_partition(partition, cap)
         offered = _offered_entries(groups, existing)
         client = self.models.chat(RETRIEVAL_EXPERIENCE_WORKLOAD)
         prompt = retrieval_experience_prompt(
@@ -426,7 +769,12 @@ class RetrievalExperienceDistillationService:
             for entry in parsed:
                 situation = entry["situation"]
                 self.experiences.upsert_experience(
-                    experience_id(situation, entry["action"]),
+                    # 内容寻址 id 必须与写入列同源:分区既进哈希输入,又进
+                    # ``notebook_id`` 列。两者取自同一个 ``partition`` 变量,
+                    # store 侧还会在合并分支上复核一次(不一致直接
+                    # ValueError),所以"id 说 A、列说 B"这种形态既拼不出来、
+                    # 也落不了库。
+                    experience_id(situation, entry["action"], partition=partition),
                     situation=situation,
                     action=entry["action"],
                     polarity=entry["polarity"],
@@ -434,12 +782,11 @@ class RetrievalExperienceDistillationService:
                     provenance=entry["provenance"],
                     provenance_max=RETRIEVAL_EXPERIENCE_PROVENANCE_MAX,
                     replace_conclusion=entry["replace"],
+                    notebook_id=partition,
                 )
                 written += 1
         finally:
-            evicted = self.experiences.evict_to_limit(
-                RETRIEVAL_EXPERIENCE_MAX_ENTRIES
-            )
+            evicted = self.experiences.evict_to_limit(cap, notebook_id=partition)
         return {
             "runs": len(runs),
             "situations": len(groups),
@@ -447,14 +794,21 @@ class RetrievalExperienceDistillationService:
             "evicted": evicted,
         }
 
-    def _observe(self) -> list[ObservedRun]:
-        """The chain's ENTIRE view of the deployment: one bounded read, then
+    def _observe(self, partition: str = "") -> list[ObservedRun]:
+        """The chain's ENTIRE view of its partition: one bounded read, then
         the projection.
 
         ⚠ ``project_run`` is not a convenience here — it is the only way a run
         may enter this module. Reading any other field off these rows, or
         reaching for a different store, would defeat the structural guarantee
-        that makes a deployment-global table safe at all.
+        that makes a table read by everyone in a library safe at all.
+
+        ⚠ The partition is spent HERE, on the read's predicate, and nowhere
+        downstream: the rows that come back are the same shape either way, so
+        everything after this line — grouping, rendering, the prompt — cannot
+        tell which chain it is serving. ``None`` rather than ``""`` for the
+        global chain, because on the port ``""`` would be a real predicate
+        matching nothing.
 
         ⚠ The batch size is capped by ``RETRIEVAL_EXPERIENCE_BATCH_RUNS``, and
         the fact that it does not exceed ``RETRIEVAL_EXPERIENCE_PROVENANCE_MAX``
@@ -465,6 +819,7 @@ class RetrievalExperienceDistillationService:
         rows = self.ask_state.recent_completed_ask_runs(
             job_limit=RETRIEVAL_EXPERIENCE_BATCH_RUNS,
             step_limit=RETRIEVAL_EXPERIENCE_BATCH_STEPS,
+            notebook_id=partition or None,
         )
         observed: list[ObservedRun] = []
         for row in rows:
@@ -477,7 +832,8 @@ class RetrievalExperienceDistillationService:
 
     # ------------------------------------------------------------ bookkeeping
     def _emit(self, status: str, *, latency_ms: int, **extra: Any) -> None:
-        """Counts only — never a rationale, never an action word, never an id.
+        """Counts and ONE closed word — never a rationale, never an action
+        word, never an id.
 
         ``rationale`` is model-written prose and the event log is a different
         disclosure surface from the table it lives in; ``action`` and the
@@ -486,6 +842,15 @@ class RetrievalExperienceDistillationService:
         operator reconstruct which shapes of question the deployment is
         currently seeing, which is the aggregate this feature is careful not to
         publish anywhere else.
+
+        ``partition`` is the one non-count field, and it is a CLOSED value
+        (``global``/``notebook``, see ``_partition_label``) precisely because
+        the same argument applies to library ids: "which chain ran" is what
+        operations needs to read a latency number correctly, and "which library
+        ran, and when" is a usage profile. It carries a default here so the
+        event's key set is the same on every path — a caller that forgot it
+        would otherwise emit an event shaped differently from its neighbours,
+        which is how a dashboard silently loses a series.
         """
         try:
             self.event_log.emit(
@@ -493,6 +858,7 @@ class RetrievalExperienceDistillationService:
                     "kind": "retrieval_experience_distilled",
                     "status": status,
                     "latency_ms": int(latency_ms),
+                    "partition": "global",
                     "runs": 0,
                     "situations": 0,
                     "written": 0,
@@ -768,8 +1134,10 @@ def parse_distillation_reply(
       guessing which one was meant is how an entry ends up about a channel the
       model was not writing about.
     * ``polarity`` is exactly ``good`` or ``bad``.
-    * ``rationale`` is non-empty, within the character cap, and contains no
-      id-shaped token. Over-length is a rejection rather than a clip: a
+    * ``rationale`` is non-empty, within the character cap, and matches
+      NEITHER id tripwire (a long hex run, or a ``nb-`` prefixed notebook id —
+      the second one exists because the first needs sixteen hex characters and
+      a notebook id carries about ten). Over-length is a rejection rather than a clip: a
       truncated line of advice reads as confident and complete having lost its
       qualifier. The id check is a tripwire on the input narrowing rather than
       a sanitiser — if an id ever reaches this point, the entry is discarded
@@ -815,7 +1183,7 @@ def parse_distillation_reply(
         rationale = " ".join(as_text(item.get("rationale")).split())
         if not rationale or len(rationale) > RETRIEVAL_EXPERIENCE_RATIONALE_MAX_CHARS:
             continue
-        if _ID_SHAPE.search(rationale):
+        if _ID_SHAPE.search(rationale) or _NOTEBOOK_ID_SHAPE.search(rationale):
             _log.warning(
                 "retrieval experience entry rejected: rationale carried an "
                 "id-shaped token, which means the observation narrowing let "

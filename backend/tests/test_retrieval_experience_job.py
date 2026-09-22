@@ -22,10 +22,15 @@ import pytest
 from app.domain.retrieval_experience import project_run_step
 from app.repositories.ports import (
     RETRIEVAL_EXPERIENCE_BATCH_RUNS,
+    RETRIEVAL_EXPERIENCE_BATCH_STEPS,
+    RETRIEVAL_EXPERIENCE_MAX_ENTRIES,
+    RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES,
     RETRIEVAL_EXPERIENCE_PROVENANCE_MAX,
     RETRIEVAL_EXPERIENCE_RATIONALE_MAX_CHARS,
 )
+from app.services import background_jobs
 from app.services.retrieval_experience_job import (
+    _MAX_QUEUED_PARTITIONS,
     _offered_entries,
     RetrievalExperienceDistillationService,
     distillation_wiring_active,
@@ -533,8 +538,11 @@ class _Store:
         self.rows = list(existing or [])
         self.upserts = []
         self.evicted = 0
+        self.reads = []
+        self.evictions = []
 
     def read_partition(self, notebook_id, limit):
+        self.reads.append((notebook_id, limit))
         return self.rows[:limit]
 
     def upsert_experience(self, experience_id, **kwargs):
@@ -543,6 +551,7 @@ class _Store:
 
     def evict_to_limit(self, max_entries, notebook_id=""):
         self.evicted += 1
+        self.evictions.append((max_entries, notebook_id))
         return 0
 
     def count(self, notebook_id=None):
@@ -550,13 +559,19 @@ class _Store:
 
 
 class _AskState:
-    def __init__(self, runs):
+    """取数替身。``notebook_id`` 不是摆设:``by_partition`` 里的键就是分区,
+    没有键的分区返回空列表——「另一个库 0 行」那条用例靠的正是这个。"""
+
+    def __init__(self, runs, by_partition=None):
         self.runs = runs
+        self.by_partition = dict(by_partition or {})
         self.calls = []
 
-    def recent_completed_ask_runs(self, *, job_limit, step_limit):
-        self.calls.append((job_limit, step_limit))
-        return self.runs
+    def recent_completed_ask_runs(self, *, job_limit, step_limit, notebook_id=None):
+        self.calls.append((job_limit, step_limit, notebook_id))
+        if notebook_id is None:
+            return self.runs
+        return self.by_partition.get(notebook_id, [])
 
 
 class _Client:
@@ -592,13 +607,20 @@ class _Events:
 class _Settings:
     retrieval_experience_enabled = True
     retrieval_experience_trigger = 3
+    # 单库阈值与全局阈值**不相等**,是为了让「两个计数各自到各自的阈值」在每
+    # 一条用例里都是可分辨的:相等的话,一次完成同时点燃两条链路的 bug 会与
+    # 正确行为长得一模一样。
+    retrieval_experience_notebook_trigger = 2
 
 
-def _service(runs, reply, *, settings=None, store=None, models=None, events=None):
+def _service(
+    runs, reply, *, settings=None, store=None, models=None, events=None,
+    ask_state=None,
+):
     return RetrievalExperienceDistillationService(
         settings=settings or _Settings(),
         experiences=store or _Store(),
-        ask_state=_AskState(runs),
+        ask_state=ask_state or _AskState(runs),
         models=models or _Models(reply),
         event_log=events or _Events(),
     )
@@ -653,9 +675,13 @@ def test_the_event_carries_counts_only():
     )
     service.run()
     payload = events.emitted[-1]
+    # 2026-09-22:多了 ``partition``,而且是这条用例唯一允许的非计数字段——它只
+    # 取 ``global``/``notebook`` 两个封闭值(``_partition_label``),绝不带库 id。
     assert set(payload) == {
-        "kind", "status", "latency_ms", "runs", "situations", "written", "evicted",
+        "kind", "status", "latency_ms", "partition",
+        "runs", "situations", "written", "evicted",
     }
+    assert payload["partition"] in {"global", "notebook"}
     assert all(isinstance(value, (str, int)) for value in payload.values())
 
 
@@ -717,16 +743,16 @@ def test_the_trigger_fires_only_at_the_threshold():
     )
     started = []
     service._submit_claimed = (  # type: ignore[assignment]
-        lambda snapshot: started.append(snapshot)
+        lambda partition, snapshot: started.append(snapshot)
     )
-    service.note_ask_completed()
-    service.note_ask_completed()
+    service.note_ask_completed("")
+    service.note_ask_completed("")
     assert started == []
-    service.note_ask_completed()
+    service.note_ask_completed("")
     assert started == [3]          # 快照=认领时的全部积压
     # 认领临界区已消费计数并占住单飞位(worker 被 stub、不会释放):
     # 下一次完成只计数、不重复排批。
-    service.note_ask_completed()
+    service.note_ask_completed("")
     assert started == [3]
     assert service._pending == 1
 
@@ -746,7 +772,7 @@ def test_the_trigger_never_raises_into_the_ask_path():
         models=_Models(_REPLY),
         event_log=_Events(),
     )
-    service.note_ask_completed()  # must not raise
+    service.note_ask_completed("")  # must not raise
 
 
 def test_a_failing_run_releases_the_single_flight_flag():
@@ -1069,14 +1095,15 @@ def test_completions_arriving_while_the_worker_is_busy_are_not_lost(monkeypatch)
     service._running = True          # 模拟在飞 worker 占住单飞位
     trigger = max(1, int(service.settings.retrieval_experience_trigger))
     for _ in range(trigger):
-        service.note_ask_completed()
+        service.note_ask_completed("")
     assert service._pending >= trigger   # 没被清零(修复前这里是 0)
     service._running = False
     submitted = []
     monkeypatch.setattr(
-        service, "_submit_claimed", lambda snapshot: submitted.append(snapshot)
+        service, "_submit_claimed",
+        lambda partition, snapshot: submitted.append(snapshot),
     )
-    service.note_ask_completed()          # 下一次完成立刻补触发
+    service.note_ask_completed("")        # 下一次完成立刻补触发
     assert submitted == [trigger + 1]     # 整批(含 busy 期间的)一次消费
     assert service._pending == 0
     assert service._running is True       # 认领已在临界区内完成
@@ -1088,15 +1115,16 @@ def test_a_fast_worker_cannot_double_schedule_the_same_signals(monkeypatch):
     service = _service([], _REPLY)
     submitted = []
     monkeypatch.setattr(
-        service, "_submit_claimed", lambda snapshot: submitted.append(snapshot)
+        service, "_submit_claimed",
+        lambda partition, snapshot: submitted.append(snapshot),
     )
     trigger = max(1, int(service.settings.retrieval_experience_trigger))
     for _ in range(trigger):
-        service.note_ask_completed()
+        service.note_ask_completed("")
     assert submitted == [trigger]
     # 模拟快 worker 立刻结束释放槽位——此刻 pending 已在认领临界区被消费为 0
     service._running = False
-    service.note_ask_completed()          # 竞入的下一次完成
+    service.note_ask_completed("")        # 竞入的下一次完成
     assert submitted == [trigger]         # 不会重复排批
     assert service._pending == 1
 
@@ -1107,16 +1135,17 @@ def test_the_worker_release_rearms_a_full_pending_batch(monkeypatch):
     service = _service([], _REPLY)
     submitted = []
     monkeypatch.setattr(
-        service, "_submit_claimed", lambda snapshot: submitted.append(snapshot)
+        service, "_submit_claimed",
+        lambda partition, snapshot: submitted.append(snapshot),
     )
     trigger = max(1, int(service.settings.retrieval_experience_trigger))
     # 第一批:正常触发并占住槽位(stub 不会释放)
     for _ in range(trigger):
-        service.note_ask_completed()
+        service.note_ask_completed("")
     assert submitted == [trigger]
     # busy 期间又攒满一整批
     for _ in range(trigger):
-        service.note_ask_completed()
+        service.note_ask_completed("")
     assert service._pending == trigger
     # worker 退出:run() 的 finally 释放并复查
     service.run()
@@ -1321,3 +1350,342 @@ def test_a_poisoned_action_contributes_zero_anchored_hits_to_aggregation():
     ppr = next(a for a in observed.observation.actions if a.action == "ppr")
     assert ppr.attributable is False
     assert ppr.anchored_hits == 0, "poison 动作的保留前缀交集不得计入分子"
+
+
+# ============================================================================
+# 按笔记本分区(2026-09-22):两条链路,一个单飞槽位,一条有界去重队列
+# ============================================================================
+
+class _NotebooksOnlySettings:
+    """只让单库链路动的阈值组合:全局阈值高到这段流量永远够不着。
+
+    队列那两条用例要数的是「几个**库**排进了等待室」,而全局分区一旦也掺进来,
+    它会被丢掉、又在下一次完成时重新入队,把一个本该是算术的断言变成一个要跟着
+    实现细节改的数字。"""
+
+    retrieval_experience_enabled = True
+    retrieval_experience_trigger = 10_000
+    retrieval_experience_notebook_trigger = 2
+
+
+class _PartitionSettings:
+    """真实默认值的形状:全局 40、单库 10(规格 §9)。"""
+
+    retrieval_experience_enabled = True
+    retrieval_experience_trigger = 40
+    retrieval_experience_notebook_trigger = 10
+
+
+def _zero_hit_run(run_id: str) -> dict:
+    return _run(
+        [_intent_step(), {"step_type": "exact_lookup", "detail": {"found": 0}}],
+        run_id=run_id,
+    )
+
+
+def _inline_submit(monkeypatch) -> list:
+    """让 ``background_jobs.submit`` 在调用线程里同步跑,并记下 (args, name)。"""
+    calls: list = []
+
+    def _submit(fn, *args, name=None, notify_pending=False, **kwargs):
+        calls.append((args, name))
+        fn(*args, **kwargs)
+        return None
+
+    monkeypatch.setattr(background_jobs, "submit", _submit)
+    return calls
+
+
+def test_ten_asks_in_one_library_distil_that_library_and_sample_only_it(monkeypatch):
+    """验收判据 2。一个库连续 10 次 reasoning 完成 → 一批 ``partition="notebook"``
+    的蒸馏,取数只看这个库,写入落这个库的分区,淘汰按 100 收容。
+
+    全局链路在同一段流量里**不该**跑:10 < 40,而两个计数各走各的。
+    """
+    submits = _inline_submit(monkeypatch)
+    store = _Store()
+    events = _Events()
+    ask_state = _AskState([], by_partition={"nb-a": [
+        _zero_hit_run("job-1"), _zero_hit_run("job-2"),
+    ]})
+    service = _service(
+        [], _REPLY, settings=_PartitionSettings(), store=store, events=events,
+        ask_state=ask_state,
+    )
+
+    for _ in range(9):
+        service.note_ask_completed("nb-a")
+    assert submits == [], "阈值未到就排批 = 每次提问一次 LLM"
+    service.note_ask_completed("nb-a")
+
+    assert [name for _args, name in submits] == ["retrievalexperience-notebook"]
+    assert [args for args, _name in submits] == [("nb-a",)]
+    # 取数带谓词,而且只带这一个库;两个上限都按分区选。
+    assert ask_state.calls == [
+        (RETRIEVAL_EXPERIENCE_BATCH_RUNS, RETRIEVAL_EXPERIENCE_BATCH_STEPS, "nb-a")
+    ]
+    assert store.reads == [("nb-a", RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES)]
+    assert store.evictions == [(RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES, "nb-a")]
+    # 写入落该库分区,id 与列同源。
+    entry_id, kwargs = store.upserts[0]
+    assert kwargs["notebook_id"] == "nb-a"
+    assert entry_id == experience_id(
+        kwargs["situation"], kwargs["action"], partition="nb-a"
+    )
+    assert entry_id != experience_id(kwargs["situation"], kwargs["action"])
+    done = events.emitted[-1]
+    assert (done["status"], done["partition"], done["written"]) == ("done", "notebook", 1)
+    # 单库计数已结算,全局计数原封不动地继续攒。
+    assert service._notebook_pending == {}
+    assert service._pending == 10
+
+
+def test_another_library_reaching_its_threshold_sees_none_of_the_first_ones_runs(
+    monkeypatch,
+):
+    """验收判据 2 的另一半:B 库攒够 10 次,取数只问 B——而 B 没有 run,所以这
+    一批写 0 行。隔离在**取数**这一层就成立,不是靠事后过滤。"""
+    _inline_submit(monkeypatch)
+    store = _Store()
+    events = _Events()
+    ask_state = _AskState([], by_partition={"nb-a": [
+        _zero_hit_run("job-1"), _zero_hit_run("job-2"),
+    ]})
+    service = _service(
+        [], _REPLY, settings=_PartitionSettings(), store=store, events=events,
+        ask_state=ask_state,
+    )
+
+    for _ in range(10):
+        service.note_ask_completed("nb-b")
+
+    assert ask_state.calls == [
+        (RETRIEVAL_EXPERIENCE_BATCH_RUNS, RETRIEVAL_EXPERIENCE_BATCH_STEPS, "nb-b")
+    ]
+    assert store.upserts == []
+    done = events.emitted[-1]
+    assert (done["partition"], done["runs"], done["written"]) == ("notebook", 0, 0)
+
+
+def test_the_global_chain_still_fires_at_forty_with_no_predicate(monkeypatch):
+    """验收判据 9 / 规格 §4:全局链路一个字都没变——40 次(跨库)一批,取数
+    **不传** notebook_id,既有条目与淘汰都按 300。"""
+    _inline_submit(monkeypatch)
+    store = _Store()
+    events = _Events()
+    ask_state = _AskState([_zero_hit_run("job-1"), _zero_hit_run("job-2")])
+    service = _service(
+        [], _REPLY, settings=_PartitionSettings(), store=store, events=events,
+        ask_state=ask_state,
+    )
+
+    # 40 次分散在 8 个库上:每个库只有 5 次(< 10),只有全局计数到 40。
+    for index in range(40):
+        service.note_ask_completed(f"nb-{index % 8}")
+        if index < 39:
+            assert store.upserts == [], index
+
+    assert ask_state.calls == [
+        (RETRIEVAL_EXPERIENCE_BATCH_RUNS, RETRIEVAL_EXPERIENCE_BATCH_STEPS, None)
+    ]
+    assert store.reads == [("", RETRIEVAL_EXPERIENCE_MAX_ENTRIES)]
+    assert store.evictions == [(RETRIEVAL_EXPERIENCE_MAX_ENTRIES, "")]
+    entry_id, kwargs = store.upserts[0]
+    assert kwargs["notebook_id"] == ""
+    # 全局分区的 id 与分区落地**之前**逐字相同(规格 §12 偏离 ④)。
+    assert entry_id == experience_id(kwargs["situation"], kwargs["action"])
+    assert events.emitted[-1]["partition"] == "global"
+
+
+def test_a_library_that_crosses_its_threshold_twice_waits_in_line_only_once():
+    """队列去重。同一个库排两批毫无意义——第二批会读到几乎同一批 run,再花一次
+    模型调用重新推导刚写下的结论(provenance 去重挡得住 support 虚增,挡不住
+    那次调用的账单)。
+
+    顺带钉住全局分区**不进队列**:它攒到阈值只是让它在下一次认领时优先,队列
+    里从头到尾只有笔记本分区。
+    """
+    service = _service([], _REPLY)        # 全局 3、单库 2
+    service._running = True               # 单飞位被占,谁也跑不了
+
+    for _ in range(6):
+        service.note_ask_completed("nb-a")
+
+    assert list(service._queue) == ["nb-a"]
+    assert service._queued == {"nb-a"}
+    # 计数在出队时才结算,所以两边都还完整地留着。
+    assert service._pending == 6
+    assert service._notebook_pending == {"nb-a": 6}
+
+
+def test_a_full_waiting_room_refuses_the_newcomer_and_keeps_everyone_in_line():
+    """有界队列:满了**拒绝新来的**,绝不赶走已经排上的(T2 评审轮 P1)。
+
+    先前的写法从队头丢——而队头正是认领要取的那一位,于是持续压力下等待室
+    只是在churn,谁也排不到前面,还每拒一次发一条事件。拒绝新来的则什么都不
+    浪费:它的计数一动不动,下一趟 rearm 或它的下一次提问会再offer一次。
+    """
+    events = _Events()
+    service = _service([], _REPLY, events=events, settings=_NotebooksOnlySettings())
+    service._running = True
+
+    libraries = _MAX_QUEUED_PARTITIONS + 5
+    for index in range(libraries):
+        for _ in range(2):                 # 单库阈值 2
+            service.note_ask_completed(f"nb-{index:03d}")
+
+    assert len(service._queue) == _MAX_QUEUED_PARTITIONS
+    assert list(service._queue)[0] == "nb-000", "最先排上的必须还在队头"
+    # 进不来的每个库各被拒一次(一次完成最多一条事件),而且事件只有数量。
+    refusals = [event for event in events.emitted if event.get("reason") == "queue_full"]
+    assert len(refusals) == libraries - _MAX_QUEUED_PARTITIONS
+    for event in refusals:
+        assert event["dropped"] == 1
+        assert event["partition"] == "notebook"
+        assert "nb-" not in repr(event), event
+    # 被拒的库计数原封不动。
+    assert service._notebook_pending[f"nb-{libraries - 1:03d}"] == 2
+
+
+def test_a_crowded_waiting_room_never_starves_the_global_chain(monkeypatch):
+    """T2 评审轮 P1 的验收用例:评审实测 300 个就绪库时全局分区 300 个周期被
+    认领 0 次、并产生四万多条事件。
+
+    这里跑一遍完整的轮转:上百个库同时就绪 + 全局也就绪,反复「worker 退出 →
+    接下一批」。三条性质缺一不可——全局立刻轮到(它有自己的座位,不排队)、
+    每个库最终各跑一次(拒绝不丢批)、事件是**聚合**的(每趟至多一条)。
+    """
+    events = _Events()
+    service = _service([], _REPLY, events=events)   # 全局 3、单库 2
+    service._running = True
+
+    libraries = 150
+    for index in range(libraries):
+        for _ in range(2):
+            service.note_ask_completed(f"nb-{index:03d}")
+
+    assert "" not in service._queued
+    assert service._pending == libraries * 2        # 全局早已就绪
+    seeded_events = len(events.emitted)
+
+    submitted: list[str] = []
+    monkeypatch.setattr(
+        service, "_submit_claimed",
+        lambda partition, snapshot: submitted.append(partition),
+    )
+    longest_queue = len(service._queue)
+    cycles = libraries + 10
+    for _ in range(cycles):
+        service._running = False            # 上一批退出
+        service._maybe_requeue()            # run() 的 finally 做的正是这件事
+        longest_queue = max(longest_queue, len(service._queue))
+
+    assert submitted[0] == "", "全局分区必须在第一个周期就被认领"
+    assert submitted.count("") == 1, "它只就绪过一次,不该被重复认领"
+    assert sorted(submitted) == sorted(
+        [""] + [f"nb-{index:03d}" for index in range(libraries)]
+    ), "每个库都必须恰好跑到一次"
+    assert longest_queue <= _MAX_QUEUED_PARTITIONS
+    # 事件是聚合的:整轮转下来最多一趟一条,而不是一个被拒的库一条。
+    drain_events = len(events.emitted) - seeded_events
+    assert drain_events <= cycles, drain_events
+    assert service._notebook_pending == {}
+
+
+def test_a_notebook_batch_earned_while_busy_runs_when_the_slot_frees(monkeypatch):
+    """busy 期间攒满不丢——分区版的 codex #524 R4 P2。突发流量停止后,等待队列
+    里的分区由退出的 worker 在 ``finally`` 里接上,而不是等下一次提问。"""
+    service = _service([], _REPLY)
+    service._running = True
+    for _ in range(2):
+        service.note_ask_completed("nb-a")
+    assert list(service._queue) == ["nb-a"]
+
+    submitted = []
+    monkeypatch.setattr(
+        service, "_submit_claimed",
+        lambda partition, snapshot: submitted.append((partition, snapshot)),
+    )
+    service.run()                      # 占着槽位的那一批退出
+
+    assert submitted == [("nb-a", 2)]
+    assert service._notebook_pending == {}   # 出队即结算
+    assert list(service._queue) == []
+
+
+def test_distill_now_is_refused_while_the_feature_is_off_and_costs_nothing():
+    """规格 §4/§8:手动触发**自己**过总闸——``start()`` 的 docstring 一直写着
+    共享入口不自闸。关闭态零查询、零模型调用、不占槽位。"""
+
+    class Off(_Settings):
+        retrieval_experience_enabled = False
+
+    ask_state = _AskState([_run([_intent_step()])])
+    models = _Models(_REPLY)
+    service = RetrievalExperienceDistillationService(
+        settings=Off(),
+        experiences=_Store(),
+        ask_state=ask_state,
+        models=models,
+        event_log=_Events(),
+    )
+
+    assert service.distill_now("nb-a") is False
+    assert ask_state.calls == []
+    assert models.client.prompts == []
+    assert service._running is False
+
+
+def test_distill_now_claims_the_slot_once_and_then_reports_busy(monkeypatch):
+    """第二次按钮不是第二个写者:单飞槽位被占时返回 False,而不是排第二批。"""
+    submitted = []
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda fn, *args, name=None, notify_pending=False, **kwargs:
+            submitted.append((args, name)),
+    )
+    service = _service([], _REPLY)
+
+    assert service.distill_now("nb-a") is True
+    assert submitted == [(("nb-a",), "retrievalexperience-notebook")]
+    assert service.distill_now("nb-a") is False
+    assert len(submitted) == 1
+    # 手动触发不消费任何分区的积压:它是**额外**的一批,不是那个库攒的那一批。
+    assert service._pending == 0
+    assert service._notebook_pending == {}
+
+
+def test_distill_now_refuses_a_missing_partition_rather_than_running_the_global_one():
+    """T2 评审轮 P3:按钮挂在**一个笔记本**上,空 id 是「id 在半路丢了」的症状,
+    不是「跑全局那一批」的功能。退回全局会成功、会计费、还会往全体可见的分区
+    里写条目——一个看起来完全正常的错误答案。"""
+    events = _Events()
+    service = _service([], _REPLY, events=events)
+
+    assert service.distill_now("") is False
+    assert service.distill_now(None) is False
+    assert service.distill_now(12345) is False
+
+    assert service._running is False, "被拒的调用不得占住单飞槽位"
+    assert [event["reason"] for event in events.emitted] == ["invalid_partition"] * 3
+    for event in events.emitted:
+        assert event["partition"] == "notebook"
+        assert "12345" not in repr(event), "事件不带那个不可信的值"
+
+
+def test_the_kill_switch_stops_the_counters_before_they_move():
+    """规格评审 Finding 2:``RETRIEVAL_EXPERIENCE_ENABLED=false`` 时**零计数**
+    (验收判据 1),不只是零查询——早退必须发生在 ``_pending += 1`` 之前,否则
+    关着的特性照样在进程内攒状态,一旦被打开就立刻排出一批凭空的蒸馏。"""
+
+    class Off(_Settings):
+        retrieval_experience_enabled = False
+
+    service = _service([], _REPLY, settings=Off())
+    for _ in range(50):
+        service.note_ask_completed("nb-a")
+
+    assert service._pending == 0
+    assert service._notebook_pending == {}
+    assert list(service._queue) == []
+    assert service._running is False

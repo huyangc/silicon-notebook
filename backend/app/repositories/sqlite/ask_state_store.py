@@ -626,26 +626,35 @@ class AskStateStore:
         return asks
 
     def recent_completed_ask_runs(
-        self, *, job_limit: int, step_limit: int
+        self, *, job_limit: int, step_limit: int, notebook_id: str | None = None
     ) -> list[dict]:
-        """The deployment's most recent COMPLETED asks, projected and bounded —
-        across every notebook and every user.
+        """The most recent COMPLETED asks, projected and bounded — across every
+        user, and across every notebook unless a PARTITION is named.
 
         Agentic Memory P2 (T5). See ``AskStateStorePort`` for the full
         contract; the two properties that must not drift are here:
 
-        ⚠ There is NO ``created_by`` predicate and NO ``notebook_id``
-        predicate, and neither is missing by accident. This read feeds the
-        deployment-global retrieval-experience library, whose entries are
-        statements about retrieval TACTICS ("in this shape of question, this
-        action pays off") rather than about anyone's material. Narrowing it to
-        one person would not make it safer, it would make it useless — and it
-        is not what makes it safe. What makes it safe is
+        ⚠ There is NO ``created_by`` predicate, and it is not missing by
+        accident. This read feeds the retrieval-experience library, whose
+        entries are statements about retrieval TACTICS ("in this shape of
+        question, this action pays off") rather than about anyone's material.
+        Narrowing it to one person would not make it safer, it would make it
+        useless — and it is not what makes it safe. What makes it safe is
         ``project_run_row``/``project_run_step``: an opaque run id, a closed
         engine mode, and per step an action type, one count and one duration,
         plus a bools-and-small-ints situation from the ``intent`` step. The
         member's question, the step summaries, the notebook and the user id
         never leave this method.
+
+        ⚠ ``notebook_id`` IS optional, and the two callers are the two
+        distillation chains rather than two kinds of tenant: ``None`` samples
+        the whole deployment (what the global partition learns), a string adds
+        ``AND notebook_id = ?`` so one library's chain is taught only by that
+        library's own runs. The predicate lives in the SQL text for the same
+        reason the ``created_by`` ones do — a Python-side filter is one
+        refactor away from being dropped — but it carries a different promise:
+        it decides which runs COUNT, never what survives of one. Everything
+        else in this method is byte-identical either way.
 
         ⚠ It reads ONLY ``status = 'done'`` rows. A failed or cancelled ask
         stopped somewhere in the middle of its retrieval, so its action
@@ -662,6 +671,10 @@ class AskStateStore:
         """
         job_limit = max(1, int(job_limit))
         step_limit = max(1, int(step_limit))
+        # 分区谓词进 SQL 文本,不做 Python 侧过滤。``None`` = 全局链路,整段
+        # 与分区落地前逐字相同。
+        partition_sql = "" if notebook_id is None else "AND notebook_id = ? "
+        partition_params: tuple = () if notebook_id is None else (str(notebook_id),)
         with self.database.connect() as db:
             job_rows = db.execute(
                 "SELECT id, mode FROM ask_jobs WHERE status = 'done' "
@@ -670,8 +683,9 @@ class AskStateStore:
                 # 学出的确定性行为翻成 reflect 建议既不可执行,还会在非
                 # reasoning 流量占主导的部署里挤占全部 offered 席位。
                 "AND mode = 'reasoning' "
+                f"{partition_sql}"
                 "ORDER BY created_at DESC, id DESC LIMIT ?",
-                (job_limit,),
+                (*partition_params, job_limit),
             ).fetchall()
             runs = [project_run_row(row["id"], row["mode"]) for row in job_rows]
             if not runs:

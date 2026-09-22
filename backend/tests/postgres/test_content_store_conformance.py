@@ -632,6 +632,70 @@ def test_recent_user_ask_traces_step_cap_drops_the_oldest_job_first(content_harn
     assert [len(row["steps"]) for row in rows] == [3, 0]
 
 
+def test_recent_completed_ask_runs_confines_itself_to_one_notebook_when_asked(
+    content_harness,
+):
+    """Agentic Memory P2 (per-notebook partitioning, 2026-09-22): the OPTIONAL
+    partition predicate on the one read with no user predicate.
+
+    ⚠ Unlike the two reads above, this predicate is NOT a privacy boundary —
+    it decides which runs one distillation chain COUNTS, and the safety of what
+    comes back is carried by ``project_run_row``/``project_run_step`` either
+    way. What it pins here is that PostgreSQL honours it and that the projected
+    shape is byte-identical with and without it: a chain whose sample silently
+    widened to the whole deployment would write one library's advice into
+    another's partition, and nothing would raise.
+
+    The SQLite twin is ``tests/test_retrieval_experience_store.py``.
+    """
+    mark = "%s"
+    with content_harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+            "created_at,updated_at,tier) "
+            f"VALUES ({','.join([mark] * 9)})",
+            ("nb-other", "Other", "", "engineering", "ready", "user-content",
+             NOW, NOW, "personal"),
+        )
+    runs = {}
+    for notebook_id in ("nb-content", "nb-other"):
+        job_id, _conv = content_harness.ask.begin_durable_job(
+            notebook_id, AskRequest(question=f"{notebook_id}?"), "reasoning",
+            "user-content",
+        )
+        runs[notebook_id] = job_id
+        content_harness.ask.append_trace(
+            notebook_id, job_id,
+            {"step_type": "ppr", "summary": "扩展", "detail": {"count": 0}},
+            "user-content",
+        )
+        with content_harness.database.write() as connection:
+            connection.execute(
+                "UPDATE ask_jobs SET status='done' WHERE id=%s", (job_id,)
+            )
+
+    everything = content_harness.ask.recent_completed_ask_runs(
+        job_limit=40, step_limit=600
+    )
+    assert {row["run_id"] for row in everything} == set(runs.values())
+
+    only_one = content_harness.ask.recent_completed_ask_runs(
+        job_limit=40, step_limit=600, notebook_id="nb-other"
+    )
+    assert [row["run_id"] for row in only_one] == [runs["nb-other"]]
+    assert set(only_one[0]) == {"run_id", "mode", "steps"}
+    assert [step["step_type"] for step in only_one[0]["steps"]] == ["ppr"]
+    assert set(only_one[0]["steps"][0]) <= {"step_type", "duration_ms", "count"}
+    # 谓词只挑 run,不改投影:库名、问题原文、提问人都不在返回里。
+    rendered = repr(only_one)
+    assert "nb-other" not in rendered and "?" not in rendered
+    assert "user-content" not in rendered
+
+    assert content_harness.ask.recent_completed_ask_runs(
+        job_limit=40, step_limit=600, notebook_id="nb-nobody"
+    ) == []
+
+
 def test_recent_user_report_traces_scopes_to_the_reading_member(content_harness):
     """Agentic Memory P2 (T4): the overlay chain's SECOND read, on PostgreSQL.
 

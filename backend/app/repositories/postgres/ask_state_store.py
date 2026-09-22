@@ -541,11 +541,12 @@ class AskStateStore:
         return asks
 
     def recent_completed_ask_runs(
-        self, *, job_limit: int, step_limit: int
+        self, *, job_limit: int, step_limit: int, notebook_id: str | None = None
     ) -> list[dict]:
         """PostgreSQL mirror of the SQLite method — see that docstring for the
-        contract (no user/notebook predicate BY DESIGN, safety carried by the
-        projection, ``status = 'done'`` only, bounded twice).
+        contract (no user predicate BY DESIGN, an OPTIONAL partition predicate
+        that decides which runs count rather than what survives of one, safety
+        carried by the projection, ``status = 'done'`` only, bounded twice).
 
         The one backend difference: ``step_json`` is ``jsonb`` here and TEXT on
         SQLite, so it goes through ``json_value`` before the shared
@@ -554,6 +555,10 @@ class AskStateStore:
         """
         job_limit = max(1, int(job_limit))
         step_limit = max(1, int(step_limit))
+        # 分区谓词进 SQL 文本,不做 Python 侧过滤。``None`` = 全局链路,整段
+        # 与分区落地前逐字相同。
+        partition_sql = "" if notebook_id is None else "AND notebook_id = %s "
+        partition_params: tuple = () if notebook_id is None else (str(notebook_id),)
         with self.database.connect() as db:
             job_rows = db.execute(
                 "SELECT id, mode FROM ask_jobs WHERE status = 'done' "
@@ -562,8 +567,9 @@ class AskStateStore:
                 # 学出的确定性行为翻成 reflect 建议既不可执行,还会在非
                 # reasoning 流量占主导的部署里挤占全部 offered 席位。
                 "AND mode = 'reasoning' "
+                f"{partition_sql}"
                 "ORDER BY created_at DESC, id DESC LIMIT %s",
-                (job_limit,),
+                (*partition_params, job_limit),
             ).fetchall()
             runs = [project_run_row(row["id"], row["mode"]) for row in job_rows]
             if not runs:
