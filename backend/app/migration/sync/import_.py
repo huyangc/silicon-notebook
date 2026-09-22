@@ -207,6 +207,20 @@ _FILES_PHASE = "__files__"
 # progress. Taking it over is reported as a warning, never done silently.
 _STALE_RUNNING_HOURS = 6
 
+# ``sync_imports.status``. 'superseded' marks a failed package that a NEWER
+# package of the same source environment has since been declared over: its
+# half-applied progress no longer describes anything the target should finish,
+# so the progress rows are dropped and the package can never be resumed again.
+_STATUS_RUNNING = "running"
+_STATUS_DONE = "done"
+_STATUS_FAILED = "failed"
+_STATUS_SUPERSEDED = "superseded"
+
+# Where a package's own ``manifest.created_at`` is kept inside
+# ``sync_imports.report_json``, and where a supersede records who did it.
+_PACKAGE_CREATED_AT_KEY = "package_created_at"
+_SUPERSEDED_BY_KEY = "superseded_by"
+
 # What an operator has to do next for every user ``--create-missing-users``
 # minted. Nothing in this repository links an external identity to a local
 # account by matching usernames: ``AuthStore._complete`` refuses an unmapped
@@ -423,6 +437,11 @@ class UserMappingResult:
 class ImportReport:
     package_id: str
     source_env: str
+    # The package's own manifest.created_at, carried through so
+    # sync_imports.report_json records which SNAPSHOT this row applied. That
+    # is what a later import compares itself against; sync_imports has no
+    # column of its own for it and this change does not add one.
+    package_created_at: str
     already_applied: bool
     dry_run: bool
     notebooks: tuple[str, ...]
@@ -441,6 +460,7 @@ class ImportReport:
         return {
             "package_id": self.package_id,
             "source_env": self.source_env,
+            _PACKAGE_CREATED_AT_KEY: self.package_created_at,
             "already_applied": self.already_applied,
             "dry_run": self.dry_run,
             "notebooks": list(self.notebooks),
@@ -506,6 +526,7 @@ def _report(
     return ImportReport(
         package_id=manifest.package_id,
         source_env=manifest.source_env,
+        package_created_at=manifest.created_at,
         already_applied=already_applied,
         dry_run=dry_run,
         notebooks=manifest.notebooks,
@@ -540,6 +561,12 @@ class _PackageManifest:
     package_id: str
     source_env: str
     target_env: str
+    # When the SOURCE wrote this package. The ordering key for "newer" and
+    # "older" between two packages of one source environment -- not the import
+    # time, which only says when this side got around to it. PR-3 layers
+    # ``to_seq`` on top; until there is a change log, both sequence numbers
+    # are 0 and this is the only thing that orders two full snapshots.
+    created_at: str
     from_seq: int
     to_seq: int
     embed_runtime_dim: int
@@ -589,6 +616,7 @@ def _read_manifest(package_dir: Path) -> _PackageManifest:
         package_id=str(document.get("package_id") or ""),
         source_env=str(document.get("source_env") or ""),
         target_env=str(document.get("target_env") or ""),
+        created_at=str(document.get("created_at") or ""),
         from_seq=int(document.get("from_seq") or 0),
         to_seq=int(document.get("to_seq") or 0),
         embed_runtime_dim=int(document.get("embed_runtime_dim") or 0),
@@ -1183,8 +1211,11 @@ def _preflight(backend: _Backend, conn: Any, context: _Context) -> bool:
         "SELECT status FROM sync_imports WHERE package_id = ?",
         (manifest.package_id,),
     ):
-        if str(row["status"]) == "done":
+        if str(row["status"]) == _STATUS_DONE:
             return True
+    _reject_backwards_snapshot(
+        _prior_imports(backend, conn, manifest.source_env), context
+    )
 
     foreign: list[str] = []
     for batch in _batched(list(manifest.notebooks)):
@@ -1384,6 +1415,109 @@ def _create_missing_users(
 # ------------------------------------------------------- claiming the package
 
 
+@dataclass(frozen=True)
+class _PriorImport:
+    """One ``sync_imports`` row of this source environment, as the ordering
+    rules need to see it."""
+
+    package_id: str
+    status: str
+    started_at: datetime | None
+    # The package's own manifest.created_at, read back out of report_json.
+    # ``None`` when the row predates this bookkeeping or its JSON is
+    # unreadable -- an ordering question that cannot be answered, never one
+    # silently answered "yes".
+    created_at: datetime | None
+    has_progress: bool
+
+
+def _prior_imports(
+    backend: _Backend, conn: Any, source_env: str
+) -> tuple[_PriorImport, ...]:
+    with_progress = {
+        str(row["package_id"])
+        for row in backend.stream(
+            conn, "SELECT DISTINCT package_id FROM sync_import_progress"
+        )
+    }
+    prior: list[_PriorImport] = []
+    for row in backend.fetch(
+        conn,
+        "SELECT package_id, status, started_at, report_json FROM sync_imports "
+        "WHERE source_env = ?",
+        (source_env,),
+    ):
+        package_id = str(row["package_id"])
+        prior.append(
+            _PriorImport(
+                package_id=package_id,
+                status=str(row["status"]),
+                started_at=_read_moment(row["started_at"]),
+                created_at=_recorded_created_at(row["report_json"]),
+                has_progress=package_id in with_progress,
+            )
+        )
+    return tuple(prior)
+
+
+def _recorded_created_at(report_json: Any) -> datetime | None:
+    """``package_created_at`` out of a stored report. psycopg hands back a
+    decoded ``dict`` for jsonb; SQLite hands back text."""
+    document = report_json
+    if isinstance(document, (str, bytes)):
+        try:
+            document = json.loads(document)
+        except ValueError:
+            return None
+    if not isinstance(document, dict):
+        return None
+    return _read_moment(document.get(_PACKAGE_CREATED_AT_KEY))
+
+
+def _reject_backwards_snapshot(
+    prior: Sequence[_PriorImport], context: _Context
+) -> None:
+    """Refuse a package older than the newest one already applied.
+
+    A full package is a snapshot, and phase 3a now DELETES what a snapshot
+    does not carry. Importing an older snapshot after a newer one therefore
+    does not just add stale rows, it rolls the mirror back -- every row the
+    source created between the two packages is swept away. The identical
+    package short-circuits as ``already_applied`` long before this, so the
+    only thing this can reject is a genuinely older export.
+    """
+    mine = _read_moment(context.manifest.created_at)
+    newest: _PriorImport | None = None
+    for row in prior:
+        if row.status != _STATUS_DONE or row.package_id == context.manifest.package_id:
+            continue
+        if row.created_at is None:
+            context.ledger.warn(
+                f"package {row.package_id} was applied by a build that did not "
+                "record its created_at, so this run cannot check that it is "
+                "not importing an older snapshot over it"
+            )
+            continue
+        if newest is None or row.created_at > (newest.created_at or row.created_at):
+            newest = row
+    if newest is None or newest.created_at is None:
+        return
+    if mine is None:
+        raise SyncImportError(
+            f"{MANIFEST_NAME} carries no usable created_at, so this package "
+            f"cannot be ordered against {newest.package_id}, which this "
+            "environment already applied. Re-export it."
+        )
+    if mine < newest.created_at:
+        raise SyncImportError(
+            f"this package was exported at {mine.isoformat()}, BEFORE the "
+            f"package {newest.package_id} this environment already applied "
+            f"({newest.created_at.isoformat()}). Importing it would roll the "
+            "mirror back to the older snapshot and delete everything the "
+            "source has produced since. Export a current package instead."
+        )
+
+
 def _claim_import(
     backend: _Backend, context: _Context, *, resume: bool
 ) -> None:
@@ -1403,29 +1537,50 @@ def _claim_import(
     a genuine concurrent import into silent interleaving. A row that has been
     'running' longer than ``_STALE_RUNNING_HOURS`` is taken over regardless,
     with a warning.
+
+    Declaring a package also RETIRES the half-applied ones it replaces. A
+    'failed' package of the same source environment that still has progress
+    rows describes a partly-applied older snapshot; once a newer package is
+    declared, finishing the older one would re-apply superseded content on top
+    of newer, so it is marked 'superseded', its progress rows are dropped, and
+    it can never be resumed again. Declaring an OLDER package while such a
+    failed one is outstanding is refused outright -- there is no order in
+    which applying them both is meaningful.
     """
     manifest = context.manifest
     now = datetime.now(timezone.utc)
     stale_before = now - timedelta(hours=_STALE_RUNNING_HOURS)
+    mine = _read_moment(manifest.created_at)
     with backend.write() as conn:
         if backend.is_postgres:
             conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtext(%s))", (manifest.source_env,)
             )
-        running = backend.fetch(
-            conn,
-            "SELECT package_id, started_at FROM sync_imports "
-            "WHERE source_env = ? AND status = 'running'",
-            (manifest.source_env,),
+        prior = _prior_imports(backend, conn, manifest.source_env)
+        own = next(
+            (row for row in prior if row.package_id == manifest.package_id), None
         )
-        for row in running:
-            other = str(row["package_id"])
-            started = _read_moment(row["started_at"])
-            if started is not None and started < stale_before:
+        if own is not None and own.status == _STATUS_SUPERSEDED:
+            raise SyncImportError(
+                f"package {manifest.package_id} was superseded by a newer "
+                "package of the same source environment and its partial "
+                "progress has been dropped; it can no longer be resumed. "
+                "Export a current package instead."
+            )
+        if resume and own is not None and own.status == _STATUS_DONE:
+            raise SyncImportError(
+                f"package {manifest.package_id} is already recorded done; "
+                "there is nothing to resume."
+            )
+        for row in prior:
+            if row.status != _STATUS_RUNNING:
+                continue
+            other = row.package_id
+            if row.started_at is not None and row.started_at < stale_before:
                 context.ledger.warn(
                     f"took over a sync_imports row for package {other} that has "
-                    f"been 'running' since {started.isoformat()}; the process "
-                    "that opened it is assumed gone"
+                    f"been 'running' since {row.started_at.isoformat()}; the "
+                    "process that opened it is assumed gone"
                 )
                 continue
             if other == manifest.package_id and resume:
@@ -1440,6 +1595,7 @@ def _claim_import(
                 "the same source environment. If that process is gone, re-run "
                 "with resume=True (--resume)."
             )
+        _supersede_outstanding(backend, conn, context, prior, mine, now)
         conn.execute(
             backend.sql(
                 "INSERT INTO sync_imports "
@@ -1457,8 +1613,72 @@ def _claim_import(
                 manifest.from_seq,
                 manifest.to_seq,
                 _moment(backend, now),
-                "{}",
+                json.dumps({_PACKAGE_CREATED_AT_KEY: manifest.created_at}),
             ),
+        )
+
+
+def _supersede_outstanding(
+    backend: _Backend,
+    conn: Any,
+    context: _Context,
+    prior: Sequence[_PriorImport],
+    mine: datetime | None,
+    now: datetime,
+) -> None:
+    """Retire the half-applied failed packages this declaration replaces, or
+    refuse if this package is not the newer one. Runs inside the claim's
+    transaction, so a package is never declared without the retirement that
+    makes declaring it safe."""
+    manifest = context.manifest
+    outstanding = [
+        row
+        for row in prior
+        if row.status == _STATUS_FAILED
+        and row.has_progress
+        and row.package_id != manifest.package_id
+    ]
+    for row in outstanding:
+        if mine is None or row.created_at is None or mine <= row.created_at:
+            raise SyncImportError(
+                f"package {row.package_id} failed partway through and still "
+                "holds progress for this source environment. This package is "
+                f"not newer than it ({manifest.created_at or '<unknown>'} vs "
+                f"{row.created_at.isoformat() if row.created_at else '<unknown>'}"
+                "), so there is no order in which applying both is meaningful. "
+                "Finish or export past that package first."
+            )
+    for row in outstanding:
+        conn.execute(
+            backend.sql(
+                "DELETE FROM sync_import_progress WHERE package_id = ?"
+            ),
+            (row.package_id,),
+        )
+        conn.execute(
+            backend.sql(
+                "UPDATE sync_imports SET status = ?, finished_at = ?, "
+                f"report_json = {_json_cast(backend)} WHERE package_id = ?"
+            ),
+            (
+                _STATUS_SUPERSEDED,
+                _moment(backend, now),
+                json.dumps(
+                    {
+                        _PACKAGE_CREATED_AT_KEY: (
+                            row.created_at.isoformat() if row.created_at else ""
+                        ),
+                        _SUPERSEDED_BY_KEY: manifest.package_id,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                row.package_id,
+            ),
+        )
+        context.ledger.warn(
+            f"package {row.package_id} was superseded by this newer one; its "
+            "partial progress was dropped and it can no longer be resumed"
         )
 
 
@@ -2863,7 +3083,27 @@ def import_package(
     a still-running row for the same source environment refuses the run, so a
     genuinely concurrent import can never interleave. A row left 'failed' (the
     ordinary outcome of a crash this process caught) always resumes without
-    the flag, from ``sync_import_progress``.
+    the flag, from ``sync_import_progress`` -- but only while it is still the
+    newest package declared for its source environment.
+
+    **``sync_imports.status`` takes four values.** ``running`` is a claim in
+    flight; ``done`` is applied in full; ``failed`` is a run that broke and
+    left resumable progress; ``superseded`` is a failed package that a NEWER
+    package of the same source environment has since replaced -- its progress
+    rows were dropped when that newer one was declared, and it can never be
+    resumed again (export a current package instead).
+
+    **Packages of one source environment are ordered by their own
+    ``manifest.created_at``**, not by when this side imported them. Three
+    rules follow, and all three exist because phase 3a DELETES what a snapshot
+    does not carry, so applying snapshots out of order rolls the mirror
+    backwards rather than merely adding stale rows:
+
+    - a package older than one this environment has already applied ``done``
+      is refused by preflight;
+    - declaring a package while an OLDER failed one still holds progress
+      retires that one as ``superseded``;
+    - declaring one while a NEWER failed one holds progress is refused.
 
     ``verify_files`` re-hashes the installed files against ``checksums.json``.
     Preflight already hashed the same bytes in this same run, so it is off by
@@ -3066,7 +3306,15 @@ def _settle(
     """Record the run's outcome, on both the success and the failure path, and
     never let recording it become the failure. On the failure path the caller
     is already re-raising the original exception, and an error here would
-    replace it with a less informative one."""
+    replace it with a less informative one.
+
+    ``status`` is ``done`` or ``failed`` here; those are the only two outcomes
+    a RUN produces. The other two values in the column are written elsewhere:
+    ``running`` by ``_claim_import`` when the package is declared, and
+    ``superseded`` by ``_supersede_outstanding`` when a newer package retires
+    a failed one. The report goes into ``report_json`` either way, and carries
+    the package's own ``created_at`` -- which is what every later import of
+    this source environment orders itself against."""
     try:
         _close_import_row(backend, context.manifest.package_id, status, report)
     except Exception as exc:  # noqa: BLE001 - reported, never raised over the original

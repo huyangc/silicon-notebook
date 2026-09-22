@@ -301,10 +301,15 @@ def _cmd_status(args: argparse.Namespace, settings: Settings) -> int:
         print("  （无）")
     for row in state["imports"]:
         finished_at = row["finished_at"] if row["finished_at"] is not None else "-"
+        superseded = ""
+        if row["status"] == "superseded":
+            superseded_by = row["report_json"].get("superseded_by")
+            if superseded_by:
+                superseded = f"（被 {superseded_by} 取代）"
         print(
             f"  {row['package_id']} 来自 {row['source_env']}：{row['status']}，"
             f"{row['notebooks']} 个笔记本，开始于 {row['started_at']}，"
-            f"结束于 {finished_at}"
+            f"结束于 {finished_at}{superseded}"
         )
     return 0
 

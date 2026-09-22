@@ -543,13 +543,16 @@ PYTHONPATH=backend python scripts/sync_notebooks.py status --json
 再做一次 sha256 校验，不只信任包自带的 `checksums.json`——更慢，包经过不受信或可能损耗的
 传输通道时用它。`--resume` 必须显式传才能续跑一个中断了一半的导入（它在 `sync_imports` 里
 的行还是 `running`）：不传的话，同一个 `source_env` 的第二次 `import` 会被直接拒绝，防止
-误把两个不相关的包接到一起。
+误把两个不相关的包接到一起。`--resume` 只对「仍是该 `source_env` 最新一个包」的 `failed`
+包有效；一个 `failed` 包如果已经被更新的导出取代（变成 `superseded`，见下面 `status` 值域
+说明），就不能再续跑——需要重新导出一个新包再导入。
 
 预检失败会打印原因并退出 2，不写入任何东西：schema pair 不一致、`EMBED_RUNTIME_DIM` 不
 一致、校验和失败，或者——真正的目标端冲突判定——**包里携带的笔记本 id 在目标端已经存在，
 且那个笔记本的 `sync_origin` 不等于本包的 `source_env`**（纯本地笔记本，或者别的源环境的
 镜像，都不会被导入覆盖；这是按 id 判断，不是按名字查重，所以目标端一个同名但 id 不同的
-笔记本不构成冲突）。
+笔记本不构成冲突）。包的 `created_at` 若**早于**同一 `source_env` 最近一次 `done` 的包，也
+会被拒绝：应用它会把目标端往回拨到已经拥有的内容之前。
 
 目标后端是 SQLite 时，`import` 要求先停止应用再执行（导入器写在后端自己的请求串行写路径
 之外）；`status`/`--dry-run` 不需要。报告里带了这条提示时，人读摘要会原样打印出来（在
@@ -557,6 +560,11 @@ PYTHONPATH=backend python scripts/sync_notebooks.py status --json
 
 `status` 只读列出：本环境对每个目标环境的导出水位（`sync_export_state`）与本环境已引入的
 每个包及其结果（`sync_imports`）。它作用于 `DATABASE_URL` 当前选中的后端。
+`sync_imports.status` 取值四选一：`running`、`done`、`failed`、`superseded`——`superseded`
+表示这个包的导入曾经失败，之后被同一 `source_env` 更新的、已成功应用的包取代（它的
+`sync_import_progress` 断点行已清空，也不能再 `--resume`）；人读摘要对这类行会附一句
+「被 `<package_id>` 取代」，取值来自 `report_json.superseded_by`。`--json` 原样带
+`status`（以及 `report_json`，其中就含 `superseded_by`），不做改写。
 
 所有子命令失败都退出 2（stderr 一行，无堆栈），成功（包括 `already_applied`）退出 0。
 `--json` 把底层的导出/引入报告或状态快照整个打印成一个 JSON 对象，而不是人读摘要；需要

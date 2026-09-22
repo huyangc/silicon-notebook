@@ -1935,3 +1935,201 @@ def test_a_synthetic_source_for_a_MIRRORED_memory_is_not_protected(
     assert _count(
         repo, "SELECT COUNT(*) FROM sources WHERE id=?", ("src-mirrored-memory",)
     ) == 0
+
+
+# --------------------------------------------- packages are ordered by export
+
+
+def _sync_import_row(target, package_id: str):
+    return _one(
+        target["repo"], "SELECT * FROM sync_imports WHERE package_id=?", (package_id,)
+    )
+
+
+def _progress_count(target, package_id: str) -> int:
+    return _count(
+        target["repo"],
+        "SELECT COUNT(*) FROM sync_import_progress WHERE package_id=?",
+        (package_id,),
+    )
+
+
+def _fail_partway(target, package: Path, monkeypatch, table: str = "sources") -> None:
+    """Run an import that breaks after some tables have committed, leaving a
+    'failed' row with resumable progress -- the state the ordering rules are
+    about."""
+    from app.migration.sync import import_ as module
+
+    real = module._apply_table
+
+    def explode(backend, conn, name, context):
+        if name == table:
+            raise RuntimeError("simulated crash partway through")
+        return real(backend, conn, name, context)
+
+    monkeypatch.setattr(module, "_apply_table", explode)
+    try:
+        with pytest.raises(SyncImportError):
+            _import(target, package)
+    finally:
+        monkeypatch.setattr(module, "_apply_table", real)
+
+
+def test_a_newer_package_supersedes_a_half_applied_older_one(
+    source, target, tmp_path, monkeypatch
+):
+    """A failed package holding progress describes a partly-applied older
+    snapshot. Once a newer one is declared, finishing the older would re-apply
+    superseded content on top of newer content, so it is retired: status
+    'superseded', progress dropped, never resumable again."""
+    first = _export(source, tmp_path / "out1")
+    _fail_partway(target, first, monkeypatch)
+    first_id = _manifest(first)["package_id"]
+    assert _sync_import_row(target, first_id)["status"] == "failed"
+    assert _progress_count(target, first_id) > 0
+
+    second = _export(source, tmp_path / "out2")
+    report = _import(target, second)
+
+    assert report.error == ""
+    retired = _sync_import_row(target, first_id)
+    assert retired["status"] == "superseded"
+    assert json.loads(retired["report_json"])["superseded_by"] == report.package_id
+    assert _progress_count(target, first_id) == 0
+    assert any(
+        f"package {first_id} was superseded" in warning for warning in report.warnings
+    )
+
+    # ... and retrying the retired package is refused, with or without
+    # --resume. Here the newer package also FINISHED, so preflight's
+    # backwards-snapshot rule is the one that catches it first; the
+    # superseded-specific refusal is pinned by the next test, where nothing
+    # has reached 'done' yet.
+    for kwargs in ({}, {"resume": True}):
+        with pytest.raises(SyncImportError) as failure:
+            _import(target, first, **kwargs)
+        assert "Export a current package instead." in str(failure.value)
+
+
+def test_a_superseded_package_is_refused_even_with_nothing_applied_yet(
+    source, target, tmp_path, monkeypatch
+):
+    """The superseded refusal stands on its own. Both packages here failed
+    partway, so no 'done' row exists for preflight's backwards-snapshot rule
+    to fire on -- what refuses the retry is the retirement itself."""
+    first = _export(source, tmp_path / "out1")
+    _fail_partway(target, first, monkeypatch)
+    first_id = _manifest(first)["package_id"]
+    second = _export(source, tmp_path / "out2")
+    _fail_partway(target, second, monkeypatch)
+
+    assert _sync_import_row(target, first_id)["status"] == "superseded"
+    assert _progress_count(target, first_id) == 0
+    assert _sync_import_row(target, _manifest(second)["package_id"])["status"] == (
+        "failed"
+    )
+
+    for kwargs in ({}, {"resume": True}):
+        with pytest.raises(SyncImportError) as failure:
+            _import(target, first, **kwargs)
+        message = str(failure.value)
+        assert "superseded" in message
+        assert "can no longer be resumed" in message
+
+
+def test_declaring_a_package_older_than_an_outstanding_failure_is_refused(
+    source, target, tmp_path, monkeypatch
+):
+    """The mirror image: the NEWER package is the one that failed partway. An
+    older package cannot retire it, and applying both in either order is
+    meaningless -- so declaring the older one is refused by name."""
+    older = _export(source, tmp_path / "out1")
+    newer = _export(source, tmp_path / "out2")
+    _fail_partway(target, newer, monkeypatch)
+    newer_id = _manifest(newer)["package_id"]
+    assert _sync_import_row(target, newer_id)["status"] == "failed"
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, older)
+
+    message = str(failure.value)
+    assert newer_id in message
+    assert "not newer" in message
+    # The refused package never got a sync_imports row of its own.
+    assert _sync_import_row(target, _manifest(older)["package_id"]) is None
+    assert _sync_import_row(target, newer_id)["status"] == "failed"
+
+
+def test_a_package_older_than_the_last_applied_one_is_refused_by_preflight(
+    source, target, tmp_path
+):
+    """Phase 3a deletes what a snapshot does not carry, so importing an older
+    snapshot over a newer one does not add stale rows -- it rolls the mirror
+    back and destroys everything the source made in between."""
+    older = _export(source, tmp_path / "out1")
+    newer = _export(source, tmp_path / "out2")
+    applied = _import(target, newer)
+    assert applied.error == ""
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, older)
+
+    message = str(failure.value)
+    assert _manifest(newer)["package_id"] in message
+    assert "roll the mirror back" in message
+    assert _sync_import_row(target, _manifest(older)["package_id"]) is None
+    # The newer package itself still short-circuits as already applied.
+    assert _import(target, newer).already_applied
+
+
+def test_a_failed_package_still_resumes_while_it_is_the_newest(
+    source, target, package, monkeypatch
+):
+    """The ordering rules must not break ordinary resume: a failed package
+    that nothing newer has replaced is exactly what --resume is for."""
+    _fail_partway(target, package, monkeypatch)
+    package_id = _manifest(package)["package_id"]
+    assert _sync_import_row(target, package_id)["status"] == "failed"
+
+    report = _import(target, package)
+
+    assert report.error == ""
+    assert _sync_import_row(target, package_id)["status"] == "done"
+    assert report.tables["notebooks"].resumed is True
+
+
+def test_the_applied_snapshot_is_recorded_on_the_import_row(
+    source, target, package
+):
+    """sync_imports has no column for the package's export time, so it lives
+    in report_json -- and every later import of this source environment orders
+    itself against it."""
+    report = _import(target, package)
+
+    row = _sync_import_row(target, report.package_id)
+    stored = json.loads(row["report_json"])
+    assert stored["package_created_at"] == _manifest(package)["created_at"]
+    assert report.package_created_at == _manifest(package)["created_at"]
+
+
+def test_the_snapshot_is_recorded_from_the_moment_the_package_is_declared(
+    source, target, package, monkeypatch
+):
+    """Not only once the run settles. A run killed between the claim and the
+    settle leaves a row this environment still has to be able to order against,
+    so the claim itself writes which snapshot it is applying."""
+    from app.migration.sync import import_ as module
+
+    seen: list[dict] = []
+    real = module._apply_rows
+
+    def observe(backend, context, done):
+        seen.append(
+            json.loads(_sync_import_row(target, context.manifest.package_id)["report_json"])
+        )
+        return real(backend, context, done)
+
+    monkeypatch.setattr(module, "_apply_rows", observe)
+    _import(target, package)
+
+    assert seen and seen[0].get("package_created_at") == _manifest(package)["created_at"]
