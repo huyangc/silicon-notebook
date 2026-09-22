@@ -122,6 +122,28 @@ def test_stale_binding_ids_get_their_own_line_naming_them():
     assert "MODEL_BINDINGS_STRICT" in warnings[0]
 
 
+def test_a_stale_key_that_is_not_shaped_like_an_id_never_reaches_this_line():
+    """陈旧 id 是配置文件里的任意 TOML 键,放行档的告警行同样不许原样吐出来。
+
+    这条告警是严格闸被关掉时的替代诊断,脱敏口径必须和拒启那条一致(两处共用
+    `model_registry.loggable_id_list`):带路径的键会把私有路径写进日志,带转义
+    换行的键能在日志里伪造出一整行,而运维看到的将是一条不存在的记录。
+    """
+    hostile = "/etc/silicon/secret.toml\nERROR forged line"
+    models = _models(frozenset())
+    models.registry.unknown_bindings = lambda: ("ask_anwser", hostile, "x" * 80)
+
+    warnings = _unbound_workload_warnings(_settings(), models)
+
+    assert len(warnings) == 1
+    line = warnings[0]
+    assert "ask_anwser" in line
+    assert "<无法显示的键名>×2" in line
+    assert "/etc/silicon" not in line
+    assert "ERROR forged line" not in line
+    assert "\n" not in line
+
+
 def test_a_registry_without_the_stale_id_reader_still_gets_the_other_lines():
     """兼容读法:老 provider 替身没有 unknown_bindings,只丢这一行,不丢全部。"""
     warnings = _unbound_workload_warnings(

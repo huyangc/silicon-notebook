@@ -543,6 +543,53 @@ def binding_gap(
     )
 
 
+def loggable_id_list(
+    ids: Iterable[str], tables: Mapping[str, Iterable[str]] | None = None
+) -> str:
+    """Render ids that came OUT OF a deployment's TOML for a log line.
+
+    The single place that decides what a configuration file is allowed to put
+    into this process's logs, so both the startup refusal and the
+    non-strict startup warning stay sanitised by construction — a second
+    hand-rolled join is exactly how one of the two would drift.
+
+    A TOML key is arbitrary text: it can hold an absolute path, a quotation
+    mark, or an escaped newline that would forge a whole extra log line. Only
+    ids shaped like a workload id (``_LOGGABLE_ID_RE``) are echoed; every other
+    key collapses into ONE counted ``<无法显示的键名>×N`` placeholder, which
+    still tells the operator how many lines to look for. Ids are rendered in
+    the order given (callers pass them sorted), placeholder last.
+
+    ``tables`` optionally maps each id to the table(s) it was found in; the
+    placeholder then carries the union of the tables it stands for. Without it
+    the ids are rendered bare.
+    """
+    def _one(workload_id: str) -> str:
+        if tables is None:
+            return workload_id
+        return f"{workload_id}（{'/'.join(sorted(tables[workload_id]))}）"
+
+    listed = [
+        _one(workload_id)
+        for workload_id in ids
+        if _LOGGABLE_ID_RE.fullmatch(workload_id)
+    ]
+    hidden = [
+        workload_id
+        for workload_id in ids
+        if not _LOGGABLE_ID_RE.fullmatch(workload_id)
+    ]
+    if hidden:
+        placeholder = f"<无法显示的键名>×{len(hidden)}"
+        if tables is not None:
+            union = sorted({
+                table for workload_id in hidden for table in tables[workload_id]
+            })
+            placeholder = f"{placeholder}（{'/'.join(union)}）"
+        listed.append(placeholder)
+    return "，".join(listed)
+
+
 def _render_binding_gap(
     unbound: Sequence[str],
     unknown: Mapping[str, Iterable[str]],
@@ -557,30 +604,17 @@ def _render_binding_gap(
     ``safe`` decides whether ids that came out of the configuration file may be
     echoed verbatim. See the two public wrappers for which is which.
     """
-    def _listed(ids: list[str]) -> str:
+    def _verbatim(ids: list[str]) -> str:
         return "，".join(
             f"{workload_id}（{'/'.join(sorted(unknown[workload_id]))}）"
             for workload_id in ids
         )
 
     stale = sorted(unknown)
+    # Retired ids come from OUR ledger, never from the file, so they are
+    # known-safe in both renderings.
     retired = [workload_id for workload_id in stale if workload_id in RETIRED_WORKLOADS]
     mistyped = [workload_id for workload_id in stale if workload_id not in RETIRED_WORKLOADS]
-    unprintable: list[str] = []
-    if safe:
-        # A TOML key is arbitrary text.  Only ids shaped like a workload id may
-        # be echoed; everything else collapses into one counted placeholder so
-        # a crafted key cannot inject punctuation, newlines or a path into a
-        # log line.  Retired ids come from OUR ledger, never from the file, so
-        # they are already known-safe.
-        unprintable = [
-            workload_id
-            for workload_id in mistyped
-            if not _LOGGABLE_ID_RE.fullmatch(workload_id)
-        ]
-        mistyped = [
-            workload_id for workload_id in mistyped if workload_id not in unprintable
-        ]
 
     segments: list[str] = []
     if unbound:
@@ -589,20 +623,11 @@ def _render_binding_gap(
             for workload_id in unbound
         ))
     if retired:
-        segments.append("已退役、升级后请删除的绑定：" + _listed(retired))
-    if mistyped or unprintable:
-        listed = _listed(mistyped)
-        if unprintable:
-            tables = sorted({
-                table
-                for workload_id in unprintable
-                for table in unknown[workload_id]
-            })
-            placeholder = (
-                f"<无法显示的键名>×{len(unprintable)}（{'/'.join(tables)}）"
-            )
-            listed = f"{listed}，{placeholder}" if listed else placeholder
-        segments.append("未知、疑似拼写错误的绑定：" + listed)
+        segments.append("已退役、升级后请删除的绑定：" + _verbatim(retired))
+    if mistyped:
+        segments.append("未知、疑似拼写错误的绑定：" + (
+            loggable_id_list(mistyped, unknown) if safe else _verbatim(mistyped)
+        ))
     return (
         BINDING_GAP_PREFIX
         + "；".join(segments)
