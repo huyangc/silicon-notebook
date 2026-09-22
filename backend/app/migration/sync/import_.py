@@ -55,9 +55,12 @@ Phases, and what each one actually guarantees:
    notebook directory is staged beside its destination and swapped in; the
    directory it replaced is kept as ``.sync-old`` until phase 5 has succeeded,
    and is swapped BACK if anything in between fails.
-5. **Finish.** Flip the notebooks this run inserted out of their in-flight
-   state, stamp them as mirrors, drop the retired file directories, close the
-   ``sync_imports`` row, write the report.
+5. **Finish.** Stamp the notebooks as mirrors, drop the retired file
+   directories, and only THEN flip the notebooks this run inserted out of
+   their in-flight state -- publishing is the last thing this phase does
+   (codex #772 r19 P2 #2), so a notebook never becomes visible while
+   anything else about this run could still fail and roll its files back
+   underneath it. Then close the ``sync_imports`` row and write the report.
 
 **Atomicity, stated honestly.** There is no transaction spanning the run. Rows
 are atomic per table; files are atomic per notebook directory and are rolled
@@ -2535,7 +2538,7 @@ def _assert_notebooks_still_ours(
     transaction that holds the advisory lock. Everything after that runs in
     its OWN transaction -- one per table for phase 3a/3b, a filesystem pass
     for phase 4, and two more small transactions for phase 5
-    (``_publish_notebooks``/``_stamp_mirrors``) -- because the module
+    (``_stamp_mirrors``/``_publish_notebooks``, in that order) -- because the module
     deliberately does not hold one transaction spanning the whole run (see
     the module docstring's "Atomicity, stated honestly"). Asked again here,
     it is what keeps that design honest: nothing between the reservation and
@@ -4108,6 +4111,7 @@ def _install_files(context: _Context, *, verify: bool) -> None:
                     shutil.copy2(source, target)
                 installed += 1
             copied += installed
+            had_destination = destination.exists()
             if inherited:
                 # The retired copy is ALREADY the pre-import original, kept by
                 # a previous attempt. Renaming the current destination onto it
@@ -4115,13 +4119,34 @@ def _install_files(context: _Context, *, verify: bool) -> None:
                 # directory) and destroy the only copy rollback can restore,
                 # so the destination is simply replaced in place.
                 shutil.rmtree(destination, ignore_errors=True)
-            elif destination.exists():
+            elif had_destination:
                 destination.rename(retired)
-            staged.rename(destination)
-            if not inherited:
-                # An inherited pair is already registered by
+                # Registered the INSTANT this rename succeeds, not after the
+                # swap's second rename below. destination is already gone at
+                # this point -- if staged.rename(destination) then raises,
+                # _rollback_files has to already know about this pair, or it
+                # skips the directory entirely (it is not "inherited" and was
+                # never appended below) and the mirror's uploads or
+                # attachments are simply gone with no way back (codex #772
+                # r19 P2 #1).
+                context.installed.append((destination, retired))
+            try:
+                staged.rename(destination)
+            except OSError:
+                # The staged copy was never consumed by the rename. Drop it
+                # rather than leaving a ``.sync-tmp`` directory behind for a
+                # later run's _reconcile_staging to have to notice and clean
+                # up on its own -- this run is about to roll back anyway.
+                shutil.rmtree(staged, ignore_errors=True)
+                raise
+            if not inherited and not had_destination:
+                # No pre-existing directory to retire (first upload for this
+                # notebook/root), so nothing above already registered this
+                # pair. An INHERITED pair is already registered by
                 # _reconcile_staging; registering it twice would make rollback
-                # restore it and then delete what it just restored.
+                # restore it and then delete what it just restored. A
+                # HAD_DESTINATION pair was already registered right after its
+                # first rename, above.
                 context.installed.append((destination, retired))
     context.ledger.files_copied = copied
 
@@ -4211,8 +4236,12 @@ def _rollback_files(context: _Context) -> None:
 
 def _commit_files(backend: _Backend, context: _Context) -> None:
     """Drop the displaced directories and record the file phase as complete.
-    Both happen only after phase 5's database work has succeeded, so a crash
-    before this point resumes into a file phase that runs again."""
+
+    Both happen after ``_stamp_mirrors`` but BEFORE ``_publish_notebooks``
+    (codex #772 r19 P2 #2): a crash before this point resumes into a file
+    phase that runs again, and -- because publishing is the phase's very
+    last step -- a crash here still leaves the notebook hidden rather than
+    visible with its retired directories half-cleaned-up."""
     for _destination, retired in context.installed:
         if retired.exists():
             shutil.rmtree(retired, ignore_errors=True)
@@ -4262,6 +4291,57 @@ def _publish_notebooks(backend: _Backend, context: _Context) -> None:
                     context.manifest.source_env,
                 ),
             )
+
+
+def _revert_publish(backend: _Backend, context: _Context) -> None:
+    """Undo ``_publish_notebooks``, for the exception path only.
+
+    ``_publish_notebooks`` now runs as the very LAST step of the protected
+    phase (module docstring, "5. Finish" -- codex #772 r19 P2 #2), so nothing
+    else in this module's own control flow can still fail once it has
+    succeeded. This function exists anyway, as a belt-and-suspenders revert
+    for that flip, so a future step added after it -- or a call to it that
+    partially observes its effect some other way -- can never leave a
+    notebook visible while the run that published it is being unwound as
+    failed.
+
+    Narrowed exactly the way the forward flip is: only ``context.
+    reserved_notebooks`` -- this run's OWN first-time inserts -- and only a
+    row still stamped ``draft`` with THIS package's ``source_env``, i.e.
+    only a row THIS call to ``_publish_notebooks`` could plausibly have just
+    touched. An established mirror (a re-sync of a notebook the target
+    already had) is never in ``reserved_notebooks`` and its ``status`` is
+    never written here -- that column is target-owned (module docstring §5)
+    and this run's failure has no business touching it.
+
+    Runs while an exception is already propagating, like ``_rollback_files``:
+    a failure here is reported as a warning, never allowed to replace the
+    original error.
+    """
+    if not context.reserved_notebooks:
+        return
+    try:
+        with backend.write() as conn:
+            for batch in _batched(sorted(context.reserved_notebooks)):
+                placeholders = ",".join("?" for _ in batch)
+                conn.execute(
+                    backend.sql(
+                        f"UPDATE notebooks SET status = ? "
+                        f"WHERE id IN ({placeholders}) AND status = ? "
+                        "AND sync_origin = ?"
+                    ),
+                    (
+                        _IMPORT_IN_FLIGHT_STATUS,
+                        *batch,
+                        _IMPORT_FINAL_STATUS,
+                        context.manifest.source_env,
+                    ),
+                )
+    except Exception as exc:  # noqa: BLE001 - reported, never replaces the original error
+        context.ledger.warn(
+            f"could not revert {len(context.reserved_notebooks)} notebook(s) "
+            f"back to {_IMPORT_IN_FLIGHT_STATUS!r} after a failed import: {exc}"
+        )
 
 
 def _stamp_mirrors(backend: _Backend, context: _Context) -> None:
@@ -4593,12 +4673,30 @@ def _import(
             with backend.read() as conn:
                 _assert_notebooks_still_ours(backend, conn, context)
             _install_files(context, verify=verify_files)  # phase 4
-        _publish_notebooks(backend, context)          # phase 5
-        _stamp_mirrors(backend, context)
+        _stamp_mirrors(backend, context)               # phase 5a
+        # Dropping the replaced directories comes BEFORE the run publishes or
+        # is recorded done. The other order leaks: a crash in between would
+        # leave a package marked done -- which the next run short-circuits on
+        # as already_applied -- with its retired directories still on disk
+        # and nothing left that will ever come back for them. This way the
+        # crash leaves the run un-finished, the rerun resumes, and
+        # reconciliation cleans up.
+        try:
+            _commit_files(backend, context)             # phase 5b
+        except OSError as exc:  # pragma: no cover - filesystem failure path
+            ledger.warn(f"could not drop the replaced storage directories: {exc}")
+        # LAST step of the protected phase, on purpose (codex #772 r19 P2
+        # #2): a notebook this run inserted becomes visible only once
+        # everything else this run does -- the rows, the stamp, the file
+        # commit -- has already succeeded. Nothing below this line can still
+        # fail and roll the files back out from underneath a notebook this
+        # call just made visible.
+        _publish_notebooks(backend, context)           # phase 5c
     except BaseException as exc:
         # BaseException, not Exception: a KeyboardInterrupt or a cancelled
         # task must still leave the run's state recorded, or the next attempt
         # sees a row stuck at 'running' and refuses without --resume.
+        _revert_publish(backend, context)
         _rollback_files(context)
         # Bound to a local, not read out of the lambda: Python unbinds an
         # ``except ... as exc`` name at the end of its block, and the builder
@@ -4614,16 +4712,6 @@ def _import(
             raise
         raise SyncImportError(f"import failed: {exc}") from exc
 
-    # Dropping the replaced directories comes BEFORE the run is recorded done.
-    # The other order leaks: a crash in between would leave a package marked
-    # done -- which the next run short-circuits on as already_applied -- with
-    # its retired directories still on disk and nothing left that will ever
-    # come back for them. This way the crash leaves the run un-finished, the
-    # rerun resumes, and reconciliation cleans up.
-    try:
-        _commit_files(backend, context)
-    except OSError as exc:  # pragma: no cover - filesystem failure path
-        ledger.warn(f"could not drop the replaced storage directories: {exc}")
     return _settle(
         backend,
         context,

@@ -448,6 +448,66 @@ def test_a_notebook_is_hidden_until_the_run_finishes(source, target, package):
     )["status"] == "draft"
 
 
+def test_a_stamp_failure_leaves_a_new_notebook_hidden_and_rolls_back_files(
+    source, target, package, monkeypatch
+):
+    """codex #772 r19 P2 #2: phase 5 now runs ``_stamp_mirrors`` BEFORE
+    ``_publish_notebooks`` (module docstring §5), specifically so that a
+    notebook this run just inserted is still hidden if anything in phase 5
+    fails -- there is no window where the row is visible (``status='draft'``)
+    while its just-installed files get rolled back out from underneath it."""
+    from app.migration.sync import import_ as module
+
+    def explode(backend, context):
+        raise RuntimeError("simulated stamp failure")
+
+    monkeypatch.setattr(module, "_stamp_mirrors", explode)
+    with pytest.raises(SyncImportError):
+        _import(target, package)
+
+    row = _one(
+        target["repo"], "SELECT status FROM notebooks WHERE id=?",
+        (source["exported"],),
+    )
+    assert row["status"] == "importing"
+    storage = Path(target["settings"].storage_dir)
+    # A brand-new notebook had nothing to retire, so a rolled-back swap
+    # leaves no directory at all rather than an old one restored.
+    assert not (storage / "notebooks" / source["exported"]).exists()
+    assert not any(
+        ".sync-old-" in path.name or path.name.endswith(".sync-tmp")
+        for path in storage.rglob("*")
+    )
+
+
+def test_a_publish_failure_reverts_a_new_notebooks_status(
+    source, target, package, monkeypatch
+):
+    """``_revert_publish`` (codex #772 r19 P2 #2) is a belt-and-suspenders
+    undo for ``_publish_notebooks``: even though nothing in this module's own
+    control flow runs after it today (it is phase 5's LAST step), a
+    notebook it just made visible must not stay visible once the run that
+    published it is unwound as failed. Exercised by letting the real flip
+    commit and only then failing, so the revert has something to undo."""
+    from app.migration.sync import import_ as module
+
+    real = module._publish_notebooks
+
+    def publish_then_explode(backend, context):
+        real(backend, context)
+        raise RuntimeError("simulated failure after the publish flip")
+
+    monkeypatch.setattr(module, "_publish_notebooks", publish_then_explode)
+    with pytest.raises(SyncImportError):
+        _import(target, package)
+
+    row = _one(
+        target["repo"], "SELECT status FROM notebooks WHERE id=?",
+        (source["exported"],),
+    )
+    assert row["status"] == "importing"
+
+
 def test_rowids_are_assigned_by_the_target(source, target, package):
     """``POSTGRES_ROWID_ORDINAL_TABLES``' ordinal is an environment-local
     paging cursor and never travels (§8). SQLite has no such column at all --
@@ -1527,7 +1587,11 @@ def test_the_file_phase_runs_after_the_rows_and_rolls_back(
     def explode(backend, context):
         raise RuntimeError("simulated failure after the file swap")
 
-    monkeypatch.setattr(module, "_publish_notebooks", explode)
+    # _stamp_mirrors is phase 5's FIRST step, right after _install_files and
+    # before _commit_files drops the retired copies -- the earliest point a
+    # failure still has something for _rollback_files to put back (codex
+    # #772 r19 P2 #2 moved _publish_notebooks to be the LAST step instead).
+    monkeypatch.setattr(module, "_stamp_mirrors", explode)
     with pytest.raises(SyncImportError):
         _import(target, _export(source, tmp_path / "out2"))
 
@@ -1539,6 +1603,52 @@ def test_the_file_phase_runs_after_the_rows_and_rolls_back(
     # The rows of the failed run are still there: they are atomic per table
     # and were never what got rolled back.
     assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 1
+
+
+def test_a_failed_second_rename_during_the_swap_still_rolls_back(
+    source, target, package, tmp_path, monkeypatch
+):
+    """codex #772 r19 P2 #1: the swap is two renames --
+    ``destination.rename(retired)`` then ``staged.rename(destination)``. If
+    the FIRST succeeds but the SECOND then raises, ``context.installed`` must
+    already carry the pair by that point, or ``_rollback_files`` has nothing
+    to restore and the notebook's storage directory for that root is simply
+    gone -- the mirror's uploads or attachments vanish with no way back."""
+    _import(target, package)
+    storage = Path(target["settings"].storage_dir)
+    destination = storage / "notebooks" / source["exported"]
+    before = sorted(
+        (path.relative_to(destination), path.read_bytes())
+        for path in destination.rglob("*")
+        if path.is_file()
+    )
+    assert before, "the first import must have installed a file to displace"
+
+    real_rename = Path.rename
+
+    def fail_the_swaps_second_rename(self, target_path):
+        # Only the staged ("<name>.sync-tmp") -> destination rename, which is
+        # ALWAYS the second of the pair -- the first (destination -> retired)
+        # is named "<name>.sync-old-<package_id>" and must go through
+        # untouched, or this never reaches the case being tested.
+        if self.name.endswith(".sync-tmp"):
+            raise OSError("simulated failure completing the swap")
+        return real_rename(self, target_path)
+
+    monkeypatch.setattr(Path, "rename", fail_the_swaps_second_rename)
+    with pytest.raises(SyncImportError):
+        _import(target, _export(source, tmp_path / "out2"))
+
+    after = sorted(
+        (path.relative_to(destination), path.read_bytes())
+        for path in destination.rglob("*")
+        if path.is_file()
+    )
+    assert after == before
+    assert not any(
+        ".sync-old-" in path.name or path.name.endswith(".sync-tmp")
+        for path in storage.rglob("*")
+    )
 
 
 def test_the_file_phase_records_its_own_progress_step(source, target, package):
@@ -2210,7 +2320,10 @@ def test_a_failed_import_of_an_emptied_snapshot_restores_the_old_files(
     def explode(backend, context):
         raise RuntimeError("simulated failure after the empty-snapshot swap")
 
-    monkeypatch.setattr(module, "_publish_notebooks", explode)
+    # See test_the_file_phase_runs_after_the_rows_and_rolls_back: _stamp_mirrors
+    # is phase 5's first step now, so it is still reached before _commit_files
+    # drops the retired copies that make this rollback possible.
+    monkeypatch.setattr(module, "_stamp_mirrors", explode)
     with pytest.raises(SyncImportError):
         _import(target, second)
 

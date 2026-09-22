@@ -331,9 +331,11 @@ sync status [--json]      # 本库的导出水位（每个目标环境）与已�
    `ingest_memory_source` 派生的合成来源（`source_type='memory'` 且 memory_id 不在包内）及其
    可达的元素、chunk、向量、KG 行同样免删。没有 source_id 的 KG 行不在保护范围。SQLite 目标在 chunks/knowledge_objects 的事务内重建
    `chunks_fts`/`kg_objects_fts`（它们是手工维护的虚表）；PG 的 GIN 在列上自动维护。
-5. 收尾：文件目录正式替换（`.sync-old` 到此才删）；把涉及的笔记本 `status` 从 `importing`
-   翻成 `draft`，`sync_origin` 再补打一次（第二条腿，首插时已带）；`sync_imports` 置 done；
-   写导入报告（写盘失败降级为 warning）。大库的 scale 重建由运维按 operations 文档手动跑，
+5. 收尾，按「可回滚的先做、发布最后」的顺序：`sync_origin` 再补打一次（第二条腿，首插时
+   已带）→ 文件目录正式替换（`.sync-old` 到此才删）→ 最后把涉及的笔记本 `status` 从
+   `importing` 翻成 `draft`；`sync_imports` 置 done；写导入报告（写盘失败降级为 warning）。
+   任何一步失败，本次首插的笔记本回到 `importing`（不可见），文件回滚；文件换名中途失败时
+   退休目录已登记或就地换回，镜像目录不会消失。大库的 scale 重建由运维按 operations 文档手动跑，
    PR-4 自动化。
 
 ## 9. 验收与对账
