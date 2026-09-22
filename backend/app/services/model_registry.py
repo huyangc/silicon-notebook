@@ -262,10 +262,14 @@ BINDING_GAP_PREFIX = "model-bindings: "
 # checked-in examples or the legacy migration script.  A retired id no longer
 # gets the silent-drop treatment ask_modes._RETIRED_MODES still gives a retired
 # ask mode: under the user's ruling a stale binding is exactly the "多配置了
-# 哪些" half of the startup check and is named in the refusal.  The set stays
-# as the retirement ledger and as the reason the escape hatch exists — an
-# upgrade that retires a workload can be rolled out with
-# MODEL_BINDINGS_STRICT=false, which drops these entries and warns instead.
+# 哪些" half of the startup check and is named in the refusal.
+#
+# The ledger is what lets that refusal say something useful: describe_binding_gap
+# reads it to separate "retired by an upgrade — delete the line" from "not a
+# workload at all — you probably mistyped it", which are opposite instructions
+# to the reader.  It is also the reason the escape hatch exists: an upgrade that
+# retires a workload can be rolled out with MODEL_BINDINGS_STRICT=false, which
+# drops these entries and warns instead.  Add an id here when you retire it.
 RETIRED_WORKLOADS = frozenset({
     # graph ask mode retired (this branch); its chain-verification workload
     # went with it.  verify_chain_edges survives as an unwired library helper.
@@ -398,7 +402,10 @@ class SystemModelServiceRegistry:
             services[definition.id] = definition
 
         bindings: dict[str, str] = {}
-        unknown_ids: list[str] = []
+        # id -> the tables it appears in.  Carrying the SOURCE, not just the id,
+        # is what lets the refusal tell an operator which table to edit: a
+        # stale id that lives only in [thinking] is invisible in [bindings].
+        unknown_ids: dict[str, set[str]] = {}
         for workload_id, service_id in raw_bindings.items():
             if workload_id not in WORKLOADS:
                 # Collected BEFORE every other check rather than raised on the
@@ -406,7 +413,7 @@ class SystemModelServiceRegistry:
                 # with it, and an operator fixing a stale file deserves ONE
                 # message listing every id to delete plus every workload to
                 # add, not a one-at-a-time crawl through restarts.
-                unknown_ids.append(str(workload_id))
+                unknown_ids.setdefault(str(workload_id), set()).add("[bindings]")
                 continue
             if not isinstance(service_id, str) or service_id not in services:
                 raise ValueError(
@@ -424,7 +431,7 @@ class SystemModelServiceRegistry:
                 # Same ledger as [bindings] above, for the same reason: a
                 # retired workload is normally removed from both tables at
                 # once, so both halves belong in one diagnostic.
-                unknown_ids.append(str(workload_id))
+                unknown_ids.setdefault(str(workload_id), set()).add("[thinking]")
                 continue
             if workload.kind != "chat":
                 raise ValueError(
@@ -437,10 +444,8 @@ class SystemModelServiceRegistry:
             thinking_modes[workload_id] = raw_mode  # type: ignore[assignment]
 
         missing, unknown = binding_gap(bindings, unknown_ids)
-        if (missing or unknown) and bool(
-            getattr(settings, "model_bindings_strict", True)
-        ):
-            raise ValueError(describe_binding_gap(missing, unknown, path))
+        if (missing or unknown) and settings.model_bindings_strict:
+            raise ValueError(describe_binding_gap(missing, unknown_ids, path))
         return cls(services, bindings, thinking_modes, unknown)
 
     def service(self, service_id: str) -> ModelServiceDefinition:
@@ -485,6 +490,14 @@ def binding_gap(
     logs can diff them. ``bound`` is measured against EVERY workload kind, not
     just chat: an unbound embedding or rerank workload degrades retrieval just
     as silently as an unbound chat one.
+
+    Feature switches (``AGENT_PROFILE_ENABLED`` and friends) deliberately grant
+    no exemption: a switch is flipped at runtime while the binding table is
+    read once at startup, so a workload whose feature is currently off must
+    still be bound — otherwise turning the feature on later silently downgrades
+    instead of working. That is the literal reading of the ruling this check
+    implements ("有没配置的就失败"), and the reason the escape hatch is one
+    deployment-wide flag rather than a per-workload waiver.
     """
     return (
         tuple(sorted(set(WORKLOADS).difference(bound))),
@@ -493,28 +506,48 @@ def binding_gap(
 
 
 def describe_binding_gap(
-    missing: Sequence[str], unknown: Sequence[str], config_path: object
+    unbound: Sequence[str],
+    unknown: Mapping[str, Iterable[str]],
+    config_path: object,
 ) -> str:
-    """One readable line naming both halves in full, with no secret material.
+    """One readable line naming every half in full, with no secret material.
 
     Deliberately one line and deliberately exhaustive: this is the message an
     operator sees INSTEAD of a started service, so it has to be actionable on
-    its own — which ids to add, which to delete, in which file. Only ids and
-    their Chinese labels appear; the configuration's URLs and api_key_env
-    values never do.
+    its own — which ids to add, which to delete, in which table, in which file.
+    Only ids, their Chinese labels and the table names appear; the
+    configuration's URLs and api_key_env values never do.
+
+    Stale ids are split by ``RETIRED_WORKLOADS`` because the two halves need
+    opposite actions from the reader: a retired id means "your file predates
+    this upgrade, delete the line", while anything else is almost always a
+    typo the operator still has to find. Each id carries the table(s) it was
+    found in — an id that lives only in ``[thinking]`` cannot be fixed by
+    reading ``[bindings]``.
     """
+    def _listed(ids: list[str]) -> str:
+        return "，".join(
+            f"{workload_id}（{'/'.join(sorted(unknown[workload_id]))}）"
+            for workload_id in ids
+        )
+
+    stale = sorted(unknown)
+    retired = [workload_id for workload_id in stale if workload_id in RETIRED_WORKLOADS]
+    mistyped = [workload_id for workload_id in stale if workload_id not in RETIRED_WORKLOADS]
     segments: list[str] = []
-    if missing:
-        segments.append("缺少绑定的工作负载：" + ", ".join(
+    if unbound:
+        segments.append("缺少绑定的工作负载：" + "，".join(
             f"{WORKLOADS[workload_id].display_label}（{workload_id}）"
-            for workload_id in missing
+            for workload_id in unbound
         ))
-    if unknown:
-        segments.append("未知或已退役的绑定：" + ", ".join(unknown))
+    if retired:
+        segments.append("已退役、升级后请删除的绑定：" + _listed(retired))
+    if mistyped:
+        segments.append("未知、疑似拼写错误的绑定：" + _listed(mistyped))
     return (
         BINDING_GAP_PREFIX
         + "；".join(segments)
-        + f"。请在 {config_path} 的 [bindings] 补齐/删除后重启；"
+        + f"。请在 {config_path} 的 [bindings]/[thinking] 补齐/删除后重启；"
         "确需临时放行设 MODEL_BINDINGS_STRICT=false（仅告警）。"
     )
 

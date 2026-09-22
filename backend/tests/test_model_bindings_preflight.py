@@ -152,11 +152,44 @@ def _create_app_tree() -> ast.FunctionDef:
     raise AssertionError("create_app 不见了")
 
 
+def _statement_index(function: ast.FunctionDef, target: ast.AST) -> int:
+    """目标节点所在语句在函数里的执行序号——刻意不用 ``.lineno``。
+
+    行号是源码位置,不是顺序语义:上面插一行注释就会改变断言里的数字,而语句的
+    先后关系一点没变。仓库的架构策略因此把「拿 .lineno 当身份用」列为违规
+    (``tests/architecture/policy.py`` 的 ``line-number-identity``)。语句序号表达
+    的正是这条守卫要说的话——「这一步在那一步之前」。
+
+    前序遍历里,包含目标的语句从外到内依次出现,取最大下标 = 最内层的那条语句;
+    两个目标若埋在同一个块里,只比顶层下标会得到两个相同的数字。
+    """
+    ordered: list[ast.stmt] = []
+
+    def visit(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.stmt):
+                ordered.append(child)
+            visit(child)
+
+    visit(function)
+    containing = [
+        index
+        for index, statement in enumerate(ordered)
+        if any(node is target for node in ast.walk(statement))
+    ]
+    assert containing, "目标节点不在这个函数里"
+    return max(containing)
+
+
 def test_create_app_runs_the_preflight_before_it_builds_anything():
-    """接线守卫:恰好调用一次,且在 FastAPI(...) 构造之前。
+    """接线守卫:恰好调用一次、不在 try 里、且在 FastAPI(...) 构造之前。
 
     删掉那一行整仓仍然全绿——守卫在这里,是因为「校验在 app 建好之后才跑」与
     「压根没跑」对一个配错了绑定的部署是同一件事:两者都会让服务先起来。
+
+    「不在 try 里」是同一条要求的第三种绕法,也是最容易在后续改动里无意中发生
+    的一种:`create_app` 里已经有别的 best-effort try/except(日志归档提交),
+    把这一行挪进任何一个 except 能吞掉异常的块,拒启就静默失效了。
     """
     create_app = _create_app_tree()
     calls = [
@@ -168,12 +201,22 @@ def test_create_app_runs_the_preflight_before_it_builds_anything():
     ]
     assert len(calls) == 1
 
-    fastapi_lines = [
-        node.lineno
+    guarded = [
+        node
+        for node in ast.walk(create_app)
+        if isinstance(node, (ast.Try, ast.TryStar))
+        and any(child is calls[0] for child in ast.walk(node))
+    ]
+    assert guarded == [], "预检不能被 try/except 包住,否则拒启会被吞掉"
+
+    built = [
+        node
         for node in ast.walk(create_app)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "FastAPI"
     ]
-    assert len(fastapi_lines) == 1
-    assert calls[0].lineno < fastapi_lines[0]
+    assert len(built) == 1
+    assert _statement_index(create_app, calls[0]) < _statement_index(
+        create_app, built[0]
+    ), "预检必须跑在 FastAPI(...) 构造之前"

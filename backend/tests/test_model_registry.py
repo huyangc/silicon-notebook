@@ -7,8 +7,10 @@ import pytest
 
 from app.core.config import Settings
 from app.services.model_registry import (
+    BINDING_GAP_PREFIX,
     WORKLOADS,
     SystemModelServiceRegistry,
+    describe_binding_gap,
 )
 
 
@@ -638,10 +640,10 @@ def test_strict_load_names_every_unbound_workload_of_every_kind(tmp_path):
     message = str(exc_info.value)
     assert message.startswith("model-bindings: 缺少绑定的工作负载：")
     assert (
-        "库理解整理（agent_profile_consolidate）, 来源分块向量（chunk_embedding）, "
+        "库理解整理（agent_profile_consolidate），来源分块向量（chunk_embedding），"
         "检索结果重排（retrieval_rerank）" in message
     )
-    assert "未知或已退役" not in message
+    assert "已退役" not in message and "拼写错误" not in message
     assert str(path) in message
     assert "MODEL_BINDINGS_STRICT=false" in message
     # 诊断只带 id 与标签:密钥与 endpoint 都不出现。
@@ -650,7 +652,11 @@ def test_strict_load_names_every_unbound_workload_of_every_kind(tmp_path):
 
 
 def test_strict_load_names_stale_ids_including_retired_ones(tmp_path):
-    """已退役(graph_chain_verify)与拼错的 id 一起进「多配置了哪些」这一段。
+    """已退役与拼错的 id 分两段、各自带落点,因为运维要做的事相反。
+
+    「已退役」= 你的文件早于这次升级,删掉那一行;「未知」= 多半是拼错了,还得
+    自己找。落点([bindings] / [thinking] / 两者)必须写出来:只出现在 [thinking]
+    的陈旧 id 在 [bindings] 里翻遍了也找不到。
 
     放行档仍然丢弃它们(见
     ``test_registry_drops_retired_workload_entries_instead_of_failing``);默认
@@ -663,7 +669,8 @@ def test_strict_load_names_stale_ids_including_retired_ones(tmp_path):
         + _bindings(
             extra='\ngraph_chain_verify = "general"\nask_anwser = "general"\n'
         )
-        + '\n[thinking]\nstale_thinking_id = "enabled"\n',
+        + '\n[thinking]\ngraph_chain_verify = "enabled"\n'
+        'stale_thinking_id = "enabled"\n',
     )
 
     with pytest.raises(ValueError) as exc_info:
@@ -671,10 +678,16 @@ def test_strict_load_names_stale_ids_including_retired_ones(tmp_path):
 
     message = str(exc_info.value)
     assert "缺少绑定的工作负载" not in message
+    # 退役 id 在两张表里都出现过,落点合并成一条。
     assert (
-        "未知或已退役的绑定：ask_anwser, graph_chain_verify, stale_thinking_id"
+        "已退役、升级后请删除的绑定：graph_chain_verify（[bindings]/[thinking]）"
         in message
     )
+    assert (
+        "未知、疑似拼写错误的绑定：ask_anwser（[bindings]），"
+        "stale_thinking_id（[thinking]）" in message
+    )
+    assert "的 [bindings]/[thinking] 补齐/删除后重启" in message
 
 
 def test_strict_load_reports_both_halves_in_one_message(tmp_path):
@@ -693,8 +706,8 @@ def test_strict_load_reports_both_halves_in_one_message(tmp_path):
 
     message = str(exc_info.value)
     assert "知识补充抽取（kg_glean）" in message
-    assert "未知或已退役的绑定：graph_chain_verify" in message
-    assert message.index("缺少绑定") < message.index("未知或已退役")
+    assert "已退役、升级后请删除的绑定：graph_chain_verify（[bindings]）" in message
+    assert message.index("缺少绑定") < message.index("已退役")
 
 
 def test_empty_config_stays_offline_mode_even_under_the_strict_default():
@@ -723,3 +736,30 @@ def test_non_strict_load_keeps_the_stale_ids_for_the_startup_warning(tmp_path):
 
     assert registry.unknown_bindings() == ("graph_chain_verify",)
     assert registry.service_for("ask_answer") is not None
+
+
+def test_the_deployment_docs_quote_the_refusal_message_verbatim():
+    """zh/en 两份部署文档里的样例消息必须与真实输出逐字相同。
+
+    这条消息是运维遇到拒启时唯一的指引,文档抄错一个字(少一段、连接符不同、
+    落点标注漏了)就会把人引到错误的表上去改。样例拿 `==` 比,不是 `in`。
+    """
+    produced = describe_binding_gap(
+        ["agent_profile_consolidate", "retrieval_experience_distill"],
+        {
+            "graph_chain_verify": {"[bindings]", "[thinking]"},
+            "ask_anwser": {"[bindings]"},
+        },
+        "/etc/silicon/model-services.toml",
+    )
+    root = Path(__file__).resolve().parents[2] / "docs"
+    for name in (
+        "deployment-and-configuration_zh.md",
+        "deployment-and-configuration.md",
+    ):
+        quoted = [
+            line
+            for line in (root / name).read_text(encoding="utf-8").splitlines()
+            if line.startswith(BINDING_GAP_PREFIX)
+        ]
+        assert quoted == [produced], name

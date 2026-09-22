@@ -587,13 +587,19 @@ def _unbound_workload_warnings(settings: object, models: object) -> tuple[str, .
     deployment that switched the gate off — plus the offline notice, which
     strict mode deliberately never covers.
 
+    Scope matches the strict gate exactly — ALL three workload kinds, not just
+    chat. An unbound embedding or rerank workload degrades retrieval just as
+    silently as an unbound chat one, and a warning that is narrower than the
+    refusal it replaces would tell a deployment running with the gate off that
+    it is fine when it is not.
+
     A deployment with NO model services at all is not silently exempt any more:
     an empty ``MODEL_SERVICES_CONFIG`` is the supported offline/deterministic
     runtime (the same claim ``RuntimeModelProvider.primary_unconfigured``
     makes), but "everything that needs a model is answering deterministically"
-    is worth one line before READY. Listing each unbound chat workload there
-    would still be noise about a state the operator chose, so it stays ONE
-    line, not forty.
+    is worth one line before READY. Listing each unbound workload there would
+    still be noise about a state the operator chose, so it stays ONE line, not
+    forty.
 
     Fail-open like ``_pool_budget_warning`` above and for the same reason: a
     diagnostic must never be able to change the shape of a startup that would
@@ -605,14 +611,16 @@ def _unbound_workload_warnings(settings: object, models: object) -> tuple[str, .
         from app.services.model_registry import WORKLOADS
 
         if not models.registry.services():
+            # 只说现象:判据是「注册表里一个可用服务都没有」,而不是读到了空的
+            # MODEL_SERVICES_CONFIG——后者只是最常见的一种成因。
             return (
-                "model-bindings: 未配置模型服务（MODEL_SERVICES_CONFIG 为空）——"
+                "model-bindings: 当前没有可用的模型服务——"
                 "所有需要模型的功能将降级为确定性回复。",
             )
         unbound = tuple(
             workload
             for workload in WORKLOADS.values()
-            if workload.kind == "chat" and not models.configured(workload.id)
+            if not models.configured(workload.id)
         )
         lines: list[str] = []
         if unbound:
@@ -620,7 +628,7 @@ def _unbound_workload_warnings(settings: object, models: object) -> tuple[str, .
                 f"{workload.display_label}（{workload.id}）" for workload in unbound
             )
             lines.append(
-                "model-bindings: 以下 chat 工作负载在 MODEL_SERVICES_CONFIG 的 "
+                "model-bindings: 以下工作负载在 MODEL_SERVICES_CONFIG 的 "
                 f"[bindings] 里没有绑定，对应功能会静默不可用：{listed}。"
                 "升级后请重新生成 model-services.toml 或补齐新增工作负载的绑定。"
             )
@@ -642,7 +650,7 @@ def _unbound_workload_warnings(settings: object, models: object) -> tuple[str, .
         if stale:
             lines.append(
                 "model-bindings: MODEL_SERVICES_CONFIG 的 [bindings]/[thinking] 里有"
-                f"未知或已退役的 id，已忽略：{', '.join(stale)}。"
+                f"未知或已退役的 id，已忽略：{'，'.join(stale)}。"
                 "请删除这些行；MODEL_BINDINGS_STRICT 为 false 才降级为本条告警，"
                 "默认会因此拒绝启动。"
             )
