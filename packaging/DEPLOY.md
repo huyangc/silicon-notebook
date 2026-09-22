@@ -187,15 +187,19 @@ SQLite。只有 PG 切换后无新写入，或所有 PG-only 写入已经外部�
 
 ### D. 存量 SQLite → PostgreSQL 的明确边界
 
-只改 `DATABASE_URL` **不会**复制、迁移或同步存量数据。当前包提供显式、单向的
-SQLite→PostgreSQL forward-shadow CLI，但没有 cutover、反向复制或应用 dual-write。
-`SHADOW_DATABASE_URL` 只标识 shadow target，单独设置不启动同步，也不改变 active backend。
+只改 `DATABASE_URL` **不会**复制、迁移或同步存量数据。当前包提供两条显式、单向的
+SQLite→PostgreSQL 通道：停服快照导入器 `scripts/migrate_sqlite_to_postgres.py`
+（`--apply --activate-env` 完成一次性 cutover）与 forward-shadow CLI
+`scripts/shadow_sqlite_to_postgres.py`（只做影子复制，没有 cutover、反向复制或应用
+dual-write）。`SHADOW_DATABASE_URL` 只标识 shadow target，单独设置不启动同步，也不改变
+active backend。停服快照 cutover 的完整步骤、容量与回滚边界见源码仓库
+`docs/operations.md` 的迁移章节与 `docs/postgres-migration-runbook.md`。
 
-从包根目录运行，且让 `DATABASE_URL` 始终指向 active SQLite：
+forward-shadow 从包根目录运行，且让 `DATABASE_URL` 始终指向 active SQLite：
 
 1. 恢复演练 SQLite DB + storage 和 PostgreSQL 目标备份，记录 evidence ID 与 target capacity。
 2. 设置 `SHADOW_DATABASE_URL` 为专用 PostgreSQL 16 UTF-8 target；`public.pg_trgm` 必须可用。
-3. 执行 `PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py preflight ... --json`，
+3. 执行 `PYTHONPATH=backend python scripts/shadow_sqlite_to_postgres.py preflight ... --json`，
    私密保存 confirmation token。
 4. 用 token 执行 `... start-forward ...`；命令可续跑，并生成 owner-only worker token。
 5. 用 `scripts/shadow.sh start RUN_ID WORK_DIR` 启动恰好一个受监督 worker。
@@ -214,7 +218,7 @@ shadow 健康，**不授权**修改 `DATABASE_URL`。完整参数、token 续签
 | 全新 PostgreSQL | `postgresql://user:password@host:5432/new_db` | 新库，初始仅 bootstrap 行 | PG 新写入前回原 SQLite，或已对账 |
 | 切回原 SQLite | `sqlite:////absolute/path/original.db` | SQLite 最后存下的状态 | 放弃或已对账 PG-only 写入 |
 | 正向 shadow | SQLite URL（不变） | 应用仍读写 SQLite；PG 是禁止业务访问的 shadow | 停 worker 即可，不影响 SQLite |
-| 存量 SQLite 迁 PG cutover | **本阶段不支持** | 不得把流量导向 shadow | 等待另行实现并评审 cutover |
+| 存量 SQLite 迁 PG cutover | 停服后经 `migrate_sqlite_to_postgres.py --apply --activate-env` 写入的 PG URL | 停服快照导入器完成的一次性迁移；不得把流量导向 forward-shadow 的 target | 见 `docs/operations.md` 迁移章节的回滚边界 |
 
 若使用全新 PostgreSQL 或已由其他流程完成的 direct-backend 切换，操作顺序不可缩减：
 隐去凭据核对 identity → 停写/停 backend → 两端备份
@@ -225,7 +229,8 @@ shadow 健康，**不授权**修改 `DATABASE_URL`。完整参数、token 续签
 设计边界见
 `docs/superpowers/specs/2026-07-22-postgresql-shadow-cutover-design.md`；已交付 adapter 与
 forward-shadow 实现分别对应 `docs/superpowers/plans/2026-07-22-postgresql-repository-adapter.md`
-和 `docs/superpowers/plans/2026-07-22-postgresql-forward-shadow-sync.md`。Cutover 仍是后续阶段。
+和 `docs/superpowers/plans/2026-07-22-postgresql-forward-shadow-sync.md`；停服快照 cutover 由
+`docs/superpowers/plans/2026-07-22-postgresql-cutover-and-rollback.md` 交付。
 
 ### F. 离线 batch ingest 边界
 

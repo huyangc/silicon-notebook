@@ -454,6 +454,7 @@ python scripts/migrate_sqlite_to_postgres.py \
      --work-dir /protected/path/postgres-migration \
      --apply \
      --activate-env /absolute/path/to/.env \
+     --source-timezone <SQLite 主机的 IANA 时区> \
      --confirm-service-stopped
    ```
 
@@ -835,6 +836,8 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 
 与 `backfill-source-index` 一样，它是**显式离线**操作（绝不从交互请求触发），不调用模型，幂等、可中断重跑。SQLite v46 / PostgreSQL v24 为每个 notebook 持久化一行 `chunk_element_backfills`：起始事务会跳过当前已完成标记、在相同 `kg_mutation_seq` 上续跑 running/failed 账本，或清掉旧行并按新代次重建。每个有界 keyset 页面把反查行与游标/计数原子提交，崩溃最多重做未提交页面。代次漂移只写稳定的 `kg_generation_changed`，保持 `chunk_elements_indexed` 快速路径标记为 false，并让下次运行按新代次重置；账本不含 chunk 正文或异常文本。新写入无需回填：活库够得着的每条 chunk 写路径都在同一个事务里维护反查行，删除来源、重新解析、改写 knowhow 格子都经 chunks 的外键级联带走它们。（整本深拷贝豁免：它不复制 `unified_kg_state`，副本恒走旧全量路径。）用 `--notebook-id` 限定单个 notebook，或用 `--all-notebooks` 覆盖整库；只有要丢弃当前已完成账本并重建行时才加 `--force`。
 
+**已登记的代价**：反查表按 (chunk, element) 一对一行，因此严格大于 chunks 表——每个 chunk 平均带 N 个元素 id 就产出约 N 行。这些行由 `chunks` 的外键级联带走，于是删除来源、重新解析比以前更重：交互式删除的那个事务现在还要级联这张侧表（有 `chunk_id` 索引，因此是逐 chunk 的有界索引删除，不是全表扫描）。大库应预期删除/重解析的事务规模与磁盘占用按比例上升。读侧收益是每次问答兑现的，这是相应的写侧价格。
+
 `backfill-images` 子命令外科式补回单文件 markdown 导入时丢掉的来源图片。历史部署把 PDF 用离线 MinerU 转成 markdown 后只上传了那个 `.md`，于是这批来源既没有图片元素也没有资产：单文件 markdown 解析路径不解析相对路径图片，而空 alt 的 `![](images/<sha>.jpg)` 会被整块丢弃。MinerU 的 output 树里还留着一部分原图，且文件名就是内容哈希，因此可以按名找回。命令会先给一个或多个 `--mineru-output` 树建索引（只认直接位于 `images/` 目录下的文件，所以 `auto`/`ocr`/`txt` 各种方法目录都适用），再按 keyset 分页遍历该 notebook 的 `.md`/`.markdown` 来源，用单调双指针把每篇文档的行与它既有的元素对齐，把命中的图片插在它物理上紧跟的那个元素之后。它不调用模型、不重算任何 embedding、不碰任何 KG 表，chunk id 与 chunk 正文逐字节不变——补回的图片只被 append 到锚点 chunk 的 `element_ids` **尾部**。图注是机会性收割的：图片前后最近的一行若形如 `Figure`/`Table`/`图`/`表` + 数字就取为图注（否则回退到图片自己的 alt 文本）；没有图注的图片照样显示，因为引用带图的准入只要求这条 `image` 元素的 `metadata.asset_id` 非空。
 
 对齐**宁可拒绝也不猜**。markdown 的文本行永远匹配不上的元素类型（`image`/`figure`/`table`/`code_block`）不消耗前瞻窗口，所以一串连续表格或连续带图注的图片不会把窗口吃干、让指针停滞。扫描到结构块时还会**即时**推进指针——一个 markdown 或 HTML 表格块、一个围栏代码块、一条带图注的独立图片各推进**一条**元素，块的起点由显式开/闭状态判定而不是看上一行长什么样（两个中间没有空行的围栏块、或管道表格紧跟一个 HTML 表格，都是**两条**元素，而上一行恰好同类）——于是物理上紧跟在表格/代码块之后的图片锚到那个结构块本身，而不是它**之前**的那个段落。没有这一条，错位是**静默的**：覆盖率仍是 100%，图却挂进了错误的 chunk。空 alt 的独立图片刻意不跨越——解析路径把它整块丢弃，元素侧根本没有它可跨。在此之上还有两道闸：逐张的**锚点新鲜度**（自锚点被匹配以来未匹配文本行过多 → 以 `anchor_stale` 跳过该图）与**整源覆盖率下限**（低于它就整源跳过，reason `alignment_drifted`）。两者都在 `--dry-run` 输出与 `--report` 里逐源可见。手写、硬折行的 markdown（一个自然段跨多行）可能触发覆盖率下限而被整源跳过——这是安全方向（跳过而不是错插，目标语料 MinerU 的段落是单行），而且看得见、不是静默失败。只有**真正的 image 块**会被补回。「独占一整行」是必要条件而非充分条件：列表项、表格单元格与段落中间的内嵌图片一律跳过，而那些**看起来**独占一行的也一样——HTML 表块内部、缩进 4 列以上（缩进代码块、列表续行、段落续行三种都解析不出 image 元素，tab 同理）、以及一行里两张以上图片，全部记 `inline_image_skipped`；表格或代码里的图片语法多半只是个字面示例，不是一张图。`Markdown image N` 的序号同样只数这些真正的块，行内引用不会再把还原出来的独立图的编号顶高。这与在线 markdown 路径「只留 alt 文本、不落资产」的规则一致——也正因为这条规则，行归一化把图片语法折成它的 **alt 文本**而不是整段抹掉：解析路径会把内嵌图片的 alt 留在元素正文里，抹掉它这一行就永远匹配不上自己的元素，短文档里一行就足以把覆盖率压到下限之下、让整源被误跳。来源文件按产品统一的路径约定打开（绝对路径原样、相对路径按仓库根解析），所以历史上存成相对路径的 `file_path` 无论命令从哪个工作目录启动都读得到。同一锚点下的元素 id 是**固定三位**的 `-gNNN`，所以某个锚点要挂第 1000 张时跳过它并记 `anchor_suffix_exhausted`，而不是铸一个在 C collation 下排序错乱的 `-g1000`——`MINERU_MAX_IMAGES_PER_SOURCE` 是在线解析路径也在用的共享设置、没有上界校验，刻意不为一个离线工具去收紧它。
@@ -844,8 +847,6 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 本命令确实会改写既有元素行，但只有**一处、且已登记**。解析路径对**带图注**的相对路径图片（`![图 1 架构](images/a.jpg)`）会产出一条 `image` 元素、写下 `metadata.src`，但拿不到 `asset_id`——这条行不在"已补过"集合里（那条判据要求 `asset_id` 非空），按只插入处理就会给同一张图造出第二条元素。改为**就地补齐**：落资产之后只 UPDATE 这条元素的 `metadata` 补上 `asset_id`，`text`/`id`/`created_at` 一律不动；它不在任何 chunk 里时才 append 进锚点 chunk。这类计数与插入分列（`enriched` / `candidates_enrich`），它们的图注同样计入 `captions`——补齐不改写 `text`，所以图注取自元素自己。同一个 `src` 底下有多条既有元素时只补 id 序第一条。就地补齐**不受**对齐相关的那几道闸约束：它按精确 `src` 相等找到目标元素，目标不在任何 chunk 时沿**元素 id 序**向前回退找最近的已入 chunk 元素，全程不看 markdown 对齐。这一点很关键——纯图片文档一条文本行都没有，覆盖率**恒为 0**，按覆盖率闸拒掉就等于对这一整类来源永远补不了图，而它们恰恰是本命令要修的主力。覆盖率下限与锚点新鲜度只作用于新插入。
 
 **刻意登记的偏离**：标准分块管线对既无图注又无描述的图片元素一律跳过，而本命令仍会把它 append 进 chunk。这是一次针对历史数据修复的定向例外，判据是 markdown 里图片引用与该段文字的物理相邻关系（原始 PDF 的版面顺序），而不是分块所依赖的「这张图自带可检索文本」。
-
-**已登记的代价**：反查表按 (chunk, element) 一对一行，因此严格大于 chunks 表——每个 chunk 平均带 N 个元素 id 就产出约 N 行。这些行由 `chunks` 的外键级联带走，于是删除来源、重新解析比以前更重：交互式删除的那个事务现在还要级联这张侧表（有 `chunk_id` 索引，因此是逐 chunk 的有界索引删除，不是全表扫描）。大库应预期删除/重解析的事务规模与磁盘占用按比例上升。读侧收益是每次问答兑现的，这是相应的写侧价格。
 
 `metadata` 子命令给 notebook 里还缺论文元数据（标题、作者、机构、期刊、年份）的来源补抽——适用于「论文元数据抽取」上线前就已入库的旧库，或抽取 prompt/校验升级后想刷新一遍。它只处理已解析、且看起来是论文的来源（doc_type 为空或 `academic_paper`）；文本读的是库里已存的解析产物（source elements），原始 PDF 不在磁盘上也能跑。必须给 `--notebook-id`（本子命令绝不新建 notebook），且系统模型配置必须绑定 `paper_metadata` workload；未绑定时直接报错退出，不会静默跳过，也不需要 embedding workload。幂等、可中断重跑：已有元数据行的源默认跳过，加 `--force` 则对本次范围内所有源强制重抽（例如 prompt/校验升级后）。进度按已完成源逐行打印（`[meta <done>] <source-id> <status>`），结束打印各状态计数的 JSON 汇总。
 
@@ -860,7 +861,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 
 只有无法捕获的终止（`kill -9`、被 OOM 杀、掉电、机器重启）才会把任务行留在「进行中」。离线命令刻意不代为清理——它无法判断那一行是否属于一个仍在运行的后端——而是打印现存任务（阶段、完成/总数、最后更新时间）并以状态码 2 退出，而不是抛出数据库错误。若「最后更新」已长时间停滞，说明这行是残留：**重启后端服务即可清理**（启动时会把上一进程留下的进行中任务，连同搁浅的解析与投影一起落到终态）。若它确实还在运行（另一个 `batch_ingest` 进程，或网页端发起的分析），等它结束后重跑即可。
 
-**MRL 截断质量 spike(`app.eval.mrl_truncation`)。** 回答「把存量向量截断到前 1024/2048 维(+ re-normalize),检索质量掉多少」——这既是进程内向量内存瘦身(4096→1024 约 ÷4)的前置,也是 pgvector HNSW 建索引(维度上限 2000/4000)的 gate。只读、流式分块(百万行表内存有界),并总是先打印该 notebook 四张 embeddings 表的行数。
+**MRL 截断质量 spike(`app.eval.mrl_truncation`)。** 回答「把存量向量截断到前 1024/2048 维(+ re-normalize),检索质量掉多少」——这既是进程内向量内存瘦身(4096→1024 约 ÷4)的前置,也是 pgvector HNSW 建索引(维度上限 2000/4000)的 gate。只读、流式分块(百万行表内存有界),并总是先打印该 notebook 四张 embeddings 表的行数。它只读 SQLite（`--db` 收 SQLite 路径，缺省用 `Settings.sqlite_path`）；PostgreSQL 部署不能把 `DATABASE_URL` 交给它，需在有代表性的 SQLite 副本上做质量评估。
 
 ```bash
 # 邻居保持率模式(默认):零 API 调用,任意 notebook 可跑——

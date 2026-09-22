@@ -315,10 +315,12 @@ python scripts/example_mcp_memory_client.py \
   --memory-content 'Agent 已通过 MCP 选择目标笔记本，并完成正式上下文与私有 Memory 检索。'
 ```
 
-如需强制选择白名单中的某个笔记本：
+如需强制选择白名单中的某个笔记本，设置环境变量或给脚本传 `--notebook-id`：
 
 ```bash
 export SILICON_NOTEBOOK_NOTEBOOK_ID='<notebook-id>'
+# 或
+python scripts/example_mcp_memory_client.py --notebook-id '<notebook-id>' ...
 ```
 
 成功输出应依次包含：

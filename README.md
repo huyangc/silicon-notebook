@@ -141,7 +141,7 @@ Chinese counterparts are linked from the top of each split document.
 - PostgreSQL 16 is the default deployment choice for development and production; SQLite remains supported. Switching databases does not copy or synchronize existing data.
 - Highest-fidelity scanned-PDF, formula, and image extraction requires MinerU; local parsers provide deterministic fallbacks.
 - Model-backed answers and knowledge extraction require matching workload bindings; offline mode remains useful for ingestion and deterministic workflows.
-- Graph Ask is opt-in and experimental; the default Ask mode is `chunk`. Generated-question recall is deployment opt-in and defaults to `off`.
+- Ask modes are `chunk` (default) and `reasoning`; the retired `graph`, `fast`, and `global` engine ids still resolve as aliases of built-in modes. Generated-question recall is deployment opt-in and defaults to `off`.
 - Memory is creator-private. Sharing supports copy, read-only membership, and groups, but not live collaborative editing.
 - Web/network source search remains a disabled future affordance.
 

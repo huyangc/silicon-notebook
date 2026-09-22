@@ -16,10 +16,10 @@ color: green
 ## 红线（违反即返工）
 
 - **worktree**：当前目录若已是 worktree 就在原地做，不要切分支、不要动主 checkout。
-- **依赖**：绝不在 worktree 里跑 `npm install`（`frontend/node_modules` 是软链到主 checkout 的共享安装树，会写穿真树）。要装新包先问。
+- **依赖**：在 worktree 里跑 `npm install` 前先 `ls -l frontend/node_modules`；若它是软链到主 checkout 的共享安装树，不得写穿真树，需要独立依赖时复制或在正确的 checkout 安装。要装新包先问。
 - **全栈对等**：面向用户的后端能力必须同批带上前端 UI，不接受「后端先行前端后补」。
 - **schema**：加表/改结构必须**追加** `_migration_N` 并 bump `SCHEMA_VERSION`，不要塞进已封版的旧迁移。
-- **界面文案**：只用「界面词」，不得出现 `projection`/`tier`/`canonical`/`chunk`/`KG` 这类内部黑话；真源是 `AGENTS.md`「界面词汇表」。
+- **界面文案**：只用「界面词」，不得出现 `projection`/`tier`/`canonical`/`chunk`/`KG` 这类内部黑话；真源是 `docs/ui-vocabulary.md`。
 - **错误文案**：新增 4xx 若 `detail` 是中文用户文案，必须走 `backend/app/api/deps.py` 的 `user_error()`；前端翻译只在 `frontend/app/errors.ts`。
 - **守卫**：新增守卫/断言必须做**变异验证**——把代码改回违规形态确认它真的报红，否则等于没加。
 - 用 Edit/Write 改文件，不要用 shell 重定向整体覆写。
