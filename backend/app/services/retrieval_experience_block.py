@@ -1,4 +1,11 @@
-"""Render the deployment-global retrieval experience library as ONE prompt block.
+"""Render the retrieval experience library as ONE prompt block.
+
+⚠ 2026-09-22 起这个库是**分区**的(见 `docs/superpowers/specs/2026-09-22-
+retrieval-experience-per-notebook-design_zh.md`),但分区是**调用方**的概念:
+本模块只认 ``primary`` / ``fallback`` 两层优先级(``select_experiences_
+layered``),既不读行里的分区键、也不知道哪一层对应什么。这是隐私守卫判据二
+对本模块零豁免的直接后果,也是它站得住的理由——渲染面从构造上说不出「哪个库」
+这句话。
 
 Agentic Memory P2 (A / T6), design doc §6.1. This module is the injection-side
 mirror of ``agent_profile_block.py`` and deliberately copies its shape: a fixed
@@ -308,12 +315,84 @@ def select_experiences(
     return picked
 
 
+@dataclass(frozen=True)
+class LayeredExperiences:
+    """``select_experiences_layered`` 的结果:选中集 + 有多少条来自 ``primary``。
+
+    返回一个结构而不是一个列表,是因为调用方要记的账目里有一条**只有这里算得
+    出来**:送达给模型的行里有几条来自 primary 层。选中集本身是 primary 在前的
+    一整串,单看它分不出分界线在哪;让调用方重跑一次 ``select_experiences``
+    去反推,等于把同一条排序规则写两份(两份一漂移,账目就开始说谎)。
+
+    ⚠ 本模块对隐私守卫判据二零豁免,所以这两层在这里只有 ``primary`` /
+    ``fallback`` 两个名字——它们是**选择优先级**的名字,不是数据来源的名字。
+    「哪一层对应哪个分区」是调用方(``reasoning_retrieval``)的知识,本模块
+    连行里存着什么分区键都不读。
+    """
+
+    #: 选中集,primary 层在前,层内各自按 ``select_experiences`` 的序。
+    entries: tuple[Mapping[str, Any], ...]
+    #: ``entries`` 前多少条来自 ``primary``(即分界下标)。
+    primary_count: int
+
+
+def select_experiences_layered(
+    primary: Sequence[Mapping[str, Any]],
+    fallback: Sequence[Mapping[str, Any]],
+    situation: Mapping[str, Any],
+    *,
+    top_k: int = RETRIEVAL_EXPERIENCE_INJECT_TOP_K,
+    floor: float = RETRIEVAL_EXPERIENCE_SIMILARITY_FLOOR,
+) -> LayeredExperiences:
+    """两层候选的分层选择:先把名额给 ``primary``,不够再由 ``fallback`` 补。
+
+    纯函数,与 ``select_experiences`` 同样确定性——它就是在那个函数上加一层
+    优先级,而不是另一套排序:每层内部仍是 ``(-similarity, -support, id)``,
+    仍有相似度地板,仍是**每个动作只留一条**。
+
+    跨层的同动作唯一是硬规则,不是优化:渲染块不带指纹,模型收到同一个动作的
+    两行(一行来自 primary、一行来自 fallback,极性还可能相反)时没有任何依据
+    分辨哪条适用——这正是 ``select_experiences`` 层内去重的同一条理由,只是
+    换到了层之间。
+
+    ⚠ ``fallback`` 一侧要的是**整份** ``top_k`` 而不是剩余名额数,且这个数就
+    够:``select_experiences`` 自己已按动作去重,所以这 ``top_k`` 条里与
+    primary 撞车的至多 ``primary_count`` 条,剩下的必然不少于还缺的
+    ``top_k - primary_count`` 条。要少了才会欠额——凡是被 primary 占掉的动作
+    都会白白吃掉一个 fallback 名额。
+
+    ``primary`` 空(或全部低于地板)时退化为纯 ``fallback`` 选择,这正是新库
+    的冷启动形态;``fallback`` 与 ``primary`` 是同一份列表时不会产生重复行——
+    第二轮选出来的动作已经全被第一轮占掉了。
+    """
+    limit = max(0, int(top_k))
+    picked: list[Mapping[str, Any]] = list(
+        select_experiences(primary, situation, top_k=limit, floor=floor))
+    primary_count = len(picked)
+    if primary_count < limit:
+        actions_taken = {
+            str(entry.get("action") or "") for entry in picked
+        }
+        for entry in select_experiences(
+            fallback, situation, top_k=limit, floor=floor
+        ):
+            if len(picked) >= limit:
+                break
+            action = str(entry.get("action") or "")
+            if action in actions_taken:
+                continue
+            actions_taken.add(action)
+            picked.append(entry)
+    return LayeredExperiences(tuple(picked), primary_count)
+
+
 def select_consultable(
     entries: Sequence[Mapping[str, Any]],
     situation: Mapping[str, Any],
     *,
     exclude_ids: Sequence[str] = (),
     zero_hit_actions: Sequence[str] = (),
+    primary_count: int = 0,
     top_k: int = CONSULT_MEMORY_TOP_K,
     floor: float = RETRIEVAL_EXPERIENCE_SIMILARITY_FLOOR,
 ) -> list[Mapping[str, Any]]:
@@ -336,13 +415,27 @@ def select_consultable(
       has stopped paying off, so an entry about THAT channel is worth more
       than one about a channel nothing in this run has touched yet.
 
-    Ordering is therefore ``(not-zero-hit, -similarity, -support, id)``: zero-
-    hit-this-run first, then the same tie-break ``select_experiences`` uses.
+    ``primary_count`` says how many of the LEADING ``entries`` belong to the
+    primary layer — the same positional convention ``select_experiences_
+    layered`` returns, and the same product rule: with everything else equal,
+    the primary layer wins. It has to be a rank position rather than a filter
+    because this half hands back ONE merged list, and without it the last
+    tie-break would be the content-addressed ``id`` — i.e. a hash deciding
+    which layer a caller's stated priority resolves to, which is not a
+    priority at all. It sits AFTER similarity and support on purpose: a
+    closer or better-evidenced fallback row is still the more useful answer,
+    and the layer only settles rows that are otherwise indistinguishable.
+
+    Ordering is therefore ``(not-zero-hit, -similarity, -support, not-primary,
+    id)``: zero-hit-this-run first, then similarity/support as
+    ``select_experiences`` ranks them, then the layer, then the id that makes
+    the whole thing deterministic.
     """
     exclude = {str(x) for x in (exclude_ids or ())}
     zero_hit = {str(x) for x in (zero_hit_actions or ())}
-    scored: list[tuple[bool, float, int, str, Mapping[str, Any]]] = []
-    for entry in entries or ():
+    primary_rows = max(0, int(primary_count))
+    scored: list[tuple[bool, float, int, bool, str, Mapping[str, Any]]] = []
+    for index, entry in enumerate(entries or ()):
         if not usable_entry(entry):
             continue
         entry_id = str(entry.get("id") or "")
@@ -355,12 +448,13 @@ def select_consultable(
         support = support if isinstance(support, int) and not isinstance(
             support, bool) else 0
         action = str(entry.get("action") or "")
-        scored.append((action not in zero_hit, score, support, entry_id, entry))
-    scored.sort(key=lambda item: (item[0], -item[1], -item[2], item[3]))
+        scored.append((action not in zero_hit, score, support,
+                       index >= primary_rows, entry_id, entry))
+    scored.sort(key=lambda item: (item[0], -item[1], -item[2], item[3], item[4]))
     picked: list[Mapping[str, Any]] = []
     actions_taken: set[str] = set()
     limit = max(0, int(top_k))
-    for _not_zero_hit, _score, _support, _id, entry in scored:
+    for _not_zero_hit, _score, _support, _fallback, _id, entry in scored:
         if len(picked) >= limit:
             break
         action = str(entry.get("action") or "")
@@ -376,6 +470,7 @@ def worst_experience_for(
     situation: Mapping[str, Any],
     action: str,
     *,
+    primary_count: int = 0,
     floor: float = RETRIEVAL_EXPERIENCE_SIMILARITY_FLOOR,
 ) -> Optional[Mapping[str, Any]]:
     """The best-matching ``bad``-polarity entry about ONE specific action, or
@@ -393,10 +488,19 @@ def worst_experience_for(
     ``zero_hit_actions``/``exclude_ids`` bookkeeping: the caller decides once
     per action whether to show this at all (via ``nudged_actions``), so this
     function only has to answer "what would we say".
+
+    ``primary_count`` means what it does in ``select_consultable``: the first
+    that many ``entries`` are the primary layer, and they win every tie that
+    similarity and support leave open. Without it the winner would be decided
+    by the content-addressed ``id`` — a hash, not a priority — and this
+    function returns exactly ONE row, so that tie is not a corner case: two
+    layers holding the same conclusion about the same action is the normal
+    shape of a library that has both a shared fallback and a local one.
     """
+    primary_rows = max(0, int(primary_count))
     best: Optional[Mapping[str, Any]] = None
-    best_key: Optional[tuple[float, int, str]] = None
-    for entry in entries or ():
+    best_key: Optional[tuple[float, int, bool, str]] = None
+    for index, entry in enumerate(entries or ()):
         if not usable_entry(entry):
             continue
         if str(entry.get("action") or "") != action:
@@ -409,7 +513,8 @@ def worst_experience_for(
         support = entry.get("support")
         support = support if isinstance(support, int) and not isinstance(
             support, bool) else 0
-        key = (score, support, str(entry.get("id") or ""))
+        key = (score, support, index < primary_rows,
+               str(entry.get("id") or ""))
         if best_key is None or key > best_key:
             best_key = key
             best = entry
@@ -617,6 +722,7 @@ __all__ = [
     "RETRIEVAL_EXPERIENCE_BLOCK_MAX_CHARS",
     "RETRIEVAL_EXPERIENCE_INJECT_TOP_K",
     "RETRIEVAL_EXPERIENCE_SIMILARITY_FLOOR",
+    "LayeredExperiences",
     "RenderedConsultBlock",
     "action_id_for",
     "adopted_entry_ids",
@@ -626,6 +732,7 @@ __all__ = [
     "rendered_row_count",
     "select_consultable",
     "select_experiences",
+    "select_experiences_layered",
     "usable_entry",
     "worst_experience_for",
 ]

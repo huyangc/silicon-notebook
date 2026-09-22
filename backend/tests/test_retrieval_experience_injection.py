@@ -36,6 +36,7 @@ from app.services.retrieval_experience_block import (
     render_experience_block,
     rendered_row_count,
     select_experiences,
+    select_experiences_layered,
 )
 from app.services.retrieval_experience_projection import (
     current_situation,
@@ -104,8 +105,10 @@ def _reset_memo():
         reasoning_retrieval._EXPERIENCE_CACHE.clear()
 
 
-def _seed(repo):
-    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+def _seed(repo, *, source_id="s1", name="nb"):
+    """一个可提问的笔记本。``source_id`` 可换,同一个仓库要种第二个库时必须换
+    ——``sources.id`` 是主键,复用会在插入时直接炸掉。"""
+    notebook = repo.create_notebook(NotebookCreate(name=name))
     repo.store_kg(notebook.id, None, [
         {"local_id": "C1", "object_type": "claim",
          "payload": {"name": "版图设计要点", "section_path": "1"}, "evidence": []},
@@ -114,7 +117,8 @@ def _seed(repo):
         db.execute(
             "INSERT INTO sources (id,notebook_id,title,source_type,status,"
             "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
-            ("s1", notebook.id, "论文一", "pdf", "extracted", "extracted", NOW, NOW),
+            (source_id, notebook.id, "论文一", "pdf", "extracted", "extracted",
+             NOW, NOW),
         )
     repo.collection_catalog.invalidate()
     return notebook
@@ -155,9 +159,15 @@ def _situation(**overrides) -> dict:
     return situation
 
 
-def _write(repo, action, polarity, rationale, *, situation=None, support=1):
+def _write(repo, action, polarity, rationale, *, situation=None, support=1,
+           partition=""):
+    """写一条经验。``partition=""`` 是全局分区,非空是某个笔记本自己的分区。
+
+    id 与列必须由**同一个** partition 算出来:两侧的 store 在不一致时会直接
+    ``ValueError``,所以这个 helper 不给调用方拆开传的机会。
+    """
     situation = situation or _situation()
-    entry_id = experience_id(situation, action)
+    entry_id = experience_id(situation, action, partition)
     repo.retrieval_experiences.upsert_experience(
         entry_id,
         situation=situation,
@@ -167,6 +177,7 @@ def _write(repo, action, polarity, rationale, *, situation=None, support=1):
         provenance=[f"run-{support}-{action}"],
         provenance_max=60,
         replace_conclusion=True,
+        notebook_id=partition,
     )
     _reset_memo()
     return entry_id
@@ -248,9 +259,14 @@ def test_the_block_reaches_plan_and_every_reflect_round(repo):
     steps = _steps(result, "experience")
     assert len(steps) == 1, "打法块每 run 只读一次"
     assert steps[0].summary == "带上以往检索攒下的打法"
-    assert steps[0].detail == {"entries": 1, "chars": len(
-        render_experience_block(select_experiences(
-            repo.retrieval_experiences.read_partition("", 300), _situation())))}
+    assert steps[0].detail == {
+        "entries": 1,
+        # 这条条目写在**全局**分区(``_write`` 的默认),所以送达行里来自本库
+        # 分区的条数是 0——分层记账必须如实说出"这一轮全靠全局回退"。
+        "notebook_entries": 0,
+        "chars": len(render_experience_block(select_experiences(
+            repo.retrieval_experiences.read_partition("", 300), _situation()))),
+    }
 
 
 def test_an_entry_about_a_different_shape_of_question_is_not_injected(repo):
@@ -690,11 +706,14 @@ def test_a_failing_adoption_write_does_not_break_the_run(repo):
 # ------------------------------------------------------------- ⑦ 进程级 memo
 
 def test_the_library_is_read_once_per_version_not_once_per_run(repo):
-    """memo:表没变时第二次 run 不再重读全表。
+    """memo:表没变时第二次 run 不再重读。
 
     它换掉的是「至多 300 行 + 每行两次 JSON 反序列化 + 逐行打分」,留下的是一次
     聚合查询。写入之后必须**立刻**失效——刻意不做 TTL,不然刚蒸出来的条目要等一
     段时间才生效。
+
+    每 run 两次读(本库分区 + 全局分区回退)是分区后的固定形态;计数按 2 的倍数
+    走,证明的仍是同一件事:同一份表只读一轮,签名一变整份缓存失效。
     """
     notebook = _seed(repo)
     _write(repo, "enumerate", "good", RATIONALE)
@@ -721,7 +740,7 @@ def test_the_library_is_read_once_per_version_not_once_per_run(repo):
         retriever.retrieval_experiences = counting
         result = _run(retriever, notebook, limits)
         assert _steps(result, "experience")
-    assert counting.reads == 1, "同一份表只该读一次"
+    assert counting.reads == 2, "同一份表只该读一轮(本库分区 + 全局分区)"
 
     # 新条目落库 ⇒ 签名变 ⇒ 下一次 run 重读。
     _write(repo, "ppr", "bad", OTHER_RATIONALE)
@@ -729,7 +748,7 @@ def test_the_library_is_read_once_per_version_not_once_per_run(repo):
     retriever, limits = _retriever(repo, llm)
     retriever.retrieval_experiences = counting
     result = _run(retriever, notebook, limits)
-    assert counting.reads == 2
+    assert counting.reads == 4
     assert _steps(result, "experience")[0].detail["entries"] == 2
 
 
@@ -851,3 +870,341 @@ def test_injection_keeps_only_the_best_entry_per_action():
     picked = select_experiences(entries, situation, top_k=2)
     assert [entry["id"] for entry in picked] == ["a-good", "b"]
     assert len({entry["action"] for entry in picked}) == len(picked)
+
+
+# ------------------------------------------------------ ⑨ 按笔记本分区(2026-09-22)
+
+NB_RATIONALE = "In this library the graph walk pays off more than keyword hunts."
+
+
+def test_this_notebooks_own_entries_come_before_the_global_fallback(repo):
+    """规格 §11 第 3 条前半:本库分区的条目排在全局分区条目之前。
+
+    两条条目情境完全相同、支持度也相同——唯一的区别就是分区。所以行序只可能
+    由分层规则决定,不可能是相似度或支持度排出来的巧合。
+    """
+    notebook = _seed(repo)
+    _write(repo, "enumerate", "good", RATIONALE)                  # 全局分区
+    _write(repo, "ppr", "good", NB_RATIONALE, partition=notebook.id)
+
+    llm = _SeqLLM()
+    retriever, limits = _retriever(repo, llm)
+    result = _run(retriever, notebook, limits)
+
+    steps = _steps(result, "experience")
+    assert len(steps) == 1
+    assert steps[0].detail["entries"] == 2
+    assert steps[0].detail["notebook_entries"] == 1
+
+    prompt = llm.plan_prompts[0]
+    assert NB_RATIONALE in prompt and RATIONALE in prompt
+    assert prompt.index(NB_RATIONALE) < prompt.index(RATIONALE), (
+        "本库分区的打法必须排在全局回退之前")
+
+
+def test_another_notebook_never_sees_this_ones_entries(repo):
+    """规格 §11 第 3 条后半(隔离用例):A 有条目、B 只有全局。
+
+    这是本特性**唯一**不可妥协的那条:B 的 run 里出现 A 的任何一条,分区就白做了。
+    """
+    notebook_a = _seed(repo, source_id="s-a", name="A")
+    notebook_b = _seed(repo, source_id="s-b", name="B")
+    _write(repo, "enumerate", "good", RATIONALE)                  # 全局分区
+    _write(repo, "ppr", "good", NB_RATIONALE, partition=notebook_a.id)
+
+    llm = _SeqLLM()
+    retriever, limits = _retriever(repo, llm)
+    result = _run(retriever, notebook_b, limits)
+
+    steps = _steps(result, "experience")
+    assert len(steps) == 1
+    assert steps[0].detail == {
+        "entries": 1, "notebook_entries": 0,
+        "chars": steps[0].detail["chars"]}
+    for prompt in [*llm.plan_prompts, *llm.reflect_prompts]:
+        assert NB_RATIONALE not in prompt, "B 的 run 绝不许看到 A 的分区条目"
+        assert RATIONALE in prompt, "全局分区仍然是 B 的回退层"
+
+
+def test_the_same_action_is_never_shown_twice_across_partitions(repo):
+    """跨分区同动作唯一。渲染块不带分区标记,模型收到「本库:多用 ppr」和
+    「全局:别用 ppr」并排时没有任何依据分辨哪条适用——这正是 ``select_
+    experiences`` 层内去重的同一条理由,换到层之间。"""
+    notebook = _seed(repo)
+    _write(repo, "ppr", "bad", OTHER_RATIONALE)                   # 全局分区
+    _write(repo, "ppr", "good", NB_RATIONALE, partition=notebook.id)
+
+    llm = _SeqLLM()
+    retriever, limits = _retriever(repo, llm)
+    result = _run(retriever, notebook, limits)
+
+    steps = _steps(result, "experience")
+    assert steps[0].detail["entries"] == 1
+    assert steps[0].detail["notebook_entries"] == 1
+    prompt = llm.plan_prompts[0]
+    assert NB_RATIONALE in prompt
+    assert OTHER_RATIONALE not in prompt, "同动作的全局条目必须被本库那条挡住"
+
+
+def test_the_switch_off_run_issues_no_partition_read_at_all(repo):
+    """关闸 ⇒ 注入侧**零查询**。分区之后一次 run 要读两份快照,所以「关掉之后
+    只是没渲染、还是照读不误」这件事比接入前更值得钉死。"""
+    notebook = _seed(repo)
+    _write(repo, "ppr", "good", NB_RATIONALE, partition=notebook.id)
+    repo.settings.retrieval_experience_inject_enabled = False
+
+    reads: list = []
+    real_read = repo.retrieval_experiences.read_partition
+
+    def counting_read(partition, limit):
+        reads.append(partition)
+        return real_read(partition, limit)
+
+    repo.retrieval_experiences.read_partition = counting_read
+    llm = _SeqLLM()
+    retriever, limits = _retriever(repo, llm)
+    result = _run(retriever, notebook, limits)
+
+    assert reads == []
+    assert not _steps(result, "experience")
+
+
+class _PartitionCountingStore:
+    """只记 ``read_partition(partition, limit)`` 调用的假 store。签名可改,
+    用来验证「签名一变整份缓存失效」。"""
+
+    def __init__(self):
+        self.signal = (1, "2026-08-19T00:00:00+00:00")
+        self.reads: list = []
+
+    def version_signal(self):
+        return self.signal
+
+    def read_partition(self, notebook_id, limit):
+        self.reads.append((notebook_id, limit))
+        return [{"id": f"rx-{notebook_id or 'global'}"}]
+
+
+def test_the_partition_cache_is_lru_bounded_and_keeps_the_global_slot():
+    """分区缓存有界(LRU 64),全局分区**不参与**淘汰。
+
+    无界字典会把「有界的注入成本」悄悄变成一条随库数增长的内存泄漏;而把全局
+    分区也扔进 LRU 则更糟——它是每个 run 的回退层,一定会被读,被冷门库轮换
+    挤掉只会换来一次必然的重读。
+    """
+    from app.services.reasoning_retrieval import (
+        _EXPERIENCE_CACHE_MAX_PARTITIONS, _cached_experiences,
+    )
+    from app.repositories.ports import (
+        RETRIEVAL_EXPERIENCE_MAX_ENTRIES,
+        RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES,
+    )
+
+    _reset_memo()
+    store = _PartitionCountingStore()
+    _cached_experiences(store, "")
+    for index in range(_EXPERIENCE_CACHE_MAX_PARTITIONS):
+        _cached_experiences(store, f"nb-{index}")
+    # 每个分区各读一次,且两层的行数上限不同(全局 300 / 单库 100)。
+    assert store.reads[0] == ("", RETRIEVAL_EXPERIENCE_MAX_ENTRIES)
+    assert store.reads[1] == ("nb-0", RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES)
+    assert len(store.reads) == _EXPERIENCE_CACHE_MAX_PARTITIONS + 1
+
+    store.reads.clear()
+    _cached_experiences(store, "nb-0")       # 命中 ⇒ 顺带挪到 LRU 尾
+    assert store.reads == []
+
+    _cached_experiences(store, "nb-new")     # 第 65 个 ⇒ 淘汰最久未用的 nb-1
+    store.reads.clear()
+    _cached_experiences(store, "nb-1")
+    assert store.reads == [
+        ("nb-1", RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES)], "nb-1 应已被淘汰"
+
+    store.reads.clear()
+    _cached_experiences(store, "nb-0")
+    _cached_experiences(store, "")
+    assert store.reads == [], "刚用过的分区与全局分区都该还在"
+
+
+def test_a_changed_version_signal_invalidates_every_partition():
+    """签名是**全表**的,所以任何分区被写过都让整份缓存(含全局)失效。
+
+    刻意不做每分区签名:那要么多发 N 次聚合查询,要么给 store 加一个只有缓存
+    用得上的方法,换来的只是「别的库刚蒸完时本库少读一次表」这点收益。
+    """
+    from app.services.reasoning_retrieval import _cached_experiences
+
+    _reset_memo()
+    store = _PartitionCountingStore()
+    _cached_experiences(store, "")
+    _cached_experiences(store, "nb-a")
+    store.reads.clear()
+    _cached_experiences(store, "")
+    _cached_experiences(store, "nb-a")
+    assert store.reads == []
+
+    store.signal = (2, "2026-08-20T00:00:00+00:00")
+    store.reads.clear()
+    _cached_experiences(store, "")
+    _cached_experiences(store, "nb-a")
+    assert [partition for partition, _limit in store.reads] == ["", "nb-a"]
+
+
+def test_a_dead_store_can_never_serve_its_successors_partitions():
+    """弱引用身份判据对分区缓存同样成立:两个活 store 即使签名逐字相同,也不
+    共享任何一个分区的快照。"""
+    from app.services.reasoning_retrieval import _cached_experiences
+
+    _reset_memo()
+    first = _PartitionCountingStore()
+    second = _PartitionCountingStore()          # 刻意同签名
+    assert _cached_experiences(first, "nb-a") == [{"id": "rx-nb-a"}]
+    second.read_partition = lambda notebook_id, limit: [{"id": "other"}]
+    assert _cached_experiences(second, "nb-a") == [{"id": "other"}]
+
+
+# ------------------------------------------- ⑩ 纯函数:select_experiences_layered
+
+def _entry(entry_id, action, rationale, *, support=1, situation=None):
+    return {"id": entry_id, "situation": situation or _situation(),
+            "action": action, "polarity": "good", "rationale": rationale,
+            "support": support}
+
+
+def test_layered_selection_puts_primary_first_and_counts_it():
+    situation = _situation()
+    primary = [_entry("p1", "ppr", "本库", support=1)]
+    fallback = [_entry("g1", "enumerate", "全局", support=99)]
+
+    picked = select_experiences_layered(primary, fallback, situation)
+
+    assert [entry["id"] for entry in picked.entries] == ["p1", "g1"]
+    assert picked.primary_count == 1, "支持度高得多的全局条目也不能抢到前面"
+
+
+def test_layered_selection_fills_the_quota_after_a_cross_layer_collision():
+    """被 primary 占掉的动作不该白白吃掉一个 fallback 名额。
+
+    变异验证:把 fallback 一侧的 ``top_k`` 从 ``limit`` 改成「剩余名额」
+    (``limit - primary_count``),这条会翻红——fallback 只会交回 ``g-ppr``
+    一条,而它撞车被跳过,名单只剩 ``p-ppr`` 一条。
+    """
+    situation = _situation()
+    primary = [_entry("p-ppr", "ppr", "本库 ppr", support=9)]
+    fallback = [
+        _entry("g-ppr", "ppr", "全局 ppr", support=8),
+        _entry("g-enum", "enumerate", "全局 enumerate", support=7),
+        _entry("g-outline", "outline", "全局 outline", support=6),
+    ]
+
+    picked = select_experiences_layered(primary, fallback, situation, top_k=3)
+
+    assert [entry["id"] for entry in picked.entries] == [
+        "p-ppr", "g-enum", "g-outline"]
+    assert picked.primary_count == 1
+
+
+def test_layered_selection_degrades_to_the_fallback_when_primary_is_empty():
+    """新库的冷启动形态:本库还没攒出任何东西,全靠全局分区。"""
+    situation = _situation()
+    fallback = [_entry("g1", "ppr", "全局")]
+
+    picked = select_experiences_layered([], fallback, situation)
+
+    assert [entry["id"] for entry in picked.entries] == ["g1"]
+    assert picked.primary_count == 0
+
+
+def test_layered_selection_never_duplicates_a_row_given_one_list_twice():
+    """两层是同一份列表时不得出现重复行——``notebook_id=""`` 的 run(以及任何
+    把同一份列表传两次的调用方)不该把同一条打法渲染两遍。"""
+    situation = _situation()
+    entries = [_entry("a", "ppr", "一"), _entry("b", "enumerate", "二")]
+
+    picked = select_experiences_layered(entries, entries, situation)
+
+    assert [entry["id"] for entry in picked.entries] == ["a", "b"]
+    assert picked.primary_count == 2
+
+
+def test_notebook_entries_counts_delivered_rows_not_selected_ones(repo):
+    """``notebook_entries`` 与 ``entries`` 同口径:按**送达**行数封顶。
+
+    三条本库条目全部进了 top-k(``primary_count == 3``),但 600 字符硬顶按整行
+    只装得下 2 条。两个计数都必须是 2——按选中数报 3 会说「模型收到了三条本库
+    打法」,而它只收到两条。
+    """
+    notebook = _seed(repo)
+    rationale_base = "B" * 120
+    for action in ("enumerate", "ppr", "exact_lookup"):
+        _write(repo, action, "good", f"{action}-{rationale_base}",
+               partition=notebook.id)
+
+    llm = _SeqLLM()
+    retriever, limits = _retriever(repo, llm)
+    result = _run(retriever, notebook, limits)
+
+    # 前提:三条都在本库分区、都被选中——否则下面的 min 分支根本没被走到。
+    selection = select_experiences_layered(
+        repo.retrieval_experiences.read_partition(notebook.id, 100),
+        repo.retrieval_experiences.read_partition("", 300),
+        _situation())
+    assert selection.primary_count == 3
+
+    detail = _steps(result, "experience")[0].detail
+    assert detail["entries"] == 2
+    assert detail["notebook_entries"] == 2
+
+
+def test_a_partition_that_is_not_a_string_is_refused():
+    """``None`` 不是「全局分区」的别名,是一次事故。
+
+    ``""`` 是一个**真实**分区(共享的那一个),所以把丢了的 id 静静归一成它,
+    等于把共享分区的打法当成某个库自己的——而 T1 让 store 的 ``read_partition``
+    对 ``None`` 抛 TypeError 正是为了挡住这件事,缓存层不该把它吞掉。
+    """
+    from app.services.reasoning_retrieval import (
+        _cached_experience_layers, _cached_experiences,
+    )
+
+    _reset_memo()
+    store = _PartitionCountingStore()
+    with pytest.raises(TypeError):
+        _cached_experiences(store, None)
+    with pytest.raises(TypeError):
+        _cached_experience_layers(store, None)
+    assert store.reads == [], "拒绝必须发生在任何一次读之前"
+
+
+def test_the_two_layers_are_loaded_under_one_signature():
+    """每个消费点只付**一次** ``version_signal()``。
+
+    它是 COUNT + MAX 的全表聚合,分区后表可达「300 + 100 × 有流量的库数」行,
+    每层各算一次就是把最贵的那一步翻倍。顺带挡住一个更隐蔽的洞:两层各算各的
+    签名时,两次之间落一笔蒸馏写入会让第二次的新签名把第一次刚装进去的分区整份
+    清掉,于是这一对快照落在两个不同的表版本上。
+    """
+    from app.services.reasoning_retrieval import _cached_experience_layers
+
+    _reset_memo()
+
+    class _SignalCounting(_PartitionCountingStore):
+        def __init__(self):
+            super().__init__()
+            self.signal_calls = 0
+
+        def version_signal(self):
+            self.signal_calls += 1
+            return self.signal
+
+    store = _SignalCounting()
+    primary, fallback = _cached_experience_layers(store, "nb-a")
+    assert store.signal_calls == 1
+    assert [partition for partition, _limit in store.reads] == ["", "nb-a"]
+    assert primary == [{"id": "rx-nb-a"}] and fallback == [{"id": "rx-global"}]
+
+    # 不属于任何库的调用方没有本库层——不能把全局层塞两遍,否则下游会把同一批行
+    # 既算成本库又算成回退,``notebook_entries`` 当场说谎。
+    empty_primary, shared = _cached_experience_layers(store, "")
+    assert empty_primary == []
+    assert shared == [{"id": "rx-global"}]

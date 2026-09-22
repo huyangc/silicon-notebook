@@ -12,6 +12,7 @@ import math
 import threading
 import time
 import weakref
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
@@ -46,7 +47,10 @@ from app.repositories.lexical_query import (
     MAX_EXACT_PHRASE_CHARS, MAX_QUOTED_PHRASES, exact_probe_query,
     exact_probe_terms,
 )
-from app.repositories.ports import RETRIEVAL_EXPERIENCE_MAX_ENTRIES
+from app.repositories.ports import (
+    RETRIEVAL_EXPERIENCE_MAX_ENTRIES,
+    RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES,
+)
 from app.services.agent_profile_block import (
     clip_block_value, render_profile_block, rendered_row_count,
 )
@@ -94,7 +98,7 @@ from app.services.retrieval_experience_block import (
     CONSULT_MEMORY_TOP_K, action_id_for, adopted_entry_ids, clip_rationale,
     render_consult_block, render_experience_block,
     rendered_row_count as rendered_experience_count, select_consultable,
-    select_experiences, worst_experience_for,
+    select_experiences_layered, worst_experience_for,
 )
 from app.services.retrieval_experience_projection import current_situation
 from app.services.retrieval import (
@@ -910,7 +914,12 @@ def profile_wiring_active(settings, profile_store) -> bool:
 
 
 def experience_wiring_active(settings, experience_store) -> bool:
-    """接线层面上,部署级全局的「检索打法」是否注入(kill switch + store 在)。
+    """接线层面上,「检索打法」是否注入(kill switch + store 在)。
+
+    2026-09-22 起这张表按笔记本分区(``''`` 是全局分区),但这条判据**不分层**:
+    它管的是「这个调用方到底读不读这张表」,两层是同开同关的——只开一层既没有
+    产品含义(本库为空是新库的常态,那时回退层就是全部),也会让下面那条「不注入
+    了但每 run 还在读表」的半关状态换个地方重新出现。
 
     与 ``profile_wiring_active`` 同款、同理由的**单点判定**:注入面有读取、渲染、
     plan 注入、reflect 注入、轨迹步、采用回写六个消费点,各写一份判据就会剩下
@@ -957,44 +966,149 @@ def search_profile_wiring_active(settings, identity_store) -> bool:
 #: 观测到的 ``ask_jobs.mode`` 对得上——对不上就等于永远选不到自己攒的条目。
 _EXPERIENCE_RUN_MODE = "reasoning"
 
-# 进程级经验库快照。表是**部署级全局**的(没有 notebook/owner 维度),所以一份缓存
-# 服务所有 run;key 是 store 的 ``version_signal()``(行数 + 最新 updated_at),
-# 内容变了就自然失效。
+# 进程级经验库快照。表从 2026-09-22 起按 ``notebook_id`` **分区**(``''`` 是全局
+# 分区),所以缓存也按分区存:一个进程同时服务很多库,一份「整表快照」既不存在也
+# 没意义。有效性判据仍是 store 身份 + 一次 ``version_signal()``(行数 + 最新
+# updated_at)——它是**全表**的签名,所以任何分区被写过都会让**整份**缓存失效。
 #
-# 换来的是:每 run 从「读回至多 300 行 + 每行两次 JSON 反序列化 + 逐行打分」降到
-# 「一次聚合查询 + 逐行打分」。刻意**不做** TTL:TTL 会让刚蒸出来的条目要等一段
-# 时间才生效,而这条判据是精确的、代价也只有一次聚合。
+# ⚠ 「整份失效」的代价要说清楚,它不是零:失效频率随有流量的库数 N **线性**增长
+# (任何一个库蒸出一条,所有库的快照一起作废),所以 memo 的命中率随 N 衰减,极端
+# 情况下退化成「每 run 都重读」。接受它是因为真正的账在**查询**上而不在命中率上
+# ——一次 miss 的代价是两条按主键分区扫描(至多 300 / 100 行的封闭枚举值行),而
+# 每 run 无论命中与否都要付的那次 ``version_signal()`` 聚合,走
+# ``_cached_experience_layers`` 之后每个消费点只剩**一次**。要把失效做成按分区的,
+# 就得给 store 加一个只有缓存用得上的分区签名方法、或每 run 多发 N 次聚合,换来的
+# 只是「别的库刚蒸完时本库少扫一次分区」。
+#
+# 换来的是:每 run 从「读回至多 300+100 行 + 每行两次 JSON 反序列化 + 逐行打分」
+# 降到「一次聚合查询 + 逐行打分」。刻意**不做** TTL:TTL 会让刚蒸出来的条目要等
+# 一段时间才生效,而这条判据是精确的、代价也只有一次聚合。
+#
+# 分区项走 LRU 上界:进程见过的库数没有天花板(一个部署几千个库很正常),无界字典
+# 会把一份「有界的注入成本」悄悄变成一条随流量增长的内存泄漏。全局分区**不进** LRU
+# ——它是每个 run 的回退层,一定被读,进了 LRU 只会被冷门库的轮换挤掉再重读。
 _EXPERIENCE_CACHE_LOCK = threading.Lock()
+#: 缓存里最多留几个**非全局**分区的快照。64 个库 × 至多 100 行的封闭枚举值行,
+#: 是一个进程稳态下可以接受的常数上界。
+_EXPERIENCE_CACHE_MAX_PARTITIONS = 64
+#: 单一字典,因为用例(以及任何想清干净的调用方)只需要 ``.clear()`` 一处就能把
+#: 整份缓存——身份、签名、全局分区、LRU——一起归零。键:``store_ref``/``signal``/
+#: ``global``/``partitions``(``OrderedDict``,最近使用的在尾)。
 _EXPERIENCE_CACHE: Dict[str, object] = {}
 
 
-def _cached_experiences(store) -> List[dict]:
-    """读一次经验库(带进程级 memo)。任何异常由调用方 fail-open 吞掉。
+def _experience_cache_fresh(store, signal) -> bool:
+    """当前缓存是否属于 ``store`` 且签名仍是 ``signal``。**必须持锁调用**。
 
-    返回的列表**只读**:多个 run 共享同一份对象,任何原地修改都会污染别的 run。
-    下游 ``select_experiences``/``render_experience_block`` 都是纯函数。
+    codex #524 R7→R11 P2:store 身份用**弱引用**而不是 id()——id() 在旧 store
+    被回收后可以被新对象复用,配上恰好相同的 (行数, 最新时间) 签名就会把 A 库的
+    打法注进 B 库的 run。弱引用把这个洞按构造关掉:旧 store 一死,``ref() is
+    store`` 就再也不可能为真;两个活对象则本来就不共享身份。
     """
-    # codex #524 R7→R11 P2:store 身份用**弱引用**而不是 id()——id() 在旧
-    # store 被回收后可以被新对象复用,配上恰好相同的 (行数, 最新时间) 签名就会
-    # 把 A 库的打法注进 B 库的 run。弱引用把这个洞按构造关掉:旧 store 一死,
-    # ``ref() is store`` 就再也不可能为真;两个活对象则本来就不共享身份。
-    signal = tuple(store.version_signal())
+    ref = _EXPERIENCE_CACHE.get("store_ref")
+    return (
+        ref is not None
+        and ref() is store  # type: ignore[operator]
+        and _EXPERIENCE_CACHE.get("signal") == signal
+    )
+
+
+def _experience_partition_key(notebook_id) -> str:
+    """分区键。``""`` 是全局分区;**任何非 str 都直接 TypeError**。
+
+    刻意不写成 ``str(notebook_id or "")``:那会把 ``None``(以及任何丢了 id 的
+    调用方)悄悄归一成全局分区,正好抵消掉 store 侧 ``read_partition`` 为 ``None``
+    抛 TypeError 的那道守卫。``""`` 是一个**真实**分区——共享的那一个——所以
+    「id 没传到」与「要读全局」必须长得不一样,否则一次接线事故会静静地把共享
+    分区的打法当成某个库自己的。
+    """
+    if not isinstance(notebook_id, str):
+        raise TypeError(
+            "retrieval experience partition must be a str; "
+            f"got {type(notebook_id).__name__}")
+    return notebook_id
+
+
+def _cached_partition(store, signal, key: str) -> List[dict]:
+    """在**已经算好的** ``signal`` 下取一个分区的快照(命中即返回,否则读一次)。
+
+    签名由调用方传进来而不是在这里算,是为了让「装两层」只付一次
+    ``version_signal()`` 聚合查询,也让两层落在**同一个**签名下——各算各的话,
+    两次之间落一笔写就会让第二层把第一层刚装进去的快照整份清掉。
+    """
     with _EXPERIENCE_CACHE_LOCK:
-        ref = _EXPERIENCE_CACHE.get("store_ref")
-        if (
-            ref is not None
-            and ref() is store  # type: ignore[operator]
-            and _EXPERIENCE_CACHE.get("signal") == signal
-        ):
-            return _EXPERIENCE_CACHE.get("entries")  # type: ignore[return-value]
-    entries = list(store.read_partition("", RETRIEVAL_EXPERIENCE_MAX_ENTRIES))
+        if _experience_cache_fresh(store, signal):
+            if not key:
+                cached = _EXPERIENCE_CACHE.get("global")
+                if cached is not None:
+                    return cached  # type: ignore[return-value]
+            else:
+                partitions = _EXPERIENCE_CACHE.get("partitions")
+                if isinstance(partitions, OrderedDict) and key in partitions:
+                    partitions.move_to_end(key)
+                    return partitions[key]
+    limit = (
+        RETRIEVAL_EXPERIENCE_MAX_ENTRIES if not key
+        else RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES
+    )
+    entries = list(store.read_partition(key, limit))
     with _EXPERIENCE_CACHE_LOCK:
         # 后写者赢:两个 run 同时未命中时都会读一次,写回的是同一份内容(签名相同)
         # 或更新的那一份(签名不同)。都不是错误,而抢锁读表会把一次 I/O 变成串行点。
-        _EXPERIENCE_CACHE["store_ref"] = weakref.ref(store)
-        _EXPERIENCE_CACHE["signal"] = signal
-        _EXPERIENCE_CACHE["entries"] = entries
+        if not _experience_cache_fresh(store, signal):
+            _EXPERIENCE_CACHE.clear()
+            _EXPERIENCE_CACHE["store_ref"] = weakref.ref(store)
+            _EXPERIENCE_CACHE["signal"] = signal
+        if not key:
+            _EXPERIENCE_CACHE["global"] = entries
+        else:
+            partitions = _EXPERIENCE_CACHE.get("partitions")
+            if not isinstance(partitions, OrderedDict):
+                partitions = OrderedDict()
+                _EXPERIENCE_CACHE["partitions"] = partitions
+            partitions[key] = entries
+            partitions.move_to_end(key)
+            while len(partitions) > _EXPERIENCE_CACHE_MAX_PARTITIONS:
+                partitions.popitem(last=False)
     return entries
+
+
+def _cached_experiences(store, notebook_id: str = "") -> List[dict]:
+    """读一次**某个分区**的经验库(带进程级 memo)。异常由调用方 fail-open 吞掉。
+
+    ``notebook_id=""`` 是全局分区,也是默认值——它是这张表接入时唯一的形态,
+    也是任何「不属于某个库」的调用方(蒸馏侧、脚本)该看到的那一份。
+
+    注入侧的三个消费点都走 ``_cached_experience_layers``(一次签名装两层);
+    这个单层入口留给只关心一个分区的调用方。
+
+    返回的列表**只读**:多个 run 共享同一份对象,任何原地修改都会污染别的 run。
+    下游 ``select_experiences_layered``/``render_experience_block`` 都是纯函数。
+    """
+    key = _experience_partition_key(notebook_id)
+    return _cached_partition(store, tuple(store.version_signal()), key)
+
+
+def _cached_experience_layers(store, notebook_id) -> Tuple[List[dict], List[dict]]:
+    """一次 ``version_signal()`` 取回 ``(本库分区, 全局分区)`` 两层快照。
+
+    注入侧每个消费点都只能付**一次**聚合查询:``version_signal()`` 是
+    COUNT + MAX 的全表聚合,分区之后这张表可以到「300 + 100 × 有流量的库数」
+    行,每个消费点算两次就是把最贵的那一步翻倍。顺带修掉的是一个更隐蔽的洞:
+    两层各算各的签名时,两次之间落一笔蒸馏写入会让第二次的新签名把第一次刚
+    装进缓存的分区整份清掉,于是这一对快照在**两个**不同的表版本上——本库层
+    的条目可能已经被全局层那次失效冲掉了。
+
+    ``notebook_id == ""`` 的调用方(不属于任何库)没有本库层,返回空的第一层
+    而不是把全局层塞两遍:后者会让下游把同一批行既算成本库又算成回退,轨迹上
+    的 ``notebook_entries`` 当场说谎。
+    """
+    key = _experience_partition_key(notebook_id)
+    signal = tuple(store.version_signal())
+    fallback = _cached_partition(store, signal, "")
+    if not key:
+        return [], fallback
+    return _cached_partition(store, signal, key), fallback
 
 
 # trace summary 会上屏,所以清单名必须是界面词。刻意**不**复用后端
@@ -2045,6 +2159,8 @@ def _zero_hit_nudge_note(
     nudged_actions: set,
     entries: Sequence[Mapping[str, object]],
     situation: Mapping[str, object],
+    *,
+    primary_count: int = 0,
 ) -> Optional[Tuple[str, str]]:
     """挑出**至多一个**够格提示的动作,连带它对应的经验库「坏」条目理由。
 
@@ -2055,13 +2171,18 @@ def _zero_hit_nudge_note(
     比不提示更糟。返回 ``(action, note)``,``action`` 是存储词表拼写(调用方用
     它更新 ``nudged_actions``),``note`` 是可以直接拼进 ``summary`` 的中文提示,
     rationale 原样嵌入(P4 开工裁决⑤)。
+
+    ``primary_count``:``entries`` 的前这么多条属于本库分区,同分同支持度时它们
+    赢(见 ``worst_experience_for``)。只提示一条,所以这个平局不是边角——本库
+    与全局对同一个动作得出同一条结论,正是分区库的常态形状。
     """
     for action in _ZERO_HIT_TRACKED_ACTIONS:
         if action in nudged_actions:
             continue
         if zero_hit_by_action.get(action, 0) < _ZERO_HIT_NUDGE_THRESHOLD:
             continue
-        entry = worst_experience_for(entries, situation, action)
+        entry = worst_experience_for(entries, situation, action,
+                                     primary_count=primary_count)
         if entry is None:
             continue
         action_id = action_id_for(action)
@@ -2077,6 +2198,38 @@ def _zero_hit_nudge_note(
         )
         return action, note
     return None
+
+
+def _zero_hit_nudge_for(
+    store, notebook_id, zero_hit_by_action: Mapping[str, int],
+    nudged_actions: set, situation: Mapping[str, object],
+) -> Optional[Tuple[str, str]]:
+    """读两层快照 + 挑一条零命中提示。``_zero_hit_nudge_note`` 的取数外壳。
+
+    存在的理由是分层要**同时**把合并列表和分界下标交给纯函数,而 run() 里那处
+    调用不该长出一段取数代码:纯函数保持纯(用例直接喂列表),取数保持一处(一次
+    ``version_signal()`` 装两层)。
+    """
+    primary, fallback = _cached_experience_layers(store, notebook_id)
+    return _zero_hit_nudge_note(
+        zero_hit_by_action, nudged_actions, [*primary, *fallback], situation,
+        primary_count=len(primary))
+
+
+def _consultable_rows(
+    store, notebook_id, situation: Mapping[str, object], *,
+    exclude_ids, zero_hit_actions, top_k: int,
+) -> List[Mapping[str, object]]:
+    """读两层快照 + 选出这一轮 consult_memory 该还回去的新行。
+
+    与 ``_zero_hit_nudge_for`` 同款外壳、同一条理由:合并列表与分界下标一起
+    交给 ``select_consultable``,本库分区的条目在同分同支持度时赢。
+    """
+    primary, fallback = _cached_experience_layers(store, notebook_id)
+    return select_consultable(
+        [*primary, *fallback], situation, exclude_ids=exclude_ids,
+        zero_hit_actions=zero_hit_actions, primary_count=len(primary),
+        top_k=top_k)
 
 
 def _undelivered_retrieval_note(
@@ -4495,7 +4648,7 @@ class ReasoningRetriever:
             detail={"reason": "kg_unavailable"}))
 
     def _first_round_prompt_blocks(self, state: "_ReasoningRunState") -> None:
-        """注入三块规划背景:Agent 库理解、部署级检索打法、集合地图。
+        """注入三块规划背景:Agent 库理解、检索打法(本库分区 + 全局回退)、集合地图。
 
         三者都是 prompt 脚手架而非证据:不开任何检索通道、不能被 [k] 引用。
         顺序(理解 → 打法 → 地图)承重,见搬过来的原注释。
@@ -4552,9 +4705,13 @@ class ReasoningRetriever:
             except Exception:  # noqa: BLE001 — 见上:理解是背景,不是必需品
                 profile_block = ""
                 profile_raw_blocks = []
-        # 部署级全局的「检索打法」(Agentic Memory P2 §6.1)。紧挨着上面那块
-        # 读:两者是同一类东西(规划背景,不是证据),形态也刻意做成同一套
+        # 「检索打法」(Agentic Memory P2 §6.1;2026-09-22 起按库分区)。紧挨着
+        # 上面那块读:两者是同一类东西(规划背景,不是证据),形态也刻意做成同一套
         # ——表头 + 一句框定语 + `- ` 行 + 一个整块硬顶 + 按**送达**行数记步。
+        #
+        # 分层:名额先给**本库分区**的条目,不够再由全局分区补齐(跨层仍是同一个
+        # 动作只留一条)。本库优先是产品规则而不是实现细节——「这个库里哪种查法
+        # 好用」才是用户要的那件事,全局分区只是新库还没攒出东西时的冷启动回退。
         #
         # 与理解块的差别只有一条,但它是本特性的红线:理解块讲「这个库是什么」,
         # 打法讲「这类问题该用哪个通道去查」。后者**绝不**触及来源范围——那是
@@ -4573,18 +4730,27 @@ class ReasoningRetriever:
                     retrieval_effort=(
                         limits.effort if limits is not None else ""),
                 )
-                experience_entries = select_experiences(
-                    _cached_experiences(self.retrieval_experiences), situation)
+                primary, fallback = _cached_experience_layers(
+                    self.retrieval_experiences, notebook_id)
+                selection = select_experiences_layered(
+                    primary, fallback, situation)
+                experience_entries = list(selection.entries)
                 experience_block = render_experience_block(experience_entries)
                 if experience_block:
+                    # 送达行数,不是选中行数:整块 600 字符硬顶按整行丢弃装不下
+                    # 的条目(见 render_experience_block)。
+                    delivered = rendered_experience_count(experience_block)
                     record(TraceStep(
                         step_type="experience",
                         summary="带上以往检索攒下的打法",
                         detail={
-                            # 送达行数,不是选中行数:整块 600 字符硬顶按整行
-                            # 丢弃装不下的条目(见 render_experience_block)。
-                            "entries": rendered_experience_count(
-                                experience_block),
+                            "entries": delivered,
+                            # 送达行里有几条来自本库分区。同样按**送达**口径:
+                            # 选中集是本库在前(见 select_experiences_layered),
+                            # 硬顶只丢尾部、不重排,所以与分界下标求 min 就是
+                            # 交集大小。0 表示这一轮全靠全局分区回退。
+                            "notebook_entries": min(
+                                delivered, selection.primary_count),
                             "chars": len(experience_block)}))
             except AskCancelled:
                 raise
@@ -6730,9 +6896,9 @@ class ReasoningRetriever:
                         intent_detail, mode=_EXPERIENCE_RUN_MODE,
                         retrieval_effort=(
                             limits.effort if limits is not None else ""))
-                    picked_nudge = _zero_hit_nudge_note(
+                    picked_nudge = _zero_hit_nudge_for(
+                        self.retrieval_experiences, notebook_id,
                         zero_hit_by_action, nudged_actions,
-                        _cached_experiences(self.retrieval_experiences),
                         nudge_situation)
                 except AskCancelled:
                     raise
@@ -7151,8 +7317,8 @@ class ReasoningRetriever:
                             for e in experience_entries[
                                 : rendered_experience_count(experience_block)]
                         } if experience_block else set()
-                        new_consult_rows = select_consultable(
-                            _cached_experiences(self.retrieval_experiences),
+                        new_consult_rows = _consultable_rows(
+                            self.retrieval_experiences, notebook_id,
                             consult_situation,
                             exclude_ids=(
                                 consult_delivered_ids | delivered_passive_ids
