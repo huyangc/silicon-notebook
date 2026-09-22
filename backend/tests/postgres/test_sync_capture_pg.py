@@ -101,7 +101,7 @@ def test_the_migration_installs_the_generated_functions_and_triggers(migrated):
                 "SELECT p.proname, p.prokind, p.prosecdef, l.lanname, p.prosrc "
                 "FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
                 "JOIN pg_language l ON l.oid=p.prolang "
-                "WHERE n.nspname=current_schema() AND p.proname LIKE 'sync_capture%'"
+                "WHERE n.nspname=current_schema() AND p.proname LIKE 'sync\\_capture%'"
             ).fetchall()
         }
         triggers = {
@@ -136,7 +136,7 @@ def test_no_installed_function_materializes_a_whole_row(migrated):
             for row in conn.execute(
                 "SELECT p.prosrc FROM pg_proc p "
                 "JOIN pg_namespace n ON n.oid=p.pronamespace "
-                "WHERE n.nspname=current_schema() AND p.proname LIKE 'sync_capture%'"
+                "WHERE n.nspname=current_schema() AND p.proname LIKE 'sync\\_capture%'"
             ).fetchall()
         ]
 

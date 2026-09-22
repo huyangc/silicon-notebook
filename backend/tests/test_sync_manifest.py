@@ -614,6 +614,40 @@ def test_registered_sync_key_has_a_covering_unique_surface_in_sqlite(
     assert not problems, "; ".join(problems)
 
 
+def test_the_sqlite_primary_key_matches_the_row_key_column_for_column(
+    _sqlite_schema_template,
+):
+    """两端主键平价, **含顺序**。
+
+    ``app.migration.sync.capture.key_columns`` 解析的是 PostgreSQL 迁移 DDL 里
+    的主键(没登记 ``TableSyncSpec.key`` 时), 捕获触发器按那个顺序拼 ``key_json``
+    —— 两端各自建库, 所以「只改了一端主键」的迁移在别处没有任何东西会红: PG 侧
+    照常跑, SQLite 侧照常跑, 只有跨环境同步时目标端按另一种身份找行、一行也匹配
+    不上。顺序同理: 同一列集换个次序就是另一个 JSON 对象。
+
+    只覆盖**未登记 key** 的表 —— 登记了 key 的两张表在 SQLite 上根本没有主键
+    (v84 用唯一索引承担), 它们的平价由上一条守卫按列集比对。
+    """
+    from app.migration.sync.capture import key_columns
+
+    conn = sqlite3.connect(f"file:{_sqlite_schema_template}?mode=ro", uri=True)
+    try:
+        problems: list[str] = []
+        for table in synced_tables():
+            if spec_for(table).key:
+                continue
+            sqlite_key = _sqlite_catalog_primary_key(conn, table)
+            row_key = key_columns(table)
+            if sqlite_key != row_key:
+                problems.append(
+                    f"{table}: SQLite primary key {sqlite_key} != sync row key "
+                    f"{row_key} (parsed from the PostgreSQL migration DDL)"
+                )
+    finally:
+        conn.close()
+    assert not problems, "; ".join(problems)
+
+
 def test_registered_sync_key_guard_actually_detects_a_missing_unique_surface():
     """Mutation verification for the guard above: build an in-memory SQLite
     table shaped like a registered-key table but WITHOUT the unique index

@@ -1269,13 +1269,13 @@ class UnifiedKgStore:
                     normalize_timestamp(now),
                     generation,
                 ))
-            # ON CONFLICT DO NOTHING: 0064 gave this table a composite primary
-            # key (community_id, canonical_id) -- a repeated pair is the same row.
+            # ON CONFLICT (community_id, canonical_id) DO NOTHING: only the 0064
+            # composite primary key's conflict is swallowed, nothing else.
             execute_many(
                 db,
                 "INSERT INTO community_members "
                 "(canonical_id, notebook_id, level, community_id, canonical_name, centrality, generation) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                "VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (community_id, canonical_id) DO NOTHING",
                 [(m, notebook_id, level, cid, names.get(m, m), deg.get(m, 0.0),
                   generation) for m in members])
 
@@ -1317,13 +1317,13 @@ class UnifiedKgStore:
                 "FROM community_members "
                 "WHERE notebook_id=%s AND level != %s AND generation=%s",
                 (notebook_id, exclude_level, from_generation)).fetchall()
-            # ON CONFLICT DO NOTHING: 0064 gave this table a composite primary
-            # key (community_id, canonical_id) -- a repeated pair is the same row.
+            # ON CONFLICT (community_id, canonical_id) DO NOTHING: only the 0064
+            # composite primary key's conflict is swallowed, nothing else.
             execute_many(
                 db,
                 "INSERT INTO community_members "
                 "(canonical_id, notebook_id, level, community_id, canonical_name, centrality, generation) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                "VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (community_id, canonical_id) DO NOTHING",
                 [(m["canonical_id"], notebook_id, m["level"],
                   remap[str(m["community_id"])], m["canonical_name"],
                   m["centrality"], to_generation)

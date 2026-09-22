@@ -30,7 +30,11 @@ from datetime import datetime
 import pytest
 
 from app.core.config import Settings
-from app.migration.shadow.postgres_catalog import EXPECTED_CAPTURE_DDL
+from app.migration.shadow.postgres_catalog import (
+    EXPECTED_CAPTURE_DDL,
+    _capture_ddl_from,
+)
+from app.migration.shadow.postgres_catalog import _MIGRATIONS as _PACKAGED_MIGRATIONS
 from app.migration.sync.capture import (
     expected_postgres_function_names,
     expected_postgres_trigger_names,
@@ -133,7 +137,69 @@ def test_the_postgres_migration_carries_the_generated_text_verbatim():
         )
         if sql + ";" not in text
     ]
-    assert missing == [], missing
+    assert missing == [], (
+        f"0064 与生成器不一致, 缺失: {missing}。重新渲染: "
+        "python3 scripts/generate_sync_capture_migration.py"
+    )
+
+
+def test_the_migration_parse_takes_the_last_definition_of_each_object():
+    """一条后续迁移 ``CREATE OR REPLACE`` 掉某个捕获函数、或重建某条触发器时,
+    期望值必须取**最后一次**定义 —— 线上 catalog 里留下的就是那一份。按出现
+    顺序做字典赋值即可, 但前提是 ``CREATE OR REPLACE FUNCTION`` 也被认出来
+    (只认 ``CREATE FUNCTION`` 的话, 覆盖后的期望会停留在旧文本, 守卫从此对着
+    一份已经不存在的函数体报 drift)。"""
+    later_migration = (
+        "CREATE OR REPLACE FUNCTION sync_capture_sources() RETURNS trigger\n"
+        "LANGUAGE plpgsql AS $later$\nBEGIN\n  RETURN NULL;\nEND;\n$later$;\n"
+        "DROP TRIGGER sync_capture_sources ON sources;\n"
+        "CREATE TRIGGER sync_capture_sources AFTER INSERT ON sources "
+        "FOR EACH ROW EXECUTE FUNCTION sync_capture_sources();\n"
+    )
+    packaged = [
+        migration.sql for migration in _PACKAGED_MIGRATIONS
+    ]
+
+    triggers, bodies = _capture_ddl_from([*packaged, later_migration])
+
+    assert bodies["sync_capture_sources"] == "\nBEGIN\n  RETURN NULL;\nEND;\n"
+    assert triggers["sync_capture_sources"] == (
+        "CREATE TRIGGER sync_capture_sources AFTER INSERT ON sources "
+        "FOR EACH ROW EXECUTE FUNCTION sync_capture_sources()"
+    )
+    # 其它 45 张表不受这条迁移影响。
+    assert len(bodies) == 46 and len(triggers) == 46
+
+
+def test_the_migration_parse_retires_a_dropped_capture_object():
+    """对称的另一半: 后续迁移 DROP 掉捕获函数/触发器时, 期望集里也要消失 ——
+    否则守卫会一直索要一个 schema 早已不该有的对象, 那张表永远升不上去。"""
+    later_migration = (
+        "DROP TRIGGER IF EXISTS sync_capture_sources ON sources;\n"
+        "DROP FUNCTION IF EXISTS sync_capture_sources();\n"
+    )
+    packaged = [migration.sql for migration in _PACKAGED_MIGRATIONS]
+
+    triggers, bodies = _capture_ddl_from([*packaged, later_migration])
+
+    assert "sync_capture_sources" not in triggers
+    assert "sync_capture_sources" not in bodies
+    assert len(triggers) == 45 and len(bodies) == 45
+
+
+def test_the_migration_parse_ignores_commented_out_ddl():
+    """只认行首语句: 注释里出现同样的字眼不算 DDL。"""
+    commented = (
+        "-- CREATE TRIGGER sync_capture_ghost AFTER INSERT ON ghost "
+        "FOR EACH ROW EXECUTE FUNCTION sync_capture_ghost();\n"
+        "-- DROP FUNCTION sync_capture_sources();\n"
+    )
+    packaged = [migration.sql for migration in _PACKAGED_MIGRATIONS]
+
+    triggers, bodies = _capture_ddl_from([*packaged, commented])
+
+    assert "sync_capture_ghost" not in triggers
+    assert "sync_capture_sources" in bodies
 
 
 def test_the_catalog_guards_parse_of_the_migration_equals_the_generator():

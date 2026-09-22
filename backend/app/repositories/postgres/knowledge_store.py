@@ -2578,12 +2578,14 @@ class KnowledgeStore:
         """Forward maintenance (P0-4 reverse index) for FRESH inserts — rows
         never had prior entries, so a plain batched INSERT suffices (no
         DELETE-first)."""
-        # ON CONFLICT DO NOTHING: 0064 gave this table a composite primary key
-        # (object_id, source_id) -- a repeated pair is the same row.
+        # ON CONFLICT (object_id, source_id) DO NOTHING: 0064 gave this table
+        # that composite primary key and a repeated pair is the same row. The
+        # target is named, not inferred: only that one conflict is swallowed,
+        # and any other constraint still raises (same rule as the SQLite twin).
         execute_many(
             connection,
             "INSERT INTO knowledge_object_sources (object_id, source_id, notebook_id) "
-            "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+            "VALUES (%s, %s, %s) ON CONFLICT (object_id, source_id) DO NOTHING",
             rows,
         )
 
@@ -2799,12 +2801,12 @@ class KnowledgeStore:
         )
         source_ids = cls.source_ids_from_evidence(evidence_json)
         if source_ids:
-            # ON CONFLICT DO NOTHING: 0064 gave this table a composite primary
-            # key (object_id, source_id) -- a repeated pair is the same row.
+            # ON CONFLICT (object_id, source_id) DO NOTHING: only the 0064
+            # composite primary key's conflict is swallowed, nothing else.
             execute_many(
                 connection,
                 "INSERT INTO knowledge_object_sources (object_id, source_id, notebook_id) "
-                "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                "VALUES (%s, %s, %s) ON CONFLICT (object_id, source_id) DO NOTHING",
                 [(object_id, sid, notebook_id) for sid in source_ids],
             )
 
