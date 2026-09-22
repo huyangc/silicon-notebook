@@ -53,10 +53,11 @@ FIXTURE_SECRETS = (
 def _rollback_v85(db: sqlite3.Connection) -> None:
     """Undo _migration_85 (the incremental exporter's watermark state, parity
     with PostgreSQL 0065_sync_export_snapshot.sql) before forging any older
-    deployed schema: the change log's txid index, then the two columns
-    appended to sync_export_state. Dropping the columns restores
-    sqlite_master's stored CREATE TABLE text byte-for-byte, which is what lets
-    the v83/v84 hops keep expecting the un-ALTERed table."""
+    deployed schema: the in-flight export lease table, the change log's txid
+    index, then the two columns appended to sync_export_state. Dropping the
+    columns restores sqlite_master's stored CREATE TABLE text byte-for-byte,
+    which is what lets the v83/v84 hops keep expecting the un-ALTERed table."""
+    db.execute("DROP TABLE sync_export_runs")
     db.execute("DROP INDEX idx_sync_change_log_txid")
     db.execute("ALTER TABLE sync_export_state DROP COLUMN exported_snapshot")
     db.execute("ALTER TABLE sync_export_state DROP COLUMN captured")
@@ -65,10 +66,11 @@ def _rollback_v85(db: sqlite3.Connection) -> None:
 def test_deployed_v84_database_verifies_sync_export_snapshot(tmp_path):
     """A deployed v84 database is missing exactly _migration_85's addition:
     sync_export_state.captured (NOT NULL DEFAULT 0) and
-    sync_export_state.exported_snapshot (nullable), plus
-    idx_sync_change_log_txid. No row changes -- the fixture holds no watermark
-    row, and both defaults are what a pre-existing one would have had to take
-    anyway.
+    sync_export_state.exported_snapshot (nullable), idx_sync_change_log_txid
+    and the sync_export_runs lease table. No row changes -- the fixture holds
+    no watermark row, both column defaults are what a pre-existing one would
+    have had to take anyway, and a just-migrated database has no export
+    running, so the lease table is empty.
 
     The index is partial on ``txid IS NOT NULL`` and SQLite writes NULL into
     that column on every row, so on this backend it is an index over nothing:
@@ -99,6 +101,21 @@ def test_deployed_v84_database_verifies_sync_export_snapshot(tmp_path):
                 "PRAGMA index_info(idx_sync_change_log_txid)"
             )
         ] == ["txid", "seq"]
+        lease_columns = [
+            (row[1], row[2], row[3], row[4], row[5])
+            for row in upgraded_db.execute("PRAGMA table_info(sync_export_runs)")
+        ]
+        assert lease_columns == [
+            ("target_env", "TEXT", 1, None, 1),
+            ("run_id", "TEXT", 1, None, 0),
+            ("package_id", "TEXT", 1, None, 0),
+            ("started_at", "TEXT", 1, None, 0),
+            ("heartbeat_at", "TEXT", 1, None, 0),
+            ("floor_seq", "INTEGER", 1, "0", 0),
+        ]
+        assert upgraded_db.execute(
+            "SELECT COUNT(*) FROM sync_export_runs"
+        ).fetchone()[0] == 0
 
     with sqlite3.connect(database) as rollback:
         _rollback_v85(rollback)

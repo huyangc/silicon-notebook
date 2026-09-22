@@ -772,10 +772,26 @@ def test_packaged_index_migration_phases_are_exact():
     # empty one at read time.
     assert "exported_snapshot text COLLATE \"C\" NOT NULL" not in v65_ddl_only
     assert "ON sync_change_log (txid, seq) WHERE txid IS NOT NULL" in v65_ddl_only
-    # No new table, no backfill UPDATE, and nothing touching the change log's
-    # rows -- this migration is columns plus one index.
-    assert "CREATE TABLE" not in v65_ddl_only
+    # Exactly ONE new table, the in-flight export lease, keyed by target_env
+    # -- that primary key is what makes two unscoped exports to the same
+    # target mutually exclusive, so it is pinned here as DDL and not just as
+    # a catalog shape.
+    assert v65_ddl_only.count("CREATE TABLE") == 1
+    assert "CREATE TABLE sync_export_runs (" in v65_ddl_only
+    assert (
+        "CONSTRAINT pk_sync_export_runs PRIMARY KEY (target_env)" in v65_ddl_only
+    )
+    # started_at/heartbeat_at carry no default: a lease is only ever written
+    # by a run that knows both instants, and "no heartbeat yet" must not be
+    # representable -- the dead-lease rule reads heartbeat_at and nothing else.
+    for column in ("started_at", "heartbeat_at"):
+        assert f"  {column} timestamp with time zone NOT NULL,\n" in v65_ddl_only
+    assert "floor_seq bigint NOT NULL DEFAULT 0" in v65_ddl_only
+    # No backfill UPDATE, and nothing touching the change log's rows.
     assert "UPDATE sync_export_state" not in v65_ddl_only
+    assert "sync_change_log" not in v65_ddl_only.replace(
+        "CREATE INDEX idx_sync_change_log_txid", ""
+    ).replace("ON sync_change_log (txid, seq) WHERE txid IS NOT NULL", "")
 
     assert index_declarations(50) == [(True, "idx_ask_jobs_client_request")]
     v50_ddl_only = "\n".join(

@@ -263,6 +263,10 @@ SKIP_SECONDARY_TABLES = [
     # primary 库里不存在捕获开关行时门就是关的,开着捕获做 merge 的部署会照常
     # 把合并写入记成本地变更,这正是期望语义。
     "sync_capture_control", "sync_change_log",
+    # v85 在途导出租约:一行 = 副库上「此刻正在跑」的一次导出。它连持久状态都不
+    # 算,合进 primary 只会凭空造出一个没有进程在续心跳的租约 —— 挡住 primary
+    # 自己的导出,并把 prune-log 的 seq 下界一直压住,直到它过期被当成死租约。
+    "sync_export_runs",
 ]
 
 # 导入后清空(引用可再生的 kg_index 产物, 逼部署侧干净重建)

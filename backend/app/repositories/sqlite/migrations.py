@@ -4634,8 +4634,36 @@ class SqliteMigrator:
         same -- one catalog shape, nothing for the snapshot verifier or the
         PostgreSQL catalog guard to special-case.
 
-        No new table and no backfill: both columns' defaults ARE the correct
-        value for every pre-existing row.
+        ``sync_export_runs`` is the in-flight lease, one row per target
+        environment, and it exists so an export that has not finished yet is
+        VISIBLE to the two things that would otherwise corrupt it:
+
+        - ``sync prune-log``. The log rows an unfinished export is about to
+          read still look prunable, because the watermark it will publish does
+          not exist yet. The row is therefore inserted BEFORE the export takes
+          its read snapshot, with ``floor_seq`` = the change log's ``MAX(seq)``
+          at that moment -- a lower bound on the watermark this run will
+          eventually publish. prune-log's seq floor is the minimum over the
+          captured watermarks AND every live lease's ``floor_seq``, so nothing
+          a running export still needs is deleted underneath it.
+        - a second unscoped export to the same target. Two of them would race
+          to publish a watermark, and the loser's package would describe a
+          window that the winner's watermark says was already exported. The
+          primary key on ``target_env`` makes the lease the mutual exclusion:
+          the second one fails to insert and refuses.
+
+        ``heartbeat_at`` is refreshed by the same staging heartbeat the
+        package writer already keeps (``export._PackageWriter.beat``), so a
+        crashed run stops refreshing it. A row whose ``heartbeat_at`` is more
+        than an hour old is a DEAD lease: prune-log ignores it (it no longer
+        holds the floor down forever) and a new export replaces it with a
+        warning rather than refusing. The live row is deleted in the same
+        transaction that publishes the watermark, and also on failure or
+        abort -- a lease outliving its run is exactly what the staleness rule
+        is there to bound, not the normal path.
+
+        Beyond that table, no new table and no backfill: both columns'
+        defaults ARE the correct value for every pre-existing row.
         """
         with self._connect() as db:
             self.add_column_if_missing(
@@ -4649,6 +4677,16 @@ class SqliteMigrator:
                 "                    ON sync_change_log(txid, seq)\n"
                 "                    WHERE txid IS NOT NULL"
             )
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS sync_export_runs (
+                    target_env TEXT NOT NULL PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    package_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    heartbeat_at TEXT NOT NULL,
+                    floor_seq INTEGER NOT NULL DEFAULT 0
+                );
+            """)
 
     def _seed(self) -> None:
         now = _now()

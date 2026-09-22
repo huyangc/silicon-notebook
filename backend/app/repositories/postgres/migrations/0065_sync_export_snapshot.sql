@@ -47,3 +47,40 @@ ALTER TABLE sync_export_state
 -- the PostgreSQL catalog guard to special-case.
 CREATE INDEX idx_sync_change_log_txid
     ON sync_change_log (txid, seq) WHERE txid IS NOT NULL;
+
+-- sync_export_runs is the in-flight export lease, one row per target
+-- environment. Adapter-internal like every other sync_* table here (see
+-- backend/app/migration/shadow/manifest.py's LOCAL_EPHEMERAL registration):
+-- it describes a run happening in THIS environment right now and must never
+-- travel through the shadow-migration copy path, a notebook deep-copy or a
+-- sync package. It exists because an unfinished export is otherwise invisible
+-- to the two things that would corrupt it:
+--
+--   * sync prune-log. The log rows a running export is about to read still
+--     look prunable, because the watermark that run will publish does not
+--     exist yet. The row is inserted BEFORE the export takes its read
+--     snapshot, carrying floor_seq = the change log's MAX(seq) at that moment
+--     -- a lower bound on the watermark this run will eventually publish.
+--     prune-log takes its seq floor as the minimum over the captured
+--     watermarks AND every live lease's floor_seq.
+--   * a second unscoped export to the same target. Two of them race to
+--     publish a watermark, and the loser's package describes a window the
+--     winner's watermark already claims as exported. PRIMARY KEY (target_env)
+--     IS the mutual exclusion: the second insert fails and that export
+--     refuses.
+--
+-- heartbeat_at is refreshed by the export's existing staging heartbeat, so a
+-- crashed run stops refreshing it; a row older than an hour is a DEAD lease,
+-- which prune-log ignores (it must not hold the floor down forever) and a new
+-- export replaces with a warning rather than refusing. The live row is
+-- deleted in the same transaction that publishes the watermark, and on
+-- failure or abort as well.
+CREATE TABLE sync_export_runs (
+  target_env text COLLATE "C" NOT NULL,
+  run_id text COLLATE "C" NOT NULL,
+  package_id text COLLATE "C" NOT NULL,
+  started_at timestamp with time zone NOT NULL,
+  heartbeat_at timestamp with time zone NOT NULL,
+  floor_seq bigint NOT NULL DEFAULT 0,
+  CONSTRAINT pk_sync_export_runs PRIMARY KEY (target_env)
+);

@@ -2510,6 +2510,11 @@
         "type": "table"
       },
       {
+        "name": "sync_export_runs",
+        "sql_sha256": "9ce62cf3dfee98a835c00fa71576b04c4b03adabc7a679f7128eb008584586f9",
+        "type": "table"
+      },
+      {
         "name": "sync_export_state",
         "sql_sha256": "742da3c359a9a9a142dfbe897d67eb5da487549edb80d6477232ed2fa1c6d2d4",
         "type": "table"
