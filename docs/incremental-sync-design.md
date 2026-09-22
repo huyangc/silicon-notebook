@@ -268,7 +268,9 @@ upsert 之前按主键回查目标端已有行的归属（notebook scope 比 not
 不属于包内范围的碰撞一律拒绝，不能让一条构造的行把别的本地笔记本的行劫持进镜像。包树里
 不允许任何符号链接（预检用不跟随链接的遍历拒绝），`files/**` 与 `checksums.json` 双向相等，
 文件相位只逐个复制清单里校验过的普通文件，绝不 `copytree`——包里没被清单覆盖的东西不会
-落到目标端。
+落到目标端。笔记本 id 在声明事务里就预留：不存在的笔记本以 `importing` + `sync_origin` 首插，
+已存在的锁行重验 `sync_origin`；两个源环境带同一 id 并发导入时由 notebooks 主键裁决只有一方
+能过，之后每个删除/写入事务开头都重验包内笔记本仍归本源。
 
 导入端按目标后端选择转换：SQLite 目标只解码 `$bytes`；PostgreSQL 目标按 `postgres_catalog`
 读到的列类型调用 `transform_sqlite_value`。upsert 语句两端同形：

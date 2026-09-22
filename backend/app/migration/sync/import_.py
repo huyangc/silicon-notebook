@@ -151,6 +151,26 @@ table (its upsert is a bare ``ON CONFLICT DO NOTHING``, which never touches a
 pre-existing row regardless of who owns it) or a table with no primary key
 (replaced wholesale by notebook in ``_replace_scope``, never upserted through
 a conflict target that could straddle scopes).
+
+A notebook id itself has the same problem one level up, and ``manifest.json``
+being untrustworthy is exactly why: two packages from DIFFERENT source
+environments can both name a notebook id that does not exist at the target
+yet, and both pass ``_preflight``'s foreign-notebook check on a snapshot that
+genuinely has no row for it either way. ``_claim_import``'s advisory lock does
+not settle this by itself -- it is scoped to ONE source environment
+(``pg_advisory_xact_lock(hashtext(source_env))``), so two different source
+environments never serialize against each other through it. **The notebook id
+is reserved inside the same claim transaction instead** (``_reserve_notebooks``):
+an existing row is re-checked against this package's ``source_env`` under the
+lock, and a row that does not exist yet is inserted right there, one at a
+time, so a genuinely concurrent claim from a different source environment is
+decided by the notebooks primary key itself -- the loser's insert conflicts,
+and that conflict is what ``_reserve_notebooks`` turns into a named refusal.
+Every later write this run makes re-verifies the same thing before it runs
+(``_assert_notebooks_still_ours``, called at the start of every subsequent
+per-table transaction and before the file/publish/stamp phases), since the
+module does not hold one transaction spanning the whole run (see "Atomicity,
+stated honestly" above) and each of those phases opens its own.
 """
 
 from __future__ import annotations
@@ -1008,6 +1028,15 @@ class _Context:
     # carries" -- never re-derived from ``manifest.json``, which is not
     # trustworthy (module docstring).
     parent_key_sets: dict[str, frozenset[str]] = field(default_factory=dict)
+    # Notebook ids ``_reserve_notebooks`` actually INSERTED at claim time --
+    # i.e. that did not already exist at the target before this call to
+    # ``import_package`` declared the package. ``_apply_table`` consults this
+    # purely so the REPORT still calls a first-time notebook "inserted" even
+    # though, by the time its own upsert runs, the row already exists (the
+    # reservation put it there). A notebook already mirrored before this
+    # run -- an ordinary re-sync -- is never in this set, so it is still
+    # counted "updated", exactly as before the reservation existed.
+    reserved_notebooks: frozenset[str] = frozenset()
 
 
 def _row_key(row: Mapping[str, Any], primary_key: Sequence[str]) -> str:
@@ -2151,6 +2180,13 @@ def _claim_import(
         _supersede_outstanding(
             backend, conn, context, [*outstanding, *taken_over], mine, now
         )
+        # Claim every notebook id this package carries in the SAME
+        # transaction, under the SAME advisory lock, as declaring the
+        # package itself -- see _reserve_notebooks's docstring for why the
+        # advisory lock above (scoped to this one source_env) does not by
+        # itself stop a DIFFERENT source environment's concurrent claim of
+        # the same not-yet-mirrored notebook id (codex #772 round 14 P1).
+        _reserve_notebooks(backend, conn, context)
     return False
 
 
@@ -2333,6 +2369,227 @@ def _transfer_created_group_markers(
             ),
             (new_package_id, old_package_id, step),
         )
+
+
+#  PostgreSQL's SQLSTATE for a unique-constraint violation (class 23 --
+# integrity constraint violation -- code 23505). Checked by code rather than
+# by importing ``psycopg.errors.UniqueViolation``: this module's import
+# whitelist (``tests/test_sync_manifest.py``) keeps it off psycopg directly,
+# the same way the rest of the file only ever reaches PostgreSQL through
+# ``app.repositories.postgres.database``. psycopg's own exception classes
+# carry this same code as their ``.sqlstate`` attribute, per PEP 249's
+# ``pgcode``-style extension, so no driver-specific import is needed to read
+# it back off a caught exception either.
+_POSTGRES_UNIQUE_VIOLATION_SQLSTATE = "23505"
+
+
+def _is_primary_key_conflict(backend: _Backend, exc: BaseException) -> bool:
+    """Whether ``exc`` is the driver's own uniqueness-violation error.
+
+    The one race ``_reserve_notebooks``'s SELECT-then-INSERT cannot close by
+    itself: two DIFFERENT source environments' claims can both find a
+    notebook id missing (neither's advisory lock, scoped to its own
+    ``source_env``, blocks the other) and both then attempt to INSERT it.
+    The database's own primary-key constraint is the only thing left that
+    can decide that race, and this is what tells its refusal apart from any
+    other write failure.
+    """
+    if backend.is_postgres:
+        return getattr(exc, "sqlstate", None) == _POSTGRES_UNIQUE_VIOLATION_SQLSTATE
+    import sqlite3
+
+    return isinstance(exc, sqlite3.IntegrityError)
+
+
+def _assert_notebooks_still_ours(
+    backend: _Backend, conn: Any, context: _Context
+) -> None:
+    """Re-verify, at the start of every later write this run makes, that this
+    package's notebooks still belong to its source environment.
+
+    ``_claim_import``'s reservation (``_reserve_notebooks``) settles the
+    cross-source-environment race ONCE, at declaration time, inside the one
+    transaction that holds the advisory lock. Everything after that runs in
+    its OWN transaction -- one per table for phase 3a/3b, a filesystem pass
+    for phase 4, and two more small transactions for phase 5
+    (``_publish_notebooks``/``_stamp_mirrors``) -- because the module
+    deliberately does not hold one transaction spanning the whole run (see
+    the module docstring's "Atomicity, stated honestly"). Asked again here,
+    it is what keeps that design honest: nothing between the reservation and
+    THIS write may have reattributed one of this run's notebooks without
+    this run noticing and refusing before doing any more damage.
+    """
+    manifest = context.manifest
+    if not manifest.notebooks:
+        return
+    found: dict[str, str] = {}
+    for batch in _batched(list(manifest.notebooks)):
+        placeholders = ",".join("?" for _ in batch)
+        for row in backend.fetch(
+            conn,
+            f"SELECT id, sync_origin FROM notebooks WHERE id IN ({placeholders})",
+            batch,
+        ):
+            found[str(row["id"])] = str(row["sync_origin"] or "")
+    missing = sorted(set(manifest.notebooks) - set(found))
+    foreign = sorted(
+        f"{notebook_id} (sync_origin={origin!r})"
+        for notebook_id, origin in found.items()
+        if origin != manifest.source_env
+    )
+    if missing or foreign:
+        raise SyncImportError(
+            "aborting mid-import: this package's notebooks no longer all "
+            f"belong to source_env={manifest.source_env!r} -- "
+            f"missing={missing}, reattributed={foreign}. Another import must "
+            "have reclaimed them since this run was declared."
+        )
+
+
+def _reservation_row(raw: Mapping[str, Any], context: _Context) -> dict[str, Any]:
+    """One ``notebooks`` row for ``_reserve_notebooks``'s claim-time insert:
+    the package's own row, with its one mapped column resolved as far as
+    identity mapping goes at claim time, plus the same ``_insert_overrides``
+    a first-time insert always takes.
+
+    Deliberately NOT the general ``_map_row`` path. ``created_by`` is
+    ``notebooks``' only mapped column and its rule is FAIL
+    (``_UNMAPPED_POLICY``) -- ``_map_row`` raises the instant
+    ``context.users`` does not already resolve it, which is exactly the case
+    for a package user ``--create-missing-users`` is going to mint, because
+    that happens AFTER the claim (``_import``'s ordering: creating users is
+    the first step of the PROTECTED phase, deliberately after the row is
+    claimed, so a failure there leaves a 'failed' sync_imports row rather
+    than none at all). ``_assert_required_identities_resolve`` has already
+    refused the whole import, before the claim, if this reference will never
+    resolve either way -- so reaching here with an unresolved ``created_by``
+    means it is one ``create_missing_users`` is about to create. The
+    importer stands in for it meanwhile; phase 3b's own upsert of this same
+    row (``_apply_table``, once that user exists) overwrites it with the
+    correctly mapped id, because ``created_by`` is not one of ``notebooks``'
+    ``target_owned_columns``.
+    """
+    row = dict(decode_row(raw))
+    source_created_by = row.get("created_by")
+    if isinstance(source_created_by, str) and source_created_by:
+        row["created_by"] = context.users.get(
+            source_created_by, context.importer_user_id
+        )
+    row.update(_insert_overrides("notebooks", context))
+    return row
+
+
+def _reserve_notebooks(backend: _Backend, conn: Any, context: _Context) -> None:
+    """Claim every notebook id this package carries, inside the SAME
+    transaction that declares the package (codex #772 round 14 P1).
+
+    Two different source environments racing to import the SAME
+    not-yet-mirrored notebook id both pass ``_preflight``'s foreign-notebook
+    check: it reads a snapshot with no row for that id at all, for BOTH of
+    them, because neither has written one yet. ``_claim_import``'s advisory
+    lock does not close this either -- it is scoped to ONE source
+    environment (``pg_advisory_xact_lock(hashtext(source_env))``), so two
+    DIFFERENT source environments never serialize against each other through
+    it. Without this, both packages' claims succeed, both proceed into
+    phase 3b, and whichever's ``notebooks`` upsert commits second silently
+    reattributes the first's mirror (and everything scoped under that
+    notebook id) through ``ON CONFLICT (id) DO UPDATE`` -- codex #772 round
+    14 P1.
+
+    For every id in ``context.manifest.notebooks``:
+
+    - a row that already exists is re-checked (``FOR UPDATE`` on PostgreSQL,
+      so a concurrent writer of the SAME row -- not a different one -- really
+      does serialize against this) against THIS package's ``source_env``,
+      refusing by name if it now belongs to someone else. The same guarantee
+      ``_preflight`` already gives, asked again under the lock that actually
+      matters;
+    - a row that does not exist yet is INSERTED right here, stamped
+      ``_IMPORT_IN_FLIGHT_STATUS``/this package's ``source_env``
+      (``_insert_overrides``, via ``_reservation_row``) -- one at a time, not
+      batched, so a genuinely concurrent claim from a DIFFERENT source
+      environment (no row existed yet for ``FOR UPDATE`` to lock) is decided
+      by the database's own primary-key constraint, and the loser's conflict
+      is caught here and turned into a refusal that names the notebook,
+      rather than a driver ``IntegrityError``/``UniqueViolation`` several
+      call frames up.
+
+    Phase 3b's own pass over ``notebooks`` (``_apply_table``) still runs
+    unchanged: for a row this function reserved, ``_TargetKeys.present``
+    finds the primary key already there and the ordinary ``DO UPDATE``
+    branch overwrites the placeholder content with the package's real, fully
+    identity-mapped row. ``context.reserved_notebooks`` records which ids
+    this function actually inserted (as opposed to found already ours),
+    purely so the report still calls a first-time notebook "inserted" --
+    ``_apply_table`` reads it back for that one accounting decision only.
+    """
+    manifest = context.manifest
+    if not manifest.notebooks:
+        return
+    found: dict[str, str] = {}
+    lock_suffix = " FOR UPDATE" if backend.is_postgres else ""
+    for batch in _batched(list(manifest.notebooks)):
+        placeholders = ",".join("?" for _ in batch)
+        for row in backend.fetch(
+            conn,
+            f"SELECT id, sync_origin FROM notebooks WHERE id IN ({placeholders})"
+            f"{lock_suffix}",
+            batch,
+        ):
+            found[str(row["id"])] = str(row["sync_origin"] or "")
+    foreign = sorted(
+        f"{notebook_id} (sync_origin={origin!r})"
+        for notebook_id, origin in found.items()
+        if origin != manifest.source_env
+    )
+    if foreign:
+        raise SyncImportError(
+            "cannot declare this import: notebook id(s) already belong to a "
+            f"different source environment than this package's "
+            f"{manifest.source_env!r}: {foreign}. Another import must have "
+            "claimed them between this run's preflight and its declaration; "
+            "resolve the collision at the target before re-importing."
+        )
+    missing = [
+        notebook_id for notebook_id in manifest.notebooks if notebook_id not in found
+    ]
+    if not missing:
+        return
+    columns = _package_columns(backend, conn, "notebooks", context)
+    encode = _value_encoder(backend, conn, "notebooks")
+    names = ", ".join(_ident(column) for column in columns)
+    placeholders = ", ".join("?" for _ in columns)
+    statement = f"INSERT INTO {_ident('notebooks')} ({names}) VALUES ({placeholders})"
+    wanted = set(missing)
+    raw_by_id: dict[str, dict[str, Any]] = {}
+    for raw in _iter_lines(context.package_dir / rows_path("notebooks")):
+        notebook_id = str(raw.get("id") or "")
+        if notebook_id in wanted:
+            raw_by_id[notebook_id] = raw
+    reserved: set[str] = set()
+    for notebook_id in missing:
+        raw = raw_by_id.get(notebook_id)
+        if raw is None:
+            raise SyncImportError(
+                f"notebooks: {notebook_id!r} is in manifest.notebooks but has "
+                "no row in rows/notebooks.jsonl; _verify_row_scopes should "
+                "already have refused this package"
+            )
+        row = _reservation_row(raw, context)
+        params = tuple(encode(column, row.get(column)) for column in columns)
+        try:
+            conn.execute(backend.sql(statement), params)
+        except Exception as exc:
+            if not _is_primary_key_conflict(backend, exc):
+                raise
+            raise SyncImportError(
+                f"cannot declare this import: notebook id {notebook_id!r} was "
+                "claimed by a concurrent import of a different source "
+                "environment while this one was declaring. Re-run once that "
+                "import has finished or failed."
+            ) from exc
+        reserved.add(notebook_id)
+    context.reserved_notebooks = frozenset(reserved)
 
 
 def _json_cast(backend: _Backend) -> str:
@@ -2568,6 +2825,14 @@ def _created_parents(
     earlier, crashed attempt of the same package, because the gate has to give
     the same answer before and after a resume."""
     if parent_table == "notebooks":
+        # Reads the same two columns _reserve_notebooks stamps
+        # (_IMPORT_IN_FLIGHT_STATUS/source_env, via _insert_overrides) and
+        # nothing from context.created_parents, so a notebook the claim-time
+        # reservation inserted (rather than _apply_table's own INSERT
+        # branch, which the reservation makes _apply_table skip -- see
+        # _Context.reserved_notebooks) reads exactly the same here either
+        # way: this branch has always gone straight to the row, never
+        # through the in-memory set.
         found: set[str] = set()
         for batch in _batched(list(context.manifest.notebooks)):
             placeholders = ",".join("?" for _ in batch)
@@ -2986,8 +3251,18 @@ def _assert_target_ownership(
     wanted = set(keys)
     if not wanted:
         return
+    # ``notebooks`` needs one more check than "id is in this package's own
+    # notebook set" -- for that table, scope.column IS the primary key, so
+    # every row this loop finds trivially passes that check regardless of who
+    # owns it. What actually distinguishes "our mirror" from "someone else's"
+    # for the notebooks table itself is ``sync_origin`` (codex #772 round 14
+    # P1); NOTEBOOK-scoped tables other than notebooks need no equivalent
+    # here because the notebook row they hang off has already been settled,
+    # once, by ``_reserve_notebooks``/``_assert_notebooks_still_ours``.
+    check_sync_origin = table == "notebooks"
+    extra = ("sync_origin",) if check_sync_origin else ()
     projection = ", ".join(
-        _ident(column) for column in (*primary_key, scope.column)
+        _ident(column) for column in (*primary_key, scope.column, *extra)
     )
     leading = sorted({key[0] for key in wanted}, key=repr)
     for chunk in _batched(leading):
@@ -3010,25 +3285,58 @@ def _assert_target_ownership(
                     "an existing row to this import; resolve the collision "
                     "at the target before re-importing."
                 )
+            if check_sync_origin:
+                origin = str(row["sync_origin"] or "")
+                if origin != context.manifest.source_env:
+                    raise SyncImportError(
+                        f"{table}: primary key {found} already exists at the "
+                        f"target under sync_origin={origin!r}, which does not "
+                        f"match this package's source_env="
+                        f"{context.manifest.source_env!r}. Refusing to "
+                        "reattribute a mirror of a different source "
+                        "environment; resolve the collision at the target "
+                        "before re-importing."
+                    )
 
 
-def _apply_table(
+def _package_columns(
     backend: _Backend, conn: Any, table: str, context: _Context
-) -> TableOutcome:
-    spec = spec_for(table)
+) -> list[str]:
+    """The package's own column list for ``table``, narrowed to what the
+    target actually has, with the exporter's synthetic ``ordinal`` column
+    dropped for a PostgreSQL rowid mirror table (§8) so a package from any
+    other producer cannot pin the target's identity sequence to the
+    source's numbering.
+
+    Shared by ``_apply_table``'s per-row upsert and the claim-time notebook
+    reservation (``_reserve_notebooks``), so both build the exact same
+    ``INSERT`` column list for ``notebooks`` -- a reservation row and
+    ``_apply_table``'s own later upsert of the same row must never disagree
+    about which columns exist.
+    """
     entry = context.manifest.tables[table]
     target_columns = set(backend.columns(conn, table))
     columns = [
         column
         for column in entry.columns
-        # The exporter never writes ordinal (§8) -- filtered again here so a
-        # package from any other producer cannot pin the target's identity
-        # sequence to the source's numbering.
         if column in target_columns
         and not (column == "ordinal" and table in POSTGRES_ROWID_ORDINAL_TABLES)
     ]
     if not columns:
         raise SyncImportError(f"{table}: package carries no usable column")
+    return columns
+
+
+def _apply_table(
+    backend: _Backend, conn: Any, table: str, context: _Context
+) -> TableOutcome:
+    # Re-verified at the start of every table's own write transaction, not
+    # only once at declaration time -- see _assert_notebooks_still_ours's
+    # docstring for why the two are not the same guarantee.
+    _assert_notebooks_still_ours(backend, conn, context)
+    spec = spec_for(table)
+    entry = context.manifest.tables[table]
+    columns = _package_columns(backend, conn, table, context)
     primary_key = backend.primary_key(conn, table)
     owned = _target_owned(table)
     update_columns = [
@@ -3120,6 +3428,13 @@ def _apply_table(
         fresh: list[tuple[Any, ...]] = []
         for row, key in zip(kept, keys, strict=True):
             exists = bool(primary_key) and key in present
+            if exists and key and table == "notebooks" and str(key[0]) in context.reserved_notebooks:
+                # This row's primary key already exists at the target, but
+                # only because _reserve_notebooks put it there moments ago in
+                # the CLAIM transaction, not because this notebook predates
+                # this run. Counted as "inserted" here so the report still
+                # says that -- see _Context.reserved_notebooks.
+                exists = False
             if exists and spec.seed_only:
                 skipped += 1
                 continue
@@ -3441,6 +3756,10 @@ def _prune_table(
 ) -> int:
     """Delete the target's rows of ``table`` that belong to this package's
     notebooks but are not in the package. Returns how many went."""
+    # Re-verified at the start of every table's own write transaction -- this
+    # phase DELETES, so it is exactly where a stale ownership assumption
+    # would do the most damage. See _assert_notebooks_still_ours's docstring.
+    _assert_notebooks_still_ours(backend, conn, context)
     primary_key = backend.primary_key(conn, table)
     carried = {
         tuple(decode_value(row.get(column)) for column in primary_key)
@@ -3784,6 +4103,9 @@ def _publish_notebooks(backend: _Backend, context: _Context) -> None:
     if not context.manifest.notebooks:
         return
     with backend.write() as conn:
+        # Re-verified at the start of this phase's own write transaction too
+        # -- see _assert_notebooks_still_ours's docstring.
+        _assert_notebooks_still_ours(backend, conn, context)
         for batch in _batched(list(context.manifest.notebooks)):
             placeholders = ",".join("?" for _ in batch)
             conn.execute(
@@ -3814,6 +4136,12 @@ def _stamp_mirrors(backend: _Backend, context: _Context) -> None:
     a second ``UPDATE notebooks`` of this module's own."""
     if not context.manifest.notebooks:
         return
+    # Re-verified before this phase too, on its own read snapshot -- this
+    # function has no single write transaction of its own to hang the check
+    # on (it writes one notebook at a time through SharingStore). See
+    # _assert_notebooks_still_ours's docstring.
+    with backend.read() as conn:
+        _assert_notebooks_still_ours(backend, conn, context)
     settings = context.settings
     # Both stores take a clock and a deep-copy row writer that
     # set_notebook_sync_origin does not touch; they are supplied only because
@@ -4116,6 +4444,13 @@ def _import(
                 "this package and was not repeated"
             )
         else:
+            # Re-verified right before this phase too -- files are installed
+            # into a notebook's OWN storage directory, so writing them for a
+            # notebook this run no longer owns would be exactly the damage
+            # the claim-time reservation exists to prevent. See
+            # _assert_notebooks_still_ours's docstring.
+            with backend.read() as conn:
+                _assert_notebooks_still_ours(backend, conn, context)
             _install_files(context, verify=verify_files)  # phase 4
         _publish_notebooks(backend, context)          # phase 5
         _stamp_mirrors(backend, context)
