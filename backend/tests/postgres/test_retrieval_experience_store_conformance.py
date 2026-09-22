@@ -90,9 +90,12 @@ def retrieval_experience_harness(request) -> RetrievalExperienceHarness:
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(database).migrate() == 59
-    # Nothing is seeded: this table has no foreign key in either direction and
-    # no tenancy column, which is the structural fact behind its deep-copy
-    # exclusion and its global-union classification.
+    # Nothing is seeded: this table has no foreign key in either direction, so
+    # a partition id here is just a string nobody has to have created. Since
+    # 0059 that column exists (a PARTITION key, not a tenancy column and still
+    # no owner), which is why deep copy now EXCLUDES the table deliberately
+    # rather than structurally, while the global-union classification in
+    # scripts/merge_dbs.py is unchanged.
     yield RetrievalExperienceHarness(
         database=database,
         store=RetrievalExperienceStore(database, now=seams.now),
@@ -429,3 +432,85 @@ def test_the_partition_predicate_confines_both_reads_and_evictions(
     assert harness.store.count() == 3
     assert harness.store.count("") == 2
     assert harness.store.count("nb-a") == 1
+
+
+def test_writing_a_global_id_into_a_notebook_partition_is_refused(
+    retrieval_experience_harness,
+):
+    """P2-1 on the backend whose merge branch has TWO reads.
+
+    Worth its own case rather than trusting the SQLite mirror: here the refusal
+    has to survive a real transaction rollback (SQLite rolls back through the
+    connection context manager; this rolls back through the pool's), and the
+    check sits after an ``ON CONFLICT DO NOTHING`` insert attempt that may or
+    may not have fired. "Refused" therefore has to mean the table is unchanged,
+    not merely that an exception came back.
+    """
+    harness = retrieval_experience_harness
+    global_id = experience_id(SITUATION, "exact_lookup")
+    _upsert(harness, global_id, provenance=["global-run"], notebook_id="")
+    before = harness.store.read_experience(global_id)
+
+    with pytest.raises(ValueError, match="partition mismatch"):
+        _upsert(
+            harness,
+            global_id,
+            provenance=["nb-a-run"],
+            replace_conclusion=True,
+            rationale="来自另一个分区的结论",
+            notebook_id="nb-a",
+        )
+
+    assert harness.store.read_experience(global_id) == before
+    assert harness.store.count() == 1
+    assert harness.store.read_partition("nb-a", 50) == []
+
+
+@pytest.mark.parametrize("partition", [None, 0, b"", ["nb-a"]])
+def test_a_non_string_partition_is_refused_rather_than_coerced(
+    retrieval_experience_harness, partition
+):
+    """P2-2 mirror. The two backends must refuse the same argument shapes, or
+    a caller that works against SQLite silently evicts from the shared
+    partition against PostgreSQL."""
+    harness = retrieval_experience_harness
+    with pytest.raises(TypeError):
+        harness.store.read_partition(partition, 50)
+    with pytest.raises(TypeError):
+        harness.store.evict_to_limit(1, partition)
+    assert harness.store.count(None) == 0
+
+
+def test_the_partition_index_carries_both_columns_in_order(
+    retrieval_experience_harness,
+):
+    """P3-2 on PostgreSQL: ``(notebook_id, id)``, in that order, non-unique.
+
+    Deliberately an assertion about the INDEX, not about a PLAN. The SQLite
+    mirror pins the plan because SQLite's planner is deterministic enough for
+    that to be a guarantee; here the planner weighs this index against the
+    id-ordered primary key using statistics, and a measurement on this very
+    database shows it switching to the primary key as the table grows. An
+    "index name appears in EXPLAIN" assertion would therefore be a flake
+    dressed as a guarantee — so this pins the thing the migration actually
+    controls, and the leading/trailing order that makes the index usable for
+    "seek one partition, already in id order" at all.
+
+    Read live from ``pg_indexes`` rather than from the migration text: the
+    migration file is what a future edit changes, so asserting against it
+    would assert the edit against itself.
+    """
+    harness = retrieval_experience_harness
+    with harness.database.connect() as db:
+        definition = db.execute(
+            "SELECT indexdef FROM pg_indexes "
+            "WHERE tablename='retrieval_experiences' AND indexname=%s",
+            ("idx_retrieval_experiences_notebook",),
+        ).fetchone()
+    assert definition is not None, "0059's partition index is missing"
+    indexdef = definition["indexdef"]
+    assert "UNIQUE" not in indexdef.upper(), indexdef
+    columns = indexdef[indexdef.index("(") + 1: indexdef.rindex(")")]
+    assert [part.strip() for part in columns.split(",")] == [
+        "notebook_id", "id",
+    ], indexdef

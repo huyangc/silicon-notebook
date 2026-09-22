@@ -33,6 +33,30 @@ def _canonical_situation(situation: Mapping[str, Any]) -> str:
     return json.dumps(dict(situation), sort_keys=True, ensure_ascii=False)
 
 
+def _partition_argument(value: object) -> str:
+    """The ONE place a partition argument becomes a string — by refusing, not
+    by coercing.
+
+    ``str(value or "")`` was the obvious spelling and it is the wrong one:
+    ``None`` would quietly become ``""``, which is not "no partition asked
+    for" but a REAL partition — the global one, the one every pre-v79 row
+    lives in and the one every notebook falls back to. A caller that lost a
+    notebook id somewhere upstream would then read, and worse EVICT, the
+    shared library instead of its own, and nothing anywhere would say so.
+
+    ⚠ ``count`` deliberately does NOT go through here: ``None`` is a
+    meaningful argument there (the whole table) precisely because it is the
+    absent-argument case, and ``""`` still means the global partition. The
+    asymmetry is registered in ``RetrievalExperienceStorePort.count``.
+    """
+    if not isinstance(value, str):
+        raise TypeError(
+            "retrieval experience partition must be a string; "
+            f"got {type(value).__name__}"
+        )
+    return value
+
+
 def _loads_obj(raw: object, fallback: Any) -> Any:
     if isinstance(raw, (dict, list)):
         return raw
@@ -100,13 +124,24 @@ class RetrievalExperienceStore:
         ``ORDER BY id`` (the content hash) rather than by any counter — the
         caller ranks in memory, and a stable order makes two reads over an
         unchanged partition byte-identical, which is what lets the injection
-        side memoise the result.
+        side memoise the result. The v79 index is ``(notebook_id, id)``, not
+        ``notebook_id`` alone, and this statement is why: with both columns
+        ``EXPLAIN QUERY PLAN`` reports ``SEARCH ... USING COVERING INDEX
+        (notebook_id=?)`` — one seek into the partition, already in ``id``
+        order. With the leading column alone the planner instead walks the
+        whole table through the primary key (which already supplies the
+        order) and filters, i.e. exactly the cost partitioning was meant to
+        remove. Pinned by a test.
+
+        A non-string ``notebook_id`` is refused rather than coerced; see
+        ``_partition_argument``.
         """
+        partition = _partition_argument(notebook_id)
         with self.database.connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM retrieval_experiences WHERE notebook_id=? "
                 "ORDER BY id LIMIT ?",
-                (str(notebook_id or ""), max(0, int(limit))),
+                (partition, max(0, int(limit))),
             ).fetchall()
         return [_experience_row(row) for row in rows]
 
@@ -133,7 +168,18 @@ class RetrievalExperienceStore:
     ) -> dict:
         """Create or merge ONE entry — see the port docstring for the merge
         semantics, including why ``notebook_id`` is written on the INSERT
-        branch only. This backend's specifics:
+        branch only and why a mismatch on the merge branch is an error rather
+        than a silent no-op. This backend's specifics:
+
+        ⚠ The merge branch's SELECT reads ``notebook_id`` alongside the two
+        columns it already needed — no extra round trip, no extra row touched
+        — purely so the cross-partition case can be REFUSED. The id the caller
+        computed already encodes the partition, so "this id exists but in a
+        different partition" means the caller derived the two from different
+        values; writing anyway would merge one library's evidence into
+        another's entry while every counter still added up. The raise happens
+        before any statement mutates a row, inside the same transaction, so a
+        refused call leaves the table byte-identical.
 
         ⚠ ``begin_immediate`` opens the write transaction BEFORE the read.
         ``write()``'s mutex only serialises this process's writers, and the
@@ -167,6 +213,7 @@ class RetrievalExperienceStore:
         and the R1/R2/R3 overlapping-batch test for the shape this fixes.
         """
         now = self.now()
+        partition = _partition_argument(notebook_id)
         keep = max(1, int(provenance_max))
         incoming = list(
             reversed([str(item) for item in provenance if str(item)])
@@ -174,7 +221,8 @@ class RetrievalExperienceStore:
         with self.database.write() as db:
             self.database.begin_immediate(db)
             row = db.execute(
-                "SELECT support, provenance_json FROM retrieval_experiences WHERE id=?",
+                "SELECT support, provenance_json, notebook_id "
+                "FROM retrieval_experiences WHERE id=?",
                 (experience_id,),
             ).fetchone()
             if row is None:
@@ -194,18 +242,26 @@ class RetrievalExperienceStore:
                             rationale,
                             len(fresh),
                             json.dumps(fresh, ensure_ascii=False),
-                            str(notebook_id or ""),
+                            partition,
                             now,
                             now,
                         ),
                     )
                 except sqlite3.IntegrityError:
                     row = db.execute(
-                        "SELECT support, provenance_json FROM retrieval_experiences "
-                        "WHERE id=?",
+                        "SELECT support, provenance_json, notebook_id "
+                        "FROM retrieval_experiences WHERE id=?",
                         (experience_id,),
                     ).fetchone()
             if row is not None:
+                if str(row["notebook_id"] or "") != partition:
+                    # No id in the message: this exception is reported, and an
+                    # id here would put a content-addressed key — the hash of
+                    # a situation fingerprint — into a log line that the
+                    # partitioning exists to keep out of shared surfaces.
+                    raise ValueError(
+                        "retrieval experience partition mismatch"
+                    )
                 known = [
                     str(item) for item in _loads_obj(row["provenance_json"], [])
                 ]
@@ -309,9 +365,13 @@ class RetrievalExperienceStore:
         entries written in the same second by the same batch (SQLite's clock is
         second-granular) — without it, "which of the tied entries survived"
         would differ run to run and backend to backend.
+
+        A non-string ``notebook_id`` is refused rather than coerced, and it
+        matters most here: a lost id coerced to ``""`` would trim the SHARED
+        library instead of the caller's own. See ``_partition_argument``.
         """
         keep = max(0, int(max_entries))
-        partition = str(notebook_id or "")
+        partition = _partition_argument(notebook_id)
         with self.database.write() as db:
             self.database.begin_immediate(db)
             total = int(
@@ -334,7 +394,12 @@ class RetrievalExperienceStore:
         return cursor.rowcount
 
     def count(self, notebook_id: str | None = None) -> int:
-        """One partition's rows, or (``None``) the whole table's."""
+        """One partition's rows, or (``None``) the whole table's.
+
+        ⚠ The ONE method here where ``None`` is a legal argument rather than a
+        refused one — see ``_partition_argument`` and the port docstring for
+        why the asymmetry is deliberate.
+        """
         with self.database.connect() as connection:
             if notebook_id is None:
                 row = connection.execute(

@@ -337,10 +337,13 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # canonical (created_at, id) order.
 # SQLite v79 / PostgreSQL 0059 add retrieval_experiences.notebook_id (NOT NULL
 # DEFAULT '', '' = the global partition every pre-existing row falls into) plus
-# the NON-UNIQUE idx_retrieval_experiences_notebook. No new table, foreign key
-# or unique surface, and no backfill pass: the default IS the backfill and no
-# content-addressed id is recomputed (the global partition's hash input stays
-# byte-identical).
+# the NON-UNIQUE idx_retrieval_experiences_notebook over (notebook_id, id) --
+# the trailing column is what makes a partitioned read a covering seek into one
+# partition instead of a whole-table walk through the primary key, and
+# non-unique because two partitions holding the same (situation, action) is
+# what partitioning MEANS. No new table, foreign key or unique surface, and no
+# backfill pass: the default IS the backfill and no content-addressed id is
+# recomputed (the global partition's hash input stays byte-identical).
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
     sqlite_version=79,
     postgres_version=59,

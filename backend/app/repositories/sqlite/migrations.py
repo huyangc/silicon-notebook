@@ -210,8 +210,8 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # existing-column change, and no backfill -- every pre-existing row is simply
 # unshared.
 # v79 adds retrieval_experiences.notebook_id (TEXT NOT NULL DEFAULT '') plus
-# the NON-UNIQUE index idx_retrieval_experiences_notebook, paired with
-# PostgreSQL 0059_retrieval_experience_notebook.sql: the partition key that
+# the NON-UNIQUE index idx_retrieval_experiences_notebook(notebook_id, id),
+# paired with PostgreSQL 0059_retrieval_experience_notebook.sql: the key that
 # turns v54's deployment-global experience library into one partition per
 # notebook, with '' kept as the GLOBAL partition every pre-existing row falls
 # into. The default IS the backfill and no id is recomputed -- the
@@ -220,7 +220,10 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # keeps scripts/merge_dbs.py's cross-deployment union over old databases
 # correct. No new table, foreign key or unique surface: the index is
 # deliberately non-unique, because two partitions holding the same (situation,
-# action) is the definition of partitioning, not a collision. Design doc
+# action) is the definition of partitioning, not a collision. Its trailing
+# `id` column is what makes a partitioned read a covering SEEK into one
+# partition instead of a whole-table walk through the primary key with
+# notebook_id as a filter. Design doc
 # docs/superpowers/specs/2026-09-22-retrieval-experience-per-notebook-
 # design_zh.md Sec 3.
 SCHEMA_VERSION = 79
@@ -4315,6 +4318,20 @@ class SqliteMigrator:
         the global cap plus one per-notebook cap for every notebook with
         traffic.
 
+        It is ``(notebook_id, id)`` rather than ``notebook_id`` alone, and the
+        second column is not padding. Every read of this table is
+        ``WHERE notebook_id = ? ORDER BY id``, and phase 3's form-one deletion
+        pages the same partition by ``id``. With the leading column alone,
+        ``EXPLAIN QUERY PLAN`` measurably prefers ``SCAN ... USING INDEX
+        sqlite_autoindex`` — the primary key already provides the ``id`` order,
+        so the planner walks the WHOLE table and applies ``notebook_id`` as a
+        filter, which is precisely the cost partitioning was supposed to
+        remove. With ``id`` trailing it becomes ``SEARCH ... USING COVERING
+        INDEX (notebook_id=?)``: seek straight to the partition, walk it in
+        ``id`` order, never touch another partition's rows and never open the
+        table itself. A test pins the plan rather than leaving it to the next
+        reader's faith.
+
         Must go through ``add_column_if_missing``: SQLite has no
         ``ADD COLUMN IF NOT EXISTS``, and the "already-deployed database
         backfill" test family rolls ``user_version`` back and re-runs the
@@ -4329,7 +4346,7 @@ class SqliteMigrator:
             )
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_retrieval_experiences_notebook\n"
-                "                 ON retrieval_experiences(notebook_id)"
+                "                 ON retrieval_experiences(notebook_id, id)"
             )
 
     def _seed(self) -> None:

@@ -359,10 +359,18 @@ def test_post_union_eviction_recaps_each_partition_against_its_own_cap(fresh_db)
 
 def test_the_offline_notebook_cap_matches_the_runtime_protocol_constant():
     """与全局上限那条同款:离线脚本从 ports 直接取常量,这里钉住它取的确实是
-    分区上限而不是又一份手抄数字。"""
+    分区上限而不是又一份手抄数字。
+
+    按**形参名**取默认值,不按 ``__defaults__`` 的下标:下标是位置,在两个同类型
+    参数之间调换顺序、或在前面插一个新参数,都会让这条用例继续绿着去比另一个
+    数——两个上限恰好都是 int,连类型都挡不住。
+    """
+    import inspect
+
     from app.repositories.ports import RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES
 
-    offline_default = merge_dbs._evict_experiences_to_limit.__defaults__[1]
+    signature = inspect.signature(merge_dbs._evict_experiences_to_limit)
+    offline_default = signature.parameters["notebook_max_entries"].default
     assert offline_default == RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES
 
 
@@ -381,9 +389,12 @@ def test_the_offline_eviction_cap_matches_the_runtime_protocol_constant():
     """codex #524 R2 P2:merge_dbs 是纯 stdlib 离线脚本、刻意不 import 后端包,
     上限因此是第二份拼写——本测试把两份钉成相等,任一侧漂移即红(单一真源的
     测试化替代)。"""
+    import inspect
+
     from app.repositories.ports import RETRIEVAL_EXPERIENCE_MAX_ENTRIES
 
-    offline_default = merge_dbs._evict_experiences_to_limit.__defaults__[0]
+    signature = inspect.signature(merge_dbs._evict_experiences_to_limit)
+    offline_default = signature.parameters["max_entries"].default
     assert offline_default == RETRIEVAL_EXPERIENCE_MAX_ENTRIES
 
 

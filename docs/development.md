@@ -70,7 +70,10 @@ names from stable user names, adds the singleton authentication policy, external
 short-lived browser authentication transactions, and policy/identity audit tables, and extends sessions
 with their authentication source, external subject, and absolute expiry. SQLite v79 / PostgreSQL 0059
 adds `retrieval_experiences.notebook_id` (`TEXT NOT NULL DEFAULT ''`, `''` = the global partition) plus
-the non-unique `idx_retrieval_experiences_notebook`, partitioning the retrieval-strategy experience
+the non-unique `idx_retrieval_experiences_notebook(notebook_id, id)` — the trailing `id` serves the
+`ORDER BY id` every read of the table issues, and only with it does a partitioned read become a
+covering seek into one partition rather than a walk of the whole table through the primary key with
+`notebook_id` as a filter — partitioning the retrieval-strategy experience
 library by notebook; no new table, foreign key or unique surface, and no backfill pass — the default is
 the backfill, and no content-addressed id is recomputed because the global partition's hash input is
 unchanged by construction. Those migrations

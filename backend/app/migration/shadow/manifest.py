@@ -693,8 +693,10 @@ _TABLES = (
     # partition through the explicit phase-3 registry instead), and there is
     # no owner column — so the appended rank stays FK-consistent by
     # construction, and it has no incoming foreign key either (it stays a leaf
-    # table). v79's index is deliberately non-unique, so the unique-surface
-    # set below is unchanged by that hop.
+    # table). v79's index, ``(notebook_id, id)``, is deliberately non-unique
+    # — two partitions holding the same (situation, action) is the definition
+    # of partitioning — so the unique-surface set below is unchanged by that
+    # hop and the replication key stays the single-column primary key.
     #
     # The declared replication key is the table's single-column, CONTENT-
     # ADDRESSED primary key, and that equality is the park precondition (see
