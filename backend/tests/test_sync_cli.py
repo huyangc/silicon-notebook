@@ -1367,3 +1367,40 @@ def test_scripts_cli_registers_the_sync_command_group():
     # its own sqlite default instead of failing loudly, and an operator could
     # export/import/status against the wrong database without any signal.
     assert command.deployment_env is True
+
+
+def test_capture_log_range_query_is_two_index_probes_on_sqlite(tmp_path, monkeypatch):
+    """codex #783 r1: ``SELECT MIN(seq), MAX(seq)`` in ONE aggregate defeats
+    SQLite's min/max index optimization and plans as a full
+    ``SCAN sync_change_log`` -- on an unbounded log, from a status command.
+    The shipped statement uses two scalar subqueries, and this pins the plan:
+    no step may be a table scan, each endpoint is a primary-key probe. The
+    combined form is asserted to scan so the pin cannot be vacuous."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            shipped = [
+                str(row[3])
+                for row in conn.execute(
+                    f"EXPLAIN QUERY PLAN {cli._CAPTURE_LOG_RANGE_SQL}"
+                )
+            ]
+            combined = [
+                str(row[3])
+                for row in conn.execute(
+                    "EXPLAIN QUERY PLAN SELECT MIN(seq) AS min_seq, "
+                    "MAX(seq) AS max_seq FROM sync_change_log"
+                )
+            ]
+    finally:
+        database.close()
+    # "SCAN CONSTANT ROW" is the FROM-less outer row, not a table read: the
+    # only touches of the log must be two SEARCHes (one per endpoint).
+    assert [step for step in shipped if "sync_change_log" in step] == [
+        "SEARCH sync_change_log",
+        "SEARCH sync_change_log",
+    ], shipped
+    assert any(step.startswith("SCAN sync_change_log") for step in combined), combined

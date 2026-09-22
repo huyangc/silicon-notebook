@@ -1,5 +1,5 @@
--- Cross-environment notebook sync control state. Mirrors SQLite v83 /
--- _migration_83. Three adapter-internal tables, not replicated business
+-- Cross-environment notebook sync control state. Mirrors SQLite v81 /
+-- _migration_81. Three adapter-internal tables, not replicated business
 -- data (see backend/app/migration/shadow/manifest.py's LOCAL_EPHEMERAL
 -- registration): each backend's own export/import bookkeeping is local to
 -- that environment and must never travel through the shadow-migration

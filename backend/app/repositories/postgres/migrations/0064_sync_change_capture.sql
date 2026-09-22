@@ -3,6 +3,13 @@
 -- for the two synced tables that never had one, and one trigger function plus
 -- one AFTER-row trigger per synced business table.
 --
+-- Note on 0063's header: it says "SQLite v81 / _migration_81"; the pair it
+-- mirrors is SQLite v83 / _migration_83 (the numbers moved when that branch
+-- was renumbered). The comment is left as it shipped because an applied
+-- migration's bytes are checksummed by the ledger (docs/development.md), so
+-- correcting it would refuse startup on every database that already holds
+-- 0063.
+--
 -- Everything below the "generated" marker is rendered by
 --     python3 scripts/generate_sync_capture_migration.py
 -- out of backend/app/migration/sync/capture.py, and pinned byte-for-byte by
