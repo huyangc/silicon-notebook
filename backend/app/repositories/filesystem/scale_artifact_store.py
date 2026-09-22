@@ -376,7 +376,7 @@ class ScaleArtifactStore:
         it is fixed now). The ONLINE viz write used to land straight in the
         live ``kg_viz`` directory, which made it the one artifact writer
         outside the publishing contract every other root follows
-        (docs/development.md:33): a crash mid-write left a half-written root;
+        (architecture.md §3.5): a crash mid-write left a half-written root;
         an ``export`` running under the claim could ``copytree`` a root this
         writer was in the middle of; and an ``import`` could rename or retire
         the directory out from under it. Staging into ``{viz_dir}.tmp-<token>``

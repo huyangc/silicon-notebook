@@ -56,7 +56,7 @@ def build_generation_mismatch(
       companion after — a claim lost in between leaves the NEW main index
       beside the OLD companion.
 
-    Both are supposed to degrade to "no companion" (docs/development.md:37 —
+    Both are supposed to degrade to "no companion" (architecture.md §3.5 —
     a mismatched companion is capability-unavailable and never authorizes
     whole-graph post-filtering). The build id is what makes them actually do
     so: one build stamps one id on both roots, so any half-published pair is

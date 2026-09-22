@@ -389,7 +389,7 @@ def test_a_same_version_companion_from_another_build_is_not_served(repo):
     behind. The old version-only gate served this mixed generation. It must
     now degrade to capability-unavailable — fail-SOFT, not an exception
     escaping into the ask path, and never a whole-graph fallback
-    (docs/development.md:37).
+    (architecture.md §3.5).
 
     Mutation anchor: make ``build_generation_mismatch`` return ``False``
     unconditionally and this goes green with hits. (Dropping just one of the
@@ -764,7 +764,7 @@ def test_cross_process_companion_republish_invalidates_warm_cache(repo, monkeypa
     builder makes never fires for it either, since the builder never ran in
     THIS process. Only a disk generation probe on the companion manifest can
     catch it; without one this process would keep serving the retired CSR
-    handle until incidental LRU eviction (docs/development.md:37)."""
+    handle until incidental LRU eviction (architecture.md §3.5)."""
     notebook_id, source_a, _source_b = _seed(repo)
     version = ["same-main-version"]
     _publish(repo, notebook_id, (source_a,), version)
@@ -907,7 +907,7 @@ def test_a_retired_companion_root_invalidates_the_warm_cache(repo):
     "can't tell" left the warm ``_CombinedGraph`` serving the RETIRED
     generation for the life of the process — the opposite of the
     capability-unavailable contract a missing companion carries
-    (docs/development.md:37).
+    (architecture.md §3.5).
 
     **Mutation anchors**, one per half of the fix:
 

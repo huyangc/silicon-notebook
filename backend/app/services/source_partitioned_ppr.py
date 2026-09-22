@@ -397,7 +397,7 @@ class SourcePartitionedPprService:
         # parent_version. Without this, a warmed cache entry here would keep
         # serving the retired generation until incidental LRU eviction, in
         # this process, for as long as it stays up — violating the dedicated-
-        # LRU invalidation contract (docs/development.md:37; same-process
+        # LRU invalidation contract (architecture.md §3.5; same-process
         # rebuild/fold already call ``invalidate()`` explicitly and are
         # unaffected by this). One stat of the companion root's manifest
         # before touching the cache gives that generation a comparable
@@ -431,7 +431,7 @@ class SourcePartitionedPprService:
             # the same ``source_partition_artifact_unavailable`` a cold read
             # of a missing root produces (``validate_partition_root``), which
             # is capability-unavailable and never authorizes whole-graph
-            # post-filtering (docs/development.md:37).
+            # post-filtering (architecture.md §3.5).
             self.invalidate(notebook_id)
             raise SourcePartitionUnavailable("source_partition_artifact_unavailable")
         # P1, codex PR#643 R27: the MAIN root's generation is part of what a

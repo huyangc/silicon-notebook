@@ -49,7 +49,7 @@
 归属；只有全局问答、许愿墙、认证与系统配置不落在任何 notebook 下。用户不直接拥有数据，
 而是通过「拥有或被授权的 notebook」间接拥有。读/管/写三种权限的唯一定义点是 `repositories/*/access_sql.py`：写权 = owner
 （`notebooks.created_by`）；管理权 = owner ∪ `role='admin'` 的授权边；读权 = owner ∪
-`notebook_members` 有行 ∪ 有效授权边（`notebook_grants.principal_type` ∈ user/group/everyone）。
+`notebook_members` 有行 ∪ 有效授权边（`notebook_grants.principal_type` ∈ user/group/group_admins/everyone）。
 `notebook_bases` 让一个 notebook 挂载另一个（如 `tier='base'` 的公共基础库），读侧查询
 顺着它把基础库内容并入。原始文件与附件本体在磁盘（`sources.file_path`），库里只存元数据。
 向量各自单表单列 `bytea`（chunk/element/knowledge/memory/relation）；memory_embeddings 只按
@@ -262,46 +262,50 @@ Retrieval 的 point-specific proposal source 与通用 admission reader 是两�
 - **运行态与启动补偿**：`RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference。其他可变运行态（storage root、embedder、语言 cache、构建集合、Ask cancellation registry 与工件 cache）由 runtime 持有，组合完成后的受支持替换会同步到全部既有消费者。Ask/report 同步提交失败会把已经创建的持久化 job/report 标记为 failed、注销 cancellation entry，再重新抛出提交异常；成功 worker 的顺序及 Ask begin/save/finish/cleanup transaction checkpoint 不变。组合按领域拆分：`RepositoryRuntime.__init__` 只按顺序调用模块级 `_build_*` 领域构造函数（外加它自己的两把 `threading.Lock()`），再把每个返回的 frozen bundle 的字段逐条显式挂到自己身上，一个座位一行。调用顺序即依赖拓扑——构造函数只接收更早的 bundle，绝不接收 runtime 本身，因此写不出回指组合根的环；唯一允许的runtime 绑定输入是窄的迟绑定 callable（当前用户访问器、`ask_service` 访问器与 `_note_ask_completed`）。进程级副作用（scheduler 校验、event logger、`kg_scheduler.initialize`）与那唯一一次持久化 bundle 构造保持原有顺序；`backend/tests/test_repository_runtime_composition.py` 冻结已挂载属性集合并钉住这两条规则。
 - **旧库兼容**：迁移版本闸 + 冻结 v9 fixture（`backend/tests/fixtures/repository_v9/`、`test_repository_v9_fixture.py`）共同守护「重构前创建的数据库直接打开、迁移、读取」。`scripts/verify_repository_snapshot.py` 以 backup-only 方式验证真实旧库：逐版本 migration manifest 精确列出允许新增的表/列/index/trigger/view，稳定 seed manifest 只接受指定主键与值；SQLite URI 路径经百分号编码。repository 只在临时 backup/storage 上构造；cleanup 失败时只输出保留的 backup 路径，不输出私有行。原 DB/WAL metadata 与 SHM 的存在性/大小都必须不变；连接 live WAL 时只豁免 SHM mtime，因为 SQLite 可能重建它。
 
-本次重构不改变其 master 基线已有的 schema 版本（`SCHEMA_VERSION = 10`）。已提交的 v9 兼容 fixture 会经由既有 v10 migration 升级，并保持可读。
-
-当前 schema 版本为 39。这里指 SQLite schema。已提交的 v9 兼容 fixture 会经由 v10–v39 migration
-升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent
-与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，
-v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 为交互式规整的
-anchor 成员检查加入 `(column_id, JS-trim(content_md), row_id)` 归一化表达式索引，v22
-增加持久化的 notebook 级 KG 构建任务，v23 增加每用户最新模型服务状态，v24 为写锁
-瘦身的簇映射切换段增加 kg_canonical_scratch 表，v25 不可逆清除已存用户模型凭据与
-旧状态并新增按服务 ID 存储的部署级健康状态，v26 增加 knowhow 表变更流水与命名
-里程碑，v27 增加 sources.chunked_at 完成标记使「已就绪但无分块」的来源历史可判定
-（合法零分块解析 vs 中途失败的分块），v28 新增 app_settings 全局设置表与可空的
-user_profiles.upload_document_limit 列（每笔记本文档数量上限），v29 确定性清理旧的重复
-cluster membership 并增加唯一索引，v30 增加 sources(notebook_id, file_hash) 去重查找索引
-（内容哈希上传去重 / batch_ingest 续跑，此前是全表扫），v31 增加 inert、无 payload 的
-shadow_change_log 与 shadow_capture_control 内部表；run-scoped guard/capture/freeze DDL
-由迁移工具另行安装，guard 安装后立即强制唯一性，capture/freeze 行为在 run control
-状态启用前保持禁用；v32 增加 reports.understanding_json，持久化深度报告确认门之前的
-问题理解契约；v33 增加
-knowledge_relations(notebook_id, source_object_id/target_object_id, id) 覆盖索引，供关系词法补召回
-稳定地做有界 keyset 查询；v34 增加关系补全水位与对象 keyset 索引，v35 增加
-`ask_jobs.asked_at`；v36 增加 KG 质量分析的三张预计算产物表（kg_community_edges、kg_source_profiles 与产物账本 kg_analysis_artifacts）；rebuild_communities 在一个事务里整体重写它们，账本逐份记下产物建于哪个 kg_mutation_seq。三张表都不带 level 列——社区层的新鲜度闸本身不分 level，产物描述的 level 记在账本 payload 里；v37 为 `source_elements` 增加 `(source_id, element_type,
-created_at, id)` 索引，供有界、按类型的集合枚举（公式/表格/图片/代码块清单）；
-配对 PostgreSQL 业务 schema 为 v17。SQLite store
-以同一 ECMAScript trim 表达式等值查询，避免在 `BEGIN IMMEDIATE` 中按保存单元扫描整列。
+当前 schema 和升级 DDL 以 [SQLite migrator](./backend/app/repositories/sqlite/migrations.py) 与
+[PostgreSQL migrations](./backend/app/repositories/postgres/migrations/) 为准；
+[开发文档](./docs/development_zh.md#schema-与迁移编写)拥有封存迁移、版本闸与兼容验证规则。
+旧版本逐条变化可追溯[精简前记录](https://github.com/huyangc/silicon-notebook/blob/403b796f3c1620f93a4c35e92f035e68432290d4/architecture.md#22-repository-组合与兼容-facade)，
+不把历史版本号作为当前部署要求。
 
 `sqlite_identity.py` 与 `sqlite_notebook_sharing.py` 保留为兼容 re-export shim；请求 Context、`_COPY_CHUNK` 与 `_remap_json_ids` 等兼容导出继续有效，既有测试 monkeypatch 接缝保持可用。
 
 ### 2.2.1 PostgreSQL adapter 与切换边界
 
-- `backend/app/repositories/factory.py` 是唯一 backend choice；PostgreSQL bundle 组合与 SQLite 对等的领域 store，共享一个有界 `PostgresDatabase` pool。启动 lease 覆盖 checksummed migration、恢复、warmup 与 readiness 发布，失败或被替换的实例只关闭自己的 pool。
-- 跨进程访问由 PostgreSQL 自身的 MVCC、row/advisory lock 与 transaction isolation 处理，可消除 SQLite 的单 writer 文件锁争用；它不能消除业务层锁序错误或长事务，因此 pool acquire、statement、lock timeout 仍保持有界。
-- 切换只允许“停写 → 停服务 → 一致备份 → 修改唯一 `DATABASE_URL` → 启动并自动 migration → status/`/api/ready`/认证/数量/代表性读取验证 → 放流量”。只改 URL 不复制数据。`SHADOW_DATABASE_URL` 不启用 dual-write；切回 SQLite 也不会回放 PG-only 写入。临时 `migration/shadow` 边界目前实现 SQLite39/PostgreSQL17/epoch1（66 张 replicated 表、四个逻辑键 guard）的 preflight/control/guard、原子 snapshot、可续跑 baseline COPY/H0，以及 fail-stop 单消费者正向 replicator 原语。replicator 先在 PG 侧按 migration→control→run→worker→checkpoint 锁序取得 run/lease/checkpoint并释放，再以短 SQLite 只读 snapshot 连读全局 seq，仅为 upsert hydration 当前行，delete 保持 key-only 且 hydrated bytes 为零；同一 stable key 在 accepted prefix 内保留最后 event 并按全局最后 seq 排序，raw seq/checkpoint 连续性不变，每个 identity 的最终 actual apply 覆盖 synthetic dependency contribution，只有 dependency-only identity 才引用计数一次 synthetic 行及其 bytes；短读窗口若在 allocated high-water 前结束，会在 hydration/apply 前立即判为 suffix gap；满窗口低于 high-water 时在同一 snapshot 探测相邻 seq，缺失即失败；批次硬上限 4096 events/64 MiB；仅一个 final bundle 可独占超限，同 key replacement 若在已有其他 actual bundle 时使 bytes 超限则回滚并延后。FK 父闭包只读该验证 snapshot，每事件最多 64 行；固定 v17 图按 FK constraint branch 计数的上界为 9 个 row slots，依赖行计入 bytes并跨事件去重，不查询 suffix log。最终 PG apply 事务重新取得同一控制锁序，对 migration ledger 和全部业务表取 `SHARE ROW EXCLUSIVE`，在锁内复核 snapshot source/target、live target identity 和完整 v17 catalog/guard。逐语句 savepoint 只延后 FK/UNIQUE ordering SQLSTATE，CHECK/NOT NULL 立即 poison；精确 catalog 派生的 89 个 unique surface 通过 NULL、按其他唯一列的非 NULL 等值/NULL `IS NULL` 与固定 predicate 定域的确定性 text/bigint 候选（`C` collation 文本 max 拼 `chr(1)`，或先走可索引 bigint MIN/MAX 快速路径选择 min−1/max+1，仅在两个 int64 边界都已占用时扫描首个 gap），或仅限无入向 FK 且有 accepted current-final 恢复行的叶表同事务 delete/reinsert 来打破 cycle。停车状态按 `(unique surface, row identity)` 跟踪；每个 stagnant pass 会停车所有可独立停车的冲突，final apply 成功会清除该 identity 的所有停车面。延后处理限制为 8 passes、32 actual statements/apply、16384 actual statements 总量；每次候选查询都计入预算，ordering、statement、pass、`ProgramLimitExceeded`/`DataError` 候选搜索与候选 UPDATE 容量耗尽保持 non-poison，`QueryCanceled` 保持瞬态并重试整事务，最终窗口内不可停车的 UNIQUE 漂移则在最早实际 seq poison。`run_forever` 从 256 events/8 MiB 倍增至硬上限，仍 ordering-blocked 时 non-poison；apply 事务 claim worker 后、业务 DML 前复查既有 run/direction poison；poison 发布在 binding/checkpoint 校验后锁定检查该方向任意既有记录，完全相同视为 ACK-loss 成功，不同则 stale 且绝不新增第二条；apply、ack-loss 与 poison publication 使用同一 identity 绑定，snapshot 与业务 apply 前都要求 `progress.applied_seq == checkpoint.last_seq`。业务收敛、脱敏 progress 与连续 checkpoint 一起提交；每个有效 batch 结局恰好记录一条脱敏 metric，batch events 使用实际 accepted/observed raw-event 数并尽可能保留 retries。这样不在等待 PG 时持有 SQLite transaction，也不留下 catalog proof→apply 的 DDL/DML TOCTOU。暂态错误整事务有界重试；SQLite path/file binding 失败使用专用 identity 异常而不依赖文本分类；已证明的 gap、错误 run/epoch/table/op/key、转换、schema、identity 或约束错误写一条脱敏 poison 并永久阻断该方向。显式运维 CLI 现在负责 preflight/start-forward/status/verify，前台 worker 使用数据库时钟的排他 lease、SIGTERM 批次边界和保守 retention（至少 7 天/100,000 events，并受 FULL 校验/barrier/replay/poison 约束）。这只建立 SQLite-active 的正向 shadow；cutover、反向复制和自动 URL 交换仍未实现。
-- Verifier 在 SQLite snapshot 记录 `Hv` 并把规范化事实流式写入私有临时 spool，释放 SQLite 后等待 PG checkpoint，再固定 `REPEATABLE READ, READ ONLY` 的 `Ht`；第二个 SQLite snapshot 扫描 `(Hv,Hseen]` retained dirty key，仅把这些 key 标记为 concurrent，PG verifier barrier 保留到脱敏报告提交。Structural 层校验精确 catalog/guard、stable key/hash、FK/unique/cascade 与 storage-root 文件引用；Full 层增加领域投影、float32 bytes/dimension/norm/抽样 cosine 与固定中英检索门禁；Cutover 层再次复核 source write-frozen，并要求 `Hv=Ht=MAX(seq)`、零 concurrent、100% coverage 和前一轮完整 full/cutover。Clean report 只能按同级或更强等级 supersede drift。
-- Baseline snapshot 目录必须 owner-only 且不可为 symlink；snapshot/live fence fresh 打开 `SqliteDatabase.db_path` 当前文件而不复用线程缓存连接，跨 open/transaction 及发布/PG commit 前复核 resolved path + device/inode。COPY 将全部业务 SQL 全限定到 run 绑定 schema，使用 named server cursor 有界复核 prefix，并用 statement timeout/阶段间取消轮询约束长操作。起始绑定、逐批提交/完成点和最终 H0 前均短暂取得 live SQLite `BEGIN IMMEDIATE` 来复核 capture 仍启用，但最终 66 表 proof/`ANALYZE` 期间不持有 SQLite；JSONB prefix proof 仅在 JSON 子树内统一有限 int/float/Decimal 的精确十进制语义（bool 排除、负零归零），普通 SQL 数值列仍保持类型差异；起始和最终另以 checksummed migration 派生契约验证精确 v17 table/column/PK/FK/unique/check、operational+GIN index 与 `public.pg_trgm`，逐批只走轻量 run/control/identity gate。
-- 最终 live SQLite fence 是跨 commit 的 lease：只在 PG 双锁/run/table lock 与 66 表 proof/`ANALYZE` 完成后取得，持有期间写入并实际提交 PG H0 checkpoint + run progress，成功后才释放；PG 事务/commit 失败则不落 H0 并释放 SQLite。该 fence 期间不得再等 PG pool/advisory lock 或执行长 proof。
-- 停写 importer 与连续 shadow 是两个独立运维边界，必须使用不同 PostgreSQL 目标：`scripts/migrate_sqlite_to_postgres.py` 负责 SQLite→PostgreSQL 存量导入与本地激活；`scripts/shadow_sqlite_to_postgres.py` 负责 SQLite-active 的连续正向影子同步。前者默认 dry-run，SQLite 只读 backup-API 快照与工作副本升级，目标空库/manifest 守卫，按 FK 排序的有界 COPY，JSON/时间/旧 JSON 向量/NUL 的显式兼容转换，rowid→ordinal 保留与 reseed，全表内容 checksum，逐表 checkpoint 提交（run 头绑定 sealed snapshot hash + 每张已校验表一条已提交流水）使中断可从最后完成的表续跑而非整体重来、finalize（ordinal reseed/索引重建/ANALYZE）幂等，会话级批量装载调优（`maintenance_work_mem`/并行建索引/为离线装载设定的 `synchronous_commit`/`idle_in_transaction_session_timeout`/`statement_timeout`），无凭据 receipt。它只排除 SQLite-only 的 `shadow_capture_control` / `shadow_change_log` 运维表并把排除写入 receipt，退役用户数据表仍要求为空。默认 preview/apply 不进入应用 runtime、不修改 `DATABASE_URL`；显式 `--activate-env ... --confirm-service-stopped` 会重新快照停写 SQLite（切换锚点），默认按 receipt 重算 PG 全表 checksum（`--fast-activation` 只跳过这第二遍目标全表校验，保留源快照锚点与 schema/清单校验），再通过同目录临时文件/fsync/`os.replace` 原子切换 `.env` 并保存权限受限回退副本。它不复制 storage、不读取 MySQL，也不提供持续同步或反向回放。
-- 在线导入仅用于演练，因为快照后的 SQLite 写入不会被捕获。正式切换只允许“停全部 writer → 停服务 → 向新空目标做最终迁移 → 验证共享/已复制 storage → CLI 原子修改唯一 `DATABASE_URL` → 启动并自动 migration → `/api/ready`/认证/数量/搜索/代表性读取/canary 写验证 → 放流量”。CLI 不负责启停服务；旧 SQLite URL 只保存在惰性的 `SHADOW_DATABASE_URL`，不启用 dual-write。PG 接受业务写后，未经外部 PG→SQLite 对账不得切回。
-- PostgreSQL 依赖 `public.pg_trgm`，向量为 float32 `bytea`，不依赖 pgvector。生产仍用 `--workers 1`，因为模型 scheduler、breaker 与 cancellation registry 是进程内状态。
-- `batch_ingest` 除 SQLite 物理格式修复 `vectors-to-blob` 外的 mutation phase 支持 SQLite 与 PostgreSQL。PostgreSQL 直连维护必须先停 API/后台 writer、显式传 `--confirm-service-stopped`，并由共享 opener 在独立非池化 session 上持有数据库级 advisory lock；flag 本身不会停服务。离线 `scripts/check.sh` 不连接 PostgreSQL；`scripts/check_postgres.sh` 和 CI 的独立 PostgreSQL 16 lane 验证 adapter、migration、批处理与跨进程语义。
+- `backend/app/repositories/factory.py` 是唯一 backend choice；两种后端组合对等的领域 store。
+  PostgreSQL 共用有界 `PostgresDatabase` pool，启动 lease 覆盖 checksummed migration、
+  恢复、warmup 与 readiness 发布；失败或被替换的实例只关闭自己的 pool。MVCC、
+  row/advisory lock 不替代业务锁序与事务边界，pool acquire、statement、lock timeout 仍有界。
+- `DATABASE_URL` 选择唯一 active backend；只改 URL 不复制数据。`SHADOW_DATABASE_URL`
+  不启用 dual-write，也不选择应用后端。向量存 float32 `bytea`，依赖 `public.pg_trgm`，
+  不依赖 pgvector。生产仍是单 Uvicorn worker，模型 scheduler、breaker 与 cancellation
+  registry 的容量/归属保持进程内语义。
+- 停服快照 importer 与连续 shadow 是独立运维组合根，使用不同 PostgreSQL 目标。
+  `scripts/migrate_sqlite_to_postgres.py` 已支持存量导入和显式本地激活：默认 dry-run，
+  在只读备份/工作副本上升级 SQLite，向空目标按 FK 顺序 COPY，以 sealed snapshot、
+  内容 checksum 和逐表 checkpoint 证明可恢复性；显式激活复核停写源与目标后原子替换
+  `.env`。它不复制 storage、不启停服务、不捕获快照后的写入，也不反向回放 PG 写入。
+- `scripts/shadow_sqlite_to_postgres.py` 维持 SQLite-active 的单向影子复制；它提供
+  preflight、baseline、worker、status 与 verify，不能把 shadow target 自动切为业务库。
+  当前 catalog 从封存迁移和 manifest 派生，不在本文维护版本号、表数或约束数副本。
+  单消费者以数据库时钟 lease 取得归属，业务 apply、连续 checkpoint 与脱敏 progress
+  同事务提交；已证明的数据/身份错误写 poison，暂态错误整批有界重试。
+- Shadow 的锁顺序与跨库生命周期不得倒置：先取 PG 控制身份，再用短 SQLite snapshot
+  连读序列并 hydrate upsert；等待 PG 或执行长 proof 时不持有 SQLite 事务。最终发布 H0
+  前的 live SQLite fence 跨 PG checkpoint commit 保持，失败不发布 H0。每次关键绑定
+  复核路径与文件身份，不复用可能指向旧文件的线程缓存连接。
+  `open_fresh_live_sqlite` 边界的非瞬态 `sqlite3.OperationalError` 归为 binding identity；
+  locked、busy、interrupted open 仍整批重试，后续操作保留 schema/query 错误分类。
+- Verifier 先把 SQLite snapshot 的规范化事实写私有 spool，释放源端后等待目标 checkpoint，
+  再固定 PG 只读 snapshot；后续变更键单独计为 concurrent，barrier 保留到报告提交。
+  structural/full/cutover 是校验等级，不能把通过校验理解为已切流量。
+- PostgreSQL 离线 mutation phase 通过共享 maintenance opener，在独立非池化 session
+  持有数据库级 advisory lock；`--confirm-service-stopped` 是操作者断言，不会停服务。
+  `vectors-to-blob` 是 SQLite 物理格式修复，在线 scale 构建使用自己的组合根与每库锁。
+
+完整执行步骤、兼容转换、校验/回滚条件见[运维参考](./docs/operations_zh.md#sqlite--postgresql-正向影子同步)
+与[停服迁移 runbook](./docs/postgres-migration-runbook.md)；迁移编写与验证规则见
+[开发文档](./docs/development_zh.md#架构边界)。
 
 ### 2.3 API、模型与领域服务
 
@@ -337,6 +341,9 @@ Legacy 的 `prompts.reflect_prompt` 在原 user 消息内先输出固定指令�
 - `frontend/app/admin/usage/` 拥有用户总览及其只读「提问分析」（问答 / 深度报告）「解析问题」页签；它只消费管理员 GET projection，不拥有解析、重试或隔离文件 mutation。解析问题列表可按 7 类模型功能筛选，模型正文只在展开一行时经单案例 GET 读取，不随列表批量下发。`page.tsx` 的 workspace hash 可带一个来源 id，只负责打开仍获授权的笔记本和来源详情。
 - `kg-type-model.ts` 保存内置知识类型文案/样式；`kg-type-mark.tsx` 消费并 re-export 该模型，保存答案与图谱共用的类型标记渲染。
 - `ask-stream.ts`、`ask-reconnect.ts` 等 helper 保存流式问答和恢复行为。
+- `source-list-panel.tsx` 与 `kg-graph-view.tsx` 只渲染 readonly props，状态与编排仍归既有 hook/壳层；
+  `use-promotion-queue.ts` 与 `use-edge-review-queue.ts` 分别拥有晋升和关系审核队列的读取、
+  写入及开窗状态，壳层只组合权限与刷新事件。
 - `frontend/app/api-client.ts` is the shared transport，负责 base URL、认证 header、JSON/empty/Blob、trusted error、网络失败与 AbortSignal mechanics；七个 domain API module 仍拥有 endpoint path、body、response type 与产品策略。
 - `frontend/app/notebook-transition.ts` 是「打开笔记本」的单一 transition 编排（纯逻辑，无 React/DOM/网络）：全部 `begin` 先按声明序跑完再判拒绝 → `enter` → `load` → `isCurrent` → `apply` → 各步可选 `commit`（按声明序）→ `conclude` → 对已 begin 成功的步骤按**逆 begin 序** settle 恰好一次（成功传 outcome；拒绝、取数失败、任一守门判否与异常一律传 `null` 回滚，异常随后原样抛出）。被顶替的旧 transition 只 settle 自己铸出的那批 ticket，绝不碰更晚 transition 刚建立的 owner。`page.tsx::notebookTransitionSteps` 是各 owner `begin`/可选 `commit`/`settle` 的唯一登记点，新增 owner 只加一项；root-modal 那一步必须排第一（它的 close sink 是暂存批次的唯一清理路径）。`openNotebook` 只保留自己的 prologue 与 plan 声明，四个相位落在具名 helper 里，请求数、epoch 语义、迟到丢弃、tombstone、history 与失败落点均不变。
 - `frontend/app/use-source-library.ts` 是来源库状态的唯一 owner：列表/检索范围、分页、详情元素、重解析、删除 tombstone 与解析轮询都在 hook 内按 user + notebook + workspace generation 归属；`page.tsx` 只提交成对稳定的 notebook/source 首屏快照并消费 readonly view、具名 command 与窄刷新事件。文件/URL 写请求可以在服务端安全完成，但旧 owner 的迟到结果不得写入新工作区。
@@ -477,6 +484,9 @@ retrieval-run、读预算、参与集与来源范围进入工作线程；公平�
 后台线程有容量上限并持有取消事件，终态通过 `status='running'` 条件更新提交；关闭先取消并
 有界等待，只有服务器启动补偿把遗留任务转为 `interrupted`，普通仓库实例化不执行补偿。
 `frontend/app/ask` 拥有全局会话、范围、作业跟随（推送流优先、轮询兜底）及引用阅读状态，复用共享页面和答案组件。
+其中 `use-global-ask.ts` 用 `readConversation` / `applyConversation` /
+`dropConversationIdentity` 统一对账；`discardJob` 与 `reconcileMissingJob` 共用这一入口，
+把轮次、历史游标和会话身份一起更新。网络失败不等于会话已删除，不能在调用点自行猜终态。
 全局作业的持久骨架仍是「建作业 + 读作业行」；`backend/app/services/global_ask_feed.py`（叶子模块，只依赖标准库）
 是叠在它上面的进程内分发，只服务正在看的客户端：`GlobalAskService` 在 worker 登记处建 feed、在轨迹与覆盖回执
 变更后发布、由结束作业的一方从**数据库**取终态帧；别的进程里的作业由请求级的 `global-ask-follow` 线程读库跟随。
@@ -537,7 +547,7 @@ transport disconnect / navigation / refresh
 
 base 的权威性另在答案合成 prompt 中表达：如果 personal 与 base 证据矛盾，答案服从 base，并明确披露差异。这是 synthesis policy，不是 retrieval score policy，也不参与 grounding 阈值。
 
-当前 Ask mode registry 的默认路径是 `chunk`；`reasoning` 为严格 KG 路径，迭代执行计划、检索、反思并流式产出 trace。简化界面直接提交 `mode="reasoning"`，走与高级界面相同的意图预检后进入同一条 reasoning 路径，没有分类路由模型调用。`auto` 为退役别名，映射到 `reasoning`（与 `fast`/`global`/`graph` 映射到 `chunk` 同一机制）。因此持久化 mode、retrieval-run kind 与引擎真源永远只是稳定 registry id，高级界面的具名选择不受影响。退役 mode id 只保留兼容映射，不能改回默认模式。
+当前 Ask mode registry 的默认路径是 `chunk`；`reasoning` 迭代执行计划、检索、反思并流式产出 trace；有图时可沿图谱扩展，无图时按下文的原文/枚举可用性继续。简化界面直接提交 `mode="reasoning"`，走与高级界面相同的意图预检后进入同一条 reasoning 路径，没有分类路由模型调用。`auto` 为退役别名，映射到 `reasoning`（与 `fast`/`global`/`graph` 映射到 `chunk` 同一机制）。因此持久化 mode、retrieval-run kind 与引擎真源永远只是稳定 registry id，高级界面的具名选择不受影响。退役 mode id 只保留兼容映射，不能改回默认模式。
 
 未携带 `intent` 的 `/ask`、`/ask/stream` 直接兼容调用在 `AskService.resolve_reasoning_followup` 里先用确定性澄清闸判问句本身；只有该闸命中（指代不清或纯泛化请求）才读取同一 owner、同一 notebook 的会话历史、跑既有 `query_rewrite` 工作负载把跟进句改写成独立问题，再对改写句重判同一把闸——命中闸就是入口层的唯一改写触发条件，不做无条件改写；改写后仍命中闸返回 422，其文案固定取自原句（改写产物绝不进入错误文案），放行时改写句只顶替 `retrieval_query`/`intent.resolved_question`，`objective`/`result_scope` 等仍按原句判定。解析结果经 `ask_followup.py` 的 `followup_resolution_context` contextvar 从路由层带入（与 `retrieval_scope_receipt_context` 同形、经 `copy_context()` 跨后台任务边界），`_prepare_reasoning_ask` 读取时先校验 `resolution.question` 与当次 payload 问句逐字节相同，不同即视为没有该 resolution、按原句走引擎兼容分支判闸。MCP `ask_notebook` 不经这条入口层改写：它在调用内已跑带会话历史的模型理解步并以澄清句柄回传，跟进句由那一步解析。
 
@@ -563,57 +573,97 @@ Excel 专业分析插在 reasoning retrieval 结束与 response-draft seam 之�
 不等同于章节完整读取。目录摘要也不等同于全文证据。该分支不调用嵌入或图谱，模式仍为
 `chunk`；预算与用户可见边界见 paired product/API reference，部署参数见配置文档。
 
-`backend/app/core/ask_retrieval_policy.py` 是逐步推理预算的后端真源，`frontend/app/ask-retrieval-effort.ts` 镜像用户可见合同并由跨栈测试锁定；`answer_element_items` 与 `enum_page_size`/`enum_pages_per_run`/`enum_rows_per_run` 是这条镜像关系的例外——它们都是后端专有字段，前端没有消费者，也不在 `ask-retrieval-effort.ts` 里重复：前者只控制最终合成 prompt 里直接来源元素（公式/表格/图片等）的纳入条数上限，后三者约束 §3.3.1 之外「集合枚举工具」一节所述集合枚举工具（`enumerate_elements`/`enumerate_kg_objects` 两个动作及其 `collection="sources"` 参数值）的每 run 预算。`read_document` 按篇取样的元素池/字符池两个预算同理不是 `AskRetrievalLimits` 字段——元素池直接复用 `document_overview_max_elements`（通用问答文档介绍同一个部署旋钮），字符池现算自 `limits.chunk_context_chars // 4`，两者都只在后端读取，前端档位镜像 `ask-retrieval-effort.ts` 不需要跟着改。`retrieval_effort` 的五个稳定 id 与上限如下；最终相关性结果数按 `min(cap, max(floor, aspect × 实际执行查询数))` 计算，模型可以提前结束，不能越过上限。
+`backend/app/core/ask_retrieval_policy.py` 是逐步推理预算的后端真源，
+`frontend/app/ask-retrieval-effort.ts` 镜像有浏览器消费者的字段，由跨栈测试校验；
+`answer_element_items`、`enum_page_size`、`enum_pages_per_run`、
+`enum_rows_per_run` 和按篇取样预算只在后端使用。候选召回窗由部署配置独立控制，
+不随用户档位变化。精确数值和展示语义只维护在
+[产品/API：逐步推理档位与完整集合请求](./docs/product-and-api_zh.md#逐步推理档位与完整集合请求)。
 
-| id | 每查询取数 | 最终 floor/aspect/cap | 最大步骤/首轮子查询 | KG/chunk prompt 字符 | 合成纳入的直接来源元素 | 枚举页大小 | 每 run 额外翻页 | 每 run 累计行数 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `overview` | 4 | 8/2/12 | 4/2 | 4,000/12,000 | 4 | 50 | 2 | 100 |
-| `standard` | 8 | 20/3/36 | 8/5 | 6,000/30,000 | 6 | 50 | 4 | 200 |
-| `deep` | 8 | 24/4/48 | 16/6 | 8,000/50,000 | 8 | 50 | 6 | 300 |
-| `thorough` | 12 | 32/5/64 | 32/8 | 12,000/80,000 | 12 | 50 | 8 | 400 |
-| `exhaustive` | 16 | 40/6/96 | 50/10 | 16,000/120,000 | 16 | 50 | 12 | 600 |
+PostgreSQL KG 词法 producer 在同一召回词项和额度下选择 SQL 路径：短非 CJK 词项在
+规模、scope 与索引能力闸满足时可走 GiST KNN；其余路径把 trigram 与 literal-ILIKE
+拆成有界 ordered arms，再精确 union/top-k。物理索引由 planner 选择，不改变公开召回 cap；
+无正文 side-channel 只记录路径计数和耗时。
 
-候选召回不随档位变化，而由部署参数独立控制：`CHUNK_RECALL` 默认 200，分别约束 Chunk/KG 的 ANN 与词法候选窗（默认去重前最多 400）；`RELATION_RECALL` 默认 200，分别约束 Relation ANN 和词法端点扩出的关系总窗（默认去重前最多 400，词法总窗内仍为 source/target 两个方向预留份额）。调整这两个部署值会改变候选窗，界面不把默认值伪装成请求级硬上限。档位只表达“允许多少轮判断与最终证据”。
+`QueryIntentContract.result_scope` 区分相关性检索与集合问题。
+`structured_retrieval.py` 负责可识别的 Knowhow 物理行清单/计数，通过 repository port 的
+稳定 `(table_id, position, row_id)` 游标读取；筛选、distinct/type count、group-by 不会
+伪装成完整枚举。来源/知识对象枚举是下节独立的模型动作，不由此 scope 自动触发。
 
-PostgreSQL 的 KG 名词法 producer 在同一召回词项与额度合同下按词项选 SQL 路径：CJK/长词项避开 `<->` ordered KNN，改走 notebook-scoped 的拆分 trigram arms；短非 CJK 词项在规模、scope 与索引能力闸满足时走全局 GiST KNN，KNN 短页也回到拆分路径。拆分侧把 `%` 与 literal-ILIKE 变成各自有界的 ordered arm 后精确 union/top-k；planner 可选择 notebook-aware 复合 GIN，或其他可用的 bitmap 组合，应用不伪称固定某一个物理索引。因此访问路径差异不会泄漏成新的召回 cap；固定无正文 side-channel 只上报各 SQL 路径词项数与 producer 耗时，不进入 hit/API。
-
-`QueryIntentContract.result_scope` 用 `ranked` / `complete` / `aggregate` / `hybrid` 分开相关性检索与集合问题。`structured_retrieval.py` 仅对可识别的 Knowhow 集合请求启用，调用 repository port 的稳定 `(table_id, position, row_id)` 游标逐页枚举，持久化回答则携带结构化 result set 与 coverage；Memory 与其他集合仍无完整枚举器，只返回相关性命中并披露边界。来源元素、KG 对象与库内文档目录另有独立的枚举路径，见下文「3.3.2 集合枚举工具」——它由模型显式调用，不由这里的 `result_scope` 自动触发。五档共享同一安全线：25 行/页、50 页、1,250 物理行/请求、8 表、每表 8 列、单元格模型摘录 1,000 字符、结构化载荷 256,000 字符、正文内联 100 行、结果卡初始显示 20 行。正文与初始显示阈值不删除已经回传的结构化行。只有游标耗尽，且枚举前后 `mutation_seq`、history-backed `enumeration_seq`、行数、列元数据和所选表范围全部稳定，才发布 `complete=true`；`enumeration_seq` 会随行增删历史原子推进，因此等量删一增一也会被判为并发变化。任一行/页/表/列/载荷上限触顶或并发改表都发布 `complete=false` + `explicit_partial`。因此一张 100 行表可证明并显示 `100/100`，而低档位也不能缩小显式“全部”的枚举上限。
-
-执行边界是可证明的物理行语义，而不是所有被分类为集合的问题：确认后按最终措辞与权威澄清答案重算 scope；只有整表清单、直接物理行/记录计数及其 hybrid 可执行，“多少种”等 distinct/type count、条件筛选、group-by 必须回退并披露不支持完整。选择范围使用最多 8 个描述的轻量 catalog，不读取格、代码附件或健康 payload；截窗前按查询优先纳入显式点名表，全库聚合计数/序列用于 batch 稳定性。响应分开 per-table、batch 与 synthesis coverage，所以 200/200 枚举配 100/200 模型预览是“枚举完整、分析部分”，8 表截断仅使 batch partial。KG/Memory/chain 共享 KG 字符硬预算，结构化预览/chunk/direct element 共享原文字符硬预算，最终证据块不超过两者之和。
+只有游标耗尽且前后 mutation、history-backed enumeration sequence、行数、列及表范围
+稳定，才能宣告完整；触顶或并发改表必须披露 partial。per-table、batch、synthesis coverage
+分别证明“读全”与“送入模型分析”的范围，不能互相替代。KG/Memory/chain 共用 KG 字符池，
+结构化预览/chunk/direct element 共用原文字符池；具体安全线见上述产品/API 章节。
 
 ### 3.3.2 集合枚举工具
 
-`enumerate_elements`/`enumerate_kg_objects` 是与上述 Knowhow 执行器并行、由模型在 reflect 循环里显式调用的两个零 LLM 动作（第三个集合「来源清单」是这两个动作上的参数值 `enumerate.collection="sources"`，这一特性内模型面的动作空间维持 10 个；解析只识别 `"sources"`，其他值落回按动作 id 分派——之后另外新增的货真价实的动作与这里无关：§3.3.3 的大纲便签 `update_outline` 是第 11 个、Agentic Memory P4 的 `consult_memory` 是第 12 个、下文「来源清单 → 按篇读取」一段的 `read_document`（PR-A）是第 13 个；口径以 `domain/reflect_action.CORE_REFLECT_ACTION_IDS` 为准，终止动作 `answer` 不计入这个数）：可枚举来源元素 kind 白名单为 `formula`/`table`/`image`/`code_block`，可枚举知识对象类型白名单为 `concept`/`claim`/`formula`/`procedure`（限可用状态）；两张白名单唯一真源是 `collection_catalog.ENUMERABLE_ELEMENT_KINDS`/`ENUMERABLE_KG_OBJECT_TYPES`。第三个集合「来源清单」由参数值 `enumerate.collection="sources"` 请求，给出它就忽略 enumerate 的其他参数（库的文档目录本身就是一整个集合，没有子类型）。每个 run 只构建一次的集合地图（`[Collections in scope] elements: formula 12 (3 sources), table 5, image 0, code_block 0 | KG objects: concept 1234, claim 567, formula 89, procedure 0 | knowhow tables: 2 | sources: 7`，每个白名单 kind/type 恒在场、缺省即 0，硬顶 600 字符）注入 plan/reflect 上下文，让模型先看计数再决定是否值得整份列出；地图统计的物理源集合与执行器实际遍历的源集合按构造逐字一致。
+`collection_catalog.py` 规划集合地图，`collection_enumeration.py` 通过 repository ports
+遍历同一物理来源集合；`enumerate_elements` / `enumerate_kg_objects` 是模型显式选择的
+零 LLM 动作，来源清单使用 `enumerate.collection="sources"`。元素/知识对象白名单
+由 catalog 常量拥有，动作目录由 `CORE_REFLECT_ACTION_IDS` 拥有，本文不维护计数副本。
 
-来源清单的集合是**用户可见来源**：计划由 `source_change_signal_rows`（已排除私有 Memory 合成源）按它投影出的 `user_visible` 列筛出，纯算术、**零额外查询**：可见性由各适配器在 SQL 里对 `list_sources`/`list_sources_page`/`visible_document_count` 共用的那条谓词求值，作为投影列随行返回（不新造第三份拼写，也不另开一条查询——`source_type` 上没有索引，「哪些源被隐藏」只能整表扫这个 notebook 的全部源行，而那正发生在 signal 查询刚扫过同一批行之后）；遍历顺序取来源页签的 `(created_at, id)`（两侧列表查询也带 `id` 次键：并列 `created_at` 下缺次键会与目录分叉，PG 本来就带）。收尾除作用域指纹外再对整条链已发出的文档做一次有界批量复读，比对 (显示名, doc_type) 摘要（账目挂游标、不进用户面 coverage）：论文元数据回填只写 `source_paper_meta`、不动 `sources.updated_at`，指纹看不见它，不复检就会产出混代目录却报 complete（`source_change_signal_rows` 多投影一列 `created_at` 作排序键，同一行访问、零额外查询，双后端各自归一化成「字典序 == 本后端 ORDER BY」；指纹只消费前两个字段，创建时间不进摘要）。地图行尾的 `| sources: N` 与清单分母出自同一个 helper（`_notebook_visible_sources`），因此不可能出现「地图说 7、清单列 8」。条目为显示名（接地论文优先显示论文标题，与引用同口径）、文档类型的界面词（`extraction_profiles.PROFILES`，未识别即空串，绝不上屏 `academic_paper` 这类内部 id）与该源已存摘要的摘录；每份文档计一行，整份清单是**一个**分片，故首个 hydration 窗口免费、其后每个窗口计一次额外往返，页查询上界为 `1 + max_pages`。游标形态为 `(notebook_id, source_id)` 且指向**尚未列出**的第一份文档（inclusive resume），计划里有而 hydrate 时行已消失的文档按 `scanned>returned` 记账并由分母校验报 `concurrent_change`，绝不说成完整。
+- 地图、目录分母和执行器使用共同的可见性谓词。来源信号查询投影 `user_visible`，
+  按 `(created_at, id)` 遍历；收尾重新解析参与库集合，并批量复读显示名/类型，
+  不能只靠来源时间戳发现论文元数据或空参考库的变化。
+- `TypedCollectionCoverage` 区分已返回条数、已知/未知分母、完整性及截断原因；
+  `TypedCollectionResult` 另记 synthesis coverage。预算在 run 内累计，游标仅存在于
+  同一进程的 run 中，不入库、不交给模型。并发变更终止续跑，不能静默重置为新清单。
+- 知识对象先做纯 keyset 读取，再用地图共用的 `USABLE_STATUSES` 过滤；有限过扫描
+  保持前进并披露 partial，避免无状态索引时产生无界 SQL 残余过滤。
+  执行器检查页查询上界，违规以 `EnumerationInvariantError` 交给调用方 fail-open。
+- 来源标题在已规划范围内做确定性、唯一匹配；超出完整检查预算就拒绝证明唯一性，
+  不能用前缀猜测。跨库条目保留自己的 notebook/source 身份，引用及覆盖率不借用当前库身份。
+  元素替换与来源变更信号同事务提交，避免刚解析的来源被缓存地图漏计。
+- 无图 reasoning 的早退放行由 `AskService._no_kg_scope_admits_run` 判断：
+  未收窄来源时，枚举集合非空与原文检索有来源是独立理由，分别复用
+  `enumeration_wiring_active` / `chunk_search_wiring_active`。
+  原文通道已联邦化，默认按 `collection_map.sources` 的参与集判断；
+  关闭 `CHUNK_FEDERATION_ENABLED` 才回到 `active_sources`。收窄来源时不装配未收窄的
+  集合地图，仍可通过所选文档的原始元素检索放行。这不绕过 HTTP
+  `ask_available`：本库 `local_evidence_available=false` 且只有无图参考库有来源时，
+  仍受前置可用性门限制；本地证据判据也计入已确认 Memory/Knowhow，不能只看来源数量。
+- `read_document` 复用 `document_source_overview.prepare_source_overview` 取原始元素样本，
+  使用有界且共享的元素/字符池、来源版本前后复核，以及来源自己的引用身份。
+  样本不挤占 ordinary direct-element 席位；“目录列全”与“正文取样/模型分析覆盖”
+  分别披露，没有摘要或样本的文档不能凭标题补写正文。
 
-覆盖率是 `TypedCollectionCoverage`：`returned_total`/`total`（`None`=分母未知，渲染为未知而非 `/0`）/`complete`/`truncated_reason`（`budget`/`payload`/`concurrent_change`）/`overflow_semantics`；`complete=true` 要求游标耗尽、首尾作用域身份一致，且跨续跑链的累计条数与已知规模相符。首尾作用域身份包含**参与库集合本身**：收尾时经 `participant_ids`（与开场同一个 `resolve_participants` / `mount_sql.py` 谓词入口）重新解析，集合不等即 `scope_stable=False`，指纹/seq 复检也用收尾解析出的集合算。只按开场那份 id 列表重算指纹看不见「多了一个库」或「少了一个库」——空库不贡献来源信号，被卸载的库的信号也仍在，两种都会被误判成稳定。`TypedCollectionResult` 另携带 `synthesis_rows`/`synthesis_complete`，把「已枚举的清单」与「实际进入答案合成 prompt 的有界预览」分开披露，语义对齐 Knowhow batch 的枚举/合成两轨。预算按 run 累计：`enum_rows_per_run` 是本 run 所有枚举动作可返回的总行数，`enum_pages_per_run` 只计每个被访问分片的第二页及之后——元素侧按来源分片，KG 对象侧按参与的库分片，每个分片各自免首页（否则「每分片一条」的普通语料在预算耗尽前就无法枚全）；共享的结构化载荷上限 `structured_payload_chars` 同样是 run 级的，执行器在结果对象上回传本次真实消耗（`payload_chars`，与 `extra_pages` 同款「不进 coverage」的成本记账），run 每次只发剩余额度，否则一轮里的第 N 次枚举会拿到全新满额、累计返回数倍于文档上限。该游标是纯 run 内部句柄：不落库、不序列化进响应、模型也看不到它，只作为同一进程内续跑的凭据。
-
-知识对象翻页只做纯 keyset 读取，不带状态谓词：`idx_knowledge_objects_nb_type_created` 不含 `status`，写进 SQL 就是一次无界残余过滤（停用对象占比高的老库上「一页」不再是 O(limit)）。执行器读回后按地图计数所用的**同一个** `USABLE_STATUSES` 对象过滤，每次动作最多过扫描 `max_rows × 4` 行原始行（`scanned` 计的就是原始行数），触顶发布 `truncated_reason="budget"` 的诚实部分结果并保留可续跑游标；游标越过已扫过的不可用区段，因此续跑必然推进而不会反复重扫同一段前缀。刻意不加状态索引：那需要在本次改动里再叠一次 schema bump，且会把状态词表冻进 schema。
-
-限定单一来源按**标题**表达：内部 source id 从不上屏也从不给模型看，reflect 的 `enumerate.source_title` 由服务端在地图已规划的那批来源里做确定性解析（去空白 + 忽略大小写的精确匹配，按窗口批量读标题并有界，绝不模糊匹配）；零命中或多命中都跳过该动作并在轨迹里说明，绝不悄悄扩成全作用域枚举。计划长度超过解析上限时直接拒绝解析（`truncated=True`，不扫描、不给 id），不从前缀断言唯一——「唯一」是整个作用域的性质，同名的第二个源可能就在上限之后。同时给了 `source_id` 时以 id 为准。
-
-因为这些工具不依赖图谱，无图笔记本的早退由单点判据 `_no_kg_scope_admits_run` 决定，两条互不包含的理由任一成立即放行：**枚举工具能列出东西**（`REASONING_ENUM_TOOLS_ENABLED` 接线活跃，且元素、知识对象或**来源**三类计数任一非零），或**原文段落检索有得可检**（`REASONING_CHUNK_SEARCH_ENABLED` 接线活跃，且**当前笔记本**的用户可见来源计数`collection_map.active_sources` 非零——两条理由的范围口径不同是合同：枚举工具是联邦的，而 `search_chunks` 复用 chunk 模式的 notebook-local 原语，参考库的原文段落不在这条通道里，拿参与集的来源数给它放行等于拿一个它够不着的库当理由；联邦化登记在 `fangan_todo.md` 的检索一节——无图逐步推理这时额外提供一等的原文段落检索动作 `search_chunks`，含无图首轮确定性播种，`expand_graph`/`ppr_retrieve`/`expand_community`/`follow_chain`/`enumerate_kg_objects` 五个只对图有意义的动作同时从 schema/prompt/白名单收缩）。来源数计入枚举那条判据，因为纯散文库（有文档、零元素、零知识对象）正是来源清单的主力场景，挡住它只会让「库里有哪几篇」拿回一句非答案，而零源库仍然早退；放行后照常跑完整循环，`kg_required` 仍如实为 `True`，继续作为纯披露字段。两把 kill switch 各自对应一条放行理由的接线判据，不再共用集合枚举那把总闸的同一个函数：枚举闸关、原文检索闸开、无图有源时依旧放行；只有 `REASONING_ENUM_TOOLS_ENABLED` 与 `REASONING_CHUNK_SEARCH_ENABLED` 都关闭才逐字回到接入前的早退（此时早退文案为「当前笔记本没有可检索的来源；请先添加来源，或挂载/整理一个已建知识图谱的参考库。」——提到图谱是参考库那条出路的真实条件，参与集里有图时根本走不到这条早退）。`complete=false` 恒意味着游标可续跑，唯一例外 `truncated_reason=concurrent_change`——两次调用之间作用域发生变化时终止且绝不静默重来；未耗尽预算的续跑请求走该游标继续，预算耗尽则跳过为 `enumeration_budget`（仍是部分结果），只有链条已 `complete` 才跳过为 `already_enumerated`。`replace_elements` 在同一个写事务里把该源的 `updated_at` 推到新元素所带的时刻，变更信号因此与元素换代原子同步：首解析的来源不再有「元素已落盘、信号未动、被数成 0」的窗口（那条曾被登记为「已披露的一致低报」，现已根治），刚解析完就能进遍历计划。显式点名的 `source_id` 仍直接查询该源而非把「不在计划」当作「为空」。每次动作的页查询次数还有一条**被强制的**上界：元素侧 `max_rows + max_pages`（零计数源不进计划⇒不访问，进计划的源访问即产行⇒受行预算约束），知识对象侧 `参与库数 + max_pages + 原始行过扫描上限`（该侧没有 per-分片计数可跳过，且状态过滤会产生补页）；越界抛 `EnumerationInvariantError`，由调用方按普通执行器失败 fail-open 成一次 skip。刻意**不**给首页计费：那会让「一百个源各一条公式」这类宽而薄语料在任何档位都无法达成 complete（本特性已修过一次的形态）。挂载参考库的跨库条目仍标注来源库名，但来源跳转与图片已由**参与集内的代理读取**补齐：`GET /notebooks/{active}/sources/{id}`、`.../sources/{id}/elements` 与 `GET /notebooks/{active}/assets/{asset_id}` 一律按路径里的 active notebook 过读权限，再只在该 notebook 的有效参与集内解析资源（资源自报所属 notebook，不在集内即 404，同库先短路不多付挂载 join），浏览器因此一次都不直连另一个库——挂载仍不等于持有该库直接成员权限，裸 `GET /sources/{id}` 保持 owner∪member 口径，写入（重新解析/删除）不代理，来源详情弹窗对参考库来源按只读渲染。「纯文本兜底解析来源」的覆盖披露仍登记为独立后续任务。总闸 `REASONING_ENUM_TOOLS_ENABLED`（默认 true）关闭时两个动作与来源清单参数一并不提供、地图也不注入。
-
-范围指示语（「当前notebook」「这个库」「本库」「整个库」「知识图谱 / KG」等）只在 **prompt 层**接地：`prompts.SCOPE_DEIXIS_GROUNDING` 一段共用文本同时进入意图契约、两份规划拼写（`expand_query_prompt` 是生产实际发出的那份，`plan_prompt` 是保持同步的备份拼写）与 reflect，要求模型把这类短语解析成作用域后剥掉、不带进任何子查询/关键词/`exact_term`，同时保留问题本身。刻意不做确定性词表剥离：那会变成词法路由，也会误伤真正在讨论知识图谱的文档。
-
-上述地图/枚举共用六个有界 repository 端口，双后端（SQLite/PostgreSQL）adapter 均实现：`SourceStorePort.source_change_signal_rows`（每 notebook 一条查询取全部源的不透明变更信号）、`SourceStorePort.element_type_count_rows`（按白名单批量 `GROUP BY source_id, element_type`）、`SourceStorePort.element_page_rows`（一个源一种 kind 的 keyset 分页）、`SourceStorePort.source_display_rows`（来源标题/论文标题批量查询，刻意不带摘要）、`SourceStorePort.source_listing_rows`（来源卡投影：标题/类型/已存摘要 + 论文元数据外连接，跑在调用方连接上；`source_metadata` 就是它加一个自己的连接，两者一份 SQL）与 `KnowledgeStorePort.knowledge_object_page_rows`（一个 notebook 一种 object_type 的 keyset 分页，复用地图同一条 `USABLE_STATUSES` 谓词）。
-
-**来源清单 → 按篇读取（PR-A，`read_document`）。** 上文的来源清单只给标题、类型与已存摘要；没有存摘要的那一行，模型此前只能靠 `add_subquery` 做相关度检索去猜正文讲什么。`read_document` 补的正是这一环：在**同一次调用之内**沿用来源清单已经解析出来的花名册，挑一篇按文档顺序做有界取样，执行体逐字复用 `document_source_overview.prepare_source_overview`（与通用问答「文档介绍」单篇定位那条零 LLM 执行体完全同一份代码）。它的动作何时提供由 `ReasoningRetriever.document_read_active()` 单点判定，prompt / schema / 白名单 / 执行体四处共读，六个条件缺一不可：部署总开关 `REASONING_DOCUMENT_READ_ENABLED`（默认 true）、调用方策略位 `allow_document_read`、`sources` 端口在场、集合枚举总闸 `enumeration_active()` 处于开启（这个动作只读本 run 已经列出过的花名册，没有清单工具就没有花名册）、次数上限 `REASONING_MAX_DOCUMENT_READS`（默认 4）大于零，以及首读份额可行（见下）；六个条件任一不成立，动作在 prompt/schema/白名单三处一并消失，逐字节回到接入前。来源解析**零额外 I/O**：只在 `state.enumerations` 里 `collection="sources"` 的那批条目上按标题做精确匹配（去空白 + 忽略大小写，不模糊），范围合法性已经由 `enumerate_sources` 兑现过一次，这里不再回库重新解析标题——那会绕开清单已经收窄过的范围，给模型一条用标题探测范围外文档的路。六条 skip（未启用、次数已达上限、本轮还没有花名册可读、标题在花名册里零命中或多命中、这篇本轮已读过、预算已用完）全部零 I/O、不写 `result_ids`；唯一的例外是「见证失败」（取样期间来源被重新解析）——那一次 I/O 真的发生过，所以记一条 `result_ids: []` 的零命中 `read_document` 步，并把执行体自己的 `coverage_note` 回喂进下一轮反思的账目，不编造一句「正在重新解析」。预算走两个 run 级池而不是 `AskRetrievalLimits` 新字段：元素池复用 `settings.document_overview_max_elements`（与通用问答「文档介绍」同一个旋钮），字符池现算自 `limits.chunk_context_chars // 4`；每次读的份额按 `(池剩余) // 还能读几次` 切分（与 `document_catalog_overview.supplement_missing_summaries` 同形），取样深度由字符份额反推（每元素至少 `DOCUMENT_READ_MIN_CHARS_PER_ELEMENT=160` 字符，宽度优先会把每条正文截成只剩章节标题）。产物落在独立号段 `k7001+`（`DOCUMENT_READ_KEY_BASE`，紧邻 `_EXTERNAL_KEY_BASE`，与按节合成的 `OUTLINE_SECTION_KEY_STRIDE` 互不越界），经 `structured_block` 缝进合成证据块、紧跟在枚举预览之后——先是「库里有这几篇」，再是「其中这几篇我真的翻开读了几段」；不进 `k4001+` 直接元素段，因为那里 `notebook_id` 恒空、`tier` 取当前库，挂载参考库的来源会被打成本库，且会与 `answer_element_items` 的预算相互挤兑。引用卡按元素出（复用 `collection_item_citations`），结果卡仍是既有的 `TypedCollectionResult(collection="sources")`，不新增 result_set 类型；用量分区计数 `counts.included_document_reads` 只在真有产物时才出现（稀疏键）。合成侧的 `DOCUMENT_READ_GUIDANCE` 要求：每篇取样各自成段、标题打头；篇章的研究问题/方法/贡献只从该篇取样或已存摘要写，证据不够就明说留空；花名册里既无摘要又没被本轮读到的文档要逐一点名「未获得足以介绍正文的依据」，不得沉默漏篇、不得凭标题猜内容；「目录列全」不等于「已阅读全文」——覆盖率披露行紧跟在每篇的 header 之后逐篇呈现，不是文末一句笼统总结。
+工具参数、完整性判定、预算表和界面披露的完整合同统一见
+[产品/API：集合枚举工具](./docs/product-and-api_zh.md#集合枚举工具)；
+历史设计见[集合枚举设计](./docs/superpowers/specs/2026-07-28-reasoning-enumeration-tools-design.md)。
 
 ### 3.3.3 大纲便签与按节合成
 
-`app/services/outline_synthesis.py` 与 `reasoning_retrieval.py` 里的 `update_outline` 分支共同实现一份有界的、由模型撰写的大纲便签与按节合成（设计文档 §3.1，借鉴 DualGraph）。门控函数 `outline_wiring_active(settings, limits)` 判 `limits.effort == "exhaustive"`（读的是 `AskRetrievalLimits` 自己新增的 `effort` 字段本身，不从预算数字反推——否则测试或未来调用方对某个预算字段的一次 `dataclasses.replace` 就会静默改变「这是哪一档」的答案）与 `REASONING_OUTLINE_ENABLED`（默认 true）同时成立。`update_outline` 是 reflect 循环的第 11 个动作 id（`OUTLINE_ACTION`）：章节结构是全量替换，至多 12 节、两层（节可带一个 parent，parent 自身必须是顶层节）、标题至多 60 字符、每节至多 8 个证据 key、每个 run 至多调用 6 次；同一稳定节 id 的证据则与旧绑定取并集，遗漏不删除，`remove_evidence` 才显式撤销旧键。8 键满额时旧键优先，未接纳的新键进入下一轮有界账目供模型显式腾位后重试。pending 不把普通额度内的后续载荷降成 repair-only：结构仍按全量替换更新，所有合法绑定先合并。只有 `sufficient`/stale 的终态纠错（且 `max_steps` 仍有余额）和第 6 次后的单次资格才限制为同结构纯换键；整体 reflect 次数绝不越过 `max_steps`，stale 熔断事实先落 trace 再进入仍在预算内的纠错。一次没有任何合法节的提交是一次 skip 并**保留**上一份大纲，绝不清空（`_unique_outline_id` 的有界后缀构造本身是一处已修的 P0：原 `while True` 去重循环在两种真实输入下把 worker 线程钉在 100% CPU，因为循环体内没有取消检查）。
+`reasoning_retrieval.py` 的 `update_outline` 分支维护 run 内大纲，
+`outline_synthesis.py` 负责把终态结构映射为证据切片。
+`outline_wiring_active` 直接读取 `limits.effort` 与 `REASONING_OUTLINE_ENABLED`，
+不从预算数字反推档位。大纲属于检索运行状态，不新增持久表或独立响应载荷。
 
-证据 key 的合法性由服务端计算，不采信模型自报：合法集合 = 当前存活候选池 ∩（run 内候选摘要曾实际展示的 key ∪ 当前大纲已持有的合法 key）。`ever_shown_outline_keys` 单调累积，因此已展示并绑定的 key 不会因摘要窗口滑动而失效，从未展示的中段候选即使被猜中也过不了校验。枚举清单条目 id 与来源 id 刻意都不在合法集合内：前者模型根本看不到，后者是因为一份文档产不出可供分节合成使用的证据切片。因为章节结构是全量替换、且 reflect 的 prompt 不带对话历史，每轮 reflect 都会把当前整份大纲连同各节缺失绑定的清单一起回喂；证据即使被模型抄漏也由同 id 并集保底，空节仍被点名为下一步的检索方向。大纲修订对 stale 熔断账目保持中性——纯粹的措辞整理不推进也不清零 `no_progress`/熔断计数（真正的检索动作仍照常清零），避免两份大纲来回提交蒙混过 `reasoning_stale_limit`。
+- 结构全量替换，同一稳定节 id 的证据绑定取并集，显式 remove 才撤销。
+  服务端只接纳存活且曾展示/已合法绑定的 key；模型猜出的 id、目录来源 id
+  不能变成证据。无合法章节的更新保留旧稿；纯结构整理不重置 stale 熔断账目。
+  修复资格、动作次数和最终 reflect 上限仍由统一检索策略控制。
+- `_outline_nudge_note` 只利用已有目录/方向账目作零 I/O 引导；真正发出引导才记 trace。
+  收尾 `plan_outline_sections` 解析每节证据，精确通道 reserve 只用剩余预算，
+  不挤掉模型绑定证据，也不把空节变成有据节。
+- 至少两个非空节，且未产出集合枚举或结构化整表 batch 时，Ask 才走按节合成；清单 run 留在单次合成，
+  保持结构化结果和 coverage 同源。每节独立证据与引用号段，先按本节 id map 解析
+  再合并，防止模型跨节引用误绑。被 ranked 截断的大纲绑定候选通过
+  `outline_evidence` 保留，只有实际按节合成时才进入相应证据分类。
+- grounded/evidence level 按节判定，整篇不得提高证据强度。任一节最终失败就丢弃
+  半成品并回退单次合成；回退成功清除该失败尝试的用户可见 model error，
+  事件日志仍保留。当前大纲、略过节与回退通过现有 trace/答案标题披露。
+- KG 弱支撑回喂经 `RetrievalPort.weak_support_relations` 委托至 candidate service
+  和双后端 store：先 fold、再有界 probe、最后解析名字。workflow 不组 SQL；
+  关闭 `REASONING_OUTLINE_KG_GAP_ENABLED` 时执行处直接 skip，零 I/O。
+- Deep Report 只通过 `ReasoningRetriever.run(limits=...)` 接入，不 import 大纲内部件。
+  `report_retrieval_effort` 映射研究深度，单节步骤仍由报告策略控制；报告不接
+  collection catalog/enumeration。终态子大纲折为 `discovered_structure` 提示写作，
+  不改用户确认的 `reports.outline_json`。方向补检索后的证据再统一 clamp；
+  KG/原文分区各用共享预算。大纲优先证据由 `knowledge_context` 一次装配，
+  避免拆成两次调用丢掉跨分区关系。
 
-**大纲采用引导（设计文档 §3.1.1）**：`_outline_nudge_note` 是一个纯函数，在同一区位（几份账目之后、集合地图之前）追加一行确定性引导——闸开着、当前大纲**为空**、本 run 引导额度未用尽，且存在一条服务端手上现成的结构性理由（本 run 已把来源清单枚举到 `state == "complete"` 且条数达下限，或已确认检索方向数达同一下限；方向数取 `run()` 里已有的方向清单长度减一，不重新解析意图契约）。两条理由同时成立时用清单那条措辞。零新增查询、零模型调用、零动作 id；与大纲便签的互斥判据写在函数自己的「sections 非空即返回空串」里，而不是调用点的 `else`。只有真的发出引导的那一轮才给既有 reflect 步 detail 加 `outline_nudged: true`——无条件写 `False` 会破坏低档位/关闭态「detail 逐键不变」的冻结基线口径。同批把 `_answer_with_retry` 的报警口径改成「重试成功即摘除本次尝试记下的那几条 `ask_answer` 响应内 model_error（`mark = len(sink)` 起算，按 `workload_id` 过滤而非整段截断，sink 为 `None` 时不摘）」，两次都失败则一条不摘（含终态 empty-content 的 `RuntimeError`），`mark` 之前其它 workload 的报警一律不动，`events.jsonl` 始终记全。
-
-run 收尾时，`outline_synthesis.plan_outline_sections` 把终态大纲的证据 key 对到当时存活的 `collected`/element/chunk 候选池上；解析后零证据的节与空节等价。空节判定之后，`plan_outline_sections` 的 `exact_reserve` 形参（缺省 0=不注入，接的是与单次合成同一个 `REASONING_EXACT_RESERVE`）把未被任何节绑定的精确通道 chunk（`RetrievedChunk.exact_lookup`，上限 `exact_reserve`）以不带席位标记的副本放进**每一个**幸存节切片的 `exact_chunks`（副本作为独立的「Exact-lookup passages」段装在本节绑定的原文段与元素之后、只用剩余预算准入，绝不挤占模型绑定的证据）——已绑定到某节的精确块不重复注入、仍带标记，空节也不会被这一步救活；这与单次合成路径里 `promote_bounded_prefix` 稳定提排的是同一个意图，只是换成按节装配。解析后仍有 ≥2 节非空、且该 run 未产出集合清单/结构化整表枚举时（清单 run 保持单次合成——清单预览与覆盖披露只进单次路径的合成上下文，节化会拿 ranked 样本写散文而让完整清单闲置），`AskService._answer_reasoning_sections` 逐节调用 `_answer_reasoning(sectioned=True, key_offset=...)`：`key_offset` 按每节 10,000 的号段偏移各条上下文装配线（chunk/element/KG/Memory/推导链），保证跨节号段不相交；集合地图块、枚举工具预览、私有 Memory 与查询期推导链都不传入分节调用（它们不在合法绑定目标之列，一节根本没法「要」它们，且回退路径上保持原样不动）；分节模式跳过证据精炼（精炼是每次装配一次的模型调用，节模式下会把 k 次合成变成 2k 次，而一节至多 8 条证据本来就没有可精炼的中段）；每节的 `[k]` 锚点按该节自己的 `id_map` 解析后再合并——按合并后的 map 解析会把写出别节号段的标记（只可能是幻觉）一本正经地绑到那一节的证据上，而不是按节丢弃。`ReasoningResult.outline_evidence` 携带被大纲绑定、却被最终 rerank/`top_n` 截断挤出 `top_hits` 的候选（quota 路径下其相关度夹到选集最低分或空选集时的 0.0，不复用可能虚高的重排前分数）；这批候选只在分节合成真的跑过时才并入证据分类池。每节只用自己的证据切片与锚点通过 `classify_evidence` 判定；synthesis detail 的 `section_grounded` 是逐节记录列表（每项含 `grounded` 布尔和该节 `evidence_level`），不是整篇 flag，旁边另有无据节标题。全部节 grounded 时全局分类照旧；否则只把整篇 `evidence_level` 封顶 `overview`，不向上抬，也不把零节精确 grounded 但各节仍为 overview 的答案强制误写成 `inferred`。任一节合成失败（自身 `_answer_with_retry` 之后仍失败）会丢弃整个半成品并回退到单次合成；回退成功时，分节阶段记下的 `model_error` 会从用户可见的 `_err_sink` 里摘掉，`events.jsonl` 不受影响。每写完一节即发一条轻量的 `synthesis` 类型 `TraceStep`（`section_index`/`section_total`/`section_title`），收尾的 `synthesis` 步在大纲**规划跑过**时就在 `detail` 里新增 `outline_sections`/`outline_fallback`/`outline_skipped`/`section_grounded`/`ungrounded_sections`——按节被绕过（不足 2 节或清单 run）时 `outline_sections` 为 0、`outline_fallback` 为 false，被略过节的披露不随绕过消失；没有大纲时与冻结基线逐键一致。模型写进节标题的引用形 `[k]` 标记在 `parse_outline_sections` 入口剥除（留在 `##` 标题里会渲染成绑不上的裸引用，或撞上别节号段误绑）。`update_outline` 自身发一条 `outline` 类型 trace 步（前端标签「大纲」）。v1 刻意不为大纲新增 `AskResponse` 字段，只经 trace 与答案自身的 `##`/`###` 标题结构可见（限定在 `.chat-answer .answer-markdown h2/h3` 作用域，与深度报告的标题字阶分离）。深度报告的接线见本节末尾。
-
-**KG 弱支撑边回喂（设计文档 §3.3，PR-4）** 叠在上述大纲机制之上，走一条纯粹的端口委托链：`RetrievalPort.weak_support_relations(notebook_id, object_ids)` → `retrieval_service.py` 一跳转发 → `retrieval_candidates.CandidateRetrievalService.weak_support_relations` 在服务端完成 fold（既有 `cluster_fold_rows`，只折本轮绑定 id）→ probe（`unified_kg.weak_support_relation_rows`，`canonical_src` 主键前缀 + `source_count` 阈值 + `LIMIT`）→ 名字解析（`unified_kg.relation_endpoint_name_rows`，经 `canonical_relations.sample_relation_ids` → `knowledge_relations` 主键 → 两端点对象主键 → `idx_clusters_member` 簇行，不直查无索引的 `concept_clusters.canonical_id`）三步，最终落到 SQLite/PostgreSQL 双后端各自的两个存储原语；`reasoning_retrieval.py` 里的 `collect_kg_gap` 只调用这个端口方法，零 SQL。`REASONING_OUTLINE_KG_GAP_ENABLED`（默认 true）关闭时执行处直接 skip，零 I/O、prompt 逐字不变。
-
-**深度报告接线（PR-5）**：`report_engine.py` 不 import 上述任何大纲内部件，只经 `ReasoningRetriever.run` 的 `limits` 参数接入。`report_retrieval_effort(depth)` 把报告自己的研究深度 `depth`（1/2/4/8/16，路由层已夹在 `[1, 16]`）按阈值映射到与 Ask 相同的档位名（`overview`/`standard`/`deep`/`thorough`/`exhaustive`；中间值落更低档，不向上取整），`report_retrieval_limits(depth)` 再转成 `ask_retrieval_limits(effort)` 传给 `_deep_dive` 里的 `run(..., limits=...)`；每节自己的 `max_steps` 仍固定为报告的 depth 值，不采用档位表自身的步数上限（成本按节数放大，套用档位步数上限会把单节预算乘上节数）。到达 `exhaustive`（depth 16）时，`outline_wiring_active(settings, limits)` 的判据（`limits.effort == "exhaustive"` 且 `REASONING_OUTLINE_ENABLED`）在该节深挖里原样成立，大纲便签、`update_outline`、KG 弱支撑边回喂零改动生效；报告构造 `ReasoningRetriever` 时不传 `collection_catalog`/`collection_enumeration`，集合枚举闸不论档位都保持关闭。`_deep_dive` 收尾时用 `outline_structure_block(sections, id_map)` 把该节终态子大纲连同各子节绑定证据的 `[k]` 反查折成有界「发现的结构」块（≤12 行、行 ≤80 字符、块 ≤1200 字符，超界记账 `(+N 子节略)`），作为 `discovered_structure` 传入 `report_section_prompt`（`prompts.py`）——纯拼装、零模型调用、零新查询；prompt 措辞教撰写模型这只是 `###` 子标题的组织建议，缺证据的子话题如实略过，且它绝不触碰 `reports.outline_json`（用户确认的章节/必答主题绑定）。`_run_sections` 的 `on_step` 在观察到 `outline` 类型 trace 步时把该节 `section_status.phase` 细化为「深挖中（已整理大纲 N 节）」，复用既有 2 秒节流持久化，不新增表列或 SSE。档位的作用域覆盖整节而不止 `run()`：`clamp_merged_evidence(result, limits)` 在「按已确认方向补检索」的合并**之后**把 `top_hits` 压回 `ranked_final_cap`、`elements` 压回 `answer_element_items`（相关度降序，元素 tie-break `element_id`，与 `_answer_reasoning` 同一把键；未超上限时逐位不动；`outline_evidence` 那批豁免——它们的相关度被刻意夹到选集最低分以下，一起排序必然垫底），`_draft_section(..., depth)` 则用 `kg_context_chars` 装配 KG 分区、用一份**共享**的 `chunk_context_chars` 装配「chunk + 直接原文段」分区（原文段取 `max(0, chunk_budget - len(chunk_block))`，条数封顶 `answer_element_items`），`depth=None` 的调用方保持 `ANSWER_CONTEXT_BUDGET_CHARS`/`REPORT_SECTION_CHUNK_BUDGET` 定值与旧的 `max(2000, …//3)` 元素额度。大纲绑定对象的优先额度由 `EvidenceContextPort.knowledge_context` 的 `priority_object_ids`/`priority_budget_chars` 在**一次**调用内完成：该函数末尾的 `relations:` 行是对本次 `evidence_by_id` 内部的边求的，调用方拆成两次会把所有跨两半的关系静默丢掉、并渲染出两行各记一次预算的关系行。
+公开行为、精确上限与报告映射见[产品/API：大纲便签与按节合成](./docs/product-and-api_zh.md#大纲便签与按节合成)
+及相邻的深度报告章节。
 
 ### 3.4 Memory 与 Agent MCP
 
@@ -624,24 +674,16 @@ Ask 回答先生成不落库的 preview，用户编辑确认后写入 owner-priv
 下具备 `memory:read_candidates` 的 Agent token 可立即在候选平面召回。网页 Ask、notebook 搜索、
 Deep Report 与 `search_notebook_context` 只投影 confirmed；rejected/deprecated 在两个平面都排除。
 
-MCP 以 scoped opaque Agent token 认证，每个 session 必须先 `select_notebook`。数据工具每次重新检查
+MCP 以 scoped opaque Agent token 认证，普通 notebook 工具先 `select_notebook`；全局问答独立选库。数据工具每次重新检查
 token 是否撤销/过期、profile 状态、scope、allowlist 与用户当前 notebook 访问权，不能仅信 session
 缓存。Memory→KG 由创建者提案；admin queue 只展示脱敏后的结构化提取候选与服务端验证过的
 evidence，不提供原始 revision/provenance 浏览。批准前会重新校验 Memory 当前仍为 confirmed 且
 创建者仍有访问权，再经既有 dedupe/merge 创建或合并一个或多个 Base KG 对象，并在 API/审计中
 保存完整 `base_object_ids`；私有 Memory 行仍归原创建者。
 
-默认 core 公开二十八个工具，`mcp_server.CORE_TOOLS` 由 registrar 捕获该前缀；`mcp_server.PUBLIC_TOOLS` 是同一默认冻结组合目录（含默认受信 provider）的权威清单：Memory/context 七工具
-`list_notebooks`、`select_notebook`、`search_agent_memory`、`search_notebook_context`、
-`get_memory`、`ask_notebook`、`propose_memory`；knowhow 四工具 `list_knowhow_tables`、
-`get_knowhow_discrimination`、`get_knowhow_row` 与 `put_knowhow_cell_code`；引用点查
-`get_cited_element`；来源七工具 `list_sources`、`add_source_text`、`add_source_file`、`add_source_url`、
-`get_source_status`、`reparse_source` 与 `delete_source`；构建三工具 `build_kg`、
-`build_retrieval_index` 与 `get_build_status`；库理解两工具 `get_notebook_profile` 与
-`add_observation`（Agentic Memory P3）；全局问答四工具 `ask_global`、`get_global_ask`、
-`cancel_global_ask` 与 `get_global_cited_element` 独立解析范围，不依赖 `select_notebook`。
-读取需相应 read scope，格子代码写入需
-`knowhow:code`，观察记录写入需 `agent_observation:write`。
+工具、scope 与参数目录统一见[产品/API：Memory 与 Agent MCP](./docs/product-and-api_zh.md#memory-与-agent-mcp)，
+接入步骤见[Agent MCP SOP](./docs/agent-mcp-memory-sop_zh.md)。
+全局问答工具独立解析参与库，普通 notebook 工具使用 session 选择；两者都必须逐次实时授权。
 
 来源管理与构建工具的权限面刻意比浏览器窄（P2 后浏览器 HTTP 面的六个内容写能力已翻 admin、组管理员可写，MCP/Agent 面**仍恒 owner**、刻意不跟——长期 token 是独立凭据）。`add_source_text`/`add_source_file`/`add_source_url`/
 `reparse_source` 需 `sources:write`，`build_kg`/`build_retrieval_index` 需
@@ -662,6 +704,15 @@ fail closed。`get_source_status`/`get_build_status`/`get_cited_element` 是只�
 - KG 首次构建/整库重建使用显式 build/rebuild 端点；跨文档 merge review 只处理有界候选批次。
 - vector cache 按数据版本失效；大库 scale index 由维护任务构建/刷新，并通过状态与 manifest 观察。即使 `SCALE_INDEX_AUTO_ENABLED` 开启，调度也发生在后台维护路径，而不是把全库 backfill 塞进 Ask。
 - Ask 不同步补齐整库 embedding、不同步重建 unified KG，也不为 citation validation 扫描全部 source element。
+
+大型选源图由 `source_partitioned_ppr.py` 在选定来源的独立 companion 分区上组合，
+不会加载整库图再过滤。主工件与 companion 同时校验版本和 build identity；两者都有
+build id 时必须同代，缺失/不匹配时该能力不可用，不能退回整图后过滤。无 build id 的
+旧工件保留版本配对兼容，直到重建后获得代次身份。专用 LRU 在锁内探测两个根的 manifest，
+跨进程同版本重发也会失效；探测无法证明身份时不继续服务旧代缓存。
+`ScaleArtifactStore` 的所有工件根（包括 viz）共用 claim 检查、临时目录 staging 与
+原子 swap，在线写入不得绕过此发布协议。构建、导入和恢复操作见
+[运维参考](./docs/operations_zh.md#离线--异机-scale-构建scriptsbuild_scale_indexpy)。
 
 **簇图代际发布协议（批 3·W2）。** 三张派生表（`concept_clusters`/`communities`/
 `community_members`）带 `generation` 列；一切读者按 `unified_kg_state` 上的
@@ -807,44 +858,24 @@ Repository 侧的 persistence 与业务编排已按上表分层完成；应用�
 
 ## 7. 验证命令
 
-文档行为契约与对应运行时回归：
-
-```bash
-cd backend
-python -m pytest tests/test_architecture_documentation.py tests/test_ask_stream_cancel.py tests/test_two_tier_federated.py -q
-```
-
-Repository 组合与旧库兼容（fixture 重放 + backup-only 真库验证）：
-
-```bash
-cd backend
-python -m pytest tests/test_repository_v9_fixture.py tests/test_repository_snapshot_verifier.py -q
-cd ..
-python scripts/verify_repository_snapshot.py \
-  --database backend/tests/fixtures/repository_v9/baseline.db \
-  --storage-dir backend/tests/fixtures/repository_v9/storage
-```
-
-编辑期离线门禁与前端生产构建：
+按改动先跑相关回归，再执行标准门：
 
 ```bash
 PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
-cd frontend
-npm run build
 ```
 
-门禁按 G0–G3 分级：G0 是按改动选跑的目标测试；G1 `scripts/check.sh` 并行运行 backend、contracts、frontend 三个有界 lane，并用于编辑期及每次 PR/push，backend 默认使用 12 个 backend pytest worker，可用 `BACKEND_PYTEST_WORKERS` 覆盖，Node 原生测试与 Vitest 各限制为 4 workers；frontend 的 production build 负责 TypeScript 校验且禁止 `ignoreBuildErrors`，G1 不在它之前重复执行同一遍 `tsc --noEmit`；G2 `scripts/check_extended.sh` 先复用 G1，再补跑 `slow` 真实索引/性能用例与 `architecture_contract_heavy`（8 个 >2s 的全仓语义扫描）；其余 56 个 `architecture_contract` 测试随 G1 每次 PR 都跑，由独立 GitHub Actions workflow 每天 18:17 UTC（北京时间次日 02:17）执行一次，也支持手动触发；G3 `scripts/check_postgres.sh` 独立负责 PostgreSQL 集成覆盖。G1/G2 backend marker 表达式必须精确互补。每个 lane
-拥有独立进程组，controller 收到中断或终止信号时会终止并回收其 pytest/npm/Next.js
-后代。静态契约用模块路径、限定 scope、操作类型、目标与审核计数作为语义身份；
-源码行号/offset 仅供诊断，不得用作预期站点身份。前端纯逻辑/语义契约使用
-`*.test.mjs`，真实组件交互使用 `*.component.test.tsx` +
-Vitest/jsdom/Testing Library；策略同时覆盖测试入口和 helper 模块。pytest controller
-在 xdist worker 启动前预热仓库本地 Matplotlib 字体缓存，避免每个图谱 worker
-重复执行 macOS 字体枚举。Apple Silicon warm gate 硬目标是不超过 60 秒；CI 各 lane 时长仅作观察，不把该本机目标变成 hosted runner 的 timeout 断言。
+G0–G3 分级、环境隔离、并发和 CI 要求统一见[开发文档的验证章节](./docs/development_zh.md#验证)。
+标准门已包含前端生产构建；PostgreSQL 集成使用该文档规定的独立环境。
 
-测试性能优化保持结果语义不变：同一 pytest 进程内的全仓 AST/协议扫描只解析每个生产文件一次；缓存容器策略直接针对容器验证，不为纯淘汰语义构建数据库和 ANN 索引；autouse 隔离路径从各 worker 已有的 pytest base temp 派生，而不是为每条纯测试额外创建 `tmp_path`；普通 UT 与 G1 测试保持环境自足，不绑定宿主端口、不依赖环境服务；只有合同本身属于进程级行为时才保留自包含的子进程/信号覆盖。并发正确性以 event/barrier 握手证明，不把固定 sleep 或线程唤醒顺序当作契约。
+| 架构边界 | 主要回归入口 |
+| --- | --- |
+| 文档归属与当前契约 | `backend/tests/test_architecture_documentation.py` |
+| Ask 断连/取消与联邦检索 | `backend/tests/test_ask_stream_cancel.py`、`test_two_tier_federated.py` |
+| Repository 组合与旧库兼容 | `backend/tests/test_repository_v9_fixture.py`、`test_repository_snapshot_verifier.py` |
+| 依赖方向与兼容 facade | `scripts/check_architecture_boundaries.py` |
 
-SQLite source open 的分类只在 `open_fresh_live_sqlite` 调用边界生效：非瞬态 `sqlite3.OperationalError` 归为 binding identity；locked、busy、interrupted open 仍瞬态整批重试，后续 SQLite operational error 保持原 schema/query 分类。
+旧库 snapshot 验证器与 backup-only 边界见[开发文档](./docs/development_zh.md#架构边界)；
+不要对运行中的数据库直接执行测试。
 
 
 ## 认证扩展与业务身份边界
