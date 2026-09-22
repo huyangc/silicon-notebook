@@ -5,8 +5,9 @@
 
 ## 1. 目标与非目标
 
-目标：源环境按天导出笔记本内容的增量，目标环境幂等引入，最终整个系统具备
-「增量导出、迁移、引入」的能力。
+目标：源环境导出「距离上次导出以来」的笔记本内容变化，目标环境幂等引入，最终整个系统具备
+「增量导出、迁移、引入」的能力。增量的基准是**上一次成功导出的水位**，不是日历天；
+「按天做一次」只是用户的操作节奏，系统不按天切分、也不要求每天都跑。
 
 约束（用户裁决，2026-09-22）：
 
@@ -43,7 +44,8 @@
 - `knowledge_object_sources`、`community_members` 与两张 kg 暂存表没有主键，做不了幂等
   upsert；global_ask 两张表与 `ask_jobs.asked_at` 的时间戳是 TEXT。
 - FTS 与 trgm 都是表上的 GIN 索引，随行插入自动维护，没有独立的重建步骤。
-- 文件不在库里：上传件与附件在 `storage/notebooks/<notebook_id>/`，`kg_index`/`kg_viz`/
+- 文件不在库里：上传件在 `storage/notebooks/<notebook_id>/`，粘贴图片等附件在
+  `storage/assets/<notebook_id>/`（删除笔记本时分别清这两个目录），`kg_index`/`kg_viz`/
   `kg_index_partitions` 是从 KG 行派生的工件。
 
 ## 3. 数据分层与表清单
@@ -59,8 +61,20 @@
   sources.agent_profile_id、knowledge_objects.source_candidate_id。memory_items.source_answer_id
   刻意保留为文本指针（§11）。
 - `target_owned_columns`：对已存在行不覆盖的列（§5）。
-- `seed_only`：只在目标端首次创建该笔记本或组时写入，之后不更新也不删除目标端已有行。
-  当前是 notebook_members、notebook_grants、groups、group_members。
+- `seed_only`：目标端不存在该行才插入，已存在的行不更新也不删除（授权边与组是「首次创建
+  笔记本时播种」，object_schemas 是「目标端管理员接管后不再覆盖」）。当前是 notebook_members、
+  notebook_grants、groups、group_members、object_schemas。
+- `optional_refs`：(列, 被引用表) 列表，导入时被引用行在目标端不存在则跳过该行并记日志，不算
+  失败。当前只有 notebook_bases 的 base_notebook_id → notebooks：只导出挂载方而不导出被挂载库
+  时，挂载边落不下来是预期结果。
+- `scope`：这张表的行怎样归属到笔记本。三种：`notebook`（自带 `notebook_id`，且该列
+  NOT NULL 无默认值，是真正的归属键）、`parent(column, table)`（经父表归属，如
+  source_elements.source_id → sources、knowhow_cells.row_id → knowhow_rows（与 column_id 等价，
+  取仓库既有 SQL 一致走 row 的那条）、memory_embeddings.memory_id → memory_items、
+  knowhow_changes.table_id → knowhow_tables）、`global`（groups、group_members 按被导出笔记本的
+  授权边引用到的组圈定；object_schemas 按被导出笔记本的 knowledge_objects 与
+  notebook_object_schemas 引用到的 object_type 圈定——它的 notebook_id 自 v47 起恒为空，是
+  环境级的管理员自定义类型表）。LOCAL 表没有 scope。导出器按它生成每张表的 SELECT。
 
 `synced_tables()` 按 shadow manifest 的 `copy_rank` 给出导入顺序，守卫测试用 PG 迁移里的
 外键边证明父表先于子表；声明的列名由建临时 SQLite 库做 PRAGMA 校验。下面是分类原则与
@@ -86,10 +100,10 @@
 
 | 表 | 映射列 | 映射不到时 |
 | --- | --- | --- |
-| notebooks | created_by | 硬失败，整个笔记本不导入 |
+| notebooks | created_by | 硬失败，整个包不导入（粒度是包不是笔记本：行相位按表提交，无法只剔一本） |
 | notebook_members | user_id | 跳过该行并记日志 |
 | notebook_grants | principal_id（PRINCIPAL）、created_by | principal 映射不到跳过该行并记日志，everyone 不需要映射；created_by 映射不到置为导入执行者 |
-| groups | created_by、owner_id、invite_created_by | 组按 name 匹配已有组，匹配不到则创建；owner_id 映射不到取该组目标端 admin 成员，仍无则置为导入执行者；invite_created_by 置空 |
+| groups | created_by、owner_id、invite_created_by | 组按 name 匹配已有组，匹配不到则创建；owner_id 映射不到置为导入执行者（「取该组目标端 admin 成员」那条腿不可达：组是 seed_only，新建组在 group_members 之前落地、还没有成员）；invite_created_by 置空 |
 | group_members | group_id（GROUP）、user_id、added_by | 成员映射不到跳过；added_by 置为导入执行者 |
 | notebook_bases、notebook_object_schemas、notebook_assets、knowhow_tables、knowhow_milestones | created_by | 映射不到置为导入执行者 |
 | knowhow_cell_code | updated_by | 映射不到置为导入执行者 |
@@ -100,8 +114,8 @@
 
 knowhow_changes 与 knowhow_milestones 是编辑历史，归本层，可随开关关闭只同步当前态。
 `knowledge_objects.owner` 是治理面板里可编辑的自由文本标签，不是用户 id，不映射。
-`object_schemas` 文档最初未点名，按内容归属归 SYNCED：notebook_id 非空的行是笔记本内容，
-builtin 行幂等 upsert 后与目标端一致。
+`object_schemas` 归 SYNCED 但 scope 是 global（见 §3 的 scope 说明）：只带被导出笔记本引用到的
+自定义类型行，目标端已有同名类型不覆盖。
 
 ### 3.3 不同步层（LOCAL）
 
@@ -110,6 +124,7 @@ builtin 行幂等 upsert 后与目标端一致。
 | 用户交互 | conversations、answers、ask_jobs、ask_trace_steps、feedback、reports、global_ask_conversations、global_ask_jobs、retrieval_experiences、agent_observations、agent_notebook_profile、retained_user_activity、wishes、wish_votes |
 | 运行态与作业 | kg_build_jobs、kg_rebuild_checkpoint、kg_cluster_scratch、kg_canonical_scratch、kg_relation_completion_state、merge_review_jobs、extraction_runs、catalog_jobs、catalog_candidates、promotion_candidates、concept_merge_candidates、kg_conflict_candidates、concept_whitelist、indexing_pipeline_stages、indexing_pipeline_stage_sources、source_index_backfills、knowledge_source_fact_backfills、chunk_element_backfills、notebook_delete_jobs、notebook_delete_files、agent_profile_jobs、notebook_share_requests |
 | 身份与系统 | users、user_profiles、external_identities、auth_*、agent_profiles、agent_access_tokens、agent_token_notebooks、model_service_status、system_model_service_status、app_settings、extension_runtime_toggles、command catalog |
+| 同步控制（PR-2 起，v83/0063） | sync_export_state（源端每个目标环境的导出水位）、sync_imports（目标端已引入的包与报告）、sync_import_progress（逐表断点） |
 
 users 不同步但导入时可能**创建**：见 §4。
 
@@ -120,7 +135,12 @@ users 不同步但导入时可能**创建**：见 §4。
 - 导入时先构造 `source_user_id → target_user_id`：目标端按 username 精确匹配；匹配不到时，
   若 `--create-missing-users` 打开则按源端投影建一个无凭据的本地用户（外部认证首次登录时
   由现有 `external_identities` 绑定逻辑认领），否则按 §3.2 表内规则处理。
-- 组按 `groups.name` 匹配，匹配不到则创建。
+- 组按 `groups.name` 匹配，匹配不到则创建；匹配上的组把源端 `groups.id` 重映射为目标端 id
+  （`groups.name` 没有唯一索引，不重映射会以源 id 再插一份，下次导入撞歧义）。目标端同名组
+  重复、或源组 id 与目标端另一个名字的组撞 id，都硬失败。
+- 按 `--create-missing-users` 建的用户一律 `role='user'`（不沿用源端角色，导入不能在目标端
+  授出管理员），不建 `user_profiles` 行，走外部认证首次登录同款字段。
+- 导入执行者 `importer_user_id` 默认取目标端最早创建的管理员；没有则硬失败。
 - 映射结果写进导入报告，每条「跳过」都带表名、行主键与原因。
 
 ## 5. 目标端写入围栏
@@ -154,8 +174,11 @@ users 不同步但导入时可能**创建**：见 §4。
   对它的确认、修改会在下一次同步被覆盖，删除会被重新插入；目标端自己产生的记忆行不在
   源端变更日志里，不受影响。复制笔记本的产物是本地库，`sync_origin` 写成空。
 - 目标端自有列：manifest 的 `target_owned_columns` 登记导入时对已存在行不覆盖的列，
-  notebooks 为 status、is_shared、share_token、sync_origin。授权边表只在首次创建笔记本时
-  写入源端授权，之后不覆盖。
+  notebooks 为 status、is_shared、share_token、sync_origin。首插时这些列也由目标端给值，不用
+  源端的：`sync_origin` = 源环境标识；`is_shared` = 0、`share_token` = NULL（链接分享是目标端
+  自有决定，与 copy_notebook 先例同款）；`status` 在导入期间为 `copying`（列表隐藏，避免
+  用户看到空壳笔记本），收尾翻成 `draft`。授权边表只在首次创建笔记本时写入源端授权，之后
+  不覆盖。
 - 前端对镜像笔记本隐藏或禁用上述入口，并在来源面板顶部标注「镜像自 <sync_origin>」；
   按钮反馈规则遵循 `AGENTS.md` Interactive feedback。
 - 导入器自身绕过围栏：它走 repository 层，不经过服务层谓词。其它运维 CLI（batch_ingest
@@ -175,7 +198,8 @@ users 不同步但导入时可能**创建**：见 §4。
 - 人工审核字段（knowledge_objects 的 status/owner/last_reviewed）随行同步；目标端不允许
   改（§5）。
 - `kg_index`/`kg_viz`/`kg_index_partitions` 不拷贝，目标端按现有 scale build 流程重建；
-  导入完成后对涉及的大库排队一次重建。
+  PR-2 的导入器不触发重建（它不 import 服务层），运维在导入后按 operations 文档对涉及的大库
+  跑一次 `scale` 构建；PR-4 把这一步自动化。
 
 ## 7. 源端变更捕获
 
@@ -184,38 +208,94 @@ users 不同步但导入时可能**创建**：见 §4。
 - 对同步层与边界层的每张表挂 AFTER INSERT/UPDATE/DELETE 触发器，与业务写同事务。触发器
   由迁移创建；manifest 是触发器集合的唯一来源，守卫测试比对库内触发器与 manifest。
 - `notebook_id` 从行本身取；没有该列的表（source_elements、knowhow 列/行/格、memory 修订/
-  来源/向量等，约占同步层三分之一）在触发器里经父表查出，父子对应关系登记在 manifest。
-  四张无主键表先补复合主键，才能进 manifest。
+  来源/向量等，约占同步层三分之一）**不在触发器里查父表**——解析入库热路径上 source_elements
+  每行一次 `SELECT notebook_id FROM sources` 不可接受。触发器只记 `(table, key_json, parent_key)`
+  （parent_key 按 manifest 的 `scope.column` 取），notebook_id 留空，由导出时按 `scope_chain`
+  批量解析；父行已被删的孤儿日志按父表的删除事件归并。四张无主键表先补复合主键，才能进
+  manifest。
 - 日志按 `(table_name, key_json)` 在导出时压缩：同一键多次变更只保留最终态；KG 整体替换
   时按笔记本折叠为一条 `kg_epoch` 事件。
-- 保留策略：导出成功后记录 `exported_through_seq`，早于它 N 天的日志由运维命令清理。
+- 导出水位：源端表 `sync_export_state(target_env PK, exported_through_seq, exported_at,
+  package_id)` 记录对每个目标环境最后一次成功导出到哪个 seq。下一次导出从它之后开始；
+  没有这一行就是首次，走全量。水位只在导出包完整落盘并校验和写好之后推进，中途失败不推进，
+  所以重跑总是安全的（目标端 upsert 幂等，重复导入同一区间无副作用）。
+- 保留策略：早于所有目标环境最小水位 N 天的日志由运维命令清理；从未导出过的目标不参与
+  取最小值。
 
 ## 8. 导出包与导入相位
 
 导出包是一个目录：
 
 ```
-sync-<source_env>-<from_seq>-<to_seq>/
-  manifest.json      # 源环境标识、schema pair、seq 区间、表清单、行数、EMBED_RUNTIME_DIM
+sync-<source_env>-<from_seq>-<to_seq>-<package_id 前 8 位>/
+  manifest.json      # format_version=1、package_id、source_env、target_env、created_at、schema_pair、
+                     # embed_runtime_dim、from_seq/to_seq、notebooks、tables{columns,rows,sha256}、users、files；
+                     # 最后写入，是「包完整」的标记，自身不进 checksums.json
   users.jsonl        # §4 的用户投影
   rows/<table>.jsonl # 按 manifest 拷贝顺序；ordinal 列不导；bytea 走 base64
   deletes.jsonl      # (table, key_json) 列表
   kg_epochs.jsonl    # 需要整体替换的 (notebook_id, epoch)
-  files/notebooks/<notebook_id>/...   # 只含本次新增或变更的文件
+  files/notebooks/<notebook_id>/...   # 上传件；增量包只含本次新增或变更的文件
+  files/assets/<notebook_id>/...      # 粘贴图片等附件，同上
   checksums.json     # 每个文件与每张表的 sha256
 ```
 
 全量导出是 `from_seq = 0` 的特例，行来自表扫描而不是日志。
 
+行编码（`rows/<table>.jsonl` 每行一个 JSON 对象，键是列名）采用 **SQLite 形态**作为可移植
+表示，这样目标端是 SQLite 时原样落库，是 PostgreSQL 时复用 `app.migration.shadow.transform`
+已有的 SQLite→PG 转换（jsonb/timestamptz/bytea/boolean 与空 JSON 列表哨兵）：
+
+- 文本、整数、NULL 原样；布尔按 SQLite 惯例 0/1。
+- JSON 列以**文本**形式携带（PG 端导出时用 `_store_utils.sqlite_compatible_row` 把 jsonb 转回
+  文本，时间戳转 ISO 8601 UTC 文本）。
+- bytea/BLOB 列编码为 `{"$bytes": "<base64>"}` 对象，避免与文本列混淆。
+- `POSTGRES_ROWID_ORDINAL_TABLES` 的 `ordinal` 列不导出；目标端 IDENTITY 重新分配。
+- 每张表的列集合在 `manifest.json` 的 `tables[<table>].columns` 登记；导入前置检查要求目标端
+  该表的列集合是它的超集，缺列硬失败，多出的列按目标端默认值。
+
+导入端按目标后端选择转换：SQLite 目标只解码 `$bytes`；PostgreSQL 目标按 `postgres_catalog`
+读到的列类型调用 `transform_sqlite_value`。upsert 语句两端同形：
+`INSERT INTO t (cols) VALUES (...) ON CONFLICT (pk) DO UPDATE SET c=excluded.c ...`，
+`target_owned_columns` 与 `seed_only` 表按 §3 规则从 SET 子句剔除或整表跳过。
+主键从目标端 catalog 读取，不写死在代码里。
+
+CLI 形态（`scripts/cli.py` 的 `sync` 命令组）：
+
+```
+sync export --target <env> --out <dir> [--notebook <id>]... [--source-env <name>] [--json]
+    # 无水位=全量，有水位=增量；source_env 默认取 SILICON_NOTEBOOK_SYNC_ENV
+sync import <package_dir> [--create-missing-users] [--dry-run] [--importer-user <id>]
+    [--resume] [--verify-files] [--json]
+    # --resume：同一个包断点续跑必须显式给；--verify-files：文件二次 sha256
+sync status [--json]      # 本库的导出水位（每个目标环境）与已引入的包；落后的笔记本清单在 PR-4
+```
+
+`export` 不需要用户区分全量与增量：同一条命令按 `sync_export_state` 里有没有该目标的水位决定。
+`--notebook` 只在首次全量时限定范围；之后的增量按日志里出现的笔记本自动圈定。
+`import` 幂等：同一个包重复导入不产生副作用；`--dry-run` 只做预检与身份映射并输出报告。
+
 导入相位（借 `copy_notebook` 的相位契约）：
 
 1. 预检：schema pair 相等、`EMBED_RUNTIME_DIM` 相等、包校验和通过、源环境标识与已有
-   镜像一致、目标端没有同名非镜像笔记本。
+   镜像一致（包里每个笔记本若在目标端已存在，其 `sync_origin` 必须等于源环境标识；本地库或
+   来自别的源环境的镜像都拒绝并点名）。**不按名字查重**：笔记本名本来就不唯一。同一
+   `source_env` 已有 running 的导入则拒绝；同一个包续跑必须显式 `--resume`，running 行超过
+   6 小时视为陈旧可接管。
 2. 身份映射（§4），产出映射表与跳过清单。
-3. 文件：先落到 `storage/notebooks/<id>.sync-tmp/`，校验后原子 rename。
+3. 文件（在行相位之后执行，行已提交才动磁盘）：`files/notebooks/<id>/` 与 `files/assets/<id>/`
+   各自先落到 `<目标目录>.sync-tmp/`，用预检算过的摘要（不重复读整包），原子 rename 到位、旧目录
+   改名 `.sync-old` 留到收尾；全量包整目录替换，增量包按文件合并。文件相位在
+   `sync_import_progress` 登记 `__files__` 条目，续跑跳过。
 4. 行：对 `kg_epochs` 里的笔记本先整体清空 KG 层；再按拷贝顺序 `INSERT … ON CONFLICT (pk)
    DO UPDATE`；最后重放 `deletes`。每张表一个事务，进度写进 `sync_import_progress`，可断点续跑。
-5. 收尾：把涉及的笔记本 `sync_origin` 置为源环境标识；对大库排队 scale 重建；写导入报告。
+   两条过渡规则：`sources.file_path` 按 shadow manifest 的 `path_columns` 重锚到目标端的
+   storage 根（包里是源主机的绝对路径）；没有主键的 knowledge_object_sources 与
+   community_members 按包内笔记本删后整批插入（PR-3 补复合主键后改为 upsert）。
+5. 收尾：文件目录正式替换（`.sync-old` 到此才删）；把涉及的笔记本 `status` 从 `copying`
+   翻成 `draft`，`sync_origin` 再补打一次（第二条腿，首插时已带）；`sync_imports` 置 done；
+   写导入报告（写盘失败降级为 warning）。大库的 scale 重建由运维按 operations 文档手动跑，
+   PR-4 自动化。
 
 ## 9. 验收与对账
 
@@ -227,8 +307,8 @@ sync-<source_env>-<from_seq>-<to_seq>/
 
 | PR | 内容 | 状态 |
 | --- | --- | --- |
-| PR-1 | 本文；`architecture.md` §2.1.1 ERD；同步范围 manifest 与全覆盖守卫；`notebooks.sync_origin` 成对迁移；服务层写入围栏与路由守卫；username 映射的纯函数与测试 | 进行中 |
-| PR-2 | 按笔记本全量导出/导入 CLI（§8 的 `from_seq=0` 特例），含文件、身份映射、校验和对账 | 待办 |
+| PR-1 | 本文；`architecture.md` §2.1.1 ERD；同步范围 manifest 与全覆盖守卫；`notebooks.sync_origin` 成对迁移；能力表写入围栏；username 映射的纯函数与测试 | 已合入 #770 |
+| PR-2 | 按笔记本全量导出/导入 CLI（§8 的 `from_seq=0` 特例），manifest 的 `scope` 字段，含文件、身份映射、校验和对账、`sync_export_state` 水位表 | 进行中 |
 | PR-3 | 源端 `sync_change_log` 与触发器、日志压缩、按天增量包、KG epoch 整体替换分支 | 待办 |
 | PR-4 | 保留策略、落后笔记本巡检、runbook，前端镜像标注 | 待办 |
 
@@ -239,6 +319,10 @@ sync-<source_env>-<from_seq>-<to_seq>/
 - 记忆的 `source_answer_id` 指向不同步的 answers：目标端「查看来源回答」会失效，是否需要
   在导入时把 origin 为 ask_answer 的记忆标成「来源在源环境」。
 - username 映射是否需要大小写不敏感：取决于两套认证服务给同一个人的 username 是否完全
-  一致；不一致会命中「created_by 映射不到，整个笔记本不导入」。
+  一致；不一致会命中「created_by 映射不到，整个包不导入」。
+- PR-3 顺手：export.py 的 `_Source`/`_batched`/`_quoted` 与 import_.py 的 `_Backend`、cli.py 的
+  `_load_sync_status` 是三份后端分派，抽成包内共用的连接门面（READ ONLY 事务只有导出那份在用）。
+- `postgres_catalog._expected_columns` 不处理 `ALTER COLUMN ... TYPE`：0057 把 global_ask_jobs.created_at
+  改成 text，契约仍写 timestamptz。该表是 LOCAL，不影响同步；修契约是一行的事，留待有需要时做。
 - 登记债务：sharing store 的 `set_notebook_sync_origin` 在 PR-1 只有测试消费者，生产消费者是
   PR-2 的导入器。

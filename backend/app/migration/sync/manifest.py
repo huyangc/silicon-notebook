@@ -13,17 +13,29 @@ exactly one of three classes:
   when a table is in this class.
 - ``LOCAL``: never leaves its environment (interactive/runtime/system data).
 
-Two more axes cut across those three classes:
+More axes cut across those three classes:
 
 - ``severed_columns``: columns that reference a row in a LOCAL table (so the
   reference cannot survive the trip) and must be set to NULL/empty on
   import, independent of ``sync_class``. Never non-empty for LOCAL tables,
   since LOCAL tables are never imported at all.
-- ``seed_only``: import only writes this table's rows the first time a
-  notebook/group is created at the target; a re-sync neither updates nor
-  deletes rows the target already has, because the target environment owns
-  membership/sharing decisions made after that first import. Always False
-  for LOCAL tables.
+- ``optional_refs``: columns that reference a row in another synced table,
+  but where that reference is allowed to dangle -- if the referenced row is
+  missing at the target, import skips the row and logs it instead of
+  failing. ``(column, referenced_table)`` pairs. Empty for LOCAL tables.
+- ``seed_only``: for a target-side row that already exists (matched by
+  primary key), import never overwrites or deletes it; a row that does not
+  exist yet is inserted. For the notebook/group membership tables this
+  means "only written the first time the parent notebook/group is created
+  at the target, never touched again by a re-sync" (the target owns
+  membership/sharing decisions made after that first import); for a
+  table like ``object_schemas`` that is not owned by any one notebook, it
+  is ordinary idempotent-by-primary-key insert. Always False for LOCAL
+  tables.
+- ``scope``: how a table's rows are attributed to a notebook -- see
+  ``TableScope`` and ``scope_chain`` below. ``None`` for LOCAL tables
+  (never exported, so the question does not apply); every SYNCED/
+  SYNCED_WITH_MAPPING table must set a real one.
 
 A guard test (``tests/test_sync_manifest.py``) asserts this manifest is total
 over ``POSTGRES_BUSINESS_TABLES``: every business table must have exactly one
@@ -48,6 +60,23 @@ class SyncClass(StrEnum):
     LOCAL = "local"
 
 
+class ScopeKind(StrEnum):
+    # The table carries its own ``notebook_id`` column -- the row's notebook
+    # is read straight off the row.
+    NOTEBOOK = "notebook"
+    # The table has no ``notebook_id`` column of its own; its notebook is
+    # found by following ``column`` to a row in ``parent_table``. The parent
+    # may itself be PARENT-scoped (e.g. knowhow_cells -> knowhow_rows ->
+    # knowhow_tables), so resolving a row's notebook can take more than one
+    # hop -- see ``scope_chain``.
+    PARENT = "parent"
+    # The table's rows are not scoped to a single notebook at all; which
+    # rows an export needs is decided some other way (see each GLOBAL
+    # table's ``notes``). LOCAL tables use ``scope=None`` instead of GLOBAL
+    # -- see ``TableSyncSpec.scope`` below.
+    GLOBAL = "global"
+
+
 class MappingKind(StrEnum):
     # Column holds a users.id; rewritten through app.migration.sync.identity
     # username-based UserMapping.
@@ -68,6 +97,54 @@ class MappedColumn:
 
 
 @dataclass(frozen=True)
+class TableScope:
+    kind: ScopeKind
+    # NOTEBOOK: the table's own notebook-id column (always "notebook_id",
+    # except for ``notebooks`` itself, whose row *is* the notebook and whose
+    # column is "id"). PARENT: the column on this table that points at
+    # ``parent_table``'s primary key. Empty for GLOBAL.
+    column: str = ""
+    # PARENT only: the table ``column`` points into. Empty otherwise.
+    parent_table: str = ""
+
+    def __post_init__(self) -> None:
+        """Shape validation per ``kind`` -- catches a scope that sets the
+        wrong fields for its own kind at construction time, rather than
+        letting it silently pass through as inert data until some guard
+        test happens to notice."""
+        if self.kind is ScopeKind.PARENT:
+            if not self.column or not self.parent_table:
+                raise ValueError(
+                    "PARENT TableScope requires both column and parent_table, "
+                    f"got column={self.column!r} parent_table={self.parent_table!r}"
+                )
+        elif self.kind is ScopeKind.NOTEBOOK:
+            if not self.column:
+                raise ValueError("NOTEBOOK TableScope requires column")
+            if self.parent_table:
+                raise ValueError(
+                    "NOTEBOOK TableScope must not set parent_table, "
+                    f"got parent_table={self.parent_table!r}"
+                )
+        elif self.kind is ScopeKind.GLOBAL:
+            if self.column or self.parent_table:
+                raise ValueError(
+                    "GLOBAL TableScope must not set column or parent_table, "
+                    f"got column={self.column!r} parent_table={self.parent_table!r}"
+                )
+
+
+# The common case: a table with its own "notebook_id" column.
+_NOTEBOOK_SCOPE = TableScope(ScopeKind.NOTEBOOK, column="notebook_id")
+
+# GLOBAL for the two tables whose rows are not scoped to a single notebook:
+# groups/group_members are scoped by the *set of groups* referenced by the
+# notebook_grants rows of the notebook(s) being exported, not by a column on
+# groups/group_members themselves -- see their TableSyncSpec.notes.
+_GLOBAL_SCOPE = TableScope(ScopeKind.GLOBAL)
+
+
+@dataclass(frozen=True)
 class TableSyncSpec:
     name: str
     sync_class: SyncClass
@@ -80,9 +157,26 @@ class TableSyncSpec:
     # sync_class (a SYNCED table can have one); always empty for LOCAL
     # tables, which are never imported.
     severed_columns: tuple[str, ...] = ()
-    # True: import only writes this table's rows the first time the parent
-    # notebook/group is created at the target; a re-sync never updates or
-    # deletes rows the target already has. Always False for LOCAL tables.
+    # Columns that reference a row in another SYNCED/SYNCED_WITH_MAPPING
+    # table, but where that reference is allowed to dangle: if the
+    # referenced row does not exist at the target after import, the row
+    # carrying this column is skipped and logged rather than failing the
+    # whole import (unlike an ordinary reference, which the importer expects
+    # to resolve). Each entry is ``(column, referenced_table)``. Currently
+    # only notebook_bases.base_notebook_id -> notebooks: a notebook can be
+    # based on another notebook that was never itself synced to this
+    # target. Empty for LOCAL tables (never imported).
+    optional_refs: tuple[tuple[str, str], ...] = ()
+    # True: for a row that already exists at the target (matched by primary
+    # key), import never overwrites or deletes it; a row that does not
+    # exist there yet is inserted. For notebook_members/notebook_grants/
+    # groups/group_members this means "only written the first time the
+    # parent notebook/group is created at the target, never touched again
+    # by a re-sync" (the target owns membership/sharing decisions made
+    # after that first import). For object_schemas -- an environment-global
+    # registry owned by no single notebook -- it means ordinary idempotent-
+    # by-primary-key insert: importing a definition the target already has
+    # (by object_type) is a no-op. Always False for LOCAL tables.
     seed_only: bool = False
     # Columns that, for a row that already exists at the target (a mirrored
     # notebook being re-synced), are never overwritten by import -- the
@@ -90,6 +184,14 @@ class TableSyncSpec:
     # SYNCED_WITH_MAPPING tables; LOCAL tables are never imported at all, so
     # this must be empty for them.
     target_owned_columns: tuple[str, ...] = ()
+    # How this table's rows are attributed to a notebook (docs/incremental-
+    # sync-design.md §3 "scope"). The exporter uses it to build each table's
+    # notebook-scoped SELECT; the source-side change-capture trigger uses it
+    # to resolve the notebook_id to stamp on a change-log row. ``None`` for
+    # LOCAL tables (never exported, so the question does not apply); every
+    # SYNCED/SYNCED_WITH_MAPPING table must set a real ``TableScope`` --
+    # enforced by tests/test_sync_manifest.py, not by this dataclass.
+    scope: TableScope | None = None
     notes: str = ""
 
 
@@ -97,50 +199,98 @@ class TableSyncSpec:
 
 _SYNCED: tuple[TableSyncSpec, ...] = (
     # 笔记本本体
-    TableSyncSpec("unified_kg_state", SyncClass.SYNCED),
+    TableSyncSpec("unified_kg_state", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
     # 材料
-    TableSyncSpec("source_elements", SyncClass.SYNCED),
-    TableSyncSpec("source_authors", SyncClass.SYNCED),
-    TableSyncSpec("source_paper_meta", SyncClass.SYNCED),
-    TableSyncSpec("chunks", SyncClass.SYNCED),
-    TableSyncSpec("chunk_elements", SyncClass.SYNCED),
-    TableSyncSpec("chunk_questions", SyncClass.SYNCED),
-    TableSyncSpec("knowledge_source_facts", SyncClass.SYNCED),
-    TableSyncSpec("knowledge_source_fact_elements", SyncClass.SYNCED),
+    TableSyncSpec(
+        "source_elements",
+        SyncClass.SYNCED,
+        scope=TableScope(ScopeKind.PARENT, column="source_id", parent_table="sources"),
+    ),
+    TableSyncSpec("source_authors", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec("source_paper_meta", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec("chunks", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec("chunk_elements", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec("chunk_questions", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec("knowledge_source_facts", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec(
+        "knowledge_source_fact_elements", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE
+    ),
     # 向量
-    TableSyncSpec("chunk_embeddings", SyncClass.SYNCED),
-    TableSyncSpec("element_embeddings", SyncClass.SYNCED),
-    TableSyncSpec("knowledge_embeddings", SyncClass.SYNCED),
-    TableSyncSpec("relation_embeddings", SyncClass.SYNCED),
-    TableSyncSpec("memory_embeddings", SyncClass.SYNCED),
+    TableSyncSpec("chunk_embeddings", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec("element_embeddings", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec("knowledge_embeddings", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec("relation_embeddings", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec(
+        "memory_embeddings",
+        SyncClass.SYNCED,
+        scope=TableScope(ScopeKind.PARENT, column="memory_id", parent_table="memory_items"),
+    ),
     # KG（knowledge_objects.owner 是治理面板可编辑的自由文本标签，不是用户 id，
     # 不映射；source_candidate_id 指向 LOCAL 的 catalog_candidates，导入时置空）
     TableSyncSpec(
         "knowledge_objects",
         SyncClass.SYNCED,
         severed_columns=("source_candidate_id",),
+        scope=_NOTEBOOK_SCOPE,
     ),
-    TableSyncSpec("knowledge_relations", SyncClass.SYNCED),
-    TableSyncSpec("knowledge_object_sources", SyncClass.SYNCED),
-    TableSyncSpec("concept_clusters", SyncClass.SYNCED),
-    TableSyncSpec("communities", SyncClass.SYNCED),
-    TableSyncSpec("community_members", SyncClass.SYNCED),
-    TableSyncSpec("canonical_relations", SyncClass.SYNCED),
-    TableSyncSpec("mention_edges", SyncClass.SYNCED),
-    TableSyncSpec("concept_comentions", SyncClass.SYNCED),
-    TableSyncSpec("kg_source_profiles", SyncClass.SYNCED),
-    TableSyncSpec("kg_community_edges", SyncClass.SYNCED),
-    TableSyncSpec("kg_analysis_artifacts", SyncClass.SYNCED),
+    TableSyncSpec("knowledge_relations", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec("knowledge_object_sources", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec("concept_clusters", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec("communities", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec("community_members", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec("canonical_relations", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec("mention_edges", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec("concept_comentions", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec("kg_source_profiles", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec("kg_community_edges", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec("kg_analysis_artifacts", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
     # Knowhow
-    TableSyncSpec("knowhow_columns", SyncClass.SYNCED),
-    TableSyncSpec("knowhow_rows", SyncClass.SYNCED),
-    TableSyncSpec("knowhow_cells", SyncClass.SYNCED),
+    TableSyncSpec(
+        "knowhow_columns",
+        SyncClass.SYNCED,
+        scope=TableScope(ScopeKind.PARENT, column="table_id", parent_table="knowhow_tables"),
+    ),
+    TableSyncSpec(
+        "knowhow_rows",
+        SyncClass.SYNCED,
+        scope=TableScope(ScopeKind.PARENT, column="table_id", parent_table="knowhow_tables"),
+    ),
+    # row_id, not column_id: every place in the repo that scopes a cell to
+    # its table/notebook (knowhow_transfer_store.py, sharing_store.py, both
+    # the sqlite/ and postgres/ variants) does
+    # "JOIN knowhow_rows r ON r.id = c.row_id" and reads r.table_id off the
+    # row side -- row is the path to the parent table, column never is. A
+    # cell's row and column belonging to the same knowhow_tables row is
+    # guaranteed by how the write path constructs them, not by a DB
+    # constraint (no FK ties column_id's table to row_id's table).
+    TableSyncSpec(
+        "knowhow_cells",
+        SyncClass.SYNCED,
+        scope=TableScope(ScopeKind.PARENT, column="row_id", parent_table="knowhow_rows"),
+    ),
     # 记忆
-    TableSyncSpec("memory_provenance", SyncClass.SYNCED),
-    # 笔记本自定义提取 schema 登记表（services/schema_registry.py）；
-    # notebook_id 非空的行是笔记本内容，随笔记本同步；notebook_id='' 的
-    # builtin 行幂等 upsert 后与目标端已有内置行一致，无害。无用户/组引用列。
-    TableSyncSpec("object_schemas", SyncClass.SYNCED),
+    TableSyncSpec(
+        "memory_provenance",
+        SyncClass.SYNCED,
+        scope=TableScope(ScopeKind.PARENT, column="memory_id", parent_table="memory_items"),
+    ),
+    # 环境级自定义类型登记表（services/schema_registry.py）。
+    # migrations/0025_notebook_object_schemas.sql 已经把非空 notebook_id 的
+    # 行搬进 notebook_object_schemas 并从这张表删除；此后唯一写入方
+    # （PostgresKnowledgeStore.insert_custom_schema）硬写 notebook_id=''，
+    # 读路径（list_object_schemas 等）也不按 notebook 过滤——它是管理员维护
+    # 的、不属于任何单一笔记本的基线，GLOBAL。无用户/组引用列。
+    TableSyncSpec(
+        "object_schemas",
+        SyncClass.SYNCED,
+        seed_only=True,
+        notes=(
+            "导出被导出笔记本的 knowledge_objects.object_type ∪ "
+            "notebook_object_schemas.object_type 引用到的行；目标端按主键"
+            "（object_type）幂等，已存在不覆盖。"
+        ),
+        scope=_GLOBAL_SCOPE,
+    ),
 )
 
 # --- 3.2 边界层 (SYNCED_WITH_MAPPING) -----------------------------------
@@ -152,6 +302,11 @@ _SYNCED_WITH_MAPPING: tuple[TableSyncSpec, ...] = (
         mapped_columns=(MappedColumn("created_by", MappingKind.USER),),
         target_owned_columns=("status", "is_shared", "share_token", "sync_origin"),
         notes="created_by 映射不到时硬失败，整个笔记本不导入。",
+        # notebooks 自己是根：它没有指向自己的 notebook_id 列，它的主键 id
+        # 就是「这一行属于哪个笔记本」的答案。scope_chain() 对 NOTEBOOK 表
+        # 返回空元组，不要求 column == "notebook_id"（守卫对 notebooks 单独
+        # 放行这一例外）。
+        scope=TableScope(ScopeKind.NOTEBOOK, column="id"),
     ),
     TableSyncSpec(
         "notebook_members",
@@ -159,6 +314,7 @@ _SYNCED_WITH_MAPPING: tuple[TableSyncSpec, ...] = (
         mapped_columns=(MappedColumn("user_id", MappingKind.USER),),
         seed_only=True,
         notes="映射不到时跳过该行并记日志。种子写入：首次创建笔记本后不再由导入更新/删除。",
+        scope=_NOTEBOOK_SCOPE,
     ),
     TableSyncSpec(
         "notebook_grants",
@@ -173,24 +329,40 @@ _SYNCED_WITH_MAPPING: tuple[TableSyncSpec, ...] = (
             "跳过该行并记日志；everyone 不需要映射。created_by 映射不到置为"
             "导入执行者。种子写入：首次创建笔记本后不再由导入更新/删除。"
         ),
+        scope=_NOTEBOOK_SCOPE,
     ),
     TableSyncSpec(
         "notebook_bases",
         SyncClass.SYNCED_WITH_MAPPING,
         mapped_columns=(MappedColumn("created_by", MappingKind.USER),),
-        notes="挂载关系随笔记本同步；created_by 可为空，映射不到置为导入执行者。",
+        optional_refs=(("base_notebook_id", "notebooks"),),
+        notes=(
+            "挂载关系随笔记本同步；created_by 可为空，映射不到置为导入执行者。"
+            "base_notebook_id 指向另一本笔记本（0001_initial.sql 声明了硬 FK "
+            "fk_notebook_bases_base_notebook_id__notebooks），但那本笔记本"
+            "未必也被导出/同步到目标端；导入时目标端不存在该笔记本就跳过"
+            "这行并记日志，不算失败。"
+        ),
+        scope=_NOTEBOOK_SCOPE,
     ),
     TableSyncSpec(
         "notebook_object_schemas",
         SyncClass.SYNCED_WITH_MAPPING,
         mapped_columns=(MappedColumn("created_by", MappingKind.USER),),
         notes="映射不到置为导入执行者。",
+        scope=_NOTEBOOK_SCOPE,
     ),
     TableSyncSpec(
         "notebook_assets",
         SyncClass.SYNCED_WITH_MAPPING,
         mapped_columns=(MappedColumn("created_by", MappingKind.USER),),
-        notes="附件元数据；文件本体随 storage/notebooks/<id>/ 目录同步。映射不到置为导入执行者。",
+        notes=(
+            "附件元数据；文件本体在 storage/assets/<notebook_id>/（不是"
+            "storage/notebooks/<id>/——那是 sources 上传件的目录，两者由"
+            "notebook_catalog.py 删除笔记本时分别清理），导出器单独复制该"
+            "目录。映射不到置为导入执行者。"
+        ),
+        scope=_NOTEBOOK_SCOPE,
     ),
     TableSyncSpec(
         "sources",
@@ -202,18 +374,22 @@ _SYNCED_WITH_MAPPING: tuple[TableSyncSpec, ...] = (
             "者）；映射不到置空并记日志。agent_profile_id 指向 LOCAL 的"
             "agent_profiles，导入时置空。"
         ),
+        scope=_NOTEBOOK_SCOPE,
     ),
     TableSyncSpec(
         "knowhow_tables",
         SyncClass.SYNCED_WITH_MAPPING,
         mapped_columns=(MappedColumn("created_by", MappingKind.USER),),
         notes="映射不到置为导入执行者。",
+        scope=_NOTEBOOK_SCOPE,
     ),
+    # row_id, not column_id -- same rationale as knowhow_cells above.
     TableSyncSpec(
         "knowhow_cell_code",
         SyncClass.SYNCED_WITH_MAPPING,
         mapped_columns=(MappedColumn("updated_by", MappingKind.USER),),
         notes="映射不到置为导入执行者。",
+        scope=TableScope(ScopeKind.PARENT, column="row_id", parent_table="knowhow_rows"),
     ),
     TableSyncSpec(
         "groups",
@@ -229,8 +405,13 @@ _SYNCED_WITH_MAPPING: tuple[TableSyncSpec, ...] = (
             "（无活跃邀请链接时为 NULL），映射不到置空并记日志。owner_id 是组"
             "的现行所有权（0034 迁移，刻意无 FK），映射不到取该组目标端 admin"
             "成员，仍无则置为导入执行者。种子写入：首次创建组后不再由导入"
-            "更新/删除。"
+            "更新/删除。GLOBAL：groups 没有 notebook_id 列，也不经任何单一父"
+            "表归属到一个笔记本——一个组可以被多个笔记本的 notebook_grants"
+            "引用。导出器按「被导出笔记本集合的 notebook_grants.principal_id"
+            "（principal_type=group）引用到的组」这条授权边圈定要带走哪些组，"
+            "而不是靠 groups 表自身的某一列。"
         ),
+        scope=_GLOBAL_SCOPE,
     ),
     TableSyncSpec(
         "group_members",
@@ -244,7 +425,10 @@ _SYNCED_WITH_MAPPING: tuple[TableSyncSpec, ...] = (
         notes=(
             "user_id 映射不到跳过该行并记日志；group_id 按组映射（按 name 匹配"
             "/创建）解析所属组。种子写入：首次创建组后不再由导入更新/删除。"
+            "GLOBAL：同 groups——按授权边圈定到的组集合决定带走哪些成员行，"
+            "不是靠本表自身的列。"
         ),
+        scope=_GLOBAL_SCOPE,
     ),
     TableSyncSpec(
         "memory_items",
@@ -261,18 +445,21 @@ _SYNCED_WITH_MAPPING: tuple[TableSyncSpec, ...] = (
             "保留这个文本指针供人工排查，是否需要标注「来源在源环境」是设计"
             "文档 §11 的未决问题，不在这里预先决定。"
         ),
+        scope=_NOTEBOOK_SCOPE,
     ),
     TableSyncSpec(
         "memory_revisions",
         SyncClass.SYNCED_WITH_MAPPING,
         mapped_columns=(MappedColumn("changed_by", MappingKind.USER),),
         notes="映射不到置为导入执行者。",
+        scope=TableScope(ScopeKind.PARENT, column="memory_id", parent_table="memory_items"),
     ),
     TableSyncSpec(
         "knowhow_milestones",
         SyncClass.SYNCED_WITH_MAPPING,
         mapped_columns=(MappedColumn("created_by", MappingKind.USER),),
         notes="编辑历史表，可随开关关闭只同步当前态；映射不到置为导入执行者。",
+        scope=TableScope(ScopeKind.PARENT, column="table_id", parent_table="knowhow_tables"),
     ),
     TableSyncSpec(
         "knowhow_changes",
@@ -283,6 +470,7 @@ _SYNCED_WITH_MAPPING: tuple[TableSyncSpec, ...] = (
             "created_by，knowhow_store.py 全程用这个字段名），映射不到置为"
             "导入执行者。"
         ),
+        scope=TableScope(ScopeKind.PARENT, column="table_id", parent_table="knowhow_tables"),
     ),
 )
 
@@ -343,6 +531,12 @@ _LOCAL: tuple[TableSyncSpec, ...] = (
     TableSyncSpec("system_model_service_status", SyncClass.LOCAL),
     TableSyncSpec("app_settings", SyncClass.LOCAL),
     TableSyncSpec("extension_runtime_toggles", SyncClass.LOCAL),
+    # PR-2 同步控制表：导出水位、导入执行记录、导入进度，环境本地，不随笔记本
+    # 同步（预先登记，落地见并行任务：migrations/schema_manifest/shadow
+    # manifest/fixtures）。
+    TableSyncSpec("sync_export_state", SyncClass.LOCAL, notes="PR-2 同步控制表"),
+    TableSyncSpec("sync_imports", SyncClass.LOCAL, notes="PR-2 同步控制表"),
+    TableSyncSpec("sync_import_progress", SyncClass.LOCAL, notes="PR-2 同步控制表"),
 )
 
 SYNC_MANIFEST: tuple[TableSyncSpec, ...] = _SYNCED + _SYNCED_WITH_MAPPING + _LOCAL
@@ -375,6 +569,65 @@ def spec_for(name: str) -> TableSyncSpec:
     unknown table -- callers must not silently treat an unclassified table as
     any particular sync class."""
     return _BY_NAME[name]
+
+
+def scope_chain(name: str) -> tuple[tuple[str, str, str], ...]:
+    """Walk ``name``'s ``TableScope`` from PARENT to PARENT until it reaches
+    a NOTEBOOK table, returning the ``(child_table, child_column,
+    parent_table)`` hops in the order the exporter would join them (e.g.
+    ``knowhow_cell_code`` -> ``knowhow_rows`` -> ``knowhow_tables``).
+
+    Returns ``()`` for a table whose own scope is already NOTEBOOK (``name``
+    itself, e.g. ``chunks``). Raises ``ValueError`` if:
+
+    - ``name`` (or a table the chain walks through) is LOCAL, i.e.
+      ``scope is None`` -- a LOCAL table is never exported, so asking for
+      its scope chain is a caller bug;
+    - the chain ever hits a GLOBAL table -- a GLOBAL table has no single
+      notebook to resolve to;
+    - it revisits a table (a cycle), checked *before* the hop-count check
+      below so a 2-table cycle is reported as a cycle, not as "exceeds 4
+      hops" once it has looped around enough times;
+    - it exceeds 4 hops.
+
+    The last two indicate a bug in the manifest itself (static data), not a
+    caller error. A ``parent_table`` that names a table absent from
+    ``SYNC_MANIFEST`` altogether is also a manifest bug -- ``TableScope``'s
+    ``__post_init__`` and the guard tests in tests/test_sync_manifest.py are
+    the first lines of defense against that, but ``spec_for``'s ``KeyError``
+    is converted to a point-named ``ValueError`` here too, so a caller never
+    sees a bare, unattributed ``KeyError`` out of this function."""
+    chain: list[tuple[str, str, str]] = []
+    seen = {name}
+    current = name
+    while True:
+        try:
+            spec = spec_for(current)
+        except KeyError:
+            raise ValueError(
+                f"{name}: scope chain references unknown table {current!r}"
+            ) from None
+        if spec.scope is None:
+            raise ValueError(
+                f"{name}: table {current!r} is LOCAL (scope=None); it is "
+                "never exported, so scope_chain must not be called on or "
+                "through it"
+            )
+        if spec.scope.kind is ScopeKind.NOTEBOOK:
+            return tuple(chain)
+        if spec.scope.kind is ScopeKind.GLOBAL:
+            raise ValueError(
+                f"{name}: scope chain reaches GLOBAL table {current!r}, "
+                "which has no single notebook"
+            )
+        parent = spec.scope.parent_table
+        if parent in seen:
+            raise ValueError(f"{name}: scope chain cycles back to {parent!r}")
+        if len(chain) >= 4:
+            raise ValueError(f"{name}: scope chain exceeds 4 hops")
+        chain.append((current, spec.scope.column, parent))
+        seen.add(parent)
+        current = parent
 
 
 def synced_tables() -> tuple[str, ...]:

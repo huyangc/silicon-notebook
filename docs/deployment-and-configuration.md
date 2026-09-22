@@ -293,6 +293,11 @@ and then `fuser` — at least one must be available.
 connection failures, migration failures, and warmup failures fail closed without falling
 back to another database. `SHADOW_DATABASE_URL` never selects the active backend and setting
 it alone starts no synchronization; it is consumed only by the explicit forward-shadow CLI.
+`SILICON_NOTEBOOK_SYNC_ENV` names this deployment (e.g. `prod-shanghai`) for the separate,
+unrelated cross-environment notebook sync CLI (`scripts/cli.sh sync export/import/status`,
+see [Operations](./operations.md#cross-environment-notebook-sync) and
+[the sync design doc](./incremental-sync-design.md)); it only supplies `export`'s default
+`source_env` and is otherwise inert.
 
 ```dotenv
 # Default deployment for development and production; replace connection settings
@@ -860,6 +865,7 @@ DB_WRITE_LOCK_FLUSH_SECONDS # interval in seconds for the periodic db_write_lock
 SQLITE_CACHE_SIZE_KB    # Per-connection SQLite page cache in KB (negative = KB). Connections are reused per-thread; total memory ≈ threads × |value| (default -16384)
 DATABASE_URL            # Active database URL; PostgreSQL for development/production; unset fallback: sqlite:///.local/silicon_notebook.db
 SILICON_NOTEBOOK_STORAGE_DIR   # uploaded file storage directory (default .local/storage)
+SILICON_NOTEBOOK_SYNC_ENV      # this deployment's name in cross-environment notebook sync (default empty; see Operations)
 ```
 
 The synchronous Ask-cancellation endpoint may cross more than one database

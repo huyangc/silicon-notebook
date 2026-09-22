@@ -606,6 +606,94 @@ row stops contributing to admin totals/feed/detail at expiry even on a long-runn
 that has not yet reached either physical-prune opportunity. No manual maintenance command is
 required.
 
+## Cross-environment notebook sync
+
+`scripts/cli.sh sync export/import/status` moves notebook content (materials, vectors, KG,
+Knowhow, memory) from one deployment to another, one-way: the source writes, the target only
+interacts with what it received. It does not touch user-interaction data (conversations,
+answers, feedback, reports, global ask, activity, wishes). See
+[the design doc](./incremental-sync-design.md) for scope, identity mapping, the target-side
+write fence, and the package format; PR-2 ships full-notebook export/import only (no change
+log yet, so every export is a full snapshot even when a prior watermark exists).
+
+```bash
+# Source environment: name it once, then export every live, non-mirror notebook.
+export SILICON_NOTEBOOK_SYNC_ENV=prod-shanghai
+PYTHONPATH=backend python scripts/sync_notebooks.py export \
+  --target prod-tokyo --out /srv/silicon-notebook/sync/outgoing --json
+
+# Or scope one export to specific notebooks (repeatable):
+PYTHONPATH=backend python scripts/sync_notebooks.py export \
+  --target prod-tokyo --out /srv/silicon-notebook/sync/outgoing \
+  --notebook nb-aaa --notebook nb-bbb --json
+
+# Target environment: copy the package directory over, then dry-run before applying.
+PYTHONPATH=backend python scripts/sync_notebooks.py import \
+  /srv/silicon-notebook/sync/incoming/sync-prod-shanghai-0-0-<id> --dry-run --json
+PYTHONPATH=backend python scripts/sync_notebooks.py import \
+  /srv/silicon-notebook/sync/incoming/sync-prod-shanghai-0-0-<id> \
+  --create-missing-users --verify-files --json
+
+# Either side: check watermarks and applied packages.
+PYTHONPATH=backend python scripts/sync_notebooks.py status --json
+```
+
+`scripts/cli.sh sync export|import|status ...` is equivalent and goes through the shared
+Python launch environment (root `.env` preloaded); the standalone `scripts/sync_notebooks.py`
+form above does not preload it, so export `DATABASE_URL`/`SILICON_NOTEBOOK_STORAGE_DIR`/
+`SILICON_NOTEBOOK_SYNC_ENV` explicitly or pass an `--env-file`-aware wrapper of your own.
+
+`export` needs a `source_env`: pass `--source-env` explicitly, or set
+`SILICON_NOTEBOOK_SYNC_ENV` once per deployment so routine exports do not repeat it. Missing
+both exits 2 with a message naming the variable. `--notebook <id>` (repeatable) narrows a full
+export to specific notebooks; omit it to export everything live and non-mirror. A completed
+export always advances this environment's watermark for that `--target`, whether or not
+`--notebook` was used.
+
+`import` is idempotent: re-running the same package directory short-circuits with
+`already_applied` (exit 0) instead of re-applying rows. `--dry-run` stops after identity
+mapping and preflight, writes nothing, and reports what would happen — always run it once
+before the real import. `--create-missing-users` creates a credential-less local user for
+every source `username` the target has no match for (§4 of the design doc); without it,
+references to an unmatched user fall back to each table's own rule (skip the row, null the
+column, or fail the whole notebook, depending on the column). `--verify-files` re-checks every
+copied file's sha256 during the import instead of trusting the package's `checksums.json` alone
+— slower, use it when the package traveled over an untrusted or lossy transport.
+`--resume` must be passed explicitly to continue an import that was interrupted partway (its
+`sync_imports` row is still `running`): without it, a second `import` of a package from the
+same `source_env` is refused outright, so an operator cannot accidentally interleave two
+unrelated packages from the same source.
+
+A failed precondition prints the reason and exits 2 without writing anything: schema pair
+mismatch, `EMBED_RUNTIME_DIM` mismatch, a checksum failure, or — the actual target-collision
+check — **the package carries a notebook id that already exists on the target and that
+notebook's `sync_origin` is not this package's `source_env`** (a purely local notebook, or a
+mirror of a *different* source environment, is never overwritten by an import; this is an id
+match, not a name lookup, so a same-named-but-different-id notebook on the target is not a
+conflict).
+
+When the target backend is SQLite, `import` requires the application to be stopped first (the
+importer writes outside the backend's own request-serialized write path); `status`/`--dry-run`
+do not. If the report carries that warning, the human-readable summary prints it verbatim under
+its "警告:" (warnings) section — the CLI's own output is Chinese-only regardless of which
+language doc you're reading; this is not a separate flag or code path, just whatever
+`import_package` put in the report.
+
+`status` lists, read-only: this environment's export watermark per target (`sync_export_state`)
+and every package this environment has imported with its outcome (`sync_imports`). It works
+against whichever backend `DATABASE_URL` currently selects.
+
+Every subcommand exits 2 on any failure (one line on stderr, no traceback) and 0 on success,
+including `already_applied`. `--json` prints the underlying export/import report or status
+snapshot as one JSON object instead of the human-readable summary; script it for anything that
+inspects `skipped_rows`, `warnings`, or `missing_files` beyond the printed summary's totals.
+
+After a real (non-`--dry-run`) import, manually run a scale index build for any large library
+the package touched — `kg_index`/`kg_viz` are derived artifacts and do not travel with the
+package (§6 of the design doc); see
+[Offline / off-host scale builds](./operations.md#offline--off-host-scale-builds-scriptsbuild_scale_indexpy).
+PR-4 is expected to automate queuing this.
+
 ## PostgreSQL notebook-aware lexical indexes
 
 PostgreSQL lexical retrieval always keeps `notebook_id` in the SQL predicate, but the legacy

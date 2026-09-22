@@ -233,7 +233,21 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # docs/incremental-sync-design.md section 5). No table, index, FK or unique
 # surface change, and no backfill -- every pre-existing row is local, which is
 # exactly what the default records.
-SCHEMA_VERSION = 82
+# v81 adds four columns to global_ask_jobs for record parity with ask_jobs --
+# see ``_migration_81``'s own docstring and PostgreSQL
+# ``0061_global_ask_job_record_parity.sql``.
+# v82 adds global_ask_jobs.mode plus two indexes for post-completion learning
+# sampling -- see ``_migration_82``'s own docstring and PostgreSQL
+# ``0062_global_ask_job_sampling.sql``.
+# v83 adds three adapter-internal sync control tables -- sync_export_state,
+# sync_imports, sync_import_progress -- paired with PostgreSQL
+# 0063_sync_control_tables.sql. They hold each environment's own
+# export/import bookkeeping (how far a target has been exported to, and the
+# status/progress of packages imported into this environment); they are not
+# replicated business data and are excluded from the shadow-migration copy
+# path and notebook deep-copy the same way indexing_pipeline_stages and
+# auth_transactions are (see docs/incremental-sync-design.md).
+SCHEMA_VERSION = 83
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -4449,6 +4463,52 @@ class SqliteMigrator:
                 "CREATE INDEX IF NOT EXISTS idx_global_ask_jobs_status_mode_created\n"
                 "                 ON global_ask_jobs(status, mode, created_at, id)"
             )
+
+    def _migration_83(self) -> None:
+        """Adapter-internal cross-environment notebook sync control state.
+
+        Paired with PostgreSQL ``0063_sync_control_tables.sql``. Three
+        tables, not replicated business data: each backend's own
+        export/import bookkeeping is local to that environment.
+        ``sync_export_state`` tracks, per target environment, how far this
+        environment has already exported (``exported_through_seq``) and
+        which package that export produced. ``sync_imports`` is one row per
+        import package applied here, with the source environment's sequence
+        range and the run's outcome. ``sync_import_progress`` is per-table
+        progress within one import run, so a crashed or resumed import can
+        tell which tables it already finished applying. ``target_env`` and
+        ``package_id`` carry an explicit ``NOT NULL`` alongside their
+        ``PRIMARY KEY``: SQLite's rowid tables allow a NULL in a non-INTEGER
+        primary key column, unlike PostgreSQL, and these LOCAL_EPHEMERAL
+        tables have no ``_SQLITE_NULL_GUARD_KEYS`` entry to catch that gap.
+        """
+        with self._connect() as db:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS sync_export_state (
+                    target_env TEXT NOT NULL PRIMARY KEY,
+                    exported_through_seq INTEGER NOT NULL DEFAULT 0,
+                    exported_at TEXT NOT NULL,
+                    package_id TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE IF NOT EXISTS sync_imports (
+                    package_id TEXT NOT NULL PRIMARY KEY,
+                    source_env TEXT NOT NULL,
+                    from_seq INTEGER NOT NULL DEFAULT 0,
+                    to_seq INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    report_json TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE TABLE IF NOT EXISTS sync_import_progress (
+                    package_id TEXT NOT NULL
+                        REFERENCES sync_imports(package_id) ON DELETE CASCADE,
+                    table_name TEXT NOT NULL,
+                    rows_applied INTEGER NOT NULL DEFAULT 0,
+                    completed_at TEXT,
+                    PRIMARY KEY (package_id, table_name)
+                );
+            """)
 
     def _seed(self) -> None:
         now = _now()

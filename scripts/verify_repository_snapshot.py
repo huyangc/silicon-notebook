@@ -4676,6 +4676,38 @@ GLOBAL_ASK_TABLES_V81 = {
         " error_detail TEXT NOT NULL DEFAULT '')",
     ),
 }
+
+# v83: three adapter-internal cross-environment sync control tables (parity
+# with PostgreSQL 0063_sync_control_tables.sql) -- sync_export_state,
+# sync_imports, sync_import_progress. No index (none is created by the
+# migration), trigger or view, and no backfill -- these tables carry no
+# pre-existing rows to backfill.
+SYNC_CONTROL_TABLES = {
+    "sync_export_state": """CREATE TABLE sync_export_state (
+                    target_env TEXT NOT NULL PRIMARY KEY,
+                    exported_through_seq INTEGER NOT NULL DEFAULT 0,
+                    exported_at TEXT NOT NULL,
+                    package_id TEXT NOT NULL DEFAULT ''
+                )""",
+    "sync_imports": """CREATE TABLE sync_imports (
+                    package_id TEXT NOT NULL PRIMARY KEY,
+                    source_env TEXT NOT NULL,
+                    from_seq INTEGER NOT NULL DEFAULT 0,
+                    to_seq INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    report_json TEXT NOT NULL DEFAULT '{}'
+                )""",
+    "sync_import_progress": """CREATE TABLE sync_import_progress (
+                    package_id TEXT NOT NULL
+                        REFERENCES sync_imports(package_id) ON DELETE CASCADE,
+                    table_name TEXT NOT NULL,
+                    rows_applied INTEGER NOT NULL DEFAULT 0,
+                    completed_at TEXT,
+                    PRIMARY KEY (package_id, table_name)
+                )""",
+}
 MIGRATION_MANIFEST = {
     (key[0], 81, *key[2:]): {
         **manifest,
@@ -4758,6 +4790,23 @@ MIGRATION_MANIFEST[(81, 82)] = {
     "indexes": GLOBAL_ASK_JOB_SAMPLING_INDEXES,
     "triggers": {},
     "views": {},
+}
+
+
+# v83: three adapter-internal cross-environment sync control tables (parity
+# with PostgreSQL 0063_sync_control_tables.sql) -- sync_export_state,
+# sync_imports, sync_import_progress. No index, trigger or view, and no
+# backfill.
+MIGRATION_MANIFEST = {
+    (key[0], 83, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **SYNC_CONTROL_TABLES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(82, 83)] = {
+    "tables": SYNC_CONTROL_TABLES, "columns": {}, "indexes": {},
+    "triggers": {}, "views": {},
 }
 
 if __name__ == "__main__":
