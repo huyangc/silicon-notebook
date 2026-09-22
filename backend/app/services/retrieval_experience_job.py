@@ -226,6 +226,18 @@ MANUAL_DISTILL_BUSY = "busy"
 MANUAL_DISTILL_COOLDOWN = "cooldown"
 MANUAL_DISTILL_INVALID = "invalid_partition"
 
+#: 上面那五个值的全集,给调用方做 import 期对账用。``agent_profile_routes`` 的
+#: 按钮端点要为**每一种**结果给出一句自己的中文文案,而一条 ``if/elif`` 链漏掉
+#: 新增的一种只会安静地落到兜底那句;那边因此断言「我处理的集合 == 这个集合」,
+#: 于是在这里加一种结果而忘了配文案,进程启动时就炸,而不是在生产里说错话。
+MANUAL_DISTILL_OUTCOMES = frozenset({
+    MANUAL_DISTILL_STARTED,
+    MANUAL_DISTILL_DISABLED,
+    MANUAL_DISTILL_BUSY,
+    MANUAL_DISTILL_COOLDOWN,
+    MANUAL_DISTILL_INVALID,
+})
+
 
 def distillation_wiring_active(settings: Any, store: Any) -> bool:
     """Whether the distillation chain is wired at all (kill switch + store).
