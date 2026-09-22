@@ -258,6 +258,12 @@ sync-<source_env>-<from_seq>-<to_seq>-<package_id 前 8 位>/
 - 每张表的列集合在 `manifest.json` 的 `tables[<table>].columns` 登记；导入前置检查要求目标端
   该表的列集合是它的超集，缺列硬失败，多出的列按目标端默认值。
 
+安全边界：`manifest.json` 最后写、不在 checksums 内，所以**不可信**。导入的笔记本范围由
+`rows/notebooks.jsonl` 导出并要求与 manifest 一致；每张 notebook scope 表的行必须落在该范围内，
+parent scope 表的父键必须出现在包内父表里。所有拼进文件系统路径的标识符（笔记本 id、
+`files/**` 相对路径）只允许 `[A-Za-z0-9._-]`、不含 `..`、不以 `.` 开头，且解析后必须落在对应的
+storage 根或包目录内；这些校验都在预检、任何写入或删除之前。
+
 导入端按目标后端选择转换：SQLite 目标只解码 `$bytes`；PostgreSQL 目标按 `postgres_catalog`
 读到的列类型调用 `transform_sqlite_value`。upsert 语句两端同形：
 `INSERT INTO t (cols) VALUES (...) ON CONFLICT (pk) DO UPDATE SET c=excluded.c ...`，

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -151,6 +152,45 @@ def decode_value(value: Any) -> Any:
     if isinstance(value, dict) and tuple(value) == (BYTES_KEY,):
         return base64.b64decode(value[BYTES_KEY])
     return value
+
+
+# A single filesystem path SEGMENT drawn from package content that will be
+# spliced into a real path (a notebook id becoming a directory name, mainly).
+# Deliberately narrow -- this is not "what a notebook id happens to look
+# like today", it is "what is safe to join onto a trusted base path without
+# a traversal or a shell-metacharacter surprise". ``import_.py`` is the only
+# caller today; kept here (not there) because the SAME rule has to hold for
+# whatever the exporter writes into ``manifest.notebooks``/``checksums.json``
+# and whatever the importer reads back out of them -- one rule, not two that
+# can drift.
+_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def is_safe_identifier(value: str) -> bool:
+    """True when ``value`` is safe to use as ONE filesystem path segment.
+
+    Non-empty, drawn only from ``[A-Za-z0-9._-]``, must not start with ``.``
+    (which rules out ``.``, ``..``, and any dotfile in one stroke), and must
+    not contain ``..`` anywhere (redundant with the leading-dot rule for the
+    exact traversal token, kept as a second, independent check rather than
+    relying on the regex alone to carry the whole rule)."""
+    if not value or value.startswith(".") or ".." in value:
+        return False
+    return bool(_SAFE_IDENTIFIER_RE.match(value))
+
+
+def is_safe_relative_path(value: str) -> bool:
+    """True when ``value`` is a package-relative, ``/``-separated path (the
+    shape ``checksums.json``'s keys and ``rows_path()``/``notebook_files_dir()``/
+    ``notebook_assets_dir()`` take) whose every segment is
+    ``is_safe_identifier``. Refuses an empty string, a leading ``/`` or
+    ``\\`` (absolute on POSIX or Windows), and a Windows drive prefix
+    (``C:...``) -- and, through the per-segment check, any ``..`` hop."""
+    if not value or value.startswith("/") or value.startswith("\\"):
+        return False
+    if len(value) >= 2 and value[1] == ":":
+        return False
+    return all(is_safe_identifier(segment) for segment in value.split("/"))
 
 
 def encode_row(row: dict[str, Any]) -> dict[str, Any]:

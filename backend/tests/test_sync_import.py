@@ -778,6 +778,159 @@ def test_a_package_with_an_open_checksum_chain_is_refused(source, target, packag
     assert "checksums_sha256" in str(failure.value)
 
 
+def test_a_traversal_notebook_id_in_the_manifest_is_refused(source, target, package):
+    """codex #772 r9 P1 (path safety), end to end. ``manifest.json`` is not
+    checksummed (see the module docstring), so ``manifest.notebooks`` is
+    exactly as untrusted as the rest of manifest.json -- a package that names
+    a notebook id like ``../../victim`` must be refused in preflight, before
+    any database handle is open or any file is staged, whether or not a
+    directory happens to sit where the traversal would land. ``storage/
+    notebooks/../../victim`` resolves one level above the storage root, so
+    the sentinel is planted there and must come back untouched.
+
+    This mutation also trips ``_verify_row_scopes`` (the manifest no longer
+    agrees with ``rows/notebooks.jsonl``), so which of the two preflight
+    checks raises first is not pinned here -- ``test_verify_package_paths_
+    rejects_an_unsafe_notebook_id`` below isolates ``_verify_package_paths``
+    on its own. What this test pins is the end-to-end guarantee: whichever
+    check fires, nothing is written and the sentinel survives untouched."""
+    victim = Path(target["settings"].storage_dir).parent / "victim"
+    victim.mkdir(parents=True)
+    (victim / "canary.txt").write_text("do not touch", encoding="utf-8")
+
+    document = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))
+    document["notebooks"] = ["../../victim"]
+    (package / MANIFEST_NAME).write_text(
+        json.dumps(document, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+    )
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, package)
+
+    assert "../../victim" in str(failure.value)
+    assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 0
+    assert (victim / "canary.txt").read_text(encoding="utf-8") == "do not touch"
+    assert sorted(p.name for p in victim.iterdir()) == ["canary.txt"]
+
+
+def test_verify_package_paths_rejects_an_unsafe_notebook_id():
+    """codex #772 r9 P1 (path safety), isolated. Calls
+    ``_verify_package_paths`` directly with an otherwise-valid manifest whose
+    ``notebooks`` carries a traversal id, so this pins its own rejection
+    independent of ``_verify_row_scopes`` (the end-to-end test above cannot
+    isolate the two, since a traversal id also fails the manifest/rows
+    equality check)."""
+    from app.migration.sync.import_ import _PackageManifest, _verify_package_paths
+    from app.core.config import Settings
+
+    manifest = _PackageManifest(
+        package_id="pkg-1",
+        source_env=SOURCE_ENV,
+        target_env=TARGET_ENV,
+        created_at=MOMENT,
+        from_seq=0,
+        to_seq=0,
+        embed_runtime_dim=1,
+        sqlite_version=1,
+        postgres_version=1,
+        notebooks=("../../victim",),
+        tables={},
+        checksums_sha256="unused",
+        missing_files=(),
+    )
+    settings = Settings(database_url="sqlite:///:memory:", storage_dir="/tmp/unused-storage")
+
+    with pytest.raises(SyncImportError) as failure:
+        _verify_package_paths(Path("/tmp/unused-package"), manifest, {}, settings)
+
+    assert "unsafe" in str(failure.value)
+    assert "../../victim" in str(failure.value)
+
+
+def test_checksums_json_with_a_traversal_path_is_refused():
+    """codex #772 r9 P1 (path safety), the ``files/**``/checksums.json leg,
+    isolated the same way. ``_verify_checksums`` already requires every
+    ``checksums.json`` key to equal a real on-disk relative path derived from
+    walking the package directory, which can never lexically contain ``..``
+    (no filesystem lets you create a directory entry literally named ``..``)
+    -- so this branch of ``_verify_package_paths`` is unreachable through a
+    real end-to-end package. It is still asserted directly here as the
+    independent, defence-in-depth check the plan calls for: a corrupted or
+    hand-edited checksums.json carrying a traversal path must be refused on
+    its own terms, not merely because it happens to also fail the on-disk
+    comparison."""
+    from app.migration.sync.import_ import _PackageManifest, _verify_package_paths
+    from app.core.config import Settings
+
+    manifest = _PackageManifest(
+        package_id="pkg-1",
+        source_env=SOURCE_ENV,
+        target_env=TARGET_ENV,
+        created_at=MOMENT,
+        from_seq=0,
+        to_seq=0,
+        embed_runtime_dim=1,
+        sqlite_version=1,
+        postgres_version=1,
+        notebooks=(),
+        tables={},
+        checksums_sha256="unused",
+        missing_files=(),
+    )
+    settings = Settings(database_url="sqlite:///:memory:", storage_dir="/tmp/unused")
+    checksums = {"files/notebooks/nb-1/../../../etc/passwd": "deadbeef"}
+
+    with pytest.raises(SyncImportError) as failure:
+        _verify_package_paths(Path("/tmp/unused-package"), manifest, checksums, settings)
+
+    assert "unsafe" in str(failure.value)
+
+
+def test_an_empty_manifest_notebooks_list_is_refused(source, target, package):
+    """codex #772 r9 P1 (row-range validity). ``manifest.notebooks`` is not
+    checksummed, so it cannot be trusted as the definition of this package's
+    scope -- the target must instead read that scope off
+    ``rows/notebooks.jsonl`` (which IS checksummed) and refuse a manifest
+    that disagrees with it, here understating it to nothing."""
+    document = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))
+    document["notebooks"] = []
+    (package / MANIFEST_NAME).write_text(
+        json.dumps(document, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+    )
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, package)
+
+    assert "rows/notebooks.jsonl" in str(failure.value)
+    assert source["exported"] in str(failure.value)
+    assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 0
+
+
+def test_a_row_scoped_outside_the_packages_notebooks_is_refused(
+    source, target, package
+):
+    """codex #772 r9 P1 (row-range validity). A chunk row claiming a
+    notebook_id the package does not carry must be refused before the
+    target-side mirror-collision guard runs -- otherwise that guard, and
+    everything downstream of it, would be reasoning about a notebook set
+    the package's own rows contradict."""
+    rows_file = package / rows_path("chunks")
+    lines = [line for line in rows_file.read_text(encoding="utf-8").splitlines() if line]
+    assert lines, "seed upload produced no chunks"
+    first = json.loads(lines[0])
+    first["notebook_id"] = "not-in-this-package"
+    lines[0] = json.dumps(first, ensure_ascii=False, sort_keys=True)
+    rows_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _reseal(package)
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, package)
+
+    assert "chunks.notebook_id" in str(failure.value)
+    assert "not-in-this-package" in str(failure.value)
+    assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 0
+
+
 def test_an_incremental_payload_is_refused_by_this_build(source, target, package):
     (package / "deletes.jsonl").write_text(
         json.dumps({"table": "chunks", "key_json": "{}"}) + "\n", encoding="utf-8"
@@ -826,7 +979,13 @@ def test_an_embedding_dimension_mismatch_is_refused(source, target, package):
 def _reseal(package: Path) -> None:
     """Recompute checksums.json and the manifest digest after a test edits a
     package file on purpose, so the edit is tested for what it IS rather than
-    stopped at the checksum gate."""
+    stopped at the checksum gate.
+
+    Also syncs ``manifest.json``'s per-table ``sha256`` (``tables[*].sha256``)
+    to the freshly recomputed ``checksums.json`` entry for any
+    ``rows/<table>.jsonl`` whose content a test edited directly -- otherwise
+    ``_verify_checksums``'s own cross-check between the two would refuse the
+    package before the edit under test is ever reached."""
     checksums = json.loads((package / CHECKSUMS_NAME).read_text(encoding="utf-8"))
     for relative in checksums:
         checksums[relative] = hashlib.sha256(
@@ -840,6 +999,10 @@ def _reseal(package: Path) -> None:
     document["checksums_sha256"] = hashlib.sha256(
         (package / CHECKSUMS_NAME).read_bytes()
     ).hexdigest()
+    for table, entry in (document.get("tables") or {}).items():
+        digest = checksums.get(rows_path(table))
+        if digest is not None:
+            entry["sha256"] = digest
     (package / MANIFEST_NAME).write_text(
         json.dumps(document, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
         encoding="utf-8",
