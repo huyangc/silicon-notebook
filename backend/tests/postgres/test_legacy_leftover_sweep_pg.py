@@ -33,13 +33,18 @@ def postgres_repository(postgres_settings):
 
 
 def _seed_rows(runtime, notebook_id, per_table):
+    """``community_members`` 的 community_id 与 ``knowledge_object_sources`` 的
+    object_id 带上 notebook_id:自 PostgreSQL 0064 起这两张表各有一个跨笔记本的
+    复合主键((community_id, canonical_id) / (object_id, source_id)),而生产里
+    这两个 id 本来就是全库唯一的铸造值——同一个 id 出现在两本笔记本下是这份夹具
+    独有的形态,不是被测行为(SQLite 孪生同注记)。"""
     now = normalize_timestamp(runtime.seams.now())
     with runtime.database.write() as db:
         for i in range(per_table):
             db.execute(
                 "INSERT INTO community_members (canonical_id,notebook_id,community_id)"
                 " VALUES (%s,%s,%s)",
-                (f"can-{i}", notebook_id, f"comm-{i}"),
+                (f"can-{i}", notebook_id, f"comm-{notebook_id}-{i}"),
             )
             db.execute(
                 "INSERT INTO conversations (id,notebook_id,created_at,updated_at)"
@@ -49,7 +54,7 @@ def _seed_rows(runtime, notebook_id, per_table):
             db.execute(
                 "INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id)"
                 " VALUES (%s,%s,%s)",
-                (f"ko-{i}", f"src-{i}", notebook_id),
+                (f"ko-{notebook_id}-{i}", f"src-{i}", notebook_id),
             )
             db.execute(
                 "INSERT INTO kg_cluster_scratch (notebook_id,run_id,object_id,seed)"

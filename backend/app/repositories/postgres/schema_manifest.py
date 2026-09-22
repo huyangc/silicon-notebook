@@ -125,6 +125,8 @@ POSTGRES_BUSINESS_TABLES = (
     "source_index_backfills",
     "source_paper_meta",
     "sources",
+    "sync_capture_control",
+    "sync_change_log",
     "sync_export_state",
     "sync_import_progress",
     "sync_imports",
@@ -214,6 +216,9 @@ POSTGRES_JSON_COLUMNS = frozenset(
         "source_elements.metadata",
         "source_paper_meta.keywords",
         "source_paper_meta.raw_json",
+        # SQLite v84 / PostgreSQL 0064: the change log's key_json is the
+        # captured row's identity (its key columns), never row content.
+        "sync_change_log.key_json",
         "sync_imports.report_json",
         "user_profiles.domain_focus",
         "user_profiles.model_settings",
@@ -374,7 +379,19 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # registration): each environment's own export watermark and import
 # progress is local to that environment. No column, index or FK change to
 # any existing table.
+# SQLite v84 / PostgreSQL 0064 add source-side change capture: two more
+# adapter-internal tables (sync_capture_control, the one-row gate, seeded by
+# no migration; sync_change_log, the append-only row-identity log plus
+# idx_sync_change_log_table_seq), the plpgsql function sync_capture_row and
+# one row trigger per synced business table (46 on PostgreSQL, 138 on SQLite
+# -- three per table there). It also gives the two synced tables that never
+# had a row identity one: knowledge_object_sources (object_id, source_id)
+# and community_members (community_id, canonical_id), de-duplicated first,
+# then backed by a PRIMARY KEY on PostgreSQL and a UNIQUE INDEX on SQLite
+# (which cannot add a primary key to an existing table). See
+# app/migration/sync/capture.py -- both backends' capture DDL is generated
+# from there, never hand-written twice.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=83,
-    postgres_version=63,
+    sqlite_version=84,
+    postgres_version=64,
 )

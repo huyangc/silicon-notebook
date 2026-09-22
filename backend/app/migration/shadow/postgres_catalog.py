@@ -14,6 +14,10 @@ from typing import Any
 
 from app.migration.shadow.manifest import replication_guard_specs
 from app.migration.shadow.types import Manifest
+from app.migration.sync.capture_contract import (
+    POSTGRES_CAPTURE_FUNCTION,
+    expected_postgres_triggers,
+)
 from app.repositories.postgres.migrator import load_migrations
 from app.repositories.postgres.schema_manifest import (
     POSTGRES_ROWID_ORDINAL_TABLES,
@@ -686,6 +690,59 @@ def _validate_identity_sequences(
             raise ValueError(f"{_SCHEMA_LABEL} identity sequence contract drifted")
 
 
+def _validate_capture_triggers(
+    conn: Any,
+    *,
+    business_schema: str,
+    catalog_tables: tuple[str, ...],
+) -> None:
+    """The non-internal triggers on business tables must be EXACTLY the sync
+    change-capture set (``app.migration.sync.capture``).
+
+    Before source-side change capture existed the rule here was "no
+    non-internal trigger at all". It is still an exact-set rule, rather than
+    a prefix or a minimum: one extra trigger
+    (someone's audit hook), one missing trigger (a table that silently stops
+    being captured, which would make the next incremental export skip its
+    changes without failing), or a trigger repointed at another function all
+    count as drift. ``tgenabled`` must be ``'O'`` -- a disabled trigger fires
+    for nobody, which is the missing-trigger case wearing a different hat.
+
+    The function identity is checked per trigger rather than separately: every
+    expected trigger has to resolve to ``sync_capture_row`` in this same
+    schema, declared as a plain (``prokind='f'``), SECURITY INVOKER function.
+    """
+    expected = expected_postgres_triggers()
+    rows = conn.execute(
+        "SELECT g.tgname,t.relname AS table_name,g.tgenabled,"
+        "p.proname,p.prokind,p.prosecdef,pn.nspname AS function_schema "
+        "FROM pg_trigger g JOIN pg_class t ON t.oid=g.tgrelid "
+        "JOIN pg_namespace n ON n.oid=t.relnamespace "
+        "JOIN pg_proc p ON p.oid=g.tgfoid "
+        "JOIN pg_namespace pn ON pn.oid=p.pronamespace "
+        "WHERE n.nspname=%s AND t.relname=ANY(%s) AND NOT g.tgisinternal "
+        "ORDER BY g.tgname",
+        (business_schema, list(catalog_tables)),
+    ).fetchall()
+    actual = {
+        str(_value(row, "tgname", 0)): str(_value(row, "table_name", 1))
+        for row in rows
+    }
+    if len(rows) != len(actual) or actual != expected:
+        raise ValueError(f"{_SCHEMA_LABEL} business table trigger set drifted")
+    for row in rows:
+        if (
+            str(_value(row, "proname", 3)) != POSTGRES_CAPTURE_FUNCTION
+            or str(_value(row, "function_schema", 6)) != business_schema
+            or str(_value(row, "prokind", 4)) != "f"
+            or bool(_value(row, "prosecdef", 5))
+            or str(_value(row, "tgenabled", 2)) != "O"
+        ):
+            raise ValueError(
+                f"{_SCHEMA_LABEL} business table trigger definition drifted"
+            )
+
+
 def validate_postgres_business_catalog(
     conn: Any,
     *,
@@ -733,12 +790,9 @@ def validate_postgres_business_catalog(
     if inherited is not None:
         raise ValueError(f"{_SCHEMA_LABEL} business table inheritance drifted")
 
-    unexpected_trigger = conn.execute(
-        "SELECT 1 FROM pg_trigger g JOIN pg_class t ON t.oid=g.tgrelid "
-        "JOIN pg_namespace n ON n.oid=t.relnamespace "
-        "WHERE n.nspname=%s AND t.relname=ANY(%s) AND NOT g.tgisinternal LIMIT 1",
-        (business_schema, list(catalog_tables)),
-    ).fetchone()
+    _validate_capture_triggers(
+        conn, business_schema=business_schema, catalog_tables=catalog_tables
+    )
     unexpected_rule = conn.execute(
         "SELECT 1 FROM pg_rewrite r JOIN pg_class t ON t.oid=r.ev_class "
         "JOIN pg_namespace n ON n.oid=t.relnamespace "
@@ -751,10 +805,7 @@ def validate_postgres_business_catalog(
         "WHERE n.nspname=%s AND t.relname=ANY(%s) LIMIT 1",
         (business_schema, list(catalog_tables)),
     ).fetchone()
-    if any(
-        item is not None
-        for item in (unexpected_trigger, unexpected_rule, unexpected_policy)
-    ):
+    if any(item is not None for item in (unexpected_rule, unexpected_policy)):
         raise ValueError(f"{_SCHEMA_LABEL} business table behavior drifted")
 
     column_rows = conn.execute(

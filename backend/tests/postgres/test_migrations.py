@@ -5,6 +5,7 @@ import threading
 
 import pytest
 
+from app.migration.sync.capture import expected_postgres_triggers
 from tests.postgres.conftest import _safe_ascii_text
 
 
@@ -264,7 +265,7 @@ def test_packaged_migration_refuses_non_utf_database_before_any_ddl(
 def test_packaged_migrations_apply_in_order(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert len(PostgresMigrator(postgres_database).migrations) == 63
+    assert len(PostgresMigrator(postgres_database).migrations) == 64
     migrator = PostgresMigrator(postgres_database)
     assert migrator.migrate(target_version=2) == 2
     with postgres_database.connect() as conn:
@@ -308,7 +309,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_chunks_text_trgm" not in indexes
     for version in (3, 4, 5, 6, 7, 8, 9, 10, 11):
         assert migrator.migrate(target_version=version) == version
-    assert migrator.migrate() == 63
+    assert migrator.migrate() == 64
     with postgres_database.connect() as conn:
         final_indexes = {
             row["indexname"]
@@ -587,11 +588,99 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     completed_at = sync_columns[("sync_import_progress", "completed_at")]
     assert completed_at["data_type"] == "timestamp with time zone"
     assert completed_at["is_nullable"] == "YES"
+    # v64 (source-side change capture) — see
+    # migrations/0064_sync_change_capture.sql. Two more adapter-internal
+    # tables, the log's index, the composite primary key the two previously
+    # keyless synced tables now carry, one plpgsql function and one row
+    # trigger per synced business table. The generated text itself is pinned
+    # against the generator in tests/test_sync_capture.py; what is checked
+    # here is the shape the migration leaves in the catalog.
+    with postgres_database.connect() as conn:
+        capture_columns = {
+            (row["table_name"], row["column_name"]): row
+            for row in conn.execute(
+                "SELECT table_name,column_name,data_type,is_nullable,"
+                "column_default,collation_name FROM information_schema.columns "
+                "WHERE table_schema=current_schema() AND table_name IN "
+                "('sync_capture_control','sync_change_log')"
+            ).fetchall()
+        }
+        capture_pks = {
+            row["table_name"]: list(row["columns"])
+            for row in conn.execute(
+                "SELECT tc.table_name, array_agg(kcu.column_name::text ORDER BY "
+                "kcu.ordinal_position) AS columns "
+                "FROM information_schema.table_constraints tc "
+                "JOIN information_schema.key_column_usage kcu "
+                "ON kcu.constraint_name=tc.constraint_name "
+                "AND kcu.table_schema=tc.table_schema "
+                "WHERE tc.constraint_type='PRIMARY KEY' "
+                "AND tc.table_schema=current_schema() AND tc.table_name IN "
+                "('sync_capture_control','sync_change_log',"
+                "'knowledge_object_sources','community_members') "
+                "GROUP BY tc.table_name"
+            ).fetchall()
+        }
+        capture_function = conn.execute(
+            "SELECT p.prokind,p.prosecdef FROM pg_proc p "
+            "JOIN pg_namespace n ON n.oid=p.pronamespace "
+            "WHERE n.nspname=current_schema() AND p.proname='sync_capture_row'"
+        ).fetchall()
+        capture_triggers = {
+            row["tgname"]: row["table_name"]
+            for row in conn.execute(
+                "SELECT g.tgname,t.relname AS table_name FROM pg_trigger g "
+                "JOIN pg_class t ON t.oid=g.tgrelid "
+                "JOIN pg_namespace n ON n.oid=t.relnamespace "
+                "WHERE n.nspname=current_schema() AND NOT g.tgisinternal"
+            ).fetchall()
+        }
+        capture_control_rows = conn.execute(
+            "SELECT COUNT(*) AS n FROM sync_capture_control"
+        ).fetchone()["n"]
+    capture_table_columns: dict[str, set[str]] = {}
+    for table_name, column_name in capture_columns:
+        capture_table_columns.setdefault(table_name, set()).add(column_name)
+    assert capture_table_columns == {
+        "sync_capture_control": {
+            "singleton", "enabled", "enabled_at", "disabled_at",
+        },
+        "sync_change_log": {
+            "seq", "table_name", "key_json", "operation", "parent_key",
+            "notebook_id", "txid", "changed_at",
+        },
+    }
+    assert capture_pks == {
+        "sync_capture_control": ["singleton"],
+        "sync_change_log": ["seq"],
+        "knowledge_object_sources": ["object_id", "source_id"],
+        "community_members": ["community_id", "canonical_id"],
+    }
+    enabled = capture_columns[("sync_capture_control", "enabled")]
+    assert enabled["data_type"] == "boolean"
+    assert enabled["is_nullable"] == "NO"
+    assert enabled["column_default"] == "false"
+    assert capture_columns[("sync_capture_control", "enabled_at")]["is_nullable"] == "YES"
+    key_json = capture_columns[("sync_change_log", "key_json")]
+    assert key_json["data_type"] == "jsonb"
+    assert key_json["is_nullable"] == "NO"
+    txid = capture_columns[("sync_change_log", "txid")]
+    assert txid["data_type"] == "bigint"
+    assert txid["is_nullable"] == "YES"
+    for column_name in ("table_name", "operation", "parent_key", "notebook_id"):
+        assert capture_columns[("sync_change_log", column_name)]["collation_name"] == "C"
+    assert len(capture_function) == 1
+    assert capture_function[0]["prokind"] == "f"
+    assert capture_function[0]["prosecdef"] is False
+    assert capture_triggers == expected_postgres_triggers()
+    assert len(capture_triggers) == 46
+    # The gate row is NOT seeded: an absent row reads as disabled.
+    assert capture_control_rows == 0
     assert ledger_versions == [
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
         22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
         41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58,
-        59, 60, 61, 62, 63,
+        59, 60, 61, 62, 63, 64,
     ]
 
 
@@ -625,8 +714,8 @@ def test_auth_sunset_migration_preserves_legacy_password_and_session(
             "VALUES ('legacy-session','legacy-user',now(),now()+interval '1 day',now())"
         )
 
-    assert migrator.migrate() == 63
-    assert migrator.migrate() == 63
+    assert migrator.migrate() == 64
+    assert migrator.migrate() == 64
     with postgres_database.connect() as connection:
         users = {
             row["id"]: row for row in connection.execute(
@@ -726,7 +815,7 @@ def test_notebook_object_schema_migration_relocates_legacy_rows(postgres_databas
             ),
         )
 
-    assert migrator.migrate() == 63
+    assert migrator.migrate() == 64
     with postgres_database.connect() as connection:
         relocated = connection.execute(
             "SELECT notebook_id,object_type,status,created_by "
@@ -789,7 +878,7 @@ def test_source_agent_provenance_column_is_nullable_and_unconstrained(
             "AND column_name='agent_profile_id'"
         ).fetchone() is None
 
-    assert migrator.migrate() == 63
+    assert migrator.migrate() == 64
     with postgres_database.connect() as connection:
         column = connection.execute(
             "SELECT data_type,is_nullable,column_default,collation_name "
@@ -864,7 +953,7 @@ def test_cluster_membership_migration_dedupes_before_unique_guard(postgres_datab
                 ],
             )
 
-    assert migrator.migrate() == 63
+    assert migrator.migrate() == 64
     with postgres_database.connect() as connection:
         rows = connection.execute(
             "SELECT id,canonical_id FROM concept_clusters "

@@ -870,10 +870,14 @@ class KgBuildJobStore:
                             for row in kg.get("objects") or []
                         ],
                     )
+                    # ON CONFLICT DO NOTHING: 0064 gave this table a composite
+                    # primary key (object_id, source_id) -- a repeated pair is
+                    # the same row.
                     execute_many(
                         connection,
                         "INSERT INTO knowledge_object_sources "
-                        "(object_id,source_id,notebook_id) VALUES (%s,%s,%s)",
+                        "(object_id,source_id,notebook_id) VALUES (%s,%s,%s) "
+                        "ON CONFLICT DO NOTHING",
                         [
                             (row["object_id"], row["source_id"], notebook_id)
                             for row in kg.get("object_sources") or []

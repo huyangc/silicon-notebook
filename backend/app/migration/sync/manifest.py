@@ -36,6 +36,10 @@ More axes cut across those three classes:
   ``TableScope`` and ``scope_chain`` below. ``None`` for LOCAL tables
   (never exported, so the question does not apply); every SYNCED/
   SYNCED_WITH_MAPPING table must set a real one.
+- ``key``: the row-identity columns for the two synced tables that carry no
+  PostgreSQL primary key of their own. Empty everywhere else, meaning "the
+  catalog primary key is the row identity" -- see
+  ``app.migration.sync.capture.key_columns``.
 
 A guard test (``tests/test_sync_manifest.py``) asserts this manifest is total
 over ``POSTGRES_BUSINESS_TABLES``: every business table must have exactly one
@@ -192,6 +196,16 @@ class TableSyncSpec:
     # SYNCED/SYNCED_WITH_MAPPING table must set a real ``TableScope`` --
     # enforced by tests/test_sync_manifest.py, not by this dataclass.
     scope: TableScope | None = None
+    # The columns that identify one row of this table, for the tables that
+    # have no PostgreSQL primary key of their own. Empty (the normal case)
+    # means "use the primary key parsed out of the packaged PostgreSQL
+    # migration DDL" -- see app.migration.sync.capture.key_columns, which
+    # also refuses a registered key that disagrees with a primary key the
+    # catalog does have. SQLite v84 / PostgreSQL 0064 back every registered
+    # key with a real unique surface on both backends (a UNIQUE INDEX on
+    # SQLite, which cannot add a primary key to an existing table; a PRIMARY
+    # KEY on PostgreSQL).
+    key: tuple[str, ...] = ()
     notes: str = ""
 
 
@@ -246,10 +260,33 @@ _SYNCED: tuple[TableSyncSpec, ...] = (
         scope=_NOTEBOOK_SCOPE,
     ),
     TableSyncSpec("knowledge_relations", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
-    TableSyncSpec("knowledge_object_sources", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec(
+        "knowledge_object_sources",
+        SyncClass.SYNCED,
+        scope=_NOTEBOOK_SCOPE,
+        key=("object_id", "source_id"),
+        notes=(
+            "0001_initial.sql 没给这张表主键。(object_id, source_id) 就是它的"
+            "行身份——notebook_id 由 object_id 决定，不参与identity。v84/0064 "
+            "去重后补上唯一面（SQLite 唯一索引 / PG 主键）。"
+        ),
+    ),
     TableSyncSpec("concept_clusters", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
     TableSyncSpec("communities", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
-    TableSyncSpec("community_members", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
+    TableSyncSpec(
+        "community_members",
+        SyncClass.SYNCED,
+        scope=_NOTEBOOK_SCOPE,
+        key=("community_id", "canonical_id"),
+        notes=(
+            "0001_initial.sql 没给这张表主键。行身份取 (community_id, "
+            "canonical_id)，与 reap_derived_generations_page 的删除口径一致："
+            "community_id 每一代重铸、全库唯一，所以它已经蕴含 notebook_id/"
+            "level/generation。shadow manifest 那条三列复制键 (notebook_id, "
+            "level, canonical_id) 自 v71 加 generation 后不再唯一，不沿用。"
+            "v84/0064 去重后补上唯一面（SQLite 唯一索引 / PG 主键）。"
+        ),
+    ),
     TableSyncSpec("canonical_relations", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
     TableSyncSpec("mention_edges", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
     TableSyncSpec("concept_comentions", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE),
@@ -549,6 +586,11 @@ _LOCAL: tuple[TableSyncSpec, ...] = (
     TableSyncSpec("sync_export_state", SyncClass.LOCAL, notes="PR-2 同步控制表"),
     TableSyncSpec("sync_imports", SyncClass.LOCAL, notes="PR-2 同步控制表"),
     TableSyncSpec("sync_import_progress", SyncClass.LOCAL, notes="PR-2 同步控制表"),
+    # PR-3a 源端变更捕获（SQLite v84 / PostgreSQL 0064）：捕获开关与变更日志。
+    # 两张都是本环境自己的记账，绝不随笔记本同步——把源环境的日志搬到目标端，
+    # 目标端就会把别人的行变更当成自己的待导出增量。
+    TableSyncSpec("sync_capture_control", SyncClass.LOCAL, notes="PR-3a 捕获开关"),
+    TableSyncSpec("sync_change_log", SyncClass.LOCAL, notes="PR-3a 变更日志"),
 )
 
 SYNC_MANIFEST: tuple[TableSyncSpec, ...] = _SYNCED + _SYNCED_WITH_MAPPING + _LOCAL

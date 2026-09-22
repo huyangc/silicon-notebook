@@ -111,9 +111,13 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "community_overview_on 分岔)"),
     "backend/app/repositories/source_subgraph_projection.py": (4, 0, 0, 2, 0,
         "A×4(两函数各 PG/SQLite 分支),共享 published_gen 局部模板"),
-    "backend/app/repositories/sqlite/migrations.py": (3, 0, 0, 1, 0,
+    "backend/app/repositories/sqlite/migrations.py": (3, 0, 2, 1, 0,
         "非站点:DDL(_migration_71 的索引重建);谓词计数来自启动恢复"
-        "_reap_stale_derived_generations 的 state 行现读(逐本取 keep)"),
+        "_reap_stale_derived_generations 的 state 行现读(逐本取 keep)。"
+        "community_members 的两处来自 _migration_84 的一次性去重 DDL "
+        "(DELETE ... WHERE rowid NOT IN (SELECT MIN(rowid) ... )):C 类跨代"
+        "豁免——它按 (community_id, canonical_id) 折叠历史重复行,好让那张表"
+        "第一次拿到唯一面,与 published 代次无关(重复行在哪一代都是重复行)"),
     "backend/app/services/kg_analysis_precompute.py": (0, 0, 1, 0, 0,
         "非站点:注释里的表名"),
     "scripts/diag_open_latency.py": (3, 0, 0, 0, 0,
