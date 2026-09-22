@@ -13,6 +13,8 @@ from app.repositories.postgres.agent_observation_store import AgentObservationSt
 from app.repositories.postgres.agent_profile_store import AgentProfileStore
 from app.repositories.postgres.ask_state_store import AskStateStore
 from app.repositories.global_ask_store import GlobalAskStore
+from app.repositories.postgres import access_sql as postgres_access_sql
+from app.repositories.postgres.read_authority_lock import lock_reader_access_on
 from app.repositories.postgres.catalog_store import CatalogStore
 from app.repositories.postgres.chunk_store import ChunkStore
 from app.repositories.postgres.database import PostgresDatabase
@@ -275,7 +277,10 @@ class PostgresPersistenceBundleFactory:
                 current_user_id=lambda: identity.current_user().id,
             )
             ask_state = AskStateStore(database, seams)
-            global_ask = GlobalAskStore(database, marker="%s")
+            global_ask = GlobalAskStore(
+                database, marker="%s", access_sql=postgres_access_sql,
+                read_authority_lock=lock_reader_access_on,
+            )
             unified_kg = UnifiedKgStore(database, seams.now)
             model_status = ModelStatusStore(database)
             agent_profile = AgentProfileStore(

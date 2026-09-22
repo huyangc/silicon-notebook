@@ -13,7 +13,6 @@ from app.api.deps import (
     global_ask_repository,
     model_status_service,
     identity_repository,
-    notebook_read_authority_store,
     repository,
     require_notebook_capability,
     user_error,
@@ -668,13 +667,15 @@ def get_admin_user_ask_detail(
         pass
     # Not a notebook job of this user: the same id space serves global Ask jobs
     # (``gask-…``), which live in their own table and leave the same record.
-    record = global_ask_repository().admin_job_record(job_id, user_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="ask job not found")
-    return _global_ask_detail(record, owner_id=user_id, viewer=user)
+    with global_ask_repository().guarded_admin_job_record(
+        job_id, user_id, reader_id=None if user.role == "admin" else user.id,
+    ) as record:
+        if record is None:
+            raise HTTPException(status_code=404, detail="ask job not found")
+        return _global_ask_detail(record, viewer=user)
 
 
-def _global_ask_detail(record: dict, *, owner_id: str, viewer: UserProfile) -> AskDetail:
+def _global_ask_detail(record: dict, *, viewer: UserProfile) -> AskDetail:
     """The global twin of the notebook branch above, same reader rule.
 
     An administrator keeps the complete audit history: the job is returned even
@@ -683,7 +684,10 @@ def _global_ask_detail(record: dict, *, owner_id: str, viewer: UserProfile) -> A
     administrator). The owner reading their own activity gets exactly the
     owner-facing rule ``GlobalAskService.get_job`` applies -- every participant
     must still be readable, otherwise 404 -- so an activity detail can never
-    show them a global answer the global page itself refuses to open.
+    show them a global answer the global page itself refuses to open. Both
+    checks run inside ``guarded_admin_job_record``'s transaction, which holds
+    the job row and the participants' authority chains until this projection
+    is assembled (the notebook branch's ``guarded_ask_detail`` invariant).
 
     ``error`` is the raw ``error_detail`` column (admin-only via
     ``_activity_failure_text``); a failed row written before that column existed
@@ -695,12 +699,7 @@ def _global_ask_detail(record: dict, *, owner_id: str, viewer: UserProfile) -> A
     """
     job = record["job"]
     notebook_ids = list(job.resolved_notebook_ids)
-    sharing = notebook_read_authority_store()
-    if viewer.role != "admin":
-        readable = sharing.readable_notebook_ids(notebook_ids, owner_id)
-        if not set(notebook_ids).issubset(readable):
-            raise HTTPException(status_code=404, detail="ask job not found")
-    names = sharing.readable_notebook_names(owner_id, notebook_ids)
+    names = record["notebook_names"]
     if job.answer is not None:
         answer = job.answer.model_dump(mode="json")
         answered_at = job.answer.answered_at or ""

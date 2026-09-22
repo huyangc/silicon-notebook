@@ -513,3 +513,52 @@ def test_postgres_passage_snapshot_batches_past_the_parameter_limit(store):
     assert snapshot[wanted[-1]]["text_sha"] == hashlib.sha256(
         f"text of {wanted[-1]}".encode("utf-8")
     ).hexdigest()
+
+
+def _guarded_store(postgres_database):
+    from app.repositories.postgres import access_sql
+    from app.repositories.postgres.read_authority_lock import lock_reader_access_on
+
+    assert PostgresMigrator(postgres_database).migrate() == 61
+    return GlobalAskStore(
+        postgres_database, marker="%s", access_sql=access_sql,
+        read_authority_lock=lock_reader_access_on,
+    )
+
+
+def _seed_participants(store):
+    now = "2026-09-20T00:00:00Z"
+    with store.database.write() as db:
+        for user in ("user-a", "user-b"):
+            db.execute(
+                "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                (user, f"{user}@x", user, "user", "active", now, now))
+        for nb, owner in (("nb-a", "user-a"), ("nb-b", "user-b")):
+            db.execute(
+                "INSERT INTO notebooks(id,name,created_by,status,created_at,updated_at) "
+                "VALUES(%s,%s,%s,%s,%s,%s)",
+                (nb, f"NB {nb}", owner, "ready", now, now))
+
+
+def test_guarded_admin_job_record_applies_the_owner_rule_and_names_readable_participants(postgres_database):
+    """PG 孪生:FOR SHARE / FOR KEY SHARE 下同一套判定(见 SQLite 侧同名用例)。"""
+    store = _guarded_store(postgres_database)
+    _seed_participants(store)
+    value = job()
+    store.create(value, "user-a", "request-a", "payload", "web", new_conversation=True)
+    value.status = "done"
+    assert store.save(value, "user-a")
+
+    with store.guarded_admin_job_record(value.job_id, "user-a", reader_id=None) as record:
+        assert record is not None and record["notebook_names"] == {"nb-a": "NB nb-a"}
+    with store.guarded_admin_job_record(value.job_id, "user-a", reader_id="user-a") as record:
+        assert record is None
+    with store.guarded_admin_job_record(value.job_id, "user-b", reader_id=None) as record:
+        assert record is None
+
+    with store.database.write() as db:
+        db.execute("UPDATE notebooks SET created_by=%s WHERE id=%s", ("user-a", "nb-b"))
+    with store.guarded_admin_job_record(value.job_id, "user-a", reader_id="user-a") as record:
+        assert record is not None
+        assert record["notebook_names"] == {"nb-a": "NB nb-a", "nb-b": "NB nb-b"}
