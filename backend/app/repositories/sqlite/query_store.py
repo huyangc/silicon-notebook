@@ -7,6 +7,7 @@ from typing import Any
 
 from app.core.config import Settings, get_settings
 from app.repositories.sqlite import access_sql
+from app.models.global_ask import GLOBAL_ASK_PAGE_SIZE
 from app.models.notebooks import NotebookAnalytics
 from app.models.admin import ADMIN_QUESTIONS_DEFAULT_LIMIT
 from app.models.ask import (
@@ -1911,11 +1912,14 @@ class QueryStore:
 
         谓词与笔记本内那一臂一一对应:同一份精确在途状态集合、属主隔离
         (``user_id = ?``,全局作业只有发起人一个主体)、同一个上限。读权与生命周期
-        对应的是**参与库集合整体**——全局会话不属于任何一本库,会话详情读取时要求它
-        的每一个参与库都仍可读且存活,缺一个就 404;所以条目只在该作业的每一个
-        ``resolved_notebook_ids`` 都满足规范读谓词与 ``NOTEBOOK_LIVE_SQL`` 时出现,
-        与 `/admin/users/{id}/activity` 全局臂本人自助读取的那条子句逐字同形,不在
-        这里另拼谓词。点不开的条目不进铃铛,恢复读权自动回来。
+        对应的是**会话详情那一页的参与库集合**——全局会话不属于任何一本库,点击条目
+        打开的是会话第一页(`GlobalAskService.conversation`:最新 ``GLOBAL_ASK_PAGE_SIZE``
+        轮,顺序与 ``GlobalAskStore.jobs`` 逐字一致),而那次读取要求这一页**每一轮**的
+        每一个参与库都仍可读且存活,缺一个就 404。只看在途这一轮不够(codex #785 R1):
+        早先一轮用过、后来失权的库会让条目点开即 404。所以条目只在那一页全部
+        ``resolved_notebook_ids`` 都满足规范读谓词与 ``NOTEBOOK_LIVE_SQL`` 时出现(逐库
+        子句与 `/admin/users/{id}/activity` 全局臂本人自助读取的那条同形);谓词在
+        ``LIMIT`` 之前。点不开的条目不进铃铛,恢复读权自动回来。
 
         排序走 v82 的 ``idx_global_ask_jobs_user_created(user_id, created_at, id)``;
         ``created_at`` 由服务端 ``datetime.now(timezone.utc).isoformat()`` 写入,同一
@@ -1925,16 +1929,20 @@ class QueryStore:
         rows = db.execute(
             "SELECT id, conversation_id, status, asked_at, created_at, "
             "COALESCE(json_extract(payload_json,'$.question'),'') AS question "
-            f"FROM global_ask_jobs WHERE user_id = ? AND status IN ({placeholders}) "
-            "AND NOT EXISTS(SELECT 1 FROM json_each("
-            "json_extract(payload_json,'$.resolved_notebook_ids')) p "
-            "WHERE NOT EXISTS(SELECT 1 FROM notebooks nb WHERE nb.id=p.value AND "
+            f"FROM global_ask_jobs g WHERE user_id = ? AND status IN ({placeholders}) "
+            "AND NOT EXISTS(SELECT 1 FROM global_ask_jobs page, json_each("
+            "json_extract(page.payload_json,'$.resolved_notebook_ids')) p "
+            "WHERE page.id IN (SELECT t.id FROM global_ask_jobs t "
+            "WHERE t.conversation_id = g.conversation_id AND t.user_id = g.user_id "
+            "ORDER BY t.created_at DESC, t.id DESC LIMIT ?) "
+            "AND NOT EXISTS(SELECT 1 FROM notebooks nb WHERE nb.id=p.value AND "
             + access_sql.read_access_clause()
             + f" AND nb.{access_sql.NOTEBOOK_LIVE_SQL})) "
             "ORDER BY created_at DESC, id DESC LIMIT ?",
             (
                 user_id,
                 *RUNNING_ASK_STATUSES,
+                GLOBAL_ASK_PAGE_SIZE,
                 *access_sql.read_access_params(user_id),
                 RUNNING_ASK_ROWS,
             ),

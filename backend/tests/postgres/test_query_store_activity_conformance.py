@@ -1594,6 +1594,25 @@ def test_running_global_ask_items_mirror_the_sqlite_projection(postgres_database
         _insert_member(connection, "n-shared", "u-member")
     assert [it["job_id"] for it in _asks("u-member")] == ["gask-m"]
 
+    # 会话第一页里**早先一轮**用过的库失权,同样让条目出铃铛(codex #785 R1):点击
+    # 打开的会话读取要求这一页每一轮的参与库都可读,不只是在途这一轮。
+    with postgres_database.write() as connection:
+        _insert_notebook(connection, "n-early", "u-owner")
+        _insert_member(connection, "n-early", "u-member")
+        _insert_global_ask(connection, "gask-early", "gconv-m", "u-member",
+                           datetime(2026, 8, 1, 8, 0, tzinfo=timezone.utc),
+                           status="done", notebook_ids=["n-early"])
+    assert [it["job_id"] for it in _asks("u-member")] == ["gask-m"]
+    with postgres_database.write() as connection:
+        connection.execute(
+            "DELETE FROM notebook_members WHERE notebook_id=%s AND user_id=%s",
+            ("n-early", "u-member"),
+        )
+    assert _asks("u-member") == []
+    with postgres_database.write() as connection:
+        _insert_member(connection, "n-early", "u-member")
+    assert [it["job_id"] for it in _asks("u-member")] == ["gask-m"]
+
     # 两臂归并:第 k 分钟,偶数 k 是笔记本内提问、奇数 k 是全局问答;整份快照
     # 最新优先、共用一个 RUNNING_ASK_ROWS 上限。
     # 每条在途全局作业各占一个会话(idx_global_ask_running:一个会话同时只有一条 running)。
