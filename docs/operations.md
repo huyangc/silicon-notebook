@@ -713,42 +713,71 @@ PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --j
    running `sync export` daily requires importing every package the moment it lands — packages can
    queue up on the target side — but they must be applied in the order they were produced, and
    every package in between must be imported (or superseded by a fresh full baseline) before a
-   later one will be accepted. `sync status` on the target prints the current chain head per
-   `source_env` so you can tell which package to import next.
+   later one will be accepted. `sync status` on the target prints the current chain head(s) per
+   `source_env` — normally one, occasionally more than one (see the `status` section below) — so
+   you can tell which package to import next.
 6. An incremental export with nothing to ship still produces a package (every `rows/*.jsonl`,
    `deletes.jsonl`, and `kg_epochs.jsonl` is present but empty) and still advances the
    watermark — the report's `empty` field says so. This keeps the export chain unbroken: every
    package's `base_package_id` names the package it continues from, so skipping a day with no
    changes never breaks the chain for the next one.
 7. Importing an incremental package does not swap directories the way a full import does — it
-   merges files in place, one changed file at a time (write `<file>.sync-tmp`, then
-   `os.replace` over the destination), so there is no `storage/...retired`/`.sync-old` sibling to
-   clean up afterward, and an interrupted incremental file merge is safe to retry with `--resume`
-   (each file's replace is atomic; the ones already replaced are simply overwritten again with the
-   same bytes). A `.sync-tmp` file left behind by a killed import (a crash between the copy and the
-   rename) is harmless clutter, not something to clean up by hand: the next import into that same
-   notebook/asset directory removes any stale `*.sync-tmp` it finds before merging, and `sync
-   export` skips any file ending in `.sync-tmp` on both of its own file-collection paths, so an
-   interrupted import's debris never rides along in a later package to another environment.
-8. If the incremental package's `deleted_notebooks` names a mirrored notebook, what happens
-   depends on that notebook's state on THIS target right now, decided in one read at the start of
-   the delete phase: a notebook this target is actively deep-copying (`status='copying'`) is left
-   completely alone — neither its rows nor its `status` are touched, and it is counted in both
-   `notebooks_delete_skipped` and `deletes_skipped_for_copying` — because the copy is reading those
-   rows right now and deleting out from under it would corrupt it; finish or abandon the copy, then
-   delete the notebook (by hand, or let the next incremental package's replay catch it once the
-   copy has settled and the notebook is no longer `copying`). A notebook this target actually holds
-   (not copying) is instead tombstoned — flipped to `status='deleting'` and handed to the same
-   delete-job queue `DELETE /api/notebooks/{id}` uses (see "Notebook delete jobs" below) — and its
-   individual row-level delete entries are **not** replayed one by one; they are counted in
+   merges files in place, one changed file at a time, and stages each file's bytes under
+   `storage/.sync-staging/<package_id>/<root>/<notebook id>/...` before an atomic `os.replace`
+   onto the destination — **not** as a `.sync-tmp` suffix on the destination's own name.
+   `.sync-tmp` only ever appears today as a directory-name suffix during a FULL import's swap
+   (`<notebook id>.sync-tmp`, in the notebook-id namespace — never on a file inside
+   `storage/notebooks/`/`storage/assets/`). You may see `storage/.sync-staging/<package_id>/`
+   appear during an incremental import and disappear again once it finishes — that is normal,
+   not something to clean up by hand. If it is still there afterward (a killed import), the
+   cleanup rule depends on whose it is and whether that import ever finished: your own retry of
+   the SAME package clears its own leftover unconditionally; a package this target's `sync_imports`
+   already marked `done` gets its leftover removed too (and reported — that import failed to
+   clean up after itself, which should not happen but is not itself a problem now); anything
+   else — a DIFFERENT, still-unfinished package's staging (a concurrent import of another
+   `source_env` is a normal thing to have running) — is left alone unless it has gone untouched
+   for over an hour, judged purely by the directory's own mtime, and reported either way. Nothing
+   under `storage/notebooks/`/`storage/assets/` is ever treated as staging regardless of what it
+   is named — those two trees are 100% user content, and `sync export` never skips a file there
+   for looking like a staging artifact (a real upload whose name happens to end in `.sync-tmp` is
+   exported like any other file). An interrupted incremental file merge is safe to retry with
+   `--resume`: each file's replace is atomic, and the ones already replaced are simply
+   overwritten again with the same bytes.
+8. If the incremental package's `deleted_notebooks` names a mirrored notebook, what happens to a
+   given row-level delete entry for it is decided on **the target's own resolved attribution**,
+   never on the entry's own claimed `notebook_id` alone — a primary key is exported verbatim and
+   never reissued, so the row this target currently holds under that key can by now belong to a
+   completely different, still-in-scope notebook M (re-attributed by something else since the
+   source recorded that entry); folding or skipping it purely on the entry's word would leave M's
+   row neither replayed nor covered by any delete job. So the entry's own `notebook_id` is only a
+   cheap first guess (skipped as "copying" immediately when it names a notebook already known to
+   be copying); anything it flags as belonging to a to-be-tombstoned notebook is held back and
+   re-decided once the row's real target-side owner is read — only THAT resolved owner decides
+   fold vs. replay. With the owner resolved: a notebook this target is actively deep-copying
+   (`status='copying'`) is left completely alone — neither its rows nor its `status` are touched,
+   counted in both `notebooks_delete_skipped` and `deletes_skipped_for_copying` — because the copy
+   is reading those rows right now and deleting out from under it would corrupt it; finish or
+   abandon the copy, then delete the notebook (by hand, or let a later incremental package's
+   replay catch it once the copy has settled). A notebook this target actually holds (not copying)
+   is instead tombstoned — flipped to `status='deleting'` and handed to the same delete-job queue
+   `DELETE /api/notebooks/{id}` uses (see "Notebook delete jobs" below) — and its individual
+   row-level delete entries are **not** replayed one by one; they are counted in
    `deletes_folded_into_notebook_deletion` instead, because the delete job is about to clear every
    table for that notebook anyway, so replaying thousands of keys first would be work the job
    immediately undoes. **A non-zero `deletes_folded_into_notebook_deletion` with the notebook's rows
    still present right after the import returns is the expected shape, not a bug** — those rows are
-   the delete job's to clear, not this import's; the import itself only queues the job. See
-   `sync status`'s "waiting on a delete job" count above and the "Notebook delete jobs" section
-   below for what finishes that cleanup, and why the application's own delete-job worker needs to
-   be running for it to happen.
+   the delete job's to clear, not this import's; the import itself only queues the job, and the
+   human-readable summary says so in a reassuring warning naming the notebook(s). **Watch for a
+   DIFFERENT warning that starts with `INCONSISTENT:` instead** — folding is decided in one phase
+   but the notebook is only actually tombstoned (or not) in a LATER one, so a notebook can be
+   folded on the assumption it would be tombstoned and then turn out NOT to have been (e.g. it
+   started `copying` in between). When that happens the rows folded for that notebook are queued
+   for nothing — not replayed, and not covered by any delete job — and the `INCONSISTENT:` warning
+   names exactly which notebook(s) this happened for and says to re-import the package once the
+   target has settled, or delete those notebooks by hand. See `sync status`'s "waiting on a delete
+   job" count above and the "Notebook delete jobs" section below for what finishes the ordinary
+   (non-`INCONSISTENT`) cleanup, and why the application's own delete-job worker needs to be
+   running for it to happen.
 
 Upgrading to schema v85/0065 resets every target's watermark to `captured=false` (the column is
 new; rows written before the upgrade predate it and have no change-log window behind them). The
@@ -858,10 +887,20 @@ heartbeat_at` — this is the evidence to check before deciding whether `--take-
 when present) unchanged from the row.
 
 `status` also prints, per `source_env` this environment has ever imported from, the current
-**chain head** — the `package_id`, `to_seq`, and `created_at` of the `done` package that no later
-`done` package has moved past (§8 of the design doc). This is the value the next incremental import's
-`base_package_id` must match; use it to tell which package in an incoming queue to import next,
-or to confirm a `--full` re-baseline actually reset the chain. It also prints how many mirrored
+**chain head(s)** — the `package_id`, `to_seq`, and `created_at` of every `done` package that no
+later `done` package has moved past (§8 of the design doc). `--json`'s `chain_heads[source_env]`
+is always a list, even when there is exactly one entry (the ordinary case). **It can legitimately
+hold more than one**: a full baseline and a `--notebook`-scoped (or gate-closed full) import
+recorded around it can tie on the same watermark position without either having moved past the
+other — neither of those two shapes advances the source's own watermark, so the chain rules never
+treat one as continuing the other. When that happens the human-readable summary prints every
+candidate and appends "链头不唯一；源端下一个窗口的 base 会是其中推进过水位的那个（to_seq 最大
+且 base 非空或 to_seq>0）" — read literally: among the tied candidates, the one the source will
+actually continue from next is whichever one is a real chain link (its own `base_package_id` is
+non-empty, or its `to_seq` reflects an actual log read), not the scoped/gate-closed one that
+happened to land on the same number. Use whichever entry matches that description as "the" chain
+head for deciding what to import next; the ordinary single-entry case needs no such reading. It
+also prints how many mirrored
 notebooks are **waiting on a delete job** — `status='deleting'` with a non-empty `sync_origin`
 but no `notebook_delete_jobs` row has finished yet. An incremental import that propagates a
 source-side notebook deletion only flips the notebook to `status='deleting'` and queues a
