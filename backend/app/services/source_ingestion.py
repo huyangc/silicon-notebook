@@ -1654,8 +1654,7 @@ class SourceIngestionService:
         # 抑制,不是崩溃检测。租约是**引用计数**——同一源可被并发处理(上传后台 job
         # 未完时 owner 又点 POST /sources/{id}/parse),每个 invocation 各加一次、
         # finally 各减一次,计数归零才真正撤租;否则先完成的 invocation 会撤掉仍在跑
-        # 的另一个的租约,令其在途缺 elements/chunks 被体检误报损坏。下面 try 的
-        # finally 覆盖所有出口做减。
+        # 的另一个的租约,令其在途缺 elements/chunks 被体检误报损坏;下面 try 的 finally 覆盖所有出口做减。
         with self._active_sources_lock:
             self._active_sources[source_id] = self._active_sources.get(source_id, 0) + 1
         source_parse_lock: threading.Lock | None = None
@@ -1696,6 +1695,7 @@ class SourceIngestionService:
                 delete_source_images=lambda: self.delete_source_images(source_id),
                 event_sink=self.event_log.emit,
                 trusted_proxy_origins=self._parser_trusted_proxy_origins(),
+                table_part_max_chars=self.settings.chunk_target_chars,
             )
             parsed = parser_execution.run()
             parsed_assets_pending = parser_execution.materialized

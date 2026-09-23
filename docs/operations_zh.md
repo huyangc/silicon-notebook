@@ -1030,6 +1030,8 @@ PDF 解析与 GPU 解耦：后端本身不引入 torch，只有在配置 MinerU 
 
 MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素（保留 LaTeX），表格→`table` 元素（HTML 存入 metadata），标题保留层级；PyMuPDF4LLM 的分页 Markdown 也会转换到同一套标题/段落/表格元素模型。Office 兜底同样映射到这套模型，且是分级的：DOCX 先试 mammoth（Word 样式→语义化 HTML→标题/段落/表格元素，保留 `table_html`），失败才用 python-docx 的拍平抽取；PPTX 先试 python-pptx（幻灯片文本、幻灯片表格、图表标题、组合形状、演讲者备注），失败才用原始幻灯片 XML 抽取——后者只看 `p:sp` 形状，幻灯片表格和图表此前整块丢失。前端用 KaTeX 渲染公式，并直接渲染 HTML 表格。MinerU 降级到本机库解析成功时，来源仍为 `extracted`；原始诊断只留在 pipeline log 和私有 source `error_message`，列表/详情仅返回 `parse_quality_warning`。该警告覆盖**兜底确实有损**的那几个后缀（`.pdf`、`.docx`、`.pptx`），DOCX 悄悄走 mammoth（或再往下的 python-docx）完成时同样可见，不再只有 PDF 才提示。工作簿（`.xlsx`、`.xlsm`）刻意排除：openpyxl 逐格读回原值，降级损失的是表格结构而不是内容；而部署的 MinerU 若根本不支持工作簿，这条警告会永远点亮、重新解析也消不掉。工作簿改由入口处一道更严的闸把关——MinerU 的非空产出会与工作簿自身的非空行数（纯本地、零模型、零网络的流式计数）对账，覆盖行数太少就整份丢弃、改用 openpyxl，因为 MinerU 按渲染页出表，可能整列整 sheet 丢行且不报错。本来就没有 MinerU 路径的格式（Markdown、CSV、纯文本）不会触发该警告——它们的常规解析器不是降级。来源详情会明确提示版面、公式、表格或 OCR 可能有差异，并给 owner「重新解析」「删除来源」操作；后续 MinerU 重解析成功会清掉警告。若某 PDF 仍解析出 0 文本，会给出扫描/图片型 PDF 提示而不是看起来“空成功”。桌面端的来源详情窗口使用常规关闭按钮并可拖动；窄屏继续使用固定弹窗布局，详情正文保持独立滚动。
 
+XLSX／DOCX／PPTX 来源（PDF 表格按渲染页天然有界，不受影响）里，`parsers.py` 会按行边界把超长表格切成多个 `table` 元素，同时受行数与字符数双重上限约束——字符上限直接就是 `chunking.py` 切普通文本用的同一个 `CHUNK_TARGET_CHARS`，不另设参数，改它只对下一次重新解析生效（精确上限见 [来源上传与解析](./product-and-api_zh.md#来源上传与解析)）。这就是为什么一张几百行的宽表不会再折成 `chunking.py` 从不切分的一个元素——旧行为会把靠后的行同时挤出向量嵌入与回答上下文。第 2 段起的检索文本前面会带上识别出的表头行（表头本身长过预算一半时不拼）；`metadata.table_group`／`table_part`／`table_parts` 供来源详情页把连续的分段合并显示回一张表，只出现一行表头。
+
 ### 单文件解析自检(`scripts/mineru_probe.py`)
 
 一个单文件诊断脚本，把一个文件(`.pdf`/`.docx`/`.pptx`)沿**应用上传时的同一条内联路径**发出去——即配置好的 MinerU 服务(`MINERU_MODE=http` → `/file_parse`，或 `MINERU_MODE=cli`)，再经同样的 `content_list` → `SourceElement` 映射——并报告能否解析。用于在把某个 MinerU 部署接入摄取前，确认它可达、且确实能解析给定文件。

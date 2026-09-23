@@ -145,6 +145,7 @@ def _parse_via_chain(
     file_name: str,
     client: FakeMineru,
     persist_image=None,
+    table_part_max_chars=None,
 ):
     result = ParserChainExecution(
         host=default_extension_runtime().parser_chain,
@@ -159,6 +160,7 @@ def _parse_via_chain(
         make_persist_image=lambda: persist_image,
         delete_source_images=lambda: None,
         event_sink=lambda _event: None,
+        table_part_max_chars=table_part_max_chars,
     ).run()
     client.last_error = result.mineru_error
     return list(result.elements)
@@ -1145,3 +1147,379 @@ def test_mineru_client_reaches_exactly_the_capable_suffixes(tmp_path, suffix):
     _parse_via_chain("s1", path, path.name, client)
 
     assert bool(client.calls) == (suffix in MINERU_CAPABLE_SUFFIXES)
+
+
+# -- 表头识别 _table_header_rows：宁缺毋滥 ------------------------------------
+
+
+def test_table_header_rows_detects_all_th_row():
+    from app.services.parsers import _table_header_rows, _top_level_table_rows
+
+    raw = "<table><tr><th>字段A</th><th>字段B</th></tr><tr><td>v1</td><td>v2</td></tr></table>"
+    rows = _top_level_table_rows(raw)
+    header = _table_header_rows(rows)
+    assert header == [rows[0]]
+
+
+def test_table_header_rows_skips_merged_title_row_then_detects_header():
+    from app.services.parsers import _table_header_rows, _top_level_table_rows
+
+    raw = (
+        "<table>"
+        '<tr><td colspan="3">合并标题</td></tr>'
+        "<tr><td>姓名</td><td>年龄</td><td>城市</td></tr>"
+        "<tr><td>张三</td><td>20</td><td>北京</td></tr>"
+        "</table>"
+    )
+    rows = _top_level_table_rows(raw)
+    header = _table_header_rows(rows)
+    assert header == [rows[1]]  # 标题行被跳过，真正的表头是第二行
+
+
+def test_table_header_rows_rejects_pure_numeric_first_row():
+    from app.services.parsers import _table_header_rows, _top_level_table_rows
+
+    raw = "<table><tr><td>2024-01</td><td>100.5</td></tr><tr><td>a</td><td>b</td></tr></table>"
+    rows = _top_level_table_rows(raw)
+    assert _table_header_rows(rows) == []
+
+
+def test_table_header_rows_rejects_duplicate_values_first_row():
+    from app.services.parsers import _table_header_rows, _top_level_table_rows
+
+    raw = "<table><tr><td>同名</td><td>同名</td></tr><tr><td>a</td><td>b</td></tr></table>"
+    rows = _top_level_table_rows(raw)
+    assert _table_header_rows(rows) == []
+
+
+def test_table_header_rows_rejects_rowspan_first_row():
+    from app.services.parsers import _table_header_rows, _top_level_table_rows
+
+    raw = (
+        "<table>"
+        '<tr><td rowspan="2">合并列</td><td>字段B</td></tr>'
+        "<tr><td>字段C</td></tr>"
+        "<tr><td>v1</td><td>v2</td></tr>"
+        "</table>"
+    )
+    rows = _top_level_table_rows(raw)
+    assert _table_header_rows(rows) == []
+
+
+def test_table_header_rows_rejects_overlong_cell():
+    from app.services.parsers import _table_header_rows, _top_level_table_rows
+
+    long_text = "很长的表头文字" * 10  # > 30 字
+    raw = f"<table><tr><td>{long_text}</td><td>字段B</td></tr><tr><td>a</td><td>b</td></tr></table>"
+    rows = _top_level_table_rows(raw)
+    assert _table_header_rows(rows) == []
+
+
+def test_table_header_rows_returns_empty_for_no_rows():
+    from app.services.parsers import _table_header_rows
+
+    assert _table_header_rows([]) == []
+
+
+# -- 切分后仍不影响 MinerU 工作簿覆盖率对账 -----------------------------------
+
+
+def test_xlsx_workbook_coverage_survives_split(tmp_path):
+    """40 行超过 `_FALLBACK_TABLE_ROWS_PER_ELEMENT`(30)，MinerU 分支据此把它切成
+    多个 table 元素；对账按元素逐个扫 table_html 求和，覆盖率不因切分而改变。"""
+    path = _make_xlsx_rows(tmp_path / "wide.xlsx", 40)      # 40 行 × 2 列
+    client = FakeMineru(content_list=_mineru_table(40))
+    els = _parse_via_chain("s1", path, "wide.xlsx", client)
+    assert all(e.metadata.get("parser") == "mineru" for e in els)  # 对账通过、被采信
+    assert client.last_error == ""
+
+    tables = [e for e in els if e.element_type == "table"]
+    assert len(tables) > 1
+    assert sum(e.metadata["table_html"].count("<tr>") for e in tables) == 40
+
+
+# -- PDF 表格按页天然有界，MinerU 分支不切分 ----------------------------------
+
+
+def test_mineru_pdf_large_table_is_not_split():
+    """label_prefix 默认 "PDF"：MinerU 按渲染页出表，每页一张表天然有界，不走
+    Office 来源那条切分路径，行为逐字不变。"""
+    rows = "".join(f"<tr><td>r{i}c0</td><td>r{i}c1</td></tr>" for i in range(65))
+    content_list = [
+        {
+            "type": "table",
+            "table_body": f"<table>{rows}</table>",
+            "table_caption": ["Table 1"],
+            "page_idx": 0,
+        }
+    ]
+    els = mineru_content_list_to_elements("s1", content_list)  # 默认 label_prefix="PDF"
+    tables = [e for e in els if e.element_type == "table"]
+    assert len(tables) == 1
+    assert "table_part" not in tables[0].metadata
+    assert "table_group" not in tables[0].metadata
+    assert tables[0].metadata["table_html"].count("<tr>") == 65
+
+
+# -- codex 阻塞项复核：预判式收段(B1)/settings 一路透传(B2)/空段过滤(B3) --------
+
+
+def test_split_table_into_elements_keeps_each_part_within_max_chars():
+    """B1：预判式收段——除单行本身就超限外，每段自己的文本都不能超过 max_chars。
+    旧的「加完行再判」会把越限的那一行也留在本段（实测 126 字/行 → 每段 630 字）。"""
+    from app.services.parsers import _html_table_to_text, _split_table_into_elements
+
+    rows = "".join(
+        f"<tr><td>row{i:03d}</td><td>{'x' * 20}</td></tr>" for i in range(40)
+    )
+    raw = f"<table>{rows}</table>"
+    results = _split_table_into_elements(raw, "T", {}, max_chars=200)
+    assert len(results) > 1
+    for _, _, metadata in results:
+        assert len(_html_table_to_text(metadata["table_html"])) <= 200
+
+
+def test_split_table_html_defers_char_split_while_rowspan_active():
+    """B1 + rowspan：字符预算催着收段，但活跃的竖向合并仍然优先——不能把合并覆盖
+    的行切到不同段。"""
+    from app.services.parsers import _split_table_html
+
+    rows = [
+        "<tr><td>h1</td><td>h2</td></tr>",
+        '<tr><td rowspan="3">merged</td><td>r1</td></tr>',
+        "<tr><td>r2</td></tr>",
+        "<tr><td>r3</td></tr>",
+        "<tr><td>a4</td><td>r4</td></tr>",
+    ]
+    raw = "<table>" + "".join(rows) + "</table>"
+    parts = _split_table_html(raw, rows_per_element=1000, max_chars=5)
+    assert any(p.count("<tr") == 3 and 'rowspan="3"' in p for p in parts)
+    assert sum(p.count("<tr") for p in parts) == 5  # 不丢行
+
+
+def test_split_table_into_elements_keeps_title_and_header_together_in_first_part():
+    """B1：标题行 + 表头行必须整体落在第 1 段，即便两者加起来已经超预算；后续段
+    不能重复表头（无论是 HTML 还是拼接进检索文本）。"""
+    from app.services.parsers import _split_table_into_elements
+
+    width = 15
+    title_text = "T" * 300  # 约 300 字的合并标题行
+    title_row = f'<tr><td colspan="{width}">{title_text}</td></tr>'
+    header_marker = "H00"
+    header_cells = "".join(f"<td>H{i:02d}{'x' * 24}</td>" for i in range(width))
+    header_row = f"<tr>{header_cells}</tr>"  # 约 400 字的表头行
+    data_row = lambda i: "<tr>" + "".join(
+        f"<td>d{i}_{c}</td>" for c in range(width)
+    ) + "</tr>"
+    data_rows = "".join(data_row(i) for i in range(10))
+    raw = f"<table>{title_row}{header_row}{data_rows}</table>"
+
+    results = _split_table_into_elements(raw, "T", {}, max_chars=900)
+    assert len(results) > 1
+    first_html = results[0][2]["table_html"]
+    assert title_text in first_html and header_marker in first_html
+    for _, text, metadata in results[1:]:
+        assert title_text not in metadata["table_html"]
+        assert header_marker not in metadata["table_html"]
+    assert header_marker in results[1][1]  # 后段检索文本带上了表头前缀
+
+
+def test_split_table_into_elements_drops_header_prefix_when_header_too_long():
+    """N5：表头本身比 max_chars 的一半还长时（宽表常见）不拼进后段文本，否则大半
+    预算都用来重复表头。HTML 层面表头本来就只在第 1 段，这里只影响检索文本前缀。"""
+    from app.services.parsers import _split_table_into_elements
+
+    width = 10
+    marker = "H00" + "y" * 22
+    header_cells = "".join(f"<td>H{i:02d}{'y' * 22}</td>" for i in range(width))
+    header = f"<tr>{header_cells}</tr>"
+    data_row = lambda i: "<tr>" + "".join(
+        f"<td>d{i}_{c}</td>" for c in range(width)
+    ) + "</tr>"
+    data_rows = "".join(data_row(i) for i in range(8))
+    raw = f"<table>{header}{data_rows}</table>"
+
+    results = _split_table_into_elements(raw, "T", {}, max_chars=400)
+    assert len(results) > 1
+    assert marker in results[0][2]["table_html"]
+    for _, text, metadata in results[1:]:
+        assert marker not in text
+        assert marker not in metadata["table_html"]
+
+
+def test_split_table_into_elements_drops_trailing_empty_rows_and_renumbers_parts():
+    """B3：末尾一大片全空行必须整段消失，不能只留一个 caption/表头兜底的空壳
+    元素；剩下的段 table_part 必须重新连续编号（前端要求连续递增才合并）。"""
+    from app.services.parsers import _html_table_to_text, _split_table_into_elements
+
+    header = "<tr><td>字段A</td><td>字段B</td></tr>"
+    data_rows = "".join(
+        f"<tr><td>d{i}</td><td>v{i}</td></tr>" for i in range(50)
+    )
+    blank_rows = "<tr><td></td><td></td></tr>" * 35
+    raw = f"<table>{header}{data_rows}{blank_rows}</table>"
+
+    results = _split_table_into_elements(raw, "T", {}, max_chars=100_000)
+    assert len(results) >= 2
+    part_numbers = [metadata["table_part"] for _, _, metadata in results]
+    assert part_numbers == list(range(1, len(results) + 1))
+    assert all(metadata["table_parts"] == len(results) for _, _, metadata in results)
+    for _, _, metadata in results:
+        assert _html_table_to_text(metadata["table_html"])  # 没有空壳段
+
+
+def test_split_table_into_elements_drops_middle_empty_segment_and_renumbers_parts():
+    """B3：中间一整段全空（不含表头场景）同样要整段消失，前后两段重新编号为
+    1、2，不留编号缺口。"""
+    from app.services.parsers import _split_table_into_elements
+
+    # 纯数字首行，避免被误判成表头，专门覆盖“无表头”场景。
+    lead = "".join(f"<tr><td>{i}</td><td>{i * 2}</td></tr>" for i in range(30))
+    blank = "<tr><td></td><td></td></tr>" * 30
+    tail = "".join(f"<tr><td>{i}</td><td>{i * 2}</td></tr>" for i in range(30, 60))
+    raw = f"<table>{lead}{blank}{tail}</table>"
+
+    results = _split_table_into_elements(raw, "T", {}, max_chars=100_000)
+    assert len(results) == 2
+    assert [metadata["table_part"] for _, _, metadata in results] == [1, 2]
+    assert all(metadata["table_parts"] == 2 for _, _, metadata in results)
+
+
+def test_split_table_html_refuses_to_split_on_unclosed_trailing_tr():
+    """N4：MinerU 尾部 `<tr>` 缺 `</tr>` 时，`_top_level_table_rows` 会悄悄漏掉这一
+    行；切分前校验行数与顶层 `<tr` 开标签数一致，不一致就整表原样一段，宁可不切
+    也不丢行。"""
+    from app.services.parsers import _split_table_html
+
+    rows = "".join(f"<tr><td>r{i}</td><td>v{i}</td></tr>" for i in range(40))
+    unclosed_tail = "<tr><td>LOST</td>"  # 缺 </tr>
+    raw = f"<table>{rows}{unclosed_tail}</table>"
+
+    parts = _split_table_html(raw, max_chars=100_000)
+    assert parts == [raw]
+    assert "LOST" in parts[0]
+
+
+def test_parser_chain_execution_table_part_max_chars_changes_split_granularity(
+    tmp_path,
+):
+    """B2：字符上限必须由调用方一路透传到 `_split_table_into_elements`，不是
+    模块级常量——同一份内容，传不同的 `table_part_max_chars` 切出不同的段数。"""
+    rows_count, cols = 20, 5
+
+    def _cell(row: int, col: int) -> str:
+        return f"row{row:02d}col{col}_" + "z" * 10
+
+    body = "".join(
+        "<tr>" + "".join(f"<td>{_cell(r, c)}</td>" for c in range(cols)) + "</tr>"
+        for r in range(rows_count)
+    )
+    content_list = [
+        {
+            "type": "table",
+            "table_body": f"<table>{body}</table>",
+            "table_caption": [],
+            "page_idx": 0,
+        }
+    ]
+    path = _make_xlsx_rows(tmp_path / "wide.xlsx", rows_count, cols=cols)
+
+    tight = _parse_via_chain(
+        "s1",
+        path,
+        "wide.xlsx",
+        FakeMineru(content_list=content_list),
+        table_part_max_chars=200,
+    )
+    loose = _parse_via_chain(
+        "s1",
+        path,
+        "wide.xlsx",
+        FakeMineru(content_list=content_list),
+        table_part_max_chars=4000,
+    )
+    tight_tables = [e for e in tight if e.element_type == "table"]
+    loose_tables = [e for e in loose if e.element_type == "table"]
+    assert all(e.metadata.get("parser") == "mineru" for e in tight + loose)
+    assert len(loose_tables) == 1          # 20 行 × 每格约 16 字远小于 4000，不切
+    assert len(tight_tables) > len(loose_tables)
+
+
+# -- codex 第二轮评审复核：分隔符口径(5)/单段兜底保真(6)/label 后缀契约 --------
+
+
+def test_split_table_html_early_return_accounts_for_row_separators():
+    """评审 5：提前返回(不切)的判断口径必须跟真正收段时一致——按拼接后的文本
+    长度（含 " ; " 分隔符）比较，不能只加各行文本本身。30 行 × 19 字，单独相加
+    570 <= 600 不会触发切分，但加上 29 个分隔符共 657 > 600，应该切。"""
+    from app.services.parsers import _split_table_html
+
+    rows = "".join(f"<tr><td>{'x' * 19}</td></tr>" for _ in range(30))
+    raw = f"<table>{rows}</table>"
+    parts = _split_table_html(raw, max_chars=600)
+    assert len(parts) > 1
+    assert sum(p.count("<tr") for p in parts) == 30  # 不丢行
+
+
+def test_split_table_into_elements_keeps_caption_only_element_when_body_is_empty():
+    """评审 6：B3 的空段过滤只发生在真的被切成多段之后。表体为空、只靠 caption
+    撑出一个元素这种边缘形态（未被切分)必须逐字保留——不能因为“正文为空”被
+    误伤成 0 个元素。"""
+    from app.services.parsers import _split_table_into_elements
+
+    results = _split_table_into_elements(
+        "<table><tr><td></td></tr></table>",
+        "XLSX p.1 table 1",
+        {"parser": "mineru"},
+        prefix_text="Sheet1",
+        max_chars=600,
+    )
+    assert len(results) == 1
+    label, text, metadata = results[0]
+    assert label == "XLSX p.1 table 1"
+    assert text == "Sheet1"
+    assert "table_part" not in metadata
+    assert "table_group" not in metadata
+
+
+def test_mineru_xlsx_empty_table_body_with_caption_still_produces_one_element():
+    """评审 6 端到端：MinerU 给出表体为空、只有 caption 的表格块时（Office 来源
+    走切分分支），仍要产出 1 个元素，不能因为切分层的空段过滤把它连带清空。"""
+    from app.services.parsers import mineru_content_list_to_elements
+
+    content_list = [
+        {
+            "type": "table",
+            "table_body": "",
+            "table_caption": ["Sheet1"],
+            "page_idx": 0,
+        }
+    ]
+    elements = mineru_content_list_to_elements("s1", content_list, label_prefix="XLSX")
+    tables = [e for e in elements if e.element_type == "table"]
+    assert len(tables) == 1
+    assert tables[0].text == "Sheet1"
+    assert "table_part" not in tables[0].metadata
+
+
+def test_split_table_into_elements_label_suffix_is_only_added_when_split():
+    """collection_catalog 的计数/枚举靠 label 的 " part {k}" 后缀判断续段
+    （不读 metadata）；这条钉住生成端的契约：真正切分成多段时每段 label 都以
+    " part {k}" 结尾，没切分时 label 逐字不带后缀。"""
+    from app.services.parsers import _split_table_into_elements
+
+    small = _split_table_into_elements(
+        "<table><tr><td>a</td></tr></table>", "T", {}, max_chars=600
+    )
+    assert len(small) == 1
+    assert small[0][0] == "T"
+    assert not small[0][0].endswith(tuple(f" part {n}" for n in range(1, 10)))
+
+    rows = "".join(f"<tr><td>row{i:03d}</td></tr>" for i in range(40))
+    big = _split_table_into_elements(
+        f"<table>{rows}</table>", "T", {}, max_chars=100_000
+    )
+    assert len(big) > 1
+    for index, (label, _text, metadata) in enumerate(big, start=1):
+        assert label == f"T part {index}"
+        assert metadata["table_part"] == index

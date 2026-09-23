@@ -773,6 +773,10 @@ def test_element_count_query_is_served_by_the_typed_index(repo):
 
     捕获的是**实际执行**的语句(sqlite3 trace callback 给的是参数展开后的
     SQL),不是测试里另抄一份查询文本——所以查询形状一旦漂到全表扫,这条会红。
+
+    ``table`` 的 part≥2 续段过滤(codex N3)要读 `metadata`,折进同一条语句会让
+    另外三个白名单类型也被迫做行查找,覆盖索引计划就没了；因此拆成两条语句：
+    非 table 三种类型仍是纯覆盖索引扫描,table 单独一条走「索引定位 + 行查找」。
     """
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     _add_source(repo, notebook.id, "s1", [("formula", 2), ("paragraph", 3)])
@@ -786,18 +790,134 @@ def test_element_count_query_is_served_by_the_typed_index(repo):
         finally:
             db.set_trace_callback(None)
         executed = [item for item in statements if "source_elements" in item]
-        assert len(executed) == 1
-        plan = " ".join(
-            str(row[3])
-            for row in db.execute("EXPLAIN QUERY PLAN " + executed[0]).fetchall()
-        )
+        assert len(executed) == 2
+        plans = [
+            " ".join(
+                str(row[3])
+                for row in db.execute("EXPLAIN QUERY PLAN " + statement).fetchall()
+            )
+            for statement in executed
+        ]
     # 逐字钉住覆盖索引与两段键:少了 element_type 段(白名单被去掉、或索引退回
-    # 单列 source_id)就不是这条计划,守卫当场红。
+    # 单列 source_id)就不是这条计划,守卫当场红。非 table 那条必须仍是覆盖索引。
+    non_table_plan = next(p for p in plans if "COVERING INDEX" in p)
+    table_plan = next(p for p in plans if "COVERING INDEX" not in p)
     assert (
         "USING COVERING INDEX idx_source_elements_source_type "
         "(source_id=? AND element_type=?)"
-    ) in plan, plan
-    assert "SCAN source_elements" not in plan, plan
+    ) in non_table_plan, non_table_plan
+    assert (
+        "USING INDEX idx_source_elements_source_type "
+        "(source_id=? AND element_type=?)"
+    ) in table_plan, table_plan
+    assert "SCAN source_elements" not in non_table_plan, non_table_plan
+    assert "SCAN source_elements" not in table_plan, table_plan
+
+
+def test_element_type_count_rows_counts_a_split_table_once(repo):
+    """codex N3:一张被解析层切成多段的超长表(location_label 带 " part N" 后缀)
+    在计数里只能算 1 张表,不能按物理段数虚增(400 行 sheet 曾从 1 张变成 ~100
+    张)。判定改走 `location_label` 后缀(不读 metadata,codex 评审第二轮 阻塞
+    1+2:PG 上 metadata 是会被 TOAST 的 JSONB,读它做过滤等于逼每行 detoast 整份
+    `table_html`)。"""
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("s1", notebook.id, "t", "xlsx", "extracted", "extracted", NOW, NOW),
+        )
+        # 一张表切成 3 段(label 带 part 1..3 后缀)+ 一张完全没切过的旧表(label
+        # 无 part 后缀)。metadata 留空,证明判定确实不依赖它。
+        rows = [
+            ("el-1", "table", "XLSX p.1 table 1 part 1"),
+            ("el-2", "table", "XLSX p.1 table 1 part 2"),
+            ("el-3", "table", "XLSX p.1 table 1 part 3"),
+            ("el-4", "table", "XLSX p.1 table 2"),
+            ("el-5", "formula", "XLSX p.1 formula 1"),
+        ]
+        for element_id, element_type, location_label in rows:
+            db.execute(
+                "INSERT INTO source_elements (id,source_id,element_type,"
+                "location_label,text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+                (element_id, "s1", element_type, location_label, "body", "{}", NOW),
+            )
+    with repo._connect() as db:
+        counts = repo._runtime.source_store.element_type_count_rows(
+            db, ["s1"], ENUMERABLE_ELEMENT_KINDS
+        )
+    assert sorted(counts) == [("s1", "formula", 1), ("s1", "table", 2)]  # 2 张表,不是 4
+
+
+def test_element_page_rows_skips_table_continuation_parts(repo):
+    """codex N3:枚举(浏览列表)同样只吐每张表的第 1 段,不把物理分段当独立表；
+    判定同样只看 `location_label` 后缀。"""
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("s1", notebook.id, "t", "xlsx", "extracted", "extracted", NOW, NOW),
+        )
+        labels = (
+            "XLSX p.1 table 1 part 1",
+            "XLSX p.1 table 1 part 2",
+            "XLSX p.1 table 1 part 3",
+            "XLSX p.1 table 2",
+        )
+        for index, label in enumerate(labels, start=1):
+            db.execute(
+                "INSERT INTO source_elements (id,source_id,element_type,"
+                "location_label,text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+                (f"el-{index}", "s1", "table", label, "body", "{}",
+                 f"2026-07-28T00:00:0{index}+08:00"),
+            )
+    with repo._connect() as db:
+        rows = repo._runtime.source_store.element_page_rows(
+            db, "s1", "table", None, 100
+        )
+    assert [row["id"] for row in rows] == ["el-1", "el-4"]  # 段 2/3 被跳过
+
+
+@pytest.mark.parametrize(
+    "location_label, is_continuation",
+    [
+        ("XLSX p.1 table 1", False),          # 从未切分
+        ("XLSX p.1 table 1 part 1", False),   # 第 1 段
+        ("XLSX p.1 table 1 part 2", True),
+        ("XLSX p.1 table 1 part 9", True),
+        ("XLSX p.1 table 1 part 10", True),   # 两位数续段号
+        ("XLSX p.1 table 1 part 11", True),
+        ("XLSX p.1 table 1 part 12", True),
+        ("DOCX table 3", False),
+        ("DOCX table 3 part 1", False),
+        ("DOCX table 3 part 2", True),
+        ("PPTX slide 1 table 5 part 100", True),  # 三位数续段号
+    ],
+)
+def test_table_continuation_glob_predicate_matches_label_convention(
+    repo, location_label, is_continuation
+):
+    """codex 评审第二轮 守卫 3:直接钉住 GLOB 判定本身——两位数/三位数续段号要能
+    识别成续段,part 1 与完全没切过的表都不能被误伤。"""
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("s1", notebook.id, "t", "xlsx", "extracted", "extracted", NOW, NOW),
+        )
+        db.execute(
+            "INSERT INTO source_elements (id,source_id,element_type,"
+            "location_label,text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("el-1", "s1", "table", location_label, "body", "{}", NOW),
+        )
+    with repo._connect() as db:
+        counts = repo._runtime.source_store.element_type_count_rows(
+            db, ["s1"], ("table",)
+        )
+    expected = [] if is_continuation else [("s1", "table", 1)]
+    assert counts == expected
 
 
 def test_source_signal_query_is_index_seeked(repo):

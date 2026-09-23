@@ -78,6 +78,12 @@ Silicon Notebook 是团队知识工作区，后端使用 FastAPI，前端使用 
 
 PDF／DOCX／PPTX 的有损回退设置 `parse_quality_warning`，来源仍为 `extracted`；工作簿不报此警告。MinerU 的非空工作簿结果（含云端上传路径）必须同时覆盖原工作簿非空行与非空格的 **0.8**（`parsers.py` 的 `MINERU_WORKBOOK_MIN_ROW_COVERAGE`）；非表格文本最多贡献一行一格，图片两者均不贡献。任一维度不达标则整份结果回退 openpyxl；仅在验收后保存图片资产。
 
+XLSX／DOCX／PPTX 来源（PDF 表格按渲染页天然有界，不受影响）里按行数（≤30 行）与字符数双重上限切分超长表格：字符上限直接取 `CHUNK_TARGET_CHARS`（与普通文本分块目标同源，不另设参数），先到者收段，单行本身超限也只落一段。识别出的标题/表头行整体绝不会被切开——即便因此让第 1 段超出字符上限，也保证它们完整落在第 1 段。切出的后段检索文本前面会带上识别出的表头行纯文本，但表头本身长过预算一半时不拼（避免宽表的表头占满整段预算）。正文为空的段（如末尾一整片空行）直接丢弃、不产出只剩表头/caption 的空壳元素，剩余的段重新连续编号，`table_part` 从 1 开始不留缺口。`CHUNK_TARGET_CHARS` 应明显小于 `EMBED_TRUNCATE_CHARS`，否则带表头的分段仍可能在进嵌入模型前被截断。
+
+每个被切出的表格元素带 `metadata.table_group`（同一张表各段相同，取不带 part 后缀的标签）、`metadata.table_part`（从 1 开始连续编号）、`metadata.table_parts`（过滤空段之后的总段数）；只有第 1 段的 `table_html` 含表头行，后段的 `table_html` 只有自己那些行。来源详情页把 `table_group` 相同、`table_part` 严格递增且连续的一串元素合并显示为一张表（只出现一行表头）。已入库文件需重新解析才会按新粒度切分。
+
+已知取舍：集合地图的表格计数与智能体枚举工具对一张被切分的表只按 1 张计/枚举（只算第 1 段），不按物理段数——续段的判定看 `location_label` 是否以「 part N」（N≥2）结尾，与 `_split_table_into_elements` 生成分段标签用的是同一套约定。枚举同样只返回第 1 段；后续段不能被单独浏览到，但仍可通过普通的检索召回与引用触达。
+
 MinerU 图片在来源内联展示，图注可搜索。Markdown 图片的 `alt` 写入 `metadata.caption` 并进入 chunk 检索；普通路径图片既无 alt 又无合格描述时不产生元素。
 
 独占段落的 `data:image/{png,jpeg,gif,webp};base64,...` 图片可经来源图片资产端口保存，svg／bmp／avif 等 MIME 不接受。任何位置（含混合段落、列表、标题、表格）里的 data URI 字面量均只保留 alt，绝不进入元素元数据；只有独占段落的图片会落资产，其余位置仅留 alt。持久化共用 `MINERU_MAX_IMAGE_BYTES`（默认 5 MB）、`MINERU_MAX_IMAGES_PER_SOURCE`（默认 200）及 `MINERU_RETURN_IMAGES`（false 禁止所有来源保存图片）。无 alt 的 data 图片若无法保存且无描述，不产生元素。

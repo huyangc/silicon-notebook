@@ -1851,14 +1851,25 @@ class SourceStorePort(Protocol):
         ``WHERE source_id IN (...) AND element_type IN (...)
         GROUP BY source_id, element_type``, which
         ``idx_source_elements_source_type`` (source_id, element_type,
-        created_at, id) covers — SQLite resolves it as a covering index search
-        on both key columns.  PostgreSQL's planner keeps the choice (an index
-        or bitmap scan by selectivity); what the contract fixes is that the
-        type restriction stays IN THE QUERY, never a post-filter in Python,
-        so a source's prose elements are never read to count its formulas.
-        Both id lists are deduplicated and batched by the adapter, so callers
-        may pass a whole notebook's source list; types absent from a source
-        simply do not appear in the result.
+        created_at, id) covers.  For every requested type EXCEPT ``table``,
+        both adapters resolve this as a covering index search on the first
+        two key columns (no heap/row fetch). ``table`` is the one exception:
+        a ``table`` element whose ``location_label`` ends in " part N" (N>=2)
+        is a later retrieval segment of an overlong table that parsing split
+        (``parsers.py::_split_table_into_elements``) and must count once, not
+        once per segment — evaluating that predicate reads ``location_label``,
+        so ``table`` counts are answered by a SEPARATE statement (still index
+        seek plus a cheap heap fetch, never a table scan, and deliberately
+        never a ``metadata`` read: that column is JSONB/TOASTed and holds the
+        full rendered table HTML, so filtering on it would force a decompress
+        per candidate row). PostgreSQL's planner keeps the access-path choice
+        for the non-table statement (an index or bitmap scan by selectivity);
+        what the contract fixes is that the type restriction stays IN THE
+        QUERY, never a post-filter in Python, so a source's prose elements
+        are never read to count its formulas. Both id lists are deduplicated
+        and batched by the adapter, so callers may pass a whole notebook's
+        source list; types absent from a source simply do not appear in the
+        result.
         """
         ...
     def element_page_rows(
@@ -1884,6 +1895,15 @@ class SourceStorePort(Protocol):
         O(limit) regardless of how many prose elements the source holds and no
         ORDER BY sort is materialized.  Rows carry id / source_id /
         element_type / location_label / text / created_at / asset_id.
+
+        For ``element_type == "table"``, rows whose ``location_label`` ends
+        in " part N" (N>=2) — later segments of an overlong table split by
+        ``parsers.py::_split_table_into_elements`` — are excluded so
+        enumeration returns one row per logical table, not one per physical
+        segment.  This still costs a heap fetch of ``location_label`` per
+        candidate (not a covering index scan) but never touches ``metadata``,
+        which is where the same column's JSONB/TOAST cost would otherwise
+        land.
 
         ``asset_id`` is projected out of ``metadata`` IN SQL, never by
         selecting the column and picking a key in Python: a table element's

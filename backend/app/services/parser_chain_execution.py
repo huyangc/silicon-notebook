@@ -143,6 +143,7 @@ class ParserChainExecution:
         delete_source_images: Callable[[], None],
         event_sink: Callable[[dict[str, object]], None],
         trusted_proxy_origins: "frozenset[str] | None" = None,
+        table_part_max_chars: "int | None" = None,
     ) -> None:
         self.host = host
         self.source_id = source_id
@@ -158,6 +159,10 @@ class ParserChainExecution:
         # 部署配置的受信代理 origin 白名单(source_ingestion.process_source 注入,
         # 已归一);只影响 URL 来源在 _local_path 的下载是否豁免公网地址检查。
         self._trusted_proxy_origins = frozenset(trusted_proxy_origins or ())
+        # Office 来源超长表格分段的字符上限(source_ingestion.process_source 传
+        # self.settings.chunk_target_chars,与普通文本分块目标同源);None 时
+        # parsers.py 的 _split_table_into_elements 自行兜底 get_settings()。
+        self._table_part_max_chars = table_part_max_chars
         self.cancellation = _NeverCancelled()
         suffix = Path(file_name).suffix.lower() or (".pdf" if source_kind == "url" else "")
         self.source = ParserSourceDescriptor(source_kind, suffix)
@@ -293,6 +298,7 @@ class ParserChainExecution:
                         self.source_id,
                         content_list,
                         label_prefix=mineru_label_prefix(self.file_name),
+                        table_part_max_chars=self._table_part_max_chars,
                     )
                 )
                 if not elements:
@@ -386,6 +392,7 @@ class ParserChainExecution:
                     str(self._local_path()),
                     effective_file_name or "source.pdf",
                     persist_image=persist_image,
+                    table_part_max_chars=self._table_part_max_chars,
                 )
                 if self._attempted_cloud:
                     parser_mode = "python_pdf_fallback_after_cloud_error"
@@ -408,6 +415,7 @@ class ParserChainExecution:
                     label_prefix=mineru_label_prefix(self.file_name),
                     images=candidate.images,
                     persist_image=persist_image,
+                    table_part_max_chars=self._table_part_max_chars,
                 )
                 if not elements:
                     self._mineru_error = (

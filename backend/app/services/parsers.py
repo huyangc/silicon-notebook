@@ -98,12 +98,17 @@ def parse_builtin_source_file(
     file_path: str,
     file_name: str,
     persist_image: Any = None,
+    table_part_max_chars: int | None = None,
 ) -> List[SourceElement]:
     """Dispatch only to the guaranteed local parser surface.
 
     Optional MinerU selection belongs exclusively to the parser ProviderChain.
     Keeping this function provider-free prevents a builtin fallback from
     re-entering an earlier link and issuing a second remote request.
+
+    `table_part_max_chars` threads through to the DOCX/PPTX table-splitting
+    branches (codex B2); `None` falls back to `get_settings().chunk_target_chars`
+    there.
     """
     parser_id = builtin_parser_id(file_name)
     if parser_id == "markdown":
@@ -113,9 +118,13 @@ def parse_builtin_source_file(
             source_id, Path(file_path), persist_image=persist_image
         )
     if parser_id == "docx":
-        return parse_docx_mammoth(source_id, Path(file_path))
+        return parse_docx_mammoth(
+            source_id, Path(file_path), table_part_max_chars=table_part_max_chars
+        )
     if parser_id == "pptx":
-        return parse_pptx_pythonpptx(source_id, Path(file_path))
+        return parse_pptx_pythonpptx(
+            source_id, Path(file_path), table_part_max_chars=table_part_max_chars
+        )
     if parser_id == "pdf":
         return parse_pdf_python(source_id, Path(file_path))
     if parser_id == "csv":
@@ -967,7 +976,9 @@ def _mammoth_html_blocks(markup: str) -> List[tuple[str, int, str, str]]:
     return parser.blocks
 
 
-def parse_docx_mammoth(source_id: str, path: Path) -> List[SourceElement]:
+def parse_docx_mammoth(
+    source_id: str, path: Path, table_part_max_chars: int | None = None
+) -> List[SourceElement]:
     """Semantic DOCX fallback: mammoth HTML → structured elements.
 
     python-docx (parse_docx_basic) walks paragraphs as flat `.text`, losing
@@ -975,6 +986,10 @@ def parse_docx_mammoth(source_id: str, path: Path) -> List[SourceElement]:
     onto semantic HTML, which we fold into the repo's element vocabulary
     (heading/paragraph/table). Its markdown writer is deprecated and has no
     table support, hence the HTML route.
+
+    `table_part_max_chars` threads through to `_split_table_into_elements`
+    (codex B2): the caller that holds `Settings` passes `chunk_target_chars`
+    explicitly; `None` falls back to `get_settings()` there.
 
     Deliberately fail-open: a missing wheel, a conversion error or an empty
     result falls through to parse_docx_basic, which is the last resort.
@@ -1001,22 +1016,14 @@ def parse_docx_mammoth(source_id: str, path: Path) -> List[SourceElement]:
         for kind, level, text, raw in blocks:
             counters[kind] = counters.get(kind, 0) + 1
             if kind == "table" and raw:
-                parts = _split_table_html(raw)
-                for part_index, part in enumerate(parts, start=1):
-                    part_text = _html_table_to_text(part)
-                    if not part_text:
-                        continue
-                    label = f"DOCX table {counters[kind]}"
-                    metadata: Dict[str, Any] = {
-                        "parser": "mammoth",
-                        "table_index": counters[kind],
-                        "table_html": part,
-                    }
-                    if len(parts) > 1:
-                        label = f"{label} part {part_index}"
-                        metadata["table_part"] = part_index
-                        metadata["table_parts"] = len(parts)
-                    elements.append(_element(source_id, kind, label, part_text, metadata))
+                base_metadata = {"parser": "mammoth", "table_index": counters[kind]}
+                for label, text, metadata in _split_table_into_elements(
+                    raw,
+                    f"DOCX table {counters[kind]}",
+                    base_metadata,
+                    max_chars=table_part_max_chars,
+                ):
+                    elements.append(_element(source_id, kind, label, text, metadata))
                 continue
             metadata = {"parser": "mammoth", f"{kind}_index": counters[kind]}
             if kind == "heading":
@@ -1145,7 +1152,9 @@ def _pptx_table_html(table: Any) -> str:
     return f"<table>{''.join(rows)}</table>" if rows else ""
 
 
-def parse_pptx_pythonpptx(source_id: str, path: Path) -> List[SourceElement]:
+def parse_pptx_pythonpptx(
+    source_id: str, path: Path, table_part_max_chars: int | None = None
+) -> List[SourceElement]:
     """Structured PPTX fallback: python-pptx shapes, tables, charts and notes.
 
     The raw-XML extractor (parse_pptx_basic) only walks `p:sp` shapes, so slide
@@ -1155,6 +1164,9 @@ def parse_pptx_pythonpptx(source_id: str, path: Path) -> List[SourceElement]:
     Pictures are skipped on purpose: this parser never persists image assets
     (the file may be a short-lived downloaded temp file), and python-pptx 1.0
     has no public alt-text accessor worth reaching into private XML for.
+
+    `table_part_max_chars` threads through to `_split_table_into_elements`
+    (codex B2); see `parse_docx_mammoth` for the same contract.
 
     Deliberately fail-open: missing wheel, unreadable package or zero elements
     falls through to parse_pptx_basic.
@@ -1175,23 +1187,18 @@ def parse_pptx_pythonpptx(source_id: str, path: Path) -> List[SourceElement]:
                 try:
                     if getattr(shape, "has_table", False):
                         html = _pptx_table_html(shape.table)
-                        parts = _split_table_html(html)
                         table_index += 1
-                        for part_index, part in enumerate(parts, start=1):
-                            text = _html_table_to_text(part)
-                            if not text:
-                                continue
-                            label = f"PPTX slide {slide_index} table {table_index}"
-                            metadata: Dict[str, Any] = {
-                                "parser": "python-pptx",
-                                "slide_number": slide_index,
-                                "table_index": table_index,
-                                "table_html": part,
-                            }
-                            if len(parts) > 1:
-                                label = f"{label} part {part_index}"
-                                metadata["table_part"] = part_index
-                                metadata["table_parts"] = len(parts)
+                        base_metadata = {
+                            "parser": "python-pptx",
+                            "slide_number": slide_index,
+                            "table_index": table_index,
+                        }
+                        for label, text, metadata in _split_table_into_elements(
+                            html,
+                            f"PPTX slide {slide_index} table {table_index}",
+                            base_metadata,
+                            max_chars=table_part_max_chars,
+                        ):
                             elements.append(
                                 _element(source_id, "table", label, text, metadata)
                             )
@@ -1508,12 +1515,17 @@ def mineru_content_list_to_elements(
     label_prefix: str = "PDF",
     images: Dict[str, bytes] | None = None,
     persist_image: Any = None,
+    table_part_max_chars: int | None = None,
 ) -> List[SourceElement]:
     """Map MinerU's content_list blocks into structured SourceElements.
 
     Formulas are kept as LaTeX (element_type "formula"), tables keep their HTML
     in metadata while exposing a flattened text body, and headings keep their
     level. page_idx is 0-based in MinerU; we display 1-based page numbers.
+
+    `table_part_max_chars` threads through to `_split_table_into_elements` for
+    the Office-source table-splitting branch below (codex B2); `None` falls
+    back to `get_settings().chunk_target_chars` there.
     """
     elements: List[SourceElement] = []
     counters: Dict[int, int] = {}
@@ -1561,6 +1573,23 @@ def mineru_content_list_to_elements(
         elif block_type == "table":
             html = str(block.get("table_body", ""))
             caption = " ".join(_as_list(block.get("table_caption")))
+            base_metadata = {
+                "parser": "mineru",
+                "page_number": page,
+                "caption": caption,
+                "source_format": label_prefix.lower(),
+            }
+            # 只对不按渲染页分表的 Office 来源切分：PDF 每页天然有界，行为逐字不变。
+            if label_prefix in ("XLSX", "DOCX", "PPTX"):
+                for label, text, metadata in _split_table_into_elements(
+                    html,
+                    f"{label_prefix} p.{page} table {ordinal}",
+                    base_metadata,
+                    prefix_text=caption,
+                    max_chars=table_part_max_chars,
+                ):
+                    elements.append(_element(source_id, "table", label, text, metadata))
+                continue
             body_text = _html_table_to_text(html)
             text = " ".join(part for part in (caption, body_text) if part).strip()
             if not text:
@@ -1571,13 +1600,7 @@ def mineru_content_list_to_elements(
                     "table",
                     f"{label_prefix} p.{page} table {ordinal}",
                     text,
-                    {
-                        "parser": "mineru",
-                        "page_number": page,
-                        "table_html": html,
-                        "caption": caption,
-                        "source_format": label_prefix.lower(),
-                    },
+                    {**base_metadata, "table_html": html},
                 )
             )
         elif block_type == "image":
@@ -1679,7 +1702,29 @@ def _row_max_rowspan(row: str) -> int:
     return max(spans, default=1)
 
 
-def _split_table_html(raw: str, rows_per_element: int = _FALLBACK_TABLE_ROWS_PER_ELEMENT) -> List[str]:
+def _top_level_tr_open_count(raw: str) -> int:
+    """`raw` 里深度为 1 的 `<tr` 开标签个数（口径与 `_top_level_table_rows` 一致）。
+
+    用来校验拆出的行数没有漏行：MinerU 偶发尾部 `<tr>` 缺失 `</tr>`，
+    `_top_level_table_rows` 只认闭合标签会悄悄丢掉这一行（codex N4）。"""
+    depth = 0
+    count = 0
+    for match in re.finditer(r"(?i)<(/?)(table|tr)\b[^>]*>", raw):
+        closing, tag = match.group(1), match.group(2).lower()
+        if tag == "table":
+            depth += 1 if not closing else -1
+            continue
+        if depth == 1 and not closing:
+            count += 1
+    return count
+
+
+def _split_table_html(
+    raw: str,
+    rows_per_element: int = _FALLBACK_TABLE_ROWS_PER_ELEMENT,
+    max_chars: int | None = None,
+    protected_rows: int = 0,
+) -> List[str]:
     """按 <tr> 边界把超长表格 HTML 切成多段，每段仍是良构的 <table>。
 
     行数不超限时**原样返回**（单段、逐字不变），普通表格零行为变化。需要切分时每段
@@ -1687,30 +1732,226 @@ def _split_table_html(raw: str, rows_per_element: int = _FALLBACK_TABLE_ROWS_PER
     表头语义真正所在的 <th> 单元格在行里、且 thead 的行本来就排在最前，因此自然归
     属首段。
 
+    `max_chars` 给了就再加一条收段条件，且是**预判式**的：每加入一行前先判断
+    「加入它会不会让本段文本（`_html_table_to_text` 口径，含行间 " ; " 分隔符）
+    超过预算」，会超就在这一行之前收段——而不是加完超限的行再回头判（那样会把
+    越限的那一行也留在本段里，段长失控，见 codex B1）。单行本身已经超预算也只
+    落它自己一段，不拆行。
+
+    `protected_rows` 给了就保证表格最前面这么多行（标题行 + 识别出的表头行）永远
+    整体落在第 1 段，不会被从中间切开——`_split_table_into_elements` 用它，否则
+    表头可能被切进第 2 段，「表头只在第 1 段」的约定就破了。
+
     切点只落在**没有竖向合并跨越**的行边界上（codex R2 P2）：rowspan 跨段会让后段
     整列缺失、其余单元格全部错位。有活跃 rowspan 时顺延收段，段长因此可能超过
     rows_per_element；合并一路连到表尾的退化形态就整表一段——那等于该表不切，
     与「行数不超限原样返回」同一语义，宁可段长也不产出结构错误的碎片。
+
+    切分前校验拆出的行数与原始顶层 `<tr>` 开标签数一致（`_top_level_tr_open_count`，
+    codex N4）：不一致说明有 `<tr>` 没闭合、被 `_top_level_table_rows` 悄悄漏掉，
+    这种情况整表原样一段——宁可不切也不能丢行。
     """
     if not raw:
         return []
     rows = _top_level_table_rows(raw)
-    if len(rows) <= rows_per_element:
+    if len(rows) != _top_level_tr_open_count(raw):
+        return [raw]
+    row_chars = [len(_html_table_to_text(row)) for row in rows] if max_chars is not None else None
+    # 口径必须与真正收段时的判断一致(codex 评审 5)：把行拼成一段要加 " ; " 分隔符
+    # (n 行 n-1 个)，只加行文本本身会低估、让恰好卡线的表漏切。
+    total_chars = (
+        sum(row_chars) + 3 * max(len(rows) - 1, 0) if row_chars is not None else 0
+    )
+    if len(rows) <= rows_per_element and (max_chars is None or total_chars <= max_chars):
         return [raw]
     open_match = re.search(r"(?i)<table\b[^>]*>", raw)
     open_tag = open_match.group(0) if open_match else "<table>"
     parts: List[str] = []
     part_start = 0
-    covered_ahead = 0  # 当前行之后仍被上方 rowspan 覆盖的行数
+    active_rowspan = 0  # 之前某行的竖向合并仍覆盖到当前行时，此处不能收段
+    seg_rows = 0  # 当前段已经落了几行（不含正在判断是否要收进来的这一行）
+    seg_chars = 0  # 当前段累计文本长度（" ; " 分隔符口径）
     for index, row in enumerate(rows):
-        covered_ahead = max(covered_ahead - 1, _row_max_rowspan(row) - 1)
-        filled = index - part_start + 1
-        if filled >= rows_per_element and covered_ahead == 0:
-            parts.append(f"{open_tag}{''.join(rows[part_start : index + 1])}</table>")
-            part_start = index + 1
+        this_chars = row_chars[index] if row_chars is not None else 0
+        boundary_allowed = active_rowspan == 0 and index >= protected_rows
+        would_exceed_chars = (
+            max_chars is not None
+            and seg_rows >= 1
+            and seg_chars + 3 + this_chars > max_chars  # 3 = " ; " 分隔符长度
+        )
+        at_row_cap = seg_rows >= rows_per_element
+        if boundary_allowed and seg_rows >= 1 and (would_exceed_chars or at_row_cap):
+            parts.append(f"{open_tag}{''.join(rows[part_start:index])}</table>")
+            part_start = index
+            seg_rows = 0
+            seg_chars = 0
+        if row_chars is not None:
+            seg_chars += (3 if seg_rows >= 1 else 0) + this_chars
+        seg_rows += 1
+        active_rowspan = max(active_rowspan - 1, _row_max_rowspan(row) - 1)
     if part_start < len(rows):
         parts.append(f"{open_tag}{''.join(rows[part_start:])}</table>")
     return parts
+
+
+_TABLE_CELL_RE = re.compile(r"(?i)<(t[dh])\b([^>]*)>(.*?)</t[dh]>", re.DOTALL)
+_TABLE_COLSPAN_RE = re.compile(r"(?i)\bcolspan\s*=\s*[\"']?(\d+)")
+_TABLE_NUMERIC_CELL_RE = re.compile(r"^[\d\s.,:/%+\-年月日]+$")
+
+
+def _row_cell_info(row: str) -> List[tuple[str, int, str]]:
+    """一行里每个 <td>/<th> 的 (标签名, colspan, 剥标签后的文本)。"""
+    cells: List[tuple[str, int, str]] = []
+    for match in _TABLE_CELL_RE.finditer(row):
+        tag = match.group(1).lower()
+        colspan_match = _TABLE_COLSPAN_RE.search(match.group(2))
+        colspan = int(colspan_match.group(1)) if colspan_match else 1
+        text = html_module.unescape(re.sub(r"<[^>]+>", " ", match.group(3)))
+        cells.append((tag, colspan, " ".join(text.split())))
+    return cells
+
+
+def _scan_header_rows(rows: List[str]) -> "tuple[int, str] | None":
+    """从表格前几行里宁缺毋滥地识别表头行；判不出返回 `None`。
+
+    只看前 3 行，从顶往下跳过「合并标题行」（单个非空格子且 colspan≥2，或该行只有
+    1 个格子而表宽>1），遇到第一条非标题行就只判这一行——要么整行都是 `<th>`，要么
+    满足一组启发式（非空格数够多、每格够短、不是纯数字/日期/金额、互不重复、无
+    rowspan）；判不出、或前 3 行全是标题行，都返回 `None`。多行表头（rowspan 表头
+    等）不支持，会在 rowspan 检查上自然落空。
+
+    返回 `(消耗掉的行数, 表头行 HTML)`——消耗掉的行数 = 跳过的标题行数 + 表头本身
+    这一行，供 `_split_table_into_elements` 保护这段前缀不被切分器切开。
+
+    已知取舍（不改）：首行恰好满足这组启发式（非空格数够、互不重复、不像数字）时
+    会被判成表头，即便它其实就是普通的第一条数据行；一旦识别出表头，它会在每个
+    非首段的检索文本里重复出现一次，多花该表 ~1/(每段行数) 的嵌入/KG 输入 token
+    （宽表实测约 25%）——这是让后段仍知道每列含义的必要代价，两者都按当前设计
+    接受。
+    """
+    if not rows:
+        return None
+    width = 0
+    for row in rows[:10]:
+        width = max(width, sum(colspan for _, colspan, _ in _row_cell_info(row)))
+    if width <= 0:
+        return None
+    for offset, row in enumerate(rows[:3]):
+        cells = _row_cell_info(row)
+        non_empty_cells = [c for c in cells if c[2]]
+        is_single_merged_cell = len(non_empty_cells) == 1 and non_empty_cells[0][1] >= 2
+        is_only_cell_in_wide_table = len(cells) == 1 and width > 1
+        if is_single_merged_cell or is_only_cell_in_wide_table:
+            continue  # 合并标题行，跳过继续看下一行
+        non_empty = [text for _, _, text in non_empty_cells]
+        if cells and all(tag == "th" for tag, _, _ in cells):
+            return offset + 1, row
+        if (
+            len(non_empty) >= max(2, math.ceil(width / 2))
+            and all(len(text) <= 30 for text in non_empty)
+            and not any(_TABLE_NUMERIC_CELL_RE.match(text) for text in non_empty)
+            and len(set(non_empty)) == len(non_empty)
+            and _row_max_rowspan(row) <= 1
+        ):
+            return offset + 1, row
+        return None
+    return None
+
+
+def _table_header_rows(rows: List[str]) -> List[str]:
+    """`_scan_header_rows` 的公开外形：只要表头行本身，供单测直接断言。"""
+    found = _scan_header_rows(rows)
+    return [found[1]] if found else []
+
+
+def _split_table_into_elements(
+    raw: str,
+    base_label: str,
+    base_metadata: Dict[str, Any],
+    prefix_text: str = "",
+    max_chars: int | None = None,
+) -> List[tuple[str, str, Dict[str, Any]]]:
+    """把一段表格 HTML 切成 `(label, text, metadata)` 三元组列表，mammoth /
+    python-pptx / MinerU（Office 来源）三处共用，避免三份拷贝。
+
+    `_split_table_html` 没有真的切分（0 或 1 段）时逐字沿用今天的行为（不加 part
+    后缀、不加 part/group metadata，正文为空也照样靠 caption/表头产出一个元素）；
+    B3 的空段过滤只发生在真的切了多段之后，见下。切分后第 k≥2 段的检索文本前面拼上表头
+    行纯文本（`_scan_header_rows` 判不出表头，或表头本身长过 `max_chars` 一半——
+    宽表的表头能占满一整段预算，见 codex N5——则不拼），让向量嵌入/FTS 在只看到
+    某一段时仍知道每列是什么；`table_html` 只含本段的行——第 k≥2 段不重复表头
+    HTML，前端才能把各段合并成一张表、只显示一行表头，`_mineru_workbook_coverage`
+    也不会重复计表头。`table_group` 取不带 " part k" 的 `base_label`，供前端识别
+    同一张表的分段。`prefix_text`（如 MinerU 的 caption）拼在每一段文本最前面。
+
+    表头（及其上方被跳过的标题行）用 `protected_rows` 钉死在第 1 段：`_split_table_html`
+    不会在这段前缀中间收段，「表头只在第 1 段、后段不重复」因此是结构性保证，不
+    依赖切分点恰好落在表头之后。
+
+    正文为空的段（`_html_table_to_text` 判定，不含 header/caption 前缀）一律不
+    产出，不能只靠 caption/表头兜底出一个空壳元素（codex B3）；`table_part` 按
+    **过滤之后**重新连续编号，`table_parts` 是过滤后的段数——前端合并要求 part
+    连续递增，中间/尾部的全空段必须整段消失而不是留一个编号缺口。
+
+    `max_chars` 未传时取 `Settings.chunk_target_chars`（`build_chunks` 切普通文本
+    用的同一个值，不新增配置项）——检索粒度边界与分块目标同源；改 `CHUNK_TARGET_CHARS`
+    只对之后重新解析的文件生效，已入库的表格需要「重新解析」才会跟着变。调用方
+    持有 settings 时应显式传入（见 `ParserChainExecution.table_part_max_chars`）；
+    这里的 `get_settings()` 只是够不到 settings 时的兜底（如直接单测这个函数）。
+    """
+    if max_chars is None:
+        from app.core.config import get_settings
+
+        max_chars = get_settings().chunk_target_chars
+    top_rows = _top_level_table_rows(raw)
+    header_scan = _scan_header_rows(top_rows) if top_rows else None
+    protected_rows = header_scan[0] if header_scan else 0
+    parts = _split_table_html(raw, max_chars=max_chars, protected_rows=protected_rows)
+    if len(parts) <= 1:
+        # 没有真的切分(0 段=空表格 HTML，或 1 段=不超限)：逐字沿用切分前的行为，
+        # 包括「表体为空、只靠 caption 撑出一个元素」这种边缘形态(codex 评审 6)——
+        # B3 的空段过滤只解决「切分产出多段后某些段整段是空」，不能收窄到本来就
+        # 没被切分的表格上。
+        part = parts[0] if parts else raw
+        body_text = _html_table_to_text(part)
+        text = " ".join(item for item in (prefix_text, body_text) if item).strip()
+        if not text:
+            return []
+        metadata = dict(base_metadata)
+        metadata["table_html"] = part
+        return [(base_label, text, metadata)]
+    header_text = ""
+    if header_scan:
+        header_text = _html_table_to_text(header_scan[1])
+        if len(header_text) > max_chars // 2:
+            header_text = ""  # N5：表头本身太宽，拼上去会把预算大半占给表头
+    candidates: List[tuple[str, str]] = []
+    for part in parts:
+        body_text = _html_table_to_text(part)
+        if not body_text:
+            continue  # B3：正文为空的段一律不产出
+        candidates.append((part, body_text))
+    total = len(candidates)
+    results: List[tuple[str, str, Dict[str, Any]]] = []
+    for part_index, (part, body_text) in enumerate(candidates, start=1):
+        if part_index >= 2 and header_text:
+            body_text = f"{header_text} ; {body_text}"
+        text = " ".join(item for item in (prefix_text, body_text) if item).strip()
+        metadata = dict(base_metadata)
+        metadata["table_html"] = part
+        label = base_label
+        if total > 1:
+            # label 的 " part {k}" 后缀不是纯展示：collection_catalog 的计数/枚举
+            # 用它(而不是 metadata.table_part，读 metadata 会 detoast 整份
+            # table_html，PG 上实测让计数查询慢一个数量级)判定「这是第几段」，
+            # `part 1` 记一张表，`part 2`+ 视为同一张表的续段不重复计。改这里的
+            # 格式必须同步改 sqlite/postgres source_store 的 GLOB/正则过滤。
+            label = f"{base_label} part {part_index}"
+            metadata["table_part"] = part_index
+            metadata["table_parts"] = total
+            metadata["table_group"] = base_label
+        results.append((label, text, metadata))
+    return results
 
 
 def _html_table_to_text(html: str) -> str:

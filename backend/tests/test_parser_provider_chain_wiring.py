@@ -95,7 +95,7 @@ def test_self_hosted_failure_never_opens_public_cloud_and_reuses_one_download(
     monkeypatch.setattr(
         execution_module,
         "parse_builtin_source_file",
-        lambda source_id, path, file_name, persist_image=None: builtin_names.append(
+        lambda source_id, path, file_name, persist_image=None, **_kwargs: builtin_names.append(
             file_name
         ) or [
             SourceElement(
@@ -162,7 +162,7 @@ def test_extensionless_pdf_url_cloud_failure_uses_pdf_builtin_once(
     monkeypatch.setattr(
         execution_module,
         "parse_builtin_source_file",
-        lambda source_id, path, file_name, persist_image=None: builtin_names.append(
+        lambda source_id, path, file_name, persist_image=None, **_kwargs: builtin_names.append(
             file_name
         ) or [],
     )
@@ -421,7 +421,7 @@ def test_rejected_workbook_writes_no_assets_before_builtin_fallback(
     monkeypatch.setattr(
         execution_module,
         "parse_builtin_source_file",
-        lambda source_id, path, file_name, persist_image=None: [
+        lambda source_id, path, file_name, persist_image=None, **_kwargs: [
             SourceElement(
                 id="",
                 source_id=source_id,
