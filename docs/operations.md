@@ -115,7 +115,10 @@ PostgreSQL cancelled the statement, or SQLite interrupted it), `saturated` (no c
 in the remaining budget — the pool is full, the query never ran, and the operator lever is pool size or
 concurrency, not the user's scope), `queue_deadline` (the phase budget expired while the notebook was still
 queued behind the shared retrieval pool — nothing was asked of the database, so "narrow your scope" would be
-the wrong advice) and `unavailable` (everything else). `chunk_federation_evidence_unavailable` reports that
+the wrong advice) and `unavailable` (everything else). Rows carrying `arm="keyword"` belong to the global
+bilingual keyword recall supplement, which has NO coverage receipt: exclude them when counting skip events
+against receipts. That arm reports once per run as `ask_stage` with `stage="global_keyword_arm"` (participant,
+notebooks-with-hits, merged and failed-notebook counts plus latency, no text). `chunk_federation_evidence_unavailable` reports that
 a call's evidence fingerprints could not be read, which makes the affected citations refusable by name;
 `global_ask_citations_void` reports an answer withdrawn by the citation recheck and carries a content-free
 `reason` (`changed`, `unreadable`, `unattributed`, `out_of_ceiling`) — `unattributed` is a normalization gap

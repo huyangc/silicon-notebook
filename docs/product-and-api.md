@@ -269,13 +269,16 @@ is unchanged. Federating these channels is registered in `fangan_todo.md` pendin
 The bilingual keyword recall supplement is federated instead of closed (each semantic leg already carries its
 own full-text search over the sub-query text; this is the separate keyword-string arm used by `chunk` mode and by
 `reasoning`'s first-round seed). It runs the single-notebook keyword search once per participant, on the same
-shared executor, fair window, phase deadline and per-notebook budget as the semantic legs, each under that
-notebook's own frozen source ceiling; a notebook with no visible source issues no query. Every notebook keeps the
-single-notebook recall window (`CHUNK_RECALL`); the merge interleaves the notebooks' hits round-robin in each
+shared executor, fair window and per-notebook budget as the semantic legs, each under that notebook's own frozen
+source ceiling; a notebook with no visible source issues no query. Being a fail-open supplement, the whole arm
+(preparation included) is bounded by one `GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS` rather than the full retrieval
+phase, and its timeouts never switch off a notebook's full-text search for the semantic legs. Every notebook keeps
+the single-notebook recall window (`CHUNK_RECALL`); the merge interleaves the notebooks' hits round-robin in each
 notebook's own keyword-score order (every notebook's first, then every second, …), keeps the first occurrence of a
-passage, and stops at `GLOBAL_ASK_CANDIDATE_LIMIT`, so no notebook fills the list by volume. A keyword leg that
-times out or fails only leaves that notebook without keyword hits: it never enters the searched/skipped receipts
-(coverage is decided by the semantic legs alone), and a timeout raises no failure banner. The run emits one
+passage, and stops at `GLOBAL_ASK_CANDIDATE_LIMIT`, so no notebook fills the merged list handed to the caller by
+volume (`reasoning` then re-selects its seed from that list by score). A keyword leg that times out or fails only
+leaves that notebook without keyword hits: it never enters the searched/skipped receipts (coverage is decided by
+the semantic legs alone), and no failure of it raises a banner. The run emits one
 content-free `ask_stage` event, `stage: "global_keyword_arm"`, with participant, notebooks-with-hits, merged,
 failed-notebook counts and latency. `GLOBAL_ASK_KEYWORD_ARM_ENABLED` (default `true`) is the rollback switch:
 `false` closes the arm for global runs again; single-notebook asks never read it.

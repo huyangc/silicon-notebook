@@ -123,9 +123,11 @@ class KeywordProbe:
         return contextlib.nullcontext("db")
 
     def _chunk_fts_hits(self, db, notebook_id, needle, *, k,
-                        allowed_source_ids, corpus_langs):
+                        allowed_source_ids, corpus_langs, **peer_only):
+        # ``peer_only`` 只可能是联邦关键词腿传的 ``trip_circuit=False``;单库路径
+        # 一个多余的关键字都不许有,所以它被原样记进调用元组。
         call = ("chunk_fts", notebook_id, needle, k, allowed_source_ids,
-                corpus_langs)
+                corpus_langs) + ((peer_only,) if peer_only else ())
         self._record(call)
         with self._lock:
             self.fts.append(call)
@@ -134,17 +136,21 @@ class KeywordProbe:
             raise planned
         return [{"chunk_id": chunk_id} for chunk_id, _rel in planned]
 
-    def _hydrate_chunk_candidates(self, chunk_ids):
-        self._record(("hydrate", tuple(chunk_ids)))
+    def _rows(self, chunk_ids):
         relevance = {
             chunk_id: rel
             for rows in self._hits.values() if isinstance(rows, list)
             for chunk_id, rel in rows
         }
-        return (
-            [{"chunk_id": cid, "relevance": relevance[cid]} for cid in chunk_ids],
-            list(chunk_ids), None,
-        )
+        return [{"chunk_id": cid, "relevance": relevance[cid]} for cid in chunk_ids]
+
+    def _hydrate_chunk_candidates(self, chunk_ids):
+        self._record(("hydrate", tuple(chunk_ids)))
+        return self._rows(chunk_ids), list(chunk_ids), None
+
+    def _hydrate_chunk_texts(self, chunk_ids):
+        self._record(("hydrate_texts", tuple(chunk_ids)))
+        return self._rows(chunk_ids)
 
     def _note_model_error(self, stage, model, exc=None, *args, **kwargs):
         with self._lock:
@@ -268,8 +274,15 @@ def test_each_participant_is_searched_once_under_its_own_ceiling():
     by_library = sorted(probe.fts)
     assert by_library == [
         # 可见清单 ∩ 该库冻结天花板,不是名义 active 的,也不是 None。
-        ("chunk_fts", nid, _NEEDLE, _RECALL, (f"src-{nid}",), ["en", "zh"])
+        # 联邦腿只遵守、不触发共享的按库 FTS 熔断。
+        ("chunk_fts", nid, _NEEDLE, _RECALL, (f"src-{nid}",), ["en", "zh"],
+         {"trip_circuit": False})
         for nid in ("nb-a", "nb-b", "nb-c")
+    ]
+    # 关键词打分不读向量:联邦腿只回表取文本,不走带向量矩阵的 hydrate。
+    assert not [s for s in probe.steps if s[0] == "hydrate"]
+    assert sorted(s[1] for s in probe.steps if s[0] == "hydrate_texts") == [
+        ("a1", "a2", "a3"), ("b2", "b1"), ("c1",),
     ]
     # 每库按自己的关键词分数排序后轮转交错;每条都打上所属库。
     assert _ids(merged) == [
@@ -330,7 +343,8 @@ def test_a_one_library_peer_set_still_takes_the_federated_branch():
         merged = probe._keyword_chunk_candidates("nb-a", _NEEDLE)
 
     assert probe.fts == [
-        ("chunk_fts", "nb-a", _NEEDLE, _RECALL, ("src-nb-a",), ["en", "zh"]),
+        ("chunk_fts", "nb-a", _NEEDLE, _RECALL, ("src-nb-a",), ["en", "zh"],
+         {"trip_circuit": False}),
     ]
     assert _ids(merged) == [("nb-a", "a1")]
     assert probe.summary()["participants"] == 1
@@ -387,6 +401,31 @@ def test_failing_libraries_leave_the_rest_and_never_reach_receipts():
     )
     assert skipped == [("nb-b", "keyword"), ("nb-c", "keyword"),
                        ("nb-d", "keyword")]
+    # 关键词腿的词法超时归 ``timeout``,不是 ``unavailable``。
+    reasons = {
+        event["notebook_id"]: event.get("reason")
+        for event in probe.events
+        if event.get("kind") == "chunk_federation_skipped"
+    }
+    assert reasons == {
+        "nb-b": "timeout", "nb-c": "timeout", "nb-d": "unavailable",
+    }
+
+
+def test_the_lexical_timeout_reclassification_is_keyword_arm_only():
+    """语义腿的分类不变:同一个 ``ChunkLexicalSearchTimeout`` 在语义腿上不走这条。"""
+    import contextvars
+
+    from app.services import chunk_federation as cf
+
+    def _task(arm):
+        return cf._Task("nb-a", "personal", "q", contextvars.copy_context(),
+                        True, (), None, arm)
+
+    timeout = ChunkLexicalSearchTimeout()
+    assert cf._keyword_lexical_timeout(_task("keyword"), timeout) is True
+    assert cf._keyword_lexical_timeout(_task(""), timeout) is False
+    assert cf._keyword_lexical_timeout(_task("keyword"), RuntimeError()) is False
 
 
 def test_cancellation_propagates_from_a_keyword_leg():
@@ -499,3 +538,214 @@ def test_blank_keywords_query_nothing_in_either_mode():
     with _peer_run(("nb-a", "nb-b")):
         assert probe._keyword_chunk_candidates("nb-a", "") == []
     assert probe.steps == [] and probe.seat_reads == 0
+
+
+# ---------------------------------------------------------------------------
+# 5. 共享的按库 FTS 熔断:关键词腿只遵守、不触发
+# ---------------------------------------------------------------------------
+
+class RealFtsProbe(KeywordProbe):
+    """真实的 ``_chunk_fts_hits``(连同它读写的真实 ``RetrievalRunState`` 熔断),
+    底下只换掉适配器的 ``chunk_fts_search``。``timeouts`` 里的库第一次查询超时。"""
+
+    _chunk_fts_hits = _borrow("_chunk_fts_hits")
+
+    def __init__(self, participants, *, timeouts=(), **kwargs):
+        super().__init__(participants, **kwargs)
+        self._timeouts = set(timeouts)
+        self.searches: list = []
+        self.knowledge = SimpleNamespace(chunk_fts_search=self._search)
+
+    def _search(self, db, notebook_id, query, *, k, allowed_source_ids=None,
+                corpus_langs=None):
+        with self._lock:
+            self.searches.append(notebook_id)
+        if notebook_id in self._timeouts:
+            self._timeouts.discard(notebook_id)
+            raise ChunkLexicalSearchTimeout()
+        return [{"chunk_id": chunk_id}
+                for chunk_id, _rel in self._hits.get(notebook_id, [])]
+
+
+def test_a_keyword_leg_timeout_does_not_open_the_semantic_fts_circuit():
+    """P1:关键词腿超时后,同一 run 里同库语义侧的下一次 FTS 仍真的发出查询。"""
+    probe = RealFtsProbe(
+        ("nb-a", "nb-b"),
+        hits={"nb-a": [("a1", 0.9)], "nb-b": [("b1", 0.9)]},
+        timeouts={"nb-a"},
+    )
+
+    with _peer_run(("nb-a", "nb-b")):
+        merged = probe._keyword_chunk_candidates("nb-a", _NEEDLE)
+        assert _ids(merged) == [("nb-b", "b1")]
+        assert sorted(probe.searches) == ["nb-a", "nb-b"]
+        # 语义腿的调用形状:不带 ``trip_circuit``。
+        semantic = probe._chunk_fts_hits("db", "nb-a", "sub query", k=5)
+
+    assert semantic == [{"chunk_id": "a1"}]
+    assert sorted(probe.searches) == ["nb-a", "nb-a", "nb-b"]
+    assert not [
+        event for event in probe.events
+        if event.get("status") == "skipped_circuit_open"
+    ]
+
+
+def test_a_semantic_timeout_still_opens_the_circuit_and_keyword_legs_obey_it():
+    """对照臂:语义侧超时照旧打开熔断;已打开的熔断关键词腿同样遵守、不发查询。"""
+    probe = RealFtsProbe(
+        ("nb-a", "nb-b"),
+        hits={"nb-a": [("a1", 0.9)], "nb-b": [("b1", 0.9)]},
+        timeouts={"nb-a"},
+    )
+
+    with _peer_run(("nb-a", "nb-b")):
+        with pytest.raises(ChunkLexicalSearchTimeout):
+            probe._chunk_fts_hits("db", "nb-a", "sub query", k=5)
+        merged = probe._keyword_chunk_candidates("nb-a", _NEEDLE)
+
+    assert _ids(merged) == [("nb-b", "b1")]
+    assert sorted(probe.searches) == ["nb-a", "nb-b"]
+    assert [
+        event["notebook_id"] for event in probe.events
+        if event.get("status") == "skipped_circuit_open"
+    ] == ["nb-a"]
+
+
+# ---------------------------------------------------------------------------
+# 6. 整条臂的时限:一份逐库预算,不是整段阶段时限
+# ---------------------------------------------------------------------------
+
+class _Clock:
+    """贴着真钟、整数基准的注入时钟(与 ``test_federated_global_budget`` 同形)。"""
+
+    def __init__(self):
+        import math
+        import time
+
+        self.base = float(math.floor(time.monotonic()))
+        self.offset = 0.0
+
+    def now(self) -> float:
+        return self.base + self.offset
+
+
+def test_keyword_arm_deadline_is_one_notebook_budget_capped_by_the_phase(monkeypatch):
+    import time
+
+    from app.services import chunk_federation as cf
+
+    clock = _Clock()
+    monkeypatch.setattr(cf, "time", SimpleNamespace(
+        monotonic=clock.now, perf_counter=time.perf_counter,
+    ))
+
+    def _plan(phase, notebook):
+        return SimpleNamespace(
+            phase_timeout_seconds=phase, notebook_timeout_seconds=notebook,
+        )
+
+    assert cf._keyword_arm_deadline(None) == 0.0
+    assert cf._keyword_arm_deadline(_plan(60, 5)) == clock.base + 5
+    assert cf._keyword_arm_deadline(_plan(3, 5)) == clock.base + 3
+
+
+def test_a_leg_started_late_is_still_bounded_by_the_arm_deadline(monkeypatch):
+    """准备期用掉 3 秒后才起跑的腿,预算止于「臂起点 + 逐库预算」,而不是
+    「起跑时刻 + 逐库预算」——整条臂按一份逐库预算计,不吃满阶段时限。"""
+    import time
+
+    from app.repositories.read_budget import current_read_budget
+    from app.services import chunk_federation as cf
+
+    clock = _Clock()
+    monkeypatch.setattr(cf, "time", SimpleNamespace(
+        monotonic=clock.now, perf_counter=time.perf_counter,
+    ))
+    budgets: list = []
+
+    class _Probe(KeywordProbe):
+        def _chunk_fts_hits(self, *args, **kwargs):
+            budgets.append(current_read_budget().deadline)
+            return super()._chunk_fts_hits(*args, **kwargs)
+
+    probe = _Probe(("nb-a",), hits={"nb-a": [("a1", 0.9)]})
+
+    def _visible(notebook_id):
+        # 准备期的逐库读取:这里让时钟走 3 秒。
+        clock.offset += 3.0
+        return ("src-nb-a",)
+
+    probe.sources = SimpleNamespace(all_visible_source_ids=_visible)
+    receipts = Receipts()
+    with _global_run(("nb-a",), receipts):
+        merged = probe._keyword_chunk_candidates("nb-a", _NEEDLE)
+
+    assert _ids(merged) == [("nb-a", "a1")]
+    # ``_global_run`` 的计划:阶段 60 秒、逐库 5 秒。
+    assert budgets == [clock.base + 5.0]
+
+
+# ---------------------------------------------------------------------------
+# 7. 调用方层:reasoning 外层不持槽;chunk 模式入口剔除天花板外的命中
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("peer", [True, False])
+def test_reasoning_keyword_chunks_holds_no_outer_slot_in_peer_mode(peer):
+    """``fanout_limit=1`` 下外层若持着唯一的槽,内层联邦腿取槽就会自锁。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    from app.services.retrieval_run import current_retrieval_run
+
+    observed: list = []
+
+    def _keyword_chunk_candidates(notebook_id, keywords):
+        semaphore = current_retrieval_run()._fanout
+        free = semaphore.acquire(blocking=False)
+        if free:
+            semaphore.release()
+        observed.append(free)
+        return ["hit"]
+
+    retriever = object.__new__(ReasoningRetriever)
+    retriever.retrieval = SimpleNamespace(
+        keyword_chunk_candidates=_keyword_chunk_candidates,
+    )
+    retriever._filter_candidates = lambda kind, hits: list(hits)
+
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR, fanout_limit=1):
+        scope = (
+            source_scope_context(
+                "nb-a", None, None,
+                notebook_source_ceilings=_ceilings(("nb-a", "nb-b")),
+                subjectless=True,
+            ) if peer else contextlib.nullcontext()
+        )
+        with scope:
+            assert retriever.keyword_chunks("nb-a", _NEEDLE) == ["hit"]
+
+    # 对等:槽是空的(外层没取);单库:外层照旧持着那一个槽。
+    assert observed == [peer]
+
+
+def test_chunk_mode_entry_returns_per_library_hits_and_drops_unchecked_sources():
+    """经 ``RetrievalService.keyword_chunk_candidates``(chunk 模式调用方的入口),
+    在真实 ``global_ask_run`` 下拿到逐库命中;不在该库冻结天花板里的来源被剔除。
+
+    替身 FTS 故意不按天花板下推(替身的 ``score_chunks`` 把 ``src-<chunk_id>``
+    当来源),以证明结果边界那道 ``filter_retrieval_items`` 兜得住。"""
+    from app.services.retrieval_service import RetrievalService
+
+    probe = KeywordProbe(
+        ("nb-a", "nb-b"),
+        hits={
+            # 来源 src-nb-a / src-nb-b 在各自天花板里;src-a-stray 不在。
+            "nb-a": [("nb-a", 0.9), ("a-stray", 0.8)],
+            "nb-b": [("nb-b", 0.7)],
+        },
+    )
+    service = SimpleNamespace(candidates=probe)
+
+    with _global_run(("nb-a", "nb-b"), Receipts()):
+        hits = RetrievalService.keyword_chunk_candidates(service, "nb-a", _NEEDLE)
+
+    assert _ids(hits) == [("nb-a", "nb-a"), ("nb-b", "nb-b")]
+    assert sorted(call[1] for call in probe.fts) == ["nb-a", "nb-b"]

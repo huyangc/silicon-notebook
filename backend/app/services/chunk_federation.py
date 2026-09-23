@@ -549,10 +549,26 @@ def federated_keyword_chunk_candidates(
     ``arm="keyword"``.  ``AskCancelled`` and the attestation error still
     propagate through ``_run_one``/``_run_tasks`` exactly as for a semantic leg.
 
+    Failures are therefore visible ONLY in telemetry: the summary event's
+    ``failed_libraries`` and the per-leg skip events.  The reasoning trace's
+    ``keyword_failed`` flag covers the single-notebook path alone -- in peer
+    mode this function never raises for a failed leg, even when every library
+    failed, and must not start to: the ``chunk``-mode caller has no ``try``
+    around it, so raising would fail the whole answer over a supplement.
+
+    ⛔ The whole arm, preparation included, is bounded by ONE per-library
+    budget (``_keyword_arm_deadline``), not by the phase.
+
+    Its per-leg FTS never OPENS the run's per-library FTS circuit, though it
+    obeys one that is already open (``_chunk_fts_hits(trip_circuit=False)``):
+    that circuit is shared with the semantic legs' own lexical union.
+
     Merge: each library's hits in its own keyword-score order, interleaved
     round-robin (every library's 1st, then every 2nd, ...), first occurrence
     of a ``chunk_id`` wins, capped at ``global_ask_candidate_limit`` -- so no
-    library can fill the list by volume and its length has a fixed bound.
+    library can fill THIS merged list by volume and its length has a fixed
+    bound.  (What a caller then selects from it is the caller's rule: the
+    reasoning seed re-ranks by score.)
     Every hit is stamped with its owning library, as the semantic legs' are in
     peer mode.
 
@@ -563,11 +579,7 @@ def federated_keyword_chunk_candidates(
         candidates, active_notebook_id,
     )
     plan = current_federated_run_plan()
-    # Derived once, before the first read, exactly as the semantic arm does.
-    deadline = (
-        time.monotonic() + float(plan.phase_timeout_seconds)
-        if plan is not None else 0.0
-    )
+    deadline = _keyword_arm_deadline(plan)
     failed: dict = {}
 
     def _producer(task: _Task) -> tuple:
@@ -615,6 +627,23 @@ def federated_keyword_chunk_candidates(
         "latency_ms": round((time.perf_counter() - started) * 1000),
     })
     return merged
+
+
+def _keyword_arm_deadline(plan) -> float:
+    """The keyword arm's WHOLE-arm deadline: one per-library budget, not a phase.
+
+    Derived once, before the first read (task preparation included), like the
+    semantic arm's -- but shorter.  This arm is a fail-open supplement, so on a
+    saturated database it may cost at most about one
+    ``notebook_timeout_seconds`` on top of the semantic fan-out rather than a
+    whole ``phase_timeout_seconds``; and never more than the phase either.
+    ``0.0`` without a plan, the value every unplanned caller passes.
+    """
+    if plan is None:
+        return 0.0
+    return time.monotonic() + min(
+        float(plan.phase_timeout_seconds), float(plan.notebook_timeout_seconds),
+    )
 
 
 def _interleave_capped(columns: list, limit: int) -> list:
@@ -1350,6 +1379,7 @@ def _run_one(candidates, task: _Task, plan=None, deadline: float = 0.0,
             # decides what an UNCLASSIFIED failure was.
             reason = classify_read_failure(exc) or (
                 "timeout" if time.monotonic() >= clock.deadline
+                or _keyword_lexical_timeout(task, exc)
                 else "unavailable"
             )
         # Emit inside THIS TASK's own context, not the worker thread's bare
@@ -1365,6 +1395,21 @@ def _run_one(candidates, task: _Task, plan=None, deadline: float = 0.0,
             round((time.perf_counter() - started) * 1000),
         )
         return _empty_leg(), reason
+
+
+def _keyword_lexical_timeout(task: _Task, exc: BaseException) -> bool:
+    """A keyword leg whose lexical probe hit its own statement timeout.
+
+    ``ChunkLexicalSearchTimeout`` is the adapter's bounded-FTS timeout, not a
+    driver failure ``classify_read_failure`` knows, so without this a keyword
+    leg's timeout would be filed as ``unavailable``.  Scoped to the keyword
+    arm on purpose: the semantic legs' classification stays exactly as it was.
+    """
+    if task.arm != "keyword":
+        return False
+    from app.repositories.ports import ChunkLexicalSearchTimeout
+
+    return isinstance(exc, ChunkLexicalSearchTimeout)
 
 
 def _emit_leg_skipped(candidates, task: _Task, reason: str, error_type: str,
