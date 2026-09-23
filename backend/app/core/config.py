@@ -1364,6 +1364,12 @@ class Settings(BaseSettings):
     global_ask_shutdown_timeout_seconds: float = Field(
         5, gt=0, validation_alias="GLOBAL_ASK_SHUTDOWN_TIMEOUT_SECONDS",
     )
+    # 对等(全局)模式下双语关键词补召回臂逐库联邦化的回退开关。开着时每个参与库
+    # 各跑一次同一套关键词全文检索、按库轮转交错并以 GLOBAL_ASK_CANDIDATE_LIMIT
+    # 封顶;关掉即回到「对等模式整条不跑」。单库问答不读它。
+    global_ask_keyword_arm_enabled: bool = Field(
+        True, validation_alias="GLOBAL_ASK_KEYWORD_ARM_ENABLED",
+    )
     document_overview_max_elements: int = Field(
         64, ge=2, validation_alias="DOCUMENT_OVERVIEW_MAX_ELEMENTS",
     )

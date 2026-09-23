@@ -265,18 +265,17 @@
       （判据仍是 `not hit.notebook_id`，与另外两条分支同一个「空 = 当前库」口径），
       席位数复用 `CHUNK_FEDERATION_ACTIVE_RESERVE × CHUNK_MMR_K`，合格候选不足时以实际
       数量为上限。刻意不在联邦 PR 里做：那个函数的 reserve 规则是独立一处改动。
-- [ ] **全局（对等）模式的关键词臂 / 精确查找臂联邦化**。`_keyword_chunk_candidates`
-      与 `_exact_lookup_chunks` 是 **active-only** 的补召回腿：每次 ask 只跑一次、只对
-      传进来的那一个 notebook 发 `chunk_fts_search` / `exact_lookup_chunks`，不随联邦腿
-      逐库分叉。对等模式（`federated_ask_active()`）下留着它们等于凭空给**名义 active**
-      多两条别的参与库没有的腿，所以 D0-5 把两条在对等模式下整条关掉（`fangan_done.md`
-      第 40 条），代价如实：全局问答暂时没有词法补召回，也没有精确标识符快查——跨语言
-      提问与「问一个命令名」这两种形态在全局模式下只剩语义臂。联邦化要连带决定三件事：
-      逐库词法臂的候选配额（今天 `CHUNK_RECALL` 是**每条腿**的量，× 库数会把池子撑爆，
-      对等模式的合并预算已经换成 `GLOBAL_ASK_CANDIDATE_LIMIT`）、逐库 `corpus_langs`
-      探测的成本（每库一次 `_lexical_corpus_langs`，与上面那条双语化待办同一处）、以及
-      `exact_section_reserve` 的席位在跨库池子里该怎么分（今天它只认 `exact_ids` 这一个
-      集合，跨库之后需要一个按库的口径，否则某一个库的章节能把保底席位全占了）。
+- [ ] **全局（对等）模式的精确查找臂联邦化**。双语关键词臂（`_keyword_chunk_candidates`）
+      已逐库联邦化：每个参与库各跑一次、各带冻结天花板、按库轮转交错并以
+      `GLOBAL_ASK_CANDIDATE_LIMIT` 封顶、失败不进覆盖回执，开关
+      `GLOBAL_ASK_KEYWORD_ARM_ENABLED`（合同见 `docs/product-and-api*.md` 全局问答一节）。
+      剩下 `_exact_lookup_chunks`：它仍是 **active-only** 的补召回腿（每次 ask 只对传进来的
+      那一个 notebook 发 `exact_lookup_chunks`），对等模式下整条关掉（D0-5，`fangan_done.md`
+      第 40 条）。代价如实：全局问答没有精确标识符快查——「问一个命令名」在全局模式下只靠
+      语义腿（每条语义腿本来就带一路按子查询原文的全文检索，所以不是「只剩语义臂」，但没有
+      整节取回）。联邦化要连带决定 `exact_section_reserve` 的席位在跨库池子里该怎么分（今天它
+      只认 `exact_ids` 这一个集合，跨库之后需要一个按库的口径，否则某一个库的章节能把保底
+      席位全占了）。
 - [ ] **全局（对等）模式下集合枚举的引用卡只给到命名锚点挂载得到的库**（codex #755 第 6 轮
       P2）。`evidence_context.collection_item_citations` 在元素水合前复核成员资格，走的是
       **真实挂载谓词**（`self.notebooks.participant_notebook_ids(active)`）——那是鉴权座位，
@@ -353,8 +352,8 @@
       `answer-image-preview` 那一格 root modal；全局问答的小窗/大窗里配图只能原位看，点开无效。
       直接复用要把 Esc 拦截下沉（全局窗口自己已经吃掉 Esc，再叠一层 modal 会出现「按 Esc 关掉
       的是窗口而不是图」），属于弹窗协调器一侧的独立改动。
-- [ ] **跨库最终答案的全局关键词臂 / 精确标识符臂**。上面那条登记的是把两条 active-only 腿
-      **逐库联邦化**；另有一种形态是在跨库合并**之后**、对最终候选池再跑一次全局口径的词法
+- [ ] **跨库最终答案的全局关键词臂 / 精确标识符臂**。上面那条登记的是把 active-only 腿
+      **逐库联邦化**（关键词臂已按这种形态落地，精确查找臂待做）；另有一种形态是在跨库合并**之后**、对最终候选池再跑一次全局口径的词法
       /精确匹配（成本与库数无关，但拿不到各库的 FTS 索引）。两种形态解决的问题不同（前者补
       逐库召回，后者补跨库排序与标识符定位），拍板时要一起比较，不要默认前者就是答案。
 - [ ] BM25 / FTS5 / tsvector 全文索引：已评估为低 ROI、基础设施级，暂缓。

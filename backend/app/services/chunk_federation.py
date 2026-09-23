@@ -100,7 +100,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from app.services.cancellation import AskCancelled, raise_if_cancelled
 # Only the NAME, from the dependency-free domain layer: these modules are
@@ -243,6 +243,18 @@ class _Task:
     # ``_federated_tasks``). ``None`` only for a non-peer active notebook,
     # whose call shape stays the bare positional one.
     visible: tuple | None
+    # A leg that is NOT the semantic chunk leg: ``_producer_call`` hands the
+    # task to this callable instead of calling ``_retrieve_chunks``. ``None``
+    # -- every semantic leg -- keeps the historical call shape exactly. Its one
+    # user today is the peer-mode keyword arm
+    # (``federated_keyword_chunk_candidates``), which borrows this module's
+    # whole fan-out rather than growing a second concurrency mechanism.
+    producer: Callable[["_Task"], tuple] | None = None
+    # Which recall arm the leg belongs to, stamped on its skip event so an
+    # operator can tell a keyword leg's skip from a semantic leg's (only the
+    # latter decides coverage). Empty -- and absent from the event -- for the
+    # semantic legs, whose events keep their historical fields.
+    arm: str = ""
 
 
 class _AnyCancelled:
@@ -511,6 +523,118 @@ def federated_chunk_candidates(
     )
 
 
+def federated_keyword_chunk_candidates(
+    candidates, active_notebook_id: str, needle: str,
+    leg: Callable[[str, "tuple | None"], list],
+) -> list:
+    """PEER mode's bilingual-keyword arm: one keyword leg per participant.
+
+    ``leg(notebook_id, visible)`` is the single-library keyword search for ONE
+    library under that library's frozen ceiling; it runs inside the task's own
+    ``Context`` on the same fan-out the semantic legs use (``_run_tasks``: the
+    borrowed executor, the fair window, this call's phase deadline, the
+    per-library ``read_budget``, the fan-out slot and cancellation), so the arm
+    owns no concurrency of its own.
+
+    The participant set and each library's ceiling come from the one place the
+    semantic legs take them (``_bounded_participants`` and
+    ``_federated_tasks``/``_peer_visible_sources``).  The SILENT form of the
+    seat on purpose: the truncation fact is announced once per call by the
+    semantic arm, and a second copy would read like a second cut.
+
+    ⛔ NO RECEIPTS.  Coverage (searched/skipped) is the semantic legs' verdict
+    alone: this function never reaches ``_merge_results`` or the plan's
+    callbacks, so a keyword leg that timed out or failed is only "this library
+    had no keyword hits" -- fail-open, with its skip event marked
+    ``arm="keyword"``.  ``AskCancelled`` and the attestation error still
+    propagate through ``_run_one``/``_run_tasks`` exactly as for a semantic leg.
+
+    Merge: each library's hits in its own keyword-score order, interleaved
+    round-robin (every library's 1st, then every 2nd, ...), first occurrence
+    of a ``chunk_id`` wins, capped at ``global_ask_candidate_limit`` -- so no
+    library can fill the list by volume and its length has a fixed bound.
+    Every hit is stamped with its owning library, as the semantic legs' are in
+    peer mode.
+
+    Emits one content-free ``ask_stage``/``global_keyword_arm`` summary.
+    """
+    started = time.perf_counter()
+    participants, _mounted_total = _bounded_participants(
+        candidates, active_notebook_id,
+    )
+    plan = current_federated_run_plan()
+    # Derived once, before the first read, exactly as the semantic arm does.
+    deadline = (
+        time.monotonic() + float(plan.phase_timeout_seconds)
+        if plan is not None else 0.0
+    )
+    failed: dict = {}
+
+    def _producer(task: _Task) -> tuple:
+        try:
+            return (list(leg(task.notebook_id, task.visible)), [], None)
+        except (AskCancelled, RetrievalControlError):
+            raise
+        except Exception:
+            # Written by one worker per library (distinct keys) and read by the
+            # parent only after the fan-out returned; re-raised so ``_run_one``
+            # classifies and emits it like any other leg.
+            failed[task.notebook_id] = True
+            raise
+
+    dropped: dict = {}
+    tasks = _federated_tasks(
+        candidates, active_notebook_id, participants, [needle], None,
+        dropped=dropped, plan=plan, deadline=deadline,
+        producer=_producer, arm="keyword",
+    )
+    results, reasons = (
+        _run_tasks(candidates, tasks, plan, deadline) if tasks else ([], [])
+    )
+    columns: list = []
+    for task, value in zip(tasks, results):
+        hits = sorted(value[0], key=lambda hit: -float(hit.relevance or 0.0))
+        columns.append([
+            replace(hit, notebook_id=task.notebook_id) if task.peer else hit
+            for hit in hits
+        ])
+    merged = _interleave_capped(
+        columns, int(candidates.settings.global_ask_candidate_limit),
+    )
+    unhealthy = set(dropped) | set(failed) | {
+        task.notebook_id for task, reason in zip(tasks, reasons) if reason
+    }
+    _emit(candidates, {
+        "kind": "ask_stage",
+        "stage": "global_keyword_arm",
+        "site": "global_keyword_arm",
+        "participants": len(participants),
+        "libraries_with_hits": sum(1 for column in columns if column),
+        "merged": len(merged),
+        "failed_libraries": len(unhealthy),
+        "latency_ms": round((time.perf_counter() - started) * 1000),
+    })
+    return merged
+
+
+def _interleave_capped(columns: list, limit: int) -> list:
+    """Round-robin over per-library ranked lists, de-duplicated, capped."""
+    merged: list = []
+    seen: set = set()
+    for position in range(max((len(column) for column in columns), default=0)):
+        for column in columns:
+            if len(merged) >= limit:
+                return merged
+            if position >= len(column):
+                continue
+            hit = column[position]
+            if hit.chunk_id in seen:
+                continue
+            seen.add(hit.chunk_id)
+            merged.append(hit)
+    return merged
+
+
 def _task_participants(tasks: list) -> tuple:
     """The ``(notebook_id, tier)`` pairs the task table actually carries.
 
@@ -642,7 +766,7 @@ def _single_library_result(
 def _federated_tasks(
     candidates, active_notebook_id: str, participants, sub_queries: list,
     drifted: bool | None, *, dropped: dict | None = None, plan=None,
-    deadline: float = 0.0,
+    deadline: float = 0.0, producer=None, arm: str = "",
 ) -> list:
     """The flat task table: library-major, sub-query-minor, deterministic.
 
@@ -711,6 +835,13 @@ def _federated_tasks(
     ``plan``/``deadline`` are ``None``/``0.0`` for every caller without a run
     plan, and that path is byte-identical: no budget is opened, no deadline is
     consulted, and the two reads keep their present shapes.
+
+    ``producer``/``arm`` are carried onto every task (and ``arm`` onto the
+    preparation-skip events) for a non-semantic arm that reuses this exact
+    preparation -- the same participant loop, the same frozen per-library
+    ceiling, the same drop rules -- instead of a second copy of them.  Both
+    default to the semantic leg's values, which leave its tasks and events
+    unchanged.
     """
     # ``chunk_lane`` 而不是 ``retrieval_candidates``:那边的 ``_gather_vector_chunks``
     # 调本模块,两边互取就是 import 环;这两个 ContextVar 与那把探针因此住在
@@ -750,13 +881,16 @@ def _federated_tasks(
                     # are what "nothing ran" looks like in it.
                     if dropped is not None:
                         dropped[notebook_id] = "queue_deadline"
-                    _emit(candidates, {
+                    event = {
                         "kind": "chunk_federation_skipped",
                         "notebook_id": notebook_id,
                         "error_type": "",
                         "latency_ms": 0,
                         "reason": "queue_deadline",
-                    })
+                    }
+                    if arm:
+                        event["arm"] = arm
+                    _emit(candidates, event)
                     continue
                 # ``min`` of the two bounds, never the per-library one alone,
                 # for the reason ``_budgeted_retrieve_for`` spells out for a
@@ -806,6 +940,8 @@ def _federated_tasks(
                             else "unavailable"
                         )
                         event["reason"] = dropped[notebook_id]
+                    if arm:
+                        event["arm"] = arm
                     _emit(candidates, event)
                     continue
             peek_token = _CHUNK_PEEK_ONLY.set(peek)
@@ -814,7 +950,7 @@ def _federated_tasks(
                 tasks.extend(
                     _Task(
                         notebook_id, tier, query, contextvars.copy_context(),
-                        peer, visible,
+                        peer, visible, producer, arm,
                     )
                     for query in sub_queries
                 )
@@ -1251,6 +1387,8 @@ def _emit_leg_skipped(candidates, task: _Task, reason: str, error_type: str,
         event["reason"] = reason
     if lane:
         event["lane"] = lane
+    if task.arm:
+        event["arm"] = task.arm
     _emit(candidates, event)
 
 
@@ -1323,7 +1461,13 @@ def _producer_call(candidates, task: _Task):
     contextualized live enumeration, not a producer's own genuinely narrow
     universe, and attesting True would turn off the corpus-language probe and
     switch the lexical arm.
+
+    A task that carries its own ``producer`` (a non-semantic arm borrowing
+    this fan-out) is handed to it instead; every semantic leg has ``None``
+    there, so neither call shape above changes.
     """
+    if task.producer is not None:
+        return task.producer(task)
     if not task.peer:
         return candidates._retrieve_chunks(task.notebook_id, task.query)
     return candidates._retrieve_chunks(
