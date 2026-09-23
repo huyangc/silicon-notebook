@@ -111,15 +111,19 @@ class SourceStore:
     # only inspects a couple of bytes.  ``location_label`` is always short and
     # never TOASTed, so this still costs a heap fetch (no covering-index scan)
     # but not a decompression.
-    #   * NOT GLOB '* part [0-9]*'  -> no " part <digits>" suffix at all (an
-    #     unsplit table, or a non-numeric label coincidentally containing the
-    #     substring "part" elsewhere never matches because GLOB matches the
-    #     WHOLE string against "* part <digit>*").
-    #   * GLOB '* part 1'           -> ends in EXACTLY " part 1" (no trailing
-    #     digit), so "part 10"/"part 12" do not match this arm and stay
-    #     classified as continuations.
+    # A continuation label ENDS in " part N" with N >= 2 and nothing after the
+    # digits (PostgreSQL: the anchored regex in its store).  GLOB has no "one or
+    # more digits" operator, and a trailing `*` would accept arbitrary text —
+    # a Markdown bundle member "reports part 2/data.md · Markdown table 1" is an
+    # unsplit table (codex #789 r1) — so each digit count is spelled out, the
+    # first digit never 0.  Five digits bound the part number: a sheet's
+    # 1,048,576-row maximum at the 30-row cap is < 35,000 parts.
     _NOT_TABLE_CONTINUATION_SQL = (
-        "(location_label NOT GLOB '* part [0-9]*' OR location_label GLOB '* part 1') "
+        "NOT (location_label GLOB '* part [2-9]' "
+        "OR location_label GLOB '* part [1-9][0-9]' "
+        "OR location_label GLOB '* part [1-9][0-9][0-9]' "
+        "OR location_label GLOB '* part [1-9][0-9][0-9][0-9]' "
+        "OR location_label GLOB '* part [1-9][0-9][0-9][0-9][0-9]') "
     )
 
     def __init__(
