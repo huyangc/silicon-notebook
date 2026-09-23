@@ -893,6 +893,12 @@ def test_element_page_rows_skips_table_continuation_parts(repo):
         ("DOCX table 3 part 1", False),
         ("DOCX table 3 part 2", True),
         ("PPTX slide 1 table 5 part 100", True),  # 三位数续段号
+        ("XLSX p.1 table 1 part 34953", True),    # 五位数:百万行工作簿的上界
+        # codex #789 r1:「 part 2」只出现在中间(压缩包成员路径)的未切分表不是续段。
+        ("reports part 2/data.md · Markdown table 1", False),
+        ("reports part 2/data.md · Markdown table 1 part 1", False),
+        ("XLSX p.1 table 1 part 2b", False),      # 数字后还有字符
+        ("XLSX p.1 table 1 part 02", False),      # 解析器不产出前导零
     ],
 )
 def test_table_continuation_glob_predicate_matches_label_convention(

@@ -3711,6 +3711,12 @@ def test_table_continuation_parts_count_and_enumerate_once(core_stores: CoreStor
                 SourceElementWrite(
                     "el-old", "table", "XLSX p.1 table 2", "old table", {},
                 ),
+                # codex #789 r1:「 part 2」只出现在中间(Markdown 压缩包成员路径)的
+                # 未切分表不是续段——判定必须锚定在 label 结尾(SQLite 侧同款用例)。
+                SourceElementWrite(
+                    "el-bundle", "table",
+                    "reports part 2/data.md · Markdown table 1", "bundle table", {},
+                ),
             ),
             created_at=NOW,
         )
@@ -3718,12 +3724,14 @@ def test_table_continuation_parts_count_and_enumerate_once(core_stores: CoreStor
         counts = core_stores.sources.element_type_count_rows(
             connection, ["src-table-split"], ENUMERABLE_ELEMENT_KINDS
         )
-        assert counts == [("src-table-split", "table", 2)]  # 不是 4
+        assert counts == [("src-table-split", "table", 3)]  # 不是 5
 
         pages = core_stores.sources.element_page_rows(
             connection, "src-table-split", "table", None, 100
         )
-    assert sorted(row["id"] for row in pages) == ["el-old", "el-split-1"]  # part 2/3 被跳过
+    assert sorted(row["id"] for row in pages) == [
+        "el-bundle", "el-old", "el-split-1"
+    ]  # part 2/3 被跳过
 
 
 def test_typed_collection_enumeration_primitives_match_sqlite_semantics(
