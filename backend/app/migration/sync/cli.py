@@ -44,7 +44,6 @@ from app.migration.sync.import_ import (
     SyncImportError,
     _STATUS_DONE,
     _moment,
-    _prior_imports,
     _PriorImport,
     _read_moment,
     import_package,
@@ -478,26 +477,72 @@ def _load_export_leases(source: _Source, conn: Any) -> list[dict[str, Any]]:
     return rows
 
 
-def _chain_head(prior: Sequence[_PriorImport]) -> _PriorImport | None:
-    """The row a NEXT incremental package's ``base_package_id`` must name,
-    for this ``source_env`` -- the same "done, and nothing downstream of it"
-    rule ``import_.py``'s ``_assert_chain`` enforces (design doc §8), read
-    back here for display rather than re-derived: this reuses
-    :meth:`_PriorImport.downstream_of` and does not re-implement the
-    ``report_json``/``to_seq`` reading ``_prior_imports`` already did.
+def _chain_candidate_sort_key(row: _PriorImport) -> tuple[int, datetime, str]:
+    """Deterministic ordering for chain-head candidates: ``(to_seq,
+    created_at, package_id)``. Two rows can legitimately tie on the first two
+    (an empty incremental window and the row it continued from can share a
+    ``to_seq``; a naive/undated row falls back to the epoch), so
+    ``package_id`` breaks the tie and guarantees a total order regardless of
+    which physical row order the caller built ``prior`` from (neither
+    ``sync_imports`` nor the in-memory grouping below carries an ORDER BY of
+    its own)."""
+    created_at = row.created_at or datetime.min.replace(tzinfo=timezone.utc)
+    return (row.to_seq, created_at, row.package_id)
 
-    ``None`` when this ``source_env`` has no ``done`` row at all -- nothing
-    has ever finished importing from it, so there is no base yet for a first
-    incremental package (it would have to arrive as ``mode=full``).
+
+def _chain_heads_for(prior: Sequence[_PriorImport]) -> list[_PriorImport]:
+    """Every ``done`` row for this ``source_env`` that nothing else is
+    downstream of -- the same "done, and nothing downstream of it" rule
+    ``import_.py``'s ``_assert_chain`` enforces (design doc §8), read back
+    here for display rather than re-derived: reuses
+    :meth:`_PriorImport.downstream_of`, the actual comparison rule, instead
+    of re-deriving it.
+
+    **Usually returns one row. Can legitimately return more than one**
+    (codex review round 2, P2-1): a full baseline and a later
+    ``--notebook``-scoped import, or a gate-closed full import, can share the
+    same watermark position without either being downstream of the other
+    (neither of those two shapes advances the source's own watermark, so
+    the chain rules never treat them as continuing anything -- see the
+    design doc's §8 "已知边界"). The OLD version of this function returned
+    the first undominated row it found while walking ``prior`` in whatever
+    order the caller passed it in -- silently non-deterministic whenever more
+    than one existed, since neither ``sync_imports`` nor
+    ``_load_sync_status``'s in-memory grouping carries an ORDER BY. This
+    version computes the FULL undominated set and lets the caller decide what
+    "ambiguous" means for its output, rather than guessing on this function's
+    behalf.
+
+    Only rows sharing prior's own MAXIMUM ``to_seq`` can possibly qualify:
+    ``downstream_of`` returns True unconditionally whenever a row's own
+    ``to_seq`` exceeds the candidate's (its first, unconditional branch), so
+    any row with a lower ``to_seq`` always has at least the max-``to_seq``
+    row downstream of it and can never be a head. Narrowing to that (usually
+    tiny) subset before the pairwise comparison keeps this cheap on a
+    ``source_env`` with a long ``done`` history: O(n) to find the maximum
+    plus O(k^2) over just the rows tied for it, instead of an O(n^2) scan
+    over every ``done`` row (codex review round 2, P2-2).
+
+    Returned sorted by ``_chain_candidate_sort_key`` -- deterministic
+    regardless of the order ``prior`` arrived in, so two callers building the
+    same set from rows fetched in a different physical order still print or
+    serialize it identically (the reason the OLD version's row-order
+    dependence was a real bug and not just a style nit).
     """
     done = [row for row in prior if row.status == _STATUS_DONE]
-    for candidate in done:
+    if not done:
+        return []
+    max_to_seq = max(row.to_seq for row in done)
+    candidates = [row for row in done if row.to_seq == max_to_seq]
+    heads = [
+        candidate
+        for candidate in candidates
         if not any(
             other.package_id != candidate.package_id and other.downstream_of(candidate)
-            for other in done
-        ):
-            return candidate
-    return None
+            for other in candidates
+        )
+    ]
+    return sorted(heads, key=_chain_candidate_sort_key)
 
 
 def _pending_notebook_deletes(source: _Source, conn: Any) -> dict[str, int]:
@@ -562,7 +607,7 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
     )
     imports_sql = (
         "SELECT package_id, source_env, status, started_at, finished_at, "
-        "report_json FROM sync_imports ORDER BY started_at DESC"
+        "from_seq, to_seq, report_json FROM sync_imports ORDER BY started_at DESC"
     )
     source = _Source(settings, ROOT_DIR)
     try:
@@ -598,20 +643,6 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
                 runs = _load_export_leases(source, conn)
                 runs_note = None
             imports = source.fetch(conn, imports_sql)
-            source_envs = sorted({str(row["source_env"]) for row in imports})
-            chain_heads: dict[str, dict[str, Any] | None] = {}
-            for source_env in source_envs:
-                prior = _prior_imports(source, conn, source_env)
-                head = _chain_head(prior)
-                chain_heads[source_env] = (
-                    {
-                        "package_id": head.package_id,
-                        "to_seq": head.to_seq,
-                        "created_at": head.created_at,
-                    }
-                    if head is not None
-                    else None
-                )
             pending_notebook_deletes = _pending_notebook_deletes(source, conn)
     finally:
         source.close()
@@ -624,6 +655,44 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
                 report = {}
         row["report_json"] = report or {}
         row["notebooks"] = len(row["report_json"].get("notebooks", []) or [])
+    # Chain heads are computed here, off the ALREADY-FETCHED `imports` rows
+    # (report_json now parsed by the loop above), rather than by calling back
+    # into `_prior_imports` once per source_env inside the read transaction.
+    # That used to mean one extra `sync_imports` query AND one extra
+    # `SELECT DISTINCT package_id FROM sync_import_progress` query per
+    # source_env; `_load_sync_status` already has every `sync_imports` column
+    # `_prior_imports` reads (this function's own `imports_sql` above now
+    # also selects `from_seq`/`to_seq`) and never needed `has_progress` in the
+    # first place, so building the `_PriorImport` rows locally, grouped by
+    # source_env, drops both redundant round trips to zero rather than just
+    # hoisting the progress query once (codex review round 2, P2-3).
+    prior_by_source_env: dict[str, list[_PriorImport]] = {}
+    for row in imports:
+        prior_by_source_env.setdefault(str(row["source_env"]), []).append(
+            _PriorImport(
+                package_id=str(row["package_id"]),
+                status=str(row["status"]),
+                started_at=_read_moment(row.get("started_at")),
+                created_at=_read_moment(row["report_json"].get("package_created_at")),
+                heartbeat_at=None,
+                has_progress=False,
+                notebooks=None,
+                from_seq=int(row.get("from_seq") or 0),
+                to_seq=int(row.get("to_seq") or 0),
+                base_package_id=str(row["report_json"].get("base_package_id") or ""),
+            )
+        )
+    chain_heads: dict[str, list[dict[str, Any]]] = {
+        source_env: [
+            {
+                "package_id": head.package_id,
+                "to_seq": head.to_seq,
+                "created_at": head.created_at,
+            }
+            for head in _chain_heads_for(prior)
+        ]
+        for source_env, prior in prior_by_source_env.items()
+    }
     return {
         "exports": exports,
         "exports_note": exports_note,
@@ -718,15 +787,24 @@ def _cmd_status(args: argparse.Namespace, settings: Settings) -> int:
     if not source_envs:
         print("  （无）")
     for source_env in source_envs:
-        head = chain_heads.get(source_env)
-        if head is None:
+        heads = chain_heads.get(source_env) or []
+        if not heads:
             head_desc = "尚无入链的已完成包（下一个包只能是 mode=full）"
         else:
-            created_at = head["created_at"]
-            created_note = created_at.isoformat() if created_at is not None else "-"
-            head_desc = (
-                f"{head['package_id']}（to_seq={head['to_seq']}，创建于 {created_note}）"
+            head_desc = "、".join(
+                f"{head['package_id']}（to_seq={head['to_seq']}，创建于 "
+                f"{head['created_at'].isoformat() if head['created_at'] is not None else '-'}）"
+                for head in heads
             )
+            if len(heads) > 1:
+                # More than one done package that neither has moved past the
+                # other -- print all of them rather than silently pick one
+                # (codex review round 2, P2-1); see _chain_heads_for's
+                # docstring for how this can legitimately happen.
+                head_desc += (
+                    "——链头不唯一；源端下一个窗口的 base 会是其中推进过水位的那个"
+                    "（to_seq 最大且 base 非空或 to_seq>0）"
+                )
         pending = pending_deletes.get(source_env, 0)
         pending_note = (
             f"，等待删除作业清理的镜像 {pending} 个（由目标端应用的删除作业完成）"
