@@ -44,6 +44,13 @@ export function itemSig(it: PendingItem): string {
   return `index:${it.notebook_id}:${it.state ?? ""}`;
 }
 
+/** 条目行首那枚出处标签:库名;全局问答不属于任何一本库,标成「全局问答」。
+ *  名字为空(旧数据/库已删)时返回空串,调用方就不渲染一个空格子。 */
+export function pendingItemOrigin(it: PendingItem): string {
+  if (it.type === "ask" && it.scope === "global") return "全局问答";
+  return it.notebook_name || "";
+}
+
 /** 「已进行多久」——纯函数,时钟由调用方传入(组件测试因此不依赖真实时间)。
  *
  * `askedAt` 解析不出来(空串、旧行、脏值)就返回空串,让调用方整段省略这一截,

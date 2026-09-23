@@ -34,6 +34,8 @@ from app.services.cancellation import AskCancelled, raise_if_cancelled
 from app.services.federated_run import DetachedAskTurn, FederatedRunPlan
 from app.services.global_ask_feed import JobFeed
 from app.services.global_run import global_ask_run
+# 待确认中心「进行中的提问」的推送入口——与笔记本内问答的 worker 同一个叶子模块。
+from app.services.pending_bus import publish_snapshot
 from app.services.retrieval_participants import ParticipantOverride
 
 
@@ -1063,6 +1065,10 @@ class GlobalAskService:
                     # keepalives for a job that never ran.
                     if orphan is not None:
                         orphan.close(None)
+                    # worker 从未运行,起点那次推送也从未发生;但行在失败写入之前已是
+                    # running,并发的快照重算可能已把它带进铃铛。快照是绝对值,补一次
+                    # 终态推送就足以抹掉它(与笔记本内问答提交失败同一处理)。
+                    publish_snapshot(user_id)
                     raise
                 previous = self.store.request_job(user_id, payload.client_request_id)
                 if previous is not None:
@@ -1611,6 +1617,11 @@ class GlobalAskService:
              authority_check, source_ceiling, followup=None, intent=None):
         delivered = False
         try:
+            # 待确认中心「进行中的提问」的起点,与笔记本内问答 worker 同一条规则:在
+            # worker 线程体里、``try`` 之内的第一句(快照是一次数据库读取,放请求线程就
+            # 加在按下发送与真正开跑之间;放 ``try`` 外遇到 ``BaseException`` 会连
+            # ``finally`` 的终态帧一起跳过)。作业行在线程启动前已提交,快照必含本次提问。
+            publish_snapshot(user_id)
             delivered = self._execute(
                 job, user_id, history, user_history, event, allowed,
                 authority_check, source_ceiling, followup, intent,
@@ -1658,6 +1669,10 @@ class GlobalAskService:
                 self._workers.pop(job.job_id, None)
                 self._feeds.pop(job.job_id, None)
                 self._live.pop(job.job_id, None)
+            # 终态刷一次铃铛,让「进行中的提问」条目消失:排在终态帧与离开在跑登记表
+            # **之后**(快照重算不许拖慢答案投递),又排在学习链**之前**(那几条链可能
+            # 慢,铃铛不该等它们)。三条分支(done/cancelled/failed)共用这一处。
+            publish_snapshot(user_id)
             # The post-completion learning chains run LAST: after the terminal
             # row, after the push stream's terminal frame and after the job has
             # left the live registry -- the same "never ahead of the browser's

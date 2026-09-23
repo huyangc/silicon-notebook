@@ -29,6 +29,7 @@ from app.repositories.like_pattern import escape_like_pattern
 from app.repositories.pending_action_rows import (
     RUNNING_ASK_ROWS,
     RUNNING_ASK_STATUSES,
+    merge_running_asks,
     running_ask_item,
 )
 from app.repositories.postgres import access_sql
@@ -1679,15 +1680,65 @@ class QueryStore:
                 RUNNING_ASK_ROWS,
             ),
         ).fetchall()
+        notebook_arm = [
+            (
+                row["created_at"],
+                running_ask_item(
+                    job_id=row["id"],
+                    notebook_id=row["notebook_id"],
+                    notebook_name=row["notebook_name"],
+                    conversation_id=row["conversation_id"],
+                    question=row["question"],
+                    status=row["status"],
+                    asked_at=row["asked_at"] or iso_timestamp(row["created_at"]) or "",
+                ),
+            )
+            for row in rows
+        ]
+        return merge_running_asks(
+            (notebook_arm, self._running_global_ask_items(db, user_id))
+        )
+
+    def _running_global_ask_items(self, db: object, user_id: str) -> list[tuple[object, dict]]:
+        """SQLite 侧 ``_running_global_ask_items`` 的孪生实现——精确在途状态、属主
+        隔离、参与库集合整体可读且存活、排序与上限逐条对应,理由见那一份 docstring。
+
+        方言差异只在写法:参与库用 ``jsonb_array_elements_text`` 展开(与
+        `/admin/users/{id}/activity` 全局臂同形);``global_ask_jobs.created_at`` 在
+        PostgreSQL 上同样是 ``text COLLATE "C"``(0057),写入格式固定,裸列序即绝对
+        时刻序,ORDER BY 用裸列才能走 0062 的 ``idx_global_ask_jobs_user_created``。
+        """
+        placeholders = ",".join("%s" for _ in RUNNING_ASK_STATUSES)
+        rows = db.execute(
+            "SELECT id, conversation_id, status, asked_at, created_at, "
+            "COALESCE(payload_json::jsonb->>'question','') AS question "
+            f"FROM global_ask_jobs WHERE user_id = %s AND status IN ({placeholders}) "
+            "AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements_text("
+            "COALESCE(payload_json::jsonb->'resolved_notebook_ids','[]'::jsonb)) p "
+            "WHERE NOT EXISTS(SELECT 1 FROM notebooks nb WHERE nb.id=p.value AND "
+            + access_sql.read_access_clause()
+            + f" AND nb.{access_sql.NOTEBOOK_LIVE_SQL})) "
+            "ORDER BY created_at DESC, id DESC LIMIT %s",
+            (
+                user_id,
+                *RUNNING_ASK_STATUSES,
+                *access_sql.read_access_params(user_id),
+                RUNNING_ASK_ROWS,
+            ),
+        ).fetchall()
         return [
-            running_ask_item(
-                job_id=row["id"],
-                notebook_id=row["notebook_id"],
-                notebook_name=row["notebook_name"],
-                conversation_id=row["conversation_id"],
-                question=row["question"],
-                status=row["status"],
-                asked_at=row["asked_at"] or iso_timestamp(row["created_at"]) or "",
+            (
+                row["created_at"],
+                running_ask_item(
+                    job_id=row["id"],
+                    notebook_id="",
+                    notebook_name="",
+                    conversation_id=row["conversation_id"],
+                    question=row["question"],
+                    status=row["status"],
+                    asked_at=row["asked_at"] or row["created_at"] or "",
+                    scope="global",
+                ),
             )
             for row in rows
         ]

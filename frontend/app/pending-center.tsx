@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Bell } from "lucide-react";
 import { performApiRequest } from "./api-client.ts";
 import { getToken } from "./auth";
-import { itemSig, currentSigs, doneMessage, pruneSigs, pendingView, askElapsedLabel } from "./pending-actions";
+import { itemSig, currentSigs, doneMessage, pruneSigs, pendingView, askElapsedLabel, pendingItemOrigin } from "./pending-actions";
 
 // 「进行中的提问」在铃铛打开时的重算间隔。快照只在提问起止时推送,已进行时长要
 // 自己走时钟;只在面板打开且真有在途提问时起表,关掉即停。
@@ -32,6 +32,9 @@ export type PendingItem = {
   job_id?: string;
   conversation_id?: string;
   asked_at?: string;
+  // ask:「notebook」是笔记本内的提问(点击打开那本库里的会话);「global」是全局问答,
+  // 不属于任何一本库(notebook_id/notebook_name 为空),点击打开全局问答窗口里的会话。
+  scope?: "notebook" | "global";
   title?: string;
   count?: number;
   state?: string;
@@ -334,7 +337,7 @@ export function PendingBell(props: {
                     {/* 库名对报告条目同样要显示(群组知识共享 P1):共享库里建的报告
                         原本连库名都解析不出来,现在后端随行带回。判据从「不是报告」
                         改成「有库名」——名字为空(旧数据/库已删)时不渲染一个空格子。 */}
-                    {it.notebook_name && <span className="pending-row-nb">{it.notebook_name}</span>}
+                    {pendingItemOrigin(it) && <span className="pending-row-nb">{pendingItemOrigin(it)}</span>}
                     <span className="pending-row-label">{labelFor(it)}</span>
                   </span>
                   <span className="pending-row-x" title="关掉"
