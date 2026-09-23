@@ -88,8 +88,9 @@ SKIPPED_NOT_ELIGIBLE = "skipped:not_eligible"
 # ``require_write_admission`` is concerned (mid-copy, mid-import, being deleted)
 # or its indexing pipeline is unavailable. Not this pass's business to fix.
 SKIPPED_REFUSED = "skipped:refused_by_builder"
-# Another process -- almost always the live service's own scheduler -- holds
-# the cross-process build claim. The notebook IS being indexed, just not here.
+# Another process holds the cross-process build claim. It may be an online
+# build, but it may equally be an export or a delta fold, neither of which
+# replaces already-indexed content -- so this outcome always carries a warning.
 SKIPPED_BUSY = "skipped:busy"
 SKIPPED_INTERRUPTED = "skipped:interrupted"
 
@@ -255,9 +256,11 @@ def _rebuild_one(
 
     This function never raises: a notebook that cannot be judged or built is a
     receipt line, so the next candidate still gets its turn and ``sync import``
-    still exits 0. Only an outcome an OPERATOR has to act on carries a warning --
-    a skip never does, because the whole point of the skip is that there is
-    nothing to do.
+    still exits 0. A warning is attached exactly when this run leaves the
+    notebook OWING a rebuild that nobody else is guaranteed to perform -- every
+    failure, and ``SKIPPED_BUSY``. The other skips carry none: the notebook
+    either does not want an index or is not in a state anyone could build it
+    in, so there is nothing for an operator to do.
     """
 
     def report(message: str) -> None:
@@ -285,11 +288,17 @@ def _rebuild_one(
     try:
         build_cli.run_build(repository, notebook_id, mode=_FULL, report=report)
     except build_cli.ScaleBuildCliBusy:
-        # Another process holds this notebook's build claim -- normally the
-        # live service's own scheduler, which reached it first. It is being
-        # indexed; this pass just is not the one doing it. Nothing published,
-        # nothing for an operator to do.
-        return SKIPPED_BUSY, ""
+        # Another process holds this notebook's build claim. Nothing was
+        # published here -- and, critically, we cannot assume the holder does
+        # what this pass owed the notebook. The SAME claim is taken by
+        # ``run_export`` (which only copies the artifacts out) and by an online
+        # delta fold (which appends and does not replace already-indexed
+        # content). Either of those overlapping this run would silently drop
+        # the full rebuild the import made necessary, and re-running the
+        # package will not bring it back: the second import is
+        # ``already_applied`` and rebuilds nothing. So this skip is the one
+        # skip that carries a warning (codex #791 R2 P2).
+        return SKIPPED_BUSY, _rebuild_busy_warning(notebook_id)
     except build_cli.ScaleBuildCliError:
         # The builder refused before touching anything: the notebook is not
         # live for ``require_write_admission`` (mid-copy, mid-import, being
@@ -302,11 +311,31 @@ def _rebuild_one(
     return "built", ""
 
 
+def _rebuild_busy_warning(notebook_id: str) -> str:
+    """Actionable, because nobody else is obliged to finish this.
+
+    Says WHAT to run rather than "retry later": re-running the package does not
+    help (the second import is ``already_applied`` and rebuilds nothing), so the
+    only way back to a correct index is the explicit full build below.
+    """
+    return (
+        f"笔记本 {notebook_id} 的 scale 索引本次未重建：另一个构建者正持有该库的"
+        "构建 claim。那一方不一定做的是全量重建（导出、增量 fold 用的是同一把 claim，"
+        "都不会替换已经索引过的内容），而重跑这个包不会再触发重建（第二次导入是"
+        "already_applied）。等它结束后手动全量重建一次："
+        "PYTHONPATH=backend python scripts/build_scale_index.py build "
+        f"--notebook {notebook_id} --full"
+    )
+
+
 def _rebuild_failed_warning(notebook_id: str) -> str:
+    # ``--full`` is spelled out even though it is the default: after an import
+    # a fold would be unsound (module docstring, property 3), so the command an
+    # operator copies out of this warning must not be ambiguous about it.
     return (
         f"笔记本 {notebook_id} 的 scale 索引重建失败；导入本身已完成、未受影响。"
         "排查后手动重跑：PYTHONPATH=backend python scripts/build_scale_index.py "
-        f"build --notebook {notebook_id}"
+        f"build --notebook {notebook_id} --full"
     )
 
 

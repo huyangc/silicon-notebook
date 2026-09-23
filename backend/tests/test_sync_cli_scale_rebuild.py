@@ -367,8 +367,9 @@ def test_ledger_mismatch_refuses_before_composing_anything(
 
 def test_builder_refusal_is_a_skip_without_a_warning(tmp_path, monkeypatch, capsys):
     """`run_build` 对「不是 live 笔记本」（正在拷贝/导入/删除）以及不可用的
-    indexing pipeline 抛 `ScaleBuildCliError`：它在动手之前就拒绝了。运维手动
-    重跑同一条命令也会被同样拒绝，所以不发警告。"""
+    indexing pipeline 抛 `ScaleBuildCliError`：它在动手之前就拒绝了。这本现在
+    谁也建不了，运维手动重跑同一条命令也会被同样拒绝——与 busy 不同，这里没有
+    「义务未尽」可言，所以不发警告。"""
     _settings(tmp_path, monkeypatch)
 
     def refusing(repo, notebook_id, *, mode, report):
@@ -384,10 +385,16 @@ def test_builder_refusal_is_a_skip_without_a_warning(tmp_path, monkeypatch, caps
     assert payload["warnings"] == []
 
 
-def test_another_builder_holding_the_claim_is_a_skip(tmp_path, monkeypatch, capsys):
+def test_another_builder_holding_the_claim_is_a_skip_with_a_warning(
+    tmp_path, monkeypatch, capsys
+):
     """`status()["building"]` 读的是进程内集合，在新起的 CLI 进程里恒为空，所以
-    在线服务正在建的本一定走到这里才被发现——跨进程 claim 才是那个真答案。它
-    说明系统在正常工作，不是重建出了问题。"""
+    别处正在建的本一定走到这里才被发现——跨进程 claim 才是那个真答案。
+
+    codex #791 R2 P2：但不能假设持有 claim 的那一方替我们做了全量重建。
+    `run_export`（只拷工件）和在线 delta fold（只追加，不替换已索引内容）持的是
+    同一把 claim；它们和本次重叠时，导入后必需的全量重建就静默丢了，而重导同一个
+    包是 already_applied、不会再建。所以这一条跳过必须带一条可执行的警告。"""
     _settings(tmp_path, monkeypatch)
 
     def busy_first(repo, notebook_id, *, mode, report):
@@ -404,7 +411,31 @@ def test_another_builder_holding_the_claim_is_a_skip(tmp_path, monkeypatch, caps
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["scale_rebuild"] == {"nb-1": "skipped:busy", "nb-2": "built"}
-    assert payload["warnings"] == []
+    assert len(payload["warnings"]) == 1
+    warning = payload["warnings"][0]
+    assert "nb-1" in warning
+    assert "--full" in warning
+    assert "build_scale_index.py" in warning
+    # 回执与警告都不许把构建器消息里的存储路径带出来。
+    assert "/srv/storage" not in warning
+
+
+def test_busy_warning_reaches_the_human_scale_warning_section(
+    tmp_path, monkeypatch, capsys
+):
+    _settings(tmp_path, monkeypatch)
+
+    def busy(repo, notebook_id, *, mode, report):
+        raise scale_build_cli.ScaleBuildCliBusy("held elsewhere")
+
+    _install(monkeypatch, _eligible("nb-1"), run_build=busy)
+    exit_code = _run_import(tmp_path, monkeypatch, _report(notebooks=("nb-1",)))
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "scale 索引: 重建 0、跳过 1、失败 0" in out
+    assert "  nb-1: skipped:busy" in out
+    assert "scale 重建警告:" in out
+    assert "--notebook nb-1 --full" in out
 
 
 def test_busy_stays_a_scale_build_cli_failure_for_existing_callers():

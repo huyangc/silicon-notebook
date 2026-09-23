@@ -294,7 +294,9 @@ def test_status_surveys_mirrors_against_the_chain_head_on_postgres(
     ``report_json`` 推导（没有 ``sync_applied_through_seq`` 列，也不比
     ``to_seq``——scoped 行的区间在库里恒为 0/0），而 ``notebooks`` 在这里是
     psycopg 已经解析好的 list、SQLite 那边是文本——两种形态必须收敛成同一份
-    结论。覆盖 lagging 与 deleting 两个桶，与 tests/test_sync_cli.py 的同款
+    结论。形态是：全量 → 一份一月的 scoped 快照（六月才导入）→ 一个 01-03 的
+    窗口（当天导入，带了这三本的改动）；于是那份旧快照盖掉了窗口，nb-scoped
+    真落后。覆盖 lagging 与 deleting 两个桶，与 tests/test_sync_cli.py 的同款
     用例对应。"""
     _migrate(cli_settings)
     database = PostgresDatabase(cli_settings, root_dir)
@@ -313,7 +315,7 @@ def test_status_surveys_mirrors_against_the_chain_head_on_postgres(
                 package_id="pkg-scoped",
                 source_env="prod-shanghai",
                 created_at="2026-01-02T00:00:00+00:00",
-                # 六月才引入的一月快照：判据看源端导出时间，不看导入先后。
+                # 一月的快照六月才导入：落在窗口的行上面，把它盖了回去。
                 started_at="2026-06-01T00:00:00+00:00",
                 scoped=True,
                 notebooks=("nb-scoped", "nb-gone"),
@@ -327,7 +329,8 @@ def test_status_surveys_mirrors_against_the_chain_head_on_postgres(
                 created_at="2026-01-03T00:00:00+00:00",
                 mode="incremental",
                 base_package_id="pkg-full",
-                notebooks=("nb-chain",),
+                # 这一轮这三本都有变更，所以窗口带上了它们。
+                notebooks=("nb-chain", "nb-scoped", "nb-gone"),
             )
             _insert_mirror_pg(conn, "nb-chain", "prod-shanghai")
             _insert_mirror_pg(conn, "nb-scoped", "prod-shanghai")
@@ -370,8 +373,8 @@ def test_status_surveys_mirrors_against_the_chain_head_on_postgres(
     ) in out
     assert (
         "落后 nb-scoped（nb-scoped）：最近带过它的是 pkg-scoped"
-        "（2026-01-02T00:00:00+00:00），比链头 pkg-window"
-        "（2026-01-03T00:00:00+00:00）更旧；"
+        "（2026-01-02T00:00:00+00:00），它盖掉了更晚导出、更早导入的 pkg-window"
+        "（2026-01-03T00:00:00+00:00）；"
     ) in out
     assert "待删除 nb-gone（nb-gone）：" in out
     assert (
