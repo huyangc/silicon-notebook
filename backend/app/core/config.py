@@ -1370,6 +1370,13 @@ class Settings(BaseSettings):
     global_ask_keyword_arm_enabled: bool = Field(
         True, validation_alias="GLOBAL_ASK_KEYWORD_ARM_ENABLED",
     )
+    # 对等(全局)模式下精确标识符臂逐库联邦化的回退开关。开着时问题里有可探测
+    # 名称才对每个参与库各查一次、按库以整节轮转交错并以 GLOBAL_ASK_CANDIDATE_LIMIT
+    # 封顶(不切断一节);关掉即回到「对等模式整条不跑」。仍受 EXACT_LOOKUP_ENABLED
+    # 总闸约束;单库问答不读它。
+    global_ask_exact_arm_enabled: bool = Field(
+        True, validation_alias="GLOBAL_ASK_EXACT_ARM_ENABLED",
+    )
     document_overview_max_elements: int = Field(
         64, ge=2, validation_alias="DOCUMENT_OVERVIEW_MAX_ELEMENTS",
     )

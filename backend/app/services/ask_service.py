@@ -133,7 +133,7 @@ from app.services.retrieval import (
     is_generated_question_only_chunk,
     merge_retrieval_supports,
     prefer_stronger_chunk_candidate,
-    promote_bounded_prefix,
+    promote_bounded_prefix_by_library,
 )
 from app.services.search_profile import render_style_block
 from app.services.source_graph_activation import (
@@ -2932,7 +2932,7 @@ class AskService:
             # 于是「参数表进不进 prompt」成了掷骰子。Python 的稳定排序保留插入序
             # (= 检索序 / 节内文档序),这既是确定的,也正好是该节该被读的顺序。
             ordered = sorted(chunks, key=lambda c: -c.relevance)
-            # 精确通道的块再往前提一小段(见 `promote_bounded_prefix`)。相关度
+            # 精确通道的块再往前提一小段(见 `promote_bounded_prefix_by_library`,跨库按库分席位)。相关度
             # 降序**不足以**保住它们,两条具体风险:①同分 1.0 洗牌——PPR / 词法
             # 通道也会给出 relevance 1.0 的块,稳定排序下它们按插入序排在精确块
             # **之前**,于是一次 PPR 丰收就能把整节命令表挤到预算之外;②切点落在
@@ -2945,7 +2945,7 @@ class AskService:
             # fangan_todo「结构化块挤空 reasoning 原文段」,本处不夹下限。
             # 按节合成注入的未绑定精确块**不**走这里:它们不在 `chunks` 里,而是
             # 经 `trailing_chunks` 单独成段装在本节全部绑定证据之后。
-            ordered = promote_bounded_prefix(
+            ordered = promote_bounded_prefix_by_library(
                 ordered,
                 lambda chunk: getattr(chunk, "exact_lookup", False),
                 self.settings.reasoning_exact_reserve,
@@ -3655,7 +3655,6 @@ class AskService:
             # merged into whichever candidate branch runs below.
             exact_hits = (self.candidates.exact_lookup_chunks(notebook_id, retrieval_query)
                           if self.settings.exact_lookup_enabled else [])
-            exact_ids = {c.chunk_id for c in exact_hits}
             ask_stage("expand_query", _t, n=len(sub_queries))
 
             # ── 检索 + 选择 ──
@@ -3714,7 +3713,7 @@ class AskService:
                 chunk_budget = max(0, self.settings.max_total_tokens
                                    - est_tokens(kg_block) - self._MIX_PROMPT_BUFFER_TOKENS)
                 from app.services.retrieval import (
-                    exact_section_reserve_rule, graph_reserve_rule,
+                    exact_section_reserve_rules, graph_reserve_rule,
                     select_with_reserves_baseline_first,
                 )
 
@@ -3728,8 +3727,8 @@ class AskService:
                 # behaviour byte-for-byte.
                 selected = select_with_reserves_baseline_first(ranked, chunk_budget, (
                     graph_reserve_rule(max(0, self.settings.chunk_graph_reserve)),
-                    exact_section_reserve_rule(
-                        max(0, self.settings.exact_section_reserve), exact_ids),
+                    *exact_section_reserve_rules(
+                        max(0, self.settings.exact_section_reserve), exact_hits),
                 ))
                 ask_stage("mix_rerank", _t, recall=len(candidates),
                           selected=len(selected), kg_nodes=len(kg_id_map),

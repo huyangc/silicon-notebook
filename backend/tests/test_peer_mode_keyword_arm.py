@@ -681,9 +681,9 @@ def test_keyword_arm_deadline_is_one_notebook_budget_capped_by_the_phase(monkeyp
             phase_timeout_seconds=phase, notebook_timeout_seconds=notebook,
         )
 
-    assert cf._keyword_arm_deadline(None) == 0.0
-    assert cf._keyword_arm_deadline(_plan(60, 5)) == clock.base + 5
-    assert cf._keyword_arm_deadline(_plan(3, 5)) == clock.base + 3
+    assert cf._supplement_arm_deadline(None) == 0.0
+    assert cf._supplement_arm_deadline(_plan(60, 5)) == clock.base + 5
+    assert cf._supplement_arm_deadline(_plan(3, 5)) == clock.base + 3
 
 
 def test_a_leg_started_late_is_still_bounded_by_the_arm_deadline(monkeypatch):

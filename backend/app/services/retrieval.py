@@ -885,6 +885,98 @@ def exact_section_reserve_rule(
     return ReserveRule(reserve=reserve, holds=_member, admits=_member)
 
 
+def library_seats(reserve: int, libraries: Sequence[str]) -> List[tuple]:
+    """``[(library, seats), ...]``: ``reserve`` seats shared fairly, total kept.
+
+    ``libraries`` is ordered best-first (each caller defines "best"): the
+    seats are split evenly, the remainder goes one each to the libraries at
+    the front, and when there are more libraries than seats only the first
+    ``reserve`` get one.  A library that would get zero seats is omitted, so
+    the seats always sum to ``max(0, reserve)``.
+    """
+    reserve = max(0, int(reserve))
+    ordered = list(dict.fromkeys(libraries))
+    if not ordered or reserve == 0:
+        return []
+    if len(ordered) > reserve:
+        return [(library, 1) for library in ordered[:reserve]]
+    base, extra = divmod(reserve, len(ordered))
+    return [
+        (library, base + (1 if index < extra else 0))
+        for index, library in enumerate(ordered)
+    ]
+
+
+def _chunk_library(chunk: "RetrievedChunk") -> str:
+    return str(getattr(chunk, "notebook_id", "") or "")
+
+
+def exact_section_reserve_rules(
+    reserve: int, exact_hits: Sequence["RetrievedChunk"],
+) -> tuple:
+    """The exact-section reserve, split per library when hits span several.
+
+    Hits from ONE library (every single-notebook ask, whose hits carry no or
+    one ``notebook_id``) give exactly ``(exact_section_reserve_rule(reserve,
+    ids),)`` -- today's single rule over the same id set.  Hits from ``k > 1``
+    libraries (the peer-mode federated exact arm) give one rule per library,
+    the ``reserve`` seats shared by ``library_seats`` in the order each
+    library's first hit appears in ``exact_hits`` (the merge's order), so one
+    library's large section cannot take every seat.  The total stays
+    ``reserve``.
+    """
+    hits = list(exact_hits)
+    libraries = list(dict.fromkeys(_chunk_library(chunk) for chunk in hits))
+    seats = library_seats(reserve, libraries)
+    if len(libraries) <= 1 or not seats:
+        return (exact_section_reserve_rule(
+            reserve, {chunk.chunk_id for chunk in hits}),)
+    return tuple(
+        exact_section_reserve_rule(count, {
+            chunk.chunk_id for chunk in hits
+            if _chunk_library(chunk) == library
+        })
+        for library, count in seats
+    )
+
+
+def promote_bounded_prefix_by_library(
+    chunks: Sequence["RetrievedChunk"],
+    holds: Callable[["RetrievedChunk"], bool],
+    reserve: int,
+) -> List["RetrievedChunk"]:
+    """``promote_bounded_prefix`` with its ``reserve`` shared per library.
+
+    When every chunk satisfying ``holds`` belongs to one library (every
+    single-notebook ask) this IS ``promote_bounded_prefix``, item for item.
+    When they span several (the peer-mode federated exact arm), the seats are
+    split by ``library_seats`` in the order each library's first held chunk
+    appears in ``chunks`` (relevance order for the caller), and each library
+    promotes at most its own share -- still a stable reordering that drops
+    nothing, and still at most ``reserve`` chunks in total.
+    """
+    ordered = list(chunks)
+    libraries = list(dict.fromkeys(
+        _chunk_library(chunk) for chunk in ordered if holds(chunk)
+    ))
+    if len(libraries) <= 1:
+        return promote_bounded_prefix(ordered, holds, reserve)
+    seats = dict(library_seats(reserve, libraries))
+    used: Dict[str, int] = {}
+    promoted: List["RetrievedChunk"] = []
+    remainder: List["RetrievedChunk"] = []
+    for chunk in ordered:
+        library = _chunk_library(chunk)
+        if used.get(library, 0) < seats.get(library, 0) and holds(chunk):
+            used[library] = used.get(library, 0) + 1
+            promoted.append(chunk)
+        else:
+            remainder.append(chunk)
+    if not promoted:
+        return ordered
+    return promoted + remainder
+
+
 def promote_bounded_prefix(
     chunks: Sequence["RetrievedChunk"],
     holds: Callable[["RetrievedChunk"], bool],

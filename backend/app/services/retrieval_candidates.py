@@ -4191,17 +4191,126 @@ class CandidateRetrievalService(_RetrievalState):
         `_keyword_chunk_candidates`, and fail-open for the same reason: a
         supplementary recall channel must never take the whole retrieval down.
 
-        ACTIVE-ONLY, and therefore closed in PEER mode (unlike
-        `_keyword_chunk_candidates`, which is federated there; this arm's
-        federation is still registered in `fangan_todo.md`): an identifier
-        lookup that only ever reaches the nominal active would give it a second
-        recall leg its peers do not have, and `exact_section_reserve` would then reserve budget seats for
-        that one library's sections.  With `[]` here the reserve rule becomes
-        inert on its own (its `exact_ids` set is empty), so no second gate is
-        needed downstream.
+        PEER mode federates it (``_peer_exact_lookup_chunks``), like
+        `_keyword_chunk_candidates`: an identifier lookup that only ever
+        reached the nominal active would give it a second recall leg its peers
+        do not have.  Every other run takes the single-library body
+        (``_exact_lookup_chunks_one``) exactly as before.
         """
         if federated_ask_active():
+            return self._peer_exact_lookup_chunks(notebook_id, query)
+        return self._exact_lookup_chunks_one(notebook_id, query)
+
+    def _exact_lookup_limits(self):
+        from app.services.exact_lookup import ExactLookupLimits
+
+        return ExactLookupLimits(
+            max_identifiers=self.settings.exact_lookup_max_identifiers,
+            fts_k=self.settings.exact_lookup_fts_k,
+            max_sections=self.settings.exact_lookup_max_sections,
+            max_chunks_per_section=(
+                self.settings.exact_lookup_max_chunks_per_section),
+        )
+
+    def _exact_lookup_deps(self):
+        from app.services.exact_lookup import ExactLookupDeps
+
+        return ExactLookupDeps(
+            connect=self._connect,
+            exact_search=self.knowledge.chunk_exact_search,
+            section_rows=self.chunks.chunks_by_section,
+            # `hydrate_rows` already returns the exact row shape the
+            # section fetch does (id/source_id/text/section_path/
+            # element_ids/source_title) on BOTH adapters, so the
+            # by-id path needs no new store primitive — only this seam.
+            chunk_rows=self.chunks.hydrate_rows,
+        )
+
+    def _peer_exact_lookup_chunks(self, notebook_id: str, query: str):
+        """PEER mode: the exact-identifier lookup once per participant.
+
+        Gates, all in the parent and all before any read: the operator's
+        ``EXACT_LOOKUP_ENABLED`` kill switch, the peer-arm rollback switch
+        ``GLOBAL_ASK_EXACT_ARM_ENABLED`` (off → the old peer-mode ``[]``), and
+        the module's own zero-IO identifier test.  A question naming nothing
+        probe-worthy returns here without touching the participant seat,
+        starting a task or emitting an event -- the neutrality guarantee the
+        single-library path has always had.
+
+        Otherwise ``chunk_federation.federated_exact_chunk_candidates`` runs
+        ``_peer_exact_leg`` per library and owns the merge, the cap, the
+        evidence registration and the summary event.
+        """
+        if not self.settings.exact_lookup_enabled:
             return []
+        if not self.settings.global_ask_exact_arm_enabled:
+            return []
+        from app.services.exact_lookup import exact_lookup_terms
+
+        limits = self._exact_lookup_limits()
+        if not exact_lookup_terms(query, limits):
+            return []
+        from app.services.chunk_federation import (
+            federated_exact_chunk_candidates,
+        )
+
+        return federated_exact_chunk_candidates(
+            self, notebook_id, query, self._peer_exact_leg(query, limits),
+        )
+
+    def _peer_exact_leg(self, query: str, limits):
+        """One library's exact-identifier leg for the peer-mode fan-out.
+
+        Runs inside the federated task's own ``Context`` and read budget.
+
+        * A library with no visible source under its frozen ceiling issues no
+          query at all (``scoped_allowed_source_ids`` over the visible list
+          ``_federated_tasks`` enumerated, as the keyword leg derives it).
+        * The single path's source gate, judged PER LIBRARY
+          (``_peer_exact_scope_drifted``): the lookup has no source predicate,
+          so a library whose live visible universe no longer equals its frozen
+          ceiling is skipped -- that library alone.
+        * Any failure propagates to ``_run_one``: no ``_note_model_error``, so
+          a missing supplementary leg is never a banner; its skip event
+          (``arm="exact"``) carries the exception class.
+        """
+        from app.services.exact_lookup import exact_lookup_sections
+        from app.services.source_scope import scoped_allowed_source_ids
+
+        def _leg(notebook_id: str, visible) -> list:
+            allowed = scoped_allowed_source_ids(notebook_id, visible)
+            if allowed is not None and not allowed:
+                return []
+            if self._peer_exact_scope_drifted(notebook_id):
+                return []
+            return exact_lookup_sections(
+                self._exact_lookup_deps(), notebook_id, query, limits,
+            )
+
+        return _leg
+
+    def _peer_exact_scope_drifted(self, notebook_id: str) -> bool:
+        """``_unsafe_source_scope_restricted``, asked of ONE peer library.
+
+        A global run freezes each participant's whole visible source list, so
+        no library is ever narrowed by the user; what can still make the
+        unpartitioned exact probe unsafe is DRIFT -- a source added or removed
+        since the freeze, whose chunks would take section slots before the
+        result-boundary filter could drop them.  Read LIVE on every call, never
+        memoised, for the reason ``_unsafe_source_scope_restricted`` documents.
+        A library with no per-notebook ceiling falls back to that probe itself.
+        """
+        from app.services.source_scope import current_source_scope
+
+        scope = current_source_scope()
+        ceiling = None if scope is None else scope.source_ceiling_for(notebook_id)
+        if ceiling is None:
+            return self._unsafe_source_scope_restricted(notebook_id)
+        live = self.sources.all_visible_source_ids(notebook_id)
+        return set(str(value) for value in live) != set(ceiling)
+
+    def _exact_lookup_chunks_one(self, notebook_id: str, query: str):
+        """The single-library lookup -- the pre-federation body, unchanged."""
         # The exact-section helper currently allocates slots before hydration
         # and has no source predicate.  Skip it only for a truly narrowed run;
         # an all-selected frozen snapshot keeps the historical channel and its
@@ -4210,34 +4319,19 @@ class CandidateRetrievalService(_RetrievalState):
             return []
         if not self.settings.exact_lookup_enabled:
             return []
-        from app.services.exact_lookup import (
-            ExactLookupDeps, ExactLookupLimits, exact_lookup_chunks,
-        )
+        from app.services.exact_lookup import exact_lookup_chunks
+
         try:
             return exact_lookup_chunks(
-                ExactLookupDeps(
-                    connect=self._connect,
-                    exact_search=self.knowledge.chunk_exact_search,
-                    section_rows=self.chunks.chunks_by_section,
-                    # `hydrate_rows` already returns the exact row shape the
-                    # section fetch does (id/source_id/text/section_path/
-                    # element_ids/source_title) on BOTH adapters, so the
-                    # by-id path needs no new store primitive — only this seam.
-                    chunk_rows=self.chunks.hydrate_rows,
-                ),
+                self._exact_lookup_deps(),
                 notebook_id,
                 query,
-                ExactLookupLimits(
-                    max_identifiers=self.settings.exact_lookup_max_identifiers,
-                    fts_k=self.settings.exact_lookup_fts_k,
-                    max_sections=self.settings.exact_lookup_max_sections,
-                    max_chunks_per_section=(
-                        self.settings.exact_lookup_max_chunks_per_section),
-                ),
+                self._exact_lookup_limits(),
             )
         except Exception as exc:  # noqa: BLE001 — 精确通道失败绝不拖垮检索
             self._note_model_error("chunk_exact_lookup", "", exc)
             return []
+
     @staticmethod
     def _union_chunk_candidates(base: list, extra: list) -> list:
         """Append ``extra`` while preserving one same-source text candidate.

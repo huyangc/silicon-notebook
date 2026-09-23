@@ -245,14 +245,15 @@ class _Task:
     visible: tuple | None
     # A leg that is NOT the semantic chunk leg: ``_producer_call`` hands the
     # task to this callable instead of calling ``_retrieve_chunks``. ``None``
-    # -- every semantic leg -- keeps the historical call shape exactly. Its one
-    # user today is the peer-mode keyword arm
-    # (``federated_keyword_chunk_candidates``), which borrows this module's
-    # whole fan-out rather than growing a second concurrency mechanism.
+    # -- every semantic leg -- keeps the historical call shape exactly. Its
+    # users are the peer-mode keyword and exact-identifier arms
+    # (``_run_supplement_arm``), which borrow this module's whole fan-out
+    # rather than growing a second concurrency mechanism.
     producer: Callable[["_Task"], tuple] | None = None
-    # Which recall arm the leg belongs to, stamped on its skip event so an
-    # operator can tell a keyword leg's skip from a semantic leg's (only the
-    # latter decides coverage). Empty -- and absent from the event -- for the
+    # Which recall arm the leg belongs to (``"keyword"`` / ``"exact"``),
+    # stamped on its skip event so an operator can tell a supplementary leg's
+    # skip from a semantic leg's (only the latter decides coverage). Empty --
+    # and absent from the event -- for the
     # semantic legs, whose events keep their historical fields.
     arm: str = ""
 
@@ -568,7 +569,7 @@ def federated_keyword_chunk_candidates(
     around it, so raising would fail the whole answer over a supplement.
 
     ⛔ The whole arm, preparation included, is bounded by ONE per-library
-    budget (``_keyword_arm_deadline``), not by the phase.
+    budget (``_supplement_arm_deadline``), not by the phase.
 
     Its per-leg FTS never OPENS the run's per-library FTS circuit, though it
     obeys one that is already open (``_chunk_fts_hits(trip_circuit=False)``):
@@ -586,11 +587,149 @@ def federated_keyword_chunk_candidates(
     Emits one content-free ``ask_stage``/``global_keyword_arm`` summary.
     """
     started = time.perf_counter()
+    arm = _run_supplement_arm(
+        candidates, active_notebook_id, needle, leg, "keyword",
+    )
+    columns = [
+        _stamped(task, sorted(
+            value, key=lambda hit: -float(hit.relevance or 0.0),
+        ))
+        for task, value in zip(arm.tasks, arm.values)
+    ]
+    merged = _interleave_capped(
+        columns, int(candidates.settings.global_ask_candidate_limit),
+    )
+    _register_supplement_evidence(candidates, arm, merged)
+    _emit(candidates, {
+        "kind": "ask_stage",
+        "stage": "global_keyword_arm",
+        "site": "global_keyword_arm",
+        "participants": len(arm.participants),
+        "libraries_with_hits": sum(1 for column in columns if column),
+        "merged": len(merged),
+        "failed_libraries": arm.failed_libraries,
+        "latency_ms": round((time.perf_counter() - started) * 1000),
+    })
+    return merged
+
+
+def federated_exact_chunk_candidates(
+    candidates, active_notebook_id: str, query: str,
+    leg: Callable[[str, "tuple | None"], list],
+) -> list:
+    """PEER mode's exact-identifier arm: one whole-section lookup per library.
+
+    The same shape as ``federated_keyword_chunk_candidates`` and the same
+    machinery (``_run_supplement_arm``): one task per participant on the
+    semantic legs' fan-out, each under that library's frozen ceiling, the
+    whole arm inside ONE per-library budget (``_supplement_arm_deadline``).
+    ``leg(notebook_id, visible)`` returns that library's lookup as SECTIONS
+    (``exact_lookup.exact_lookup_sections``: a list of chunk lists).
+
+    ⛔ The caller has already established that the question names something
+    worth probing (``exact_lookup.exact_lookup_terms``) -- this function reads
+    the participant seat and starts tasks unconditionally, so an
+    identifier-free question must never reach it.
+
+    ⛔ NO RECEIPTS, NO BANNER, BUT EVIDENCE -- exactly the keyword arm's
+    rules, for the same reasons: coverage is the semantic legs' verdict alone,
+    a failed or timed-out leg is only "this library had no exact section"
+    (a skip event with ``arm="exact"``, nothing else), and the merged list is
+    registered through ``_report_evidence`` under a run plan so a passage only
+    this arm retrieved still carries a retrieval-time fingerprint.
+    ``AskCancelled`` and the attestation error propagate.
+
+    No FTS circuit is involved: the lookup issues its own
+    ``knowledge.chunk_exact_search`` probe, which never went through
+    ``_chunk_fts_hits`` and therefore neither obeys nor opens that circuit --
+    the single-library path's behaviour, unchanged.
+
+    Merge by WHOLE SECTION (``_interleave_sections_capped``): library 1's
+    first section, library 2's first section, ..., then every library's
+    second, and so on; a ``chunk_id`` already taken is dropped; the total is
+    capped at ``global_ask_candidate_limit`` without ever cutting a section --
+    the first section that does not fit ends the merge.  Handing a caller half
+    of a command's section is the failure this channel exists to prevent.
+    Every hit keeps its ``exact_lookup`` flag and is stamped with its library.
+
+    Emits one content-free ``ask_stage``/``global_exact_arm`` summary.
+    """
+    started = time.perf_counter()
+    # ``drifted=False``: the lexical-lane drift verdict routes only the
+    # keyword/semantic FTS arms; an exact leg never reads it, so probing it
+    # (two live source reads) would be pure waste.
+    arm = _run_supplement_arm(
+        candidates, active_notebook_id, query, leg, "exact", drifted=False,
+    )
+    columns = [
+        [_stamped(task, section) for section in value]
+        for task, value in zip(arm.tasks, arm.values)
+    ]
+    merged, sections = _interleave_sections_capped(
+        columns, int(candidates.settings.global_ask_candidate_limit),
+    )
+    _register_supplement_evidence(candidates, arm, merged)
+    _emit(candidates, {
+        "kind": "ask_stage",
+        "stage": "global_exact_arm",
+        "site": "global_exact_arm",
+        "participants": len(arm.participants),
+        "libraries_with_hits": sum(1 for column in columns if column),
+        "merged": len(merged),
+        "sections": sections,
+        "failed_libraries": arm.failed_libraries,
+        "latency_ms": round((time.perf_counter() - started) * 1000),
+    })
+    return merged
+
+
+@dataclass(frozen=True)
+class _SupplementArm:
+    """What one fail-open supplementary arm's fan-out produced.
+
+    ``values`` is one entry per task (= per library: these arms run one query
+    each), in task-table order; a failed leg's entry is empty.
+    ``failed_libraries`` counts every library that was dropped in preparation,
+    raised, or was skipped with a reason code.
+    """
+
+    participants: tuple
+    plan: Any
+    deadline: float
+    tasks: list
+    values: list
+    failed_libraries: int
+
+
+def _run_supplement_arm(
+    candidates, active_notebook_id: str, query: str, leg, arm: str, *,
+    drifted: bool | None = None,
+) -> _SupplementArm:
+    """The shared fan-out of the peer-mode keyword and exact-identifier arms.
+
+    Participants and each library's ceiling come from the one place the
+    semantic legs take them (``_bounded_participants`` and
+    ``_federated_tasks``/``_peer_visible_sources``) -- the SILENT form of the
+    seat on purpose: the truncation fact is announced once per call by the
+    semantic arm, and a second copy would read like a second cut.  Each leg
+    runs on ``_run_tasks`` (borrowed executor, fair window, per-library
+    ``read_budget``, fan-out slot, cancellation) with ``producer``/``arm`` set,
+    so neither arm owns any concurrency of its own and every skip event it
+    causes carries ``arm``.
+
+    A leg's failure is re-raised into ``_run_one`` (which classifies and
+    emits it) after being noted here; nothing in this function reaches
+    ``_merge_results``, ``_report_receipts`` or ``plan.on_library``.
+
+    ``drifted`` is handed to ``_federated_tasks`` as is: ``None`` (the keyword
+    arm) probes the lexical-lane drift verdict once for the arm, as the
+    semantic arm does; an arm whose legs never read it passes a value.
+    """
     participants, _mounted_total = _bounded_participants(
         candidates, active_notebook_id,
     )
     plan = current_federated_run_plan()
-    deadline = _keyword_arm_deadline(plan)
+    deadline = _supplement_arm_deadline(plan)
     failed: dict = {}
 
     def _producer(task: _Task) -> tuple:
@@ -607,55 +746,57 @@ def federated_keyword_chunk_candidates(
 
     dropped: dict = {}
     tasks = _federated_tasks(
-        candidates, active_notebook_id, participants, [needle], None,
+        candidates, active_notebook_id, participants, [query], drifted,
         dropped=dropped, plan=plan, deadline=deadline,
-        producer=_producer, arm="keyword",
+        producer=_producer, arm=arm,
     )
     results, reasons = (
         _run_tasks(candidates, tasks, plan, deadline) if tasks else ([], [])
     )
-    columns: list = []
-    for task, value in zip(tasks, results):
-        hits = sorted(value[0], key=lambda hit: -float(hit.relevance or 0.0))
-        columns.append([
-            replace(hit, notebook_id=task.notebook_id) if task.peer else hit
-            for hit in hits
-        ])
-    merged = _interleave_capped(
-        columns, int(candidates.settings.global_ask_candidate_limit),
-    )
-    if plan is not None and merged:
-        # Retrieval-time evidence for exactly what is handed to the caller --
-        # the same read, rules and consumer the semantic selection uses -- so a
-        # passage only this arm found is re-checked like any other federated
-        # one instead of looking "never travelled this channel".  No receipt.
-        _report_evidence(
-            candidates, plan,
-            FederatedCollected({hit.chunk_id: hit for hit in merged}),
-            deadline,
-        )
     unhealthy = set(dropped) | set(failed) | {
         task.notebook_id for task, reason in zip(tasks, reasons) if reason
     }
-    _emit(candidates, {
-        "kind": "ask_stage",
-        "stage": "global_keyword_arm",
-        "site": "global_keyword_arm",
-        "participants": len(participants),
-        "libraries_with_hits": sum(1 for column in columns if column),
-        "merged": len(merged),
-        "failed_libraries": len(unhealthy),
-        "latency_ms": round((time.perf_counter() - started) * 1000),
-    })
-    return merged
+    return _SupplementArm(
+        participants=participants, plan=plan, deadline=deadline, tasks=tasks,
+        values=[list(value[0]) for value in results],
+        failed_libraries=len(unhealthy),
+    )
 
 
-def _keyword_arm_deadline(plan) -> float:
-    """The keyword arm's WHOLE-arm deadline: one per-library budget, not a phase.
+def _stamped(task: _Task, hits) -> list:
+    """``hits`` stamped with the task's library, as the semantic legs' are."""
+    return [
+        replace(hit, notebook_id=task.notebook_id) if task.peer else hit
+        for hit in hits
+    ]
 
-    Derived once, before the first read (task preparation included), like the
-    semantic arm's -- but shorter.  This arm is a fail-open supplement, so on a
-    saturated database it may cost at most about one
+
+def _register_supplement_evidence(candidates, arm: _SupplementArm,
+                                  merged: list) -> None:
+    """Retrieval-time evidence for exactly what a supplementary arm hands out.
+
+    The same read, rules and consumer the semantic selection uses
+    (``_report_evidence``), so a passage only a supplementary arm found is
+    re-checked like any other federated one instead of looking "never
+    travelled this channel" (codex #787 r1).  No receipt.  Nothing without a
+    run plan, as for the semantic legs, and nothing for an empty list.
+    """
+    if arm.plan is None or not merged:
+        return
+    _report_evidence(
+        candidates, arm.plan,
+        FederatedCollected({hit.chunk_id: hit for hit in merged}),
+        arm.deadline,
+    )
+
+
+def _supplement_arm_deadline(plan) -> float:
+    """A supplementary arm's WHOLE-arm deadline: one per-library budget.
+
+    Shared by the peer-mode keyword and exact-identifier arms.  Derived once,
+    before the first read (task preparation included), like the semantic
+    arm's -- but shorter.  These arms are fail-open supplements, so on a
+    saturated database each may cost at most about one
     ``notebook_timeout_seconds`` on top of the semantic fan-out rather than a
     whole ``phase_timeout_seconds``; and never more than the phase either.
     ``0.0`` without a plan, the value every unplanned caller passes.
@@ -665,6 +806,39 @@ def _keyword_arm_deadline(plan) -> float:
     return time.monotonic() + min(
         float(plan.phase_timeout_seconds), float(plan.notebook_timeout_seconds),
     )
+
+
+def _interleave_sections_capped(columns: list, limit: int) -> tuple:
+    """``(merged, sections)``: per-library section lists, merged section-wise.
+
+    Round-robin over the libraries one WHOLE section at a time.  Chunks
+    already taken are dropped from a later section (a section left empty by
+    that is skipped, not counted); the first section whose remaining chunks do
+    not fit under ``limit`` ends the merge, so no section is ever cut.
+    ``sections`` counts the sections that contributed.
+    """
+    merged: list = []
+    seen: set = set()
+    sections = 0
+    for position in range(max((len(column) for column in columns), default=0)):
+        for column in columns:
+            if position >= len(column):
+                continue
+            fresh: list = []
+            taken: set = set()
+            for hit in column[position]:
+                if hit.chunk_id in seen or hit.chunk_id in taken:
+                    continue
+                taken.add(hit.chunk_id)
+                fresh.append(hit)
+            if not fresh:
+                continue
+            if len(merged) + len(fresh) > limit:
+                return merged, sections
+            seen.update(taken)
+            merged.extend(fresh)
+            sections += 1
+    return merged, sections
 
 
 def _interleave_capped(columns: list, limit: int) -> list:

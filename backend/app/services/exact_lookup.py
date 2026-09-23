@@ -16,7 +16,9 @@ name does no I/O at all, so the overwhelming majority of asks pay literally
 nothing for this module. That gate is deliberately narrower than the lexical
 layer's recall-side `identifier_terms` — see its docstring. Scoped to the active
 notebook only — mounted base libraries are deliberately out of scope (manuals
-live in the user's own library).
+live in the user's own library). A global (peer-mode) ask instead runs the
+same lookup once per participant library (`exact_lookup_sections`, federated by
+`chunk_federation.federated_exact_chunk_candidates`).
 
 Layering mirrors `chunking.py` / `mmr.py`: the logic here is pure, and every
 database touch arrives as an injected callable.
@@ -156,6 +158,22 @@ def _rank_groups(
     return ordered[: max(0, max_sections)]
 
 
+def exact_lookup_terms(query: str, limits: ExactLookupLimits) -> list[str]:
+    """The names this path would probe for ``query``, or ``[]`` for none.
+
+    THE zero-IO gate, as one function so that a caller deciding whether to do
+    anything at all (the peer-mode fan-out, which would otherwise read the
+    participant seat and start one task per library) asks exactly the question
+    ``exact_lookup_sections`` asks before its first store call.  ``[]`` when
+    the query holds no probe-worthy identifier, or when the section budget is
+    configured away -- either way no probe is worth issuing.
+    """
+    terms = exact_probe_terms(query)[: max(0, limits.max_identifiers)]
+    if not terms or limits.max_sections <= 0 or limits.max_chunks_per_section <= 0:
+        return []
+    return terms
+
+
 def exact_lookup_chunks(
     deps: ExactLookupDeps,
     notebook_id: str,
@@ -195,9 +213,34 @@ def exact_lookup_chunks(
     would be an unbounded per-notebook scan, which this module must not do.
     Pinned by test_probe_anchors_via_text_only_so_prose_free_grandchild_
     sections_are_not_found.
+
+    The flat form of ``exact_lookup_sections``: the same store calls, in the
+    same order, and the same chunks in the same order.
     """
-    terms = exact_probe_terms(query)[: max(0, limits.max_identifiers)]
-    if not terms or limits.max_sections <= 0 or limits.max_chunks_per_section <= 0:
+    return [
+        chunk
+        for section in exact_lookup_sections(deps, notebook_id, query, limits)
+        for chunk in section
+    ]
+
+
+def exact_lookup_sections(
+    deps: ExactLookupDeps,
+    notebook_id: str,
+    query: str,
+    limits: ExactLookupLimits,
+) -> list[list[RetrievedChunk]]:
+    """``exact_lookup_chunks`` with its section boundaries kept.
+
+    One inner list per ranked group, in rank order, each in the order the
+    group was fetched (document order for a subtree, probe order for
+    addressed hits).  A chunk already emitted by an earlier group is not
+    repeated, and a group left empty by that is dropped.  The peer-mode
+    merge interleaves libraries by WHOLE section, which it can only do if
+    the boundaries survive this far.
+    """
+    terms = exact_lookup_terms(query, limits)
+    if not terms:
         # Zero-IO gates: no identifier, or the section budget is configured
         # away — either way no probe is worth issuing.
         return []
@@ -206,7 +249,7 @@ def exact_lookup_chunks(
     # this collection to `max_chunks_per_section`, and slicing a set would make
     # *which* hits survive depend on string hash randomisation.
     hits_by_group: dict[_SectionKey, dict[str, None]] = {}
-    rows: list[Any] = []
+    row_groups: list[list[Any]] = []
     with deps.connect() as db:
         for term in terms:
             for hit in deps.exact_search(db, notebook_id, term, limits.fts_k):
@@ -230,20 +273,20 @@ def exact_lookup_chunks(
             return []
         for group in _rank_groups(hits_by_group, limits.max_sections):
             if _identifier_named(group.section_path, terms):
-                rows.extend(deps.section_rows(
+                row_groups.append(list(deps.section_rows(
                     db,
                     notebook_id,
                     group.source_id,
                     group.section_path,
                     limits.max_chunks_per_section,
-                ))
+                )))
             else:
                 hit_ids = list(hits_by_group[group])[
                     : limits.max_chunks_per_section]
-                rows.extend(_ordered_by_id(
+                row_groups.append(_ordered_by_id(
                     deps.chunk_rows(db, hit_ids), hit_ids))
 
-    return _build_chunks(rows, terms)
+    return _build_sections(row_groups, terms)
 
 
 def _ordered_by_id(rows: Sequence[Any], chunk_ids: Sequence[str]) -> list[Any]:
@@ -260,10 +303,14 @@ def _ordered_by_id(rows: Sequence[Any], chunk_ids: Sequence[str]) -> list[Any]:
     return [by_id[cid] for cid in chunk_ids if cid in by_id]
 
 
-def _build_chunks(
-    rows: Sequence[Any], terms: Sequence[str]
-) -> list[RetrievedChunk]:
+def _build_sections(
+    row_groups: Sequence[Sequence[Any]], terms: Sequence[str]
+) -> list[list[RetrievedChunk]]:
     """Score keyword-only and deduplicate, preserving section/document order.
+
+    One output list per input group; de-duplication runs across ALL groups
+    (a chunk keeps its first group), and a group it empties is dropped, so
+    the flattened result is exactly the one list this used to return.
 
     Three deliberate choices:
 
@@ -299,8 +346,8 @@ def _build_chunks(
     The support is recorded as ordinary `lexical` — which it truthfully is, a
     substring match. It deliberately does not mint a new `RetrievalSupport`
     origin: `is_graph_only_chunk` and the reserve logic read that vocabulary,
-    and it stays unexpanded. Chunk mode still drives `exact_section_reserve_rule`
-    off the caller's own `exact_ids` set, unchanged. Reasoning instead
+    and it stays unexpanded. Chunk mode drives `exact_section_reserve_rules`
+    off the caller's own exact hits (by chunk id). Reasoning instead
     recognises "this came from the exact channel" off the `exact_lookup` flag
     set on the object below, an independent field that cannot perturb the
     support vocabulary's existing consumers.
@@ -317,31 +364,35 @@ def _build_chunks(
     # phrase it does not contain. Single-word names keep the historical token
     # basis, so identifier probes are unaffected (codex #410 round-3 P2).
     basis = probe_keyword_basis(terms)
-    chunks: list[RetrievedChunk] = []
+    sections: list[list[RetrievedChunk]] = []
     seen: set[str] = set()
-    for row in rows:
-        chunk_id = str(row["id"])
-        if chunk_id in seen:
-            continue
-        seen.add(chunk_id)
-        text = row["text"] or ""
-        section_path = row["section_path"] or ""
-        haystack = f"{section_path} {text}" if section_path else text
-        relevance = basis.coverage(frozenset(), haystack)
-        chunks.append(
-            RetrievedChunk(
-                chunk_id=chunk_id,
-                source_id=str(row["source_id"]),
-                source_title=row["source_title"] or "",
-                section_path=row["section_path"] or "",
-                text=text,
-                element_ids=_element_ids(row["element_ids"]),
-                score=relevance,
-                relevance=relevance,
-                retrieval_supports=(
-                    RetrievalSupport("lexical", "chunk", chunk_id, relevance),
-                ),
-                exact_lookup=True,
+    for rows in row_groups:
+        chunks: list[RetrievedChunk] = []
+        for row in rows:
+            chunk_id = str(row["id"])
+            if chunk_id in seen:
+                continue
+            seen.add(chunk_id)
+            text = row["text"] or ""
+            section_path = row["section_path"] or ""
+            haystack = f"{section_path} {text}" if section_path else text
+            relevance = basis.coverage(frozenset(), haystack)
+            chunks.append(
+                RetrievedChunk(
+                    chunk_id=chunk_id,
+                    source_id=str(row["source_id"]),
+                    source_title=row["source_title"] or "",
+                    section_path=row["section_path"] or "",
+                    text=text,
+                    element_ids=_element_ids(row["element_ids"]),
+                    score=relevance,
+                    relevance=relevance,
+                    retrieval_supports=(
+                        RetrievalSupport("lexical", "chunk", chunk_id, relevance),
+                    ),
+                    exact_lookup=True,
+                )
             )
-        )
-    return chunks
+        if chunks:
+            sections.append(chunks)
+    return sections
