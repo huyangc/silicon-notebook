@@ -893,7 +893,11 @@ def test_element_page_rows_skips_table_continuation_parts(repo):
         ("DOCX table 3 part 1", False),
         ("DOCX table 3 part 2", True),
         ("PPTX slide 1 table 5 part 100", True),  # 三位数续段号
-        ("XLSX p.1 table 1 part 34953", True),    # 五位数:百万行工作簿的上界
+        ("XLSX p.1 table 1 part 34953", True),    # 五位数
+        # codex #789 r2:字数上限可让每行自成一段,段号无上界(百万行 → 七位数)。
+        ("XLSX p.1 table 1 part 100000", True),
+        ("XLSX p.1 table 1 part 1048576", True),
+        ("XLSX p.1 table 1 part ", False),        # 没有数字
         # codex #789 r1:「 part 2」只出现在中间(压缩包成员路径)的未切分表不是续段。
         ("reports part 2/data.md · Markdown table 1", False),
         ("reports part 2/data.md · Markdown table 1 part 1", False),
