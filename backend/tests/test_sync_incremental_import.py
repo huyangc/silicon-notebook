@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -1766,3 +1767,201 @@ def test_the_fts_reprojection_also_clears_a_deleted_notebooks_leftovers(baseline
         mirror, "SELECT COUNT(*) FROM chunks_fts WHERE notebook_id=?",
         (baseline["beta"],),
     ) == 0
+
+
+# ------------------------------- codex #788 r1: what a window must not break
+
+
+def test_a_window_keeps_a_memorys_untouched_revisions_and_provenance(baseline):
+    """``_prune_superseded`` replaces a carried memory's WHOLE child set with
+    the package's. That is right for a snapshot and destructive for a window:
+    a window carries only the revision rows that CHANGED, so pruning against
+    it deletes every earlier revision and the entire provenance of any memory
+    the window happens to touch. Editing one memory's body would silently
+    erase its history at the mirror (codex #788 r1 P1-1).
+
+    变异验证: 去掉 ``_apply_table`` 里 ``mode == MODE_FULL`` 的条件 (恢复无条件
+    prune), 本条报红。"""
+    repo = baseline["source"]["repo"]
+    mirror = baseline["target"]["repo"]
+    memory = _one(
+        repo, "SELECT id FROM memory_items WHERE notebook_id=?",
+        (baseline["alpha"],),
+    )["id"]
+    # Give the memory a history the baseline mirrors, then change only its
+    # body so the window carries the item row and nothing else of its.
+    with repo._write() as db:
+        for revision in (2, 3):
+            db.execute(
+                "INSERT INTO memory_revisions(id,memory_id,revision,title,"
+                "content_md,tags_json,status,promotion_state,changed_by,"
+                "change_reason,created_at) "
+                "VALUES(?,?,?,'t','body','[]','candidate','none',"
+                "'user-local','edit',?)",
+                (f"mrev-{revision}", memory, revision, MOMENT),
+            )
+    # ``memory_provenance`` is UNIQUE on memory_id and the candidate already
+    # has its row; that existing one is exactly what must survive.
+    carrier = _window(baseline)
+    assert _import(baseline["target"], carrier.package_dir).error == ""
+    before_revisions = _count(
+        mirror, "SELECT COUNT(*) FROM memory_revisions WHERE memory_id=?",
+        (memory,),
+    )
+    before_provenance = _count(
+        mirror, "SELECT COUNT(*) FROM memory_provenance WHERE memory_id=?",
+        (memory,),
+    )
+    assert before_revisions >= 2 and before_provenance >= 1
+
+    with repo._write() as db:
+        db.execute(
+            "UPDATE memory_items SET content_md='edited body' WHERE id=?",
+            (memory,),
+        )
+    window = _window(baseline)
+    # The window carries the item row, and NOT its whole child set.
+    assert memory in {row["id"] for row in _rows(window.package_dir, "memory_items")}
+    assert len(_rows(window.package_dir, "memory_revisions")) < before_revisions
+
+    report = _import(baseline["target"], window.package_dir)
+
+    assert report.error == ""
+    assert _one(
+        mirror, "SELECT content_md FROM memory_items WHERE id=?", (memory,)
+    )["content_md"] == "edited body"
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM memory_revisions WHERE memory_id=?",
+        (memory,),
+    ) == before_revisions
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM memory_provenance WHERE memory_id=?",
+        (memory,),
+    ) == before_provenance
+
+
+def test_a_row_deleted_and_recreated_under_the_same_business_key_imports(
+    baseline
+):
+    """A primary key is not a table's only identity. ``knowhow_milestones`` is
+    ``UNIQUE(table_id, name)``, so deleting ``m-old`` named "v1" and creating
+    ``m-new`` named "v1" inside one window gives the package a delete for one
+    id and an upsert for another -- and upserting first walks into the
+    target's still-present ``m-old`` on that unique index. Replaying the
+    deletes FIRST removes the superseded row while it is still the only one
+    (codex #788 r1 P1-2).
+
+    变异验证: 把 ``_import`` 的增量相位序改回 3b 先于 3c, 本条报红
+    (``_assert_no_unique_key_collision`` 中止导入)。"""
+    repo = baseline["source"]["repo"]
+    mirror = baseline["target"]["repo"]
+    table_id = _one(
+        repo, "SELECT id FROM knowhow_tables WHERE notebook_id=?",
+        (baseline["alpha"],),
+    )["id"]
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowhow_milestones(id,table_id,seq,name,note,"
+            "created_by,created_at) VALUES(?,?,1,'v1','','user-local',?)",
+            ("mstone-old", table_id, MOMENT),
+        )
+    carrier = _window(baseline)
+    assert _import(baseline["target"], carrier.package_dir).error == ""
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM knowhow_milestones WHERE id=?",
+        ("mstone-old",),
+    ) == 1
+
+    # One window: drop the milestone and rebuild it under a NEW id, same name.
+    with repo._write() as db:
+        db.execute("DELETE FROM knowhow_milestones WHERE id=?", ("mstone-old",))
+        db.execute(
+            "INSERT INTO knowhow_milestones(id,table_id,seq,name,note,"
+            "created_by,created_at) VALUES(?,?,2,'v1','rebuilt','user-local',?)",
+            ("mstone-new", table_id, MOMENT),
+        )
+    window = _window(baseline)
+    assert any(
+        entry["table"] == "knowhow_milestones" for entry in _deletes(window.package_dir)
+    )
+    assert "mstone-new" in {
+        row["id"] for row in _rows(window.package_dir, "knowhow_milestones")
+    }
+
+    report = _import(baseline["target"], window.package_dir)
+
+    assert report.error == ""
+    surviving = {
+        str(row["id"]): str(row["note"])
+        for row in _all(
+            mirror, "SELECT id, note FROM knowhow_milestones WHERE table_id=?",
+            (table_id,),
+        )
+    }
+    assert surviving == {"mstone-new": "rebuilt"}
+
+
+def test_a_live_merges_staging_survives_a_long_copy(baseline):
+    """Liveness is the ``.heartbeat`` marker, not the package directory's own
+    mtime: every byte a merge writes lands in ``<package_id>/<root>/<nb>/``,
+    which never updates ``<package_id>``, so a merge running longer than the
+    staleness window would look abandoned and be deleted out from under
+    itself by a concurrent import (codex #788 r1 P2).
+
+    变异验证: 把 ``_staging_is_abandoned`` 改回只看目录 mtime, 「30 分钟前心跳
+    的目录还在」这一半报红。"""
+    import os as _os
+
+    _upload(baseline["source"]["repo"], baseline["alpha"], "second.txt")
+    staging = Path(baseline["target"]["settings"].storage_dir) / ".sync-staging"
+
+    def _stranger(name: str, heartbeat_age_seconds: float) -> Path:
+        directory = staging / name
+        (directory / "notebooks" / baseline["alpha"]).mkdir(parents=True)
+        (directory / "notebooks" / baseline["alpha"] / "in-flight.txt").write_bytes(
+            b"theirs\n"
+        )
+        marker = directory / ".heartbeat"
+        marker.touch()
+        when = time.time() - heartbeat_age_seconds
+        _os.utime(marker, (when, when))
+        # The DIRECTORY looks ancient either way -- that is the whole point:
+        # only the marker distinguishes the live run from the dead one.
+        _os.utime(directory, (time.time() - 7200, time.time() - 7200))
+        return directory
+
+    live = _stranger("pkg-live-long-copy", 1800)
+    dead = _stranger("pkg-really-abandoned", 7200)
+
+    report = _import(baseline["target"], _window(baseline).package_dir)
+
+    assert report.error == ""
+    assert (live / "notebooks" / baseline["alpha"] / "in-flight.txt").is_file()
+    assert not dead.exists()
+
+
+def test_the_merge_writes_a_heartbeat_while_it_copies(baseline):
+    """The marker has to exist from the merge's first instant, not from its
+    first copied file -- a merge is live before it has done anything."""
+    from app.migration.sync import import_ as import_module
+
+    _upload(baseline["source"]["repo"], baseline["alpha"], "second.txt")
+    window = _window(baseline)
+    staging = Path(baseline["target"]["settings"].storage_dir) / ".sync-staging"
+    seen: list[bool] = []
+    original = import_module.os.replace
+
+    def watch(source, destination):
+        seen.append((staging / window.package_id / ".heartbeat").is_file())
+        return original(source, destination)
+
+    import_module.os.replace = watch
+    try:
+        report = _import(baseline["target"], window.package_dir)
+    finally:
+        import_module.os.replace = original
+
+    assert report.error == ""
+    assert seen and all(seen)
+    # ...and it leaves nothing behind.
+    assert not (staging / window.package_id).exists()

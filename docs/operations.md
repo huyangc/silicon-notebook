@@ -736,7 +736,15 @@ PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --j
    clean up after itself, which should not happen but is not itself a problem now); anything
    else — a DIFFERENT, still-unfinished package's staging (a concurrent import of another
    `source_env` is a normal thing to have running) — is left alone unless it has gone untouched
-   for over an hour, judged purely by the directory's own mtime, and reported either way. Nothing
+   for over an hour, judged by the mtime of a `.heartbeat` file inside that staging directory
+   (created before the first copy and touched at least once a minute while the merge runs) rather than the staging directory's own
+   mtime — the directory's mtime only moves when an entry is created or removed directly inside
+   it, and the merge's actual writes land one level deeper (under `<root>/<notebook id>/...`), so
+   it would otherwise stay stale for the whole run and make an import that is still actively
+   writing look abandoned. A staging directory with no `.heartbeat` file (e.g. one left over from
+   before this mechanism existed) falls back to the directory's own creation time. The one-hour
+   threshold is the same one the EXPORT side uses for its own stale-staging judgment. Reported
+   either way. Nothing
    under `storage/notebooks/`/`storage/assets/` is ever treated as staging regardless of what it
    is named — those two trees are 100% user content, and `sync export` never skips a file there
    for looking like a staging artifact (a real upload whose name happens to end in `.sync-tmp` is
