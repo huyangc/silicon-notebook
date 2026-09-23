@@ -495,14 +495,6 @@ _FILE_ROOTS = (
 )
 
 
-# The suffix the IMPORTER writes its half-finished per-file copies under
-# (``import_._STAGED_SUFFIX``). Restated rather than imported: export must not
-# depend on import, and the value is a filesystem convention shared by the two
-# halves of this package rather than either one's internal detail. A guard
-# test pins the two spellings together.
-_IMPORT_STAGING_SUFFIX = ".sync-tmp"
-
-
 def _write_files(
     writer: _PackageWriter, storage_dir: Path, notebooks: Sequence[str]
 ) -> tuple[int, list[str]]:
@@ -531,14 +523,6 @@ def _write_files(
             target_prefix = package_dir_for(notebook_id)
             for path in sorted(origin.rglob("*")):
                 if not path.is_file():
-                    continue
-                if path.name.endswith(_IMPORT_STAGING_SUFFIX):
-                    # A file an IMPORT was killed halfway through writing (see
-                    # import_._STAGED_SUFFIX). It is not this notebook's
-                    # content -- no row points at it, and the importer drops
-                    # it on its next run -- so carrying it into a package
-                    # would propagate one environment's crash debris to every
-                    # other (codex T1 review P3).
                     continue
                 relative = f"{target_prefix}/{path.relative_to(origin).as_posix()}"
                 if writer.copy_file(relative, path):

@@ -794,6 +794,52 @@ def test_a_delete_aimed_at_another_notebooks_row_refuses_the_whole_import(
     ) == 1
 
 
+def test_a_fold_is_not_taken_on_the_packages_word_alone(baseline):
+    """A delete entry says where the row lived at the SOURCE. Ids are
+    exported verbatim and never reissued, so the row this target holds under
+    that key can belong to a different notebook entirely -- and folding it
+    into a deleted notebook's job would leave that other notebook's row
+    behind forever, because the job only clears the deleted one.
+
+    变异验证: 把早期折叠筛选改回「命中 entry.notebook_id 就折叠」, 本条报红。"""
+    repo = baseline["source"]["repo"]
+    mirror = baseline["target"]["repo"]
+    victim = _one(
+        mirror, "SELECT id FROM chunks WHERE notebook_id=? LIMIT 1",
+        (baseline["alpha"],),
+    )["id"]
+    with repo._write() as db:
+        # alpha changes too, so the window declares it -- otherwise the row
+        # below is out of scope for a reason that has nothing to do with
+        # folding.
+        db.execute(
+            "UPDATE notebooks SET name='alpha v2' WHERE id=?", (baseline["alpha"],)
+        )
+        db.execute("DELETE FROM notebooks WHERE id=?", (baseline["beta"],))
+    window = _window(baseline)
+    assert baseline["alpha"] in _manifest(window.package_dir)["notebooks"]
+    # An entry that CLAIMS the deleted notebook but names a key the target
+    # holds under alpha, which this package also covers.
+    _write_deletes(
+        window.package_dir,
+        [
+            *_deletes(window.package_dir),
+            {"table": "chunks", "key": {"id": victim},
+             "notebook_id": baseline["beta"], "parent_key": None},
+        ],
+    )
+    _reseal(window.package_dir)
+
+    report = _import(baseline["target"], window.package_dir)
+
+    assert report.error == ""
+    # Replayed against alpha, where the row really is -- not folded away.
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM chunks WHERE id=?", (victim,)
+    ) == 0
+    assert report.deletes_applied >= 1
+
+
 def test_an_orphan_delete_that_names_no_notebook_is_a_no_op(baseline):
     """§11's registered rule, now implemented: a PARENT-scoped entry whose
     chain is broken at the target and that carries no notebook of its own
@@ -1298,27 +1344,64 @@ def test_a_file_for_an_undeclared_notebook_is_refused_before_it_lands(baseline):
     assert victim in refused, "the package was not refused by name"
 
 
-def test_the_merge_phase_clears_a_previous_runs_staging_leftovers(baseline):
-    """``*.sync-tmp`` is the unconsumed half of a copy+rename pair, left only
-    by a run that was killed outright. Nothing ever reads one, and the
-    per-file rename only overwrites the ones this run stages, so they would
-    accumulate in a notebook's storage directory forever.
+def test_a_file_under_an_unknown_root_or_hung_off_files_is_refused(baseline):
+    """The fence is about the SHAPE of every ``files/`` key, not only about
+    the notebook segment: an unknown root and a file hung directly off
+    ``files/`` are both silently ignored by the two file phases, which is
+    exactly why a package carrying one is not a package this build
+    understands (codex T1 review P2).
 
-    变异验证: 去掉 ``_drop_stale_staging`` 的调用, 本条报红。"""
+    变异验证: 把 ``_verify_package_paths`` 的 malformed 判定去掉, 本条报红。"""
+    for planted, needle in (
+        (f"files/other/{baseline['alpha']}/x.txt", "other"),
+        ("files/x.txt", "files/x.txt"),
+    ):
+        window = _prepared_window(baseline)
+        path = window.package_dir / planted
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"not installable\n")
+        checksums = json.loads(
+            (window.package_dir / CHECKSUMS_NAME).read_text(encoding="utf-8")
+        )
+        checksums[planted] = ""
+        (window.package_dir / CHECKSUMS_NAME).write_text(
+            json.dumps(checksums, ensure_ascii=False, sort_keys=True, indent=2)
+            + "\n",
+            encoding="utf-8",
+        )
+        _reseal(window.package_dir)
+
+        with pytest.raises(SyncImportError) as failure:
+            _import(baseline["target"], window.package_dir)
+
+        assert needle in str(failure.value), planted
+        assert not (
+            Path(baseline["target"]["settings"].storage_dir) / "other"
+        ).exists()
+
+
+def test_the_merge_phase_never_touches_a_dot_sync_tmp_file_in_a_notebook(
+    baseline
+):
+    """The inverse of what the old suffix scheme required. A file named
+    ``*.sync-tmp`` inside a notebook's storage directory is USER CONTENT --
+    ``stored_upload_name`` keeps whatever extension the person typed -- so
+    the merge must leave it exactly where it is. The cleanup it does do
+    happens under ``storage/.sync-staging/`` and nowhere else.
+
+    变异验证: 让合并相位再按后缀清理笔记本目录, 本条报红。"""
     _upload(baseline["source"]["repo"], baseline["alpha"], "second.txt")
     directory = (
         Path(baseline["target"]["settings"].storage_dir)
         / "notebooks" / baseline["alpha"]
     )
-    leftover = directory / "killed-mid-copy.txt.sync-tmp"
-    leftover.write_bytes(b"debris\n")
+    users_file = directory / "src-whatever_report.sync-tmp"
+    users_file.write_bytes(b"a real upload the person named oddly\n")
 
-    window = _window(baseline)
-    report = _import(baseline["target"], window.package_dir)
+    report = _import(baseline["target"], _window(baseline).package_dir)
 
     assert report.error == ""
-    assert not leftover.exists()
-    assert not any(path.name.endswith(".sync-tmp") for path in directory.iterdir())
+    assert users_file.is_file()
 
 
 # ------------------------------------------------ one pass over deletes.jsonl
@@ -1353,11 +1436,36 @@ def test_deletes_jsonl_is_read_exactly_once(baseline, monkeypatch):
 
     monkeypatch.setattr(import_module, "_iter_deletes", counted)
 
+    # ...and the one pass is PREFLIGHT's. Phase 3c must consume the grouping
+    # that pass produced, not re-read the file by some other route: the line
+    # reader is wrapped too, and any read of deletes.jsonl after preflight
+    # has handed over is a failure (codex T1 review P3-11).
+    from app.migration.sync.package import DELETES_NAME
+
+    preflight_done = {"yes": False}
+    late_reads: list[str] = []
+    original_lines = import_module._iter_lines
+
+    def watched(path):
+        if preflight_done["yes"] and path.name == DELETES_NAME:
+            late_reads.append(str(path))
+        return original_lines(path)
+
+    monkeypatch.setattr(import_module, "_iter_lines", watched)
+    original_replay = import_module._replay_deletes
+
+    def note_then_replay(backend, context, done):
+        preflight_done["yes"] = True
+        return original_replay(backend, context, done)
+
+    monkeypatch.setattr(import_module, "_replay_deletes", note_then_replay)
+
     report = _import(baseline["target"], window.package_dir)
 
     assert report.error == ""
     assert report.deletes_applied >= 1
     assert len(passes) == 1
+    assert late_reads == []
 
 
 def _delete_steps(baseline, package_id: str) -> set[str]:
@@ -1452,75 +1560,111 @@ def test_a_borrowed_parent_moved_mid_import_refuses_the_write(baseline, monkeypa
     assert table_id in str(failure.value)
 
 
-# --------------------------------- the .sync-tmp convention, both directions
+# ------------------------------- staging lives outside the user namespace
 
 
-def test_the_three_staging_suffix_spellings_agree():
-    """``import_`` writes it, and both export paths have to skip it. The
-    exporter may not import the importer, so the value is restated in two
-    more modules -- pinned here rather than left to drift."""
-    from app.migration.sync import export as export_module
+def test_the_staging_root_is_not_inside_any_notebook_directory():
+    """``.sync-tmp`` as a per-file suffix shared a namespace with real
+    uploads: ``stored_upload_name`` keeps the client's extension, so
+    ``report.sync-tmp`` is an ordinary source file. The merge phase therefore
+    stages under a root of its own, and what makes that root safe is where it
+    sits -- the exporter only ever walks ``storage/<root>/<notebook>/``, so a
+    sibling of those roots is invisible to it and needs no skip rule
+    anywhere (codex T1 review P1)."""
     from app.migration.sync import import_ as import_module
-    from app.migration.sync import incremental as incremental_module
+    from app.migration.sync.package import ASSET_FILES_DIR, NOTEBOOK_FILES_DIR
 
-    assert (
-        import_module._STAGED_SUFFIX
-        == export_module._IMPORT_STAGING_SUFFIX
-        == incremental_module._IMPORT_STAGING_SUFFIX
+    assert import_module._STAGING_ROOT not in (
+        NOTEBOOK_FILES_DIR, ASSET_FILES_DIR,
     )
+    assert "/" not in import_module._STAGING_ROOT
+    assert import_module._STAGING_ROOT.startswith(".")
 
 
-def test_a_full_export_does_not_carry_an_interrupted_imports_staging_file(
-    source, tmp_path
+def test_an_upload_named_like_the_old_staging_suffix_still_travels(
+    source, target, tmp_path
 ):
-    """A source environment that is itself a mirror can hold ``.sync-tmp``
-    debris from an import that was killed. No row points at it and the next
-    import drops it, so carrying it onward would propagate one environment's
-    crash into every other (codex T1 review P3).
+    """The regression the suffix scheme would have caused, pinned from the
+    user's side: a source file the person named ``report.sync-tmp`` has to
+    reach the mirror, in a full package and in a window alike.
 
-    变异验证: 去掉 ``export._write_files`` 的后缀跳过, 本条报红。"""
-    notebook = _seed_notebook(source["repo"], "alpha")
-    debris = (
-        Path(source["settings"].storage_dir) / "notebooks" / notebook
-        / "killed-mid-copy.txt.sync-tmp"
+    变异验证: 在 ``export._write_files`` 或 ``incremental.resolve_file_requests``
+    里按 ``.sync-tmp`` 后缀跳过文件, 本条报红。"""
+    repo = source["repo"]
+    notebook = _seed_notebook(repo, "alpha")
+    awkward = _upload(repo, notebook, "report.sync-tmp")
+    _enable_capture(repo)
+    out = tmp_path / "out"
+
+    full = _export(source, out)
+    assert full.mode == MODE_FULL
+    carried = {
+        name for name in json.loads(
+            (full.package_dir / CHECKSUMS_NAME).read_text(encoding="utf-8")
+        )
+        if name.endswith(".sync-tmp")
+    }
+    assert carried, "the full package dropped an upload named *.sync-tmp"
+    assert _import(target, full.package_dir).error == ""
+    mirrored = Path(
+        _one(
+            target["repo"], "SELECT file_path FROM sources WHERE id=?", (awkward,)
+        )["file_path"]
     )
-    debris.write_bytes(b"debris\n")
+    assert mirrored.is_file()
 
-    report = _export(source, tmp_path / "full-out")
+    # ...and again through a window, which resolves an asset's bytes by stem
+    # and a source's by path.
+    second = _upload(repo, notebook, "second.sync-tmp")
+    window = _export(source, out)
+    assert window.mode == MODE_INCREMENTAL
+    assert _import(target, window.package_dir).error == ""
+    assert Path(
+        _one(
+            target["repo"], "SELECT file_path FROM sources WHERE id=?", (second,)
+        )["file_path"]
+    ).is_file()
 
-    checksums = json.loads(
-        (report.package_dir / CHECKSUMS_NAME).read_text(encoding="utf-8")
-    )
-    assert not any(name.endswith(".sync-tmp") for name in checksums)
-    assert not (
-        report.package_dir / "files" / "notebooks" / notebook / debris.name
-    ).exists()
 
-
-def test_a_window_does_not_carry_an_interrupted_imports_asset_staging_file(
-    baseline
-):
-    """``<id>.png.sync-tmp`` matches the asset phase's own ``<id>.*`` glob,
-    which is the one place the suffix can sneak into an incremental package.
-
-    变异验证: 去掉 ``incremental.resolve_file_requests`` 的后缀跳过, 本条报红。"""
-    _seed_asset(
-        baseline["source"]["repo"], baseline["source"]["settings"],
-        baseline["alpha"], "asset-1",
-    )
-    debris = (
-        Path(baseline["source"]["settings"].storage_dir)
-        / "assets" / baseline["alpha"] / "asset-1.png.sync-tmp"
-    )
-    debris.write_bytes(b"debris\n")
+def test_the_merge_phase_leaves_no_staging_behind(baseline):
+    """A finished merge cleans up after itself, and nothing it wrote is left
+    inside a notebook's own directory."""
+    _upload(baseline["source"]["repo"], baseline["alpha"], "second.txt")
 
     window = _window(baseline)
+    report = _import(baseline["target"], window.package_dir)
 
-    checksums = json.loads(
-        (window.package_dir / CHECKSUMS_NAME).read_text(encoding="utf-8")
-    )
-    carried = [name for name in checksums if "asset-1" in name]
-    assert carried == [f"files/assets/{baseline['alpha']}/asset-1.png"]
+    assert report.error == ""
+    storage = Path(baseline["target"]["settings"].storage_dir)
+    assert not (storage / ".sync-staging" / window.package_id).exists()
+    directory = storage / "notebooks" / baseline["alpha"]
+    assert not any(path.name.endswith(".sync-tmp") for path in directory.iterdir())
+
+
+def test_a_previous_runs_staging_is_cleared_and_a_live_ones_is_not(baseline):
+    """This package's own debris goes on sight; a finished package's goes
+    too; an unfinished stranger's is left alone until it has gone quiet,
+    because a concurrent import of a DIFFERENT source environment is an
+    ordinary thing for a target to be doing.
+
+    变异验证: 让 ``_reconcile_staging_root`` 无条件删除, 本条的「别人的还在」
+    断言报红; 让它什么都不删, 「自己的没了」断言报红。"""
+    _upload(baseline["source"]["repo"], baseline["alpha"], "second.txt")
+    window = _window(baseline)
+    staging = Path(baseline["target"]["settings"].storage_dir) / ".sync-staging"
+    mine = staging / window.package_id / "notebooks" / baseline["alpha"]
+    mine.mkdir(parents=True)
+    (mine / "half-written.txt").write_bytes(b"debris\n")
+    stranger = staging / "pkg-someone-elses-live-run"
+    stranger.mkdir(parents=True)
+    (stranger / "in-flight.txt").write_bytes(b"theirs\n")
+
+    report = _import(baseline["target"], window.package_dir)
+
+    assert report.error == ""
+    assert not (staging / window.package_id).exists()
+    assert (stranger / "in-flight.txt").is_file()
+    assert any("pkg-someone-elses-live-run" in text for text in report.warnings)
 
 
 def test_the_fts_reprojection_also_clears_a_deleted_notebooks_leftovers(baseline):
