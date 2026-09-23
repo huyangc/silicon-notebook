@@ -56,8 +56,9 @@ PACKAGE_FORMAT_VERSION = 2
 # ``manifest.mode``. A full package reconciles the notebooks it names (the
 # importer deletes target rows the package does not carry); an incremental one
 # carries only the window's final states plus ``deletes.jsonl`` and must never
-# be replayed as a reconciliation -- see ``import_._reject_incremental_payload``
-# until PR-3c teaches the importer to apply one.
+# be replayed as a reconciliation. ``import_._classify_package`` is the one
+# place that decides which of the two a package is, and every import phase
+# branches on its answer.
 MODE_FULL = "full"
 MODE_INCREMENTAL = "incremental"
 
@@ -246,10 +247,18 @@ def delete_entry(
 
     ``notebook_id`` is deliberately nullable: a PARENT-scoped row whose parent
     chain was deleted in the same window has no notebook left to resolve to,
-    and the exporter records that honestly instead of guessing (§7 "归属";
-    PR-3c resolves such an orphan delete against the TARGET's parent chain).
-    ``parent_key`` carries the change log's own ``parent_key`` so PR-3c has
-    something to resolve WITH.
+    and the exporter records that honestly instead of guessing (§7 "归属").
+    The importer's delete replay uses it as the last piece of evidence for an
+    orphan -- a row whose chain it cannot walk at the target is deleted only
+    when this field names a notebook in scope, and is otherwise a no-op (§11).
+
+    ``parent_key`` carries the change log's own ``parent_key``. It has **no
+    importer-side consumer**: the replay resolves attribution from the TARGET
+    row's own parent pointer, which is the only thing that can say who the row
+    about to be deleted belongs to THERE -- a key the source recorded
+    describes the source's chain, not this one's. Kept because it is the
+    honest record of what the log carried, and because an operator reading a
+    package has nothing else to go on.
     """
     return {
         "table": table,

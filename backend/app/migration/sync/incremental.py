@@ -808,6 +808,10 @@ _EXPORTED_PATH_COLUMNS: dict[tuple[str, str], str] = {
 # carries whatever ``<id>.*`` is on disk. Registered here, next to the path
 # columns, so the two mechanisms are visible in one place rather than one of
 # them being an unexplained special case inside a function.
+# See export._IMPORT_STAGING_SUFFIX: the suffix an interrupted import leaves
+# behind, which neither file phase may treat as notebook content.
+_IMPORT_STAGING_SUFFIX = ".sync-tmp"
+
 _STEM_TABLES: dict[str, tuple[str, str]] = {
     "notebook_assets": ("id", ASSET_FILES_DIR),
 }
@@ -931,8 +935,15 @@ def resolve_file_requests(
                 "a safe file name and its bytes were not carried"
             )
             continue
-        matched = [path for path in sorted(base.glob(f"{request.stem}.*"))
-                   if path.is_file()]
+        matched = [
+            path
+            for path in sorted(base.glob(f"{request.stem}.*"))
+            # ``<id>.png.sync-tmp`` matches ``<id>.*`` too. It is an
+            # interrupted IMPORT's staging file, not this asset's bytes, and
+            # carrying it would ship one environment's crash debris onward
+            # (codex T1 review P3).
+            if path.is_file() and not path.name.endswith(_IMPORT_STAGING_SUFFIX)
+        ]
         if not matched:
             _record_gap(
                 missing, warnings, f"{prefix}/{request.stem}",
