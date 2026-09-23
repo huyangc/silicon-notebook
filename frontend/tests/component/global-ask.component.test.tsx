@@ -131,6 +131,45 @@ function Launcher({ actorId = "user-1" }: { actorId?: string }) {
   </>;
 }
 
+/** 笔记本页的宿主替身:铃铛里的全局条目会把「打开这个会话」的请求交给浮窗。 */
+function BellLauncher() {
+  const presentation = useRootModalCoordinator({ actorId: "user-1", sourceId: null, onClosed() {} });
+  const [request, setRequest] = useState<{ conversationId: string; nonce: number } | null>(null);
+  const ask = (conversationId: string) => setRequest((prev) => ({ conversationId, nonce: (prev?.nonce ?? 0) + 1 }));
+  return <>
+    <button onClick={() => ask("conv-b")}>铃铛:打开 conv-b</button>
+    <button onClick={() => ask("conv-c")}>铃铛:打开 conv-c</button>
+    <GlobalAskLauncher presentation={presentation} openRequest={request} />
+  </>;
+}
+
+test("a running global ask picked in the bell opens the window on that conversation", async () => {
+  installDialogMethods();
+  api.list.mockResolvedValue([conversation("conv-b"), conversation("conv-c")]);
+  api.detail.mockImplementation((id: string) => Promise.resolve(detail(id, [job("running", id)])));
+  render(<BellLauncher />);
+  expect(screen.queryByRole("dialog", { name: "全局问答" })).toBeNull();
+
+  fireEvent.click(screen.getByRole("button", { name: "铃铛:打开 conv-b" }));
+  // 窗口本来关着:点一下铃铛条目就打开浮窗,且首次载入结束后停在那个会话上。
+  expect(await screen.findByRole("dialog", { name: "全局问答" })).toBeInTheDocument();
+  await waitFor(() => expect(api.detail).toHaveBeenCalledWith("conv-b"));
+  // 会话列表那次读取没有被「打开会话」作废(两者各推进 owner,必须等载入结束再开)。
+  await waitFor(() => expect(screen.getAllByText("对话 conv-c").length).toBeGreaterThan(0));
+
+  // 已经停在 conv-b:再点同一条不重开(重开会清掉输入框里的草稿)。
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入问题" })).toBeInTheDocument());
+  fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "接着问" } });
+  const reads = api.detail.mock.calls.length;
+  fireEvent.click(screen.getByRole("button", { name: "铃铛:打开 conv-b" }));
+  expect(api.detail.mock.calls.length).toBe(reads);
+  expect(screen.getByRole("textbox", { name: "输入问题" })).toHaveValue("接着问");
+
+  // 窗口开着时点另一条:切到那个会话。
+  fireEvent.click(screen.getByRole("button", { name: "铃铛:打开 conv-c" }));
+  await waitFor(() => expect(api.detail).toHaveBeenLastCalledWith("conv-c"));
+});
+
 test("root overlays arbitrate chat visibility and an actor change clears its local state", async () => {
   installDialogMethods();
   const view = render(<Launcher />);

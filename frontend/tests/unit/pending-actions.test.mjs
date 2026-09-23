@@ -9,6 +9,7 @@ import {
   pruneSigs,
   pendingView,
   askElapsedLabel,
+  pendingItemOrigin,
 } from "../../app/pending-actions.ts";
 
 const report = { type: "report_outline", notebook_id: "nb1", notebook_name: "NB1", report_id: "r1", title: "T" };
@@ -145,4 +146,14 @@ test("askElapsedLabel: seconds, minutes and hours; unparseable input yields noth
   assert.equal(askElapsedLabel("not-a-time", started), "");
   // 客户端时钟快于服务端时不显示负数。
   assert.equal(askElapsedLabel("2026-09-07T10:00:00Z", started - 60_000), "刚刚开始");
+});
+
+test("pendingItemOrigin: library name for notebook items, 全局问答 for global asks", () => {
+  assert.equal(pendingItemOrigin(report), "NB1");
+  assert.equal(pendingItemOrigin({ type: "ask", scope: "notebook", notebook_name: "封装库", job_id: "a" }), "封装库");
+  assert.equal(pendingItemOrigin({ type: "ask", scope: "global", notebook_name: "", job_id: "g" }), "全局问答");
+  // 库名为空(旧数据/库已删)不渲染空格子。
+  assert.equal(pendingItemOrigin({ type: "ask", notebook_name: "", job_id: "b" }), "");
+  // 全局条目与笔记本条目 job id 前缀不同,签名互不相撞。
+  assert.notEqual(itemSig({ type: "ask", scope: "global", job_id: "gask-1" }), itemSig({ type: "ask", job_id: "askjob-1" }));
 });

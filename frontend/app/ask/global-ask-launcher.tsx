@@ -1,6 +1,6 @@
 "use client";
 
-import { lazy, Suspense, useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Maximize2, MessageSquare, Minimize2, Minus } from "lucide-react";
 import type { RootModalCoordinator } from "../use-root-modal-coordinator";
 import { citationPopoverHoldsEscape } from "../citation-card";
@@ -13,11 +13,20 @@ const GlobalAskWorkspace = lazy(() => import("./global-ask-workspace"));
 
 type Presentation = Pick<RootModalCoordinator, "view" | "open" | "requestClose" | "captureActorOwner">;
 
-export function GlobalAskLauncher({ presentation, uiMode }: { presentation: Presentation; uiMode?: UiMode }) {
+/** 宿主(笔记本页)要求打开某个全局会话——目前只有铃铛里「进行中的提问」的全局
+ *  条目会发。`nonce` 每次点击都换新值:同一个会话点两次也是两次独立的导航意图。 */
+export type GlobalConversationRequest = { conversationId: string; nonce: number };
+
+export function GlobalAskLauncher({ presentation, uiMode, openRequest }: {
+  presentation: Presentation; uiMode?: UiMode; openRequest?: GlobalConversationRequest | null;
+}) {
   const [expanded, setExpanded] = useState(false);
   const [started, setStarted] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
   const launcher = useRef<HTMLButtonElement>(null);
+  // 真正交给工作区的那一份请求:只有窗口确实打开了才转交。窗口被更上层的弹窗挡住、
+  // 没能打开时不转交——否则用户之后自己点开浮窗,会被一条早已过时的点击甩到那个会话。
+  const [forwarded, setForwarded] = useState<GlobalConversationRequest | null>(null);
   const view = presentation.view("global-ask");
   const open = view.open;
   const mode = !open ? "closed" : expanded ? "full" : "compact";
@@ -30,6 +39,19 @@ export function GlobalAskLauncher({ presentation, uiMode }: { presentation: Pres
     setStarted(true);
     setExpanded(next === "full");
   }
+
+  useEffect(() => {
+    if (!openRequest) return;
+    if (!open) {
+      launcher.current?.focus();
+      if (!presentation.open("global-ask", presentation.captureActorOwner())) return;
+      setExpanded(false);
+    }
+    setStarted(true);
+    setForwarded(openRequest);
+    // 只对新的一次点击(nonce)起反应;open/presentation 的变化不是新的导航意图。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openRequest?.nonce]);
 
   useLayoutEffect(() => {
     const node = dialog.current;
@@ -57,7 +79,7 @@ export function GlobalAskLauncher({ presentation, uiMode }: { presentation: Pres
       onCancel={(event) => { event.preventDefault(); if (citationPopoverHoldsEscape() || globalAskLayerHoldsEscape()) return; presentation.requestClose("global-ask", "escape"); }}
       onKeyDown={(event) => { if (event.key === "Escape" && !event.defaultPrevented) { event.preventDefault(); presentation.requestClose("global-ask", "escape"); } }}>
       {started && <Suspense fallback={<div className="global-window-loading" role="status">正在打开全局问答…<button className="sort-button" onClick={() => setMode("closed")}>收起</button></div>}>
-        <GlobalAskWorkspace embedded uiMode={uiMode} active={open} compact={mode !== "full"} onOpenNotebook={() => setMode("closed")} controls={<>
+        <GlobalAskWorkspace embedded uiMode={uiMode} active={open} compact={mode !== "full"} requestedConversation={forwarded} onOpenNotebook={() => setMode("closed")} controls={<>
           <button autoFocus className="icon-button" aria-label={mode === "full" ? "退出全屏" : "全屏展开"} title={mode === "full" ? "退出全屏" : "全屏展开"} onClick={() => setMode(mode === "full" ? "compact" : "full")}>{mode === "full" ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>
           <button className="icon-button" aria-label="收起全局问答" title="收起，保留当前对话" onClick={() => setMode("closed")}><Minus size={19} /></button>
         </>} />

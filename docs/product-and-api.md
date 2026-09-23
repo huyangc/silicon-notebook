@@ -3029,18 +3029,28 @@ cancellation entry (stopping an ask stays the in-session 「停止」 button).
   the `interrupted` that restart recovery rewrites a stale `running` into, never
   appear. The predicate is a positive match, never `NOT IN (<terminal…>)`, so a
   future intermediate state does not silently acquire a clickable deep link.
+  Running **global** asks join the same group under the same rule
+  (`global_ask_jobs.status = 'running'`), carrying `scope: "global"`; notebook asks
+  carry `scope: "notebook"`.
 - **Owner isolation.** `ask_jobs.created_by` must be the requesting user: an ask
   someone else is running inside my library is their action, not mine, and my ask
   inside someone else's library is mine. Visibility is layered on top with the same
   canonical read predicate and lifecycle filter the rest of the projection uses, so
   losing read access on that library removes the item and regaining it brings the
-  item back.
+  item back. A global ask belongs to no library, so its owner is
+  `global_ask_jobs.user_id` and its visibility gate is its **whole participant set**:
+  the item appears only while every library in `resolved_notebook_ids` is live and
+  readable — the same rule the global conversation read enforces (one unreadable
+  participant makes that read 404, so the bell does not offer a link it cannot open).
 - **Fields** — `type: "ask"`, `state: "running"`, `job_id`, `notebook_id`,
   `notebook_name`, `conversation_id`, `title` (a truncated question preview — the
   full prompt is never carried into the bell), and `asked_at` (the browser-captured
   submission instant, falling back to the server-side creation instant when the row
   has none). Clicking opens that notebook and that conversation; the existing
-  conversation-detail reattach path takes over from there.
+  conversation-detail reattach path takes over from there. A global item carries an
+  empty `notebook_id` / `notebook_name`, is labelled 「全局问答」 in the bell, and
+  clicking it opens the floating global Ask window on that conversation instead of a
+  notebook (a window already showing that conversation is left as is, draft included).
 - **It never rings.** In-progress asks are excluded from the payload's `count`, and
   the client excludes them from its unread badge — this is a deliberate divergence
   from index-building and paper-metadata-backfill items, which do count as unread.
@@ -3048,7 +3058,10 @@ cancellation entry (stopping an ask stays the in-session 「停止」 button).
   something they started seconds ago, and badging it would make the bell light up on
   every question.
 - **Push boundaries.** The user's pending snapshot is republished exactly twice per
-  ask: once when the job starts and once when it reaches a terminal state. Trace
+  ask, notebook or global: once when the job starts and once when it reaches a
+  terminal state (for a global ask: after the push stream's terminal frame and the
+  job leaving the live registry, before the post-completion learning chains; a global
+  job whose worker never starts publishes that one terminal snapshot too). Trace
   progress never publishes (recomputing the snapshot is a database read; the
   per-step rate would turn it into a query storm), and the terminal publish is
   ordered strictly *after* the terminal event is queued for the browser so it can
@@ -3066,7 +3079,7 @@ cancellation entry (stopping an ask stays the in-session 「停止」 button).
 
 | Bound | Value |
 | --- | --- |
-| Running asks carried per snapshot | 20, newest first (`RUNNING_ASK_ROWS`) |
+| Running asks carried per snapshot | 20, newest first across notebook and global asks together — one cap for the whole snapshot, not one per kind (`RUNNING_ASK_ROWS`) |
 | Question preview | Whitespace collapsed to single spaces, then cut to 60 characters (`ASK_QUESTION_PREVIEW_CHARS`) |
 | Elapsed-time refresh in the bell | 30s, and only while the panel is open with at least one running ask |
 

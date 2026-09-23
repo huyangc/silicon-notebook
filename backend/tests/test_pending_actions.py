@@ -404,6 +404,7 @@ def test_pending_actions_running_ask_item_fields(repo):
     assert item["notebook_name"] == "NB"
     assert item["conversation_id"] == "conv-x"
     assert item["asked_at"] == "2026-07-07T03:00:00+00:00"
+    assert item["scope"] == "notebook"
     # 摘要恰好被截断,提示词全文不进铃铛快照。
     assert item["title"] == long_question[:ASK_QUESTION_PREVIEW_CHARS]
     assert len(item["title"]) < len(long_question)
@@ -503,6 +504,140 @@ def test_pending_actions_running_ask_in_a_notebook_being_deleted_is_absent(repo)
     with repo._connect() as db:
         db.execute("UPDATE notebooks SET status='deleting' WHERE id=?", (nb,))
     assert not any(it["type"] == "ask" for it in repo.pending_actions("user-a")["items"])
+
+
+# --- 进行中的全局问答(同一分组,scope="global") ----------------------------------
+
+
+def _insert_global_job(repo, job_id, user_id, notebook_ids, **kw):
+    """插一行 global_ask_jobs(连同它的会话)。默认 running。"""
+    import json
+
+    created_at = kw.get("created_at", "2026-07-07T03:00:00+00:00")
+    conversation_id = kw.get("conversation_id", f"gconv-{job_id}")
+    payload = {
+        "question": kw.get("question", "跨库比较两种带隙基准的温漂?"),
+        "resolved_notebook_ids": list(notebook_ids),
+    }
+    with repo._connect() as db:
+        db.execute(
+            "INSERT OR IGNORE INTO global_ask_conversations "
+            "(id,user_id,title,scope_json,submitted_via,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (conversation_id, user_id, "", '{"mode":"all"}', "web", created_at, created_at),
+        )
+        db.execute(
+            "INSERT INTO global_ask_jobs (id,conversation_id,user_id,client_request_id,"
+            "request_json,status,payload_json,created_at,submitted_via,asked_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                job_id, conversation_id, user_id, None, "{}", kw.get("status", "running"),
+                json.dumps(payload, ensure_ascii=False), created_at, "web",
+                kw.get("asked_at", created_at), created_at,
+            ),
+        )
+
+
+def _asks(repo, uid):
+    return [it for it in repo.pending_actions(uid)["items"] if it["type"] == "ask"]
+
+
+def test_pending_actions_running_global_ask_item_fields(repo):
+    """在途的全局问答进同一个分组:scope="global"、不属于任何库(库字段为空)、
+    会话 id 用来打开全局问答窗口;摘要同一口径截断;不响铃。"""
+    from app.repositories.pending_action_rows import ASK_QUESTION_PREVIEW_CHARS
+
+    nb_a = _seed_user_nb(repo, "user-a", "A")
+    with repo._connect() as db:
+        db.execute(
+            "INSERT INTO notebooks (id, name, purpose, primary_domain, status, created_by, "
+            "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("nb-user-a-B", "B", "", "", "ready", "user-a",
+             "2026-07-07T00:00:00", "2026-07-07T00:00:00"),
+        )
+    long_question = "比" * (ASK_QUESTION_PREVIEW_CHARS + 30)
+    _insert_global_job(repo, "gask-1", "user-a", [nb_a, "nb-user-a-B"],
+                       question=long_question, conversation_id="gconv-x", asked_at="")
+
+    out = repo.pending_actions("user-a")
+    asks = [it for it in out["items"] if it["type"] == "ask"]
+    assert asks == [{
+        "type": "ask",
+        "scope": "global",
+        "state": "running",
+        "job_id": "gask-1",
+        "notebook_id": "",
+        "notebook_name": "",
+        "conversation_id": "gconv-x",
+        "title": long_question[:ASK_QUESTION_PREVIEW_CHARS],
+        # asked_at 为空时回落到服务端写入时刻(与笔记本内那一臂同一条回退)。
+        "asked_at": "2026-07-07T03:00:00+00:00",
+    }]
+    assert out["count"] == 0
+
+
+def test_pending_actions_running_global_ask_owner_and_terminal_states(repo):
+    """属主隔离 + 只有精确的 running 进铃铛(全局作业的终态同样一律缺席)。"""
+    nb = _seed_user_nb(repo, "user-a")
+    _mk_user(repo, "user-b")
+    repo.add_member(nb, "user-b")
+    for index, status in enumerate(("done", "failed", "cancelled", "interrupted", "running")):
+        _insert_global_job(repo, f"gask-{status}", "user-a", [nb], status=status,
+                           created_at=f"2026-07-07T0{index}:00:00+00:00")
+    _insert_global_job(repo, "gask-b", "user-b", [nb])
+
+    assert [it["job_id"] for it in _asks(repo, "user-a")] == ["gask-running"]
+    assert [it["job_id"] for it in _asks(repo, "user-b")] == ["gask-b"]
+
+
+def test_pending_actions_running_global_ask_needs_every_participant_readable(repo):
+    """全局会话要求每个参与库都仍可读、存活才打得开——条目同一口径:任一参与库
+    失权或进入删除中即出铃铛,恢复后自动回来。"""
+    own = _seed_user_nb(repo, "user-member", "own")
+    shared = _seed_user_nb(repo, "user-owner", "shared")
+    repo.add_member(shared, "user-member")
+    _insert_global_job(repo, "gask-two", "user-member", [own, shared])
+
+    def ids():
+        return [it["job_id"] for it in _asks(repo, "user-member")]
+
+    assert ids() == ["gask-two"]
+    repo.remove_member(shared, "user-member")
+    assert ids() == []
+    repo.add_member(shared, "user-member")
+    assert ids() == ["gask-two"]
+    with repo._connect() as db:
+        db.execute("UPDATE notebooks SET status='deleting' WHERE id=?", (own,))
+    assert ids() == []
+
+
+def test_pending_actions_running_asks_merge_both_arms_newest_first_under_one_cap(repo):
+    """两臂归并成一份:按绝对时刻最新优先,上限是整份快照的 RUNNING_ASK_ROWS,
+    不是每臂各一份。笔记本内那一臂写成 +08:00 的时刻按绝对时刻参与比较。"""
+    from app.repositories.pending_action_rows import RUNNING_ASK_ROWS
+
+    nb = _seed_user_nb(repo, "user-a")
+    expected = []
+    # 第 k 分钟(UTC):偶数 k 是笔记本内提问(写成 +08:00 的同一时刻),奇数 k 是全局问答。
+    for minute in range(RUNNING_ASK_ROWS + 6):
+        if minute % 2 == 0:
+            local = minute + 8 * 60
+            _insert_ask_job(
+                repo, f"askjob-{minute:03d}", nb, "user-a",
+                created_at=f"2026-07-07T{local // 60:02d}:{local % 60:02d}:00+08:00",
+            )
+            expected.append(f"askjob-{minute:03d}")
+        else:
+            _insert_global_job(
+                repo, f"gask-{minute:03d}", "user-a", [nb],
+                created_at=f"2026-07-07T00:{minute:02d}:00+00:00",
+            )
+            expected.append(f"gask-{minute:03d}")
+
+    asks = _asks(repo, "user-a")
+    assert len(asks) == RUNNING_ASK_ROWS
+    assert [it["job_id"] for it in asks] == list(reversed(expected))[:RUNNING_ASK_ROWS]
+    assert {it["scope"] for it in asks} == {"notebook", "global"}
 
 
 # --- 同步 Ask 路径的推送边界(流式那条由 test_ask_execution_coordinator.py 钉) ---

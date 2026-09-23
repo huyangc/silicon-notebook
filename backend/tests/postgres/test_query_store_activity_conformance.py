@@ -1534,3 +1534,83 @@ def test_running_ask_items_mirror_the_sqlite_projection(postgres_database, store
             ("n-shared", "u-member"),
         )
     assert _member_asks() == []
+
+
+def test_running_global_ask_items_mirror_the_sqlite_projection(postgres_database, store):
+    """全局问答那一臂的 PostgreSQL 孪生:scope="global" 字段形状、属主隔离、终态
+    缺席、参与库集合整体可读才出现、与笔记本内那一臂按绝对时刻归并且共用一个上限。
+
+    SQLite 侧的孪生断言在 ``backend/tests/test_pending_actions.py``。
+    """
+    from app.repositories.pending_action_rows import ASK_QUESTION_PREVIEW_CHARS, RUNNING_ASK_ROWS
+
+    long_question = "比" * (ASK_QUESTION_PREVIEW_CHARS + 30)
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u-owner")
+        _insert_user(connection, "u-member")
+        _insert_notebook(connection, "n-own", "u-member")
+        _insert_notebook(connection, "n-shared", "u-owner")
+        _insert_member(connection, "n-shared", "u-member")
+        _insert_global_conversation(connection, "gconv-m", "u-member", NOW)
+        _insert_global_ask(connection, "gask-m", "gconv-m", "u-member", NOW,
+                           status="running", question=long_question,
+                           notebook_ids=["n-own", "n-shared"])
+        for index, status in enumerate(("done", "failed", "cancelled", "interrupted")):
+            _insert_global_ask(connection, f"gask-{status}", "gconv-m", "u-member",
+                               datetime(2026, 8, 1, 9, index, tzinfo=timezone.utc),
+                               status=status, notebook_ids=["n-own"])
+        _insert_global_conversation(connection, "gconv-o", "u-owner", NOW)
+        _insert_global_ask(connection, "gask-o", "gconv-o", "u-owner", NOW,
+                           status="running", notebook_ids=["n-shared"])
+
+    def _asks(uid):
+        return [
+            it for it in store.pending_actions_projection_rows(uid)["items"]
+            if it["type"] == "ask"
+        ]
+
+    assert _asks("u-member") == [{
+        "type": "ask",
+        "scope": "global",
+        "state": "running",
+        "job_id": "gask-m",
+        "notebook_id": "",
+        "notebook_name": "",
+        "conversation_id": "gconv-m",
+        "title": long_question[:ASK_QUESTION_PREVIEW_CHARS],
+        # 插入工具写 asked_at='',回落到服务端 created_at(同一 ISO 文本)。
+        "asked_at": NOW.isoformat(),
+    }]
+    assert [it["job_id"] for it in _asks("u-owner")] == ["gask-o"]
+
+    # 任一参与库失权即出铃铛,恢复读权自动回来;参与库进入删除中同样出铃铛。
+    with postgres_database.write() as connection:
+        connection.execute(
+            "DELETE FROM notebook_members WHERE notebook_id=%s AND user_id=%s",
+            ("n-shared", "u-member"),
+        )
+    assert _asks("u-member") == []
+    with postgres_database.write() as connection:
+        _insert_member(connection, "n-shared", "u-member")
+    assert [it["job_id"] for it in _asks("u-member")] == ["gask-m"]
+
+    # 两臂归并:第 k 分钟,偶数 k 是笔记本内提问、奇数 k 是全局问答;整份快照
+    # 最新优先、共用一个 RUNNING_ASK_ROWS 上限。
+    # 每条在途全局作业各占一个会话(idx_global_ask_running:一个会话同时只有一条 running)。
+    expected = ["gask-m"]
+    with postgres_database.write() as connection:
+        for minute in range(RUNNING_ASK_ROWS + 6):
+            stamp = datetime(2026, 8, 2, 0, minute, tzinfo=timezone.utc)
+            if minute % 2 == 0:
+                _insert_ask(connection, f"askjob-{minute:03d}", "n-own", "u-member",
+                            stamp, status="running")
+                expected.append(f"askjob-{minute:03d}")
+            else:
+                _insert_global_conversation(connection, f"gconv-{minute:03d}", "u-member", stamp)
+                _insert_global_ask(connection, f"gask-{minute:03d}", f"gconv-{minute:03d}",
+                                   "u-member", stamp, status="running",
+                                   notebook_ids=["n-own"])
+                expected.append(f"gask-{minute:03d}")
+    merged = _asks("u-member")
+    assert [it["job_id"] for it in merged] == list(reversed(expected))[:RUNNING_ASK_ROWS]
+    assert {it["scope"] for it in merged} == {"notebook", "global"}

@@ -844,6 +844,95 @@ def test_a_delivered_global_answer_notes_completion_once_with_every_participant(
     assert notes == []
 
 
+def _record_bell_pushes(service, monkeypatch):
+    """Replace the bell's push entry with a recorder that captures what the
+    projection would read at that instant: every job row's status, and whether
+    the worker still holds the job in its live registry."""
+    import app.services.global_ask as global_ask_module
+
+    pushes = []
+    pushed = Event()
+
+    def record(user_id):
+        with service.store.database.connect() as db:
+            statuses = {
+                row["id"]: row["status"]
+                for row in db.execute("SELECT id, status FROM global_ask_jobs").fetchall()
+            }
+        with service._lock:
+            live = set(service._events)
+        pushes.append(("push", user_id, statuses, live))
+        pushed.set()
+
+    monkeypatch.setattr(global_ask_module, "publish_snapshot", record)
+    return pushes, pushed
+
+
+def _wait_for(predicate, message):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        Event().wait(0.01)
+    pytest.fail(message)
+
+
+@pytest.mark.parametrize("outcome", ["done", "failed"])
+def test_the_bell_is_refreshed_once_at_start_and_once_after_the_terminal_frame(
+    setup, monkeypatch, outcome,
+):
+    """The in-progress bell gets exactly two snapshots per global run, the same
+    boundaries a notebook run keeps: once at the start (the row is already
+    ``running``, so the snapshot shows it) and once at the terminal state -- after
+    the row is terminal and the job left the live registry (so the snapshot drops
+    it and never delays delivery), and before the learning chains (which may be
+    slow). Progress never publishes."""
+    service, _, _, _ = setup
+    pushes, _ = _record_bell_pushes(service, monkeypatch)
+    order = pushes
+
+    def note(ids, user, mode, *, anchor):
+        order.append(("note",))
+
+    service.note_ask_completed = note
+    if outcome == "failed":
+        def failing(*args, **kwargs):
+            raise RuntimeError("boom")
+        monkeypatch.setattr(service.ask, "ask", failing)
+    job = service.start(GlobalAskRequest(question="compare"), user_id="u")
+    assert finished(service, job).status == outcome
+    expected_tail = 3 if outcome == "done" else 2
+    _wait_for(lambda: len(order) >= expected_tail, "worker never finished its pushes")
+
+    started, terminal = order[0], order[1]
+    assert started[:2] == ("push", "u")
+    assert started[2][job.job_id] == "running" and job.job_id in started[3]
+    assert terminal[:2] == ("push", "u")
+    assert terminal[2][job.job_id] == outcome and job.job_id not in terminal[3]
+    assert order[2:] == ([("note",)] if outcome == "done" else [])
+
+
+def test_a_job_whose_worker_never_starts_clears_the_bell(setup, monkeypatch):
+    """The row is ``running`` before the worker fails to start, so a concurrent
+    snapshot may already show it; one terminal push removes it (the notebook
+    submit-failure path does the same)."""
+    service, _, _, _ = setup
+    pushes, _ = _record_bell_pushes(service, monkeypatch)
+    original = Thread.start
+
+    def refuse(thread):
+        if thread.name == "global-ask":
+            raise RuntimeError("no threads left")
+        return original(thread)
+
+    monkeypatch.setattr(Thread, "start", refuse)
+    with pytest.raises(RuntimeError):
+        service.start(GlobalAskRequest(question="compare"), user_id="u")
+    assert len(pushes) == 1
+    _, user, statuses, live = pushes[0]
+    assert user == "u" and set(statuses.values()) == {"failed"} and live == set()
+
+
 def test_a_failing_completion_note_leaves_the_delivered_answer_untouched(setup, caplog):
     service, _, _, _ = setup
 

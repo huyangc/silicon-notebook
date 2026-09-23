@@ -5,7 +5,7 @@ import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database
 import "katex/dist/katex.min.css";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
 import { AuthedImage } from "./authed-image";
-import { GlobalAskLauncher } from "./ask/global-ask-launcher";
+import { GlobalAskLauncher, type GlobalConversationRequest } from "./ask/global-ask-launcher";
 import { FormulaView } from "./formula-view";
 import {
   currentPreviewImage,
@@ -893,6 +893,8 @@ export default function Home() {
     setCatalogReviewSeq(0);
   }, [sourceDetail?.id, currentNotebookId]);
   const [toast, setToast] = useState("");
+  // 铃铛里「进行中的提问」的全局条目要打开的那个全局会话(见 GlobalAskLauncher)。
+  const [globalAskRequest, setGlobalAskRequest] = useState<GlobalConversationRequest | null>(null);
   const [modelStatusState, setModelStatusState] = useState({
     status: null as ModelServicesStatus | null,
     unavailable: false,
@@ -2813,6 +2815,13 @@ export default function Home() {
     // 「待审批申请」区批准/驳回。放在 openNotebook 之前:它没有 notebook_id 可开。
     if (item.type === "share_request") {
       showGroups({ groupId: item.group_id || "", tab: "requests" }, "push");
+      return;
+    }
+    // 进行中的全局问答不属于任何一本库:不开笔记本,直接把全局问答浮窗开到那个
+    // 会话上。接回同样由会话详情既有的在途轮次 + 推送流承担,铃铛只负责导航。
+    if (item.type === "ask" && item.scope === "global") {
+      const conversationId = item.conversation_id;
+      if (conversationId) setGlobalAskRequest((prev) => ({ conversationId, nonce: (prev?.nonce ?? 0) + 1 }));
       return;
     }
     // coalesce:false —— 待办项的目的地是报告/治理/索引里的某个具体位置,不是「再点一次
@@ -7676,7 +7685,7 @@ export default function Home() {
         />
       )}
 
-      <GlobalAskLauncher key={currentUser.id} presentation={rootModals} uiMode={uiMode} />
+      <GlobalAskLauncher key={currentUser.id} presentation={rootModals} uiMode={uiMode} openRequest={globalAskRequest} />
       {toast && <div className="toast">{toast}</div>}
       <PendingToast toast={pending.toast} onClose={() => pending.setToast(null)}
         onClick={() => { if (pending.toast) openDoneItem(pending.toast); }} />

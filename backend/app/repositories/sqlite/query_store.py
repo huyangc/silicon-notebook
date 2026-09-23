@@ -30,6 +30,7 @@ from app.repositories.like_pattern import escape_like_pattern
 from app.repositories.pending_action_rows import (
     RUNNING_ASK_ROWS,
     RUNNING_ASK_STATUSES,
+    merge_running_asks,
     running_ask_item,
 )
 from app.repositories.sqlite.database import SqliteDatabase
@@ -1843,7 +1844,8 @@ class QueryStore:
 
     def _running_ask_items(self, db: sqlite3.Connection, user_id: str) -> list[dict]:
         """当前用户仍在跑的提问,最新 `RUNNING_ASK_ROWS` 条(待确认中心「进行中的
-        提问」分组)。
+        提问」分组)——笔记本内这一臂与 ``_running_global_ask_items`` 那一臂经
+        ``merge_running_asks`` 归并,上限是整份快照的,不是每臂各一份。
 
         谓词只有「这次提问是我发起的」+「我现在还读得到那本库」,**一个 notebook id
         都不消费**——所以调用点和「待确认报告」那一半一样放在 `if notebook_ids:`
@@ -1880,17 +1882,76 @@ class QueryStore:
                 RUNNING_ASK_ROWS,
             ),
         ).fetchall()
+        notebook_arm = [
+            (
+                row["created_at"],
+                running_ask_item(
+                    job_id=row["id"],
+                    notebook_id=row["notebook_id"],
+                    notebook_name=row["notebook_name"],
+                    conversation_id=row["conversation_id"],
+                    question=row["question"],
+                    status=row["status"],
+                    # asked_at 是浏览器提交时刻(可能是空串:该列 NOT NULL DEFAULT ''),
+                    # 空则回落到服务端写入时刻,免得前端算不出「已进行多久」。
+                    asked_at=row["asked_at"] or row["created_at"] or "",
+                ),
+            )
+            for row in rows
+        ]
+        return merge_running_asks(
+            (notebook_arm, self._running_global_ask_items(db, user_id))
+        )
+
+    def _running_global_ask_items(
+        self, db: sqlite3.Connection, user_id: str
+    ) -> list[tuple[object, dict]]:
+        """全局问答那一臂:当前用户仍在跑的 `global_ask_jobs`,最新
+        `RUNNING_ASK_ROWS` 条,以 ``(created_at, item)`` 对交给归并。
+
+        谓词与笔记本内那一臂一一对应:同一份精确在途状态集合、属主隔离
+        (``user_id = ?``,全局作业只有发起人一个主体)、同一个上限。读权与生命周期
+        对应的是**参与库集合整体**——全局会话不属于任何一本库,会话详情读取时要求它
+        的每一个参与库都仍可读且存活,缺一个就 404;所以条目只在该作业的每一个
+        ``resolved_notebook_ids`` 都满足规范读谓词与 ``NOTEBOOK_LIVE_SQL`` 时出现,
+        与 `/admin/users/{id}/activity` 全局臂本人自助读取的那条子句逐字同形,不在
+        这里另拼谓词。点不开的条目不进铃铛,恢复读权自动回来。
+
+        排序走 v82 的 ``idx_global_ask_jobs_user_created(user_id, created_at, id)``;
+        ``created_at`` 由服务端 ``datetime.now(timezone.utc).isoformat()`` 写入,同一
+        格式,裸文本序即绝对时刻序,因此不需要 ``_absolute_instant``。
+        """
+        placeholders = ",".join("?" for _ in RUNNING_ASK_STATUSES)
+        rows = db.execute(
+            "SELECT id, conversation_id, status, asked_at, created_at, "
+            "COALESCE(json_extract(payload_json,'$.question'),'') AS question "
+            f"FROM global_ask_jobs WHERE user_id = ? AND status IN ({placeholders}) "
+            "AND NOT EXISTS(SELECT 1 FROM json_each("
+            "json_extract(payload_json,'$.resolved_notebook_ids')) p "
+            "WHERE NOT EXISTS(SELECT 1 FROM notebooks nb WHERE nb.id=p.value AND "
+            + access_sql.read_access_clause()
+            + f" AND nb.{access_sql.NOTEBOOK_LIVE_SQL})) "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            (
+                user_id,
+                *RUNNING_ASK_STATUSES,
+                *access_sql.read_access_params(user_id),
+                RUNNING_ASK_ROWS,
+            ),
+        ).fetchall()
         return [
-            running_ask_item(
-                job_id=row["id"],
-                notebook_id=row["notebook_id"],
-                notebook_name=row["notebook_name"],
-                conversation_id=row["conversation_id"],
-                question=row["question"],
-                status=row["status"],
-                # asked_at 是浏览器提交时刻(可能是空串:该列 NOT NULL DEFAULT ''),
-                # 空则回落到服务端写入时刻,免得前端算不出「已进行多久」。
-                asked_at=row["asked_at"] or row["created_at"] or "",
+            (
+                row["created_at"],
+                running_ask_item(
+                    job_id=row["id"],
+                    notebook_id="",
+                    notebook_name="",
+                    conversation_id=row["conversation_id"],
+                    question=row["question"],
+                    status=row["status"],
+                    asked_at=row["asked_at"] or row["created_at"] or "",
+                    scope="global",
+                ),
             )
             for row in rows
         ]

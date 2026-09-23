@@ -80,6 +80,45 @@ test("提交时刻缺失(旧行 / 不带该字段的客户端)时只省略时长
   expect(onOpenItem).toHaveBeenCalledTimes(1);
 });
 
+const GLOBAL_ASK: PendingItem = {
+  type: "ask",
+  scope: "global",
+  state: "running",
+  job_id: "gask-1",
+  notebook_id: "",
+  notebook_name: "",
+  conversation_id: "gconv-7",
+  title: "对比两本库里的封装翘曲结论",
+  asked_at: "2026-09-07T10:00:00Z",
+};
+
+test("进行中的全局问答与笔记本内提问同组呈现,出处标成「全局问答」", async () => {
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  renderBell([ASK, GLOBAL_ASK]);
+
+  await user.click(screen.getByLabelText("待确认中心"));
+  expect(screen.getAllByText("进行中的提问")).toHaveLength(1);
+  // 全局作业不属于任何一本库:出处标签不是空格子,而是「全局问答」。
+  expect(screen.getByText("全局问答")).toBeInTheDocument();
+  expect(screen.getByText("对比两本库里的封装翘曲结论 · 已进行 3 分钟")).toBeInTheDocument();
+});
+
+test("点击进行中的全局问答把整条待办(scope 与会话 id)交给上层", async () => {
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  const onOpenItem = renderBell([GLOBAL_ASK]);
+
+  await user.click(screen.getByLabelText("待确认中心"));
+  await user.click(screen.getByText("对比两本库里的封装翘曲结论 · 已进行 3 分钟"));
+
+  expect(onOpenItem).toHaveBeenCalledTimes(1);
+  const item = onOpenItem.mock.calls[0][0] as PendingItem;
+  // scope 决定上层去哪:全局条目开全局问答浮窗,而不是去开一本(不存在的)笔记本。
+  expect(item.scope).toBe("global");
+  expect(item.conversation_id).toBe("gconv-7");
+  // 全局条目同样不进未读徽标(它也是用户自己刚发起的)。
+  expect(screen.queryByText("1")).not.toBeInTheDocument();
+});
+
 test("进行中的提问不进未读徽标,同一帧里的其它待办照常计数", async () => {
   renderBell([
     ASK,
