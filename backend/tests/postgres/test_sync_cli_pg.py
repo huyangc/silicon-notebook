@@ -201,11 +201,13 @@ def test_status_reports_chain_head_and_pending_notebook_deletes_on_postgres(
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["chain_heads"] == {
-        "prod-shanghai": {
-            "package_id": "pkg-B",
-            "to_seq": 20,
-            "created_at": "2026-01-02T00:00:00+00:00",
-        }
+        "prod-shanghai": [
+            {
+                "package_id": "pkg-B",
+                "to_seq": 20,
+                "created_at": "2026-01-02T00:00:00+00:00",
+            }
+        ]
     }
     assert payload["pending_notebook_deletes"] == {"prod-shanghai": 1}
 

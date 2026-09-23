@@ -13,6 +13,7 @@ tests/postgres/test_sync_cli_pg.py。
 from __future__ import annotations
 
 import json
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1355,11 +1356,13 @@ def test_status_reports_chain_head_for_a_two_link_chain(tmp_path, monkeypatch, c
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["chain_heads"] == {
-        "prod-shanghai": {
-            "package_id": "pkg-B",
-            "to_seq": 20,
-            "created_at": "2026-01-02T00:00:00+00:00",
-        }
+        "prod-shanghai": [
+            {
+                "package_id": "pkg-B",
+                "to_seq": 20,
+                "created_at": "2026-01-02T00:00:00+00:00",
+            }
+        ]
     }
 
     exit_code = cli.main(["status"])
@@ -1367,6 +1370,7 @@ def test_status_reports_chain_head_for_a_two_link_chain(tmp_path, monkeypatch, c
     out = capsys.readouterr().out
     assert "导入链头" in out
     assert "pkg-B（to_seq=20，创建于 2026-01-02T00:00:00+00:00）" in out
+    assert "不唯一" not in out
 
 
 def test_status_reports_no_chain_head_when_nothing_is_done(
@@ -1400,12 +1404,244 @@ def test_status_reports_no_chain_head_when_nothing_is_done(
     exit_code = cli.main(["status", "--json"])
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["chain_heads"] == {"prod-shanghai": None}
+    assert payload["chain_heads"] == {"prod-shanghai": []}
 
     exit_code = cli.main(["status"])
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "尚无入链的已完成包" in out
+
+
+def _insert_import_row(
+    conn,
+    *,
+    package_id: str,
+    source_env: str,
+    to_seq: int,
+    created_at: str,
+    status: str = "done",
+    from_seq: int = 0,
+    base_package_id: str = "",
+    mode: str = "full",
+) -> None:
+    """One ``sync_imports`` row, ``report_json`` carrying exactly the keys
+    ``_load_sync_status``'s chain-head grouping reads back
+    (``package_created_at``/``mode``/``base_package_id``). Shared by the
+    chain-head ambiguity/ordering/scale tests below so a 1000-row seed does
+    not hand-roll the same INSERT a thousand times."""
+    conn.execute(
+        "INSERT INTO sync_imports "
+        "(package_id, source_env, from_seq, to_seq, status, started_at, "
+        "finished_at, report_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            package_id,
+            source_env,
+            from_seq,
+            to_seq,
+            status,
+            created_at,
+            created_at if status == "done" else None,
+            json.dumps(
+                {
+                    "notebooks": [],
+                    "mode": mode,
+                    "base_package_id": base_package_id,
+                    "package_created_at": created_at,
+                }
+            ),
+        ),
+    )
+
+
+def test_status_prints_every_head_when_the_chain_has_more_than_one(
+    tmp_path, monkeypatch, capsys
+):
+    """Two ``done`` full packages tied on ``to_seq`` and neither carrying a
+    ``base_package_id`` (so neither is a "later window" of the other) are
+    BOTH valid chain-head candidates -- design doc §8's "已知边界": a
+    ``--notebook``-scoped export or a gate-closed full export can share a
+    watermark position with an unrelated full baseline without either having
+    moved past the other. `status` must print and serialize BOTH, not
+    silently pick one the way the old row-order-dependent version did (codex
+    review round 2, P2-1)."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            _insert_import_row(
+                conn,
+                package_id="pkg-full-1",
+                source_env="prod-osaka",
+                to_seq=100,
+                created_at="2026-01-01T00:00:00+00:00",
+            )
+            _insert_import_row(
+                conn,
+                package_id="pkg-full-2",
+                source_env="prod-osaka",
+                to_seq=100,
+                created_at="2026-01-02T00:00:00+00:00",
+            )
+    finally:
+        database.close()
+
+    exit_code = cli.main(["status", "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["chain_heads"]["prod-osaka"] == [
+        {
+            "package_id": "pkg-full-1",
+            "to_seq": 100,
+            "created_at": "2026-01-01T00:00:00+00:00",
+        },
+        {
+            "package_id": "pkg-full-2",
+            "to_seq": 100,
+            "created_at": "2026-01-02T00:00:00+00:00",
+        },
+    ]
+
+    exit_code = cli.main(["status"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "pkg-full-1" in out
+    assert "pkg-full-2" in out
+    assert "链头不唯一" in out
+
+
+def test_status_chain_head_result_is_independent_of_insertion_order(
+    tmp_path, monkeypatch, capsys
+):
+    """Same two ambiguous heads as above, inserted in the OPPOSITE order --
+    neither ``sync_imports`` nor ``_load_sync_status``'s in-memory grouping
+    carries an ORDER BY that ``_chain_heads_for`` could accidentally depend
+    on, so the printed/serialized result must be identical either way (codex
+    review round 2, P2-1: this is the mutation the old version's dependence
+    on row order would have failed)."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            _insert_import_row(
+                conn,
+                package_id="pkg-full-2",
+                source_env="prod-osaka",
+                to_seq=100,
+                created_at="2026-01-02T00:00:00+00:00",
+            )
+            _insert_import_row(
+                conn,
+                package_id="pkg-full-1",
+                source_env="prod-osaka",
+                to_seq=100,
+                created_at="2026-01-01T00:00:00+00:00",
+            )
+    finally:
+        database.close()
+
+    exit_code = cli.main(["status", "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["chain_heads"]["prod-osaka"] == [
+        {
+            "package_id": "pkg-full-1",
+            "to_seq": 100,
+            "created_at": "2026-01-01T00:00:00+00:00",
+        },
+        {
+            "package_id": "pkg-full-2",
+            "to_seq": 100,
+            "created_at": "2026-01-02T00:00:00+00:00",
+        },
+    ]
+
+
+def test_status_chain_head_scales_to_a_long_done_history(tmp_path, monkeypatch, capsys):
+    """1000 ``done`` rows for one ``source_env``: 990 with strictly
+    increasing (and therefore never tied, never candidate) ``to_seq``, plus
+    10 tied on the actual maximum -- the only rows ``_chain_heads_for`` can
+    ever call ``downstream_of`` on, per its own docstring (only the maximum
+    ``to_seq`` can possibly qualify as undominated).
+
+    Wall-clock timing alone does not discriminate here: a plain, naive O(n^2)
+    pairwise scan over 1000 lightweight objects still finishes in well under
+    a second on ordinary hardware (measured ~15ms), so a timing budget large
+    enough to be CI-safe would never actually fail if the O(n) + O(k^2)
+    narrowing this is supposed to be regressed back to a full O(n^2) scan.
+    The real regression guard is the ``downstream_of`` CALL COUNT: narrowed
+    to the 10-row tied subset first, the pairwise comparison makes at most
+    10*9 = 90 calls; an unnarrowed scan over all 1000 ``done`` rows would
+    make roughly 1000*999 ~ 1,000,000 (codex review round 2, P2-2). The
+    timing assertion is kept too, as a generous backstop against a much
+    worse regression (e.g. a per-candidate database round trip) that a call
+    count on this one method would not catch."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            for i in range(990):
+                _insert_import_row(
+                    conn,
+                    package_id=f"pkg-lo-{i:04d}",
+                    source_env="prod-bulk",
+                    to_seq=i,
+                    created_at="2026-01-01T00:00:00+00:00",
+                )
+            # A genuine chain of 10 EMPTY windows tied on to_seq=990 (the
+            # ordinary shape after `sync prune-log` dropped an empty stretch
+            # of the log -- design doc §7 "导出水位"): each continues from
+            # the one before it, so only the last is undominated and the
+            # other 9 must each be resolved via the pairwise scan.
+            for i in range(10):
+                _insert_import_row(
+                    conn,
+                    package_id=f"pkg-hi-{i:02d}",
+                    source_env="prod-bulk",
+                    to_seq=990,
+                    created_at=f"2026-01-02T00:00:{i:02d}+00:00",
+                    base_package_id=f"pkg-hi-{i - 1:02d}" if i > 0 else "",
+                    mode="incremental" if i > 0 else "full",
+                )
+    finally:
+        database.close()
+
+    calls = 0
+    original_downstream_of = cli._PriorImport.downstream_of
+
+    def _counting_downstream_of(self, base):
+        nonlocal calls
+        calls += 1
+        return original_downstream_of(self, base)
+
+    monkeypatch.setattr(cli._PriorImport, "downstream_of", _counting_downstream_of)
+
+    started = time.monotonic()
+    exit_code = cli.main(["status", "--json"])
+    elapsed = time.monotonic() - started
+    assert exit_code == 0
+    assert elapsed < 5.0, f"sync status took {elapsed:.2f}s over 1000 done rows"
+    assert calls <= 200, (
+        f"_PriorImport.downstream_of was called {calls} times for 1000 done "
+        "rows with only 10 tied on the maximum to_seq -- the max-to_seq "
+        "narrowing appears to have regressed back to an O(n^2) full scan"
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["chain_heads"]["prod-bulk"] == [
+        {
+            "package_id": "pkg-hi-09",
+            "to_seq": 990,
+            "created_at": "2026-01-02T00:00:09+00:00",
+        }
+    ]
 
 
 def test_status_reports_pending_notebook_deletes_grouped_by_source_env(
