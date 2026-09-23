@@ -42,10 +42,14 @@ from app.migration.sync.database import SyncExportError, _Source
 from app.migration.sync.export import ExportReport, export_notebooks
 from app.migration.sync.import_ import (
     SyncImportError,
+    _STATUS_DONE,
     _moment,
+    _prior_imports,
+    _PriorImport,
     _read_moment,
     import_package,
 )
+from app.migration.sync.package import MODE_INCREMENTAL
 from app.repositories.sqlite.database import SqliteDatabase
 
 ROOT_DIR = Path(__file__).resolve().parents[4]
@@ -275,6 +279,8 @@ def _cmd_import(args: argparse.Namespace, settings: Settings) -> int:
     if report.dry_run:
         print("== 预检模式（--dry-run）：以下是预览，未写入任何数据 ==")
     print(f"包 id: {report.package_id}（来自 {report.source_env}）")
+    base_note = f"，base={report.base_package_id}" if report.base_package_id else ""
+    print(f"模式: {report.mode}{base_note}")
     print(f"笔记本: {len(report.notebooks)} 个")
     if not report.dry_run:
         # dry-run 从不触达行/文件应用阶段，tables/files_copied 恒为空——打印它们
@@ -303,6 +309,24 @@ def _cmd_import(args: argparse.Namespace, settings: Settings) -> int:
         print(f"{label}: {', '.join(sorted(report.groups_created))}")
     if not report.dry_run:
         print(f"文件数: {report.files_copied}")
+    if not report.dry_run and report.mode == MODE_INCREMENTAL:
+        # 全量包这几个字段恒为 0/空（§8「导入相位」），dry-run 从不触达删除重放/
+        # 笔记本删除传播这两个相位——只在真正执行的增量导入里打印才不误导。
+        print(
+            f"删除重放: 应用 {report.deletes_applied}、目标端已不存在 "
+            f"{report.deletes_absent}、孤儿跳过 {report.deletes_orphan_skipped}"
+        )
+        if report.notebooks_deleted:
+            print(
+                "已排队删除的笔记本: "
+                + "、".join(sorted(report.notebooks_deleted))
+                + "（由目标端应用的删除作业完成清理）"
+            )
+        if report.notebooks_delete_skipped:
+            print(
+                "跳过删除的笔记本（目标端正在拷贝，留给运维在拷贝结束后处理）: "
+                + "、".join(sorted(report.notebooks_delete_skipped))
+            )
     if report.warnings:
         # 含目标是 SQLite 时「必须停机导入」一类的提示——来自报告本身，这里不再
         # 自行判断后端去重复那个决定。
@@ -452,6 +476,47 @@ def _load_export_leases(source: _Source, conn: Any) -> list[dict[str, Any]]:
     return rows
 
 
+def _chain_head(prior: Sequence[_PriorImport]) -> _PriorImport | None:
+    """The row a NEXT incremental package's ``base_package_id`` must name,
+    for this ``source_env`` -- the same "done, and nothing downstream of it"
+    rule ``import_.py``'s ``_assert_chain`` enforces (design doc §8), read
+    back here for display rather than re-derived: this reuses
+    :meth:`_PriorImport.downstream_of` and does not re-implement the
+    ``report_json``/``to_seq`` reading ``_prior_imports`` already did.
+
+    ``None`` when this ``source_env`` has no ``done`` row at all -- nothing
+    has ever finished importing from it, so there is no base yet for a first
+    incremental package (it would have to arrive as ``mode=full``).
+    """
+    done = [row for row in prior if row.status == _STATUS_DONE]
+    for candidate in done:
+        if not any(
+            other.package_id != candidate.package_id and other.downstream_of(candidate)
+            for other in done
+        ):
+            return candidate
+    return None
+
+
+def _pending_notebook_deletes(source: _Source, conn: Any) -> dict[str, int]:
+    """How many mirrored notebooks (non-empty ``sync_origin``) are sitting in
+    ``status='deleting'`` per source environment, grouped by ``sync_origin``.
+
+    An incremental import that propagates a source-side notebook deletion
+    (design doc §8 "笔记本删除传播") only flips the row to ``deleting`` and
+    queues a ``notebook_delete_jobs`` row -- the actual cleanup runs later, in
+    the target application's own delete-job worker. This count is how an
+    operator notices a notebook stuck waiting on that worker rather than
+    assuming the import itself failed.
+    """
+    rows = source.fetch(
+        conn,
+        "SELECT sync_origin, COUNT(*) AS pending FROM notebooks "
+        "WHERE status = 'deleting' AND sync_origin <> '' GROUP BY sync_origin",
+    )
+    return {str(row["sync_origin"]): int(row["pending"]) for row in rows}
+
+
 def _load_sync_status(settings: Settings) -> dict[str, Any]:
     """Read ``sync_export_state``/``sync_imports`` on whichever backend
     ``settings.database_url`` names.
@@ -531,6 +596,21 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
                 runs = _load_export_leases(source, conn)
                 runs_note = None
             imports = source.fetch(conn, imports_sql)
+            source_envs = sorted({str(row["source_env"]) for row in imports})
+            chain_heads: dict[str, dict[str, Any] | None] = {}
+            for source_env in source_envs:
+                prior = _prior_imports(source, conn, source_env)
+                head = _chain_head(prior)
+                chain_heads[source_env] = (
+                    {
+                        "package_id": head.package_id,
+                        "to_seq": head.to_seq,
+                        "created_at": head.created_at,
+                    }
+                    if head is not None
+                    else None
+                )
+            pending_notebook_deletes = _pending_notebook_deletes(source, conn)
     finally:
         source.close()
     for row in imports:
@@ -548,6 +628,8 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
         "runs": runs,
         "runs_note": runs_note,
         "imports": imports,
+        "chain_heads": chain_heads,
+        "pending_notebook_deletes": pending_notebook_deletes,
     }
 
 
@@ -627,6 +709,29 @@ def _cmd_status(args: argparse.Namespace, settings: Settings) -> int:
             f"{row['notebooks']} 个笔记本，开始于 {row['started_at']}，"
             f"结束于 {finished_at}{suffix}"
         )
+    print("导入链头（本环境作为目标；下一个增量包的 base_package_id 应等于它）：")
+    chain_heads = state["chain_heads"]
+    pending_deletes = state["pending_notebook_deletes"]
+    source_envs = sorted(set(chain_heads) | set(pending_deletes))
+    if not source_envs:
+        print("  （无）")
+    for source_env in source_envs:
+        head = chain_heads.get(source_env)
+        if head is None:
+            head_desc = "尚无入链的已完成包（下一个包只能是 mode=full）"
+        else:
+            created_at = head["created_at"]
+            created_note = created_at.isoformat() if created_at is not None else "-"
+            head_desc = (
+                f"{head['package_id']}（to_seq={head['to_seq']}，创建于 {created_note}）"
+            )
+        pending = pending_deletes.get(source_env, 0)
+        pending_note = (
+            f"，等待删除作业清理的镜像 {pending} 个（由目标端应用的删除作业完成）"
+            if pending
+            else ""
+        )
+        print(f"  -> {source_env}: {head_desc}{pending_note}")
     _print_capture_section(state["capture"])
     return 0
 

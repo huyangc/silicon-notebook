@@ -641,9 +641,9 @@ fall permanently outside every later incremental window (`seq > W`), with no pac
 picks it back up. Only an export that covers the full current notebook set is entitled to
 advance the watermark. The importer accepts both full and incremental packages (§8 of the design
 doc); an incremental package must be imported **in chain order** — its `base_package_id` must
-equal the `package_id` of the most recent `done` package from the same `source_env` that is
-itself chained (§8's "chain head") — see "Operating a daily export cadence" below for what that
-means in practice.
+equal the `package_id` of the `done` package this target has applied that no later `done` package
+has moved past (§8's "chain head" — see "Operating a daily export cadence" below for what that
+means in practice).
 
 ```bash
 # Source environment: name it once, enable capture, then run the first (full) export --
@@ -695,20 +695,26 @@ PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --j
 4. Move the package directory to the target environment the same way you already move full
    packages (`scp`/rsync/object storage — whatever transport is in place).
 5. **Import packages in chain order, one at a time.** `sync import` accepts an incremental
-   package only when its `base_package_id` equals the `package_id` of the target's current chain
-   head for that `source_env` — the most recent `done` package that is itself chained (a
-   `--notebook`-scoped export or a `captured=false` full export never advances the watermark and
-   is never a valid chain head). Importing packages out of order, or skipping one, is rejected at
+   package only when its `base_package_id` names a `done` package on the target for that
+   `source_env` that no later `done` package has moved past (§8's "chain head" — a
+   `--notebook`-scoped export or a `captured=false` full export never advances the source's own
+   watermark, so it is never actually named as a base by a real incremental package even though
+   nothing about the target-side check requires that on its own). Also, an incremental package is
+   refused outright, before the base is even checked, whenever this target has any OTHER package
+   from the same `source_env` still `failed` or `running` — an incremental package carries only
+   its own window and can never stand in for what an unfinished package was going to apply, so it
+   is never allowed to layer on top of one; resolve or `--resume` that package first, or take over
+   a dead one (`--take-over`). Importing packages out of order, or skipping one, is rejected at
    preflight before writing anything; the error names both the chain head it found and the
-   rejected package's `base_package_id`, and offers one of two ways out: if the chain head itself
+   rejected package's `base_package_id`, and offers one of two ways out: if the named base itself
    is `failed` or still `running` on the target, resolve or `--resume` that package first; if it
-   simply hasn't arrived or was discarded, re-export a full baseline from the source
-   (`sync export --full`) and start the chain over. Nothing about running `sync export` daily
-   requires importing every package the moment it lands — packages can queue up on the target
-   side — but they must be applied in the order they were produced, and every package in between
-   must be imported (or superseded by a fresh full baseline) before a later one will be accepted.
-   `sync status` on the target prints the current chain head per `source_env` so you can tell
-   which package to import next.
+   simply hasn't arrived, was discarded, or has already been passed by a later package, re-export a
+   full baseline from the source (`sync export --full`) and start the chain over. Nothing about
+   running `sync export` daily requires importing every package the moment it lands — packages can
+   queue up on the target side — but they must be applied in the order they were produced, and
+   every package in between must be imported (or superseded by a fresh full baseline) before a
+   later one will be accepted. `sync status` on the target prints the current chain head per
+   `source_env` so you can tell which package to import next.
 6. An incremental export with nothing to ship still produces a package (every `rows/*.jsonl`,
    `deletes.jsonl`, and `kg_epochs.jsonl` is present but empty) and still advances the
    watermark — the report's `empty` field says so. This keeps the export chain unbroken: every
@@ -829,8 +835,8 @@ heartbeat_at` — this is the evidence to check before deciding whether `--take-
 when present) unchanged from the row.
 
 `status` also prints, per `source_env` this environment has ever imported from, the current
-**chain head** — the `package_id`, `to_seq`, and `created_at` of the most recent `done` package
-that is itself chained (§8 of the design doc). This is the value the next incremental import's
+**chain head** — the `package_id`, `to_seq`, and `created_at` of the `done` package that no later
+`done` package has moved past (§8 of the design doc). This is the value the next incremental import's
 `base_package_id` must match; use it to tell which package in an incoming queue to import next,
 or to confirm a `--full` re-baseline actually reset the chain. It also prints how many mirrored
 notebooks are **waiting on a delete job** — `status='deleting'` with a non-empty `sync_origin`

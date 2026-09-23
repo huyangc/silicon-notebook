@@ -851,36 +851,63 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
    目标端已存在，其 `sync_origin` 必须等于源环境标识；本地库或来自别的源环境的镜像都拒绝并
    点名）。**不按名字查重**：笔记本名本来就不唯一。
 
-   **链头**：同一 `source_env` 在 `sync_imports` 里 `status=done` 且**入链**的最新一条——入链
-   指它落盘时记下的 `base_package_id != ''` 或 `to_seq > 0`（限定导出 `--notebook` 与门关
-   全量的 `to_seq=0`/`base_package_id=''` 都不入链，后续增量包不能以它们为 base）。
-   `report_json`（`_running_report_json` 与最终 `ImportReport.as_json()`）从本 PR 起都记
-   `mode`/`from_seq`/`to_seq`/`base_package_id`；早于本 PR 写下的行缺这些字段一律按不入链
-   处理（不去猜它当时是不是增量）。
+   **链头**：同一 `source_env` 在 `sync_imports` 里，`done` 且**没有任何包在它下游**的那
+   一条——「下游」（`_PriorImport.downstream_of`）指另一条 `done` 记录的 `to_seq` 比它大，
+   或者那条记录本身是一次晚于它记下的窗口（`base_package_id` 非空且 `created_at` 更晚，用
+   来兜住「`to_seq` 没变但确实是更晚一次空窗口」这种形状）。这条规则**不要求候选本身
+   「入链」**——不检查候选自己的 `base_package_id`/`to_seq` 是否非空/大于零：只要眼下还没有
+   任何后续导入把水位推过它，一个限定导出（`--notebook`）或门关全量导入的包在理论上也可以
+   是「此刻的链头」，因为它就是同源最近一条 `done` 的记录。实践中这种情况极少出现，因为
+   源端本来就不会把不推进水位的包（限定导出、门关全量）记成后续增量窗口的 `base_package_id`
+   ——它们不推进源端自己的水位，源端仍然从更早那次真正推进过水位的包续接。`report_json`
+   （运行中的行由 `_running_report_json` 写，完成的行由 `ImportReport.as_json()` 写）从本 PR
+   起都记 `mode`/`from_seq`/`to_seq`/`base_package_id`；早于本 PR 写下的行两者皆缺，一律读
+   成空字符串——不能被当作合法的 `base`，也不去猜它当时是不是增量。
 
-   `incremental` 包要求 `base_package_id == 链头.package_id`；不等就拒绝，错误点名链头的
-   `package_id`/`created_at` 与本包的 `base_package_id`，并给出两种出路：本包的
-   `base_package_id` 指向同源一个仍是 `failed` 或 `running` 的包 ⇒ 提示先 `--resume`
-   或处理那个包；否则提示源端 `sync export --full` 重建基线。`from_seq == 链头.to_seq + 1`
-   不连续只记一条诊断 warning，不作为拒绝条件——`prune-log` 清过日志之后的空窗口增量包是
-   合法形态（见 §7「导出水位」）。`incremental` 包不参与 `_supersede_outstanding`（它不能
-   取代任何未完成的包）；同源存在 `failed` 或 `running` 的包时，新到的增量包一律拒绝（除非
-   它自己就是要被 `--resume` 的那一个）。`_reject_backwards_snapshot` 对增量包比的是链头的
-   `created_at`（全量包仍比同源最近一次 `done` 包的 `created_at`，见下文）。空增量包（无行
-   也无删除）照常入链、记 `done`——导出链靠 `base_package_id` 接续，不能因为一次窗口没变化
-   就断链。
+   `incremental` 包要求 `base_package_id == 链头.package_id`：先要求这个 `package_id` 在
+   本环境 `sync_imports` 里存在且状态是 `done`（不存在或仍是 `failed`/`running` 都不算），
+   再要求没有任何别的 `done` 记录在它下游。任一条不满足就拒绝，错误点名找到的那一行的状态
+   （或「本环境从未应用过」）与本包的 `base_package_id`，并给出两种出路：命名的 base 在本
+   环境记录着 `failed` 或仍 `running` ⇒ 提示先 `--resume` 或处理那个包；base 根本找不到、
+   或已经被别的 `done` 记录越过 ⇒ 提示源端 `sync export --full` 重建基线。`from_seq ==
+   base.to_seq + 1` 不连续只记一条诊断 warning，不作为拒绝条件——`prune-log` 清过日志之后
+   的空窗口增量包是合法形态（见 §7「导出水位」）。**同源任何其它包只要还是 `failed` 或
+   `running`（不是这次要 `--resume` 的那一个），增量包一律拒绝，不取代**——增量包只携带
+   自己的窗口，天然不能替某个未完成的全量/增量包把它本该应用的东西补上，所以不走
+   `_supersede_outstanding` 那条「更新的包取代旧 failed 包」的路（那条路只对全量包开放）。
+   `_reject_backwards_snapshot` 对增量包比的是命名 base 的 `created_at`（全量包仍比同源最
+   近一次 `done` 包的 `created_at`，见下文）。空增量包（无行也无删除）照常入链、记 `done`
+   ——导出链靠 `base_package_id` 接续，不能因为一次窗口没变化就断链。
 
-   新增范围校验：`_verify_row_scopes` 不变（沿用「安全边界」的既有口径）。新增
-   `_verify_delete_scopes`：每条 `deletes.jsonl` 记录的 `table` 必须属于同步表集合、非
-   `seed_only`、非 GLOBAL scope；`key` 的列集合必须与该表 `sync_key` 声明的列集合完全相等
-   （多列或少列都拒绝）；`notebook_id` 非空时必须属于 `manifest.notebooks ∪
-   deleted_notebooks`；`deleted_notebooks ∩ manifest.notebooks` 必须为空集；
-   `deleted_notebooks` 里出现的每个 id 同样过一遍 `is_safe_identifier`（与笔记本 id、包 id
-   同一套字符集校验）。这一步和 `_verify_row_scopes` 一样，在预检里做，在任何写入或删除
-   之前。`deleted_notebooks` 逐个核对目标端现状：目标端存在同 id 笔记本时，它的
-   `sync_origin` 必须等于本包 `source_env`（否则拒绝并点名，与「镜像 origin 检查」同口径—
-   —不能让一个构造的 `deleted_notebooks` 条目去删别的源、或本地自建的笔记本）；目标端不
-   存在这个 id（从没同步过来，或已经被更早一次导入删过）⇒ no-op，只记一条 warning。
+   **已知边界，登记而非掩盖**：导入端分辨不出一个全量包导出时变更捕获的门是开是关——
+   manifest 不带 `captured` 字段，`to_seq=0` 在「门关全量」与「开门后第一次全量」两种情况下
+   都可能合法出现。防止「在一个未受信任的日志窗口上续接增量」的保证因此活在**导出侧**：一个
+   `captured=0` 的水位行会强制该 target 的下一次导出退回全量（`export._resume_watermark`，
+   见 §7「模式判定」），所以「门关全量之后紧跟一个把它当 base 的增量包」这种窗口从未被产出
+   过——导入端不需要（也无法）识别这个情形，只需要正确执行上面的链校验。
+
+   新增范围校验：`_verify_row_scopes` 对**增量包**的 PARENT scope 多一次机会——一个窗口只
+   携带变化的行，一条新的 knowhow 单元格可能不带着它所属的 `knowhow_tables` 行一起来（那张
+   表这次窗口里没变），把每个变化行的祖先都重发一遍正是窗口存在的意义所在要避免的膨胀；这类
+   父键改为向**目标端**按 `scope_chain` 解析（`_resolve_target_notebooks`，与 3c 删除重放
+   用的同一套解析），解析结果落在本包声明的笔记本集合内才接受，接受后的父键会并入
+   `_assert_target_ownership` 复用的「本包可以归属到的父键」集合，供同一父表下更靠后的表与
+   写入时的归属校验使用；解析不出、或解析到集合外，仍然拒绝——被保护的性质没变（「每一行都
+   能归属到本包声明的某个笔记本」），只是证据来源可能从包内部换成目标端。**全量包没有这个
+   宽限**：它是快照，理应自带全部祖先。新增 `_verify_delete_scopes`：每条 `deletes.jsonl`
+   记录的 `table` 必须属于同步表集合、非 `seed_only`、非 GLOBAL scope；`key` 的列集合必须
+   与该表 `sync_key` 声明的列集合完全相等（多列或少列都拒绝）；`notebook_id` 非空时必须
+   属于 `manifest.notebooks ∪ deleted_notebooks`。**`manifest.deleted_notebooks` 不是这个
+   集合的来源**——manifest 不进 checksums，这一步和 `rows/notebooks.jsonl` ⇔
+   `manifest.notebooks` 同一个理由、同一种做法：真正的删除笔记本集合从 `deletes.jsonl` 里
+   `table="notebooks"` 的条目读出来，`manifest.deleted_notebooks` 必须与这个集合**逐一相等**
+   （多一个少一个都拒绝），而不只是要求它和 `manifest.notebooks` 不相交。`deleted_notebooks`
+   里出现的每个 id 同样过一遍 `is_safe_identifier`（3c 要拿它拼 `storage/` 路径）。这一步和
+   `_verify_row_scopes` 一样，在预检里做，在任何写入或删除之前。`deleted_notebooks` 逐个核对
+   目标端现状：目标端存在同 id 笔记本时，它的 `sync_origin` 必须等于本包 `source_env`（否则
+   拒绝并点名，与「镜像 origin 检查」同口径——不能让一个构造的 `deleted_notebooks` 条目去删
+   别的源、或本地自建的笔记本）；目标端不存在这个 id（从没同步过来，或已经被更早一次导入
+   删过）⇒ no-op，只记一条 warning。
 
    同一 `source_env` 已有 running 的导入则拒绝，错误里带对方的 `heartbeat_at`（每表提交
    刷新）；只有操作者确认对方进程已死后显式 `--take-over` 才接管，不按运行时长推断。同一个
@@ -914,9 +941,12 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
       过渡规则仍然存在：`sources.file_path` 按 shadow manifest 的 `path_columns` 重锚到
       目标端的 storage 根（包里是源主机的绝对路径）。本次预留（reserved）的笔记本经这一步
       从 `importing` 的壳子填上真实内容。
-   c. **删除重放**（仅增量包）：按 `reversed(synced_tables())`（子表先于父表，与拷贝序
-      「先父后子」正好相反——删除要反过来才不撞外键）逐表一个事务，进度写
-      `__delete__:<table>`。每表：从 `deletes.jsonl` 取属于这张表的条目，按 `sync_key`
+   c. **删除重放**（仅增量包）：重放表集合是 `reversed(synced_tables())` 去掉 `notebooks`、
+      `seed_only` 与 GLOBAL scope 的表——`notebooks` 自己的删除交给下面的 3d（它不是一条
+      DELETE，是一个排队的六相位作业）；`seed_only`/GLOBAL 不出现是因为 `_verify_delete_scopes`
+      已经把携带这类条目的包挡在预检之外，这里不用再判一次。其余表按这个顺序逐表一个事务，
+      进度写 `__delete__:<table>`——反过来的顺序（子表先于父表）与拷贝序「先父后子」正好相反，
+      删除要反过来才不撞外键。每表：从 `deletes.jsonl` 取属于这张表的条目，按 `sync_key`
       列序组出批量键，分批（`_ROW_BATCH`）处理：
       - 归属校验——与 `_assert_target_ownership` 同一套「先回读目标行再判定」的口径，方向
         相反：那边校验「即将写入的行属于本包范围」，这里校验「即将删除的目标行属于本包
@@ -939,18 +969,31 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
       memory 四张表的删除照常重放——这正是 §5「允许共存」承诺的「源端删除靠 `deletes.jsonl`
       精确重放」；对账删除相位的 `_protected_sources` 概念不参与，增量删除重放靠的是日志
       本身的精确性，不需要额外保护集合。
-   d. **笔记本删除传播**（仅增量包）：对 `manifest.deleted_notebooks` 里、经第 1 步核对
-      目标端存在且 `sync_origin` 匹配的每个笔记本 id，一个事务里做 CAS：
-      `UPDATE notebooks SET status='deleting', updated_at=? WHERE id=? AND sync_origin=?
-      AND status NOT IN ('deleting','copying')`；`rowcount=1` 就在同一事务里插入一行
-      `notebook_delete_jobs`（走 `_new_id("ndj")` 同一套 id 生成，与 HTTP `DELETE
-      /api/notebooks/{id}` 走的是同一条「CAS 置位 + 建作业行」路径，见运维文档「Notebook
-      delete jobs」/「笔记本删除作业」）。`rowcount=0` 且这一行已经是 `deleting` ⇒ 幂等
-      （别的导入或 HTTP 删除已经在处理它），no-op；`status='copying'` ⇒ 记 warning 跳过——
-      目标端此刻正在拷贝这本笔记本，导入不等它，也不越权打断它，把删除留给运维在拷贝结束
-      后再处理。进度写 `__delete_notebook__:<id>`。实际清理（六相位、storage 目录、
-      `retained_user_activity` 归档）由应用侧运行中的 `NotebookDeleteJobRunner` 完成，不是
-      导入器自己做——导入只负责把作业排进队列；目标端此刻若没有应用在跑这个作业消费者，
+   d. **笔记本删除传播**（仅增量包）：对 `manifest.deleted_notebooks` 里的每个笔记本 id，一
+      个事务里先回读目标端这一行的 `sync_origin`：不等于本包 `source_env` ⇒ **直接中止整个
+      导入**（`SyncImportError`）——预检已经查过一次，这里在真正落笔前再查一次，是因为
+      归属可能在预检快照之后被别的进程改过，而这正是「即将销毁这行」的那个事务，必须是最后
+      一道防线；目标端根本没有这一行 ⇒ no-op（预检阶段已经对这种情况发过 warning，这里不
+      重复发）。归属核对通过后做 CAS：`UPDATE notebooks SET status='deleting', updated_at=?
+      WHERE id=? AND sync_origin=? AND status NOT IN ('deleting','copying')`——谓词刻意比
+      `notebook_delete_job_store` 的 `NOTEBOOK_LIVE_SQL`（多挡一个 `'importing'`）更窄：HTTP
+      删除路由不能把一本还在导入中的笔记本当作合法目标，但这里恰恰相反——一次更早的、同一个
+      `source_env` 的导入失败后，可能把某本笔记本晾在 `importing` 状态；源端这本笔记本这次
+      又被删了，若不能对 `importing` 状态放行，这本笔记本就会永远卡在那里，谁都清不掉。
+      `rowcount=1` 就在同一事务里插入一行 `notebook_delete_jobs`（`id` 直接拼
+      `f"ndj-{uuid4().hex}"`——前缀写法与 facade 的 `_new_id("ndj")` 一致，但这里是内联
+      拼接，不调用那个仓储层函数：这个模块按导入白名单不允许 import 仓储层；列与字面量跟
+      `notebook_delete_job_store.request` 的 INSERT 逐字节相同，是与 HTTP `DELETE
+      /api/notebooks/{id}` 同一条「CAS 置位 + 建作业行」路径的另一份落地，见运维文档
+      「Notebook delete jobs」/「笔记本删除作业」）；若这本笔记本已经有一条 active
+      （`queued`/`running`/`waiting`）的 `notebook_delete_jobs` 行——一次 sweep 或更早的一次
+      跑漏网补建的——则只做 CAS、跳过插入并记 warning（唯一索引不允许两条 active 作业同时
+      存在，CAS 本身已经尽到这个相位的责任）。`rowcount=0` 且这一行已经是 `deleting` ⇒ 幂等
+      （别的导入或 HTTP 删除已经在处理它），记 warning、no-op；`status='copying'` ⇒ 记
+      warning 跳过——目标端此刻正在拷贝这本笔记本，导入不等它，也不越权打断它，把删除留给
+      运维在拷贝结束后再处理。进度写 `__delete_notebook__:<id>`。实际清理（六相位、storage
+      目录、`retained_user_activity` 归档）由应用侧运行中的 `NotebookDeleteJobRunner` 完成，
+      不是导入器自己做——导入只负责把作业排进队列；目标端此刻若没有应用在跑这个作业消费者，
       笔记本会停在 `deleting` 直到应用下次启动或运维手动处理（`sync status` 用「等待删除
       作业的镜像」这个数字把这种情况亮出来）。
 4. 文件：全量包整目录替换（不变）——`files/notebooks/<id>/` 与 `files/assets/<id>/` 各自先
