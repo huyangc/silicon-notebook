@@ -812,7 +812,15 @@ upsert 之前按主键回查目标端已有行的归属（notebook scope 比 not
 文件相位只逐个复制清单里校验过的普通文件，绝不 `copytree`——包里没被清单覆盖的东西不会
 落到目标端。笔记本 id 在声明事务里就预留：不存在的笔记本以 `importing` + `sync_origin` 首插，
 已存在的锁行重验 `sync_origin`；两个源环境带同一 id 并发导入时由 notebooks 主键裁决只有一方
-能过，之后每个删除/写入事务开头都重验包内笔记本仍归本源。
+能过，之后每个删除/写入事务开头都重验笔记本仍归本源——这个复核覆盖的不只是
+`manifest.notebooks`，也覆盖 `deleted_notebooks`：目标端不存在这个 id，或者存在且
+`sync_origin` 等于本包 `source_env`（对存在的行，PostgreSQL 目标额外 `FOR UPDATE`），两种
+都算通过；否则整个导入失败并点名这个 id 与它此刻的 `sync_origin`。覆盖 `deleted_notebooks`
+是必须的，不是顺手：`_plan_deletes`（3c）预检时把目标端不存在的被删笔记本 id 留在允许集合
+里（§8「导入相位」3c），但预检只是一次读快照，不是锁——预检和真正落笔之间，另一个源环境的
+并发导入完全可能用这同一个 id 重新创建一个镜像；如果删除事务开头不重新核一遍，3c 会照着
+预检时的结论把这个外来镜像的行删掉，等轮到 3d 才因为 `sync_origin` 不匹配而拒绝——那时候
+3c 的删除已经提交了，为时已晚。见下方 3c/3d 的具体描述。
 
 导入端按目标后端选择转换：SQLite 目标只解码 `$bytes`；PostgreSQL 目标按 `postgres_catalog`
 读到的列类型调用 `transform_sqlite_value`。upsert 语句两端同形：
@@ -1062,8 +1070,13 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
       `seed_only`/GLOBAL 不出现是因为 `_verify_delete_scopes` 已经把携带这类条目的包挡在
       预检之外，这里不用再判一次。**只有这次窗口真的携带条目的表才开事务**：按这个顺序遍历，
       表不在 `context.deletes` 里就跳过，不开事务也不写进度行；开了事务的表逐表一个事务，
-      进度写 `__delete__:<table>`——反过来的顺序（子表先于父表）与拷贝序「先父后子」正好
-      相反，删除要反过来才不撞外键。每表：按 `sync_key` 列序组出批量键，分批（`_ROW_BATCH`）
+      事务开头先跑 `_assert_notebooks_still_ours`（范围是 `manifest.notebooks ∪
+      deleted_notebooks`，见下方「安全边界」）——`_plan_deletes` 定的性是一次预检快照，不是
+      锁，`allowed` 集合里「目标端本来没有」的被删笔记本，完全可能在预检之后被另一个源环境
+      的并发导入用同一个 id 重新建出来，不在这里重新核一遍，接下来的 DELETE 就会删掉那个
+      外来镜像的行；进度写 `__delete__:<table>`——反过来的顺序（子表先于父表）与拷贝序
+      「先父后子」正好相反，删除要反过来才不撞外键。每表：按 `sync_key` 列序组出批量键，
+      分批（`_ROW_BATCH`）
       处理。**没有任何按条目自带 `notebook_id` 的快速路径**：`copying` 跳过与 `folded`
       折叠都只按下面归属校验从**目标行**解析出的归属拍板，条目自带的 `notebook_id`（源端说
       这一行曾属于哪本笔记本）只在目标端父链断掉、解析不出归属的孤儿条目上作最后证据。理由：
@@ -1115,8 +1128,11 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
       个事务里先回读目标端这一行的 `sync_origin`：不等于本包 `source_env` ⇒ **直接中止整个
       导入**（`SyncImportError`）——预检已经查过一次，这里在真正落笔前再查一次，是因为
       归属可能在预检快照之后被别的进程改过，而这正是「即将销毁这行」的那个事务，必须是最后
-      一道防线；目标端根本没有这一行 ⇒ no-op（预检阶段已经对这种情况发过 warning，这里不
-      重复发）。归属核对通过后做 CAS：`UPDATE notebooks SET status='deleting', updated_at=?
+      一道防线（这正是 `_assert_notebooks_still_ours` 扩到覆盖 `deleted_notebooks` 之后，对
+      正在处理的这一个 id 的具体体现——这里做的就是那条通用规则：目标端不存在或
+      `sync_origin` 匹配才算通过）；目标端根本没有这一行 ⇒ no-op（预检阶段已经对这种情况
+      发过 warning，这里不重复发）。归属核对通过后做 CAS：`UPDATE notebooks SET
+      status='deleting', updated_at=?
       WHERE id=? AND sync_origin=? AND status NOT IN ('deleting','copying')`——谓词刻意比
       `notebook_delete_job_store` 的 `NOTEBOOK_LIVE_SQL`（多挡一个 `'importing'`）更窄：HTTP
       删除路由不能把一本还在导入中的笔记本当作合法目标，但这里恰恰相反——一次更早的、同一个
@@ -1207,9 +1223,17 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
 对应笔记本目标端正在拷贝而完全没碰的行级删除条目数）、`notebooks_deleted`（本次排进
 删除作业队列的笔记本 id 列表）、`notebooks_delete_skipped`（`status='copying'` 被跳过的
 笔记本 id 列表）；全量包的这几个计数恒为 0/空，字段仍然出现，CLI 人读摘要与 `--json` 都
-打印。`_assert_notebooks_still_ours` 仍按 `manifest.notebooks` 在每个写事务开头重验；第
-3c/3d 步新增的删除、笔记本状态翻转事务各自在自己的事务里再验一次，不复用之前验过的结果——
-写、删是独立的事务链，不能假设中间没有别的进程改过归属。
+打印。`_assert_notebooks_still_ours` 在每个写事务（3b/3c/3d/文件相位）开头重验的范围是
+`manifest.notebooks ∪ deleted_notebooks`（codex #788 r4 P2 扩大，此前只查前者）：对集合里
+每个 id，目标端不存在，或者存在且 `sync_origin` 等于本包 `source_env`，两种都算通过（对
+存在的行 PostgreSQL 目标额外 `FOR UPDATE`）；否则整个导入失败并点名这个 id 与它此刻的
+`sync_origin`。3c/3d 步新增的删除、笔记本状态翻转事务各自在自己的事务里再验一次，不复用
+之前验过的结果——写、删是独立的事务链，不能假设中间没有别的进程改过归属，`deleted_notebooks`
+尤其如此：`_plan_deletes`（3c）预检时把目标端不存在的被删笔记本 id 留在允许集合里（当时
+确实没有冲突），但那只是一次读快照，不是锁；等真正开始删的这个事务，另一个源环境的并发
+导入完全可能已经用同一个 id 重建了一个新镜像——不在删除事务开头重新核一遍，3c 就会照着
+预检时的旧结论把这个外来镜像的行删掉，等轮到 3d 才会因为 `sync_origin` 不匹配而拒绝，那
+时候 3c 的删除早已提交，为时已晚。
 
 ## 9. 验收与对账
 

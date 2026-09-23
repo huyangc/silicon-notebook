@@ -364,3 +364,96 @@ def test_a_delete_aimed_at_another_notebooks_row_refuses_the_import(mirrored):
     assert _count(
         mirrored["target"], "SELECT COUNT(*) AS c FROM chunks WHERE id=%s", (victim,)
     ) == 1
+
+
+def test_a_deleted_notebook_reclaimed_by_another_source_aborts_the_replay(
+    mirrored, monkeypatch
+):
+    """codex #788 r4 P2, on the backend where the fix's ``FOR UPDATE`` half
+    actually does something: a deleted notebook id the target does not have
+    stays in ``plan.allowed``, but nothing this run did CLAIMS that id --
+    ``_reserve_notebooks`` only reserves ``manifest.notebooks``. A concurrent
+    import of a DIFFERENT source environment can mirror that id between this
+    run's transactions, and phase 3c would then delete its rows; phase 3d
+    only refuses afterwards, with 3c already committed.
+
+    The intruder is written on its OWN psycopg connection -- not through the
+    target repository, which refuses a nested ``write()`` -- so this really
+    is two writers on one database rather than a reentrant call.
+
+    变异验证: 去掉 ``_assert_notebooks_still_ours`` 里覆盖 deleted_notebooks
+    的那段, 本条报红 -- 外来镜像的 knowhow_tables 行被删掉。"""
+    source = mirrored["source"]
+    target = mirrored["target"]
+    with source._write() as db:
+        db.execute(
+            "UPDATE notebooks SET name='alpha v2' WHERE id=%s", (mirrored["alpha"],)
+        )
+        db.execute("DELETE FROM notebooks WHERE id=%s", (mirrored["beta"],))
+    window = _window(mirrored)
+    assert window.deleted_notebooks == (mirrored["beta"],)
+    # A row-level delete this window carries FOR beta. Ids are exported
+    # verbatim and never reissued, so two environments mirroring the same
+    # upstream content can hold the same key -- which is how the intruder's
+    # brand-new mirror ends up in this window's line of fire.
+    doomed = next(
+        entry["key"]["id"]
+        for entry in _deletes(window.package_dir)
+        if entry["table"] == "knowhow_tables"
+        and entry["notebook_id"] == mirrored["beta"]
+    )
+    with target._write() as db:
+        db.execute("DELETE FROM notebooks WHERE id=%s", (mirrored["beta"],))
+
+    from app.migration.sync import import_ as import_module
+
+    original = import_module._replay_delete_table
+    planted = {"done": False}
+
+    def claim_then_replay(backend, conn, table, context, plan):
+        if not planted["done"]:
+            planted["done"] = True
+            _as_another_importer(
+                mirrored["target_settings"],
+                (
+                    "INSERT INTO notebooks(id,name,created_by,status,"
+                    "sync_origin,created_at,updated_at) "
+                    "VALUES(%s,%s,'user-local','draft','other-env',%s,%s)",
+                    (mirrored["beta"], "theirs", MOMENT, MOMENT),
+                ),
+                (
+                    "INSERT INTO knowhow_tables(id,notebook_id,title,"
+                    "description,mutation_seq,hidden_source_id,created_by,"
+                    "created_at,updated_at) "
+                    "VALUES(%s,%s,'theirs','',0,'','user-local',%s,%s)",
+                    (doomed, mirrored["beta"], MOMENT, MOMENT),
+                ),
+            )
+        return original(backend, conn, table, context, plan)
+
+    monkeypatch.setattr(import_module, "_replay_delete_table", claim_then_replay)
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(mirrored, window.package_dir)
+
+    assert planted["done"]
+    message = str(failure.value)
+    assert mirrored["beta"] in message
+    assert "other-env" in message
+    assert _count(
+        target, "SELECT COUNT(*) AS c FROM knowhow_tables WHERE id=%s", (doomed,)
+    ) == 1
+    assert _one(
+        target, "SELECT sync_origin FROM notebooks WHERE id=%s", (mirrored["beta"],)
+    )["sync_origin"] == "other-env"
+
+
+def _as_another_importer(settings: Settings, *statements) -> None:
+    """Run statements on a connection of their own, committed immediately --
+    what a concurrent import of a DIFFERENT source environment looks like
+    from this run's point of view."""
+    import psycopg
+
+    with psycopg.connect(str(settings.database_url), autocommit=True) as conn:
+        for sql, params in statements:
+            conn.execute(sql, params)
