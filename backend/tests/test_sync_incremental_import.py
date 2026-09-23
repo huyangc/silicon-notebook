@@ -608,31 +608,109 @@ def test_a_deleted_notebook_is_tombstoned_and_queued_not_deleted(baseline):
     assert str(job["id"]).startswith("ndj-")
 
 
-def test_a_notebook_being_copied_at_the_target_is_skipped_not_tombstoned(baseline):
+def test_a_notebook_being_copied_at_the_target_is_left_completely_alone(baseline):
     """A deep copy in flight here owns that row's lifecycle. The import does
-    not fight it and does not wait: it says so in the report instead."""
+    not fight it and does not wait -- and that has to hold for the notebook's
+    ROWS as well as for its ``status``. Phase 3d declining the tombstone while
+    phase 3c deleted the rows underneath it would leave the copy reading a
+    notebook that is being emptied, with nothing left to put it back and no
+    job that will ever finish the job (codex T1 review P1-2).
+
+    变异验证: 去掉 ``_plan_deletes`` 的 copying 剔除, 本条的行数/文件断言报红。"""
     repo = baseline["source"]["repo"]
+    mirror = baseline["target"]["repo"]
+    before_chunks = _count(
+        mirror, "SELECT COUNT(*) FROM chunks WHERE notebook_id=?",
+        (baseline["beta"],),
+    )
+    before_sources = _count(
+        mirror, "SELECT COUNT(*) FROM sources WHERE notebook_id=?",
+        (baseline["beta"],),
+    )
+    assert before_chunks and before_sources, "the baseline mirrored beta"
+    files = sorted(
+        (
+            Path(baseline["target"]["settings"].storage_dir)
+            / "notebooks" / baseline["beta"]
+        ).iterdir()
+    )
+    assert files, "the baseline installed beta's uploads"
     with repo._write() as db:
         db.execute("DELETE FROM notebooks WHERE id=?", (baseline["beta"],))
-    with baseline["target"]["repo"]._write() as db:
+    with mirror._write() as db:
         db.execute(
             "UPDATE notebooks SET status='copying' WHERE id=?", (baseline["beta"],)
         )
 
     window = _window(baseline)
+    # The window really does carry row-level deletes for beta -- otherwise
+    # this test would pass for the wrong reason.
+    assert any(
+        entry["notebook_id"] == baseline["beta"] and entry["table"] != "notebooks"
+        for entry in _deletes(window.package_dir)
+    )
     report = _import(baseline["target"], window.package_dir)
 
     assert report.notebooks_deleted == ()
     assert report.notebooks_delete_skipped == (baseline["beta"],)
+    assert report.deletes_skipped_for_copying > 0
     assert _one(
-        baseline["target"]["repo"], "SELECT status FROM notebooks WHERE id=?",
-        (baseline["beta"],),
+        mirror, "SELECT status FROM notebooks WHERE id=?", (baseline["beta"],)
     )["status"] == "copying"
     assert _count(
-        baseline["target"]["repo"],
-        "SELECT COUNT(*) FROM notebook_delete_jobs WHERE notebook_id=?",
+        mirror, "SELECT COUNT(*) FROM notebook_delete_jobs WHERE notebook_id=?",
         (baseline["beta"],),
     ) == 0
+    # ...and not one row or byte of it was touched.
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM chunks WHERE notebook_id=?",
+        (baseline["beta"],),
+    ) == before_chunks
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM sources WHERE notebook_id=?",
+        (baseline["beta"],),
+    ) == before_sources
+    assert all(path.is_file() for path in files)
+
+
+def test_a_tombstoned_notebooks_row_deletes_are_folded_into_its_job(baseline):
+    """A deleted notebook's delete job clears every table for it, so replaying
+    its keys one by one first is work that gets undone. The entries are
+    counted and skipped instead -- and the notebook still ends up tombstoned
+    with a job to run (codex T1 review P2-3).
+
+    变异验证: 去掉 ``_plan_deletes`` 的 folded 集合, 本条的 folded 计数与
+    「行还在」断言报红。"""
+    repo = baseline["source"]["repo"]
+    mirror = baseline["target"]["repo"]
+    before = _count(
+        mirror, "SELECT COUNT(*) FROM chunks WHERE notebook_id=?",
+        (baseline["beta"],),
+    )
+    assert before, "the baseline mirrored beta's chunks"
+    with repo._write() as db:
+        db.execute("DELETE FROM notebooks WHERE id=?", (baseline["beta"],))
+
+    window = _window(baseline)
+    report = _import(baseline["target"], window.package_dir)
+
+    assert report.error == ""
+    assert report.deletes_folded_into_notebook_deletion > 0
+    assert report.deletes_skipped_for_copying == 0
+    # The rows are still there: the JOB removes them, not the import. That is
+    # exactly what "folded" means, and the tombstone plus the queued job are
+    # what makes it safe.
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM chunks WHERE notebook_id=?",
+        (baseline["beta"],),
+    ) == before
+    assert _one(
+        mirror, "SELECT status FROM notebooks WHERE id=?", (baseline["beta"],)
+    )["status"] == "deleting"
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM notebook_delete_jobs WHERE notebook_id=?",
+        (baseline["beta"],),
+    ) == 1
 
 
 def test_deleting_a_notebook_the_target_owns_locally_is_refused(baseline):
@@ -1086,9 +1164,12 @@ def test_a_run_interrupted_inside_the_delete_phase_resumes(baseline):
     original = import_module._replay_delete_table
     state = {"seen": 0}
 
-    def explode(backend, conn, table, context):
-        outcome = original(backend, conn, table, context)
-        if table == "chunk_elements":
+    def explode(backend, conn, table, context, plan):
+        outcome = original(backend, conn, table, context, plan)
+        if table == "chunks":
+            # NOT the first table with entries: ``chunk_elements`` is replayed
+            # before it (children first), so its own progress row is committed
+            # and the resume below has something to skip.
             state["seen"] += 1
             raise RuntimeError("boom mid-delete-phase")
         return outcome
@@ -1108,8 +1189,8 @@ def test_a_run_interrupted_inside_the_delete_phase_resumes(baseline):
             (window.package_id,),
         )
     }
-    assert "__delete__:chunk_elements" not in steps
-    assert any(step.startswith("__delete__:") for step in steps)
+    assert "__delete__:chunks" not in steps
+    assert "__delete__:chunk_elements" in steps
 
     report = _import(baseline["target"], window.package_dir, resume=True)
 
@@ -1164,3 +1245,325 @@ def _without_foreign_keys(settings: Settings, statement: str, params=()) -> None
         connection.commit()
     finally:
         connection.close()
+
+
+# --------------------------------------------------------- the file fence
+
+
+def test_a_file_for_an_undeclared_notebook_is_refused_before_it_lands(baseline):
+    """A package's ``files/**`` may only carry directories for notebooks the
+    package DECLARES. Character safety is not scope: ``victim`` is a perfectly
+    valid identifier, and without this fence its bytes land in
+    ``storage/notebooks/victim/`` -- next to a notebook this target owns or
+    mirrors from somewhere else -- with no row anywhere to make the write
+    visible as an import (codex T1 review P1-1).
+
+    The assertion that matters is on STORAGE, not on the message: what is
+    being defended is that nothing was written, not that something was said.
+
+    变异验证: 去掉 ``_verify_package_paths`` 的 declared 围栏, 本条报红。"""
+    window = _prepared_window(baseline)
+    victim = baseline["beta"]
+    assert victim not in _manifest(window.package_dir)["notebooks"]
+    planted = window.package_dir / "files" / "notebooks" / victim / "evil.txt"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_bytes(b"not this package's bytes\n")
+    checksums = json.loads(
+        (window.package_dir / CHECKSUMS_NAME).read_text(encoding="utf-8")
+    )
+    checksums[f"files/notebooks/{victim}/evil.txt"] = ""
+    (window.package_dir / CHECKSUMS_NAME).write_text(
+        json.dumps(checksums, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    _reseal(window.package_dir)
+
+    # Deliberately NOT wrapped in ``pytest.raises``: the property being
+    # defended is that nothing was written, and that has to be asserted
+    # whether or not the package was refused. Two independent barriers make
+    # it true (the fence here, and ``_merge_files`` looping over
+    # ``manifest.notebooks`` rather than over the package's own paths), and
+    # this shape gives a distinct failure for each.
+    refused = ""
+    try:
+        _import(baseline["target"], window.package_dir)
+    except SyncImportError as exc:
+        refused = str(exc)
+
+    landed = (
+        Path(baseline["target"]["settings"].storage_dir)
+        / "notebooks" / victim / "evil.txt"
+    )
+    assert not landed.exists(), "the package wrote into an undeclared notebook"
+    assert victim in refused, "the package was not refused by name"
+
+
+def test_the_merge_phase_clears_a_previous_runs_staging_leftovers(baseline):
+    """``*.sync-tmp`` is the unconsumed half of a copy+rename pair, left only
+    by a run that was killed outright. Nothing ever reads one, and the
+    per-file rename only overwrites the ones this run stages, so they would
+    accumulate in a notebook's storage directory forever.
+
+    变异验证: 去掉 ``_drop_stale_staging`` 的调用, 本条报红。"""
+    _upload(baseline["source"]["repo"], baseline["alpha"], "second.txt")
+    directory = (
+        Path(baseline["target"]["settings"].storage_dir)
+        / "notebooks" / baseline["alpha"]
+    )
+    leftover = directory / "killed-mid-copy.txt.sync-tmp"
+    leftover.write_bytes(b"debris\n")
+
+    window = _window(baseline)
+    report = _import(baseline["target"], window.package_dir)
+
+    assert report.error == ""
+    assert not leftover.exists()
+    assert not any(path.name.endswith(".sync-tmp") for path in directory.iterdir())
+
+
+# ------------------------------------------------ one pass over deletes.jsonl
+
+
+def test_deletes_jsonl_is_read_exactly_once(baseline, monkeypatch):
+    """Preflight validates every entry and groups it by table; phase 3c
+    replays from that grouping. Re-streaming the file once per synced table
+    would be 45 passes over the same bytes for an answer preflight already
+    had (codex T1 review P2-3).
+
+    变异验证: 让 3c 重新按表扫文件, 本条报红。"""
+    repo = baseline["source"]["repo"]
+    chunk = _one(
+        repo, "SELECT id FROM chunks WHERE notebook_id=? LIMIT 1",
+        (baseline["alpha"],),
+    )["id"]
+    with repo._write() as db:
+        db.execute("DELETE FROM chunk_elements WHERE chunk_id=?", (chunk,))
+        db.execute("DELETE FROM chunks WHERE id=?", (chunk,))
+        db.execute("DELETE FROM chunks_fts WHERE chunk_id=?", (chunk,))
+    window = _window(baseline)
+
+    from app.migration.sync import import_ as import_module
+
+    passes = []
+    original = import_module._iter_deletes
+
+    def counted(package_dir):
+        passes.append(package_dir)
+        return original(package_dir)
+
+    monkeypatch.setattr(import_module, "_iter_deletes", counted)
+
+    report = _import(baseline["target"], window.package_dir)
+
+    assert report.error == ""
+    assert report.deletes_applied >= 1
+    assert len(passes) == 1
+
+
+def _delete_steps(baseline, package_id: str) -> set[str]:
+    return {
+        str(row["table_name"]).split(":", 1)[1]
+        for row in _all(
+            baseline["target"]["repo"],
+            "SELECT table_name FROM sync_import_progress WHERE package_id=?",
+            (package_id,),
+        )
+        if str(row["table_name"]).startswith("__delete__:")
+    }
+
+
+def test_only_tables_with_delete_entries_open_a_transaction(baseline):
+    """A window with nothing to delete must not leave 45 empty
+    ``__delete__:`` progress rows behind to prove it -- and neither must a
+    window that deletes from two tables leave 43 (codex T1 review P2-3)."""
+    empty = _window(baseline)
+    assert _deletes(empty.package_dir) == []
+    assert _import(baseline["target"], empty.package_dir).error == ""
+
+    assert _delete_steps(baseline, empty.package_id) == set()
+    assert _all(
+        baseline["target"]["repo"],
+        "SELECT table_name FROM sync_import_progress WHERE package_id=?",
+        (empty.package_id,),
+    ), "the row phase still recorded its own steps"
+
+    repo = baseline["source"]["repo"]
+    chunk = _one(
+        repo, "SELECT id FROM chunks WHERE notebook_id=? LIMIT 1",
+        (baseline["alpha"],),
+    )["id"]
+    with repo._write() as db:
+        db.execute("DELETE FROM chunk_elements WHERE chunk_id=?", (chunk,))
+        db.execute("DELETE FROM chunks WHERE id=?", (chunk,))
+        db.execute("DELETE FROM chunks_fts WHERE chunk_id=?", (chunk,))
+    window = _window(baseline)
+    carried = {
+        entry["table"] for entry in _deletes(window.package_dir)
+    } - {"notebooks"}
+    assert len(carried) < 5, "a window touches a handful of tables, not all 45"
+
+    assert _import(baseline["target"], window.package_dir).error == ""
+
+    assert _delete_steps(baseline, window.package_id) == carried
+
+
+def test_a_borrowed_parent_moved_mid_import_refuses_the_write(baseline, monkeypatch):
+    """The incremental PARENT fallback attributes a parent through the TARGET,
+    in a preflight snapshot. A snapshot is not a lock, so the write
+    transaction that relies on it asks again -- and refuses if the parent has
+    moved out of scope since (codex T1 review P3).
+
+    变异验证: 去掉 ``_reassert_borrowed_parents`` 的调用, 本条报红。"""
+    repo = baseline["source"]["repo"]
+    table_id = _one(
+        repo, "SELECT id FROM knowhow_tables WHERE notebook_id=?",
+        (baseline["alpha"],),
+    )["id"]
+    columns = repo.get_knowhow_table(table_id)["columns"]
+    repo.add_knowhow_row(
+        table_id, {column["id"]: "second value" for column in columns},
+        actor="user-local",
+    )
+    window = _window(baseline)
+
+    from app.migration.sync import import_ as import_module
+
+    original = import_module._apply_table
+    moved = {"done": False}
+
+    def move_then_apply(backend, conn, table, context):
+        if not moved["done"] and table == "knowhow_rows":
+            # Between preflight's snapshot and this table's own write
+            # transaction, somebody re-points the parent at another notebook.
+            moved["done"] = True
+            with baseline["target"]["repo"]._write() as db:
+                db.execute(
+                    "UPDATE knowhow_tables SET notebook_id=? WHERE id=?",
+                    (baseline["beta"], table_id),
+                )
+        return original(backend, conn, table, context)
+
+    monkeypatch.setattr(import_module, "_apply_table", move_then_apply)
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(baseline["target"], window.package_dir)
+
+    assert moved["done"]
+    assert table_id in str(failure.value)
+
+
+# --------------------------------- the .sync-tmp convention, both directions
+
+
+def test_the_three_staging_suffix_spellings_agree():
+    """``import_`` writes it, and both export paths have to skip it. The
+    exporter may not import the importer, so the value is restated in two
+    more modules -- pinned here rather than left to drift."""
+    from app.migration.sync import export as export_module
+    from app.migration.sync import import_ as import_module
+    from app.migration.sync import incremental as incremental_module
+
+    assert (
+        import_module._STAGED_SUFFIX
+        == export_module._IMPORT_STAGING_SUFFIX
+        == incremental_module._IMPORT_STAGING_SUFFIX
+    )
+
+
+def test_a_full_export_does_not_carry_an_interrupted_imports_staging_file(
+    source, tmp_path
+):
+    """A source environment that is itself a mirror can hold ``.sync-tmp``
+    debris from an import that was killed. No row points at it and the next
+    import drops it, so carrying it onward would propagate one environment's
+    crash into every other (codex T1 review P3).
+
+    变异验证: 去掉 ``export._write_files`` 的后缀跳过, 本条报红。"""
+    notebook = _seed_notebook(source["repo"], "alpha")
+    debris = (
+        Path(source["settings"].storage_dir) / "notebooks" / notebook
+        / "killed-mid-copy.txt.sync-tmp"
+    )
+    debris.write_bytes(b"debris\n")
+
+    report = _export(source, tmp_path / "full-out")
+
+    checksums = json.loads(
+        (report.package_dir / CHECKSUMS_NAME).read_text(encoding="utf-8")
+    )
+    assert not any(name.endswith(".sync-tmp") for name in checksums)
+    assert not (
+        report.package_dir / "files" / "notebooks" / notebook / debris.name
+    ).exists()
+
+
+def test_a_window_does_not_carry_an_interrupted_imports_asset_staging_file(
+    baseline
+):
+    """``<id>.png.sync-tmp`` matches the asset phase's own ``<id>.*`` glob,
+    which is the one place the suffix can sneak into an incremental package.
+
+    变异验证: 去掉 ``incremental.resolve_file_requests`` 的后缀跳过, 本条报红。"""
+    _seed_asset(
+        baseline["source"]["repo"], baseline["source"]["settings"],
+        baseline["alpha"], "asset-1",
+    )
+    debris = (
+        Path(baseline["source"]["settings"].storage_dir)
+        / "assets" / baseline["alpha"] / "asset-1.png.sync-tmp"
+    )
+    debris.write_bytes(b"debris\n")
+
+    window = _window(baseline)
+
+    checksums = json.loads(
+        (window.package_dir / CHECKSUMS_NAME).read_text(encoding="utf-8")
+    )
+    carried = [name for name in checksums if "asset-1" in name]
+    assert carried == [f"files/assets/{baseline['alpha']}/asset-1.png"]
+
+
+def test_the_fts_reprojection_also_clears_a_deleted_notebooks_leftovers(baseline):
+    """SQLite's FTS5 shadow tables have no foreign keys, so a notebook that
+    was removed from ``notebooks`` can leave rows behind in ``chunks_fts``
+    that nothing else will ever clear. Phase 3c's re-projection covers the
+    notebooks this package says the source DELETED for exactly that reason --
+    they are never in ``manifest.notebooks``.
+
+    变异验证: 把 3c 的 ``include_deleted=True`` 去掉, 本条报红。"""
+    repo = baseline["source"]["repo"]
+    mirror = baseline["target"]["repo"]
+    chunk = _one(
+        repo, "SELECT id FROM chunks WHERE notebook_id=? LIMIT 1",
+        (baseline["alpha"],),
+    )["id"]
+    with repo._write() as db:
+        db.execute("DELETE FROM chunk_elements WHERE chunk_id=?", (chunk,))
+        db.execute("DELETE FROM chunks WHERE id=?", (chunk,))
+        db.execute("DELETE FROM chunks_fts WHERE chunk_id=?", (chunk,))
+        db.execute("DELETE FROM notebooks WHERE id=?", (baseline["beta"],))
+    # The target no longer has beta at all (so 3d has nothing to tombstone and
+    # 3c does not fold its entries), but its lexical index still does.
+    with mirror._write() as db:
+        db.execute("DELETE FROM notebooks WHERE id=?", (baseline["beta"],))
+        db.execute(
+            "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES(?,?,?)",
+            ("ck-orphaned-index-row", baseline["beta"], "stale"),
+        )
+    # beta's own indexed chunk rows are still there too (the notebooks DELETE
+    # cascades the base table but not the FTS5 shadow, which carries no FK).
+    stale = _count(
+        mirror, "SELECT COUNT(*) FROM chunks_fts WHERE notebook_id=?",
+        (baseline["beta"],),
+    )
+    assert stale >= 1
+
+    window = _window(baseline)
+    report = _import(baseline["target"], window.package_dir)
+
+    assert report.error == ""
+    assert report.deletes_applied >= 1
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM chunks_fts WHERE notebook_id=?",
+        (baseline["beta"],),
+    ) == 0

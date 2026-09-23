@@ -1171,8 +1171,39 @@ def test_an_empty_manifest_notebooks_list_is_refused(source, target, package):
     with pytest.raises(SyncImportError) as failure:
         _import(target, package)
 
-    assert "rows/notebooks.jsonl" in str(failure.value)
+    # From PR-3c the FILE fence reaches this shape first: a manifest that
+    # declares no notebooks also declares no notebook the package's own
+    # ``files/**`` may be installed under, and that check is filesystem-only
+    # (phase 1a) where the row-range check needs a database handle (phase 1b).
+    # Both refusals are correct and both name the notebook the manifest
+    # disowned; the sibling test below is the one that pins
+    # ``_verify_row_scopes`` itself.
     assert source["exported"] in str(failure.value)
+    assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 0
+
+
+def test_a_manifest_claiming_a_notebook_the_rows_do_not_have_is_refused(
+    source, target, package
+):
+    """The other direction of the same equality, and the one that still
+    reaches ``_verify_row_scopes``: overstating the notebook set cannot be
+    caught by the file fence (declaring MORE notebooks than the package
+    carries files for is not itself suspicious), so this is what keeps the
+    manifest ⇔ ``rows/notebooks.jsonl`` check under test.
+
+    变异验证: 去掉 ``_verify_row_scopes`` 开头的两集合相等断言, 本条报红。"""
+    document = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))
+    document["notebooks"] = [*document["notebooks"], "nb-not-in-the-rows"]
+    (package / MANIFEST_NAME).write_text(
+        json.dumps(document, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+    )
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, package)
+
+    message = str(failure.value)
+    assert "rows/notebooks.jsonl" in message
+    assert "nb-not-in-the-rows" in message
     assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 0
 
 
@@ -1293,7 +1324,7 @@ def test_a_full_v2_package_with_a_captured_watermark_still_imports(
     non-zero ``to_seq`` must NOT be refused. Refusing it would make every
     package produced by a source with change capture turned on unimportable.
 
-    变异验证: 把 ``_classify_package`` 的判据改回 ``to_seq != 0``,
+    变异验证: 把 ``_classify_package`` 里判定 base 的那一条改回 ``to_seq != 0``,
     本条必须报红。
     """
     document = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))

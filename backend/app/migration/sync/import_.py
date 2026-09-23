@@ -385,17 +385,19 @@ def _notebook_delete_step(notebook_id: str) -> str:
 # point, ``request`` opens its OWN transaction and this phase needs the CAS,
 # the job row and the progress row in ONE).
 #
-# The predicate is deliberately NARROWER than that store's
-# ``NOTEBOOK_LIVE_SQL`` ("status NOT IN ('copying','deleting','importing')"):
-# ``importing`` is excluded there because a half-imported notebook must not be
-# accepted as a live delete target from the API, but here it is exactly the
-# shape a source-side deletion has to be able to clear -- a previous failed
-# import of THIS source environment can have left the notebook stranded in
-# ``importing``, and refusing to queue its deletion would strand it forever.
-# ``deleting`` is idempotent (somebody already queued it) and ``copying`` is a
-# deep copy this environment is running right now, which the import does not
-# wait for.
-_NOTEBOOK_DELETE_CAS_STATUSES = ("deleting", "copying")
+# The predicate is deliberately WIDER than that store's ``NOTEBOOK_LIVE_SQL``
+# ("status NOT IN ('copying','deleting','importing')"): this one excludes only
+# two statuses, so it additionally LETS ``importing`` THROUGH. That is the
+# whole difference, and it is the point -- a previous failed import of THIS
+# source environment can have left the notebook stranded in ``importing``, and
+# refusing to queue its deletion would strand it forever. The API's own delete
+# route has no such case to serve and is right to be narrower.
+#
+# The two that stay excluded: ``deleting`` is idempotent (somebody already
+# queued it) and ``copying`` is a deep copy this environment is running right
+# now, which the import neither waits for nor fights.
+_NOTEBOOK_COPYING_STATUS = "copying"
+_NOTEBOOK_DELETE_CAS_STATUSES = ("deleting", _NOTEBOOK_COPYING_STATUS)
 
 # The job row phase 3d inserts, byte-for-byte the column list and literals
 # ``notebook_delete_job_store.request`` inserts (both backends spell it
@@ -709,6 +711,11 @@ class ImportReport:
     deletes_applied: int = 0
     deletes_absent: int = 0
     deletes_orphan_skipped: int = 0
+    # Row deletes phase 3c did NOT replay one by one because their notebook is
+    # being deleted whole (``notebooks_deleted``), and ones it left alone
+    # because the target is deep-copying their notebook.
+    deletes_folded_into_notebook_deletion: int = 0
+    deletes_skipped_for_copying: int = 0
     # Phase 3d (incremental only): notebook ids this run flipped to
     # ``deleting`` and queued a ``notebook_delete_jobs`` row for, and the ones
     # it deliberately left alone (a deep copy was in flight).
@@ -728,6 +735,10 @@ class ImportReport:
             "deletes_applied": self.deletes_applied,
             "deletes_absent": self.deletes_absent,
             "deletes_orphan_skipped": self.deletes_orphan_skipped,
+            "deletes_folded_into_notebook_deletion": (
+                self.deletes_folded_into_notebook_deletion
+            ),
+            "deletes_skipped_for_copying": self.deletes_skipped_for_copying,
             "notebooks_deleted": list(self.notebooks_deleted),
             "notebooks_delete_skipped": list(self.notebooks_delete_skipped),
             "tables": {
@@ -759,6 +770,8 @@ class _Ledger:
         self.deletes_applied = 0
         self.deletes_absent = 0
         self.deletes_orphan_skipped = 0
+        self.deletes_folded = 0
+        self.deletes_skipped_for_copying = 0
         self.notebooks_deleted: list[str] = []
         self.notebooks_delete_skipped: list[str] = []
 
@@ -815,6 +828,8 @@ def _report(
         deletes_applied=ledger.deletes_applied,
         deletes_absent=ledger.deletes_absent,
         deletes_orphan_skipped=ledger.deletes_orphan_skipped,
+        deletes_folded_into_notebook_deletion=ledger.deletes_folded,
+        deletes_skipped_for_copying=ledger.deletes_skipped_for_copying,
         notebooks_deleted=tuple(ledger.notebooks_deleted),
         notebooks_delete_skipped=tuple(ledger.notebooks_delete_skipped),
     )
@@ -1327,6 +1342,11 @@ class _Context:
     # carries" -- never re-derived from ``manifest.json``, which is not
     # trustworthy (module docstring).
     parent_key_sets: dict[str, frozenset[str]] = field(default_factory=dict)
+    # The subset of ``parent_key_sets`` an INCREMENTAL package did not carry
+    # and this target vouched for instead (``_verify_row_scopes``' PARENT
+    # fallback). Re-resolved inside every write transaction that relies on
+    # them, because a preflight snapshot is not a lock (codex T1 review P3).
+    borrowed_parents: dict[str, frozenset[str]] = field(default_factory=dict)
     # Notebook ids ``_reserve_notebooks`` actually INSERTED at claim time --
     # i.e. that did not already exist at the target before this call to
     # ``import_package`` declared the package. ``_apply_table`` consults this
@@ -1344,6 +1364,12 @@ class _Context:
     # away are still this package's to delete); phase 3d queues the notebook's
     # own delete job.
     deleted_notebooks: frozenset[str] = frozenset()
+    # This package's row-level delete entries, grouped by table, exactly as
+    # the single pass in ``_verify_delete_scopes`` validated them. Phase 3c
+    # replays from here rather than re-streaming ``deletes.jsonl`` once per
+    # synced table (codex T1 review P2-3), and a table absent from this map
+    # never opens a transaction at all.
+    deletes: Mapping[str, tuple["_DeleteEntry", ...]] = field(default_factory=dict)
     # The chain head this package continues from (incremental only), as the
     # claim transaction last resolved it. Reported, never trusted across a
     # transaction boundary -- ``_assert_chain`` re-resolves it under the lock.
@@ -1779,6 +1805,14 @@ def _verify_package_paths(
     - every directory actually present under ``files/notebooks/`` and
       ``files/assets/`` must have an ``is_safe_identifier`` name, whether or
       not ``manifest.notebooks`` mentions it;
+    - and must be a notebook this package DECLARES. Safety is not scope: a
+      directory can pass the character whitelist and still name a notebook
+      the target owns locally or mirrors from elsewhere, and both file phases
+      are driven by ``manifest.notebooks``, so an undeclared one is dead
+      weight at best (codex T1 review P1-1). Checked against
+      ``checksums.json``'s keys AND against what is physically on disk, so
+      neither an unrecorded directory nor a recorded-but-undeclared path gets
+      through;
     - for every notebook id, the package-side and storage-side paths
       ``_install_files`` will read from and write to are resolved and
       asserted to stay inside the package's ``files/<root>/`` directory and
@@ -1811,6 +1845,7 @@ def _verify_package_paths(
     _assert_files_match_checksums(package_dir, checksums)
 
     storage_dir = Path(settings.storage_dir)
+    declared = set(manifest.notebooks)
     for root in (NOTEBOOK_FILES_DIR, ASSET_FILES_DIR):
         package_root = package_dir / FILES_DIR / root
         if package_root.is_dir():
@@ -1822,6 +1857,44 @@ def _verify_package_paths(
             if bad_entries:
                 raise SyncImportError(
                     f"{FILES_DIR}/{root} carries unsafe director(ies): {bad_entries}"
+                )
+        # Character safety is not scope. A directory name can be a perfectly
+        # safe identifier AND name a notebook this package has no business
+        # writing into -- ``victim`` under ``files/notebooks/`` lands bytes in
+        # ``storage/notebooks/victim/`` next to a notebook the target owns, or
+        # mirrors from a different source environment, with no row anywhere to
+        # make it visible as an import. Both file phases are driven by
+        # ``manifest.notebooks``, so an undeclared directory could only ever
+        # be dead weight or an attack; either way it is refused by name before
+        # a byte is hashed, staged or copied (codex T1 review P1-1).
+        #
+        # Asked of ``checksums.json``'s keys AND of what is physically on
+        # disk. Given ``_assert_files_match_checksums`` (which just ran) the
+        # two sets are equal, so the second question is deliberately
+        # REDUNDANT -- it is here so that this fence does not silently depend
+        # on that equality holding, the same defence-in-depth reasoning
+        # ``_assert_files_match_checksums`` itself is written under.
+        undeclared = sorted(
+            relative
+            for relative in checksums
+            if relative.startswith(f"{FILES_DIR}/{root}/")
+            and relative.split("/")[2] not in declared
+        )
+        if undeclared:
+            raise SyncImportError(
+                f"{FILES_DIR}/{root} carries file(s) for notebook(s) this "
+                f"package does not declare: {undeclared[:20]}"
+            )
+        if package_root.is_dir():
+            stray = sorted(
+                entry.name
+                for entry in package_root.iterdir()
+                if entry.name not in declared
+            )
+            if stray:
+                raise SyncImportError(
+                    f"{FILES_DIR}/{root} carries director(ies) for notebook(s) "
+                    f"this package does not declare: {stray}"
                 )
         storage_root = storage_dir / root
         for notebook_id in manifest.notebooks:
@@ -1875,7 +1948,7 @@ def _verify_columns(backend: _Backend, conn: Any, manifest: _PackageManifest) ->
 
 def _verify_row_scopes(
     backend: _Backend, conn: Any, package_dir: Path, manifest: _PackageManifest
-) -> dict[str, frozenset[str]]:
+) -> tuple[dict[str, frozenset[str]], dict[str, frozenset[str]]]:
     """Refuse a package whose rows reach outside the notebook set it claims.
 
     ``manifest.notebooks`` is not checksummed (see the module docstring), so
@@ -1926,13 +1999,15 @@ def _verify_row_scopes(
     that guard sees the package's real scope rather than what its manifest
     claims.
 
-    Returns the package-side primary-key sets it collected for every table
-    named as somebody else's PARENT ``parent_table`` (``_PARENT_SCOPE_TARGETS``,
-    plus ``"notebooks"``). The row-ownership guard in ``_apply_table``
-    (``_assert_target_ownership``) reuses this as "the parent keys this
-    package actually carries" -- the set a PARENT-scoped table's existing
-    target-side rows must be attributed into -- rather than re-streaming the
-    same package files a second time.
+    Returns two maps. The first is the package-side primary-key sets it
+    collected for every table named as somebody else's PARENT ``parent_table``
+    (``_PARENT_SCOPE_TARGETS``, plus ``"notebooks"``); the row-ownership guard
+    in ``_apply_table`` (``_assert_target_ownership``) reuses it as "the parent
+    keys this package may attribute a row into" rather than re-streaming the
+    same package files a second time. The second names the subset of those
+    keys that came from the incremental fallback above -- the ones this TARGET
+    vouched for, in a preflight snapshot, rather than the package -- so the
+    write transactions that act on them can ask again.
     """
     notebook_ids: set[str] = set()
     for row in _iter_lines(package_dir / rows_path("notebooks")):
@@ -1949,6 +2024,7 @@ def _verify_row_scopes(
         )
 
     parent_key_sets: dict[str, set[str]] = {"notebooks": notebook_ids}
+    borrowed: dict[str, set[str]] = {}
     for table in synced_tables():
         if table == "notebooks":
             continue
@@ -2008,6 +2084,13 @@ def _verify_row_scopes(
             # and for ``_assert_target_ownership``, which reads this same map
             # back as "the parent keys this package may attribute a row into".
             allowed |= accepted
+            # Remembered separately, because these are the ONLY parents whose
+            # in-scope-ness rests on target state read in a preflight snapshot
+            # rather than on the package's own content. ``_apply_table`` asks
+            # again, inside the write transaction that acts on them (codex T1
+            # review P3).
+            if accepted:
+                borrowed.setdefault(scope.parent_table, set()).update(accepted)
         if bad:
             raise SyncImportError(
                 f"{table}.{scope.column} carries value(s) outside this "
@@ -2017,7 +2100,10 @@ def _verify_row_scopes(
         if collect_own_keys:
             parent_key_sets[table] = own_keys
 
-    return {table: frozenset(keys) for table, keys in parent_key_sets.items()}
+    return (
+        {table: frozenset(keys) for table, keys in parent_key_sets.items()},
+        {table: frozenset(keys) for table, keys in borrowed.items()},
+    )
 
 
 @dataclass(frozen=True)
@@ -2048,9 +2134,10 @@ def _verify_delete_scopes(
     package_dir: Path,
     manifest: _PackageManifest,
     notebook_ids: frozenset[str],
-) -> frozenset[str]:
+) -> tuple[frozenset[str], dict[str, tuple["_DeleteEntry", ...]]]:
     """Refuse a package whose DELETE instructions reach outside the notebook
-    set it declares, and return the notebooks it says the source deleted.
+    set it declares; return the notebooks it says the source deleted and its
+    row-level delete entries grouped by table.
 
     The mirror image of ``_verify_row_scopes``, and needed for the same
     reason with more at stake: a delete entry is an instruction to destroy a
@@ -2087,11 +2174,21 @@ def _verify_delete_scopes(
     Reads the target only for ``backend.sync_key`` (column names out of the
     live catalog, like every other schema fact in this module); it reads no
     target DATA and writes nothing.
+
+    **This is the only pass over ``deletes.jsonl`` the whole import makes**
+    (codex T1 review P2-3). The validated entries are grouped by table and
+    handed back for phase 3c to replay, instead of the file being re-streamed
+    once per synced table: a window's delete list is bounded by what actually
+    changed and each entry is a key plus one id, so holding it is cheap --
+    cheaper, in wall time, than 45 more passes over the same bytes. The
+    grouping is also what lets phase 3c open a transaction only for the tables
+    that HAVE entries, so an empty window writes no progress rows at all.
     """
     deleted_notebooks: set[str] = set()
     synced = set(synced_tables())
-    key_columns: dict[str, frozenset[str]] = {}
+    key_columns: dict[str, tuple[str, ...]] = {}
     attributions: list[tuple[int, str, str]] = []
+    grouped: dict[str, list[_DeleteEntry]] = {}
     for number, payload in _iter_deletes(package_dir):
         table = str(payload.get("table") or "")
         if table not in synced:
@@ -2116,10 +2213,10 @@ def _verify_delete_scopes(
                 "not scoped to a notebook; no notebook set can authorize "
                 "deleting such a row"
             )
-        wanted = key_columns.get(table)
-        if wanted is None:
-            wanted = frozenset(_sync_key(backend, conn, table))
-            key_columns[table] = wanted
+        columns = key_columns.get(table)
+        if columns is None:
+            columns = _sync_key(backend, conn, table)
+            key_columns[table] = columns
         raw_key = payload.get("key")
         if not isinstance(raw_key, dict):
             raise SyncImportError(
@@ -2127,21 +2224,29 @@ def _verify_delete_scopes(
                 f"{table!r}"
             )
         found = frozenset(str(column) for column in raw_key)
-        if found != wanted:
+        if found != frozenset(columns):
             raise SyncImportError(
                 f"{DELETES_NAME}:{number}: the key for {table!r} is "
                 f"{sorted(found)} but this target's synchronization key is "
-                f"{sorted(wanted)}; refusing to widen or misread a DELETE's "
+                f"{sorted(columns)}; refusing to widen or misread a DELETE's "
                 "predicate"
             )
         if table == "notebooks":
             # ``notebooks``' own sync key is its id, and the key set check
             # above already proved this entry carries exactly that column.
+            # Consumed by phase 3d, never replayed as a row delete.
             deleted_notebooks.add(str(next(iter(raw_key.values()))))
             continue
         notebook_id = str(payload.get("notebook_id") or "")
         if notebook_id:
             attributions.append((number, table, notebook_id))
+        grouped.setdefault(table, []).append(
+            _DeleteEntry(
+                table=table,
+                key=tuple(decode_value(raw_key.get(column)) for column in columns),
+                notebook_id=notebook_id,
+            )
+        )
 
     declared = set(manifest.deleted_notebooks)
     missing = sorted(declared - deleted_notebooks)
@@ -2177,7 +2282,9 @@ def _verify_delete_scopes(
             "delete instruction(s) attributed to notebook(s) outside this "
             f"package's scope: {outside[:20]}"
         )
-    return frozenset(deleted_notebooks)
+    return frozenset(deleted_notebooks), {
+        table: tuple(entries) for table, entries in grouped.items()
+    }
 
 
 def _preflight(backend: _Backend, conn: Any, context: _Context) -> bool:
@@ -2210,13 +2317,13 @@ def _preflight(backend: _Backend, conn: Any, context: _Context) -> bool:
     # already-applied short-circuit right below, so a package whose manifest
     # lies about its scope is refused the same way whether or not it happens
     # to share a package_id with something already recorded.
-    context.parent_key_sets = _verify_row_scopes(
+    context.parent_key_sets, context.borrowed_parents = _verify_row_scopes(
         backend, conn, context.package_dir, manifest
     )
     # Same placement, and the same reasoning: the DELETE instructions' own
     # validity is settled before any target-side decision reasons about "this
     # package's notebooks", including the already-applied short-circuit below.
-    context.deleted_notebooks = _verify_delete_scopes(
+    context.deleted_notebooks, context.deletes = _verify_delete_scopes(
         backend,
         conn,
         context.package_dir,
@@ -2510,12 +2617,14 @@ class _PriorImport:
     # The window this row applied, from ``sync_imports``' own columns.
     from_seq: int
     to_seq: int
-    # What this row's package declared, read back out of report_json. Written
-    # by both ``_running_report_json`` and ``ImportReport.as_json`` from PR-3c
-    # on; a row written by an older build carries neither and reads as empty
-    # strings -- which ``in_chain`` below deliberately treats as "not a chain
-    # link" rather than guessing.
-    mode: str
+    # What this row's package declared as its base, read back out of
+    # report_json. Written by both ``_running_report_json`` and
+    # ``ImportReport.as_json`` from PR-3c on; a row written by an older build
+    # carries none and reads as the empty string -- which ``downstream_of``
+    # below then reads as "this row is not a window", rather than guessing
+    # what it was. (``mode`` is written to report_json too, for operators and
+    # the CLI, but nothing in this module reads it back: what the rules need
+    # is the BASE, and a non-empty base is what makes a row a window.)
     base_package_id: str
 
     def downstream_of(self, base: "_PriorImport") -> bool:
@@ -2569,74 +2678,59 @@ def _prior_imports(
         (source_env,),
     ):
         package_id = str(row["package_id"])
+        # Decoded ONCE per row. SQLite hands this back as text and every
+        # reader below used to parse it again; on an environment with a long
+        # import history that is one json.loads per field per row, for a
+        # document that cannot change between them (codex T1 review P3).
+        document = _report_document(row["report_json"])
         prior.append(
             _PriorImport(
                 package_id=package_id,
                 status=str(row["status"]),
                 started_at=_read_moment(row["started_at"]),
-                created_at=_recorded_created_at(row["report_json"]),
-                heartbeat_at=_recorded_moment(row["report_json"], _HEARTBEAT_AT_KEY),
+                created_at=_read_moment(document.get(_PACKAGE_CREATED_AT_KEY)),
+                heartbeat_at=_read_moment(document.get(_HEARTBEAT_AT_KEY)),
                 has_progress=package_id in with_progress,
-                notebooks=_recorded_notebooks(row["report_json"]),
+                notebooks=_recorded_notebooks(document),
                 from_seq=int(row["from_seq"] or 0),
                 to_seq=int(row["to_seq"] or 0),
-                mode=_recorded_text(row["report_json"], _MODE_KEY),
-                base_package_id=_recorded_text(
-                    row["report_json"], _BASE_PACKAGE_ID_KEY
-                ),
+                base_package_id=_recorded_text(document, _BASE_PACKAGE_ID_KEY),
             )
         )
     return tuple(prior)
 
 
-def _recorded_moment(report_json: Any, key: str) -> datetime | None:
-    """One timestamp out of a stored report. psycopg hands back a decoded
-    ``dict`` for jsonb; SQLite hands back text."""
+def _report_document(report_json: Any) -> Mapping[str, Any]:
+    """One stored ``sync_imports.report_json`` as a mapping, decoded once.
+
+    psycopg hands back a decoded ``dict`` for jsonb; SQLite hands back text.
+    A row whose JSON is unreadable (or absent) becomes the EMPTY mapping, so
+    every reader below answers "this row says nothing" rather than raising --
+    which is the same thing they each used to decide for themselves, once per
+    field (codex T1 review P3)."""
     document = report_json
     if isinstance(document, (str, bytes)):
         try:
             document = json.loads(document)
         except ValueError:
-            return None
-    if not isinstance(document, dict):
-        return None
-    return _read_moment(document.get(key))
+            return {}
+    return document if isinstance(document, dict) else {}
 
 
-def _recorded_created_at(report_json: Any) -> datetime | None:
-    return _recorded_moment(report_json, _PACKAGE_CREATED_AT_KEY)
-
-
-def _recorded_text(report_json: Any, key: str) -> str:
-    """One string field out of a stored report, or ``""`` when the row
-    predates this bookkeeping or its JSON is unreadable. Never guessed: an
-    absent ``mode``/``base_package_id`` reads as "this row says nothing",
-    which ``_PriorImport.in_chain`` then treats as "not a chain link"."""
-    document = report_json
-    if isinstance(document, (str, bytes)):
-        try:
-            document = json.loads(document)
-        except ValueError:
-            return ""
-    if not isinstance(document, dict):
-        return ""
+def _recorded_text(document: Mapping[str, Any], key: str) -> str:
+    """One string field out of a decoded report, or ``""`` when the row
+    predates this bookkeeping. Never guessed: an absent ``base_package_id``
+    reads as "this row says nothing", which ``_PriorImport.downstream_of``
+    then treats as "this row is not a window"."""
     value = document.get(key)
     return str(value) if isinstance(value, str) else ""
 
 
-def _recorded_notebooks(report_json: Any) -> tuple[str, ...] | None:
-    """This row's own ``manifest.notebooks``, read back out of a stored
+def _recorded_notebooks(document: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """This row's own ``manifest.notebooks``, read back out of a decoded
     report. ``None`` when the row predates this bookkeeping (written by both
     ``_running_report_json`` and the full ``ImportReport.as_json``) or its
-    JSON is unreadable."""
-    document = report_json
-    if isinstance(document, (str, bytes)):
-        try:
-            document = json.loads(document)
-        except ValueError:
-            return None
-    if not isinstance(document, dict):
-        return None
+    JSON was unreadable."""
     notebooks = document.get("notebooks")
     if not isinstance(notebooks, list):
         return None
@@ -2705,9 +2799,12 @@ def _assert_chain(context: _Context, prior: Sequence[_PriorImport]) -> None:
             f"an incremental package cannot be applied while {outstanding} "
             f"of source environment {manifest.source_env!r} is unfinished. An "
             "incremental package carries only its own window, so it can never "
-            "stand in for what that run was going to apply. Finish it "
-            "(--resume) or take a fresh full baseline (sync export --full at "
-            "the source) first."
+            "stand in for what that run was going to apply -- and --take-over "
+            "does not help either: taking over another run means replacing "
+            "what it was applying, which a window cannot do. Finish that "
+            "package (--resume it, or --take-over and --resume it if its "
+            "process is gone), or take a fresh full baseline at the source "
+            "(sync export --full), and import this window after."
         )
     base = next(
         (
@@ -3893,18 +3990,35 @@ _SQLITE_FTS_REBUILD: dict[str, tuple[str, str]] = {
 
 
 def _rebuild_sqlite_fts(
-    backend: _Backend, conn: Any, table: str, context: _Context
+    backend: _Backend,
+    conn: Any,
+    table: str,
+    context: _Context,
+    *,
+    include_deleted: bool = False,
 ) -> None:
     """Re-project this table's SQLite lexical index for the package's
     notebooks, inside the caller's transaction. A no-op on PostgreSQL and for
-    every table that has no hand-maintained index."""
+    every table that has no hand-maintained index.
+
+    ``include_deleted`` widens the re-projection to the notebooks this package
+    says the source DELETED. Phase 3c passes it: those notebooks are not in
+    ``manifest.notebooks`` (a window never re-sends a deleted notebook's row),
+    yet their chunk and object rows are exactly what that phase removes, so
+    without them the index would keep serving rows that no longer exist. The
+    DELETE-then-reinsert shape makes it right either way -- re-projecting a
+    notebook whose base rows are gone simply empties its slice of the index
+    (codex T1 review P3)."""
     if backend.is_postgres:
         return
     entry = _SQLITE_FTS_REBUILD.get(table)
-    if entry is None or not context.manifest.notebooks:
+    notebooks = list(context.manifest.notebooks)
+    if include_deleted:
+        notebooks.extend(sorted(context.deleted_notebooks))
+    if entry is None or not notebooks:
         return
     index, insert = entry
-    for batch in _batched(list(context.manifest.notebooks)):
+    for batch in _batched(notebooks):
         placeholders = ",".join("?" for _ in batch)
         conn.execute(
             f"DELETE FROM {_ident(index)} WHERE notebook_id IN ({placeholders})",
@@ -4154,6 +4268,62 @@ def _assert_target_ownership(
                     )
 
 
+def _reassert_borrowed_parents(
+    backend: _Backend,
+    conn: Any,
+    table: str,
+    scope: TableScope,
+    rows: Sequence[Mapping[str, Any]],
+    context: _Context,
+) -> None:
+    """Re-resolve, inside THIS write transaction, the parent keys preflight
+    accepted on the target's word.
+
+    ``_verify_row_scopes``' incremental fallback is the one place where a
+    row's right to exist in this package rests on target state instead of on
+    the package's own content -- and it read that state in a preflight
+    snapshot, which is not a lock. Between then and now a knowhow table can
+    have been moved to a different notebook; writing this batch afterwards
+    would attach the package's rows to a parent that is no longer in scope,
+    which is precisely what ``_assert_target_ownership`` refuses to do for
+    keys the target already holds. Same question, asked again where it is
+    actually decided (codex T1 review P3).
+
+    Only the BORROWED keys are re-resolved; a parent the package carries
+    itself needs no target confirmation, and re-walking every parent chain
+    once per batch would undo the reason the sets are precomputed at all."""
+    borrowed = context.borrowed_parents.get(scope.parent_table)
+    if not borrowed or not rows:
+        return
+    touched = sorted(
+        {
+            value
+            for row in rows
+            if (value := str(row.get(scope.column) or "")) in borrowed
+        }
+    )
+    if not touched:
+        return
+    resolved = _resolve_target_notebooks(
+        backend, conn, scope.parent_table, touched
+    )
+    declared = set(context.manifest.notebooks)
+    moved = sorted(
+        f"{value} -> {resolved.get(value, '<unresolvable>')!r}"
+        for value in touched
+        if resolved.get(value, "") not in declared
+    )
+    if moved:
+        raise SyncImportError(
+            f"{table}: this package does not carry its PARENT rows in "
+            f"{scope.parent_table!r}, so preflight attributed them through "
+            "this target -- and they no longer resolve into the notebooks "
+            f"this package declares: {moved[:20]}. Another writer must have "
+            "moved them since this run's preflight; re-import once the target "
+            "has settled."
+        )
+
+
 def _package_columns(
     backend: _Backend, conn: Any, table: str, context: _Context
 ) -> list[str]:
@@ -4271,6 +4441,10 @@ def _apply_table(
                 backend, conn, table, unique_keys, kept, primary_key
             )
         keys = [tuple(row.get(column) for column in primary_key) for row in kept]
+        if check_ownership and scope is not None and scope.kind is ScopeKind.PARENT:
+            # Before the ownership check, because it is what that check's
+            # allowed-set rests on for an incremental package.
+            _reassert_borrowed_parents(backend, conn, table, scope, kept, context)
         if check_ownership:
             # Before the upsert, in this same write transaction: an existing
             # target row whose primary key this batch is about to write, but
@@ -4662,7 +4836,91 @@ class _DeleteOutcome:
     applied: int = 0
     absent: int = 0
     orphan_skipped: int = 0
+    # Entries whose notebook phase 3d is about to tombstone: the delete job
+    # removes the whole notebook, so replaying its rows one by one is work
+    # that would be undone anyway (codex T1 review P2-3).
+    folded: int = 0
+    # Entries whose notebook the TARGET is copying right now. Not this
+    # import's to touch, in either direction (codex T1 review P1-2).
+    skipped_for_copying: int = 0
     files: list[_FileRemoval] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _DeletePlan:
+    """How phase 3c must treat each notebook a delete entry can name, decided
+    ONCE against the target before the first delete transaction opens.
+
+    Phase 3d runs AFTER 3c and decides the same thing again for the notebooks
+    themselves; 3c has to know the answer first, because what it does with a
+    row depends on what is going to happen to the notebook that row belongs
+    to. Read in one snapshot rather than per table, so every table of one run
+    replays against the same picture."""
+
+    # Notebooks whose rows 3c may delete: the ones this package carries, plus
+    # the deleted ones the target does not have at all (nothing to fold into,
+    # and any row still pointing at them is genuinely stale).
+    allowed: frozenset[str]
+    # Deleted notebooks the target HAS and can tombstone. 3d queues one delete
+    # job each; their row-level entries are skipped here.
+    folded: frozenset[str]
+    # Deleted notebooks the target is deep-copying. Neither 3c nor 3d touches
+    # them -- see ``_apply_notebook_deletions``.
+    copying: frozenset[str]
+
+
+def _plan_deletes(backend: _Backend, context: _Context) -> _DeletePlan:
+    """Resolve, in ONE read snapshot, what phase 3c may do with each notebook.
+
+    Three outcomes, and the reason they are decided here rather than per row:
+
+    - a deleted notebook the target is **copying** is excluded from every
+      decision 3c makes. Its rows are not this import's to delete -- a deep
+      copy in flight is reading them right now -- and 3d will not tombstone it
+      either, so deleting its rows would leave the copy with a half-notebook
+      and nothing to put it back (codex T1 review P1-2).
+    - a deleted notebook the target HAS and will tombstone has its row-level
+      entries **folded** into the notebook deletion: the job clears every
+      table for that notebook anyway, so replaying a few thousand keys first
+      is work that gets undone (codex T1 review P2-3).
+    - a deleted notebook the target does NOT have stays in ``allowed``:
+      there is no job to fold into, and a stray row still pointing at it is
+      exactly what the replay is for.
+    """
+    if not context.deleted_notebooks:
+        return _DeletePlan(
+            allowed=frozenset(context.manifest.notebooks),
+            folded=frozenset(),
+            copying=frozenset(),
+        )
+    found: dict[str, str] = {}
+    with backend.read() as conn:
+        for batch in _batched(sorted(context.deleted_notebooks)):
+            placeholders = ",".join("?" for _ in batch)
+            for row in backend.fetch(
+                conn,
+                f"SELECT id, status FROM notebooks WHERE id IN ({placeholders})",
+                batch,
+            ):
+                found[str(row["id"])] = str(row["status"] or "")
+    copying = frozenset(
+        notebook_id
+        for notebook_id, status in found.items()
+        if status == _NOTEBOOK_COPYING_STATUS
+    )
+    folded = frozenset(set(found) - copying)
+    absent = frozenset(set(context.deleted_notebooks) - set(found))
+    if copying:
+        context.ledger.warn(
+            f"{sorted(copying)} were deleted at the source but are being "
+            "copied at this target right now; neither their rows nor their "
+            "notebook row were touched by this import"
+        )
+    return _DeletePlan(
+        allowed=frozenset(context.manifest.notebooks) | absent,
+        folded=folded,
+        copying=copying,
+    )
 
 
 def _delete_replay_tables() -> tuple[str, ...]:
@@ -4697,35 +4955,6 @@ def _delete_replay_tables() -> tuple[str, ...]:
             continue
         chosen.append(table)
     return tuple(chosen)
-
-
-def _table_deletes(
-    package_dir: Path, table: str, key_columns: Sequence[str]
-) -> list[_DeleteEntry]:
-    """This table's delete entries, keyed in the target's own key order.
-
-    Streams ``deletes.jsonl`` once per table rather than grouping the whole
-    file into memory up front: a window's delete list is exactly as unbounded
-    as its row list, and the peak this module is willing to hold is ONE
-    table's worth -- the same bound ``_verify_row_scopes`` keeps for rows.
-    ``_verify_delete_scopes`` has already proved every entry's key carries
-    exactly ``key_columns``.
-    """
-    entries: list[_DeleteEntry] = []
-    for _number, payload in _iter_deletes(package_dir):
-        if str(payload.get("table") or "") != table:
-            continue
-        raw_key = payload.get("key") or {}
-        entries.append(
-            _DeleteEntry(
-                table=table,
-                key=tuple(
-                    decode_value(raw_key.get(column)) for column in key_columns
-                ),
-                notebook_id=str(payload.get("notebook_id") or ""),
-            )
-        )
-    return entries
 
 
 def _hop_to_parent(
@@ -4812,7 +5041,11 @@ def _resolve_target_notebooks(
 
 
 def _replay_delete_table(
-    backend: _Backend, conn: Any, table: str, context: _Context
+    backend: _Backend,
+    conn: Any,
+    table: str,
+    context: _Context,
+    plan: _DeletePlan,
 ) -> _DeleteOutcome:
     """Replay one table's deletes inside the caller's write transaction.
 
@@ -4838,6 +5071,14 @@ def _replay_delete_table(
       evidence than this side can reconstruct. Otherwise it is counted
       ``orphan_skipped`` and left alone: an unattributable delete is a no-op
       by design (§11), never a guess.
+    - **the entry belongs to a notebook phase 3d is about to tombstone**:
+      counted ``folded`` and skipped. The delete job clears every table for
+      that notebook, so replaying its keys first is work that gets undone
+      (codex T1 review P2-3).
+    - **the entry belongs to a notebook the target is copying**: counted
+      ``skipped_for_copying`` and left completely alone -- a deep copy is
+      reading those rows right now, and 3d is not going to tombstone the
+      notebook either (codex T1 review P1-2).
 
     ``sources``/``notebook_assets`` rows own bytes under ``storage/``. Their
     paths are read off the row while it is still there and handed back to the
@@ -4848,17 +5089,34 @@ def _replay_delete_table(
     if scope is None:
         raise SyncImportError(f"{table}: LOCAL table has no import scope")
     key_columns = _sync_key(backend, conn, table)
-    entries = _table_deletes(context.package_dir, table, key_columns)
     outcome = _DeleteOutcome()
+    entries: list[_DeleteEntry] = []
+    for entry in context.deletes.get(table, ()):
+        # Decided on the entry's OWN attribution first, which costs no query
+        # and covers every entry the exporter could attribute -- which, for a
+        # deleted notebook, is all of them. An entry that names nothing is
+        # decided below, on the owner the target resolves.
+        if entry.notebook_id in plan.copying:
+            outcome.skipped_for_copying += 1
+        elif entry.notebook_id in plan.folded:
+            outcome.folded += 1
+        else:
+            entries.append(entry)
     if not entries:
         return outcome
-    allowed = set(context.manifest.notebooks) | set(context.deleted_notebooks)
     extra: tuple[str, ...] = ("file_path",) if table == "sources" else ()
     projection_columns = list(
         dict.fromkeys((*key_columns, scope.column, *extra))
     )
     projection = ", ".join(_ident(column) for column in projection_columns)
     predicate = " AND ".join(f"{_ident(column)} = ?" for column in key_columns)
+    # PostgreSQL: lock every row this batch is about to judge, so the
+    # attribution it reads is the attribution the DELETE acts on. Without it
+    # another transaction can move a row into a different notebook between the
+    # probe and the statement, and the check would have passed for a row that
+    # is no longer the one being deleted. SQLite needs nothing: ``write()``
+    # holds the single writer for the whole transaction (codex T1 review P3).
+    lock_suffix = " FOR UPDATE" if backend.is_postgres else ""
     for start in range(0, len(entries), _ROW_BATCH):
         batch = entries[start : start + _ROW_BATCH]
         wanted = {entry.key: entry for entry in batch}
@@ -4869,7 +5127,8 @@ def _replay_delete_table(
             for row in backend.fetch(
                 conn,
                 f"SELECT {projection} FROM {_ident(table)} "
-                f"WHERE {_ident(key_columns[0])} IN ({placeholders})",
+                f"WHERE {_ident(key_columns[0])} IN ({placeholders})"
+                f"{lock_suffix}",
                 chunk,
             ):
                 found = tuple(row[column] for column in key_columns)
@@ -4897,6 +5156,14 @@ def _replay_delete_table(
         for key, row in present.items():
             entry = wanted[key]
             owner = owners.get(key, "")
+            # An entry that named no notebook of its own can still resolve, at
+            # the target, into one of the two sets ``plan`` excluded.
+            if owner and owner in plan.copying:
+                outcome.skipped_for_copying += 1
+                continue
+            if owner and owner in plan.folded:
+                outcome.folded += 1
+                continue
             if not owner:
                 # Only reachable for a PARENT scope: a NOTEBOOK-scoped row
                 # always carries its own notebook (the column is NOT NULL on
@@ -4904,7 +5171,7 @@ def _replay_delete_table(
                 # drift rather than an orphan -- and the fallback below is the
                 # same either way, since an in-scope ``notebook_id`` on the
                 # entry is the only evidence left.
-                if entry.notebook_id and entry.notebook_id in allowed:
+                if entry.notebook_id and entry.notebook_id in plan.allowed:
                     owner = entry.notebook_id
                 else:
                     outcome.orphan_skipped += 1
@@ -4915,7 +5182,7 @@ def _replay_delete_table(
                         "guessed (docs/incremental-sync-design.md §11)"
                     )
                     continue
-            if owner not in allowed:
+            if owner not in plan.allowed:
                 raise SyncImportError(
                     f"{table}: this package asks to delete the row "
                     f"{key}, which this target attributes to "
@@ -4940,6 +5207,14 @@ def _replay_delete_table(
         if not doomed:
             continue
         for offset in range(0, len(doomed), _ROW_BATCH):
+            # ``doomed`` holds only keys a locked SELECT just found present,
+            # inside this same transaction, so every one of them matches
+            # exactly one row -- the count is the length. Not read off
+            # ``executemany``'s rowcount: neither driver reports a per-batch
+            # total for it reliably (psycopg gives the LAST statement's count,
+            # sqlite3 accumulates), and a counter that is right by accident on
+            # one backend is worse than one that is right by construction on
+            # both (codex T1 review P3).
             _executemany(
                 backend,
                 conn,
@@ -4951,7 +5226,9 @@ def _replay_delete_table(
         # In the same transaction as the rows it indexes, exactly like the
         # upsert and prune paths: SQLite's two FTS5 tables have no triggers,
         # so a row deleted here stays lexically searchable forever otherwise.
-        _rebuild_sqlite_fts(backend, conn, table, context)
+        # ``include_deleted`` because a window's deletes reach notebooks that
+        # are NOT in manifest.notebooks -- the deleted ones.
+        _rebuild_sqlite_fts(backend, conn, table, context, include_deleted=True)
     return outcome
 
 
@@ -5014,8 +5291,20 @@ def _replay_deletes(backend: _Backend, context: _Context, done: set[str]) -> Non
     same shape phases 3a and 3b use, so a crash loses at most the table in
     flight and a resume redoes only that one. Re-doing a whole table is safe:
     a replayed delete whose row is already gone counts ``absent``.
+
+    **Only tables this package actually carries entries for open a
+    transaction** (codex T1 review P2-3). The entries were grouped by table in
+    preflight's single pass over ``deletes.jsonl``, so an empty window -- a
+    perfectly ordinary shape -- writes no progress rows and does no work here
+    at all, rather than 45 empty transactions with 45 progress rows to show
+    for them.
     """
+    if not context.deletes:
+        return
+    plan = _plan_deletes(backend, context)
     for table in _delete_replay_tables():
+        if table not in context.deletes:
+            continue
         step = _delete_step(table)
         if step in done:
             continue
@@ -5024,7 +5313,7 @@ def _replay_deletes(backend: _Backend, context: _Context, done: set[str]) -> Non
             # assumption would do the most damage. See
             # _assert_notebooks_still_ours's docstring.
             _assert_notebooks_still_ours(backend, conn, context)
-            outcome = _replay_delete_table(backend, conn, table, context)
+            outcome = _replay_delete_table(backend, conn, table, context, plan)
             _record_progress(
                 backend,
                 conn,
@@ -5036,7 +5325,15 @@ def _replay_deletes(backend: _Backend, context: _Context, done: set[str]) -> Non
         context.ledger.deletes_applied += outcome.applied
         context.ledger.deletes_absent += outcome.absent
         context.ledger.deletes_orphan_skipped += outcome.orphan_skipped
+        context.ledger.deletes_folded += outcome.folded
+        context.ledger.deletes_skipped_for_copying += outcome.skipped_for_copying
         _remove_deleted_files(context, outcome.files)
+    if context.ledger.deletes_folded:
+        context.ledger.warn(
+            f"{context.ledger.deletes_folded} row delete(s) were not replayed "
+            "one by one: they belong to notebooks this import tombstoned, "
+            "whose delete job clears every table for them"
+        )
 
 
 # -------------------------------------- phase 3d -- notebook delete propagation
@@ -5114,7 +5411,7 @@ def _apply_notebook_deletions(
                 )
             status = str(rows[0]["status"] or "")
             if status in _NOTEBOOK_DELETE_CAS_STATUSES:
-                if status == "copying":
+                if status == _NOTEBOOK_COPYING_STATUS:
                     context.ledger.notebooks_delete_skipped.append(notebook_id)
                     context.ledger.warn(
                         f"notebook {notebook_id} was deleted at the source but "
@@ -5378,58 +5675,96 @@ def _merge_files(context: _Context, *, verify: bool) -> None:
 
     ``checksums.json`` is the only listing read, exactly like
     ``_install_files``: a path the checksums do not cover is never opened, no
-    matter what else sits in the package directory.
+    matter what else sits in the package directory. And like
+    ``_install_files``, the OUTER loop is ``manifest.notebooks`` rather than
+    the checksums' own keys -- the destination notebook is chosen from the
+    declared set and the package's paths are matched against it, never the
+    other way round, so a crafted path can only ever fail to match rather than
+    nominate a directory of its own (codex T1 review P1-1;
+    ``_verify_package_paths`` already refuses such a package outright, and
+    this is the second, independent reason it can do no damage).
     """
     storage = Path(context.settings.storage_dir)
-    prefix = f"{FILES_DIR}/"
     copied = 0
-    for relative in sorted(context.checksums):
-        if not relative.startswith(prefix):
-            continue
-        parts = relative.split("/")
-        if len(parts) < 4 or parts[1] not in _FILE_ROOTS:
-            raise SyncImportError(
-                f"{CHECKSUMS_NAME} lists {relative!r}, which is not under one "
-                f"of this package's file roots {_FILE_ROOTS}"
+    for notebook_id in context.manifest.notebooks:
+        for root in _FILE_ROOTS:
+            package_root = context.package_dir / FILES_DIR / root
+            destination_root = storage / root / notebook_id
+            _assert_within(
+                package_root,
+                package_root / notebook_id,
+                what="package file path",
             )
-        root, notebook_id = parts[1], parts[2]
-        if not is_safe_identifier(notebook_id):
-            raise SyncImportError(
-                f"{CHECKSUMS_NAME} lists {relative!r} under the unsafe "
-                f"notebook id {notebook_id!r}"
+            _assert_within(
+                storage / root, destination_root, what="storage destination path"
             )
-        package_root = context.package_dir / FILES_DIR / root
-        source = context.package_dir / relative
-        _assert_within(package_root, source, what="package file path")
-        destination_root = storage / root / notebook_id
-        destination = destination_root.joinpath(*parts[3:])
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        _assert_within(
-            storage / root, destination, what="storage destination path"
-        )
-        staged = destination.with_name(destination.name + _STAGED_SUFFIX)
-        _assert_within(storage / root, staged, what="staged file path")
-        try:
-            if verify:
-                digest = hashlib.sha256()
-                with source.open("rb") as handle, staged.open("wb") as out:
-                    for block in iter(lambda: handle.read(1 << 20), b""):
-                        digest.update(block)
-                        out.write(block)
-                if digest.hexdigest() != context.checksums.get(relative):
-                    raise SyncImportError(
-                        f"package file failed its checksum on install: {relative}"
-                    )
-            else:
-                shutil.copy2(source, staged)
-            os.replace(staged, destination)
-        except BaseException:
-            # The staged copy was never consumed. Drop it rather than leaving
-            # a ``.sync-tmp`` file behind for a later run to trip over.
-            staged.unlink(missing_ok=True)
-            raise
-        copied += 1
+            prefix = f"{FILES_DIR}/{root}/{notebook_id}/"
+            entries = sorted(
+                relative
+                for relative in context.checksums
+                if relative.startswith(prefix)
+            )
+            if not entries:
+                continue
+            # A previous run killed between the copy and the rename leaves a
+            # ``.sync-tmp`` file behind. Nothing else ever reads one, and the
+            # per-file rename below only overwrites the ones this run stages,
+            # so they would otherwise accumulate in a notebook's storage
+            # directory forever (codex T1 review P3).
+            _drop_stale_staging(context, destination_root)
+            for relative in entries:
+                source = context.package_dir / relative
+                _assert_within(package_root, source, what="package file path")
+                destination = destination_root.joinpath(
+                    *relative[len(prefix) :].split("/")
+                )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                _assert_within(
+                    destination_root, destination, what="storage destination path"
+                )
+                staged = destination.with_name(destination.name + _STAGED_SUFFIX)
+                _assert_within(
+                    destination_root, staged, what="staged file path"
+                )
+                try:
+                    if verify:
+                        digest = hashlib.sha256()
+                        with source.open("rb") as handle, staged.open("wb") as out:
+                            for block in iter(lambda: handle.read(1 << 20), b""):
+                                digest.update(block)
+                                out.write(block)
+                        if digest.hexdigest() != context.checksums.get(relative):
+                            raise SyncImportError(
+                                "package file failed its checksum on install: "
+                                f"{relative}"
+                            )
+                    else:
+                        shutil.copy2(source, staged)
+                    os.replace(staged, destination)
+                except BaseException:
+                    # The staged copy was never consumed. Drop it rather than
+                    # leaving a ``.sync-tmp`` file behind for a later run.
+                    staged.unlink(missing_ok=True)
+                    raise
+                copied += 1
     context.ledger.files_copied = copied
+
+
+def _drop_stale_staging(context: _Context, directory: Path) -> None:
+    """Remove ``*.sync-tmp`` leftovers directly under ``directory``.
+
+    Only this module ever writes one, and only as the unconsumed half of a
+    ``copy`` + ``os.replace`` pair, so anything still here belongs to a run
+    that was killed outright (SIGKILL, power loss) -- the ``except`` path
+    cleans up every failure this process can observe. Best effort: a file that
+    cannot be removed is clutter, never a reason to fail an import."""
+    if not directory.is_dir():
+        return
+    for path in sorted(directory.glob(f"*{_STAGED_SUFFIX}")):
+        try:
+            path.unlink()
+        except OSError as exc:  # pragma: no cover - filesystem failure path
+            context.ledger.warn(f"could not remove the stale {path.name}: {exc}")
 
 
 def _reconcile_staging(context: _Context, destination: Path) -> bool:
