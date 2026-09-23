@@ -1201,30 +1201,39 @@ def test_a_row_scoped_outside_the_packages_notebooks_is_refused(
     assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 0
 
 
-def test_an_incremental_payload_is_refused_by_this_build(source, target, package):
+def test_a_full_package_carrying_deletes_is_refused(source, target, package):
+    """A full package is a snapshot and is applied by reconciliation: phase 3a
+    has already deleted whatever the target holds and the package does not, so
+    a delete list riding along describes nothing that still needs doing and is
+    evidence the package is not the shape it claims. ``manifest.json`` says
+    ``deletes: 0`` here and is not checksummed, so the file itself is what is
+    read (and resealed, because ``deletes.jsonl`` IS checksummed).
+
+    变异验证: 去掉 ``_classify_package`` 里对全量包 ``deletes.jsonl`` 的检查,
+    本条报红。"""
     (package / "deletes.jsonl").write_text(
-        json.dumps({"table": "chunks", "key_json": "{}"}) + "\n", encoding="utf-8"
+        json.dumps({"table": "chunks", "key": {"id": "c-1"}}) + "\n",
+        encoding="utf-8",
     )
     _reseal(package)
 
     with pytest.raises(SyncImportError) as failure:
         _import(target, package)
 
-    assert "full packages only" in str(failure.value)
+    message = str(failure.value)
+    assert "deletes.jsonl" in message and "snapshot" in message
 
 
-def test_an_incremental_mode_package_is_refused_with_empty_deletes_and_epochs(
+def test_an_incremental_mode_package_with_no_chain_to_continue_is_refused(
     source, target, package
 ):
-    """codex #772 r18 P2, restated for format 2. This build imports full
-    snapshots only, and a package's ``deletes.jsonl``/``kg_epochs.jsonl``
-    being empty is not proof that it is one -- an exporter (or a hand-crafted
-    package) can declare ``mode=incremental`` with nothing in either
-    incremental payload file. Every downstream phase (declaration, table
-    apply, file swap) treats an imported package as a full reconciliation of
-    the notebook, so importing such a package as one would silently drop
-    everything the source wrote outside the claimed range. ``manifest.json``
-    is not itself checksummed (see
+    """codex #772 r18 P2, restated for PR-3c. A package declaring
+    ``mode=incremental`` is no longer refused for BEING incremental -- it is
+    refused because this target has applied nothing of that source environment
+    that a window can continue from. Every downstream phase of an incremental
+    import assumes the base is already here; applying the window without it
+    would produce a mirror that silently disagrees with its source.
+    ``manifest.json`` is not itself checksummed (see
     ``test_an_embedding_dimension_mismatch_is_refused`` above), so this needs
     no ``_reseal``.
 
@@ -1232,8 +1241,8 @@ def test_an_incremental_mode_package_is_refused_with_empty_deletes_and_epochs(
     the change-log watermark its export saw, which is exactly what lets the
     next export be incremental -- see the sibling test below.
 
-    变异验证: 去掉 ``_reject_incremental_payload`` 里的 ``mode``/``from_seq``
-    断言,本条必须报红(目标端把这个包当全量对账接收)。
+    变异验证: 去掉 ``_assert_chain`` 里 ``head is None`` 的拒绝, 本条必须报红
+    (目标端在没有基线的情况下应用了一个窗口)。
     """
     document = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))
     document["mode"] = "incremental"
@@ -1248,9 +1257,31 @@ def test_an_incremental_mode_package_is_refused_with_empty_deletes_and_epochs(
         _import(target, package)
 
     message = str(failure.value)
-    assert "incremental" in message
     assert "base-pkg-1" in message
-    assert "from_seq=6" in message and "to_seq=11" in message
+    assert "full baseline" in message
+    assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 0
+
+
+def test_a_full_mode_package_with_a_nonzero_from_seq_is_refused(
+    source, target, package
+):
+    """A package claiming a floor while declaring itself full is
+    self-contradictory: only a window starts above zero. Neither shape fits,
+    so it is refused by name rather than guessed at.
+
+    变异验证: 去掉 ``_classify_package`` 的 ``from_seq == 0`` 条件, 本条报红。
+    """
+    document = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))
+    document["from_seq"] = 6
+    (package / MANIFEST_NAME).write_text(
+        json.dumps(document, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+    )
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(target, package)
+
+    message = str(failure.value)
+    assert "from_seq=6" in message
     assert _count(target["repo"], "SELECT COUNT(*) FROM notebooks") == 0
 
 
@@ -1262,7 +1293,7 @@ def test_a_full_v2_package_with_a_captured_watermark_still_imports(
     non-zero ``to_seq`` must NOT be refused. Refusing it would make every
     package produced by a source with change capture turned on unimportable.
 
-    变异验证: 把 ``_reject_incremental_payload`` 的判据改回 ``to_seq != 0``,
+    变异验证: 把 ``_classify_package`` 的判据改回 ``to_seq != 0``,
     本条必须报红。
     """
     document = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))

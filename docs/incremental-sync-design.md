@@ -203,12 +203,12 @@ users 不同步但导入时可能**创建**：见 §4。
   `max(目标端现值, 包内值) + 1`：目标端与源端各自变更可能凑出相同的版本元组，只有让每次导入
   严格推进目标端的 seq，服务进程里按 `graph_seq_row` 版本校验的 unified 图缓存与检索向量
   矩阵缓存（其版本元组同样折进这四元组）才必然失效，且 seq 永不倒退；其余列（kg_reset_epoch
-  等）原样搬。导入器只接受 `mode=full` 的包（§8）；`to_seq` 不要求为 0——从 v85/0065 起全量
-  包也带着捕获到的水位（§7），但内容仍然是表扫描而不是日志重放。`mode=incremental` 的包在
-  预检阶段就被拒绝并指向 PR-3c，不进入这里描述的任何一条分支。全量包本身不依赖
-  `kg_epochs.jsonl` 驱动整体替换：§8「导入相位」的对账删除相位已经让全量导入天然等价于
-  「整体替换」，`kg_epochs.jsonl` 只对未来的增量导入（PR-3c）有意义，而本 PR 的导出恒把它
-  写成空文件（§7「压缩」，折叠延后）。
+  等）原样搬。导入器接受 `mode=full` 与 `mode=incremental` 的包（§8）；`to_seq` 不要求为
+  0——从 v85/0065 起全量包也带着捕获到的水位（§7），但内容仍然是表扫描而不是日志重放。两种
+  包 `kg_epochs.jsonl` 恒为空文件（折叠延后，见 §11），所以这里描述的「整体替换」分支目前
+  都不触发：全量包靠 §8「导入相位」的对账删除相位让整个导入天然等价于「整体替换」；增量包
+  靠逐行 upsert/delete 精确重放（§8 「删除重放」）达到同样效果，不依赖 `kg_epochs.jsonl`
+  驱动的整体替换指令。
 - 人工审核字段（knowledge_objects 的 status/owner/last_reviewed）随行同步；目标端不允许
   改（§5）。
 - `kg_index`/`kg_viz`/`kg_index_partitions` 不拷贝，目标端按现有 scale build 流程重建；
@@ -219,9 +219,9 @@ users 不同步但导入时可能**创建**：见 §4。
 
 状态：schema、触发器与开关已实现（PR-3a，`app.migration.sync.capture`/`capture_contract`，
 SQLite v84 / PostgreSQL 0064）；导出端（按日志读窗口、压缩、产出 `deletes.jsonl`）由 PR-3b
-实现（SQLite v85 / PostgreSQL 0065，进行中，见 §10）；`deletes.jsonl` 的重放是导入端的工作，
-留给 PR-3c。`kg_epoch` 折叠延后，本 PR 的 `kg_epochs.jsonl` 仍是空文件（见下「压缩」与
-§11）。
+实现（SQLite v85 / PostgreSQL 0065，已合入 #784，见 §10）；`deletes.jsonl` 的重放是导入端的
+工作，由 PR-3c 实现（进行中，见 §8「导入相位」）。`kg_epoch` 折叠延后，`kg_epochs.jsonl`
+两种包都仍是空文件（见下「压缩」与 §11）。
 
 ### 控制行门
 
@@ -484,8 +484,9 @@ SQLite 的相对开销比 PostgreSQL 明显：SQLite 基线本身极快（进程
 - **归属**：NOTEBOOK scope 表直接用行/日志自带的 `notebook_id`；PARENT scope 表的 upsert 行
   按 `scope_chain` 批量解析父键链得到 `notebook_id`；PARENT scope 的 delete 行按日志里的
   `parent_key` 解析，父行此刻也已经不在（父表自己被一并删了）时归属留空
-  （`deletes.jsonl` 该行 `notebook_id: null`）——按目标端父链解析归属、把这种孤儿删除处理成
-  no-op，是 PR-3c 的工作；本 PR 只如实记下「解析不出」，不在导出侧猜测或丢弃这条删除。
+  （`deletes.jsonl` 该行 `notebook_id: null`）——按目标端父链解析归属、把解析不出的孤儿删除
+  处理成 no-op，是导入端的工作（§8「导入相位」3c「删除重放」）；导出端只如实记下「解析
+  不出」，不在导出侧猜测或丢弃这条删除。
   GLOBAL scope 表（groups、object_schemas 等）的 upsert 全部带上（目标端按 seed_only 规则
   导入，本就幂等）；seed_only 表（notebook_members、notebook_grants、groups、group_members、
   object_schemas）的 delete 不导出（§5「授权只播种」——目标端撤销过的授权本就不该被源端的
@@ -551,8 +552,8 @@ SQLite 的相对开销比 PostgreSQL 明显：SQLite 基线本身极快（进程
   知道这个包是「知情地不完整」，而不是事后才发现一个悬空的附件）。glob 零命中记的那条
   `missing_files` 路径是 `files/assets/<nb>/<asset id>`——没有扩展名，因为压根没有匹配到的
   文件可以借它的扩展名；这只是信息性的登记，导入端从不按路径找 asset（找不到的行就是字节
-  没跟着来，不影响其它字段落库）。被删行指向的文件本包不处理，由 PR-3c 在目标端按目标行路径
-  删除。
+  没跟着来，不影响其它字段落库）。被删行指向的文件本包不处理，由导入端在重放 `deletes.jsonl`
+  时按目标行路径删除（§8「导入相位」3c「删除重放」）。
 
 - **模式判定**（`sync export` 不需要用户区分全量与增量）：没给 `--notebook` 时，门开 且 该
   `--target` 的水位行存在 且 `captured = 1` 且没给 `--full` ⇒ 增量；否则全量。两种情况都
@@ -728,9 +729,10 @@ sync-<source_env>-<from_seq>-<to_seq>-<package_id 前 8 位>/
   users.jsonl        # §4 的用户投影
   rows/<table>.jsonl # 按 manifest 拷贝顺序；ordinal 列不导；bytea 走 base64
   deletes.jsonl      # 每行 {"table", "key", "notebook_id", "parent_key"}；key 是该表的复合键取值
-  kg_epochs.jsonl    # 需要整体替换的 (notebook_id, epoch)；本 PR 恒空文件（§7「压缩」，折叠延后）
+  kg_epochs.jsonl    # 需要整体替换的 (notebook_id, epoch)；折叠延后，恒空文件（§7「压缩」、§11）
   files/notebooks/<notebook_id>/...   # 上传件；增量包只含本次新增或变更的文件；被删行的文件
-                                       # 不在包里，由目标端在重放 deletes 时按目标行路径删（PR-3c）
+                                       # 不在包里，由目标端在重放 deletes 时按目标行路径删
+                                       # （§8「导入相位」3c「删除重放」）
   files/assets/<notebook_id>/...      # 粘贴图片等附件，同上
   checksums.json     # 每个文件与每张表的 sha256
 ```
@@ -761,8 +763,8 @@ prune-log` 可能已经把水位以下的日志行清空，那时裸 `MAX(seq)` 
 最后是 GLOBAL 表——这个顺序确定（同一次导出、同样的窗口内容，两次跑出来的文件字节相等），
 但**不是外键安全序**：`copy_rank` 排的是父表先于子表的插入序，删除通常要反过来（子表先于
 父表）才不会撞外键，导出侧不会为了这一个文件重排整个循环。把 `deletes.jsonl` 按安全的顺序
-重放是导入端的工作（PR-3c），它有目标端的 catalog 可以现查外键关系；导出端只保证行序可预测、
-不保证行序可直接拿去执行。
+重放是导入端的工作（§8「导入相位」3c「删除重放」按 `reversed(synced_tables())` 逐表重放）；
+导出端只保证行序可预测、不保证行序可直接拿去执行。
 
 行编码（`rows/<table>.jsonl` 每行一个 JSON 对象，键是列名）采用 **SQLite 形态**作为可移植
 表示，这样目标端是 SQLite 时原样落库，是 PostgreSQL 时复用 `app.migration.shadow.transform`
@@ -808,11 +810,17 @@ sync export --target <env> --out <dir> [--notebook <id>]... [--source-env <name>
 sync import <package_dir> [--create-missing-users] [--dry-run] [--importer-user <id>]
     [--resume] [--verify-files] [--json]
     # --resume：同一个包断点续跑必须显式给；--verify-files：文件二次 sha256
-    # 只接受 mode=full 的 v2 包；mode=incremental 的包（或 deletes/kg_epochs 非空）在预检阶段
-    # 就被拒绝，错误点名 base_package_id/from_seq/to_seq 并指向 PR-3c。
+    # 接受 mode=full 与 mode=incremental 的 v2 包（§8「导入相位」）：full 要求 deletes/kg_epochs
+    # 为空；incremental 要求 base_package_id 等于同源链头的 package_id（不等则拒绝，错误给出
+    # 两种出路：链头是 failed/running ⇒ 先 --resume 或处理那个包，否则源端 sync export --full
+    # 重建基线）。除这两种形态外的任何组合（mode 未知、mode=full 但 from_seq≠0、
+    # mode=incremental 但 from_seq=0 或 base_package_id 为空、kg_epochs 非空）一律在预检阶段
+    # 拒绝并点名具体字段。
 sync status [--json]      # 本库的导出水位（每个目标环境）、在途导出租约（§7「在途导出租约」，
                            # target/started_at/heartbeat_at/floor_seq/floor_xmin/是否已死）、
-                           # 已引入的包与变更捕获开关状态；落后的笔记本清单在 PR-4
+                           # 每个 source_env 的导入链头（package_id/to_seq/created_at）、等待
+                           # 删除作业清理的镜像数、已引入的包与变更捕获开关状态；落后的笔记本
+                           # 清单在 PR-4
 sync capture enable [--json]   # 打开源端变更捕获；清空 sync_export_state（下一次导出必是全量）
 sync capture disable [--json]  # 关闭变更捕获；清空 sync_export_state 与 sync_change_log
 sync capture status [--json]   # 开关状态、enabled_at/disabled_at、日志行数与 seq 范围
@@ -833,54 +841,142 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
 
 导入相位（借 `copy_notebook` 的相位契约）：
 
-1. 预检：manifest `mode` 先分支——`mode=incremental`（或 `deletes`/`kg_epochs` 非空）一律拒绝，
-   错误点名该包的 `base_package_id`/`from_seq`/`to_seq` 并指向 PR-3c；manifest 里出现
-   `mode=full`/`incremental` 以外的未知值同样在这一步拒绝（读 manifest 时就报，不等到下面
-   这些检查）。`mode=full` 但 `from_seq != 0` 的包（一个自称全量、却带着增量包才有的非零窗口
-   起点的包，形态本身自相矛盾，只可能是构造或损坏的 manifest）同样拒绝，不当作增量处理、也不
-   当作全量放行——`mode=full` 才继续走下面这些检查，`to_seq` 不再要求为 0（`from_seq` 仍然
-   要求为 0，这正是这条新增拒绝规则的另一半）。schema pair 相等、`EMBED_RUNTIME_DIM` 相等、包校验和通过、
-   源环境标识与已有镜像一致（包里每个笔记本若在目标端已存在，其 `sync_origin` 必须等于源环境
-   标识；本地库或来自别的源环境的镜像都拒绝并点名）。**不按名字查重**：笔记本名本来就不唯一。
-   同一 `source_env` 已有 running 的导入则拒绝，错误里带对方的 `heartbeat_at`（每表提交刷新）；
-   只有操作者确认对方进程已死后显式 `--take-over` 才接管，不按运行时长推断。同一个包续跑
-   必须显式 `--resume`。FAIL 策略的用户引用（notebooks.created_by、memory_items.created_by）
-   在预检里就校验，dry-run 同样硬失败，绝不在删除相位之后才发现。声明事务里除了预留笔记本行，
-   还写一条 `__reserved__` 进度行：预留后、任何表处理前失败的包也算「有未完成工作」，同源更新
-   的包必须覆盖它的笔记本才能取代它。包的新旧按 `manifest.created_at` 排序（本 PR 起 `to_seq`
-   一并记在 `sync_imports` 供人读诊断参考，但由于本 PR 只接受全量包、`from_seq` 恒为 0，
-   新旧判定本身仍只看 `created_at`：比同 `source_env` 最近一次 done 的包更旧的包拒绝导入，
-   不能让目标端倒退）；声明一个更新的包时，同源 `failed` 且带进度的旧包被标成 `superseded`
-   并清掉进度行，之后不能再 `--resume`，避免旧进度与新快照拼成混合状态。`sync_imports.status`
+1. 预检：manifest `mode` 先分类（`_classify_package`）——`full`（`mode=full` 且 `from_seq=0`；
+   `deletes`/`kg_epochs` 必须为空，语义与 PR-3a/3b 时代一致）或 `incremental`（`mode=incremental`
+   且 `from_seq>0` 且 `base_package_id` 非空；`kg_epochs` 必须为空，`deletes` 允许非空）。除这
+   两种形态之外的任何组合——`mode` 取值未知、`mode=full` 但 `from_seq≠0`、`mode=incremental`
+   但 `from_seq=0` 或 `base_package_id` 为空字符串——在读 manifest 这一步就拒绝并点名具体
+   字段，不当作增量或全量放行（读 manifest 时就报，不等到下面这些检查）。schema pair 相等、
+   `EMBED_RUNTIME_DIM` 相等、包校验和通过、源环境标识与已有镜像一致（包里每个笔记本若在
+   目标端已存在，其 `sync_origin` 必须等于源环境标识；本地库或来自别的源环境的镜像都拒绝并
+   点名）。**不按名字查重**：笔记本名本来就不唯一。
+
+   **链头**：同一 `source_env` 在 `sync_imports` 里 `status=done` 且**入链**的最新一条——入链
+   指它落盘时记下的 `base_package_id != ''` 或 `to_seq > 0`（限定导出 `--notebook` 与门关
+   全量的 `to_seq=0`/`base_package_id=''` 都不入链，后续增量包不能以它们为 base）。
+   `report_json`（`_running_report_json` 与最终 `ImportReport.as_json()`）从本 PR 起都记
+   `mode`/`from_seq`/`to_seq`/`base_package_id`；早于本 PR 写下的行缺这些字段一律按不入链
+   处理（不去猜它当时是不是增量）。
+
+   `incremental` 包要求 `base_package_id == 链头.package_id`；不等就拒绝，错误点名链头的
+   `package_id`/`created_at` 与本包的 `base_package_id`，并给出两种出路：本包的
+   `base_package_id` 指向同源一个仍是 `failed` 或 `running` 的包 ⇒ 提示先 `--resume`
+   或处理那个包；否则提示源端 `sync export --full` 重建基线。`from_seq == 链头.to_seq + 1`
+   不连续只记一条诊断 warning，不作为拒绝条件——`prune-log` 清过日志之后的空窗口增量包是
+   合法形态（见 §7「导出水位」）。`incremental` 包不参与 `_supersede_outstanding`（它不能
+   取代任何未完成的包）；同源存在 `failed` 或 `running` 的包时，新到的增量包一律拒绝（除非
+   它自己就是要被 `--resume` 的那一个）。`_reject_backwards_snapshot` 对增量包比的是链头的
+   `created_at`（全量包仍比同源最近一次 `done` 包的 `created_at`，见下文）。空增量包（无行
+   也无删除）照常入链、记 `done`——导出链靠 `base_package_id` 接续，不能因为一次窗口没变化
+   就断链。
+
+   新增范围校验：`_verify_row_scopes` 不变（沿用「安全边界」的既有口径）。新增
+   `_verify_delete_scopes`：每条 `deletes.jsonl` 记录的 `table` 必须属于同步表集合、非
+   `seed_only`、非 GLOBAL scope；`key` 的列集合必须与该表 `sync_key` 声明的列集合完全相等
+   （多列或少列都拒绝）；`notebook_id` 非空时必须属于 `manifest.notebooks ∪
+   deleted_notebooks`；`deleted_notebooks ∩ manifest.notebooks` 必须为空集；
+   `deleted_notebooks` 里出现的每个 id 同样过一遍 `is_safe_identifier`（与笔记本 id、包 id
+   同一套字符集校验）。这一步和 `_verify_row_scopes` 一样，在预检里做，在任何写入或删除
+   之前。`deleted_notebooks` 逐个核对目标端现状：目标端存在同 id 笔记本时，它的
+   `sync_origin` 必须等于本包 `source_env`（否则拒绝并点名，与「镜像 origin 检查」同口径—
+   —不能让一个构造的 `deleted_notebooks` 条目去删别的源、或本地自建的笔记本）；目标端不
+   存在这个 id（从没同步过来，或已经被更早一次导入删过）⇒ no-op，只记一条 warning。
+
+   同一 `source_env` 已有 running 的导入则拒绝，错误里带对方的 `heartbeat_at`（每表提交
+   刷新）；只有操作者确认对方进程已死后显式 `--take-over` 才接管，不按运行时长推断。同一个
+   包续跑必须显式 `--resume`。FAIL 策略的用户引用（notebooks.created_by、
+   memory_items.created_by）在预检里就校验，dry-run 同样硬失败，绝不在删除相位之后才发现。
+   声明事务里除了预留笔记本行，还写一条 `__reserved__` 进度行：预留后、任何表处理前失败的
+   包也算「有未完成工作」，同源更新的包必须覆盖它的笔记本才能取代它。全量包的新旧按
+   `manifest.created_at` 排序：比同 `source_env` 最近一次 `done` 包更旧的包拒绝导入，不能
+   让目标端倒退；声明一个更新的包时，同源 `failed` 且带进度的旧包被标成 `superseded` 并
+   清掉进度行，之后不能再 `--resume`，避免旧进度与新快照拼成混合状态。`sync_imports.status`
    值域：running / done / failed / superseded。
 2. 身份映射（§4），产出映射表与跳过清单。
-3. 文件（在行相位之后执行，行已提交才动磁盘）：`files/notebooks/<id>/` 与 `files/assets/<id>/`
-   各自先落到 `<目标目录>.sync-tmp/`，用预检算过的摘要（不重复读整包），原子 rename 到位、旧目录
-   改名 `.sync-old` 留到收尾；全量包整目录替换，增量包按文件合并。文件相位在
-   `sync_import_progress` 登记 `__files__` 条目，续跑跳过。
-4. 行：对 `kg_epochs` 里的笔记本先整体清空 KG 层；再按拷贝顺序 `INSERT … ON CONFLICT (pk)
-   DO UPDATE`；最后重放 `deletes`。每张表一个事务，进度写进 `sync_import_progress`，可断点续跑。
-   `knowledge_object_sources`、`community_members` 自 PR-3a（v84/0064 补了复合键，见 §7）起
-   与其它表一样走这条 keyed upsert 路径，不再是 PR-2 的删后整批插入。一条过渡规则仍然存在：
-   `sources.file_path` 按 shadow manifest 的 `path_columns` 重锚到目标端的 storage 根（包里是
-   源主机的绝对路径）。
-   全量包还有一个**对账删除**相位（在行相位**之前**、逆序、每表一个事务、进
-   `sync_import_progress`）：对每张 notebook/parent scope 且非 seed_only 的同步表，删除属于
-   包内笔记本、但主键不在包内的目标端行——源端删掉的材料、KG 行、Knowhow 行在下一次全量后
-   消失。先删后 upsert 是为了让「主键换了、业务唯一键没换」的行（如 chunk_questions 的
-   (chunk_id, question)）不撞二级唯一约束；导入前还按目标 catalog 的唯一索引预检并点名。
-   例外：memory_items 及其三张子表不对账，因为目标端用户在镜像上自建的记忆与源端删掉的
-   记忆没有标记可分（§5 允许共存），源端删除留给 PR-3c 的删除日志精确重放（本 PR 的导出端
-   已经产出 `deletes.jsonl`，但导入端只接受全量包、不消费它，见 §8「导入端」）；目标端记忆经
-   `ingest_memory_source` 派生的合成来源（`source_type='memory'` 且 memory_id 不在包内）及其
-   可达的元素、chunk、向量、KG 行同样免删。没有 source_id 的 KG 行不在保护范围。SQLite 目标在 chunks/knowledge_objects 的事务内重建
-   `chunks_fts`/`kg_objects_fts`（它们是手工维护的虚表）；PG 的 GIN 在列上自动维护。
+3. 行——四个子相位，`kg_epochs` 恒空（§11「`kg_epoch` 折叠延后」），两种包都不触发整体替换
+   分支；每张表一个事务，进度写进 `sync_import_progress`，可断点续跑：
+   a. **对账删除**（仅全量包）：逆序、每表一个事务，进 `sync_import_progress`：对每张
+      notebook/parent scope 且非 seed_only 的同步表，删除属于包内笔记本、但主键不在包内的
+      目标端行——源端删掉的材料、KG 行、Knowhow 行在下一次全量后消失。先删后 upsert 是为了
+      让「主键换了、业务唯一键没换」的行（如 chunk_questions 的 (chunk_id, question)）不撞
+      二级唯一约束；导入前还按目标 catalog 的唯一索引预检并点名。例外：memory_items 及其
+      三张子表不对账（§5 允许目标端自建记忆与源端记忆共存，见下方增量删除重放）；目标端记忆
+      经 `ingest_memory_source` 派生的合成来源（`source_type='memory'` 且 memory_id 不在
+      包内）及其可达的元素、chunk、向量、KG 行同样免删，没有 source_id 的 KG 行不在保护
+      范围。SQLite 目标在 chunks/knowledge_objects 的事务内重建
+      `chunks_fts`/`kg_objects_fts`（它们是手工维护的虚表）；PG 的 GIN 在列上自动维护。
+      **增量包跳过这一相位**——它不是一份快照，没有「包内笔记本此刻的完整主键集合」这个
+      基准可以拿来对账；源端的删除已经完整落在 `deletes.jsonl` 里，下面的精确重放就是它的
+      对账方式，两者不叠加，对账删除会把增量包没提到、但目标端确实还该存在的行误删。
+   b. **行 apply**（全量、增量同形，不变）：按拷贝顺序 `INSERT … ON CONFLICT (pk) DO
+      UPDATE`。`knowledge_object_sources`、`community_members` 自 PR-3a（v84/0064 补了复合
+      键，见 §7）起与其它表一样走这条 keyed upsert 路径，不再是 PR-2 的删后整批插入。一条
+      过渡规则仍然存在：`sources.file_path` 按 shadow manifest 的 `path_columns` 重锚到
+      目标端的 storage 根（包里是源主机的绝对路径）。本次预留（reserved）的笔记本经这一步
+      从 `importing` 的壳子填上真实内容。
+   c. **删除重放**（仅增量包）：按 `reversed(synced_tables())`（子表先于父表，与拷贝序
+      「先父后子」正好相反——删除要反过来才不撞外键）逐表一个事务，进度写
+      `__delete__:<table>`。每表：从 `deletes.jsonl` 取属于这张表的条目，按 `sync_key`
+      列序组出批量键，分批（`_ROW_BATCH`）处理：
+      - 归属校验——与 `_assert_target_ownership` 同一套「先回读目标行再判定」的口径，方向
+        相反：那边校验「即将写入的行属于本包范围」，这里校验「即将删除的目标行属于本包
+        范围」。NOTEBOOK scope 直接回读目标行的 `notebook_id`（`notebooks` 表自身读
+        `id`）；PARENT scope 用 `scope_chain` 在**目标端**逐跳解析出 `notebook_id`。解析出
+        的 `notebook_id` 不属于 `manifest.notebooks ∪ deleted_notebooks` ⇒ **拒绝整个
+        导入**并点名——一条构造的删除条目不能删掉别的本地笔记本名下的行。目标端本来就没有
+        这一行 ⇒ 计入 `deletes_absent`（幂等重放、`--resume` 续跑都会撞到，不是错误）。
+        PARENT 链在目标端已经断了（父行不在了，说明父行本身也被删过）⇒ 孤儿：delete 条目
+        自带非空 `notebook_id` 且落在范围内就按它删；否则计入 `deletes_orphan_skipped` 并
+        记 warning（解析不出目标端归属的孤儿删除是 no-op，不猜、不强删）。
+      - 文件：`sources` 条目在删这一行前先回读目标端这一行的 `file_path`，按
+        `_STORAGE_PATH_COLUMNS` 算出的根做 `_assert_within(storage/notebooks/<nb>)`，
+        通过才 `unlink`（文件已经不在就忽略）；`notebook_assets` 条目删
+        `storage/assets/<nb>/<asset id>.*`（同 §7「文件」一节的 glob 口径）。文件删除在
+        这张表的删除事务**提交之后**做——和「行先于文件」的既有顺序一致——失败只记
+        warning，不回滚已提交的删除。
+      - `DELETE FROM t WHERE k1=? AND k2=? ...` 用 `executemany` 批量执行；SQLite 目标在
+        chunks/knowledge_objects 的删除事务内同样重建 `chunks_fts`/`kg_objects_fts`。
+      memory 四张表的删除照常重放——这正是 §5「允许共存」承诺的「源端删除靠 `deletes.jsonl`
+      精确重放」；对账删除相位的 `_protected_sources` 概念不参与，增量删除重放靠的是日志
+      本身的精确性，不需要额外保护集合。
+   d. **笔记本删除传播**（仅增量包）：对 `manifest.deleted_notebooks` 里、经第 1 步核对
+      目标端存在且 `sync_origin` 匹配的每个笔记本 id，一个事务里做 CAS：
+      `UPDATE notebooks SET status='deleting', updated_at=? WHERE id=? AND sync_origin=?
+      AND status NOT IN ('deleting','copying')`；`rowcount=1` 就在同一事务里插入一行
+      `notebook_delete_jobs`（走 `_new_id("ndj")` 同一套 id 生成，与 HTTP `DELETE
+      /api/notebooks/{id}` 走的是同一条「CAS 置位 + 建作业行」路径，见运维文档「Notebook
+      delete jobs」/「笔记本删除作业」）。`rowcount=0` 且这一行已经是 `deleting` ⇒ 幂等
+      （别的导入或 HTTP 删除已经在处理它），no-op；`status='copying'` ⇒ 记 warning 跳过——
+      目标端此刻正在拷贝这本笔记本，导入不等它，也不越权打断它，把删除留给运维在拷贝结束
+      后再处理。进度写 `__delete_notebook__:<id>`。实际清理（六相位、storage 目录、
+      `retained_user_activity` 归档）由应用侧运行中的 `NotebookDeleteJobRunner` 完成，不是
+      导入器自己做——导入只负责把作业排进队列；目标端此刻若没有应用在跑这个作业消费者，
+      笔记本会停在 `deleting` 直到应用下次启动或运维手动处理（`sync status` 用「等待删除
+      作业的镜像」这个数字把这种情况亮出来）。
+4. 文件：全量包整目录替换（不变）——`files/notebooks/<id>/` 与 `files/assets/<id>/` 各自先
+   落到 `<目标目录>.sync-tmp/`，用预检算过的摘要（不重复读整包），原子 rename 到位、旧目录
+   改名 `.sync-old` 留到收尾。**增量包按文件合并**：按 `checksums.json` 列出的每个文件逐个
+   复制——先写 `<目标路径>.sync-tmp`，再 `os.replace` 原子换到最终路径，不建临时目录、不
+   整目录 rename、不产生 `.sync-old`，全量专用的 `context.installed` 登记不使用；
+   `_assert_within` 校验目标路径落在对应 storage 根下与全量包同一套逻辑。单个文件复制失败
+   只记 warning、不回滚已经复制成功的文件（文件复制本身幂等，`--resume` 重做这一步会重新
+   尝试失败的那些）。文件相位在 `sync_import_progress` 登记 `__files__` 条目，续跑跳过。
 5. 收尾，按「可回滚的先做、发布最后」的顺序：`sync_origin` 再补打一次（第二条腿，首插时
-   已带）→ 文件目录正式替换（`.sync-old` 到此才删）→ 最后把涉及的笔记本 `status` 从
-   `importing` 翻成 `draft`；`sync_imports` 置 done；写导入报告（写盘失败降级为 warning）。
-   任何一步失败，本次首插的笔记本回到 `importing`（不可见），文件回滚；文件换名中途失败时
-   退休目录已登记或就地换回，镜像目录不会消失。大库的 scale 重建由运维按 operations 文档手动跑，
-   PR-4 自动化。
+   已带）→ 文件目录正式生效（全量包这里才删 `.sync-old`；增量包这一步纯粹是进度收口，没有
+   目录可删）→ `_stamp_mirrors`（按 `manifest.notebooks` 更新 `sync_applied_through_seq` 等
+   镜像记账列）→ 把本次预留（reserved）的笔记本 `status` 从 `importing` 翻成 `draft`；
+   `sync_imports` 置 done；写导入报告（写盘失败降级为 warning）。任何一步失败，本次首插的
+   笔记本回到 `importing`（不可见）；全量包文件回滚（文件换名中途失败时退休目录已登记或
+   就地换回，镜像目录不会消失），增量包保留已复制成功的部分（`--resume` 重做）。大库的
+   scale 重建由运维按 operations 文档手动跑，PR-4 自动化。
+
+`ImportReport`/`as_json()` 新增字段：`mode`（`full`/`incremental`）、`base_package_id`、
+`deletes_applied`、`deletes_absent`、`deletes_orphan_skipped`、`notebooks_deleted`（本次排进
+删除作业队列的笔记本 id 列表）、`notebooks_delete_skipped`（`status='copying'` 被跳过的
+笔记本 id 列表）；全量包的这几个计数恒为 0/空，字段仍然出现，CLI 人读摘要与 `--json` 都
+打印。`_assert_notebooks_still_ours` 仍按 `manifest.notebooks` 在每个写事务开头重验；第
+3c/3d 步新增的删除、笔记本状态翻转事务各自在自己的事务里再验一次，不复用之前验过的结果——
+写、删是独立的事务链，不能假设中间没有别的进程改过归属。
 
 ## 9. 验收与对账
 
@@ -895,8 +991,8 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
 | PR-1 | 本文；`architecture.md` §2.1.1 ERD；同步范围 manifest 与全覆盖守卫；`notebooks.sync_origin` 成对迁移；能力表写入围栏；username 映射的纯函数与测试 | 已合入 #770 |
 | PR-2 | 按笔记本全量导出/导入 CLI（§8 的 `from_seq=0` 特例），manifest 的 `scope` 字段，含文件、身份映射、校验和对账、`sync_export_state` 水位表 | 已合入 #772 |
 | PR-3a | 源端 `sync_change_log` schema 与 46 张表的触发器（`app.migration.sync.capture`，SQLite v84 / PostgreSQL 0064）；两张无主键表补复合键，导出/导入改走 keyed upsert；`sync capture enable/disable/status` 开关与导出水位记账 | 已合入 #783 |
-| PR-3b | 按日志读的增量导出（含 PostgreSQL 快照补偿窗口，SQLite v85 / PostgreSQL 0065）、日志压缩（按 (table,key) 折终态，`kg_epoch` 行不折叠）、产出 `deletes.jsonl`、包格式 v2、`sync export --full`、`sync prune-log` 保留策略；导入端只做最小兼容（接受 v2 全量包，拒绝增量包并指向 PR-3c，`deletes.jsonl` 的重放留给 PR-3c）；`kg_epoch` 整体替换的折叠优化延后（见 §11） | 进行中 |
-| PR-3c | 增量导入：增量包重放（deletes 按键删除、文件合并而非整目录替换、孤儿删除按目标端父链归属解析）、笔记本删除的跨环境传播 | 待办 |
+| PR-3b | 按日志读的增量导出（含 PostgreSQL 快照补偿窗口，SQLite v85 / PostgreSQL 0065）、日志压缩（按 (table,key) 折终态，`kg_epoch` 行不折叠）、产出 `deletes.jsonl`、包格式 v2、`sync export --full`、`sync prune-log` 保留策略；导入端只做最小兼容（接受 v2 全量包，拒绝增量包；`deletes.jsonl` 的重放留给 PR-3c）；`kg_epoch` 整体替换的折叠优化延后（见 §11） | 已合入 #784 |
+| PR-3c | 增量导入（§8「导入相位」）：包分类与链头校验（`base_package_id` 必须等于同源链头，两种出路）、增量包的对账删除跳过、按键精确重放 `deletes.jsonl`（子表先于父表、目标端归属校验、孤儿 no-op）、文件相位对增量改为逐文件合并（不整目录替换）、`deleted_notebooks` 触发笔记本删除传播（CAS `status='deleting'` + 同事务建 `notebook_delete_jobs` 作业行，走既有的删除作业消费路径）；`sync status` 展示每个 source_env 的链头与等待删除作业的镜像数 | 进行中 |
 | PR-4 | 落后笔记本巡检、runbook，前端镜像标注 | 待办 |
 
 ## 11. 未决问题
@@ -912,9 +1008,10 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
   同一批 KG 重建产生的变化，折叠只是把它们合并成一条「整体替换」指令，省掉重放大量单行
   delete/insert 的体积与耗时。值得回头做的时机：某个笔记本单次 KG 重建产生的日志行数变得
   显著（大图频繁重建），增量包体积或导入耗时因为这些冗余行而明显偏大时。
-- 孤儿删除的目标端归属规则交 PR-3c：PARENT scope 表的 delete 日志若父行也已经被删，
-  `deletes.jsonl` 该行的 `notebook_id` 写 `null`（§7「归属」）；按目标端当时仍存活的父链
-  解析真实归属、并把解析不出的孤儿删除当作 no-op，是导入端（PR-3c）的工作，导出端不猜测。
+- 孤儿删除的目标端归属规则已实现（§8「导入相位」3c「删除重放」）：PARENT scope 表的 delete
+  日志若父行也已经被删，`deletes.jsonl` 该行的 `notebook_id` 写 `null`（§7「归属」，导出端
+  不猜测）；导入端按目标端当时仍存活的父链重新解析归属，解析得出就按结果删，解析不出（孤儿）
+  就计入 `deletes_orphan_skipped` 并 no-op，不强删、不猜。
 - 增量压缩的内存量级：完整的按组件核算见 §7「压缩」——按表持有的压缩字典、流式写入不缓冲的
   行与删除条目、整份常驻但只装键身份的补偿窗口、每个变更文件一条的请求列表。这是离线导出
   工具单次调用内的开销，运维按导出周期的写入量估算即可，不随 `sync_change_log` 表的总行数
