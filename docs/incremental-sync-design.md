@@ -971,9 +971,26 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
    声明事务里除了预留笔记本行，还写一条 `__reserved__` 进度行：预留后、任何表处理前失败的
    包也算「有未完成工作」，同源更新的包必须覆盖它的笔记本才能取代它。全量包的新旧按
    `manifest.created_at` 排序：比同 `source_env` 最近一次 `done` 包更旧的包拒绝导入，不能
-   让目标端倒退；声明一个更新的包时，同源 `failed` 且带进度的旧包被标成 `superseded` 并
-   清掉进度行，之后不能再 `--resume`，避免旧进度与新快照拼成混合状态。`sync_imports.status`
-   值域：running / done / failed / superseded。
+   让目标端倒退；声明一个更新的包时，同源 `failed` 且带进度的旧包**通常**被标成
+   `superseded` 并清掉进度行，之后不能再 `--resume`，避免旧进度与新快照拼成混合状态。
+
+   **例外：一个失败的增量包，删除相关的两个阶段没有都做完，不能被取代**（codex #788 r3
+   P2）。全量包的对账删除（3a）明确豁免 memory 四张表与 `notebooks`（§5「允许共存」）——
+   这两类删除永远只靠精确重放（3c）与笔记本删除传播（3d）来做，全量对账补不回来。如果一个
+   增量包在重放完 memory 删除或者排队笔记本删除**之前**就失败了，此时如果放任一个更新的
+   全量包把它标成 `superseded`（连同它的进度一起清掉），这个增量包窗口里那些还没重放的
+   memory 删除、还没排队的笔记本删除，就永远不会被任何后续动作补上——全量对账不会替它删
+   （豁免了），后续从新基线续接的增量窗口也不会替它删（那些删除已经落在新基线的水位之前，
+   不会再出现在任何未来窗口里）——目标端会静默地把这些本该删除的内容留到永远。规则：`取代`
+   判定（`_supersede_outstanding`）在候选是**增量包**时，额外要求它的 `sync_import_progress`
+   里同时有 `__deletes_replayed__` 与 `__notebook_deletes_queued__` 这两条进度——两个都在，
+   说明它失败在这两个阶段**之后**（比如卡在文件合并或收尾），剩下的行/文件差异全量对账能
+   覆盖，正常允许取代；缺一个都拒绝取代，错误点名缺的是哪一步，要求先对那个失败的增量包
+   本身 `--resume`（把它剩下的部分做完，而不是绕过它）；**`--take-over` 同样不能绕过这条**
+   ——`--take-over` 解决的是「进程已死、需要有人接管这一行」，不改变「这个包自己删除相关的
+   两个阶段有没有做完」这个事实，接管之后要走的仍然是 `--resume` 补做剩下的部分，不是让
+   一个更新的全量包把它标成 `superseded` 绕过去。`sync_imports.status` 值域：
+   running / done / failed / superseded。
 2. 身份映射（§4），产出映射表与跳过清单。
 3. 行——四个子相位，`kg_epochs` 恒空（§11「`kg_epoch` 折叠延后」），两种包都不触发整体替换
    分支；每张表一个事务，进度写进 `sync_import_progress`，可断点续跑。**下面 a/b/c/d 这几个
@@ -1090,7 +1107,10 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
       ——比如 `_plan_deletes` 定性时它还不是 `copying`，等真正轮到 3d 那个事务时状态已经变成
       `copying`，于是被 3d 放过不打墓碑）单独发一条 `INCONSISTENT:` 告警，点名这些笔记本，
       说清楚「没有任何东西清掉这些行，重新导入或者手动处理」——不能跟着上面那条报喜的告警
-      一起含糊过去，因为这种情况下这些行是真的没人管。
+      一起含糊过去，因为这种情况下这些行是真的没人管。这个子相位对全部有条目的表都处理完
+      （或者一开始 `context.deletes` 就是空的）之后，写一条 `__deletes_replayed__` 进度行——
+      跟逐表的 `__delete__:<table>` 不是一回事，是给「这个包的删除重放整体做完了没有」这
+      个问题留的一个可以直接查的答案（`_supersede_outstanding` 要用，见下文「取代」）。
    d. **笔记本删除传播**（仅增量包）：对 `manifest.deleted_notebooks` 里的每个笔记本 id，一
       个事务里先回读目标端这一行的 `sync_origin`：不等于本包 `source_env` ⇒ **直接中止整个
       导入**（`SyncImportError`）——预检已经查过一次，这里在真正落笔前再查一次，是因为
@@ -1117,7 +1137,10 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
       目录、`retained_user_activity` 归档）由应用侧运行中的 `NotebookDeleteJobRunner` 完成，
       不是导入器自己做——导入只负责把作业排进队列；目标端此刻若没有应用在跑这个作业消费者，
       笔记本会停在 `deleting` 直到应用下次启动或运维手动处理（`sync status` 用「等待删除
-      作业的镜像」这个数字把这种情况亮出来）。
+      作业的镜像」这个数字把这种情况亮出来）。`manifest.deleted_notebooks` 里的每个笔记本都
+      处理完（或者一开始这个集合就是空的）之后，写一条 `__notebook_deletes_queued__` 进度
+      行——跟 `__deletes_replayed__` 同一个用途，给「这个包的笔记本删除传播整体做完了没有」
+      这个问题留一个可以直接查的答案。
 4. 文件：全量包整目录替换（不变）——`files/notebooks/<id>/` 与 `files/assets/<id>/` 各自先
    落到同一父目录下的兄弟目录 `<notebook id>.sync-tmp`（`.sync-tmp` 这个后缀现在**只剩这一处
    用法**：笔记本 id 命名空间，受 `is_safe_identifier` 约束，不是用户能起的名字，所以不会跟

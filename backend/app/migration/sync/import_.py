@@ -374,6 +374,41 @@ _RESERVATION_STEP = "__reserved__"
 _DELETE_STEP_PREFIX = "__delete__:"
 _NOTEBOOK_DELETE_STEP_PREFIX = "__delete_notebook__:"
 
+# The two phase-completion markers an INCREMENTAL run writes, and the reason
+# they exist at all (codex #788 r3 P2).
+#
+# A window's deletions are the one thing a later FULL package cannot make good
+# on. Phase 3a reconciles a full package against the target -- but it exempts
+# ``memory_items`` and its revision/provenance/embedding rows (§5: the target's
+# own memories live beside the mirrored ones and nothing on a row says which
+# side made it) and it exempts ``notebooks`` (retiring a mirror is an operator
+# decision, not a side effect of syncing another notebook). So a source-side
+# memory deletion, and a source-side notebook deletion, are carried ONLY by the
+# window that observed them.
+#
+# That makes retiring a half-applied window genuinely lossy in a way retiring a
+# half-applied full package never is: ``_supersede_outstanding`` drops its
+# progress and marks it ``superseded``, which means it can never be resumed --
+# and the newer full package will not replay those deletions, nor will any
+# later window (the change log has moved past them). The target silently keeps
+# content the source deleted, with nothing left that will ever remove it.
+#
+# These markers are what let ``_supersede_outstanding`` tell the two cases
+# apart: a window that got through 3c and 3d has already applied every deletion
+# it carried, so whatever is left of it is ordinary row and file work a full
+# package DOES cover, and retiring it is safe. One that did not is refused
+# until somebody resumes it. Written unconditionally -- an empty window writes
+# them too, because "carried no deletions" and "applied all of them" are the
+# same fact for this purpose and only the marker says either.
+_DELETES_REPLAYED_STEP = "__deletes_replayed__"
+_NOTEBOOK_DELETES_QUEUED_STEP = "__notebook_deletes_queued__"
+
+# Both of the above. A package missing either has not settled its deletions.
+_INCREMENTAL_DELETE_STEPS = (
+    _DELETES_REPLAYED_STEP,
+    _NOTEBOOK_DELETES_QUEUED_STEP,
+)
+
 
 def _delete_step(table: str) -> str:
     return f"{_DELETE_STEP_PREFIX}{table}"
@@ -2715,6 +2750,13 @@ class _PriorImport:
     # The package's own ``manifest.scoped``, or ``None`` for a row written
     # before the field existed. See ``downstream_of``.
     scoped: bool | None = None
+    # ``package.MODE_FULL``/``MODE_INCREMENTAL`` as this row recorded it, or
+    # ``""`` for a row that predates the field. Read by
+    # ``_supersede_outstanding``, which may only retire an unfinished WINDOW
+    # under a condition that does not apply to a full package. An unknown
+    # mode is treated as full: no incremental import existed before PR-3c, so
+    # a row that does not say cannot be one (codex #788 r3 P2).
+    mode: str = ""
 
     def downstream_of(self, base: "_PriorImport") -> bool:
         """Whether this row applied something the chain has moved PAST
@@ -2810,6 +2852,7 @@ def _prior_imports(
                 from_seq=int(row["from_seq"] or 0),
                 to_seq=int(row["to_seq"] or 0),
                 base_package_id=_recorded_text(document, _BASE_PACKAGE_ID_KEY),
+                mode=_recorded_text(document, _MODE_KEY),
                 scoped=(
                     bool(document[_SCOPED_KEY])
                     if isinstance(document.get(_SCOPED_KEY), bool)
@@ -3238,10 +3281,52 @@ def _supersede_outstanding(
     strand the other notebook: nothing declared for this source environment
     would ever finish it, and nothing would say so.
 
+    **An unfinished WINDOW is refused outright unless it settled its
+    deletions** (codex #788 r3 P2). Everything above rests on one assumption:
+    that whatever the retired package had left to do, this newer one will do
+    instead. For a half-applied full package that holds -- both are snapshots
+    of the same notebooks. For a half-applied INCREMENTAL package it is false
+    in exactly one place, and it is the place that cannot be recovered from:
+    phase 3a exempts ``memory_items`` and its children (§5) and ``notebooks``
+    itself, so a source-side memory deletion and a source-side notebook
+    deletion are carried ONLY by the window that observed them. Retire that
+    window before it replayed them and they are gone for good -- the window
+    can never be resumed again, the full package will not reconcile those
+    tables, and no later window carries them either (the change log has moved
+    past). The target silently keeps content the source deleted.
+
+    So a window that has not written BOTH ``_INCREMENTAL_DELETE_STEPS``
+    markers is not retired; the refusal says to ``--resume`` it first.
+    ``--take-over`` does not get past this either: it asserts the other
+    PROCESS is gone, which is a claim about liveness, not a licence to drop
+    deletions nothing else will replay. A window that HAS both markers is
+    retired normally -- its remaining row and file work is exactly what a full
+    package does cover.
+
     Runs inside the claim's transaction, so a package is never declared
     without the retirement that makes declaring it safe."""
     manifest = context.manifest
     mine_notebooks = set(manifest.notebooks)
+    for row in outstanding:
+        if row.mode != MODE_INCREMENTAL:
+            continue
+        missing_steps = sorted(
+            set(_INCREMENTAL_DELETE_STEPS)
+            - _completed_steps(backend, conn, row.package_id)
+        )
+        if missing_steps:
+            raise SyncImportError(
+                f"package {row.package_id} is an incremental window that "
+                f"stopped before it finished applying its deletions "
+                f"({missing_steps}). Retiring it would drop them for good: a "
+                "full package does not reconcile memory rows or notebook "
+                "deletions (docs/incremental-sync-design.md §5), and no later "
+                "window carries them either. Finish that window first "
+                "(--resume it, or --take-over and --resume it if its process "
+                "is gone), and import this package after. --take-over alone "
+                "does not help -- it says that run's process is gone, not "
+                "that its deletions have been applied."
+            )
     for row in outstanding:
         if mine is None or row.created_at is None or mine <= row.created_at:
             state = (
@@ -5489,6 +5574,10 @@ def _replay_deletes(backend: _Backend, context: _Context, done: set[str]) -> Non
     for them.
     """
     if not context.deletes:
+        # An empty window still SETTLED its deletions -- it had none. The
+        # marker says "this run is past 3c", which is the only thing
+        # ``_supersede_outstanding`` asks, so it is written here too.
+        _record_phase_complete(backend, context, _DELETES_REPLAYED_STEP, done)
         return
     plan = _plan_deletes(backend, context)
     for table in _delete_replay_tables():
@@ -5522,6 +5611,13 @@ def _replay_deletes(backend: _Backend, context: _Context, done: set[str]) -> Non
     # unbounded thing this context holds, nothing after 3c reads it, and a
     # resumed run rebuilds it in preflight anyway (codex T1 review P3-7).
     context.deletes = {}
+    _record_phase_complete(
+        backend,
+        context,
+        _DELETES_REPLAYED_STEP,
+        done,
+        rows=context.ledger.deletes_applied,
+    )
 
 
 # -------------------------------------- phase 3d -- notebook delete propagation
@@ -5565,6 +5661,9 @@ def _apply_notebook_deletions(
     - **absent**: nothing to delete. Already warned in preflight.
     """
     if not context.deleted_notebooks:
+        _record_phase_complete(
+            backend, context, _NOTEBOOK_DELETES_QUEUED_STEP, done
+        )
         return
     lock_suffix = " FOR UPDATE" if backend.is_postgres else ""
     excluded = ",".join("?" for _ in _NOTEBOOK_DELETE_CAS_STATUSES)
@@ -5665,7 +5764,37 @@ def _apply_notebook_deletions(
             "by this environment's own delete-job runner, so the application "
             "must be running (or be started) for them to disappear"
         )
+    _record_phase_complete(
+        backend,
+        context,
+        _NOTEBOOK_DELETES_QUEUED_STEP,
+        done,
+        rows=len(context.ledger.notebooks_deleted),
+    )
     _report_folded_deletes(context)
+
+
+def _record_phase_complete(
+    backend: _Backend,
+    context: _Context,
+    step: str,
+    done: set[str],
+    *,
+    rows: int = 0,
+) -> None:
+    """Write one whole-phase completion marker in a transaction of its own.
+
+    Same shape as ``_FILES_PHASE``: not a table, never compared against one,
+    and idempotent -- a resumed run that finds the marker already there skips
+    the write rather than re-stamping it, so the recorded ``completed_at``
+    keeps saying when the phase actually finished."""
+    if step in done:
+        return
+    with backend.write() as conn:
+        _record_progress(
+            backend, conn, context, step, rows, datetime.now(timezone.utc)
+        )
+    done.add(step)
 
 
 def _report_folded_deletes(context: _Context) -> None:
