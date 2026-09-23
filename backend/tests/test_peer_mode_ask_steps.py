@@ -360,16 +360,23 @@ class _LexicalProbe:
     def _connect(self):
         return contextlib.nullcontext(None)
 
+    _keyword_chunk_candidates_one = (
+        CandidateRetrievalService._keyword_chunk_candidates_one
+    )
+
     def _chunk_fts_hits(self, db, notebook_id, needle, *, k, allowed_source_ids,
                         corpus_langs):
         self.calls.append("chunk_fts")
         return []
 
 
-def test_keyword_arm_is_closed_in_peer_mode():
-    """这条臂是 active-only 的(每次 ask 一次,不随联邦腿分叉),对等模式下它等于
-    凭空给命名锚点多一条别人没有的腿。"""
+def test_keyword_arm_switch_off_closes_it_in_peer_mode():
+    """这条臂在对等模式下已经逐库联邦化(合同见 ``test_peer_mode_keyword_arm.py``);
+    这里只钉回退开关 ``GLOBAL_ASK_KEYWORD_ARM_ENABLED=false``:它一关,对等模式回到
+    「整条不跑」——只查名义 active 等于凭空给命名锚点多一条别人没有的腿,所以回退
+    形状是零查询而不是单库那一次。对照臂:同一个开关不影响单库路径。"""
     probe = _LexicalProbe()
+    probe.settings.global_ask_keyword_arm_enabled = False
 
     with _peer_scope():
         assert CandidateRetrievalService._keyword_chunk_candidates(

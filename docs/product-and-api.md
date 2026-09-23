@@ -258,13 +258,27 @@ A global question has no "current notebook": the notebook handed to the engine i
 the resolved scope, a naming anchor with no retrieval privilege, and EVERY citation names its owning notebook
 (the first library included). Channels defined as "…for the current library" are therefore closed for the whole
 run, disclosed rather than silently degraded: the notebook's hidden private Memory projection, concept roaming
-(PPR), selected-source graph activation, the `index_required` call to action, the keyword recall supplement,
+(PPR), selected-source graph activation, the `index_required` call to action,
 the exact-identifier lookup arm, and `reasoning`'s raw-element search arm (including the automatic top-up when
 every deterministic channel came back empty); the generated-question recall supplement is off on federated legs
 too. The spreadsheet analysis arm covers the first library only and is narrowed — never widened — by the
 per-notebook source ceiling. Community/comparison sibling entities stay available and cover every participant;
 `chunk` mode's comparison sub-queries rotate across libraries under a total cap, and single-notebook behaviour
 is unchanged. Federating these channels is registered in `fangan_todo.md` pending a product decision.
+
+The bilingual keyword recall supplement is federated instead of closed (each semantic leg already carries its
+own full-text search over the sub-query text; this is the separate keyword-string arm used by `chunk` mode and by
+`reasoning`'s first-round seed). It runs the single-notebook keyword search once per participant, on the same
+shared executor, fair window, phase deadline and per-notebook budget as the semantic legs, each under that
+notebook's own frozen source ceiling; a notebook with no visible source issues no query. Every notebook keeps the
+single-notebook recall window (`CHUNK_RECALL`); the merge interleaves the notebooks' hits round-robin in each
+notebook's own keyword-score order (every notebook's first, then every second, …), keeps the first occurrence of a
+passage, and stops at `GLOBAL_ASK_CANDIDATE_LIMIT`, so no notebook fills the list by volume. A keyword leg that
+times out or fails only leaves that notebook without keyword hits: it never enters the searched/skipped receipts
+(coverage is decided by the semantic legs alone), and a timeout raises no failure banner. The run emits one
+content-free `ask_stage` event, `stage: "global_keyword_arm"`, with participant, notebooks-with-hits, merged,
+failed-notebook counts and latency. `GLOBAL_ASK_KEYWORD_ARM_ENABLED` (default `true`) is the rollback switch:
+`false` closes the arm for global runs again; single-notebook asks never read it.
 
 Authenticated HTTP routes live under `/api/global-ask`: `POST /ask` returns a pollable task and accepts
 `replaces_job_id` ("edit and re-send": it may only name the conversation's **newest** job while that job is

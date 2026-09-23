@@ -4006,31 +4006,99 @@ class CandidateRetrievalService(_RetrievalState):
         never the question-language sub_queries — is still retrieved. fail-open:
         FTS/hydrate errors (e.g. legacy lib missing chunks_fts) → [].
 
-        PEER mode returns ``[]``: this arm is ACTIVE-ONLY (one ``chunk_fts_search``
-        against the notebook it is handed, called once per ask rather than per
-        federated leg), so in a run that answers for a set it would hand the
-        nominal active — a naming anchor the user never singled out — a second
-        recall leg none of its peers has.  Federating it is registered in
-        ``fangan_todo.md``; until then the honest behavior is no leg at all."""
-        from app.services.retrieval import (
-            RetrievalSupport, add_chunk_supports, score_chunks,
-        )
+        PEER mode federates it instead: the nominal active is a naming anchor
+        the user never singled out, so searching only it would hand it a
+        second recall leg none of its peers has.  Each participant gets the
+        SAME single-library search below, under its own frozen ceiling, on the
+        semantic legs' fan-out (``chunk_federation
+        .federated_keyword_chunk_candidates``, which also owns the per-library
+        interleave and the ``GLOBAL_ASK_CANDIDATE_LIMIT`` cap).  Its failures
+        never reach the coverage receipts.  ``GLOBAL_ASK_KEYWORD_ARM_ENABLED=
+        false`` restores the old peer-mode ``[]``; the non-peer path never
+        reads that switch."""
         if federated_ask_active():
-            return []
+            if not self.settings.global_ask_keyword_arm_enabled:
+                return []
+            needle = (keywords or "").strip()
+            if not needle:
+                return []
+            from app.services.chunk_federation import (
+                federated_keyword_chunk_candidates,
+            )
+
+            return federated_keyword_chunk_candidates(
+                self, notebook_id, needle,
+                self._peer_keyword_leg(needle, recall or self.settings.chunk_recall),
+            )
         needle = (keywords or "").strip()
         if not needle:
             return []
         recall = recall or self.settings.chunk_recall
         from app.services.source_scope import scoped_allowed_source_ids
 
-        allowed_source_ids = scoped_allowed_source_ids(notebook_id)
-        # This method is the whole keyword arm's one call per ask (see the
-        # docstring above), so the drift probe is genuinely taken once here —
-        # not memoised anywhere, just read fresh for this one call and used
-        # only for the two lexical arms' routing below (see
-        # ``_lexical_gate_source_scoped``; the source predicate itself is
-        # still pushed down unconditionally regardless of this verdict).
-        drifted = _lexical_gate_drift_probe(self, notebook_id)
+        return self._keyword_chunk_candidates_one(
+            notebook_id, needle, recall,
+            allowed_source_ids=scoped_allowed_source_ids(notebook_id),
+        )
+
+    def _peer_keyword_leg(self, needle: str, recall: int):
+        """One library's keyword leg for the peer-mode fan-out.
+
+        Runs inside the federated task's own ``Context``.  The ceiling is that
+        library's frozen per-notebook ceiling intersected with the live visible
+        list ``_federated_tasks`` enumerated -- the same derivation the
+        semantic leg's ``_chunk_source_ceiling`` makes -- and a library with no
+        visible source issues no query at all.  The drift verdict is the one
+        the task table probed once for the arm (``_CHUNK_ARM_DRIFTED``), as the
+        semantic leg reads it, so there is no per-library probe.
+        """
+        from app.services.source_scope import scoped_allowed_source_ids
+
+        def _leg(notebook_id: str, visible) -> list:
+            allowed = scoped_allowed_source_ids(notebook_id, visible)
+            if allowed is not None and not allowed:
+                return []
+            return self._keyword_chunk_candidates_one(
+                notebook_id, needle, recall,
+                allowed_source_ids=allowed,
+                drifted=_CHUNK_ARM_DRIFTED.get(),
+                federated=True,
+            )
+
+        return _leg
+
+    def _keyword_chunk_candidates_one(
+        self, notebook_id: str, needle: str, recall: int, *,
+        allowed_source_ids, drifted: Optional[bool] = None,
+        federated: bool = False,
+    ):
+        """The keyword search against ONE library -- the pre-federation body.
+
+        The non-peer path calls it with exactly its historical inputs
+        (``drifted=None`` -> one fresh probe, ``federated=False`` -> every
+        failure swallowed here), so that path is unchanged.
+
+        ``federated=True`` (a peer-mode leg) changes only where a failure
+        ends: it is re-raised so the fan-out's ``_run_one`` records the leg as
+        failed and emits its skip event.  A budget/lease expiry
+        (``classify_read_failure``) and a lexical timeout are NOT sent to
+        ``_note_model_error`` -- a timed-out supplementary leg is no banner,
+        exactly as ``ChunkLexicalSearchTimeout`` is none on the single path --
+        while an unclassified error keeps the single path's
+        ``chunk_keyword_union`` note.
+        """
+        from app.services.retrieval import (
+            RetrievalSupport, add_chunk_supports, score_chunks,
+        )
+        # The keyword arm is one call per ask (see
+        # ``_keyword_chunk_candidates``), so on the single path the drift probe
+        # is genuinely taken once here — not memoised anywhere, just read
+        # fresh for this one call and used only for the two lexical arms'
+        # routing below (see ``_lexical_gate_source_scoped``; the source
+        # predicate itself is still pushed down unconditionally regardless of
+        # this verdict).  A peer leg hands in the arm's one probe instead.
+        if drifted is None:
+            drifted = _lexical_gate_drift_probe(self, notebook_id)
         source_restricted = self._lexical_gate_source_scoped(
             allowed_source_ids, notebook_id, drifted=drifted
         )
@@ -4062,8 +4130,18 @@ class CandidateRetrievalService(_RetrievalState):
         except ChunkLexicalSearchTimeout:
             # 同 `_retrieve_chunks_ann` 的词法臂:超时已由 `_chunk_fts_hits` 记事件并
             # 关闭本轮词法臂,不是模型故障,不上横幅。
+            if federated:
+                raise
             return []
         except Exception as exc:  # noqa: BLE001 — lexical补召回失败绝不拖垮检索
+            if federated:
+                from app.domain.retrieval_control import RetrievalControlError
+                from app.repositories.read_budget import classify_read_failure
+
+                if not isinstance(exc, (AskCancelled, RetrievalControlError)) \
+                        and classify_read_failure(exc) is None:
+                    self._note_model_error("chunk_keyword_union", "", exc)
+                raise
             self._note_model_error("chunk_keyword_union", "", exc)
             return []
     def _exact_lookup_chunks(self, notebook_id: str, query: str):
@@ -4079,10 +4157,11 @@ class CandidateRetrievalService(_RetrievalState):
         `_keyword_chunk_candidates`, and fail-open for the same reason: a
         supplementary recall channel must never take the whole retrieval down.
 
-        ACTIVE-ONLY, and therefore closed in PEER mode for the same reason as
-        `_keyword_chunk_candidates`: an identifier lookup that only ever reaches
-        the nominal active would give it a second recall leg its peers do not
-        have, and `exact_section_reserve` would then reserve budget seats for
+        ACTIVE-ONLY, and therefore closed in PEER mode (unlike
+        `_keyword_chunk_candidates`, which is federated there; this arm's
+        federation is still registered in `fangan_todo.md`): an identifier
+        lookup that only ever reaches the nominal active would give it a second
+        recall leg its peers do not have, and `exact_section_reserve` would then reserve budget seats for
         that one library's sections.  With `[]` here the reserve rule becomes
         inert on its own (its `exact_ids` set is empty), so no second gate is
         needed downstream.
