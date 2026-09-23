@@ -742,6 +742,8 @@ def test_import_human_output_incremental_prints_mode_base_and_delete_counts(
         deletes_applied=3,
         deletes_absent=1,
         deletes_orphan_skipped=2,
+        deletes_folded_into_notebook_deletion=4,
+        deletes_skipped_for_copying=5,
         notebooks_deleted=("nb-9",),
         notebooks_delete_skipped=("nb-8",),
     )
@@ -750,7 +752,10 @@ def test_import_human_output_incremental_prints_mode_base_and_delete_counts(
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "模式: incremental，base=pkg-base" in out
-    assert "删除重放: 应用 3、目标端已不存在 1、孤儿跳过 2" in out
+    assert (
+        "删除重放: 应用 3、目标端已不存在 1、孤儿跳过 2、"
+        "随笔记本删除作业整本清理 4、目标端正在拷贝、本次未动 5" in out
+    )
     assert "已排队删除的笔记本: nb-9（由目标端应用的删除作业完成清理）" in out
     assert "跳过删除的笔记本" in out and "nb-8" in out
 
@@ -768,7 +773,10 @@ def test_import_human_output_incremental_empty_window_still_prints_zero_counts(
     exit_code = cli.main(["import", str(tmp_path / "pkg")])
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "删除重放: 应用 0、目标端已不存在 0、孤儿跳过 0" in out
+    assert (
+        "删除重放: 应用 0、目标端已不存在 0、孤儿跳过 0、"
+        "随笔记本删除作业整本清理 0、目标端正在拷贝、本次未动 0" in out
+    )
     assert "已排队删除的笔记本" not in out
     assert "跳过删除的笔记本" not in out
 
@@ -820,6 +828,8 @@ def test_import_json_includes_incremental_report_fields(tmp_path, monkeypatch, c
         deletes_applied=3,
         deletes_absent=1,
         deletes_orphan_skipped=2,
+        deletes_folded_into_notebook_deletion=4,
+        deletes_skipped_for_copying=5,
         notebooks_deleted=("nb-9",),
         notebooks_delete_skipped=("nb-8",),
     )
@@ -832,6 +842,8 @@ def test_import_json_includes_incremental_report_fields(tmp_path, monkeypatch, c
     assert payload["deletes_applied"] == 3
     assert payload["deletes_absent"] == 1
     assert payload["deletes_orphan_skipped"] == 2
+    assert payload["deletes_folded_into_notebook_deletion"] == 4
+    assert payload["deletes_skipped_for_copying"] == 5
     assert payload["notebooks_deleted"] == ["nb-9"]
     assert payload["notebooks_delete_skipped"] == ["nb-8"]
 
