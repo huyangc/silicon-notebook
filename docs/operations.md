@@ -1039,13 +1039,25 @@ check `build_scale_index.py` runs is applied: if the checkout doing the import i
 from the live database, nothing is built, because an index built by the wrong revision is quietly
 wrong and would be published over a healthy one.
 
-Each candidate is then judged **by the service's own criteria**, not by a second set of thresholds
-defined in the sync tooling: it is rebuilt only when `scale-index/status` reports `unindexed`,
-`suggested` or `stale` (the gate `maybe_auto_index` applies online); a notebook under the
-whole-notebook copy limits in both bytes and rows is skipped as `copyable_small`, because that is
-this codebase's definition of "small enough not to need a scale index"; and full-versus-fold is
-the same `auto` resolution an online build uses. Builds run one notebook at a time under the
-ordinary cross-process per-notebook claim.
+Each candidate is then judged by exactly one question, and it is **the service's own**, not a
+second set of thresholds defined in the sync tooling: `scale-index/status`'s `eligible` — does
+this notebook want a scale index at all? (Base tier, an artifact already on disk, mounted by
+another notebook, over the chunk-suggest threshold, or simply too big to be copied whole. That
+last clause is why a small library needs no separate rule; it is reported as
+`skipped:not_eligible`.)
+
+Every eligible notebook is then rebuilt **in full**. The `state` gate and the fold/full `auto`
+resolution the online path uses are deliberately not applied here, because both assume the only
+thing that happened since the last build is content being *appended*: the delta is computed as
+"source ids not in the published manifest", so a fold is correct exactly while the existing
+artifact is still a subset of the notebook's content. A sync package breaks that assumption — it
+replaces rows that are already indexed (a source's chunks and knowledge upserted in place, or a
+source deleted outright). After such an import the delta can be empty while the artifact is wrong:
+`state` reads `indexed` and a fold returns the old manifest untouched, so either gate would leave
+a stale index published. A full rebuild is the only mode whose correctness does not depend on that
+assumption. The cost is real — a large mirror rebuilt on every import — and it is the operator's
+to schedule: `--rebuild-scale skip` hands it back, to be run off-peak with `build_scale_index.py`.
+Builds run one notebook at a time under the ordinary cross-process per-notebook claim.
 
 Two of those outcomes are refusals rather than problems, and neither raises a warning. A notebook
 the live service is already building elsewhere holds the claim, so the offline builder never gets
@@ -1061,10 +1073,10 @@ this starts, so **a rebuild failure cannot change the import's result** — `syn
 `build_scale_index.py` command to retry by hand. Ctrl-C is absorbed the same way: the remaining
 notebooks are reported as `skipped:interrupted` and the import is still reported as done, so do
 not re-run the package. The human summary is printed **before** the rebuild starts (it can run for
-hours), and the scale section follows it: `scale 索引: 重建 N、折叠 N、跳过 N、失败 N`, then one
+hours), and the scale section follows it: `scale 索引: 重建 N、跳过 N、失败 N`, then one
 line per skipped or failed notebook (capped at 20, as in the mirror survey, with "另有 N 本未列出"),
 then the rebuild's own warnings under `scale 重建警告:`. `--json` carries `scale_rebuild` (notebook
-id → `built`/`folded`/`skipped:<why>`/`failed:<ExceptionClass>`; the failure form deliberately
+id → `built`/`skipped:<why>`/`failed:<ExceptionClass>`; the failure form deliberately
 carries only the exception class, because a build failure's text can quote a storage path),
 `scale_rebuild_mode` (the `--rebuild-scale` value used, so an empty map is never ambiguous) and
 `scale_rebuild_note`. Those three are added by the CLI and are **not** part of

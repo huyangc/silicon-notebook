@@ -6,7 +6,7 @@ the target's rows moved but its published scale index did not, so a large
 mirrored library keeps serving a stale artifact until somebody rebuilds it. That
 used to be a documented manual step; this module is the automation §6/§8 promised.
 
-Three properties shape everything below.
+Four properties shape everything below.
 
 1. **The import already finished.** ``import_package`` closed the ``sync_imports``
    row as ``done`` and wrote ``report_json`` before this module runs, so nothing
@@ -14,16 +14,32 @@ Three properties shape everything below.
    never raised, and ``sync import`` keeps exit code 0. Nothing here writes back
    to ``sync_imports`` either -- "done means done" stays literally true, and the
    rebuild's receipt lives only in the CLI's output/``--json``.
-2. **The eligibility verdict is not re-derived here.** Which notebooks want an
-   index (``state``), whether one is small enough that it needs no scale index
-   at all (``copyable`` -- the notebook fits under the whole-notebook copy
-   limits in bytes and rows, which is this codebase's definition of "small",
-   NOT a statement about a copy being in flight), and fold-versus-full
-   (``_resolve_scale_mode(..., "auto")``) all come from the same calls the
-   ONLINE automatic path -- ``ScaleArtifactRuntime.maybe_auto_index`` -- makes.
-   Copying its thresholds instead would make this a second, drifting definition
-   of "large enough to index".
-3. **It has to be synchronous.** ``maybe_auto_index`` only enqueues onto an
+2. **"Does this notebook want a scale index at all" is not re-derived here.**
+   That question is ``ScaleArtifactRuntime.status()["eligible"]``, which is the
+   single definition the online path uses -- base tier, an artifact already on
+   disk, mounted by another notebook, over the chunk-suggest threshold, or NOT
+   ``copyable`` (i.e. too big to be copied whole, this codebase's spelling of
+   "large"). Restating any of those thresholds here would create a second,
+   drifting definition.
+3. **Every eligible notebook is rebuilt in FULL.** This module deliberately
+   does NOT ask ``_resolve_scale_mode(..., "auto")``, and deliberately does not
+   gate on ``state``. Both are tuned for the ONLINE world, where the only thing
+   that happens between builds is content being APPENDED: ``_index_delta``
+   answers with the source ids that are not in the published manifest's
+   ``watermark_sources``, so a fold is correct exactly while the existing
+   artifact is still a subset of the notebook's content. A sync package breaks
+   that premise -- it carries REPLACEMENT semantics for rows that are already
+   indexed (a source's chunks and knowledge upserted in place, or a source
+   deleted outright). After such an import the delta can be empty while the
+   artifact is wrong: ``state`` reads ``indexed`` and a fold returns the old
+   manifest untouched, so either gate would leave a stale index published --
+   and a fold with new sources present would additionally stamp the current
+   version onto an artifact still holding superseded content. A full rebuild is
+   the only mode whose correctness does not depend on that premise, and it goes
+   through the very same ``build_scale_index`` the online path calls. The cost
+   (a daily full rebuild on a large mirror) is real and is the operator's to
+   schedule: ``--rebuild-scale skip`` hands it back to them.
+4. **It has to be synchronous.** ``maybe_auto_index`` only enqueues onto an
    in-process scheduler, which dies with the CLI. So this drives
    ``scale_build_cli.run_build`` directly, the same offline builder an operator
    would have run by hand, complete with its cross-process per-notebook claim.
@@ -57,15 +73,17 @@ REBUILD_AUTO = "auto"
 REBUILD_SKIP = "skip"
 REBUILD_CHOICES = (REBUILD_AUTO, REBUILD_SKIP)
 
-# The state gate, verbatim from ``ScaleArtifactRuntime.maybe_auto_index``.
-_REBUILDABLE_STATES = ("unindexed", "suggested", "stale")
+# The only mode this module ever builds in; see property 3 in the module
+# docstring for why a fold is not sound after an import.
+_FULL = "full"
 
 SKIPPED_SQLITE = "skipped:sqlite_backend"
 SKIPPED_UNKNOWN_NOTEBOOK = "skipped:unknown_notebook"
-# Under the whole-notebook copy limits (bytes AND rows): small enough that
-# retrieval reads it directly and a scale index would buy nothing. Named for
-# the predicate, because "copyable" reads like "a copy is running" and is not.
-SKIPPED_COPYABLE_SMALL = "skipped:copyable_small"
+# ``status()["eligible"]`` said no: the notebook does not want a scale index at
+# all. That one predicate already folds in every reason -- small enough to be
+# copied whole (NOT ``copyable`` is its last clause), below the chunk-suggest
+# threshold, not mounted, no artifact on disk, not base tier.
+SKIPPED_NOT_ELIGIBLE = "skipped:not_eligible"
 # The builder refused before doing anything: the notebook is not live as far as
 # ``require_write_admission`` is concerned (mid-copy, mid-import, being deleted)
 # or its indexing pipeline is unavailable. Not this pass's business to fix.
@@ -94,8 +112,9 @@ INTERRUPTED_WARNING = (
 class ScaleRebuildResult:
     """What the rebuild pass did, per notebook, plus whole-run commentary.
 
-    ``outcomes`` maps notebook id to one of ``built``/``folded``/``skipped:<why>``/
-    ``failed:<ExceptionClass>``. The failure form deliberately carries the
+    ``outcomes`` maps notebook id to one of ``built``/``skipped:<why>``/
+    ``failed:<ExceptionClass>``. There is no ``folded``: this module only ever
+    builds in full (module docstring, property 3). The failure form carries the
     exception's CLASS and not its message: a build failure's text can quote a
     storage path or a database URL, and this receipt is printed and serialized.
     The actionable half goes into ``warnings`` as a fixed sentence instead.
@@ -112,7 +131,7 @@ class ScaleRebuildResult:
 
     @property
     def counts(self) -> dict[str, int]:
-        totals = {"built": 0, "folded": 0, "skipped": 0, "failed": 0}
+        totals = {"built": 0, "skipped": 0, "failed": 0}
         for outcome in self.outcomes.values():
             key = outcome.split(":", 1)[0]
             if key in totals:
@@ -254,27 +273,17 @@ def _rebuild_one(
         return SKIPPED_UNKNOWN_NOTEBOOK, ""
     except Exception as exc:  # noqa: BLE001 - one notebook never fails another
         return f"failed:{type(exc).__name__}", _rebuild_failed_warning(notebook_id)
-    state = str(status.get("state") or "")
-    if state not in _REBUILDABLE_STATES:
-        # Usually ``indexed``: nothing to do. ``building``/``queued`` can also
-        # appear, but do NOT rely on them to detect a live service's build --
-        # both read in-process sets, which are empty in a fresh CLI process.
-        # The cross-process claim is what actually answers that, and it is
-        # taken inside ``run_build`` (see ``SKIPPED_BUSY`` below).
-        return f"skipped:{state or 'unknown_state'}", ""
+    if not status.get("eligible"):
+        return SKIPPED_NOT_ELIGIBLE, ""
+    # NOT gated on ``state``. An import replaces rows that are already indexed,
+    # which ``state``'s append-only delta cannot see: a mirror whose content was
+    # rewritten in place still reads ``indexed`` while its published artifact
+    # describes the previous contents (module docstring, property 3). Nor is
+    # ``building``/``queued`` consulted -- those read in-process sets that are
+    # empty in a fresh CLI process. The cross-process claim inside ``run_build``
+    # is the real answer to "is somebody else building this" (``SKIPPED_BUSY``).
     try:
-        copy_stats = repository.notebook_copy_stats(notebook_id)
-    except KeyError:
-        return SKIPPED_UNKNOWN_NOTEBOOK, ""
-    except Exception as exc:  # noqa: BLE001 - one notebook never fails another
-        return f"failed:{type(exc).__name__}", _rebuild_failed_warning(notebook_id)
-    if bool(copy_stats["copyable"]):
-        # Under the whole-notebook copy limits: small, so no scale index is
-        # wanted. The same gate ``maybe_auto_index`` applies online.
-        return SKIPPED_COPYABLE_SMALL, ""
-    try:
-        mode = repository._resolve_scale_mode(notebook_id, REBUILD_AUTO)  # noqa: SLF001
-        build_cli.run_build(repository, notebook_id, mode=mode, report=report)
+        build_cli.run_build(repository, notebook_id, mode=_FULL, report=report)
     except build_cli.ScaleBuildCliBusy:
         # Another process holds this notebook's build claim -- normally the
         # live service's own scheduler, which reached it first. It is being
@@ -290,7 +299,7 @@ def _rebuild_one(
         return SKIPPED_REFUSED, ""
     except Exception as exc:  # noqa: BLE001 - one notebook never fails another
         return f"failed:{type(exc).__name__}", _rebuild_failed_warning(notebook_id)
-    return ("folded" if mode == "fold" else "built"), ""
+    return "built", ""
 
 
 def _rebuild_failed_warning(notebook_id: str) -> str:

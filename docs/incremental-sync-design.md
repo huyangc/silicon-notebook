@@ -245,10 +245,16 @@ users 不同步但导入时可能**创建**：见 §4。
   PR-2 的导入器本身仍然不触发重建（`import_.py` 不 import 服务层）；PR-4 T2 把它接在了
   **CLI 层**：`sync import` 在导入置 `done` 之后调
   `app.migration.sync.scale_rebuild.rebuild_after_import`，由它组合离线构建器
-  （`app.services.scale_build_cli`）逐本同步重建，默认 `--rebuild-scale auto`。判据整体复用
-  服务内自动建索引那一套（`state` 属于 `unindexed`/`suggested`/`stale`、`copyable` 为假即
-  「大到需要 scale 索引」、全量/折叠走同一个 `_resolve_scale_mode(…, "auto")`），不在同步侧
-  另立阈值；`notebooks_deleted` 与 `notebooks_delete_skipped` 里的本不参与。组装仓库之前先跑
+  （`app.services.scale_build_cli`）逐本同步重建，默认 `--rebuild-scale auto`。「要不要 scale
+  索引」只问服务内那一个 `status()["eligible"]`（它最后一条分支就是 `not copyable`，所以体量
+  小的本已经折在里面），不在同步侧另立阈值；需要的**一律全量重建**——包对已索引行是替换语义
+  （同一条 source 的 chunks/knowledge 被原地覆盖、或整条 source 被删），而 `_index_delta` 只认
+  已发布 manifest 的 `watermark_sources` 之外的**新** source id，所以这种改写后 delta 可能为空、
+  `state` 仍读作 `indexed`、fold 原样返回旧 manifest，两道闸都会把陈旧索引留在线上；有新 source
+  时 fold 还会把过时内容留在索引里并盖上当前版本号。因此不调 `_resolve_scale_mode`、不看
+  `state` 三态，离线全量与在线路径共用同一条 `build_scale_index`。大库每次导入全量重建的代价
+  由运维用 `--rebuild-scale skip` 自行挪到低峰时段。`notebooks_deleted` 与
+  `notebooks_delete_skipped` 里的本不参与。组装仓库之前先跑
   `verify_migration_ledger`，与 `scale_build_cli.main` 同序——checkout 与线上库差一个迁移时，
   建出来的索引是静默错误的，而它会原子换名顶掉一份健康索引。构建器在动手前拒绝（笔记本对
   `require_write_admission` 不算 live、或 indexing pipeline 不可用）记 `skipped:refused_by_builder`，

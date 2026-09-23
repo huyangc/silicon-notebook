@@ -5,8 +5,9 @@
 `verify_migration_ledger`/`open_scale_build_repository`/`run_build` 全部
 monkeypatch，只盯本任务自己的契约：
 
-- 判定口径来自服务内那一套（state 三态 + copyable 体量谓词 +
-  `_resolve_scale_mode("auto")`），不在 sync 侧另立阈值；
+- 「要不要 scale 索引」只问服务内那一个 `status()["eligible"]`，不在 sync 侧另立阈值；
+- 需要的**一律全量重建**：包对已索引行是替换语义，追加式 fold 的前提不成立
+  （codex #791 R1 P1）；
 - 组装仓库之前必须先过迁移 ledger 闸（与 `scale_build_cli.main` 同序）；
 - 「构建器拒绝」「别处正在建」是跳过不是失败，只有真失败才发警告；
 - 三种「本来就不该重建」的跑（`--dry-run`、`already_applied`、`--rebuild-scale skip`）
@@ -73,39 +74,48 @@ def _report(**overrides) -> ImportReport:
 
 
 class _FakeRepository:
-    """The reads the rebuild makes, and nothing else."""
+    """The one read the rebuild makes, and nothing else.
 
-    def __init__(
-        self,
-        *,
-        states,
-        copyable=(),
-        modes=None,
-        status_error=None,
-        copy_stats_error=None,
-    ):
-        self._states = dict(states)
-        self._copyable = set(copyable)
-        self._modes = dict(modes or {})
+    ``notebooks`` maps a notebook id to its ``eligible`` verdict; an id that is
+    absent raises ``KeyError``, the way ``scale_index_status`` does for a
+    notebook this environment does not have (live). ``states`` only fills the
+    ``state`` field so a test can prove it is NOT consulted.
+    """
+
+    def __init__(self, *, notebooks=None, states=None, status_error=None):
+        self._notebooks = dict(notebooks or {})
+        self._states = dict(states or {})
         self._status_error = dict(status_error or {})
-        self._copy_stats_error = dict(copy_stats_error or {})
         self.closed = False
 
     def scale_index_status(self, notebook_id: str) -> dict:
         if notebook_id in self._status_error:
             raise self._status_error[notebook_id]
-        if notebook_id not in self._states:
+        if notebook_id not in self._notebooks:
             raise KeyError(notebook_id)
-        return {"state": self._states[notebook_id], "exists": True}
+        return {
+            "eligible": self._notebooks[notebook_id],
+            "state": self._states.get(notebook_id, "stale"),
+            "exists": True,
+        }
 
-    def notebook_copy_stats(self, notebook_id: str) -> dict:
-        if notebook_id in self._copy_stats_error:
-            raise self._copy_stats_error[notebook_id]
-        return {"copyable": notebook_id in self._copyable}
+    def notebook_copy_stats(self, notebook_id: str) -> dict:  # pragma: no cover
+        raise AssertionError(
+            "copyable is already the last clause of eligible(); asking it "
+            "separately would be a second definition of 'large enough to index'"
+        )
 
     def _resolve_scale_mode(self, notebook_id: str, mode: str) -> str:
-        assert mode == "auto"
-        return self._modes.get(notebook_id, "full")
+        raise AssertionError(
+            "fold/full must NOT be resolved here: a package replaces rows that "
+            "are already indexed, so an append-only fold is unsound"
+        )
+
+
+def _eligible(*notebook_ids, **kwargs) -> _FakeRepository:
+    return _FakeRepository(
+        notebooks={notebook_id: True for notebook_id in notebook_ids}, **kwargs
+    )
 
 
 def _install(
@@ -209,8 +219,7 @@ def test_candidates_preserve_order_and_deduplicate():
 
 def test_copying_notebooks_never_reach_the_builder(tmp_path, monkeypatch, capsys):
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(states={"nb-1": "stale", "nb-2": "stale"})
-    rig = _install(monkeypatch, repository)
+    rig = _install(monkeypatch, _eligible("nb-1", "nb-2"))
     exit_code = _run_import(
         tmp_path,
         monkeypatch,
@@ -228,57 +237,64 @@ def test_copying_notebooks_never_reach_the_builder(tmp_path, monkeypatch, capsys
 # ------------------------------------------------------------------ 判定口径
 
 
-def test_only_unindexed_suggested_and_stale_are_built(tmp_path, monkeypatch, capsys):
-    """三态来自 `ScaleArtifactRuntime.maybe_auto_index`；不在三态里的本一律不碰，
-    且跳过的理由按 state 原样记下来。"""
+def test_every_eligible_notebook_is_rebuilt_in_full(tmp_path, monkeypatch, capsys):
+    """codex #791 R1 P1：`state` 与 fold 都只对**新增**敏感。包对已索引行是替换
+    语义（同一 source 的 chunks/knowledge 被原地覆盖、或整条 source 被删），这种
+    改写后 delta 为空、`state` 仍是 `indexed`、fold 原样返回旧 manifest——两道闸
+    都会把一份陈旧索引留在线上。所以：eligible 的本一律全量重建，`state` 不参与
+    判定。"""
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(
+    repository = _eligible(
+        "nb-indexed",
+        "nb-stale",
+        "nb-unindexed",
         states={
-            "nb-unindexed": "unindexed",
-            "nb-suggested": "suggested",
-            "nb-stale": "stale",
             "nb-indexed": "indexed",
-            "nb-odd": "something-new",
-        }
+            "nb-stale": "stale",
+            "nb-unindexed": "unindexed",
+        },
     )
     rig = _install(monkeypatch, repository)
     exit_code = _run_import(
         tmp_path,
         monkeypatch,
-        _report(
-            notebooks=(
-                "nb-unindexed",
-                "nb-suggested",
-                "nb-stale",
-                "nb-indexed",
-                "nb-odd",
-            )
-        ),
+        _report(notebooks=("nb-indexed", "nb-stale", "nb-unindexed")),
         "--json",
     )
     assert exit_code == 0
-    assert sorted(notebook for notebook, _ in rig.builds) == [
-        "nb-stale",
-        "nb-suggested",
-        "nb-unindexed",
+    assert rig.builds == [
+        ("nb-indexed", "full"),
+        ("nb-stale", "full"),
+        ("nb-unindexed", "full"),
     ]
     payload = json.loads(capsys.readouterr().out)
     assert payload["scale_rebuild"] == {
-        "nb-indexed": "skipped:indexed",
-        "nb-odd": "skipped:something-new",
+        "nb-indexed": "built",
         "nb-stale": "built",
-        "nb-suggested": "built",
         "nb-unindexed": "built",
     }
 
 
-def test_small_notebook_is_left_alone(tmp_path, monkeypatch, capsys):
-    """`copyable` 是体量谓词（整本在字节数和行数上都低于拷贝上限），意思是
-    「小到不需要 scale 索引」，不是「正在深拷贝」——回执名字要说的就是这个。"""
+def test_the_mode_is_never_anything_but_full(tmp_path, monkeypatch, capsys):
+    """`_FakeRepository._resolve_scale_mode` 直接 assert 失败：这个模块不许再去
+    问 fold/full。"""
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(
-        states={"nb-1": "stale", "nb-2": "stale"}, copyable=("nb-2",)
+    rig = _install(monkeypatch, _eligible("nb-1"))
+    exit_code = _run_import(
+        tmp_path, monkeypatch, _report(notebooks=("nb-1",)), "--json"
     )
+    assert exit_code == 0
+    assert {mode for _, mode in rig.builds} == {"full"}
+    payload = json.loads(capsys.readouterr().out)
+    # 没有 "folded" 这个回执值了。
+    assert "folded" not in payload["scale_rebuild"].values()
+
+
+def test_ineligible_notebook_is_left_alone(tmp_path, monkeypatch, capsys):
+    """`eligible` 是服务内唯一那一份「这本要不要 scale 索引」的定义——它最后一条
+    分支就是 `not copyable`，所以体量小的本已经折在里面，不需要第二份口径。"""
+    _settings(tmp_path, monkeypatch)
+    repository = _FakeRepository(notebooks={"nb-1": True, "nb-2": False})
     rig = _install(monkeypatch, repository)
     exit_code = _run_import(
         tmp_path, monkeypatch, _report(notebooks=("nb-1", "nb-2")), "--json"
@@ -286,13 +302,13 @@ def test_small_notebook_is_left_alone(tmp_path, monkeypatch, capsys):
     assert exit_code == 0
     assert rig.builds == [("nb-1", "full")]
     payload = json.loads(capsys.readouterr().out)
-    assert payload["scale_rebuild"]["nb-2"] == "skipped:copyable_small"
+    assert payload["scale_rebuild"]["nb-2"] == "skipped:not_eligible"
+    assert payload["warnings"] == []
 
 
 def test_unknown_notebook_is_skipped_not_failed(tmp_path, monkeypatch, capsys):
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(states={"nb-1": "stale"})
-    rig = _install(monkeypatch, repository)
+    rig = _install(monkeypatch, _eligible("nb-1"))
     exit_code = _run_import(
         tmp_path, monkeypatch, _report(notebooks=("nb-1", "nb-gone")), "--json"
     )
@@ -303,42 +319,6 @@ def test_unknown_notebook_is_skipped_not_failed(tmp_path, monkeypatch, capsys):
     assert payload["warnings"] == []
 
 
-def test_copy_stats_keyerror_is_also_unknown_notebook(tmp_path, monkeypatch, capsys):
-    """两个读都可能在笔记本刚退场时抛 KeyError，含义相同，回执也该相同。"""
-    _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(
-        states={"nb-1": "stale"}, copy_stats_error={"nb-1": KeyError("nb-1")}
-    )
-    rig = _install(monkeypatch, repository)
-    exit_code = _run_import(
-        tmp_path, monkeypatch, _report(notebooks=("nb-1",)), "--json"
-    )
-    assert exit_code == 0
-    assert rig.builds == []
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["scale_rebuild"] == {"nb-1": "skipped:unknown_notebook"}
-    assert payload["warnings"] == []
-
-
-def test_fold_versus_full_comes_from_resolve_scale_mode(
-    tmp_path, monkeypatch, capsys
-):
-    """折叠条件不在 sync 侧重新发明：整个决定就是服务内自动路径用的那一个
-    `_resolve_scale_mode(nb, "auto")`。"""
-    _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(
-        states={"nb-1": "stale", "nb-2": "unindexed"}, modes={"nb-1": "fold"}
-    )
-    rig = _install(monkeypatch, repository)
-    exit_code = _run_import(
-        tmp_path, monkeypatch, _report(notebooks=("nb-1", "nb-2")), "--json"
-    )
-    assert exit_code == 0
-    assert rig.builds == [("nb-1", "fold"), ("nb-2", "full")]
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["scale_rebuild"] == {"nb-1": "folded", "nb-2": "built"}
-
-
 # --------------------------------------------------------------- 迁移 ledger
 
 
@@ -346,8 +326,7 @@ def test_ledger_is_verified_before_the_repository_is_composed(
     tmp_path, monkeypatch, capsys
 ):
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(states={"nb-1": "stale"})
-    rig = _install(monkeypatch, repository)
+    rig = _install(monkeypatch, _eligible("nb-1"))
     exit_code = _run_import(
         tmp_path, monkeypatch, _report(notebooks=("nb-1",)), "--json"
     )
@@ -364,10 +343,9 @@ def test_ledger_mismatch_refuses_before_composing_anything(
     ——而且会原子换名顶掉一份健康索引。`scale_build_cli.main` 为此在组装之前跑
     ledger 闸；自动路径不许绕过它。"""
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(states={"nb-1": "stale", "nb-2": "stale"})
     rig = _install(
         monkeypatch,
-        repository,
+        _eligible("nb-1", "nb-2"),
         ledger_error=scale_build_cli.ScaleBuildCliError("ledger mismatch"),
     )
     exit_code = _run_import(
@@ -392,12 +370,11 @@ def test_builder_refusal_is_a_skip_without_a_warning(tmp_path, monkeypatch, caps
     indexing pipeline 抛 `ScaleBuildCliError`：它在动手之前就拒绝了。运维手动
     重跑同一条命令也会被同样拒绝，所以不发警告。"""
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(states={"nb-1": "stale"})
 
     def refusing(repo, notebook_id, *, mode, report):
         raise scale_build_cli.ScaleBuildCliError(f"unknown notebook: {notebook_id}")
 
-    _install(monkeypatch, repository, run_build=refusing)
+    _install(monkeypatch, _eligible("nb-1"), run_build=refusing)
     exit_code = _run_import(
         tmp_path, monkeypatch, _report(notebooks=("nb-1",)), "--json"
     )
@@ -412,7 +389,6 @@ def test_another_builder_holding_the_claim_is_a_skip(tmp_path, monkeypatch, caps
     在线服务正在建的本一定走到这里才被发现——跨进程 claim 才是那个真答案。它
     说明系统在正常工作，不是重建出了问题。"""
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(states={"nb-1": "stale", "nb-2": "stale"})
 
     def busy_first(repo, notebook_id, *, mode, report):
         if notebook_id == "nb-1":
@@ -421,7 +397,7 @@ def test_another_builder_holding_the_claim_is_a_skip(tmp_path, monkeypatch, caps
             )
         return {"notebook_id": notebook_id, "mode": mode, "result": {}}
 
-    _install(monkeypatch, repository, run_build=busy_first)
+    _install(monkeypatch, _eligible("nb-1", "nb-2"), run_build=busy_first)
     exit_code = _run_import(
         tmp_path, monkeypatch, _report(notebooks=("nb-1", "nb-2")), "--json"
     )
@@ -448,7 +424,6 @@ def test_build_failure_keeps_exit_code_zero_and_records_the_class(
     """导入已经 done，重建失败不能把它变成失败的跑。报告只记异常类名——失败
     文本可能带存储路径或数据库 URL，而这份回执要被打印和序列化。"""
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(states={"nb-1": "stale", "nb-2": "stale"})
 
     def flaky(repo, notebook_id, *, mode, report):
         if notebook_id == "nb-1":
@@ -457,7 +432,7 @@ def test_build_failure_keeps_exit_code_zero_and_records_the_class(
             )
         return {"notebook_id": notebook_id, "mode": mode, "result": {}}
 
-    rig = _install(monkeypatch, repository, run_build=flaky)
+    rig = _install(monkeypatch, _eligible("nb-1", "nb-2"), run_build=flaky)
     exit_code = _run_import(
         tmp_path, monkeypatch, _report(notebooks=("nb-1", "nb-2")), "--json"
     )
@@ -477,8 +452,7 @@ def test_build_failure_keeps_exit_code_zero_and_records_the_class(
 
 def test_repository_open_failure_marks_every_candidate(tmp_path, monkeypatch, capsys):
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(states={"nb-1": "stale"})
-    _install(monkeypatch, repository, open_error=RuntimeError("no connection"))
+    _install(monkeypatch, _eligible("nb-1"), open_error=RuntimeError("no connection"))
     exit_code = _run_import(
         tmp_path, monkeypatch, _report(notebooks=("nb-1", "nb-2")), "--json"
     )
@@ -494,9 +468,8 @@ def test_status_read_failure_does_not_stop_the_next_notebook(
     tmp_path, monkeypatch, capsys
 ):
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(
-        states={"nb-1": "stale", "nb-2": "stale"},
-        status_error={"nb-1": RuntimeError("read timeout")},
+    repository = _eligible(
+        "nb-1", "nb-2", status_error={"nb-1": RuntimeError("read timeout")}
     )
     rig = _install(monkeypatch, repository)
     exit_code = _run_import(
@@ -515,16 +488,15 @@ def test_ctrl_c_stops_building_without_failing_the_import(
     skipped:interrupted，但 `sync import` 仍然退出 0 并打出导入摘要——导入在这
     一步开始之前就已经提交，报成中断会把运维推去重跑一个已经应用过的包。"""
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(
-        states={"nb-1": "stale", "nb-2": "stale", "nb-3": "stale"}
-    )
 
     def interrupted(repo, notebook_id, *, mode, report):
         if notebook_id == "nb-2":
             raise KeyboardInterrupt
         return {"notebook_id": notebook_id, "mode": mode, "result": {}}
 
-    rig = _install(monkeypatch, repository, run_build=interrupted)
+    rig = _install(
+        monkeypatch, _eligible("nb-1", "nb-2", "nb-3"), run_build=interrupted
+    )
     exit_code = _run_import(
         tmp_path, monkeypatch, _report(notebooks=("nb-1", "nb-2", "nb-3")), "--json"
     )
@@ -546,15 +518,14 @@ def test_ctrl_c_while_composing_the_repository_is_also_absorbed(
     """组装（`prime_extension_admission`）和收尾各自是秒级真实墙钟；Ctrl-C 落在
     那里曾经会穿到 `main`，把一次已提交的导入报成 interrupted / 退出 2。"""
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(states={"nb-1": "stale"})
-    _install(monkeypatch, repository, open_error=KeyboardInterrupt())
+    _install(monkeypatch, _eligible("nb-1"), open_error=KeyboardInterrupt())
     exit_code = _run_import(
         tmp_path, monkeypatch, _report(notebooks=("nb-1", "nb-2"), files_copied=7)
     )
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "文件数: 7" in out
-    assert "scale 索引: 重建 0、折叠 0、跳过 2、失败 0" in out
+    assert "scale 索引: 重建 0、跳过 2、失败 0" in out
     assert "  nb-1: skipped:interrupted" in out
     assert "  nb-2: skipped:interrupted" in out
 
@@ -572,8 +543,7 @@ def test_ctrl_c_escaping_the_pass_still_yields_a_report():
 
 def test_dry_run_never_touches_the_builder(tmp_path, monkeypatch, capsys):
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(states={"nb-1": "stale"})
-    rig = _install(monkeypatch, repository)
+    rig = _install(monkeypatch, _eligible("nb-1"))
     exit_code = _run_import(
         tmp_path,
         monkeypatch,
@@ -588,8 +558,7 @@ def test_dry_run_never_touches_the_builder(tmp_path, monkeypatch, capsys):
 
 def test_already_applied_never_touches_the_builder(tmp_path, monkeypatch, capsys):
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(states={"nb-1": "stale"})
-    rig = _install(monkeypatch, repository)
+    rig = _install(monkeypatch, _eligible("nb-1"))
     exit_code = _run_import(
         tmp_path, monkeypatch, _report(notebooks=("nb-1",), already_applied=True)
     )
@@ -601,8 +570,7 @@ def test_already_applied_never_touches_the_builder(tmp_path, monkeypatch, capsys
 
 def test_rebuild_scale_skip_never_touches_the_builder(tmp_path, monkeypatch, capsys):
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(states={"nb-1": "stale"})
-    rig = _install(monkeypatch, repository)
+    rig = _install(monkeypatch, _eligible("nb-1"))
     exit_code = _run_import(
         tmp_path,
         monkeypatch,
@@ -622,8 +590,7 @@ def test_package_without_notebooks_prints_no_scale_section(
     tmp_path, monkeypatch, capsys
 ):
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(states={})
-    rig = _install(monkeypatch, repository)
+    rig = _install(monkeypatch, _eligible())
     exit_code = _run_import(tmp_path, monkeypatch, _report())
     assert exit_code == 0
     assert rig.builds == []
@@ -639,8 +606,7 @@ def test_sqlite_backend_skips_without_opening_a_builder(
     """SQLite 没有跨进程建索引 claim（`scale_build_cli.require_postgres` 的理由），
     所以离线构建器根本不可用。这是「跳过」不是「失败」。"""
     _settings(tmp_path, monkeypatch, postgres=False)
-    repository = _FakeRepository(states={"nb-1": "stale"})
-    rig = _install(monkeypatch, repository)
+    rig = _install(monkeypatch, _eligible("nb-1"))
     exit_code = _run_import(tmp_path, monkeypatch, _report(notebooks=("nb-1",)))
     assert exit_code == 0
     assert rig.builds == []
@@ -648,13 +614,13 @@ def test_sqlite_backend_skips_without_opening_a_builder(
     assert rig.ledger_checks == []
     out = capsys.readouterr().out
     assert "SQLite 后端不支持离线 scale 构建" in out
-    assert "scale 索引: 重建 0、折叠 0、跳过 1、失败 0" in out
+    assert "scale 索引: 重建 0、跳过 1、失败 0" in out
     assert "  nb-1: skipped:sqlite_backend" in out
 
 
 def test_sqlite_backend_json_records_every_notebook(tmp_path, monkeypatch, capsys):
     _settings(tmp_path, monkeypatch, postgres=False)
-    _install(monkeypatch, _FakeRepository(states={}))
+    _install(monkeypatch, _eligible())
     exit_code = _run_import(
         tmp_path, monkeypatch, _report(notebooks=("nb-1", "nb-2")), "--json"
     )
@@ -676,13 +642,7 @@ def test_human_summary_counts_and_lists_only_the_unfinished(
     """成功的本不逐行刷屏；跳过和失败的逐本一行，因为那是运维要跟进的。"""
     _settings(tmp_path, monkeypatch)
     repository = _FakeRepository(
-        states={
-            "nb-built": "unindexed",
-            "nb-folded": "stale",
-            "nb-skipped": "indexed",
-            "nb-failed": "stale",
-        },
-        modes={"nb-folded": "fold"},
+        notebooks={"nb-built": True, "nb-skipped": False, "nb-failed": True}
     )
 
     def flaky(repo, notebook_id, *, mode, report):
@@ -695,17 +655,15 @@ def test_human_summary_counts_and_lists_only_the_unfinished(
         tmp_path,
         monkeypatch,
         _report(
-            notebooks=("nb-built", "nb-folded", "nb-skipped", "nb-failed"),
-            files_copied=3,
+            notebooks=("nb-built", "nb-skipped", "nb-failed"), files_copied=3
         ),
     )
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "scale 索引: 重建 1、折叠 1、跳过 1、失败 1" in out
-    assert "  nb-skipped: skipped:indexed" in out
+    assert "scale 索引: 重建 1、跳过 1、失败 1" in out
+    assert "  nb-skipped: skipped:not_eligible" in out
     assert "  nb-failed: failed:RuntimeError" in out
     assert "nb-built:" not in out
-    assert "nb-folded:" not in out
 
 
 def test_import_summary_is_printed_before_the_rebuild_starts(
@@ -714,14 +672,13 @@ def test_import_summary_is_printed_before_the_rebuild_starts(
     """重建可能跑几个小时。摘要必须先落地，否则运维对着一个不动的屏幕不知道
     导入到底成没成。"""
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(states={"nb-1": "stale"})
     seen_at_build_time: list[str] = []
 
     def peeking(repo, notebook_id, *, mode, report):
         seen_at_build_time.append(capsys.readouterr().out)
         return {"notebook_id": notebook_id, "mode": mode, "result": {}}
 
-    _install(monkeypatch, repository, run_build=peeking)
+    _install(monkeypatch, _eligible("nb-1"), run_build=peeking)
     exit_code = _run_import(
         tmp_path, monkeypatch, _report(notebooks=("nb-1",), files_copied=3)
     )
@@ -739,14 +696,14 @@ def test_detail_lines_are_capped_like_the_mirror_section(
     _settings(tmp_path, monkeypatch)
     notebooks = tuple(f"nb-{index:03d}" for index in range(25))
     repository = _FakeRepository(
-        states={notebook_id: "indexed" for notebook_id in notebooks}
+        notebooks={notebook_id: False for notebook_id in notebooks}
     )
     _install(monkeypatch, repository)
     exit_code = _run_import(tmp_path, monkeypatch, _report(notebooks=notebooks))
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "scale 索引: 重建 0、折叠 0、跳过 25、失败 0" in out
-    assert out.count(": skipped:indexed") == 20
+    assert "scale 索引: 重建 0、跳过 25、失败 0" in out
+    assert out.count(": skipped:not_eligible") == 20
     assert "另有 5 本未列出" in out
 
 
@@ -756,12 +713,11 @@ def test_rebuild_warnings_are_their_own_section_after_the_import_summary(
     """导入自己的警告和重建的警告分开成段：后者是导入完成之后才产生的，混进
     前者会让人以为导入本身出了问题。"""
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(states={"nb-1": "stale"})
 
     def failing(repo, notebook_id, *, mode, report):
         raise RuntimeError("boom")
 
-    _install(monkeypatch, repository, run_build=failing)
+    _install(monkeypatch, _eligible("nb-1"), run_build=failing)
     exit_code = _run_import(
         tmp_path,
         monkeypatch,
@@ -778,8 +734,7 @@ def test_rebuild_warnings_are_their_own_section_after_the_import_summary(
 def test_build_stage_lines_go_to_stderr_not_stdout(tmp_path, monkeypatch, capsys):
     """`--json` 的 stdout 必须只有那一个 JSON 对象。"""
     _settings(tmp_path, monkeypatch)
-    repository = _FakeRepository(states={"nb-1": "stale"})
-    _install(monkeypatch, repository)
+    _install(monkeypatch, _eligible("nb-1"))
     exit_code = _run_import(
         tmp_path, monkeypatch, _report(notebooks=("nb-1",)), "--json"
     )
@@ -797,14 +752,14 @@ def test_build_settings_carry_the_offline_statement_timeout(tmp_path, monkeypatc
     @contextmanager
     def fake_open(build_settings):
         seen["timeout"] = build_settings.postgres_statement_timeout_seconds
-        yield _FakeRepository(states={"nb-1": "indexed"})
+        yield _FakeRepository(notebooks={"nb-1": False})
 
     monkeypatch.setattr(
         scale_build_cli, "verify_migration_ledger", lambda url: (1, 1)
     )
     monkeypatch.setattr(scale_build_cli, "open_scale_build_repository", fake_open)
     result = scale_rebuild.rebuild_after_import(settings, ("nb-1",))
-    assert result.outcomes == {"nb-1": "skipped:indexed"}
+    assert result.outcomes == {"nb-1": "skipped:not_eligible"}
     assert seen["timeout"] == scale_build_cli.DEFAULT_STATEMENT_TIMEOUT_SECONDS
 
 
@@ -830,7 +785,7 @@ def test_json_carries_mode_and_note_so_an_empty_map_is_never_ambiguous(
     tmp_path, monkeypatch, capsys
 ):
     _settings(tmp_path, monkeypatch)
-    _install(monkeypatch, _FakeRepository(states={"nb-1": "stale"}))
+    _install(monkeypatch, _eligible("nb-1"))
     exit_code = _run_import(
         tmp_path,
         monkeypatch,
@@ -850,7 +805,7 @@ def test_json_auto_with_nothing_to_do_is_an_empty_map_and_no_note(
     tmp_path, monkeypatch, capsys
 ):
     _settings(tmp_path, monkeypatch)
-    _install(monkeypatch, _FakeRepository(states={}))
+    _install(monkeypatch, _eligible())
     exit_code = _run_import(tmp_path, monkeypatch, _report(), "--json")
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
