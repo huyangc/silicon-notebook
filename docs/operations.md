@@ -860,6 +860,21 @@ is still the latest one for its `source_env`; a `failed` package that has since 
 `superseded` by a newer export cannot be resumed (see the `status` value domain below) — export
 and import a fresh package instead.
 
+**A `failed` incremental package cannot always BE superseded, though, and this is not optional.**
+A full package's row-level reconciliation deliberately exempts `memory_items`/its three child
+tables and `notebooks` (§5 "coexistence") — those four are only ever cleaned up by an
+incremental package's own delete replay and notebook-delete queueing, never by a later full
+baseline's sweep. If an incremental package fails BEFORE finishing those two phases and a newer
+full baseline is then allowed to mark it `superseded` (clearing its progress), whatever memory
+deletes it had not yet replayed and whatever notebook deletions it had not yet queued are gone
+for good — no later action ever revisits them, and the target silently keeps content the source
+deleted. So a `failed` incremental package can only be superseded once BOTH of its
+delete-related phases finished (it failed later — during file merge or finalization, say); if
+either is missing, a newer package is refused with an error naming which phase is missing, and
+the fix is to `--resume` that specific failed package to completion — `--take-over` does not
+bypass this either, since taking over a dead run's row still leaves the same unfinished work to
+`--resume`, not a shortcut around it.
+
 `--take-over` explicitly claims a `sync_imports` row that is still `running`, for when the
 process that opened it is actually dead (crashed host, killed process) rather than merely slow.
 There is no automatic time-based takeover — use it only after confirming the row is dead: run

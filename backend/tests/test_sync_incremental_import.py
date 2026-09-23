@@ -2149,3 +2149,162 @@ def test_a_window_is_refused_once_a_post_reset_baseline_supersedes_its_base(
     assert _one(
         mirror, "SELECT name FROM notebooks WHERE id=?", (baseline["alpha"],)
     )["name"] == "alpha v9"
+
+
+# --------- codex #788 r3: a half-applied window's deletions are not droppable
+
+
+def _break_at(monkeypatch, name: str):
+    """Make the named import phase raise, so a run fails partway and leaves a
+    ``failed`` row with whatever progress it had committed."""
+    from app.migration.sync import import_ as import_module
+
+    original = getattr(import_module, name)
+
+    def explode(*args, **kwargs):
+        raise RuntimeError(f"boom in {name}")
+
+    monkeypatch.setattr(import_module, name, explode)
+    return original
+
+
+def _window_with_deletions(baseline) -> tuple[ExportReport, str]:
+    """A window carrying BOTH kinds of deletion a full package can never make
+    good on: a memory row (§5 exempts the memory tables from the snapshot
+    sweep) and a notebook (phase 3a exempts ``notebooks`` too)."""
+    repo = baseline["source"]["repo"]
+    memory = _one(
+        repo, "SELECT id FROM memory_items WHERE notebook_id=?",
+        (baseline["alpha"],),
+    )["id"]
+    with repo._write() as db:
+        db.execute("DELETE FROM memory_items WHERE id=?", (memory,))
+        db.execute("DELETE FROM notebooks WHERE id=?", (baseline["beta"],))
+    window = _window(baseline)
+    assert window.deleted_notebooks == (baseline["beta"],)
+    assert any(
+        entry["table"] == "memory_items" for entry in _deletes(window.package_dir)
+    )
+    return window, memory
+
+
+def test_a_newer_full_package_cannot_retire_a_window_that_owes_deletions(
+    baseline, monkeypatch
+):
+    """The gap codex found. A window that died before phase 3c holds the only
+    copy of its memory and notebook deletions; retiring it makes them
+    unrecoverable, because the full package that retires it does not
+    reconcile either table and no later window carries them.
+
+    变异验证: 去掉 ``_supersede_outstanding`` 的标记检查, 本条报红 (全量包
+    retire 了窗口, 被删的 memory 与笔记本静默留在目标端)。"""
+    window, memory = _window_with_deletions(baseline)
+    _break_at(monkeypatch, "_replay_deletes")
+    with pytest.raises(SyncImportError):
+        _import(baseline["target"], window.package_dir)
+    monkeypatch.undo()
+    mirror = baseline["target"]["repo"]
+    steps = _delete_phase_steps(baseline, window.package_id)
+    assert "__deletes_replayed__" not in steps
+    assert "__notebook_deletes_queued__" not in steps
+    # The deletions have NOT been applied -- which is the whole problem.
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM memory_items WHERE id=?", (memory,)
+    ) == 1
+
+    # A newer full package must not be allowed to bury that.
+    newer = _export(baseline["source"], baseline["out"] / "newer", full=True)
+    assert newer.mode == MODE_FULL
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(baseline["target"], newer.package_dir)
+
+    message = str(failure.value)
+    assert window.package_id in message
+    assert "--resume" in message
+    assert "__deletes_replayed__" in message
+    # ...and --take-over is not a way around it either.
+    with pytest.raises(SyncImportError) as forced:
+        _import(baseline["target"], newer.package_dir, take_over=True)
+    assert window.package_id in str(forced.value)
+
+
+def test_a_full_package_may_retire_a_window_that_finished_its_deletions(
+    baseline, monkeypatch
+):
+    """The other half: once 3c and 3d are done, whatever is left of the window
+    is ordinary row and file work, which a full package DOES cover. Failing in
+    the FILE phase must therefore leave it retirable.
+
+    变异验证: 让 3c/3d 不写标记, 本条报红 (全量包被拒)。"""
+    window, memory = _window_with_deletions(baseline)
+    _break_at(monkeypatch, "_merge_files")
+    with pytest.raises(SyncImportError):
+        _import(baseline["target"], window.package_dir)
+    monkeypatch.undo()
+    mirror = baseline["target"]["repo"]
+    steps = _delete_phase_steps(baseline, window.package_id)
+    assert {"__deletes_replayed__", "__notebook_deletes_queued__"} <= steps
+    # The deletions DID land before the failure.
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM memory_items WHERE id=?", (memory,)
+    ) == 0
+    assert _one(
+        mirror, "SELECT status FROM notebooks WHERE id=?", (baseline["beta"],)
+    )["status"] == "deleting"
+
+    newer = _export(baseline["source"], baseline["out"] / "newer", full=True)
+
+    report = _import(baseline["target"], newer.package_dir)
+
+    assert report.error == ""
+    assert any(window.package_id in text for text in report.warnings)
+    assert _one(
+        mirror, "SELECT status FROM sync_imports WHERE package_id=?",
+        (window.package_id,),
+    )["status"] == "superseded"
+
+
+def test_resuming_the_window_first_unblocks_the_full_package(
+    baseline, monkeypatch
+):
+    """What the refusal tells an operator to do has to actually work."""
+    window, memory = _window_with_deletions(baseline)
+    _break_at(monkeypatch, "_replay_deletes")
+    with pytest.raises(SyncImportError):
+        _import(baseline["target"], window.package_dir)
+    monkeypatch.undo()
+
+    assert _import(baseline["target"], window.package_dir, resume=True).error == ""
+    mirror = baseline["target"]["repo"]
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM memory_items WHERE id=?", (memory,)
+    ) == 0
+
+    newer = _export(baseline["source"], baseline["out"] / "newer", full=True)
+
+    assert _import(baseline["target"], newer.package_dir).error == ""
+
+
+def test_an_empty_window_still_records_both_delete_phase_markers(baseline):
+    """"Carried no deletions" and "applied all of them" are the same fact for
+    ``_supersede_outstanding``, and only the marker says either."""
+    empty = _window(baseline)
+    assert _deletes(empty.package_dir) == []
+
+    assert _import(baseline["target"], empty.package_dir).error == ""
+
+    assert {
+        "__deletes_replayed__", "__notebook_deletes_queued__"
+    } <= _delete_phase_steps(baseline, empty.package_id)
+
+
+def _delete_phase_steps(baseline, package_id: str) -> set[str]:
+    return {
+        str(row["table_name"])
+        for row in _all(
+            baseline["target"]["repo"],
+            "SELECT table_name FROM sync_import_progress WHERE package_id=?",
+            (package_id,),
+        )
+    }
