@@ -118,6 +118,105 @@ def test_status_reads_watermark_and_import_row_from_postgres(
     assert imported["notebooks"] == 3
 
 
+def test_status_reports_chain_head_and_pending_notebook_deletes_on_postgres(
+    cli_settings, root_dir, capsys
+):
+    """PR-3c fields (design doc §8), PostgreSQL lane: ``report_json`` is
+    jsonb here (psycopg hands it back already-parsed, unlike SQLite's text
+    column), and ``_chain_head``/``_pending_notebook_deletes`` must read the
+    same shape off it either way -- pin one chain (a full baseline plus one
+    incremental window continuing from it) and one grouped delete count
+    against the real PostgreSQL round trip, mirroring the SQLite-lane
+    coverage in tests/test_sync_cli.py."""
+    _migrate(cli_settings)
+    database = PostgresDatabase(cli_settings, root_dir)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_imports "
+                "(package_id, source_env, from_seq, to_seq, status, started_at, "
+                "finished_at, report_json) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)",
+                (
+                    "pkg-A",
+                    "prod-shanghai",
+                    0,
+                    10,
+                    "done",
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:05:00+00:00",
+                    json.dumps(
+                        {
+                            "notebooks": ["nb-1"],
+                            "mode": "full",
+                            "base_package_id": "",
+                            "package_created_at": "2026-01-01T00:00:00+00:00",
+                        }
+                    ),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO sync_imports "
+                "(package_id, source_env, from_seq, to_seq, status, started_at, "
+                "finished_at, report_json) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)",
+                (
+                    "pkg-B",
+                    "prod-shanghai",
+                    11,
+                    20,
+                    "done",
+                    "2026-01-02T00:00:00+00:00",
+                    "2026-01-02T00:05:00+00:00",
+                    json.dumps(
+                        {
+                            "notebooks": ["nb-1"],
+                            "mode": "incremental",
+                            "base_package_id": "pkg-A",
+                            "package_created_at": "2026-01-02T00:00:00+00:00",
+                        }
+                    ),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO notebooks"
+                "(id, name, purpose, primary_domain, status, created_by, "
+                "created_at, updated_at, sync_origin) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    "nb-sh-1",
+                    "mirror",
+                    "",
+                    "",
+                    "deleting",
+                    None,
+                    "2026-01-03T00:00:00+00:00",
+                    "2026-01-03T00:00:00+00:00",
+                    "prod-shanghai",
+                ),
+            )
+    finally:
+        database.close()
+
+    args = cli.build_parser().parse_args(["status", "--json"])
+    exit_code = cli._cmd_status(args, cli_settings)
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["chain_heads"] == {
+        "prod-shanghai": {
+            "package_id": "pkg-B",
+            "to_seq": 20,
+            "created_at": "2026-01-02T00:00:00+00:00",
+        }
+    }
+    assert payload["pending_notebook_deletes"] == {"prod-shanghai": 1}
+
+    human_args = cli.build_parser().parse_args(["status"])
+    exit_code = cli._cmd_status(human_args, cli_settings)
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "pkg-B（to_seq=20，创建于 2026-01-02T00:00:00+00:00）" in out
+    assert "等待删除作业清理的镜像 1 个（由目标端应用的删除作业完成）" in out
+
+
 def test_status_missing_sync_tables_gives_named_message_on_postgres(
     postgres_scope, capsys
 ):

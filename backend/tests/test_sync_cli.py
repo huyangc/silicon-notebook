@@ -727,6 +727,115 @@ def test_import_preflight_failure_exits_2(tmp_path, monkeypatch, capsys):
     assert "schema pair mismatch" in capsys.readouterr().err
 
 
+def test_import_human_output_incremental_prints_mode_base_and_delete_counts(
+    tmp_path, monkeypatch, capsys
+):
+    """PR-3c fields (design doc §8): a real (non-dry-run) incremental import
+    prints its mode/base, the delete-replay counts, and both notebook-delete
+    lists -- including the "由目标端应用的删除作业完成清理" sentence the
+    coordinator asked for, since the import itself only queues the job."""
+    _settings(tmp_path, monkeypatch)
+    report = _empty_import_report(
+        mode="incremental",
+        base_package_id="pkg-base",
+        notebooks=("nb-1",),
+        deletes_applied=3,
+        deletes_absent=1,
+        deletes_orphan_skipped=2,
+        notebooks_deleted=("nb-9",),
+        notebooks_delete_skipped=("nb-8",),
+    )
+    monkeypatch.setattr(cli, "import_package", lambda *a, **k: report)
+    exit_code = cli.main(["import", str(tmp_path / "pkg")])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "模式: incremental，base=pkg-base" in out
+    assert "删除重放: 应用 3、目标端已不存在 1、孤儿跳过 2" in out
+    assert "已排队删除的笔记本: nb-9（由目标端应用的删除作业完成清理）" in out
+    assert "跳过删除的笔记本" in out and "nb-8" in out
+
+
+def test_import_human_output_incremental_empty_window_still_prints_zero_counts(
+    tmp_path, monkeypatch, capsys
+):
+    """An empty incremental window (no rows, no deletes) is a legitimate
+    shape (design doc §7 "模式判定") -- the delete-replay line must still
+    appear with its zero counts, not be suppressed as if it were a full
+    package."""
+    _settings(tmp_path, monkeypatch)
+    report = _empty_import_report(mode="incremental", base_package_id="pkg-base")
+    monkeypatch.setattr(cli, "import_package", lambda *a, **k: report)
+    exit_code = cli.main(["import", str(tmp_path / "pkg")])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "删除重放: 应用 0、目标端已不存在 0、孤儿跳过 0" in out
+    assert "已排队删除的笔记本" not in out
+    assert "跳过删除的笔记本" not in out
+
+
+def test_import_human_output_full_mode_omits_delete_counts(
+    tmp_path, monkeypatch, capsys
+):
+    """A full package's delete-related fields are always 0/empty in
+    practice (design doc §8), but the human summary gates on ``mode``, not
+    on the counts happening to be zero -- pin that explicitly with non-zero
+    values a full package should never actually carry."""
+    _settings(tmp_path, monkeypatch)
+    report = _empty_import_report(mode="full", deletes_applied=5)
+    monkeypatch.setattr(cli, "import_package", lambda *a, **k: report)
+    exit_code = cli.main(["import", str(tmp_path / "pkg")])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "删除重放" not in out
+    assert "模式: full" in out
+
+
+def test_import_dry_run_shows_mode_but_omits_delete_counts(
+    tmp_path, monkeypatch, capsys
+):
+    """dry-run never reaches the delete-replay/notebook-delete phases (it
+    stops after identity mapping and preflight -- design doc §8), so those
+    lines must not appear even for an incremental package; the mode/base
+    line comes from classification alone and is shown regardless."""
+    _settings(tmp_path, monkeypatch)
+    report = _empty_import_report(
+        dry_run=True, mode="incremental", base_package_id="pkg-base"
+    )
+    monkeypatch.setattr(cli, "import_package", lambda *a, **k: report)
+    exit_code = cli.main(["import", str(tmp_path / "pkg"), "--dry-run"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "模式: incremental，base=pkg-base" in out
+    assert "删除重放" not in out
+
+
+def test_import_json_includes_incremental_report_fields(tmp_path, monkeypatch, capsys):
+    """``--json`` is a straight ``ImportReport.as_json()`` dump (pinned
+    generically by test_import_json_uses_report_as_json above); this checks
+    the PR-3c field names/values explicitly so a rename shows up here too."""
+    _settings(tmp_path, monkeypatch)
+    report = _empty_import_report(
+        mode="incremental",
+        base_package_id="pkg-base",
+        deletes_applied=3,
+        deletes_absent=1,
+        deletes_orphan_skipped=2,
+        notebooks_deleted=("nb-9",),
+        notebooks_delete_skipped=("nb-8",),
+    )
+    monkeypatch.setattr(cli, "import_package", lambda *a, **k: report)
+    exit_code = cli.main(["import", str(tmp_path / "pkg"), "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["mode"] == "incremental"
+    assert payload["base_package_id"] == "pkg-base"
+    assert payload["deletes_applied"] == 3
+    assert payload["deletes_absent"] == 1
+    assert payload["deletes_orphan_skipped"] == 2
+    assert payload["notebooks_deleted"] == ["nb-9"]
+    assert payload["notebooks_delete_skipped"] == ["nb-8"]
+
+
 # ------------------------------------------------------------------- status
 
 
@@ -1153,6 +1262,196 @@ def test_status_json_carries_status_unchanged_including_superseded(
     row = payload["imports"][0]
     assert row["status"] == "superseded"
     assert row["report_json"]["superseded_by"] == "pkg-new"
+
+
+def test_status_reports_chain_head_for_a_two_link_chain(tmp_path, monkeypatch, capsys):
+    """Chain head (design doc §8) is the ``done`` row nothing else is
+    downstream of -- here a full baseline (pkg-A, to_seq=10) followed by one
+    incremental window (pkg-B, to_seq=20) that continues from it. A third,
+    unrelated ``failed`` row for the same source_env must not affect the
+    result (only ``done`` rows are chain candidates)."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_imports "
+                "(package_id, source_env, from_seq, to_seq, status, started_at, "
+                "finished_at, report_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "pkg-A",
+                    "prod-shanghai",
+                    0,
+                    10,
+                    "done",
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:05:00+00:00",
+                    json.dumps(
+                        {
+                            "notebooks": ["nb-1"],
+                            "mode": "full",
+                            "base_package_id": "",
+                            "package_created_at": "2026-01-01T00:00:00+00:00",
+                        }
+                    ),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO sync_imports "
+                "(package_id, source_env, from_seq, to_seq, status, started_at, "
+                "finished_at, report_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "pkg-B",
+                    "prod-shanghai",
+                    11,
+                    20,
+                    "done",
+                    "2026-01-02T00:00:00+00:00",
+                    "2026-01-02T00:05:00+00:00",
+                    json.dumps(
+                        {
+                            "notebooks": ["nb-1"],
+                            "mode": "incremental",
+                            "base_package_id": "pkg-A",
+                            "package_created_at": "2026-01-02T00:00:00+00:00",
+                        }
+                    ),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO sync_imports "
+                "(package_id, source_env, from_seq, to_seq, status, started_at, "
+                "finished_at, report_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "pkg-C-failed",
+                    "prod-shanghai",
+                    21,
+                    30,
+                    "failed",
+                    "2026-01-03T00:00:00+00:00",
+                    None,
+                    json.dumps({"mode": "incremental", "base_package_id": "pkg-B"}),
+                ),
+            )
+    finally:
+        database.close()
+
+    exit_code = cli.main(["status", "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["chain_heads"] == {
+        "prod-shanghai": {
+            "package_id": "pkg-B",
+            "to_seq": 20,
+            "created_at": "2026-01-02T00:00:00+00:00",
+        }
+    }
+
+    exit_code = cli.main(["status"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "导入链头" in out
+    assert "pkg-B（to_seq=20，创建于 2026-01-02T00:00:00+00:00）" in out
+
+
+def test_status_reports_no_chain_head_when_nothing_is_done(
+    tmp_path, monkeypatch, capsys
+):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            conn.execute(
+                "INSERT INTO sync_imports "
+                "(package_id, source_env, from_seq, to_seq, status, started_at, "
+                "finished_at, report_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "pkg-running",
+                    "prod-shanghai",
+                    0,
+                    0,
+                    "running",
+                    "2026-01-01T00:00:00+00:00",
+                    None,
+                    json.dumps({}),
+                ),
+            )
+    finally:
+        database.close()
+
+    exit_code = cli.main(["status", "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["chain_heads"] == {"prod-shanghai": None}
+
+    exit_code = cli.main(["status"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "尚无入链的已完成包" in out
+
+
+def test_status_reports_pending_notebook_deletes_grouped_by_source_env(
+    tmp_path, monkeypatch, capsys
+):
+    """Design doc §8 "笔记本删除传播": an incremental import only flips a
+    mirrored notebook to ``deleting`` and queues a delete job -- ``status``
+    surfaces how many are waiting per ``source_env`` so an operator notices a
+    stuck job worker rather than assuming the import failed. A locally
+    ``deleting`` notebook (``sync_origin=''``) and a ``draft`` mirror must
+    not be counted."""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    database = SqliteDatabase(settings, tmp_path)
+    rows = [
+        ("nb-sh-1", "deleting", "prod-shanghai"),
+        ("nb-sh-2", "deleting", "prod-shanghai"),
+        ("nb-tokyo-1", "deleting", "prod-tokyo"),
+        ("nb-sh-draft", "draft", "prod-shanghai"),
+        ("nb-local", "deleting", ""),
+    ]
+    try:
+        with database.write() as conn:
+            for notebook_id, status, sync_origin in rows:
+                conn.execute(
+                    "INSERT INTO notebooks(id,name,purpose,primary_domain,status,"
+                    "created_by,created_at,updated_at,sync_origin) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        notebook_id,
+                        notebook_id,
+                        "",
+                        "",
+                        status,
+                        None,
+                        "2026-01-01T00:00:00+00:00",
+                        "2026-01-01T00:00:00+00:00",
+                        sync_origin,
+                    ),
+                )
+    finally:
+        database.close()
+
+    exit_code = cli.main(["status", "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["pending_notebook_deletes"] == {
+        "prod-shanghai": 2,
+        "prod-tokyo": 1,
+    }
+
+    exit_code = cli.main(["status"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "等待删除作业清理的镜像 2 个（由目标端应用的删除作业完成）" in out
+    assert "等待删除作业清理的镜像 1 个（由目标端应用的删除作业完成）" in out
 
 
 def test_status_missing_sync_tables_gives_named_message(tmp_path, monkeypatch, capsys):
