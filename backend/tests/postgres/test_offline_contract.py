@@ -347,13 +347,49 @@ def _run_postgres_gate(url: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _wait_for_file(path: Path, *, timeout: float = 5.0) -> None:
+def _wait_for_pid_file(path: Path, *, timeout: float = 5.0) -> int:
+    """Wait until a child has written its pid to ``path`` and return it.
+
+    ``Path.write_text`` creates the file before it writes the digits, so on a
+    slow runner "the file exists" can be observed with zero bytes in it --
+    ``int('')`` then raises ``ValueError`` (CI flake, PR #770 and PR #785).
+    The wait is therefore for a *parseable* pid, not for the file.
+    """
     deadline = time.monotonic() + timeout
+    last = ""
     while time.monotonic() < deadline:
-        if path.exists():
-            return
+        try:
+            last = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            last = ""
+        if last.isdigit():
+            return int(last)
         time.sleep(0.02)
-    raise AssertionError(f"timed out waiting for {path.name}")
+    raise AssertionError(
+        f"timed out after {timeout}s waiting for a pid in {path.name} (last read: {last!r})"
+    )
+
+
+def test_wait_for_pid_file_waits_past_an_empty_file(tmp_path):
+    """The race the helper exists for: the file is already there with zero
+    bytes, and the pid lands a moment later."""
+    import threading
+
+    path = tmp_path / "child.pid"
+    path.write_text("", encoding="utf-8")
+    writer = threading.Timer(0.1, lambda: path.write_text("4242", encoding="utf-8"))
+    writer.start()
+    try:
+        assert _wait_for_pid_file(path) == 4242
+    finally:
+        writer.cancel()
+
+
+def test_wait_for_pid_file_times_out_with_what_it_last_read(tmp_path):
+    path = tmp_path / "child.pid"
+    path.write_text("", encoding="utf-8")
+    with pytest.raises(AssertionError, match=r"child\.pid \(last read: ''\)"):
+        _wait_for_pid_file(path, timeout=0.1)
 
 
 def _process_exists(pid: int) -> bool:
@@ -1112,8 +1148,7 @@ def test_launcher_signal_reaps_blocked_child_and_removes_pgpass(
     )
     child_pid: int | None = None
     try:
-        _wait_for_file(pid_file)
-        child_pid = int(pid_file.read_text(encoding="utf-8"))
+        child_pid = _wait_for_pid_file(pid_file)
         assert list(tmp_path.glob("silicon-notebook-pgpass-*"))
         launcher.send_signal(signum)
         stdout, stderr = launcher.communicate(timeout=10)
