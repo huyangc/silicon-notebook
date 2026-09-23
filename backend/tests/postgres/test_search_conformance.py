@@ -921,7 +921,7 @@ def test_hydrate_rows_matches_the_section_row_shape_for_the_exact_channel(
     """精确通道的两条取数分支必须给出同一种行。
 
     有面包屑的库按小节整节取齐;没有面包屑的库(MinerU 解析的 PDF/DOCX)按命中
-    id 直接取行——两条分支的结果落进同一个 `_build_chunks`,行形状不一致会在
+    id 直接取行——两条分支的结果落进同一个 `_build_sections`,行形状不一致会在
     生产上静默少列。SQLite 侧的对等断言在 tests/test_exact_lookup.py。
     """
     _seed_manual(search_harness)
@@ -940,7 +940,7 @@ def test_hydrate_rows_matches_the_section_row_shape_for_the_exact_channel(
         assert ({field: row[field] for field in _EXACT_ROW_FIELDS}
                 == {field: by_section[chunk_id][field]
                     for field in _EXACT_ROW_FIELDS})
-    # element_ids 两条分支都归一成 JSON 字符串形态(`_build_chunks` 依赖这一点)。
+    # element_ids 两条分支都归一成 JSON 字符串形态(`_build_sections` 依赖这一点)。
     assert json.loads(by_id["chunk-manual-args"]["element_ids"]) == [
         "element-search-b"]
 

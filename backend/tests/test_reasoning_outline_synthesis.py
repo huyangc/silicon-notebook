@@ -1470,7 +1470,7 @@ def test_a_section_grounded_only_in_external_evidence_is_not_capped(
 
 
 def _exact_chunk(chunk_id, text="精确命中的原文", source_id="s1"):
-    """精确通道打过标的块(`exact_lookup.py::_build_chunks`,T3)。"""
+    """精确通道打过标的块(`exact_lookup.py::_build_sections`,T3)。"""
     return RetrievedChunk(
         chunk_id=chunk_id, source_id=source_id, source_title="论文一",
         section_path="1", text=text, relevance=0.8, exact_lookup=True,
@@ -1566,6 +1566,30 @@ def test_the_reserve_caps_how_many_exact_hits_each_section_receives():
     assert [chunk.chunk_id for chunk in slices[1].chunks] == ["c2"]
     assert [c.chunk_id for c in slices[0].exact_chunks] == ["x1", "x2"]
     assert [c.chunk_id for c in slices[1].exact_chunks] == ["x1", "x2"]
+
+
+@pytest.mark.parametrize("reserve,expected", [
+    (2, ["a1", "b1"]),
+    (3, ["a1", "a2", "b1"]),
+    (9, ["a1", "a2", "a3", "b1"]),
+])
+def test_the_reserve_is_shared_per_library_across_libraries(reserve, expected):
+    """全局问答(联邦精确臂)下未绑定精确块来自 k=2 个库:席位按库分配,一个库的
+    大节不能占满;某库命中不足时空出的席位补给另一个库;注入仍按迭代序。"""
+    def exact(chunk_id, notebook_id):
+        return replace(_exact_chunk(chunk_id), notebook_id=notebook_id)
+
+    slices, _ = plan_outline_sections(
+        [_section("a", "第一节", "c1")],
+        kg_by_id={}, element_by_id={},
+        chunk_by_id={
+            "c1": _chunk("c1"),
+            "a1": exact("a1", "nb-a"), "a2": exact("a2", "nb-a"),
+            "a3": exact("a3", "nb-a"), "b1": exact("b1", "nb-b"),
+        },
+        exact_reserve=reserve,
+    )
+    assert [c.chunk_id for c in slices[0].exact_chunks] == expected
 
 
 def test_an_exact_hit_bound_to_one_section_is_not_copied_into_the_others():

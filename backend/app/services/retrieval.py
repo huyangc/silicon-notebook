@@ -885,30 +885,118 @@ def exact_section_reserve_rule(
     return ReserveRule(reserve=reserve, holds=_member, admits=_member)
 
 
-def library_seats(reserve: int, libraries: Sequence[str]) -> List[tuple]:
-    """``[(library, seats), ...]``: ``reserve`` seats shared fairly, total kept.
+def library_seats(reserve: int, available: Sequence[tuple]) -> List[tuple]:
+    """``[(library, seats), ...]``: ``reserve`` seats shared fairly, no seat idle.
 
-    ``libraries`` is ordered best-first (each caller defines "best"): the
-    seats are split evenly, the remainder goes one each to the libraries at
-    the front, and when there are more libraries than seats only the first
-    ``reserve`` get one.  A library that would get zero seats is omitted, so
-    the seats always sum to ``max(0, reserve)``.
+    ``available`` is ``[(library, candidates it has), ...]`` in priority order
+    (``libraries_by_best_hit``).  Seats are dealt one at a time, round-robin in
+    that order, passing over a library once it holds as many seats as it has
+    candidates.  Unconstrained, that is the even split with the remainder going
+    one each to the libraries at the front (with more libraries than seats,
+    only the first ``reserve`` get one); a library with fewer candidates than
+    its share hands the unused seats on, in the same order, to the libraries
+    that still have candidates.  The seats therefore sum to
+    ``min(reserve, total candidates)``.  Zero-seat libraries are omitted.
     """
     reserve = max(0, int(reserve))
-    ordered = list(dict.fromkeys(libraries))
-    if not ordered or reserve == 0:
-        return []
-    if len(ordered) > reserve:
-        return [(library, 1) for library in ordered[:reserve]]
-    base, extra = divmod(reserve, len(ordered))
-    return [
-        (library, base + (1 if index < extra else 0))
-        for index, library in enumerate(ordered)
-    ]
+    order: List[str] = []
+    capacity: Dict[str, int] = {}
+    for library, count in available:
+        if library in capacity:
+            continue
+        order.append(library)
+        capacity[library] = max(0, int(count))
+    seats = dict.fromkeys(order, 0)
+    remaining = min(reserve, sum(capacity.values()))
+    while remaining > 0:
+        for library in order:
+            if remaining == 0:
+                break
+            if seats[library] < capacity[library]:
+                seats[library] += 1
+                remaining -= 1
+    return [(library, seats[library]) for library in order if seats[library]]
 
 
 def _chunk_library(chunk: "RetrievedChunk") -> str:
     return str(getattr(chunk, "notebook_id", "") or "")
+
+
+def libraries_by_best_hit(chunks: Sequence["RetrievedChunk"]) -> List[tuple]:
+    """``[(library, count), ...]`` in seat-priority order.
+
+    The ONE priority order every per-library exact-seat split uses: libraries
+    sorted by their best chunk's ``relevance``, descending, ties broken by the
+    position of the library's first chunk in ``chunks``.  ``count`` is how
+    many of ``chunks`` belong to it -- the most seats it can use.
+    """
+    best: Dict[str, float] = {}
+    count: Dict[str, int] = {}
+    first: Dict[str, int] = {}
+    for index, chunk in enumerate(chunks):
+        library = _chunk_library(chunk)
+        score = float(getattr(chunk, "relevance", 0.0) or 0.0)
+        if library not in first:
+            first[library] = index
+            best[library] = score
+            count[library] = 0
+        best[library] = max(best[library], score)
+        count[library] += 1
+    ordered = sorted(first, key=lambda library: (-best[library], first[library]))
+    return [(library, count[library]) for library in ordered]
+
+
+def exact_query_groups(
+    exact_hits: Sequence["RetrievedChunk"],
+) -> List[Dict[str, "RetrievedChunk"]]:
+    """``chunk`` mode's ``multi`` per-query groups for the exact hits.
+
+    Hits from one library (every single-notebook ask): exactly one group,
+    ``[{chunk_id: hit, ...}]`` in hit order -- the historical shape.  Hits
+    from several libraries (the peer-mode federated exact arm): one group per
+    library, in ``libraries_by_best_hit`` order, so ``quota_fuse`` gives every
+    library's exact section its own quota instead of one shared group.  No
+    hits: no group.
+    """
+    hits = list(exact_hits)
+    if not hits:
+        return []
+    available = libraries_by_best_hit(hits)
+    if len(available) <= 1:
+        return [{chunk.chunk_id: chunk for chunk in hits}]
+    return [
+        {
+            chunk.chunk_id: chunk for chunk in hits
+            if _chunk_library(chunk) == library
+        }
+        for library, _count in available
+    ]
+
+
+def select_by_library(
+    chunks: Sequence["RetrievedChunk"], reserve: int,
+) -> List["RetrievedChunk"]:
+    """At most ``reserve`` of ``chunks``, shared per library, in input order.
+
+    One library (every single-notebook ask): exactly ``chunks[:reserve]``.
+    Several (the peer-mode federated exact arm): each library contributes its
+    first ``library_seats`` share of ``chunks``, so one library's large
+    section cannot take every seat, and no seat stays idle while another
+    library still has candidates.
+    """
+    ordered = list(chunks)
+    available = libraries_by_best_hit(ordered)
+    if len(available) <= 1:
+        return ordered[: max(0, int(reserve))]
+    seats = dict(library_seats(reserve, available))
+    used: Dict[str, int] = {}
+    picked: List["RetrievedChunk"] = []
+    for chunk in ordered:
+        library = _chunk_library(chunk)
+        if used.get(library, 0) < seats.get(library, 0):
+            used[library] = used.get(library, 0) + 1
+            picked.append(chunk)
+    return picked
 
 
 def exact_section_reserve_rules(
@@ -920,15 +1008,15 @@ def exact_section_reserve_rules(
     one ``notebook_id``) give exactly ``(exact_section_reserve_rule(reserve,
     ids),)`` -- today's single rule over the same id set.  Hits from ``k > 1``
     libraries (the peer-mode federated exact arm) give one rule per library,
-    the ``reserve`` seats shared by ``library_seats`` in the order each
-    library's first hit appears in ``exact_hits`` (the merge's order), so one
-    library's large section cannot take every seat.  The total stays
-    ``reserve``.
+    the ``reserve`` seats shared by ``library_seats`` in
+    ``libraries_by_best_hit`` order, so one library's large section cannot take
+    every seat; a library with fewer hits than its share passes the rest on.
+    The total stays ``reserve`` (or the hit count, when that is smaller).
     """
     hits = list(exact_hits)
-    libraries = list(dict.fromkeys(_chunk_library(chunk) for chunk in hits))
-    seats = library_seats(reserve, libraries)
-    if len(libraries) <= 1 or not seats:
+    available = libraries_by_best_hit(hits)
+    seats = library_seats(reserve, available)
+    if len(available) <= 1 or not seats:
         return (exact_section_reserve_rule(
             reserve, {chunk.chunk_id for chunk in hits}),)
     return tuple(
@@ -949,32 +1037,22 @@ def promote_bounded_prefix_by_library(
 
     When every chunk satisfying ``holds`` belongs to one library (every
     single-notebook ask) this IS ``promote_bounded_prefix``, item for item.
-    When they span several (the peer-mode federated exact arm), the seats are
-    split by ``library_seats`` in the order each library's first held chunk
-    appears in ``chunks`` (relevance order for the caller), and each library
-    promotes at most its own share -- still a stable reordering that drops
-    nothing, and still at most ``reserve`` chunks in total.
+    When they span several (the peer-mode federated exact arm), the held
+    chunks to promote are chosen by ``select_by_library`` (seats in
+    ``libraries_by_best_hit`` order, unused seats passed on) -- still a stable
+    reordering that drops nothing, and still at most ``reserve`` chunks.
     """
     ordered = list(chunks)
-    libraries = list(dict.fromkeys(
-        _chunk_library(chunk) for chunk in ordered if holds(chunk)
-    ))
-    if len(libraries) <= 1:
+    held = [chunk for chunk in ordered if holds(chunk)]
+    if len({_chunk_library(chunk) for chunk in held}) <= 1:
         return promote_bounded_prefix(ordered, holds, reserve)
-    seats = dict(library_seats(reserve, libraries))
-    used: Dict[str, int] = {}
-    promoted: List["RetrievedChunk"] = []
-    remainder: List["RetrievedChunk"] = []
-    for chunk in ordered:
-        library = _chunk_library(chunk)
-        if used.get(library, 0) < seats.get(library, 0) and holds(chunk):
-            used[library] = used.get(library, 0) + 1
-            promoted.append(chunk)
-        else:
-            remainder.append(chunk)
-    if not promoted:
+    chosen = {id(chunk) for chunk in select_by_library(held, reserve)}
+    if not chosen:
         return ordered
-    return promoted + remainder
+    return (
+        [chunk for chunk in ordered if id(chunk) in chosen]
+        + [chunk for chunk in ordered if id(chunk) not in chosen]
+    )
 
 
 def promote_bounded_prefix(

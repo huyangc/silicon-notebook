@@ -5,9 +5,11 @@
 借语义腿的联邦调度(``chunk_federation._run_supplement_arm``),按库以**整节**轮转
 交错、去重、以 ``GLOBAL_ASK_CANDIDATE_LIMIT`` 封顶且不切断一节。本文件钉住:
 
-* 每个库各查一次、各自冻结天花板;某库来源漂移(真正收窄)只跳过该库;
+* 每个库各查一次;探测命中按该库冻结天花板过滤后才分组、分节名额(天花板外的
+  隐藏投影/新增来源不占名额);
 * 无标识符零开销:不读参与集座位、不派任务、不发事件;
-* 合并以整节为单位轮转、去重、封顶不切节;命中保留 ``exact_lookup`` 与所属库;
+* 合并以整节为单位轮转、去重、封顶不切节(放不下的节整节跳过、后面更小的节仍可
+  进);命中保留 ``exact_lookup`` 与所属库;
 * 失败/超时 fail-open:不抛、不进回执、不上横幅;取消照常上抛;
 * 检索时刻证据登记(含读失败 fail closed、无计划不登记);
 * 开关;单库路径调用序列守卫;reasoning 外层不持槽;
@@ -38,10 +40,12 @@ from app.services.federated_run import DetachedAskTurn, FederatedRunPlan
 from app.services.global_run import global_ask_run
 from app.services.retrieval import (
     exact_section_reserve_rule,
+    exact_query_groups,
     exact_section_reserve_rules,
     library_seats,
     promote_bounded_prefix,
     promote_bounded_prefix_by_library,
+    select_by_library,
 )
 from app.services.retrieval_candidates import CandidateRetrievalService
 from app.services.retrieval_participants import (
@@ -80,7 +84,6 @@ class ExactProbe:
     _exact_lookup_chunks_one = _borrow("_exact_lookup_chunks_one")
     _peer_exact_lookup_chunks = _borrow("_peer_exact_lookup_chunks")
     _peer_exact_leg = _borrow("_peer_exact_leg")
-    _peer_exact_scope_drifted = _borrow("_peer_exact_scope_drifted")
     _exact_lookup_deps = _borrow("_exact_lookup_deps")
     _exact_lookup_limits = _borrow("_exact_lookup_limits")
 
@@ -335,20 +338,48 @@ def test_each_participant_is_looked_up_once_and_merged_section_by_section():
         and "Cmds" not in repr(event)
         for event in probe.events
     )
-    # 对等模式按库判漂移(每库一次现读),不走名义 active 的单库闸。
+    # 对等模式不走名义 active 的单库闸,也不为精确臂探词法漂移。
     assert not [s for s in probe.steps if s[0] == "restricted_probe"]
-    assert probe.visible_reads.count("nb-b") >= 1
+    # 可见来源只在准备期按库读一次(与关键词臂同一处),腿里不再现读。
+    assert sorted(probe.visible_reads) == sorted(_ABC)
 
 
-def test_the_merge_never_cuts_a_section_and_stops_at_the_first_that_does_not_fit():
+def test_the_merge_never_cuts_a_section_and_skips_to_a_smaller_one():
     probe = ExactProbe(_ABC, limit=4)
 
     with _peer_run(_ABC):
         merged = probe._exact_lookup_chunks("nb-a", _QUERY)
 
-    # a 的整节(3)放得下;b 的整节(2)放不下 → 停,即使后面 c 的一块本来放得下。
-    assert _ids(merged) == [("nb-a", "a1"), ("nb-a", "a2"), ("nb-a", "a3")]
-    assert (probe.summary()["merged"], probe.summary()["sections"]) == (3, 1)
+    # a 的整节(3)放得下;b 的整节(2)放不下 → 整节跳过;c 的一块放得下 → 进;
+    # 满了就停(a 的第二节不再尝试)。
+    assert _ids(merged) == [
+        ("nb-a", "a1"), ("nb-a", "a2"), ("nb-a", "a3"), ("nb-c", "c1"),
+    ]
+    assert (probe.summary()["merged"], probe.summary()["sections"]) == (4, 2)
+
+
+def _hits(prefix, count):
+    return [SimpleNamespace(chunk_id=f"{prefix}-{i}") for i in range(count)]
+
+
+def test_late_libraries_still_get_a_smaller_section_under_the_cap():
+    """8 库各一节;前 7 库各 12 块、第 8 库 3 块,上限 64:前 5 节占 60,第 6、7 库
+    的 12 块节整节跳过,排在最后的第 8 库的 3 块节仍然进来。"""
+    columns = [[_hits(f"nb{i}", 12)] for i in range(7)] + [[_hits("nb7", 3)]]
+    merged, sections = cf._interleave_sections_capped(columns, 64)
+    owners = [hit.chunk_id.split("-")[0] for hit in merged]
+    assert len(merged) == 63 and sections == 6
+    assert sorted(set(owners)) == ["nb0", "nb1", "nb2", "nb3", "nb4", "nb7"]
+    # 每一节都是完整的:没有哪个库只进了半节。
+    assert all(owners.count(owner) in (12, 3) for owner in set(owners))
+
+
+def test_nothing_fits_returns_empty_and_a_full_list_stops():
+    columns = [[_hits(f"nb{i}", 12)] for i in range(8)]
+    assert cf._interleave_sections_capped(columns, 10) == ([], 0)
+    # 恰好填满即停:12 + 12 = 24。
+    merged, sections = cf._interleave_sections_capped(columns, 24)
+    assert (len(merged), sections) == (24, 2)
 
 
 def test_interleave_sections_dedups_across_libraries_and_skips_emptied_sections():
@@ -410,24 +441,31 @@ def test_either_switch_off_restores_the_empty_peer_arm(switch):
 # 3. 来源闸按库判;无可见来源的库不发查询
 # ---------------------------------------------------------------------------
 
-def test_a_drifted_library_is_skipped_alone():
-    """nb-b 冻结后多了一个来源(真正越出天花板):只跳过 nb-b,其余照查。"""
+@pytest.mark.parametrize("outside", ["src-knowhow-b", "src-added-after-freeze"])
+def test_out_of_ceiling_hits_take_no_section_slot(outside):
+    """nb-b 里一个天花板外的来源(隐藏 Knowhow 投影,或冻结后新增的来源)命中更
+    多,未过滤时会先占掉唯一的节名额;过滤后它不占名额、也不被整节取回,库内
+    真正的小节被取到。其它库照查。"""
     probe = ExactProbe(
-        _ABC,
-        visible={"nb-a": ("src-nb-a",), "nb-b": ("src-nb-b", "src-new"),
-                 "nb-c": ("src-nb-c",)},
+        ("nb-a", "nb-b"),
+        sections={
+            "nb-a": [("Cmds > set_db", ["a1"], None)],
+            "nb-b": [("Hidden > set_db", ["h1", "h2", "h3"], outside),
+                     ("Ref > set_db", ["b1"], None)],
+        },
     )
+    probe.settings.exact_lookup_max_sections = 1
+    receipts = Receipts()
 
-    with _peer_run(_ABC):
+    with _global_run(("nb-a", "nb-b"), receipts):
         merged = probe._exact_lookup_chunks("nb-a", _QUERY)
 
-    assert probe.searched() == ["nb-a", "nb-c"]
-    assert [nid for nid, _cid in _ids(merged)] == [
-        "nb-a", "nb-a", "nb-a", "nb-c", "nb-a",
-    ]
-    summary = probe.summary()
-    assert (summary["participants"], summary["libraries_with_hits"],
-            summary["failed_libraries"]) == (3, 2, 0)
+    assert _ids(merged) == [("nb-a", "a1"), ("nb-b", "b1")]
+    fetched = [s[2] for s in probe.steps if s[0] == "section_rows"]
+    assert sorted(fetched) == ["Cmds > set_db", "Ref > set_db"]
+    # 证据只登记天花板内、真正交给调用方的块。
+    assert probe.snapshot_reads == [["a1", "b1"]]
+    assert probe.searched() == ["nb-a", "nb-b"]
 
 
 def test_a_library_with_no_visible_source_issues_no_query():
@@ -656,52 +694,80 @@ def test_reasoning_exact_lookup_holds_no_outer_slot_in_peer_mode(peer):
 
 def test_chunk_mode_entry_returns_per_library_hits_and_drops_unchecked_sources():
     """经 ``RetrievalService.exact_lookup_chunks`` 在真实 ``global_ask_run`` 下拿到
-    逐库命中;小节里来源不在该库冻结天花板内的块被结果边界剔除。"""
+    逐库命中;来源不在该库冻结天花板内的 stray 节在分节名额之前就被滤掉——
+    命中更多也不先占名额、不被整节取回,库内真正的小节照常取到。"""
     from app.services.retrieval_service import RetrievalService
 
     probe = ExactProbe(
         ("nb-a", "nb-b"),
         sections={
-            "nb-a": [("Cmds > set_db", ["a1"], None),
-                     ("Cmds > report_timing", ["stray"], "src-stray")],
+            "nb-a": [("Stray > set_db", ["s1", "s2"], "src-stray"),
+                     ("Cmds > set_db", ["a1"], None)],
             "nb-b": [("Ref > set_db", ["b1"], None)],
         },
     )
+    probe.settings.exact_lookup_max_sections = 1
     service = SimpleNamespace(candidates=probe)
 
     with _global_run(("nb-a", "nb-b"), Receipts()):
         hits = RetrievalService.exact_lookup_chunks(service, "nb-a", _QUERY)
 
     assert _ids(hits) == [("nb-a", "a1"), ("nb-b", "b1")]
+    assert "Stray > set_db" not in [
+        s[2] for s in probe.steps if s[0] == "section_rows"
+    ]
 
 
 # ---------------------------------------------------------------------------
 # 8. 按库席位纯函数
 # ---------------------------------------------------------------------------
 
-def _chunk(chunk_id, notebook_id="", *, exact=True):
+def _chunk(chunk_id, notebook_id="", *, exact=True, relevance=0.5):
     return RetrievedChunk(
         chunk_id=chunk_id, source_id="s", source_title="t", section_path="",
-        text=chunk_id, element_ids=[], score=0.5, relevance=0.5,
+        text=chunk_id, element_ids=[], score=relevance, relevance=relevance,
         notebook_id=notebook_id, exact_lookup=exact,
     )
 
 
-@pytest.mark.parametrize("reserve,libraries,expected", [
-    (4, ["a"], [("a", 4)]),
-    (4, ["a", "b"], [("a", 2), ("b", 2)]),
-    (4, ["a", "b", "c"], [("a", 2), ("b", 1), ("c", 1)]),
-    (5, ["a", "b", "c"], [("a", 2), ("b", 2), ("c", 1)]),
-    (4, ["a", "b", "c", "d", "e"], [("a", 1), ("b", 1), ("c", 1), ("d", 1)]),
-    (0, ["a", "b"], []),
+def _plenty(*libraries):
+    return [(library, 99) for library in libraries]
+
+
+@pytest.mark.parametrize("reserve,available,expected", [
+    (4, _plenty("a"), [("a", 4)]),
+    (4, _plenty("a", "b"), [("a", 2), ("b", 2)]),
+    (4, _plenty("a", "b", "c"), [("a", 2), ("b", 1), ("c", 1)]),
+    (5, _plenty("a", "b", "c"), [("a", 2), ("b", 2), ("c", 1)]),
+    (4, _plenty("a", "b", "c", "d", "e"),
+     [("a", 1), ("b", 1), ("c", 1), ("d", 1)]),
+    (0, _plenty("a", "b"), []),
     (3, [], []),
 ])
 def test_library_seats_share_the_reserve_and_keep_its_total(
-    reserve, libraries, expected,
+    reserve, available, expected,
 ):
-    seats = library_seats(reserve, libraries)
+    seats = library_seats(reserve, available)
     assert seats == expected
-    assert sum(count for _lib, count in seats) == (reserve if libraries else 0)
+    assert sum(count for _lib, count in seats) == (reserve if available else 0)
+
+
+@pytest.mark.parametrize("reserve,available,expected", [
+    # a 只有 1 条:它分到的第 2 席补给仍有剩余的 b。
+    (4, [("a", 1), ("b", 5)], [("a", 1), ("b", 3)]),
+    # 余数本该给 a,a 用不上 → 顺序补给 b、c。
+    (5, [("a", 1), ("b", 2), ("c", 9)], [("a", 1), ("b", 2), ("c", 2)]),
+    # 命中总数不足 reserve:总数 = 命中总数。
+    (6, [("a", 1), ("b", 2)], [("a", 1), ("b", 2)]),
+    # 库数多于席位、排前面的库没有命中可用时,席位顺延给后面的库。
+    (2, [("a", 0), ("b", 1), ("c", 1)], [("b", 1), ("c", 1)]),
+])
+def test_library_seats_hand_unused_seats_on(reserve, available, expected):
+    seats = library_seats(reserve, available)
+    assert seats == expected
+    assert sum(count for _lib, count in seats) == min(
+        reserve, sum(count for _lib, count in available),
+    )
 
 
 def _rule_shape(rule, universe):
@@ -742,12 +808,44 @@ def test_exact_reserve_rules_split_per_library(k, expected_seats):
         ]
 
 
-def test_exact_reserve_rules_remainder_goes_to_the_library_seen_first():
+def test_exact_reserve_rules_ties_go_to_the_library_seen_first_and_idle_seats_move_on():
+    """同分按首次出现排序;b 只有 1 条命中,它那份余数席位补给 a。"""
     hits = [_chunk("b1", "nb-b"), _chunk("a1", "nb-a"), _chunk("c1", "nb-c"),
             _chunk("a2", "nb-a")]
     rules = exact_section_reserve_rules(4, hits)
     assert [(r.reserve, [c.chunk_id for c in hits if r.holds(c)])
-            for r in rules] == [(2, ["b1"]), (1, ["a1", "a2"]), (1, ["c1"])]
+            for r in rules] == [(1, ["b1"]), (2, ["a1", "a2"]), (1, ["c1"])]
+
+
+def test_exact_reserve_rules_priority_is_the_best_hit_relevance():
+    """余数给最佳命中相关度最高的库,不是最先出现的库。"""
+    hits = [_chunk("a1", "nb-a", relevance=0.4), _chunk("a2", "nb-a"),
+            _chunk("b1", "nb-b", relevance=0.9), _chunk("b2", "nb-b"),
+            _chunk("c1", "nb-c", relevance=0.6), _chunk("c2", "nb-c")]
+    rules = exact_section_reserve_rules(4, hits)
+    assert [(r.reserve, [c.chunk_id for c in hits if r.holds(c)])
+            for r in rules] == [
+        (2, ["b1", "b2"]), (1, ["c1", "c2"]), (1, ["a1", "a2"]),
+    ]
+
+
+@pytest.mark.parametrize("stamp", ["", "nb-a"])
+def test_exact_query_groups_single_library_is_the_historical_group(stamp):
+    hits = [_chunk(f"c{i}", stamp) for i in range(3)]
+    groups = exact_query_groups(hits)
+    assert groups == [{c.chunk_id: c for c in hits}]
+    assert list(groups[0]) == ["c0", "c1", "c2"]
+    assert exact_query_groups([]) == []
+
+
+def test_exact_query_groups_split_per_library():
+    hits = [_chunk("a1", "nb-a"), _chunk("b1", "nb-b", relevance=0.9),
+            _chunk("a2", "nb-a"), _chunk("b2", "nb-b")]
+    groups = exact_query_groups(hits)
+    # 每库一组,按最佳命中相关度排;组内保持命中顺序。
+    assert [list(group) for group in groups] == [["b1", "b2"], ["a1", "a2"]]
+    assert all(group[cid] is next(c for c in hits if c.chunk_id == cid)
+               for group in groups for cid in group)
 
 
 def _marked(chunk):
@@ -796,8 +894,25 @@ def test_promote_by_library_does_not_let_one_library_take_every_seat():
     big = [_chunk(f"a{i}", "nb-a") for i in range(6)]
     small = [_chunk("b0", "nb-b")]
     out = promote_bounded_prefix_by_library(big + small, _marked, 4)
-    assert [c.chunk_id for c in out[:3]] == ["a0", "a1", "b0"]
-    # 单库形态下同样的输入会把前 4 块 nb-a 全提上来——这正是要防的。
+    # b 分到 2 席只用得上 1 席,空出的那席补给 a:总数仍是 4,b0 一定在前缀里。
+    assert [c.chunk_id for c in out[:4]] == ["a0", "a1", "a2", "b0"]
+    # 单库形态下同样的输入会把前 4 块 nb-a 全提上来、b0 留在后面——这正是要防的。
     assert [c.chunk_id for c in promote_bounded_prefix(big + small, _marked, 4)][:4] == [
         "a0", "a1", "a2", "a3",
     ]
+
+
+def test_promote_by_library_remainder_follows_the_best_hit():
+    """余数席位给最佳命中相关度最高的库(这里是排在后面的 b)。"""
+    chunks = [_chunk("a0", "nb-a"), _chunk("a1", "nb-a"), _chunk("a2", "nb-a"),
+              _chunk("b0", "nb-b", relevance=0.9), _chunk("b1", "nb-b"),
+              _chunk("b2", "nb-b")]
+    out = promote_bounded_prefix_by_library(chunks, _marked, 3)
+    assert [c.chunk_id for c in out[:3]] == ["a0", "b0", "b1"]
+
+
+def test_select_by_library_single_library_is_a_plain_prefix():
+    chunks = [_chunk(f"c{i}", "nb-a") for i in range(5)]
+    assert select_by_library(chunks, 3) == chunks[:3]
+    assert select_by_library(chunks, 0) == []
+    assert select_by_library([], 4) == []

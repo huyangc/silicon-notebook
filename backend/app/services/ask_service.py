@@ -130,6 +130,7 @@ from app.services.prompts import (
 from app.services.retrieval import (
     RetrievedKnowledge,
     classify_evidence,
+    exact_query_groups,
     is_generated_question_only_chunk,
     merge_retrieval_supports,
     prefer_stronger_chunk_candidate,
@@ -3744,11 +3745,11 @@ class AskService:
                     _merge_multi_direct_chunk_hits(collected, kw_hits)
                     per_query = per_query + [{c.chunk_id: c for c in kw_hits}]
                 # ∪ exact-identifier whole-section hits, treated identically:
-                # its own per_query group is what gives quota_fuse a reason to
-                # surface a section chunk whose standalone relevance is low.
+                # its own per_query group (one per library across libraries) is
+                # what lets quota_fuse surface a low-relevance section chunk.
                 if exact_hits:
                     _merge_multi_direct_chunk_hits(collected, exact_hits)
-                    per_query = per_query + [{c.chunk_id: c for c in exact_hits}]
+                    per_query = per_query + exact_query_groups(exact_hits)
                 baseline_chunk_candidates, _supplemental_candidates = (
                     partition_generated_question_chunks(list(collected.values()))
                 )

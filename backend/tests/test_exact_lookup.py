@@ -158,7 +158,7 @@ def test_sqlite_hydrate_rows_matches_the_section_row_shape(repo):
     """通道两条取数分支给出的行必须一致。
 
     有面包屑的库按小节整节取齐;没有面包屑的库(MinerU 解析的 PDF/DOCX)按命中
-    id 直接取行。两者的结果落进同一个 `_build_chunks`,少一列就是生产上的静默
+    id 直接取行。两者的结果落进同一个 `_build_sections`,少一列就是生产上的静默
     缺字段。PostgreSQL 侧的对等断言在 tests/postgres/test_search_conformance.py。
     """
     notebook = _seed_manual(repo, BREADCRUMB_MANUAL)

@@ -161,6 +161,30 @@ def _first_relation_sample(raw: object) -> str:
     return ""
 
 
+def _ceiling_bound_exact_deps(deps, allowed_source_ids):
+    """``deps`` whose exact probe only returns hits inside a source ceiling.
+
+    ``None`` (no ceiling binds) returns ``deps`` unchanged.  Otherwise the
+    probe's rows are filtered by ``source_id`` before
+    ``exact_lookup_sections`` groups them, so an out-of-ceiling hit never
+    takes a section slot.  Used by the peer-mode exact leg only.
+    """
+    if allowed_source_ids is None:
+        return deps
+    from dataclasses import replace
+
+    ceiling = frozenset(str(value) for value in allowed_source_ids)
+    search = deps.exact_search
+
+    def _exact_search(db, notebook_id, needle, k):
+        return [
+            hit for hit in search(db, notebook_id, needle, k)
+            if str(hit["source_id"] or "") in ceiling
+        ]
+
+    return replace(deps, exact_search=_exact_search)
+
+
 def _hydrated_chunk_row(r) -> dict:
     """One ``chunks.hydrate_rows`` row in the shape ``score_chunks`` reads."""
     return {
@@ -4266,10 +4290,16 @@ class CandidateRetrievalService(_RetrievalState):
         * A library with no visible source under its frozen ceiling issues no
           query at all (``scoped_allowed_source_ids`` over the visible list
           ``_federated_tasks`` enumerated, as the keyword leg derives it).
-        * The single path's source gate, judged PER LIBRARY
-          (``_peer_exact_scope_drifted``): the lookup has no source predicate,
-          so a library whose live visible universe no longer equals its frozen
-          ceiling is skipped -- that library alone.
+        * The lookup honours that same ceiling (``_ceiling_bound_exact_deps``):
+          probe hits whose source is outside it -- a hidden Memory/Knowhow
+          projection, a source added since the freeze -- are dropped BEFORE
+          hits are grouped and section slots handed out, so they can neither
+          take a slot nor reach the subtree fetch (which stays inside the hit's
+          own source).  No extra read: the filter is applied to rows the probe
+          returns anyway, which is also why the single path's live drift gate
+          is not needed here.  Residual: the probe's own ``EXACT_LOOKUP_FTS_K``
+          window is taken before the filter, so out-of-ceiling rows can still
+          use part of it.
         * Any failure propagates to ``_run_one``: no ``_note_model_error``, so
           a missing supplementary leg is never a banner; its skip event
           (``arm="exact"``) carries the exception class.
@@ -4281,33 +4311,12 @@ class CandidateRetrievalService(_RetrievalState):
             allowed = scoped_allowed_source_ids(notebook_id, visible)
             if allowed is not None and not allowed:
                 return []
-            if self._peer_exact_scope_drifted(notebook_id):
-                return []
             return exact_lookup_sections(
-                self._exact_lookup_deps(), notebook_id, query, limits,
+                _ceiling_bound_exact_deps(self._exact_lookup_deps(), allowed),
+                notebook_id, query, limits,
             )
 
         return _leg
-
-    def _peer_exact_scope_drifted(self, notebook_id: str) -> bool:
-        """``_unsafe_source_scope_restricted``, asked of ONE peer library.
-
-        A global run freezes each participant's whole visible source list, so
-        no library is ever narrowed by the user; what can still make the
-        unpartitioned exact probe unsafe is DRIFT -- a source added or removed
-        since the freeze, whose chunks would take section slots before the
-        result-boundary filter could drop them.  Read LIVE on every call, never
-        memoised, for the reason ``_unsafe_source_scope_restricted`` documents.
-        A library with no per-notebook ceiling falls back to that probe itself.
-        """
-        from app.services.source_scope import current_source_scope
-
-        scope = current_source_scope()
-        ceiling = None if scope is None else scope.source_ceiling_for(notebook_id)
-        if ceiling is None:
-            return self._unsafe_source_scope_restricted(notebook_id)
-        live = self.sources.all_visible_source_ids(notebook_id)
-        return set(str(value) for value in live) != set(ceiling)
 
     def _exact_lookup_chunks_one(self, notebook_id: str, query: str):
         """The single-library lookup -- the pre-federation body, unchanged."""
