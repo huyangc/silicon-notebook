@@ -27,6 +27,7 @@ from app.migration.sync.import_ import (
     SyncImportError,
     TableOutcome,
     UserMappingResult,
+    _PriorImport,
 )
 from app.repositories.sqlite.database import SqliteDatabase
 from app.services.sqlite_repository import SQLiteRepository
@@ -588,7 +589,14 @@ def test_import_json_uses_report_as_json(tmp_path, monkeypatch, capsys):
     """--json must match ``ImportReport.as_json()`` -- the same shape as the
     on-disk import report and ``sync_imports.report_json`` -- not a generic
     dataclass walk that would, e.g., spell out the full user_mapping dicts
-    instead of ``as_json()``'s summarized counts."""
+    instead of ``as_json()``'s summarized counts.
+
+    The three ``scale_rebuild*`` keys are the only additions, and they are added
+    by the CLI rather than by ``as_json()`` on purpose (see
+    ``cli._import_report_as_json``): the rebuild runs after
+    ``sync_imports.report_json`` is already written, so the stored report must
+    not carry fields it could only ever store empty. This package carried no
+    notebook, so the pass ran with nothing to judge."""
     _settings(tmp_path, monkeypatch)
     report = _empty_import_report(
         user_mapping=UserMappingResult(
@@ -599,7 +607,12 @@ def test_import_json_uses_report_as_json(tmp_path, monkeypatch, capsys):
     exit_code = cli.main(["import", str(tmp_path / "pkg"), "--json"])
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload == report.as_json()
+    assert payload == {
+        **report.as_json(),
+        "scale_rebuild": {},
+        "scale_rebuild_mode": "auto",
+        "scale_rebuild_note": None,
+    }
     assert payload["user_mapping"] == {"matched": 1, "created": [], "unmatched": ["carol"]}
 
 
@@ -1417,13 +1430,15 @@ def _insert_import_row(
     *,
     package_id: str,
     source_env: str,
-    to_seq: int,
     created_at: str,
+    to_seq: int = 0,
     status: str = "done",
     from_seq: int = 0,
     base_package_id: str = "",
     mode: str = "full",
     scoped: bool | None = False,
+    notebooks: tuple[str, ...] | None = (),
+    started_at: str | None = None,
 ) -> None:
     """One ``sync_imports`` row, ``report_json`` carrying exactly the keys
     ``_load_sync_status``'s chain-head grouping reads back
@@ -1432,7 +1447,25 @@ def _insert_import_row(
     does not hand-roll the same INSERT a thousand times.
 
     ``scoped=None`` writes NO ``scoped`` key at all, which is what a row
-    recorded by a build older than that field looks like."""
+    recorded by a build older than that field looks like. ``notebooks=None``
+    likewise writes no ``notebooks`` key -- what the mirror survey below
+    reads as "this row cannot answer which notebooks it carried".
+
+    ``scoped=True`` forces ``from_seq``/``to_seq`` to 0 no matter what the
+    caller asked for: ``export.py`` hard-codes exactly that for a subset
+    package ("a subset package makes no claim about a sequence range") and
+    ``import_.py`` copies the manifest's numbers into ``sync_imports``, so a
+    scoped row with a non-zero range cannot exist in a real database and a
+    test must not be able to seed one.
+
+    ``started_at`` defaults to ``created_at`` (the ordinary "imported about
+    when it was exported" case) and is passed explicitly only to pin that
+    the lag verdict does NOT depend on import order: this column is the
+    TARGET's clock, the verdict is about the SOURCE's."""
+    if scoped:
+        from_seq = 0
+        to_seq = 0
+    started_at = started_at or created_at
     conn.execute(
         "INSERT INTO sync_imports "
         "(package_id, source_env, from_seq, to_seq, status, started_at, "
@@ -1443,11 +1476,11 @@ def _insert_import_row(
             from_seq,
             to_seq,
             status,
-            created_at,
-            created_at if status == "done" else None,
+            started_at,
+            started_at if status == "done" else None,
             json.dumps(
                 {
-                    "notebooks": [],
+                    **({} if notebooks is None else {"notebooks": list(notebooks)}),
                     "mode": mode,
                     "base_package_id": base_package_id,
                     "package_created_at": created_at,
@@ -1485,11 +1518,15 @@ def test_status_prints_every_head_when_the_chain_has_more_than_one(
                 to_seq=100,
                 created_at="2026-01-01T00:00:00+00:00",
             )
+            # A scoped row's range is 0..0 in every real database:
+            # ``export.py`` hard-codes it and ``import_.py`` copies the
+            # manifest verbatim. That is exactly why ``downstream_of``
+            # cannot compare heights here -- the older baseline's to_seq
+            # is the HIGHER one.
             _insert_import_row(
                 conn,
                 package_id="pkg-full-2",
                 source_env="prod-osaka",
-                to_seq=100,
                 created_at="2026-01-02T00:00:00+00:00",
                 scoped=True,
             )
@@ -1507,7 +1544,7 @@ def test_status_prints_every_head_when_the_chain_has_more_than_one(
         },
         {
             "package_id": "pkg-full-2",
-            "to_seq": 100,
+            "to_seq": 0,
             "created_at": "2026-01-02T00:00:00+00:00",
         },
     ]
@@ -1517,7 +1554,10 @@ def test_status_prints_every_head_when_the_chain_has_more_than_one(
     out = capsys.readouterr().out
     assert "pkg-full-1" in out
     assert "pkg-full-2" in out
-    assert "链头不唯一" in out
+    # The exact sentence the operations docs quote (record order, not
+    # watermark height -- codex #788 r2); a drift back to "to_seq 最大" must red.
+    assert "链头不唯一；源端下一个窗口的 base 会是其中记录更晚且非限定导出的那个" in out
+    assert "to_seq 最大" not in out
 
 
 def test_status_chain_head_result_is_independent_of_insertion_order(
@@ -1541,7 +1581,6 @@ def test_status_chain_head_result_is_independent_of_insertion_order(
                 conn,
                 package_id="pkg-full-2",
                 source_env="prod-osaka",
-                to_seq=100,
                 created_at="2026-01-02T00:00:00+00:00",
                 scoped=True,
             )
@@ -1566,7 +1605,7 @@ def test_status_chain_head_result_is_independent_of_insertion_order(
         },
         {
             "package_id": "pkg-full-2",
-            "to_seq": 100,
+            "to_seq": 0,
             "created_at": "2026-01-02T00:00:00+00:00",
         },
     ]
@@ -1710,6 +1749,654 @@ def test_status_reports_pending_notebook_deletes_grouped_by_source_env(
     out = capsys.readouterr().out
     assert "等待删除作业清理的镜像 2 个（由目标端应用的删除作业完成）" in out
     assert "等待删除作业清理的镜像 1 个（由目标端应用的删除作业完成）" in out
+
+
+# --------------------------------------------- 镜像落后巡检 (_classify_mirrors)
+#
+# 判据见 docs/incremental-sync-design.md §9：不落 `sync_applied_through_seq` 列，
+# 按 `sync_imports.report_json` 推导，并且**按记录顺序（created_at）判，不比
+# 水位高度**——`export.py` 对 scoped 包硬写 `from_seq, to_seq = 0, 0`，
+# `import_.py` 原样写进 `sync_imports`，所以数据库里任何 scoped 行的 to_seq 恒为
+# 0，比高低只会得出「恒定落后一个链头水位」这一个答案。`_prior_import` 下面的
+# 断言把这条事实钉住，免得用例再造出一个库里不可能存在的 scoped 行。
+# `_classify_mirrors` 是纯函数，这一组用例不碰数据库；真 `_load_sync_status` 的
+# 集成用例在下面（PostgreSQL 同款在 tests/postgres/test_sync_cli_pg.py）。
+
+
+def _prior_import(package_id: str, **overrides) -> _PriorImport:
+    fields = dict(
+        package_id=package_id,
+        status="done",
+        started_at=None,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        heartbeat_at=None,
+        has_progress=False,
+        notebooks=("nb-1",),
+        from_seq=0,
+        to_seq=10,
+        base_package_id="",
+        scoped=False,
+    )
+    fields.update(overrides)
+    if fields["scoped"]:
+        # export.py: "A subset package makes no claim about a sequence range"
+        fields["from_seq"] = 0
+        fields["to_seq"] = 0
+    return _PriorImport(**fields)
+
+
+def _mirror_row(
+    notebook_id: str = "nb-1",
+    *,
+    name: str = "",
+    status: str = "draft",
+    sync_origin: str = "prod-shanghai",
+) -> dict:
+    return {
+        "id": notebook_id,
+        "name": name or notebook_id,
+        "status": status,
+        "sync_origin": sync_origin,
+    }
+
+
+def test_classify_mirrors_chain_participant_is_in_sync():
+    """判据 2：参与链的包之后的窗口覆盖整个源端 scope，所以这本跟链一样新——
+    包括之后没有任何窗口再点名它（那只说明它没变过）。"""
+    package = _prior_import("pkg-A")
+    head = _prior_import(
+        "pkg-B",
+        to_seq=20,
+        base_package_id="pkg-A",
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    mirrors = cli._classify_mirrors(
+        [_mirror_row()], {"prod-shanghai": [package]}, {"prod-shanghai": [head]}
+    )
+    group = mirrors["prod-shanghai"]
+    assert group["total"] == 1
+    assert [entry["notebook_id"] for entry in group["in_sync"]] == ["nb-1"]
+    assert group["in_sync"][0]["head_package_id"] == "pkg-B"
+    assert group["in_sync"][0]["applied_package_id"] == "pkg-A"
+    assert group["lagging"] == []
+    assert group["ahead"] == []
+    assert group["ambiguous"] == []
+
+
+def test_classify_mirrors_chain_participant_with_two_heads_is_ambiguous():
+    package = _prior_import("pkg-A")
+    heads = [
+        _prior_import("pkg-B", to_seq=20),
+        _prior_import("pkg-C", to_seq=20),
+    ]
+    mirrors = cli._classify_mirrors(
+        [_mirror_row()], {"prod-shanghai": [package]}, {"prod-shanghai": heads}
+    )
+    group = mirrors["prod-shanghai"]
+    assert group["in_sync"] == []
+    assert [entry["notebook_id"] for entry in group["ambiguous"]] == ["nb-1"]
+    assert group["ambiguous"][0]["head_package_id"] is None
+
+
+def test_classify_mirrors_chain_participant_without_a_head_is_ambiguous():
+    """理论上不可能（这个包自己就是链头候选），但仍然回答而不是默认通过。"""
+    package = _prior_import("pkg-A")
+    mirrors = cli._classify_mirrors(
+        [_mirror_row()], {"prod-shanghai": [package]}, {"prod-shanghai": []}
+    )
+    assert [entry["notebook_id"] for entry in mirrors["prod-shanghai"]["ambiguous"]] == [
+        "nb-1"
+    ]
+
+
+def test_classify_mirrors_scoped_snapshot_older_than_the_head_is_lagging():
+    """判据 3：scoped 包的 to_seq 在库里恒为 0，所以只能按导出时间判。这本最后
+    一次是被一个**比链头更旧**的快照刷的——两次导出之间对它的改动不会再有窗口
+    带过来（窗口只装自己范围内有变更的本），所以是真落后。"""
+    package = _prior_import(
+        "pkg-scoped",
+        scoped=True,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        # 导入发生在窗口之后：落后与导入先后无关，只跟快照新旧有关。
+        started_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    head = _prior_import(
+        "pkg-B",
+        to_seq=20,
+        base_package_id="pkg-A",
+        created_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
+    )
+    mirrors = cli._classify_mirrors(
+        [_mirror_row(name="镜像本")],
+        {"prod-shanghai": [package]},
+        {"prod-shanghai": [head]},
+    )
+    group = mirrors["prod-shanghai"]
+    assert group["in_sync"] == []
+    assert group["lagging"] == [
+        {
+            "notebook_id": "nb-1",
+            "name": "镜像本",
+            "applied_package_id": "pkg-scoped",
+            "applied_created_at": "2026-01-01T00:00:00+00:00",
+            "head_package_id": "pkg-B",
+            "head_created_at": "2026-01-05T00:00:00+00:00",
+            "deleting": False,
+        }
+    ]
+
+
+def test_classify_mirrors_scoped_snapshot_newer_than_the_head_is_ahead():
+    package = _prior_import(
+        "pkg-scoped", scoped=True, created_at=datetime(2026, 1, 9, tzinfo=timezone.utc)
+    )
+    head = _prior_import(
+        "pkg-B", to_seq=20, created_at=datetime(2026, 1, 5, tzinfo=timezone.utc)
+    )
+    mirrors = cli._classify_mirrors(
+        [_mirror_row()], {"prod-shanghai": [package]}, {"prod-shanghai": [head]}
+    )
+    group = mirrors["prod-shanghai"]
+    assert group["lagging"] == []
+    assert [entry["notebook_id"] for entry in group["ahead"]] == ["nb-1"]
+    assert group["ahead"][0]["applied_created_at"] == "2026-01-09T00:00:00+00:00"
+    assert group["ahead"][0]["head_created_at"] == "2026-01-05T00:00:00+00:00"
+
+
+def test_classify_mirrors_scoped_snapshot_exactly_at_the_head_is_ahead():
+    """边界：`created_at == head.created_at` 归 ahead——同一时刻的快照不可能
+    漏掉链头已覆盖的东西。"""
+    moment = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    package = _prior_import("pkg-scoped", scoped=True, created_at=moment)
+    head = _prior_import("pkg-B", to_seq=20, created_at=moment)
+    mirrors = cli._classify_mirrors(
+        [_mirror_row()], {"prod-shanghai": [package]}, {"prod-shanghai": [head]}
+    )
+    group = mirrors["prod-shanghai"]
+    assert group["lagging"] == []
+    assert [entry["notebook_id"] for entry in group["ahead"]] == ["nb-1"]
+
+
+def test_classify_mirrors_scoped_package_without_a_readable_created_at_is_unknown():
+    """两个时间戳都要可读才谈得上比较：缺 `package_created_at` 的旧行只能报
+    unknown，不能拿目标端的 `started_at`（另一个时钟）去跟源端时间比。"""
+    package = _prior_import("pkg-scoped", scoped=True, created_at=None)
+    head = _prior_import(
+        "pkg-B", to_seq=20, created_at=datetime(2026, 1, 5, tzinfo=timezone.utc)
+    )
+    mirrors = cli._classify_mirrors(
+        [_mirror_row()], {"prod-shanghai": [package]}, {"prod-shanghai": [head]}
+    )
+    group = mirrors["prod-shanghai"]
+    assert group["lagging"] == []
+    assert group["ahead"] == []
+    assert [entry["notebook_id"] for entry in group["unknown"]] == ["nb-1"]
+    assert group["unknown"][0]["applied_package_id"] == "pkg-scoped"
+    assert group["unknown"][0]["applied_created_at"] is None
+
+
+def test_classify_mirrors_scoped_package_without_any_head_is_no_chain():
+    package = _prior_import("pkg-scoped", scoped=True)
+    mirrors = cli._classify_mirrors(
+        [_mirror_row()], {"prod-shanghai": [package]}, {"prod-shanghai": []}
+    )
+    group = mirrors["prod-shanghai"]
+    assert [entry["notebook_id"] for entry in group["no_chain"]] == ["nb-1"]
+    assert group["no_chain"][0]["applied_package_id"] == "pkg-scoped"
+    assert group["no_chain"][0]["head_package_id"] is None
+
+
+def test_classify_mirrors_scoped_package_with_two_heads_is_ambiguous():
+    package = _prior_import("pkg-scoped", scoped=True)
+    heads = [_prior_import("pkg-B", to_seq=20), _prior_import("pkg-C", to_seq=20)]
+    mirrors = cli._classify_mirrors(
+        [_mirror_row()], {"prod-shanghai": [package]}, {"prod-shanghai": heads}
+    )
+    assert [
+        entry["notebook_id"] for entry in mirrors["prod-shanghai"]["ambiguous"]
+    ] == ["nb-1"]
+
+
+def test_classify_mirrors_a_scoped_head_is_not_a_baseline():
+    """`_chain_heads_for` 会把 scoped 包当合法链头（它回答的是「下一个包的
+    base 可以指向谁」），但 scoped 包不覆盖任何 scope，不能当判据基准——否则
+    「只导入过 scoped 包」会被判成 `ahead`（文案说「无需动作」），而实际上
+    这里没有链可续，下一个增量包会被 `_assert_chain` 拒。"""
+    package = _prior_import("pkg-scoped", scoped=True)
+    mirrors = cli._classify_mirrors(
+        [_mirror_row()], {"prod-shanghai": [package]}, {"prod-shanghai": [package]}
+    )
+    group = mirrors["prod-shanghai"]
+    assert group["ahead"] == []
+    assert [entry["notebook_id"] for entry in group["no_chain"]] == ["nb-1"]
+
+
+def test_classify_mirrors_an_extra_scoped_head_does_not_make_everything_ambiguous():
+    """最后一个窗口之后又导了一个 scoped 包：链头确实变成两条，但只有一条
+    参与链——没被 scoped 包碰过的镜像位置并不含糊，仍然是 in_sync。"""
+    window = _prior_import("pkg-window", to_seq=30, base_package_id="pkg-full")
+    late_scoped = _prior_import(
+        "pkg-late",
+        scoped=True,
+        notebooks=("nb-other",),
+        created_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+    )
+    mirrors = cli._classify_mirrors(
+        [_mirror_row()],
+        {"prod-shanghai": [window, late_scoped]},
+        {"prod-shanghai": [window, late_scoped]},
+    )
+    group = mirrors["prod-shanghai"]
+    assert group["ambiguous"] == []
+    assert [entry["notebook_id"] for entry in group["in_sync"]] == ["nb-1"]
+
+
+def test_classify_mirrors_source_env_never_imported_is_unknown():
+    """判据 4：目标端有 sync_origin=E 的镜像，但 E 在 sync_imports 里一行都没有。"""
+    mirrors = cli._classify_mirrors([_mirror_row(sync_origin="prod-osaka")], {}, {})
+    group = mirrors["prod-osaka"]
+    assert group["total"] == 1
+    assert [entry["notebook_id"] for entry in group["unknown"]] == ["nb-1"]
+    assert group["unknown"][0]["applied_package_id"] is None
+    assert group["unknown"][0]["applied_created_at"] is None
+
+
+def test_classify_mirrors_package_that_does_not_name_this_notebook_is_unknown():
+    package = _prior_import("pkg-A", notebooks=("nb-other",))
+    mirrors = cli._classify_mirrors(
+        [_mirror_row()], {"prod-shanghai": [package]}, {"prod-shanghai": [package]}
+    )
+    assert [entry["notebook_id"] for entry in mirrors["prod-shanghai"]["unknown"]] == [
+        "nb-1"
+    ]
+
+
+def test_classify_mirrors_unreadable_report_json_is_unknown_not_empty_coverage():
+    """``_PriorImport.notebooks is None`` 是「答不上来」，不是「什么都没带」——
+    旧行/JSON 不可读只能报 unknown，不能拿来当覆盖判据。"""
+    package = _prior_import("pkg-A", notebooks=None)
+    mirrors = cli._classify_mirrors(
+        [_mirror_row()], {"prod-shanghai": [package]}, {"prod-shanghai": [package]}
+    )
+    assert [entry["notebook_id"] for entry in mirrors["prod-shanghai"]["unknown"]] == [
+        "nb-1"
+    ]
+
+
+def test_classify_mirrors_only_done_packages_count():
+    """failed/running 的包碰过这本也不算数——它没有把这本落成任何一个快照。"""
+    failed = _prior_import("pkg-failed", status="failed", scoped=True)
+    mirrors = cli._classify_mirrors(
+        [_mirror_row()], {"prod-shanghai": [failed]}, {"prod-shanghai": []}
+    )
+    assert [entry["notebook_id"] for entry in mirrors["prod-shanghai"]["unknown"]] == [
+        "nb-1"
+    ]
+
+
+def test_classify_mirrors_falls_back_to_started_at_when_created_at_is_missing():
+    """排序口径：选「最近带过这本的包」时，有 created_at 按 created_at，缺的
+    旧行按目标端自己的 started_at——这里选中的是缺 created_at 的 pkg-late。
+    选中之后它答不上导出时间，于是判 unknown（两个时钟不能互比）。"""
+    early = _prior_import(
+        "pkg-early",
+        scoped=True,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    late = _prior_import(
+        "pkg-late",
+        scoped=True,
+        created_at=None,
+        started_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    head = _prior_import("pkg-head", to_seq=20)
+    mirrors = cli._classify_mirrors(
+        [_mirror_row()],
+        {"prod-shanghai": [early, late]},
+        {"prod-shanghai": [head]},
+    )
+    unknown = mirrors["prod-shanghai"]["unknown"]
+    assert [entry["applied_package_id"] for entry in unknown] == ["pkg-late"]
+
+
+def test_classify_mirrors_deleting_mirror_gets_its_own_bucket():
+    """判据 5：等删除作业清理的镜像单独进 `deleting` 桶，不再进其它桶——
+    这样监控可以直接拿 `len(lagging) > 0` 当报警条件。"""
+    package = _prior_import(
+        "pkg-scoped", scoped=True, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc)
+    )
+    head = _prior_import(
+        "pkg-B", to_seq=20, created_at=datetime(2026, 1, 5, tzinfo=timezone.utc)
+    )
+    mirrors = cli._classify_mirrors(
+        [_mirror_row(status="deleting")],
+        {"prod-shanghai": [package]},
+        {"prod-shanghai": [head]},
+    )
+    group = mirrors["prod-shanghai"]
+    # 不做这一层短路的话这本会是 lagging（快照比链头旧）。
+    assert group["lagging"] == []
+    assert [entry["notebook_id"] for entry in group["deleting"]] == ["nb-1"]
+    assert group["deleting"][0]["deleting"] is True
+    # 条目仍然带着算出来的证据，运维看行就知道最后是哪个包碰的。
+    assert group["deleting"][0]["applied_package_id"] == "pkg-scoped"
+
+
+def test_classify_mirrors_groups_by_sync_origin():
+    shanghai = _prior_import("pkg-sh", notebooks=("nb-1",))
+    osaka = _prior_import(
+        "pkg-os",
+        notebooks=("nb-2",),
+        scoped=True,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    osaka_head = _prior_import(
+        "pkg-os-head", to_seq=9, created_at=datetime(2026, 1, 4, tzinfo=timezone.utc)
+    )
+    mirrors = cli._classify_mirrors(
+        [_mirror_row("nb-1"), _mirror_row("nb-2", sync_origin="prod-osaka")],
+        {"prod-shanghai": [shanghai], "prod-osaka": [osaka]},
+        {"prod-shanghai": [shanghai], "prod-osaka": [osaka_head]},
+    )
+    assert sorted(mirrors) == ["prod-osaka", "prod-shanghai"]
+    assert [entry["notebook_id"] for entry in mirrors["prod-shanghai"]["in_sync"]] == [
+        "nb-1"
+    ]
+    assert [entry["notebook_id"] for entry in mirrors["prod-osaka"]["lagging"]] == [
+        "nb-2"
+    ]
+
+
+def test_classify_mirrors_caps_detail_lines_per_bucket_in_the_human_output(capsys):
+    """`status` 是巡检不是转储：每桶最多 20 行，超出打「另有 N 本」。"""
+    head = _prior_import(
+        "pkg-head", to_seq=20, created_at=datetime(2026, 1, 5, tzinfo=timezone.utc)
+    )
+    scoped = _prior_import(
+        "pkg-scoped",
+        scoped=True,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        notebooks=tuple(f"nb-{index}" for index in range(25)),
+    )
+    mirrors = cli._classify_mirrors(
+        [_mirror_row(f"nb-{index}") for index in range(25)],
+        {"prod-shanghai": [scoped]},
+        {"prod-shanghai": [head]},
+    )
+    assert len(mirrors["prod-shanghai"]["lagging"]) == 25
+    cli._print_mirror_section(mirrors)
+    out = capsys.readouterr().out
+    assert out.count("落后 nb-") == 20
+    assert "另有 5 本落后的镜像未列出" in out
+
+
+def test_classify_mirrors_without_any_mirror_returns_empty():
+    assert cli._classify_mirrors([], {"prod-shanghai": []}, {"prod-shanghai": []}) == {}
+
+
+def _insert_mirror(conn, notebook_id, sync_origin, *, status="draft"):
+    conn.execute(
+        "INSERT INTO notebooks(id,name,purpose,primary_domain,status,"
+        "created_by,created_at,updated_at,sync_origin) VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            notebook_id,
+            notebook_id,
+            "",
+            "",
+            status,
+            None,
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-01T00:00:00+00:00",
+            sync_origin,
+        ),
+    )
+
+
+def test_status_surveys_mirrors_against_the_chain_head(tmp_path, monkeypatch, capsys):
+    """真 ``_load_sync_status``：一个全量包 + 一个窗口 + 一个**更旧**的 scoped
+    包（导出于全量之后、窗口之前）。nb-chain 最后由窗口带过（in_sync）；
+    nb-scoped 最后一次是被那个比链头更旧的快照刷的（lagging）；nb-gone 正在
+    等删除作业（deleting 桶，不在 lagging 里）；nb-orphan 的 sync_origin 指向
+    一个从未导入过的环境（unknown）。"""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            _insert_import_row(
+                conn,
+                package_id="pkg-full",
+                source_env="prod-shanghai",
+                to_seq=10,
+                created_at="2026-01-01T00:00:00+00:00",
+                notebooks=("nb-chain", "nb-scoped", "nb-gone"),
+            )
+            _insert_import_row(
+                conn,
+                package_id="pkg-scoped",
+                source_env="prod-shanghai",
+                created_at="2026-01-02T00:00:00+00:00",
+                # 导入发生在窗口**之后**（六月才引入的一个一月份的快照）：判据
+                # 只看源端导出时间，不看目标端导入先后——晚点应用一个旧快照
+                # 并不会让它变新。
+                started_at="2026-06-01T00:00:00+00:00",
+                scoped=True,
+                notebooks=("nb-scoped", "nb-gone"),
+            )
+            _insert_import_row(
+                conn,
+                package_id="pkg-window",
+                source_env="prod-shanghai",
+                from_seq=11,
+                to_seq=30,
+                created_at="2026-01-03T00:00:00+00:00",
+                mode="incremental",
+                base_package_id="pkg-full",
+                notebooks=("nb-chain",),
+            )
+            _insert_mirror(conn, "nb-chain", "prod-shanghai")
+            _insert_mirror(conn, "nb-scoped", "prod-shanghai")
+            _insert_mirror(conn, "nb-gone", "prod-shanghai", status="deleting")
+            _insert_mirror(conn, "nb-orphan", "prod-osaka")
+    finally:
+        database.close()
+
+    exit_code = cli.main(["status", "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    shanghai = payload["mirrors"]["prod-shanghai"]
+    assert shanghai["total"] == 3
+    assert [entry["notebook_id"] for entry in shanghai["in_sync"]] == ["nb-chain"]
+    assert shanghai["lagging"] == [
+        {
+            "notebook_id": "nb-scoped",
+            "name": "nb-scoped",
+            "applied_package_id": "pkg-scoped",
+            "applied_created_at": "2026-01-02T00:00:00+00:00",
+            "head_package_id": "pkg-window",
+            "head_created_at": "2026-01-03T00:00:00+00:00",
+            "deleting": False,
+        }
+    ]
+    # 同样被那个更旧的 scoped 包碰过，但它在等删除作业：单独进 deleting 桶，
+    # 不进 lagging，这样 len(lagging) 可以直接当报警条件。
+    assert [entry["notebook_id"] for entry in shanghai["deleting"]] == ["nb-gone"]
+    assert shanghai["ahead"] == []
+    assert shanghai["unknown"] == []
+    osaka = payload["mirrors"]["prod-osaka"]
+    assert osaka["total"] == 1
+    assert [entry["notebook_id"] for entry in osaka["unknown"]] == ["nb-orphan"]
+
+    exit_code = cli.main(["status"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "镜像笔记本" in out
+    assert (
+        "-> prod-shanghai: 共 3 本（已跟上 1，落后 1，领先 0，无链 0，不确定 0，"
+        "未知 0，待删除 1）"
+    ) in out
+    assert (
+        "落后 nb-scoped（nb-scoped）：最近带过它的是 pkg-scoped"
+        "（2026-01-02T00:00:00+00:00），比链头 pkg-window"
+        "（2026-01-03T00:00:00+00:00）更旧；"
+    ) in out
+    assert "现在对它再做一次 sync export --notebook 并导入" in out
+    assert "待删除 nb-gone（nb-gone）：" in out
+    # 判据 4（该 source_env 从未在本环境导入过）也走 unknown，所以文案必须把
+    # 三种成因都说全，不能只说「导入早于本记账」。
+    assert (
+        "未知 nb-orphan（nb-orphan）：没有任何 done 导入记录能说明这本的位置："
+        "该源环境从未在本环境导入过、只有 failed/running 的行，"
+        "或者记录早于本记账、report_json 不可读"
+    ) in out
+
+
+def test_status_mirror_of_a_scoped_only_source_env_is_no_chain(
+    tmp_path, monkeypatch, capsys
+):
+    """只导入过 scoped 包的环境：`_chain_heads_for` 会把那个 scoped 包当成
+    合法链头（它下游没有任何东西，也不在任何东西下游），但它不覆盖任何
+    scope——拿它当基准会得出 `ahead`（「无需动作」），而实际上这里根本没有链
+    可续，下一个增量包会被 `_assert_chain` 直接拒。基准必须只取参与链的链头，
+    于是这里是 `no_chain`（先导一次全量）。"""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            _insert_import_row(
+                conn,
+                package_id="pkg-scoped-only",
+                source_env="prod-osaka",
+                created_at="2026-01-01T00:00:00+00:00",
+                scoped=True,
+                notebooks=("nb-only",),
+            )
+            _insert_mirror(conn, "nb-only", "prod-osaka")
+    finally:
+        database.close()
+
+    exit_code = cli.main(["status", "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    osaka = payload["mirrors"]["prod-osaka"]
+    assert osaka["ahead"] == []
+    assert osaka["ambiguous"] == []
+    assert osaka["no_chain"] == [
+        {
+            "notebook_id": "nb-only",
+            "name": "nb-only",
+            "applied_package_id": "pkg-scoped-only",
+            "applied_created_at": "2026-01-01T00:00:00+00:00",
+            "head_package_id": None,
+            "head_created_at": None,
+            "deleting": False,
+        }
+    ]
+
+    exit_code = cli.main(["status"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert (
+        "无链 nb-only（nb-only）：最近带过它的是 pkg-scoped-only"
+        "（2026-01-01T00:00:00+00:00）；"
+    ) in out
+    assert "从未做过覆盖全 scope 的导入（只有 scoped 导入），先导入一次全量包" in out
+
+
+def test_status_scoped_import_after_the_last_window_does_not_blur_every_mirror(
+    tmp_path, monkeypatch, capsys
+):
+    """全量 + 窗口之后又临时 `sync export --notebook` 导了一个 scoped 包
+    （`created_at` **晚于**窗口）：那个 scoped 包也是一个合法链头（没有更晚
+    的、参与链的包越过它），所以 `chain_heads` 里确实有两条。但它只碰了一
+    本——没被它碰过的镜像位置并不含糊，仍然是 `in_sync`；被它碰过的那本快照
+    不早于链头，所以是 `ahead`（下一次窗口幂等覆盖，无需动作）。"""
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    database = SqliteDatabase(settings, tmp_path)
+    try:
+        with database.write() as conn:
+            _insert_import_row(
+                conn,
+                package_id="pkg-full",
+                source_env="prod-shanghai",
+                to_seq=10,
+                created_at="2026-01-01T00:00:00+00:00",
+                notebooks=("nb-chain", "nb-patched"),
+            )
+            _insert_import_row(
+                conn,
+                package_id="pkg-window",
+                source_env="prod-shanghai",
+                from_seq=11,
+                to_seq=30,
+                created_at="2026-01-02T00:00:00+00:00",
+                mode="incremental",
+                base_package_id="pkg-full",
+                notebooks=("nb-chain", "nb-patched"),
+            )
+            _insert_import_row(
+                conn,
+                package_id="pkg-late-scoped",
+                source_env="prod-shanghai",
+                created_at="2026-01-03T00:00:00+00:00",
+                scoped=True,
+                notebooks=("nb-patched",),
+            )
+            _insert_mirror(conn, "nb-chain", "prod-shanghai")
+            _insert_mirror(conn, "nb-patched", "prod-shanghai")
+    finally:
+        database.close()
+
+    exit_code = cli.main(["status", "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    # 链头确实有两条（窗口 + 那个更晚的 scoped 包），巡检不受影响。
+    assert [head["package_id"] for head in payload["chain_heads"]["prod-shanghai"]] == [
+        "pkg-window",
+        "pkg-late-scoped",
+    ]
+    shanghai = payload["mirrors"]["prod-shanghai"]
+    assert shanghai["total"] == 2
+    assert [entry["notebook_id"] for entry in shanghai["in_sync"]] == ["nb-chain"]
+    assert shanghai["ambiguous"] == []
+    assert shanghai["lagging"] == []
+    assert [entry["notebook_id"] for entry in shanghai["ahead"]] == ["nb-patched"]
+    assert shanghai["ahead"][0]["applied_package_id"] == "pkg-late-scoped"
+    assert shanghai["ahead"][0]["head_package_id"] == "pkg-window"
+
+    exit_code = cli.main(["status"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert (
+        "领先 nb-patched（nb-patched）：最近带过它的是 pkg-late-scoped"
+        "（2026-01-03T00:00:00+00:00），不早于链头 pkg-window"
+        "（2026-01-02T00:00:00+00:00）；"
+    ) in out
+    assert "下一次窗口会按幂等 upsert 覆盖，无需动作" in out
+
+
+def test_status_mirror_section_says_so_when_there_are_no_mirrors(
+    tmp_path, monkeypatch, capsys
+):
+    settings = _settings(tmp_path, monkeypatch)
+    repository = SQLiteRepository(settings)
+    repository.close()
+
+    exit_code = cli.main(["status"])
+    assert exit_code == 0
+    assert "（本环境没有镜像笔记本）" in capsys.readouterr().out
+
+    exit_code = cli.main(["status", "--json"])
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out)["mirrors"] == {}
 
 
 def test_status_missing_sync_tables_gives_named_message(tmp_path, monkeypatch, capsys):

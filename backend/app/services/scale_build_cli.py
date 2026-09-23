@@ -153,6 +153,21 @@ class ScaleBuildCliFailure(RuntimeError):
     """The command was attempted and failed. Operator-facing; exit code 1."""
 
 
+class ScaleBuildCliBusy(ScaleBuildCliFailure):
+    """Someone else holds this notebook's build claim; nothing was published.
+
+    A SUBCLASS rather than a sibling, so every existing handler -- ``main``'s
+    ``except ScaleBuildCliFailure`` and its exit code 1 above all -- keeps
+    treating it exactly as before. It exists for callers that are not an
+    operator typing a command and can do something better than reporting a
+    failure: ``sync import``'s automatic post-import rebuild
+    (``app.migration.sync.scale_rebuild``) records it as a SKIP, because "the
+    live service is already building this notebook" is the system working, not
+    the rebuild going wrong. That distinction is invisible from the message
+    alone, which is why it is a type.
+    """
+
+
 class _ImportPipelineIdentityDrifted(RuntimeError):
     """Internal to ``run_import`` (codex PR#643 R5 P1): the live pipeline
     identity changed while this package's roots were being staged. Caught
@@ -1659,7 +1674,10 @@ def run_build(
         # of the documented exit-code-2 refusal (codex PR#643 R1 P2).
         raise ScaleBuildCliError(f"unknown notebook: {notebook_id}") from None
     except ScaleBuildBusy as error:
-        raise ScaleBuildCliFailure(
+        # ``ScaleBuildCliBusy`` is a ``ScaleBuildCliFailure``: ``main`` and any
+        # other existing caller are unaffected, while a programmatic caller can
+        # tell "another builder owns it" from "the build went wrong".
+        raise ScaleBuildCliBusy(
             f"{error}. Nothing was published; retry once the other builder "
             "finishes."
         ) from None

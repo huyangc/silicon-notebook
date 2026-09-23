@@ -202,7 +202,21 @@ users 不同步但导入时可能**创建**：见 §4。
   只在父行（笔记本/组）由本次导入创建时播种，目标端撤销过的授权不会被下一个包插回。授权边表只在首次创建笔记本时写入源端授权，之后
   不覆盖。
 - 前端对镜像笔记本隐藏或禁用上述入口，并在来源面板顶部标注「镜像自 <sync_origin>」；
-  按钮反馈规则遵循 `AGENTS.md` Interactive feedback。
+  按钮反馈规则遵循 `AGENTS.md` Interactive feedback。浏览器端「哪些入口画出来」的唯一
+  判据是 `frontend/app/workspace-transitions.ts::workspaceCapabilities`（第四参
+  `syncOrigin`），它按上面的能力表**逐格**映射而不是「镜像 = 只读」：镜像的 owner 仍能
+  链接分享、管群组授权、提问、建报告，并且**必须**能重建检索索引（`scale_index:write`
+  放行，索引是目标端自有派生产物）。改名/tier 与「删除笔记本」在镜像上不渲染成可操作，
+  原位留一句说明（「镜像的名称、档位与参考库挂载随源环境同步」/「镜像只能由同步导入
+  退役」；镜像上整扇「笔记本设置」弹窗都不开，挂载区的说明并入前一句）；笔记本列表行的
+  角色列旁与网格卡片的 meta 槽都挂「镜像」小标。记忆面板的编辑入口**不收**：memory 写
+  端点只挂用户身份 + 行级归属、不经能力守卫，而本节「放行」已明文允许目标端用户确认/修改
+  镜像上的 memory——前端若按 `knowledge:write` 推断把它收起，会比后端更严且让纯只读成员
+  失去编辑自己私有记忆的能力。组件里不得直接判 `sync_origin`（标注处除外）。
+- 409 兜底：`notebook_mirrored` 的结构化 detail 刻意不带 `X-User-Message`，前端在
+  `frontend/app/errors.ts::parseMirroredFailure` 里按 **status 409 + code 成对**的具名形状
+  单独放行，让后端那句中文原文能上屏。这只是兜底——正常路径入口已收起；改动该 detail
+  形状时要同步这一处。
 - 导入器自身绕过围栏：它走 repository 层，不经过服务层谓词。其它运维 CLI（batch_ingest
   等）同样不经围栏，在镜像上批量灌料是否合法由运维流程约束，不由代码挡。
 - 围栏与写事务之间有一个窗口：守卫读到 sync_origin 为空之后、写入落库之前，导入器把该
@@ -227,9 +241,19 @@ users 不同步但导入时可能**创建**：见 §4。
   驱动的整体替换指令。
 - 人工审核字段（knowledge_objects 的 status/owner/last_reviewed）随行同步；目标端不允许
   改（§5）。
-- `kg_index`/`kg_viz`/`kg_index_partitions` 不拷贝，目标端按现有 scale build 流程重建；
-  PR-2 的导入器不触发重建（它不 import 服务层），运维在导入后按 operations 文档对涉及的大库
-  跑一次 `scale` 构建；PR-4 把这一步自动化。
+- `kg_index`/`kg_viz`/`kg_index_partitions` 不拷贝，目标端按现有 scale build 流程重建。
+  PR-2 的导入器本身仍然不触发重建（`import_.py` 不 import 服务层）；PR-4 T2 把它接在了
+  **CLI 层**：`sync import` 在导入置 `done` 之后调
+  `app.migration.sync.scale_rebuild.rebuild_after_import`，由它组合离线构建器
+  （`app.services.scale_build_cli`）逐本同步重建，默认 `--rebuild-scale auto`。判据整体复用
+  服务内自动建索引那一套（`state` 属于 `unindexed`/`suggested`/`stale`、`copyable` 为假即
+  「大到需要 scale 索引」、全量/折叠走同一个 `_resolve_scale_mode(…, "auto")`），不在同步侧
+  另立阈值；`notebooks_deleted` 与 `notebooks_delete_skipped` 里的本不参与。组装仓库之前先跑
+  `verify_migration_ledger`，与 `scale_build_cli.main` 同序——checkout 与线上库差一个迁移时，
+  建出来的索引是静默错误的，而它会原子换名顶掉一份健康索引。构建器在动手前拒绝（笔记本对
+  `require_write_admission` 不算 live、或 indexing pipeline 不可用）记 `skipped:refused_by_builder`，
+  跨进程 claim 被别人（通常是在线服务自己的调度）持有记 `skipped:busy`，两者都不发警告。
+  SQLite 没有跨进程 claim，离线构建器不可用，记成 `skipped:sqlite_backend`。
 
 ## 7. 源端变更捕获
 
@@ -848,8 +872,11 @@ sync export --target <env> --out <dir> [--notebook <id>]... [--source-env <name>
     # 未给 --full ⇒ 增量，否则全量；两种都推进水位。给了 --notebook（不论是否同时给 --full）：
     # 永远全量、永远不推进水位（manifest base_package_id=''、from_seq=to_seq=0）。
 sync import <package_dir> [--create-missing-users] [--dry-run] [--importer-user <id>]
-    [--resume] [--verify-files] [--json]
+    [--resume] [--verify-files] [--take-over] [--rebuild-scale {auto,skip}] [--json]
     # --resume：同一个包断点续跑必须显式给；--verify-files：文件二次 sha256
+    # --take-over：接管同一 source_env 一个仍是 running 的导入，仅在确认那个进程真的死了之后
+    # --rebuild-scale：导入置 done 之后是否自动重建受影响笔记本的 scale 索引（默认 auto，
+    #   见 §6 末尾）；无论哪种取值都不影响导入本身的结果与退出码
     # 接受 mode=full 与 mode=incremental 的 v2 包（§8「导入相位」）：full 要求 deletes/kg_epochs
     # 为空；incremental 要求 base_package_id 等于同源链头的 package_id（不等则拒绝，错误给出
     # 两种出路：链头是 failed/running ⇒ 先 --resume 或处理那个包，否则源端 sync export --full
@@ -861,8 +888,13 @@ sync status [--json]      # 本库的导出水位（每个目标环境）、在�
                            # 每个 source_env 的导入链头——JSON 里是列表，通常一条
                            # （package_id/to_seq/created_at）；同源存在多条互不下游的 done 包
                            # 时全部列出并标「链头不唯一」（见下方「链头」定义）、等待删除作业
-                           # 清理的镜像数、已引入的包与变更捕获开关状态；落后的笔记本清单在
-                           # PR-4
+                           # 清理的镜像数、已引入的包与变更捕获开关状态；以及镜像笔记本巡检
+                           # ——按 sync_origin 分组的 mirrors[E]：total，加上 in_sync/lagging/
+                           # ahead/no_chain/ambiguous/unknown/deleting 七个列表，条目是
+                           # {notebook_id, name, applied_package_id, applied_created_at,
+                           # head_package_id, head_created_at, deleting}（不适用的字段为
+                           # null；没有 to_seq 类字段——scoped 包的区间恒为 0/0）；人读每桶
+                           # 最多列 20 行。判据见 §9
 sync capture enable [--json]   # 打开源端变更捕获；清空 sync_export_state（下一次导出必是全量）
 sync capture disable [--json]  # 关闭变更捕获；清空 sync_export_state 与 sync_change_log
 sync capture status [--json]   # 开关状态、enabled_at/disabled_at、日志行数与 seq 范围
@@ -1239,12 +1271,17 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
      条目，续跑跳过。
 5. 收尾，按「可回滚的先做、发布最后」的顺序：`sync_origin` 再补打一次（第二条腿，首插时
    已带）→ 文件目录正式生效（全量包这里才删 `.sync-old`；增量包这一步纯粹是进度收口，没有
-   目录可删）→ `_stamp_mirrors`（按 `manifest.notebooks` 更新 `sync_applied_through_seq` 等
-   镜像记账列）→ 把本次预留（reserved）的笔记本 `status` 从 `importing` 翻成 `draft`；
+   目录可删）→ `_stamp_mirrors`（按 `manifest.notebooks` 补齐镜像的 `sync_origin`；**不落**
+   逐本的 `sync_applied_through_seq` 之类的水位列，理由见 §9）→ 把本次预留（reserved）的
+   笔记本 `status` 从 `importing` 翻成 `draft`；
    `sync_imports` 置 done；写导入报告（写盘失败降级为 warning）。任何一步失败，本次首插的
    笔记本回到 `importing`（不可见）；全量包文件回滚（文件换名中途失败时退休目录已登记或
    就地换回，镜像目录不会消失），增量包保留已复制成功的部分（`--resume` 重做）。大库的
-   scale 重建由运维按 operations 文档手动跑，PR-4 自动化。
+   scale 重建（PR-4 T2）发生在这一步**之后**、完全在 CLI 层：`sync_imports` 已经是 `done`、
+   `report_json` 已经落盘，所以重建既不回写这一行，也不改变 `sync import` 的退出码——每本的
+   结果只以 `built`/`folded`/`skipped:<原因>`/`failed:<异常类名>` 进 CLI 输出与 `--json` 的
+   `scale_rebuild` 字段（`ImportReport.as_json()` 不带它，否则存进去的永远是空的）。
+   `--rebuild-scale skip` 回到原来的「运维手动跑」。
 
 `ImportReport`/`as_json()` 新增字段：`mode`（`full`/`incremental`）、`base_package_id`、
 `deletes_applied`、`deletes_absent`、`deletes_orphan_skipped`、
@@ -1268,7 +1305,45 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
 ## 9. 验收与对账
 
 - 逐表行数与 `checksums.json` 比对（复用 `sqlite_to_postgres` 的行校验和思路）。
-- 目标端每个镜像笔记本记录 `sync_applied_through_seq`；运维命令能列出落后的笔记本。
+- 目标端**不**为镜像笔记本落 `sync_applied_through_seq` 之类的逐本水位列；落后与否按
+  `sync_imports.report_json` 推导，运维命令（`sync status` 的「镜像笔记本」段）据此列出落后的
+  笔记本。不落列的理由：增量窗口覆盖源端整个同步 scope，窗口带过的每一本水位都等于链头，
+  逐本记账只是把链头抄 N 份，还多出一套要和链头保持一致的写路径；而唯一能让单本偏离链头的
+  是 `--notebook` 限定导出包（它不取租约、不推进水位，所以不入链），这种包已经在自己的
+  `report_json.notebooks` 里记下了带走的是哪几本——推导需要的事实一条都不缺。
+
+  判据（对目标端每一本 `sync_origin = E` 的镜像，`status` 任意）：先在 E 名下找**最近一次
+  `done` 且 `report_json.notebooks` 含该 id** 的包 P（按包自己的 `created_at` 排序，早于该
+  字段的旧行退回目标端的 `started_at`）；找不到就是 `unknown`（导入早于本记账，或
+  `report_json` 不可读；三种成因共用 `unknown`，文案要说全——绝不把「答不上来」当成
+  「没带过」）。找到之后：P 入链（`scoped` 为假，或旧行按形态判定参与链）⇒ 之后的窗口覆盖
+  整个源端 scope，这本就跟链一样新（**包括之后再没有窗口点名它**——那只说明它没变过），
+  基准链头唯一时 `in_sync`，不唯一（§8「已知边界」）时 `ambiguous`；P 是 scoped 包 ⇒ 没有
+  基准链头是 `no_chain`（只做过 scoped 导入，从未导入过覆盖全 scope 的包），多于一条是
+  `ambiguous`，唯一一条记为 H 时按**导出时间**比：两边任一缺 `package_created_at` 是
+  `unknown`，`P.created_at >= H.created_at` 是 `ahead`（快照不早于链已覆盖的范围，下一次窗口
+  按幂等 upsert 覆盖，无需动作），`P.created_at < H.created_at` 是 `lagging`。
+  `status='deleting'` 的镜像**单独进 `deleting` 桶**，不再进其它桶，这样监控可以直接拿
+  `len(lagging) > 0` 当报警条件。
+
+  **按记录顺序判，不按水位高度**（#788 r2 的同一条规矩）。这里不仅是「更好的规则」，而是
+  唯一可能的规则：`export.py` 对 scoped 包硬写 `from_seq, to_seq, base_package_id = 0, 0, ""`
+  （「子集包不对序列区间做任何声明」），`import_.py` 把 manifest 的数字原样写进
+  `sync_imports`，所以库里**任何 scoped 行的 `to_seq` 恒为 0**。比高低的话，每一本被 scoped
+  包碰过的镜像都会恒定「落后一个链头水位」，`ahead` 分支永远走不到。`lagging` 的实质是：这本
+  最后一次是被一个比链头更旧的快照刷的，两次导出之间对它的改动不会再有任何窗口带过来（窗口
+  只装自己范围内有变更的本），所以处置是**现在**对它再做一次 `sync export --notebook` 并导入
+  （今天取的快照必然不早于链头），或者等下一次全量包。这跟导入先后无关：晚一点应用一个旧
+  快照并不会让它变新，所以判据只读源端的 `package_created_at`，不读目标端的 `started_at`。
+
+  **基准链头比 `sync status` 打印的链头集合更窄**：只取 `participates_in_chain` 为真的那些。
+  `_chain_heads_for` 回答的是「下一个包的 `base_package_id` 可以指向谁」，它会把 scoped 包
+  当合法链头（它不在任何东西下游、也没有东西在它下游），并且在没有任何行入链时把全部 done
+  行当候选——这两种形态都不代表「源端整个 scope 已覆盖到此」。不做这一层收窄会错两次：
+  只导入过 scoped 包的环境会被判成 `ahead`（文案说「无需动作」，可实际上
+  没有链可续，下一个增量包会被 `_assert_chain` 拒，正确处置是先导全量）；最后一个窗口之后
+  临时 `sync export --notebook` 再导入，会让该 `source_env` 的**每一本**镜像都变成
+  `ambiguous`，包括那个 scoped 包根本没碰过、位置毫无疑问的那些。
 - 导入报告以 JSON 落盘并在 CLI 打印摘要：处理的表、行数、跳过与原因、映射结果。
 
 ## 10. 分步交付
@@ -1279,8 +1354,8 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
 | PR-2 | 按笔记本全量导出/导入 CLI（§8 的 `from_seq=0` 特例），manifest 的 `scope` 字段，含文件、身份映射、校验和对账、`sync_export_state` 水位表 | 已合入 #772 |
 | PR-3a | 源端 `sync_change_log` schema 与 46 张表的触发器（`app.migration.sync.capture`，SQLite v84 / PostgreSQL 0064）；两张无主键表补复合键，导出/导入改走 keyed upsert；`sync capture enable/disable/status` 开关与导出水位记账 | 已合入 #783 |
 | PR-3b | 按日志读的增量导出（含 PostgreSQL 快照补偿窗口，SQLite v85 / PostgreSQL 0065）、日志压缩（按 (table,key) 折终态，`kg_epoch` 行不折叠）、产出 `deletes.jsonl`、包格式 v2、`sync export --full`、`sync prune-log` 保留策略；导入端只做最小兼容（接受 v2 全量包，拒绝增量包；`deletes.jsonl` 的重放留给 PR-3c）；`kg_epoch` 整体替换的折叠优化延后（见 §11） | 已合入 #784 |
-| PR-3c | 增量导入（§8「导入相位」）：包分类与链头校验（`base_package_id` 必须等于同源链头，两种出路）、增量包的对账删除跳过、按键精确重放 `deletes.jsonl`（子表先于父表、目标端归属校验、孤儿 no-op）、文件相位对增量改为逐文件合并（不整目录替换）、`deleted_notebooks` 触发笔记本删除传播（CAS `status='deleting'` + 同事务建 `notebook_delete_jobs` 作业行，走既有的删除作业消费路径）；`sync status` 展示每个 source_env 的链头与等待删除作业的镜像数 | 进行中 |
-| PR-4 | 落后笔记本巡检、runbook，前端镜像标注 | 待办 |
+| PR-3c | 增量导入（§8「导入相位」）：包分类与链头校验（`base_package_id` 必须等于同源链头，两种出路）、增量包的对账删除跳过、按键精确重放 `deletes.jsonl`（子表先于父表、目标端归属校验、孤儿 no-op）、文件相位对增量改为逐文件合并（不整目录替换）、`deleted_notebooks` 触发笔记本删除传播（CAS `status='deleting'` + 同事务建 `notebook_delete_jobs` 作业行，走既有的删除作业消费路径）；`sync status` 展示每个 source_env 的链头与等待删除作业的镜像数 | 已合入 #788 |
+| PR-4 | `sync status` 镜像巡检（不落列，按 `sync_imports.report_json` 的记录顺序推导，§9）；`sync import --rebuild-scale auto` 导入后按 scale 运行时自己的 `status()` 口径重建索引（PostgreSQL，失败只记 warning）；前端首次消费 `sync_origin`：`workspaceCapabilities` 按围栏表逐格收起写入口、来源面板标注、列表小标、409 兜底（§5）；runbook 扩到 operations 「按天导出的操作节奏」 | 进行中 |
 
 ## 11. 未决问题
 

@@ -6,6 +6,10 @@ import {
   NotebookMenuActions,
   ReaderNotebookBadge,
 } from "../../app/notebook-reader-actions.tsx";
+import {
+  MIRROR_NOTEBOOK_DELETE_NOTE,
+  MIRROR_NOTEBOOK_MANAGE_NOTE,
+} from "../../app/workspace-transitions.ts";
 import type { NotebookSummary } from "../../app/workspace-model.ts";
 
 // 后端真实形状:`GET /notebooks/{id}` 的详情投影现在回填 access / shared_from /
@@ -65,6 +69,8 @@ test("卡片菜单:只读共享给退出、群组共享只说明由谁管理、o
   const { rerender } = render(
     <NotebookMenuActions
       notebook={notebook({})}
+      canManageNotebook
+      canDeleteNotebook
       onLeave={onLeave}
       onEdit={vi.fn()}
       onDelete={vi.fn()}
@@ -76,6 +82,8 @@ test("卡片菜单:只读共享给退出、群组共享只说明由谁管理、o
   rerender(
     <NotebookMenuActions
       notebook={notebook({ granted_via: VIA_GROUP })}
+      canManageNotebook
+      canDeleteNotebook
       onLeave={onLeave}
       onEdit={vi.fn()}
       onDelete={vi.fn()}
@@ -87,6 +95,8 @@ test("卡片菜单:只读共享给退出、群组共享只说明由谁管理、o
   rerender(
     <NotebookMenuActions
       notebook={notebook({ access: "owner", shared_from: "" })}
+      canManageNotebook
+      canDeleteNotebook
       onLeave={onLeave}
       onEdit={vi.fn()}
       onDelete={vi.fn()}
@@ -152,6 +162,8 @@ test("卡片菜单:组管理员只有「由组管理员管理」——没有编�
   render(
     <NotebookMenuActions
       notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: true })}
+      canManageNotebook
+      canDeleteNotebook
       onLeave={vi.fn()}
       onEdit={vi.fn()}
       onDelete={vi.fn()}
@@ -287,4 +299,115 @@ test("顶栏徽章:链接共享的「退出共享」是这一行唯一的动作,
   );
   expect(screen.getByRole("button", { name: "退出共享" })).toHaveClass("reader-badge-action");
   expect(container.querySelector(".tool-hint")).toBeNull();
+});
+
+// -------------------------------------------- 跨环境增量同步 §5:目标端写入围栏
+//
+// 镜像笔记本上改名(notebook:manage)与删库(notebook:delete)都被后端挡成 409。两位
+// 由调用方按 workspaceCapabilities 算好传进来——组件不读 sync_origin。这里钉的是
+// 「收起来之后原位留下一句说明」:按钮不留、结果落在原控件的位置上,不是整段消失。
+
+test("卡片菜单:镜像库的 owner 看到两句说明,而不是两颗必 409 的按钮", () => {
+  const onEdit = vi.fn();
+  const onDelete = vi.fn();
+  render(
+    <NotebookMenuActions
+      notebook={notebook({ access: "owner", shared_from: "", sync_origin: "site-a" })}
+      canManageNotebook={false}
+      canDeleteNotebook={false}
+      manageDisabledNote={MIRROR_NOTEBOOK_MANAGE_NOTE}
+      deleteDisabledNote={MIRROR_NOTEBOOK_DELETE_NOTE}
+      onLeave={vi.fn()}
+      onEdit={onEdit}
+      onDelete={onDelete}
+    />,
+  );
+
+  expect(screen.queryByRole("button", { name: "编辑信息" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "删除笔记本" })).not.toBeInTheDocument();
+  // 改名/tier/挂载三样是同一扇弹窗里的同一次保存,所以顶替它们的是同一句话——
+  // 镜像上那扇弹窗根本打不开,单给挂载写一句会没有任何位置能显示。
+  expect(screen.getByText("镜像的名称、档位与参考库挂载随源环境同步")).toBeInTheDocument();
+  expect(screen.getByText("镜像只能由同步导入退役")).toBeInTheDocument();
+  expect(onEdit).not.toHaveBeenCalled();
+  expect(onDelete).not.toHaveBeenCalled();
+});
+
+test("卡片菜单:两位互相独立——只挡删库时编辑信息仍在", () => {
+  render(
+    <NotebookMenuActions
+      notebook={notebook({ access: "owner", shared_from: "" })}
+      canManageNotebook
+      canDeleteNotebook={false}
+      deleteDisabledNote={MIRROR_NOTEBOOK_DELETE_NOTE}
+      onLeave={vi.fn()}
+      onEdit={vi.fn()}
+      onDelete={vi.fn()}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "编辑信息" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "删除笔记本" })).not.toBeInTheDocument();
+  expect(screen.getByText(MIRROR_NOTEBOOK_DELETE_NOTE)).toBeInTheDocument();
+  expect(screen.queryByText(MIRROR_NOTEBOOK_MANAGE_NOTE)).not.toBeInTheDocument();
+});
+
+// 文案由调用方给:某一位因为**别的**原因为假时(将来可能有),不传说明就什么都不显示,
+// 绝不会冒出一句「镜像…」去解释一件与镜像无关的事。
+test("卡片菜单:不传说明时那一格直接没有,不会退回写死的镜像文案", () => {
+  render(
+    <NotebookMenuActions
+      notebook={notebook({ access: "owner", shared_from: "" })}
+      canManageNotebook={false}
+      canDeleteNotebook={false}
+      onLeave={vi.fn()}
+      onEdit={vi.fn()}
+      onDelete={vi.fn()}
+    />,
+  );
+  expect(screen.queryByRole("button", { name: "编辑信息" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "删除笔记本" })).not.toBeInTheDocument();
+  expect(document.querySelector(".notebook-menu-note")).toBeNull();
+  expect(screen.queryByText(/镜像/)).toBeNull();
+});
+
+test("顶栏徽章:不下发 rename 时标题退回只读,镜像说明就地出现", () => {
+  render(
+    <ReaderNotebookBadge
+      notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: true, sync_origin: "site-a" })}
+      leaveBusy={false}
+      onLeave={vi.fn()}
+      mirrorNote={MIRROR_NOTEBOOK_MANAGE_NOTE}
+    />,
+  );
+
+  // 组管理员在本地库上本会拿到一个可编辑输入框;镜像上连承接方都没有。
+  expect(screen.queryByLabelText("笔记本名称")).not.toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "封装工艺库" })).toBeInTheDocument();
+  const note = screen.getByText(MIRROR_NOTEBOOK_MANAGE_NOTE);
+  // 两个 chip 并存:镜像那一句额外戴 `.reader-badge-mirror-chip` 收紧 max-width,
+  // 否则 40% + 40% 会把 26px 的库名重新压到看不见(globals.css 有对应的版式注释)。
+  expect(note).toHaveClass("reader-badge-chip");
+  expect(note).toHaveClass("reader-badge-mirror-chip");
+  expect(note).toHaveAttribute("title", MIRROR_NOTEBOOK_MANAGE_NOTE);
+  // 身份徽章没有被顶掉:两件事各说各的。
+  expect(screen.getByText("可管理 · 来自群组《封装项目》")).toBeInTheDocument();
+});
+
+test("顶栏徽章:本地库不渲染镜像说明", () => {
+  const { container } = render(
+    <ReaderNotebookBadge
+      notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: true })}
+      leaveBusy={false}
+      onLeave={vi.fn()}
+      rename={{
+        value: "封装工艺库",
+        saving: false,
+        onChange: vi.fn(),
+        onCommit: vi.fn(),
+        onReset: vi.fn(),
+      }}
+    />,
+  );
+  expect(screen.getByLabelText("笔记本名称")).toBeInTheDocument();
+  expect(container.querySelectorAll(".reader-badge-chip")).toHaveLength(1);
 });

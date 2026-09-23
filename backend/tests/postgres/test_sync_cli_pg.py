@@ -219,6 +219,260 @@ def test_status_reports_chain_head_and_pending_notebook_deletes_on_postgres(
     assert "等待删除作业清理的镜像 1 个（由目标端应用的删除作业完成）" in out
 
 
+def _insert_import_row_pg(
+    conn,
+    *,
+    package_id: str,
+    source_env: str,
+    created_at: str,
+    to_seq: int = 0,
+    from_seq: int = 0,
+    base_package_id: str = "",
+    mode: str = "full",
+    scoped: bool = False,
+    notebooks: tuple[str, ...] = (),
+    started_at: str | None = None,
+) -> None:
+    """一行 ``sync_imports``。``scoped=True`` 强制 ``from_seq``/``to_seq`` 归
+    0——``export.py`` 对子集包硬写的就是 0/0，``import_.py`` 原样写进表里，所以
+    带非零区间的 scoped 行在真库里不存在，用例也不许造出来。``started_at``
+    默认等于 ``created_at``，显式传入是为了钉住判据不看目标端导入先后。"""
+    if scoped:
+        from_seq = 0
+        to_seq = 0
+    conn.execute(
+        "INSERT INTO sync_imports "
+        "(package_id, source_env, from_seq, to_seq, status, started_at, "
+        "finished_at, report_json) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)",
+        (
+            package_id,
+            source_env,
+            from_seq,
+            to_seq,
+            "done",
+            started_at or created_at,
+            started_at or created_at,
+            json.dumps(
+                {
+                    "notebooks": list(notebooks),
+                    "mode": mode,
+                    "base_package_id": base_package_id,
+                    "scoped": scoped,
+                    "package_created_at": created_at,
+                }
+            ),
+        ),
+    )
+
+
+def _insert_mirror_pg(
+    conn, notebook_id: str, sync_origin: str, *, status: str = "draft"
+) -> None:
+    conn.execute(
+        "INSERT INTO notebooks"
+        "(id, name, purpose, primary_domain, status, created_by, "
+        "created_at, updated_at, sync_origin) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (
+            notebook_id,
+            notebook_id,
+            "",
+            "",
+            status,
+            None,
+            "2026-01-03T00:00:00+00:00",
+            "2026-01-03T00:00:00+00:00",
+            sync_origin,
+        ),
+    )
+
+
+def test_status_surveys_mirrors_against_the_chain_head_on_postgres(
+    cli_settings, root_dir, capsys
+):
+    """镜像落后巡检（设计文档 §9）的 PostgreSQL 泳道：判据全部从 jsonb 的
+    ``report_json`` 推导（没有 ``sync_applied_through_seq`` 列，也不比
+    ``to_seq``——scoped 行的区间在库里恒为 0/0），而 ``notebooks`` 在这里是
+    psycopg 已经解析好的 list、SQLite 那边是文本——两种形态必须收敛成同一份
+    结论。覆盖 lagging 与 deleting 两个桶，与 tests/test_sync_cli.py 的同款
+    用例对应。"""
+    _migrate(cli_settings)
+    database = PostgresDatabase(cli_settings, root_dir)
+    try:
+        with database.write() as conn:
+            _insert_import_row_pg(
+                conn,
+                package_id="pkg-full",
+                source_env="prod-shanghai",
+                to_seq=10,
+                created_at="2026-01-01T00:00:00+00:00",
+                notebooks=("nb-chain", "nb-scoped", "nb-gone"),
+            )
+            _insert_import_row_pg(
+                conn,
+                package_id="pkg-scoped",
+                source_env="prod-shanghai",
+                created_at="2026-01-02T00:00:00+00:00",
+                # 六月才引入的一月快照：判据看源端导出时间，不看导入先后。
+                started_at="2026-06-01T00:00:00+00:00",
+                scoped=True,
+                notebooks=("nb-scoped", "nb-gone"),
+            )
+            _insert_import_row_pg(
+                conn,
+                package_id="pkg-window",
+                source_env="prod-shanghai",
+                from_seq=11,
+                to_seq=30,
+                created_at="2026-01-03T00:00:00+00:00",
+                mode="incremental",
+                base_package_id="pkg-full",
+                notebooks=("nb-chain",),
+            )
+            _insert_mirror_pg(conn, "nb-chain", "prod-shanghai")
+            _insert_mirror_pg(conn, "nb-scoped", "prod-shanghai")
+            _insert_mirror_pg(conn, "nb-gone", "prod-shanghai", status="deleting")
+            _insert_mirror_pg(conn, "nb-orphan", "prod-osaka")
+    finally:
+        database.close()
+
+    args = cli.build_parser().parse_args(["status", "--json"])
+    exit_code = cli._cmd_status(args, cli_settings)
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    shanghai = payload["mirrors"]["prod-shanghai"]
+    assert shanghai["total"] == 3
+    assert [entry["notebook_id"] for entry in shanghai["in_sync"]] == ["nb-chain"]
+    assert shanghai["lagging"] == [
+        {
+            "notebook_id": "nb-scoped",
+            "name": "nb-scoped",
+            "applied_package_id": "pkg-scoped",
+            "applied_created_at": "2026-01-02T00:00:00+00:00",
+            "head_package_id": "pkg-window",
+            "head_created_at": "2026-01-03T00:00:00+00:00",
+            "deleting": False,
+        }
+    ]
+    assert [entry["notebook_id"] for entry in shanghai["deleting"]] == ["nb-gone"]
+    assert shanghai["ahead"] == []
+    assert [
+        entry["notebook_id"] for entry in payload["mirrors"]["prod-osaka"]["unknown"]
+    ] == ["nb-orphan"]
+
+    human_args = cli.build_parser().parse_args(["status"])
+    exit_code = cli._cmd_status(human_args, cli_settings)
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert (
+        "-> prod-shanghai: 共 3 本（已跟上 1，落后 1，领先 0，无链 0，不确定 0，"
+        "未知 0，待删除 1）"
+    ) in out
+    assert (
+        "落后 nb-scoped（nb-scoped）：最近带过它的是 pkg-scoped"
+        "（2026-01-02T00:00:00+00:00），比链头 pkg-window"
+        "（2026-01-03T00:00:00+00:00）更旧；"
+    ) in out
+    assert "待删除 nb-gone（nb-gone）：" in out
+    assert (
+        "未知 nb-orphan（nb-orphan）：没有任何 done 导入记录能说明这本的位置："
+        "该源环境从未在本环境导入过、只有 failed/running 的行，"
+        "或者记录早于本记账、report_json 不可读"
+    ) in out
+
+
+def test_status_mirror_of_a_scoped_only_source_env_is_no_chain_on_postgres(
+    cli_settings, root_dir, capsys
+):
+    """只导入过 scoped 包的环境必须报 `no_chain`（先导一次全量），不能因为
+    `_chain_heads_for` 把那个 scoped 包列成链头就判成 `ahead`——它不覆盖任何
+    scope，这里根本没有链可续。SQLite 泳道同款用例在 tests/test_sync_cli.py。"""
+    _migrate(cli_settings)
+    database = PostgresDatabase(cli_settings, root_dir)
+    try:
+        with database.write() as conn:
+            _insert_import_row_pg(
+                conn,
+                package_id="pkg-scoped-only",
+                source_env="prod-osaka",
+                created_at="2026-01-01T00:00:00+00:00",
+                scoped=True,
+                notebooks=("nb-only",),
+            )
+            _insert_mirror_pg(conn, "nb-only", "prod-osaka")
+    finally:
+        database.close()
+
+    args = cli.build_parser().parse_args(["status", "--json"])
+    assert cli._cmd_status(args, cli_settings) == 0
+    payload = json.loads(capsys.readouterr().out)
+    osaka = payload["mirrors"]["prod-osaka"]
+    assert osaka["ahead"] == []
+    assert osaka["ambiguous"] == []
+    assert [entry["notebook_id"] for entry in osaka["no_chain"]] == ["nb-only"]
+    assert osaka["no_chain"][0]["applied_package_id"] == "pkg-scoped-only"
+    assert osaka["no_chain"][0]["head_package_id"] is None
+
+
+def test_status_scoped_import_after_the_last_window_does_not_blur_mirrors_on_postgres(
+    cli_settings, root_dir, capsys
+):
+    """全量 + 窗口 + 之后一个 scoped 包（`created_at` 更晚）：链头有两条，但
+    只有一条参与链——没被 scoped 包碰过的镜像仍是 `in_sync`，被碰过的那本
+    快照不早于链头，所以是 `ahead`（下一次窗口幂等覆盖，无需动作）。"""
+    _migrate(cli_settings)
+    database = PostgresDatabase(cli_settings, root_dir)
+    try:
+        with database.write() as conn:
+            _insert_import_row_pg(
+                conn,
+                package_id="pkg-full",
+                source_env="prod-shanghai",
+                to_seq=10,
+                created_at="2026-01-01T00:00:00+00:00",
+                notebooks=("nb-chain", "nb-patched"),
+            )
+            _insert_import_row_pg(
+                conn,
+                package_id="pkg-window",
+                source_env="prod-shanghai",
+                from_seq=11,
+                to_seq=30,
+                created_at="2026-01-02T00:00:00+00:00",
+                mode="incremental",
+                base_package_id="pkg-full",
+                notebooks=("nb-chain", "nb-patched"),
+            )
+            _insert_import_row_pg(
+                conn,
+                package_id="pkg-late-scoped",
+                source_env="prod-shanghai",
+                created_at="2026-01-03T00:00:00+00:00",
+                scoped=True,
+                notebooks=("nb-patched",),
+            )
+            _insert_mirror_pg(conn, "nb-chain", "prod-shanghai")
+            _insert_mirror_pg(conn, "nb-patched", "prod-shanghai")
+    finally:
+        database.close()
+
+    args = cli.build_parser().parse_args(["status", "--json"])
+    assert cli._cmd_status(args, cli_settings) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [head["package_id"] for head in payload["chain_heads"]["prod-shanghai"]] == [
+        "pkg-window",
+        "pkg-late-scoped",
+    ]
+    shanghai = payload["mirrors"]["prod-shanghai"]
+    assert shanghai["total"] == 2
+    assert [entry["notebook_id"] for entry in shanghai["in_sync"]] == ["nb-chain"]
+    assert shanghai["ambiguous"] == []
+    assert shanghai["lagging"] == []
+    assert [entry["notebook_id"] for entry in shanghai["ahead"]] == ["nb-patched"]
+    assert shanghai["ahead"][0]["applied_package_id"] == "pkg-late-scoped"
+    assert shanghai["ahead"][0]["head_package_id"] == "pkg-window"
+
+
 def test_status_missing_sync_tables_gives_named_message_on_postgres(
     postgres_scope, capsys
 ):

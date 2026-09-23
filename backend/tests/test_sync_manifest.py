@@ -801,12 +801,29 @@ _ALLOWED_EXACT_MODULES = {
     "app.repositories.sqlite.sharing_store",
 }
 
+# Per-FILE additions. The set above is what every module in the package may
+# import; these are admitted for one file each, so an allowance made for the
+# operator CLI cannot quietly become available to the export/import engines.
+_ALLOWED_BY_FILE = {
+    # PR-4 T2 (app.migration.sync.scale_rebuild): after an import finishes,
+    # the CLI rebuilds the scale artifacts the package invalidated
+    # (kg_index/kg_viz do not travel with a package, §6). That step exists
+    # precisely to reuse the SERVICE's own verdict -- eligibility state,
+    # copy-in-flight, fold-vs-full -- rather than restate its thresholds here,
+    # so this one module composes the offline builder and its repository.
+    # It is the only file that may: export.py/import_.py stay engine-only, and
+    # nothing in this package may reach the service layer during an import.
+    "scale_rebuild.py": {"app.services.scale_build_cli"},
+}
 
-def _import_is_allowed(module: str) -> bool:
+
+def _import_is_allowed(module: str, filename: str) -> bool:
     top_level = module.split(".", 1)[0]
     if top_level in sys.stdlib_module_names:
         return True
     if module in _ALLOWED_EXACT_MODULES:
+        return True
+    if module in _ALLOWED_BY_FILE.get(filename, frozenset()):
         return True
     if module == "app.migration.sync" or module.startswith("app.migration.sync."):
         return True
@@ -821,19 +838,37 @@ def test_sync_package_only_imports_the_whitelist():
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if not _import_is_allowed(alias.name):
+                    if not _import_is_allowed(alias.name, path.name):
                         violations.append(f"{path.name}: import {alias.name}")
             elif isinstance(node, ast.ImportFrom):
                 if node.level and node.level > 0:
                     continue  # relative import inside the package: always fine
                 module = node.module or ""
-                if not _import_is_allowed(module):
-                    violations.append(f"{path.name}: from {module} import ...")
+                if _import_is_allowed(module, path.name):
+                    continue
+                for alias in node.names:
+                    # ``from pkg import mod`` names a MODULE as often as it
+                    # names a symbol, and the whitelist is written in full
+                    # dotted module names -- so resolve the member too rather
+                    # than judging the package it came from.
+                    member = f"{module}.{alias.name}" if module else alias.name
+                    if not _import_is_allowed(member, path.name):
+                        violations.append(
+                            f"{path.name}: from {module} import {alias.name}"
+                        )
     assert not violations, (
         "backend/app/migration/sync/*.py 只允许标准库 + "
-        f"{sorted(_ALLOWED_EXACT_MODULES)} + app.migration.sync.* 的 import; "
+        f"{sorted(_ALLOWED_EXACT_MODULES)} + app.migration.sync.* 的 import"
+        f"（逐文件额外放行见 _ALLOWED_BY_FILE: {_ALLOWED_BY_FILE}）; "
         f"违规: {violations}"
     )
+
+
+def test_service_layer_allowance_is_scoped_to_one_file():
+    """放行是逐文件的：导出/导入引擎不因为 CLI 侧的这一条而拿到服务层。"""
+    assert _import_is_allowed("app.services.scale_build_cli", "scale_rebuild.py")
+    for filename in ("export.py", "import_.py", "cli.py", "capture.py"):
+        assert not _import_is_allowed("app.services.scale_build_cli", filename)
 
 
 # --- identity.build_user_mapping ---------------------------------------

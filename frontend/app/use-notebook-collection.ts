@@ -27,6 +27,7 @@ import {
 } from "./indexing-pipeline-settings.ts";
 import { logDiagnostic } from "./errors.ts";
 import { defaultNotebookPayload } from "./notebook-creation.ts";
+import { workspaceCapabilities } from "./workspace-transitions.ts";
 import type { NotebookSummary, SearchHit } from "./workspace-model.ts";
 
 type CollectionOwner = Readonly<{ actorId: string; generation: number }>;
@@ -71,7 +72,10 @@ type EditorView = {
   owner: CollectionOwner;
   target: NotebookSummary;
   canManageContent: boolean;
-  canConfigureNotebook: boolean;
+  /** 能不能改本库挂了哪些参考库(notebook:mount)。⚠ 这一位曾叫 `canConfigureNotebook`
+   *  ——后端已经把挂载从 notebook:configure 拆成 notebook:mount(级别没变,恒 owner),
+   *  因为镜像围栏上两者相反:链接分享放行、挂载要挡。这个弹窗里只有挂载区读它。 */
+  canMountBases: boolean;
   mountable: NotebookRef[];
   mountedIds: string[];
   mountEdges: MountedBase[];
@@ -296,11 +300,6 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       : null
   );
 
-  const rowIsOwner = (id: string): boolean => {
-    const row = currentRow(id);
-    return Boolean(row && (row.access ?? "owner") !== "reader");
-  };
-
   const rowCanManageContent = (id: string): boolean => {
     const row = currentRow(id);
     return Boolean(row && (
@@ -335,12 +334,42 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     return false;
   };
 
-  const rowCanRename = (id: string): boolean => {
-    return rowCanManageContent(id);
+  // 一行笔记本的能力位。判据只有 `workspaceCapabilities` 一处(工作区那一侧同源),这里
+  // 不第二次拼 access/can_manage_content/sync_origin。`role` 传空串:本 hook 用到的四位
+  // 里没有一位读它(只有 canManageGlobalSchemas 读,而那是系统管理员的全局基线,不属于
+  // 单行笔记本)。
+  const rowCapabilities = (id: string) => {
+    const row = currentRow(id);
+    return workspaceCapabilities(
+      row?.access,
+      "",
+      row?.can_manage_content ?? false,
+      row?.sync_origin ?? "",
+    );
   };
 
-  const rowCanConfigure = (id: string): boolean => {
-    return rowIsOwner(id);
+  // `notebook:manage` 这一格(改名 / 描述性画像 / tier / 索引管线)。编辑器的**入口**、
+  // 它的续跑检查点、以及「这个弹窗还该不该在屏上」三处共用这一个谓词——三者判的是同一件
+  // 事,谁单独漂移都会变成「打得开但保存必被拒」或「打不开但旧弹窗还留在屏上」。镜像上
+  // 被围栏挡:名称/画像/tier 都是同步来的,目标端改了留不住。
+  //
+  // ⚠ 与 `rowCanManageContent`(裸内容管理权)刻意不同:后者是「他对这本库的内容有没有写
+  // 权」,不含镜像这条正交的轴。它现在只剩一个消费点——发布给表单的 `canManageContent`
+  // 字段(驱动索引管线切换的二次确认文案),那一格问的确实是权限而不是围栏。
+  const rowCanRename = (id: string): boolean => {
+    return Boolean(currentRow(id)) && rowCapabilities(id).canManageNotebook;
+  };
+
+  // 参考库挂载(notebook:mount,恒 owner)。镜像上被围栏挡:notebook_bases 属同步层。
+  // ⚠ 与链接分享(notebook:configure)不再共用一位——后端已按围栏那条轴把两者拆开。
+  const rowCanMountBases = (id: string): boolean => {
+    return Boolean(currentRow(id)) && rowCapabilities(id).canMountBases;
+  };
+
+  // 删除笔记本(notebook:delete,恒 owner)。镜像上被围栏挡:镜像只能由同步导入退役,
+  // 目标端删掉它只会让下一次导入把整本库重新造出来。
+  const rowCanDelete = (id: string): boolean => {
+    return Boolean(currentRow(id)) && rowCapabilities(id).canDeleteNotebook;
   };
 
   const refreshCompositeAfterCommit = async (owner: CollectionOwner): Promise<boolean> => {
@@ -726,7 +755,10 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
 
   async function openEditor(notebookId: string): Promise<boolean> {
     const owner = captureOwner();
-    if (!owner || !rowCanManageContent(notebookId)) return false;
+    // 这个弹窗的保存写的是 PATCH /notebooks/{id}(notebook:manage)+ 索引管线 + 挂载,
+    // 三样在镜像上都被围栏挡 → 判据是 `canManageNotebook` 而不是裸内容管理权,否则镜像
+    // 上还能打开一个保存必 409 的表单。
+    if (!owner || !rowCanRename(notebookId)) return false;
     const operation: EditorOperation = { notebookId };
     editorOperationRef.current = operation;
     editorRevokedOperationRef.current = null;
@@ -741,9 +773,9 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       // reference library.  The row's *content* is re-read; its authority is not.
       if (!currentRow(notebookId)) return false;
       const canManageContent = rowCanManageContent(notebookId);
-      const canConfigureNotebook = rowCanConfigure(notebookId);
+      const canMountBases = rowCanMountBases(notebookId);
       const indexingPipelinePromise = fetchNotebookIndexingPipeline(notebookId);
-      const [indexingPipeline, mountable, mountEdges] = canConfigureNotebook
+      const [indexingPipeline, mountable, mountEdges] = canMountBases
         ? await Promise.all([
           indexingPipelinePromise,
           listMountable(notebookId),
@@ -757,7 +789,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       if (
         !owns(owner)
         || editorOperationRef.current !== operation
-        || !rowCanManageContent(notebookId)
+        || !rowCanRename(notebookId)
       ) return false;
       // Publish the row as it stands *now*, not the snapshot taken before these
       // requests.  A collection refresh can land while this open is in flight —
@@ -770,7 +802,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         owner,
         target: published,
         canManageContent,
-        canConfigureNotebook,
+        canMountBases,
         mountable,
         mountEdges,
         mountedIds: mountEdges.map((edge) => edge.id),
@@ -840,7 +872,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     const current = editor;
     if (!owner || !current || !owns(current.owner) || current.busy
       || editorSaveOutstanding(owner.actorId, current.target.id)
-      || !rowCanManageContent(current.target.id)) return;
+      || !rowCanRename(current.target.id)) return;
     const operation = editorOperationRef.current;
     // Two notebook ids are in play once a write is outstanding: the steps below
     // key off `current.target.id`, while the sticky-revocation bookkeeping in
@@ -884,7 +916,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         normalizeIndexingPipelineId(indexingPipelineId),
       );
       if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
-      const bases = current.canConfigureNotebook
+      const bases = current.canMountBases
         ? await setBases(current.target.id, current.mountedIds)
         : current.mountEdges;
       if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
@@ -959,7 +991,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         if (ownsIdentity(owner) && !editorSaveOutstanding(owner.actorId, current.target.id)) {
           setEditor((value) => {
             if (!value || value.target.id !== current.target.id) return value;
-            if (!rowCanManageContent(value.target.id)) {
+            if (!rowCanRename(value.target.id)) {
               editorOperationRef.current = null;
               return null;
             }
@@ -978,7 +1010,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     const current = editor;
     if (!owner || !current || !owns(current.owner) || current.busy
       || editorSaveOutstanding(owner.actorId, current.target.id)
-      || !rowCanManageContent(current.target.id)) return;
+      || !rowCanRename(current.target.id)) return;
     const operation = editorOperationRef.current;
     // Same split-identity refusal as saveEditor — see the comment there.
     if (!operation || operation.notebookId !== current.target.id) return;
@@ -1060,7 +1092,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         if (ownsIdentity(owner) && !editorSaveOutstanding(owner.actorId, current.target.id)) {
           setEditor((value) => {
             if (!value || value.target.id !== current.target.id) return value;
-            if (!rowCanManageContent(value.target.id)) {
+            if (!rowCanRename(value.target.id)) {
               editorOperationRef.current = null;
               return null;
             }
@@ -1090,12 +1122,12 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
 
   async function openDelete(notebookId: string): Promise<boolean> {
     const owner = captureOwner();
-    if (!owner || !rowIsOwner(notebookId)) return false;
+    if (!owner || !rowCanDelete(notebookId)) return false;
     const operation = {};
     deleteOperationRef.current = operation;
     try {
       const { count } = await mountedByCount(notebookId);
-      if (!owns(owner) || deleteOperationRef.current !== operation || !rowIsOwner(notebookId)) return false;
+      if (!owns(owner) || deleteOperationRef.current !== operation || !rowCanDelete(notebookId)) return false;
       const target = currentRow(notebookId);
       if (!target) return false;
       // The row survives until its DELETE settles, so the confirmation can be
@@ -1136,7 +1168,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
   async function confirmDelete(): Promise<void> {
     const owner = captureOwner();
     const current = deletion;
-    if (!owner || !current || !owns(current.owner) || !rowIsOwner(current.target.id)) return;
+    if (!owner || !current || !owns(current.owner) || !rowCanDelete(current.target.id)) return;
     const key = operationKey(owner.actorId, current.target.id);
     if (deletingRef.current.has(key)) return;
     const operation = deleteOperationRef.current;
@@ -1194,7 +1226,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       if (ownsIdentity(owner)) {
         setDeletion((value) => {
           if (!value || value.target.id !== current.target.id) return value;
-          if (!rowIsOwner(value.target.id)) {
+          if (!rowCanDelete(value.target.id)) {
             deleteOperationRef.current = null;
             return null;
           }
@@ -1232,11 +1264,11 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       ref: menuRef,
     },
     editor: visible && editor && owns(editor.owner)
-      && (editorSaveInFlight || rowCanManageContent(editor.target.id))
+      && (editorSaveInFlight || rowCanRename(editor.target.id))
       ? editor
       : null,
     deletion: visible && deletion && owns(deletion.owner)
-      && (deletionInFlight || rowIsOwner(deletion.target.id))
+      && (deletionInFlight || rowCanDelete(deletion.target.id))
       ? deletion
       : null,
     creating: visible && creating && Boolean(

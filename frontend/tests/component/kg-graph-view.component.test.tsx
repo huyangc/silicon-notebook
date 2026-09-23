@@ -78,6 +78,7 @@ function renderView(overrides: Partial<Props> = {}) {
     kgGraphRef: { current: null },
     kgDetailRef: { current: null },
     readOnlyWorkspace: false,
+    readOnlyIndexes: false,
     currentNotebookId: "nb-1",
     kgReady: true,
     baseKgAvailable: false,
@@ -258,6 +259,7 @@ test("只读工作区看不到图谱处理、自动判重与逐行合并决定",
   const candidate: PendingMerge = { id: "m-1", canonical_a: "K-A", canonical_b: "K-B", score: 0.91, status: "pending" };
   renderView({
     readOnlyWorkspace: true,
+    readOnlyIndexes: true,
     kgGraph: graphView({ pendingMerges: [candidate] }),
   });
 

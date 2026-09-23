@@ -4,7 +4,11 @@
 Five subcommand groups:
 
 - ``export`` calls :func:`app.migration.sync.export.export_notebooks`.
-- ``import`` calls :func:`app.migration.sync.import_.import_package`.
+- ``import`` calls :func:`app.migration.sync.import_.import_package`, then --
+  unless ``--rebuild-scale skip`` -- hands the notebooks it applied to
+  :func:`app.migration.sync.scale_rebuild.rebuild_after_import`. That step runs
+  strictly AFTER the import is ``done``; it cannot change the import's verdict
+  or its exit code, and its receipt lives only in this module's output.
 - ``status`` reads the adapter-internal bookkeeping tables
   (``sync_export_state``, ``sync_imports``) those two engines maintain, plus
   the capture section below -- through :class:`app.migration.sync.database._Source`,
@@ -41,14 +45,26 @@ from app.core.config import Settings
 from app.migration.sync.database import SyncExportError, _Source
 from app.migration.sync.export import ExportReport, export_notebooks
 from app.migration.sync.import_ import (
+    ImportReport,
     SyncImportError,
     _STATUS_DONE,
     _moment,
     _PriorImport,
     _read_moment,
+    _recorded_notebooks,
     import_package,
 )
 from app.migration.sync.package import MODE_INCREMENTAL
+from app.migration.sync.scale_rebuild import (
+    REBUILD_AUTO,
+    REBUILD_CHOICES,
+    REBUILD_SKIP,
+    SKIP_FLAG_NOTE,
+    ScaleRebuildResult,
+    aborted_result,
+    rebuild_after_import,
+    rebuild_candidates,
+)
 from app.repositories.sqlite.database import SqliteDatabase
 
 ROOT_DIR = Path(__file__).resolve().parents[4]
@@ -270,11 +286,27 @@ def _cmd_import(args: argparse.Namespace, settings: Settings) -> int:
         print(f"sync import: {exc}", file=sys.stderr)
         return 2
     if args.as_json:
-        _print_json(report.as_json())
+        # ``--json`` 合同是「一个对象」，所以这里必须等重建跑完再输出；人读模式
+        # 没有这个约束，见下面。
+        _print_json(
+            _import_report_as_json(
+                report, _scale_rebuild_for(args, settings, report), args.rebuild_scale
+            )
+        )
         return 0
+    _print_import_summary(report)
+    # 导入摘要先落地再开工：重建可能跑几个小时，把「导入成了没有」压在它后面，
+    # 会让运维对着一个不动的屏幕猜——而那正是这一步最不该制造的疑问。
+    sys.stdout.flush()
+    _print_scale_rebuild(_scale_rebuild_for(args, settings, report))
+    return 0
+
+
+def _print_import_summary(report: ImportReport) -> None:
+    """人读摘要里属于导入本身的那一段（不含 scale 重建，那在它之后才发生）。"""
     if report.already_applied:
         print(f"包 {report.package_id}（来自 {report.source_env}）已经引入过，本次未重复执行。")
-        return 0
+        return
     if report.dry_run:
         print("== 预检模式（--dry-run）：以下是预览，未写入任何数据 ==")
     print(f"包 id: {report.package_id}（来自 {report.source_env}）")
@@ -336,11 +368,123 @@ def _cmd_import(args: argparse.Namespace, settings: Settings) -> int:
             )
     if report.warnings:
         # 含目标是 SQLite 时「必须停机导入」一类的提示——来自报告本身，这里不再
-        # 自行判断后端去重复那个决定。
+        # 自行判断后端去重复那个决定。scale 重建的警告不在这里：它发生在这一段
+        # 打完之后，由 `_print_scale_rebuild` 接着打。
         print("警告:")
         for warning in report.warnings:
             print(f"  {warning}")
-    return 0
+
+
+def _import_report_as_json(
+    report: ImportReport, rebuild: ScaleRebuildResult, mode: str
+) -> dict[str, Any]:
+    """``ImportReport.as_json()`` plus this run's scale-rebuild receipt.
+
+    The extra fields are merged HERE rather than added to ``ImportReport``
+    itself, and that is the whole point: ``import_package`` persists
+    ``as_json()`` into ``sync_imports.report_json`` while closing the row as
+    ``done``, which happens strictly before the rebuild starts. A
+    ``scale_rebuild`` field on the dataclass would therefore be written to the
+    database permanently empty, and the two readers of that column (the chain
+    rules, and ``status``'s mirror classifier) would carry a field that is a lie
+    on every row. Keeping it in the CLI layer preserves "done means done": the
+    stored report describes the import, this payload describes the import plus
+    what the operator's terminal just did afterwards.
+
+    ``warnings`` is the one merged list: a rebuild warning is an operator
+    warning like any other, and a script that greps warnings should see it.
+    ``scale_rebuild_mode`` is the ``--rebuild-scale`` value this run used, so an
+    empty ``scale_rebuild`` is never ambiguous -- ``skip`` means the operator
+    turned the pass off, ``auto`` with ``{}`` means it ran and had nothing to
+    judge.
+    """
+    payload = report.as_json()
+    payload["warnings"] = list(report.warnings) + list(rebuild.warnings)
+    payload["scale_rebuild"] = dict(sorted(rebuild.outcomes.items()))
+    payload["scale_rebuild_mode"] = mode
+    payload["scale_rebuild_note"] = rebuild.note or None
+    return payload
+
+
+def _scale_rebuild_for(
+    args: argparse.Namespace, settings: Settings, report: ImportReport
+) -> ScaleRebuildResult:
+    """Decide whether this import earns a scale rebuild, and run it if so.
+
+    Three runs never rebuild anything, and none of them is a refusal:
+    ``--dry-run`` (nothing was written, so nothing became stale),
+    ``already_applied`` (a repeat of a package this environment already has --
+    the rebuild happened on the first pass), and ``--rebuild-scale skip``.
+    """
+    if report.dry_run or report.already_applied:
+        return ScaleRebuildResult()
+    candidates = rebuild_candidates(
+        report.notebooks, report.notebooks_deleted, report.notebooks_delete_skipped
+    )
+    if not candidates:
+        return ScaleRebuildResult()
+    if args.rebuild_scale == REBUILD_SKIP:
+        return ScaleRebuildResult(note=SKIP_FLAG_NOTE)
+    try:
+        return rebuild_after_import(settings, candidates)
+    except BaseException as exc:  # noqa: BLE001 - the import is already done
+        # ``rebuild_after_import`` answers both ``Exception`` and
+        # ``KeyboardInterrupt`` itself, so this only fires for something that
+        # escaped between its handlers -- most plausibly a SECOND Ctrl-C landing
+        # while it builds its result. The import summary is already on screen by
+        # then and the process must still print the scale section rather than
+        # die into ``main``'s generic handler with exit 2 on a committed import.
+        # Caught exactly once: nothing below this frame catches again, so a
+        # further Ctrl-C ends the process normally.
+        return aborted_result(candidates, exc)
+
+
+# 明细行与 `status` 的镜像段同口径：最多列这么多本，其余折成「另有 N 本」。
+# 一次导入可以涉及上百本，逐本刷屏会把真正要跟进的那几行埋掉。
+_SCALE_MAX_DETAIL_LINES = 20
+
+
+def _print_scale_rebuild(rebuild: ScaleRebuildResult) -> None:
+    """The scale section of the human summary, printed after the import's own.
+
+    Silent when the pass had nothing to say -- a package that carried no
+    notebook, or a dry run. A zeroed counter line would only read as "something
+    went wrong".
+    """
+    if rebuild.note:
+        print(rebuild.note)
+    if rebuild.outcomes:
+        counts = rebuild.counts
+        print(
+            f"scale 索引: 重建 {counts['built']}、折叠 {counts['folded']}、"
+            f"跳过 {counts['skipped']}、失败 {counts['failed']}"
+        )
+        _print_scale_rebuild_details(rebuild.outcomes)
+    if rebuild.warnings:
+        # 与导入自己的「警告:」分开成段：这些是导入完成之后才产生的，混进上一段
+        # 会让人以为导入本身出了问题。逐本一条，不封顶——每一条都要有人跟进。
+        print("scale 重建警告:")
+        for warning in rebuild.warnings:
+            print(f"  {warning}")
+
+
+def _print_scale_rebuild_details(outcomes: Mapping[str, str]) -> None:
+    """One line per notebook that did NOT end up with a fresh index.
+
+    Successes are counted, not listed: there is nothing to do about them, and on
+    a package carrying a hundred notebooks they would bury the handful that need
+    an operator.
+    """
+    pending = sorted(
+        (notebook_id, outcome)
+        for notebook_id, outcome in outcomes.items()
+        if outcome not in ("built", "folded")
+    )
+    for notebook_id, outcome in pending[:_SCALE_MAX_DETAIL_LINES]:
+        print(f"  {notebook_id}: {outcome}")
+    hidden = len(pending) - _SCALE_MAX_DETAIL_LINES
+    if hidden > 0:
+        print(f"  另有 {hidden} 本未列出（详情见 --json 的 scale_rebuild）")
 
 
 # ------------------------------------------------------------------- status
@@ -586,6 +730,259 @@ def _pending_notebook_deletes(source: _Source, conn: Any) -> dict[str, int]:
     return {str(row["sync_origin"]): int(row["pending"]) for row in rows}
 
 
+def _load_mirror_notebooks(source: _Source, conn: Any) -> list[dict[str, Any]]:
+    """Every mirrored notebook of this target environment (non-empty
+    ``sync_origin``), whatever its ``status``.
+
+    Read in the SAME transaction as ``sync_imports`` (see
+    ``_load_sync_status``) so the lag verdict below is computed off one
+    consistent read rather than two: a package that finishes importing
+    between the two queries would otherwise show up as a chain head no
+    mirror has been touched by."""
+    return source.fetch(
+        conn,
+        "SELECT id, name, status, sync_origin FROM notebooks "
+        "WHERE sync_origin <> '' ORDER BY sync_origin, id",
+    )
+
+
+# Every classification bucket a mirrored notebook can land in, in the order
+# ``_print_mirror_section`` counts them on the group line. All seven are
+# LISTS in the JSON, so a monitor can act on one shape (``len(lagging) > 0``
+# is the alarm condition) instead of a count for one bucket and a list for
+# the rest.
+_MIRROR_BUCKETS = (
+    "in_sync",
+    "lagging",
+    "ahead",
+    "no_chain",
+    "ambiguous",
+    "unknown",
+    "deleting",
+)
+
+# Which of those get one line per notebook in the human-readable section.
+# ``in_sync`` does not: there is nothing to do about it, its count is on the
+# group line, and on an environment with hundreds of mirrors it would bury
+# every bucket that DOES need an operator's attention.
+_MIRROR_DETAIL_BUCKETS = tuple(
+    bucket for bucket in _MIRROR_BUCKETS if bucket != "in_sync"
+)
+
+# At most this many notebooks are named per bucket before the renderer says
+# "另有 N 本" instead. `status` is a survey, not a dump.
+_MIRROR_MAX_DETAIL_LINES = 20
+
+
+def _mirror_package_sort_key(row: _PriorImport) -> tuple[datetime, int, str]:
+    """Ordering for "which done package most recently carried this
+    notebook" -- ``_chain_candidate_sort_key``'s key, with ``started_at`` as
+    the fallback for a row whose package recorded no ``created_at``.
+
+    ``_chain_candidate_sort_key`` floors an undated row at ``datetime.min``
+    on purpose: for the CHAIN rules an unorderable row must never win a
+    comparison it cannot actually answer. This question is different and
+    weaker -- it only picks WHICH row to then ask the question of, and a
+    pre-``package_created_at`` row still has this target's own
+    ``sync_imports.started_at``, which orders it well enough for that. A row
+    with neither falls back to the same epoch floor.
+
+    **This deliberately mixes two clocks**: ``created_at`` is the SOURCE's
+    export time, ``started_at`` this TARGET's import time, and they can
+    disagree by however long a package spent in transit. That is tolerable
+    here and only here, because the fallback merely picks a candidate -- the
+    verdict below never COMPARES the two: a package that reached this
+    function through the ``started_at`` fallback has no ``created_at``, and
+    the scoped branch answers ``unknown`` for exactly that rather than
+    comparing a source timestamp against a target one."""
+    if row.created_at is not None:
+        return _chain_candidate_sort_key(row)
+    moment = row.started_at or datetime.min.replace(tzinfo=timezone.utc)
+    return (moment, row.to_seq, row.package_id)
+
+
+def _moment_text(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat()
+
+
+def _covering_package(
+    notebook_id: str, prior: Sequence[_PriorImport]
+) -> _PriorImport | None:
+    """The most recent ``done`` package of this source environment that
+    RECORDED carrying ``notebook_id``, or ``None`` when no row can answer.
+
+    ``notebooks is None`` means the row predates this bookkeeping or its
+    ``report_json`` was unreadable (see :attr:`_PriorImport.notebooks`) --
+    such a row is skipped rather than read as "carried nothing", which is
+    why a target whose whole import history predates PR-3c reports
+    ``unknown`` instead of a confidently wrong verdict."""
+    covering = [
+        row
+        for row in prior
+        if row.status == _STATUS_DONE
+        and row.notebooks is not None
+        and notebook_id in row.notebooks
+    ]
+    if not covering:
+        return None
+    return max(covering, key=_mirror_package_sort_key)
+
+
+def _classify_one_mirror(
+    row: Mapping[str, Any],
+    prior: Sequence[_PriorImport],
+    heads: Sequence[_PriorImport],
+) -> tuple[str, dict[str, Any]]:
+    """One mirrored notebook's bucket and its report entry.
+
+    The whole verdict is derived from ``sync_imports.report_json`` -- there
+    is deliberately no per-notebook watermark COLUMN (design doc §9). A
+    window package covers the source environment's entire sync scope, so
+    stamping every notebook it carried would only ever restate the chain
+    head; the one shape that can leave a single notebook behind is a
+    ``--notebook``-scoped package, and that one already names the notebooks
+    it carried in its own report.
+
+    **Judged by RECORD ORDER, never by watermark height** -- the same rule
+    ``_PriorImport.downstream_of`` follows (codex #788 r2 P1), and here it is
+    not merely the better rule but the only possible one: ``export.py`` hard-
+    codes ``from_seq, to_seq, base_package_id = 0, 0, ""`` for a scoped
+    package ("a subset package makes no claim about a sequence range"), and
+    ``import_.py`` writes the manifest's numbers into ``sync_imports``
+    verbatim. Every scoped row in that table therefore reads ``to_seq = 0``.
+    Comparing heights would report EVERY scoped-covered mirror as lagging by
+    exactly the chain head's own watermark, and could never report anything
+    else.
+
+    So the question asked of a scoped package is "is this notebook's content
+    older than what the chain has covered?", answered with the two packages'
+    own export times:
+
+    - ``P.created_at >= H.created_at`` -- the scoped snapshot was taken no
+      earlier than the chain head, so it cannot be missing anything the chain
+      has applied. The next window replays over it by idempotent upsert
+      anyway. Normal, no action.
+    - ``P.created_at < H.created_at`` -- this notebook was last written from
+      a snapshot OLDER than the chain head, so any change made to it between
+      the two exports is missing here, and no future window will notice: a
+      window only carries the notebooks that changed INSIDE its own range.
+      Re-export this notebook NOW (``sync export --notebook``) -- taken
+      today, the new snapshot cannot be older than the head -- or wait for
+      the next full package.
+
+    Note this is not decided by IMPORT order: importing the scoped package
+    after the window does not make its contents newer. Both timestamps must
+    be readable; if either is missing the honest answer is ``unknown``, not a
+    guess (an undated row reaches here only through
+    ``_mirror_package_sort_key``'s ``started_at`` fallback, which is this
+    target's clock, not the source's -- comparing the two would be comparing
+    unlike things).
+    """
+    entry = {
+        "notebook_id": str(row["id"]),
+        "name": str(row["name"] or ""),
+        "applied_package_id": None,
+        "applied_created_at": None,
+        "head_package_id": None,
+        "head_created_at": None,
+        "deleting": str(row.get("status") or "") == "deleting",
+    }
+    bucket = _mirror_bucket(entry, prior, heads)
+    # A notebook already queued for deletion gets its OWN bucket rather than
+    # a lag verdict: it is on its way out, none of the advice above applies
+    # to it, and keeping it out of `lagging` is what lets a monitor treat a
+    # non-empty `lagging` as an alarm without special-casing anything. The
+    # entry still carries what was computed, so an operator reading the line
+    # can still see which package last touched it.
+    return ("deleting" if entry["deleting"] else bucket), entry
+
+
+def _mirror_bucket(
+    entry: dict[str, Any],
+    prior: Sequence[_PriorImport],
+    heads: Sequence[_PriorImport],
+) -> str:
+    """``_classify_one_mirror``'s verdict, filling ``entry``'s package fields
+    as it goes. Split out so the deletion short-circuit above reads as the
+    one rule it is."""
+    package = _covering_package(entry["notebook_id"], prior)
+    if package is None:
+        return "unknown"
+    entry["applied_package_id"] = package.package_id
+    entry["applied_created_at"] = _moment_text(package.created_at)
+    # **The baseline is the CHAIN-PARTICIPATING head, not every head.**
+    # ``_chain_heads_for`` answers a different question -- "what may the next
+    # package's base_package_id name" -- and deliberately returns shapes that
+    # cover no scope at all: a ``--notebook``-scoped import is downstream of
+    # nothing and nothing is downstream of it, so it is always a head, and
+    # when NO row participates in the chain every done row is one. Reading a
+    # baseline off those is wrong twice over:
+    #
+    # - an environment that has only ever imported scoped packages has heads
+    #   but no chain. Comparing a scoped package against itself reports
+    #   ``ahead``, whose advice is "normal, the next window covers it" --
+    #   except there is no chain for a window to continue, so ``_assert_chain``
+    #   would refuse the next incremental package outright. ``no_chain``
+    #   ("import a full baseline once") is the honest answer.
+    # - one ``sync export --notebook`` after the latest window makes that
+    #   scoped package a second head, which would turn EVERY mirror of that
+    #   source environment ambiguous -- including the ones the scoped package
+    #   never touched, whose position is not in doubt at all.
+    participating = [head for head in heads if head.participates_in_chain]
+    head = participating[0] if len(participating) == 1 else None
+    if head is not None:
+        entry["head_package_id"] = head.package_id
+        entry["head_created_at"] = _moment_text(head.created_at)
+    if package.participates_in_chain:
+        # A chain participant is followed by windows that cover the whole
+        # source scope, so this notebook is as current as the chain is --
+        # including when no later window names it, which only means nothing
+        # changed in it. No unique participating head is the only thing that
+        # can go wrong here; "none at all" cannot actually happen (this very
+        # package participates and is done, so either it or whatever moved
+        # past it is one) but is answered rather than assumed away.
+        return "in_sync" if head is not None else "ambiguous"
+    if len(participating) > 1:
+        return "ambiguous"
+    if head is None:
+        return "no_chain"
+    if package.created_at is None or head.created_at is None:
+        return "unknown"
+    return "ahead" if package.created_at >= head.created_at else "lagging"
+
+
+def _classify_mirrors(
+    mirror_rows: Sequence[Mapping[str, Any]],
+    prior_by_source_env: Mapping[str, Sequence[_PriorImport]],
+    chain_heads_by_env: Mapping[str, Sequence[_PriorImport]],
+) -> dict[str, dict[str, Any]]:
+    """Group every mirrored notebook by ``sync_origin`` and classify it
+    against that source environment's import history -- pure, so the rules
+    are testable without a database (``_load_sync_status`` does the reading).
+
+    ``chain_heads_by_env`` carries ``_chain_heads_for``'s OWN rows rather
+    than the serialized dicts ``status`` prints, so this function and the
+    "导入链头" section above cannot drift apart on what a head is -- though
+    they do not USE the same subset of them (see ``_classify_one_mirror``:
+    only a chain participant covers a scope worth comparing against).
+    """
+    mirrors: dict[str, dict[str, Any]] = {}
+    for row in mirror_rows:
+        source_env = str(row["sync_origin"])
+        group = mirrors.setdefault(
+            source_env,
+            {"total": 0, **{bucket: [] for bucket in _MIRROR_BUCKETS}},
+        )
+        bucket, entry = _classify_one_mirror(
+            row,
+            prior_by_source_env.get(source_env) or (),
+            chain_heads_by_env.get(source_env) or (),
+        )
+        group["total"] += 1
+        group[bucket].append(entry)
+    return mirrors
+
+
 def _load_sync_status(settings: Settings) -> dict[str, Any]:
     """Read ``sync_export_state``/``sync_imports`` on whichever backend
     ``settings.database_url`` names.
@@ -618,6 +1015,14 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
     ``runs_note``: a v83/v84 database has neither the columns nor this
     table, but the two are still checked and reported separately rather than
     one implying the other.
+
+    ``mirrors`` (see ``_classify_mirrors``) is derived from the rows this
+    function has already read -- ``sync_imports.report_json`` plus one extra
+    ``notebooks`` SELECT in the SAME transaction. There is no per-notebook
+    watermark column behind it (design doc §9): a window covers the source
+    environment's whole scope, so the only thing that can leave one notebook
+    behind the chain head is a ``--notebook``-scoped package, which already
+    records the notebooks it carried.
     """
     exports_sql_v85 = (
         "SELECT target_env, exported_through_seq, exported_at, package_id, "
@@ -666,6 +1071,7 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
                 runs_note = None
             imports = source.fetch(conn, imports_sql)
             pending_notebook_deletes = _pending_notebook_deletes(source, conn)
+            mirror_rows = _load_mirror_notebooks(source, conn)
     finally:
         source.close()
     for row in imports:
@@ -698,7 +1104,15 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
                 created_at=_read_moment(row["report_json"].get("package_created_at")),
                 heartbeat_at=None,
                 has_progress=False,
-                notebooks=None,
+                # Really filled in, unlike `heartbeat_at`/`has_progress`
+                # above (which nothing this function computes reads): the
+                # mirror survey below needs to know which notebooks each
+                # done package carried. `_recorded_notebooks` is
+                # `import_.py`'s own reader, so "the row cannot answer"
+                # stays ONE rule -- an absent or unreadable `notebooks`
+                # reads as None ("cannot answer"), never as an empty tuple
+                # ("carried nothing").
+                notebooks=_recorded_notebooks(row["report_json"]),
                 from_seq=int(row.get("from_seq") or 0),
                 to_seq=int(row.get("to_seq") or 0),
                 base_package_id=str(row["report_json"].get("base_package_id") or ""),
@@ -709,6 +1123,10 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
                 ),
             )
         )
+    heads_by_source_env: dict[str, list[_PriorImport]] = {
+        source_env: _chain_heads_for(prior)
+        for source_env, prior in prior_by_source_env.items()
+    }
     chain_heads: dict[str, list[dict[str, Any]]] = {
         source_env: [
             {
@@ -716,9 +1134,9 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
                 "to_seq": head.to_seq,
                 "created_at": head.created_at,
             }
-            for head in _chain_heads_for(prior)
+            for head in heads
         ]
-        for source_env, prior in prior_by_source_env.items()
+        for source_env, heads in heads_by_source_env.items()
     }
     return {
         "exports": exports,
@@ -728,6 +1146,9 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
         "imports": imports,
         "chain_heads": chain_heads,
         "pending_notebook_deletes": pending_notebook_deletes,
+        "mirrors": _classify_mirrors(
+            mirror_rows, prior_by_source_env, heads_by_source_env
+        ),
     }
 
 
@@ -829,8 +1250,8 @@ def _cmd_status(args: argparse.Namespace, settings: Settings) -> int:
                 # (codex review round 2, P2-1); see _chain_heads_for's
                 # docstring for how this can legitimately happen.
                 head_desc += (
-                    "——链头不唯一；源端下一个窗口的 base 会是其中推进过水位的那个"
-                    "（to_seq 最大且 base 非空或 to_seq>0）"
+                    "——链头不唯一；源端下一个窗口的 base 会是其中记录更晚且非限定"
+                    "导出的那个"
                 )
         pending = pending_deletes.get(source_env, 0)
         pending_note = (
@@ -839,8 +1260,109 @@ def _cmd_status(args: argparse.Namespace, settings: Settings) -> int:
             else ""
         )
         print(f"  -> {source_env}: {head_desc}{pending_note}")
+    _print_mirror_section(state["mirrors"])
     _print_capture_section(state["capture"])
     return 0
+
+
+# The short name each bucket goes by on the group counts line and at the
+# head of its own detail lines.
+_MIRROR_BUCKET_LABELS = {
+    "in_sync": "已跟上",
+    "lagging": "落后",
+    "ahead": "领先",
+    "no_chain": "无链",
+    "ambiguous": "不确定",
+    "unknown": "未知",
+    "deleting": "待删除",
+}
+
+# What each bucket means and what an operator does about it. Kept next to
+# the renderer rather than inside it so the wording is one thing to review,
+# and so `_mirror_entry_line` below stays a formatter.
+_MIRROR_BUCKET_ADVICE = {
+    "lagging": (
+        "这本最后一次是被一个比链头更旧的快照刷的，两次导出之间对它的改动不会再有窗口带过来"
+        "（窗口只装自己范围内有变更的本）；现在对它再做一次 sync export --notebook 并导入"
+        "（今天取的快照必然不早于链头），或者等下一次全量包"
+    ),
+    "ahead": "快照不早于链头覆盖的范围，下一次窗口会按幂等 upsert 覆盖，无需动作",
+    "no_chain": "从未做过覆盖全 scope 的导入（只有 scoped 导入），先导入一次全量包",
+    "ambiguous": "参与链的链头不止一条，先按上面的「导入链头」一节确认以哪个包为准",
+    # Three causes, not two: the source environment may have no import rows
+    # here at all, or only `failed`/`running` ones (neither is `done`, so
+    # neither carried anything), or the row that carried it predates the
+    # `report_json.notebooks`/`package_created_at` bookkeeping or its JSON is
+    # unreadable. The wording names all three rather than implying the
+    # notebook was definitely imported once.
+    "unknown": (
+        "没有任何 done 导入记录能说明这本的位置：该源环境从未在本环境导入过、"
+        "只有 failed/running 的行，或者记录早于本记账、report_json 不可读；"
+        "先看上面的「已引入的包」确认该源环境的导入状态，必要时导入一次全量包"
+    ),
+    "deleting": "已排进删除作业队列，等目标端删除作业清理即可，不按落后处置",
+}
+
+
+def _mirror_package_text(entry: Mapping[str, Any], key: str) -> str:
+    """``<package_id>（<created_at>）``, or a named gap. ``key`` is
+    ``"applied"`` or ``"head"``."""
+    package_id = entry[f"{key}_package_id"]
+    if not package_id:
+        return "（无）"
+    created_at = entry[f"{key}_created_at"] or "记录时间未知"
+    return f"{package_id}（{created_at}）"
+
+
+def _mirror_entry_line(bucket: str, entry: Mapping[str, Any]) -> str:
+    """One mirrored notebook's line, without indentation.
+
+    No sequence numbers anywhere: a scoped package's ``to_seq`` is always 0
+    (see ``_classify_one_mirror``), so printing one would be printing a
+    placeholder. The two package identities and their export times are the
+    whole evidence the verdict rests on."""
+    applied = _mirror_package_text(entry, "applied")
+    head = _mirror_package_text(entry, "head")
+    if bucket == "lagging":
+        detail = f"最近带过它的是 {applied}，比链头 {head}更旧；"
+    elif bucket == "ahead":
+        detail = f"最近带过它的是 {applied}，不早于链头 {head}；"
+    elif entry["applied_package_id"]:
+        detail = f"最近带过它的是 {applied}；"
+    else:
+        detail = ""
+    return (
+        f"{_MIRROR_BUCKET_LABELS[bucket]} {entry['notebook_id']}（{entry['name']}）："
+        f"{detail}{_MIRROR_BUCKET_ADVICE[bucket]}"
+    )
+
+
+def _print_mirror_section(mirrors: Mapping[str, Any]) -> None:
+    """The "镜像笔记本" section: per source environment, the count in every
+    bucket, then one line per notebook in each bucket that has something to
+    act on (everything but ``in_sync``), capped at
+    ``_MIRROR_MAX_DETAIL_LINES`` per bucket."""
+    print("镜像笔记本（本环境作为目标；判据见 docs/incremental-sync-design.md §9）：")
+    if not mirrors:
+        print("  （本环境没有镜像笔记本）")
+        return
+    for source_env in sorted(mirrors):
+        group = mirrors[source_env]
+        counts = "，".join(
+            f"{_MIRROR_BUCKET_LABELS[bucket]} {len(group[bucket])}"
+            for bucket in _MIRROR_BUCKETS
+        )
+        print(f"  -> {source_env}: 共 {group['total']} 本（{counts}）")
+        for bucket in _MIRROR_DETAIL_BUCKETS:
+            _print_mirror_bucket(bucket, group[bucket])
+
+
+def _print_mirror_bucket(bucket: str, entries: Sequence[Mapping[str, Any]]) -> None:
+    for entry in entries[:_MIRROR_MAX_DETAIL_LINES]:
+        print(f"     {_mirror_entry_line(bucket, entry)}")
+    hidden = len(entries) - _MIRROR_MAX_DETAIL_LINES
+    if hidden > 0:
+        print(f"     另有 {hidden} 本{_MIRROR_BUCKET_LABELS[bucket]}的镜像未列出")
 
 
 # ------------------------------------------------------------------ capture
@@ -1814,6 +2336,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="显式接管同一 source_env 一个仍是 running 的导入；仅当已经确认那个"
         "进程真的死了才用——用 `sync status` 看该行的心跳（heartbeat_at）判断，"
         "不要凭经过的时间猜测",
+    )
+    import_parser.add_argument(
+        "--rebuild-scale",
+        dest="rebuild_scale",
+        choices=list(REBUILD_CHOICES),
+        default=REBUILD_AUTO,
+        help="导入完成后如何处理受影响笔记本的 scale 索引（kg_index/kg_viz 是派生"
+        "工件，不随包走）。auto（默认）：对每本按服务内自动建索引的同一套判据决定"
+        "重建/折叠/跳过，在本进程内同步跑完；skip：完全不碰，留给运维手动跑 "
+        "scripts/build_scale_index.py。无论哪种都不影响导入本身的结果与退出码",
     )
     import_parser.add_argument("--json", action="store_true", dest="as_json")
     import_parser.set_defaults(handler=_cmd_import)

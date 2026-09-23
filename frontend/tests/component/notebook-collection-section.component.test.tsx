@@ -125,3 +125,65 @@ test("resetKey 变化时翻页状态回到第一页", async () => {
   );
   expect(cardNames()[0]).toBe("笔记本01");
 });
+
+// 跨环境增量同步 §5:镜像库在列表里要认得出来。角色列答「我对这本库是什么身份」,
+// 「镜像」小标答「这本库的内容从哪来」——两件事分开,角色文案(既有契约)一个字不动。
+test("列表视图:镜像行在角色列旁挂「镜像」小标,本地行没有", () => {
+  const entries = makeEntries(2);
+  entries[0].notebook.sync_origin = "site-a";
+  render(
+    <NotebookCollectionSection
+      entries={entries}
+      viewMode="list"
+      label="我的笔记本分页"
+      {...baseProps()}
+    />,
+  );
+
+  const rows = Array.from(document.querySelectorAll(".notebook-list-row"));
+  expect(rows).toHaveLength(2);
+  const mirrorRole = rows[0].querySelector(".role-cell")!;
+  expect(mirrorRole.textContent).toContain("Owner");
+  expect(within(mirrorRole as HTMLElement).getByText("镜像")).toHaveClass("notebook-mirror-tag");
+
+  const localRole = rows[1].querySelector(".role-cell")!;
+  expect(localRole.textContent).toBe("Owner");
+  expect(within(localRole as HTMLElement).queryByText("镜像")).toBeNull();
+});
+
+test("列表视图:空串 sync_origin 与缺失一样,都是本地库", () => {
+  const entries = makeEntries(1);
+  entries[0].notebook.sync_origin = "";
+  render(
+    <NotebookCollectionSection
+      entries={entries}
+      viewMode="list"
+      label="我的笔记本分页"
+      {...baseProps()}
+    />,
+  );
+  expect(document.querySelector(".notebook-mirror-tag")).toBeNull();
+});
+
+test("网格视图(默认):镜像卡片在页脚元信息里挂「镜像」小标", () => {
+  const entries = makeEntries(2);
+  entries[0].notebook.sync_origin = "site-a";
+  render(
+    <NotebookCollectionSection
+      entries={entries}
+      viewMode="grid"
+      label="我的笔记本分页"
+      {...baseProps()}
+    />,
+  );
+
+  const cards = Array.from(document.querySelectorAll(".notebook-card"));
+  expect(cards).toHaveLength(2);
+  const mirrorMeta = cards[0].querySelector(".notebook-card-footer .notebook-card-meta")!;
+  expect(within(mirrorMeta as HTMLElement).getByText("镜像")).toHaveClass("notebook-mirror-tag");
+  // 既有的元信息没有被顶掉。
+  expect(mirrorMeta.textContent).toContain("个来源");
+
+  const localMeta = cards[1].querySelector(".notebook-card-footer .notebook-card-meta")!;
+  expect(within(localMeta as HTMLElement).queryByText("镜像")).toBeNull();
+});

@@ -47,6 +47,11 @@ test("collection hook has a positive dependency allowlist and no cross-domain ow
     "./notebook-bases.ts",
     "./notebook-creation.ts",
     "./workspace-model.ts",
+    // 能力位词汇表。同 errors.ts 一样是零依赖的叶子模块（workspace-transitions.ts 自己
+    // 一条 import 都没有），不是任何域的 owner——放行的是 `workspaceCapabilities` 这条
+    // 「哪些入口画出来」的唯一判据。集合页的行级谓词（改名/挂载/删库）必须与工作区那一
+    // 侧同源，否则同一条围栏规则会散成两份各自漂移的手写判断。
+    "./workspace-transitions.ts",
   ]);
   const actual = [...new Set(importsIn(hook).map((item) => item.module))].sort();
   assert.deepEqual(actual, [...actual].filter((item) => allowed.has(item)), actual);

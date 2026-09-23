@@ -2,7 +2,7 @@ import { type MouseEvent, type ReactNode } from "react";
 import { User } from "lucide-react";
 
 import { grantedViaLabel, isGroupGranted } from "./group-api";
-import { notebookRoleText } from "./workspace-transitions";
+import { NOTEBOOK_MIRROR_TAG, notebookIsMirror, notebookRoleText } from "./workspace-transitions";
 import { Pagination } from "./Pagination";
 import { useClientPagination, type PaginationResetKey } from "./use-client-pagination.ts";
 import type { NotebookSummary, SearchHit } from "./workspace-model";
@@ -95,7 +95,13 @@ function NotebookList({
           <button className="notebook-list-cell" disabled={opening} onClick={() => openNotebook(notebook.id)}>{notebook.counts.sources ?? 0} 个来源</button>
           <button className="notebook-list-cell notebook-memory-link" onClick={() => openMemory(notebook.id)}>{notebook.counts.memories ?? 0} 条</button>
           <button className="notebook-list-cell" disabled={opening} onClick={() => openNotebook(notebook.id)}>{notebook.created_label}</button>
-          <button className="notebook-list-cell role-cell" disabled={opening} onClick={() => openNotebook(notebook.id)}>{notebookRoleText(notebook, roleText)}</button>
+          {/* 角色列答「我对这本库是什么身份」;「镜像」小标答「这本库的内容从哪来」
+              (跨环境增量同步 §5)。两件事不合并进 notebookRoleText 那个字符串——那一列
+              的文案是既有契约,而一本镜像库在任何角色下都还是那个角色。 */}
+          <button className="notebook-list-cell role-cell" disabled={opening} onClick={() => openNotebook(notebook.id)}>
+            {notebookRoleText(notebook, roleText)}
+            {notebookIsMirror(notebook) && <span className="tag notebook-mirror-tag">{NOTEBOOK_MIRROR_TAG}</span>}
+          </button>
           <button className="list-row-menu" onClick={(event) => openMenu(notebook.id, event)} title="笔记本操作">⋮</button>
         </article>
         );
@@ -185,7 +191,15 @@ export function NotebookCollectionSection({
                     <SearchHits hits={hits} compact={false} />
                   </button>
                   <div className="notebook-card-footer">
-                    <p className="notebook-card-meta">{notebook.created_label} · {notebook.counts.sources ?? 0} 个来源</p>
+                    {/* 网格是默认视图,镜像必须在这里也认得出来——只在列表视图挂小标
+                        等于大多数用户根本看不到它。槽位取页脚这行既有的元信息,不新造
+                        一层。 */}
+                    <p className="notebook-card-meta">
+                      {notebook.created_label} · {notebook.counts.sources ?? 0} 个来源
+                      {notebookIsMirror(notebook) && (
+                        <span className="tag notebook-mirror-tag">{NOTEBOOK_MIRROR_TAG}</span>
+                      )}
+                    </p>
                     <div className="notebook-card-footer-actions">
                       {notebook.access !== "reader" && notebook.is_shared && (
                         <span className="notebook-shared-badge" title="已分享" aria-label="已分享"><User size={14} /></span>

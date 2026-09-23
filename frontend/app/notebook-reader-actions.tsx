@@ -57,6 +57,15 @@ type ReaderNotebookBadgeProps = {
   onLeave: () => void;
   /** 组管理员改名(可选);仅当 `notebook.can_manage_content` 时真正渲染成可编辑。 */
   rename?: BadgeRenameProps;
+  /**
+   * 镜像库的就地说明(空串 = 不是镜像,不渲染)。改名在镜像上被目标端写入围栏挡
+   * (`notebook:manage`),承接方 `rename` 由调用方直接不下发——这句话顶替它,说明
+   * 「这里为什么没有输入框」,并且落在标题**紧邻**处而不是页面顶部横幅。
+   *
+   * ⚠ 判据由调用方按 `workspaceCapabilities` 算好再传进来,组件不自己读
+   * `notebook.sync_origin`(同 `can_manage_content` 的纪律)。
+   */
+  mirrorNote?: string;
 };
 
 /**
@@ -95,6 +104,7 @@ export function ReaderNotebookBadge({
   leaveBusy,
   onLeave,
   rename,
+  mirrorNote = "",
 }: ReaderNotebookBadgeProps) {
   const granted = isGroupGranted(notebook);
   const canManage = Boolean(notebook.can_manage_content);
@@ -146,6 +156,14 @@ export function ReaderNotebookBadge({
       >
         {badgeLabel}
       </span>
+      {mirrorNote && (
+        // 同样戴 `.reader-badge-chip`:那个类是这一行里唯一有界(max-width + 省略)的
+        // 文本槽,72px 单行顶栏的版式前提靠它(见 reader-badge-layout-guard)。再叠一个
+        // `.reader-badge-mirror-chip` 收紧上限——两个 chip 各占 40% 会把库名重新压没。
+        <span className="reader-badge-chip reader-badge-mirror-chip" title={mirrorNote}>
+          {mirrorNote}
+        </span>
+      )}
       {!granted && (
         <button
           className="sort-button reader-badge-action"
@@ -162,6 +180,22 @@ export function ReaderNotebookBadge({
 
 type NotebookMenuActionsProps = {
   notebook: NotebookSummary;
+  /**
+   * 这一行的 `notebook:manage`(改名/画像/tier/挂载)与 `notebook:delete`。两位都由调用方
+   * 按 `workspaceCapabilities` 算好传进来——组件不自己读 `sync_origin`,也不自己拼
+   * access/can_manage_content(同 `can_manage_content` 注释里的纪律)。
+   */
+  canManageNotebook: boolean;
+  canDeleteNotebook: boolean;
+  /**
+   * 两位为假时**就地**顶替那颗按钮的说明(空串 = 不渲染,菜单里那一格直接没有)。
+   *
+   * 文案由调用方传,不写死在组件里:一位为假的**原因**只有调用方知道。今天唯一的原因是
+   * 镜像(目标端写入围栏,设计 §5),但将来若有别的原因把 `canDeleteNotebook` 按下去,
+   * 写死的「镜像…」会变成一句当场说谎的话。同 `ReaderNotebookBadge.mirrorNote` 的口径。
+   */
+  manageDisabledNote?: string;
+  deleteDisabledNote?: string;
   onLeave: () => void;
   onEdit: () => void;
   onDelete: (event: MouseEvent<HTMLButtonElement>) => void;
@@ -181,6 +215,10 @@ type NotebookMenuActionsProps = {
  */
 export function NotebookMenuActions({
   notebook,
+  canManageNotebook,
+  canDeleteNotebook,
+  manageDisabledNote = "",
+  deleteDisabledNote = "",
   onLeave,
   onEdit,
   onDelete,
@@ -192,8 +230,16 @@ export function NotebookMenuActions({
   }
   return (
     <>
-      <button onClick={onEdit}>编辑信息</button>
-      <button className="danger" onClick={onDelete}>删除笔记本</button>
+      {canManageNotebook
+        ? <button onClick={onEdit}>编辑信息</button>
+        : manageDisabledNote
+          ? <span className="notebook-menu-note">{manageDisabledNote}</span>
+          : null}
+      {canDeleteNotebook
+        ? <button className="danger" onClick={onDelete}>删除笔记本</button>
+        : deleteDisabledNote
+          ? <span className="notebook-menu-note">{deleteDisabledNote}</span>
+          : null}
     </>
   );
 }
