@@ -29,7 +29,12 @@ Cost shape (per build, per notebook in scope):
     with the list the executor walks;
   * 0 element queries when the notebook's signal fingerprint is unchanged;
   * otherwise one batched ``GROUP BY source_id, element_type`` per batch of
-    sources, restricted to the whitelist;
+    sources for the non-``table`` whitelist kinds (covering-index scan), PLUS
+    one more batched ``GROUP BY source_id`` scoped to ``table`` alone (index
+    seek + a ``location_label`` heap fetch, to exclude an overlong table's
+    later split segments from the count — ``element_type_count_rows`` on
+    each store adapter has the "why two statements, why ``location_label``
+    and not ``metadata``" detail);
   * 1 O(1) ``unified_kg_state`` seq read, plus — only when that seq moved —
     the per-type GROUP BY, one bounded Memory-source id query, and (only when
     that notebook actually has Memory sources) one bounded per-source GROUP BY

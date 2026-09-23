@@ -2184,3 +2184,45 @@ def test_element_asset_locations_without_a_resolver_is_an_empty_mapping():
     )
 
     assert located == {}
+
+
+# -- codex 第二轮评审 守卫 4：table_part_max_chars 必须真的从 settings 传到 -----
+# -- ParserChainExecution，不是巧合地都读到同一个默认值。---------------------
+
+
+def test_process_source_passes_settings_chunk_target_chars_to_parser_chain(
+    tmp_path, monkeypatch
+):
+    """构造一个 CHUNK_TARGET_CHARS 明显偏离默认值(600)的 Settings，断言
+    process_source 传给 ParserChainExecution 的 table_part_max_chars 就是它——
+    不是巧合地都读到某个默认值，也不是被后续 get_settings() 兜底覆盖。"""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    custom_chunk_target = 4321
+    repo = _repository(Settings(CHUNK_TARGET_CHARS=str(custom_chunk_target)))
+    assert repo.settings.chunk_target_chars == custom_chunk_target
+    nb, sid = _seed_queued_office(repo, tmp_path / "doc.docx", "doc.docx", "docx")
+
+    captured = {}
+
+    class _CapturingParserChainExecution:
+        assets_pending = False
+
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def run(self):
+            raise RuntimeError("stop right after construction — capture is enough")
+
+    import app.services.source_ingestion as source_ingestion_module
+
+    monkeypatch.setattr(
+        source_ingestion_module, "ParserChainExecution", _CapturingParserChainExecution
+    )
+
+    repo.process_source(sid)  # 不抛：内部 except 落 'failed'，我们只要构造参数
+
+    assert "table_part_max_chars" in captured
+    assert captured["table_part_max_chars"] == custom_chunk_target

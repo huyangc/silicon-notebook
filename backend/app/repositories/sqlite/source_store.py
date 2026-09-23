@@ -97,6 +97,31 @@ class SourceStore:
     # facade's `_IN_CHUNK` (well under SQLite's default 999-variable limit).
     IN_CHUNK = 900
 
+    # A ``table`` element whose ``location_label`` ends in " part N" (N >= 2) is
+    # a continuation of an overlong table that parsing split into several
+    # retrieval units (``parsers.py::_split_table_into_elements`` — the label
+    # suffix is the label-generation contract that codepath documents; codex
+    # N3). Counting/enumerating every part would inflate a 400-row sheet from
+    # "1 table" to "~100 tables"; this predicate keeps only the first part
+    # (no " part N" suffix at all, or exactly " part 1").  Deliberately reads
+    # ``location_label`` and never ``metadata``: `table_html` lives in
+    # `metadata` and can be large, and on PostgreSQL that column is TOASTed —
+    # filtering on it detoasts every candidate row (measured ~22x more
+    # buffers, 7ms -> 60-100ms on a 2M-row table) even though the predicate
+    # only inspects a couple of bytes.  ``location_label`` is always short and
+    # never TOASTed, so this still costs a heap fetch (no covering-index scan)
+    # but not a decompression.
+    #   * NOT GLOB '* part [0-9]*'  -> no " part <digits>" suffix at all (an
+    #     unsplit table, or a non-numeric label coincidentally containing the
+    #     substring "part" elsewhere never matches because GLOB matches the
+    #     WHOLE string against "* part <digit>*").
+    #   * GLOB '* part 1'           -> ends in EXACTLY " part 1" (no trailing
+    #     digit), so "part 10"/"part 12" do not match this arm and stay
+    #     classified as continuations.
+    _NOT_TABLE_CONTINUATION_SQL = (
+        "(location_label NOT GLOB '* part [0-9]*' OR location_label GLOB '* part 1') "
+    )
+
     def __init__(
         self,
         database: SqliteDatabase,
@@ -670,26 +695,54 @@ class SourceStore:
         created_at, id): the whitelist keeps each source to one seek per
         requested type instead of scanning its whole element range.  Both
         lists are deduplicated; the source batch leaves room for the type
-        placeholders under SQLite's variable limit."""
+        placeholders under SQLite's variable limit.
+
+        ``table`` continuation parts (see ``_NOT_TABLE_CONTINUATION_SQL``) are
+        excluded so a split table counts once. This only touches ``table``
+        rows: formula/image/code_block labels never carry a " part N" suffix
+        and are unaffected — so ``table`` is counted through a SEPARATE
+        statement (below) rather than folded into the one above. Folding it
+        in would force SQLite to fetch ``location_label`` for every
+        whitelisted row just to evaluate one type's condition, turning the
+        covering-index plan the other three kinds enjoy into a row-lookup
+        scan for all of them (``test_element_count_query_is_served_by_the_typed_index``
+        pins the split: one covering-index statement for the non-table kinds,
+        one index-seek-plus-lookup statement scoped to ``table`` alone).
+        """
         ids = list(dict.fromkeys(source_id for source_id in source_ids if source_id))
         types = list(
             dict.fromkeys(element_type for element_type in element_types if element_type)
         )
         if not ids or not types:
             return []
-        type_marks = ",".join("?" for _ in types)
-        batch_size = max(1, self.IN_CHUNK - len(types))
+        plain_types = [t for t in types if t != "table"]
         out: List[tuple[str, str, int]] = []
-        for offset in range(0, len(ids), batch_size):
-            batch = ids[offset:offset + batch_size]
-            id_marks = ",".join("?" for _ in batch)
-            for row in db.execute(
-                "SELECT source_id, element_type, COUNT(*) AS c FROM source_elements "
-                f"WHERE source_id IN ({id_marks}) AND element_type IN ({type_marks}) "
-                "GROUP BY source_id, element_type",
-                (*batch, *types),
-            ).fetchall():
-                out.append((row["source_id"], row["element_type"], int(row["c"])))
+        if plain_types:
+            type_marks = ",".join("?" for _ in plain_types)
+            batch_size = max(1, self.IN_CHUNK - len(plain_types))
+            for offset in range(0, len(ids), batch_size):
+                batch = ids[offset:offset + batch_size]
+                id_marks = ",".join("?" for _ in batch)
+                for row in db.execute(
+                    "SELECT source_id, element_type, COUNT(*) AS c FROM source_elements "
+                    f"WHERE source_id IN ({id_marks}) AND element_type IN ({type_marks}) "
+                    "GROUP BY source_id, element_type",
+                    (*batch, *plain_types),
+                ).fetchall():
+                    out.append((row["source_id"], row["element_type"], int(row["c"])))
+        if "table" in types:
+            batch_size = max(1, self.IN_CHUNK - 1)
+            for offset in range(0, len(ids), batch_size):
+                batch = ids[offset:offset + batch_size]
+                id_marks = ",".join("?" for _ in batch)
+                for row in db.execute(
+                    "SELECT source_id, COUNT(*) AS c FROM source_elements "
+                    f"WHERE source_id IN ({id_marks}) AND element_type = 'table' "
+                    f"AND {self._NOT_TABLE_CONTINUATION_SQL}"
+                    "GROUP BY source_id",
+                    batch,
+                ).fetchall():
+                    out.append((row["source_id"], "table", int(row["c"])))
         return out
 
     # --------------------------------------- typed-collection enumeration
@@ -719,11 +772,19 @@ class SourceStore:
         selecting ``metadata``: an image needs its short asset id, while a
         table's metadata carries the whole rendered HTML that this listing
         deliberately does not transfer.
+
+        ``table`` enumeration additionally skips continuation parts (see
+        ``_NOT_TABLE_CONTINUATION_SQL``): those rows are the same overlong
+        table's later retrieval segments (``parsers.py::_split_table_into_elements``),
+        not distinct tables, and listing each one would show a 400-row sheet
+        as ~100 "tables".
         """
         params: List[object] = [source_id, element_type]
         clause = ""
+        if element_type == "table":
+            clause += f"AND {self._NOT_TABLE_CONTINUATION_SQL}"
         if after is not None:
-            clause = "AND (created_at, id) > (?, ?) "
+            clause += "AND (created_at, id) > (?, ?) "
             params.extend([after[0], after[1]])
         params.append(max(1, int(limit)))
         return db.execute(

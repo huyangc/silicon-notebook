@@ -139,6 +139,31 @@ class SourceStore:
 
     IN_CHUNK = 5_000
 
+    # A ``table`` element whose ``location_label`` ends in " part N" (N >= 2)
+    # is a continuation of an overlong table that parsing split into several
+    # retrieval units (``parsers.py::_split_table_into_elements`` — the label
+    # suffix is the label-generation contract that codepath documents; codex
+    # N3). This predicate keeps only the first part (no " part N" suffix at
+    # all, or exactly " part 1"), so a split table counts/enumerates once.
+    #
+    # Deliberately reads ``location_label`` and never ``metadata``:
+    # `table_html` lives in `metadata`, is JSONB, and is TOASTed once it grows
+    # past ~2KB — filtering on `metadata->>'table_part'` forces Postgres to
+    # detoast (decompress) that whole blob for every candidate row even
+    # though the predicate only needs a couple of bytes (measured ~22x more
+    # buffer hits, 7ms -> 60-100ms on a 2M-row table). `location_label` is
+    # short and never TOASTed, so this predicate still costs a heap fetch —
+    # it is not part of `idx_source_elements_source_type`, so this is not an
+    # index-only scan — but not a decompression.
+    #   * ``!~ ' part ([2-9]|[1-9][0-9]+)$'`` — does NOT end in " part " plus
+    #     a number >= 2 (single digit 2-9, or 2+ digits with no leading
+    #     zero). "part 1" fails this alternation (excluded on purpose) and
+    #     stays classified as a first part; "part 10"/"part 12" match the
+    #     second alternative and stay classified as continuations.
+    _NOT_TABLE_CONTINUATION_SQL = (
+        "location_label !~ ' part ([2-9]|[1-9][0-9]+)$' "
+    )
+
     def __init__(
         self,
         database: PostgresDatabase,
@@ -695,23 +720,46 @@ class SourceStore:
         table — and that choice is deliberately NOT part of the contract; what
         is fixed is that the element-type restriction stays in the query, so
         a source's prose is never read to count its formulas.
+
+        ``table`` continuation parts (see ``_NOT_TABLE_CONTINUATION_SQL``) are
+        excluded so a split table counts once — through a SEPARATE statement
+        below rather than folded into the one above.  Folding it in would
+        force a ``location_label`` read on every whitelisted row just to
+        evaluate one type's condition, giving up the Index Only Scan the
+        other kinds get from ``idx_source_elements_source_type`` alone.
         """
         ids = list(dict.fromkeys(value for value in source_ids if value))
         types = list(dict.fromkeys(value for value in element_types if value))
         if not ids or not types:
             return []
+        plain_types = [t for t in types if t != "table"]
         out: list[tuple[str, str, int]] = []
-        for offset in range(0, len(ids), self.COUNT_IN_CHUNK):
-            batch = ids[offset : offset + self.COUNT_IN_CHUNK]
-            rows = connection.execute(
-                "SELECT source_id,element_type,COUNT(*) AS c FROM source_elements "
-                "WHERE source_id=ANY(%s) AND element_type=ANY(%s) "
-                "GROUP BY source_id,element_type",
-                (batch, types),
-            ).fetchall()
-            out.extend(
-                (row["source_id"], row["element_type"], int(row["c"])) for row in rows
-            )
+        if plain_types:
+            for offset in range(0, len(ids), self.COUNT_IN_CHUNK):
+                batch = ids[offset : offset + self.COUNT_IN_CHUNK]
+                rows = connection.execute(
+                    "SELECT source_id,element_type,COUNT(*) AS c FROM source_elements "
+                    "WHERE source_id=ANY(%s) AND element_type=ANY(%s) "
+                    "GROUP BY source_id,element_type",
+                    (batch, plain_types),
+                ).fetchall()
+                out.extend(
+                    (row["source_id"], row["element_type"], int(row["c"]))
+                    for row in rows
+                )
+        if "table" in types:
+            for offset in range(0, len(ids), self.COUNT_IN_CHUNK):
+                batch = ids[offset : offset + self.COUNT_IN_CHUNK]
+                rows = connection.execute(
+                    "SELECT source_id,COUNT(*) AS c FROM source_elements "
+                    "WHERE source_id=ANY(%s) AND element_type='table' "
+                    f"AND {self._NOT_TABLE_CONTINUATION_SQL}"
+                    "GROUP BY source_id",
+                    (batch,),
+                ).fetchall()
+                out.extend(
+                    (row["source_id"], "table", int(row["c"])) for row in rows
+                )
         return out
 
     # --------------------------------------- typed-collection enumeration
@@ -732,11 +780,19 @@ class SourceStore:
         silently skips or repeats a row at a page boundary.  Row values
         ``(created_at, id) > (%s, %s)`` are index-comparable, keeping this on
         ``idx_source_elements_source_type``.
+
+        ``table`` enumeration additionally skips continuation parts (see
+        ``_NOT_TABLE_CONTINUATION_SQL``): those rows are the same overlong
+        table's later retrieval segments (``parsers.py::_split_table_into_elements``),
+        not distinct tables, and listing each one would show a 400-row sheet
+        as ~100 "tables".
         """
         params: list[Any] = [source_id, element_type]
         clause = ""
+        if element_type == "table":
+            clause += f"AND {self._NOT_TABLE_CONTINUATION_SQL}"
         if after is not None:
-            clause = "AND (created_at,id) > (%s,%s) "
+            clause += "AND (created_at,id) > (%s,%s) "
             params.extend([after[0], after[1]])
         params.append(max(1, int(limit)))
         return connection.execute(

@@ -178,7 +178,7 @@ def test_process_source_url_cloud_failure_uses_python_fallback_and_can_reparse(
     monkeypatch.setattr(cloud_repo.mineru_cloud_client, "parse_url_with_images", boom)
     fallback_calls = []
 
-    def local_python_fallback(source_id, path, file_name, persist_image=None):
+    def local_python_fallback(source_id, path, file_name, persist_image=None, **_kwargs):
         fallback_calls.append((source_id, "https://a/doc.pdf", file_name))
         return [
             SourceElement(

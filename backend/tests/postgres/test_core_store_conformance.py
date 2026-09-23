@@ -3663,6 +3663,69 @@ def test_typed_collection_catalog_primitives_match_sqlite_semantics(
     assert after_swap["src-collect-a"] != remaining["src-collect-a"]
 
 
+def test_table_continuation_parts_count_and_enumerate_once(core_stores: CoreStores):
+    """codex 评审第二轮 守卫 3:一张被解析层切成 3 段的超长表 + 一张完全没切过的
+    旧表——计数只能是 2(不是 4),枚举只回第 1 段和旧表(不回 part 2/3)。
+
+    判定必须只读 ``location_label``,不读 ``metadata``:PG 上 `metadata` 是
+    TOASTed JSONB、装着整份 `table_html`,读它做过滤会逼每一行 detoast(实测
+    ~22x 更多 buffer、7ms -> 60-100ms/2M 行);`location_label` 短且从不 TOAST。
+    """
+    owner = core_stores.identity.create_user("n00123457", "password-12")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="TableContinuation"), owner.id
+    )
+    core_stores.sources.insert_source(
+        source_id="src-table-split",
+        notebook_id=notebook_id,
+        title="Split",
+        source_type="xlsx",
+        status="parsed",
+        parse_status="parsed",
+        file_name="split.xlsx",
+        file_path="uploads/split.xlsx",
+        file_size=1,
+        file_hash="hash",
+        summary="",
+        doc_type="",
+    )
+    with core_stores.database.write() as connection:
+        core_stores.sources.replace_elements(
+            connection,
+            "src-table-split",
+            (
+                SourceElementWrite(
+                    "el-split-1", "table", "XLSX p.1 table 1 part 1", "row a",
+                    {"table_part": 1, "table_parts": 3, "table_group": "XLSX p.1 table 1"},
+                ),
+                SourceElementWrite(
+                    "el-split-2", "table", "XLSX p.1 table 1 part 2", "row b",
+                    {"table_part": 2, "table_parts": 3, "table_group": "XLSX p.1 table 1"},
+                ),
+                SourceElementWrite(
+                    "el-split-3", "table", "XLSX p.1 table 1 part 3", "row c",
+                    {"table_part": 3, "table_parts": 3, "table_group": "XLSX p.1 table 1"},
+                ),
+                # 一张完全没切过的旧表:label 没有 part 后缀,metadata 也没有
+                # table_part——存量数据(改动前落库的行)必须一并受益。
+                SourceElementWrite(
+                    "el-old", "table", "XLSX p.1 table 2", "old table", {},
+                ),
+            ),
+            created_at=NOW,
+        )
+    with core_stores.database.connect() as connection:
+        counts = core_stores.sources.element_type_count_rows(
+            connection, ["src-table-split"], ENUMERABLE_ELEMENT_KINDS
+        )
+        assert counts == [("src-table-split", "table", 2)]  # 不是 4
+
+        pages = core_stores.sources.element_page_rows(
+            connection, "src-table-split", "table", None, 100
+        )
+    assert sorted(row["id"] for row in pages) == ["el-old", "el-split-1"]  # part 2/3 被跳过
+
+
 def test_typed_collection_enumeration_primitives_match_sqlite_semantics(
     core_stores: CoreStores,
 ):

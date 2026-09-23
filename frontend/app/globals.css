@@ -4068,10 +4068,31 @@ button.chat-session-card {
   animation: chatUserFlash 1.3s ease-out;
 }
 
+/* 合并表格分段(table-part-groups.ts)的引用跳转高亮:被引用的那一段是拼进同一张
+   <table> 的 <tbody>,不是独立卡片,box-shadow 环在表格行组上不可靠,改用同色系的
+   背景一次性淡出。 */
+@keyframes tablePartFlash {
+  0% { background: rgba(31, 94, 255, 0.18); }
+  100% { background: transparent; }
+}
+
+.table-part--highlighted {
+  animation: tablePartFlash 1.3s ease-out;
+}
+
+/* 表头行的 <th> 自带不透明背景(.element-table th 那条规则),会盖住上面 tbody 级
+   的高亮——被引用的分段若正好是带表头的第 1 段,读者会看不出高亮。单独在 th 上
+   跑同一段动画:动画默认在结束后交还给下面这条静态规则,不会永久盖掉表头底色。 */
+.table-part--highlighted th {
+  animation: tablePartFlash 1.3s ease-out;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .chat-turn-nav-loupe { animation: none; }
   .chat-user-flash { animation: none; box-shadow: 0 0 0 3px rgba(31, 94, 255, 0.5); }
   .source-element-card--highlighted { animation: none; box-shadow: 0 0 0 3px rgba(31, 94, 255, 0.5); }
+  .table-part--highlighted { animation: none; background: rgba(31, 94, 255, 0.18); }
+  .table-part--highlighted th { animation: none; background: rgba(31, 94, 255, 0.18); }
 }
 
 .reasoning-trace-panel {
