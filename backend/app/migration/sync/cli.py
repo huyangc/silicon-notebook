@@ -456,7 +456,7 @@ def _print_scale_rebuild(rebuild: ScaleRebuildResult) -> None:
     if rebuild.outcomes:
         counts = rebuild.counts
         print(
-            f"scale 索引: 重建 {counts['built']}、折叠 {counts['folded']}、"
+            f"scale 索引: 重建 {counts['built']}、"
             f"跳过 {counts['skipped']}、失败 {counts['failed']}"
         )
         _print_scale_rebuild_details(rebuild.outcomes)
@@ -478,7 +478,7 @@ def _print_scale_rebuild_details(outcomes: Mapping[str, str]) -> None:
     pending = sorted(
         (notebook_id, outcome)
         for notebook_id, outcome in outcomes.items()
-        if outcome not in ("built", "folded")
+        if outcome != "built"
     )
     for notebook_id, outcome in pending[:_SCALE_MAX_DETAIL_LINES]:
         print(f"  {notebook_id}: {outcome}")
@@ -2343,9 +2343,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(REBUILD_CHOICES),
         default=REBUILD_AUTO,
         help="导入完成后如何处理受影响笔记本的 scale 索引（kg_index/kg_viz 是派生"
-        "工件，不随包走）。auto（默认）：对每本按服务内自动建索引的同一套判据决定"
-        "重建/折叠/跳过，在本进程内同步跑完；skip：完全不碰，留给运维手动跑 "
-        "scripts/build_scale_index.py。无论哪种都不影响导入本身的结果与退出码",
+        "工件，不随包走）。auto（默认）：按服务内同一套 eligible 判据决定哪些本"
+        "需要 scale 索引，需要的一律**全量**重建（包对已索引行是替换语义，追加式"
+        "折叠的前提不成立），在本进程内同步逐本跑完；skip：完全不碰，留给运维自己"
+        "挑时段跑 scripts/build_scale_index.py。无论哪种都不影响导入本身的结果与"
+        "退出码",
     )
     import_parser.add_argument("--json", action="store_true", dest="as_json")
     import_parser.set_defaults(handler=_cmd_import)

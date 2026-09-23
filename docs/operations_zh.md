@@ -829,11 +829,20 @@ head_created_at, deleting}`，不适用的字段给 `null`。JSON 不截断—�
 `build_scale_index.py` 用的那同一道迁移 ledger 闸：执行导入的 checkout 与线上库差一个迁移
 时，一本都不建——用错版本的代码建出来的索引是静默错误的，而它会原子换名顶掉一份健康索引。
 
-每一本再按**服务内那一套判据**决定，而不是在同步工具里另立一份阈值：只有
-`scale-index/status` 报 `unindexed`、`suggested` 或 `stale` 才重建（就是在线 `maybe_auto_index`
-用的那道闸）；整本在字节数和行数上都低于整本拷贝上限的，按 `copyable_small` 跳过——这是本
-代码库对「小到不需要 scale 索引」的定义；全量还是折叠也用在线构建的同一个 `auto` 解析。
-构建逐本串行，取的是普通的跨进程逐库 claim。
+每一本只问一个问题，而且是**服务内那一个**，不在同步工具里另立阈值：`scale-index/status` 的
+`eligible`——这本到底要不要 scale 索引？（base tier、磁盘上已有工件、被别的笔记本挂载、超过
+chunk 建议阈值，或者干脆大到不能整本拷贝。最后这条就是为什么小库不需要另设一条规则；它被
+记成 `skipped:not_eligible`。）
+
+eligible 的本一律**全量**重建。在线路径那套 `state` 闸和 fold/full 的 `auto` 解析在这里刻意
+不用：它们都假设上次构建之后只发生了内容**追加**——delta 是按「不在已发布 manifest 里的
+source id」算的，所以折叠正确的前提是现有工件仍然是本库内容的子集。同步包破坏了这个前提：
+它对已经建过索引的行是**替换**语义（同一条 source 的 chunks/knowledge 被原地覆盖，或者整条
+source 被删）。这种导入之后 delta 可能是空的，而工件已经不对了：`state` 读出来是 `indexed`，
+fold 原样返回旧 manifest——两道闸都会把一份陈旧索引留在线上。全量是唯一一种正确性不依赖那个
+前提的模式。代价是真实的——大库每次导入都要重建一次——这笔时间归运维安排：
+`--rebuild-scale skip` 把它交还回去，改成低峰时段手动跑 `build_scale_index.py`。构建逐本串行，
+取的是普通的跨进程逐库 claim。
 
 其中两种结果是「拒绝」而不是「出问题」，都不发警告。在线服务已经在建的那一本持有 claim，
 离线构建器根本拿不到，记 `skipped:busy`（注意进程内的 `building`/`queued` 状态查不出这件事：
@@ -845,10 +854,10 @@ head_created_at, deleting}`，不适用的字段给 `null`。JSON 不截断—�
 导入的结果**——`sync import` 仍然退出 0，`sync_imports` 仍然是 `done`，失败的那本会给一条
 警告，点名手动重跑用的 `build_scale_index.py` 命令。Ctrl-C 同样被吸收：剩下的本记
 `skipped:interrupted`，导入照样报成完成，**不要**重跑这个包。人读摘要在重建开始**之前**就
-打完（重建可能跑几个小时），scale 段接在它后面：`scale 索引: 重建 N、折叠 N、跳过 N、失败 N`，
+打完（重建可能跑几个小时），scale 段接在它后面：`scale 索引: 重建 N、跳过 N、失败 N`，
 然后跳过和失败的逐本一行（与镜像段同口径封顶 20 行，其余折成「另有 N 本未列出」），最后是
 重建自己的警告，放在 `scale 重建警告:` 下。`--json` 带 `scale_rebuild`（笔记本 id →
-`built`/`folded`/`skipped:<原因>`/`failed:<异常类名>`；失败形态只记异常类名，因为构建失败的
+`built`/`skipped:<原因>`/`failed:<异常类名>`；失败形态只记异常类名，因为构建失败的
 文本可能带上存储路径）、`scale_rebuild_mode`（本次用的 `--rebuild-scale` 取值，所以空映射
 永远不歧义）和 `scale_rebuild_note`。这三个字段由 CLI 合并，**不**进
 `sync_imports.report_json`：那一行在重建开始前就已经关闭，「done 即 done」。
