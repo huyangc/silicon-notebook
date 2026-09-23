@@ -725,10 +725,30 @@ PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --j
    `os.replace` over the destination), so there is no `storage/...retired`/`.sync-old` sibling to
    clean up afterward, and an interrupted incremental file merge is safe to retry with `--resume`
    (each file's replace is atomic; the ones already replaced are simply overwritten again with the
-   same bytes). If the incremental package's `deleted_notebooks` names a mirrored notebook, the
-   import only marks it `status='deleting'` and queues a delete job — it does not delete anything
-   itself; see `sync status`'s "waiting on a delete job" count above and the "Notebook delete
-   jobs" section below for what finishes that cleanup.
+   same bytes). A `.sync-tmp` file left behind by a killed import (a crash between the copy and the
+   rename) is harmless clutter, not something to clean up by hand: the next import into that same
+   notebook/asset directory removes any stale `*.sync-tmp` it finds before merging, and `sync
+   export` skips any file ending in `.sync-tmp` on both of its own file-collection paths, so an
+   interrupted import's debris never rides along in a later package to another environment.
+8. If the incremental package's `deleted_notebooks` names a mirrored notebook, what happens
+   depends on that notebook's state on THIS target right now, decided in one read at the start of
+   the delete phase: a notebook this target is actively deep-copying (`status='copying'`) is left
+   completely alone — neither its rows nor its `status` are touched, and it is counted in both
+   `notebooks_delete_skipped` and `deletes_skipped_for_copying` — because the copy is reading those
+   rows right now and deleting out from under it would corrupt it; finish or abandon the copy, then
+   delete the notebook (by hand, or let the next incremental package's replay catch it once the
+   copy has settled and the notebook is no longer `copying`). A notebook this target actually holds
+   (not copying) is instead tombstoned — flipped to `status='deleting'` and handed to the same
+   delete-job queue `DELETE /api/notebooks/{id}` uses (see "Notebook delete jobs" below) — and its
+   individual row-level delete entries are **not** replayed one by one; they are counted in
+   `deletes_folded_into_notebook_deletion` instead, because the delete job is about to clear every
+   table for that notebook anyway, so replaying thousands of keys first would be work the job
+   immediately undoes. **A non-zero `deletes_folded_into_notebook_deletion` with the notebook's rows
+   still present right after the import returns is the expected shape, not a bug** — those rows are
+   the delete job's to clear, not this import's; the import itself only queues the job. See
+   `sync status`'s "waiting on a delete job" count above and the "Notebook delete jobs" section
+   below for what finishes that cleanup, and why the application's own delete-job worker needs to
+   be running for it to happen.
 
 Upgrading to schema v85/0065 resets every target's watermark to `captured=false` (the column is
 new; rows written before the upgrade predate it and have no change-log window behind them). The
@@ -812,7 +832,10 @@ mirror of a *different* source environment, is never overwritten by an import; t
 match, not a name lookup, so a same-named-but-different-id notebook on the target is not a
 conflict). A package is also rejected when its `created_at` is **older** than the most recent
 `done` package from the same `source_env`: applying it would move the target backwards behind
-content it already has.
+content it already has. A package whose `files/notebooks/**`/`files/assets/**` names a notebook
+id `manifest.notebooks` does not declare is refused the same way, before a single byte is hashed,
+staged, or copied — a well-formed package never produces one, so seeing this error means the
+package itself is malformed or was tampered with in transit.
 
 When the target backend is SQLite, `import` requires the application to be stopped first (the
 importer writes outside the backend's own request-serialized write path); `status`/`--dry-run`

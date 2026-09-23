@@ -314,7 +314,9 @@ def _cmd_import(args: argparse.Namespace, settings: Settings) -> int:
         # 笔记本删除传播这两个相位——只在真正执行的增量导入里打印才不误导。
         print(
             f"删除重放: 应用 {report.deletes_applied}、目标端已不存在 "
-            f"{report.deletes_absent}、孤儿跳过 {report.deletes_orphan_skipped}"
+            f"{report.deletes_absent}、孤儿跳过 {report.deletes_orphan_skipped}、"
+            f"随笔记本删除作业整本清理 {report.deletes_folded_into_notebook_deletion}、"
+            f"目标端正在拷贝、本次未动 {report.deletes_skipped_for_copying}"
         )
         if report.notebooks_deleted:
             print(
