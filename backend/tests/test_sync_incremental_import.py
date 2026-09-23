@@ -2308,3 +2308,123 @@ def _delete_phase_steps(baseline, package_id: str) -> set[str]:
             (package_id,),
         )
     }
+
+
+# ---- codex #788 r4: a deleted id another environment has since claimed -----
+
+
+def test_a_deleted_notebook_reclaimed_by_another_source_aborts_the_replay(
+    baseline, monkeypatch
+):
+    """The window says notebook X was deleted at the source. The target does
+    not have X, so ``_plan_deletes`` leaves it in ``plan.allowed`` -- correct
+    at the moment it is computed, because any row still naming X is stale.
+
+    But nothing this run did CLAIMS X: it is not in ``manifest.notebooks``,
+    so ``_reserve_notebooks`` never reserved it. A concurrent import of a
+    DIFFERENT source environment can create a mirror under that very id while
+    this run sits between transactions -- and phase 3c would then delete the
+    new mirror's rows, because they are attributed to a notebook this package
+    believes it may delete from. Phase 3d refuses afterwards on
+    ``sync_origin``, by which time 3c has committed (codex #788 r4 P2).
+
+    变异验证: 去掉 ``_assert_notebooks_still_ours`` 里覆盖 deleted_notebooks
+    的那段, 本条报红 -- 外来镜像的 chunk 被删掉。"""
+    repo = baseline["source"]["repo"]
+    mirror = baseline["target"]["repo"]
+    # A window that deletes beta, and also touches alpha so it declares one.
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET name='alpha v2' WHERE id=?", (baseline["alpha"],)
+        )
+        db.execute("DELETE FROM notebooks WHERE id=?", (baseline["beta"],))
+    window = _window(baseline)
+    assert window.deleted_notebooks == (baseline["beta"],)
+    # A row-level delete the window carries FOR beta. Ids are exported
+    # verbatim and never reissued, so two environments mirroring the same
+    # upstream content can hold the same key -- which is precisely how the
+    # intruder's brand-new mirror ends up in this window's line of fire.
+    doomed = next(
+        entry["key"]["id"]
+        for entry in _deletes(window.package_dir)
+        if entry["table"] == "knowhow_tables"
+        and entry["notebook_id"] == baseline["beta"]
+    )
+    # The target must not have it, so the planner leaves it in `allowed`.
+    with mirror._write() as db:
+        db.execute("DELETE FROM notebooks WHERE id=?", (baseline["beta"],))
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM notebooks WHERE id=?", (baseline["beta"],)
+    ) == 0
+
+    from app.migration.sync import import_ as import_module
+
+    original = import_module._replay_delete_table
+    planted = {"done": False}
+
+    def claim_then_replay(backend, conn, table, context, plan):
+        if not planted["done"]:
+            planted["done"] = True
+            # Another environment's import creates a mirror under that id,
+            # with content of its own, between this run's transactions.
+            with mirror._write() as db:
+                db.execute(
+                    "INSERT INTO notebooks(id,name,created_by,status,"
+                    "sync_origin,created_at,updated_at) "
+                    "VALUES(?,?,'user-local','draft','other-env',?,?)",
+                    (baseline["beta"], "theirs", MOMENT, MOMENT),
+                )
+                # ...carrying a row whose key this window's delete list
+                # names. Without the guard, 3c reads its owner (beta, still
+                # in ``plan.allowed``) and deletes it.
+                db.execute(
+                    "INSERT INTO knowhow_tables(id,notebook_id,title,"
+                    "description,mutation_seq,hidden_source_id,created_by,"
+                    "created_at,updated_at) "
+                    "VALUES(?,?,'theirs','',0,'','user-local',?,?)",
+                    (doomed, baseline["beta"], MOMENT, MOMENT),
+                )
+        return original(backend, conn, table, context, plan)
+
+    monkeypatch.setattr(import_module, "_replay_delete_table", claim_then_replay)
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(baseline["target"], window.package_dir)
+
+    assert planted["done"]
+    message = str(failure.value)
+    assert baseline["beta"] in message
+    assert "other-env" in message
+    # The other environment's row is untouched.
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM knowhow_tables WHERE id=?", (doomed,)
+    ) == 1
+    assert _one(
+        mirror, "SELECT sync_origin FROM notebooks WHERE id=?", (baseline["beta"],)
+    )["sync_origin"] == "other-env"
+
+
+def test_a_deleted_notebook_absent_at_the_target_is_not_itself_an_error(
+    baseline
+):
+    """The other half of the weaker rule: a deleted id the target simply does
+    not have must NOT trip the guard -- that is the ordinary shape of a source
+    deleting something this mirror never received."""
+    repo = baseline["source"]["repo"]
+    mirror = baseline["target"]["repo"]
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET name='alpha v2' WHERE id=?", (baseline["alpha"],)
+        )
+        db.execute("DELETE FROM notebooks WHERE id=?", (baseline["beta"],))
+    window = _window(baseline)
+    with mirror._write() as db:
+        db.execute("DELETE FROM notebooks WHERE id=?", (baseline["beta"],))
+
+    report = _import(baseline["target"], window.package_dir)
+
+    assert report.error == ""
+    assert report.notebooks_deleted == ()
+    assert _one(
+        mirror, "SELECT name FROM notebooks WHERE id=?", (baseline["alpha"],)
+    )["name"] == "alpha v2"

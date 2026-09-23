@@ -3506,7 +3506,7 @@ def _is_primary_key_conflict(backend: _Backend, exc: BaseException) -> bool:
 
 
 def _assert_notebooks_still_ours(
-    backend: _Backend, conn: Any, context: _Context
+    backend: _Backend, conn: Any, context: _Context, *, lock: bool = False
 ) -> None:
     """Re-verify, at the start of every later write this run makes, that this
     package's notebooks still belong to its source environment.
@@ -3522,19 +3522,57 @@ def _assert_notebooks_still_ours(
     it is what keeps that design honest: nothing between the reservation and
     THIS write may have reattributed one of this run's notebooks without
     this run noticing and refusing before doing any more damage.
+
+    **``deleted_notebooks`` are checked too, under a weaker rule** (codex
+    #788 r4 P2). They are not in ``manifest.notebooks`` -- a window never
+    re-sends a notebook it says the source deleted -- and ``_reserve_
+    notebooks`` never claimed them, so nothing this run did stops a
+    concurrent import of a DIFFERENT source environment from creating a
+    mirror under one of those ids while this run is between transactions.
+    That is not hypothetical bookkeeping: ``_plan_deletes`` puts a deleted id
+    the target does NOT have into ``plan.allowed`` (there is no job to fold
+    into, and a stray row pointing at it is genuinely stale), so phase 3c
+    would happily delete rows that, by then, belong to the OTHER
+    environment's brand-new mirror. Phase 3d refuses it afterwards on
+    ``sync_origin`` -- but 3c has already committed.
+
+    The rule for a deleted id is therefore "absent, or present and ours",
+    which is exactly what makes it safe to delete rows attributed to it:
+
+    - absent at the target: nothing to collide with, and any row still
+      naming it is the stale row the replay is for;
+    - present with THIS package's ``sync_origin``: our own mirror, which 3d
+      is about to tombstone;
+    - present with anyone else's: refused by name, with the origin quoted.
+
+    ``lock=True`` additionally takes ``FOR UPDATE`` on PostgreSQL over the
+    rows that exist, so a concurrent writer of one of them serializes against
+    this check instead of racing it. Passed by every caller running inside a
+    WRITE transaction and by none of the others: two call sites here hold a
+    ``read()`` snapshot (``_stamp_mirrors``, and the re-check before the file
+    phase), and PostgreSQL refuses ``SELECT ... FOR UPDATE`` outright in a
+    read-only transaction. Since this function already runs at the start of
+    every write transaction phases 3a, 3b, 3c, 3d and 5 open, one change here
+    covers every per-table replay transaction without any of them having to
+    remember.
     """
     manifest = context.manifest
-    if not manifest.notebooks:
+    if not manifest.notebooks and not context.deleted_notebooks:
         return
+    lock_suffix = " FOR UPDATE" if lock and backend.is_postgres else ""
+    wanted = [*manifest.notebooks, *sorted(context.deleted_notebooks)]
     found: dict[str, str] = {}
-    for batch in _batched(list(manifest.notebooks)):
+    for batch in _batched(wanted):
         placeholders = ",".join("?" for _ in batch)
         for row in backend.fetch(
             conn,
-            f"SELECT id, sync_origin FROM notebooks WHERE id IN ({placeholders})",
+            f"SELECT id, sync_origin FROM notebooks WHERE id IN ({placeholders})"
+            f"{lock_suffix}",
             batch,
         ):
             found[str(row["id"])] = str(row["sync_origin"] or "")
+    # A CARRIED notebook must be present and ours; a DELETED one may also be
+    # absent, which is the only difference between the two rules.
     missing = sorted(set(manifest.notebooks) - set(found))
     foreign = sorted(
         f"{notebook_id} (sync_origin={origin!r})"
@@ -4570,7 +4608,7 @@ def _apply_table(
     # Re-verified at the start of every table's own write transaction, not
     # only once at declaration time -- see _assert_notebooks_still_ours's
     # docstring for why the two are not the same guarantee.
-    _assert_notebooks_still_ours(backend, conn, context)
+    _assert_notebooks_still_ours(backend, conn, context, lock=True)
     spec = spec_for(table)
     entry = context.manifest.tables[table]
     columns = _package_columns(backend, conn, table, context)
@@ -4947,7 +4985,7 @@ def _prune_table(
     # Re-verified at the start of every table's own write transaction -- this
     # phase DELETES, so it is exactly where a stale ownership assumption
     # would do the most damage. See _assert_notebooks_still_ours's docstring.
-    _assert_notebooks_still_ours(backend, conn, context)
+    _assert_notebooks_still_ours(backend, conn, context, lock=True)
     primary_key = _sync_key(backend, conn, table)
     carried = {
         tuple(decode_value(row.get(column)) for column in primary_key)
@@ -5590,7 +5628,7 @@ def _replay_deletes(backend: _Backend, context: _Context, done: set[str]) -> Non
             # This phase DELETES, so it is exactly where a stale ownership
             # assumption would do the most damage. See
             # _assert_notebooks_still_ours's docstring.
-            _assert_notebooks_still_ours(backend, conn, context)
+            _assert_notebooks_still_ours(backend, conn, context, lock=True)
             outcome = _replay_delete_table(backend, conn, table, context, plan)
             _record_progress(
                 backend,
@@ -5673,7 +5711,7 @@ def _apply_notebook_deletions(
         if step in done:
             continue
         with backend.write() as conn:
-            _assert_notebooks_still_ours(backend, conn, context)
+            _assert_notebooks_still_ours(backend, conn, context, lock=True)
             rows = backend.fetch(
                 conn,
                 "SELECT id, status, sync_origin FROM notebooks WHERE id = ?"
@@ -6396,7 +6434,7 @@ def _publish_notebooks(backend: _Backend, context: _Context) -> None:
     with backend.write() as conn:
         # Re-verified at the start of this phase's own write transaction too
         # -- see _assert_notebooks_still_ours's docstring.
-        _assert_notebooks_still_ours(backend, conn, context)
+        _assert_notebooks_still_ours(backend, conn, context, lock=True)
         for batch in _batched(list(context.manifest.notebooks)):
             placeholders = ",".join("?" for _ in batch)
             conn.execute(
