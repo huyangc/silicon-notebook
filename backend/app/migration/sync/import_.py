@@ -451,6 +451,11 @@ _SUPERSEDED_BY_KEY = "superseded_by"
 # and one fewer place for the two to disagree.
 _MODE_KEY = "mode"
 _BASE_PACKAGE_ID_KEY = "base_package_id"
+# Whether the package this row applied was a ``--notebook`` export. Persisted
+# because the chain rule reads it back off EVERY earlier row, not just this
+# one: a scoped package must never displace the baseline a later window
+# continues from (codex #788 r2 P1).
+_SCOPED_KEY = "scoped"
 
 # What an operator has to do next for every user ``--create-missing-users``
 # minted. Nothing in this repository links an external identity to a local
@@ -708,6 +713,8 @@ class ImportReport:
     # this field plus the row's own ``from_seq``/``to_seq`` columns.
     mode: str = MODE_FULL
     base_package_id: str = ""
+    # ``None`` when the package predates the field; see ``_PackageManifest``.
+    scoped: bool | None = None
     # Phase 3c (incremental only). ``applied`` counts rows actually deleted,
     # ``absent`` the entries whose row the target no longer had (idempotent
     # replay, or a resumed run), ``orphan_skipped`` the PARENT-scoped entries
@@ -734,6 +741,7 @@ class ImportReport:
             _PACKAGE_CREATED_AT_KEY: self.package_created_at,
             _MODE_KEY: self.mode,
             _BASE_PACKAGE_ID_KEY: self.base_package_id,
+            _SCOPED_KEY: self.scoped,
             "already_applied": self.already_applied,
             "dry_run": self.dry_run,
             "notebooks": list(self.notebooks),
@@ -830,6 +838,7 @@ def _report(
         error=error,
         mode=manifest.mode,
         base_package_id=manifest.base_package_id,
+        scoped=manifest.scoped,
         deletes_applied=ledger.deletes_applied,
         deletes_absent=ledger.deletes_absent,
         deletes_orphan_skipped=ledger.deletes_orphan_skipped,
@@ -892,6 +901,14 @@ class _PackageManifest:
     # (deleted by a concurrent edit while the export ran). Reported, never
     # fatal: the rows that point at them still import.
     missing_files: tuple[str, ...]
+    # Whether ``--notebook`` narrowed the export that wrote this package.
+    # ``None`` for a package written before the field existed -- an honest
+    # "this package does not say", never guessed either way, because the two
+    # answers lead to opposite chain decisions
+    # (``_PriorImport.participates_in_chain``). Last, and defaulted, so a
+    # caller constructing this by hand (the path-safety tests do) does not
+    # have to know about a field that only the chain rules read.
+    scoped: bool | None = None
 
 
 def _read_json(path: Path) -> Any:
@@ -936,6 +953,11 @@ def _read_manifest(package_dir: Path) -> _PackageManifest:
         to_seq=int(document.get("to_seq") or 0),
         mode=str(document.get("mode") or MODE_FULL),
         base_package_id=str(document.get("base_package_id") or ""),
+        scoped=(
+            bool(document["scoped"])
+            if isinstance(document.get("scoped"), bool)
+            else None
+        ),
         deleted_notebooks=tuple(
             str(item) for item in document.get("deleted_notebooks") or ()
         ),
@@ -1973,7 +1995,12 @@ def _verify_columns(backend: _Backend, conn: Any, manifest: _PackageManifest) ->
 
 
 def _verify_row_scopes(
-    backend: _Backend, conn: Any, package_dir: Path, manifest: _PackageManifest
+    backend: _Backend,
+    conn: Any,
+    package_dir: Path,
+    manifest: _PackageManifest,
+    *,
+    target_resolution: bool = True,
 ) -> tuple[dict[str, frozenset[str]], dict[str, frozenset[str]]]:
     """Refuse a package whose rows reach outside the notebook set it claims.
 
@@ -1995,6 +2022,15 @@ def _verify_row_scopes(
       before its children, so a PARENT table's own scope has already been
       verified, and therefore everything it stands for, by the time a table
       scoped through it is reached.
+
+      ``target_resolution=False`` turns that second chance into a pass:
+      the caller has already established this package is applied in full, so
+      nothing is going to be written and there is nothing to prove -- while
+      the target's parent rows may legitimately have moved on since (a later
+      window can have deleted the very knowhow table this one hung rows off).
+      Asking anyway would refuse a re-import that is a no-op, which is the
+      one answer that cannot be right (codex #788 r2 P2). The package's own
+      internal checks below are unaffected.
 
       **An INCREMENTAL package gets a second chance here, and only here.** A
       window carries what CHANGED, so a new knowhow cell arrives with no
@@ -2093,6 +2129,15 @@ def _verify_row_scopes(
                 own_keys.add(str(row.get(own_key_column) or ""))
         bad = outside
         if (
+            outside
+            and manifest.mode == MODE_INCREMENTAL
+            and scope.kind is ScopeKind.PARENT
+            and not target_resolution
+        ):
+            # Already applied -- see the docstring. Not "accepted": simply not
+            # asked, because the answer cannot change what this call returns.
+            bad = set()
+        elif (
             outside
             and manifest.mode == MODE_INCREMENTAL
             and scope.kind is ScopeKind.PARENT
@@ -2338,13 +2383,33 @@ def _preflight(backend: _Backend, conn: Any, context: _Context) -> bool:
             "(docs/incremental-sync-design.md §6)"
         )
     _verify_columns(backend, conn, manifest)
-    # Row-range validity is checked before ANY target-side decision that
-    # reasons about "this package's notebooks" -- including the
-    # already-applied short-circuit right below, so a package whose manifest
-    # lies about its scope is refused the same way whether or not it happens
-    # to share a package_id with something already recorded.
+    # Read BEFORE the scope checks, and used only to decide which of them may
+    # consult the target (codex #788 r2 P2). A package recorded ``done`` is a
+    # no-op to re-import, and the one thing that must never happen is for
+    # that no-op to FAIL -- which it did: an incremental package whose PARENT
+    # rows were attributed through the target at import time cannot be
+    # re-verified that way once a LATER window has deleted the parent, so
+    # re-running a finished package raised instead of short-circuiting.
+    already_applied = any(
+        str(row["status"]) == _STATUS_DONE
+        for row in backend.fetch(
+            conn,
+            "SELECT status FROM sync_imports WHERE package_id = ?",
+            (manifest.package_id,),
+        )
+    )
+    # Row-range validity is still checked in full: it is the package's own
+    # internal consistency (``manifest.notebooks`` vs ``rows/notebooks.jsonl``
+    # vs every other table's scope column), and a package that lies about its
+    # scope is refused the same way whether or not it shares a package_id
+    # with something already recorded. Only the one check that needs TARGET
+    # data is skipped for an already-applied package.
     context.parent_key_sets, context.borrowed_parents = _verify_row_scopes(
-        backend, conn, context.package_dir, manifest
+        backend,
+        conn,
+        context.package_dir,
+        manifest,
+        target_resolution=not already_applied,
     )
     # Same placement, and the same reasoning: the DELETE instructions' own
     # validity is settled before any target-side decision reasons about "this
@@ -2357,13 +2422,8 @@ def _preflight(backend: _Backend, conn: Any, context: _Context) -> bool:
         context.parent_key_sets.get("notebooks", frozenset()),
     )
 
-    for row in backend.fetch(
-        conn,
-        "SELECT status FROM sync_imports WHERE package_id = ?",
-        (manifest.package_id,),
-    ):
-        if str(row["status"]) == _STATUS_DONE:
-            return True
+    if already_applied:
+        return True
     prior = _prior_imports(backend, conn, manifest.source_env)
     _assert_chain(context, prior)
     _reject_backwards_snapshot(prior, context)
@@ -2652,39 +2712,68 @@ class _PriorImport:
     # the CLI, but nothing in this module reads it back: what the rules need
     # is the BASE, and a non-empty base is what makes a row a window.)
     base_package_id: str
+    # The package's own ``manifest.scoped``, or ``None`` for a row written
+    # before the field existed. See ``downstream_of``.
+    scoped: bool | None = None
 
     def downstream_of(self, base: "_PriorImport") -> bool:
         """Whether this row applied something the chain has moved PAST
-        ``base`` with -- i.e. whether continuing a window from ``base`` would
-        be going backwards.
+        ``base`` -- i.e. whether continuing a window from ``base`` would be
+        going backwards.
 
-        Two independent signals, because neither alone covers both shapes:
+        **Decided by RECORD ORDER, not by watermark height** (codex #788 r2
+        P1). The obvious rule -- "a higher ``to_seq`` is downstream" -- is
+        wrong across a capture reset. ``sync capture disable`` followed by
+        ``enable`` empties the change log and the watermark, so the next full
+        baseline legitimately exports at ``to_seq`` 0 even though it is the
+        NEWEST thing this source has ever produced. Every older package then
+        has a higher ``to_seq`` and reads as downstream of it, and every
+        window built on the new baseline is refused forever, with nothing an
+        operator can do about it short of hand-editing ``sync_imports``.
+        Sequence numbers only order packages WITHIN one capture epoch; they
+        say nothing across a reset. ``created_at`` -- the source's own export
+        time, which is already this module's ordering key everywhere else --
+        orders them across resets too.
 
-        - ``to_seq > base.to_seq``: this row advanced the change-log watermark
-          past the base's. Only an export that actually consumed more of the
-          log does that, so it catches every later window and every later
-          full baseline taken with the gate open.
-        - this row is itself a WINDOW (``base_package_id`` non-empty) recorded
-          after the base. A window whose range happened to end where the base
-          did -- an EMPTY window, which is a legitimate shape -- still moves
-          the chain head onto itself, and the ``to_seq`` test alone would
-          miss it.
+        So: a row is downstream of ``base`` when it was exported after it and
+        is a package that PARTICIPATES in the chain. The second half is what
+        keeps a one-off copy from displacing a baseline:
 
-        Deliberately NOT triggered by a package that merely happens to be
-        newer: a notebook-scoped export (``--notebook``) and a full export
-        taken with the capture gate closed both leave the source's watermark
-        where it was, so the source keeps basing its windows on the package
-        BEFORE them. Importing one of those at this target must not break the
-        chain the source is still building -- the whole reason this is a
-        watermark comparison rather than a timestamp comparison.
+        - a ``scoped`` package (``--notebook``) takes no lease and writes no
+          watermark, so the source keeps building its chain from the package
+          before it. Importing one here must not break that chain, and this
+          is the exporter's own word for it rather than something inferred.
+        - a row written before the ``scoped`` field existed cannot answer, so
+          it falls back to the old shape-based test: it counts as a chain
+          participant if it recorded a base of its own or advanced ``to_seq``
+          past zero. That is exactly as good as the old rule was for those
+          rows, and no worse.
+
+        An empty window -- same ``to_seq`` as its base -- is downstream by
+        ``created_at`` alone, which the height test could never see.
         """
-        if self.to_seq > base.to_seq:
-            return True
-        if not self.base_package_id:
-            return False
         if self.created_at is None or base.created_at is None:
+            # Unorderable. Refusing to guess is the conservative answer here:
+            # saying "not downstream" lets the window through, and the base
+            # check has already established it names this very row's chain.
             return False
-        return self.created_at > base.created_at
+        if self.created_at <= base.created_at:
+            return False
+        return self.participates_in_chain
+
+    @property
+    def participates_in_chain(self) -> bool:
+        """Whether this row is the KIND of package that moves the chain, in
+        its own right and without reference to any other row.
+
+        Split out of ``downstream_of`` because two callers need exactly this
+        half: the comparison above, and ``cli._chain_heads_for``, which uses
+        it to narrow the candidate set before its pairwise scan. One rule,
+        one place."""
+        if self.scoped is not None:
+            return not self.scoped
+        # Pre-``scoped`` row: the old shape test, kept for those alone.
+        return bool(self.base_package_id) or self.to_seq > 0
 
 
 def _prior_imports(
@@ -2721,6 +2810,11 @@ def _prior_imports(
                 from_seq=int(row["from_seq"] or 0),
                 to_seq=int(row["to_seq"] or 0),
                 base_package_id=_recorded_text(document, _BASE_PACKAGE_ID_KEY),
+                scoped=(
+                    bool(document[_SCOPED_KEY])
+                    if isinstance(document.get(_SCOPED_KEY), bool)
+                    else None
+                ),
             )
         )
     return tuple(prior)
@@ -2787,15 +2881,14 @@ def _assert_chain(context: _Context, prior: Sequence[_PriorImport]) -> None:
       base this target never finished is a window applied to nothing in
       particular.
     - **nothing may be downstream of the base** (``_PriorImport.downstream_of``).
-      That is the check that makes "the base is the CHAIN HEAD" precise
-      without needing a field no package carries: a later window, or a later
-      full baseline taken with the gate open, moved the chain past this
-      window's base, and re-applying it would roll rows back to that older
-      state. A notebook-scoped export or a gate-closed full export imported in
-      between is deliberately NOT downstream of anything -- neither advanced
-      the source's watermark, so the source is still building its chain from
-      the same base, and refusing the window because of one would break a
-      chain that is perfectly intact.
+      That is the check that makes "the base is the CHAIN HEAD" precise: a
+      package of this source environment exported AFTER the base, and
+      participating in the chain, moved it past this window's base, so
+      re-applying the window would roll rows back to that older state. A
+      notebook-scoped export imported in between is deliberately NOT
+      downstream of anything -- it took no lease and moved no watermark, so
+      the source is still building its chain from the same base, and refusing
+      the window because of one would break a chain that is perfectly intact.
     - **a gap in the sequence range is a warning, not a refusal.** A window
       whose ``from_seq`` is not the base's ``to_seq + 1`` is the ordinary
       shape after ``sync prune-log`` removed an empty stretch of the log, so
@@ -2859,7 +2952,8 @@ def _assert_chain(context: _Context, prior: Sequence[_PriorImport]) -> None:
             "(sync export --full)."
         )
     downstream = sorted(
-        f"{row.package_id} (to_seq={row.to_seq})"
+        f"{row.package_id} (exported "
+        f"{row.created_at.isoformat() if row.created_at else '<unknown>'})"
         for row in prior
         if row.status == _STATUS_DONE
         and row.package_id not in (base.package_id, manifest.package_id)
@@ -2868,8 +2962,9 @@ def _assert_chain(context: _Context, prior: Sequence[_PriorImport]) -> None:
     if downstream:
         raise SyncImportError(
             f"this incremental package continues from {base.package_id} "
-            f"(to_seq={base.to_seq}), but this environment has already applied "
-            f"{downstream} past it. Applying this window now would roll those "
+            f"(exported "
+            f"{base.created_at.isoformat() if base.created_at else '<unknown>'}"
+            f"), but this environment has already applied {downstream} past it. Applying this window now would roll those "
             "notebooks back to the state the window ends at. Export a current "
             "package instead, or take a fresh full baseline at the source "
             "(sync export --full)."
@@ -3647,6 +3742,7 @@ def _running_report_json(manifest: _PackageManifest, heartbeat: datetime) -> str
             "notebooks": list(manifest.notebooks),
             _MODE_KEY: manifest.mode,
             _BASE_PACKAGE_ID_KEY: manifest.base_package_id,
+            _SCOPED_KEY: manifest.scoped,
         },
         ensure_ascii=False,
         sort_keys=True,

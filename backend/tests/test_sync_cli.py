@@ -1423,12 +1423,16 @@ def _insert_import_row(
     from_seq: int = 0,
     base_package_id: str = "",
     mode: str = "full",
+    scoped: bool | None = False,
 ) -> None:
     """One ``sync_imports`` row, ``report_json`` carrying exactly the keys
     ``_load_sync_status``'s chain-head grouping reads back
-    (``package_created_at``/``mode``/``base_package_id``). Shared by the
-    chain-head ambiguity/ordering/scale tests below so a 1000-row seed does
-    not hand-roll the same INSERT a thousand times."""
+    (``package_created_at``/``mode``/``base_package_id``/``scoped``). Shared
+    by the chain-head ambiguity/ordering/scale tests below so a 1000-row seed
+    does not hand-roll the same INSERT a thousand times.
+
+    ``scoped=None`` writes NO ``scoped`` key at all, which is what a row
+    recorded by a build older than that field looks like."""
     conn.execute(
         "INSERT INTO sync_imports "
         "(package_id, source_env, from_seq, to_seq, status, started_at, "
@@ -1447,6 +1451,7 @@ def _insert_import_row(
                     "mode": mode,
                     "base_package_id": base_package_id,
                     "package_created_at": created_at,
+                    **({} if scoped is None else {"scoped": scoped}),
                 }
             ),
         ),
@@ -1456,14 +1461,16 @@ def _insert_import_row(
 def test_status_prints_every_head_when_the_chain_has_more_than_one(
     tmp_path, monkeypatch, capsys
 ):
-    """Two ``done`` full packages tied on ``to_seq`` and neither carrying a
-    ``base_package_id`` (so neither is a "later window" of the other) are
-    BOTH valid chain-head candidates -- design doc §8's "已知边界": a
-    ``--notebook``-scoped export or a gate-closed full export can share a
-    watermark position with an unrelated full baseline without either having
-    moved past the other. `status` must print and serialize BOTH, not
-    silently pick one the way the old row-order-dependent version did (codex
-    review round 2, P2-1)."""
+    """A full baseline and a LATER ``--notebook``-scoped import are BOTH
+    valid chain-head candidates -- design doc §8's "已知边界". The scoped one
+    took no lease and moved no watermark, so it is downstream of nothing; the
+    baseline is older, so it is not downstream of the scoped one either.
+    `status` must print and serialize BOTH, not silently pick one the way the
+    old row-order-dependent version did (codex review round 2, P2-1).
+
+    Two unscoped baselines a day apart are NOT this case: the later one is
+    simply the head (codex #788 r2 P1 -- the rule orders by export time, so
+    only a non-participating package can tie with something older)."""
     settings = _settings(tmp_path, monkeypatch)
     repository = SQLiteRepository(settings)
     repository.close()
@@ -1484,6 +1491,7 @@ def test_status_prints_every_head_when_the_chain_has_more_than_one(
                 source_env="prod-osaka",
                 to_seq=100,
                 created_at="2026-01-02T00:00:00+00:00",
+                scoped=True,
             )
     finally:
         database.close()
@@ -1515,7 +1523,8 @@ def test_status_prints_every_head_when_the_chain_has_more_than_one(
 def test_status_chain_head_result_is_independent_of_insertion_order(
     tmp_path, monkeypatch, capsys
 ):
-    """Same two ambiguous heads as above, inserted in the OPPOSITE order --
+    """Same two ambiguous heads as above (a baseline and a later scoped
+    import), inserted in the OPPOSITE order --
     neither ``sync_imports`` nor ``_load_sync_status``'s in-memory grouping
     carries an ORDER BY that ``_chain_heads_for`` could accidentally depend
     on, so the printed/serialized result must be identical either way (codex
@@ -1534,6 +1543,7 @@ def test_status_chain_head_result_is_independent_of_insertion_order(
                 source_env="prod-osaka",
                 to_seq=100,
                 created_at="2026-01-02T00:00:00+00:00",
+                scoped=True,
             )
             _insert_import_row(
                 conn,

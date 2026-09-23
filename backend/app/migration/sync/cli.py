@@ -477,17 +477,21 @@ def _load_export_leases(source: _Source, conn: Any) -> list[dict[str, Any]]:
     return rows
 
 
-def _chain_candidate_sort_key(row: _PriorImport) -> tuple[int, datetime, str]:
-    """Deterministic ordering for chain-head candidates: ``(to_seq,
-    created_at, package_id)``. Two rows can legitimately tie on the first two
-    (an empty incremental window and the row it continued from can share a
-    ``to_seq``; a naive/undated row falls back to the epoch), so
-    ``package_id`` breaks the tie and guarantees a total order regardless of
-    which physical row order the caller built ``prior`` from (neither
+def _chain_candidate_sort_key(row: _PriorImport) -> tuple[datetime, int, str]:
+    """Deterministic ordering for chain-head candidates: ``(created_at,
+    to_seq, package_id)``.
+
+    ``created_at`` leads because that is what the chain rule itself orders by
+    (:meth:`_PriorImport.downstream_of`) -- ``to_seq`` only orders packages
+    WITHIN one capture epoch and says nothing across a ``sync capture
+    disable``/``enable`` reset (codex #788 r2 P1). Rows can still tie (an
+    undated row falls back to the epoch; two packages can share a second), so
+    ``package_id`` breaks it and guarantees a total order regardless of which
+    physical row order the caller built ``prior`` from (neither
     ``sync_imports`` nor the in-memory grouping below carries an ORDER BY of
     its own)."""
     created_at = row.created_at or datetime.min.replace(tzinfo=timezone.utc)
-    return (row.to_seq, created_at, row.package_id)
+    return (created_at, row.to_seq, row.package_id)
 
 
 def _chain_heads_for(prior: Sequence[_PriorImport]) -> list[_PriorImport]:
@@ -513,15 +517,19 @@ def _chain_heads_for(prior: Sequence[_PriorImport]) -> list[_PriorImport]:
     "ambiguous" means for its output, rather than guessing on this function's
     behalf.
 
-    Only rows sharing prior's own MAXIMUM ``to_seq`` can possibly qualify:
-    ``downstream_of`` returns True unconditionally whenever a row's own
-    ``to_seq`` exceeds the candidate's (its first, unconditional branch), so
-    any row with a lower ``to_seq`` always has at least the max-``to_seq``
-    row downstream of it and can never be a head. Narrowing to that (usually
-    tiny) subset before the pairwise comparison keeps this cheap on a
-    ``source_env`` with a long ``done`` history: O(n) to find the maximum
-    plus O(k^2) over just the rows tied for it, instead of an O(n^2) scan
-    over every ``done`` row (codex review round 2, P2-2).
+The narrowing that keeps this cheap on a ``source_env`` with a long
+    ``done`` history follows the rule rather than the watermark (codex #788
+    r2 P1 -- it used to narrow by maximum ``to_seq``, which stopped being
+    sound the moment ``downstream_of`` stopped comparing heights). Let P be
+    the NEWEST row that participates in the chain
+    (:attr:`_PriorImport.participates_in_chain`). Every row exported before P
+    has P downstream of it and can never be a head, so only rows at or after
+    P's ``created_at`` need the pairwise comparison -- O(n) to find P plus
+    O(k^2) over the usually tiny tail, instead of O(n^2) over every ``done``
+    row. Two shapes sit outside that argument and are added back explicitly:
+    an UNDATED row (nothing is downstream of it and it is downstream of
+    nothing, so it is always a head), and the case where NO row participates
+    at all (every ``done`` row is then a head).
 
     Returned sorted by ``_chain_candidate_sort_key`` -- deterministic
     regardless of the order ``prior`` arrived in, so two callers building the
@@ -532,8 +540,16 @@ def _chain_heads_for(prior: Sequence[_PriorImport]) -> list[_PriorImport]:
     done = [row for row in prior if row.status == _STATUS_DONE]
     if not done:
         return []
-    max_to_seq = max(row.to_seq for row in done)
-    candidates = [row for row in done if row.to_seq == max_to_seq]
+    undated = [row for row in done if row.created_at is None]
+    dated = [row for row in done if row.created_at is not None]
+    participating = [row for row in dated if row.participates_in_chain]
+    if participating:
+        floor = max(row.created_at for row in participating)
+        candidates = [
+            row for row in dated if row.created_at >= floor
+        ] + undated
+    else:
+        candidates = done
     heads = [
         candidate
         for candidate in candidates
@@ -680,6 +696,11 @@ def _load_sync_status(settings: Settings) -> dict[str, Any]:
                 from_seq=int(row.get("from_seq") or 0),
                 to_seq=int(row.get("to_seq") or 0),
                 base_package_id=str(row["report_json"].get("base_package_id") or ""),
+                scoped=(
+                    bool(row["report_json"]["scoped"])
+                    if isinstance(row["report_json"].get("scoped"), bool)
+                    else None
+                ),
             )
         )
     chain_heads: dict[str, list[dict[str, Any]]] = {

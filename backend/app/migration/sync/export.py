@@ -1744,6 +1744,18 @@ def _assemble(
             "from_seq": from_seq,
             "to_seq": to_seq,
             "base_package_id": base_package_id,
+            # Whether ``--notebook`` narrowed this export. A scoped package is
+            # a one-off copy of the notebooks an operator named: it takes no
+            # lease, writes no watermark and is not a link in the chain, so an
+            # importer must not let it displace the baseline a window
+            # continues from. The importer cannot infer that -- a scoped full
+            # package and a first unscoped baseline over an empty log are
+            # otherwise identical on the wire (both ``0 .. 0``, both without a
+            # base) -- so the exporter, which is the only side that knows,
+            # says so. An additive field: format 2 readers that predate it see
+            # nothing new, and this build reads its absence as "unknown"
+            # rather than as either answer (codex #788 r2 P1).
+            "scoped": scoped,
             "notebooks": list(produced.notebooks),
             "deleted_notebooks": list(produced.deleted_notebooks),
             "tables": produced.table_entries,

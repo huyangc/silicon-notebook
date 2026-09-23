@@ -727,6 +727,9 @@ sync-<source_env>-<from_seq>-<to_seq>-<package_id 前 8 位>/
   manifest.json      # format_version=2、package_id、source_env、target_env、created_at、schema_pair、
                      # embed_runtime_dim、mode（full|incremental）、from_seq/to_seq、
                      # base_package_id（增量包=上次水位的 package_id，全量包为空字符串）、
+                     # scoped（true|false：`--notebook` 限定导出为 true，否则 false——增量式
+                     # 字段，加它不改 format_version；早于这个字段的旧包读不到它，链校验按
+                     # 「未知」处理，不当 false 用，见下方「下游」判据）、
                      # notebooks、deleted_notebooks、tables{columns,rows,sha256}、deletes（条数）、
                      # kg_epochs（条数，本 PR 恒 0）、users、files；最后写入，是「包完整」的
                      # 标记，自身不进 checksums.json
@@ -870,26 +873,48 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
    目标端已存在，其 `sync_origin` 必须等于源环境标识；本地库或来自别的源环境的镜像都拒绝并
    点名）。**不按名字查重**：笔记本名本来就不唯一。
 
+   **重复导入这同一个包**：在做任何需要读目标端当前状态才能判断的检查（下面的链头/链
+   校验、`_verify_row_scopes` 对增量包的父键第二次机会、`deleted_notebooks` 现状核对……）
+   之前，先读这个 `package_id` 在本环境 `sync_imports` 里的记录。已经是 `done`：包内
+   完整性该做的检查仍然照做一遍（`_classify_package` 的形态判断、校验和、`_verify_package_paths`
+   的文件围栏形状——凡是只读包自己、不碰目标端数据的），但**跳过一切依赖目标端当前状态的
+   校验**，直接判 `already_applied` 短路返回，不再往下走链头/写入/删除这些相位。这不只是
+   为了省一次重复写——如果仍然按正常流程走到那些依赖目标端状态的检查，目标端此后的正常
+   活动完全可能让它们报错：比如这个包依赖的某个父行，在这次重复导入之前，已经被后续一个
+   更新的包合法地清理掉了（对账删除、或者笔记本本身被删）；对一个**已经成功应用过**的包
+   来说，这种「现在查不到了」不是错误，是目标端正常演进的结果，不该拦下一次纯粹的重复
+   导入。`--dry-run` 同样在这一步短路，报告里如实标 `already_applied`，不假装往后走了
+   预检的其余部分。
+
    **链头**：同一 `source_env` 在 `sync_imports` 里，`done` 且**没有任何包在它下游**的那
-   一批——「下游」（`_PriorImport.downstream_of`）指另一条 `done` 记录的 `to_seq` 比它大，
-   或者那条记录本身是一次晚于它记下的窗口（`base_package_id` 非空且 `created_at` 更晚，用
-   来兜住「`to_seq` 没变但确实是更晚一次空窗口」这种形状）。这条规则**不要求候选本身
-   「入链」**——不检查候选自己的 `base_package_id`/`to_seq` 是否非空/大于零：只要眼下还没有
-   任何后续导入把水位推过它，一个限定导出（`--notebook`）或门关全量导入的包在理论上也可以
-   是「此刻的链头」，因为它就是同源最近一条 `done` 的记录。**链头可能不止一个**：一个全量
-   基线与一个中间插入的限定导出包（或门关全量包）可以共享同一个 `to_seq`，谁都没有越过
-   对方——两者都不推进源端自己的水位，都不是「窗口」（`base_package_id` 为空），彼此互不
-   下游。`sync status` 遇到这种情况**把候选全部列出**，不擅自挑一个（挑一个等于替源端猜它
-   下一步会接哪个），只在人读摘要里标一句「链头不唯一；源端下一个窗口的 base 会是其中推进
-   过水位的那个（to_seq 最大且 base 非空或 to_seq>0）」——这句提示本身就是运维该怎么读这批
-   候选的说明：几个并列候选按 `to_seq` 必然相等，真正会被源端下一个窗口引用的，是其中真的
-   参与了链（`base_package_id` 非空，或 `to_seq>0` 意味着它确实读过日志）的那个，不是限定
-   导出或门关全量那种「巧合撞上同一水位」的旁支。实践中多头的情况极少出现，因为源端本来就
-   不会把不推进水位的包（限定导出、门关全量）记成后续增量窗口的 `base_package_id`——它们
-   不推进源端自己的水位，源端仍然从更早那次真正推进过水位的包续接。`report_json`
-   （运行中的行由 `_running_report_json` 写，完成的行由 `ImportReport.as_json()` 写）从本 PR
-   起都记 `mode`/`from_seq`/`to_seq`/`base_package_id`；早于本 PR 写下的行两者皆缺，一律读
-   成空字符串——不能被当作合法的 `base`，也不去猜它当时是不是增量。
+   一批——「下游」（`_PriorImport.downstream_of`）**按记录顺序判**，不再比较 `to_seq` 的
+   大小：候选 B 是 base 的下游，当且仅当 B 与 base 同源、`status=done`、B 的 `created_at`
+   （manifest 记的导出时间）晚于 base，且 B 本身不是限定导出（`scoped=false`）。B 的
+   `scoped` 未知（早于这个字段的旧行）时退回旧判据——`to_seq>0` 或 `base_package_id` 非
+   空——当「B 不是限定导出」的替代证据，不整条退回旧的 to_seq 比较算法。**为什么不能比
+   `to_seq` 大小**：`sync capture disable` 再 `enable` 会清空 `sync_change_log` 与
+   `sync_export_state`（§7「变更捕获」），之后对每个 target 的第一次导出都是新基线；如果
+   这次全量导出恰好在下一次捕获真正写入日志之前完成，它读到的 `to_seq`（`MAX(seq)` 快照
+   可见）合法为 0——比重置之前任何一个历史更高水位的旧包都小。按 `to_seq` 大小比较「下游」
+   的旧算法会把这个历史更高水位的旧包错判成新基线的下游（`to_seq` 更大就判定为下游，不管
+   它是不是更早导出的），导致这个新基线永远无法被判定为「无下游」的链头，之后每一个想以它
+   为 base 的增量窗口都会被 `_assert_chain` 拒绝——按创建时间判定则不会：重置前的旧包
+   `created_at` 更早，天然不满足「晚于新基线」这条件，不会被当成新基线的下游。这条规则
+   **不要求候选本身「入链」**——不检查候选自己的 `base_package_id`/`to_seq` 是否非空/大于
+   零：只要眼下还没有任何后续导入按「记录更晚且非限定导出」的标准盖过它，一个限定导出
+   （`--notebook`）或门关全量导入的包在理论上也可以是「此刻的链头」，因为它就是同源最近
+   一条 `done` 的记录。**链头可能不止一个**：一个全量基线与一个中间插入的限定导出包
+   （`scoped=true`，天生不算任何东西的下游，也不会有任何东西把它算作下游之外的「越过」）
+   可以共存，谁都没有越过对方。`sync status` 遇到这种情况**把候选全部列出**，不擅自挑一个
+   （挑一个等于替源端猜它下一步会接哪个），只在人读摘要里标一句「链头不唯一；源端下一个
+   窗口的 base 会是其中记录更晚且非限定导出的那个」——真正会被源端下一个窗口引用的，是其中
+   记录更晚、且本身不是限定导出的那个，不是巧合共存的限定导出旁支。实践中多头的情况极少
+   出现，因为源端本来就不会把限定导出记成后续增量窗口的 `base_package_id`——它不推进源端
+   自己的水位，源端仍然从更早那次真正推进过水位的包续接。`report_json`（运行中的行由
+   `_running_report_json` 写，完成的行由 `ImportReport.as_json()` 写）从本 PR 起都记
+   `mode`/`from_seq`/`to_seq`/`base_package_id`/`scoped`；早于本 PR 写下的行缺 `scoped`，
+   一律按「未知」处理（见上），`mode`/`base_package_id` 皆缺时读成空字符串——不能被当作
+   合法的 `base`，也不去猜它当时是不是增量。
 
    `incremental` 包要求 `base_package_id == 链头.package_id`：先要求这个 `package_id` 在
    本环境 `sync_imports` 里存在且状态是 `done`（不存在或仍是 `failed`/`running` 都不算），

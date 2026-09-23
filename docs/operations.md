@@ -830,9 +830,16 @@ held while it ran -- equal to `package_id`, empty for a `--notebook`-scoped expo
 no lease; see the design doc's §7 "在途导出租约").
 
 `import` is idempotent: re-running the same package directory short-circuits with
-`already_applied` (exit 0) instead of re-applying rows. `--dry-run` stops after identity
-mapping and preflight, writes nothing, and reports what would happen — always run it once
-before the real import. A package whose `mode`/`from_seq`/`base_package_id` do not form a
+`already_applied` (exit 0) instead of re-applying rows — and this check runs early, before
+anything that needs to look at the target's CURRENT state (the chain check, or an incremental
+package's target-side parent-key resolution). The package's own internal integrity is still
+verified (classification, checksums, the file fence) on a repeat run, but nothing that depends on
+target state gets a second chance to fail: a package that was correctly applied once is not
+re-rejected just because the target has legitimately moved on since (e.g. a row it once depended
+on has since been cleaned up by a later, newer package, or the notebook itself was deleted) —
+`already_applied` on an already-`done` package is unconditional once its own integrity checks out.
+`--dry-run` stops after identity mapping and preflight, writes nothing, and reports what would
+happen — always run it once before the real import. A package whose `mode`/`from_seq`/`base_package_id` do not form a
 recognized shape (unknown `mode`, `mode=full` with `from_seq != 0`, `mode=incremental` with
 `from_seq=0` or an empty `base_package_id`, or a non-empty `kg_epochs` in either mode) is rejected
 at preflight, before anything is written, naming the offending field. An otherwise well-formed
@@ -896,19 +903,26 @@ when present) unchanged from the row.
 
 `status` also prints, per `source_env` this environment has ever imported from, the current
 **chain head(s)** — the `package_id`, `to_seq`, and `created_at` of every `done` package that no
-later `done` package has moved past (§8 of the design doc). `--json`'s `chain_heads[source_env]`
-is always a list, even when there is exactly one entry (the ordinary case). **It can legitimately
-hold more than one**: a full baseline and a `--notebook`-scoped (or gate-closed full) import
-recorded around it can tie on the same watermark position without either having moved past the
-other — neither of those two shapes advances the source's own watermark, so the chain rules never
-treat one as continuing the other. When that happens the human-readable summary prints every
-candidate and appends "链头不唯一；源端下一个窗口的 base 会是其中推进过水位的那个（to_seq 最大
-且 base 非空或 to_seq>0）" — read literally: among the tied candidates, the one the source will
-actually continue from next is whichever one is a real chain link (its own `base_package_id` is
-non-empty, or its `to_seq` reflects an actual log read), not the scoped/gate-closed one that
-happened to land on the same number. Use whichever entry matches that description as "the" chain
-head for deciding what to import next; the ordinary single-entry case needs no such reading. It
-also prints how many mirrored
+later `done` package has moved past. "Moved past" is judged **by record order, not by `to_seq`
+size** (§8 of the design doc): package B counts as having moved past package A when B is `done`,
+from the same `source_env`, was exported (`created_at`) later than A, and B itself is not a
+`--notebook`-scoped export. `to_seq` is deliberately NOT compared for this — after a `sync capture
+disable` + `enable` reset (which clears the change log and every watermark), the very first full
+baseline exported afterward can legitimately read `to_seq=0`, lower than an older package's
+`to_seq` from before the reset; judging "moved past" by `to_seq` size would make that older,
+higher-`to_seq` package look like it moved past the new baseline even though it is chronologically
+older, permanently blocking every window meant to continue from the new baseline. `--json`'s
+`chain_heads[source_env]` is always a list, even when there is exactly one entry (the ordinary
+case). **It can legitimately hold more than one**: a full baseline and a `--notebook`-scoped
+import recorded around it can coexist without either having moved past the other — a scoped
+export never counts as having moved past anything, and nothing has moved past IT either as long
+as nothing later and unscoped exists. When that happens the human-readable summary prints every
+candidate and appends "链头不唯一；源端下一个窗口的 base 会是其中记录更晚且非限定导出的那个"
+— among the tied candidates, the one the source will actually continue from next is whichever one
+was recorded later and is not itself a scoped export, not a scoped export that happens to be
+sitting alongside it. Use whichever entry matches that description as "the" chain head for
+deciding what to import next; the ordinary single-entry case needs no such reading. It also
+prints how many mirrored
 notebooks are **waiting on a delete job** — `status='deleting'` with a non-empty `sync_origin`
 but no `notebook_delete_jobs` row has finished yet. An incremental import that propagates a
 source-side notebook deletion only flips the notebook to `status='deleting'` and queues a
