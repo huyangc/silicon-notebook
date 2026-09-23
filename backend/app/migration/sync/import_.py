@@ -763,6 +763,12 @@ class ImportReport:
     # because the target is deep-copying their notebook.
     deletes_folded_into_notebook_deletion: int = 0
     deletes_skipped_for_copying: int = 0
+    # Rows of a SOURCE-AUTHORITATIVE table (§5) that this environment had
+    # created itself and that collided, on a secondary unique key, with a row
+    # the window carries. Incremental only: the source owns those tables for
+    # the memories it carries, so the local row was replaced rather than the
+    # import refused (codex #788 r5 P1).
+    source_authoritative_collisions_resolved: int = 0
     # Phase 3d (incremental only): notebook ids this run flipped to
     # ``deleting`` and queued a ``notebook_delete_jobs`` row for, and the ones
     # it deliberately left alone (a deep copy was in flight).
@@ -787,6 +793,9 @@ class ImportReport:
                 self.deletes_folded_into_notebook_deletion
             ),
             "deletes_skipped_for_copying": self.deletes_skipped_for_copying,
+            "source_authoritative_collisions_resolved": (
+                self.source_authoritative_collisions_resolved
+            ),
             "notebooks_deleted": list(self.notebooks_deleted),
             "notebooks_delete_skipped": list(self.notebooks_delete_skipped),
             "tables": {
@@ -820,6 +829,7 @@ class _Ledger:
         self.deletes_orphan_skipped = 0
         self.deletes_folded = 0
         self.deletes_skipped_for_copying = 0
+        self.source_authoritative_collisions = 0
         self.notebooks_deleted: list[str] = []
         self.notebooks_delete_skipped: list[str] = []
 
@@ -879,6 +889,9 @@ def _report(
         deletes_orphan_skipped=ledger.deletes_orphan_skipped,
         deletes_folded_into_notebook_deletion=ledger.deletes_folded,
         deletes_skipped_for_copying=ledger.deletes_skipped_for_copying,
+        source_authoritative_collisions_resolved=(
+            ledger.source_authoritative_collisions
+        ),
         notebooks_deleted=tuple(ledger.notebooks_deleted),
         notebooks_delete_skipped=tuple(ledger.notebooks_delete_skipped),
     )
@@ -4400,6 +4413,120 @@ def _probe_unique_key(
                 )
 
 
+def _resolve_source_authoritative_collisions(
+    backend: _Backend,
+    conn: Any,
+    table: str,
+    keys: Sequence[tuple[str, ...]],
+    rows: Sequence[Mapping[str, Any]],
+    primary_key: Sequence[str],
+    context: _Context,
+) -> int:
+    """Clear the target's own row out of the way of an incoming one that
+    collides with it on a secondary unique key, for a SOURCE-AUTHORITATIVE
+    table only. Returns how many rows were removed.
+
+    The deadlock this exists to break (codex #788 r5 P1). §5 lets the target
+    edit a mirrored memory, and each side's memory store allocates the next
+    revision number independently -- so both environments editing one memory
+    after a baseline mint ``revision = N+1`` under DIFFERENT ids. The window carries
+    the source's; the target holds its own; ``UNIQUE(memory_id, revision)``
+    lets only one exist. Before PR-3c a full package's
+    ``_prune_superseded`` removed the target's copy first, but that prune is
+    a SNAPSHOT operation and a window must not run it (codex #788 r1 P1-1 --
+    it would delete every revision the window does not carry). So the
+    collision reached ``_assert_no_unique_key_collision`` and refused the
+    import, and NOTHING could clear it: the source cannot ship a delete for a
+    row whose id it has never seen, a resume hits the same wall, and a newer
+    full package cannot supersede the window either because the window never
+    reached its delete-phase markers (codex #788 r3). The chain stopped for
+    good, on an edit that §5 explicitly permits.
+
+    The resolution is as narrow as the problem: only rows that actually
+    collide, found by the package's own unique-key values, and only when the
+    colliding target row is a DIFFERENT row (its primary key is not the one
+    the package is about to write). A revision the source never touched is
+    not in ``rows``, so its key is never probed and it is never deleted --
+    which is the whole difference between this and the snapshot prune.
+
+    Scoped to ``_SOURCE_AUTHORITATIVE`` because that is the registry of
+    tables §5 says the source owns outright for the memories it carries.
+    Every other table's unique-key collision is still a refusal: there the
+    two rows are a genuine conflict between environments with no rule saying
+    which wins.
+    """
+    removed = 0
+    for key in keys:
+        wanted: dict[tuple[Any, ...], tuple[Any, ...]] = {}
+        for row in rows:
+            if any(column not in row for column in key):
+                break
+            wanted[tuple(row[column] for column in key)] = tuple(
+                row.get(column) for column in primary_key
+            )
+        else:
+            removed += _evict_unique_key_conflicts(
+                backend, conn, table, key, wanted, primary_key, context
+            )
+    return removed
+
+
+def _evict_unique_key_conflicts(
+    backend: _Backend,
+    conn: Any,
+    table: str,
+    key: Sequence[str],
+    wanted: Mapping[tuple[Any, ...], tuple[Any, ...]],
+    primary_key: Sequence[str],
+    context: _Context,
+) -> int:
+    """One unique key's worth of ``_resolve_source_authoritative_collisions``.
+    Same probe shape as ``_probe_unique_key`` -- leading column ``IN`` list,
+    refined in Python -- so the two read the target identically and only
+    their verdict differs."""
+    if not wanted:
+        return 0
+    projection = ", ".join(
+        _ident(column) for column in (*primary_key, *key) if column
+    )
+    doomed: list[tuple[Any, ...]] = []
+    leading = sorted({item[0] for item in wanted}, key=repr)
+    for chunk in _batched(leading):
+        placeholders = ",".join("?" for _ in chunk)
+        for row in backend.fetch(
+            conn,
+            f"SELECT {projection} FROM {_ident(table)} "
+            f"WHERE {_ident(key[0])} IN ({placeholders})",
+            chunk,
+        ):
+            found = tuple(row[column] for column in key)
+            mine = wanted.get(found)
+            if mine is None:
+                continue
+            theirs = tuple(row[column] for column in primary_key)
+            if theirs == mine:
+                continue
+            doomed.append(theirs)
+            context.ledger.warn(
+                f"{table}: this environment's own row {theirs} held "
+                f"{tuple(key)}={found}, which the source now uses for row "
+                f"{mine}. The source owns this table's rows for the memories "
+                "it carries (docs/incremental-sync-design.md §5), so the "
+                "local row was replaced"
+            )
+    if not doomed:
+        return 0
+    predicate = " AND ".join(f"{_ident(column)} = ?" for column in primary_key)
+    for start in range(0, len(doomed), _ROW_BATCH):
+        _executemany(
+            backend,
+            conn,
+            f"DELETE FROM {_ident(table)} WHERE {predicate}",
+            doomed[start : start + _ROW_BATCH],
+        )
+    return len(doomed)
+
+
 def _assert_target_ownership(
     backend: _Backend,
     conn: Any,
@@ -4637,6 +4764,14 @@ def _apply_table(
         # cannot raise on any index.
         else _unique_keys(backend, conn, table, primary_key)
     )
+    # A window cannot run the snapshot prune (below), so the collision that
+    # prune used to clear is resolved per conflicting row instead -- see
+    # ``_resolve_source_authoritative_collisions`` for the deadlock that
+    # leaves behind otherwise (codex #788 r5 P1).
+    resolve_collisions = (
+        table in _SOURCE_AUTHORITATIVE
+        and context.manifest.mode == MODE_INCREMENTAL
+    )
     if table in _SOURCE_AUTHORITATIVE and context.manifest.mode == MODE_FULL:
         # FULL packages only. This prune replaces a carried memory's WHOLE
         # child set with the package's, which is right for a snapshot and
@@ -4704,6 +4839,16 @@ def _apply_table(
             kept = allowed
         if not kept:
             continue
+        if unique_keys and resolve_collisions:
+            # A window, on a table §5 says the source owns: clear the
+            # target's own colliding rows instead of refusing. The assert
+            # below still runs -- anything it can still find is a collision
+            # this rule does NOT cover, and is refused as before.
+            context.ledger.source_authoritative_collisions += (
+                _resolve_source_authoritative_collisions(
+                    backend, conn, table, unique_keys, kept, primary_key, context
+                )
+            )
         if unique_keys:
             _assert_no_unique_key_collision(
                 backend, conn, table, unique_keys, kept, primary_key

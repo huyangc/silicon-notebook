@@ -457,3 +457,70 @@ def _as_another_importer(settings: Settings, *statements) -> None:
     with psycopg.connect(str(settings.database_url), autocommit=True) as conn:
         for sql, params in statements:
             conn.execute(sql, params)
+
+
+def _add_revision(repo, memory: str, revision: int, row_id: str, title: str):
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO memory_revisions(id,memory_id,revision,title,"
+            "content_md,tags_json,status,promotion_state,changed_by,"
+            "change_reason,created_at) "
+            "VALUES(%s,%s,%s,%s,'body','[]','candidate','none','user-local',"
+            "'edit',%s)",
+            (row_id, memory, revision, title, MOMENT),
+        )
+
+
+def test_both_sides_editing_one_memory_resolves_instead_of_deadlocking(
+    mirrored
+):
+    """codex #788 r5 P1 on PostgreSQL, where ``UNIQUE(memory_id, revision)``
+    is a real constraint the upsert would hit rather than something this
+    module merely checks for.
+
+    变异验证: 去掉 ``resolve_collisions`` 分支, 本条报红。"""
+    source = mirrored["source"]
+    target = mirrored["target"]
+    source.create_memory_candidate(
+        mirrored["alpha"], "user-local", None, "记忆请求", "alpha 记忆",
+        "正文", ["t"], "test",
+    )
+    memory = _one(
+        source, "SELECT id FROM memory_items WHERE notebook_id=%s LIMIT 1",
+        (mirrored["alpha"],),
+    )["id"]
+    _add_revision(source, memory, 2, "rev-2-shared", "shared history")
+    carrier = _window(mirrored)
+    assert _import(mirrored, carrier.package_dir).error == ""
+    assert _count(
+        target, "SELECT COUNT(*) AS c FROM memory_revisions WHERE id=%s",
+        ("rev-2-shared",),
+    ) == 1
+
+    # A real edit also rewrites the item row, so the window carries the
+    # parent -- the shape a snapshot prune would act on.
+    _add_revision(source, memory, 3, "rev-3-source", "the source's edit")
+    with source._write() as db:
+        db.execute(
+            "UPDATE memory_items SET content_md='the source edit' WHERE id=%s",
+            (memory,),
+        )
+    _add_revision(target, memory, 3, "rev-3-target", "this target's own edit")
+
+    report = _import(mirrored, _window(mirrored).package_dir)
+
+    assert report.error == ""
+    surviving = {
+        str(row["id"]): int(row["revision"])
+        for row in _fetch(
+            target,
+            "SELECT id, revision FROM memory_revisions WHERE memory_id=%s",
+            (memory,),
+        )
+    }
+    # First: the history neither side touched survives -- a targeted
+    # resolution, not a snapshot prune.
+    assert surviving.get("rev-2-shared") == 2
+    assert surviving.get("rev-3-source") == 3
+    assert "rev-3-target" not in surviving
+    assert report.source_authoritative_collisions_resolved >= 1
