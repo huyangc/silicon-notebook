@@ -1364,12 +1364,20 @@ class _Context:
     # away are still this package's to delete); phase 3d queues the notebook's
     # own delete job.
     deleted_notebooks: frozenset[str] = frozenset()
+    # The notebooks phase 3c folded its row deletes into, as ``_plan_deletes``
+    # decided. Read back by phase 3d, which is the only place that knows
+    # whether the fold's premise -- "a delete job is going to clear this
+    # notebook" -- actually came true.
+    folded_notebooks: frozenset[str] = frozenset()
     # This package's row-level delete entries, grouped by table, exactly as
     # the single pass in ``_verify_delete_scopes`` validated them. Phase 3c
     # replays from here rather than re-streaming ``deletes.jsonl`` once per
     # synced table (codex T1 review P2-3), and a table absent from this map
     # never opens a transaction at all.
     deletes: Mapping[str, tuple["_DeleteEntry", ...]] = field(default_factory=dict)
+    # ``checksums`` grouped by (file root, notebook id), computed on first use
+    # and shared by both file phases -- see ``_file_buckets``.
+    file_buckets: Mapping[tuple[str, str], tuple[str, ...]] | None = None
     # The chain head this package continues from (incremental only), as the
     # claim transaction last resolved it. Reported, never trusted across a
     # transaction boundary -- ``_assert_chain`` re-resolves it under the lock.
@@ -1777,9 +1785,15 @@ def _verify_package_paths(
     checksums: Mapping[str, str],
     settings: "Settings",
 ) -> None:
-    """Refuse, before any database handle is open and before a single file is
-    staged, renamed, or deleted, any identifier this package would splice
-    into a filesystem path.
+    """Refuse, before any database handle is open and before any byte lands
+    in storage, any identifier this package would splice into a filesystem
+    path.
+
+    Not "before a byte is hashed": ``_verify_checksums`` has already read and
+    digested the whole package by the time this runs, which is harmless (it
+    only ever reads inside the package directory) and is what makes
+    ``checksums.json`` trustworthy enough to check here. What this function
+    stands before is every write.
 
     ``manifest.json`` is not covered by ``checksums.json`` (see the module
     docstring), so ``manifest.notebooks`` is exactly as untrusted as an
@@ -1787,7 +1801,7 @@ def _verify_package_paths(
     what the package's rows say (``_verify_row_scopes`` does that, and needs
     a database handle for primary-key names, so it runs later in phase 1b).
 
-    Six things get checked, all filesystem-only:
+    Seven things get checked, all filesystem-only:
 
     - every id in ``manifest.notebooks``, and ``manifest.package_id`` itself
       (both later become directory-name components -- the notebook id under
@@ -1802,17 +1816,19 @@ def _verify_package_paths(
       tree (``_assert_no_symlinks``);
     - ``files/**`` and ``checksums.json`` must agree bidirectionally, scoped
       to the two file roots (``_assert_files_match_checksums``);
-    - every directory actually present under ``files/notebooks/`` and
-      ``files/assets/`` must have an ``is_safe_identifier`` name, whether or
-      not ``manifest.notebooks`` mentions it;
-    - and must be a notebook this package DECLARES. Safety is not scope: a
-      directory can pass the character whitelist and still name a notebook
-      the target owns locally or mirrors from elsewhere, and both file phases
-      are driven by ``manifest.notebooks``, so an undeclared one is dead
-      weight at best (codex T1 review P1-1). Checked against
-      ``checksums.json``'s keys AND against what is physically on disk, so
-      neither an unrecorded directory nor a recorded-but-undeclared path gets
-      through;
+    - every ``files/`` key in ``checksums.json`` must have the exact shape
+      ``files/<root>/<notebook>/<relative path>``: a known root
+      (``_FILE_ROOTS``), a notebook this package DECLARES, and a non-empty
+      path under it. Safety is not scope -- a directory can pass the
+      character whitelist and still name a notebook the target owns locally
+      or mirrors from elsewhere -- and neither is a plausible-looking prefix:
+      an unknown root, a file hung directly off ``files/``, and an undeclared
+      notebook are all refused by name (codex T1 review P1-1/P2);
+    - every directory actually present under ``files/`` must be one of the
+      two roots, and every directory under a root must be an
+      ``is_safe_identifier`` notebook this package declares. Asked of the
+      filesystem as well as of ``checksums.json`` because this fence must not
+      silently depend on ``_assert_files_match_checksums``' equality holding;
     - for every notebook id, the package-side and storage-side paths
       ``_install_files`` will read from and write to are resolved and
       asserted to stay inside the package's ``files/<root>/`` directory and
@@ -1846,56 +1862,61 @@ def _verify_package_paths(
 
     storage_dir = Path(settings.storage_dir)
     declared = set(manifest.notebooks)
-    for root in (NOTEBOOK_FILES_DIR, ASSET_FILES_DIR):
-        package_root = package_dir / FILES_DIR / root
-        if package_root.is_dir():
-            bad_entries = sorted(
-                entry.name
-                for entry in package_root.iterdir()
-                if not is_safe_identifier(entry.name)
+    # ONE pass over the checksums, deciding the whole shape of every
+    # ``files/`` key rather than asking one question per root (codex T1
+    # review P2). A key that is not exactly
+    # ``files/<known root>/<declared notebook>/<something>`` is refused by
+    # name: an unknown root would be silently ignored by both file phases, a
+    # file hung directly off ``files/`` has no notebook at all, and an
+    # undeclared notebook is the real danger -- ``victim`` under
+    # ``files/notebooks/`` would land bytes in ``storage/notebooks/victim/``
+    # next to a notebook the target owns, or mirrors from a different source
+    # environment, with no row anywhere to make it visible as an import.
+    malformed: list[str] = []
+    for relative in sorted(checksums):
+        if not relative.startswith(f"{FILES_DIR}/"):
+            continue
+        parts = relative.split("/")
+        if len(parts) < 4 or not all(parts[3:]):
+            malformed.append(
+                f"{relative!r} is not {FILES_DIR}/<root>/<notebook>/<path>"
             )
-            if bad_entries:
-                raise SyncImportError(
-                    f"{FILES_DIR}/{root} carries unsafe director(ies): {bad_entries}"
-                )
-        # Character safety is not scope. A directory name can be a perfectly
-        # safe identifier AND name a notebook this package has no business
-        # writing into -- ``victim`` under ``files/notebooks/`` lands bytes in
-        # ``storage/notebooks/victim/`` next to a notebook the target owns, or
-        # mirrors from a different source environment, with no row anywhere to
-        # make it visible as an import. Both file phases are driven by
-        # ``manifest.notebooks``, so an undeclared directory could only ever
-        # be dead weight or an attack; either way it is refused by name before
-        # a byte is hashed, staged or copied (codex T1 review P1-1).
-        #
-        # Asked of ``checksums.json``'s keys AND of what is physically on
-        # disk. Given ``_assert_files_match_checksums`` (which just ran) the
-        # two sets are equal, so the second question is deliberately
-        # REDUNDANT -- it is here so that this fence does not silently depend
-        # on that equality holding, the same defence-in-depth reasoning
-        # ``_assert_files_match_checksums`` itself is written under.
-        undeclared = sorted(
-            relative
-            for relative in checksums
-            if relative.startswith(f"{FILES_DIR}/{root}/")
-            and relative.split("/")[2] not in declared
+            continue
+        root, notebook_id = parts[1], parts[2]
+        if root not in _FILE_ROOTS:
+            malformed.append(f"{relative!r} names the unknown file root {root!r}")
+        elif notebook_id not in declared:
+            malformed.append(
+                f"{relative!r} is for notebook {notebook_id!r}, which this "
+                "package does not declare"
+            )
+    if malformed:
+        raise SyncImportError(
+            f"{FILES_DIR}/** carries path(s) this package may not install: "
+            + "; ".join(malformed[:20])
         )
-        if undeclared:
+    # The same question asked of the filesystem. Given
+    # ``_assert_files_match_checksums`` (which just ran) the two agree, so
+    # this is deliberately REDUNDANT -- it is here so the fence does not
+    # silently depend on that equality holding, the same defence-in-depth
+    # reasoning that function is itself written under.
+    files_root = package_dir / FILES_DIR
+    if files_root.is_dir():
+        stray: list[str] = []
+        for entry in sorted(files_root.iterdir()):
+            if entry.name not in _FILE_ROOTS or not entry.is_dir():
+                stray.append(f"{FILES_DIR}/{entry.name}")
+                continue
+            for child in sorted(entry.iterdir()):
+                if not is_safe_identifier(child.name) or child.name not in declared:
+                    stray.append(f"{FILES_DIR}/{entry.name}/{child.name}")
+        if stray:
             raise SyncImportError(
-                f"{FILES_DIR}/{root} carries file(s) for notebook(s) this "
-                f"package does not declare: {undeclared[:20]}"
+                f"{FILES_DIR}/** carries director(ies) or file(s) this package "
+                f"may not install: {stray[:20]}"
             )
-        if package_root.is_dir():
-            stray = sorted(
-                entry.name
-                for entry in package_root.iterdir()
-                if entry.name not in declared
-            )
-            if stray:
-                raise SyncImportError(
-                    f"{FILES_DIR}/{root} carries director(ies) for notebook(s) "
-                    f"this package does not declare: {stray}"
-                )
+    for root in _FILE_ROOTS:
+        package_root = package_dir / FILES_DIR / root
         storage_root = storage_dir / root
         for notebook_id in manifest.notebooks:
             _assert_within(
@@ -5091,17 +5112,28 @@ def _replay_delete_table(
     key_columns = _sync_key(backend, conn, table)
     outcome = _DeleteOutcome()
     entries: list[_DeleteEntry] = []
+    deferred: list[_DeleteEntry] = []
     for entry in context.deletes.get(table, ()):
         # Decided on the entry's OWN attribution first, which costs no query
         # and covers every entry the exporter could attribute -- which, for a
-        # deleted notebook, is all of them. An entry that names nothing is
-        # decided below, on the owner the target resolves.
+        # deleted notebook, is all of them.
         if entry.notebook_id in plan.copying:
             outcome.skipped_for_copying += 1
         elif entry.notebook_id in plan.folded:
-            outcome.folded += 1
+            # NOT folded on the SOURCE's word alone. The entry says where the
+            # row lived at the source; the row this target holds under that
+            # key may sit somewhere else entirely (ids are exported verbatim
+            # and never reissued -- the same reason ``_assert_target_ownership``
+            # exists). Folding it on the entry's say-so would leave a row of
+            # some OTHER in-scope notebook M un-deleted, because the delete
+            # job it was folded into only ever clears the deleted notebook.
+            # So it is deferred into the ordinary path, where the owner is
+            # read off the target row and the fold decision is made again on
+            # THAT (codex T1 review P3-4).
+            deferred.append(entry)
         else:
             entries.append(entry)
+    entries.extend(deferred)
     if not entries:
         return outcome
     extra: tuple[str, ...] = ("file_path",) if table == "sources" else ()
@@ -5328,12 +5360,11 @@ def _replay_deletes(backend: _Backend, context: _Context, done: set[str]) -> Non
         context.ledger.deletes_folded += outcome.folded
         context.ledger.deletes_skipped_for_copying += outcome.skipped_for_copying
         _remove_deleted_files(context, outcome.files)
-    if context.ledger.deletes_folded:
-        context.ledger.warn(
-            f"{context.ledger.deletes_folded} row delete(s) were not replayed "
-            "one by one: they belong to notebooks this import tombstoned, "
-            "whose delete job clears every table for them"
-        )
+    context.folded_notebooks = plan.folded
+    # Dropped as soon as the phase that consumes it is over: it is the only
+    # unbounded thing this context holds, nothing after 3c reads it, and a
+    # resumed run rebuilds it in preflight anyway (codex T1 review P3-7).
+    context.deletes = {}
 
 
 # -------------------------------------- phase 3d -- notebook delete propagation
@@ -5414,10 +5445,11 @@ def _apply_notebook_deletions(
                 if status == _NOTEBOOK_COPYING_STATUS:
                     context.ledger.notebooks_delete_skipped.append(notebook_id)
                     context.ledger.warn(
-                        f"notebook {notebook_id} was deleted at the source but "
-                        "a deep copy of it is in flight here (status="
-                        "'copying'), so its deletion was NOT queued; delete it "
-                        "once that copy settles"
+                        f"notebook {notebook_id} was deleted at the source "
+                        "but a deep copy of it is in flight here (its status "
+                        f"is the {_NOTEBOOK_COPYING_STATUS!r} sentinel), so "
+                        "its deletion was NOT queued; delete it once that "
+                        "copy settles"
                     )
                 else:
                     context.ledger.warn(
@@ -5476,6 +5508,39 @@ def _apply_notebook_deletions(
             "by this environment's own delete-job runner, so the application "
             "must be running (or be started) for them to disappear"
         )
+    _report_folded_deletes(context)
+
+
+def _report_folded_deletes(context: _Context) -> None:
+    """Say what phase 3c's folding actually amounted to -- AFTER phase 3d,
+    which is the only place that knows (codex T1 review P3-5).
+
+    3c folds a deleted notebook's row deletes into the delete job 3d is
+    expected to queue. Saying so from inside 3c would be claiming an outcome
+    that had not happened yet, and for a notebook 3d then DECLINES to
+    tombstone the claim is simply false: its rows were neither replayed nor
+    scheduled for removal by anything. That case is a contradiction between
+    two phases' views of the same notebook, so it gets a warning of its own
+    rather than being folded into the reassuring one."""
+    if not context.ledger.deletes_folded:
+        return
+    queued = set(context.ledger.notebooks_deleted)
+    stranded = sorted(context.folded_notebooks - queued)
+    honoured = sorted(context.folded_notebooks & queued)
+    if honoured:
+        context.ledger.warn(
+            f"{context.ledger.deletes_folded} row delete(s) were not replayed "
+            f"one by one: they belong to notebook(s) {honoured} that this "
+            "import tombstoned, whose delete job clears every table for them"
+        )
+    if stranded:
+        context.ledger.warn(
+            f"INCONSISTENT: row deletes were folded into the deletion of "
+            f"notebook(s) {stranded}, but this run did not end up queuing a "
+            "delete job for them, so nothing has removed those rows. Re-run "
+            "this package once the target has settled, or delete those "
+            "notebooks at this environment by hand."
+        )
 
 
 # ----------------------------------------------------------- phase 4 -- files
@@ -5485,12 +5550,66 @@ def _apply_notebook_deletions(
 # same pair the exporter copies and notebook delete cleans up together.
 _FILE_ROOTS = (NOTEBOOK_FILES_DIR, ASSET_FILES_DIR)
 
+# Where a FULL package's directory swap stages a notebook's whole new
+# directory, as a sibling of the destination. A NOTEBOOK-ID namespace, not a
+# user one: the component is ``<notebook id>.sync-tmp``, and a notebook id is
+# ``is_safe_identifier`` -- so nothing a person can name collides with it.
+# (The incremental merge stages per FILE and may NOT use a suffix for it; see
+# ``_STAGING_ROOT``.)
 _STAGED_SUFFIX = ".sync-tmp"
+
+# Where the INCREMENTAL merge stages each file before renaming it into place:
+# ``storage/.sync-staging/<package_id>/<root>/<notebook>/<relative>``.
+#
+# NOT a suffix on the destination name, which is what this used to be and was
+# wrong (codex T1 review P1). A source file's on-disk component is
+# ``{source_id}_{safe_filename(client name)}`` (``repositories/source_files.py
+# ::stored_upload_name``), and ``safe_filename`` does not touch the
+# extension -- so ``report.sync-tmp`` is a perfectly ordinary upload, and a
+# suffix-based staging name shares a namespace with user content. Everything
+# built on that suffix then becomes a trap: the exporter would have to skip
+# real uploads to avoid shipping staging debris, and the merge's own cleanup
+# would delete them.
+#
+# A single dotted root under ``storage/`` has none of that. It is not under
+# ``storage/notebooks/<nb>/`` or ``storage/assets/<nb>/``, so no export walk
+# and no notebook-delete cleanup ever sees it; it is on the same filesystem
+# as every destination, so ``os.replace`` stays atomic; and it is keyed by
+# package id, so one run's debris is distinguishable from another's.
+_STAGING_ROOT = ".sync-staging"
+
+# How long a DIFFERENT package's staging directory may sit there before this
+# run treats it as abandoned. Only ever used for a package whose own
+# ``sync_imports`` row does not say ``done`` -- a finished package's debris is
+# removed on sight regardless of age.
+_STAGING_STALE_SECONDS = 3600.0
+
 # A retired directory names the package that retired it. Without the id, a
 # LATER package's reconciliation cannot tell "my own interrupted swap, adopt
 # it" from "somebody else's leftovers, do not touch". The prefix is what a
 # scan matches on; the id is what decides ownership.
 _RETIRED_PREFIX = ".sync-old-"
+
+
+def _file_buckets(context: _Context) -> Mapping[tuple[str, str], tuple[str, ...]]:
+    """``(root, notebook id) -> the package's checksummed paths under it``,
+    computed once and shared by both file phases (codex T1 review P3-8).
+
+    Both used to re-scan every checksum key per notebook per root, which is
+    O(notebooks x roots x keys) for an answer that is one grouping pass.
+    ``_verify_package_paths`` has already proved every ``files/`` key has the
+    shape this relies on, so the split needs no validation of its own."""
+    if context.file_buckets is None:
+        buckets: dict[tuple[str, str], list[str]] = {}
+        for relative in sorted(context.checksums):
+            if not relative.startswith(f"{FILES_DIR}/"):
+                continue
+            parts = relative.split("/")
+            buckets.setdefault((parts[1], parts[2]), []).append(relative)
+        context.file_buckets = {
+            key: tuple(value) for key, value in buckets.items()
+        }
+    return context.file_buckets
 
 
 def _retired_path(destination: Path, package_id: str) -> Path:
@@ -5568,9 +5687,7 @@ def _install_files(context: _Context, *, verify: bool) -> None:
             _assert_within(storage / root, destination, what="storage destination path")
             inherited = _reconcile_staging(context, destination)
             prefix = f"{FILES_DIR}/{root}/{notebook_id}/"
-            entries = sorted(
-                relative for relative in context.checksums if relative.startswith(prefix)
-            )
+            entries = _file_buckets(context).get((root, notebook_id), ())
             if not entries and not inherited and not destination.exists():
                 # The package carries no files here AND the target has
                 # nothing at this path either (no retired copy inherited from
@@ -5659,10 +5776,13 @@ def _merge_files(context: _Context, *, verify: bool) -> None:
     the very same swap would delete every file the window did not happen to
     touch. This phase therefore works one file at a time:
 
-    - write the bytes to ``<file>.sync-tmp`` beside the destination, then
-      ``os.replace`` onto it. That rename is atomic per FILE, so a reader
-      never sees a half-written upload and a crash leaves at most one stray
-      ``.sync-tmp``, which the next run overwrites;
+    - write the bytes under ``storage/.sync-staging/<package_id>/`` and
+      ``os.replace`` them onto the destination. Same filesystem, so the
+      rename is atomic per FILE: a reader never sees a half-written upload,
+      and a crash leaves at most one stray file in a directory nothing else
+      reads (``_STAGING_ROOT`` has the full reasoning for why the staging
+      area is a root of its own rather than a suffix on the destination
+      name);
     - no directory is retired, so ``context.installed`` stays empty and there
       is nothing for ``_rollback_files`` to put back or for ``_commit_files``
       to drop -- both are no-ops that only record the phase's progress. That
@@ -5679,15 +5799,21 @@ def _merge_files(context: _Context, *, verify: bool) -> None:
     ``_install_files``, the OUTER loop is ``manifest.notebooks`` rather than
     the checksums' own keys -- the destination notebook is chosen from the
     declared set and the package's paths are matched against it, never the
-    other way round, so a crafted path can only ever fail to match rather than
-    nominate a directory of its own (codex T1 review P1-1;
-    ``_verify_package_paths`` already refuses such a package outright, and
-    this is the second, independent reason it can do no damage).
+    other way round, so a crafted path can only ever fail to match rather
+    than nominate a directory of its own (codex T1 review P1-1).
     """
     storage = Path(context.settings.storage_dir)
+    staging_root = storage / _STAGING_ROOT
+    _reconcile_staging_root(context, staging_root)
+    buckets = _file_buckets(context)
+    mine = staging_root / context.manifest.package_id
+    _assert_within(staging_root, mine, what="staging path")
     copied = 0
     for notebook_id in context.manifest.notebooks:
         for root in _FILE_ROOTS:
+            entries = buckets.get((root, notebook_id), ())
+            if not entries:
+                continue
             package_root = context.package_dir / FILES_DIR / root
             destination_root = storage / root / notebook_id
             _assert_within(
@@ -5699,33 +5825,18 @@ def _merge_files(context: _Context, *, verify: bool) -> None:
                 storage / root, destination_root, what="storage destination path"
             )
             prefix = f"{FILES_DIR}/{root}/{notebook_id}/"
-            entries = sorted(
-                relative
-                for relative in context.checksums
-                if relative.startswith(prefix)
-            )
-            if not entries:
-                continue
-            # A previous run killed between the copy and the rename leaves a
-            # ``.sync-tmp`` file behind. Nothing else ever reads one, and the
-            # per-file rename below only overwrites the ones this run stages,
-            # so they would otherwise accumulate in a notebook's storage
-            # directory forever (codex T1 review P3).
-            _drop_stale_staging(context, destination_root)
             for relative in entries:
                 source = context.package_dir / relative
                 _assert_within(package_root, source, what="package file path")
-                destination = destination_root.joinpath(
-                    *relative[len(prefix) :].split("/")
-                )
-                destination.parent.mkdir(parents=True, exist_ok=True)
+                tail = relative[len(prefix) :].split("/")
+                destination = destination_root.joinpath(*tail)
                 _assert_within(
                     destination_root, destination, what="storage destination path"
                 )
-                staged = destination.with_name(destination.name + _STAGED_SUFFIX)
-                _assert_within(
-                    destination_root, staged, what="staged file path"
-                )
+                staged = mine.joinpath(root, notebook_id, *tail)
+                _assert_within(mine, staged, what="staging path")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                staged.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     if verify:
                         digest = hashlib.sha256()
@@ -5743,28 +5854,67 @@ def _merge_files(context: _Context, *, verify: bool) -> None:
                     os.replace(staged, destination)
                 except BaseException:
                     # The staged copy was never consumed. Drop it rather than
-                    # leaving a ``.sync-tmp`` file behind for a later run.
+                    # leaving it for a later run to have to reason about.
                     staged.unlink(missing_ok=True)
                     raise
                 copied += 1
+    shutil.rmtree(mine, ignore_errors=True)
     context.ledger.files_copied = copied
 
 
-def _drop_stale_staging(context: _Context, directory: Path) -> None:
-    """Remove ``*.sync-tmp`` leftovers directly under ``directory``.
+def _reconcile_staging_root(context: _Context, staging_root: Path) -> None:
+    """Clear what earlier merge runs left under ``storage/.sync-staging/``.
 
-    Only this module ever writes one, and only as the unconsumed half of a
-    ``copy`` + ``os.replace`` pair, so anything still here belongs to a run
-    that was killed outright (SIGKILL, power loss) -- the ``except`` path
-    cleans up every failure this process can observe. Best effort: a file that
-    cannot be removed is clutter, never a reason to fail an import."""
-    if not directory.is_dir():
+    Three cases, and only the first is unconditional:
+
+    - **this package's own directory**: whatever is in it belongs to an
+      earlier attempt of this same run, which is about to be redone from the
+      package. Removed outright.
+    - **a directory whose package this environment has finished**
+      (``sync_imports.status='done'``, the same set ``_reconcile_staging``
+      uses to decide about a retired notebook directory): its run will never
+      come back for it. Removed, and reported.
+    - **anything else**: removed only once it has gone untouched for
+      ``_STAGING_STALE_SECONDS``. A concurrent import of a DIFFERENT source
+      environment is a perfectly ordinary thing for this target to be doing
+      (the claim lock is per source environment), and deleting the files it
+      is staging right now would corrupt its copy. Age is the only evidence
+      available here, so a young directory is left alone and reported rather
+      than guessed about.
+
+    Best effort throughout: staging debris costs disk and nothing else, so a
+    failure to remove it is a warning, never a reason to fail an import."""
+    if not staging_root.is_dir():
         return
-    for path in sorted(directory.glob(f"*{_STAGED_SUFFIX}")):
+    now = datetime.now(timezone.utc).timestamp()
+    for path in sorted(staging_root.iterdir()):
+        owner = path.name
+        if owner != context.manifest.package_id:
+            if owner in context.finished_packages:
+                context.ledger.warn(
+                    f"removed staging left by package {owner}, which finished "
+                    "without cleaning up"
+                )
+            else:
+                try:
+                    age = now - path.stat().st_mtime
+                except OSError:  # pragma: no cover - filesystem failure path
+                    age = 0.0
+                if age < _STAGING_STALE_SECONDS:
+                    context.ledger.warn(
+                        f"left staging for package {owner} alone: it has not "
+                        "finished and its files were touched recently, so "
+                        "another import may be writing them right now"
+                    )
+                    continue
+                context.ledger.warn(
+                    f"removed staging left by package {owner}: it has not "
+                    f"finished, but nothing has touched it for {int(age)}s"
+                )
         try:
-            path.unlink()
+            shutil.rmtree(path)
         except OSError as exc:  # pragma: no cover - filesystem failure path
-            context.ledger.warn(f"could not remove the stale {path.name}: {exc}")
+            context.ledger.warn(f"could not remove the staging at {path}: {exc}")
 
 
 def _reconcile_staging(context: _Context, destination: Path) -> bool:
