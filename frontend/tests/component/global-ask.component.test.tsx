@@ -2002,7 +2002,10 @@ test("a failed re-send brings the stopped record back and returns the new questi
   expect(input).toHaveValue("另一个问题");
 });
 
+// 并行门禁（scripts/check.sh 三泳道抢 CPU）下这条曾三次在默认 1s 查询窗口/5s 用例上限内
+// 等不到引用弹窗（单独跑恒绿）：查询与用例上限都放宽，断言本身不变。
 test("citation badge shows the owning notebook for every citation", async () => {
+  const slow = { timeout: 5000 };
   window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
   api.list.mockResolvedValue([conversation()]);
   api.detail.mockResolvedValue(detail("conv-a", [{
@@ -2032,14 +2035,14 @@ test("citation badge shows the owning notebook for every citation", async () => 
     ["[1]", "材料研究", "/#notebook=nb-0&source=source-1"],
     ["[2]", "热管理", "/#notebook=nb-1&source=source-2"],
   ] as const) {
-    fireEvent.click(await screen.findByRole("button", { name: marker }));
-    const card = await screen.findByRole("dialog");
+    fireEvent.click(await screen.findByRole("button", { name: marker }, slow));
+    const card = await screen.findByRole("dialog", {}, slow);
     expect(card).toHaveTextContent(`来自「${name}」（个人知识库）`);
     expect(within(card).getByRole("link", { name: "打开笔记本" })).toHaveAttribute("href", href);
     await act(async () => { document.body.dispatchEvent(new Event("pointerdown", { bubbles: true })); });
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull(), slow);
   }
-});
+}, 30000);
 
 // --- 回答里的附图 -------------------------------------------------------------
 //
