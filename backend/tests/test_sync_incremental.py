@@ -703,9 +703,18 @@ def test_the_watermark_records_the_seq_the_snapshot_and_the_gate(baseline):
 # ------------------------------------------------------------ import side
 
 
-def test_the_importer_refuses_an_incremental_package_and_names_pr_3c(
+def test_the_importer_classifies_a_real_incremental_package_as_incremental(
     baseline, tmp_path
 ):
+    """PR-3c: an incremental package is no longer refused outright. What the
+    classifier has to get right is that a real one produced by this exporter
+    reads as ``incremental`` -- ``mode``, a ``from_seq`` above zero and a
+    non-empty ``base_package_id``, all three -- rather than falling through to
+    the full path, which would reconcile the target against a window.
+
+    变异验证: 把 ``_classify_package`` 的增量分支判据放宽成只看 ``mode``,
+    本条仍绿但 tests/test_sync_incremental_import.py 的链用例会红; 把增量分支
+    整个删掉, 本条报红。"""
     with baseline["repo"]._write() as db:
         db.execute(
             "UPDATE notebooks SET name='alpha v2' WHERE id=?", (baseline["alpha"],)
@@ -713,15 +722,45 @@ def test_the_importer_refuses_an_incremental_package_and_names_pr_3c(
     report = _export(baseline["settings"], baseline["out"])
     assert report.mode == MODE_INCREMENTAL
 
-    from app.migration.sync.import_ import _read_manifest, _reject_incremental_payload
+    from app.migration.sync.import_ import _classify_package, _read_manifest
+
+    manifest = _read_manifest(report.package_dir)
+
+    assert _classify_package(report.package_dir, manifest) == MODE_INCREMENTAL
+    assert manifest.from_seq > 0
+    assert manifest.base_package_id == report.base_package_id
+
+
+def test_an_incremental_package_without_a_base_is_refused_by_name(
+    baseline, tmp_path
+):
+    """A window that names no base cannot be placed in any chain, and the
+    sequence range is not a substitute: the importer would have to guess which
+    package it continues, which is exactly the guess §8 forbids.
+    ``manifest.json`` is not checksummed, so this needs no reseal.
+
+    变异验证: 去掉 ``_classify_package`` 对 ``base_package_id`` 的要求,
+    本条报红。"""
+    with baseline["repo"]._write() as db:
+        db.execute(
+            "UPDATE notebooks SET name='alpha v2' WHERE id=?", (baseline["alpha"],)
+        )
+    report = _export(baseline["settings"], baseline["out"])
+    assert report.mode == MODE_INCREMENTAL
+    document = _manifest(report.package_dir)
+    document["base_package_id"] = ""
+    (report.package_dir / MANIFEST_NAME).write_text(
+        json.dumps(document, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+    )
+
+    from app.migration.sync.import_ import _classify_package, _read_manifest
 
     manifest = _read_manifest(report.package_dir)
     with pytest.raises(SyncImportError) as failure:
-        _reject_incremental_payload(report.package_dir, manifest)
+        _classify_package(report.package_dir, manifest)
 
     message = str(failure.value)
     assert MODE_INCREMENTAL in message
-    assert report.base_package_id in message
     assert f"from_seq={report.from_seq}" in message
 
 

@@ -639,9 +639,11 @@ if a notebook-scoped export advanced it, a change to some *other*
 notebook that happened before this export — one that never made it into this package — would
 fall permanently outside every later incremental window (`seq > W`), with no package that ever
 picks it back up. Only an export that covers the full current notebook set is entitled to
-advance the watermark. **Today's importer only accepts full packages** (§8 of the design doc);
-an incremental package has to wait for PR-3c — see "Operating a daily export cadence" below for
-what that means in practice.
+advance the watermark. The importer accepts both full and incremental packages (§8 of the design
+doc); an incremental package must be imported **in chain order** — its `base_package_id` must
+equal the `package_id` of the most recent `done` package from the same `source_env` that is
+itself chained (§8's "chain head") — see "Operating a daily export cadence" below for what that
+means in practice.
 
 ```bash
 # Source environment: name it once, enable capture, then run the first (full) export --
@@ -666,7 +668,7 @@ PYTHONPATH=backend python scripts/sync_notebooks.py export \
   --notebook nb-aaa --notebook nb-bbb --json
 
 # Target environment: copy the package directory over, then dry-run before applying.
-# (only a mode=full package can actually be imported today -- see the cadence note below)
+# (import packages in chain order -- see the cadence note below)
 PYTHONPATH=backend python scripts/sync_notebooks.py import \
   /srv/silicon-notebook/sync/incoming/sync-prod-shanghai-0-42-<id> --dry-run --json
 PYTHONPATH=backend python scripts/sync_notebooks.py import \
@@ -692,17 +694,35 @@ PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --j
    its `captured` status).
 4. Move the package directory to the target environment the same way you already move full
    packages (`scp`/rsync/object storage — whatever transport is in place).
-5. **Until PR-3c ships, an incremental package cannot be imported.** `sync import` rejects a
-   `mode=incremental` package at preflight, before writing anything, and the error names the
-   rejected package's `base_package_id`/`from_seq`/`to_seq`. Keep incremental packages wherever
-   they land on the target side until the PR-3c importer exists — nothing about running
-   `sync export` daily requires importing every package as it arrives; only the *source-side*
-   watermark needs to keep advancing for the next export to stay incremental.
+5. **Import packages in chain order, one at a time.** `sync import` accepts an incremental
+   package only when its `base_package_id` equals the `package_id` of the target's current chain
+   head for that `source_env` — the most recent `done` package that is itself chained (a
+   `--notebook`-scoped export or a `captured=false` full export never advances the watermark and
+   is never a valid chain head). Importing packages out of order, or skipping one, is rejected at
+   preflight before writing anything; the error names both the chain head it found and the
+   rejected package's `base_package_id`, and offers one of two ways out: if the chain head itself
+   is `failed` or still `running` on the target, resolve or `--resume` that package first; if it
+   simply hasn't arrived or was discarded, re-export a full baseline from the source
+   (`sync export --full`) and start the chain over. Nothing about running `sync export` daily
+   requires importing every package the moment it lands — packages can queue up on the target
+   side — but they must be applied in the order they were produced, and every package in between
+   must be imported (or superseded by a fresh full baseline) before a later one will be accepted.
+   `sync status` on the target prints the current chain head per `source_env` so you can tell
+   which package to import next.
 6. An incremental export with nothing to ship still produces a package (every `rows/*.jsonl`,
    `deletes.jsonl`, and `kg_epochs.jsonl` is present but empty) and still advances the
    watermark — the report's `empty` field says so. This keeps the export chain unbroken: every
    package's `base_package_id` names the package it continues from, so skipping a day with no
    changes never breaks the chain for the next one.
+7. Importing an incremental package does not swap directories the way a full import does — it
+   merges files in place, one changed file at a time (write `<file>.sync-tmp`, then
+   `os.replace` over the destination), so there is no `storage/...retired`/`.sync-old` sibling to
+   clean up afterward, and an interrupted incremental file merge is safe to retry with `--resume`
+   (each file's replace is atomic; the ones already replaced are simply overwritten again with the
+   same bytes). If the incremental package's `deleted_notebooks` names a mirrored notebook, the
+   import only marks it `status='deleting'` and queues a delete job — it does not delete anything
+   itself; see `sync status`'s "waiting on a delete job" count above and the "Notebook delete
+   jobs" section below for what finishes that cleanup.
 
 Upgrading to schema v85/0065 resets every target's watermark to `captured=false` (the column is
 new; rows written before the upgrade predate it and have no change-log window behind them). The
@@ -749,10 +769,14 @@ no lease; see the design doc's §7 "在途导出租约").
 `import` is idempotent: re-running the same package directory short-circuits with
 `already_applied` (exit 0) instead of re-applying rows. `--dry-run` stops after identity
 mapping and preflight, writes nothing, and reports what would happen — always run it once
-before the real import. A `mode=incremental` package (or one whose `deletes`/`kg_epochs` are
-non-empty) is rejected at preflight, before anything is written; the error names the rejected
-package's `base_package_id`/`from_seq`/`to_seq` and points at PR-3c, which ships the
-incremental importer. `--create-missing-users` creates a credential-less local user for
+before the real import. A package whose `mode`/`from_seq`/`base_package_id` do not form a
+recognized shape (unknown `mode`, `mode=full` with `from_seq != 0`, `mode=incremental` with
+`from_seq=0` or an empty `base_package_id`, or a non-empty `kg_epochs` in either mode) is rejected
+at preflight, before anything is written, naming the offending field. An otherwise well-formed
+`mode=incremental` package whose `base_package_id` does not match the target's current chain
+head for that `source_env` is likewise rejected at preflight (see "Operating a daily export
+cadence" above for the chain-head rule and the two ways out this error offers).
+`--create-missing-users` creates a credential-less local user for
 every source `username` the target has no match for (§4 of the design doc); without it,
 references to an unmatched user fall back to each table's own rule (skip the row, null the
 column, or fail the whole notebook, depending on the column). `--verify-files` re-checks every
@@ -803,6 +827,20 @@ appends "，心跳: `<heartbeat_at>`" (or `-` before the first commit) from `rep
 heartbeat_at` — this is the evidence to check before deciding whether `--take-over` is safe.
 `--json` carries `status` and the full `report_json` (including `superseded_by`/`heartbeat_at`
 when present) unchanged from the row.
+
+`status` also prints, per `source_env` this environment has ever imported from, the current
+**chain head** — the `package_id`, `to_seq`, and `created_at` of the most recent `done` package
+that is itself chained (§8 of the design doc). This is the value the next incremental import's
+`base_package_id` must match; use it to tell which package in an incoming queue to import next,
+or to confirm a `--full` re-baseline actually reset the chain. It also prints how many mirrored
+notebooks are **waiting on a delete job** — `status='deleting'` with a non-empty `sync_origin`
+but no `notebook_delete_jobs` row has finished yet. An incremental import that propagates a
+source-side notebook deletion only flips the notebook to `status='deleting'` and queues a
+`notebook_delete_jobs` row (§8's "notebook delete propagation"); the actual cleanup — the same
+six-phase job the `DELETE /api/notebooks/{id}` endpoint queues — only runs once the target
+application's own delete-job worker picks it up, so a notebook can sit in `deleting` for a while
+if the target is not running, or was not running when the import completed. This count is how you
+notice that and know to start (or restart) the application rather than assume the import failed.
 
 Every subcommand exits 2 on any failure (one line on stderr, no traceback) and 0 on success,
 including `already_applied`. `--json` prints the underlying export/import report or status

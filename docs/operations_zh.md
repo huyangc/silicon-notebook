@@ -520,8 +520,9 @@ Knowhow、记忆）从一个部署搬到另一个部署，**单向**：源端写
 也再不会被任何一次增量窗口捕获到。只有覆盖当前全部非镜像笔记本的导出才配推进水位（源端
 `status` 如 `copying`/`deleting`/`importing` 不参与这个判断，只有 `sync_origin` 决定是否
 跳过，见设计文档 §7「笔记本范围与镜像」）。
-**目前导入器只接受全量包**（设计文档 §8）；增量包要等 PR-3c——下面「按天导出的操作节奏」
-说明这在实践中意味着什么。
+导入器同时接受全量包与增量包（设计文档 §8）；增量包必须**按链序**导入——它的
+`base_package_id` 必须等于目标端对该 `source_env` 记的「链头」（同源最近一次 `done` 且入链
+的包的 `package_id`）——下面「按天导出的操作节奏」说明这在实践中意味着什么。
 
 ```bash
 # 源环境：设置一次环境标识，开启捕获，再跑第一次（全量）导出——这是之后每次增量导出的基线。
@@ -544,7 +545,7 @@ PYTHONPATH=backend python scripts/sync_notebooks.py export \
   --notebook nb-aaa --notebook nb-bbb --json
 
 # 目标环境：把包目录搬过去，先 --dry-run 再真正引入。
-# （目前只有 mode=full 的包能真正被引入——见下面的操作节奏说明）
+# （按链序导入——见下面的操作节奏说明）
 PYTHONPATH=backend python scripts/sync_notebooks.py import \
   /srv/silicon-notebook/sync/incoming/sync-prod-shanghai-0-42-<id> --dry-run --json
 PYTHONPATH=backend python scripts/sync_notebooks.py import \
@@ -566,15 +567,27 @@ PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --j
 3. 之后每次导出，只要捕获保持开着、且没有什么强制走全量（`--full`、`--notebook`，或水位
    丢了 `captured`），不用加任何参数就自动是增量。
 4. 把包目录搬到目标环境，跟搬全量包一样（`scp`/rsync/对象存储——用现有的传输方式）。
-5. **在 PR-3c 上线之前，增量包无法被引入。** `sync import` 在预检阶段就会拒绝
-   `mode=incremental` 的包，任何东西都不写，错误信息会点名被拒包的
-   `base_package_id`/`from_seq`/`to_seq`。在 PR-3c 的导入器落地之前，增量包可以先放在目标端
-   落地的地方不动——每天跑 `sync export` 本身不要求把每个包都立刻引入；只有*源端*的水位
-   需要不断推进，下一次导出才能继续保持增量。
+5. **按链序逐包导入，一次一个。** `sync import` 只在增量包的 `base_package_id` 等于目标端
+   对该 `source_env` 记的当前链头（同一 `source_env` 最近一次 `done` 且入链的包，`--notebook`
+   限定导出与 `captured=false` 的全量导出都不推进水位、都不能当链头）时才接受它；顺序错了
+   或跳过了一个包，会在预检阶段就拒绝、什么都不写，错误信息会同时点名找到的链头和被拒包的
+   `base_package_id`，并给出两种出路：链头本身还是 `failed` 或 `running`——先处理或
+   `--resume` 那个包；链头根本没到或被丢弃了——从源端重新导一次全量基线
+   （`sync export --full`）重新起链。每天跑 `sync export` 本身不要求把每个包一落地就立刻
+   引入——包可以先在目标端排队——但引入顺序必须和产出顺序一致，中间每一个包都要先导入（或
+   被一次新的全量基线取代），后面的包才会被接受。目标端 `sync status` 会打印每个
+   `source_env` 当前的链头，据此判断下一个该导入哪个包。
 6. 一次窗口为空的增量导出仍会产出一个包（`rows/*.jsonl`、`deletes.jsonl`、`kg_epochs.jsonl`
    都在，只是空文件），水位照样推进——报告的 `empty` 字段会说明这一点。这保证导出链不断：
    每个包的 `base_package_id` 都指向它接续的上一个包，某一天没有变化不会打断下一次导出的
    链条。
+7. 增量包的引入不像全量包那样整目录交换——它按文件逐个合并（先写 `<file>.sync-tmp`，再
+   `os.replace` 覆盖目标文件），所以事后不会留下 `storage/...retired`/`.sync-old` 这样的
+   旧目录要清理；文件合并中途被打断也可以安全地 `--resume` 续跑（单个文件的替换本身是原子
+   的，已经替换过的文件重放一次只是原样再覆盖一次）。若增量包的 `deleted_notebooks` 点名了
+   一本已同步的镜像笔记本，导入只会把它标成 `status='deleting'` 并排一个删除作业，不会自己
+   删任何东西——真正的清理见上面 `sync status` 的「等待删除作业的镜像」计数，以及下面
+   「笔记本删除作业」一节。
 
 升级到 schema v85/0065 会把每个目标环境的水位重置为 `captured=false`（这是新列，升级之前
 写下的水位行没有这一列、背后也没有变更日志窗口）。升级之后对每个目标的第一次导出因此必然
@@ -611,9 +624,12 @@ v1 文件没有转换器）。若升级目标端时还有 v1 包在途（已导�
 
 `import` 幂等：重复引入同一个包目录会短路为 `already_applied`（退出 0），不会重新应用行。
 `--dry-run` 只做到身份映射与预检为止，不写入任何数据，只输出会发生什么——正式引入前务必
-先跑一次。`mode=incremental` 的包（或者 `deletes`/`kg_epochs` 非空的包）在预检阶段就会被
-拒绝，什么都不写；错误信息点名被拒包的 `base_package_id`/`from_seq`/`to_seq` 并指向
-PR-3c——增量导入器在那一步才上线。`--create-missing-users` 为源端每个在目标端按 `username`
+先跑一次。`mode`/`from_seq`/`base_package_id` 凑不成一个认得出的形态时（`mode` 是未知值、
+`mode=full` 但 `from_seq≠0`、`mode=incremental` 但 `from_seq=0` 或 `base_package_id` 为空、
+或者任一模式下 `kg_epochs` 非空）在预检阶段就会被拒绝，什么都不写，错误点名具体是哪个字段
+不对。一个形态本身没问题的 `mode=incremental` 包，若它的 `base_package_id` 不等于目标端
+当前链头，同样在预检阶段被拒绝（链头判据与两种出路见上面「按天导出的操作节奏」）。
+`--create-missing-users` 为源端每个在目标端按 `username`
 找不到匹配的用户创建一个无凭据本地用户（设计文档 §4）；不加它时，引用不到的用户按各表自己的规则处理（跳过该
 行、置空该列，或视列而定使整个笔记本导入失败）。`--verify-files` 在导入时对每个复制的文件
 再做一次 sha256 校验，不只信任包自带的 `checksums.json`——更慢，包经过不受信或可能损耗的
@@ -650,6 +666,17 @@ PR-3c——增量导入器在那一步才上线。`--create-missing-users` 为�
 「，心跳: `<heartbeat_at>`」（第一次提交之前是 `-`），取值来自 `report_json.heartbeat_at`——
 这就是判断 `--take-over` 是否安全要看的证据。`--json` 原样带 `status` 与完整的
 `report_json`（有的话含 `superseded_by`/`heartbeat_at`），不做改写。
+
+`status` 还会对本环境曾经从中导入过的每个 `source_env` 打印当前**链头**——同源最近一次
+`done` 且入链的包的 `package_id`/`to_seq`/`created_at`（设计文档 §8）。下一次增量导入的
+`base_package_id` 必须等于这个值；拿它判断排队里该先导入哪个包，或者确认一次 `--full`
+重建基线是不是真的把链重置了。它同时打印有多少个镜像笔记本**在等删除作业**——
+`status='deleting'`、`sync_origin` 非空、但还没有一条 `notebook_delete_jobs` 跑完。一次
+增量导入传播源端笔记本删除时只会把这本笔记本翻成 `status='deleting'` 并排一条
+`notebook_delete_jobs`（设计文档 §8「笔记本删除传播」）——真正的清理，即 `DELETE
+/api/notebooks/{id}` 那条路径排的同一个六相位作业，要等目标端应用自己的删除作业消费者跑
+起来才会执行；如果导入完成时目标端应用没在跑，或者当时没跑，笔记本就会在 `deleting` 上停着。
+这个计数就是用来发现这种情况、判断该启动（或重启）应用，而不是误以为导入失败了。
 
 所有子命令失败都退出 2（stderr 一行，无堆栈），成功（包括 `already_applied`）退出 0。
 `--json` 把底层的导出/引入报告或状态快照整个打印成一个 JSON 对象，而不是人读摘要；需要
