@@ -786,13 +786,18 @@ parent scope 表的父键必须出现在包内父表里；`deletes.jsonl` 每条
 `..`、不以 `.` 开头；`files/**` 相对路径的每一段只挡穿越（非空、不是 `.`/`..`、不含分隔符与
 NUL），因为上传件文件名保留用户原名（Unicode、空格都合法），再由 `resolve()` 证明落在对应的
 storage 根或包目录内；这些校验都在预检、任何写入或删除之前。**字符安全不等于范围**：
-`files/notebooks/<id>/`、`files/assets/<id>/` 下每个目录名过完字符白名单之后，还要求这个
-`id` 必须在 `manifest.notebooks` 里声明过——否则拒绝并点名，不管它长得多合法，都可能是目标
-端本地笔记本或别的源环境镜像的 id，两个文件相位（全量 `_install_files`、增量 `_merge_files`）
-都是按 `manifest.notebooks` 驱动去读写，一个未声明的目录只会是死重量或者一次攻击。这一步
-分别核对 `checksums.json` 的键与磁盘上物理存在的目录（后者在 `files/**` ⇔ `checksums.json`
-双向相等已经成立之后本该冗余，仍然独立核一次，不让这道围栏依赖那个不变量一直成立）；全部
-发生在预检 1a（不开数据库句柄的那一段），在任何字节被哈希、暂存或复制之前。主键同样不可信：
+`checksums.json` 里每一个 `files/` 开头的键都必须恰好是
+`files/<root>/<声明的笔记本>/<非空路径>` 这个形状——`<root>` 必须是已知的两个文件根之一
+（`_FILE_ROOTS`）、笔记本 id 必须在 `manifest.notebooks` 里声明过、`<非空路径>` 段数不能为
+零；三种畸形一律拒绝并点名：`root` 是未知值、文件直接挂在 `files/` 下（没有笔记本这一层）、
+笔记本没有声明——最后这条是真正的危险：一个字符合法的目录名照样可能是目标端本地笔记本或
+别的源环境镜像的 id，两个文件相位（全量 `_install_files`、增量 `_merge_files`）都是按
+`manifest.notebooks` 驱动去读写，一个未声明的目录只会是死重量或者一次攻击。这一遍扫描
+`checksums.json` 一次性判完全部三种畸形，不是分别问；再分别核一遍磁盘上物理存在的目录（在
+`files/**` ⇔ `checksums.json` 双向相等已经成立之后本该冗余，仍然独立核一次，不让这道围栏
+依赖那个不变量一直成立）；全部发生在预检 1a（不开数据库句柄的那一段），在任何字节落进
+storage 之前——不是「哈希之前」：`_verify_checksums` 这时候已经把整个包读了一遍算出摘要，
+这一步守的是任何一次写。主键同样不可信：
 写事务里
 upsert 之前按主键回查目标端已有行的归属（notebook scope 比 notebook_id，parent scope 比父键），
 不属于包内范围的碰撞一律拒绝，不能让一条构造的行把别的本地笔记本的行劫持进镜像。包树里
@@ -826,9 +831,11 @@ sync import <package_dir> [--create-missing-users] [--dry-run] [--importer-user 
     # 拒绝并点名具体字段。
 sync status [--json]      # 本库的导出水位（每个目标环境）、在途导出租约（§7「在途导出租约」，
                            # target/started_at/heartbeat_at/floor_seq/floor_xmin/是否已死）、
-                           # 每个 source_env 的导入链头（package_id/to_seq/created_at）、等待
-                           # 删除作业清理的镜像数、已引入的包与变更捕获开关状态；落后的笔记本
-                           # 清单在 PR-4
+                           # 每个 source_env 的导入链头——JSON 里是列表，通常一条
+                           # （package_id/to_seq/created_at）；同源存在多条互不下游的 done 包
+                           # 时全部列出并标「链头不唯一」（见下方「链头」定义）、等待删除作业
+                           # 清理的镜像数、已引入的包与变更捕获开关状态；落后的笔记本清单在
+                           # PR-4
 sync capture enable [--json]   # 打开源端变更捕获；清空 sync_export_state（下一次导出必是全量）
 sync capture disable [--json]  # 关闭变更捕获；清空 sync_export_state 与 sync_change_log
 sync capture status [--json]   # 开关状态、enabled_at/disabled_at、日志行数与 seq 范围
@@ -860,14 +867,22 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
    点名）。**不按名字查重**：笔记本名本来就不唯一。
 
    **链头**：同一 `source_env` 在 `sync_imports` 里，`done` 且**没有任何包在它下游**的那
-   一条——「下游」（`_PriorImport.downstream_of`）指另一条 `done` 记录的 `to_seq` 比它大，
+   一批——「下游」（`_PriorImport.downstream_of`）指另一条 `done` 记录的 `to_seq` 比它大，
    或者那条记录本身是一次晚于它记下的窗口（`base_package_id` 非空且 `created_at` 更晚，用
    来兜住「`to_seq` 没变但确实是更晚一次空窗口」这种形状）。这条规则**不要求候选本身
    「入链」**——不检查候选自己的 `base_package_id`/`to_seq` 是否非空/大于零：只要眼下还没有
    任何后续导入把水位推过它，一个限定导出（`--notebook`）或门关全量导入的包在理论上也可以
-   是「此刻的链头」，因为它就是同源最近一条 `done` 的记录。实践中这种情况极少出现，因为
-   源端本来就不会把不推进水位的包（限定导出、门关全量）记成后续增量窗口的 `base_package_id`
-   ——它们不推进源端自己的水位，源端仍然从更早那次真正推进过水位的包续接。`report_json`
+   是「此刻的链头」，因为它就是同源最近一条 `done` 的记录。**链头可能不止一个**：一个全量
+   基线与一个中间插入的限定导出包（或门关全量包）可以共享同一个 `to_seq`，谁都没有越过
+   对方——两者都不推进源端自己的水位，都不是「窗口」（`base_package_id` 为空），彼此互不
+   下游。`sync status` 遇到这种情况**把候选全部列出**，不擅自挑一个（挑一个等于替源端猜它
+   下一步会接哪个），只在人读摘要里标一句「链头不唯一；源端下一个窗口的 base 会是其中推进
+   过水位的那个（to_seq 最大且 base 非空或 to_seq>0）」——这句提示本身就是运维该怎么读这批
+   候选的说明：几个并列候选按 `to_seq` 必然相等，真正会被源端下一个窗口引用的，是其中真的
+   参与了链（`base_package_id` 非空，或 `to_seq>0` 意味着它确实读过日志）的那个，不是限定
+   导出或门关全量那种「巧合撞上同一水位」的旁支。实践中多头的情况极少出现，因为源端本来就
+   不会把不推进水位的包（限定导出、门关全量）记成后续增量窗口的 `base_package_id`——它们
+   不推进源端自己的水位，源端仍然从更早那次真正推进过水位的包续接。`report_json`
    （运行中的行由 `_running_report_json` 写，完成的行由 `ImportReport.as_json()` 写）从本 PR
    起都记 `mode`/`from_seq`/`to_seq`/`base_package_id`；早于本 PR 写下的行两者皆缺，一律读
    成空字符串——不能被当作合法的 `base`，也不去猜它当时是不是增量。
@@ -977,16 +992,24 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
       表不在 `context.deletes` 里就跳过，不开事务也不写进度行；开了事务的表逐表一个事务，
       进度写 `__delete__:<table>`——反过来的顺序（子表先于父表）与拷贝序「先父后子」正好
       相反，删除要反过来才不撞外键。每表：按 `sync_key` 列序组出批量键，分批（`_ROW_BATCH`）
-      处理，条目先按自带的 `notebook_id` 走快速路径判一次（属于 `copying` 集合直接计
-      `deletes_skipped_for_copying`、属于 `folded` 集合直接计
-      `deletes_folded_into_notebook_deletion`，都不用查询），没能这样判掉的条目才进下面这套：
+      处理，条目先按自带的 `notebook_id` 判一次快速路径：属于 `copying` 集合直接计
+      `deletes_skipped_for_copying`，不用查询。**属于 `folded` 集合的不直接计数，而是先
+      缓存下来，延后并入下面的正常归属校验流程再判一次**——折叠决定绝不能只凭条目自带的
+      `notebook_id`（源端说这一行曾属于哪本笔记本）：id 导出后原样不动、从不重新分配，
+      目标端此刻这个主键下的行完全可能已经属于范围内另一本笔记本 M（比如这个主键之前被
+      别的同步链改写过归属）；如果照条目自己的话直接折叠，M 的这一行就会被漏删——它既没有
+      被逐条重放（被当成了"已经折叠进别人的删除作业"），也不在任何删除作业的清理范围内
+      （3d 排的作业只清它标注要删的那本笔记本），永久留在目标端。所以折叠这个决定必须挪到
+      归属真正解析出来之后，对**目标端解析出的归属**再判一次——延后的这批条目和没能走快速
+      路径判掉的条目一起，进下面这套归属校验：
       - 归属校验——与 `_assert_target_ownership` 同一套「先回读目标行再判定」的口径，方向
         相反：那边校验「即将写入的行属于本包范围」，这里校验「即将删除的目标行属于本包
         范围」。NOTEBOOK scope 直接回读目标行的 `notebook_id`（`notebooks` 表自身读
         `id`）；PARENT scope 用 `scope_chain` 在**目标端**逐跳解析出 `notebook_id`
         （PostgreSQL 对回读的行加 `FOR UPDATE`，锁住判定用的那份归属，防止另一个事务在探测
         和真正 DELETE 之间把行挪到别的笔记本下；SQLite 的 `write()` 本身独占整个事务不需要
-        额外加锁）。解析出的归属落进 `copying`/`folded` 集合，按上面同一套规则处理；不属于
+        额外加锁）。**解析出的归属**落进 `copying`/`folded` 集合，按上面同一套规则处理——
+        这是真正拍板折叠还是重放的地方，不是条目自己说了算；解析出的归属若不属于
         `manifest.notebooks ∪ deleted_notebooks` ⇒ **拒绝整个导入**并点名——一条构造的删除
         条目不能删掉别的本地笔记本名下的行。目标端本来就没有这一行 ⇒ 计入 `deletes_absent`
         （幂等重放、`--resume` 续跑都会撞到，不是错误）。PARENT 链在目标端已经断了（父行不
@@ -1006,8 +1029,16 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
       memory 四张表的删除照常重放——这正是 §5「允许共存」承诺的「源端删除靠 `deletes.jsonl`
       精确重放」；对账删除相位的 `_protected_sources` 概念不参与，增量删除重放靠的是日志
       本身的精确性，不需要额外保护集合。`deletes_folded_into_notebook_deletion` 非零、对应
-      的行却仍在目标端，是这套设计的预期形态而不是遗漏——那些行由 3d 排的作业负责清理，不是
-      本相位没做完。
+      的行却仍在目标端，本身是这套设计的预期形态而不是遗漏——但这句话只对**真的被 3d 打上
+      墓碑、进了 `notebooks_deleted`** 的笔记本成立；折叠的告警因此挪到 3d 跑完之后才发
+      （3c 自己跑的时候还不知道 3d 最终会不会真的排上队），按两个集合的交集/差集分两条口径：
+      折叠的笔记本里，真的被 3d 排进队列的那些（`folded_notebooks ∩ notebooks_deleted`）
+      正常报「N 条行级删除未逐条重放：它们属于本次导入打了墓碑的笔记本，删除作业会清空这些
+      笔记本的每一张表」；折叠了但 3d 最终没排上队的那些（`folded_notebooks - notebooks_deleted`
+      ——比如 `_plan_deletes` 定性时它还不是 `copying`，等真正轮到 3d 那个事务时状态已经变成
+      `copying`，于是被 3d 放过不打墓碑）单独发一条 `INCONSISTENT:` 告警，点名这些笔记本，
+      说清楚「没有任何东西清掉这些行，重新导入或者手动处理」——不能跟着上面那条报喜的告警
+      一起含糊过去，因为这种情况下这些行是真的没人管。
    d. **笔记本删除传播**（仅增量包）：对 `manifest.deleted_notebooks` 里的每个笔记本 id，一
       个事务里先回读目标端这一行的 `sync_origin`：不等于本包 `source_env` ⇒ **直接中止整个
       导入**（`SyncImportError`）——预检已经查过一次，这里在真正落笔前再查一次，是因为
@@ -1036,24 +1067,46 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
       笔记本会停在 `deleting` 直到应用下次启动或运维手动处理（`sync status` 用「等待删除
       作业的镜像」这个数字把这种情况亮出来）。
 4. 文件：全量包整目录替换（不变）——`files/notebooks/<id>/` 与 `files/assets/<id>/` 各自先
-   落到 `<目标目录>.sync-tmp/`，用预检算过的摘要（不重复读整包），原子 rename 到位、旧目录
-   改名 `.sync-old` 留到收尾。**增量包按文件合并**：外层循环是 `manifest.notebooks`，不是
-   `checksums.json` 自己的键——目标笔记本从声明集合里选，包内路径拿去跟这个笔记本匹配，永远
-   不是反过来用路径去认领一个目录，一条精心构造的路径至多匹配失败、不能自己提名一个笔记本
-   （`_verify_package_paths` 已经在预检把这类包整个拒绝，这里是第二道、各自独立的防线）。
-   命中的文件按 `checksums.json` 逐个复制——先写 `<目标路径>.sync-tmp`，再 `os.replace` 原子
-   换到最终路径，不建临时目录、不整目录 rename、不产生 `.sync-old`，全量专用的
-   `context.installed` 登记不使用；`_assert_within` 校验目标路径落在对应 storage 根下与全量
-   包同一套逻辑。合并每个笔记本的每个文件根之前，先清掉该目录下遗留的 `*.sync-tmp`
-   残片——这个后缀只有导入器自己写，且只在「复制到位、还没 `os.replace`」这一小段窗口内存在，
-   进程被杀（SIGKILL、断电）会把它晾在原地；下次跑（不管是不是同一个包）都会先清掉它，
-   属于尽力而为（删不掉只记 warning，不算导入失败）。导出侧的两条取文件路径都跳过这个后缀
-   （`sources.file_path` 走的整目录 `rglob`、`notebook_assets` 走的 `<stem>.*` glob 都各自
-   过滤 `.sync-tmp` 结尾的文件），所以一次导入崩溃留下的残片不会被下一次导出打包带到别的
-   环境去——两边共享同一个后缀字面量（`.sync-tmp`），一条守卫测试把两处拼写钉在一起。单个
-   文件复制失败只记 warning、不回滚已经复制成功的文件（文件复制本身幂等，`--resume` 重做
-   这一步会重新尝试失败的那些）。文件相位在 `sync_import_progress` 登记 `__files__` 条目，
-   续跑跳过。
+   落到同一父目录下的兄弟目录 `<notebook id>.sync-tmp`（`.sync-tmp` 这个后缀现在**只剩这一处
+   用法**：笔记本 id 命名空间，受 `is_safe_identifier` 约束，不是用户能起的名字，所以不会跟
+   真实上传件撞名），用预检算过的摘要（不重复读整包），原子 rename 到位、旧目录改名
+   `.sync-old` 留到收尾。**增量包按文件合并**，暂存位置整个换了一套机制（对上一轮文档的
+   撤销：曾经写过「暂存文件是 `<目标路径>.sync-tmp`、合并前清掉同目录残片、导出两条取文件
+   路径都跳过这个后缀」——这套按目标文件名加后缀的方案已经被回退，下面是现在的实现）：
+   - 外层循环是 `manifest.notebooks`，不是 `checksums.json` 自己的键——目标笔记本从声明集合
+     里选，包内路径拿去跟这个笔记本匹配，永远不是反过来用路径去认领一个目录，一条精心构造的
+     路径至多匹配失败、不能自己提名一个笔记本（`_verify_package_paths` 已经在预检把这类包
+     整个拒绝，这里是第二道、各自独立的防线）。
+   - 逐文件的暂存根是 **`storage/.sync-staging/<package_id>/<root>/<notebook id>/<相对路径>`**
+     ——`storage/` 下单独一个以 `.` 开头的目录，不是任何目标文件名上挂的后缀。按目标文件名
+     加后缀这条路（上一版的实现）是错的：一次上传件在磁盘上的真实文件名是
+     `{source_id}_{safe_filename(客户端原名)}`（`repositories/source_files.py` 的
+     `stored_upload_name`），`safe_filename` 不动扩展名，所以一个用户上传的、名字恰好以
+     `report.sync-tmp` 结尾的文件是完全合法的普通上传，跟按后缀命名的暂存文件共享同一个
+     命名空间——建在这上面的每一条防线都会跟着塌：导出端得反过来跳过真实用户内容才能不带上
+     暂存残留，合并阶段自己的清理也会连累用户的文件。`storage/.sync-staging/` 这个独立根没有
+     这个问题：它不在 `storage/notebooks/<nb>/` 或 `storage/assets/<nb>/` 下，任何一次导出的
+     文件收集路径、任何一次笔记本删除的清理都天然看不到它；跟每个目标文件同一个文件系统，
+     `os.replace` 仍然原子；按 `package_id`分区，一次跑的残骸和另一次的分得清。
+   - 命中的文件写进 `mine = <暂存根>/<package_id>/`（先 `_assert_within` 校验落在暂存根下），
+     再 `os.replace` 原子换到最终路径；不建全量专用的目录级 `.sync-tmp`/`.sync-old`，
+     `context.installed` 登记不使用；两侧路径都过 `_assert_within`，落在对应包目录/storage
+     根下。整个合并跑完，`shutil.rmtree(mine, ignore_errors=True)` 清掉这次自己的暂存目录
+     （删不掉不算失败，下次进 `_reconcile_staging_root` 还会再试）。
+   - 合并开始前先跑 `_reconcile_staging_root`，处理 `storage/.sync-staging/` 下其它运行留下的
+     东西，按谁的、完没完成分三种：**本包自己的残骸**（同一个包更早一次跑留下的）见到就删，
+     不发 warning，因为它注定会被这次跑重新写一遍；**已经 `done` 的包留下的残骸**——那次跑
+     没清理干净——删掉并 warning，指名是哪个包留的；**既不是本包也不是已完成包的**——同一
+     目标上并发跑着别的 `source_env` 的导入是正常形态（认领锁是按 source_env 分的），这时候
+     唯一能用的证据是 mtime：一小时（`_STAGING_STALE_SECONDS`）内被碰过的原样不动、只
+     warning 说明可能有另一个导入正在写；超过一小时没被碰过才当成废弃，删掉并 warning。
+     整个函数尽力而为：删不掉只 warning，从不让这类清理本身搞挂一次导入。
+   - `storage/notebooks/` 与 `storage/assets/` 这两棵目录树下的任何东西——不管名字长得像不像
+     暂存文件——都**不被当成暂存**，导出端从不为「像不像暂存文件」这件事跳过任何东西：那两棵
+     树下的字节全部是用户内容，一个真实上传件的文件名恰好以 `.sync-tmp` 结尾也照常打包带走。
+   - 单个文件复制失败只记 warning、不回滚已经复制成功的文件（文件复制本身幂等，`--resume`
+     重做这一步会重新尝试失败的那些）。文件相位在 `sync_import_progress` 登记 `__files__`
+     条目，续跑跳过。
 5. 收尾，按「可回滚的先做、发布最后」的顺序：`sync_origin` 再补打一次（第二条腿，首插时
    已带）→ 文件目录正式生效（全量包这里才删 `.sync-old`；增量包这一步纯粹是进度收口，没有
    目录可删）→ `_stamp_mirrors`（按 `manifest.notebooks` 更新 `sync_applied_through_seq` 等
