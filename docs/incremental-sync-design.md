@@ -177,6 +177,10 @@ users 不同步但导入时可能**创建**：见 §4。
   源端相撞，两边共存）。记忆是两端都写的唯一同步表：源端产生的记忆行以源端为准，目标端
   对它的确认、修改会在下一次同步被覆盖，删除会被重新插入；目标端自己产生的记忆行不在
   源端变更日志里，不受影响。复制笔记本的产物是本地库，`sync_origin` 写成空。
+  `memory_revisions`/`memory_provenance` 这两张修订/溯源子表在此之上还有一层只对全量包生效
+  的快照式对账（`_prune_superseded`，§8「导入相位」3a），把本包确实携带的 memory_item 名下、
+  没出现在这份全量快照里的陈旧子行删掉；增量包不做这层对账，全靠 `deletes.jsonl` 精确重放
+  覆盖同样的效果——理由见 §8。
 - 目标端自有列：manifest 的 `target_owned_columns` 登记导入时对已存在行不覆盖的列，
   notebooks 为 status、is_shared、share_token、sync_origin。首插时这些列也由目标端给值，不用
   源端的：`sync_origin` = 源环境标识；`is_shared` = 0、`share_token` = NULL（链接分享是目标端
@@ -947,13 +951,39 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
    值域：running / done / failed / superseded。
 2. 身份映射（§4），产出映射表与跳过清单。
 3. 行——四个子相位，`kg_epochs` 恒空（§11「`kg_epoch` 折叠延后」），两种包都不触发整体替换
-   分支；每张表一个事务，进度写进 `sync_import_progress`，可断点续跑：
+   分支；每张表一个事务，进度写进 `sync_import_progress`，可断点续跑。**下面 a/b/c/d 这几个
+   字母对应的是机制（沿用 PR-3a/3b/3c/3d 引入它们时的分组），不是执行顺序**——两种包实际
+   跑的顺序不一样：
+   - **全量包**：3a（对账删除）→ 3b（行 apply）→（第 4 步）文件整目录替换。顺序不变。
+   - **增量包**：**3c（删除重放）→ 3b（行 apply）→ 3d（笔记本删除传播）→（第 4 步）文件
+     合并**——删除排在 upsert **之前**，跟全量包「先 3a 后 3b」形态上一致（先清场再落子），
+     但对增量包这是必须的，不只是形态一致：源端删掉一行、又在同一个窗口里用新主键重建同一
+     份内容（业务唯一键不变，比如 `knowhow_milestones` 的 `(table_id, name)`），窗口里就是
+     「旧 id 的 delete + 新 id 的 upsert」两条独立记录（压缩只按 (table, key) 折终态，旧
+     id 和新 id 是两个不同的 key，不会被压缩合并成一条）。upsert 先跑的话，新行插入时目标端
+     还留着旧 id 的那一行，两者在 `(table_id, name)` 这个二级唯一约束上打架，upsert 直接
+     报错。3c 已经是逆序（子表先于父表）删除，天然 FK 安全；把它挪到 3b 之前，同一份重建
+     内容就不会撞上自己即将被清理的旧影子。**只有「同一个键先删后插」这种压缩内已经折叠成
+     纯 upsert 的形状不会触发这个问题**——会触发的是「不同键之间抢同一个业务唯一约束」；
+     父行被删时，子行的 delete 条目也照常在这同一个窗口里（源端的级联删除同样经触发器落进
+     变更日志，不会被落下）。
    a. **对账删除**（仅全量包）：逆序、每表一个事务，进 `sync_import_progress`：对每张
       notebook/parent scope 且非 seed_only 的同步表，删除属于包内笔记本、但主键不在包内的
       目标端行——源端删掉的材料、KG 行、Knowhow 行在下一次全量后消失。先删后 upsert 是为了
       让「主键换了、业务唯一键没换」的行（如 chunk_questions 的 (chunk_id, question)）不撞
       二级唯一约束；导入前还按目标 catalog 的唯一索引预检并点名。例外：memory_items 及其
-      三张子表不对账（§5 允许目标端自建记忆与源端记忆共存，见下方增量删除重放）；目标端记忆
+      三张子表不对账（§5 允许目标端自建记忆与源端记忆共存，见下方增量删除重放）——目标端
+      完全自建、本包压根没提到的记忆永远不会被这个相位删掉。**`memory_revisions`/
+      `memory_provenance` 有它们自己一层更窄的快照式对账**（`_prune_superseded`），跟上面
+      这条全局豁免不冲突：它只针对**本包确实携带**的那个 memory_item——对这样一个 memory，
+      源端才是权威内容，这个 memory 此刻在源端的修订/溯源历史就是包里携带的这份快照，源端
+      如果清理过旧修订行（比如修订历史保留策略），全量包的快照天然就不会带着那些行，
+      `_prune_superseded` 据此删掉目标端这个 memory 名下、不在快照里的陈旧子行——**这一步
+      只对全量包做**：全量包对每个携带的 memory_item 都是一份完整快照，「没出现在包里」才
+      能拿来当「源端已经清理掉」的证据；增量包只带变更过的行，一条修订行没出现在窗口里，
+      唯一能说明的是「这次窗口它没变」，不是「源端把它删了」，拿它去对账会把没变的历史行
+      错杀。源端真的删掉一条修订/溯源行时，这个删除本身会进变更日志、落进 `deletes.jsonl`，
+      交给下面的精确重放（3c）处理——这才是增量包这边真正对应的机制。目标端记忆
       经 `ingest_memory_source` 派生的合成来源（`source_type='memory'` 且 memory_id 不在
       包内）及其可达的元素、chunk、向量、KG 行同样免删，没有 source_id 的 KG 行不在保护
       范围。SQLite 目标在 chunks/knowledge_objects 的事务内重建
@@ -1088,16 +1118,25 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
    - 命中的文件写进 `mine = <暂存根>/<package_id>/`（先 `_assert_within` 校验落在暂存根下），
      再 `os.replace` 原子换到最终路径；不建全量专用的目录级 `.sync-tmp`/`.sync-old`，
      `context.installed` 登记不使用；两侧路径都过 `_assert_within`，落在对应包目录/storage
-     根下。整个合并跑完，`shutil.rmtree(mine, ignore_errors=True)` 清掉这次自己的暂存目录
-     （删不掉不算失败，下次进 `_reconcile_staging_root` 还会再试）。
+     根下。合并期间会持续刷新 `mine` 下的 `.heartbeat` 文件（复制开始前先建好，之后至少每分钟摸一次，与导出侧 staging 心跳同一节流）（touch 它的
+     mtime）——这是判断「这个暂存目录是不是还有人在写」的唯一凭据（见下一条）。整个合并
+     跑完，`shutil.rmtree(mine, ignore_errors=True)` 清掉这次自己的暂存目录（删不掉不算
+     失败，下次进 `_reconcile_staging_root` 还会再试）。
    - 合并开始前先跑 `_reconcile_staging_root`，处理 `storage/.sync-staging/` 下其它运行留下的
      东西，按谁的、完没完成分三种：**本包自己的残骸**（同一个包更早一次跑留下的）见到就删，
      不发 warning，因为它注定会被这次跑重新写一遍；**已经 `done` 的包留下的残骸**——那次跑
      没清理干净——删掉并 warning，指名是哪个包留的；**既不是本包也不是已完成包的**——同一
      目标上并发跑着别的 `source_env` 的导入是正常形态（认领锁是按 source_env 分的），这时候
-     唯一能用的证据是 mtime：一小时（`_STAGING_STALE_SECONDS`）内被碰过的原样不动、只
-     warning 说明可能有另一个导入正在写；超过一小时没被碰过才当成废弃，删掉并 warning。
-     整个函数尽力而为：删不掉只 warning，从不让这类清理本身搞挂一次导入。
+     判断存活的证据是 **`<暂存目录>/.heartbeat` 文件的 mtime**，不是暂存目录本身的
+     mtime——目录本身的 mtime 只在里面创建/删除文件那一刻才动，合并期间真正的写入发生在
+     更深一层（`<root>/<notebook>/...` 那些子目录里），不会反过来刷新暂存目录自己的 mtime，
+     用它判断会把一个正在写、只是暂时没在暂存目录这一层动作的导入错判成废弃；`.heartbeat`
+     文件在合并期间至少每分钟摸一次，是唯一会随合并进度持续刷新的信号。没有 `.heartbeat`
+     文件的目录（比如从旧版本升级后残留的、或者刚被创建还没来得及写第一次心跳）退回按
+     目录自己的创建时间判断。陈旧阈值跟导出侧自己的 staging 陈旧判据用同一个值——一小时
+     （`_STAGING_STALE_SECONDS`）：阈值内的原样不动、只 warning 说明可能有另一个导入正在写；
+     超过阈值才当成废弃，删掉并 warning。整个函数尽力而为：删不掉只 warning，从不让这类
+     清理本身搞挂一次导入。
    - `storage/notebooks/` 与 `storage/assets/` 这两棵目录树下的任何东西——不管名字长得像不像
      暂存文件——都**不被当成暂存**，导出端从不为「像不像暂存文件」这件事跳过任何东西：那两棵
      树下的字节全部是用户内容，一个真实上传件的文件名恰好以 `.sync-tmp` 结尾也照常打包带走。

@@ -11,10 +11,13 @@ the phases below branch on that one decision:
   export saw), which is what lets the next export be a window.
 - an **incremental** package is a WINDOW over the source's change log. It
   states what changed, so there is nothing to reconcile against: phase 3a is
-  skipped, phase 3b upserts the window's final states, phase 3c REPLAYS the
-  window's row deletions by key, phase 3d queues a delete job for each
+  skipped, phase 3c REPLAYS the window's row deletions by key, phase 3b then
+  upserts the window's final states, phase 3d queues a delete job for each
   notebook the source deleted, and phase 4 MERGES the files the changed rows
-  point at, one atomic rename per file. It must name the chain head it
+  point at, one atomic rename per file. **3c before 3b** -- the reverse of
+  nothing, since a full package has no 3c, but worth saying out loud: one
+  window can delete a row and create a replacement carrying the same business
+  key, and the upsert collides unless the original is gone first. It must name the chain head it
   continues from, and ``_assert_chain`` refuses it otherwise -- a diff applied
   to the wrong base is not a smaller version of the right answer, it is a
   mirror that silently disagrees with its source.
@@ -70,12 +73,13 @@ Phases, and what each one actually guarantees:
    and a re-run re-applies only tables that never completed. A SQLite
    target's two hand-maintained FTS5 indexes are re-projected in the same
    transaction as the table they index (``_SQLITE_FTS_REBUILD``).
-3c. **Delete replay (incremental only).** The window's row deletions, applied
-   by KEY rather than inferred -- which is what lets ``memory_items`` and its
-   children finally lose a source-side deletion (§5), and what makes the
-   whole phase safe: a replayed key can be checked against the target's own
-   attribution before it runs. Children before parents, one transaction and
-   one progress step per table. A target row attributed outside this package
+3c. **Delete replay (incremental only), which runs BEFORE 3b.** The window's
+   row deletions, applied by KEY rather than inferred -- which is what lets
+   ``memory_items`` and its children finally lose a source-side deletion
+   (§5), and what makes the whole phase safe: a replayed key can be checked
+   against the target's own attribution before it runs, while every row it
+   reasons about is still untouched by this import. Children before parents,
+   one transaction and one progress step per table. A target row attributed outside this package
    refuses the whole import; a row the target no longer has is counted
    ``absent``; a PARENT-scoped entry whose chain is broken at the target and
    that names no notebook of its own is a no-op (§11). The bytes a deleted
@@ -226,6 +230,7 @@ import json
 import os
 import secrets
 import shutil
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -3907,6 +3912,11 @@ def _prune_superseded(
     own memories, which §5 leaves alone. A parent the package DOES carry has
     its whole child set replaced by the package's, including the case where
     the package carries none for it.
+
+    **FULL packages only** -- "replaced by the package's" is a snapshot's
+    sentence, and a window does not carry a whole child set to replace
+    anything with. The caller enforces that; see the comment at its call site
+    for what applying this to a window destroys (codex #788 r1 P1-1).
     """
     child_column, parent_table = _SOURCE_AUTHORITATIVE[table]
     if len(primary_key) != 1:
@@ -4408,7 +4418,25 @@ def _apply_table(
         # cannot raise on any index.
         else _unique_keys(backend, conn, table, primary_key)
     )
-    if table in _SOURCE_AUTHORITATIVE:
+    if table in _SOURCE_AUTHORITATIVE and context.manifest.mode == MODE_FULL:
+        # FULL packages only. This prune replaces a carried memory's WHOLE
+        # child set with the package's, which is right for a snapshot and
+        # destructive for a window: an incremental package carries only the
+        # revision/provenance rows that CHANGED, so "the parents this package
+        # carries" is a handful of memories whose unchanged earlier revisions
+        # and whose entire provenance would be deleted for having been
+        # exported some other time. Editing one memory's body would silently
+        # erase its history at the mirror (codex #788 r1 P1-1).
+        #
+        # A window needs none of it. The reason the prune exists at all is
+        # that a snapshot cannot express deletion, and a window can: a
+        # source-side deletion of a revision or a provenance row travels as a
+        # ``deletes.jsonl`` entry and is replayed by key in phase 3c, which
+        # is both exact and the whole point of §5's "记忆行以源端为准"
+        # promise. The unique-index half of this function's rationale is
+        # covered too -- phase 3c runs BEFORE the upsert for an incremental
+        # package, so a superseded row is gone before its replacement is
+        # written (see ``_import``).
         _prune_superseded(backend, conn, table, context, primary_key)
     # A seed_only upsert is a bare ON CONFLICT DO NOTHING, so a pre-existing
     # row is never touched regardless of who it belongs to. It cannot
@@ -5317,6 +5345,41 @@ def _replay_deletes(backend: _Backend, context: _Context, done: set[str]) -> Non
     target-side creation, and a replayed key can -- so their deletes are
     replayed here like any other table's, with no exemption.
 
+    **Runs BEFORE the row upsert (3b), which is the reverse of a full
+    package's order** (codex #788 r1 P1-2). A primary key is not a table's
+    only identity, and inside ONE window the source can delete a row and
+    create a different row carrying the same business key: delete milestone
+    ``m-old`` named "v1", create ``m-new`` named "v1". The window then holds
+    a delete for ``m-old`` and an upsert for ``m-new``, and running the
+    upsert first walks straight into the target's still-present ``m-old`` on
+    the ``(table_id, name)`` unique index -- ``_assert_no_unique_key_
+    collision`` aborts the import, and a resume aborts in the same place
+    forever. Deleting first removes the superseded row while it is still the
+    only one, exactly as phase 3a does for a full package and for exactly the
+    same reason (see that phase's note about ``chunk_questions`` and
+    ``knowhow_cells``).
+
+    Three things make the reversal safe rather than merely convenient:
+
+    - **no key is both deleted and upserted.** ``incremental.compact`` keeps
+      only each key's FINAL operation inside the window, so a row that was
+      deleted and re-inserted under the SAME key arrives as an upsert alone,
+      never as a delete the upsert would then have to undo.
+    - **attribution is still read off live rows.** Every delete's ownership
+      check reads the target row it is about to remove, and at this point
+      nothing of this package has been written yet -- those rows are exactly
+      as they were before the import started, which is the state the check
+      wants to reason about.
+    - **the FK order still holds.** Deleting a parent at the source cascades
+      to its children there, and the cascade is captured too (the triggers
+      fire per row), so a window that deletes a parent also carries its
+      children's deletes; walking ``reversed(synced_tables())`` removes them
+      child-first without relying on the target's cascade behaviour.
+
+    ``_plan_deletes`` still runs first, on a read snapshot taken before any
+    of this. Phase 3d (the notebook tombstones) still runs AFTER 3b: it must
+    not tombstone a notebook whose rows this same run is still writing.
+
     One transaction and one ``sync_import_progress`` step per table, in the
     same shape phases 3a and 3b use, so a crash loses at most the table in
     flight and a resume redoes only that one. Re-doing a whole table is safe:
@@ -5579,8 +5642,24 @@ _STAGING_ROOT = ".sync-staging"
 # How long a DIFFERENT package's staging directory may sit there before this
 # run treats it as abandoned. Only ever used for a package whose own
 # ``sync_imports`` row does not say ``done`` -- a finished package's debris is
-# removed on sight regardless of age.
+# removed on sight regardless of age. Deliberately the same value as the
+# exporter's ``export._STALE_STAGING_SECONDS``: the two answer the same
+# question about the same kind of directory, and an operator who learns one
+# number should not have to learn a second.
 _STAGING_STALE_SECONDS = 3600.0
+
+# Liveness marker a running merge keeps touching at its staging root, and the
+# floor on how often it does so. Same mechanism, same names and same reason as
+# the exporter's (``export._HEARTBEAT_NAME``): every byte the merge writes
+# lands in ``<package_id>/<root>/<notebook>/``, which never updates
+# ``<package_id>``'s own mtime, so a merge running longer than
+# ``_STAGING_STALE_SECONDS`` would look abandoned by that measure and a
+# concurrent import of a DIFFERENT source environment would delete it
+# mid-copy (codex #788 r1 P2). Debris from a build that predates the marker
+# carries no ``.heartbeat``; for those, and only those, the directory's own
+# mtime is the fallback.
+_STAGING_HEARTBEAT_NAME = ".heartbeat"
+_STAGING_HEARTBEAT_INTERVAL_SECONDS = 60.0
 
 # A retired directory names the package that retired it. Without the id, a
 # LATER package's reconciliation cannot tell "my own interrupted swap, adopt
@@ -5806,6 +5885,8 @@ def _merge_files(context: _Context, *, verify: bool) -> None:
     buckets = _file_buckets(context)
     mine = staging_root / context.manifest.package_id
     _assert_within(staging_root, mine, what="staging path")
+    mine.mkdir(parents=True, exist_ok=True)
+    beat = _StagingHeartbeat(mine)
     copied = 0
     for notebook_id in context.manifest.notebooks:
         for root in _FILE_ROOTS:
@@ -5850,6 +5931,7 @@ def _merge_files(context: _Context, *, verify: bool) -> None:
                     else:
                         shutil.copy2(source, staged)
                     os.replace(staged, destination)
+                    beat()
                 except BaseException:
                     # The staged copy was never consumed. Drop it rather than
                     # leaving it for a later run to have to reason about.
@@ -5858,6 +5940,59 @@ def _merge_files(context: _Context, *, verify: bool) -> None:
                 copied += 1
     shutil.rmtree(mine, ignore_errors=True)
     context.ledger.files_copied = copied
+
+
+class _StagingHeartbeat:
+    """Keeps ``<staging root>/<package_id>/.heartbeat`` fresh while a merge
+    runs, so a concurrent import can tell "still working" from "abandoned".
+
+    Same shape as the exporter's ``_PackageWriter.beat``: the marker is
+    created up front (so a merge is live from its first instant, before it has
+    copied anything) and re-touched at most once per
+    ``_STAGING_HEARTBEAT_INTERVAL_SECONDS`` thereafter, which keeps a per-file
+    beat down to one clock read per file and one ``utime`` per minute.
+
+    Best effort throughout. A marker that cannot be written costs this run its
+    protection from a concurrent sweep, which is a risk worth a warning and
+    not worth failing an import over -- and the sweep's own fallback (the
+    directory's mtime) still gives it some.
+    """
+
+    def __init__(self, directory: Path) -> None:
+        self._path = directory / _STAGING_HEARTBEAT_NAME
+        self._beat_at = 0.0
+        self._broken = False
+        self()
+
+    def __call__(self) -> None:
+        if self._broken:
+            return
+        now = time.time()
+        if self._beat_at and now - self._beat_at < _STAGING_HEARTBEAT_INTERVAL_SECONDS:
+            return
+        self._beat_at = now
+        try:
+            self._path.touch()
+        except OSError:  # pragma: no cover - filesystem failure path
+            # Once, then never again: a directory that cannot hold the marker
+            # will not start being able to halfway through.
+            self._broken = True
+
+
+def _staging_is_abandoned(directory: Path, cutoff: float) -> bool:
+    """Whether ``directory`` has gone untouched since ``cutoff``.
+
+    The ``.heartbeat`` marker is the measure. The directory's OWN mtime is
+    only a fallback for debris left by a build that predates the marker: it
+    does not move while a merge writes into the subdirectories below it, so
+    using it as the primary measure is exactly the bug this replaced."""
+    marker = directory / _STAGING_HEARTBEAT_NAME
+    try:
+        if marker.exists():
+            return marker.stat().st_mtime <= cutoff
+        return directory.stat().st_mtime <= cutoff
+    except OSError:  # pragma: no cover - filesystem failure path
+        return False
 
 
 def _reconcile_staging_root(context: _Context, staging_root: Path) -> None:
@@ -5884,7 +6019,7 @@ def _reconcile_staging_root(context: _Context, staging_root: Path) -> None:
     failure to remove it is a warning, never a reason to fail an import."""
     if not staging_root.is_dir():
         return
-    now = datetime.now(timezone.utc).timestamp()
+    cutoff = time.time() - _STAGING_STALE_SECONDS
     for path in sorted(staging_root.iterdir()):
         owner = path.name
         if owner != context.manifest.package_id:
@@ -5893,21 +6028,18 @@ def _reconcile_staging_root(context: _Context, staging_root: Path) -> None:
                     f"removed staging left by package {owner}, which finished "
                     "without cleaning up"
                 )
+            elif not _staging_is_abandoned(path, cutoff):
+                context.ledger.warn(
+                    f"left staging for package {owner} alone: it has not "
+                    "finished and its heartbeat is recent, so another import "
+                    "may be writing it right now"
+                )
+                continue
             else:
-                try:
-                    age = now - path.stat().st_mtime
-                except OSError:  # pragma: no cover - filesystem failure path
-                    age = 0.0
-                if age < _STAGING_STALE_SECONDS:
-                    context.ledger.warn(
-                        f"left staging for package {owner} alone: it has not "
-                        "finished and its files were touched recently, so "
-                        "another import may be writing them right now"
-                    )
-                    continue
                 context.ledger.warn(
                     f"removed staging left by package {owner}: it has not "
-                    f"finished, but nothing has touched it for {int(age)}s"
+                    "finished, and nothing has touched it for over "
+                    f"{int(_STAGING_STALE_SECONDS)}s"
                 )
         try:
             shutil.rmtree(path)
@@ -6444,9 +6576,15 @@ def _import(
             # row the window simply did not mention. Its deletions arrive as
             # instructions instead, in phase 3c.
             _prune_snapshot(backend, context, done)  # phase 3a
-        _apply_rows(backend, context, done)          # phase 3b
-        if mode == MODE_INCREMENTAL:
-            _replay_deletes(backend, context, done)          # phase 3c
+            _apply_rows(backend, context, done)      # phase 3b
+        else:
+            # DELETES FIRST for a window -- see ``_replay_deletes`` for the
+            # full argument. In short: the source can delete a row and create
+            # a replacement carrying the same business key inside one window,
+            # and upserting the replacement before removing the original
+            # collides on that key.
+            _replay_deletes(backend, context, done)            # phase 3c
+            _apply_rows(backend, context, done)                # phase 3b
             _apply_notebook_deletions(backend, context, done)  # phase 3d
         if _FILES_PHASE in done:
             ledger.warn(
