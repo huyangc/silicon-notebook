@@ -1849,27 +1849,29 @@ def test_classify_mirrors_chain_participant_without_a_head_is_ambiguous():
     ]
 
 
-def test_classify_mirrors_scoped_snapshot_older_than_the_head_is_lagging():
-    """判据 3：scoped 包的 to_seq 在库里恒为 0，所以只能按导出时间判。这本最后
-    一次是被一个**比链头更旧**的快照刷的——两次导出之间对它的改动不会再有窗口
-    带过来（窗口只装自己范围内有变更的本），所以是真落后。"""
+def test_classify_mirrors_scoped_snapshot_that_overwrote_a_window_is_lagging():
+    """真落后的唯一形态：某个参与链的窗口带过这本的改动（`nb-1 in
+    notebooks`）、导出时间晚于这份 scoped 快照、而且**先于**它被导入——于是
+    这份旧快照把窗口已经写下的新行盖了回去，后续窗口也不会再补（窗口只装
+    自己范围内有变更的本）。条目里的 head 指向被盖掉的那个窗口。"""
+    window = _prior_import(
+        "pkg-window",
+        to_seq=20,
+        base_package_id="pkg-A",
+        created_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
+    )
     package = _prior_import(
         "pkg-scoped",
         scoped=True,
         created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        # 导入发生在窗口之后：落后与导入先后无关，只跟快照新旧有关。
+        # 一月的快照，六月才导入——落在窗口的行上面。
         started_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
-    )
-    head = _prior_import(
-        "pkg-B",
-        to_seq=20,
-        base_package_id="pkg-A",
-        created_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
     )
     mirrors = cli._classify_mirrors(
         [_mirror_row(name="镜像本")],
-        {"prod-shanghai": [package]},
-        {"prod-shanghai": [head]},
+        {"prod-shanghai": [window, package]},
+        {"prod-shanghai": [window]},
     )
     group = mirrors["prod-shanghai"]
     assert group["in_sync"] == []
@@ -1879,11 +1881,92 @@ def test_classify_mirrors_scoped_snapshot_older_than_the_head_is_lagging():
             "name": "镜像本",
             "applied_package_id": "pkg-scoped",
             "applied_created_at": "2026-01-01T00:00:00+00:00",
-            "head_package_id": "pkg-B",
+            "head_package_id": "pkg-window",
             "head_created_at": "2026-01-05T00:00:00+00:00",
             "deleting": False,
         }
     ]
+
+
+def test_classify_mirrors_older_scoped_snapshot_imported_first_is_in_sync():
+    """codex #791 r2 P2 的反例，正常的日常节奏：全量 → `sync export
+    --notebook A`（t1）导入 → 之后一个只带 B 改动的窗口（t2 > t1）导入。
+    A 完全是最新的——它若在 (t1, t2] 有改动，窗口就会带上它——不能报落后。"""
+    package = _prior_import(
+        "pkg-scoped",
+        scoped=True,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    window = _prior_import(
+        "pkg-window",
+        to_seq=20,
+        base_package_id="pkg-A",
+        notebooks=("nb-other",),  # 这一轮只有 B 变过
+        created_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
+    )
+    mirrors = cli._classify_mirrors(
+        [_mirror_row()],
+        {"prod-shanghai": [package, window]},
+        {"prod-shanghai": [window]},
+    )
+    group = mirrors["prod-shanghai"]
+    assert group["lagging"] == []
+    assert [entry["notebook_id"] for entry in group["in_sync"]] == ["nb-1"]
+
+
+def test_classify_mirrors_window_imported_after_the_scoped_snapshot_is_in_sync():
+    """同一形态，但窗口**带了** A：窗口在 scoped 包之后导入，所以窗口的行压在
+    上面，什么都没丢。只有「更晚导出、更早导入」才是落后。"""
+    package = _prior_import(
+        "pkg-scoped",
+        scoped=True,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    window = _prior_import(
+        "pkg-window",
+        to_seq=20,
+        base_package_id="pkg-A",
+        created_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
+    )
+    mirrors = cli._classify_mirrors(
+        [_mirror_row()],
+        {"prod-shanghai": [package, window]},
+        {"prod-shanghai": [window]},
+    )
+    group = mirrors["prod-shanghai"]
+    assert group["lagging"] == []
+    assert [entry["notebook_id"] for entry in group["in_sync"]] == ["nb-1"]
+
+
+def test_classify_mirrors_unorderable_import_times_are_unknown():
+    """第三条判据要的是目标端自己的导入时钟（`started_at`）：缺了就排不出
+    先后，只能报 unknown，不猜。"""
+    window = _prior_import(
+        "pkg-window",
+        to_seq=20,
+        base_package_id="pkg-A",
+        created_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
+        started_at=None,
+    )
+    package = _prior_import(
+        "pkg-scoped",
+        scoped=True,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    mirrors = cli._classify_mirrors(
+        [_mirror_row()],
+        {"prod-shanghai": [window, package]},
+        {"prod-shanghai": [window]},
+    )
+    group = mirrors["prod-shanghai"]
+    assert group["lagging"] == []
+    assert group["in_sync"] == []
+    assert [entry["notebook_id"] for entry in group["unknown"]] == ["nb-1"]
 
 
 def test_classify_mirrors_scoped_snapshot_newer_than_the_head_is_ahead():
@@ -2034,10 +2117,11 @@ def test_classify_mirrors_only_done_packages_count():
     ]
 
 
-def test_classify_mirrors_falls_back_to_started_at_when_created_at_is_missing():
-    """排序口径：选「最近带过这本的包」时，有 created_at 按 created_at，缺的
-    旧行按目标端自己的 started_at——这里选中的是缺 created_at 的 pkg-late。
-    选中之后它答不上导出时间，于是判 unknown（两个时钟不能互比）。"""
+def test_classify_mirrors_picks_the_package_that_wrote_last_by_import_time():
+    """排序口径：选「最后写过这本的包」按目标端的 `started_at`（谁最后应用，
+    谁的行在上面），缺 `started_at` 的旧行才退回 `created_at`——这里选中的是
+    六月才导入的 pkg-late，尽管它连导出时间都没记。选中之后它答不上导出
+    时间，于是判 unknown（两个时钟不能互比）。"""
     early = _prior_import(
         "pkg-early",
         scoped=True,
@@ -2063,14 +2147,20 @@ def test_classify_mirrors_deleting_mirror_gets_its_own_bucket():
     """判据 5：等删除作业清理的镜像单独进 `deleting` 桶，不再进其它桶——
     这样监控可以直接拿 `len(lagging) > 0` 当报警条件。"""
     package = _prior_import(
-        "pkg-scoped", scoped=True, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc)
+        "pkg-scoped",
+        scoped=True,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
     )
     head = _prior_import(
-        "pkg-B", to_seq=20, created_at=datetime(2026, 1, 5, tzinfo=timezone.utc)
+        "pkg-B",
+        to_seq=20,
+        created_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
     )
     mirrors = cli._classify_mirrors(
         [_mirror_row(status="deleting")],
-        {"prod-shanghai": [package]},
+        {"prod-shanghai": [package, head]},
         {"prod-shanghai": [head]},
     )
     group = mirrors["prod-shanghai"]
@@ -2089,13 +2179,18 @@ def test_classify_mirrors_groups_by_sync_origin():
         notebooks=("nb-2",),
         scoped=True,
         created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
     )
     osaka_head = _prior_import(
-        "pkg-os-head", to_seq=9, created_at=datetime(2026, 1, 4, tzinfo=timezone.utc)
+        "pkg-os-head",
+        to_seq=9,
+        notebooks=("nb-2",),
+        created_at=datetime(2026, 1, 4, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 4, tzinfo=timezone.utc),
     )
     mirrors = cli._classify_mirrors(
         [_mirror_row("nb-1"), _mirror_row("nb-2", sync_origin="prod-osaka")],
-        {"prod-shanghai": [shanghai], "prod-osaka": [osaka]},
+        {"prod-shanghai": [shanghai], "prod-osaka": [osaka, osaka_head]},
         {"prod-shanghai": [shanghai], "prod-osaka": [osaka_head]},
     )
     assert sorted(mirrors) == ["prod-osaka", "prod-shanghai"]
@@ -2109,18 +2204,24 @@ def test_classify_mirrors_groups_by_sync_origin():
 
 def test_classify_mirrors_caps_detail_lines_per_bucket_in_the_human_output(capsys):
     """`status` 是巡检不是转储：每桶最多 20 行，超出打「另有 N 本」。"""
+    covered = tuple(f"nb-{index}" for index in range(25))
     head = _prior_import(
-        "pkg-head", to_seq=20, created_at=datetime(2026, 1, 5, tzinfo=timezone.utc)
+        "pkg-head",
+        to_seq=20,
+        notebooks=covered,
+        created_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
     )
     scoped = _prior_import(
         "pkg-scoped",
         scoped=True,
         created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        notebooks=tuple(f"nb-{index}" for index in range(25)),
+        started_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        notebooks=covered,
     )
     mirrors = cli._classify_mirrors(
         [_mirror_row(f"nb-{index}") for index in range(25)],
-        {"prod-shanghai": [scoped]},
+        {"prod-shanghai": [head, scoped]},
         {"prod-shanghai": [head]},
     )
     assert len(mirrors["prod-shanghai"]["lagging"]) == 25
@@ -2153,11 +2254,13 @@ def _insert_mirror(conn, notebook_id, sync_origin, *, status="draft"):
 
 
 def test_status_surveys_mirrors_against_the_chain_head(tmp_path, monkeypatch, capsys):
-    """真 ``_load_sync_status``：一个全量包 + 一个窗口 + 一个**更旧**的 scoped
-    包（导出于全量之后、窗口之前）。nb-chain 最后由窗口带过（in_sync）；
-    nb-scoped 最后一次是被那个比链头更旧的快照刷的（lagging）；nb-gone 正在
-    等删除作业（deleting 桶，不在 lagging 里）；nb-orphan 的 sync_origin 指向
-    一个从未导入过的环境（unknown）。"""
+    """真 ``_load_sync_status``：全量包 → 一个**更旧**的 scoped 包（导出于
+    01-02，但六月才导入）→ 一个窗口（导出于 01-03，当天就导入，带了
+    nb-chain/nb-scoped/nb-gone 的改动）。nb-chain 最后由窗口写下（in_sync）；
+    nb-scoped 最后落下的是那份一月快照，把窗口 01-03 已经应用的改动盖了回去
+    （lagging，head 指向被盖掉的窗口）；nb-gone 同形态但在等删除作业
+    （deleting 桶，不在 lagging 里）；nb-orphan 的 sync_origin 指向一个从未
+    导入过的环境（unknown）。"""
     settings = _settings(tmp_path, monkeypatch)
     repository = SQLiteRepository(settings)
     repository.close()
@@ -2178,9 +2281,8 @@ def test_status_surveys_mirrors_against_the_chain_head(tmp_path, monkeypatch, ca
                 package_id="pkg-scoped",
                 source_env="prod-shanghai",
                 created_at="2026-01-02T00:00:00+00:00",
-                # 导入发生在窗口**之后**（六月才引入的一个一月份的快照）：判据
-                # 只看源端导出时间，不看目标端导入先后——晚点应用一个旧快照
-                # 并不会让它变新。
+                # 一月的快照六月才导入：它落在窗口的行**上面**——这正是真落后
+                # 的唯一形态（更晚导出、更早导入的窗口被盖回去了）。
                 started_at="2026-06-01T00:00:00+00:00",
                 scoped=True,
                 notebooks=("nb-scoped", "nb-gone"),
@@ -2194,7 +2296,8 @@ def test_status_surveys_mirrors_against_the_chain_head(tmp_path, monkeypatch, ca
                 created_at="2026-01-03T00:00:00+00:00",
                 mode="incremental",
                 base_package_id="pkg-full",
-                notebooks=("nb-chain",),
+                # 这一轮这三本都有变更，所以窗口带上了它们。
+                notebooks=("nb-chain", "nb-scoped", "nb-gone"),
             )
             _insert_mirror(conn, "nb-chain", "prod-shanghai")
             _insert_mirror(conn, "nb-scoped", "prod-shanghai")
@@ -2239,8 +2342,8 @@ def test_status_surveys_mirrors_against_the_chain_head(tmp_path, monkeypatch, ca
     ) in out
     assert (
         "落后 nb-scoped（nb-scoped）：最近带过它的是 pkg-scoped"
-        "（2026-01-02T00:00:00+00:00），比链头 pkg-window"
-        "（2026-01-03T00:00:00+00:00）更旧；"
+        "（2026-01-02T00:00:00+00:00），它盖掉了更晚导出、更早导入的 pkg-window"
+        "（2026-01-03T00:00:00+00:00）；"
     ) in out
     assert "现在对它再做一次 sync export --notebook 并导入" in out
     assert "待删除 nb-gone（nb-gone）：" in out

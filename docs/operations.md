@@ -966,19 +966,24 @@ line per notebook in every bucket except "in sync" (capped at 20 lines per bucke
 derived from `sync_imports.report_json`, because a window package covers the source's whole sync
 scope and a per-notebook stamp would only ever restate the chain head. The one shape that can
 leave a single notebook behind is a `--notebook`-scoped package, which already records exactly
-which notebooks it carried. For each mirror, `status` finds the most recent `done` package of that
-`source_env` whose `report_json.notebooks` names it (ordered by the package's own `created_at`,
-falling back to this target's `started_at` for a row recorded before that field), and reads the
-verdict off it:
+which notebooks it carried. For each mirror, `status` finds the `done` package of that
+`source_env` that wrote it LAST — ordered by this target's own `started_at`, because a mirrored row
+holds whatever was applied to it last, and a package exported in January but imported in June lands
+on top of everything imported before June (a row with no `started_at` falls back to `created_at`,
+which only picks the candidate and never decides anything) — and reads the verdict off it:
 
-- **in sync** (`in_sync`) — that package participates in the chain, so the notebook is as current
-  as the chain is. This includes a notebook no later window names: a window only carries what
-  changed inside its range, so silence means it did not change.
-- **lagging** (`lagging`) — the last package to carry it was a scoped one exported EARLIER than the
-  chain head. Anything changed in that notebook between the two exports is missing here, and no
-  future window will notice, because a window only carries notebooks that changed inside its own
-  range. Re-export this notebook NOW (`sync export --notebook <id>`) — a snapshot taken today
-  cannot be older than the head — or wait for the next full package.
+- **in sync** (`in_sync`) — either that package participates in the chain (so the notebook is as
+  current as the chain is, including when no later window names it: a window only carries what
+  changed inside its range, so silence means it did not change), or it is an older scoped snapshot
+  that overwrote nothing.
+- **lagging** (`lagging`) — a scoped snapshot was applied on top of a window that had already
+  carried changes to this notebook, rolling those rows back. All three of these hold for some
+  chain-participating `done` package Q: Q names this notebook, Q was exported AFTER the scoped
+  snapshot, and Q was imported BEFORE it. No future window will repair this, because a window only
+  carries notebooks that changed inside its own range. Re-export this notebook NOW (`sync export
+  --notebook <id>`) — a snapshot taken today cannot be older than the head — or wait for the next
+  full package. For a lagging entry, `head_package_id`/`head_created_at` name Q (the window that
+  got overwritten) rather than the chain head, so you can see what was lost.
 - **ahead** (`ahead`) — a scoped package exported no earlier than the chain head carried it, so it
   cannot be missing anything the chain has applied. The next window replays over it by idempotent
   upsert. Normal, no action.
@@ -1000,10 +1005,11 @@ Two points about how this is judged. First, **by record order, never by watermar
 scoped package's `from_seq`/`to_seq` are hard-coded to 0 on export ("a subset package makes no
 claim about a sequence range") and copied into `sync_imports` verbatim, so comparing sequence
 numbers would report every scoped-covered mirror as lagging by exactly the chain head's own
-watermark and could never report anything else. The comparison is between the two packages' export
-times, and neither the lines nor the JSON carry a sequence number for this reason. Import order is
-not part of it either: applying an old snapshot late does not make it newer, so only the source's
-`package_created_at` is read, never this target's `started_at`.
+watermark and could never report anything else. Neither the lines nor the JSON carry a sequence
+number for this reason. What is compared instead is the two packages' export times (`created_at`)
+AND their import times (`started_at`) — being older is not itself a problem, being older *and*
+applied on top of something newer is. Importing a `--notebook` snapshot and then the next window is
+the ordinary daily rhythm and is never reported.
 
 Second, the baseline is deliberately narrower than the chain-head list printed above it: only a
 head that PARTICIPATES in the chain (not a `--notebook`-scoped package, and not a `done` row from
@@ -1059,13 +1065,19 @@ assumption. The cost is real — a large mirror rebuilt on every import — and 
 to schedule: `--rebuild-scale skip` hands it back, to be run off-peak with `build_scale_index.py`.
 Builds run one notebook at a time under the ordinary cross-process per-notebook claim.
 
-Two of those outcomes are refusals rather than problems, and neither raises a warning. A notebook
-the live service is already building elsewhere holds the claim, so the offline builder never gets
-it — reported as `skipped:busy` (note that the in-process `building`/`queued` states cannot detect
-this: they are empty in a fresh CLI process, and the cross-process claim is the real answer).
-A notebook the builder refuses outright — not live for the write-admission check, or an
-unavailable indexing pipeline — is reported as `skipped:refused_by_builder`; running the same
-command by hand would be refused too.
+Two outcomes are refusals rather than problems. A notebook whose build claim is held elsewhere is
+reported as `skipped:busy` (the in-process `building`/`queued` states cannot detect this: they are
+empty in a fresh CLI process, and the cross-process claim is the real answer). **That one always
+carries a warning naming the notebook and the `build_scale_index.py build --notebook <id> --full`
+command to run once the holder finishes** — do not assume the holder does the work this pass owed
+the notebook. The same claim is taken by `build_scale_index.py export` (which only copies the
+artifacts out) and by an online delta fold (which appends and does not replace already-indexed
+content); either of those overlapping an import would silently drop the full rebuild, and
+re-importing the package does not bring it back, because the second import is `already_applied`
+and rebuilds nothing. A notebook the builder refuses outright — not live for the write-admission
+check, or an unavailable indexing pipeline — is reported as `skipped:refused_by_builder` and
+carries no warning: nobody can build it in that state, and running the same command by hand would
+be refused too.
 
 Every outcome is a receipt, never an exit code: the import is already committed and closed when
 this starts, so **a rebuild failure cannot change the import's result** — `sync import` still exits

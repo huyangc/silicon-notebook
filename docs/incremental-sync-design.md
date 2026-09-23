@@ -258,7 +258,10 @@ users 不同步但导入时可能**创建**：见 §4。
   `verify_migration_ledger`，与 `scale_build_cli.main` 同序——checkout 与线上库差一个迁移时，
   建出来的索引是静默错误的，而它会原子换名顶掉一份健康索引。构建器在动手前拒绝（笔记本对
   `require_write_admission` 不算 live、或 indexing pipeline 不可用）记 `skipped:refused_by_builder`，
-  跨进程 claim 被别人（通常是在线服务自己的调度）持有记 `skipped:busy`，两者都不发警告。
+  不发警告（这本现在谁也建不了）。跨进程 claim 被别人持有记 `skipped:busy`，**必须附一条可执行
+  的警告**：持有方不一定在做全量重建（`run_export` 只拷工件、在线 delta fold 只追加，两者用的
+  是同一把 claim），而重导同一个包是 `already_applied` 不会再建，所以警告点名该本与等对方结束
+  后手动跑的 `build_scale_index.py build --notebook <id> --full`。
   SQLite 没有跨进程 claim，离线构建器不可用，记成 `skipped:sqlite_backend`。
 
 ## 7. 源端变更捕获
@@ -1322,25 +1325,36 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
   `done` 且 `report_json.notebooks` 含该 id** 的包 P（按包自己的 `created_at` 排序，早于该
   字段的旧行退回目标端的 `started_at`）；找不到就是 `unknown`（导入早于本记账，或
   `report_json` 不可读；三种成因共用 `unknown`，文案要说全——绝不把「答不上来」当成
-  「没带过」）。找到之后：P 入链（`scoped` 为假，或旧行按形态判定参与链）⇒ 之后的窗口覆盖
-  整个源端 scope，这本就跟链一样新（**包括之后再没有窗口点名它**——那只说明它没变过），
-  基准链头唯一时 `in_sync`，不唯一（§8「已知边界」）时 `ambiguous`；P 是 scoped 包 ⇒ 没有
-  基准链头是 `no_chain`（只做过 scoped 导入，从未导入过覆盖全 scope 的包），多于一条是
-  `ambiguous`，唯一一条记为 H 时按**导出时间**比：两边任一缺 `package_created_at` 是
-  `unknown`，`P.created_at >= H.created_at` 是 `ahead`（快照不早于链已覆盖的范围，下一次窗口
-  按幂等 upsert 覆盖，无需动作），`P.created_at < H.created_at` 是 `lagging`。
-  `status='deleting'` 的镜像**单独进 `deleting` 桶**，不再进其它桶，这样监控可以直接拿
-  `len(lagging) > 0` 当报警条件。
+  「没带过」）。**P 按目标端的 `started_at` 选**，不按导出时间：镜像行里是什么，取决于谁
+  最后**应用**过它；一月导出、六月才导入的包压在六月之前应用的一切之上。缺 `started_at`
+  的旧行才退回 `created_at`（这一步只用来挑候选，不参与任何判定）。找到之后：
+  P 入链（`scoped` 为假，或旧行按形态判定参与链）⇒ 它是被窗口写下的，而窗口覆盖整个源端
+  scope，这本就跟链一样新（**包括之后再没有窗口点名它**——那只说明它没变过），基准链头唯一时
+  `in_sync`，不唯一（§8「已知边界」）时 `ambiguous`；P 是 scoped 包 ⇒ 没有基准链头是
+  `no_chain`（只做过 scoped 导入，从未导入过覆盖全 scope 的包），多于一条是 `ambiguous`，
+  唯一一条记为 H 时：**存在被 P 盖掉的窗口 Q** 就是 `lagging`，否则
+  `P.created_at >= H.created_at` 是 `ahead`（快照不早于链已覆盖的范围，下一次窗口按幂等
+  upsert 覆盖，无需动作），`P.created_at < H.created_at` 也是 `in_sync`（更旧但什么都没盖掉：
+  要么链在它之后又覆盖过这本，要么它压根没变过）。`status='deleting'` 的镜像**单独进
+  `deleting` 桶**，不再进其它桶，这样监控可以直接拿 `len(lagging) > 0` 当报警条件。
+
+  **`lagging` 的判据是「盖掉了什么」，不是「比链头旧」**（codex #791 r2 P2）。旧一点本身完全
+  正常：全量 → `sync export --notebook A`（t1）导入 → 之后一个只带 B 的窗口（t2 > t1）导入，
+  A 一点都不旧——它若在 (t1, t2] 有改动，窗口就会带上 A；按「比链头旧」判会把这种日常节奏
+  报成故障。精确判据是：存在参与链的 done 包 Q，同时满足 `A ∈ Q.notebooks`（Q 真的带过这本
+  的改动）、`Q.created_at > P.created_at`（那些改动晚于这份快照）、`Q.started_at < P.started_at`
+  （Q 先于 P 被应用，于是 P 的旧行盖在 Q 的新行上面）。三者缺一都不算：Q 在 P 之后导入 ⇒ Q 的
+  行在上面，没丢；Q 没带这本 ⇒ 那段时间它没变；Q 比 P 的快照还旧 ⇒ P 更新。`started_at` 任一
+  缺失且不存在已被证实的 Q ⇒ `unknown`，不猜。条目里的 `head_package_id`/`head_created_at`
+  在 `lagging` 时填那个被盖掉的 Q（运维要知道是哪个窗口被盖了），其余分类填基准链头 H。
+  处置是**现在**对它再做一次 `sync export --notebook` 并导入（今天取的快照必然不早于链头），
+  或者等下一次全量包。
 
   **按记录顺序判，不按水位高度**（#788 r2 的同一条规矩）。这里不仅是「更好的规则」，而是
   唯一可能的规则：`export.py` 对 scoped 包硬写 `from_seq, to_seq, base_package_id = 0, 0, ""`
   （「子集包不对序列区间做任何声明」），`import_.py` 把 manifest 的数字原样写进
   `sync_imports`，所以库里**任何 scoped 行的 `to_seq` 恒为 0**。比高低的话，每一本被 scoped
-  包碰过的镜像都会恒定「落后一个链头水位」，`ahead` 分支永远走不到。`lagging` 的实质是：这本
-  最后一次是被一个比链头更旧的快照刷的，两次导出之间对它的改动不会再有任何窗口带过来（窗口
-  只装自己范围内有变更的本），所以处置是**现在**对它再做一次 `sync export --notebook` 并导入
-  （今天取的快照必然不早于链头），或者等下一次全量包。这跟导入先后无关：晚一点应用一个旧
-  快照并不会让它变新，所以判据只读源端的 `package_created_at`，不读目标端的 `started_at`。
+  包碰过的镜像都会恒定「落后一个链头水位」，`ahead` 分支永远走不到。
 
   **基准链头比 `sync status` 打印的链头集合更窄**：只取 `participates_in_chain` 为真的那些。
   `_chain_heads_for` 回答的是「下一个包的 `base_package_id` 可以指向谁」，它会把 scoped 包

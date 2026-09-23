@@ -775,30 +775,34 @@ _MIRROR_MAX_DETAIL_LINES = 20
 
 
 def _mirror_package_sort_key(row: _PriorImport) -> tuple[datetime, int, str]:
-    """Ordering for "which done package most recently carried this
-    notebook" -- ``_chain_candidate_sort_key``'s key, with ``started_at`` as
-    the fallback for a row whose package recorded no ``created_at``.
+    """Ordering for "which done package wrote this notebook LAST" -- by
+    ``started_at``, this TARGET's own import clock, falling back to
+    ``created_at`` for a row that has no import time recorded.
 
-    ``_chain_candidate_sort_key`` floors an undated row at ``datetime.min``
-    on purpose: for the CHAIN rules an unorderable row must never win a
-    comparison it cannot actually answer. This question is different and
-    weaker -- it only picks WHICH row to then ask the question of, and a
-    pre-``package_created_at`` row still has this target's own
-    ``sync_imports.started_at``, which orders it well enough for that. A row
-    with neither falls back to the same epoch floor.
+    **Import order, not export order**, because that is what the question
+    actually is: a mirrored row holds whatever was written to it last, and
+    what was written last is what was APPLIED last. A package exported in
+    January and imported in June lands on top of everything imported before
+    June, however old its contents are. Ordering these candidates by export
+    time instead would pick the newest-exported package as "the one that
+    wrote this row", which is exactly wrong in the one case that matters --
+    an old scoped snapshot imported after the window it rolls back would
+    never be looked at, and the loss it caused could not be reported at all.
 
-    **This deliberately mixes two clocks**: ``created_at`` is the SOURCE's
-    export time, ``started_at`` this TARGET's import time, and they can
-    disagree by however long a package spent in transit. That is tolerable
-    here and only here, because the fallback merely picks a candidate -- the
-    verdict below never COMPARES the two: a package that reached this
-    function through the ``started_at`` fallback has no ``created_at``, and
-    the scoped branch answers ``unknown`` for exactly that rather than
+    ``_chain_candidate_sort_key`` is not reused here for that reason (it
+    orders by ``created_at``: the CHAIN rules are about export order, and
+    rightly so -- see ``_PriorImport.downstream_of``). Its tail is, though,
+    so ties break identically and this is a total order regardless of the
+    row order the caller built ``prior`` from.
+
+    **The fallback mixes two clocks**, and that is tolerable here and only
+    here: it merely picks WHICH row to ask the question of, never answers
+    it. A row that got here through the fallback has no ``started_at``, and
+    ``_overwritten_window`` answers ``unknown`` for exactly that rather than
     comparing a source timestamp against a target one."""
-    if row.created_at is not None:
-        return _chain_candidate_sort_key(row)
-    moment = row.started_at or datetime.min.replace(tzinfo=timezone.utc)
-    return (moment, row.to_seq, row.package_id)
+    if row.started_at is not None:
+        return (row.started_at, row.to_seq, row.package_id)
+    return _chain_candidate_sort_key(row)
 
 
 def _moment_text(value: datetime | None) -> str | None:
@@ -808,8 +812,9 @@ def _moment_text(value: datetime | None) -> str | None:
 def _covering_package(
     notebook_id: str, prior: Sequence[_PriorImport]
 ) -> _PriorImport | None:
-    """The most recent ``done`` package of this source environment that
-    RECORDED carrying ``notebook_id``, or ``None`` when no row can answer.
+    """The ``done`` package of this source environment that LAST wrote
+    ``notebook_id`` (see ``_mirror_package_sort_key``: last applied, not
+    last exported), or ``None`` when no row can answer.
 
     ``notebooks is None`` means the row predates this bookkeeping or its
     ``report_json`` was unreadable (see :attr:`_PriorImport.notebooks`) --
@@ -854,29 +859,16 @@ def _classify_one_mirror(
     exactly the chain head's own watermark, and could never report anything
     else.
 
-    So the question asked of a scoped package is "is this notebook's content
-    older than what the chain has covered?", answered with the two packages'
-    own export times:
-
-    - ``P.created_at >= H.created_at`` -- the scoped snapshot was taken no
-      earlier than the chain head, so it cannot be missing anything the chain
-      has applied. The next window replays over it by idempotent upsert
-      anyway. Normal, no action.
-    - ``P.created_at < H.created_at`` -- this notebook was last written from
-      a snapshot OLDER than the chain head, so any change made to it between
-      the two exports is missing here, and no future window will notice: a
-      window only carries the notebooks that changed INSIDE its own range.
-      Re-export this notebook NOW (``sync export --notebook``) -- taken
-      today, the new snapshot cannot be older than the head -- or wait for
-      the next full package.
-
-    Note this is not decided by IMPORT order: importing the scoped package
-    after the window does not make its contents newer. Both timestamps must
-    be readable; if either is missing the honest answer is ``unknown``, not a
-    guess (an undated row reaches here only through
-    ``_mirror_package_sort_key``'s ``started_at`` fallback, which is this
-    target's clock, not the source's -- comparing the two would be comparing
-    unlike things).
+    So the question asked of a scoped package is not "is this snapshot older
+    than the chain head" -- being older is perfectly fine on its own -- but
+    "did this snapshot OVERWRITE a change the chain had already applied?"
+    (codex #791 r2 P2). The two differ in the ordinary daily rhythm: a full
+    import, then ``sync export --notebook A`` taken at t1 and imported, then
+    a window exported at t2 > t1 that carries only B. A is completely
+    current -- had A changed in (t1, t2] the window would have carried it,
+    and that window is applied AFTER the scoped package anyway -- yet a
+    "snapshot older than the head" rule reports it as lagging and demands a
+    re-export. See ``_overwritten_window`` for the precise test.
     """
     entry = {
         "notebook_id": str(row["id"]),
@@ -942,13 +934,87 @@ def _mirror_bucket(
         # package participates and is done, so either it or whatever moved
         # past it is one) but is answered rather than assumed away.
         return "in_sync" if head is not None else "ambiguous"
-    if len(participating) > 1:
-        return "ambiguous"
-    if head is None:
+    if not participating:
         return "no_chain"
+    if head is None:
+        return "ambiguous"
     if package.created_at is None or head.created_at is None:
         return "unknown"
-    return "ahead" if package.created_at >= head.created_at else "lagging"
+    unorderable, overwritten = _overwritten_window(
+        entry["notebook_id"], package, prior
+    )
+    if unorderable:
+        return "unknown"
+    if overwritten is not None:
+        # Name the WINDOW that got overwritten rather than the chain head:
+        # that is the package whose version of this notebook was rolled
+        # back, and therefore what an operator needs to see.
+        entry["head_package_id"] = overwritten.package_id
+        entry["head_created_at"] = _moment_text(overwritten.created_at)
+        return "lagging"
+    if package.created_at >= head.created_at:
+        return "ahead"
+    # An older snapshot that overwrote nothing: either the chain covered
+    # this notebook again after it, or it has not changed since. Current
+    # either way.
+    return "in_sync"
+
+
+def _overwritten_window(
+    notebook_id: str, package: _PriorImport, prior: Sequence[_PriorImport]
+) -> tuple[bool, _PriorImport | None]:
+    """Whether the scoped ``package`` rolled this notebook back over a
+    window's changes, as ``(unorderable, window)``.
+
+    A mirrored row is whatever was written to it LAST, so a scoped package
+    only causes a loss when all three hold for some chain-participating
+    ``done`` package Q (codex #791 r2 P2):
+
+    - ``notebook_id in Q.notebooks`` -- Q actually carried changes to this
+      notebook. A window only carries what changed inside its own range, so
+      a window that does not name it says this notebook did not change then,
+      and there is nothing the scoped snapshot could have rolled back.
+    - ``Q.created_at > package.created_at`` -- those changes are NEWER than
+      the scoped snapshot. Anything older is already in the snapshot.
+    - ``Q.started_at < package.started_at`` -- and Q was applied to this
+      target BEFORE the scoped package, so the older snapshot's rows landed
+      on top of Q's. Imported the other way round, Q's rows are the ones on
+      top and nothing was lost -- which is the ordinary daily rhythm and
+      must not be reported.
+
+    Returns ``(False, Q)`` for the newest such Q (deterministic via
+    ``_chain_candidate_sort_key``; the most recent lost update is the one
+    worth naming), ``(False, None)`` when there is none, and
+    ``(True, None)`` when the question cannot be ANSWERED -- the third test
+    is the only one needing ``started_at``, this target's own import clock,
+    and a row that does not record it cannot be ordered against another.
+    A Q that definitively passes all three still wins over an unorderable
+    one: that is proof, not a guess."""
+    later = [
+        row
+        for row in prior
+        if row.status == _STATUS_DONE
+        and row.participates_in_chain
+        and row.notebooks is not None
+        and notebook_id in row.notebooks
+        and row.created_at is not None
+        and package.created_at is not None
+        and row.created_at > package.created_at
+    ]
+    if not later:
+        return (False, None)
+    if package.started_at is None:
+        return (True, None)
+    overwritten = [
+        row
+        for row in later
+        if row.started_at is not None and row.started_at < package.started_at
+    ]
+    if overwritten:
+        return (False, max(overwritten, key=_chain_candidate_sort_key))
+    if any(row.started_at is None for row in later):
+        return (True, None)
+    return (False, None)
 
 
 def _classify_mirrors(
@@ -1282,8 +1348,9 @@ _MIRROR_BUCKET_LABELS = {
 # and so `_mirror_entry_line` below stays a formatter.
 _MIRROR_BUCKET_ADVICE = {
     "lagging": (
-        "这本最后一次是被一个比链头更旧的快照刷的，两次导出之间对它的改动不会再有窗口带过来"
-        "（窗口只装自己范围内有变更的本）；现在对它再做一次 sync export --notebook 并导入"
+        "这本最后落下的是一份更旧的快照，把那个窗口已经应用过的改动盖回去了，"
+        "而后续窗口只装自己范围内有变更的本、不会再把它补回来；"
+        "现在对它再做一次 sync export --notebook 并导入"
         "（今天取的快照必然不早于链头），或者等下一次全量包"
     ),
     "ahead": "快照不早于链头覆盖的范围，下一次窗口会按幂等 upsert 覆盖，无需动作",
@@ -1306,7 +1373,9 @@ _MIRROR_BUCKET_ADVICE = {
 
 def _mirror_package_text(entry: Mapping[str, Any], key: str) -> str:
     """``<package_id>（<created_at>）``, or a named gap. ``key`` is
-    ``"applied"`` or ``"head"``."""
+    ``"applied"`` or ``"head"`` -- for a ``lagging`` entry the ``head``
+    pair names the OVERWRITTEN window rather than the chain head (see
+    ``_overwritten_window``), which is what that line says out loud."""
     package_id = entry[f"{key}_package_id"]
     if not package_id:
         return "（无）"
@@ -1324,7 +1393,7 @@ def _mirror_entry_line(bucket: str, entry: Mapping[str, Any]) -> str:
     applied = _mirror_package_text(entry, "applied")
     head = _mirror_package_text(entry, "head")
     if bucket == "lagging":
-        detail = f"最近带过它的是 {applied}，比链头 {head}更旧；"
+        detail = f"最近带过它的是 {applied}，它盖掉了更晚导出、更早导入的 {head}；"
     elif bucket == "ahead":
         detail = f"最近带过它的是 {applied}，不早于链头 {head}；"
     elif entry["applied_package_id"]:
