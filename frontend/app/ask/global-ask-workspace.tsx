@@ -62,12 +62,14 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
   const ask = useGlobalAsk({ syncUrl: !embedded, active, uiMode });
   // 宿主要求打开的会话(铃铛里的全局条目)。等首次载入结束再开:载入与打开会话各自
   // 推进 owner,载入中途打开会把会话列表那次读取作废。每个 nonce 只处理一次;已经
-  // 停在那个会话上就不重开——重开会清空输入框里的草稿,而用户要的只是「看到它」。
+  // **成功**停在那个会话上就不重开——重开会清空输入框里的草稿,而用户要的只是「看到
+  // 它」。上次打开失败(`openFailed`:id 已记下、正文没读到)则照常重开,否则再点多少次
+  // 都只是一个空会话加一个禁用的输入框(codex #785 R1)。
   const handledRequest = useRef(0);
   useEffect(() => {
     if (!requestedConversation || ask.loading || handledRequest.current === requestedConversation.nonce) return;
     handledRequest.current = requestedConversation.nonce;
-    if (requestedConversation.conversationId !== ask.conversationId) void ask.openConversation(requestedConversation.conversationId);
+    if (requestedConversation.conversationId !== ask.conversationId || ask.openFailed) void ask.openConversation(requestedConversation.conversationId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestedConversation?.nonce, ask.loading]);
   const [historyOpen, setHistoryOpen] = useState(false);

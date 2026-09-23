@@ -611,6 +611,35 @@ def test_pending_actions_running_global_ask_needs_every_participant_readable(rep
     assert ids() == []
 
 
+def test_pending_actions_running_global_ask_gates_on_the_whole_first_page(repo):
+    """点击打开的是会话第一页,那次读取要求这一页**每一轮**的参与库都可读(codex
+    #785 R1):早先一轮用过、后来失权的库,即使在途这一轮没用它,也让条目出铃铛;
+    只有超出第一页的更早轮次不影响。"""
+    from app.models.global_ask import GLOBAL_ASK_PAGE_SIZE
+
+    own = _seed_user_nb(repo, "user-member", "own")
+    shared = _seed_user_nb(repo, "user-owner", "shared")
+    repo.add_member(shared, "user-member")
+    _insert_global_job(repo, "gask-early", "user-member", [shared], status="done",
+                       conversation_id="gconv-1", created_at="2026-07-07T01:00:00+00:00")
+    _insert_global_job(repo, "gask-now", "user-member", [own],
+                       conversation_id="gconv-1", created_at="2026-07-07T02:00:00+00:00")
+
+    def ids():
+        return [it["job_id"] for it in _asks(repo, "user-member")]
+
+    assert ids() == ["gask-now"]
+    repo.remove_member(shared, "user-member")
+    assert ids() == []
+
+    # 把那条失权的早先轮次挤出第一页:会话读取不再看它,条目回来。
+    for index in range(GLOBAL_ASK_PAGE_SIZE - 1):
+        _insert_global_job(repo, f"gask-fill-{index:03d}", "user-member", [own],
+                           status="done", conversation_id="gconv-1",
+                           created_at=f"2026-07-07T01:{index // 60 + 10:02d}:{index % 60:02d}+00:00")
+    assert ids() == ["gask-now"]
+
+
 def test_pending_actions_running_asks_merge_both_arms_newest_first_under_one_cap(repo):
     """两臂归并成一份:按绝对时刻最新优先,上限是整份快照的 RUNNING_ASK_ROWS,
     不是每臂各一份。笔记本内那一臂写成 +08:00 的时刻按绝对时刻参与比较。"""

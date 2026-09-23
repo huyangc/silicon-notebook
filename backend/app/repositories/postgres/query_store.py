@@ -12,6 +12,7 @@ from app.core.activity_time import (
 )
 from app.core.config import Settings
 from app.models.admin import ADMIN_QUESTIONS_DEFAULT_LIMIT
+from app.models.global_ask import GLOBAL_ASK_PAGE_SIZE
 from app.models.notebooks import NotebookAnalytics
 from app.models.ask import (
     SEARCH_HIT_CAP,
@@ -1701,7 +1702,8 @@ class QueryStore:
 
     def _running_global_ask_items(self, db: object, user_id: str) -> list[tuple[object, dict]]:
         """SQLite 侧 ``_running_global_ask_items`` 的孪生实现——精确在途状态、属主
-        隔离、参与库集合整体可读且存活、排序与上限逐条对应,理由见那一份 docstring。
+        隔离、会话第一页全部参与库可读且存活、排序与上限逐条对应,理由见那一份
+        docstring;那一页的取法与 ``GlobalAskStore.jobs`` 在本后端的写法逐字一致。
 
         方言差异只在写法:参与库用 ``jsonb_array_elements_text`` 展开(与
         `/admin/users/{id}/activity` 全局臂同形);``global_ask_jobs.created_at`` 在
@@ -1712,16 +1714,20 @@ class QueryStore:
         rows = db.execute(
             "SELECT id, conversation_id, status, asked_at, created_at, "
             "COALESCE(payload_json::jsonb->>'question','') AS question "
-            f"FROM global_ask_jobs WHERE user_id = %s AND status IN ({placeholders}) "
-            "AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements_text("
-            "COALESCE(payload_json::jsonb->'resolved_notebook_ids','[]'::jsonb)) p "
-            "WHERE NOT EXISTS(SELECT 1 FROM notebooks nb WHERE nb.id=p.value AND "
+            f"FROM global_ask_jobs g WHERE user_id = %s AND status IN ({placeholders}) "
+            "AND NOT EXISTS(SELECT 1 FROM global_ask_jobs page, jsonb_array_elements_text("
+            "COALESCE(page.payload_json::jsonb->'resolved_notebook_ids','[]'::jsonb)) p "
+            "WHERE page.id IN (SELECT t.id FROM global_ask_jobs t "
+            "WHERE t.conversation_id = g.conversation_id AND t.user_id = g.user_id "
+            "ORDER BY t.created_at DESC, t.id DESC LIMIT %s) "
+            "AND NOT EXISTS(SELECT 1 FROM notebooks nb WHERE nb.id=p.value AND "
             + access_sql.read_access_clause()
             + f" AND nb.{access_sql.NOTEBOOK_LIVE_SQL})) "
             "ORDER BY created_at DESC, id DESC LIMIT %s",
             (
                 user_id,
                 *RUNNING_ASK_STATUSES,
+                GLOBAL_ASK_PAGE_SIZE,
                 *access_sql.read_access_params(user_id),
                 RUNNING_ASK_ROWS,
             ),

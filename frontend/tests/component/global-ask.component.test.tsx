@@ -170,6 +170,23 @@ test("a running global ask picked in the bell opens the window on that conversat
   await waitFor(() => expect(api.detail).toHaveBeenLastCalledWith("conv-c"));
 });
 
+test("a bell click retries a conversation whose last load failed", async () => {
+  installDialogMethods();
+  api.list.mockResolvedValue([conversation("conv-b")]);
+  api.detail.mockRejectedValueOnce(new Error("network down"));
+  render(<BellLauncher />);
+
+  fireEvent.click(screen.getByRole("button", { name: "铃铛:打开 conv-b" }));
+  await waitFor(() => expect(api.detail).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入问题" })).toBeDisabled());
+
+  // 同一条再点一次:上次没读到正文,这次必须真的再读(codex #785 R1),而不是
+  // 因为「已经停在这个会话上」就什么都不做。
+  fireEvent.click(screen.getByRole("button", { name: "铃铛:打开 conv-b" }));
+  await waitFor(() => expect(api.detail).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入问题" })).toBeEnabled());
+});
+
 test("root overlays arbitrate chat visibility and an actor change clears its local state", async () => {
   installDialogMethods();
   const view = render(<Launcher />);
