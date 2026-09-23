@@ -1375,7 +1375,7 @@ sync prune-log [--keep-days N] [--dry-run] [--json]
 | PR-3a | 源端 `sync_change_log` schema 与 46 张表的触发器（`app.migration.sync.capture`，SQLite v84 / PostgreSQL 0064）；两张无主键表补复合键，导出/导入改走 keyed upsert；`sync capture enable/disable/status` 开关与导出水位记账 | 已合入 #783 |
 | PR-3b | 按日志读的增量导出（含 PostgreSQL 快照补偿窗口，SQLite v85 / PostgreSQL 0065）、日志压缩（按 (table,key) 折终态，`kg_epoch` 行不折叠）、产出 `deletes.jsonl`、包格式 v2、`sync export --full`、`sync prune-log` 保留策略；导入端只做最小兼容（接受 v2 全量包，拒绝增量包；`deletes.jsonl` 的重放留给 PR-3c）；`kg_epoch` 整体替换的折叠优化延后（见 §11） | 已合入 #784 |
 | PR-3c | 增量导入（§8「导入相位」）：包分类与链头校验（`base_package_id` 必须等于同源链头，两种出路）、增量包的对账删除跳过、按键精确重放 `deletes.jsonl`（子表先于父表、目标端归属校验、孤儿 no-op）、文件相位对增量改为逐文件合并（不整目录替换）、`deleted_notebooks` 触发笔记本删除传播（CAS `status='deleting'` + 同事务建 `notebook_delete_jobs` 作业行，走既有的删除作业消费路径）；`sync status` 展示每个 source_env 的链头与等待删除作业的镜像数 | 已合入 #788 |
-| PR-4 | `sync status` 镜像巡检（不落列，按 `sync_imports.report_json` 的记录顺序推导，§9）；`sync import --rebuild-scale auto` 导入后按 scale 运行时自己的 `status()` 口径重建索引（PostgreSQL，失败只记 warning）；前端首次消费 `sync_origin`：`workspaceCapabilities` 按围栏表逐格收起写入口、来源面板标注、列表小标、409 兜底（§5）；runbook 扩到 operations 「按天导出的操作节奏」 | 进行中 |
+| PR-4 | `sync status` 镜像巡检（不落列，按 `sync_imports.report_json` 的记录顺序推导，§9）；`sync import --rebuild-scale auto` 导入后按 scale 运行时自己的 `status()` 口径重建索引（PostgreSQL，失败只记 warning）；前端首次消费 `sync_origin`：`workspaceCapabilities` 按围栏表逐格收起写入口、来源面板标注、列表小标、409 兜底（§5）；runbook 扩到 operations 「按天导出的操作节奏」 | 已合入 #791 |
 
 ## 11. 未决问题
 
