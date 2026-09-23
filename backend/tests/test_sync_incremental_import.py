@@ -1965,3 +1965,187 @@ def test_the_merge_writes_a_heartbeat_while_it_copies(baseline):
     assert seen and all(seen)
     # ...and it leaves nothing behind.
     assert not (staging / window.package_id).exists()
+
+
+# ------------------------------ codex #788 r2: chain across a capture reset
+
+
+def test_a_window_on_a_baseline_taken_after_a_capture_reset_imports(baseline):
+    """``sync capture disable`` + ``enable`` empties the change log and the
+    watermark, so the next full baseline legitimately exports at ``to_seq``
+    0 -- even though it is the NEWEST thing this source has produced. Judging
+    "downstream" by watermark height made every older package look newer than
+    it, and every window built on it was refused forever (codex #788 r2 P1).
+
+    变异验证: 把 ``downstream_of`` 的判据改回比较 ``to_seq`` 大小, 本条报红。"""
+    repo = baseline["source"]["repo"]
+    # A real window first, so the chain has height to lose.
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET name='alpha v2' WHERE id=?", (baseline["alpha"],)
+        )
+    first = _window(baseline)
+    assert first.to_seq > 0
+    assert _import(baseline["target"], first.package_dir).error == ""
+
+    # The reset: the gate closes, the log and watermark are cleared, the gate
+    # re-opens. The next export is a FULL baseline over an empty log.
+    _close_capture(repo)
+    with repo._write() as db:
+        db.execute("DELETE FROM sync_change_log")
+        db.execute("DELETE FROM sync_export_state")
+    _enable_capture(repo)
+    rebased = _export(baseline["source"], baseline["out"] / "after-reset")
+    assert rebased.mode == MODE_FULL
+    assert rebased.to_seq == 0 < first.to_seq
+    assert _import(baseline["target"], rebased.package_dir).error == ""
+
+    # ...and a window on THAT baseline has to import.
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET name='alpha v3' WHERE id=?", (baseline["alpha"],)
+        )
+    following = _export(baseline["source"], baseline["out"] / "after-reset")
+    assert following.mode == MODE_INCREMENTAL
+    assert following.base_package_id == rebased.package_id
+
+    report = _import(baseline["target"], following.package_dir)
+
+    assert report.error == ""
+    assert _one(
+        baseline["target"]["repo"], "SELECT name FROM notebooks WHERE id=?",
+        (baseline["alpha"],),
+    )["name"] == "alpha v3"
+
+
+def test_the_exporter_says_whether_a_package_was_scoped(baseline):
+    """The importer cannot infer it: a ``--notebook`` package and a first
+    unscoped baseline over an empty log are otherwise identical on the wire.
+    So the manifest carries it, and the import report records it."""
+    scoped = _export(
+        baseline["source"], baseline["out"] / "scoped",
+        notebook_ids=[baseline["beta"]],
+    )
+    assert _manifest(scoped.package_dir)["scoped"] is True
+    assert _manifest(baseline["full"].package_dir)["scoped"] is False
+
+    report = _import(baseline["target"], scoped.package_dir)
+
+    assert report.error == ""
+    assert report.scoped is True
+    stored = json.loads(
+        _one(
+            baseline["target"]["repo"],
+            "SELECT report_json FROM sync_imports WHERE package_id=?",
+            (scoped.package_id,),
+        )["report_json"]
+    )
+    assert stored["scoped"] is True
+
+
+# ---------------------------- codex #788 r2: re-importing a finished package
+
+
+def test_reimporting_a_done_window_whose_parent_table_is_gone_is_a_no_op(
+    baseline
+):
+    """A window that attributed its PARENT rows through the target cannot be
+    re-verified that way once a LATER window has deleted the parent. Re-running
+    a finished package must short-circuit as already-applied, not raise: it is
+    a no-op, and the one answer a no-op cannot give is "error" (codex #788 r2
+    P2).
+
+    变异验证: 把 ``_preflight`` 的 done 读回移到 ``_verify_row_scopes`` 之后
+    (或去掉 ``target_resolution``), 本条报红。"""
+    repo = baseline["source"]["repo"]
+    table_id = _one(
+        repo, "SELECT id FROM knowhow_tables WHERE notebook_id=?",
+        (baseline["alpha"],),
+    )["id"]
+    # Window 1: a new row under a knowhow table the window does NOT carry, so
+    # its scope is attributed through the target.
+    columns = repo.get_knowhow_table(table_id)["columns"]
+    row_id = repo.add_knowhow_row(
+        table_id, {column["id"]: "second value" for column in columns},
+        actor="user-local",
+    )
+    first = _window(baseline)
+    assert table_id not in {
+        str(row["id"]) for row in _rows(first.package_dir, "knowhow_tables")
+    }
+    assert _import(baseline["target"], first.package_dir).error == ""
+    assert _count(
+        baseline["target"]["repo"],
+        "SELECT COUNT(*) FROM knowhow_rows WHERE id=?", (row_id,),
+    ) == 1
+
+    # Window 2 deletes the whole table, taking the parent with it.
+    with repo._write() as db:
+        db.execute("DELETE FROM knowhow_tables WHERE id=?", (table_id,))
+    second = _window(baseline)
+    assert _import(baseline["target"], second.package_dir).error == ""
+    assert _count(
+        baseline["target"]["repo"],
+        "SELECT COUNT(*) FROM knowhow_tables WHERE id=?", (table_id,),
+    ) == 0
+
+    # Re-offering window 1 is a no-op, not a failure.
+    report = _import(baseline["target"], first.package_dir)
+
+    assert report.error == ""
+    assert report.already_applied
+    # ...and it did not resurrect anything window 2 removed.
+    assert _count(
+        baseline["target"]["repo"],
+        "SELECT COUNT(*) FROM knowhow_tables WHERE id=?", (table_id,),
+    ) == 0
+
+
+def test_a_window_is_refused_once_a_post_reset_baseline_supersedes_its_base(
+    baseline
+):
+    """Where the ``scoped`` field actually earns its keep. Two baselines a
+    capture reset apart BOTH export at ``to_seq`` 0 with no base, so the old
+    shape test ("a base of its own, or a watermark above zero") reads neither
+    as a chain participant -- and a window on the OLDER one sails through,
+    rolling every notebook back past the newer baseline. The exporter's own
+    word for "this was a ``--notebook`` one-off" is what separates the two
+    shapes the sequence numbers cannot (codex #788 r2 P1).
+
+    变异验证: 去掉 ``participates_in_chain`` 的 ``scoped`` 分支 (退回形状判据),
+    本条报红 -- 窗口被接受, alpha 被回滚。"""
+    repo = baseline["source"]["repo"]
+    older = baseline["full"]
+    assert older.to_seq == 0 and not _manifest(older.package_dir)["scoped"]
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET name='alpha v2' WHERE id=?", (baseline["alpha"],)
+        )
+    window = _window(baseline)
+    assert window.base_package_id == older.package_id
+
+    # A capture reset, then a NEW baseline -- also to_seq 0, also unscoped.
+    _close_capture(repo)
+    with repo._write() as db:
+        db.execute("DELETE FROM sync_change_log")
+        db.execute("DELETE FROM sync_export_state")
+        db.execute(
+            "UPDATE notebooks SET name='alpha v9' WHERE id=?", (baseline["alpha"],)
+        )
+    _enable_capture(repo)
+    newer = _export(baseline["source"], baseline["out"] / "after-reset")
+    assert newer.mode == MODE_FULL and newer.to_seq == 0
+    assert _import(baseline["target"], newer.package_dir).error == ""
+    mirror = baseline["target"]["repo"]
+    assert _one(
+        mirror, "SELECT name FROM notebooks WHERE id=?", (baseline["alpha"],)
+    )["name"] == "alpha v9"
+
+    # The window predates that baseline. Applying it now would undo it.
+    with pytest.raises(SyncImportError) as failure:
+        _import(baseline["target"], window.package_dir)
+
+    assert newer.package_id in str(failure.value)
+    assert _one(
+        mirror, "SELECT name FROM notebooks WHERE id=?", (baseline["alpha"],)
+    )["name"] == "alpha v9"
