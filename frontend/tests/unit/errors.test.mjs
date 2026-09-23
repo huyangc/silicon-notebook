@@ -7,6 +7,8 @@ import {
   humanizeHttpError,
   httpErrorStatus,
   logDiagnostic,
+  parseMirroredFailure,
+  parseTrustedStructuredFailure,
   pluginEngineFailureMessage,
   readHttpError,
   throwHumanizedHttpError,
@@ -377,6 +379,97 @@ test("非 JSON 原始正文进不了可展示通道(只进诊断)", async () => 
     readHttpError(jsonResponse(400, { detail: { code: 17, msg: "参数不对" } }), "t")
   );
   assert.equal(v3.userDetail, "");
+});
+
+// ---------------------------------------------------------------------------
+// 目标端写入围栏(跨环境增量同步 §5)的结构化 409
+// ---------------------------------------------------------------------------
+
+const MIRROR_MESSAGE = "此笔记本是从 site-a 同步的镜像，内容只能在源环境修改";
+const mirrorBody = (over = {}) => ({
+  detail: { code: "notebook_mirrored", message: MIRROR_MESSAGE, sync_origin: "site-a", ...over },
+});
+
+test("闭表:没登记的 code 一格都不放行(哪怕形状一模一样、status 也对)", async () => {
+  // 这条钉的是「出处是一张**闭集**」。放行的不是「结构化 detail」这个形态,而是表里
+  // 逐字登记的那几个名字 —— 任何新 code 都必须由一次显式改动进表,不能凭形状混进来。
+  for (const code of [
+    "some_future_failure",   // 还没登记的新 code
+    "knowhow_history_stale", // 别的模块自己解析的那一族
+    "toString",              // 原型链上的名字:hasOwn 判,不给闭表开侧门
+    "constructor",
+  ]) {
+    assert.equal(
+      parseTrustedStructuredFailure(409, { detail: { code, message: "一句中文" } }),
+      null,
+      `code "${code}" 不在表里,不该被放行`,
+    );
+    const { value } = await captureConsole(() =>
+      readHttpError(jsonResponse(409, { detail: { code, message: "一句中文" } }), "t")
+    );
+    assert.equal(value.trusted, false, `code "${code}" 不该被算成已声明出处`);
+    assert.equal(value.userDetail, "", "结构化 detail 不经闭表就一个字都不该外泄");
+  }
+});
+
+test("parseTrustedStructuredFailure:status 与登记值必须成对", () => {
+  // 表里 notebook_mirrored 登记的是 409;同一个 code 配别的 status 一律不认。
+  for (const status of [200, 400, 403, 410, 500]) {
+    assert.equal(parseTrustedStructuredFailure(status, mirrorBody()), null);
+  }
+  assert.equal(parseTrustedStructuredFailure(409, mirrorBody()), MIRROR_MESSAGE);
+});
+
+test("parseMirroredFailure:status 与 code 成对命中才认", () => {
+  assert.equal(parseMirroredFailure(409, mirrorBody()), MIRROR_MESSAGE);
+
+  // status 不匹配:别的端点将来若返回同形状 body,不得被这条通道误认。
+  assert.equal(parseMirroredFailure(403, mirrorBody()), null);
+  assert.equal(parseMirroredFailure(200, mirrorBody()), null);
+
+  // code 不匹配(含既有的 knowhow 那一族,它们有自己的解析器)。
+  assert.equal(parseMirroredFailure(409, mirrorBody({ code: "knowhow_history_stale" })), null);
+  assert.equal(parseMirroredFailure(409, mirrorBody({ code: "" })), null);
+
+  // message 为空/缺失/非字符串 → null,调用方落回状态码通用文案。
+  assert.equal(parseMirroredFailure(409, mirrorBody({ message: "" })), null);
+  assert.equal(parseMirroredFailure(409, mirrorBody({ message: "   " })), null);
+  assert.equal(parseMirroredFailure(409, mirrorBody({ message: 17 })), null);
+  assert.equal(parseMirroredFailure(409, { detail: { code: "notebook_mirrored" } }), null);
+
+  // 裸字符串 detail(user_error / str(exc) 那一族)永远进不来。
+  assert.equal(parseMirroredFailure(409, { detail: "notebook_mirrored" }), null);
+  assert.equal(parseMirroredFailure(409, {}), null);
+  assert.equal(parseMirroredFailure(409, null), null);
+  assert.equal(parseMirroredFailure(409, "notebook_mirrored"), null);
+});
+
+test("镜像 409 没有 X-User-Message 也能上屏(闸1 之外单独放行的那一个形状)", async () => {
+  const { value } = await captureConsole(() =>
+    readHttpError(jsonResponse(409, mirrorBody()), "t")
+  );
+  assert.equal(value.trusted, true, "结构化镜像 detail 由我们自己后端定义,按具名形状放行");
+  assert.equal(value.userDetail, MIRROR_MESSAGE);
+
+  await assert.rejects(
+    captureConsole(() => throwHumanizedHttpError(jsonResponse(409, mirrorBody()), "t")),
+    (error) => {
+      assert.equal(error.message, MIRROR_MESSAGE, "后端那句中文原文必须上屏,而不是 409 的通用文案");
+      assert.equal(httpErrorStatus(error), 409);
+      return true;
+    },
+  );
+});
+
+test("别的 409 仍然只拿通用文案(放行的是一个形状,不是整个状态码)", async () => {
+  const { value } = await captureConsole(() =>
+    readHttpError(jsonResponse(409, { detail: "正在删除中，请稍后重试" }), "t")
+  );
+  assert.equal(value.trusted, false);
+  assert.equal(
+    humanizeHttpError(value.status, value.userDetail, value.trusted),
+    "操作有冲突，请刷新后重试",
+  );
 });
 
 test("诊断值统一截断(非 JSON 大正文也逃不掉)", async () => {

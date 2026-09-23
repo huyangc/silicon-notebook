@@ -95,6 +95,20 @@ export type NotebookSummary = {
    * 二十几份。
    */
   can_manage_content?: boolean;
+  /**
+   * 这本笔记本是从**哪个环境同步过来的镜像**（跨环境增量同步，
+   * `docs/incremental-sync-design.md` §5）。非空 = 镜像，值是源环境标识；缺失/空串 =
+   * 本地库，与本字段出现之前逐字一致（旧后端不发它）。
+   *
+   * 后端在镜像上对「会改写同步层内容」的写端点回 409
+   * （`backend/app/api/deps.py::_CAPABILITY_MIRROR_FENCE`）。前端据此**收起**那些入口，
+   * 判据只有一处：`workspaceCapabilities`——同 `can_manage_content` 的纪律，别在组件里
+   * 直接判它，否则「镜像上还能做什么」会散成二十几份各自漂移的判断。
+   *
+   * 例外只有一类：与「能不能按」无关的**标注**（列表行的「镜像」小标、来源面板顶部的
+   * 那句说明），它们经 `notebookIsMirror` / `capabilities.mirrored` 取，不自己拼判据。
+   */
+  sync_origin?: string;
   indexing_pipeline_id?: string | null;
   indexing_pipeline_version?: string | null;
   indexing_pipeline_available?: boolean;

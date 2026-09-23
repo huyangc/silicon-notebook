@@ -669,6 +669,8 @@ PYTHONPATH=backend python scripts/sync_notebooks.py export \
 
 # Target environment: copy the package directory over, then dry-run before applying.
 # (import packages in chain order -- see the cadence note below)
+# A real import also rebuilds the scale indexes it invalidated; add
+# --rebuild-scale skip to leave that to a hand-run build_scale_index.py.
 PYTHONPATH=backend python scripts/sync_notebooks.py import \
   /srv/silicon-notebook/sync/incoming/sync-prod-shanghai-0-42-<id> --dry-run --json
 PYTHONPATH=backend python scripts/sync_notebooks.py import \
@@ -786,6 +788,16 @@ PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --j
    job" count above and the "Notebook delete jobs" section below for what finishes the ordinary
    (non-`INCONSISTENT`) cleanup, and why the application's own delete-job worker needs to be
    running for it to happen.
+
+9. After every import run `sync status` on the target and read three things: whether the chain
+   head is unique (which package comes next), the "mirrors waiting for a delete job" count (non-zero
+   means the target's application is not running its delete-job consumer), and the `lagging` /
+   `no_chain` / `unknown` buckets of the mirror inspection (remedies are in the `status` section
+   below; a non-zero `lagging` is a usable alarm condition). `kg_index`/`kg_viz` do not travel with
+   the package: `sync import` rebuilds them itself after the import is `done` (`--rebuild-scale auto`,
+   the default) using the service's own verdict per notebook. A first full baseline on a large library
+   can run for hours; pass `--rebuild-scale skip` to move that to another slot and run the offline
+   builder by hand. A rebuild failure only produces a warning and never changes the import's result.
 
 Upgrading to schema v85/0065 resets every target's watermark to `captured=false` (the column is
 new; rows written before the upgrade predate it and have no change-log window behind them). The
@@ -947,16 +959,122 @@ application's own delete-job worker picks it up, so a notebook can sit in `delet
 if the target is not running, or was not running when the import completed. This count is how you
 notice that and know to start (or restart) the application rather than assume the import failed.
 
+`status` finally prints a **mirrored-notebook survey** ("镜像笔记本"), grouped by `sync_origin`:
+how many mirrors this environment holds from that source, the count in each bucket below, and one
+line per notebook in every bucket except "in sync" (capped at 20 lines per bucket, then "另有 N
+本"). There is no per-notebook watermark column behind this (§9 of the design doc) — the verdict is
+derived from `sync_imports.report_json`, because a window package covers the source's whole sync
+scope and a per-notebook stamp would only ever restate the chain head. The one shape that can
+leave a single notebook behind is a `--notebook`-scoped package, which already records exactly
+which notebooks it carried. For each mirror, `status` finds the most recent `done` package of that
+`source_env` whose `report_json.notebooks` names it (ordered by the package's own `created_at`,
+falling back to this target's `started_at` for a row recorded before that field), and reads the
+verdict off it:
+
+- **in sync** (`in_sync`) — that package participates in the chain, so the notebook is as current
+  as the chain is. This includes a notebook no later window names: a window only carries what
+  changed inside its range, so silence means it did not change.
+- **lagging** (`lagging`) — the last package to carry it was a scoped one exported EARLIER than the
+  chain head. Anything changed in that notebook between the two exports is missing here, and no
+  future window will notice, because a window only carries notebooks that changed inside its own
+  range. Re-export this notebook NOW (`sync export --notebook <id>`) — a snapshot taken today
+  cannot be older than the head — or wait for the next full package.
+- **ahead** (`ahead`) — a scoped package exported no earlier than the chain head carried it, so it
+  cannot be missing anything the chain has applied. The next window replays over it by idempotent
+  upsert. Normal, no action.
+- **no chain** (`no_chain`) — only scoped imports exist for that `source_env`; no package has ever
+  covered its whole scope here. Import a full baseline once (an incremental package would be
+  refused anyway — there is no chain for it to continue).
+- **ambiguous** (`ambiguous`) — more than one CHAIN-PARTICIPATING head (see the chain-head
+  paragraph above); settle which package is the head first, then re-read this section.
+- **unknown** (`unknown`) — no `done` package on record can place this notebook: that `source_env`
+  has never been imported from here, or only has `failed`/`running` rows, or the row that carried
+  it predates this bookkeeping (no `notebooks`/`package_created_at`) or its `report_json` is
+  unreadable. Check the "已引入的包" section above for that environment's import state; import a
+  full baseline if there is nothing to go on.
+- **deleting** (`deleting`) — the mirror is queued for deletion (`status='deleting'`, the count in
+  the paragraph above). It gets its OWN bucket and is never classified as lagging, so
+  `len(lagging) > 0` works as an alarm condition on its own.
+
+Two points about how this is judged. First, **by record order, never by watermark height**: a
+scoped package's `from_seq`/`to_seq` are hard-coded to 0 on export ("a subset package makes no
+claim about a sequence range") and copied into `sync_imports` verbatim, so comparing sequence
+numbers would report every scoped-covered mirror as lagging by exactly the chain head's own
+watermark and could never report anything else. The comparison is between the two packages' export
+times, and neither the lines nor the JSON carry a sequence number for this reason. Import order is
+not part of it either: applying an old snapshot late does not make it newer, so only the source's
+`package_created_at` is read, never this target's `started_at`.
+
+Second, the baseline is deliberately narrower than the chain-head list printed above it: only a
+head that PARTICIPATES in the chain (not a `--notebook`-scoped package, and not a `done` row from
+an environment that has no chain at all) represents "the source's whole scope was covered through
+here". So one `sync export --notebook` imported after the latest window shows up as a second chain
+head without making every mirror of that `source_env` ambiguous — only the notebook it actually
+carried is judged against it.
+
+`--json` carries the same thing under `mirrors[source_env]`: `total` plus one list per bucket,
+whose entries are `{notebook_id, name, applied_package_id, applied_created_at, head_package_id,
+head_created_at, deleting}` with `null` wherever a field does not apply. The JSON is not capped —
+the 20-line limit is a display rule only. An environment with no mirrored notebooks at all prints
+one line saying so and serializes `mirrors` as `{}`.
+
 Every subcommand exits 2 on any failure (one line on stderr, no traceback) and 0 on success,
 including `already_applied`. `--json` prints the underlying export/import report or status
 snapshot as one JSON object instead of the human-readable summary; script it for anything that
 inspects `skipped_rows`, `warnings`, or `missing_files` beyond the printed summary's totals.
 
-After a real (non-`--dry-run`) import, manually run a scale index build for any large library
-the package touched — `kg_index`/`kg_viz` are derived artifacts and do not travel with the
-package (§6 of the design doc); see
-[Offline / off-host scale builds](./operations.md#offline--off-host-scale-builds-scriptsbuild_scale_indexpy).
-PR-4 is expected to automate queuing this.
+`kg_index`/`kg_viz`/`kg_index_partitions` are derived artifacts and do not travel with a
+package (§6 of the design doc), so a real (non-`--dry-run`) import leaves the target's published
+scale artifacts describing the rows it had *before*. `sync import` therefore rebuilds them itself,
+synchronously, once the import is `done` — `--rebuild-scale auto` is the default; pass
+`--rebuild-scale skip` to suppress it and run
+[Offline / off-host scale builds](./operations.md#offline--off-host-scale-builds-scriptsbuild_scale_indexpy)
+by hand afterwards instead.
+
+The candidates are the notebooks the package applied, minus the ones the same run already excused:
+`notebooks_deleted` (building an index for one would race its delete job) and
+`notebooks_delete_skipped` (a deep copy was in flight at the target, so the notebook is not live
+and the builder would refuse it anyway). Before anything is composed, the same migration-ledger
+check `build_scale_index.py` runs is applied: if the checkout doing the import is a migration away
+from the live database, nothing is built, because an index built by the wrong revision is quietly
+wrong and would be published over a healthy one.
+
+Each candidate is then judged **by the service's own criteria**, not by a second set of thresholds
+defined in the sync tooling: it is rebuilt only when `scale-index/status` reports `unindexed`,
+`suggested` or `stale` (the gate `maybe_auto_index` applies online); a notebook under the
+whole-notebook copy limits in both bytes and rows is skipped as `copyable_small`, because that is
+this codebase's definition of "small enough not to need a scale index"; and full-versus-fold is
+the same `auto` resolution an online build uses. Builds run one notebook at a time under the
+ordinary cross-process per-notebook claim.
+
+Two of those outcomes are refusals rather than problems, and neither raises a warning. A notebook
+the live service is already building elsewhere holds the claim, so the offline builder never gets
+it — reported as `skipped:busy` (note that the in-process `building`/`queued` states cannot detect
+this: they are empty in a fresh CLI process, and the cross-process claim is the real answer).
+A notebook the builder refuses outright — not live for the write-admission check, or an
+unavailable indexing pipeline — is reported as `skipped:refused_by_builder`; running the same
+command by hand would be refused too.
+
+Every outcome is a receipt, never an exit code: the import is already committed and closed when
+this starts, so **a rebuild failure cannot change the import's result** — `sync import` still exits
+0, `sync_imports` still says `done`, and the failed notebook gets a warning naming the
+`build_scale_index.py` command to retry by hand. Ctrl-C is absorbed the same way: the remaining
+notebooks are reported as `skipped:interrupted` and the import is still reported as done, so do
+not re-run the package. The human summary is printed **before** the rebuild starts (it can run for
+hours), and the scale section follows it: `scale 索引: 重建 N、折叠 N、跳过 N、失败 N`, then one
+line per skipped or failed notebook (capped at 20, as in the mirror survey, with "另有 N 本未列出"),
+then the rebuild's own warnings under `scale 重建警告:`. `--json` carries `scale_rebuild` (notebook
+id → `built`/`folded`/`skipped:<why>`/`failed:<ExceptionClass>`; the failure form deliberately
+carries only the exception class, because a build failure's text can quote a storage path),
+`scale_rebuild_mode` (the `--rebuild-scale` value used, so an empty map is never ambiguous) and
+`scale_rebuild_note`. Those three are added by the CLI and are **not** part of
+`sync_imports.report_json`: the row was closed before the rebuild began, and "done means done".
+
+Nothing is rebuilt after a `--dry-run` (nothing was written), after an `already_applied` re-import
+(the first pass did it), or on SQLite — a single-process deployment has no cross-process build
+claim, so the offline builder is not available there at all; it is reported as
+`skipped:sqlite_backend` with a note, and the index is built in-process the next time the service
+handles that notebook.
 
 ### `sync prune-log`
 

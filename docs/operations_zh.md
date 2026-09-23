@@ -547,6 +547,8 @@ PYTHONPATH=backend python scripts/sync_notebooks.py export \
 
 # 目标环境：把包目录搬过去，先 --dry-run 再真正引入。
 # （按链序导入——见下面的操作节奏说明）
+# 正式导入还会顺手重建被它作废的 scale 索引；不想要就加 --rebuild-scale skip，
+# 改为事后手动跑 build_scale_index.py。
 PYTHONPATH=backend python scripts/sync_notebooks.py import \
   /srv/silicon-notebook/sync/incoming/sync-prod-shanghai-0-42-<id> --dry-run --json
 PYTHONPATH=backend python scripts/sync_notebooks.py import \
@@ -634,6 +636,14 @@ PYTHONPATH=backend python scripts/sync_notebooks.py prune-log --keep-days 30 --j
    一次这个包（等目标端稳定下来），或者手动处理这些笔记本。真正的清理（不带 `INCONSISTENT`
    前缀的那种正常情形）见上面 `sync status` 的「等待删除作业的镜像」计数，以及下面「笔记本
    删除作业」一节，包括为什么需要目标端应用自己的删除作业消费者在跑它才会发生。
+
+9. 每次导入之后在目标端跑一次 `sync status`，看三样：链头是否唯一（下一个包该接谁）、
+   「等待删除作业的镜像」计数（非零说明目标端应用没在跑删除作业消费者）、以及「镜像笔记本」
+   巡检的 `lagging`/`no_chain`/`unknown` 三个分类（处置见下面 `status` 一节；`lagging` 非零
+   可以直接当报警条件）。`kg_index`/`kg_viz` 不随包走，`sync import` 默认（`--rebuild-scale
+   auto`）在导入置 `done` 之后自己按服务内的判据同步重建，首次全量基线在大库上可能跑数小时，
+   想把它挪到别的时段就传 `--rebuild-scale skip`，事后手动跑离线构建；重建失败只给警告，
+   不改变导入结果。
 
 升级到 schema v85/0065 会把每个目标环境的水位重置为 `captured=false`（这是新列，升级之前
 写下的水位行没有这一列、背后也没有变更日志窗口）。升级之后对每个目标的第一次导出因此必然
@@ -757,14 +767,96 @@ base 会是其中记录更晚且非限定导出的那个」——照字面读：
 起来才会执行；如果导入完成时目标端应用没在跑，或者当时没跑，笔记本就会在 `deleting` 上停着。
 这个计数就是用来发现这种情况、判断该启动（或重启）应用，而不是误以为导入失败了。
 
+`status` 最后还打印一段**镜像笔记本**巡检，按 `sync_origin` 分组：本环境从该源持有多少本
+镜像、下面每个分类各多少本，以及除「已跟上」之外每个分类逐本一行（每个分类最多列 20 行，
+超出打「另有 N 本」）。这背后**没有**逐本的水位列（设计文档 §9）——判据全部从
+`sync_imports.report_json` 推导：窗口包覆盖源端整个同步 scope，逐本记账只会与链头重复；唯一
+能让单本掉队的是 `--notebook` 限定导出包，而它已经在自己的 `report_json` 里记下了带走的是
+哪几本。对每一本镜像，`status` 找出该 `source_env` 下**最近一次 `done` 且
+`report_json.notebooks` 含这本**的包（按包自己的 `created_at` 排序，早于该字段的旧行按目标端
+的 `started_at`），并据此判定：
+
+- **已跟上**（`in_sync`）——这个包参与链，所以这本跟链一样新。**包括之后再没有任何窗口点名
+  它**：窗口只装自己范围内有变更的本，没被点名只说明它没变过。
+- **落后**（`lagging`）——最后带过它的是一个**导出时间早于链头**的 scoped 包。两次导出之间
+  对这本的改动在本环境是缺失的，而且不会再有窗口带过来（窗口只装自己范围内有变更的本）。
+  处置：**现在**对它再做一次 `sync export --notebook <id>` 并导入（今天取的快照必然不早于
+  链头），或者等下一次全量包。
+- **领先**（`ahead`）——带过它的 scoped 包导出时间不早于链头，所以它不可能缺链头已经应用过
+  的东西。下一次窗口会按幂等 upsert 覆盖，无需动作。
+- **无链**（`no_chain`）——该 `source_env` 只有 scoped 导入，从来没有一个包在这里覆盖过它的
+  整个 scope。先导入一次全量包（增量包在这种状态下本来也会被拒——没有链可续）。
+- **不确定**（`ambiguous`）——**参与链的**链头不止一条（见上面链头那一段）；先确定以哪个包为
+  链头，再回来读这一段。
+- **未知**（`unknown`）——没有任何 `done` 导入记录能说明这本的位置：该 `source_env` 在本环境
+  从未导入过、只有 `failed`/`running` 的行，或者带过它的那行早于本记账（没有
+  `notebooks`/`package_created_at`）、`report_json` 不可读。先看上面的「已引入的包」确认该源
+  环境的导入状态；实在无据可依就导入一次全量包。
+- **待删除**（`deleting`）——这本已经排进删除作业队列（`status='deleting'`，即上面那个计数）。
+  它**单独占一个桶**，不会被算成落后，所以 `len(lagging) > 0` 可以直接当报警条件。
+
+判法上有两点要说清。其一，**按记录顺序判，不比水位高度**：scoped 包的 `from_seq`/`to_seq` 在
+导出端就被硬写成 0（「子集包不对序列区间做任何声明」），导入时原样写进 `sync_imports`，所以
+比序列号只会把每一本被 scoped 包碰过的镜像都判成「恒定落后一个链头水位」，永远得不到别的
+结论。真正比的是两个包的**导出时间**，也正因为如此，人读行与 `--json` 里都不带任何序列号。
+导入先后同样不参与：晚一点应用一个旧快照并不会让它变新，所以只读源端的
+`package_created_at`，不读目标端的 `started_at`。
+
+其二，这里比的基准比上面打印的链头列表**更窄**，是故意的：只有**参与链**的链头（即不是
+`--notebook` 限定导出包、也不是一个根本没有链的环境里的 `done` 行）才代表「源端整个 scope
+已经覆盖到这里」。所以在最后一个窗口之后临时导入一个 `sync export --notebook` 包，它会作为
+第二条链头出现，但不会把该 `source_env` 的每一本镜像都变成「不确定」——只有它真正带过的那
+一本会拿它来判。
+
+`--json` 里是同一份内容，放在 `mirrors[source_env]` 下：`total`，以及每个分类各一个列表，
+列表条目是 `{notebook_id, name, applied_package_id, applied_created_at, head_package_id,
+head_created_at, deleting}`，不适用的字段给 `null`。JSON 不截断——20 行只是人读输出的显示
+规则。本环境一本镜像都没有时，打印一行说明，`mirrors` 序列化成 `{}`。
+
 所有子命令失败都退出 2（stderr 一行，无堆栈），成功（包括 `already_applied`）退出 0。
 `--json` 把底层的导出/引入报告或状态快照整个打印成一个 JSON 对象，而不是人读摘要；需要
 `skipped_rows`、`warnings`、`missing_files` 打印摘要之外的细节时用它做脚本化处理。
 
-正式（非 `--dry-run`）导入完成后，对包里涉及的大库手动跑一次 scale 索引构建——
-`kg_index`/`kg_viz` 是派生工件，不随包走（设计文档 §6）；见
+`kg_index`/`kg_viz`/`kg_index_partitions` 是派生工件，不随包走（设计文档 §6），所以一次正式
+（非 `--dry-run`）导入之后，目标端已发布的 scale 工件描述的还是导入**之前**的那批行。
+`sync import` 因此在导入置 `done` 之后，自己同步把它们重建一遍——`--rebuild-scale auto` 是
+默认值；传 `--rebuild-scale skip` 可以完全不做，改为事后手动跑
 [离线 / 异机 scale 构建](./operations_zh.md#离线--异机-scale-构建scriptsbuild_scale_indexpy)。
-PR-4 计划把这一步接入自动排队。
+
+候选是本次导入实际应用的那些笔记本，减去同一次跑里已经被导入自己排除掉的两类：
+`notebooks_deleted`（给它建索引会和删除作业抢同一批工件根目录）和 `notebooks_delete_skipped`
+（目标端正在深拷贝，那种本不算 live，构建器本来也会拒绝）。在组装任何东西之前，先跑
+`build_scale_index.py` 用的那同一道迁移 ledger 闸：执行导入的 checkout 与线上库差一个迁移
+时，一本都不建——用错版本的代码建出来的索引是静默错误的，而它会原子换名顶掉一份健康索引。
+
+每一本再按**服务内那一套判据**决定，而不是在同步工具里另立一份阈值：只有
+`scale-index/status` 报 `unindexed`、`suggested` 或 `stale` 才重建（就是在线 `maybe_auto_index`
+用的那道闸）；整本在字节数和行数上都低于整本拷贝上限的，按 `copyable_small` 跳过——这是本
+代码库对「小到不需要 scale 索引」的定义；全量还是折叠也用在线构建的同一个 `auto` 解析。
+构建逐本串行，取的是普通的跨进程逐库 claim。
+
+其中两种结果是「拒绝」而不是「出问题」，都不发警告。在线服务已经在建的那一本持有 claim，
+离线构建器根本拿不到，记 `skipped:busy`（注意进程内的 `building`/`queued` 状态查不出这件事：
+在新起的 CLI 进程里它们恒为空，跨进程 claim 才是真答案）。构建器在动手之前直接拒绝的——对
+写入准入检查不算 live、或 indexing pipeline 不可用——记 `skipped:refused_by_builder`；手动跑
+同一条命令也会被同样拒绝。
+
+所有结果都只是回执，不是退出码：这一步开始时导入已经提交并收口，所以**重建失败不会改变
+导入的结果**——`sync import` 仍然退出 0，`sync_imports` 仍然是 `done`，失败的那本会给一条
+警告，点名手动重跑用的 `build_scale_index.py` 命令。Ctrl-C 同样被吸收：剩下的本记
+`skipped:interrupted`，导入照样报成完成，**不要**重跑这个包。人读摘要在重建开始**之前**就
+打完（重建可能跑几个小时），scale 段接在它后面：`scale 索引: 重建 N、折叠 N、跳过 N、失败 N`，
+然后跳过和失败的逐本一行（与镜像段同口径封顶 20 行，其余折成「另有 N 本未列出」），最后是
+重建自己的警告，放在 `scale 重建警告:` 下。`--json` 带 `scale_rebuild`（笔记本 id →
+`built`/`folded`/`skipped:<原因>`/`failed:<异常类名>`；失败形态只记异常类名，因为构建失败的
+文本可能带上存储路径）、`scale_rebuild_mode`（本次用的 `--rebuild-scale` 取值，所以空映射
+永远不歧义）和 `scale_rebuild_note`。这三个字段由 CLI 合并，**不**进
+`sync_imports.report_json`：那一行在重建开始前就已经关闭，「done 即 done」。
+
+`--dry-run`（什么都没写，也就没有什么被作废）、`already_applied` 的重复导入（第一次已经做过）
+以及 SQLite 后端都不会重建。SQLite 是单进程部署，没有跨进程建索引 claim，离线构建器在那里
+根本不可用，所以记成 `skipped:sqlite_backend` 并打一行说明；索引会在服务下一次处理该笔记本
+时在进程内建起来。
 
 ### `sync prune-log`
 

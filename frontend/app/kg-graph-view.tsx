@@ -213,6 +213,7 @@ export function KgGraphView({
   kgGraphRef,
   kgDetailRef,
   readOnlyWorkspace,
+  readOnlyIndexes,
   currentNotebookId,
   kgReady,
   baseKgAvailable,
@@ -289,6 +290,9 @@ export function KgGraphView({
   kgGraphRef: React.MutableRefObject<any>;
   kgDetailRef: React.RefObject<HTMLElement | null>;
   readOnlyWorkspace: boolean;
+  /** 检索索引的写门。与 `readOnlyWorkspace` 分开:检索索引(scale_index:write)不在
+   *  跨环境同步的闭包里,镜像库照样要能重建它(见 page.tsx 的 readOnlyIndexes)。 */
+  readOnlyIndexes: boolean;
   currentNotebookId: string | null;
   /** 当前笔记本是否已有知识图谱(NotebookSummary.kg_ready);没有就没有可删的东西。 */
   kgReady: boolean;
@@ -473,7 +477,7 @@ export function KgGraphView({
               {scaleIndexStatus && (() => {
                 const s = scaleIndexStatus;
                 const v = describeScaleIndex(s);
-                const clickable = v.primaryOp !== null && !readOnlyWorkspace;
+                const clickable = v.primaryOp !== null && !readOnlyIndexes;
                 const color = v.tone === "warn" ? "var(--color-warn, #b97a00)"
                   : v.tone === "ok" ? "var(--color-ok, #1a7f5a)" : undefined;
                 const label = `检索索引：${v.stateLabel}${v.state === "indexed" ? ` · ${s.n_nodes} 节点` : ""}`;

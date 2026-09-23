@@ -11,16 +11,26 @@
 // 现在出处由后端显式声明,共两条通道:
 //
 //   ① 可展示通道(给用户):只有**同时**满足三条才把 detail 原样给用户——
-//      (a) 响应带 `X-User-Message: 1`,即后端经 user_error() 明确声明「这是
-//          写给终端用户的文案」(见 backend/app/api/deps.py);
+//      (a) **出处**:二者之一(见下),都是后端显式声明,不是文本形态;
 //      (b) 它还得像一句文案(isDisplayableUserText:不多行、不带标签、不带
 //          花括号、不超长);
 //      (c) 它还得符合产品文案规范(中文,见 isCompliantUserCopy)。
 //      (a) 是**信任闸**,(b)(c) 是**展示策略闸**,两道串联、职责不能互换,
 //      详见 humanizeHttpError 上方的长注释。没有 (a) 的一律不给用户看,哪怕
 //      整段都是中文。
-//      裸 `HTTPException(detail=str(exc))` 永远不带标记 → 用户只看到按状态码
-//      泛化的通用中文。
+//      裸 `HTTPException(detail=str(exc))` 既不带头、detail 又是字符串,两条都
+//      挨不上 → 用户只看到按状态码泛化的通用中文。
+//
+//      出处 = **头 ∪ 一张可枚举的具名 code 表**,两者都是显式声明:
+//        (a1) 响应带 `X-User-Message: 1`,即后端经 user_error() 明确声明「这是
+//             写给终端用户的文案」(见 backend/app/api/deps.py)。它配的 detail
+//             是**裸字符串**;
+//        (a2) detail 是结构化对象,且它的 `code` 命中
+//             `TRUSTED_STRUCTURED_FAILURES` 这张表、`status` 与表里登记的那个
+//             逐字相等。这一族后端刻意**不**发 (a1) 的头——那个头是 user_error()
+//             的标记,而结构化 detail 是另一族(前端按 code 分支、拿 message 显示)。
+//        表是**闭集**:没登记的 code 一格都不放行。加一格 = 显式决定信任一个我们
+//        自己后端定义的具名形状,与后端那次改动同一个 PR 完成。
 //
 //   ② 诊断通道(给开发者 / MCP):状态码 + statusText + 原始正文 + X-Request-Id,
 //      统一截断后只进 console.error。见 pickDiagnostic() / readHttpError()。
@@ -96,7 +106,8 @@ const CJK_RE = /[一-鿿]/;
 // `detail=str(exc)` 里碰巧带中文的异常串(「解析失败:不支持的文件类型」)就
 // 上了屏。别把这个函数读成那条回退。
 //
-// 区别在**作用位置**:本函数只在闸1(出处 / X-User-Message)已经放行之后才跑。
+// 区别在**作用位置**:本函数只在闸1(出处 —— `X-User-Message` 头,或
+// `TRUSTED_STRUCTURED_FAILURES` 那张具名 code 闭表)已经放行之后才跑。
 // 到这里为止,「这句是写给终端用户的」已经由后端显式声明过了,不再有疑问;
 // 本函数判的不是「能不能信」,而是「符不符合规范」。也就是:
 //
@@ -167,8 +178,9 @@ export function httpErrorStatus(error: unknown): number | undefined {
 
 // 状态码 → 中文。`trusted` 才允许 detail 原样穿透。
 //
-// ⚠ trusted 只该来自 readHttpError() 读到的 `X-User-Message` 头。手工传 true
-// 等于绕过整条信任链。
+// ⚠ trusted 只该来自 readHttpError():它读到的 `X-User-Message` 头,或 detail 命中
+// `TRUSTED_STRUCTURED_FAILURES` 这张具名 code 闭表(两条出处的定义见文件头 ①)。
+// 手工传 true 等于绕过整条信任链。
 export function humanizeHttpError(status: number, detail?: string, trusted: boolean = false): string {
   const trimmed = (detail ?? "").trim();
   // 闸1(信任):出处 + 5xx 排除 + 形态兜底。
@@ -229,7 +241,8 @@ export type HttpErrorDiagnostic = {
   // 后端 JSON 里的 detail/message 原文。**能不能给用户看由 trusted 决定**,
   // 不要绕过 humanizeHttpError() 直接展示它。
   userDetail: string;
-  // 后端是否用 user_error() 声明「这句是写给用户的」。
+  // 后端是否显式声明「这句是写给用户的」:`user_error()` 的 `X-User-Message` 头,
+  // 或结构化 detail 命中 `TRUSTED_STRUCTURED_FAILURES`(文件头 ① 的 a1/a2 两条出处)。
   trusted: boolean;
   requestId: string;
 };
@@ -261,6 +274,80 @@ function pickUserDetail(raw: string): string {
       .join("；");
   }
   return "";
+}
+
+// 出处 (a2):**结构化失败的具名 code 闭表**(文件头 ① 的第二条出处)。
+//
+// 有一族后端失败的 detail 不是裸字符串而是结构化对象(`{code, message, ...}`):前端按
+// `code` 分支、拿 `message` 显示。它们**刻意不带 `X-User-Message`**——那个头是
+// `user_error()` 的标记,而 `user_error()` 配的 detail 是裸字符串(见后端
+// `api/deps.py` 的「用户可见文案的出处标记」一节)。
+//
+// 没有这张表,闸1 对它们就是空的:整条 detail 被 pickUserDetail 当成非字符串丢掉,用户只
+// 拿到按状态码泛化的那句通用中文。镜像围栏是第一个进表的:后端 `_raise_if_mirrored` 在
+// 镜像笔记本上拒绝一切会改写同步层内容的写请求,detail 是
+// `{code:"notebook_mirrored", message:"<中文>", sync_origin:"<源环境>"}`,而 409 的通用文案
+// 「操作有冲突，请刷新后重试」完全没说到点子上——真正该说的是「这本库是镜像,内容只能在
+// 源环境改」。
+//
+// ⚠ 为什么这**不是**「用形态判断信任」那条被否掉的回退(见文件头与 isCompliantUserCopy
+// 上方的长注释):那条回退判的是「4xx 且含中文」——一个**任意** detail 都可能碰巧满足的
+// 模糊形态,放行的是一个开集。这里放行的是**闭集**:code 必须逐字命中表里登记的名字,
+// status 还必须与表里登记的那个**成对**相等(不是只看 code 已知)。裸
+// `HTTPException(detail=str(exc))` 的 detail 是字符串,永远进不来;别处凑巧返回同状态码的
+// 端点没有这个 code,也进不来;未来某个无关端点返回同形状 body 时同样进不来。口径与
+// `parseKnowhowRevertFailure` / `parseCleanupFailure` 逐字一致。
+//
+// ⚠ 加一格 = **显式决定信任我们自己后端定义的又一个具名形状**,与后端那次改动同一个 PR
+// 完成;放行之后仍然要过闸2(展示策略:短句、单行、中文),那一层职责没变。
+const TRUSTED_STRUCTURED_FAILURES: Readonly<Record<string, number>> = Object.freeze({
+  // 目标端写入围栏(跨环境增量同步,docs/incremental-sync-design.md §5)。
+  notebook_mirrored: 409,
+});
+
+/**
+ * 结构化失败 detail → 可展示的中文原文;不命中一律 null。
+ *
+ * 不命中的情形一个都不放过:status 与表里登记的对不上、`code` 不在表里、detail 是普通
+ * 字符串(user_error / str(exc) 那一族)、`message` 缺失/为空/不是字符串、body 根本不是
+ * 对象。调用方落回按状态码的通用文案。纯函数,不摸网络——status/body 由调用方转手过来。
+ */
+export function parseTrustedStructuredFailure(status: number, body: unknown): string | null {
+  if (typeof body !== "object" || body === null) return null;
+  const detail = (body as Record<string, unknown>).detail;
+  if (typeof detail !== "object" || detail === null) return null;
+  const d = detail as Record<string, unknown>;
+  if (typeof d.code !== "string") return null;
+  // `in` 会命中 Object.prototype 上的名字("toString" 之类),而表是 Object.freeze 的字面量
+  // ——用 hasOwn 判,别让原型链给闭表开一道侧门。
+  if (!Object.hasOwn(TRUSTED_STRUCTURED_FAILURES, d.code)) return null;
+  if (TRUSTED_STRUCTURED_FAILURES[d.code] !== status) return null;
+  const message = typeof d.message === "string" ? d.message.trim() : "";
+  return message ? message : null;
+}
+
+/**
+ * 镜像围栏那一格的薄包装(调用点读起来是「这是不是镜像挡的」而不是「这是不是某个具名
+ * 失败」)。判定完全由上面那张表负责,这里不另写一份判据。
+ */
+export function parseMirroredFailure(status: number, body: unknown): string | null {
+  if (status !== TRUSTED_STRUCTURED_FAILURES.notebook_mirrored) return null;
+  const message = parseTrustedStructuredFailure(status, body);
+  if (message === null) return null;
+  const code = (body as { detail?: { code?: unknown } }).detail?.code;
+  return code === "notebook_mirrored" ? message : null;
+}
+
+// 原始正文 → 已解析的 JSON(非 JSON / 空正文一律 null)。pickUserDetail 只认字符串型
+// detail,拿不到结构化那一族,所以结构化解析需要自己再读一次 body。
+function parseJsonBody(raw: string): unknown {
+  const text = raw.trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }
 
 // 诊断值统一压成单行 + 截断。HTTP 正文和 catch 到的异常共用,避免一边截断
@@ -315,6 +402,12 @@ export async function readHttpError(res: Response, tag: string): Promise<HttpErr
   console.error(
     `[${tag}] ${res.status} ${res.statusText}${diagnostic ? ` - ${diagnostic}` : ""}${requestId ? ` [${requestId}]` : ""}`
   );
+  // 出处 (a2):结构化失败的具名 code 闭表。这一族没有 X-User-Message 头(理由见
+  // TRUSTED_STRUCTURED_FAILURES 上方),按表放行——是表说了算,不是这里写死某一个 code。
+  // 对镜像围栏而言这只是**兜底**:正常情况下镜像上的写入口已经由 workspaceCapabilities
+  // 收起,走不到这条路径。
+  const structured = parseTrustedStructuredFailure(res.status, parseJsonBody(raw));
+  if (structured) return { status: res.status, userDetail: structured, trusted: true, requestId };
   return { status: res.status, userDetail, trusted, requestId };
 }
 

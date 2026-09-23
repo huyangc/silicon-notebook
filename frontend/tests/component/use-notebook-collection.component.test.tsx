@@ -42,6 +42,7 @@ function notebook(
   id: string,
   access: "owner" | "reader" = "owner",
   canManageContent = false,
+  syncOrigin = "",
 ): NotebookSummary {
   return {
     id,
@@ -53,6 +54,7 @@ function notebook(
     created_label: "8月22日",
     access,
     can_manage_content: canManageContent,
+    sync_origin: syncOrigin,
   };
 }
 
@@ -382,6 +384,42 @@ test("group administrators retain PATCH-only rename and can open settings withou
   await act(async () => value!.openDelete("shared"));
   expect(value!.deletion).toBeNull();
   expect(basesApi.mountedByCount).not.toHaveBeenCalled();
+});
+
+// 跨环境增量同步 §5:镜像笔记本上「会改写同步层内容」的动作一律不发请求。owner 的
+// 权限一点没少(他仍然能分享、能授权),被挡的是这本库的**内容**——改名/画像、挂载、
+// 删库三样都由源环境和导入器决定,目标端改了也留不住(下一次导入原样覆盖回去)。
+test("a mirrored notebook refuses rename, settings and delete before any request", async () => {
+  render(<Harness />);
+  publish([notebook("mirror", "owner", false, "site-a")]);
+
+  let renamed: NotebookSummary | null = null;
+  await act(async () => { renamed = await value!.renameNotebook("mirror", "renamed"); });
+  expect(renamed).toBeNull();
+  expect(notebookApi.updateNotebook).not.toHaveBeenCalled();
+
+  await act(async () => value!.openEditor("mirror"));
+  expect(value!.editor).toBeNull();
+  // 表单连拉都没拉:挂载与索引管线的请求一次都不该发出去。
+  expect(notebookApi.fetchNotebookIndexingPipeline).not.toHaveBeenCalled();
+  expect(basesApi.listMountable).not.toHaveBeenCalled();
+  expect(basesApi.listBases).not.toHaveBeenCalled();
+
+  await act(async () => value!.openDelete("mirror"));
+  expect(value!.deletion).toBeNull();
+  expect(basesApi.mountedByCount).not.toHaveBeenCalled();
+  expect(notebookApi.deleteNotebook).not.toHaveBeenCalled();
+});
+
+// 反向一半:同一本库、只差 sync_origin —— 本地库那一侧一个请求都不能少。
+test("the same owner row without sync_origin still opens the settings form", async () => {
+  render(<Harness />);
+  publish([notebook("local")]);
+
+  await act(async () => value!.openEditor("local"));
+  expect(value!.editor?.target.id).toBe("local");
+  expect(value!.editor?.canMountBases).toBe(true);
+  expect(basesApi.listMountable).toHaveBeenCalledWith("local");
 });
 
 test("one-click revert to builtin uses only indexing pipeline APIs", async () => {
@@ -914,7 +952,7 @@ test("a promotion mid-open cannot render an owner mount section over skipped mou
 
   expect(basesApi.listBases).not.toHaveBeenCalled();
   expect(basesApi.listMountable).not.toHaveBeenCalled();
-  expect(value!.editor?.canConfigureNotebook).toBe(false);
+  expect(value!.editor?.canMountBases).toBe(false);
   expect(value!.editor?.mountEdges).toEqual([]);
 });
 

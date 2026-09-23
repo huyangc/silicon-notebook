@@ -922,6 +922,22 @@ button.copy-result-failed:hover:not(:disabled) {
   color: #2b2f36;
 }
 
+/* 「镜像」小标(跨环境增量同步 §5)。两处用它:列表行的角色格,以及网格卡片页脚那行
+   `.notebook-card-meta`。形状沿用既有的 `.tag` chip,这里只补间距与**上限**。
+
+   ⚠ 上限是必须的:列表的角色列是 `minmax(90px, .55fr)`,一个不缩的 chip 会把
+   「只读成员」这类文案顶出格去。所以它可缩、超出省略(文案是固定的两个字,只有在
+   极窄视口上才会被省),而不是 `flex: 0 0 auto` 把压力全推给角色文案。 */
+.notebook-mirror-tag {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 4.5em;
+  margin-left: 8px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .list-row-menu {
   width: 34px;
   height: 34px;
@@ -1063,8 +1079,14 @@ button.copy-result-failed:hover:not(:disabled) {
      120 字符(`GROUP_INPUT_LIMITS.nameMaxChars`),而 `grantedViaLabel` 还会把多个组名
      串起来(`来自群组《A》《B》`)。一个不缩不换行的徽章能吃掉整条 `.workspace-title`
      (`max-width: min(48vw, 720px)`),标题就又被压到 0 宽(codex #529 R1 P2)。
-     `max-width` 是**给标题留的地**:徽章起始就不许超过这一行的 40%,所以标题恒有
-     ~60% 可用;超出的部分省略,完整文本连同身份说明一起进 tooltip。 */
+     `max-width` 是**给标题留的地**:身份徽章起始就不许超过这一行的 40%;超出的部分省略,
+     完整文本连同身份说明一起进 tooltip。
+
+     ⚠ 这一行上最多**同时**挂两个 chip:身份徽章,以及镜像库那一句就地说明
+     (`.reader-badge-mirror-chip`,跨环境同步 §5——改名控件被围栏收走时顶替它的位置)。
+     所以「标题恒有 ~60%」只在单 chip 时成立;两个并存时留给标题的是
+     `100% - 40% - 24% - 两道 gap`,仍有 ~三分之一,且标题是这一行唯一 `flex-grow` 的项,
+     两个 chip 都先于它收缩。镜像那一句因此单独钉一个更小的上限,见下。 */
   flex: 0 1 auto;
   min-width: 0;
   max-width: 40%;
@@ -1078,6 +1100,14 @@ button.copy-result-failed:hover:not(:disabled) {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+/* 镜像库的就地说明(跨环境同步 §5)。与身份徽章同形,但**上限更小**:两个 chip 并存时
+   40% + 40% 会把 26px 的库名重新压到几乎看不见——那正是 `.reader-badge-chip` 上方那段
+   注释要根除的故障。这一句是固定文案(不随用户数据变长),24% 足够在常见宽度上读全,
+   读不全时完整文本在 tooltip 里。 */
+.reader-badge-mirror-chip {
+  max-width: 24%;
 }
 
 /* 「退出共享」是这一行里唯一的动作。它是固定宽度(~98px)且不缩,所以在**紧凑桌面**

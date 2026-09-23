@@ -1055,6 +1055,11 @@ state, and one cell cannot answer both questions. `scale_index:write` carries
 non-empty when the notebook is a **mirror** imported from another environment; the
 value names that source environment and is surfaced on `NotebookSummary.sync_origin`
 in both the list and the detail projection.
+The browser consumes it in exactly one place, `workspaceCapabilities` in
+`frontend/app/workspace-transitions.ts` (plus the two labels: the sources-panel notice and
+the list-row "镜像" tag); components never test `sync_origin` directly. The mapping is
+cell-by-cell against the fence table below, not "mirror = read-only": link sharing, group
+grants, reports and the scale-index rebuild stay available on a mirror.
 
 Any capability whose endpoints rewrite synced content is refused on a mirror with
 **409** and a `detail` of `{"code": "notebook_mirrored", "sync_origin": "<value>"}`.

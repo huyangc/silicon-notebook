@@ -278,6 +278,9 @@ import {
 import {
   doneItemDestination,
   historyModeForTransition,
+  MIRROR_NOTEBOOK_DELETE_NOTE,
+  MIRROR_NOTEBOOK_MANAGE_NOTE,
+  mirrorSourcesNotice,
   NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING,
   openMemoryDeepLink,
   workspaceCapabilities,
@@ -780,6 +783,7 @@ export default function Home() {
     currentNotebook?.access,
     currentUser?.role ?? "",
     currentNotebook?.can_manage_content ?? false,
+    currentNotebook?.sync_origin ?? "",
   ).canWriteNotebook;
   const workspaceExtensions = useWorkspaceExtensions(
     currentUser?.id ?? null,
@@ -965,6 +969,7 @@ export default function Home() {
     currentNotebook?.access,
     currentUser?.role ?? "",
     currentNotebook?.can_manage_content ?? false,
+    currentNotebook?.sync_origin ?? "",
   );
   const kgWorkspace = useKgWorkspace({
     actorId: currentUser?.id ?? null,
@@ -2033,6 +2038,7 @@ export default function Home() {
         currentNotebook?.access,
         currentUser?.role ?? "",
         currentNotebook?.can_manage_content ?? false,
+        currentNotebook?.sync_origin ?? "",
       ).canManageReports,
       creationDisabled: sourceScopeBlocked,
       sourceScope: currentSourceScope,
@@ -4874,6 +4880,16 @@ export default function Home() {
     currentNotebook?.access,
     currentUser?.role ?? "",
     currentNotebook?.can_manage_content ?? false,
+    currentNotebook?.sync_origin ?? "",
+  );
+  // 卡片操作菜单打开的那一行(不一定是当前工作区这本)的能力位。同样只走
+  // workspaceCapabilities 一处判据,不在菜单组件里第二次拼 access/sync_origin。
+  // 菜单没开时 notebook 为 null,算出来的值不会被渲染。
+  const menuNotebookCapabilities = workspaceCapabilities(
+    notebookCollection.menu.notebook?.access,
+    currentUser?.role ?? "",
+    notebookCollection.menu.notebook?.can_manage_content ?? false,
+    notebookCollection.menu.notebook?.sync_origin ?? "",
   );
   const notebookEditorIndexingNotice = describeIndexingPipelineState(
     notebookCollection.editor?.indexingPipeline ?? null,
@@ -4935,6 +4951,11 @@ export default function Home() {
   // 就会让组管理员看到一个 API 全部允许、界面却全部藏起来的只读工作区。
   // 判据统一走 workspaceCapabilities,不在这里第二次拼 access/can_manage_content。
   const readOnlyWorkspace = !capabilities.canWriteNotebook;
+  // 检索索引(scale index)的构建/更新/重建入口**不跟** `readOnlyWorkspace` 走。
+  // 后端 `scale_index:write` 不在镜像围栏里(索引是目标端自有的派生产物,不在同步闭包
+  // 中,而重建是目标端唯一的修复手段),所以镜像库必须还能重建自己的索引;而对纯只读
+  // 成员,这一位与 `readOnlyWorkspace` 逐字相同(两者都来自同一个 canWrite)。
+  const readOnlyIndexes = !capabilities.canRebuildIndexes;
   // 挂了几个公共知识库决定「提交晋升」按钮的行为(none=禁用/auto=直接用/choose=弹选择器)。
   // A4:与 Memory 晋升共用同一份数据源(notebookPromotionBases),不再单独拉取。
   const promotionTarget = resolvePromotionTarget(notebookPromotionBases);
@@ -5233,14 +5254,33 @@ export default function Home() {
                     onLeave={() => { handleLeaveShared().catch(reportError); }}
                     // 组管理员(can_manage_content)可在顶栏改名(PATCH-only,notebook:manage)。
                     // 徽章按 can_manage_content 才渲染成可编辑;纯只读成员传了也只显示 h1。
-                    rename={{
+                    // 镜像上 canManageNotebook 为假 → 连承接方都不下发,徽章退回只读标题,
+                    // 下面那句 mirrorNote 顶替它说明原因。
+                    rename={capabilities.canManageNotebook ? {
                       value: titleDraft,
                       saving: titleSaveInFlight,
                       onChange: setTitleDraft,
                       onCommit: () => { saveInlineNotebookName().catch(reportError); },
                       onReset: () => setTitleDraft(currentNotebook.name),
-                    }}
+                    } : undefined}
+                    // 只在**控件确实被收走**时才解释(mirrorHidesNotebookManage):纯只读
+                    // 成员本来就没有那个输入框,给他一句「镜像的名称…」是在解释他从未
+                    // 见过的事。
+                    mirrorNote={capabilities.mirrorHidesNotebookManage ? MIRROR_NOTEBOOK_MANAGE_NOTE : ""}
                   />
+                ) : !capabilities.canManageNotebook ? (
+                  // 镜像库:名称与 tier 都是**同步来的**(notebook:manage 被目标端写入围栏
+                  // 挡,见 deps.py 的 _CAPABILITY_MIRROR_FENCE),在这里改了也留不住——下一次
+                  // 导入会原样覆盖回去。所以输入框整个换成不可编辑的标题 + 一句就地说明:
+                  // 说明落在原来那颗控件的位置上,不发页面顶部横幅(AGENTS.md
+                  // 「Interactive feedback」)。版式沿用 `.reader-badge-row` 那套(固定 72px
+                  // 单行顶栏的既有约定,见 reader-badge-layout-guard),不新造视觉体系。
+                  <div className="reader-badge-row">
+                    <h1 className="reader-badge-title" title={currentNotebook.name}>{currentNotebook.name}</h1>
+                    <span className="reader-badge-chip" title={MIRROR_NOTEBOOK_MANAGE_NOTE}>
+                      {MIRROR_NOTEBOOK_MANAGE_NOTE}
+                    </span>
+                  </div>
                 ) : (
                   <input
                     className="notebook-title-input"
@@ -5304,7 +5344,10 @@ export default function Home() {
                   <Table2 size={17} />
                   <span>Knowhow 表</span>
                 </button>
-                {!readOnlyWorkspace && (
+                {/* 「分享」后面挂的是链接分享(notebook:configure)与群组授权(notebook:grant),
+                    两格在镜像围栏里**都放行**(目标端自己的可见性由目标端管理,设计 §5),
+                    所以这颗按钮跟 canGrantAccess 走而不是跟内容写门走。 */}
+                {capabilities.canGrantAccess && (
                   <button className="workspace-nav-button" disabled={shareBusy} onClick={() => openShareModal().catch(reportError)}>
                     <Share2 size={17} />
                     <span>分享</span>
@@ -5349,6 +5392,15 @@ export default function Home() {
                 </div>
               </div>
               <div className="workspace-panel-body sources-body">
+                {/* 镜像库的标注(跨环境增量同步 §5)。它是**说明**不是错误:这本库的材料
+                    由源环境维护,目标端的写入口(添加来源/重解析/删除……)已经由
+                    capabilities 逐格收起,这一行解释它们为什么不在。沿用既有的
+                    `.tool-hint`,不新造视觉体系。 */}
+                {capabilities.mirrored && (
+                  <p className="tool-hint" style={{ margin: 0 }}>
+                    {mirrorSourcesNotice(capabilities.mirrorOrigin)}
+                  </p>
+                )}
                 {!readOnlyWorkspace && (
                   <button type="button" className="add-source-button" onClick={() => { setLinkSectionOpen(false); openSourceModal(); }}>
 
@@ -5802,9 +5854,11 @@ export default function Home() {
                             imagePreviewOpen={rootModals.view("answer-image-preview").open}
                             notebookId={currentNotebookId}
                             notebookNames={notebookNames}
-                            // 构建索引的 POST 走 kg:write(admin 档),只读成员点了必 403:
-                            // 不下发承接方,AnswerView 会保留横幅诊断、只收起按钮。
-                            onBuildScaleIndex={readOnlyWorkspace ? undefined : (() => runScaleIndexOp("build"))}
+                            // 构建索引的 POST 走 scale_index:write(admin 档),只读成员点了
+                            // 必 403:不下发承接方,AnswerView 会保留横幅诊断、只收起按钮。
+                            // 判据是 `readOnlyIndexes` 而不是 `readOnlyWorkspace`——镜像库
+                            // 仍然要能重建自己的索引(围栏放行 scale_index:write)。
+                            onBuildScaleIndex={readOnlyIndexes ? undefined : (() => runScaleIndexOp("build"))}
                             buildingScaleIndex={buildingScaleIndex}
                             scaleIndexStatus={scaleIndexStatus}
                             onSaveMemory={openMemorySave}
@@ -6054,6 +6108,12 @@ export default function Home() {
         >
           <NotebookMenuActions
             notebook={notebookCollection.menu.notebook}
+            canManageNotebook={menuNotebookCapabilities.canManageNotebook}
+            canDeleteNotebook={menuNotebookCapabilities.canDeleteNotebook}
+            // 说明文案由这一侧给:今天两位为假的**唯一**原因是镜像,将来若有别的原因把
+            // 它们按下去,写死在组件里的「镜像…」就成了一句说谎的话。
+            manageDisabledNote={menuNotebookCapabilities.mirrored ? MIRROR_NOTEBOOK_MANAGE_NOTE : ""}
+            deleteDisabledNote={menuNotebookCapabilities.mirrored ? MIRROR_NOTEBOOK_DELETE_NOTE : ""}
             onLeave={leaveMenuNotebook(notebookCollection.menu.notebook.id)}
             onEdit={editMenuNotebook(notebookCollection.menu.notebook.id)}
             onDelete={deleteMenuNotebook(notebookCollection.menu.notebook.id)}
@@ -6522,7 +6582,7 @@ export default function Home() {
             <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>笔记本设置</h2>
-                <p>{notebookCollection.editor?.canConfigureNotebook
+                <p>{notebookCollection.editor?.canMountBases
                   ? "编辑当前笔记本的信息、索引管线与参考库。模型服务由系统统一管理。"
                   : "编辑当前笔记本的信息与索引管线。参考库挂载仍由库主配置。"}
                 </p>
@@ -6641,7 +6701,7 @@ export default function Home() {
                     : `保存后将切换到“${notebookEditorSelectedPipeline?.label ?? "所选索引管线"}”，并重建全库索引。`}
                 </p>
               </section>
-              {notebookCollection.editor?.canConfigureNotebook && (
+              {notebookCollection.editor?.canMountBases && (
                 <section className="settings-section">
                   <div className="settings-section-head">
                   <h3>参考库</h3>
@@ -7404,7 +7464,7 @@ export default function Home() {
                         </div>
                         <div className="index-sub">检索索引已损坏，检索与{strictLabel}结果可能不完整，请重建索引。</div>
                       </div>
-                      {!readOnlyWorkspace && (
+                      {!readOnlyIndexes && (
                         <div className="index-ctas">
                           <button type="button" className="index-cta primary"
                                   disabled={rebuilding}
@@ -7454,7 +7514,9 @@ export default function Home() {
                             </div>
                           )}
                         </div>
-                        {!readOnlyWorkspace && (
+                        {/* 检索索引的三个动作(含取消与「空闲时建」)走 scale_index:write,
+                            镜像上放行 —— 判据用 `readOnlyIndexes`,见它的声明处。 */}
+                        {!readOnlyIndexes && (
                           <div className="index-ctas">
                             {v.state === "queued" && !s.building ? (
                               <>
@@ -7588,6 +7650,7 @@ export default function Home() {
           kgGraphRef={kgGraphRef}
           kgDetailRef={kgDetailRef}
           readOnlyWorkspace={readOnlyWorkspace}
+          readOnlyIndexes={readOnlyIndexes}
           currentNotebookId={currentNotebookId}
           kgReady={Boolean(currentNotebook?.kg_ready)}
           baseKgAvailable={Boolean(currentNotebook?.base_kg_available)}
