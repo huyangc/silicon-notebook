@@ -113,17 +113,18 @@ class SourceStore:
     # but not a decompression.
     # A continuation label ENDS in " part N" with N >= 2 and nothing after the
     # digits (PostgreSQL: the anchored regex in its store).  GLOB has no "one or
-    # more digits" operator, and a trailing `*` would accept arbitrary text —
-    # a Markdown bundle member "reports part 2/data.md · Markdown table 1" is an
-    # unsplit table (codex #789 r1) — so each digit count is spelled out, the
-    # first digit never 0.  Five digits bound the part number: a sheet's
-    # 1,048,576-row maximum at the 30-row cap is < 35,000 parts.
+    # more digits" operator and a trailing `*` would accept arbitrary text — a
+    # Markdown bundle member "reports part 2/data.md · Markdown table 1" is an
+    # unsplit table (codex #789 r1).  So peel the terminal digit run off with
+    # rtrim: the rest must end in " part ", and the run must be a number other
+    # than 1 without a leading zero.  Any length (codex #789 r2: the character
+    # budget can make every row its own part, so N is unbounded in practice).
     _NOT_TABLE_CONTINUATION_SQL = (
-        "NOT (location_label GLOB '* part [2-9]' "
-        "OR location_label GLOB '* part [1-9][0-9]' "
-        "OR location_label GLOB '* part [1-9][0-9][0-9]' "
-        "OR location_label GLOB '* part [1-9][0-9][0-9][0-9]' "
-        "OR location_label GLOB '* part [1-9][0-9][0-9][0-9][0-9]') "
+        "NOT (rtrim(location_label,'0123456789') GLOB '* part ' "
+        "AND substr(location_label,length(rtrim(location_label,'0123456789'))+1) "
+        "NOT IN ('','1') "
+        "AND substr(location_label,length(rtrim(location_label,'0123456789'))+1) "
+        "NOT GLOB '0*') "
     )
 
     def __init__(
