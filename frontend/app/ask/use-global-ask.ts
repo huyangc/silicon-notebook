@@ -497,7 +497,12 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     }
     if (!jobId || turns.some((turn) => turn.job_id === jobId)) return true;
     const ticket = owner.current;
-    const alive = () => mounted.current && ticket === owner.current && currentId.current === id && !flight.current;
+    // 重读期间输入框仍可用:用户若又提交了一问,那一问可能先于这次读取落地——此时这份
+    // 快照不含新作业,照搬会把刚接受的一轮连同它的推送流一起抹掉(codex #785 R3)。
+    // 与提交失败后的对账同一条判据:记下提交序号,回来时序号变了就作废。
+    const serial = submitSerial.current;
+    const alive = () => mounted.current && ticket === owner.current && currentId.current === id
+      && !flight.current && serial === submitSerial.current;
     void readConversation(id).then((synced) => {
       if (!alive()) return;
       if (synced === null) { setError("对话加载失败，请重新打开"); return; }

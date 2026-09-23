@@ -196,6 +196,30 @@ test("focusConversation re-reads the shown conversation in place when the reques
   expect(api.detail.mock.calls.length).toBe(reads);
 });
 
+test("a bell refresh that returns after a newer submission was accepted is discarded", async () => {
+  // 就地重读还在路上时用户又提交了一问,且提交先落地:迟到的快照里没有新作业,
+  // 不许用它把刚接受的一轮抹掉(codex #785 R3)。
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.detail.mockResolvedValueOnce(detail("conv-a", [job("done")]));
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  await waitFor(() => expect(result.current.conversationId).toBe("conv-a"));
+
+  const stale = deferred<GlobalConversationDetail>();
+  api.detail.mockReturnValueOnce(stale.promise);
+  act(() => { result.current.focusConversation("conv-a", "job-elsewhere"); });
+
+  const accepted = { ...job("running"), job_id: "job-fresh", question: "又问一句", created_at: "2026-09-19T03:00:00Z" };
+  api.ask.mockResolvedValueOnce(accepted);
+  act(() => result.current.setDraft("又问一句"));
+  await act(async () => { await result.current.submit(); });
+  expect(result.current.running?.job_id).toBe("job-fresh");
+
+  await act(async () => { stale.resolve(detail("conv-a", [job("done")])); });
+  expect(result.current.turns.some((turn) => turn.job_id === "job-fresh")).toBe(true);
+  expect(result.current.running?.job_id).toBe("job-fresh");
+});
+
 test("a bell request that arrives while a submission is in flight is applied once it settles", async () => {
   installDialogMethods();
   api.list.mockResolvedValue([conversation("conv-b")]);
