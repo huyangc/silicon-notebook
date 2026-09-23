@@ -14,8 +14,9 @@ const GlobalAskWorkspace = lazy(() => import("./global-ask-workspace"));
 type Presentation = Pick<RootModalCoordinator, "view" | "open" | "requestClose" | "captureActorOwner">;
 
 /** 宿主(笔记本页)要求打开某个全局会话——目前只有铃铛里「进行中的提问」的全局
- *  条目会发。`nonce` 每次点击都换新值:同一个会话点两次也是两次独立的导航意图。 */
-export type GlobalConversationRequest = { conversationId: string; nonce: number };
+ *  条目会发,`jobId` 是那条在途作业(浮窗据此判断眼前的轮次是否已含它)。`nonce`
+ *  每次点击都换新值:同一个会话点两次也是两次独立的导航意图。 */
+export type GlobalConversationRequest = { conversationId: string; jobId?: string; nonce: number };
 
 export function GlobalAskLauncher({ presentation, uiMode, openRequest }: {
   presentation: Presentation; uiMode?: UiMode; openRequest?: GlobalConversationRequest | null;

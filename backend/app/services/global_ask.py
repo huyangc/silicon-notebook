@@ -2136,6 +2136,11 @@ class GlobalAskService:
                 with self._lock:
                     self._discarding.discard(job_id)
                 self._end_feed(feed, job_id, user_id)
+                # 铃铛同理(codex #785 R2):终态行在这里已经写下(discard 时连行都没了),
+                # worker 可能还要几秒才退出;等它退出再刷,铃铛就一直挂着一条已停止、
+                # 甚至已被删掉的提问。worker 退出时的那次推送随后再到只是重复的同一份
+                # 快照(按用户单调序号,旧帧被丢弃)。
+                publish_snapshot(user_id)
         return job
 
     def submit_feedback(self, job_id, rating, *, user_id, allowed_notebook_ids=None):
@@ -2191,11 +2196,15 @@ class GlobalAskService:
     def delete_conversation(self, conversation_id, *, user_id):
         self._conversation(conversation_id, user_id)
         with self._lock:
-            for job_id in self.store.running_job_ids(conversation_id, user_id):
+            running = self.store.running_job_ids(conversation_id, user_id)
+            for job_id in running:
                 event = self._events.get(job_id)
                 if event is not None:
                     event.set()
             self.store.delete(conversation_id, user_id)
+        # 会话连同在途作业一起删了:铃铛现在就刷,不等 worker 退出(同 ``cancel``)。
+        if running:
+            publish_snapshot(user_id)
 
     # ------------------------------------------------------------------
     # public conversation sharing -- the global twin of the notebook-scoped

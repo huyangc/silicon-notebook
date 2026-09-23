@@ -912,6 +912,40 @@ def test_the_bell_is_refreshed_once_at_start_and_once_after_the_terminal_frame(
     assert order[2:] == ([("note",)] if outcome == "done" else [])
 
 
+@pytest.mark.parametrize("discard", [False, True])
+def test_stop_refreshes_the_bell_without_waiting_for_the_worker(setup, monkeypatch, discard):
+    """Stop writes the terminal row (discard: deletes it) and ends the feed in the
+    cancelling request; the bell is refreshed there too, while the worker is still
+    stuck and holds the job in its registry (codex #785 R2). Otherwise a connected
+    bell keeps showing a stopped -- or already deleted -- ask as running."""
+    service, _, _, _ = setup
+    pushes, _ = _record_bell_pushes(service, monkeypatch)
+    staged = []
+    monkeypatch.setattr("app.services.global_ask.threading.Thread.start", _stage_job_threads(staged))
+    job = service.start(GlobalAskRequest(question="compare"), user_id="u")
+    assert pushes == []  # the worker (and its start push) is held back
+
+    service.cancel(job.job_id, user_id="u", discard=discard)
+    assert len(pushes) == 1
+    _, user, statuses, live = pushes[0]
+    assert user == "u" and job.job_id in live            # worker has not exited
+    assert statuses.get(job.job_id) == (None if discard else "cancelled")
+
+    staged[0].run()                                      # the worker unwinds later
+    assert all(entry[2].get(job.job_id) != "running" for entry in pushes)
+
+
+def test_deleting_a_conversation_with_a_running_job_refreshes_the_bell(setup, monkeypatch):
+    service, _, _, _ = setup
+    pushes, _ = _record_bell_pushes(service, monkeypatch)
+    staged = []
+    monkeypatch.setattr("app.services.global_ask.threading.Thread.start", _stage_job_threads(staged))
+    job = service.start(GlobalAskRequest(question="compare"), user_id="u")
+    service.delete_conversation(job.conversation_id, user_id="u")
+    assert len(pushes) == 1 and job.job_id not in pushes[0][2]
+    staged[0].run()
+
+
 def test_a_job_whose_worker_never_starts_clears_the_bell(setup, monkeypatch):
     """The row is ``running`` before the worker fails to start, so a concurrent
     snapshot may already show it; one terminal push removes it (the notebook
