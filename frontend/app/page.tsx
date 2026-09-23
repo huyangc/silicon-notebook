@@ -2821,7 +2821,8 @@ export default function Home() {
     // 会话上。接回同样由会话详情既有的在途轮次 + 推送流承担,铃铛只负责导航。
     if (item.type === "ask" && item.scope === "global") {
       const conversationId = item.conversation_id;
-      if (conversationId) setGlobalAskRequest((prev) => ({ conversationId, nonce: (prev?.nonce ?? 0) + 1 }));
+      const jobId = item.job_id;
+      if (conversationId) setGlobalAskRequest((prev) => ({ conversationId, jobId, nonce: (prev?.nonce ?? 0) + 1 }));
       return;
     }
     // coalesce:false —— 待办项的目的地是报告/治理/索引里的某个具体位置,不是「再点一次

@@ -58,20 +58,21 @@ const suggestions = [
   { title: "寻找相关证据", question: "这个问题有哪些原文证据支持，还有哪些信息需要补充？", icon: FileText },
 ];
 
-export default function GlobalAskWorkspace({ compact = false, embedded = false, active = true, controls, onOpenNotebook, uiMode, requestedConversation }: { compact?: boolean; embedded?: boolean; active?: boolean; controls?: ReactNode; onOpenNotebook?: () => void; uiMode?: UiMode; requestedConversation?: { conversationId: string; nonce: number } | null }) {
+export default function GlobalAskWorkspace({ compact = false, embedded = false, active = true, controls, onOpenNotebook, uiMode, requestedConversation }: { compact?: boolean; embedded?: boolean; active?: boolean; controls?: ReactNode; onOpenNotebook?: () => void; uiMode?: UiMode; requestedConversation?: { conversationId: string; jobId?: string; nonce: number } | null }) {
   const ask = useGlobalAsk({ syncUrl: !embedded, active, uiMode });
   // 宿主要求打开的会话(铃铛里的全局条目)。等首次载入结束再开:载入与打开会话各自
-  // 推进 owner,载入中途打开会把会话列表那次读取作废。每个 nonce 只处理一次;已经
-  // **成功**停在那个会话上就不重开——重开会清空输入框里的草稿,而用户要的只是「看到
-  // 它」。上次打开失败(`openFailed`:id 已记下、正文没读到)则照常重开,否则再点多少次
-  // 都只是一个空会话加一个禁用的输入框(codex #785 R1)。
+  // 推进 owner,载入中途打开会把会话列表那次读取作废。提交 / 停止在途时也先不动——
+  // `focusConversation` 那时不接请求,等它们落定(依赖里的 submitting / stopping 变化)
+  // 再试;每个 nonce 只在**被接下之后**才算处理过。怎么打开见 `focusConversation`。
   const handledRequest = useRef(0);
   useEffect(() => {
-    if (!requestedConversation || ask.loading || handledRequest.current === requestedConversation.nonce) return;
-    handledRequest.current = requestedConversation.nonce;
-    if (requestedConversation.conversationId !== ask.conversationId || ask.openFailed) void ask.openConversation(requestedConversation.conversationId);
+    if (!requestedConversation || ask.loading || ask.submitting || ask.stopping) return;
+    if (handledRequest.current === requestedConversation.nonce) return;
+    if (ask.focusConversation(requestedConversation.conversationId, requestedConversation.jobId)) {
+      handledRequest.current = requestedConversation.nonce;
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [requestedConversation?.nonce, ask.loading]);
+  }, [requestedConversation?.nonce, ask.loading, ask.submitting, ask.stopping]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [cite, setCite] = useState<CiteSelection | null>(null);
   const [share, setShare] = useState<ShareSelection | null>(null);

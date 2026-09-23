@@ -170,6 +170,52 @@ test("a running global ask picked in the bell opens the window on that conversat
   await waitFor(() => expect(api.detail).toHaveBeenLastCalledWith("conv-c"));
 });
 
+test("focusConversation re-reads the shown conversation in place when the requested job is not on screen", async () => {
+  // 这个窗口早先打开过 conv-a,之后别的标签页在同一个会话里又问了一轮:会话 id 相同、
+  // 上次也没失败,但眼前的轮次里没有那条在途作业(codex #785 R2)。
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.detail.mockResolvedValueOnce(detail("conv-a", [job("done")]));
+  const { result } = renderHook(() => useGlobalAsk());
+  await waitFor(() => expect(result.current.conversationId).toBe("conv-a"));
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  act(() => result.current.setDraft("还没发出去的草稿"));
+
+  const newer = { ...job("running"), job_id: "job-newer", created_at: "2026-09-19T02:00:00Z" };
+  api.detail.mockResolvedValueOnce(detail("conv-a", [job("done"), newer]));
+  let accepted = false;
+  act(() => { accepted = result.current.focusConversation("conv-a", "job-newer"); });
+  expect(accepted).toBe(true);
+  await waitFor(() => expect(result.current.running?.job_id).toBe("job-newer"));
+  // 就地重读:草稿与会话都原样保留。
+  expect(result.current.draft).toBe("还没发出去的草稿");
+  expect(result.current.conversationId).toBe("conv-a");
+
+  // 那条作业已经在眼前:再要一次什么都不读。
+  const reads = api.detail.mock.calls.length;
+  act(() => { result.current.focusConversation("conv-a", "job-newer"); });
+  expect(api.detail.mock.calls.length).toBe(reads);
+});
+
+test("a bell request that arrives while a submission is in flight is applied once it settles", async () => {
+  installDialogMethods();
+  api.list.mockResolvedValue([conversation("conv-b")]);
+  const pending = deferred<GlobalJob>();
+  api.ask.mockReturnValueOnce(pending.promise);
+  render(<BellLauncher />);
+  fireEvent.click(screen.getByRole("button", { name: "打开全局问答" }));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入问题" })).toBeEnabled());
+  fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "新问题" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+  await waitFor(() => expect(api.ask).toHaveBeenCalledTimes(1));
+
+  // 提交还在途:这次导航不能被当成「处理过」却什么都没做(codex #785 R2)。
+  fireEvent.click(screen.getByRole("button", { name: "铃铛:打开 conv-b" }));
+  expect(api.detail).not.toHaveBeenCalledWith("conv-b");
+
+  await act(async () => { pending.resolve(job("running", "conv-new")); });
+  await waitFor(() => expect(api.detail).toHaveBeenCalledWith("conv-b"));
+});
+
 test("a bell click retries a conversation whose last load failed", async () => {
   installDialogMethods();
   api.list.mockResolvedValue([conversation("conv-b")]);

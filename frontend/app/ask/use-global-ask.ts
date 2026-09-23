@@ -477,6 +477,37 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     }
   }
 
+  /**
+   * 宿主要求「让我看到这个会话里的这条作业」(铃铛里进行中的全局问答)。
+   *
+   * 返回值**同步**说明这次请求有没有被接下:提交 / 停止在途(`flight`)时不接,调用方
+   * 等它们落定再发一次——只有在接下之后才算处理过,否则那次导航会被悄悄吞掉,浮窗
+   * 停在错的会话上(codex #785 R2)。接下之后:
+   *   · 不在这个会话上,或上次打开失败——走 `openConversation`,与点会话列表同一条路;
+   *   · 已经停在这个会话上、但那条作业不在当前轮次里(别的标签页后来在这里又问了
+   *     一轮)——就地重读第一页,草稿与范围原样保留;轮询 / 推送流随在途轮次出现自动
+   *     接上。
+   *   · 已经停在这里且那条作业就在眼前——什么都不做(重开会清掉草稿)。
+   */
+  function focusConversation(id: string, jobId?: string): boolean {
+    if (flight.current) return false;
+    if (id !== currentId.current || openFailed) {
+      void openConversation(id);
+      return true;
+    }
+    if (!jobId || turns.some((turn) => turn.job_id === jobId)) return true;
+    const ticket = owner.current;
+    const alive = () => mounted.current && ticket === owner.current && currentId.current === id && !flight.current;
+    void readConversation(id).then((synced) => {
+      if (!alive()) return;
+      if (synced === null) { setError("对话加载失败，请重新打开"); return; }
+      setPollError("");
+      if (synced === "gone") dropConversationIdentity(id);
+      else applyConversation(synced);
+    });
+    return true;
+  }
+
   function resetConversation() {
     ++owner.current;
     flight.current = false;
@@ -982,7 +1013,7 @@ export function useGlobalAsk({ syncUrl = true, active = true, uiMode: hostUiMode
     loading, opening, openFailed, submitting, stopping, error, notice, pollError, historyError, running,
     pending, traceSeeds,
     moreHistory, loadingHistory, turnOffset, loadingTurns, loadMoreHistory, loadMoreTurns,
-    load, openConversation, newConversation, submit, stop, sendFeedback, updateConversation, removeConversation,
+    load, openConversation, focusConversation, newConversation, submit, stop, sendFeedback, updateConversation, removeConversation,
     mode, selectMode, modes: GLOBAL_ASK_MODES, uiMode,
     intentReview, intentChecking, confirmIntent, cancelIntent, abortIntent,
     retryPoll: () => { setPollError(""); setPollRevision((value) => value + 1); },

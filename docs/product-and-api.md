@@ -3050,7 +3050,9 @@ cancellation entry (stopping an ask stays the in-session 「停止」 button).
   conversation-detail reattach path takes over from there. A global item carries an
   empty `notebook_id` / `notebook_name`, is labelled 「全局问答」 in the bell, and
   clicking it opens the floating global Ask window on that conversation instead of a
-  notebook (a window already showing that conversation is left as is, draft included).
+  notebook (a window already showing that conversation is left as is, draft included;
+  if that conversation's turns do not yet include the running job, it is re-read in
+  place; a click during an in-flight submit or stop is applied once that settles).
 - **It never rings.** In-progress asks are excluded from the payload's `count`, and
   the client excludes them from its unread badge — this is a deliberate divergence
   from index-building and paper-metadata-backfill items, which do count as unread.
@@ -3061,7 +3063,10 @@ cancellation entry (stopping an ask stays the in-session 「停止」 button).
   ask, notebook or global: once when the job starts and once when it reaches a
   terminal state (for a global ask: after the push stream's terminal frame and the
   job leaving the live registry, before the post-completion learning chains; a global
-  job whose worker never starts publishes that one terminal snapshot too). Trace
+  job whose worker never starts publishes that one terminal snapshot too). Stopping a
+  global ask, or deleting its conversation, also publishes from that request as soon
+  as the row is terminal or gone, without waiting for the worker to unwind; the
+  worker's own later publish is then a duplicate the per-user sequence discards. Trace
   progress never publishes (recomputing the snapshot is a database read; the
   per-step rate would turn it into a query storm), and the terminal publish is
   ordered strictly *after* the terminal event is queued for the browser so it can
