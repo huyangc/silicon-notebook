@@ -280,7 +280,7 @@ volume (`reasoning` then re-selects its seed from that list by score). A keyword
 leaves that notebook without keyword hits: it never enters the searched/skipped receipts (coverage is decided by
 the semantic legs alone), and no failure of it raises a banner. The keyword passages handed on are fingerprinted
 at retrieval time exactly like semantic ones, so their citations get the same recheck, without producing any
-coverage receipt. The run emits one
+coverage receipt. Each call of the arm emits one
 content-free `ask_stage` event, `stage: "global_keyword_arm"`, with participant, notebooks-with-hits, merged,
 failed-notebook counts and latency. `GLOBAL_ASK_KEYWORD_ARM_ENABLED` (default `true`) is the rollback switch:
 `false` closes the arm for global runs again; single-notebook asks never read it.
@@ -289,20 +289,27 @@ The exact-identifier lookup arm is federated the same way. A question that names
 nothing: the same zero-I/O identifier test runs first, so no participant is read, no leg is started and no event is
 emitted. Otherwise the single-notebook lookup (same `EXACT_LOOKUP_*` bounds per notebook) runs once per
 participant on the same fan-out and the same single per-notebook budget as the keyword arm, each notebook under
-its own frozen ceiling; a notebook with no visible source issues no query, and because the lookup has no source
-predicate, a notebook whose live visible sources no longer equal its frozen ceiling is skipped — that notebook
-alone. The merge works in WHOLE SECTIONS: every notebook's first section, then every notebook's second, …, a
-passage already taken is dropped, and the total stops at `GLOBAL_ASK_CANDIDATE_LIMIT` without ever cutting a
-section (the first section that does not fit ends the merge). Every passage keeps its exact-lookup mark and its
-owning notebook. The reserved seats are shared per notebook with their totals unchanged: `EXACT_SECTION_RESERVE`
-in `chunk` mode's `mix` selection and `REASONING_EXACT_RESERVE` in `reasoning`'s synthesis prefix are split
-evenly across the notebooks that returned exact passages (the remainder goes to the notebook seen first; with
-more notebooks than seats, only the first ones get one each), so one notebook's large section cannot take every
-seat; with passages from one notebook — every single-notebook ask — both behave exactly as before. Failures,
+its own frozen ceiling; a notebook with no visible source issues no query. The lookup filters its probe hits by
+that notebook's frozen source ceiling BEFORE grouping them and handing out section slots, so a source outside the
+ceiling (a hidden Memory/Knowhow projection, or a source added after the question was asked) neither takes a
+section slot nor is fetched; the probe's own `EXACT_LOOKUP_FTS_K` window is still taken before that filter, so such
+rows can use part of it. The merge works in WHOLE SECTIONS: every notebook's first section, then every notebook's
+second, …, a passage already taken is dropped, and the total stops at `GLOBAL_ASK_CANDIDATE_LIMIT` without ever
+cutting a section — a section that does not fit in what is left is skipped whole and a later, smaller one may
+still be taken. Every passage keeps its exact-lookup mark and its owning notebook. The reserved seats are shared
+per notebook with their totals unchanged: `EXACT_SECTION_RESERVE` in `chunk` mode's `mix` selection, and
+`REASONING_EXACT_RESERVE` both in `reasoning`'s single-shot synthesis prefix and in the unbound exact passages
+injected into every section of per-section synthesis, are split evenly across the notebooks that returned exact
+passages, in the order of each notebook's best exact passage by relevance (ties: the notebook seen first): the
+remainder goes to the front, with more notebooks than seats only the first ones get one each, and a notebook with
+fewer passages than its share passes the unused seats on in the same order — so one notebook's large section
+cannot take every seat and no seat stays idle while another notebook still has passages. `chunk` mode's `multi`
+selection likewise gives each notebook's exact passages their own quota group. With passages from one notebook —
+every single-notebook ask — all of these behave exactly as before. Failures,
 timeouts, receipts, banners and evidence follow the keyword arm's rules: a failed leg only leaves that notebook
 without exact passages, never enters the searched/skipped receipts and never raises a banner, and the passages
 handed on are fingerprinted at retrieval time. One `reasoning` `exact_lookup` action is still one lookup (now
-one federated lookup) against its per-run cap. The run emits one content-free `ask_stage` event,
+one federated lookup) against its per-run cap. Each call of the arm emits one content-free `ask_stage` event,
 `stage: "global_exact_arm"`, with participant, notebooks-with-hits, merged-passage, merged-section and
 failed-notebook counts and latency. `GLOBAL_ASK_EXACT_ARM_ENABLED` (default `true`) is the rollback switch:
 `false` closes the arm for global runs again; `EXACT_LOOKUP_ENABLED=false` still closes it everywhere, and

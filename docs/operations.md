@@ -117,10 +117,10 @@ concurrency, not the user's scope), `queue_deadline` (the phase budget expired w
 queued behind the shared retrieval pool — nothing was asked of the database, so "narrow your scope" would be
 the wrong advice) and `unavailable` (everything else). Rows carrying `arm="keyword"` belong to the global
 bilingual keyword recall supplement, which has NO coverage receipt: exclude them when counting skip events
-against receipts. That arm reports once per run as `ask_stage` with `stage="global_keyword_arm"` (participant,
+against receipts. That arm reports once per call (a `reasoning` run may call it more than once) as `ask_stage` with `stage="global_keyword_arm"` (participant,
 notebooks-with-hits, merged and failed-notebook counts plus latency, no text). Rows carrying `arm="exact"` belong
-to the global exact-identifier lookup arm and are excluded the same way; that arm reports once per run (only
-when the question names something probe-worthy) as `ask_stage` with `stage="global_exact_arm"` (participant,
+to the global exact-identifier lookup arm and are excluded the same way; that arm reports once per call (only
+when the query names something probe-worthy; a `reasoning` run may call it several times) as `ask_stage` with `stage="global_exact_arm"` (participant,
 notebooks-with-hits, merged-passage, merged-section and failed-notebook counts plus latency, no identifier,
 question or path text). `chunk_federation_evidence_unavailable` reports that
 a call's evidence fingerprints could not be read, which makes the affected citations refusable by name;

@@ -648,7 +648,9 @@ def federated_exact_chunk_candidates(
     first section, library 2's first section, ..., then every library's
     second, and so on; a ``chunk_id`` already taken is dropped; the total is
     capped at ``global_ask_candidate_limit`` without ever cutting a section --
-    the first section that does not fit ends the merge.  Handing a caller half
+    a section that does not fit in what is left is skipped whole and a later,
+    smaller one may still be taken (a library ranked late in the round is not
+    starved by the early ones' large sections).  Handing a caller half
     of a command's section is the failure this channel exists to prevent.
     Every hit keeps its ``exact_lookup`` flag and is stamped with its library.
 
@@ -813,15 +815,19 @@ def _interleave_sections_capped(columns: list, limit: int) -> tuple:
 
     Round-robin over the libraries one WHOLE section at a time.  Chunks
     already taken are dropped from a later section (a section left empty by
-    that is skipped, not counted); the first section whose remaining chunks do
-    not fit under ``limit`` ends the merge, so no section is ever cut.
-    ``sections`` counts the sections that contributed.
+    that is skipped, not counted).  A section whose remaining chunks do not fit
+    in what is left of ``limit`` is skipped WHOLE -- never cut -- and the
+    round continues, so a later, smaller section may still be taken.  Stops as
+    soon as the list is full.  ``sections`` counts the sections that
+    contributed.
     """
     merged: list = []
     seen: set = set()
     sections = 0
     for position in range(max((len(column) for column in columns), default=0)):
         for column in columns:
+            if len(merged) >= limit:
+                return merged, sections
             if position >= len(column):
                 continue
             fresh: list = []
@@ -834,7 +840,7 @@ def _interleave_sections_capped(columns: list, limit: int) -> tuple:
             if not fresh:
                 continue
             if len(merged) + len(fresh) > limit:
-                return merged, sections
+                continue
             seen.update(taken)
             merged.extend(fresh)
             sections += 1

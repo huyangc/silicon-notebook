@@ -14,6 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Sequence
 
+from app.services.retrieval import select_by_library
+
 
 # 每节的 `[k]` 编号基址步长。合成上下文里既有的分区基址(chunk 0 / KG 1000 /
 # chains 2000 / Memory 3000 / element 4000 / 集合清单 5000)全部 < 6000,所以
@@ -115,7 +117,8 @@ def plan_outline_sections(
     这三处会各说各的 —— 模型被告知在写第 2 节,读者却在第 4 个标题下读到它。
 
     ``exact_reserve``:**未被任何节绑定**的精确命中(用户在问题里逐字点名的那些
-    段落,``RetrievedChunk.exact_lookup``)按 ``chunk_by_id`` 迭代序取前 N 条,放进
+    段落,``RetrievedChunk.exact_lookup``)按 ``chunk_by_id`` 迭代序取前 N 条(跨库时
+    N 个席位按库分配,见 ``retrieval.select_by_library``;单库时即前 N 条),放进
     **每一节**切片的 ``exact_chunks``。缺省 0 = 不注入,此时 ``exact_chunks`` 为
     空,切片其余内容、顺序、``evidence_count`` 与 ``skipped`` 逐字节等于接这个
     参数之前。
@@ -183,16 +186,15 @@ def plan_outline_sections(
         kept.append(section)
 
     # 空节判定已经做完(上面的循环),所以注入不可能让任何一节复活。
+    # 席位按库分配(``retrieval.select_by_library``):单库时恰是迭代序前 N 条;
+    # 跨库(全局问答的联邦精确臂)时一个库的大节不能占满全部席位。
     reserved: list = []
     if int(exact_reserve or 0) > 0:
-        for key, chunk in chunk_by_id.items():
-            if key in bound_chunk_keys:
-                continue
-            if not getattr(chunk, "exact_lookup", False):
-                continue
-            reserved.append(chunk)
-            if len(reserved) >= int(exact_reserve):
-                break
+        reserved = select_by_library([
+            chunk for key, chunk in chunk_by_id.items()
+            if key not in bound_chunk_keys
+            and getattr(chunk, "exact_lookup", False)
+        ], int(exact_reserve))
 
     slices: list[OutlineSectionSlice] = []
     for section, parent_id in _document_order(kept):
