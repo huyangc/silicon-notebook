@@ -47,6 +47,12 @@ _RECALL = 7
 _CANDIDATE_LIMIT = 64
 
 
+def _sha(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
 def _borrow(name: str):
     return getattr(CandidateRetrievalService, name)
 
@@ -85,8 +91,12 @@ class KeywordProbe:
         self.model_errors: list = []
         self.seat_reads = 0
         self._lock = threading.Lock()
+        self.elements: dict = {}
+        self.snapshot_reads: list = []
+        self.passage_error = None
         self.sources = SimpleNamespace(
             all_visible_source_ids=lambda nid: self._visible.get(nid, ()),
+            passage_evidence_snapshot=self._passage_evidence_snapshot,
         )
 
     # --- 参与集座位(非对等路径绝不该读它) ---------------------------------
@@ -142,7 +152,32 @@ class KeywordProbe:
             for rows in self._hits.values() if isinstance(rows, list)
             for chunk_id, rel in rows
         }
-        return [{"chunk_id": cid, "relevance": relevance[cid]} for cid in chunk_ids]
+        return [
+            {"chunk_id": cid, "relevance": relevance[cid],
+             "element_ids": self.elements_of(cid)}
+            for cid in chunk_ids
+        ]
+
+    # --- 检索时刻取证(``_report_evidence`` 读的那一口) ------------------------
+    def elements_of(self, chunk_id):
+        return list(self.elements.get(chunk_id, (f"el-{chunk_id}",)))
+
+    def _passage_evidence_snapshot(self, chunk_ids):
+        """默认:段落原文未动,元素指纹 ``fp-<element>``;``passage_error`` 让整批读失败。"""
+        with self._lock:
+            self.snapshot_reads.append(list(chunk_ids))
+        if self.passage_error is not None:
+            raise self.passage_error
+        return {
+            cid: {
+                "text_sha": _sha(f"text-{cid}"),
+                "elements": {
+                    element_id: (f"src-{cid}", f"fp-{element_id}")
+                    for element_id in self.elements_of(cid)
+                },
+            }
+            for cid in chunk_ids
+        }
 
     def _hydrate_chunk_candidates(self, chunk_ids):
         self._record(("hydrate", tuple(chunk_ids)))
@@ -175,6 +210,7 @@ def ranked_scoring(monkeypatch):
             RetrievedChunk(
                 chunk_id=row["chunk_id"], source_id=f"src-{row['chunk_id']}",
                 source_title="t", section_path="", text=f"text-{row['chunk_id']}",
+                element_ids=list(row.get("element_ids", ())),
                 score=row["relevance"], relevance=row["relevance"],
             )
             for row in ranked
@@ -388,8 +424,9 @@ def test_failing_libraries_leave_the_rest_and_never_reach_receipts():
     assert _ids(merged) == [("nb-a", "a1")]
     # 覆盖口径只由语义腿决定:关键词腿一个回执、一份证据指纹都不发。
     assert receipts.libraries == []
-    assert receipts.evidence == []
-    assert receipts.groups == []
+    # 检索时刻取证只覆盖交给调用方的那批段落(codex #787 r1),与回执无关。
+    assert receipts.evidence == [{"el-a1": ("src-a1", "fp-el-a1")}]
+    assert receipts.groups == [[]]
     # 全局模式里任何一个库的关键词腿失败都不走横幅(补召回臂缺席不影响结果的
     # 可信度),未分类的 RuntimeError 也一样;失败只以 skip 事件记下。
     assert probe.model_errors == []
@@ -749,3 +786,121 @@ def test_chunk_mode_entry_returns_per_library_hits_and_drops_unchecked_sources()
 
     assert _ids(hits) == [("nb-a", "nb-a"), ("nb-b", "nb-b")]
     assert sorted(call[1] for call in probe.fts) == ["nb-a", "nb-b"]
+
+
+# ---------------------------------------------------------------------------
+# 8. 检索时刻取证(codex #787 r1):关键词段落登记证据,但不发覆盖回执
+# ---------------------------------------------------------------------------
+
+def _run_state_plan_sink(state):
+    """把计划的三条回传接到真实 ``global_ask._RunState`` 上(回执另记)。"""
+    receipts: list = []
+    return SimpleNamespace(
+        on_library=lambda nid, outcome: receipts.append((nid, outcome)),
+        on_evidence=state.record_evidence,
+        on_evidence_groups=state.record_evidence_groups,
+        receipts=receipts,
+    )
+
+
+def test_keyword_only_passages_publish_retrieval_time_evidence_without_receipts():
+    receipts = Receipts()
+    probe = KeywordProbe(
+        ("nb-a", "nb-b"),
+        hits={"nb-a": [("a1", 0.9), ("a2", 0.8)], "nb-b": [("b1", 0.7)]},
+        limit=2,
+    )
+    probe.elements = {"a1": ("el-a1-0", "el-a1-1")}
+
+    with _global_run(("nb-a", "nb-b"), receipts):
+        merged = probe._keyword_chunk_candidates("nb-a", _NEEDLE)
+
+    # 登记的恰是交给调用方的那批(封顶后 a2 不在其中),一次读。
+    assert _ids(merged) == [("nb-a", "a1"), ("nb-b", "b1")]
+    assert probe.snapshot_reads == [["a1", "b1"]]
+    assert receipts.evidence == [{
+        "el-a1-0": ("src-a1", "fp-el-a1-0"),
+        "el-a1-1": ("src-a1", "fp-el-a1-1"),
+        "el-b1": ("src-b1", "fp-el-b1"),
+    }]
+    assert receipts.groups == [[("el-a1-0", "el-a1-1")]]
+    # 覆盖回执只由语义腿决定。
+    assert receipts.libraries == []
+
+
+def test_unreadable_keyword_evidence_fails_closed():
+    receipts = Receipts()
+    probe = KeywordProbe(("nb-a",), hits={"nb-a": [("a1", 0.9)]})
+    probe.passage_error = RuntimeError("store down")
+
+    with _global_run(("nb-a",), receipts):
+        merged = probe._keyword_chunk_candidates("nb-a", _NEEDLE)
+
+    assert _ids(merged) == [("nb-a", "a1")]
+    assert receipts.evidence == [{"el-a1": None}]
+    assert receipts.libraries == []
+
+
+def test_keyword_registration_never_overwrites_a_semantic_snapshot():
+    """同一 element:语义腿先登记真实快照,关键词腿后登记(这里读失败 → None),
+    ``_RunState.record_evidence`` 的有方向合并保住前者。"""
+    from app.services.global_ask import _RunState
+
+    state = _RunState(("nb-a",))
+    state.record_evidence({"el-a1": ("src-a1", "fp-semantic")})
+    probe = KeywordProbe(("nb-a",), hits={"nb-a": [("a1", 0.9)]})
+    probe.passage_error = RuntimeError("store down")
+
+    with _global_run(("nb-a",), _run_state_plan_sink(state)):
+        probe._keyword_chunk_candidates("nb-a", _NEEDLE)
+
+    assert state.evidence == {"el-a1": ("src-a1", "fp-semantic")}
+
+
+def test_no_plan_registers_no_keyword_evidence():
+    probe = KeywordProbe(("nb-a", "nb-b"), hits={"nb-a": [("a1", 0.9)]})
+
+    with _peer_run(("nb-a", "nb-b")):
+        merged = probe._keyword_chunk_candidates("nb-a", _NEEDLE)
+
+    assert _ids(merged) == [("nb-a", "a1")]
+    assert probe.snapshot_reads == []
+
+
+def test_a_keyword_only_citation_is_refused_after_its_source_is_reingested():
+    """贴近真实:只被关键词臂召回的段落被引用;合成前来源被重新入库(同一 element
+    id、指纹变化)→ 引用复核拒绝它。对照:同一变化在没有检索时刻快照时会被放行——
+    这正是修复前的洞。"""
+    from app.services.global_ask import GlobalAskService, _RunState
+
+    state = _RunState(("nb-a",))
+    # chunk id 取 ``nb-a``,于是替身给它的来源是 ``src-nb-a``,在该库天花板内。
+    probe = KeywordProbe(("nb-a",), hits={"nb-a": [("nb-a", 0.9)]})
+    with _global_run(("nb-a",), _run_state_plan_sink(state)):
+        merged = probe._keyword_chunk_candidates("nb-a", _NEEDLE)
+    assert _ids(merged) == [("nb-a", "nb-a")]
+    assert state.evidence == {"el-nb-a": ("src-nb-a", "fp-el-nb-a")}
+
+    live = {"el-nb-a": ("src-nb-a", "fp-after-reingest")}
+    service = object.__new__(GlobalAskService)
+    service.sources = SimpleNamespace(
+        evidence_fingerprints=lambda ids: {i: live[i] for i in ids if i in live},
+        all_visible_source_ids=lambda nid: ("src-nb-a",),
+    )
+    service.settings = SimpleNamespace(global_ask_notebook_timeout_seconds=5.0)
+    citation = SimpleNamespace(
+        element_id="el-nb-a", notebook_id="nb-a", source_id="src-nb-a",
+        tier="personal", url="",
+    )
+    ceiling = {"nb-a": {"src-nb-a"}}
+
+    assert service._validate_citations(
+        [citation], state.evidence, ceiling, siblings=state.siblings,
+    ) == "changed"
+    # 对照:缺快照(修复前的状态)时,同源的指纹变化被当成非联邦证据放行。
+    assert service._validate_citations([citation], {}, ceiling) == ""
+    # 对照:未被改动时照常通过。
+    live["el-nb-a"] = ("src-nb-a", "fp-el-nb-a")
+    assert service._validate_citations(
+        [citation], state.evidence, ceiling, siblings=state.siblings,
+    ) == ""

@@ -543,10 +543,21 @@ def federated_keyword_chunk_candidates(
     semantic arm, and a second copy would read like a second cut.
 
     ⛔ NO RECEIPTS.  Coverage (searched/skipped) is the semantic legs' verdict
-    alone: this function never reaches ``_merge_results`` or the plan's
-    callbacks, so a keyword leg that timed out or failed is only "this library
-    had no keyword hits" -- fail-open, with its skip event marked
-    ``arm="keyword"``.  ``AskCancelled`` and the attestation error still
+    alone: this function never reaches ``_merge_results``,
+    ``_report_receipts`` or ``plan.on_library``, so a keyword leg that timed
+    out or failed is only "this library had no keyword hits" -- fail-open,
+    with its skip event marked ``arm="keyword"``.
+
+    ⛔ BUT EVIDENCE, YES (codex #787 r1).  The merged list -- exactly what the
+    caller receives, after interleave/dedup/cap -- goes through
+    ``_report_evidence`` (``on_evidence_groups`` + ``on_evidence``) under a
+    run plan, as a ``FederatedCollected`` shaped like the semantic merge's.  A
+    passage only this arm retrieved must carry a retrieval-time fingerprint:
+    absent from the run's table, the citation re-check would read it as a
+    non-federated element and wave a stale citation through.  The consumer's
+    merge is directional (a real snapshot is never overwritten by a later
+    ``None``), so this cannot undo what a semantic leg already attested.
+    Without a plan nothing is registered, as for the semantic legs.  ``AskCancelled`` and the attestation error still
     propagate through ``_run_one``/``_run_tasks`` exactly as for a semantic leg.
 
     Failures are therefore visible ONLY in telemetry: the summary event's
@@ -613,6 +624,16 @@ def federated_keyword_chunk_candidates(
     merged = _interleave_capped(
         columns, int(candidates.settings.global_ask_candidate_limit),
     )
+    if plan is not None and merged:
+        # Retrieval-time evidence for exactly what is handed to the caller --
+        # the same read, rules and consumer the semantic selection uses -- so a
+        # passage only this arm found is re-checked like any other federated
+        # one instead of looking "never travelled this channel".  No receipt.
+        _report_evidence(
+            candidates, plan,
+            FederatedCollected({hit.chunk_id: hit for hit in merged}),
+            deadline,
+        )
     unhealthy = set(dropped) | set(failed) | {
         task.notebook_id for task, reason in zip(tasks, reasons) if reason
     }

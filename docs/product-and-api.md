@@ -278,7 +278,9 @@ notebook's own keyword-score order (every notebook's first, then every second, â
 passage, and stops at `GLOBAL_ASK_CANDIDATE_LIMIT`, so no notebook fills the merged list handed to the caller by
 volume (`reasoning` then re-selects its seed from that list by score). A keyword leg that times out or fails only
 leaves that notebook without keyword hits: it never enters the searched/skipped receipts (coverage is decided by
-the semantic legs alone), and no failure of it raises a banner. The run emits one
+the semantic legs alone), and no failure of it raises a banner. The keyword passages handed on are fingerprinted
+at retrieval time exactly like semantic ones, so their citations get the same recheck, without producing any
+coverage receipt. The run emits one
 content-free `ask_stage` event, `stage: "global_keyword_arm"`, with participant, notebooks-with-hits, merged,
 failed-notebook counts and latency. `GLOBAL_ASK_KEYWORD_ARM_ENABLED` (default `true`) is the rollback switch:
 `false` closes the arm for global runs again; single-notebook asks never read it.
