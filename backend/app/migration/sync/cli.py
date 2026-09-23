@@ -317,6 +317,12 @@ def _cmd_import(args: argparse.Namespace, settings: Settings) -> int:
             f"随笔记本删除作业整本清理 {report.deletes_folded_into_notebook_deletion}、"
             f"目标端正在拷贝、本次未动 {report.deletes_skipped_for_copying}"
         )
+        if report.source_authoritative_collisions_resolved:
+            print(
+                "记忆修订/来源的唯一键冲突按源端权威消解: "
+                f"{report.source_authoritative_collisions_resolved} 条（只替换目标端自建的那条，"
+                "源端未动的历史保留）"
+            )
         if report.notebooks_deleted:
             print(
                 "已排队删除的笔记本: "

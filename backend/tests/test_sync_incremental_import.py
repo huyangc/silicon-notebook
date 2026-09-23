@@ -2428,3 +2428,169 @@ def test_a_deleted_notebook_absent_at_the_target_is_not_itself_an_error(
     assert _one(
         mirror, "SELECT name FROM notebooks WHERE id=?", (baseline["alpha"],)
     )["name"] == "alpha v2"
+
+
+# ---- codex #788 r5: both sides edit one mirrored memory after the baseline
+
+
+def _add_revision(repo, memory: str, revision: int, row_id: str, title: str):
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO memory_revisions(id,memory_id,revision,title,"
+            "content_md,tags_json,status,promotion_state,changed_by,"
+            "change_reason,created_at) "
+            "VALUES(?,?,?,?,'body','[]','candidate','none','user-local',"
+            "'edit',?)",
+            (row_id, memory, revision, title, MOMENT),
+        )
+
+
+def test_both_sides_editing_one_memory_resolves_instead_of_deadlocking(
+    baseline
+):
+    """§5 lets the target edit a mirrored memory, and each side's memory
+    store allocates the next revision independently -- so both mint
+    ``revision = N+1`` under different ids and collide on
+    ``UNIQUE(memory_id, revision)``.
+
+    Before this fix that refused the import, and nothing could clear it: the
+    source cannot ship a delete for a row whose id it never saw, a resume
+    hits the same wall, and a newer full package cannot supersede the window
+    either (it never reached its delete-phase markers). The chain stopped for
+    good on an edit §5 explicitly permits (codex #788 r5 P1).
+
+    变异验证: 去掉 ``resolve_collisions`` 分支 (恢复直接拒绝), 本条报红;
+    把消解改成整体 ``_prune_superseded``, 「源端未动的旧修订仍在」断言报红。"""
+    repo = baseline["source"]["repo"]
+    mirror = baseline["target"]["repo"]
+    memory = _one(
+        repo, "SELECT id FROM memory_items WHERE notebook_id=?",
+        (baseline["alpha"],),
+    )["id"]
+    # History the baseline mirrors and that NEITHER side touches afterwards.
+    _add_revision(repo, memory, 2, "rev-2-shared", "shared history")
+    carrier = _window(baseline)
+    assert _import(baseline["target"], carrier.package_dir).error == ""
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM memory_revisions WHERE id=?",
+        ("rev-2-shared",),
+    ) == 1
+
+    # Now BOTH sides edit the same memory: same revision number, different
+    # id. A real edit also rewrites the item row, so the window carries the
+    # parent -- which is exactly the shape a snapshot prune would act on.
+    _add_revision(repo, memory, 3, "rev-3-source", "the source's edit")
+    with repo._write() as db:
+        db.execute(
+            "UPDATE memory_items SET content_md='the source edit' WHERE id=?",
+            (memory,),
+        )
+    _add_revision(mirror, memory, 3, "rev-3-target", "this target's own edit")
+
+    window = _window(baseline)
+    assert "rev-3-source" in {
+        row["id"] for row in _rows(window.package_dir, "memory_revisions")
+    }
+
+    report = _import(baseline["target"], window.package_dir)
+
+    assert report.error == ""
+    surviving = {
+        str(row["id"]): int(row["revision"])
+        for row in _all(
+            mirror,
+            "SELECT id, revision FROM memory_revisions WHERE memory_id=?",
+            (memory,),
+        )
+    }
+    # Asserted FIRST, because it is the one that separates a targeted
+    # resolution from a snapshot prune: the history neither side touched has
+    # to survive. A prune would take it, and would do so while still
+    # producing a clean report.
+    assert surviving.get("rev-2-shared") == 2
+    # The source's edit won the collision...
+    assert surviving.get("rev-3-source") == 3
+    assert "rev-3-target" not in surviving
+    # ...and the run said so.
+    assert report.source_authoritative_collisions_resolved >= 1
+    assert any("rev-3-target" in text for text in report.warnings)
+
+
+def test_a_target_created_provenance_row_yields_to_the_source(baseline):
+    """``memory_provenance`` is ``UNIQUE(memory_id)``, so the same collision
+    arrives one row at a time rather than per revision."""
+    repo = baseline["source"]["repo"]
+    mirror = baseline["target"]["repo"]
+    memory = _one(
+        repo, "SELECT id FROM memory_items WHERE notebook_id=?",
+        (baseline["alpha"],),
+    )["id"]
+    with mirror._write() as db:
+        db.execute("DELETE FROM memory_provenance WHERE memory_id=?", (memory,))
+        db.execute(
+            "INSERT INTO memory_provenance(id,memory_id,origin,payload_json,"
+            "created_at) VALUES(?,?,'external_agent','{\"mine\":true}',?)",
+            ("prov-target", memory, MOMENT),
+        )
+    with repo._write() as db:
+        db.execute(
+            "UPDATE memory_items SET content_md='edited' WHERE id=?", (memory,)
+        )
+        db.execute(
+            "UPDATE memory_provenance SET payload_json='{\"theirs\":true}' "
+            "WHERE memory_id=?",
+            (memory,),
+        )
+
+    window = _window(baseline)
+    report = _import(baseline["target"], window.package_dir)
+
+    assert report.error == ""
+    assert report.source_authoritative_collisions_resolved >= 1
+    rows = _all(
+        mirror, "SELECT id, payload_json FROM memory_provenance WHERE memory_id=?",
+        (memory,),
+    )
+    assert len(rows) == 1
+    assert str(rows[0]["id"]) != "prov-target"
+    assert "theirs" in str(rows[0]["payload_json"])
+
+
+def test_a_collision_outside_the_source_authoritative_tables_still_refuses(
+    baseline
+):
+    """The resolution is scoped to the tables §5 hands to the source. Anywhere
+    else, two rows claiming one unique key are a genuine conflict between
+    environments with no rule saying which wins, and the import still refuses.
+
+    变异验证: 把 ``resolve_collisions`` 的表集合放宽成所有表, 本条报红。"""
+    repo = baseline["source"]["repo"]
+    mirror = baseline["target"]["repo"]
+    table_id = _one(
+        repo, "SELECT id FROM knowhow_tables WHERE notebook_id=?",
+        (baseline["alpha"],),
+    )["id"]
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowhow_milestones(id,table_id,seq,name,note,"
+            "created_by,created_at) VALUES(?,?,1,'v1','','user-local',?)",
+            ("mstone-source", table_id, MOMENT),
+        )
+    with mirror._write() as db:
+        db.execute(
+            "INSERT INTO knowhow_milestones(id,table_id,seq,name,note,"
+            "created_by,created_at) VALUES(?,?,9,'v1','theirs','user-local',?)",
+            ("mstone-target", table_id, MOMENT),
+        )
+
+    window = _window(baseline)
+
+    with pytest.raises(SyncImportError) as failure:
+        _import(baseline["target"], window.package_dir)
+
+    message = str(failure.value)
+    assert "knowhow_milestones" in message
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM knowhow_milestones WHERE id=?",
+        ("mstone-target",),
+    ) == 1
