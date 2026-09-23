@@ -88,7 +88,10 @@ run 下它在笔记本、失败异常类名与耗时毫秒之外多带一个 `re
 `timeout`（逐库预算到期、PostgreSQL 取消语句、或 SQLite 中断）、`saturated`（剩余预算内借不到连接——
 池被打满、查询根本没跑，运维抓手是池容量或并发，不是用户的选库范围）、`queue_deadline`（阶段时限
 到点时该库仍在共享检索池里排队，一次查询都没发出，因此「请缩小范围」是错的建议）、
-`unavailable`（其余）。`chunk_federation_evidence_unavailable` 表示某次调用的证据指纹读不出来，
+`unavailable`（其余）。带 `arm="keyword"` 的行属于全局双语关键词补召回腿，它**没有**对应的覆盖
+回执：按 kind 对照回执计数时要把它们排除。这条臂每次 run 另发一条 `ask_stage` 事件
+（`stage="global_keyword_arm"`，只含参与库数、有结果的库数、合并条数、失败库数与耗时，不含文本）。
+`chunk_federation_evidence_unavailable` 表示某次调用的证据指纹读不出来，
 受影响的引用因此按名字可被拒绝；`global_ask_citations_void` 表示一份答案被引用复核整份作废，
 带内容无关的 `reason`（`changed` / `unreadable` / `unattributed` / `out_of_ceiling`）——`unattributed`
 是某个引用生产者的归一缺口、需要修，其余是与正在编辑的用户抢跑。已退役的独立全局检索链路带走了

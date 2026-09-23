@@ -3632,9 +3632,20 @@ class ReasoningRetriever:
         `retrieval_fanout_slot()` 圈住发 I/O 的那一步,`_filter_candidates("chunk", …)`
         走与其余通道同一条策略边界(knowhow 智能补全据它剔除私有 Memory 与当前表
         自身投影,新通道不得绕过)。
+
+        ⛔ 跨库(对等)run 例外:这条通道在那里是逐库联邦扇出,每条联邦腿在叶子上
+        自己取扇出槽(``chunk_federation._budgeted_retrieve_for``/``_retrieve_for``)。
+        外层再持一个就是编排者持槽——``fanout_limit=1`` 时外层占着唯一的槽等内层
+        腿取槽,自锁(``retrieval_run`` 模块 docstring 的那条合同)。所以对等 run
+        外层不取槽;单库 run 仍是叶子调用,形状不变。判据用 ask 侧的
+        ``subjectless_run_active``(本模块不在覆盖模块的读者白名单上),它与检索层的
+        ``federated_ask_active`` 由同一个管理器装齐、恒等。
         """
-        with retrieval_fanout_slot():
+        if subjectless_run_active():
             hits = self.retrieval.keyword_chunk_candidates(notebook_id, keywords)
+        else:
+            with retrieval_fanout_slot():
+                hits = self.retrieval.keyword_chunk_candidates(notebook_id, keywords)
         return self._filter_candidates("chunk", hits)
 
     def exact_lookup(self, notebook_id, query):

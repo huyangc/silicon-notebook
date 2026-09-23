@@ -161,6 +161,15 @@ def _first_relation_sample(raw: object) -> str:
     return ""
 
 
+def _hydrated_chunk_row(r) -> dict:
+    """One ``chunks.hydrate_rows`` row in the shape ``score_chunks`` reads."""
+    return {
+        "chunk_id": r["id"], "source_id": r["source_id"], "text": r["text"],
+        "section_path": r["section_path"], "source_title": r["source_title"],
+        "element_ids": json.loads(r["element_ids"] or "[]"),
+    }
+
+
 class _RetrievalState:
     def __init__(
         self,
@@ -992,8 +1001,18 @@ class CandidateRetrievalService(_RetrievalState):
         k: int,
         allowed_source_ids=None,
         corpus_langs=None,
+        trip_circuit: bool = True,
     ) -> list[dict]:
-        """Run one generic chunk lexical leaf with run-local fail-fast state."""
+        """Run one generic chunk lexical leaf with run-local fail-fast state.
+
+        ``trip_circuit=False`` -- passed only by the peer-mode keyword leg --
+        still OBEYS an already-open per-library circuit but never OPENS one on
+        its own timeout.  That circuit is shared with the semantic legs' FTS
+        union, and a supplementary keyword leg timing out must not switch a
+        library's semantic lexical recall off for the rest of the run (a
+        library on the FTS-degraded lane would then produce nothing while its
+        receipt still reads "searched").
+        """
         run = current_retrieval_run()
         if run is not None and not run.chunk_fts_permitted(notebook_id):
             self.event_log.emit({
@@ -1018,7 +1037,7 @@ class CandidateRetrievalService(_RetrievalState):
                 corpus_langs=corpus_langs,
             )
         except ChunkLexicalSearchTimeout:
-            if run is not None:
+            if run is not None and trip_circuit:
                 run.note_chunk_fts_timeout(notebook_id)
             elapsed_ms = round((time.perf_counter() - started) * 1000)
             self.event_log.emit({
@@ -3788,13 +3807,20 @@ class CandidateRetrievalService(_RetrievalState):
                 vrows.extend(self.embeddings.rows_by_ids(
                     db, "chunk_embeddings", "chunk_id", batch,
                 ))
-        chunks = [{
-            "chunk_id": r["id"], "source_id": r["source_id"], "text": r["text"],
-            "section_path": r["section_path"], "source_title": r["source_title"],
-            "element_ids": json.loads(r["element_ids"] or "[]"),
-        } for r in rows]
+        chunks = [_hydrated_chunk_row(r) for r in rows]
         ids, mat = build_matrix((r["vid"], r["vector"]) for r in vrows)
         return chunks, ids, mat
+
+    def _hydrate_chunk_texts(self, cand_ids):
+        """``hydrate_chunk_candidates``' text half only: the same row shape,
+        no ``chunk_embeddings`` read and no matrix.  For a caller that scores
+        by keyword alone (the peer-mode keyword leg), where fetching and
+        normalising every candidate's vector would be discarded work."""
+        rows = []
+        with self._connect() as db:
+            for batch in self._in_batches(cand_ids):
+                rows.extend(self.chunks.hydrate_rows(db, batch))
+        return [_hydrated_chunk_row(r) for r in rows]
 
     def hydrate_retrieval_contribution_chunks(
         self, notebook_id: str, actor_id: str, candidate_ids: Iterable[str]
@@ -4104,6 +4130,10 @@ class CandidateRetrievalService(_RetrievalState):
         try:
             corpus_langs = self._lexical_corpus_langs(
                 notebook_id, source_scoped=source_restricted)
+            # A peer leg obeys an open per-library FTS circuit but never opens
+            # one (see ``_chunk_fts_hits``); the single path keeps its
+            # historical call shape, keyword for keyword.
+            peer_only = {"trip_circuit": False} if federated else {}
             with self._connect() as db:
                 hits = self._chunk_fts_hits(
                     db,
@@ -4112,10 +4142,17 @@ class CandidateRetrievalService(_RetrievalState):
                     k=recall,
                     allowed_source_ids=allowed_source_ids,
                     corpus_langs=corpus_langs,
+                    **peer_only,
                 )
             if not hits:
                 return []
-            chunks, _ids, _mat = self._hydrate_chunk_candidates([h["chunk_id"] for h in hits])
+            hit_ids = [h["chunk_id"] for h in hits]
+            if federated:
+                # Keyword scoring reads no vector, so a peer leg fetches text
+                # rows only.  The single path keeps its historical hydrate.
+                chunks = self._hydrate_chunk_texts(hit_ids)
+            else:
+                chunks, _ids, _mat = self._hydrate_chunk_candidates(hit_ids)
             # keyword-only score (no query_vector/chunk_sims) — mirrors the ANN∪FTS
             # union where lexical hits get keyword score and semantic 0.
             scored = score_chunks(needle, chunks, None, None, limit=recall)
