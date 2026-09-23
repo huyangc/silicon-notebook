@@ -4080,12 +4080,11 @@ class CandidateRetrievalService(_RetrievalState):
 
         ``federated=True`` (a peer-mode leg) changes only where a failure
         ends: it is re-raised so the fan-out's ``_run_one`` records the leg as
-        failed and emits its skip event.  A budget/lease expiry
-        (``classify_read_failure``) and a lexical timeout are NOT sent to
-        ``_note_model_error`` -- a timed-out supplementary leg is no banner,
-        exactly as ``ChunkLexicalSearchTimeout`` is none on the single path --
-        while an unclassified error keeps the single path's
-        ``chunk_keyword_union`` note.
+        failed and emits its skip event.  No failure of a peer leg is sent to
+        ``_note_model_error``: one library's supplementary keyword leg being
+        absent changes no coverage receipt and is no banner (the product rule
+        "only failures that affect the result are shown"); the skip event
+        carries the exception class for diagnosis.
         """
         from app.services.retrieval import (
             RetrievalSupport, add_chunk_supports, score_chunks,
@@ -4135,12 +4134,10 @@ class CandidateRetrievalService(_RetrievalState):
             return []
         except Exception as exc:  # noqa: BLE001 — lexical补召回失败绝不拖垮检索
             if federated:
-                from app.domain.retrieval_control import RetrievalControlError
-                from app.repositories.read_budget import classify_read_failure
-
-                if not isinstance(exc, (AskCancelled, RetrievalControlError)) \
-                        and classify_read_failure(exc) is None:
-                    self._note_model_error("chunk_keyword_union", "", exc)
+                # 全局模式里,一个库的关键词补召回腿失败只是「这一路缺席」,不影响
+                # 覆盖回执也不改答案的可信度,所以不记 model_error、不上横幅(用户
+                # 原则:只显示真影响结果的失败)。失败由 fan-out 的 `_run_one` 以
+                # 内容无关的 skip 事件记下(带 arm="keyword" 与异常类名)。
                 raise
             self._note_model_error("chunk_keyword_union", "", exc)
             return []

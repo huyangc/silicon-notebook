@@ -376,8 +376,9 @@ def test_failing_libraries_leave_the_rest_and_never_reach_receipts():
     assert receipts.libraries == []
     assert receipts.evidence == []
     assert receipts.groups == []
-    # 预算超时与词法超时不走横幅;只有未分类的故障沿用单库口径记一笔。
-    assert probe.model_errors == [("chunk_keyword_union", "RuntimeError")]
+    # 全局模式里任何一个库的关键词腿失败都不走横幅(补召回臂缺席不影响结果的
+    # 可信度),未分类的 RuntimeError 也一样;失败只以 skip 事件记下。
+    assert probe.model_errors == []
     assert probe.summary()["failed_libraries"] == 3
     skipped = sorted(
         (event["notebook_id"], event.get("arm"))
