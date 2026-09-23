@@ -949,6 +949,8 @@ Global Ask uses `GLOBAL_ASK_CANDIDATE_LIMIT` for merged cross-notebook evidence 
 `GLOBAL_ASK_HISTORY_TURNS` for admitted completed conversational turns.
 `GLOBAL_ASK_KEYWORD_ARM_ENABLED` (default `true`) runs the bilingual keyword recall supplement once per
 participant in global Ask; `false` is the rollback that closes it for global runs (see the product reference).
+`GLOBAL_ASK_EXACT_ARM_ENABLED` (default `true`) does the same for the exact-identifier lookup arm (still subject
+to `EXACT_LOOKUP_ENABLED`); `false` closes that arm for global runs.
 `GLOBAL_ASK_MAX_NOTEBOOKS`, `GLOBAL_ASK_MAX_CONCURRENT`, `GLOBAL_ASK_RETRIEVAL_CONCURRENCY`,
 `GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS`,
 `GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS` and `GLOBAL_ASK_SHUTDOWN_TIMEOUT_SECONDS` control explicit

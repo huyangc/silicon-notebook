@@ -745,6 +745,8 @@ origin 写进此名单后 URL 导入才能触达。每项必须带 `http://` 或
 `GLOBAL_ASK_HISTORY_TURNS` 控制允许进入上下文的既往完成对话。
 `GLOBAL_ASK_KEYWORD_ARM_ENABLED`（默认 `true`）让全局问答的双语关键词补召回逐库各跑一次；
 设为 `false` 是回退，全局问答重新关闭这条臂（见产品参考）。
+`GLOBAL_ASK_EXACT_ARM_ENABLED`（默认 `true`）对精确标识符查找臂做同样的事（仍受 `EXACT_LOOKUP_ENABLED`
+约束）；设为 `false` 时全局问答关闭这条臂。
 `GLOBAL_ASK_MAX_NOTEBOOKS`、`GLOBAL_ASK_MAX_CONCURRENT`、`GLOBAL_ASK_RETRIEVAL_CONCURRENCY`、
 `GLOBAL_ASK_RETRIEVAL_TIMEOUT_SECONDS`、
 `GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS` 和 `GLOBAL_ASK_SHUTDOWN_TIMEOUT_SECONDS` 分别控制范围

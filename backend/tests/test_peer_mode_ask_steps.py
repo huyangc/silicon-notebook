@@ -363,6 +363,10 @@ class _LexicalProbe:
     _keyword_chunk_candidates_one = (
         CandidateRetrievalService._keyword_chunk_candidates_one
     )
+    _exact_lookup_chunks_one = CandidateRetrievalService._exact_lookup_chunks_one
+    _peer_exact_lookup_chunks = (
+        CandidateRetrievalService._peer_exact_lookup_chunks
+    )
 
     def _chunk_fts_hits(self, db, notebook_id, needle, *, k, allowed_source_ids,
                         corpus_langs):
@@ -434,11 +438,14 @@ def test_the_reasoning_element_action_is_skipped_in_peer_mode():
     )
 
 
-def test_exact_lookup_arm_is_closed_in_peer_mode():
-    """同上。它一关,``exact_section_reserve`` 的 ``exact_ids`` 恒空、该保底规则
-    自动 inert,所以下游不需要第二道闸。"""
+def test_exact_lookup_arm_switch_off_closes_it_in_peer_mode():
+    """同上,精确标识符臂:对等模式下已逐库联邦化(合同见
+    ``test_peer_mode_exact_arm.py``);这里只钉回退开关
+    ``GLOBAL_ASK_EXACT_ARM_ENABLED=false``——对等模式回到零查询、零座位读(问题里
+    明明有标识符 ``set_db``)。它一关,``exact_section_reserve`` 的保底规则随命中
+    为空自动 inert。对照臂:单库路径照旧先探来源闸、再看 ``exact_lookup_enabled``。"""
     probe = _LexicalProbe()
-    probe.settings.exact_lookup_enabled = False
+    probe.settings.global_ask_exact_arm_enabled = False
 
     with _peer_scope():
         assert CandidateRetrievalService._exact_lookup_chunks(
@@ -446,6 +453,7 @@ def test_exact_lookup_arm_is_closed_in_peer_mode():
         ) == []
     assert probe.calls == []
 
+    probe.settings.exact_lookup_enabled = False
     assert CandidateRetrievalService._exact_lookup_chunks(
         probe, "nb-a", "set_db",
     ) == []

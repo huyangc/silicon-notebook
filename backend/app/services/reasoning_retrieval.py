@@ -3653,9 +3653,17 @@ class ReasoningRetriever:
 
         走 `_filter_candidates` 与 PPR/element 同一条策略边界:knowhow 智能补全
         用它剔除私有 Memory 与当前表自身投影,新通道不能绕过。
+
+        ⛔ 跨库(对等)run 外层不取扇出槽,理由与 `keyword_chunks` 相同:那里这条
+        通道是逐库联邦扇出,每条联邦腿在叶子上自己取槽,外层再持一个在
+        ``fanout_limit=1`` 下自锁。reflect 动作的 `max_exact_lookups` 次数上限不变:
+        一次动作仍是这里的一次调用(= 一次联邦查询)。
         """
-        with retrieval_fanout_slot():
+        if subjectless_run_active():
             retrieved = self.retrieval.exact_lookup_chunks(notebook_id, query)
+        else:
+            with retrieval_fanout_slot():
+                retrieved = self.retrieval.exact_lookup_chunks(notebook_id, query)
         return self._filter_candidates("chunk", retrieved)
 
     def _exact_lookup_terms(self, text: str, *, honor_quotes: bool = True) -> List[str]:
