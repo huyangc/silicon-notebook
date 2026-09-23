@@ -840,6 +840,61 @@ def test_a_fold_is_not_taken_on_the_packages_word_alone(baseline):
     assert report.deletes_applied >= 1
 
 
+def test_a_copying_skip_is_not_taken_on_the_packages_word_alone(baseline):
+    """The copying skip follows the same rule as the fold: it is decided on
+    the attribution the TARGET resolves, never on what the entry claims.
+
+    Skipping on the entry's say-so is worse than a wrong fold, in fact. A
+    wrongly folded row is at least swept by the delete job it was folded
+    into; a wrongly skipped one is scheduled for removal by nothing at all,
+    so notebook M silently keeps a row its source deleted, forever.
+
+    变异验证: 把 ``copying`` 改回「命中 entry.notebook_id 就计数跳过」的快速
+    路径, 本条报红。"""
+    repo = baseline["source"]["repo"]
+    mirror = baseline["target"]["repo"]
+    victim = _one(
+        mirror, "SELECT id FROM chunks WHERE notebook_id=? LIMIT 1",
+        (baseline["alpha"],),
+    )["id"]
+    with repo._write() as db:
+        # alpha changes too, so the window declares it.
+        db.execute(
+            "UPDATE notebooks SET name='alpha v2' WHERE id=?", (baseline["alpha"],)
+        )
+        db.execute("DELETE FROM notebooks WHERE id=?", (baseline["beta"],))
+    with mirror._write() as db:
+        db.execute(
+            "UPDATE notebooks SET status='copying' WHERE id=?", (baseline["beta"],)
+        )
+    window = _window(baseline)
+    assert baseline["alpha"] in _manifest(window.package_dir)["notebooks"]
+    # An entry that CLAIMS the copying notebook but names a key the target
+    # holds under alpha, which this package also covers.
+    _write_deletes(
+        window.package_dir,
+        [
+            *_deletes(window.package_dir),
+            {"table": "chunks", "key": {"id": victim},
+             "notebook_id": baseline["beta"], "parent_key": None},
+        ],
+    )
+    _reseal(window.package_dir)
+
+    report = _import(baseline["target"], window.package_dir)
+
+    assert report.error == ""
+    # Replayed against alpha, where the row really is -- not skipped.
+    assert _count(
+        mirror, "SELECT COUNT(*) FROM chunks WHERE id=?", (victim,)
+    ) == 0
+    # ...while beta, which really is copying, is still untouched.
+    assert report.deletes_skipped_for_copying > 0
+    assert _one(
+        mirror, "SELECT status FROM notebooks WHERE id=?", (baseline["beta"],)
+    )["status"] == "copying"
+
+
 def test_an_orphan_delete_that_names_no_notebook_is_a_no_op(baseline):
     """§11's registered rule, now implemented: a PARENT-scoped entry whose
     chain is broken at the target and that carries no notebook of its own

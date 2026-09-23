@@ -5092,14 +5092,17 @@ def _replay_delete_table(
       evidence than this side can reconstruct. Otherwise it is counted
       ``orphan_skipped`` and left alone: an unattributable delete is a no-op
       by design (§11), never a guess.
-    - **the entry belongs to a notebook phase 3d is about to tombstone**:
-      counted ``folded`` and skipped. The delete job clears every table for
-      that notebook, so replaying its keys first is work that gets undone
-      (codex T1 review P2-3).
-    - **the entry belongs to a notebook the target is copying**: counted
-      ``skipped_for_copying`` and left completely alone -- a deep copy is
-      reading those rows right now, and 3d is not going to tombstone the
+    - **the target's row belongs to a notebook phase 3d is about to
+      tombstone**: counted ``folded`` and skipped. The delete job clears every
+      table for that notebook, so replaying its keys first is work that gets
+      undone (codex T1 review P2-3).
+    - **the target's row belongs to a notebook the target is copying**:
+      counted ``skipped_for_copying`` and left completely alone -- a deep copy
+      is reading those rows right now, and 3d is not going to tombstone the
       notebook either (codex T1 review P1-2).
+
+    Both of those read "the TARGET's row belongs to", never "the entry claims
+    it belongs to" -- see the comment on the entry loop below.
 
     ``sources``/``notebook_assets`` rows own bytes under ``storage/``. Their
     paths are read off the row while it is still there and handed back to the
@@ -5111,29 +5114,24 @@ def _replay_delete_table(
         raise SyncImportError(f"{table}: LOCAL table has no import scope")
     key_columns = _sync_key(backend, conn, table)
     outcome = _DeleteOutcome()
-    entries: list[_DeleteEntry] = []
-    deferred: list[_DeleteEntry] = []
-    for entry in context.deletes.get(table, ()):
-        # Decided on the entry's OWN attribution first, which costs no query
-        # and covers every entry the exporter could attribute -- which, for a
-        # deleted notebook, is all of them.
-        if entry.notebook_id in plan.copying:
-            outcome.skipped_for_copying += 1
-        elif entry.notebook_id in plan.folded:
-            # NOT folded on the SOURCE's word alone. The entry says where the
-            # row lived at the source; the row this target holds under that
-            # key may sit somewhere else entirely (ids are exported verbatim
-            # and never reissued -- the same reason ``_assert_target_ownership``
-            # exists). Folding it on the entry's say-so would leave a row of
-            # some OTHER in-scope notebook M un-deleted, because the delete
-            # job it was folded into only ever clears the deleted notebook.
-            # So it is deferred into the ordinary path, where the owner is
-            # read off the target row and the fold decision is made again on
-            # THAT (codex T1 review P3-4).
-            deferred.append(entry)
-        else:
-            entries.append(entry)
-    entries.extend(deferred)
+    # NOTHING is decided on the entry's own ``notebook_id``. It says where the
+    # row lived at the SOURCE, and the row THIS target holds under that key
+    # may sit somewhere else entirely -- ids are exported verbatim and never
+    # reissued, which is the same reason ``_assert_target_ownership`` exists.
+    # Both special outcomes therefore wait until the owner has been read off
+    # the target row, below:
+    #
+    # - folding on the entry's say-so would leave a row of some OTHER
+    #   in-scope notebook M un-deleted, because the delete job it was folded
+    #   into only ever clears the deleted notebook (codex T1 review P3-4);
+    # - skipping on the entry's say-so would do the same for a copying
+    #   notebook, and there the row is not even scheduled for removal by
+    #   anything -- M simply keeps a row the source deleted, forever.
+    #
+    # The entry's ``notebook_id`` still has exactly one job, and it is the
+    # last-resort one: naming an ORPHAN's notebook when the target's own
+    # parent chain cannot resolve the row at all.
+    entries = list(context.deletes.get(table, ()))
     if not entries:
         return outcome
     extra: tuple[str, ...] = ("file_path",) if table == "sources" else ()
