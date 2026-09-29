@@ -19,6 +19,9 @@ from typing import List, Optional, Sequence, Tuple
 
 from app.core.query_syntax import quoted_phrases
 from app.domain.reflect_action import ReflectActionSpec
+# The one literal the four server-side readers of ``source_scoped`` share (see
+# its definition); the reflect prompt is the fourth.
+from app.services.collection_enumeration import SELECTED_SOURCES_SCOPE_SUFFIX
 from app.services.prompt_layers import fragment_text
 
 
@@ -716,6 +719,7 @@ def reflect_schema_hint(
     read_document: bool = False,
     plugin_actions: Sequence[ReflectActionSpec] = (),
     keyword_search: bool = False,
+    enumerate_scope: bool = True,
 ) -> str:
     """The reflect response schema, with the enumeration branch iff offered.
 
@@ -793,6 +797,14 @@ def reflect_schema_hint(
     budget switching it off) reassembles this schema byte for byte. Rendering
     lives in ``project_reflect_actions`` because the prompt line, this branch
     and ``reflect``'s whitelist must come out of one description.
+
+    ``enumerate_scope`` False = a PEER (global) run, where the document
+    roster's ``scope`` knob does not exist: there is no current notebook to
+    narrow to (the anchor is a naming convention), so the field is dropped
+    from the enumerate branch. The prompt's scope paragraph, ``reflect``'s
+    argument parsing and the enumeration executor read the same predicate
+    (``reasoning_retrieval.local_only_scope_offered``). True (the default) is
+    byte-for-byte the schema from before the knob became conditional.
     """
     # The SAME double gate ``reflect_prompt`` applies to the action's own prompt
     # line: ``read_document and enumeration_tools``. The two projections must
@@ -870,8 +882,9 @@ def reflect_schema_hint(
         enumerate_branch = (
             '"enumerate":{"kind":"' + "|".join(element_kinds) + '",'
             + object_type_field +
-            '"collection":"","scope":"all|current_notebook",'
-            '"source_id":"","source_title":""},'
+            '"collection":"",'
+            + ('"scope":"all|current_notebook",' if enumerate_scope else "")
+            + '"source_id":"","source_title":""},'
         )
     # The per-document sampling branch (PR-A). It is spliced between the
     # enumerate branch and the plugin projection because that is where it
@@ -979,6 +992,8 @@ def reflect_prompt(
     plugin_actions: Sequence[ReflectActionSpec] = (),
     corpus_langs: Optional[Sequence[str]] = None,
     keyword_search: bool = False,
+    enumerate_scope: bool = True,
+    source_scoped: bool = False,
 ) -> str:
     """Next-step decision prompt.
 
@@ -1057,6 +1072,18 @@ def reflect_prompt(
     ``chunks_keywords`` sentence to the ``search_chunks`` description and the
     field to the scope-word rule; False (the default) renders both exactly as
     they were before the parameter existed.
+
+    ``enumerate_scope`` False = a PEER (global) run: the roster's ``scope``
+    paragraph and the "may be listed once at the other scope" exception are
+    dropped, exactly as ``reflect_schema_hint`` drops the field. True (the
+    default) is byte-for-byte the previous prompt.
+
+    ``source_scoped`` True = this notebook's source ceiling is narrowed (the
+    user ticked only some sources) or has drifted since the question was
+    frozen, so every listing covers the ticked sources only; one sentence,
+    carrying ``SELECTED_SOURCES_SCOPE_SUFFIX``, tells the model not to present
+    those counts as the size of the library. Only rendered with the
+    enumeration tools; False (the default) adds nothing.
     """
     if read_document and read_document_cap < 1:
         raise ValueError(
@@ -1247,14 +1274,21 @@ def reflect_prompt(
         # number the model was shown and the number it gets back agree when it
         # leaves the knob alone. Spelled as a string enum, never a boolean —
         # see ``reflect_schema_hint``'s ``scope`` comment for why.
-        "By default the roster lists EVERY document in retrieval scope (this "
-        "notebook plus the checked reference libraries) — the same count the "
-        "[Collections in scope] line reports as sources. Set enumerate.scope "
-        "to \"current_notebook\" ONLY when the question asks specifically about "
-        "the current notebook ('当前notebook的文章', '本库', 'the documents in "
-        "this notebook'); that narrows the roster to the parenthesised "
-        "'current notebook' count on the same line. Leave it empty otherwise.\n"
-        "Use the [Collections in scope] counts to decide BEFORE acting: a "
+        #
+        # ``enumerate_scope`` False = a PEER (global) run: there is no current
+        # notebook to narrow to, so the whole paragraph goes and the schema
+        # drops the field with it (``reasoning_retrieval
+        # .local_only_scope_offered`` is the one predicate both read).
+        + ("By default the roster lists EVERY document in retrieval scope (this "
+           "notebook plus the checked reference libraries) — the same count the "
+           "[Collections in scope] line reports as sources. Set enumerate.scope "
+           "to \"current_notebook\" ONLY when the question asks specifically "
+           "about the current notebook ('当前notebook的文章', '本库', 'the "
+           "documents in this notebook'); that narrows the roster to the "
+           "parenthesised 'current notebook' count on the same line. Leave it "
+           "empty otherwise.\n"
+           if enumerate_scope else "")
+        + "Use the [Collections in scope] counts to decide BEFORE acting: a "
         "collection whose count fits this run's listing allowance can be "
         "listed in full, but when the count is far larger than that allowance, "
         "do NOT try to page through it — answer with the count, a few "
@@ -1262,8 +1296,22 @@ def reflect_prompt(
         "request (one source, one section, one topic). Requesting the same "
         "collection again CONTINUES from where the previous call stopped; it "
         "never restarts, and a collection already reported complete must not "
-        "be requested again — except a roster already listed at one "
-        "enumerate.scope, which may be listed once at the other.\n"
+        "be requested again"
+        + (" — except a roster already listed at one "
+           "enumerate.scope, which may be listed once at the other"
+           if enumerate_scope else "")
+        + ".\n"
+        # ``source_scoped`` True = the user ticked only some of this notebook's
+        # sources (or the source set drifted after the question was frozen), so
+        # every listing -- and every count it reports -- covers the ticked
+        # sources only.  The model must not present such a count as the size
+        # of the whole library.  The literal is the same suffix the ledger and
+        # the trace stamp on each such listing.
+        + ("Every listing in this run covers ONLY the sources the user ticked "
+           "for this question (such listings are marked "
+           + SELECTED_SOURCES_SCOPE_SUFFIX + "): report their counts as counts "
+           "of the selected sources, never as the size of the whole library.\n"
+           if source_scoped else "")
         if enumeration_tools else ""
     )
     # The per-document bounded sampling action (PR-A), placed right after the

@@ -776,6 +776,18 @@ class TypedCollectionResult(BaseModel):
     # before it existed, and any client that never sends it, both read back as
     # the unnarrowed scope they actually were.
     scope: str = "all"         # "all" | "current_notebook"
+    # Whether this listing was taken under a NARROWED source ceiling (the user
+    # ticked only some of the current notebook's sources, or the source set
+    # drifted after the question was frozen).  Its rows and its denominator
+    # then cover the ticked sources only, so the card must say so; the frontend
+    # appends 「（仅勾选的来源）」 (``collection_enumeration
+    # .SELECTED_SOURCES_SCOPE_SUFFIX``, the literal the trace, the reflect
+    # ledger, the synthesis section header and the reflect prompt share).
+    # Independent of ``scope`` and valid for every collection.  It is part of
+    # the listing's identity (the continuation ledger keys on it).  Omitted
+    # from the JSON when False, so every unscoped response -- and every stored
+    # answer written before the field existed -- keeps its exact bytes.
+    source_scoped: bool = Field(default=False, exclude_if=lambda value: not value)
     items: List[TypedCollectionItem] = Field(default_factory=list)
     coverage: TypedCollectionCoverage
     # Rows that actually entered the answer-synthesis prompt preview (bounded
