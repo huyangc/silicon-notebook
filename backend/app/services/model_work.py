@@ -209,8 +209,11 @@ def make_model_work_context(
             else (artifact_scope.question if artifact_scope is not None else "")
         ),
         support_id=str(support_id or f"mdl-{secrets.token_urlsafe(12)}"),
+        # A caller deadline may only TIGHTEN the priority's default queue
+        # deadline, never extend it (the scheduler's staleness sweep and
+        # fairness are sized for the defaults).
         deadline_at=(
-            float(deadline_at)
+            min(float(deadline_at), now + _DEADLINE_SECONDS[effective_priority])
             if deadline_at is not None
             else now + _DEADLINE_SECONDS[effective_priority]
         ),

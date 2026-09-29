@@ -48,10 +48,12 @@ class RerankClient:
 
     def rerank(self, query: str, documents: List[str], on_error=None, *,
                cancel_event=None, timeout=None) -> List[int]:
-        # ``cancel_event``/``timeout`` mirror ``RerankClientPort``: a set
-        # signal before the request re-raises cancellation instead of reporting
-        # a rerank failure, and ``timeout`` (seconds, > 0) replaces the
-        # deployment-wide HTTP timeout for this one call.
+        # 形参与 ``RerankClientPort`` 逐一相同(``test_model_client_ports_match_
+        # concrete_call_signatures`` 钉住)。这是**不经调度器**的直连入口:前面
+        # 既没有队列也没有共享熔断器,调用方预算只能约束这一次阻塞的 HTTP
+        # 请求,所以在这里下传为请求超时。经调度器的 ``ScheduledRerankClient``
+        # 刻意**不**这么做(调用方私有预算不能把共享服务判成故障、打开熔断器),
+        # 它只调 ``_rerank_batch(query, docs)``。已取消的信号在发请求前照抛。
         if not self.configured or not documents:
             return list(range(len(documents)))
         if cancel_event is not None and cancel_event.is_set():

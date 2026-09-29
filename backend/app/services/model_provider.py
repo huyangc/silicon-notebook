@@ -735,11 +735,19 @@ class ScheduledRerankClient(_ScheduledAdapter):
         dropped by the scheduler once it is set and the wait here raises
         ``AskCancelled`` -- cancellation is re-raised, never reported through
         ``on_error`` as a rerank failure.  With ``timeout`` (seconds, > 0) the
-        whole call shares one deadline: it bounds the queue (the context's
-        ``deadline_at``), each HTTP request (forwarded to the physical client
-        only when set, so duck-typed clients without the keyword are untouched
-        on the default path) and the wait here, which reports
-        ``ModelQueueTimeout`` through ``on_error`` when it passes.
+        whole call shares one caller deadline that bounds only two things: the
+        queue (the context's ``deadline_at``, which ``make_model_work_context``
+        clamps so a caller budget can tighten but never extend the priority's
+        default) and the wait here, which reports ``ModelQueueTimeout`` through
+        ``on_error`` once it passes.
+
+        The budget deliberately does **not** become the HTTP request timeout.
+        A caller's private budget is not evidence about the shared service's
+        health: a slow-but-working rerank service read-timed-out at 10 s would
+        be classified as a transient provider failure and, three in a row,
+        open the shared ``retrieval_rerank`` breaker -- refusing chunk mode's
+        mix-branch rerank too.  The price is that an abandoned in-flight batch
+        keeps its service slot until the service's own HTTP timeout ends it.
         """
         if not documents:
             return []
@@ -748,7 +756,6 @@ class ScheduledRerankClient(_ScheduledAdapter):
             return self._provider._offline_rerank.rerank(query, documents, on_error)
         bounded = timeout is not None and float(timeout) > 0
         deadline_at = time.monotonic() + float(timeout) if bounded else None
-        batch_kwargs = {"timeout": float(timeout)} if bounded else {}
         maximum = max(1, int(getattr(runtime.raw, "max_docs", len(documents))))
         batches = [
             (start, documents[start : start + maximum])
@@ -767,8 +774,7 @@ class ScheduledRerankClient(_ScheduledAdapter):
                 calls.append((
                     base,
                     self._submit(runtime, lambda docs=docs: _validate_rerank_rows(
-                        runtime.raw._rerank_batch(query, docs, **batch_kwargs),
-                        len(docs),
+                        runtime.raw._rerank_batch(query, docs), len(docs),
                     ), cancel_event=cancel_event, deadline_at=deadline_at),
                 ))
 
@@ -778,7 +784,7 @@ class ScheduledRerankClient(_ScheduledAdapter):
         while calls:
             base, call = calls.pop(0)
             try:
-                rows = self._await_batch(call, cancel_event, deadline_at)
+                rows = self._await_batch(call, cancel_event, bounded)
             except AskCancelled:
                 for _, pending in calls:
                     pending.future.cancel()
@@ -809,31 +815,39 @@ class ScheduledRerankClient(_ScheduledAdapter):
         order.extend(index for index in range(len(documents)) if index not in seen)
         return order
 
-    def _await_batch(self, call: _SubmittedCall, cancel_event, deadline_at):
+    def _await_batch(self, call: _SubmittedCall, cancel_event, bounded: bool):
         """``_resolve`` behind an optional cancel/deadline-aware wait.
 
-        Neither set → exactly ``_resolve`` (the historical blocking wait).
-        Otherwise poll the future: a set cancel signal cancels a still-queued
-        batch and raises ``AskCancelled``; a passed deadline does the same with
-        ``ModelQueueTimeout``.  An in-flight HTTP request cannot be interrupted
-        from here -- it is abandoned (its own ``timeout`` bounds it) and the
+        Neither a cancel signal nor a caller budget → exactly ``_resolve`` (the
+        historical blocking wait).  Otherwise poll the future: a set cancel
+        signal cancels a still-queued batch and raises ``AskCancelled``; with a
+        budget, passing the context's (already clamped) ``deadline_at`` does
+        the same with ``ModelQueueTimeout``.  Both early exits emit the
+        ``model_scheduler`` event ``_resolve`` would have (``cancelled`` /
+        ``error``), so the call's ``support_id`` still has its scheduler row.
+        An in-flight HTTP request cannot be interrupted from here -- it is
+        abandoned, bounded by the service's own HTTP timeout, and the
         scheduler still records its completion.
         """
-        if cancel_event is None and deadline_at is None:
+        if cancel_event is None and not bounded:
             return self._resolve(call)
+        deadline_at = call.context.deadline_at if bounded else None
         while not call.future.done():
             if cancel_event is not None and cancel_event.is_set():
                 call.future.cancel()
+                self._emit(call, status="cancelled", error=None)
                 raise AskCancelled()
             step = self._WAIT_POLL_SECONDS
             if deadline_at is not None:
                 remaining = deadline_at - time.monotonic()
                 if remaining <= 0:
                     call.future.cancel()
-                    raise ModelQueueTimeout(
+                    error = ModelQueueTimeout(
                         "rerank exceeded its caller deadline",
                         support_id=call.context.support_id,
                     )
+                    self._emit(call, status="error", error=error)
+                    raise error
                 step = min(step, remaining)
             wait_futures([call.future], timeout=step)
         return self._resolve(call)

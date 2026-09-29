@@ -1568,8 +1568,10 @@ def test_no_stats_kwarg_is_forwarded_to_a_client_that_does_not_declare_it():
 
 # ── Rerank: optional caller cancel signal and time budget ─────────────────
 # Reasoning's passage-selection rerank passes both; chunk mode's mix branch
-# passes neither and keeps the historical blocking wait, with no ``timeout``
-# keyword ever reaching the raw client.
+# passes neither and keeps the historical blocking wait.  The budget bounds
+# only the queue deadline and the caller's wait -- it never reaches the raw
+# client as an HTTP timeout (a caller's private budget must not mark the
+# shared service unhealthy and open its breaker).
 
 
 class _BlockingReranker(_Reranker):
@@ -1579,53 +1581,79 @@ class _BlockingReranker(_Reranker):
         super().__init__()
         self.entered = threading.Event()
         self.release = threading.Event()
-        self.timeouts: list = []
+        self.batch_kwargs: list = []
 
-    def _rerank_batch(self, query, documents, timeout=None):
-        self.timeouts.append(timeout)
+    def _rerank_batch(self, query, documents, **kwargs):
+        self.batch_kwargs.append(dict(kwargs))
         self.entered.set()
         self.release.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
         return [{"index": i, "relevance_score": 1.0 - i / 10}
                 for i in range(len(documents))]
 
 
-def test_rerank_forwards_cancel_event_and_deadline_to_the_scheduler():
+def _spy_submissions(client):
+    seen: list = []
+    real_submit = client._submit
+
+    def _spy(runtime, invoke, **kwargs):
+        call = real_submit(runtime, invoke, **kwargs)
+        seen.append((kwargs, call.context))
+        return call
+
+    client._submit = _spy
+    return seen
+
+
+def test_rerank_forwards_cancel_event_and_deadline_but_no_http_timeout():
     raw = _BlockingReranker()
     raw.release.set()
     provider = _provider(registry=_registry(maximum=1), reranker=raw)
     try:
         client = provider.rerank("retrieval_rerank")
-        seen = []
-        real_submit = client._submit
-
-        def _spy(runtime, invoke, **kwargs):
-            seen.append(kwargs)
-            return real_submit(runtime, invoke, **kwargs)
-
-        client._submit = _spy
+        seen = _spy_submissions(client)
         cancel = threading.Event()
         before = time.monotonic()
         assert client.rerank(
             "q", ["a", "b"], cancel_event=cancel, timeout=5.0) == [0, 1]
-        assert seen and seen[0]["cancel_event"] is cancel
-        assert before + 5.0 <= seen[0]["deadline_at"] <= time.monotonic() + 5.0
-        assert raw.timeouts == [5.0]
-        # Default path: no deadline, and the raw client sees no timeout keyword.
+        kwargs, context = seen[0]
+        assert kwargs["cancel_event"] is cancel
+        assert before + 5.0 <= context.deadline_at <= time.monotonic() + 5.0
+        # The budget never becomes the physical client's HTTP timeout.
+        assert raw.batch_kwargs == [{}]
+        # Default path: no caller deadline at all.
         seen.clear()
         assert client.rerank("q", ["a", "b"]) == [0, 1]
-        assert seen[0]["cancel_event"] is None and seen[0]["deadline_at"] is None
-        assert raw.timeouts == [5.0, None]
+        assert seen[0][0]["cancel_event"] is None
+        assert seen[0][0]["deadline_at"] is None
+        assert raw.batch_kwargs == [{}, {}]
     finally:
         provider.close()
 
 
-def test_rerank_cancel_signal_raises_instead_of_reporting_a_failure():
+def test_rerank_budget_only_tightens_the_default_queue_deadline():
     raw = _BlockingReranker()
+    raw.release.set()
     provider = _provider(registry=_registry(maximum=1), reranker=raw)
+    try:
+        client = provider.rerank("retrieval_rerank")
+        seen = _spy_submissions(client)
+        client.rerank("q", ["a"], timeout=60.0)
+        # Interactive default is 30 s: a 60 s budget may not extend it.
+        assert seen[0][1].deadline_at <= time.monotonic() + 30.0
+    finally:
+        provider.close()
+
+
+def test_rerank_cancel_signal_raises_and_emits_a_cancelled_scheduler_event():
+    raw = _BlockingReranker()
+    events = _EventLog()
+    provider = _provider(
+        registry=_registry(maximum=1), reranker=raw, events=events)
     errors: list = []
     executor = ThreadPoolExecutor(max_workers=1)
     try:
         client = provider.rerank("retrieval_rerank")
+        seen = _spy_submissions(client)
         cancel = threading.Event()
         pending = executor.submit(
             client.rerank, "q", ["a", "b"], errors.append, cancel_event=cancel)
@@ -1634,23 +1662,44 @@ def test_rerank_cancel_signal_raises_instead_of_reporting_a_failure():
         with pytest.raises(AskCancelled):
             pending.result(_RENDEZVOUS_TIMEOUT_SECONDS)
         assert errors == []
+        support_id = seen[0][1].support_id
+        assert any(
+            event.get("kind") == "model_scheduler"
+            and event.get("status") == "cancelled"
+            and event.get("support_id") == support_id
+            for event in events.events
+        )
     finally:
         raw.release.set()
         executor.shutdown()
         provider.close()
 
 
-def test_rerank_timeout_reports_a_queue_timeout_and_returns_identity():
+def test_rerank_timeout_emits_an_error_event_and_spares_the_breaker():
     raw = _BlockingReranker()
-    provider = _provider(registry=_registry(maximum=1), reranker=raw)
+    events = _EventLog()
+    provider = _provider(
+        registry=_registry(maximum=1), reranker=raw, events=events)
     errors: list = []
     try:
         client = provider.rerank("retrieval_rerank")
-        assert client.rerank(
-            "q", ["a", "b", "c"], errors.append, timeout=0.1) == [0, 1, 2]
-        assert len(errors) == 1
-        assert errors[0].code == "model_queue_timeout"
-        assert errors[0].support_id
+        # Three budget overruns in a row: the breaker's transient threshold.
+        for _ in range(3):
+            assert client.rerank(
+                "q", ["a", "b", "c"], errors.append, timeout=0.1) == [0, 1, 2]
+        assert len(errors) == 3
+        assert {error.code for error in errors} == {"model_queue_timeout"}
+        assert all(error.support_id for error in errors)
+        scheduler_errors = {
+            event["support_id"] for event in events.events
+            if event.get("kind") == "model_scheduler"
+            and event.get("status") == "error"
+        }
+        assert {error.support_id for error in errors} <= scheduler_errors
+        # No HTTP timeout was forced on the slow-but-working service, so the
+        # abandoned calls were never counted as provider failures.
+        assert all(kwargs == {} for kwargs in raw.batch_kwargs)
+        assert provider.scheduler_snapshot("rerank").breaker_state == "closed"
     finally:
         raw.release.set()
         provider.close()

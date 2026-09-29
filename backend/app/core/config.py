@@ -1122,9 +1122,12 @@ class Settings(BaseSettings):
         True, validation_alias="REASONING_CHUNK_RERANK_ENABLED")
     reasoning_chunk_rerank_candidates: int = Field(
         50, validation_alias="REASONING_CHUNK_RERANK_CANDIDATES")
-    # 上面那次精排的时间预算(秒):一次 `search_chunks` 的精排调用(含排队、各批
-    # HTTP 与等待)共用这一个截止时间,超时退回 MMR 并记 `rerank_timeout` 事件。
-    # 0 = 不另设预算,沿用精排服务自身的调度截止与 HTTP 超时。
+    # 上面那次精排的调用方时间预算(秒):一次 `search_chunks` 的精排(排队截止与
+    # 调用方等待)共用这一个截止时间,超时退回 MMR 并记 `rerank_timeout` 事件。
+    # 正值只会**收紧**:大于该优先级的默认排队截止(交互 30 秒)时以默认为准。
+    # 它**不**改写 HTTP 请求超时——调用方私有预算不能把一个偏慢但正常的共享
+    # 精排服务判成故障、打开 `retrieval_rerank` 熔断器;代价是被放弃的在途请求
+    # 最多占着服务槽位到服务自身的 HTTP 超时。0 = 不设调用方预算。
     reasoning_chunk_rerank_timeout_seconds: float = Field(
         10.0, ge=0, validation_alias="REASONING_CHUNK_RERANK_TIMEOUT_SECONDS")
     # 逐步推理的按篇原文取样动作(reflect 动作 read_document)总开关。关掉即动作
