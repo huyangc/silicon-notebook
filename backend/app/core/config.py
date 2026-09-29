@@ -1107,8 +1107,9 @@ class Settings(BaseSettings):
     # 补种 / add_subquery 原文半的总开关(不看知识图谱,有图与无图 run 同闸)。关掉
     # 即动作不进 schema/prompt/白名单、首轮不播种、不叠原文补检索、
     # `REASONING_MAX_CHUNK_SEARCHES` 无消费者,零额外检索。原文段在合成与深度报告
-    # 撰写中的装配顺序(相关度排序 → 概念漫游段与检索段两道交错 → 精确前缀席位,
-    # 单点 `retrieval.order_reasoning_passages`)是固定规则,不归这把开关管。
+    # 撰写中的装配顺序(相关度排序 → 概念漫游段与检索段两道交错 → 精确前缀席位
+    # → 当前库 / 逐库保底前缀,单点 `retrieval.reasoning_passage_order`)是固定
+    # 规则,不归这把开关管。
     #
     # ⚠ 关闭态**不是**零额外查询:`kg_in_scope`(本库或勾选的参考库有没有图)这对
     # EXISTS 照付一次。它不归这把闸管——`ask_service` 的 `no_usable_kg` 早退本来
