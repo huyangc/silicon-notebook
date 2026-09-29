@@ -1711,8 +1711,10 @@ class CeilingReaders:
       visible sources.  Deliberately one statement per library rather than the
       batched ``visible_source_ids_by_notebook``: a mounted library must fail
       on its own (see ``_mounted_library_ceilings``), and one statement per
-      library was also measured cheaper at 6 x 49k sources (SQLite 123 ms vs
-      168 ms, PostgreSQL 156 ms vs 306 ms);
+      library was also measured cheaper for 6 libraries x 49k sources, both
+      forms with their ``ORDER BY`` (SQLite 123 ms vs 168 ms, PostgreSQL
+      156 ms vs 306 ms; same machine as the COST figures, warm, machine load
+      24-45, 2026-09-29 fix round);
     * ``hidden(notebook_id, owner_id)`` -- ``hidden_source_ids``: the RAW
       owner-scoped hidden half (the owner's Memory projections plus the
       notebook-wide Knowhow ones), exactly what the drift probe re-reads;
@@ -1740,8 +1742,9 @@ DEFAULT_MOUNTED_READ_SECONDS = 5.0
 # deadline, now + DEFAULT_MOUNTED_READ_SECONDS)`` -- the pairing
 # ``chunk_federation._federated_tasks`` gives ``_prepared_peer`` -- so M slow
 # libraries cost at most this long, not M x 5 s, before the run starts.  Two
-# per-library allowances: 6 x 49k visible sources read in 0.3-0.5 s measured,
-# so the stage bound only ever bites a database that is already failing.
+# per-library allowances: 6 x 49k visible sources were read in 0.3-0.4 s under
+# load (see the COST section of ``default_ceiling_context``), so the stage
+# bound only ever bites a database that is already failing.
 DEFAULT_MOUNTED_TOTAL_SECONDS = 2 * DEFAULT_MOUNTED_READ_SECONDS
 
 
@@ -1966,16 +1969,54 @@ def default_ceiling_context(
     number of SOURCES, and M is bounded by the mount set.  Bytes and time do
     not share that property: both grow linearly with the total number of
     visible sources across the notebook and its mounted libraries, because each
-    library's ceiling is materialised as a ``frozenset`` (built exactly once,
-    never sorted).  Measured with the real stores at 49k visible sources per
-    library, medians over two runs at machine load 24-45 (so the times are
-    noisy; SQLite / PostgreSQL): no mount 27-37 / 32-69 ms, one mount 63-79 /
-    70-300 ms, six mounts 349-466 / 266-313 ms.  Peak allocation, which load
-    does not blur: 10 / 14 MB, 14 / 18 MB and 44 / 48 MB (the batched read this
-    replaced peaked at 98 / 122 MB with six mounts).  The mounted-library share
-    is not new work in a single-library run: the federated legs read the same
-    visible sets today and now reuse these frozen ones instead
-    (``_peer_visible_sources``).
+    library's ceiling is materialised as a ``frozenset`` (built exactly once);
+    ``_peer_visible_sources`` then sorts each mounted ceiling once per run for
+    its hand-out (~7 ms per 49k ids).  Worst case before the run starts: the
+    active notebook's reads plus ``mounted_total_seconds``.
+
+    Measured against TODAY's route-level freeze in the same process and
+    session (``ask_routes._validate_source_scope`` on the all-selected scope
+    plus its install, plus the one live visible read per mounted library a
+    single-library run pays through federation's run memo).  Conditions: Apple
+    M5 Max, 18 cores, 64 GB; local PostgreSQL 16.15; Python 3.14.6; 49k visible
+    sources per library (ids of 43 ASCII characters) plus 300 Knowhow and 50
+    Memory sources in the notebook; warm (one warm-up, median of 11, two
+    interleaved rounds, both medians shown); machine load 16-20 from other
+    work, so the times are noisy.  ``all_visible_source_ids`` and
+    ``hidden_source_ids`` carry ``ORDER BY id``; ``memory_source_ids`` and the
+    participant read do not.  Route vs constructor, SQLite / PostgreSQL:
+
+    * no mount: 32-34 vs 25-26 ms / 72-84 vs 34-44 ms (2 vs 3 reads);
+    * one mount: 55-73 vs 90-101 ms / 152-183 vs 102-122 ms (3 vs 4 reads);
+    * six mounts: 163-204 vs 339-365 ms / 283-412 vs 373-391 ms (8 vs 9 reads);
+    * peak allocation: 10.6 / 16.7 / 38.2 MB vs 9.7 / 15.8 / 45.9 MB (SQLite),
+      13.7 / 20.6 / 42.2 MB vs 13.7 / 19.8 / 49.9 MB (PostgreSQL).
+
+    So with mounted libraries this costs MORE than today's route freeze in wall
+    clock (six mounts: roughly +150 ms on SQLite, up to +90 ms on PostgreSQL),
+    more peak memory (the held per-library frozensets, +8 MB at six mounts)
+    and one more read (the participant set); only the unmounted case is
+    cheaper.  With the cyclic GC paused, six mounts take 140 vs 216 ms
+    (SQLite) and 202 vs 293 ms (PostgreSQL): the remaining gap is the sorted
+    hand-out and the per-library budget, and on SQLite most of the rest is GC
+    that the per-library ``read_budget`` provokes -- its progress handler made
+    six 49k-row reads trigger ~200 young and one full collection (~87 ms in
+    this process) where the same reads without a budget trigger five young
+    ones.  Against the batched constructor this replaced, peak memory fell
+    from 98 / 122 MB to 46 / 50 MB at six mounts.
+
+    Once installed, runs that had no scope before (MCP ``ask_notebook``,
+    unscoped API asks, the report worker) start running the drift probe
+    (``source_scope_visible_universe_matches``, asked before the whole-graph,
+    PPR, relation and exact-lookup channels): two reads per probe -- the
+    notebook's visible set and the owner's hidden half -- and 4-8 probes per
+    question (32.5 ms each at 49k sources in the first quality review, so
+    roughly 130-260 ms per question).  What that buys: while a notebook is
+    ingesting, a source that finishes after the freeze reads as drift, and
+    those channels -- which are not partitioned by source -- are switched off
+    for that question instead of admitting a source outside the freeze, which
+    is what the browser path already does.  The probe must stay per call, not
+    per run (codex #634 R1).
     """
     if current_source_scope() is not None:
         yield
@@ -2105,7 +2146,8 @@ def refreshed_ceiling_context(
       and is refused.
 
     Reads: participants plus one visible read per newly admitted library (plus
-    the notebook's visible and hidden sets in the narrowing-only case above).
+    the notebook's visible and hidden sets in the narrowing-only case above,
+    and one ``memory_sources`` read while the Memory channel is closed).
     """
     outer = current_source_scope()
     if outer is not None and outer.notebook_id != notebook_id:
