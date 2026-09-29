@@ -3601,14 +3601,146 @@ class ReasoningRetriever:
         个子任务里,也就是 `retrieval_run.py` 模块 docstring 要求的位置:只有真正
         的检索调用被圈住,编排者不得持槽。`select_chunk_candidates` 的 MMR 是纯
         CPU、只读已在手的候选与矩阵,本来也不该进临界区。
+
+        **选择步先试 cross-encoder 精排,MMR 是回退。** 召回之后由
+        `_rerank_chunk_selection` 决定入选;它返回 None(精排关闭、未配置、调用
+        失败、候选池不超过 k)时才走上面的 `select_chunk_candidates`,那条路径
+        逐字节不变。精排是模型调用、不是检索 I/O,同样不进扇出槽。
         """
         scored, ids, matrix = self.retrieval.retrieve_chunk_candidates(
             notebook_id, query)
-        selected = self.retrieval.select_chunk_candidates(
-            scored, ids, matrix,
-            self.settings.chunk_mmr_k if k is None else k,
-            self.settings.chunk_mmr_lambda)
+        take = self.settings.chunk_mmr_k if k is None else k
+        selected = self._rerank_chunk_selection(query, scored, take)
+        if selected is None:
+            selected = self.retrieval.select_chunk_candidates(
+                scored, ids, matrix, take, self.settings.chunk_mmr_lambda)
         return self._filter_candidates("chunk", selected)
+
+    def _chunk_rerank_client(self):
+        """原文检索精排用的 `retrieval_rerank` 客户端;不可用时 None。
+
+        `model_clients` 在 Ask 与深度报告路径是带 `.rerank(workload_id)` 的
+        provider,在 `from_repository`(knowhow 智能补全)路径是仓库 facade、
+        **没有** `.rerank`。所以这里按属性探测,而不是把 rerank 加进
+        `ReasoningModelProvider` 协议——ports 面只许收缩,而且这条能力本来就是
+        「有则用、无则回到 MMR」的可选项。探测到之后还要客户端自报
+        `configured`:未绑定 rerank 服务时生产客户端返回恒等序,拿它当精排结果
+        会把 MMR 的多样性白白换成融合分排序。
+        """
+        settings = self.settings
+        if not getattr(settings, "reasoning_chunk_rerank_enabled", False):
+            return None
+        if int(getattr(settings, "reasoning_chunk_rerank_candidates", 0) or 0) <= 0:
+            return None
+        provider = getattr(self.model_clients, "rerank", None)
+        if not callable(provider):
+            return None
+        client = provider("retrieval_rerank")
+        if not getattr(client, "configured", False):
+            return None
+        return client
+
+    def _rerank_chunk_selection(self, query, scored, k):
+        """用 cross-encoder 精排决定 `search_chunks` 选哪 k 段;回退时返回 None。
+
+        口径与 chunk 模式 mix 分支(`AskService` 里 `partition_generated_
+        question_chunks` 之后的两次 rerank)一致:基线候选与生成问题补充候选
+        **分开**精排,补充整体排在基线之后——补充候选只是问题索引的可选增量,
+        不许靠精排分挤掉历史通道已经找到的段落。多出来的一条界是**候选窗口**:
+        基线按融合分(`relevance`,与 MMR 读的同一个值)降序取前
+        `REASONING_CHUNK_RERANK_CANDIDATES` 条交精排,窗口外的基线按融合分接在
+        精排序之后(只在窗口小于 k 时才轮得到)。召回窗是 `chunk_recall`(200 段
+        量级),全量交精排会让每条子查询多付几批 cross-encoder。补充候选同样按
+        窗口截断,且只在基线不够 k 段时才精排(否则它们一段都进不了前 k,调用
+        白付)。
+
+        按精排序取前 k 段之后,仍走 `apply_active_reserve`——与 MMR 路径同一个
+        本库保底实现(`retrieval.enforce_active_floor`),池子同样是完整的
+        `scored`。精排只决定入选与返回顺序,**不改写 `relevance`**:它参与接地
+        阈值(`EVIDENCE_TAU_*`)。已知残余:合成时 `order_reasoning_passages` 仍按
+        相关度装配原文分区,所以精排决定的是「选哪 k 段」,不是合成内的先后。
+
+        回退(返回 None,调用方走 MMR,逐字节不变):
+        * 精排关闭 / 窗口为 0 / 客户端不可用(见 `_chunk_rerank_client`);
+        * 候选池不超过 k——没有取舍可做,MMR 路径本来就原样全收;
+        * 精排失败:客户端调了 `on_error`,或调用本身抛错(取消照抛)。
+
+        失败的判据**只**认 `on_error`/异常,不认「返回恒等序」:窗口按融合分
+        排好序交出去,一个真实的精排完全可能给出原序,两者在返回值上无法区分;
+        恒等序因此照常按精排结果取段。失败不上横幅——退回 MMR 不影响结果可用性
+        ——所以这里刻意**不**用 `note_model_error`(它写进本次提问的模型错误
+        集合,前端据此出横幅),只经 `_note_chunk_rerank_fallback` 记一条不含
+        内容的事件;调度器本身也已为每个失败批次记了 `model_scheduler` 错误事件。
+
+        并发:首轮播种按子查询并发调用 `search_chunks`,每条子查询至多两次精排
+        调用(基线一次,基线不足 k 时补充一次);精排服务的并发由模型调度器按
+        该服务的 `max_concurrency` 排队,不占检索扇出槽。
+        """
+        if len(scored) <= k or k <= 0:
+            return None
+        client = self._chunk_rerank_client()
+        if client is None:
+            return None
+        from app.services.chunk_federation import apply_active_reserve
+        from app.services.retrieval import partition_generated_question_chunks
+
+        window = int(self.settings.reasoning_chunk_rerank_candidates)
+        baseline, supplemental = partition_generated_question_chunks(scored)
+        baseline = sorted(baseline, key=lambda c: -float(c.relevance or 0.0))
+        failures: List[BaseException] = []
+        raise_if_cancelled(self.cancel_event)
+        try:
+            ranked = self._rerank_window(client, query, baseline, window, failures)
+            if len(ranked) < k and supplemental and not failures:
+                supplemental = sorted(
+                    supplemental, key=lambda c: -float(c.relevance or 0.0))
+                ranked += self._rerank_window(
+                    client, query, supplemental, window, failures)
+        except AskCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 — 精排是可选项,失败回到 MMR
+            failures.append(exc)
+        raise_if_cancelled(self.cancel_event)
+        if failures:
+            if isinstance(failures[0], AskCancelled):
+                # 调度器把取消当批次失败交给 on_error 时,取消仍是取消。
+                raise failures[0]
+            self._note_chunk_rerank_fallback(failures[0], len(scored))
+            return None
+        return apply_active_reserve(self.settings, ranked[:k], scored, k)
+
+    @staticmethod
+    def _rerank_window(client, query, hits, window, failures):
+        """把 `hits` 的前 `window` 条交精排,窗口外的按原序接在后面。
+
+        失败经 `failures` 回传(`on_error` 被调即记一条),调用方据此整次回退。
+        """
+        head, tail = hits[:window], hits[window:]
+        if not head:
+            return list(tail)
+        order = client.rerank(
+            query, [c.text for c in head], on_error=failures.append)
+        return [head[i] for i in order] + list(tail)
+
+    def _note_chunk_rerank_fallback(self, error, candidates: int) -> None:
+        """原文检索精排失败、已退回 MMR 的事件回执。不上横幅,不带内容。
+
+        只记原因码与异常类名(不记查询、段落或异常消息)。事件日志经
+        `model_clients` 上的 `event_log` 探测拿到——没有它的替身/仓库形态就不记,
+        记录本身失败也吞掉:诊断绝不能把一次已经兜住的回退变成新的失败。
+        """
+        emit = getattr(getattr(self.model_clients, "event_log", None), "emit", None)
+        if not callable(emit):
+            return
+        try:
+            emit({
+                "kind": "reasoning_chunk_rerank_fallback",
+                "reason": "rerank_failed",
+                "error_type": type(error).__name__,
+                "candidates": int(candidates),
+            })
+        except Exception:  # noqa: BLE001 — 诊断绝不打断检索
+            pass
 
     def keyword_chunks(self, notebook_id, keywords):
         """按**整题关键词**做纯词法(FTS)的原文段落检索。零模型调用、零 embedding。

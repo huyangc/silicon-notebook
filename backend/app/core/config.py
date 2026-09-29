@@ -1097,13 +1097,11 @@ class Settings(BaseSettings):
     reasoning_enum_tools_enabled: bool = Field(
         True, validation_alias="REASONING_ENUM_TOOLS_ENABLED")
     # 逐步推理的原文段落检索动作(reflect 动作 search_chunks)、首轮原文播种与
-    # 补种 / add_subquery 原文半的总开关(不看知识图谱,有图与无图 run 同闸)。与
-    # 上面那把枚举闸同一「off 就是旧行为」契约:关掉即完全回到接入前——动作不进
-    # schema/prompt/白名单、首轮不播种、不叠原文补检索、`REASONING_MAX_CHUNK_SEARCHES`
-    # 无消费者,零额外检索;没有检索段时合成装配的交错也不起作用,问答合成的
-    # 顺序回到「相关度排序 + 精确前缀席位」。例外:深度报告撰写的未绑定段从
-    # 插入序改成了同一套排序(`ReportEngine._section_passage_order`),这一点
-    # 不随本开关回退。
+    # 补种 / add_subquery 原文半的总开关(不看知识图谱,有图与无图 run 同闸)。关掉
+    # 即动作不进 schema/prompt/白名单、首轮不播种、不叠原文补检索、
+    # `REASONING_MAX_CHUNK_SEARCHES` 无消费者,零额外检索。原文段在合成与深度报告
+    # 撰写中的装配顺序(相关度排序 → 概念漫游段与检索段两道交错 → 精确前缀席位,
+    # 单点 `retrieval.order_reasoning_passages`)是固定规则,不归这把开关管。
     #
     # ⚠ 关闭态**不是**零额外查询:`kg_in_scope`(本库或勾选的参考库有没有图)这对
     # EXISTS 照付一次。它不归这把闸管——`ask_service` 的 `no_usable_kg` 早退本来
@@ -1112,6 +1110,18 @@ class Settings(BaseSettings):
     # 总共只付一次。
     reasoning_chunk_search_enabled: bool = Field(
         True, validation_alias="REASONING_CHUNK_SEARCH_ENABLED")
+    # 原文检索工具(`ReasoningRetriever.search_chunks`:首轮原文播种、方向补检索、
+    # reflect 动作 search_chunks)内部的 cross-encoder 精排。只有部署绑定了
+    # `retrieval_rerank` 工作负载才生效;召回之后按融合分(relevance)取前
+    # `REASONING_CHUNK_RERANK_CANDIDATES` 条基线候选交精排,生成问题补充候选排在
+    # 基线之后单独精排(与 chunk 模式 mix 分支同法),按精排序取 k 段,再走本库
+    # 保底席位。精排决定「选哪 k 段」,不改写 relevance(它参与接地阈值)。
+    # 未配置、调用失败或候选池不超过 k 时走原来的 MMR,逐字节不变;设 false
+    # 或窗口设 0 = 零精排调用,完全回到 MMR。
+    reasoning_chunk_rerank_enabled: bool = Field(
+        True, validation_alias="REASONING_CHUNK_RERANK_ENABLED")
+    reasoning_chunk_rerank_candidates: int = Field(
+        50, validation_alias="REASONING_CHUNK_RERANK_CANDIDATES")
     # 逐步推理的按篇原文取样动作(reflect 动作 read_document)总开关。与上面那把
     # chunk 检索闸同一「off 就是旧行为」契约:关掉即动作不进 prompt/schema/
     # allowed_actions 三处,`REASONING_MAX_DOCUMENT_READS` 无消费者,逐字节回到
