@@ -27,19 +27,26 @@
 `a.created_by` 判第 2 支(同 owner),于是 A 的每个只读成员都经参与集读到了 B——
 主人把 A 分享出去,并没有把 B 分享出去。
 
-因此另起一组**带查看者**的片段,有效边 = `MOUNT_VALID_EXPR` **且**下面四支之一:
+因此另起一组**带查看者**的片段,有效边 = `MOUNT_VALID_EXPR` **且**下面两支之一:
 
 1. `b.tier = 'base'`——公共知识库的受众本来就是全员;
-2. `v.uid = a.created_by`——查看者就是挂载人;
-3. 查看者自己对 B 有读权——`access_sql.read_access_clause` 的列引用形式(owner ∨
+2. 查看者自己对 B 有读权——`access_sql.read_access_clause` 的列引用形式(owner ∨
    只读成员 ∨ 有效授权边),不另抄一份读权。`everyone` 授权边就在它的授权边臂里,
-   且那条臂不看 `user_ref`,所以不单列第四支:空查看者照样命中它。
+   且那条臂不看 `user_ref`,所以不单列一支:空查看者照样命中它。
 
-第 2 支在逻辑上被「`MOUNT_VALID_EXPR` ∧ 第 3 支」蕴含:边站得住时,挂载人要么是
-被挂库的 owner(同 owner 支),要么对它有受限读权(借入支),要么它是公共库/
-`everyone`——每一种挂载人自己都读得到 B。保留它是为了一次纯列比较就短路掉最常见
-的「主人看自己的库」,省下后面几层 EXISTS;也因此「删掉第 2 支」是等价变异,没有
-任何行为测试杀得死它,别为它写期望。
+「挂载人自己一律生效」不是一条单独的支,而是由这两支加 `MOUNT_VALID_EXPR` 蕴含出来
+的:边站得住时,挂载人要么是被挂库的 owner(同 owner 支),要么对它有受限读权(借入
+支),要么它是公共库/`everyone`——每一种挂载人自己都读得到 B。行为矩阵里「挂载人
+看到的集合逐行等于旧片段」那条断言守着这个蕴含:将来 `MOUNT_VALID_EXPR` 多出一支
+挂载人自己读不到的可挂范围,它会先红。
+
+⚠ **别把 `v.uid = a.created_by` 作为一支加回来**,哪怕它看起来只是一次廉价的短路。
+查看者支现在只引用被挂库 `b` 和查看者常量,计划器把它当作 `b` 上的限制条件下推到
+`b` 的扫描上,于是顺序扫描 `notebooks b` 要为每一行求值读权子查询,代价远高于按主键
+逐条取挂载边,计划器稳定选索引。一旦 OR 里出现引用挂载方 `a` 的一支,整个查看者支
+就变成 join 条件,不再下推,几千本笔记本的规模上计划器会翻成「hash join + 顺序扫描
+notebooks」(PG 实测:5k 本时 0.2 ms → 1.2 ms)。EXPLAIN pin 在
+`tests/postgres/test_mount_sql_viewer_pg.py`,加回这一支会让它变红。
 
 挂载人 = `a.created_by` 的依据:挂载写入口 `PUT /notebooks/{id}/bases` 挂的是
 `notebook:mount`,解析到 **owner 档**(`api/deps.py::_CAPABILITY_LEVELS`);应用层
@@ -53,15 +60,14 @@ upsert,它照搬源环境那一行(同样不可转让)的 owner 映射结果,而
 两种「查不到人」都失败即关,且都不需要单独的分支:
 
 * **挂载人未知**:`notebooks.created_by` 在两个后端的 schema 里都可空、没有回填迁移,
-  同步导入把源环境的空值原样带过来(「空即无人」)。`v.uid = NULL` 不为真,于是只剩
-  第 1、3 支——边只对自己能读 B 的人生效。(今天的 `MOUNT_VALID_EXPR` 在挂载人为
+  同步导入把源环境的空值原样带过来(「空即无人」)。查看者支本来就不看挂载人,于是
+  只剩公共库与读权两支——边只对自己能读 B 的人生效。(今天的 `MOUNT_VALID_EXPR` 在挂载人为
   NULL 时本来就只放行公共库与 `everyone` 两支,这一条是不依赖那个事实的第二道保证。)
 * **空查看者**(没有 actor 的后台路径):查看者行写成 `NULLIF(?, '')`,空串与
   `None` 都归一成 NULL,于是空查看者不等于任何人——只剩第 1 支和读权谓词里与人无关
   的 `everyone` 臂。归一不能省:若空查看者保持 `''`,只要库里有任何一行把 `''` 当
   用户 id(外键今天只在 `users` 里真有一个 `id=''` 时才放得进来,谓词不该寄生在这个
-  外部事实上),它就会与那行的 `created_by` / 成员行 / 点名授权边相等,凭空打开第 2
-  支或读权。
+  外部事实上),它就会与那行的 `created_by` / 成员行 / 点名授权边相等,凭空打开读权支。
 
 参数:`MOUNT_VIEWER_JOIN` 恰好消费**两个**位置参数,顺序 `(viewer_id, notebook_id)`
 (查看者行在 FROM 子句里,先于 WHERE 出现)。新起名字而不是给旧片段加参数:漏改的
@@ -219,11 +225,14 @@ MOUNT_VIEWER_JOIN = (
     "WHERE e.notebook_id = ? AND b.id != e.notebook_id"
 )
 
-# 「这条站得住的边对查看者 v 生效吗」:公共库 ∨ v 是挂载人 ∨ v 自己能读 b。读权
-# 复用 access_sql.read_access_clause 的列引用形式(零参数);别名与 MOUNT_VALID_EXPR
-# 里的 nm/ng/nge/xm/xg 错开,嵌套子查询里不互相遮蔽。
+# 「这条站得住的边对查看者 v 生效吗」:公共库 ∨ v 自己能读 b(挂载人由此与
+# MOUNT_VALID_EXPR 蕴含,见模块 docstring)。读权复用 access_sql.read_access_clause
+# 的列引用形式(零参数);别名与 MOUNT_VALID_EXPR 里的 nm/ng/nge/xm/xg 错开,嵌套
+# 子查询里不互相遮蔽。⚠ 只许引用 b 与 v:引用挂载方 a 会让它变成 join 条件、不再
+# 下推到 b 的扫描上,计划器随之翻成顺序扫描 notebooks(理由与 EXPLAIN pin 见模块
+# docstring)。
 _VIEWER_REACHES_MOUNT_EXPR = (
-    "(b.tier = 'base' OR v.uid = a.created_by OR "
+    "(b.tier = 'base' OR "
     + read_access_clause(
         "b",
         "vm",

@@ -166,8 +166,15 @@ def test_viewer_predicate_is_derived_from_the_existing_definitions():
     """带查看者的谓词 = 既有有效性原样 ∧ 查看者支;读权复用 access_sql,不另抄。
 
     `MOUNT_VALID_EXPR` 原样嵌在里面,「借来的不转借」、copying 哨兵与四支可挂范围就
-    对所有查看者照旧成立;读权支逐字等于 `read_access_clause` 的列引用形式。两个后端的
-    查看者支逐字相同(纯列引用,没有方言差异)——双后端同修的可执行证据。
+    对所有查看者照旧成立;查看者支逐字等于「公共库 ∨ `read_access_clause` 的列引用形式」。
+    两个后端的查看者支逐字相同(纯列引用,没有方言差异)——双后端同修的可执行证据。
+
+    查看者支**不许引用挂载方 `a`**:只引用 `b` 与查看者常量时,它作为 `b` 上的限制
+    条件下推到 `b` 的扫描上,计划器稳定按主键取被挂库;一旦 OR 里出现 `a.` 的列(比如
+    把「查看者就是挂载人」`v.uid = a.created_by` 作为短路加回来),它就变成 join 条件,
+    几千本笔记本的规模上计划器翻成顺序扫描 notebooks(EXPLAIN pin 在
+    `tests/postgres/test_mount_sql_viewer_pg.py`)。挂载人照样生效,靠的是与
+    `MOUNT_VALID_EXPR` 的蕴含,由行为矩阵里「挂载人的有序结果等于旧片段」守着。
     """
     arms = []
     for backend, module, access, _placeholder in _BACKENDS:
@@ -182,8 +189,9 @@ def test_viewer_predicate_is_derived_from_the_existing_definitions():
             group_alias="vgm",
             group_admin_alias="vga",
         )
-        assert read_arm in module._VIEWER_REACHES_MOUNT_EXPR, backend
-        assert "v.uid = a.created_by" in module._VIEWER_REACHES_MOUNT_EXPR, backend
+        arm = module._VIEWER_REACHES_MOUNT_EXPR
+        assert arm == "(b.tier = 'base' OR " + read_arm + ")", backend
+        assert re.search(r"(?<![\w.])a\.", arm) is None, backend
         arms.append(module._VIEWER_REACHES_MOUNT_EXPR)
     assert arms[0] == arms[1]
 
@@ -200,6 +208,8 @@ def test_viewer_predicate_is_derived_from_the_existing_definitions():
 #   u-plain 是 nb-a 的成员但读不了 nb-b——M3 要挡的正是他。
 # * nb-c:u-owner 的**未共享**库,挂着借来的 nb-x(u-xowner 的库,u-owner 是只读成员)
 #   与 nb-b。借入边对挂载人生效,对被借库的主人 u-xowner 也生效(他本来就能读 nb-x)。
+# * u-all 同时是 nb-b 与 nb-x 的只读成员:他读得到每一本私有挂载,于是在每本库上看到
+#   的都与旧片段相同——和挂载人一起承担「有序结果逐行等于旧片段」那条断言。
 # * nb-n:挂载人未知(created_by 为 NULL),挂着 nb-p、nb-e、nb-b。
 # * 空 id 用户 `""` 是 nb-b 的只读成员:外键今天只在 `users` 里真有 `id=''` 时才放得
 #   进这种行,这里手插它,钉住「空查看者不等于任何人」的归一(NULLIF),不让谓词
@@ -213,6 +223,7 @@ MOUNT_WORLD_USERS = (
     "u-carol",
     "u-xowner",
     "u-stranger",
+    "u-all",
     "",
 )
 # (id, created_by, tier, status)
@@ -236,6 +247,8 @@ MOUNT_WORLD_MEMBERS = (
     ("nb-b", ""),
     ("nb-y", "u-owner"),
     ("nb-x", "u-owner"),
+    ("nb-b", "u-all"),
+    ("nb-x", "u-all"),
 )
 # (id, notebook_id, principal_type, principal_id)
 MOUNT_WORLD_GRANTS = (
@@ -259,16 +272,26 @@ MOUNT_WORLD_BASES = (
 
 # None = 空查看者的另一种形态(后台路径拿不到 actor 时传进来的可能是 None)。
 MOUNT_WORLD_VIEWERS = MOUNT_WORLD_USERS + (None,)
-_READERS_OF_B = frozenset({"u-owner", "u-bmember", "u-bgrantee", "u-bgroup"})
+_READERS_OF_B = frozenset({"u-owner", "u-bmember", "u-bgrantee", "u-bgroup", "u-all"})
+_READERS_OF_X = frozenset({"u-owner", "u-xowner", "u-all"})
 _PUBLIC = frozenset({"nb-p", "nb-e"})
 
-# 旧(与查看者无关)片段今天判出的有效集合——本任务不许改变它们。
-OLD_MOUNT_EFFECTIVE = {
-    "nb-a": frozenset({"nb-b", "nb-p", "nb-e"}),
-    "nb-c": frozenset({"nb-x", "nb-b"}),
-    "nb-n": frozenset({"nb-p", "nb-e"}),
+# 旧(与查看者无关)片段今天按 MOUNT_ORDER 判出的有效列表——本任务不许改变它们。
+# 公共库在前,其余按名字。
+OLD_MOUNT_ORDERED = {
+    "nb-a": ("nb-p", "nb-b", "nb-e"),
+    "nb-c": ("nb-b", "nb-x"),
+    "nb-n": ("nb-p", "nb-e"),
 }
+OLD_MOUNT_EFFECTIVE = {nb: frozenset(ids) for nb, ids in OLD_MOUNT_ORDERED.items()}
 MOUNTER = {"nb-a": "u-owner", "nb-c": "u-owner"}
+# 这些查看者在对应库上的结果必须与旧片段**逐行同序**(不只是同一个集合):挂载人,
+# 以及读得到全部私有挂载的 u-all。
+ORDER_PINNED_VIEWERS = {
+    "nb-a": ("u-owner", "u-all"),
+    "nb-c": ("u-owner", "u-all"),
+    "nb-n": ("u-all",),
+}
 
 
 def expected_mounts_for_viewer(notebook_id: str, viewer: str | None) -> frozenset:
@@ -279,7 +302,7 @@ def expected_mounts_for_viewer(notebook_id: str, viewer: str | None) -> frozense
         return _PUBLIC | ({"nb-b"} if viewer in _READERS_OF_B else set())
     if notebook_id == "nb-c":
         result = set()
-        if viewer in ("u-owner", "u-xowner"):
+        if viewer in _READERS_OF_X:
             result.add("nb-x")
         if viewer in _READERS_OF_B:
             result.add("nb-b")
@@ -298,7 +321,7 @@ def expected_reach_with_unknown_mounter(base_id: str, viewer: str | None) -> boo
     if base_id == "nb-b":
         return viewer in _READERS_OF_B
     if base_id == "nb-x":
-        return viewer in ("u-owner", "u-xowner")
+        return viewer in _READERS_OF_X
     raise AssertionError(base_id)
 
 
@@ -393,12 +416,12 @@ def mount_viewer_contract_failures(
         + " AS ok "
         + module.MOUNT_VIEWER_JOIN
     )
-    old = "SELECT b.id " + module.MOUNT_JOIN + module.MOUNT_VALID
+    old = "SELECT b.id " + module.MOUNT_JOIN + module.MOUNT_VALID + module.MOUNT_ORDER
 
     for notebook_id, old_expected in OLD_MOUNT_EFFECTIVE.items():
-        old_actual = frozenset(query(old, (notebook_id,)))
-        if old_actual != old_expected:
-            failures.append(f"old {notebook_id}: {sorted(old_actual)}")
+        old_ordered = query(old, (notebook_id,))
+        if tuple(old_ordered) != OLD_MOUNT_ORDERED[notebook_id]:
+            failures.append(f"old {notebook_id}: {old_ordered}")
         for viewer in MOUNT_WORLD_VIEWERS:
             case = f"{notebook_id} viewer={viewer!r}"
             expected = expected_mounts_for_viewer(notebook_id, viewer)
@@ -419,8 +442,10 @@ def mount_viewer_contract_failures(
             # 收窄只许收,不许扩;对挂载人本人逐字等于今天的有效集合。
             if not expected <= old_expected:
                 failures.append(f"{case}: 期望值跑出了旧有效集合")
-            if MOUNTER.get(notebook_id) == viewer and frozenset(got_filtered) != old_expected:
-                failures.append(f"{case}: 挂载人看到的不再是今天的有效集合")
+            if viewer in ORDER_PINNED_VIEWERS[notebook_id] and got_filtered != old_ordered:
+                failures.append(
+                    f"{case}: 有序结果 {got_filtered} 不再逐行等于旧片段 {old_ordered}"
+                )
         # 错序绑定:e.notebook_id 比的是一个用户 id,结果为空,不串到别的库。
         swapped = query(filtered, (notebook_id, MOUNTER.get(notebook_id, "u-owner")))
         if swapped:
