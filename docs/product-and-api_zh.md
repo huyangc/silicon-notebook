@@ -3039,7 +3039,7 @@ workload 做有界规划，不引入 Anthropic SDK 一类通用 Agent。模型�
 
 持久化策略为 `local → dual → binding_required → sso_only → retired`，默认仍为local。dual保留密码操作并允许用户主动关联；binding_required关闭注册/改密，密码会话只能迁移，不能访问业务HTTP或订阅；sso_only拒绝本地会话和密码；retired不可逆地关闭本地认证并清理密码材料。阶段修改要求真实管理员会话及版本匹配，数据库在提交时复验切换条件。插件故障不会改变认证阶段。
 
-已有用户先验证当前本站密码，再统一认证并确认展示的身份。原 `users.id`、资产、角色、偏好及内部邮箱保持不变；可信外部用户名成为 `users.username`，原 `local_login_name` 仅在并存/迁移期继续用于密码登录。SSO只按唯一的 `(provider_namespace, subject)` 映射登录，不按用户名或邮箱认领。与他人正式用户名或旧登录名冲突时整个绑定回滚。显示姓名不用于身份匹配。
+已有用户先验证当前本站密码，再统一认证并确认展示的身份。原 `users.id`、资产、角色、偏好及内部邮箱保持不变；可信外部用户名成为 `users.username`，原 `local_login_name` 仅在并存/迁移期继续用于密码登录。SSO只按唯一的 `(provider_namespace, subject)` 映射登录，不按用户名或邮箱认领；唯一例外是下文需显式开启的按工号自动关联，关联后同样落成映射。与他人正式用户名或旧登录名冲突时整个绑定回滚。显示姓名不用于身份匹配。
 
 state、浏览器证明、平台支持时的PKCE、原本站会话、策略/配置代次和一次性交接均由主仓控制。外部token不离开插件调用。回调跳转只携带短时交接码，浏览器还必须持有host-only、HttpOnly、SameSite证明cookie；绑定确认另需原本站Bearer。退出、重置密码、停用、重放及阶段/配置变化会使待办证明失效。SSO绝对期限从可信外部认证开始计算，滑动访问不能延长；网页认证的NDJSON/SSE每帧发送前复验会话。`/mcp` 继续由其协议逐请求、逐工具检查Agent凭据及所有者资格；已提交写入可以在token撤销后返回终态确认，后续访问仍被拒绝。
 
@@ -3058,7 +3058,8 @@ state、浏览器证明、平台支持时的PKCE、原本站会话、策略/配�
 | `POST /auth/sso/complete` | `{code}`，返回登录token/user或明确的绑定/授权开通确认预览 |
 | `POST /me/identity-binding/confirm` | `{pending_id}`，原子提交关联与名称并轮换会话 |
 | `POST /me/identity-binding/cancel` | `{pending_id}`，取消待确认事务 |
-| `GET /me/identities` | 本人的关联状态、统一名称及临时本地登录名；可接受迁移凭据 |
+| `GET /me/identities` | 本人的关联状态、统一名称、临时本地登录名及 `migration_available`；可接受迁移凭据 |
+| `POST /me/identity-migration` | 自动开户账号的SSO会话及本人旧账号的 `{login_name, password}`；把统一身份迁到旧账号并返回其 `{token, user}` |
 | `GET/PATCH /admin/auth/policy` | 持久化策略；修改需预期版本及显式回退标志 |
 | `GET /admin/auth/migration` | 预检计数及策略，不等同于真实IDaaS验收 |
 | `GET /admin/auth/accounts` | 分页迁移清单，包含已停用账号 |
@@ -3069,7 +3070,15 @@ state、浏览器证明、平台支持时的PKCE、原本站会话、策略/配�
 | `POST /auth/sso/grant/start` | 兑换授权并认证指定外部subject；新开通不能继承历史资产 |
 | `POST /admin/auth/retirement-cleanup` | 写入退役标记后可重试的凭据清理 |
 
-原 `POST /auth/login` 在收口期可返回 `migration_required=true`，此token不能用于业务。纯SSO新用户只获普通用户身份且无本地密码。晚到老用户需管理员签发固定原用户ID的恢复凭证，再由本人统一认证和确认；持有迁移会话时仍提供管理员凭证入口，无需清除浏览器存储才能恢复。不自动建号或合并账号。
+原 `POST /auth/login` 在收口期可返回 `migration_required=true`，此token不能用于业务。纯SSO新用户只获普通用户身份且无本地密码。晚到老用户需管理员签发固定原用户ID的恢复凭证，再由本人统一认证和确认；持有迁移会话时仍提供管理员凭证入口，无需清除浏览器存储才能恢复。未开启 `AUTH_SSO_AUTO_ACCOUNTS` 时不自动建号；任何情况下都不合并账号数据。
+
+开启 `AUTH_SSO_AUTO_ACCOUNTS=true` 后，非local阶段中未映射的 `login` 会查找 `user-local` 以外、`username` 或 `local_login_name` 与IdP用户名相同（不区分大小写）的账号。判定在暂存身份时做出，并在完成的写事务内重新计算；结论变化（候选账号重置密码等导致 `auth_revision` 改变、出现同名新账号、subject 已被映射、开关已关闭）时以 `stale_transaction` 或 `identity_not_linked` 失败，不会改选其他目标。
+
+- 恰有一个候选、启用且在当前身份源下没有任何映射（有效或历史）：建立映射，`username`/`display_name` 取IdP值，审计记 `sso_auto_linked`，`complete` 直接返回 `authenticated`。角色保持不变，管理员账号仍是管理员。
+- 唯一候选已停用返回 `account_inactive`；候选已有本身份源映射或多于一个候选返回 `identity_conflict`。
+- 没有候选：`complete` 返回 `confirmation_required`，`purpose: "auto_enroll"` 并带 `external_username`、`display_name`，此时不写任何数据。`POST /me/identity-binding/confirm`（无需本站Bearer）才新建以IdP用户名命名、无本地密码的普通 `user`、建立映射并审计 `sso_auto_enrolled`；`cancel` 则丢弃。确认页明确告知旧账号中的数据不会出现在新账号里，并给出替代路径：本地登录仍开放时用旧账号登录后关联，否则联系管理员。
+
+自动开户账号可以把统一身份迁回本人旧账号。仅当调用者本人的有效映射位于审计中含 `sso_auto_enrolled` 的账号、且阶段为 `dual` 或 `binding_required`（未退役）时，`migration_available` 为 true。`POST /me/identity-migration` 要求这种账号的SSO会话（本地会话被拒），按规范化后的 `local_login_name` 查找旧账号并校验密码；账号不存在与密码错误返回同一条消息。旧账号须启用、不是 `user-local`，且在本身份源下没有映射。随后在同一事务中把映射转到旧账号、旧账号改用IdP用户名和显示姓名、停用自动账号并清空其用户名、两个账号的 `auth_revision` 均递增并撤销各自会话、审计 `identity_migrated` 与 `sso_auto_account_retired`，并为旧账号签发SSO会话，其到期时间不晚于调用者原会话的绝对期限。旧账号的用户ID和数据保持不变；自动账号中的内容不搬迁。`recover` 授权也可指向当前被自动开户账号占用的subject，完成时执行相同迁移（两条审计都带授权引用），适用于任一非local阶段；subject被其他账号占用时仍以 `identity_conflict` 拒绝。
 
 更换已关联的统一账号必须由管理员签发 `replace` 凭证，固定原本站用户ID及当前身份源中的精确新subject。确认页展示原账号与新统一身份；用户认证并明确确认后，在同一事务中停用旧映射和旧SSO会话、保留历史subject归属并激活新映射，原用户ID、资产和角色不变。失败或取消不会改变原映射。授权签发、使用、完成以及关联、改名和账号状态变更均保留受限持久审计，不依赖短期认证事务。账号清单和审计均采用下表分页限制。
 
@@ -3082,6 +3091,7 @@ Agent初验及每次数据工具调用都复验账号状态；仅统一认证和
 | `AUTH_TRANSACTION_TTL_SECONDS` | 默认600，60–1800秒 |
 | `AUTH_SSO_SESSION_SECONDS` | 默认28800，300–86400秒 |
 | `AUTH_PROVIDER_TIMEOUT_SECONDS` | 默认15，大于0且不超过60秒 |
+| `AUTH_SSO_AUTO_ACCOUNTS` | 默认 `false`；未映射统一登录按工号自动关联/开户 |
 | `AUTH_PROVIDER_ID_MAX_CHARS` | 128 |
 | `AUTH_PROVIDER_NAMESPACE_MAX_CHARS` | 256 |
 | `AUTH_PROVIDER_CONFIGURATION_GENERATION_MAX_CHARS` | 128 |

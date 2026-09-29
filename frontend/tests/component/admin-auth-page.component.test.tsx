@@ -242,3 +242,26 @@ test.each(["success", "failure"])("a stale page %s cannot replace a newer post-m
   expect(section.getByRole("status")).toHaveTextContent("第 1 页");
   await waitFor(() => expect(section.getByRole("button", { name: "下一页" })).toBeEnabled());
 });
+
+test("audit shows readable labels for employee-number auto accounts and migrations", async () => {
+  const actions = ["sso_auto_linked", "sso_auto_enrolled", "identity_migrated", "sso_auto_account_retired"];
+  api.fetchAuthAudit.mockResolvedValue({ offset: 0, limit: 100, total: actions.length, items: actions.map((action, index) => ({
+    id: `audit-${index}`, actor_id: "u1", target_user_id: "u1", action, provider_namespace: "corp.production",
+    subject: "s", grant_reference: "", created_at: "2026-09-29T00:00:00",
+  })) });
+  render(<AdminAuthPage />);
+  const audit = await waitFor(() => actionSection("认证审计"));
+  for (const label of ["统一认证按工号自动关联", "统一认证自动开户", "已迁移到旧账号", "自动开户账号已停用（已迁移）"]) {
+    expect(await audit.findByText(label)).toBeInTheDocument();
+  }
+  expect(audit.queryByText("其他账号操作")).not.toBeInTheDocument();
+});
+
+test("recovery grant explains that an auto-enrolled holder of the identity is migrated", async () => {
+  const actor = userEvent.setup();
+  render(<AdminAuthPage />);
+  const grants = await waitFor(() => actionSection("签发迁移凭证"));
+  expect(grants.queryByText(/自动开户的账号占用/)).not.toBeInTheDocument();
+  await actor.selectOptions(grants.getByLabelText("用途"), "recover");
+  expect(grants.getByText(/若该统一身份已被统一认证自动开户的账号占用.*迁到所选旧账号.*自动开户账号随即停用/)).toBeInTheDocument();
+});

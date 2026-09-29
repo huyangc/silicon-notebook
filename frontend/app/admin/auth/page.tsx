@@ -29,6 +29,10 @@ const AUDIT_ACTION_LABEL: Readonly<Record<string, string>> = {
   "grant_completed:replace": "已完成更换统一账号",
   identity_bound: "已关联统一身份",
   identity_renamed: "已更新统一身份名称",
+  sso_auto_linked: "统一认证按工号自动关联",
+  sso_auto_enrolled: "统一认证自动开户",
+  identity_migrated: "已迁移到旧账号",
+  sso_auto_account_retired: "自动开户账号已停用（已迁移）",
   "account_status:active": "已启用账号",
   "account_status:disabled": "已停用账号",
 };
@@ -257,6 +261,7 @@ export default function AdminAuthPage() {
         <label>目标账号 ID（必填）<input value={grantTarget} disabled={busy} onChange={(event) => { setGrantTarget(event.target.value); setSelectedGrantAccount(null); setSelectionResult(null); }} /></label>
         {selectedGrantAccount && <p>已选原账号：{selectedGrantAccount.display_name || selectedGrantAccount.username}（用户名：{selectedGrantAccount.username}；统一身份：{selectedGrantAccount.subject || "未关联"}；账号 ID：<code>{selectedGrantAccount.id}</code>）。选择账号不会签发凭证。</p>}
       </>}
+      {grantPurpose === "recover" && <p>若该统一身份已被统一认证自动开户的账号占用，使用人确认后会把统一身份迁到所选旧账号，旧账号的用户 ID 与数据不变并改用统一身份用户名；自动开户账号随即停用，其中内容不会搬走。</p>}
       {grantPurpose === "replace" && <p>更换凭证只能用于该目标账号。用户确认新统一身份后，原用户 ID、数据和角色保留，旧统一身份与旧统一登录会话将失效。</p>}
       <button type="button" disabled={busy} onClick={() => { void createGrant(); }}>签发凭证</button>
       <ActionFeedback result={grantResult} />

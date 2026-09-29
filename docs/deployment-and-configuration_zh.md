@@ -1360,6 +1360,8 @@ EXTENSION_ADMISSION_REFRESH_SECONDS  # 服务进程重读管理员运行时开�
 
 `AUTH_PUBLIC_BASE_URL` 是公开API origin，需在IDaaS登记其 `/api/auth/sso/callback`。`AUTH_FRONTEND_BASE_URL` 默认使用同一origin，接收 `/auth/sso/callback`。生产必须使用HTTPS及相同hostname，保证host-only、SameSite浏览器证明可发送，推荐同源反向代理；开发可用回环HTTP和不同端口。不能从请求Host或未经信任的转发头推导这些地址。内网只有纯HTTP域名（如 `http://notebook.corp.example`）时必须设置 `AUTH_ALLOW_INSECURE_HTTP=true`；未设置时非回环HTTP地址启动即被拒，生产报 `https_required`。放行后其余origin检查（相同hostname、裸origin）不变，但授权码和会话令牌明文传输、浏览器证明cookie不带 `Secure`，只在受信内网开启；网关能配TLS时优先配TLS。
 
+`AUTH_SSO_AUTO_ACCOUNTS=true`（默认关闭）让任一非local阶段里尚未映射的统一登录按IdP返回的用户名自行落地；部署方必须确认该用户名就是历史本站账号注册时使用的工号。恰有一个用户名或本地登录名与之相同（不区分大小写）的启用账号时，直接关联并登录；没有对应账号时先展示确认页，用户确认后才新建普通 `user` 账号。打开它是一项信任决定：凡能通过公司统一认证的人都会得到账号；按工号自动关联意味着信任IdP的工号与本站用户名一致——若有人事先把本站用户名注册成别人的工号，该员工首次统一登录就会接管这个账号。自动关联从不提升角色，但对应账号本来就是管理员时按管理员关联。无法确认工号与本站用户名一致时保持关闭。开关在暂存和完成两处都读取，关闭后在途的自动登录同样停止；精确的匹配与拒绝规则归产品/API参考。
+
 高级预算为 `AUTH_TRANSACTION_TTL_SECONDS`、`AUTH_SSO_SESSION_SECONDS`、`AUTH_PROVIDER_TIMEOUT_SECONDS`，精确默认值和范围归产品/API参考。迁移阶段存于数据库，没有平行的环境变量模式开关。装载插件不会自动启用SSO，需管理员推进策略。非local阶段要求provider、身份源及配置代次匹配，并拒绝匿名管理员回退；插件缺失、不兼容或被禁用时启动失败。上游运行时故障只阻止新SSO，不恢复密码入口。
 
 配置代次标识已审核的插件版本、端点、客户端和密钥版本组合；上述项目变化时更新非敏感代次，所有部署副本保持一致，经受控路径更新策略。在途事务不能跨代次完成。身份源命名空间不能由包版本生成；普通插件开关不能停用当前认证插件。

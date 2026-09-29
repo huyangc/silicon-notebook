@@ -11,9 +11,12 @@ import {
   HeartHandshake,
   MessagesSquare,
   SlidersHorizontal,
+  UserCheck,
   Users,
   Wand2,
 } from "lucide-react";
+
+import { IdentityMigrationForm } from "./identity-migration-form";
 
 
 type AccountMenuProps = {
@@ -41,6 +44,9 @@ type AccountMenuProps = {
   canBindIdentity: boolean;
   linkedIdentityName: string | null;
   onStartIdentityBinding: (currentPassword: string) => Promise<void>;
+  /** 统一认证自动开户账号在本地密码仍有效时，可把统一身份迁回自己的旧账号。 */
+  canMigrateIdentity?: boolean;
+  onMigrateIdentity?: (loginName: string, password: string) => Promise<void>;
   onLogout: () => void | Promise<void>;
 };
 
@@ -63,6 +69,8 @@ export function AccountMenu({
   canBindIdentity,
   linkedIdentityName,
   onStartIdentityBinding,
+  canMigrateIdentity = false,
+  onMigrateIdentity,
   onLogout,
 }: AccountMenuProps) {
   const [open, setOpen] = useState(false);
@@ -70,6 +78,7 @@ export function AccountMenu({
   const [bindingPassword, setBindingPassword] = useState("");
   const [bindingError, setBindingError] = useState("");
   const [bindingBusy, setBindingBusy] = useState(false);
+  const [migrationOpen, setMigrationOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -268,6 +277,24 @@ export function AccountMenu({
                     <button type="submit" disabled={bindingBusy}>{bindingBusy ? "正在跳转…" : "验证并继续"}</button>
                   </div>
                 </form>
+              )}
+            </div>
+          )}
+          {canMigrateIdentity && onMigrateIdentity && (
+            <div className="identity-binding-menu-item">
+              <button
+                className="user-logout"
+                type="button"
+                role="menuitem"
+                aria-expanded={migrationOpen}
+                title="把当前统一身份迁到你原来的本站账号，旧账号的数据保持不变"
+                onClick={() => setMigrationOpen((value) => !value)}
+              >
+                <UserCheck size={16} />
+                <span>迁移旧账号</span>
+              </button>
+              {migrationOpen && (
+                <IdentityMigrationForm onSubmit={onMigrateIdentity} onClose={() => setMigrationOpen(false)} />
               )}
             </div>
           )}

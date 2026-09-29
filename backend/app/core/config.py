@@ -130,6 +130,9 @@ class Settings(BaseSettings):
     # https。代价是授权码与会话令牌在网络上明文传输、浏览器证明 cookie 不带 Secure；
     # 只在受信内网打开。默认关闭，未打开时非回环 http 仍在启动期被拒。
     auth_allow_insecure_http: bool = Field(False, validation_alias="AUTH_ALLOW_INSECURE_HTTP")
+    # 统一认证未映射的登录按工号(IdP username)自动关联同名账号或自动开普通账号。
+    # 打开即信任 IdP 工号与本站用户名一致;默认关闭,关闭时未关联登录仍被拒绝。
+    auth_sso_auto_accounts: bool = Field(False, validation_alias="AUTH_SSO_AUTO_ACCOUNTS")
     auth_transaction_ttl_seconds: int = Field(
         600, ge=60, le=1800, validation_alias="AUTH_TRANSACTION_TTL_SECONDS"
     )

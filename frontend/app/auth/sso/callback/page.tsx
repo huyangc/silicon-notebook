@@ -5,6 +5,7 @@ import {
   cancelIdentityBinding,
   completeSsoLogin,
   confirmIdentityBinding,
+  fetchAuthCapabilities,
   getToken,
   setToken,
   type SsoCompletion,
@@ -28,6 +29,7 @@ function callbackErrorMessage(key: string | null): string {
 export default function SsoCallbackPage() {
   const [state, setState] = useState<CallbackState>({ kind: "working" });
   const [busy, setBusy] = useState(false);
+  const [localLoginAllowed, setLocalLoginAllowed] = useState<boolean | null>(null);
   const completionStarted = useRef(false);
 
   useEffect(() => {
@@ -49,6 +51,12 @@ export default function SsoCallbackPage() {
           return;
         }
         setState({ kind: "preview", pending: result });
+        if (result.status === "confirmation_required" && result.purpose === "auto_enroll") {
+          // Unknown capabilities fall back to "contact an administrator".
+          void fetchAuthCapabilities()
+            .then((caps) => setLocalLoginAllowed(caps.local_login))
+            .catch(() => setLocalLoginAllowed(false));
+        }
       })
       .catch((err) => setState({ kind: "error", copy: toUserMessage(err, "统一登录未完成，请返回后重试。") }));
   }, []);
@@ -96,7 +104,7 @@ export default function SsoCallbackPage() {
           }}>返回登录页</a>
         </>}
         {state.kind === "preview" && <>
-          <IdentityBindingConfirmation pending={state.pending} busy={busy} onConfirm={() => { void confirm(); }} onCancel={() => { void cancel(); }} />
+          <IdentityBindingConfirmation pending={state.pending} busy={busy} localLoginAllowed={localLoginAllowed} onConfirm={() => { void confirm(); }} onCancel={() => { void cancel(); }} />
         </>}
       </section>
     </main>

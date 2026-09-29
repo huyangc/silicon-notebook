@@ -5483,6 +5483,25 @@
           "title": "HTTPValidationError",
           "type": "object"
         },
+        "IdentityMigration": {
+          "additionalProperties": false,
+          "properties": {
+            "login_name": {
+              "title": "Login Name",
+              "type": "string"
+            },
+            "password": {
+              "title": "Password",
+              "type": "string"
+            }
+          },
+          "required": [
+            "login_name",
+            "password"
+          ],
+          "title": "IdentityMigration",
+          "type": "object"
+        },
         "IndexingPipelineOptionResponse": {
           "description": "Sanitized deployment option; never exposes loader or availability internals.",
           "properties": {
@@ -18471,6 +18490,44 @@
             }
           },
           "summary": "Binding Start"
+        }
+      },
+      "/api/me/identity-migration": {
+        "post": {
+          "operationId": "identity_migration_api_me_identity_migration_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityMigration"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AuthResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Identity Migration"
         }
       },
       "/api/me/password": {

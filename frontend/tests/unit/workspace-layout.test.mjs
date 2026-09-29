@@ -11,6 +11,7 @@ import {
 import {
   callSitesIn,
   declarations,
+  findFunction,
   importsFrom,
   jsxElements,
   jsxTextValues,
@@ -153,6 +154,20 @@ test("系统更新弹窗在 page 接线:hook 取数、槽位按 notice 打开、
   });
   assert.ok(page.getText(page).includes("useReleaseNotes(currentUser?.id ?? null, authChecked)"));
   assert.ok(page.getText(page).includes('rootModals.open("release-notes", rootModals.captureActorOwner())'));
+});
+
+
+// 「迁移旧账号」入口只在后端给出 migration_available 时出现;组件测试只测菜单本身,
+// 这里钉住 page 的两截接线(可见谓词 + 提交回调)。
+test("迁移旧账号在 page 接线:按 migration_available 显示、回调走迁移处理", () => {
+  const menus = jsxElements(page, "AccountMenu");
+  assert.equal(menus.length, 1);
+  assert.equal(menus[0].bindings.canMigrateIdentity, "Boolean(identityInfo?.migration_available)");
+  assert.equal(menus[0].bindings.onMigrateIdentity, "handleMigrateIdentity");
+  const targets = callSitesIn(findFunction(page, "handleMigrateIdentity")).map((call) => call.target);
+  for (const target of ["migrateToLegacyAccount", "setToken", "window.location.reload"]) {
+    assert.ok(targets.includes(target), `handleMigrateIdentity 缺 ${target}`);
+  }
 });
 
 
