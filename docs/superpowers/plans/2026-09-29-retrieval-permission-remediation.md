@@ -318,6 +318,14 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
   安装点不得吞掉读取器异常再退回无 scope；`follow_chain` 早退（`retrieval_service.py:133-138`）与 `any_base_has_kg`（`:476`）
   补看 `ceilings_total`（前者若 E2-1 先删则免）；更新 `notebook_source_ceilings`、`scoped_subgraph_nodes` 里「缺省即逐字不变 / 生产不可达」
   的过时 docstring；成本对照要计入：漂移探针每次多两次读（今天 scope 为 None 时零读）、有挂载时 `_chunk_kg_overlay` 多一次批量证据读。
+- **E1-2 成本清单（质量评审实测，4.9 万来源/库，真实存储）**：构造器 0 挂载 37–45 ms（今天路由式冻结 27–29 ms）、1 挂载 78–105 ms、
+  6 挂载 256–435 ms（E1-1 修复轮去掉挂载库可见集的重复读、并给逐库读加预算与故障隔离之后重测）；漂移探针每次 32.5 ms、每问 4–8 次，
+  过去无 scope 的运行（MCP `ask_notebook`、不带范围的 API、报告 worker）每问因此多约 130–260 ms，且笔记本正在入库时探针报漂移会关掉
+  全图/PPR/关系/精确查找通道——与浏览器路径今天的行为相同，对 MCP 是新变化，E1-Z 文档要写明；探针不得改成 run 级 memo（codex #634 判过 P1）。
+  挂载库带逐库天花板后变热的三处：`scoped_allowed_source_ids(peer)` 每次排序（PR-A 的逐 scope 缓存合入后消除）、
+  `communities._source_ceiling_kwargs` 每次 `sorted + json.dumps` 且在未回填库上切到证据 JSON 扫描、`_ceiling_scoped_subgraph`
+  每次非收窄且有挂载的运行多一次批量证据读——后两处 E1-2 要实测并处理（按逐 scope 缓存取绑定形态）。
+- **E1-2 的提交约束**：安装 `AskService.ask` 与删除插件自合成必须在**同一个提交**里（否则中间态会在构造器里面再叠一层不带逐库天花板的 scope）。
 - **E1-3 必须做**：`_run_ask_notebook` 与 `search_notebook_context` 在 worker 线程内进入 `memory_access_context(allow_memory)`；
   `MemoryRetriever` 两个方法在通道关闭时返回空；MCP 入口不得开始提交 `local_scope`；报告 worker 用重装入口。
 - **E1-Z 文档要点名的用户可见变化**：挂载库的 Knowhow / 个人记忆投影不再参与单库问答，在该库内提问仍可用。
