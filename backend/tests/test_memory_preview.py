@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.models.schemas import AskResponse
+from tests.answer_owner_testkit import save_owned_answer
 from tests.model_testkit import bind_chat_client
 from app.services.model_work import (
     ModelQueueFull, ModelQueueTimeout, ModelServiceUnavailable,
@@ -76,15 +77,15 @@ def test_preview_falls_back_deterministically_without_persisting(tmp_path, monke
 
     repo = repository()
     question = "Q" * 90
-    answer_id = repo._runtime.ask_state.save_answer(
+    answer_id = save_owned_answer(
+        repo,
         notebook_id,
-        None,
+        registered["user"]["id"],
         question,
         AskResponse(
             conclusion="Use $A_v$ [1], then verify margin [2, 3] and [k4].",
             answer="Use $A_v$ [1], then verify margin [2, 3] and [k4].",
         ),
-        registered["user"]["id"],
     )
 
     preview = client.post(f"/api/answers/{answer_id}/memory-preview", headers=headers)
@@ -135,12 +136,12 @@ def test_preview_llm_failure_uses_same_fallback(
     from app.api.deps import repository
 
     repo = repository()
-    answer_id = repo._runtime.ask_state.save_answer(
+    answer_id = save_owned_answer(
+        repo,
         notebook_id,
-        None,
+        registered["user"]["id"],
         "Fallback title",
         AskResponse(conclusion="Fallback body", answer="Fallback body"),
-        registered["user"]["id"],
     )
 
     class FailingClient:
@@ -191,12 +192,12 @@ def test_preview_reflects_kg_extract_eligible_gate_including_llm_success_path(
 
     repo = repository()
 
-    answer_before = repo._runtime.ask_state.save_answer(
+    answer_before = save_owned_answer(
+        repo,
         notebook_id,
-        None,
+        registered["user"]["id"],
         "Before KG?",
         AskResponse(conclusion="Body before", answer="Body before"),
-        registered["user"]["id"],
     )
     before = client.post(
         f"/api/answers/{answer_before}/memory-preview", headers=headers
@@ -214,12 +215,12 @@ def test_preview_reflects_kg_extract_eligible_gate_including_llm_success_path(
             ("ko-preview-gate", notebook_id, "concept", "t", "t"),
         )
 
-    answer_after = repo._runtime.ask_state.save_answer(
+    answer_after = save_owned_answer(
+        repo,
         notebook_id,
-        None,
+        registered["user"]["id"],
         "After KG?",
         AskResponse(conclusion="Body after", answer="Body after"),
-        registered["user"]["id"],
     )
     after = client.post(f"/api/answers/{answer_after}/memory-preview", headers=headers)
     assert after.status_code == 200, after.text
@@ -234,12 +235,12 @@ def test_preview_reflects_kg_extract_eligible_gate_including_llm_success_path(
             )
 
     bind_chat_client(repo, "memory_preview", SuccessfulClient())
-    llm_answer = repo._runtime.ask_state.save_answer(
+    llm_answer = save_owned_answer(
+        repo,
         notebook_id,
-        None,
+        registered["user"]["id"],
         "LLM path?",
         AskResponse(conclusion="Body llm", answer="Body llm"),
-        registered["user"]["id"],
     )
     llm_preview = client.post(
         f"/api/answers/{llm_answer}/memory-preview", headers=headers

@@ -1118,6 +1118,12 @@ class SharingStore:
         return row["owner"] if row else None
 
     def answer_owner(self, answer_id: str) -> "str | None":
+        """The NOTEBOOK owner of the notebook this answer belongs to, not the
+        answer's author. Never use it to authorise anything about the answer:
+        that is ``NotebookSharingService.user_owns_answer`` (notebook read
+        access AND the conversation's creator). Kept under this name and
+        meaning for the frozen compatibility surface.
+        """
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT nb.created_by AS owner FROM answers a "

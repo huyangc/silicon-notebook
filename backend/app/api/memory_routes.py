@@ -455,10 +455,10 @@ async def preview_answer_memory(
     llm_client=Depends(memory_preview_client),
     service: MemoryRepository = Depends(memory_service),
 ) -> MemoryPreview:
-    can_read = await run_in_threadpool(
-        notebook_access_repository().user_can_read_answer, answer_id, user.id
+    owns_answer = await run_in_threadpool(
+        notebook_access_repository().user_owns_answer, answer_id, user.id
     )
-    if not can_read:
+    if not owns_answer:
         raise _not_found("Answer not found")
     try:
         source = await run_in_threadpool(ask_state.answer_memory_source, answer_id)
@@ -540,10 +540,10 @@ async def preview_answer_memory_stream(
     service: MemoryRepository = Depends(memory_service),
 ) -> StreamingResponse:
     """Stream the slow model half while retaining the deterministic fallback."""
-    can_read = await run_in_threadpool(
-        notebook_access_repository().user_can_read_answer, answer_id, user.id
+    owns_answer = await run_in_threadpool(
+        notebook_access_repository().user_owns_answer, answer_id, user.id
     )
-    if not can_read:
+    if not owns_answer:
         raise _not_found("Answer not found")
     try:
         source = await run_in_threadpool(ask_state.answer_memory_source, answer_id)
@@ -591,7 +591,9 @@ async def create_memory_from_answer(
             payload.extract_kg,
         )
     except PermissionError:
-        raise _not_found()
+        # Same 404 as ``memory-preview`` gives for a foreign / creatorless /
+        # unknown answer id.
+        raise _not_found("Answer not found")
     except KeyError:
         raise HTTPException(status_code=409, detail="Answer is no longer available")
     except ValueError as exc:
