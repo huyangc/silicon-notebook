@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-09-29（新增 §47 当前库保底席位与原文段下限；§48 全局问答引用核对：部分失败照常交付）
+更新日期：2026-09-29（新增 §47 当前库保底席位与原文段下限；§48 全局问答引用核对：部分失败照常交付；§49 KG 对象定义的来源归因与 KG 详情按查看者过滤）
 
 对照依据：[产品方案](silicon_notebook_fangan.md)。章节号指向原方案；“扩展”表示交付时延伸能力，不冒称原方案已有独立条款。
 
@@ -419,6 +419,12 @@ Agent profile、opaque token、scope/allowlist/过期与撤销、公开 onboardi
 对照依据是检索时刻的指纹快照：联邦原文段、mix 分支的知识图谱叠加段、文档概览、集合枚举、KG 对象、推导链与表格分析都经同一道接缝登记（读过全文的生产者进程内哈希，只持指针的一次有界按 id 读），首个真实快照获胜，只按 id 读到的快照不替换已有条目；本 run 登记过、随后被删的元素报告为「资料已删除」。检索时已经不存在的元素不生成引用卡，单库与全局一致。
 
 当前合同见[全局问答][global]与[运维事件][ops]；回归入口：[逐条判定与说明句](backend/tests/test_global_ask_citation_check.py)、[真实引擎的健康运行与竞态](backend/tests/test_global_citation_producers_e2e.py)、[构造点静态登记](backend/tests/test_citation_attestation_guard.py)、[单库悬空元素](backend/tests/test_reference_liveness.py)。
+
+## 49. KG 对象的定义按来源归因，KG 详情按查看者的可读来源过滤（2026-09-29）
+
+**已交付，2026-09-29；方案 §5.2、§11。** 关掉第 38 节登记的残余口：`node_context` 的定义带上归属（`definition_basis` / `definition_source_id` / `definition_element_id`），`defines` 证据有序、有界地回落到第一条范围内证据，概念簇融合描述只在能证明全部成员来源都在范围内时使用（用户裁决 Q1，严格；超出成员上限的簇在绑定的范围下不用），流程步骤与章节路径先归因再显示。来源范围只在它能排除东西时才绑定这次重查，全选、未变化、没有读不到的隐藏来源的运行与不带范围的运行逐字节相同。知识图谱面板的对象详情、概念详情与邻域补全按查看者的可读来源过滤（用户裁决 Q4 / M1）：另一位成员的私有 Memory 抽出的对象、出处、定义与簇标签不再出现在这三个读取里。
+
+当前合同与数值上限见[检索模式][retrieval]与[产品/API][product]的 KG 详情一节；回归入口：[对象上下文](backend/tests/test_node_context.py)、[知识上下文范围](backend/tests/test_knowledge_context_source_ceiling.py)、[范围绑定裁决](backend/tests/test_ceiling_binds_verdict.py)、[查看者规则](backend/tests/test_kg_viewer_scope_rules.py)、[两用户端到端](backend/tests/test_kg_viewer_scope_routes.py)。实施计划：[来源范围与引用可信度修复计划](docs/superpowers/plans/2026-09-29-scope-ceiling-remediation.md)。
 
 [product]: docs/product-and-api_zh.md
 [flow]: docs/product-and-api_zh.md#产品流程
