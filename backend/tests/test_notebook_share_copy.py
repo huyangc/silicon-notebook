@@ -1786,7 +1786,13 @@ def test_share_link_copy_route_of_a_notebook_with_memories_carries_none_of_them(
     shared = client.post(f"/api/notebooks/{memory_cases.NOTEBOOK}/share")
     assert shared.status_code == 200 and shared.json()["copyable"] is True
     token = shared.json()["share_token"]
-    assert client.get(f"/api/shared/{token}").status_code == 200
+    preview = client.get(f"/api/shared/{token}")
+    assert preview.status_code == 200
+    # 预览的节点/边数与拷贝同口径:不含成员 Memory 派生的 8-4 个对象、5-4 条关系
+    assert (preview.json()["node_count"], preview.json()["edge_count"]) == (4, 1)
+    assert preview.json()["size"]["nodes"] == 4 and preview.json()["size"]["edges"] == 1
+    assert (shared.json()["size"]["nodes"], shared.json()["size"]["edges"]) == (4, 1)
+    assert repo._runtime.sharing_store.memory_derived_kg_counts(memory_cases.NOTEBOOK) == (4, 4)
 
     copied = client.post(f"/api/shared/{token}/copy")
     assert copied.status_code == 200, copied.text
@@ -1874,3 +1880,15 @@ def test_snapshot_table_set_is_pinned_and_memory_carriers_are_not_in_it():
     assert [t for t, _ in sqlite_store._COPY_SNAPSHOT_QUERIES] == [
         t for t, _ in pg_store._COPY_SNAPSHOT_QUERIES
     ]
+
+
+def test_share_preview_of_a_notebook_without_memory_counts_every_row(repo, client):
+    """没有 Memory 的笔记本,预览的节点/边数就是库里全部对象与关系(口径不变)。"""
+    _seed_memory_world(repo, memory_cases.NOTEBOOK_PLAIN, with_memory=False)
+    shared = client.post(f"/api/notebooks/{memory_cases.NOTEBOOK_PLAIN}/share")
+    assert shared.status_code == 200
+    preview = client.get(f"/api/shared/{shared.json()['share_token']}").json()
+    assert (preview["node_count"], preview["edge_count"]) == (4, 1)
+    assert repo._runtime.sharing_store.memory_derived_kg_counts(
+        memory_cases.NOTEBOOK_PLAIN
+    ) == (0, 0)

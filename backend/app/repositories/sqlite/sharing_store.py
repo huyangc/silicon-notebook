@@ -94,18 +94,25 @@ def _visible_by_source(alias: str) -> str:
     return f"NOT {memory_sql.memory_derived_object(alias)}"
 
 
-def _relation_carries_memory(alias: str) -> str:
-    """The relation's own source is a Memory source, or either endpoint is a
-    Memory-derived object. The endpoint arms matter: a relation between a Memory
-    object and a shared object has a non-Memory source_id, yet the copy holds no
-    Memory object to point at (the service would raise KeyError on the object
-    map) and the edge itself is Memory-derived content."""
-    ends = " ".join(
-        f"OR EXISTS (SELECT 1 FROM knowledge_objects {end} "
-        f"WHERE {end}.id = {alias}.{column} AND {memory_sql.memory_derived_object(end)})"
-        for end, column in (("eo1", "source_object_id"), ("eo2", "target_object_id"))
+def _relation_memory_arms(alias: str) -> tuple[str, ...]:
+    """The three ways a relation is Memory-derived: its own source is a Memory
+    source, or its source endpoint, or its target endpoint, is a Memory-derived
+    object. The endpoint arms matter: a relation between a Memory object and a
+    shared object has a non-Memory source_id, yet the copy holds no Memory object
+    to point at (the service would raise KeyError on the object map) and the edge
+    itself is Memory-derived content."""
+    return (
+        memory_sql.memory_derived_relation(alias),
+        *(
+            f"EXISTS (SELECT 1 FROM knowledge_objects {end} "
+            f"WHERE {end}.id = {alias}.{column} AND {memory_sql.memory_derived_object(end)})"
+            for end, column in (("eo1", "source_object_id"), ("eo2", "target_object_id"))
+        ),
     )
-    return f"({memory_sql.memory_derived_relation(alias)} {ends})"
+
+
+def _relation_carries_memory(alias: str) -> str:
+    return "(" + " OR ".join(_relation_memory_arms(alias)) + ")"
 
 
 def _visible_relation(alias: str) -> str:
@@ -131,6 +138,15 @@ _MEMORY_PRESENT_SQL = (
     "SELECT 1 FROM sources WHERE notebook_id = ? "
     f"AND {memory_sql.memory_source_type_predicate()} LIMIT 1"
 )
+# What the copy leaves out, counted (share preview: node/edge numbers exclude Memory).
+_MEMORY_NODES_SQL = (
+    "SELECT COUNT(*) AS n FROM knowledge_objects o WHERE o.notebook_id = ? "
+    f"AND {memory_sql.memory_derived_object('o')}"
+)
+_MEMORY_EDGES_SQL = "SELECT COUNT(*) AS n FROM (" + " UNION ".join(
+    f"SELECT r.id FROM knowledge_relations r WHERE r.notebook_id = ? AND {arm}"
+    for arm in _relation_memory_arms("r")
+) + ")"
 
 # Deep-copy row snapshot: table -> the exact SELECT the former mixin issued.
 # "notebooks" carries the single source row that the copy service rewrites
@@ -313,7 +329,7 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     (
         "chunk_embeddings",
         "SELECT e.* FROM chunk_embeddings e WHERE e.notebook_id = ? AND NOT EXISTS ("
-        "SELECT 1 FROM chunks ec WHERE ec.id = e.chunk_id "
+        "SELECT 1 FROM chunks ec WHERE ec.id = e.chunk_id AND ec.notebook_id = e.notebook_id "
         f"AND {memory_sql.memory_derived_object('ec')})",
     ),
     (
@@ -341,9 +357,14 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     ),
     (
         "relation_embeddings",
-        "SELECT e.* FROM relation_embeddings e WHERE e.notebook_id = ? AND NOT EXISTS ("
-        "SELECT 1 FROM knowledge_relations er WHERE er.id = e.relation_id "
-        f"AND {_relation_carries_memory('er')})",
+        # One NOT EXISTS per arm, notebook-bounded (PostgreSQL twin's comment has the
+        # measurement behind this shape).
+        "SELECT e.* FROM relation_embeddings e WHERE e.notebook_id = ? "
+        + " ".join(
+            "AND NOT EXISTS (SELECT 1 FROM knowledge_relations er "
+            f"WHERE er.id = e.relation_id AND er.notebook_id = e.notebook_id AND {arm})"
+            for arm in _relation_memory_arms("er")
+        ),
     ),
     (
         "concept_clusters",
@@ -988,6 +1009,19 @@ class SharingStore:
         with self.database.connect() as db:
             db.execute("BEGIN")
             return self._copy_limit_violation(db, notebook_id) is None
+
+    def memory_derived_kg_counts(self, notebook_id: str) -> tuple[int, int]:
+        """(objects, relations) of this notebook that derive from a Memory — the rows a
+        copy leaves out, so the share preview's node/edge numbers can exclude them (a
+        Memory is its creator's private record; its size is not the link holder's to
+        learn). ``(0, 0)`` after one indexed probe when the notebook holds no Memory
+        source, so a notebook without Memory pays nothing."""
+        with self.database.connect() as db:
+            if db.execute(_MEMORY_PRESENT_SQL, (notebook_id,)).fetchone() is None:
+                return 0, 0
+            nodes = db.execute(_MEMORY_NODES_SQL, (notebook_id,)).fetchone()["n"]
+            edges = db.execute(_MEMORY_EDGES_SQL, (notebook_id,) * 3).fetchone()["n"]
+        return int(nodes), int(edges)
 
     def valid_copied_mount_base_ids(
         self, notebook_id: str, base_notebook_ids: Sequence[str]
