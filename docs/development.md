@@ -62,7 +62,9 @@ contributor constraints, not a second implementation history.
   [caller ledger](./superpowers/plans/2026-08-23-facade-retirement-ledger.md), reproduced
   by `scripts/audit_facade_callers.py`; update the ownership/surface fixtures with
   `scripts/generate_repository_contract_fixtures.py --rebaseline-surface`.
-- Keep both adapters' `access_sql.py` and `mount_sql.py` predicates aligned. New notebook
+- Keep both adapters' `access_sql.py`, `mount_sql.py` and `memory_sql.py` predicates
+  aligned; `memory_sql.py` is the single definition of who may read a Memory-derived
+  source and of which KG rows count as Memory-derived. New notebook
   write endpoints use `require_notebook_capability(...)`; body-resolved identities use
   the same capability table, including its independent mirror-write fence. Preserve
   authorization-before-mirror-error ordering and the registered creator-owned report
