@@ -21,6 +21,7 @@ from typing import Dict, Iterable, List, Optional, Sequence
 from app.models.common import Evidence
 from app.repositories.lexical_query import sqlite_fts_match_expression
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.id_binding import ids_param, member_of
 from app.repositories.sqlite.mount_sql import (
     MOUNT_JOIN, MOUNT_VALID, MOUNTED_BASE_IDS_SUBQUERY,
 )
@@ -2968,11 +2969,15 @@ class KnowledgeStore:
         if not match_query:
             return []
         if allowed_source_ids is not None:
-            source_ids = list(dict.fromkeys(allowed_source_ids))
-            if not source_ids:
+            # 天花板恒为一个 JSON 参数,一元 ``+`` 只过滤、不驱动计划(``id_binding``)。
+            source_payload = ids_param(allowed_source_ids)
+            if source_payload == "[]":
                 return []
-            placeholders = ",".join("?" for _ in source_ids)
             if authoritative_source_filter:
+                ev_source = (
+                    "json_extract(CASE WHEN ev.type='object' THEN ev.value "
+                    "ELSE '{}' END,'$.source_id')"
+                )
                 rows = db.execute(
                     "SELECT f.object_id,f.name,bm25(kg_objects_fts) AS rank "
                     "FROM kg_objects_fts f JOIN knowledge_objects ko ON ko.id=f.object_id "
@@ -2980,11 +2985,9 @@ class KnowledgeStore:
                     "SELECT 1 FROM json_each(CASE WHEN json_valid(ko.evidence) "
                     "THEN CASE WHEN json_type(ko.evidence)='array' "
                     "THEN ko.evidence ELSE '[]' END ELSE '[]' END) ev "
-                    "WHERE ev.type='object' AND json_extract("
-                    "CASE WHEN ev.type='object' THEN ev.value ELSE '{}' END,"
-                    f"'$.source_id') IN ({placeholders})) "
+                    f"WHERE ev.type='object' AND {member_of(ev_source)}) "
                     "ORDER BY rank LIMIT ?",
-                    (notebook_id, match_query, *source_ids, k),
+                    (notebook_id, match_query, source_payload, k),
                 ).fetchall()
             else:
                 rows = db.execute(
@@ -2993,9 +2996,9 @@ class KnowledgeStore:
                     "AND kg_objects_fts MATCH ? AND EXISTS ("
                     "SELECT 1 FROM knowledge_object_sources kos "
                     "WHERE kos.notebook_id=? AND kos.object_id=kg_objects_fts.object_id "
-                    f"AND kos.source_id IN ({placeholders})) "
+                    f"AND {member_of('kos.source_id')}) "
                     "ORDER BY rank LIMIT ?",
-                    (notebook_id, match_query, notebook_id, *source_ids, k),
+                    (notebook_id, match_query, notebook_id, source_payload, k),
                 ).fetchall()
         else:
             rows = db.execute(
@@ -3021,16 +3024,16 @@ class KnowledgeStore:
         if not match_query:
             return []
         if allowed_source_ids is not None:
-            source_ids = list(dict.fromkeys(allowed_source_ids))
-            if not source_ids:
+            source_payload = ids_param(allowed_source_ids)
+            if source_payload == "[]":
                 return []
-            source_payload = json.dumps(source_ids, ensure_ascii=False)
+            # FTS 驱动、清单只作 LIST SUBQUERY 成员判定——今天的计划本来就对,
+            # ``+`` 把它钉死,不让统计信息变化后改由天花板驱动。
             rows = db.execute(
                 "SELECT f.chunk_id,bm25(chunks_fts) AS rank FROM chunks_fts f "
                 "JOIN chunks c ON c.id=f.chunk_id "
                 "WHERE f.notebook_id=? AND chunks_fts MATCH ? "
-                "AND c.source_id IN (SELECT CAST(value AS TEXT) "
-                "FROM json_each(?)) ORDER BY rank LIMIT ?",
+                f"AND {member_of('c.source_id')} ORDER BY rank LIMIT ?",
                 (notebook_id, match_query, source_payload, k),
             ).fetchall()
         else:
