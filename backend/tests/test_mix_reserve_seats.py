@@ -625,7 +625,7 @@ def test_render_cut_spares_the_reserved_tail_rows():
     rows = _floored_selection()
     budget = 5 * 305                       # five whole rows fit, not eight
     rule = active_reserve_rule(2, rows, ACTIVE)
-    kept = spare_reserved_rows(rows, budget, rule)
+    kept = spare_reserved_rows(rows, budget, rule, protected_chars=budget)
     ids = _ids(kept)
     assert ids[-2:] == ["mine-0", "mine-1"], ids
     assert ids == [row.chunk_id for row in rows if row in kept], "order kept"
@@ -637,13 +637,44 @@ def test_render_cut_is_inert_when_everything_fits_or_nothing_is_foreign():
 
     rows = _floored_selection()
     rule = active_reserve_rule(2, rows, ACTIVE)
-    assert spare_reserved_rows(rows, 10**6, rule) is rows
+    assert spare_reserved_rows(rows, 10**6, rule, protected_chars=10**6) is rows
     own = [_row(f"own-{i}", relevance=0.9, notebook_id=ACTIVE, origin="ppr",
                 text=f"own-{i} ".ljust(300, "o")) for i in range(6)] + rows[-2:]
     inert = active_reserve_rule(2, own, ACTIVE)
     assert inert.reserve == 0
-    assert spare_reserved_rows(own, 5 * 305, inert) is own
-    assert spare_reserved_rows(rows, 5 * 305, active_reserve_rule(0, rows, ACTIVE)) is rows
+    assert spare_reserved_rows(own, 5 * 305, inert, protected_chars=5 * 305) is own
+    assert spare_reserved_rows(rows, 5 * 305, active_reserve_rule(0, rows, ACTIVE),
+                               protected_chars=5 * 305) is rows
+
+
+def test_reserved_rows_longer_than_the_seat_share_do_not_displace_strong_rows():
+    """Four 900-char reserved rows against a 3000-char budget: their seat
+    share (3000 x 4 / 16 = 750) holds none of them, so ranking order decides
+    and the strong reference rows keep their place (no flip to all-reserved)."""
+    from app.services.retrieval import spare_reserved_rows
+
+    rows = _render_rows(12, length=250) + [
+        _row(f"mine-{i}", relevance=0.3, text=f"mine-{i} ".ljust(900, "m"))
+        for i in range(4)]
+    rule = active_reserve_rule(4, rows, ACTIVE)
+    assert spare_reserved_rows(rows, 3000, rule, protected_chars=3000 * 4 // 16) is rows
+    # Normal case: a share that holds them still spares them.
+    kept = spare_reserved_rows(rows, 3000, rule, protected_chars=2000)
+    assert "mine-0" in _ids(kept) and "mine-1" in _ids(kept) and "ref-0" in _ids(kept)
+
+
+def test_render_cut_estimates_after_the_renderers_de_duplication():
+    """A same-source same-text copy is dropped by ``chunk_context`` before it
+    renders, so it must not make a row that fits look like it does not."""
+    from app.services.retrieval import spare_reserved_rows
+
+    rows = _floored_selection()
+    dup = _row("ref-0-dup", relevance=0.5, notebook_id="ref", text=rows[0].text,
+               source_id=rows[0].source_id)
+    rows = rows[:6] + [dup] + rows[6:]
+    budget = 8 * 305                      # the eight distinct rows fit exactly
+    rule = active_reserve_rule(2, rows, ACTIVE)
+    assert spare_reserved_rows(rows, budget, rule, protected_chars=budget) is rows
 
 
 def test_answer_chunks_renders_the_reserved_rows_under_a_tight_budget(monkeypatch):
@@ -662,7 +693,9 @@ def test_answer_chunks_renders_the_reserved_rows_under_a_tight_budget(monkeypatc
             return json.dumps({"answer": "结论。", "grounded": False})
 
     service = _minimal_ask_service()
-    service.settings = Settings(chunk_answer_budget_chars=5 * 305)
+    # 2 seats of k=4: the seats' share (762 chars) holds both reserved rows.
+    service.settings = Settings(chunk_answer_budget_chars=5 * 305, chunk_mmr_k=4,
+                                chunk_federation_active_reserve=0.5)
 
     def _context(chunks, notebook_id="", budget_chars=None, id_offset=0):
         captured["ids"] = _ids(chunks)
@@ -671,8 +704,11 @@ def test_answer_chunks_renders_the_reserved_rows_under_a_tight_budget(monkeypatc
     monkeypatch.setattr(service, "_chunk_answer_context", _context)
     rows = _floored_selection()
     service._answer_chunks("q", rows, notebook_id=ACTIVE, llm_client=_Echo())
-    assert captured["ids"][-2:] == ["mine-0", "mine-1"]
-    service.settings = Settings(chunk_answer_budget_chars=10**6)
+    # The render really was cut, and the cut took the lowest-ranked
+    # unreserved rows -- not the reserved tail.
+    assert captured["ids"] == ["ref-0", "ref-1", "ref-2", "mine-0", "mine-1"]
+    service.settings = Settings(chunk_answer_budget_chars=10**6, chunk_mmr_k=4,
+                                chunk_federation_active_reserve=0.5)
     service._answer_chunks("q", rows, notebook_id=ACTIVE, llm_client=_Echo())
     assert captured["ids"] == _ids(rows)
 
@@ -720,3 +756,23 @@ def test_mix_seat_identity_is_the_raw_text():
     assert "mine" in _ids(out)
     floor = enforce_active_floor(ranked[:5], ranked, 1, active_notebook_id=ACTIVE)
     assert "mine" in _ids(floor)
+
+
+def test_peer_seat_skipped_after_an_exact_rule_copy_is_handed_on():
+    """B's only passage is the first copy of its text, but the exact-seat rule
+    (earlier in priority) pulled in A's lower-ranked copy of the same text;
+    B's candidate is then skipped as a duplicate.  Its seat goes to the next
+    library with candidates (C) instead of staying idle."""
+    def row(cid, lib, rel, text=None, exact=False):
+        return _row(cid, relevance=rel, notebook_id=lib, text=(text or cid).ljust(30, "x"),
+                    origin="lexical" if exact else "semantic", exact=exact)
+
+    ranked = [row(f"A{i}", "A", 0.9 - i * 0.01) for i in range(6)] + [
+        row("B1", "B", 0.5, text="T")] + [
+        row(f"C{i}", "C", 0.45 - i * 0.01) for i in range(3)] + [
+        row("A9", "A", 0.2, text="T", exact=True)]
+    out = _cut(ranked, _tokens(ranked[:5]), library_seats=3,
+               exact_hits=[ranked[-1]], settings=_settings(exact=1), active="A")
+    ids = _ids(out)
+    assert "A9" in ids and "B1" not in ids
+    assert {"C0", "C1"} <= set(ids), ids
