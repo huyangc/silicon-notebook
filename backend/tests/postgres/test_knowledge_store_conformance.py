@@ -6458,8 +6458,7 @@ NC_ELEMENTS = (
     ("el-nc-def-ok", NC_IN, "OK definition text"),
 )
 # 任何一条语句的任何一个绑定参数(字符串长度 / 数组的 JSON 长度)都不许超过它。
-# 天花板(生产可达 ~49k 个 32 字符 id、~1.7 MB,每绑一次 ~50 ms)只允许在两条
-# 稀有路径上进 SQL:来源多于探针上限的簇、无 section 的 legacy 兄弟查询。
+# 天花板(生产可达 ~49k 个 32 字符 id、~1.7 MB,每绑一次 ~50 ms)从不进 SQL。
 NODE_CONTEXT_MAX_BOUND_PARAM_CHARS = 256
 
 
@@ -6477,8 +6476,8 @@ NC_UNATTRIBUTED = [
     {"element_id": "", "quoted_span": "stray"},
     {"source_id": "", "element_id": "", "quoted_span": "blank"},
 ]
-# 来源多于 NODE_CONTEXT_CLUSTER_SOURCES_PROBE 的簇:1030 个不同来源,按 id 排序
-# 最后一个是 src-nc-w1029(排在 1025 条探针之外)。
+# 一个成员带 1030 个不同来源的簇:成员数远在 NODE_CONTEXT_CLUSTER_MEMBER_PROBE
+# 之内,所以全部来源都被读回判定——最后一个(src-nc-w1029)也不例外。
 NC_WIDE_SOURCES = [f"src-nc-w{index:04d}" for index in range(1030)]
 
 
@@ -6537,7 +6536,7 @@ NC_OBJECTS = (
     ("ko-nc-partial", "concept", {"name": "Partial"},
      [_nc_ev("el-nc-occ-in", NC_IN), NC_UNATTRIBUTED[0]]),
     ("ko-nc-partial-peer", "concept", {"name": "Partial"}, [_nc_ev("el-nc-def-in", NC_IN)]),
-    # 来源多于探针上限的簇(退回 SQL 数组谓词)。
+    # 一个成员带上千个来源的簇(成员行在上限内,每个来源都判)。
     ("ko-nc-wide", "concept", {"name": "Wide"}, [_nc_ev("el-nc-occ-in", NC_IN)]),
     ("ko-nc-wide-peer", "concept", {"name": "Wide"},
      [_nc_ev("", source_id) for source_id in NC_WIDE_SOURCES]),
@@ -6842,18 +6841,18 @@ def test_node_context_applies_the_source_ceiling_on_both_index_branches(
 
 
 def _assert_wide_cluster(harness, base) -> None:
-    """``base`` 之上加齐宽簇的 1030 个来源:探针读回的前 1025 个(按 id 排序)全在
-    天花板内时,只有 keyset 读回的其余来源能暴露排在探针之外的那个。"""
+    """``base`` 之上加齐宽簇成员的 1030 个来源:全在天花板内才用融合描述,
+    第一个或最后一个不在都不用。"""
     every = frozenset(base) | frozenset(NC_WIDE_SOURCES)
     assert _nc(harness, "ko-nc-wide", every)["definition"] == "WIDE fused description"
     assert _nc(harness, "ko-nc-wide", every - {NC_WIDE_SOURCES[-1]})["definition_basis"] is None
     assert _nc(harness, "ko-nc-wide", every - {NC_WIDE_SOURCES[0]})["definition_basis"] is None
 
 
-def test_node_context_cluster_with_more_sources_than_the_probe_reads_the_rest(
+def test_node_context_cluster_member_with_many_sources_is_judged_on_all_of_them(
     knowledge_harness,
 ):
-    """簇的来源多于 NODE_CONTEXT_CLUSTER_SOURCES_PROBE,两条支。"""
+    """一个成员带上千个来源:成员行在上限内,每个来源都判,两条支。"""
     _seed_node_context_ceiling(knowledge_harness)
     for backfill in (False, True):
         if backfill:
@@ -6916,7 +6915,8 @@ def test_node_context_legacy_steps_ceiling_pages_past_out_of_ceiling_siblings(
     """section 为空的 legacy 兄弟查询今天是 ``LIMIT 500``:天花板下若先取 500 行
     再滤,先插入的 501 个天花板外兄弟会占满名额、把天花板内的目标挤掉。天花板不进
     SQL,改成 keyset 翻页边读边滤,直到凑够或扫满 NODE_CONTEXT_LEGACY_SIBLING_SCAN
-    行;扫描上限压到一页时目标就在上限之外(漏召回,失败关闭)。"""
+    行。扫描上限压到一页时,排在上限之外的天花板内兄弟漏召回(失败关闭),但目标
+    对象**自己**那一步不受上限影响:它的行已经读过,最先进候选。"""
     from app.repositories.postgres import knowledge_store
     crowd = [
         (f"ko-crowd-{index:03d}", "nb-personal", "procedure", "approved",
@@ -6928,9 +6928,15 @@ def test_node_context_legacy_steps_ceiling_pages_past_out_of_ceiling_siblings(
         "ko-crowd-target", "nb-personal", "procedure", "approved",
         json.dumps({"name": "in"}), json.dumps([_nc_ev("", NC_IN)]), NC_IN, NOW, NOW,
     )
+    later = normalize_timestamp(NOW) + timedelta(seconds=1)
+    sibling = (
+        "ko-crowd-sibling", "nb-personal", "procedure", "approved",
+        json.dumps({"name": "in sibling"}), json.dumps([_nc_ev("", NC_IN)]), NC_IN,
+        later, later,
+    )
     with knowledge_harness.database.write() as connection:
         knowledge_harness.knowledge.insert_object_chunk(connection, crowd)
-        knowledge_harness.knowledge.insert_object_chunk(connection, [target])
+        knowledge_harness.knowledge.insert_object_chunk(connection, [target, sibling])
     for backfill in (False, True):
         if backfill:
             with knowledge_harness.database.write() as connection:
@@ -6938,7 +6944,7 @@ def test_node_context_legacy_steps_ceiling_pages_past_out_of_ceiling_siblings(
                     connection,
                     "INSERT INTO knowledge_object_sources(object_id,source_id,notebook_id) "
                     "VALUES (%s,%s,%s)",
-                    [(row[0], row[6], "nb-personal") for row in [*crowd, target]],
+                    [(row[0], row[6], "nb-personal") for row in [*crowd, target, sibling]],
                 )
                 connection.execute(
                     "INSERT INTO unified_kg_state(notebook_id,updated_at,"
@@ -6946,6 +6952,7 @@ def test_node_context_legacy_steps_ceiling_pages_past_out_of_ceiling_siblings(
                     ("nb-personal", normalize_timestamp(NOW)),
                 )
         steps = _nc(knowledge_harness, "ko-crowd-target", [NC_IN])["steps"]
-        assert [step["name"] for step in steps] == ["in"]
+        assert sorted(step["name"] for step in steps) == ["in", "in sibling"]
     monkeypatch.setattr(knowledge_store, "NODE_CONTEXT_LEGACY_SIBLING_SCAN", 500)
-    assert _nc(knowledge_harness, "ko-crowd-target", [NC_IN])["steps"] == []
+    steps = _nc(knowledge_harness, "ko-crowd-target", [NC_IN])["steps"]
+    assert [step["name"] for step in steps] == ["in"]

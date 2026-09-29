@@ -27,10 +27,16 @@ def test_retrieval_service_has_no_repository_backreference():
     service = RetrievalService(
         candidates=_Candidates(), graph=_Graph(), community_queries=communities
     )
+    from app.services.source_scope import source_ceiling_exists
+
+    # ``_ceiling_binds`` is the run-level ``ceiling_binds`` verdict (a pure
+    # scope function by default; production wires the store-probing verdict),
+    # not a way back into the repository.
     assert service.__dict__ == {
         "candidates": service.candidates,
         "graph": service.graph,
         "_community_queries": communities,
+        "_ceiling_binds": source_ceiling_exists,
     }
 
 

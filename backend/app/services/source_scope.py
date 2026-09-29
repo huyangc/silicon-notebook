@@ -74,7 +74,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import cached_property
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 
 # The STORED shape of ``ActiveSourceScope.notebook_source_ceilings``: pairs of
@@ -300,6 +300,12 @@ class ActiveSourceScope:
         single dict assignment of a complete immutable value -- a benign race
         that can repeat work but never exposes a torn value.
         """
+        return {}
+
+    @cached_property
+    def _ceiling_binds_memo(self) -> dict[str, bool]:
+        """Per-run memo behind ``ceiling_binds``: ``notebook_id -> verdict``.
+        Same mechanics and thread-safety argument as ``_library_ceiling_memo``."""
         return {}
 
     @property
@@ -973,7 +979,10 @@ def _library_ceiling_uncached(scope: ActiveSourceScope, notebook_id: str) -> fro
     ceiling = scope.source_ceiling_for(notebook_id)
     if ceiling is not None:
         return ceiling
-    if not scope.ceiling_active or notebook_id != scope.notebook_id:
+    # A blank id is callers' stand-in for the scope's own notebook -- the same
+    # reading ``source_ceiling_binds`` gives it -- so the local ceiling
+    # materialises for it too (fail closed: the two never disagree on "").
+    if not scope.ceiling_active or (notebook_id and notebook_id != scope.notebook_id):
         return None
     if scope.mode == "include":
         return scope.source_ids | scope.hidden_source_ids
@@ -1010,6 +1019,85 @@ def scoped_source_ceiling(notebook_id: str) -> frozenset[str] | None:
     one).  ``None`` = no ceiling to push; ``frozenset()`` = deny everything."""
     scope = current_source_scope()
     return None if scope is None else library_source_ceiling(scope, notebook_id)
+
+
+def source_ceiling_exists(notebook_id: str) -> bool:
+    """Whether ANY source ceiling binds ``notebook_id`` on the current run
+    (``ActiveSourceScope.source_ceiling_binds``) -- the conservative stand-in
+    for ``ceiling_binds`` where no store probes are wired (direct service
+    constructions in tests)."""
+    scope = current_source_scope()
+    return scope is not None and scope.source_ceiling_binds(notebook_id)
+
+
+def ceiling_binds(
+    scope: ActiveSourceScope,
+    notebook_id: str,
+    *,
+    drifted: Callable[[], bool],
+    foreign_hidden: Callable[[], bool],
+) -> bool:
+    """THE verdict "the source ceiling binds KG content of library
+    ``notebook_id`` on this run" for ``node_context`` re-reads
+    (``EvidenceContextService.knowledge_context``, ``RetrievalService
+    .node_context``).  False → the store gets NO ceiling and the row is used as
+    read: the O(1) path whose bytes (hub fused descriptions included) are the
+    ones a run without a scope gets.
+
+    True when a ceiling exists for the library (``source_ceiling_binds``) AND
+    it can exclude something the store would otherwise read:
+
+    * it denies everything (an excluded library, a zero-source freeze);
+    * the run is subjectless (global: each library carries its own frozen
+      ceiling), or the library carries a per-notebook freeze outside peer mode
+      -- nothing proves that freeze equals the library's current sources;
+    * the user narrowed the scope (``restricted``, which also answers True for
+      legacy scopes without the server-computed bit);
+    * the sources changed after the freeze (``drifted``: the visible universe
+      or the asker's hidden half no longer equals the frozen lists);
+    * the library holds a hidden source the asker may not read
+      (``foreign_hidden``: another member's Memory -- a frozen all-selected
+      list excludes it, an unbounded read would not).
+
+    The two probes are callables so this module stays store-free; each is
+    called at most once per run and library, and the whole verdict is
+    memoised on the scope (``_ceiling_binds_memo``).  Memoising is sound here
+    although ``_unsafe_source_scope_restricted`` must re-probe per call: that
+    probe gates candidate GENERATION (an out-of-scope candidate would consume
+    Top-K or seed hidden premises), whereas this verdict is taken when the
+    first KG hit of the run is re-read -- after recall, whose candidates the
+    frozen ceiling already bounded -- and decides only whether that
+    already-admitted object's text is re-read under the ceiling.
+
+    The enumeration side names the same concept ``ceiling_binds``; its verdict
+    has no ``foreign_hidden`` arm because listings exclude private Memory
+    unconditionally by another rule.
+    """
+    if not scope.source_ceiling_binds(notebook_id):
+        return False
+    key = notebook_id or scope.notebook_id
+    memo = scope._ceiling_binds_memo
+    if key not in memo:
+        memo[key] = _ceiling_binds_uncached(
+            scope, key, drifted=drifted, foreign_hidden=foreign_hidden)
+    return memo[key]
+
+
+def _ceiling_binds_uncached(
+    scope: ActiveSourceScope,
+    notebook_id: str,
+    *,
+    drifted: Callable[[], bool],
+    foreign_hidden: Callable[[], bool],
+) -> bool:
+    ceiling = library_source_ceiling(scope, notebook_id)
+    if ceiling is not None and not ceiling:
+        return True
+    if scope.subjectless or scope.source_ceiling_for(notebook_id) is not None:
+        return True
+    if notebook_id != scope.notebook_id or scope.restricted:
+        return True
+    return bool(drifted()) or bool(foreign_hidden())
 
 
 def _evidence_source_id(value: Any) -> str:

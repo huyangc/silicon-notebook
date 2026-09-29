@@ -168,7 +168,7 @@ NC_ELEMENTS = (
     ("el-nc-def-ok", NC_IN, "OK definition text"),
 )
 # 常量名与 PG 孪生一致:任何一条语句的任何一个绑定参数(字符串长度 / 数组的 JSON
-# 长度)都不许超过它。天花板(生产可达 ~49k 个 id)只允许在两条稀有路径上进 SQL。
+# 长度)都不许超过它。天花板(生产可达 ~49k 个 id)从不进 SQL。
 NODE_CONTEXT_MAX_BOUND_PARAM_CHARS = 256
 
 
@@ -181,8 +181,8 @@ def _nc_ev(element_id, source_id):
 # 证据里归因不到来源的两种项:缺 source_id 键、source_id 为空串。
 NC_UNATTRIBUTED = [{"element_id": "", "quoted_span": "stray"},
                    {"source_id": "", "element_id": "", "quoted_span": "blank"}]
-# 来源多于 NODE_CONTEXT_CLUSTER_SOURCES_PROBE 的簇:1030 个不同来源,按 id 排序
-# 最后一个是 src-nc-w1029(排在 1025 条探针之外)。
+# 一个成员带 1030 个不同来源的簇:成员数远在 NODE_CONTEXT_CLUSTER_MEMBER_PROBE
+# 之内,所以全部来源都被读回判定——最后一个(src-nc-w1029)也不例外。
 NC_WIDE_SOURCES = [f"src-nc-w{i:04d}" for i in range(1030)]
 
 
@@ -233,7 +233,7 @@ NC_OBJECTS = (
     ("ko-nc-partial", "concept", {"name": "Partial"},
      [_nc_ev("el-nc-occ-in", NC_IN), NC_UNATTRIBUTED[0]]),
     ("ko-nc-partial-peer", "concept", {"name": "Partial"}, [_nc_ev("el-nc-def-in", NC_IN)]),
-    # 来源多于探针上限的簇(退回 SQL 数组谓词)。
+    # 一个成员带上千个来源的簇(成员行在上限内,每个来源都判)。
     ("ko-nc-wide", "concept", {"name": "Wide"}, [_nc_ev("el-nc-occ-in", NC_IN)]),
     ("ko-nc-wide-peer", "concept", {"name": "Wide"},
      [_nc_ev("", source_id) for source_id in NC_WIDE_SOURCES]),
@@ -464,16 +464,16 @@ def test_node_context_applies_the_source_ceiling_on_both_index_branches(repo):
 
 
 def _assert_wide_cluster(repo, nb, base):
-    """``base`` 之上加齐宽簇的 1030 个来源:探针读回的前 1025 个(按 id 排序)全在
-    天花板内时,只有 keyset 读回的其余来源能暴露排在探针之外的那个。"""
+    """``base`` 之上加齐宽簇成员的 1030 个来源:全在天花板内才用融合描述,
+    第一个或最后一个不在都不用。"""
     every = frozenset(base) | frozenset(NC_WIDE_SOURCES)
     assert _nc(repo, nb, "ko-nc-wide", every)["definition"] == "WIDE fused description"
     assert _nc(repo, nb, "ko-nc-wide", every - {NC_WIDE_SOURCES[-1]})["definition_basis"] is None
     assert _nc(repo, nb, "ko-nc-wide", every - {NC_WIDE_SOURCES[0]})["definition_basis"] is None
 
 
-def test_node_context_cluster_with_more_sources_than_the_probe_reads_the_rest(repo):
-    """簇的来源多于 NODE_CONTEXT_CLUSTER_SOURCES_PROBE,两条支。"""
+def test_node_context_cluster_member_with_many_sources_is_judged_on_all_of_them(repo):
+    """一个成员带上千个来源:成员行在上限内,每个来源都判,两条支。"""
     nb = _seed_node_context_ceiling(repo)
     for backfill in (False, True):
         if backfill:
@@ -489,7 +489,7 @@ def _param_chars(param):
 
 def test_node_context_never_binds_the_whole_ceiling(repo):
     """生产上的天花板是整库可见来源(~49k 个 32 字符 id、~1.7 MB)。node_context
-    发出的**每一条**语句(簇描述、来源多于探针上限的簇、defines、payload steps、
+    发出的**每一条**语句(簇描述、成员带上千来源的簇、defines、payload steps、
     有 / 无 section 的 legacy 兄弟)的每一个绑定参数都不许超过
     NODE_CONTEXT_MAX_BOUND_PARAM_CHARS —— 天花板只在 Python 里判。"""
     from contextlib import contextmanager
@@ -530,3 +530,137 @@ def test_node_context_never_binds_the_whole_ceiling(repo):
             assert largest <= NODE_CONTEXT_MAX_BOUND_PARAM_CHARS, largest
     finally:
         del store._connect
+
+
+# ---------------------------------------------------------------------------
+# Re-review F1(a): under a binding ceiling a cluster's fused description is
+# verified by reading at most NODE_CONTEXT_CLUSTER_MEMBER_PROBE member rows in
+# one statement; a bigger cluster cannot be verified within budget and fails
+# closed to the mixed-cluster fallback (in-ceiling ``defines`` evidence).
+def _seed_hub(repo, members):
+    """A cluster of ``members`` concepts all evidenced by one visible source
+    (source/element ids carry the notebook id: they are global keys), with a
+    fused description and one in-ceiling ``defines`` fallback.  The reverse
+    index is written like ``store_kg`` does, so both branches see the sources."""
+    nb = repo.create_notebook(NotebookCreate(name=f"hub-{members}")).id
+    now = datetime.datetime.now().isoformat()
+    src, el, el_def = f"src-{nb}", f"el-{nb}", f"el-def-{nb}"
+    ev = json.dumps([_nc_ev(el, src)])
+    with repo._connect() as db:
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) VALUES (?,?,'hub','markdown','extracted','parsed','d.md','',0,'','','academic_paper',?,?)", (src, nb, now, now))
+        db.execute("INSERT INTO source_elements (id,source_id,element_type,location_label,text,metadata,created_at) VALUES (?,?,'paragraph','p','HUB occurrence','{}',?)", (el, src, now))
+        db.execute("INSERT INTO source_elements (id,source_id,element_type,location_label,text,metadata,created_at) VALUES (?,?,'paragraph','p','HUB definition text','{}',?)", (el_def, src, now))
+        ids = [f"ko-hub-{nb}-{i:05d}" for i in range(members)]
+        db.executemany(
+            "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,payload,evidence,source_id,created_at,updated_at) VALUES (?,?,'concept','approved','{\"name\":\"Hub\"}',?,?,?,?)",
+            [(oid, nb, ev, src, now, now) for oid in ids])
+        db.executemany(
+            "INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id) VALUES (?,?,?)",
+            [(oid, src, nb) for oid in ids])
+        db.executemany(
+            "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at,generation) VALUES (?,?,'K-hub',?,'Hub','concept','HUB fused description',?,0)",
+            [(f"cc-{oid}", nb, oid, now) for oid in ids])
+        definer = f"ko-hub-definer-{nb}"
+        db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,payload,evidence,source_id,created_at,updated_at) VALUES (?,?,'claim','approved','{\"name\":\"definer\"}',?,?,?,?)",
+                   (definer, nb, json.dumps([_nc_ev(el_def, src)]), src, now, now))
+        db.execute("INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id) VALUES (?,?,?)", (definer, src, nb))
+        db.execute("INSERT INTO knowledge_relations (id,notebook_id,source_id,source_object_id,target_object_id,edge_type,evidence,created_at) VALUES (?,?,?,?,?,'defines','[]',?)",
+                   (f"rel-{nb}", nb, src, definer, ids[0], now))
+    return nb, ids[0], src
+
+
+def _statements(repo, fn):
+    seen = []
+    original = repo._runtime.database.connect
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def counting(*args, **kwargs):
+        with original(*args, **kwargs) as db:
+            db.set_trace_callback(seen.append)
+            try:
+                yield db
+            finally:
+                db.set_trace_callback(None)
+
+    repo._runtime.database.connect = counting
+    try:
+        result = fn()
+    finally:
+        repo._runtime.database.connect = original
+    return result, seen
+
+
+def test_hub_cluster_description_is_verified_only_within_the_member_bound(repo):
+    from app.domain.knowledge_contracts import NODE_CONTEXT_CLUSTER_MEMBER_PROBE as bound
+
+    for members, verified in ((bound - 1, True), (bound, True), (bound + 1, False)):
+        nb, hub, src = _seed_hub(repo, members)
+        ctx = _nc(repo, nb, hub, [src])
+        if verified:
+            assert (ctx["definition"], ctx["definition_basis"]) == (
+                "HUB fused description", "cluster_description"), members
+        else:
+            # Unverifiable within budget → fail closed to the fallback, and the
+            # basis says where the text really came from.
+            assert (ctx["definition"], ctx["definition_basis"], ctx["definition_source_id"]) == (
+                "HUB definition text", "defines_evidence", src), members
+        # Without a ceiling the fused description is untouched.
+        assert _nc(repo, nb, hub)["definition"] == "HUB fused description"
+
+
+def test_hub_probe_statements_do_not_grow_with_the_cluster(repo):
+    from app.domain.knowledge_contracts import NODE_CONTEXT_CLUSTER_MEMBER_PROBE as bound
+
+    shapes = []
+    for members in (bound + 1, 3 * bound):
+        nb, hub, src = _seed_hub(repo, members)
+        _ctx, statements = _statements(
+            repo, lambda nb=nb, hub=hub, src=src: repo._runtime.knowledge.node_context(
+                nb, hub, check_access=False, allowed_source_ids=frozenset([src])))
+        shapes.append([s.replace(nb, "<nb>") for s in statements])
+    assert shapes[0] == shapes[1]
+    assert all(len(s) < 4000 for s in shapes[0])
+
+
+def test_name_only_skips_definition_cluster_and_step_work(repo):
+    nb, hub, src = _seed_hub(repo, 3)
+    full, full_statements = _statements(
+        repo, lambda: repo._runtime.knowledge.node_context(
+            nb, hub, check_access=False, allowed_source_ids=frozenset([src])))
+    slim, slim_statements = _statements(
+        repo, lambda: repo._runtime.knowledge.node_context(
+            nb, hub, check_access=False, allowed_source_ids=frozenset([src]),
+            name_only=True))
+    assert full["definition"] == "HUB fused description"
+    assert (slim["name"], slim["definition"], slim["steps"]) == ("Hub", None, None)
+    assert slim["occurrences"] == full["occurrences"]
+    assert not any("concept_clusters" in s or "knowledge_relations" in s
+                   for s in slim_statements), slim_statements
+    assert len(slim_statements) < len(full_statements)
+    # Under a ceiling that leaves no readable occurrence the row is empty, and
+    # the service layer drops the object (RetrievalService → {}).
+    gone = repo._runtime.knowledge.node_context(
+        nb, hub, check_access=False, allowed_source_ids=frozenset(), name_only=True)
+    assert gone["occurrences"] == []
+
+
+@pytest.mark.parametrize("authoritative", [True, False])
+def test_hub_probe_range_scans_one_cluster_in_member_order(repo, authoritative):
+    """EXPLAIN pin: the member read is a range scan of the probed cluster on
+    (notebook_id, canonical_id, member_object_id, generation) in member order,
+    stopping at LIMIT — never a walk of idx_clusters_member across every
+    cluster, and no temp b-tree sort of the members (the per-member DISTINCT
+    over one object's evidence items is the only temp structure)."""
+    from app.repositories.sqlite.knowledge_store import _node_context_cluster_sql
+
+    nb, hub, _src = _seed_hub(repo, 5)
+    with repo._runtime.database.connect() as db:
+        plan = [row[3] for row in db.execute(
+            "EXPLAIN QUERY PLAN " + _node_context_cluster_sql(authoritative=authoritative),
+            (nb, hub, nb, nb, 2001)).fetchall()]
+    assert any("SEARCH m USING COVERING INDEX idx_clusters_nb_canonical_member_gen" in step
+               for step in plan), plan
+    assert not any(step.startswith("SCAN m") for step in plan), plan
+    assert not any("TEMP B-TREE FOR ORDER BY" in step for step in plan), plan

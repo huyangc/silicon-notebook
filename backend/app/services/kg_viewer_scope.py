@@ -55,6 +55,12 @@ import json
 from collections import Counter
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence
 
+from app.services.source_scope import (
+    ceiling_binds,
+    current_source_scope,
+    source_scope_visible_universe_matches,
+)
+
 _ID_BATCH = 900
 
 
@@ -293,6 +299,56 @@ class KgViewerScope:
         return kept_nodes, kept_edges
 
 
+def foreign_memory_source_ids(
+    sources: Any, connect: Callable[[], Any], notebook_id: str, viewer: str,
+) -> tuple[FrozenSet[str], FrozenSet[str]]:
+    """``(viewer's own hidden sources, Memory sources of other users)`` for one
+    library — THE short-circuit probe, shared by the KG detail reads and the
+    run-level ``ceiling_binds`` verdict.  A library with no Memory answers
+    ``(∅, ∅)`` after one read (``memory_source_ids``); otherwise the second read
+    is ``hidden_source_ids(notebook_id, viewer)``.  Both are bounded by the
+    library's Memory/Knowhow count."""
+    with connect() as db:
+        memory = {str(s) for s in sources.memory_source_ids(db, notebook_id) if s}
+    if not memory:
+        return frozenset(), frozenset()
+    own = frozenset(str(s) for s in sources.hidden_source_ids(notebook_id, viewer) if s)
+    return own, frozenset(memory - own)
+
+
+class NodeContextCeilingVerdict:
+    """``source_scope.ceiling_binds`` for the current run, with its two store
+    probes: drift (the frozen lists against the library's current visible
+    universe and the asker's hidden half) and foreign hidden sources
+    (``foreign_memory_source_ids``).  Both probes read as the identity the
+    freeze used (``scope.owner_id``), never whoever is current — this runs in
+    detached workers."""
+
+    def __init__(self, *, database: Any, sources: Any) -> None:
+        self.database = database
+        self.sources = sources
+
+    def __call__(self, notebook_id: str) -> bool:
+        scope = current_source_scope()
+        if scope is None:
+            return False
+        library = notebook_id or scope.notebook_id
+
+        def drifted() -> bool:
+            return not source_scope_visible_universe_matches(
+                library,
+                self.sources.all_visible_source_ids(library),
+                self.sources.hidden_source_ids(library, scope.owner_id),
+            )
+
+        def foreign_hidden() -> bool:
+            return bool(foreign_memory_source_ids(
+                self.sources, self.database.connect, library, scope.owner_id)[1])
+
+        return ceiling_binds(
+            scope, notebook_id, drifted=drifted, foreign_hidden=foreign_hidden)
+
+
 class KgViewerScopeReader:
     """Builds ``KgViewerScope`` for the request's current user."""
 
@@ -330,16 +386,12 @@ class KgViewerScopeReader:
             or notebook_id == active_notebook_id
             or self.can_read_notebook(notebook_id, viewer)
         )
-        with self.connect() as db:
-            memory = {str(s) for s in self.sources.memory_source_ids(db, notebook_id) if s}
         if member:
-            if not memory:
-                return None
-            own = frozenset(
-                str(s) for s in self.sources.hidden_source_ids(notebook_id, viewer) if s
-            )
-            foreign = frozenset(memory - own)
+            own, foreign = foreign_memory_source_ids(
+                self.sources, self.connect, notebook_id, viewer)
         else:
+            with self.connect() as db:
+                memory = {str(s) for s in self.sources.memory_source_ids(db, notebook_id) if s}
             # Visible sources only: every hidden source is unreadable.  The
             # empty identity owns no Memory, so this read is exactly the
             # library's notebook-wide Knowhow half of ``hidden_source_ids``.

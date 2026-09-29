@@ -8,7 +8,7 @@ from app.services.evidence_attestation import DEAD, attest_pointers
 from app.services.retrieval import NeighborExpansion
 from app.services.source_scope import (
     current_source_scope, filter_retrieval_items, scoped_node_context_row,
-    scoped_source_ceiling, subjectless_run_active,
+    scoped_source_ceiling, source_ceiling_exists, subjectless_run_active,
 )
 
 
@@ -18,10 +18,16 @@ def _notebook_id(args, kwargs, *, keyword: str = "notebook_id") -> str:
 
 
 class RetrievalService:
-    def __init__(self, *, candidates, graph, community_queries) -> None:
+    def __init__(
+        self, *, candidates, graph, community_queries, ceiling_verdict=None,
+    ) -> None:
         self.candidates = candidates
         self.graph = graph
         self._community_queries = community_queries
+        # ``source_scope.ceiling_binds`` for the current run (production wires
+        # ``kg_viewer_scope.NodeContextCeilingVerdict``); without one every
+        # existing ceiling binds -- the conservative historical answer.
+        self._ceiling_binds = ceiling_verdict or source_ceiling_exists
 
     def community_queries(self, settings=None):
         if settings is None:
@@ -225,6 +231,10 @@ class RetrievalService:
         notebook_id = _notebook_id(args, kwargs)
         if not scope.covers_notebook(notebook_id):
             return {}
+        if not self._ceiling_binds(notebook_id):
+            # The ceiling cannot exclude anything this read would return (see
+            # ``source_scope.ceiling_binds``): the unbounded read, as is.
+            return self.graph.node_context(*args, **kwargs)
         allowed = scoped_source_ceiling(notebook_id)
         if allowed is not None:
             kwargs = {**kwargs, "allowed_source_ids": allowed}

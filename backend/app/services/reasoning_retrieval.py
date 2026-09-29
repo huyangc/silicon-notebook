@@ -3729,9 +3729,13 @@ class ReasoningRetriever:
         )
 
     def get(self, notebook_id, object_id):
+        """The trace's node-name lookup: only ``name`` is read, so the store
+        skips definition, cluster and step work (``name_only``); the object is
+        still dropped when a binding ceiling leaves it no readable occurrence."""
         try:
             with retrieval_fanout_slot():
-                return self.retrieval.node_context(notebook_id, object_id)
+                return self.retrieval.node_context(
+                    notebook_id, object_id, name_only=True)
         except KeyError:
             return {}
 
