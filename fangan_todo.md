@@ -1,6 +1,6 @@
 # silicon-notebook 待办（fangan_todo.md）
 
-更新日期：2026-09-08
+更新日期：2026-09-29
 对照：`silicon_notebook_fangan.md`（产品方案）。已完成项见 `fangan_done.md`；本文件只列**尚未做完**的部分。
 
 > 规则：完成某项后，从本文件移除并补进 `fangan_done.md`（见 `AGENTS.md` 的「Documentation Ownership」）。
@@ -212,33 +212,6 @@
       `docs/product-and-api_zh.md` 的 `read_document` 一段），拍板后再一并改两步。
 
 ### 检索
-
-- [ ] **全局引用复核：非联邦通道引用的检索时刻指纹快照**。`GlobalAskService
-      ._validate_citations` 的「缺席 + 现读不存在 → 放行」那一支是**刻意保留的现状**
-      （codex #755 第 2 轮 P2，裁决为不改并登记）。codex 要求「引用指向真实 source
-      element 而现读缺失就拒」，不能只这么做：非空的 `Citation.element_id` 并不保证那一行
-      在 run 开始时是活的。元素 id **不是**重新签发的——`source_ingestion` 按
-      `(来源, 序号)` 确定性地生成 `el-<source>-<index>`，重新入库后同一个 id 照样回来；
-      悬空 id 的来源是另外三条：重新解析后元素**变少**、Knowhow 行级删除，以及
-      `knowledge_store._enrich_evidence` 对查无此行的 id 原样交回给
-      `evidence_context.knowledge_context`（文本回落 `quoted_span`），这也正是
-      `evidence_context.collection_item_citations` 要「挑第一条活的元素」的原因；单库问答
-      照样发布这类引用。一律拒绝会把一批**本来就这样**的既有可答问题整份作废，而且用户读到
-      的那句「引用原文在回答期间发生了变化」是假的。
-      **代价（明写）**：合成窗口内被删的非联邦引用会发布一条打不开的引用卡。
-      **真正的修法**：让四个不经联邦 chunk 通道的引用生产者——文档概览
-      （`document_source_overview`）、集合枚举（`collection_enumeration` /
-      `evidence_context.collection_item_citations`）、KG 对象
-      （`evidence_context.knowledge_context`）、`follow_chain`——也在**检索时刻**经同一道
-      接缝 `FederatedRunPlan.on_evidence`（三态：快照 / `None` / 缺席）登记一份**指纹**
-      快照。只登记「当时还活着」是不够的：id 确定性复用意味着同一个 id 下的**文字**可以
-      整个换掉而存活位始终为真，所以登记的必须是检索那一刻读到的文本指纹（联邦通道侧由
-      `passage_evidence_snapshot` 把段落原文与元素指纹放进同一个数据库快照来保证这一点）。
-      有了指纹快照，这一支就退化成既有的「快照存在 + 现读缺失/不等 → changed」，不需要
-      新判据。四个生产者各自改动，单独立项。
-      现状由 `tests/test_global_ask_engine_parity.py::
-      test_a_non_federated_citation_whose_element_vanished_is_still_delivered` 钉住：改成
-      拒绝而不补快照，那条用例会红。
 
 - [ ] **「中文问句检索英文语料首轮空」的三条次因（此前未登记）**。主因——冻结来源范围
       关掉 chunk 向量通道——已修（`docs/superpowers/specs/2026-09-07-scoped-chunk-vector-lane-design_zh.md`）；

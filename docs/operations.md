@@ -139,10 +139,12 @@ snapshot for that element. `global_ask_citation_scope_diagnostic` is emitted bes
 `unattributed` / `out_of_ceiling` references — those can only come from a retrieval-layer defect (a channel
 that skipped attribution or leaked past the frozen ceiling) and need a fix; the rest are races with an
 editing user. `global_ask_citation_check_read_failed` (`read`, `error_type`) reports a terminal read that
-failed, whose references are then reported unverifiable. `producer_evidence_attested` (`producer`,
-`method` = `read`/`pointers`, element / live / dead counts) and `producer_evidence_unavailable` (`producer`,
-`reason` = `read_failed`/`no_reader`, `elements`, optional `error_type`) cover the non-federated producers'
-retrieval-time registration. Rows written before this change that the old recheck voided keep their stored
+failed, whose references are then reported unverifiable. `producer_evidence_attested` (`producer`;
+`method` = `read` with an `elements` count, `pointers` with `elements`, `read` and the `attested` / `live` /
+`dead` / `unknown` counts, or `passages` with a `passages` count for the mix branch's KG-overlay passages,
+producer `kg_overlay_passages`) and `producer_evidence_unavailable` (`producer`, `reason` =
+`read_failed`/`no_reader`, `elements`, optional `error_type`) cover the retrieval-time registration outside
+the federated fan-out; a cancelled run raises its cancellation and emits neither. Rows written before this change that the old recheck voided keep their stored
 sentence. The retired global
 retrieval lane's `global_retrieval_skipped` and `global_retrieval_ann_starved` events no longer exist.
 Lexical degradation is no longer disclosed per notebook; it emits `chunk_bruteforce_skipped` like any other

@@ -104,9 +104,11 @@ run 下它在笔记本、失败异常类名与耗时毫秒之外多带一个 `re
 `unattributed` / `out_of_ceiling` 时才另发 `global_ask_citation_scope_diagnostic`——这两种只可能来自
 检索层缺陷（某条通道漏了归属或越过了冻结的来源天花板）、需要修，其余是与正在编辑的用户抢跑。
 `global_ask_citation_check_read_failed`（`read`、`error_type`）表示终态读失败，相应引用按「无法核对」
-报告。`producer_evidence_attested`（`producer`、`method` = `read`/`pointers`、元素 / 存活 / 悬空计数）
-与 `producer_evidence_unavailable`（`producer`、`reason` = `read_failed`/`no_reader`、`elements`、可选
-`error_type`）覆盖非联邦生产者的检索时刻登记。改动之前被旧复核整份作废的行保留原句。已退役的独立全局检索链路带走了
+报告。`producer_evidence_attested`（`producer`；`method` = `read` 带 `elements` 计数，`pointers` 带 `elements`、
+`read` 与 `attested` / `live` / `dead` / `unknown` 计数，或 `passages` 带 `passages` 计数——后者是 mix
+分支知识图谱叠加通道的原文段，生产者名 `kg_overlay_passages`）与 `producer_evidence_unavailable`（`producer`、
+`reason` = `read_failed`/`no_reader`、`elements`、可选 `error_type`）覆盖联邦检索之外的检索时刻登记；被取消的
+run 直接抛出取消，两个事件都不发。改动之前被旧复核整份作废的行保留原句。已退役的独立全局检索链路带走了
 `global_retrieval_skipped` 与 `global_retrieval_ann_starved` 两个事件，它们不再出现。
 词法降级不再有逐库披露，它和别的 run 一样只发 `chunk_bruteforce_skipped`；降级清单现在只表示
 「该库有部分检索腿失败」。
