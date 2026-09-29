@@ -416,15 +416,16 @@ def test_ann_union_lexical_timeout_is_not_a_model_error(repo, monkeypatch):
     assert noted == []
 
 
-@pytest.mark.parametrize("scoped", [False, True])
 def test_ann_union_lexical_failure_is_an_event_not_a_model_error(
-    repo, monkeypatch, scoped
+    repo, monkeypatch
 ):
     """ANN∪FTS 联合检索里词法半发生非超时异常(例如旧库缺词法索引),而 ANN 已覆盖
     全部在范围来源:语义半的候选照常返回,答案不受影响,所以不进
     ``_ASK_MODEL_ERRORS``、不上「模型服务调用失败」横幅;改记一条 ``ask_stage``
     事件(stage=chunk_fts、status=failed_open、recall_role=supplement、只带异常
-    类名),不含异常消息。"""
+    类名),不含异常消息。
+
+    只有带来源范围时才能这样判:无范围的直接调用见下一条(recall_role=unknown)。"""
     from app.core.ask_context import _ASK_MODEL_ERRORS
 
     query = "engram memory architecture"
@@ -446,7 +447,7 @@ def test_ann_union_lexical_failure_is_an_event_not_a_model_error(
     try:
         result = repo._retrieve_chunks_ann(
             nb.id, query, repo._embed_query(query), idx, recall=2,
-            allowed_source_ids=(sid,) if scoped else None,
+            allowed_source_ids=(sid,),
         )
     finally:
         _ASK_MODEL_ERRORS.reset(token)
@@ -467,6 +468,56 @@ def test_ann_union_lexical_failure_is_an_event_not_a_model_error(
         "error_type": "RuntimeError",
     }]
     assert "secret database diagnostic" not in json.dumps(events)
+
+
+def test_ann_union_lexical_failure_banners_when_scope_is_unknown(
+    repo, monkeypatch
+):
+    """直接的服务调用方不给来源范围(``allowed`` 为 None、也不是报告运行):ANN 跑
+    全库,不对 sidecar 做范围规划,无法知道 ANN 建好后有没有新来源只能靠词法召回。
+    覆盖未知时按唯一召回处理——照旧记 ``chunk_fts`` model_error 上横幅,事件
+    recall_role=unknown,仍不含异常消息。
+
+    这条原先断言「无横幅」(与带范围的 supplement 同判):那样会在 ANN 之后新加
+    的来源整体丢失时把失败压掉(codex #801 P2)。HTTP 请求总会冻结出 include
+    范围,不走这条。"""
+    from app.core.ask_context import _ASK_MODEL_ERRORS
+
+    query = "engram memory architecture"
+    nb, _sid = _seed_chunks(repo, [f"{query} " * 20])
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    idx = repo._scale_index(nb.id, allow_stale=True)
+
+    def _broken(*_args, **_kwargs):
+        raise RuntimeError("secret database diagnostic")
+
+    monkeypatch.setattr(repo._runtime.knowledge, "chunk_fts_search", _broken)
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+    sink = []
+    token = _ASK_MODEL_ERRORS.set(sink)
+    try:
+        result = repo._retrieve_chunks_ann(
+            nb.id, query, repo._embed_query(query), idx, recall=2,
+        )
+    finally:
+        _ASK_MODEL_ERRORS.reset(token)
+
+    assert result is not None and result[0]  # semantic half still answers
+    assert [entry["stage"] for entry in sink] == ["chunk_fts"]
+    arm = [e for e in events if e.get("site") == "chunk_ann_union"]
+    assert arm == [{
+        "kind": "ask_stage",
+        "stage": "chunk_fts",
+        "site": "chunk_ann_union",
+        "notebook_id": nb.id,
+        "status": "failed_open",
+        "lexical_mode": "non_report_union",
+        "recall_role": "unknown",
+        "error_type": "RuntimeError",
+    }]
+    assert "secret database diagnostic" not in json.dumps(arm)
 
 
 @pytest.mark.parametrize(
@@ -574,6 +625,79 @@ def test_ann_union_lexical_failure_is_supplement_when_delta_covers_new_source(
     ]
 
 
+def test_ann_union_lexical_failure_is_sole_when_delta_returns_no_rows(
+    repo, monkeypatch
+):
+    """``scale_search_include_delta`` 打开、两个未 fold 新来源都在范围里:一个有
+    chunk 向量(delta 暴力补召回取回语义候选),一个缺 chunk_embeddings(delta 查询
+    不报错但零行)。覆盖只按实际取回的来源算:前者从唯一召回集合里扣除,后者仍只能
+    靠词法半——词法半一坏它整体缺席,判 sole、照旧上横幅(codex #801 P2)。"""
+    from app.core.ask_context import _ASK_MODEL_ERRORS
+
+    monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
+    nb, old_source = _seed_chunks(
+        repo, ["indexed union evidence baseline " * 20]
+    )
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    embedded_source = _add_chunked_source(
+        repo, nb.id, ["DELTA9000 fresh union evidence " * 20]
+    )
+    unembedded_source = _add_chunked_source(
+        repo, nb.id, ["DELTA9001 vectorless union evidence " * 20]
+    )
+    with repo._write() as db:
+        db.execute(
+            "DELETE FROM chunk_embeddings WHERE chunk_id IN "
+            "(SELECT id FROM chunks WHERE source_id=?)",
+            (unembedded_source,),
+        )
+    idx = repo._scale_index(nb.id, allow_stale=True)
+    assert embedded_source not in idx.chunk_ann_source_names
+    assert unembedded_source not in idx.chunk_ann_source_names
+    candidates = repo.retrieval.candidates
+    assert set(candidates._index_delta(nb.id)["delta_sources"]) >= {
+        embedded_source, unembedded_source,
+    }
+
+    def _broken(*_args, **_kwargs):
+        raise RuntimeError("secret database diagnostic")
+
+    monkeypatch.setattr(repo._runtime.knowledge, "chunk_fts_search", _broken)
+    judged = []
+    real_note = candidates._note_ann_union_lexical_failure
+
+    def _spy_note(*args, **kwargs):
+        judged.append(kwargs["delta_covered_sources"])
+        return real_note(*args, **kwargs)
+
+    monkeypatch.setattr(candidates, "_note_ann_union_lexical_failure", _spy_note)
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+    query = "fresh union evidence DELTA9000 vectorless DELTA9001"
+    sink = []
+    token = _ASK_MODEL_ERRORS.set(sink)
+    try:
+        result = repo._retrieve_chunks_ann(
+            nb.id, query, repo._embed_query(query), idx, recall=10,
+            allowed_source_ids=(old_source, embedded_source, unembedded_source),
+        )
+    finally:
+        _ASK_MODEL_ERRORS.reset(token)
+
+    assert result is not None
+    returned = {chunk.source_id for chunk in result[0]}
+    assert embedded_source in returned
+    assert unembedded_source not in returned
+    assert [entry["stage"] for entry in sink] == ["chunk_fts"]
+    arm = [e for e in events if e.get("site") == "chunk_ann_union"]
+    assert [(e["lexical_mode"], e["recall_role"]) for e in arm] == [
+        ("non_report_union", "sole")
+    ]
+    # 有行的那个新来源确实从唯一召回集合里扣除,判 sole 只因零行的那个。
+    assert judged == [frozenset({embedded_source})]
+
+
 @pytest.mark.parametrize("control", ["cancelled", "retrieval_control"])
 def test_ann_union_lexical_control_flow_is_re_raised(repo, monkeypatch, control):
     """取消与检索控制流不是「词法失败」:照抛给调用方,不记事件、不记横幅。"""
@@ -626,9 +750,15 @@ def test_keyword_arm_control_flow_is_re_raised(repo, monkeypatch, control):
 
 def test_ask_chunk_lexical_failure_shows_no_chunk_fts_banner(repo, monkeypatch):
     """同一条原则落到响应上:词法半坏掉时 ``AskResponse.model_errors`` 里没有
-    ``chunk_fts``(前端 ModelErrorPanel 只要列表非空就上横幅),答案照常产出。"""
+    ``chunk_fts``(前端 ModelErrorPanel 只要列表非空就上横幅),答案照常产出。
+
+    请求带上 HTTP 入口那样冻结的全选 include 范围——无范围的直接调用覆盖未知,
+    按唯一召回处理(见 ``..._banners_when_scope_is_unknown``)。"""
+    from app.models.source_scope import SourceScope
+    from app.services.source_scope import source_scope_context
+
     query = "engram memory architecture"
-    nb, _ = _seed_chunks(repo, [f"{query} " * 20])
+    nb, sid = _seed_chunks(repo, [f"{query} " * 20])
     repo.rebuild_unified_kg(nb.id)
     repo.build_scale_index(nb.id)
     repo.settings.query_rewrite_enabled = False
@@ -644,10 +774,16 @@ def test_ask_chunk_lexical_failure_shows_no_chunk_fts_banner(repo, monkeypatch):
     events = []
     monkeypatch.setattr(repo.event_log, "emit", events.append)
 
-    resp = repo.ask_chunk(nb.id, AskRequest(question=query, mode="chunk"))
+    scope = SourceScope(mode="include", source_ids=[sid], narrowed=False)
+    with source_scope_context(nb.id, scope):
+        resp = repo.ask_chunk(
+            nb.id, AskRequest(question=query, mode="chunk", source_scope=scope)
+        )
 
     assert fts_calls
-    assert any(e.get("site") == "chunk_ann_union" for e in events)
+    assert {
+        e["recall_role"] for e in events if e.get("site") == "chunk_ann_union"
+    } == {"supplement"}
     assert "chunk_fts" not in [e.stage for e in resp.model_errors]
     assert resp.answer
     assert resp.citations
