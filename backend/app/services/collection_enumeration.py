@@ -947,6 +947,7 @@ class CollectionEnumerationService:
         budget: EnumerationBudget,
         cursor: Optional[ElementCursor] = None,
         cancel_event: CancelEvent = None,
+        ceiling_binds: bool = True,
     ) -> ElementEnumeration:
         """List source elements of one whitelisted kind across the scope.
 
@@ -981,7 +982,9 @@ class CollectionEnumerationService:
 
         with self._database.connect() as db:
             notebook_ids, tiers = self._participants(db, active_notebook_id)
-            plan = self._catalog.scope_element_plan(db, notebook_ids, kind)
+            plan = self._catalog.scope_element_plan(
+                db, notebook_ids, kind, ceiling_binds=ceiling_binds,
+            )
             sources = plan.sources
             total: Optional[int] = plan.total
             preloaded: Dict[str, Any] = {}
@@ -992,7 +995,9 @@ class CollectionEnumerationService:
 
             scope_id = (
                 tuple(notebook_ids), plan.fingerprint,
-                self._catalog.scope_ceiling_digest(db, notebook_ids),
+                self._catalog.scope_ceiling_digest(
+                    db, notebook_ids, ceiling_binds=ceiling_binds,
+                ),
             )
             if cursor is not None:
                 if (cursor.scope_notebook_ids, cursor.scope_fingerprint,
@@ -1091,7 +1096,9 @@ class CollectionEnumerationService:
             closing_ids = self._closing_participants(db, active_notebook_id)
             scope_stable = (
                 closing_ids == tuple(notebook_ids)
-                and self._catalog.scope_signal_fingerprint(db, closing_ids)
+                and self._catalog.scope_signal_fingerprint(
+                    db, closing_ids, ceiling_binds=ceiling_binds,
+                )
                 == plan.fingerprint
             )
 
@@ -1115,6 +1122,7 @@ class CollectionEnumerationService:
         title: str,
         *,
         cancel_event: CancelEvent = None,
+        ceiling_binds: bool = True,
     ) -> Tuple[str, int, bool]:
         """Resolve a source TITLE to the id of the one source that bears it.
 
@@ -1155,7 +1163,7 @@ class CollectionEnumerationService:
         with self._database.connect() as db:
             notebook_ids, _tiers = self._participants(db, active_notebook_id)
             sources = self._catalog.scope_element_plan(
-                db, notebook_ids, kind
+                db, notebook_ids, kind, ceiling_binds=ceiling_binds,
             ).sources
             if len(sources) > _MAX_TITLE_RESOLVE_SOURCES:
                 return "", 0, True
@@ -1186,6 +1194,7 @@ class CollectionEnumerationService:
         cursor: Optional[SourceCursor] = None,
         cancel_event: CancelEvent = None,
         local_only: bool = False,
+        ceiling_binds: bool = True,
     ) -> SourceEnumeration:
         """List the scope's USER-VISIBLE documents, in the source tab's order.
 
@@ -1236,12 +1245,16 @@ class CollectionEnumerationService:
             notebook_ids, tiers = self._participants(db, active_notebook_id)
             if local_only:
                 notebook_ids = tuple(n for n in notebook_ids if n == active_notebook_id)
-            plan = self._catalog.scope_source_plan(db, notebook_ids)
+            plan = self._catalog.scope_source_plan(
+                db, notebook_ids, ceiling_binds=ceiling_binds,
+            )
             sources: Optional[Tuple[ScopeSource, ...]] = plan.sources
             total: Optional[int] = plan.total
             scope_id = (
                 tuple(notebook_ids), plan.fingerprint,
-                self._catalog.scope_ceiling_digest(db, notebook_ids),
+                self._catalog.scope_ceiling_digest(
+                    db, notebook_ids, ceiling_binds=ceiling_binds,
+                ),
             )
             if cursor is not None:
                 if (cursor.scope_notebook_ids, cursor.scope_fingerprint,
@@ -1315,7 +1328,9 @@ class CollectionEnumerationService:
                 closing_ids = tuple(n for n in closing_ids if n == active_notebook_id)
             scope_stable = (
                 closing_ids == tuple(notebook_ids)
-                and self._catalog.scope_signal_fingerprint(db, closing_ids)
+                and self._catalog.scope_signal_fingerprint(
+                    db, closing_ids, ceiling_binds=ceiling_binds,
+                )
                 == plan.fingerprint
             )
             # 元数据换代复检。作用域指纹证明的是「源集合与元素代次没变」,证明不了
@@ -1399,6 +1414,7 @@ class CollectionEnumerationService:
         budget: EnumerationBudget,
         cursor: Optional[KgObjectCursor] = None,
         cancel_event: CancelEvent = None,
+        ceiling_binds: bool = True,
     ) -> KgObjectEnumeration:
         """List usable knowledge objects of one type across the scope.
 
@@ -1425,8 +1441,12 @@ class CollectionEnumerationService:
         with self._database.connect() as db:
             notebook_ids, tiers = self._participants(db, active_notebook_id)
             opening_seqs = self._kg_seqs(db, notebook_ids)
-            opening_ceiling = self._catalog.scope_ceiling_digest(db, notebook_ids)
-            total = self._kg_total(db, notebook_ids, object_type)
+            opening_ceiling = self._catalog.scope_ceiling_digest(
+                db, notebook_ids, ceiling_binds=ceiling_binds,
+            )
+            total = self._kg_total(
+                db, notebook_ids, object_type, ceiling_binds=ceiling_binds,
+            )
             walk_ids: Sequence[str] = notebook_ids
             # Private-Memory exclusion, resolved per participant.  One bounded
             # id query per notebook actually walked (the set is one row per
@@ -1484,7 +1504,9 @@ class CollectionEnumerationService:
                     # under (``_kg_total`` → the catalog's ceiling-keyed
                     # count), judged per library.  A scope read like the
                     # Memory ids above, not a page query.
-                    ceiling = self._catalog.source_ceiling(db, notebook_id)
+                    ceiling = self._catalog.source_ceiling(
+                        db, notebook_id, ceiling_binds=ceiling_binds,
+                    )
                     resume = _kg_cursor(
                         object_type, notebook_id, after, opening_seqs, walk,
                         opening_ceiling,
@@ -1877,7 +1899,12 @@ class CollectionEnumerationService:
         return tuple(result)
 
     def _kg_total(
-        self, db: object, notebook_ids: Sequence[str], object_type: str
+        self,
+        db: object,
+        notebook_ids: Sequence[str],
+        object_type: str,
+        *,
+        ceiling_binds: bool = True,
     ) -> Optional[int]:
         """The map's count for this type, or ``None`` when it is unavailable.
 
@@ -1890,7 +1917,9 @@ class CollectionEnumerationService:
         ``total=None`` is visible in the coverage the caller renders.
         """
         try:
-            counts = dict(self._catalog.scope_kg_type_counts(db, notebook_ids))
+            counts = dict(self._catalog.scope_kg_type_counts(
+                db, notebook_ids, ceiling_binds=ceiling_binds,
+            ))
         except AskCancelled:
             raise           # a cancelled run is not a missing denominator
         except Exception:
