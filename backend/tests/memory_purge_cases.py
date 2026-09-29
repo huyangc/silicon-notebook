@@ -1033,7 +1033,47 @@ def case_a_source_removed_concurrently_counts_as_removed(
     assert_intact(world, "alice")
 
 
+def case_a_source_published_just_before_the_row_delete_is_removed_after(
+    world: World, monkeypatch
+) -> None:
+    """An in-flight KG ingest can publish a Memory's source after the first
+    removal pass and before the row delete (its own post-ingest recheck
+    already saw the Memory alive). The pass after the row delete removes it:
+    no orphan source, on the single delete and on the bulk/exit path."""
+    svc = service(world)
+    ingestion = world.repo._runtime.source_ingestion
+    store = svc.store
+
+    def orphans() -> int:
+        return world.sql.count(
+            "SELECT COUNT(*) AS c FROM sources s WHERE s.source_type='memory' "
+            "AND NOT EXISTS (SELECT 1 FROM memory_items m WHERE m.id=s.memory_id)"
+        )
+
+    single = plain_memory(world, world.shared, world.alice, "late-src-1", "confirmed")
+    bulk = plain_memory(world, world.shared, world.alice, "late-src-2", "confirmed")
+    for name in ("delete_memory", "bulk_delete_memories"):
+        original = getattr(store, name)
+
+        def publish_then_delete(user_id_or_id, *args, _original=original, _name=name):
+            memory_id = user_id_or_id if _name == "delete_memory" else args[0][0]
+            item = svc.get(memory_id, world.alice.id)
+            ingestion.ingest_memory_source(
+                item.notebook_id, item.id, item.title, item.content_md
+            )
+            assert ingestion.memory_source_id(item.id) is not None
+            return _original(user_id_or_id, *args)
+
+        monkeypatch.setattr(store, name, publish_then_delete)
+    world.repo.delete_memory(single, world.alice.id)
+    world.repo.bulk_delete_memories(world.alice.id, [bulk])
+    assert ingestion.memory_source_id(single) is None
+    assert ingestion.memory_source_id(bulk) is None
+    assert orphans() == 0
+
+
 MONKEYPATCH_CASES: dict[str, Callable[..., None]] = {
+    "late_source_removed": case_a_source_published_just_before_the_row_delete_is_removed_after,
     "gone_source_is_removed": case_a_source_removed_concurrently_counts_as_removed,
     "failed_purge_keeps_membership": case_failed_purge_keeps_the_membership,
     "save_during_exit_kept": case_memory_saved_during_exit_is_never_deleted_unacknowledged,
