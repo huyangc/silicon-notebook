@@ -10,13 +10,19 @@ export const SESSION_HANDOFF_MAX_MS = 60_000;
 
 type SessionHandoff = { token: string; expiresAt: number };
 
+// The token this tab last wrote or subscribed with. `storage` events fire only
+// in other tabs, so this is what another tab's write is compared against.
+let pageToken: string | null = null;
+
 export function getToken(): string {
   if (typeof window === "undefined") return "";
   return window.localStorage.getItem(TOKEN_KEY) ?? "";
 }
 
 export function setToken(token: string): void {
-  if (typeof window !== "undefined") window.localStorage.setItem(TOKEN_KEY, token);
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(TOKEN_KEY, token);
+  pageToken = token;
 }
 
 /** Explicit sign-out: drops the token and any handoff, so an in-flight
@@ -24,6 +30,7 @@ export function setToken(token: string): void {
 export function clearToken(): void {
   if (typeof window === "undefined") return;
   window.localStorage.removeItem(TOKEN_KEY);
+  pageToken = "";
   try {
     window.localStorage.removeItem(HANDOFF_KEY);
   } catch {
@@ -74,6 +81,36 @@ export function sessionHandoffActive(token: string): boolean {
   if (typeof window === "undefined" || !token) return false;
   const marker = readHandoff();
   return marker !== null && marker.token === token && marker.expiresAt > Date.now();
+}
+
+/**
+ * Cross-tab session sync: when another tab replaces or clears the token (sign
+ * in/out, identity migration), this tab's user and actor-owned state are stale,
+ * so `onChange` runs (the page reloads and restores from the new token). This
+ * completes a switch; the handoff marker above only covers the 401 gap before
+ * the new token is written. Other keys are ignored. Returns an unsubscribe.
+ */
+export function subscribeTokenChanges(onChange: () => void): () => void {
+  if (typeof window === "undefined") return () => undefined;
+  try {
+    pageToken = getToken();
+  } catch {
+    return () => undefined;
+  }
+  function handle(event: StorageEvent) {
+    if (event.key !== TOKEN_KEY && event.key !== null) return;
+    let next: string;
+    try {
+      next = event.key === null ? getToken() : event.newValue ?? "";
+    } catch {
+      return;
+    }
+    if (next === pageToken) return;
+    pageToken = next;
+    onChange();
+  }
+  window.addEventListener("storage", handle);
+  return () => window.removeEventListener("storage", handle);
 }
 
 /** A 401 for `token` clears the session only if it is still the current one

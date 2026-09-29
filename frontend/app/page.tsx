@@ -144,7 +144,7 @@ import {
 import { KG_RANGE_DEFAULT, kgCanvasState } from "./kg-workspace-model.ts";
 import { refreshKgDeleteDependents } from "./kg-delete-dependents.ts";
 import { API_BASE } from "./api-config";
-import { clearRejectedToken, getToken } from "./auth-session";
+import { clearRejectedToken, getToken, subscribeTokenChanges } from "./auth-session";
 import { copyTextSafely } from "./copy-text";
 import { useCopyResult } from "./copy-result";
 import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors.ts";
@@ -640,6 +640,8 @@ export default function Home() {
   const [authRestoreRetry, setAuthRestoreRetry] = useState(0);
   const [identityInfo, setIdentityInfo] = useState<IdentityInfo | null>(null);
   const identityMigration = useIdentityMigration();
+  // 另一个标签页换了或清了 token：本页的用户与按 actor 归属的状态已失效，整页重载重建。
+  useEffect(() => subscribeTokenChanges(() => window.location.reload()), []);
   const [health, setHealth] = useState<Health | null>(null);
   const [currentNotebookId, setCurrentNotebookId] = useState<string | null>(null);
   const [currentNotebook, setCurrentNotebook] = useState<NotebookSummary | null>(null);
