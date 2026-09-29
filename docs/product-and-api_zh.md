@@ -933,9 +933,10 @@ scale_index 各与其母格同为 admin，mount 与 configure 同为 owner）；
 - `NotebookSummary.granted_via` 是 `{group_id, group_name, kind}` 的列表，驱动卡片上的
   「来自群组《X》」标注。自有库与经分享链接加入的库为空，因此旧行为逐字不变。**列表与
   详情两条路径都回填**，去重口径两边一致：**成员行优先**——既经分享链接加入、又在被授权
-  群组里的人，`granted_via` 为空、「退出共享」仍然可用（它删的正是那条成员行）。
-- 反过来，`granted_via` 非空的卡片**不得**显示「退出共享」：那个按钮只删
-  `notebook_members` 行，对授权边一点作用都没有，点了而库还在列表里是一个**必然发生的
+  群组里的人，`granted_via` 为空、「退出共享」仍然可用（它结束的正是那条成员行；告知条数
+  之后还会删除退出者本人在该库的记忆，见「Memory 与 Agent MCP」）。
+- 反过来，`granted_via` 非空的卡片**不得**显示「退出共享」：那个按钮只结束
+  `notebook_members` 成员关系，对授权边一点作用都没有，点了而库还在列表里是一个**必然发生的
   假失败**。改为展示「由组管理员管理」的静态说明。
 - `GET /notebooks/{id}/mountable` 换了响应模型 `MountableNotebook`，多一个
   `origin ∈ {base, mine, shared}`，由 `MOUNT_VALID_EXPR` 已有的列信息（`tier` 与
@@ -1399,8 +1400,33 @@ id、不带 `revision`、不带变更历史，因此只持有这一个 scope 的
 快照与队列历史中。批准时会重新校验 Memory 当前仍为 confirmed 且创建者仍有访问权，
 并在写事务内校验固定 revision 与 notebook，再复用 KG dedupe/merge 创建或合并一个或多个 Base KG 对象；批准/拒绝会记录当前登录的
 admin reviewer，API 与晋升审计记录完整的 `base_object_ids`。这一过程不会改变或暴露原私有 Memory。
+Memory 被硬删除时，它的晋升提案在同一事务中撤回：置为 `rejected`，原因 `withdrawn_memory_deleted`，
+不记审核人（撤回不是审核）；已批准的晋升独立于 Memory，保留不动。
 删除 notebook 会级联删除所有成员绑定到它的私有 Memory，因此删除弹窗会提示这一生命周期
 后果，但不会泄露成员身份或数量。
+
+硬删除 Memory（`DELETE /memories/{id}`，或 `POST /memories/bulk-delete`，至多 200 个 id，只计调用者
+本人的记录）会先删掉由它派生的一切：隐藏合成来源及其元素与元素向量，以及从中抽取的 KG 对象、关系、
+来源局部事实、簇成员行、反向索引行与审阅候选，并把该笔记本的图谱标记为待重建。若策展人曾把一个
+Memory 派生对象手工合并进另一个对象，保留下来的对象只失去该 Memory 贡献的证据，绝不会随 Memory
+一起被删。批量删除写一条不含内容的审计事件（笔记本、用户、条数）。
+
+退出共享笔记本会删除退出者本人在该库的记忆，而且只有本人的退出会删。退出前，
+`GET /notebooks/{id}/membership/exit-disclosure` 返回 `{"memory_count": N}`：退出将永久删除的、调用者
+本人在该库的记忆条数（各种状态都算；不是成员、或退出后仍能凭所有者身份或直接/群组/everyone 授权
+读这本库时为 0）。随后 `DELETE /notebooks/{id}/membership` 在 N > 0 时必须带
+`?acknowledged_memory_count=N` 且与服务端条数一致，否则返回 409
+`{"detail": {"code": "exit_disclosure_required", "memory_count": N}}`，什么都不删、仍是成员；N = 0 时
+不需要确认，行为与从前一致。条数在成员行锁下取得，成员关系在同一事务里连同最后一次计数一起结束，
+所以期间新存的记忆绝不会未经确认被删，退出会改为返回带新条数的 409。清理失败返回 503 与中文提示，
+用户仍是成员。确认之前，用户有两种办法留住记忆：`GET /notebooks/{id}/memories/export` 把被计入的
+全部条目下载为 Markdown 文件（`<笔记本>-记忆-<YYYYMMDD>.md`，每条含标题、类型、状态——候选会标出——
+时间、标签、正文与来源说明；每次流式读取 200 条）；`POST /memories/transfer` 把已确认的条目复制或
+移动到本人拥有的笔记本（其他状态不转移）。退出写一条不含内容的审计事件（笔记本、用户、条数）。
+
+别人的任何操作都不会删除成员的记忆：所有者移出成员、移出全部成员、取消共享（同时清空成员名单）、
+撤销授权边、把人移出持有授权的群组，都只是收回访问权。权限常常是临时的，所以记忆保留；无权期间
+任何人（包括创建者本人）都读不到它，权限恢复后创建者立即重新看到。
 
 仓库内固定 Memory 评测计算 Recall@5、MRR、nDCG，以及三项零容忍计数：candidate 进入正式
 平面、跨用户、跨 notebook 泄漏。A/B harness 比较 no-Memory、KB-only 与
