@@ -55,7 +55,7 @@ for (const [label, key, value] of [
 
 test("the handoff marker and unrelated keys never reload", () => {
   const tab = subscribed();
-  otherTabWrites("silicon_notebook_session_handoff", JSON.stringify({ token: "auto-account", expiresAt: 1 }));
+  otherTabWrites("silicon_notebook_session_handoff", JSON.stringify([{ id: "h", token: "auto-account", expiresAt: 1 }]));
   otherTabWrites("some_other_key", "value");
   beginSessionHandoff("auto-account");
   assert.equal(tab.reloads(), 0);

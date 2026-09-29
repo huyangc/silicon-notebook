@@ -173,7 +173,7 @@ test("a 401 for a token that was replaced in flight keeps the new session", asyn
 
 test("another tab's handoff keeps this tab's 401 from logging the shared session out", async () => {
   setToken("auto-account");
-  migratingTab.beginSessionHandoff("auto-account");
+  const handoff = migratingTab.beginSessionHandoff("auto-account");
   globalThis.fetch = async () => new Response(null, { status: 401 });
   const response = await performApiRequest("/reports", { tag: "report" });
   assert.equal(response.status, 401);
@@ -181,7 +181,7 @@ test("another tab's handoff keeps this tab's 401 from logging the shared session
   assert.equal(getToken(), "auto-account");
   assert.equal(reloads, 0);
 
-  migratingTab.endSessionHandoff("auto-account");
+  migratingTab.endSessionHandoff(handoff);
   await performApiRequest("/reports", { tag: "report" });
   assert.equal(getToken(), "");
   assert.equal(reloads, 1);
@@ -223,13 +223,19 @@ test("a handed-over token replaced in flight keeps the new session", async () =>
   assert.equal(reloads, 0);
 });
 
-test("ending a handoff removes only the marker that belongs to that token", () => {
-  setToken("second-account");
-  migratingTab.beginSessionHandoff("second-account");
-  migratingTab.endSessionHandoff("first-account");
-  assert.equal(migratingTab.sessionHandoffActive("second-account"), true);
-  migratingTab.endSessionHandoff("second-account");
-  assert.equal(migratingTab.sessionHandoffActive("second-account"), false);
+test("ending a handoff retires only that request, not a concurrent one for the same token", async () => {
+  setToken("auto-account");
+  const failedTab = migratingTab.beginSessionHandoff("auto-account");
+  const pendingTab = migratingTab.beginSessionHandoff("auto-account");
+  assert.notEqual(failedTab, pendingTab);
+  migratingTab.endSessionHandoff(failedTab);
+  assert.equal(migratingTab.sessionHandoffActive("auto-account"), true);
+  globalThis.fetch = async () => new Response(null, { status: 401 });
+  await performApiRequest("/reports", { tag: "report" });
+  assert.equal(getToken(), "auto-account");
+  assert.equal(reloads, 0);
+  migratingTab.endSessionHandoff(pendingTab);
+  assert.equal(migratingTab.sessionHandoffActive("auto-account"), false);
 });
 
 test("an explicit sign-out in any tab clears the handoff with the token", () => {
