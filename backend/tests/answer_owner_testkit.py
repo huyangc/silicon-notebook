@@ -12,6 +12,8 @@ SQLite suites and the PostgreSQL twins.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from app.models.schemas import AskResponse
 
 
@@ -110,3 +112,50 @@ def seed_ownership_matrix(repo):
     )
     ns.nocreator_answer = creatorless_conversation_answer(repo, notebook.id)
     return ns
+
+
+class _Recorder:
+    """A connection proxy that records every statement sent through it."""
+
+    def __init__(self, connection, seen: list) -> None:
+        self._connection = connection
+        self._seen = seen
+
+    def execute(self, sql, params=()):
+        self._seen.append((str(sql), tuple(params)))
+        return self._connection.execute(sql, params)
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+
+@contextmanager
+def capture_statements(database):
+    """Record the ``(sql, params)`` of every ``database.connect()`` statement
+    issued inside the block (reads only: ``write()`` is not intercepted)."""
+    seen: list = []
+    real_connect = database.connect
+
+    @contextmanager
+    def connect(*args, **kwargs):
+        with real_connect(*args, **kwargs) as connection:
+            yield _Recorder(connection, seen)
+
+    database.connect = connect
+    try:
+        yield seen
+    finally:
+        del database.connect
+
+
+def refusal_cases(ns):
+    """(answer_id, user_id) pairs that must all be refused, one per kind."""
+    return (
+        ("another member's answer", ns.bob_answer, ns.alice.id),
+        ("no conversation", ns.creatorless_answer, ns.alice.id),
+        ("conversation without a creator", ns.nocreator_answer, ns.bob.id),
+        ("unknown id", "ans-does-not-exist", ns.alice.id),
+        ("empty user, someone's answer", ns.bob_answer, ""),
+        ("empty user, no conversation", ns.creatorless_answer, ""),
+        ("empty user, conversation without a creator", ns.nocreator_answer, ""),
+    )

@@ -806,10 +806,14 @@ class MemoryStore:
                     raise KeyError(write.source_answer_id)
                 row = db.execute(
                     "SELECT a.question,a.payload,a.conversation_id FROM answers a "
-                    "WHERE a.id=%s AND a.notebook_id=%s FOR SHARE OF a",
+                    # the author, re-checked in this transaction like read access
+                    "JOIN conversations c ON c.id=a.conversation_id "
+                    "WHERE a.id=%s AND a.notebook_id=%s AND c.created_by=%s "
+                    "FOR SHARE OF a",
                     (
                         write.source_answer_id,
                         write.notebook_id,
+                        write.created_by,
                     ),
                 ).fetchone()
                 if row is None:
@@ -850,11 +854,13 @@ class MemoryStore:
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT 1 FROM answers a JOIN notebooks n ON n.id=a.notebook_id "
-                "WHERE a.id=%s AND a.notebook_id=%s AND "
+                "JOIN conversations c ON c.id=a.conversation_id "
+                "WHERE a.id=%s AND a.notebook_id=%s AND c.created_by=%s AND "
                 + read_access_clause("n", "nm"),
                 (
                     write.source_answer_id,
                     write.notebook_id,
+                    write.created_by,
                     *read_access_params(write.created_by),
                 ),
             ).fetchone()
