@@ -42,9 +42,11 @@ notebook's Memory/Knowhow count (``memory_source_ids`` +
 access check).  A filtered read then builds, lazily and at most once per
 request: the readable set (one visible-universe read) for evidence items, and
 — only for concept detail and neighbours — the set of objects OWNED by an
-unreadable hidden source (one ``source_id``-indexed read per such source,
-the one term that still scales with the number of Memory sources; see
-``owned_hidden``) folded to clusters in batches of 900.  Everything else is
+unreadable hidden source (ONE statement whatever the number of such sources,
+``relink_object_rows_for_source(source_ids=...)``), folded to clusters in
+batches of 900 object ids.  Neighbours then read the first members of every
+partly hidden cluster of the response in one batched statement
+(``concept_cluster_detail_rows(canonical_ids=...)``).  Everything else is
 decided on the rows the response already carries.
 """
 from __future__ import annotations
@@ -134,17 +136,14 @@ class KgViewerScope:
         knowledge = reader.knowledge
         notebook_id = self.notebook_id
         with reader.connect() as db:
-            owned: set = set()
-            # One ``(notebook_id, source_id)``-indexed read per unreadable
-            # source; no set-valued store read of objects by owner exists yet.
-            for source_id in sorted(self.foreign):
-                owned.update(
-                    str(row["id"])
-                    for row in knowledge.relink_object_rows_for_source(
-                        db, notebook_id, source_id
-                    )
+            # ONE statement for every unreadable source (the ids travel as one
+            # array / JSON parameter), then the folds in batches of 900 ids.
+            ordered = sorted({
+                str(row["id"])
+                for row in knowledge.relink_object_rows_for_source(
+                    db, notebook_id, source_ids=sorted(self.foreign)
                 )
-            ordered = sorted(owned)
+            })
             per_canonical: Counter = Counter()
             for start in range(0, len(ordered), _ID_BATCH):
                 for row in reader.unified_kg.cluster_fold_rows(
@@ -215,6 +214,33 @@ class KgViewerScope:
                 after = str(rows[-1]["member_object_id"])
                 window *= 2
 
+    def _first_visible_members(
+        self, canonical_ids: List[str],
+    ) -> Dict[str, Optional[Dict[str, Any]]]:
+        """``visible_member`` for many clusters with ONE batched read: the
+        first ``max(owned) + 1`` members of every listed cluster (so at most
+        ``len(canonical_ids) × (max owned + 1)`` rows). A cluster whose window
+        is full yet holds nothing visible (members hidden by the evidence half
+        alone) falls back to ``visible_member``'s widening scan."""
+        if not canonical_ids:
+            return {}
+        window = max(self.owned_member_count(cid) for cid in canonical_ids) + 1
+        with self._reader.connect() as db:
+            rows, _unused = self._reader.knowledge.concept_cluster_detail_rows(
+                db, self.notebook_id, "", limit=window, canonical_ids=canonical_ids,
+            )
+        by_cluster: Dict[str, list] = {cid: [] for cid in canonical_ids}
+        for row in rows:
+            by_cluster.setdefault(str(row["canonical_id"]), []).append(row)
+        found: Dict[str, Optional[Dict[str, Any]]] = {}
+        for cid in canonical_ids:
+            members = by_cluster.get(cid, [])
+            visible = next((r for r in members if not self.member_hidden(r)), None)
+            if visible is None and len(members) >= window:
+                visible = self.visible_member(cid)
+            found[cid] = visible
+        return found
+
     def cluster_display_name(self, canonical_id: str, name: str) -> str:
         """A cluster that has owned-hidden members is labelled with its first
         visible member's name (the stored ``canonical_name`` and the label the
@@ -239,10 +265,9 @@ class KgViewerScope:
         hidden_raw = self.objects_hidden(ids)
         labels: Dict[str, str] = {}
         hidden_clusters: set = set()
-        for node_id in dict.fromkeys(ids):
-            if not self.owned_member_count(node_id):
-                continue
-            row = self.visible_member(node_id)
+        for node_id, row in self._first_visible_members(
+            [i for i in dict.fromkeys(ids) if self.owned_member_count(i)]
+        ).items():
             if row is None:
                 hidden_clusters.add(node_id)
             else:

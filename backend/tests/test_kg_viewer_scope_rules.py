@@ -288,25 +288,24 @@ def _count_statements(repo, monkeypatch):
     return statements
 
 
-def _foreign_memories(repo, s, count):
+def _foreign_memories(repo, s, count, *, offset=0):
     """``count`` extra Memory sources of A, each owning one concept of its
     own (outside the probed clusters)."""
+    names = [f"{j:03d}" for j in range(offset, offset + count)]
     with repo._write() as db:
-        for j in range(count):
-            _memory(db, s.nb, f"mem-x{j:03d}", s.a.id)
-            _source(db, s.nb, f"src-x{j:03d}", memory_id=f"mem-x{j:03d}",
-                    elements=[(f"el-x{j:03d}", f"X{j}")])
-    for j in range(count):
-        repo.store_kg(s.nb, f"src-x{j:03d}", [{
+        for j in names:
+            _memory(db, s.nb, f"mem-x{j}", s.a.id)
+            _source(db, s.nb, f"src-x{j}", memory_id=f"mem-x{j}",
+                    elements=[(f"el-x{j}", f"X{j}")])
+    for j in names:
+        repo.store_kg(s.nb, f"src-x{j}", [{
             "local_id": "c", "object_type": "concept",
             "payload": {"name": f"Private topic {j}", "section_path": "1"},
-            "evidence": [_ev(f"src-x{j:03d}", f"el-x{j:03d}")]}], [])
+            "evidence": [_ev(f"src-x{j}", f"el-x{j}")]}], [])
     repo.rebuild_unified_kg(s.nb)
 
 
-def _endpoint_counts(repo, monkeypatch, foreign_count):
-    s = build_scenario(repo, b_memory=False)
-    _foreign_memories(repo, s, foreign_count)
+def _endpoint_counts(repo, monkeypatch, s):
     statements = _count_statements(repo, monkeypatch)
     counts = {}
     for name, fn, args in (
@@ -317,22 +316,111 @@ def _endpoint_counts(repo, monkeypatch, foreign_count):
         statements.clear()
         as_user(s.b, fn, *args)
         counts[name] = len(statements)
+    monkeypatch.undo()
     return counts
 
 
-@pytest.mark.parametrize("foreign_count", [30, 300])
-def test_statement_count_scales_only_with_the_owned_object_read(
-    repo, monkeypatch, foreign_count,
+def test_statement_count_is_constant_in_the_number_of_unreadable_sources(
+    repo, monkeypatch,
 ):
-    """Object context is flat in the number of foreign Memory sources. Concept
-    detail and neighbours are flat apart from ONE term: the per-source
-    ``relink_object_rows_for_source`` read that builds the owned-object set
-    (one statement per unreadable hidden source, index-seeked), which a
-    set-valued store read would collapse to one. Everything else — no
-    ``source_index_backfilled``, no reverse index, no per-cluster COUNT — is a
-    constant (1 foreign source of the base scenario + ``foreign_count``)."""
-    counts = _endpoint_counts(repo, monkeypatch, foreign_count)
-    unreadable = 1 + foreign_count
-    assert counts["context"] <= 30, counts
-    assert counts["concept"] - unreadable <= 30, counts
-    assert counts["neighbors"] - unreadable <= 40, counts
+    """Each endpoint issues the same number of statements with 31 and with 301
+    unreadable Memory sources: the owned-object set is ONE statement
+    (``relink_object_rows_for_source(source_ids=...)``), partly hidden
+    clusters of a neighbourhood are read in ONE batched statement, and nothing
+    reads ``source_index_backfilled``, the reverse index or a per-cluster
+    COUNT. (The owned objects here stay under one 900-id fold batch.)"""
+    s = build_scenario(repo, b_memory=False)
+    _foreign_memories(repo, s, 30)
+    few = _endpoint_counts(repo, monkeypatch, s)
+    _foreign_memories(repo, s, 270, offset=30)
+    many = _endpoint_counts(repo, monkeypatch, s)
+    assert few == many, (few, many)
+    assert few["context"] <= 30 and few["concept"] <= 30 and few["neighbors"] <= 40, few
+
+
+def test_owned_object_read_seeks_the_source_index(repo):
+    """The set-valued owner read is driven by the id list: SQLite seeks the
+    source index once per listed id instead of scanning the notebook. The
+    statement pinned is the one the store actually issues."""
+    s = build_scenario(repo, b_memory=False)
+    statements = []
+    with repo._runtime.database.connect() as db:
+        db.set_trace_callback(statements.append)
+        repo._runtime.knowledge.relink_object_rows_for_source(
+            db, s.nb, source_ids=["src-ma", "src-mb"])
+        db.set_trace_callback(None)
+        assert len(statements) == 1, statements
+        plan = " | ".join(
+            str(tuple(row)) for row in
+            db.execute("EXPLAIN QUERY PLAN " + statements[0]).fetchall()
+        )
+    assert "idx_knowledge_objects_source (source_id=?)" in plan, plan
+    assert "SCAN knowledge_objects" not in plan, plan
+    assert "idx_knowledge_objects_nb_updated" not in plan, plan
+
+
+def test_set_valued_store_reads(repo):
+    """``source_ids=`` / ``canonical_ids=``: owned live objects only, an empty
+    list issues no statement, and each cluster is cut to ``limit`` rows."""
+    s = build_scenario(repo, b_memory=False)
+    knowledge = repo._runtime.knowledge
+    with repo._write() as db:
+        db.execute("UPDATE knowledge_objects SET status='deprecated' WHERE id=?",
+                   (s.ids.definer_ma,))
+    with repo._runtime.database.connect() as db:
+        owned = {r["id"] for r in knowledge.relink_object_rows_for_source(
+            db, s.nb, source_ids=["src-ma", "src-none"])}
+        statements = []
+        db.set_trace_callback(statements.append)
+        assert knowledge.relink_object_rows_for_source(db, s.nb, source_ids=[]) == []
+        assert knowledge.concept_cluster_detail_rows(
+            db, s.nb, "", limit=1, canonical_ids=[]) == ([], "")
+        db.set_trace_callback(None)
+        assert statements == []
+        rows, name = knowledge.concept_cluster_detail_rows(
+            db, s.nb, "", limit=1,
+            canonical_ids=[s.ids.engram_canonical, s.ids.secret_canonical])
+    assert owned == {s.ids.engram_ma, s.ids.secret}
+    assert name == ""
+    by_cluster = {}
+    for row in rows:
+        by_cluster.setdefault(row["canonical_id"], []).append(row["member_object_id"])
+    assert by_cluster == {
+        s.ids.engram_canonical: [min(s.ids.engram_s, s.ids.engram_ma)],
+        s.ids.secret_canonical: [s.ids.secret],
+    }
+
+
+def _mixed_neighbour_clusters(repo, s, names):
+    """Concepts linked to the visible Engram, each clustering a visible member
+    with a member owned by A's Memory (partly hidden clusters)."""
+    repo.store_kg(s.nb, "src-s", [
+        {"local_id": "hub", "object_type": "concept",
+         "payload": {"name": "Engram", "section_path": "1"},
+         "evidence": [_ev("src-s", "el-s-occ")]}] + [
+        {"local_id": n, "object_type": "concept",
+         "payload": {"name": n, "section_path": "1"},
+         "evidence": [_ev("src-s", "el-s-def")]} for n in names],
+        [{"source_local_id": n, "target_local_id": "hub", "edge_type": "about",
+          "evidence": []} for n in names])
+    repo.store_kg(s.nb, "src-ma", [
+        {"local_id": n, "object_type": "concept",
+         "payload": {"name": n, "section_path": "A-PRIVATE"},
+         "evidence": [_ev("src-ma", "el-ma-occ")]} for n in names], [])
+    repo.rebuild_unified_kg(s.nb)
+
+
+def test_partly_hidden_clusters_are_read_in_one_batch(repo, monkeypatch):
+    """Neighbour hydration probes every partly hidden cluster of the
+    response with ONE batched read: the statement count does not grow with
+    the number of such clusters."""
+    s = build_scenario(repo, b_memory=False)
+    _mixed_neighbour_clusters(repo, s, [f"Mixed{i}" for i in range(2)])
+    few = _endpoint_counts(repo, monkeypatch, s)["neighbors"]
+    _mixed_neighbour_clusters(repo, s, [f"Mixed{i}" for i in range(2, 8)])
+    view = as_user(s.b, repo.kg_neighbors, s.nb, s.ids.engram_s)
+    labels = sorted(n["payload"]["name"] for n in view["nodes"]
+                    if n["payload"]["name"].startswith("Mixed"))
+    assert labels == [f"Mixed{i}" for i in range(8)], view
+    many = _endpoint_counts(repo, monkeypatch, s)["neighbors"]
+    assert few == many, (few, many)

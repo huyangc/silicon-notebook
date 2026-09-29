@@ -82,16 +82,20 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "staged 发布即整体作废全部派生 KG;communities 两表走动态表名清单)"),
     "backend/app/repositories/sqlite/kg_build_job_store.py": (1, 0, 0, 0, 0,
         "PG 孪生同注记"),
-    "backend/app/repositories/postgres/knowledge_store.py": (14, 0, 0, 8, 0,
-        "A×6 已配谓词(node_context 无天花板/有天花板两条簇查询、簇详情三查询、"
+    "backend/app/repositories/postgres/knowledge_store.py": (15, 0, 0, 9, 0,
+        "A×7 已配谓词(node_context 无天花板/有天花板两条簇查询、簇详情三查询、"
+        "PR-A·A5 的多簇首成员读 concept_cluster_detail_rows(canonical_ids=) 的"
+        "LATERAL 一处、"
         "邻接同簇探针);PR-A·A1 的 Q1 严格谓词:成员来源片段"
         "(_cluster_member_sources,两支各一处 concept_clusters m)与「归因不到"
         "来源的成员」子查询 concept_clusters u 都用 generation=cc.generation "
         "相关对齐(零新参数,不计入谓词计数,同 query_store 注记);来源多于探针"
         "上限时的回退语句复用同一片段,代次以绑定参数出现(取自已配谓词的那一行);"
         "其余 C:drain/终局 blanket 与 per-source 清理(跨代豁免:删源必须跨代删)"),
-    "backend/app/repositories/sqlite/knowledge_store.py": (14, 0, 0, 8, 0,
-        "PG 孪生同注记"),
+    "backend/app/repositories/sqlite/knowledge_store.py": (16, 0, 0, 9, 0,
+        "PG 孪生同注记;多簇首成员读在 SQLite 没有 LATERAL,改用相关 LIMIT 子查询"
+        "(外层 JOIN concept_clusters cc 按 rowid 取回 + 内层 FROM concept_clusters "
+        "cc2 带谓词),所以出现数比 PG 多一处、谓词同样只多一处"),
     "backend/app/repositories/postgres/query_store.py": (1, 0, 0, 1, 0,
         "A:top_concept_names 外层谓词;内层整簇排除的 NOT EXISTS 已搬进 "
         "memory_sql.no_memory_member_cluster(见下条),本文件只剩外层这一处读"),

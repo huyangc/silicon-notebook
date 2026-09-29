@@ -2318,7 +2318,8 @@ class KnowledgeStorePort(Protocol):
     def relink_orphan_source_ids(db: object, notebook_id: str) -> list[Any]: ...
     @staticmethod
     def relink_object_rows_for_source(
-        db: object, notebook_id: str, source_id: str
+        db: object, notebook_id: str, source_id: str = "",
+        *, source_ids: Sequence[str] | None = None,
     ) -> list[Any]: ...
     @staticmethod
     def relink_relation_rows_for_objects(

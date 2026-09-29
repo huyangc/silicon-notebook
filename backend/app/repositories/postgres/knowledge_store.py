@@ -1211,7 +1211,13 @@ class KnowledgeStore:
         ).fetchall()
 
     @staticmethod
-    def relink_object_rows_for_source(db: Any, notebook_id: str, source_id: str):
+    def relink_object_rows_for_source(
+        db: Any,
+        notebook_id: str,
+        source_id: str = "",
+        *,
+        source_ids: Optional[Sequence[str]] = None,
+    ):
         """Every non-deprecated object of ONE source, in insertion (ordinal) order.
 
         ``ordinal`` is the reviewed PostgreSQL counterpart of SQLite's ``rowid``
@@ -1221,7 +1227,27 @@ class KnowledgeStore:
         reproduction of the historical order — see the SQLite twin for why the old
         unordered query's de facto ``updated_at`` order was a planner accident and
         what the registered consequence is.
+
+        ``source_ids`` (PR-A·A5, the KG viewer scope): the live objects OWNED by
+        any of those sources, ``id`` only, in ONE statement; ``source_id`` is then
+        ignored and an empty list issues no query. The list is one array
+        parameter and the statement runs unprepared (``prepare=False``): psycopg
+        prepares a query text at its fifth execution and PostgreSQL may then pick
+        a generic plan that mis-estimates the array (the ceiling-binding ledger
+        of this round measured it). The id list is the only bound collection, so
+        the statement switches to the shared ``id_binding`` helpers mechanically.
         """
+        if source_ids is not None:
+            values = sorted({str(value) for value in source_ids if value})
+            if not values:
+                return []
+            return db.execute(
+                "SELECT id FROM knowledge_objects "
+                "WHERE notebook_id = %s AND source_id = ANY(%s) "
+                "AND status != 'deprecated' ORDER BY ordinal",
+                (notebook_id, values),
+                prepare=False,
+            ).fetchall()
         return _compat_rows(
             db.execute(
                 "SELECT id, object_type, payload, evidence FROM knowledge_objects "
@@ -4034,6 +4060,7 @@ class KnowledgeStore:
         *,
         limit: Optional[int] = None,
         after: str = "",
+        canonical_ids: Optional[Sequence[str]] = None,
     ) -> "tuple[List[dict], str]":
         """Cluster member rows (joined onto live knowledge_objects) plus the
         canonical name for one concept cluster. Keyset-paginated by
@@ -4068,7 +4095,38 @@ class KnowledgeStore:
         it can start returning members (measured: 200,603 rows / 104ms for a
         mid-page cursor). With the redundant predicate the planner has a
         seek condition on ``ko.id`` too and starts the scan at the cursor
-        (603 rows / 2.2ms for the same page)."""
+        (603 rows / 2.2ms for the same page).
+
+        ``canonical_ids`` (PR-A·A5, KG viewer scope): the first ``limit`` live
+        members (member-id order) of EACH listed cluster in ONE statement,
+        rows carrying ``canonical_id``; ``canonical_id``/``after`` are then
+        ignored, the name is not read (``""``), and an empty list issues no
+        query. A LATERAL seek per cluster on the (notebook, canonical, member)
+        index keeps a hub cluster at ``limit`` rows. The id list is one array
+        parameter run unprepared (same reason as
+        ``relink_object_rows_for_source``) and is the only bound collection, so
+        the statement switches to the shared ``id_binding`` helpers
+        mechanically."""
+        if canonical_ids is not None:
+            values = sorted({str(value) for value in canonical_ids if value})
+            if not values or not limit:
+                return [], ""
+            rows = db.execute(
+                "SELECT c.cid AS canonical_id, m.member_object_id, m.canonical_name, "
+                "m.object_type, m.payload, m.evidence "
+                "FROM unnest(%s::text[]) AS c(cid) CROSS JOIN LATERAL ("
+                "SELECT cc.member_object_id, cc.canonical_name, ko.object_type, "
+                "ko.payload, ko.evidence FROM concept_clusters cc "
+                "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
+                "WHERE cc.notebook_id=%s AND cc.canonical_id=c.cid "
+                "AND ko.status!='deprecated' "
+                f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN} "
+                'ORDER BY cc.member_object_id COLLATE "C" LIMIT %s) m '
+                'ORDER BY c.cid COLLATE "C", m.member_object_id COLLATE "C"',
+                (values, notebook_id, notebook_id, int(limit)),
+                prepare=False,
+            ).fetchall()
+            return _compat_rows(rows, payload=True, evidence=True), ""
         query = (
             "SELECT cc.member_object_id, cc.canonical_name, ko.object_type, ko.payload, ko.evidence "
             "FROM concept_clusters cc "
