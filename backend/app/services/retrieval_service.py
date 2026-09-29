@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+from app.services.evidence_attestation import DEAD, attest_pointers
 from app.services.retrieval import NeighborExpansion
 from app.services.source_scope import (
     filter_retrieval_items,
@@ -638,10 +639,14 @@ def attest_chain_evidence(inferences: list) -> list:
     locator: the relation still renders, but its anchor no longer names a row
     that opens on nothing and is judged at source level only (J3). Returns the
     input list itself when nothing was dead, which includes every call outside
-    a global run (the seam answers ``{}`` there).
-    """
-    from app.services.evidence_attestation import DEAD, attest_pointers
+    a global run (the seam answers ``{}`` there). The input chains, hops and
+    evidence entries are never modified: a hop with a dead primary is copied.
 
+    Lives beside ``RetrievalService.follow_chain`` rather than in
+    ``kg.follow_chain``: that module is the pure, storage-free composer and
+    renderer, while this spends a bounded store read through the run's seat,
+    exactly like the ceiling filter on chains above.
+    """
     states = attest_pointers(FOLLOW_CHAIN_PRODUCER, (
         str(hop.primary_evidence.get("element_id") or "")
         for chain in inferences for hop in chain.hops
@@ -650,16 +655,16 @@ def attest_chain_evidence(inferences: list) -> list:
         return inferences
     return [
         replace(chain, hops=tuple(
-            _hop_without_dead_primary(hop, states, DEAD) for hop in chain.hops
+            _hop_without_dead_primary(hop, states) for hop in chain.hops
         ))
         for chain in inferences
     ]
 
 
-def _hop_without_dead_primary(hop, states: dict, dead: str):
-    """``hop`` with its dead primary evidence entry's element id cleared."""
+def _hop_without_dead_primary(hop, states: dict):
+    """A copy of ``hop`` with its dead primary entry's element id cleared."""
     primary = hop.primary_evidence
-    if states.get(str(primary.get("element_id") or "")) != dead:
+    if states.get(str(primary.get("element_id") or "")) != DEAD:
         return hop
     return replace(hop, evidence=[
         {**entry, "element_id": ""} if entry is primary else entry

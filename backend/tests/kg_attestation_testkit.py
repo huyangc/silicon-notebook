@@ -89,6 +89,11 @@ def mutate(database, marker: str, mutation: str) -> None:
                     + ",".join(marker for _ in range(6)) + ")",
                     (CITED, SOURCE, "paragraph", "p0", TEXTS[CITED], NOW),
                 )
+        elif mutation == "update_other":
+            db.execute(
+                f"UPDATE source_elements SET text={marker} WHERE id={marker}",
+                (TEXTS[OTHER] + "（修订）", OTHER),
+            )
 
 
 class CountingReader:
@@ -433,6 +438,42 @@ def kg_one_read_per_call(sources, database, marker, notebook_id, *, hits=30):
     )]
 
 
+#: mutation -> the anchor's verdict when the object has two occurrences and
+#: its anchor names the FIRST (``CITED``); ``update_other`` edits the second.
+MULTI_OCCURRENCE_EXPECTATIONS = {
+    "none": None,
+    "update": "changed",
+    "update_other": None,
+}
+
+
+def kg_registers_the_occurrence_it_writes(sources, database, marker, notebook_id,
+                                          mutation):
+    """An object with several occurrences from different elements: the ONE
+    element registered is exactly the one written to ``evidence_by_id`` (the
+    anchor's), so an edit of that element is detected and an edit of another
+    occurrence's element is not reported on this anchor. ``knowledge_context``
+    runs alone here, so nothing else can have registered the anchor's element."""
+    seed(database, marker, notebook_id)
+    hit = kg_hit("ko-1", CITED, notebook_id)
+    service = evidence_service(sources, notebook_id, Knowledge({
+        "ko-1": [occurrence(CITED), occurrence(OTHER)],
+    }))
+    with global_run(sources, notebook_id) as run:
+        _block, id_map = service.knowledge_context(notebook_id, [hit])
+    anchors = service.parse_anchors("结论 [k1]", id_map)
+    assert id_map["k1"]["element_id"] == CITED
+    assert run.reader.reads == [(CITED,)]
+    assert set(run.state.evidence_snapshot()) == {CITED}
+    _assert_full_text_snapshot(run, CITED)
+    mutate(database, marker, mutation)
+    response = terminal_check(sources, run, notebook_id, anchors=anchors)
+    assert [a.element_id for a in response.anchors] == [CITED]
+    assert [_verification(a) for a in response.anchors] == [
+        MULTI_OCCURRENCE_EXPECTATIONS[mutation],
+    ]
+
+
 def chain_race(sources, database, marker, notebook_id, mutation):
     """D6: both hops of a derived chain become anchors; hop 1 cites ``CITED``."""
     seed(database, marker, notebook_id)
@@ -462,6 +503,31 @@ def chain_dangling_pointer_is_not_minted(sources, database, marker, notebook_id)
     assert DANGLING not in run.state.evidence_snapshot()
     response = terminal_check(sources, run, notebook_id, anchors=anchors)
     assert [_verification(a) for a in response.anchors] == [None, None]
+
+
+def chain_registration_never_mutates_its_input(sources, database, marker, notebook_id):
+    """The chains handed to ``attest_chain_evidence`` are shared structures
+    (the retrieval port's result): a dead primary is cleared on a COPY, the
+    input chains, hops and evidence entries compare equal to a deep copy
+    taken before the call, and with nothing dead the very same list object
+    comes back."""
+    import copy
+
+    seed(database, marker, notebook_id)
+    with global_run(sources, notebook_id):
+        dead = chain_result(notebook_id, (DANGLING, OTHER))
+        given = dead.inferences
+        before = copy.deepcopy(given)
+        attested = follow_chain_via_reasoning(dead).inferences
+        live = chain_result(notebook_id, (CITED, OTHER))
+        live_given = live.inferences
+        live_attested = follow_chain_via_reasoning(live).inferences
+    assert given == before
+    assert given[0].hops[0].evidence[0]["element_id"] == DANGLING
+    assert attested is not given
+    assert attested[0].hops[0].evidence[0]["element_id"] == ""
+    assert attested[0].hops[1] is given[0].hops[1]
+    assert live_attested is live_given
 
 
 def collection_race(sources, database, marker, notebook_id, mutation):
