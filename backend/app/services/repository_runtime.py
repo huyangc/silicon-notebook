@@ -2401,6 +2401,35 @@ class RepositoryRuntime:
         except Exception:
             pass
 
+    def ceiling_readers(self):
+        """THE production ``CeilingReaders`` for ``default_ceiling_context``.
+
+        The one place the four store reads behind a default retrieval ceiling
+        are bound, so every entry point that installs one (the report worker,
+        MCP ``ask_notebook``, the Ask service and its route prechecks) freezes
+        from the same reads: the participant set (``mount_sql.py``), ONE
+        library's visible sources, the raw owner-scoped hidden half, and the
+        notebook's Memory source ids.  ``memory_source_ids`` takes the caller's
+        connection, so it is bound here as a closure that opens one per call;
+        the constructor reads it only while the Memory channel is closed.
+        Building it does no I/O (four bound methods)."""
+        from app.services.source_scope import CeilingReaders
+
+        database = self.database
+        sources = self.source_store
+
+        def memory_sources(notebook_id: str) -> list[str]:
+            with database.connect() as db:
+                return sources.memory_source_ids(db, notebook_id)
+
+        return CeilingReaders(
+            participants=self.notebook_store.participant_notebook_ids,
+            visible=sources.all_visible_source_ids,
+            hidden=sources.hidden_source_ids,
+            memory_sources=memory_sources,
+            emit=self.event_log.emit,
+        )
+
     def wire_report_execution(
         self,
         *,
@@ -2471,6 +2500,7 @@ class RepositoryRuntime:
                 memory_retriever=self.memory_retriever,
                 corpus_profile=ReportCorpusProfileService(self.source_store),
                 generation_gate=generation_gate,
+                ceiling_readers=self.ceiling_readers(),
                 # Agentic Memory P1:逐节深挖的理解注入(§5.2)。报告侧没有任何
                 # 自动贯通的路,必须在这里显式填座位。
                 agent_profile=self.agent_profile,
@@ -2498,6 +2528,7 @@ class RepositoryRuntime:
             engine_factory=engine_factory,
             cancellations=self.report_cancellations,
             job_submitter=job_submitter,
+            ceiling_readers=self.ceiling_readers(),
             after_completed=self._after_report_completed,
         )
         return self.report_execution

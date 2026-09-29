@@ -18,6 +18,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -708,6 +709,12 @@ class ReportEngineDependencies:
     # ⚠ 与 P1 那个座位不同,这里没有对应的 owner 字段:打法库没有任何租户维度,
     # 一条打法不属于任何人,所以「报告创建者是谁」对它不是一个有意义的问题。
     retrieval_experiences: Any = None
+    # ``RepositoryRuntime.ceiling_readers()``: the reads ``run`` needs to
+    # re-install a refreshed scope freeze inside the worker's default ceiling
+    # (``refreshed_ceiling_context``).  None only in direct engine tests that
+    # never reach the auto-confirm refresh; reaching it without readers fails
+    # the report instead of planning unscoped.
+    ceiling_readers: Any = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.memory_sources, MemorySourceReader):
@@ -3506,6 +3513,42 @@ class ReportEngine:
             pass
         return None
 
+    def _refreshed_ceiling(self, notebook_id, rid, refreshed_scope,
+                           refreshed_base_scope) -> ExitStack | None:
+        """Enter the auto-confirm refresh's scope; None when the report failed.
+
+        ``refreshed_ceiling_context`` runs INSIDE the default ceiling the
+        worker installed (``ReportExecutionCoordinator._default_ceiling``) and
+        is handed exactly the dimensions the re-validation refreshed -- a
+        ``None`` one was never persisted, so the worker's freeze of it stands.
+        The outer per-library ceilings and ``ceilings_total`` are inherited.
+        A reader failure (or no readers wired) fails the report; a stop
+        cancels it.  Neither falls back to planning without a ceiling.
+        """
+        from app.services.source_scope import refreshed_ceiling_context
+
+        reports = self.dependencies.reports
+        stack = ExitStack()
+        try:
+            readers = self.dependencies.ceiling_readers
+            if readers is None:
+                raise RuntimeError("report scope refresh has no ceiling readers")
+            stack.enter_context(refreshed_ceiling_context(
+                notebook_id, self.user_id, readers,
+                local_scope=refreshed_scope, base_scope=refreshed_base_scope,
+                cancel_event=self.cancel_event,
+            ))
+        except AskCancelled:
+            reports.update_report(
+                notebook_id, rid, status="cancelled", progress="已取消"
+            )
+            return None
+        except Exception as exc:
+            reports.update_report(notebook_id, rid, status="failed",
+                                  error=str(exc)[:500], progress="规划失败")
+            return None
+        return stack
+
     # --- 编排:规划(→outline_ready)+(auto_generate 时)生成,保留一键直出 ---
     def run(self, notebook_id, rid, question, history="", depth: int = 2,
             auto_generate: bool = False, intent_contract=None,
@@ -3535,11 +3578,12 @@ class ReportEngine:
                 # 重验刷新过冻结范围:镜像人工确认端点的重新拉起——后续规划/生成
                 # 在**刷新后**的范围上下文里跑,而不是创建时进 worker 的旧上下文
                 # (codex R4 P2)。对象态保留隐藏参与者快照,与 launch_kwargs 同义。
-                from app.services.source_scope import source_scope_context
-
-                with source_scope_context(
-                    notebook_id, refreshed_scope, refreshed_base_scope
-                ):
+                ceiling = self._refreshed_ceiling(
+                    notebook_id, rid, refreshed_scope, refreshed_base_scope
+                )
+                if ceiling is None:
+                    return None
+                with ceiling:
                     self.plan_outline(
                         notebook_id, rid, question, history,
                         intent_contract=intent_contract,
