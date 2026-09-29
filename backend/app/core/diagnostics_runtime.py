@@ -50,6 +50,8 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("checkup",),
     ("memories",),
     ("memories", "from-answer"),
+    # 记忆导出(退出共享前的下载):两段都是字面量,整条路径原样进诊断快照。
+    ("memories", "export"),
     ("answer-memory-links",),
     ("sources",),
     ("sources", "import"),
@@ -99,6 +101,8 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("mounted-by-count",),
     ("share",),
     ("membership",),
+    # 退出前告知(将删除的记忆条数):字面量第二段,原样进诊断快照。
+    ("membership", "exit-disclosure"),
     # Agentic Memory P1(T6)。第二段是固定字面量,label 走 None 打 {id},scope
     # 只在查询串/请求体里,所以整条路径可以原样进诊断快照。⚠️ 顺序敏感(同上面
     # knowhow history/diff 的注释):字面末段 "rebuild" 必须排在通配 None 末段
