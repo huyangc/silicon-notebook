@@ -2233,3 +2233,43 @@ class MemoryStore:
             (notebook_id,),
         ).fetchone()
         return int(row["n"])
+
+    @staticmethod
+    def memory_ids_for_source_ids_sql() -> str:
+        """SQLite mirror of the PostgreSQL statement; see its docstring there.
+
+        Two scalar parameters: the id list as ONE JSON array text, and the owner.
+        ``json_each`` feeds a primary-key probe of ``sources`` per id, so a
+        citation list of hundreds stays one bound variable (never near the
+        32,766-variable limit) and one index probe per id.
+        """
+        from app.repositories.sqlite import memory_sql
+
+        return (
+            "SELECT DISTINCT s.memory_id AS memory_id "
+            "FROM json_each(?) AS wanted "
+            "JOIN sources s ON s.id = wanted.value "
+            f"WHERE {memory_sql.memory_source_type_predicate('s.source_type')} "
+            f"AND {memory_sql.memory_source_readable('s')} "
+            "ORDER BY memory_id"
+        )
+
+    def memory_ids_for_source_ids(
+        self, source_ids: Sequence[str], owner_id: str
+    ) -> list[str]:
+        """Memory ids behind the given source ids that belong to ``owner_id``.
+
+        Mirrors the PostgreSQL store: only Memory sources readable by the owner
+        under ``memory_sql`` count; another member's Memory source, an orphan,
+        Knowhow, ordinary sources and unknown ids contribute nothing.  Sorted and
+        distinct; an empty id list or owner returns ``[]``.
+        """
+        wanted = list(dict.fromkeys(str(item) for item in source_ids if item))
+        owner = str(owner_id or "")
+        if not wanted or not owner:
+            return []
+        with self.database.connect() as db:
+            rows = db.execute(
+                self.memory_ids_for_source_ids_sql(), (json.dumps(wanted), owner)
+            ).fetchall()
+        return [str(row["memory_id"]) for row in rows]
