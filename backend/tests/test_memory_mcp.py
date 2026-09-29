@@ -2066,6 +2066,79 @@ async def test_ask_notebook_filters_memory_citations_without_memory_read_scope(
 
 
 @pytest.mark.anyio
+async def test_ask_notebook_drops_memory_anchors_without_memory_read_scope(
+    mcp_env, monkeypatch
+):
+    """E1-3: anchors are filtered like citations -- ``object_type == 'memory'``
+    never reaches a token without memory:read, and the omitted count is taken
+    from the FILTERED anchor list (26 anchors, one of them Memory: rows plus
+    ``omitted_items`` add up to 26 for the token with memory:read and to 25
+    for the token without, which therefore learns nothing about the 26th).
+
+    The real run executes with the Memory channel closed, so no Memory anchor
+    should exist at all; this pins the wire-side backstop in
+    ``_strip_memory_items`` on its own."""
+    service = mcp_env["service"]
+    notebook_id = mcp_env["notebook"].id
+    monkeypatch.setattr(service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env))
+
+    def anchor(index: int, object_type: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            key=f"k{index}", object_id=f"obj-{index}", object_type=object_type,
+            label=f"A{index}", source_title="", location_label="",
+            source_id="" if object_type == "memory" else f"s{index}",
+            element_id="", tier="personal", provenance={}, url="", knowhow=None,
+        )
+
+    def fake_ask(*_a, **_k):
+        return SimpleNamespace(
+            answer_id="ans-anchor", answer="Answer.", conclusion="Answer.",
+            grounded=True, evidence_level="grounded", mode="chunk",
+            conversation_id="conv-anchor",
+            anchors=[
+                anchor(index, "memory" if index == 3 else "concept")
+                for index in range(26)
+            ],
+            citations=[],
+        )
+
+    monkeypatch.setattr(service, "ask", fake_ask)
+    with_token = service.issue_agent_token(
+        mcp_env["alice"].id, mcp_env["profile_a"].id,
+        ["memory:read", "ask:execute"], notebook_id, [notebook_id], None,
+    )
+    without_token = service.issue_agent_token(
+        mcp_env["alice"].id, mcp_env["profile_a"].id, ["ask:execute"],
+        notebook_id, [notebook_id], None,
+    )
+    app = mcp_env["app"]
+    async with app.router.lifespan_context(app):
+        results = {}
+        for name, issued in (("with", with_token), ("without", without_token)):
+            async with OfficialMcpClient(
+                app, issued.token, manage_lifespan=False
+            ) as client:
+                _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+                results[name] = _payload(await client.call(
+                    "ask_notebook", {"question": "anchor scoping", "mode": "chunk"}
+                ))
+
+    kept = results["without"]["anchors"]
+    assert all(row["object_type"] != "memory" for row in kept)
+    assert "obj-3" not in {row["object_id"] for row in kept}
+    assert any(row["object_type"] == "memory" for row in results["with"]["anchors"])
+    # Every omission (slice or sub-budget) lands in omitted_items, so rows +
+    # omitted is exactly the population each token may know about.
+    assert (
+        len(kept) + results["without"]["truncation"]["omitted_items"] == 25
+    ), "无 memory:read 的 token 只该数到 25 条非 Memory 锚点"
+    assert (
+        len(results["with"]["anchors"])
+        + results["with"]["truncation"]["omitted_items"] == 26
+    )
+
+
+@pytest.mark.anyio
 async def test_ask_notebook_memory_citation_count_is_not_recoverable_from_omitted(
     mcp_env, monkeypatch
 ):
