@@ -35,6 +35,7 @@ from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.id_binding import bind_ids, execute_ids
 from app.repositories.postgres.knowledge_store import KnowledgeStore
 from app.repositories.postgres.migrator import PostgresMigrator
+from app.repositories.postgres.search import chunk_candidate_rows_for_terms
 from app.repositories.postgres.source_store import SourceStore
 from app.repositories.postgres.unified_kg_store import UnifiedKgStore
 
@@ -116,6 +117,16 @@ def _seed(database: PostgresDatabase) -> None:
             "g * 2 + k + 1, '[]', %s "
             "FROM generate_series(0, %s) g, generate_series(0, 1) k",
             (NB, NOW, SOURCES - 1),
+        )
+        # 30 chunks with identical text (tied similarity) inserted in
+        # DESCENDING id order, so heap order never happens to equal the
+        # documented id tie-break that decides which of them fill a LIMIT.
+        db.execute(
+            "INSERT INTO chunks(id,notebook_id,source_id,text,ordinal,element_ids,created_at) "
+            "SELECT 'c-tie-'||lpad(g::text,2,'0'), %s, 's-'||lpad((g * 2)::text,5,'0'), "
+            "'tiebreakmarker', 100000 + g, '[]', %s "
+            "FROM generate_series(0, 29) g ORDER BY g DESC",
+            (NB, NOW),
         )
         db.execute(
             "INSERT INTO chunk_questions(id,chunk_id,notebook_id,source_id,question,vector,"
@@ -441,6 +452,60 @@ def test_contribution_hydration_plan_drives_by_candidate_primary_keys(
     assert "pk_chunks" in plan, plan
     assert "Index Cond: (c.id = ANY" in plan, plan
     assert "Index Cond: (c.source_id" not in plan, plan
+
+
+def test_converted_statements_keep_their_documented_row_order(pin_database):
+    """The binding changed how the ceiling travels, never which rows come back
+    or in what order: each ordered statement is checked against its own
+    ORDER BY, on data where a lost key would show."""
+    knowledge = KnowledgeStore(pin_database, _seams())
+    chunks = ChunkStore(pin_database)
+    unified = UnifiedKgStore(pin_database)
+    allowed = set(CEILING)
+
+    with pin_database.connect() as db:
+        # P1: 30 tied chunks, 5 slots -> the id tie-break picks the 5 lowest.
+        tied = chunk_candidate_rows_for_terms(
+            db, NB, ["tiebreakmarker"], 5, CEILING,
+        )
+        assert [row["candidate_id"] for row in tied] == [
+            f"c-tie-{index:02d}" for index in range(5)
+        ]
+        # P5: candidate primary keys in the ceiling, in document order.
+        hydrated = chunks.retrieval_contribution_rows(
+            db, NB, list(reversed(CANDIDATE_CHUNKS)), actor_id=USER,
+            source_mode="include", source_ids=CEILING,
+        )
+        expected = sorted(
+            chunk for chunk in CANDIDATE_CHUNKS
+            if "s-" + chunk.split("-")[1] in allowed
+        )
+        assert [row["id"] for row in hydrated] == expected and expected
+        # P1 store path: hits keep the union's deterministic ranking.
+        first = knowledge.chunk_fts_search(
+            db, NB, "tiebreakmarker", k=5, allowed_source_ids=CEILING,
+        )
+        assert [hit["chunk_id"] for hit in first] == [
+            f"c-tie-{index:02d}" for index in range(5)
+        ]
+    # P4: the scan window is the lowest question ids (C collation).
+    questions = chunks.question_index_rows(
+        NB, actor_id=USER, allowed_source_ids=CEILING, limit=50,
+    )
+    ids = [row["id"] for row in questions]
+    assert len(ids) == 50 and ids == sorted(ids) and ids[0] == "q-c-00000-0"
+    # P8: centrality DESC, canonical id ascending.
+    peers = unified.community_member_peers(
+        NB, "com-0", "can-00000", 20, allowed_source_ids=CEILING,
+    )
+    centralities = [row["centrality"] for row in peers]
+    assert len(peers) == 20 and centralities == sorted(centralities, reverse=True)
+    # P9: bridge claims DESC.
+    comentions = unified.comention_peers(
+        NB, "can-00000", 1, 20, allowed_source_ids=CEILING,
+    )
+    claims = [claim for _name, claim in comentions]
+    assert len(comentions) == 20 and claims == sorted(claims, reverse=True)
 
 
 def test_text_form_and_fallback_select_exactly_the_array_rows(pin_database):
