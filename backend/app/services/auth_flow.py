@@ -33,7 +33,9 @@ class AuthFlowService:
         # keeps the browser and callback on the same host, including local ports.
         if urlsplit(frontend).hostname != urlsplit(self.settings.auth_public_base_url).hostname:
             raise AuthProviderError("callback_origin_mismatch")
-        if self.settings.environment.lower() in {"prod", "production"} and (
+        if self.settings.environment.lower() in {"prod", "production"} and not (
+            self.settings.auth_allow_insecure_http
+        ) and (
             urlsplit(frontend).scheme != "https"
             or urlsplit(self.settings.auth_public_base_url).scheme != "https"
         ):
