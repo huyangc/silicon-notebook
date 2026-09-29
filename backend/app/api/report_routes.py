@@ -2,8 +2,9 @@ import io
 import zipfile
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field, StrictInt
 
 from app.api.deps import (
     repository,
@@ -24,6 +25,12 @@ from app.models.reports import (
     ReportSummary,
 )
 from app.services.report_public_view import public_report_payload
+from app.services.share_disclosure import (
+    NonAuthorShareRefused,
+    ShareDisclosureRequired,
+    report_share_disclosure,
+    require_publishable,
+)
 from app.services.report_export import export_completed_reports
 from app.services.reports.intent_confirmation import (
     ReportIntentConfirmationError,
@@ -592,19 +599,86 @@ def delete_report(notebook_id: str, report_id: str) -> dict:
     return {"status": "deleted"}
 
 
+class ReportShareRequest(BaseModel):
+    """Optional body of ``POST .../share`` (M4).
+
+    ``acknowledged_memory_count`` is the number of the author's own Memory
+    excerpts the author saw and confirmed.  A client that has nothing to
+    confirm sends no body at all, exactly as before M4, and must not get a 422.
+    """
+
+    acknowledged_memory_count: StrictInt | None = Field(default=None, ge=0)
+
+
+class ReportShareDisclosure(BaseModel):
+    memory_count: int
+
+
+def _share_disclosure(repo, report: dict):
+    # The Memory store answers "which of these sources are the author's Memory"
+    # through memory_sql's single readability predicate.
+    return report_share_disclosure(
+        repo._runtime.memory_store,  # type: ignore[attr-defined]
+        report,
+    )
+
+
+@router.get("/notebooks/{notebook_id}/reports/{report_id}/share/disclosure",
+            response_model=ReportShareDisclosure,
+            dependencies=[Depends(require_notebook_read)])
+def report_share_disclosure_route(
+    notebook_id: str, report_id: str
+) -> ReportShareDisclosure:
+    """How many of the author's own Memory entries the public page would carry.
+
+    Read before sharing so the author can be asked first (M4).  Row-level gated
+    like every operation on an existing report.  The number is advisory: the
+    share POST counts again and refuses an acknowledgement that no longer
+    matches.
+    """
+    repo = repository()
+    report = _own_report_or_404(repo, notebook_id, report_id)
+    return ReportShareDisclosure(
+        memory_count=_share_disclosure(repo, report).memory_count
+    )
+
+
 @router.post("/notebooks/{notebook_id}/reports/{report_id}/share",
              response_model=ReportShareResponse,
              dependencies=[Depends(require_notebook_read)])
-def share_report_route(notebook_id: str, report_id: str) -> ReportShareResponse:
+def share_report_route(
+    notebook_id: str,
+    report_id: str,
+    payload: ReportShareRequest | None = Body(default=None),
+) -> ReportShareResponse:
     """Publish one finished report behind an unguessable link.
 
     Only `done` reports can be shared: a link to a running or failed report
     would show an empty or half-written body to whoever it was sent to.
+
+    M4: a report citing the author's own Memory is published only by the
+    author and only with ``acknowledged_memory_count`` equal to the count taken
+    here, on this request, right before the share flag flips — never a number
+    from an earlier request.  A mismatch is a 409 whose ``detail`` carries
+    ``share_disclosure_required`` and the current count; no token is issued.
+    A report citing none publishes exactly as before (no body needed).  A
+    ``done`` report is frozen (it cannot be regenerated), so what the author
+    confirms is the content the link serves.
     """
     repo = repository()
     report = _own_report_or_404(repo, notebook_id, report_id)
     if str(report.get("status") or "") != "done":
         raise user_error(409, "只能分享已完成的报告。")
+    try:
+        require_publishable(
+            _share_disclosure(repo, report),
+            requester_id=repo.current_user().id,
+            acknowledged=payload.acknowledged_memory_count if payload else None,
+        )
+    except NonAuthorShareRefused as refusal:
+        raise user_error(403, refusal.message) from None
+    except ShareDisclosureRequired as required:
+        raise HTTPException(status_code=409, detail=required.detail()) from None
     return ReportShareResponse(share_token=repo.share_report(notebook_id, report_id))
 
 
