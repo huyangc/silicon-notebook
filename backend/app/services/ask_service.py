@@ -766,6 +766,10 @@ class DefaultResponseDraftStage:
         return self._service._draft_reasoning_response(stage, runtime)
 
 
+# The heading of the reasoning passage segment.  The passage floor charges it
+# (``AskService._assemble_structured_evidence``), so both read this one value.
+_REASONING_CHUNK_HEADING = "Retrieved chunks"
+
 # Fixed one-line notices for a structured block the passage floor left out
 # whole (``AskService._assemble_structured_evidence``): the result cards still
 # show it, so the model must not answer as if it did not exist.
@@ -2569,9 +2573,11 @@ class AskService:
         raise_if_cancelled(cancel_event)
         # 当前库保底席位被 `enforce_active_floor` 换在尾部;渲染预算装不下时先丢
         # 排名最低的非保底行,保底行不被截掉(同一个 `active_reserve_rule`)。
+        seats = active_reserve_seats(self.settings)
+        budget = self.settings.chunk_answer_budget_chars
         chunks = spare_reserved_rows(
-            chunks, self.settings.chunk_answer_budget_chars, active_reserve_rule(
-                active_reserve_seats(self.settings), chunks, notebook_id))
+            chunks, budget, active_reserve_rule(seats, chunks, notebook_id),
+            protected_chars=budget * seats // max(1, int(self.settings.chunk_mmr_k)))
         context_block, id_map = self._chunk_answer_context(chunks, notebook_id=notebook_id)
         context_block, id_map = self._append_memory_context(
             context_block, id_map, memory_hits or []
@@ -2960,8 +2966,9 @@ class AskService:
             # 1.0 相关度自然靠前(交错锚定精确段正是为了不破坏这一点)——与 chunk
             # 模式 `exact_section_reserve` 的 4/12 同义。structured_block 先于原文
             # 段消费同一份预算,整表够大时曾让原文段拿到 0 字符、席位作废;现在
-            # 结构化侧在上游按「分区 − 原文段下限」渲染(`retrieval.passage_floor`,
-            # 见 `_assemble_structured_evidence`)。按节合成注入的未绑定精确块**不**走
+            # 上游只在照旧渲染会把保底前缀挤出去时,才以「分区 − 原文段下限」为
+            # 上限重新渲染结构化侧(`retrieval.passage_floor`,见
+            # `_assemble_structured_evidence`)。按节合成注入的未绑定精确块**不**走
             # 这里:它们不在 `chunks` 里,而是经 `trailing_chunks` 单独成段装在本节
             # 全部绑定证据之后。
             # 号段:chunk 段 k1..N、KG 段 k1001+,合并 id_map,两段都可 [k] 引用。
@@ -2977,7 +2984,7 @@ class AskService:
                 budget_chars=max(0, chunk_budget - len(source_context)))
             source_context, source_map = self._bounded_context_append(
                 source_context, source_map, chunk_block, chunk_id_map,
-                budget_chars=chunk_budget, heading="Retrieved chunks",
+                budget_chars=chunk_budget, heading=_REASONING_CHUNK_HEADING,
                 admission_sink=baseline_admission,
             )
 
@@ -5485,8 +5492,8 @@ class AskService:
     def _assemble_structured_evidence(
         self, stage, answer_client, collection_map_prompt_block: str,
     ) -> tuple:
-        """The structured side of the reasoning source partition, rendered
-        against what the passage floor leaves it.
+        """The structured side of the reasoning source partition, kept out of
+        the reserved passages' way.
 
         Four blocks share ``chunk_context_chars`` with the passage segment and
         are assembled before it: the Knowhow preview
@@ -5494,43 +5501,63 @@ class AskService:
         ``enumeration_sub_budget``), sampled document reads
         (``_assemble_document_read_block``'s shared / partition caps) and the
         spreadsheet block (``_add_sheet_prompt``'s ``max_chars``).  Rendered
-        against the whole partition they could leave the passages zero
-        characters and void every reserved seat.  So the floor --
-        ``retrieval.passage_floor`` over the reserved-seat prefix of the very
-        order ``_answer_reasoning`` will render (``reasoning_order_for``: the
-        exact prefix plus the active / per-library prefix) -- is computed
-        ONCE, here, and becomes ``room``: the characters the structured side
-        may take in total, ``partition - floor`` less the collection map block
-        that sits ahead of it.
+        against the whole partition they could leave the reserved passages
+        zero characters and void every reserved seat.
 
-        ``room`` is an extra ceiling, never a new budget.  Every block first
-        renders exactly as it always has -- its own caps, the half-partition
-        caps included, still read the WHOLE partition -- and is re-rendered
-        against what ``room`` leaves only when that historical rendering
-        would cross it.  So the only runs whose bytes change are those in
-        which the structured side would really have crowded the reserved
-        passages out; there each block's own coverage disclosure describes
-        the smaller rendering exactly, rather than a block cut afterwards.  No
-        chunk or no reserved seat: no ``room``, byte-for-byte as before.
+        So the floor -- ``retrieval.passage_floor``: the REAL rendered cost of
+        the reserved-seat prefix of the very order ``_answer_reasoning`` will
+        render (``reasoning_order_for``: exact prefix plus active / per-library
+        prefix), plus the passage segment's heading, capped at half the
+        partition -- is computed once and becomes ``room``: what the
+        structured side may take in total, ``partition - floor`` less the
+        collection map block that sits ahead of it.
+
+        The structured side is first rendered exactly as it always has been.
+        Only when that historical rendering is longer than ``room`` -- i.e.
+        only when it really would push part of the reserved prefix out of the
+        prompt (or, past the half-partition cap, keep more than half of it) --
+        is it rendered a second time with ``room`` as an extra ceiling; there
+        each block's own coverage disclosure describes the smaller rendering
+        exactly.  Every other run -- no chunk, no reserved seat, or a
+        historical structured side that leaves the prefix whole -- returns
+        the historical rendering byte for byte.
 
         Returns ``(structured_block, structured_map,
         typed_collection_result_sets, enumeration_block_dropped,
-        collection_item_citations, document_read_block_dropped)``; the body
-        below the floor is the historical inline segment of
-        ``_draft_reasoning_response``, moved verbatim apart from the budgets.
+        collection_item_citations, document_read_block_dropped)``.
+        """
+        limits = stage.prepared.limits
+        notebook_id = stage.prepared.notebook_id
+        order = (reasoning_order_for(self.settings, list(stage.chunks), notebook_id)
+                 if stage.chunks else None)
+        floor = (passage_floor(
+            order.passages[:order.prefix], limits.chunk_context_chars,
+            heading_chars=len(f"\n\n[{_REASONING_CHUNK_HEADING}]\n"))
+            if order else 0)
+        room = (limits.chunk_context_chars - floor - (
+            len(collection_map_prompt_block) + 2
+            if collection_map_prompt_block else 0)) if floor else None
+        memo: dict = {}
+        historical = self._render_structured_side(stage, answer_client, None, memo)
+        if room is None or len(historical[0]) <= room:
+            return historical
+        return self._render_structured_side(stage, answer_client, room, memo)
+
+    def _render_structured_side(self, stage, answer_client, room, memo) -> tuple:
+        """One rendering of the structured side (see
+        ``_assemble_structured_evidence``).  ``room=None`` is the historical
+        inline segment of ``_draft_reasoning_response``, moved verbatim;
+        with ``room`` each block that would cross what is left is rendered
+        again against it (the half-partition caps still read the whole
+        partition), and a document-read or spreadsheet block left out only
+        for ``room`` leaves its one-line notice.  ``memo`` carries the
+        enumeration mapping to the second rendering so it is read once.
         """
         limits = stage.prepared.limits
         notebook_id = stage.prepared.notebook_id
         structured_batch = stage.structured_batch
         enumerations = list(stage.enumerations)
         spreadsheet_results = list(stage.spreadsheet_results)
-        order = (reasoning_order_for(self.settings, list(stage.chunks), notebook_id)
-                 if stage.chunks else None)
-        floor = (passage_floor(order.passages[:order.prefix],
-                               limits.chunk_context_chars) if order else 0)
-        room = (limits.chunk_context_chars - floor - (
-            len(collection_map_prompt_block) + 2
-            if collection_map_prompt_block else 0)) if floor else None
         structured_block = ""
         if structured_batch is not None and answer_client.configured:
             from app.services.structured_retrieval import structured_prompt_block
@@ -5568,22 +5595,32 @@ class AskService:
                 # 载荷闸在这里按**真实 wire 形状**收口:执行器的池量的是
                 # 紧凑 dataclass,而联合体两臂的默认字段 + 结果元数据会让
                 # 下发/持久化的 JSON 明显更宽(见该函数 docstring)。
-                collection_items = [
-                    item for outcome in enumerations for item in outcome.items
-                ]
-                collection_item_citations = (
-                    self.evidence_context.collection_item_citations(
-                        collection_items,
-                        active_notebook_id=notebook_id,
+                cached = memo.get("mapping")
+                if cached is None:
+                    collection_items = [
+                        item for outcome in enumerations for item in outcome.items
+                    ]
+                    collection_item_citations = (
+                        self.evidence_context.collection_item_citations(
+                            collection_items,
+                            active_notebook_id=notebook_id,
+                        )
                     )
-                )
-                typed_collection_result_sets = typed_collection_results(
-                    enumerations,
-                    payload_chars=limits.structured_payload_chars,
-                    citations_by_item_id=collection_item_citations,
-                )
+                    typed_collection_result_sets = typed_collection_results(
+                        enumerations,
+                        payload_chars=limits.structured_payload_chars,
+                        citations_by_item_id=collection_item_citations,
+                    )
+                    # 第二次(挤占时)渲染复用映射,不再读一次库;字典留副本,
+                    # 取样块会往本次渲染的那份里写。
+                    memo["mapping"] = (dict(collection_item_citations),
+                                       typed_collection_result_sets)
+                else:
+                    collection_item_citations = dict(cached[0])
+                    typed_collection_result_sets = cached[1]
                 if answer_client.configured:
                     from app.services.collection_enumeration_answer import (
+                        COLLECTION_MAP_BLOCK_MAX_CHARS,
                         enumeration_sub_budget,
                     )
                     # 枚举块在后:与既有 knowhow structured_block 拼接,整体
@@ -5620,11 +5657,21 @@ class AskService:
                             citations_by_item_id=collection_item_citations,
                         )
                     preview = _preview(enum_budget_chars)
-                    # 原文段下限只在历史渲染真的越过 room 时才收紧(半分区上限
-                    # 仍按整份分区算,不因下限变小)。
+                    # 挤占时(room 非空)才收紧,半分区上限仍按整份分区算。只为
+                    # 真能装进去的取样块预留:它在 room 与自身历史上限下都放得
+                    # 下才扣它的份额,否则花名册白白让出一块最终没人用的空间。
+                    joiner = 2 if structured_block else 0
+                    read_limit = (None if room is None else min(
+                        room, limits.chunk_context_chars
+                        - COLLECTION_MAP_BLOCK_MAX_CHARS - 4))
+                    read_fits = bool(read_reserve) and read_limit is not None and (
+                        read_reserve - 2 <= limits.chunk_context_chars // 2
+                        and len(structured_block) + joiner + read_reserve - 2
+                        <= read_limit)
                     fit = (None if room is None else max(
-                        0, room - len(structured_block)
-                        - (2 if structured_block else 0) - read_reserve))
+                        0, (read_limit if read_fits else room)
+                        - len(structured_block) - joiner
+                        - (read_reserve if read_fits else 0)))
                     if fit is not None and len(preview.text) > fit:
                         preview = _preview(min(enum_budget_chars, fit))
                     structured_map = preview.evidence_by_id

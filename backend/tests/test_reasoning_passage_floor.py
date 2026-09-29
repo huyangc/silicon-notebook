@@ -5,11 +5,15 @@ The Knowhow preview, the enumeration preview, document reads and the
 spreadsheet block are assembled BEFORE the passage segment and share its
 character partition (`chunk_context_chars`).  A structured block sized to the
 partition used to leave the passages zero characters, voiding every reserved
-seat.  `AskService._assemble_structured_evidence` now renders them against
-`partition - floor`, `floor = min(partition // 2, sum(len(text) + 120))` over
-the reserved-seat prefix (exact prefix + active prefix) of the very order
-`_answer_reasoning` renders -- so each block's own coverage disclosure stays
-true, and a run with no chunk or no reserved seat renders byte-for-byte as
+seat.  `AskService._assemble_structured_evidence` computes
+`floor = min(partition // 2, heading + rendered cost of the reserved prefix)`
+(exact prefix + active prefix of the very order `_answer_reasoning` renders,
+measured the way the passage segment renders it) and `room = partition -
+floor - map block`.  The structured side renders as it always has; only when
+that historical rendering is longer than `room` is it rendered again with
+`room` as an extra ceiling -- so each block's own coverage disclosure stays
+true, and every run whose historical structured side leaves the prefix whole
+(no chunk, no reserved seat, or simply enough room) is byte-for-byte as
 before.
 """
 from __future__ import annotations
@@ -24,7 +28,9 @@ from app.models.schemas import NotebookCreate
 from app.services import ask_service as ask_module
 from app.services.ask_service import AskService
 from app.services.chunk_federation import reasoning_order_for
-from app.services.retrieval import PASSAGE_FLOOR_LINE_CHARS, passage_floor
+from app.services.retrieval import passage_floor
+
+HEADING = len(f"\n\n[{ask_module._REASONING_CHUNK_HEADING}]\n")
 from app.services.structured_retrieval import (
     StructuredEnumeration,
     structured_prompt_block,
@@ -92,6 +98,10 @@ def _stage(notebook_id, chunks, *, batch=None, sheets=()):
         spreadsheet_results=list(sheets), chunks=list(chunks))
 
 
+def _floor(prefix):
+    return passage_floor(prefix, PARTITION, heading_chars=HEADING)
+
+
 def _structured(service, stage, map_block=""):
     return service._assemble_structured_evidence(stage, _Echo(), map_block)
 
@@ -129,9 +139,11 @@ def _render(svc, notebook_id, chunks, structured_block, structured_map):
 # --------------------------------------------------------------------- floor
 def test_floor_is_the_prefix_cost_capped_at_half_the_partition():
     prefix = [_p("a", 0.5, length=100), _p("b", 0.5, length=50)]
-    assert passage_floor(prefix, 10_000) == 150 + 2 * PASSAGE_FLOOR_LINE_CHARS
-    assert passage_floor(prefix, 500) == 250
-    assert passage_floor([], 10_000) == 0
+    # The renderer's own measure: "k1: " + 100, newline, "k2: " + 50.
+    assert passage_floor(prefix, 10_000, heading_chars=HEADING) == (
+        HEADING + 4 + 100 + 1 + 4 + 50)
+    assert passage_floor(prefix, 300, heading_chars=HEADING) == 150
+    assert passage_floor([], 10_000, heading_chars=HEADING) == 0
 
 
 def test_a_full_knowhow_block_leaves_the_reserved_prefix_its_characters(service):
@@ -142,7 +154,7 @@ def test_a_full_knowhow_block_leaves_the_reserved_prefix_its_characters(service)
     assert {"exact-0", "mine-0", "mine-1", "mine-2"} <= prefix
 
     block, smap, *_ = _structured(svc, _stage(nb, chunks, batch=_batch()))
-    floor = passage_floor(order.passages[:order.prefix], PARTITION)
+    floor = _floor(order.passages[:order.prefix])
     assert 0 < floor and len(block) <= PARTITION - floor
     # The Knowhow block's own disclosure is still true: partial.
     assert "synthesis_complete=false" in block
@@ -152,7 +164,7 @@ def test_a_full_knowhow_block_leaves_the_reserved_prefix_its_characters(service)
 
 def test_control_without_the_floor_the_prefix_is_starved(service, monkeypatch):
     svc, nb = service
-    monkeypatch.setattr(ask_module, "passage_floor", lambda prefix, chars: 0)
+    monkeypatch.setattr(ask_module, "passage_floor", lambda prefix, chars, heading_chars: 0)
     chunks = _foreign_pool()
     block, smap, *_ = _structured(svc, _stage(nb, chunks, batch=_batch()))
     rendered = _render(svc, nb, chunks, block, smap)
@@ -164,8 +176,8 @@ def test_the_floor_covers_the_prefix_only_not_every_passage(service):
     chunks = _foreign_pool()
     block, *_ = _structured(svc, _stage(nb, chunks, batch=_batch()))
     order = reasoning_order_for(svc.settings, chunks, nb)
-    everything = passage_floor(order.passages, PARTITION)
-    prefix_only = passage_floor(order.passages[:order.prefix], PARTITION)
+    everything = _floor(order.passages)
+    prefix_only = _floor(order.passages[:order.prefix])
     assert prefix_only < everything
     assert len(block) > PARTITION - everything
 
@@ -176,7 +188,10 @@ def test_the_map_block_is_held_back_too(service):
     plain, *_ = _structured(svc, _stage(nb, chunks, batch=_batch()))
     with_map, *_ = _structured(svc, _stage(nb, chunks, batch=_batch()),
                                map_block="m" * 300)
-    assert len(with_map) <= len(plain) - 300
+    order = reasoning_order_for(svc.settings, chunks, nb)
+    floor = _floor(order.passages[:order.prefix])
+    assert len(plain) <= PARTITION - floor
+    assert len(with_map) <= PARTITION - floor - 302 < len(plain)
 
 
 # --------------------------------------------------------------- byte identity
@@ -209,7 +224,7 @@ def test_spreadsheet_block_respects_the_reduced_partition(service):
     svc, nb = service
     chunks = _foreign_pool()
     order = reasoning_order_for(svc.settings, chunks, nb)
-    floor = passage_floor(order.passages[:order.prefix], PARTITION)
+    floor = _floor(order.passages[:order.prefix])
     block, smap, *_ = _structured(svc, _stage(nb, chunks, sheets=[_sheet()]))
     assert len(block) <= PARTITION - floor
     unbounded, *_ = _structured(svc, _stage(nb, [], sheets=[_sheet()]))
@@ -266,7 +281,7 @@ def test_half_partition_caps_are_not_shrunk_by_the_floor(service, monkeypatch):
     _fake_roster(monkeypatch, svc, seen)
     chunks = _single_notebook_exact_chunks()
     order = reasoning_order_for(svc.settings, chunks, nb)
-    assert passage_floor(order.passages[:order.prefix], PARTITION) > 0
+    assert _floor(order.passages[:order.prefix]) > 0
 
     stage = _stage(nb, chunks)
     stage.enumerations = [SimpleNamespace(items=[])]
@@ -302,12 +317,14 @@ def test_the_floor_still_holds_when_roster_and_knowhow_would_crowd(
     _fake_roster(monkeypatch, svc, seen)
     chunks = _foreign_pool()
     order = reasoning_order_for(svc.settings, chunks, nb)
-    floor = passage_floor(order.passages[:order.prefix], PARTITION)
+    floor = _floor(order.passages[:order.prefix])
     stage = _stage(nb, chunks, batch=_batch(rows=45))   # ~3000-char Knowhow
     stage.enumerations = [SimpleNamespace(items=[])]
     block, smap, *_ = _structured(svc, stage)
     assert len(block) <= PARTITION - floor
-    assert len(seen["enumeration"]) == 2 and seen["enumeration"][1] < seen[
+    # Historical rendering, then the crowded rendering (historical budget
+    # first, then the budget ``room`` leaves).
+    assert len(seen["enumeration"]) == 3 and seen["enumeration"][2] < seen[
         "enumeration"][0], "the historical rendering crowded, so it re-rendered"
     prefix = {chunk.chunk_id for chunk in order.passages[:order.prefix]}
     assert prefix <= _render(svc, nb, chunks, block, smap)
@@ -317,7 +334,7 @@ def test_a_document_read_that_would_crowd_is_dropped_whole(service, monkeypatch)
     svc, nb = service
     chunks = _foreign_pool()
     order = reasoning_order_for(svc.settings, chunks, nb)
-    floor = passage_floor(order.passages[:order.prefix], PARTITION)
+    floor = _floor(order.passages[:order.prefix])
     _fake_reads(monkeypatch, PARTITION // 2 - 50)
     stage = _stage(nb, chunks, batch=_batch(rows=40))
     stage.document_reads = [object()]
@@ -398,3 +415,83 @@ def test_own_id_ppr_passages_do_not_create_a_floor(service):
     chunks = ppr + [_p(f"seed-{i}", 0.4 - i * 0.01) for i in range(4)]
     block, *_ = _structured(svc, _stage(nb, chunks, batch=_batch()))
     assert block == _unfloored(_batch())
+
+
+# ------------------------------------ the document-read reservation (review)
+def _stage_at(nb, chunks, batch, partition):
+    limits = SimpleNamespace(
+        chunk_context_chars=partition, inline_answer_rows=10_000,
+        cell_excerpt_chars=200, structured_payload_chars=1_000_000)
+    return SimpleNamespace(
+        prepared=SimpleNamespace(limits=limits, notebook_id=nb),
+        structured_batch=batch, enumerations=[SimpleNamespace(items=[])],
+        document_reads=[object()], spreadsheet_results=[], chunks=list(chunks))
+
+
+def test_no_reservation_for_a_document_read_that_cannot_go_in(service, monkeypatch):
+    """Crowded: the document read does not fit ``room`` after the Knowhow
+    block, so the roster must not give up space for it -- the roster keeps
+    what ``room`` leaves instead of being emptied for a block that is then
+    dropped anyway."""
+    svc, nb = service
+    seen: dict = {}
+    _fake_roster(monkeypatch, svc, seen)
+    _fake_reads(monkeypatch, 7000)
+    chunks = [_p(f"exact-{i}", 1.0, exact=True, length=6000) for i in range(3)]
+    stage = _stage_at(nb, chunks, _batch(rows=130), 30000)
+    block, _smap, _t, enum_dropped, _c, doc_dropped = _structured(
+        svc, stage, "m" * 300)
+    room = 30000 - 15000 - 302            # floor capped at half the partition
+    assert doc_dropped and not enum_dropped
+    assert "R" * 20 in block and "D" * 20 not in block
+    assert len(block) == room, "no room left unused"
+
+
+def test_a_document_read_that_fits_keeps_its_reservation(service, monkeypatch):
+    """Crowded, and the document read does fit after the Knowhow block: the
+    roster yields exactly its share, and the read goes in."""
+    svc, nb = service
+    seen: dict = {}
+    _fake_roster(monkeypatch, svc, seen)
+    _fake_reads(monkeypatch, 3000)
+    chunks = [_p(f"exact-{i}", 1.0, exact=True, length=6000) for i in range(3)]
+    stage = _stage_at(nb, chunks, _batch(rows=110), 30000)
+    block, _smap, _t, enum_dropped, _c, doc_dropped = _structured(
+        svc, stage, "m" * 300)
+    room = 30000 - 15000 - 302
+    assert not doc_dropped and not enum_dropped
+    assert "D" * 3000 in block and "R" * 20 in block
+    assert len(block) <= room
+
+
+def test_an_uncrowded_run_keeps_the_historical_structured_side(service, monkeypatch):
+    """Single notebook, no reference library, Knowhow above half the
+    partition, roster + a document read the historical partition cap refuses:
+    the historical structured side leaves the exact prefix whole, so nothing
+    changes -- the roster is not squeezed to let the read in."""
+    svc, nb = service
+    seen: dict = {}
+    _fake_roster(monkeypatch, svc, seen)
+    _fake_reads(monkeypatch, 5000)
+    chunks = [_p("exact-0", 1.0, exact=True, length=300)]
+    stage = _stage_at(nb, chunks, _batch(rows=250), 30000)
+    got = _structured(svc, stage, "m" * 300)
+    historical = _structured(svc, _stage_at(nb, [], _batch(rows=250), 30000),
+                             "m" * 300)
+    assert got[0] == historical[0] and got[5] is historical[5] is True
+    assert "R" * 20 in got[0]
+
+
+def test_the_document_read_notice_is_only_written_when_it_fits(service, monkeypatch):
+    """Room so tight that even the one-line notice does not fit: nothing is
+    written, and the structured side stays within ``room``."""
+    svc, nb = service
+    size = PARTITION // 2 - 50
+    _fake_reads(monkeypatch, size)
+    stage = _stage(nb, _long_active_chunks(), batch=_batch(rows=35))
+    stage.document_reads = [object()]
+    block, *rest = _structured(svc, stage, map_block="m" * 300)
+    room = PARTITION - PARTITION // 2 - 302
+    assert rest[-1] is True
+    assert ask_module.DOCUMENT_READ_OMITTED_NOTICE not in block
+    assert len(block) <= room

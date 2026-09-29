@@ -686,3 +686,42 @@ def test_real_path_unconfigured_rerank_is_byte_identical_to_mmr(rrepo):
     assert client.calls == []
     assert json.dumps([vars(h) for h in after], default=repr, ensure_ascii=False) == \
         json.dumps([vars(h) for h in before], default=repr, ensure_ascii=False)
+
+
+def test_rerank_timeout_falls_back_to_the_real_mmr_and_applies_the_reserve_once(
+    monkeypatch,
+):
+    """The ``_Retrieval`` double implements selection itself, so a fallback
+    that skipped the reserve would pass everywhere else.  Here the fallback
+    runs the real ``RetrievalService.select_chunk_candidates`` (MMR + reserve)
+    after a rerank timeout: the own passage is pulled back, exactly once."""
+    from app.services import chunk_federation
+    from app.services.model_work import ModelQueueTimeout
+    from app.services.retrieval_service import RetrievalService
+
+    class _TimesOut(_Rerank):
+        def rerank(self, query, documents, on_error=None, **kwargs):
+            on_error(ModelQueueTimeout("deadline", support_id="mdl-abc"))
+            return list(range(len(documents)))
+
+    calls = []
+    real_reserve = chunk_federation.apply_active_reserve
+
+    def _counting(*args, **kwargs):
+        calls.append(kwargs.get("active_notebook_id"))
+        return real_reserve(*args, **kwargs)
+
+    monkeypatch.setattr(chunk_federation, "apply_active_reserve", _counting)
+    peers = _descending(6, prefix="p", notebook_id="nb-peer")
+    active = [_hit("a00", 0.30), _hit("a01", 0.20)]
+    rr, retrieval = _retriever(peers + active, _Models(_TimesOut()))
+    real = RetrievalService.__new__(RetrievalService)
+    real.candidates = SimpleNamespace(
+        settings=rr.settings,
+        _mmr_select_chunks=lambda rows, ids, matrix, k, lambda_: list(rows)[:k])
+    retrieval.select_chunk_candidates = real.select_chunk_candidates
+
+    selected = rr.search_chunks("nb", "q", k=4)
+
+    assert calls == ["nb"], "reserve applied exactly once, with the real id"
+    assert "a00" in _ids(selected)
