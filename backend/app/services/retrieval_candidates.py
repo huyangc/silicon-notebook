@@ -387,8 +387,10 @@ class _RetrievalState:
         ≤1 的短路判断在查询之后)。每一次都是一条 ``_connect()`` + 一次 mount
         查询。
 
-        冻结的理由与同一条通道上 ``all_visible_source_ids`` 的 run-local memo
-        (见 ``chunk_federation._peer_visible_sources``)是**同一条**:run 中途的
+        冻结的理由与同一条通道上参考库可见来源的冻结(见
+        ``chunk_federation._peer_visible_sources``:默认天花板下的单库运行用 scope
+        里冻结的天花板,其余运行用 ``all_visible_source_ids`` 的 run-local memo)
+        是**同一条**:run 中途的
         挂载/上传不许扩宽一次已经在飞的 run。两处对同一句话取相反结论才是纪律
         自相矛盾。无 ambient run 时 ``memoized_retrieval_value`` 退化成直通,照旧
         现读。

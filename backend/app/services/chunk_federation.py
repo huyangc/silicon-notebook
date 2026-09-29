@@ -1027,7 +1027,9 @@ def _federated_tasks(
     inside the worker: without an ambient ``retrieval_run`` the memo degrades
     to a pass-through, so reading it per task would be one live source
     enumeration per (library, sub-query).  With a run it still goes through the
-    same memo key, so the run-local freeze semantics are unchanged.  That move
+    run memo, so the run-local freeze semantics are unchanged (and in a
+    single-library run under a default ceiling there is no read at all: the
+    scope's frozen ceiling is the answer, see ``_peer_visible_sources``).  That move
     put a real database read in the PARENT thread, which is why each peer's
     preparation carries its own failure isolation below -- a peer that cannot
     be prepared is dropped from the table entirely and therefore never appears
@@ -1249,7 +1251,7 @@ def _peer_leg(active_id: str, notebook_id: str) -> bool:
     return federated_ask_active() or notebook_id != active_id
 
 
-def _peer_visible_sources(candidates, notebook_id: str) -> "tuple | frozenset":
+def _peer_visible_sources(candidates, notebook_id: str) -> tuple:
     """This peer library's live visible ceiling, frozen for the run.
 
     ``all_visible_source_ids`` only -- never ``hidden_source_ids``.  The
@@ -1264,9 +1266,17 @@ def _peer_visible_sources(candidates, notebook_id: str) -> "tuple | frozenset":
     moments earlier, so re-reading it would read the same list a second time per
     run -- and the result is intersected with that same ceiling downstream
     anyway (``scoped_allowed_source_ids``), so live ∩ frozen was already the
-    frozen set minus later deletions.  Every consumer iterates it (order is not
-    part of the contract).  A library frozen to ``frozenset()`` because its read
-    failed therefore contributes nothing here either.
+    frozen set minus later deletions.  A library frozen to ``frozenset()``
+    because its read failed therefore contributes nothing here either.
+
+    Handed out SORTED, the order the live read's ``ORDER BY id`` gives, never
+    in frozenset (hash) order: ``scoped_allowed_source_ids`` preserves the
+    order of the list it is given, and that list becomes the producers'
+    ``allowed_source_ids`` -- bound into SQL, carried in traces -- so hash
+    order would make the same question bind differently per process
+    (``PYTHONHASHSEED``).  Sorted once per run and library (about 6 ms at 49k
+    ids), memoized under the frozenset itself so a scope re-installed with a
+    different ceiling for the same library gets its own entry.
 
     A SUBJECTLESS (global) run keeps the live read: there the per-library
     enumeration is also the federation's coverage probe -- it runs under the
@@ -1281,7 +1291,10 @@ def _peer_visible_sources(candidates, notebook_id: str) -> "tuple | frozenset":
         else scope.source_ceiling_for(notebook_id)
     )
     if frozen is not None:
-        return frozen
+        return memoized_retrieval_value(
+            ("federated_chunk_visible_frozen", notebook_id, frozen),
+            lambda: tuple(sorted(frozen)),
+        )
     return memoized_retrieval_value(
         ("federated_chunk_visible", notebook_id),
         lambda: tuple(candidates.sources.all_visible_source_ids(notebook_id)),
