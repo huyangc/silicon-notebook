@@ -178,9 +178,21 @@ def test_viewer_predicate_is_derived_from_the_existing_definitions():
     """
     arms = []
     for backend, module, access, _placeholder in _BACKENDS:
-        expr = module.MOUNT_EFFECTIVE_FOR_VIEWER_EXPR
-        assert expr.startswith("(" + module.MOUNT_VALID_EXPR + " AND "), backend
-        assert module.MOUNT_EFFECTIVE_FOR_VIEWER == " AND " + expr, backend
+        pred = module._MOUNT_EFFECTIVE_FOR_VIEWER_PRED
+        assert pred == (
+            "(" + module.MOUNT_VALID_EXPR + " AND "
+            + module._VIEWER_REACHES_MOUNT_EXPR + ")"
+        ), backend
+        # 过滤后缀与 id 子查询用裸合取项(COALESCE 包住会让查看者支不再下推到 b,
+        # 计划翻成顺序扫描——PG pin 的正对照之外,这里先在文本上钉住);投影/取反
+        # 用的公开布尔列是 COALESCE 版本,三值取反漏行的坑由构造堵上。
+        assert module.MOUNT_EFFECTIVE_FOR_VIEWER == " AND " + pred, backend
+        assert module.MOUNTED_BASE_IDS_FOR_VIEWER_SUBQUERY.endswith(
+            module.MOUNT_EFFECTIVE_FOR_VIEWER
+        ), backend
+        assert module.MOUNT_EFFECTIVE_FOR_VIEWER_EXPR == (
+            "COALESCE(" + pred + ", FALSE)"
+        ), backend
         read_arm = access.read_access_clause(
             "b",
             "vm",
@@ -211,6 +223,9 @@ def test_viewer_predicate_is_derived_from_the_existing_definitions():
 # * u-all 同时是 nb-b 与 nb-x 的只读成员:他读得到每一本私有挂载,于是在每本库上看到
 #   的都与旧片段相同——和挂载人一起承担「有序结果逐行等于旧片段」那条断言。
 # * nb-n:挂载人未知(created_by 为 NULL),挂着 nb-p、nb-e、nb-b。
+# * nb-o:owner 未知(created_by 为 NULL)的私有库,挂在 nb-c 上——对谁都不生效,且
+#   裸谓词对每位查看者都求出 NULL(同 owner 支与读权 owner 臂都比 NULL)。它与空查看者、
+#   nb-n 一起提供裸谓词求出 NULL 的全部三种来源,「对此人无效的边」查询靠它们才不空转。
 # * 空 id 用户 `""` 是 nb-b 的只读成员:外键今天只在 `users` 里真有 `id=''` 时才放得
 #   进这种行,这里手插它,钉住「空查看者不等于任何人」的归一(NULLIF),不让谓词
 #   寄生在「没人用空 id」这个外部事实上。
@@ -237,6 +252,7 @@ MOUNT_WORLD_NOTEBOOKS = (
     ("nb-c", "u-owner", "personal", "draft"),
     ("nb-x", "u-xowner", "personal", "draft"),
     ("nb-n", None, "personal", "draft"),
+    ("nb-o", None, "personal", "draft"),
 )
 MOUNT_WORLD_MEMBERS = (
     ("nb-a", "u-plain"),
@@ -265,6 +281,7 @@ MOUNT_WORLD_BASES = (
     ("nb-a", "nb-k", "u-owner"),
     ("nb-c", "nb-x", "u-owner"),
     ("nb-c", "nb-b", "u-owner"),
+    ("nb-c", "nb-o", "u-owner"),
     ("nb-n", "nb-p", None),
     ("nb-n", "nb-e", None),
     ("nb-n", "nb-b", None),
@@ -284,6 +301,11 @@ OLD_MOUNT_ORDERED = {
     "nb-n": ("nb-p", "nb-e"),
 }
 OLD_MOUNT_EFFECTIVE = {nb: frozenset(ids) for nb, ids in OLD_MOUNT_ORDERED.items()}
+# 每本挂载方库的全部挂载边(含失效的),直接由世界数据派生。
+ALL_MOUNT_EDGES = {
+    nb: frozenset(base for owner_nb, base, _ in MOUNT_WORLD_BASES if owner_nb == nb)
+    for nb in OLD_MOUNT_ORDERED
+}
 MOUNTER = {"nb-a": "u-owner", "nb-c": "u-owner"}
 # 这些查看者在对应库上的结果必须与旧片段**逐行同序**(不只是同一个集合):挂载人,
 # 以及读得到全部私有挂载的 u-all。
@@ -312,6 +334,28 @@ def expected_mounts_for_viewer(notebook_id: str, viewer: str | None) -> frozense
         # 主人 u-owner 也不生效;公共库与 everyone 对所有人。
         return _PUBLIC
     raise AssertionError(notebook_id)
+
+
+def expected_viewer_predicate_null_cells() -> frozenset:
+    """裸谓词 `_MOUNT_EFFECTIVE_FOR_VIEWER_PRED` 求出 NULL(而不是 FALSE)的格子,
+    `(挂载方, 被挂库, 查看者)`。钉住世界确实覆盖三种 NULL 来源,「对此人无效的边」
+    断言才有对象;公开的 `MOUNT_EFFECTIVE_FOR_VIEWER_EXPR` 必须把它们都判成 FALSE。"""
+    cells = set()
+    for viewer in MOUNT_WORLD_VIEWERS:
+        empty = viewer in ("", None)
+        # 被挂库 owner 未知:同 owner 支与读权 owner 臂都比 NULL,对谁都是 NULL。
+        cells.add(("nb-c", "nb-o", viewer))
+        if empty:
+            # 空查看者:边站得住,读权 owner 臂比的是 NULL。
+            cells |= {
+                ("nb-a", "nb-b", viewer),
+                ("nb-c", "nb-b", viewer),
+                ("nb-c", "nb-x", viewer),
+            }
+        if empty or viewer in _READERS_OF_B:
+            # 挂载人未知:既有有效性为 NULL,查看者支为 TRUE(读者)或 NULL(空查看者)。
+            cells.add(("nb-n", "nb-b", viewer))
+    return frozenset(cells)
 
 
 # 查看者支单独在挂载人未知(a = nb-n)下的判定:只认「查看者自己能读 b」。
@@ -396,7 +440,8 @@ def mount_viewer_contract_failures(
 
     `query(sql, params)` 返回每行第一列组成的列表。三种用法各跑一遍:join 骨架 +
     过滤后缀 + 排序、`IN (...)` 子查询、以及把布尔谓词当投影列——任何一种拼装方式
-    漏掉查看者都会在这里现形。
+    漏掉查看者都会在这里现形。另跑一遍 `NOT MOUNT_EFFECTIVE_FOR_VIEWER_EXPR`:它必须
+    拿回全部无效边,包括裸谓词求出 NULL 的那些(三值取反会把它们静默漏掉)。
     """
     failures: list[str] = []
     filtered = (
@@ -417,6 +462,21 @@ def mount_viewer_contract_failures(
         + module.MOUNT_VIEWER_JOIN
     )
     old = "SELECT b.id " + module.MOUNT_JOIN + module.MOUNT_VALID + module.MOUNT_ORDER
+    # 后来的调用方找「对此人无效的边」最自然的写法:对公开布尔列取反。
+    not_effective = (
+        "SELECT b.id "
+        + module.MOUNT_VIEWER_JOIN
+        + " AND NOT "
+        + module.MOUNT_EFFECTIVE_FOR_VIEWER_EXPR
+    )
+    raw_is_null = (
+        "SELECT b.id "
+        + module.MOUNT_VIEWER_JOIN
+        + " AND "
+        + module._MOUNT_EFFECTIVE_FOR_VIEWER_PRED
+        + " IS NULL"
+    )
+    null_cells: set = set()
 
     for notebook_id, old_expected in OLD_MOUNT_EFFECTIVE.items():
         old_ordered = query(old, (notebook_id,))
@@ -432,13 +492,24 @@ def mount_viewer_contract_failures(
             got_in = frozenset(query(in_subquery, params))
             if got_in != expected:
                 failures.append(f"{case} in-subquery: {sorted(got_in)}")
-            got_projected = frozenset(
-                row_id
-                for row_id, ok in query(projected, params, all_columns=True)
-                if ok
-            )
+            projected_rows = query(projected, params, all_columns=True)
+            got_projected = frozenset(row_id for row_id, ok in projected_rows if ok)
             if got_projected != expected:
                 failures.append(f"{case} projected: {sorted(got_projected)}")
+            nulls = sorted(row_id for row_id, ok in projected_rows if ok is None)
+            if nulls:
+                failures.append(f"{case} projected NULL (not a boolean): {nulls}")
+            # 取反必须拿回全部无效边,包括裸谓词为 NULL 的那几条。
+            got_not = frozenset(query(not_effective, params))
+            want_not = ALL_MOUNT_EDGES[notebook_id] - expected
+            if got_not != want_not:
+                failures.append(
+                    f"{case} not-effective: {sorted(got_not)} != {sorted(want_not)}"
+                )
+            null_cells.update(
+                (notebook_id, base_id, viewer)
+                for base_id in query(raw_is_null, params)
+            )
             # 收窄只许收,不许扩;对挂载人本人逐字等于今天的有效集合。
             if not expected <= old_expected:
                 failures.append(f"{case}: 期望值跑出了旧有效集合")
@@ -450,6 +521,14 @@ def mount_viewer_contract_failures(
         swapped = query(filtered, (notebook_id, MOUNTER.get(notebook_id, "u-owner")))
         if swapped:
             failures.append(f"{notebook_id} swapped binding returned {swapped}")
+
+    want_null_cells = expected_viewer_predicate_null_cells()
+    if null_cells != want_null_cells:
+        failures.append(
+            "raw predicate NULL cells: missing "
+            f"{sorted(want_null_cells - null_cells, key=repr)}, extra "
+            f"{sorted(null_cells - want_null_cells, key=repr)}"
+        )
 
     reach = (
         "SELECT 1 FROM notebooks a CROSS JOIN notebooks b CROSS JOIN "

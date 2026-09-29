@@ -4,10 +4,12 @@
 判定器),这里只换方言跑一遍——`postgres/mount_sql.py` 的 `%s` 拼装、`CAST(... AS text)`
 的查看者行、以及 `COLLATE "C"` 列与查看者值的比较都要在真 PG 上判出同一个集合。
 
-EXPLAIN pin:这些片段在后续波次会进参与集解析、KG 可用性门与 follow 起点子查询,
-都是每次提问都跑的热路径。夹具是真实形状的几千本笔记本(规模选在计划器会在两种
-join 之间取舍的那一段,理由与实测表见 `PIN_NOTEBOOKS`),断言默认代价下新片段不顺序
-扫描任何访问控制表,并保留 `enable_seqscan=off` 的能力判据。
+EXPLAIN pin:同一轮整改的任务 E6-2 把参与集解析、KG 可用性门与 follow 起点子查询
+切到这些片段,都是每次提问都跑的热路径(此刻还没有调用点)。夹具是真实形状的几千本
+笔记本,跑 3000/6000/8000 三档(规模选在计划器会在两种 join 之间取舍的那一段,理由与
+实测表见 `PIN_SCALES`),custom 与 generic 两种计划都看:断言发布的片段不顺序扫描任何
+访问控制表,保留 `enable_seqscan=off` 的能力判据,并用正对照证明已知的回退写法在同一
+夹具上确实会翻成顺序扫描。
 """
 from __future__ import annotations
 
@@ -15,6 +17,7 @@ import re
 
 import psycopg
 import pytest
+from psycopg import sql
 
 from app.repositories.postgres import mount_sql as pg_mount_sql
 from app.repositories.postgres._store_utils import normalize_timestamp
@@ -83,20 +86,41 @@ def test_postgres_viewer_fragments_refuse_a_single_parameter(pg_mount_world):
 # 全部由 generate_series + hashtext 确定性地生成(同一份输入在任何机器上是同一份数据),
 # 用 ON CONFLICT DO NOTHING 吸收伪随机撞上的主键。
 #
-# 规模为什么是 6000:这条 pin 只在「计划器可能翻成 hash join + 顺序扫描 notebooks」
-# 的那一段规模上才有牙齿。实测(本夹具,探针 nbP0,估算代价,NL = 按主键逐条取被挂库,
-# hash = 顺序扫描 notebooks 建哈希表):
+# 这条 pin 只在「计划器可能翻成 hash join + 顺序扫描 notebooks」的那一段规模上才有
+# 牙齿,所以不止跑一档规模,也不只看 custom plan。要挡的回退是「查看者支变成 join
+# 条件」:往查看者支里加一支引用挂载方 a 的条件(把 `v.uid = a.created_by` 加回来),
+# 或者把整个谓词包进 COALESCE 再当过滤条件用。两者在本夹具上(PG 16,探针 nbP0,每档
+# 规模重复 ANALYZE 5 次,结论不变)的表现:
 #
-#     规模   旧片段 NL / hash    新片段 NL / hash     查看者支里加回引用 a 的一支 NL / hash
-#     3000   (旧片段自己已翻成 hash)                  —
-#     5000   259.6 / 261.2       392.3 / 233121       445.7 / 261.2  → 翻
-#     6000   209.5 / 310.4       321.1 / 229330       362.0 / 310.4  → 翻
-#     8000   213.1 / 409.9       306.8 / 271602       348.6 / 409.9  → 不翻,pin 空转
+#     规模     custom plan                     generic plan(force_generic_plan)
+#     3000     三种形状都翻(空查看者除外)      三种形状都翻,含空查看者
+#     6000     filtered / in_subquery 翻        filtered / in_subquery 翻
+#     8000     都不翻                           filtered / in_subquery 翻
+#     20000    都不翻                           都不翻
 #
-# 6000 本时旧片段离翻转有近五成余量(前置断言稳定),而「查看者支变成 join 条件」
-# 这种回退仍会让新片段翻成顺序扫描,正好是要挡的那一类。新片段的 hash 代价高出
-# 几个数量级,是因为查看者支只引用 b,被下推到 b 的扫描上逐行求值读权子查询。
-PIN_NOTEBOOKS = 6000
+# 发布的片段在这四档、两种计划、四类查看者下都没有任何顺序扫描。20000 档对回退没有
+# 鉴别力,所以不跑。custom plan 下空查看者不翻,是因为 `NULL = a.created_by` 被常量
+# 折叠掉了;generic plan 看不到参数值,折叠不了。
+#
+# `PIN_SCALES` 记下每档规模上正对照必须翻的(计划, 形状):这些格子里回退写法**必须**
+# 出现 `Seq Scan on notebooks`。计划器或统计口径一变、回退不再翻,正对照先红——pin
+# 不会悄悄变成空转。`exists` 形状(KG 可用性门)是 EXISTS 子查询,计划器按首行代价
+# 选 nested loop,只有 3000 这一档它才翻,所以它的鉴别力只挂在 3000 上;6000/8000
+# 两档它只承担「没有顺序扫描」与 `enable_seqscan=off` 能力判据。
+PIN_SCALES: dict[int, dict[str, tuple[str, ...]]] = {
+    3000: {
+        "custom": ("filtered", "exists", "in_subquery"),
+        "generic": ("filtered", "exists", "in_subquery"),
+    },
+    6000: {
+        "custom": ("filtered", "in_subquery"),
+        "generic": ("filtered", "in_subquery"),
+    },
+    8000: {
+        "custom": (),
+        "generic": ("filtered", "in_subquery"),
+    },
+}
 PIN_USERS = 1000
 PIN_GROUPS = 200
 
@@ -213,77 +237,147 @@ _PIN_VIEWERS = (("member", "u500"), ("mounter", "u7"), ("reader", "u501"), ("emp
 
 
 @pytest.fixture
-def pg_realistic_mounts(postgres_database):
+def pg_realistic_mounts(request, postgres_database):
+    """`request.param` 本笔记本规模的真实形状夹具,返回 `(database, 规模)`。"""
+    notebooks = request.param
     PostgresMigrator(postgres_database).migrate()
     now = normalize_timestamp("2026-01-01T00:00:00+00:00")
     with postgres_database.write() as db:
         db.execute("SET LOCAL statement_timeout = '0'")
-        seed_realistic_mount_fixture(db.execute, PIN_NOTEBOOKS, now)
+        seed_realistic_mount_fixture(db.execute, notebooks, now)
     # VACUUM 设置可见性图、ANALYZE 给出真实选择度;不能进事务,走独立 autocommit 连接。
     with psycopg.connect(
         postgres_database.settings.database_url, autocommit=True
     ) as raw:
         for table in _ACCESS_TABLES + ("users", "groups"):
             raw.execute(f"VACUUM (ANALYZE) {table}")
-    return postgres_database
+    return postgres_database, notebooks
 
 
-def _plan(connection, sql: str, params: tuple, *, seqscan: bool = True) -> str:
+def _plan(
+    connection, query: str, params: tuple, *, mode: str = "custom", seqscan: bool = True
+) -> str:
+    """`mode="custom"`:带参数的 EXPLAIN,计划器看得到参数值(psycopg 默认、前 5 次
+    执行的形态)。`mode="generic"`:`PREPARE` + `force_generic_plan`,计划器看不到参数值
+    ——psycopg 第 5 次执行起改用服务端预编译语句,PostgreSQL 之后可能改用这种计划。
+    两者都在连接池的隐式事务里 `SET LOCAL`(池是 `autocommit=False`),事务结束自动复原。"""
     if not seqscan:
-        connection.execute("SET LOCAL enable_seqscan=off")
-    rows = connection.execute(f"EXPLAIN (COSTS OFF) {sql}", params).fetchall()
+        connection.execute("SET LOCAL enable_seqscan = off")
+    if mode == "custom":
+        rows = connection.execute(f"EXPLAIN (COSTS OFF) {query}", params).fetchall()
+    else:
+        assert mode == "generic", mode
+        connection.execute("SET LOCAL plan_cache_mode = force_generic_plan")
+        counter = iter(range(1, query.count("%s") + 1))
+        dollar = re.sub(r"%s", lambda _match: f"${next(counter)}", query)
+        types = ", ".join(["text"] * len(params))
+        connection.execute(f"PREPARE mount_pin({types}) AS {dollar}")
+        # EXECUTE 是 utility 语句,不能走扩展协议传参:实参用 sql.Literal 内联(只是
+        # 喂值;generic plan 的判据在 PREPARE 的 $n 参数位上)。
+        literals = ", ".join(sql.Literal(value).as_string(None) for value in params)
+        rows = connection.execute(
+            f"EXPLAIN (COSTS OFF) EXECUTE mount_pin({literals})"
+        ).fetchall()
+        connection.execute("DEALLOCATE mount_pin")
+        connection.execute("RESET plan_cache_mode")
     if not seqscan:
         connection.execute("RESET enable_seqscan")
     return "\n".join(str(row["QUERY PLAN"]) for row in rows)
 
 
-def _shapes(module, *, viewer: bool) -> dict[str, str]:
-    """后续波次的三种消费形状:过滤+排序(参与集)、EXISTS 门(KG 可用性)、
-    IN 子查询(follow 起点)。`viewer=False` 给出同形的旧片段作基线。"""
-    join = module.MOUNT_VIEWER_JOIN if viewer else module.MOUNT_JOIN
-    valid = module.MOUNT_EFFECTIVE_FOR_VIEWER if viewer else module.MOUNT_VALID
-    ids = (
-        module.MOUNTED_BASE_IDS_FOR_VIEWER_SUBQUERY
-        if viewer
-        else module.MOUNTED_BASE_IDS_SUBQUERY
-    )
+def _shapes(join: str, effective: str) -> dict[str, str]:
+    """E6-2 的三种消费形状:过滤+排序(参与集)、EXISTS 门(KG 可用性)、IN 子查询
+    (follow 起点)。`effective` 是追加在 `join` 之后的有效性过滤后缀。"""
     return {
-        "filtered": "SELECT b.id " + join + valid + module.MOUNT_ORDER,
-        "exists": "SELECT EXISTS(SELECT 1 " + join + valid + ")",
-        "in_subquery": "SELECT n.id FROM notebooks n WHERE n.id IN (" + ids + ")",
+        "filtered": "SELECT b.id " + join + effective + pg_mount_sql.MOUNT_ORDER,
+        "exists": "SELECT EXISTS(SELECT 1 " + join + effective + ")",
+        "in_subquery": (
+            "SELECT n.id FROM notebooks n WHERE n.id IN (SELECT b.id "
+            + join + effective + ")"
+        ),
+    }
+
+
+def _shipped_shapes() -> dict[str, str]:
+    shapes = _shapes(
+        pg_mount_sql.MOUNT_VIEWER_JOIN, pg_mount_sql.MOUNT_EFFECTIVE_FOR_VIEWER
+    )
+    # IN 子查询形状用发布的子查询常量本身,而不是就地重拼。
+    shapes["in_subquery"] = (
+        "SELECT n.id FROM notebooks n WHERE n.id IN ("
+        + pg_mount_sql.MOUNTED_BASE_IDS_FOR_VIEWER_SUBQUERY + ")"
+    )
+    return shapes
+
+
+def _regressed_shapes() -> dict[str, dict[str, str]]:
+    """已知的坏写法(正对照):都让查看者支变成 join 条件。"""
+    valid = pg_mount_sql.MOUNT_VALID_EXPR
+    arm = pg_mount_sql._VIEWER_REACHES_MOUNT_EXPR
+    assert arm.endswith(")")
+    mounter_arm = arm[:-1] + " OR v.uid = a.created_by)"
+    return {
+        # 把挂载人支加回查看者支(E6-1 第一版的写法)。
+        "mounter_arm": _shapes(
+            pg_mount_sql.MOUNT_VIEWER_JOIN,
+            " AND (" + valid + " AND " + mounter_arm + ")",
+        ),
+        # 拿公开布尔列 `MOUNT_EFFECTIVE_FOR_VIEWER_EXPR`(COALESCE 版)当正向过滤条件。
+        "coalesce_filter": _shapes(
+            pg_mount_sql.MOUNT_VIEWER_JOIN,
+            " AND " + pg_mount_sql.MOUNT_EFFECTIVE_FOR_VIEWER_EXPR,
+        ),
     }
 
 
 _SEQ_SCAN = re.compile(r"Seq Scan on (" + "|".join(_ACCESS_TABLES) + r")\b")
 
 
+@pytest.mark.parametrize("pg_realistic_mounts", sorted(PIN_SCALES), indirect=True)
 def test_viewer_fragments_keep_the_index_path_at_realistic_scale(pg_realistic_mounts):
-    """默认代价下,新片段在旧片段走索引的那个规模上同样不顺序扫描任何访问控制表。
+    """发布的片段不顺序扫描任何访问控制表;已知的回退写法在同一夹具上必须顺序扫描。
 
-    * **前置**:旧片段的三种形状在这套夹具上都没有 `Seq Scan on notebooks`。它失败
-      说明夹具不再落在要钉的那一段规模上(计划器版本或代价参数变了),要先重新定
-      规模,而不是放宽下面的断言。
-    * **主断言**(绝对判据,不是「⊆ 旧片段」):对每种形状、每类查看者,新片段的
-      计划里没有任何 `Seq Scan on <访问控制表>`。
+    * **主断言**(绝对判据):每档规模、每种形状、每类查看者(含空查看者)、custom 与
+      generic 两种计划,发布片段的计划里都没有 `Seq Scan on <访问控制表>`。
     * **能力**(`enable_seqscan=off`,沿用 `test_cluster_generation_explain_pins.py`
       的 scale-free 判据):关掉顺序扫描后仍出现 `Seq Scan on <表>`,说明那张表根本
       没有可用的索引路径——例如查看者值与 `COLLATE "C"` 列比较时排序规则不一致。
+    * **正对照**:`PIN_SCALES` 列出的每个 (计划, 形状) 格子里,两种已知回退写法都
+      必须出现 `Seq Scan on notebooks`(custom plan 跳过空查看者,理由见 `PIN_SCALES`
+      上方的注释)。它红了说明夹具不再落在回退会翻转的那段规模上,主断言已经不能
+      区分好坏——要重新定规模,而不是删掉正对照。它取代了旧版「旧片段不顺序扫描」
+      那条前置断言:旧片段在 3000 档自己就顺序扫描,而正对照直接证明这档有鉴别力。
     """
-    old_shapes = _shapes(pg_mount_sql, viewer=False)
-    new_shapes = _shapes(pg_mount_sql, viewer=True)
-    with pg_realistic_mounts.connect() as connection:
-        for name, sql in old_shapes.items():
-            plan = _plan(connection, sql, (_PROBE,))
-            assert "Seq Scan on notebooks" not in plan, (
-                f"前置失败:旧片段 {name} 在 {PIN_NOTEBOOKS} 本的夹具上已经顺序扫描 "
-                f"notebooks,这条 pin 失去基线:\n{plan}"
-            )
-        for name, sql in new_shapes.items():
+    database, notebooks = pg_realistic_mounts
+    shipped = _shipped_shapes()
+    regressed = _regressed_shapes()
+    with database.connect() as connection:
+        for name, query in shipped.items():
             for label, viewer in _PIN_VIEWERS:
                 params = (viewer, _PROBE)
-                plan = _plan(connection, sql, params)
-                assert not _SEQ_SCAN.search(plan), f"{name} / {label}:\n{plan}"
-                capability = _plan(connection, sql, params, seqscan=False)
+                for mode in ("custom", "generic"):
+                    plan = _plan(connection, query, params, mode=mode)
+                    assert not _SEQ_SCAN.search(plan), (
+                        f"{notebooks} 本 / {mode} / {name} / {label}:\n{plan}"
+                    )
+                capability = _plan(connection, query, params, seqscan=False)
                 assert not _SEQ_SCAN.search(capability), (
-                    f"{name} / {label}(enable_seqscan=off):\n{capability}"
+                    f"{notebooks} 本 / {name} / {label}(enable_seqscan=off):\n{capability}"
                 )
+        for mode, shape_names in PIN_SCALES[notebooks].items():
+            viewers = [
+                (label, viewer)
+                for label, viewer in _PIN_VIEWERS
+                if mode == "generic" or viewer is not None
+            ]
+            for variant, shapes in regressed.items():
+                for name in shape_names:
+                    for label, viewer in viewers:
+                        plan = _plan(
+                            connection, shapes[name], (viewer, _PROBE), mode=mode
+                        )
+                        assert "Seq Scan on notebooks" in plan, (
+                            f"正对照失效:{notebooks} 本 / {mode} / {variant} / {name} / "
+                            f"{label} 不再顺序扫描 notebooks,这条 pin 在这档规模上已经"
+                            f"失去鉴别力,重新定规模:\n{plan}"
+                        )

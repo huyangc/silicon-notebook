@@ -9,6 +9,11 @@ PG 侧独有的事实只有一条:查看者行写成 `(SELECT NULLIF(CAST(%s AS 
 比较时 `v.uid` 取默认排序规则,与 `COLLATE "C"` 的列相遇时让位给列的隐式排序规则,
 所以成员/授权边的主键索引照常可用(EXPLAIN pin 在
 `tests/postgres/test_mount_sql_viewer_pg.py`)。
+
+带查看者片段的其余说明都写在 SQLite 那一份:三值与布尔的分工(过滤用
+`MOUNT_EFFECTIVE_FOR_VIEWER`,投影与取反用 `MOUNT_EFFECTIVE_FOR_VIEWER_EXPR`),以及
+「两组片段并存」(此刻没有任何调用点 import 带查看者的片段,同一轮整改的任务
+E6-2 / E6-3 切换调用点)。
 """
 
 from app.repositories.postgres.access_sql import (
@@ -99,11 +104,17 @@ _VIEWER_REACHES_MOUNT_EXPR = (
     + ")"
 )
 
-MOUNT_EFFECTIVE_FOR_VIEWER_EXPR = (
+# 三值裸谓词,只许作 WHERE 的合取项;投影与取反用下面的 COALESCE 版本(把它当正向
+# 过滤会让整个谓词变成 join 条件,计划随之翻成顺序扫描)。
+_MOUNT_EFFECTIVE_FOR_VIEWER_PRED = (
     "(" + MOUNT_VALID_EXPR + " AND " + _VIEWER_REACHES_MOUNT_EXPR + ")"
 )
 
-MOUNT_EFFECTIVE_FOR_VIEWER = " AND " + MOUNT_EFFECTIVE_FOR_VIEWER_EXPR
+MOUNT_EFFECTIVE_FOR_VIEWER_EXPR = (
+    "COALESCE(" + _MOUNT_EFFECTIVE_FOR_VIEWER_PRED + ", FALSE)"
+)
+
+MOUNT_EFFECTIVE_FOR_VIEWER = " AND " + _MOUNT_EFFECTIVE_FOR_VIEWER_PRED
 
 MOUNTED_BASE_IDS_FOR_VIEWER_SUBQUERY = (
     "SELECT b.id " + MOUNT_VIEWER_JOIN + MOUNT_EFFECTIVE_FOR_VIEWER
