@@ -39,6 +39,7 @@ _ID_ARGUMENT = {
     "_qualified_active": 1,
     "_withheld_active": None,
     "reasoning_order_for": 2,
+    "reasoning_passage_order": None,
     "active_reserve_rule": 2,
     "library_reserve_rules": 2,
     "library_floor_rules": 1,
@@ -48,6 +49,7 @@ _ID_ARGUMENT = {
 # Every production call site, as ``file::enclosing function -> callee``.  A new
 # one must be added here, after checking it passes the run's real id.
 _REGISTERED = {
+    "services/ask_service.py::_answer_chunks -> active_reserve_rule",
     "services/ask_service.py::_answer_reasoning -> reasoning_order_for",
     "services/ask_service.py::_assemble_structured_evidence -> reasoning_order_for",
     "services/ask_service.py::ask_chunk -> mix_reserve_rules",
@@ -58,6 +60,7 @@ _REGISTERED = {
     "services/chunk_federation.py::_withheld_active -> _qualified_active",
     "services/chunk_federation.py::_qualified_active -> active_reserve_eligible",
     "services/chunk_federation.py::apply_active_reserve -> enforce_active_floor",
+    "services/chunk_federation.py::reasoning_order_for -> reasoning_passage_order",
     "services/reasoning_retrieval.py::_select_chunk_candidates -> select_chunk_candidates",
     "services/reasoning_retrieval.py::_rerank_chunk_selection -> apply_active_reserve",
     "services/report_engine.py::_section_passage_order -> reasoning_order_for",
@@ -75,10 +78,22 @@ _REGISTERED = {
 }
 
 
-def _call_sites():
+def _aliases(tree) -> dict:
+    """``{local name: original}`` for every ``from x import f as g`` of a
+    tracked function, so an alias cannot slip a call past the guard."""
+    return {
+        alias.asname: alias.name
+        for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        if alias.asname and alias.name in _ID_ARGUMENT
+    }
+
+
+def _call_sites(root=APP):
     sites = []
-    for path in sorted(APP.rglob("*.py")):
+    for path in sorted(root.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        aliases = _aliases(tree)
         stack: list[str] = []
 
         class _Visitor(ast.NodeVisitor):
@@ -98,8 +113,9 @@ def _call_sites():
                 func = node.func
                 name = (func.attr if isinstance(func, ast.Attribute)
                         else getattr(func, "id", None))
+                name = aliases.get(name, name)
                 if name in _ID_ARGUMENT:
-                    where = f"{path.relative_to(APP)}::{'.'.join(stack)} -> {name}"
+                    where = f"{path.relative_to(root)}::{'.'.join(stack)} -> {name}"
                     sites.append((where, name, node))
                 self.generic_visit(node)
 
@@ -129,12 +145,28 @@ def test_every_call_site_passes_the_run_id_and_is_registered():
             where, value.id)
 
 
+def test_an_import_alias_does_not_hide_a_call_site(tmp_path):
+    (tmp_path / "mod.py").write_text(
+        "from app.services.retrieval import enforce_active_floor as floor\n"
+        "def f(rows):\n"
+        "    return floor(rows, rows, 1, active_notebook_id='')\n",
+        encoding="utf-8")
+    sites = _call_sites(tmp_path)
+    assert [where for where, _name, _node in sites] == [
+        "mod.py::f -> enforce_active_floor"]
+
+
 @pytest.mark.parametrize("function", [
     retrieval.is_active_hit,
     retrieval.active_reserve_eligible,
     retrieval.enforce_active_floor,
     retrieval.quota_fuse_baseline_first,
     cf.reasoning_order_for,
+    retrieval.reasoning_passage_order,
+    retrieval.active_reserve_rule,
+    retrieval.library_reserve_rules,
+    retrieval.library_floor_rules,
+    retrieval.mix_reserve_rules,
     cf.apply_active_reserve,
     RetrievalService.select_chunk_candidates,
     *[

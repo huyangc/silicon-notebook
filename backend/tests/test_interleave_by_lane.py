@@ -8,7 +8,7 @@ relevance and then alternates the two lanes (`interleave_by_lane`), so neither
 lane can evict the other wholesale under the character budget. Exact-lookup
 passages are anchored at their relevance position (they do not alternate), and
 the exact prefix seat is applied AFTER the interleave and stays in front. The
-whole order lives in `retrieval.order_reasoning_passages`, shared with deep-report
+whole order lives in `retrieval.reasoning_passage_order`, shared with deep-report
 section drafting.
 """
 from __future__ import annotations
@@ -19,9 +19,9 @@ from app.domain.retrieval import RetrievalSupport, RetrievedChunk
 from app.services.retrieval import (
     interleave_by_lane,
     is_exact_lookup_chunk,
-    order_reasoning_passages,
     prefer_stronger_chunk_candidate,
     promote_bounded_prefix_by_library,
+    reasoning_passage_order,
     relevance_on_ppr_scale,
 )
 from tests.test_exact_lookup import repo  # noqa: F401  (repo fixture)
@@ -294,7 +294,10 @@ def test_two_lanes_interleave_alongside_a_two_library_exact_seat_split():
     chunks = a_exact + b_exact + ppr + seeded
     reserve = 4
 
-    actual = order_reasoning_passages(chunks, exact_reserve=reserve)
+    # Seatless (no library floor): the three-step order under test.
+    actual = reasoning_passage_order(
+        chunks, exact_reserve=reserve, active_reserve=0, library_reserve=0,
+        active_notebook_id="a").passages
     pre = _pre_interleave_order(chunks, reserve)
 
     # (a) a permutation of the input.

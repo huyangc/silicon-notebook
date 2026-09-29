@@ -21,7 +21,6 @@ from app.services import chunk_federation as cf
 from app.services.chunk_federation import reasoning_order_for
 from app.services.retrieval import (
     RELEVANCE_FLOOR,
-    order_reasoning_passages,
     reasoning_passage_order,
 )
 from tests.test_exact_lookup import repo  # noqa: F401  (fixture)
@@ -43,6 +42,13 @@ def _p(chunk_id, relevance, *, notebook_id="", origin="semantic", exact=False,
 
 def _ids(rows):
     return [row.chunk_id for row in rows]
+
+
+def _three_step(chunks, exact_reserve):
+    """The order before step 4: no library seat."""
+    return reasoning_passage_order(
+        chunks, exact_reserve=exact_reserve, active_reserve=0,
+        library_reserve=0, active_notebook_id=ACTIVE).passages
 
 
 def _order(chunks, *, exact=4, active=0, library=0, active_id=ACTIVE, held=()):
@@ -70,7 +76,7 @@ def test_single_notebook_order_is_byte_identical_with_own_id_ppr_stamps():
         + [_p(f"seed-{i}", 0.4 - i * 0.02) for i in range(6)]
         + [_p("exact", 1.0, exact=True)]
     )
-    before = order_reasoning_passages(chunks, exact_reserve=4)
+    before = _three_step(chunks, exact_reserve=4)
     got = _order(chunks, active=4)
     assert _ids(got.passages) == _ids(before)
     assert got.prefix == 1
@@ -81,7 +87,7 @@ def test_single_notebook_order_is_byte_identical_with_own_id_ppr_stamps():
 def test_seatless_order_is_the_three_step_order():
     chunks = _pool()
     assert _ids(_order(chunks, active=0).passages) == _ids(
-        order_reasoning_passages(chunks, exact_reserve=4))
+        _three_step(chunks, exact_reserve=4))
 
 
 # ---------------------------------------------------------------- the prefix
@@ -138,7 +144,7 @@ def test_no_eligible_active_passage_moves_nothing():
     chunks = [_p(f"ref-{i}", 0.9, notebook_id="ref") for i in range(4)] + [
         _p("weak", 0.05)]
     got = _order(chunks, exact=0, active=4)
-    assert _ids(got.passages) == _ids(order_reasoning_passages(chunks, exact_reserve=0))
+    assert _ids(got.passages) == _ids(_three_step(chunks, exact_reserve=0))
     assert got.prefix == 0
 
 
@@ -172,7 +178,7 @@ def test_peer_run_shares_the_prefix_per_library():
 def test_peer_run_with_one_library_is_inert():
     pool = [chunk for chunk in _peer_pool() if chunk.notebook_id == "nb-z"]
     got = _order(pool, exact=0, library=3, active_id="nb-z")
-    assert _ids(got.passages) == _ids(order_reasoning_passages(pool, exact_reserve=0))
+    assert _ids(got.passages) == _ids(_three_step(pool, exact_reserve=0))
     assert got.prefix == 0
 
 
@@ -320,5 +326,50 @@ def test_reasoning_synthesis_passes_the_real_id(repo):  # noqa: F811
             notebook.id, "q", [], [], chunks=chunks, chunk_context_chars=10_000)
     finally:
         AskService._chunk_answer_context = real
-    assert captured[0] == _ids(order_reasoning_passages(
+    assert captured[0] == _ids(_three_step(
         chunks, exact_reserve=repo.settings.reasoning_exact_reserve))
+
+
+def _idle_seat_pool():
+    shared = "one passage held by two libraries"
+    return [
+        _p("z-0", 0.9, notebook_id="nb-z", text=shared),
+        # Z's other rows are graph-only: ranked high, never seat-eligible, so
+        # Z's capacity is exactly one.
+        *[_p(f"z-{i}", 0.9 - i * 0.01, notebook_id="nb-z", origin="ppr")
+          for i in range(1, 6)],
+        _p("b-0", 0.35, notebook_id="nb-b", text=shared),
+        _p("c-0", 0.3, notebook_id="nb-c"),
+        _p("c-1", 0.29, notebook_id="nb-c"),
+    ]
+
+
+def test_peer_prefix_hands_on_a_seat_whose_only_passage_is_a_copy():
+    """B's only passage repeats Z's better-ranked copy: B has no capacity, so
+    its seat goes to C instead of staying idle."""
+    got = _order(_idle_seat_pool(), exact=0, library=3, active_id="nb-z")
+    assert _ids(got.passages[:got.prefix]) == ["z-0", "c-0", "c-1"]
+
+
+def test_peer_report_bound_passages_spend_their_librarys_seat(repo, monkeypatch):  # noqa: F811
+    from app.services.retrieval import ReasoningPassageOrder  # noqa: F401
+
+    monkeypatch.setattr(cf, "federated_ask_active", lambda: True)
+    pool = [_p(f"z-{i}", 0.9 - i * 0.01, notebook_id="nb-z") for i in range(6)] + [
+        _p("b-0", 0.3, notebook_id="nb-b"), _p("c-0", 0.25, notebook_id="nb-c")]
+    bound = [_p("b-bound", 0.1, notebook_id="nb-b")]
+    free = _order(pool, exact=0, library=3, active_id="nb-z")
+    held = _order(pool, exact=0, library=3, active_id="nb-z", held=bound)
+    assert "b-0" in _ids(free.passages[:free.prefix])
+    assert "b-0" not in _ids(held.passages[:held.prefix])
+
+
+def test_seat_identity_is_the_raw_text():
+    """Whitespace is part of the identity everywhere (no stripping drift):
+    ``" x "`` and ``"x"`` are two passages."""
+    chunks = [_p(f"ref-{i}", 0.9, notebook_id="ref") for i in range(4)] + [
+        _p("exact-ref", 1.0, notebook_id="ref", exact=True, text="x"),
+        _p("mine-padded", 0.5, text=" x "),
+    ]
+    got = _order(chunks, exact=4, active=1)
+    assert _ids(got.passages)[:2] == ["exact-ref", "mine-padded"]

@@ -408,7 +408,7 @@ Agent profile、opaque token、scope/allowlist/过期与撤销、公开 onboardi
 
 ## 47. 当前库保底席位与原文段下限（2026-09-29）
 
-**已交付，2026-09-29；方案 §19 两层知识库的延伸（来源范围与引用可信度修复计划 PR-C）。** 挂了参考库时，当前笔记本在每一处机械切分里都保有 `CHUNK_FEDERATION_ACTIVE_RESERVE` 的席位：`chunk` 模式的 MMR / 配额融合 / mix 最终切分，`reasoning` 单次合成、按节合成（只在本节绑定段之间）与深度报告逐节撰写的原文段前缀；全局问答没有主体库，同样的席位按最佳命中顺序逐库分配。判据、席位数、相同正文一席、「无参考库条目则惰性」只有一处定义，未挂参考库的笔记本逐字节不变；reasoning 合成里先于原文段装配的结构化块按原文段下限渲染，不再把精确与保底段落挤到 0 字符。保底只约束机械切分，不覆盖证据精炼与大纲绑定。
+**已交付，2026-09-29；方案 §19 两层知识库的延伸（来源范围与引用可信度修复计划 PR-C）。** 挂了参考库时，当前笔记本在每一处机械切分里都保有 `CHUNK_FEDERATION_ACTIVE_RESERVE` 的席位：`chunk` 模式的 MMR / 配额融合 / mix 最终切分，`reasoning` 单次合成、按节合成（只在本节绑定段之间）与深度报告逐节撰写的原文段前缀；全局问答没有主体库，同样的席位按最佳命中顺序逐库分配。判据、席位数、相同正文一席、「无参考库条目则惰性」只有一处定义；未挂参考库时席位恒惰性。reasoning 合成里先于原文段装配的结构化块按原文段下限渲染，不再把精确与保底段落挤到 0 字符——下限的精确前缀部分对单库同样生效（比例为 0 时也是），但只改变结构化块本会把精确段落挤出去的那类运行，其余运行逐字节不变。保底只约束机械切分，不覆盖证据精炼与大纲绑定。
 
 合同、数值与回滚开关见[检索模式问答][retrieval]、[全局问答][global]与[部署][deploy]；回归入口：[mix 席位](backend/tests/test_mix_reserve_seats.py)、[reasoning 前缀](backend/tests/test_reasoning_library_reserve.py)、[原文段下限](backend/tests/test_reasoning_passage_floor.py)、[当前库 id 贯通](backend/tests/test_active_notebook_id_threading.py)。
 

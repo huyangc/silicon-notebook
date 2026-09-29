@@ -1168,9 +1168,14 @@ def library_reserve_rules(
     ``seats`` (``chunk_federation.peer_library_reserve_seats``, 0 outside
     peer mode) is split by ``library_seats`` in ``libraries_by_best_hit``
     order -- the split ``exact_section_reserve_rules`` uses -- over each
-    library's eligible first copies (``reserve_eligible``), a library with
-    fewer eligible rows than its share passing the rest on.  One
-    ``_first_copy_rule`` per library, placed after the exact rules.
+    library's eligible rows that are the FIRST copy of their text across the
+    whole ranking (``reserve_eligible``), a library with fewer such rows than
+    its share passing the rest on.  Whole-ranking identity, not per library:
+    a row whose text a better-ranked copy in another library already carries
+    can never fill a seat (``distinct_text`` skips it at selection time), so
+    counting it as capacity would leave that seat idle instead of handing it
+    to a library that still has candidates.  One ``_first_copy_rule`` per
+    library, placed after the exact rules.
 
     Inert (``()``) with ``seats <= 0`` or when the baseline rows span a
     single library.  A row's library is its stamp, an empty stamp standing for
@@ -1189,18 +1194,71 @@ def library_reserve_rules(
     rows: Dict[str, List["RetrievedChunk"]] = {}
     for chunk in baseline:
         rows.setdefault(_library(chunk), []).append(chunk)
-    rules = {
-        library: _first_copy_rule(0, members, reserve_eligible)
-        for library, members in rows.items()
-    }
+    first: Dict[str, str] = {}
+    for chunk in baseline:
+        first.setdefault(chunk.text, chunk.chunk_id)
     eligible = [
-        chunk for chunk in baseline if rules[_library(chunk)].admits(chunk)
+        chunk for chunk in baseline
+        if first[chunk.text] == chunk.chunk_id and reserve_eligible(chunk)
     ]
     return tuple(
         _first_copy_rule(count, rows[library], reserve_eligible)
         for library, count in library_seats(
             seats, libraries_by_best_hit(eligible, _library))
     )
+
+
+def _rendered_chars(rows: Sequence["RetrievedChunk"], id_offset: int) -> int:
+    """What ``EvidenceContextBuilder.chunk_context`` spends rendering ``rows``
+    whole: one ``k{n}: `` prefix plus the text per row, one newline between."""
+    return sum(
+        len(f"k{index + id_offset}: ") + len(row.text or "")
+        for index, row in enumerate(rows, 1)
+    ) + max(0, len(rows) - 1)
+
+
+def spare_reserved_rows(
+    rows: Sequence["RetrievedChunk"],
+    budget_chars: int,
+    rule: ReserveRule,
+    *,
+    id_offset: int = 0,
+) -> List["RetrievedChunk"]:
+    """Make a character-budget render cut spare the rows holding a seat.
+
+    ``chunk`` mode's MMR / quota floor (``enforce_active_floor``) swaps the
+    active notebook's reserved rows into the TAIL positions of a finished
+    selection, and the answer prompt renders that selection in order against
+    ``CHUNK_ANSWER_BUDGET_CHARS`` -- so when the rows exceed the budget the
+    first ones cut would be exactly the reserved ones.  ``rule`` is the same
+    ``active_reserve_rule`` the mix cut uses; its first ``reserve`` holders in
+    order are protected.  While the rows up to the last protected one do not
+    fit, the lowest-ranked unprotected row before it is dropped (whole, never
+    reordered).  Returns ``rows`` itself -- same order, same bytes -- when
+    everything fits, when the rule is inert (no seats, or no foreign row), or
+    when the protected rows already fit.
+    """
+    ordered = list(rows)
+    if rule.reserve <= 0 or _rendered_chars(ordered, id_offset) <= budget_chars:
+        return rows
+    protected: Set[int] = set()
+    for row in ordered:
+        if len(protected) >= rule.reserve:
+            break
+        if rule.holds(row):
+            protected.add(id(row))
+    if not protected:
+        return rows
+    kept = list(ordered)
+    while True:
+        last = max(i for i, row in enumerate(kept) if id(row) in protected)
+        if _rendered_chars(kept[:last + 1], id_offset) <= budget_chars:
+            break
+        droppable = [i for i in range(last) if id(kept[i]) not in protected]
+        if not droppable:
+            break
+        del kept[droppable[-1]]
+    return rows if len(kept) == len(ordered) else kept
 
 
 def mix_reserve_rules(
@@ -1426,11 +1484,14 @@ def is_exact_lookup_chunk(chunk: "RetrievedChunk") -> bool:
     return bool(getattr(chunk, "exact_lookup", False))
 
 
-# Characters one reserved passage is assumed to cost beyond its own text in the
-# reasoning chunk segment (the ``kN: [source] title · location — `` line
-# prefix, the newline, the segment heading).  Over-estimating only hands the
-# structured side a few hundred characters fewer; under-estimating is what
-# would let a reserved passage fall off the end of the partition.
+# Characters one reserved passage is allowed beyond its own text in the
+# reasoning chunk segment.  ``chunk_context`` renders each passage as
+# ``kN: `` plus its text, one newline between lines, and the segment carries
+# one ``[Retrieved chunks]`` heading -- well under 20 characters per passage.
+# 120 is a deliberate allowance on top of that (it also absorbs the joiners
+# between the structured blocks): over-estimating only hands the structured
+# side a few hundred characters fewer, under-estimating is what would let a
+# reserved passage fall off the end of the partition.
 PASSAGE_FLOOR_LINE_CHARS = 120
 
 
@@ -1515,9 +1576,9 @@ def reasoning_passage_order(
     chunks: Sequence["RetrievedChunk"],
     *,
     exact_reserve: int,
-    active_reserve: int = 0,
-    library_reserve: int = 0,
-    active_notebook_id: str = "",
+    active_reserve: int,
+    library_reserve: int,
+    active_notebook_id: str,
     held: Sequence["RetrievedChunk"] = (),
 ) -> ReasoningPassageOrder:
     """The order a reasoning passage partition is rendered in, against a
@@ -1574,22 +1635,6 @@ def reasoning_passage_order(
         [*held, *ordered], active_notebook_id,
         active_seats=active_reserve, library_seats_total=library_reserve)
     return promote_library_prefix(ordered, exact, rules, held)
-
-
-def order_reasoning_passages(
-    chunks: Sequence["RetrievedChunk"],
-    *,
-    exact_reserve: int,
-    active_reserve: int = 0,
-    library_reserve: int = 0,
-    active_notebook_id: str = "",
-    held: Sequence["RetrievedChunk"] = (),
-) -> List["RetrievedChunk"]:
-    """``reasoning_passage_order(...).passages``."""
-    return reasoning_passage_order(
-        chunks, exact_reserve=exact_reserve, active_reserve=active_reserve,
-        library_reserve=library_reserve,
-        active_notebook_id=active_notebook_id, held=held).passages
 
 
 def relevance_on_ppr_scale(chunk: "RetrievedChunk") -> bool:
