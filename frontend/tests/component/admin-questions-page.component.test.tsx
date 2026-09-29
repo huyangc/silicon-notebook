@@ -293,3 +293,57 @@ test("搜索 rail 按 Unicode 字符计数且不会静默截断 emoji", async ()
   expect(input).toHaveValue(overLimit);
   expect(mocks.fetchAdminQuestions).toHaveBeenCalledTimes(1);
 });
+
+test("只有一页时不显示分页控件", async () => {
+  render(<AdminQuestionsPage />);
+  await screen.findByText("这个市场的主要竞争者是谁？");
+  expect(screen.queryByRole("navigation", { name: "提问分页" })).not.toBeInTheDocument();
+});
+
+test("用全站分页控件翻页：显示区间与总页数，可跳页，翻页期间保留当前表格", async () => {
+  let resolveJump!: (value: typeof page) => void;
+  const jumpResponse = new Promise<typeof page>((resolve) => { resolveJump = resolve; });
+  mocks.fetchAdminQuestions.mockReset();
+  mocks.fetchAdminQuestions
+    .mockResolvedValueOnce({ ...page, total: 120 })
+    .mockReturnValueOnce(jumpResponse);
+  const user = userEvent.setup();
+  render(<AdminQuestionsPage />);
+  await screen.findByText("这个市场的主要竞争者是谁？");
+
+  const pager = screen.getByRole("navigation", { name: "提问分页" });
+  expect(within(pager).getByText("1–50 / 120")).toBeInTheDocument();
+  expect(within(pager).getByText("第 1 / 3 页")).toBeInTheDocument();
+
+  await user.type(within(pager).getByLabelText("跳到第几页"), "3{Enter}");
+  await waitFor(() => expect(mocks.fetchAdminQuestions).toHaveBeenLastCalledWith(
+    expect.objectContaining({ offset: 100 }),
+  ));
+  expect(screen.getByText("这个市场的主要竞争者是谁？")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "提问内容" }).closest("section")).toHaveAttribute("aria-busy", "true");
+  expect(within(pager).getByRole("button", { name: "下一页" })).toBeDisabled();
+
+  resolveJump({ ...page, items: [{ ...page.items[0], id: "ask-101", question: "第三页的提问" }], total: 120, offset: 100 });
+  expect(await screen.findByText("第三页的提问")).toBeInTheDocument();
+  const lastPager = screen.getByRole("navigation", { name: "提问分页" });
+  expect(within(lastPager).getByText("101–120 / 120")).toBeInTheDocument();
+  expect(within(lastPager).getByRole("button", { name: "下一页" })).toBeDisabled();
+  expect(within(lastPager).getByRole("button", { name: "上一页" })).toBeEnabled();
+});
+
+test("停在末页而提问变少时退回新的最后一页，不显示空页", async () => {
+  mocks.fetchAdminQuestions.mockReset();
+  mocks.fetchAdminQuestions
+    .mockResolvedValueOnce({ ...page, total: 120 })
+    .mockResolvedValueOnce({ ...page, items: [], total: 60, offset: 100 })
+    .mockResolvedValueOnce({ ...page, items: [{ ...page.items[0], id: "ask-51", question: "新的最后一页" }], total: 60, offset: 50 });
+  const user = userEvent.setup();
+  render(<AdminQuestionsPage />);
+  await screen.findByText("这个市场的主要竞争者是谁？");
+
+  await user.type(screen.getByLabelText("跳到第几页"), "3{Enter}");
+  expect(await screen.findByText("新的最后一页")).toBeInTheDocument();
+  expect(mocks.fetchAdminQuestions).toHaveBeenLastCalledWith(expect.objectContaining({ offset: 50 }));
+  expect(screen.queryByText("没有符合当前条件的提问。")).not.toBeInTheDocument();
+  expect(within(screen.getByRole("navigation", { name: "提问分页" })).getByText("第 2 / 2 页")).toBeInTheDocument();
+});

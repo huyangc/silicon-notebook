@@ -39,9 +39,9 @@
 .questions-empty, .questions-state { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 8px; min-height: 160px; padding: 24px; color: var(--muted); }
 .questions-state { margin-top: 18px; border: 1px dashed var(--line); border-radius: 11px; background: rgba(255,255,255,.55); }
 .questions-state.error { color: var(--red); }
-.questions-state button, .questions-pagination button { padding: 7px 11px; border: 1px solid var(--line); border-radius: 7px; background: #fff; color: var(--ink); }
-.questions-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px 15px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
-.questions-pagination button:disabled { cursor: not-allowed; opacity: .45; }
+.questions-state button { padding: 7px 11px; border: 1px solid var(--line); border-radius: 7px; background: #fff; color: var(--ink); }
+.questions-results .pagination { padding: 10px 15px; border-top: 1px solid var(--line); }
+.questions-results.busy .questions-table-wrap { opacity: .55; }
 @media (max-width: 900px) {
   .questions-stats { grid-template-columns: repeat(3, 1fr); }
 }

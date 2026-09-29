@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { fetchMe } from "../../auth.ts";
 import { PageHeader } from "../../components/PageHeader.tsx";
+import { Pagination } from "../../Pagination.tsx";
 import { toUserMessage } from "../../errors.ts";
 import { submittedViaLabel } from "../../submitted-via.ts";
 import { fetchSystemConfiguration } from "../../system-api.ts";
@@ -61,6 +62,7 @@ export default function AdminQuestionsPage() {
   const [searchNotice, setSearchNotice] = useState("");
   const [query, setQuery] = useState("");
   const [offset, setOffset] = useState(0);
+  const [busy, setBusy] = useState(false);
   const requestGeneration = useRef(0);
 
   const initialize = useCallback(async () => {
@@ -89,7 +91,9 @@ export default function AdminQuestionsPage() {
   const load = useCallback(async () => {
     if (!authorized) return;
     const generation = ++requestGeneration.current;
-    setState({ kind: "loading" });
+    // 已有结果时保留当前页、只标忙碌：翻页或改筛选不把整张表换成加载提示再闪回来。
+    setState((current) => (current.kind === "ready" ? current : { kind: "loading" }));
+    setBusy(true);
     try {
       const page = await fetchAdminQuestions({
         kind: kind || undefined,
@@ -100,10 +104,18 @@ export default function AdminQuestionsPage() {
         offset,
       });
       if (generation !== requestGeneration.current) return;
+      // 停在末页时提问被删或留存到期，这一页可能整页落空：按新总数退回最后一页，
+      // 与界面分页「请求的页码按当前长度夹紧」同一口径。
+      if (page.items.length === 0 && page.offset > 0 && page.total > 0) {
+        setOffset(Math.floor((page.total - 1) / page.limit) * page.limit);
+        return;
+      }
       setState({ kind: "ready", page });
+      setBusy(false);
     } catch (error) {
       if (generation !== requestGeneration.current) return;
       setState({ kind: "error", notice: toUserMessage(error, "提问分析加载失败，请重试") });
+      setBusy(false);
     }
   }, [authorized, kind, scope, submittedVia, userId, query, offset]);
 
@@ -217,7 +229,7 @@ export default function AdminQuestionsPage() {
               <article><Users size={19} /><div><strong>{state.page.stats.active_users}</strong><span>活跃用户</span></div></article>
             </section>
 
-            <section className="questions-results">
+            <section className={busy ? "questions-results busy" : "questions-results"} aria-busy={busy}>
               <div className="questions-results-head"><h2>提问内容</h2><span>共 {state.page.total} 条</span></div>
               {state.page.items.length === 0 ? (
                 <div className="questions-empty">没有符合当前条件的提问。</div>
@@ -244,11 +256,14 @@ export default function AdminQuestionsPage() {
                   </table>
                 </div>
               )}
-              <div className="questions-pagination">
-                <span>第 {Math.floor(state.page.offset / state.page.limit) + 1} 页</span>
-                <button type="button" disabled={state.page.offset === 0} onClick={() => changeOffset(Math.max(0, offset - state.page.limit))}>上一页</button>
-                <button type="button" disabled={state.page.offset + state.page.items.length >= state.page.total} onClick={() => changeOffset(offset + state.page.limit)}>下一页</button>
-              </div>
+              <Pagination
+                page={Math.floor(state.page.offset / state.page.limit)}
+                pageSize={state.page.limit}
+                total={state.page.total}
+                busy={busy}
+                onPage={(next) => changeOffset(next * state.page.limit)}
+                label="提问分页"
+              />
             </section>
           </>
         )}
