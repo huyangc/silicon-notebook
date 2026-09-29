@@ -205,6 +205,30 @@ def global_answer_citations(job: "GlobalAskJob") -> list[Citation]:
     return []
 
 
+# The one sentence both drill-down surfaces answer a flagged citation with.
+FLAGGED_CITATION_MESSAGE = "这条引用未通过核对，无法打开原文；引用卡片里保留的是回答时读到的摘录。"
+
+
+def global_citation_flagged(job: "GlobalAskJob", element_id: str) -> bool:
+    """Whether a citation of ``element_id`` in this job failed the terminal check.
+
+    Every drill-down that opens what a global citation points at (the HTTP
+    ``/jobs/{id}/citations/{element}`` read and MCP ``get_global_cited_element``)
+    asks this and answers 404 for a flagged one: the card stays in the answer
+    with its stored excerpt, only the way into the original is closed. Anchors
+    and citations are both consulted -- the browser opens a card from either --
+    so an element flagged on one is closed on both. ``getattr`` rather than the
+    attribute: a legacy ``response`` answer's rows predate the marker.
+    """
+    answer = job.answer if job.answer is not None else job.response
+    if answer is None:
+        return False
+    return any(
+        getattr(item, "element_id", "") == element_id and getattr(item, "verification", None)
+        for item in (*answer.citations, *answer.anchors)
+    )
+
+
 def global_answer_trace(job: "GlobalAskJob") -> list[TraceStep]:
     if job.answer is not None and job.answer.reasoning_trace:
         return job.answer.reasoning_trace

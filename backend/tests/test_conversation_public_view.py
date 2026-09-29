@@ -1003,3 +1003,135 @@ def test_termination_and_assessment_never_cross_the_public_boundary():
                    "aspects_undelivered", "unrecovered_channels",
                    "search_elements", "intent_topics"):
         assert leaked not in serialized
+
+
+# ---- PR-D:全局问答终态引用核对的部分失败 --------------------------------
+#
+# 核对失败不作废回答:整轮照常公开,失败的引用保留卡片与摘录,另带
+# ``verification``;轮上带 ``citation_check`` 计数。干净的一轮必须逐字节不变。
+
+
+def _partial_payload() -> dict:
+    return {
+        "answer": "甲 [k1],乙 [k2]。",
+        "evidence_level": "overview",
+        "anchors": [
+            _anchor("k1", verification="source_gone",
+                    images=[{"element_id": "E1", "asset_id": "FLAGGED-ASSET",
+                             "caption": "失效图"}]),
+            _anchor("k2", images=[{"element_id": "E2", "asset_id": "CLEAN-ASSET",
+                                   "caption": "正常图"}]),
+        ],
+        "citations": [],
+        "citation_check": {
+            "outcome": "partial", "checked": 2, "failed": 1,
+            "changed": 0, "source_gone": 1, "unverifiable": 0,
+        },
+    }
+
+
+def test_a_partly_failed_turn_discloses_the_check_and_marks_the_failed_reference():
+    turn = public_turn(_turn("q", _partial_payload()))
+
+    # The answer body is delivered whole; no verdict withholds text.
+    assert turn["answer_md"] == "甲 [k1],乙 [k2]。"
+    assert turn["citation_check"] == {
+        "outcome": "partial", "checked": 2, "failed": 1,
+        "changed": 0, "source_gone": 1, "unverifiable": 0,
+    }
+    flagged, clean = turn["references"]
+    # The flagged card stays in the list with its stored excerpt.
+    assert flagged["key"] == "k1" and flagged["snippet"] == "锚点摘录-k1"
+    assert flagged["verification"] == "source_gone"
+    assert "verification" not in clean
+    # Exactly one key added to the allowlist per surface, nothing else.
+    assert set(flagged) - set(clean) == {"verification"}
+
+
+def test_a_clean_turn_projects_exactly_as_before_the_check_existed():
+    """No ``citation_check`` and no ``verification`` key anywhere: a clean turn's
+    projection is byte-identical to one built from a payload without the fields."""
+    payload = _partial_payload()
+    for anchor in payload["anchors"]:
+        anchor.pop("verification", None)
+    bare = dict(payload)
+    bare.pop("citation_check")
+    zero = dict(payload, citation_check={
+        "outcome": "partial", "checked": 2, "failed": 0,
+        "changed": 0, "source_gone": 0, "unverifiable": 0,
+    })
+    expected = json.dumps(public_turn(_turn("q", bare)), ensure_ascii=False, sort_keys=True)
+    assert json.dumps(public_turn(_turn("q", zero)), ensure_ascii=False,
+                      sort_keys=True) == expected
+    assert "citation_check" not in expected and "verification" not in expected
+
+
+def test_a_failed_reference_contributes_no_image_to_the_page_or_the_endpoint():
+    """The flagged card's drill-downs are closed, and an attached image is one:
+    the page shows none for it and its alias no longer resolves."""
+    row = {"turns": [_turn("q", _partial_payload())]}
+    turn = public_turn(row["turns"][0])
+
+    assert turn["images"] == [{
+        "alias": conversation_asset_alias(_SHARE_TOKEN, "CLEAN-ASSET"),
+        "caption": "正常图", "reference_keys": ["k2"],
+    }]
+    assert referenced_asset_ids(row) == ["CLEAN-ASSET"]
+    flagged_alias = conversation_asset_alias(_SHARE_TOKEN, "FLAGGED-ASSET")
+    assert resolve_conversation_asset_alias(row, _SHARE_TOKEN, flagged_alias) is None
+
+
+def test_an_image_shared_with_a_clean_reference_stays_bound_to_it_alone():
+    payload = _partial_payload()
+    payload["anchors"][1]["images"] = [
+        {"element_id": "E1", "asset_id": "FLAGGED-ASSET", "caption": "共用图"},
+    ]
+    turn = public_turn(_turn("q", payload))
+    assert turn["images"] == [{
+        "alias": conversation_asset_alias(_SHARE_TOKEN, "FLAGGED-ASSET"),
+        "caption": "共用图", "reference_keys": ["k2"],
+    }]
+
+
+def test_only_the_three_public_verification_values_cross():
+    """An internal reason code, a non-string, or an empty value is treated as
+    absent rather than disclosed."""
+    for value in ("unattested", "out_of_ceiling", "unattributed", "unreadable",
+                  "", None, 1, ["changed"]):
+        turn = public_turn(_turn("q", {
+            "answer": "见 [k1]。", "anchors": [_anchor("k1", verification=value)],
+        }))
+        assert "verification" not in turn["references"][0], value
+    for value in ("changed", "source_gone", "unverifiable"):
+        turn = public_turn(_turn("q", {
+            "answer": "见 [k1]。", "anchors": [_anchor("k1", verification=value)],
+        }))
+        assert turn["references"][0]["verification"] == value
+
+
+def test_citation_fallback_references_carry_their_marker_too():
+    turn = public_turn(_turn("q", {
+        "answer": "见 [1][2]。",
+        "citations": [_citation(1, verification="changed"), _citation(2)],
+    }))
+    assert [ref.get("verification") for ref in turn["references"]] == ["changed", None]
+
+
+def test_the_check_summary_is_an_allowlist_of_counts():
+    """Unknown keys never cross, counts are non-negative ints (a bool or a
+    malformed value reads as 0), and the only outcome is ``partial``."""
+    turn = public_turn(_turn("q", {
+        "answer": "答案",
+        "citation_check": {
+            "outcome": "内部泄露词", "checked": 5, "failed": 2, "changed": True,
+            "source_gone": -3, "unverifiable": "2", "unattested": 2,
+            "detail": "内部泄露词",
+        },
+    }))
+    assert turn["citation_check"] == {
+        "outcome": "partial", "checked": 5, "failed": 2,
+        "changed": 0, "source_gone": 0, "unverifiable": 0,
+    }
+    for malformed in (None, "partial", [1], {"failed": True}, {"failed": "1"}):
+        turn = public_turn(_turn("q", {"answer": "答案", "citation_check": malformed}))
+        assert "citation_check" not in turn, malformed
