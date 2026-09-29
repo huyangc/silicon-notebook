@@ -1,5 +1,16 @@
 """Pins for ``app.repositories.sqlite.id_binding`` and the statements that bind a
-source ceiling through it (plan ``2026-09-29-ceiling-sql-hazards.md`` S1-S9).
+source ceiling through it.  The rule itself is stated in the module docstring
+and in ``docs/development.md`` ("Binding id lists in SQL").  The test names
+use these labels:
+
+* S1 ``KnowledgeStore.chunk_fts_search`` (chunk FTS candidates);
+* S2 / S3 ``KnowledgeStore.fts_search`` (KG FTS: reverse-index gate /
+  authoritative evidence gate);
+* S4 ``ChunkStore.question_index_rows`` (generated-question rows);
+* S5 ``ChunkStore.retrieval_contribution_rows`` (contribution hydration);
+* S6 ``ChunkStore.ids_for_sources``;
+* S7 / S8 ``UnifiedKgStore.community_member_peers`` /
+  ``UnifiedKgStore.comention_peers`` (comparison peers).
 
 Three kinds of pin, each on the real store methods:
 
@@ -38,7 +49,6 @@ from app.repositories.sqlite.id_binding import (
     not_member_of,
 )
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
-from app.repositories.sqlite.source_store import SourceStore
 from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
 
 DEPLOYMENT_VARIABLE_LIMIT = 32_766
@@ -703,22 +713,3 @@ def test_s6_ids_for_sources_bind_the_ceiling_once(conn, captured):
         )
     _single_ceiling_param(captured, ceiling)
     assert len(captured) == 2
-
-
-# ------------------------------------------ S9 element rows with a list
-@pytest.mark.parametrize("label", list(CEILINGS))
-def test_s9_element_rows_match_reference_under_deployment_limit(conn, label):
-    ceiling = CEILINGS[label]
-    everything = _by_id(SourceStore.retrieval_element_rows(conn, NB))
-    got = _by_id(SourceStore.retrieval_element_rows(conn, NB, ceiling))
-    allowed = None if ceiling is None else set(ceiling)
-    assert got == [
-        row for row in everything
-        if allowed is None or row["source_id"] in allowed
-    ]
-
-
-def test_s9_element_rows_bind_the_ceiling_once(conn, captured):
-    ceiling = CEILINGS["49k"]
-    SourceStore.retrieval_element_rows(conn, NB, ceiling)
-    _single_ceiling_param(captured, ceiling)

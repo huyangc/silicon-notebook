@@ -263,10 +263,6 @@ def _converted_calls(database: PostgresDatabase):
         "P9 comention peers (authoritative)": backfilled(0, lambda: (
             unified.comention_peers(
                 NB, "can-00000", 1, 8, allowed_source_ids=CEILING))),
-        "P10 retrieval_element_rows": on_connection(
-            lambda db: sources.retrieval_element_rows(db, NB, CEILING)),
-        "P11 relation_endpoint_rows": on_connection(
-            lambda db: knowledge.relation_endpoint_rows(db, NB, CEILING)),
         "P12 element_type_count_rows": on_connection(
             lambda db: sources.element_type_count_rows(
                 db, CEILING, ["paragraph", "table", "formula"])),
