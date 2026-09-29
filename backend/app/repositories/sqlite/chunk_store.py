@@ -8,6 +8,9 @@ from app.repositories.chunk_elements import reverse_rows_for_writes
 from app.repositories.like_pattern import escape_like_pattern
 from app.repositories.ports import ChunkWrite
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.id_binding import (
+    drive_by, ids_param, member_of, not_member_of,
+)
 from app.repositories.sqlite.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 from app.domain.vector_index import encode_vector
 from app.domain.indexing_pipeline import IndexingPipelineStalePlanError
@@ -83,15 +86,15 @@ class ChunkStore:
         params: list[object] = [notebook_id, actor_id]
         source_clause = ""
         if allowed_source_ids is not None:
-            source_ids = list(dict.fromkeys(allowed_source_ids))
-            if not source_ids:
+            source_payload = ids_param(allowed_source_ids)
+            if source_payload == "[]":
                 return []
-            source_clause = (
-                "AND q.source_id IN ("
-                "SELECT CAST(value AS TEXT) FROM json_each(?)"
-                ") "
-            )
-            params.append(json.dumps(source_ids))
+            # ``member_of``: walk ``q.id`` order and stop at ``LIMIT``; a
+            # ceiling-driven plan fetched and sorted every question of every
+            # listed source (49k ids: 78 ms vs 16 ms; one id pays a bounded
+            # notebook scan, 8 ms on 98k questions).
+            source_clause = f"AND {member_of('q.source_id')} "
+            params.append(source_payload)
         params.append(int(limit))
         with self.database.connect() as db:
             rows = db.execute(
@@ -134,8 +137,8 @@ class ChunkStore:
         *,
         presence_only: bool = False,
     ):
-        values = list(dict.fromkeys(source_ids))
-        if not values:
+        values = ids_param(source_ids)
+        if values == "[]":
             return []
         if presence_only:
             return db.execute(
@@ -145,12 +148,13 @@ class ChunkStore:
                 "WHERE c.notebook_id=? "
                 "AND c.source_id=CAST(requested.value AS TEXT)) "
                 "ORDER BY CAST(requested.key AS INTEGER)",
-                (json.dumps(values), notebook_id),
+                (values, notebook_id),
             ).fetchall()
+        # ``drive_by``: every chunk of the listed sources is the answer, so one
+        # ``idx_chunks_source`` seek per id is proportional to the output.
         return db.execute(
-            "SELECT id FROM chunks WHERE notebook_id=? "
-            "AND source_id IN (SELECT CAST(value AS TEXT) FROM json_each(?))",
-            (notebook_id, json.dumps(values)),
+            f"SELECT id FROM chunks WHERE notebook_id=? AND {drive_by('source_id')}",
+            (notebook_id, values),
         ).fetchall()
 
     def source_elements_for_chunking(self, source_id: str) -> list:
@@ -433,20 +437,18 @@ class ChunkStore:
         source_ids: Sequence[str],
     ):
         ids = list(dict.fromkeys(chunk_ids))
-        sources = list(dict.fromkeys(source_ids))
-        if not ids or (source_mode == "include" and not sources):
+        sources = ids_param(source_ids)
+        if not ids or (source_mode == "include" and sources == "[]"):
             return []
+        # ``chunk_ids`` is one ``_in_batches`` window (<= 900 candidate primary
+        # keys): they drive the lookup; the ceiling only filters.
         id_placeholders = ",".join("?" for _ in ids)
         source_clause = ""
         params: list[object] = [notebook_id, *ids]
-        if source_mode in {"include", "exclude"} and sources:
-            operator = "IN" if source_mode == "include" else "NOT IN"
-            source_clause = (
-                f" AND c.source_id {operator} ("
-                "SELECT CAST(value AS TEXT) FROM json_each(?)"
-                ")"
-            )
-            params.append(json.dumps(sources))
+        if source_mode in {"include", "exclude"} and sources != "[]":
+            predicate = member_of if source_mode == "include" else not_member_of
+            source_clause = f" AND {predicate('c.source_id')}"
+            params.append(sources)
         memory_clause = (
             " AND (s.source_type <> 'memory' OR EXISTS ("
             "SELECT 1 FROM memory_items m "
