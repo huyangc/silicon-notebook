@@ -173,6 +173,22 @@ test("迁移旧账号在 page 接线:按 migration_available 显示、提交与�
 });
 
 
+// 另一个标签页换号/登出/迁移后，本页必须按新 token 整页重建；安装点在 page 根部，只装一次。
+test("跨标签页会话同步在 page 根部安装一次,变更时整页重载", () => {
+  assert.ok(importsFrom(page, "./auth-session").some((item) => item.imported === "subscribeTokenChanges"));
+  const installs = callSitesIn(findFunction(page, "Home")).filter((call) => call.target === "subscribeTokenChanges");
+  assert.deepEqual(installs.map((call) => call.arguments), [["() => window.location.reload()"]]);
+  assert.ok(
+    callSitesIn(findFunction(page, "Home")).some((call) => (
+      call.target === "useEffect"
+      && call.arguments[0] === "() => subscribeTokenChanges(() => window.location.reload())"
+      && call.arguments[1] === "[]"
+    )),
+    "subscribeTokenChanges 必须由挂载一次的 effect 安装并返回退订",
+  );
+});
+
+
 test("source detail uses the dedicated draggable window shell", () => {
   assert.deepEqual(
     importsFrom(page, "./source-detail-window").map((item) => item.imported),
