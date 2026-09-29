@@ -9,9 +9,8 @@ from pydantic import ValidationError
 
 from app.models.ask import ASK_UNDERSTANDING_MS_MAX, AskIntentConfirmation
 from app.models.global_ask import (
-    FLAGGED_CITATION_MESSAGE, GlobalAskIntentPreviewRequest, GlobalAskJob, GlobalAskRequest,
+    GlobalAskIntentPreviewRequest, GlobalAskJob, GlobalAskRequest,
     global_answer_citations, global_answer_text, global_answer_trace,
-    global_citation_flagged,
 )
 from app.services.global_citation_check import global_answer_check
 from ._shared import (
@@ -459,17 +458,10 @@ def register_global_ask_tools(server: FastMCP, repository_provider: Callable[[],
         def load() -> Any:
             principal = _authorize(repo, answer=False)
             with _owner_request_context(principal):
-                service = global_ask_service()
-                # Same order and refusal as the HTTP drill-down: the job's own
-                # authority first, then a citation that failed the terminal
-                # check is closed (its stored excerpt is in get_global_ask).
-                job = service.get_job(
-                    job_id, user_id=principal.owner_id,
-                    allowed_notebook_ids=principal.notebook_ids,
-                )
-                if global_citation_flagged(job, element_id):
-                    raise _ToolInputError(FLAGGED_CITATION_MESSAGE)
-                return service.cited_element(
+                # The service refuses a citation that failed the terminal
+                # check (``FLAGGED_CITATION_MESSAGE``); ``_safe_errors`` turns
+                # that into the tool error like every other ``GlobalAskError``.
+                return global_ask_service().cited_element(
                     job_id, element_id, user_id=principal.owner_id,
                     allowed_notebook_ids=principal.notebook_ids,
                 )

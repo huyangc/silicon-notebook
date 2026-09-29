@@ -4231,6 +4231,7 @@ class AskService:
         if draft.response.conversation_id != prepared.conversation_id:
             raise StageBoundaryError("response draft changed the response conversation_id")
         response = draft.response
+        self._drop_dangling_references(response)
         self._assert_reasoning_runtime(
             runtime,
             "before-persist",
@@ -4251,6 +4252,22 @@ class AskService:
             response=response,
             baseline_manifest=draft.baseline_manifest,
         )
+
+    def _drop_dangling_references(self, response) -> None:
+        """J2, single-notebook half: no card for an element already gone.
+
+        One batched by-id read (``reference_liveness``). Only outside a global
+        run: there the producers already applied J2 at retrieval time, and an
+        element deleted DURING the answer must reach the terminal citation
+        check as ``source_gone`` rather than vanish here.
+        """
+        from app.services.federated_run import current_federated_run_plan
+        from app.services.reference_liveness import drop_dangling_references
+
+        sources = getattr(self.evidence_context, "sources", None)
+        read = getattr(sources, "evidence_fingerprints", None)
+        if read is not None and current_federated_run_plan() is None:
+            drop_dangling_references(response, read)
 
     def _optimize_gap_consult_queries(
         self, question: str, gaps: tuple[str, ...],
@@ -4678,7 +4695,7 @@ class AskService:
                 if runtime.trace_sink:
                     runtime.trace_sink(step)
             return results
-        except AskCancelled:
+        except (AskCancelled, RetrievalControlError):
             raise
         except Exception as exc:  # noqa: BLE001 - optional analysis lane
             self.event_log.logger.warning(
@@ -5690,6 +5707,8 @@ class AskService:
                         # 只是这一轮没能把它塞进合成证据——这条轨迹detail是
                         # 唯一挂点(trace 已闭合,不能另起一条独立 trace 步)。
                         enumeration_block_dropped = True
+            except (AskCancelled, RetrievalControlError):
+                raise
             except Exception:
                 typed_collection_result_sets = []
                 enumeration_block_dropped = False

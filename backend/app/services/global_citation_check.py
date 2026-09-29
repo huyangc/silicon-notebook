@@ -95,6 +95,7 @@ REASON_CLAUSE = "{count} 条{label}"
 REASON_FALLBACK = "共 {count} 条"
 # Display / wire order of the three kinds (the summary's key order).
 _WIRE_ORDER = (CHANGED, SOURCE_GONE, UNVERIFIABLE)
+_SUMMARY_COUNTS = ("checked", "failed", *_WIRE_ORDER)
 
 
 class _Absent:
@@ -105,23 +106,6 @@ class _Absent:
 
 
 _ABSENT = _Absent()
-
-
-def is_external_reference(reference) -> bool:
-    """URL-backed material from OUTSIDE every library (a reflect plugin action).
-
-    Strict: the tier alone exempts nothing. It must also carry an openable
-    address and name no library row -- an "external" reference pointing at a
-    source or an element is a library reference wearing the wrong tier and is
-    judged like one.
-    """
-    return (
-        getattr(reference, "tier", "") == "external"
-        and bool(getattr(reference, "url", ""))
-        and not getattr(reference, "notebook_id", "")
-        and not getattr(reference, "source_id", "")
-        and not getattr(reference, "element_id", "")
-    )
 
 
 def reference_key(reference) -> tuple[str, str, str]:
@@ -137,16 +121,17 @@ def reference_key(reference) -> tuple[str, str, str]:
 def checkable_references(response) -> dict[tuple[str, str, str], Any]:
     """Every citation and anchor that names library material, de-duplicated.
 
-    Two kinds are not checked at all: external material (no library to hold it
-    to) and a reference naming neither a source nor an element -- a memory row
-    or a bare graph node carries nothing whose integrity could be tested, and
-    counting it as ``unverifiable`` would flag every such answer for a property
-    it never claimed (J3).
+    ONE rule decides what is not checked: a reference naming neither a source
+    nor an element carries nothing whose integrity could be tested -- a memory
+    row, a bare graph node, and URL-backed external material from a reflect
+    plugin action (which by construction names no library row) -- and counting
+    it as ``unverifiable`` would flag every such answer for a property it never
+    claimed (J3). The tier is deliberately NOT consulted: an "external"
+    reference that points at a source or an element is library material
+    wearing the wrong tier and is judged like any other.
     """
     found: dict = {}
     for reference in [*(response.citations or ()), *(response.anchors or ())]:
-        if is_external_reference(reference):
-            continue
         key = reference_key(reference)
         if not key[1] and not key[2]:
             continue
@@ -214,12 +199,12 @@ class GlobalCitationCheck:
         if not references:
             return CitationCheckOutcome(checked=0)
         current = self._read_current(references, siblings, event)
-        visible: dict = {}
+        visible = self._read_visible(sorted({
+            key[0] for key in references if key[0] and key[0] in source_ceiling
+        }), event)
         verdicts: dict = {}
         for key, reference in references.items():
             notebook_id = key[0]
-            if notebook_id and notebook_id not in visible:
-                visible[notebook_id] = self._read_visible(notebook_id, event)
             verdict = judge_reference(
                 reference, evidence=evidence, current=current,
                 siblings=siblings.get(key[2], ()) if key[2] else (),
@@ -243,17 +228,48 @@ class GlobalCitationCheck:
             lambda: dict(self.sources.evidence_fingerprints(wanted)),
         )
 
-    def _read_visible(self, notebook_id: str, event):
-        return self._bounded(
-            "visible_sources", event,
-            lambda: set(self.sources.all_visible_source_ids(notebook_id)),
-        )
+    def _read_visible(self, notebook_ids: list, event) -> dict:
+        """``{notebook_id: current visible source ids | None}`` in ONE statement.
 
-    def _bounded(self, read: str, event, call):
+        Only libraries inside the frozen ceiling are read: a reference naming
+        any other library is ``out_of_ceiling`` before visibility matters, so
+        reading it would only cost a statement per stray id. The batched port
+        is the one the run froze its ceiling with, so both halves share one
+        visibility rule. Failure stays PER LIBRARY: if the batched statement
+        fails, each library is re-read on its own under one shared deadline,
+        and a library whose own read also fails is the only one whose
+        references become ``unreadable``.
+        """
+        if not notebook_ids:
+            return {}
+        batched = self._bounded(
+            "visible_sources", event,
+            lambda: self.sources.visible_source_ids_by_notebook(notebook_ids),
+        )
+        if batched is not None:
+            return {
+                notebook_id: set(batched.get(notebook_id) or ())
+                for notebook_id in notebook_ids
+            }
+        deadline = time.monotonic() + self.notebook_timeout_seconds
+        return {
+            notebook_id: self._bounded(
+                "visible_sources", event,
+                lambda notebook_id=notebook_id: set(
+                    self.sources.all_visible_source_ids(notebook_id)
+                ),
+                deadline=deadline,
+            )
+            for notebook_id in notebook_ids
+        }
+
+    def _bounded(self, read: str, event, call, *, deadline: float | None = None):
         """Run one read under the per-library budget; ``None`` when it failed."""
         raise_if_cancelled(event)
+        if deadline is None:
+            deadline = time.monotonic() + self.notebook_timeout_seconds
         try:
-            with read_budget(time.monotonic() + self.notebook_timeout_seconds, event):
+            with read_budget(deadline, event):
                 return call()
         except AskCancelled:
             raise
@@ -292,7 +308,7 @@ def judge_reference(reference, *, evidence: Mapping, current, siblings: Iterable
         before[0] if isinstance(before, tuple) else ""
     )
     if not source_id:
-        return UNVERIFIABLE, REASON_UNATTESTED
+        return UNVERIFIABLE, (REASON_UNREADABLE if before is None else REASON_UNATTESTED)
     source_verdict = _source_verdict(source_id, ceiling, live_sources)
     if source_verdict is not None or not element_id:
         return source_verdict
@@ -397,33 +413,62 @@ def check_trace_summary(outcome: CitationCheckOutcome) -> str:
     return f"核对引用：共核对 {outcome.checked} 条，{outcome.failed} 条未通过（{reasons}）"
 
 
-def _count(value) -> int:
-    try:
-        number = int(value or 0)
-    except (TypeError, ValueError):
-        return 0
-    return number if number > 0 else 0
+def check_count(value) -> int:
+    """One stored count, coerced: a positive ``int`` or 0. Never raises.
+
+    The single coercion every reader of a stored summary applies -- the public
+    projection (``conversation_public_view``), ``global_answer_check`` and the
+    notice -- so a malformed or hand-edited value (a string, a list, a bool, a
+    negative number) reads as 0 on every surface alike.
+    """
+    return value if type(value) is int and value > 0 else 0
+
+
+def coerce_check_summary(value) -> dict | None:
+    """A stored ``citation_check`` as the six-key wire dict, or ``None``.
+
+    ``None`` when the value is not a mapping or records no failure. Every count
+    goes through ``check_count``; ``outcome`` is always ``partial`` (a failed
+    check never voids an answer), so a stored label cannot reach a response.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    counts = {key: check_count(value.get(key)) for key in _SUMMARY_COUNTS}
+    if not counts["failed"]:
+        return None
+    return {"outcome": "partial", **counts}
 
 
 def citation_check_reason_text(check: Mapping) -> str:
-    """「2 条原文已改动、1 条资料已删除」; the total when no kind is counted."""
-    parts = [
-        REASON_CLAUSE.format(count=_count(check.get(kind)), label=VERIFICATION_LABELS[kind])
-        for kind in _WIRE_ORDER if _count(check.get(kind))
-    ]
-    if parts:
-        return REASON_JOINER.join(parts)
-    return REASON_FALLBACK.format(count=_count(check.get("failed")))
+    """「2 条原文已改动、1 条资料已删除」, or 「共 N 条」.
+
+    The per-kind clauses are used only when they account for every failure;
+    counts that do not add up to ``failed`` (a malformed or foreign summary)
+    fall back to the total, so the sentence never under-reports.
+    """
+    failed = check_count(check.get("failed"))
+    counts = {kind: check_count(check.get(kind)) for kind in _WIRE_ORDER}
+    if sum(counts.values()) == failed:
+        parts = [
+            REASON_CLAUSE.format(count=counts[kind], label=VERIFICATION_LABELS[kind])
+            for kind in _WIRE_ORDER if counts[kind]
+        ]
+        if parts:
+            return REASON_JOINER.join(parts)
+    return REASON_FALLBACK.format(count=failed)
 
 
 def citation_check_notice(check: Mapping | None, tense: str = "live") -> str:
     """The one sentence shown under a partially failed answer, or ``""``.
 
-    ``tense="snapshot"`` is the public page's past tense. Every surface that
-    shows the notice calls this function; the frontend's
-    ``citationCheckNotice`` is its character-for-character twin.
+    ``tense="snapshot"`` is the public page's past tense. This is the BACKEND
+    TWIN of the frontend's ``citationCheckNotice``, which renders the sentence
+    on every page that shows it; ``scripts/check_citation_verification_contract.py``
+    pins the two against each other. No backend surface emits the sentence
+    today (MCP carries the counts); the reasoning trace's 「核对」 step shares
+    its reason text (``citation_check_reason_text``).
     """
-    if not check or not _count(check.get("failed")):
+    if not check or not check_count(check.get("failed")):
         return ""
     lead = NOTICE_LEADS["snapshot" if tense == "snapshot" else "live"]
     return f"{lead}：{citation_check_reason_text(check)}。{NOTICE_TAIL}"
@@ -436,24 +481,16 @@ def global_answer_check(job) -> dict | None:
     holding ``answer``, or ``answer`` at top level). ``None`` whenever nothing
     failed, the turn predates the check, or it has no engine answer (legacy
     ``response`` rows were never checked this way and keep their stored text).
+    A read path: every value goes through ``coerce_check_summary`` and nothing
+    here raises on a malformed row.
     """
-    answer = getattr(job, "answer", None) if not isinstance(job, Mapping) else None
-    if answer is not None:
-        check = getattr(answer, "citation_check", None)
-        return _check_dict(check.model_dump() if check is not None else None)
-    if isinstance(job, Mapping):
-        payload = job.get("payload") if isinstance(job.get("payload"), Mapping) else job
-        stored = payload.get("answer")
-        if isinstance(stored, Mapping):
-            return _check_dict(stored.get("citation_check"))
-    return None
-
-
-def _check_dict(value) -> dict | None:
-    if not isinstance(value, Mapping) or not int(value.get("failed") or 0):
-        return None
-    keys = ("outcome", "checked", "failed", *_WIRE_ORDER)
-    return {key: value.get(key, 0 if key != "outcome" else "partial") for key in keys}
+    if not isinstance(job, Mapping):
+        answer = getattr(job, "answer", None)
+        check = getattr(answer, "citation_check", None) if answer is not None else None
+        return coerce_check_summary(check.model_dump() if check is not None else None)
+    payload = job.get("payload") if isinstance(job.get("payload"), Mapping) else job
+    stored = payload.get("answer")
+    return coerce_check_summary(stored.get("citation_check")) if isinstance(stored, Mapping) else None
 
 
 __all__ = [
@@ -461,7 +498,7 @@ __all__ = [
     "UNVERIFIABLE", "VERIFICATION_KINDS", "VERIFICATION_LABELS",
     "NOTICE_LEADS", "NOTICE_TAIL", "REASON_CLAUSE", "REASON_FALLBACK",
     "REASON_JOINER", "apply_outcome", "check_trace_summary",
-    "checkable_references", "citation_check_notice", "citation_check_reason_text",
-    "global_answer_check", "is_external_reference",
+    "check_count", "checkable_references", "citation_check_notice",
+    "citation_check_reason_text", "coerce_check_summary", "global_answer_check",
     "judge_reference", "reference_key",
 ]

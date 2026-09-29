@@ -629,13 +629,20 @@ def test_a_clean_answer_page_is_unchanged():
 
 @pytest.mark.anyio
 async def test_a_flagged_citation_cannot_be_opened_and_a_clean_one_still_can(adapter):
+    """The gate lives in ``GlobalAskService.cited_element`` (one job read, one
+    exit); the tool only translates the service's refusal into its error."""
+    from app.models.global_ask import FLAGGED_CITATION_MESSAGE, global_citation_flagged
+    from app.services.global_ask import GlobalAskError
+
     handlers, principal, _, service = adapter
     principal.scopes = ["knowledge:read"]
     saved = _engine_job(check=_CHECK)
-    reads, opened = [], []
-    service.get_job = lambda job_id, **kw: reads.append((job_id, kw)) or saved
+    calls, opened = [], []
 
     def cited(job_id, element_id, **kw):
+        calls.append((job_id, element_id, kw))
+        if global_citation_flagged(saved, element_id):
+            raise GlobalAskError(404, FLAGGED_CITATION_MESSAGE)
         opened.append(element_id)
         return {"id": element_id, "source_id": "s-b", "text": "原文",
                 "element_type": "text", "location_label": "第一页"}
@@ -643,13 +650,15 @@ async def test_a_flagged_citation_cannot_be_opened_and_a_clean_one_still_can(ada
     service.cited_element = cited
     with pytest.raises(ValueError, match="未通过核对") as refused:
         await handlers["get_global_cited_element"]("job-a", "e-flagged", None)
-    assert str(refused.value) == module.FLAGGED_CITATION_MESSAGE
+    assert str(refused.value) == FLAGGED_CITATION_MESSAGE
     assert opened == []
 
     page = await handlers["get_global_cited_element"]("job-a", "e-clean", None)
     assert page["text"] == "原文" and opened == ["e-clean"]
-    # The job read runs under the same owner and allowlist the open does.
-    assert reads == [("job-a", {"user_id": "owner-a", "allowed_notebook_ids": ["nb-a"]})] * 2
+    # One service call per open, under the same owner and allowlist.
+    assert [call[2] for call in calls] == [
+        {"user_id": "owner-a", "allowed_notebook_ids": ["nb-a"]}
+    ] * 2
 
 
 def test_an_element_flagged_only_on_its_anchor_is_flagged_for_the_drill_down():

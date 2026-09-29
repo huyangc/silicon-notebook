@@ -31,7 +31,8 @@ nothing -- not a read, not a hash.
 
 What gets published, per id:
 
-* a live element -> ``(source_id, element_text_sha(text))``;
+* a live element -> ``(source_id, element_text_sha(text))`` -- from
+  ``attest_read`` a plain tuple, from ``attest_pointers`` a ``PointerSnapshot``;
 * a read that failed (``unknown``) -> ``None``, the plan's STATED "travelled a
   producer and could not be fingerprinted"; the terminal check reports such a
   citation as ``unverifiable`` rather than accepting it unchecked;
@@ -41,7 +42,12 @@ What gets published, per id:
 
 The consumer keeps the FIRST real snapshot per element (``_RunState.
 record_evidence``), so a later pointer read -- which may postdate an edit --
-never overwrites a snapshot a reading producer took earlier.
+never overwrites a snapshot a reading producer took earlier. Pointer snapshots
+travel as ``federated_run.PointerSnapshot`` and never replace ANY existing
+entry, not even a declared ``None``: when the federated channel found a
+passage's text changed under the run (a re-ingest reuses element ids), a blind
+by-id read here would see the NEW text and launder that declaration into a
+pass. Only a reading producer's snapshot may replace a ``None``.
 
 Content-free telemetry: ``producer_evidence_attested`` and
 ``producer_evidence_unavailable`` carry the producer code and counts, never an
@@ -61,8 +67,8 @@ from app.domain.evidence_fingerprint import element_text_sha
 from app.domain.retrieval_control import RetrievalControlError
 from app.repositories.global_ask_ports import GlobalAskEvidenceReaderPort
 from app.repositories.read_budget import read_budget
-from app.services.cancellation import AskCancelled
-from app.services.federated_run import current_federated_run_plan
+from app.services.cancellation import AskCancelled, raise_if_cancelled
+from app.services.federated_run import PointerSnapshot, current_federated_run_plan
 
 
 LIVE = "live"
@@ -150,8 +156,9 @@ def attest_pointers(producer: str, element_ids: Iterable[str]) -> dict[str, str]
 
     One read per call at most, over the ids this run has not settled yet;
     ``live`` and ``dead`` are memoised for the rest of the run, ``unknown`` is
-    retried by the next call. Cancellation and participant-attestation failures
-    re-raise; any other read failure is fail-soft in the closed direction.
+    retried by the next call. Cancellation (including a read budget stopped by
+    the run's cancel token) and participant-attestation failures re-raise; any
+    other read failure is fail-soft in the closed direction.
     """
     plan = current_federated_run_plan()
     if plan is None:
@@ -180,11 +187,15 @@ def _read_pointers(plan, seat: _AttestationSeat, producer: str, pending: list) -
     except (AskCancelled, RetrievalControlError):
         raise
     except Exception as exc:  # noqa: BLE001 - fail closed, see attest_pointers
+        # A cancelled run surfaces here as the read budget's own timeout (the
+        # budget polls ``plan.cancel``); that is the run stopping, not a read
+        # that failed, so it propagates instead of turning into ``unknown``.
+        raise_if_cancelled(plan.cancel)
         return _refuse(
             plan, producer, pending, reason="read_failed",
             error_type=type(exc).__name__,
         )
-    live = {key: current[key] for key in pending if key in current}
+    live = {key: PointerSnapshot(current[key]) for key in pending if key in current}
     states = {key: (LIVE if key in live else DEAD) for key in pending}
     with seat.lock:
         seat.settled.update(states)

@@ -24,6 +24,7 @@ from app.models.global_ask import (
     GlobalAskIntentPreviewRequest, GlobalAskJob, GlobalAskRequest,
     GlobalConversationDetail, GlobalNotebookScope, GLOBAL_ASK_PAGE_MAX,
     GLOBAL_ASK_PAGE_SIZE, GlobalAskSkippedNotebook, global_answer_citations,
+    FLAGGED_CITATION_MESSAGE, global_citation_flagged,
 )
 from app.models.sources import SourceElement
 from app.repositories.global_ask_ports import ReplacedJobUnavailable
@@ -32,7 +33,9 @@ from app.services.ask_followup import followup_resolution_context
 from app.services.ask_modes import UnknownAskMode
 from app.services.cancellation import AskCancelled, raise_if_cancelled
 from app.services.evidence_attestation import evidence_attestation_seat
-from app.services.federated_run import DetachedAskTurn, FederatedRunPlan
+from app.services.federated_run import (
+    DetachedAskTurn, FederatedRunPlan, PointerSnapshot,
+)
 from app.services.global_ask_feed import JobFeed
 from app.services.global_citation_check import (
     DIAGNOSTIC_REASONS, GlobalCitationCheck, apply_outcome, check_trace_summary,
@@ -235,15 +238,21 @@ class _RunState:
         pointer read (``attest_pointers``) may postdate an edit and would then
         hide it from the terminal check by comparing the new text against
         itself. So a real snapshot is overwritten by nothing, neither a later
-        ``None`` nor a later real snapshot, while a real snapshot does replace
-        an earlier ``None`` (a round that could read what an earlier one
-        could not). Plain ``update`` would get both halves wrong.
+        ``None`` nor a later real snapshot. A declared ``None`` is replaced
+        only by a snapshot from a producer that READ the text (a later round
+        that could vouch for it); a ``PointerSnapshot`` never replaces it. The
+        ``None`` says "the text this run read is not the text there now" -- a
+        blind by-id read of the NEW text would launder that into a pass while
+        the card still shows the old excerpt. Plain ``update`` would get every
+        half of this wrong.
         """
         if not mapping:
             return
         with self.lock:
             for element_id, snapshot in mapping.items():
                 if self.evidence.get(element_id) is not None:
+                    continue
+                if element_id in self.evidence and isinstance(snapshot, PointerSnapshot):
                     continue
                 self.evidence[element_id] = snapshot
 
@@ -2173,7 +2182,18 @@ class GlobalAskService:
         }
 
     def cited_element(self, job_id, element_id, *, user_id, allowed_notebook_ids=None):
+        """Open what one citation of a global job points at.
+
+        The job's own authority first (a foreign or missing job keeps its 404
+        before anything about its citations is looked at), then the ONE gate
+        for a citation that failed the terminal check: every drill-down -- the
+        HTTP route and the MCP tool -- goes through here and only translates
+        the refusal. The card stays in the answer with its stored excerpt; only
+        this way into the original closes.
+        """
         job = self.get_job(job_id, user_id=user_id, allowed_notebook_ids=allowed_notebook_ids)
+        if global_citation_flagged(job, element_id):
+            raise GlobalAskError(404, FLAGGED_CITATION_MESSAGE)
         # One projection for both payload shapes: a turn answered by the shared
         # engine carries ``answer``, a turn from before the switch carries the
         # legacy ``response``, and a drill-down must work on either.

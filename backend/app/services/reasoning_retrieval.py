@@ -8215,7 +8215,7 @@ class ReasoningRetriever:
                             target_object_id=decision.chain_target_object_id,
                             direction=decision.chain_direction)
                     except Exception as exc:  # 见 _chunk_seed_search 的登记注释
-                        if self.fail_closed or isinstance(exc, RetrievalControlError):
+                        if self.fail_closed or isinstance(exc, (RetrievalControlError, AskCancelled)):
                             raise
                         chain_result = None
                     raise_if_cancelled(self.cancel_event)

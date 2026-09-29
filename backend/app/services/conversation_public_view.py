@@ -67,6 +67,8 @@ from typing import Any, Iterator, Sequence
 # Sunk to app.domain.conversation_public_view in B3 (app.repositories'
 # ask_state_store imports it directly there); re-exported here unchanged.
 from app.domain.conversation_public_view import MAX_TURNS
+# The one coercion every reader of a stored citation-check summary applies.
+from app.services.global_citation_check import coerce_check_summary
 
 # Mirrors ``report_public_view``'s caps; the report body (``content_md``) is
 # left uncapped and the conversation answer body (``answer_md``) AND the
@@ -117,7 +119,6 @@ MAX_REFERENCED_ASSETS = 6000
 # unreadable / unattributed / out_of_ceiling) never reaches the stored answer
 # and, should one ever appear, is dropped here rather than disclosed.
 CITATION_VERIFICATION_VALUES = frozenset({"changed", "source_gone", "unverifiable"})
-_CITATION_CHECK_COUNTS = ("checked", "failed", "changed", "source_gone", "unverifiable")
 
 
 def conversation_asset_alias(token: str, asset_id: str) -> str:
@@ -442,17 +443,11 @@ def _citation_check_field(payload: dict) -> dict[str, Any]:
     An allowlist like everything else here: the five counts (non-negative ints;
     a bool or a malformed value reads as 0) and ``outcome``, whose only value
     is ``partial`` (``models.ask.CitationCheckSummary``: a failed check never
-    voids an answer), so a hand-edited label cannot reach the response model."""
-    summary = payload.get("citation_check")
-    if not isinstance(summary, dict):
-        return {}
-    counts = {
-        key: value if type(value) is int and value > 0 else 0
-        for key, value in ((key, summary.get(key)) for key in _CITATION_CHECK_COUNTS)
-    }
-    if counts["failed"] <= 0:
-        return {}
-    return {"citation_check": {"outcome": "partial", **counts}}
+    voids an answer), so a hand-edited label cannot reach the response model.
+    The coercion is ``global_citation_check.coerce_check_summary`` -- the same
+    one ``global_answer_check`` applies -- so no two readers disagree."""
+    summary = coerce_check_summary(payload.get("citation_check"))
+    return {"citation_check": summary} if summary else {}
 
 
 def public_turn(
