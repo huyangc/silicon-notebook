@@ -493,6 +493,12 @@ def test_chunks_keywords_sentence_names_the_corpus_languages():
     for line in (zh, en, both):
         assert "model numbers, terms, command names, code identifiers" in line
         assert "leave it empty to search by chunks_query alone" in line
+        # 真模型抽问(PR #799):模型会把候选里见过的兄弟型号与猜测的答案值塞进
+        # 关键词串,整串覆盖率被稀释到把金段挤出 RELEVANCE_FLOOR。只许问题点名
+        # 的词及其对应写法,这句约束必须随关键词说明一起出现。
+        assert "use only terms the question names and their equivalents" in line
+        assert "not neighbouring identifiers seen in the candidates" in line
+        assert "or guessed answer values" in line
     # 没探测到语言 = zh/en 回退,与 expand_query_prompt 的缺省同一对。
     assert _line() == both
     assert _line(corpus_langs=[]) == both
