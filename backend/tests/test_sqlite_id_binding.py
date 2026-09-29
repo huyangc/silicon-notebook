@@ -257,13 +257,20 @@ def _single_ceiling_param(statements, ceiling, *, bounded: int = 0) -> None:
 
 # ------------------------------------------------------------ module API
 def test_ids_param_is_one_deduplicated_deterministic_json_array():
-    assert ids_param(["b", "a", "b", "", "  ", None, "a"]) == '["b","a"]'
-    assert ids_param(("b", "a")) == '["b","a"]'
-    assert ids_param({"b", "a", "c"}) == '["a","b","c"]'
-    assert ids_param(frozenset({"z", "y"})) == '["y","z"]'
+    def decoded(values):
+        return json.loads(ids_param(values))
+
+    assert decoded(["b", "a", "b", "", "  ", "\t", None, "a"]) == ["b", "a"]
+    assert decoded(("b", "a")) == ["b", "a"]
+    assert decoded({"b", "a", "c"}) == ["a", "b", "c"]
+    assert decoded(frozenset({"z", "y"})) == ["y", "z"]
+    assert decoded({7, "7"}) == ["7", 7]
     assert ids_param([]) == "[]"
-    assert json.loads(ids_param(WEIRD)) == WEIRD
-    assert ids_param([7, "7", 7]) == '[7,"7"]'
+    assert ids_param([None, "", " "]) == "[]"
+    assert decoded(WEIRD) == WEIRD
+    assert decoded([7, "7", 7]) == [7, "7"]
+    assert decoded(x for x in ["b", "a"]) == ["b", "a"]
+    assert ids_param(["b", "a"]) == ids_param(["b", "a"])  # byte-stable
 
 
 @pytest.mark.parametrize("bad", ["s-001", b"s-001", bytearray(b"s")])
