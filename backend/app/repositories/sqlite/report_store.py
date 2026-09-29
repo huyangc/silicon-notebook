@@ -19,6 +19,8 @@ from typing import Callable, Iterator
 
 from app.core.capability_tokens import new_capability_token
 from app.domain.report_export import ReportExportSource
+from app.domain.share_disclosure import ShareMemoryGuard
+from app.repositories.sqlite.memory_store import MemoryStore
 from app.models.ask import StoredSubmittedVia
 from app.repositories.sqlite.access_sql import NOTEBOOK_READ_SQL, read_access_params
 from app.repositories.sqlite.database import SqliteDatabase
@@ -352,11 +354,23 @@ class ReportStore:
     # for a selected-then-dropped column, and it is popped for the same reason.
     GATE_FIELDS = ("notebook_id", "created_by")
 
-    def share_report(self, notebook_id: str, report_id: str) -> str:
+    def share_report(
+        self,
+        notebook_id: str,
+        report_id: str,
+        *,
+        memory_guard: ShareMemoryGuard | None = None,
+    ) -> str:
         """Issue (or return) the public token for one report.
 
         Idempotent: re-sharing keeps the existing link so a URL already handed
         out never silently starts 404ing.
+
+        ``memory_guard`` (M4): the author's Memory the page carries is counted
+        again inside this ``write()`` (``BEGIN IMMEDIATE``: every other writer,
+        Memory writes included, waits for it), and a count that no longer
+        matches the acknowledgement raises ``ShareDisclosureRequired`` with
+        nothing written.  See the PostgreSQL store for the row locks there.
         """
         candidate = new_capability_token("rshr")
         with self.database.write() as db:
@@ -366,6 +380,11 @@ class ReportStore:
             ).fetchone()
             if row is None:
                 raise KeyError(report_id)
+            if memory_guard is not None:
+                memory_guard.check(MemoryStore.memory_sources_on(
+                    db, memory_guard.live_source_ids, memory_guard.author_id,
+                    lock=True,
+                ).values())
             # One conditional write instead of read-then-write: COALESCE keeps
             # an already-issued token, so two concurrent shares converge on the
             # same link rather than the later one silently invalidating the
