@@ -1582,10 +1582,12 @@ def promote_library_prefix(
     counted = [*held, *head]
     ahead = {chunk.text for chunk in counted}
     chosen: Set[int] = set()
-    handed: Dict[str, int] = {}
+    # No hand-on is needed here (unlike ``select_with_reserves``): a library's
+    # capacity is its eligible whole-ranking first copies of THIS order, which
+    # no earlier pick or prefix row can repeat, so every seat dealt can be
+    # filled -- there is no higher-priority rule pulling in a later copy.
     for rule in rules:
-        need = (rule.reserve + (handed.pop(rule.group, 0) if rule.group else 0)
-                - sum(1 for chunk in counted if rule.holds(chunk)))
+        need = rule.reserve - sum(1 for chunk in counted if rule.holds(chunk))
         for chunk in tail:
             if need <= 0:
                 break
@@ -1596,8 +1598,6 @@ def promote_library_prefix(
             chosen.add(id(chunk))
             ahead.add(chunk.text)
             need -= 1
-        if rule.group and need > 0:
-            handed[rule.group] = need     # same hand-on as the mix cut
     picked = [chunk for chunk in tail if id(chunk) in chosen]
     rest = [chunk for chunk in tail if id(chunk) not in chosen]
     return ReasoningPassageOrder(head + picked + rest, len(head) + len(picked))
