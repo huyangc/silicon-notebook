@@ -56,6 +56,14 @@ def test_kg_object_dangling_pointer_is_not_minted_pg(store):
     kit.kg_dangling_pointer_is_not_minted(*store[:2], "%s", store[2])
 
 
+@pytest.mark.parametrize("mutation", sorted(kit.MULTI_OCCURRENCE_EXPECTATIONS))
+def test_kg_object_registers_exactly_the_occurrence_it_writes_pg(store, mutation):
+    sources, database, notebook_id = store
+    kit.kg_registers_the_occurrence_it_writes(
+        sources, database, "%s", notebook_id, mutation,
+    )
+
+
 def test_knowledge_context_issues_one_read_over_admitted_objects_pg(store):
     kit.kg_one_read_per_call(*store[:2], "%s", store[2])
 
@@ -68,6 +76,10 @@ def test_follow_chain_hop_anchors_race_the_terminal_read_pg(store, mutation):
 
 def test_follow_chain_dangling_primary_is_not_minted_pg(store):
     kit.chain_dangling_pointer_is_not_minted(*store[:2], "%s", store[2])
+
+
+def test_follow_chain_registration_never_mutates_its_input_pg(store):
+    kit.chain_registration_never_mutates_its_input(*store[:2], "%s", store[2])
 
 
 @pytest.mark.parametrize("mutation", MUTATIONS)
