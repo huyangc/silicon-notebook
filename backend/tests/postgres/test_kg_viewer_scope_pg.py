@@ -253,3 +253,32 @@ def test_pg_owner_column_hides_objects_whatever_their_evidence(repo):
     view = as_user(s.b, repo.kg_neighbors, s.nb, s.ids.engram_s)
     assert bare not in {n["id"] for n in view["nodes"]}
     assert "A-PRIVATE" not in repr(view)
+
+
+def test_pg_set_valued_store_reads(repo):
+    """``source_ids=`` / ``canonical_ids=`` on PostgreSQL: owned live objects
+    only, empty lists answer without a statement, each cluster cut to
+    ``limit`` rows (one LATERAL seek per cluster)."""
+    s = build_scenario(repo, b_memory=False)
+    knowledge = repo._runtime.knowledge
+    with repo._runtime.database.write() as db:
+        db.execute("UPDATE knowledge_objects SET status='deprecated' WHERE id=%s",
+                   (s.ids.definer_ma,))
+    with repo._runtime.database.connect() as db:
+        owned = {r["id"] for r in knowledge.relink_object_rows_for_source(
+            db, s.nb, source_ids=["src-ma", "src-none"])}
+        assert knowledge.relink_object_rows_for_source(db, s.nb, source_ids=[]) == []
+        assert knowledge.concept_cluster_detail_rows(
+            db, s.nb, "", limit=1, canonical_ids=[]) == ([], "")
+        rows, name = knowledge.concept_cluster_detail_rows(
+            db, s.nb, "", limit=1,
+            canonical_ids=[s.ids.engram_canonical, s.ids.secret_canonical])
+    assert owned == {s.ids.engram_ma, s.ids.secret}
+    assert name == ""
+    by_cluster = {}
+    for row in rows:
+        by_cluster.setdefault(row["canonical_id"], []).append(row["member_object_id"])
+    assert by_cluster == {
+        s.ids.engram_canonical: [min(s.ids.engram_s, s.ids.engram_ma)],
+        s.ids.secret_canonical: [s.ids.secret],
+    }

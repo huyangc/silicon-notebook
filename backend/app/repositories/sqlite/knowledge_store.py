@@ -996,7 +996,11 @@ class KnowledgeStore:
 
     @staticmethod
     def relink_object_rows_for_source(
-        db: sqlite3.Connection, notebook_id: str, source_id: str
+        db: sqlite3.Connection,
+        notebook_id: str,
+        source_id: str = "",
+        *,
+        source_ids: Optional[Sequence[str]] = None,
     ):
         """Every non-deprecated object of ONE source, in insertion (rowid) order.
 
@@ -1015,7 +1019,32 @@ class KnowledgeStore:
         per-node cap binds, the paged pass may bind an isolated node to a different
         equally valid partner than the historical pass would have. Edge COUNTS and
         isolation counts are unaffected.
+
+        ``source_ids`` (PR-A·A5, the KG viewer scope): the live objects OWNED by
+        any of those sources, ``id`` only, in ONE statement; ``source_id`` is then
+        ignored and an empty list issues no query. The ids travel as ONE JSON
+        parameter (never one placeholder per id — the variable limit), and the
+        list DRIVES the lookup: each value seeks ``idx_knowledge_objects_source``.
+        Left alone the planner prefers the ``notebook_id`` equality on
+        ``idx_knowledge_objects_nb_updated`` — a scan of the whole notebook for
+        a handful of ids — so the index is named (``INDEXED BY``, which fails
+        loudly if it ever disappears; EXPLAIN pin in
+        tests/test_kg_viewer_scope_rules.py). The JSON list is the only bound
+        collection, so the statement switches to the shared ``id_binding``
+        helpers mechanically.
         """
+        if source_ids is not None:
+            values = sorted({str(value) for value in source_ids if value})
+            if not values:
+                return []
+            return db.execute(
+                "SELECT id FROM knowledge_objects "
+                "INDEXED BY idx_knowledge_objects_source "
+                "WHERE notebook_id = ? AND source_id IN "
+                "(SELECT CAST(value AS TEXT) FROM json_each(?)) "
+                "AND status != 'deprecated' ORDER BY rowid",
+                (notebook_id, json.dumps(values)),
+            ).fetchall()
         return db.execute(
             "SELECT id, object_type, payload, evidence FROM knowledge_objects "
             "WHERE notebook_id = ? AND source_id = ? AND status != 'deprecated' "
@@ -3751,6 +3780,7 @@ class KnowledgeStore:
         *,
         limit: Optional[int] = None,
         after: str = "",
+        canonical_ids: Optional[Sequence[str]] = None,
     ) -> "tuple[List[sqlite3.Row], str]":
         """Cluster member rows (joined onto live knowledge_objects) plus the
         canonical name for one concept cluster. Keyset-paginated by
@@ -3768,7 +3798,35 @@ class KnowledgeStore:
         ``cc.member_object_id > after`` logically the same set of rows), same
         motivation (give SQLite's planner a seek condition on the
         ``knowledge_objects`` side too, so a mid-cluster page does not have to
-        scan that table from its start up to the cursor)."""
+        scan that table from its start up to the cursor).
+
+        ``canonical_ids``: mirrors the PostgreSQL side — the first ``limit``
+        live members of EACH listed cluster in ONE statement, rows carrying
+        ``canonical_id``, name not read, empty list → no query. The ids are ONE
+        JSON parameter; a correlated ``LIMIT`` subquery per cluster keeps a
+        hub cluster at ``limit`` rows (SQLite has no LATERAL). The JSON list is
+        the only bound collection, so the statement switches to the shared
+        ``id_binding`` helpers mechanically."""
+        if canonical_ids is not None:
+            values = sorted({str(value) for value in canonical_ids if value})
+            if not values or not limit:
+                return [], ""
+            rows = db.execute(
+                "SELECT CAST(c.value AS TEXT) AS canonical_id, cc.member_object_id, "
+                "cc.canonical_name, ko.object_type, ko.payload, ko.evidence "
+                "FROM json_each(?) c "
+                "JOIN concept_clusters cc ON cc.rowid IN ("
+                "SELECT cc2.rowid FROM concept_clusters cc2 "
+                "JOIN knowledge_objects ko2 ON ko2.id=cc2.member_object_id "
+                "WHERE cc2.notebook_id=? AND cc2.canonical_id=CAST(c.value AS TEXT) "
+                "AND ko2.status!='deprecated' "
+                f"AND cc2.generation = {_PUBLISHED_CLUSTER_GEN} "
+                "ORDER BY cc2.member_object_id LIMIT ?) "
+                "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
+                "ORDER BY canonical_id, cc.member_object_id",
+                (json.dumps(values), notebook_id, notebook_id, int(limit)),
+            ).fetchall()
+            return rows, ""
         query = (
             "SELECT cc.member_object_id, cc.canonical_name, ko.object_type, ko.payload, ko.evidence "
             "FROM concept_clusters cc "
