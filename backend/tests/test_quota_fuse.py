@@ -49,6 +49,7 @@ def test_question_supplement_cannot_evict_multi_query_baseline():
         collected,
         [{"supplement": supplemental, "baseline": baseline}],
         top_n=1,
+        active_notebook_id="nb-active",
     )
 
     assert [item.chunk_id for item in selected] == ["baseline"]
@@ -85,7 +86,7 @@ def test_enforce_active_floor_is_inert_without_a_peer_hit():
     selected = [_chunk(f"a{i}", 0.9 - i * 0.1) for i in range(3)]
     pool = selected + [_chunk("a9", 0.1)]
 
-    assert enforce_active_floor(selected, pool, 2) is selected
+    assert enforce_active_floor(selected, pool, 2, active_notebook_id="nb-active") is selected
 
 
 def test_enforce_active_floor_is_inert_without_a_floor():
@@ -94,8 +95,8 @@ def test_enforce_active_floor_is_inert_without_a_floor():
     selected = [_chunk("b1", 0.9, notebook_id="b")]
     pool = selected + [_chunk("a1", 0.3)]
 
-    assert enforce_active_floor(selected, pool, 0) is selected
-    assert enforce_active_floor([], pool, 4) == []
+    assert enforce_active_floor(selected, pool, 0, active_notebook_id="nb-active") is selected
+    assert enforce_active_floor([], pool, 4, active_notebook_id="nb-active") == []
 
 
 def test_enforce_active_floor_replaces_peers_from_the_tail():
@@ -111,7 +112,7 @@ def test_enforce_active_floor_replaces_peers_from_the_tail():
     ]
     spare = [_chunk("a1", 0.4), _chunk("a2", 0.3)]
 
-    out = enforce_active_floor(selected, selected + spare, 3)
+    out = enforce_active_floor(selected, selected + spare, 3, active_notebook_id="nb-active")
 
     assert len(out) == len(selected)
     assert [hit.chunk_id for hit in out] == [
@@ -123,7 +124,7 @@ def test_enforce_active_floor_is_capped_by_the_available_candidates():
     from app.services.retrieval import enforce_active_floor
 
     selected = [_chunk(f"b{i}", 0.9, notebook_id="b") for i in range(4)]
-    out = enforce_active_floor(selected, selected + [_chunk("a1", 0.2)], 3)
+    out = enforce_active_floor(selected, selected + [_chunk("a1", 0.2)], 3, active_notebook_id="nb-active")
 
     assert [hit.chunk_id for hit in out] == ["b0", "b1", "b2", "a1"]
 
@@ -137,7 +138,7 @@ def test_enforce_active_floor_deduplicates_by_text():
         _chunk(f"a{i}", 0.4 - i * 0.01, text="同一段正文") for i in range(4)
     ]
 
-    out = enforce_active_floor(selected, selected + copies, 3)
+    out = enforce_active_floor(selected, selected + copies, 3, active_notebook_id="nb-active")
 
     local = [hit for hit in out if not hit.notebook_id]
     assert len(local) == 1, f"同一段正文占了 {len(local)} 个保底席位"
@@ -158,7 +159,7 @@ def test_enforce_active_floor_counts_held_seats_per_distinct_passage():
     distinct = [_chunk(f"a{i}", 0.5 - i * 0.01, text=f"另一段正文 {i}") for i in range(3)]
     selected = [*copies, *peers]
 
-    out = enforce_active_floor(selected, [*selected, *distinct], 4)
+    out = enforce_active_floor(selected, [*selected, *distinct], 4, active_notebook_id="nb-active")
 
     held = {hit.text for hit in out if not hit.notebook_id}
     assert held == {"同一段正文", *(hit.text for hit in distinct)}
@@ -173,7 +174,7 @@ def test_enforce_active_floor_never_duplicates_what_is_already_selected():
     selected = [already, *(_chunk(f"b{i}", 0.9, notebook_id="b") for i in range(3))]
     twin = _chunk("a2", 0.39, text="同一段正文")
 
-    out = enforce_active_floor(selected, selected + [twin], 2)
+    out = enforce_active_floor(selected, selected + [twin], 2, active_notebook_id="nb-active")
 
     assert [hit.chunk_id for hit in out] == [hit.chunk_id for hit in selected]
 
@@ -184,8 +185,8 @@ def test_enforce_active_floor_is_deterministic():
     selected = [_chunk(f"b{i}", 0.9, notebook_id="b") for i in range(4)]
     spare = [_chunk("a1", 0.3), _chunk("a2", 0.3), _chunk("a3", 0.2)]
 
-    first = enforce_active_floor(list(selected), selected + spare, 2)
-    second = enforce_active_floor(list(selected), selected + spare, 2)
+    first = enforce_active_floor(list(selected), selected + spare, 2, active_notebook_id="nb-active")
+    second = enforce_active_floor(list(selected), selected + spare, 2, active_notebook_id="nb-active")
 
     assert [hit.chunk_id for hit in first] == [hit.chunk_id for hit in second]
 
@@ -200,11 +201,12 @@ def test_quota_fuse_baseline_first_reads_the_floor_off_the_mapping():
     # 一个子查询、一组:组内纯按相关度排,强参考库通吃——这正是保底要挡的形态。
     groups = [dict(rows)]
 
-    plain, _counts = quota_fuse_baseline_first(dict(rows), groups, 8)
+    plain, _counts = quota_fuse_baseline_first(dict(rows), groups, 8, active_notebook_id="nb-active")
     assert sum(1 for hit in plain if not hit.notebook_id) == 0
 
     carried, _counts = quota_fuse_baseline_first(
         with_active_reserve(dict(rows), 3), groups, 8,
+        active_notebook_id="nb-active",
     )
     assert len(carried) == 8
     assert sum(1 for hit in carried if not hit.notebook_id) >= 3

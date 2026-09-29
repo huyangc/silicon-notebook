@@ -946,6 +946,7 @@ def test_the_floor_is_paid_after_the_quota_fuse():
     selected, _counts = quota_fuse_baseline_first(
         result.collected, result.per_query, 16,
         relevance=lambda c: c.relevance,
+        active_notebook_id="a",
     )
     assert len(selected) == 16
     assert sum(1 for hit in selected if not hit.notebook_id) >= 4
@@ -963,6 +964,7 @@ def test_reserve_zero_restores_pure_relevance():
     selected, _counts = quota_fuse_baseline_first(
         result.collected, result.per_query, 16,
         relevance=lambda c: c.relevance,
+        active_notebook_id="a",
     )
     assert all(hit.notebook_id for hit in selected), (
         "纯相关度下强参考库本就该通吃——这条是保底用例的对照臂"
@@ -981,6 +983,7 @@ def test_active_floor_does_not_shrink_as_libraries_are_mounted():
         selected, _counts = quota_fuse_baseline_first(
             result.collected, result.per_query, 16,
             relevance=lambda c: c.relevance,
+            active_notebook_id="a",
         )
         return sum(1 for hit in selected if not hit.notebook_id)
 
@@ -1006,6 +1009,7 @@ def test_the_floor_is_capped_by_the_qualified_active_candidates():
     selected, _counts = quota_fuse_baseline_first(
         result.collected, result.per_query, 16,
         relevance=lambda c: c.relevance,
+        active_notebook_id="a",
     )
 
     assert len(selected) == 16
@@ -1039,6 +1043,7 @@ def test_the_floor_ignores_generated_question_only_candidates():
     selected, _counts = quota_fuse_baseline_first(
         result.collected, result.per_query, 16,
         relevance=lambda c: c.relevance,
+        active_notebook_id="a",
     )
 
     local = [hit for hit in selected if not hit.notebook_id]
@@ -1062,6 +1067,7 @@ def test_mmr_branch_hands_trailing_peer_seats_back_to_active():
 
     repaired = cf.apply_active_reserve(
         settings, selected, list(selected) + spare, 8,
+        active_notebook_id="a",
     )
 
     assert [hit.chunk_id for hit in repaired[:6]] == [
@@ -1079,11 +1085,11 @@ def test_mmr_branch_reserve_is_inert_for_a_single_library():
     selected = [make_chunk(f"a{i}", 0.9 - i * 0.01) for i in range(8)]
     pool = selected + [make_chunk("a9", 0.1)]
 
-    assert cf.apply_active_reserve(settings, selected, pool, 8) == selected
+    assert cf.apply_active_reserve(settings, selected, pool, 8, active_notebook_id="a") == selected
     off = SimpleNamespace(
         chunk_federation_active_reserve=0.0, chunk_mmr_k=16,
     )
-    assert cf.apply_active_reserve(off, selected, pool, 8) == selected
+    assert cf.apply_active_reserve(off, selected, pool, 8, active_notebook_id="a") == selected
 
 
 # --------------------------------------------------------------------------
@@ -1302,6 +1308,7 @@ def test_each_sub_query_group_keeps_its_own_relevance(libraries):
     selected, _counts = quota_fuse_baseline_first(
         result.collected, result.per_query, 2,
         relevance=lambda chunk: chunk.relevance,
+        active_notebook_id="a",
     )
     assert [hit.chunk_id for hit in selected] == ["c1", "c3"], (
         "两个方向各一席;塌成一组时拿到的是 ['c1', 'c2']"
@@ -1489,11 +1496,12 @@ def test_both_selection_branches_pay_the_floor_under_a_swamped_pool(branch):
         chosen = CandidateRetrievalService._mmr_select_chunks(
             None, scored, result.ids, result.matrix, 16, 0.5,
         )
-        seats = cf.apply_active_reserve(candidates.settings, chosen, scored, 16)
+        seats = cf.apply_active_reserve(candidates.settings, chosen, scored, 16, active_notebook_id="a")
     else:
         seats, _counts = quota_fuse_baseline_first(
             result.collected, result.per_query, 16,
             relevance=lambda chunk: chunk.relevance,
+            active_notebook_id="a",
         )
 
     assert len(seats) == 16
@@ -1700,6 +1708,7 @@ def _ask_chunk_multi_fuse(collected, per_query, direct_hits, top_n=16):
         per_query = per_query + [{c.chunk_id: c for c in direct_hits}]
     selected, _counts = quota_fuse_baseline_first(
         collected, per_query, top_n, relevance=lambda c: c.relevance,
+        active_notebook_id="a",
     )
     return selected
 

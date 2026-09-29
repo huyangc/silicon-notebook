@@ -560,6 +560,7 @@ def _mmr_seats(repo, active):
     selected = repo.retrieval.select_chunk_candidates(
         scored, ids, matrix,
         repo.settings.chunk_mmr_k, repo.settings.chunk_mmr_lambda,
+        active_notebook_id=active,
     )
     return selected
 
@@ -575,6 +576,7 @@ def _fuse_seats(repo, active):
     selected, _counts = quota_fuse_baseline_first(
         collected, per_query, repo.settings.chunk_mmr_k,
         relevance=lambda chunk: chunk.relevance,
+        active_notebook_id=active,
     )
     return selected
 
@@ -659,6 +661,7 @@ def test_single_participant_selection_is_value_identical(repo, single_library):
     selected = repo.retrieval.select_chunk_candidates(
         scored, ids, matrix,
         repo.settings.chunk_mmr_k, repo.settings.chunk_mmr_lambda,
+        active_notebook_id=single_library,
     )
 
     assert _same_chunks(selected, baseline)
@@ -800,6 +803,7 @@ def test_direct_hit_groups_do_not_defeat_the_floor_end_to_end(
     selected, _counts = quota_fuse_baseline_first(
         collected, per_query, repo.settings.chunk_mmr_k,
         relevance=lambda chunk: chunk.relevance,
+        active_notebook_id=active,
     )
 
     assert len(selected) == repo.settings.chunk_mmr_k

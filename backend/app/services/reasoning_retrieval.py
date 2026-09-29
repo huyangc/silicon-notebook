@@ -3811,7 +3811,8 @@ class ReasoningRetriever:
         """
         recalled = self._recall_chunk_candidates(notebook_id, query)
         return self._select_chunk_candidates(
-            query, recalled, self.settings.chunk_mmr_k if k is None else k)
+            query, recalled, self.settings.chunk_mmr_k if k is None else k,
+            notebook_id)
 
     def _recall_chunk_candidates(self, notebook_id, query):
         """`search_chunks` 的召回步:`(scored, ids, matrix)`。
@@ -3828,13 +3829,19 @@ class ReasoningRetriever:
             raise_if_cancelled(self.cancel_event)
             return self.retrieval.retrieve_chunk_candidates(notebook_id, query)
 
-    def _select_chunk_candidates(self, query, recalled, k):
-        """`search_chunks` 的选择步:精排或 MMR,本库保底,再过策略边界。"""
+    def _select_chunk_candidates(self, query, recalled, k, notebook_id):
+        """`search_chunks` 的选择步:精排或 MMR,本库保底,再过策略边界。
+
+        顺序是硬约束:先切到 k(精排,不可用时 MMR),再在这最后一刀之后按真实的
+        当前库 id 兑现保底(完整 `scored` 作池),最后过 `_filter_candidates`。
+        保底之后不再有精排——否则精排会把保底换进来的本库行重新挤掉。
+        """
         scored, ids, matrix = recalled
-        selected = self._rerank_chunk_selection(query, scored, k)
+        selected = self._rerank_chunk_selection(query, scored, k, notebook_id)
         if selected is None:
             selected = self.retrieval.select_chunk_candidates(
-                scored, ids, matrix, k, self.settings.chunk_mmr_lambda)
+                scored, ids, matrix, k, self.settings.chunk_mmr_lambda,
+                active_notebook_id=notebook_id)
         return self._filter_candidates("chunk", selected)
 
     def _chunk_rerank_client(self):
@@ -3861,7 +3868,7 @@ class ReasoningRetriever:
             return None
         return client
 
-    def _rerank_chunk_selection(self, query, scored, k):
+    def _rerank_chunk_selection(self, query, scored, k, notebook_id):
         """用 cross-encoder 精排决定 `search_chunks` 选哪 k 段;回退时返回 None。
 
         口径与 chunk 模式 mix 分支(`AskService` 里 `partition_generated_
@@ -3877,9 +3884,12 @@ class ReasoningRetriever:
 
         按精排序取前 k 段之后,仍走 `apply_active_reserve`——与 MMR 路径同一个
         本库保底实现(`retrieval.enforce_active_floor`),池子同样是完整的
-        `scored`。精排只决定入选与返回顺序,**不改写 `relevance`**:它参与接地
-        阈值(`EVIDENCE_TAU_*`)。已知残余:合成时 `order_reasoning_passages` 仍按
-        相关度装配原文分区,所以精排决定的是「选哪 k 段」,不是合成内的先后。
+        `scored`,当前库 id 是 `search_chunks` 传下来的真实 id(PPR 等腿给本库行
+        盖的是它自己的 id)。保底在最后一刀之后、精排之后。精排只决定入选与返回
+        顺序,**不改写 `relevance`**:它参与接地阈值(`EVIDENCE_TAU_*`)。合成时
+        `chunk_federation.reasoning_order_for` 按相关度装配原文分区(两道交错 →
+        精确前缀 → 当前库 / 逐库保底前缀),所以精排决定的是「选哪 k 段」,不是
+        合成内的先后。
 
         回退(返回 None,调用方走 MMR,逐字节不变):
         * 精排关闭 / 窗口为 0 / 客户端不可用(见 `_chunk_rerank_client`);
@@ -3948,7 +3958,8 @@ class ReasoningRetriever:
             self._note_chunk_rerank_fallback(
                 failures[0], reason, candidates=len(scored), documents=sum(sent))
             return None
-        return apply_active_reserve(self.settings, ranked[:k], scored, k)
+        return apply_active_reserve(self.settings, ranked[:k], scored, k,
+                                    active_notebook_id=notebook_id)
 
     def _rerank_window(self, client, query, hits, window, failures, sent, deadline):
         """把 `hits` 的前 `window` 条交精排,窗口外的按原序接在后面。

@@ -1278,9 +1278,17 @@ class SpreadsheetAnalysisService:
 
 
 def spreadsheet_prompt_block(
-    results: Sequence[SpreadsheetAnalysisResult], *, preview_rows: int, max_bytes: int
+    results: Sequence[SpreadsheetAnalysisResult], *, preview_rows: int, max_bytes: int,
+    max_chars: int | None = None,
 ) -> tuple[str, dict[str, dict[str, Any]]]:
-    """Render bounded spreadsheet receipts into the ordinary citable map."""
+    """Render bounded spreadsheet receipts into the ordinary citable map.
+
+    Two caps, both on whole lines: ``max_bytes`` (UTF-8, the historical
+    transport cap) and, when given, ``max_chars`` -- the characters the
+    reasoning source partition has left for this block once the passage
+    floor is held back.  A line that would cross either is not written, so the
+    ``result_rows`` header and the rows shown never disagree with a cut.
+    """
     lines: list[str] = []
     evidence: dict[str, dict[str, Any]] = {}
 
@@ -1288,6 +1296,10 @@ def spreadsheet_prompt_block(
         separator = "\n" if lines else ""
         current_bytes = len("\n".join(lines).encode("utf-8"))
         if current_bytes + len((separator + line).encode("utf-8")) > max_bytes:
+            return False
+        if max_chars is not None and (
+            len("\n".join(lines)) + len(separator + line) > max_chars
+        ):
             return False
         lines.append(line)
         return True

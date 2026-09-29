@@ -3751,16 +3751,18 @@ def test_search_chunks_wrapper_uses_the_chunk_mode_primitives(rrepo):
     seen = {}
     original = rr.retrieval.select_chunk_candidates
 
-    def _spy(scored, ids, matrix, k, lambda_):
+    def _spy(scored, ids, matrix, k, lambda_, **kwargs):
         seen["k"] = k
         seen["lambda"] = lambda_
-        return original(scored, ids, matrix, k, lambda_)
+        seen["active"] = kwargs.get("active_notebook_id")
+        return original(scored, ids, matrix, k, lambda_, **kwargs)
 
     rr.retrieval.select_chunk_candidates = _spy
     hits = rr.search_chunks(nb.id, "布局布线")
     assert hits and all(h.chunk_id.startswith("ck-") for h in hits)
     assert seen == {"k": rrepo.settings.chunk_mmr_k,
-                    "lambda": rrepo.settings.chunk_mmr_lambda}
+                    "lambda": rrepo.settings.chunk_mmr_lambda,
+                    "active": nb.id}
     rr.search_chunks(nb.id, "布局布线", k=2)
     assert seen["k"] == 2
 

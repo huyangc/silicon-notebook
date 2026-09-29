@@ -5,7 +5,8 @@ insertion order (outline-bound passages first). With the first-round passage see
 decoupled from the knowledge graph, insertion order puts the whole seeded batch
 ahead of the passages the model fetched on purpose during reflection, and the
 character budget cut the latter. Unbound passages now go through the same
-`retrieval.order_reasoning_passages` Ask uses; bound passages still come first.
+`retrieval.reasoning_order_for` Ask uses (exact prefix, then the active /
+per-library reserved prefix); bound passages still come first.
 """
 from __future__ import annotations
 
@@ -83,10 +84,84 @@ def test_bound_first_then_exact_then_the_two_lanes_alternate(repo, monkeypatch):
 def test_control_insertion_order_pushes_the_action_passage_out(repo, monkeypatch):
     """The same section with the old insertion order: the seeded batch spends
     the budget and the action passage never reaches the prompt."""
+    from app.services.retrieval import ReasoningPassageOrder
+
     monkeypatch.setattr(
-        "app.services.retrieval.order_reasoning_passages",
-        lambda chunks, *, exact_reserve: list(chunks))
+        "app.services.chunk_federation.reasoning_order_for",
+        lambda settings, chunks, notebook_id, *, held=(): ReasoningPassageOrder(
+            list(chunks), 0))
     captured = _draft(repo, monkeypatch)
 
     assert captured["order"][0] == "bound"
     assert "action" not in captured["rendered"]
+
+
+# ------------------------------------------------ library reserve (PR-C, C3)
+def _stamped(chunk_id, relevance, notebook_id, **kwargs):
+    from dataclasses import replace
+
+    return replace(_passage(chunk_id, relevance, **kwargs), notebook_id=notebook_id)
+
+
+def test_single_notebook_report_order_is_unchanged_with_own_id_ppr(repo, monkeypatch):
+    """Concept-walk passages carry the notebook's own id: no foreign passage,
+    so the active prefix is inert and the order is the three-step order."""
+    from app.services.retrieval import order_reasoning_passages
+
+    eng = _mk_engine(repo, _SectionLLM())
+    nb = _mk_nb(repo)
+    result = _section_result()
+    chunks = [
+        _stamped(c.chunk_id, c.relevance, nb.id, ppr=True)
+        if c.chunk_id.startswith("ppr") else c
+        for c in result.chunks
+    ]
+    got = eng._section_passage_order(chunks, {"bound"}, nb.id)
+    unbound = [c for c in chunks if c.chunk_id != "bound"]
+    expected = ["bound"] + [c.chunk_id for c in order_reasoning_passages(
+        unbound, exact_reserve=eng.settings.reasoning_exact_reserve)]
+    assert [c.chunk_id for c in got] == expected
+
+
+def test_report_order_is_bound_then_exact_then_active_prefix(repo):
+    eng = _mk_engine(repo, _SectionLLM())
+    nb = _mk_nb(repo)
+    foreign = [_stamped(f"ref{i}", round(0.9 - i * 0.01, 2), "ref") for i in range(8)]
+    mine = [_passage(f"mine{i}", round(0.3 - i * 0.01, 2)) for i in range(5)]
+    exact = [_stamped("exact", 1.0, "ref", exact=True)]
+    bound = [_stamped("bound", 0.2, "ref")]
+    got = [c.chunk_id for c in eng._section_passage_order(
+        foreign + mine + exact + bound, {"bound"}, nb.id)]
+    seats = 4   # ceil(chunk_mmr_k 16 x 0.25)
+    assert got[:2] == ["bound", "exact"]
+    assert got[2:2 + seats] == [f"mine{i}" for i in range(seats)]
+    assert sorted(got) == sorted(
+        c.chunk_id for c in foreign + mine + exact + bound)
+
+
+def test_bound_active_passages_spend_report_seats(repo):
+    eng = _mk_engine(repo, _SectionLLM())
+    nb = _mk_nb(repo)
+    foreign = [_stamped(f"ref{i}", round(0.9 - i * 0.01, 2), "ref") for i in range(8)]
+    mine = [_passage(f"mine{i}", round(0.3 - i * 0.01, 2)) for i in range(5)]
+    bound = [_passage(f"bound{i}", 0.1) for i in range(3)]
+    got = [c.chunk_id for c in eng._section_passage_order(
+        foreign + mine + bound, {f"bound{i}" for i in range(3)}, nb.id)]
+    assert got[:4] == ["bound0", "bound1", "bound2", "mine0"]
+    assert got[4] == "ref0"
+
+
+def test_peer_report_order_shares_the_prefix_per_library(repo, monkeypatch):
+    from app.services import chunk_federation as cf
+
+    monkeypatch.setattr(cf, "federated_ask_active", lambda: True)
+    eng = _mk_engine(repo, _SectionLLM())
+    nb = _mk_nb(repo)
+    big = [_stamped(f"z{i}", round(0.9 - i * 0.01, 2), "nb-z") for i in range(10)]
+    small = [_stamped("b0", 0.3, "nb-b"), _stamped("c0", 0.25, "nb-c")]
+    got = [c.chunk_id for c in eng._section_passage_order(big + small, set(), nb.id)]
+    # 4 seats round-robin in best-hit order z, b, c, z; picks keep their order.
+    assert got[:4] == ["z0", "z1", "b0", "c0"]
+    # One participant: inert.
+    alone = [c.chunk_id for c in eng._section_passage_order(big, set(), nb.id)]
+    assert alone == [c.chunk_id for c in big]

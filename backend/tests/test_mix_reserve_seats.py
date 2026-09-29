@@ -116,9 +116,10 @@ def test_active_hit_normalises_the_raw_own_id_stamp():
     assert is_active_hit(_row("a", notebook_id=""), ACTIVE)
     assert is_active_hit(_row("a", notebook_id=ACTIVE), ACTIVE)
     assert not is_active_hit(_row("b", notebook_id="ref"), ACTIVE)
-    # Default active id "": the historical "empty stamp == active" reading.
-    assert is_active_hit(_row("a", notebook_id=""))
-    assert not is_active_hit(_row("a", notebook_id=ACTIVE))
+    # An empty active id reads only an empty stamp as active -- which is why
+    # the id is a required argument (a raw own-id stamp would pose as a peer).
+    assert is_active_hit(_row("a", notebook_id=""), "")
+    assert not is_active_hit(_row("a", notebook_id=ACTIVE), "")
 
 
 @pytest.mark.parametrize("row, eligible", [
@@ -163,6 +164,13 @@ def test_peer_mode_moves_the_seats_from_the_active_rule_to_the_library_rule(
     assert cf.active_reserve_seats(_seat_settings(0.25)) == 0
     assert cf.peer_library_reserve_seats(_seat_settings(0.25)) == 4
     assert cf.peer_library_reserve_seats(_seat_settings(0.0)) == 0
+
+
+@pytest.mark.parametrize("ratio, seats", [(0.25, 4), (0.3, 5), (1.0, 16)])
+def test_peer_library_seats_are_ceil_of_k_times_ratio(monkeypatch, ratio, seats):
+    """0.3 x 16 = 4.8: ceil gives 5, a floor would give 4."""
+    monkeypatch.setattr(cf, "federated_ask_active", lambda: True)
+    assert cf.peer_library_reserve_seats(_seat_settings(ratio)) == seats
 
 
 # --------------------------------------------------------- single notebook
@@ -273,6 +281,58 @@ def test_identical_text_in_two_active_sources_spends_one_seat():
     ids = set(_ids(out))
     assert {"mine-1", "mine-2"} <= ids, ids
     assert "mine-1-copy" not in ids
+
+
+def test_an_active_copy_of_a_selected_foreign_passage_takes_no_seat():
+    """Seat identity is the text over the WHOLE selection: ``mine`` repeats
+    ``ref-3``'s text from another source, so pulling it in would evict a
+    different passage for nothing -- the MMR / quota floor skips it too."""
+    same = "shared passage".ljust(30, ".")
+    foreign = _foreign(6)
+    foreign[3] = _row("ref-3", relevance=foreign[3].relevance, notebook_id="ref",
+                      text=same, source_id="s-ref")
+    ranked = foreign + [
+        _row("mine", relevance=0.4, text=same, source_id="s-mine"),
+        _row("mine-2", relevance=0.3),
+    ]
+    budget = _tokens(ranked[:6])
+
+    out = _cut(ranked, budget, active_seats=2)
+
+    ids = _ids(out)
+    assert "mine" not in ids and "mine-2" in ids, ids
+    assert len({row.text for row in out}) == len(out), "one text, one seat"
+    floor = enforce_active_floor(ranked[:6], ranked, 2, active_notebook_id=ACTIVE)
+    assert "mine" not in _ids(floor) and "mine-2" in _ids(floor)
+
+
+def test_peer_copy_of_a_selected_passage_takes_no_library_seat():
+    same = "shared passage".ljust(30, ".")
+    ranked = _foreign(8, library="nb-z") + [
+        _row("nb-b-copy", relevance=0.35, notebook_id="nb-b", text=same),
+        _row("nb-b-own", relevance=0.3, notebook_id="nb-b"),
+    ]
+    ranked[2] = _row("nb-z-2", relevance=ranked[2].relevance,
+                     notebook_id="nb-z", text=same)
+    out = _cut(ranked, _tokens(ranked[:5]), library_seats=2, active="nb-z")
+
+    ids = _ids(out)
+    assert "nb-b-copy" not in ids and "nb-b-own" in ids, ids
+    assert len({row.text for row in out}) == len(out)
+
+
+def test_active_seats_never_evict_a_graph_seat_holder():
+    graph = _row("graph", relevance=0.5, notebook_id="ref", origin="ppr")
+    ranked = [*_foreign(2), graph, *_foreign(4, library="ref2"),
+              *[_row(f"mine-{i}", relevance=0.3) for i in range(4)]]
+    budget = _tokens(ranked[:3])
+
+    out = _cut(ranked, budget, active_seats=4, settings=_settings(graph=1))
+
+    ids = _ids(out)
+    assert "graph" in ids, ids
+    assert any(i.startswith("mine-") for i in ids), ids
+    assert _tokens(out) <= budget
 
 
 def test_ratio_one_is_capped_by_eligible_rows_and_budget():
@@ -409,9 +469,69 @@ def test_enforce_active_floor_reads_a_raw_own_id_stamp_as_active_when_told():
     # With the real id, the raw own-id row already holds the one seat.
     assert enforce_active_floor(selected, selected + spare, 1,
                                 active_notebook_id=ACTIVE) is selected
-    # Default "": the historical reading treats that stamp as a peer.
-    out = enforce_active_floor(selected, selected + spare, 1)
+    # An empty id: the historical reading treats that stamp as a peer.
+    out = enforce_active_floor(selected, selected + spare, 1,
+                               active_notebook_id="")
     assert "mine" in _ids(out)
+
+
+@pytest.mark.parametrize("spare", [
+    _row("mine", relevance=RELEVANCE_FLOOR / 2),
+    _row("mine", relevance=0.5, origin="ppr"),
+], ids=["below_floor", "graph_only"])
+def test_mmr_and_quota_floors_never_pull_in_an_ineligible_active_row(spare):
+    """``enforce_active_floor``'s spare candidates pass the same predicate as
+    the mix seats: below ``RELEVANCE_FLOOR`` or graph-only is never pulled in,
+    on either the MMR branch (``apply_active_reserve``) or the quota branch
+    (``quota_fuse_baseline_first`` over a ``FederatedCollected``)."""
+    from app.services.retrieval import quota_fuse_baseline_first
+
+    foreign = _foreign(6)      # all rank above the spare: the fusion skips it
+    pool = foreign + [spare]
+    settings = _seat_settings(0.5, k=6)
+    mmr = cf.apply_active_reserve(settings, list(foreign), pool, 6,
+                                  active_notebook_id=ACTIVE)
+    assert _ids(mmr) == _ids(foreign)
+
+    collected = cf.with_active_reserve({row.chunk_id: row for row in pool}, 3)
+    quota, _counts = quota_fuse_baseline_first(
+        collected, [{row.chunk_id: row for row in pool}], 6,
+        active_notebook_id=ACTIVE)
+    assert _ids(quota) == _ids(foreign)
+    # Control: an eligible spare at the same rank IS pulled in on both branches.
+    ok = _row("mine", relevance=0.5)
+    assert "mine" in _ids(cf.apply_active_reserve(
+        settings, list(foreign), foreign + [ok], 6, active_notebook_id=ACTIVE))
+    both = cf.with_active_reserve(
+        {row.chunk_id: row for row in foreign + [ok]}, 3)
+    assert "mine" in _ids(quota_fuse_baseline_first(
+        both, [dict(both)], 6, active_notebook_id=ACTIVE)[0])
+
+
+def _withheld(lane, *, min_relevance=0.0, relative=0.0):
+    candidates = SimpleNamespace(settings=_seat_settings(0.25, k=8))
+    return cf._withheld_active(
+        candidates, [lane], 100, min_relevance=min_relevance,
+        relative_relevance=relative, active_notebook_id=ACTIVE)
+
+
+def test_withheld_floor_reads_the_peak_off_the_whole_active_lane():
+    """A graph-only own row can hold the lane's peak without being eligible;
+    the relative floor is still measured from it, as ``peer_evidence`` would
+    measure the lane."""
+    lane = [_row("peak", relevance=0.9, origin="ppr"),
+            _row("mid", relevance=0.5), _row("low", relevance=0.3)]
+    kept, _unqualified = _withheld(lane, relative=0.6)
+    assert kept == []                     # floor 0.54 rejects mid and low
+    kept, _unqualified = _withheld(lane[1:], relative=0.6)
+    assert _ids(kept) == ["mid", "low"]   # control: peak 0.5 -> floor 0.30
+
+
+def test_withheld_reports_a_sub_floor_lane_row_it_never_withholds():
+    lane = [_row("strong", relevance=0.8), _row("weak", relevance=0.05)]
+    kept, unqualified = _withheld(lane, min_relevance=0.1)
+    assert _ids(kept) == ["strong"]
+    assert "weak" in unqualified
 
 
 # --------------------------------------------------------- ask_chunk wiring

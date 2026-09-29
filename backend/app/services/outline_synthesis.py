@@ -161,6 +161,12 @@ def plan_outline_sections(
     块之前、吃掉整份 chunk 预算。绑到 source element 的节同样中招——chunk 段在
     element 段之前装配。单独成段之后,注入块拿到的永远是剩余预算,绝不挤占模型
     亲自绑定的证据。
+
+    **当前库保底席位不跨节注入**(J5):精确命中是「用户亲口点名」的东西,所以
+    未绑定的也注入;当前库 / 逐库保底只是机械切分的份额规则,不是用户点名,更
+    不能覆盖大纲绑定这个模型判断。于是保底只在每一节**自己绑定的** ``chunks``
+    之间生效(``_answer_reasoning`` → ``chunk_federation.reasoning_order_for`` 在节内
+    把合格的当前库段落提到精确前缀之后),未绑定的当前库段落不进任何一节。
     """
     kept: list[Any] = []
     evidence: dict[int, tuple[list, list, list]] = {}

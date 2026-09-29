@@ -50,11 +50,16 @@ class _Retrieval:
     def __init__(self, scored):
         self.scored = list(scored)
         self.select_calls = []
+        self.recalled_for = None
 
     def retrieve_chunk_candidates(self, notebook_id, query):
+        self.recalled_for = notebook_id
         return list(self.scored), [c.chunk_id for c in self.scored], None
 
-    def select_chunk_candidates(self, scored, ids, matrix, k, lambda_):
+    def select_chunk_candidates(self, scored, ids, matrix, k, lambda_, *,
+                                active_notebook_id):
+        # The MMR fallback must receive the run's real notebook id, never "".
+        assert active_notebook_id and active_notebook_id == self.recalled_for
         self.select_calls.append((k, lambda_))
         return [c for c in scored if c.chunk_id.endswith("-mmr")] or list(scored[-k:])
 

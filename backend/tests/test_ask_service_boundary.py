@@ -180,7 +180,8 @@ class _MinimalCandidates:
     def merge_chunk_candidates(self, base, extra):
         return base
 
-    def select_chunk_candidates(self, scored, ids, matrix, k, lambda_):
+    def select_chunk_candidates(self, scored, ids, matrix, k, lambda_, *,
+                                active_notebook_id):
         return []
 
     def has_kg(self, notebook_id):

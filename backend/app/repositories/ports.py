@@ -3064,7 +3064,7 @@ class RetrievalPort(Protocol):
     # candidate producer -- the two ports have different owners and the
     # coverage guard reads each one against its own live call sites.
     def retrieve_chunk_candidates(self, notebook_id: str, query: str) -> tuple[list[RetrievedChunk], list[str], np.ndarray | None]: ...
-    def select_chunk_candidates(self, scored: list[RetrievedChunk], ids: list[str], matrix: np.ndarray | None, k: int, lambda_: float) -> list[RetrievedChunk]: ...
+    def select_chunk_candidates(self, scored: list[RetrievedChunk], ids: list[str], matrix: np.ndarray | None, k: int, lambda_: float, *, active_notebook_id: str) -> list[RetrievedChunk]: ...
     # The lexical (FTS) half of the raw-passage surface, spelled here for the
     # same reason as the pair above: reasoning's first-round passage seed (graph
     # or not, since 2026-09-29) reaches it
@@ -3110,7 +3110,7 @@ class AskCandidatePort(Protocol):
     # merge_chunk_candidates was dropped from this port when #489's ask_service
     # rewrite removed its last port-mediated call site; the protocol-coverage
     # guard requires every declared member to have a live service/route call.
-    def select_chunk_candidates(self, scored: list[RetrievedChunk], ids: list[str], matrix: np.ndarray | None, k: int, lambda_: float) -> list[RetrievedChunk]: ...
+    def select_chunk_candidates(self, scored: list[RetrievedChunk], ids: list[str], matrix: np.ndarray | None, k: int, lambda_: float, *, active_notebook_id: str) -> list[RetrievedChunk]: ...
     # has_kg / any_base_has_kg moved to ``RetrievalPort`` when the KG-availability
     # fact got a single evaluation point (``reasoning_retrieval.kg_in_scope_for``,
     # which both ask's no-KG early exit and reasoning's graph gates read):

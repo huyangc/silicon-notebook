@@ -159,7 +159,7 @@ def test_question_supplement_cannot_evict_single_query_mmr_baseline(repo):
     )
 
     selected = repo.retrieval.select_chunk_candidates(
-        [supplemental, baseline], [], None, 1, 0.7
+        [supplemental, baseline], [], None, 1, 0.7, active_notebook_id="nb"
     )
 
     assert [chunk.chunk_id for chunk in selected] == ["baseline"]
@@ -206,7 +206,7 @@ def test_multi_query_aggregation_keeps_historical_collision_order(
     }
     from app.services.retrieval import quota_fuse_baseline_first
 
-    selected, _counts = quota_fuse_baseline_first(collected, per_query, 2)
+    selected, _counts = quota_fuse_baseline_first(collected, per_query, 2, active_notebook_id="nb")
     assert [chunk.chunk_id for chunk in selected] == ["a", "b"]
 
 
@@ -248,7 +248,7 @@ def test_multi_query_aggregation_collapses_text_before_quota(repo, monkeypatch):
     }
     from app.services.retrieval import quota_fuse_baseline_first
 
-    selected, _counts = quota_fuse_baseline_first(collected, per_query, 2)
+    selected, _counts = quota_fuse_baseline_first(collected, per_query, 2, active_notebook_id="nb")
     assert {chunk.chunk_id for chunk in selected} == {"header-2", "abstract"}
 
 
@@ -311,6 +311,7 @@ def test_multi_query_direct_collision_replaces_question_only_canonical():
             {"before": before, "collision": lexical},
         ],
         2,
+        active_notebook_id="nb",
     )
     assert selected == [before, lexical]
 
@@ -351,7 +352,7 @@ def test_single_direct_collision_uses_historical_score_before_mmr(repo):
         "lexical",
     }
     selected = repo.retrieval.select_chunk_candidates(
-        merged, [], None, 1, 0.7
+        merged, [], None, 1, 0.7, active_notebook_id="nb"
     )
     assert selected == [historical]
 

@@ -96,6 +96,7 @@ from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancel
 # whitelist), but its fail-soft handlers must be able to re-raise the override's
 # control exception instead of degrading it into a normal answer.
 from app.domain.retrieval_control import RetrievalControlError
+from app.services.chunk_federation import reasoning_order_for
 from app.services.citation_markers import LOOSE_MARKER_RE, MARKER_RE, marker_keys
 from app.services.document_read_answer import document_read_block_reserve
 # A leaf that imports nothing from ``app`` (see its module docstring): reading
@@ -133,7 +134,7 @@ from app.services.retrieval import (
     exact_query_groups,
     is_generated_question_only_chunk,
     merge_retrieval_supports,
-    order_reasoning_passages,
+    passage_floor,
     prefer_stronger_chunk_candidate,
 )
 from app.services.search_profile import render_style_block
@@ -2921,21 +2922,23 @@ class AskService:
                 budget_chars=chunk_budget, admission_sink=baseline_admission,
             )
         if chunks:
-            # 装配顺序单点在 `retrieval.order_reasoning_passages`(深度报告撰写的未绑定
+            # 装配顺序单点在 `chunk_federation.reasoning_order_for`(深度报告撰写的未绑定
             # 段走同一个函数):相关度降序(稳定,同分保留插入序 = 检索序 / 节内文档
             # 序,不按随机 chunk_id 洗牌)→ 按来源两道交错(概念漫游段是 run 内
             # min-max 归一分、播种/检索段是绝对融合分,不可比;精确段锚定在自己的
-            # 相关度位置不参与交错)→ 前 reserve 个精确段提前(优先级最高,放最后
-            # 才保证它们仍在最前)。relevance 数值不改写,它还参与接地阈值。
+            # 相关度位置不参与交错)→ 前 reserve 个精确段提前(优先级最高)→ 紧随
+            # 其后是当前库保底前缀(挂了参考库时;对等模式为逐库前缀,判据与席位
+            # 数同 mix 切分,`retrieval.library_floor_rules`)。relevance 数值不
+            # 改写,它还参与接地阈值。
             # 精确前缀席位救的两条风险:①同分 1.0——PPR / 词法通道也会给出 1.0 的
             # 块,稳定排序下按插入序排在精确块之前,一次 PPR 丰收就能把整节命令表挤
             # 出预算;②切点落在精确小节中间,主描述进了 prompt、`Arguments` 参数表
             # 没进。残余是刻意的:一节 12 块时只有前 reserve 块拿到席位,其余靠
             # 1.0 相关度自然靠前(交错锚定精确段正是为了不破坏这一点)——与 chunk
-            # 模式 `exact_section_reserve` 的 4/12 同义。席位救不了的第三种形态:
-            # structured_block / collection_map_block 先于原文段消费同一份预算,
-            # 整表够大时原文段拿到 0 字符——已登记 fangan_todo「结构化块挤空
-            # reasoning 原文段」,本处不夹下限。按节合成注入的未绑定精确块**不**走
+            # 模式 `exact_section_reserve` 的 4/12 同义。structured_block 先于原文
+            # 段消费同一份预算,整表够大时曾让原文段拿到 0 字符、席位作废;现在
+            # 结构化侧在上游按「分区 − 原文段下限」渲染(`retrieval.passage_floor`,
+            # 见 `_assemble_structured_evidence`)。按节合成注入的未绑定精确块**不**走
             # 这里:它们不在 `chunks` 里,而是经 `trailing_chunks` 单独成段装在本节
             # 全部绑定证据之后。
             # 号段:chunk 段 k1..N、KG 段 k1001+,合并 id_map,两段都可 [k] 引用。
@@ -2945,8 +2948,7 @@ class AskService:
             # add_subquery 每步至多一份 chunk_mmr_k、search_chunks ≤3 次——最深档
             # 可以上千,但 120k 字符的最大分区按本地语料 p10 段长(约 210 字)也只
             # 装得下约 550 行,< 1000。只有大量极短段的库才可能逼近(已登记)。
-            ordered = order_reasoning_passages(
-                chunks, exact_reserve=self.settings.reasoning_exact_reserve)
+            ordered = reasoning_order_for(self.settings, chunks, notebook_id).passages
             chunk_block, chunk_id_map = self._chunk_answer_context(
                 ordered, notebook_id=notebook_id, id_offset=key_offset,
                 budget_chars=max(0, chunk_budget - len(source_context)))
@@ -3743,11 +3745,8 @@ class AskService:
                     partition_generated_question_chunks(list(collected.values()))
                 )
                 selected, _counts = quota_fuse_baseline_first(
-                    collected,
-                    per_query,
-                    plan.fuse_k,
-                    relevance=lambda c: c.relevance,
-                )
+                    collected, per_query, plan.fuse_k,
+                    relevance=lambda c: c.relevance, active_notebook_id=notebook_id)
                 ask_stage("retrieve_fuse", _t, recall=len(collected), selected=len(selected))
             else:
                 baseline_kg_truncated = False
@@ -3762,7 +3761,8 @@ class AskService:
                 )
                 raise_if_cancelled(cancel_event)
                 selected = self.candidates.select_chunk_candidates(
-                    scored, ids, mat, plan.mmr_k, plan.mmr_lambda)
+                    scored, ids, mat, plan.mmr_k, plan.mmr_lambda,
+                    active_notebook_id=notebook_id)
                 ask_stage("retrieve_mmr", _t, recall=len(scored), selected=len(selected))
 
             historical_selected = list(selected)
@@ -5381,8 +5381,16 @@ class AskService:
         structured_map: dict,
         spreadsheet_results: list,
         answer_client,
+        *,
+        max_chars: int | None = None,
     ) -> str:
-        """Append a bounded workbook preview without endangering result cards."""
+        """Append a bounded workbook preview without endangering result cards.
+
+        ``max_chars``: the characters the passage floor leaves this block in
+        the reasoning source partition (``_assemble_structured_evidence``);
+        whole lines that do not fit are left out rather than cut afterwards.
+        ``None`` keeps only the byte cap -- the historical behaviour.
+        """
         if not spreadsheet_results or not answer_client.configured:
             return structured_block
         try:
@@ -5392,6 +5400,7 @@ class AskService:
                 spreadsheet_results,
                 preview_rows=self.settings.spreadsheet_analysis_prompt_rows,
                 max_bytes=self.settings.spreadsheet_analysis_prompt_bytes,
+                max_chars=max_chars,
             )
             if spreadsheet_block:
                 structured_map.update(spreadsheet_map)
@@ -5429,6 +5438,159 @@ class AskService:
             + collections
             + sheets
         )
+
+    def _assemble_structured_evidence(
+        self, stage, answer_client, collection_map_prompt_block: str,
+    ) -> tuple:
+        """The structured side of the reasoning source partition, rendered
+        against what the passage floor leaves it.
+
+        Four blocks share ``chunk_context_chars`` with the passage segment and
+        are assembled before it: the Knowhow preview
+        (``structured_prompt_block``), the enumeration preview (its
+        ``enumeration_sub_budget``), sampled document reads
+        (``_assemble_document_read_block``'s shared / partition caps) and the
+        spreadsheet block (``_add_sheet_prompt``'s ``max_chars``).  Rendered
+        against the whole partition they could leave the passages zero
+        characters and void every reserved seat.  So the floor --
+        ``retrieval.passage_floor`` over the reserved-seat prefix of the very
+        order ``_answer_reasoning`` will render (``reasoning_order_for``: the
+        exact prefix plus the active / per-library prefix) -- is computed
+        ONCE, here, and every block renders against ``partition - floor``
+        (less the collection map block, which sits ahead of them in the same
+        partition), so each block's own coverage disclosure describes exactly
+        what the model sees rather than a block cut afterwards.  No chunk or
+        no reserved seat: floor 0, and every block renders byte-for-byte as
+        before (the spreadsheet block keeps only its byte cap).
+
+        Returns ``(structured_block, structured_map,
+        typed_collection_result_sets, enumeration_block_dropped,
+        collection_item_citations, document_read_block_dropped)``; the body
+        below the floor is the historical inline segment of
+        ``_draft_reasoning_response``, moved verbatim apart from the budgets.
+        """
+        limits = stage.prepared.limits
+        notebook_id = stage.prepared.notebook_id
+        structured_batch = stage.structured_batch
+        enumerations = list(stage.enumerations)
+        spreadsheet_results = list(stage.spreadsheet_results)
+        order = (reasoning_order_for(self.settings, list(stage.chunks), notebook_id)
+                 if stage.chunks else None)
+        floor = (passage_floor(order.passages[:order.prefix],
+                               limits.chunk_context_chars) if order else 0)
+        partition = limits.chunk_context_chars - floor - (
+            len(collection_map_prompt_block) + 2
+            if floor and collection_map_prompt_block else 0)
+        structured_block = ""
+        if structured_batch is not None and answer_client.configured:
+            from app.services.structured_retrieval import structured_prompt_block
+            structured_block = structured_prompt_block(
+                structured_batch,
+                inline_rows=limits.inline_answer_rows,
+                cell_excerpt_chars=limits.cell_excerpt_chars,
+                budget_chars=partition,
+            )
+        # 类型化集合清单(T4 产出的 enumerations)映射成 AskResponse.result_sets
+        # 行 + 合成证据块(T5)。映射与 prompt 块拼接放在**同一个** try 里:两者
+        # 失败都只应让清单这一整份"锦上添花"的产出消失,不该出现"卡片有了
+        # 但块裸抛穿整轮 Ask"或"块建起来了但卡片已经在别的异常里被清空"的
+        # 一半状态(codex 评审实测复现过后一种)。`enumerations` 在上面的 broad
+        # except 分支里可能已经被清空过一次,这里的 try 只防映射/渲染本身再
+        # 出岔子。
+        typed_collection_result_sets: list = []
+        enumeration_block_dropped = False
+        collection_item_citations: dict = {}
+        structured_map: dict = {}
+        knowhow_block_len = len(structured_block)   # 花名册拼上来之前的长度
+        if enumerations:
+            try:
+                from app.services.collection_enumeration_answer import (
+                    apply_synthesis_preview_counts,
+                    delivered_outcomes,
+                    enumeration_prompt_block,
+                    typed_collection_results,
+                )
+                # 载荷闸在这里按**真实 wire 形状**收口:执行器的池量的是
+                # 紧凑 dataclass,而联合体两臂的默认字段 + 结果元数据会让
+                # 下发/持久化的 JSON 明显更宽(见该函数 docstring)。
+                collection_items = [
+                    item for outcome in enumerations for item in outcome.items
+                ]
+                collection_item_citations = (
+                    self.evidence_context.collection_item_citations(
+                        collection_items,
+                        active_notebook_id=notebook_id,
+                    )
+                )
+                typed_collection_result_sets = typed_collection_results(
+                    enumerations,
+                    payload_chars=limits.structured_payload_chars,
+                    citations_by_item_id=collection_item_citations,
+                )
+                if answer_client.configured:
+                    from app.services.collection_enumeration_answer import (
+                        enumeration_sub_budget,
+                    )
+                    # 枚举块在后:与既有 knowhow structured_block 拼接,整体
+                    # 仍经 structured_block 这一个参数进 _answer_reasoning,
+                    # 装配位保持在 source 分区最前(语义不变,见该函数 843
+                    # 行起)。子预算三层夹(见 enumeration_sub_budget 的
+                    # docstring):减去 knowhow 已占字符 + 两者之间 "\n\n"
+                    # 拼接符本身的 2 个字符,再夹到 chunk_context_chars 的
+                    # 一半,防止模型"顺便列出所有表格"把另一半问题
+                    # (chunks/elements)的证据预算整个挤空。
+                    # 取样块的席位**先于**枚举预览预留(codex #724 R2):80 篇的
+                    # 花名册能把共享的那一半预算吃到只剩几十字,随后拼上来的
+                    # 取样块整块被挡——白读。按取样块真实渲染长度先扣。
+                    # 预留要从**半预算上限**里扣,不是从整份预算里扣:整份预算
+                    # 减掉两千字仍远大于一半,夹到一半后花名册照样拿满 15000。
+                    enum_budget_chars = max(0, enumeration_sub_budget(
+                        chunk_context_chars=partition,
+                        structured_block_len=len(structured_block),
+                    ) - document_read_block_reserve(stage.document_reads))
+                    # 预览渲染的是**结果卡真正拿到的那份**:wire 闸裁过的
+                    # 集合若照原 outcome 渲染,prompt 里会出现卡片没有的行,
+                    # 头部还写着「complete」——prompt 与卡片对同一份清单说
+                    # 两套话,正是 coverage 合同要防的东西。
+                    preview = enumeration_prompt_block(
+                        delivered_outcomes(
+                            enumerations, typed_collection_result_sets
+                        ),
+                        inline_rows=limits.inline_answer_rows,
+                        budget_chars=enum_budget_chars,
+                        citations_by_item_id=collection_item_citations,
+                    )
+                    structured_map = preview.evidence_by_id
+                    apply_synthesis_preview_counts(
+                        typed_collection_result_sets, preview.shown_rows
+                    )
+                    if preview.text:
+                        structured_block = (
+                            f"{structured_block}\n\n{preview.text}"
+                            if structured_block else preview.text
+                        )
+                    else:
+                        # 预算把连块头都挤没了(极端场景,如 knowhow 已经吃满
+                        # chunk_context_chars 的绝大部分):清单结果卡仍然
+                        # 存在(上面 typed_collection_result_sets 不受影响),
+                        # 只是这一轮没能把它塞进合成证据——这条轨迹detail是
+                        # 唯一挂点(trace 已闭合,不能另起一条独立 trace 步)。
+                        enumeration_block_dropped = True
+            except Exception:
+                typed_collection_result_sets = []
+                enumeration_block_dropped = False
+        structured_block, document_read_block_dropped = (
+            self._assemble_document_read_block(
+                stage.document_reads, structured_block, structured_map,
+                collection_item_citations, answer_client,
+                partition, knowhow_block_len))
+        structured_block = self._add_sheet_prompt(
+            structured_block, structured_map, spreadsheet_results, answer_client,
+            max_chars=(max(0, partition - len(structured_block)
+                           - (2 if structured_block else 0)) if floor else None))
+        return (structured_block, structured_map, typed_collection_result_sets,
+                enumeration_block_dropped, collection_item_citations,
+                document_read_block_dropped)
 
     def _draft_reasoning_response(self, stage, runtime):
         """The shipped ``ResponseDraftStage`` body: evidence -> response draft.
@@ -5560,111 +5722,10 @@ class AskService:
             _collection_map_block(collection_map_text)
             if answer_client.configured else ""
         )
-        structured_block = ""
-        if structured_batch is not None and answer_client.configured:
-            from app.services.structured_retrieval import structured_prompt_block
-            structured_block = structured_prompt_block(
-                structured_batch,
-                inline_rows=limits.inline_answer_rows,
-                cell_excerpt_chars=limits.cell_excerpt_chars,
-                budget_chars=limits.chunk_context_chars,
-            )
-        # 类型化集合清单(T4 产出的 enumerations)映射成 AskResponse.result_sets
-        # 行 + 合成证据块(T5)。映射与 prompt 块拼接放在**同一个** try 里:两者
-        # 失败都只应让清单这一整份"锦上添花"的产出消失,不该出现"卡片有了
-        # 但块裸抛穿整轮 Ask"或"块建起来了但卡片已经在别的异常里被清空"的
-        # 一半状态(codex 评审实测复现过后一种)。`enumerations` 在上面的 broad
-        # except 分支里可能已经被清空过一次,这里的 try 只防映射/渲染本身再
-        # 出岔子。
-        typed_collection_result_sets: list = []
-        enumeration_block_dropped = False
-        collection_item_citations: dict = {}
-        structured_map: dict = {}
-        knowhow_block_len = len(structured_block)   # 花名册拼上来之前的长度
-        if enumerations:
-            try:
-                from app.services.collection_enumeration_answer import (
-                    apply_synthesis_preview_counts,
-                    delivered_outcomes,
-                    enumeration_prompt_block,
-                    typed_collection_results,
-                )
-                # 载荷闸在这里按**真实 wire 形状**收口:执行器的池量的是
-                # 紧凑 dataclass,而联合体两臂的默认字段 + 结果元数据会让
-                # 下发/持久化的 JSON 明显更宽(见该函数 docstring)。
-                collection_items = [
-                    item for outcome in enumerations for item in outcome.items
-                ]
-                collection_item_citations = (
-                    self.evidence_context.collection_item_citations(
-                        collection_items,
-                        active_notebook_id=notebook_id,
-                    )
-                )
-                typed_collection_result_sets = typed_collection_results(
-                    enumerations,
-                    payload_chars=limits.structured_payload_chars,
-                    citations_by_item_id=collection_item_citations,
-                )
-                if answer_client.configured:
-                    from app.services.collection_enumeration_answer import (
-                        enumeration_sub_budget,
-                    )
-                    # 枚举块在后:与既有 knowhow structured_block 拼接,整体
-                    # 仍经 structured_block 这一个参数进 _answer_reasoning,
-                    # 装配位保持在 source 分区最前(语义不变,见该函数 843
-                    # 行起)。子预算三层夹(见 enumeration_sub_budget 的
-                    # docstring):减去 knowhow 已占字符 + 两者之间 "\n\n"
-                    # 拼接符本身的 2 个字符,再夹到 chunk_context_chars 的
-                    # 一半,防止模型"顺便列出所有表格"把另一半问题
-                    # (chunks/elements)的证据预算整个挤空。
-                    # 取样块的席位**先于**枚举预览预留(codex #724 R2):80 篇的
-                    # 花名册能把共享的那一半预算吃到只剩几十字,随后拼上来的
-                    # 取样块整块被挡——白读。按取样块真实渲染长度先扣。
-                    # 预留要从**半预算上限**里扣,不是从整份预算里扣:整份预算
-                    # 减掉两千字仍远大于一半,夹到一半后花名册照样拿满 15000。
-                    enum_budget_chars = max(0, enumeration_sub_budget(
-                        chunk_context_chars=limits.chunk_context_chars,
-                        structured_block_len=len(structured_block),
-                    ) - document_read_block_reserve(stage.document_reads))
-                    # 预览渲染的是**结果卡真正拿到的那份**:wire 闸裁过的
-                    # 集合若照原 outcome 渲染,prompt 里会出现卡片没有的行,
-                    # 头部还写着「complete」——prompt 与卡片对同一份清单说
-                    # 两套话,正是 coverage 合同要防的东西。
-                    preview = enumeration_prompt_block(
-                        delivered_outcomes(
-                            enumerations, typed_collection_result_sets
-                        ),
-                        inline_rows=limits.inline_answer_rows,
-                        budget_chars=enum_budget_chars,
-                        citations_by_item_id=collection_item_citations,
-                    )
-                    structured_map = preview.evidence_by_id
-                    apply_synthesis_preview_counts(
-                        typed_collection_result_sets, preview.shown_rows
-                    )
-                    if preview.text:
-                        structured_block = (
-                            f"{structured_block}\n\n{preview.text}"
-                            if structured_block else preview.text
-                        )
-                    else:
-                        # 预算把连块头都挤没了(极端场景,如 knowhow 已经吃满
-                        # chunk_context_chars 的绝大部分):清单结果卡仍然
-                        # 存在(上面 typed_collection_result_sets 不受影响),
-                        # 只是这一轮没能把它塞进合成证据——这条轨迹detail是
-                        # 唯一挂点(trace 已闭合,不能另起一条独立 trace 步)。
-                        enumeration_block_dropped = True
-            except Exception:
-                typed_collection_result_sets = []
-                enumeration_block_dropped = False
-        structured_block, document_read_block_dropped = (
-            self._assemble_document_read_block(
-                stage.document_reads, structured_block, structured_map,
-                collection_item_citations, answer_client,
-                limits.chunk_context_chars, knowhow_block_len))
-        structured_block = self._add_sheet_prompt(
-            structured_block, structured_map, spreadsheet_results, answer_client)
+        (structured_block, structured_map, typed_collection_result_sets,
+         enumeration_block_dropped, collection_item_citations,
+         document_read_block_dropped) = self._assemble_structured_evidence(
+            stage, answer_client, collection_map_prompt_block)
         def _synth_reasoning():
             # counts_sink 在模型调用前就被 _answer_reasoning 填充:合成模型
             # 抛错/吐畸形 JSON 时,synthesis 步仍能报出真实装配计数而非全零。
