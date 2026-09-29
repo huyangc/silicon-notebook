@@ -46,7 +46,7 @@
 逐条取挂载边,计划器稳定选索引。一旦 OR 里出现引用挂载方 `a` 的一支,整个查看者支
 就变成 join 条件,不再下推,几千本笔记本的规模上计划器会翻成「hash join + 顺序扫描
 notebooks」(PG 实测:5k 本时 0.2 ms → 1.2 ms;在 PG 16 的真实形状夹具上,custom plan
-约 3k–7k 本翻转,generic plan 到 8k 本仍翻转,20k 本两者都不翻)。EXPLAIN pin 在
+在 3k/5k/6k 本翻转、8k 本不翻,generic plan 到 8k 本仍翻转,20k 本两者都不翻)。EXPLAIN pin 在
 `tests/postgres/test_mount_sql_viewer_pg.py`:在 3k/6k/8k 三档规模上分别看 custom 与
 generic plan,并带一个正对照——把这一支加回去的写法在那几档上必须出现
 `Seq Scan on notebooks`,否则 pin 自己先红(说明它不再有鉴别力,要重新定规模)。
@@ -54,9 +54,9 @@ generic plan,并带一个正对照——把这一支加回去的写法在那几�
 
 ## 三值与布尔:过滤用 `MOUNT_EFFECTIVE_FOR_VIEWER`,取值与取反用 `..._EXPR`
 
-裸谓词 `MOUNT_VALID_EXPR AND 查看者支` 是三值的:空查看者(`b.created_by = NULL`)、
-挂载人为 NULL(`b.created_by = a.created_by` 比 NULL)、被挂库 owner 为 NULL 时,它
-可以求出 NULL 而不是 FALSE。作为 WHERE 的一个合取项没有问题(NULL 与 FALSE 一样不
+裸谓词 `MOUNT_VALID_EXPR AND 查看者支` 是三值的:空查看者(读权 owner 臂
+`b.created_by = v.uid` 比 NULL)、挂载人为 NULL(同 owner 支 `b.created_by = a.created_by`
+比 NULL)、被挂库 owner 为 NULL(两处都比 NULL)时,它可以求出 NULL 而不是 FALSE。作为 WHERE 的一个合取项没有问题(NULL 与 FALSE 一样不
 保留该行),而且必须保持裸的合取形式:计划器把它拆成独立的限制条件,查看者支才下推
 到 `b` 上。`COALESCE(裸谓词, FALSE)` 对计划器是一个不透明的整体,里面引用了 `a`,于是
 整个谓词成了 join 条件——实测与加回挂载人支完全同款地翻成顺序扫描。所以:
