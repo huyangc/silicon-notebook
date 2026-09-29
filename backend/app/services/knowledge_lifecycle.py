@@ -418,6 +418,9 @@ class KnowledgeLifecycleService:
         # KeyError)。默认 None 退回 get_notebook(语义相同、更贵),生产
         # wiring 传 notebook_store.get_row。
         notebook_live_row: Callable[[str], Any] | None = None,
+        # PR-A·A5: notebook_id -> KgViewerScope | None (kg_viewer_scope).
+        # Default: nothing is filtered (every direct construction unchanged).
+        viewer_scope: Callable[[str], Any] = lambda _notebook_id: None,
     ) -> None:
         self.settings = settings
         # batch-3-W1 T-5a (codex #663 R3 P2): the drain's row budget — one
@@ -456,6 +459,7 @@ class KnowledgeLifecycleService:
         self._bulk_write = bulk_write
         self.get_notebook = get_notebook
         self._current_user_id = current_user_id
+        self._viewer_scope = viewer_scope
         self._invalidate_unified_cache = invalidate_unified_cache
         self._mark_unified_kg_dirty = mark_unified_kg_dirty
         self._mark_unified_kg_dirty_in_tx = mark_unified_kg_dirty_in_tx
@@ -4627,8 +4631,42 @@ class KnowledgeLifecycleService:
                 notebook_id, object_id, source_notebook_id
             )
         result = self._kg_neighbors_unchecked(source_id, object_id, cap)
+        scope = self._viewer_scope(source_id)
+        if scope is not None:
+            result = self._viewer_scoped_neighbors(result, scope, object_id)
         result["source_notebook_id"] = source_id
         return result
+
+    @staticmethod
+    def _viewer_scoped_neighbors(result: dict, scope, object_id: str) -> dict:
+        """PR-A·A5 (rulings Q4 / M1): neighbour hydration omits every node the
+        viewer may not see — a raw object derived only from another member's
+        Memory, or a folded cluster all of whose live members are — and every
+        edge touching one. A hidden focus answers an empty neighbourhood, the
+        same shape an unknown id gets, so the response does not confirm it.
+
+        A kept cluster that still has hidden members is relabelled through
+        ``KgViewerScope.cluster_display_name``: both hydration paths take a
+        cluster's label from one member's payload (the viz artifact bakes it
+        at build time), and that member may be the hidden one."""
+        focus_id = result.get("focus_id") or object_id
+        if scope.node_hidden(object_id) or scope.node_hidden(focus_id):
+            return {**result, "nodes": [], "edges": []}
+        nodes = []
+        for node in result.get("nodes", []):
+            if scope.node_hidden(node["id"]):
+                continue
+            if scope.hidden_member_count(node["id"]):
+                payload = node.get("payload") or {}
+                node = {**node, "payload": {**payload, "name": scope.cluster_display_name(
+                    node["id"], str(payload.get("name", "") or ""))}}
+            nodes.append(node)
+        kept = {n["id"] for n in nodes}
+        edges = [
+            e for e in result.get("edges", [])
+            if e["source_object_id"] in kept and e["target_object_id"] in kept
+        ]
+        return {**result, "nodes": nodes, "edges": edges}
 
     def _kg_neighbors_unchecked(
         self, notebook_id: str, object_id: str, cap: int

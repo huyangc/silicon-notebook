@@ -31,6 +31,7 @@ import {
   fetchUnifiedGraph,
   fetchUnifiedKgStatus,
   fetchUnifiedKgRebuildStatus,
+  isKgNodeAbsent,
   rebuildKg,
   rebuildUnifiedKg,
   relinkKg,
@@ -569,7 +570,12 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
           );
         }
       } catch (error) {
-        if (owns(owner) && requestId === graphNodeRequestRef.current) publishError(owner, error);
+        // 404 = this concept does not exist for this viewer (e.g. every member
+        // derives from another member's private Memory, PR-A·A5). Same
+        // presentation as a missing node context: no detail sections, no
+        // error banner — the node simply has nothing to show.
+        if (owns(owner) && requestId === graphNodeRequestRef.current
+          && !isKgNodeAbsent(error)) publishError(owner, error);
       }
     }
     if (!owns(owner) || requestId !== graphNodeRequestRef.current || selectedNodeIdRef.current !== nodeId) return;
@@ -627,7 +633,12 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
         member_total: page.member_total ?? current.member_total,
       } : current));
     } catch (error) {
-      if (owns(owner) && epoch === conceptMembersEpochRef.current) {
+      if (owns(owner) && epoch === conceptMembersEpochRef.current && isKgNodeAbsent(error)) {
+        // The concept stopped existing for this viewer mid-paging: there are
+        // no more members to load, so the button goes away instead of
+        // offering a retry that can only 404 again.
+        setConceptDetail((current) => (current ? { ...current, next_cursor: null } : current));
+      } else if (owns(owner) && epoch === conceptMembersEpochRef.current) {
         // 横幅照旧(全局错误通道),但本地失败态才是按钮紧邻反馈的载体
         // (codex #639 R4 P2 / AGENTS.md Interactive feedback)。
         setConceptMembersLoadError(true);

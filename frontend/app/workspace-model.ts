@@ -933,6 +933,10 @@ export type NodeContext = {
   section_path: string;
   occurrences: KgOccurrence[];
   definition: string | null;
+  // Where `definition` came from; null when there is none for this viewer.
+  definition_basis?: "cluster_description" | "defines_evidence" | "defines_name" | null;
+  definition_source_id?: string | null;
+  definition_element_id?: string | null;
   steps: KgProcedureStep[] | null;
 };
 export type PendingMerge = { id: string; canonical_a: string; canonical_b: string; score: number; status: string };

@@ -707,7 +707,8 @@ export function KgGraphView({
                   />
                 </>
               )}
-              {kgGraph.nodeContext?.definition && (<><h4>定义</h4><p className="kg-text-card">{kgGraph.nodeContext.definition}</p></>)}
+              {/* No row at all when the viewer's readable sources yield no definition (PR-A·A5): null, "" and blank text alike. */}
+              {kgGraph.nodeContext?.definition?.trim() && (<><h4>定义</h4><p className="kg-text-card">{kgGraph.nodeContext.definition}</p></>)}
               {kgGraph.nodeContext?.object_type === "procedure" && kgGraph.nodeContext.steps && kgGraph.nodeContext.steps.length > 0 && (
                 <><h4>流程步骤</h4>{kgGraph.nodeContext.steps.map((s, i) => (
                   <KgProcedureStepCard step={s} index={i} key={`${s.name}-${i}`} />

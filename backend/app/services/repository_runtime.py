@@ -48,6 +48,7 @@ from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService
 from app.services.knowledge_query import KnowledgeQueryService
+from app.services.kg_viewer_scope import KgViewerScopeReader
 from app.services.evidence_context import EvidenceContextService
 from app.services.graph_retrieval import GraphRetrievalService
 from app.services.model_provider import (
@@ -1987,6 +1988,15 @@ class RepositoryRuntime:
     def wire_query_services(self, *, retrieval: Callable[[], Any]) -> None:
         if self.scale_artifacts is None:
             raise RuntimeError("query services require scale runtime")
+        # PR-A·A5: the one viewer-readable-source rule every KG browse read
+        # consumes (knowledge_query detail reads + lifecycle neighbours).
+        self.kg_viewer_scope = KgViewerScopeReader(
+            database=self.database,
+            sources=self.source_store,
+            knowledge=self.knowledge,
+            unified_kg=self.unified_kg,
+            current_user_id=self._current_user_id,
+        )
         self.knowledge_query = KnowledgeQueryService(
             settings=self.settings,
             model_provider=self.models,
@@ -2011,6 +2021,7 @@ class RepositoryRuntime:
             memory_retriever=self.memory_retriever,
             current_user_id=self._current_user_id,
             queries=self.queries,
+            viewer_scope=self.kg_viewer_scope.for_notebook,
         )
         self.pending_actions_service = PendingActionsService(
             self.queries,
@@ -2191,6 +2202,11 @@ class RepositoryRuntime:
             # 维护任务状态轮询只需「活着的笔记本行在不在」:一次主键点查,
             # 与 get_notebook 同一个活库谓词,缺失/墓碑同样 KeyError→404。
             notebook_live_row=lambda notebook_id: self.notebook_store.get_row(
+                notebook_id
+            ),
+            # PR-A·A5: neighbour hydration omits nodes the viewer may not see;
+            # the reader is built in wire_query_services (resolved per call).
+            viewer_scope=lambda notebook_id: self.kg_viewer_scope.for_notebook(
                 notebook_id
             ),
         )

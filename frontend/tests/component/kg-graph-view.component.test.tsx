@@ -570,6 +570,37 @@ test("出处超过一页时分页展示，翻页后显示下一批", async () =>
 });
 
 
+test("定义被查看者的可读来源滤掉时整行不出现，有定义时照常显示（PR-A·A5）", () => {
+  const context = (definition: string | null) => ({
+    id: "ko-1",
+    object_type: "concept",
+    name: "阈值",
+    section_path: "",
+    occurrences: [],
+    definition,
+    definition_basis: definition ? "defines_evidence" as const : null,
+    definition_source_id: definition ? "src-1" : null,
+    definition_element_id: definition ? "el-1" : null,
+    steps: null,
+  });
+  const selectedKgNode = { id: "ko-1", object_type: "concept", payload: { name: "阈值" } };
+  for (const filtered of [null, "", "   "]) {
+    const { unmount } = renderView({
+      selectedKgNode,
+      kgGraph: graphView({ selectedNodeId: "ko-1", nodeContext: context(filtered) }),
+    });
+    expect(screen.queryByRole("heading", { name: "定义" })).toBeNull();
+    expect(document.querySelector(".kg-text-card")).toBeNull();
+    unmount();
+  }
+  renderView({
+    selectedKgNode,
+    kgGraph: graphView({ selectedNodeId: "ko-1", nodeContext: context("可见来源里的定义") }),
+  });
+  expect(screen.getByRole("heading", { name: "定义" })).toBeInTheDocument();
+  expect(screen.getByText("可见来源里的定义")).toHaveClass("kg-text-card");
+});
+
 test("children 原位渲染在 .kg-view section 内（图谱分析弹窗的层叠上下文归属）", () => {
   const { container } = renderView({
     children: <div data-testid="analysis-slot" />,

@@ -24,6 +24,7 @@ vi.mock("../../features/kg-maintenance/kg-api.ts", async (importOriginal) => ({
 }));
 
 import { createTestKgAuthority } from "../../test-support/kg-owner-authority";
+import { humanizedError } from "../../app/errors";
 import { useKgGraph } from "../../app/use-kg-graph";
 
 const policy = { canWriteKg: true, externalBuildPolling: false };
@@ -340,4 +341,72 @@ test("loadMoreConceptMembers dedupes attached objects repeated across pages (R3 
   await act(async () => { await result.current.loadMoreConceptMembers(); });
 
   expect(result.current.view.conceptDetail?.attached.map((n) => n.id)).toEqual(["a1", "a2", "a3"]);
+});
+
+// PR-A·A5: a concept that does not exist FOR THIS VIEWER (e.g. every member
+// derives from another member's private Memory) answers 404. That is the
+// absent-detail presentation — no detail, no error banner — not a failure.
+async function openAndSelectWithEffects(
+  harness: ReturnType<typeof createTestKgAuthority>,
+  hookEffects: ReturnType<typeof effects>,
+  detail: () => Promise<ConceptDetailResp>,
+) {
+  harness.establish("user-a", "notebook-a");
+  kgApi.fetchUnifiedGraph.mockResolvedValue(conceptGraphResponse);
+  kgApi.fetchPendingMerges.mockResolvedValue([]);
+  kgApi.fetchUnifiedKgStatus.mockResolvedValue({ dirty: false });
+  kgApi.fetchKgNeighbors.mockImplementation(() => new Promise((resolve) => {
+    setTimeout(() => resolve(emptyNeighbors), 20);
+  }));
+  kgApi.fetchNodeContext.mockResolvedValue({});
+  const rendered = renderHook(() => useKgGraph({
+    authority: harness.authority,
+    policy,
+    effects: hookEffects,
+  }));
+  await rendered.result.current.openGraph();
+  await waitFor(() => expect(rendered.result.current.view.graph).not.toBeNull());
+  kgApi.fetchConceptDetail.mockImplementationOnce(detail);
+  // Not wrapped in act(): selectNode's selection guard reads a ref React only
+  // syncs on re-render (see openWithConceptSelected above).
+  await rendered.result.current.selectNode("k1");
+  return rendered;
+}
+
+test("a concept detail 404 (absent for this viewer) shows no detail and raises no error banner", async () => {
+  const harness = createTestKgAuthority();
+  const hookEffects = effects();
+  const { result } = await openAndSelectWithEffects(
+    harness, hookEffects, () => Promise.reject(humanizedError("没有找到", 404)),
+  );
+  expect(result.current.view.selectedNodeId).toBe("k1");
+  expect(result.current.view.conceptDetail).toBeNull();
+  expect(hookEffects.reportError).not.toHaveBeenCalled();
+  // The node context is still asked for (best effort, same as today).
+  expect(kgApi.fetchNodeContext).toHaveBeenCalled();
+});
+
+test("any other concept detail failure still reaches the error banner (non-vacuous control)", async () => {
+  const harness = createTestKgAuthority();
+  const hookEffects = effects();
+  await openAndSelectWithEffects(
+    harness, hookEffects, () => Promise.reject(humanizedError("服务暂时不可用", 503)),
+  );
+  expect(hookEffects.reportError).toHaveBeenCalledTimes(1);
+});
+
+test("a load-more 404 ends paging instead of offering a retry that can only 404 again", async () => {
+  const harness = createTestKgAuthority();
+  const hookEffects = effects();
+  const { result } = await openAndSelectWithEffects(
+    harness, hookEffects, () => Promise.resolve(conceptPage(["m1", "m2"], "m2")),
+  );
+  await waitFor(() => expect(result.current.view.conceptDetail?.next_cursor).toBe("m2"));
+  kgApi.fetchConceptDetail.mockRejectedValueOnce(humanizedError("没有找到", 404));
+  await act(async () => { await result.current.loadMoreConceptMembers(); });
+  expect(result.current.view.conceptDetail?.next_cursor).toBeNull();
+  expect(result.current.view.conceptDetail?.members.map((m) => m.id)).toEqual(["m1", "m2"]);
+  expect(result.current.view.conceptMembersLoadError).toBe(false);
+  expect(result.current.view.conceptMembersLoadingMore).toBe(false);
+  expect(hookEffects.reportError).not.toHaveBeenCalled();
 });
