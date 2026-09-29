@@ -37,7 +37,7 @@ from app.services.source_element_selection import deduplicate_source_chunks_in_o
 from app.services.source_scope import (
     citation_active_id, current_source_scope, node_context_row_within_ceiling,
     notebook_in_scope, record_ceiling_drift, scoped_node_context_row,
-    scoped_source_ceiling, source_ceiling_exists,
+    scoped_source_ceiling, source_allowed, source_ceiling_exists,
 )
 
 
@@ -425,10 +425,24 @@ class EvidenceContextService:
         and excerpt and never needs direct membership in a mounted base.
 
         KG rows expose at most ``MAX_EVIDENCE_REFS`` element ids; hydrate all
-        requested ids in one bounded store read, then select the first live
-        occurrence in the executor's stable order.  Element rows already carry
+        requested ids in one bounded store read, then select the first
+        occurrence that is BOTH still alive AND inside the run's source
+        ceiling, in the executor's stable order.  Element rows already carry
         their exact source projection and therefore remain citable even if the
         optional hydration read misses.
+
+        Every row kind — document, element, KG — passes ``source_allowed``
+        against the ceiling of the row's OWN library (in a global run each
+        participant carries its own frozen visible-source list), and a row
+        with no in-ceiling source gets no citation rather than an out-of-scope
+        one.  This function is the last retrieval-side boundary before the
+        answer: synthesis treats what it receives as readable, so an
+        out-of-ceiling citation minted here would be shown.  Concretely it is
+        what stopped a peer library's Knowhow-projected KG object — whose
+        evidence lives in that library's hidden projection source, outside a
+        global run's visible-source ceiling — from being cited with that
+        hidden element, which the global terminal check then refused as
+        ``out_of_ceiling`` and voided the whole answer over.
         """
         participants = set(
             self.notebooks.participant_notebook_ids(active_notebook_id)
@@ -489,6 +503,8 @@ class EvidenceContextService:
             if expected_notebook_id not in participants:
                 continue
             if _is_document_row(item):
+                if not source_allowed(expected_notebook_id, item_id):
+                    continue
                 # A DOCUMENT row's original source is the document itself: there
                 # is no sub-location to resolve, so this branch needs neither the
                 # element hydration above nor an ``element_id``.  Leaving that
@@ -521,6 +537,8 @@ class EvidenceContextService:
             if direct_element_id:
                 evidence_row = hydrated.get(direct_element_id) or {}
                 source_id = str(getattr(item, "source_id", "") or "")
+                if not source_allowed(expected_notebook_id, source_id):
+                    continue
                 if str(
                     (source_metadata.get(source_id) or {}).get("notebook_id") or ""
                 ) != expected_notebook_id:
@@ -540,6 +558,10 @@ class EvidenceContextService:
                     if not candidate:
                         continue
                     candidate_source_id = str(candidate.get("source_id") or "")
+                    if not source_allowed(
+                        expected_notebook_id, candidate_source_id
+                    ):
+                        continue
                     if str(
                         (source_metadata.get(candidate_source_id) or {}).get("notebook_id") or ""
                     ) != expected_notebook_id:
