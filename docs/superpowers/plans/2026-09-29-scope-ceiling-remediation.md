@@ -116,6 +116,15 @@ PR-A 与 PR-C 互不相交，可并行；PR-B 依赖 PR-A（同改 `evidence_con
   覆盖披露保持真实。`_draft_reasoning_response` 抽 `_assemble_structured_evidence`，天花板 698 同
   diff 下调。不新增 Settings，数值登记在 `product-and-api*.md`。
 - **C5 生成问题水合腿**：`retrieval_candidates.py:3932` 盖章改走 `foreign_notebook_id`。
+  **实施偏离（任务 1 落地时）**：盖章**不改**，仍盖原始 notebook id——贡献者准入校验
+  （`generated_question_contribution.py:335`、`source_graph_activation.py:650`）要求行上带原始
+  id，改成归一值会让本库行被拒收。改为由共享判据 `retrieval.is_active_hit` 先过
+  `foreign_notebook_id` 归一，所有席位调用点必须传入真实的当前库 id（C8：参数改为必填，
+  `test_active_notebook_id_threading.py` 钉住调用点清单）。
+- **C3 / C4 落地后的更正**：`order_reasoning_passages` 已删除，唯一入口是 `reasoning_passage_order`
+  与 `chunk_federation.reasoning_order_for`；原文段下限不再把分区缩小后交给各块，而是作为结构化侧的
+  总上限（各块先按历史口径渲染，只有历史合计越过上限才重渲），下限按保底前缀的真实渲染成本计。
+  本计划文件只保留在 `claude/scope-ceiling-remediation` 分支上，PR-C 分支不带它。
 - **C6 对等模式逐库保底（J7）**：mix 最终切分增加逐库分席规则，复用精确席位的
   `library_seats` / `libraries_by_best_hit`，判据与 C1 的合格谓词一致；无「当前库」概念，按库公平。
   席位总数同样取 `ceil(k × CHUNK_FEDERATION_ACTIVE_RESERVE)`，按最佳命中顺序分给各参与库。
