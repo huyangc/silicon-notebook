@@ -19,6 +19,7 @@ one-``?``-per-id statements could not even run at.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sqlite3
 from pathlib import Path
@@ -36,6 +37,7 @@ from app.repositories.sqlite.id_binding import (
     not_member_of,
 )
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
+from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
 
 DEPLOYMENT_VARIABLE_LIMIT = 32_766
 NB = "nb-ceiling"
@@ -244,7 +246,7 @@ def _single_ceiling_param(statements, ceiling) -> None:
     assert statements, "the ceiling statement was not captured"
     payload = ids_param(ceiling)
     for sql, params in statements:
-        assert sql.count(JSON_IDS) == sum(p == payload for p in params), sql
+        assert sum(p == payload for p in params) == 1, sql
         assert len(params) < 16, (len(params), sql[:200])
 
 
@@ -375,3 +377,121 @@ def test_s2_kg_fts_gate_probes_by_object_only(conn, captured):
     assert "(object_id=?)" in plan, plan
     assert "(object_id=? AND source_id=?)" not in plan, plan
     assert "LIST SUBQUERY" in plan, plan
+
+
+# --------------------------------------- S7/S8 comparison-peer source gates
+@pytest.fixture(params=[True, False], ids=["reverse_index", "authoritative"])
+def backfilled(request, database):
+    """Both gate branches: the reverse index, and the evidence scan used while
+    ``source_index_backfilled`` is 0."""
+    with database.write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET source_index_backfilled=? WHERE notebook_id=?",
+            (int(request.param), NB),
+        )
+    yield request.param
+    with database.write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET source_index_backfilled=1 WHERE notebook_id=?",
+            (NB,),
+        )
+
+
+def _supported_canonicals(db, ceiling, *, authoritative: bool) -> set[str] | None:
+    if ceiling is None:
+        return None
+    support = _support(db, authoritative=authoritative)
+    allowed = set(ceiling)
+    return {
+        row["canonical_id"]
+        for row in db.execute(
+            "SELECT canonical_id, member_object_id FROM concept_clusters "
+            "WHERE notebook_id=?", (NB,),
+        )
+        if support[row["member_object_id"]] & allowed
+    }
+
+
+def _canonical_by_name(db) -> dict[str, str]:
+    return {
+        row["canonical_name"]: row["canonical_id"]
+        for row in db.execute(
+            "SELECT DISTINCT canonical_id, canonical_name FROM concept_clusters "
+            "WHERE notebook_id=?", (NB,),
+        )
+    }
+
+
+@pytest.mark.parametrize("label", list(CEILINGS))
+def test_s7_community_peers_match_reference_under_deployment_limit(
+    database, conn, backfilled, label
+):
+    ceiling = CEILINGS[label]
+    store = UnifiedKgStore(database)
+    everything = [tuple(row) for row in store.community_member_peers(
+        NB, "com-0", "can-000", 10_000
+    )]
+    kwargs = {} if ceiling is None else {"allowed_source_ids": ceiling}
+    got = [tuple(row) for row in store.community_member_peers(
+        NB, "com-0", "can-000", 5, **kwargs
+    )]
+    supported = _supported_canonicals(conn, ceiling, authoritative=not backfilled)
+    names = _canonical_by_name(conn)
+    expected = [
+        row for row in everything
+        if supported is None or names[row[0]] in supported
+    ][:5]
+    assert got == expected
+
+
+@pytest.mark.parametrize("label", list(CEILINGS))
+def test_s8_comention_peers_match_reference_under_deployment_limit(
+    database, conn, backfilled, label
+):
+    ceiling = CEILINGS[label]
+    store = UnifiedKgStore(database)
+    everything = store.comention_peers(NB, "can-000", 1, 10_000)
+    kwargs = {} if ceiling is None else {"allowed_source_ids": ceiling}
+    got = store.comention_peers(NB, "can-000", 1, 5, **kwargs)
+    supported = _supported_canonicals(conn, ceiling, authoritative=not backfilled)
+    names = _canonical_by_name(conn)
+    expected = [
+        (name, claims) for name, claims in everything
+        if supported is None or names[name] in supported
+    ][:5]
+    assert got == expected
+
+
+def test_s7_s8_bind_the_ceiling_once(database, conn, captured, backfilled):
+    ceiling = CEILINGS["49k"]
+    store = UnifiedKgStore(database)
+    store.community_member_peers(
+        NB, "com-0", "can-000", 5, allowed_source_ids=ceiling
+    )
+    store.comention_peers(NB, "can-000", 1, 5, allowed_source_ids=ceiling)
+    ceiling_statements = [
+        (sql, params) for sql, params in captured
+        if ids_param(ceiling) in params
+    ]
+    assert len(ceiling_statements) == 3  # S7, S8 limit gate, S8 names
+    _single_ceiling_param(ceiling_statements, ceiling)
+
+
+def test_s7_s8_support_probe_goes_by_object_only(database, conn, captured):
+    """S7/S8: a ceiling able to drive turns the reverse-index probe into
+    ``(object_id=? AND source_id=?)`` per ceiling id per member (4k: 2 s)."""
+    ceiling = CEILINGS["49k"]
+    store = UnifiedKgStore(database)
+    store.community_member_peers(
+        NB, "com-0", "can-000", 5, allowed_source_ids=ceiling
+    )
+    store.comention_peers(NB, "can-000", 1, 5, allowed_source_ids=ceiling)
+    gated = [
+        (sql, params) for sql, params in captured
+        if "knowledge_object_sources kos" in sql
+    ]
+    assert len(gated) == 3
+    for sql, params in gated:
+        plan = " / ".join(_plan(conn, sql, params))
+        assert re.search(r"SEARCH kos (EXISTS )?USING INDEX \S+ \(object_id=\?\)", plan), plan
+        assert "(object_id=? AND source_id=?)" not in plan, plan
