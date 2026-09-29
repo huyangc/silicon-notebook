@@ -4,13 +4,15 @@ import assert from "node:assert/strict";
 import { API_BASE } from "../../app/api-config.ts";
 import { clearToken, getToken, setToken } from "../../app/auth-session.ts";
 import {
-  beginSessionHandoff,
-  endSessionHandoff,
   performApiRequest,
   requestBlob,
   requestJson,
   requestVoid,
 } from "../../app/api-client.ts";
+
+// The migrating tab is a separate module instance; it shares only the storage
+// with the tab (this api-client) whose background request receives the 401.
+const migratingTab = await import("../../app/auth-session.ts?tab=migrating");
 
 const storage = new Map();
 let reloads = 0;
@@ -28,6 +30,7 @@ globalThis.window = {
 
 test.afterEach(() => {
   clearToken();
+  storage.clear();
   reloads = 0;
 });
 
@@ -168,53 +171,96 @@ test("a 401 for a token that was replaced in flight keeps the new session", asyn
   assert.equal(reloads, 0);
 });
 
-test("a 401 during a session handoff fails the request without logging out", async () => {
+test("another tab's handoff keeps this tab's 401 from logging the shared session out", async () => {
   setToken("auto-account");
-  beginSessionHandoff("auto-account");
+  migratingTab.beginSessionHandoff("auto-account");
   globalThis.fetch = async () => new Response(null, { status: 401 });
-  try {
-    const response = await performApiRequest("/reports", { tag: "report" });
-    assert.equal(response.status, 401);
-    assert.equal(getToken(), "auto-account");
-    assert.equal(reloads, 0);
-    await assert.rejects(requestJson("/reports", { tag: "report" }));
-    assert.equal(getToken(), "auto-account");
-    assert.equal(reloads, 0);
-  } finally {
-    endSessionHandoff("auto-account");
-  }
+  const response = await performApiRequest("/reports", { tag: "report" });
+  assert.equal(response.status, 401);
+  await assert.rejects(requestJson("/reports", { tag: "report" }));
+  assert.equal(getToken(), "auto-account");
+  assert.equal(reloads, 0);
 
+  migratingTab.endSessionHandoff("auto-account");
   await performApiRequest("/reports", { tag: "report" });
+  assert.equal(getToken(), "");
+  assert.equal(reloads, 1);
+});
+
+test("an expired handoff no longer suppresses a 401", async () => {
+  setToken("auto-account");
+  const realNow = Date.now;
+  migratingTab.beginSessionHandoff("auto-account");
+  Date.now = () => realNow() + migratingTab.SESSION_HANDOFF_MAX_MS + 1;
+  try {
+    globalThis.fetch = async () => new Response(null, { status: 401 });
+    await performApiRequest("/me", { tag: "auth" });
+  } finally {
+    Date.now = realNow;
+  }
   assert.equal(getToken(), "");
   assert.equal(reloads, 1);
 });
 
 test("a handoff for one token does not shield a different current token", async () => {
   setToken("other-login");
-  beginSessionHandoff("auto-account");
+  migratingTab.beginSessionHandoff("auto-account");
   globalThis.fetch = async () => new Response(null, { status: 401 });
-  try {
-    await performApiRequest("/me", { tag: "auth" });
-    assert.equal(getToken(), "");
-    assert.equal(reloads, 1);
-  } finally {
-    endSessionHandoff("auto-account");
-  }
+  await performApiRequest("/me", { tag: "auth" });
+  assert.equal(getToken(), "");
+  assert.equal(reloads, 1);
 });
 
 test("a handed-over token replaced in flight keeps the new session", async () => {
   setToken("auto-account");
-  beginSessionHandoff("auto-account");
+  migratingTab.beginSessionHandoff("auto-account");
   globalThis.fetch = async () => {
     setToken("another-login");
     return new Response(null, { status: 401 });
   };
+  await performApiRequest("/me", { tag: "auth" });
+  assert.equal(getToken(), "another-login");
+  assert.equal(reloads, 0);
+});
+
+test("ending a handoff removes only the marker that belongs to that token", () => {
+  setToken("second-account");
+  migratingTab.beginSessionHandoff("second-account");
+  migratingTab.endSessionHandoff("first-account");
+  assert.equal(migratingTab.sessionHandoffActive("second-account"), true);
+  migratingTab.endSessionHandoff("second-account");
+  assert.equal(migratingTab.sessionHandoffActive("second-account"), false);
+});
+
+test("an explicit sign-out in any tab clears the handoff with the token", () => {
+  setToken("auto-account");
+  migratingTab.beginSessionHandoff("auto-account");
+  clearToken();
+  assert.equal(migratingTab.sessionHandoffActive("auto-account"), false);
+  assert.equal(migratingTab.getToken(), "");
+});
+
+test("unusable storage degrades to the plain 401 rule instead of throwing", async () => {
+  setToken("auto-account");
+  const { getItem, setItem } = globalThis.window.localStorage;
+  globalThis.window.localStorage.setItem = (key, value) => {
+    if (key !== "silicon_notebook_token") throw new DOMException("denied", "SecurityError");
+    setItem(key, value);
+  };
+  globalThis.window.localStorage.getItem = (key) => {
+    if (key !== "silicon_notebook_token") throw new DOMException("denied", "SecurityError");
+    return getItem(key);
+  };
   try {
+    migratingTab.beginSessionHandoff("auto-account");
+    assert.equal(migratingTab.sessionHandoffActive("auto-account"), false);
+    globalThis.fetch = async () => new Response(null, { status: 401 });
     await performApiRequest("/me", { tag: "auth" });
-    assert.equal(getToken(), "another-login");
-    assert.equal(reloads, 0);
+    assert.equal(getToken(), "");
+    assert.equal(reloads, 1);
   } finally {
-    endSessionHandoff("auto-account");
+    globalThis.window.localStorage.setItem = setItem;
+    globalThis.window.localStorage.getItem = getItem;
   }
 });
 

@@ -4,7 +4,7 @@ import { afterEach, expect, test, vi } from "vitest";
 
 import { AccountMenu } from "../../app/account-menu";
 import { performApiRequest } from "../../app/api-client";
-import { getToken, setToken, clearToken } from "../../app/auth-session";
+import { clearToken, getToken, sessionHandoffActive, setToken } from "../../app/auth-session";
 import type { AuthUser } from "../../app/auth";
 import { IdentityBindingConfirmation } from "../../app/identity-binding-confirmation";
 import { IdentityMigrationForm } from "../../app/identity-migration-form";
@@ -193,6 +193,23 @@ test.each(["failed", "discarded"] as const)("a %s migration ends the handoff so 
   await performApiRequest("/me", { tag: "auth" });
   expect(getToken()).toBe("");
   expect(pageReload).toHaveBeenCalledOnce();
+});
+
+test("an explicit sign-out during the migration wins: the result is discarded and nothing is installed", async () => {
+  const actor = userEvent.setup();
+  setToken("auto-account-token");
+  const pending = deferred<MigrationResult>();
+  const reload = vi.fn();
+  render(<MigrationHarness migrate={() => pending.promise} reload={reload} />);
+  const form = await openMigrationForm(actor);
+  await submitMigration(actor);
+  expect(sessionHandoffActive("auto-account-token")).toBe(true);
+  clearToken();
+  expect(sessionHandoffActive("auto-account-token")).toBe(false);
+  pending.resolve(migrated);
+  await waitFor(() => expect(form).toHaveTextContent("本次结果未应用到此页面"));
+  expect(getToken()).toBe("");
+  expect(reload).not.toHaveBeenCalled();
 });
 
 test("the form's close control stays available while the page reports a migration in flight", async () => {

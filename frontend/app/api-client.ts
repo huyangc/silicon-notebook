@@ -1,5 +1,5 @@
 import { API_BASE } from "./api-config.ts";
-import { authHeaders, clearToken, getToken } from "./auth-session.ts";
+import { authHeaders, clearRejectedToken, getToken } from "./auth-session.ts";
 import { throwHumanizedHttpError } from "./errors.ts";
 
 export type ApiAuth = "required" | "none";
@@ -9,19 +9,6 @@ export type ApiRequestOptions = RequestInit & {
   tag: string;
   unauthorized?: "preserve" | "clear-and-reload";
 };
-
-// Tokens whose session is being handed over to another one (identity
-// migration revokes the old session before its response installs the new
-// token). A 401 on such a token is an ordinary failure, not a logout.
-const sessionHandoffs = new Set<string>();
-
-export function beginSessionHandoff(token: string): void {
-  if (token) sessionHandoffs.add(token);
-}
-
-export function endSessionHandoff(token: string): void {
-  sessionHandoffs.delete(token);
-}
 
 function resolveApiUrl(pathOrUrl: string): string {
   try {
@@ -62,7 +49,7 @@ export async function performApiRequest(
   } = options;
   const headers = new Headers(inputHeaders);
   // A 401 only speaks for the token that was sent: a session switched in the
-  // meantime (e.g. identity migration) must not be cleared by a stale reply.
+  // meantime, or one being handed over in any tab, is not cleared by it.
   const sentToken = auth === "required" ? getToken() : null;
   if (auth === "required") {
     for (const [name, value] of Object.entries(authHeaders())) headers.set(name, value);
@@ -83,11 +70,10 @@ export async function performApiRequest(
     && unauthorized === "clear-and-reload"
     && response.status === 401
     && sentToken
-    && getToken() === sentToken
-    && !sessionHandoffs.has(sentToken)
+    && clearRejectedToken(sentToken)
+    && typeof window !== "undefined"
   ) {
-    clearToken();
-    if (typeof window !== "undefined") window.location.reload();
+    window.location.reload();
   }
   void tag;
   return response;
