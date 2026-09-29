@@ -186,7 +186,7 @@ def test_node_context_ceiling_queries_never_seq_scan(postgres_database, authorit
     from app.domain.knowledge_contracts import NODE_CONTEXT_CLUSTER_MEMBER_PROBE
     from app.repositories.postgres.knowledge_store import _node_context_cluster_sql
 
-    assert PostgresMigrator(postgres_database).migrate() == 65
+    assert PostgresMigrator(postgres_database).migrate() == 66
     _seed_node_context_explain(postgres_database)
     notebook_id = _NC_EXPLAIN_NOTEBOOK
     cluster_sql = _node_context_cluster_sql(authoritative=authoritative)
@@ -221,7 +221,7 @@ def test_node_context_legacy_sibling_queries_never_seq_scan(postgres_database):
         _LEGACY_SIBLINGS_UNSECTIONED_SQL,
     )
 
-    assert PostgresMigrator(postgres_database).migrate() == 65
+    assert PostgresMigrator(postgres_database).migrate() == 66
     _seed_node_context_explain(postgres_database)
     notebook_id = _NC_EXPLAIN_NOTEBOOK
     first_page = (notebook_id, normalize_timestamp("0001-01-01T00:00:00+00:00"), "")
@@ -252,7 +252,7 @@ def test_node_context_defines_query_walks_the_target_index_in_id_order(postgres_
     定义者按主键回表,不顺扫。"""
     from app.repositories.postgres.knowledge_store import _NODE_CONTEXT_DEFINES_SQL
 
-    assert PostgresMigrator(postgres_database).migrate() == 65
+    assert PostgresMigrator(postgres_database).migrate() == 66
     _seed_node_context_explain(postgres_database)
     params = (_NC_EXPLAIN_NOTEBOOK, "ko-42", 8)
     with postgres_database.connect() as connection:
