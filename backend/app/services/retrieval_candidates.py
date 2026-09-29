@@ -2589,6 +2589,11 @@ class CandidateRetrievalService(_RetrievalState):
             rows = self.knowledge.usable_object_rows_on(
                 db, neighbour_ids, USABLE_STATUSES,
             )
+        # PEER mode stamps every hit with the library it was read from, as the
+        # federated legs do: the statements above read ``notebook_id`` only, and a
+        # blank origin in a global run is an unattributable citation. Single-
+        # notebook hits keep the historical blank / ``personal`` defaults.
+        owner, owner_tier = self._peer_owner(notebook_id)
         out: List[RetrievedKnowledge] = []
         for row in rows:
             keys = row.keys()
@@ -2598,8 +2603,19 @@ class CandidateRetrievalService(_RetrievalState):
                 evidence=[Evidence(**e) for e in json.loads(row["evidence"] or "[]")],
                 score=0.0, relevance=0.0, status=row["status"], owner=row["owner"],
                 last_reviewed=row["last_reviewed"] if "last_reviewed" in keys else "",
+                notebook_id=owner, tier=owner_tier,
             ))
         return NeighborExpansion(out, truncated)
+
+    def _peer_owner(self, notebook_id: str) -> tuple:
+        """``(notebook_id, tier)`` to stamp on hits read from ``notebook_id``
+        in a global (peer) run -- the tier the federated legs give that library
+        (``_retrieval_participants``) -- or the unstamped ``("", "personal")``
+        outside one, which keeps single-notebook output byte-identical."""
+        if not federated_ask_active():
+            return "", "personal"
+        tiers = dict(self._retrieval_participants(notebook_id))
+        return notebook_id, tiers.get(notebook_id, "personal")
     def _retrieve_elements(self, notebook_id: str, query: str,
                            limit: int = 8, *,
                            allowed_source_ids=None,
