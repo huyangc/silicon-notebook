@@ -549,6 +549,7 @@ def source_scope_context(
     subjectless: bool = False,
     ceilings_total: bool = False,
     local_synthesized: bool = False,
+    _withheld_hidden_source_ids: Iterable[str] = (),
 ) -> Iterator[None]:
     """Install this run's retrieval scope, if it has one at all.
 
@@ -557,6 +558,10 @@ def source_scope_context(
     ``default_ceiling_context`` rather than submitted by the caller: it binds
     exactly like a submitted include, but ``source_provided`` stays False so
     neither persistable payload reports a scope the user never chose.
+    ``_withheld_hidden_source_ids`` is private to this module's constructors
+    (see ``ActiveSourceScope.withheld_hidden_source_ids``): it widens the set
+    the drift probe expects, so it is never read from a payload -- a key of
+    that name inside ``scope`` is ignored.
 
     ``notebook_source_ceilings`` is the third, independently optional input: a
     ``{notebook_id: source ids}`` mapping (see ``ActiveSourceScope``).  Supplying
@@ -617,8 +622,7 @@ def source_scope_context(
         subjectless=subjectless,
         ceilings_total=ceilings_total,
         withheld_hidden_source_ids=frozenset(
-            str(value)
-            for value in (raw or {}).get("withheld_hidden_source_ids") or []
+            str(value) for value in _withheld_hidden_source_ids
         ),
     )
     token = _CURRENT_SOURCE_SCOPE.set(current)
@@ -1733,6 +1737,54 @@ def partition_memory_sources(
     return tuple(kept), tuple(memory)
 
 
+def _without_memory(
+    local: Any,
+    readers: CeilingReaders,
+    notebook_id: str,
+    withheld: Iterable[str] = (),
+) -> tuple[Any, tuple[str, ...]]:
+    """The local dimension as the Memory channel allows it, plus withheld ids.
+
+    Channel open -> ``local`` unchanged.  Channel closed -> every Memory source
+    is removed from BOTH halves of the include list, whether the list was
+    synthesised or submitted: the constructor must not rely on "no entry point
+    submits a scope while closing the channel".  The Memory ids removed from
+    the hidden half are returned as withheld, so the drift probe -- which
+    re-reads the raw owner-scoped hidden set -- keeps matching; none removed
+    from the visible half need recording (a Memory source is never in the
+    live visible set the probe compares against).  One ``memory_sources`` read,
+    and only when there is something to classify.
+
+    An EXCLUDE-form local scope cannot be bounded this way -- it admits every
+    source it does not name, other members' Memory included -- so with the
+    channel closed it is refused rather than run.  Every entry point freezes an
+    include (routes via ``_validate_source_scope``, the constructor itself), so
+    this only fails a caller that would otherwise run unbounded.
+    """
+    if local is None or memory_channel_allowed():
+        return local, tuple(withheld)
+    raw = _scope_dict(local) or {}
+    if str(raw.get("mode") or "exclude") != "include":
+        raise ValueError(
+            "an exclude-form local scope cannot be bounded while the Memory "
+            "channel is closed"
+        )
+    source_ids = raw.get("source_ids") or ()
+    hidden = raw.get("hidden_source_ids") or ()
+    if not source_ids and not hidden:
+        return raw, tuple(withheld)
+    memory = frozenset(str(value) for value in readers.memory_sources(notebook_id))
+    if memory.isdisjoint(source_ids) and memory.isdisjoint(hidden):
+        # Nothing to strip: keep the caller's (possibly canonical) sets as-is.
+        return raw, tuple(withheld)
+    kept_visible, _ = partition_memory_sources(source_ids, memory)
+    kept_hidden, removed = partition_memory_sources(hidden, memory)
+    return (
+        {**raw, "source_ids": kept_visible, "hidden_source_ids": kept_hidden},
+        tuple(dict.fromkeys((*withheld, *removed))),
+    )
+
+
 def _emit_ceiling_event(readers: CeilingReaders, event: dict) -> None:
     if readers.emit is None:
         return
@@ -1808,17 +1860,19 @@ def default_ceiling_context(
        the report engine inside its worker) -> pass through untouched and read
        nothing.  The subjectless bit therefore keeps its single writer.
     2. LOCAL dimension.  ``local_scope`` submitted (the route already froze an
-       include) -> used as-is, own hidden half and all; a narrowed selection
-       deliberately carries no hidden sources, and a closed Memory channel does
-       not rewrite it either (no production caller submits one while closing
-       the channel).  Omitted -> synthesised as ``include: visible(notebook)``
+       include) -> used as-is, own hidden half and all (a narrowed selection
+       deliberately carries no hidden sources).  Omitted -> synthesised as
+       ``include: visible(notebook)``
        with ``hidden_source_ids = hidden(notebook, owner)``, ``narrowed=False``
        and ``owner_id``, but ``source_provided=False``: it binds exactly like the
        browser's all-selected freeze (``ceiling_active`` True, ``restricted``
        False) while ``current_source_scope_payload()`` keeps returning None, so
        the report ``understanding`` contract persists nothing the user never
-       chose.  With the Memory channel closed the owner's Memory projections are
-       moved out of the hidden half into ``withheld_hidden_source_ids``.
+       chose.  With the Memory channel closed, Memory sources are removed from
+       the include list in BOTH cases -- synthesised or submitted -- and those
+       taken from the hidden half are recorded in
+       ``withheld_hidden_source_ids`` for the drift probe (``_without_memory``;
+       an exclude-form submission is refused there).
     3. LIBRARY dimension.  ``base_scope`` submitted -> as-is; omitted ->
        unsubmitted (``base_provided=False``), no library is filtered by it.
     4. PER-LIBRARY CEILINGS.  Every mounted participant other than
@@ -1882,21 +1936,16 @@ def _fresh_default_ceiling(
     synthesize_local = local_scope is None
     local = local_scope
     if synthesize_local:
-        visible = readers.visible(notebook_id)
-        hidden = tuple(str(value) for value in readers.hidden(notebook_id, owner_id))
-        withheld: tuple[str, ...] = ()
-        if hidden and not memory_channel_allowed():
-            hidden, withheld = partition_memory_sources(
-                hidden, readers.memory_sources(notebook_id)
-            )
         local = {
             "mode": "include",
-            "source_ids": visible,
-            "hidden_source_ids": hidden,
-            "withheld_hidden_source_ids": withheld,
+            "source_ids": readers.visible(notebook_id),
+            "hidden_source_ids": tuple(
+                str(value) for value in readers.hidden(notebook_id, owner_id)
+            ),
             "narrowed": False,
             "owner_id": owner_id,
         }
+    local, withheld = _without_memory(local, readers, notebook_id)
     with source_scope_context(
         notebook_id,
         local,
@@ -1906,6 +1955,7 @@ def _fresh_default_ceiling(
         ),
         ceilings_total=True,
         local_synthesized=synthesize_local,
+        _withheld_hidden_source_ids=withheld,
     ):
         yield
 
@@ -1973,14 +2023,16 @@ def refreshed_ceiling_context(
             "mode": outer.mode,
             "source_ids": outer.source_ids,
             "hidden_source_ids": outer.hidden_source_ids,
-            "withheld_hidden_source_ids": outer.withheld_hidden_source_ids,
             "narrowed": outer.narrowed,
             "owner_id": outer.owner_id,
         }
         local_synthesized = not outer.source_provided
+        local, withheld = _without_memory(
+            local, readers, notebook_id, outer.withheld_hidden_source_ids,
+        )
     else:
-        local = local_scope
         local_synthesized = False
+        local, withheld = _without_memory(local_scope, readers, notebook_id)
     base = base_scope
     if base is None and outer.base_provided:
         base = {
@@ -2018,5 +2070,6 @@ def refreshed_ceiling_context(
         inherited,
         ceilings_total=True,
         local_synthesized=local_synthesized,
+        _withheld_hidden_source_ids=withheld,
     ):
         yield
