@@ -111,3 +111,72 @@ def test_end_to_end_single_notebook_reasoning_drops_a_dead_locator(tmp_path, mon
 ])
 def test_marker_stripping_touches_only_the_dropped_keys(marker, text, expected):
     assert reference_liveness.strip_marker_keys(text, {marker}) == expected
+
+
+@pytest.mark.parametrize("mix", [False, True], ids=["plain-chunk", "mix-kg-overlay"])
+def test_end_to_end_single_notebook_chunk_answer_drops_a_dead_locator(tmp_path, monkeypatch, mix):
+    """Closing item 21: chunk-mode answers take the same pass at
+    ``_save_answer`` -- the plain branch and the mix branch, whose KG anchors
+    name evidence elements. The element behind the first cited reference is
+    deleted just before the pass: no reference names it afterwards, the text is
+    intact, one read is spent."""
+    from tests.global_citation_e2e_kit import CitingAnswerer, evidence
+    from tests.model_testkit import bind_chat_client
+    from tests.model_testkit import bind_rerank_client
+    from tests.test_global_ask_engine_parity import _e2e_repo
+
+    class _Rerank:
+        configured = True
+
+        def rerank(self, query, documents, on_error=None):
+            return list(range(len(documents)))
+
+    repo, notebooks, user_id = _e2e_repo(tmp_path, monkeypatch, answer="低温性能如下。")
+    try:
+        nb = notebooks[0]
+        database = repo._runtime.source_store.database
+        if mix:
+            repo.settings.chunk_kg_overlay_enabled = True
+            bind_rerank_client(repo, _Rerank())
+            with database.connect() as db:
+                row = db.execute(
+                    "SELECT e.id, e.source_id FROM source_elements e JOIN sources s "
+                    "ON s.id=e.source_id WHERE s.notebook_id=? AND e.text LIKE '%零下四十度%'",
+                    (nb.id,),
+                ).fetchone()
+            repo.store_kg(nb.id, row["source_id"], [{
+                "local_id": "a", "object_type": "concept",
+                "payload": {"name": "低温性能", "definition": "低温下增益上升"},
+                "evidence": [evidence(row["source_id"], row["id"], "零下四十度")],
+            }], [])
+            bind_chat_client(repo, "ask_answer", CitingAnswerer("低温性能如下。"))
+        original = reference_liveness.drop_dangling_references
+        seen: dict = {}
+
+        def remove_then_check(response, read):
+            victim = next(
+                (a.element_id for a in response.anchors if a.object_type == "concept"),
+                None,
+            ) or next(ref.element_id for ref in [*response.anchors, *response.citations]
+                      if ref.element_id)
+            seen["victim"] = victim
+            seen["kinds"] = {a.object_type for a in response.anchors}
+            with database.write() as db:
+                db.execute("DELETE FROM source_elements WHERE id=?", (victim,))
+            calls: list = []
+            original(response, lambda ids: calls.append(tuple(ids)) or read(ids))
+            seen["reads"] = len(calls)
+
+        monkeypatch.setattr(reference_liveness, "drop_dangling_references", remove_then_check)
+        response = repo._runtime.ask_service().ask(
+            nb.id, AskRequest(question="低温性能如何", mode="chunk"), user_id=user_id,
+        )
+        assert seen["reads"] == 1
+        if mix:
+            assert "concept" in seen["kinds"], seen["kinds"]
+        assert response.answer.startswith("低温性能如下。")
+        victim = seen["victim"]
+        assert all(ref.element_id != victim for ref in [*response.anchors, *response.citations])
+        assert response.citation_check is None
+    finally:
+        repo.close()

@@ -26,6 +26,17 @@ from tests.model_testkit import bind_chat_client
 
 # ─────────────────────────── fixtures / helpers ───────────────────────────
 
+@pytest.fixture(autouse=True)
+def _synthetic_elements_are_not_dangling(monkeypatch):
+    """These chunk fixtures name synthetic element ids with no
+    ``source_elements`` row; J2's liveness pass at ``_save_answer``
+    (``reference_liveness``, pinned in ``test_reference_liveness.py``) would
+    rightly drop those cards, and this file is not about liveness."""
+    from app.services.ask_service import AskService
+
+    monkeypatch.setattr(AskService, "_drop_dangling_references", lambda self, response: None)
+
+
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")

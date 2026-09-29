@@ -2016,6 +2016,7 @@ class AskService:
         if receipt is not None:
             response.retrieval_scope = receipt
         response.asked_at = asked_at or response.asked_at
+        AskService._drop_dangling_references(self, response)
         # A DETACHED turn owns its own persistence. The three assignments above
         # still run because they shape the RESPONSE the caller gets back; what
         # must not happen is the write. There is no notebook whose ``answers``
@@ -4231,7 +4232,6 @@ class AskService:
         if draft.response.conversation_id != prepared.conversation_id:
             raise StageBoundaryError("response draft changed the response conversation_id")
         response = draft.response
-        self._drop_dangling_references(response)
         self._assert_reasoning_runtime(
             runtime,
             "before-persist",
@@ -4256,15 +4256,19 @@ class AskService:
     def _drop_dangling_references(self, response) -> None:
         """J2, single-notebook half: no card for an element already gone.
 
-        One batched by-id read (``reference_liveness``). Only outside a global
-        run: there the producers already applied J2 at retrieval time, and an
-        element deleted DURING the answer must reach the terminal citation
-        check as ``source_gone`` rather than vanish here.
+        Called from ``_save_answer``, the one exit every single-notebook answer
+        takes (chunk -- including its mix branch's KG evidence --, reasoning,
+        catalog overview, plugin engine), so the rule holds for all of them.
+        One batched by-id read (``reference_liveness``) when the answer names
+        an element, none otherwise. Only outside a global run: there the
+        producers already applied J2 at retrieval time, and an element deleted
+        DURING the answer must reach the terminal citation check as
+        ``source_gone`` rather than vanish here.
         """
         from app.services.federated_run import current_federated_run_plan
         from app.services.reference_liveness import drop_dangling_references
 
-        sources = getattr(self.evidence_context, "sources", None)
+        sources = getattr(getattr(self, "evidence_context", None), "sources", None)
         read = getattr(sources, "evidence_fingerprints", None)
         if read is not None and current_federated_run_plan() is None:
             drop_dangling_references(response, read)
