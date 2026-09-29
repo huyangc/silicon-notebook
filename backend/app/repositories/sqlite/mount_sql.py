@@ -17,8 +17,8 @@
 转让/撤销常是临时的,静默删掉用户配置无法撤销),重新满足条件即自动恢复。上面四支
 里的「挂载方 owner」一律取挂载方笔记本的 `a.created_by`,不取请求用户——四支回答的
 是「这条边本身还站不站得住」,与谁在提问无关。**「参与集与谁在提问无关」这条旧契约
-已被 M3 作废**,见下面「挂载仅对挂载人生效」:边站得住之后,还要问「对这位查看者
-生效吗」。
+已被 M3 裁决作废**,见下面「挂载仅对挂载人生效」:边站得住之后,还要问「对这位查看者
+生效吗」。回答这一问的片段已经在本文件里,调用点何时切换见「两组片段并存」。
 
 ## 挂载仅对挂载人生效(M3,带查看者的片段)
 
@@ -45,8 +45,28 @@
 `b` 的扫描上,于是顺序扫描 `notebooks b` 要为每一行求值读权子查询,代价远高于按主键
 逐条取挂载边,计划器稳定选索引。一旦 OR 里出现引用挂载方 `a` 的一支,整个查看者支
 就变成 join 条件,不再下推,几千本笔记本的规模上计划器会翻成「hash join + 顺序扫描
-notebooks」(PG 实测:5k 本时 0.2 ms → 1.2 ms)。EXPLAIN pin 在
-`tests/postgres/test_mount_sql_viewer_pg.py`,加回这一支会让它变红。
+notebooks」(PG 实测:5k 本时 0.2 ms → 1.2 ms;在 PG 16 的真实形状夹具上,custom plan
+约 3k–7k 本翻转,generic plan 到 8k 本仍翻转,20k 本两者都不翻)。EXPLAIN pin 在
+`tests/postgres/test_mount_sql_viewer_pg.py`:在 3k/6k/8k 三档规模上分别看 custom 与
+generic plan,并带一个正对照——把这一支加回去的写法在那几档上必须出现
+`Seq Scan on notebooks`,否则 pin 自己先红(说明它不再有鉴别力,要重新定规模)。
+把整个谓词包进 `COALESCE(...)` 再当过滤条件用,是同一类回退(见下一节)。
+
+## 三值与布尔:过滤用 `MOUNT_EFFECTIVE_FOR_VIEWER`,取值与取反用 `..._EXPR`
+
+裸谓词 `MOUNT_VALID_EXPR AND 查看者支` 是三值的:空查看者(`b.created_by = NULL`)、
+挂载人为 NULL(`b.created_by = a.created_by` 比 NULL)、被挂库 owner 为 NULL 时,它
+可以求出 NULL 而不是 FALSE。作为 WHERE 的一个合取项没有问题(NULL 与 FALSE 一样不
+保留该行),而且必须保持裸的合取形式:计划器把它拆成独立的限制条件,查看者支才下推
+到 `b` 上。`COALESCE(裸谓词, FALSE)` 对计划器是一个不透明的整体,里面引用了 `a`,于是
+整个谓词成了 join 条件——实测与加回挂载人支完全同款地翻成顺序扫描。所以:
+
+* `MOUNT_EFFECTIVE_FOR_VIEWER`(追加到 `MOUNT_VIEWER_JOIN` 之后)与
+  `MOUNTED_BASE_IDS_FOR_VIEWER_SUBQUERY` 用裸谓词,只能出现在 WHERE 的合取位置;
+* `MOUNT_EFFECTIVE_FOR_VIEWER_EXPR` 是 `COALESCE(裸谓词, FALSE)`,恒为真布尔:当投影列
+  用,或写 `NOT (...)` 找「对此人无效的边」时,NULL 那几种情形按无效返回,不会被
+  三值取反静默漏掉。不要拿它当正向过滤条件(那是上面的回退);取反本身同样不能下推,
+  只适合挂载边清单这类按单本笔记本取全部边的查询。
 
 挂载人 = `a.created_by` 的依据:挂载写入口 `PUT /notebooks/{id}/bases` 挂的是
 `notebook:mount`,解析到 **owner 档**(`api/deps.py::_CAPABILITY_LEVELS`);应用层
@@ -74,9 +94,23 @@ upsert,它照搬源环境那一行(同样不可转让)的 owner 映射结果,而
 调用点绑一个参数会当场报错,而不是静默错绑。错序绑定时 `e.notebook_id` 比的是一个
 用户 id,结果为空,不会串到别的库。其余新片段都是纯列引用、零参数。
 
-旧的单参数片段原样保留:`list_mount_edges` / `mountable_notebooks`(路由 owner 专属,
-查看者恒为挂载人)、深拷贝重判(按新主人)、治理侧只看 `tier='base'` 的清单都不随
-查看者变化;检索参与集等调用点在后续波次切换到带查看者的片段。
+## 两组片段并存
+
+旧的单参数片段(`MOUNT_JOIN`、`MOUNT_VALID_EXPR` / `MOUNT_VALID`、
+`MOUNT_GATE_CLOSED_EXPR`、`MOUNT_ORIGIN_COLUMN`、`MOUNT_ORDER`、
+`MOUNTED_BASE_IDS_SUBQUERY`)逐字未变;带查看者的四个公开片段(`MOUNT_VIEWER_JOIN`、
+`MOUNT_EFFECTIVE_FOR_VIEWER`、`MOUNT_EFFECTIVE_FOR_VIEWER_EXPR`、
+`MOUNTED_BASE_IDS_FOR_VIEWER_SUBQUERY`)与它们并列。**此刻(任务 E6-1 落地时)没有任何
+调用点 import 带查看者的片段**:`resolve_participants`、`participant_rows`、
+`notebook_has_usable_base_kg`、`mounted_bases_row`、`UnifiedKgStore.mounted_base_ids`、
+`any_mounted_has_kg_on`、`follow_start_row` 仍按旧片段求值,即参与集仍与查看者无关,
+M3 在调用点上尚未生效。同一轮整改里,任务 E6-2 把这些 store 调用点切到带查看者的
+片段,任务 E6-3 接上服务层的查看者来源与缓存键。
+
+不随查看者变化、切换后也继续用旧片段的调用点:`list_mount_edges` /
+`mountable_notebooks`(路由 owner 专属,查看者恒为挂载人)、深拷贝重判
+`valid_copied_mount_base_ids`(按新主人)、治理侧只看 `tier='base'` 的
+`mounted_public_base_ids`。
 
 ## 借入挂载(第 4 支)与它的未共享门
 
@@ -244,14 +278,20 @@ _VIEWER_REACHES_MOUNT_EXPR = (
     + ")"
 )
 
-# 带查看者的有效性谓词:既有有效性(四支 + 未共享门 + NOTEBOOK_LIVE_SQL)原样在前,
-# 于是「借来的不转借」与 copying 哨兵对所有查看者照旧成立。需要 v 已经 join 进来。
-MOUNT_EFFECTIVE_FOR_VIEWER_EXPR = (
+# 带查看者的裸谓词:既有有效性(四支 + 未共享门 + NOTEBOOK_LIVE_SQL)原样在前,于是
+# 「借来的不转借」与 copying 哨兵对所有查看者照旧成立。需要 v 已经 join 进来。三值:
+# 可能求出 NULL,只许作 WHERE 的合取项(理由见模块 docstring「三值与布尔」)。
+_MOUNT_EFFECTIVE_FOR_VIEWER_PRED = (
     "(" + MOUNT_VALID_EXPR + " AND " + _VIEWER_REACHES_MOUNT_EXPR + ")"
 )
 
-# 追加到 MOUNT_VIEWER_JOIN 之后的有效性过滤。
-MOUNT_EFFECTIVE_FOR_VIEWER = " AND " + MOUNT_EFFECTIVE_FOR_VIEWER_EXPR
+# 真布尔:投影列与取反用。别拿它当正向过滤——COALESCE 让整个谓词变成 join 条件。
+MOUNT_EFFECTIVE_FOR_VIEWER_EXPR = (
+    "COALESCE(" + _MOUNT_EFFECTIVE_FOR_VIEWER_PRED + ", FALSE)"
+)
+
+# 追加到 MOUNT_VIEWER_JOIN 之后的有效性过滤(裸合取项,查看者支才能下推到 b)。
+MOUNT_EFFECTIVE_FOR_VIEWER = " AND " + _MOUNT_EFFECTIVE_FOR_VIEWER_PRED
 
 # 供 `IN (...)` 内联的 id 子查询,两个位置参数 (viewer_id, notebook_id)。
 MOUNTED_BASE_IDS_FOR_VIEWER_SUBQUERY = (
