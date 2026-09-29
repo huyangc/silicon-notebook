@@ -627,6 +627,10 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                     finish_reason=str(
                         (stats_sink or {}).get("finish_reason") or "")
                 ) from exc
+            if parsed.trailing_data:
+                self._emit_json_repair_event(
+                    status="trimmed", reason="trailing_data"
+                )
             if parsed.repaired:
                 self._emit_json_repair_event(
                     status=(

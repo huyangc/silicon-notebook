@@ -1240,7 +1240,8 @@ Excel 专业分析由部署项 `SPREADSHEET_ANALYSIS_ENABLED` 总控；摄取护
 `MODEL_JSON_REPAIR_MODE` 只作用于 `reasoning_agent` 与 `ask_answer`。`off` 保持严格拒绝，
 `shadow` 记录响应是否可安全修复但仍拒绝，`on` 接受保守修复（默认）。它不会补全被截断的
 输出，也不会放松 schema、类型或正文安全校验；修复事件不含业务内容，并用模型调用的安全
-`support_id` 做关联。
+`support_id` 做关联。与这项配置无关，所有 chat workload 都接受「完整对象之后只跟着零散闭合
+标点」的回复（记为 `model_json_repair` 的 `status: "trimmed"`）；它原样交付该对象，不算修复。
 
 同源 `/api/*` rewrite 存在有限的代理 idle timeout，因此 Ask 每 5 秒发送一条不含业务内容的
 空白 NDJSON 心跳并返回禁缓冲 header；ingress 不应缓冲 `application/x-ndjson`。这只能处理

@@ -45,6 +45,12 @@ from app.core.config import (
     DEFAULT_REPORT_RETRIEVAL_FANOUT,
 )
 from app.core.llm import cap_kwargs
+from app.core.model_json import (
+    ModelJsonRepairError,
+    parse_model_json_object,
+    validate_model_json_shape,
+)
+from app.core.model_safety import safe_model_error_code, safe_model_error_detail
 from app.domain.extensions import RetrievalContributorHostPort
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 # Only the NAME, from the dependency-free domain layer: these modules are
@@ -156,6 +162,49 @@ def _string_items(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _section_reply(raw: Any, schema_hint: str) -> dict:
+    """One section reply through the shared model-JSON boundary.
+
+    The scheduled client already did this; doing it again here keeps a
+    direct client (tests, a plugin runtime) on the same contract -- a
+    complete object followed by a stray ``"}`` drafts instead of failing
+    ``json.loads`` with "Extra data" (2026-09-29).
+    """
+    parsed = parse_model_json_object(raw, schema_hint, allow_repair=False)
+    return json.loads(validate_model_json_shape(parsed.content, schema_hint).content)
+
+
+#: Rejection reasons that mean "the model wrote no section": an empty body,
+#: or an object carrying none of the section fields (``{}`` included).
+_EMPTY_SECTION_REASONS = frozenset({"empty", "missing_expected_key"})
+
+#: Per failure class, what the section note says. Only the empty class keeps
+#: its historical budget hint; the others state what happened, and the
+#: reason code goes to the ``report_section_attempt`` event, not the copy.
+_SECTION_FAILURE_COPY = MappingProxyType({
+    "empty": "答案合成未产出内容(模型可能把输出预算耗在思维链上),已重试",
+    "malformed": "模型返回的本节内容无法解析,已重试",
+    "error": "本节模型调用失败,已重试",
+})
+
+
+def _section_attempt_failure(exc: BaseException) -> tuple[str, str]:
+    """Classify one failed section attempt as (status, reason code)."""
+    if isinstance(exc, ModelJsonRepairError) or getattr(
+        exc, "code", ""
+    ) == "malformed_response":
+        # The scheduler raises ``ModelInvocationError`` carrying the reason
+        # as ``detail``; the boundary itself raises it as ``reason``.
+        reason = safe_model_error_detail(
+            getattr(exc, "detail", "") or getattr(exc, "reason", "")
+        )
+        return ("empty" if reason in _EMPTY_SECTION_REASONS else "malformed"), reason
+    # Only a model error carries a code; anything else gets no reason rather
+    # than the vocabulary's ``upstream_error`` fallback, which would guess.
+    code = getattr(exc, "code", "")
+    return "error", safe_model_error_code(code) if code else ""
 
 
 def audit_high_risk_assertions(markdown: str, id_map: dict[str, dict], *,
@@ -2410,56 +2459,26 @@ class ReportEngine:
         # reports.outline_json 里用户确认过的大纲。两次重试共用同一份块:它与
         # id_map 一样在这轮里是常量。
         structure_block = outline_structure_block(sub_outline, id_map)
-        # 思考型模型(deepseek-v4-pro)偶发把输出预算耗在 reasoning_content(思维链,被
-        # _stream_chat_content 丢弃)上 → content 空 → chat_json 兜底 "{}" → markdown 空
-        # (不抛异常)。原先空 markdown 会让本节在 _assemble 里静默消失(无标题/无提示)。
-        # 有界重试一次("{}" 不入 LLM 缓存,真·重掷);仍空则标 failed(→渲染「本节生成失败」
-        # note,不再静默)+ emit model_error(report_engine 原先零可观测)。报告章节会使用
-        # 独立的 report_section_max_tokens 上限，但思考型模型仍可能把该预算耗在 reasoning 上。
-        markdown, llm_grounded, raw_claims = "", False, None
-        for attempt in range(1, 3):
-            attempt_started = time.monotonic()
-            attempt_status = "error"
-            try:
-                raw = client.chat_json(
-                    [{"role": "user", "content": report_section_prompt(
-                        section["title"], section["scope"], question, context_block,
-                        allow_parametric=self.settings.report_allow_parametric,
-                        discovered_structure=structure_block,
-                        assumptions="；".join(
-                            str(item) for item in
-                            ((section.get("intent_contract") or {}).get("assumptions") or [])
-                            if str(item).strip()
-                        )[:1000],
-                        report_frame=frame_block,
-                        synthesis_commitment=synthesis_block,
-                    )}],
-                    REPORT_SECTION_SCHEMA_HINT, cancel_event=self.cancel_event,
-                    **cap_kwargs(client, "report_section_max_tokens"))
-                data = json.loads(raw)
-                if isinstance(data, dict):
-                    markdown = _prose(data.get("markdown"))
-                    llm_grounded = data.get("grounded", False) is True
-                    raw_claims = data.get("claims")
-                attempt_status = "success" if markdown else "empty"
-            except AskCancelled:
-                attempt_status = "cancelled"
-                raise
-            except Exception:
-                markdown, llm_grounded = "", False
-                attempt_status = "error"
-            finally:
-                if report_id and section_index >= 0:
-                    emit_section_attempt(
-                        deps.event_log,
-                        report_id=report_id,
-                        section_index=section_index,
-                        attempt=attempt,
-                        status=attempt_status,
-                        started=attempt_started,
-                    )
-            if markdown:
-                break
+        def ask_model() -> Any:
+            return client.chat_json(
+                [{"role": "user", "content": report_section_prompt(
+                    section["title"], section["scope"], question, context_block,
+                    allow_parametric=self.settings.report_allow_parametric,
+                    discovered_structure=structure_block,
+                    assumptions="；".join(
+                        str(item) for item in
+                        ((section.get("intent_contract") or {}).get("assumptions") or [])
+                        if str(item).strip()
+                    )[:1000],
+                    report_frame=frame_block,
+                    synthesis_commitment=synthesis_block,
+                )}],
+                REPORT_SECTION_SCHEMA_HINT, cancel_event=self.cancel_event,
+                **cap_kwargs(client, "report_section_max_tokens"))
+        markdown, llm_grounded, raw_claims, failure = self._section_attempts(
+            ask_model, REPORT_SECTION_SCHEMA_HINT,
+            report_id=report_id, section_index=section_index,
+        )
         anchors = deps.evidence_context.parse_anchors(markdown, id_map) if markdown else []
         evidence_level, top_relevance, citation_audit = self._section_evidence_grade(
             markdown, id_map, anchors, llm_grounded)
@@ -2492,22 +2511,80 @@ class ReportEngine:
                 "id_map": id_map,      # 节内 k -> ctx;仅供 _assemble 全局重编号,不入库
                 "attempted": list(getattr(result, "attempted", []) or [])}
         if not markdown:
-            try:
-                deps.model_errors.note_model_error(
-                    "report_section",
-                    RuntimeError(
-                        f"report section '{section['title']}' produced empty content after retry "
-                        "(reasoning model likely spent output budget on discarded chain-of-thought)"
-                    ),
-                    workload_id="report_section",
-                )
-            except Exception:
-                # Observability must not become a second failure channel after
-                # the model request has already degraded to an empty section.
-                pass
-            base["failed"] = True
-            base["error"] = "答案合成未产出内容(模型可能把输出预算耗在思维链上),已重试"
+            self._mark_section_failed(base, failure)
         return base
+
+    def _section_attempts(
+        self, ask_model: Any, schema_hint: str, *,
+        report_id: Optional[str], section_index: int,
+    ) -> tuple[str, bool, Any, tuple[str, Optional[Exception]]]:
+        """Draft one section with one bounded retry.
+
+        Returns ``(markdown, grounded, raw_claims, (failure_status, error))``;
+        the failure pair describes the LAST attempt -- the outcome the retry
+        left standing -- and is meaningless when markdown is non-empty.
+        """
+        # 思考型模型(deepseek-v4-pro)偶发把输出预算耗在 reasoning_content(思维链,被
+        # _stream_chat_content 丢弃)上 → content 空 → markdown 空。原先空 markdown 会让
+        # 本节在 _assemble 里静默消失(无标题/无提示)。有界重试一次(空回复不入 LLM 缓存,
+        # 真·重掷);仍失败则标 failed(→渲染「本节生成失败」note,不再静默)+ emit
+        # model_error。失败分三类、各有文案:empty(空回复/无章节字段)、malformed(回复
+        # 无法解析)、error(调用本身失败)。只有 empty 沿用思维链提示;原因码记在
+        # report_section_attempt 事件里,不写进文案猜原因。
+        markdown, llm_grounded, raw_claims = "", False, None
+        failure: tuple[str, Optional[Exception]] = ("empty", None)
+        for attempt in range(1, 3):
+            attempt_started = time.monotonic()
+            attempt_status, attempt_reason = "error", ""
+            failure_error: Optional[Exception] = None
+            try:
+                data = _section_reply(ask_model(), schema_hint)
+                markdown = _prose(data.get("markdown"))
+                llm_grounded = data.get("grounded", False) is True
+                raw_claims = data.get("claims")
+                attempt_status = "success" if markdown else "empty"
+            except AskCancelled:
+                attempt_status = "cancelled"
+                raise
+            except Exception as exc:
+                markdown, llm_grounded = "", False
+                attempt_status, attempt_reason = _section_attempt_failure(exc)
+                failure_error = exc
+            finally:
+                if report_id and section_index >= 0:
+                    emit_section_attempt(
+                        self.dependencies.event_log,
+                        report_id=report_id,
+                        section_index=section_index,
+                        attempt=attempt,
+                        status=attempt_status,
+                        started=attempt_started,
+                        reason=attempt_reason,
+                    )
+            if markdown:
+                break
+            failure = (attempt_status, failure_error)
+        return markdown, llm_grounded, raw_claims, failure
+
+    def _mark_section_failed(
+        self, base: dict, failure: tuple[str, Optional[Exception]],
+    ) -> None:
+        """Flag a section with no body and note why, without guessing a cause."""
+        status, error = failure
+        try:
+            self.dependencies.model_errors.note_model_error(
+                "report_section",
+                error or RuntimeError(
+                    f"report section '{base['title']}' produced empty content after retry"
+                ),
+                workload_id="report_section",
+            )
+        except Exception:
+            # Observability must not become a second failure channel after
+            # the model request has already degraded to an empty section.
+            pass
+        base["failed"] = True
+        base["error"] = _SECTION_FAILURE_COPY.get(status, _SECTION_FAILURE_COPY["error"])
 
     def _synthesize_report_blueprint(self, outline: Sequence[dict], results: Sequence[Any],
                                      question: str, report_frame: Optional[dict]) -> tuple[

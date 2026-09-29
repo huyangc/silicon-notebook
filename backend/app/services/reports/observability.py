@@ -6,6 +6,7 @@ queries, source ids and evidence must never reach this boundary.
 """
 from __future__ import annotations
 
+import re
 import time
 from contextlib import contextmanager
 from typing import Any
@@ -20,7 +21,12 @@ _TIMING_META = frozenset({
     "failed",
     "cancelled",
 })
-_ATTEMPT_STATUS = frozenset({"success", "empty", "error", "cancelled"})
+_ATTEMPT_STATUS = frozenset({
+    "success", "empty", "malformed", "error", "cancelled",
+})
+# A failed attempt's reason code: lowercase snake_case from the closed model
+# error vocabularies (``core.model_safety``), never free text.
+_ATTEMPT_REASON_RE = re.compile(r"[a-z][a-z_]{0,47}\Z")
 _STAGES = frozenset({
     "planning_intent",
     "planning_corpus_profile",
@@ -60,18 +66,21 @@ def emit_stage_timing(event_log: Any, *, report_id: str, stage: str,
 
 def emit_section_attempt(event_log: Any, *, report_id: str,
                          section_index: int, attempt: int, status: str,
-                         started: float) -> None:
+                         started: float, reason: str = "") -> None:
     """Record one outer section-generation attempt without model/user text."""
     safe_status = status if status in _ATTEMPT_STATUS else "error"
+    event = {
+        "kind": "report_section_attempt",
+        "report_id": str(report_id),
+        "section_index": int(section_index),
+        "attempt": int(attempt),
+        "status": safe_status,
+        "ms": max(0, int((time.monotonic() - started) * 1000)),
+    }
+    if isinstance(reason, str) and _ATTEMPT_REASON_RE.fullmatch(reason):
+        event["reason"] = reason
     try:
-        event_log.emit({
-            "kind": "report_section_attempt",
-            "report_id": str(report_id),
-            "section_index": int(section_index),
-            "attempt": int(attempt),
-            "status": safe_status,
-            "ms": max(0, int((time.monotonic() - started) * 1000)),
-        })
+        event_log.emit(event)
     except Exception:
         pass
 
