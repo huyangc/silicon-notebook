@@ -90,3 +90,15 @@ def test_enumerated_row_citations_race_the_terminal_read_pg(store, mutation):
 
 def test_enumerated_dangling_element_row_is_not_minted_pg(store):
     kit.collection_dangling_element_row(*store[:2], "%s", store[2])
+
+
+def test_enumerated_row_registered_then_deleted_is_minted_and_source_gone_pg(store):
+    kit.collection_registered_row_deleted_before_minting(*store[:2], "%s", store[2])
+
+
+def test_kg_element_registered_then_deleted_keeps_card_and_anchor_pg(store):
+    kit.kg_registered_element_deleted_before_the_pointer_read(*store[:2], "%s", store[2])
+
+
+def test_follow_chain_element_registered_then_deleted_keeps_its_locator_pg(store):
+    kit.chain_registered_element_deleted_before_the_pointer_read(*store[:2], "%s", store[2])

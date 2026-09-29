@@ -210,7 +210,7 @@ def _state_plan():
     plan = FederatedRunPlan(
         phase_timeout_seconds=30.0, notebook_timeout_seconds=5.0, executor=None,
         window=lambda: 1, cancel=None, on_library=lambda *_: None,
-        on_evidence=state.record_evidence,
+        on_evidence=state.record_evidence, evidence_registered=state.is_registered,
     )
     return state, plan
 
@@ -231,9 +231,22 @@ def test_a_pointer_read_does_not_replace_a_declared_none():
     """Federated channel: passage text changed under the run -> ``None``. A
     later blind pointer read sees the NEW text; it must not replace the None,
     or the terminal check compares new with new and passes."""
-    state, plan = _state_plan()
+    from app.services.federated_run import PointerSnapshot
+
+    # The merge rule on its own: nothing upstream may be relied on to keep a
+    # pointer snapshot away from a declared None.
+    state, _plan_ = _state_plan()
     state.record_evidence({"e-1": None})
-    with federated_run_plan(plan), evidence_attestation_seat(
+    state.record_evidence({"e-1": PointerSnapshot(("s", element_text_sha("new text")))})
+    assert state.evidence == {"e-1": None}
+    # And through the seam with a plan that does not answer "registered?":
+    # the pointer read happens, and its snapshot still cannot replace the None.
+    unregistered = FederatedRunPlan(
+        phase_timeout_seconds=30.0, notebook_timeout_seconds=5.0, executor=None,
+        window=lambda: 1, cancel=None, on_library=lambda *_: None,
+        on_evidence=state.record_evidence,
+    )
+    with federated_run_plan(unregistered), evidence_attestation_seat(
         _Reader({"e-1": ("s", element_text_sha("new text"))}),
     ):
         assert attest_pointers("kg_objects", ["e-1"]) == {"e-1": LIVE}
@@ -291,12 +304,16 @@ def test_a_cancelled_run_propagates_out_of_the_pointer_read():
             cancel.set()
             raise ReadBudgetExceeded("read budget exhausted")
 
+    events: list = []
     with federated_run_plan(_plan(published, cancel=cancel)), evidence_attestation_seat(
-        _Cancelling(),
+        _Cancelling(), emit=events.append,
     ):
         with pytest.raises(AskCancelled):
             attest_pointers("table_analysis", ["e-1"])
+    # Nothing is stated unreadable and no read failure is reported: telemetry
+    # must not record a cancellation as ``producer_evidence_unavailable``.
     assert published == []
+    assert events == []
 
 
 # ---------------------------------------------------------------------------
@@ -371,3 +388,29 @@ def test_an_ordinary_table_lane_failure_stays_fail_soft():
     service, prepared, runtime, warnings = _table_lane_service(analyze)
     assert service._spreadsheet_reasoning_results(prepared, runtime, []) == []
     assert warnings and warnings[0][1] == "RuntimeError"
+
+
+def test_an_id_registered_in_this_run_is_attested_never_dead():
+    """J2 drops only ids dangling BEFORE the question. An element a producer
+    already registered (real snapshot or declared None) and that has since been
+    deleted answers ``attested`` -- no read spent -- so the producer keeps the
+    card and the terminal check reports source_gone."""
+    from app.services.evidence_attestation import ATTESTED
+
+    state, plan = _state_plan()
+    state.record_evidence({"e-read": ("s", "fp"), "e-none": None})
+    reader = _Reader({})
+    with federated_run_plan(plan), evidence_attestation_seat(reader):
+        states = attest_pointers("kg_objects", ["e-read", "e-none", "e-gone"])
+    assert states == {"e-read": ATTESTED, "e-none": ATTESTED, "e-gone": DEAD}
+    assert reader.reads == [("e-gone",)]
+
+
+def test_a_memoised_dead_id_later_registered_answers_attested():
+    from app.services.evidence_attestation import ATTESTED
+
+    state, plan = _state_plan()
+    with federated_run_plan(plan), evidence_attestation_seat(_Reader({})):
+        assert attest_pointers("kg_objects", ["e-1"]) == {"e-1": DEAD}
+        state.record_evidence({"e-1": ("s", "fp")})
+        assert attest_pointers("kg_objects", ["e-1"]) == {"e-1": ATTESTED}

@@ -1396,11 +1396,14 @@ def test_a_single_element_passage_is_checked_exactly_as_before(service):
     assert [row.element_id for row in result.answer.citations] == ["e-b-1"]
 
 
-def test_an_id_dangling_before_the_question_is_delivered_as_usual(service):
-    """提问之前就悬空的 element id(KG 证据在重新入库后留下的旧 id):照常交付。
-
-    没有检索时刻快照,它就不是「回答期间被删」——线上只能说「无法核对」,绝不是
-    「资料已删除」或「原文已改动」,正文与这张卡片都照常保留。
+def test_an_unregistered_dangling_id_reaching_the_check_is_unverifiable(service):
+    """J2 is applied by the PRODUCERS: an element id already dangling before the
+    question produces no card (``attest_pointers`` answers ``dead``; the
+    single-notebook half is ``reference_liveness``). This pins the consumer's
+    side for an id that reached it anyway, e.g. from a producer that registers
+    nothing: with no retrieval-time snapshot it is not "deleted during the
+    answer", so the check says ``unverifiable`` -- never ``source_gone`` or
+    ``changed`` -- and the answer text is untouched.
     """
     service.ask = _FakeAsk(
         rounds=[[]], citations=[_citation("b")], evidence=None,
@@ -1471,7 +1474,11 @@ def test_a_blind_pointer_read_cannot_launder_a_declared_failure(service):
     element id, new text): its snapshot read declared E ``None``. A producer
     later attests E by pointer and reads the NEW text. That snapshot must not
     replace the ``None`` -- otherwise the terminal check compares new with new
-    and passes while the card shows the old excerpt. The verdict is
+    and passes while the card shows the old excerpt. Two guards hold here:
+    the run already registered E, so the pointer producer is told ``attested``
+    and reads nothing; and even a pointer snapshot could not replace the
+    ``None`` (``test_a_pointer_read_does_not_replace_a_declared_none`` pins that
+    merge rule alone). The verdict is
     ``unverifiable`` (internal ``unreadable``), not ``changed``: there is no
     trustworthy "before" to compare, and only a real snapshot mismatch may be
     called a change (J1)."""

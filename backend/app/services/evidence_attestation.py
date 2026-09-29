@@ -23,7 +23,10 @@ Which helper a producer calls depends on what it has in hand:
   run's per-library read budget and the run's cancel token, memoised for the
   rest of the run. It answers ``live`` / ``dead`` / ``unknown`` per id so the
   producer can drop a pointer that was already dangling before the question
-  (J2) instead of minting a card that opens on nothing.
+  (J2) instead of minting a card that opens on nothing -- and ``attested``,
+  with no read, for an id some producer already registered in this run: that
+  element may have been deleted since, and its card must stay so the terminal
+  check can report ``source_gone``.
 
 Both return immediately when no plan is installed: an ordinary notebook ask has
 no terminal re-check (J8), so registering there is a no-op by design and costs
@@ -74,6 +77,10 @@ from app.services.federated_run import PointerSnapshot, current_federated_run_pl
 LIVE = "live"
 DEAD = "dead"
 UNKNOWN = "unknown"
+# Already registered in THIS run by some producer (a real snapshot or a
+# declared ``None``): no read is spent and the producer keeps the card -- never
+# DEAD, because J2 is only for ids dangling BEFORE the question.
+ATTESTED = "attested"
 
 # Producer codes travel into telemetry, so they are identifiers, never prose.
 _PRODUCER_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -148,11 +155,16 @@ def attest_read(producer: str, texts: Mapping[str, "tuple[str, str | None]"]) ->
 def attest_pointers(producer: str, element_ids: Iterable[str]) -> dict[str, str]:
     """Attest elements the producer cites without having read their text.
 
-    Returns ``{element_id: "live" | "dead" | "unknown"}`` for every distinct,
-    non-empty id asked about, or ``{}`` when no plan is installed (nothing was
-    checked; the caller keeps whatever it did before). ``dead`` means the row
-    did not exist at retrieval time; ``unknown`` means the read failed or ran
-    out of budget, and those ids were published as ``None``.
+    Returns ``{element_id: "attested" | "live" | "dead" | "unknown"}`` for
+    every distinct, non-empty id asked about, or ``{}`` when no plan is
+    installed (nothing was checked; the caller keeps whatever it did before).
+    ``attested`` means a producer already registered the element in this run
+    (``FederatedRunPlan.evidence_registered``): nothing is read, and even if
+    the row has since been deleted the producer keeps the card, so the terminal
+    check reports ``source_gone`` instead of the card silently vanishing.
+    ``dead`` means the row did not exist and no producer had registered it --
+    the J2 case, a pointer dangling before the question. ``unknown`` means the
+    read failed or ran out of budget, and those ids were published as ``None``.
 
     One read per call at most, over the ids this run has not settled yet;
     ``live`` and ``dead`` are memoised for the rest of the run, ``unknown`` is
@@ -166,11 +178,18 @@ def attest_pointers(producer: str, element_ids: Iterable[str]) -> dict[str, str]
     ids = list(dict.fromkeys(str(value) for value in element_ids if value))
     if not ids:
         return {}
+    registered = getattr(plan, "evidence_registered", None)
+    states = {
+        key: ATTESTED for key in ids if registered is not None and registered(key)
+    }
+    unregistered = [key for key in ids if key not in states]
     seat = _SEAT.get()
     if seat is None:
-        return _refuse(plan, producer, ids, reason="no_reader", error_type="")
+        if unregistered:
+            states.update(_refuse(plan, producer, unregistered, reason="no_reader", error_type=""))
+        return {key: states[key] for key in ids}
     with seat.lock:
-        states = {key: seat.settled[key] for key in ids if key in seat.settled}
+        states.update({key: seat.settled[key] for key in unregistered if key in seat.settled})
     pending = [key for key in ids if key not in states]
     if pending:
         states.update(_read_pointers(plan, seat, producer, pending))
@@ -240,6 +259,6 @@ def _emit(event: dict) -> None:
 
 
 __all__ = [
-    "DEAD", "LIVE", "UNKNOWN",
+    "ATTESTED", "DEAD", "LIVE", "UNKNOWN",
     "attest_pointers", "attest_read", "evidence_attestation_seat",
 ]

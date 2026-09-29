@@ -135,6 +135,18 @@ def test_enumerated_dangling_element_row_is_not_minted(store):
     kit.collection_dangling_element_row(*store[:2], "?", store[2])
 
 
+def test_enumerated_row_registered_then_deleted_is_minted_and_source_gone(store):
+    kit.collection_registered_row_deleted_before_minting(*store[:2], "?", store[2])
+
+
+def test_kg_element_registered_then_deleted_keeps_card_and_anchor(store):
+    kit.kg_registered_element_deleted_before_the_pointer_read(*store[:2], "?", store[2])
+
+
+def test_follow_chain_element_registered_then_deleted_keeps_its_locator(store):
+    kit.chain_registered_element_deleted_before_the_pointer_read(*store[:2], "?", store[2])
+
+
 # --- outside a global run: byte-identical, zero reads (J8) --------------------
 
 def test_single_notebook_producers_register_nothing_and_read_nothing(store):
