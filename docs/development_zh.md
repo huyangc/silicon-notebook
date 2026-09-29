@@ -129,6 +129,44 @@
   `use-notebook-collection.ts::refreshAfterAccessChange` 与壳层窄
   `reconcileOpenNotebook` effect，使已打开工作区与列表一起对账。
 
+### SQL 里绑定 id 清单
+
+清单大小由数据决定的语句——首先是一次运行冻结的来源天花板，它可以装下一个笔记本的全部
+来源——一律经所在后端的 `id_binding` 模块绑定：
+[PostgreSQL](../backend/app/repositories/postgres/id_binding.py) 用 `bind_ids` +
+`member_of` / `not_member_of`，经 `execute_ids` 执行（或 `execute_bound`：没绑清单时保持
+原样的普通 execute）；[SQLite](../backend/app/repositories/sqlite/id_binding.py) 用
+`bind_ids` + `member_of` / `not_member_of` / `drive_by`。两边都返回 `BoundIds(sql, param)`：
+不论多长，一个清单只占一个参数。完整测量写在两个模块的 docstring 里；决定这条规则的事实
+（49,000 个来源的笔记本上实测）：
+
+- PostgreSQL：psycopg 在同一连接上第 5 次执行时预备语句，PostgreSQL 约从第 11 次起可能改用
+  generic plan，绑定的数组变成按 10 个元素估计的不透明参数。chunk FTS 在 49k 个 id 时从
+  1.1 s 变成 3.1 s，超过它 3 s 的超时；超时的回滚又会清空预备缓存，于是每约 11 次循环一次，
+  并打开词法熔断；稀有词 7 ms 对 7.7 s；KG 证据闸 169 ms 对 6.7 s。`execute_ids` 发
+  `prepare=False`，每次执行都按真实清单规划。代价是每次都要规划：列上没有高频值时 49k 个 id
+  规划 5–11 ms，有高频值时（每个来源的 chunk 数偏斜）62–81 ms（稀有词每问约 0.2 s）——换来的
+  是有界的成本而不是悬崖。半连接写法 `col IN (SELECT unnest(…))` 规划只要几毫秒，但会让清单
+  驱动计划，在每条语句上都有输的格子（常见词 chunk FTS 1.8 s → 5–7 s），所以不用。
+- SQLite：每个 id 一个 `?` 会撞上部署版 32,766 个变量的上限（`SQLITE_LIMIT_VARIABLE_NUMBER`；
+  本地版允许 250,000，所以故障只在生产出现），fail-open 的调用方会把报错变成静默的空通道。
+  有索引的列上 `col IN (清单)` 还会让清单驱动计划：在复合索引 `(object_id, source_id)` 的
+  相关探针里，每个候选行对每个 id 各探一次（49k 个 id 时 6.6–8.7 s）。`member_of` 写成
+  `+col IN (…)`，清单只做过滤（14–20 ms）；`drive_by` 是「逐个查清单里每个 id」的显式写法。
+  生产库没有规划统计信息，所以计划在有没有 `sqlite_stat1` 时都必须成立，计划钉子两种状态
+  各跑一遍。
+
+绑定层从不改变成员：id 原样绑定（包括空串和空白 id），非字符串 id 抛 `TypeError`；去重由
+store 决定，两个后端一致。清单只有属于以下三类之一时才能直接绑定：**构造上有界**（一页或
+`LIMIT` 窗口、排序后的主键窗口、一次运行的笔记本、固定的状态集合、单个来源的元素 id）；
+**分批的键探针**（id 就是语句要读写的行的键，也是它唯一的选择性谓词，PostgreSQL 每条不超过
+1024 个、SQLite 不超过 900 个占位符）；**由清单驱动、只占一个参数**（整份清单就是要读的键
+集合，如 `visible_source_scope_snapshot`）。清单用来过滤一条由别的东西驱动的语句时，永远不
+属于豁免。`backend/tests/test_id_list_binding_guard.py` 扫描两个 repository 目录，任何既没
+改走模块、也没在那里登记类别与理由的 id 清单绑定都会报红。刻意不采用：补集清单（冻结的
+天花板不能放进冻结之后新增的来源）、绑定层里的身份缓存（属于持有长寿命清单的调用方）、
+语句级规划器设置（实测两个方向都有）。
+
 ### Schema 与迁移编写
 
 - SQLite schema 变更新增 `_migration_N`，同步提升

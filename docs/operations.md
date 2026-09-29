@@ -1386,6 +1386,11 @@ The transaction is rolled back to that savepoint on `QueryCanceled`, and the fir
 opens a per-notebook circuit for the rest of the current retrieval run; later generic calls
 skip the database statement. Calls already in flight are not forcibly cancelled. Exact
 phrase/identifier lookup is a separate channel and is never covered by this circuit.
+A source-scoped probe binds its source list unprepared, so it is planned with the real
+list on every execution; before 2026-09-29 the same probe drifted into a generic plan
+from about its 11th execution on a pooled connection and could cross this budget
+periodically on large notebooks. Timeouts that still recur therefore come from the query
+itself (its terms, the trigram index, or load), not from the plan cache.
 
 When an immutable chunk ANN source sidecar covers the frozen authorized scope, Deep Report
 planning/generation skips the generic natural-language FTS union by default; ordinary Ask
