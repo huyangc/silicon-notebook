@@ -1414,16 +1414,24 @@ the legacy aggregate as pure ANN: `site=chunk_scale_index` reports
 `lexical_mode` classification (`report_ann_only`, `report_delta_fallback`,
 `report_quality_union`, or `non_report_union`); `site=_retrieve_scored` reports the broad
 `candidate_ms` plus `scale_index_ms`, `kg_ann_ms`, and `kg_lexical_ms`. The retrieval-run
-summary reports `chunk_fts_timeouts` and `chunk_fts_circuit_skips`. A non-timeout failure of
-the FTS half of the single-notebook ANN∪FTS union records no model error and shows no banner
-(the semantic half still produces candidates); besides the leaf's own `site=chunk_fts`
-`status=failed_open` timing sample (present when the leaf query itself raised) it emits one `ask_stage` event with `stage=chunk_fts`,
-`site=chunk_ann_union`, `status=failed_open`, `notebook_id` and the exception class name
-`error_type`, never the message. It uses its own `site` so `diag_retrieval_latency.py` does not
-count the leaf failure twice. These events also carry
+summary reports `chunk_fts_timeouts` and `chunk_fts_circuit_skips`. These events also carry
 the compatible `stage`/`latency_ms` pair (`chunk_scale_index`, `chunk_ann`, `chunk_fts`, or
-`kg_candidates`), so both `diag.py slow` and `diag.py latency` aggregate them. A
-`chunk_scale_index` event from the federated borrow-only lane additionally carries
+`kg_candidates`), so both `diag.py slow` and `diag.py latency` aggregate them.
+
+A non-timeout failure of the FTS half of the single-notebook ANN∪FTS union emits one
+`ask_stage` event with `stage=chunk_fts`, `site=chunk_ann_union`, `status=failed_open`,
+`notebook_id`, `lexical_mode`, `recall_role`, and the exception class name `error_type`,
+never the message. The event carries no `latency_ms` and does not enter the latency
+aggregation; it also comes on top of the leaf's own `site=chunk_fts` `status=failed_open`
+timing sample (present when the leaf query itself raised), and uses its own `site` so
+`diag_retrieval_latency.py` does not count the leaf failure twice. `recall_role=supplement`
+means the ANN index covers every in-scope source: their semantic candidates are unaffected,
+so the failure records no model error and shows no banner. `recall_role=sole` means the
+scope also holds sources not yet in the vector index (and not covered by the opt-in delta
+brute force), which only lexical search can recall; the failure leaves them out, so it still
+records the `chunk_fts` model error and raises the banner.
+
+A `chunk_scale_index` event from the federated borrow-only lane additionally carries
 `lane=peek`: it timed one dictionary lookup rather than an index load, so `diag_slow.py`
 reports it as its own `chunk_scale_index(peek)` bucket instead of dragging the residency
 percentiles toward zero. After deploying, verify

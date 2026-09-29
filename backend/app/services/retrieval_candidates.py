@@ -25,6 +25,7 @@ from app.core.config import (
 from app.models.common import Evidence
 from app.domain.extensions import GENERATED_QUESTION_ACCESS_CAPABILITY
 from app.domain.retrieval import ChunkRetrievalPlan
+from app.domain.retrieval_control import RetrievalControlError
 from app.repositories.ports import ChunkLexicalSearchTimeout
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 # chunk 召回腿的两个 per-task ContextVar 与那把 routing 探针住在
@@ -3668,6 +3669,7 @@ class CandidateRetrievalService(_RetrievalState):
         # scale_auto_fold_on_add 排增量 fold 把 delta 收进索引。普通 Ask / 报告质量
         # 回滚闸仍由下方 FTS 覆盖全部 chunk；报告默认 ANN-only 时依赖及时 fold。
         # True 时保持强一致的暴力补召回(慢)。
+        delta_covered_sources = frozenset()
         if self.settings.scale_search_include_delta:
             try:
                 delta = self._index_delta(notebook_id)
@@ -3690,6 +3692,9 @@ class CandidateRetrievalService(_RetrievalState):
                         if cid not in chunk_sims:
                             cand_ids.append(cid)
                         chunk_sims[cid] = s
+                # 只有暴力补召回整段成功,这些来源才有语义候选;下方词法半失败时
+                # 据此判断它是不是某些来源的唯一召回。
+                delta_covered_sources = frozenset(delta_sources)
             except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮检索,退回仅核候选
                 self._note_model_error(
                     "chunk_ann_delta",
@@ -3764,18 +3769,33 @@ class CandidateRetrievalService(_RetrievalState):
                 # 失败」(生产 7 天 34 条横幅里 27 条是它),把一条补召回臂的缺席说成
                 # 答案不完整。只有真的影响结果的失败才显示给用户。
                 pass
+            except (AskCancelled, RetrievalControlError):
+                raise
             except Exception as exc:  # noqa: BLE001 — 词法失败不拖垮检索
-                # 其它词法失败同理:语义半照常产出候选,答案不受影响,所以不记
-                # model_error、不上横幅;原因码走事件,只带异常类名。site 与叶子
-                # 事件(site=chunk_fts,带耗时)分开,免得延迟诊断重复计数。
+                # 其它词法失败要看词法半是不是某些来源的唯一召回。在范围内但
+                # 不在这一代 ANN 里的来源(sidecar 缺席、也没被 delta 暴力补上)
+                # 只能靠词法命中:它们会整体缺席,答案真受影响,照旧记
+                # model_error 上横幅。ANN 已覆盖全部在范围来源时,语义半照常
+                # 产出候选,词法只是补召回,不上横幅。两种都记事件:内容无关,
+                # 只带异常类名;site 与叶子事件(site=chunk_fts,带耗时)分开,
+                # 免得延迟诊断重复计数。
+                lexical_only_sources = unindexed_allowed_sources.difference(
+                    delta_covered_sources
+                )
                 self.event_log.emit({
                     "kind": "ask_stage",
                     "stage": "chunk_fts",
                     "site": "chunk_ann_union",
                     "notebook_id": notebook_id,
                     "status": "failed_open",
+                    "lexical_mode": lexical_mode,
+                    "recall_role": (
+                        "sole" if lexical_only_sources else "supplement"
+                    ),
                     "error_type": type(exc).__name__,
                 })
+                if lexical_only_sources:
+                    self._note_model_error("chunk_fts", "", exc)
         t_fts = time.perf_counter()
 
         if not cand_ids:
@@ -4231,6 +4251,8 @@ class CandidateRetrievalService(_RetrievalState):
             if federated:
                 raise
             return []
+        except (AskCancelled, RetrievalControlError):
+            raise
         except Exception as exc:  # noqa: BLE001 — lexical补召回失败绝不拖垮检索
             if federated:
                 # 全局模式里,一个库的关键词补召回腿失败只是「这一路缺席」,不影响
