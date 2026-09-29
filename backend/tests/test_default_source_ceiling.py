@@ -906,6 +906,32 @@ def test_refresh_inside_a_legacy_scope_keeps_every_dimension_it_does_not_refresh
     assert store.visible_calls == [], "an excluded library is not read"
 
 
+def test_refresh_inside_a_legacy_scope_with_an_own_notebook_entry():
+    """An older-style outer may bind its OWN notebook through a per-notebook
+    entry.  Not refreshing the local dimension keeps that entry binding (so
+    ``src-b`` stays refused); refreshing it replaces the entry -- the refreshed
+    list is the local dimension now, and keeping both would be the ambiguous
+    shape ``ActiveSourceScope`` refuses."""
+    store = _refresh_store()
+    with source_scope_context(NB, None, None, {NB: ["src-a"]}):
+        assert source_allowed(NB, "src-b") is False
+        with refreshed_ceiling_context(NB, "bob", store.readers()):
+            scope = current_source_scope()
+            assert scope.source_ceiling_for(NB) == frozenset({"src-a"})
+            assert source_allowed(NB, "src-b") is False
+            assert scope.ceilings_total is True
+            assert scope.source_ceiling_for("nb-lib") == frozenset({"lib-1"})
+        with refreshed_ceiling_context(
+            NB, "bob", store.readers(),
+            local_scope={"mode": "include", "source_ids": ["src-a", "src-b"],
+                         "narrowed": False},
+        ):
+            scope = current_source_scope()
+            assert scope.source_ceiling_for(NB) is None
+            assert source_allowed(NB, "src-b") is True
+    assert "hidden" not in store.calls
+
+
 def test_refresh_inside_a_legacy_scope_that_binds_nothing_only_narrows():
     """The one case a None dimension does not copy the outer: an older-style
     outer whose local dimension binds nothing (library-only) gets the
