@@ -16,10 +16,7 @@ import pytest
 
 from app.models.notebooks import NotebookCreate
 from app.repositories.postgres._store_utils import jsonb, normalize_timestamp
-from app.services.collection_enumeration import (
-    TRUNCATED_SOURCE_OUT_OF_SCOPE,
-    EnumerationBudget,
-)
+from app.services.collection_enumeration import EnumerationBudget
 from app.services.source_scope import source_scope_context
 
 
@@ -102,6 +99,20 @@ def _seed(repository):
     return notebook_id
 
 
+def _insert_late_source(repository, notebook_id, source_id):
+    runtime = repository._runtime
+    now = normalize_timestamp(runtime.seams.now())
+    with runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,status,parse_status,"
+            "file_name,file_path,file_size,file_hash,summary,created_at,"
+            "updated_at,doc_type) VALUES (%s,%s,'late','markdown',"
+            "'extracted','extracted','l.md','',0,%s,'',%s,%s,'')",
+            (source_id, notebook_id, f"h-{source_id}", now, now),
+        )
+
+
 def _ticked(notebook_id, source_ids):
     return source_scope_context(notebook_id, {
         "mode": "include", "source_ids": list(source_ids), "narrowed": True,
@@ -128,8 +139,9 @@ def test_pg_enumeration_under_a_ceiling_counts_what_it_lists(postgres_repository
             cursor=paged.cursor)
         elements = enumeration.enumerate_elements(
             notebook_id, "formula", budget=_budget())
-        refused = enumeration.enumerate_elements(
-            notebook_id, "formula", source_id="sB", budget=_budget())
+        with pytest.raises(ValueError, match="source is not in scope: 'sB'"):
+            enumeration.enumerate_elements(
+                notebook_id, "formula", source_id="sB", budget=_budget())
         roster = enumeration.enumerate_sources(notebook_id, budget=_budget())
         citations = repository._runtime.ask_service().evidence_context \
             .collection_item_citations(kg.items, active_notebook_id=notebook_id)
@@ -146,7 +158,6 @@ def test_pg_enumeration_under_a_ceiling_counts_what_it_lists(postgres_repository
     assert citations["oMix"].element_id == "el-sA-002"
     assert {item.source_id for item in elements.items} == {"sA", "sC"}
     assert (elements.coverage.total, elements.coverage.complete) == (3, True)
-    assert refused.coverage.truncated_reason == TRUNCATED_SOURCE_OUT_OF_SCOPE
     assert [item.source_id for item in roster.items] == ["sA", "sC"]
 
 
@@ -164,16 +175,7 @@ def test_pg_out_of_ceiling_upload_is_not_a_concurrent_change(
         rows = original(*args, **kwargs)
         state["pages"] += 1
         if state["pages"] == 1:
-            now = normalize_timestamp(runtime.seams.now())
-            with runtime.database.write() as db:
-                db.execute(
-                    "INSERT INTO sources "
-                    "(id,notebook_id,title,source_type,status,parse_status,"
-                    "file_name,file_path,file_size,file_hash,summary,created_at,"
-                    "updated_at,doc_type) VALUES ('sLate',%s,'late','markdown',"
-                    "'extracted','extracted','l.md','',0,'h-late','',%s,%s,'')",
-                    (notebook_id, now, now),
-                )
+            _insert_late_source(repository, notebook_id, "sLate")
         return rows
 
     monkeypatch.setattr(store, "element_page_rows", hook)
@@ -197,3 +199,37 @@ def test_pg_without_a_ceiling_keeps_the_historical_numbers(postgres_repository):
         "oA", "oB", "oMix", "oNone"]
     mix = next(item for item in kg.items if item.object_id == "oMix")
     assert mix.evidence_element_ids == ("el-sB-001", "el-sB-002", "el-sB-003")
+
+
+def test_pg_per_library_freeze_hides_a_later_upload(postgres_repository):
+    """E-3 孪生:逐库冻结之后上传的来源不进来源清单,也不进地图的 ``sources:``。"""
+    repository = postgres_repository
+    notebook_id = _seed(repository)
+    with source_scope_context(
+        notebook_id, None, None,
+        notebook_source_ceilings={notebook_id: ["sA", "sB", "sC"]},
+    ):
+        _insert_late_source(repository, notebook_id, "sLate")
+        collection_map = repository.collection_catalog.collection_map(notebook_id)
+        roster = repository.collection_enumeration.enumerate_sources(
+            notebook_id, budget=_budget())
+    assert collection_map.sources == 3
+    assert [item.source_id for item in roster.items] == ["sA", "sB", "sC"]
+    assert roster.coverage.complete is True
+
+
+def test_pg_knowhow_table_count_is_what_the_executor_reaches(postgres_repository):
+    """E-5(b) 孪生:只数当前库的表;收窄时为 0。"""
+    repository = postgres_repository
+    notebook_id = repository.create_notebook(NotebookCreate(name="nb")).id
+    base_id = repository.create_notebook(NotebookCreate(name="base")).id
+    repository.mark_notebook_base(base_id)
+    columns = [{"name": "Topic", "role": "anchor"}]
+    repository.create_knowhow_table(notebook_id, "T1", "", columns)
+    repository.create_knowhow_table(base_id, "T2", "", columns)
+    repository.replace_notebook_bases(
+        notebook_id, [base_id], repository.current_user().id)
+    catalog = repository.collection_catalog
+    assert catalog.collection_map(notebook_id).knowhow_tables == 1
+    with _ticked(notebook_id, []):
+        assert catalog.collection_map(notebook_id).knowhow_tables == 0

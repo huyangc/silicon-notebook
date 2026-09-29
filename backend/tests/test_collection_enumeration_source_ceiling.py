@@ -11,7 +11,8 @@
   (``total``)、``complete`` 与续跑游标都与过滤后的集合一致;
 * 指纹:天花板外的上传不触发 ``concurrent_change``,天花板内的重解析仍触发;
 * 截断前先按天花板过滤:前三条证据都在天花板外、第四条在内,仍能引到界内元素;
-* 显式点名天花板外的 ``source_id`` → 分类结局 ``source_out_of_scope``(不是异常);
+* 显式点名天花板外的 ``source_id`` → 与「不在参与库」同一句 ``ValueError``
+  (无法借拒绝探测未勾选文档是否存在),推理循环里的跳过步骤与 fail_closed 同形;
 * 冻结之后上传的来源既不列出、也不计数、也不能被点名;
 * 全局问答:Knowhow 投影对象的引用不再让整份答案以 ``out_of_ceiling`` 作废;
 * 无天花板时逐字节不变(页查询不带新关键字、计数走旧口径、证据引用原样)。
@@ -33,7 +34,6 @@ from app.services import collection_catalog
 from app.services.collection_enumeration import (
     MAX_EVIDENCE_REFS,
     TRUNCATED_CONCURRENT_CHANGE,
-    TRUNCATED_SOURCE_OUT_OF_SCOPE,
     EnumerationBudget,
     KgObjectItem,
     SourceItem,
@@ -47,6 +47,13 @@ from app.services.retrieval_run import retrieval_run
 from app.services.source_scope import source_scope_context
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients
+from tests.test_reasoning_enumeration_tools import (
+    _SeqLLM,
+    _enumerate_action,
+    _retriever,
+    _seed as _reasoning_seed,
+    _skips,
+)
 
 
 NOW = "2026-07-28T00:00:00+08:00"
@@ -521,9 +528,19 @@ def test_a_resumed_chain_ignores_an_out_of_ceiling_upload_between_calls(repo):
 
 # ------------------------------------------------ 显式 source_id / 冻结后上传
 
-def test_explicit_out_of_ceiling_source_is_a_classified_refusal(
+def _refusal(repo, notebook_id, source_id):
+    with pytest.raises(ValueError) as caught:
+        repo.collection_enumeration.enumerate_elements(
+            notebook_id, "formula", source_id=source_id, budget=_budget())
+    return str(caught.value)
+
+
+def test_explicit_out_of_ceiling_source_is_refused_like_a_non_member(
     repo, monkeypatch,
 ):
+    """E-4:以前只核对库成员身份,点名一个未勾选文档的 id 就能列出并引用它的
+    元素。现在按该行所属库的天花板拒绝,且与「根本不存在」是**同一句**——拒绝
+    本身不能拿来探测一篇未勾选的文档在不在。被拒的来源一次页查询都不发。"""
     nb = _library(repo)
     pages: list = []
     original = repo._runtime.source_store.element_page_rows
@@ -532,29 +549,67 @@ def test_explicit_out_of_ceiling_source_is_a_classified_refusal(
         lambda *args, **kwargs: pages.append(args) or original(*args, **kwargs),
     )
     with _ticked(nb, ["sA", "sC"]):
-        refused = repo.collection_enumeration.enumerate_elements(
-            nb, "formula", source_id="sB", budget=_budget())
+        unticked = _refusal(repo, nb, "sB")
+        missing = _refusal(repo, nb, "no-such-source")
         allowed = repo.collection_enumeration.enumerate_elements(
             nb, "formula", source_id="sA", budget=_budget())
-    assert refused.items == ()
-    assert refused.cursor is None
-    assert refused.coverage.truncated_reason == TRUNCATED_SOURCE_OUT_OF_SCOPE
-    assert refused.coverage.complete is False
-    assert refused.coverage.total is None
-    assert refused.coverage.has_more is False
-    assert (refused.extra_pages, refused.payload_chars) == (0, 0)
-    # 没有为被拒的来源发出任何页查询;界内的来源照常走。
+    assert unticked == "source is not in scope: 'sB'"
+    assert missing == "source is not in scope: 'no-such-source'"
     assert all(args[1] != "sB" for args in pages)
     assert allowed.coverage.complete is True and len(allowed.items) == 2
 
 
-def test_a_missing_source_still_raises(repo):
-    """格式错误的请求(库里根本没有这个来源)保持原有的 ValueError 合同。"""
-    nb = _library(repo)
-    with _ticked(nb, ["sA"]):
-        with pytest.raises(ValueError):
-            repo.collection_enumeration.enumerate_elements(
-                nb, "formula", source_id="no-such-source", budget=_budget())
+@pytest.fixture
+def rrepo(tmp_path, monkeypatch):
+    """推理循环用的仓库:与 ``test_reasoning_enumeration_tools`` 同款隔离(本机
+    .env 的真实推理端点不得被打到)。"""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("EMBED_DIM", "16")
+    for key in ("OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
+                "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL",
+                "REASONING_LLM_MODEL"):
+        monkeypatch.setenv(key, "")
+    instance = SQLiteRepository(Settings())
+    bind_all_embedding_clients(instance, FakeEmbedder(dim=16))
+    instance.settings.graph_ppr_enabled = False
+    try:
+        yield instance
+    finally:
+        instance.close()
+
+
+def test_the_reflect_loop_sees_an_unticked_id_exactly_as_a_missing_one(rrepo):
+    """推理循环读到的跳过步骤,对「冻结之外的来源」与「不存在的来源」逐字相同
+    (只有报错里回显的 id 不同)——循环照常继续,清单里什么都没多出来。"""
+    notebook = _reasoning_seed(rrepo, formulas=2)
+    _src(rrepo, notebook.id, "s2", formulas=2)        # 冻结之后才有的来源
+    skips = {}
+    for source_id in ("s2", "no-such-source"):
+        llm = _SeqLLM([_enumerate_action(source_id=source_id),
+                       {"next_action": "answer", "sufficient": True}])
+        retriever, limits = _retriever(rrepo, llm)
+        with _ticked(notebook.id, ["s1"], narrowed=False):
+            result = retriever.run(notebook.id, "哪些公式", "", limits=limits)
+        assert result.enumerations == []
+        skips[source_id] = _skips(result)["enumeration_rejected"]
+    unticked, missing = skips["s2"], skips["no-such-source"]
+    assert unticked.summary == missing.summary
+    assert unticked.detail["error"].replace("'s2'", "'X'") == (
+        missing.detail["error"].replace("'no-such-source'", "'X'"))
+    assert {k: v for k, v in unticked.detail.items() if k != "error"} == {
+        k: v for k, v in missing.detail.items() if k != "error"}
+
+
+def test_a_fail_closed_run_raises_on_an_unticked_id(rrepo):
+    notebook = _reasoning_seed(rrepo, formulas=2)
+    _src(rrepo, notebook.id, "s2", formulas=2)
+    llm = _SeqLLM([_enumerate_action(source_id="s2")])
+    retriever, limits = _retriever(rrepo, llm, fail_closed=True)
+    with _ticked(notebook.id, ["s1"], narrowed=False):
+        with pytest.raises(ValueError, match="source is not in scope: 's2'"):
+            retriever.run(notebook.id, "哪些公式", "", limits=limits)
 
 
 def test_a_source_uploaded_after_the_freeze_is_neither_listed_nor_named(repo):
@@ -569,8 +624,7 @@ def test_a_source_uploaded_after_the_freeze_is_neither_listed_nor_named(repo):
             nb, budget=_budget())
         elements = repo.collection_enumeration.enumerate_elements(
             nb, "formula", budget=_budget())
-        named = repo.collection_enumeration.enumerate_elements(
-            nb, "formula", source_id="sNew", budget=_budget())
+        named = _refusal(repo, nb, "sNew")
         kg = repo.collection_enumeration.enumerate_kg_objects(
             nb, "concept", budget=_budget())
     assert collection_map.sources == 3
@@ -579,8 +633,23 @@ def test_a_source_uploaded_after_the_freeze_is_neither_listed_nor_named(repo):
     assert roster.coverage.complete is True
     assert "sNew" not in {item.source_id for item in elements.items}
     assert elements.coverage.complete is True
-    assert named.coverage.truncated_reason == TRUNCATED_SOURCE_OUT_OF_SCOPE
+    assert named == "source is not in scope: 'sNew'"
     assert "oNew" not in {item.object_id for item in kg.items}
+
+
+def test_per_library_freeze_hides_a_later_upload_from_roster_and_map(repo):
+    """E-3 回归钉:逐库冻结(全局问答的形状)之后上传的来源,既不进
+    ``enumerate_sources``,也不进集合地图的 ``sources:``。"""
+    first, second = _two_libraries(repo)
+    with _peer_run([first, second], {first: ["x1", "x2"], second: ["y1", "y2"]}):
+        _src(repo, second, "yLate", formulas=2)
+        collection_map = repo.collection_catalog.collection_map(first)
+        roster = repo.collection_enumeration.enumerate_sources(
+            first, budget=_budget())
+    assert collection_map.sources == 4
+    assert collection_map.element_count("formula") == 10
+    assert [item.source_id for item in roster.items] == ["x1", "x2", "y1", "y2"]
+    assert roster.coverage.complete is True
 
 
 def test_title_resolution_cannot_reach_an_unticked_source(repo):
@@ -616,8 +685,7 @@ def test_peer_mode_judges_each_row_against_its_own_library(repo):
             first, "concept", budget=_budget())
         roster = repo.collection_enumeration.enumerate_sources(
             first, budget=_budget())
-        refused = repo.collection_enumeration.enumerate_elements(
-            first, "formula", source_id="y2", budget=_budget())
+        refused = _refusal(repo, first, "y2")
     assert collection_map.element_count("formula") == 4           # x1 1 + y1 3
     assert dict(collection_map.kg_objects)["concept"] == 1        # 只有 oy
     assert {item.source_id for item in elements.items} == {"x1", "y1"}
@@ -625,7 +693,30 @@ def test_peer_mode_judges_each_row_against_its_own_library(repo):
     assert [item.object_id for item in kg.items] == ["oy"]
     assert kg.coverage.total == 1 and kg.coverage.complete is True
     assert [item.source_id for item in roster.items] == ["x1", "y1"]
-    assert refused.coverage.truncated_reason == TRUNCATED_SOURCE_OUT_OF_SCOPE
+    assert refused == "source is not in scope: 'y2'"
+
+
+def test_peer_mode_has_no_current_notebook(repo):
+    """E-5(a):对等模式没有「当前笔记本」——名义 active 只是第一个被选中的库。
+    ``local_only`` 被忽略(否则只会列出一个随意的库并称之为当前笔记本),地图也
+    不再渲染 ``(current notebook: N)``;单库运行逐字不变。"""
+    first, second = _two_libraries(repo)
+    ceilings = {first: ["x1", "x2"], second: ["y1", "y2"]}
+    single = collection_catalog.render_collection_map(
+        repo.collection_catalog.collection_map(first))
+    with _peer_run([first, second], ceilings):
+        peer_map = repo.collection_catalog.collection_map(first)
+        peer_text = collection_catalog.render_collection_map(peer_map)
+        local = repo.collection_enumeration.enumerate_sources(
+            first, budget=_budget(), local_only=True)
+    assert single.endswith("sources: 2 (current notebook: 2)")
+    assert peer_text.endswith("sources: 4")
+    assert "current notebook" not in peer_text
+    assert [item.source_id for item in local.items] == ["x1", "x2", "y1", "y2"]
+    assert local.coverage.complete is True
+    # 渲染按调用时的运行形状判断:同一份地图在单库上下文里仍带括号。
+    assert collection_catalog.render_collection_map(peer_map).endswith(
+        f"sources: 4 (current notebook: {peer_map.active_sources})")
 
 
 def test_global_ask_knowhow_object_citation_no_longer_voids_the_answer(repo):
@@ -726,3 +817,86 @@ def test_knowhow_table_count_is_what_the_executor_can_reach(repo):
     with _peer_run([notebook, base], {notebook: [], base: []}):
         assert catalog.collection_map(notebook).knowhow_tables == 0
     assert collection_catalog.knowhow_enumeration_reachable() is True
+
+
+# --------------------------------------------------- 私有 Memory 证据引用
+
+def _memory_source(repo, notebook_id, source_id, element_id):
+    """一个 Memory 合成源(``source_type='memory'``)与它的一个元素。"""
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+            "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (source_id, notebook_id, "别人的记忆", "memory", "extracted",
+             "extracted", NOW, NOW),
+        )
+    _element(repo, source_id, element_id, element_type="formula")
+    repo.collection_catalog.invalidate()
+
+
+@pytest.mark.parametrize("scope", ["none", "default", "narrowed"])
+def test_a_memory_evidence_element_never_reaches_the_citation(repo, scope):
+    """可见来源拥有的对象合并进了一条 Memory 证据(排在最前):无论有没有天花板,
+    Memory 元素都不进 ``evidence_element_ids``、也就到不了
+    ``collection_item_citations``——「清单里永远不含私有 Memory」覆盖引用会摘录
+    的正文,不只是行本身。今天仍可能没有天花板(``none``);默认冻结(``default``,
+    全选、未收窄)与真收窄(``narrowed``)同样成立。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    _src(repo, nb, "sV", formulas=1)
+    _memory_source(repo, nb, "sMem", "el-sMem-001")
+    _kg(repo, nb, "oMerged", [("sMem", "el-sMem-001"), ("sV", "el-sV-001")],
+        owner_source_id="sV")
+    contexts = {
+        "none": lambda: source_scope_context(nb, None),
+        "default": lambda: _ticked(nb, ["sV"], narrowed=False),
+        "narrowed": lambda: _ticked(nb, ["sV"], narrowed=True),
+    }
+    evidence_context = repo._runtime.ask_service().evidence_context
+    with contexts[scope]():
+        listed = repo.collection_enumeration.enumerate_kg_objects(
+            nb, "concept", budget=_budget())
+        citations = evidence_context.collection_item_citations(
+            listed.items, active_notebook_id=nb)
+    merged = next(item for item in listed.items if item.object_id == "oMerged")
+    assert merged.evidence_element_ids == ("el-sV-001",)
+    assert citations["oMerged"].element_id == "el-sV-001"
+    assert all(c.source_id != "sMem" for c in citations.values())
+
+
+# ------------------------------------------------ 目录概览的「仅勾选的来源」
+
+def _overview_repo(tmp_path):
+    return SQLiteRepository(Settings(
+        _env_file=None, database_url=f"sqlite:///{tmp_path / 'o.db'}",
+        storage_dir=str(tmp_path / "os"), model_services_config="",
+        llm_log_enabled=False, event_log_enabled=False,
+        document_overview_max_elements=3,
+    ))
+
+
+def test_the_catalog_overview_card_discloses_a_narrowed_scope(tmp_path):
+    """chunk 引擎的目录概览与 reasoning 的清单用同一个判据
+    (``reasoning_retrieval.unsafe_scope_restricted``)盖 ``source_scoped``:收窄时
+    结果卡带 ``source_scoped: true``,未收窄时这个键根本不出现(字节不变)。"""
+    from app.models.source_scope import SourceScope
+    from tests.test_document_overview import AnswerClient, ask, seed
+    from tests.model_testkit import bind_chat_client
+
+    overview_repo = _overview_repo(tmp_path)
+    try:
+        nb = overview_repo.create_notebook(NotebookCreate(name="资料")).id
+        seed(overview_repo, nb, "a", "手册", "可见摘要")
+        seed(overview_repo, nb, "b", "未选文档", "不应出现")
+        bind_chat_client(overview_repo, "ask_answer", AnswerClient())
+        narrowed = ask(
+            overview_repo, nb, "这个库中的文档分别介绍了什么",
+            source_scope=SourceScope(mode="include", source_ids=["a"]),
+        )
+        whole = ask(overview_repo, nb, "这个库中的文档分别介绍了什么")
+    finally:
+        overview_repo.close()
+    assert narrowed.result_sets[0].source_scoped is True
+    assert narrowed.result_sets[0].model_dump()["source_scoped"] is True
+    assert [item.source_id for item in narrowed.result_sets[0].items] == ["a"]
+    assert "source_scoped" not in whole.result_sets[0].model_dump()
+    assert whole.result_sets[0].coverage.total == 2

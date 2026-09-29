@@ -58,6 +58,7 @@ def prepare_catalog_overview(
     cancel_event: CancelEvent = None,
     *,
     local_only: bool = False,
+    source_scoped: bool = False,
 ) -> CatalogOverview:
     """List authorized sources and project the delivered list into bounded context.
 
@@ -65,6 +66,14 @@ def prepare_catalog_overview(
     trimming and preview counts. This helper only composes those existing seams.
     ``citations`` is keyed by source identity; ``id_map`` preserves the preview's
     k5001+ namespace for the answer citation binder.
+
+    ``source_scoped`` is the caller's answer to "does this listing cover only
+    the ticked sources?" — ``reasoning_retrieval.unsafe_scope_restricted``, the
+    predicate the reasoning engine stamps its own listings with — and is
+    recorded on the outcome so the directory card and the synthesis header
+    disclose it the same way (``SELECTED_SOURCES_SCOPE_SUFFIX``).  The roster
+    itself is already filtered by the ceiling inside the executor; this flag
+    only says so.
     """
     raise_if_cancelled(cancel_event)
     listing = enumeration.enumerate_sources(
@@ -83,6 +92,7 @@ def prepare_catalog_overview(
     outcomes = [CollectionEnumerationOutcome(
         collection="sources", kind="", source_id="", local_only=local_only,
         items=list(listing.items), coverage=listing.coverage,
+        source_scoped=source_scoped,
     )]
     citations = evidence_context.collection_item_citations(
         listing.items, active_notebook_id=notebook_id,
