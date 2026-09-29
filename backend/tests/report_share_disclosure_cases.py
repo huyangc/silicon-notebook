@@ -18,12 +18,10 @@ from typing import Any, Callable
 
 from fastapi.testclient import TestClient
 
-from app.services.share_disclosure import (
-    NON_AUTHOR_SHARE_REFUSAL,
-    SHARE_DISCLOSURE_REQUIRED,
-)
+from app.services.share_disclosure import SHARE_DISCLOSURE_REQUIRED
 
 PASSWORD = "pw12345678"
+NON_AUTHOR_SHARE_REFUSAL = "报告引用了作者本人的个人记忆，只有作者可以公开分享。"
 _USERNAMES = count(1)
 _KEYS = count(1)
 
