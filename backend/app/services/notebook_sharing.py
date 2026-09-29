@@ -1022,6 +1022,21 @@ class NotebookSharingService:
         stats = self._copy_stats(notebook_id)
         if stats.get("copyable") and not self._store.snapshot_copy_within_limits(notebook_id):
             stats = {**stats, "copyable": False}
+        # M2: the node/edge numbers shown on every share surface (the public preview
+        # above all) exclude what a copy never carries — a member's Memory-derived KG
+        # rows. The verdict above stays on the physical counts (conservative, and
+        # retrieval's large-library logic reads the unadjusted memo directly).
+        memory_nodes, memory_edges = self._store.memory_derived_kg_counts(notebook_id)
+        size = stats.get("size")
+        if (memory_nodes or memory_edges) and size:
+            stats = {
+                **stats,
+                "size": {
+                    **size,
+                    "nodes": max(0, size["nodes"] - memory_nodes),
+                    "edges": max(0, size["edges"] - memory_edges),
+                },
+            }
         return stats
 
     def shared_preview(self, notebook_id: str) -> dict:
