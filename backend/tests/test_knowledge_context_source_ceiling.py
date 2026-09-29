@@ -429,7 +429,7 @@ def test_defines_evidence_falls_through_to_the_first_in_ceiling_definer():
     service = _service(store)
     with _include_open():
         block, id_map = service.knowledge_context(ACTIVE, [_hit(ACTIVE)])
-    assert store.pushed == [(OPEN_SOURCE,)]
+    assert store.pushed == [frozenset({OPEN_SOURCE})]
     assert f"— def: {DEFINE_IN_TEXT}" in block
     assert DEFINE_OUT_TEXT not in block
     (key, entry), = id_map.items()
@@ -495,7 +495,7 @@ def test_peer_object_pushes_the_peer_librarys_own_ceiling():
     ):
         block, id_map = _service(store).knowledge_context(ACTIVE, [_hit(PEER)])
     assert store.node_context_calls == [(PEER, "ko-mixed")]
-    assert store.pushed == [("peer-open",)]
+    assert store.pushed == [frozenset({"peer-open"})]
     assert DEFINE_IN_TEXT in block
     assert HIDDEN_TEXT not in block and DEFINE_OUT_TEXT not in block
     (entry,) = id_map.values()
@@ -537,7 +537,7 @@ def test_store_emptied_object_is_dropped():
     service = _service(store)
     with _include_open():
         block, id_map = service.knowledge_context(ACTIVE, [_hit(ACTIVE)])
-    assert store.pushed == [(OPEN_SOURCE,)]
+    assert store.pushed == [frozenset({OPEN_SOURCE})]
     assert id_map == {}, "不铸锚点、不产生空 source_id 的引用"
     assert OBJECT_NAME not in block and CLUSTER_TEXT not in block
     assert "界内步骤" not in block, "整条丢:步骤名也不渲染"
@@ -558,7 +558,7 @@ def test_backstop_drops_an_out_of_ceiling_defines_evidence_from_a_store_ignoring
     service = _service(knowledge)
     with _include_open():
         block, id_map = service.knowledge_context(ACTIVE, [_hit(ACTIVE)])
-    assert knowledge.pushed == [(OPEN_SOURCE,)], "参数照传,是 store 没理它"
+    assert knowledge.pushed == [frozenset({OPEN_SOURCE})], "参数照传,是 store 没理它"
     assert DEFINE_OUT_TEXT not in block
     (key, entry), = id_map.items()
     assert entry["definition"] == OPEN_TEXT, "回落到界内出处原文"
@@ -607,6 +607,136 @@ def test_exclude_ceiling_cannot_be_pushed_so_cluster_description_and_steps_drop(
 
 
 # --------------------------------------------------------------------------- #
+# 9. 天花板只绑它自己那一库;冻结成空集是显式拒绝;簇去重只算真被接纳的成员
+# --------------------------------------------------------------------------- #
+def _peer_hit(object_id="ko-peer"):
+    return RetrievedKnowledge(
+        object_id=object_id, object_type="concept",
+        payload={"name": OBJECT_NAME}, evidence=[],
+        notebook_id=PEER, tier="base", relevance=0.9,
+    )
+
+
+def _peer_knowledge():
+    """参考库对象:有簇描述、有 steps、出处来自参考库自己的来源(本地天花板之外
+    的 id,但本地天花板本来就不管参考库)。"""
+    return _Knowledge(
+        [_occurrence("peer-src", "参考库原文")],
+        definition=CLUSTER_TEXT, definition_basis="cluster_description",
+        steps=[{"name": "参考库步骤", "element_text": "", "section_path": ""}],
+    )
+
+
+def test_a_local_ceiling_leaves_a_peer_library_value_identical():
+    """本地勾选天花板(include、收窄)只绑本库:参考库命中与无 scope 时逐值相同
+    (簇描述与 steps 都在,不下推参数)。**变异锚点**:让本地天花板也绑住参考库
+    → 簇描述与 steps 被当成「没下推、无从归因」清掉,本条红。"""
+    bare = _service(_peer_knowledge()).knowledge_context(ACTIVE, [_peer_hit()])
+    knowledge = _peer_knowledge()
+    with _include_open():
+        scoped = _service(knowledge).knowledge_context(ACTIVE, [_peer_hit()])
+    assert scoped == bare
+    assert f"— def: {CLUSTER_TEXT}" in bare[0] and "steps: 参考库步骤" in bare[0]
+    assert knowledge.pushed == ["<absent>"]
+
+
+def test_a_peer_frozen_to_zero_sources_is_dropped_whole():
+    """参考库被冻结成 ``frozenset()``(显式全部拒绝):对象整条不 admit——没有名字、
+    没有锚点;空集照样下推。**变异锚点**:``is not None`` 换成真值判断 → 空集被当成
+    没有天花板,对象原样渲染,本条红。"""
+    knowledge = _peer_knowledge()
+    service = _service(knowledge)
+    with source_scope_context(
+        ACTIVE, None, None, notebook_source_ceilings={PEER: frozenset()},
+    ):
+        block, id_map = service.knowledge_context(ACTIVE, [_peer_hit()])
+    assert knowledge.pushed == [frozenset()]
+    assert id_map == {} and OBJECT_NAME not in block
+    assert service.parse_anchors("见 [k1]", id_map) == []
+
+
+class _ClusterKnowledge(_Knowledge):
+    """两个命中同簇(``cluster_fold`` 都折到 ``K``),各有各的出处。"""
+
+    def __init__(self, occurrences_by_object):
+        super().__init__([])
+        self.by_object = occurrences_by_object
+
+    def cluster_fold(self, notebook_id, object_ids):
+        return {object_id: "K" for object_id in object_ids if object_id in self.by_object}
+
+    def node_context(self, notebook_id, object_id, **kwargs):
+        self.occurrences = self.by_object[object_id]
+        return super().node_context(notebook_id, object_id, **kwargs)
+
+
+def _cluster_hit(object_id):
+    return RetrievedKnowledge(
+        object_id=object_id, object_type="concept",
+        payload={"name": object_id}, evidence=[],
+        notebook_id=ACTIVE, tier="personal", relevance=0.9,
+    )
+
+
+def test_a_cluster_is_marked_seen_only_when_a_member_is_admitted():
+    """同簇两个命中:第一个只有天花板外出处(整条丢掉),第二个有天花板内出处。
+    簇只在有成员真被接纳时才记为已见,所以第二个顶上、拿到锚点;无天花板时照旧
+    第一个成员胜出、第二个被去重。"""
+    def knowledge():
+        return _ClusterKnowledge({
+            "ko-first": [_occurrence(HIDDEN_SOURCE, HIDDEN_TEXT)],
+            "ko-second": [_occurrence(OPEN_SOURCE, OPEN_TEXT)],
+        })
+
+    hits = [_cluster_hit("ko-first"), _cluster_hit("ko-second")]
+    with _include_open():
+        block, id_map = _service(knowledge()).knowledge_context(ACTIVE, hits)
+    assert [entry["object_id"] for entry in id_map.values()] == ["ko-second"]
+    assert list(id_map) == ["k1"] and "k1: [concept][personal] ko-second" in block
+    assert HIDDEN_TEXT not in block
+
+    plain_block, plain_map = _service(knowledge()).knowledge_context(ACTIVE, hits)
+    assert [entry["object_id"] for entry in plain_map.values()] == ["ko-first"]
+    assert "ko-second" not in plain_block
+
+
+def test_the_ceiling_is_normalised_once_per_library_not_once_per_hit(monkeypatch):
+    """整库可见来源 ~49k 个 id、40 个命中:每个参与库的天花板每次 run 只归一化
+    一次(曾经每个命中各排一遍 49k,~8 ms/条),而且交给 store 的就是那同一个
+    frozenset 对象。按调用次数计,不按墙钟。"""
+    from app.services import source_scope
+
+    calls = []
+    real = source_scope._library_ceiling_uncached
+
+    def counting(scope, notebook_id):
+        calls.append(notebook_id)
+        return real(scope, notebook_id)
+
+    monkeypatch.setattr(source_scope, "_library_ceiling_uncached", counting)
+    wide = [OPEN_SOURCE, *(f"{index:032x}" for index in range(49_000))]
+    knowledge = _Knowledge([_occurrence(OPEN_SOURCE, OPEN_TEXT)])
+    hits = [
+        RetrievedKnowledge(
+            object_id=f"ko-{index}", object_type="concept",
+            payload={"name": f"对象{index}"}, evidence=[],
+            notebook_id=ACTIVE if index % 2 else PEER, tier="personal", relevance=0.5,
+        )
+        for index in range(40)
+    ]
+    with source_scope_context(
+        ACTIVE, {"mode": "include", "source_ids": wide, "narrowed": False}, None,
+        notebook_source_ceilings=None,
+    ):
+        _block, id_map = _service(knowledge).knowledge_context(
+            ACTIVE, hits, budget_chars=100_000)
+    assert len(id_map) == 40
+    assert sorted(calls) == [ACTIVE, PEER], calls
+    pushed = [value for value in knowledge.pushed if value != "<absent>"]
+    assert len(pushed) == 20 and len({id(value) for value in pushed}) == 1
+
+
+# --------------------------------------------------------------------------- #
 # 8. 真实 SQLite store 端到端
 # --------------------------------------------------------------------------- #
 def test_real_sqlite_store_keeps_every_out_of_ceiling_text_out_of_the_prompt(
@@ -630,13 +760,18 @@ def test_real_sqlite_store_keeps_every_out_of_ceiling_text_out_of_the_prompt(
         )
 
     hits = [hit("ko-nc-def"), hit("ko-nc-named"), hit("ko-nc-mixed"),
-            hit("ko-nc-allin"), hit("ko-nc-p-in", "procedure")]
+            hit("ko-nc-allin"), hit("ko-nc-p-in", "procedure"),
+            hit("ko-nc-payload", "procedure"), hit("ko-nc-payload-merged", "procedure")]
     plain_block, _ = service.knowledge_context(nb, hits, budget_chars=10_000)
     # 对照臂:无天花板时越界文字确实会进 prompt。
     assert "OUT definition text" in plain_block
     assert "NAME-ONLY definer" in plain_block
     assert "MIXED fused description" in plain_block
     assert "step out" in plain_block
+    # payload 过程:越界元素的步骤(s-out / s-out2)与归因到越界来源的步骤
+    # (合并对象的 s-gone2 / s-bare2,对象自己来自 NC_OUT)无天花板时都渲染。
+    for name in ("s-out", "s-out2", "s-gone2", "s-bare2"):
+        assert name in plain_block, name
 
     with source_scope_context(
         nb, {"mode": "include", "source_ids": [NC_IN], "narrowed": True}, None,
@@ -653,3 +788,11 @@ def test_real_sqlite_store_keeps_every_out_of_ceiling_text_out_of_the_prompt(
     assert {entry["source_id"] for entry in id_map.values()} == {NC_IN}
     assert "steps: step in" in block
     assert NC_OUT not in {entry["source_id"] for entry in id_map.values()}
+    # payload 过程:越界步骤与归因不到天花板内来源的步骤,名字与原文都不进
+    # prompt / id_map;天花板内的步骤(含归因到对象自己来源 NC_IN 的)照常。
+    rendered = block + repr(id_map)
+    for leaked in ("s-out", "s-gone2", "s-bare2", "q-out", "q-gone2", "q-bare2",
+                   "OUT step text"):
+        assert leaked not in rendered, leaked
+    assert "steps: s-in -> s-gone -> s-bare" in block
+    assert by_object["ko-nc-payload-merged"]["source_id"] == NC_IN

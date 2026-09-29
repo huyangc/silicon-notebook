@@ -35,95 +35,9 @@ from app.services.citation_markers import MARKER_RE, marker_keys
 from app.services.source_display import source_display_title
 from app.services.source_element_selection import deduplicate_source_chunks_in_order
 from app.services.source_scope import (
-    citation_active_id, current_source_scope, filter_evidence,
-    notebook_in_scope, scoped_allowed_source_ids, source_allowed,
+    citation_active_id, notebook_in_scope, scoped_node_context_row,
+    scoped_source_ceiling,
 )
-
-
-_DEFINITION_FIELDS = (
-    "definition", "definition_basis", "definition_source_id",
-    "definition_element_id",
-)
-
-
-def _source_ceiling_binds(scope: Any, notebook_id: str) -> bool:
-    """Does a SOURCE ceiling bind ``notebook_id``'s evidence on this run?
-
-    Same question, same branch order as ``ActiveSourceScope.allows`` and the
-    knowledge branch of ``filter_retrieval_items``: the notebook's own
-    per-notebook ceiling first (``is not None`` -- ``frozenset()`` is an
-    explicit deny), then the local mode/source_ids ceiling, which binds only the
-    scope's own notebook (``""`` is callers' stand-in for it).  A peer library
-    is never bound by the active notebook's checkboxes.
-    """
-    if scope.source_ceiling_for(notebook_id) is not None:
-        return True
-    return bool(scope.ceiling_active) and (
-        not notebook_id or notebook_id == scope.notebook_id
-    )
-
-
-def scoped_node_context_row(
-    notebook_id: str, row: dict[str, Any], *, ceiling_pushed: bool
-) -> dict[str, Any] | None:
-    """The retrieval layer's verdict on one ``node_context`` row.
-
-    Shared by both consumers of a re-read row -- ``knowledge_context`` below and
-    ``RetrievalService.node_context`` (reasoning's reads, lazy import: see there
-    why it cannot live in ``retrieval_service``) -- so the two cannot drift.
-
-    ``row`` is what a knowledge store returned for ``notebook_id`` (the object's
-    OWN library -- a peer/mounted library's object is judged by that library's
-    ceiling).  ``ceiling_pushed`` says whether the caller handed the store
-    ``allowed_source_ids=scoped_allowed_source_ids(notebook_id)``.
-
-    Returns ``row`` itself -- same object, not a copy -- whenever no source
-    ceiling binds ``notebook_id``, so a run without a ceiling is value- and
-    identity-identical to before.  Under a binding ceiling:
-
-    * ``occurrences`` are filtered through ``filter_evidence`` (idempotent
-      after a store that honoured the ceiling; the only gate after one that did
-      not, or when the ceiling could not be pushed -- the local ``exclude``
-      shape has no materialised allow-list).
-    * ``None`` = drop the WHOLE object when no occurrence survives.  That
-      covers both "a non-empty list was emptied" and "the object never had
-      evidence": a store that honoured the ceiling returns the first case
-      already emptied, so the two are indistinguishable here, and neither can be
-      attributed to an in-ceiling source.  Same rule as
-      ``filter_retrieval_items``' knowledge branch -- the object's NAME is what
-      renders into the prompt behind a live ``k{n}`` anchor, so emptying the
-      text alone is not enough.
-    * the definition is kept only when it is attributable: ``defines_evidence``
-      whose ``definition_source_id`` the ceiling allows (the service-layer
-      backstop against a store that ignored the kwarg), or
-      ``cluster_description`` when the ceiling WAS pushed (the store applies
-      the strict Q1 member predicate; it cannot be judged here).
-      ``defines_name``, an unknown basis, or a cluster description the store
-      never judged are cleared -- all four definition fields together, so no
-      attribution survives the text.  Callers then fall back to the first
-      in-ceiling occurrence.
-    * ``steps`` are dropped when the ceiling was not pushed: a step carries no
-      source id, so only the store can judge it.
-    """
-    scope = current_source_scope()
-    if scope is None or not _source_ceiling_binds(scope, notebook_id):
-        return row
-    occurrences = filter_evidence(notebook_id, row.get("occurrences") or [])
-    if not occurrences:
-        return None
-    scoped = {**row, "occurrences": occurrences}
-    basis = str(row.get("definition_basis") or "")
-    if basis == "defines_evidence":
-        attributable = source_allowed(
-            notebook_id, str(row.get("definition_source_id") or "")
-        )
-    else:
-        attributable = basis == "cluster_description" and ceiling_pushed
-    if row.get("definition") and not attributable:
-        scoped.update(dict.fromkeys(_DEFINITION_FIELDS))
-    if not ceiling_pushed:
-        scoped["steps"] = None
-    return scoped
 
 
 def _fold(value: object) -> str:
@@ -1060,7 +974,6 @@ class EvidenceContextService:
                 cluster_id = _canonical(hit.object_id)
                 if cluster_id in seen_clusters:
                     continue
-                seen_clusters.add(cluster_id)
                 # origin: hit.notebook_id 回退本次 ask 的 notebook_id,供
                 # node_context 查询用(同库命中也要查得到详情)。raw_origin 是写进
                 # id_map 的徽章口径——"真正跨库才非空"——由 foreign_notebook_id
@@ -1093,15 +1006,18 @@ class EvidenceContextService:
                 #
                 # 两层:① 把 ``origin`` 那一库的天花板下推给 store(只在非 None
                 # 时传——``None`` = 无天花板,不传参保证无天花板的调用逐字节不变;
-                # ``()`` = 全部拒绝,照传),store 按它过滤 occurrences、definition
-                # 两条产出路径与 legacy steps;② ``scoped_node_context_row`` 在服务
-                # 层按同一天花板复核(与 ``RetrievalService.node_context`` 同一条
-                # 规则):occurrences 再过一次 ``filter_evidence``、无幸存证据整条
-                # 丢掉、definition 只在可归因时保留(``defines_*`` 的
-                # ``definition_source_id`` 不在范围内即丢——防一个忽略了参数的
-                # store)、天花板没能下推(LOCAL exclude 形态没有物化清单)时丢掉
-                # 无从归因的簇描述与 steps。无天花板绑住该库时它原样交回 row。
-                allowed_source_ids = scoped_allowed_source_ids(origin)
+                # ``frozenset()`` = 全部拒绝,照传),store 按它过滤 occurrences、
+                # definition 两条产出路径与 steps;天花板按库每次 run 只归一化
+                # 一次(``scoped_source_ceiling`` 交的就是 scope 里那份 frozenset,
+                # 不排序、不复制——整库可见来源 ~49k 个 id 时逐命中重排曾是每条
+                # ~8 ms);② ``scoped_node_context_row`` 在服务层按同一天花板复核
+                # (与 ``RetrievalService.node_context`` 同一条规则):occurrences
+                # 再过一次 ``filter_evidence``、无幸存证据整条丢掉、definition
+                # 只在可归因时保留(``defines_*`` 的 ``definition_source_id`` 不在
+                # 范围内即丢——防一个忽略了参数的 store)、天花板没能下推(LOCAL
+                # exclude 形态没有物化清单)时丢掉无从归因的簇描述与 steps。无天花板
+                # 绑住该库时它原样交回 row。
+                allowed_source_ids = scoped_source_ceiling(origin)
                 try:
                     context = (
                         self.knowledge.node_context(origin, hit.object_id)
@@ -1125,8 +1041,10 @@ class EvidenceContextService:
                     # 无从归因的,一视同仁。只清空 snippet/definition 不够:对象名
                     # 照样会渲染成一行、照样铸一个活的 k{n} 锚点(与上面
                     # notebook_in_scope 整条跳过的理由逐字相同)。无天花板绑住时
-                    # 无证据对象照旧渲染。
+                    # 无证据对象照旧渲染。簇在这里**不**记为已见:同簇里下一个
+                    # 有天花板内证据的成员仍可顶上(簇只在有成员真被接纳时才记)。
                     continue
+                seen_clusters.add(cluster_id)
                 context = scoped_context
                 occurrences = context.get("occurrences") or []
                 separator = 1 if lines else 0

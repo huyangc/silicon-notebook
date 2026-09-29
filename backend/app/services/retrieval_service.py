@@ -7,8 +7,8 @@ from typing import Any
 from app.services.evidence_attestation import DEAD, attest_pointers
 from app.services.retrieval import NeighborExpansion
 from app.services.source_scope import (
-    filter_retrieval_items,
-    subjectless_run_active,
+    current_source_scope, filter_retrieval_items, scoped_node_context_row,
+    scoped_source_ceiling, subjectless_run_active,
 )
 
 
@@ -204,32 +204,33 @@ class RetrievalService:
         ids).  A row with no in-ceiling occurrence left → ``{}``.
 
         The row is judged against ``notebook_id``, the library it was READ from:
-        the store scopes the object lookup to that notebook, so the row can
-        belong to no other.
+        the downstream store (``graph.node_context`` passes straight through to
+        ``KnowledgeStore.node_context``) scopes the object lookup to that
+        notebook, so the row can belong to no other.  There is no
+        ``source_notebook_id`` here -- unlike ``KnowledgeQueryService
+        .node_context``, nothing below re-targets the read at another
+        participant -- so the argument is rejected outright rather than
+        forwarded: a row read from a different library than the one whose
+        ceiling was pushed and judged would bypass that library's ceiling.
         """
-        from app.services.source_scope import (
-            current_source_scope,
-            scoped_allowed_source_ids,
-        )
-
+        if "source_notebook_id" in kwargs:
+            raise TypeError(
+                "RetrievalService.node_context reads the row from notebook_id "
+                "itself; source_notebook_id is not supported (call it with the "
+                "participant library's own notebook_id)"
+            )
         scope = current_source_scope()
         if scope is None:
             return self.graph.node_context(*args, **kwargs)
         notebook_id = _notebook_id(args, kwargs)
         if not scope.covers_notebook(notebook_id):
             return {}
-        allowed = scoped_allowed_source_ids(notebook_id)
+        allowed = scoped_source_ceiling(notebook_id)
         if allowed is not None:
             kwargs = {**kwargs, "allowed_source_ids": allowed}
         row = self.graph.node_context(*args, **kwargs)
         if not isinstance(row, dict):
             return row
-        # The verdict lives with its other caller (``evidence_context``):
-        # ``retrieval_service`` lazily reaches ``retrieval_candidates``, which
-        # reaches ``evidence_context`` through ``kg.graph_reason``, so the
-        # reverse top-level import would close a static import cycle.
-        from app.services.evidence_context import scoped_node_context_row
-
         scoped = scoped_node_context_row(
             notebook_id, row, ceiling_pushed=allowed is not None
         )

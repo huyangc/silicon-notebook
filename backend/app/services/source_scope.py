@@ -73,6 +73,7 @@ import json
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
+from functools import cached_property
 from typing import Any, Iterable, Iterator
 
 
@@ -260,6 +261,46 @@ class ActiveSourceScope:
             if candidate_id == notebook_id:
                 return ceiling
         return None
+
+    def source_ceiling_binds(self, notebook_id: str) -> bool:
+        """Does a SOURCE ceiling bind ``notebook_id``'s evidence on this run?
+
+        THE one answer to that question -- ``filter_retrieval_items``' knowledge
+        branch, ``evidence_json_allowed`` and ``scoped_node_context_row`` all
+        ask it here.  Same branch order as ``allows``: the notebook's own
+        per-notebook ceiling first (``is not None`` -- ``frozenset()`` is an
+        explicit deny, not "no ceiling"), then the local mode/source_ids
+        ceiling, which binds only the scope's own notebook.  A peer or mounted
+        library is never bound by the active notebook's checkboxes.
+
+        A blank ``notebook_id`` is callers' stand-in for the scope's own
+        notebook -- exactly as ``covers_notebook`` and ``allows`` read it -- so
+        the local ceiling binds it (fail-closed).  The library dimension is not
+        this question: an excluded library is answered by ``covers_notebook``.
+        """
+        if self.source_ceiling_for(notebook_id) is not None:
+            return True
+        return self.ceiling_active and (
+            not notebook_id or notebook_id == self.notebook_id
+        )
+
+    @cached_property
+    def _library_ceiling_memo(self) -> dict[tuple[str, bool], Any]:
+        """Per-run memo behind ``library_source_ceiling`` / ``scoped_allowed_
+        source_ids``: ``(notebook_id, sorted?) -> ceiling``.
+
+        A scope is frozen for the run, so each library's normalised ceiling is
+        a fixed value; a whole-library include list is ~49k ids and re-deriving
+        it (union + sort) cost ~8 ms per KG hit.  ``cached_property`` writes the
+        instance ``__dict__`` directly, so the frozen dataclass stays frozen and
+        its generated ``__eq__`` / ``__hash__`` / ``__repr__`` (fields only) are
+        untouched; ``dataclasses.replace`` builds a fresh, empty memo.  The
+        scope is shared by worker threads through ``copy_context()``: two
+        threads may compute the same entry concurrently, and each store is a
+        single dict assignment of a complete immutable value -- a benign race
+        that can repeat work but never exposes a torn value.
+        """
+        return {}
 
     @property
     def peer_ceiling_active(self) -> bool:
@@ -869,11 +910,12 @@ def scoped_allowed_source_ids(
     ``source_origin`` map built from that list -- so a drifted source that got
     into the list would be retrieved AND issued as evidence.
     """
-    allowed = (
-        tuple(dict.fromkeys(str(value) for value in explicit if str(value)))
-        if explicit is not None else None
-    )
     scope = current_source_scope()
+    if explicit is None:
+        # The common producer call: memoised per run and library, see
+        # ``library_source_ceiling``.
+        return None if scope is None else _sorted_library_ceiling(scope, notebook_id)
+    allowed = tuple(dict.fromkeys(str(value) for value in explicit if str(value)))
     if scope is None:
         return allowed
     if not scope.covers_notebook(notebook_id):
@@ -905,8 +947,6 @@ def scoped_allowed_source_ids(
         # LIVE, so live ∩ frozen is the frozen universe while live passed
         # through is the drifted one.  Intersection preserves ``allowed``'s
         # order because that order is the producer's, not ours.
-        if allowed is None:
-            return tuple(sorted(ceiling))
         return tuple(value for value in allowed if value in ceiling)
     if not scope.ceiling_active or notebook_id != scope.notebook_id:
         return allowed
@@ -914,13 +954,62 @@ def scoped_allowed_source_ids(
     # which LANE a producer takes, never whether the ceiling binds it; see the
     # docstring above and ``_lexical_gate_source_scoped``.
     if scope.mode == "include":
-        ceiling = scope.source_ids | scope.hidden_source_ids
-        if allowed is None:
-            return tuple(sorted(ceiling))
+        ceiling = library_source_ceiling(scope, notebook_id)
         return tuple(value for value in allowed if value in ceiling)
-    if allowed is not None:
-        return tuple(value for value in allowed if value not in scope.source_ids)
+    return tuple(value for value in allowed if value not in scope.source_ids)
+
+
+def _library_ceiling_uncached(scope: ActiveSourceScope, notebook_id: str) -> frozenset[str] | None:
+    """``scoped_allowed_source_ids(notebook_id)``'s answer (no ``explicit``) as a
+    frozenset, computed from scratch.  Branch order is that function's ①②③ and
+    is not negotiable for the same reasons given there: library exclusion
+    first (``frozenset()``, an explicit deny), the per-notebook ceiling second
+    (returned as stored -- it already is a frozenset, no copy), the local
+    ceiling last and only for the scope's own notebook.  ``None`` = nothing to
+    materialise: no ceiling binds, or the local ``exclude`` shape, which has no
+    allow-list without a producer's universe."""
+    if not scope.covers_notebook(notebook_id):
+        return frozenset()
+    ceiling = scope.source_ceiling_for(notebook_id)
+    if ceiling is not None:
+        return ceiling
+    if not scope.ceiling_active or notebook_id != scope.notebook_id:
+        return None
+    if scope.mode == "include":
+        return scope.source_ids | scope.hidden_source_ids
     return None
+
+
+def library_source_ceiling(
+    scope: ActiveSourceScope, notebook_id: str,
+) -> frozenset[str] | None:
+    """The frozen source ceiling binding ``notebook_id`` on this run, normalised
+    at most once per run and library (``ActiveSourceScope._library_ceiling_memo``).
+
+    Same value as ``scoped_allowed_source_ids(notebook_id)`` as a set: callers
+    that only test membership (``node_context``'s store takes a frozenset) get
+    it without the sort; SQL producers keep the sorted tuple, also memoised."""
+    memo = scope._library_ceiling_memo
+    key = (notebook_id, False)
+    if key not in memo:
+        memo[key] = _library_ceiling_uncached(scope, notebook_id)
+    return memo[key]
+
+
+def _sorted_library_ceiling(scope: ActiveSourceScope, notebook_id: str) -> tuple[str, ...] | None:
+    memo = scope._library_ceiling_memo
+    key = (notebook_id, True)
+    if key not in memo:
+        ceiling = library_source_ceiling(scope, notebook_id)
+        memo[key] = None if ceiling is None else tuple(sorted(ceiling))
+    return memo[key]
+
+
+def scoped_source_ceiling(notebook_id: str) -> frozenset[str] | None:
+    """``library_source_ceiling`` for the current run's scope (``None`` without
+    one).  ``None`` = no ceiling to push; ``frozenset()`` = deny everything."""
+    scope = current_source_scope()
+    return None if scope is None else library_source_ceiling(scope, notebook_id)
 
 
 def _evidence_source_id(value: Any) -> str:
@@ -960,17 +1049,6 @@ def filter_retrieval_items(
         or scope.peer_ceiling_active
     ):
         return values
-    # "Did a SOURCE ceiling bind the ACTIVE notebook on this run?"  Hoisted out
-    # of the loop because it is a per-run fact, and widened past
-    # ``ceiling_active`` alone because a per-notebook ceiling on the active
-    # notebook empties evidence exactly the way the local one does -- see where
-    # the knowledge/relation branch consults it below.  It answers for the
-    # ACTIVE notebook only; a peer's own answer is per-item and is computed
-    # inside the loop, because each participant carries its own ceiling.
-    active_source_ceiling_binds = (
-        scope.ceiling_active
-        or scope.source_ceiling_for(active_notebook_id) is not None
-    )
     out: list[Any] = []
     for item in values:
         origin = str(
@@ -1010,9 +1088,11 @@ def filter_retrieval_items(
             # "No surviving evidence" disqualifies a node whenever A SOURCE
             # CEILING IS WHAT EMPTIED IT.  The question is asked about the
             # node's OWN library, never about the nominal active one: the
-            # active notebook answers it with the local mode/source_ids ceiling
-            # or a per-notebook one naming itself, a peer answers it with its
-            # own per-notebook ceiling, and both filter through ``allows()``.
+            # scope's own notebook answers it with the local mode/source_ids
+            # ceiling or a per-notebook one naming itself, a peer answers it
+            # with its own per-notebook ceiling, and both filter through
+            # ``allows()`` -- ``ActiveSourceScope.source_ceiling_binds`` is that
+            # one predicate, shared with ``scoped_node_context_row``.
             #
             # ⛔ Do NOT collapse this back to ``origin != active_notebook_id``.
             # That spelling fails OPEN for every peer: ``_federated_retrieve_
@@ -1032,12 +1112,7 @@ def filter_retrieval_items(
             # dropping an already-evidence-less node there would be a filtering
             # decision the user never asked for (before these fields existed
             # the whole function short-circuited).
-            source_ceiling_binds_origin = (
-                active_source_ceiling_binds
-                if origin == active_notebook_id
-                else scope.source_ceiling_for(origin) is not None
-            )
-            if evidence or not source_ceiling_binds_origin:
+            if evidence or not scope.source_ceiling_binds(origin):
                 if isinstance(item, dict):
                     out.append({**item, "evidence": evidence})
                     continue
@@ -1049,6 +1124,77 @@ def filter_retrieval_items(
             continue
         out.append(item)
     return out
+
+
+_DEFINITION_FIELDS = (
+    "definition", "definition_basis", "definition_source_id",
+    "definition_element_id",
+)
+
+
+def scoped_node_context_row(
+    notebook_id: str, row: dict[str, Any], *, ceiling_pushed: bool
+) -> dict[str, Any] | None:
+    """The retrieval layer's verdict on one ``node_context`` row.
+
+    Shared by both consumers of a re-read row --
+    ``EvidenceContextService.knowledge_context`` and
+    ``RetrievalService.node_context`` (reasoning's reads) -- so the two cannot
+    drift.  It lives here, below both, because it is a scope rule.
+
+    ``row`` is what a knowledge store returned for ``notebook_id`` (the object's
+    OWN library -- a peer/mounted library's object is judged by that library's
+    ceiling).  ``ceiling_pushed`` says whether the caller handed the store
+    ``allowed_source_ids=scoped_source_ceiling(notebook_id)``.
+
+    Returns ``row`` itself -- same object, not a copy -- whenever no source
+    ceiling binds ``notebook_id`` (``ActiveSourceScope.source_ceiling_binds``),
+    so a run without a ceiling is value- and identity-identical to before.
+    Under a binding ceiling:
+
+    * ``occurrences`` are filtered through ``filter_evidence`` (idempotent
+      after a store that honoured the ceiling; the only gate after one that did
+      not, or when the ceiling could not be pushed -- the local ``exclude``
+      shape has no materialised allow-list).
+    * ``None`` = drop the WHOLE object when no occurrence survives.  That
+      covers both "a non-empty list was emptied" and "the object never had
+      evidence": a store that honoured the ceiling returns the first case
+      already emptied, so the two are indistinguishable here, and neither can be
+      attributed to an in-ceiling source.  Same rule as
+      ``filter_retrieval_items``' knowledge branch -- the object's NAME is what
+      renders into the prompt behind a live ``k{n}`` anchor, so emptying the
+      text alone is not enough.
+    * the definition is kept only when it is attributable: ``defines_evidence``
+      whose ``definition_source_id`` the ceiling allows (the service-layer
+      backstop against a store that ignored the kwarg), or
+      ``cluster_description`` when the ceiling WAS pushed (the store applies
+      the strict Q1 member predicate; it cannot be judged here).
+      ``defines_name``, an unknown basis, or a cluster description the store
+      never judged are cleared -- all four definition fields together, so no
+      attribution survives the text.  Callers then fall back to the first
+      in-ceiling occurrence.
+    * ``steps`` are dropped when the ceiling was not pushed: a step carries no
+      source id, so only the store can judge it.
+    """
+    scope = current_source_scope()
+    if scope is None or not scope.source_ceiling_binds(notebook_id):
+        return row
+    occurrences = filter_evidence(notebook_id, row.get("occurrences") or [])
+    if not occurrences:
+        return None
+    scoped = {**row, "occurrences": occurrences}
+    basis = str(row.get("definition_basis") or "")
+    if basis == "defines_evidence":
+        attributable = source_allowed(
+            notebook_id, str(row.get("definition_source_id") or "")
+        )
+    else:
+        attributable = basis == "cluster_description" and ceiling_pushed
+    if row.get("definition") and not attributable:
+        scoped.update(dict.fromkeys(_DEFINITION_FIELDS))
+    if not ceiling_pushed:
+        scoped["steps"] = None
+    return scoped
 
 
 def scoped_subgraph_nodes(subgraph: Iterable[Any]) -> list[Any]:
@@ -1128,18 +1274,17 @@ def scoped_subgraph_nodes(subgraph: Iterable[Any]) -> list[Any]:
 
 
 def evidence_json_allowed(notebook_id: str, raw: Any) -> bool:
-    """Same branch order as ``scoped_allowed_source_ids``/``allows``, and for
-    the same reason: ③ below answers True for every notebook that is not the
-    scope's own, so a per-notebook ceiling placed after it would never bind a
-    peer library's evidence blob."""
+    """Same branch order as ``scoped_allowed_source_ids``/``allows``: library
+    exclusion first, then ``ActiveSourceScope.source_ceiling_binds`` -- the one
+    "does a source ceiling bind this library" predicate, per-notebook ceiling
+    before the local one (a blank ``notebook_id`` is the scope's own notebook
+    and is bound by the local ceiling, as in ``allows``)."""
     scope = current_source_scope()
     if scope is None:
         return True
     if not scope.covers_notebook(notebook_id):
         return False
-    if scope.source_ceiling_for(notebook_id) is None and (
-        not scope.ceiling_active or notebook_id != scope.notebook_id
-    ):
+    if not scope.source_ceiling_binds(notebook_id):
         return True
     if isinstance(raw, str):
         try:

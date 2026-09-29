@@ -1847,7 +1847,7 @@ class GraphRetrievalService(_RetrievalState):
         # method's two consumers each gate at their own boundary, with one
         # shared verdict.  Both push the object's own library ceiling as
         # ``allowed_source_ids`` (only when it is not ``None``) and then judge
-        # the row with ``evidence_context.scoped_node_context_row`` --
+        # the row with ``source_scope.scoped_node_context_row`` --
         # ``RetrievalService.node_context`` (reasoning's reads) and
         # ``EvidenceContextService.knowledge_context``, which additionally
         # skips a hit from an unchecked library BEFORE calling this at all:

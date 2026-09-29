@@ -24,6 +24,7 @@ from app.services.source_scope import (
     ActiveSourceScope,
     base_scope_restricted,
     current_base_scope_payload,
+    current_source_scope,
     current_source_scope_payload,
     filter_retrieval_items,
     scoped_allowed_source_ids,
@@ -1970,7 +1971,7 @@ def test_follow_chain_and_node_context_honour_a_peer_ceiling():
         # 该库天花板把这一行的出处清空 → ``{}`` 是既有的「没了」哨兵。
         assert retrieval.node_context("nbB", "o1") == {}
     # 天花板按**该库自己那一份**下推给 store。
-    assert graph.node_context_calls == [("nbB", ("b1",))]
+    assert graph.node_context_calls == [("nbB", frozenset({"b1"}))]
 
     # 没有任何天花板 → 两处都逐字不变,且不向 store 传参。
     graph_plain = _Graph()
@@ -2018,6 +2019,157 @@ def test_node_context_filters_occurrences_not_a_nonexistent_evidence_key():
         row = retrieval.node_context("nbA", "o1")
     assert row["name"] == "可读节点名"
     assert row["occurrences"] == [{"source_id": "s-in", "element_text": "界内原文"}]
+
+
+class _RowGraph:
+    """``graph.node_context`` 替身:**忽略** ``allowed_source_ids``、原样交回同一行,
+    钉住的是 ``RetrievalService.node_context`` 那道服务层复核本身。"""
+
+    def __init__(self, row):
+        self.row = row
+        self.calls = []
+
+    def node_context(self, notebook_id, object_id, **kwargs):
+        self.calls.append((notebook_id, object_id, kwargs))
+        return {**self.row, "id": object_id}
+
+
+_UNJUDGED_ROW = {
+    "name": "节点名",
+    "occurrences": [{"source_id": "s-in", "element_text": "界内原文"}],
+    "definition": "簇融合描述", "definition_basis": "cluster_description",
+    "definition_source_id": None, "definition_element_id": None,
+    "steps": [{"name": "某步骤", "element_text": "", "section_path": ""}],
+}
+
+
+def test_node_context_under_an_exclude_scope_drops_what_only_the_store_can_judge():
+    """LOCAL ``exclude`` 形态没有物化清单,天花板推不下去(不传参):store 没判过
+    的簇描述与 steps 无从归因,四个 definition 字段与 steps 一起清掉,界内出处照留。
+
+    **变异锚点**:``ceiling_pushed=True`` → 簇描述与 steps 原样留下,本条红。"""
+    graph = _RowGraph(_UNJUDGED_ROW)
+    retrieval = RetrievalService(candidates=object(), graph=graph, community_queries=lambda: [])
+    with source_scope_context(
+        "nbA", {"mode": "exclude", "source_ids": ["s-out"], "narrowed": True}, None,
+    ):
+        row = retrieval.node_context("nbA", "o1")
+    assert graph.calls == [("nbA", "o1", {})], "exclude 形态不下推"
+    assert {field: row[field] for field in (
+        "definition", "definition_basis", "definition_source_id", "definition_element_id",
+    )} == dict.fromkeys(("definition", "definition_basis", "definition_source_id",
+                         "definition_element_id"))
+    assert row["steps"] is None
+    assert row["occurrences"] == _UNJUDGED_ROW["occurrences"]
+
+
+def test_node_context_drops_an_object_of_a_library_frozen_to_zero_sources():
+    """参考库被冻结成 ``frozenset()``(显式全部拒绝,不是「没有天花板」):对象整条
+    丢掉。**变异锚点**:把判「天花板是否绑住该库」的 ``is not None`` 换成真值判断
+    → 空集被当成没有天花板,行原样交回,本条红。"""
+    graph = _RowGraph(_UNJUDGED_ROW)
+    retrieval = RetrievalService(candidates=object(), graph=graph, community_queries=lambda: [])
+    with source_scope_context("nbA", None, None, {"nbB": frozenset()}):
+        assert retrieval.node_context("nbB", "o1") == {}
+    assert graph.calls == [("nbB", "o1", {"allowed_source_ids": frozenset()})]
+
+
+def test_node_context_rejects_source_notebook_id():
+    """``RetrievalService.node_context`` 按 ``notebook_id`` 自己读行、判的也是那一库
+    的天花板;``source_notebook_id``(``KnowledgeQueryService`` 才有的改道读)没有
+    下游,转发出去等于读另一库的行却按这一库判,所以显式拒绝——有没有 scope 都一样。"""
+    retrieval = RetrievalService(
+        candidates=object(), graph=_RowGraph(_UNJUDGED_ROW), community_queries=lambda: [],
+    )
+    with pytest.raises(TypeError, match="source_notebook_id"):
+        retrieval.node_context("nbA", "o1", source_notebook_id="nbB")
+    with source_scope_context("nbA", {"mode": "include", "source_ids": ["s-in"]}, None):
+        with pytest.raises(TypeError, match="source_notebook_id"):
+            retrieval.node_context("nbA", "o1", source_notebook_id="nbB")
+
+
+def test_one_predicate_answers_whether_a_source_ceiling_binds_a_library():
+    """``ActiveSourceScope.source_ceiling_binds`` 是唯一的一份判据:逐库天花板(含
+    ``frozenset()``)先,本地天花板只绑 scope 自己那一库;空 notebook id 是 scope
+    自己那一库的替身(与 ``covers_notebook`` / ``allows`` 同读法)→ 本地天花板
+    绑住它(失败关闭)。``evidence_json_allowed`` 与 ``scoped_node_context_row`` 读
+    同一份判据,空 id 上三者一致。"""
+    from app.services.source_scope import evidence_json_allowed, scoped_node_context_row
+
+    with source_scope_context(
+        "nbA", {"mode": "include", "source_ids": ["s-in"], "narrowed": True}, None,
+    ):
+        scope = current_source_scope()
+        assert scope.source_ceiling_binds("nbA") is True
+        assert scope.source_ceiling_binds("") is True
+        assert scope.source_ceiling_binds("nbB") is False
+        assert evidence_json_allowed("", [{"source_id": "s-out"}]) is False
+        assert evidence_json_allowed("", [{"source_id": "s-in"}]) is True
+        assert evidence_json_allowed("nbB", [{"source_id": "s-out"}]) is True
+        out_row = {"occurrences": [{"source_id": "s-out"}], "steps": None}
+        assert scoped_node_context_row("", out_row, ceiling_pushed=True) is None
+    with source_scope_context("nbA", None, None, {"nbB": frozenset()}):
+        scope = current_source_scope()
+        assert scope.source_ceiling_binds("nbB") is True, "frozenset() 是显式拒绝"
+        assert scope.source_ceiling_binds("nbA") is False
+        assert scope.source_ceiling_binds("") is False
+    # 「全部本地来源」(exclude:[])没有本地天花板:空 id 也不被绑。
+    assert ActiveSourceScope("nbA", "exclude", frozenset()).source_ceiling_binds("") is False
+
+
+@pytest.mark.parametrize("basis, pushed", [
+    ("defines_name", True), (None, True), ("unknown_basis", True),
+    ("cluster_description", False), ("defines_evidence", True),
+])
+def test_scoped_node_context_row_clears_all_four_definition_fields(basis, pushed):
+    """definition 归因不到时**四个**字段一起清:只清 ``definition`` 会让来源 / 元素
+    定位字段带着一个不存在的定义活下来。``defines_evidence`` 那一行的定义来源在
+    天花板外。**变异锚点**:只清 ``definition`` → 本条红。"""
+    from app.services.source_scope import scoped_node_context_row
+
+    row = {
+        "occurrences": [{"source_id": "s-in"}],
+        "definition": "某定义", "definition_basis": basis,
+        "definition_source_id": "s-out", "definition_element_id": "el-s-out",
+        "steps": None,
+    }
+    with source_scope_context(
+        "nbA", {"mode": "include", "source_ids": ["s-in"], "narrowed": True}, None,
+    ):
+        scoped = scoped_node_context_row("nbA", row, ceiling_pushed=pushed)
+    assert {field: scoped[field] for field in (
+        "definition", "definition_basis", "definition_source_id", "definition_element_id",
+    )} == dict.fromkeys(("definition", "definition_basis", "definition_source_id",
+                         "definition_element_id"))
+    assert scoped["occurrences"] == [{"source_id": "s-in"}]
+
+
+def test_the_library_ceiling_is_memoised_on_the_scope_without_touching_its_identity():
+    """每个库的天花板每次 run 只归一化一次,缓存挂在 scope 上但不进 ``__eq__`` /
+    ``__hash__`` / ``__repr__``;``dataclasses.replace`` 得到一份空缓存。"""
+    from dataclasses import replace
+
+    from app.services.source_scope import (
+        ActiveSourceScope, library_source_ceiling, scoped_source_ceiling,
+    )
+
+    ids = frozenset(f"s{index}" for index in range(1000))
+    first = ActiveSourceScope("nbA", "include", ids, narrowed=True)
+    twin = ActiveSourceScope("nbA", "include", ids, narrowed=True)
+    before = (hash(first), repr(first))
+    ceiling = library_source_ceiling(first, "nbA")
+    assert ceiling == ids and library_source_ceiling(first, "nbA") is ceiling
+    assert (hash(first), repr(first)) == before and first == twin
+    assert library_source_ceiling(replace(first), "nbA") is not ceiling
+    peer = ActiveSourceScope(
+        "nbA", "exclude", frozenset(), notebook_source_ceilings={"nbB": ids},
+    )
+    assert library_source_ceiling(peer, "nbB") is peer.source_ceiling_for("nbB"), (
+        "逐库天花板本来就是 frozenset,原样交出,不复制")
+    with source_scope_context("nbA", None, None, {"nbB": frozenset({"b1"})}):
+        assert scoped_source_ceiling("nbB") == frozenset({"b1"})
+        assert scoped_source_ceiling("nbA") is None
+    assert scoped_source_ceiling("nbB") is None
 
 
 def _seed_two_source_kg(repo):
