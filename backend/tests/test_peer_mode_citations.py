@@ -93,7 +93,18 @@ class _Knowledge:
         return {}
 
     def node_context(self, notebook_id, object_id, *, allowed_source_ids=None):
-        return {"occurrences": [], "definition": "定义", "steps": None}
+        # 真实 store 形状:每个对象一条**本库天花板内**的出处(PR-A·A3 起,天花板
+        # 绑住该库时没有幸存出处的对象整条不 admit,空列在 peer_scope 下会被丢)。
+        source_id = "s-active" if notebook_id == ACTIVE else "s-peer"
+        return {
+            "occurrences": [{
+                "source_id": source_id, "element_id": f"e-{source_id}",
+                "element_text": "原文", "section_path": "§1",
+            }],
+            "definition": "定义", "definition_basis": "cluster_description",
+            "definition_source_id": None, "definition_element_id": None,
+            "steps": None,
+        }
 
     def in_network_relations(self, participant_ids, object_ids):
         return []

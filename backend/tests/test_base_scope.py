@@ -641,7 +641,7 @@ def test_node_context_drops_a_row_from_an_unchecked_library():
         def node_context(self, notebook_id, _object_id, *, allowed_source_ids=None):
             return {"notebook_id": notebook_id,
                     "definition": f"text from {notebook_id}",
-                    "evidence": [{"source_id": f"s-{notebook_id}"}]}
+                    "occurrences": [{"source_id": f"s-{notebook_id}"}]}
 
     retrieval = RetrievalService(
         candidates=object(), graph=_Graph(), community_queries=lambda: []

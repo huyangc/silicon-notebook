@@ -187,42 +187,53 @@ class RetrievalService:
     def node_context(self, *args, **kwargs):
         """取某对象的邻域上下文。
 
-        The library gate here serves THIS method's own consumer -- reasoning's
-        query-time chain hydration -- and nothing else. It is explicitly NOT
-        the gate for ``evidence_context.knowledge_context()``: that function is
-        wired to the graph service directly, never passes through here, and
-        needs a stronger gate anyway (emptying the row it re-reads would still
-        leave the object's name rendering into the prompt behind a live
-        ``k{n}`` anchor). ``{}`` is the existing "gone" sentinel.
+        Serves reasoning's query-time reads (``ReasoningRetriever.get`` -- the
+        human-readable node name in the trace).  ``evidence_context
+        .knowledge_context()`` does not pass through here (it is wired to the
+        graph service directly) but applies the SAME verdict,
+        ``scoped_node_context_row``, to the row it re-reads -- one rule, two
+        call sites.
+
+        Under a scope: an unchecked library → ``{}`` (the existing "gone"
+        sentinel) without reading; otherwise the notebook's source ceiling is
+        pushed to the store (``allowed_source_ids``, only when it is not
+        ``None`` so an unbounded read stays byte-identical), then the row is
+        judged on its ``occurrences`` -- the key real store rows carry (an
+        earlier version filtered a nonexistent ``evidence`` key, so every run
+        with a binding ceiling got ``{}`` and the trace fell back to raw object
+        ids).  A row with no in-ceiling occurrence left → ``{}``.
+
+        The row is judged against ``notebook_id``, the library it was READ from:
+        the store scopes the object lookup to that notebook, so the row can
+        belong to no other.
         """
         from app.services.source_scope import (
             current_source_scope,
-            filter_evidence,
+            scoped_allowed_source_ids,
         )
 
-        row = self.graph.node_context(*args, **kwargs)
-        notebook_id = _notebook_id(args, kwargs)
         scope = current_source_scope()
-        if scope is None or not isinstance(row, dict):
-            return row
-        origin = str(row.get("notebook_id") or notebook_id)
-        if not scope.covers_notebook(origin):
+        if scope is None:
+            return self.graph.node_context(*args, **kwargs)
+        notebook_id = _notebook_id(args, kwargs)
+        if not scope.covers_notebook(notebook_id):
             return {}
-        # Branch order and spelling copied verbatim from
-        # ``source_scope.evidence_json_allowed``, and for its stated reason: the
-        # local arm answers "not mine" for every peer library, so a per-notebook
-        # ceiling tested after it would never bind a peer's row. This method is
-        # where a peer's definition/snippet enters the answer prompt behind a
-        # live ``k{n}`` anchor (see ``filter_retrieval_items``' knowledge branch),
-        # so returning that row unfiltered is the leak, not a courtesy.
-        # ``is not None``, never truthiness: ``frozenset()`` is "frozen to zero
-        # sources", an explicit deny, and must filter rather than pass through.
-        if scope.source_ceiling_for(origin) is None and (
-            not scope.ceiling_active or origin != notebook_id
-        ):
+        allowed = scoped_allowed_source_ids(notebook_id)
+        if allowed is not None:
+            kwargs = {**kwargs, "allowed_source_ids": allowed}
+        row = self.graph.node_context(*args, **kwargs)
+        if not isinstance(row, dict):
             return row
-        evidence = filter_evidence(origin, row.get("evidence") or [])
-        return {**row, "evidence": evidence} if evidence else {}
+        # The verdict lives with its other caller (``evidence_context``):
+        # ``retrieval_service`` lazily reaches ``retrieval_candidates``, which
+        # reaches ``evidence_context`` through ``kg.graph_reason``, so the
+        # reverse top-level import would close a static import cycle.
+        from app.services.evidence_context import scoped_node_context_row
+
+        scoped = scoped_node_context_row(
+            notebook_id, row, ceiling_pushed=allowed is not None
+        )
+        return {} if scoped is None else scoped
 
     def retrieve_relations_scored(self, *args, **kwargs):
         """单 notebook 关系检索(词法∪语义) → List[RetrievedRelation]。"""

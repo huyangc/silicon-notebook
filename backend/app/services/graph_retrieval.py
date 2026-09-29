@@ -1843,14 +1843,17 @@ class GraphRetrievalService(_RetrievalState):
         return self._follow_chain(*args, **kwargs)
 
     def node_context(self, *args, **kwargs):
-        # Deliberately ungated: this method's two consumers each gate at their
-        # own boundary, and neither is served by a gate here.
-        # ``RetrievalService.node_context`` filters the row it gets back
-        # (reasoning's chain hydration).  ``EvidenceContextService
-        # .knowledge_context`` skips an out-of-scope hit BEFORE calling this at
-        # all — it has to, because emptying the row would still leave the
-        # object's NAME rendering into the prompt behind a live ``k{n}`` anchor,
-        # the row being only the definition/snippet half of what it prints.
+        # Deliberately a pass-through (``allowed_source_ids`` included): this
+        # method's two consumers each gate at their own boundary, with one
+        # shared verdict.  Both push the object's own library ceiling as
+        # ``allowed_source_ids`` (only when it is not ``None``) and then judge
+        # the row with ``evidence_context.scoped_node_context_row`` --
+        # ``RetrievalService.node_context`` (reasoning's reads) and
+        # ``EvidenceContextService.knowledge_context``, which additionally
+        # skips a hit from an unchecked library BEFORE calling this at all:
+        # emptying the row would still leave the object's NAME rendering into
+        # the prompt behind a live ``k{n}`` anchor.  A gate here would have to
+        # re-derive the ceiling from ambient scope a second time.
         return self.knowledge.node_context(*args, **kwargs)
 
     def scale_ppr(self, *args, **kwargs):

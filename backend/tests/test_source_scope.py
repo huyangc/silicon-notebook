@@ -1943,15 +1943,23 @@ def test_follow_chain_and_node_context_honour_a_peer_ceiling():
         def follow_chain(self, *_args, **_kwargs):
             return FollowChainResult(inferences=[chain], nodes=list(nodes))
 
-        def node_context(self, *_args, **_kwargs):
+        def node_context(self, notebook_id, _object_id, *, allowed_source_ids=None):
+            # 真实 store 的行形状:出处在 ``occurrences``(没有 ``evidence`` 键),
+            # 也不带 ``notebook_id``——行属于被查询的那一库。这个替身**忽略**
+            # ``allowed_source_ids``,钉住的是服务层那道复核本身。
+            self.node_context_calls.append((notebook_id, allowed_source_ids))
             return {
-                "notebook_id": "nbB",
+                "id": _object_id,
                 "name": "peer node",
-                "evidence": [{"source_id": "b9"}],
+                "occurrences": [{"source_id": "b9", "element_text": "must not leak"}],
+                "definition": None,
+                "steps": None,
             }
 
+    graph = _Graph()
+    graph.node_context_calls = []
     retrieval = RetrievalService(
-        candidates=object(), graph=_Graph(), community_queries=lambda: []
+        candidates=object(), graph=graph, community_queries=lambda: []
     )
     with source_scope_context("nbA", None, None, {"nbB": frozenset({"b1"})}):
         result = retrieval.follow_chain("nbA", "a")
@@ -1959,21 +1967,125 @@ def test_follow_chain_and_node_context_honour_a_peer_ceiling():
         assert [
             item["source_id"] for item in result.inferences[0].hops[0].evidence
         ] == ["b1"], "参考库 hop 的证据必须按该库的天花板收窄"
-        # 该库天花板把这一行的证据清空 → ``{}`` 是既有的「没了」哨兵。
-        assert retrieval.node_context("nbA", "o1") == {}
+        # 该库天花板把这一行的出处清空 → ``{}`` 是既有的「没了」哨兵。
+        assert retrieval.node_context("nbB", "o1") == {}
+    # 天花板按**该库自己那一份**下推给 store。
+    assert graph.node_context_calls == [("nbB", ("b1",))]
 
-    # 没有任何天花板 → 两处都逐字不变。
+    # 没有任何天花板 → 两处都逐字不变,且不向 store 传参。
+    graph_plain = _Graph()
+    graph_plain.node_context_calls = []
     retrieval_plain = RetrievalService(
-        candidates=object(), graph=_Graph(), community_queries=lambda: []
+        candidates=object(), graph=graph_plain, community_queries=lambda: []
     )
     with source_scope_context("nbA", None, None, None):
         plain = retrieval_plain.follow_chain("nbA", "a")
         assert [
             item["source_id"] for item in plain.inferences[0].hops[0].evidence
         ] == ["b9", "b1"]
-        assert retrieval_plain.node_context("nbA", "o1")["evidence"] == [
-            {"source_id": "b9"}
+        assert retrieval_plain.node_context("nbB", "o1")["occurrences"] == [
+            {"source_id": "b9", "element_text": "must not leak"}
         ]
+    assert graph_plain.node_context_calls == [("nbB", None)]
+
+
+def test_node_context_filters_occurrences_not_a_nonexistent_evidence_key():
+    """PR-A·A4:行上的出处键是 ``occurrences``。
+
+    旧实现过滤 ``row["evidence"]``——真实行没有这个键,于是**每一次**带天花板
+    的运行都拿到 ``{}``,推理轨迹的节点名退回原始对象 id。一条天花板内出处 +
+    一条天花板外出处:行保留、只剩天花板内那条;名字照常。
+
+    **变异锚点**:改回过滤 ``evidence`` → 本条红(返回 ``{}``)。
+    """
+    class _Graph:
+        def node_context(self, notebook_id, object_id, *, allowed_source_ids=None):
+            return {
+                "id": object_id, "name": "可读节点名",
+                "occurrences": [
+                    {"source_id": "s-out", "element_text": "越界原文"},
+                    {"source_id": "s-in", "element_text": "界内原文"},
+                ],
+                "definition": None, "steps": None,
+            }
+
+    retrieval = RetrievalService(
+        candidates=object(), graph=_Graph(), community_queries=lambda: []
+    )
+    with source_scope_context(
+        "nbA", {"mode": "include", "source_ids": ["s-in"], "narrowed": True}, None,
+    ):
+        row = retrieval.node_context("nbA", "o1")
+    assert row["name"] == "可读节点名"
+    assert row["occurrences"] == [{"source_id": "s-in", "element_text": "界内原文"}]
+
+
+def _seed_two_source_kg(repo):
+    """一个库、两个来源;``ko-keep`` 由 s-keep 支撑,``ko-drop`` 只由 s-drop 支撑。"""
+    import datetime
+
+    from app.models.schemas import NotebookCreate
+
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    now = datetime.datetime.now().isoformat()
+    with repo._connect() as db:
+        for source_id in ("s-keep", "s-drop"):
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+                "parse_status,file_name,file_path,file_size,file_hash,summary,"
+                "doc_type,created_at,updated_at) VALUES (?,?,?,'markdown',"
+                "'extracted','parsed','d.md','',0,'','','academic_paper',?,?)",
+                (source_id, nb, source_id, now, now),
+            )
+            db.execute(
+                "INSERT INTO source_elements (id,source_id,element_type,"
+                "location_label,text,metadata,created_at) VALUES "
+                "(?,?,'paragraph','p',?,'{}',?)",
+                (f"el-{source_id}", source_id, f"text of {source_id}", now),
+            )
+        for object_id, source_id, name in (
+            ("ko-keep", "s-keep", "Kept node"),
+            ("ko-drop", "s-drop", "Dropped node"),
+        ):
+            evidence = [{
+                "source_id": source_id, "element_id": f"el-{source_id}",
+                "element_type": "paragraph", "location_label": "p",
+                "quoted_span": "q", "confidence": 1.0,
+            }]
+            db.execute(
+                "INSERT INTO knowledge_objects (id,notebook_id,object_type,payload,"
+                "evidence,source_id,created_at,updated_at) VALUES "
+                "(?,?,'concept',?,?,?,?,?)",
+                (object_id, nb, json.dumps({"name": name}), json.dumps(evidence),
+                 source_id, now, now),
+            )
+    return nb
+
+
+def test_node_context_against_the_real_sqlite_store(tmp_path, monkeypatch):
+    """真实 store、真实行形状:全勾选时名字照常;对象唯一的来源被取消勾选时整条丢。"""
+    from app.core.config import Settings
+    from app.services.sqlite_repository import SQLiteRepository
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    repo = SQLiteRepository(Settings(_env_file=None))
+    nb = _seed_two_source_kg(repo)
+    retrieval = repo.retrieval
+
+    everything = {"mode": "include", "source_ids": ["s-keep", "s-drop"], "narrowed": False}
+    with source_scope_context(nb, everything, None):
+        kept = retrieval.node_context(nb, "ko-keep")
+        dropped_too = retrieval.node_context(nb, "ko-drop")
+    assert kept["name"] == "Kept node"
+    assert [o["source_id"] for o in kept["occurrences"]] == ["s-keep"]
+    assert dropped_too["name"] == "Dropped node"
+
+    unticked = {"mode": "include", "source_ids": ["s-keep"], "narrowed": True}
+    with source_scope_context(nb, unticked, None):
+        assert retrieval.node_context(nb, "ko-keep")["name"] == "Kept node"
+        assert retrieval.node_context(nb, "ko-drop") == {}
 
 
 def test_evidence_json_allowed_binds_a_peer_ceiling():
