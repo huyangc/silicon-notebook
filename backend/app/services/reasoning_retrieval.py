@@ -2536,6 +2536,26 @@ def take_distinct_chunk_hits(
     return distinct
 
 
+#: 首轮播种外层线程池的上界。精排不拿数据库连接,所以它不跟
+#: `_chunk_seed_workers` 那个按参与库数压的数;召回仍由 `_chunk_recall_gate`
+#: 按那个数限流(见 `ReasoningRetriever._recall_chunk_candidates`)。
+_CHUNK_SEED_POOL_MAX_WORKERS = 8
+
+
+def _is_timeout_error(error) -> bool:
+    """精排失败是不是超时:调度截止(`ModelQueueTimeout`,含包装后的
+    `model_queue_timeout` 码)或底层 HTTP 超时(沿 `__cause__` 找)。"""
+    for _ in range(4):
+        if error is None:
+            return False
+        code = str(getattr(error, "code", "") or "").lower()
+        if (isinstance(error, TimeoutError) or "timeout" in code
+                or "timeout" in type(error).__name__.lower()):
+            return True
+        error = error.__cause__
+    return False
+
+
 def top_chunks_by_relevance(found: list, take: int) -> list:
     """把**一条检索臂**的产出收到它自己该有的宽度:relevance 降序的前 ``take`` 段。
 
@@ -3563,12 +3583,13 @@ class ReasoningRetriever:
         )
 
     def search_chunks(self, notebook_id, query, *, k: Optional[int] = None):
-        """按语义 + 关键词检索来源原文段落(chunk)。零模型调用。
+        """按语义 + 关键词检索来源原文段落(chunk)。召回零模型调用;配置了
+        `retrieval_rerank` 时选择步有精排调用,否则走 MMR。
 
         复用 chunk 模式的现成原语,不新写检索:召回走
         `retrieve_chunk_candidates`(`chunk_recall` 候选池、来源范围天花板与
-        `filter_retrieval_items` 都在通道里),选择走 `select_chunk_candidates`
-        的 MMR。`k` 缺省 = agent 动作口径(`chunk_mmr_k`,与 chunk 模式单查询
+        `filter_retrieval_items` 都在通道里),选择先试 cross-encoder 精排、不可用
+        时走 `select_chunk_candidates` 的 MMR。`k` 缺省 = agent 动作口径(`chunk_mmr_k`,与 chunk 模式单查询
         分支同参);首轮播种显式传 `ranked_per_query_take`(档位字段),让「档位
         买更多首轮证据」对原文同样成立。
 
@@ -3604,16 +3625,41 @@ class ReasoningRetriever:
 
         **选择步先试 cross-encoder 精排,MMR 是回退。** 召回之后由
         `_rerank_chunk_selection` 决定入选;它返回 None(精排关闭、未配置、调用
-        失败、候选池不超过 k)时才走上面的 `select_chunk_candidates`,那条路径
-        逐字节不变。精排是模型调用、不是检索 I/O,同样不进扇出槽。
+        失败或超时、候选池不超过 k)时才走上面的 `select_chunk_candidates`,那条
+        路径逐字节不变。精排是模型调用、不是检索 I/O,同样不进扇出槽。
+
+        内部是「召回」(`_recall_chunk_candidates`)与「选择」
+        (`_select_chunk_candidates`)两步;这里一次调用两步都走,动作路径与方向
+        补检索的行为与拆分前相同。拆开是为了首轮播种:召回按参与库数限流
+        (它拿数据库连接),选择(精排)不拿连接、不该被同一个数压住,见
+        `_first_round_chunk_seed`。
         """
-        scored, ids, matrix = self.retrieval.retrieve_chunk_candidates(
-            notebook_id, query)
-        take = self.settings.chunk_mmr_k if k is None else k
-        selected = self._rerank_chunk_selection(query, scored, take)
+        recalled = self._recall_chunk_candidates(notebook_id, query)
+        return self._select_chunk_candidates(
+            query, recalled, self.settings.chunk_mmr_k if k is None else k)
+
+    def _recall_chunk_candidates(self, notebook_id, query):
+        """`search_chunks` 的召回步:`(scored, ids, matrix)`。
+
+        首轮播种期间 `_chunk_recall_gate` 是一把按参与库数定宽的信号量
+        (`_chunk_seed_workers`),召回在它里面跑——外层线程池放宽到
+        `min(N, 8)` 之后,真正取数据库连接的并发仍是改动前那个数。播种之外
+        (动作路径、方向补检索)没有这把闸,形状不变。
+        """
+        gate = getattr(self, "_chunk_recall_gate", None)
+        if gate is None:
+            return self.retrieval.retrieve_chunk_candidates(notebook_id, query)
+        with gate:
+            raise_if_cancelled(self.cancel_event)
+            return self.retrieval.retrieve_chunk_candidates(notebook_id, query)
+
+    def _select_chunk_candidates(self, query, recalled, k):
+        """`search_chunks` 的选择步:精排或 MMR,本库保底,再过策略边界。"""
+        scored, ids, matrix = recalled
+        selected = self._rerank_chunk_selection(query, scored, k)
         if selected is None:
             selected = self.retrieval.select_chunk_candidates(
-                scored, ids, matrix, take, self.settings.chunk_mmr_lambda)
+                scored, ids, matrix, k, self.settings.chunk_mmr_lambda)
         return self._filter_candidates("chunk", selected)
 
     def _chunk_rerank_client(self):
@@ -3662,8 +3708,14 @@ class ReasoningRetriever:
 
         回退(返回 None,调用方走 MMR,逐字节不变):
         * 精排关闭 / 窗口为 0 / 客户端不可用(见 `_chunk_rerank_client`);
+          探测本身抛错也回退(事件 `reason=rerank_unavailable`);
         * 候选池不超过 k——没有取舍可做,MMR 路径本来就原样全收;
-        * 精排失败:客户端调了 `on_error`,或调用本身抛错(取消照抛)。
+        * 精排失败:客户端调了 `on_error`,或调用本身抛错(`rerank_failed`);
+        * 超时:一次选择的精排共用 `REASONING_CHUNK_RERANK_TIMEOUT_SECONDS` 这一个
+          截止时间,过了即回退(`rerank_timeout`)。
+
+        取消**不是**失败:`cancel_event` 随调用传给精排客户端,设置后照抛
+        `AskCancelled`;客户端若把取消当批次失败经 `on_error` 报回来,同样照抛。
 
         失败的判据**只**认 `on_error`/异常,不认「返回恒等序」:窗口按融合分
         排好序交出去,一个真实的精排完全可能给出原序,两者在返回值上无法区分;
@@ -3678,24 +3730,31 @@ class ReasoningRetriever:
         """
         if len(scored) <= k or k <= 0:
             return None
-        client = self._chunk_rerank_client()
-        if client is None:
-            return None
         from app.services.chunk_federation import apply_active_reserve
         from app.services.retrieval import partition_generated_question_chunks
 
-        window = int(self.settings.reasoning_chunk_rerank_candidates)
-        baseline, supplemental = partition_generated_question_chunks(scored)
-        baseline = sorted(baseline, key=lambda c: -float(c.relevance or 0.0))
         failures: List[BaseException] = []
+        sent: List[int] = []
+        ranked: List = []
+        reason = "rerank_unavailable"
         raise_if_cancelled(self.cancel_event)
         try:
-            ranked = self._rerank_window(client, query, baseline, window, failures)
+            client = self._chunk_rerank_client()
+            if client is None:
+                return None
+            reason = "rerank_failed"
+            budget = float(self.settings.reasoning_chunk_rerank_timeout_seconds or 0)
+            deadline = time.monotonic() + budget if budget > 0 else None
+            window = int(self.settings.reasoning_chunk_rerank_candidates)
+            baseline, supplemental = partition_generated_question_chunks(scored)
+            baseline = sorted(baseline, key=lambda c: -float(c.relevance or 0.0))
+            ranked = self._rerank_window(
+                client, query, baseline, window, failures, sent, deadline)
             if len(ranked) < k and supplemental and not failures:
                 supplemental = sorted(
                     supplemental, key=lambda c: -float(c.relevance or 0.0))
                 ranked += self._rerank_window(
-                    client, query, supplemental, window, failures)
+                    client, query, supplemental, window, failures, sent, deadline)
         except AskCancelled:
             raise
         except Exception as exc:  # noqa: BLE001 — 精排是可选项,失败回到 MMR
@@ -3703,31 +3762,44 @@ class ReasoningRetriever:
         raise_if_cancelled(self.cancel_event)
         if failures:
             if isinstance(failures[0], AskCancelled):
-                # 调度器把取消当批次失败交给 on_error 时,取消仍是取消。
+                # 客户端把取消当批次失败交给 on_error 时,取消仍是取消。
                 raise failures[0]
-            self._note_chunk_rerank_fallback(failures[0], len(scored))
+            if reason == "rerank_failed" and _is_timeout_error(failures[0]):
+                reason = "rerank_timeout"
+            self._note_chunk_rerank_fallback(
+                failures[0], reason, candidates=len(scored), documents=sum(sent))
             return None
         return apply_active_reserve(self.settings, ranked[:k], scored, k)
 
-    @staticmethod
-    def _rerank_window(client, query, hits, window, failures):
+    def _rerank_window(self, client, query, hits, window, failures, sent, deadline):
         """把 `hits` 的前 `window` 条交精排,窗口外的按原序接在后面。
 
-        失败经 `failures` 回传(`on_error` 被调即记一条),调用方据此整次回退。
+        失败经 `failures` 回传(`on_error` 被调即记一条),调用方据此整次回退;
+        `sent` 记实际送去精排的条数(事件字段)。`deadline` 是本次选择共用的截止
+        时间(monotonic),换算成剩余秒数随 `cancel_event` 一起交给客户端。
         """
         head, tail = hits[:window], hits[window:]
         if not head:
             return list(tail)
+        timeout = None
+        if deadline is not None:
+            timeout = max(deadline - time.monotonic(), 0.001)
+        sent.append(len(head))
         order = client.rerank(
-            query, [c.text for c in head], on_error=failures.append)
+            query, [c.text for c in head], on_error=failures.append,
+            cancel_event=self.cancel_event, timeout=timeout)
         return [head[i] for i in order] + list(tail)
 
-    def _note_chunk_rerank_fallback(self, error, candidates: int) -> None:
+    def _note_chunk_rerank_fallback(self, error, reason: str, *,
+                                    candidates: int, documents: int) -> None:
         """原文检索精排失败、已退回 MMR 的事件回执。不上横幅,不带内容。
 
-        只记原因码与异常类名(不记查询、段落或异常消息)。事件日志经
-        `model_clients` 上的 `event_log` 探测拿到——没有它的替身/仓库形态就不记,
-        记录本身失败也吞掉:诊断绝不能把一次已经兜住的回退变成新的失败。
+        只记原因码(`rerank_unavailable`/`rerank_failed`/`rerank_timeout`)、异常
+        类名、调度器的 `support_id`(与 `model_scheduler` 事件对得上)、召回池
+        大小 `candidates` 与实际送去精排的条数 `documents`;不记查询、段落或异常
+        消息。事件日志经 `model_clients` 上的 `event_log` 探测拿到——没有它的
+        替身/仓库形态就不记,记录本身失败也吞掉:诊断绝不能把一次已经兜住的回退
+        变成新的失败。
         """
         emit = getattr(getattr(self.model_clients, "event_log", None), "emit", None)
         if not callable(emit):
@@ -3735,9 +3807,12 @@ class ReasoningRetriever:
         try:
             emit({
                 "kind": "reasoning_chunk_rerank_fallback",
-                "reason": "rerank_failed",
+                "status": "fallback",
+                "reason": reason,
                 "error_type": type(error).__name__,
+                "support_id": str(getattr(error, "support_id", "") or ""),
                 "candidates": int(candidates),
+                "documents": int(documents),
             })
         except Exception:  # noqa: BLE001 — 诊断绝不打断检索
             pass
@@ -5320,14 +5395,20 @@ class ReasoningRetriever:
         的触发条件 `not (collected or elements or chunks)` 不变——播种有命中时
         它自然不触发,全空时仍照旧补一次 `search_elements`。
 
-        每子查询的 MMR k 取 `state.per_query_take`(= 档位的
-        `ranked_per_query_take`)而不是 `chunk_mmr_k`:首轮是并发多路、合成侧
-        还有 `chunk_context_chars` 兜底,用档位字段让「档位买更多首轮证据」的
-        既有语义对原文同样成立。
+        每子查询的选择宽度 k(精排取前 k 或 MMR 的 k)取 `state.per_query_take`
+        (= 档位的 `ranked_per_query_take`)而不是 `chunk_mmr_k`:首轮是并发多路、
+        合成侧还有 `chunk_context_chars` 兜底,用档位字段让「档位买更多首轮证据」
+        的既有语义对原文同样成立。
 
         seed 不是 agent 动作,与 PPR/精确 seed 同口径**不**计入
-        `max_chunk_searches`。零模型调用;查询 embedding 走请求级 memo,与
-        chunk 模式共享同一份缓存语义。
+        `max_chunk_searches`。召回零模型调用;配置 `retrieval_rerank` 时选择步有
+        精排调用(每条子查询至多两次),否则 MMR。查询 embedding 走请求级 memo,
+        与 chunk 模式共享同一份缓存语义。
+
+        **并发分两段。** 外层池宽 `min(N, 8)`;每条子查询的召回在
+        `_chunk_recall_gate`(宽 `_chunk_seed_workers`,按参与库数压数据库连接)
+        里跑,选择步(精排)在闸外并发——否则挂 5 个库时 workers=1,5 条子查询的
+        精排会被串行叠加。合入仍按子查询提交顺序,与并发度无关。
 
         **命中要记回首轮账目(codex #690 R2 P2-2)。** 播种是**按子查询**发的,
         每条子查询新增了几段是已知的,所以并入时就给 `state.attempted` 里那条
@@ -5397,23 +5478,32 @@ class ReasoningRetriever:
         take = state.per_query_take
         raise_if_cancelled(self.cancel_event)
         workers = self._chunk_seed_workers(notebook_id, len(subqueries))
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            # Context must be copied once PER task (见 `_first_round_initial_
-            # search` 的同款注释):一个 Context 不能被并发进入,而裸执行器会
-            # 丢掉 per-user 的模型/日志路由。
-            futures = [
-                ex.submit(contextvars.copy_context().run,
-                          self._chunk_seed_search, notebook_id, sq.query, take)
-                for sq in subqueries
-            ]
-            # 按提交顺序 result:第 i 个结果仍对应第 i 个子查询,故去重与串行版
-            # 完全等价(同一段先被哪条子查询领走是确定的)。取消检查与
-            # `_first_round_initial_search` 同形:**逐个** future 收完就查一次,
-            # 而不是等整批收齐——否则一次取消要多等最慢那条子查询。
-            found = []
-            for future in futures:
-                found.append(future.result())
-                raise_if_cancelled(self.cancel_event)
+        # 两段并发(codex/评审 P2-1):召回拿数据库连接,按 `workers` 限流——那把
+        # 信号量在 `_recall_chunk_candidates` 里取;选择步(精排)不拿连接,外层池
+        # 放宽到 `min(N, 8)`,不再被参与库数串行压住。没有精排时多出的线程只是
+        # 在信号量上排队,召回并发与改动前相同。
+        self._chunk_recall_gate = threading.BoundedSemaphore(workers)
+        try:
+            with ThreadPoolExecutor(max_workers=min(
+                    len(subqueries), _CHUNK_SEED_POOL_MAX_WORKERS)) as ex:
+                # Context must be copied once PER task (见 `_first_round_initial_
+                # search` 的同款注释):一个 Context 不能被并发进入,而裸执行器会
+                # 丢掉 per-user 的模型/日志路由。
+                futures = [
+                    ex.submit(contextvars.copy_context().run,
+                              self._chunk_seed_search, notebook_id, sq.query, take)
+                    for sq in subqueries
+                ]
+                # 按提交顺序 result:第 i 个结果仍对应第 i 个子查询,故去重与串行
+                # 版完全等价(同一段先被哪条子查询领走是确定的)。取消检查与
+                # `_first_round_initial_search` 同形:**逐个** future 收完就查一
+                # 次,而不是等整批收齐——否则一次取消要多等最慢那条子查询。
+                found = []
+                for future in futures:
+                    found.append(future.result())
+                    raise_if_cancelled(self.cancel_event)
+        finally:
+            self._chunk_recall_gate = None
         seeded: List = []
         attempted = state.attempted
         label_of = state.label_of

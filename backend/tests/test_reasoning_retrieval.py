@@ -4116,11 +4116,16 @@ def test_chunk_seed_workers_error_handling_matches_chunk_seed_search(
             rr._chunk_seed_workers("nb", 5)
 
 
-def test_first_round_seed_runs_two_outer_workers_over_four_libraries(
-    rrepo, monkeypatch,
-):
-    """端到端:参与库 4 个、首轮 5 条子查询 ⇒ 播种线程池只开 2 个 worker。"""
-    import app.services.reasoning_retrieval as module
+def test_first_round_seed_runs_two_outer_workers_over_four_libraries(rrepo):
+    """端到端:参与库 4 个、首轮 5 条子查询 ⇒ 播种的**召回**同时最多 2 条。
+
+    召回拿数据库连接,由 `_chunk_recall_gate`(宽 `_chunk_seed_workers` = 2)
+    限流;外层池放宽到 `min(N, 8)` = 5,只让不拿连接的选择步(精排)并发
+    (评审 P2-1)。所以这里量的是召回的实际并发,不是池宽。
+    """
+    import threading
+    import time as _time
+
     from app.core.ask_retrieval_policy import ask_retrieval_limits
     from app.services.reasoning_retrieval import ReasoningRetriever
 
@@ -4132,21 +4137,27 @@ def test_first_round_seed_runs_two_outer_workers_over_four_libraries(
         reflects=[{"next_action": "answer", "sufficient": True}]))
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     rr.retrieval.chunk_participant_count = lambda notebook_id: 4
-    calls: list = []
-    _stub_search_chunks(rr, calls, {None: [_chunk_hit("ck-1")]})
-    sizes: list = []
-    real_pool = module.ThreadPoolExecutor
+    lock = threading.Lock()
+    state = {"active": 0, "peak": 0}
+    recalled: list = []
 
-    def _recording_pool(*args, **kwargs):
-        sizes.append(kwargs.get("max_workers"))
-        return real_pool(*args, **kwargs)
+    def _recall(notebook_id, query):
+        with lock:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+            recalled.append(query)
+        _time.sleep(0.05)
+        with lock:
+            state["active"] -= 1
+        return [_chunk_hit(f"ck-{query}")], [f"ck-{query}"], None
 
-    monkeypatch.setattr(module, "ThreadPoolExecutor", _recording_pool)
+    rr.retrieval.retrieve_chunk_candidates = _recall
     rr.run(nb.id, "布局布线怎么做", "", limits=ask_retrieval_limits("exhaustive"))
 
-    assert sorted(query for query, _k in calls) == sorted(queries)
-    assert 2 in sizes
-    assert sizes.count(2) == 1
+    assert set(queries) <= set(recalled)
+    # 精排在召回闸外的并发由 `test_reasoning_chunk_rerank.py::
+    # test_seed_reranks_concurrently_while_recall_stays_serial` 钉住。
+    assert state["peak"] == 2
 
 
 def test_chunk_participant_count_counts_the_checked_reference_library(rrepo):

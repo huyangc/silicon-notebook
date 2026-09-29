@@ -391,6 +391,9 @@ class RerankClientPort(Protocol):
         query: str,
         documents: List[str],
         on_error: Callable[[Exception], None] | None = None,
+        *,
+        cancel_event: Any = None,
+        timeout: float | None = None,
     ) -> list[int]: ...
 
 
