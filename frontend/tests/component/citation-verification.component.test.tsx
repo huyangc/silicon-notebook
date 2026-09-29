@@ -159,7 +159,10 @@ test("the flagged marker is muted, names its reason, and opens a card that keeps
   expect(within(popover).queryByRole("img")).toBeNull();
   expect(popover.querySelector(".cite-detail-images")).toBeNull();
   expect(popover.querySelectorAll("button")).toHaveLength(0);
-  expect(flaggedMarker).toHaveAttribute("aria-expanded", "true");
+  // await 之后重新查询标记,不攥 await 之前拿到的节点。
+  await waitFor(() => expect(
+    screen.getByRole("button", { name: "[1] 未通过核对：原文已改动" }),
+  ).toHaveAttribute("aria-expanded", "true"));
   // 卡片没被删：清单里仍然是两条引用，编号不跳。
   expect(container.querySelectorAll(".cite-chip")).toHaveLength(2);
 });
@@ -183,6 +186,9 @@ test("each reason label reaches the card", async () => {
     fireEvent.click(screen.getByRole("button", { name: `[1] 未通过核对：${text}` }));
     const popover = await screen.findByRole("dialog");
     expect(within(popover).getByRole("note")).toHaveTextContent(`未通过核对：${text}`);
+    if (verification === "source_gone") {
+      expect(within(popover).getByRole("note")).toHaveTextContent("这份资料或这段原文已被删除，下面是回答时引用的摘录。");
+    }
     view.unmount();
   }
 });
@@ -214,8 +220,8 @@ test("a flagged citation on the no-anchor fallback path keeps its quoted span an
 
 test("inline images of a flagged citation are skipped; a clean citation keeps its images", async () => {
   renderAnswer(flaggedAnswer());
-  const region = await screen.findByRole("complementary", { name: "引用图片 [2]" });
-  expect(await within(region).findByRole("img", { name: "图 2：通过核对的图" })).toBeInTheDocument();
+  const image = await screen.findByRole("img", { name: "图 2：通过核对的图" });
+  expect(screen.getByRole("complementary", { name: "引用图片 [2]" })).toContainElement(image);
   expect(screen.queryByRole("complementary", { name: /引用图片 \[1\]/ })).toBeNull();
   expect(screen.queryByRole("img", { name: "图 1：容量曲线" })).toBeNull();
   await waitFor(() => expect(mocks.assetBlob).toHaveBeenCalledTimes(1));
@@ -304,12 +310,11 @@ test("the public page states the check in the past tense and marks the flagged r
   // 正文完整。
   expect(container.querySelector(".public-turn-answer")).toHaveTextContent("容量下降[1]，内阻上升[2]。");
 
-  const flagged = screen.getByRole("button", { name: "[1] 未通过核对：资料已删除" });
-  expect(flagged).toHaveClass("cite-chip-unverified");
+  expect(screen.getByRole("button", { name: "[1] 未通过核对：资料已删除" })).toHaveClass("cite-chip-unverified");
   expect(screen.getByRole("button", { name: "[2]" }).className).toBe("cite-chip");
 
-  const references = screen.getByRole("region", { name: "引用出处" });
-  const items = within(references).getAllByRole("listitem");
+  const referenceItems = () => within(screen.getByRole("region", { name: "引用出处" })).getAllByRole("listitem");
+  const items = referenceItems();
   expect(items).toHaveLength(2);
   expect(items[0]).toHaveTextContent("未通过核对：资料已删除");
   expect(items[0]).toHaveTextContent("甲摘录");
@@ -319,9 +324,10 @@ test("the public page states the check in the past tense and marks the flagged r
   expect(await screen.findByRole("img", { name: "乙图" })).toBeInTheDocument();
   expect(screen.queryByRole("img", { name: "甲图" })).toBeNull();
 
-  // 点带标记的标记:滚到清单里那一条(原因在那里),不是打开什么资料。
-  fireEvent.click(flagged);
-  await waitFor(() => expect(items[0]).toHaveClass("active"));
+  // 点带标记的标记:滚到清单里那一条(原因在那里),不是打开什么资料。await 之后
+  // 一律重新查询节点。
+  fireEvent.click(screen.getByRole("button", { name: "[1] 未通过核对：资料已删除" }));
+  await waitFor(() => expect(referenceItems()[0]).toHaveClass("active"));
 });
 
 test("a public turn without a check summary has no notice and no marked references", async () => {

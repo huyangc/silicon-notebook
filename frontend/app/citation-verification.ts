@@ -45,7 +45,9 @@ export const CITATION_VERIFICATION_LABELS: Record<CitationVerification, string> 
 /** 卡片原因行下面那句解释：摘录是回答时的内容，为什么打不开原文。 */
 const CITATION_VERIFICATION_EXPLANATIONS: Record<CitationVerification, string> = {
   changed: "这段原文在回答生成过程中被修改过，下面是回答时引用的摘录。",
-  source_gone: "这份资料已被删除，下面是回答时引用的摘录。",
+  // 判定也覆盖「资料还在、只是被引的那段没了」(运行中重新解析、元素变少)——那时
+  // 文档仍能打开,只说「资料已被删除」就是错话。标签「资料已删除」是跨侧契约,不动。
+  source_gone: "这份资料或这段原文已被删除，下面是回答时引用的摘录。",
   unverifiable: "没能确认这条引用与原文一致，下面是回答时引用的摘录。",
 };
 
