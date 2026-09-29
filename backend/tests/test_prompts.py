@@ -380,7 +380,8 @@ def test_read_document_open_shows_up_in_all_three_projections(gates):
     assert ("read_document" in schema) is has_enumeration
     if has_enumeration:
         assert schema["read_document"] == {
-            "source": "", "coverage": "spread|opening"}
+            "source": "", "coverage": "spread|opening",
+            "depth": "brief|thorough"}
 
     prompt = reflect_prompt("q", "c", read_document=True,
                             read_document_cap=4, **gates)
@@ -527,6 +528,13 @@ def test_read_document_action_line_says_the_five_things_it_has_to_say():
     assert "It is NOT search_chunks" in prompt
     assert "never state or imply that you have read the document in full" in prompt
     assert '"spread"' in prompt and '"opening"' in prompt
+    # depth(PR-4):两个取值、各自适合什么、以及 thorough 的代价——模型不知道
+    # 代价就会对每一篇都选 thorough,于是只读得到第一篇。
+    assert ('Set read_document.depth to "brief" (the default) to split the '
+            "remaining reading budget evenly") in prompt
+    assert ('"thorough" to give this one document the whole remaining budget, '
+            "which suits introducing one or a few documents") in prompt
+    assert "after a thorough read there may be no budget left" in prompt
     assert "at most 3 document(s)" in prompt
 
 

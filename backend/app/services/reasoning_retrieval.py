@@ -334,6 +334,13 @@ def legacy_action_ledger_note(
         failed = "".join(
             f"《{intent_direction_label(o.source_title)}》——{o.coverage_note}"
             for o in document_reads if not o.context_block)
+        # depth 填了非法值的那几次(PR-4)单列一句:模型按「以为自己花了多少
+        # 预算」规划后续读取,不告诉它那几次其实按 brief 读了,它会以为整份预算
+        # 已经花光。原值去重保序;合法值与缺省时这一段为空,账目逐字节不变。
+        rejected = "、".join(
+            f"「{r}」" for r in dict.fromkeys(
+                o.depth_rejected for o in document_reads)
+            if r)
         note = (
             f"{note}\n\n（"
             + (f"已按篇读取过原文的文档,勿重复请求: {done}。" if done else "")
@@ -341,6 +348,8 @@ def legacy_action_ledger_note(
                "请按各自的原因决定下一步,而不是重复请求同一篇;"
                "拿不到原文的那几篇请改读别的文档,或如实说明它暂无依据。"
                if failed else "")
+            + (f"read_document.depth 只接受 brief 或 thorough,{rejected}"
+               "不是可选值,那几次已按 brief 读取。" if rejected else "")
             + "）"
         )
     return note
@@ -691,6 +700,14 @@ READ_DOCUMENT_ACTION = "read_document"
 # (harness 原则,2026-09-14),非法值由解析器落回 `spread`。
 READ_DOCUMENT_COVERAGES = ("spread", "opening")
 READ_DOCUMENT_COVERAGE_DEFAULT = "spread"
+# `read_document.depth` 的取值(PR-4):这一次读取能花掉本 run 取样预算的多少。
+# `brief` = 剩余预算按剩余可读次数均分(接入前的唯一行为,适合一次介绍多篇);
+# `thorough` = 剩余预算整份给这一篇(适合只介绍一篇或少数几篇,之后可能没有预算
+# 再读别的)。同样是**自描述字符串枚举而不是布尔**,理由同 coverage。
+READ_DOCUMENT_DEPTH_BRIEF = "brief"
+READ_DOCUMENT_DEPTH_THOROUGH = "thorough"
+READ_DOCUMENT_DEPTHS = (READ_DOCUMENT_DEPTH_BRIEF, READ_DOCUMENT_DEPTH_THOROUGH)
+READ_DOCUMENT_DEPTH_DEFAULT = READ_DOCUMENT_DEPTH_BRIEF
 # 本 run 每次 read_document 产物的 `[kN]` 号段起点。
 # ⚠ 它必须与 `AskService._DOCUMENT_READ_KEY_BASE` **相等**:合成侧按同一个号段把
 # 这批取样缝进原文分区,两处各写一份数就会让证据键在装配时对不上。这条相等关系
@@ -2767,6 +2784,14 @@ class ReflectDecision:
     # 读者以为它有消费者。校验层对非法值只记注记不拒收(harness 原则),所以非法
     # 字符串会到达这里,同样落回 `spread`。
     read_document_coverage: str = READ_DOCUMENT_COVERAGE_DEFAULT
+    # 这一次读取的预算深度(PR-4),落在 `READ_DOCUMENT_DEPTHS` 之内;缺省/空串/
+    # 非法值一律 `brief`,同样不抛。
+    read_document_depth: str = READ_DOCUMENT_DEPTH_DEFAULT
+    # 与 coverage **分道**:depth 填错**有**教学文案要说。模型按「以为自己花了
+    # 多少预算」规划后续读取——它写了一个不认识的值、以为自己拿到了整份预算,
+    # 实际按 brief 读了,就会以为预算已经花光而过早放弃读别的篇。所以留下非空
+    # 非法原值(截 60 字),经 `DocumentReadOutcome.depth_rejected` 进回喂账目。
+    read_document_depth_rejected: str = ""
     # update_outline 携带的**整份章节结构**;同 id 的证据 union/显式删除在 run()
     # 应用。解析期只夹形状与边界,证据 key 的合法性要看 run 局部候选集合——
     # reflect() 在这一层根本不知道候选是什么。
@@ -2859,6 +2884,12 @@ class DocumentReadOutcome:
     coverage_note: str
     summary_was_empty: bool
     coverage: str
+    # 这次读取实际生效的预算深度(PR-4)与模型给出的非法原值(见
+    # `ReflectDecision.read_document_depth_rejected`)。都带默认值:这个类型只在
+    # `_action_read_document` 构造,但合成侧的用例用鸭子替身/按字段构造它,新增
+    # 字段不应让与 depth 无关的用例跟着改。
+    depth: str = READ_DOCUMENT_DEPTH_DEFAULT
+    depth_rejected: str = ""
 
 
 @dataclass
@@ -3491,6 +3522,9 @@ class ReasoningRetriever:
         * 号段总宽 `DOCUMENT_READ_KEY_BASE + 次数 × 池宽` 越过
           `OUTLINE_SECTION_KEY_STRIDE`,按篇取样的 `[kN]` 会与按节合成第 2 节的证据
           撞号——那不会报错,只会把引用静静指错。
+
+        判据按 brief 的均分份额算(最坏情况:每一次都只拿到 1/N)。`depth=
+        "thorough"`(PR-4)只放大单次份额、从不缩小,所以它不改变这把闸的结论。
 
         这三种都是**部署配置错误**,而这把闸的选择是静默降级:动作整体不提供(五处
         同步消失),模型看到的仍是一个自洽的动作空间,而不是一个每次调用都被服务端
@@ -4415,16 +4449,29 @@ class ReasoningRetriever:
                 d.read_document_source = str(
                     read_document_request.get("source", "")
                 ).strip()
-                # 非法值一律落回默认,**不留**被拒原值:非空非法值在
-                # `model_json` 的校验层已经按封闭枚举(`"spread|opening"`)整轮
-                # 拒掉了,到得了这里的只有缺省/空串/非字符串,而那是模型不动这个
-                # 旋钮的正当写法,没有教学文案要说。见 `ReflectDecision` 那一格
-                # 的注释。
+                # 非法值一律落回默认,**不留**被拒原值。`model_json` 的校验层对
+                # 封闭枚举(`"spread|opening"`)上的非空非法值只记 `invalid_enum`
+                # 注记、对非字符串只记 `invalid_type` 注记,**不拒收**(harness
+                # 原则,2026-09-14),所以非法值到得了这里;取样形状填错也只是按
+                # 默认取样,没有教学文案要说。见 `ReflectDecision` 那一格的注释。
                 coverage = read_document_request.get("coverage", "")
                 d.read_document_coverage = (
                     coverage if coverage in READ_DOCUMENT_COVERAGES
                     else READ_DOCUMENT_COVERAGE_DEFAULT
                 )
+                # depth 与 coverage 有两处**刻意**的差异:
+                # * 匹配前 `strip()` + 小写:`"Thorough"`/`" thorough "` 只有一种
+                #   读法,是可接受的偏差,按 harness 原则兼容而不是降级成 brief
+                #   (降级会让模型以为自己拿到了整份预算)。coverage 保持精确匹配
+                #   不动——那一格的既有行为与用例不在本次范围内;
+                # * 非空非法值留原值(截 60 字)做教学,理由见 `ReflectDecision`。
+                # 非字符串(`true`、数字)同样是非法值;JSON null 与缺省同义。
+                depth_raw = read_document_request.get("depth")
+                depth_text = "" if depth_raw is None else str(depth_raw).strip()
+                if depth_text.lower() in READ_DOCUMENT_DEPTHS:
+                    d.read_document_depth = depth_text.lower()
+                elif depth_text:
+                    d.read_document_depth_rejected = depth_text[:60]
             if outline:
                 # 与 enumerate 分支同形:只在这一把闸打开时才看这个字段,关闭态
                 # 连读都不读(模型硬吐一份大纲也不会有任何影响)。夹取与丢弃的规则
@@ -6055,7 +6102,14 @@ class ReasoningRetriever:
         # 装配时被自己的标题挤掉。
         element_pool = int(self.settings.document_overview_max_elements)
         char_pool = state.enum_limits.chunk_context_chars // 4
-        reads_left = action_policy.max_document_reads - state.document_reads_done
+        #
+        # `depth="thorough"`(PR-4)只换掉这个除数:把剩余预算**整份**给这一篇
+        # (除数取 1),仍扣已用量与包头预留、仍受下面按字符反推元素数那道夹子
+        # 约束。之后的读取自然落到 `document_read_budget` skip——代价已在 prompt
+        # 里说给模型听。
+        reads_left = (
+            1 if decision.read_document_depth == READ_DOCUMENT_DEPTH_THOROUGH
+            else action_policy.max_document_reads - state.document_reads_done)
         pool_share = (
             element_pool - state.document_read_elements_used) // reads_left
         share_chars = (
@@ -6113,6 +6167,8 @@ class ReasoningRetriever:
             coverage_note=overview.coverage_note,
             summary_was_empty=not str(item.summary or "").strip(),
             coverage=decision.read_document_coverage,
+            depth=decision.read_document_depth,
+            depth_rejected=decision.read_document_depth_rejected,
         )
         state.document_reads.append(outcome)
         state.document_reads_done += 1
@@ -6121,13 +6177,17 @@ class ReasoningRetriever:
             # 见证失败:I/O 发起过,所以写 `result_ids: []` 而不是缺席那把键。
             # `note` 就是执行体自己的 coverage_note——前端在 found==0 时显示它,
             # 否则用户只看到一条「新增 0 段」而不知道为什么。
+            _failed_detail = {"source": item.source_title,
+                              "coverage": outcome.coverage, "found": 0,
+                              "result_ids": [], "note": overview.coverage_note}
+            # depth 只在 thorough 时出现(稀疏键):brief 的键集合与接入前相同。
+            if outcome.depth == READ_DOCUMENT_DEPTH_THOROUGH:
+                _failed_detail["depth"] = outcome.depth
             record(TraceStep(
                 step_type="read_document",
                 summary=(f"按篇读取原文取样:《{item.source_title}》,"
                          "本次没有取到原文"),
-                detail={"source": item.source_title,
-                        "coverage": outcome.coverage, "found": 0,
-                        "result_ids": [], "note": overview.coverage_note}))
+                detail=_failed_detail))
             return
         state.document_read_elements_used += len(overview.id_map)
         state.document_read_chars_used += len(overview.context_block)
@@ -6140,6 +6200,8 @@ class ReasoningRetriever:
                         "result_ids": _read_ids}
         if _read_ids_truncated:
             _read_detail["result_ids_truncated"] = True
+        if outcome.depth == READ_DOCUMENT_DEPTH_THOROUGH:
+            _read_detail["depth"] = outcome.depth
         record(TraceStep(
             step_type="read_document",
             summary=(f"按篇读取原文取样:《{item.source_title}》,"

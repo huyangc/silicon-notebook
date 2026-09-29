@@ -774,7 +774,7 @@ def reflect_schema_hint(
     enumeration tools and a non-zero per-run cap are ALL present (single
     predicate: ``reasoning_retrieval.ReasoningRetriever.document_read_active``).
     It adds one word to the ``next_action`` enum and one nested branch
-    (``read_document``, carrying ``source``/``coverage``), so False is once more
+    (``read_document``, carrying ``source``/``coverage``/``depth``), so False is once more
     byte-for-byte the schema from before the action existed. Keyword-only
     because it arrived after ``kg_actions``: it must not become reachable by
     position inside that run of booleans. It is ALSO conditioned on the
@@ -885,9 +885,12 @@ def reflect_schema_hint(
     # ENUM, never a boolean: see the ``scope`` comment in the enumerate branch
     # for why a bool example costs the whole reflect turn when a model answers
     # ``"true"``, while a string example inherits F1's "empty is accepted"
-    # tolerance.
+    # tolerance. ``depth`` is the same kind of string enum: ``brief`` splits the
+    # remaining sampling budget evenly across the reads still allowed, while
+    # ``thorough`` hands this one document the whole remaining budget.
     read_document_branch = (
-        '"read_document":{"source":"","coverage":"spread|opening"},'
+        '"read_document":{"source":"","coverage":"spread|opening",'
+        '"depth":"brief|thorough"},'
         if read_document and enumeration_tools else ""
     )
     if consult_memory:
@@ -1280,7 +1283,11 @@ def reflect_prompt(
     #     last element, because a document's conclusion usually carries its
     #     verdict) or opening (the first elements only, the cheapest useful
     #     reading). A STRING ENUM, never a boolean — same reason as
-    #     enumerate.scope, see ``reflect_schema_hint``.
+    #     enumerate.scope, see ``reflect_schema_hint``. The second knob, depth,
+    #     says how much of the run's sampling budget this one read may spend:
+    #     brief (the default) splits what is left evenly across the reads still
+    #     allowed, thorough gives all of it to this document — so the price has
+    #     to be said too (a later read may find nothing left).
     read_document_action = (
         "- read_document: sample the ORIGINAL TEXT of ONE document, in document "
         "order, to learn what that document itself is about. Set "
@@ -1299,7 +1306,13 @@ def reflect_prompt(
         "read_document.coverage to \"spread\" for evenly spaced sampling that "
         "always includes the document's last element (its conclusion usually "
         "carries the verdict), or \"opening\" to read only the beginning, which "
-        "is the cheapest useful reading; leave it empty to get \"spread\". You "
+        "is the cheapest useful reading; leave it empty to get \"spread\". Set "
+        "read_document.depth to \"brief\" (the default) to split the remaining "
+        "reading budget evenly across the reads still allowed, which suits "
+        "introducing several documents, or \"thorough\" to give this one "
+        "document the whole remaining budget, which suits introducing one or a "
+        "few documents — after a thorough read there may be no budget left to "
+        "read another. You "
         f"may read at most {read_document_cap} document(s) this way in this "
         "run, so spend them on the documents the question actually needs.\n"
         if read_document and enumeration_tools else ""
