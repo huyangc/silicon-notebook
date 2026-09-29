@@ -359,6 +359,143 @@ def case_rules_before_the_count_are_unchanged(world: World) -> None:
     assert not is_shared(world, rid)
 
 
+def delete_memory(world: World, user: User, memory_id: str) -> None:
+    """Hard delete as the Memory hard-delete path does: the row and its
+    projection source go; the report keeps its stored citation."""
+    world.repo._runtime.memory_service.delete(memory_id, user.id)
+    world.repo._runtime.source_ingestion.remove_memory_source(memory_id)
+
+
+def recorded(reference: dict, memory_id: str, owner: User) -> dict:
+    """A citation as the report engine stores it for the author's Memory source."""
+    return {**reference, "memory_id": memory_id, "memory_owner_id": owner.id}
+
+
+def case_memory_confirmed_between_the_count_and_the_flip(world: World) -> None:
+    """A confirm (and its projection) committing after the route's count but
+    before ``share_report`` runs: the store's own count, in the transaction
+    that would set the token, refuses with the new count and issues nothing."""
+    make_memory(world, world.alice, "a1")
+    late = f"src-late-{next(_KEYS)}"
+    rid = make_report(world, world.alice, [
+        source_ref(world.memories["a1"][1], "k1"),
+        source_ref(late, "k2", "稍后才落地的记忆投影"),
+    ])
+    assert disclosure(world, world.alice, rid).json() == {"memory_count": 1}
+    original = world.repo.share_report
+    landed: list[str] = []
+
+    def share_after_a_concurrent_confirm(notebook_id, report_id, **kwargs):
+        if not landed:
+            landed.append(make_memory(world, world.alice, "a2", source_id=late))
+        return original(notebook_id, report_id, **kwargs)
+
+    world.monkeypatch.setattr(world.repo, "share_report", share_after_a_concurrent_confirm)
+    stale = share(world, world.alice, rid, 1)
+    assert landed, "the concurrent confirm must land between the two counts"
+    assert stale.status_code == 409, stale.text
+    assert stale.json() == _required(2, 1)
+    assert not is_shared(world, rid)
+    assert world.repo.report_share_token(world.notebook, rid) == ""
+    published = share(world, world.alice, rid, 2)
+    assert published.status_code == 200
+
+
+def case_recorded_memory_citation_counts_after_the_memory_is_deleted(world: World) -> None:
+    mid = make_memory(world, world.alice, "a1")
+    projection = world.memories["a1"][1]
+    rid = make_report(world, world.alice, [
+        recorded(source_ref(projection, "k1", "私有记忆里的原话"), mid, world.alice),
+        source_ref(world.doc_source, "k2"),
+    ])
+    delete_memory(world, world.alice, mid)
+    assert world.repo._runtime.memory_store.memory_ids_for_source_ids(
+        [projection], world.alice.id
+    ) == []
+    assert disclosure(world, world.alice, rid).json() == {"memory_count": 1}
+    assert share(world, world.alice, rid).json() == _required(1, 1)
+    published = share(world, world.alice, rid, 1)
+    assert published.status_code == 200
+    public = world.client.get(f"/api/public/reports/{published.json()['share_token']}")
+    assert public.status_code == 200
+    body = public.json()
+    assert "私有记忆里的原话" in [ref["snippet"] for ref in body["references"]]
+    for ref in body["references"]:
+        assert "memory_id" not in ref and "memory_owner_id" not in ref
+    # A record naming someone else never counts for this author.
+    other = make_report(world, world.alice, [
+        recorded(source_ref("src-x", "k1"), "mem-foreign", world.owner),
+    ])
+    assert disclosure(world, world.alice, other).json() == {"memory_count": 0}
+
+
+def case_unrecorded_citation_of_a_deleted_memory_source_cannot_be_recognised(
+    world: World,
+) -> None:
+    """Reports generated before citations were recorded: while the Memory
+    source exists it is found live; once it is gone the fact is unrecoverable
+    and the citation no longer counts (pinned, documented)."""
+    mid = make_memory(world, world.alice, "a1")
+    rid = make_report(world, world.alice, [
+        source_ref(world.memories["a1"][1], "k1", "私有记忆里的原话"),
+    ])
+    assert disclosure(world, world.alice, rid).json() == {"memory_count": 1}
+    delete_memory(world, world.alice, mid)
+    assert disclosure(world, world.alice, rid).json() == {"memory_count": 0}
+    assert share(world, world.alice, rid).status_code == 200
+
+
+def case_generation_records_memory_citations(world: World) -> None:
+    """Through the engine's generate → final audit → persist: the citation of
+    the author's Memory projection is recorded; every other citation is stored
+    byte for byte as before; the count survives deleting the Memory."""
+    from app.services.reasoning_retrieval import ReasoningResult
+    from tests.model_testkit import bind_chat_client
+
+    mid = make_memory(world, world.alice, "a1")
+    make_memory(world, world.owner, "o1")
+    rid = make_report(world, world.alice, [], finished=False)
+    world.repo.update_report(
+        world.notebook, rid, status="outline_ready",
+        outline=[{"title": "A", "scope": "s", "sub_queries": ["q"]}],
+    )
+    doc = source_ref(world.doc_source, "k1")
+    foreign = source_ref(world.memories["o1"][1], "k2")
+    own = source_ref(world.memories["a1"][1], "k3", "私有记忆里的原话")
+    direct = memory_ref("mem-direct", "k4")   # a Memory citation needs no record
+
+    class _Sections:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "ONLY this section" in messages[-1]["content"]:
+                return '{"markdown": "## A\\n正文", "grounded": false}'
+            return '{"summary": "总"}'
+
+    for workload_id in ("report_outline", "report_sufficiency", "report_section",
+                        "report_summary", "query_rewrite", "reasoning_agent",
+                        "ask_answer"):
+        bind_chat_client(world.repo, workload_id, _Sections())
+    engine = world.repo._runtime.report_execution.engine_factory(
+        user_id=world.alice.id, cancel_event=None
+    )
+    world.monkeypatch.setattr(engine, "_deep_dive", lambda *a, **k: ReasoningResult())
+    world.monkeypatch.setattr(
+        engine, "_assemble",
+        lambda *a, **k: ("# 报告\n\n正文", [], [dict(doc), dict(foreign), dict(own),
+                                                 dict(direct)]),
+    )
+    engine.generate(world.notebook, rid, "环路为什么稳定？", depth=2)
+    stored = world.repo.get_report(world.notebook, rid)
+    assert stored["status"] == "done", stored.get("error")
+    assert stored["references"] == [
+        doc, foreign, recorded(own, mid, world.alice), direct,
+    ]
+    assert disclosure(world, world.alice, rid).json() == {"memory_count": 2}
+    delete_memory(world, world.alice, mid)
+    assert disclosure(world, world.alice, rid).json() == {"memory_count": 2}
+
+
 CASES: dict[str, Callable[[World], None]] = {
     name.removeprefix("case_"): value
     for name, value in dict(globals()).items()

@@ -12,6 +12,8 @@ from app.repositories.postgres._store_utils import (
 )
 from app.core.capability_tokens import new_capability_token
 from app.domain.report_export import ReportExportSource
+from app.domain.share_disclosure import ShareMemoryGuard
+from app.repositories.postgres.memory_store import MemoryStore
 from app.models.ask import StoredSubmittedVia
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.read_authority_lock import lock_reader_access_on
@@ -358,11 +360,26 @@ class ReportStore:
     # are a separate tuple from PUBLIC_FIELDS and never reach the payload.
     GATE_FIELDS = ("notebook_id", "created_by")
 
-    def share_report(self, notebook_id: str, report_id: str) -> str:
+    def share_report(
+        self,
+        notebook_id: str,
+        report_id: str,
+        *,
+        memory_guard: ShareMemoryGuard | None = None,
+    ) -> str:
         """Issue (or return) the public token for one report.
 
         Idempotent: re-sharing keeps the existing link so a URL already handed
         out never silently starts 404ing.
+
+        ``memory_guard`` (M4): the author's Memory the page carries is counted
+        again HERE, in the transaction that sets the token, and a count that no
+        longer matches the acknowledgement raises ``ShareDisclosureRequired``
+        with nothing written.  The live part is read with ``FOR SHARE`` on the
+        cited Memory ``sources`` rows and their ``memory_items`` rows
+        (``MemoryStore.memory_sources_for_source_ids_sql``): a concurrent
+        change to exactly those rows either committed before the read and is
+        seen, or waits until this transaction ends (one read and one UPDATE).
         """
         candidate = new_capability_token("rshr")
         with self.database.write() as db:
@@ -372,6 +389,11 @@ class ReportStore:
             ).fetchone()
             if row is None:
                 raise KeyError(report_id)
+            if memory_guard is not None:
+                memory_guard.check(MemoryStore.memory_sources_on(
+                    db, memory_guard.live_source_ids, memory_guard.author_id,
+                    lock=True,
+                ).values())
             # One conditional write instead of read-then-write.  Under
             # READ COMMITTED two concurrent shares both observe NULL and would
             # each overwrite unconditionally, so the later token wins and the

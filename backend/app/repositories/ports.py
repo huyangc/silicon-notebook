@@ -32,6 +32,8 @@ from typing import (
 if TYPE_CHECKING:
     import numpy as np
 
+    from app.domain.share_disclosure import ShareMemoryGuard
+
 from app.core.config import Settings
 from app.repositories.auth_ports import AuthStorePort
 from app.domain.ask import AskMode
@@ -991,7 +993,13 @@ class ReportRepository(Protocol):
     # session, so it takes no notebook/owner argument: the token is the whole
     # authorization. It must never consult the current-user ContextVar, which
     # falls back to the seeded admin when unset.
-    def share_report(self, notebook_id: str, report_id: str) -> str: ...
+    # `memory_guard` (M4): re-count the author's Memory on the page inside the
+    # transaction that sets the token; a changed count raises
+    # `ShareDisclosureRequired` and writes nothing.
+    def share_report(
+        self, notebook_id: str, report_id: str, *,
+        memory_guard: ShareMemoryGuard | None = None,
+    ) -> str: ...
     def unshare_report(self, notebook_id: str, report_id: str) -> None: ...
     def report_share_token(self, notebook_id: str, report_id: str) -> str: ...
     def public_report_by_token(self, token: str) -> dict | None: ...
