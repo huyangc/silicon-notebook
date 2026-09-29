@@ -41,9 +41,7 @@ from app.models.ask import (
 )
 from app.services.collection_catalog import COLLECTION_MAP_MAX_CHARS
 from app.services.collection_enumeration import (
-    LOCAL_ONLY_SCOPE_SUFFIX,
     MAX_EVIDENCE_REFS,
-    SELECTED_SOURCES_SCOPE_SUFFIX,
     SOURCE_ROW_FIELD_SEPARATOR,
     TRUNCATED_BUDGET,
     TRUNCATED_CONCURRENT_CHANGE,
@@ -55,8 +53,12 @@ from app.services.collection_enumeration import (
     SourceItem,
 )
 
+# 清单范围后缀的唯一实现住在推理模块(它的另两个读者在那里);这里是第三个读者。
+from app.services.reasoning_retrieval import enumeration_scope_suffix
+
 if TYPE_CHECKING:
     from app.services.reasoning_retrieval import CollectionEnumerationOutcome
+
 
 
 # ---------------------------------------------------------------------------
@@ -522,22 +524,16 @@ def _coverage_phrase(outcome: "CollectionEnumerationOutcome", *, previewed: int)
     Rule 11 requires the model to base analysis on what it actually saw,
     not on the coverage claim alone.
 
-    The label carries the SCOPE suffix when the listing excluded reference
-    libraries, because one run can now enumerate the same collection twice
-    under two scopes (the chain key includes the scope): the model would
-    otherwise be handed two identically labelled document listings whose
-    ``listed``/``total`` disagree, with nothing in the block saying which one
-    is the narrower read. The literal is
-    ``LOCAL_ONLY_SCOPE_SUFFIX`` — the same one the on-screen trace summary and
-    the reflect ledger already use, so the model reads one wording across the
-    three places the same fact reaches it, and a change to the wording cannot
-    land in one of them only.
-
-    ``SELECTED_SOURCES_SCOPE_SUFFIX`` follows the scope suffix when the run's
-    source ceiling was narrowed (or had drifted) while this listing was taken:
-    its rows and its denominator then cover the ticked sources only, and a
+    The label carries the listing's SCOPE suffixes from
+    ``enumeration_scope_suffix`` -- the one implementation the on-screen trace
+    summary and the reflect ledger also use, so the model reads one wording
+    across the places the same fact reaches it.  One run can enumerate the
+    same collection under two scopes (the chain key includes ``local_only``),
+    and without the suffix the model would be handed two identically labelled
+    listings whose ``listed``/``total`` disagree; a listing taken under a
+    narrowed or drifted source ceiling covers the ticked sources only, and a
     header saying "complete" without that qualifier would read as the whole
-    library.  Same literal as the trace, the ledger and the reflect prompt.
+    library.
     """
     coverage = outcome.coverage
     # The sources collection has no sub-type, so its label is the noun alone —
@@ -545,10 +541,7 @@ def _coverage_phrase(outcome: "CollectionEnumerationOutcome", *, previewed: int)
     # read as a truncated field rather than as "the documents".
     noun = _collection_noun(outcome.collection)
     label = f"{outcome.kind} {noun}" if outcome.kind else noun
-    if outcome.local_only:
-        label = f"{label}{LOCAL_ONLY_SCOPE_SUFFIX}"
-    if getattr(outcome, "source_scoped", False):
-        label = f"{label}{SELECTED_SOURCES_SCOPE_SUFFIX}"
+    label = f"{label}{enumeration_scope_suffix(outcome)}"
     listed = coverage.returned_total
     suffix = f", previewed {previewed}"
     if coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE:

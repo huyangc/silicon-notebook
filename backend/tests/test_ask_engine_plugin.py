@@ -2528,8 +2528,11 @@ def test_ask_service_wires_the_kg_seats_and_persists_object_citations():
         )],
         False,
     )
+    # ``ceiling_binds`` 必填:插件回调必须带着本 run 的集合读取判词读地图,落到入口
+    # 默认值会让全选请求也按天花板过度过滤(见 ``AskService._plugin_collection_overview``)。
     service.collection_catalog = SimpleNamespace(
-        collection_map_text=lambda _notebook_id: "[Collections in scope] …"
+        collection_map_text=lambda _notebook_id, *, ceiling_binds: (
+            "[Collections in scope] …")
     )
     service.evidence_context.evidence_elements = _all_live
     service.evidence_context.citation_source_info = lambda _ids: {

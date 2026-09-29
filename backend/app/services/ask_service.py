@@ -1484,7 +1484,8 @@ class AskService:
         的一部分,不因为这一轮跑通了就变成假的。
         """
         from app.services.reasoning_retrieval import (
-            chunk_search_wiring_active, enumeration_wiring_active,
+            ceiling_binds_for_run, chunk_search_wiring_active,
+            enumeration_wiring_active,
         )
         from app.services.source_scope import current_source_scope
 
@@ -1507,7 +1508,10 @@ class AskService:
         if not enumeration_wired and not chunk_search_wired:
             return False
         try:
-            collection_map = self.collection_catalog.collection_map(notebook_id)
+            collection_map = self.collection_catalog.collection_map(
+                notebook_id,
+                ceiling_binds=ceiling_binds_for_run(getattr(self, "retrieval", None)),
+            )
         except AskCancelled:
             raise
         except RetrievalControlError:
@@ -1549,6 +1553,24 @@ class AskService:
 
     def _parse_answer_anchors(self, answer: str, id_map: dict) -> list:
         return self.evidence_context.parse_anchors(answer, id_map)
+
+    def _plugin_collection_overview(self):
+        """插件引擎的 ``collection_overview`` 回调:带着本 run 的集合读取判词读地图。
+
+        直接把 ``collection_map_text`` 交出去会落到它的默认值 ``ceiling_binds=True``
+        ——浏览器默认的全选请求也按天花板下推、丢掉没有证据的知识对象,插件看到的
+        计数就与内置推理路径看到的不一样。判词在回调**被调用时**于请求上下文里读
+        (``ceiling_binds_for_run``,按 run 记住),与内置路径是同一个值。目录服务没有
+        这个方法时照旧返回 None,插件真用到这项能力才失败。
+        """
+        overview = getattr(self.collection_catalog, "collection_map_text", None)
+        if overview is None:
+            return None
+        from app.services.reasoning_retrieval import ceiling_binds_for_run
+
+        retrieval = getattr(self, "retrieval", None)
+        return lambda notebook_id: overview(
+            notebook_id, ceiling_binds=ceiling_binds_for_run(retrieval))
 
     def _knowhow_completeness_in_scope(self, notebook_id: str) -> bool:
         """Whether the deterministic Knowhow complete-enumeration may run here.
@@ -2301,9 +2323,7 @@ class AskService:
                     object_neighbors=getattr(
                         self.retrieval, "retrieve_neighbors", None
                     ),
-                    collection_overview=getattr(
-                        self.collection_catalog, "collection_map_text", None
-                    ),
+                    collection_overview=self._plugin_collection_overview(),
                     evidence_elements=getattr(
                         self.evidence_context, "evidence_elements", None
                     ),
@@ -3502,7 +3522,7 @@ class AskService:
         from app.services.document_source_overview import prepare_source_overview
         from app.services.document_guide import GUIDE_SCHEMA_HINT, guide_style_instruction, render_document_guide
         from app.services.reasoning_retrieval import (
-            document_source_admitted, unsafe_scope_restricted,
+            ceiling_binds_for_run, document_source_admitted,
         )
 
         intent = overview_intent(payload.question)
@@ -3515,7 +3535,7 @@ class AskService:
             # 对等模式没有「当前笔记本」:锚点只是命名锚,只列它是一份与问题无关的偏窄目录。
             local_only=(intent.kind == "catalog" and not intent.include_reference_libraries
                         and not subjectless_run_active()),
-            source_scoped=unsafe_scope_restricted(getattr(self, "retrieval", None)),
+            source_scoped=ceiling_binds_for_run(getattr(self, "retrieval", None)),
         )
         prepared = catalog
         notice = ""
