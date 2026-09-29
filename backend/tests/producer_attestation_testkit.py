@@ -148,10 +148,11 @@ def overview_citations(sources, notebook_id: str) -> list:
     return list(overview.citations)
 
 
-def enumeration_citations(repository, notebook_id: str) -> list:
+def enumeration_citations(repository, notebook_id: str, *, between=None) -> list:
     """D4: the executor lists the elements (excerpt cut to 12 characters) and
     the production minting (``collection_item_citations``) turns them into
-    cards."""
+    cards. ``between`` runs after the listing and before the minting -- the
+    window in which the model has already seen the listed text."""
     from app.services.collection_enumeration import EnumerationBudget
 
     listed = repository.collection_enumeration.enumerate_elements(
@@ -163,6 +164,8 @@ def enumeration_citations(repository, notebook_id: str) -> list:
     )
     for item in listed.items:
         assert item.text == TEXTS[item.element_id][:12]
+    if between is not None:
+        between()
     minted = repository._runtime.evidence_context_component.collection_item_citations(
         list(listed.items), active_notebook_id=notebook_id,
     )

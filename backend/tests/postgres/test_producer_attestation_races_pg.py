@@ -92,6 +92,22 @@ def test_postgres_reading_producer_cannot_cite_an_id_dangling_before_the_questio
     assert response.citations[0].verification is None
 
 
+def test_postgres_enumeration_snapshot_is_the_listed_text_not_a_later_read(world):
+    """The executor registers at LISTING time. An edit landing after the listing
+    and before the card is minted must read as ``changed``: the model already
+    saw the old text, and a snapshot taken by any later read would silently
+    accept the new one."""
+    with global_run(world.sources, world.notebook_id) as run:
+        card = cited(enumeration_citations(
+            world.repository, world.notebook_id,
+            between=lambda: mutate(world.database, world.marker, "update"),
+        ))
+
+    response = terminal_check(world.sources, run, world.notebook_id, [card])
+    assert response.citations[0].verification == "changed"
+    assert run.state.evidence[CITED] == (SOURCE, element_text_sha(TEXTS[CITED]))
+
+
 def test_postgres_table_analysis_drops_a_row_locator_dangling_before_the_question(world):
     mutate(world.database, world.marker, "delete")
     with global_run(world.sources, world.notebook_id) as run:
