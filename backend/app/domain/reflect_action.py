@@ -158,6 +158,9 @@ REFLECT_SCHEMA_TOP_LEVEL_FIELDS = frozenset({
     "ppr_query",
     "exact_term",
     "chunks_query",
+    # The ``search_chunks`` action's optional literal-keyword (full-text) half;
+    # rides the same gate as ``chunks_query``.
+    "chunks_keywords",
     # PR-A: the ``read_document`` action's own arguments (``source`` /
     # ``coverage``) nest under this same-named top-level field.
     "read_document",

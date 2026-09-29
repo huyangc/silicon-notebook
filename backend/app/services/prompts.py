@@ -715,6 +715,7 @@ def reflect_schema_hint(
     *,
     read_document: bool = False,
     plugin_actions: Sequence[ReflectActionSpec] = (),
+    keyword_search: bool = False,
 ) -> str:
     """The reflect response schema, with the enumeration branch iff offered.
 
@@ -744,6 +745,17 @@ def reflect_schema_hint(
     word to the ``next_action`` enum and one field (``chunks_query``) to the
     tail group, so False is again byte-for-byte the schema from before the
     action existed.
+
+    ``keyword_search`` is a SUB-gate of ``search_chunks`` (keyword-only,
+    default False): True adds the action's optional literal-keyword field
+    ``chunks_keywords`` right after ``chunks_query``. It is True only when the
+    keyword (full-text) arm can return anything this run
+    (``ReasoningRetriever.keyword_search_active``); a peer run with
+    ``GLOBAL_ASK_KEYWORD_ARM_ENABLED=false`` closes it, because offering a
+    parameter that is guaranteed to do nothing is exactly the kind of template
+    slot a model fills in anyway. Closed (and with ``search_chunks`` False it
+    renders nothing regardless) the schema is byte-for-byte the one from
+    before the parameter existed.
 
     ``kg_actions`` is the one gate that SUBTRACTS. False = this run's retrieval
     scope holds no knowledge graph (``reasoning_retrieval.kg_in_scope_for``), so
@@ -800,8 +812,15 @@ def reflect_schema_hint(
         actions += "|read_document"
     # Shown beside the other free-text retrieval fields in the tail group, and
     # only when the action exists — an unusable field in the template is a
-    # field some model will fill in anyway.
-    chunks_query_field = '"chunks_query":"",' if search_chunks else ""
+    # field some model will fill in anyway. ``chunks_keywords`` is the same
+    # action's optional literal (full-text) half: it needs the action AND a
+    # keyword arm that can actually return something this run
+    # (``keyword_search``), so a closed keyword gate leaves exactly the
+    # pre-parameter ``chunks_query``-only shape.
+    chunks_query_field = (
+        '"chunks_query":"",'
+        + ('"chunks_keywords":"",' if keyword_search else "")
+        if search_chunks else "")
     enumerate_branch = ""
     if element_kinds or object_types:
         # Two INDEPENDENT branches now: listing document elements needs no
@@ -930,6 +949,18 @@ def reflect_schema_hint(
 REFLECT_SCHEMA_HINT = reflect_schema_hint()
 
 
+def corpus_language_list(corpus_langs: Optional[Sequence[str]]) -> List[str]:
+    """The corpus languages a keyword instruction names, never empty.
+
+    ``None``/empty means "not probed" and falls back to the zh/en pair — the
+    same default ``expand_query_prompt`` has always used, so a caller that
+    passes nothing gets the wording it got before the hint existed. Shared by
+    that prompt and ``reflect_prompt``'s ``chunks_keywords`` sentence so the
+    two keyword instructions can never name different fallback languages.
+    """
+    return [l for l in (corpus_langs or ["zh", "en"]) if l] or ["zh", "en"]
+
+
 def reflect_prompt(
     question: str,
     candidates_summary: str,
@@ -943,6 +974,8 @@ def reflect_prompt(
     read_document: bool = False,
     read_document_cap: int = 0,
     plugin_actions: Sequence[ReflectActionSpec] = (),
+    corpus_langs: Optional[Sequence[str]] = None,
+    keyword_search: bool = False,
 ) -> str:
     """Next-step decision prompt.
 
@@ -1005,6 +1038,22 @@ def reflect_prompt(
     extension point existed. Only the plugin's own ``description`` and
     parameter descriptions come from the plugin; see
     ``project_reflect_actions``.
+
+    ``corpus_langs`` is not a gate either: it is the run's corpus languages
+    (``ReasoningRetriever._corpus_langs``), and its ONLY reader is the
+    ``search_chunks`` description, which tells the model which languages its
+    ``chunks_keywords`` should be written in. With ``search_chunks`` closed it
+    renders nothing, so every closed-gate prompt is byte for byte what it was.
+    ``None`` = not probed, and the sentence names the zh/en fallback that
+    ``expand_query_prompt`` uses (``corpus_language_list``). Keyword-only, for
+    the same reason as ``plugin_actions``.
+
+    ``keyword_search`` is the ``chunks_keywords`` sub-gate, the same one
+    ``reflect_schema_hint`` takes (single predicate:
+    ``ReasoningRetriever.keyword_search_active``). True adds the
+    ``chunks_keywords`` sentence to the ``search_chunks`` description and the
+    field to the scope-word rule; False (the default) renders both exactly as
+    they were before the parameter existed.
     """
     if read_document and read_document_cap < 1:
         raise ValueError(
@@ -1021,6 +1070,30 @@ def reflect_prompt(
     # untrue there — it is absent, full stop, and saying "thin" invites the
     # model to keep probing for it). Both are spelled as suffix/infix clauses so
     # the gate-open text is byte-for-byte the sentence from before T2.
+    #
+    # The closing ``chunks_keywords`` sentence is the action's optional literal
+    # (full-text) half — the same keyword arm chunk mode always runs, handed to
+    # the model as a parameter instead of being derived by the server. It names
+    # the corpus languages because the arm is a lexical match: a keyword in a
+    # language the documents are not written in can only miss. The wording of
+    # the multi-language branch mirrors ``expand_query_prompt``'s keyword rule
+    # (both forms of a term), so the planner and this action ask for the same
+    # kind of keyword string. It is appended only under ``keyword_search``, so
+    # with that sub-gate closed the paragraph is byte-for-byte the pre-PR-3 one.
+    kw_langs = corpus_language_list(corpus_langs)
+    chunks_keywords_rule = (
+        "Optionally also set chunks_keywords: space-separated keywords in "
+        + (
+            f"each corpus language ({', '.join(kw_langs)}), giving both forms "
+            "of a term that has a well-known form in another listed language"
+            if len(kw_langs) > 1 else
+            f"the corpus language ({kw_langs[0]})"
+        )
+        + " plus both an abbreviation and its full name, to catch literal "
+        "matches semantic search can miss (model numbers, terms, command "
+        "names, code identifiers); leave it empty to search by chunks_query "
+        "alone."
+    )
     search_chunks_action = (
         "- search_chunks: retrieve raw SOURCE PASSAGES from the documents "
         "themselves, by semantics and keywords (set chunks_query). Reach for it "
@@ -1034,7 +1107,9 @@ def reflect_prompt(
         + (" and from ppr_retrieve (which propagates "
            "through the graph)" if kg_actions else "")
         + ": this one searches the passage text directly, so it "
-        "works even with no graph at all.\n"
+        "works even with no graph at all."
+        + (" " + chunks_keywords_rule if keyword_search else "")
+        + "\n"
         if search_chunks else ""
     )
     # The reflect-local half of the scope-grounding rule: this is the prompt with
@@ -1059,11 +1134,18 @@ def reflect_prompt(
     # the mirror image of the omission problem described above. ``exact_term``
     # stays out of the joined list so the "exact_term especially" clause that
     # follows still lands on the field it names.
+    #
+    # ``chunks_keywords`` is listed for the same reason and only when its
+    # sub-gate is open, and it is the field where a scope word costs the most
+    # after ``exact_term``: it is matched literally too, so "当前notebook" as a
+    # keyword is a zero-hit probe.
     scope_fields = ["new_sub_query.query", "elements_query"]
     if kg_actions:
         scope_fields.append("ppr_query")
     if search_chunks:
         scope_fields.append("chunks_query")
+        if keyword_search:
+            scope_fields.append("chunks_keywords")
     scope_fields_rule = (
         "This applies to every retrieval field you fill: "
         + ", ".join(scope_fields)
@@ -1469,7 +1551,7 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
         if want_types else
         "- types and prefer are not used in this run: leave them as [] and "
         "\"balanced\". reason: an optional one-line note.\n")
-    langs = [l for l in (corpus_langs or ["zh", "en"]) if l] or ["zh", "en"]
+    langs = corpus_language_list(corpus_langs)
     if len(langs) > 1:
         kw_langs_rule = (
             "provide terms in EACH of these corpus languages: "

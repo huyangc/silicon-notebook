@@ -504,6 +504,25 @@ def test_switch_off_restores_the_empty_peer_arm_and_queries_nothing():
     assert probe.events == []
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_keyword_arm_availability_is_the_switch_in_peer_mode_only(enabled):
+    """``keyword_arm_available`` 是通道短路与 reasoning ``chunks_keywords`` 子闸
+    共读的那一句:对等模式下等于开关;单库路径恒 True 且**不读**开关。"""
+    from app.services.retrieval_candidates import keyword_arm_available
+
+    probe = KeywordProbe(("nb-a", "nb-b"), enabled=enabled)
+    with _peer_run(("nb-a", "nb-b")):
+        assert keyword_arm_available(probe.settings) is enabled
+        # 通道据同一句话短路:关着时零查询。
+        hits = probe._keyword_chunk_candidates("nb-a", _NEEDLE)
+        assert (probe.steps == []) is (not enabled)
+        if not enabled:
+            assert hits == []
+
+    # 读开关就会 AttributeError:单库路径根本不读它。
+    assert keyword_arm_available(SimpleNamespace()) is True
+
+
 # ---------------------------------------------------------------------------
 # 4. 单库路径守卫
 # ---------------------------------------------------------------------------
@@ -559,14 +578,22 @@ def test_single_notebook_path_is_unchanged(scope, enabled, ranked_scoring):
 
 
 def test_single_notebook_failure_keeps_its_historical_handling():
-    """单库路径:词法超时静默 ``[]``、其它故障记 ``chunk_keyword_union`` 后 ``[]``。"""
+    """单库路径:词法超时静默 ``[]``;其它故障同样 ``[]``,**不**记 model_error
+    (补召回臂缺席不上横幅,2026-09-29),只发一条内容无关的
+    ``ask_stage/chunk_keyword_union`` 事件,带异常类名。"""
     timeout = KeywordProbe(hits={"nb-a": ChunkLexicalSearchTimeout()})
     assert timeout._keyword_chunk_candidates("nb-a", _NEEDLE) == []
     assert timeout.model_errors == []
 
     broken = KeywordProbe(hits={"nb-a": RuntimeError("boom")})
     assert broken._keyword_chunk_candidates("nb-a", _NEEDLE) == []
-    assert broken.model_errors == [("chunk_keyword_union", "RuntimeError")]
+    assert broken.model_errors == []
+    assert broken.events == [{
+        "kind": "ask_stage", "stage": "chunk_keyword_union",
+        "site": "chunk_keyword_union", "notebook_id": "nb-a",
+        "status": "failed_open", "error_type": "RuntimeError",
+    }]
+    assert "boom" not in repr(broken.events)          # 不带异常消息
 
 
 def test_blank_keywords_query_nothing_in_either_mode():

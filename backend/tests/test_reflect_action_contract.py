@@ -505,6 +505,9 @@ _KNOWN_REFLECT_SCHEMA_GATES = frozenset({
     # PR-A:按篇读取有界原文取样。它是**默认关**的那种形状,正是这份反射式
     # 开闸最该覆盖的——手写调用会永远漏掉它。
     "read_document",
+    # PR-3:`search_chunks` 的子闸,打开后多出 `chunks_keywords` 顶层字段。同样
+    # 默认关,全门打开时它必须把这个字段带进保留集。
+    "keyword_search",
 })
 # The full whitelist each sequence-shaped gate is opened with.
 _REFLECT_SCHEMA_SEQUENCE_GATES = {

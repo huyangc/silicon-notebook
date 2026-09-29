@@ -393,6 +393,122 @@ def test_read_document_open_shows_up_in_all_three_projections(gates):
             reflect_schema_hint(**gates))
 
 
+# ---------------------------------------------------------------------------
+# PR-3:`search_chunks` 的可选关键词 `chunks_keywords` + 语料语言。
+#
+# `chunks_keywords` 骑一把**子闸** `keyword_search`(单点判据
+# `ReasoningRetriever.keyword_search_active`):只有 `search_chunks` 与它同时开时
+# schema 与 prompt 里才出现这个字段;任一关着时一个字节都不出现,`corpus_langs`
+# 也不改变任何一个字节(它唯一的读者就是那句说明)。子闸关、`search_chunks` 开时
+# 的形态逐字节等于接入这个参数之前的 `search_chunks` 形态。
+
+
+_CHUNKS_KEYWORDS_OTHER_GATES = [
+    {},
+    {"kg_actions": False},
+    {"outline": True, "consult_memory": True},
+    {"element_kinds": ("formula",), "object_types": ("claim",),
+     "read_document": True, "read_document_cap": 2},
+]
+
+
+def _schema_only(gates):
+    return {k: v for k, v in gates.items() if k != "read_document_cap"}
+
+
+@pytest.mark.parametrize("gates", _CHUNKS_KEYWORDS_OTHER_GATES)
+@pytest.mark.parametrize("search_chunks, keyword_search",
+                         [(False, False), (False, True), (True, False)])
+def test_chunks_keywords_is_absent_and_languages_inert_with_either_gate_closed(
+    gates, search_chunks, keyword_search,
+):
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+
+    kwargs = dict(gates, search_chunks=search_chunks)
+    closed = reflect_prompt("q", "c", keyword_search=keyword_search, **kwargs)
+    schema = reflect_schema_hint(keyword_search=keyword_search,
+                                 **_schema_only(kwargs))
+    assert "chunks_keywords" not in closed
+    assert "chunks_keywords" not in schema
+    # 子闸关 == 不传(接入前的调用形状);子闸在 search_chunks 关时开着也不起作用。
+    assert closed == reflect_prompt("q", "c", **kwargs)
+    assert schema == reflect_schema_hint(**_schema_only(kwargs))
+    for langs in (["zh"], ["en"], ["zh", "en"], []):
+        assert reflect_prompt("q", "c", corpus_langs=langs,
+                              keyword_search=keyword_search, **kwargs) == closed
+
+
+@pytest.mark.parametrize("gates", _CHUNKS_KEYWORDS_OTHER_GATES)
+def test_keyword_gate_closed_is_the_pre_parameter_search_chunks_shape(gates):
+    """子闸关、search_chunks 开:schema 尾组只有 `chunks_query`,动作说明以
+    「works even with no graph at all.」收尾,范围词规则只列到 chunks_query。"""
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+
+    kwargs = dict(gates, search_chunks=True)
+    schema = reflect_schema_hint(**_schema_only(kwargs))
+    assert '"exact_term":"","chunks_query":"","reason":""' in schema
+    prompt = reflect_prompt("q", "c", **kwargs)
+    assert "works even with no graph at all.\n" in prompt
+    assert ", chunks_query and exact_term" in prompt
+    opened = reflect_schema_hint(keyword_search=True, **_schema_only(kwargs))
+    assert opened == schema.replace(
+        '"chunks_query":"",', '"chunks_query":"","chunks_keywords":"",', 1)
+
+
+@pytest.mark.parametrize("gates", _CHUNKS_KEYWORDS_OTHER_GATES)
+def test_chunks_keywords_shows_up_in_schema_and_prompt_together(gates):
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+
+    schema = json.loads(reflect_schema_hint(
+        search_chunks=True, keyword_search=True, **_schema_only(gates)))
+    assert schema["chunks_keywords"] == ""
+    # 紧跟 chunks_query,与它同在尾组。
+    keys = list(schema)
+    assert keys.index("chunks_keywords") == keys.index("chunks_query") + 1
+    prompt = reflect_prompt("q", "c", search_chunks=True, keyword_search=True,
+                            **gates)
+    assert "Optionally also set chunks_keywords" in prompt
+    # 范围词规则同样点名它(字面匹配的字段,范围词放进去必零命中)。
+    assert "chunks_query, chunks_keywords and exact_term" in prompt
+
+
+def test_chunks_keywords_sentence_names_the_corpus_languages():
+    from app.services.prompts import reflect_prompt
+
+    def _line(**kwargs):
+        prompt = reflect_prompt("q", "c", search_chunks=True,
+                                keyword_search=True, **kwargs)
+        return next(line for line in prompt.splitlines()
+                    if line.startswith("- search_chunks: "))
+
+    zh = _line(corpus_langs=["zh"])
+    assert "keywords in the corpus language (zh) plus both an abbreviation" in zh
+    assert "each corpus language" not in zh
+    en = _line(corpus_langs=["en"])
+    assert "keywords in the corpus language (en)" in en
+    both = _line(corpus_langs=["zh", "en"])
+    assert "keywords in each corpus language (zh, en), giving both forms" in both
+    # 字面命中的用途与「不填就只按 chunks_query」都要说。
+    for line in (zh, en, both):
+        assert "model numbers, terms, command names, code identifiers" in line
+        assert "leave it empty to search by chunks_query alone" in line
+    # 没探测到语言 = zh/en 回退,与 expand_query_prompt 的缺省同一对。
+    assert _line() == both
+    assert _line(corpus_langs=[]) == both
+
+
+def test_expand_query_prompt_keeps_its_language_fallback():
+    """两个 prompt 共用 `corpus_language_list` 之后,规划 prompt 的回退不变。"""
+    from app.services.prompts import corpus_language_list, expand_query_prompt
+
+    assert corpus_language_list(None) == ["zh", "en"]
+    assert corpus_language_list([]) == ["zh", "en"]
+    assert corpus_language_list(["", "en"]) == ["en"]
+    assert expand_query_prompt("q") == expand_query_prompt(
+        "q", corpus_langs=["zh", "en"])
+    assert "corpus language (zh)" in expand_query_prompt("q", corpus_langs=["zh"])
+
+
 def test_read_document_action_line_says_the_five_things_it_has_to_say():
     """五条要点各钉一次:标题来源、首选目标、与 search_chunks 的分工、有界取样的
     披露义务、coverage 两个取值。报出的次数就是调用方传进来的那个预算。"""

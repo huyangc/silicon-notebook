@@ -3489,12 +3489,19 @@ _ADD_SUBQUERY_TAIL = "rephrase it substantially or choose a different action.\n"
 #: 动作说明——两处插入因此各自被单独钉住,谁多改一个字节都红。
 _SCOPE_RULE_WITH_CHUNKS_QUERY = ", chunks_query and exact_term"
 _SCOPE_RULE_WITHOUT_CHUNKS_QUERY = " and exact_term"
+#: 真实 `reflect()` 在单库 run 里还开着 PR-3 的 `chunks_keywords` 子闸
+#: (`keyword_search_active`),规则句于是再多一项;归一时一并还原。
+_SCOPE_RULE_WITH_CHUNKS_KEYWORDS = ", chunks_query, chunks_keywords and exact_term"
+#: 同一子闸开着时 schema 尾组的形态(`chunks_keywords` 紧跟 `chunks_query`)。
+_CHUNK_SCHEMA_FIELDS_WITH_KEYWORDS = (
+    '"exact_term":"","chunks_query":"","chunks_keywords":"","reason":""')
 
 
 def _scope_rule_normalised(prompt: str) -> str:
     """把开启态的规则句还原成关闭态的形状(其余字节一个不动)。"""
-    return prompt.replace(_SCOPE_RULE_WITH_CHUNKS_QUERY,
-                          _SCOPE_RULE_WITHOUT_CHUNKS_QUERY, 1)
+    return prompt.replace(
+        _SCOPE_RULE_WITH_CHUNKS_KEYWORDS, _SCOPE_RULE_WITHOUT_CHUNKS_QUERY, 1,
+    ).replace(_SCOPE_RULE_WITH_CHUNKS_QUERY, _SCOPE_RULE_WITHOUT_CHUNKS_QUERY, 1)
 
 
 def _free_text_retrieval_fields(schema_hint: str) -> set:
@@ -3724,13 +3731,13 @@ def test_reflect_kill_switch_puts_the_whole_action_back_to_baseline(rrepo):
     # 插入——其余(包括本 run 实际开着的枚举/大纲/consult 三把闸的产物)逐字节
     # 相同。
     on_prompt = _scope_rule_normalised(raw_on_prompt)
-    assert _SCOPE_RULE_WITH_CHUNKS_QUERY in raw_on_prompt
+    assert _SCOPE_RULE_WITH_CHUNKS_KEYWORDS in raw_on_prompt
     head, sep, tail = off_prompt.partition(_ADD_SUBQUERY_TAIL)
     assert sep and on_prompt.startswith(head + sep) and on_prompt.endswith(tail)
     assert on_schema == (
         off_schema.replace("|exact_lookup", "|exact_lookup|search_chunks", 1)
                   .replace('"exact_term":"","reason":""',
-                           '"exact_term":"","chunks_query":"","reason":""', 1)
+                           _CHUNK_SCHEMA_FIELDS_WITH_KEYWORDS, 1)
     )
 
 
@@ -4563,9 +4570,13 @@ def test_plan_keeps_its_signature_while_plan_with_keywords_adds_the_string(rrepo
         reflects=[]))
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
 
+    # PR-3 只在**末尾**追加了一个带缺省值的 `corpus_langs`:既有调用方(按位置或
+    # 按名传前八个)逐字不受影响。
     assert list(inspect.signature(rr.plan).parameters) == [
         "question", "history", "max_subqueries", "collection_map",
-        "profile_block", "experience_block", "style_block", "kg_available"]
+        "profile_block", "experience_block", "style_block", "kg_available",
+        "corpus_langs"]
+    assert inspect.signature(rr.plan).parameters["corpus_langs"].default is None
     subs = rr.plan("布局布线怎么做", "")
     assert type(subs) is list and [s.query for s in subs] == ["布局布线"]
 
@@ -6097,3 +6108,553 @@ def test_reflect_drops_off_type_query_fields_instead_of_searching_their_repr(rre
     assert decision.new_sub_query is None
     assert decision.ppr_query == ""
     assert decision.reason == ""
+
+
+# --------------------------------------------- search_chunks 的关键词半(PR-3)
+#
+# chunk 模式总有一条按语料语言双语化的关键词全文检索臂;reasoning 的确定性
+# 关键词只在首轮播种、且 `plan()` 真的跑过时才有。PR-3 把这条臂作为
+# `search_chunks` 的可选参数 `chunks_keywords` 交给模型,并把本 run 的语料语言
+# 告诉模型与规划器。
+
+
+_ACTION_STEP_KEYS = {"query", "found", "result_ids"}
+
+
+def _action_chunk_steps(res):
+    return [t for t in res.trace
+            if t.step_type == "search_chunks" and t.detail.get("phase") != "seed"]
+
+
+def _keyword_action_run(rrepo, reflect, *, fail_closed=False, channel=None):
+    """无图库 + 一段只有字面词能命中的原文;向量半打桩成一段固定命中。
+
+    规划不带关键词(`plan_keywords` 为空),所以首轮播种的词法臂不跑——轨迹与
+    通道调用里出现的关键词检索只可能来自 `search_chunks` 动作本身。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_no_kg_notebook_with_exact_chunks(
+        rrepo, [("ck-kw", _KEYWORD_ONLY_TEXT)])
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[reflect, {"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(
+        rrepo, rrepo.settings, fail_closed=fail_closed)
+    vector_calls: list = []
+    _stub_search_chunks(rr, vector_calls, {None: [_chunk_hit("ck-vec")]})
+    if channel is not None:
+        rr.retrieval.keyword_chunk_candidates = channel
+    keyword_calls = _count_keyword_chunk_candidates(rr)
+    return nb, rr, vector_calls, keyword_calls
+
+
+def test_search_chunks_action_merges_the_models_keyword_half(rrepo):
+    """模型给了 `chunks_keywords` ⇒ 关键词通道被调一次、字面命中并入证据池,
+    轨迹 detail 多出 `keywords`/`keyword_found`,`found` 是两半合计。"""
+    kw = f"{_KEYWORD_ONLY_TERM} 沟槽隔离"
+    nb, rr, vector_calls, keyword_calls = _keyword_action_run(rrepo, {
+        "next_action": "search_chunks", "chunks_query": "布局",
+        "chunks_keywords": kw})
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    assert keyword_calls == [kw]
+    assert ("布局", None) in vector_calls           # 向量半照常(动作口径 k)
+    ids = [c.chunk_id for c in res.chunks]
+    assert "ck-kw" in ids and "ck-vec" in ids
+    [step] = _action_chunk_steps(res)
+    assert step.detail["keywords"] == kw
+    assert step.detail["keyword_found"] == 1
+    assert "keyword_failed" not in step.detail
+    # 向量半在首轮播种时已经领走了 ck-vec,动作的新增只剩关键词那一段。
+    assert step.detail["found"] == 1
+    assert step.detail["result_ids"] == ["ck-kw"]
+
+
+def test_search_chunks_action_without_keywords_keeps_its_old_shape(rrepo):
+    """不给 `chunks_keywords` ⇒ 关键词通道零调用、detail 键集合与接入前相同。"""
+    nb, rr, _vector_calls, keyword_calls = _keyword_action_run(rrepo, {
+        "next_action": "search_chunks", "chunks_query": "布局"})
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    assert keyword_calls == []
+    [step] = _action_chunk_steps(res)
+    assert set(step.detail) == _ACTION_STEP_KEYS
+
+
+def test_search_chunks_action_keyword_half_is_bounded_like_the_vector_half(rrepo):
+    """关键词通道交回的是召回窗:并入前先过 `top_chunks_by_relevance(…, chunk_mmr_k)`。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    rows = [(f"ck-{i:02d}", f"{_KEYWORD_ONLY_TERM} 第 {i} 段的原文正文。")
+            for i in range(8)]
+    nb = _seed_no_kg_notebook_with_exact_chunks(rrepo, rows)
+    rrepo.settings.graph_ppr_enabled = False
+    rrepo.settings.chunk_mmr_k = 3
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "search_chunks",
+                   "chunks_keywords": _KEYWORD_ONLY_TERM},
+                  {"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr, [], {None: []})
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    [step] = _action_chunk_steps(res)
+    assert step.detail["keyword_found"] == 3
+    assert len(res.chunks) == 3
+
+
+def test_reflect_truncates_chunks_keywords_to_the_documented_cap(rrepo):
+    """解析处截到 `CHUNKS_KEYWORDS_MAX_CHARS`,且截断点落在空格上不留尾随空白。"""
+    from app.services.reasoning_retrieval import CHUNKS_KEYWORDS_MAX_CHARS
+
+    assert CHUNKS_KEYWORDS_MAX_CHARS == 300
+
+    class _LongKeywords:
+        configured = True
+
+        def __init__(self, keywords):
+            self.keywords = keywords
+
+        def chat_json(self, *_args, **_kwargs):
+            return json.dumps({"next_action": "search_chunks",
+                               "chunks_keywords": self.keywords})
+
+    long_kw = "k" * 400
+    decision = _reflect_once(rrepo, _LongKeywords(long_kw))
+    assert decision.chunks_keywords == long_kw[:300]
+
+    spaced = "k" * 299 + " " + "tail"
+    decision = _reflect_once(rrepo, _LongKeywords(spaced))
+    assert decision.chunks_keywords == "k" * 299
+
+
+def test_truncated_keywords_are_what_reaches_the_channel_and_the_trace(rrepo):
+    kw = f"{_KEYWORD_ONLY_TERM} " + "y" * 400
+    nb, rr, _vector_calls, keyword_calls = _keyword_action_run(rrepo, {
+        "next_action": "search_chunks", "chunks_keywords": kw})
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    assert keyword_calls == [kw[:300]]
+    [step] = _action_chunk_steps(res)
+    assert step.detail["keywords"] == kw[:300]
+
+
+def test_search_chunks_keyword_half_fails_soft_and_discloses_it(rrepo):
+    """关键词通道炸了 ⇒ fail-soft:向量半结果照常,detail 写稀疏 `keyword_failed`。"""
+    def _boom(notebook_id, keywords):
+        raise RuntimeError("fts down")
+
+    nb, rr, _vector_calls, _keyword_calls = _keyword_action_run(
+        rrepo, {"next_action": "search_chunks", "chunks_query": "布线",
+                "chunks_keywords": _KEYWORD_ONLY_TERM}, channel=_boom)
+    rr.search_chunks = lambda notebook_id, query, *, k=None: (
+        [_chunk_hit("ck-act")] if query == "布线" else [])
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    [step] = _action_chunk_steps(res)
+    assert step.detail["keyword_failed"] is True
+    assert step.detail["keyword_found"] == 0
+    assert step.detail["found"] == 1
+    assert "ck-act" in [c.chunk_id for c in res.chunks]
+
+
+def test_search_chunks_keyword_half_raises_under_fail_closed(rrepo):
+    def _boom(notebook_id, keywords):
+        raise RuntimeError("fts down")
+
+    nb, rr, _vector_calls, _keyword_calls = _keyword_action_run(
+        rrepo, {"next_action": "search_chunks",
+                "chunks_keywords": _KEYWORD_ONLY_TERM},
+        fail_closed=True, channel=_boom)
+    with pytest.raises(RuntimeError, match="fts down"):
+        rr.run(nb.id, "布局布线怎么做", "")
+
+
+def test_search_chunks_keyword_half_propagates_cancellation(rrepo):
+    from app.domain.cancellation import AskCancelled
+
+    def _cancelled(notebook_id, keywords):
+        raise AskCancelled()
+
+    nb, rr, _vector_calls, _keyword_calls = _keyword_action_run(
+        rrepo, {"next_action": "search_chunks",
+                "chunks_keywords": _KEYWORD_ONLY_TERM}, channel=_cancelled)
+    with pytest.raises(AskCancelled):
+        rr.run(nb.id, "布局布线怎么做", "")
+
+
+def test_chunks_keywords_is_not_even_read_with_the_channel_closed(rrepo):
+    """闸关时即便模型硬吐 `chunks_keywords` 也不解析(与 `chunks_query` 同形)。"""
+    class _Stray:
+        configured = True
+
+        def chat_json(self, *_args, **_kwargs):
+            return json.dumps({"next_action": "search_elements",
+                               "elements_query": "布局",
+                               "chunks_query": "布线",
+                               "chunks_keywords": _KEYWORD_ONLY_TERM})
+
+    rrepo.settings.reasoning_chunk_search_enabled = False
+    closed = _reflect_once(rrepo, _Stray())
+    assert closed.next_action == "search_elements"
+    assert closed.chunks_query == "" and closed.chunks_keywords == ""
+
+    rrepo.settings.reasoning_chunk_search_enabled = True
+    opened = _reflect_once(rrepo, _Stray())
+    assert opened.chunks_query == "布线"
+    assert opened.chunks_keywords == _KEYWORD_ONLY_TERM
+
+
+def test_search_chunks_with_keywords_still_counts_once_against_the_cap(rrepo):
+    """带关键词的一次动作仍只算一次 `max_chunk_searches`。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_no_kg_notebook_with_exact_chunks(
+        rrepo, [("ck-kw", _KEYWORD_ONLY_TEXT)])
+    rrepo.settings.graph_ppr_enabled = False
+    rrepo.settings.reasoning_max_chunk_searches = 2
+    action = {"next_action": "search_chunks", "chunks_query": "布局",
+              "chunks_keywords": _KEYWORD_ONLY_TERM}
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[action, dict(action, chunks_query="布线"), dict(action),
+                  {"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr, [], {None: []})
+    keyword_calls = _count_keyword_chunk_candidates(rr)
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    assert len(_action_chunk_steps(res)) == 2
+    assert len(keyword_calls) == 2
+    assert any(t.detail.get("reason") == "chunk_search_cap"
+               for t in res.trace if t.step_type == "skip")
+
+
+# ------------------------------------------------------ 语料语言(PR-3)
+
+
+def test_plan_hands_the_corpus_languages_to_expand_query(rrepo, monkeypatch):
+    """`plan()` 的 `expand_query` 调用带本 run 的语料语言(纯中文库 ⇒ ["zh"])。"""
+    import app.services.query_rewrite as qr
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    seen = []
+
+    def _capture(*_a, **k):
+        seen.append(k.get("corpus_langs"))
+        return qr.ExpandedQuery(query="x", sub_queries=[qr.SubQuerySpec("sub A")])
+
+    monkeypatch.setattr(qr, "expand_query", _capture)
+    nb = _seed_notebook_without_kg(rrepo, ["布局布线阶段先全局布局再详细布线。"])
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    rr.run(nb.id, "布局布线是什么")
+    assert seen == [["zh"]]
+
+
+def test_reflect_prompt_names_the_corpus_language_of_the_notebook(rrepo):
+    """reflect 的 `search_chunks` 说明列出的是本库的语料语言,不是 zh/en 默认。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo, ["布局布线阶段先全局布局再详细布线。"])
+    llm = _RecordingSeqLLM(plan={"sub_queries": [{"query": "布局布线"}]},
+                           reflects=[{"next_action": "answer", "sufficient": True}])
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "布局布线是什么")
+
+    [prompt] = llm.reflect_prompts
+    assert "keywords in the corpus language (zh)" in prompt
+    assert "each corpus language" not in prompt
+
+
+def test_confirmed_intent_run_still_tells_reflect_the_corpus_language(rrepo):
+    """已确认意图路径不调 `plan()`,但 reflect 的 `chunks_keywords` 说明仍要
+    拿到语料语言——那条路径上的关键词检索正是靠它交给模型的。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo, ["Place and route runs after synthesis."])
+    llm = _RecordingSeqLLM(plan={"sub_queries": [{"query": "unused"}]},
+                           reflects=[{"next_action": "answer", "sufficient": True}])
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "what is place and route", intent_queries=["place and route"])
+
+    [prompt] = llm.reflect_prompts
+    assert "keywords in the corpus language (en)" in prompt
+
+
+def test_corpus_languages_are_probed_once_per_run(rrepo):
+    """规划与每一轮 reflect 共用 `_first_round_plan` 那一次探测。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "search_chunks", "chunks_query": "布局"},
+                  {"next_action": "search_chunks", "chunks_query": "布线"},
+                  {"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    probes = []
+    original = rr.retrieval.keyword_corpus_languages
+
+    def _spy(notebook_id):
+        probes.append(notebook_id)
+        return original(notebook_id)
+
+    rr.retrieval.keyword_corpus_languages = _spy
+    rr.run(nb.id, "布局布线是什么")
+    assert probes == [nb.id]
+
+
+def test_a_retrieval_double_without_the_probe_means_no_hint():
+    """检索替身没有 `keyword_corpus_languages` ⇒ None,两个读者都不传参。"""
+    from types import SimpleNamespace
+
+    from app.services.reasoning_retrieval import (
+        ReasoningRetriever, _ReasoningRunState,
+    )
+
+    rr = ReasoningRetriever(
+        retrieval=SimpleNamespace(), model_clients=SimpleNamespace(),
+        communities=SimpleNamespace(), settings=SimpleNamespace())
+    assert rr._corpus_langs("nb") is None
+    assert _ReasoningRunState.corpus_langs_kwarg.fget(
+        SimpleNamespace(corpus_langs=None)) == {}
+    assert _ReasoningRunState.corpus_langs_kwarg.fget(
+        SimpleNamespace(corpus_langs=["zh"])) == {"corpus_langs": ["zh"]}
+
+
+def test_keyword_corpus_languages_follow_the_keyword_arms_scope(monkeypatch):
+    """单库 run = 本库自己的语言(关键词臂只查本库);对等 run = 参与库并集。"""
+    import app.services.chunk_federation as federation
+    import app.services.retrieval_service as retrieval_service
+    from app.services.retrieval_service import RetrievalService
+
+    langs = {"nb-a": ["en"], "nb-b": ["zh"], "nb-c": ["en"]}
+
+    class _Candidates:
+        def _notebook_langs(self, notebook_id):
+            return langs[notebook_id]
+
+    service = RetrievalService(candidates=_Candidates(), graph=None,
+                               community_queries=lambda *_a: None)
+    monkeypatch.setattr(federation, "federation_participant_ids",
+                        lambda _c, _nb: frozenset({"nb-a", "nb-b"}))
+
+    monkeypatch.setattr(retrieval_service, "subjectless_run_active", lambda: False)
+    assert service.keyword_corpus_languages("nb-a") == ["en"]
+
+    monkeypatch.setattr(retrieval_service, "subjectless_run_active", lambda: True)
+    assert service.keyword_corpus_languages("nb-a") == ["zh", "en"]
+    monkeypatch.setattr(federation, "federation_participant_ids",
+                        lambda _c, _nb: frozenset({"nb-a", "nb-c"}))
+    assert service.keyword_corpus_languages("nb-a") == ["en"]
+
+
+# ------------------------------------ `chunks_keywords` 子闸(关键词臂恒空时消失)
+
+
+class _CaptureReflect:
+    """记下 reflect 的 prompt 与 schema,并硬吐一个带 `chunks_keywords` 的动作。"""
+    configured = True
+
+    def __init__(self):
+        self.seen = []
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        self.seen.append((messages[-1]["content"], schema_hint))
+        return json.dumps({"next_action": "search_chunks",
+                           "chunks_query": "布局",
+                           "chunks_keywords": _KEYWORD_ONLY_TERM})
+
+
+@contextmanager
+def _peer_override(notebook_ids):
+    """只装参与集覆盖(`federated_ask_active()` 为真)——通道的开关判据只读它。"""
+    from app.services.retrieval_participants import (
+        ParticipantOverride, participant_override,
+    )
+
+    with participant_override(ParticipantOverride(
+            notebook_ids=tuple(notebook_ids), tiers={},
+            attested_actor_id="user-kw-gate")):
+        yield
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_peer_run_with_the_keyword_arm_switched_off_hides_chunks_keywords(
+    rrepo, enabled,
+):
+    """对等 run + `GLOBAL_ASK_KEYWORD_ARM_ENABLED=false`:关键词臂恒空,所以
+    schema、prompt、解析三处都没有 `chunks_keywords`(模型硬吐也不读);开关开着
+    时三处都在。判据走真实链路:`keyword_search_active` →
+    `RetrievalService.keyword_arm_available` → 通道自己的 `keyword_arm_available`。
+    """
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    rrepo.settings.global_ask_keyword_arm_enabled = enabled
+    capture = _CaptureReflect()
+    bind_chat_client(rrepo, "reasoning_agent", capture)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    with _peer_override(("nb-a", "nb-b")):
+        assert rr.keyword_search_active() is enabled
+        decision = rr.reflect("布局布线怎么做", "候选")
+    prompt, schema = capture.seen[-1]
+
+    assert decision.next_action == "search_chunks"
+    assert decision.chunks_query == "布局"
+    assert ("chunks_keywords" in prompt) is enabled
+    assert ("chunks_keywords" in schema) is enabled
+    assert decision.chunks_keywords == (_KEYWORD_ONLY_TERM if enabled else "")
+    if not enabled:
+        # 子闸关 == search_chunks 开但没有这个参数的形态,逐字节。
+        gates = dict(element_kinds=(), object_types=(), search_chunks=True)
+        if rr.enumeration_active():
+            from app.services.collection_catalog import (
+                ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES,
+            )
+            gates.update(element_kinds=ENUMERABLE_ELEMENT_KINDS,
+                         object_types=ENUMERABLE_KG_OBJECT_TYPES)
+        assert schema == reflect_schema_hint(**gates)
+        assert prompt == reflect_prompt("布局布线怎么做", "候选", **gates)
+    # 单库 run 不读这把开关:关着也照样提供。
+    assert rr.keyword_search_active() is True
+
+
+def test_keyword_gate_closed_run_never_calls_the_keyword_channel(rrepo):
+    """子闸关时的执行面:模型硬吐 `chunks_keywords`、甚至决定里带着它直达
+    执行体,关键词通道也零调用,detail 键集合与接入前相同。"""
+    nb, rr, _vector_calls, keyword_calls = _keyword_action_run(rrepo, {
+        "next_action": "search_chunks", "chunks_query": "布局",
+        "chunks_keywords": _KEYWORD_ONLY_TERM})
+    rr.retrieval.keyword_arm_available = lambda: False
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    assert keyword_calls == []
+    [step] = _action_chunk_steps(res)
+    assert set(step.detail) == _ACTION_STEP_KEYS
+
+    # 纵深防御:绕过解析、直接把带关键词的决定交给执行体。
+    from app.services.reasoning_retrieval import ReflectDecision
+
+    state = type("S", (), {})()
+    state.record = lambda step: None
+    state.action_policy = type("P", (), {"max_chunk_searches": 3})()
+    state.chunk_searches = 0
+    state.question = "q"
+    state.notebook_id = nb.id
+    state.seen_chunks = set()
+    state.chunks = []
+    state.zero_hit_by_action = {}
+    rr._action_search_chunks(state, ReflectDecision(
+        next_action="search_chunks", chunks_keywords=_KEYWORD_ONLY_TERM))
+    assert keyword_calls == []
+
+
+def test_keyword_channel_failure_is_an_event_not_a_banner(rrepo, monkeypatch):
+    """关键词通道内部失败(单库路径被通道自己吞掉的那一种):响应内的
+    model_errors(「模型服务调用失败」横幅的唯一来源)一条都不加,原因码走
+    `ask_stage/chunk_keyword_union` 事件,语义半的结果照常。"""
+    from app.core.ask_context import _ASK_MODEL_ERRORS
+
+    nb, rr, _vector_calls, keyword_calls = _keyword_action_run(rrepo, {
+        "next_action": "search_chunks", "chunks_query": "布局",
+        "chunks_keywords": _KEYWORD_ONLY_TERM})
+    candidates = rrepo.retrieval.candidates
+    events = []
+    real_emit = candidates.event_log.emit
+
+    def _emit(event):
+        events.append(event)
+        return real_emit(event)
+
+    monkeypatch.setattr(candidates.event_log, "emit", _emit)
+
+    def _broken(*_args, **_kwargs):
+        raise RuntimeError("legacy lib missing chunks_fts")
+
+    monkeypatch.setattr(candidates, "_chunk_fts_hits", _broken)
+    sink: list = []
+    token = _ASK_MODEL_ERRORS.set(sink)
+    try:
+        res = rr.run(nb.id, "布局布线怎么做", "")
+    finally:
+        _ASK_MODEL_ERRORS.reset(token)
+
+    assert keyword_calls == [_KEYWORD_ONLY_TERM]        # 臂确实跑了
+    assert sink == []                                   # 没有横幅
+    assert [(e["stage"], e["status"], e["error_type"]) for e in events
+            if e.get("stage") == "chunk_keyword_union"] == [
+        ("chunk_keyword_union", "failed_open", "RuntimeError")]
+    assert "ck-vec" in [c.chunk_id for c in res.chunks]  # 语义半照常
+    [step] = _action_chunk_steps(res)
+    assert step.detail["keyword_found"] == 0
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_seed_keyword_arm_rides_the_same_sub_gate(rrepo, monkeypatch, enabled):
+    """首轮播种的词法臂与 `chunks_keywords` 共读子闸 `keyword_search_active()`。
+
+    对等 run + `GLOBAL_ASK_KEYWORD_ARM_ENABLED=false`:关键词臂恒空,播种不调
+    通道、seed 步 detail 没有 `keyword_found`(与「`plan_keywords` 为空」同形,
+    不再是一句「跑了但零命中」);开关开着时照旧调用、照旧写键。
+
+    对等判据只替换通道模块里的 `federated_ask_active`(子闸判据
+    `keyword_arm_available` 读的就是它),其余检索仍走单库路径;通道本身换成
+    记账替身,开关开着时不必真的联邦扇出。
+    """
+    import app.services.retrieval_candidates as candidates_module
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    rrepo.settings.global_ask_keyword_arm_enabled = enabled
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan=_plan_with_keywords_json(high=["沟槽隔离"], low=[_KEYWORD_ONLY_TERM]),
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr, [], {None: [_chunk_hit("ck-1")]})
+    keyword_calls = []
+
+    def _channel(notebook_id, keywords):
+        keyword_calls.append(keywords)
+        return []
+
+    rr.retrieval.keyword_chunk_candidates = _channel
+    monkeypatch.setattr(candidates_module, "federated_ask_active", lambda: True)
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert seed.detail["phase"] == "seed"
+    if enabled:
+        assert keyword_calls == [f"沟槽隔离 {_KEYWORD_ONLY_TERM}"]
+        assert seed.detail["keyword_found"] == 0
+    else:
+        assert keyword_calls == []
+        assert "keyword_found" not in seed.detail
+        assert "keyword_failed" not in seed.detail
+    assert seed.detail["found"] == 1                     # 向量臂照常
+
+
+def test_keyword_search_active_follows_the_passage_switch_and_the_probe():
+    from types import SimpleNamespace
+
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    def _rr(retrieval, enabled=True):
+        return ReasoningRetriever(
+            retrieval=retrieval, model_clients=SimpleNamespace(),
+            communities=SimpleNamespace(),
+            settings=SimpleNamespace(reasoning_chunk_search_enabled=enabled))
+
+    # 没有探测方法的替身 = 可用(接入前的形态)。
+    assert _rr(SimpleNamespace()).keyword_search_active() is True
+    assert _rr(SimpleNamespace(keyword_arm_available=lambda: False)
+               ).keyword_search_active() is False
+    # 原文检索整体关着时子闸必关。
+    assert _rr(SimpleNamespace(keyword_arm_available=lambda: True),
+               enabled=False).keyword_search_active() is False

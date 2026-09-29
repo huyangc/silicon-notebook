@@ -730,6 +730,14 @@ DOCUMENT_READ_HEADER_RESERVE_CHARS = 200
 # 降一个量级而送进合成的正文反而更长。
 DOCUMENT_READ_MIN_CHARS_PER_ELEMENT = 320
 
+# `search_chunks` 动作的 `chunks_keywords`(模型给的关键词串)解析时的截断上限。
+# 这串原样进全文检索(`keyword_chunk_candidates` → FTS 的 OR 查询):词项越多,
+# 全文检索越慢,关键词覆盖率打分(命中词数 / 总词数)也被越多的无关词稀释——
+# 一串塞满同义词的长关键词反而让真正命中的段落分数变低。300 字符足够容纳
+# 一组中英对照的术语、型号与标识符(chunk 模式 `expand_query` 的 high+low
+# level 关键词串通常在 100~200 字符),再长就是堆砌。
+CHUNKS_KEYWORDS_MAX_CHARS = 300
+
 
 _TITLE_WRAPPING_PAIRS = (
     ("《", "》"), ("〈", "〉"), ("「", "」"), ("『", "』"),
@@ -2698,6 +2706,10 @@ class ReflectDecision:
     # search_chunks 的检索串。与 elements_query/ppr_query 同款「空则回退到原
     # 问题」,解析处不做必填校验。
     chunks_query: str = ""
+    # search_chunks 的可选关键词串(空格分隔,语料语言 + 跨语言对应词),交给
+    # 全文检索臂做字面命中。空 = 本次动作只走 chunks_query 那一半;解析时截到
+    # `CHUNKS_KEYWORDS_MAX_CHARS`。
+    chunks_keywords: str = ""
     # 要按名称精确查找的名称，执行层统一校验其形状。
     exact_term: str = ""
     chain_start_object_id: str = ""
@@ -3078,6 +3090,18 @@ class _ReasoningRunState:
     # 已确认意图路径不调 `plan()`,因此恒为空串 —— 词法臂在那条路径上不跑
     # (chunk 模式在同样的路径上也没有 expand 关键词)。
     plan_keywords: str = ""
+    # 本 run 的语料语言(`ReasoningRetriever._corpus_langs`)。`_first_round_plan`
+    # 写;读者是 `plan()` 的 `expand_query` 与每轮 reflect 的 `search_chunks`
+    # 说明(`chunks_keywords` 该用哪几种语言)。None = 没探测到(检索替身没有
+    # 这个方法,或本 run 两个读者都用不上),两处都按「有才传」不传。
+    corpus_langs: Optional[List[str]] = None
+
+    @property
+    def corpus_langs_kwarg(self) -> Dict[str, Any]:
+        """`corpus_langs` 的「有才传」形态:有值时 `{"corpus_langs": [...]}`,否则
+        空字典。`plan()` 与 `reflect()` 的调用处都按它展开,既有的替身(签名里没有
+        这个参数的 `plan`/`reflect` lambda)在没有语言时收到的调用形状逐字不变。"""
+        return {"corpus_langs": self.corpus_langs} if self.corpus_langs else {}
 
     # `_first_round_search`(初检索与补种共用)写:检索本身抛异常(非「成功但零
     # 命中」)的查询原文集合。并发 add/discard 都是同 GIL 原子操作,且每个 worker
@@ -3385,6 +3409,29 @@ class ReasoningRetriever:
         """
         return chunk_search_wiring_active(self.settings) and self.allow_search_chunks
 
+    def keyword_search_active(self) -> bool:
+        """本 run 的 `search_chunks` 是否提供可选关键词参数 `chunks_keywords`。
+
+        `chunk_search_active()` 的子闸,同款单点判定:**同一个**判据同时决定
+        schema 给不给这个字段、reflect prompt 写不写那句说明(连同范围词规则里
+        的字段名)、解析读不读它、执行体跑不跑关键词半。用户原则:模型看到的与
+        实际生效同口径——一个本 run 恒返回空的参数不该出现在模型面前。
+
+        第二个条件是关键词(FTS)臂本 run 能不能返回任何东西,判据在检索层
+        (`RetrievalService.keyword_arm_available` → 通道自己的
+        `retrieval_candidates.keyword_arm_available`,通道据同一句话短路,两边不会分叉)。今天唯一
+        让它恒空的配置是对等(全局问答)run + `GLOBAL_ASK_KEYWORD_ARM_ENABLED=
+        false`。按属性探测、不入 `RetrievalPort`(`keyword_corpus_languages` 的
+        先例):没有这个方法的检索替身按「可用」处理,即接入前的形态。
+
+        每次调用现算、不缓存:两个输入(部署开关 + 请求级 ContextVar)在一个 run
+        内恒定,与 `chunk_search_active` 同款。
+        """
+        if not self.chunk_search_active():
+            return False
+        probe = getattr(self.retrieval, "keyword_arm_available", None)
+        return bool(probe()) if callable(probe) else True
+
     # --- 按篇原文取样通道的总闸(PR-A) ---
     def document_read_active(
         self, limits: "AskRetrievalLimits | None" = None,
@@ -3466,6 +3513,33 @@ class ReasoningRetriever:
     def _kg_in_scope(self, notebook_id) -> bool:
         """本 run 的检索范围内有没有知识图谱。判据单点在 `kg_in_scope_for`。"""
         return kg_in_scope_for(self.retrieval, notebook_id)
+
+    def _corpus_langs(self, notebook_id) -> Optional[List[str]]:
+        """本 run 关键词该用的语料语言(``["zh","en"]`` 的子集);探测不到时 None。
+
+        口径与关键词臂的检索范围一致,单点在
+        ``RetrievalService.keyword_corpus_languages``:单库 run = 本库自己的语言
+        (关键词臂只查本库,chunk 模式 ``expand_query`` 传的也是这一个);对等
+        (全局问答)run = 参与库语言的并集(关键词臂在那里逐库联邦,每一库各按自己
+        的语料过滤词项,并集才不会漏掉任何一库的语言)。
+
+        **不入** ``RetrievalPort``,按属性探测(``chunk_participant_count`` 的先例):
+        reasoning 只有这一个调用点,语言本身只是提示(猜错只多/少生成几个关键词,
+        不会让检索出错);而探测不到时返回 None、两个读者都不传参,既有的检索替身
+        因此拿到的是接入前逐字节相同的规划与反思调用。
+
+        按 ``notebook_id`` 做**请求级** memo(与 ``kg_in_scope_for`` 同款):参与集
+        与语言缓存在一次 run 内恒定,规划与每轮 reflect 共用一次探测。异常不吞——
+        与 chunk 模式直调 ``notebook_languages`` 同口径,``AskCancelled`` 照旧上抛。
+        """
+        probe = getattr(self.retrieval, "keyword_corpus_languages", None)
+        if not callable(probe):
+            return None
+        langs = memoized_retrieval_value(
+            ("reasoning_corpus_langs", notebook_id),
+            lambda: tuple(probe(notebook_id) or ()),
+        )
+        return list(langs) or None
 
     def enumeration_active(self) -> bool:
         """本 run 是否提供类型化集合枚举工具。
@@ -3832,21 +3906,20 @@ class ReasoningRetriever:
 
         与 `search_chunks` 是同一批证据的两条臂,不是它的替代:那条走向量召回 +
         MMR,这条走 chunk 模式同款的 `keyword_chunk_candidates`。chunk 模式里这
-        条臂是「FTS 携带第二语言」到达原文的路径;**这里的关键词是 zh/en 默认
-        双语,不是按语料语言的双语**——`plan()` 调 `expand_query` 时不传
-        `corpus_langs`,拿到的就是 prompt 的默认语言对。对齐需要给 `plan()` 传
-        `corpus_langs`,那会改到**所有 run 的规划 prompt**(有无图谱共用同一个
-        `plan()`),已登记为后续(见 `fangan_todo.md` 的检索一节)。reasoning 的
-        首轮原文播种此前只有向量一臂,
-        所以同一个库、同一个问题,chunk 模式能捞到的词法独有段落在 reasoning 里
-        是拿不到的。
+        条臂是「FTS 携带第二语言」到达原文的路径;这里的关键词同样按**语料语言**
+        双语化:`plan()` 调 `expand_query` 时传本 run 的 `corpus_langs`
+        (`_corpus_langs`,与 chunk 模式传 `notebook_languages` 同口径),reflect 的
+        `search_chunks` 说明也把同一组语言告诉模型。reasoning 的首轮原文播种此前
+        只有向量一臂,所以同一个库、同一个问题,chunk 模式能捞到的词法独有段落在
+        reasoning 里是拿不到的。
 
-        `keywords` 是空格分隔的一个串(`PlanOutcome.keywords`,拼法与 `ask_chunk`
-        的 `kw_str` 逐字同形)。召回窗沿用通道自身的口径(`chunk_recall`),不新增
+        两个调用方:首轮播种(`keywords` = `PlanOutcome.keywords`,空格分隔,拼法
+        与 `ask_chunk` 的 `kw_str` 逐字同形)与 `search_chunks` 动作(`keywords` =
+        模型给的 `chunks_keywords`)。召回窗沿用通道自身的口径(`chunk_recall`),不新增
         配置——**所以这里交出来的是召回窗,不是选择结果**:`search_chunks` 的
         `select_chunk_candidates` 那一步在这条通道里不存在,调用方必须自己补上
-        等价的选择步(播种用 `top_chunks_by_relevance`,见
-        `_first_round_chunk_seed`)。
+        等价的选择步(两个调用方都用 `top_chunks_by_relevance`,见
+        `_first_round_chunk_seed` 与 `_action_search_chunks`)。
 
         包装形状与 `search_chunks`/`ppr_retrieve`/`exact_lookup` 逐字一致:
         `retrieval_fanout_slot()` 圈住发 I/O 的那一步,`_filter_candidates("chunk", …)`
@@ -3938,7 +4011,15 @@ class ReasoningRetriever:
 
     def plan(self, question, history="", max_subqueries=None, collection_map="",
              profile_block="", experience_block="", style_block="",
-             kg_available=True):
+             kg_available=True, corpus_langs=None):
+        """首轮规划(一次 `expand_query`)。
+
+        `corpus_langs` = 本 run 的语料语言(`_corpus_langs`),原样交给
+        `expand_query`,让整题关键词(`PlanOutcome.keywords`,首轮播种词法臂的
+        输入)按语料语言双语化——与 chunk 模式 `expand_query(corpus_langs=
+        notebook_languages(...))` 同一口径。缺省 None = `expand_query` 自己的
+        zh/en 默认;调用方按「有才传」只在探测到语言时才传。
+        """
         raise_if_cancelled(self.cancel_event)
         from app.services.query_rewrite import expand_query
         fallback = [SubQuery(query=question)]
@@ -3961,6 +4042,7 @@ class ReasoningRetriever:
                           # 范围内无图时关掉它,规划模型不再被要求按图节点类型
                           # 拆问题;有图 run 恒 True,调用形状与接入前逐字一致。
                           want_types=kg_available,
+                          corpus_langs=corpus_langs,
                           cancel_event=self.cancel_event,
                           fail_closed=self.fail_closed,
                           system_instruction=(
@@ -3999,7 +4081,8 @@ class ReasoningRetriever:
     def reflect(self, question, candidates_summary, outline: bool = False,
                 consult_memory: bool = False, kg_actions: bool = True,
                 *, plugin_actions: "Sequence[ReflectActionSpec]" = (),
-                limits: "AskRetrievalLimits | None" = None):
+                limits: "AskRetrievalLimits | None" = None,
+                corpus_langs: "Optional[List[str]]" = None):
         """规划后的轻量反思：判断材料是否齐备，或选择下一次检索。
 
         ``outline`` = 本 run 提供大纲便签动作(仅 exhaustive 档,见
@@ -4034,7 +4117,13 @@ class ReasoningRetriever:
         「首读份额可行」判据要看 ``chunk_context_chars``)。由 ``run()`` 传进来
         而不是在这里现算:执行体读的是 ``state.enum_limits``,两处各自兜底成默认档
         就会出现「prompt 里提供了这个动作、执行时却恒 budget skip」的漂移。缺省
-        ``None`` 取默认档,与 ``run()`` 在 ``limits is None`` 时用的是同一份。"""
+        ``None`` 取默认档,与 ``run()`` 在 ``limits is None`` 时用的是同一份。
+
+        ``corpus_langs`` = 本 run 的语料语言(``_corpus_langs``,``run()`` 在
+        ``_first_round_plan`` 里取一次存进 state)。唯一读者是 ``search_chunks``
+        动作说明里 ``chunks_keywords`` 那句(关键词该用哪几种语言写);闸关时一个
+        字节都不渲染。按「有才传」传入:探测不到(检索端口没有这个方法的替身)
+        时不传,prompt 回退到 zh/en,与 ``expand_query`` 的缺省同一对。"""
         raise_if_cancelled(self.cancel_event)
         client = self.model_clients.chat("reasoning_agent")
         if not getattr(client, "configured", False):
@@ -4048,6 +4137,9 @@ class ReasoningRetriever:
         # outline/consult_memory 那样从调用处传进来:它不看档位、不看请求,
         # run() 的调用形状因此一个字都不用改。
         chunk_search = self.chunk_search_active()
+        # `chunks_keywords` 子闸:schema、prompt、解析三处读同一个值(见
+        # `keyword_search_active`),闸关时三处都回到只有 `chunks_query` 的形态。
+        keyword_search = self.keyword_search_active()
         # PR-A 的按篇原文取样同理:它的判据里既有部署开关、也有 run 级事实(端口
         # 在场、枚举工具开着、次数上限),但全都拿得到,所以与 `chunk_search` 一样
         # 在这里现算,run() 的调用形状一个字都不用改。
@@ -4076,6 +4168,8 @@ class ReasoningRetriever:
                     read_document=read_document,
                     read_document_cap=read_document_cap,
                     plugin_actions=plugin_actions,
+                    corpus_langs=corpus_langs,
+                    keyword_search=keyword_search,
                 ),
             }]
             if self.untrusted_evidence:
@@ -4090,6 +4184,7 @@ class ReasoningRetriever:
                     chunk_search, kg_actions,
                     read_document=read_document,
                     plugin_actions=plugin_actions,
+                    keyword_search=keyword_search,
                 ),
                 timeout=self.settings.reasoning_timeout_seconds,
                 max_retries=self.settings.reasoning_max_retries,
@@ -4189,6 +4284,12 @@ class ReasoningRetriever:
             # chunks_query 也不会有任何影响(动作本身不在白名单里)。
             if chunk_search:
                 d.chunks_query = as_text(data.get("chunks_query"))
+            if keyword_search:
+                # 子闸关着(或原文检索整体关着)时连读都不读:模型硬吐一个也不会
+                # 被执行。截断后再 strip:截断点落在空格上时不留尾随空白,执行体
+                # 的「非空才跑」判据与轨迹里记的串因此是同一个值。
+                d.chunks_keywords = as_text(data.get("chunks_keywords"))[
+                    :CHUNKS_KEYWORDS_MAX_CHARS].strip()
             d.exact_term = clean_exact_term(as_text(data.get("exact_term")))
             enumerate_request = data.get("enumerate")
             if enumeration and isinstance(enumerate_request, dict):
@@ -5131,9 +5232,17 @@ class ReasoningRetriever:
         # kg_actions 门同源。
         if not state.kg_in_scope:
             plan_kwargs["kg_available"] = False
+        # 语料语言:两个读者——`plan()` 的 `expand_query`(整题关键词双语化)与
+        # 每轮 reflect 的 `search_chunks` 说明(`chunks_keywords` 用哪几种语言)。
+        # 两个都用不上(已确认意图路径不调 `plan()`、且原文检索闸关)时不探测。
+        if not reviewed_queries or self.chunk_search_active():
+            state.corpus_langs = self._corpus_langs(state.notebook_id)
+        plan_kwargs.update(state.corpus_langs_kwarg)
         # 已确认意图路径不调 `plan()`,因此也没有关键词:`plan_keywords` 留空串,
         # 原文播种的词法臂在那条路径上不跑(chunk 模式同样只在 expand 过的路径上
-        # 才有关键词)。
+        # 才有关键词)。那条路径上的关键词检索交给模型:reflect 的 `search_chunks`
+        # 动作带可选的 `chunks_keywords` 参数(见 `_action_search_chunks`),服务端
+        # 不另造一个确定性的关键词来源。
         plan_keywords = ""
         if reviewed_queries:
             subqueries = [SubQuery(query=query) for query in reviewed_queries]
@@ -5365,7 +5474,10 @@ class ReasoningRetriever:
     def _keyword_seed_search(
         self, notebook_id: str, keywords: str,
     ) -> Tuple[List, bool]:
-        """播种里的词法臂那一次调用,交出 `(命中, 这次是不是炸了)`。
+        """词法臂的一次调用,交出 `(命中, 这次是不是炸了)`。
+
+        两个调用方:首轮播种的整题关键词,与 `search_chunks` 动作里模型给的
+        `chunks_keywords`(`_action_search_chunks`)。失败语义对两者相同。
 
         失败语义与 `_chunk_seed_search` 逐字一致:fail-open 吞掉、`fail_closed`
         下照抛、`AskCancelled` 始终上抛——词法臂炸掉不该把已经到手的向量臂命中
@@ -5447,8 +5559,12 @@ class ReasoningRetriever:
         模式(`ask_chunk` 把 `kw_str` 的 FTS 命中并进向量命中)是同一套构成,
         对标的正是它。没有这条臂时,同一个库里 chunk 模式能捞到、reasoning
         捞不到的,就是那些只能被术语字面命中的段落(它也是「FTS 携带第二语言」
-        到达原文的路径;当前关键词是 zh/en 默认双语而非按语料语言双语,原因与
-        后续登记见 `keyword_chunks` 的 docstring)。
+        到达原文的路径;关键词按本 run 的语料语言双语化,见 `keyword_chunks`)。
+
+        **分工:这条臂只在 `plan_keywords` 非空时跑,不另造关键词来源。** 已确认
+        意图路径不调 `plan()`,首轮因此没有确定性的关键词;那条路径上的字面检索
+        以 function 的形式交给模型——reflect 的 `search_chunks` 动作带可选参数
+        `chunks_keywords`(`_action_search_chunks`),由模型按需要决定给不给。
 
         **词法臂并入前先过自己的选择步。** 向量臂那半的宽度由
         `search_chunks(k=take)` 的 MMR 定死;词法通道没有选择步,交回来的是
@@ -5477,6 +5593,9 @@ class ReasoningRetriever:
         `state.plan_keywords` 空白(已确认意图路径、`expand_query` 回退)时这条臂
         零 I/O,且 `detail` 一个键都不加——关键词为空的 run,detail 形状与本臂
         接入前逐字一致。判空用 `.strip()`,与 chunk 侧的 `kw_str.strip()` 同形。
+        关键词臂本 run 恒空时(子闸 `keyword_search_active()` 为假:对等 run +
+        `GLOBAL_ASK_KEYWORD_ARM_ENABLED=false`)同样零 I/O、不加键——与
+        `search_chunks` 的 `chunks_keywords` 共读这一把闸。
         """
         if not self.chunk_search_active():
             return
@@ -5542,7 +5661,11 @@ class ReasoningRetriever:
         # 一节)。不记 `attempted.new`——它不属于任何一条子查询方向。
         keyword_new = None
         keyword_failed = False
-        if state.plan_keywords.strip():
+        # 与 `chunks_keywords` 同一把子闸:关键词臂本 run 恒空(对等 run +
+        # `GLOBAL_ASK_KEYWORD_ARM_ENABLED=false`)时不调通道、detail 不写
+        # `keyword_found`——形态与「子闸开但 `plan_keywords` 为空」相同,而不是
+        # 一句「跑了但零命中」的假账。
+        if state.plan_keywords.strip() and self.keyword_search_active():
             keyword_hits, keyword_failed = self._keyword_seed_search(
                 notebook_id, state.plan_keywords)
             # 通道交回的是召回窗,不是选择结果 —— 先过词法臂自己的选择步,宽度
@@ -5683,6 +5806,24 @@ class ReasoningRetriever:
         函数,新通道的执行体按 `_first_round_*` 的先例不记在它头上。计数器就地
         读写 `state.chunk_searches`(它是本方法独占的 run 级账目,`run` 不解包
         它,所以没有「解包之后别再读 state 标量」那条纪律的问题)。
+
+        **可选的关键词半(`chunks_keywords`)。** chunk 模式总有一条按语料语言
+        双语化的关键词全文检索臂;reasoning 的确定性关键词只在首轮播种、且只在
+        `plan()` 真的跑过时才有(已确认意图路径没有)。这条臂因此以**参数**的形式
+        交给模型:模型在 reflect 里给出关键词(语料语言 + 跨语言对应词,prompt 里
+        列出本 run 的语料语言),这里走与播种词法臂同一个通道
+        `keyword_chunks`——单库 run 只查本库、对等 run 逐库联邦,与 chunk 模式的
+        关键词臂同一个范围。
+        并入与播种同法(向量半先并、关键词半先过 `top_chunks_by_relevance` 收到
+        `chunk_mmr_k`);失败 fail-soft(`fail_closed` 下照抛、`AskCancelled` 恒抛),
+        向量半的结果照常保留。一次动作仍只算一次 `max_chunk_searches`,不论带不带
+        关键词。`found`/`result_ids`/`zero_hit_by_action` 是两半合计;detail 的
+        `keywords`/`keyword_found`(失败时再加稀疏的 `keyword_failed`)只在模型给了
+        关键词时出现,不给时键集合与接入前逐字节相同。
+
+        这个参数只在子闸 `keyword_search_active()` 为真时存在:关键词臂本 run
+        恒空时(对等 run + `GLOBAL_ASK_KEYWORD_ARM_ENABLED=false`),它从 schema、
+        prompt、解析与这里的执行一起消失。
         """
         record = state.record
         action_policy = state.action_policy
@@ -5705,7 +5846,24 @@ class ReasoningRetriever:
             self.search_chunks(state.notebook_id, cq),
             state.seen_chunks, state.chunks)
         state.chunks.extend(new)
-        # 命中即清零,与 ppr 分支同形(让"连续"是真话)。
+        # 关键词半(模型给了 `chunks_keywords` 才跑):与首轮播种词法臂同法——
+        # 向量半并完再并、先过 `top_chunks_by_relevance` 收到本次动作的宽度
+        # (`chunk_mmr_k`,与向量半同宽),失败语义复用 `_keyword_seed_search`。
+        # 纵深防御:子闸关着时解析处已不读这个字段,测试替身或直构的决定仍可能
+        # 带着它直达这里,那也必须零关键词 I/O。
+        keywords = (decision.chunks_keywords
+                    if self.keyword_search_active() else "")
+        keyword_new = None
+        keyword_failed = False
+        if keywords:
+            keyword_hits, keyword_failed = self._keyword_seed_search(
+                state.notebook_id, keywords)
+            keyword_new = take_distinct_chunk_hits(
+                top_chunks_by_relevance(keyword_hits, self.settings.chunk_mmr_k),
+                state.seen_chunks, state.chunks)
+            state.chunks.extend(keyword_new)
+            new = new + keyword_new
+        # 命中即清零,与 ppr 分支同形(让"连续"是真话)。`new` 是两半合计。
         if not new:
             state.zero_hit_by_action["search_chunks"] = (
                 state.zero_hit_by_action.get("search_chunks", 0) + 1)
@@ -5715,6 +5873,13 @@ class ReasoningRetriever:
             [c.chunk_id for c in new])
         _chunk_action_detail = {"query": cq, "found": len(new),
                                 "result_ids": _result_ids}
+        if keyword_new is not None:
+            # 只在模型给了关键词时出现(键名与播种步的 `keyword_found` 同名):
+            # 不给关键词的动作,detail 键集合与接入前逐字节相同。
+            _chunk_action_detail["keywords"] = keywords
+            _chunk_action_detail["keyword_found"] = len(keyword_new)
+        if keyword_failed:
+            _chunk_action_detail["keyword_failed"] = True
         if _result_ids_truncated:
             _chunk_action_detail["result_ids_truncated"] = True
         record(TraceStep(step_type="search_chunks",
@@ -7313,13 +7478,13 @@ class ReasoningRetriever:
                     )
                 )
             # 可选参数按「有才传」(同 plan() 的 max_subqueries/collection_map):
-            # 关闭态、低档位与**有图** run 下调用形状与接入前逐字一致,既有的
-            # reflect 测试替身不必为收不到的参数改签名。`kg_in_scope` 是 run 级
-            # 不变量(`_new_run_state` 算一次),这里直读 state,不解包成局部名。
-            # `limits` 是例外,恒传:`document_read_active` 的首读份额判据要看本
-            # run 的 `chunk_context_chars`,兜底成默认档会让它与执行体分叉。
-            reflect_kwargs = ({"limits": enum_limits} if state.kg_in_scope
-                              else {"kg_actions": False, "limits": enum_limits})
+            # 关闭态、低档位、**有图**与未探测到语料语言的 run 下调用形状与接入前
+            # 逐字一致,既有替身不必改签名。`kg_in_scope`/`corpus_langs` 都是 run
+            # 级不变量(前者 `_new_run_state`、后者 `_first_round_plan` 写),直读
+            # state。`limits` 例外恒传:`document_read_active` 的首读份额判据要看
+            # 本 run 的 `chunk_context_chars`,兜底成默认档会让它与执行体分叉。
+            reflect_kwargs = dict(state.corpus_langs_kwarg, limits=enum_limits, **(
+                {} if state.kg_in_scope else {"kg_actions": False}))
             if outline_active:
                 reflect_kwargs["outline"] = True
             if consult_memory_flag:
