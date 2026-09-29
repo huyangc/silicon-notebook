@@ -1153,6 +1153,63 @@ def test_an_all_ticked_unnarrowed_run_is_byte_identical_to_an_unscoped_one(
     assert page_kwargs and all(kwargs == {} for kwargs in page_kwargs)
 
 
+def test_an_all_ticked_reasoning_run_matches_an_unscoped_one(rrepo):
+    """推理循环一侧的 A/B:浏览器全选冻结(可见 + 本人隐藏,未收窄、未漂移)与
+    不带范围的 run 看到的是同一份东西——地图文本(``claim 1``)、清单(无证据的
+    对象在内)、枚举步骤的摘要与 detail、回喂 reflect 的 prompt 都逐字相同。"""
+    notebook = _reasoning_seed(rrepo, formulas=2)
+    _kg(rrepo, notebook.id, "cNone", [], object_type="claim")
+
+    def run(scoped):
+        llm = _SeqLLM([
+            {"next_action": "enumerate_kg_objects",
+             "enumerate": {"object_type": "claim"}},
+            {"next_action": "answer", "sufficient": True},
+        ])
+        retriever, limits = _retriever(rrepo, llm)
+        rrepo.collection_catalog.invalidate()
+        with retrieval_run(run_kind="ask_reasoning", actor_id=_ACTOR):
+            if scoped:
+                visible = rrepo._runtime.source_store.all_visible_source_ids(
+                    notebook.id)
+                with _frozen_all_selected(rrepo, notebook.id, visible):
+                    result = retriever.run(notebook.id, "有哪些论断", "",
+                                           limits=limits)
+            else:
+                result = retriever.run(notebook.id, "有哪些论断", "",
+                                       limits=limits)
+        return result, llm
+
+    unscoped, unscoped_llm = run(False)
+    ticked, ticked_llm = run(True)
+    assert "claim 2" in ticked.collection_map_text  # store_kg 的 C1 + cNone
+    assert ticked.collection_map_text == unscoped.collection_map_text
+    assert [o.items for o in ticked.enumerations] == [
+        o.items for o in unscoped.enumerations]
+    assert "cNone" in {i.object_id for i in ticked.enumerations[0].items}
+
+    def enumerate_steps(result):
+        return [(s.summary, s.detail) for s in result.trace
+                if s.step_type == "enumerate"]
+
+    assert enumerate_steps(ticked) == enumerate_steps(unscoped)
+
+    # 回喂 reflect 的集合地图与枚举账目逐行相同(清单拿到的是同一批条目,no_progress
+    # 因此不会翻转)。首轮候选那一段不比:首轮 KG 检索臂在冻结的全选清单下本来就
+    # 按清单下推(与本 PR 之前一样),无证据对象不会成为首轮候选——那不是枚举层。
+    def enumeration_lines(prompts):
+        return [
+            [line for line in prompt.splitlines()
+             if "Collections in scope" in line or "枚举" in line]
+            for prompt in prompts
+        ]
+
+    ticked_lines = enumeration_lines(ticked_llm.reflect_prompts)
+    assert ticked_lines == enumeration_lines(unscoped_llm.reflect_prompts)
+    assert len(ticked_lines) >= 2 and any(
+        "枚举" in line for line in ticked_lines[-1])
+
+
 def test_the_safe_default_still_binds_the_all_ticked_freeze(repo):
     """没传 ``ceiling_binds`` 的调用方拿到的是安全默认值:照样施加天花板
     (宁可少列,也不漏);无证据对象因此不在清单里。"""
