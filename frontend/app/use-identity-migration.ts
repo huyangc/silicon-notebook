@@ -28,7 +28,7 @@ export function useIdentityMigration({
     inFlightRef.current = true;
     setInFlight(true);
     const sentToken = getToken();
-    beginSessionHandoff(sentToken);
+    const handoff = beginSessionHandoff(sentToken);
     let applied = false;
     try {
       const result = await migrate(loginName, password);
@@ -39,7 +39,7 @@ export function useIdentityMigration({
       return "applied";
     } finally {
       if (!applied) {
-        endSessionHandoff(sentToken);
+        endSessionHandoff(handoff);
         inFlightRef.current = false;
         setInFlight(false);
       }
