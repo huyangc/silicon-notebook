@@ -25,12 +25,20 @@ OBJECT_TYPE = "concept"
 USABLE = ("approved", "draft")
 SOURCES = ("s-in1", "s-in2", "s-out1", "s-out2", "s-mem")
 INCLUDE_CEILING = ("s-in1", "s-in2")
+ODD_SOURCE = "s-odd\x1fid"
+
+
+@dataclass(frozen=True)
+class Raw:
+    """An evidence element written verbatim (a JSON string, number, or
+    hand-built object) instead of being expanded into an evidence object."""
+    value: object
 
 
 @dataclass(frozen=True)
 class SpecObject:
     id: str
-    evidence: tuple            # evidence items: source ids, or raw JSON values
+    evidence: tuple            # items: a source id (str → evidence object) or Raw
     owner: str = ""
     status: str = "approved"
     object_type: str = OBJECT_TYPE
@@ -52,8 +60,10 @@ def _objects() -> tuple[SpecObject, ...]:
         SpecObject("ko-06", ("s-in2",), owner="s-in2", status="deprecated", second=6),
         # Owned by a private Memory source, evidence inside the ceiling.
         SpecObject("ko-07", ("s-in1",), owner="s-mem", second=7),
-        # Empty source id and a non-object item name no source.
-        SpecObject("ko-08", ({"source_id": ""}, "junk", 7), owner="", second=8),
+        # Name no source: an object with an empty source id, a JSON STRING
+        # element (not an object), a JSON number.
+        SpecObject("ko-08", (Raw({"source_id": ""}), Raw("s-in1"), Raw(7)), owner="",
+                   second=8),
         # OWNER inside the ceiling, evidence outside: NOT supported.
         SpecObject("ko-09", ("s-out1",), owner="s-in1", second=9),
     ]
@@ -71,6 +81,9 @@ def _objects() -> tuple[SpecObject, ...]:
         SpecObject("ko-30", ("s-in1",), owner="s-in1", object_type="claim", second=31),
         SpecObject("ko-31", ("s-in1",), owner="s-in1", notebook_id=OTHER_NOTEBOOK_ID,
                    second=32),
+        # A source id containing the PostgreSQL bind form's separator (0x1F):
+        # only an exact match may admit it, never a split.
+        SpecObject("ko-22", (ODD_SOURCE,), owner=ODD_SOURCE, second=33),
     ])
     return tuple(rows)
 
@@ -81,13 +94,13 @@ OBJECTS = _objects()
 def evidence_json(obj: SpecObject) -> str:
     items = []
     for item in obj.evidence:
-        if isinstance(item, str):
+        if isinstance(item, Raw):
+            items.append(item.value)
+        else:
             items.append({"source_id": item, "source_title": item,
                           "element_id": f"el-{obj.id}-{item}",
                           "element_type": "paragraph", "location_label": "p1",
                           "quoted_span": "q", "confidence": 1.0})
-        else:
-            items.append(item)
     return json.dumps(items)
 
 
@@ -99,12 +112,19 @@ def evidence_sources(obj: SpecObject) -> set[str]:
     return {item for item in obj.evidence if isinstance(item, str) and item}
 
 
-def seed(execute: Callable[[str, tuple], object], mark: str, *, backfilled: bool) -> None:
+def seed(
+    execute: Callable[[str, tuple], object], mark: str, *, backfilled: bool,
+    flatten: Callable[[str], set],
+) -> None:
     """Insert the spec through ``execute(sql, params)``; ``mark`` is the
     dialect's placeholder (``?`` / ``%s``).  ``backfilled`` certifies the
-    reverse index (then ``knowledge_object_sources`` holds exactly the
-    flattened evidence); uncertified leaves the index EMPTY, so only the
-    authoritative evidence-JSON branch can produce the expected answer."""
+    reverse index; uncertified leaves the index EMPTY, so only the
+    authoritative evidence-JSON branch can produce the expected answer.
+
+    The certified index rows are built by ``flatten`` — the backend's
+    PRODUCTION ``KnowledgeStore.source_ids_from_evidence`` — and checked
+    against this module's own ``evidence_sources`` first, so "reverse index =
+    flattened evidence" is verified, not assumed."""
     def q(sql: str) -> str:
         return sql.replace("?", mark)
 
@@ -122,8 +142,10 @@ def seed(execute: Callable[[str, tuple], object], mark: str, *, backfilled: bool
                 (obj.id, obj.notebook_id, obj.object_type, obj.status, "",
                  json.dumps({"name": obj.id}), evidence_json(obj), obj.owner,
                  created_at(obj), created_at(obj)))
+        flattened = set(flatten(evidence_json(obj)))
+        assert flattened == evidence_sources(obj), (obj.id, flattened)
         if backfilled:
-            for source_id in sorted(evidence_sources(obj)):
+            for source_id in sorted(flattened):
                 execute(q("INSERT INTO knowledge_object_sources (object_id,source_id,"
                           "notebook_id) VALUES (?,?,?)"),
                         (obj.id, source_id, obj.notebook_id))
@@ -166,6 +188,10 @@ CEILINGS: dict[str, Optional[tuple]] = {
     "blank_only": ("",),
     "outside_only": ("s-out1",),
     "duplicates_and_blank": ("s-in2", "", "s-in2"),
+    # Separator collisions: a joined pair must not admit either half, and
+    # the odd id must match itself exactly.
+    "separator_joined": ("s-in1\x1fs-in2",),
+    "separator_exact": (ODD_SOURCE, "s-in2"),
     "huge": HUGE_CEILING,
 }
 
@@ -200,6 +226,9 @@ class RecordingConnection:
         self._inner = inner
         self.calls: list[tuple[str, tuple]] = []
         self.options: list[dict] = []
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
 
     def execute(self, sql, params=(), **options):
         self.calls.append((sql, tuple(params)))

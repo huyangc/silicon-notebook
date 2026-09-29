@@ -24,6 +24,7 @@ from app.domain.knowledge_contracts import (
 )
 from app.models.common import Evidence
 from app.repositories.lexical_query import sqlite_fts_match_expression
+from app.repositories.sqlite import source_ceiling
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.id_binding import bind_ids, drive_by, member_of
 from app.repositories.sqlite.mount_sql import (
@@ -2160,58 +2161,6 @@ class KnowledgeStore:
                         self._element_texts, own_row=row)
             return result
 
-    # ---------------------------------------------- source-ceiling support
-    @staticmethod
-    def _source_id_list(source_ids: Optional[Iterable[str]]) -> Optional[List[str]]:
-        """Normalise a source-id set ONCE: ``None`` stays ``None`` ("no
-        restriction"); anything else becomes a de-duplicated list of non-empty
-        ids in caller order, so an empty list (including ``("",)``) means
-        "nothing" — never "unrestricted".  Same rule as the PostgreSQL twin."""
-        if source_ids is None:
-            return None
-        return [str(value) for value in dict.fromkeys(source_ids) if value]
-
-    @staticmethod
-    def _object_support_sql(db: sqlite3.Connection, notebook_id: str) -> str:
-        """``AND``-able predicate: the unaliased ``knowledge_objects`` row of
-        the enclosing query has at least one evidence item whose source is in
-        ONE bound JSON-array parameter (``json.dumps(ids)``).
-
-        The PostgreSQL twin's docstring is the canonical definition (support
-        = ``evidence[].source_id``, never the object's own ``source_id``;
-        certified reverse index vs. authoritative evidence-JSON branch, chosen
-        exactly as ``fts_search`` chooses).  The id set rides ``json_each(?)``
-        rather than one placeholder per id: a ceiling is a whole library's
-        visible sources, tens of thousands in production, past
-        ``SQLITE_MAX_VARIABLE_NUMBER``.  The ``IN (SELECT … json_each(?))``
-        list is uncorrelated, so SQLite materialises it once per statement.
-
-        ⚠ The unary ``+`` on ``kos.source_id`` is load-bearing.  Without it the
-        planner seeks ``uq_knowledge_object_sources_sync_key (object_id,
-        source_id)`` once PER CEILING ID for every candidate row — measured on
-        20k objects with a 49k-id ceiling: 110 ms for a dense page, 19.3 s for
-        a sparse one (10 supported rows at the end of the keyset).  With the
-        ``+`` it probes ``idx_kos_object (object_id)`` — an object has a
-        handful of rows there — and tests each against the materialised list:
-        14 ms / 11 ms on the same data.
-        """
-        id_list = "(SELECT CAST(value AS TEXT) FROM json_each(?))"
-        if not KnowledgeStore.source_index_backfilled(db, notebook_id):
-            return (
-                "EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(knowledge_objects.evidence) "
-                "THEN CASE WHEN json_type(knowledge_objects.evidence)='array' "
-                "THEN knowledge_objects.evidence ELSE '[]' END ELSE '[]' END) ev "
-                "WHERE ev.type='object' AND json_extract("
-                "CASE WHEN ev.type='object' THEN ev.value ELSE '{}' END,"
-                f"'$.source_id') IN {id_list})"
-            )
-        return (
-            "EXISTS (SELECT 1 FROM knowledge_object_sources kos "
-            "WHERE kos.object_id=knowledge_objects.id "
-            "AND kos.notebook_id=knowledge_objects.notebook_id "
-            f"AND +kos.source_id IN {id_list})"
-        )
-
     # ------------------------------------------------------------- counts
     @staticmethod
     def count_knowledge(
@@ -2231,23 +2180,32 @@ class KnowledgeStore:
         (``knowledge_objects.source_id``) is listed — the executor's own
         private-Memory row drop, evaluated in SQL."""
         placeholders = ",".join("?" for _ in statuses)
-        ceiling = KnowledgeStore._source_id_list(supported_by_source_ids)
+        ceiling = source_ceiling.normalise_ceiling(supported_by_source_ids)
         if ceiling is not None and not ceiling:
             return 0
-        excluded = KnowledgeStore._source_id_list(excluding_owner_source_ids) or []
+        excluded = source_ceiling.normalise_ceiling(excluding_owner_source_ids)
         gate, gate_params = "", []
         if excluded:
-            gate += " AND source_id NOT IN (SELECT CAST(value AS TEXT) FROM json_each(?))"
-            gate_params.append(json.dumps(excluded))
+            bound = source_ceiling.ceiling_param(excluded)
+            gate += f" AND source_id NOT IN {bound.sql}"
+            gate_params.append(bound.value)
         if ceiling is not None:
-            gate += " AND " + KnowledgeStore._object_support_sql(db, notebook_id)
-            gate_params.append(json.dumps(ceiling))
-        row = db.execute(
+            bound = source_ceiling.ceiling_param(ceiling)
+            gate += " AND " + source_ceiling.evidence_support_sql(
+                "knowledge_objects", bound,
+                authoritative=not KnowledgeStore.source_index_backfilled(db, notebook_id),
+            )
+            gate_params.append(bound.value)
+        sql = (
             f"SELECT COUNT(*) AS count FROM knowledge_objects "
             f"WHERE notebook_id = ? AND object_type = ? AND status IN ({placeholders})"
-            f"{gate}",
-            (notebook_id, object_type, *statuses, *gate_params),
-        ).fetchone()
+            f"{gate}"
+        )
+        params = (notebook_id, object_type, *statuses, *gate_params)
+        if gate_params:
+            row = source_ceiling.execute_with_ceiling(db, sql, params).fetchone()
+        else:
+            row = db.execute(sql, params).fetchone()
         return int(row["count"])
 
     @staticmethod
@@ -2310,14 +2268,16 @@ class KnowledgeStore:
         in the ceiling and the keyset (same ordering, same cursor) is
         unchanged.  The price is the residual the paragraphs above avoid for
         status: a page walks keyset entries until ``limit`` supported rows
-        are found, one indexed ``idx_kos_object`` probe each — bounded by the
-        notebook's rows of this type, and paid in the database instead of as
-        executor round trips.  ``None`` → statement and parameters byte-identical to the
+        are found, one indexed probe by ``object_id`` each — bounded by the
+        notebook's rows of this type (see the port docstring for the
+        measured rate), and paid in the database instead of as executor round
+        trips.  ``None`` → statement and parameters byte-identical to the
         unrestricted page; empty → ``[]`` without a query.  Support means an
-        EVIDENCE item from a listed source (``_object_support_sql``), the
-        predicate ``count_knowledge(supported_by_source_ids=...)`` shares.
+        EVIDENCE item from a listed source
+        (``source_ceiling.evidence_support_sql``), the predicate
+        ``count_knowledge(supported_by_source_ids=...)`` shares.
         """
-        ceiling = KnowledgeStore._source_id_list(allowed_source_ids)
+        ceiling = source_ceiling.normalise_ceiling(allowed_source_ids)
         if ceiling is not None and not ceiling:
             return []
         params: List[object] = [notebook_id, object_type]
@@ -2326,16 +2286,22 @@ class KnowledgeStore:
             clause = "AND (created_at, id) > (?, ?) "
             params.extend([after[0], after[1]])
         if ceiling is not None:
-            clause += "AND " + KnowledgeStore._object_support_sql(db, notebook_id) + " "
-            params.append(json.dumps(ceiling))
+            bound = source_ceiling.ceiling_param(ceiling)
+            clause += "AND " + source_ceiling.evidence_support_sql(
+                "knowledge_objects", bound,
+                authoritative=not KnowledgeStore.source_index_backfilled(db, notebook_id),
+            ) + " "
+            params.append(bound.value)
         params.append(max(1, int(limit)))
-        return db.execute(
+        sql = (
             "SELECT id, object_type, source_id, payload, evidence, status, created_at "
             "FROM knowledge_objects "
             f"WHERE notebook_id = ? AND object_type = ? {clause}"
-            "ORDER BY created_at, id LIMIT ?",
-            params,
-        ).fetchall()
+            "ORDER BY created_at, id LIMIT ?"
+        )
+        if ceiling is not None:
+            return source_ceiling.execute_with_ceiling(db, sql, params).fetchall()
+        return db.execute(sql, params).fetchall()
 
     @staticmethod
     def list_knowledge_page(
