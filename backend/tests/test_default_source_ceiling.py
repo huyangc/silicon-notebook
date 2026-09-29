@@ -490,6 +490,92 @@ def test_closed_memory_channel_keeps_memory_out_of_the_hidden_half():
         ) is False
 
 
+def test_closed_channel_strips_memory_from_a_submitted_scope_too():
+    """The constructor does not rely on "nobody submits a scope while closing
+    the channel": a submitted all-selected freeze carrying the asker's own
+    Memory in its hidden half (and, defensively, a Memory id in its visible
+    half) loses both, and the probe still reports no drift."""
+    store = _shared_store()
+    submitted = {
+        "mode": "include",
+        "source_ids": ["src-a", "src-b", "src-memory-bob"],
+        "hidden_source_ids": ["src-knowhow", "src-memory-bob"],
+        "narrowed": False,
+        "owner_id": "bob",
+    }
+    with memory_access_context(False), default_ceiling_context(
+        NB, "bob", store.readers(), local_scope=submitted,
+    ):
+        scope = current_source_scope()
+        assert scope.source_provided is True
+        assert scope.source_ids == frozenset({"src-a", "src-b"})
+        assert scope.hidden_source_ids == frozenset({"src-knowhow"})
+        assert scope.withheld_hidden_source_ids == frozenset({"src-memory-bob"})
+        assert source_allowed(NB, "src-memory-bob") is False
+        assert source_scope_visible_universe_matches(
+            NB, ["src-a", "src-b"], ["src-knowhow", "src-memory-bob"],
+        ) is True
+        assert current_source_scope_payload() == {
+            "mode": "include", "source_ids": ["src-a", "src-b"], "narrowed": False,
+        }
+    # Open channel: the submission is used exactly as given.
+    with default_ceiling_context(
+        NB, "bob", store.readers(), local_scope=submitted,
+    ):
+        assert source_allowed(NB, "src-memory-bob") is True
+
+
+def test_closed_channel_refuses_an_exclude_form_submission():
+    store = _shared_store()
+    submitted = {"mode": "exclude", "source_ids": []}
+    with memory_access_context(False):
+        with pytest.raises(ValueError):
+            with default_ceiling_context(
+                NB, "bob", store.readers(), local_scope=submitted,
+            ):
+                pytest.fail("an unbounded local scope must not run")
+    with default_ceiling_context(NB, "bob", store.readers(), local_scope=submitted):
+        assert current_source_scope().mode == "exclude"
+
+
+def test_closed_channel_strips_memory_on_refresh():
+    store = _shared_store()
+    with default_ceiling_context(NB, "bob", store.readers()):
+        with memory_access_context(False), refreshed_ceiling_context(
+            NB, "bob", store.readers(),
+        ):
+            scope = current_source_scope()
+            assert scope.hidden_source_ids == frozenset({"src-knowhow"})
+            assert scope.withheld_hidden_source_ids == frozenset({"src-memory-bob"})
+        with memory_access_context(False), refreshed_ceiling_context(
+            NB, "bob", store.readers(),
+            local_scope={"mode": "include", "source_ids": ["src-a"],
+                         "hidden_source_ids": ["src-memory-bob"],
+                         "narrowed": True},
+        ):
+            assert source_allowed(NB, "src-memory-bob") is False
+
+
+def test_a_payload_cannot_supply_withheld_ids():
+    """``withheld_hidden_source_ids`` widens what the drift probe expects; a
+    submitted dict carrying that key must not suppress drift detection."""
+    payload = {
+        "mode": "include", "source_ids": ["src-a"],
+        "hidden_source_ids": ["src-knowhow"], "narrowed": False,
+        "owner_id": "bob",
+        "withheld_hidden_source_ids": ["src-memory-new"],
+    }
+    with source_scope_context(NB, payload):
+        scope = current_source_scope()
+        assert scope.withheld_hidden_source_ids == frozenset()
+        assert source_scope_visible_universe_matches(
+            NB, ["src-a"], ["src-knowhow", "src-memory-new"],
+        ) is False, "a new hidden source is drift, whatever the payload said"
+    store = _shared_store()
+    with default_ceiling_context(NB, "bob", store.readers(), local_scope=payload):
+        assert current_source_scope().withheld_hidden_source_ids == frozenset()
+
+
 def test_open_memory_channel_does_not_classify_the_hidden_half():
     store = _shared_store()
     with default_ceiling_context(NB, "bob", store.readers()):
