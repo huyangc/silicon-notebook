@@ -1013,21 +1013,170 @@ def test_report_create_rejects_a_base_only_submission_on_a_library_only_notebook
     assert launched == []
 
 
-def test_report_create_without_any_scope_is_untouched_by_the_emptiness_check(
+def test_report_create_without_any_scope_runs_every_phase_under_the_default_ceiling(
     client, monkeypatch
 ):
-    """两维都没提交的请求不是一次「选择」,这道闸完全不参与 —— 报告可以合法建在
-    一个 Ask 框会拒绝的笔记本上,收紧那一点是另一个行为变更。"""
-    nb_id, _base_id, launched = _scoped_client(client, monkeypatch)
+    """E1-3:两维都没提交的报告不是一次「选择」——空范围闸不参与,也不替用户持久化
+    任何范围(``understanding.source_scope`` 仍为 None);但它的每个阶段(问题理解、
+    确认后的规划、生成)都在**默认天花板**下跑:可见来源 ∪ 创建者本人的隐藏半边,
+    ``ceilings_total`` 置位——无范围不再等于「读全体成员的 Memory 投影」。
+
+    经真实路由与真实协调器(只把后台提交改成同步),引擎只替换三个调模型的步骤,
+    在里面记录当时装着的范围。"""
+    import app.api.report_routes as R
+    from app.api.deps import repository
+    from app.services.report_engine import ReportEngine
+    from app.services.source_scope import (
+        current_source_scope,
+        current_source_scope_payload,
+        source_scope_restricted,
+    )
+    from tests.model_testkit import bind_chat_client
+
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+    repo = repository()
+    monkeypatch.setattr(
+        repo.report_execution, "job_submitter",
+        lambda fn, *args, name=None, notify_pending=False, **kwargs: fn(),
+    )
+    seen: list[tuple] = []
+
+    def record(phase: str) -> None:
+        scope = current_source_scope()
+        seen.append((
+            phase,
+            None if scope is None else (
+                set(scope.source_ids), scope.source_provided, scope.ceilings_total,
+            ),
+            current_source_scope_payload(),
+            source_scope_restricted(),
+        ))
+
+    def intent(engine, question, history):
+        record("intent")
+        return {
+            "normalized_question": question, "resolved_question": question,
+            "intent_type": "explain", "needs_clarification": False,
+            "ambiguities": [], "mandatory_topics": [],
+        }
+
+    def plan(engine, notebook_id, rid, question, history="", **_kwargs):
+        record("plan")
+        repo.update_report(
+            notebook_id, rid, status="outline_ready",
+            outline=[{"title": "A", "scope": "s", "sub_queries": ["q"]}],
+        )
+        return [{"title": "A"}]
+
+    monkeypatch.setattr(ReportEngine, "_plan_intent_contract", intent)
+    monkeypatch.setattr(ReportEngine, "plan_outline", plan)
+    monkeypatch.setattr(
+        ReportEngine, "generate",
+        lambda engine, *args, **kwargs: record("generate"),
+    )
+
+    nb_id = client.post("/api/notebooks", json={"name": "t"}).json()["id"]
+    repo._runtime.source_store.insert_source(
+        source_id="src-unscoped", notebook_id=nb_id, title="doc",
+        source_type="pdf", status="active", parse_status="parsed",
+        file_name="", file_path="", file_size=0, file_hash="", summary="",
+        doc_type="", memory_id="",
+    )
     created = client.post(f"/api/notebooks/{nb_id}/reports", json={"question": "q?"})
     assert created.status_code == 200
-    assert launched and "source_scope" not in launched[-1][1]
-    assert "base_scope" not in launched[-1][1]
-    from app.api.deps import repository
-
-    stored = repository().get_report(nb_id, created.json()["report_id"])
+    rid = created.json()["report_id"]
+    stored = repo.get_report(nb_id, rid)
+    assert stored["status"] == "intent_ready"
     assert (stored.get("understanding") or {}).get("base_scope") is None
     assert (stored.get("understanding") or {}).get("source_scope") is None
+
+    confirmed = client.post(
+        f"/api/notebooks/{nb_id}/reports/{rid}/intent",
+        json={"resolved_question": "q?", "answers": []},
+    )
+    assert confirmed.status_code == 200
+
+    class _Configured:
+        configured = True
+
+    bind_chat_client(repo, "report_section", _Configured())
+    generated = client.post(f"/api/notebooks/{nb_id}/reports/{rid}/generate", json={})
+    assert generated.status_code == 200
+
+    assert [row[0] for row in seen] == ["intent", "plan", "generate"]
+    for phase, scope, payload, restricted in seen:
+        assert scope == ({"src-unscoped"}, False, True), (phase, scope)
+        assert payload is None, phase
+        assert restricted is False, phase
+    final = repo.get_report(nb_id, rid)
+    assert (final.get("understanding") or {}).get("source_scope") is None
+
+
+def test_every_report_phase_refreezes_a_persisted_exclude_scope_to_include(
+    client, monkeypatch
+):
+    """A-2 回归钉:旧形态的 ``exclude`` 持久化范围在生产里不可达,因为三个阶段
+    都先经 ``_validate_source_scope`` 重新冻结成 include——人工确认、生成、以及
+    直出报告的自动确认重验(``_report_scope_recheck``)。任何一处退回原样透传,
+    exclude 就会带着「它没点名的一切」进入规划。"""
+    import app.api.report_routes as R
+    from app.api.deps import repository
+    from tests.model_testkit import bind_chat_client
+
+    nb_id, _base_id, launched = _scoped_client(client, monkeypatch)
+    generate_launches: list = []
+    monkeypatch.setattr(
+        R, "_launch_generate_job",
+        lambda *args, **kwargs: generate_launches.append(kwargs),
+    )
+    repo = repository()
+    for source_id in ("src-keep", "src-drop"):
+        repo._runtime.source_store.insert_source(
+            source_id=source_id, notebook_id=nb_id, title=source_id,
+            source_type="pdf", status="active", parse_status="parsed",
+            file_name="", file_path="", file_size=0, file_hash="", summary="",
+            doc_type="", memory_id="",
+        )
+    rid = client.post(
+        f"/api/notebooks/{nb_id}/reports", json={"question": "q?"}
+    ).json()["report_id"]
+    legacy = {"mode": "exclude", "source_ids": ["src-drop"]}
+    understanding = {
+        "source_scope": legacy, "resolved_question": "q?",
+        "ambiguities": [], "needs_clarification": False,
+    }
+
+    # Auto-confirm re-validation (the direct-run path).
+    refreshed = R._report_scope_recheck(repo, nb_id, dict(understanding))
+    assert refreshed is not None
+    assert refreshed["source_scope"].mode == "include"
+    assert list(refreshed["source_scope"].source_ids) == ["src-keep"]
+
+    # Manual confirmation.
+    repo.update_report(nb_id, rid, status="intent_ready", understanding=understanding)
+    launched.clear()
+    confirmed = client.post(
+        f"/api/notebooks/{nb_id}/reports/{rid}/intent",
+        json={"resolved_question": "q?", "answers": []},
+    )
+    assert confirmed.status_code == 200
+    assert launched[-1][1]["source_scope"].mode == "include"
+    assert list(launched[-1][1]["source_scope"].source_ids) == ["src-keep"]
+
+    # Generation.
+    repo.update_report(
+        nb_id, rid, status="outline_ready", understanding=understanding,
+        outline=[{"title": "A", "scope": "s", "sub_queries": ["q"]}],
+    )
+
+    class _Configured:
+        configured = True
+
+    bind_chat_client(repo, "report_section", _Configured())
+    generated = client.post(f"/api/notebooks/{nb_id}/reports/{rid}/generate", json={})
+    assert generated.status_code == 200
+    assert generate_launches[-1]["source_scope"].mode == "include"
+    assert list(generate_launches[-1]["source_scope"].source_ids) == ["src-keep"]
 
 
 def test_report_confirm_and_generate_reject_a_scope_emptied_since_create(
@@ -1232,14 +1381,14 @@ def test_base_scope_survives_intent_ready_and_reaches_planning(client, monkeypat
     prepare_intent 自己补回,否则确认/生成两阶段读到的恒为 None、参考库照常全量
     参与。
 
-    这里跑完整链路:create(存范围) → 计划任务在 source_scope_context 里调
+    这里跑完整链路:create(存范围) → 计划任务在 default_ceiling_context 里调
     prepare_intent(与 report_execution.start_plan 逐字同构) → confirm(重新冻结
     并把范围交给下一段 plan job)。"""
     import json
 
     from app.api.deps import repository
     from app.services.report_engine import ReportEngine
-    from app.services.source_scope import source_scope_context
+    from app.services.source_scope import default_ceiling_context
     from tests.model_testkit import bind_chat_client
 
     class _IntentLLM:
@@ -1280,8 +1429,10 @@ def test_base_scope_survives_intent_ready_and_reaches_planning(client, monkeypat
     # 就是这条链路上唯一的补回点。
     for workload_id in ("report_outline", "report_section", "report_summary"):
         bind_chat_client(repo, workload_id, _IntentLLM())
-    with source_scope_context(
-        nb_id, after_create.get("source_scope"), after_create.get("base_scope")
+    with default_ceiling_context(
+        nb_id, repo.current_user().id, repo._runtime.ceiling_readers(),
+        local_scope=after_create.get("source_scope"),
+        base_scope=after_create.get("base_scope"),
     ):
         ReportEngine.from_repository(repo, repo.settings).prepare_intent(
             nb_id, rid, "分析 PLL 稳定性"
@@ -1322,8 +1473,9 @@ def test_library_only_report_scope_never_becomes_locally_restricted(
     from app.api.deps import repository
     from app.services.source_scope import (
         base_scope_restricted,
+        current_source_scope_payload,
+        default_ceiling_context,
         source_scope_restricted,
-        source_scope_context,
     )
 
     nb_id, base_id, _launched = _scoped_client(client, monkeypatch, with_base=True)
@@ -1349,11 +1501,18 @@ def test_library_only_report_scope_never_becomes_locally_restricted(
     assert understanding.get("source_scope") is None, "不得替用户伪造一份本地范围"
     assert understanding["base_scope"]["narrowed"] is True
 
-    with source_scope_context(
-        nb_id, understanding.get("source_scope"), understanding.get("base_scope")
+    # Installed exactly as the report worker does (start_plan/start_generate):
+    # the default ceiling freezes the omitted local dimension to the full
+    # visible set, which must still not count as a local narrowing.
+    repo = repository()
+    with default_ceiling_context(
+        nb_id, repo.current_user().id, repo._runtime.ceiling_readers(),
+        local_scope=understanding.get("source_scope"),
+        base_scope=understanding.get("base_scope"),
     ):
         assert base_scope_restricted() is True
         assert source_scope_restricted() is False
+        assert current_source_scope_payload() is None
     import app.api.report_routes as R
     from app.api.deps import repository
 
