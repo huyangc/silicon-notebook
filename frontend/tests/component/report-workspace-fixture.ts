@@ -16,6 +16,7 @@ export function reportWorkspaceFixture(
     outlineBusy: false,
     shareBusy: false,
     shared: false,
+    shareConfirm: null,
     confirmDelete: false,
     confirmDeleteId: null,
     deletingId: null,
@@ -37,7 +38,11 @@ export function reportWorkspaceFixture(
     requestRetry: vi.fn(),
     confirmIntent: vi.fn(),
     confirmOutline: vi.fn(),
-    toggleShare: vi.fn(),
+    // toggleShare / confirmShare 与 copyShareLink 同理:视图 `.then(...)` 读「链接有没有进
+    // 剪贴板」,默认 resolve(null)=「这一次没有公开成功」。
+    toggleShare: vi.fn(async () => null),
+    confirmShare: vi.fn(async () => null),
+    cancelShareConfirm: vi.fn(),
     // 默认 resolve(null)=「这一次没走到复制」。不能用裸 vi.fn():它返回 undefined,而
     // 调用方要 `.then(...)` 读复制结果,undefined 上取 then 当场抛。
     copyShareLink: vi.fn(async () => null),
