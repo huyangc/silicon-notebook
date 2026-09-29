@@ -432,6 +432,17 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
 - 验收：经 facade `_build_chunks_for_source` / `_chunk_and_embed_source` 与 `maintenance.chunk_and_embed_source` 对 Memory 来源建 chunk，
   零行写入；store 直写被拒。变异：去掉 store 检查，直写用例必须红。
 
+**E4-1 落地记录（提交 5d02306a）与由此补入的范围**
+- `build_chunks_for_source` 返回类型是 `str`（回落告警码），遇 Memory 来源返回 `""`，不是计划原文的 0。
+- `replace_source_chunks(memory_source, [])` 同样被拒（同一条写路径）；没有调用方对 Memory 来源这样用。
+- 三条既有测试原来经写路径给 Memory 来源种 chunk，已改为先建普通来源再改类型、或直接 INSERT；断言不变。
+- **E4-1b 其余 chunk 写路径的兜底与静态守卫**（sonnet，波次 2）：`kg_build_job_store.py`（双后端，暂存 chunk 的原子发布）、
+  `knowhow_transfer_store.py`（双后端）、`migration/sync/import_.py`（批量导入）各加同一条拒绝；`sharing_store.py` 的拷贝归 E5-1。
+  新守卫 `$R/backend/tests/test_memory_chunk_write_guard.py`：扫描两个后端所有写 `chunks` 表的语句，每一处要么经过
+  `_refuse_memory_source`，要么登记为「上游只取可见来源」并给出取数函数名；新增未登记的写入点即红。
+- **存量清理并入 E4-5 迁移**：删除 `source_type='memory'` 来源名下已有的 chunk 行及其向量/FTS 行（正常情况下为零行）；
+  迁移测试夹具里种一条这样的行，迁移后不存在。
+
 **E4-2 建图输入排除**（sonnet，波次 2）
 - 文件：`$R/backend/app/repositories/postgres/unified_kg_store.py`、`$R/backend/app/repositories/sqlite/unified_kg_store.py`
   （`seed_payload_rows` :144 / :139、`stream_seed_rows` :154 / :149、`canonical_relation_seed_rows` :260 / :247、`mention_seed_rows` :280 / :265、
