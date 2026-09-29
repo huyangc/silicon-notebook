@@ -43,7 +43,6 @@ from typing import Any, Mapping, Protocol, Sequence
 
 SHARE_DISCLOSURE_REQUIRED = "share_disclosure_required"
 MEMORY_OBJECT_TYPE = "memory"
-NON_AUTHOR_SHARE_REFUSAL = "报告引用了作者本人的个人记忆，只有作者可以公开分享。"
 
 
 class MemoryIdReader(Protocol):
@@ -81,11 +80,9 @@ class ShareDisclosureRequired(Exception):
 
 
 class NonAuthorShareRefused(Exception):
-    """Someone other than the author tried to publish the author's Memory."""
+    """Someone other than the author tried to publish the author's Memory.
 
-    def __init__(self) -> None:
-        super().__init__(NON_AUTHOR_SHARE_REFUSAL)
-        self.message = NON_AUTHOR_SHARE_REFUSAL
+    The user-facing sentence belongs to the route (``user_error`` literal)."""
 
 
 def report_share_disclosure(
