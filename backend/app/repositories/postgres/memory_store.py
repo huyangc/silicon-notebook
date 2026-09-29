@@ -2049,3 +2049,49 @@ class MemoryStore:
             "SELECT embedding_status FROM memory_items WHERE id=%s FOR SHARE",
             (source_memory_id,),
         ).fetchone()
+
+    @staticmethod
+    def memory_ids_for_source_ids_sql() -> str:
+        """The statement behind ``memory_ids_for_source_ids`` (also EXPLAIN-pinned).
+
+        Two scalar parameters, in order: the id list as ONE JSON array text, and
+        the owner.  The id list is a citation list (a report's references), so it
+        can run to hundreds; it is unpacked in SQL instead of being bound as one
+        placeholder per id or as ``= ANY(%s)`` with a Python list.  The row
+        estimate of ``jsonb_array_elements_text`` does not depend on the bound
+        value, so the custom and generic plans are the same primary-key nested
+        loop and a prepared statement cannot flip to a worse plan.
+        """
+        from app.repositories.postgres import memory_sql
+
+        return (
+            "SELECT DISTINCT s.memory_id AS memory_id "
+            "FROM jsonb_array_elements_text(%s::jsonb) AS wanted(id) "
+            "JOIN sources s ON s.id = wanted.id "
+            f"WHERE {memory_sql.memory_source_type_predicate('s.source_type')} "
+            f"AND {memory_sql.memory_source_readable('s')} "
+            "ORDER BY memory_id"
+        )
+
+    def memory_ids_for_source_ids(
+        self, source_ids: Sequence[str], owner_id: str
+    ) -> list[str]:
+        """Memory ids behind the given source ids that belong to ``owner_id``.
+
+        A source counts only when it is a Memory source (``source_type =
+        'memory'``) readable by ``owner_id`` under ``memory_sql``'s single
+        definition — i.e. its ``memory_items`` row was created by that owner.
+        Another member's Memory source, an orphaned Memory source, a Knowhow or
+        an ordinary source, and an unknown id contribute nothing, so a caller
+        that counts the result can never learn about anyone else's Memory.
+        Sorted and distinct; an empty id list or owner returns ``[]``.
+        """
+        wanted = list(dict.fromkeys(str(item) for item in source_ids if item))
+        owner = str(owner_id or "")
+        if not wanted or not owner:
+            return []
+        with self.database.connect() as db:
+            rows = db.execute(
+                self.memory_ids_for_source_ids_sql(), (json.dumps(wanted), owner)
+            ).fetchall()
+        return [str(row["memory_id"]) for row in rows]
