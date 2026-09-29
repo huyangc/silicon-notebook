@@ -417,10 +417,11 @@ def test_one_oversized_block_is_clamped_before_the_whole_block_cap():
 # ------------------------------------------------------- ⑥ 来源范围收窄
 
 def test_narrowed_source_scope_still_injects(repo):
-    """收窄来源范围时**仍然注入**——与集合地图被清空的处理刻意不同。
+    """收窄来源范围时**仍然注入**,集合地图也照常注入。
 
-    地图之所以要清,是因为它承诺了一批本次枚举不到的集合;理解块不开任何通道、
-    不是证据、不能被引用,收窄来源并不会让「这个库主要是工艺手册」变得不成立。
+    理解块不开任何通道、不是证据、不能被引用,收窄来源并不会让「这个库主要是工艺
+    手册」变得不成立。地图此前在收窄时被清空(它承诺了一批当时枚举不到的集合);
+    用户裁决 2026-09-29 之后清单工具在收窄下照常可用、计数按天花板计,地图随之保留。
     """
     notebook = _seed(repo)
     _write(repo, notebook.id, "", "corpus_shape", "以模拟版图手册为主EEEE")
@@ -435,8 +436,54 @@ def test_narrowed_source_scope_still_injects(repo):
 
     assert _steps(result, "profile"), "收窄时理解块仍须注入"
     assert "以模拟版图手册为主EEEE" in llm.plan_prompts[0]
-    # 对照:同一次 run 里集合地图被清空(它承诺的集合这次枚举不到)。
-    assert result.collection_map_text == ""
+    # 同一次 run 里集合地图照常在场(清单工具收窄下仍可用,不再被清空)。
+    assert result.collection_map_text.startswith("[Collections in scope]")
+
+
+def test_peer_mode_does_not_inject_the_anchor_library_profile(repo):
+    """对等(全局)模式不注入锚点库的理解块(台账 E-6)。
+
+    对等 run 没有主体库:锚点只是参与集里的第一个命名锚,把「对这个库的理解」当成
+    整组资料的背景会让规划偏向一个用户从未单独选中的库。判据是
+    ``subjectless_run_active()``,不读画像 store,也不记 profile 步。对照臂:同一个
+    库、同一个 retriever 形状、不装对等范围时照常注入。
+    """
+    notebook = _seed(repo)
+    _write(repo, notebook.id, "", "corpus_shape", "以模拟版图手册为主PEER")
+
+    class _RecordingProfile:
+        def __init__(self, inner):
+            self.inner = inner
+            self.reads = 0
+
+        def read_blocks(self, *args, **kwargs):
+            self.reads += 1
+            return self.inner.read_blocks(*args, **kwargs)
+
+    retriever, _ = _retriever(repo, _SeqLLM(), owner_id="u1")
+    recording = _RecordingProfile(repo.agent_profile)
+    retriever.agent_profile = recording
+
+    def prompt_block_state():
+        state = retriever._new_run_state(
+            notebook.id, "版图设计要点", "", None, max_steps=2,
+            intent_queries=None, limits=ask_retrieval_limits("standard"),
+            intent_detail=None)
+        retriever._first_round_prompt_blocks(state)
+        return state
+
+    with source_scope_context(
+        notebook.id, None, None,
+        notebook_source_ceilings={notebook.id: ["s1"]}, subjectless=True,
+    ):
+        peer = prompt_block_state()
+    assert recording.reads == 0
+    assert peer.profile_block == ""
+    assert not [step for step in peer.trace if step.step_type == "profile"]
+
+    single = prompt_block_state()
+    assert recording.reads == 1
+    assert "以模拟版图手册为主PEER" in single.profile_block
 
 
 # --------------------------------------------------------------- ⑦ Ask 侧接线

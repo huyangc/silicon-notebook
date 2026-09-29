@@ -737,8 +737,13 @@ def test_the_disabled_skip_is_reachable_as_defense_in_depth(repo):  # noqa: F811
 # ------------------------------------------------- 三处投影与预算的窄判据
 
 
-def test_narrowed_source_scope_takes_the_action_out_of_every_projection(repo):  # noqa: F811
-    """④ 来源范围收窄 ⇒ 枚举闸关 ⇒ 这个动作整体消失(它与枚举同门)。"""
+def test_narrowed_source_scope_keeps_the_action_in_every_projection(repo):  # noqa: F811
+    """④ 来源范围收窄 ⇒ 枚举闸**照开** ⇒ 这个动作仍在每一处投影里(它与枚举同门)。
+
+    翻转自旧合同「收窄 ⇒ 动作整体消失」(用户裁决 2026-09-29:枚举与
+    `read_document` 认来源勾选、收窄时工具继续可用)。能读哪一篇由花名册(执行器按
+    天花板过滤)与执行体的来源级兜底决定,不再靠把整个动作关掉。
+    """
     from app.models.source_scope import SourceScope
     from app.services.source_scope import source_scope_context
 
@@ -749,11 +754,13 @@ def test_narrowed_source_scope_takes_the_action_out_of_every_projection(repo):  
     with source_scope_context(
         notebook.id, SourceScope(mode="include", source_ids=["s-empty"]),
     ):
-        assert retriever.document_read_active() is False
+        assert retriever.document_read_active() is True
         retriever.run(notebook.id, "这个库讲了什么", "")
 
-    assert all("read_document" not in prompt for prompt in llm.reflect_prompts)
-    assert all("read_document" not in hint for hint in llm.schema_hints)
+    assert llm.reflect_prompts
+    assert all("read_document" in prompt for prompt in llm.reflect_prompts)
+    assert all('"read_document":{' in hint for hint in llm.schema_hints
+               if "sub_queries" not in hint)
 
 
 @pytest.mark.parametrize("overrides, why", [

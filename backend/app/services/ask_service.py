@@ -1490,9 +1490,11 @@ class AskService:
 
         source_scope = current_source_scope()
         if source_scope is not None and source_scope.restricted:
-            # Scoped runs deliberately disable whole-collection enumeration,
-            # but selected documents still expose raw element search. Keep the
-            # no-KG guard from short-circuiting before that tool can run.
+            # A narrowed run with a non-empty selection always has something to
+            # read: the selected documents expose raw element search, and, when
+            # wired, the enumeration tools stay available under narrowing (their
+            # rows and counts are filtered by the ceiling).  Keep the no-KG
+            # guard from short-circuiting before those tools can run.
             return (
                 source_scope.mode == "exclude"
                 or bool(source_scope.source_ids)
@@ -1547,6 +1549,38 @@ class AskService:
 
     def _parse_answer_anchors(self, answer: str, id_map: dict) -> list:
         return self.evidence_context.parse_anchors(answer, id_map)
+
+    def _knowhow_completeness_in_scope(self, notebook_id: str) -> bool:
+        """Whether the deterministic Knowhow complete-enumeration may run here.
+
+        That path walks the named library's Knowhow tables and answers from
+        them directly, so it is only honest when every table it can reach is
+        inside this run's source ceiling.  Knowhow rows belong to a table's
+        hidden projection source, and the path's catalog does not carry it, so
+        the ceiling is honoured at the level it can be proved:
+
+        * PEER (global) mode never runs it: ``notebook_id`` there is only the
+          naming anchor of a participant SET, and walking that one library's
+          tables would answer a set question from one member -- the other
+          participants' tables are simply not in this path;
+        * a narrowed local selection never runs it: the frozen ceiling of a
+          narrowed run excludes every hidden projection source
+          (``ask_routes._validate_source_scope``), so no table is inside it;
+        * an all-selected freeze runs it only while the notebook's live
+          visible+hidden universe still equals the frozen one (the retrieval
+          drift probe, which re-reads the hidden half for the freeze's owner),
+          i.e. while every projection source is inside the ceiling.  A table
+          whose projection source appeared after the question was frozen makes
+          the probe report drift and the path steps aside.
+
+        Stepping aside is the existing ``completeness_unavailable`` outcome:
+        the run continues on the reasoning path, whose own channels filter by
+        the ceiling row by row.
+        """
+        if subjectless_run_active() or source_scope_restricted():
+            return False
+        drift_probe = getattr(self.retrieval, "unsafe_source_scope_restricted", None)
+        return not (callable(drift_probe) and drift_probe(notebook_id))
 
     def _memory_hits(self, user_id: str, notebook_id: str, query: str):
         # Memory/Knowhow projection sources are intentionally absent from the
@@ -3459,6 +3493,7 @@ class AskService:
         from app.services.document_catalog_overview import catalog_coverage_note, prepare_catalog_overview, supplement_missing_summaries
         from app.services.document_source_overview import prepare_source_overview
         from app.services.document_guide import GUIDE_SCHEMA_HINT, guide_style_instruction, render_document_guide
+        from app.services.reasoning_retrieval import document_source_admitted
 
         intent = overview_intent(payload.question)
         if intent is None or self.collection_enumeration is None:
@@ -3467,7 +3502,9 @@ class AskService:
             self.collection_enumeration, self.evidence_context, notebook_id,
             ask_retrieval_limits(payload.retrieval_effort),
             self.settings.chunk_answer_budget_chars, cancel_event,
-            local_only=(intent.kind == "catalog" and not intent.include_reference_libraries),
+            # 对等模式没有「当前笔记本」:锚点只是命名锚,只列它是一份与问题无关的偏窄目录。
+            local_only=(intent.kind == "catalog" and not intent.include_reference_libraries
+                        and not subjectless_run_active()),
         )
         prepared = catalog
         notice = ""
@@ -3480,6 +3517,12 @@ class AskService:
             )
         if intent.kind == "source":
             source, notice = resolve_overview_source(intent, catalog)
+            if source is not None and not document_source_admitted(
+                str(source.notebook_id or ""), source.source_id,
+            ):
+                # 来源级兜底,与 reasoning 的 `read_document` 同一个判据:目录已按
+                # 天花板过滤,读原文之前读取层自己再判一次;越界按「范围内没有」处理。
+                source, notice = None, "当前选择范围内未找到该标题的文档，请核对标题或在来源面板选择目标文档。"
             if source is not None and self.overview_sources is not None:
                 prepared = prepare_source_overview(
                     self.overview_sources, source,
@@ -4918,7 +4961,7 @@ class AskService:
         if (
             intent_contract.completeness_required
             and self.knowhow_store is not None
-            and not source_scope_restricted()
+            and self._knowhow_completeness_in_scope(notebook_id)
         ):
             from app.services.structured_retrieval import (
                 enumerate_knowhow,

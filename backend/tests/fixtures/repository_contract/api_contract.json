@@ -13004,6 +13004,11 @@
               "title": "Source Id",
               "type": "string"
             },
+            "source_scoped": {
+              "default": false,
+              "title": "Source Scoped",
+              "type": "boolean"
+            },
             "synthesis_complete": {
               "anyOf": [
                 {

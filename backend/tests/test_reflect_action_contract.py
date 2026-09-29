@@ -508,6 +508,9 @@ _KNOWN_REFLECT_SCHEMA_GATES = frozenset({
     # PR-3:`search_chunks` 的子闸,打开后多出 `chunks_keywords` 顶层字段。同样
     # 默认关,全门打开时它必须把这个字段带进保留集。
     "keyword_search",
+    # PR-B:来源清单的 `scope` 字段。它是**做减法**的闸(关 = 对等模式,字段整个
+    # 消失),开着即默认值;嵌在 enumerate 分支里,不产生新的顶层键或动作词。
+    "enumerate_scope",
 })
 # The full whitelist each sequence-shaped gate is opened with.
 _REFLECT_SCHEMA_SEQUENCE_GATES = {

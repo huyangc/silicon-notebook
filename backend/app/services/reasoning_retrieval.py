@@ -67,7 +67,8 @@ from app.services.collection_catalog import (
     render_collection_map,
 )
 from app.services.collection_enumeration import (
-    LOCAL_ONLY_SCOPE_SUFFIX, TRUNCATED_CONCURRENT_CHANGE,
+    LOCAL_ONLY_SCOPE_SUFFIX, SELECTED_SOURCES_SCOPE_SUFFIX,
+    TRUNCATED_CONCURRENT_CHANGE,
     EnumerationBudget,
     # PR-A:来源标题 → 花名册条目的比较范式。**共用**枚举侧那一份而不是在这里
     # 再写一个「trim + casefold」:两侧各写一份的话,模型从清单里逐字复制的标题
@@ -116,7 +117,7 @@ from app.services.search_profile import render_style_block
 # ``subjectless_run_active`` only answers "this run has no subject library",
 # which is exactly the fact the element arm's closure turns on, and it is
 # installed by the same one manager that installs the override.
-from app.services.source_scope import subjectless_run_active
+from app.services.source_scope import current_source_scope, subjectless_run_active
 from app.services.source_element_selection import (
     rank_source_elements,
     source_chunk_content_key,
@@ -1269,8 +1270,65 @@ def _allowance_suffix(rows_left: int) -> str:
     return f" | listing allowance left: {max(0, int(rows_left))} rows"
 
 
+def local_only_scope_offered() -> bool:
+    """本 run 是否向模型提供来源清单的 ``scope:"current_notebook"`` 选项。
+
+    **单一判据,四处共读**:reflect prompt 写不写那段范围说明、schema 给不给
+    ``scope`` 字段、解析读不读那一格、``_enumeration_scope`` 换算 ``local_only``。
+    对等(全局)模式下没有「当前笔记本」——锚点库只是参与集里的一个命名锚,用户从未
+    单独选中它;``local_only`` 在那里只会列出锚点库,是一份与问题无关的偏窄目录。所以
+    那种 run 里这个选项整个不存在:模型看不到它,硬填了也按默认 ``"all"`` 走。
+    """
+    return not subjectless_run_active()
+
+
+def document_source_admitted(notebook_id: str, source_id: str) -> bool:
+    """按篇读取的来源级兜底:这一篇在不在本 run 的来源天花板与参与集之内。
+
+    花名册本身已经由枚举执行器按天花板过滤过,所以正常路径上这里恒为真;它是检索/
+    读取层自己的纵深防御——读原文是 I/O,决定一篇能不能读的判据不能只寄托在上游
+    清单的正确性上。两条:
+
+    * ``ActiveSourceScope.allows``:本库勾选(含冻结天花板与漂移后的新来源)、逐库
+      天花板、参考库勾选,与候选过滤同一个谓词;
+    * 对等模式下参与集就是「带逐库天花板的那几本」(``subjectless`` 的构造约束保证
+      每个参与库都有自己的天花板),没有天花板的库不是参与者——``allows`` 对这种库
+      的历史回答是放行,所以这里先判一次。
+
+    无范围(历史的全库路径)一律放行,与 ``source_allowed`` 同口径。
+    """
+    scope = current_source_scope()
+    if scope is None:
+        return True
+    if scope.subjectless and scope.source_ceiling_for(notebook_id) is None:
+        return False
+    return scope.allows(notebook_id, source_id)
+
+
+def _enumeration_scope_suffix(local_only: bool, source_scoped: bool) -> str:
+    """清单的两个范围后缀,按「笔记本范围 → 来源勾选」的固定顺序拼接。
+
+    两件事互相独立:``local_only`` 说的是排除了参考库,``source_scoped`` 说的是本库
+    只剩勾选的来源。一份「仅当前笔记本」的清单在收窄的 run 里两句都成立,于是两个
+    后缀都出现;顺序与前端结果卡标题一致(本地范围在前)。
+    """
+    return (
+        (LOCAL_ONLY_SCOPE_SUFFIX if local_only else "")
+        + (SELECTED_SOURCES_SCOPE_SUFFIX if source_scoped else "")
+    )
+
+
+def _enumeration_scope_detail(local_only: bool, source_scoped: bool) -> dict:
+    """enumerate 步 detail 上的两个稀疏范围键(为假时缺席,与既有 ``local_only`` 同形)。"""
+    return {
+        **({"local_only": True} if local_only else {}),
+        **({"source_scoped": True} if source_scoped else {}),
+    }
+
+
 def _enumeration_step_summary(label: str, coverage, source_id: str, *,
-                              local_only: bool = False) -> str:
+                              local_only: bool = False,
+                              source_scoped: bool = False) -> str:
     """enumerate 步的上屏摘要。
 
     三种结局分别披露：已列全、达到本轮上限、资料变动而无法确认完整。数字一律用
@@ -1279,14 +1337,15 @@ def _enumeration_step_summary(label: str, coverage, source_id: str, *,
 
     范围后缀与既有的「(限指定来源)」同形、同位置:两者都在回答同一个问题——
     「这个数是从多大的一片资料里数出来的」。没有它,「已全部列出 2 条」在一个挂了
-    参考库的库里读起来就是一句假话。两个后缀互斥(source_id 只有元素清单会给,
-    local_only 只有来源清单会给),所以不会叠出一串括号。范围字面取自
-    ``LOCAL_ONLY_SCOPE_SUFFIX``——轨迹、账目、合成分区标题与结果卡共用一份。
+    参考库的库里读起来就是一句假话。「(限指定来源)」与另两个后缀互斥(source_id
+    只有元素清单会给,且单一来源的清单不需要再说「只列了勾选的来源」);
+    ``LOCAL_ONLY_SCOPE_SUFFIX`` 与 ``SELECTED_SOURCES_SCOPE_SUFFIX`` 可以同时成立,
+    按 ``_enumeration_scope_suffix`` 的顺序拼接。两个字面都取自执行器模块——轨迹、
+    账目、合成分区标题、reflect prompt 与结果卡共用一份。
     """
     scope = (
         "（限指定来源）" if source_id
-        else LOCAL_ONLY_SCOPE_SUFFIX if local_only
-        else ""
+        else _enumeration_scope_suffix(local_only, source_scoped)
     )
     if coverage.complete:
         return f"枚举{label}: 已全部列出 {coverage.returned_total} 条{scope}"
@@ -1416,8 +1475,10 @@ def _enumeration_note(chains) -> str:
         )
         # 范围后缀与上屏摘要同形同词。模型看的是这份账目:不写范围的话,「已完整
         # 列出 2 条」会让它以为参考库里也就这些,从而放弃再用 `scope:"all"` 问一次
-        # ——而那正是链键含范围之后它**可以**做的事。
-        scope = LOCAL_ONLY_SCOPE_SUFFIX if chain.outcome.local_only else ""
+        # ——而那正是链键含范围之后它**可以**做的事。来源勾选后缀同理:不写的话,
+        # 收窄 run 里的「已完整列出 3 条」会被模型当成整库只有 3 条。
+        scope = _enumeration_scope_suffix(
+            chain.outcome.local_only, chain.outcome.source_scoped)
         if chain.state == "complete":
             parts.append(f"「{label}」已完整列出 {returned_total} 条{scope}{titles}")
         elif chain.state == "conflict":
@@ -2843,6 +2904,14 @@ class CollectionEnumerationOutcome:
     # "current_notebook"/"all"),前端按同一份字面拼标题后缀。见
     # docs/product-and-api*.md。
     local_only: bool = False
+    # 三类集合都有:这份清单开链时本库的来源天花板是否收窄(用户只勾选了部分来源,
+    # 或冻结后来源集合发生了漂移)——判据与 ``_unsafe_scope_restricted()`` 同一个。
+    # 为真时执行器按天花板过滤了条目与分母,清单里只有勾选的来源,所以它与
+    # ``local_only`` 一样是清单身份的一部分、进续跑键。四个服务端读者(上屏摘要、
+    # 回喂账目、合成证据块的分区标题、reflect prompt)共用
+    # ``SELECTED_SOURCES_SCOPE_SUFFIX`` 那一份「(仅勾选的来源)」字面;结果卡走
+    # ``TypedCollectionResult.source_scoped``。带默认值,既有构造点一个字都不用改。
+    source_scoped: bool = False
 
 
 @dataclass
@@ -2897,7 +2966,9 @@ class DocumentReadOutcome:
 class _EnumChain:
     """一个集合的续跑状态。仅 run 局部,绝不持久化(游标是进程内句柄)。
 
-    续跑键是 ``(collection, kind, source_id, local_only)`` —— **范围在键里**,因为
+    续跑键是 ``(collection, kind, source_id, local_only, source_scoped)`` ——
+    **范围在键里**(``source_scoped`` 与 ``local_only`` 同理:run 中途来源集合漂移
+    会让它翻转,翻转前后按两种天花板读出来的条目不能拼成一份清单),因为
     范围是清单身份的一部分:换了范围要的本来就不是同一份目录。三个后果都是想要的:
     一条链上每一次续跑的范围天然相同(所以这里**不再单独存范围**,「沿用开链范围」
     那个判据没有了存在余地);「先只列本库、后要全部」是**新开一条链**,不再被
@@ -3436,9 +3507,17 @@ class ReasoningRetriever:
 
         The user's checkbox source ceiling is request-local.  Channels that
         cannot be proven safe to pre-filter by source (graph/PPR/community
-        expansion, whole-collection enumeration) are skipped whenever it is
+        expansion, chains, exact-section lookup) are skipped whenever it is
         narrowed; source-addressable KG/element search keeps running and lets
         candidate retrieval intersect that ceiling.
+
+        Typed collection enumeration and ``read_document`` are NOT gated here
+        (user ruling 2026-09-29): both are source-addressable reads, so they
+        stay available under narrowing and drift and the executor filters
+        their rows and denominators by the ceiling.  For them this predicate
+        answers a DISCLOSURE question instead -- ``_enumeration_scope`` reads
+        it to stamp ``source_scoped`` on the listing, and ``reflect`` reads it
+        to tell the model its listings cover only the ticked sources.
         """
         from app.services.source_scope import (
             current_source_scope,
@@ -3658,10 +3737,18 @@ class ReasoningRetriever:
     def enumeration_active(self) -> bool:
         """本 run 是否提供类型化集合枚举工具。
 
-        四个条件缺一不可,且**同一个**判据同时决定:地图注不注入、reflect
-        prompt 写不写这两个动作、schema 给不给 enumerate 分支、动作在不在
-        allowed_actions 里。刻意只有一个闸:任何一处与其余不同步,都会让模型看见
-        一个它调不动的工具(或反过来,调用一个它没被告知的工具),两种都是纯亏。
+        两个条件缺一不可(调用方策略位 + 接线判据),且**同一个**判据同时决定:
+        地图注不注入、reflect prompt 写不写这两个动作、schema 给不给 enumerate
+        分支、动作在不在 allowed_actions 里、循环里的纵深防御放不放行。刻意只有
+        一个闸:任何一处与其余不同步,都会让模型看见一个它调不动的工具(或反过来,
+        调用一个它没被告知的工具),两种都是纯亏。
+
+        **来源范围不进这把闸**(用户裁决 2026-09-29):枚举是按来源可寻址的读取,
+        收窄与漂移下工具照常提供,执行器按本 run 的来源天花板过滤条目与分母,清单
+        以 ``source_scoped`` 如实披露「只列了勾选的来源」。此前这里读
+        ``_unsafe_scope_restricted()``,收窄的 run 因此整个失去了清单与地图。
+        判据因此也不再有 I/O(漂移探针只在真正开链时读一次,见
+        ``_enumeration_scope``)。
 
         因此关闭态没有「enumerate 动作被跳过」这条路径可走——模型压根看不到这个
         动作,真返回了就是畸形输出,按既有的未知动作合同 fail-open 成 answer
@@ -3669,11 +3756,31 @@ class ReasoningRetriever:
         """
         return bool(
             self.allow_enumeration
-            and not self._unsafe_scope_restricted()
             and enumeration_wiring_active(
                 self.settings, self.collection_catalog, self.collection_enumeration
             )
         )
+
+    def _enumeration_scope(
+        self, is_sources: bool, requested_scope: str,
+    ) -> Tuple[bool, bool]:
+        """一次枚举动作的两个范围标记 ``(local_only, source_scoped)``,都进续跑键。
+
+        * ``local_only``:模型填的 ``scope`` 换算成执行器参数,只对来源清单成立,
+          且只在 ``local_only_scope_offered()`` 为真时成立——对等模式下这个选项
+          不存在(prompt/schema/解析同一个判据),替身或畸形响应硬塞进来也按
+          ``"all"`` 走;
+        * ``source_scoped``:本库的来源天花板此刻是否收窄或漂移
+          (``_unsafe_scope_restricted()``,与图通道的闸同一个判据,但这里只用于
+          披露)。**每次开链/续跑现算**:漂移探针的契约就是逐调用现探,run 中途
+          来源集合一变,它翻转、续跑键随之变,新旧两种天花板下的条目不会被接成
+          同一份清单。
+        """
+        local_only = (
+            is_sources and local_only_scope_offered()
+            and requested_scope == ENUMERATE_SCOPE_CURRENT_NOTEBOOK
+        )
+        return local_only, self._unsafe_scope_restricted()
 
     # --- KG 工具箱(薄封装 repo 原语) ---
     def _filter_candidates(self, kind: str, items):
@@ -4288,6 +4395,13 @@ class ReasoningRetriever:
         # 解析三处共用同一份,不各写一份副本。
         element_kinds = ENUMERABLE_ELEMENT_KINDS if enumeration else ()
         object_types = ENUMERABLE_KG_OBJECT_TYPES if enumeration else ()
+        # 来源清单的 `scope` 选项与「清单只含勾选的来源」这句提示,各自一个判据、
+        # prompt/schema/解析(与执行体)共读:对等模式没有「当前笔记本」可选
+        # (`local_only_scope_offered`);收窄或漂移的 run 里每份清单都被天花板过滤,
+        # 模型必须知道清单里的数不是整库的数(`_unsafe_scope_restricted`,只在枚举
+        # 工具在场时才探,关闭态零 I/O)。
+        enumerate_scope = local_only_scope_offered()
+        source_scoped = bool(enumeration) and self._unsafe_scope_restricted()
         try:
             messages = [{
                 "role": "user",
@@ -4301,6 +4415,8 @@ class ReasoningRetriever:
                     plugin_actions=plugin_actions,
                     corpus_langs=corpus_langs,
                     keyword_search=keyword_search,
+                    enumerate_scope=enumerate_scope,
+                    source_scoped=source_scoped,
                 ),
             }]
             if self.untrusted_evidence:
@@ -4316,6 +4432,7 @@ class ReasoningRetriever:
                     read_document=read_document,
                     plugin_actions=plugin_actions,
                     keyword_search=keyword_search,
+                    enumerate_scope=enumerate_scope,
                 ),
                 timeout=self.settings.reasoning_timeout_seconds,
                 max_retries=self.settings.reasoning_max_retries,
@@ -4470,7 +4587,9 @@ class ReasoningRetriever:
                 # 的结果在下游完全一样(非 sources 的执行器压根没有这个参数,
                 # `_run_enumeration` 会再与一次 `is_sources`),多写的那半个条件
                 # 是不可观测的——它坏掉不会有任何测试红。
-                scope = enumerate_request.get("scope", "")
+                # 对等模式下这个选项不存在(prompt 与 schema 都不提供,见
+                # `local_only_scope_offered`),模型硬填也不读,与关闭态的分支同形。
+                scope = enumerate_request.get("scope", "") if enumerate_scope else ""
                 d.enumerate_scope = (
                     scope if scope in ENUMERATE_SCOPES else ENUMERATE_SCOPE_ALL
                 )
@@ -5191,10 +5310,15 @@ class ReasoningRetriever:
         # 耗时改由它后面的下一步(plan,本来就是一次模型调用)吸收,不会污染
         # profile 步的账目。
         #
-        # 收窄口径与集合地图**刻意不同**:``_unsafe_scope_restricted()`` 为真时
-        # 地图必须清空(它承诺了一批本次枚举不到的集合),而理解块**照常注入**
-        # ——它不开任何检索通道、不是证据、不能被 [k] 引用,只影响措辞与查法,
-        # 收窄来源范围并不会让「这个库主要是工艺手册」这句话变得不成立。
+        # 来源收窄下理解块与集合地图都**照常注入**:理解块不开任何检索通道、不是
+        # 证据、不能被 [k] 引用,只影响措辞与查法,收窄来源范围并不会让「这个库
+        # 主要是工艺手册」这句话变得不成立;地图的计数由目录服务按本 run 的来源
+        # 天花板计(清单工具在收窄下照常可用,见 ``enumeration_active``)。
+        #
+        # 对等(全局)模式则**不注入**理解块:它是「对这个库」的理解,而对等 run
+        # 没有主体库——锚点只是参与集里的第一个命名锚,把它的画像当成整组资料的
+        # 背景会让规划偏向一个用户从未单独选中的库。判据是
+        # ``subjectless_run_active()``,与私有记忆通道关闭的判据同一个。
         #
         # fail-open:读不到就当没有。但**不记 skip 步**——这与 memory 零命中记
         # skip 的口径是分开的:那条 skip 承载的是一次 embedding 往返 + 向量
@@ -5205,7 +5329,8 @@ class ReasoningRetriever:
         # 半复用(见 _undelivered_retrieval_note)——零新增查询,关闭态/读取
         # 失败都保持空列表,consult_memory 那半自然查不到任何东西。
         profile_raw_blocks: List = []
-        if profile_wiring_active(self.settings, self.agent_profile):
+        if (profile_wiring_active(self.settings, self.agent_profile)
+                and not subjectless_run_active()):
             try:
                 profile_raw_blocks = self.agent_profile.read_blocks(
                     notebook_id, self.profile_owner_id)
@@ -6051,11 +6176,14 @@ class ReasoningRetriever:
 
         **来源解析零额外 I/O**:只在 `state.enumerations` 里 `collection=="sources"`
         的那批 `SourceItem` 上按 `_normalized_title` 精确匹配。范围合法性已经由
-        `enumerate_sources` 兑现过一次(它按勾选的参考库与 scope 收窄),所以这里
-        既不必、也不该再去库里解析一次标题——那会绕开清单的范围,打开一条模型能
-        用标题探测范围外文档的路。
+        `enumerate_sources` 兑现过一次(它按勾选的参考库、scope 与本 run 的来源
+        天花板收窄),所以这里既不必、也不该再去库里解析一次标题——那会绕开清单的
+        范围,打开一条模型能用标题探测范围外文档的路。解析出的那一篇在发起任何读取
+        之前还要过一次来源级兜底 `document_source_admitted`(天花板 + 参与集),越界即
+        `document_read_out_of_scope` skip:权限只归检索/读取层管,这一层不把它寄托在
+        上游清单的正确性上。
 
-        六条 skip 全部零 I/O、不写 `result_ids`(硬判据:走到发起 I/O 的路径才无条件
+        七条 skip 全部零 I/O、不写 `result_ids`(硬判据:走到发起 I/O 的路径才无条件
         写那把键,skip 分支一律不写)。**见证失败不是 skip**:那一次 I/O 真的发生过,
         所以它记的是一条零命中的 `read_document` 步(`result_ids: []`),并把空产物
         记进账目——模型据此知道那一篇读失败了,不必再请求一次。
@@ -6111,6 +6239,22 @@ class ReasoningRetriever:
         # 解析走 `_resolve_roster_rows`:每一步都是确定性的精确匹配,只是先把模型
         # 抄来的形态(标记/书名号/整行/账目里的截断形)还原成花名册的显示串。
         matches = _resolve_roster_rows(list(roster.values()), requested)
+        # 来源级兜底(检索/读取层的纵深防御,见 `document_source_admitted`):花名册
+        # 已按天花板过滤,但读原文是 I/O,能不能读由这一层自己再判一次。命中的行
+        # 全部在天花板或参与集之外 ⇒ 拒绝,并且这一篇的任何东西都不往下走——不进
+        # 账目(`document_reads`)、不进 trace 的标题与 detail(连模型抄来的标题都
+        # 不回写)、不产生引用;不计次数(没有发生 I/O)。只有部分命中越界时,越界
+        # 的那几行从候选里剔掉,剩下的按原规则判唯一。
+        admitted = [row for row in matches if document_source_admitted(
+            str(getattr(row, "notebook_id", "") or ""), row.source_id)]
+        if matches and not admitted:
+            record(TraceStep(
+                step_type="skip",
+                summary=("跳过按篇读取原文:这篇文档不在本次问题的来源范围内,"
+                         "请改读清单里的其他文档或依据已有材料作答"),
+                detail={"reason": "document_read_out_of_scope"}))
+            return
+        matches = admitted
         if len(matches) != 1:
             # detail 只带模型自己给的标题(截断)与命中条数。内部 source_id 从不
             # 上屏,而这条 skip 的用途恰恰是让模型看懂「你给的标题在清单里找不到
@@ -6976,10 +7120,10 @@ class ReasoningRetriever:
             else decision.enumerate_kind if is_elements
             else decision.enumerate_object_type
         )
-        # 模型填的范围换算成执行器的 `local_only`,与 `is_sources` 与一次(理由与
-        # 取值见 ENUMERATE_SCOPES;另两个集合的执行器没有这个参数)。
-        local_only = is_sources and (
-            decision.enumerate_scope == ENUMERATE_SCOPE_CURRENT_NOTEBOOK)
+        # 两个范围标记都进续跑键:模型填的 scope → `local_only`(仅来源清单),本库
+        # 天花板收窄/漂移 → `source_scoped`(三类集合)。换算见 `_enumeration_scope`。
+        local_only, source_scoped = self._enumeration_scope(
+            is_sources, decision.enumerate_scope)
         source_id = decision.enumerate_source_id if is_elements else ""
         source_title = (
             decision.enumerate_source_title if is_elements else ""
@@ -7012,7 +7156,7 @@ class ReasoningRetriever:
                 source_truncated = False
                 resolve_error = str(exc)[:120]
         # 续跑键含**范围**:换了范围就不是同一份目录了(见 `_EnumChain`)。
-        key = (collection, kind, source_id, local_only)
+        key = (collection, kind, source_id, local_only, source_scoped)
         chain_state = enum_chains.get(key)
         rows_left = enum_limits.enum_rows_per_run - state.enum_rows_used
         pages_left = enum_limits.enum_pages_per_run - state.enum_pages_used
@@ -7151,7 +7295,7 @@ class ReasoningRetriever:
                 if chain_state is None:
                     outcome = CollectionEnumerationOutcome(
                         collection=collection, kind=kind,
-                        source_id=source_id, local_only=local_only,
+                        source_id=source_id, local_only=local_only, source_scoped=source_scoped,
                         items=list(listed.items), coverage=coverage)
                     chain_state = _EnumChain(outcome)
                     enum_chains[key] = chain_state
@@ -7172,7 +7316,7 @@ class ReasoningRetriever:
                 record(TraceStep(
                     step_type="enumerate",
                     summary=_enumeration_step_summary(
-                        label, coverage, source_id, local_only=local_only),
+                        label, coverage, source_id, local_only=local_only, source_scoped=source_scoped),
                     # 字段名刻意与 Knowhow 那条 enumerate 步不同:那边数的
                     # 是表的「行」(scanned_rows/known_total_rows),这里数的
                     # 是集合的「条目」,而且分母可能未知(total=None)。复用
@@ -7189,7 +7333,7 @@ class ReasoningRetriever:
                         "complete": coverage.complete,
                         "has_more": coverage.has_more,
                         "truncated_reason": coverage.truncated_reason,
-                        **({"local_only": True} if local_only else {}),
+                        **_enumeration_scope_detail(local_only, source_scoped),
                     }))
 
     def run(self, notebook_id, question, history="", on_step=None, top_n=None,
@@ -7747,15 +7891,15 @@ class ReasoningRetriever:
                 decision.next_action in (
                     ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION
                 )
-                and self._unsafe_scope_restricted()
+                and not self.enumeration_active()
             ):
-                # Defense in depth: the restricted reflect schema does not
-                # offer enumeration, but a malformed model response or a test
-                # double must still be unable to turn it into collection I/O.
+                # Defense in depth: a run without the enumeration gate does not
+                # offer these actions, but a malformed model response or a test
+                # double must still be unable to turn one into collection I/O.
                 record(TraceStep(
                     step_type="skip",
-                    summary="跳过枚举（指定来源范围下不可用）",
-                    detail={"reason": "source_scope_unsafe_channel"},
+                    summary="跳过枚举(本次检索未提供清单工具)",
+                    detail={"reason": "enumeration_disabled"},
                 ))
             elif decision.next_action == "expand_graph":
                 oid = decision.expand_object_id
@@ -8413,8 +8557,6 @@ class ReasoningRetriever:
             answer_detail)
         if self._unsafe_scope_restricted():
             chains = []
-            enumerations = []
-            collection_map_text = ""
         raise_if_cancelled(self.cancel_event)
         answer_detail["kg"] = len(top_hits)
         # 这里统计的是候选池(截断前),不是最终进入合成 prompt 的数量——那由

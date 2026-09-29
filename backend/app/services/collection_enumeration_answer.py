@@ -43,6 +43,7 @@ from app.services.collection_catalog import COLLECTION_MAP_MAX_CHARS
 from app.services.collection_enumeration import (
     LOCAL_ONLY_SCOPE_SUFFIX,
     MAX_EVIDENCE_REFS,
+    SELECTED_SOURCES_SCOPE_SUFFIX,
     SOURCE_ROW_FIELD_SEPARATOR,
     TRUNCATED_BUDGET,
     TRUNCATED_CONCURRENT_CHANGE,
@@ -249,6 +250,10 @@ def typed_collection_results(
             object_type=outcome.kind if outcome.collection == "kg_objects" else "",
             source_id=outcome.source_id,
             scope="current_notebook" if local_only else "all",
+            # Every collection can be source-scoped (the ceiling filters rows
+            # of all three), so unlike ``scope`` it is not gated on the
+            # collection.  Absent from the wire when False.
+            source_scoped=bool(getattr(outcome, "source_scoped", False)),
             items=[],
             coverage=_typed_coverage(outcome.coverage),
         ))
@@ -527,6 +532,12 @@ def _coverage_phrase(outcome: "CollectionEnumerationOutcome", *, previewed: int)
     the reflect ledger already use, so the model reads one wording across the
     three places the same fact reaches it, and a change to the wording cannot
     land in one of them only.
+
+    ``SELECTED_SOURCES_SCOPE_SUFFIX`` follows the scope suffix when the run's
+    source ceiling was narrowed (or had drifted) while this listing was taken:
+    its rows and its denominator then cover the ticked sources only, and a
+    header saying "complete" without that qualifier would read as the whole
+    library.  Same literal as the trace, the ledger and the reflect prompt.
     """
     coverage = outcome.coverage
     # The sources collection has no sub-type, so its label is the noun alone —
@@ -536,6 +547,8 @@ def _coverage_phrase(outcome: "CollectionEnumerationOutcome", *, previewed: int)
     label = f"{outcome.kind} {noun}" if outcome.kind else noun
     if outcome.local_only:
         label = f"{label}{LOCAL_ONLY_SCOPE_SUFFIX}"
+    if getattr(outcome, "source_scoped", False):
+        label = f"{label}{SELECTED_SOURCES_SCOPE_SUFFIX}"
     listed = coverage.returned_total
     suffix = f", previewed {previewed}"
     if coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE:

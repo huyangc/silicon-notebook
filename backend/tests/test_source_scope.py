@@ -1015,7 +1015,13 @@ class _ScopedRunCommunities:
     pass
 
 
-def test_checkbox_only_scope_disables_enumeration_and_ppr_before_io():
+def test_checkbox_only_scope_keeps_enumeration_and_disables_ppr_before_io():
+    """收窄只关图通道(PPR 零 I/O),枚举工具照常提供(用户裁决 2026-09-29)。
+
+    此前这条用例钉的是「收窄 ⇒ 枚举闸关」;裁决之后枚举与 `read_document` 认来源
+    勾选、由执行器按天花板过滤,工具本身在收窄下继续可用。接线替身只为让接线判据
+    成立——这条 run 的 reflect 直接作答,一次枚举都不发。
+    """
     retrieval = _ScopedRunRetrieval()
     settings = _ScopedRunSettings()
     settings.graph_ppr_enabled = True
@@ -1026,6 +1032,8 @@ def test_checkbox_only_scope_disables_enumeration_and_ppr_before_io():
         communities=_ScopedRunCommunities(),
         settings=settings,
     )
+    retriever.collection_catalog = object()
+    retriever.collection_enumeration = object()
     retriever.plan = lambda *args, **kwargs: [SubQuery(query="plain question")]
     retriever.reflect = lambda *args, **kwargs: ReflectDecision(
         next_action="answer", sufficient=True
@@ -1034,7 +1042,8 @@ def test_checkbox_only_scope_disables_enumeration_and_ppr_before_io():
     with source_scope_context(
         "nb", SourceScope(mode="include", source_ids=["A"])
     ):
-        assert retriever.enumeration_active() is False
+        assert retriever._unsafe_scope_restricted() is True
+        assert retriever.enumeration_active() is True
         result = retriever.run("nb", "plain question")
 
     assert retrieval.ppr_calls == 0
@@ -1124,32 +1133,21 @@ def test_all_selected_universe_drift_disables_ppr_before_io():
 def test_checkbox_scope_skips_per_action_unsafe_channels_with_zero_io():
     """逐动作的纵深防御:模型即使提交了受限 run 下不该出现的动作,也不能落成 I/O。
 
-    受限 run 的 reflect schema 根本不提供枚举/扩展分支,所以正常情况下走不到
-    这里。但畸形模型响应、或将来有人把 allowed_actions 的构造改坏,都会让
-    decision 落到 run() 循环里那几道逐动作闸上——它们一旦失效,执行器就会对
-    **全库**跑枚举/扩展,把未勾选来源的证据连同 [k] 锚点送进答案。
+    受限 run 的 reflect schema 根本不提供扩展分支,所以正常情况下走不到这里。但
+    畸形模型响应、或将来有人把 allowed_actions 的构造改坏,都会让 decision 落到
+    run() 循环里那几道逐动作闸上——它们一旦失效,就会对**全图**跑扩展,把未勾选
+    来源的证据连同 [k] 锚点送进答案。
+
+    枚举已不在这批闸里(用户裁决 2026-09-29):它是按来源可寻址的读取,收窄下照常
+    执行、由执行器按天花板过滤,见
+    ``test_checkbox_scope_enumeration_reaches_the_executor_and_is_disclosed``。
 
     此前唯一覆盖这几道闸的是已删除的 test_reasoning_source_scope.py(那份文件
     专测已移除的模型判断来源特性),整支审查用变异验证确认了覆盖真空:把
     2716 行的 self._unsafe_scope_restricted() 改成 False,全套测试仍然全绿。
     这条测试按用户勾选范围补回该覆盖。
     """
-    from app.services.reasoning_retrieval import (
-        ENUMERATE_ELEMENTS_ACTION,
-    )
-
-    class _NoEnumeration:
-        """任何真实枚举调用都是失败——闸必须在 I/O 之前拦住。"""
-
-        def __getattr__(self, name):
-            def _boom(*args, **kwargs):
-                raise AssertionError(
-                    f"受限 run 不得触发集合枚举 I/O: {name}"
-                )
-            return _boom
-
     for action, expected_summary_fragment in (
-        (ENUMERATE_ELEMENTS_ACTION, "枚举"),
         ("expand_graph", "关系扩展"),
     ):
         retrieval = _ScopedRunRetrieval()
@@ -1159,7 +1157,6 @@ def test_checkbox_scope_skips_per_action_unsafe_channels_with_zero_io():
             communities=_ScopedRunCommunities(),
             settings=_ScopedRunSettings(),
         )
-        retriever.collection_enumeration = _NoEnumeration()
         retriever.plan = lambda *a, **k: [SubQuery(query="plain question")]
         # 第一轮提交那个受限 run 下不该出现的动作,第二轮才收工。
         decisions = iter([
@@ -1187,7 +1184,71 @@ def test_checkbox_scope_skips_per_action_unsafe_channels_with_zero_io():
         assert any(
             expected_summary_fragment in step.summary for step in skipped
         ), f"{action} 的跳过文案未说明跳过的是什么"
-        assert result.enumerations == []
+
+
+def test_checkbox_scope_enumeration_reaches_the_executor_and_is_disclosed():
+    """收窄的 run 里枚举动作照常落到执行器(过滤归执行器),清单带 source_scoped。
+
+    翻转自旧合同「收窄 ⇒ 逐动作 skip、零 I/O」:那条闸让用户勾选部分来源后整个
+    失去清单工具。现在执行体读同一个收窄判据只做**披露**——条目与分母由执行器按
+    天花板过滤,上屏摘要带「(仅勾选的来源)」。
+    """
+    from app.services.collection_enumeration import (
+        SELECTED_SOURCES_SCOPE_SUFFIX,
+        ElementEnumeration,
+        EnumerationCoverage,
+    )
+    from app.services.reasoning_retrieval import ENUMERATE_ELEMENTS_ACTION
+
+    class _RecordingEnumeration:
+        def __init__(self):
+            self.calls = []
+
+        def enumerate_elements(self, notebook_id, kind, **kwargs):
+            self.calls.append((notebook_id, kind))
+            return ElementEnumeration(
+                kind=kind, items=(), cursor=None, extra_pages=0,
+                payload_chars=0,
+                coverage=EnumerationCoverage(
+                    returned=0, returned_total=0, scanned=0, total=0,
+                    has_more=False, complete=True, truncated_reason="",
+                    overflow_semantics=""),
+            )
+
+    retriever = ReasoningRetriever(
+        retrieval=_ScopedRunRetrieval(),
+        model_clients=_ScopedRunModels(),
+        communities=_ScopedRunCommunities(),
+        settings=_ScopedRunSettings(),
+    )
+    executor = _RecordingEnumeration()
+    retriever.collection_catalog = object()
+    retriever.collection_enumeration = executor
+    retriever.plan = lambda *a, **k: [SubQuery(query="plain question")]
+    decisions = iter([
+        ReflectDecision(next_action=ENUMERATE_ELEMENTS_ACTION,
+                        enumerate_kind="formula"),
+        ReflectDecision(next_action="answer", sufficient=True),
+    ])
+    retriever.reflect = lambda *a, **k: next(
+        decisions, ReflectDecision(next_action="answer", sufficient=True)
+    )
+
+    with source_scope_context(
+        "nb", SourceScope(mode="include", source_ids=["A"])
+    ):
+        result = retriever.run("nb", "plain question")
+
+    assert executor.calls == [("nb", "formula")]
+    assert not any(
+        step.detail.get("reason") == "source_scope_unsafe_channel"
+        for step in result.trace
+    )
+    [outcome] = result.enumerations
+    assert outcome.source_scoped is True
+    step = next(s for s in result.trace if s.step_type == "enumerate")
+    assert step.summary.endswith(SELECTED_SOURCES_SCOPE_SUFFIX)
+    assert step.detail["source_scoped"] is True
 
 
 def test_checkbox_scope_rejected_community_expansion_does_not_end_loop():
