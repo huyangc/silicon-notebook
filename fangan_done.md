@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-09-29（新增 §47 当前库保底席位与原文段下限）
+更新日期：2026-09-29（新增 §47 当前库保底席位与原文段下限；§48 全局问答引用核对：部分失败照常交付）
 
 对照依据：[产品方案](silicon_notebook_fangan.md)。章节号指向原方案；“扩展”表示交付时延伸能力，不冒称原方案已有独立条款。
 
@@ -374,7 +374,7 @@ Agent profile、opaque token、scope/allowlist/过期与撤销、公开 onboardi
 
 ## 43. 全局问答的回执口径与引用冻结复核（2026-09-20）
 
-**已交付，2026-09-20；方案 §5.2、§11 / 全局问答扩展。** 多轮检索回执聚合真实成功/降级状态；答案交付前复核冻结来源、可见性与适用的检索指纹。失败时整份答案按公开合同作废并提示重试，不冒充已重新检索的原答案。
+**已交付，2026-09-20；方案 §5.2、§11 / 全局问答扩展。** 多轮检索回执聚合真实成功/降级状态；答案交付前复核冻结来源、可见性与适用的检索指纹。失败时整份答案按公开合同作废并提示重试，不冒充已重新检索的原答案。（2026-09-29 起不再整份作废，见第 48 条。）
 
 当前回执、引用冻结及权限复核时点见[全局问答][global]，回归入口：[全局问答](backend/tests/test_global_ask.py)。
 
@@ -411,6 +411,14 @@ Agent profile、opaque token、scope/allowlist/过期与撤销、公开 onboardi
 **已交付，2026-09-29；方案 §19 两层知识库的延伸（来源范围与引用可信度修复计划 PR-C）。** 挂了参考库时，当前笔记本在每一处机械切分里都保有 `CHUNK_FEDERATION_ACTIVE_RESERVE` 的席位：`chunk` 模式的 MMR / 配额融合 / mix 最终切分，`reasoning` 单次合成、按节合成（只在本节绑定段之间）与深度报告逐节撰写的原文段前缀；全局问答没有主体库，同样的席位按最佳命中顺序逐库分配。判据、席位数、相同正文一席、「无参考库条目则惰性」只有一处定义；未挂参考库时席位恒惰性。reasoning 合成里先于原文段装配的结构化块不再把精确与保底段落挤出 prompt：下限按原文段的真实渲染长度计算，只有结构化块照旧渲染会把保底前缀挤出去的运行才会重新渲染；下限的精确前缀部分对单库同样生效（比例为 0 时也是），其余运行逐字节不变。保底只约束机械切分，不覆盖证据精炼与大纲绑定。
 
 合同、数值与回滚开关见[检索模式问答][retrieval]、[全局问答][global]与[部署][deploy]；回归入口：[mix 席位](backend/tests/test_mix_reserve_seats.py)、[reasoning 前缀](backend/tests/test_reasoning_library_reserve.py)、[原文段下限](backend/tests/test_reasoning_passage_floor.py)、[当前库 id 贯通](backend/tests/test_active_notebook_id_threading.py)。
+
+## 48. 全局问答引用核对：部分失败照常交付、检索时刻登记（2026-09-29）
+
+**已交付，2026-09-29；方案 §5.2、§11 / 全局问答扩展，取代第 43 条的作废口径。** 全局回答的终态引用核对不再整份作废：每条引用与锚点逐条判定，未通过的标注「原文已改动 / 资料已删除 / 无法核对」，答案下方一句如实说明，正文照常交付。核对只判引用完整性，权限与来源范围只归检索层。
+
+对照依据是检索时刻的指纹快照：联邦原文段、mix 分支的知识图谱叠加段、文档概览、集合枚举、KG 对象、推导链与表格分析都经同一道接缝登记（读过全文的生产者进程内哈希，只持指针的一次有界按 id 读），首个真实快照获胜，只按 id 读到的快照不替换已有条目；本 run 登记过、随后被删的元素报告为「资料已删除」。检索时已经不存在的元素不生成引用卡，单库与全局一致。
+
+当前合同见[全局问答][global]与[运维事件][ops]；回归入口：[逐条判定与说明句](backend/tests/test_global_ask_citation_check.py)、[真实引擎的健康运行与竞态](backend/tests/test_global_citation_producers_e2e.py)、[构造点静态登记](backend/tests/test_citation_attestation_guard.py)、[单库悬空元素](backend/tests/test_reference_liveness.py)。
 
 [product]: docs/product-and-api_zh.md
 [flow]: docs/product-and-api_zh.md#产品流程

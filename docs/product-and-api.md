@@ -244,8 +244,12 @@ when the run read it. The federated chunk channel registers it out of the SAME d
 the run retrieved, and only when that passage's own text still matches what the run read (element ids are reused
 deterministically when a source is re-ingested, so a fingerprint read by id alone could describe text that
 replaced what the answer rested on); the other producers register through `evidence_attestation` — the text they
-read hashed in-process, or one bounded by-id read for evidence they cite without reading it. The first real
-snapshot in a run wins. The check covers the WHOLE passage behind a citation, not only the element the card
+read hashed in-process, or one bounded by-id read for evidence they cite without reading it; the mix branch's
+knowledge-graph overlay passages are registered exactly like federated passages. The first real snapshot in a
+run wins, and a snapshot from a by-id read that saw no text never replaces an existing entry -- not even a
+producer's statement that the text it read could not be vouched for; only a producer that read the text may
+replace that. An element some producer registered in the run and that is then deleted during it keeps its card
+and is reported 「资料已删除」. The check covers the WHOLE passage behind a citation, not only the element the card
 names: a passage is assembled from several source elements and the rest are rechecked beside the first. Each
 failed reference is marked with one of three reasons — `changed` (原文已改动: the snapshot and the current text
 differ, or part of the passage is gone), `source_gone` (资料已删除: the source or the cited element was deleted;
@@ -265,6 +269,13 @@ has references that can be checked (an answer citing only external material or m
 additive and omitted when empty, so single-notebook responses serialize exactly as before. They persist in the
 job's payload with no migration; a row the previous recheck voided keeps its stored retry sentence. A partially
 failed answer still feeds the post-completion learning chains.
+An element that no longer exists when it is retrieved produces no citation card, in single-notebook and global
+answers alike: a card whose subject is that element is not shown (in a single-notebook answer its `[k]` marker
+is also removed from the text), a knowledge-object or derivation-chain anchor keeps its card and falls back to
+the source level (it opens the source, not the element), and a table-analysis receipt falls back to the source
+level as well. A single-notebook answer pays one bounded existence read for this when it cites any element and
+none otherwise; a global answer learns it at retrieval time. A table-analysis receipt with no result rows
+still names the library it came from, so it is checked at the source level.
 
 Cross-notebook retrieval runs through the federated original-text channel: the participants × sub-queries task
 table is submitted to a process-level shared executor rather than polled notebook by notebook. A notebook
