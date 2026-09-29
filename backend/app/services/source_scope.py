@@ -1905,11 +1905,14 @@ def default_ceiling_context(
     visible sources across the notebook and its mounted libraries, because each
     library's ceiling is materialised as a ``frozenset`` (built exactly once,
     never sorted).  Measured with the real stores at 49k visible sources per
-    library (median; SQLite / PostgreSQL; machine load ~24): no mount 27 / 32
-    ms, one mount 63 / 70 ms, six mounts 349 / 313 ms; peak allocation 10 / 14
-    MB, 14 / 18 MB and 44 / 48 MB.  The mounted-library share is not new work in
-    a single-library run: the federated legs read the same visible sets today
-    and now reuse these frozen ones instead (``_peer_visible_sources``).
+    library, medians over two runs at machine load 24-45 (so the times are
+    noisy; SQLite / PostgreSQL): no mount 27-37 / 32-69 ms, one mount 63-79 /
+    70-300 ms, six mounts 349-466 / 266-313 ms.  Peak allocation, which load
+    does not blur: 10 / 14 MB, 14 / 18 MB and 44 / 48 MB (the batched read this
+    replaced peaked at 98 / 122 MB with six mounts).  The mounted-library share
+    is not new work in a single-library run: the federated legs read the same
+    visible sets today and now reuse these frozen ones instead
+    (``_peer_visible_sources``).
     """
     if current_source_scope() is not None:
         yield
