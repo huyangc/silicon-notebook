@@ -415,7 +415,9 @@ class RetrievalService:
     def merge_chunk_candidates(self, base, extra):
         return self.candidates._union_chunk_candidates(base, extra)
 
-    def select_chunk_candidates(self, scored, ids, matrix, k, lambda_):
+    def select_chunk_candidates(
+        self, scored, ids, matrix, k, lambda_, *, active_notebook_id,
+    ):
         """MMR 精选,再补上当前笔记本的保底席位。
 
         MMR 只认候选自己的 ``relevance``,而联邦召回把「几篇短文的当前库」和
@@ -432,6 +434,10 @@ class RetrievalService:
 
         单参与者(或 ``CHUNK_FEDERATION_ENABLED=0``)时每条候选都属于当前库,
         保底恒自动满足,这里逐值回到改动之前。
+
+        ``active_notebook_id`` 必填:本轮真实的当前笔记本 id。PPR 腿、生成问题
+        水合腿与第三方贡献者会给当前库自己的行盖上它的原始 id,缺省 ``""`` 会把
+        这些行当成参考库——既算错保底,又打穿「池里有没有参考库行」的惰性闸。
         """
         from app.services.chunk_federation import apply_active_reserve
         from app.services.retrieval import partition_generated_question_chunks
@@ -447,6 +453,7 @@ class RetrievalService:
             )
         return apply_active_reserve(
             self.candidates.settings, selected, scored, k,
+            active_notebook_id=active_notebook_id,
         )
 
     def has_kg(self, notebook_id):

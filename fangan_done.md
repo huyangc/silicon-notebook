@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-09-22（账本精简与现状校正）
+更新日期：2026-09-29（新增 §47 当前库保底席位与原文段下限）
 
 对照依据：[产品方案](silicon_notebook_fangan.md)。章节号指向原方案；“扩展”表示交付时延伸能力，不冒称原方案已有独立条款。
 
@@ -405,6 +405,12 @@ Agent profile、opaque token、scope/allowlist/过期与撤销、公开 onboardi
 注入默认开启，蒸馏与注入仍独立开关。经验只作检索提示，不是可引用证据；本机连通性试跑不等于真实 A/B 质量验收，后者仍在待办中。当前权限、隐私、预算与配置见[检索策略经验][experience]及[部署][deploy]；回归入口：[蒸馏](backend/tests/test_retrieval_experience_job.py)、[注入](backend/tests/test_retrieval_experience_injection.py)、[隐私](backend/tests/test_retrieval_experience_privacy_guard.py)。
 
 [历史交付记录][h46]。
+
+## 47. 当前库保底席位与原文段下限（2026-09-29）
+
+**已交付，2026-09-29；方案 §19 两层知识库的延伸（来源范围与引用可信度修复计划 PR-C）。** 挂了参考库时，当前笔记本在每一处机械切分里都保有 `CHUNK_FEDERATION_ACTIVE_RESERVE` 的席位：`chunk` 模式的 MMR / 配额融合 / mix 最终切分，`reasoning` 单次合成、按节合成（只在本节绑定段之间）与深度报告逐节撰写的原文段前缀；全局问答没有主体库，同样的席位按最佳命中顺序逐库分配。判据、席位数、相同正文一席、「无参考库条目则惰性」只有一处定义，未挂参考库的笔记本逐字节不变；reasoning 合成里先于原文段装配的结构化块按原文段下限渲染，不再把精确与保底段落挤到 0 字符。保底只约束机械切分，不覆盖证据精炼与大纲绑定。
+
+合同、数值与回滚开关见[检索模式问答][retrieval]、[全局问答][global]与[部署][deploy]；回归入口：[mix 席位](backend/tests/test_mix_reserve_seats.py)、[reasoning 前缀](backend/tests/test_reasoning_library_reserve.py)、[原文段下限](backend/tests/test_reasoning_passage_floor.py)、[当前库 id 贯通](backend/tests/test_active_notebook_id_threading.py)。
 
 [product]: docs/product-and-api_zh.md
 [flow]: docs/product-and-api_zh.md#产品流程

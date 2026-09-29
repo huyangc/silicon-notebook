@@ -231,7 +231,7 @@ def test_active_reserve_is_zero_under_override(monkeypatch):
     floors: list = []
     monkeypatch.setattr(
         retrieval_module, "enforce_active_floor",
-        lambda selected, pool, floor: floors.append(floor) or selected,
+        lambda selected, pool, floor, **_kw: floors.append(floor) or selected,
     )
     ids = ("nb-a", "nb-b")
     # 名义 active 的命中弱、peer 的强:没有保底时 active 会被挤出预算=1 的池子。
@@ -248,7 +248,7 @@ def test_active_reserve_is_zero_under_override(monkeypatch):
 
     with _peer_run(ids):
         peer = cf.federated_chunk_candidates(candidates, "nb-a", ["q"])
-        cf.apply_active_reserve(candidates.settings, ["x"], ["x", "y"], 2)
+        cf.apply_active_reserve(candidates.settings, ["x"], ["x", "y"], 2, active_notebook_id="nb-a")
 
     assert floors == [0]
     assert not isinstance(peer.collected, cf.FederatedCollected)
@@ -266,7 +266,7 @@ def test_active_reserve_is_zero_under_override(monkeypatch):
     )
     with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
         single = cf.federated_chunk_candidates(plain, "nb-a", ["q"])
-        cf.apply_active_reserve(plain.settings, ["x"], ["x", "y"], 2)
+        cf.apply_active_reserve(plain.settings, ["x"], ["x", "y"], 2, active_notebook_id="nb-a")
 
     assert floors == [1]
     assert single.collected.active_reserve == 1

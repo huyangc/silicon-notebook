@@ -26,6 +26,7 @@ from typing import (
     Dict,
     FrozenSet,
     List,
+    NamedTuple,
     Optional,
     Sequence,
     Set,
@@ -828,11 +829,20 @@ class ReserveRule:
     pulled in to fill it; it is usually stricter than ``holds`` (a graph-only
     chunk counts as graph coverage even when it is too weak to be worth pulling
     in deliberately).
+
+    ``distinct_text``: a candidate whose ``text`` the selection already carries
+    -- through ANY copy, another library's included -- is never pulled in.
+    The library seats (``_first_copy_rule``) set it, so a seat is one piece of
+    evidence, the same identity ``enforce_active_floor`` holds its spare
+    candidates to; pulling in a second copy of a selected passage would evict
+    a different passage for nothing.  Off (the historical behaviour) for the
+    graph and exact rules.
     """
 
     reserve: int
     holds: Callable[["RetrievedChunk"], bool]
     admits: Callable[["RetrievedChunk"], bool]
+    distinct_text: bool = False
 
 
 def graph_reserve_rule(
@@ -1044,15 +1054,18 @@ def exact_section_reserve_rules(
 # refinement, outline binding) is never overridden by a seat.
 
 
-def is_active_hit(hit, active_notebook_id: str = "") -> bool:
+def is_active_hit(hit, active_notebook_id: str) -> bool:
     """Whether ``hit`` belongs to the notebook this run answers for.
 
     Normalised through ``foreign_notebook_id`` rather than read as
     ``not hit.notebook_id``: federated chunk recall leaves the active leg
     unstamped, but the PPR lane and the generated-question hydrate stamp the
-    RAW owning id, the active notebook's own included.  ``""`` (the default)
-    keeps the historical reading -- only an empty stamp is active -- for the
-    callers that have no active id in scope.
+    RAW owning id, the active notebook's own included.  The id is REQUIRED,
+    never defaulted: with ``""`` an own-id stamp reads as a peer, which both
+    miscounts the floor and defeats every "is there any foreign row?" inert
+    gate -- the single-notebook byte-identity guarantee.  Every production
+    caller passes the run's real active id (pinned by
+    ``test_active_notebook_id_threading``).
     """
     return not foreign_notebook_id(
         getattr(hit, "notebook_id", ""), active_notebook_id)
@@ -1076,7 +1089,7 @@ def reserve_eligible(hit) -> bool:
     return float(getattr(hit, "relevance", 0.0) or 0.0) >= RELEVANCE_FLOOR
 
 
-def active_reserve_eligible(hit, active_notebook_id: str = "") -> bool:
+def active_reserve_eligible(hit, active_notebook_id: str) -> bool:
     """``is_active_hit`` and ``reserve_eligible``: may take an active seat."""
     return is_active_hit(hit, active_notebook_id) and reserve_eligible(hit)
 
@@ -1093,7 +1106,9 @@ def _first_copy_rule(
     one-seat-per-passage identity ``enforce_active_floor`` uses.  ``admits``
     is ``holds`` and ``eligible``: a weak or graph-only own row that the
     ranking already selected still counts toward the floor, but only an
-    eligible one is pulled in.
+    eligible one is pulled in.  ``distinct_text`` extends that identity to the
+    WHOLE selection: a row whose text is already selected through another
+    library's copy is skipped, exactly as the floor skips it.
     """
     first: Dict[str, str] = {}
     for chunk in rows:
@@ -1106,7 +1121,8 @@ def _first_copy_rule(
     def _admits(chunk: "RetrievedChunk") -> bool:
         return chunk.chunk_id in held and eligible(chunk)
 
-    return ReserveRule(reserve=max(0, int(seats)), holds=_holds, admits=_admits)
+    return ReserveRule(reserve=max(0, int(seats)), holds=_holds, admits=_admits,
+                       distinct_text=True)
 
 
 def active_reserve_rule(
@@ -1221,6 +1237,30 @@ def mix_reserve_rules(
         graph_reserve_rule(max(0, settings.chunk_graph_reserve)),
         *exact_section_reserve_rules(
             max(0, settings.exact_section_reserve), exact_hits),
+        *library_floor_rules(
+            ranked, active_notebook_id, active_seats=active_seats,
+            library_seats_total=library_seats_total),
+    )
+
+
+def library_floor_rules(
+    ranked: Sequence["RetrievedChunk"],
+    active_notebook_id: str,
+    *,
+    active_seats: int,
+    library_seats_total: int,
+) -> tuple:
+    """The library floors -- ``active_reserve_rule`` then
+    ``library_reserve_rules`` -- shared by every mechanical cut that holds them.
+
+    The mix branch's token cut (``mix_reserve_rules``) and the reasoning
+    passage prefix (``reasoning_passage_order``: Ask synthesis, sectioned
+    synthesis, deep-report drafting) build their floors HERE, so the seat
+    count, the eligibility predicate, the first-copy-per-text identity, the
+    peer-mode per-library split and the "no foreign row -> inert" gate cannot
+    drift between them.  At most one of the two halves is non-empty.
+    """
+    return (
         active_reserve_rule(active_seats, ranked, active_notebook_id),
         *library_reserve_rules(library_seats_total, ranked, active_notebook_id),
     )
@@ -1386,15 +1426,111 @@ def is_exact_lookup_chunk(chunk: "RetrievedChunk") -> bool:
     return bool(getattr(chunk, "exact_lookup", False))
 
 
-def order_reasoning_passages(
-    chunks: Sequence["RetrievedChunk"], *, exact_reserve: int,
-) -> List["RetrievedChunk"]:
-    """The order a reasoning passage partition is rendered in, against a
-    character budget. One definition for both consumers: Ask synthesis
-    (``AskService._answer_reasoning``) and deep-report section drafting
-    (``ReportEngine._draft_section``, for the passages no outline item bound).
+# Characters one reserved passage is assumed to cost beyond its own text in the
+# reasoning chunk segment (the ``kN: [source] title · location — `` line
+# prefix, the newline, the segment heading).  Over-estimating only hands the
+# structured side a few hundred characters fewer; under-estimating is what
+# would let a reserved passage fall off the end of the partition.
+PASSAGE_FLOOR_LINE_CHARS = 120
 
-    Three steps, and the order carries weight:
+
+class ReasoningPassageOrder(NamedTuple):
+    """``reasoning_passage_order``'s result: the order, and its seat prefix.
+
+    ``passages`` is the full reordered partition (nothing dropped).
+    ``prefix`` counts the passages at its front that hold a reserved seat --
+    the exact prefix plus the active / per-library prefix -- which is what the
+    passage floor (``passage_floor``) protects from the structured side.
+    """
+
+    passages: List["RetrievedChunk"]
+    prefix: int
+
+
+def passage_floor(
+    prefix: Sequence["RetrievedChunk"], partition_chars: int,
+) -> int:
+    """Characters of a reasoning source partition held back for ``prefix``.
+
+    ``min(partition // 2, sum(len(text) + PASSAGE_FLOOR_LINE_CHARS))`` over
+    the reserved-seat passages -- the exact prefix AND the active /
+    per-library prefix (J6).  The structured side (Knowhow preview, the
+    enumeration sub-budget, document reads, the spreadsheet block) renders
+    against ``partition - floor``, so a full structured block can no longer
+    leave the passage segment zero characters and void the seats; the half
+    cap keeps the structured side's own share.  ``0`` with no reserved seat
+    (no passage, no exact hit, a single-notebook run), so those runs render
+    byte-for-byte as before.
+    """
+    if not prefix:
+        return 0
+    return min(
+        max(0, int(partition_chars)) // 2,
+        sum(len(chunk.text or "") + PASSAGE_FLOOR_LINE_CHARS for chunk in prefix),
+    )
+
+
+def promote_library_prefix(
+    ordered: Sequence["RetrievedChunk"],
+    prefix: int,
+    rules: Sequence[ReserveRule],
+    held: Sequence["RetrievedChunk"] = (),
+) -> ReasoningPassageOrder:
+    """Stably move each library floor's missing seats behind ``prefix``.
+
+    For every rule (``library_floor_rules``, priority order): the seats it
+    still needs are ``reserve`` minus the passages it already ``holds`` among
+    ``held`` (passages rendered ahead of ``ordered``, e.g. a report section's
+    outline-bound passages) and the first ``prefix`` of ``ordered`` (the exact
+    prefix), so an active passage already in the exact prefix spends a seat.
+    That many ``admits`` passages from the remainder move, in their current
+    order, to directly behind the prefix -- skipping, for a ``distinct_text``
+    rule, a passage whose text is already ahead of it (``held``, the prefix or
+    an earlier pick, any library's copy): one seat is one piece of evidence.
+    A reordering only: nothing is dropped, and a rule with no seats (or none
+    missing) moves nothing.
+    """
+    head, tail = list(ordered[:prefix]), list(ordered[prefix:])
+    counted = [*held, *head]
+    ahead = {chunk.text for chunk in counted}
+    chosen: Set[int] = set()
+    for rule in rules:
+        need = rule.reserve - sum(1 for chunk in counted if rule.holds(chunk))
+        for chunk in tail:
+            if need <= 0:
+                break
+            if id(chunk) in chosen or not rule.admits(chunk):
+                continue
+            if rule.distinct_text and chunk.text in ahead:
+                continue
+            chosen.add(id(chunk))
+            ahead.add(chunk.text)
+            need -= 1
+    picked = [chunk for chunk in tail if id(chunk) in chosen]
+    rest = [chunk for chunk in tail if id(chunk) not in chosen]
+    return ReasoningPassageOrder(head + picked + rest, len(head) + len(picked))
+
+
+def reasoning_passage_order(
+    chunks: Sequence["RetrievedChunk"],
+    *,
+    exact_reserve: int,
+    active_reserve: int = 0,
+    library_reserve: int = 0,
+    active_notebook_id: str = "",
+    held: Sequence["RetrievedChunk"] = (),
+) -> ReasoningPassageOrder:
+    """The order a reasoning passage partition is rendered in, against a
+    character budget, plus how many passages at its front hold a reserved
+    seat. One definition for every consumer: Ask synthesis
+    (``AskService._answer_reasoning``, which the sectioned path reuses per
+    section over that section's bound passages only) and deep-report section
+    drafting (``ReportEngine._section_passage_order``, for the passages no
+    outline item bound).  Production callers reach it through
+    ``chunk_federation.reasoning_order_for``, which reads the seat counts
+    from settings.
+
+    Four steps, and the order carries weight:
 
     1. relevance descending, stable -- ties keep insertion order (retrieval
        order / document order inside an exact section) instead of a random
@@ -1405,16 +1541,55 @@ def order_reasoning_passages(
        position;
     3. ``promote_bounded_prefix_by_library`` -- the first ``exact_reserve``
        exact passages move to the very front (seats split per library in a
-       peer run). Last, so exact passages keep the highest priority; running
-       the interleave after it would scatter the promoted block again.
+       peer run), so exact passages keep the highest priority; running the
+       interleave after it would scatter the promoted block again;
+    4. ``promote_library_prefix`` over ``library_floor_rules`` -- directly
+       behind the exact prefix, at most ``active_reserve`` eligible active
+       passages (``active_reserve_eligible``, first copy per text, current
+       order) minus those the exact prefix (and ``held``) already holds; in a
+       peer run, where there is no subject library, ``library_reserve`` seats
+       shared per library exactly as the mix cut shares them
+       (``library_reserve_rules``: best-hit order, first copy per text).  The
+       active floor is inert when no FOREIGN passage exists -- which is why
+       the real ``active_notebook_id`` must be passed: reasoning's PPR
+       passages carry the active notebook's OWN id -- and the per-library
+       floor with a single library, so a single-notebook run and a
+       one-participant peer run come out exactly as after step 3.
 
     A reordering only: nothing is dropped, ``relevance`` is never rewritten.
+    Mechanical cut only (J4): a model judgement -- evidence refinement,
+    outline binding -- is never overridden, so ``held`` passages stay where
+    their caller put them and are only counted.
     """
     ordered = sorted(chunks, key=lambda chunk: -chunk.relevance)
     ordered = interleave_by_lane(
         ordered, relevance_on_ppr_scale, anchored=is_exact_lookup_chunk)
-    return promote_bounded_prefix_by_library(
+    ordered = promote_bounded_prefix_by_library(
         ordered, is_exact_lookup_chunk, exact_reserve)
+    # The promoted exact block is exactly the first min(reserve, exact count)
+    # passages: ``library_seats`` hands out min(reserve, candidates) seats.
+    exact = min(max(0, int(exact_reserve)),
+                sum(1 for chunk in ordered if is_exact_lookup_chunk(chunk)))
+    rules = library_floor_rules(
+        [*held, *ordered], active_notebook_id,
+        active_seats=active_reserve, library_seats_total=library_reserve)
+    return promote_library_prefix(ordered, exact, rules, held)
+
+
+def order_reasoning_passages(
+    chunks: Sequence["RetrievedChunk"],
+    *,
+    exact_reserve: int,
+    active_reserve: int = 0,
+    library_reserve: int = 0,
+    active_notebook_id: str = "",
+    held: Sequence["RetrievedChunk"] = (),
+) -> List["RetrievedChunk"]:
+    """``reasoning_passage_order(...).passages``."""
+    return reasoning_passage_order(
+        chunks, exact_reserve=exact_reserve, active_reserve=active_reserve,
+        library_reserve=library_reserve,
+        active_notebook_id=active_notebook_id, held=held).passages
 
 
 def relevance_on_ppr_scale(chunk: "RetrievedChunk") -> bool:
@@ -1547,6 +1722,9 @@ def select_with_reserves(
             if inserted >= need:
                 break
             if candidate.chunk_id in selected_ids or not rule.admits(candidate):
+                continue
+            if rule.distinct_text and any(
+                    chunk.text == candidate.text for chunk in selected):
                 continue
             candidate_tokens = est_tokens(candidate.text)
             if candidate_tokens > max_tokens:
@@ -1719,7 +1897,8 @@ def quota_fuse(collected, per_query, top_n, relevance=lambda h: h.relevance):
 
 
 def quota_fuse_baseline_first(
-    collected, per_query, top_n, relevance=lambda h: h.relevance
+    collected, per_query, top_n, relevance=lambda h: h.relevance, *,
+    active_notebook_id: str,
 ):
     """Preserve historical quota-fuse output; fill only unused seats.
 
@@ -1735,6 +1914,8 @@ def quota_fuse_baseline_first(
     expressed in the GROUPS is only a rule about the groups this function was
     handed.  A plain ``dict`` -- every single-library caller, every test double
     -- has no such attribute and takes the historical path unchanged.
+    ``active_notebook_id`` is the run's real active notebook, handed to the
+    floor so an own-id-stamped row counts as the active notebook's.
 
     ``counts`` is the fusion's own per-group accounting and is deliberately NOT
     rewritten by that floor: a floor substitution replaces one already-selected
@@ -1779,12 +1960,13 @@ def quota_fuse_baseline_first(
         collected.values(),
         int(getattr(collected, "active_reserve", 0) or 0),
         relevance=relevance,
+        active_notebook_id=active_notebook_id,
     ), counts
 
 
 def enforce_active_floor(
-    selected, candidates, floor, relevance=lambda h: h.relevance,
-    active_notebook_id: str = "",
+    selected, candidates, floor, relevance=lambda h: h.relevance, *,
+    active_notebook_id: str,
 ):
     """Guarantee the active notebook a minimum share of a FINISHED selection.
 
@@ -1797,11 +1979,13 @@ def enforce_active_floor(
     answer's evidence.
 
     "Active" is ``is_active_hit(hit, active_notebook_id)``.  Federated recall
-    stamps only peer libraries' hits, so with the default ``""`` an empty
-    origin means the notebook being asked about -- the same reading
-    ``evidence_context``, ``source_scope`` and ``citation_origin`` already
-    have; a caller holding the real active id passes it so a raw own-id stamp
-    reads as active too.  A seat already held counts any active baseline row;
+    stamps only peer libraries' hits, so an empty origin means the notebook
+    being asked about -- the same reading ``evidence_context``,
+    ``source_scope`` and ``citation_origin`` already have -- and the REQUIRED
+    real active id makes a raw own-id stamp (PPR lane, generated-question
+    hydrate, third-party contributor rows) read as active too instead of
+    posing as a peer and defeating the inert gate below.  A seat already held
+    counts any active baseline row;
     a spare candidate must also pass ``active_reserve_eligible`` (not graph-
     only, relevance at least ``RELEVANCE_FLOOR`` unless exact-lookup) -- the
     one predicate the mix branch's ``active_reserve_rule`` uses.

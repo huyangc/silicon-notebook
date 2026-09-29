@@ -512,7 +512,7 @@ def federated_chunk_candidates(
     return _merge_results(
         candidates, _task_participants(tasks), tasks, results, len(queries),
         min_relevance=min_relevance, relative_relevance=relative_relevance,
-        plan=plan,
+        plan=plan, active_notebook_id=active_notebook_id,
         legs=_Legs(tuple(participants), tuple(reasons), dropped, deadline),
     )
 
@@ -1729,6 +1729,7 @@ def _emit(candidates, event: dict) -> None:
 def _merge_results(
     candidates, participants, tasks: list, results: list, sub_count: int, *,
     min_relevance: float, relative_relevance: float, plan=None, legs=None,
+    active_notebook_id: str,
 ) -> FederatedChunkResult:
     """Fold within each library, pool by PARTICIPANT order, then select.
 
@@ -1803,6 +1804,7 @@ def _merge_results(
         [folded[notebook_id] for notebook_id, _tier in participants],
         min_relevance=min_relevance,
         relative_relevance=relative_relevance,
+        active_notebook_id=active_notebook_id,
     )
     collected = with_active_reserve(
         {hit.chunk_id: hit for hit in selected},
@@ -2070,7 +2072,7 @@ def _evidence_groups(collected: dict) -> list:
 
 def _select_baseline_then_supplements(
     candidates, folded_pools: list, *,
-    min_relevance: float, relative_relevance: float,
+    min_relevance: float, relative_relevance: float, active_notebook_id: str,
 ) -> list:
     """Cross-library selection that a supplement can extend but never displace.
 
@@ -2119,6 +2121,7 @@ def _select_baseline_then_supplements(
     kept, unqualified = _withheld_active(
         candidates, baseline_pools, budget,
         min_relevance=min_relevance, relative_relevance=relative_relevance,
+        active_notebook_id=active_notebook_id,
     )
     if kept:
         blocked_ids = {hit.chunk_id for hit in kept} | unqualified
@@ -2196,7 +2199,7 @@ def _merge_thresholds(
 
 def _withheld_active(
     candidates, baseline_pools: list, budget: int, *,
-    min_relevance: float, relative_relevance: float,
+    min_relevance: float, relative_relevance: float, active_notebook_id: str,
 ) -> tuple:
     """The active notebook's hits that the cross-library cap may not discard.
 
@@ -2219,8 +2222,9 @@ def _withheld_active(
     evidence, and the copies would then never meet the text de-duplication
     ``peer_evidence`` would have applied to them.
 
-    Identified by ``not hit.notebook_id`` over the flattened pools rather than
-    by taking pool 0.  The active notebook IS pool 0 today (the seat guarantees
+    Identified by ``retrieval.is_active_hit(hit, active_notebook_id)`` over
+    the flattened pools rather than by taking pool 0.  The active notebook IS
+    pool 0 today (the seat guarantees
     it or falls back to the single-library lane), but a predicate that reads
     what it means survives a reordering that a positional index would silently
     misinterpret as "reserve seats for whichever library came first".
@@ -2267,10 +2271,11 @@ def _withheld_active(
     # floor rejects it, or it would slip back in on a lower remainder peak.
     lane = [
         hit for pool in baseline_pools for hit in pool
-        if is_active_hit(hit) and not is_generated_question_only_chunk(hit)
+        if is_active_hit(hit, active_notebook_id)
+        and not is_generated_question_only_chunk(hit)
         and math.isfinite(_score(hit))
     ]
-    ranked = _qualified_active(lane)
+    ranked = _qualified_active(lane, active_notebook_id)
     if not ranked:
         return [], set()
     floor = max(
@@ -2422,26 +2427,60 @@ def peer_library_reserve_seats(settings) -> int:
     return _ratio_seats(settings, _reserve_k(settings))
 
 
+def reasoning_order_for(
+    settings, chunks, active_notebook_id: str, *, held=(),
+):
+    """``retrieval.reasoning_passage_order`` with every seat count read here.
+
+    The one entry the reasoning consumers use -- Ask synthesis
+    (``AskService._answer_reasoning``, which the sectioned path reuses per
+    section), the passage floor computed before it
+    (``AskService._assemble_structured_evidence``) and deep-report drafting
+    (``ReportEngine._section_passage_order``) -- so they cannot read different
+    numbers: ``REASONING_EXACT_RESERVE`` for the exact prefix, and
+    ``active_reserve_seats`` / ``peer_library_reserve_seats`` (exactly one of
+    them non-zero) for the library prefix.  Lives beside those two because
+    they own the seat numbers; ``retrieval`` stays free of an import back
+    into this module.  ``active_notebook_id`` is required: reasoning's PPR
+    passages carry the active notebook's own id.
+    """
+    from app.services.retrieval import reasoning_passage_order
+
+    return reasoning_passage_order(
+        chunks,
+        exact_reserve=int(getattr(settings, "reasoning_exact_reserve", 0) or 0),
+        active_reserve=active_reserve_seats(settings),
+        library_reserve=peer_library_reserve_seats(settings),
+        active_notebook_id=active_notebook_id,
+        held=held,
+    )
+
+
 def _score(hit) -> float:
     return float(hit.relevance or hit.score or 0.0)
 
 
-def _qualified_active(hits) -> list:
+def _qualified_active(hits, active_notebook_id: str) -> list:
     """Active-library hits eligible to hold a reserved seat, strongest first.
 
     ``retrieval.active_reserve_eligible`` -- the one predicate every seat
-    uses -- with the default active id: "active" is an empty stamp, see
-    ``_merge_results`` for why the active leg is the only one left unstamped.
-    Stable sort, so equal scores keep the caller's own deterministic order.
+    uses -- with the run's real active id: the active leg is left unstamped
+    (see ``_merge_results``), and the normalisation reads an own-id stamp as
+    active too.  Stable sort, so equal scores keep the caller's own
+    deterministic order.
     """
     from app.services.retrieval import active_reserve_eligible
 
-    qualified = [hit for hit in hits if active_reserve_eligible(hit)]
+    qualified = [
+        hit for hit in hits if active_reserve_eligible(hit, active_notebook_id)
+    ]
     qualified.sort(key=lambda hit: -_score(hit))
     return qualified
 
 
-def apply_active_reserve(settings, selected, pool, k: int) -> list:
+def apply_active_reserve(
+    settings, selected, pool, k: int, *, active_notebook_id: str,
+) -> list:
     """The MMR branch's entry to the ONE floor implementation.
 
     ``RetrievalService.select_chunk_candidates`` calls this after MMR, which on
@@ -2453,11 +2492,15 @@ def apply_active_reserve(settings, selected, pool, k: int) -> list:
     both branches reserve one number -- and then it delegates to
     ``retrieval.enforce_active_floor``, which owns the rule (tail-first peer
     replacement, supplements given up before evidence, text de-duplication,
-    inert without a peer hit or without a floor).
+    inert without a peer hit or without a floor).  ``active_notebook_id`` is
+    the run's real active notebook, so a row stamped with its own raw id reads
+    as active rather than as a peer.
     """
     from app.services.retrieval import enforce_active_floor
 
-    return enforce_active_floor(selected, pool, _reserve_size(settings, k))
+    return enforce_active_floor(
+        selected, pool, _reserve_size(settings, k),
+        active_notebook_id=active_notebook_id)
 
 
 def _fold_library_pool(groups: list) -> list:
