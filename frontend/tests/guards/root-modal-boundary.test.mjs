@@ -45,6 +45,7 @@ const hook = await parseModule("use-root-modal-coordinator.ts");
 const modelPanel = await parseModule("model-service-panel.tsx");
 const passwordModal = await parseModule("password-change-modal.tsx");
 const searchProfileModal = await parseModule("search-profile-modal.tsx");
+const releaseNotesModal = await parseModule("release-notes-modal.tsx");
 const memoryPanel = await parseModule("memory-panel.tsx");
 const catalogPanel = await parseModule("command-catalog-panel.tsx");
 const conversationShare = await parseModule("conversation-share-modal.tsx");
@@ -226,6 +227,7 @@ test("every coordinated root surface leaves the interaction tree when it is cove
   }
   const componentBindings = [
     ["PasswordChangeModal", "password-change"],
+    ["ReleaseNotesModal", "release-notes"],
     ["SearchProfileModal", "search-profile"],
     ["MemorySaveDialog", "memory-save"],
     ["CommandCatalogReview", "catalog-review"],
@@ -245,7 +247,7 @@ test("every coordinated root surface leaves the interaction tree when it is cove
     );
   }
   for (const source of [
-    passwordModal, searchProfileModal, memoryPanel, catalogPanel, conversationShare,
+    passwordModal, searchProfileModal, releaseNotesModal, memoryPanel, catalogPanel, conversationShare,
     promotionQueueModal, edgeReviewModal,
   ]) {
     const text = source.getText(source);
@@ -368,4 +370,19 @@ test("无 Escape / 无遮罩关闭的弹窗，其关闭入口不得被忙碌位�
       );
     }
   }
+});
+
+test("release-notes slot: policy is the actor-owned announcement shape and its close sink stays presentation-only", () => {
+  // conflictGroup 为 null:登录后晚到的公告不许挤掉用户此刻已开的 primary 弹窗。
+  assert.match(
+    hookText,
+    /"release-notes": \{ ownerKinds: \["actor"\], conflictGroup: null, layer: 60, backdrop: false, escape: false \}/,
+  );
+  const sink = caseClauseIn(findFunctionIn(page, "Home", "handleRootModalClosed"), "release-notes").getText(page);
+  assert.match(sink, /releaseNotes\.clear\(\);\s*return;/);
+  assert.doesNotMatch(sink, /markReleaseNotesSeen|fetch/);
+  // 上报「已看」在弹窗自己的关闭函数里,× 与「知道了」共用一条,且两个按钮都不带 disabled。
+  const modalText = releaseNotesModal.getText(releaseNotesModal);
+  assert.match(modalText, /markReleaseNotesSeen\(build\.ordinal\)/);
+  assert.doesNotMatch(modalText, /disabled=/);
 });

@@ -22,6 +22,9 @@ a user's screen, and all three are scanned:
   displayed (the front end falls back to a generic message by status code) and its
   detail is a diagnostics/MCP contract. `tests/test_user_error.py` guards that split.
 
+  4. `release-notes/*.md` (README excluded) — the release manifest hands each note to
+     the front end's update dialog verbatim; each line is scanned with the same rules.
+
 Any hit fails the build. Run by scripts/check.sh.
 
 Scope & deliberate limitation (see MEMORY severity lesson — a word blacklist is not
@@ -85,6 +88,8 @@ FRONTEND_PRODUCTION_DIRS = (
     ROOT / "frontend" / "features",
 )
 BACKEND_APP = ROOT / "backend" / "app"
+# 第四条通道:release-notes/*.md 由打包清单原样交给前端弹窗展示,是用户可见文案。
+RELEASE_NOTES_DIR = ROOT / "release-notes"
 
 # 后端「这段文案会原样上屏」的唯一标记函数(app/api/deps.py)。
 USER_ERROR = "user_error"
@@ -459,6 +464,26 @@ def scan_trace_summaries(path: Path) -> tuple[int, list[tuple[int, str, str]]]:
     return sites, sorted(hits)
 
 
+def scan_release_note(path: Path) -> list[tuple[int, str, str]]:
+    """Blacklisted jargon in one release note (markdown shown to users verbatim).
+
+    Each line is a unit; the same CJK-gated ``terms_in`` rules as the frontend scan apply.
+    """
+    hits: list[tuple[int, str, str]] = []
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not CJK.search(line):
+            continue
+        for term in terms_in(line):
+            hits.append((lineno, term, line.strip()))
+    return hits
+
+
+def _release_note_files() -> list[Path]:
+    if not RELEASE_NOTES_DIR.is_dir():
+        return []
+    return sorted(p for p in RELEASE_NOTES_DIR.glob("*.md") if p.name != "README.md")
+
+
 def _rel(path: Path) -> str:
     """Repo-relative path for reporting; falls back to the absolute one when the
     scan root has been redirected (the self-tests point it at a tmpdir)."""
@@ -575,6 +600,13 @@ def main(argv: list[str] | None = None) -> int:
             violations.append(
                 f"  {rel}:{line}: 「{term}」in trace summary: {snippet!r}"
             )
+
+    note_files = _release_note_files()
+    for path in note_files:
+        rel = _rel(path)
+        for line, term, snippet in scan_release_note(path):
+            snippet = snippet if len(snippet) <= 80 else snippet[:77] + "…"
+            violations.append(f"  {rel}:{line}: 「{term}」in release note: {snippet!r}")
 
     if trace_sites < MIN_TRACE_SUMMARY_SITES:
         print(

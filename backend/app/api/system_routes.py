@@ -30,6 +30,8 @@ from app.repositories.identity_errors import (
 from app.models.model_services import ModelServicesStatus
 from app.models.sources import DetectDocTypesRequest, DetectedDocType
 from app.models.system import (
+    ReleaseNotesResponse,
+    ReleaseNotesSeenRequest,
     SystemConfiguration,
     SystemExtensionContribution,
     SystemExtensionsResponse,
@@ -40,6 +42,11 @@ from app.services.parser_registry import (
     parser_engine_capabilities,
 )
 from app.services.pending_bus import pending_bus
+from app.services.release_notes import (
+    load_release_manifest,
+    mark_release_notes_seen,
+    release_notes_for_user,
+)
 from app.services.reasoning_retrieval import search_profile_wiring_active
 
 #: 与 agent_profile_routes.py 的 ``_DISABLED_MESSAGE`` 同一措辞——两处都是
@@ -84,6 +91,31 @@ def update_my_ui_mode(
     """自助切换界面模式偏好("auto"|"advanced")；只写调用者自己的 user_profiles
     行，不做 admin 校验。合法值由 pydantic Literal 在到达这里之前已经拒绝。"""
     return identity_repository().set_user_ui_mode(user.id, payload.ui_mode)
+
+
+@router.get("/me/release-notes", response_model=ReleaseNotesResponse)
+def my_release_notes(
+    user: UserProfile = Depends(get_current_user),
+) -> ReleaseNotesResponse:
+    """本账号还没看过的系统更新说明(最新在前)。清单缺失/损坏 → ``available=false``
+    且不写库;账号从未记录过基线时,静默把当前版本记为已看并返回空列表。"""
+    return release_notes_for_user(
+        identity_repository(), user.id, load_release_manifest()
+    )
+
+
+@router.post("/me/release-notes/seen", status_code=204)
+def mark_my_release_notes_seen(
+    payload: ReleaseNotesSeenRequest,
+    user: UserProfile = Depends(get_current_user),
+) -> None:
+    """把已看基线推进到 ``min(through_ordinal, 当前版本序号)``,只增不减。
+    前端传它拿到的 ``build.ordinal``,弹窗展示期间服务端升级也不会把新版本
+    一并标成已看。清单不可用时不写库。"""
+    mark_release_notes_seen(
+        identity_repository(), user.id, load_release_manifest(),
+        payload.through_ordinal,
+    )
 
 
 @router.patch("/me/search-profile", response_model=UserProfile)

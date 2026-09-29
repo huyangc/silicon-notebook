@@ -1,0 +1,18 @@
+-- Add users.seen_release_ordinal: the mainline ordinal (first-parent commit
+-- count of the build) of the newest release whose update notes this user has
+-- already been shown. Mirrors SQLite v86 (_migration_86).
+--
+-- The column stays NULLABLE with NO backfill: NULL is a load-bearing value
+-- meaning "never recorded". The first release-notes request for such a user
+-- initializes it to the running build's ordinal (a silent baseline, nothing
+-- is shown), so a new account -- or an existing one at the moment this
+-- feature first ships -- is not shown history it never missed. Backfilling
+-- here would have to invent a baseline that no user ever actually saw.
+--
+-- Write path (identity_store, both backends): initialize only while still
+-- NULL, and advance monotonically (GREATEST / max, never decreases), so a
+-- rolled-back deployment followed by an upgrade does not re-show a notice.
+--
+-- No table, index, FK or unique-surface change: the value is read and written
+-- by primary key only.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS seen_release_ordinal INTEGER;

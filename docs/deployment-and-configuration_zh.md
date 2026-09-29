@@ -403,6 +403,12 @@ bash scripts/pack.sh          # → dist/silicon_notebook_<version>_<os>-<arch>.
 架构)来跑它,并预编译一个包含全部 Python 依赖的 **wheelhouse**——这样 `hnswlib` / `scipy`
 等编译型包在目标机上无需编译器。因为打包机与目标机同 OS/同架构,包内每个二进制都能直接运行。
 
+`pack.sh` 还会在包根目录写 `release-manifest.json`(由 `scripts/build_release_manifest.py`
+生成):记录本次构建的主线序号和全部 `release-notes/*.md`,用来驱动应用内的「系统已更新」
+提示。它需要**完整(非浅克隆)的 git 历史**——浅克隆、说明正文为空或说明文件名不合规都会让
+打包失败。序号以 master 的 first-parent 主线为准,所以**生产包应从 `master` 构建**;从分支
+构建可能漏掉说明。没有 git(或源码树本身不是仓库根目录)时打包会响亮警告、不生成清单,该包不会弹出更新提示。
+
 目标机上——无需 npm/node、无需 root:
 
 ```bash

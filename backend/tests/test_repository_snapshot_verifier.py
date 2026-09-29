@@ -50,6 +50,47 @@ FIXTURE_SECRETS = (
 )
 
 
+def _rollback_v86(db: sqlite3.Connection) -> None:
+    """Undo _migration_86 (users.seen_release_ordinal, parity with PostgreSQL
+    0066_user_seen_release_ordinal.sql) before forging any older deployed
+    schema: a pure column addition, no index to drop -- same shape as
+    _rollback_v72."""
+    db.execute("ALTER TABLE users DROP COLUMN seen_release_ordinal")
+
+
+def test_deployed_v85_database_verifies_users_seen_release_ordinal(tmp_path):
+    """A deployed v85 database is missing exactly _migration_86's addition:
+    the nullable ``users.seen_release_ordinal`` column. No row changes -- NULL
+    ("never recorded") is the correct value for every pre-existing user, so
+    the migration backfills nothing."""
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as upgraded_db:
+        columns = {
+            row[1]: (row[2], row[3], row[4])
+            for row in upgraded_db.execute("PRAGMA table_info(users)")
+        }
+        assert columns["seen_release_ordinal"] == ("INTEGER", 0, None)
+        assert upgraded_db.execute(
+            "SELECT COUNT(*) FROM users WHERE seen_release_ordinal IS NOT NULL"
+        ).fetchone()[0] == 0
+
+    with sqlite3.connect(database) as rollback:
+        _rollback_v86(rollback)
+        rollback.execute("PRAGMA user_version = 85")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 85
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+
+
 def _rollback_v85(db: sqlite3.Connection) -> None:
     """Undo _migration_85 (the incremental exporter's watermark state, parity
     with PostgreSQL 0065_sync_export_snapshot.sql) before forging any older
@@ -57,6 +98,7 @@ def _rollback_v85(db: sqlite3.Connection) -> None:
     index, then the two columns appended to sync_export_state. Dropping the
     columns restores sqlite_master's stored CREATE TABLE text byte-for-byte,
     which is what lets the v83/v84 hops keep expecting the un-ALTERed table."""
+    _rollback_v86(db)
     db.execute("DROP TABLE sync_export_runs")
     db.execute("DROP INDEX idx_sync_change_log_txid")
     db.execute("ALTER TABLE sync_export_state DROP COLUMN exported_snapshot")

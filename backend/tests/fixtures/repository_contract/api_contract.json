@@ -10228,6 +10228,101 @@
           "title": "RejectedUrl",
           "type": "object"
         },
+        "ReleaseNoteItem": {
+          "additionalProperties": false,
+          "description": "One user-facing update note (markdown body written by hand).",
+          "properties": {
+            "body": {
+              "title": "Body",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "ordinal": {
+              "title": "Ordinal",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id",
+            "ordinal",
+            "body"
+          ],
+          "title": "ReleaseNoteItem",
+          "type": "object"
+        },
+        "ReleaseNotesBuild": {
+          "additionalProperties": false,
+          "description": "The running build, as far as the update notice cares.",
+          "properties": {
+            "ordinal": {
+              "title": "Ordinal",
+              "type": "integer"
+            },
+            "version": {
+              "title": "Version",
+              "type": "string"
+            }
+          },
+          "required": [
+            "version",
+            "ordinal"
+          ],
+          "title": "ReleaseNotesBuild",
+          "type": "object"
+        },
+        "ReleaseNotesResponse": {
+          "additionalProperties": false,
+          "description": "Notes this user has not seen yet, newest first.\n\n``available=false`` means the deployment carries no usable manifest; the\nclient then shows nothing (and nothing was recorded for the user).",
+          "properties": {
+            "available": {
+              "title": "Available",
+              "type": "boolean"
+            },
+            "build": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ReleaseNotesBuild"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "notes": {
+              "items": {
+                "$ref": "#/components/schemas/ReleaseNoteItem"
+              },
+              "title": "Notes",
+              "type": "array"
+            }
+          },
+          "required": [
+            "available",
+            "build",
+            "notes"
+          ],
+          "title": "ReleaseNotesResponse",
+          "type": "object"
+        },
+        "ReleaseNotesSeenRequest": {
+          "additionalProperties": false,
+          "description": "Mark notes up to ``through_ordinal`` as seen.\n\nThe client sends the ``build.ordinal`` it was shown, so a server upgrade\nthat lands while the dialog is open does not get marked as seen too.",
+          "properties": {
+            "through_ordinal": {
+              "minimum": 0.0,
+              "title": "Through Ordinal",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "through_ordinal"
+          ],
+          "title": "ReleaseNotesSeenRequest",
+          "type": "object"
+        },
         "RepairScheduledResult": {
           "description": "一个后台修复动作的受理回执。``scheduled`` 是实际排入后台的 source_id(reparse 经\nnotebook 作用域过滤后的);notebook 级动作(补向量)用布尔 ``accepted``。",
           "properties": {
@@ -18446,6 +18541,57 @@
             }
           },
           "summary": "Me Pending Stream"
+        }
+      },
+      "/api/me/release-notes": {
+        "get": {
+          "description": "本账号还没看过的系统更新说明(最新在前)。清单缺失/损坏 → ``available=false``\n且不写库;账号从未记录过基线时,静默把当前版本记为已看并返回空列表。",
+          "operationId": "my_release_notes_api_me_release_notes_get",
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ReleaseNotesResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            }
+          },
+          "summary": "My Release Notes"
+        }
+      },
+      "/api/me/release-notes/seen": {
+        "post": {
+          "description": "把已看基线推进到 ``min(through_ordinal, 当前版本序号)``,只增不减。\n前端传它拿到的 ``build.ordinal``,弹窗展示期间服务端升级也不会把新版本\n一并标成已看。清单不可用时不写库。",
+          "operationId": "mark_my_release_notes_seen_api_me_release_notes_seen_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseNotesSeenRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Mark My Release Notes Seen"
         }
       },
       "/api/me/search-profile": {

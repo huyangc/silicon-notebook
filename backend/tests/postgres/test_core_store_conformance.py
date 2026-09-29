@@ -86,7 +86,7 @@ def core_stores(request) -> CoreStores:
     postgres_settings = request.getfixturevalue("postgres_settings")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 65
+    assert PostgresMigrator(postgres_database).migrate() == 66
     yield CoreStores(
         database=postgres_database,
         identity=PostgresIdentityStore(postgres_database, postgres_settings),
@@ -599,6 +599,37 @@ def test_identity_session_expiry_and_touch_throttle(core_stores: CoreStores):
         (active,),
     )
     assert _iso(touched["last_seen_at"]) > old_seen
+
+
+def test_seen_release_ordinal_initialize_is_conditional_and_advance_is_max(
+    core_stores: CoreStores,
+):
+    """users.seen_release_ordinal(系统更新通知的每账号已看基线):新用户为
+    NULL;initialize 只在仍为 NULL 时写;advance 是单条 SQL 的 GREATEST,
+    NULL 时直接写入、只增不减;未知用户两个写方法都是空操作。"""
+    store = core_stores.identity
+    user = store.create_user("r00654321", "password-9")
+    assert store.get_seen_release_ordinal(user.id) is None
+
+    store.initialize_seen_release_ordinal(user.id, 50)
+    assert store.get_seen_release_ordinal(user.id) == 50
+    store.initialize_seen_release_ordinal(user.id, 999)
+    assert store.get_seen_release_ordinal(user.id) == 50
+
+    store.advance_seen_release_ordinal(user.id, 40)
+    assert store.get_seen_release_ordinal(user.id) == 50
+    store.advance_seen_release_ordinal(user.id, 51)
+    assert store.get_seen_release_ordinal(user.id) == 51
+
+    other = store.create_user("r00654322", "password-9")
+    store.advance_seen_release_ordinal(other.id, 7)  # NULL -> 直接写入
+    assert store.get_seen_release_ordinal(other.id) == 7
+    assert store.get_seen_release_ordinal(user.id) == 51
+
+    assert store.get_seen_release_ordinal("ghost") is None
+    store.initialize_seen_release_ordinal("ghost", 1)
+    store.advance_seen_release_ordinal("ghost", 2)
+    assert store.get_seen_release_ordinal("ghost") is None
 
 
 def test_users_last_seen_follows_session_throttle(core_stores: CoreStores):
@@ -2302,7 +2333,7 @@ def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 65
+    assert PostgresMigrator(postgres_database).migrate() == 66
     local_zone = ZoneInfo("America/Los_Angeles")
     naive_local = datetime(2026, 7, 22, 3, 0, 0)
     expected_utc = naive_local.replace(tzinfo=local_zone).astimezone(timezone.utc)
@@ -2385,7 +2416,7 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 65
+    assert PostgresMigrator(postgres_database).migrate() == 66
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 60}
     )
@@ -2457,7 +2488,7 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
     from app.repositories.postgres import sharing_store as pg_sharing_store
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 65
+    assert PostgresMigrator(postgres_database).migrate() == 66
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 120}
     )

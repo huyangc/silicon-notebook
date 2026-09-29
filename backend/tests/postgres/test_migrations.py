@@ -268,7 +268,7 @@ def test_packaged_migration_refuses_non_utf_database_before_any_ddl(
 def test_packaged_migrations_apply_in_order(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert len(PostgresMigrator(postgres_database).migrations) == 65
+    assert len(PostgresMigrator(postgres_database).migrations) == 66
     migrator = PostgresMigrator(postgres_database)
     assert migrator.migrate(target_version=2) == 2
     with postgres_database.connect() as conn:
@@ -312,7 +312,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_chunks_text_trgm" not in indexes
     for version in (3, 4, 5, 6, 7, 8, 9, 10, 11):
         assert migrator.migrate(target_version=version) == version
-    assert migrator.migrate() == 65
+    assert migrator.migrate() == 66
     with postgres_database.connect() as conn:
         final_indexes = {
             row["indexname"]
@@ -400,6 +400,23 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert wish_status["is_nullable"] == "NO"
     assert wish_status["column_default"] == "'open'::text"
     assert wish_status["collation_name"] == "C"
+    # v66 (per-user baseline for the system-update notice) — see
+    # migrations/0066_user_seen_release_ordinal.sql. Nullable INTEGER with no
+    # default and no backfill: NULL means "never recorded", and every
+    # pre-existing user must still read NULL after the migration.
+    with postgres_database.connect() as conn:
+        seen_ordinal = conn.execute(
+            "SELECT data_type,is_nullable,column_default "
+            "FROM information_schema.columns WHERE table_name='users' "
+            "AND column_name='seen_release_ordinal'"
+        ).fetchone()
+        seen_ordinal_set = conn.execute(
+            "SELECT COUNT(*) AS n FROM users WHERE seen_release_ordinal IS NOT NULL"
+        ).fetchone()["n"]
+    assert seen_ordinal["data_type"] == "integer"
+    assert seen_ordinal["is_nullable"] == "YES"
+    assert seen_ordinal["column_default"] is None
+    assert seen_ordinal_set == 0
     # v54 (question submission channel) — see
     # migrations/0054_question_submitted_via.sql. NOT NULL DEFAULT '' on all
     # three tables; ask_jobs/reports keep the table's existing COLLATE "C",
@@ -815,7 +832,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
         22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
         41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58,
-        59, 60, 61, 62, 63, 64, 65,
+        59, 60, 61, 62, 63, 64, 65, 66,
     ]
 
 
@@ -849,8 +866,8 @@ def test_auth_sunset_migration_preserves_legacy_password_and_session(
             "VALUES ('legacy-session','legacy-user',now(),now()+interval '1 day',now())"
         )
 
-    assert migrator.migrate() == 65
-    assert migrator.migrate() == 65
+    assert migrator.migrate() == 66
+    assert migrator.migrate() == 66
     with postgres_database.connect() as connection:
         users = {
             row["id"]: row for row in connection.execute(
@@ -950,7 +967,7 @@ def test_notebook_object_schema_migration_relocates_legacy_rows(postgres_databas
             ),
         )
 
-    assert migrator.migrate() == 65
+    assert migrator.migrate() == 66
     with postgres_database.connect() as connection:
         relocated = connection.execute(
             "SELECT notebook_id,object_type,status,created_by "
@@ -1013,7 +1030,7 @@ def test_source_agent_provenance_column_is_nullable_and_unconstrained(
             "AND column_name='agent_profile_id'"
         ).fetchone() is None
 
-    assert migrator.migrate() == 65
+    assert migrator.migrate() == 66
     with postgres_database.connect() as connection:
         column = connection.execute(
             "SELECT data_type,is_nullable,column_default,collation_name "
@@ -1088,7 +1105,7 @@ def test_cluster_membership_migration_dedupes_before_unique_guard(postgres_datab
                 ],
             )
 
-    assert migrator.migrate() == 65
+    assert migrator.migrate() == 66
     with postgres_database.connect() as connection:
         rows = connection.execute(
             "SELECT id,canonical_id FROM concept_clusters "

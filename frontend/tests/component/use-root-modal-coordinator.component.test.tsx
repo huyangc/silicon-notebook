@@ -420,3 +420,20 @@ test("the coordinator creates no timer or I/O work", () => {
   });
   expect(vi.getTimerCount()).toBe(0);
 });
+
+test("release-notes is an actor-owned announcement that never evicts a primary modal and cannot be closed by backdrop/escape", () => {
+  render(<Harness />);
+  const actor = value!.captureActorOwner();
+  expect(value!.open("password-change", actor)).not.toBeNull();
+  expect(value!.open("release-notes", actor)).not.toBeNull();
+  expect(value!.view("password-change").open).toBe(true);
+  expect(value!.view("release-notes").open).toBe(true);
+  expect(value!.view("release-notes").topmost).toBe(true);
+  expect(value!.view("password-change").topmost).toBe(false);
+  expect(closed).not.toHaveBeenCalledWith("password-change", "conflict");
+  expect(value!.requestClose("release-notes", "backdrop")).toBe(false);
+  expect(value!.requestClose("release-notes", "escape")).toBe(false);
+  expect(value!.requestClose("release-notes", "button")).toBe(true);
+  expect(closed).toHaveBeenCalledWith("release-notes", "button");
+  expect(value!.view("password-change").topmost).toBe(true);
+});

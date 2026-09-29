@@ -64,6 +64,7 @@ import { AskModePicker } from "./ask-mode-picker";
 import { proposePromotion } from "./promotion-queue";
 import { PromotionQueueModal } from "./promotion-queue-modal";
 import { usePromotionQueue } from "./use-promotion-queue";
+import { useReleaseNotes } from "./use-release-notes";
 import { PromotionTargetModal } from "./promotion-target-modal";
 import { setNotebookTier, tierActionState } from "./notebook-tier";
 import {
@@ -209,6 +210,7 @@ import {
 } from "./group-api";
 import { NotebookMenuActions, ReaderNotebookBadge } from "./notebook-reader-actions";
 import { PasswordChangeModal } from "./password-change-modal";
+import { ReleaseNotesModal } from "./release-notes-modal";
 import { SearchProfileModal } from "./search-profile-modal";
 import { AskComposer } from "./ask-composer";
 import { quotedPhraseHint } from "./query-syntax";
@@ -1042,6 +1044,11 @@ export default function Home() {
     sourceId: sourceDetail?.id ?? null,
     onClosed: handleRootModalClosed,
   });
+  // 登录后每个用户每次页面加载问一次「系统更新说明」;有待看说明才开槽位。
+  const releaseNotes = useReleaseNotes(currentUser?.id ?? null, authChecked);
+  useEffect(() => {
+    if (releaseNotes.notice) rootModals.open("release-notes", rootModals.captureActorOwner());
+  }, [releaseNotes.notice]); // eslint-disable-line react-hooks/exhaustive-deps
   // Domain owners may clear their payload after a successful write, permission
   // downgrade, or workspace transition.  Mirror that close into the
   // presentation coordinator so a hidden lease never remains topmost.
@@ -4622,6 +4629,9 @@ export default function Home() {
       case "search-profile":
       case "understanding":
         return;
+      case "release-notes":
+        releaseNotes.clear();
+        return;
       case "notebook-editor":
         notebookCollection.closeEditor();
         return;
@@ -6816,6 +6826,16 @@ export default function Home() {
           onClose={() => rootModals.requestClose("password-change", "button")}
           interactive={rootModals.view("password-change").topmost}
           zIndex={rootModals.view("password-change").zIndex}
+        />
+      )}
+
+      {rootModals.view("release-notes").open && releaseNotes.notice && (
+        <ReleaseNotesModal
+          build={releaseNotes.notice.build}
+          notes={releaseNotes.notice.notes}
+          onClose={() => rootModals.requestClose("release-notes", "button")}
+          interactive={rootModals.view("release-notes").topmost}
+          zIndex={rootModals.view("release-notes").zIndex}
         />
       )}
 

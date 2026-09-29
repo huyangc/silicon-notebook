@@ -259,7 +259,11 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # sync_export_state.captured and sync_export_state.exported_snapshot -- plus
 # idx_sync_change_log_txid, paired with PostgreSQL
 # 0065_sync_export_snapshot.sql. See ``_migration_85``'s own docstring.
-SCHEMA_VERSION = 85
+# v86 adds users.seen_release_ordinal (nullable INTEGER, no backfill), paired
+# with PostgreSQL 0066_user_seen_release_ordinal.sql: the mainline ordinal of
+# the newest release the user has been shown the system-update notice for.
+# NULL means "never recorded". See ``_migration_86``'s own docstring.
+SCHEMA_VERSION = 86
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -4704,6 +4708,23 @@ class SqliteMigrator:
                     floor_xmin INTEGER
                 );
             """)
+
+    def _migration_86(self) -> None:
+        """Per-user baseline for the system-update notice, parity with
+        PostgreSQL ``0066_user_seen_release_ordinal.sql``.
+
+        ``users.seen_release_ordinal`` is the mainline ordinal (first-parent
+        commit count) of the newest release the user has already been shown
+        notes for. It stays NULLABLE with no backfill: NULL is a load-bearing
+        value meaning "never recorded", which the first notice request turns
+        into a silent baseline (a brand-new or pre-feature user is not shown
+        history they never missed). ``add_column_if_missing`` keeps this
+        migration re-runnable.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "users", "seen_release_ordinal", "INTEGER"
+            )
 
     def _seed(self) -> None:
         now = _now()

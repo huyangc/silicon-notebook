@@ -13745,3 +13745,40 @@ select.group-input {
   min-height: 140px;
   max-height: none;
 }
+
+/* 「系统已更新」弹窗:与 .share-overview-card 同一套四条成对的限高规则——整卡限高 +
+   纵向 flex + 整卡纵向 auto 兜底 + 说明列表区让高并在自己内部滚(下限见下,不收到 0),
+   头(含 ×)与底栏(知道了)恒可达。 */
+.utility-modal-card.release-notes-card {
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.release-notes-card > .source-modal-header,
+.release-notes-card > .modal-actions {
+  flex: 0 0 auto;
+}
+
+/* 下限约等于「一条单行说明」的高度(14+14 内边距 + 一行 ≈ 56px),而不是 140px:
+   卡片限高时列表仍收不到 0(R4 教训,滚动容器塌成 0 会把内容锁死),而内容只有一两行时
+   flex-basis:auto 让它贴着内容,不再在下面留一大块空白。极矮视口仍由整卡 overflow-y:auto 兜底。 */
+.release-notes-list {
+  flex: 1 1 auto;
+  min-height: 56px;
+  margin: 0;
+  padding: 0 24px;
+  list-style: none;
+  overflow-y: auto;
+}
+
+.release-notes-item {
+  padding: 14px 0;
+  border-top: 1px solid #e6e9ef;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.release-notes-item > :first-child { margin-top: 0; }
+.release-notes-item > :last-child { margin-bottom: 0; }

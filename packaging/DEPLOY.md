@@ -18,6 +18,7 @@ model-services.example.toml  系统模型服务模板(无密钥)
 install.sh     一键安装(建 venv + 装依赖 + 生成模型 TOML/.env + 自检)
 start.sh       启动(venv uvicorn 后端 + 便携 node 前端)
 stop.sh        停止
+release-manifest.json  更新说明清单(本次构建的版本序号 + 面向用户的更新说明;无 git 打包时没有此文件)
 ```
 
 ## 安装 → 配置 → 启动

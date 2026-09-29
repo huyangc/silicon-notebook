@@ -1119,6 +1119,7 @@
         "password_iterations": 200000,
         "password_salt": "<password_salt>",
         "role": "user",
+        "seen_release_ordinal": null,
         "status": "active",
         "updated_at": "<timestamp>",
         "username": "a00123456"
@@ -1135,6 +1136,7 @@
         "password_iterations": 200000,
         "password_salt": "<password_salt>",
         "role": "admin",
+        "seen_release_ordinal": null,
         "status": "active",
         "updated_at": "<timestamp>",
         "username": "admin"
@@ -1151,6 +1153,7 @@
         "password_iterations": 200000,
         "password_salt": "<password_salt>",
         "role": "user",
+        "seen_release_ordinal": null,
         "status": "active",
         "updated_at": "<timestamp>",
         "username": "b00654321"
@@ -2546,7 +2549,7 @@
       },
       {
         "name": "users",
-        "sql_sha256": "f6c45d9e3a7d42febf261ceaca4010bd1072742aa8353c7ef805aa0c465fea48",
+        "sql_sha256": "06f024431d71ceb2c309d481831f8c679bc6246c6a953e7a86344ac93c5cd037",
         "type": "table"
       },
       {
@@ -3265,6 +3268,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 85
+    "user_version": 86
   }
 }
