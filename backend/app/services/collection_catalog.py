@@ -46,26 +46,32 @@ Cost shape (per build, per notebook in scope):
     when the Knowhow enumeration executor can reach it at all (see
     ``knowhow_enumeration_reachable``).
 
-**The run's source ceiling is honoured by every number and plan.**  Under a
-frozen source ceiling (``source_scope.scoped_allowed_source_ids`` — the
-browser's source ticks, a federated run's per-library visible-source freeze)
-every count, every plan and every scope fingerprint is taken over the
-IN-CEILING sources of each participant only, via ONE predicate
-(``source_ceiling``).  The memos stay scope-independent: L2/L4 are still keyed
-on the notebook's whole signal list, and the ceiling is applied AFTER them, so
-a run with different ticks never poisons another run's cache.  Two
-consequences are deliberate and documented in ``docs/product-and-api.md``:
+**The run's source ceiling is honoured by every number and plan — when it
+binds.**  A ceiling binds in a subjectless (global) run (each library's
+frozen visible-source list, always) and, in a single-notebook run, only when
+the source scope is really narrowed or has drifted since it was frozen — the
+caller's once-per-run verdict, passed in as ``ceiling_binds`` (see
+``source_ceiling``).  The browser freezes an include list even when every
+source is ticked; such an un-narrowed, un-drifted run behaves exactly as it
+did before the ceiling existed.  While a ceiling binds, every count, every
+plan and every scope fingerprint is taken over the IN-CEILING sources of each
+participant only, via ONE predicate (``source_ceiling``).  The memos stay
+scope-independent: L2/L4 are still keyed on the notebook's whole signal list,
+and the ceiling is applied AFTER them, so a run with different ticks never
+poisons another run's cache.  Two consequences, for narrowed, drifted and
+global runs only (the sentences for ``docs/product-and-api.md`` are with the
+PR-B docs task):
 
   * a KG object is in the collection only when at least one of its evidence
-    items comes from an in-ceiling source, so under a ceiling an object with no
-    evidence at all is not listed and not counted;
+    items comes from an in-ceiling source, so an object with no evidence at
+    all is not listed and not counted;
   * a source uploaded after the freeze is outside the ceiling, so it is neither
     counted nor listed, and it does not move the scope fingerprint (an
     out-of-ceiling upload is not a ``concurrent_change``; an in-ceiling reparse
     still is).
 
-Without a ceiling every number, plan and fingerprint is byte-identical to what
-this module produced before the ceiling existed.
+Without a binding ceiling every number, plan, fingerprint and cursor is
+byte-identical to what this module produced before the ceiling existed.
 
 **Private Memory is never in scope.**  A confirmed Memory is owner-private and
 every other channel treats it that way, while a typed-collection listing is
@@ -107,7 +113,7 @@ from __future__ import annotations
 import hashlib
 import threading
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import cached_property
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -126,9 +132,9 @@ from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.retrieval_participants import (
     resolve_retrieval_participant_ids,
 )
+from app.services.retrieval_run import memoized_retrieval_value
 from app.services.source_scope import (
     current_source_scope,
-    scoped_allowed_source_ids,
     scoped_participants,
     source_scope_restricted,
     subjectless_run_active,
@@ -166,13 +172,6 @@ _MAX_CACHED_NOTEBOOKS = 512
 # at worst — and it is a TOTAL, because the size of one plan is a property of
 # the library, not a constant.
 _MAX_CACHED_PLAN_SOURCES = 50_000
-# Built source ceilings kept per (scope, notebook).  One enumeration action
-# asks for the same library's ceiling several times (plan, closing
-# fingerprint, KG count, KG walk), and building one from a 49k-id freeze costs
-# tens of milliseconds, so the repeats are served from here.  Tiny on purpose:
-# an entry holds the whole id set (megabytes at that size), and the working set
-# is "the runs in flight right now", not a history.
-_MAX_CACHED_CEILINGS = 8
 
 
 @dataclass(frozen=True)
@@ -193,32 +192,41 @@ class ScopeSource:
     count: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class SourceCeiling:
-    """One participant's frozen source ceiling, in the two shapes its readers
-    need: a sorted id tuple (the store's single array parameter and the L3
-    memo digest) and a set (per-row membership).
+    """One participant's frozen source ceiling.
 
     Built ONLY by ``CollectionCatalogService.source_ceiling``; every reader —
     the element counts and plans, the source roster, the three scope
     fingerprints, the KG count, the KG page pushdown, the executor's evidence
     references — asks this one object, so "in the ceiling" has one meaning for
-    the number and for the list.  ``source_ids == ()`` is an explicit deny, not
-    "no ceiling"; "no ceiling" is ``source_ceiling`` returning ``None``.
+    the number and for the list.  An empty ``members`` is an explicit deny,
+    not "no ceiling"; "no ceiling" is ``source_ceiling`` returning ``None``.
+
+    ``members`` is the scope's OWN frozenset whenever the scope holds one (a
+    per-library freeze, or ticks with no hidden half) — accepted as-is, never
+    copied.  The two derived shapes are lazy and computed at most once per
+    object: ``source_ids`` (sorted, for the store's single ceiling parameter)
+    and ``digest`` (for the L3 memo key and cursor identity).  Membership
+    alone never sorts anything.  ``eq=False``: identity, not a comparison of
+    two 49k-element sets.
     """
 
-    source_ids: Tuple[str, ...]
-    members: frozenset = field(default_factory=frozenset)
+    members: frozenset
 
     def allows(self, source_id: str) -> bool:
-        return source_id in self.members
+        return bool(source_id) and source_id in self.members
+
+    @cached_property
+    def source_ids(self) -> Tuple[str, ...]:
+        return tuple(sorted(value for value in self.members if value))
 
     @cached_property
     def digest(self) -> str:
-        """The L3 memo key half.  Lazy: only the KG count reads it, while the
-        element side builds a ceiling per signal read and never needs it.
-        ``c:`` prefix because a deny-all ceiling digests the empty input and
-        must not collide with the ``""`` key an unscoped build uses."""
+        """Order-independent by construction: a hash of the SORTED ids, taken
+        once per ceiling object.  ``c:`` prefix because a deny-all ceiling
+        digests the empty input and must not collide with the ``""`` key an
+        unscoped build uses."""
         digest = hashlib.blake2b(digest_size=16)
         for source_id in self.source_ids:
             digest.update(source_id.encode("utf-8"))
@@ -227,8 +235,21 @@ class SourceCeiling:
 
 
 def _make_ceiling(source_ids) -> SourceCeiling:
-    ids = tuple(sorted({str(value) for value in source_ids if value}))
-    return SourceCeiling(source_ids=ids, members=frozenset(ids))
+    return SourceCeiling(members=frozenset(str(value) for value in source_ids if value))
+
+
+def _scope_ceiling(scope, notebook_id: str) -> SourceCeiling:
+    """The ceiling a scope holds AS A SET for ``notebook_id``, without copying
+    it when it can be avoided: the per-library freeze is the scope's own
+    frozenset; local ticks with no hidden half are ``source_ids`` itself; only
+    ticks plus a hidden half need one union.  Callers have already checked that
+    one of those two branches applies (``source_ceiling``)."""
+    ceiling = scope.source_ceiling_for(notebook_id)
+    if ceiling is not None:
+        return SourceCeiling(members=ceiling)
+    if not scope.hidden_source_ids:
+        return SourceCeiling(members=scope.source_ids)
+    return SourceCeiling(members=scope.source_ids | scope.hidden_source_ids)
 
 
 def knowhow_enumeration_reachable(scope_unsafe: Optional[bool] = None) -> bool:
@@ -501,15 +522,6 @@ class CollectionCatalogService:
             "OrderedDict[Tuple[str, str], Tuple[str, Tuple[ScopeSource, ...]]]"
         ) = OrderedDict()
         self._plan_source_entries = 0
-        # (ActiveSourceScope, notebook_id) -> SourceCeiling.  Keyed on the
-        # frozen scope OBJECT's value (it is hashable by design and carries
-        # every field the ceiling is derived from), never on ``id(scope)``: a
-        # recycled id would serve a dead run's ceiling to a new one.  Holds only
-        # ceilings derived from the scope alone; the legacy exclude-mode shape
-        # depends on live signals and is never stored.
-        self._ceilings: (
-            "OrderedDict[Tuple[object, str], SourceCeiling]"
-        ) = OrderedDict()
         # One lock for all the maps: every critical section is a handful of
         # dict operations, and the service is called from request threads.
         self._lock = threading.Lock()
@@ -856,46 +868,53 @@ class CollectionCatalogService:
         does not depend on any of this; it is unconditional.
 
         THE one definition every collection reader shares (``SourceCeiling``'s
-        docstring lists them).  It is ``scoped_allowed_source_ids`` — the same
-        branch order ``ActiveSourceScope.allows`` follows: library exclusion,
-        then the per-notebook freeze (a federated run's visible sources), then
-        the active notebook's local include list (ticks ∪ the requester's own
-        hidden sources) — so a row this ceiling admits is a row
-        ``source_allowed`` admits, and vice versa.
+        docstring lists them).  Same branch order as
+        ``scoped_allowed_source_ids`` and ``ActiveSourceScope.allows``:
+        library exclusion (explicit deny), then the per-notebook freeze (a
+        federated run's visible sources), then the active notebook's local
+        include list (ticks ∪ the requester's own hidden sources) — so a row
+        this ceiling admits is a row ``source_allowed`` admits, and vice versa
+        (``test_source_ceiling_members_equal_scoped_allowed_source_ids`` pins
+        the equivalence for every shape).  It does not CALL
+        ``scoped_allowed_source_ids`` because that sorts the whole list on
+        every call; this takes the scope's own frozenset as-is and sorts only
+        when a store parameter or a digest is actually needed.
 
-        The one shape ``scoped_allowed_source_ids`` cannot materialize on its
-        own is the legacy EXCLUDE-mode local ceiling (a direct service caller,
-        or a report scope persisted before the include freeze): it returns
-        ``None`` there although the ceiling binds.  That case is materialized
-        here from the notebook's live signal rows filtered by ``allows`` —
-        ``signals`` when the caller already holds them, otherwise one signal
-        read — because an exclusion list cannot be pushed into a KG page query
-        or hashed into a memo key, and treating it as "no ceiling" would list
-        exactly the sources the user excluded.
+        Memoized on the RETRIEVAL RUN (``memoized_retrieval_value``, keyed on
+        the scope object and the notebook), not in a process-level cache: the
+        repeats that matter (plan, closing fingerprint, KG count, KG walk,
+        cursor digest) all happen inside one run, and a process cache keyed by
+        scope objects would pin megabyte-sized sets of runs long gone.
+        Outside a run it is simply built — cheap, since nothing is copied.
+
+        The one shape the scope cannot hand over as a set is the legacy
+        EXCLUDE-mode local ceiling (a direct service caller, or a report scope
+        persisted before the include freeze).  It is materialized here from
+        the notebook's live signal rows filtered by ``allows`` — ``signals``
+        when the caller already holds them, otherwise one signal read — and
+        not memoized, because it depends on live rows: an exclusion list
+        cannot be pushed into a KG page query or hashed into a memo key, and
+        treating it as "no ceiling" would list exactly the excluded sources.
         """
         scope = current_source_scope()
         if scope is None:
             return None
         if not ceiling_binds and not scope.subjectless:
             return None
-        key = (scope, notebook_id)
-        with self._lock:
-            cached = self._ceilings.get(key)
-            if cached is not None:
-                self._ceilings.move_to_end(key)
-                return cached
-        allowed = scoped_allowed_source_ids(notebook_id)
-        if allowed is not None:
-            # Already sorted and de-duplicated by ``scoped_allowed_source_ids``
-            # (it materializes a frozenset); only blanks are dropped here.
-            ids = tuple(value for value in allowed if value)
-            ceiling = SourceCeiling(source_ids=ids, members=frozenset(ids))
-            with self._lock:
-                self._ceilings[key] = ceiling
-                self._ceilings.move_to_end(key)
-                while len(self._ceilings) > _MAX_CACHED_CEILINGS:
-                    self._ceilings.popitem(last=False)
-            return ceiling
+        if not scope.covers_notebook(notebook_id):
+            return SourceCeiling(members=frozenset())
+        if (
+            scope.source_ceiling_for(notebook_id) is not None
+            or (
+                scope.ceiling_active
+                and notebook_id == scope.notebook_id
+                and scope.mode == "include"
+            )
+        ):
+            return memoized_retrieval_value(
+                ("collection_source_ceiling", scope, notebook_id),
+                lambda: _scope_ceiling(scope, notebook_id),
+            )
         if not (scope.ceiling_active and notebook_id == scope.notebook_id):
             return None
         if signals is None:
@@ -1002,7 +1021,6 @@ class CollectionCatalogService:
             self._kg_counts.clear()
             self._plan_sources.clear()
             self._plan_source_entries = 0
-            self._ceilings.clear()
 
     # ----------------------------------------------------------------- element
     def _scope_signal_row_counts(
@@ -1102,43 +1120,33 @@ class CollectionCatalogService:
         """Per-kind totals over the IN-CEILING sources only.
 
         The notebook-level L2 figure counts every source, so it cannot be
-        served as-is once the ceiling leaves one out; the answer is recomputed
-        from the per-source L1 counts instead — the same numbers the element
-        plan is built from, so the map's figure and the plan's ``total`` stay
-        one definition.  L2 is neither read for a ceiling of its own nor
-        written: it stays the scope-independent whole-notebook memo.
-
-        Whichever side is SMALLER is summed from L1: the kept sources directly,
-        or the whole-notebook L2 figure minus the excluded sources.  Both are
-        exact (every element belongs to exactly one source, and every per-source
-        count is keyed on that source's change signal), and the choice is what
-        keeps the common shapes cheap — a federated run's visible-source freeze
-        excludes only the hidden projection row, while ticking three documents
-        out of fifty thousand keeps only three.
+        served as-is once the ceiling leaves one out.  The answer is summed
+        from the per-kind L4 plans instead (``_notebook_plan_sources``): they
+        are scope-independent, memoized on the notebook's whole signal list,
+        and already carry each source's count — so a warm build issues NO
+        per-source statement whatever the ceiling's size, and it cannot sweep
+        the L1 LRU (reading per-source counts for a 24,500-source ceiling on
+        every build would evict every other library's entries).  It is also
+        literally the plan the executor walks, filtered the same way
+        (``scope_element_plan``), so the map's figure and the plan's ``total``
+        stay one definition.  L2 is neither read for a ceiling nor written: it
+        stays the scope-independent whole-notebook memo.  ``kept`` is unused
+        on purpose: the excluded half is the one to test against, exactly as
+        ``scope_element_plan`` does.
         """
-        subtract = len(excluded) < len(kept)
-        per_source = self._per_source_counts(db, excluded if subtract else kept)
-        totals: Dict[str, int] = {kind: 0 for kind in ENUMERABLE_ELEMENT_KINDS}
-        source_totals: Dict[str, int] = {kind: 0 for kind in ENUMERABLE_ELEMENT_KINDS}
-        if subtract:
-            for item in self._notebook_element_counts(db, notebook_id, signals):
-                totals[item.kind] = item.count
-                source_totals[item.kind] = item.sources
-        sign = -1 if subtract else 1
-        for counts in per_source.values():
-            for kind, count in counts.items():
-                if count <= 0 or kind not in totals:
+        dropped = {row[0] for row in excluded}
+        result = []
+        for kind in ENUMERABLE_ELEMENT_KINDS:
+            count = sources = 0
+            for entry in self._notebook_plan_sources(
+                db, notebook_id, kind, signals
+            ):
+                if entry.source_id in dropped:
                     continue
-                totals[kind] += sign * count
-                source_totals[kind] += sign
-        return tuple(
-            ElementKindCount(
-                kind=kind,
-                count=max(0, totals[kind]),
-                sources=max(0, source_totals[kind]),
-            )
-            for kind in ENUMERABLE_ELEMENT_KINDS
-        )
+                count += entry.count
+                sources += 1
+            result.append(ElementKindCount(kind=kind, count=count, sources=sources))
+        return tuple(result)
 
     def _per_source_counts(
         self, db: object, signals: Sequence[Tuple[str, ...]]

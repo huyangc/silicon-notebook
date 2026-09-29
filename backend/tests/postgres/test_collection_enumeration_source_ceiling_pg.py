@@ -235,6 +235,42 @@ def test_pg_knowhow_table_count_is_what_the_executor_reaches(postgres_repository
         assert catalog.collection_map(notebook_id).knowhow_tables == 0
 
 
+def test_pg_all_ticked_unnarrowed_run_matches_an_unscoped_one(postgres_repository):
+    """全选、未收窄、未漂移(``ceiling_binds=False``):与无范围逐字相同——无证据
+    的 oNone 照样列出、计数,KG 页语句不带天花板参数。"""
+    repository = postgres_repository
+    notebook_id = _seed(repository)
+    enumeration = repository.collection_enumeration
+    store = repository._runtime.knowledge
+    original = store.knowledge_object_page_rows
+    page_kwargs: list = []
+
+    def spy(*args, **kwargs):
+        page_kwargs.append(dict(kwargs))
+        return original(*args, **kwargs)
+
+    unscoped_map = repository.collection_catalog.collection_map(notebook_id)
+    unscoped = enumeration.enumerate_kg_objects(
+        notebook_id, "concept", budget=_budget())
+    store.knowledge_object_page_rows = spy
+    try:
+        with source_scope_context(notebook_id, {
+            "mode": "include", "source_ids": ["sA", "sB", "sC"],
+            "narrowed": False,
+        }):
+            ticked_map = repository.collection_catalog.collection_map(
+                notebook_id, ceiling_binds=False)
+            ticked = enumeration.enumerate_kg_objects(
+                notebook_id, "concept", budget=_budget(), ceiling_binds=False)
+    finally:
+        del store.knowledge_object_page_rows
+    assert ticked_map == unscoped_map
+    assert dict(ticked_map.kg_objects)["concept"] == 4
+    assert ticked.items == unscoped.items
+    assert "oNone" in {item.object_id for item in ticked.items}
+    assert page_kwargs and all(kwargs == {} for kwargs in page_kwargs)
+
+
 def _set_owner_and_breadcrumb(repository, notebook_id, object_id, owner, crumb):
     with repository._runtime.database.write() as db:
         db.execute(

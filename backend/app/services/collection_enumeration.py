@@ -79,7 +79,12 @@ Six contracts this module owns:
    ceiling is refused with the very ``ValueError`` a non-member id gets, so
    the refusal cannot be used to probe whether an unticked document exists.
    Under a ceiling a KG object with no evidence is not listed (it is supported
-   by no ticked source).  Without a ceiling nothing here differs by a byte.
+   by no ticked source).  A ceiling BINDS in a global run always and in a
+   single-notebook run only when the caller's once-per-run verdict
+   ``ceiling_binds`` (narrowed or drifted) is true — the browser's all-ticked
+   freeze therefore enumerates exactly as an unscoped run.  Without a binding
+   ceiling nothing here differs by a byte, cursors included.  The private-
+   Memory exclusion (contract 5) is unconditional.
 
 Cost shape per action, all index-assisted and bounded by the budget:
 
