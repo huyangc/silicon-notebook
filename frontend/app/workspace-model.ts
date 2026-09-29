@@ -603,6 +603,12 @@ export type TypedCollectionResult = {
    * 而不是 `!== "all"`，未知值也落回不加后缀，不会给一份没收窄的清单贴上标签。
    */
   scope?: string;
+  /**
+   * true = 这份清单只覆盖用户勾选的来源；缺席或 false = 覆盖检索范围内全部来源。
+   * ⚠ 可选：历史回答不带这个键，缺席按 false 读，所以判据写成 `=== true`。
+   * 与 `scope`（笔记本范围）正交。真源：`backend/app/models/ask.py TypedCollectionResult`。
+   */
+  source_scoped?: boolean;
   items: TypedCollectionItem[];
   coverage: TypedCollectionCoverage;
   /** 实际进入本轮答案合成预览的条目数；与 coverage.returned_total（枚举出的总条目数）分开披露。 */

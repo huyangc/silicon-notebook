@@ -746,3 +746,71 @@ test("两条范围不同的来源清单链渲染成两张各自独立的卡(Reac
   expect(screen.getByText("已全部列出 1 条")).toBeInTheDocument();
   expect(screen.getByText("已全部列出 2 条")).toBeInTheDocument();
 });
+
+
+// ---------------------------------------------------------------------------
+// source_scoped:清单只覆盖用户勾选的来源时,标题要说;它与 scope 正交
+// ---------------------------------------------------------------------------
+
+test("source_scoped 缺席或 false 的清单标题与没有这个字段之前逐字相同", () => {
+  // 历史回答(已持久化)重开时整键缺席;false 是新后端的显式默认。两者都不许出后缀。
+  for (const source_scoped of [undefined, false]) {
+    const answer = baseAnswer();
+    answer.result_sets = [
+      sourcesResult({ source_scoped }),
+      collectionResult({ source_scoped }),
+    ];
+    renderAnswer(answer, {}, { openCollections: false });
+
+    expect(screen.getByText("来源清单")).toBeInTheDocument();
+    expect(screen.getByText("公式清单")).toBeInTheDocument();
+    expect(screen.queryByText(/仅勾选的来源/)).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "清单结果：来源清单" })).toBeInTheDocument();
+    cleanup();
+  }
+});
+
+
+test("source_scoped=true 的清单标题带「（仅勾选的来源）」,来源清单与元素清单都一样", () => {
+  const answer = baseAnswer();
+  answer.result_sets = [
+    sourcesResult({ source_scoped: true }),
+    collectionResult({ source_scoped: true }),
+  ];
+  renderAnswer(answer, {}, { openCollections: false });
+
+  expect(screen.getByText("来源清单（仅勾选的来源）")).toBeInTheDocument();
+  expect(screen.getByText("公式清单（仅勾选的来源）")).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "清单结果：来源清单（仅勾选的来源）" }))
+    .toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "展开来源清单（仅勾选的来源）" }))
+    .toBeInTheDocument();
+});
+
+
+test("scope=current_notebook 与 source_scoped=true 同时成立时两个后缀都在,本库范围在前", () => {
+  const answer = baseAnswer();
+  answer.result_sets = [sourcesResult({ scope: "current_notebook", source_scoped: true })];
+  renderAnswer(answer, {}, { openCollections: false });
+
+  expect(screen.getByText("来源清单（仅当前笔记本）（仅勾选的来源）")).toBeInTheDocument();
+});
+
+
+test("同一集合、同一 scope 的勾选清单与全部来源清单是两张独立的卡(React key 含 source_scoped)", () => {
+  const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const answer = baseAnswer();
+  answer.result_sets = [
+    sourcesResult({ scope: "all", source_scoped: true }),
+    sourcesResult({ scope: "all" }),
+  ];
+  renderAnswer(answer, {}, { openCollections: false });
+
+  const duplicateKeyWarnings = errors.mock.calls.filter((args) =>
+    args.some((arg) => typeof arg === "string" && arg.includes("same key")));
+  expect(duplicateKeyWarnings).toEqual([]);
+  expect(document.querySelectorAll(".answer-collection-result")).toHaveLength(2);
+  expect(screen.getByText("来源清单（仅勾选的来源）")).toBeInTheDocument();
+  expect(screen.getByText("来源清单")).toBeInTheDocument();
+  errors.mockRestore();
+});
