@@ -2162,3 +2162,38 @@ def test_the_roster_scope_is_a_tool_parameter_the_model_fills(repo):
     # 闸关 ⇒ 字段与那句指导一并消失。
     assert '"scope"' not in reflect_schema_hint()
     assert "enumerate.scope" not in off
+
+
+@pytest.mark.parametrize("keywords", [
+    "ZKX7734 沟槽隔离",                  # schema 示例的字符串形态
+    ["ZKX7734", "沟槽隔离"],             # 模型常见的列表形态(宽松边界兼容)
+])
+def test_chunks_keywords_survives_the_production_shape_boundary(repo, keywords):
+    """PR-3:`chunks_keywords` 走真实的两道校验(`parse_model_json_object` +
+    `validate_model_json_shape`)再进 `reflect()` 解析——字符串与列表两种形态都
+    落地成同一个空格分隔串、这一轮不是兜底,关键词通道被调用一次。"""
+    notebook = _seed(repo)
+    llm = _ValidatingLLM([
+        {"next_action": "search_chunks", "chunks_query": "版图",
+         "chunks_keywords": keywords, "reason": "查型号"},
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+    retriever.search_chunks = lambda notebook_id, query, *, k=None: []
+    keyword_calls: list = []
+
+    def _channel(notebook_id, text):
+        keyword_calls.append(text)
+        return []
+
+    retriever.retrieval.keyword_chunk_candidates = _channel
+
+    result = retriever.run(notebook.id, "版图设计要点是什么", "", limits=limits)
+
+    assert _fallback_reasons(result) == []
+    # schema 真的给了这个字段(否则这条用例测的是一个模型看不到的参数)。
+    assert any('"chunks_keywords":""' in hint for hint in llm.schema_hints)
+    assert keyword_calls == ["ZKX7734 沟槽隔离"]
+    [step] = [s for s in _steps(result, "search_chunks")
+              if s.detail.get("phase") != "seed"]
+    assert step.detail["keywords"] == "ZKX7734 沟槽隔离"

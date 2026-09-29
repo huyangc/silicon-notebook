@@ -3859,7 +3859,7 @@ class CandidateRetrievalService(_RetrievalState):
     def _hydrate_chunk_texts(self, cand_ids):
         """``hydrate_chunk_candidates``' text half only: the same row shape,
         no ``chunk_embeddings`` read and no matrix.  For a caller that scores
-        by keyword alone (the peer-mode keyword leg), where fetching and
+        by keyword alone (both paths of the keyword arm), where fetching and
         normalising every candidate's vector would be discarded work."""
         rows = []
         with self._connect() as db:
@@ -4071,8 +4071,11 @@ class CandidateRetrievalService(_RetrievalState):
         the 2nd language"). ONE chunk_fts_search over the combined bilingual
         keyword string, hydrated + keyword-scored into RetrievedChunk (semantic 0,
         exactly like the existing ANN∪FTS union). Empty/blank keywords → []. NO
-        vector embed — purely lexical. Called ONCE per ask (not per sub-query);
-        the caller merges these into whatever candidate set its branch built
+        vector embed — purely lexical. Called once per question text, never per
+        sub-query: chunk mode calls it once per ask; reasoning calls it once in
+        the first-round seed (when ``plan()`` produced keywords) plus once per
+        ``search_chunks`` action that carries ``chunks_keywords`` (so at most
+        ``1 + REASONING_MAX_CHUNK_SEARCHES`` per run). The caller merges these into whatever candidate set its branch built
         (dedup by chunk_id), so a chunk that matches only a 2nd-language keyword —
         never the question-language sub_queries — is still retrieved. fail-open:
         FTS/hydrate errors (e.g. legacy lib missing chunks_fts) → [].
@@ -4147,7 +4150,8 @@ class CandidateRetrievalService(_RetrievalState):
 
         The non-peer path calls it with exactly its historical inputs
         (``drifted=None`` -> one fresh probe, ``federated=False`` -> every
-        failure swallowed here), so that path is unchanged.
+        failure swallowed here). Its hydrate is the text-only one both paths
+        share (2026-09-29): the vector matrix it used to read was never used.
 
         ``federated=True`` (a peer-mode leg) changes only where a failure
         ends: it is re-raised so the fan-out's ``_run_one`` records the leg as
@@ -4160,9 +4164,11 @@ class CandidateRetrievalService(_RetrievalState):
         from app.services.retrieval import (
             RetrievalSupport, add_chunk_supports, score_chunks,
         )
-        # The keyword arm is one call per ask (see
-        # ``_keyword_chunk_candidates``), so on the single path the drift probe
-        # is genuinely taken once here — not memoised anywhere, just read
+        # The keyword arm is one call per question text (see
+        # ``_keyword_chunk_candidates``: once per chunk-mode ask; in reasoning
+        # once for the seed plus once per keyword-bearing ``search_chunks``
+        # action), so on the single path the drift probe is taken once per
+        # call here — not memoised anywhere, just read
         # fresh for this one call and used only for the two lexical arms'
         # routing below (see ``_lexical_gate_source_scoped``; the source
         # predicate itself is still pushed down unconditionally regardless of
@@ -4192,12 +4198,12 @@ class CandidateRetrievalService(_RetrievalState):
             if not hits:
                 return []
             hit_ids = [h["chunk_id"] for h in hits]
-            if federated:
-                # Keyword scoring reads no vector, so a peer leg fetches text
-                # rows only.  The single path keeps its historical hydrate.
-                chunks = self._hydrate_chunk_texts(hit_ids)
-            else:
-                chunks, _ids, _mat = self._hydrate_chunk_candidates(hit_ids)
+            # Keyword scoring reads no vector, so both the peer leg and the
+            # single path fetch text rows only: the same row shape
+            # ``hydrate_chunk_candidates`` returns, minus the
+            # ``chunk_embeddings`` read (up to ``recall`` vectors) whose matrix
+            # this path used to build and then discard.
+            chunks = self._hydrate_chunk_texts(hit_ids)
             # keyword-only score (no query_vector/chunk_sims) — mirrors the ANN∪FTS
             # union where lexical hits get keyword score and semantic 0.
             scored = score_chunks(needle, chunks, None, None, limit=recall)

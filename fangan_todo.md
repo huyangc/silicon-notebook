@@ -386,6 +386,14 @@
       `source_scope.scoped_subgraph_nodes` 的 docstring：把 scope 放进键会按勾选组合
       重建整图）。参与集覆盖在场时守卫已经读座位——因为那时两张图也读座位，守卫与
       建图口径同源；要修的是无覆盖那一半。
+- [ ] **对等模式关键词腿的重复超时（待大库实测）**：对等模式的关键词腿自身超时
+      **不**打开按库 FTS 熔断（`retrieval_candidates._chunk_fts_hits` 的
+      `trip_circuit=False`，既有设计：补召回腿超时不该关掉该库语义腿的全文检索）。
+      chunk 模式每问只调一次关键词臂，代价有界；但 reasoning 一个 run 最多调
+      1 + `REASONING_MAX_CHUNK_SEARCHES` 次（首轮播种一次 + 每个带
+      `chunks_keywords` 的 `search_chunks` 动作一次），同一个慢库最坏每次都多等一个
+      `POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS`。待大库实测后决定是否加 run 级「本库关键词
+      腿已超时」标记（只管关键词腿，不碰语义腿共用的熔断）。
 
 ### 解析
 

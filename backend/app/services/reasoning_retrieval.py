@@ -26,7 +26,7 @@ from app.core.ask_retrieval_policy import (
     ask_retrieval_limits,
 )
 from app.core.llm import budget_kwargs
-from app.core.model_values import as_text
+from app.core.model_values import as_text, as_text_list
 from app.core.config import (
     DEFAULT_EXTERNAL_EVIDENCE_MAX_PER_RUN,
     DEFAULT_REASONING_PER_QUERY_LIMIT,
@@ -737,6 +737,22 @@ DOCUMENT_READ_MIN_CHARS_PER_ELEMENT = 320
 # 一组中英对照的术语、型号与标识符(chunk 模式 `expand_query` 的 high+low
 # level 关键词串通常在 100~200 字符),再长就是堆砌。
 CHUNKS_KEYWORDS_MAX_CHARS = 300
+
+
+def chunks_keywords_text(value) -> str:
+    """模型给的 `chunks_keywords` → 送进关键词通道的那一个串。
+
+    宽松边界(harness 原则:可接受的偏差做兼容):模型把它写成 JSON 列表时,取
+    其中的字符串元素、用空格拼接(`as_text_list`,非字符串元素丢弃),与字符串
+    形态等价;其它类型读作空串。顺序是 `lstrip` → 截断到
+    `CHUNKS_KEYWORDS_MAX_CHARS` → `strip`:开头的空白不占预算,截断点落在空格上
+    时也不留尾随空白——执行体的「非空才跑」判据与轨迹里记的串因此是同一个值。
+    """
+    if isinstance(value, list):
+        text = " ".join(as_text_list(value))
+    else:
+        text = as_text(value)
+    return text.lstrip()[:CHUNKS_KEYWORDS_MAX_CHARS].strip()
 
 
 _TITLE_WRAPPING_PAIRS = (
@@ -3529,17 +3545,59 @@ class ReasoningRetriever:
         因此拿到的是接入前逐字节相同的规划与反思调用。
 
         按 ``notebook_id`` 做**请求级** memo(与 ``kg_in_scope_for`` 同款):参与集
-        与语言缓存在一次 run 内恒定,规划与每轮 reflect 共用一次探测。异常不吞——
-        与 chunk 模式直调 ``notebook_languages`` 同口径,``AskCancelled`` 照旧上抛。
+        与语言缓存在一次 run 内恒定,规划与每轮 reflect 共用一次探测。
+
+        **失败语义:fail-open,只记事件。** 语言只是提示——探测失败时返回 None,
+        两个读者退回 zh/en 默认,也就是接入前的规划与反思形态;为一个提示让整次
+        提问失败是不成比例的(先例:``chunk_lane._lexical_gate_drift_probe``,
+        codex #640 R3 P2——路由提示的探测失败不拖垮检索)。例外与
+        ``_chunk_seed_workers`` 对齐:``AskCancelled`` 照抛;
+        ``RetrievalControlError``(含对等模式参与集身份复核的
+        ``ParticipantOverrideError``,并集口径要读参与集座位)照抛,这一处登记在
+        ``test_participant_override_guard`` 的 ``_SEAT_FAILSOFT_SITES``;
+        ``fail_closed`` 下照抛。其余异常发一条只带异常类名的
+        ``ask_stage``/``stage="reasoning_corpus_langs"``/``status="failed_open"``
+        事件,不上横幅(与原文精排回退事件同一个事件日志接缝)。
         """
         probe = getattr(self.retrieval, "keyword_corpus_languages", None)
         if not callable(probe):
             return None
-        langs = memoized_retrieval_value(
-            ("reasoning_corpus_langs", notebook_id),
-            lambda: tuple(probe(notebook_id) or ()),
-        )
+        try:
+            langs = memoized_retrieval_value(
+                ("reasoning_corpus_langs", notebook_id),
+                lambda: tuple(probe(notebook_id) or ()),
+            )
+        except AskCancelled:
+            raise
+        except RetrievalControlError:
+            # 登记的 fail-soft handler(`_SEAT_FAILSOFT_SITES`):对等模式下并集
+            # 口径读参与集座位,身份错配是 raise,不许吞。
+            raise
+        except Exception as error:
+            if self.fail_closed:
+                raise
+            self._note_corpus_langs_fallback(error)
+            return None
         return list(langs) or None
+
+    def _note_corpus_langs_fallback(self, error) -> None:
+        """语料语言探测失败、已退回 zh/en 默认的事件回执。不上横幅,不带内容。
+
+        与 `_note_chunk_rerank_fallback` 同一个接缝:`model_clients` 上的
+        `event_log` 按属性探测,没有就不记;记录本身失败也吞掉。
+        """
+        emit = getattr(getattr(self.model_clients, "event_log", None), "emit", None)
+        if not callable(emit):
+            return
+        try:
+            emit({
+                "kind": "ask_stage",
+                "stage": "reasoning_corpus_langs",
+                "status": "failed_open",
+                "error_type": type(error).__name__,
+            })
+        except Exception:  # noqa: BLE001 — 诊断绝不打断检索
+            pass
 
     def enumeration_active(self) -> bool:
         """本 run 是否提供类型化集合枚举工具。
@@ -4018,7 +4076,8 @@ class ReasoningRetriever:
         `expand_query`,让整题关键词(`PlanOutcome.keywords`,首轮播种词法臂的
         输入)按语料语言双语化——与 chunk 模式 `expand_query(corpus_langs=
         notebook_languages(...))` 同一口径。缺省 None = `expand_query` 自己的
-        zh/en 默认;调用方按「有才传」只在探测到语言时才传。
+        zh/en 默认;调用方按「有才传」只在探测到语言时才传,而且只在关键词子闸
+        (`keyword_search_active`)开着时才探测——子闸关时整题关键词没有读者。
         """
         raise_if_cancelled(self.cancel_event)
         from app.services.query_rewrite import expand_query
@@ -4286,10 +4345,9 @@ class ReasoningRetriever:
                 d.chunks_query = as_text(data.get("chunks_query"))
             if keyword_search:
                 # 子闸关着(或原文检索整体关着)时连读都不读:模型硬吐一个也不会
-                # 被执行。截断后再 strip:截断点落在空格上时不留尾随空白,执行体
-                # 的「非空才跑」判据与轨迹里记的串因此是同一个值。
-                d.chunks_keywords = as_text(data.get("chunks_keywords"))[
-                    :CHUNKS_KEYWORDS_MAX_CHARS].strip()
+                # 被执行。形状兼容与截断顺序见 `chunks_keywords_text`。
+                d.chunks_keywords = chunks_keywords_text(
+                    data.get("chunks_keywords"))
             d.exact_term = clean_exact_term(as_text(data.get("exact_term")))
             enumerate_request = data.get("enumerate")
             if enumeration and isinstance(enumerate_request, dict):
@@ -5232,10 +5290,13 @@ class ReasoningRetriever:
         # kg_actions 门同源。
         if not state.kg_in_scope:
             plan_kwargs["kg_available"] = False
-        # 语料语言:两个读者——`plan()` 的 `expand_query`(整题关键词双语化)与
-        # 每轮 reflect 的 `search_chunks` 说明(`chunks_keywords` 用哪几种语言)。
-        # 两个都用不上(已确认意图路径不调 `plan()`、且原文检索闸关)时不探测。
-        if not reviewed_queries or self.chunk_search_active():
+        # 语料语言:两个读者——`plan()` 的 `expand_query`(整题关键词双语化,
+        # 在 reasoning 里整题关键词唯一的去处是播种词法臂)与每轮 reflect 的
+        # `search_chunks` 说明(`chunks_keywords` 用哪几种语言)。两者都只在
+        # 子闸 `keyword_search_active()` 开着时才有用,所以门槛就是它;子闸关
+        # (原文检索关、或对等 run + 关键词臂开关关)时零探测,规划 prompt 也就
+        # 不带语言、回到 zh/en 默认——关键词在那种 run 里没有读者,语言无从生效。
+        if self.keyword_search_active():
             state.corpus_langs = self._corpus_langs(state.notebook_id)
         plan_kwargs.update(state.corpus_langs_kwarg)
         # 已确认意图路径不调 `plan()`,因此也没有关键词:`plan_keywords` 留空串,

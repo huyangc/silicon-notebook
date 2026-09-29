@@ -122,7 +122,9 @@ notebooks-with-hits, merged and failed-notebook counts plus latency, no text). T
 (shared by `chunk` mode, `reasoning`'s first-round seed lexical arm and `search_chunks.chunks_keywords`) likewise
 records no model error and shows no banner when it fails; it emits one `ask_stage` event with
 `stage="chunk_keyword_union"`, `status="failed_open"`, carrying only `notebook_id` and the exception class name
-`error_type`. Rows carrying `arm="exact"` belong
+`error_type`. A failed `reasoning` corpus-language probe likewise emits only one `ask_stage` event
+(`stage="reasoning_corpus_langs"`, `status="failed_open"`, `error_type` only); keywords fall back to zh/en and the
+ask proceeds. Rows carrying `arm="exact"` belong
 to the global exact-identifier lookup arm and are excluded the same way; that arm reports once per call (only
 when the query names something probe-worthy; a `reasoning` run may call it several times) as `ask_stage` with `stage="global_exact_arm"` (participant,
 notebooks-with-hits, merged-passage, merged-section and failed-notebook counts plus latency, no identifier,

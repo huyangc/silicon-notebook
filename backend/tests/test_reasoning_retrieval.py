@@ -6386,6 +6386,151 @@ def test_confirmed_intent_run_still_tells_reflect_the_corpus_language(rrepo):
     assert "keywords in the corpus language (en)" in prompt
 
 
+def _spy_plan_and_reflect_kwargs(rr):
+    """记下 `plan()` 与 `reflect()` 各自收到的关键字参数(仍走真实实现)。"""
+    seen = {"plan": [], "reflect": []}
+    real_plan, real_reflect = rr.plan, rr.reflect
+
+    def _plan(*args, **kwargs):
+        seen["plan"].append(dict(kwargs))
+        return real_plan(*args, **kwargs)
+
+    def _reflect(*args, **kwargs):
+        seen["reflect"].append(dict(kwargs))
+        return real_reflect(*args, **kwargs)
+
+    rr.plan, rr.reflect = _plan, _reflect
+    return seen
+
+
+def _corpus_langs_failing_run(rrepo, monkeypatch, error, *, fail_closed=False):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo)
+    llm = _RecordingSeqLLM(plan={"sub_queries": [{"query": "布局布线"}]},
+                           reflects=[{"next_action": "answer", "sufficient": True}])
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    rr = ReasoningRetriever.from_repository(
+        rrepo, rrepo.settings, fail_closed=fail_closed)
+
+    def _probe(notebook_id):
+        raise error
+
+    rr.retrieval.keyword_corpus_languages = _probe
+    events = []
+    monkeypatch.setattr(rr.model_clients.event_log, "emit", events.append)
+    seen = _spy_plan_and_reflect_kwargs(rr)
+    return nb, rr, llm, seen, events
+
+
+def test_a_failing_corpus_language_probe_falls_back_to_the_defaults(
+    rrepo, monkeypatch,
+):
+    """语言只是提示:探测抛普通异常 ⇒ run 照常完成,`plan()` 与 `reflect()` 都
+    不收到 `corpus_langs`(prompt 回到 zh/en 默认),并发一条只带类名的事件。"""
+    nb, rr, llm, seen, events = _corpus_langs_failing_run(
+        rrepo, monkeypatch, RuntimeError("probe db down"))
+
+    rr.run(nb.id, "布局布线是什么")
+
+    assert seen["plan"] and all("corpus_langs" not in k for k in seen["plan"])
+    assert seen["reflect"] and all(
+        "corpus_langs" not in k for k in seen["reflect"])
+    [prompt] = llm.reflect_prompts
+    assert "keywords in each corpus language (zh, en)" in prompt
+    assert [e for e in events if e.get("stage") == "reasoning_corpus_langs"] == [{
+        "kind": "ask_stage", "stage": "reasoning_corpus_langs",
+        "status": "failed_open", "error_type": "RuntimeError",
+    }]
+    assert "probe db down" not in repr(events)
+
+
+def test_a_cancelled_corpus_language_probe_still_cancels(rrepo, monkeypatch):
+    from app.domain.cancellation import AskCancelled
+
+    nb, rr, _llm, _seen, _events = _corpus_langs_failing_run(
+        rrepo, monkeypatch, AskCancelled())
+    with pytest.raises(AskCancelled):
+        rr.run(nb.id, "布局布线是什么")
+
+
+def test_a_participant_override_error_from_the_probe_is_never_swallowed(
+    rrepo, monkeypatch,
+):
+    from app.domain.retrieval_control import ParticipantOverrideError
+
+    nb, rr, _llm, _seen, events = _corpus_langs_failing_run(
+        rrepo, monkeypatch, ParticipantOverrideError("seat mismatch"))
+    with pytest.raises(ParticipantOverrideError):
+        rr.run(nb.id, "布局布线是什么")
+    assert not [e for e in events if e.get("stage") == "reasoning_corpus_langs"]
+
+
+def test_a_failing_corpus_language_probe_raises_under_fail_closed(
+    rrepo, monkeypatch,
+):
+    nb, rr, _llm, _seen, _events = _corpus_langs_failing_run(
+        rrepo, monkeypatch, RuntimeError("probe db down"), fail_closed=True)
+    with pytest.raises(RuntimeError, match="probe db down"):
+        rr.run(nb.id, "布局布线是什么")
+
+
+@pytest.mark.parametrize("gate", ["passage_search_off", "peer_keyword_arm_off"])
+def test_corpus_languages_are_not_probed_with_the_keyword_gate_closed(
+    rrepo, monkeypatch, gate,
+):
+    """探测门槛就是关键词子闸:子闸关(原文检索关、或对等 + 关键词臂开关关)⇒
+    零探测,`plan()` 也不带语言(整题关键词在那种 run 里没有读者)。"""
+    import app.services.retrieval_candidates as candidates_module
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    if gate == "passage_search_off":
+        rrepo.settings.reasoning_chunk_search_enabled = False
+    else:
+        rrepo.settings.global_ask_keyword_arm_enabled = False
+        monkeypatch.setattr(candidates_module, "federated_ask_active",
+                            lambda: True)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr, [], {None: []})
+    probes = []
+    rr.retrieval.keyword_corpus_languages = (
+        lambda notebook_id: probes.append(notebook_id) or ["zh"])
+    seen = _spy_plan_and_reflect_kwargs(rr)
+
+    rr.run(nb.id, "布局布线是什么")
+
+    assert probes == []
+    assert seen["plan"] and all("corpus_langs" not in k for k in seen["plan"])
+
+
+def test_chunks_keywords_list_form_is_joined_and_leading_blanks_are_free(rrepo):
+    """模型把 `chunks_keywords` 写成列表:取字符串元素、空格拼接;开头空白不占
+    300 字符的预算(先 lstrip 再截断)。"""
+    class _Keywords:
+        configured = True
+
+        def __init__(self, keywords):
+            self.keywords = keywords
+
+        def chat_json(self, *_args, **_kwargs):
+            return json.dumps({"next_action": "search_chunks",
+                               "chunks_keywords": self.keywords})
+
+    listed = _reflect_once(rrepo, _Keywords(["ZKX7734", " 沟槽隔离 ", 7, ""]))
+    assert listed.chunks_keywords == "ZKX7734 沟槽隔离"
+
+    padded = _reflect_once(rrepo, _Keywords(" " * 50 + "k" * 400))
+    assert padded.chunks_keywords == "k" * 300
+
+    long_list = _reflect_once(rrepo, _Keywords(["k" * 299, "tail"]))
+    assert long_list.chunks_keywords == "k" * 299
+
+
 def test_corpus_languages_are_probed_once_per_run(rrepo):
     """规划与每一轮 reflect 共用 `_first_round_plan` 那一次探测。"""
     from app.services.reasoning_retrieval import ReasoningRetriever
