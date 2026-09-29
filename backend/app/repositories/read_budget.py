@@ -74,6 +74,62 @@ def classify_read_failure(exc: BaseException) -> "str | None":
     return None
 
 
+# SQLite primary result codes (sqlite3.h); ``sqlite3.Error.sqlite_errorcode``
+# carries the extended code, whose low byte is the primary one.
+_SQLITE_INTERRUPT = 9
+_SQLITE_TOOBIG = 18
+# PostgreSQL SQLSTATE class 54 "program limit exceeded" (54000, 54001
+# statement_too_complex, 54011 too_many_columns, 54023 too_many_arguments).
+_PG_LIMIT_CLASS = "54"
+_PG_QUERY_CANCELED = "57014"
+
+
+def classify_statement_failure(exc: BaseException) -> str:
+    """Content-free reason for a swallowed statement failure.
+
+    One of a fixed set, decided by exception type, SQLSTATE or SQLite result
+    code -- never by message text (which can quote data):
+
+    * ``"statement_timeout"`` -- the statement was cancelled by a deadline: the
+      read budget (``ReadBudgetExceeded``), a store's private lexical budget
+      (``ChunkLexicalSearchTimeout``), PostgreSQL ``statement_timeout`` /
+      cancellation (SQLSTATE 57014), or SQLite's progress-handler interrupt
+      (``SQLITE_INTERRUPT``).
+    * ``"variable_limit"`` -- the statement exceeded a size limit the driver or
+      server reports with a code: PostgreSQL SQLSTATE class 54 (program limit
+      exceeded, e.g. 54023 too many arguments) and SQLite ``SQLITE_TOOBIG``
+      (a bound value or the statement too large).  The per-statement bound
+      parameter caps themselves carry no code -- SQLite reports "too many SQL
+      variables" as a generic ``SQLITE_ERROR`` and libpq refuses more than
+      65,535 parameters client-side without a SQLSTATE -- so what keeps those
+      from recurring is ``tests/test_id_list_binding_guard.py``, not this code.
+    * ``"other"`` -- anything else.
+    """
+    if isinstance(exc, ReadBudgetExceeded):
+        return "statement_timeout"
+    from app.repositories.ports import ChunkLexicalSearchTimeout
+
+    if isinstance(exc, ChunkLexicalSearchTimeout):
+        return "statement_timeout"
+    import sqlite3
+
+    if isinstance(exc, sqlite3.Error):
+        code = getattr(exc, "sqlite_errorcode", None)
+        primary = code & 0xFF if isinstance(code, int) else None
+        if primary == _SQLITE_INTERRUPT:
+            return "statement_timeout"
+        if primary == _SQLITE_TOOBIG:
+            return "variable_limit"
+        return "other"
+    sqlstate = getattr(exc, "sqlstate", None)
+    if isinstance(sqlstate, str):
+        if sqlstate == _PG_QUERY_CANCELED:
+            return "statement_timeout"
+        if sqlstate.startswith(_PG_LIMIT_CLASS):
+            return "variable_limit"
+    return "other"
+
+
 _CURRENT = ContextVar("repository_read_budget", default=None)
 
 

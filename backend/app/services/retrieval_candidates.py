@@ -27,6 +27,7 @@ from app.domain.extensions import GENERATED_QUESTION_ACCESS_CAPABILITY
 from app.domain.retrieval import ChunkRetrievalPlan
 from app.domain.retrieval_control import RetrievalControlError
 from app.repositories.ports import ChunkLexicalSearchTimeout
+from app.repositories.read_budget import classify_statement_failure
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 # chunk 召回腿的两个 per-task ContextVar 与那把 routing 探针住在
 # ``app.services.chunk_lane``(一个零服务层依赖的叶子模块),不在本文件:联邦腿
@@ -141,6 +142,23 @@ _GENERATED_QUESTION_QUERY_EVENT_FIELDS = frozenset({
 # way down to SQL/FTS. Keep a process-private identity sentinel so the failed
 # verdict can be cached once per retrieval run without entering telemetry.
 _REPORT_CHUNK_AUTHORITY_FAILED = object()
+
+
+def _lexical_failure_event(notebook_id: str, site: str, exc: BaseException) -> dict:
+    """The event a swallowed lexical failure leaves behind.
+
+    Content-free: the exception's class name and a ``reason`` from the fixed
+    set of ``classify_statement_failure`` (type / SQLSTATE / SQLite code,
+    never message text).  It stays an event: the other retrieval arms still
+    produce candidates, so the failure does not change what the user sees.
+    """
+    return {
+        "kind": "lexical_retrieval_failed",
+        "notebook_id": notebook_id,
+        "site": site,
+        "error_type": type(exc).__name__,
+        "reason": classify_statement_failure(exc),
+    }
 
 
 def _first_relation_sample(raw: object) -> str:
@@ -1500,12 +1518,7 @@ class CandidateRetrievalService(_RetrievalState):
                 routing_stats=probe_stats,
             )
         except Exception as exc:  # noqa: BLE001 — lexical failure keeps ANN usable
-            self.event_log.emit({
-                "kind": "lexical_retrieval_failed",
-                "notebook_id": notebook_id,
-                "site": site,
-                "error_type": type(exc).__name__,
-            })
+            self.event_log.emit(_lexical_failure_event(notebook_id, site, exc))
             return []
         finally:
             if routing_stats is not None and probe_stats is not None:
@@ -1539,12 +1552,9 @@ class CandidateRetrievalService(_RetrievalState):
                 batch_size=self._IN_CHUNK,
             )
         except Exception as exc:  # noqa: BLE001 — relation ANN remains usable
-            self.event_log.emit({
-                "kind": "lexical_retrieval_failed",
-                "notebook_id": notebook_id,
-                "site": "relation_endpoint_probe",
-                "error_type": type(exc).__name__,
-            })
+            self.event_log.emit(
+                _lexical_failure_event(notebook_id, "relation_endpoint_probe", exc)
+            )
             return []
         return [row["id"] for row in rows]
 
