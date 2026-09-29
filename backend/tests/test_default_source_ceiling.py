@@ -39,6 +39,7 @@ from app.services.source_scope import (
     memory_channel_allowed,
     notebook_in_scope,
     partition_memory_sources,
+    refreshed_ceiling_context,
     scoped_allowed_source_ids,
     scoped_participants,
     scoped_subgraph_nodes,
@@ -506,6 +507,131 @@ def test_partition_memory_sources_is_order_preserving_and_deduplicated():
 
 
 # ---------------------------------------------------------------------------
+# Re-installing a refreshed freeze (report auto-confirm)
+# ---------------------------------------------------------------------------
+
+
+def _refresh_store() -> _Store:
+    return _Store(
+        visible={
+            NB: ["src-a", "src-b"], "nb-lib": ["lib-1"],
+            "nb-late": ["late-1"], "nb-late2": ["late2-1"],
+        },
+        mounts=["nb-lib"],
+        hidden={"bob": ["src-knowhow"]},
+    )
+
+
+def test_refreshed_scope_is_adopted_and_ceilings_are_inherited():
+    store = _refresh_store()
+    refreshed = {
+        "mode": "include", "source_ids": ["src-a", "src-new"],
+        "hidden_source_ids": ["src-knowhow"], "narrowed": False,
+        "owner_id": "bob",
+    }
+    with default_ceiling_context(NB, "bob", store.readers()):
+        outer = current_source_scope()
+        frozen_lib = outer.source_ceiling_for("nb-lib")
+        store.calls.clear()
+        store.visible_calls.clear()
+        with refreshed_ceiling_context(
+            NB, "bob", store.readers(), local_scope=refreshed,
+        ):
+            scope = current_source_scope()
+            assert scope is not outer
+            assert scope.source_ids == frozenset({"src-a", "src-new"})
+            assert source_allowed(NB, "src-new") is True
+            assert source_allowed(NB, "src-b") is False
+            assert current_source_scope_payload() == {
+                "mode": "include", "source_ids": ["src-a", "src-new"],
+                "narrowed": False,
+            }
+            # Mounted libraries stay visible-only and the ceilings stay total.
+            assert scope.ceilings_total is True
+            assert scope.source_ceiling_for("nb-lib") is frozen_lib
+            assert source_allowed("nb-lib", "lib-1") is True
+            assert scope.covers_notebook("nb-unnamed") is False
+        assert current_source_scope() is outer, "the outer freeze is restored"
+    assert store.visible_calls == [], "no inherited library is read again"
+    assert store.calls == ["participants"]
+
+
+def test_a_library_mounted_before_the_refresh_follows_the_refreshed_library_dimension():
+    store = _refresh_store()
+    with default_ceiling_context(NB, "bob", store.readers()):
+        store.mounts += ["nb-late", "nb-late2"]  # mounted between freeze and refresh
+        admits_late = {"mode": "include", "notebook_ids": ["nb-lib", "nb-late"],
+                       "narrowed": True}
+        with refreshed_ceiling_context(
+            NB, "bob", store.readers(), base_scope=admits_late,
+        ):
+            scope = current_source_scope()
+            assert scope.source_ceiling_for("nb-late") == frozenset({"late-1"})
+            assert source_allowed("nb-late", "late-1") is True
+            assert scope.source_ceiling_for("nb-late2") is None
+            assert scope.covers_notebook("nb-late2") is False, (
+                "not admitted by the refreshed library dimension -> refused"
+            )
+            assert current_base_scope_payload() == {
+                "mode": "include", "notebook_ids": ["nb-late", "nb-lib"],
+                "narrowed": True,
+            }
+            # The local dimension was not refreshed: the default freeze stands.
+            assert scope.source_ids == frozenset({"src-a", "src-b"})
+            assert current_source_scope_payload() is None
+        assert "nb-late2" not in store.visible_calls, "an unadmitted library is not read"
+        excludes_late = {"mode": "include", "notebook_ids": ["nb-lib"],
+                         "narrowed": True}
+        with refreshed_ceiling_context(
+            NB, "bob", store.readers(), base_scope=excludes_late,
+        ):
+            assert current_source_scope().covers_notebook("nb-late") is False
+            assert source_allowed("nb-late", "late-1") is False
+
+
+def test_refresh_inside_a_subjectless_run_passes_through():
+    store = _refresh_store()
+    with source_scope_context(
+        NB, None, None, {NB: ["src-a"], "nb-x": ["x-1"]}, subjectless=True,
+    ):
+        outer = current_source_scope()
+        with refreshed_ceiling_context(
+            NB, "bob", store.readers(),
+            local_scope={"mode": "include", "source_ids": ["zzz"]},
+        ):
+            assert current_source_scope() is outer
+    assert store.calls == []
+
+
+def test_refresh_without_a_default_ceiling_outside_installs_a_fresh_one():
+    store = _refresh_store()
+    refreshed = {"mode": "include", "source_ids": ["src-a"], "narrowed": True}
+    with refreshed_ceiling_context(
+        NB, "bob", store.readers(), local_scope=refreshed,
+    ):
+        scope = current_source_scope()
+        assert scope.ceilings_total is True
+        assert scope.source_ids == frozenset({"src-a"})
+        assert scope.source_ceiling_for("nb-lib") == frozenset({"lib-1"})
+    # A legacy outer scope (no ceilings_total) is replaced, not trusted.
+    with source_scope_context(NB, {"mode": "exclude", "source_ids": []}):
+        with refreshed_ceiling_context(
+            NB, "bob", store.readers(), local_scope=refreshed,
+        ):
+            scope = current_source_scope()
+            assert scope.ceilings_total is True
+            assert scope.source_ceiling_for("nb-lib") == frozenset({"lib-1"})
+
+
+def test_refresh_for_another_notebook_is_refused():
+    store = _refresh_store()
+    with default_ceiling_context(NB, "bob", store.readers()):
+        with pytest.raises(ValueError):
+            with refreshed_ceiling_context("nb-other", "bob", store.readers()):
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Mounted-library reads: one budget per library, failures isolated
 # ---------------------------------------------------------------------------
 
@@ -754,9 +880,11 @@ def test_ceiling_is_built_once_and_nothing_is_sorted(monkeypatch):
         assert isinstance(scope.source_ceiling_for("nb-lib"), frozenset)
         assert len(scope.source_ceiling_for("nb-lib")) == 49_000
     assert max(sorted_sizes, default=0) <= 2, sorted_sizes
-    # One build per mounted library -- ``__post_init__`` reuses the frozenset
-    # ``source_scope_context`` already built instead of copying it again.
-    assert real_sorted(built) == [1, 49_000]
+    # One build per id list -- the active notebook's visible (49k) and hidden
+    # (1) halves and the two mounted libraries (49k, 1) -- and none twice:
+    # ``source_scope_context`` and ``__post_init__`` reuse the frozenset the
+    # per-library read already built instead of copying it again.
+    assert real_sorted(built) == [1, 1, 49_000, 49_000]
 
 
 def test_frozen_source_ids_reuses_canonical_input_and_coerces_the_rest():

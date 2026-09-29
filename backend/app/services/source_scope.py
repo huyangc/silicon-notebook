@@ -595,12 +595,12 @@ def source_scope_context(
     current = ActiveSourceScope(
         notebook_id=notebook_id,
         mode=str((raw or {}).get("mode") or "exclude"),
-        source_ids=CeilingSet(
-            str(value) for value in (raw or {}).get("source_ids") or []
+        source_ids=_frozen_source_ids(
+            (raw or {}).get("source_ids") or ()
         ),
         narrowed=_narrowed_flag(raw),
-        hidden_source_ids=CeilingSet(
-            str(value) for value in (raw or {}).get("hidden_source_ids") or []
+        hidden_source_ids=_frozen_source_ids(
+            (raw or {}).get("hidden_source_ids") or ()
         ),
         # (raw or {}):库维度加入后 raw 可以为 None（只提交了 base_scope）。
         # master 那行写 raw.get(...) 在它自己的前提下成立——它没有第二个维度,
@@ -1852,6 +1852,26 @@ def default_ceiling_context(
     if current_source_scope() is not None:
         yield
         return
+    with _fresh_default_ceiling(
+        notebook_id, owner_id, readers,
+        local_scope=local_scope, base_scope=base_scope,
+        cancel_event=cancel_event, mounted_read_seconds=mounted_read_seconds,
+    ):
+        yield
+
+
+@contextmanager
+def _fresh_default_ceiling(
+    notebook_id: str,
+    owner_id: str,
+    readers: CeilingReaders,
+    *,
+    local_scope: Any,
+    base_scope: Any,
+    cancel_event: Any,
+    mounted_read_seconds: float,
+) -> Iterator[None]:
+    """Steps 2-4 of ``default_ceiling_context``, whatever is installed outside."""
     from app.services.cancellation import raise_if_cancelled
 
     raise_if_cancelled(cancel_event)
@@ -1886,5 +1906,117 @@ def default_ceiling_context(
         ),
         ceilings_total=True,
         local_synthesized=synthesize_local,
+    ):
+        yield
+
+
+@contextmanager
+def refreshed_ceiling_context(
+    notebook_id: str,
+    owner_id: str,
+    readers: CeilingReaders,
+    *,
+    local_scope: Any = None,
+    base_scope: Any = None,
+    cancel_event: Any = None,
+    mounted_read_seconds: float = DEFAULT_MOUNTED_READ_SECONDS,
+) -> Iterator[None]:
+    """Re-install a REFRESHED freeze inside a run that already has a ceiling.
+
+    The one place a scope legitimately replaces the one outside it: the report
+    worker's auto-confirm re-validates the persisted scope and must plan and
+    generate under the refreshed freeze, not the one the worker started with
+    (``report_engine.run``).  ``default_ceiling_context`` cannot express that
+    -- it passes through whenever an outer scope exists -- and a bare
+    ``source_scope_context`` would drop the per-library ceilings and
+    ``ceilings_total``, reopening mounted libraries' hidden projections and any
+    library mounted mid-run.
+
+    * Outer scope SUBJECTLESS (a global run) -> pass through; a global run has
+      no local or library dimension to refresh.
+    * Outer scope is a default ceiling (``ceilings_total``, same notebook) ->
+      the refreshed ``local_scope`` / ``base_scope`` replace those dimensions;
+      a dimension passed as ``None`` keeps the outer one (the report never
+      scoped it, so the run's default freeze stands).  The outer
+      ``notebook_source_ceilings`` and ``ceilings_total`` are INHERITED
+      unchanged -- no library frozen by the outer scope is read again -- and a
+      library mounted since then gets its own visible-only ceiling, under the
+      constructor's per-library budget and isolation, only if the refreshed
+      library dimension admits it; otherwise it has no entry and stays refused.
+    * No outer scope, or one that is not a default ceiling -> a fresh default
+      ceiling over the refreshed dimensions (never a narrower guarantee than
+      the constructor's).
+
+    Reads: participants plus one visible read per newly admitted library.
+    """
+    outer = current_source_scope()
+    if outer is not None and outer.subjectless:
+        yield
+        return
+    if outer is None or not outer.ceilings_total:
+        with _fresh_default_ceiling(
+            notebook_id, owner_id, readers,
+            local_scope=local_scope, base_scope=base_scope,
+            cancel_event=cancel_event, mounted_read_seconds=mounted_read_seconds,
+        ):
+            yield
+        return
+    if outer.notebook_id != notebook_id:
+        raise ValueError(
+            "a refreshed ceiling must be installed for the run's own notebook"
+        )
+    from app.services.cancellation import raise_if_cancelled
+
+    raise_if_cancelled(cancel_event)
+    if local_scope is None:
+        local: Any = {
+            "mode": outer.mode,
+            "source_ids": outer.source_ids,
+            "hidden_source_ids": outer.hidden_source_ids,
+            "withheld_hidden_source_ids": outer.withheld_hidden_source_ids,
+            "narrowed": outer.narrowed,
+            "owner_id": outer.owner_id,
+        }
+        local_synthesized = not outer.source_provided
+    else:
+        local = local_scope
+        local_synthesized = False
+    base = base_scope
+    if base is None and outer.base_provided:
+        base = {
+            "mode": outer.base_mode,
+            "notebook_ids": outer.base_notebook_ids,
+            "narrowed": outer.base_narrowed,
+        }
+    base_raw = _scope_dict(base)
+    # The library question alone ("does the refreshed library dimension admit
+    # this library?"), answered by the one predicate that owns it.
+    admits = ActiveSourceScope(
+        notebook_id=notebook_id,
+        mode="exclude",
+        source_ids=frozenset(),
+        source_provided=False,
+        base_mode=str((base_raw or {}).get("mode") or "exclude"),
+        base_notebook_ids=_frozen_source_ids(
+            (base_raw or {}).get("notebook_ids") or ()
+        ),
+        base_provided=base_raw is not None,
+    ).covers_notebook
+    inherited = dict(outer.notebook_source_ceilings)
+    added = tuple(dict.fromkeys(
+        str(value) for value in readers.participants(notebook_id)
+        if value and str(value) != notebook_id
+        and str(value) not in inherited and admits(str(value))
+    ))
+    inherited.update(_mounted_library_ceilings(
+        added, readers, cancel_event, mounted_read_seconds
+    ))
+    with source_scope_context(
+        notebook_id,
+        local,
+        base,
+        inherited,
+        ceilings_total=True,
+        local_synthesized=local_synthesized,
     ):
         yield
