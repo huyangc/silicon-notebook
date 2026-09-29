@@ -29,6 +29,11 @@ import { splitInlineLatex, type AnswerReference } from "./answer-formatting";
 import { API_BASE } from "./api-config";
 import { AuthedImage } from "./authed-image";
 import { placeCitationPopover } from "./citation-popover";
+import {
+  referenceVerification,
+  verificationExplanation,
+  verificationLabel,
+} from "./citation-verification";
 import { type AnswerImagePreviewItem } from "./image-preview";
 import { ImportRowButton, type ImportRowController } from "./import-row-state";
 import { referenceImages } from "./inline-citation-images";
@@ -208,12 +213,19 @@ export function SelectedReferenceDetail({
   const objectType = reference.anchor?.object_type
     || (reference.citation?.tier === "external" ? "external" : "");
   const title = referenceTitle(reference);
+  // 全局问答终态引用核对没通过的引用(PR-D)。卡片**留着**、摘录**留着**(删卡会在正文
+  // 留下裸 `[k]`),但下面每一个「去原处看」的入口——知识图谱、Knowhow 行、查看原文、
+  // 打开笔记本、外链、导入、本段附图——一律**不渲染**(不是渲染成禁用):后端对带标记
+  // 引用的下钻端点返回 404,留着就是一颗必然失败的按钮。取而代之的是原因行。
+  const verification = referenceVerification(reference);
+  const flagged = Boolean(verification);
   // When the evidence row itself is the image element, its snippet/quoted_span
   // is parser-generated caption + image description. The image already carries
   // that caption as alt text, so repeating the blob as visible prose defeats the
   // image-only contract. Text evidence that merely has a nearby image keeps its
   // real excerpt.
-  const snippet = directlyReferencesImageElement(reference) ? "" : referenceSnippet(reference);
+  // 带标记的图片引用例外:附图区不渲染,图注摘录是这张卡上唯一剩下的内容,必须留着。
+  const snippet = !flagged && directlyReferencesImageElement(reference) ? "" : referenceSnippet(reference);
   const source = referenceSource(reference);
   const sourceFileName = referenceSourceFileName(reference);
   const location = referenceLocation(reference);
@@ -243,11 +255,11 @@ export function SelectedReferenceDetail({
   // 依赖后端净化过。不合格就整个不渲染链接(而不是渲染一个点不动的按钮):这条
   // 引用的其余内容照常可读。
   const externalUrl = reference.anchor?.url || reference.citation?.url || "";
-  const externalHref = isExternalReference && /^https?:\/\//i.test(externalUrl) ? externalUrl : "";
+  const externalHref = !flagged && isExternalReference && /^https?:\/\//i.test(externalUrl) ? externalUrl : "";
   // 「打开笔记本」的目标。判据与「查看原文」同构:没有承接方(不传 notebookHref)、
   // 没有所属笔记本、或调用方算不出链接(空串)时整颗不渲染。库外材料显式排除——
   // 它压根不属于任何笔记本(§九 不变量 3),守的是不变量而不是当前 payload 的形状。
-  const notebookLink = notebookHref && sourceNotebookId && !isExternalReference
+  const notebookLink = notebookHref && sourceNotebookId && !isExternalReference && !flagged
     ? notebookHref(sourceNotebookId, sourceId)
     : "";
   // Task 12b（引用跳转扩面）：citation 优先，anchor 兜底——两者理论上不会同时
@@ -257,12 +269,12 @@ export function SelectedReferenceDetail({
   // 检索结果带图(T1/T2)。图片与「查看原文」按钮共用同一个已解析的 sourceId——
   // 后端 attach_citation_images 只从绑定证据自己所在 chunk/元素的候选里取图,
   // 因此一条引用下的全部附图恒与该引用同源,不存在附图跨到别的来源的情况。
-  const images = referenceImages(reference);
+  const images = flagged ? [] : referenceImages(reference);
   // 取图归属:有 active 恒用 active(逐字保持既有口径),没有 active(全局问答)才用这条
   // 引用自己的所属库。两者皆空就整块不渲染。完整论证见 source-image.ts。
   const imageNotebookId = assetNotebookId(notebookId, sourceNotebookId);
   return (
-    <aside className="cite-detail-card" aria-live="polite">
+    <aside className={`cite-detail-card${flagged ? " is-unverified" : ""}`} aria-live="polite">
       <div className="cite-detail-head">
         <strong>{reference.displayLabel}</strong>
         {objectType && (
@@ -297,7 +309,7 @@ export function SelectedReferenceDetail({
             )}
           </span>
         )}
-        {onOpenKnowledgeGraph && !isSourceElementReference && !isExternalReference && (
+        {onOpenKnowledgeGraph && !flagged && !isSourceElementReference && !isExternalReference && (
           <button
             type="button"
             onClick={() => onOpenKnowledgeGraph(
@@ -320,7 +332,7 @@ export function SelectedReferenceDetail({
             {isRelationReference ? "关系证据不可定位" : "知识图谱"}
           </button>
         )}
-        {onOpenKnowhowRow && knowhowRef && (
+        {onOpenKnowhowRow && !flagged && knowhowRef && (
           <button
             type="button"
             onClick={() => onOpenKnowhowRow(knowhowRef.tableId, knowhowRef.rowId)}
@@ -330,7 +342,7 @@ export function SelectedReferenceDetail({
             在表格中查看
           </button>
         )}
-        {onOpenSource && sourceId && !isExternalReference && (
+        {onOpenSource && !flagged && sourceId && !isExternalReference && (
           <button
             type="button"
             onClick={() => onOpenSource(sourceId, elementId || undefined)}
@@ -389,6 +401,12 @@ export function SelectedReferenceDetail({
           />
         )}
       </div>
+      {flagged && (
+        <div className="cite-detail-verification" role="note">
+          <strong>未通过核对：{verificationLabel(verification)}</strong>
+          <span>{verificationExplanation(verification)}</span>
+        </div>
+      )}
       <h4><LatexText text={title} isFormula={objectType === "formula"} /></h4>
       {snippet && <p><LatexText text={snippet} /></p>}
       {(source || location) && <small>{[source, location].filter(Boolean).join(" · ")}</small>}

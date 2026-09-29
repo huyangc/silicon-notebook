@@ -1113,3 +1113,20 @@ test("read_document 步的 detail 显示《标题》与新增取样段数,不被
   };
   assert.equal(getTraceStepDetail(zeroWithNote), "《旧版说明书》 读取期间文档重新解析");
 });
+
+test("the final citation check step (PR-D) has its own label and no borrowed detail", () => {
+  const step = {
+    step_type: "citation_check",
+    summary: "已核对 5 条引用，2 条未通过",
+    detail: { checked: 5, failed: 2, count: 5, found: 3 },
+  };
+  assert.equal(getTraceStepLabel(step), "核对");
+  // detail 里的计数字段不得被通用兜底念成「5 个候选」「新增 3」。
+  assert.equal(getTraceStepDetail(step), "");
+  const summary = getReasoningTraceSummary([step], false);
+  assert.equal(summary.latestLabel, "核对");
+  assert.equal(summary.latestSummary, "已核对 5 条引用，2 条未通过");
+  // 与其它步不同名：轨迹里不能出现两条读起来一样的步。
+  const others = Object.entries(TRACE_STEP_LABELS).filter(([key]) => key !== "citation_check");
+  assert.ok(others.every(([, text]) => text !== "核对"));
+});

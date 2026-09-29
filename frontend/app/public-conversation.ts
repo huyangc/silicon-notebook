@@ -11,6 +11,7 @@
 
 import { requestJson } from "./api-client.ts";
 import { API_BASE } from "./api-config.ts";
+import type { CitationCheckSummary, CitationVerification } from "./citation-verification.ts";
 import { httpErrorStatus } from "./errors.ts";
 import {
   publicCitationRefs as reportCitationRefs,
@@ -41,6 +42,9 @@ export type PublicReferenceT = {
    *  标记、标题与摘录，与公开页「nothing addressable」的既有原则一致，所以这里
    *  也没有可渲染成链接的东西——不要「补齐」一个 url 字段。 */
   is_external?: boolean;
+  /** 全局问答终态引用核对(PR-D)：回答生成时这条引用没通过核对的原因，通过则缺席。
+   *  公开页据此给这条引用一枚原因徽章、正文标记换弱化样式、名下附图不插入。 */
+  verification?: CitationVerification;
 };
 
 /** 一张「本段附图」的公开投影。只带**按链接口令派生的不透明别名**，没有 asset_id。 */
@@ -64,6 +68,9 @@ export type PublicTurnT = {
   /** C-1：清单卡不进 v1，但绝不静默丢弃——>0 时公开页在该位置留一句可见说明。 */
   omitted_result_sets: number;
   images: PublicImageT[];
+  /** 全局问答终态引用核对的汇总，只在 `failed > 0` 时出现；公开页用过去时说明
+   *  （这是回答时刻的快照）。 */
+  citation_check?: CitationCheckSummary;
 };
 
 /** 一条公开分享的问答会话。真源：`backend/app/models/ask.py PublicConversation`。 */

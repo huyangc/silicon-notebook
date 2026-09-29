@@ -23,6 +23,13 @@ import "katex/dist/katex.min.css";
 
 import { remarkCitations } from "../../answer-citations";
 import { answerBodyWithoutCompletenessNotice } from "../../answer-completeness";
+import {
+  citationCheckNotice,
+  hasFailedCitationCheck,
+  verificationLabel,
+  verificationMarkerName,
+  verificationOf,
+} from "../../citation-verification";
 import { remarkAnswerInference } from "../../answer-inference";
 import { normalizeInferenceListMarkers } from "../../inference-list-markers";
 import { remarkGfmPlugin } from "../../markdown-gfm";
@@ -74,6 +81,8 @@ type PublicTurnRenderState = Readonly<{
   turnIndex: number;
   selectedKey: string | null;
   citationRefs: Record<string, PublicCitationRefT>;
+  /** key → 没通过核对的原因（PR-D）；通过的引用不在表里。 */
+  verificationByKey: Readonly<Record<string, string>>;
   markdownCitationRefs: Record<string, PublicCitationRefT>;
   imagesByAlias: ReadonlyMap<string, PublicImageT>;
   openReference: (key: string) => void;
@@ -91,10 +100,18 @@ function PublicMarkdownLink({ href, children }: { href?: string; children?: Reac
   if (href?.startsWith("cite:")) {
     const key = href.slice(5);
     if (state?.citationRefs[key]) {
+      // 回答生成时没通过核对的引用：弱化样式 + 原因进可访问名称。点开照旧滚到清单里
+      // 那一条，原因徽章就在那里。
+      const verification = Object.hasOwn(state.verificationByKey, key) ? state.verificationByKey[key] : "";
+      const markerName = verification
+        ? verificationMarkerName(state.citationRefs[key].displayLabel, verification)
+        : undefined;
       return (
         <button
           type="button"
-          className={`cite-chip${state.selectedKey === key ? " active" : ""}`}
+          aria-label={markerName}
+          title={markerName}
+          className={`cite-chip${verification ? " cite-chip-unverified" : ""}${state.selectedKey === key ? " active" : ""}`}
           onClick={() => state.openReference(key)}
         >
           {children}
@@ -285,15 +302,26 @@ function PublicTurnView({
     () => new Map(turn.images.map((image) => [image.alias, image])),
     [turn.images],
   );
+  const verificationByKey = useMemo(() => {
+    const rows: Record<string, string> = {};
+    for (const reference of turn.references) {
+      const verification = verificationOf(reference);
+      if (reference.key && verification) rows[reference.key] = verification;
+    }
+    return rows;
+  }, [turn.references]);
   const imageIdsByCitationKey: CitationImageIdsByKey = useMemo(() => {
     const rows: Record<string, string[]> = {};
     for (const image of turn.images) {
       for (const key of image.reference_keys ?? []) {
+        // 回答生成时没通过核对的引用，名下附图不插进正文（与站内同一条规则）。同一张图
+        // 还挂在别的、通过了核对的引用下时，照常在那个引用的位置出现。
+        if (Object.hasOwn(verificationByKey, key)) continue;
         (rows[key] ??= []).push(image.alias);
       }
     }
     return rows;
-  }, [turn.images]);
+  }, [turn.images, verificationByKey]);
   const legacyImages = useMemo(
     () => turn.images.filter((image) => !image.reference_keys?.length),
     [turn.images],
@@ -411,6 +439,7 @@ function PublicTurnView({
           turnIndex: index,
           selectedKey,
           citationRefs,
+          verificationByKey,
           markdownCitationRefs,
           imagesByAlias,
           openReference,
@@ -420,6 +449,12 @@ function PublicTurnView({
         </PublicTurnRenderContext.Provider>
         {turn.completeness_notice && (
           <p className="answer-completeness-notice">{turn.completeness_notice}</p>
+        )}
+        {/* 快照里的核对结果：说的是回答生成那一刻，所以用过去时。 */}
+        {hasFailedCitationCheck(turn.citation_check) && (
+          <p className="answer-citation-check-notice" role="note">
+            {citationCheckNotice(turn.citation_check, "snapshot")}
+          </p>
         )}
       </article>
 
@@ -504,6 +539,11 @@ function PublicTurnView({
                       外部
                     </span>
                   )}
+                  {verificationOf(reference) && (
+                    <small className="public-report-verification">
+                      未通过核对：{verificationLabel(verificationOf(reference))}
+                    </small>
+                  )}
                   {reference.title_truncated && (
                     <small className="public-report-truncated">（标题过长，已截断）</small>
                   )}
@@ -514,8 +554,10 @@ function PublicTurnView({
                   {reference.file_name_truncated && (
                     <small className="public-report-truncated">（原始文件名过长，已截断）</small>
                   )}
-                  {!reference.is_image_reference && reference.snippet && <blockquote>{reference.snippet}</blockquote>}
-                  {!reference.is_image_reference && reference.snippet_truncated && (
+                  {/* 没通过核对的图片引用例外：它名下的附图不插进正文，图注摘录是这条
+                      引用唯一剩下的内容，照常显示。 */}
+                  {(!reference.is_image_reference || verificationOf(reference)) && reference.snippet && <blockquote>{reference.snippet}</blockquote>}
+                  {(!reference.is_image_reference || verificationOf(reference)) && reference.snippet_truncated && (
                     <small className="public-report-truncated">（摘录过长，已截断）</small>
                   )}
                 </div>

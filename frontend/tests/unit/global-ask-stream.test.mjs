@@ -91,3 +91,22 @@ test("a body that ends without a terminal frame, an error frame, and an HTTP err
   globalThis.fetch = async () => new Response(JSON.stringify({ detail: "问答任务不存在，请刷新对话。" }), { status: 404 });
   await assert.rejects(streamGlobalJob("gask-1", { onProgress() {} }));
 });
+
+test("the final frame keeps the citation check summary and per-citation flags (PR-D)", async () => {
+  installWindow();
+  const { streamGlobalJob } = await import("../../app/global-ask-api.ts");
+  const citationCheck = { outcome: "partial", checked: 2, failed: 1, changed: 1, source_gone: 0, unverifiable: 0 };
+  globalThis.fetch = async () => streamResponse(
+    JSON.stringify({ event: "final", job: { ...jobFrame, answer: {
+      answer_id: "", answer: "结论 [k1]",
+      anchors: [{ key: "k1", verification: "changed" }],
+      citations: [{ element_id: "e-1", verification: "changed" }],
+      citation_check: citationCheck,
+    } } }),
+  );
+  const outcome = await streamGlobalJob("gask-1", { onProgress() {} });
+  assert.equal(outcome.kind, "final");
+  assert.deepEqual(outcome.job.answer.citation_check, citationCheck);
+  assert.equal(outcome.job.answer.anchors[0].verification, "changed");
+  assert.equal(outcome.job.answer.citations[0].verification, "changed");
+});

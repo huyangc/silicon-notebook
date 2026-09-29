@@ -1,0 +1,64 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  citationCheckNotice,
+  citationCheckReasonText,
+  hasFailedCitationCheck,
+  referenceVerification,
+  verificationLabel,
+  verificationMarkerName,
+} from "../../app/citation-verification.ts";
+
+const check = (counts) => ({
+  outcome: "partial", checked: 6, failed: 0, changed: 0, source_gone: 0, unverifiable: 0, ...counts,
+});
+
+test("the notice lists only the reasons with a positive count, in a fixed order", () => {
+  assert.equal(
+    citationCheckNotice(check({ failed: 3, changed: 2, source_gone: 1 })),
+    "本次回答有部分引用未通过核对：2 条原文已改动、1 条资料已删除。回答内容照常保留，带标记的引用可点开查看原因。",
+  );
+  assert.equal(citationCheckReasonText(check({ failed: 1, source_gone: 1 })), "1 条资料已删除");
+  assert.equal(citationCheckReasonText(check({ failed: 2, unverifiable: 2 })), "2 条无法核对");
+  assert.equal(
+    citationCheckReasonText(check({ failed: 6, unverifiable: 1, changed: 4, source_gone: 1 })),
+    "4 条原文已改动、1 条资料已删除、1 条无法核对",
+  );
+});
+
+test("a summary without per-reason counts falls back to the total, never an empty colon", () => {
+  assert.equal(citationCheckReasonText(check({ failed: 3 })), "共 3 条");
+});
+
+test("the public snapshot notice is in the past tense", () => {
+  assert.equal(
+    citationCheckNotice(check({ failed: 1, changed: 1 }), "snapshot"),
+    "回答生成时，有部分引用未通过核对：1 条原文已改动。回答内容照常保留，带标记的引用可点开查看原因。",
+  );
+});
+
+test("the notice appears only when failed > 0", () => {
+  assert.equal(hasFailedCitationCheck(undefined), false);
+  assert.equal(hasFailedCitationCheck(null), false);
+  assert.equal(hasFailedCitationCheck(check({ failed: 0 })), false);
+  assert.equal(hasFailedCitationCheck(check({ failed: 1, changed: 1 })), true);
+});
+
+test("absent verification means passed; the anchor wins over the citation", () => {
+  assert.equal(referenceVerification({ anchor: {} }), "");
+  assert.equal(referenceVerification({ citation: { verification: "" } }), "");
+  assert.equal(referenceVerification({ anchor: { verification: "changed" } }), "changed");
+  assert.equal(referenceVerification({ citation: { verification: "source_gone" } }), "source_gone");
+  assert.equal(
+    referenceVerification({ anchor: { verification: "unverifiable" }, citation: { verification: "changed" } }),
+    "unverifiable",
+  );
+});
+
+test("labels and the marker's accessible name", () => {
+  assert.equal(verificationLabel("changed"), "原文已改动");
+  assert.equal(verificationLabel("source_gone"), "资料已删除");
+  assert.equal(verificationLabel("unverifiable"), "无法核对");
+  assert.equal(verificationMarkerName("[2]", "source_gone"), "[2] 未通过核对：资料已删除");
+});

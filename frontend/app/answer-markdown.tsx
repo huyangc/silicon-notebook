@@ -19,6 +19,7 @@ import {
   type AnswerReference,
 } from "./answer-formatting";
 import { remarkCitations } from "./answer-citations";
+import { referenceVerification, verificationMarkerName } from "./citation-verification";
 import { remarkAnswerInference } from "./answer-inference";
 import { normalizeInferenceListMarkers } from "./inference-list-markers";
 import { remarkGfmPlugin } from "./markdown-gfm";
@@ -77,12 +78,20 @@ function AnswerMarkdownLink({ href, children }: { href?: string; children?: Reac
     const reference = state?.refsByCitationKey[href.slice(5)];
     if (reference && state) {
       const isSelected = state.selectedReferenceId === reference.id;
+      // 没通过终态核对的引用(PR-D)：弱化样式 + 原因进可访问名称/悬浮提示。点击照旧
+      // 打开引用卡——卡片那侧对带标记的引用只给原因与摘录，不给任何打开原文的入口。
+      const verification = referenceVerification(reference);
+      const markerName = verification
+        ? verificationMarkerName(reference.displayLabel, verification)
+        : undefined;
       return (
         <span className="cite-chip-wrap">
           <button
             type="button"
             aria-expanded={isSelected}
-            className={`cite-chip${isSelected ? " active" : ""}`}
+            aria-label={markerName}
+            title={markerName}
+            className={`cite-chip${verification ? " cite-chip-unverified" : ""}${isSelected ? " active" : ""}`}
             onClick={(event) => state.onReferenceClick(reference, event)}
           >
             {children}
@@ -158,7 +167,11 @@ export function AnswerMarkdown({
   const imageIdsByCitationKey: CitationImageIdsByKey = useMemo(() => Object.fromEntries(
     Object.entries(refsByCitationKey).map(([key, reference]) => [
       key,
-      (reference.anchor?.images ?? reference.citation?.images ?? []).map((image) => image.asset_id),
+      // 没通过核对的引用名下的附图不插进正文(PR-D)：图片与原文同属那份已改动/已删除
+      // 的资料，取图端点对它同样不再担保。
+      referenceVerification(reference)
+        ? []
+        : (reference.anchor?.images ?? reference.citation?.images ?? []).map((image) => image.asset_id),
     ]),
   ), [refsByCitationKey]);
 

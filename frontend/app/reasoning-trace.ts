@@ -72,6 +72,10 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   //   plugin_action    = 模型自己决定调、循环之内调、产出**进**答案且可 [k] 引用。
   // step_type 是核心拥有的**一个**值,不随插件数量增长(插件名只进 detail)。
   plugin_action: "扩展检索",
+  // citation_check = 全局问答作答之后的终态引用核对(PR-D):逐条确认引用的原文在
+  // 作答期间没被改动或删除。summary 由后端如实写「已核对 N 条、未通过 M 条」;
+  // 核对不通过从不作废回答,这一步只是把核对这件事摆进轨迹。
+  citation_check: "核对",
 };
 
 // next_action 取值来自 backend/app/services/prompts.py 的状态机决策(reflect 步骤
@@ -360,6 +364,9 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
   // 整篇都被等距取样过。零命中(found: 0)时 detail 可能带 note(例如「读取期间
   // 文档重新解析」)——此时显示 note 而不是空洞的「新增 0 段取样」,不然用户不
   // 知道为什么这一步什么都没拿到。
+  // 核对步的条数已经写在 summary 里;这里显式返回空,免得下面的通用兜底把 detail
+  // 里的计数字段念成「N 个候选」「新增 N」这类说的是另一件事的话。
+  if (step.step_type === "citation_check") return "";
   if (step.step_type === "read_document") {
     const title = typeof detail.source === "string" && detail.source ? `《${detail.source}》` : "";
     const found = typeof detail.found === "number" ? detail.found : undefined;

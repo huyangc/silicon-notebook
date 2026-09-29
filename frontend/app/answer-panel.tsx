@@ -34,6 +34,7 @@ import { type ReasoningTraceStep } from "./ask-stream";
 // 与笔记本内问答共用同一份实现。`LatexText` 跟着它一起搬(卡片正文要渲染行内公式),
 // 这里原样再导出，既有调用方的 `from "./answer-panel"` 一个字都不用改。
 import { CitationPopover, LatexText } from "./citation-card";
+import { citationCheckNotice, hasFailedCitationCheck } from "./citation-verification";
 import { copyTextSafely } from "./copy-text";
 import { FormulaView } from "./formula-view";
 import { useImportRowController } from "./import-row-state";
@@ -1328,6 +1329,14 @@ export function AnswerView({
       />
       {completenessNotice && (
         <p className="answer-completeness-notice">{completenessNotice}</p>
+      )}
+      {/* 全局问答终态引用核对有没通过的条目(PR-D)。回答**照常**整份上屏，这里只补一句
+          如实的说明；逐条原因在带标记的引用卡上。没有这个字段(单库回答、全部通过、
+          历史回答)时一个节点都不多。 */}
+      {hasFailedCitationCheck(answer.citation_check) && (
+        <p className="answer-citation-check-notice" role="note">
+          {citationCheckNotice(answer.citation_check)}
+        </p>
       )}
       <KnowhowResultSets
         resultSets={answer.result_sets}
