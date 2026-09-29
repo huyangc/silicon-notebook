@@ -40,6 +40,10 @@ from app.repositories.postgres._store_utils import (
     sqlite_compatible_notebook_row,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.memory_sql import (
+    memory_derived_object,
+    no_memory_member_cluster,
+)
 from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
 from app.repositories.postgres.search import (
     notebook_element_rows,
@@ -47,7 +51,6 @@ from app.repositories.postgres.search import (
     notebook_source_rows,
 )
 from app.repositories.postgres.source_store import (
-    MEMORY_SOURCE_TYPE_PREDICATE,
     PAPER_META_ELIGIBLE_SQL,
     PAPER_META_NO_META_SQL,
     VISIBLE_SOURCE_TYPES_PREDICATE,
@@ -101,27 +104,14 @@ def _absolute_instant(column: str) -> str:
 #: 同一个理由(codex #520 R2 P1:排除必须与被排除的行由同一次求值决定,跨查询的
 #: 相减/排除清单会被并发的 Memory 增删漏掉,而漏掉的东西里包含概念名称)。
 #: PG 的 READ COMMITTED 让「两次读没有共享快照」这件事在这一侧尤其显式。
-_NOT_MEMORY_OWNED_SQL = (
-    "NOT EXISTS (SELECT 1 FROM sources "
-    f"WHERE sources.id=o.source_id AND {MEMORY_SOURCE_TYPE_PREDICATE})"
-)
+#: 判据本体在 ``memory_sql.memory_derived_object``(唯一定义点,与 SQLite 侧同一份文本)。
+_NOT_MEMORY_OWNED_SQL = "NOT " + memory_derived_object("o")
 
 #: codex #520 R8 P1(SQLite 侧同名常量的孪生):``canonical_name`` 是代表名整簇
 #: 复制,代表可能选自私有 Memory 派生对象——成员行过滤洗不掉名字,取名字的查询
-#: 按整簇排除(约定外层别名 ``c``)。``source_type`` 不加限定词同上:三张 join 表
-#: 里只有 sources(ms) 有这列。
-_NO_MEMORY_MEMBER_CLUSTER_SQL = (
-    "NOT EXISTS (SELECT 1 FROM concept_clusters mc "
-    "JOIN knowledge_objects mo ON mo.id = mc.member_object_id "
-    "JOIN sources ms ON ms.id = mo.source_id "
-    "WHERE mc.notebook_id = c.notebook_id "
-    "AND mc.canonical_id = c.canonical_id "
-    # 批 3·W2 §1.4:内层引用与外层行同代(外层 c 已按 published 谓词过滤,
-    # 相关引用零新参数)——「按整簇排除 memory」只在同一代内判定,双代窗口
-    # 不跨代误判。
-    "AND mc.generation = c.generation "
-    f"AND {MEMORY_SOURCE_TYPE_PREDICATE})"
-)
+#: 按整簇排除(约定外层别名 ``c``)。判据本体在 ``memory_sql.no_memory_member_cluster``
+#: (``source_type`` 不加限定词的理由、批 3·W2 §1.4 的同代相关对齐都写在那里)。
+_NO_MEMORY_MEMBER_CLUSTER_SQL = no_memory_member_cluster("c")
 
 
 def _snippet(text: str, needle: str) -> str:

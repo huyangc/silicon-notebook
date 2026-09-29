@@ -39,9 +39,12 @@ from app.repositories.sqlite.identity_store import (
     _UPLOAD_LIMIT_DEFAULT_KEY,
     _resolve_global_default,
 )
+from app.repositories.sqlite.memory_sql import (
+    memory_derived_object,
+    no_memory_member_cluster,
+)
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
 from app.repositories.sqlite.source_store import (
-    MEMORY_SOURCE_TYPE_PREDICATE,
     PAPER_META_ELIGIBLE_SQL,
     PAPER_META_NO_META_SQL,
     VISIBLE_SOURCE_TYPES_PREDICATE,
@@ -104,10 +107,9 @@ def _absolute_instant(column: str) -> str:
 #: ``knowledge_objects.source_id`` 默认是 ``''`` 且不是外键,所以「没有归属来源」的
 #: 对象匹配不到任何 ``sources`` 行、照旧保留——与旧的 ``NOT IN (memory ids)`` 逐字
 #: 同义。``sources.id`` 是主键,子查询是一次点查。
-_NOT_MEMORY_OWNED_SQL = (
-    "NOT EXISTS (SELECT 1 FROM sources "
-    f"WHERE sources.id = o.source_id AND {MEMORY_SOURCE_TYPE_PREDICATE})"
-)
+#:
+#: 判据本体在 ``memory_sql.memory_derived_object``(唯一定义点,与 PG 侧同一份文本)。
+_NOT_MEMORY_OWNED_SQL = "NOT " + memory_derived_object("o")
 
 #: codex #520 R8 P1:``concept_clusters.canonical_name`` 是**代表名整簇复制**的,
 #: 代表可能恰好选自某位成员私有 Memory 派生的对象——只过滤成员行(上面那条)洗不
@@ -115,18 +117,9 @@ _NOT_MEMORY_OWNED_SQL = (
 #: 有,整簇不出名字(约定外层别名 ``c``,列 ``notebook_id``/``canonical_id``)。
 #: 宁可少一个也在可见文档里出现的名字,不冒把私有 Memory 的措辞写进全员可见块的
 #: 险。计数查询不受此累——计数不携带名字,成员行过滤就够了。
-#: ``source_type`` 不加限定词与上一条同理:三张 join 表里只有 sources(ms) 有这列,
-#: 只能解析到它——这样才能逐字复用同一份谓词常量。
-_NO_MEMORY_MEMBER_CLUSTER_SQL = (
-    "NOT EXISTS (SELECT 1 FROM concept_clusters mc "
-    "JOIN knowledge_objects mo ON mo.id = mc.member_object_id "
-    "JOIN sources ms ON ms.id = mo.source_id "
-    "WHERE mc.notebook_id = c.notebook_id "
-    "AND mc.canonical_id = c.canonical_id "
-    # 批 3·W2 §1.4:内层引用与外层行同代(PG 孪生同注释)。
-    "AND mc.generation = c.generation "
-    f"AND {MEMORY_SOURCE_TYPE_PREDICATE})"
-)
+#: 判据本体在 ``memory_sql.no_memory_member_cluster``(``source_type`` 不加限定词的理由、
+#: 批 3·W2 §1.4 的同代相关对齐都写在那里)。
+_NO_MEMORY_MEMBER_CLUSTER_SQL = no_memory_member_cluster("c")
 
 
 class QueryStore:

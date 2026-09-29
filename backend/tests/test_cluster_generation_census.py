@@ -20,8 +20,8 @@ B·目标代写者(PR-2 参数化)/C·跨代维护(显式豁免+理由)。本守
 tables/KG_STATE_TABLES/_COPY_TABLES/kg_build_job_store 的表名字符串常量)
 不进正则——它们全是 C 类整表维护,行为由各自套件钉;②同文件内把谓词从
 LEFT JOIN 的 ON 挪进 WHERE 计数不变——由本文件的 ON 结构守卫单列检查;
-③query_store 内层 `mc.generation = c.generation` 相关对齐无可计数 token
-——由其行为测试(memory 排除语义)兜;④source_subgraph_projection 的局部
+③`memory_sql.no_memory_member_cluster` 内层 `mc.generation = c.generation` 相关
+对齐无可计数 token——由其行为测试(memory 排除语义)兜;④source_subgraph_projection 的局部
 模板被两分支复用,删一个分支的引用计数不变——由该模块行为测试兜。
 """
 from __future__ import annotations
@@ -85,10 +85,16 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "drain/终局 blanket 与 per-source 清理(跨代豁免:删源必须跨代删)"),
     "backend/app/repositories/sqlite/knowledge_store.py": (10, 0, 0, 7, 0,
         "PG 孪生同注记"),
-    "backend/app/repositories/postgres/query_store.py": (2, 0, 0, 1, 0,
-        "A:top_concept_names 外层谓词;内层 NOT EXISTS 用 mc.generation="
-        "c.generation 相关对齐(零新参数,不计入谓词计数)"),
-    "backend/app/repositories/sqlite/query_store.py": (2, 0, 0, 1, 0,
+    "backend/app/repositories/postgres/query_store.py": (1, 0, 0, 1, 0,
+        "A:top_concept_names 外层谓词;内层整簇排除的 NOT EXISTS 已搬进 "
+        "memory_sql.no_memory_member_cluster(见下条),本文件只剩外层这一处读"),
+    "backend/app/repositories/sqlite/query_store.py": (1, 0, 0, 1, 0,
+        "PG 孪生同注记"),
+    "backend/app/repositories/postgres/memory_sql.py": (1, 0, 0, 0, 0,
+        "A:no_memory_member_cluster 的内层 NOT EXISTS,用 mc.generation="
+        "{外层}.generation 相关对齐(零新参数,不计入谓词计数;外层行的 published "
+        "谓词由调用方持有)"),
+    "backend/app/repositories/sqlite/memory_sql.py": (1, 0, 0, 0, 0,
         "PG 孪生同注记"),
     "backend/app/repositories/postgres/sharing_store.py": (1, 0, 0, 2, 0,
         "C→§1.6:拷贝快照只取 published 代 + 校验两侧同谓词口径"),
