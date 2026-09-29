@@ -4,8 +4,6 @@ import json
 
 from fastapi.testclient import TestClient
 
-from app.models.schemas import AskResponse
-
 from tests.answer_owner_testkit import save_owned_answer
 
 

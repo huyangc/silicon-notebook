@@ -14,7 +14,13 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.answer_owner_testkit import save_owned_answer, seed_ownership_matrix
+from app.repositories.sqlite.ask_state_store import ANSWER_AUTHOR_PROBE_SQL
+from tests.answer_owner_testkit import (
+    capture_statements,
+    refusal_cases,
+    save_owned_answer,
+    seed_ownership_matrix,
+)
 
 MISSING = "ans-does-not-exist"
 
@@ -170,19 +176,27 @@ def test_user_owns_answer_is_conversation_author_and_notebook_reader(world):
 
 def test_the_ownership_read_is_one_statement_for_every_refusal(world):
     store = world.repo._runtime.ask_state
-    assert store.answer_notebook_id(world.bob_answer, owned_by=world.bob.id) == (
-        world.notebook_id
-    )
-    for answer_id, user_id in (
-        (world.bob_answer, world.alice.id),
-        (world.creatorless_answer, world.alice.id),
-        (world.nocreator_answer, world.bob.id),
-        (MISSING, world.alice.id),
-        (world.bob_answer, ""),
-    ):
-        assert store.answer_notebook_id(answer_id, owned_by=user_id) is None
-    # without the keyword it is still the plain notebook lookup
-    assert store.answer_notebook_id(world.creatorless_answer) == world.notebook_id
+    with capture_statements(store.database) as seen:
+        assert store.answer_notebook_id(world.bob_answer, owned_by=world.bob.id) == (
+            world.notebook_id
+        )
+    assert len(seen) == 1
+    for kind, answer_id, user_id in refusal_cases(world):
+        with capture_statements(store.database) as seen:
+            assert store.answer_notebook_id(answer_id, owned_by=user_id) is None, kind
+        # every refusal kind, and the unknown id, is the SAME single statement
+        assert len(seen) == 1, kind
+        assert seen[0][0] == ANSWER_AUTHOR_PROBE_SQL, kind
+
+
+def test_a_refusal_costs_the_service_one_statement_whatever_the_kind(world):
+    sharing = world.repo._runtime.sharing
+    counts = {}
+    for kind, answer_id, user_id in refusal_cases(world):
+        with capture_statements(world.repo._runtime.ask_state.database) as seen:
+            assert sharing.user_owns_answer(answer_id, user_id) is False, kind
+        counts[kind] = len(seen)
+    assert set(counts.values()) == {1}, counts
 
 
 def test_service_create_from_answer_refuses_a_foreign_answer(world):
@@ -216,3 +230,83 @@ def test_an_answer_saved_after_the_conversation_is_reused_by_its_author(client, 
     for answer_id in (first, second):
         assert _preview(client, world.headers["bob"], answer_id).status_code == 200
         assert _preview(client, world.headers["alice"], answer_id).status_code == 404
+
+
+# Read-only: memories made from an answer whose conversation belongs to someone
+# else (or to no conversation). Answers that no longer exist cannot be judged.
+LEGACY_FOREIGN_ANSWER_MEMORIES_SQLITE = (
+    "SELECT COUNT(*) FROM memory_items m "
+    "JOIN answers a ON a.id = m.source_answer_id "
+    "LEFT JOIN conversations c ON c.id = a.conversation_id "
+    "WHERE m.origin = 'ask_answer' "
+    "AND (c.id IS NULL OR c.created_by IS NOT m.created_by)"
+)
+
+
+def _legacy_count(repo) -> int:
+    with repo._runtime.database.connect() as db:
+        return db.execute(LEGACY_FOREIGN_ANSWER_MEMORIES_SQLITE).fetchone()[0]
+
+
+def test_a_legacy_memory_from_someone_elses_answer_is_returned_to_its_creator_only(
+    client, world
+):
+    """A Memory saved before answers were author-checked keeps working for the
+    person who made it, is never handed to anyone else, and is countable."""
+    world.repo.add_member(world.notebook_id, world.carol.id)
+    assert _legacy_count(world.repo) == 0
+    # Alice saves her own answer, then the answer's conversation "moves" to Bob:
+    # the state a pre-fix save from Bob's answer left behind.
+    saved = _save(client, world.headers["alice"], world.notebook_id, world.alice_answer)
+    assert saved.status_code == 201, saved.text
+    with world.repo._write() as db:
+        db.execute(
+            "UPDATE conversations SET created_by=? WHERE id="
+            "(SELECT conversation_id FROM answers WHERE id=?)",
+            (world.bob.id, world.alice_answer),
+        )
+    assert _legacy_count(world.repo) == 1
+    again = _save(client, world.headers["alice"], world.notebook_id, world.alice_answer)
+    assert again.status_code == 201 and again.json()["id"] == saved.json()["id"]
+    memory_id = saved.json()["id"]
+    # Carol (a member, not the author, no Memory of her own): refused.
+    assert _save(
+        client, world.headers["carol"], world.notebook_id, world.alice_answer
+    ).status_code == 404
+    # Bob is the author now: he gets his OWN new Memory, never Alice's.
+    bobs = _save(client, world.headers["bob"], world.notebook_id, world.alice_answer)
+    assert bobs.status_code == 201 and bobs.json()["id"] != memory_id
+    assert bobs.json()["created_by"] == world.bob.id
+    for who in ("bob", "carol"):
+        assert client.get(
+            f"/api/memories/{memory_id}", headers=world.headers[who]
+        ).status_code == 404
+
+
+def test_the_write_lock_rechecks_the_author(world):
+    """The author is re-checked in the write transaction, not only before it:
+    if the conversation's creator differs by then, nothing is written."""
+    service = world.repo._runtime.memory_service
+    store = world.repo._runtime.memory_store
+    original = store.create_answer_with_initial_revision
+
+    def creator_changes_before_the_write(write, changed_by, reason):
+        with world.repo._write() as db:
+            db.execute(
+                "UPDATE conversations SET created_by=? WHERE id="
+                "(SELECT conversation_id FROM answers WHERE id=?)",
+                (world.alice.id, world.bob_answer),
+            )
+        return original(write, changed_by, reason)
+
+    store.create_answer_with_initial_revision = creator_changes_before_the_write
+    try:
+        with pytest.raises(KeyError):
+            service.create_from_answer(
+                world.notebook_id, world.bob.id, world.bob_answer, "T", "B", [],
+                extract_kg=False,
+            )
+    finally:
+        del store.create_answer_with_initial_revision
+    with world.repo._runtime.database.connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM memory_items").fetchone()[0] == 0
