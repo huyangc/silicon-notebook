@@ -264,6 +264,7 @@ def test_an_overlay_only_passage_race_before_the_terminal_read(
         cited = [r for r in kit.references(result.answer) if r.element_id == element_id]
         assert cited and {r.verification for r in cited} == {expected}
         assert getattr(result.answer.citation_check, expected) == 1
+        kit.assert_attributed(result)
     finally:
         repo.close()
 
@@ -339,5 +340,152 @@ def test_a_passage_kept_by_a_reserved_library_seat_is_registered(tmp_path, monke
         cited = {r.element_id for r in kit.references(result.answer)}
         assert any(chunk.element_ids and chunk.element_ids[0] in cited for chunk in kept)
         assert not [e for e in events if e.get("kind") == "global_ask_citations_partial"]
+        kit.assert_attributed(result)
+    finally:
+        repo.close()
+
+
+
+# ---------------------------------------------------------------------------
+# Every reasoning action that can put a hit in front of the model, attributed
+# ---------------------------------------------------------------------------
+
+def _two_claims_and_an_edge(repo):
+    nb = kit.notebook(repo)
+    kit.seed_document(repo, nb.id, "s-c", "推导",
+                      ["甲甲甲 原文", "乙乙乙 完全无关的另一段", "丙丙丙 第三段"])
+    repo.store_kg(nb.id, "s-c", [
+        {"local_id": "A", "object_type": "claim",
+         "payload": {"name": "前提甲", "section_path": "A"},
+         "evidence": [kit.evidence("s-c", "s-c-000", "甲甲甲")]},
+        {"local_id": "B", "object_type": "claim",
+         "payload": {"name": "邻居乙", "section_path": "B"},
+         "evidence": [kit.evidence("s-c", "s-c-001", "乙乙乙")]},
+    ], [
+        {"source_local_id": "A", "target_local_id": "B", "edge_type": "derived_from",
+         "evidence": [kit.evidence("s-c", "s-c-000", "甲甲甲")]},
+    ])
+    return nb, kit.object_ids(repo, nb.id)
+
+
+def test_first_round_search_is_clean(tmp_path, monkeypatch):
+    repo = kit.make_repo(tmp_path, monkeypatch)
+    try:
+        nb, _ids = _two_claims_and_an_edge(repo)
+        events = kit.capture_events(repo, monkeypatch)
+        kit.bind_models(repo, kit.ScriptedAgent([], plan_query="前提甲"))
+        result = kit.global_answer(repo, [nb.id], "前提甲")
+        kit.assert_clean(result, events, "kg_objects")
+    finally:
+        repo.close()
+
+
+def test_add_subquery_is_clean(tmp_path, monkeypatch):
+    repo = kit.make_repo(tmp_path, monkeypatch)
+    try:
+        nb, _ids = _two_claims_and_an_edge(repo)
+        events = kit.capture_events(repo, monkeypatch)
+        kit.bind_models(repo, kit.ScriptedAgent([{
+            "next_action": "add_subquery",
+            "new_sub_query": {"query": "邻居乙", "types": [], "prefer": "balanced",
+                              "reason": "补查"},
+            "reason": "补查",
+        }], plan_query="前提甲"))
+        result = kit.global_answer(repo, [nb.id], "前提甲与邻居乙")
+        kit.assert_clean(result, events, "kg_objects")
+    finally:
+        repo.close()
+
+
+def test_expand_graph_neighbour_is_attributed_and_clean(tmp_path, monkeypatch):
+    """Closing-review B1: a neighbour fetched ONLY by ``expand_graph`` (the
+    first-round search is made to miss it) carries its library in peer mode,
+    so the healthy answer has no mark."""
+    from app.services.retrieval_service import RetrievalService
+
+    repo = kit.make_repo(tmp_path, monkeypatch)
+    try:
+        nb, ids = _two_claims_and_an_edge(repo)
+        neighbour = ids["邻居乙"]
+        original = RetrievalService.federated_retrieve
+
+        def without_neighbour(self, *args, **kwargs):
+            return [hit for hit in original(self, *args, **kwargs) if hit.object_id != neighbour]
+
+        monkeypatch.setattr(RetrievalService, "federated_retrieve", without_neighbour)
+        events = kit.capture_events(repo, monkeypatch)
+        kit.bind_models(repo, kit.ScriptedAgent([{
+            "sufficient": False, "next_action": "expand_graph",
+            "expand": {"object_id": ids["前提甲"], "direction": "both"},
+            "reason": "深挖",
+        }], plan_query="前提甲"))
+        result = kit.global_answer(repo, [nb.id], "前提甲")
+        kit.assert_clean(result, events, "kg_objects")
+        assert any(getattr(r, "object_id", "") == neighbour for r in result.answer.anchors)
+    finally:
+        repo.close()
+
+
+def test_expand_community_is_clean(tmp_path, monkeypatch):
+    """Peers found by ``expand_community`` are searched through the federated
+    KG search, which stamps each hit's library."""
+    repo = kit.make_repo(tmp_path, monkeypatch)
+    try:
+        nb, _ids = _two_claims_and_an_edge(repo)
+        events = kit.capture_events(repo, monkeypatch)
+        kit.bind_models(repo, kit.ScriptedAgent([{
+            "next_action": "expand_community", "community_focal": "前提甲",
+            "reason": "横向对比",
+        }], plan_query="前提甲"))
+        result = kit.global_answer(repo, [nb.id], "前提甲的同类")
+        kit.assert_clean(result, events, "kg_objects")
+    finally:
+        repo.close()
+
+
+def _chunked_libraries(tmp_path, monkeypatch, extra_text):
+    """Three processed libraries (real passages) plus one more document in the
+    first carrying ``extra_text``."""
+    from app.repositories.ports import UploadedSourceFile
+    from tests.test_global_ask_engine_parity import _e2e_repo
+
+    repo, notebooks, user_id = _e2e_repo(tmp_path, monkeypatch, answer="回答如下。")
+    source = repo.upload_sources(notebooks[0].id, [UploadedSourceFile(
+        file_name="型号.md", content_type="text/markdown",
+        content=f"# 型号\n\n## 器件\n\n{extra_text}".encode("utf-8"),
+    )], scheduler=lambda _source_id: None)[0]
+    repo.process_source(source.id)
+    return repo, notebooks
+
+
+def test_exact_lookup_is_clean(tmp_path, monkeypatch):
+    repo, notebooks = _chunked_libraries(
+        tmp_path, monkeypatch, "set_gain_mode 在零下四十度下仍然满足增益指标。",
+    )
+    try:
+        events = kit.capture_events(repo, monkeypatch)
+        kit.bind_models(repo, kit.ScriptedAgent([{
+            "next_action": "exact_lookup", "exact_term": "set_gain_mode", "reason": "精查",
+        }], plan_query="低温性能"))
+        result = kit.global_answer(repo, [nb.id for nb in notebooks], "set_gain_mode 的低温性能")
+        kit.assert_clean(result, events, None)
+        assert any(step.step_type == "exact_lookup" for step in result.answer.reasoning_trace)
+    finally:
+        repo.close()
+
+
+def test_keyword_arm_is_clean(tmp_path, monkeypatch):
+    repo, notebooks = _chunked_libraries(
+        tmp_path, monkeypatch, "cryogenic gain stays within spec at minus forty degrees.",
+    )
+    try:
+        events = kit.capture_events(repo, monkeypatch)
+        kit.bind_models(repo, kit.ScriptedAgent([{
+            "next_action": "search_chunks", "chunks_query": "低温增益",
+            "chunks_keywords": "cryogenic gain 低温 增益", "reason": "关键词检索",
+        }], plan_query="低温性能"))
+        result = kit.global_answer(repo, [nb.id for nb in notebooks], "低温下的增益表现")
+        kit.assert_clean(result, events, None)
+        assert any(step.step_type == "search_chunks" for step in result.answer.reasoning_trace)
     finally:
         repo.close()

@@ -128,18 +128,36 @@ def references(answer) -> list:
     return [*answer.citations, *answer.anchors]
 
 
-def assert_clean(result, events, producer: str) -> None:
-    """A healthy run: delivered, no mark anywhere, no summary, the producer's
+def assert_attributed(result) -> None:
+    """Every citation and anchor of a global answer names the library it came
+    from, and that library is one of the run's participants. A blank origin is
+    what the terminal check reports as unattributed (a retrieval-layer defect),
+    so every healthy-run case holds the whole answer to this."""
+    participants = set(result.resolved_notebook_ids)
+    blank = [
+        (type(ref).__name__, getattr(ref, "key", ""), ref.element_id, ref.notebook_id)
+        for ref in references(result.answer)
+        if ref.notebook_id not in participants
+    ]
+    assert not blank, blank
+
+
+def assert_clean(result, events, producer: "str | None") -> None:
+    """A healthy run: delivered, no mark anywhere, no summary, every reference
+    attributed to a participant, and -- when a producer is named -- its
     registration visible in the events."""
     assert result.status == "done", result.error
     dumped = result.answer.model_dump(mode="json")
     assert "citation_check" not in dumped, dumped.get("citation_check")
     assert "verification" not in json.dumps(dumped, ensure_ascii=False)
-    assert any(
-        event.get("kind") == "producer_evidence_attested"
-        and event.get("producer") == producer
-        for event in events
-    ), [event for event in events if str(event.get("kind", "")).startswith("producer")]
+    assert references(result.answer), "a healthy run with no reference proves nothing"
+    assert_attributed(result)
+    if producer is not None:
+        assert any(
+            event.get("kind") == "producer_evidence_attested"
+            and event.get("producer") == producer
+            for event in events
+        ), [event for event in events if str(event.get("kind", "")).startswith("producer")]
 
 
 # ---------------------------------------------------------------------------

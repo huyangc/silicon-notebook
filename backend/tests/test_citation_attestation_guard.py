@@ -174,7 +174,7 @@ REGISTRY = {
         "global-unreachable", _PLUGIN_ENGINE_REFUSED, "global Ask refuses plugin engines", 1),
     ("services/reference_liveness.py", "drop_dangling_references", "model_copy:element_id"): (
         "single-notebook-only",
-        (("calls", AS, "AskService._drop_dangling_references", "current_federated_run_plan"),),
+        (("if-calls", AS, "AskService._drop_dangling_references", "current_federated_run_plan"),),
         "J2 single-notebook pass; skipped whenever a run plan is installed", 1),
     # --- never inside a global Ask (import gates) --------------------------
     ("services/report_engine.py", "ReportEngine._assemble._sub", 'dict:"element_id"'): (
@@ -243,10 +243,22 @@ def scan_source(relative: str, source: str) -> list:
                     func.attr if isinstance(func, ast.Attribute) else "")
                 if name in aliases:
                     sites.append((relative, qualname, aliases[name]))
+                if (name in ("model_validate", "model_construct")
+                        and isinstance(func, ast.Attribute)
+                        and isinstance(func.value, ast.Name) and func.value.id in aliases):
+                    sites.append((relative, qualname, f"unclassifiable:{aliases[func.value.id]}.{name}"))
+                if name == "dict" and any(k.arg == "element_id" for k in child.keywords):
+                    sites.append((relative, qualname, "unclassifiable:dict(element_id=)"))
                 for keyword in child.keywords:
                     if (keyword.arg == "update" and isinstance(keyword.value, ast.Dict)
                             and "element_id" in _keys(keyword.value)):
                         sites.append((relative, qualname, "model_copy:element_id"))
+                    if keyword.arg == "update" and not isinstance(keyword.value, ast.Dict):
+                        sites.append((relative, qualname, "unclassifiable:model_copy(update=<non-literal>)"))
+                    if (keyword.arg in ("citations", "anchors")
+                            and isinstance(keyword.value, (ast.List, ast.ListComp, ast.Tuple))
+                            and any(isinstance(item, ast.Dict) for item in ast.walk(keyword.value))):
+                        sites.append((relative, qualname, f"unclassifiable:{keyword.arg}=[dict]"))
             if isinstance(child, ast.Dict):
                 keys = _keys(child)
                 if "element_id" in keys and ("object_id" in keys or "object_type" in keys):
@@ -259,6 +271,11 @@ def scan_source(relative: str, source: str) -> list:
                             and isinstance(target.slice, ast.Constant)
                             and target.slice.value == "element_id"):
                         sites.append((relative, qualname, 'store:["element_id"]'))
+            if isinstance(child, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                targets = child.targets if isinstance(child, ast.Assign) else [child.target]
+                for target in targets:
+                    if isinstance(target, ast.Attribute) and target.attr == "element_id":
+                        sites.append((relative, qualname, "unclassifiable:.element_id="))
             visit(child, scope)
 
     visit(tree, [])
@@ -269,7 +286,9 @@ def scan() -> Counter:
     found: Counter = Counter()
     for path in sorted(APP.rglob("*.py")):
         source = path.read_text(encoding="utf-8")
-        if not any(token in source for token in ("Citation(", "AnswerAnchor(", '"element_id"')):
+        if not any(token in source for token in (
+            "Citation", "AnswerAnchor", "element_id", "model_copy(",
+        )):
             continue
         found.update(scan_source(str(path.relative_to(APP)), source))
     return found
@@ -319,14 +338,37 @@ def _module_name(relative: str) -> str:
     return "app." + relative[:-3].replace("/", ".")
 
 
+def _module_path(module: str) -> "str | None":
+    """``app.x.y`` -> ``x/y.py`` (or ``x/y/__init__.py``) when it exists."""
+    if not module.startswith("app."):
+        return None
+    base = module[4:].replace(".", "/")
+    for candidate in (f"{base}.py", f"{base}/__init__.py"):
+        if (APP / candidate).is_file():
+            return candidate
+    return None
+
+
+def _reachable_imports(importer: str) -> set:
+    """What ``importer`` imports, and what each of those imports: one level of
+    indirection, so a gated module re-exported through a helper is caught."""
+    direct = _imported_modules(importer)
+    reachable = set(direct)
+    for module in direct:
+        path = _module_path(module)
+        if path is not None:
+            reachable |= _imported_modules(path)
+    return reachable
+
+
 def proof_problems(proof) -> list:
     kind = proof[0]
     if kind == "not-imported":
         module = _module_name(proof[1])
         return [
-            f"{importer} imports {module}: the import gate is gone"
+            f"{importer} reaches {module} (directly or one import away): the import gate is gone"
             for importer in GLOBAL_ENGINE_MODULES
-            if module in _imported_modules(importer)
+            if module in _reachable_imports(importer)
         ]
     _kind, relative, qualname, name = proof
     node = _function(relative, qualname)
@@ -380,8 +422,26 @@ def no_element_problems(site) -> list:
     return [] if literal_empty else [f"{relative}::{qualname} never writes element_id=''"]
 
 
+#: Construction forms the guard cannot classify (pydantic ``model_validate``,
+#: a dict turned into a model inside ``citations=[{...}]``, ``dict(element_id=)``,
+#: ``x.element_id = ...``, ``model_copy(update=<variable>)``). A site using one
+#: fails unless listed here with the reason it builds no citation; new code
+#: must use a form the guard can see.
+UNCLASSIFIABLE_ALLOWED = {
+    ("api/ask_routes.py", "_apply_resolved_scopes", "unclassifiable:model_copy(update=<non-literal>)"):
+        "copies an AskRequest with frozen scope ceilings; builds no citation or locator",
+}
+
+
 def registry_problems(found: Counter, registry=REGISTRY) -> list:
     problems = []
+    unclassifiable = {site: count for site, count in found.items()
+                      if site[2].startswith("unclassifiable:")}
+    for site in sorted(set(unclassifiable) - set(UNCLASSIFIABLE_ALLOWED)):
+        problems.append(f"construction form the guard cannot classify: {site}")
+    for site in sorted(set(UNCLASSIFIABLE_ALLOWED) - set(unclassifiable)):
+        problems.append(f"allowed unclassifiable site {site} no longer exists; remove it")
+    found = Counter({site: count for site, count in found.items() if site not in unclassifiable})
     for site, count in sorted(found.items()):
         entry = registry.get(site)
         if entry is None:
@@ -480,3 +540,54 @@ def test_a_no_element_site_cannot_dodge_with_a_real_element(tmp_path, monkeypatc
     _fake_app(tmp_path, monkeypatch, EC, source)
     problems = no_element_problems((EC, "EvidenceContextService.external_citations", "Citation"))
     assert problems and "non-literal" in problems[0]
+
+
+
+@pytest.mark.parametrize("form,source", [
+    ("model_validate", "from app.models.ask import Citation\ndef make(d):\n    return Citation.model_validate(d)\n"),
+    ("citations=[dict]", "def make(r):\n    return AskResponse(conclusion='', citations=[{'element_id': r.e}])\n"),
+    ("dict(element_id=)", "def make(r):\n    return dict(object_id=r.o, element_id=r.e)\n"),
+    ("attribute store", "def fix(c, e):\n    c.element_id = e\n"),
+    ("model_copy(update=var)", "def fix(c, u):\n    return c.model_copy(update=u)\n"),
+], ids=lambda value: value if isinstance(value, str) and "\n" not in value else "")
+def test_a_construction_form_the_guard_cannot_classify_fails(form, source):
+    found = scan()
+    found.update(scan_source("services/new_producer.py", source))
+    problems = registry_problems(found)
+    assert any("cannot classify" in problem and "new_producer" in problem for problem in problems), form
+
+
+def test_a_single_notebook_gate_must_be_an_if_not_a_bare_call(tmp_path, monkeypatch):
+    source = (APP / AS).read_text(encoding="utf-8")
+    bare = source.replace(
+        "        if read is not None and current_federated_run_plan() is None:\n"
+        "            drop_dangling_references(response, read)",
+        "        current_federated_run_plan()\n"
+        "        if read is not None:\n"
+        "            drop_dangling_references(response, read)", 1)
+    assert bare != source
+    _fake_app(tmp_path, monkeypatch, AS, bare)
+    assert proof_problems(
+        ("if-calls", AS, "AskService._drop_dangling_references", "current_federated_run_plan")
+    )
+
+
+def test_an_import_gate_sees_one_level_of_indirection(tmp_path, monkeypatch):
+    """A global-engine module importing a helper that imports the gated module
+    breaks the gate even though the gated module is never imported directly."""
+    import shutil
+    import sys
+
+    fake = tmp_path / "app"
+    shutil.copytree(APP, fake)
+    (fake / "services" / "bridge_helper.py").write_text(
+        "from app.services import report_engine  # noqa: F401\n", encoding="utf-8",
+    )
+    engine = fake / "services" / "evidence_attestation.py"
+    engine.write_text(
+        engine.read_text(encoding="utf-8")
+        + "\nfrom app.services import bridge_helper  # noqa: E402,F401\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys.modules[__name__], "APP", fake)
+    assert proof_problems(("not-imported", "services/report_engine.py"))
