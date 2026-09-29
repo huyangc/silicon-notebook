@@ -1081,16 +1081,22 @@ class SourceStore:
         allowed_source_ids: Sequence[str] | None = None,
     ):
         if allowed_source_ids is not None:
+            # No production caller reaches this branch today: a source list
+            # routes ``_retrieve_elements`` to the bounded chunk path first.
+            # It still binds a ceiling-sized list, so it binds it safely.
             source_ids = list(dict.fromkeys(allowed_source_ids))
             if not source_ids:
                 return []
-            return connection.execute(
+            ceiling = bind_ids(source_ids)
+            return execute_ids(
+                connection,
                 "SELECT e.id,e.source_id,e.element_type,e.location_label,e.text,"
                 "s.title AS source_title,m.vector AS vector "
                 "FROM source_elements e JOIN sources s ON s.id=e.source_id "
                 "LEFT JOIN element_embeddings m ON m.element_id=e.id "
-                "WHERE s.notebook_id=%s AND e.source_id=ANY(%s) ORDER BY e.ordinal",
-                (notebook_id, source_ids),
+                f"WHERE s.notebook_id=%s AND e.source_id=ANY({ceiling.array_sql}) "
+                "ORDER BY e.ordinal",
+                (notebook_id, ceiling.param),
             ).fetchall()
         return connection.execute(
             "SELECT e.id,e.source_id,e.element_type,e.location_label,e.text,"
