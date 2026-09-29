@@ -441,7 +441,15 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
   新守卫 `$R/backend/tests/test_memory_chunk_write_guard.py`：扫描两个后端所有写 `chunks` 表的语句，每一处要么经过
   `_refuse_memory_source`，要么登记为「上游只取可见来源」并给出取数函数名；新增未登记的写入点即红。
 - **存量清理并入 E4-5 迁移**：删除 `source_type='memory'` 来源名下已有的 chunk 行及其向量/FTS 行（正常情况下为零行）；
-  迁移测试夹具里种一条这样的行，迁移后不存在。
+  迁移测试夹具里种一条这样的行，迁移后不存在。派生表逐张点名：`chunk_embeddings`、`chunk_questions`（含 `question_indexed_at`）、
+  `chunk_elements`、SQLite 的 `chunks_fts`（**没有外键级联**，必须显式删）。派生表的写入点（`embed_chunks_for_source`、
+  问题索引 `question_index_chunk_page`、`backfill_fts`、`maintenance` 回填 `element_ids` / `chunk_elements`）不另加守卫：
+  它们只挂在已存在的 chunk 行上，安全性依赖「库里不存在 Memory chunk」这条不变量，由本迁移与写侧守卫共同保证；
+  迁移测试要断言这四张表在迁移后对 Memory 来源都是零行。
+- **E4-1b 守卫的白名单**：整库镜像类路径（`migration/sqlite_to_postgres.py` 的 COPY、`migration/shadow/*` 的复制、
+  `maintenance.py` 对已有行的 `UPDATE chunks SET element_ids`）登记为「只搬运/只改已有行」。
+- **E4-1 规格评审（通过）留下的两处小修，随 E4-1 的质量评审意见一起改**：`test_memory_chunk_guard.py:196` 的 docstring 改为指向
+  E4-5 迁移；PG 文件补一条与 `test_memory_confirmation_still_ingests_without_chunks` 对应的用例。
 
 **E4-2 建图输入排除**（sonnet，波次 2）
 - 文件：`$R/backend/app/repositories/postgres/unified_kg_store.py`、`$R/backend/app/repositories/sqlite/unified_kg_store.py`
