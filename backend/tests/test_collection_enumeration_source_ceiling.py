@@ -1084,3 +1084,203 @@ def test_peer_citations_follow_the_frozen_participant_set(repo):
          for n in ("A", "B", "C", "D")],
         active_notebook_id=ids["A"])
     assert set(single) == {"sA", "sB", "sD"}
+
+
+# ---------------------------- 全选未漂移(ceiling_binds=False)与无范围逐字相同
+
+def _all_ticked(repo, notebook_id):
+    """浏览器「全选」的冻结形状:可见来源全在、未收窄。"""
+    visible = repo._runtime.source_store.all_visible_source_ids(notebook_id)
+    return _ticked(notebook_id, visible, narrowed=False)
+
+
+def _snapshot(repo, nb, **kwargs):
+    enumeration = repo.collection_enumeration
+    small = _budget(page_size=1, max_rows=1)
+    return {
+        "map": collection_catalog.render_collection_map(
+            repo.collection_catalog.collection_map(nb, **kwargs)),
+        "claims": enumeration.enumerate_kg_objects(
+            nb, "claim", budget=_budget(), **kwargs),
+        "concepts": enumeration.enumerate_kg_objects(
+            nb, "concept", budget=_budget(), **kwargs),
+        "formulas": enumeration.enumerate_elements(
+            nb, "formula", budget=_budget(), **kwargs),
+        "sources": enumeration.enumerate_sources(nb, budget=_budget(), **kwargs),
+        "cursors": (
+            enumeration.enumerate_elements(
+                nb, "formula", budget=small, **kwargs).cursor,
+            enumeration.enumerate_kg_objects(
+                nb, "concept", budget=small, **kwargs).cursor,
+            enumeration.enumerate_sources(nb, budget=small, **kwargs).cursor,
+        ),
+    }
+
+
+def test_an_all_ticked_unnarrowed_run_is_byte_identical_to_an_unscoped_one(
+    repo, monkeypatch,
+):
+    """产品决定(2026-09-29):浏览器全选也会冻结一份 include 清单(narrowed=False)。
+    这样的运行只要没漂移(调用方的 ``ceiling_binds`` 为假),枚举与地图必须与
+    引入天花板之前逐字相同:KG 语句里没有天花板参数,``count_knowledge`` 不被
+    调用,没有证据的对象照样被列出、被计数(地图 ``claim 1``),游标也逐值相同
+    (天花板摘要为空)。"""
+    nb = _library(repo)
+    _kg(repo, nb, "cNone", [], object_type="claim")
+    store = repo._runtime.knowledge
+    original = store.knowledge_object_page_rows
+    page_kwargs: list = []
+
+    def spy(*args, **kwargs):
+        page_kwargs.append(dict(kwargs))
+        return original(*args, **kwargs)
+
+    unscoped = _snapshot(repo, nb)
+    monkeypatch.setattr(store, "knowledge_object_page_rows", spy)
+    monkeypatch.setattr(store, "count_knowledge", lambda *a, **k: (
+        _ for _ in ()).throw(AssertionError("count_knowledge under no ceiling")))
+    with _all_ticked(repo, nb):
+        repo.collection_catalog.invalidate()
+        ticked = _snapshot(repo, nb, ceiling_binds=False)
+    assert "claim 1" in ticked["map"]
+    assert ticked["map"] == unscoped["map"]
+    assert [i.object_id for i in ticked["claims"].items] == ["cNone"]
+    for name in ("claims", "concepts", "formulas", "sources"):
+        assert ticked[name].items == unscoped[name].items, name
+        assert ticked[name].coverage == unscoped[name].coverage, name
+    assert ticked["cursors"] == unscoped["cursors"]
+    assert all(cursor.scope_ceiling == "" for cursor in ticked["cursors"])
+    assert page_kwargs and all(kwargs == {} for kwargs in page_kwargs)
+
+
+def test_the_safe_default_still_binds_the_all_ticked_freeze(repo):
+    """没传 ``ceiling_binds`` 的调用方拿到的是安全默认值:照样施加天花板
+    (宁可少列,也不漏);无证据对象因此不在清单里。"""
+    nb = _library(repo)
+    _kg(repo, nb, "cNone", [], object_type="claim")
+    with _all_ticked(repo, nb):
+        bound = repo.collection_enumeration.enumerate_kg_objects(
+            nb, "claim", budget=_budget())
+        cursor = repo.collection_enumeration.enumerate_elements(
+            nb, "formula", budget=_budget(page_size=1, max_rows=1)).cursor
+    assert bound.items == ()
+    assert cursor.scope_ceiling != ""
+
+
+def test_a_global_run_binds_whatever_ceiling_binds_says(repo):
+    """对等(全局)运行里逐库天花板恒生效,``ceiling_binds=False`` 不能关掉它。"""
+    first, second = _two_libraries(repo)
+    with _peer_run([first, second], {first: ["x1"], second: ["y1"]}):
+        kg = repo.collection_enumeration.enumerate_kg_objects(
+            first, "concept", budget=_budget(), ceiling_binds=False)
+        elements = repo.collection_enumeration.enumerate_elements(
+            first, "formula", budget=_budget(), ceiling_binds=False)
+        collection_map = repo.collection_catalog.collection_map(
+            first, ceiling_binds=False)
+    assert [item.object_id for item in kg.items] == ["oy"]
+    assert {item.source_id for item in elements.items} == {"x1", "y1"}
+    assert collection_map.element_count("formula") == 4
+
+
+# ------------------------------------------------- 成本:L4 与 scope 无关、零语句
+
+def _wide_library(repo, count=60):
+    nb = repo.create_notebook(NotebookCreate(name="wide")).id
+    for index in range(count):
+        _src(repo, nb, f"w{index:03d}", formulas=1)
+    return nb
+
+
+def test_a_warm_narrowed_map_build_issues_no_per_source_statement(
+    repo, monkeypatch,
+):
+    """中等规模收窄(一半来源勾选)下,热的地图构建不发任何按来源计数语句:计数取自
+    已记忆、与 scope 无关的 L4 计划,不重算 L1、也不扫穿它。"""
+    nb = _wide_library(repo)
+    ticked = [f"w{index:03d}" for index in range(0, 60, 2)]
+    store = repo._runtime.source_store
+    original = store.element_type_count_rows
+    calls: list = []
+
+    def spy(db, source_ids, kinds):
+        calls.append(len(list(source_ids)))
+        return original(db, source_ids, kinds)
+
+    monkeypatch.setattr(store, "element_type_count_rows", spy)
+    with _ticked(nb, ticked):
+        cold = repo.collection_catalog.collection_map(nb)
+        calls.clear()
+        warm = repo.collection_catalog.collection_map(nb)
+    assert calls == []
+    assert warm.element_count("formula") == cold.element_count("formula") == 30
+    assert warm.elements[0].sources == 30
+
+
+def test_the_element_plan_memo_is_scope_independent(repo):
+    """L4 记的是整库计划,天花板在记忆之后才过滤:先在收窄下建一次计划,随后
+    不带天花板的计划必须仍是整库的——在记忆之前就过滤会让它只剩勾选的那半。"""
+    nb = _wide_library(repo, count=10)
+    catalog = repo.collection_catalog
+    with _ticked(nb, ["w000", "w001"]):
+        with repo._connect() as db:
+            narrowed = catalog.scope_element_plan(db, (nb,), "formula")
+    with repo._connect() as db:
+        whole = catalog.scope_element_plan(db, (nb,), "formula")
+    assert narrowed.total == 2
+    assert whole.total == 10
+    assert len(catalog._plan_sources[(nb, "formula")][1]) == 10
+
+
+# ------------------------------------------ 天花板对象:run 上记忆、与 scope 同集合
+
+def _ceiling_members(repo, notebook_id, **kwargs):
+    with repo._connect() as db:
+        ceiling = repo.collection_catalog.source_ceiling(db, notebook_id, **kwargs)
+    return None if ceiling is None else {m for m in ceiling.members if m}
+
+
+def test_source_ceiling_members_equal_scoped_allowed_source_ids(repo):
+    """``source_ceiling`` 不再调用(每次都排序的)``scoped_allowed_source_ids``,
+    直接用 scope 自己的 frozenset;两者对每种形状必须是同一个集合。"""
+    from app.services.source_scope import scoped_allowed_source_ids
+
+    first, second = _two_libraries(repo)
+    shapes = [
+        lambda: _ticked(first, ["x1"]),
+        lambda: source_scope_context(first, {
+            "mode": "include", "source_ids": ["x1"], "narrowed": True,
+            "hidden_source_ids": ["hidden-1"]}),
+        lambda: source_scope_context(
+            first, None, None, notebook_source_ceilings={first: ["x2"]}),
+        lambda: source_scope_context(
+            first, None, None, notebook_source_ceilings={first: []}),
+        lambda: source_scope_context(
+            first, None, {"mode": "include", "notebook_ids": []}),
+    ]
+    for shape in shapes:
+        with shape():
+            for notebook_id in (first, second):
+                allowed = scoped_allowed_source_ids(notebook_id)
+                members = _ceiling_members(repo, notebook_id)
+                assert members == (None if allowed is None else set(allowed))
+
+
+def test_the_ceiling_lives_on_the_run_not_in_the_process(repo):
+    """同一次检索运行里重复取同一库的天花板拿到同一个对象(只建一次);两次运行
+    即便 scope 相等也各建各的——进程级缓存会把对象跨运行共享(并把大集合钉在
+    内存里)。成员集就是 scope 自己的 frozenset,不复制。"""
+    nb = _library(repo)
+    scope_dict = {"mode": "include", "source_ids": ["sA", "sC"], "narrowed": True}
+    seen = []
+    for _ in range(2):
+        with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
+            with source_scope_context(nb, scope_dict):
+                with repo._connect() as db:
+                    once = repo.collection_catalog.source_ceiling(db, nb)
+                    again = repo.collection_catalog.source_ceiling(db, nb)
+                from app.services.source_scope import current_source_scope
+                assert once.members is current_source_scope().source_ids
+        assert once is again
+        seen.append(once)
+    assert seen[0] is not seen[1]
+    assert not hasattr(repo.collection_catalog, "_ceilings")
