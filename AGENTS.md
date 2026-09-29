@@ -109,6 +109,11 @@ carrier they name; neither entry point is a second product or architecture sourc
   unchanged in code and protocols.
 - User-visible errors are Chinese and actionable. Diagnostic details that are not explicitly
   marked displayable remain internal.
+- Before handing off a change, decide whether users can perceive it. If they can, the same change
+  adds a `release-notes/<slug>.md`, which every user sees verbatim in the post-upgrade notice.
+  Read `release-notes/README.md` before writing one: describe the visible outcome in the words the
+  UI shows, claim only shipped and verified behavior, and leave out anything developer-facing
+  (PR numbers, file or API names, implementation reasons).
 
 ### Interactive feedback
 
