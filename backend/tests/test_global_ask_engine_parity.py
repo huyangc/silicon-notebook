@@ -1938,6 +1938,10 @@ def test_end_to_end_document_overview_is_not_voided(tmp_path, monkeypatch):
         assert result.status == "done", result.error
         assert "引用原文在回答期间发生了变化" not in result.answer.answer
         assert result.answer.citations, "文档概览必须交出引用"
+        # 健康运行:没有任何引用或锚点被标记,也没有部分失败汇总。
+        dumped = result.answer.model_dump(mode="json")
+        assert "citation_check" not in dumped
+        assert "verification" not in str(dumped)
         origins = {row.notebook_id for row in result.answer.citations}
         assert all(row.notebook_id for row in result.answer.citations)
         assert origins <= {nb.id for nb in notebooks}

@@ -661,6 +661,12 @@ class SpreadsheetAnalysisResult(BaseModel):
     formula_cells: int = Field(default=0, ge=0)
     unresolved_formula_cells: int = Field(default=0, ge=0)
     warnings: List[str] = Field(default_factory=list, max_length=20)
+    # 这份回执的归属库与层级，已按跨库引用的同一条规则归一（同 Citation.notebook_id /
+    # tier）。放在结果上而不是只挂在第一行的引用上：结果一行不剩（筛不中任何行）
+    # 时，写进证据表的锚点照样知道自己来自哪个库。本库/单库为空串、层级为默认值
+    # 时整体从 JSON 缺席，历史 payload 逐字节不变。
+    notebook_id: str = Field(default="", exclude_if=lambda value: not value)
+    tier: str = Field(default="personal", exclude_if=lambda value: value == "personal")
 
 
 # Deliberately NOT a reuse of ``StructuredResultCoverage``: that model's

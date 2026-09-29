@@ -258,3 +258,74 @@ def assert_dangling_dropped(response, live_id: str) -> None:
     ]
     assert "verification" not in response.model_dump_json()
     assert response.citation_check is None
+
+
+#: mutation -> verdict for a passage recalled ONLY by the mix branch's
+#: KG-overlay leg (registered through ``attest_selected_passages``).
+OVERLAY_EXPECTATIONS = {"none": None, "update": "changed", "delete": "source_gone"}
+
+
+def overlay_passage_race(sources, database, marker: str, notebook_id: str, mutation: str):
+    """The overlay registration under the REAL global-run installation
+    (``global_ask_run``: participant override, ceilings, turn, plan), then the
+    mutation, then the real terminal check."""
+    from app.models.ask import AskResponse, Citation
+    from app.services.chunk_federation import attest_selected_passages
+    from app.services.federated_run import DetachedAskTurn, FederatedRunPlan
+    from app.services.global_ask import _RunState
+    from app.services.global_citation_check import GlobalCitationCheck, apply_outcome
+    from app.services.global_run import global_ask_run
+    from app.services.retrieval_participants import ParticipantOverride
+    from app.services.retrieval_run import retrieval_run
+
+    passage = seed_race(database, marker, notebook_id)
+    state = _RunState((notebook_id,))
+    events: list = []
+    plan = FederatedRunPlan(
+        phase_timeout_seconds=30.0, notebook_timeout_seconds=10.0,
+        executor=None, window=lambda: 1, cancel=None,
+        on_library=lambda *_: None, on_evidence=state.record_evidence,
+        on_evidence_groups=state.record_evidence_groups,
+        evidence_registered=state.is_registered,
+    )
+    candidates = SimpleNamespace(sources=sources, event_log=SimpleNamespace(emit=events.append))
+    hit = SimpleNamespace(chunk_id=RACE_CHUNK, text=passage, element_ids=list(RACE_ELEMENTS))
+    with retrieval_run(run_kind="ask_chunk", actor_id="u-overlay"), global_ask_run(
+        ParticipantOverride(notebook_ids=(notebook_id,), tiers={}, attested_actor_id="u-overlay"),
+        {notebook_id: frozenset({RACE_SOURCE})},
+        DetachedAskTurn(conversation_id="conv-overlay"), plan, nominal_active=notebook_id,
+    ):
+        attest_selected_passages(candidates, [hit])
+    assert set(state.evidence) == set(RACE_ELEMENTS)
+    assert state.sibling_snapshot() == {
+        RACE_ELEMENTS[0]: (RACE_ELEMENTS[1],), RACE_ELEMENTS[1]: (RACE_ELEMENTS[0],),
+    }
+    assert [event["producer"] for event in events] == ["kg_overlay_passages"]
+    mutate(database, marker, mutation)
+    response = AskResponse(
+        conclusion="结论", answer="答案", grounded=True, evidence_level="grounded",
+        citations=[Citation(
+            label="Original", source_id=RACE_SOURCE, element_id=RACE_ELEMENTS[0],
+            location_label="p0", quoted_span=RACE_TEXTS[0], notebook_id=notebook_id,
+        )],
+    )
+    outcome = GlobalCitationCheck(sources, notebook_timeout_seconds=10.0).run(
+        response, evidence=state.evidence_snapshot(),
+        siblings=state.sibling_snapshot(),
+        source_ceiling={notebook_id: frozenset({RACE_SOURCE})},
+    )
+    apply_outcome(response, outcome)
+    assert [c.verification for c in response.citations] == [OVERLAY_EXPECTATIONS[mutation]]
+    return response
+
+
+def overlay_is_a_no_op_outside_a_global_run(sources) -> None:
+    from app.services.chunk_federation import attest_selected_passages
+
+    calls: list = []
+    reader = SimpleNamespace(passage_evidence_snapshot=lambda ids: calls.append(ids) or {})
+    attest_selected_passages(
+        SimpleNamespace(sources=reader, event_log=None),
+        [SimpleNamespace(chunk_id="c", text="t", element_ids=["e"])],
+    )
+    assert calls == []

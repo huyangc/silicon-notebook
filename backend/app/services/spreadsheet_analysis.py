@@ -993,6 +993,8 @@ class SpreadsheetAnalysisService:
             formula_cells=int(sheet.get("formula_cells") or 0),
             unresolved_formula_cells=int(sheet.get("unresolved_formula_cells") or 0),
             warnings=warnings,
+            notebook_id=citation.notebook_id if citation else "",
+            tier=citation.tier if citation else "personal",
         )
 
     def _bounded_result_preview(
@@ -1358,9 +1360,11 @@ def spreadsheet_prompt_block(
             # 就是第七份内联的同一条规则。`parse_anchors` 从这张 id_map 直接照抄
             # 这两个键，所以本写入点登记在 test_citation_notebook_id_guard 的
             # BUILDER_SITES 里。结果一行不剩（如筛不中任何行）时没有引用可抄，
-            # 回落到模型字段原默认值。
-            "tier": citation.tier if citation else "personal",
-            "notebook_id": citation.notebook_id if citation else "",
+            # 改抄结果自己带的归属（``SpreadsheetAnalysisResult.notebook_id`` /
+            # ``tier``，由同一条引用归一而来）——否则对等模式下这条锚点没有归属库，
+            # 终态核对会把一次健康的「没有符合条件的行」判成无法核对。
+            "tier": citation.tier if citation else result.tier,
+            "notebook_id": citation.notebook_id if citation else result.notebook_id,
             "relevance": 1.0,
             "knowhow": None,
         }
