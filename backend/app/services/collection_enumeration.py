@@ -117,6 +117,7 @@ from app.services.collection_catalog import (
     ScopeElementPlan,
     ScopeSource,
 )
+from app.services.evidence_attestation import attest_read
 from app.services.extraction_profiles import PROFILES
 from app.services.knowledge_contracts import USABLE_STATUSES
 # Reader #4 on ``retrieval_participants``' frozen whitelist: the typed
@@ -574,6 +575,23 @@ def _row_get(row: Any, key: str) -> Any:
     return row[key]
 
 
+def _attest_rows(rows: Sequence[Any]) -> None:
+    """PR-D D4: register one element page from the FULL stored text.
+
+    Called on the page before any row is admitted, because ``ElementItem.text``
+    is cut to ``excerpt_chars`` and the terminal check re-hashes the whole
+    stored row. A row the payload rail later refuses is registered but never
+    cited, which is harmless: the check only looks up cited ids. Zero extra
+    reads; a no-op outside a global run.
+    """
+    attest_read("collection_enumeration", {
+        str(_row_get(row, "id")): (
+            str(_row_get(row, "source_id") or ""), str(_row_get(row, "text") or ""),
+        )
+        for row in rows
+    })
+
+
 class EnumerationInvariantError(RuntimeError):
     """One action issued more page queries than its budget can account for.
 
@@ -979,6 +997,7 @@ class CollectionEnumerationService:
                             rows, allowance, first_page=first_page
                         )
                         first_page = False
+                        _attest_rows(page)
                         for row in page:
                             item = ElementItem(
                                 element_id=str(_row_get(row, "id")),
