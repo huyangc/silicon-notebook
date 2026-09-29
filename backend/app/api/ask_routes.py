@@ -1337,7 +1337,7 @@ def public_conversation_asset_route(token: str, alias: str) -> FileResponse:
 
 @router.post("/answers/{answer_id}/feedback", response_model=FeedbackResponse)
 def submit_feedback(answer_id: str, payload: FeedbackRequest, user: UserProfile = Depends(get_current_user)) -> FeedbackResponse:
-    if not notebook_access_repository().user_can_read_answer(answer_id, user.id):  # owner ∪ 成员(spec §3.3)
+    if not notebook_access_repository().user_owns_answer(answer_id, user.id):  # 库读权 ∧ 会话属主(E7-4)
         raise HTTPException(status_code=404, detail="Answer not found")
     try:
         return repository().submit_feedback(answer_id, payload)

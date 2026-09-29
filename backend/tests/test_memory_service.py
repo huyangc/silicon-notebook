@@ -7,6 +7,7 @@ import pytest
 
 from app.core.config import Settings
 from app.models.schemas import AskResponse, MemoryUpdate, NotebookCreate
+from tests.answer_owner_testkit import save_owned_answer
 from app.services.sqlite_repository import (
     SQLiteRepository,
     reset_request_user,
@@ -59,12 +60,12 @@ def memory_service(repo):
 
 @pytest.fixture
 def saved_answer(repo, notebook, users):
-    answer_id = repo._runtime.ask_state.save_answer(
+    answer_id = save_owned_answer(
+        repo,
         notebook.id,
-        None,
+        users.alice.id,
         "What is stable?",
         AskResponse(conclusion="Grounded answer", answer="Grounded answer"),
-        users.alice.id,
     )
     return SimpleNamespace(id=answer_id, notebook_id=notebook.id)
 
@@ -530,12 +531,12 @@ def test_embedding_completion_stays_ready_when_notebook_access_is_revoked(
             "VALUES (?,?,'reader','t')",
             (shared.id, users.alice.id),
         )
-    answer_id = repo._runtime.ask_state.save_answer(
+    answer_id = save_owned_answer(
+        repo,
         shared.id,
-        None,
+        users.alice.id,
         "Question",
         AskResponse(conclusion="Answer", answer="Answer"),
-        users.bob.id,
     )
     scheduled = []
     memory_service.embedding_scheduler = lambda fn, job: scheduled.append((fn, job))
@@ -945,12 +946,12 @@ def test_answer_save_rechecks_live_membership_inside_atomic_store_write(
     finally:
         reset_request_user(token)
     memory_service.notebooks.add_member(shared.id, users.alice.id)
-    answer_id = repo._runtime.ask_state.save_answer(
+    answer_id = save_owned_answer(
+        repo,
         shared.id,
-        None,
+        users.alice.id,
         "Shared answer?",
         AskResponse(conclusion="Shared", answer="Shared"),
-        users.bob.id,
     )
     store = repo._runtime.memory_store
     original = store.create_answer_with_initial_revision

@@ -960,12 +960,39 @@ class AskStateStore:
     # answers
     # ------------------------------------------------------------------
 
-    def answer_notebook_id(self, answer_id: str) -> "str | None":
+    def answer_notebook_id(
+        self, answer_id: str, *, owned_by: "str | None" = None
+    ) -> "str | None":
+        """The notebook an answer belongs to.
+
+        With ``owned_by`` the answer only counts when its CONVERSATION was
+        created by that user (``answers JOIN conversations``): an answer with
+        no conversation, a conversation with no creator, another member's
+        answer and an id that does not exist are all the same ``None``, from
+        one statement, so a caller cannot tell them apart. This is the
+        authorisation read behind ``NotebookSharingService.user_owns_answer``;
+        the notebook owner (``SharingStore.answer_owner``) is NOT an answer
+        owner.
+        """
+        if owned_by is None:
+            with self.database.connect() as db:
+                row = db.execute(
+                    "SELECT notebook_id FROM answers WHERE id=%s", (answer_id,)
+                ).fetchone()
+            return row["notebook_id"] if row is not None else None
+        # The creator is compared here, not in SQL: ``c.created_by = user``
+        # would let the planner drive the join from the user's whole
+        # conversation list instead of probing the conversation by primary key.
         with self.database.connect() as db:
             row = db.execute(
-                "SELECT notebook_id FROM answers WHERE id=%s", (answer_id,)
+                "SELECT a.notebook_id AS notebook_id, c.created_by AS creator "
+                "FROM answers a LEFT JOIN conversations c ON c.id=a.conversation_id "
+                "WHERE a.id=%s",
+                (answer_id,),
             ).fetchone()
-        return row["notebook_id"] if row is not None else None
+        if row is None or not owned_by or row["creator"] != owned_by:
+            return None
+        return row["notebook_id"]
 
     def answer_memory_source(self, answer_id: str) -> dict:
         """Return the durable, server-owned Ask fields used by Memory capture."""
