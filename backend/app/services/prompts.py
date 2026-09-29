@@ -1081,7 +1081,12 @@ def reflect_prompt(
     # language the documents are not written in can only miss. The wording of
     # the multi-language branch mirrors ``expand_query_prompt``'s keyword rule
     # (both forms of a term), so the planner and this action ask for the same
-    # kind of keyword string. It is appended only under ``keyword_search``, so
+    # kind of keyword string. The "only terms the question names" clause comes
+    # from a real-model spot check (PR #799): the model padded the string with
+    # sibling model numbers it had seen in the candidates and with guessed
+    # answer values, and the keyword arm scores coverage of the WHOLE string,
+    # so one padded run pushed the gold passage under ``RELEVANCE_FLOOR``.
+    # It is appended only under ``keyword_search``, so
     # with that sub-gate closed the paragraph is byte-for-byte the pre-PR-3 one.
     kw_langs = corpus_language_list(corpus_langs)
     chunks_keywords_rule = (
@@ -1094,8 +1099,10 @@ def reflect_prompt(
         )
         + " plus both an abbreviation and its full name, to catch literal "
         "matches semantic search can miss (model numbers, terms, command "
-        "names, code identifiers); leave it empty to search by chunks_query "
-        "alone."
+        "names, code identifiers); use only terms the question names and "
+        "their equivalents, not neighbouring identifiers seen in the "
+        "candidates or guessed answer values, since every extra term dilutes "
+        "the match; leave it empty to search by chunks_query alone."
     )
     search_chunks_action = (
         "- search_chunks: retrieve raw SOURCE PASSAGES from the documents "
