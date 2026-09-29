@@ -2347,6 +2347,8 @@ class RepositoryRuntime:
             profiles=self.agent_profile,
             # P3(codex #535 R6):观察行同批清空,同一条空白起点契约。
             observations=self.agent_observations,
+            # E7-4:回答 id 接口的属主判定(库读权 ∧ 会话创建者)读这一座。
+            ask_state=self.ask_state,
         )
         return self.sharing
 

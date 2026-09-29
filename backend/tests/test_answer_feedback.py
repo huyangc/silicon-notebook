@@ -34,10 +34,30 @@ def test_answer_feedback_is_persisted_and_changes_notebook_analytics(client):
 
     created_at = "2026-08-31T10:00:00+00:00"
     with repository()._write() as db:
+        # 回答属于创建它的会话的作者(E7-4):没有会话的回答谁也不拥有。
         db.execute(
-            "INSERT INTO answers(id,notebook_id,question,payload,created_at) "
-            "VALUES (?,?,?,?,?)",
-            ("answer-feedback", notebook["id"], "这个回答有用吗？", "{}", created_at),
+            "INSERT INTO conversations(id,notebook_id,title,created_by,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (
+                "conv-feedback",
+                notebook["id"],
+                "反馈会话",
+                registration["user"]["id"],
+                created_at,
+                created_at,
+            ),
+        )
+        db.execute(
+            "INSERT INTO answers(id,notebook_id,question,payload,created_at,conversation_id) "
+            "VALUES (?,?,?,?,?,?)",
+            (
+                "answer-feedback",
+                notebook["id"],
+                "这个回答有用吗？",
+                "{}",
+                created_at,
+                "conv-feedback",
+            ),
         )
 
     response = client.post(

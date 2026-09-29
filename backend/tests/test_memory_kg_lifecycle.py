@@ -29,6 +29,7 @@ import pytest
 
 from app.core.config import Settings
 from app.models.schemas import AskResponse, MemoryReviewRequest, MemoryUpdate, NotebookCreate
+from tests.answer_owner_testkit import save_owned_answer
 from app.services.sqlite_repository import (
     SQLiteRepository,
     reset_request_user,
@@ -96,12 +97,12 @@ def _candidate(service, notebook_id, user_id, request_id, title="Title", body="B
 
 
 def _save_answer(repo, notebook_id, user_id, question, answer_text):
-    return repo._runtime.ask_state.save_answer(
+    return save_owned_answer(
+        repo,
         notebook_id,
-        None,
+        user_id,
         question,
         AskResponse(conclusion=answer_text, answer=answer_text),
-        user_id,
     )
 
 

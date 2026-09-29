@@ -664,14 +664,17 @@ class MemoryService:
             if existing.notebook_id != notebook_id:
                 raise KeyError(answer_id)
             return existing
+        # An answer is its author's record: notebook read access is not enough.
+        # Checked BEFORE the answer is loaded so a foreign, creatorless and
+        # unknown id all fail the same way (PermissionError -> 404).
+        if not self.notebooks.user_owns_answer(answer_id, user_id):
+            raise PermissionError(answer_id)
         try:
             source = self.ask_state.answer_memory_source(answer_id)
         except KeyError:
             raise KeyError(answer_id)
         if source["notebook_id"] != notebook_id:
             raise KeyError(answer_id)
-        if not self.notebooks.user_can_read_answer(answer_id, user_id):
-            raise PermissionError(answer_id)
         now = self.now()
         write = MemoryWrite(
             id=self.new_id("memory"),

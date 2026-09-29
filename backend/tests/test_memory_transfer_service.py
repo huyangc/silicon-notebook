@@ -3,6 +3,7 @@ import sqlite3
 import pytest
 from app.core.config import Settings
 from app.models.schemas import AskResponse, NotebookCreate
+from tests.answer_owner_testkit import save_owned_answer
 from app.services.sqlite_repository import (
     SQLiteRepository, set_request_user, reset_request_user,
 )
@@ -59,8 +60,8 @@ def _answer_born_memory(repo, service, nb, user, question="Q?", answer="Grounded
     """
     service.embedding_scheduler = lambda fn, job: fn(job)
     service.kg_ingest_scheduler = lambda fn, key: None
-    answer_id = repo._runtime.ask_state.save_answer(
-        nb, None, question, AskResponse(conclusion=answer, answer=answer), user.id
+    answer_id = save_owned_answer(
+        repo, nb, user.id, question, AskResponse(conclusion=answer, answer=answer)
     )
     return service.create_from_answer(
         nb, user.id, answer_id, "AT", "AB", [], extract_kg=False

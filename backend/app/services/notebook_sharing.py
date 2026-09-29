@@ -14,6 +14,7 @@ from app.domain.repository import RepositoryCompatibilitySeams
 from app.repositories.ports import (
     AgentObservationStorePort,
     AgentProfileStorePort,
+    AskStateStorePort,
     NotebookTooLargeToCopyError,
     RepositoryDatabasePort,
     SharingStorePort,
@@ -938,6 +939,7 @@ class NotebookSharingService:
         copy_stats: Callable[[str], dict],
         profiles: "AgentProfileStorePort | None" = None,
         observations: "AgentObservationStorePort | None" = None,
+        ask_state: "AskStateStorePort | None" = None,
     ) -> None:
         self._store = store
         self._copies = copies
@@ -957,6 +959,9 @@ class NotebookSharingService:
         # own Agents' use of this library, so removal clears them too. ``None``
         # = not wired, same fail-open posture as ``profiles``.
         self._observations = observations
+        # E7-4: the one read behind ``user_owns_answer`` (answer -> conversation
+        # creator). ``None`` = not wired: the check then answers False, never True.
+        self._ask_state = ask_state
 
     # ---------------------------------------------------------------- share
     def share_notebook(self, notebook_id: str) -> dict:
@@ -1159,6 +1164,25 @@ class NotebookSharingService:
 
     def user_can_read_answer(self, answer_id: str, user_id: str) -> bool:
         notebook_id = self._store.answer_notebook_id(answer_id)
+        return bool(notebook_id) and self.user_can_read_notebook(notebook_id, user_id)
+
+    def user_owns_answer(self, answer_id: str, user_id: str) -> bool:
+        """The answer belongs to ``user_id``: its conversation was created by
+        them AND they can still read that notebook.
+
+        An answer is its author's record, and its text may quote the author's
+        private Memory, so reading the notebook is not enough to preview it,
+        turn it into a Memory or rate it. An answer without a conversation (no
+        creator to compare) is nobody's, so it is not owned either. Unknown ids,
+        other members' answers and creatorless answers are indistinguishable
+        (one statement, then ``False``). The NOTEBOOK owner does not own other
+        members' answers (``answer_owner`` is not authorisation). A deployment
+        admin reading answers through the admin activity log is audit access
+        and does not come through here.
+        """
+        if self._ask_state is None:
+            return False
+        notebook_id = self._ask_state.answer_notebook_id(answer_id, owned_by=user_id)
         return bool(notebook_id) and self.user_can_read_notebook(notebook_id, user_id)
 
     # ------------------------------------------------------------ membership

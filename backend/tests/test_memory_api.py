@@ -6,6 +6,8 @@ from fastapi.testclient import TestClient
 
 from app.models.schemas import AskResponse
 
+from tests.answer_owner_testkit import save_owned_answer
+
 
 def _register(client: TestClient, username: str) -> tuple[dict, str]:
     response = client.post(
@@ -27,20 +29,20 @@ def _client(tmp_path, monkeypatch) -> TestClient:
     return TestClient(create_app())
 
 
-def _answer(repo, notebook_id: str, question: str = "What remains stable?") -> str:
-    return repo._runtime.ask_state.save_answer(
-        notebook_id,
-        None,
-        question,
-        AskResponse(
-            conclusion="The loop remains stable [1].",
-            answer="The loop remains stable [1].",
-            mode="chunk",
-            llm_mode="test-model",
-            evidence_level="grounded",
-        ),
-        "unused-by-storage",
-    )
+def _answer(
+    repo,
+    notebook_id: str,
+    question: str = "What remains stable?",
+    owner_id: str | None = None,
+) -> str:
+    """An answer inside a conversation created by ``owner_id`` (default: the
+    notebook's owner) -- the only kind a user "owns" since E7-4."""
+    if owner_id is None:
+        with repo._runtime.database.connect() as db:
+            owner_id = db.execute(
+                "SELECT created_by FROM notebooks WHERE id=?", (notebook_id,)
+            ).fetchone()["created_by"]
+    return save_owned_answer(repo, notebook_id, owner_id, question)
 
 
 def _seed_kg_object(repo, notebook_id: str, object_id: str = "ko-eligibility-gate") -> None:
@@ -169,7 +171,9 @@ def test_reader_can_save_own_private_memory_and_answer_save_is_idempotent(
 
     repo = repository()
     repo.add_member(notebook_id, reader_id)
-    answer_id = _answer(repo, notebook_id, "How should it be compensated?")
+    answer_id = _answer(
+        repo, notebook_id, "How should it be compensated?", owner_id=reader_id
+    )
 
     payload = {
         "answer_id": answer_id,
@@ -196,7 +200,10 @@ def test_reader_can_save_own_private_memory_and_answer_save_is_idempotent(
         "answer_id": answer_id,
         "question": "How should it be compensated?",
         "answer": "The loop remains stable [1].",
-        "conversation_id": None,
+        # the answer's own conversation: that is what makes it the reader's
+        "conversation_id": repo._runtime.ask_state.answer_memory_source(answer_id)[
+            "conversation_id"
+        ],
         "mode": "chunk",
         "model": "test-model",
         "evidence_level": "grounded",
@@ -226,7 +233,7 @@ def test_answer_memory_links_are_bounded_owner_private_and_notebook_scoped(
     repo = repository()
     repo.add_member(notebook_a, reader_id)
     answer_a = _answer(repo, notebook_a, "Owner saved?")
-    answer_reader = _answer(repo, notebook_a, "Reader saved?")
+    answer_reader = _answer(repo, notebook_a, "Reader saved?", owner_id=reader_id)
     answer_b = _answer(repo, notebook_b, "Wrong notebook?")
 
     def save(headers, notebook_id, answer_id, title):
@@ -308,7 +315,7 @@ def test_foreign_notebook_and_memory_are_not_disclosed(tmp_path, monkeypatch):
     ).status_code == 404
 
 
-def test_save_after_preview_returns_conflict_when_answer_was_deleted(
+def test_save_after_preview_is_not_found_when_answer_was_deleted(
     tmp_path, monkeypatch
 ):
     client = _client(tmp_path, monkeypatch)
@@ -337,7 +344,10 @@ def test_save_after_preview_returns_conflict_when_answer_was_deleted(
             "tags": [],
         },
     )
-    assert saved.status_code == 409
+    # A vanished answer is an unknown id: the same 404 a foreign answer gets
+    # (E7-4), not a distinguishable 409.
+    assert saved.status_code == 404
+    assert saved.json() == {"detail": "Answer not found"}
 
 
 def test_answer_deleted_during_save_rolls_back_memory(tmp_path, monkeypatch):
@@ -584,7 +594,7 @@ def test_revoked_reader_loses_all_memory_read_and_mutation_access(
 
     repo = repository()
     repo.add_member(notebook_id, reader_id)
-    answer_id = _answer(repo, notebook_id)
+    answer_id = _answer(repo, notebook_id, owner_id=reader_id)
     confirmed = client.post(
         f"/api/notebooks/{notebook_id}/memories/from-answer",
         headers=reader_headers,
