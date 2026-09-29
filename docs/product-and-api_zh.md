@@ -2580,7 +2580,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 ## 系统更新通知
 
-升级之后，每个登录用户会在一次性的「系统已更新」弹窗里看到自己还没看过的、手写的更新说明。每个用户可感知的改动都可以附带一个 `release-notes/<slug>.md`（中文，一两句话）；文件名即说明的 id，所以改文件名等于新说明。`scripts/build_release_manifest.py`（由 `scripts/pack.sh` 调用）在包根目录写出 `release-manifest.json`：当前构建的版本与序号，加上每条说明及其正文。
+升级之后，每个登录用户会在一次性的「系统已更新」弹窗里看到自己还没看过的、手写的更新说明。每个用户可感知的改动都可以附带一个 `release-notes/<slug>.md`（中文，一两句话）；文件名即说明的 id，所以改文件名等于新说明。`scripts/build_release_manifest.py`（离线打包时由 `scripts/pack.sh` 调用，在 git 检出上由 `npm run start` 调用）在包根目录或仓库根目录写出 `release-manifest.json`：当前构建的版本与序号，加上每条说明及其正文。
 
 版本用**主线序号**比较，而不是全局的「上一个线上版本」：序号是某个提交的 `git rev-list --count --first-parent`，一条说明的序号是把它的文件加进来的那个 first-parent 提交的序号。master 以 rebase 合入，序号只增不减。每个用户只存一个整数 `users.seen_release_ordinal`（SQLite v86 / PostgreSQL 0066；`NULL` = 从未记录，不回填），待看说明恰好是 `seen < note.ordinal <= build.ordinal` 的那些。所以基准是**按用户**的——该用户上次看到的版本——跳过了好几个版本的用户会一次看到全部说明，最新在前。
 

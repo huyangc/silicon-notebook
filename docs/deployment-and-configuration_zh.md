@@ -207,6 +207,12 @@ npm run stop
 已同时预装两端依赖的镜像可设 `SKIP_INSTALL=1`；该模式下若缺少
 `frontend/node_modules/.bin/next`，仍会在 build 前直接报错，不会带病继续。
 
+启动后端之前，`npm run start` 会用与 `pack.sh` 相同的 `scripts/build_release_manifest.py`
+在仓库根目录重新生成 `release-manifest.json`，因此「`git pull` + `npm run start`」的部署方式
+也会弹出应用内的「系统已更新」提示。它要求检出是 `master` 的**完整(非浅克隆)克隆**；版本串
+为 HEAD 的提交日期加短 sha。与打包不同，这里生成失败(浅克隆、说明正文为空或文件名不合规、
+没有 git、检出不是仓库根目录)只会警告并删除旧清单——服务照常启动，只是不弹更新提示。
+
 设 `SKIP_BUILD=1` 可复用已构建好的 `frontend/.next`(如预构建镜像场景)。可用
 `BACKEND_HOST` / `PORT` / `FRONTEND_PORT` 覆盖监听地址/端口。后端默认只监听
 `127.0.0.1`；显式绑定非 loopback 地址时必须配置非默认

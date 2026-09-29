@@ -249,6 +249,14 @@ Prebuilt images that already
 contain both dependency sets may set `SKIP_INSTALL=1`; with that escape hatch, a missing
 `frontend/node_modules/.bin/next` still fails before build rather than silently continuing.
 
+Before launching the backend, `npm run start` regenerates `release-manifest.json` at the repo
+root with the same `scripts/build_release_manifest.py` that `pack.sh` uses, so a
+`git pull` + `npm run start` deployment gets the in-app "system updated" notice. It needs the
+checkout to be a **full (non-shallow) clone** of `master`; the version string is HEAD's commit
+date plus short sha. Unlike packing, a failure here (shallow clone, empty or badly named note,
+no git, or a checkout that is not a repository root) only warns and deletes any old manifest —
+the services still start, just without update notices.
+
 Set `SKIP_BUILD=1` to reuse an already-built `frontend/.next` (e.g. a prebuilt image).
 Override `BACKEND_HOST` / `PORT` / `FRONTEND_PORT` to change bind address/ports. The
 backend defaults to `127.0.0.1`; binding it to a non-loopback address requires a
