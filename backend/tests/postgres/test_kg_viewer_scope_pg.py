@@ -219,3 +219,37 @@ def test_pg_concept_detail_and_neighbours_omit_hidden(repo):
     assert s.ids.secret_canonical not in {n["id"] for n in member_view["nodes"]}
     owner_view = as_user(s.a, repo.kg_neighbors, s.nb, s.ids.engram_s)
     assert s.ids.secret_canonical in {n["id"] for n in owner_view["nodes"]}
+
+
+def test_pg_owner_column_hides_objects_whatever_their_evidence(repo):
+    """Object rule, owner half: owned by A's Memory, occurrence only in the
+    visible source (or none) — hidden from B on all three reads, A sees it."""
+    s = build_scenario(repo, b_memory=False)
+    repo.store_kg(s.nb, "src-ma", [
+        {"local_id": "m", "object_type": "concept",
+         "payload": {"name": "Engram", "section_path": "A-PRIVATE merged"},
+         "evidence": [_ev("src-s", "el-s-occ")]},
+        {"local_id": "n", "object_type": "claim",
+         "payload": {"name": "A-PRIVATE bare claim", "section_path": "1"},
+         "evidence": []},
+    ], [{"source_local_id": "n", "target_local_id": "m", "edge_type": "about",
+         "evidence": []}])
+    repo.rebuild_unified_kg(s.nb)
+    with repo._runtime.database.connect() as db:
+        merged = db.execute(
+            "SELECT id FROM knowledge_objects WHERE notebook_id=%s AND source_id='src-ma' "
+            "AND payload->>'section_path'='A-PRIVATE merged'", (s.nb,),
+        ).fetchone()["id"]
+        bare = _object_id(db, s.nb, "A-PRIVATE bare claim", "src-ma")
+    for oid in (merged, bare):
+        with pytest.raises(KeyError):
+            as_user(s.b, repo.node_context, s.nb, oid)
+        assert as_user(s.a, repo.node_context, s.nb, oid)["id"] == oid
+    canonical = repo.cluster_map(s.nb)[s.ids.engram_s]
+    detail = as_user(s.b, repo.concept_detail, s.nb, canonical)
+    assert [m["id"] for m in detail["members"]] == [s.ids.engram_s]
+    assert detail["member_total"] == 1
+    assert "A-PRIVATE" not in repr(detail)
+    view = as_user(s.b, repo.kg_neighbors, s.nb, s.ids.engram_s)
+    assert bare not in {n["id"] for n in view["nodes"]}
+    assert "A-PRIVATE" not in repr(view)

@@ -198,6 +198,10 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
   // (codex #639 R6 P2)——定时器带 epoch 守卫,新首页落地后过期回调不再清
   // (它清的是已被换代的状态,虽同值无害,守卫保持口径一致)。
   const [conceptMembersLoadError, setConceptMembersLoadError] = useState(false);
+  // A "load more" that answered 404 (the concept no longer exists for this
+  // viewer, PR-A·A5): paging ends there, and the line that replaces the
+  // button says so, because the list may hold fewer than `member_total`.
+  const [conceptMembersExhausted, setConceptMembersExhausted] = useState(false);
   const conceptMembersLoadErrorTimerRef = useRef<number | null>(null);
   const clearConceptMembersLoadErrorTimer = () => {
     if (conceptMembersLoadErrorTimerRef.current !== null) {
@@ -264,6 +268,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     setConceptMembersLoadingMore(false);
     clearConceptMembersLoadErrorTimer();
     setConceptMembersLoadError(false);
+    setConceptMembersExhausted(false);
     setConceptDetailGeneration(conceptMembersEpochRef.current);
     setConceptDetail(detail);
   };
@@ -635,9 +640,10 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     } catch (error) {
       if (owns(owner) && epoch === conceptMembersEpochRef.current && isKgNodeAbsent(error)) {
         // The concept stopped existing for this viewer mid-paging: there are
-        // no more members to load, so the button goes away instead of
-        // offering a retry that can only 404 again.
+        // no more members to load, so the button is replaced by a line saying
+        // so instead of offering a retry that can only 404 again.
         setConceptDetail((current) => (current ? { ...current, next_cursor: null } : current));
+        setConceptMembersExhausted(true);
       } else if (owns(owner) && epoch === conceptMembersEpochRef.current) {
         // 横幅照旧(全局错误通道),但本地失败态才是按钮紧邻反馈的载体
         // (codex #639 R4 P2 / AGENTS.md Interactive feedback)。
@@ -1531,6 +1537,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       conceptDetailGeneration,
       conceptMembersLoadingMore: visible && conceptMembersLoadingMore,
       conceptMembersLoadError: visible && conceptMembersLoadError,
+      conceptMembersExhausted: visible && conceptMembersExhausted,
       nodeContext: visible ? nodeContext : null,
       reviewBusy: visible && reviewBusy,
       decidingMerge: visible ? decidingMerge : null,

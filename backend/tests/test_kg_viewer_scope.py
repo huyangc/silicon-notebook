@@ -312,45 +312,54 @@ def test_cluster_label_never_comes_from_a_hidden_member(repo):
     assert owner["canonical_name"] == "A-PRIVATE Engram"
 
 
-def test_neighbour_relabel_uses_the_scopes_cluster_label():
-    from app.services.knowledge_lifecycle import KnowledgeLifecycleService
+def reader_of(repo):
+    """The one KgViewerScopeReader instance (owned by knowledge_query)."""
+    return repo._runtime.knowledge_query.viewer_scope.__self__
 
-    class Scope:
-        hidden = {"ko-hidden", "K-hidden"}
 
-        def node_hidden(self, node_id):
-            return node_id in self.hidden
-
-        def hidden_member_count(self, node_id):
-            return 1 if node_id == "K-mixed" else 0
-
-        def cluster_display_name(self, node_id, name):
-            return "visible label"
-
-    result = {
-        "focus_id": "K-mixed", "focus_object_id": "ko-focus",
-        "nodes": [
-            {"id": "K-mixed", "object_type": "concept", "payload": {"name": "hidden label"}},
-            {"id": "K-hidden", "object_type": "concept", "payload": {"name": "secret"}},
-            {"id": "ko-plain", "object_type": "claim", "payload": {"name": "plain"}},
-        ],
-        "edges": [
-            {"source_object_id": "K-mixed", "target_object_id": "K-hidden", "edge_type": "x"},
-            {"source_object_id": "ko-plain", "target_object_id": "K-mixed", "edge_type": "y"},
-        ],
-    }
-    out = KnowledgeLifecycleService._viewer_scoped_neighbors(result, Scope(), "ko-focus")
-    assert [(n["id"], n["payload"]["name"]) for n in out["nodes"]] == [
-        ("K-mixed", "visible label"), ("ko-plain", "plain"),
+def test_neighbourhood_filter_relabels_partly_hidden_clusters(repo):
+    """Both hydration paths take a cluster label from one member's payload;
+    a label baked from the hidden member must come back as a visible one."""
+    s = build_scenario(repo, b_memory=False)
+    scope = as_user(s.b, reader_of(repo).for_notebook, s.nb)
+    nodes = [
+        {"id": s.ids.engram_canonical, "object_type": "concept",
+         "payload": {"name": "A-PRIVATE baked label"}},
+        {"id": s.ids.secret_canonical, "object_type": "concept",
+         "payload": {"name": "SecretProject"}},
+        {"id": s.ids.definer_s, "object_type": "claim", "payload": {"name": "visible definer"}},
+        {"id": s.ids.definer_ma, "object_type": "claim", "payload": {"name": "private definer"}},
     ]
-    assert [e["edge_type"] for e in out["edges"]] == ["y"]
-    hidden_focus = KnowledgeLifecycleService._viewer_scoped_neighbors(
-        result, Scope(), "ko-hidden")
-    assert hidden_focus["nodes"] == [] and hidden_focus["edges"] == []
+    edges = [
+        {"source_object_id": s.ids.secret_canonical,
+         "target_object_id": s.ids.engram_canonical, "edge_type": "x"},
+        {"source_object_id": s.ids.definer_s,
+         "target_object_id": s.ids.engram_canonical, "edge_type": "y"},
+        {"source_object_id": s.ids.definer_ma,
+         "target_object_id": s.ids.engram_canonical, "edge_type": "z"},
+    ]
+    kept_nodes, kept_edges = as_user(
+        s.b, scope.filter_neighbourhood, nodes, edges, (s.ids.engram_canonical,))
+    assert [(n["id"], n["payload"]["name"]) for n in kept_nodes] == [
+        (s.ids.engram_canonical, "Engram"), (s.ids.definer_s, "visible definer"),
+    ]
+    assert [e["edge_type"] for e in kept_edges] == ["y"]
+    assert as_user(s.b, scope.filter_neighbourhood, nodes, edges, (s.ids.secret,)) is None
 
 
 # --------------------------------------------------------------- neighbours
-def test_neighbour_hydration_omits_hidden_nodes(repo):
+@pytest.fixture(params=["viz", "db"])
+def neighbour_path(request, repo, monkeypatch):
+    """Run a neighbours test over both hydration paths: the persisted viz
+    artifact (built lazily for a small notebook) and the DB fallback (forced
+    by making the artifact absent)."""
+    if request.param == "db":
+        monkeypatch.setattr(
+            repo._runtime.scale_artifacts, "viz_index", lambda *_a, **_k: None)
+    return request.param
+
+
+def test_neighbour_hydration_omits_hidden_nodes(repo, neighbour_path):
     s = build_scenario(repo, b_memory=False)
     owner_view = as_user(s.a, repo.kg_neighbors, s.nb, s.ids.engram_s)
     assert s.ids.secret_canonical in {n["id"] for n in owner_view["nodes"]}
@@ -370,7 +379,7 @@ def test_no_memory_notebook_builds_no_scope(repo, monkeypatch):
     token = set_request_user(a)
     try:
         nb = repo.create_notebook(NotebookCreate(name="plain")).id
-        reader = repo._runtime.kg_viewer_scope
+        reader = reader_of(repo)
         calls = []
         monkeypatch.setattr(reader.sources, "hidden_source_ids",
                             lambda *a, **k: calls.append(a) or [])
