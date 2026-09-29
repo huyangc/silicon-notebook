@@ -9,6 +9,7 @@ from pathlib import Path
 import threading
 import time
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
+from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal
@@ -56,6 +57,7 @@ from app.services.model_work import (
     MalformedModelResponse,
     ModelPriority,
     ModelProviderError,
+    ModelQueueTimeout,
     ModelSchedulingError,
     ModelServiceUnavailable,
     ProviderObservation,
@@ -161,8 +163,11 @@ class _UnconfiguredChatClient:
 class _UnconfiguredRerankClient:
     configured = False
 
-    def rerank(self, query: str, documents: list[str], on_error=None) -> list[int]:
-        del query, on_error
+    def rerank(
+        self, query: str, documents: list[str], on_error=None, *,
+        cancel_event=None, timeout: float | None = None,
+    ) -> list[int]:
+        del query, on_error, cancel_event, timeout
         return list(range(len(documents)))
 
 
@@ -340,6 +345,7 @@ class _ScheduledAdapter:
         parent_id: str = "",
         support_id: str | None = None,
         observe: bool = True,
+        deadline_at: float | None = None,
     ) -> _SubmittedCall:
         context = make_model_work_context(
             workload_id=self._workload.id,
@@ -348,6 +354,7 @@ class _ScheduledAdapter:
             actor_id=actor_id,
             parent_id=parent_id,
             support_id=support_id,
+            deadline_at=deadline_at,
         )
         timing: dict[str, Any] = {}
         queued_at = time.perf_counter()
@@ -707,12 +714,41 @@ class ScheduledRerankClient(_ScheduledAdapter):
     def configured(self) -> bool:
         return self._provider.configured(self._workload.id)
 
-    def rerank(self, query: str, documents: list[str], on_error=None) -> list[int]:
+    #: How often a caller-bounded wait re-checks its cancel signal/deadline.
+    _WAIT_POLL_SECONDS = 0.05
+
+    def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        on_error=None,
+        *,
+        cancel_event=None,
+        timeout: float | None = None,
+    ) -> list[int]:
+        """Rerank ``documents``; identity order (plus ``on_error``) on failure.
+
+        ``cancel_event`` and ``timeout`` are optional and keyword-only, so a
+        caller that passes neither (chunk mode's mix branch) keeps the exact
+        historical behaviour: no deadline of its own, a wait that only the
+        scheduler can end.  With ``cancel_event`` the queued batches are
+        dropped by the scheduler once it is set and the wait here raises
+        ``AskCancelled`` -- cancellation is re-raised, never reported through
+        ``on_error`` as a rerank failure.  With ``timeout`` (seconds, > 0) the
+        whole call shares one deadline: it bounds the queue (the context's
+        ``deadline_at``), each HTTP request (forwarded to the physical client
+        only when set, so duck-typed clients without the keyword are untouched
+        on the default path) and the wait here, which reports
+        ``ModelQueueTimeout`` through ``on_error`` when it passes.
+        """
         if not documents:
             return []
         runtime = self._current_runtime()
         if runtime is None:
             return self._provider._offline_rerank.rerank(query, documents, on_error)
+        bounded = timeout is not None and float(timeout) > 0
+        deadline_at = time.monotonic() + float(timeout) if bounded else None
+        batch_kwargs = {"timeout": float(timeout)} if bounded else {}
         maximum = max(1, int(getattr(runtime.raw, "max_docs", len(documents))))
         batches = [
             (start, documents[start : start + maximum])
@@ -731,8 +767,9 @@ class ScheduledRerankClient(_ScheduledAdapter):
                 calls.append((
                     base,
                     self._submit(runtime, lambda docs=docs: _validate_rerank_rows(
-                        runtime.raw._rerank_batch(query, docs), len(docs)
-                    )),
+                        runtime.raw._rerank_batch(query, docs, **batch_kwargs),
+                        len(docs),
+                    ), cancel_event=cancel_event, deadline_at=deadline_at),
                 ))
 
         fill_window()
@@ -741,7 +778,11 @@ class ScheduledRerankClient(_ScheduledAdapter):
         while calls:
             base, call = calls.pop(0)
             try:
-                rows = self._resolve(call)
+                rows = self._await_batch(call, cancel_event, deadline_at)
+            except AskCancelled:
+                for _, pending in calls:
+                    pending.future.cancel()
+                raise
             except Exception as exc:
                 failures.append(exc)
             else:
@@ -767,6 +808,35 @@ class ScheduledRerankClient(_ScheduledAdapter):
                 order.append(index)
         order.extend(index for index in range(len(documents)) if index not in seen)
         return order
+
+    def _await_batch(self, call: _SubmittedCall, cancel_event, deadline_at):
+        """``_resolve`` behind an optional cancel/deadline-aware wait.
+
+        Neither set → exactly ``_resolve`` (the historical blocking wait).
+        Otherwise poll the future: a set cancel signal cancels a still-queued
+        batch and raises ``AskCancelled``; a passed deadline does the same with
+        ``ModelQueueTimeout``.  An in-flight HTTP request cannot be interrupted
+        from here -- it is abandoned (its own ``timeout`` bounds it) and the
+        scheduler still records its completion.
+        """
+        if cancel_event is None and deadline_at is None:
+            return self._resolve(call)
+        while not call.future.done():
+            if cancel_event is not None and cancel_event.is_set():
+                call.future.cancel()
+                raise AskCancelled()
+            step = self._WAIT_POLL_SECONDS
+            if deadline_at is not None:
+                remaining = deadline_at - time.monotonic()
+                if remaining <= 0:
+                    call.future.cancel()
+                    raise ModelQueueTimeout(
+                        "rerank exceeded its caller deadline",
+                        support_id=call.context.support_id,
+                    )
+                step = min(step, remaining)
+            wait_futures([call.future], timeout=step)
+        return self._resolve(call)
 
 
 class RuntimeModelProvider:

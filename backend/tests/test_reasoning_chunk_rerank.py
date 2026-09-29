@@ -67,9 +67,12 @@ class _Rerank:
         self.calls = []
         self._order = order or (lambda n: list(reversed(range(n))))
         self._fail = fail
+        self.kwargs = []
 
-    def rerank(self, query, documents, on_error=None):
+    def rerank(self, query, documents, on_error=None, *, cancel_event=None,
+               timeout=None):
         self.calls.append((query, list(documents)))
+        self.kwargs.append({"cancel_event": cancel_event, "timeout": timeout})
         if self._fail == "raise":
             raise RuntimeError("rerank upstream down")
         if self._fail == "on_error":
@@ -267,9 +270,12 @@ def test_rerank_failure_falls_back_to_mmr_and_records_an_event(fail):
     assert sink == []                              # 不进横幅集合
     assert models.event_log.events == [{
         "kind": "reasoning_chunk_rerank_fallback",
+        "status": "fallback",
         "reason": "rerank_failed",
         "error_type": "RuntimeError",
+        "support_id": "",
         "candidates": 6,
+        "documents": 6,
     }]
 
 
@@ -279,12 +285,12 @@ def test_supplemental_rerank_failure_also_falls_back_to_mmr():
     calls = {"n": 0}
 
     class _SecondFails(_Rerank):
-        def rerank(self, query, documents, on_error=None):
+        def rerank(self, query, documents, on_error=None, **kwargs):
             calls["n"] += 1
             if calls["n"] == 2:
                 on_error(RuntimeError("second batch"))
                 return list(range(len(documents)))
-            return super().rerank(query, documents, on_error)
+            return super().rerank(query, documents, on_error, **kwargs)
 
     models = _Models(_SecondFails())
     rr, retrieval = _retriever(baseline + supplemental, models)
@@ -355,7 +361,7 @@ def test_cancellation_is_not_swallowed_into_a_fallback():
     cancel = threading.Event()
 
     class _CancelDuring(_Rerank):
-        def rerank(self, query, documents, on_error=None):
+        def rerank(self, query, documents, on_error=None, **kwargs):
             cancel.set()
             on_error(AskCancelled())
             return list(range(len(documents)))
@@ -366,6 +372,211 @@ def test_cancellation_is_not_swallowed_into_a_fallback():
     with pytest.raises(AskCancelled):
         rr.search_chunks("nb", "q", k=3)
     assert retrieval.select_calls == [] and models.event_log.events == []
+
+
+def test_cancellation_reported_through_on_error_is_reraised():
+    """取消信号**没**预先设置、客户端却经 `on_error` 报回 `AskCancelled`
+    ⇒ 仍照抛,不当成精排失败回退(那条守卫此前无用例覆盖)。"""
+    class _ReportsCancel(_Rerank):
+        def rerank(self, query, documents, on_error=None, **kwargs):
+            on_error(AskCancelled())
+            return list(range(len(documents)))
+
+    models = _Models(_ReportsCancel())
+    rr, retrieval = _retriever(_descending(6), models)
+    with pytest.raises(AskCancelled):
+        rr.search_chunks("nb", "q", k=3)
+    assert retrieval.select_calls == [] and models.event_log.events == []
+
+
+# --------------------------------------------------------------------------- #
+# 5b. 取消信号与时间预算随调用交给精排客户端(评审 P2-2)
+# --------------------------------------------------------------------------- #
+
+class _BlocksUntilCancelled(_Rerank):
+    """只认调用时收到的 `cancel_event`:收不到就立刻交原序(即「没透传」)。"""
+
+    def rerank(self, query, documents, on_error=None, *, cancel_event=None,
+               timeout=None):
+        self.calls.append((query, list(documents)))
+        self.kwargs.append({"cancel_event": cancel_event, "timeout": timeout})
+        if cancel_event is None:
+            return list(range(len(documents)))
+        assert cancel_event.wait(5)
+        raise AskCancelled()
+
+
+def test_cancel_event_is_passed_to_the_reranker_and_cancellation_propagates():
+    import threading
+
+    cancel = threading.Event()
+    models = _Models(_BlocksUntilCancelled())
+    rr, retrieval = _retriever(_descending(6), models)
+    rr.cancel_event = cancel
+    timer = threading.Timer(0.05, cancel.set)
+    timer.start()
+    try:
+        with pytest.raises(AskCancelled):
+            rr.search_chunks("nb", "q", k=3)
+    finally:
+        timer.cancel()
+    assert models.client.kwargs[0]["cancel_event"] is cancel
+    assert retrieval.select_calls == [] and models.event_log.events == []
+
+
+def test_time_budget_is_passed_and_zero_means_no_budget():
+    models = _Models(_Rerank())
+    rr, _ = _retriever(_descending(6), models)
+    rr.search_chunks("nb", "q", k=3)
+    budget = rr.settings.reasoning_chunk_rerank_timeout_seconds
+    assert budget == 10.0
+    assert 0 < models.client.kwargs[0]["timeout"] <= budget
+
+    models = _Models(_Rerank())
+    rr, _ = _retriever(_descending(6), models,
+                       reasoning_chunk_rerank_timeout_seconds=0)
+    rr.search_chunks("nb", "q", k=3)
+    assert models.client.kwargs[0]["timeout"] is None
+
+
+def test_timeout_falls_back_to_mmr_with_a_timeout_reason():
+    from app.services.model_work import ModelQueueTimeout
+
+    class _TimesOut(_Rerank):
+        def rerank(self, query, documents, on_error=None, **kwargs):
+            on_error(ModelQueueTimeout("deadline", support_id="mdl-abc"))
+            return list(range(len(documents)))
+
+    scored = _descending(6)
+    expected, _ = _mmr_baseline(scored, 3)
+    models = _Models(_TimesOut())
+    rr, retrieval = _retriever(scored, models)
+    assert rr.search_chunks("nb", "q", k=3) == expected
+    assert retrieval.select_calls == [(3, rr.settings.chunk_mmr_lambda)]
+    assert models.event_log.events == [{
+        "kind": "reasoning_chunk_rerank_fallback",
+        "status": "fallback",
+        "reason": "rerank_timeout",
+        "error_type": "ModelQueueTimeout",
+        "support_id": "mdl-abc",
+        "candidates": 6,
+        "documents": 6,
+    }]
+
+
+def test_timeout_env_alias(monkeypatch):
+    monkeypatch.setenv("REASONING_CHUNK_RERANK_TIMEOUT_SECONDS", "2.5")
+    assert Settings().reasoning_chunk_rerank_timeout_seconds == 2.5
+
+
+# --------------------------------------------------------------------------- #
+# 5c. 探测失败、事件写失败
+# --------------------------------------------------------------------------- #
+
+def test_probe_failure_falls_back_to_mmr_as_unavailable():
+    from app.services.model_work import ModelProviderError
+
+    class _BrokenModels(_Models):
+        def rerank(self, workload_id):
+            raise ModelProviderError("registry reload", code="provider_error")
+
+    scored = _descending(6)
+    expected, _ = _mmr_baseline(scored, 3)
+    models = _BrokenModels(_Rerank())
+    rr, retrieval = _retriever(scored, models)
+    assert rr.search_chunks("nb", "q", k=3) == expected
+    assert retrieval.select_calls == [(3, rr.settings.chunk_mmr_lambda)]
+    [event] = models.event_log.events
+    assert event["reason"] == "rerank_unavailable"
+    assert event["error_type"] == "ModelProviderError"
+    assert event["documents"] == 0 and event["candidates"] == 6
+
+
+@pytest.mark.parametrize("fail", ["raise", "on_error", "probe"])
+def test_event_emit_failure_still_returns_the_mmr_result(fail):
+    class _BrokenLog:
+        def emit(self, event):
+            raise OSError("disk full")
+
+    class _ProbeFails(_Models):
+        def rerank(self, workload_id):
+            raise RuntimeError("probe")
+
+    scored = _descending(6)
+    expected, _ = _mmr_baseline(scored, 3)
+    models = (_ProbeFails(_Rerank()) if fail == "probe"
+              else _Models(_Rerank(fail=fail)))
+    models.event_log = _BrokenLog()
+    rr, _ = _retriever(scored, models)
+    assert rr.search_chunks("nb", "q", k=3) == expected
+
+
+# --------------------------------------------------------------------------- #
+# 5d. 首轮播种:召回按参与库数限流,精排并发(评审 P2-1)
+# --------------------------------------------------------------------------- #
+
+def test_seed_reranks_concurrently_while_recall_stays_serial(rrepo):
+    import threading
+    import time as _time
+
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    rrepo.settings.reasoning_per_query_limit = 1
+    queries = ["布局", "布线", "时序", "功耗", "面积"]
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": q} for q in queries]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    lock = threading.Lock()
+    peaks = {"recall": 0, "rerank": 0}
+    active = {"recall": 0, "rerank": 0}
+
+    def _enter(kind):
+        with lock:
+            active[kind] += 1
+            peaks[kind] = max(peaks[kind], active[kind])
+
+    def _leave(kind):
+        with lock:
+            active[kind] -= 1
+
+    class _Slow(_Rerank):
+        def rerank(self, query, documents, on_error=None, **kwargs):
+            _enter("rerank")
+            try:
+                _time.sleep(0.2)
+                return super().rerank(query, documents, on_error, **kwargs)
+            finally:
+                _leave("rerank")
+
+    client = _Slow()
+    bind_rerank_client(rrepo, client)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    rr.model_clients = rrepo._runtime.models
+    rr.retrieval.chunk_participant_count = lambda notebook_id: 5
+
+    def _recall(notebook_id, query):
+        _enter("recall")
+        try:
+            _time.sleep(0.02)
+            hits = _descending(3, prefix=f"{query}-")
+            return hits, [h.chunk_id for h in hits], None
+        finally:
+            _leave("recall")
+
+    rr.retrieval.retrieve_chunk_candidates = _recall
+    assert rr._chunk_seed_workers(nb.id, len(queries)) == 1
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    assert sorted(q for q, _ in client.calls) == sorted(queries)
+    # 断言并发度而不是墙钟(墙钟断言在 CI 上会被挤成假红):召回仍逐条,精排
+    # 在召回闸外重叠(改前 workers=1 时两者一起串行,精排峰值恒为 1)。
+    assert peaks["recall"] == 1
+    assert peaks["rerank"] >= 2
+    # 合入仍按子查询提交顺序:每条子查询逆序精排取前 1 段。
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert seed.detail["result_ids"] == [f"{q}-02" for q in queries]
 
 
 # --------------------------------------------------------------------------- #

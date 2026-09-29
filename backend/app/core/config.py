@@ -1116,16 +1116,20 @@ class Settings(BaseSettings):
     # `REASONING_CHUNK_RERANK_CANDIDATES` 条基线候选交精排,生成问题补充候选排在
     # 基线之后单独精排(与 chunk 模式 mix 分支同法),按精排序取 k 段,再走本库
     # 保底席位。精排决定「选哪 k 段」,不改写 relevance(它参与接地阈值)。
-    # 未配置、调用失败或候选池不超过 k 时走原来的 MMR,逐字节不变;设 false
-    # 或窗口设 0 = 零精排调用,完全回到 MMR。
+    # 未配置、调用失败、超时或候选池不超过 k 时走原来的 MMR,逐字节不变;设 false
+    # 或窗口设 0 = 零精排调用,完全回到 MMR。取消照常中止本次检索,不算失败。
     reasoning_chunk_rerank_enabled: bool = Field(
         True, validation_alias="REASONING_CHUNK_RERANK_ENABLED")
     reasoning_chunk_rerank_candidates: int = Field(
         50, validation_alias="REASONING_CHUNK_RERANK_CANDIDATES")
-    # 逐步推理的按篇原文取样动作(reflect 动作 read_document)总开关。与上面那把
-    # chunk 检索闸同一「off 就是旧行为」契约:关掉即动作不进 prompt/schema/
-    # allowed_actions 三处,`REASONING_MAX_DOCUMENT_READS` 无消费者,逐字节回到
-    # 接入这个动作之前。
+    # 上面那次精排的时间预算(秒):一次 `search_chunks` 的精排调用(含排队、各批
+    # HTTP 与等待)共用这一个截止时间,超时退回 MMR 并记 `rerank_timeout` 事件。
+    # 0 = 不另设预算,沿用精排服务自身的调度截止与 HTTP 超时。
+    reasoning_chunk_rerank_timeout_seconds: float = Field(
+        10.0, ge=0, validation_alias="REASONING_CHUNK_RERANK_TIMEOUT_SECONDS")
+    # 逐步推理的按篇原文取样动作(reflect 动作 read_document)总开关。关掉即动作
+    # 不进 prompt/schema/allowed_actions 三处,`REASONING_MAX_DOCUMENT_READS` 无
+    # 消费者,逐步推理不提供按篇取样。
     reasoning_document_read_enabled: bool = Field(
         True, validation_alias="REASONING_DOCUMENT_READ_ENABLED")
     # 逐步推理的大纲便签(reflect 动作 update_outline)总开关。它**另外**受档位

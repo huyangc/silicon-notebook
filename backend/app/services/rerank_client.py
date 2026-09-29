@@ -46,11 +46,20 @@ class RerankClient:
     def configured(self) -> bool:
         return bool(self.model and self.base_url and self.api_key)
 
-    def rerank(self, query: str, documents: List[str], on_error=None) -> List[int]:
+    def rerank(self, query: str, documents: List[str], on_error=None, *,
+               cancel_event=None, timeout=None) -> List[int]:
+        # ``cancel_event``/``timeout`` mirror ``RerankClientPort``: a set
+        # signal before the request re-raises cancellation instead of reporting
+        # a rerank failure, and ``timeout`` (seconds, > 0) replaces the
+        # deployment-wide HTTP timeout for this one call.
         if not self.configured or not documents:
             return list(range(len(documents)))
+        if cancel_event is not None and cancel_event.is_set():
+            from app.services.cancellation import AskCancelled
+            raise AskCancelled()
         try:
-            scored = self._rerank_batch(query, documents)
+            scored = (self._rerank_batch(query, documents) if timeout is None
+                      else self._rerank_batch(query, documents, timeout=timeout))
             order, seen = [], set()
             for r in sorted(scored, key=lambda r: r["relevance_score"], reverse=True):
                 i = r["index"]
@@ -64,9 +73,11 @@ class RerankClient:
                 on_error(exc)
             return list(range(len(documents)))
 
-    def _rerank_batch(self, query: str, documents: List[str]) -> List[dict]:
+    def _rerank_batch(self, query: str, documents: List[str],
+                      timeout: float | None = None) -> List[dict]:
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-        timeout = getattr(self.settings, "openai_compat_timeout_seconds", 30)
+        if timeout is None or float(timeout) <= 0:
+            timeout = getattr(self.settings, "openai_compat_timeout_seconds", 30)
         if self.api_style in self._OPENAI_STYLES:
             # OpenAI 兼容(vLLM/Cohere 等):POST {base}/rerank,扁平 body,结果在顶层
             # results[].{index, relevance_score|score}。/v1 与否由 base_url 决定。

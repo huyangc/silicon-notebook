@@ -32,7 +32,8 @@ class UnconfiguredEmbedder:
 class UnconfiguredReranker:
     configured = False
 
-    def rerank(self, query, documents, on_error=None):
+    def rerank(self, query, documents, on_error=None, *, cancel_event=None,
+               timeout=None):
         return list(range(len(documents)))
 
 

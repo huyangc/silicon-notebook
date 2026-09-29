@@ -1564,3 +1564,93 @@ def test_no_stats_kwarg_is_forwarded_to_a_client_that_does_not_declare_it():
         assert provider.chat("ask_answer").chat_json([], "{}") == '{"ok": true}'
     finally:
         provider.close()
+
+
+# ── Rerank: optional caller cancel signal and time budget ─────────────────
+# Reasoning's passage-selection rerank passes both; chunk mode's mix branch
+# passes neither and keeps the historical blocking wait, with no ``timeout``
+# keyword ever reaching the raw client.
+
+
+class _BlockingReranker(_Reranker):
+    max_docs = 10
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.timeouts: list = []
+
+    def _rerank_batch(self, query, documents, timeout=None):
+        self.timeouts.append(timeout)
+        self.entered.set()
+        self.release.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
+        return [{"index": i, "relevance_score": 1.0 - i / 10}
+                for i in range(len(documents))]
+
+
+def test_rerank_forwards_cancel_event_and_deadline_to_the_scheduler():
+    raw = _BlockingReranker()
+    raw.release.set()
+    provider = _provider(registry=_registry(maximum=1), reranker=raw)
+    try:
+        client = provider.rerank("retrieval_rerank")
+        seen = []
+        real_submit = client._submit
+
+        def _spy(runtime, invoke, **kwargs):
+            seen.append(kwargs)
+            return real_submit(runtime, invoke, **kwargs)
+
+        client._submit = _spy
+        cancel = threading.Event()
+        before = time.monotonic()
+        assert client.rerank(
+            "q", ["a", "b"], cancel_event=cancel, timeout=5.0) == [0, 1]
+        assert seen and seen[0]["cancel_event"] is cancel
+        assert before + 5.0 <= seen[0]["deadline_at"] <= time.monotonic() + 5.0
+        assert raw.timeouts == [5.0]
+        # Default path: no deadline, and the raw client sees no timeout keyword.
+        seen.clear()
+        assert client.rerank("q", ["a", "b"]) == [0, 1]
+        assert seen[0]["cancel_event"] is None and seen[0]["deadline_at"] is None
+        assert raw.timeouts == [5.0, None]
+    finally:
+        provider.close()
+
+
+def test_rerank_cancel_signal_raises_instead_of_reporting_a_failure():
+    raw = _BlockingReranker()
+    provider = _provider(registry=_registry(maximum=1), reranker=raw)
+    errors: list = []
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        client = provider.rerank("retrieval_rerank")
+        cancel = threading.Event()
+        pending = executor.submit(
+            client.rerank, "q", ["a", "b"], errors.append, cancel_event=cancel)
+        assert raw.entered.wait(_RENDEZVOUS_TIMEOUT_SECONDS)
+        cancel.set()
+        with pytest.raises(AskCancelled):
+            pending.result(_RENDEZVOUS_TIMEOUT_SECONDS)
+        assert errors == []
+    finally:
+        raw.release.set()
+        executor.shutdown()
+        provider.close()
+
+
+def test_rerank_timeout_reports_a_queue_timeout_and_returns_identity():
+    raw = _BlockingReranker()
+    provider = _provider(registry=_registry(maximum=1), reranker=raw)
+    errors: list = []
+    try:
+        client = provider.rerank("retrieval_rerank")
+        assert client.rerank(
+            "q", ["a", "b", "c"], errors.append, timeout=0.1) == [0, 1, 2]
+        assert len(errors) == 1
+        assert errors[0].code == "model_queue_timeout"
+        assert errors[0].support_id
+    finally:
+        raw.release.set()
+        provider.close()
