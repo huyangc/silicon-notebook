@@ -1808,7 +1808,7 @@ def outline_truncated_kg_evidence(
             present.add(key)
             hit = collected[key]
             if rescored is not None:
-                hit = rescored.get(key, hit)
+                hit = _rescored_keeping_origin(rescored.get(key), hit)
             elif relevance_ceiling is not None and hit.relevance > relevance_ceiling:
                 hit = replace(hit, relevance=relevance_ceiling)
             extra.append(hit)
@@ -3243,6 +3243,24 @@ class _ReasoningRunState:
 
 
 
+def _rescored_keeping_origin(rescored, collected):
+    """The closing rerank's rescored hit, carrying the ORIGIN the collected
+    hit was stamped with.
+
+    ``retrieve_scored`` re-scores against the active library only and returns
+    unstamped hits; swapping one in for a federated hit dropped its
+    ``notebook_id`` and ``tier``. In a global run (every hit stamped with its
+    owner, the nominal active included) that left the answer's KG card and
+    anchor with no library -- an unattributable citation. A copy, never an
+    in-place edit: the rescored hit may be shared.
+    """
+    if rescored is None:
+        return collected
+    if not getattr(collected, "notebook_id", "") or getattr(rescored, "notebook_id", ""):
+        return rescored
+    return replace(rescored, notebook_id=collected.notebook_id, tier=collected.tier)
+
+
 class ReasoningRetriever:
     def __init__(
         self,
@@ -4657,7 +4675,7 @@ class ReasoningRetriever:
                     "knowledge", rescored,
                 )
             }
-            top_hits = [scored_map.get(oid, rk) for oid, rk in collected.items()]
+            top_hits = [_rescored_keeping_origin(scored_map.get(oid), rk) for oid, rk in collected.items()]
             top_hits.sort(key=lambda h: h.relevance, reverse=True)
             top_hits = top_hits[:top_n]
             # 补集与选集共用**同一个** scored_map:零新查询,而且相关度同口径。

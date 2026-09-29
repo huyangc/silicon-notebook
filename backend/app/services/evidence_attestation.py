@@ -193,7 +193,14 @@ def attest_pointers(producer: str, element_ids: Iterable[str]) -> dict[str, str]
     pending = [key for key in ids if key not in states]
     if pending:
         states.update(_read_pointers(plan, seat, producer, pending))
-    return {key: states[key] for key in ids}
+    result = {key: states[key] for key in ids}
+    _emit({
+        "kind": "producer_evidence_attested", "producer": _code(producer),
+        "method": "pointers", "elements": len(ids), "read": len(pending),
+        **{state: sum(1 for value in result.values() if value == state)
+           for state in (ATTESTED, LIVE, DEAD, UNKNOWN)},
+    })
+    return result
 
 
 def _read_pointers(plan, seat: _AttestationSeat, producer: str, pending: list) -> dict:
@@ -220,11 +227,6 @@ def _read_pointers(plan, seat: _AttestationSeat, producer: str, pending: list) -
         seat.settled.update(states)
     if live:
         plan.on_evidence(live)
-    _emit({
-        "kind": "producer_evidence_attested", "producer": _code(producer),
-        "method": "pointers", "elements": len(pending),
-        "live": len(live), "dead": len(pending) - len(live),
-    })
     return states
 
 

@@ -121,7 +121,7 @@ def test_postgres_table_analysis_drops_a_row_locator_dangling_before_the_questio
     assert response.citation_check is None
     assert run.events == [{
         "kind": "producer_evidence_attested", "producer": "table_analysis",
-        "method": "pointers", "elements": 1, "live": 0, "dead": 1,
+        "method": "pointers", "elements": 1, "read": 1, "attested": 0, "live": 0, "dead": 1, "unknown": 0,
     }]
 
 

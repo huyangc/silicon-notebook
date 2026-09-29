@@ -1893,6 +1893,40 @@ def _text_sha(text) -> str:
     return element_text_sha(text)
 
 
+OVERLAY_PASSAGES_PRODUCER = "kg_overlay_passages"
+
+
+def attest_selected_passages(candidates, hits) -> None:
+    """Register passages that entered a global run's pool OUTSIDE the fan-out.
+
+    The mix branch's KG-overlay leg (``_kg_source_chunks``) recalls source
+    passages without going through ``federated_chunk_candidates``, the only
+    other publisher of passage snapshots, so an overlay-only passage the answer
+    cites would reach the terminal check with no snapshot at all and be judged
+    ``unverifiable`` on a run where nothing changed. This registers them with
+    exactly the federated channel's strength -- the same ``_report_evidence``:
+    one batched passage snapshot out of ONE database statement, the passage
+    text proved against what was retrieved, every element of the passage
+    fingerprinted and grouped as siblings -- under the run's per-library read
+    budget. The run's seen-set applies, so a passage the fan-out already
+    attested costs nothing. A no-op outside a global run.
+    """
+    plan = current_federated_run_plan() if federated_ask_active() else None
+    if plan is None:
+        return
+    collected = {
+        hit.chunk_id: hit for hit in hits if getattr(hit, "chunk_id", "")
+    }
+    if not collected:
+        return
+    _report_evidence(candidates, plan, collected, 0.0)
+    _emit(candidates, {
+        "kind": "producer_evidence_attested",
+        "producer": OVERLAY_PASSAGES_PRODUCER,
+        "method": "passages", "passages": len(collected),
+    })
+
+
 def _report_evidence(candidates, plan, collected: dict, deadline: float) -> None:
     """The retrieval-time fingerprints of everything this call SELECTED.
 
