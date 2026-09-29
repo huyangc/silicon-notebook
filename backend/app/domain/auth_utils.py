@@ -14,6 +14,8 @@ import secrets
 USERNAME_RE = re.compile(r"^[a-z][0-9]{8}$")
 
 _PBKDF2_ITERATIONS = 200_000
+# Production cost for callers that must spend it without a stored hash.
+PASSWORD_HASH_ITERATIONS = _PBKDF2_ITERATIONS
 
 
 def normalize_username(username: str) -> str:

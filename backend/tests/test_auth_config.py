@@ -48,6 +48,22 @@ def test_intranet_http_auth_origin_accepted_with_opt_in(monkeypatch):
     assert s.auth_public_base_url == "http://notebook.corp.example"
 
 
+def test_opt_in_requires_public_and_frontend_to_share_a_scheme():
+    import pytest
+
+    with pytest.raises(ValueError, match="same scheme"):
+        _auth_settings(auth_allow_insecure_http=True,
+                       auth_public_base_url="https://notebook.corp.example",
+                       auth_frontend_base_url="http://notebook.corp.example")
+    with pytest.raises(ValueError, match="same scheme"):
+        _auth_settings(auth_allow_insecure_http=True,
+                       auth_public_base_url="http://notebook.corp.example",
+                       auth_frontend_base_url="https://notebook.corp.example")
+    only_public = _auth_settings(auth_allow_insecure_http=True,
+                                 auth_public_base_url="http://notebook.corp.example")
+    assert only_public.auth_frontend_base_url in ("", None)
+
+
 def test_opt_in_keeps_the_rest_of_origin_shape_checks():
     import pytest
 

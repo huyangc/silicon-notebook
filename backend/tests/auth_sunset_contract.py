@@ -830,9 +830,13 @@ class AuthSunsetContract:
         with pytest.raises(AuthStoreError,match="migration_not_available"):
             migrate(linked_sso,"z00000001","pw")
         identity.auth.set_account_status(old.id,"disabled",actor_id="user-local")
-        with pytest.raises(AuthStoreError,match="account_inactive"):
+        with pytest.raises(AuthStoreError,match="migration_target_inactive"):
             migrate(auto_token,"z00000001","pw")
         identity.auth.set_account_status(old.id,"active",actor_id="user-local")
+        with identity.auth._write() as (db, _):
+            identity.auth._execute(db,"UPDATE users SET password_hash='',password_salt='',password_iterations=0 WHERE id=?",(linked.id,))
+        with pytest.raises(AuthStoreError,match="migration_verification_failed"):
+            migrate(auto_token,"z00000002","")
         with identity.auth._write() as (db, _):
             identity.auth._execute(db,"UPDATE auth_policy SET mode='sso_only'")
         assert identity.auth.identities(auto.id)["migration_available"] is False
@@ -840,6 +844,35 @@ class AuthSunsetContract:
             migrate(auto_token,"z00000001","pw")
         assert identity.resolve_session(auto_token).id == auto.id
         assert identity.auth.identities(auto.id)["linked"]
+
+    @pytest.mark.parametrize(("mode","retired","available"), [
+        ("dual",False,True), ("binding_required",False,True),
+        ("sso_only",False,False), ("retired",True,False),
+    ])
+    def test_migration_available_follows_the_stage(self, identity, monkeypatch, mode, retired, available):
+        old, _ = identity.register_user_with_session("z00000001","pw")
+        dual(identity)
+        auto, _ = self._auto_account(identity,monkeypatch)
+        with identity.auth._write() as (db, _):
+            identity.auth._execute(
+                db,"UPDATE auth_policy SET mode=?,retired_at=?",
+                (mode,identity.auth._now() if retired else None),
+            )
+        assert identity.auth.identities(auto.id)["migration_available"] is available
+        assert identity.auth.identities(old.id)["migration_available"] is False
+
+    def test_unknown_migration_login_spends_a_full_password_check(self, identity, monkeypatch):
+        from app.repositories import auth_store
+
+        identity.register_user_with_session("z00000001","pw")
+        dual(identity)
+        _, auto_token = self._auto_account(identity,monkeypatch)
+        checks = []
+        real = auth_store.verify_password
+        monkeypatch.setattr(auth_store,"verify_password",lambda *args: checks.append(args[3]) or real(*args))
+        with pytest.raises(AuthStoreError,match="migration_verification_failed"):
+            identity.auth.migrate_auto_account(auto_token,"z09999999","pw")
+        assert checks == [auth_store.PASSWORD_HASH_ITERATIONS]
 
     def test_recovery_grant_migrates_identity_from_auto_account(self, identity, monkeypatch):
         old, _ = identity.register_user_with_session("z00000001","pw")

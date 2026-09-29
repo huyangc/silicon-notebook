@@ -135,12 +135,29 @@ test("an old-account holder abandons auto enrollment and returns to local sign-i
   await waitFor(() => expect(replace).toHaveBeenCalledWith("/"));
 });
 
-test("auto enrollment points to an administrator when capabilities cannot be read", async () => {
+test("an unreadable local-login capability is reported without guessing and can be retried", async () => {
+  mocks.fetchAuthCapabilities.mockReset();
   window.history.replaceState(null, "", "/auth/sso/callback?code=handoff");
   mocks.completeSsoLogin.mockResolvedValue(autoEnrollPreview);
-  mocks.fetchAuthCapabilities.mockRejectedValue(new Error("offline"));
+  mocks.fetchAuthCapabilities.mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce({ local_login: true });
+  render(<SsoCallbackPage />);
+  const actor = userEvent.setup();
+  await actor.click(await screen.findByRole("button", { name: "我已有本站旧账号" }));
+  expect(await screen.findByText("暂时无法确认本站登录是否可用，请稍后重试或联系管理员迁移旧账号。")).toBeInTheDocument();
+  expect(screen.queryByText(/本站密码登录已停用/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "去本站登录" })).not.toBeInTheDocument();
+  await actor.click(screen.getByRole("button", { name: "重试" }));
+  expect(await screen.findByRole("button", { name: "去本站登录" })).toBeInTheDocument();
+  expect(mocks.fetchAuthCapabilities).toHaveBeenCalledTimes(2);
+});
+
+test("while capabilities are loading the legacy-account choice shows a neutral pending state", async () => {
+  mocks.fetchAuthCapabilities.mockReset();
+  window.history.replaceState(null, "", "/auth/sso/callback?code=handoff");
+  mocks.completeSsoLogin.mockResolvedValue(autoEnrollPreview);
+  mocks.fetchAuthCapabilities.mockReturnValue(new Promise(() => undefined));
   render(<SsoCallbackPage />);
   await userEvent.setup().click(await screen.findByRole("button", { name: "我已有本站旧账号" }));
-  expect(await screen.findByText("本站密码登录已停用，请联系管理员迁移旧账号。")).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "去本站登录" })).not.toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent("正在确认本站登录是否可用…");
+  expect(screen.queryByText(/本站密码登录已停用/)).not.toBeInTheDocument();
 });

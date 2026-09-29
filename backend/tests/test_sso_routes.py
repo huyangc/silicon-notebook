@@ -396,6 +396,21 @@ def test_production_http_intranet_origin_needs_explicit_opt_in(setup):
     assert client.get("/api/auth/capabilities").status_code == 503
 
 
+def test_public_and_frontend_origins_must_share_a_scheme(setup):
+    client, identity, provider, flow = setup
+    _dual(identity)
+    flow.settings.auth_allow_insecure_http = True
+    flow.settings.auth_public_base_url = "https://notebook.corp.example"
+    flow.settings.auth_frontend_base_url = "http://notebook.corp.example"
+    # The https public origin issues a Secure __Host- proof the http frontend never gets.
+    assert client.get("/api/auth/capabilities").status_code == 503
+    assert client.post("/api/auth/sso/start").status_code == 503
+    flow.settings.auth_frontend_base_url = ""
+    assert client.get("/api/auth/capabilities").status_code == 200
+    flow.settings.auth_frontend_base_url = "https://notebook.corp.example"
+    assert client.get("/api/auth/capabilities").status_code == 200
+
+
 def _auto_enrolled(client, identity, flow):
     """Legacy account a12345678 plus an SSO auto account for employee b87654321."""
     legacy = _local_user(client)
@@ -490,6 +505,14 @@ def test_identity_migration_route_rejections(setup):
         json={"login_name": "a99999999", "password": "local-password"})
     assert wrong.status_code == missing.status_code == 409
     assert wrong.json()["detail"] == missing.json()["detail"] == "旧账号登录名或密码不正确。"
+    admin = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()
+    client.patch(f"/api/admin/auth/accounts/{legacy['user']['id']}", json={"status": "disabled"},
+        headers={"Authorization": "Bearer " + admin["token"]})
+    inactive = client.post("/api/me/identity-migration", headers=headers,
+        json={"login_name": "a12345678", "password": "local-password"})
+    assert inactive.status_code == 409 and inactive.json()["detail"] == "旧账号已停用，请联系管理员。"
+    client.patch(f"/api/admin/auth/accounts/{legacy['user']['id']}", json={"status": "active"},
+        headers={"Authorization": "Bearer " + admin["token"]})
     local = client.post("/api/auth/login", json={"username": "a12345678", "password": "local-password"}).json()
     by_local = client.post("/api/me/identity-migration", headers={"Authorization": "Bearer " + local["token"]},
         json={"login_name": "a12345678", "password": "local-password"})

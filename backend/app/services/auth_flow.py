@@ -31,7 +31,9 @@ class AuthFlowService:
         frontend = self.settings.auth_frontend_base_url or self.settings.auth_public_base_url
         # Browser proof uses a host-only SameSite cookie. A public reverse proxy
         # keeps the browser and callback on the same host, including local ports.
-        if urlsplit(frontend).hostname != urlsplit(self.settings.auth_public_base_url).hostname:
+        # Same scheme too: the cookie is Secure exactly when the public origin is https.
+        public = urlsplit(self.settings.auth_public_base_url)
+        if (urlsplit(frontend).hostname, urlsplit(frontend).scheme) != (public.hostname, public.scheme):
             raise AuthProviderError("callback_origin_mismatch")
         if self.settings.environment.lower() in {"prod", "production"} and not (
             self.settings.auth_allow_insecure_http

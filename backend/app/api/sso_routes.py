@@ -51,6 +51,7 @@ def _error(exc):
         "migration_verification_failed": "旧账号登录名或密码不正确。",
         "migration_target_invalid": "该账号不能作为迁移目标，请联系管理员。",
         "migration_target_linked": "旧账号已关联统一账号，不能再迁移，请联系管理员核实。",
+        "migration_target_inactive": "旧账号已停用，请联系管理员。",
     }
     return user_error(409 if not isinstance(exc, AuthProviderError) else 503,
                       messages.get(code, "认证操作未完成，请重新尝试或联系管理员检查配置。"))

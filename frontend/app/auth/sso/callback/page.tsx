@@ -11,7 +11,7 @@ import {
   type SsoCompletion,
 } from "../../../auth";
 import { toUserMessage } from "../../../errors";
-import { IdentityBindingConfirmation } from "../../../identity-binding-confirmation";
+import { IdentityBindingConfirmation, type LocalLoginState } from "../../../identity-binding-confirmation";
 import { consumeSsoReturnLocation } from "../../../auth-return-location";
 
 type CallbackState =
@@ -29,7 +29,7 @@ function callbackErrorMessage(key: string | null): string {
 export default function SsoCallbackPage() {
   const [state, setState] = useState<CallbackState>({ kind: "working" });
   const [busy, setBusy] = useState(false);
-  const [localLoginAllowed, setLocalLoginAllowed] = useState<boolean | null>(null);
+  const [localLogin, setLocalLogin] = useState<LocalLoginState>("loading");
   const completionStarted = useRef(false);
 
   useEffect(() => {
@@ -52,14 +52,18 @@ export default function SsoCallbackPage() {
         }
         setState({ kind: "preview", pending: result });
         if (result.status === "confirmation_required" && result.purpose === "auto_enroll") {
-          // Unknown capabilities fall back to "contact an administrator".
-          void fetchAuthCapabilities()
-            .then((caps) => setLocalLoginAllowed(caps.local_login))
-            .catch(() => setLocalLoginAllowed(false));
+          loadLocalLogin();
         }
       })
       .catch((err) => setState({ kind: "error", copy: toUserMessage(err, "统一登录未完成，请返回后重试。") }));
   }, []);
+
+  function loadLocalLogin() {
+    setLocalLogin("loading");
+    void fetchAuthCapabilities()
+      .then((caps) => setLocalLogin(caps.local_login ? "allowed" : "closed"))
+      .catch(() => setLocalLogin("unknown"));
+  }
 
   async function confirm() {
     if (state.kind !== "preview") return;
@@ -104,7 +108,7 @@ export default function SsoCallbackPage() {
           }}>返回登录页</a>
         </>}
         {state.kind === "preview" && <>
-          <IdentityBindingConfirmation pending={state.pending} busy={busy} localLoginAllowed={localLoginAllowed} onConfirm={() => { void confirm(); }} onCancel={() => { void cancel(); }} />
+          <IdentityBindingConfirmation pending={state.pending} busy={busy} localLogin={localLogin} onRetryLocalLogin={loadLocalLogin} onConfirm={() => { void confirm(); }} onCancel={() => { void cancel(); }} />
         </>}
       </section>
     </main>
