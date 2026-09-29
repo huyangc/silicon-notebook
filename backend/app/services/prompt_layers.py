@@ -375,8 +375,8 @@ L2_BLOCKS: Tuple[L2Block, ...] = (
     ),
     L2Block(
         "corpus_langs",
-        ("expand_query_prompt",),
-        "语料库涉及的语言代码列表，决定 high/low level keywords 要覆盖哪些语言拼写。",
+        ("expand_query_prompt", "reflect_prompt"),
+        "语料库涉及的语言代码列表，决定 high/low level keywords 与 reflect 里 search_chunks 的 chunks_keywords 要覆盖哪些语言拼写。",
         "调用方直接传入的参数（非渲染出的文本块）",
     ),
     L2Block(

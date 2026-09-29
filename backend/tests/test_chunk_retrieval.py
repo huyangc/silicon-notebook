@@ -292,7 +292,9 @@ def test_chunk_fts_timeout_opens_run_circuit_and_skips_the_next_probe(
 def test_lexical_timeout_is_not_a_model_error(repo, monkeypatch):
     """词法臂超时不上「本次回答可能不完整」横幅:``_chunk_fts_hits`` 已记
     ask_stage=timeout 并关掉本轮词法臂,候选仍由其它臂产出;把它记成 model_error
-    会显示成没有服务身份的「模型服务调用失败」。别的词法异常照旧记。"""
+    会显示成没有服务身份的「模型服务调用失败」。别的词法异常同样不记 model_error
+    (关键词补召回臂缺席不影响结果,2026-09-29),只发一条带异常类名的
+    ``ask_stage/chunk_keyword_union`` 事件,结果照常为空。"""
     from app.repositories.ports import ChunkLexicalSearchTimeout
 
     nb, _ = _seed_chunks(repo, ["engram memory architecture " * 20])
@@ -316,11 +318,16 @@ def test_lexical_timeout_is_not_a_model_error(repo, monkeypatch):
     def _broken(*_args, **_kwargs):
         raise RuntimeError("legacy lib missing chunks_fts")
 
+    events = []
     monkeypatch.setattr(repo.retrieval.candidates, "_chunk_fts_hits", _broken)
+    monkeypatch.setattr(repo.retrieval.candidates, "event_log",
+                        type("L", (), {"emit": staticmethod(events.append)})())
     assert repo.retrieval.candidates._keyword_chunk_candidates(
         nb.id, "engram memory"
     ) == []
-    assert [args[0] for args in noted] == ["chunk_keyword_union"]
+    assert noted == []
+    assert [(e["stage"], e["status"], e["error_type"]) for e in events] == [
+        ("chunk_keyword_union", "failed_open", "RuntimeError")]
 
 
 def test_ann_union_lexical_timeout_is_not_a_model_error(repo, monkeypatch):

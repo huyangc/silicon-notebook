@@ -185,6 +185,25 @@ def _ceiling_bound_exact_deps(deps, allowed_source_ids):
     return replace(deps, exact_search=_exact_search)
 
 
+def keyword_arm_available(settings) -> bool:
+    """Whether ``_keyword_chunk_candidates`` can return anything this run.
+
+    THE one statement of that fact: the channel short-circuits on it, and
+    reasoning reads the very same answer (through
+    ``RetrievalService.keyword_arm_available``) to decide whether its
+    ``search_chunks`` action may offer the model a ``chunks_keywords``
+    parameter at all -- a parameter that is guaranteed to do nothing must not
+    be shown. Today the only such configuration is peer mode with
+    ``GLOBAL_ASK_KEYWORD_ARM_ENABLED=false``. The switch is read only in peer
+    mode, so the single-library path still never reads it. A module function
+    over ``settings`` rather than a method, so every candidate-producer double
+    that already carries ``settings`` reaches the same predicate.
+    """
+    if not federated_ask_active():
+        return True
+    return bool(settings.global_ask_keyword_arm_enabled)
+
+
 def _hydrated_chunk_row(r) -> dict:
     """One ``chunks.hydrate_rows`` row in the shape ``score_chunks`` reads."""
     return {
@@ -4069,7 +4088,7 @@ class CandidateRetrievalService(_RetrievalState):
         false`` restores the old peer-mode ``[]``; the non-peer path never
         reads that switch."""
         if federated_ask_active():
-            if not self.settings.global_ask_keyword_arm_enabled:
+            if not keyword_arm_available(self.settings):
                 return []
             needle = (keywords or "").strip()
             if not needle:
@@ -4202,7 +4221,20 @@ class CandidateRetrievalService(_RetrievalState):
                 # 原则:只显示真影响结果的失败)。失败由 fan-out 的 `_run_one` 以
                 # 内容无关的 skip 事件记下(带 arm="keyword" 与异常类名)。
                 raise
-            self._note_model_error("chunk_keyword_union", "", exc)
+            # 单库路径同一条原则(2026-09-29 起):关键词补召回臂缺席不影响语义臂
+            # 的候选,也不改答案的可信度,所以不记 model_error、不上「模型服务调用
+            # 失败」横幅——此前记成 `chunk_keyword_union` model_error,会以一条
+            # 没有服务身份的横幅出现(chunk 模式的关键词补召回与 reasoning 的播种
+            # 词法臂、`search_chunks.chunks_keywords` 都走这里)。原因码走事件:
+            # 内容无关,只带异常类名,与对等腿的 skip 事件同口径。
+            self.event_log.emit({
+                "kind": "ask_stage",
+                "stage": "chunk_keyword_union",
+                "site": "chunk_keyword_union",
+                "notebook_id": notebook_id,
+                "status": "failed_open",
+                "error_type": type(exc).__name__,
+            })
             return []
     def _exact_lookup_chunks(self, notebook_id: str, query: str):
         """Exact-identifier fast path → whole-section RetrievedChunks.

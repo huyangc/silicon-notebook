@@ -47,6 +47,14 @@
   这是 chunk 模式「关键词命中先进 rerank/quota_fuse/MMR 选择步」的等价物。`keyword_found` 记并入后真正新增的段数。不新增配置。
 - 关键词是 `expand_query` 的 zh/en 默认双语（`plan()` 不传 `corpus_langs`）；chunk 模式按语料语言。对齐需给 plan 传 `corpus_langs`，
   会改有图 run 的规划 prompt，登记为后续（`fangan_todo.md`「检索」）。
+  - **2026-09-29 修订**（上面两行保留作历史记录）：`plan()` 现在把本 run 的语料语言传给 `expand_query`
+    （单库 = 本库语言、全局问答 = 参与库语言的并集，单点在 `RetrievalService.keyword_corpus_languages`），
+    整题关键词因此按语料语言双语化，与 chunk 模式同口径；`fangan_todo.md` 的对应登记已关闭。已确认意图路径
+    （不调 `plan()`）上的关键词检索不另造确定性来源，而是以 **function 参数**的形式交给模型：reflect 的
+    `search_chunks` 动作带可选参数 `chunks_keywords`（空格分隔、语料语言 + 跨语言对应词，prompt 列出语料
+    语言），与首轮词法臂同一条通道、同一个范围；关键词臂本 run 恒空时（全局问答 + `GLOBAL_ASK_KEYWORD_ARM_ENABLED=false`）
+    这个参数从 schema、prompt、解析与执行四处一起消失，首轮播种的词法臂在同一条件下也不发起（seed 步不写 `keyword_found`）。另：本节所说「有图 run 不调」已随 2026-09-29 推翻 D-1
+    失效（首轮原文召回不看知识图谱）。
 - 词法臂通道故障（fail-open 吞掉的异常）在 seed 步 `detail` 记稀疏键 `keyword_failed: true`，与「跑了但零命中」可分。
 
 ### T2 「首轮后直接作答」的成本契约

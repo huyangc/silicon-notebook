@@ -91,6 +91,7 @@ run 下它在笔记本、失败异常类名与耗时毫秒之外多带一个 `re
 `unavailable`（其余）。带 `arm="keyword"` 的行属于全局双语关键词补召回腿，它**没有**对应的覆盖
 回执：按 kind 对照回执计数时要把它们排除。这条臂每次调用另发一条 `ask_stage` 事件（`reasoning` 一次 run 可能调用多次）
 （`stage="global_keyword_arm"`，只含参与库数、有结果的库数、合并条数、失败库数与耗时，不含文本）。
+单库问答的关键词补召回臂（chunk 模式与 `reasoning` 的首轮播种词法臂、`search_chunks.chunks_keywords` 共用）失败时同样不记 model_error、不上横幅，只发一条 `ask_stage`（`stage="chunk_keyword_union"`、`status="failed_open"`，只带 `notebook_id` 与异常类名 `error_type`）。
 带 `arm="exact"` 的行属于全局精确标识符查找腿，同样没有覆盖回执、同样要排除；这条臂只在查询含可
 探测名称时每次调用发一条 `ask_stage` 事件（`reasoning` 一次 run 可能调用多次）（`stage="global_exact_arm"`，只含参与库数、有结果的库数、
 合并段落数、合并节数、失败库数与耗时，不含标识符、问题或路径文本）。

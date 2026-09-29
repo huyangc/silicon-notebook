@@ -386,15 +386,6 @@
       `source_scope.scoped_subgraph_nodes` 的 docstring：把 scope 放进键会按勾选组合
       重建整图）。参与集覆盖在场时守卫已经读座位——因为那时两张图也读座位，守卫与
       建图口径同源；要修的是无覆盖那一半。
-- [ ] **逐步推理词法臂的关键词按语料语言双语化（给 `plan()` 传 `corpus_langs`）**：
-      首轮原文播种的词法臂用的是 `plan()` 里 `expand_query` 产出的高/低层关键词，而
-      `plan()` 调 `expand_query` 时**不传** `corpus_langs`，拿到的是 prompt 的
-      zh/en 默认语言对；chunk 通用问答那条同源的臂是按语料语言给出的。两侧对齐
-      需要把 `corpus_langs` 传进 `plan()`，但 `plan()` 是有图/无图两条 run 共用的
-      同一个规划入口，传参会一并改到**有图 run 的规划 prompt**，当时越过「有图
-      run 一字不动」的边界（该边界随 2026-09-29 推翻 D-1 已不存在，有图 run 同样
-      跑词法臂），故当时只把两侧文案与 docstring 改成说真话，传参登记在此。做的时候要连带决定：语料语言探测（`_lexical_corpus_langs`）在
-      reasoning 侧的取数时机与失败语义，以及有图 run 规划输出漂移的回归证据。
 
 ### 解析
 

@@ -5,7 +5,10 @@ from dataclasses import replace
 from typing import Any
 
 from app.services.retrieval import NeighborExpansion
-from app.services.source_scope import filter_retrieval_items
+from app.services.source_scope import (
+    filter_retrieval_items,
+    subjectless_run_active,
+)
 
 
 def _notebook_id(args, kwargs, *, keyword: str = "notebook_id") -> str:
@@ -238,6 +241,54 @@ class RetrievalService:
     # explicitly; the private implementation split remains local here.
     def notebook_languages(self, notebook_id):
         return self.candidates._notebook_langs(notebook_id)
+
+    def keyword_arm_available(self):
+        """Whether the keyword (FTS) arm can return anything this run.
+
+        Delegates to the channel's own predicate
+        (``retrieval_candidates.keyword_arm_available``), so the answer reasoning shows the model
+        and the answer the channel acts on cannot drift. Not on
+        ``RetrievalPort`` for the same reason as ``keyword_corpus_languages``:
+        reasoning is its only consumer and probes it with ``getattr`` (a double
+        without it counts as "available", the pre-existing behaviour).
+        """
+        from app.services.retrieval_candidates import keyword_arm_available
+
+        return keyword_arm_available(self.candidates.settings)
+
+    def keyword_corpus_languages(self, notebook_id):
+        """The corpus languages the keyword (FTS) arm's keywords should be in.
+
+        Scoped exactly like that arm (``keyword_chunk_candidates``):
+
+        * single-library run -- this notebook's own languages, the value chunk
+          mode hands ``expand_query`` (``notebook_languages``); the arm only
+          searches this notebook there, reference libraries included or not;
+        * peer (global-ask) run -- the UNION over the libraries the arm
+          federates to (``federation_participant_ids``, the same bounded set
+          ``_bounded_participants`` gives the peer keyword legs). Each leg
+          filters the terms against its own corpus, so a union loses nothing,
+          while the nominal active's languages alone would drop every term a
+          peer written in the other language could match.
+
+        Returned in the canonical ``("zh", "en")`` order, ``["en"]`` when
+        nothing is known (``_notebook_langs``' own empty default). The mode
+        test is ``subjectless_run_active`` rather than ``federated_ask_active``:
+        this module is not a reader of the participant-override module, and the
+        one manager that installs a global run sets both bits together.
+
+        Deliberately NOT on ``RetrievalPort``: reasoning is its only consumer
+        and probes it with ``getattr`` (the ``chunk_participant_count``
+        precedent), so a retrieval double without it simply means "no hint".
+        """
+        if not subjectless_run_active():
+            return self.notebook_languages(notebook_id)
+        from app.services.chunk_federation import federation_participant_ids
+
+        found = set()
+        for participant in federation_participant_ids(self.candidates, notebook_id):
+            found.update(self.candidates._notebook_langs(participant))
+        return [lang for lang in ("zh", "en") if lang in found] or ["en"]
 
     def lexical_corpus_languages(self, notebook_id):
         """Corpus languages a lexical probe set may be filtered against.
