@@ -1219,11 +1219,13 @@ nor a `notebook_members` row, forms the notebook list's **群组** partition.
   list **and the detail** path fill it in; the de-duplication rule is identical on
   both: **the membership row wins** — somebody who both joined by share link and
   sits in a granted group gets an empty `granted_via` and keeps a working "退出
-  共享" button, because that button deletes precisely that membership row.
+  共享" button, because that button ends precisely that membership row (and,
+  after telling them how many, deletes the leaver's own Memory there — see
+  "Memory and Agent MCP").
 - Conversely, a card whose `granted_via` is non-empty **must not** show "退出
-  共享": that button only deletes a `notebook_members` row and does nothing to an
-  authorization edge, so pressing it while the library stays in the list is a
-  guaranteed false failure. It is replaced by a static explanation that the group
+  共享": that button only ends a `notebook_members` membership and does nothing
+  to an authorization edge, so pressing it while the library stays in the list is
+  a guaranteed false failure. It is replaced by a static explanation that the group
   admin governs this access.
 - `GET /notebooks/{id}/mountable` now returns `MountableNotebook`, which adds
   `origin ∈ {base, mine, shared}`, projected from columns `MOUNT_VALID_EXPR`
@@ -1850,9 +1852,45 @@ only in snapshot and queue history. Approval revalidates the Memory's current co
 plus the pinned revision and notebook binding, in the write transaction before reusing KG dedupe/merge to create or merge one
 or more Base KG objects. Approval/rejection records the authenticated admin reviewer; the API
 and promotion audit record the complete `base_object_ids` result. This does not change or
-expose the private Memory row.
+expose the private Memory row. A proposal whose Memory is hard-deleted is withdrawn in the
+same transaction: it becomes `rejected` with reason `withdrawn_memory_deleted` and no
+reviewer (a withdrawal is not a review); an already approved promotion is independent of the
+Memory and stays.
 Deleting a notebook cascades all members' private Memory bound to it, so the delete dialog
 warns about that lifecycle consequence without exposing member identities or counts.
+
+Hard-deleting a Memory — `DELETE /memories/{id}`, or `POST /memories/bulk-delete` with at most
+200 ids (only the caller's own records count) — first removes everything derived from it: the
+hidden synthetic source with its elements and element vectors, and the KG objects, relations,
+source-local facts, cluster memberships, reverse-index rows and review candidates extracted from
+it; the notebook's graph is marked for rebuild. If a curator manually merged a Memory-derived
+object into another object, the surviving object only loses the evidence that Memory
+contributed; it is never deleted with the Memory. Bulk deletes write a content-free audit event
+(notebook, user, count).
+
+Leaving a shared notebook deletes the leaver's own Memory there, and only their own exit does.
+Before leaving, `GET /notebooks/{id}/membership/exit-disclosure` returns `{"memory_count": N}`,
+the number of the caller's Memory items in that notebook — every status — that leaving would
+permanently delete (0 when they are not a member, or would keep reading the notebook as its
+owner or through a direct, group or everyone grant). `DELETE /notebooks/{id}/membership` then
+needs `?acknowledged_memory_count=N` equal to the server's count when N > 0; otherwise it answers
+409 `{"detail": {"code": "exit_disclosure_required", "memory_count": N}}`, deletes nothing and
+keeps the membership. With N = 0 no acknowledgement is needed and the request behaves as before.
+The count is taken under the membership row lock, and the membership ends in one transaction with
+a final count, so a Memory saved in the meantime is never deleted unacknowledged: the exit answers
+409 with the new count instead. A purge failure answers 503 with a Chinese message and leaves the
+user a member. Before confirming, the user can keep their Memory in two ways:
+`GET /notebooks/{id}/memories/export` downloads exactly the counted items as a Markdown file
+(`<notebook>-记忆-<YYYYMMDD>.md`, each with its title, kind, status — candidates marked — times,
+tags, content and provenance line; streamed 200 at a time), and `POST /memories/transfer` copies
+or moves confirmed items into a notebook the user owns (other statuses are not transferred). The
+exit writes a content-free audit event (notebook, user, count).
+
+Nobody else's action deletes a member's Memory: an owner removing a member, removing everyone,
+unsharing the notebook (which also clears its member list), revoking a grant, or removing someone
+from a granted group only withdraws access. Access is often temporary, so the Memory stays; while
+access is gone nobody can read it, its owner included, and it is visible to its owner again as
+soon as access returns.
 
 The committed deterministic Memory evaluation reports Recall@5, MRR, nDCG, and three
 zero-tolerance counters: candidate-to-formal-plane leakage, cross-user leakage, and
