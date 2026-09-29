@@ -8,6 +8,7 @@ from app.repositories.knowhow_asset_refs import required_asset_ids
 from app.repositories.ports import CATALOG_MAX_CANDIDATE_PAGE, KNOWHOW_COLUMN_KINDS
 from app.repositories.sqlite.anchor_normalization import js_trim, sqlite_js_trim_expression
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.id_binding import bind_ids, drive_by
 from app.repositories.sqlite.knowhow_history_store import record_change
 
 
@@ -708,7 +709,11 @@ class KnowhowStore:
             cell_activity = {}
             code_inputs = {table_id: [] for table_id in table_ids}
             if table_ids:
-                placeholders = ",".join("?" for _ in table_ids)
+                # Every knowhow table of the notebook: one JSON parameter,
+                # each table a key seek (``drive_by``).
+                tables_bound = bind_ids(table_ids)
+                by_table = drive_by("table_id", tables_bound)
+                by_row_table = drive_by("r.table_id", tables_bound)
                 row_stats = {
                     row["table_id"]: dict(row)
                     for row in db.execute(
@@ -718,8 +723,8 @@ class KnowhowStore:
                         "AS projection_pending,"
                         "COALESCE(SUM(CASE WHEN projection_status='failed' THEN 1 ELSE 0 END),0) "
                         "AS projection_failed,MAX(updated_at) AS row_activity_at "
-                        f"FROM knowhow_rows WHERE table_id IN ({placeholders}) GROUP BY table_id",
-                        table_ids,
+                        f"FROM knowhow_rows WHERE {by_table} GROUP BY table_id",
+                        (tables_bound.param,),
                     ).fetchall()
                 }
                 cell_activity = {
@@ -727,8 +732,8 @@ class KnowhowStore:
                     for row in db.execute(
                         "SELECT r.table_id,MAX(c.updated_at) AS cell_activity_at "
                         "FROM knowhow_cells c JOIN knowhow_rows r ON r.id=c.row_id "
-                        f"WHERE r.table_id IN ({placeholders}) GROUP BY r.table_id",
-                        table_ids,
+                        f"WHERE {by_row_table} GROUP BY r.table_id",
+                        (tables_bound.param,),
                     ).fetchall()
                 }
                 for row in db.execute(
@@ -738,8 +743,8 @@ class KnowhowStore:
                     "JOIN knowhow_rows r ON r.id=cc.row_id "
                     "LEFT JOIN knowhow_cells c "
                     "ON c.row_id=cc.row_id AND c.column_id=cc.column_id "
-                    f"WHERE r.table_id IN ({placeholders})",
-                    table_ids,
+                    f"WHERE {by_row_table}",
+                    (tables_bound.param,),
                 ).fetchall():
                     code_inputs[row["table_id"]].append(dict(row))
         result = []
@@ -1070,11 +1075,13 @@ class KnowhowStore:
             row_ids = [row["id"] for row in row_rows]
             cells_by_row: dict[str, dict[str, str]] = {rid: {} for rid in row_ids}
             if row_ids:
-                placeholders = ",".join("?" for _ in row_ids)
+                # Every row of the table (grows with the table): one JSON
+                # parameter, each row a key seek (``drive_by``).
+                rows_bound = bind_ids(row_ids)
                 cell_rows = db.execute(
                     "SELECT row_id, column_id, content_md FROM knowhow_cells "
-                    f"WHERE row_id IN ({placeholders})",
-                    row_ids,
+                    f"WHERE {drive_by('row_id', rows_bound)}",
+                    (rows_bound.param,),
                 ).fetchall()
                 for cell_row in cell_rows:
                     cells_by_row[cell_row["row_id"]][cell_row["column_id"]] = (

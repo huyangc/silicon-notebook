@@ -1118,12 +1118,13 @@ class KnowledgeStore:
         ids = list(object_ids)
         if not ids:
             return []
-        ph = ",".join("%s" for _ in ids)
+        # One cluster's member objects (grows with the notebook): one array
+        # parameter, each id an endpoint key probe (id_binding class 3).
         return db.execute(
-            f"SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
-            f"WHERE notebook_id=%s "
-            f"AND (source_object_id IN ({ph}) OR target_object_id IN ({ph}))",
-            (notebook_id, *ids, *ids),
+            "SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
+            "WHERE notebook_id=%s "
+            "AND (source_object_id=ANY(%s) OR target_object_id=ANY(%s))",
+            (notebook_id, ids, ids),
         ).fetchall()
 
     @staticmethod
@@ -1144,16 +1145,19 @@ class KnowledgeStore:
         ids = list(members)
         if not ids:
             return [], []
-        ph = ",".join("%s" for _ in ids)
+        # A community's member list grows with the notebook: one array
+        # parameter, the keys the statements exist to read (id_binding
+        # class 3).
         objects = db.execute(
-            f"SELECT id, object_type, payload FROM knowledge_objects WHERE id IN ({ph})", ids,
+            "SELECT id, object_type, payload FROM knowledge_objects WHERE id=ANY(%s)",
+            (ids,),
         ).fetchall()
         relations = db.execute(
-            f"SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
-            f"WHERE notebook_id=%s AND review_status!='rejected' "
-            f"AND source_object_id IN ({ph}) AND target_object_id IN ({ph}) "
-            f"ORDER BY id COLLATE \"C\"",
-            [notebook_id, *ids, *ids],
+            "SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
+            "WHERE notebook_id=%s AND review_status!='rejected' "
+            "AND source_object_id=ANY(%s) AND target_object_id=ANY(%s) "
+            "ORDER BY id COLLATE \"C\"",
+            (notebook_id, ids, ids),
         ).fetchall()
         return _compat_rows(objects, payload=True), relations
 
@@ -3779,17 +3783,19 @@ class KnowledgeStore:
         relations" (a hub's cross-page cluster-mates used to inflate it
         without limit before the exclusion above)."""
         member_set = set(member_ids)
-        placeholders = ",".join("%s" for _ in member_set)
-        member_list = list(member_set)
+        # A hub concept's member list grows with the notebook: one array
+        # parameter (id_binding exemption class 3 -- each member is an
+        # endpoint key probe, the list's only purpose).
+        member_list = sorted(member_set)
         rels_out = db.execute(
-            f"SELECT source_object_id, target_object_id, edge_type "
-            f"FROM knowledge_relations WHERE notebook_id=%s AND source_object_id IN ({placeholders})",
-            [notebook_id] + member_list,
+            "SELECT source_object_id, target_object_id, edge_type "
+            "FROM knowledge_relations WHERE notebook_id=%s AND source_object_id=ANY(%s)",
+            (notebook_id, member_list),
         ).fetchall()
         rels_in = db.execute(
-            f"SELECT source_object_id, target_object_id, edge_type "
-            f"FROM knowledge_relations WHERE notebook_id=%s AND target_object_id IN ({placeholders})",
-            [notebook_id] + member_list,
+            "SELECT source_object_id, target_object_id, edge_type "
+            "FROM knowledge_relations WHERE notebook_id=%s AND target_object_id=ANY(%s)",
+            (notebook_id, member_list),
         ).fetchall()
 
         attached_ids: set = set()

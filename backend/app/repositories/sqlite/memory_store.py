@@ -28,6 +28,7 @@ from app.repositories.sqlite.access_sql import (
     read_access_params,
 )
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.id_binding import bind_ids, drive_by
 from app.domain.vector_index import encode_vector
 
 
@@ -1258,12 +1259,14 @@ class MemoryStore:
     ) -> dict[str, MemoryRecord]:
         if not memory_ids:
             return {}
-        placeholders = ",".join("?" for _ in memory_ids)
+        # The whole promotion queue's memories (grows with the queue): one
+        # JSON parameter, each id a primary-key seek (``drive_by``).
+        memories = bind_ids(list(memory_ids))
         rows = db.execute(
             f"SELECT {self._select_columns()} FROM memory_items m "
             "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
-            f"WHERE m.id IN ({placeholders})",
-            list(memory_ids),
+            f"WHERE {drive_by('m.id', memories)}",
+            (memories.param,),
         ).fetchall()
         return {str(row["id"]): self._record(row) for row in rows}
 

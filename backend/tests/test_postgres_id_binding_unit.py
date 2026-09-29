@@ -21,7 +21,10 @@ from app.repositories.postgres.id_binding import (
     ID_SEPARATOR,
     BoundIds,
     bind_ids,
+    execute_bound,
     execute_ids,
+    member_of,
+    not_member_of,
 )
 from app.repositories.postgres.knowledge_store import KnowledgeStore
 from app.repositories.postgres.search import (
@@ -91,20 +94,46 @@ def test_bind_ids_uses_one_text_parameter_when_it_is_exact():
         ["s-1", "s\x1f2"],   # the separator would split one id in two
         ["s-1", ""],         # an empty id would vanish from string_to_array
         [""],                # ... and a lone one would yield an empty array
-        ["s-1", None],       # array NULL semantics the text form cannot carry
-        [1, 2],              # not text at all
+        ["   ", "s-1"],      # a blank id is text-exact: kept in the text form
     ],
 )
-def test_bind_ids_falls_back_to_the_array_parameter_it_replaced(ids):
+def test_bind_ids_keeps_every_id_and_falls_back_only_where_text_cannot(ids):
     bound = bind_ids(ids)
-    assert bound.array_sql == "%s"
-    assert bound.param == list(ids)
+    exact = all(value and "\x1f" not in value for value in ids)
+    if exact:
+        assert bound == BoundIds(TEXT_ARRAY, "\x1f".join(ids))
+    else:
+        assert bound == BoundIds("%s::text[]", list(ids))
+
+
+@pytest.mark.parametrize("bad", [["s-1", None], [1, 2], ["s-1", b"x"], "s-1"])
+def test_bind_ids_refuses_non_string_ids(bad):
+    with pytest.raises(TypeError):
+        bind_ids(bad)
+
+
+def test_predicate_forms_place_the_one_bound_parameter():
+    bound = bind_ids(["s-1"])
+    assert member_of("c.source_id", bound) == f"c.source_id=ANY({TEXT_ARRAY})"
+    assert not_member_of("c.source_id", bound) == f"c.source_id<>ALL({TEXT_ARRAY})"
+    with pytest.raises(ValueError):
+        member_of(" ", bound)
 
 
 def test_execute_ids_always_disables_statement_preparation():
     connection = _Recorder()
     execute_ids(connection, "SELECT 1 WHERE x=ANY(%s)", ["a"])
     assert connection.calls == [("SELECT 1 WHERE x=ANY(%s)", ["a"], {"prepare": False})]
+
+
+def test_execute_bound_picks_the_execute_by_whether_a_list_is_bound():
+    connection = _Recorder()
+    execute_bound(connection, "SELECT 1", ("x",), None)
+    execute_bound(connection, "SELECT 2", ("y",), bind_ids(["s-1"]))
+    assert connection.calls == [
+        ("SELECT 1", ("x",), {}),
+        ("SELECT 2", ("y",), {"prepare": False}),
+    ]
 
 
 def test_the_read_budget_wrapper_forwards_prepare_to_the_bound_statement():
@@ -178,6 +207,7 @@ def test_chunk_store_statements_pick_their_execute_by_what_they_bind():
         connection, "nb", ["c-1"], actor_id="u", source_mode="exclude",
         source_ids=["s-1"])
     ChunkStore.ids_for_sources(connection, "nb", ["s-1"])
+    ChunkStore.ids_for_sources(connection, "nb", ["s-2", "s-1"], presence_only=True)
 
     options = [options for _statement, options in connection.options_by_statement()]
     assert options == [
@@ -185,12 +215,15 @@ def test_chunk_store_statements_pick_their_execute_by_what_they_bind():
         {}, {},                               # P5: no list bound
         {"prepare": False}, {"prepare": False},  # P5: include / exclude
         {"prepare": False},                   # P6
+        {"prepare": False},                   # P7 (presence, ordinality)
     ]
     statements = [statement for statement, _options in connection.options_by_statement()]
     assert f"q.source_id=ANY({TEXT_ARRAY})" in statements[1]
     assert f"c.source_id=ANY({TEXT_ARRAY})" in statements[4]
     assert f"c.source_id<>ALL({TEXT_ARRAY})" in statements[5]
     assert f"source_id=ANY({TEXT_ARRAY})" in statements[6]
+    assert f"unnest({TEXT_ARRAY}) WITH ORDINALITY" in statements[7]
+    assert connection.calls[7][1] == ("s-2\x1fs-1", "nb")
 
 
 def test_unified_kg_peer_statements_pick_their_execute_by_what_they_bind():
@@ -221,18 +254,20 @@ def test_unified_kg_peer_statements_pick_their_execute_by_what_they_bind():
         assert (TEXT_ARRAY in statement) == (options == {"prepare": False}), statement
 
 
-def test_source_store_list_statements_bind_unprepared():
+def test_batched_element_counts_keep_the_plan_cache():
+    """``element_type_count_rows`` is a batched key probe (exemption class 2):
+    <= 1024 source ids per statement, the leading index column and its only
+    selective predicate, so it keeps the plain, plan-cached execute."""
     connection = _Recorder()
     store = SourceStore(_database(connection), now=lambda: "2026-09-01T00:00:00+00:00")
 
     SourceStore.retrieval_element_rows(connection, "nb")
     store.element_type_count_rows(connection, ["s-1", "s-2"], ["paragraph", "table"])
 
-    recorded = connection.options_by_statement()
-    assert [options for _statement, options in recorded] == [
-        {}, {"prepare": False}, {"prepare": False},
-    ]
-    assert all(f"source_id=ANY({TEXT_ARRAY})" in s for s, _ in recorded[1:])
+    recorded = connection.calls
+    assert [options for _s, _p, options in recorded] == [{}, {}, {}]
+    assert all("source_id=ANY(%s)" in s for s, _p, _o in recorded[1:])
+    assert recorded[1][1][0] == ["s-1", "s-2"]
 
 
 def test_whole_notebook_reads_have_no_source_list_form():
