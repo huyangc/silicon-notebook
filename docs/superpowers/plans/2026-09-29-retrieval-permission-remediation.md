@@ -302,6 +302,26 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
   「报告持久化 payload 仍为 None」必须红。
 - 红线：不动 `subjectless` 的单写者；`__post_init__` 的歧义拒绝不放松。
 
+**E1-1 落地记录（提交 00b0d6a2）与规格评审后补入的事项**
+- 读取器形状与计划不同：`CeilingReaders` 四个可调用（`participants`、批量 `visible_by_notebook`、原始 `hidden`、`source_metadata`），
+  Memory 剥离在构造器里做（`partition_memory_sources`，缺元数据的 id 两边都不放）；新字段 `withheld_hidden_source_ids` 只给漂移探针读。
+  构造一次 3 次读（Memory 通道关闭且隐藏集非空时 4 次），与来源数、挂载库数无关。
+- **E1-1 修复轮要做**：① 报告重装入口——`report_engine.py:3359` 在 worker 内用刷新后的冻结**替换**外层 scope，构造器的无条件透传
+  表达不了；在 `source_scope.py` 加受限的重装入口：外层是非 subjectless 的默认天花板时替换本地维与库维，同时继承外层的
+  `notebook_source_ceilings` 与 `ceilings_total`，外层 subjectless 时仍透传（本计划 D1「走透传」一句据此更正）；② 提交的
+  `local_scope` 在 Memory 通道关闭时同样剥掉 Memory（把「MCP 不提交范围」这条隐含前提变成失败即关）；③ 两处写了尚未发生之事的
+  注释（`source_scope.py:220`、`:1336`）改成如实描述。
+- **E1-2 必须做（接缝没替它做）**：删掉插件引擎的自合成 `ask_service.py:2159-2212`（它按 `not scope.source_provided` 判断，而合成的
+  本地维 `source_provided=False`，留着会在构造器里面再装一层没有逐库天花板的 scope）；`plugin_hidden_sources` 改为无条件
+  `partition_memory_sources(...)[0]`（插件引用带不上 memory 身份，必须始终剔除），仓库只剩一种写法；`AskService` 注入批量
+  `visible_by_notebook` 与 `source_metadata`（构造参数，不加 Protocol 方法）；`global_run.py:164-174` 置 `ceilings_total=True`；
+  安装点不得吞掉读取器异常再退回无 scope；`follow_chain` 早退（`retrieval_service.py:133-138`）与 `any_base_has_kg`（`:476`）
+  补看 `ceilings_total`（前者若 E2-1 先删则免）；更新 `notebook_source_ceilings`、`scoped_subgraph_nodes` 里「缺省即逐字不变 / 生产不可达」
+  的过时 docstring；成本对照要计入：漂移探针每次多两次读（今天 scope 为 None 时零读）、有挂载时 `_chunk_kg_overlay` 多一次批量证据读。
+- **E1-3 必须做**：`_run_ask_notebook` 与 `search_notebook_context` 在 worker 线程内进入 `memory_access_context(allow_memory)`；
+  `MemoryRetriever` 两个方法在通道关闭时返回空；MCP 入口不得开始提交 `local_scope`；报告 worker 用重装入口。
+- **E1-Z 文档要点名的用户可见变化**：挂载库的 Knowhow / 个人记忆投影不再参与单库问答，在该库内提问仍可用。
+
 **E1-3 MCP 与报告安装**（opus，波次 2）
 - 目标：C-11；报告 worker 装默认天花板；D5 接缝；A-2 回归钉。
 - 文件：`$R/backend/app/api/mcp_tools/memory_context.py`、`$R/backend/app/services/report_execution.py`、`$R/backend/app/services/memory_retrieval.py`；
