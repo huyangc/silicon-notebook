@@ -67,7 +67,7 @@ def _set_evidence(repo, object_id, source_ids):
 @pytest.mark.parametrize("section", ["1 > X", ""])
 def test_legacy_fallback_under_a_source_ceiling_keeps_only_supported_siblings(repo, section):
     """PR-A·A1:兄弟过程只留至少有一条天花板内证据来源的;无证据的兄弟归因不到
-    来源,同样丢掉。section 为空时走 LIMIT 500 那条路,闸在 SQL 里、LIMIT 之前。"""
+    来源,同样丢掉。section 为空时走 keyset 翻页那条路(见下一条用例)。"""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     pid = repo._test_insert_object(nb.id, "procedure", {"name": "in", "section_path": section})
     out = repo._test_insert_object(nb.id, "procedure", {"name": "out", "section_path": section})
@@ -80,10 +80,13 @@ def test_legacy_fallback_under_a_source_ceiling_keeps_only_supported_siblings(re
     assert repo.node_context(nb.id, pid, allowed_source_ids=[])["steps"] == []
 
 
-def test_legacy_fallback_ceiling_gate_sits_before_the_limit(repo):
-    """section 为空的那条路有 ``LIMIT 500``:闸若落在 LIMIT 之后(先取 500 行再在
-    Python 里滤),先插入的 501 个天花板外兄弟会占满名额、把天花板内的那个挤掉。"""
+def test_legacy_fallback_ceiling_pages_past_out_of_ceiling_siblings(repo, monkeypatch):
+    """section 为空的那条路今天是 ``LIMIT 500``:若天花板下先取 500 行再在 Python
+    里滤,先插入的 501 个天花板外兄弟会占满名额、把天花板内的那个挤掉。天花板不进
+    SQL,改成 keyset 翻页边读边滤,直到凑够或扫满 NODE_CONTEXT_LEGACY_SIBLING_SCAN
+    行;扫描上限压到一页时目标就在上限之外(漏召回,失败关闭)。"""
     import json
+    from app.repositories.sqlite import knowledge_store
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     out_ev = json.dumps([{"source_id": "s-out", "element_id": "", "quoted_span": "q"}])
     now = "2026-01-01T00:00:00"
@@ -98,15 +101,37 @@ def test_legacy_fallback_ceiling_gate_sits_before_the_limit(repo):
     _set_evidence(repo, pid, ["s-in"])
     assert [s["name"] for s in repo.node_context(
         nb.id, pid, allowed_source_ids=["s-in"])["steps"]] == ["in"]
+    monkeypatch.setattr(knowledge_store, "NODE_CONTEXT_LEGACY_SIBLING_SCAN", 500)
+    assert repo.node_context(nb.id, pid, allowed_source_ids=["s-in"])["steps"] == []
 
 
-def test_payload_steps_under_a_source_ceiling_keep_names_but_not_unattributable_text(repo):
-    """payload steps 是对象自己的内容:步骤名保留;元素不存在时 quote 归因不到
-    来源,天花板下置空(缺省时仍回落到 quote,逐值不变)。"""
+@pytest.mark.parametrize("object_source", ["s-own", ""])
+def test_payload_steps_without_a_live_element_are_attributed_to_the_object_source(
+    repo, object_source,
+):
+    """PR-A·A1:payload 步骤的元素不存在(来源重新解析后元素 id 变了、KG 没重抽)
+    或步骤没有元素时,归因到对象自己的 ``source_id``(payload 是创建对象的那个来源
+    的 binder 产出的)。该来源在天花板内 → 名字与 quote 都保留(不把合法文字置空);
+    在外、或对象没有来源 → 整条步骤丢掉,名字也不返回。缺省时逐值不变。"""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     pid = repo._test_insert_object(nb.id, "procedure", {
         "name": "Flow", "section_path": "1 > Flow",
-        "steps": [{"name": "import", "element_id": "E0", "quote": "import q"}]})
-    assert repo.node_context(nb.id, pid)["steps"][0]["element_text"] == "import q"
-    scoped = repo.node_context(nb.id, pid, allowed_source_ids=["s-any"])["steps"]
-    assert scoped == [{"name": "import", "element_text": "", "section_path": "1 > Flow"}]
+        "steps": [{"name": "import", "element_id": "E0", "quote": "import q"},
+                  {"name": "floorplan", "quote": "floorplan q"}]}, source_id=object_source)
+    unscoped = repo.node_context(nb.id, pid)
+    assert [(s["name"], s["element_text"]) for s in unscoped["steps"]] == [
+        ("import", "import q"), ("floorplan", "floorplan q")]
+    inside = repo.node_context(nb.id, pid, allowed_source_ids=["s-own"])
+    if object_source:
+        assert inside["section_path"] == "1 > Flow"
+        assert inside["steps"] == [
+            {"name": "import", "element_text": "import q", "section_path": "1 > Flow"},
+            {"name": "floorplan", "element_text": "floorplan q", "section_path": "1 > Flow"}]
+    else:
+        assert (inside["section_path"], inside["steps"]) == ("", [])
+    outside = repo.node_context(nb.id, pid, allowed_source_ids=["s-other"])
+    assert (outside["section_path"], outside["steps"]) == ("", [])
+    # 天花板里混进空 id 不等于「没有来源的对象在范围内」。
+    stray = repo.node_context(nb.id, pid, allowed_source_ids=frozenset({"s-other", ""}))
+    assert (stray["section_path"], stray["steps"]) == ("", [])
+    assert repo.node_context(nb.id, pid, allowed_source_ids=[])["steps"] == []
