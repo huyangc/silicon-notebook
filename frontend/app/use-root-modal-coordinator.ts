@@ -5,6 +5,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 export type RootModalSlot =
   | "global-ask"
   | "password-change"
+  | "release-notes"
   | "search-profile"
   | "notebook-editor"
   | "notebook-delete"
@@ -100,6 +101,10 @@ type ModalPolicy = Readonly<{
 export const ROOT_MODAL_POLICIES: Readonly<Record<RootModalSlot, ModalPolicy>> = {
   "global-ask": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: true },
   "password-change": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false },
+  // 登录后异步弹出的公告，不是用户主动打开的工作流：conflictGroup 为 null，这样它
+  // 晚到时不会把用户此刻已开的 primary 弹窗（如分享链接预览）挤掉；同层按开启顺序
+  // 叠放，晚开的在上，被盖住时由 view().topmost 退出交互树。actor 拥有，不随笔记本切换失效。
+  "release-notes": { ownerKinds: ["actor"], conflictGroup: null, layer: 60, backdrop: false, escape: false },
   "search-profile": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false },
   "notebook-editor": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false, workspaceSensitive: true },
   "notebook-delete": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false, workspaceSensitive: true },

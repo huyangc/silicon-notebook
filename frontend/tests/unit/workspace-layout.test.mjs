@@ -137,6 +137,25 @@ test("修改密码弹窗在 page 接线:菜单回调打开、内置管理员隐�
 });
 
 
+test("系统更新弹窗在 page 接线:hook 取数、槽位按 notice 打开、onClose 走协调器", () => {
+  assert.deepEqual(
+    importsFrom(page, "./release-notes-modal").map((item) => item.imported),
+    ["ReleaseNotesModal"],
+  );
+  const modals = jsxElements(page, "ReleaseNotesModal");
+  assert.equal(modals.length, 1);
+  assert.deepEqual(modals[0].bindings, {
+    build: "releaseNotes.notice.build",
+    notes: "releaseNotes.notice.notes",
+    onClose: '() => rootModals.requestClose("release-notes", "button")',
+    interactive: 'rootModals.view("release-notes").topmost',
+    zIndex: 'rootModals.view("release-notes").zIndex',
+  });
+  assert.ok(page.getText(page).includes("useReleaseNotes(currentUser?.id ?? null, authChecked)"));
+  assert.ok(page.getText(page).includes('rootModals.open("release-notes", rootModals.captureActorOwner())'));
+});
+
+
 test("source detail uses the dedicated draggable window shell", () => {
   assert.deepEqual(
     importsFrom(page, "./source-detail-window").map((item) => item.imported),

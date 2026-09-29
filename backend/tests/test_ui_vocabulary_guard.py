@@ -514,3 +514,34 @@ def test_真实源码守卫接在_contracts_lane():
         '  --extra-root "$ROOT_DIR/examples/extensions/arxiv-search/src"'
     )
     assert contracts.count(invocation) == 1
+
+
+# --------------------------------------------------------------------------
+# 5. 第四条通道:release-notes/*.md(打包清单原样展示给用户)
+# --------------------------------------------------------------------------
+
+
+def test_更新说明里的黑话会被抓到且README除外(tmp_path, monkeypatch, capsys):
+    notes = tmp_path / "release-notes"
+    notes.mkdir()
+    (notes / "README.md").write_text("写法约定里可以提到 chunk 与 projection。\n", encoding="utf-8")
+    (notes / "good.md").write_text("现在可以把回答分享给同事了。\n", encoding="utf-8")
+    (notes / "bad.md").write_text("第一行正常。\n新增了 3 个 chunk 的重建。\n", encoding="utf-8")
+    monkeypatch.setattr(guard, "RELEASE_NOTES_DIR", notes)
+
+    assert [p.name for p in guard._release_note_files()] == ["bad.md", "good.md"]
+    assert [(line, term) for line, term, _ in guard.scan_release_note(notes / "bad.md")] == [(2, "chunk")]
+    assert guard.scan_release_note(notes / "good.md") == []
+
+    assert guard.main() == 1
+    err = capsys.readouterr().err
+    assert "bad.md:2" in err and "in release note" in err
+    assert "good.md" not in err and "README.md" not in err
+
+
+def test_更新说明干净时守卫通过(tmp_path, monkeypatch):
+    notes = tmp_path / "release-notes"
+    notes.mkdir()
+    (notes / "ok.md").write_text("现在可以把回答分享给同事了。\n", encoding="utf-8")
+    monkeypatch.setattr(guard, "RELEASE_NOTES_DIR", notes)
+    assert guard.main() == 0

@@ -488,6 +488,14 @@ runtime** (matching the build host's arch) to run it, and prebuilds a **wheelhou
 Python dependency — so compiled packages like `hnswlib` / `scipy` need no compiler on the
 target. Because the build host and target share OS/arch, every bundled binary runs as-is.
 
+`pack.sh` also writes `release-manifest.json` at the bundle root (via
+`scripts/build_release_manifest.py`): the build's mainline ordinal plus every
+`release-notes/*.md`, which drives the in-app "system updated" notice. It needs the **full
+(non-shallow) git history** — a shallow clone, an empty note or an invalid note file name
+fails the pack. Ordinals assume master's first-parent lineage, so **build production
+packages from `master`**; a branch build may skip notes. Without git (or when the source tree is not itself a repository root) the pack warns
+loudly, writes no manifest, and that bundle shows no update notices.
+
 On the target — no npm/node, no root:
 
 ```bash

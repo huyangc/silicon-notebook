@@ -7,6 +7,9 @@
 #
 # 用法:  bash scripts/pack.sh
 #
+# 包内另含 release-manifest.json(scripts/build_release_manifest.py 生成的用户更新说明清单):
+# 需要打包机上有完整(非浅克隆)git 历史,生产包应从 master 打;没有 git 则警告并不生成。
+#
 # 可配置(环境变量):
 #   VERSION                  包版本串(默认 <date>-<git短sha>)
 #   OUT_DIR                  产出目录(默认 <repo>/dist)
@@ -52,6 +55,18 @@ log "版本=$VERSION  平台=${nos}-${narch}  产出目录=$OUT_DIR"
 
 rm -rf "$OUT_DIR/stage"
 mkdir -p "$STAGE" "$OUT_DIR"
+
+# --- 0) 更新说明清单(提前生成:浅克隆/空正文/文件名不合规在慢步骤之前就失败) ---
+# 仅当源码树本身就是 git 仓库根才生成(解在别的仓库里时 rev-parse 会命中外层仓库,
+# 序号会静默错误);否则响亮警告并不生成——该包不会弹更新通知。生成失败 → set -e 使打包失败。
+git_top="$(git -C "$ROOT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "$git_top" && "$(cd "$git_top" && pwd -P)" == "$(cd "$ROOT_DIR" && pwd -P)" ]]; then
+  log "生成 release-manifest.json(用户更新说明)…"
+  "$PACK_PYTHON" "$ROOT_DIR/scripts/build_release_manifest.py" \
+    --repo "$ROOT_DIR" --version "$VERSION" --out "$STAGE/release-manifest.json"
+else
+  log "警告:$ROOT_DIR 不是 git 仓库根目录,不生成 release-manifest.json——该包不会向用户弹出更新通知。"
+fi
 
 # --- 1) 前端 standalone 构建 ---
 log "构建前端(standalone)…"

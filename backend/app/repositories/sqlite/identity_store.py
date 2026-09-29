@@ -318,6 +318,34 @@ class IdentityStore:
             ).fetchone()
             return self._user_profile(user, profile)
 
+    def get_seen_release_ordinal(self, user_id: str) -> int | None:
+        """该用户已看过更新说明的最新主线序号;NULL/用户不存在 → None。"""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT seen_release_ordinal FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+        if row is None or row["seen_release_ordinal"] is None:
+            return None
+        return int(row["seen_release_ordinal"])
+
+    def initialize_seen_release_ordinal(self, user_id: str, ordinal: int) -> None:
+        """仅当仍为 NULL 时写入基线(幂等;已有值不动)。"""
+        with self.database.write() as db:
+            db.execute(
+                "UPDATE users SET seen_release_ordinal = ? "
+                "WHERE id = ? AND seen_release_ordinal IS NULL",
+                (ordinal, user_id),
+            )
+
+    def advance_seen_release_ordinal(self, user_id: str, ordinal: int) -> None:
+        """单条 SQL 原子取 max:只增不减;当前值为 NULL 时直接写入。"""
+        with self.database.write() as db:
+            db.execute(
+                "UPDATE users SET seen_release_ordinal = "
+                "MAX(COALESCE(seen_release_ordinal, ?), ?) WHERE id = ?",
+                (ordinal, ordinal, user_id),
+            )
+
     def set_user_search_profile(
         self, user_id: str, fields: "dict", origin: str
     ) -> UserProfile:

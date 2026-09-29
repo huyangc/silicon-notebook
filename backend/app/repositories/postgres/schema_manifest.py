@@ -410,7 +410,11 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # defaults are the correct value for every pre-existing watermark row (a row
 # written before this migration has no snapshot, so it must read as
 # not-captured and force one more full export).
+# SQLite v86 / PostgreSQL 0066 add users.seen_release_ordinal (nullable
+# INTEGER, no backfill): the mainline ordinal of the newest release whose
+# update notes the user has been shown; NULL = never recorded. No table,
+# index, FK or unique-surface change.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=85,
-    postgres_version=65,
+    sqlite_version=86,
+    postgres_version=66,
 )

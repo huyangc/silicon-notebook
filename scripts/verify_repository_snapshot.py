@@ -4960,5 +4960,36 @@ MIGRATION_MANIFEST[(84, 85)] = {
     "indexes": SYNC_EXPORT_SNAPSHOT_INDEXES, "triggers": {}, "views": {},
 }
 
+
+# v86 (per-user baseline for the system-update notice, parity with PostgreSQL
+# 0066_user_seen_release_ordinal.sql): the nullable
+# ``users.seen_release_ordinal`` column. No new table, index, trigger or view,
+# and no backfill (existing rows stay NULL = never recorded).
+USERS_SEEN_RELEASE_COLUMNS = {
+    "users": {
+        "seen_release_ordinal": ("seen_release_ordinal", "INTEGER", 0, None, 0),
+    },
+}
+MIGRATION_MANIFEST = {
+    (key[0], 86, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "users": {
+                **manifest["columns"].get("users", {}),
+                **USERS_SEEN_RELEASE_COLUMNS["users"],
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(85, 86)] = {
+    "tables": {},
+    "columns": USERS_SEEN_RELEASE_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

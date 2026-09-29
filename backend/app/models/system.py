@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 
 class ParserEngineCapability(BaseModel):
@@ -94,3 +94,48 @@ class SystemExtensionsResponse(BaseModel):
 
     api_version: Literal["1"] = "1"
     extensions: list[SystemExtensionContribution]
+
+
+class ReleaseNotesBuild(BaseModel):
+    """The running build, as far as the update notice cares."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str
+    ordinal: int
+
+
+class ReleaseNoteItem(BaseModel):
+    """One user-facing update note (markdown body written by hand)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    ordinal: int
+    body: str
+
+
+class ReleaseNotesResponse(BaseModel):
+    """Notes this user has not seen yet, newest first.
+
+    ``available=false`` means the deployment carries no usable manifest; the
+    client then shows nothing (and nothing was recorded for the user).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    available: bool
+    build: ReleaseNotesBuild | None
+    notes: list[ReleaseNoteItem]
+
+
+class ReleaseNotesSeenRequest(BaseModel):
+    """Mark notes up to ``through_ordinal`` as seen.
+
+    The client sends the ``build.ordinal`` it was shown, so a server upgrade
+    that lands while the dialog is open does not get marked as seen too.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    through_ordinal: StrictInt = Field(ge=0)

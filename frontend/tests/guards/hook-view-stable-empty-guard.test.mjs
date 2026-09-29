@@ -95,6 +95,9 @@ const EXPECTED_NO_VIEW_FIELDS = new Set([
   // Returns only the title string and stable React state setter as a tuple;
   // no returned view-object fields or collection-valued hidden fallback.
   "use-notebook-title-draft.ts",
+  // Returns `{ notice, clear }` (all shorthand): `notice` is `null` when there is
+  // nothing to show — a stable primitive, never an empty [] / {} fallback.
+  "use-release-notes.ts",
 ]);
 
 // Parameters here are deliberately *not* named `node` (this repo's
