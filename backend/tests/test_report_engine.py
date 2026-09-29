@@ -2332,6 +2332,119 @@ def test_draft_section_empty_content_marks_failed_and_observable(repo, monkeypat
     assert "SECRET-QUESTION" not in serialized
 
 
+def _draft_with(repo, monkeypatch, replies):
+    """Drive ``_draft_section`` against a fake returning ``replies`` in order
+    (an Exception instance is raised). Returns (section, attempt events, notes)."""
+    from app.services.reasoning_retrieval import ReasoningResult
+
+    class _ScriptedLLM:
+        configured = True
+        model = "m"
+        def __init__(self):
+            self.calls = 0
+        def chat_json(self, *a, **k):
+            reply = replies[self.calls]
+            self.calls += 1
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+    stub = _ScriptedLLM()
+    eng = _mk_engine(repo, stub)
+    nb = _mk_nb(repo)
+    events, notes = [], []
+    monkeypatch.setattr(eng.dependencies.event_log, "emit", events.append)
+    repo._runtime.models.note_model_error = (
+        lambda stage, error, *, workload_id: notes.append(error)
+    )
+    out = eng._draft_section(
+        nb.id, {"title": "T", "scope": "S"}, "Q", ReasoningResult(),
+        report_id="rep-id", section_index=0,
+    )
+    attempts = [
+        (event["status"], event.get("reason", ""))
+        for event in events if event.get("kind") == "report_section_attempt"
+    ]
+    return out, attempts, notes, stub.calls
+
+
+def test_draft_section_accepts_a_complete_object_with_a_stray_trailer(
+    repo, monkeypatch
+):
+    # 2026-09-29 deepseek-flash: a normal section object followed by an
+    # extra ``"}``. It drafted as "error" and the note blamed chain-of-thought.
+    body = "## 小节\n" + "正文" * 1500
+    reply = json.dumps({"markdown": body, "grounded": True}, ensure_ascii=False)
+    out, attempts, notes, calls = _draft_with(repo, monkeypatch, [reply + '"}'])
+
+    assert calls == 1
+    assert out["markdown"] == body
+    assert not out.get("failed") and not out.get("error")
+    assert attempts == [("success", "")]
+    assert notes == []
+
+
+def test_draft_section_unparseable_reply_fails_as_malformed_not_empty(
+    repo, monkeypatch
+):
+    broken = '{"markdown": "正文"}, "grounded": true}'
+    out, attempts, notes, calls = _draft_with(
+        repo, monkeypatch, [broken, broken]
+    )
+
+    assert calls == 2
+    assert out["markdown"] == "" and out.get("failed") is True
+    assert attempts == [("malformed", "invalid_json"), ("malformed", "invalid_json")]
+    assert out["error"] == "模型返回的本节内容无法解析,已重试"
+    assert "思维链" not in out["error"]
+    assert len(notes) == 1 and not isinstance(notes[0], RuntimeError)
+
+
+def test_draft_section_scheduler_rejection_keeps_its_reason_code(
+    repo, monkeypatch
+):
+    # What the scheduled client raises for a reply the boundary rejected:
+    # the reason rides on ``detail``. An empty body is the empty class.
+    from app.services.model_work import MalformedModelResponse, ModelProviderError
+
+    class _Rejected(ModelProviderError):
+        def __init__(self, detail):
+            super().__init__("rejected", code="malformed_response")
+            self.detail = detail
+
+    out, attempts, _notes, _calls = _draft_with(
+        repo, monkeypatch,
+        [_Rejected("incomplete_object"), MalformedModelResponse(reason="empty")],
+    )
+
+    assert attempts == [("malformed", "incomplete_object"), ("empty", "empty")]
+    # The retry's outcome names the note: the model returned nothing.
+    assert out["error"] == "答案合成未产出内容(模型可能把输出预算耗在思维链上),已重试"
+
+
+def test_draft_section_call_failure_is_an_error_not_empty(repo, monkeypatch):
+    from app.services.model_work import ModelProviderError
+
+    failure = ModelProviderError("down", code="provider_unavailable")
+    out, attempts, notes, _calls = _draft_with(
+        repo, monkeypatch, [failure, failure]
+    )
+
+    assert attempts == [
+        ("error", "provider_unavailable"), ("error", "provider_unavailable"),
+    ]
+    assert out["error"] == "本节模型调用失败,已重试"
+    assert notes == [failure]
+
+
+def test_draft_section_empty_reply_keeps_the_empty_copy(repo, monkeypatch):
+    out, attempts, notes, _calls = _draft_with(repo, monkeypatch, ["", "{}"])
+
+    assert attempts == [("empty", "empty"), ("empty", "missing_expected_key")]
+    assert out["error"] == "答案合成未产出内容(模型可能把输出预算耗在思维链上),已重试"
+    assert len(notes) == 1
+
+
 def test_report_section_uses_direct_element_and_recomputes_grounding(repo):
     from app.services.reasoning_retrieval import ReasoningResult
     from app.services.retrieval import RetrievedElement

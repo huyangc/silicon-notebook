@@ -21,6 +21,10 @@ import json_repair
 class ModelJsonObject:
     content: str
     repaired: bool = False
+    #: A complete leading object was delivered and stray closing punctuation
+    #: after it was dropped (see ``_leading_object``); ``content`` is then
+    #: the object's own text, byte-for-byte.
+    trailing_data: bool = False
 
 
 class ModelJsonRepairError(ValueError):
@@ -556,6 +560,32 @@ def _validate_repaired_shape(
     _assert_json_domain(value)
 
 
+_DECODER = json.JSONDecoder()
+# What may follow a complete object and still be read as noise: closing
+# delimiters, quotes, backticks and whitespace. A deepseek-flash report section
+# came back as a whole valid object followed by an extra ``"}`` (2026-09-29).
+# Anything else after the object -- a second object, ``, "key": value}``
+# continuing fields the model meant to include, prose -- has more than one
+# reading and stays a malformed response.
+_TRAILING_NOISE_RE = re.compile(r"[\s}\]\"'`]+\Z")
+
+
+def _leading_object(content: str) -> str | None:
+    """Return a complete leading object followed only by stray closers."""
+    stripped = content.strip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        value, end = _DECODER.raw_decode(stripped)
+    except ValueError:
+        return None
+    if not isinstance(value, dict):
+        return None
+    if not _TRAILING_NOISE_RE.fullmatch(stripped[end:]):
+        return None
+    return stripped[:end]
+
+
 def parse_model_json_object(
     content: str,
     schema_hint: str,
@@ -568,6 +598,11 @@ def parse_model_json_object(
     try:
         _strict_object(content)
     except ModelJsonRepairError as strict_error:
+        # Not a repair: the object is delivered exactly as the model wrote
+        # it, so this applies to every workload regardless of repair mode.
+        leading = _leading_object(content)
+        if leading is not None:
+            return ModelJsonObject(content=leading, trailing_data=True)
         if not allow_repair or strict_error.reason == "non_object":
             raise
     else:

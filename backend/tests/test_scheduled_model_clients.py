@@ -619,6 +619,31 @@ def test_shadow_mode_observes_repair_but_keeps_strict_failure():
         provider.close()
 
 
+def test_every_workload_drops_stray_closers_after_a_complete_object():
+    # query_rewrite is not a repair workload, and the trailer is not a
+    # repair: a complete object followed by an extra ``"}`` (the 2026-09-29
+    # report-section reply) is delivered as the object itself.
+    obj = '{"query":"改写后的问题"}'
+    events = _EventLog()
+    provider = _provider(chat=_Chat(obj + '"}'), events=events)
+    try:
+        raw = provider.chat("query_rewrite").chat_json(
+            [{"role": "user", "content": "q"}], '{"query":""}'
+        )
+
+        assert raw == obj
+        [trimmed] = [
+            event for event in events.events
+            if event.get("kind") == "model_json_repair"
+        ]
+        assert trimmed["status"] == "trimmed"
+        assert trimmed["reason"] == "trailing_data"
+        assert trimmed["workload_id"] == "query_rewrite"
+        assert "改写" not in json.dumps(trimmed, ensure_ascii=False)
+    finally:
+        provider.close()
+
+
 def test_unapproved_workload_remains_strict_when_repair_is_on():
     provider = _provider(chat=_Chat('{query: "q"}'))
     try:

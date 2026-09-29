@@ -490,3 +490,55 @@ def test_a_scalar_for_the_only_advertised_collection_is_unusable():
         validate_model_json_shape('{"sub_queries": "not-a-list"}', PLAN_SCHEMA)
 
     assert caught.value.reason == "missing_expected_key"
+
+
+SECTION_SCHEMA = '{"markdown":"","grounded":true}'
+
+
+@pytest.mark.parametrize("allow_repair", [False, True])
+@pytest.mark.parametrize("trailer", ['"}', "}", '\n"}\n', "]}", "```"])
+def test_complete_object_with_stray_closers_is_delivered_verbatim(
+    trailer, allow_repair
+):
+    # deepseek-flash report section, 2026-09-29: a whole valid object then an
+    # extra ``"}``. Strict ``json.loads`` said "Extra data" and the section
+    # was lost; the object itself is complete and needs no repair.
+    obj = '{"markdown": "## 小节\\n正文 [k1]", "grounded": true}'
+
+    result = parse_model_json_object(
+        obj + trailer, SECTION_SCHEMA, allow_repair=allow_repair
+    )
+
+    assert result.trailing_data is True
+    assert result.repaired is False
+    assert result.content == obj
+    assert validate_model_json_shape(result.content, SECTION_SCHEMA).content == obj
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # The model closed early and kept writing fields: dropping them would
+        # silently lose content, so this is not "noise".
+        '{"markdown": "正文"}, "grounded": true}',
+        # A second object has more than one reading.
+        '{"markdown": "a"}{"markdown": "b"}',
+        '{"markdown": "a"}\n[1]',
+        # Prose after the object.
+        '{"markdown": "a"} 以上',
+        # Truncated: nothing complete to take.
+        '{"markdown": "a", "grounded": tr',
+    ],
+)
+def test_trailing_content_other_than_stray_closers_stays_malformed(raw):
+    with pytest.raises(ModelJsonRepairError):
+        parse_model_json_object(raw, SECTION_SCHEMA, allow_repair=False)
+
+
+def test_strict_json_is_not_flagged_as_trailing_data():
+    raw = '{"markdown": "a", "grounded": true}'
+
+    result = parse_model_json_object(raw, SECTION_SCHEMA, allow_repair=False)
+
+    assert result.trailing_data is False
+    assert result.content == raw
