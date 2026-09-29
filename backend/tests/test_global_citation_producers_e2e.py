@@ -266,3 +266,78 @@ def test_an_overlay_only_passage_race_before_the_terminal_read(
         assert getattr(result.answer.citation_check, expected) == 1
     finally:
         repo.close()
+
+
+# ---------------------------------------------------------------------------
+# Reserved seats (PR-C) put only registered passages in front of the model
+# ---------------------------------------------------------------------------
+
+def test_a_passage_kept_by_a_reserved_library_seat_is_registered(tmp_path, monkeypatch):
+    """Peer mode's per-library seats in the mix branch's final cut can keep a
+    passage the budget alone would have cut. Such a passage comes from the
+    same registered pools (federated fan-out, KG-overlay leg), so the run stays
+    clean and the kept passage is cited without a mark."""
+    from app.services import retrieval as retrieval_module
+    from tests.model_testkit import bind_chat_client
+    from tests.test_global_ask_engine_parity import _e2e_answer, _e2e_repo
+
+    repo, notebooks, user_id = _e2e_repo(tmp_path, monkeypatch, answer="低温性能如下。")
+    try:
+        from app.repositories.ports import UploadedSourceFile
+
+        class _FirstLibraryFirst:
+            configured = True
+
+            def rerank(self, query, documents, on_error=None):
+                return sorted(range(len(documents)), key=lambda i: "指标0" not in documents[i])
+
+        repo.settings.chunk_kg_overlay_enabled = True
+        bind_rerank_client(repo, _FirstLibraryFirst())
+        bind_chat_client(repo, "ask_answer", kit.CitingAnswerer("低温性能如下。"))
+        nb = notebooks[0]
+        for extra in (1, 2):
+            source = repo.upload_sources(nb.id, [UploadedSourceFile(
+                file_name=f"补充{extra}.md", content_type="text/markdown",
+                content=(f"# 补充{extra}\n\n## 低温性能\n\n低温性能的补充测量{extra}，"
+                         f"零下四十度仍然满足指标0。").encode("utf-8"),
+            )], scheduler=lambda _source_id: None)[0]
+            repo.process_source(source.id)
+        with repo._runtime.source_store.database.connect() as db:
+            row = db.execute(
+                "SELECT e.id, e.source_id FROM source_elements e JOIN sources s "
+                "ON s.id=e.source_id WHERE s.notebook_id=? AND e.text LIKE '%零下四十度%'",
+                (nb.id,),
+            ).fetchone()
+        repo.store_kg(nb.id, row["source_id"], [{
+            "local_id": "a", "object_type": "concept",
+            "payload": {"name": "低温性能", "definition": "低温下增益上升"},
+            "evidence": [kit.evidence(row["source_id"], row["id"], "零下四十度")],
+        }], [])
+        kept: list = []
+        original = retrieval_module.select_with_reserves_baseline_first
+
+        def spy(ranked, budget, rules):
+            # A budget that holds exactly the first library's three passages
+            # (ranked first by the reranker): a passage of another library in
+            # the cut is there because its library seat kept it.
+            head = [chunk for chunk in ranked if chunk.notebook_id == nb.id][:3]
+            tight = sum(retrieval_module.est_tokens(chunk.text) for chunk in head) or budget
+            selected = original(ranked, tight, rules)
+            plain = {chunk.chunk_id for chunk in original(ranked, tight, ())}
+            kept.extend(chunk for chunk in selected if chunk.chunk_id not in plain)
+            return selected
+
+        monkeypatch.setattr(retrieval_module, "select_with_reserves_baseline_first", spy)
+        events = kit.capture_events(repo, monkeypatch)
+        result = _e2e_answer(repo, notebooks, user_id, "低温性能如何")
+
+        assert result.status == "done", result.error
+        assert kept, "no passage was kept by a reserved seat; the case proves nothing"
+        dumped = result.answer.model_dump(mode="json")
+        assert "citation_check" not in dumped
+        assert "verification" not in str(dumped)
+        cited = {r.element_id for r in kit.references(result.answer)}
+        assert any(chunk.element_ids and chunk.element_ids[0] in cited for chunk in kept)
+        assert not [e for e in events if e.get("kind") == "global_ask_citations_partial"]
+    finally:
+        repo.close()
