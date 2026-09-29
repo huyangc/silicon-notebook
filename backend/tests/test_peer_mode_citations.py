@@ -92,7 +92,7 @@ class _Knowledge:
     def cluster_fold(self, notebook_id, object_ids):
         return {}
 
-    def node_context(self, notebook_id, object_id):
+    def node_context(self, notebook_id, object_id, *, allowed_source_ids=None):
         return {"occurrences": [], "definition": "定义", "steps": None}
 
     def in_network_relations(self, participant_ids, object_ids):

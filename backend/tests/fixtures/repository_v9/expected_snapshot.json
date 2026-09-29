@@ -103,6 +103,9 @@
   "context": {
     "node": {
       "definition": null,
+      "definition_basis": null,
+      "definition_element_id": null,
+      "definition_source_id": null,
       "id": "<ko-id-2>",
       "name": "source degeneration",
       "object_type": "concept",

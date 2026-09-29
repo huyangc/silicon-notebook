@@ -93,6 +93,14 @@ KG_COMMUNITY_EDGES_MAX = 2000
 # product-and-api 文档),前端「加载更多成员」翻页即可看到完整集合。
 CONCEPT_DETAIL_PAGE_MAX = 200
 
+# `node_context` 在来源天花板生效时最多看多少条 `defines` 关系(按 `r.id` 排序)
+# 去找第一条天花板内的定义证据。一个概念的 `defines` 边通常只有一两条(同一个概念
+# 在少数几处被定义);8 条已经覆盖「同一概念被多个来源各定义一次」的常见形态,
+# 同时把那一次批量 `_enrich_evidence` 的元素主键读限制在「8 个定义者的证据」之内
+# ——这条读路径在推理的每个 KG 命中上都要走一次,扫描量必须与库规模无关。
+# 无天花板时仍只看第一条(与今天逐值相同)。
+NODE_CONTEXT_DEFINES_SCAN = 8
+
 
 class KnowledgeGraphTooLargeError(Exception):
     """Raised by knowledge_graph() (legacy GET /notebooks/{id}/graph) when the
