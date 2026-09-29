@@ -1100,6 +1100,84 @@ def promote_bounded_prefix(
     return promoted + remainder
 
 
+def interleave_by_lane(
+    ordered: Sequence["RetrievedChunk"],
+    in_graph_lane: Callable[["RetrievedChunk"], bool],
+) -> List["RetrievedChunk"]:
+    """Stably split a relevance-sorted list into two lanes and alternate them.
+
+    ``ordered`` is already sorted by relevance descending. The chunks for which
+    ``in_graph_lane`` holds form one lane, every other chunk the other; each lane
+    keeps its input order. The result takes one chunk from each lane in turn,
+    starting with the lane that holds ``ordered[0]``; once a lane runs out, the
+    rest of the other lane follows as one block. If either lane is empty the
+    result is a same-order copy -- byte-for-byte neutral downstream.
+
+    Why: a reasoning run's passage partition mixes two relevance scales that
+    cannot be compared. Concept-walk (PPR) passages carry a PER-RUN min-max
+    normalized score -- the top one is always exactly 1.0 and the tail decays
+    relative to it -- while seeded / searched passages carry an ABSOLUTE fused
+    score (0.4 keyword coverage + 0.6 cosine). Measured on eight graph-bearing
+    questions (2026-09-29, local corpus): PPR rank 1 was 1.0 in 8/8, the rank-2
+    median 0.945, rank-6 median 0.62; seeded passages had median 0.36 and max
+    0.78. Sorting the union on one relevance key therefore lets the PPR lane
+    systematically evict the retrieval lane: under the overview budget (12k
+    characters) 3 of the 8 questions kept at most one seeded passage -- none at
+    all, or only the budget-truncated last line -- and under the standard budget
+    one question kept 1 of its 8. Interleaved, every one of those runs admits
+    its whole seeded pool.
+
+    This is a REORDERING of what the character budget sees, never a rewrite of
+    ``relevance``: that value still feeds the grounding thresholds
+    (``EVIDENCE_TAU_*``) and ``top_relevance``, where rescaling one lane would
+    silently change what counts as grounded. Nothing is dropped. It is the same
+    idea as chunk mode's mix branch, which round-robins its producers instead of
+    ranking them on one incomparable score.
+    """
+    items = list(ordered)
+    graph = [chunk for chunk in items if in_graph_lane(chunk)]
+    if not graph or len(graph) == len(items):
+        return items
+    graph_ids = {id(chunk) for chunk in graph}
+    other = [chunk for chunk in items if id(chunk) not in graph_ids]
+    first, second = (graph, other) if id(items[0]) in graph_ids else (other, graph)
+    result: List["RetrievedChunk"] = []
+    for index in range(max(len(first), len(second))):
+        if index < len(first):
+            result.append(first[index])
+        if index < len(second):
+            result.append(second[index])
+    return result
+
+
+def relevance_on_ppr_scale(chunk: "RetrievedChunk") -> bool:
+    """Whether ``chunk.relevance`` is a PPR (per-run min-max normalized) value.
+
+    The lane is decided by the SCALE of the relevance the chunk carries, not by
+    "PPR ever touched it". Every PPR producer sets ``relevance`` to the very
+    value it stores as its ``RetrievalSupport(origin="ppr").score``
+    (``graph_retrieval._ppr_retrieve``, ``source_partitioned_ppr``,
+    ``source_subgraph_ppr`` / ``source_graph_activation``). When reasoning
+    dedups a passage that two producers returned (``take_distinct_chunk_hits``
+    -> ``prefer_stronger_chunk_candidate``), the HIGHER-relevance representative
+    is kept and the support sets are unioned, with a repeated ppr support
+    keeping the max score. So a passage PPR brought back at 0.9 and a seed later
+    hit at 0.45 keeps the PPR object (relevance 0.9 == its ppr score): graph
+    lane. The reverse -- PPR at 0.3, seed at 0.45 -- keeps the seed object: its
+    supports now include a ppr entry, but its relevance (0.45) is an absolute
+    fused score, not that ppr score, so it belongs to the retrieval lane.
+    Exact float equality is sound because the two numbers are copies of one
+    value, never recomputed. ``getattr`` keeps duck-typed test doubles working.
+    """
+    relevance = getattr(chunk, "relevance", None)
+    return any(
+        getattr(support, "origin", "") == "ppr"
+        and getattr(support, "score", None) is not None
+        and support.score == relevance
+        for support in (getattr(chunk, "retrieval_supports", ()) or ())
+    )
+
+
 def is_generated_question_only_chunk(chunk: "RetrievedChunk") -> bool:
     """Whether a chunk exists only because the optional question index hit it.
 

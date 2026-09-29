@@ -144,12 +144,6 @@ KG_SHAPED_STEP_TYPES: frozenset[str] = frozenset({
     "expand", "ppr", "follow_chain", "expand_community",
 })
 
-#: 无图原文半留下的印记。`_search_passages_if_graphless`
-#: (`reasoning_retrieval.py`)只在 `state.kg_in_scope` 为假时才把这个键写进
-#: 同一条 `retrieve` 步的 detail——它一在场,这一步的 `new` 就只可能是空手的
-#: 图查询,不能拿来当「图在场」的证据。
-_GRAPHLESS_RETRIEVE_MARK = "chunks_found"
-
 STALE_BREAKER_REASON = "stale_circuit_breaker"
 NO_EXECUTABLE_ACTION_REASON = "no_executable_action"
 
@@ -531,11 +525,13 @@ def _is_kg_shaped_retrieve(step_type: str, detail: Mapping) -> bool:
 
     只有 `new`/`found`(补种 / `add_subquery` 的方向级检索,写侧只在实际有
     命中时才写这两个键之一,且值只计 KG 候选)算数;首轮"初检索"步只写
-    `count`(图与原文混合抓取的粗计数,分不清就不算,§3);带
-    `_GRAPHLESS_RETRIEVE_MARK` 的步是无图原文半自己的印记——它一出现,这一步
-    的 `new` 就只可能是空手的图查询,不能倒过来当「图在场」证据。
+    `count`(图与原文混合抓取的粗计数,分不清就不算,§3)。同一步的原文半另记
+    `chunks_found`(`_search_passages_for_direction`,`reasoning_retrieval.py`),
+    它不进 `new`,所以不参与判定:2026-09-29 起原文半与知识图谱无关、有图谱
+    run 上也会写,它的在场**不再**意味着「这一步的图查询空手」——此前把它当
+    无图印记整步排除,会让有图谱 run 上 `new>0` 的真证据被漏掉。
     """
-    if step_type != "retrieve" or _GRAPHLESS_RETRIEVE_MARK in detail:
+    if step_type != "retrieve":
         return False
     for key in ("new", "found"):
         value = _int(detail.get(key))

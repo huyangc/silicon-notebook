@@ -1032,7 +1032,7 @@ KG_CANONICAL_FOLD_ENABLED    # 检索时折叠同 canonical 的碎片化 KG 节�
 KG_ABOUT_DOWNWEIGHT_ENABLED  # 关系检索里对弱 about 边降权排序（默认 false）
 KNOWHOW_KG_NODE_RETRIEVAL_ENABLED # Knowhow 格子对象进入 reasoning/graph 节点检索（默认 true；false 只关闭直接节点路径，不影响格子 chunk 检索）
 REASONING_ENUM_TOOLS_ENABLED # 逐步推理的类型化集合枚举 reflect 工具，enumerate_elements/enumerate_kg_objects（默认 true；false 同时关闭两个工具与集合地图，零额外查询）
-REASONING_CHUNK_SEARCH_ENABLED # 逐步推理的原文段落检索一等动作 search_chunks 及无图首轮确定性播种总闸（默认 true；false 时动作不进 schema/prompt/白名单、播种不跑、REASONING_MAX_CHUNK_SEARCHES 无消费者，逐字回到接入前——但仍会在请求级 memo 内为判定图是否在范围内付一次图存在性 EXISTS 查询，这与总闸开关无关）
+REASONING_CHUNK_SEARCH_ENABLED # 逐步推理的原文段落检索一等动作 search_chunks 及首轮确定性原文播种、已确认方向补种与 add_subquery 原文半的总闸（不看知识图谱，有图与无图 run 同闸；默认 true；false 时动作不进 schema/prompt/白名单、播种与原文补检索不跑、REASONING_MAX_CHUNK_SEARCHES 无消费者，逐字回到接入前——但仍会在请求级 memo 内为判定图是否在范围内付一次图存在性 EXISTS 查询，这与总闸开关无关）
 REASONING_OUTLINE_ENABLED    # 逐步推理的大纲便签 reflect 动作，update_outline（默认 true；不论此开关，仅「穷尽」检索档位提供该动作；false 关闭该动作与按节合成，回到接入前逐字一致的行为）；同一个开关也管深度报告每节深挖在穷尽档（depth 16，见下方 REPORT_MAX_SECTIONS）的启用，不另设报告专属开关
 REASONING_OUTLINE_KG_GAP_ENABLED # 大纲便签的 KG 弱支撑边回喂：每次被接受的 update_outline 之后附带弱支撑关系提示（默认 true；叠在 REASONING_OUTLINE_ENABLED 之上；false 关闭后大纲便签不再附带弱支撑关系提示，零额外查询）；深度报告每节深挖到达穷尽档时同样生效
 AGENT_PROFILE_ENABLED        # 「AI 对这个库的理解」总闸：同时管住 plan/reflect 注入、后台巡固触发与两个 API 面的可见性（默认 true；false 处处逐字回到接入前——不注入、不记 trace 步、不排巡固，API 返回 enabled=false 而非 404）
@@ -1082,7 +1082,7 @@ REPORT_ALLOW_PARAMETRIC      # 深度报告：允许【通识】层（库外通�
 REPORT_HIGH_RISK_DOWNGRADE_ENABLED # 深度报告高风险引证审计超阈值时是否把 grounded 章节封顶为 overview（默认 false；关闭时披露仍运行）
 REPORT_HIGH_RISK_UNSUPPORTED_RATIO # 深度报告高风险引证审计阈值；数值契约只在 docs/product-and-api_zh.md 维护
 REASONING_MAX_PPR_RETRIEVES / REASONING_MAX_EXACT_LOOKUPS / REASONING_MAX_FOLLOW_CHAIN_ACTIONS / REASONING_COMMUNITY_PEERS_CAP_FACTOR / REASONING_MAX_OUTLINE_UPDATES # 集中的 reasoning 动作/扩展护栏；默认保持历史行为，精确护栏见 product-and-api
-REASONING_MAX_CHUNK_SEARCHES # 逐步推理 search_chunks 动作每 run 的调用次数上限（默认 3，与 REASONING_MAX_PPR_RETRIEVES/REASONING_MAX_EXACT_LOOKUPS 一致；ge=0；无图首轮的确定性播种不计入这个上限）
+REASONING_MAX_CHUNK_SEARCHES # 逐步推理 search_chunks 动作每 run 的调用次数上限（默认 3，与 REASONING_MAX_PPR_RETRIEVES/REASONING_MAX_EXACT_LOOKUPS 一致；ge=0；首轮的确定性原文播种不计入这个上限）
 REASONING_DOCUMENT_READ_ENABLED # 逐步推理的按篇原文取样 reflect 动作 read_document 总闸（默认 true；false 时动作不进 schema/prompt/白名单，零额外查询，逐字回到接入前）；与集合枚举总闸 REASONING_ENUM_TOOLS_ENABLED 同门——枚举工具关闭或请求按来源收窄了检索范围时，这个动作即便自己开着也不会出现，因为它只读本 run 已经列出过的来源清单
 REASONING_MAX_DOCUMENT_READS # 逐步推理 read_document 动作每 run 的调用次数上限（默认 4；ge=0；为 0 时是第二把部署级 kill switch）；元素取样池复用上方 DOCUMENT_OVERVIEW_MAX_ELEMENTS，字符取样池取档位 chunk_context_chars 的四分之一，两者都按「剩余预算 // 还能读几次」切份额，不是独立请求级字段
 REASONING_MAX_TOKENS # 逐步推理规划（查询扩展）与每轮反思的单次输出上限（默认 16384；ge=1）。这是 Legacy 共用的部署预算；各 workload 的输出、重试与超时边界仍独立生效。

@@ -228,7 +228,7 @@
 
   **【状态订正，见 `docs/superpowers/specs/2026-09-07-reasoning-kg-optional-design_zh.md`】**
   以上早退条件描述的是本设计落地时的状态。该规格（T1–T5）在此基础上又新增了原文段落
-  检索一等动作 `search_chunks`（含无图首轮播种）与它自己的接线判据
+  检索一等动作 `search_chunks`（含首轮原文播种；2026-09-29 起不再限于无图 run）与它自己的接线判据
   `chunk_search_wiring_active()`／kill switch `REASONING_CHUNK_SEARCH_ENABLED`；早退放行
   判据已改成单点 `ask_service._no_kg_scope_admits_run`——枚举接线活跃且集合非零，
   或原文检索接线活跃且来源非零，任一成立即放行，不再与集合枚举共用同一个函数。当前行为
