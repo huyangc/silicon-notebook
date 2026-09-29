@@ -403,7 +403,7 @@ def test_exact_lookup_action_step_writes_empty_result_ids_on_zero_hits(rrepo):
 
 
 def test_chunk_seed_step_carries_result_ids_and_zero_hit_writes_empty_list(rrepo):
-    """⑨ 无图首轮的原文播种:内容 + 零命中两种形状。
+    """⑨ 首轮原文播种(与图谱无关):内容 + 零命中两种形状。
 
     零命中写 ``result_ids: []`` 而不是缺席——I/O 真的发起过,缺席是 skip 分支
     才有的信号。"""
@@ -442,7 +442,9 @@ def test_search_chunks_action_step_carries_result_ids(rrepo):
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     _stub_search_chunks(rr, [], {"布局": [_chunk_hit("ck-action")]})
     res = rr.run(nb.id, "布局布线怎么做", "")
-    step = next(t for t in res.trace if t.step_type == "search_chunks")
+    # 有图谱 run 上首轮播种也跑(替身对「布局布线」零命中),这里取动作步。
+    step = next(t for t in res.trace
+                if t.step_type == "search_chunks" and t.detail.get("phase") != "seed")
     assert step.detail["result_ids"] == ["ck-action"]
     assert step.detail["query"] == "布局"
     assert "phase" not in step.detail            # 动作步不是 seed
@@ -459,7 +461,9 @@ def test_search_chunks_action_step_writes_empty_result_ids_on_zero_hits(rrepo):
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     _stub_search_chunks(rr, [], {})
     res = rr.run(nb.id, "布局布线怎么做", "")
-    step = next(t for t in res.trace if t.step_type == "search_chunks")
+    step = next(t for t in res.trace
+                if t.step_type == "search_chunks" and t.detail.get("phase") != "seed")
+    assert step.detail["query"] == "布局"
     assert step.detail["found"] == 0
     assert step.detail["result_ids"] == []
 
@@ -477,7 +481,8 @@ def test_search_chunks_cap_skip_never_writes_result_ids(rrepo):
     calls = []
     _stub_search_chunks(rr, calls, {"布局": [_chunk_hit("ck-nope")]})
     res = rr.run(nb.id, "布局布线怎么做", "")
-    assert calls == []                           # 上限为 0 ⇒ 一次 I/O 都没有
+    # 上限为 0 ⇒ 动作一次 I/O 都没有;首轮播种不计入这把上限,照常发起那一次。
+    assert calls == [("布局布线", rrepo.settings.reasoning_per_query_limit)]
     skip = next(t for t in res.trace
                 if t.step_type == "skip"
                 and t.detail.get("reason") == "chunk_search_cap")

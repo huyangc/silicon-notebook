@@ -116,14 +116,26 @@ def test_run_seed_pass_populates_cross_doc_chunks_when_flag_on(repo):
     assert any(s.step_type == "ppr" for s in result.trace)
 
 
+def _assert_no_ppr_chunks(result):
+    """PPR 关着:证据池里没有 PPR 产出的段落。首轮原文播种与图谱无关、照常
+    发起,所以池子不必为空——但每一段都得是播种那一步的 `result_ids`。"""
+    assert all(support.origin != "ppr"
+               for chunk in result.chunks for support in chunk.retrieval_supports)
+    seeded = {cid for s in result.trace
+              if s.step_type == "search_chunks" and s.detail.get("phase") == "seed"
+              for cid in s.detail["result_ids"]}
+    assert {c.chunk_id for c in result.chunks} <= seeded
+
+
 def test_run_no_seed_when_flag_off(repo, monkeypatch):
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_doc_moe(repo)
     bind_chat_client(repo, "reasoning_agent", _AnswerOnlyLLM())
     monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)
     result = ReasoningRetriever.from_repository(repo, repo.settings).run(nb.id, "DeepSeek-V3 MoE 对比")
-    assert result.chunks == []
     assert not any(s.step_type == "ppr" for s in result.trace)
+    # 没有任何一段来自 PPR;在场的原文全部是首轮原文播种(与图谱无关)的产物。
+    _assert_no_ppr_chunks(result)
 
 
 class _ScriptedReflectLLM:
@@ -203,7 +215,7 @@ def test_ppr_retrieve_action_skipped_when_flag_off(repo, monkeypatch):
     result = ReasoningRetriever.from_repository(repo, repo.settings).run(nb.id, "对比题")
     assert any(s.step_type == "skip" and s.detail.get("reason") == "ppr_disabled"
                for s in result.trace)
-    assert result.chunks == []
+    _assert_no_ppr_chunks(result)
 
 
 def test_answer_context_id_offset_shifts_keys(repo):

@@ -131,10 +131,12 @@ from app.services.retrieval import (
     RetrievedKnowledge,
     classify_evidence,
     exact_query_groups,
+    interleave_by_lane,
     is_generated_question_only_chunk,
     merge_retrieval_supports,
     prefer_stronger_chunk_candidate,
     promote_bounded_prefix_by_library,
+    relevance_on_ppr_scale,
 )
 from app.services.search_profile import render_style_block
 from app.services.source_graph_activation import (
@@ -2933,6 +2935,14 @@ class AskService:
             # 于是「参数表进不进 prompt」成了掷骰子。Python 的稳定排序保留插入序
             # (= 检索序 / 节内文档序),这既是确定的,也正好是该节该被读的顺序。
             ordered = sorted(chunks, key=lambda c: -c.relevance)
+            # 再按来源两道交错(见 `interleave_by_lane`):概念漫游段的 relevance 是
+            # run 内 min-max 归一(第 1 名恒 1.0),播种/检索段是绝对融合分,两者不
+            # 可比,单键排序会让前者系统性挤掉后者。每道内部仍按自己的相关度,
+            # relevance 数值不动(它还参与接地阈值)。判道按 relevance 的量纲
+            # (`relevance_on_ppr_scale`),不按「PPR 碰过没有」。
+            # 顺序承重:交错在前、精确席位在后——精确段优先级最高,最后一步提前
+            # 才保证它们仍在最前;反过来,交错会把刚提前的精确段重新拆散到两道里。
+            ordered = interleave_by_lane(ordered, relevance_on_ppr_scale)
             # 精确通道的块再往前提一小段(见 `promote_bounded_prefix_by_library`,跨库按库分席位)。相关度
             # 降序**不足以**保住它们,两条具体风险:①同分 1.0 洗牌——PPR / 词法
             # 通道也会给出 relevance 1.0 的块,稳定排序下它们按插入序排在精确块

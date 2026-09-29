@@ -344,7 +344,7 @@
             },
             "duration_ms": 1,
             "step_type": "search_chunks",
-            "summary": "检索原文段落:本笔记本无知识图谱,新增 1 段"
+            "summary": "检索原文段落:首轮按子查询召回,新增 1 段"
           },
           {
             "detail": {
@@ -522,7 +522,7 @@
             },
             "duration_ms": 1,
             "step_type": "search_chunks",
-            "summary": "检索原文段落:本笔记本无知识图谱,新增 1 段"
+            "summary": "检索原文段落:首轮按子查询召回,新增 1 段"
           },
           {
             "detail": {
@@ -578,15 +578,15 @@
       "answers_payload": {
         "anchors": [
           {
-            "definition": "A source-degenerated stage stabilizes voltage gain.",
+            "definition": null,
             "element_id": "<el-id-1>",
             "key": "k1",
-            "label": "fixture gain remains stable",
-            "location_label": "",
-            "name": "fixture gain remains stable",
-            "object_id": "<ko-id-1>",
-            "object_type": "claim",
-            "snippet": "A source-degenerated stage stabilizes voltage gain.",
+            "label": "§1 Gain",
+            "location_label": "§1 Gain",
+            "name": "§1 Gain",
+            "object_id": "<chunk-id-1>",
+            "object_type": "chunk",
+            "snippet": "Fixture gain is stable because source degeneration adds feedback.",
             "source_file_name": "fixture.md",
             "source_id": "<src-id-1>",
             "source_title": "Fixture amplifier notes",
@@ -602,6 +602,15 @@
             "label": "Fixture amplifier notes · §1 Gain",
             "location_label": "§1 Gain",
             "quoted_span": "A source-degenerated stage stabilizes voltage gain.",
+            "source_file_name": "fixture.md",
+            "source_id": "<src-id-1>",
+            "tier": "personal"
+          },
+          {
+            "element_id": "<el-id-1>",
+            "label": "Fixture amplifier notes · §1 Gain",
+            "location_label": "§1 Gain",
+            "quoted_span": "Fixture gain is stable because source degeneration adds feedback.",
             "source_file_name": "fixture.md",
             "source_id": "<src-id-1>",
             "tier": "personal"
@@ -690,6 +699,18 @@
           },
           {
             "detail": {
+              "found": 1,
+              "phase": "seed",
+              "result_ids": [
+                "<chunk-id-1>"
+              ]
+            },
+            "duration_ms": 1,
+            "step_type": "search_chunks",
+            "summary": "检索原文段落:首轮按子查询召回,新增 1 段"
+          },
+          {
+            "detail": {
               "next_action": "answer",
               "no_progress": false,
               "stale": 0,
@@ -715,14 +736,14 @@
           {
             "detail": {
               "anchor_evidence_ids": [
-                "<ko-id-1>"
+                "<chunk-id-1>"
               ],
               "anchors": 1,
-              "citations": 1,
+              "citations": 2,
               "enumerated_collections": 0,
               "enumeration_block_dropped": false,
               "evidence_level": "grounded",
-              "included_chunks": 0,
+              "included_chunks": 1,
               "included_collections": 0,
               "included_elements": 0,
               "included_kg": 1
@@ -770,15 +791,15 @@
       "response": {
         "anchors": [
           {
-            "definition": "A source-degenerated stage stabilizes voltage gain.",
+            "definition": null,
             "element_id": "<el-id-1>",
             "key": "k1",
-            "label": "fixture gain remains stable",
-            "location_label": "",
-            "name": "fixture gain remains stable",
-            "object_id": "<ko-id-1>",
-            "object_type": "claim",
-            "snippet": "A source-degenerated stage stabilizes voltage gain.",
+            "label": "§1 Gain",
+            "location_label": "§1 Gain",
+            "name": "§1 Gain",
+            "object_id": "<chunk-id-1>",
+            "object_type": "chunk",
+            "snippet": "Fixture gain is stable because source degeneration adds feedback.",
             "source_file_name": "fixture.md",
             "source_id": "<src-id-1>",
             "source_title": "Fixture amplifier notes",
@@ -794,6 +815,15 @@
             "label": "Fixture amplifier notes · §1 Gain",
             "location_label": "§1 Gain",
             "quoted_span": "A source-degenerated stage stabilizes voltage gain.",
+            "source_file_name": "fixture.md",
+            "source_id": "<src-id-1>",
+            "tier": "personal"
+          },
+          {
+            "element_id": "<el-id-1>",
+            "label": "Fixture amplifier notes · §1 Gain",
+            "location_label": "§1 Gain",
+            "quoted_span": "Fixture gain is stable because source degeneration adds feedback.",
             "source_file_name": "fixture.md",
             "source_id": "<src-id-1>",
             "tier": "personal"
@@ -882,6 +912,18 @@
           },
           {
             "detail": {
+              "found": 1,
+              "phase": "seed",
+              "result_ids": [
+                "<chunk-id-1>"
+              ]
+            },
+            "duration_ms": 1,
+            "step_type": "search_chunks",
+            "summary": "检索原文段落:首轮按子查询召回,新增 1 段"
+          },
+          {
+            "detail": {
               "next_action": "answer",
               "no_progress": false,
               "stale": 0,
@@ -907,14 +949,14 @@
           {
             "detail": {
               "anchor_evidence_ids": [
-                "<ko-id-1>"
+                "<chunk-id-1>"
               ],
               "anchors": 1,
-              "citations": 1,
+              "citations": 2,
               "enumerated_collections": 0,
               "enumeration_block_dropped": false,
               "evidence_level": "grounded",
-              "included_chunks": 0,
+              "included_chunks": 1,
               "included_collections": 0,
               "included_elements": 0,
               "included_kg": 1

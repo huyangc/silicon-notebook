@@ -532,12 +532,21 @@ def test_ambiguous_retrieve_step_is_not_kg_evidence():
     assert row["kg_in_scope"] is None
 
 
-def test_graphless_retrieve_half_is_not_kg_evidence():
-    """`chunks_found` 在场说明这一步的 `new` 只可能是空手的图查询。"""
+def test_passage_half_alone_is_not_kg_evidence():
+    """`chunks_found` 是原文半的计数,不进 `new`:图查询空手时这一步不算证据。"""
     row = project_run(
         JOB, [step("retrieve", {"new": 0, "chunks_found": 3})], PAYLOAD,
     )
     assert row["kg_in_scope"] is None
+
+
+def test_kg_hits_next_to_a_passage_half_are_still_kg_evidence():
+    """原文半与知识图谱无关、有图谱 run 上也写 `chunks_found`;它在场时
+    `new>0`(只计 KG 候选)仍是「图在场」的正面证据,不能被整步排除。"""
+    row = project_run(
+        JOB, [step("retrieve", {"new": 2, "chunks_found": 3})], PAYLOAD,
+    )
+    assert row["kg_in_scope"] is True
 
 
 def test_retrieve_step_with_new_hits_is_kg_evidence():

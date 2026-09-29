@@ -23,6 +23,7 @@
 - 不做「直答」档位（零反思轮），不改自动模式选路（`auto_ask_mode_from_intent`），不动 `ask_chunk` 流水线的任何一行。
 - 不改 `ask.engine` 插件端口（它已经是 KG 可选的：`search` 必有、`search_kg`/`kg_neighbors`/`kg_overview` 可选）。
 - 不给有图笔记本加原文播种或改变其检索预算分配（D-1）。
+  > **2026-09-29 修订：用户裁决推翻 D-1。首轮原文召回不应依赖知识图谱——不论检索范围内有没有图谱，首轮都按子查询做原文播种，已确认方向补种与 `add_subquery` 也各叠一次原文召回，唯一的闸是原文检索开关（`chunk_search_active()`）。理由：原文召回与图谱是否存在无关；按 D-1 实施的实际后果是「本库无图谱、勾选的参考库有图谱」时范围内判为有图，本库原文在首轮缺席。有图 run 的原文分区改由概念漫游段与播种段共享；两者相关度量纲不可比（前者 run 内归一、后者绝对融合分），合成时按来源两道交错装配，精确段仍占前缀席位。**
 - 不建问答质量评测台；本轮验收用契约测试 + 三句式人工抽问（见「验收」）。
 - 不改 `AskResponse`/`AskRequest` 形状、不动 OpenAPI 冻结夹具、不加 schema 迁移。
 - 不动 `answer_prompt` 规则编号（L0 规则 1..13 被 `test_memory_authority` 钉成连续序号）。
@@ -100,6 +101,7 @@
 `_first_round_empty_fallback` 之前插入 `_first_round_chunk_seed(state)`：
 
 - 仅当本 run `kg_in_scope=False`（定义见 T2）时执行；有图 run 一字不动（D-1）。
+  > **2026-09-29 修订（推翻 D-1，见决议一节）**：该条件已去掉，有图与无图 run 同样执行；本库原文在「本库无图谱、勾选参考库有图谱」时由此进入首轮。
 - 对首轮子查询（`state.subqueries`，已按 `max_initial_subqueries` 切片）逐条调 `search_chunks`，并发与 `_first_round_initial_search` 同形
   （`ThreadPoolExecutor`，每任务 `contextvars.copy_context()`），按子查询顺序收集后依次 `take_distinct_chunk_hits`。
 - 每子查询 MMR k 取 `limits.ranked_per_query_take`（档位化：4/8/8/12/16），而不是 `chunk_mmr_k`：首轮是并发多路，
@@ -252,6 +254,7 @@ prompt 签名不该随运维开关漂移。`kg_in_scope` 是**每次 run 的笔�
 D-1 不做有图播种；D-2 `search_chunks` 进 `RETRIEVAL_ACTIONS`；D-3 有图 run 也提供 `search_chunks` 动作；D-4 上限默认 3。下文保留原推荐与理由。
 
 - **D-1 有图 run 是否也做首轮原文播种。** 推荐**不做**：有图 run 的 chunk 分区由 PPR seed 填充，再叠一路会改变预算分配与引用构成，属于独立实验，应在有评测台之后做。
+  > **2026-09-29 修订：用户裁决推翻 D-1。首轮原文召回不应依赖知识图谱——不论检索范围内有没有图谱，首轮都按子查询做原文播种，已确认方向补种与 `add_subquery` 也各叠一次原文召回，唯一的闸是原文检索开关（`chunk_search_active()`）。理由：原文召回与图谱是否存在无关；按 D-1 实施的实际后果是「本库无图谱、勾选的参考库有图谱」时范围内判为有图，本库原文在首轮缺席。有图 run 的原文分区改由概念漫游段与播种段共享；两者相关度量纲不可比（前者 run 内归一、后者绝对融合分），合成时按来源两道交错装配，精确段仍占前缀席位。**
 - **D-2 `search_chunks` 是否进 `RETRIEVAL_ACTIONS` 经验词表。** 推荐**进**：否则无图 run 的主通道在 Agentic Memory 里是盲区。代价是 `retrieval_experience_prompt` 动作清单多一个词及相应契约测试同步。
 - **D-3 有图 run 是否提供 `search_chunks` 动作。** 推荐**提供**（理由见「零变化论证」）；若要求有图侧逐字节零变化，改为只在无图时提供。
 - **D-4 每 run 上限默认值。** 推荐 3（与 PPR、精确查找一致）。备选 5（与 `search_elements` 一致）。上限是 Settings 项，随时可调，不阻塞。

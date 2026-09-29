@@ -2647,7 +2647,7 @@ class PlanOutcome:
     """`plan_with_keywords()` 的完整产出:检索方向 + 整题关键词串。
 
     `plan()` 今天只交出 `subqueries`,`expand_query` 同时产出的
-    `high_level_keywords`/`low_level_keywords` 被丢掉。无图首轮要用它们走
+    `high_level_keywords`/`low_level_keywords` 被丢掉。首轮原文播种要用它们走
     chunk 模式同款的词法(FTS)臂,所以需要一个能同时交出两半的出参——但
     `plan()` 的返回类型是报告引擎等调用方的既有契约,不能改。于是新增这个
     显式载体,`plan()` 保持签名与返回值逐字不变。
@@ -2976,7 +2976,8 @@ class _ReasoningRunState:
     kg_gap_active: bool
     # 本 run 的检索范围内是否存在知识图谱(本库有图,或勾选的参考库里有图)。
     # 由 `_new_run_state` 算一次(见 `ReasoningRetriever._kg_in_scope`),之后是
-    # run 级不变量:无图 run 的确定性原文播种以它为唯一判据。
+    # run 级不变量:无图谱披露步、`plan()` 的 `kg_available` 与 reflect 的图动作闸
+    # 以它为判据。首轮原文播种与方向级原文补检索**不**看它(与知识图谱无关)。
     kg_in_scope: bool
 
     # —— 证据池:首轮各阶段写入,reflect 循环继续就地写入,收尾读 ——
@@ -3052,7 +3053,7 @@ class _ReasoningRunState:
     reviewed_queries: List[str] = field(default_factory=list)
     pending_intent_queries: List[str] = field(default_factory=list)
     subqueries: List["SubQuery"] = field(default_factory=list)
-    # 整题关键词串(`expand_query` 的 high+low level,空格分隔),无图首轮播种的
+    # 整题关键词串(`expand_query` 的 high+low level,空格分隔),首轮原文播种的
     # 词法臂唯一输入。`_first_round_plan` 写、`_first_round_chunk_seed` 读。
     # 已确认意图路径不调 `plan()`,因此恒为空串 —— 词法臂在那条路径上不跑
     # (chunk 模式在同样的路径上也没有 expand 关键词)。
@@ -3339,7 +3340,7 @@ class ReasoningRetriever:
 
     # --- 原文段落检索通道的总闸 ---
     def chunk_search_active(self) -> bool:
-        """本 run 是否提供 `search_chunks` 动作与无图首轮原文播种。
+        """本 run 是否提供 `search_chunks` 动作与首轮/方向级原文召回。
 
         与枚举那把闸同款单点判定:**同一个**判据同时决定 reflect prompt 写不写
         这个动作、schema 给不给 `chunks_query`、动作在不在 allowed_actions 里、
@@ -3615,9 +3616,9 @@ class ReasoningRetriever:
         条臂是「FTS 携带第二语言」到达原文的路径;**这里的关键词是 zh/en 默认
         双语,不是按语料语言的双语**——`plan()` 调 `expand_query` 时不传
         `corpus_langs`,拿到的就是 prompt 的默认语言对。对齐需要给 `plan()` 传
-        `corpus_langs`,那会改到**有图 run 的规划 prompt**(同一个 `plan()`
-        两侧共用),超出「有图 run 一字不动」的边界,已登记为后续(见
-        `fangan_todo.md` 的检索一节)。reasoning 的无图首轮此前只有向量一臂,
+        `corpus_langs`,那会改到**所有 run 的规划 prompt**(有无图谱共用同一个
+        `plan()`),已登记为后续(见 `fangan_todo.md` 的检索一节)。reasoning 的
+        首轮原文播种此前只有向量一臂,
         所以同一个库、同一个问题,chunk 模式能捞到的词法独有段落在 reasoning 里
         是拿不到的。
 
@@ -4912,7 +4913,7 @@ class ReasoningRetriever:
         if not state.kg_in_scope:
             plan_kwargs["kg_available"] = False
         # 已确认意图路径不调 `plan()`,因此也没有关键词:`plan_keywords` 留空串,
-        # 无图播种的词法臂在那条路径上不跑(chunk 模式同样只在 expand 过的路径上
+        # 原文播种的词法臂在那条路径上不跑(chunk 模式同样只在 expand 过的路径上
         # 才有关键词)。
         plan_keywords = ""
         if reviewed_queries:
@@ -5136,11 +5137,16 @@ class ReasoningRetriever:
             return [], True
 
     def _first_round_chunk_seed(self, state: "_ReasoningRunState") -> None:
-        """无图首轮的原文播种 pass(确定性兜底,镜像 PPR/精确查找 seed pass)。
+        """首轮的原文播种 pass(确定性召回,镜像 PPR/精确查找 seed pass)。
 
-        **仅** `kg_in_scope=False` 时执行:有图 run 的 chunk 分区由 PPR seed
-        填充,再叠一路会改变预算分配与引用构成(设计 D-1),所以有图 run 在这
-        条路径上一字不动。
+        **与知识图谱无关**:不论检索范围内有没有图谱都按子查询做原文召回,唯一
+        的闸是部署开关 `chunk_search_active()`(`REASONING_CHUNK_SEARCH_ENABLED`
+        + 调用方策略位 `allow_search_chunks`)。2026-09-29 用户裁决推翻了设计稿
+        D-1「有图 run 不播种」:原文召回不该取决于图谱是否存在——那条闸的实际
+        后果是「本库无图谱、勾选的参考库有图谱」时本库原文在首轮缺席。有图谱
+        run 的原文分区因此由概念漫游段(PPR seed)与本播种段**共享**;两者的
+        relevance 量纲不可比,合成侧按来源两道交错装配(`ask_service.
+        _answer_reasoning` 调 `retrieval.interleave_by_lane`)。
 
         排在精确查找 seed 之后、空证据兜底之前:前者保证 PPR/精确两条通道的
         `seen_chunks` 去重与新增计数逐位不变(本通道只往 `chunks` 追加);后者
@@ -5161,8 +5167,9 @@ class ReasoningRetriever:
         (由 `_first_round_initial_search` 建立)的 `new` 加上该条真正新增的段数。
         口径与补种 / `add_subquery` 的原文半逐字一致:`new` 记的是**证据总数**
         (KG + 原文),不是 KG 候选数。不这么记的后果不是「账目不好看」——回喂
-        reflect 的措辞是「新增为 0 的方向请换明显不同的问法」,无图 run 里 KG 半
-        恒空手,于是每一条真检索到原文的方向都会被指认为空手,模型被反复推着
+        reflect 的措辞是「新增为 0 的方向请换明显不同的问法」,KG 半空手的方向
+        (无图谱范围里恒如此)若只记 KG 数,每一条真检索到原文的方向都会被指认为
+        空手,模型被反复推着
         为已经拿到证据的方向另起炉灶。`tries` **不**动:播种与初检索是同一次
         方向尝试的两半(KG 半已经记过一次),再加一次就成了「已试 2 次」的假账。
 
@@ -5178,7 +5185,7 @@ class ReasoningRetriever:
         `search_chunks`,词法臂只发一次 `keyword_chunks(state.plan_keywords)`,
         两臂的命中按同一个 `seen_chunks` 去重后合成同一批原文证据——这与 chunk
         模式(`ask_chunk` 把 `kw_str` 的 FTS 命中并进向量命中)是同一套构成,
-        对标的正是它。没有这条臂时,同一个无图库里 chunk 模式能捞到、reasoning
+        对标的正是它。没有这条臂时,同一个库里 chunk 模式能捞到、reasoning
         捞不到的,就是那些只能被术语字面命中的段落(它也是「FTS 携带第二语言」
         到达原文的路径;当前关键词是 zh/en 默认双语而非按语料语言双语,原因与
         后续登记见 `keyword_chunks` 的 docstring)。
@@ -5208,11 +5215,10 @@ class ReasoningRetriever:
         `test_vector_arm_is_accounted_before_the_keyword_arm_merges`。
 
         `state.plan_keywords` 空白(已确认意图路径、`expand_query` 回退)时这条臂
-        零 I/O,且 `detail` 一个键都不加——有图 run 与关键词为空的 run,detail
-        形状与本臂接入前逐字一致。判空用 `.strip()`,与 chunk 侧的
-        `kw_str.strip()` 同形。
+        零 I/O,且 `detail` 一个键都不加——关键词为空的 run,detail 形状与本臂
+        接入前逐字一致。判空用 `.strip()`,与 chunk 侧的 `kw_str.strip()` 同形。
         """
-        if state.kg_in_scope or not self.chunk_search_active():
+        if not self.chunk_search_active():
             return
         subqueries = state.subqueries
         if not subqueries:
@@ -5291,28 +5297,29 @@ class ReasoningRetriever:
             _chunk_seed_detail["result_ids_truncated"] = True
         record(TraceStep(
             step_type="search_chunks",
-            summary=f"检索原文段落:本笔记本无知识图谱,新增 {len(seeded)} 段",
+            summary=f"检索原文段落:首轮按子查询召回,新增 {len(seeded)} 段",
             detail=_chunk_seed_detail))
 
-    def _search_passages_if_graphless(
+    def _search_passages_for_direction(
         self, state: "_ReasoningRunState", query: str,
         detail: Optional[dict] = None, k: Optional[int] = None,
     ) -> int:
-        """无图 run 的**方向级**原文补检索:并入 `state.chunks`,返回新增段数。
+        """**方向级**原文补检索:并入 `state.chunks`,返回新增段数。
 
         为什么需要它(codex #690 R1 P2):`_first_round_chunk_seed` 只给首轮切片
         (`state.subqueries`)播了种。首轮装不下的已确认方向走补种
         (`_first_round_coverage_pass`)、模型后补的方向走 `add_subquery`——这两条
-        路径都只经 KG 侧的 `self.search`,在无图库上恒空手,却照样把该方向写进
-        `attempted`。于是这些方向的原文证据被永久丢掉:防重判据是归一化键在不
-        在 `attempted` 里(与新增数无关),模型之后重提同一条只会被
-        `duplicate_subquery` 拦下。补上这条原文调用之后,「已尝试」才是真话。
+        路径的 KG 半只经 `self.search`,却照样把该方向写进 `attempted`。防重判据
+        是归一化键在不在 `attempted` 里(与新增数无关),模型之后重提同一条只会
+        被 `duplicate_subquery` 拦下,所以不在这里叠原文召回,这些方向的原文证据
+        就被永久丢掉(无图谱范围里 KG 半恒空手时尤其如此)。补上这条原文调用之后,
+        「已尝试」才是真话。
 
-        两把闸与首轮播种同源:`state.kg_in_scope` 为真(有图 run 的 chunk 分区由
-        PPR/精确 seed 填,再叠一路会改变预算分配与引用构成,设计 D-1),或
-        `chunk_search_active()` 为假(部署级 kill switch)时**零 I/O、零写点**,
-        连 `detail` 都一个键不加——有图 run 与关闸 run 的调用序列、trace detail
-        键集合因此逐字节不变。
+        与首轮播种同一个口径:**与知识图谱无关**(2026-09-29 用户裁决推翻设计稿
+        D-1,见 `_first_round_chunk_seed`),唯一的闸是 `chunk_search_active()`
+        (部署级 kill switch + 调用方策略位)。闸关时**零 I/O、零写点**,连
+        `detail` 都一个键不加——关闸 run 的调用序列、trace detail 键集合因此
+        逐字节不变。
 
         **不**计入 `action_policy.max_chunk_searches`:那把闸管的是模型主动选
         `search_chunks` 动作的次数(`_action_search_chunks`)。补种是与首轮播种
@@ -5332,7 +5339,7 @@ class ReasoningRetriever:
         `k` 缺省 = 动作口径(`chunk_mmr_k`,add_subquery 用);补种显式传档位的
         `per_query_take`,与首轮播种同口径。
         """
-        if state.kg_in_scope or not self.chunk_search_active():
+        if not self.chunk_search_active():
             return 0
         new = take_distinct_chunk_hits(
             self._chunk_seed_search(state.notebook_id, query, k),
@@ -6201,15 +6208,15 @@ class ReasoningRetriever:
                                     "result_ids": _result_ids}
                 if _result_ids_truncated:
                     _coverage_detail["result_ids_truncated"] = True
-                # 无图 run 的原文半(codex #690 R1 P2):上面那次 KG 检索在无图库上
-                # 恒空手,这条方向的证据只可能来自原文。闸、预算口径与不写
-                # chunk result_ids 的理由都在 helper 的 docstring 里;有图 run 与
-                # kill switch 关闭时它零 I/O、`_coverage_detail` 一个键不加。
+                # 方向的原文半(codex #690 R1 P2;与知识图谱无关,见 helper):上面
+                # 那次 KG 检索只说图,这条方向的原文证据由这里补。闸、预算口径与不写
+                # chunk result_ids 的理由都在 helper 的 docstring 里;kill switch
+                # 关闭时它零 I/O、`_coverage_detail` 一个键不加。
                 # detail["new"]/result_ids 仍只说 KG 候选(两者必须对得上),原文另
                 # 记 `chunks_found`;`attempted` 那条记的是**证据总数**——回喂措辞
                 # 就叫「新增证据数」,把「KG 空但原文有命中」记成 0 会让模型以为这
                 # 条方向是干的、改问法另起炉灶,白丢已经到手的原文证据。
-                added += self._search_passages_if_graphless(
+                added += self._search_passages_for_direction(
                     state, query, _coverage_detail, state.per_query_take)
                 # 账目与 add_subquery 分支同型:进 attempted(供 reflect 回喂与防重)、
                 # 进 used_queries(它是"方面数",决定配额轮转与最终证据预算)。
@@ -6238,9 +6245,9 @@ class ReasoningRetriever:
 
         阶段顺序本身是合同(每一条都有独立理由,见各阶段的原注释):
         无图披露 → 理解/打法/地图注入 → 规划 → 初检索 → PPR seed → 精确查找
-        seed → 无图原文播种 → 空证据兜底 → 已确认方向补种。特别地,精确查找
+        seed → 原文播种 → 空证据兜底 → 已确认方向补种。特别地,精确查找
         seed 必须排在 PPR seed **之后**,否则 PPR 那一步的 `seen_chunks` 去重与
-        `seeded` 计数会变;无图原文播种同理排在两条 seed 之后。
+        `seeded` 计数会变;原文播种同理排在两条 seed 之后。
 
         首轮**没有**目录播种:agentic 模式下要不要列目录由模型经 `enumerate`
         工具自己决定(参数 `collection="sources"`),服务端不拿问法正则替它做这个
@@ -7277,10 +7284,10 @@ class ReasoningRetriever:
                                             "result_ids": _result_ids}
                         if _result_ids_truncated:
                             _subquery_detail["result_ids_truncated"] = True
-                        # 无图 run 的原文半(codex #690 R1 P2):KG 那次检索在无图
-                        # 库上恒空手。detail 的 "new"/result_ids 已定稿(仍只说 KG
-                        # 候选),原文另记 `chunks_found`,attempted 记证据**总数**。
-                        added += self._search_passages_if_graphless(
+                        # 方向的原文半(codex #690 R1 P2;与知识图谱无关):detail
+                        # 的 "new"/result_ids 已定稿(仍只说 KG 候选),原文另记
+                        # `chunks_found`,attempted 记证据**总数**。
+                        added += self._search_passages_for_direction(
                             state, exec_query, _subquery_detail)
                         # 账目记在 exec_query(方向原文)的身份上,而非模型提交
                         # 的简称——这样它同时从未覆盖清单(_still_uncovered_

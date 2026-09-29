@@ -3037,14 +3037,18 @@ def test_run_exact_lookup_seed_pass_takes_the_whole_named_section(rrepo):
                            "result_ids": ["ck-main", "ck-args"]}
     assert step.summary == "按名称精确查找:新增 2 段原文"
     # 主描述与参数表都在——分块把它们切开、普通检索只留其一,正是本通道要治的。
-    assert [c.chunk_id for c in res.chunks] == ["ck-main", "ck-args"]
+    # 精确查找 seed 的两段在最前;其后追加的是首轮原文播种(与图谱无关,排在
+    # 两条 seed 之后)的命中,不属于本用例。
+    exact = [c for c in res.chunks if c.exact_lookup]
+    assert [c.chunk_id for c in res.chunks[:2]] == ["ck-main", "ck-args"]
+    assert [c.chunk_id for c in exact] == ["ck-main", "ck-args"]
     # item 1:打分串是抽出的名称本身(" ".join(seed_terms)),不是整句问题——
     # 与 action 同构。命中节的章节路径+正文都包含名称,关键词覆盖率是 1.0;
     # 整句问题打分会被问题里一堆不相关词拖到约 0.286(评审实测的回归值),把
     # 这个精确命中挤到合成排序垫底、还可能拖过 grounded 判定阈值。
-    assert [c.relevance for c in res.chunks] == [1.0, 1.0]
+    assert [c.relevance for c in exact] == [1.0, 1.0]
     # PR-B 乙 T3:两条都来自精确通道,`exact_lookup` 标记跟着对象一路传到结果。
-    assert [c.exact_lookup for c in res.chunks] == [True, True]
+    assert [c.exact_lookup for c in res.chunks[:2]] == [True, True]
     assert calls == ['"set_db"']
     # seed 步排在初检索之后,天然被「轨迹覆盖整轮」包住。
     kinds = [t.step_type for t in res.trace]
@@ -3062,7 +3066,9 @@ def test_run_without_an_identifier_makes_zero_exact_lookup_calls_and_no_step(rre
     res = _retriever_counting_exact_lookup(rrepo, calls).run(
         nb.id, "这个流程是怎样的", "")
     assert calls == []
-    assert [t.step_type for t in res.trace] == ["plan", "retrieve", "reflect", "answer"]
+    # `search_chunks` 是首轮原文播种(与图谱无关),不是精确查找多出来的步。
+    assert [t.step_type for t in res.trace] == [
+        "plan", "retrieve", "search_chunks", "reflect", "answer"]
 
 
 def test_run_seed_pass_does_not_probe_a_digitless_hyphen_word(rrepo):
@@ -3133,7 +3139,9 @@ def test_run_exact_lookup_action_pulls_the_section_the_model_named(rrepo):
                            "found": 2, "phase": "reflect",
                            "result_ids": ["ck-main", "ck-args"]}
     assert step.summary == "按名称精确查找「set_db」:新增 2 段原文"
-    assert [c.chunk_id for c in res.chunks] == ["ck-main", "ck-args"]
+    # 动作取到的是精确通道的这两段;排在它们之前的是首轮原文播种的命中。
+    assert [c.chunk_id for c in res.chunks if c.exact_lookup] == ["ck-main", "ck-args"]
+    assert [c.chunk_id for c in res.chunks[-2:]] == ["ck-main", "ck-args"]
     assert calls == ['"set_db"']
 
 
@@ -3288,7 +3296,9 @@ def test_exact_lookup_goes_through_the_candidate_policy_boundary(rrepo):
 
     assert ("chunk", ("ck-main", "ck-args")) in seen          # seed 经过策略
     assert ("chunk", ("ck-timing",)) in seen                  # 动作也经过策略
-    assert [c.chunk_id for c in res.chunks] == ["ck-args", "ck-timing"]
+    assert [c.chunk_id for c in res.chunks if c.exact_lookup] == ["ck-args", "ck-timing"]
+    # 首轮原文播种(与图谱无关)也经同一条策略边界:被挡的那一节哪条路都进不来。
+    assert not any(c.chunk_id.startswith("ck-main") for c in res.chunks)
     seed_step = next(t for t in res.trace
                      if t.step_type == "exact_lookup" and t.detail["phase"] == "seed")
     assert seed_step.detail["found"] == 1                     # 记账记的是过滤后的真实新增
@@ -3414,8 +3424,9 @@ def test_run_ppr_seed_precedes_exact_seed_and_shares_chunk_dedup(rrepo):
     assert exact_step.detail["found"] == 1
 
     # 两通道去重后的并集,顺序即两个 seed 块各自 extend 的顺序:
-    # PPR 的两段(重叠段 + 独占段)在前,精确查找真正新增的一段在后。
-    assert [c.chunk_id for c in res.chunks] == ["ck-main", "ppr-only", "ck-args"]
+    # PPR 的两段(重叠段 + 独占段)在前,精确查找真正新增的一段在后;再往后是
+    # 首轮原文播种(与图谱无关,排在两条 seed 之后)的命中,不属于本用例。
+    assert [c.chunk_id for c in res.chunks[:3]] == ["ck-main", "ppr-only", "ck-args"]
 
 
 def test_attempted_marks_search_failures_sparsely(rrepo, monkeypatch):
@@ -3459,7 +3470,8 @@ def test_attempted_marks_search_failures_sparsely(rrepo, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# search_chunks:原文段落检索一等动作 + 无图首轮播种(设计规格 T1)
+# search_chunks:原文段落检索一等动作 + 首轮原文播种(设计规格 T1;2026-09-29
+# 起首轮播种与知识图谱无关,见 `_first_round_chunk_seed`)
 # --------------------------------------------------------------------------- #
 #
 # 这一组的红线是「**有图** 笔记本除多一个动作与它的说明/字段外逐字节不变,
@@ -3770,12 +3782,16 @@ def test_search_chunks_action_merges_hits_and_upgrades_duplicates(rrepo):
 
     assert [c.chunk_id for c in res.chunks] == ["ck-1", "ck-2", "ck-3"]
     assert next(c for c in res.chunks if c.chunk_id == "ck-1").relevance == 0.9
-    steps = [t for t in res.trace if t.step_type == "search_chunks"]
+    # 首轮原文播种与图谱无关、有图谱 run 上也跑(替身对「布局布线」零命中),
+    # 这里只看动作步。
+    steps = [t for t in res.trace
+             if t.step_type == "search_chunks" and t.detail.get("phase") != "seed"]
     assert [t.detail["query"] for t in steps] == ["布局", "布线"]
     assert [t.detail["found"] for t in steps] == [2, 1]   # 第二轮 ck-1 是重复
     assert [t.summary for t in steps] == ["检索原文段落:布局,新增 2 段",
                                           "检索原文段落:布线,新增 1 段"]
-    assert calls == [("布局", None), ("布线", None)]
+    assert calls == [("布局布线", rrepo.settings.reasoning_per_query_limit),
+                     ("布局", None), ("布线", None)]
 
 
 def test_search_chunks_action_falls_back_to_the_question(rrepo):
@@ -3792,8 +3808,11 @@ def test_search_chunks_action_falls_back_to_the_question(rrepo):
     calls = []
     _stub_search_chunks(rr, calls, {None: [_chunk_hit("ck-1")]})
     res = rr.run(nb.id, "布局布线怎么做", "")
-    assert calls == [("布局布线怎么做", None)]
-    step = next(t for t in res.trace if t.step_type == "search_chunks")
+    # 首轮播种(子查询、档位 k)在前,动作(动作口径 k=None)回退到原问题。
+    assert calls == [("布局布线", rrepo.settings.reasoning_per_query_limit),
+                     ("布局布线怎么做", None)]
+    step = next(t for t in res.trace
+                if t.step_type == "search_chunks" and t.detail.get("phase") != "seed")
     assert step.detail["query"] == "布局布线怎么做"
 
 
@@ -3814,7 +3833,10 @@ def test_search_chunks_action_stops_at_the_per_run_cap(rrepo):
     _stub_search_chunks(rr, calls, {None: [_chunk_hit("ck-1")]})
     res = rr.run(nb.id, "布局布线怎么做", "")
 
-    assert len(calls) == 1                       # 第二次根本没发起
+    # 首轮播种**不**计入 `max_chunk_searches`:有图谱 run 上它同样发起了一次,
+    # 上限 1 仍整个留给了动作——第一次动作照常执行,第二次根本没发起。
+    assert calls == [("布局布线", rrepo.settings.reasoning_per_query_limit),
+                     ("布局", None)]
     skip = next(t for t in res.trace
                 if t.step_type == "skip"
                 and t.detail.get("reason") == "chunk_search_cap")
@@ -3822,8 +3844,9 @@ def test_search_chunks_action_stops_at_the_per_run_cap(rrepo):
     assert "result_ids" not in skip.detail       # skip 步不写这把键(P4 硬规则)
 
 
-def test_first_round_chunk_seed_runs_only_when_the_scope_has_no_kg(rrepo):
-    """验收 3:无图 run 记一条 `phase=seed` 的播种步;有图 run 一步都不记。"""
+def test_first_round_chunk_seed_runs_whether_or_not_the_scope_has_kg(rrepo):
+    """验收 3:首轮原文召回与知识图谱无关——无图谱与有图谱 run 都记一条
+    `phase=seed` 的播种步,按子查询发起原文检索、命中进证据池。"""
     from app.services.reasoning_retrieval import ReasoningRetriever
 
     rrepo.settings.graph_ppr_enabled = False
@@ -3839,7 +3862,7 @@ def test_first_round_chunk_seed_runs_only_when_the_scope_has_no_kg(rrepo):
     seed = next(t for t in res.trace if t.step_type == "search_chunks")
     assert seed.detail == {"found": 2, "phase": "seed",
                            "result_ids": ["ck-1", "ck-2"]}
-    assert seed.summary == "检索原文段落:本笔记本无知识图谱,新增 2 段"
+    assert seed.summary == "检索原文段落:首轮按子查询召回,新增 2 段"
     assert [c.chunk_id for c in res.chunks] == ["ck-1", "ck-2"]
     # 其余通道全空但播种有命中 ⇒ 空证据兜底**不**触发(P2-4:这条曾经只被
     # 「兜底的确会补一次 search_elements」那侧覆盖,反向一侧没人钉)。
@@ -3847,15 +3870,20 @@ def test_first_round_chunk_seed_runs_only_when_the_scope_has_no_kg(rrepo):
     # limits 缺省 ⇒ 每查询纳入数落回 `reasoning_per_query_limit`(同 `_new_run_state`)。
     assert calls == [("布局布线", rrepo.settings.reasoning_per_query_limit)]
 
-    # 有图 run:D-1,播种一字不动。
+    # 有图谱 run:同一条播种照跑(没有按图谱分叉的特殊分支),同参、同形。
     nb_kg = _seed_two_nodes(rrepo)
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(plan=plan, reflects=list(answer)))
     rr2 = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     calls2 = []
     _stub_search_chunks(rr2, calls2, {None: [_chunk_hit("ck-9")]})
     res2 = rr2.run(nb_kg.id, "布局布线怎么做", "")
-    assert calls2 == []
-    assert not any(t.step_type == "search_chunks" for t in res2.trace)
+    assert calls2 == [("布局布线", rrepo.settings.reasoning_per_query_limit)]
+    seed2 = next(t for t in res2.trace if t.step_type == "search_chunks")
+    assert seed2.detail == {"found": 1, "phase": "seed", "result_ids": ["ck-9"]}
+    assert seed2.summary == "检索原文段落:首轮按子查询召回,新增 1 段"
+    assert "ck-9" in [c.chunk_id for c in res2.chunks]
+    # 有图谱 run 没有无图谱披露步(那一步仍只看 `kg_in_scope`)。
+    assert not any(t.detail.get("reason") == "kg_unavailable" for t in res2.trace)
 
 
 def test_first_round_chunk_seed_takes_the_effort_tier_per_query_allowance(rrepo):
@@ -3937,9 +3965,10 @@ def test_first_round_chunk_seed_credits_hits_to_each_query_attempt(rrepo):
     assert "(新增0条" not in captured[0]
 
 
-def test_first_round_chunk_seed_leaves_a_graph_run_ledger_untouched(rrepo):
-    """有图 run 的账目逐字不变:播种整条路径不执行(D-1),所以把它换成 no-op
-    得到的 `attempted` 必须与真实实现逐字相同——记账那一步同样只在无图侧生效。
+def test_first_round_chunk_seed_credits_a_graph_run_ledger_too(rrepo):
+    """有图谱 run 同样播种,命中同样记回发起它的那条子查询:与把播种换成
+    no-op 的同一次 run 相比,每条方向的 `new` 恰好多出自己那一段原文、`tries`
+    不变——记账口径与无图谱 run 逐字相同,没有按图谱分叉。
     """
     from app.services.reasoning_retrieval import ReasoningRetriever
 
@@ -3952,18 +3981,26 @@ def test_first_round_chunk_seed_leaves_a_graph_run_ledger_untouched(rrepo):
                      _SeqLLM(plan=plan, reflects=list(answer)))
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     calls: list = []
-    _stub_search_chunks(rr, calls, {None: [_chunk_hit("ck-x")]})
+    per_query = {"RTL到GDSII流程": [_chunk_hit("ck-x")],
+                 "时序收敛方法": [_chunk_hit("ck-y")]}
+    _stub_search_chunks(rr, calls, per_query)
     real = rr.run(nb.id, "RTL到GDSII流程", "")
 
     bind_chat_client(rrepo, "reasoning_agent",
                      _SeqLLM(plan=plan, reflects=list(answer)))
     rr2 = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
-    _stub_search_chunks(rr2, [], {None: [_chunk_hit("ck-x")]})
+    _stub_search_chunks(rr2, [], per_query)
     rr2._first_round_chunk_seed = lambda state: None
     without_seed = rr2.run(nb.id, "RTL到GDSII流程", "")
 
-    assert calls == []                       # 有图 run 一次都不发起播种
-    assert real.attempted == without_seed.attempted
+    take = rrepo.settings.reasoning_per_query_limit
+    assert sorted(calls) == sorted([("RTL到GDSII流程", take), ("时序收敛方法", take)])
+    real_rows = {row["query"]: row for row in real.attempted}
+    base_rows = {row["query"]: row for row in without_seed.attempted}
+    assert set(real_rows) == set(base_rows) == {"RTL到GDSII流程", "时序收敛方法"}
+    for query in real_rows:
+        assert real_rows[query]["new"] == base_rows[query]["new"] + 1
+        assert real_rows[query]["tries"] == base_rows[query]["tries"] == 1
 
 
 def test_first_round_chunk_seed_sits_between_exact_seed_and_empty_fallback(rrepo):
@@ -4030,13 +4067,13 @@ def test_chunk_search_kill_switch_removes_the_first_round_seed_entirely(rrepo):
 
 
 # --------------------------------------------------------------------------- #
-# 无图首轮的**词法臂**:与 chunk 模式同法的整题关键词 FTS
+# 首轮原文播种的**词法臂**:与 chunk 模式同法的整题关键词 FTS
 # --------------------------------------------------------------------------- #
 #
-# 无图首轮此前只有向量一臂(逐子查询 `search_chunks`)。chunk 模式在向量之外还
+# 首轮播种此前只有向量一臂(逐子查询 `search_chunks`)。chunk 模式在向量之外还
 # 并入 `keyword_chunk_candidates(kw_str)` 的词法命中——同一个库、同一个问题,只能
 # 被术语字面命中的段落因此在 reasoning 里拿不到。下面这组钉住:两臂都在、两臂的
-# 命中合成同一批证据、有图 run 与无关键词的 run 一字不动。
+# 命中合成同一批证据、无关键词的 run 一字不动;有图谱 run 同样两臂都跑。
 #
 # 向量臂在这里一律打桩(`_stub_search_chunks`),词法臂走**真** FTS:两臂各自独有
 # 的段落才能被区分开——否则同一个 FakeEmbedder 会让向量臂顺手把词法臂那段也捞走,
@@ -4115,7 +4152,7 @@ def _count_reflects(rr):
     return calls
 
 
-def test_graphless_seed_merges_the_keyword_arm_with_the_vector_arm(rrepo):
+def test_first_round_seed_merges_the_keyword_arm_with_the_vector_arm(rrepo):
     """T2 的成本契约:首轮后模型说"够了"就直接收尾——恰好一次 reflect、零动作步,
     而首轮的原文证据同时来自向量臂与词法臂(两条独有段落都在 `res.chunks` 里)。"""
     from app.services.reasoning_retrieval import ReasoningRetriever
@@ -4160,7 +4197,7 @@ def test_graphless_seed_merges_the_keyword_arm_with_the_vector_arm(rrepo):
     assert set(c.chunk_id for c in lexical) <= set(seed.detail["result_ids"])
 
 
-def test_graphless_seed_records_a_zero_hit_keyword_arm(rrepo):
+def test_first_round_seed_records_a_zero_hit_keyword_arm(rrepo):
     """词法臂零命中也要写 `keyword_found`:读轨迹的人得能区分「跑了没捞到」与
     「压根没跑」(后者根本不写这把键,见下面两条)。"""
     from app.services.reasoning_retrieval import ReasoningRetriever
@@ -4291,8 +4328,9 @@ def test_keyword_arm_channel_failure_is_disclosed_not_swallowed(rrepo):
     assert [c.chunk_id for c in res.chunks] == ["ck-1"]
 
 
-def test_graph_run_never_reaches_the_keyword_arm(rrepo):
-    """D-1 边界:有图 run 的证据构成一字不动——词法臂零调用、播种步压根不存在。"""
+def test_graph_run_runs_the_keyword_arm_too(rrepo):
+    """首轮原文召回与知识图谱无关:有图谱 run 的播种同样两臂都跑——向量臂逐
+    子查询、词法臂整题一次,`plan_keywords` 非空就发起。"""
     from app.services.reasoning_retrieval import ReasoningRetriever
 
     nb = _seed_two_nodes(rrepo)
@@ -4306,8 +4344,12 @@ def test_graph_run_never_reaches_the_keyword_arm(rrepo):
     keyword_calls = _count_keyword_chunk_candidates(rr)
     res = rr.run(nb.id, "布局布线怎么做", "")
 
-    assert keyword_calls == [] and vector_calls == []
-    assert not any(t.step_type == "search_chunks" for t in res.trace)
+    assert vector_calls == [("布局布线", rrepo.settings.reasoning_per_query_limit)]
+    assert keyword_calls == [f"沟槽隔离 {_KEYWORD_ONLY_TERM}"]
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert seed.detail["phase"] == "seed"
+    assert "keyword_found" in seed.detail           # 词法臂跑过(零命中也写)
+    assert "ck-1" in [c.chunk_id for c in res.chunks]
 
 
 def test_confirmed_intent_run_has_no_plan_keywords_and_no_keyword_arm(rrepo):
@@ -4403,13 +4445,14 @@ def test_plan_keeps_its_signature_while_plan_with_keywords_adds_the_string(rrepo
 
 
 # --------------------------------------------------------------------------- #
-# 无图 run 的两条**补检索**路径也必须走原文(codex #690 R1 P2)
+# 两条**补检索**路径也必须走原文(codex #690 R1 P2;与知识图谱无关)
 # --------------------------------------------------------------------------- #
 #
 # 首轮播种只覆盖 `state.subqueries`(首轮切片)。首轮装不下的已确认方向走补种、
 # 模型后补的方向走 add_subquery —— 这两条此前只经 KG 侧的 `search`,在无图库上
 # 恒空手却照样把方向写进 `attempted`,于是方向的原文证据被永久丢掉(防重判据只
-# 看归一化键在不在 attempted 里,模型重提只会被 duplicate_subquery 拦下)。
+# 看归一化键在不在 attempted 里,模型重提只会被 duplicate_subquery 拦下)。有图谱
+# run 同样叠这一路原文召回(2026-09-29 用户裁决,推翻设计稿 D-1)。
 
 
 def _no_kg_run(rrepo, *, reflects, intent_queries=None, limits=None,
@@ -4522,8 +4565,10 @@ def test_graphless_add_subquery_after_coverage_keeps_the_passage_evidence(rrepo)
     assert "ck-b1" in [c.chunk_id for c in res.chunks]
 
 
-def test_graphless_passage_backfill_leaves_a_graph_run_untouched(rrepo):
-    """有图 run:两条路径都不发起原文检索,trace detail 键集合逐字节不变。"""
+def test_passage_backfill_also_runs_on_a_graph_run(rrepo):
+    """有图谱 run:补种与 add_subquery 各多一次原文召回(与无图谱 run 同参),
+    detail 的 `new`/`result_ids` 仍只说 KG 候选,原文另记 `chunks_found`,
+    `attempted` 记证据总数。"""
     from app.core.ask_retrieval_policy import ask_retrieval_limits
     from app.services.reasoning_retrieval import ReasoningRetriever
 
@@ -4536,22 +4581,33 @@ def test_graphless_passage_backfill_leaves_a_graph_run_untouched(rrepo):
                   {"next_action": "answer", "sufficient": True}]))
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     calls = []
-    _stub_search_chunks(rr, calls, {None: [_chunk_hit("ck-x")]})
+    _stub_search_chunks(rr, calls, {"完整问题": [_chunk_hit("ck-q0")],
+                                    "方向一": [_chunk_hit("ck-a1")],
+                                    "方向二": [_chunk_hit("ck-b1")],
+                                    "新方向": [_chunk_hit("ck-n1"),
+                                               _chunk_hit("ck-n2")]})
+    limits = ask_retrieval_limits("overview")
     res = rr.run(nb.id, "完整问题", "",
                  intent_queries=["完整问题", "方向一", "方向二"],
-                 limits=ask_retrieval_limits("overview"))
+                 limits=limits)
 
+    # 补种用档位的每查询纳入数,add_subquery 用动作口径(k 缺省),与无图谱 run 同参。
+    assert ("方向二", limits.ranked_per_query_take) in calls
+    assert ("新方向", None) in calls
     covered = _coverage_retrieves(res.trace)
-    assert covered, "有图 run 的补种照跑,只是不叠原文"
+    assert [s.detail["query"] for s in covered] == ["方向二"]
+    assert covered[0].detail["chunks_found"] == 1
     added = next(t for t in res.trace
                  if t.step_type == "retrieve" and t.detail.get("query") == "新方向")
-    assert calls == []                              # spy:一次都没被调用
-    assert "chunks_found" not in covered[0].detail
-    assert "chunks_found" not in added.detail
+    assert added.detail["chunks_found"] == 2
+    assert {"ck-b1", "ck-n1", "ck-n2"} <= {c.chunk_id for c in res.chunks}
+    ledger = {row["query"]: row for row in res.attempted}
+    assert ledger["方向二"]["new"] == covered[0].detail["new"] + 1
+    assert ledger["新方向"]["new"] == added.detail["new"] + 2
 
 
 def test_chunk_search_kill_switch_removes_the_passage_backfill_too(rrepo):
-    """kill switch 关:无图 run 的两条补检索路径也一并消失(与播种同一条通路)。"""
+    """kill switch 关:两条补检索路径也一并消失(与播种同一条通路)。"""
     from app.core.ask_retrieval_policy import ask_retrieval_limits
 
     rrepo.settings.reasoning_chunk_search_enabled = False
@@ -4679,8 +4735,9 @@ def test_kg_in_scope_counts_a_checked_reference_library(rrepo):
     """P2-3:本库无图,但挂了一个**有图**参考库并且勾选了它 ⇒ 范围内有图。
 
     这是 `kg_in_scope` 的第二个维度(`any_base_has_kg`),此前只有「本库有图」
-    与「哪儿都没图」两侧被覆盖。有图 ⇒ 首轮不播种(设计 D-1),轨迹里连一步
-    `search_chunks` 都不该有。
+    与「哪儿都没图」两侧被覆盖。范围内有图 ⇒ 没有无图谱披露步;首轮原文播种
+    与图谱无关,照样按子查询发起(推翻设计稿 D-1 之前,这正是本库原文在首轮
+    缺席的形态)。
     """
     from app.models.source_scope import BaseNotebookScope
     from app.services.reasoning_retrieval import (
@@ -4707,8 +4764,99 @@ def test_kg_in_scope_counts_a_checked_reference_library(rrepo):
         assert kg_in_scope_for(rr.retrieval, nb.id) is True
         res = rr.run(nb.id, "布局布线怎么做", "")
 
-    assert calls == []
-    assert not any(t.step_type == "search_chunks" for t in res.trace)
+    assert not any(t.detail.get("reason") == "kg_unavailable" for t in res.trace)
+    assert calls == [("布局布线", rrepo.settings.reasoning_per_query_limit)]
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert seed.detail["phase"] == "seed" and seed.detail["found"] == 1
+
+
+def test_first_round_seed_brings_own_passages_when_only_a_reference_library_has_kg(
+        rrepo):
+    """本库无图谱、勾选的参考库有图谱:首轮播种照跑,**本库**原文进证据池。
+
+    走真实的 `search_chunks`(不打桩),断言的是端到端结果:本库那段原文经
+    `phase=seed` 那一步进了 `res.chunks`(即 `state.chunks`)。概念漫游关着、
+    问题不点名精确术语,本库原文除了播种没有别的入口——恢复「范围内有图就
+    不播种」的旧闸时,这条用例先红。
+    """
+    from app.models.source_scope import BaseNotebookScope
+    from app.services.reasoning_retrieval import ReasoningRetriever, kg_in_scope_for
+    from app.services.source_scope import source_scope_context
+
+    own_text = "布局布线阶段先全局布局再详细布线。"
+    base = _seed_two_nodes(rrepo)                         # 有图的参考库
+    nb = _seed_notebook_without_kg(rrepo, (own_text,))    # 本库无图
+    rrepo.replace_notebook_bases(nb.id, [base.id], "user-local")
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    with source_scope_context(
+        nb.id, None,
+        BaseNotebookScope(mode="include", notebook_ids=[base.id]),
+    ):
+        assert kg_in_scope_for(rr.retrieval, nb.id) is True
+        res = rr.run(nb.id, "布局布线怎么做", "")
+
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert seed.detail["phase"] == "seed"
+    own = [c for c in res.chunks if own_text in c.text]
+    assert own, f"本库原文没有进证据池:{[c.chunk_id for c in res.chunks]}"
+    assert {c.chunk_id for c in own} <= set(seed.detail["result_ids"])
+
+
+@pytest.mark.parametrize("gate", ["kill_switch", "allow_search_chunks"])
+@pytest.mark.parametrize("has_kg", [False, True])
+def test_chunk_search_gate_is_the_only_gate_for_passage_recall(rrepo, gate, has_kg):
+    """原文召回唯一的闸是 `chunk_search_active()`(部署开关
+    `REASONING_CHUNK_SEARCH_ENABLED` + 调用方策略位 `allow_search_chunks`)。
+    闸关时,不论范围内有没有图谱,首轮播种(向量臂与词法臂)、补种、
+    add_subquery 的原文半都零调用:轨迹里没有 `search_chunks` 步、没有
+    `chunks_found` 键。"""
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = (_seed_two_nodes(rrepo) if has_kg
+          else _seed_notebook_without_kg(rrepo, ["布局布线阶段先全局布局再详细布线。",
+                                                 _KEYWORD_ONLY_TEXT]))
+    rrepo.settings.graph_ppr_enabled = False
+    if gate == "kill_switch":
+        rrepo.settings.reasoning_chunk_search_enabled = False
+
+    def _retriever():
+        bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+            plan=_plan_with_keywords_json(high=["沟槽隔离"],
+                                          low=[_KEYWORD_ONLY_TERM]),
+            reflects=[{"next_action": "add_subquery",
+                       "new_sub_query": {"query": "新方向"}},
+                      {"next_action": "answer", "sufficient": True}]))
+        rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+        if gate == "allow_search_chunks":
+            rr.allow_search_chunks = False
+        return rr
+
+    # 规划路径(有关键词):首轮两臂 + add_subquery 的原文半。
+    rr = _retriever()
+    vector_calls: list = []
+    _stub_search_chunks(rr, vector_calls, {None: [_chunk_hit("ck-1")]})
+    keyword_calls = _count_keyword_chunk_candidates(rr)
+    planned = rr.run(nb.id, "布局布线怎么做", "")
+    # 已确认意图路径:首轮切片装不下的方向走补种。
+    rr2 = _retriever()
+    _stub_search_chunks(rr2, vector_calls, {None: [_chunk_hit("ck-2")]})
+    confirmed = rr2.run(nb.id, "完整问题", "",
+                        intent_queries=["完整问题", "方向一", "方向二"],
+                        limits=ask_retrieval_limits("overview"))
+
+    assert vector_calls == [] and keyword_calls == []
+    assert _coverage_retrieves(confirmed.trace), "补种本身照跑,只是不叠原文"
+    assert any(t.step_type == "retrieve" and t.detail.get("query") == "新方向"
+               for t in planned.trace), "add_subquery 本身照跑,只是不叠原文"
+    for res in (planned, confirmed):
+        assert not any(t.step_type == "search_chunks" for t in res.trace)
+        assert not any("chunks_found" in (t.detail or {}) for t in res.trace)
+        assert not any(c.chunk_id in ("ck-1", "ck-2") for c in res.chunks)
 
 
 # --------------------------------------------------------------------------- #
@@ -5708,8 +5856,9 @@ def test_legacy_trace_keeps_its_step_sequence_and_duration_keys(rrepo):
     bind_chat_client(rrepo, "reasoning_agent", llm)
     result = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
         nb.id, "RTL到GDSII流程", "")
+    # `search_chunks` 是首轮原文播种:与图谱无关,有图谱 run 上也跑。
     assert [t.step_type for t in result.trace] == [
-        "plan", "retrieve", "ppr", "reflect", "answer"]
+        "plan", "retrieve", "ppr", "search_chunks", "reflect", "answer"]
     row = project_run(
         {"id": "j1", "notebook_id": nb.id, "mode": "reasoning",
          "status": "done"},
@@ -5718,7 +5867,7 @@ def test_legacy_trace_keeps_its_step_sequence_and_duration_keys(rrepo):
          for i, t in enumerate(result.trace)])
     assert "rerank" not in row["durations_ms"]
     assert set(row["durations_ms"]) == {
-        "plan", "retrieve", "ppr", "reflect", "answer"}
+        "plan", "retrieve", "ppr", "search_chunks", "reflect", "answer"}
 
 
 def _stub_rerank_legs(monkeypatch, retriever):
