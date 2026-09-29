@@ -176,7 +176,7 @@ class _OfflinePlanner:
     configured = False
 
 
-def table_citations(tmp_path: Path, notebook_id: str) -> list:
+def table_citations(tmp_path: Path, notebook_id: str, *, anchored: bool = True) -> list:
     """D7: a workbook whose data rows are anchored to the two elements; the
     offline plan profiles the sheet and cites the first data row (``CITED``)."""
     from openpyxl import Workbook
@@ -213,7 +213,9 @@ def table_citations(tmp_path: Path, notebook_id: str) -> list:
             file_name="attest.xlsx", file_path=str(path), file_hash="h", source_url="",
         ),
         notebook_name="Notebook", owner_id="owner",
-        row_element_ids={("Sales", 2): CITED, ("Sales", 3): SIBLING},
+        row_element_ids=(
+            {("Sales", 2): CITED, ("Sales", 3): SIBLING} if anchored else {}
+        ),
     )
     results, _trace = service.analyze(
         notebook_id=notebook_id, source_ids=(SOURCE,),
@@ -226,3 +228,118 @@ def cited(citations, element_id: str = CITED):
     """The one card naming ``element_id`` (the producers mint one per element)."""
     [found] = [citation for citation in citations if citation.element_id == element_id]
     return found
+
+
+# ---------------------------------------------------------------------------
+# Shared cases (both backends call these with their own ``world``)
+# ---------------------------------------------------------------------------
+
+def edit(database, marker: str, element_id: str, text: str) -> None:
+    with database.write() as db:
+        db.execute(
+            f"UPDATE source_elements SET text={marker} WHERE id={marker}",
+            (text, element_id),
+        )
+
+
+def _element_budget(payload: int):
+    from app.services.collection_enumeration import EnumerationBudget
+
+    return EnumerationBudget(
+        page_size=25, max_rows=100, max_pages=10, max_payload_chars=payload,
+        excerpt_chars=12,
+    )
+
+
+def refused_row_case(world) -> None:
+    """Only EMITTED rows are registered, including when the walk stops early.
+
+    The payload rail admits CITED and refuses SIBLING on the same page. SIBLING
+    is then edited and listed by the continuation with its NEW text -- exactly
+    what the model sees -- so its card must pass. Registering the refused row
+    on the first page would keep the OLD snapshot (first snapshot wins) and
+    flag a healthy card ``changed``.
+    """
+    from app.domain.evidence_fingerprint import element_text_sha
+    from app.services.collection_enumeration import _payload_chars
+
+    service = world.repository.collection_enumeration
+    nb = world.notebook_id
+    whole = service.enumerate_elements(nb, "formula", budget=_element_budget(256_000))
+    assert [item.element_id for item in whole.items] == [CITED, SIBLING]
+    one_row = _payload_chars(whole.items[0])
+    edited = TEXTS[SIBLING] + "（改）"
+    with global_run(world.sources, nb) as run:
+        first = service.enumerate_elements(nb, "formula", budget=_element_budget(one_row))
+        assert [item.element_id for item in first.items] == [CITED]
+        assert first.cursor is not None and first.coverage.truncated_reason == "payload"
+        assert run.state.evidence == {CITED: (SOURCE, element_text_sha(TEXTS[CITED]))}
+        edit(world.database, world.marker, SIBLING, edited)
+        second = service.enumerate_elements(
+            nb, "formula", budget=_element_budget(256_000), cursor=first.cursor,
+        )
+        assert [item.element_id for item in second.items] == [SIBLING]
+        minted = world.repository._runtime.evidence_context_component.collection_item_citations(
+            [*first.items, *second.items], active_notebook_id=nb,
+        )
+    response = terminal_check(world.sources, run, nb, [minted[CITED], minted[SIBLING]])
+    assert [citation.verification for citation in response.citations] == [None, None]
+    assert run.state.evidence[SIBLING] == (SOURCE, element_text_sha(edited))
+
+
+def one_row_page_case(world) -> None:
+    """A source holding a single element of the kind (a one-row page) is
+    registered at listing time like any other page."""
+    from app.domain.evidence_fingerprint import element_text_sha
+
+    with world.database.write() as db:
+        db.execute(f"DELETE FROM source_elements WHERE id={world.marker}", (SIBLING,))
+    with global_run(world.sources, world.notebook_id) as run:
+        citations = enumeration_citations(
+            world.repository, world.notebook_id,
+            between=lambda: mutate(world.database, world.marker, "update"),
+        )
+    assert [citation.element_id for citation in citations] == [CITED]
+    response = terminal_check(world.sources, run, world.notebook_id, citations)
+    assert response.citations[0].verification == "changed"
+    assert run.state.evidence == {CITED: (SOURCE, element_text_sha(TEXTS[CITED]))}
+
+
+EMPTY_SOURCE = "src-attest-empty"
+
+
+def nothing_to_register_case(world, producer: str) -> None:
+    """A producer with nothing to cite registers nothing and does not fail:
+    an overview of a document with no elements, an enumeration of a kind the
+    scope does not hold, a workbook whose rows carry no element anchors."""
+    from app.services.collection_enumeration import SourceItem
+    from app.services.document_source_overview import prepare_source_overview
+
+    if producer == "document_overview":
+        marker = world.marker
+        with world.database.write() as db:
+            db.execute(
+                "INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,"
+                "created_at,updated_at) VALUES(" + ",".join(marker for _ in range(8)) + ")",
+                (EMPTY_SOURCE, world.notebook_id, "Empty", "markdown", "extracted",
+                 "parsed", NOW, NOW),
+            )
+    with global_run(world.sources, world.notebook_id) as run:
+        if producer == "document_overview":
+            overview = prepare_source_overview(
+                world.sources,
+                SourceItem(source_id=EMPTY_SOURCE, source_title="Empty", doc_type_label="",
+                           summary="", notebook_id=world.notebook_id, tier="personal"),
+                budget_chars=60, max_elements=2, active_notebook_id=world.notebook_id,
+            )
+            assert overview.citations == [] and overview.id_map == {}
+        elif producer == "collection_enumeration":
+            listed = world.repository.collection_enumeration.enumerate_elements(
+                world.notebook_id, "table", budget=_element_budget(256_000),
+            )
+            assert listed.items == ()
+        else:
+            [card] = table_citations(world.tmp_path, world.notebook_id, anchored=False)
+            assert card.element_id == "" and card.source_id == SOURCE
+    assert run.state.evidence == {}
+    assert run.events == []

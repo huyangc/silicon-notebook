@@ -29,7 +29,8 @@ from app.models.notebooks import NotebookCreate
 from app.services.evidence_attestation import evidence_attestation_seat
 from tests.producer_attestation_testkit import (
     CITED, RACE_EXPECTATIONS, SIBLING, SOURCE, TEXTS, cited, enumeration_citations,
-    global_run, mutate, overview_citations, seed, table_citations, terminal_check,
+    global_run, mutate, nothing_to_register_case, one_row_page_case,
+    overview_citations, refused_row_case, seed, table_citations, terminal_check,
 )
 
 
@@ -186,3 +187,16 @@ def test_producer_events_are_content_free_counts(world, producer):
         rendered = repr(event)
         assert not any(token in rendered for token in (CITED, SIBLING, SOURCE))
         assert not any(text[:4] in rendered for text in TEXTS.values())
+
+
+def test_enumeration_registers_only_the_rows_it_emitted(world):
+    refused_row_case(world)
+
+
+def test_enumeration_registers_a_one_row_page(world):
+    one_row_page_case(world)
+
+
+@pytest.mark.parametrize("producer", PRODUCERS)
+def test_a_producer_with_nothing_to_cite_registers_nothing(world, producer):
+    nothing_to_register_case(world, producer)
