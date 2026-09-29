@@ -675,8 +675,10 @@ def share_report_route(
             requester_id=repo.current_user().id,
             acknowledged=payload.acknowledged_memory_count if payload else None,
         )
-    except NonAuthorShareRefused as refusal:
-        raise user_error(403, refusal.message) from None
+    except NonAuthorShareRefused:
+        raise user_error(
+            403, "报告引用了作者本人的个人记忆，只有作者可以公开分享。"
+        ) from None
     except ShareDisclosureRequired as required:
         raise HTTPException(status_code=409, detail=required.detail()) from None
     return ReportShareResponse(share_token=repo.share_report(notebook_id, report_id))
