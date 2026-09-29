@@ -159,6 +159,58 @@ contributor constraints, not a second implementation history.
   `use-notebook-collection.ts::refreshAfterAccessChange` and the shell's narrow
   `reconcileOpenNotebook` effect so an open workspace is reconciled with its list.
 
+### Binding id lists in SQL
+
+A statement that binds an id list whose size is set by the data — above all a
+run's frozen source ceiling, which can hold every source of a notebook — binds it
+through its backend's `id_binding` module:
+[PostgreSQL](../backend/app/repositories/postgres/id_binding.py) `bind_ids` +
+`member_of` / `not_member_of`, executed by `execute_ids` (or `execute_bound`, which
+keeps the plain execute when no list is bound);
+[SQLite](../backend/app/repositories/sqlite/id_binding.py) `bind_ids` +
+`member_of` / `not_member_of` / `drive_by`. Both return `BoundIds(sql, param)`: one
+parameter per list, whatever its length. The modules' docstrings hold the full
+measurements; the facts that shape the rule, measured on a 49,000-source notebook:
+
+- PostgreSQL: psycopg prepares a statement on its 5th execution on a connection and
+  PostgreSQL may switch it to a generic plan from about the 11th, where a bound
+  array is an opaque parameter estimated at 10 elements. Chunk FTS went from 1.1 s
+  to 3.1 s at 49k ids — past its 3 s timeout, whose rollback clears the prepared
+  cache so the cycle repeats every ~11 executions and opens the lexical circuit
+  breaker; a rare term 7 ms vs 7.7 s; the KG evidence gate 169 ms vs 6.7 s.
+  `execute_ids` sends `prepare=False`, so every execution is planned with the real
+  list. Planning is then paid every time: 5–11 ms for 49k ids on a column without
+  most-common values, 62–81 ms on one with them (skewed chunks per source; about
+  0.2 s per question on rare terms) — a bounded cost instead of a cliff. The
+  semi-join form `col IN (SELECT unnest(…))` plans in milliseconds but lets the list
+  drive and lost somewhere on every statement (common-term chunk FTS 1.8 s → 5–7 s),
+  so it is not used.
+- SQLite: one `?` per id stops at the deployment build's 32,766 variables
+  (`SQLITE_LIMIT_VARIABLE_NUMBER`; the local build allows 250,000, so the failure
+  only shows in production), and a fail-open caller turns the error into a silently
+  empty channel. `col IN (list)` on an indexed column also lets the list drive:
+  inside a correlated probe of the composite index `(object_id, source_id)` it seeks
+  once per id per candidate row (6.6–8.7 s at 49k ids). `member_of` writes
+  `+col IN (…)` so the list only filters (14–20 ms); `drive_by` is the explicit form
+  for "seek every listed id". Production databases carry no planner statistics, so a
+  plan must hold with and without `sqlite_stat1`, and the plan pins run in both.
+
+The binding layer never changes membership: ids are bound exactly as given (empty
+and blank ids included) and a non-string id raises `TypeError`; de-duplication is the
+store's decision, identical on both backends. A list may be bound directly only in
+one of three classes: **bounded by construction** (a page or `LIMIT` window, a
+ranked primary-key window, one run's notebooks, a fixed status set, one source's
+element ids); **batched key probe** (the ids are the keys the statement reads or
+writes, its only selective predicate, at most 1024 per statement on PostgreSQL and
+900 placeholders on SQLite); **driven by the list, one parameter** (the whole list is
+the set of keys to read, e.g. `visible_source_scope_snapshot`). A list that filters a
+statement driven by something else is never exempt. `backend/tests/test_id_list_binding_guard.py`
+scans both repository directories and fails on any id-list binding that is neither
+converted nor listed there with its class and reason. Deliberately not adopted: a
+complement list (a frozen ceiling must not admit sources added after the freeze), an
+identity cache in the binder (it belongs to whoever owns a long-lived list), and
+statement-local planner settings (measured in both directions).
+
 ### Schema and migration authoring
 
 - SQLite schema changes append `_migration_N` and bump `SCHEMA_VERSION` in
