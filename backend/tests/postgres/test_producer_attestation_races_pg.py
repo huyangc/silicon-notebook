@@ -17,7 +17,8 @@ from app.domain.evidence_fingerprint import element_text_sha
 from app.models.notebooks import NotebookCreate
 from tests.producer_attestation_testkit import (
     CITED, RACE_EXPECTATIONS, SIBLING, SOURCE, TEXTS, cited, enumeration_citations,
-    global_run, mutate, overview_citations, seed, table_citations, terminal_check,
+    global_run, mutate, nothing_to_register_case, one_row_page_case,
+    overview_citations, refused_row_case, seed, table_citations, terminal_check,
 )
 
 
@@ -122,3 +123,16 @@ def test_postgres_table_analysis_drops_a_row_locator_dangling_before_the_questio
         "kind": "producer_evidence_attested", "producer": "table_analysis",
         "method": "pointers", "elements": 1, "live": 0, "dead": 1,
     }]
+
+
+def test_postgres_enumeration_registers_only_the_rows_it_emitted(world):
+    refused_row_case(world)
+
+
+def test_postgres_enumeration_registers_a_one_row_page(world):
+    one_row_page_case(world)
+
+
+@pytest.mark.parametrize("producer", PRODUCERS)
+def test_postgres_a_producer_with_nothing_to_cite_registers_nothing(world, producer):
+    nothing_to_register_case(world, producer)

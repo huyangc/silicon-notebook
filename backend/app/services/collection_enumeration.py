@@ -576,13 +576,15 @@ def _row_get(row: Any, key: str) -> Any:
 
 
 def _attest_rows(rows: Sequence[Any]) -> None:
-    """PR-D D4: register one element page from the FULL stored text.
+    """PR-D D4: register the rows one action EMITTED, from the FULL stored text.
 
-    Called on the page before any row is admitted, because ``ElementItem.text``
-    is cut to ``excerpt_chars`` and the terminal check re-hashes the whole
-    stored row. A row the payload rail later refuses is registered but never
-    cited, which is harmless: the check only looks up cited ids. Zero extra
-    reads; a no-op outside a global run.
+    ``ElementItem.text`` is cut to ``excerpt_chars`` and the terminal check
+    re-hashes the whole stored row, so the snapshot is taken from the row, not
+    the item. Only emitted rows: a row the payload rail refused was never seen
+    by the model, and registering it would let a stale snapshot outlive the
+    text a continuation later lists (first snapshot wins). One batched call per
+    action, made when the walk ends however it ends. Zero extra reads; a no-op
+    outside a global run.
     """
     attest_read("collection_enumeration", {
         str(_row_get(row, "id")): (
@@ -923,6 +925,7 @@ class CollectionEnumerationService:
         raise_if_cancelled(cancel_event)
         walk = _Walk(budget, cursor.returned_before if cursor else 0)
         items: List[ElementItem] = []
+        emitted: List[Any] = []
         resume: Optional[ElementCursor] = None
         exhausted = True
 
@@ -997,7 +1000,6 @@ class CollectionEnumerationService:
                             rows, allowance, first_page=first_page
                         )
                         first_page = False
-                        _attest_rows(page)
                         for row in page:
                             item = ElementItem(
                                 element_id=str(_row_get(row, "id")),
@@ -1014,6 +1016,7 @@ class CollectionEnumerationService:
                             )
                             walk.admit(item)
                             items.append(item)
+                            emitted.append(row)
                             after = (
                                 _row_get(row, "created_at"), str(_row_get(row, "id"))
                             )
@@ -1028,6 +1031,8 @@ class CollectionEnumerationService:
             except _Stop as stop:
                 walk.reason = stop.reason
                 exhausted = False
+            finally:
+                _attest_rows(emitted)
 
             closing_ids = self._closing_participants(db, active_notebook_id)
             scope_stable = (
