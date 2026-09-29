@@ -4081,6 +4081,41 @@ def test_chunk_seed_workers_fall_back_to_one_library(rrepo):
     assert rr._chunk_seed_workers("nb", 5) == 5
 
 
+@pytest.mark.parametrize(
+    "case", ["control_error", "cancelled", "plain_open", "plain_closed"])
+def test_chunk_seed_workers_error_handling_matches_chunk_seed_search(
+    rrepo, case,
+):
+    """读参与集(`chunk_participant_count`)失败时的语义与 `_chunk_seed_search`
+    docstring 点名的同形:`RetrievalControlError`/`AskCancelled` 照抛(不受
+    `fail_closed` 影响);普通异常 `fail_closed=False` 按参与库=1 兜底继续,
+    `fail_closed=True` 照抛。"""
+    from app.domain.cancellation import AskCancelled
+    from app.domain.retrieval_control import RetrievalControlError
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    error_cls = {
+        "control_error": RetrievalControlError,
+        "cancelled": AskCancelled,
+        "plain_open": RuntimeError,
+        "plain_closed": RuntimeError,
+    }[case]
+    fail_closed = case == "plain_closed"
+
+    def _broken(notebook_id):
+        raise error_cls("boom")
+
+    rr = ReasoningRetriever.from_repository(
+        rrepo, rrepo.settings, fail_closed=fail_closed)
+    rr.retrieval.chunk_participant_count = _broken
+
+    if case == "plain_open":
+        assert rr._chunk_seed_workers("nb", 5) == max(1, min(5, 8, 8 // 1))
+    else:
+        with pytest.raises(error_cls):
+            rr._chunk_seed_workers("nb", 5)
+
+
 def test_first_round_seed_runs_two_outer_workers_over_four_libraries(
     rrepo, monkeypatch,
 ):
