@@ -126,6 +126,10 @@ class Settings(BaseSettings):
     # Authentication redirects use deployment-owned origins, never Host headers.
     auth_public_base_url: str = Field("", validation_alias="AUTH_PUBLIC_BASE_URL")
     auth_frontend_base_url: str = Field("", validation_alias="AUTH_FRONTEND_BASE_URL")
+    # 内网部署只有 http 域名时的显式放行：两个认证 origin 可用非回环 http，生产也不再要求
+    # https。代价是授权码与会话令牌在网络上明文传输、浏览器证明 cookie 不带 Secure；
+    # 只在受信内网打开。默认关闭，未打开时非回环 http 仍在启动期被拒。
+    auth_allow_insecure_http: bool = Field(False, validation_alias="AUTH_ALLOW_INSECURE_HTTP")
     auth_transaction_ttl_seconds: int = Field(
         600, ge=60, le=1800, validation_alias="AUTH_TRANSACTION_TTL_SECONDS"
     )
@@ -1914,11 +1918,10 @@ class Settings(BaseSettings):
         if not value:
             return ""
         parsed = urlsplit(value)
-        local_http = parsed.scheme == "http" and parsed.hostname in {
-            "localhost", "127.0.0.1", "::1"
-        }
+        # Scheme policy (HTTPS unless loopback or the explicit intranet opt-in)
+        # needs AUTH_ALLOW_INSECURE_HTTP, so it lives in the model validator below.
         if (
-            (parsed.scheme != "https" and not local_http)
+            parsed.scheme not in {"http", "https"}
             or not parsed.hostname
             or parsed.username is not None
             or parsed.password is not None
@@ -1929,6 +1932,23 @@ class Settings(BaseSettings):
         ):
             raise ValueError("authentication base URL must be an HTTPS origin")
         return value.rstrip("/")
+
+    @model_validator(mode="after")
+    def _require_https_auth_origins(self) -> "Settings":
+        from urllib.parse import urlsplit
+
+        if self.auth_allow_insecure_http:
+            return self
+        for value in (self.auth_public_base_url, self.auth_frontend_base_url):
+            parsed = urlsplit(value)
+            if value and parsed.scheme != "https" and parsed.hostname not in {
+                "localhost", "127.0.0.1", "::1"
+            }:
+                raise ValueError(
+                    "authentication base URL must be an HTTPS origin "
+                    "(set AUTH_ALLOW_INSECURE_HTTP=true for an http-only intranet)"
+                )
+        return self
 
     @model_validator(mode="after")
     def _resolve_core_bound_defaults(self) -> "Settings":

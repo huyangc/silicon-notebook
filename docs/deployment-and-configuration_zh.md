@@ -1358,7 +1358,7 @@ EXTENSION_ADMISSION_REFRESH_SECONDS  # 服务进程重读管理员运行时开�
 
 将可选的[W3示例](../examples/extensions/w3-auth/README_zh.md)安装到后端实际使用的Python环境，将默认关闭的TOML复制到仓库外，填写环境变量引用后在副本中启用，并保留 `EXTENSIONS_CONFIG` 内其他插件条目。主仓不强制依赖W3包；示例目录可原样移到独立插件仓库维护。
 
-`AUTH_PUBLIC_BASE_URL` 是公开API origin，需在IDaaS登记其 `/api/auth/sso/callback`。`AUTH_FRONTEND_BASE_URL` 默认使用同一origin，接收 `/auth/sso/callback`。生产必须使用HTTPS及相同hostname，保证host-only、SameSite浏览器证明可发送，推荐同源反向代理；开发可用回环HTTP和不同端口。不能从请求Host或未经信任的转发头推导这些地址。
+`AUTH_PUBLIC_BASE_URL` 是公开API origin，需在IDaaS登记其 `/api/auth/sso/callback`。`AUTH_FRONTEND_BASE_URL` 默认使用同一origin，接收 `/auth/sso/callback`。生产必须使用HTTPS及相同hostname，保证host-only、SameSite浏览器证明可发送，推荐同源反向代理；开发可用回环HTTP和不同端口。不能从请求Host或未经信任的转发头推导这些地址。内网只有纯HTTP域名（如 `http://notebook.corp.example`）时必须设置 `AUTH_ALLOW_INSECURE_HTTP=true`；未设置时非回环HTTP地址启动即被拒，生产报 `https_required`。放行后其余origin检查（相同hostname、裸origin）不变，但授权码和会话令牌明文传输、浏览器证明cookie不带 `Secure`，只在受信内网开启；网关能配TLS时优先配TLS。
 
 高级预算为 `AUTH_TRANSACTION_TTL_SECONDS`、`AUTH_SSO_SESSION_SECONDS`、`AUTH_PROVIDER_TIMEOUT_SECONDS`，精确默认值和范围归产品/API参考。迁移阶段存于数据库，没有平行的环境变量模式开关。装载插件不会自动启用SSO，需管理员推进策略。非local阶段要求provider、身份源及配置代次匹配，并拒绝匿名管理员回退；插件缺失、不兼容或被禁用时启动失败。上游运行时故障只阻止新SSO，不恢复密码入口。
 

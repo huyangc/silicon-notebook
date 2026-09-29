@@ -372,3 +372,25 @@ def test_unavailable_provider_blocks_capabilities_and_policy_write_without_revis
     policy = identity.auth.get_policy()
     assert policy["mode"] == "dual"
     assert policy["revision"] == 1
+
+
+def test_production_http_intranet_origin_needs_explicit_opt_in(setup):
+    client, identity, provider, flow = setup
+    _dual(identity)
+    flow.settings.environment = "production"
+    flow.settings.auth_public_base_url = "http://notebook.corp.example"
+    flow.settings.auth_frontend_base_url = "http://notebook.corp.example"
+    assert client.get("/api/auth/capabilities").status_code == 503
+    flow.settings.auth_allow_insecure_http = True
+    response = client.get("/api/auth/capabilities")
+    assert response.status_code == 200, response.text
+    assert response.json()["sso_login"] is True
+    # Plain-http origins keep the non-Secure dev cookie; a __Host- cookie would
+    # be dropped by the browser and the callback would never see its proof.
+    assert flow.cookie_name == "sn-auth-browser-dev" and flow.secure_cookie is False
+    start = client.post("/api/auth/sso/start", headers={"Origin": "http://notebook.corp.example"})
+    assert start.status_code == 200, start.text
+    params = parse_qs(urlsplit(start.json()["authorization_url"]).query)
+    assert params["redirect_uri"] == ["http://notebook.corp.example/api/auth/sso/callback"]
+    flow.settings.auth_frontend_base_url = "http://other.corp.example"
+    assert client.get("/api/auth/capabilities").status_code == 503
