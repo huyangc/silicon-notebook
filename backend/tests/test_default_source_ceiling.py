@@ -57,9 +57,12 @@ NB = "nb-active"
 class _Store:
     """In-memory stand-in for the four production readers, counting calls.
 
-    ``hidden`` is keyed by owner and returns the RAW owner-scoped half (own
-    Memory + notebook-wide Knowhow) -- the SQL of ``hidden_source_ids`` already
-    keeps another member's Memory out, so this double does the same.
+    ``hidden`` is keyed by ``(notebook, owner)`` and returns the RAW
+    owner-scoped half (own Memory + notebook-wide Knowhow) -- the SQL of
+    ``hidden_source_ids`` already keeps another member's Memory out, so this
+    double does the same.  Every reader honours its notebook id, so a
+    constructor that reads the wrong library's set gets the wrong answer.
+    ``fail`` maps a notebook id to the exception its visible read raises.
     """
 
     def __init__(
@@ -69,38 +72,57 @@ class _Store:
         mounts: list[str],
         hidden: dict[str, list[str]] | None = None,
         types: dict[str, str] | None = None,
+        fail: dict[str, BaseException] | None = None,
+        home: str = NB,
     ) -> None:
-        self.visible = visible
+        self.visible_by_nb = visible
         self.mounts = list(mounts)
-        self.hidden_by_owner = hidden or {}
+        # Owner-keyed shorthand for the home notebook; other notebooks have no
+        # hidden sources unless listed as ``(notebook, owner)`` keys.
+        self.hidden_rows = {
+            (key if isinstance(key, tuple) else (home, key)): rows
+            for key, rows in (hidden or {}).items()
+        }
         self.types = types or {}
+        self.fail = fail or {}
         self.calls: list[str] = []
+        self.visible_calls: list[str] = []
+        self.budgets: list[Any] = []
+        self.events: list[dict] = []
 
     def participants(self, notebook_id: str) -> list[str]:
         self.calls.append("participants")
         return [notebook_id, *self.mounts]
 
-    def visible_by_notebook(self, notebook_ids) -> dict[str, list[str]]:
-        self.calls.append("visible_by_notebook")
-        return {nb: list(self.visible.get(nb, [])) for nb in notebook_ids}
+    def visible(self, notebook_id: str) -> list[str]:
+        from app.repositories.read_budget import current_read_budget
+
+        self.calls.append("visible")
+        self.visible_calls.append(notebook_id)
+        self.budgets.append(current_read_budget())
+        if notebook_id in self.fail:
+            raise self.fail[notebook_id]
+        return list(self.visible_by_nb.get(notebook_id, []))
 
     def hidden(self, notebook_id: str, owner_id: str) -> list[str]:
         self.calls.append("hidden")
-        return list(self.hidden_by_owner.get(owner_id, []))
+        return list(self.hidden_rows.get((notebook_id, owner_id), []))
 
-    def source_metadata(self, source_ids) -> dict[str, dict[str, Any]]:
-        self.calls.append("source_metadata")
-        return {
-            sid: {"id": sid, "source_type": self.types[sid]}
-            for sid in source_ids if sid in self.types
-        }
+    def memory_sources(self, notebook_id: str) -> list[str]:
+        self.calls.append("memory_sources")
+        return [
+            sid for (nb, _owner), rows in self.hidden_rows.items()
+            if nb == notebook_id for sid in rows
+            if self.types.get(sid) == "memory"
+        ]
 
     def readers(self) -> CeilingReaders:
         return CeilingReaders(
             participants=self.participants,
-            visible_by_notebook=self.visible_by_notebook,
+            visible=self.visible,
             hidden=self.hidden,
-            source_metadata=self.source_metadata,
+            memory_sources=self.memory_sources,
+            emit=self.events.append,
         )
 
 
@@ -396,7 +418,8 @@ def test_submitted_local_scope_is_used_as_is():
         assert scope.source_ceiling_for("nb-lib") == frozenset({"lib-visible"})
         assert scope.ceilings_total is True
     assert "hidden" not in store.calls
-    assert store.calls == ["participants", "visible_by_notebook"]
+    assert store.calls == ["participants", "visible"]
+    assert store.visible_calls == ["nb-lib"], "the active visible set is not re-read"
 
 
 def test_submitted_base_scope_is_used_as_is():
@@ -470,21 +493,178 @@ def test_open_memory_channel_does_not_classify_the_hidden_half():
     store = _shared_store()
     with default_ceiling_context(NB, "bob", store.readers()):
         pass
-    assert "source_metadata" not in store.calls
+    assert "memory_sources" not in store.calls
 
 
-def test_partition_memory_sources_is_order_preserving_and_fail_closed():
-    types = {"k1": "knowhow", "m1": "memory", "k2": "knowhow"}
-
-    def metadata(ids):
-        return {sid: {"source_type": types[sid]} for sid in ids if sid in types}
-
+def test_partition_memory_sources_is_order_preserving_and_deduplicated():
     kept, memory = partition_memory_sources(
-        ["k2", "m1", "gone", "k1", "k2", ""], metadata
+        ["k2", "m1", "k1", "k2", "", "m2"], ["m1", "m2", "m-other"]
     )
     assert kept == ("k2", "k1")
-    assert memory == ("m1",)
-    assert partition_memory_sources([], metadata) == ((), ())
+    assert memory == ("m1", "m2")
+    assert partition_memory_sources([], ["m1"]) == ((), ())
+
+
+# ---------------------------------------------------------------------------
+# Mounted-library reads: one budget per library, failures isolated
+# ---------------------------------------------------------------------------
+
+
+def _two_mount_store(**kwargs) -> _Store:
+    return _Store(
+        visible={NB: ["src-a"], "nb-lib": ["lib-1"], "nb-lib2": ["lib2-1"]},
+        mounts=["nb-lib", "nb-lib2"],
+        hidden={"bob": ["src-knowhow"]},
+        **kwargs,
+    )
+
+
+def test_each_mounted_library_is_read_under_its_own_budget():
+    store = _two_mount_store()
+    with default_ceiling_context(
+        NB, "bob", store.readers(), mounted_read_seconds=2.5,
+    ):
+        pass
+    assert store.visible_calls == [NB, "nb-lib", "nb-lib2"]
+    active_budget, *mounted_budgets = store.budgets
+    assert active_budget is None, "the active notebook's own read is not isolated"
+    assert all(budget is not None for budget in mounted_budgets)
+    assert mounted_budgets[0] is not mounted_budgets[1], "one budget per library"
+    import time as _time
+
+    for budget in mounted_budgets:
+        assert 0 < budget.deadline - _time.monotonic() <= 2.5
+
+
+@pytest.mark.parametrize("error, reason", [
+    (RuntimeError("boom"), "unavailable"),
+    (None, "timeout"),  # ReadBudgetExceeded, filled in below
+])
+def test_a_failing_mounted_library_is_denied_not_fatal(error, reason):
+    from app.repositories.read_budget import ReadBudgetExceeded
+
+    exc = error if error is not None else ReadBudgetExceeded("read budget exhausted")
+    store = _two_mount_store(fail={"nb-lib": exc})
+    with default_ceiling_context(NB, "bob", store.readers()):
+        scope = current_source_scope()
+        assert scope.source_ceiling_for("nb-lib") == frozenset(), "deny, not open"
+        assert scope.covers_notebook("nb-lib") is True
+        assert source_allowed("nb-lib", "lib-1") is False
+        assert scoped_allowed_source_ids("nb-lib") == ()
+        # The healthy library and the active notebook are unaffected.
+        assert source_allowed("nb-lib2", "lib2-1") is True
+        assert source_allowed(NB, "src-a") is True
+    assert store.events == [{
+        "kind": "default_ceiling_library_skipped",
+        "notebook_id": "nb-lib",
+        "reason": reason,
+    }], "content-free: notebook id and reason code only"
+
+
+def test_a_real_budget_overrun_on_sqlite_is_classified_as_timeout(tmp_path, monkeypatch):
+    """With the production readers, an exhausted budget (zero seconds) denies
+    each mounted library -- classified ``timeout`` by the repository's own
+    ``classify_read_failure`` -- while the active notebook, which is not under
+    that budget, keeps its full ceiling."""
+    repo, ids = _real_sqlite_fixture(tmp_path, monkeypatch)
+    events: list[dict] = []
+    readers = _real_readers(repo, emit=events.append)
+    with default_ceiling_context(
+        ids["nb"], ids["bob"], readers, mounted_read_seconds=0.0,
+    ):
+        scope = current_source_scope()
+        assert scope.source_ceiling_for(ids["lib"]) == frozenset()
+        assert scope.source_ceiling_for(ids["lib2"]) == frozenset()
+        assert scope.source_ids == frozenset({"src-visible"})
+    assert events == [
+        {"kind": "default_ceiling_library_skipped", "notebook_id": lib,
+         "reason": "timeout"}
+        for lib in (ids["lib"], ids["lib2"])
+    ]
+
+
+def test_the_active_notebooks_own_read_failing_fails_the_request():
+    store = _two_mount_store(fail={NB: RuntimeError("active down")})
+    with pytest.raises(RuntimeError, match="active down"):
+        with default_ceiling_context(NB, "bob", store.readers()):
+            pytest.fail("must not run unscoped")
+    assert current_source_scope() is None
+
+
+def test_emit_failure_is_swallowed():
+    store = _two_mount_store(fail={"nb-lib": RuntimeError("x")})
+    readers = store.readers()
+
+    def broken(_event):
+        raise ValueError("log sink down")
+
+    from dataclasses import replace as _replace
+
+    with default_ceiling_context(NB, "bob", _replace(readers, emit=broken)):
+        assert current_source_scope().source_ceiling_for("nb-lib") == frozenset()
+
+
+def test_cancellation_propagates_instead_of_skipping():
+    import threading
+
+    from app.services.cancellation import AskCancelled
+
+    cancel = threading.Event()
+    store = _two_mount_store()
+    original = store.visible
+
+    def cancelling_visible(notebook_id):
+        if notebook_id == "nb-lib":
+            cancel.set()
+            raise RuntimeError("statement cancelled")
+        return original(notebook_id)
+
+    readers = store.readers()
+    from dataclasses import replace as _replace
+
+    with pytest.raises(AskCancelled):
+        with default_ceiling_context(
+            NB, "bob", _replace(readers, visible=cancelling_visible),
+            cancel_event=cancel,
+        ):
+            pytest.fail("a stopped run must not start")
+    assert store.events == [], "a stop is not reported as a library failure"
+    # Already cancelled: no read at all.
+    fresh = _two_mount_store()
+    with pytest.raises(AskCancelled):
+        with default_ceiling_context(
+            NB, "bob", fresh.readers(), cancel_event=cancel,
+        ):
+            pass
+    assert fresh.calls == []
+
+
+def test_peer_visible_sources_returns_the_frozen_ceiling_without_reading():
+    from types import SimpleNamespace
+
+    from app.services import chunk_federation
+
+    store = _two_mount_store()
+    live_reads: list[str] = []
+    candidates = SimpleNamespace(sources=SimpleNamespace(
+        all_visible_source_ids=lambda nb: live_reads.append(nb) or ["live"],
+    ))
+    with default_ceiling_context(NB, "bob", store.readers()):
+        frozen = current_source_scope().source_ceiling_for("nb-lib")
+        assert chunk_federation._peer_visible_sources(candidates, "nb-lib") is frozen
+        # A library the scope never froze still takes the live read.
+        assert chunk_federation._peer_visible_sources(candidates, "nb-x") == ("live",)
+    assert live_reads == ["nb-x"]
+    # Without a scope the historical live read is unchanged.
+    assert chunk_federation._peer_visible_sources(candidates, "nb-lib") == ("live",)
+    # A subjectless (global) run keeps its live, budgeted coverage read.
+    with source_scope_context(
+        "nb-x", None, None, {"nb-x": ["x-1"], "nb-lib": ["lib-1"]},
+        subjectless=True,
+    ):
+        assert chunk_federation._peer_visible_sources(
+            candidates, "nb-lib"
+        ) == ("live",)
 
 
 # ---------------------------------------------------------------------------
@@ -509,9 +689,11 @@ def test_read_count_is_independent_of_sources_and_libraries(
     open_store = _Store(
         visible=visible, mounts=mounts, hidden={"bob": hidden_ids}, types=types,
     )
+    per_mount = ["visible"] * mount_count
     with default_ceiling_context(NB, "bob", open_store.readers()):
         assert len(current_source_scope().source_ids) == source_count
-    assert open_store.calls == ["participants", "visible_by_notebook", "hidden"]
+    # 3 + M: participants, visible(nb), hidden, one visible read per mount.
+    assert open_store.calls == ["participants", "visible", "hidden", *per_mount]
 
     closed_store = _Store(
         visible=visible, mounts=mounts, hidden={"bob": hidden_ids}, types=types,
@@ -521,7 +703,7 @@ def test_read_count_is_independent_of_sources_and_libraries(
     ):
         assert "mem-own" not in current_source_scope().hidden_source_ids
     assert closed_store.calls == [
-        "participants", "visible_by_notebook", "hidden", "source_metadata",
+        "participants", "visible", "hidden", "memory_sources", *per_mount,
     ]
 
     submitted_store = _Store(visible=visible, mounts=mounts)
@@ -530,9 +712,8 @@ def test_read_count_is_independent_of_sources_and_libraries(
         local_scope={"mode": "include", "source_ids": ["s-0"]},
     ):
         pass
-    assert submitted_store.calls == (
-        ["participants", "visible_by_notebook"] if mounts else ["participants"]
-    )
+    # 1 + M.
+    assert submitted_store.calls == ["participants", *per_mount]
 
 
 def test_ceiling_is_built_once_and_nothing_is_sorted(monkeypatch):
@@ -590,38 +771,30 @@ def test_frozen_source_ids_reuses_canonical_input_and_coerces_the_rest():
 
 
 # ---------------------------------------------------------------------------
-# Real SQLite stores wired as the entry points will wire them
+# Real stores wired as the entry points will wire them.  The builders are
+# backend-neutral; ``tests/postgres/test_default_source_ceiling_pg.py`` runs
+# the same assertions against PostgreSQL.
 # ---------------------------------------------------------------------------
 
 _NOW = "2026-09-29T00:00:00+00:00"
 
 
-def test_default_ceiling_over_real_sqlite_stores(tmp_path, monkeypatch):
-    """Two members share a notebook, each with a confirmed Memory; a mounted
-    library (same owner) holds a visible source plus Memory/Knowhow projections
-    of its own.  Wired through the production readers, Bob's default ceiling
-    admits his own Memory and the shared Knowhow, never Alice's Memory, and
-    only the mounted library's visible source; a library mounted mid-run is
-    refused."""
-    from app.core.config import Settings
+def build_real_fixture(repo, placeholder: str) -> dict[str, Any]:
+    """Two members share ``nb``, each with a confirmed Memory; ``lib`` (mounted,
+    same owner) holds a visible source plus Memory/Knowhow projections of its
+    own; ``lib2`` (mounted) holds one visible source; ``late`` is not mounted
+    yet.  Returns the ids plus a ``mount(base_id)`` callable."""
     from app.models.schemas import NotebookCreate
-    from app.services.sqlite_repository import (
-        SQLiteRepository,
-        reset_request_user,
-        set_request_user,
-    )
+    from app.services.sqlite_repository import reset_request_user, set_request_user
 
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'ceiling.db'}")
-    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
-    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
-    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    repo = SQLiteRepository(Settings())
+    ph = placeholder
     alice = repo.create_user("a00123456", "password-12")
     bob = repo.create_user("b00123456", "password-12")
     token = set_request_user(alice)
     try:
         nb = repo.create_notebook(NotebookCreate(name="共享库")).id
         lib = repo.create_notebook(NotebookCreate(name="参考库")).id
+        lib2 = repo.create_notebook(NotebookCreate(name="参考库二")).id
         late = repo.create_notebook(NotebookCreate(name="后挂库")).id
     finally:
         reset_request_user(token)
@@ -642,7 +815,8 @@ def test_default_ceiling_over_real_sqlite_stores(tmp_path, monkeypatch):
                 "INSERT INTO memory_items"
                 "(id,notebook_id,created_by,agent_profile_id,source_answer_id,"
                 "origin,status,title,content_md,created_at,updated_at) "
-                "VALUES (?,?,?,NULL,NULL,'ask_answer','confirmed',?,?,?,?)",
+                f"VALUES ({ph},{ph},{ph},NULL,NULL,'ask_answer','confirmed',"
+                f"{ph},{ph},{ph},{ph})",
                 (memory_id, notebook_id, user_id, "记忆", "内容", _NOW, _NOW),
             )
         insert(notebook_id, source_id, "memory", memory_id=memory_id)
@@ -652,7 +826,7 @@ def test_default_ceiling_over_real_sqlite_stores(tmp_path, monkeypatch):
             db.execute(
                 "INSERT INTO notebook_bases"
                 "(notebook_id,base_notebook_id,created_at,created_by) "
-                "VALUES (?,?,?,?)",
+                f"VALUES ({ph},{ph},{ph},{ph})",
                 (nb, base_id, _NOW, alice.id),
             )
 
@@ -663,16 +837,58 @@ def test_default_ceiling_over_real_sqlite_stores(tmp_path, monkeypatch):
     insert(lib, "lib-visible", "pdf")
     insert(lib, "lib-knowhow", "knowhow")
     memory(lib, alice.id, "mem-lib", "lib-memory")
+    insert(lib2, "lib2-visible", "pdf")
     insert(late, "late-visible", "pdf")
     mount(lib)
+    mount(lib2)
+    return {
+        "nb": nb, "lib": lib, "lib2": lib2, "late": late,
+        "alice": alice.id, "bob": bob.id, "mount": mount,
+    }
 
-    readers = CeilingReaders(
+
+def real_readers(repo, emit=None) -> CeilingReaders:
+    """The production wiring: bound store methods, nothing else."""
+    sources = repo._runtime.source_store
+
+    def memory_sources(notebook_id: str) -> list[str]:
+        with sources.database.connect() as db:
+            return sources.memory_source_ids(db, notebook_id)
+
+    return CeilingReaders(
         participants=repo._runtime.notebook_store.participant_notebook_ids,
-        visible_by_notebook=sources.visible_source_ids_by_notebook,
+        visible=sources.all_visible_source_ids,
         hidden=sources.hidden_source_ids,
-        source_metadata=sources.source_metadata,
+        memory_sources=memory_sources,
+        emit=emit,
     )
-    with default_ceiling_context(nb, bob.id, readers):
+
+
+def _real_sqlite_fixture(tmp_path, monkeypatch):
+    from app.core.config import Settings
+    from app.services.sqlite_repository import SQLiteRepository
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'ceiling.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    repo = SQLiteRepository(Settings())
+    return repo, build_real_fixture(repo, "?")
+
+
+def _real_readers(repo, emit=None) -> CeilingReaders:
+    return real_readers(repo, emit=emit)
+
+
+def assert_default_ceiling_over_real_stores(repo, ids) -> None:
+    """Bob's default ceiling admits his own Memory and the shared Knowhow,
+    never Alice's Memory, and only a mounted library's visible source; a
+    library mounted mid-run is refused; with the Memory channel closed his own
+    Memory leaves the ceiling without the drift probe reporting drift."""
+    sources = repo._runtime.source_store
+    nb, lib, late, bob = ids["nb"], ids["lib"], ids["late"], ids["bob"]
+    readers = real_readers(repo)
+    with default_ceiling_context(nb, bob, readers):
         scope = current_source_scope()
         assert scope is not None
         assert scope.source_ids == frozenset({"src-visible"})
@@ -681,6 +897,7 @@ def test_default_ceiling_over_real_sqlite_stores(tmp_path, monkeypatch):
         )
         assert source_allowed(nb, "src-memory-alice") is False
         assert scope.source_ceiling_for(lib) == frozenset({"lib-visible"})
+        assert scope.source_ceiling_for(ids["lib2"]) == frozenset({"lib2-visible"})
         assert source_allowed(lib, "lib-memory") is False
         assert source_allowed(lib, "lib-knowhow") is False
         assert current_source_scope_payload() is None
@@ -688,21 +905,67 @@ def test_default_ceiling_over_real_sqlite_stores(tmp_path, monkeypatch):
         # The live universe equals the freeze: no drift is reported.
         assert source_scope_visible_universe_matches(
             nb, sources.all_visible_source_ids(nb),
-            sources.hidden_source_ids(nb, bob.id),
+            sources.hidden_source_ids(nb, bob),
         ) is True
 
-        mount(late)
+        ids["mount"](late)
         assert late in repo._runtime.notebook_store.participant_notebook_ids(nb)
         assert notebook_in_scope(late) is False
         assert scoped_allowed_source_ids(late) == ()
 
     with memory_access_context(False), default_ceiling_context(
-        nb, bob.id, readers
+        nb, bob, readers
     ):
         scope = current_source_scope()
         assert scope.hidden_source_ids == frozenset({"src-knowhow"})
         assert scope.withheld_hidden_source_ids == frozenset({"src-memory-bob"})
         assert source_scope_visible_universe_matches(
             nb, sources.all_visible_source_ids(nb),
-            sources.hidden_source_ids(nb, bob.id),
+            sources.hidden_source_ids(nb, bob),
         ) is True
+
+
+def test_default_ceiling_over_real_sqlite_stores(tmp_path, monkeypatch):
+    repo, ids = _real_sqlite_fixture(tmp_path, monkeypatch)
+    assert_default_ceiling_over_real_stores(repo, ids)
+
+
+def test_each_mounted_library_visible_set_is_read_once_per_run(tmp_path, monkeypatch):
+    """Statement count on the real SQLite store: constructor + federation read
+    each mounted library's visible set ONCE in total per run.  Federation
+    preparation (``_prepared_peer``, what every federated chunk arm calls) and
+    the KG peer-ceiling reuse (``_peer_visible_sources`` again) hand back the
+    frozen ceiling instead of re-reading it."""
+    from types import SimpleNamespace
+
+    from app.services import chunk_federation
+    from app.services.retrieval_run import retrieval_run
+
+    repo, ids = _real_sqlite_fixture(tmp_path, monkeypatch)
+    sources = repo._runtime.source_store
+    statements: list[str] = []
+    sources.database.connect().set_trace_callback(statements.append)
+    candidates = SimpleNamespace(
+        sources=sources, notebook_copy_stats=lambda _nb: {"copyable": True},
+    )
+    with default_ceiling_context(ids["nb"], ids["bob"], real_readers(repo)), \
+            retrieval_run(run_kind="ask_chunk"):
+        for _arm in range(3):  # semantic, keyword and exact arms
+            for lib in (ids["lib"], ids["lib2"]):
+                visible, _peek = chunk_federation._prepared_peer(
+                    candidates, lib, None, 0.0,
+                )
+                assert set(visible) == current_source_scope().source_ceiling_for(lib)
+                chunk_federation._peer_visible_sources(candidates, lib)
+
+    def visible_reads(notebook_id: str) -> int:
+        return sum(
+            1 for sql in statements
+            if f"FROM sources WHERE notebook_id='{notebook_id}'" in sql
+            and "NOT IN ('memory', 'knowhow')" in sql
+        )
+
+    assert visible_reads(ids["lib"]) == 1
+    assert visible_reads(ids["lib2"]) == 1
+    assert visible_reads(ids["nb"]) == 1
+    sources.database.connect().set_trace_callback(None)
