@@ -902,6 +902,9 @@ def _build_content_tools(
         notebooks=seats.notebook_store,
         queries=seats.queries,
         unified_kg=seats.unified_kg,
+        # Source-ceiling KG counts (``count_knowledge(supported_by_source_ids=)``)
+        # — the same store the enumeration executor pages from below.
+        knowledge=seats.knowledge,
     )
     return _ContentToolsDomain(
         source_generation=seats.catalog_store.source_element_generation,

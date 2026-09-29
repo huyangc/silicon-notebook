@@ -551,7 +551,8 @@ def test_kg_memo_is_lru_bounded(repo, monkeypatch):
     second = repo.create_notebook(NotebookCreate(name="b"))
     catalog.collection_map(first.id)
     catalog.collection_map(second.id)
-    assert list(catalog._kg_counts) == [second.id]
+    # 键是 (notebook, 天花板摘要);不装天花板时摘要为空串。
+    assert list(catalog._kg_counts) == [(second.id, "")]
 
 
 def test_kg_counts_use_epoch_not_just_raw_seq_after_a_delete_and_reingest(repo):
@@ -616,7 +617,11 @@ def test_kg_counts_use_epoch_not_just_raw_seq_after_a_delete_and_reingest(repo):
     )
 
 
-def test_knowhow_table_count_covers_scope(repo):
+def test_knowhow_table_count_covers_only_what_the_executor_reaches(repo):
+    """Knowhow 全量枚举只读**当前库**的表(``knowhow_enumeration_catalog``),所以
+    挂上参考库之后地图上的表数不变——参考库的表没有任何执行器列得出来,算进地图
+    只会让模型白花一个动作去发现这一点(PR-B E-5,文档化的行为变化;收窄与对等
+    模式归零见 ``test_collection_enumeration_source_ceiling``)。"""
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     base = repo.create_notebook(NotebookCreate(name="base"))
     repo.mark_notebook_base(base.id)
@@ -626,7 +631,7 @@ def test_knowhow_table_count_covers_scope(repo):
     catalog = _catalog(repo)
     assert catalog.collection_map(notebook.id).knowhow_tables == 1
     repo.replace_notebook_bases(notebook.id, [base.id], "user-local")
-    assert catalog.collection_map(notebook.id).knowhow_tables == 2
+    assert catalog.collection_map(notebook.id).knowhow_tables == 1
 
 
 # -------------------------------------------------------------------- 指纹

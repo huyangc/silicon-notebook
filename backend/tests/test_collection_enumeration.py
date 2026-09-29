@@ -504,13 +504,25 @@ def _hook_element_page(repo, monkeypatch, on_first_page):
     monkeypatch.setattr(store, "element_page_rows", hook)
 
 
+def _kg_passthrough(original, kwargs, *args):
+    """KG 页钩子的统一转发:关键字参数原样透传,且断言这些**不装天花板**的用例
+    里执行器没有传 ``allowed_source_ids``——无天花板时页调用必须与引入天花板之前
+    逐字节相同,而一个只收位置参数、悄悄吞掉关键字的钩子会把「漏传」与「多传」
+    都掩盖掉(天花板下的传参由 ``test_collection_enumeration_source_ceiling``
+    钉住)。"""
+    assert kwargs == {}, kwargs
+    return original(*args, **kwargs)
+
+
 def _hook_kg_page(repo, monkeypatch, on_first_page):
     store = repo._runtime.knowledge
     original = store.knowledge_object_page_rows
     state = {"pages": 0}
 
-    def hook(db, notebook_id, object_type, after, limit):
-        rows = original(db, notebook_id, object_type, after, limit)
+    def hook(db, notebook_id, object_type, after, limit, **kwargs):
+        rows = _kg_passthrough(
+            original, kwargs, db, notebook_id, object_type, after, limit,
+        )
         state["pages"] += 1
         if state["pages"] == 1:
             on_first_page()
@@ -780,9 +792,11 @@ def test_kg_page_queries_are_charged_against_the_ceiling_too(repo, monkeypatch):
     original = store.knowledge_object_page_rows
     calls: list[int] = []
 
-    def spy(db, notebook_id, object_type, after, limit):
+    def spy(db, notebook_id, object_type, after, limit, **kwargs):
         calls.append(limit)
-        return original(db, notebook_id, object_type, after, limit)
+        return _kg_passthrough(
+            original, kwargs, db, notebook_id, object_type, after, limit,
+        )
 
     monkeypatch.setattr(store, "knowledge_object_page_rows", spy)
     charges = _count_query_charges(monkeypatch)
@@ -1503,8 +1517,10 @@ def test_kg_mutation_between_pages_is_not_complete(repo, monkeypatch):
     original = store.knowledge_object_page_rows
     state = {"pages": 0}
 
-    def hook(db, notebook_id, object_type, after, limit):
-        rows = original(db, notebook_id, object_type, after, limit)
+    def hook(db, notebook_id, object_type, after, limit, **kwargs):
+        rows = _kg_passthrough(
+            original, kwargs, db, notebook_id, object_type, after, limit,
+        )
         state["pages"] += 1
         if state["pages"] == 1:
             with repo._write() as write_db:
@@ -1564,8 +1580,10 @@ def test_kg_reset_epoch_bump_midwalk_that_realiases_raw_seq_is_not_complete(
     original = store.knowledge_object_page_rows
     state = {"pages": 0}
 
-    def hook(db, notebook_id, object_type, after, limit):
-        rows = original(db, notebook_id, object_type, after, limit)
+    def hook(db, notebook_id, object_type, after, limit, **kwargs):
+        rows = _kg_passthrough(
+            original, kwargs, db, notebook_id, object_type, after, limit,
+        )
         state["pages"] += 1
         if state["pages"] == 1:
             # Simulate delete_notebook_kg's sole epoch write (kg_reset_epoch
@@ -2480,9 +2498,11 @@ def test_cancel_between_kg_pages(repo, monkeypatch):
     store = repo._runtime.knowledge
     original = store.knowledge_object_page_rows
 
-    def hook(db, notebook_id, object_type, after, limit):
+    def hook(db, notebook_id, object_type, after, limit, **kwargs):
         cancel.set()
-        return original(db, notebook_id, object_type, after, limit)
+        return _kg_passthrough(
+            original, kwargs, db, notebook_id, object_type, after, limit,
+        )
 
     monkeypatch.setattr(store, "knowledge_object_page_rows", hook)
     with pytest.raises(AskCancelled):
@@ -2581,9 +2601,11 @@ def test_kg_enumeration_stays_bounded_when_most_objects_are_deprecated(
     original = store.knowledge_object_page_rows
     calls: list[int] = []
 
-    def spy(db, notebook_id, object_type, after, limit):
+    def spy(db, notebook_id, object_type, after, limit, **kwargs):
         calls.append(limit)
-        return original(db, notebook_id, object_type, after, limit)
+        return _kg_passthrough(
+            original, kwargs, db, notebook_id, object_type, after, limit,
+        )
 
     monkeypatch.setattr(store, "knowledge_object_page_rows", spy)
     result = _enum(repo).enumerate_kg_objects(
@@ -2627,8 +2649,10 @@ def test_kg_raw_scan_ceiling_clamps_the_fetch_before_the_query(
     calls: list[tuple[int, int]] = []          # (请求 limit, 实际返回行数)
     running = 0
 
-    def spy(db, notebook_id, object_type, after, limit):
-        rows = original(db, notebook_id, object_type, after, limit)
+    def spy(db, notebook_id, object_type, after, limit, **kwargs):
+        rows = _kg_passthrough(
+            original, kwargs, db, notebook_id, object_type, after, limit,
+        )
         nonlocal running
         running += len(rows)
         calls.append((limit, len(rows)))
