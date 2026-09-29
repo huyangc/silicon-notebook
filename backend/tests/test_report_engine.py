@@ -3415,7 +3415,9 @@ def test_auto_confirm_revalidates_a_scoped_report_before_claiming(
 
     # 重验通过:照常直通到 done,且**刷新后的冻结被采用**——重冻结翻出的
     # narrowed=true 必须落进认领的 understanding(codex R4 P2),后续阶段也要在
-    # 刷新后的范围上下文里跑(监听 source_scope_context 的实参)。
+    # 刷新后的范围上下文里跑(监听 source_scope_context 的实参)。E1-3 起刷新
+    # 经 refreshed_ceiling_context 装在 worker 的默认天花板**里面**(继承逐库
+    # 天花板与 ceilings_total),所以这里按生产形状先装外层天花板。
     import app.services.source_scope as source_scope_module
     from contextlib import contextmanager
 
@@ -3423,9 +3425,9 @@ def test_auto_confirm_revalidates_a_scoped_report_before_claiming(
     real_ctx = source_scope_module.source_scope_context
 
     @contextmanager
-    def recording_ctx(nb_id, scope_arg, base_arg):
+    def recording_ctx(nb_id, scope_arg, base_arg=None, *args, **kwargs):
         entered.append((nb_id, scope_arg, base_arg))
-        with real_ctx(nb_id, scope_arg, base_arg):
+        with real_ctx(nb_id, scope_arg, base_arg, *args, **kwargs):
             yield
 
     monkeypatch.setattr(
@@ -3449,9 +3451,12 @@ def test_auto_confirm_revalidates_a_scoped_report_before_claiming(
     eng2 = _mk_engine(repo, llm2)
     _stub_auto_run_corpus(eng2, repo, monkeypatch)
     rid2 = repo.create_report(nb2.id, "分析 PLL 稳定性")
-    eng2.run(nb2.id, rid2, "分析 PLL 稳定性", "", auto_generate=True,
-             require_intent_review=True, source_scope=scope,
-             scope_reconfirm=allow)
+    with source_scope_module.default_ceiling_context(
+        nb2.id, eng2.user_id, repo._runtime.ceiling_readers(), local_scope=scope,
+    ):
+        eng2.run(nb2.id, rid2, "分析 PLL 稳定性", "", auto_generate=True,
+                 require_intent_review=True, source_scope=scope,
+                 scope_reconfirm=allow)
     detail2 = repo.get_report(nb2.id, rid2)
     assert detail2["status"] == "done", detail2.get("error")
     assert detail2["understanding"]["source_scope"]["narrowed"] is True
