@@ -157,11 +157,30 @@ PR-A 与 PR-C 互不相交，可并行；PR-B 依赖 PR-A（同改 `evidence_con
 - 红线：不降检索性能（新增 SQL 配 EXPLAIN pin）、单库无挂载运行字节一致、热函数天花板与 ports
   棘轮零松弛。
 
-## Q3 对 PR-D 的影响（部分失败而非整份作废）
+## PR-D 消费方设计定稿（Q3：部分失败而非整份作废）
 
-- 答案正文照常交付并持久化；作业增加部分失败标记与逐条引用的核对状态
-  （`changed` / `source_gone` / `unverifiable`），失效引用卡保留但不可打开原文、显示原因。
-- 答案上方给出一句真实的说明（有几条引用未通过核对、各是什么原因），历史记录、公开分享页、
-  MCP 返回同口径。
-- 授权丢失（提问人对参与库失去读权）是独立的鉴权复核，不属于引用核对，维持现有处理。
-- 消费方设计在 PR-D 动工前由规划子代理按本节重出，仍遵守「不留一半」。
+事实更正：全局问答没有逐来源勾选，冻结天花板 = 每个参与库的全部可见来源；来源「不再可见」只可能是
+行被删除，权限丢失只发生在笔记本级，由既有的 `_check` 处理（作业失败并提示重新选择范围），不变。
+
+- **线上形状（全部 additive、空则不序列化）**：`Citation.verification` / `AnswerAnchor.verification`
+  ∈ `changed` / `source_gone` / `unverifiable`；`AskResponse.citation_check`（`outcome`、`checked`、
+  `failed` 与三类计数）仅在 `failed > 0` 时出现；公开页 `PublicReference.verification`、
+  `PublicTurn.citation_check`；新增投影 `global_answer_check(job)`。单库响应与黄金 fixture 字节不变。
+  内部原因码（unattested / unreadable / unattributed / out_of_ceiling）只进事件，不上线。
+- **证据等级**：部分失败时 `grounded=False`、`evidence_level` 封顶 `overview`（`inferred` 不抬升）。
+- **失效引用卡**：保留在列表里并保留摘录，不提供打开原文/图谱/Knowhow/图片等入口，显示原因行；
+  后端 `cited_element` 对带标记的引用返回 404。删除卡片会在正文里留下裸 `[k]` 标记，故不删。
+- **文案**：答案下方一条说明「本次回答有部分引用未通过核对：…。回答内容照常保留，带标记的引用可点开
+  查看原因。」；卡片标签「原文已改动 / 资料已删除 / 无法核对」。分享页用过去时，状态是回答时刻的快照。
+- **校验改为全量**：逐条判定、不再首个失败即退出；新模块 `services/global_citation_check.py`，
+  读取口加在 `global_ask_ports.py`（不动 `ports.py`）。
+- **呈现面（十处全部纳入）**：`answer-panel`（含全局窗口与管理端活动详情）、`citation-card`、
+  `answer-markdown` 标记样式、内联图片跳过、全局窗口、公开页 `/c/{token}`、MCP `get_global_ask`
+  （摘要放进 `coverage.citation_check`，顶层键数仍为 20）、MCP/HTTP 引用元素下钻、SSE/作业/会话详情、
+  前端类型镜像。
+- **持久化**：随 `payload_json` 落库，无迁移；历史上已作废的行保留原句。
+- **学习链与事件**：部分失败的回答照常进学习链；新事件 `global_ask_citations_partial`（内容无关计数）。
+- **轨迹**：reasoning 模式追加一步「核对」，如实写已核对条数与未通过条数。
+- **已裁决的小项**：会话列表不加角标（重开该轮即见说明，与失败/停止轮一致）；MCP 不新增锚点输出。
+- **待用户裁决**：唯一的「不展示正文」例外——核对**证明**某条被引来源是提问人无权查看的
+  （他人的私有 Memory、非参与库）时是否仍不展示回答。
