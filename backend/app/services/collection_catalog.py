@@ -520,8 +520,14 @@ class CollectionCatalogService:
         active_notebook_id: str,
         *,
         knowhow_reachable: Optional[bool] = None,
+        ceiling_binds: bool = True,
     ) -> CollectionMap:
         """Build the scope's counts over one connection.
+
+        ``ceiling_binds`` is the caller's once-per-run verdict "this run's
+        source scope is narrowed or has drifted" (see ``source_ceiling``); the
+        default is the SAFE one — apply the ceiling — so a caller that does not
+        pass it over-filters rather than leaks.
 
         ``knowhow_reachable`` is the run's verdict on whether the Knowhow
         complete enumeration may run (``reasoning_retrieval
@@ -553,9 +559,11 @@ class CollectionCatalogService:
                 )
             )
             elements, sources, active_sources = self._scope_signal_row_counts(
-                db, notebook_ids, active_notebook_id
+                db, notebook_ids, active_notebook_id, ceiling_binds=ceiling_binds,
             )
-            kg_objects = self._scope_kg_counts(db, notebook_ids)
+            kg_objects = self._scope_kg_counts(
+                db, notebook_ids, ceiling_binds=ceiling_binds,
+            )
             knowhow_tables = self._reachable_knowhow_tables(
                 db, notebook_ids, active_notebook_id,
                 knowhow_enumeration_reachable() if knowhow_reachable is None
@@ -571,14 +579,24 @@ class CollectionCatalogService:
         )
 
     def collection_map_text(
-        self, active_notebook_id: str, *, knowhow_reachable: Optional[bool] = None
+        self,
+        active_notebook_id: str,
+        *,
+        knowhow_reachable: Optional[bool] = None,
+        ceiling_binds: bool = True,
     ) -> str:
         return render_collection_map(self.collection_map(
             active_notebook_id, knowhow_reachable=knowhow_reachable,
+            ceiling_binds=ceiling_binds,
         ))
 
     def scope_element_plan(
-        self, db: object, notebook_ids: Sequence[str], kind: str
+        self,
+        db: object,
+        notebook_ids: Sequence[str],
+        kind: str,
+        *,
+        ceiling_binds: bool = True,
     ) -> ScopeElementPlan:
         """Traversal plan for one kind over one already-resolved scope.
 
@@ -609,7 +627,9 @@ class CollectionCatalogService:
         total = 0
         for notebook_id in notebook_ids:
             signals = list(self._sources.source_change_signal_rows(db, notebook_id))
-            kept, excluded = self._ceiling_split(db, notebook_id, signals)
+            kept, excluded = self._ceiling_split(
+                db, notebook_id, signals, ceiling_binds=ceiling_binds,
+            )
             all_signals.extend(kept)
             notebook_sources = self._notebook_plan_sources(
                 db, notebook_id, kind, signals
@@ -630,7 +650,11 @@ class CollectionCatalogService:
         )
 
     def scope_source_plan(
-        self, db: object, notebook_ids: Sequence[str]
+        self,
+        db: object,
+        notebook_ids: Sequence[str],
+        *,
+        ceiling_binds: bool = True,
     ) -> ScopeSourcePlan:
         """Traversal plan for the SOURCES collection over one resolved scope.
 
@@ -651,7 +675,9 @@ class CollectionCatalogService:
         all_signals: List[Tuple[str, str]] = []
         for notebook_id in notebook_ids:
             signals = list(self._sources.source_change_signal_rows(db, notebook_id))
-            kept, _excluded = self._ceiling_split(db, notebook_id, signals)
+            kept, _excluded = self._ceiling_split(
+                db, notebook_id, signals, ceiling_binds=ceiling_binds,
+            )
             all_signals.extend(kept)
             sources.extend(
                 self._notebook_visible_sources(notebook_id, kept)
@@ -781,7 +807,11 @@ class CollectionCatalogService:
         return result
 
     def scope_signal_fingerprint(
-        self, db: object, notebook_ids: Sequence[str]
+        self,
+        db: object,
+        notebook_ids: Sequence[str],
+        *,
+        ceiling_binds: bool = True,
     ) -> str:
         """Just the identity half of ``scope_element_plan``.
 
@@ -795,7 +825,9 @@ class CollectionCatalogService:
         all_signals: List[Tuple[str, str]] = []
         for notebook_id in notebook_ids:
             signals = list(self._sources.source_change_signal_rows(db, notebook_id))
-            all_signals.extend(self._ceiling_split(db, notebook_id, signals)[0])
+            all_signals.extend(self._ceiling_split(
+                db, notebook_id, signals, ceiling_binds=ceiling_binds,
+            )[0])
         return signal_fingerprint(all_signals)
 
     def source_ceiling(
@@ -803,9 +835,25 @@ class CollectionCatalogService:
         db: object,
         notebook_id: str,
         signals: Optional[Sequence[Tuple[str, ...]]] = None,
+        *,
+        ceiling_binds: bool = True,
     ) -> Optional[SourceCeiling]:
         """``notebook_id``'s frozen source ceiling for THIS run, or ``None``
         when no ceiling binds that library.
+
+        WHEN a ceiling binds (product decision, 2026-09-29): in a subjectless
+        (global) run the per-library ceilings always bind; in a single-notebook
+        run only when ``ceiling_binds`` is true — the caller's once-per-run
+        verdict "this run's source scope is narrowed or has drifted", the same
+        one the ``source_scoped`` disclosure reads.  The browser freezes an
+        include list even when every source is ticked (``narrowed=False``);
+        such an un-narrowed, un-drifted run must enumerate and count exactly as
+        it did before the ceiling existed — no pushdown into the KG statements,
+        objects without evidence listed and counted — and its frozen list
+        admits every live source anyway, so skipping it loses nothing.  The
+        default is the SAFE value (bind), so a caller that does not pass the
+        verdict over-filters rather than leaks.  The private-Memory exclusion
+        does not depend on any of this; it is unconditional.
 
         THE one definition every collection reader shares (``SourceCeiling``'s
         docstring lists them).  It is ``scoped_allowed_source_ids`` — the same
@@ -827,6 +875,8 @@ class CollectionCatalogService:
         """
         scope = current_source_scope()
         if scope is None:
+            return None
+        if not ceiling_binds and not scope.subjectless:
             return None
         key = (scope, notebook_id)
         with self._lock:
@@ -855,7 +905,11 @@ class CollectionCatalogService:
         )
 
     def scope_ceiling_digest(
-        self, db: object, notebook_ids: Sequence[str]
+        self,
+        db: object,
+        notebook_ids: Sequence[str],
+        *,
+        ceiling_binds: bool = True,
     ) -> str:
         """One digest of every participant's source ceiling, for cursor identity.
 
@@ -876,7 +930,9 @@ class CollectionCatalogService:
         """
         pairs = []
         for notebook_id in notebook_ids:
-            ceiling = self.source_ceiling(db, notebook_id)
+            ceiling = self.source_ceiling(
+                db, notebook_id, ceiling_binds=ceiling_binds,
+            )
             if ceiling is not None:
                 pairs.append((notebook_id, ceiling.digest))
         if not pairs:
@@ -890,7 +946,12 @@ class CollectionCatalogService:
         return digest.hexdigest()
 
     def _ceiling_split(
-        self, db: object, notebook_id: str, signals: Sequence[Tuple[str, ...]]
+        self,
+        db: object,
+        notebook_id: str,
+        signals: Sequence[Tuple[str, ...]],
+        *,
+        ceiling_binds: bool = True,
     ) -> Tuple[List[Tuple[str, ...]], List[Tuple[str, ...]]]:
         """``(in-ceiling signal rows, out-of-ceiling signal rows)``.
 
@@ -900,7 +961,9 @@ class CollectionCatalogService:
         is what keeps an unscoped build byte-identical — the fingerprint of the
         whole list, the notebook-level L2 figure, the unfiltered L4 plan.
         """
-        ceiling = self.source_ceiling(db, notebook_id, signals)
+        ceiling = self.source_ceiling(
+            db, notebook_id, signals, ceiling_binds=ceiling_binds,
+        )
         if ceiling is None:
             return list(signals), []
         kept: List[Tuple[str, ...]] = []
@@ -910,11 +973,17 @@ class CollectionCatalogService:
         return kept, excluded
 
     def scope_kg_type_counts(
-        self, db: object, notebook_ids: Sequence[str]
+        self,
+        db: object,
+        notebook_ids: Sequence[str],
+        *,
+        ceiling_binds: bool = True,
     ) -> Tuple[Tuple[str, int], ...]:
         """Per-type KG totals for a resolved scope — the enumeration's
         denominator, from the same seq-gated memo the map renders."""
-        return self._scope_kg_counts(db, notebook_ids)
+        return self._scope_kg_counts(
+            db, notebook_ids, ceiling_binds=ceiling_binds,
+        )
 
     def invalidate(self) -> None:
         """Drop every cached count.
@@ -937,7 +1006,12 @@ class CollectionCatalogService:
 
     # ----------------------------------------------------------------- element
     def _scope_signal_row_counts(
-        self, db: object, notebook_ids: Sequence[str], active_notebook_id: str
+        self,
+        db: object,
+        notebook_ids: Sequence[str],
+        active_notebook_id: str,
+        *,
+        ceiling_binds: bool = True,
     ) -> Tuple[Tuple[ElementKindCount, ...], int, int]:
         """Element counts AND the user-visible source count, in one pass.
 
@@ -960,7 +1034,9 @@ class CollectionCatalogService:
         active_visible_sources = 0
         for notebook_id in notebook_ids:
             signals = list(self._sources.source_change_signal_rows(db, notebook_id))
-            kept, excluded = self._ceiling_split(db, notebook_id, signals)
+            kept, excluded = self._ceiling_split(
+                db, notebook_id, signals, ceiling_binds=ceiling_binds,
+            )
             counts = (
                 self._ceiling_element_counts(db, notebook_id, signals, kept, excluded)
                 if excluded
@@ -1113,7 +1189,11 @@ class CollectionCatalogService:
 
     # ---------------------------------------------------------------------- KG
     def _scope_kg_counts(
-        self, db: object, notebook_ids: Sequence[str]
+        self,
+        db: object,
+        notebook_ids: Sequence[str],
+        *,
+        ceiling_binds: bool = True,
     ) -> Tuple[Tuple[str, int], ...]:
         """Sum the per-type counts over the scope, memoized per notebook on
         ``kg_mutation_seq``.
@@ -1154,7 +1234,9 @@ class CollectionCatalogService:
             object_type: 0 for object_type in ENUMERABLE_KG_OBJECT_TYPES
         }
         for notebook_id in notebook_ids:
-            for object_type, count in self._notebook_kg_counts(db, notebook_id).items():
+            for object_type, count in self._notebook_kg_counts(
+                db, notebook_id, ceiling_binds=ceiling_binds,
+            ).items():
                 if object_type in totals:
                     totals[object_type] += count
         return tuple(
@@ -1162,7 +1244,9 @@ class CollectionCatalogService:
             for object_type in ENUMERABLE_KG_OBJECT_TYPES
         )
 
-    def _notebook_kg_counts(self, db: object, notebook_id: str) -> Dict[str, int]:
+    def _notebook_kg_counts(
+        self, db: object, notebook_id: str, *, ceiling_binds: bool = True,
+    ) -> Dict[str, int]:
         """Per-type usable object counts MINUS the ones a private Memory owns.
 
         Two queries on a miss instead of one, and the second only when the
@@ -1187,7 +1271,9 @@ class CollectionCatalogService:
         under its own key (the ceiling's digest), never under the unscoped
         entry.
         """
-        ceiling = self.source_ceiling(db, notebook_id)
+        ceiling = self.source_ceiling(
+            db, notebook_id, ceiling_binds=ceiling_binds,
+        )
         row = self._unified_kg.graph_seq_row(db, notebook_id)
         version = (int(row[3]), int(row[0]))
         key = (notebook_id, "" if ceiling is None else ceiling.digest)
