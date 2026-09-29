@@ -397,9 +397,11 @@ def _assert_node_context_out_only(repo, nb):
         ("s-gone2", "q-gone2", "OUT > Flow"), ("s-bare2", "q-bare2", "OUT > Flow"),
         ("s-out2", "OUT step text", "OUT > Flow")]
     assert _nc(repo, nb, "ko-nc-merged", [NC_OUT])["section_path"] == "OUT > Heading"
-    # 兄弟过程 ko-nc-p-in 自己创建于 NC_IN:它的 section 不返回(步骤里也不带)。
+    # 兄弟过程 ko-nc-p-in 自己创建于 NC_IN:它的 section 不返回;它作为 legacy
+    # 步骤的名字同样归因到自己的来源(codex #806 r1,与 payload 步骤同一条归因),
+    # 在外 → 这一步整条不出现(对象自己的 name 仍是实体身份,照常返回)。
     assert _steps(_nc(repo, nb, "ko-nc-p-in", [NC_OUT])) == [
-        ("step in", "OUT step text", ""), ("step out", "OUT step text", "")]
+        ("step out", "OUT step text", "")]
     assert _steps(_nc(repo, nb, "ko-nc-nosec-in", [NC_OUT])) == [("nosec out", "OUT step text", "")]
 
 

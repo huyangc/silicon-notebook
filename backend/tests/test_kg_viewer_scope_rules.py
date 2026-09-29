@@ -145,8 +145,10 @@ def _add_dangling(repo, s):
 def test_evidence_only_hidden_objects_with_and_without_a_certified_reverse_index(
     repo, certified,
 ):
-    """The reverse index is never read on these paths, so certifying it must
-    not change a single answer; the evidence half is judged on each row."""
+    """The evidence half is judged on each row. The reverse index only
+    narrows WHICH clusters are examined (certified: those with a member owned
+    by or citing an unreadable source; uncertified: all of them), so
+    certifying it must not change a single answer here."""
     s = build_scenario(repo, b_memory=False)
     dangling, claim = _add_dangling(repo, s)
     with repo._write() as db:
@@ -325,10 +327,12 @@ def test_statement_count_is_constant_in_the_number_of_unreadable_sources(
 ):
     """Each endpoint issues the same number of statements with 31 and with 301
     unreadable Memory sources: the owned-object set is ONE statement
-    (``relink_object_rows_for_source(source_ids=...)``), partly hidden
-    clusters of a neighbourhood are read in ONE batched statement, and nothing
-    reads ``source_index_backfilled``, the reverse index or a per-cluster
-    COUNT. (The owned objects here stay under one 900-id fold batch.)"""
+    (``relink_object_rows_for_source(source_ids=...)``), the citing set is
+    the certificate plus ONE reverse-index statement
+    (``object_ids_citing_sources``), the clusters of a neighbourhood that
+    need a check are read in ONE batched statement, and nothing issues a
+    per-source read or a per-cluster COUNT. (The suspect objects here stay
+    under one 900-id fold batch.)"""
     s = build_scenario(repo, b_memory=False)
     _foreign_memories(repo, s, 30)
     few = _endpoint_counts(repo, monkeypatch, s)

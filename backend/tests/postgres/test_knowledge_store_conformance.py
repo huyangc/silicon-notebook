@@ -6746,9 +6746,10 @@ def _assert_node_context_out_only(harness) -> None:
         ("s-out2", "OUT step text", "OUT > Flow"),
     ]
     assert _nc(harness, "ko-nc-merged", [NC_OUT])["section_path"] == "OUT > Heading"
-    # 兄弟过程 ko-nc-p-in 自己创建于 NC_IN:它的 section 不返回(步骤里也不带)。
+    # 兄弟过程 ko-nc-p-in 自己创建于 NC_IN:它的 section 不返回;legacy 步骤名
+    # 同样归因到自己的来源(codex #806 r1),在外 → 这一步整条不出现。
     assert _steps(_nc(harness, "ko-nc-p-in", [NC_OUT])) == [
-        ("step in", "OUT step text", ""), ("step out", "OUT step text", ""),
+        ("step out", "OUT step text", ""),
     ]
     assert _steps(_nc(harness, "ko-nc-nosec-in", [NC_OUT])) == [
         ("nosec out", "OUT step text", ""),
