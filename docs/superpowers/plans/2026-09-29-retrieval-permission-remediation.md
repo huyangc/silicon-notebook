@@ -604,6 +604,24 @@ E4-2/E4-3/E4-6 的建图输入排除、E2-2 的缓存构建排除、E4-1 的 chu
   （第 4 支）与未共享门行为不变；`NOTEBOOK_LIVE_SQL` 仍挡住所有支。
 - 变异：去掉 `v.uid = a.created_by` 支，「主人有效」必须红；把它换成 `true`，「成员无效」必须红。
 
+**E6-1 落地记录（提交 d9688ba6，分支 `claude/mount-viewer-scope`）**
+- 公开名：`MOUNT_VIEWER_JOIN`（两个参数，顺序 `(viewer_id, notebook_id)`）、`MOUNT_EFFECTIVE_FOR_VIEWER_EXPR`（零参数，可当布尔列）、
+  `MOUNT_EFFECTIVE_FOR_VIEWER`、`MOUNTED_BASE_IDS_FOR_VIEWER_SUBQUERY`。读权支直接复用 `access_sql.read_access_clause`。
+- **挂载人支被「MOUNT_VALID ∧ 读权支」完全蕴含**（边成立时挂载人自己必能读被挂库），保留它只为短路后面的 EXISTS；所以上面
+  「去掉挂载人支，主人有效必须红」是等价变异，行为上杀不死，只由文本派生断言守住。M3 的实际语义即：挂载只对**自己能读被挂库**的
+  查看者生效。
+- 查看者值先 `NULLIF(…,'')`，空串与 None 同为无查看者（只剩 base / everyone）。`notebooks.created_by` 可空且无回填，NULL 挂载人时只对
+  能读被挂库的人生效。
+- **E6-2 要切换的 store 调用点**（PG / SQLite）：`NotebookStore.resolve_participants`（`notebook_store.py:88` / `:81`）、`participant_rows`
+  （`:113` / `:100`）、`QueryStore.notebook_has_usable_base_kg`（`query_store.py:315` / `:375`）、`mounted_bases_row`（`:447` / `:565`）、
+  `UnifiedKgStore.mounted_base_ids`（`unified_kg_store.py:1422` / `:1338`）、`KnowledgeStore.any_mounted_has_kg_on`（`knowledge_store.py:1177` / `:1021`）、
+  `follow_start_row`（`:1653` / `:1423`）。保持不变：`list_mount_edges`、`mountable_notebooks`、`valid_copied_mount_base_ids`、`mounted_public_base_ids`。
+- **E6-3 的查看者来源**：报告、全局问答、离开后接回的运行在工作线程上执行，查看者取检索运行的 `actor_id`，不取 HTTP 请求上下文。
+  后台路径经 `get_notebook` → `NotebookSummaryQuery.get` 间接求值 `mounted_bases_row` / `notebook_has_usable_base_kg`，E6-3 逐一确认
+  各调用方读不读这两个字段。`services/communities.py:311` 的模块级 `mounted_base_ids` 无调用方，E6-3 删除。
+- `test_notebook_update_authorization_free.py` 按名字点名谓词常量，E6-2 把新名字加进名单。
+- 请求路径调用点的完整清单见实现报告，E6-3 动手前用 grep 按函数名重新核对（其它 PR 合入后行号会变）。
+
 **E6-2 store 与端口**（sonnet，波次 5）
 - 文件：`$R/backend/app/repositories/postgres/notebook_store.py`、`$R/backend/app/repositories/sqlite/notebook_store.py`、
   `$R/backend/app/repositories/postgres/query_store.py`、`$R/backend/app/repositories/sqlite/query_store.py`、`$R/backend/app/repositories/postgres/unified_kg_store.py`、
