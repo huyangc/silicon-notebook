@@ -6,6 +6,7 @@ import {
   citationCheckReasonText,
   hasFailedCitationCheck,
   referenceVerification,
+  verificationExplanation,
   verificationLabel,
   verificationMarkerName,
 } from "../../app/citation-verification.ts";
@@ -61,4 +62,11 @@ test("labels and the marker's accessible name", () => {
   assert.equal(verificationLabel("source_gone"), "资料已删除");
   assert.equal(verificationLabel("unverifiable"), "无法核对");
   assert.equal(verificationMarkerName("[2]", "source_gone"), "[2] 未通过核对：资料已删除");
+});
+
+test("the source_gone explanation also covers a surviving document whose cited passage is gone", () => {
+  // 资料还在、被引的那段在运行中重新解析时没了,同样判 source_gone;那时文档仍能打开,
+  // 所以解释句不能只说「资料已被删除」。标签是跨侧契约,保持原样。
+  assert.equal(verificationExplanation("source_gone"), "这份资料或这段原文已被删除，下面是回答时引用的摘录。");
+  assert.equal(verificationLabel("source_gone"), "资料已删除");
 });
