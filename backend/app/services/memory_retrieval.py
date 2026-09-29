@@ -17,6 +17,7 @@ from app.services.retrieval import (
     cosine,
     keyword_basis,
 )
+from app.services.source_scope import memory_channel_allowed
 from app.services.vector_index import decode_vector
 
 
@@ -73,7 +74,10 @@ class MemoryRetriever:
     ) -> list[MemoryHit]:
         clean_query = (query or "").strip()
         limit = max(1, min(int(limit), 50))
-        if not clean_query:
+        # THE Memory-channel seam (``memory:read``): every hit method funnels
+        # through here, so a closed channel answers empty before the store or
+        # the embedder is touched, whichever of the seven call sites asked.
+        if not clean_query or not memory_channel_allowed():
             return []
         # Memory's candidate generation probes the WHOLE query as one value
         # (a single FTS phrase on SQLite, the same string on PostgreSQL), so the
@@ -155,6 +159,10 @@ class MemoryRetriever:
     ) -> tuple[str, dict[str, dict]]:
         lines: list[str] = []
         id_map: dict[str, dict] = {}
+        if not memory_channel_allowed():
+            # Hits obtained before the channel closed never become prompt
+            # evidence or anchors inside a run that may not read Memory.
+            hits = ()
         for index, hit in enumerate(hits, 1):
             key = f"k{id_offset + index}"
             line = f"{key}: [memory][personal][confirmed] {hit.title} — {hit.text}"

@@ -38,6 +38,7 @@ from app.services.query_intent import (
     validate_confirmed_intent,
 )
 from app.services.search_concurrency import run_under_search_gate
+from app.services.source_scope import default_ceiling_context, memory_access_context
 
 from ._shared import (
     RESULT_LIMIT,
@@ -184,6 +185,45 @@ def _ask_actionable(repo: Any, notebook_id: str, payload: AskRequest) -> Any:
             else "扩展引擎暂时无法完成回答，请重试"
         )
         raise ValueError(f"{message}（reason: {exc.code}）") from None
+
+
+def _memory_read_allowed(repo: Any, principal: Any, notebook_id: str) -> bool:
+    """Whether this token holds ``memory:read`` on the notebook right now.
+
+    The one gate both context tools read: its answer opens or closes the
+    private-Memory channel for the whole run (``memory_access_context``) AND
+    decides which answer items may reach the wire (``_strip_memory_items``).
+    A ``PermissionError`` is a deny, never an error.
+    """
+    try:
+        repo.require_agent_access(principal, "memory:read", notebook_id)
+    except PermissionError:
+        return False
+    return True
+
+
+def _strip_memory_items(answer: Any, allow_memory: bool) -> tuple[list, list]:
+    """``(anchors, citations)`` of ``answer`` that this token may receive.
+
+    Without ``memory:read`` every Memory-backed item goes: a citation with a
+    ``memory_id`` and an anchor whose ``object_type`` is ``'memory'``.  The run
+    already executed with the Memory channel closed, so neither should exist;
+    this is the wire-side backstop for any path that still mints one.
+
+    Filtered BEFORE any ``[:RESULT_LIMIT]`` slice, and the caller counts
+    omissions from THESE lists: slicing first, or counting the unfiltered
+    ones, leaks the hidden Memory count by arithmetic (with 25 citations of
+    which 3 are Memory, a token with ``memory:read`` would get 20 rows +
+    ``omitted_items=5`` and a token without 18 + 5 -- and 20 - 18 is the
+    count).  Filtered rows leave no trace, exactly as
+    ``search_notebook_context`` drops Memory hits.
+    """
+    if allow_memory:
+        return list(answer.anchors), list(answer.citations)
+    return (
+        [item for item in answer.anchors if item.object_type != "memory"],
+        [item for item in answer.citations if not item.memory_id],
+    )
 
 
 def _validation_fields(exc: ValidationError) -> str:
@@ -390,6 +430,7 @@ def _reasoning_intent_history(
 def _run_ask_notebook(
     ctx: Context, repo: Any, principal: Any, notebook_id: str, question: str,
     mode: str, conversation_id: str, reply: _IntentReply | None,
+    allow_memory: bool,
 ) -> Any:
     """``ask_notebook``'s blocking body: resolve a clarification reply if one
     came in, the availability gate, then -- for a reasoning question nobody
@@ -416,8 +457,19 @@ def _run_ask_notebook(
     ``cancel_event`` -- HTTP sets one when the browser disconnects, while
     this surface never abandons a call it is still executing (there is no
     client cancel signal to forward).
+
+    ``allow_memory`` (the token's ``memory:read``) opens or closes the
+    private-Memory channel for everything run here.  It is entered HERE, in
+    the worker thread that executes retrieval, because a context variable set
+    on the event loop does not follow the work into this thread.  The ask
+    itself runs under the default retrieval ceiling built for the token's
+    owner -- never under a submitted ``local_scope``: this surface has no
+    source picker, and its hidden half follows the channel (no Memory when
+    closed), so neither another member's nor, without ``memory:read``, the
+    owner's own Memory projections are retrievable.  A reader failure fails
+    the call; it never falls back to an unscoped run.
     """
-    with _owner_request_context(principal):
+    with _owner_request_context(principal), memory_access_context(allow_memory):
         confirmation: AskIntentConfirmation | None = None
         if reply is not None:
             confirmation = _confirm_pending_intent(
@@ -465,16 +517,21 @@ def _run_ask_notebook(
                 answers=[],
                 understanding_ms=understanding_ms,
             )
-        return _ask_actionable(
-            repo,
-            notebook_id,
-            AskRequest(
-                question=question,
-                mode=mode,
-                conversation_id=conversation_id or None,
-                intent=confirmation,
-            ),
-        )
+        # ``_runtime``, not a facade seat (precedent: ``_shared.refuse_if_mirrored``):
+        # the readers are the runtime's one production wiring.
+        with default_ceiling_context(
+            notebook_id, principal.owner_id, repo._runtime.ceiling_readers()
+        ):
+            return _ask_actionable(
+                repo,
+                notebook_id,
+                AskRequest(
+                    question=question,
+                    mode=mode,
+                    conversation_id=conversation_id or None,
+                    intent=confirmation,
+                ),
+            )
 
 
 _CLARIFICATION_NEXT_STEP = (
@@ -741,15 +798,13 @@ def register_memory_context_tools(
         )
 
         def load() -> list[dict[str, Any]]:
-            with _owner_request_context(principal):
+            # The channel is closed IN this worker thread, before the search
+            # runs: without memory:read the Memory retriever is never called.
+            allow_memory = _memory_read_allowed(repo, principal, notebook_id)
+            with _owner_request_context(principal), memory_access_context(
+                allow_memory
+            ):
                 response = repo.search_notebook(notebook_id, query)
-            allow_memory = True
-            try:
-                repo.require_agent_access(
-                    principal, "memory:read", notebook_id
-                )
-            except PermissionError:
-                allow_memory = False
             rows: list[dict[str, Any]] = []
             for hit in response.hits:
                 if hit.memory_id and not allow_memory:
@@ -898,30 +953,21 @@ def register_memory_context_tools(
         )
 
         def run_ask():
-            return _run_ask_notebook(
+            allow = _memory_read_allowed(repo, principal, notebook_id)
+            return allow, _run_ask_notebook(
                 ctx, repo, principal, notebook_id, question, mode,
-                conversation_id, reply,
+                conversation_id, reply, allow,
             )
 
-        outcome = await _run_with_progress(ctx, run_ask, label="ask_notebook")
+        allow_memory, outcome = await _run_with_progress(
+            ctx, run_ask, label="ask_notebook"
+        )
         if isinstance(outcome, _PendingIntent):
             return _clarification_payload(outcome)
         answer = outcome
-
-        def check_memory_scope() -> bool:
-            # Mirrors search_notebook_context's allow_memory gate exactly: a
-            # token without memory:read must not see memory-backed citations,
-            # even though chunk/reasoning ask unconditionally builds them.
-            try:
-                repo.require_agent_access(principal, "memory:read", notebook_id)
-                return True
-            except PermissionError:
-                return False
-
-        allow_memory = await anyio.to_thread.run_sync(check_memory_scope)
-
+        anchors, visible_citations = _strip_memory_items(answer, allow_memory)
         anchor_rows = []
-        for anchor in answer.anchors[:RESULT_LIMIT]:
+        for anchor in anchors[:RESULT_LIMIT]:
             row = {
                 "key": anchor.key,
                 "object_id": anchor.object_id,
@@ -947,23 +993,6 @@ def register_memory_context_tools(
                     "row_id": anchor.knowhow.row_id,
                 }
             anchor_rows.append(row)
-        # Scope-filtered rows leave NO trace, exactly as search_notebook_context
-        # drops memory hits: `omitted_items` would otherwise tell a token
-        # without memory:read how many private Memory citations back this answer
-        # -- a number it is not entitled to. Budget truncation is a different
-        # thing and is still reported.
-        #
-        # ⚠ The filter must run BEFORE the [:RESULT_LIMIT] slice, and the
-        # omitted count below must be taken from the FILTERED length. Filtering
-        # inside the loop over an already-sliced list leaks the very number this
-        # is protecting: with 25 citations of which 3 are Memory, a token with
-        # memory:read gets 20 rows + omitted_items=5, and a token without gets
-        # 18 rows + omitted_items=5 -- and 20-18 is the Memory count, recovered
-        # by arithmetic from a response that was supposed to hide it.
-        visible_citations = [
-            citation for citation in answer.citations
-            if allow_memory or not citation.memory_id
-        ]
         citation_rows = []
         for citation in visible_citations[:RESULT_LIMIT]:
             row = {
@@ -1009,10 +1038,9 @@ def register_memory_context_tools(
             "citations": citation_rows,
             **_intent_entry(answer),
         }, initial_omitted_items=(
-                max(0, len(answer.anchors) - RESULT_LIMIT)
-                # `visible_citations`, not `answer.citations` -- see the note
-                # above the filter: counting the unfiltered list here is exactly
-                # how the hidden Memory count leaks back out.
+                # The FILTERED lists (``_strip_memory_items``): counting the
+                # unfiltered ones is how the hidden Memory count leaks out.
+                max(0, len(anchors) - RESULT_LIMIT)
                 + max(0, len(visible_citations) - RESULT_LIMIT)
             ),
             field_limits={"answer": 6_000, "conclusion": 1_000,
