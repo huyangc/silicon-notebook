@@ -30,6 +30,7 @@ from app.services.share_disclosure import (
     ShareDisclosureRequired,
     report_share_disclosure,
     require_publishable,
+    share_memory_guard,
 )
 from app.services.report_export import export_completed_reports
 from app.services.reports.intent_confirmation import (
@@ -657,9 +658,12 @@ def share_report_route(
     would show an empty or half-written body to whoever it was sent to.
 
     M4: a report citing the author's own Memory is published only by the
-    author and only with ``acknowledged_memory_count`` equal to the count taken
-    here, on this request, right before the share flag flips — never a number
-    from an earlier request.  A mismatch is a 409 whose ``detail`` carries
+    author and only with ``acknowledged_memory_count`` equal to the count —
+    never a number from an earlier request.  The count is taken here (which
+    decides the 403 and refuses early without a write) and taken again by
+    ``share_report`` inside the transaction that sets the token
+    (``memory_guard``), so a Memory change committed in between is refused
+    too.  A mismatch is a 409 whose ``detail`` carries
     ``share_disclosure_required`` and the current count; no token is issued.
     A report citing none publishes exactly as before (no body needed).  A
     ``done`` report is frozen (it cannot be regenerated), so what the author
@@ -669,11 +673,17 @@ def share_report_route(
     report = _own_report_or_404(repo, notebook_id, report_id)
     if str(report.get("status") or "") != "done":
         raise user_error(409, "只能分享已完成的报告。")
+    acknowledged = payload.acknowledged_memory_count if payload else None
+    disclosure = _share_disclosure(repo, report)
     try:
         require_publishable(
-            _share_disclosure(repo, report),
+            disclosure,
             requester_id=repo.current_user().id,
-            acknowledged=payload.acknowledged_memory_count if payload else None,
+            acknowledged=acknowledged,
+        )
+        token = repo.share_report(
+            notebook_id, report_id,
+            memory_guard=share_memory_guard(disclosure, acknowledged),
         )
     except NonAuthorShareRefused:
         raise user_error(
@@ -681,7 +691,7 @@ def share_report_route(
         ) from None
     except ShareDisclosureRequired as required:
         raise HTTPException(status_code=409, detail=required.detail()) from None
-    return ReportShareResponse(share_token=repo.share_report(notebook_id, report_id))
+    return ReportShareResponse(share_token=token)
 
 
 @router.get("/notebooks/{notebook_id}/reports/{report_id}/share",

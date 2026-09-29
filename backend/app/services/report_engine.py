@@ -3103,8 +3103,35 @@ class ReportEngine:
             sections=tuple(persisted_sections),
             content_md=content_md,
             gaps=tuple(gaps),
-            references=tuple(MappingProxyType(dict(row)) for row in references),
+            references=tuple(
+                MappingProxyType(row) for row in self._record_memory_citations(references)
+            ),
         )
+
+    def _record_memory_citations(self, references) -> list[dict]:
+        """Mark, on each stored citation, that its source is the author's Memory.
+
+        A citation whose ``source_id`` is one of the author's Memory projection
+        sources gets ``memory_id`` (the Memory behind it) and
+        ``memory_owner_id`` (the author).  Share disclosure (M4) counts these
+        from the stored report, so deleting the Memory or its projection later
+        cannot hide that the report carries a private excerpt.  Additive only:
+        other citations are stored exactly as before, and the public report
+        projection is an allowlist that never names these fields.
+        """
+        rows = [dict(row) for row in references]
+        retriever = self.dependencies.memory_retriever
+        source_ids = [str(row.get("source_id") or "") for row in rows]
+        if retriever is None or not any(source_ids):
+            return rows
+        memory_of = retriever.store.memory_sources_for_source_ids(
+            source_ids, self.user_id
+        )
+        for row, source_id in zip(rows, source_ids):
+            if source_id in memory_of:
+                row["memory_id"] = memory_of[source_id]
+                row["memory_owner_id"] = self.user_id
+        return rows
 
     def _generate_run(
         self,

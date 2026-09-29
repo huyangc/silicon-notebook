@@ -81,8 +81,8 @@ def test_memory_ids_for_source_ids_binds_a_long_citation_list_once(world):
     wanted = [f"src-missing-{index}" for index in range(40_000)]
     wanted.append(world.memories["a1"][1])
     assert store.memory_ids_for_source_ids(wanted, world.alice.id) == [a1]
-    sql = store.memory_ids_for_source_ids_sql()
-    assert sql.count("?") == 2
+    for lock in (False, True):
+        assert store.memory_sources_for_source_ids_sql(lock=lock).count("?") == 2
 
 
 def test_memory_ids_for_source_ids_probes_sources_by_primary_key(world):
@@ -91,7 +91,7 @@ def test_memory_ids_for_source_ids_probes_sources_by_primary_key(world):
         plan = [
             str(row["detail"])
             for row in db.execute(
-                "EXPLAIN QUERY PLAN " + store.memory_ids_for_source_ids_sql(),
+                "EXPLAIN QUERY PLAN " + store.memory_sources_for_source_ids_sql(),
                 (json.dumps(["a", "b"]), world.alice.id),
             ).fetchall()
         ]
@@ -123,10 +123,19 @@ def test_disclosure_counts_distinct_memory_objects_and_asks_the_store_as_author(
             {"object_type": "memory", "object_id": "mem-1"},
             {"object_type": "memory", "object_id": "mem-1"},
             {"object_type": "element", "object_id": "el-1", "source_id": "src-1"},
+            {"object_type": "element", "object_id": "el-2", "source_id": "src-2",
+             "memory_id": "mem-2", "memory_owner_id": "u-author"},
+            {"object_type": "element", "object_id": "el-3", "source_id": "src-3",
+             "memory_id": "mem-3", "memory_owner_id": "u-other"},
             "not a reference",
         ],
     })
-    assert disclosure == ShareDisclosure("u-author", ("mem-1",))
+    assert disclosure == ShareDisclosure(
+        "u-author", ("mem-1", "mem-2"),
+        known_memory_ids=frozenset({"mem-1", "mem-2"}),
+        live_source_ids=("src-1",),
+    )
+    # Recorded citations are never looked up again; only unrecorded ones are.
     assert reader.calls == [(["src-1"], "u-author")]
 
 

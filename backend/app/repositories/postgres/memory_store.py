@@ -2466,47 +2466,72 @@ class MemoryStore:
         return int(row["n"])
 
     @staticmethod
-    def memory_ids_for_source_ids_sql() -> str:
-        """The statement behind ``memory_ids_for_source_ids`` (also EXPLAIN-pinned).
+    def memory_sources_for_source_ids_sql(*, lock: bool = False) -> str:
+        """The statement behind the Memory-source lookups (also EXPLAIN-pinned).
 
         Two scalar parameters, in order: the id list as ONE JSON array text, and
         the owner.  The id list is a citation list (a report's references), so it
         can run to hundreds; it is unpacked in SQL instead of being bound as one
         placeholder per id or as ``= ANY(%s)`` with a Python list.  The row
         estimate of ``jsonb_array_elements_text`` does not depend on the bound
-        value, so the custom and generic plans are the same primary-key nested
-        loop and a prepared statement cannot flip to a worse plan.
+        value, so the custom and generic plans are the same and a prepared
+        statement cannot flip to a worse plan.
+
+        ``lock=True`` (the report share transaction) adds ``FOR SHARE`` on the
+        matching ``sources`` rows and their ``memory_items`` rows: removing the
+        projection, deleting / moving / changing the status of exactly those
+        Memory entries waits for the share transaction to commit, or — when it
+        committed first — is seen by this statement (READ COMMITTED re-checks a
+        row it waited for).  Nothing else is locked: other users' Memory and the
+        author's uncited Memory are untouched.  The ``memory_items`` join only
+        takes the lock; readability is decided by ``memory_source_readable``.
         """
         from app.repositories.postgres import memory_sql
 
         return (
-            "SELECT DISTINCT s.memory_id AS memory_id "
+            "SELECT s.id AS source_id, s.memory_id AS memory_id "
             "FROM jsonb_array_elements_text(%s::jsonb) AS wanted(id) "
             "JOIN sources s ON s.id = wanted.id "
-            f"WHERE {memory_sql.memory_source_type_predicate('s.source_type')} "
-            f"AND {memory_sql.memory_source_readable('s')} "
-            "ORDER BY memory_id"
+            + ("JOIN memory_items lm ON lm.id = s.memory_id " if lock else "")
+            + f"WHERE {memory_sql.memory_source_type_predicate('s.source_type')} "
+            f"AND {memory_sql.memory_source_readable('s')}"
+            + (" FOR SHARE OF s, lm" if lock else "")
         )
+
+    @staticmethod
+    def memory_sources_on(
+        db: object, source_ids: Sequence[str], owner_id: str, *, lock: bool = False
+    ) -> dict[str, str]:
+        """``{source_id: memory_id}`` for the given ids that are ``owner_id``'s
+        Memory sources, read on the caller's connection (see the SQL builder)."""
+        wanted = list(dict.fromkeys(str(item) for item in source_ids if item))
+        owner = str(owner_id or "")
+        if not wanted or not owner:
+            return {}
+        rows = db.execute(
+            MemoryStore.memory_sources_for_source_ids_sql(lock=lock),
+            (json.dumps(wanted), owner),
+        ).fetchall()
+        return {str(row["source_id"]): str(row["memory_id"]) for row in rows}
+
+    def memory_sources_for_source_ids(
+        self, source_ids: Sequence[str], owner_id: str
+    ) -> dict[str, str]:
+        """``{source_id: memory_id}`` for the ids that are ``owner_id``'s Memory
+        sources.
+
+        A source maps only when it is a Memory source (``source_type =
+        'memory'``) readable by ``owner_id`` under ``memory_sql``'s single
+        definition — its ``memory_items`` row was created by that owner.
+        Another member's Memory source, an orphaned Memory source, Knowhow, an
+        ordinary source and an unknown id map to nothing, so a caller can never
+        learn about anyone else's Memory.  Empty ids or owner: ``{}``.
+        """
+        with self.database.connect() as db:
+            return self.memory_sources_on(db, source_ids, owner_id)
 
     def memory_ids_for_source_ids(
         self, source_ids: Sequence[str], owner_id: str
     ) -> list[str]:
-        """Memory ids behind the given source ids that belong to ``owner_id``.
-
-        A source counts only when it is a Memory source (``source_type =
-        'memory'``) readable by ``owner_id`` under ``memory_sql``'s single
-        definition — i.e. its ``memory_items`` row was created by that owner.
-        Another member's Memory source, an orphaned Memory source, a Knowhow or
-        an ordinary source, and an unknown id contribute nothing, so a caller
-        that counts the result can never learn about anyone else's Memory.
-        Sorted and distinct; an empty id list or owner returns ``[]``.
-        """
-        wanted = list(dict.fromkeys(str(item) for item in source_ids if item))
-        owner = str(owner_id or "")
-        if not wanted or not owner:
-            return []
-        with self.database.connect() as db:
-            rows = db.execute(
-                self.memory_ids_for_source_ids_sql(), (json.dumps(wanted), owner)
-            ).fetchall()
-        return [str(row["memory_id"]) for row in rows]
+        """Sorted distinct Memory ids behind ``memory_sources_for_source_ids``."""
+        return sorted(set(self.memory_sources_for_source_ids(source_ids, owner_id).values()))

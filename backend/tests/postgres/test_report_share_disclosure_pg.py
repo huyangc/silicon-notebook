@@ -50,6 +50,58 @@ def test_report_share_disclosure_scenario_pg(world, case):
     CASES[case](world)
 
 
+def test_share_transaction_locks_only_the_cited_memory_pg(world):
+    """While the share transaction is between its count and its commit, a
+    status change of the cited Memory waits for it, and nothing else does:
+    the author's uncited Memory and another user's Memory are confirmed at
+    once.  The hold lasts exactly the share transaction."""
+    import threading
+    import time
+
+    from tests.report_share_disclosure_cases import make_report, share, source_ref
+
+    make_memory(world, world.alice, "a1")
+    cited_memory, cited_source = world.memories["a1"]
+    rid = make_report(world, world.alice, [source_ref(cited_source, "k1")])
+    store = world.repo._runtime.report_store
+    real_now = store.now
+    inside, release = threading.Event(), threading.Event()
+
+    def held_now():
+        inside.set()
+        assert release.wait(30)
+        return real_now()
+
+    world.monkeypatch.setattr(store, "now", held_now)
+    results: dict[str, object] = {}
+
+    def publish():
+        results["share"] = share(world, world.alice, rid, 1).status_code
+
+    def deprecate_cited():
+        world.repo._runtime.memory_service.deprecate(cited_memory, world.alice.id)
+        results["deprecated_at"] = time.monotonic()
+
+    publisher = threading.Thread(target=publish)
+    publisher.start()
+    assert inside.wait(30), "the share transaction never reached its UPDATE"
+    blocked = threading.Thread(target=deprecate_cited)
+    blocked.start()
+    # Ordinary Memory writes are not held up by the publication.
+    started = time.monotonic()
+    make_memory(world, world.alice, "a2")          # the author's uncited Memory
+    make_memory(world, world.owner, "o1")          # another user's Memory
+    assert time.monotonic() - started < 3
+    blocked.join(1.0)
+    assert blocked.is_alive(), "the cited Memory changed under the share transaction"
+    released_at = time.monotonic()
+    release.set()
+    publisher.join(30)
+    blocked.join(30)
+    assert results["share"] == 200
+    assert results["deprecated_at"] >= released_at
+
+
 def test_memory_ids_for_source_ids_maps_only_the_owners_memory_sources_pg(world):
     store = world.repo._runtime.memory_store
     a1 = make_memory(world, world.alice, "a1")
@@ -79,7 +131,8 @@ def test_memory_ids_for_source_ids_is_stable_across_prepared_executions_pg(world
     store = world.repo._runtime.memory_store
     a1 = make_memory(world, world.alice, "a1")
     source = world.memories["a1"][1]
-    assert store.memory_ids_for_source_ids_sql().count("%s") == 2
+    for lock in (False, True):
+        assert store.memory_sources_for_source_ids_sql(lock=lock).count("%s") == 2
     for length in (1, 3, 300, 40_000, 2, 1, 5, 7, 9, 11, 13, 15):
         wanted = [f"src-missing-{index}" for index in range(length - 1)] + [source]
         assert store.memory_ids_for_source_ids(wanted, world.alice.id) == [a1]
@@ -110,7 +163,7 @@ def _seed_sources(world, *, uploads: int, foreign_memories: int) -> None:
         db.execute("ANALYZE memory_items")
 
 
-def _plan(world, wanted: list[str]) -> str:
+def _plan(world, wanted: list[str], *, lock: bool = False) -> str:
     store = world.repo._runtime.memory_store
     with world.repo._runtime.database.connect() as db:
         db.execute("SET LOCAL enable_seqscan=off")
@@ -118,7 +171,8 @@ def _plan(world, wanted: list[str]) -> str:
         return "\n".join(
             str(row["QUERY PLAN"])
             for row in db.execute(
-                "EXPLAIN (COSTS OFF) " + store.memory_ids_for_source_ids_sql(),
+                "EXPLAIN (COSTS OFF) "
+                + store.memory_sources_for_source_ids_sql(lock=lock),
                 (json.dumps(wanted), world.alice.id),
             ).fetchall()
         )
@@ -148,3 +202,11 @@ def test_memory_ids_for_source_ids_explain_pin_pg(world):
     assert "Function Scan on jsonb_array_elements_text wanted" in many, many
     assert "Index Scan using pk_sources on sources s" in many, many
     assert "Seq Scan" not in many, many
+
+    # The share transaction's locking read: the same probe, plus the cited
+    # rows' memory_items by primary key, under LockRows.
+    locked = _plan(world, wanted, lock=True)
+    assert "LockRows" in locked, locked
+    assert "Index Scan using pk_sources on sources s" in locked, locked
+    assert "pk_memory_items on memory_items lm" in locked, locked
+    assert "Seq Scan" not in locked, locked
