@@ -1249,7 +1249,7 @@ def _peer_leg(active_id: str, notebook_id: str) -> bool:
     return federated_ask_active() or notebook_id != active_id
 
 
-def _peer_visible_sources(candidates, notebook_id: str) -> tuple:
+def _peer_visible_sources(candidates, notebook_id: str) -> "tuple | frozenset":
     """This peer library's live visible ceiling, frozen for the run.
 
     ``all_visible_source_ids`` only -- never ``hidden_source_ids``.  The
@@ -1257,7 +1257,31 @@ def _peer_visible_sources(candidates, notebook_id: str) -> tuple:
     library's Memory/Knowhow projections cannot reach the chunk channel today
     at all.  Letting them through here would be a brand-new authorization
     surface, not a federation of what is already readable.
+
+    In a single-library run whose scope already froze this mounted library's
+    ceiling (``source_scope.default_ceiling_context``), that frozenset IS the
+    answer and nothing is read: the constructor froze exactly this visible set
+    moments earlier, so re-reading it would read the same list a second time per
+    run -- and the result is intersected with that same ceiling downstream
+    anyway (``scoped_allowed_source_ids``), so live ∩ frozen was already the
+    frozen set minus later deletions.  Every consumer iterates it (order is not
+    part of the contract).  A library frozen to ``frozenset()`` because its read
+    failed therefore contributes nothing here either.
+
+    A SUBJECTLESS (global) run keeps the live read: there the per-library
+    enumeration is also the federation's coverage probe -- it runs under the
+    plan's per-library budget and feeds the library's skip receipt and the
+    "no visible source, no query" rule -- which this reuse must not bypass.
     """
+    from app.services.source_scope import current_source_scope
+
+    scope = current_source_scope()
+    frozen = (
+        None if scope is None or scope.subjectless
+        else scope.source_ceiling_for(notebook_id)
+    )
+    if frozen is not None:
+        return frozen
     return memoized_retrieval_value(
         ("federated_chunk_visible", notebook_id),
         lambda: tuple(candidates.sources.all_visible_source_ids(notebook_id)),

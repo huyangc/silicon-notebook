@@ -70,6 +70,7 @@ changing persisted scale-index artifacts.
 from __future__ import annotations
 
 import json
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -1683,46 +1684,105 @@ class CeilingReaders:
 
     * ``participants(notebook_id)`` -- ``participant_notebook_ids``: the active
       notebook first, then every mount that is valid right now;
-    * ``visible_by_notebook(notebook_ids)`` -- ``visible_source_ids_by_notebook``:
-      every requested library's visible sources in ONE read snapshot, keyed by
-      notebook id (a missing key reads as "nothing visible", fail-closed);
+    * ``visible(notebook_id)`` -- ``all_visible_source_ids``: ONE library's
+      visible sources.  Deliberately one statement per library rather than the
+      batched ``visible_source_ids_by_notebook``: a mounted library must fail
+      on its own (see ``_mounted_library_ceilings``), and one statement per
+      library was also measured cheaper at 6 x 49k sources (SQLite 123 ms vs
+      168 ms, PostgreSQL 156 ms vs 306 ms);
     * ``hidden(notebook_id, owner_id)`` -- ``hidden_source_ids``: the RAW
       owner-scoped hidden half (the owner's Memory projections plus the
       notebook-wide Knowhow ones), exactly what the drift probe re-reads;
-    * ``source_metadata(source_ids)`` -- ``source_metadata``: consulted only to
-      classify that hidden half when the Memory channel is closed.
+    * ``memory_sources(notebook_id)`` -- ``memory_source_ids`` on a connection
+      of the caller's: the notebook's Memory source ids (primary keys only),
+      read only when the Memory channel is closed.
+
+    ``emit`` receives the content-free ``default_ceiling_library_skipped``
+    event (``notebook_id`` and ``reason`` only); optional, and fail-open.
     """
 
     participants: Callable[[str], Iterable[str]]
-    visible_by_notebook: Callable[[Sequence[str]], Mapping[str, Iterable[str]]]
+    visible: Callable[[str], Iterable[str]]
     hidden: Callable[[str, str], Iterable[str]]
-    source_metadata: Callable[[Sequence[str]], Mapping[str, Mapping[str, Any]]]
+    memory_sources: Callable[[str], Iterable[str]]
+    emit: Callable[[dict], Any] | None = None
+
+
+# Per-library budget for a mounted library's visible read.  The same default as
+# ``GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS``, the per-library allowance federation
+# already applies to a library read inside a global run.
+DEFAULT_MOUNTED_READ_SECONDS = 5.0
 
 
 def partition_memory_sources(
     source_ids: Iterable[str],
-    source_metadata: Callable[[Sequence[str]], Mapping[str, Mapping[str, Any]]],
+    memory_source_ids: Iterable[str],
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Split hidden source ids into ``(non-Memory, Memory)`` in one read.
+    """Split source ids into ``(non-Memory, Memory)``, order preserved.
 
-    THE one spelling of "which of these projection sources are Memory" for the
-    ceiling side (formerly inlined in the plugin engine's hidden-source reader).
-    Order is preserved.  An id with no metadata row -- deleted between the two
-    reads -- lands in NEITHER half: it has no content left to admit, and
-    guessing its type could only be wrong in the admitting direction.
+    THE ceiling side's spelling of "which of these sources are Memory": the
+    membership test against the notebook's Memory source ids
+    (``SourceStore.memory_source_ids``, the store's single definition of that
+    set).  Pure -- the caller performs the one read.
     """
-    ids = tuple(dict.fromkeys(str(value) for value in source_ids if value))
-    if not ids:
-        return (), ()
-    metadata = source_metadata(ids)
+    memory_ids = frozenset(str(value) for value in memory_source_ids)
     kept: list[str] = []
     memory: list[str] = []
-    for source_id in ids:
-        row = metadata.get(source_id)
-        if row is None:
-            continue
-        (memory if row.get("source_type") == "memory" else kept).append(source_id)
+    for source_id in dict.fromkeys(str(value) for value in source_ids if value):
+        (memory if source_id in memory_ids else kept).append(source_id)
     return tuple(kept), tuple(memory)
+
+
+def _emit_ceiling_event(readers: CeilingReaders, event: dict) -> None:
+    if readers.emit is None:
+        return
+    try:
+        readers.emit(event)
+    except Exception:  # noqa: BLE001 - observability is fail-open
+        pass
+
+
+def _mounted_library_ceilings(
+    libraries: Iterable[str],
+    readers: CeilingReaders,
+    cancel_event: Any,
+    seconds: float,
+) -> dict[str, frozenset[str]]:
+    """Each mounted library's VISIBLE sources, read one library at a time.
+
+    Every read runs under its OWN ``read_budget`` of ``seconds`` (nested inside
+    any budget the caller already holds, so it can only get shorter), and a
+    library whose read fails or exceeds it is frozen to ``frozenset()`` -- an
+    explicit deny -- with a content-free event, instead of failing the request.
+    That is the fault isolation federation already gives a library it cannot
+    enumerate (``chunk_federation_skipped``), and it is fail-CLOSED: the
+    library is not searched at all, never searched without a ceiling.
+
+    A stop is not a library failure: cancellation is checked before each read
+    and again after a failed one, and ``AskCancelled`` (like the participant
+    override's control error) propagates.
+    """
+    from app.domain.retrieval_control import RetrievalControlError
+    from app.repositories.read_budget import classify_read_failure, read_budget
+    from app.services.cancellation import AskCancelled, raise_if_cancelled
+
+    ceilings: dict[str, frozenset[str]] = {}
+    for library in libraries:
+        raise_if_cancelled(cancel_event)
+        try:
+            with read_budget(time.monotonic() + float(seconds), cancel_event):
+                ceilings[library] = _frozen_source_ids(readers.visible(library))
+        except (AskCancelled, RetrievalControlError):
+            raise
+        except Exception as exc:  # noqa: BLE001 - one library must not fail the run
+            raise_if_cancelled(cancel_event)
+            ceilings[library] = frozenset()
+            _emit_ceiling_event(readers, {
+                "kind": "default_ceiling_library_skipped",
+                "notebook_id": library,
+                "reason": classify_read_failure(exc) or "unavailable",
+            })
+    return ceilings
 
 
 @contextmanager
@@ -1733,6 +1793,8 @@ def default_ceiling_context(
     *,
     local_scope: Any = None,
     base_scope: Any = None,
+    cancel_event: Any = None,
+    mounted_read_seconds: float = DEFAULT_MOUNTED_READ_SECONDS,
 ) -> Iterator[None]:
     """Install the retrieval ceiling EVERY entry point runs under.
 
@@ -1763,38 +1825,53 @@ def default_ceiling_context(
        ``notebook_id`` is frozen to its VISIBLE sources only -- a mounted
        library's Memory/Knowhow projections belong to its own members -- and
        ``ceilings_total`` is set, so a library mounted after this freeze (or
-       otherwise unnamed) participates in nothing.
+       otherwise unnamed) participates in nothing.  Each mounted library is read
+       under its own ``mounted_read_seconds`` budget and ``cancel_event``; one
+       whose read fails is frozen to ``frozenset()`` (deny) with a content-free
+       ``default_ceiling_library_skipped`` event.  The ACTIVE notebook's own
+       reads are not isolated: if they fail the request fails -- a run never
+       proceeds unscoped.  ``chunk_federation._peer_visible_sources`` hands the
+       frozen ceiling back to every federated leg, so each mounted library's
+       visible set is read once per run, here.
 
-    COST: at most three reader calls with a synthesised local dimension
-    (participants, one batched visible snapshot for the notebook and all its
-    mounts, the hidden half), plus one ``source_metadata`` call only when the
-    Memory channel is closed and the hidden half is non-empty; at most two with
-    a submitted one (participants, and the batched visible read only if
-    something is mounted).  The count depends on neither the number of sources
-    nor the number of mounted libraries.  Each library's ceiling is turned into
-    a ``frozenset`` exactly once and nothing is sorted.
+    COST.  Reader calls: a synthesised local dimension makes 3 + M (the
+    participants, the notebook's visible set, its hidden half, and one visible
+    read per mounted library M), plus 1 ``memory_sources`` read when the Memory
+    channel is closed; a submitted one makes 1 + M.  None of that depends on the
+    number of SOURCES, and M is bounded by the mount set.  Bytes and time do
+    not share that property: both grow linearly with the total number of
+    visible sources across the notebook and its mounted libraries, because each
+    library's ceiling is materialised as a ``frozenset`` (built exactly once,
+    never sorted).  Measured with the real stores at 49k visible sources per
+    library (median; SQLite / PostgreSQL; machine load ~24): no mount 27 / 32
+    ms, one mount 63 / 70 ms, six mounts 349 / 313 ms; peak allocation 10 / 14
+    MB, 14 / 18 MB and 44 / 48 MB.  The mounted-library share is not new work in
+    a single-library run: the federated legs read the same visible sets today
+    and now reuse these frozen ones instead (``_peer_visible_sources``).
     """
     if current_source_scope() is not None:
         yield
         return
+    from app.services.cancellation import raise_if_cancelled
+
+    raise_if_cancelled(cancel_event)
     peers = tuple(dict.fromkeys(
         str(value) for value in readers.participants(notebook_id)
         if value and str(value) != notebook_id
     ))
     synthesize_local = local_scope is None
-    wanted = (notebook_id, *peers) if synthesize_local else peers
-    visible = readers.visible_by_notebook(wanted) if wanted else {}
     local = local_scope
     if synthesize_local:
+        visible = readers.visible(notebook_id)
         hidden = tuple(str(value) for value in readers.hidden(notebook_id, owner_id))
         withheld: tuple[str, ...] = ()
         if hidden and not memory_channel_allowed():
             hidden, withheld = partition_memory_sources(
-                hidden, readers.source_metadata
+                hidden, readers.memory_sources(notebook_id)
             )
         local = {
             "mode": "include",
-            "source_ids": visible.get(notebook_id) or (),
+            "source_ids": visible,
             "hidden_source_ids": hidden,
             "withheld_hidden_source_ids": withheld,
             "narrowed": False,
@@ -1804,7 +1881,9 @@ def default_ceiling_context(
         notebook_id,
         local,
         base_scope,
-        {peer: visible.get(peer) or () for peer in peers},
+        _mounted_library_ceilings(
+            peers, readers, cancel_event, mounted_read_seconds
+        ),
         ceilings_total=True,
         local_synthesized=synthesize_local,
     ):
