@@ -11,6 +11,7 @@ from app.models.ask import Citation
 from app.repositories.ports import SourceStorePort
 from app.services.cancellation import CancelEvent, raise_if_cancelled
 from app.services.collection_enumeration import SourceItem
+from app.services.evidence_attestation import attest_read
 from app.services.source_scope import citation_active_id
 
 
@@ -25,6 +26,21 @@ class SourceOverview:
 def _safe_text(text: str) -> str:
     # Source content cannot manufacture handles belonging to this context.
     return re.sub(r"\[\s*k\d+\s*\]", lambda m: "［" + m[0][1:-1] + "］", text)
+
+
+def _attest_cited(elements: list, citations: list[Citation]) -> None:
+    """PR-D D3: register every element this overview cites, from the FULL text.
+
+    ``element.text`` is the stored body the page read handed back; the citation
+    only quotes a budget-sized prefix of it, and the terminal check re-hashes
+    the whole stored row, so the snapshot is taken from the body, never the
+    quote. Zero extra reads; a no-op outside a global run.
+    """
+    cited = {citation.element_id for citation in citations}
+    attest_read("document_overview", {
+        element.id: (element.source_id, element.text)
+        for element in elements if element.id in cited
+    })
 
 
 def supplemental_excerpt_header(key: str, title: str) -> str:
@@ -217,4 +233,5 @@ def prepare_source_overview(
             f"本次提供 {len(lines)}/{total} 个原文元素的有界摘录，按来源详情顺序分布取样；"
             "不代表覆盖所有章节或全文，请仅依据这些原文介绍，并明确概述范围有限。"
         )
+    _attest_cited(elements, citations)
     return SourceOverview("\n".join(lines), id_map, citations, note)

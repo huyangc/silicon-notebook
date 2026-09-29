@@ -23,6 +23,7 @@ from app.models.ask import (
 )
 from app.repositories.analysis_artifacts import AnalysisArtifactStore
 from app.services.cancellation import AskCancelled, raise_if_cancelled
+from app.services.evidence_attestation import DEAD, attest_pointers
 from app.services.source_scope import citation_active_id
 
 
@@ -189,6 +190,24 @@ def _looks_like_header(row: dict[str, Any]) -> bool:
         len(populated) >= 2
         and all(isinstance(value, str) and bool(value.strip()) for value in populated)
     )
+
+
+def _attested_row_citation(citation: Citation | None) -> Citation | None:
+    """PR-D D7: register the row element a workbook receipt points at.
+
+    The analysis runs over the compiled manifest, never over the element's
+    stored text, so the element is attested by pointer (one bounded by-id read
+    inside a global run, a no-op everywhere else). A row element that no longer
+    exists at retrieval time is not minted (J2): the receipt keeps its source
+    and sheet range but drops the dead locator, and so becomes a source-level
+    citation (J3) instead of a card that opens on nothing.
+    """
+    if citation is None or not citation.element_id:
+        return citation
+    states = attest_pointers("table_analysis", [citation.element_id])
+    if states.get(citation.element_id) != DEAD:
+        return citation
+    return citation.model_copy(update={"element_id": ""})
 
 
 class SpreadsheetAnalysisService:
@@ -930,6 +949,7 @@ class SpreadsheetAnalysisService:
             active_notebook_id=active_notebook_id,
             notebook_tiers=notebook_tiers,
         )
+        citation = _attested_row_citation(citation)
         delivered, delivered_headers, complete, truncated_reason, budget_warnings = (
             self._bounded_result_preview(
                 output_rows, output_headers, citation=citation
