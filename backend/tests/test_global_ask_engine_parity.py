@@ -1466,6 +1466,58 @@ def test_a_pointer_producer_attests_through_the_run_seat(service):
     assert attested["producer"] == "kg_objects" and attested["live"] == 1
 
 
+def test_a_blind_pointer_read_cannot_launder_a_declared_failure(service):
+    """The federated channel read E, then the source was re-ingested (same
+    element id, new text): its snapshot read declared E ``None``. A producer
+    later attests E by pointer and reads the NEW text. That snapshot must not
+    replace the ``None`` -- otherwise the terminal check compares new with new
+    and passes while the card shows the old excerpt. The verdict is
+    ``unverifiable`` (internal ``unreadable``), not ``changed``: there is no
+    trustworthy "before" to compare, and only a real snapshot mismatch may be
+    called a change (J1)."""
+    from app.services.evidence_attestation import attest_pointers
+
+    def produce(fake):
+        attest_pointers("kg_objects", ["e-b-1"])
+
+    _grounded_service(
+        service, citations=[_citation("b")], evidence={"e-b-1": None},
+        fingerprints={"e-b-1": ("s-b", "重新入库后的新文字")},
+    )
+    service.ask.on_run = produce
+
+    result = _run(service)
+
+    _assert_delivered(result)
+    assert result.answer.citations[0].verification == "unverifiable"
+    assert _events(service, "global_ask_citations_partial")[-1]["reasons"] == {
+        "unreadable": 1,
+    }
+
+
+def test_a_flagged_citation_is_refused_by_the_service_with_one_job_read(service):
+    """One gate, one read: ``cited_element`` refuses a flagged citation right
+    after its own ``get_job``; the API layers only translate."""
+    from app.models.global_ask import FLAGGED_CITATION_MESSAGE
+
+    _grounded_service(
+        service, citations=[_citation("b")],
+        evidence={"e-b-1": ("s-b", "原文")}, fingerprints={},
+    )
+    result = _run(service)
+    assert result.answer.citations[0].verification == "source_gone"
+    reads: list = []
+    original = service.store.job
+    service.store.job = lambda *args: reads.append(args) or original(*args)
+
+    with pytest.raises(GlobalAskError) as refused:
+        service.cited_element(result.job_id, "e-b-1", user_id="u")
+
+    assert refused.value.status_code == 404
+    assert refused.value.message == FLAGGED_CITATION_MESSAGE
+    assert len(reads) == 1
+
+
 def test_reasoning_appends_a_truthful_check_step(service):
     """reasoning 轨迹末尾追加「核对」一步,如实写核对条数与未通过条数。"""
     _grounded_service(

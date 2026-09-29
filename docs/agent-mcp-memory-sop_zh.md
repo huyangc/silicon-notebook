@@ -274,6 +274,9 @@ claude mcp list
 澄清时返回 `status="needs_clarification"`，把补充信息写进新问题后重新调用即可（不保存句柄）。
 推理轨迹在 `trace` 里分页，用 `trace.next_offset` 作为 `trace_offset` 继续读取。
 调用 `cancel_global_ask` 明确停止任务，`get_global_cited_element` 读取实际引用原文。
+部分引用未通过回答的引用核对时，`get_global_ask` 仍返回完整回答，把计数放在 `coverage.citation_check`，
+每条未通过的引用带 `verification`；这样的引用不能用 `get_global_cited_element` 打开（返回错误），
+引用里存下的 `quoted_span` 就是回答读到的内容。
 `conversation_id` 可以接续网页端同一用户的全局会话，但历史和结果仍受当前 token 权限约束。
 第一版检索可见导入来源的原文，不把隐藏的 Memory/Knowhow 投影或 candidate 当作全局证据。
 

@@ -133,3 +133,55 @@ def test_postgres_federated_passage_race_before_the_terminal_read(pg_sources, mu
         assert getattr(response.citation_check, expected) == 1
         assert response.evidence_level == "overview"
         assert response.grounded is False
+
+
+def _pg_libraries(database, count):
+    notebook_ids = [f"nb-lib-{index}" for index in range(count)]
+    with database.write() as db:
+        for notebook_id in notebook_ids:
+            db.execute(
+                "INSERT INTO notebooks(id,name,created_by,created_at,updated_at) "
+                "VALUES(%s,%s,%s,%s,%s)",
+                (notebook_id, notebook_id, "cite-owner", NOW, NOW),
+            )
+    return notebook_ids
+
+
+def test_postgres_terminal_check_over_eight_libraries_issues_two_statements(pg_sources):
+    from tests.citation_check_testkit import terminal_check_statements
+
+    notebook_ids = _pg_libraries(pg_sources.database, 8)
+    statements, outcome = terminal_check_statements(
+        pg_sources, pg_sources.database, "%s", notebook_ids,
+    )
+    assert len(statements) == 2, statements
+    assert outcome.checked == 8 and outcome.failed == 0
+
+
+def test_postgres_single_notebook_liveness_is_one_read_and_drops_dead_cards(pg_sources):
+    from app.services.reference_liveness import drop_dangling_references
+    from tests.citation_check_testkit import (
+        assert_dangling_dropped, count_statements, dangling_response, seed_libraries,
+    )
+
+    live_id = seed_libraries(pg_sources.database, "%s", [_NOTEBOOK])[_NOTEBOOK]
+    response = dangling_response(live_id, f"src-{_NOTEBOOK}")
+    with count_statements(pg_sources.database) as statements:
+        drop_dangling_references(response, pg_sources.evidence_fingerprints)
+    assert len(statements) == 1
+    assert_dangling_dropped(response, live_id)
+
+
+def test_postgres_live_references_are_byte_identical_after_one_read(pg_sources):
+    from app.services.reference_liveness import drop_dangling_references
+    from tests.citation_check_testkit import count_statements, dangling_response, seed_libraries
+
+    live_id = seed_libraries(pg_sources.database, "%s", [_NOTEBOOK])[_NOTEBOOK]
+    response = dangling_response(live_id, f"src-{_NOTEBOOK}")
+    response.citations = response.citations[:1]
+    response.anchors = response.anchors[2:]
+    before = response.model_dump_json()
+    with count_statements(pg_sources.database) as statements:
+        drop_dangling_references(response, pg_sources.evidence_fingerprints)
+    assert len(statements) == 1
+    assert response.model_dump_json() == before

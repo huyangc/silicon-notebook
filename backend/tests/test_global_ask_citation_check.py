@@ -251,3 +251,306 @@ def test_only_the_three_wire_values_can_be_serialised():
     with pytest.raises(ValidationError):
         AnswerAnchor(key="k1", object_id="e", object_type="element", label="l",
                      verification="unattested")
+
+
+# ---------------------------------------------------------------------------
+# Judgement table (fix round items 2, 7, 8)
+# ---------------------------------------------------------------------------
+
+def _ref(element_id="e1", source_id="s1", notebook_id="nb"):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(element_id=element_id, source_id=source_id,
+                           notebook_id=notebook_id)
+
+
+
+@pytest.mark.parametrize("evidence,current,live,expected", [
+    # element changed + sibling unreadable -> the definite finding wins
+    ({"e1": ("s1", "a"), "e2": None}, {"e1": ("s1", "A"), "e2": ("s1", "b")},
+     {"s1"}, ("changed", "changed")),
+    # element unattested + sibling changed -> changed
+    ({"e2": ("s1", "b")}, {"e1": ("s1", "a"), "e2": ("s1", "B")},
+     {"s1"}, ("changed", "changed")),
+    # sibling source gone + element changed -> source_gone
+    ({"e1": ("s1", "a"), "e2": ("s2", "b")}, {"e1": ("s1", "A"), "e2": ("s2", "b")},
+     {"s1"}, ("source_gone", "source_gone")),
+    # element deleted + sibling changed -> source_gone
+    ({"e1": ("s1", "a"), "e2": ("s1", "b")}, {"e2": ("s1", "B")},
+     {"s1"}, ("source_gone", "source_gone")),
+    # element unattested + sibling unreadable -> unverifiable
+    ({"e2": None}, {"e1": ("s1", "a"), "e2": ("s1", "b")},
+     {"s1"}, ("unverifiable", "unattested")),
+    # everything holds
+    ({"e1": ("s1", "a"), "e2": ("s1", "b")}, {"e1": ("s1", "a"), "e2": ("s1", "b")},
+     {"s1"}, None),
+], ids=["changed>unverifiable", "sibling-changed>unattested", "source_gone>changed",
+        "element-gone>sibling-changed", "unattested+unreadable", "holds"])
+def test_the_most_definite_finding_wins(evidence, current, live, expected):
+    from app.services.global_citation_check import judge_reference
+
+    assert judge_reference(
+        _ref(), evidence=evidence, current=current, siblings=("e2",),
+        ceiling={"s1", "s2"}, live_sources=live,
+    ) == expected
+
+
+def test_a_sibling_with_no_snapshot_fails_closed():
+    """A sibling is known only because the federated channel published its
+    passage and fingerprinted it in the same read; no stated snapshot is a
+    contradiction and must not pass."""
+    from app.services.global_citation_check import judge_reference
+
+    assert judge_reference(
+        _ref(), evidence={"e1": ("s1", "a")},
+        current={"e1": ("s1", "a"), "e2": ("s1", "b")}, siblings=("e2",),
+        ceiling={"s1"}, live_sources={"s1"},
+    ) == ("unverifiable", "unreadable")
+
+
+def test_a_citation_naming_another_source_than_its_snapshot_is_changed():
+    from app.services.global_citation_check import judge_reference
+
+    assert judge_reference(
+        _ref(source_id="s1"), evidence={"e1": ("s2", "a")}, current={"e1": ("s2", "a")},
+        siblings=(), ceiling={"s1", "s2"}, live_sources={"s1", "s2"},
+    ) == ("changed", "changed")
+
+
+def test_no_source_and_a_declared_none_records_unreadable():
+    from app.services.global_citation_check import judge_reference
+
+    assert judge_reference(
+        _ref(source_id=""), evidence={"e1": None}, current={}, siblings=(),
+        ceiling={"s1"}, live_sources={"s1"},
+    ) == ("unverifiable", "unreadable")
+    assert judge_reference(
+        _ref(source_id=""), evidence={}, current={}, siblings=(),
+        ceiling={"s1"}, live_sources={"s1"},
+    ) == ("unverifiable", "unattested")
+
+
+def test_cancellation_during_a_terminal_read_propagates():
+    """The read budget polls the run's token and surfaces as its own timeout;
+    the check must raise the cancellation, not mark references unreadable."""
+    import threading
+
+    from app.repositories.read_budget import ReadBudgetExceeded
+    from app.services.cancellation import AskCancelled
+    from app.services.global_citation_check import GlobalCitationCheck
+
+    cancel = threading.Event()
+
+    class _Sources:
+        def evidence_fingerprints(self, ids):
+            cancel.set()
+            raise ReadBudgetExceeded("read budget exhausted")
+
+        def visible_source_ids_by_notebook(self, ids):  # pragma: no cover
+            raise AssertionError("must not be reached")
+
+    response = AskResponse(conclusion="c", citations=[Citation(
+        label="l", source_id="s1", element_id="e1", location_label="", quoted_span="q",
+        notebook_id="nb",
+    )])
+    with pytest.raises(AskCancelled):
+        GlobalCitationCheck(_Sources(), notebook_timeout_seconds=5).run(
+            response, evidence={}, siblings={}, source_ceiling={"nb": {"s1"}},
+            event=cancel,
+        )
+
+
+def test_visibility_is_read_once_for_libraries_in_the_ceiling_only():
+    from app.services.global_citation_check import GlobalCitationCheck
+
+    batched: list = []
+    single: list = []
+
+    class _Sources:
+        def evidence_fingerprints(self, ids):
+            return {}
+
+        def visible_source_ids_by_notebook(self, ids):
+            batched.append(tuple(ids))
+            return {nb: [f"s-{nb}"] for nb in ids}
+
+        def all_visible_source_ids(self, nb):  # pragma: no cover
+            single.append(nb)
+            return []
+
+    citations = [Citation(label="l", source_id=f"s-{nb}", element_id="",
+                          location_label="", quoted_span="q", notebook_id=nb)
+                 for nb in ("a", "b", "stray")]
+    outcome = GlobalCitationCheck(_Sources(), notebook_timeout_seconds=5).run(
+        AskResponse(conclusion="c", citations=citations), evidence={}, siblings={},
+        source_ceiling={"a": {"s-a"}, "b": {"s-b"}},
+    )
+    assert batched == [("a", "b")] and single == []
+    assert list(outcome.reasons()) == ["out_of_ceiling"]
+
+
+def test_a_failed_batched_visibility_read_is_retried_per_library():
+    """Failure stays per library: only the library whose own read also fails
+    has its references marked unreadable."""
+    from app.services.global_citation_check import GlobalCitationCheck
+
+    events: list = []
+
+    class _Sources:
+        def evidence_fingerprints(self, ids):
+            return {}
+
+        def visible_source_ids_by_notebook(self, ids):
+            raise RuntimeError("batch failed")
+
+        def all_visible_source_ids(self, nb):
+            if nb == "b":
+                raise RuntimeError("b failed")
+            return [f"s-{nb}"]
+
+    citations = [Citation(label="l", source_id=f"s-{nb}", element_id="",
+                          location_label="", quoted_span="q", notebook_id=nb)
+                 for nb in ("a", "b")]
+    outcome = GlobalCitationCheck(
+        _Sources(), notebook_timeout_seconds=5, emit=events.append,
+    ).run(
+        AskResponse(conclusion="c", citations=citations), evidence={}, siblings={},
+        source_ceiling={"a": {"s-a"}, "b": {"s-b"}},
+    )
+    assert dict(outcome.verdicts) == {("b", "s-b", ""): ("unverifiable", "unreadable")}
+    assert [event["read"] for event in events] == ["visible_sources", "visible_sources"]
+
+
+# ---------------------------------------------------------------------------
+# Robust stored-summary reads (fix round item 6c)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("stored,expected", [
+    ({"failed": "abc", "changed": 1}, None),
+    ({"failed": [1]}, None),
+    ({"failed": -1, "changed": 1}, None),
+    ({"failed": True}, None),
+    ({"checked": "x", "failed": 2, "changed": -5, "unverifiable": 2},
+     {"outcome": "partial", "checked": 0, "failed": 2, "changed": 0,
+      "source_gone": 0, "unverifiable": 2}),
+    ({"outcome": "void", "checked": 3, "failed": 1, "source_gone": 1},
+     {"outcome": "partial", "checked": 3, "failed": 1, "changed": 0,
+      "source_gone": 1, "unverifiable": 0}),
+])
+def test_global_answer_check_never_raises_on_a_malformed_row(stored, expected):
+    assert global_answer_check({"payload": {"answer": {"citation_check": stored}}}) == expected
+
+
+def test_the_public_projection_uses_the_same_coercion():
+    from app.services.conversation_public_view import _citation_check_field
+
+    stored = {"checked": "x", "failed": 2, "changed": -5, "unverifiable": 2}
+    assert _citation_check_field({"citation_check": stored}) == {
+        "citation_check": global_answer_check({"answer": {"citation_check": stored}}),
+    }
+
+
+def test_the_notice_never_under_reports_when_counts_do_not_add_up():
+    assert citation_check_notice({"failed": 3, "changed": 1}) == (
+        f"本次回答有部分引用未通过核对：共 3 条。{_TAIL}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Statement counts on the real SQLite store (items 4 and 10); PG twin in
+# tests/postgres/test_global_citation_race_pg.py
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def sqlite_libraries(tmp_path):
+    from app.models.notebooks import NotebookCreate
+    from app.repositories.sqlite.source_store import SourceStore
+    from app.services.sqlite_repository import SQLiteRepository
+
+    repo = SQLiteRepository(Settings(
+        _env_file=None, database_url=f"sqlite:///{tmp_path / 'libs.db'}",
+        storage_dir=str(tmp_path / "storage"),
+    ))
+    notebook_ids = [repo.create_notebook(NotebookCreate(name=f"lib{i}")).id for i in range(8)]
+    database = repo._runtime.source_store.database
+    sources = object.__new__(SourceStore)
+    sources.database = database
+    try:
+        yield sources, database, notebook_ids
+    finally:
+        repo.close()
+
+
+def test_sqlite_terminal_check_over_eight_libraries_issues_two_statements(sqlite_libraries):
+    """Fingerprints + one batched visibility read, independent of how many
+    libraries are cited (8 here)."""
+    from tests.citation_check_testkit import terminal_check_statements
+
+    sources, database, notebook_ids = sqlite_libraries
+    statements, outcome = terminal_check_statements(sources, database, "?", notebook_ids)
+    assert len(statements) == 2, statements
+    assert outcome.checked == 8 and outcome.failed == 0
+
+
+def test_sqlite_single_notebook_liveness_is_one_read_and_drops_dead_cards(sqlite_libraries):
+    from app.services.reference_liveness import drop_dangling_references
+    from tests.citation_check_testkit import (
+        assert_dangling_dropped, count_statements, dangling_response, seed_libraries,
+    )
+
+    sources, database, notebook_ids = sqlite_libraries
+    live_id = seed_libraries(database, "?", notebook_ids[:1])[notebook_ids[0]]
+    response = dangling_response(live_id, f"src-{notebook_ids[0]}")
+    with count_statements(database) as statements:
+        drop_dangling_references(response, sources.evidence_fingerprints)
+    assert len(statements) == 1
+    assert_dangling_dropped(response, live_id)
+
+
+def test_sqlite_live_references_are_byte_identical_after_one_read(sqlite_libraries):
+    from app.services.reference_liveness import drop_dangling_references
+    from tests.citation_check_testkit import count_statements, dangling_response, seed_libraries
+
+    sources, database, notebook_ids = sqlite_libraries
+    live_id = seed_libraries(database, "?", notebook_ids[:1])[notebook_ids[0]]
+    response = dangling_response(live_id, f"src-{notebook_ids[0]}")
+    response.citations = response.citations[:1]
+    response.anchors = response.anchors[2:]
+    before = response.model_dump_json()
+    with count_statements(database) as statements:
+        drop_dangling_references(response, sources.evidence_fingerprints)
+    assert len(statements) == 1
+    assert response.model_dump_json() == before
+
+
+def test_liveness_without_element_references_reads_nothing_and_a_failed_read_keeps_cards():
+    from app.services.reference_liveness import drop_dangling_references
+    from tests.citation_check_testkit import dangling_response
+
+    reads: list = []
+    bare = AskResponse(conclusion="c", answer="a", citations=[Citation(
+        label="l", source_id="s", element_id="", location_label="", quoted_span="q",
+    )])
+    drop_dangling_references(bare, lambda ids: reads.append(ids) or {})
+    assert reads == []
+
+    response = dangling_response("el-live", "s")
+    before = response.model_dump_json()
+
+    def broken(ids):
+        raise RuntimeError("database went away")
+
+    drop_dangling_references(response, broken)
+    assert response.model_dump_json() == before
+
+
+def test_liveness_propagates_cancellation():
+    from app.services.cancellation import AskCancelled
+    from app.services.reference_liveness import drop_dangling_references
+    from tests.citation_check_testkit import dangling_response
+
+    def cancelled(ids):
+        raise AskCancelled()
+
+    with pytest.raises(AskCancelled):
+        drop_dangling_references(dangling_response("el-live", "s"), cancelled)

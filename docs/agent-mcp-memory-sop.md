@@ -286,7 +286,11 @@ is confirmed and submitted automatically, and one that needs clarification retur
 `status="needs_clarification"` — fold the missing detail into a new question and call again (no handle is
 stored). The reasoning trace is paged under `trace`; follow `trace.next_offset` as `trace_offset`.
 `cancel_global_ask` explicitly stops work, and
-`get_global_cited_element` reads the cited original evidence. `conversation_id` can continue the same
+`get_global_cited_element` reads the cited original evidence. When some citations failed the answer's
+citation check, `get_global_ask` still returns the whole answer, reports the counts at
+`coverage.citation_check` and marks each failed citation with `verification`; such a citation cannot be
+opened with `get_global_cited_element` (it returns an error) and its stored `quoted_span` is what the
+answer read. `conversation_id` can continue the same
 user's browser-created global conversation, but current token permissions still constrain history and
 results. V1 searches visible imported-source text, excluding hidden Memory/Knowhow projections and candidates.
 

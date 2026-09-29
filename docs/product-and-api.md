@@ -260,7 +260,8 @@ produced them; the failed references carry `verification`, the answer carries `c
 becomes false and `evidence_level` is capped at `overview` (`inferred` is not raised). The reader sees one
 sentence under the answer — 「本次回答有部分引用未通过核对：{N 条原文已改动、N 条资料已删除、N 条无法核对}。
 回答内容照常保留，带标记的引用可点开查看原因。」 — and a reason line on each marked card; a reasoning run's trace
-ends with a `citation_check` step stating how many citations were checked and how many failed. Both fields are
+ends with a `citation_check` step stating how many citations were checked and how many failed, when the answer
+has references that can be checked (an answer citing only external material or memory rows gets no such step). Both fields are
 additive and omitted when empty, so single-notebook responses serialize exactly as before. They persist in the
 job's payload with no migration; a row the previous recheck voided keeps its stored retry sentence. A partially
 failed answer still feeds the post-completion learning chains.
@@ -387,6 +388,12 @@ overwrite the first; the rating lives in that job's `payload_json` under `feedba
 in-notebook `feedback` table, so it does not surface in the notebook analytics panel or any
 per-notebook feedback rollup.
 `GET /jobs/{job_id}/citations/{element_id}` reads only an original element actually cited by that task.
+An element flagged by the terminal citation check on any of the answer's citations or anchors is refused
+with 404 and a user-displayable sentence (the refusal lives in `GlobalAskService.cited_element`, so every
+drill-down shares it), while unflagged citations of the same answer still open; the flagged card keeps its
+stored excerpt. The job read, the conversation detail, the push stream's terminal frame (read from the store)
+and the administrator activity detail carry `citation_check` and `verification` exactly as stored; a clean
+answer carries neither, and the conversation list adds no badge.
 `GET /conversations` and `GET /conversations/{id}` accept `limit`/`offset`, with `has_more`/`next_offset`
 on detail pages; `PATCH /conversations/{id}` renames and `DELETE` removes a conversation. Conversations
 belong only to their initiating user. Browser and MCP can continue the same `conversation_id`, subject
@@ -526,6 +533,10 @@ pure request echoes `answer_offset` and `citation_offset` were dropped. `next_an
 `next_citation_offset` and
 `next_coverage_offset` continue independent answer, citation and coverage pagination. Coverage retains complete
 counts; skipped/degraded notebook lists continue together using `coverage_offset`.
+A partially failed answer reports its citation-check summary at `coverage.citation_check` (the result keeps its
+20 top-level keys), each failed citation carries `verification`, and no anchor output is added;
+`get_global_cited_element` answers a flagged element with a tool error carrying the same sentence the HTTP
+drill-down uses, and the citation's stored `quoted_span` is what the answer read.
 Citation metadata can be visibly compressed under the shared MCP budget;
 the original-element reader exposes `next_offset` for complete text. Answer pages, identifiers and
 continuation cursors must not be silently truncated. Results include `/ask?conversation_id=...`.
@@ -3343,7 +3354,7 @@ A conversation's creator can publish completed turns at `/c/{token}`. Under `/no
 
 Issuing retains the token and advances `shared_through_at`/`shared_through_id`. Body `expected_through_id` pins publication to the exact answer the user reviewed, excluding later arrivals; a deleted boundary returns 409. Empty/absent body selects the latest answer. The snapshot uses the boundary answer's `(created_at, rowid/ordinal)` keyset, so same-instant later answers stay excluded; if the answer no longer resolves, it falls back to the time interval. In-flight jobs without answer rows are excluded.
 
-The payload uses the report-style allowlist and rendering, additionally omitting `reasoning_trace`, `intent`, `retrieval_scope`, `retrieval_query` and every addressable id, including `memory_id`. Cited private-Memory excerpts are disclosed, with their count shown before sharing. Result cards are omitted with `PublicTurn.omitted_result_sets`. Images use a per-token HMAC `conversation_asset_alias`, never real asset ids: only snapshot-referenced images resolve, `Cache-Control: no-store` applies, revocation kills them, and aliases differ across tokens.
+The payload uses the report-style allowlist and rendering, additionally omitting `reasoning_trace`, `intent`, `retrieval_scope`, `retrieval_query` and every addressable id, including `memory_id`. Cited private-Memory excerpts are disclosed, with their count shown before sharing. Result cards are omitted with `PublicTurn.omitted_result_sets`. Images use a per-token HMAC `conversation_asset_alias`, never real asset ids: only snapshot-referenced images resolve, `Cache-Control: no-store` applies, revocation kills them, and aliases differ across tokens. A global turn whose terminal citation check found failures exposes `PublicTurn.citation_check` (only when `failed > 0`, counts coerced to non-negative integers, `outcome` always `partial`) and `PublicReference.verification` (only the three public values) as a snapshot of the moment the answer was produced, and the page states it in the past tense; an image attached only to a flagged reference is neither listed nor served by its alias, and a flagged card offers no way into the original.
 
 The history-card action publishes the current last answer; the action after an answer's copy button sends that answer's id. Failure to load detail never substitutes an empty body for that explicit boundary. Watermarks only advance: for an answer earlier than the live boundary, the dialog offers no publish action, says the link covers this answer plus N later turns, and computes disclosure counts from the full live scope. Narrowing requires revoke-then-reshare. Numeric bounds are below.
 
