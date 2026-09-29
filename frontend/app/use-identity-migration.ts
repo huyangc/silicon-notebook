@@ -1,8 +1,7 @@
 import { useRef, useState } from "react";
 
-import { beginSessionHandoff, endSessionHandoff } from "./api-client.ts";
 import { migrateToLegacyAccount } from "./auth.ts";
-import { getToken, setToken } from "./auth-session.ts";
+import { beginSessionHandoff, endSessionHandoff, getToken, setToken } from "./auth-session.ts";
 import type { IdentityMigrationOutcome } from "./identity-migration-form";
 
 type MigrationDeps = {

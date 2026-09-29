@@ -144,7 +144,7 @@ import {
 import { KG_RANGE_DEFAULT, kgCanvasState } from "./kg-workspace-model.ts";
 import { refreshKgDeleteDependents } from "./kg-delete-dependents.ts";
 import { API_BASE } from "./api-config";
-import { clearToken, getToken } from "./auth-session";
+import { clearRejectedToken, getToken } from "./auth-session";
 import { copyTextSafely } from "./copy-text";
 import { useCopyResult } from "./copy-result";
 import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors.ts";
@@ -1611,7 +1611,8 @@ export default function Home() {
       }
       if (cancelled) return;
       setAuthCapabilities(capabilities);
-      if (!getToken()) {
+      const restoreToken = getToken();
+      if (!restoreToken) {
         if (!capabilities) setAuthRestoreError("认证状态暂时无法确认，请稍后重试。");
         setAuthChecked(true);
         return;
@@ -1668,11 +1669,11 @@ export default function Home() {
             await fetchMyIdentities();
             if (!cancelled) setMigrationSession(true);
           } catch (identityError) {
-            if (httpErrorStatus(identityError) === 401) clearToken();
+            if (httpErrorStatus(identityError) === 401) clearRejectedToken(restoreToken);
             else if (!cancelled) setAuthRestoreError("认证状态暂时无法确认，请稍后重试。");
           }
         } else if (httpErrorStatus(error) === 401) {
-          clearToken();
+          clearRejectedToken(restoreToken);
         } else if (!cancelled) {
           setAuthRestoreError("认证状态暂时无法确认，请稍后重试。");
         }
