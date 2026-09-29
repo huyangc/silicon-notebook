@@ -1189,8 +1189,9 @@ def library_reserve_rules(
 
     Inert (``()``) with ``seats <= 0`` or when the baseline rows span a
     single library.  A row's library is its stamp, an empty stamp standing for
-    ``active_notebook_id`` (the nominal active, whose KG-overlay source rows
-    are normalised to ``""``).
+    ``active_notebook_id`` (defensive: in peer mode the nominal active's
+    KG-overlay source rows are stamped with its id too, see
+    ``graph_retrieval._kg_source_chunks``).
     """
     baseline = [
         chunk for chunk in ranked if not is_generated_question_only_chunk(chunk)

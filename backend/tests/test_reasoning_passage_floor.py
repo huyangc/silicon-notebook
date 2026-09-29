@@ -85,7 +85,10 @@ def _sheet(rows=80):
         columns=[SimpleNamespace(name="A")],
         rows=[SimpleNamespace(cells={"A": "cell ".ljust(90, "c")}, citation=None)
               for _ in range(rows)],
-        source_id="s-wb", source_file_name="wb.xlsx")
+        source_id="s-wb", source_file_name="wb.xlsx",
+        # The receipt's own library and tier (``SpreadsheetAnalysisResult``);
+        # the id_map entry falls back to them when no row carries a citation.
+        notebook_id="", tier="personal")
 
 
 def _stage(notebook_id, chunks, *, batch=None, sheets=()):
