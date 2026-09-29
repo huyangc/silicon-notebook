@@ -101,6 +101,21 @@ CONCEPT_DETAIL_PAGE_MAX = 200
 # 无天花板时仍只看第一条(与今天逐值相同)。
 NODE_CONTEXT_DEFINES_SCAN = 8
 
+# `node_context` 在来源天花板下判簇融合描述(用户裁决 Q1 严格)时,簇查询顺带读回
+# 至多这么多个**不同的**成员证据来源(按 id 排序,SQL 取 `+1` 条),在 Python 里判
+# 「全在天花板内」——天花板本身(生产整库可见来源可达 ~49k 个 id、~1.7 MB,每绑
+# 一次 ~50 ms,同一连接执行到第 ~10 次还会切到更慢的 generic plan)从不绑进 SQL。
+# 读满 `+1` 条说明簇的来源多于这个数;读回的这些里有一个在天花板外就直接拒绝,
+# 全在内时再按 keyset 读回其余来源,同样在 Python 里判。1024 覆盖所有常见簇
+# (成员通常个位到两位数),常见情形只有一次往返。
+NODE_CONTEXT_CLUSTER_SOURCES_PROBE = 1024
+
+# `node_context` 在来源天花板下给**没有 section_path** 的 legacy 过程找兄弟时,最多
+# 扫这么多行过程对象(按 (created_at, id) keyset 翻页,每页 500,边读边在 Python 里
+# 按证据判天花板),凑够 500 个天花板内的兄弟或扫满即停。无天花板时仍是今天的
+# 「任意 500 行」样本。扫满仍没找到 = 漏召回,失败关闭;扫描量与库大小无关。
+NODE_CONTEXT_LEGACY_SIBLING_SCAN = 5000
+
 
 class KnowledgeGraphTooLargeError(Exception):
     """Raised by knowledge_graph() (legacy GET /notebooks/{id}/graph) when the

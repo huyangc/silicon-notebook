@@ -16,12 +16,16 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from psycopg import errors, sql
 
 from app.core.json_safety import validate_finite_json
-from app.domain.knowledge_contracts import NODE_CONTEXT_DEFINES_SCAN
+from app.domain.knowledge_contracts import (
+    NODE_CONTEXT_CLUSTER_SOURCES_PROBE, NODE_CONTEXT_DEFINES_SCAN,
+    NODE_CONTEXT_LEGACY_SIBLING_SCAN,
+)
 from app.models.common import Evidence
 from app.repositories.lexical_query import corpus_gated_recall_terms
 
@@ -267,85 +271,348 @@ def _object_insert_row(row: Sequence[Any]) -> tuple:
     )
 
 
-# PR-A·A1:``node_context`` 的来源天花板谓词(规范定义在这一侧,SQLite 孪生同名
-# 函数方言不同、语义逐字等价)。形态照搬 ``unified_kg_store._object_support_exists``:
-# 天花板恒为**一个**数组参数(``=ANY(%s)`` / ``<>ALL(%s)``),生产上整库可见来源
-# 可达数千,不随库大小展开成占位符;反向索引 ``knowledge_object_sources`` 未认证
-# (``source_index_backfilled`` 为假 = 历史/未知,不是「没有行」)时走权威支,直接
-# 扫 ``evidence`` JSON。两支读的都是 ``evidence[].source_id``(反向索引就是它打平
-# 出来的,见 ``source_ids_from_evidence``),空/缺的 source_id 两支都不算来源。
-def _object_supported_by_ceiling(object_ref: str, *, authoritative: bool) -> str:
-    """``object_ref`` 那一行 knowledge_objects 是否至少有一条天花板内证据来源。
+# PR-A·A1:``node_context`` 的来源天花板 SQL(规范定义在这一侧,SQLite 孪生同名
+# 函数方言不同、语义逐字等价)。
+#
+# 天花板在生产上是整库可见来源(可达 ~49k 个 id、~1.7 MB):每绑一次就是一次固定
+# 的序列化 + ``array_in`` + 规划成本(实测 ~50 ms/次,与 SQL 写法无关),同一连接上
+# 执行到第 ~10 次还会切到更慢的 generic plan。所以 ``node_context`` 的任何语句都
+# **不绑天花板**:SQL 只读回候选(簇成员的来源、兄弟过程的证据),在 Python 里对
+# 天花板 frozenset 判成员关系。
+#
+# 反向索引 ``knowledge_object_sources`` 未认证(``source_index_backfilled`` 为假 =
+# 历史/未知,不是「没有行」)时簇谓词走权威支,直接扫 ``evidence`` JSON。两支读的
+# 都是 ``evidence[].source_id``(反向索引就是它打平出来的,见
+# ``source_ids_from_evidence``,只收非空 id);空/缺的 source_id 两支都不算来源。
+_ATTRIBUTABLE_SOURCE = "COALESCE(ev->>'source_id','')<>''"
 
-    绑定一个参数:天花板数组。
-    """
-    if authoritative:
-        return (
-            "EXISTS (SELECT 1 FROM jsonb_array_elements("
-            f"CASE WHEN jsonb_typeof({object_ref}.evidence)='array' "
-            f"THEN {object_ref}.evidence ELSE '[]'::jsonb END) ev "
-            "WHERE ev->>'source_id'=ANY(%s))"
-        )
+
+def _evidence_items(ref: str) -> str:
+    """``ref`` 那一行的 evidence 数组展开成 ``ev``(非数组按空数组)。"""
     return (
-        "EXISTS (SELECT 1 FROM knowledge_object_sources kos "
-        f"WHERE kos.object_id={object_ref}.id "
-        f"AND kos.notebook_id={object_ref}.notebook_id "
-        "AND kos.source_id=ANY(%s))"
+        "jsonb_array_elements(CASE WHEN jsonb_typeof("
+        f"{ref}.evidence)='array' THEN {ref}.evidence ELSE '[]'::jsonb END) ev"
     )
 
 
-def _cluster_sources_within_ceiling(cluster_ref: str, *, authoritative: bool) -> str:
-    """用户裁决 Q1(严格):``cluster_ref`` 那一行所在的簇(同 canonical_id、同一
-    published 代次)**没有任何成员**带天花板外的证据来源,且至少有一条来源。
+def _evidence_source_exists(ref: str, condition: str) -> str:
+    """``ref`` 那一行至少有一条证据满足 ``condition``(条件写在 ``ev`` 上)。"""
+    return f"EXISTS (SELECT 1 FROM {_evidence_items(ref)} WHERE {condition})"
 
-    簇融合描述是对全部成员的 LLM 融合,归因不到单一来源;只要有一个成员的
-    来源在天花板外,描述里就可能含那个来源的内容,所以整段不用。「至少有一条
-    来源」挡住无来源成员组成的簇(空真):那样的描述同样归因不到任何天花板内
-    来源。两条子查询共用同一个成员-来源关系,只有外层谓词不同;绑定一个参数:
-    天花板数组(只出现在 NOT EXISTS 里)。
-    """
+
+def _cluster_member_sources(
+    notebook: str, canonical: str, generation: str, *, authoritative: bool,
+) -> tuple[str, str]:
+    """一个簇(同 notebook / canonical_id / 代次)全部成员的**可归因**证据来源:
+    返回 (``FROM … WHERE …`` 片段, 来源列表达式)。三个参数是 SQL 表达式(相关列
+    或 ``%s``)。"""
+    scope = (
+        f"WHERE m.notebook_id={notebook} AND m.canonical_id={canonical} "
+        f"AND m.generation={generation}"
+    )
     if authoritative:
-        member_sources = (
+        return (
             "FROM concept_clusters m JOIN knowledge_objects ko "
             "ON ko.id=m.member_object_id AND ko.notebook_id=m.notebook_id "
-            "CROSS JOIN LATERAL jsonb_array_elements("
-            "CASE WHEN jsonb_typeof(ko.evidence)='array' "
-            "THEN ko.evidence ELSE '[]'::jsonb END) ev "
-            f"WHERE m.notebook_id={cluster_ref}.notebook_id "
-            f"AND m.canonical_id={cluster_ref}.canonical_id "
-            f"AND m.generation={cluster_ref}.generation "
-            "AND COALESCE(ev->>'source_id','')<>''"
+            f"CROSS JOIN LATERAL {_evidence_items('ko')} "
+            f"{scope} AND {_ATTRIBUTABLE_SOURCE}",
+            "ev->>'source_id'",
         )
-        source_col = "ev->>'source_id'"
-    else:
-        member_sources = (
-            "FROM concept_clusters m JOIN knowledge_object_sources kos "
-            "ON kos.object_id=m.member_object_id AND kos.notebook_id=m.notebook_id "
-            f"WHERE m.notebook_id={cluster_ref}.notebook_id "
-            f"AND m.canonical_id={cluster_ref}.canonical_id "
-            f"AND m.generation={cluster_ref}.generation "
-            "AND kos.source_id<>''"
-        )
-        source_col = "kos.source_id"
     return (
-        f"(EXISTS (SELECT 1 {member_sources}) "
-        f"AND NOT EXISTS (SELECT 1 {member_sources} AND {source_col}<>ALL(%s)))"
+        "FROM concept_clusters m JOIN knowledge_object_sources kos "
+        "ON kos.object_id=m.member_object_id AND kos.notebook_id=m.notebook_id "
+        f"{scope}",
+        "kos.source_id",
+    )
+
+
+def _member_has_attributable_source(member_ref: str, *, authoritative: bool) -> str:
+    """簇成员行 ``member_ref`` 的对象至少有一条可归因的证据来源(对象不存在 = 没有)。"""
+    if authoritative:
+        return (
+            "EXISTS (SELECT 1 FROM knowledge_objects ko "
+            f"WHERE ko.id={member_ref}.member_object_id "
+            f"AND ko.notebook_id={member_ref}.notebook_id "
+            f"AND {_evidence_source_exists('ko', _ATTRIBUTABLE_SOURCE)})"
+        )
+    return (
+        "EXISTS (SELECT 1 FROM knowledge_object_sources kos "
+        f"WHERE kos.object_id={member_ref}.member_object_id "
+        f"AND kos.notebook_id={member_ref}.notebook_id)"
     )
 
 
 def _node_context_cluster_sql(*, authoritative: bool) -> str:
-    """天花板生效时 ``node_context`` 的簇描述查询:Q1 谓词折成布尔列,与今天的
-    簇查询同一条语句(不多一次往返)。参数:(天花板数组, notebook_id,
-    object_id, notebook_id)。EXPLAIN pin:tests/postgres/
-    test_cluster_generation_explain_pins.py。"""
-    within = _cluster_sources_within_ceiling("cc", authoritative=authoritative)
+    """天花板生效时 ``node_context`` 的簇描述查询(与无天花板的簇查询同一次往返,
+    **不绑天花板**)。参数:(notebook_id, object_id, notebook_id)。
+
+    用户裁决 Q1(严格):簇融合描述是对全部成员的 LLM 融合,归因不到单一来源;
+    只有**没有任何成员**的证据来源落在天花板外时才能用,且证据里归因不到任何
+    来源的成员(含成员对象已不存在)同样算在天花板外。多读两列交给 Python 判:
+
+    - ``unattributed_member``:簇里有没有「没有一条可归因来源」的成员;
+    - ``member_sources``:成员的不同可归因来源,按 id 排序、至多
+      ``NODE_CONTEXT_CLUSTER_SOURCES_PROBE + 1`` 个(读满说明还有更多,由
+      ``_node_context_cluster_sources_after_sql`` 按 keyset 读回其余的)。
+
+    EXPLAIN pin:tests/postgres/test_cluster_generation_explain_pins.py。"""
+    rows, source = _cluster_member_sources(
+        "cc.notebook_id", "cc.canonical_id", "cc.generation",
+        authoritative=authoritative,
+    )
+    attributed = _member_has_attributable_source("u", authoritative=authoritative)
     return (
-        f"SELECT cc.canonical_description, {within} AS within_ceiling "
+        "SELECT cc.canonical_description, cc.canonical_id, cc.generation, "
+        "EXISTS (SELECT 1 FROM concept_clusters u "
+        "WHERE u.notebook_id=cc.notebook_id AND u.canonical_id=cc.canonical_id "
+        f"AND u.generation=cc.generation AND NOT {attributed}) AS unattributed_member, "
+        f"ARRAY(SELECT DISTINCT ({source}) COLLATE \"C\" AS s {rows} "
+        f"ORDER BY s LIMIT {NODE_CONTEXT_CLUSTER_SOURCES_PROBE + 1}) AS member_sources "
         "FROM concept_clusters cc "
         "WHERE cc.notebook_id=%s AND cc.member_object_id=%s "
         "AND cc.canonical_description!='' "
         f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN} LIMIT 1"
     )
+
+
+def _node_context_cluster_sources_after_sql(*, authoritative: bool) -> str:
+    """来源多于 ``NODE_CONTEXT_CLUSTER_SOURCES_PROBE`` 的簇:读回排在探针之后的
+    其余不同来源(keyset,不绑天花板,Python 端判)。参数:(notebook_id,
+    canonical_id, generation, 探针读到的最后一个来源);代次取自第一条簇查询读到
+    的那一行,两条语句判的是同一代。"""
+    rows, source = _cluster_member_sources(
+        "%s", "%s", "%s", authoritative=authoritative,
+    )
+    ordered = f"({source}) COLLATE \"C\""
+    return f"SELECT DISTINCT {ordered} AS s {rows} AND {ordered} > %s"
+
+
+def _normalise_ceiling(allowed_source_ids: Optional[Iterable[str]]) -> Optional[frozenset]:
+    """天花板只归一化一次:``frozenset``(``source_ceiling_for`` 的形态)不含空 id
+    时原样用,不复制;其余可迭代形态(set / tuple / list)去空后转 frozenset。
+    ``None`` = 不限;空集 = 全部拒绝。"""
+    if allowed_source_ids is None:
+        return None
+    if (
+        isinstance(allowed_source_ids, frozenset)
+        and "" not in allowed_source_ids
+        and None not in allowed_source_ids
+    ):
+        return allowed_source_ids
+    return frozenset(str(s) for s in allowed_source_ids if s)
+
+
+def _evidence_dicts(raw: Any) -> list:
+    """证据数组里的对象项(非数组 / 非对象项一律丢掉,不抛)。"""
+    return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+
+
+def _cluster_description_in_ceiling(
+    db: Any, notebook_id: str, crow: Any, allowed: frozenset, *, authoritative: bool,
+) -> bool:
+    """Q1 严格谓词在 Python 里判(``crow`` 是 ``_node_context_cluster_sql`` 的行)。"""
+    if crow["unattributed_member"]:
+        return False
+    members = crow["member_sources"] or []
+    # 簇行自己的成员就是被查的对象,「没有归因不到的成员」已蕴含至少一个来源;
+    # 空表仍按拒绝处理(失败关闭)。
+    if not members or any(source not in allowed for source in members):
+        return False
+    if len(members) <= NODE_CONTEXT_CLUSTER_SOURCES_PROBE:
+        return True
+    # 读满了:簇的来源多于探针上限,且读回的这些全在天花板内 —— 按 keyset 读回
+    # 排在探针之后的其余来源,同样在 Python 里判(一个在外就整段不用)。
+    rest = db.execute(
+        _node_context_cluster_sources_after_sql(authoritative=authoritative),
+        (notebook_id, crow["canonical_id"], crow["generation"], members[-1]),
+    ).fetchall()
+    return all(row["s"] in allowed for row in rest)
+
+
+# ``node_context`` 的 ``defines`` 回落:按关系 id 有序、有界(``LIMIT %s``);被拒绝
+# 的关系与已弃用(含被合并掉)的定义者不供定义文字(台账 B-8)。参数:
+# (notebook_id, target_object_id, limit)。EXPLAIN pin:
+# tests/postgres/test_cluster_generation_explain_pins.py。
+_NODE_CONTEXT_DEFINES_SQL = (
+    "SELECT ko.payload, ko.evidence FROM knowledge_relations r "
+    "JOIN knowledge_objects ko ON ko.id=r.source_object_id "
+    "WHERE r.notebook_id=%s AND r.target_object_id=%s AND r.edge_type='defines' "
+    "AND r.review_status!='rejected' AND ko.status!='deprecated' "
+    "ORDER BY r.id COLLATE \"C\" LIMIT %s"
+)
+
+
+def _defines_evidence_fields(item: dict) -> dict:
+    return {
+        "definition": item["element_text"],
+        "definition_basis": "defines_evidence",
+        "definition_source_id": item.get("source_id") or None,
+        "definition_element_id": item.get("element_id") or None,
+    }
+
+
+def _definition_from_defines(
+    first_definer_name: str, first_definer_items: int, enriched: list,
+    allowed: Optional[frozenset],
+) -> dict:
+    """``enriched`` 是全部定义者证据按 (关系 id, 证据序) 批量 enrich 的结果。"""
+    if allowed is None:
+        first = enriched[:first_definer_items]
+        if first:
+            return _defines_evidence_fields(first[0])
+        return {"definition": first_definer_name, "definition_basis": "defines_name"}
+    hit = next((item for item in enriched if item.get("source_id") in allowed), None)
+    return {} if hit is None else _defines_evidence_fields(hit)
+
+
+def _element_rows(db: Any, element_ids: Iterable[Any]) -> dict:
+    """{element_id: (source_id, text)},只含存在的元素。"""
+    ids = [e for e in dict.fromkeys(element_ids) if e]
+    if not ids:
+        return {}
+    ph = ",".join("%s" for _ in ids)
+    rows = db.execute(
+        f"SELECT id, source_id, text FROM source_elements WHERE id IN ({ph})", ids,
+    ).fetchall()
+    return {r["id"]: (r["source_id"], r["text"]) for r in rows}
+
+
+def _scoped_payload_steps(
+    db: Any, steps: list, allowed: frozenset, own_source: str, section: str,
+) -> list:
+    """天花板下的 payload steps:每条步骤先归因,再整条去留(名字与原文同进退)。
+
+    元素存在 → 归因到元素所在来源,原文取元素正文;元素不存在(来源重新解析后
+    元素 id 变了而 KG 没重抽)或步骤没有元素 → 归因到对象自己的
+    ``knowledge_objects.source_id``(payload 是创建对象的那个来源的 binder 产出的,
+    合并只追加证据、不动幸存对象的 payload),原文取步骤的 quote。归因来源不在
+    天花板内(或对象没有来源)→ 整条丢掉。"""
+    if not allowed:
+        return []
+    steps = [step for step in steps if isinstance(step, dict)]
+    elements = _element_rows(db, (step.get("element_id") for step in steps))
+    own_in_ceiling = own_source in allowed
+    kept = []
+    for step in steps:
+        element = elements.get(step.get("element_id") or "")
+        if element is None:
+            if not own_in_ceiling:
+                continue
+            text = step.get("quote", "")
+        elif element[0] in allowed:
+            text = element[1]
+        else:
+            continue
+        kept.append({"name": step.get("name", ""), "element_text": text, "section_path": section})
+    return kept
+
+
+# legacy 兄弟过程查询,都不绑天花板(Python 端按证据 JSON 逐个判,失败关闭)。
+# 有 section 的一路取回的就是同一 section 的兄弟(量级与库大小无关)。无 section
+# 的一路今天是 ``LIMIT 500`` 的任意样本;天花板下若先取 500 行再滤,天花板外的
+# 兄弟会占满名额,所以改成沿 (notebook_id, object_type, created_at, id) 索引按
+# keyset 翻页、边读边滤,凑够 500 个或读满 ``NODE_CONTEXT_LEGACY_SIBLING_SCAN``
+# 行为止(扫描量与库大小无关;读满仍没凑够 = 漏召回,失败关闭)。EXPLAIN pin:
+# tests/postgres/test_cluster_generation_explain_pins.py。
+_LEGACY_SIBLING_PAGE = 500
+_LEGACY_SIBLINGS_BY_SECTION_SQL = (
+    "SELECT id, payload, evidence FROM knowledge_objects "
+    "WHERE notebook_id=%s AND object_type='procedure' AND status!='deprecated' "
+    "AND (payload ->> 'section_path') COLLATE \"C\"=%s"
+)
+_LEGACY_SIBLINGS_UNSECTIONED_SQL = (
+    "SELECT id, payload, evidence FROM knowledge_objects "
+    "WHERE notebook_id=%s AND object_type='procedure' AND status!='deprecated' "
+    f"LIMIT {_LEGACY_SIBLING_PAGE}"
+)
+# 参数:(notebook_id, 上一页最后一行的 created_at, 上一页最后一行的 id);第一页
+# 用 (-infinity, '')。
+_LEGACY_SIBLINGS_UNSECTIONED_PAGE_SQL = (
+    "SELECT id, created_at, payload, evidence FROM knowledge_objects "
+    "WHERE notebook_id=%s AND object_type='procedure' AND status!='deprecated' "
+    "AND (created_at, id) > (%s, %s) "
+    f"ORDER BY created_at, id LIMIT {_LEGACY_SIBLING_PAGE}"
+)
+
+
+def _sibling_candidate(pr: Any, section: str, allowed: Optional[frozenset]):
+    """(步骤名, 原文元素 id);不是同 section 的兄弟、或天花板下没有天花板内证据
+    → None。"""
+    ppay = json_value(pr["payload"], {})
+    if ppay.get("section_path", "") != section:
+        return None
+    ev = json_value(pr["evidence"], [])
+    if allowed is None:
+        return ppay.get("name", ""), (ev[0].get("element_id") if ev else "")
+    # The step text comes from the sibling's first IN-ceiling evidence item,
+    # never from an out-of-ceiling one ahead of it; no such item → the sibling
+    # is not supported by the ceiling → fail closed.
+    first_in = next((e for e in _evidence_dicts(ev) if e.get("source_id") in allowed), None)
+    if first_in is None:
+        return None
+    return ppay.get("name", ""), (first_in.get("element_id") or "")
+
+
+def _scoped_unsectioned_siblings(db: Any, notebook_id: str, allowed: frozenset) -> list:
+    candidates: list = []
+    after = (datetime.min.replace(tzinfo=timezone.utc), "")
+    for _ in range(max(1, NODE_CONTEXT_LEGACY_SIBLING_SCAN // _LEGACY_SIBLING_PAGE)):
+        page = db.execute(
+            _LEGACY_SIBLINGS_UNSECTIONED_PAGE_SQL, (notebook_id, *after)).fetchall()
+        for pr in page:
+            candidate = _sibling_candidate(pr, "", allowed)
+            if candidate is not None:
+                candidates.append(candidate)
+        if len(page) < _LEGACY_SIBLING_PAGE or len(candidates) >= _LEGACY_SIBLING_PAGE:
+            break
+        after = (page[-1]["created_at"], page[-1]["id"])
+    return candidates[:_LEGACY_SIBLING_PAGE]
+
+
+def _legacy_sibling_steps(
+    db: Any, notebook_id: str, section: str, shown_section: str,
+    allowed: Optional[frozenset], element_texts,
+) -> list:
+    """Legacy fallback: group sibling procedure nodes by exact section_path
+    (precedes edges are sparse). Two distinct procedures sharing a heading
+    would merge — acceptable for inspection.
+
+    P2-3: this used to scan EVERY procedure object in the notebook
+    (regardless of section) and filter in Python — O(procedures in
+    notebook) per call. When the target node's own section_path is
+    known (the common case), bind the query to it directly in SQL, so
+    only matching rows are read. section_path is free text (not a
+    dedicated column) so this is the only way to push the filter down
+    without a schema change. If section_path is unavailable (rare: an
+    old or malformed payload), fall back to a bounded LIMIT — this path
+    is a display-only legacy fallback, not a correctness-critical query,
+    so an arbitrary-but-bounded sample is acceptable.
+
+    ``element_texts`` is the store's ``_element_texts``.
+    """
+    if section or allowed is None:
+        prows = db.execute(
+            _LEGACY_SIBLINGS_BY_SECTION_SQL if section else _LEGACY_SIBLINGS_UNSECTIONED_SQL,
+            (notebook_id, section) if section else (notebook_id,)).fetchall()
+        candidate_steps = [
+            candidate for candidate in (_sibling_candidate(pr, section, allowed) for pr in prows)
+            if candidate is not None
+        ]
+    else:
+        candidate_steps = _scoped_unsectioned_siblings(db, notebook_id, allowed)
+    all_step_first_eids = [eid for _, eid in candidate_steps if eid]
+    if all_step_first_eids:
+        texts, ordinal = element_texts(db, all_step_first_eids, with_ordinal=True)
+    else:
+        texts, ordinal = {}, {}
+    steps = []
+    for step_name, first_eid in candidate_steps:
+        steps.append({"name": step_name, "element_text": texts.get(first_eid, ""),
+                      "section_path": shown_section, "_ord": ordinal.get(first_eid, 1_000_000)})
+    steps.sort(key=lambda s: s["_ord"])
+    for s in steps:
+        s.pop("_ord", None)
+    return steps
 
 
 def _relation_insert_row(row: Sequence[Any]) -> tuple:
@@ -1944,6 +2211,9 @@ class KnowledgeStore:
         ordinal = {r["id"]: i for i, r in enumerate(order_rows)}
         return texts, ordinal
     def _enrich_evidence(self, db, evidence):
+        # 非对象项(脏数据)跳过,不抛:定义者最多扫 NODE_CONTEXT_DEFINES_SCAN 个,
+        # 一条坏证据不该让整次 node_context 失败。
+        evidence = [e for e in evidence if isinstance(e, dict)]
         element_ids = list(
             dict.fromkeys(e.get("element_id") for e in evidence if e.get("element_id"))
         )
@@ -1976,65 +2246,70 @@ class KnowledgeStore:
         return out
     def node_context(
         self, notebook_id, object_id, *, check_access: bool = True,
-        allowed_source_ids: Optional[Sequence[str]] = None,
+        allowed_source_ids: Optional[Iterable[str]] = None,
     ):
         """对象详情:occurrences / definition / steps。
 
         ``allowed_source_ids`` 缺省(None)→ 返回值与来源天花板落地之前逐值相同,
         只多三个附加字段 ``definition_basis`` / ``definition_source_id`` /
-        ``definition_element_id``(唯一有意的变化:``defines`` 查询加了
-        ``ORDER BY r.id``,今天那条无序 ``LIMIT 1`` 的挑选因此确定)。
+        ``definition_element_id``。有意的变化只有两处:``defines`` 查询加了
+        ``ORDER BY r.id``(今天那条无序 ``LIMIT 1`` 的挑选因此确定),并且不再读
+        被拒绝的 ``defines`` 关系与已弃用(含被合并掉)的定义者(台账 B-8)。
 
-        传进来时(空序列 = 全部拒绝,不是「不限」)—— 任何来自天花板外来源的
-        文字都不进返回值(PR-A·A1,用户裁决 Q1 严格 / Q4):
+        传进来时(frozenset / set / tuple / list,只归一化一次;空 = 全部拒绝,
+        不是「不限」)—— 任何来自天花板外来源的文字都不进返回值(PR-A·A1,用户
+        裁决 Q1 严格 / Q4):
 
         - ``occurrences`` 只留 source_id 在天花板内的条目;
-        - 簇融合描述只在 ``_cluster_sources_within_ceiling`` 成立时用;
+        - ``section_path`` 是创建对象的那个来源(``knowledge_objects.source_id``)
+          的标题路径,该来源不在天花板内时返回空串(``name`` 是实体身份,保留;
+          对象只有在天花板内证据支持它时才会被服务层用到);
+        - 簇融合描述只在 Q1 严格谓词成立时用(``_node_context_cluster_sql``:
+          没有成员来源在天花板外、也没有归因不到来源的成员);
         - ``defines`` 证据按 ``r.id`` 有界扫描 ``NODE_CONTEXT_DEFINES_SCAN`` 个
           定义者、一次批量 enrich,取第一条天花板内的证据;定义者无证据时今天回落
           到它的名字(``defines_name``),归因不到来源,天花板下不返回;
-        - payload steps 是对象自己的内容,步骤名保留;但步骤原文按 element_id 读自
-          具体来源(合并对象的步骤可来自另一个来源),该来源不在天花板内时原文
-          置空,元素不存在时 quote 同样归因不到来源,一并置空;
-        - legacy steps(同 section_path 的兄弟过程)只留至少有一条天花板内证据
-          来源的兄弟,原文取该兄弟第一条天花板内证据的元素。
+        - payload steps 按步骤归因:元素存在 → 元素所在来源;元素不存在或步骤
+          没有元素 → 对象自己的 ``source_id``。归因来源在天花板内则名字与原文
+          照常返回,否则整条步骤(名字也)丢掉;
+        - legacy steps(同 section_path 的兄弟过程)只留证据里至少有一条天花板内
+          来源的兄弟,原文取该兄弟第一条天花板内证据的元素(无 section 时有界
+          翻页,见 ``NODE_CONTEXT_LEGACY_SIBLING_SCAN``)。
 
         什么都不合格时 ``definition`` 为 None、``definition_basis`` 为 None,
-        由服务层回落到 snippet。
+        由服务层回落到 snippet。天花板从不进 SQL:每条语句的绑定参数都与天花板
+        大小无关,成员关系全在 Python 里对 frozenset 判。
         """
         if check_access:
             self.get_notebook(notebook_id)
-        ceiling: Optional[List[str]] = None
-        allowed: Optional[frozenset] = None
-        if allowed_source_ids is not None:
-            ceiling = [str(s) for s in dict.fromkeys(allowed_source_ids) if s]
-            allowed = frozenset(ceiling)
+        allowed = _normalise_ceiling(allowed_source_ids)
         with self._connect() as db:
-            row = db.execute("SELECT id, object_type, payload, evidence FROM knowledge_objects WHERE id=%s AND notebook_id=%s", (object_id, notebook_id)).fetchone()
+            row = db.execute("SELECT id, object_type, payload, evidence, source_id FROM knowledge_objects WHERE id=%s AND notebook_id=%s", (object_id, notebook_id)).fetchone()
             if row is None:
                 raise KeyError(object_id)
             obj_type = row["object_type"]
             payload = json_value(row["payload"], {})
             section = payload.get("section_path", "")
+            shown_section = section if allowed is None or row["source_id"] in allowed else ""
             occurrences = self._enrich_evidence(db, json_value(row["evidence"], []))
             if allowed is not None:
                 occurrences = [o for o in occurrences if o.get("source_id") in allowed]
             result = {"id": object_id, "object_type": obj_type, "name": payload.get("name", ""),
-                      "section_path": section, "occurrences": occurrences, "definition": None,
+                      "section_path": shown_section, "occurrences": occurrences, "definition": None,
                       "definition_basis": None, "definition_source_id": None,
                       "definition_element_id": None, "steps": None}
             authoritative_memo: List[bool] = []
 
             def _authoritative() -> bool:
-                # 只在天花板真的在绑、且确实要跑谓词时读一次凭证。
+                # 只在天花板生效、且确实要跑谓词时读一次凭证。
                 if not authoritative_memo:
                     authoritative_memo.append(
                         not self.source_index_backfilled(db, notebook_id))
                 return authoritative_memo[0]
 
-            if obj_type == "concept" and not (ceiling is not None and not ceiling):
+            if obj_type == "concept" and (allowed is None or allowed):
                 # prefer the unified cluster's fused description when present
-                if ceiling is None:
+                if allowed is None:
                     crow = db.execute(
                         "SELECT canonical_description FROM concept_clusters "
                         "WHERE notebook_id=%s AND member_object_id=%s AND canonical_description!='' "
@@ -2042,50 +2317,34 @@ class KnowledgeStore:
                         (notebook_id, object_id, notebook_id)).fetchone()
                     description_ok = True
                 else:
-                    # Q1 严格谓词折进同一条簇查询(布尔列),不多一次往返。
                     crow = db.execute(
                         _node_context_cluster_sql(authoritative=_authoritative()),
-                        (ceiling, notebook_id, object_id, notebook_id)).fetchone()
-                    description_ok = bool(crow and crow["within_ceiling"])
+                        (notebook_id, object_id, notebook_id)).fetchone()
+                    description_ok = bool(crow) and _cluster_description_in_ceiling(
+                        db, notebook_id, crow, allowed, authoritative=_authoritative())
                 if crow and crow["canonical_description"] and description_ok:
                     result["definition"] = crow["canonical_description"]
                     result["definition_basis"] = "cluster_description"
                 else:
                     drows = db.execute(
-                        "SELECT ko.payload, ko.evidence FROM knowledge_relations r JOIN knowledge_objects ko ON ko.id=r.source_object_id "
-                        "WHERE r.notebook_id=%s AND r.target_object_id=%s AND r.edge_type='defines' "
-                        "ORDER BY r.id COLLATE \"C\" LIMIT %s",
+                        _NODE_CONTEXT_DEFINES_SQL,
                         (notebook_id, object_id,
                          1 if allowed is None else NODE_CONTEXT_DEFINES_SCAN)).fetchall()
                     if drows:
-                        per_definer = [json_value(d["evidence"], []) for d in drows]
+                        per_definer = [_evidence_dicts(json_value(d["evidence"], [])) for d in drows]
                         # 一次批量 enrich 覆盖全部定义者的证据(顺序 = 关系 id 序、
                         # 定义者内证据序)。
                         enriched = self._enrich_evidence(
                             db, [item for ev in per_definer for item in ev])
-                        if allowed is None:
-                            den = enriched[:len(per_definer[0])]
-                            if den:
-                                result["definition"] = den[0]["element_text"]
-                                result["definition_basis"] = "defines_evidence"
-                                result["definition_source_id"] = den[0].get("source_id") or None
-                                result["definition_element_id"] = den[0].get("element_id") or None
-                            else:
-                                result["definition"] = json_value(drows[0]["payload"], {}).get("name", "")
-                                result["definition_basis"] = "defines_name"
-                        else:
-                            hit = next((e for e in enriched if e.get("source_id") in allowed), None)
-                            if hit is not None:
-                                result["definition"] = hit["element_text"]
-                                result["definition_basis"] = "defines_evidence"
-                                result["definition_source_id"] = hit.get("source_id") or None
-                                result["definition_element_id"] = hit.get("element_id") or None
+                        result.update(_definition_from_defines(
+                            json_value(drows[0]["payload"], {}).get("name", ""),
+                            len(per_definer[0]), enriched, allowed))
             if obj_type == "procedure":
                 steps_payload = payload.get("steps")
                 if isinstance(steps_payload, list) and steps_payload:
                     # New self-contained shape: ordered steps live in the object's payload.
-                    eids = [s.get("element_id") for s in steps_payload if s.get("element_id")]
                     if allowed is None:
+                        eids = [s.get("element_id") for s in steps_payload if s.get("element_id")]
                         texts, _ord = self._element_texts(db, eids) if eids else ({}, {})
                         result["steps"] = [
                             {"name": s.get("name", ""),
@@ -2094,88 +2353,14 @@ class KnowledgeStore:
                             for s in steps_payload
                         ]
                     else:
-                        probes = self._enrich_evidence(
-                            db, [{"element_id": e} for e in dict.fromkeys(eids)]) if eids and ceiling else []
-                        texts = {p["element_id"]: p["element_text"] for p in probes
-                                 if p.get("source_id") in allowed}
-                        result["steps"] = [
-                            {"name": s.get("name", ""),
-                             "element_text": texts.get(s.get("element_id") or "", ""),
-                             "section_path": section}
-                            for s in steps_payload
-                        ]
-                elif ceiling is not None and not ceiling:
+                        result["steps"] = _scoped_payload_steps(
+                            db, steps_payload, allowed, row["source_id"], shown_section)
+                elif allowed is not None and not allowed:
                     result["steps"] = []
                 else:
-                    # Legacy fallback: group sibling procedure nodes by exact section_path
-                    # (precedes edges are sparse). Two distinct procedures sharing a heading
-                    # would merge — acceptable for inspection.
-                    #
-                    # P2-3: this used to scan EVERY procedure object in the notebook
-                    # (regardless of section) and filter in Python — O(procedures in
-                    # notebook) per call. When the target node's own section_path is
-                    # known (the common case — payload.get("section_path") above),
-                    # bind the query to it directly in SQL via json_extract (JSON1,
-                    # already used elsewhere in this file), so SQLite only reads
-                    # matching rows. section_path is free text (not a dedicated
-                    # column) so this is the only way to push the filter down without
-                    # a schema change. If section_path is unavailable (rare: an old
-                    # or malformed payload), fall back to a bounded LIMIT — this path
-                    # is a display-only legacy fallback, not a correctness-critical
-                    # query, so an arbitrary-but-bounded sample is acceptable.
-                    #
-                    # PR-A·A1: under a source ceiling the support gate sits in the
-                    # SQL (before the LIMIT 500 of the section-less path, so
-                    # out-of-ceiling siblings cannot crowd supported ones out).
-                    gate, gate_params = "", ()
-                    if ceiling is not None:
-                        gate = "AND " + _object_supported_by_ceiling(
-                            "knowledge_objects", authoritative=_authoritative()) + " "
-                        gate_params = (ceiling,)
-                    if section:
-                        prows = db.execute(
-                            "SELECT id, payload, evidence FROM knowledge_objects "
-                            "WHERE notebook_id=%s AND object_type='procedure' AND status!='deprecated' "
-                            "AND (payload ->> 'section_path') COLLATE \"C\"=%s "
-                            f"{gate}",
-                            (notebook_id, section, *gate_params)).fetchall()
-                    else:
-                        prows = db.execute(
-                            "SELECT id, payload, evidence FROM knowledge_objects "
-                            "WHERE notebook_id=%s AND object_type='procedure' AND status!='deprecated' "
-                            f"{gate}LIMIT 500",
-                            (notebook_id, *gate_params)).fetchall()
-                    candidate_steps = []
-                    for pr in prows:
-                        ppay = json_value(pr["payload"], {})
-                        if ppay.get("section_path", "") != section:
-                            continue
-                        ev = json_value(pr["evidence"], [])
-                        if allowed is None:
-                            first_eid = ev[0].get("element_id") if ev else ""
-                        else:
-                            # The step text comes from the sibling's first IN-ceiling
-                            # evidence item, never from an out-of-ceiling one ahead of
-                            # it; no such item (index/JSON disagreement) → fail closed.
-                            first_in = next((e for e in ev if isinstance(e, dict)
-                                             and e.get("source_id") in allowed), None)
-                            if first_in is None:
-                                continue
-                            first_eid = first_in.get("element_id") or ""
-                        candidate_steps.append((ppay.get("name", ""), first_eid))
-                    all_step_first_eids = [eid for _, eid in candidate_steps if eid]
-                    if all_step_first_eids:
-                        texts, ordinal = self._element_texts(db, all_step_first_eids, with_ordinal=True)
-                    else:
-                        texts, ordinal = {}, {}
-                    steps = []
-                    for step_name, first_eid in candidate_steps:
-                        steps.append({"name": step_name, "element_text": texts.get(first_eid, ""),
-                                      "section_path": section, "_ord": ordinal.get(first_eid, 1_000_000)})
-                    steps.sort(key=lambda s: s["_ord"])
-                    for s in steps:
-                        s.pop("_ord", None)
-                    result["steps"] = steps
+                    result["steps"] = _legacy_sibling_steps(
+                        db, notebook_id, section, shown_section, allowed,
+                        self._element_texts)
             return result
 
     # ------------------------------------------------------------- counts

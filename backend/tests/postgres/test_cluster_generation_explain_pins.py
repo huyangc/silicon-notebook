@@ -106,19 +106,37 @@ def test_version_facts_cluster_component_scans_the_created_gen_index(
     assert "InitPlan" in plan, plan
 
 
-@pytest.mark.parametrize("authoritative", [False, True])
-def test_node_context_ceiling_cluster_query_never_seq_scans(
-    postgres_database, authoritative,
-):
-    """PR-A·A1:``node_context`` 在来源天花板下的簇描述查询(Q1 严格谓词折成
-    布尔列)。两条支都不许顺扫 ``concept_clusters`` / ``knowledge_object_sources``
-    / ``knowledge_objects``:成员走 (notebook_id, canonical_id, ...) 前导索引,
-    来源走 ``knowledge_object_sources`` 的 (object_id, source_id) 主键,权威支按
-    主键回表读 evidence。published 代次谓词仍是一次求值的 InitPlan。"""
-    from app.repositories.postgres.knowledge_store import _node_context_cluster_sql
+# PR-A·A1:``node_context`` 在来源天花板下的语句都不绑天花板(成员关系在 Python
+# 里判),这里钉它们的计划形态,并钉「同一连接执行十几次、切到 generic plan 之后」
+# 形态不退化(绑 49k 数组的旧写法在第 ~10 次执行后切到 generic plan,慢一个量级)。
+_NC_EXPLAIN_NOTEBOOK = "nb-nc-explain"
 
-    assert PostgresMigrator(postgres_database).migrate() == 65
-    notebook_id = "nb-nc-explain"
+
+def _generic_plan_after_repeats(connection, sql: str, types: str, params: tuple) -> str:
+    """同一连接上 PREPARE 后连续 EXECUTE 12 次,再 EXPLAIN EXECUTE:计划缓存此时
+    已按代价比较决定是否改用 generic plan,这里拿到的就是之后每次执行的形态。"""
+    parts = sql.split("%s")
+    numbered = "".join(
+        part + (f"${index + 1}" if index < len(parts) - 1 else "")
+        for index, part in enumerate(parts)
+    )
+    connection.execute("SET LOCAL enable_seqscan=off")
+    connection.execute("SET LOCAL enable_bitmapscan=off")
+    from psycopg import sql as pg_sql
+
+    connection.execute(f"PREPARE nc_plan ({types}) AS {numbered}")
+    arguments = pg_sql.SQL(",").join(pg_sql.Literal(value) for value in params)
+    execute = pg_sql.SQL("EXECUTE nc_plan ({})").format(arguments)
+    for _ in range(12):
+        connection.execute(execute).fetchall()
+    rows = connection.execute(
+        pg_sql.SQL("EXPLAIN (COSTS OFF) {}").format(execute)).fetchall()
+    connection.execute("DEALLOCATE nc_plan")
+    return "\n".join(str(row["QUERY PLAN"]) for row in rows)
+
+
+def _seed_node_context_explain(postgres_database) -> None:
+    notebook_id = _NC_EXPLAIN_NOTEBOOK
     _seed(postgres_database, notebook_id, 5000)
     now = normalize_timestamp("2026-01-01T00:00:00+00:00")
     with postgres_database.write() as db:
@@ -130,7 +148,8 @@ def test_node_context_ceiling_cluster_query_never_seq_scans(
         db.execute(
             "INSERT INTO knowledge_objects"
             "(id,notebook_id,object_type,payload,evidence,created_at,updated_at) "
-            "SELECT 'ko-'||g, %s, 'concept', '{}'::jsonb, "
+            "SELECT 'ko-'||g, %s, CASE WHEN g%%5=0 THEN 'procedure' ELSE 'concept' END, "
+            "jsonb_build_object('section_path', 'S'||(g%%50)), "
             "jsonb_build_array(jsonb_build_object('source_id', 'src-'||(g%%7))), %s, %s "
             "FROM generate_series(0, 4999) g",
             (notebook_id, now, now),
@@ -140,19 +159,115 @@ def test_node_context_ceiling_cluster_query_never_seq_scans(
             "SELECT 'ko-'||g, 'src-'||(g%%7), %s FROM generate_series(0, 4999) g",
             (notebook_id,),
         )
+        db.execute(
+            "INSERT INTO knowledge_relations"
+            "(id,notebook_id,source_id,source_object_id,target_object_id,edge_type,"
+            "evidence,created_at) "
+            "SELECT 'rel-'||g, %s, NULL, 'ko-'||(g+1), 'ko-'||g, "
+            "CASE WHEN g%%3=0 THEN 'defines' ELSE 'related_to' END, '[]'::jsonb, %s "
+            "FROM generate_series(0, 4998) g",
+            (notebook_id, now),
+        )
         db.execute("ANALYZE knowledge_objects")
         db.execute("ANALYZE knowledge_object_sources")
+        db.execute("ANALYZE knowledge_relations")
+
+
+@pytest.mark.parametrize("authoritative", [False, True])
+def test_node_context_ceiling_queries_never_seq_scan(postgres_database, authoritative):
+    """PR-A·A1:``node_context`` 在来源天花板下的簇查询(读回成员来源交给
+    Python 判)与来源多于探针上限时的 keyset 续读语句,首次执行与同一连接上执行
+    12 次之后(generic plan)两种形态。两条支都不许顺扫 ``concept_clusters`` /
+    ``knowledge_object_sources`` / ``knowledge_objects``:成员走
+    (notebook_id, canonical_id, ...) 前导索引,来源走 ``knowledge_object_sources``
+    的 (object_id, ...) 索引,权威支按主键回表读 evidence。published 代次谓词仍是
+    一次求值的 InitPlan。"""
+    from app.repositories.postgres.knowledge_store import (
+        _node_context_cluster_sources_after_sql, _node_context_cluster_sql,
+    )
+
+    assert PostgresMigrator(postgres_database).migrate() == 65
+    _seed_node_context_explain(postgres_database)
+    notebook_id = _NC_EXPLAIN_NOTEBOOK
+    cluster_sql = _node_context_cluster_sql(authoritative=authoritative)
+    after_sql = _node_context_cluster_sources_after_sql(authoritative=authoritative)
+    cluster_params = (notebook_id, "ko-42", notebook_id)
+    after_params = (notebook_id, "can-4", 0, "src-1")
+    plans = {}
     with postgres_database.connect() as connection:
-        plan = _plan(
-            connection,
-            _node_context_cluster_sql(authoritative=authoritative),
-            (["src-1", "src-2"], notebook_id, "ko-42", notebook_id),
-        )
-    for table in ("concept_clusters", "knowledge_object_sources", "knowledge_objects"):
-        assert f"Seq Scan on {table}" not in plan, plan
-    assert "InitPlan" in plan, plan
-    if not authoritative:
-        assert "knowledge_object_sources" in plan, plan
+        plans["cluster"] = _plan(connection, cluster_sql, cluster_params)
+    with postgres_database.connect() as connection:
+        plans["after"] = _plan(connection, after_sql, after_params)
+    with postgres_database.connect() as connection:
+        plans["cluster@12"] = _generic_plan_after_repeats(
+            connection, cluster_sql, "text, text, text", cluster_params)
+    with postgres_database.connect() as connection:
+        plans["after@12"] = _generic_plan_after_repeats(
+            connection, after_sql, "text, text, bigint, text", after_params)
+    for label, plan in plans.items():
+        for table in ("concept_clusters", "knowledge_object_sources", "knowledge_objects"):
+            assert f"Seq Scan on {table}" not in plan, (label, plan)
+        if not authoritative:
+            assert "knowledge_object_sources" in plan, (label, plan)
+    assert "InitPlan" in plans["cluster"], plans["cluster"]
+    assert "InitPlan" in plans["cluster@12"], plans["cluster@12"]
+
+
+def test_node_context_legacy_sibling_queries_never_seq_scan(postgres_database):
+    """legacy 兄弟过程查询(都不绑天花板):有 section 的一路、无天花板时无
+    section 的 ``LIMIT 500`` 一路,都走 knowledge_objects 的
+    (notebook_id, object_type, ...) 索引;天花板下无 section 的 keyset 翻页沿
+    (notebook_id, object_type, created_at, id) 索引按序读、不排序,首次执行与同一
+    连接执行 12 次之后形态相同。"""
+    from app.repositories.postgres.knowledge_store import (
+        _LEGACY_SIBLINGS_BY_SECTION_SQL, _LEGACY_SIBLINGS_UNSECTIONED_PAGE_SQL,
+        _LEGACY_SIBLINGS_UNSECTIONED_SQL,
+    )
+
+    assert PostgresMigrator(postgres_database).migrate() == 65
+    _seed_node_context_explain(postgres_database)
+    notebook_id = _NC_EXPLAIN_NOTEBOOK
+    first_page = (notebook_id, normalize_timestamp("0001-01-01T00:00:00+00:00"), "")
+    plans = {}
+    with postgres_database.connect() as connection:
+        plans["sectioned"] = _plan(
+            connection, _LEGACY_SIBLINGS_BY_SECTION_SQL, (notebook_id, "S5"))
+    with postgres_database.connect() as connection:
+        plans["unsectioned"] = _plan(
+            connection, _LEGACY_SIBLINGS_UNSECTIONED_SQL, (notebook_id,))
+    with postgres_database.connect() as connection:
+        plans["page"] = _plan(connection, _LEGACY_SIBLINGS_UNSECTIONED_PAGE_SQL, first_page)
+    with postgres_database.connect() as connection:
+        plans["page@12"] = _generic_plan_after_repeats(
+            connection, _LEGACY_SIBLINGS_UNSECTIONED_PAGE_SQL,
+            "text, timestamptz, text", first_page)
+    for label, plan in plans.items():
+        assert "Seq Scan on knowledge_objects" not in plan, (label, plan)
+        assert "idx_knowledge_objects_nb_type" in plan, (label, plan)
+    for label in ("page", "page@12"):
+        assert "idx_knowledge_objects_nb_type_created" in plans[label], plans[label]
+        assert "Sort" not in plans[label], plans[label]
+
+
+def test_node_context_defines_query_walks_the_target_index_in_id_order(postgres_database):
+    """有序、有界的 ``defines`` 回落(台账 B-8 的两道状态过滤):沿
+    knowledge_relations(notebook_id, target_object_id, id) 索引按 id 序读、不排序,
+    定义者按主键回表,不顺扫。"""
+    from app.repositories.postgres.knowledge_store import _NODE_CONTEXT_DEFINES_SQL
+
+    assert PostgresMigrator(postgres_database).migrate() == 65
+    _seed_node_context_explain(postgres_database)
+    params = (_NC_EXPLAIN_NOTEBOOK, "ko-42", 8)
+    with postgres_database.connect() as connection:
+        plan = _plan(connection, _NODE_CONTEXT_DEFINES_SQL, params)
+    with postgres_database.connect() as connection:
+        repeated = _generic_plan_after_repeats(
+            connection, _NODE_CONTEXT_DEFINES_SQL, "text, text, bigint", params)
+    for shape in (plan, repeated):
+        for table in ("knowledge_relations", "knowledge_objects"):
+            assert f"Seq Scan on {table}" not in shape, shape
+        assert "Sort" not in shape, shape
+        assert "pk_knowledge_objects" in shape, shape
 
 
 def test_concept_clusters_count_skip_gate_leg_stays_index_only(postgres_database):
