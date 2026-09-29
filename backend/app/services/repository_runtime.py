@@ -48,7 +48,7 @@ from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService
 from app.services.knowledge_query import KnowledgeQueryService
-from app.services.kg_viewer_scope import KgViewerScopeReader
+from app.services.kg_viewer_scope import KgViewerScopeReader, NodeContextCeilingVerdict
 from app.services.evidence_context import EvidenceContextService
 from app.services.graph_retrieval import GraphRetrievalService
 from app.services.model_provider import (
@@ -1524,9 +1524,14 @@ class RepositoryRuntime:
                 retrieval_contributors=self.retrieval_contributors,
             )
             graph = GraphRetrievalService(**common)
+            # PR-A: one ``ceiling_binds`` verdict (memoised on the run's scope)
+            # shared by both node_context re-read sites.
+            ceiling_verdict = NodeContextCeilingVerdict(
+                database=self.database, sources=self.source_store)
             retrieval = RetrievalService(
                 candidates=candidates,
                 graph=graph,
+                ceiling_verdict=ceiling_verdict,
                 community_queries=lambda settings=None: CommunityQueryService(
                     notebooks=self.notebook_store,
                     unified_kg=self.unified_kg,
@@ -1543,6 +1548,7 @@ class RepositoryRuntime:
                 sources=self.source_store,
                 knowledge=graph,
                 settings=self.settings,
+                ceiling_verdict=ceiling_verdict,
             )
             self.candidate_retrieval = candidates
             self.graph_retrieval = graph

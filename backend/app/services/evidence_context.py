@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Iterable, Mapping, MutableMapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
 
 from app.core.config import Settings
 from app.domain.citation_origin import foreign_notebook_id
@@ -36,7 +36,7 @@ from app.services.source_display import source_display_title
 from app.services.source_element_selection import deduplicate_source_chunks_in_order
 from app.services.source_scope import (
     citation_active_id, notebook_in_scope, scoped_node_context_row,
-    scoped_source_ceiling,
+    scoped_source_ceiling, source_ceiling_exists,
 )
 
 
@@ -299,11 +299,16 @@ class EvidenceContextService:
         sources: SourceStorePort,
         knowledge: EvidenceKnowledgeContextPort,
         settings: Settings,
+        ceiling_verdict: Callable[[str], bool] | None = None,
     ) -> None:
         self.notebooks = notebooks
         self.sources = sources
         self.knowledge = knowledge
         self.settings = settings
+        # ``source_scope.ceiling_binds`` for the current run (production wires
+        # ``kg_viewer_scope.NodeContextCeilingVerdict``).  Without one, every
+        # existing ceiling binds -- the conservative historical answer.
+        self.ceiling_binds = ceiling_verdict or source_ceiling_exists
 
     def tier_map(self, notebook_ids: Sequence[str]) -> dict[str, str]:
         return self.notebooks.tier_map(notebook_ids)
@@ -995,6 +1000,10 @@ class EvidenceContextService:
                     # 库维度专用(notebook_in_scope 而非 source_scope_restricted):
                     # 只取消参考库时后者恒为 False(R1)。本地维度不在此过滤——命中
                     # 已在候选边界按来源过滤过。
+                    #
+                    # 簇记为已见(与改动前逐字相同):无天花板的输出不许因为
+                    # 这里而变。
+                    seen_clusters.add(cluster_id)
                     continue
                 # 来源级闸,落在这条**重查**上(PR-A·A3)。上面的 notebook_in_scope
                 # 只答库维度;``hit.evidence`` 虽已被 ``filter_retrieval_items`` 的
@@ -1017,7 +1026,14 @@ class EvidenceContextService:
                 # 范围内即丢——防一个忽略了参数的 store)、天花板没能下推(LOCAL
                 # exclude 形态没有物化清单)时丢掉无从归因的簇描述与 steps。无天花板
                 # 绑住该库时它原样交回 row。
-                allowed_source_ids = scoped_source_ceiling(origin)
+                #
+                # 天花板**绑定**与否是一次 run、一个库一次的裁决
+                # (``source_scope.ceiling_binds``):全选、冻结后没变、库里也
+                # 没有提问者读不到的隐藏来源时,天花板排除不了任何东西——store
+                # 不收天花板、行原样用,与没有 scope 的 run 逐字节相同(hub 簇的
+                # 融合描述也在)。
+                binds = self.ceiling_binds(origin)
+                allowed_source_ids = scoped_source_ceiling(origin) if binds else None
                 try:
                     context = (
                         self.knowledge.node_context(origin, hit.object_id)
@@ -1028,10 +1044,15 @@ class EvidenceContextService:
                         )
                     )
                 except KeyError:
+                    # 召回之后对象被删:簇记为已见,与改动前逐字相同。
+                    seen_clusters.add(cluster_id)
                     continue
-                scoped_context = scoped_node_context_row(
-                    origin, context,
-                    ceiling_pushed=allowed_source_ids is not None,
+                scoped_context = (
+                    scoped_node_context_row(
+                        origin, context,
+                        ceiling_pushed=allowed_source_ids is not None,
+                    )
+                    if binds else context
                 )
                 if scoped_context is None:
                     # FAIL-CLOSED,与 ``filter_retrieval_items`` 的 knowledge 支同

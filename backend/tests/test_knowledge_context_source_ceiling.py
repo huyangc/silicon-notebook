@@ -701,9 +701,10 @@ def test_a_cluster_is_marked_seen_only_when_a_member_is_admitted():
 
 
 def test_the_ceiling_is_normalised_once_per_library_not_once_per_hit(monkeypatch):
-    """整库可见来源 ~49k 个 id、40 个命中:每个参与库的天花板每次 run 只归一化
-    一次(曾经每个命中各排一遍 49k,~8 ms/条),而且交给 store 的就是那同一个
-    frozenset 对象。按调用次数计,不按墙钟。"""
+    """整库可见来源 ~49k 个 id、40 个命中:绑定的天花板每次 run 只归一化一次
+    (曾经每个命中各排一遍 49k,~8 ms/条),而且交给 store 的就是那同一个
+    frozenset 对象;天花板不绑的库(本地勾选管不到的 peer)一次都不算。按调用
+    次数计,不按墙钟。"""
     from app.services import source_scope
 
     calls = []
@@ -731,7 +732,7 @@ def test_the_ceiling_is_normalised_once_per_library_not_once_per_hit(monkeypatch
         _block, id_map = _service(knowledge).knowledge_context(
             ACTIVE, hits, budget_chars=100_000)
     assert len(id_map) == 40
-    assert sorted(calls) == [ACTIVE, PEER], calls
+    assert calls == [ACTIVE], calls
     pushed = [value for value in knowledge.pushed if value != "<absent>"]
     assert len(pushed) == 20 and len({id(value) for value in pushed}) == 1
 

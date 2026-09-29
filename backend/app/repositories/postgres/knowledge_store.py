@@ -23,7 +23,7 @@ from psycopg import errors, sql
 
 from app.core.json_safety import validate_finite_json
 from app.domain.knowledge_contracts import (
-    NODE_CONTEXT_CLUSTER_SOURCES_PROBE, NODE_CONTEXT_DEFINES_SCAN,
+    NODE_CONTEXT_CLUSTER_MEMBER_PROBE, NODE_CONTEXT_DEFINES_SCAN,
     NODE_CONTEXT_LEGACY_SIBLING_SCAN,
 )
 from app.models.common import Evidence
@@ -295,96 +295,51 @@ def _evidence_items(ref: str) -> str:
     )
 
 
-def _evidence_source_exists(ref: str, condition: str) -> str:
-    """``ref`` 那一行至少有一条证据满足 ``condition``(条件写在 ``ev`` 上)。"""
-    return f"EXISTS (SELECT 1 FROM {_evidence_items(ref)} WHERE {condition})"
-
-
-def _cluster_member_sources(
-    notebook: str, canonical: str, generation: str, *, authoritative: bool,
-) -> tuple[str, str]:
-    """一个簇(同 notebook / canonical_id / 代次)全部成员的**可归因**证据来源:
-    返回 (``FROM … WHERE …`` 片段, 来源列表达式)。三个参数是 SQL 表达式(相关列
-    或 ``%s``)。"""
-    scope = (
-        f"WHERE m.notebook_id={notebook} AND m.canonical_id={canonical} "
-        f"AND m.generation={generation}"
-    )
-    if authoritative:
-        return (
-            "FROM concept_clusters m JOIN knowledge_objects ko "
-            "ON ko.id=m.member_object_id AND ko.notebook_id=m.notebook_id "
-            f"CROSS JOIN LATERAL {_evidence_items('ko')} "
-            f"{scope} AND {_ATTRIBUTABLE_SOURCE}",
-            "ev->>'source_id'",
-        )
-    return (
-        "FROM concept_clusters m JOIN knowledge_object_sources kos "
-        "ON kos.object_id=m.member_object_id AND kos.notebook_id=m.notebook_id "
-        f"{scope}",
-        "kos.source_id",
-    )
-
-
-def _member_has_attributable_source(member_ref: str, *, authoritative: bool) -> str:
-    """簇成员行 ``member_ref`` 的对象至少有一条可归因的证据来源(对象不存在 = 没有)。"""
-    if authoritative:
-        return (
-            "EXISTS (SELECT 1 FROM knowledge_objects ko "
-            f"WHERE ko.id={member_ref}.member_object_id "
-            f"AND ko.notebook_id={member_ref}.notebook_id "
-            f"AND {_evidence_source_exists('ko', _ATTRIBUTABLE_SOURCE)})"
-        )
-    return (
-        "EXISTS (SELECT 1 FROM knowledge_object_sources kos "
-        f"WHERE kos.object_id={member_ref}.member_object_id "
-        f"AND kos.notebook_id={member_ref}.notebook_id)"
-    )
-
-
 def _node_context_cluster_sql(*, authoritative: bool) -> str:
-    """天花板生效时 ``node_context`` 的簇描述查询(与无天花板的簇查询同一次往返,
-    **不绑天花板**)。参数:(notebook_id, object_id, notebook_id)。
+    """**绑定的**天花板下 ``node_context`` 的簇描述查询(**不绑天花板**)。参数:
+    (notebook_id, object_id, notebook_id, 成员行上限)。
 
     用户裁决 Q1(严格):簇融合描述是对全部成员的 LLM 融合,归因不到单一来源;
-    只有**没有任何成员**的证据来源落在天花板外时才能用,且证据里归因不到任何
-    来源的成员(含成员对象已不存在)同样算在天花板外。多读两列交给 Python 判:
+    只有能证明**没有任何成员**的证据来源落在天花板外时才能用,证据里归因不到任何
+    来源的成员(含成员对象已不存在)同样算在天花板外。一条语句读回这个簇的成员行
+    (按成员 id 序,``LIMIT NODE_CONTEXT_CLUSTER_MEMBER_PROBE + 1``),每行带该成员
+    的可归因来源数组,判定全在 Python 里:读满上限 + 1 行 = 成员多于预算,无从
+    证明 → 不用(``_cluster_description_in_ceiling``)。所以开销有界,与簇大小
+    无关(hub 簇在生产上可达百万级成员行)。
 
-    - ``unattributed_member``:簇里有没有「没有一条可归因来源」的成员;
-    - ``member_sources``:成员的不同可归因来源,按 id 排序、至多
-      ``NODE_CONTEXT_CLUSTER_SOURCES_PROBE + 1`` 个(读满说明还有更多,由
-      ``_node_context_cluster_sources_after_sql`` 按 keyset 读回其余的)。
-
-    EXPLAIN pin:tests/postgres/test_cluster_generation_explain_pins.py。"""
-    rows, source = _cluster_member_sources(
-        "cc.notebook_id", "cc.canonical_id", "cc.generation",
-        authoritative=authoritative,
-    )
-    attributed = _member_has_attributable_source("u", authoritative=authoritative)
+    反向索引已认证时来源取自 ``knowledge_object_sources``,否则走权威支直接展开
+    ``evidence`` JSON(两支都只收非空 source_id)。EXPLAIN pin:
+    tests/postgres/test_cluster_generation_explain_pins.py。"""
+    if authoritative:
+        sources = (
+            "ARRAY(SELECT DISTINCT ev->>'source_id' FROM knowledge_objects ko "
+            f"CROSS JOIN LATERAL {_evidence_items('ko')} "
+            "WHERE ko.id=m.member_object_id AND ko.notebook_id=c.notebook_id "
+            f"AND {_ATTRIBUTABLE_SOURCE})"
+        )
+    else:
+        sources = (
+            "ARRAY(SELECT kos.source_id FROM knowledge_object_sources kos "
+            "WHERE kos.object_id=m.member_object_id AND kos.notebook_id=c.notebook_id "
+            "AND kos.source_id<>'')"
+        )
     return (
-        "SELECT cc.canonical_description, cc.canonical_id, cc.generation, "
-        "EXISTS (SELECT 1 FROM concept_clusters u "
-        "WHERE u.notebook_id=cc.notebook_id AND u.canonical_id=cc.canonical_id "
-        f"AND u.generation=cc.generation AND NOT {attributed}) AS unattributed_member, "
-        f"ARRAY(SELECT DISTINCT ({source}) COLLATE \"C\" AS s {rows} "
-        f"ORDER BY s LIMIT {NODE_CONTEXT_CLUSTER_SOURCES_PROBE + 1}) AS member_sources "
-        "FROM concept_clusters cc "
+        "WITH c AS (SELECT cc.canonical_description, cc.notebook_id, cc.canonical_id, "
+        "cc.generation FROM concept_clusters cc "
         "WHERE cc.notebook_id=%s AND cc.member_object_id=%s "
         "AND cc.canonical_description!='' "
-        f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN} LIMIT 1"
+        f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN} LIMIT 1) "
+        f"SELECT c.canonical_description, m.member_object_id, {sources} AS member_sources "
+        # LATERAL, not a plain join: the planner cannot see c's values when it
+        # plans a join, and then walks idx_clusters_member (member order across
+        # EVERY cluster) filtering for this one — unbounded on a large library.
+        # Correlated, the member read is a range scan of this cluster on the
+        # (notebook_id, canonical_id, member_object_id) index that stops at LIMIT.
+        "FROM c CROSS JOIN LATERAL (SELECT m.member_object_id FROM concept_clusters m "
+        "WHERE m.notebook_id=c.notebook_id AND m.canonical_id=c.canonical_id "
+        "AND m.generation=c.generation "
+        'ORDER BY m.member_object_id COLLATE "C" LIMIT %s) m'
     )
-
-
-def _node_context_cluster_sources_after_sql(*, authoritative: bool) -> str:
-    """来源多于 ``NODE_CONTEXT_CLUSTER_SOURCES_PROBE`` 的簇:读回排在探针之后的
-    其余不同来源(keyset,不绑天花板,Python 端判)。参数:(notebook_id,
-    canonical_id, generation, 探针读到的最后一个来源);代次取自第一条簇查询读到
-    的那一行,两条语句判的是同一代。"""
-    rows, source = _cluster_member_sources(
-        "%s", "%s", "%s", authoritative=authoritative,
-    )
-    ordered = f"({source}) COLLATE \"C\""
-    return f"SELECT DISTINCT {ordered} AS s {rows} AND {ordered} > %s"
 
 
 def _normalise_ceiling(allowed_source_ids: Optional[Iterable[str]]) -> Optional[frozenset]:
@@ -407,26 +362,19 @@ def _evidence_dicts(raw: Any) -> list:
     return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
 
 
-def _cluster_description_in_ceiling(
-    db: Any, notebook_id: str, crow: Any, allowed: frozenset, *, authoritative: bool,
-) -> bool:
-    """Q1 严格谓词在 Python 里判(``crow`` 是 ``_node_context_cluster_sql`` 的行)。"""
-    if crow["unattributed_member"]:
+def _cluster_description_in_ceiling(rows: list, allowed: frozenset) -> bool:
+    """Q1 严格谓词在 Python 里判(``rows`` 是 ``_node_context_cluster_sql`` 的结果)。
+
+    ``True`` 只在「证明了」时给:行数在上限内(读满上限 + 1 行 = 成员多于预算、
+    无从证明 → ``False``,失败关闭),且每个成员都至少有一条可归因来源、全部
+    来源都在天花板内。"""
+    if not rows or len(rows) > NODE_CONTEXT_CLUSTER_MEMBER_PROBE:
         return False
-    members = crow["member_sources"] or []
-    # 簇行自己的成员就是被查的对象,「没有归因不到的成员」已蕴含至少一个来源;
-    # 空表仍按拒绝处理(失败关闭)。
-    if not members or any(source not in allowed for source in members):
-        return False
-    if len(members) <= NODE_CONTEXT_CLUSTER_SOURCES_PROBE:
-        return True
-    # 读满了:簇的来源多于探针上限,且读回的这些全在天花板内 —— 按 keyset 读回
-    # 排在探针之后的其余来源,同样在 Python 里判(一个在外就整段不用)。
-    rest = db.execute(
-        _node_context_cluster_sources_after_sql(authoritative=authoritative),
-        (notebook_id, crow["canonical_id"], crow["generation"], members[-1]),
-    ).fetchall()
-    return all(row["s"] in allowed for row in rest)
+    for row in rows:
+        sources = [source for source in (row["member_sources"] or []) if source]
+        if not sources or any(source not in allowed for source in sources):
+            return False
+    return True
 
 
 # ``node_context`` 的 ``defines`` 回落:按关系 id 有序、有界(``LIMIT %s``);被拒绝
@@ -553,13 +501,27 @@ def _sibling_candidate(pr: Any, section: str, allowed: Optional[frozenset]):
     return ppay.get("name", ""), (first_in.get("element_id") or "")
 
 
-def _scoped_unsectioned_siblings(db: Any, notebook_id: str, allowed: frozenset) -> list:
+def _scoped_unsectioned_siblings(
+    db: Any, notebook_id: str, allowed: frozenset, own_row: Any = None,
+) -> list:
+    """``own_row`` (the target object's row, already read) enters the candidates
+    FIRST: the scan stops at ``NODE_CONTEXT_LEGACY_SIBLING_SCAN`` rows, and the
+    target's own in-ceiling step must not depend on how many earlier
+    out-of-ceiling procedures fill that budget."""
     candidates: list = []
+    own_id = None
+    if own_row is not None:
+        own_id = own_row["id"]
+        own = _sibling_candidate(own_row, "", allowed)
+        if own is not None:
+            candidates.append(own)
     after = (datetime.min.replace(tzinfo=timezone.utc), "")
     for _ in range(max(1, NODE_CONTEXT_LEGACY_SIBLING_SCAN // _LEGACY_SIBLING_PAGE)):
         page = db.execute(
             _LEGACY_SIBLINGS_UNSECTIONED_PAGE_SQL, (notebook_id, *after)).fetchall()
         for pr in page:
+            if pr["id"] == own_id:
+                continue
             candidate = _sibling_candidate(pr, "", allowed)
             if candidate is not None:
                 candidates.append(candidate)
@@ -571,7 +533,7 @@ def _scoped_unsectioned_siblings(db: Any, notebook_id: str, allowed: frozenset) 
 
 def _legacy_sibling_steps(
     db: Any, notebook_id: str, section: str, shown_section: str,
-    allowed: Optional[frozenset], element_texts,
+    allowed: Optional[frozenset], element_texts, own_row: Any = None,
 ) -> list:
     """Legacy fallback: group sibling procedure nodes by exact section_path
     (precedes edges are sparse). Two distinct procedures sharing a heading
@@ -599,7 +561,7 @@ def _legacy_sibling_steps(
             if candidate is not None
         ]
     else:
-        candidate_steps = _scoped_unsectioned_siblings(db, notebook_id, allowed)
+        candidate_steps = _scoped_unsectioned_siblings(db, notebook_id, allowed, own_row)
     all_step_first_eids = [eid for _, eid in candidate_steps if eid]
     if all_step_first_eids:
         texts, ordinal = element_texts(db, all_step_first_eids, with_ordinal=True)
@@ -2273,6 +2235,7 @@ class KnowledgeStore:
     def node_context(
         self, notebook_id, object_id, *, check_access: bool = True,
         allowed_source_ids: Optional[Iterable[str]] = None,
+        name_only: bool = False,
     ):
         """对象详情:occurrences / definition / steps。
 
@@ -2290,8 +2253,9 @@ class KnowledgeStore:
         - ``section_path`` 是创建对象的那个来源(``knowledge_objects.source_id``)
           的标题路径,该来源不在天花板内时返回空串(``name`` 是实体身份,保留;
           对象只有在天花板内证据支持它时才会被服务层用到);
-        - 簇融合描述只在 Q1 严格谓词成立时用(``_node_context_cluster_sql``:
-          没有成员来源在天花板外、也没有归因不到来源的成员);
+        - 簇融合描述只在 Q1 严格谓词**被证明**时用(``_node_context_cluster_sql``:
+          没有成员来源在天花板外、也没有归因不到来源的成员;成员多于
+          ``NODE_CONTEXT_CLUSTER_MEMBER_PROBE`` 的簇无从在预算内证明,不用);
         - ``defines`` 证据按 ``r.id`` 有界扫描 ``NODE_CONTEXT_DEFINES_SCAN`` 个
           定义者、一次批量 enrich,取第一条天花板内的证据;定义者无证据时今天回落
           到它的名字(``defines_name``),归因不到来源,天花板下不返回;
@@ -2305,6 +2269,10 @@ class KnowledgeStore:
         什么都不合格时 ``definition`` 为 None、``definition_basis`` 为 None,
         由服务层回落到 snippet。天花板从不进 SQL:每条语句的绑定参数都与天花板
         大小无关,成员关系全在 Python 里对 frozenset 判。
+
+        ``name_only``:只算 ``name`` / ``section_path`` / ``occurrences``(天花板
+        下同样过滤),``definition`` 与 ``steps`` 留空、不发簇 / defines / 步骤的
+        语句——推理轨迹取节点名那条路只读名字。
         """
         if check_access:
             self.get_notebook(notebook_id)
@@ -2333,6 +2301,10 @@ class KnowledgeStore:
                         not self.source_index_backfilled(db, notebook_id))
                 return authoritative_memo[0]
 
+            if name_only:
+                # 只要名字的读(推理轨迹取节点名):occurrences 照算——服务层据此
+                # 丢掉天花板下没有可读出处的对象——定义、簇与步骤一概不算。
+                return result
             if obj_type == "concept" and (allowed is None or allowed):
                 # prefer the unified cluster's fused description when present
                 if allowed is None:
@@ -2343,11 +2315,12 @@ class KnowledgeStore:
                         (notebook_id, object_id, notebook_id)).fetchone()
                     description_ok = True
                 else:
-                    crow = db.execute(
+                    crows = db.execute(
                         _node_context_cluster_sql(authoritative=_authoritative()),
-                        (notebook_id, object_id, notebook_id)).fetchone()
-                    description_ok = bool(crow) and _cluster_description_in_ceiling(
-                        db, notebook_id, crow, allowed, authoritative=_authoritative())
+                        (notebook_id, object_id, notebook_id,
+                         NODE_CONTEXT_CLUSTER_MEMBER_PROBE + 1)).fetchall()
+                    crow = crows[0] if crows else None
+                    description_ok = _cluster_description_in_ceiling(crows, allowed)
                 if crow and crow["canonical_description"] and description_ok:
                     result["definition"] = crow["canonical_description"]
                     result["definition_basis"] = "cluster_description"
@@ -2386,7 +2359,7 @@ class KnowledgeStore:
                 else:
                     result["steps"] = _legacy_sibling_steps(
                         db, notebook_id, section, shown_section, allowed,
-                        self._element_texts)
+                        self._element_texts, own_row=row)
             return result
 
     # ------------------------------------------------------------- counts

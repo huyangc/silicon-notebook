@@ -175,38 +175,35 @@ def _seed_node_context_explain(postgres_database) -> None:
 
 @pytest.mark.parametrize("authoritative", [False, True])
 def test_node_context_ceiling_queries_never_seq_scan(postgres_database, authoritative):
-    """PR-A·A1:``node_context`` 在来源天花板下的簇查询(读回成员来源交给
-    Python 判)与来源多于探针上限时的 keyset 续读语句,首次执行与同一连接上执行
-    12 次之后(generic plan)两种形态。两条支都不许顺扫 ``concept_clusters`` /
-    ``knowledge_object_sources`` / ``knowledge_objects``:成员走
-    (notebook_id, canonical_id, ...) 前导索引,来源走 ``knowledge_object_sources``
-    的 (object_id, ...) 索引,权威支按主键回表读 evidence。published 代次谓词仍是
-    一次求值的 InitPlan。"""
-    from app.repositories.postgres.knowledge_store import (
-        _node_context_cluster_sources_after_sql, _node_context_cluster_sql,
-    )
+    """PR-A·A1 / re-review F1(a):``node_context`` 在绑定的来源天花板下的簇查询
+    ——一条语句读回至多 ``NODE_CONTEXT_CLUSTER_MEMBER_PROBE + 1`` 个成员行及各自
+    的可归因来源,交给 Python 判——首次执行与同一连接上执行 12 次之后(generic
+    plan)两种形态。两条支都不许顺扫 ``concept_clusters`` /
+    ``knowledge_object_sources`` / ``knowledge_objects``:成员沿
+    (notebook_id, canonical_id, member_object_id, ...) 索引按序读到 LIMIT 即停,
+    来源走 ``knowledge_object_sources`` 的 (object_id, ...) 索引,权威支按主键回表
+    读 evidence。published 代次谓词仍是一次求值的 InitPlan。"""
+    from app.domain.knowledge_contracts import NODE_CONTEXT_CLUSTER_MEMBER_PROBE
+    from app.repositories.postgres.knowledge_store import _node_context_cluster_sql
 
     assert PostgresMigrator(postgres_database).migrate() == 65
     _seed_node_context_explain(postgres_database)
     notebook_id = _NC_EXPLAIN_NOTEBOOK
     cluster_sql = _node_context_cluster_sql(authoritative=authoritative)
-    after_sql = _node_context_cluster_sources_after_sql(authoritative=authoritative)
-    cluster_params = (notebook_id, "ko-42", notebook_id)
-    after_params = (notebook_id, "can-4", 0, "src-1")
+    cluster_params = (notebook_id, "ko-42", notebook_id, NODE_CONTEXT_CLUSTER_MEMBER_PROBE + 1)
     plans = {}
     with postgres_database.connect() as connection:
         plans["cluster"] = _plan(connection, cluster_sql, cluster_params)
     with postgres_database.connect() as connection:
-        plans["after"] = _plan(connection, after_sql, after_params)
-    with postgres_database.connect() as connection:
         plans["cluster@12"] = _generic_plan_after_repeats(
-            connection, cluster_sql, "text, text, text", cluster_params)
-    with postgres_database.connect() as connection:
-        plans["after@12"] = _generic_plan_after_repeats(
-            connection, after_sql, "text, text, bigint, text", after_params)
+            connection, cluster_sql, "text, text, text, bigint", cluster_params)
     for label, plan in plans.items():
         for table in ("concept_clusters", "knowledge_object_sources", "knowledge_objects"):
             assert f"Seq Scan on {table}" not in plan, (label, plan)
+        assert "Limit" in plan, (label, plan)
+        # The member read is a range scan of THIS cluster (LATERAL), never a
+        # walk of idx_clusters_member in member order across every cluster.
+        assert "idx_clusters_nb_canonical_member" in plan, (label, plan)
         if not authoritative:
             assert "knowledge_object_sources" in plan, (label, plan)
     assert "InitPlan" in plans["cluster"], plans["cluster"]

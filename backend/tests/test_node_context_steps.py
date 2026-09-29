@@ -84,7 +84,9 @@ def test_legacy_fallback_ceiling_pages_past_out_of_ceiling_siblings(repo, monkey
     """section 为空的那条路今天是 ``LIMIT 500``:若天花板下先取 500 行再在 Python
     里滤,先插入的 501 个天花板外兄弟会占满名额、把天花板内的那个挤掉。天花板不进
     SQL,改成 keyset 翻页边读边滤,直到凑够或扫满 NODE_CONTEXT_LEGACY_SIBLING_SCAN
-    行;扫描上限压到一页时目标就在上限之外(漏召回,失败关闭)。"""
+    行。扫描上限压到一页时,上限之外的天花板内兄弟漏召回(失败关闭),目标对象
+    **自己**那一步却不受影响:它的行已经读过,最先进候选(评审 P3-2:6000 个更早
+    的天花板外过程曾让目标连自己那一步都丢掉)。"""
     import json
     from app.repositories.sqlite import knowledge_store
     nb = repo.create_notebook(NotebookCreate(name="nb"))
@@ -99,10 +101,13 @@ def test_legacy_fallback_ceiling_pages_past_out_of_ceiling_siblings(repo, monkey
                        (f"ko-crowd-{i:03d}", "s-out", nb.id))
     pid = repo._test_insert_object(nb.id, "procedure", {"name": "in"})
     _set_evidence(repo, pid, ["s-in"])
+    sib = repo._test_insert_object(nb.id, "procedure", {"name": "in sibling"})
+    _set_evidence(repo, sib, ["s-in"])
+    assert sorted(s["name"] for s in repo.node_context(
+        nb.id, pid, allowed_source_ids=["s-in"])["steps"]) == ["in", "in sibling"]
+    monkeypatch.setattr(knowledge_store, "NODE_CONTEXT_LEGACY_SIBLING_SCAN", 500)
     assert [s["name"] for s in repo.node_context(
         nb.id, pid, allowed_source_ids=["s-in"])["steps"]] == ["in"]
-    monkeypatch.setattr(knowledge_store, "NODE_CONTEXT_LEGACY_SIBLING_SCAN", 500)
-    assert repo.node_context(nb.id, pid, allowed_source_ids=["s-in"])["steps"] == []
 
 
 @pytest.mark.parametrize("object_source", ["s-own", ""])

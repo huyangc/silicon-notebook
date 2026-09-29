@@ -19,7 +19,7 @@ import sqlite3
 from typing import Dict, Iterable, List, Optional, Sequence
 
 from app.domain.knowledge_contracts import (
-    NODE_CONTEXT_CLUSTER_SOURCES_PROBE, NODE_CONTEXT_DEFINES_SCAN,
+    NODE_CONTEXT_CLUSTER_MEMBER_PROBE, NODE_CONTEXT_DEFINES_SCAN,
     NODE_CONTEXT_LEGACY_SIBLING_SCAN,
 )
 from app.models.common import Evidence
@@ -60,85 +60,43 @@ def _evidence_items(ref: str) -> str:
     )
 
 
-def _evidence_source_exists(ref: str, condition: str) -> str:
-    """``ref`` 那一行至少有一条对象型证据满足 ``condition``(条件写在 ``ev`` 上)。"""
-    return (
-        f"EXISTS (SELECT 1 FROM {_evidence_items(ref)} "
-        f"WHERE ev.type='object' AND {condition})"
-    )
-
-
-def _cluster_member_sources(
-    notebook: str, canonical: str, generation: str, *, authoritative: bool,
-) -> tuple[str, str]:
-    """PG 孪生:簇全部成员的可归因证据来源 (``FROM … WHERE …``, 来源列)。"""
-    scope = (
-        f"WHERE m.notebook_id={notebook} AND m.canonical_id={canonical} "
-        f"AND m.generation={generation}"
-    )
-    if authoritative:
-        return (
-            "FROM concept_clusters m JOIN knowledge_objects ko "
-            "ON ko.id=m.member_object_id AND ko.notebook_id=m.notebook_id "
-            f"JOIN {_evidence_items('ko')} "
-            f"{scope} AND ev.type='object' AND {_ATTRIBUTABLE_SOURCE}",
-            _EVIDENCE_ITEM_SOURCE,
-        )
-    return (
-        "FROM concept_clusters m JOIN knowledge_object_sources kos "
-        "ON kos.object_id=m.member_object_id AND kos.notebook_id=m.notebook_id "
-        f"{scope}",
-        "kos.source_id",
-    )
-
-
-def _member_has_attributable_source(member_ref: str, *, authoritative: bool) -> str:
-    """PG 孪生:簇成员行的对象至少有一条可归因来源(对象不存在 = 没有)。"""
-    if authoritative:
-        return (
-            "EXISTS (SELECT 1 FROM knowledge_objects ko "
-            f"WHERE ko.id={member_ref}.member_object_id "
-            f"AND ko.notebook_id={member_ref}.notebook_id "
-            f"AND {_evidence_source_exists('ko', _ATTRIBUTABLE_SOURCE)})"
-        )
-    return (
-        "EXISTS (SELECT 1 FROM knowledge_object_sources kos "
-        f"WHERE kos.object_id={member_ref}.member_object_id "
-        f"AND kos.notebook_id={member_ref}.notebook_id)"
-    )
-
-
 def _node_context_cluster_sql(*, authoritative: bool) -> str:
-    """PG 孪生同名函数(Q1 严格,不绑天花板):多读 ``unattributed_member`` 与
-    ``member_sources``(成员不同可归因来源的 JSON 数组,按 id 排序、至多
-    ``NODE_CONTEXT_CLUSTER_SOURCES_PROBE + 1`` 个)。参数:(notebook_id,
-    object_id, notebook_id)。"""
-    rows, source = _cluster_member_sources(
-        "cc.notebook_id", "cc.canonical_id", "cc.generation",
-        authoritative=authoritative,
-    )
-    attributed = _member_has_attributable_source("u", authoritative=authoritative)
+    """PG 孪生同名函数(Q1 严格,不绑天花板,成员行有界):一条语句读回簇成员行
+    (按成员 id 序,``LIMIT NODE_CONTEXT_CLUSTER_MEMBER_PROBE + 1``),每行带该成员
+    可归因来源的 JSON 数组。参数:(notebook_id, object_id, notebook_id,
+    notebook_id, 成员行上限)。"""
+    if authoritative:
+        sources = (
+            "(SELECT json_group_array(s) FROM (SELECT DISTINCT "
+            f"CAST({_EVIDENCE_ITEM_SOURCE} AS TEXT) AS s FROM knowledge_objects ko "
+            f"JOIN {_evidence_items('ko')} "
+            "WHERE ko.id=m.member_object_id AND ko.notebook_id=c.notebook_id "
+            f"AND ev.type='object' AND {_ATTRIBUTABLE_SOURCE}))"
+        )
+    else:
+        sources = (
+            "(SELECT json_group_array(kos.source_id) FROM knowledge_object_sources kos "
+            "WHERE kos.object_id=m.member_object_id AND kos.notebook_id=c.notebook_id "
+            "AND kos.source_id<>'')"
+        )
+    # The cluster's key reaches the member read as scalar subqueries, so SQLite
+    # range-scans THIS cluster on (notebook_id, canonical_id, member_object_id,
+    # generation) in member order and stops at LIMIT. Written as a join, it
+    # walks idx_clusters_member across every cluster (the PG twin uses LATERAL
+    # for the same reason). EXPLAIN pin: tests/test_node_context.py.
     return (
-        "SELECT cc.canonical_description, cc.canonical_id, cc.generation, "
-        "EXISTS (SELECT 1 FROM concept_clusters u "
-        "WHERE u.notebook_id=cc.notebook_id AND u.canonical_id=cc.canonical_id "
-        f"AND u.generation=cc.generation AND NOT {attributed}) AS unattributed_member, "
-        "(SELECT json_group_array(s) FROM ("
-        f"SELECT DISTINCT CAST({source} AS TEXT) AS s {rows} "
-        f"ORDER BY s LIMIT {NODE_CONTEXT_CLUSTER_SOURCES_PROBE + 1})) AS member_sources "
-        "FROM concept_clusters cc "
+        "WITH c AS (SELECT cc.canonical_description, cc.notebook_id, cc.canonical_id, "
+        "cc.generation FROM concept_clusters cc "
         "WHERE cc.notebook_id=? AND cc.member_object_id=? "
         "AND cc.canonical_description!='' "
-        f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN} LIMIT 1"
+        f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN} LIMIT 1) "
+        f"SELECT c.canonical_description, m.member_object_id, {sources} AS member_sources "
+        "FROM concept_clusters m INDEXED BY idx_clusters_nb_canonical_member_gen "
+        "JOIN c ON 1 "
+        "WHERE m.notebook_id=? AND m.canonical_id=(SELECT canonical_id FROM c) "
+        "AND m.generation=(SELECT generation FROM c) "
+        "ORDER BY m.member_object_id LIMIT ?"
     )
-
-
-def _node_context_cluster_sources_after_sql(*, authoritative: bool) -> str:
-    """PG 孪生:来源多于探针上限的簇,keyset 读回排在探针之后的其余不同来源。
-    参数:(notebook_id, canonical_id, generation, 探针读到的最后一个来源)。"""
-    rows, source = _cluster_member_sources("?", "?", "?", authoritative=authoritative)
-    ordered = f"CAST({source} AS TEXT)"
-    return f"SELECT DISTINCT {ordered} AS s {rows} AND {ordered} > ?"
 
 
 def _normalise_ceiling(allowed_source_ids: Optional[Iterable[str]]) -> Optional[frozenset]:
@@ -166,23 +124,16 @@ def _json_loads(text: object, default: object) -> object:
         return default
 
 
-def _cluster_description_in_ceiling(
-    db: sqlite3.Connection, notebook_id: str, crow: sqlite3.Row, allowed: frozenset,
-    *, authoritative: bool,
-) -> bool:
-    """PG 孪生:Q1 严格谓词在 Python 里判。"""
-    if crow["unattributed_member"]:
+def _cluster_description_in_ceiling(rows: list, allowed: frozenset) -> bool:
+    """PG 孪生:Q1 严格谓词在 Python 里判,只在「证明了」时给 ``True``(读满上限
+    + 1 行 = 成员多于预算,失败关闭)。"""
+    if not rows or len(rows) > NODE_CONTEXT_CLUSTER_MEMBER_PROBE:
         return False
-    members = _json_loads(crow["member_sources"], [])
-    if not members or any(source not in allowed for source in members):
-        return False
-    if len(members) <= NODE_CONTEXT_CLUSTER_SOURCES_PROBE:
-        return True
-    rest = db.execute(
-        _node_context_cluster_sources_after_sql(authoritative=authoritative),
-        (notebook_id, crow["canonical_id"], crow["generation"], members[-1]),
-    ).fetchall()
-    return all(row["s"] in allowed for row in rest)
+    for row in rows:
+        sources = [s for s in _json_loads(row["member_sources"], []) if s]
+        if not sources or any(source not in allowed for source in sources):
+            return False
+    return True
 
 
 # PG 孪生:``defines`` 回落(有序、有界,台账 B-8 的两道状态过滤)。
@@ -294,14 +245,24 @@ def _sibling_candidate(pr: sqlite3.Row, section: str, allowed: Optional[frozense
 
 
 def _scoped_unsectioned_siblings(
-    db: sqlite3.Connection, notebook_id: str, allowed: frozenset,
+    db: sqlite3.Connection, notebook_id: str, allowed: frozenset, own_row=None,
 ) -> list:
+    """PG 孪生:目标对象自己的行最先进候选(扫描有上限,它不能被更早的天花板外
+    过程挤掉)。"""
     candidates: list = []
+    own_id = None
+    if own_row is not None:
+        own_id = own_row["id"]
+        own = _sibling_candidate(own_row, "", allowed)
+        if own is not None:
+            candidates.append(own)
     after = ("", "")
     for _ in range(max(1, NODE_CONTEXT_LEGACY_SIBLING_SCAN // _LEGACY_SIBLING_PAGE)):
         page = db.execute(
             _LEGACY_SIBLINGS_UNSECTIONED_PAGE_SQL, (notebook_id, *after)).fetchall()
         for pr in page:
+            if pr["id"] == own_id:
+                continue
             candidate = _sibling_candidate(pr, "", allowed)
             if candidate is not None:
                 candidates.append(candidate)
@@ -313,7 +274,7 @@ def _scoped_unsectioned_siblings(
 
 def _legacy_sibling_steps(
     db: sqlite3.Connection, notebook_id: str, section: str, shown_section: str,
-    allowed: Optional[frozenset], element_texts,
+    allowed: Optional[frozenset], element_texts, own_row=None,
 ) -> list:
     """PG 孪生同名函数(P2-3 的 section 下推与 LIMIT 回落说明见那边)。"""
     if section or allowed is None:
@@ -325,7 +286,7 @@ def _legacy_sibling_steps(
             if candidate is not None
         ]
     else:
-        candidate_steps = _scoped_unsectioned_siblings(db, notebook_id, allowed)
+        candidate_steps = _scoped_unsectioned_siblings(db, notebook_id, allowed, own_row)
     all_step_first_eids = [eid for _, eid in candidate_steps if eid]
     if all_step_first_eids:
         texts, ordinal = element_texts(db, all_step_first_eids, with_ordinal=True)
@@ -2012,10 +1973,12 @@ class KnowledgeStore:
     def node_context(
         self, notebook_id, object_id, *, check_access: bool = True,
         allowed_source_ids: Optional[Iterable[str]] = None,
+        name_only: bool = False,
     ):
         """对象详情(PG 孪生的 docstring 是规范说明:``allowed_source_ids`` 缺省
         → 逐值不变 + 三个附加字段(外加 ``defines`` 的 B-8 状态过滤);传进来时
-        任何天花板外来源的文字都不进返回值,空集 = 全部拒绝)。"""
+        任何天花板外来源的文字都不进返回值,空集 = 全部拒绝;``name_only`` 只算
+        名字与 occurrences)。"""
         if check_access:
             self.get_notebook(notebook_id)
         allowed = _normalise_ceiling(allowed_source_ids)
@@ -2043,6 +2006,9 @@ class KnowledgeStore:
                         not self.source_index_backfilled(db, notebook_id))
                 return authoritative_memo[0]
 
+            if name_only:
+                # PG 孪生:只要名字的读,定义、簇与步骤一概不算。
+                return result
             if obj_type == "concept" and (allowed is None or allowed):
                 # prefer the unified cluster's fused description when present
                 if allowed is None:
@@ -2053,11 +2019,12 @@ class KnowledgeStore:
                         (notebook_id, object_id, notebook_id)).fetchone()
                     description_ok = True
                 else:
-                    crow = db.execute(
+                    crows = db.execute(
                         _node_context_cluster_sql(authoritative=_authoritative()),
-                        (notebook_id, object_id, notebook_id)).fetchone()
-                    description_ok = bool(crow) and _cluster_description_in_ceiling(
-                        db, notebook_id, crow, allowed, authoritative=_authoritative())
+                        (notebook_id, object_id, notebook_id, notebook_id,
+                         NODE_CONTEXT_CLUSTER_MEMBER_PROBE + 1)).fetchall()
+                    crow = crows[0] if crows else None
+                    description_ok = _cluster_description_in_ceiling(crows, allowed)
                 if crow and crow["canonical_description"] and description_ok:
                     result["definition"] = crow["canonical_description"]
                     result["definition_basis"] = "cluster_description"
@@ -2096,7 +2063,7 @@ class KnowledgeStore:
                 else:
                     result["steps"] = _legacy_sibling_steps(
                         db, notebook_id, section, shown_section, allowed,
-                        self._element_texts)
+                        self._element_texts, own_row=row)
             return result
 
     # ------------------------------------------------------------- counts
