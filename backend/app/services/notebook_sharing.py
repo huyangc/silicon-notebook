@@ -1198,6 +1198,14 @@ class NotebookSharingService:
         return bool(notebook_id) and self.user_can_read_notebook(notebook_id, user_id)
 
     def user_can_read_answer(self, answer_id: str, user_id: str) -> bool:
+        """Notebook READ access to the notebook the answer sits in, nothing more.
+
+        Do NOT use this to authorise acting on an answer (preview, save as a
+        Memory, rate): an answer belongs to the creator of its conversation and
+        its text may quote that person's private Memory. That is
+        ``user_owns_answer``. No production caller is left; the method stays
+        only because the frozen facade surface still delegates to it.
+        """
         notebook_id = self._store.answer_notebook_id(answer_id)
         return bool(notebook_id) and self.user_can_read_notebook(notebook_id, user_id)
 

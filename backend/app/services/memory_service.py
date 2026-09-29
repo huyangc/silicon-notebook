@@ -861,6 +861,15 @@ class MemoryService:
         tags: Sequence[str],
         extract_kg: bool = True,
     ) -> MemoryRecord:
+        """Save an answer of the caller's own as a private Memory (idempotent).
+
+        Order matters: the caller's EXISTING Memory for this answer is returned
+        before the author check. That return exposes only a record the caller
+        created and can already read, and it keeps a retry safe after the answer
+        was deleted. A Memory made before answers were author-checked (from
+        another member's answer) is therefore still returned to its creator, and
+        to nobody else. A NEW Memory needs the author check that follows.
+        """
         title = normalize_title(title)
         content_md = normalize_content(content_md)
         tags = normalize_tags(tags)

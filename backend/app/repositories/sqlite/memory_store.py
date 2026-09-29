@@ -689,10 +689,15 @@ class MemoryStore:
             row = db.execute(
                 "SELECT a.question,a.payload,a.conversation_id FROM answers a "
                 "JOIN notebooks nb ON nb.id=a.notebook_id "
-                "WHERE a.id=? AND a.notebook_id=? AND " + read_access_clause(),
+                # the author, re-checked under the write lock like read access:
+                # the answer's conversation must still be the writer's own
+                "JOIN conversations c ON c.id=a.conversation_id "
+                "WHERE a.id=? AND a.notebook_id=? AND c.created_by=? AND "
+                + read_access_clause(),
                 (
                     write.source_answer_id,
                     write.notebook_id,
+                    write.created_by,
                     *read_access_params(write.created_by),
                 ),
             ).fetchone()

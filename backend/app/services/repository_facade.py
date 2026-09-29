@@ -1629,6 +1629,8 @@ class RepositoryFacade:
         return self._runtime.sharing.answer_owner(answer_id)
 
     def user_can_read_answer(self, answer_id: str, user_id: str) -> bool:
+        """Notebook read access only; NOT authorisation to act on an answer
+        (that is ``user_owns_answer`` on the sharing service). Frozen delegate."""
         return self._runtime.sharing.user_can_read_answer(answer_id, user_id)
 
     def delete_notebook_kg(self, notebook_id: str) -> dict:

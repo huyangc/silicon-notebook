@@ -98,6 +98,17 @@ CONVERSATION_ANSWERS_ORDER_ASC = "ORDER BY created_at ASC, ordinal ASC"
 CONVERSATION_ANSWERS_ORDER_DESC = "ORDER BY created_at DESC, ordinal DESC"
 
 
+
+#: The one statement behind ``answer_notebook_id``: the answer's notebook and the
+#: creator of its conversation (NULL when there is no conversation). Module-level
+#: so the PostgreSQL EXPLAIN pin and the statement-count tests look at exactly
+#: what production sends.
+ANSWER_AUTHOR_PROBE_SQL = (
+    "SELECT a.notebook_id AS notebook_id, c.created_by AS creator "
+    "FROM answers a LEFT JOIN conversations c ON c.id=a.conversation_id "
+    "WHERE a.id=%s"
+)
+
 class AskStateStore:
     def __init__(self, database: PostgresDatabase, seams) -> None:
         self.database = database
@@ -960,36 +971,25 @@ class AskStateStore:
     # answers
     # ------------------------------------------------------------------
 
-    def answer_notebook_id(
-        self, answer_id: str, *, owned_by: "str | None" = None
-    ) -> "str | None":
-        """The notebook an answer belongs to.
+    def answer_notebook_id(self, answer_id: str, *, owned_by: str) -> "str | None":
+        """The notebook of ``answer_id`` when ``owned_by`` is its author, else None.
 
-        With ``owned_by`` the answer only counts when its CONVERSATION was
-        created by that user (``answers JOIN conversations``): an answer with
-        no conversation, a conversation with no creator, another member's
-        answer and an id that does not exist are all the same ``None``, from
-        one statement, so a caller cannot tell them apart. This is the
-        authorisation read behind ``NotebookSharingService.user_owns_answer``;
-        the notebook owner (``SharingStore.answer_owner``) is NOT an answer
-        owner.
+        The author of an answer is the creator of its CONVERSATION. An answer
+        with no conversation, a conversation with no creator, another member's
+        answer, an empty ``owned_by`` and an id that does not exist all give the
+        same ``None`` from ONE statement, so a caller cannot tell them apart.
+        ``owned_by`` is required on purpose: there is no variant that answers
+        without the author check. It is the read behind
+        ``NotebookSharingService.user_owns_answer``; the notebook owner
+        (``SharingStore.answer_owner``) is NOT an answer owner.
         """
-        if owned_by is None:
-            with self.database.connect() as db:
-                row = db.execute(
-                    "SELECT notebook_id FROM answers WHERE id=%s", (answer_id,)
-                ).fetchone()
-            return row["notebook_id"] if row is not None else None
-        # The creator is compared here, not in SQL: ``c.created_by = user``
-        # would let the planner drive the join from the user's whole
-        # conversation list instead of probing the conversation by primary key.
         with self.database.connect() as db:
-            row = db.execute(
-                "SELECT a.notebook_id AS notebook_id, c.created_by AS creator "
-                "FROM answers a LEFT JOIN conversations c ON c.id=a.conversation_id "
-                "WHERE a.id=%s",
-                (answer_id,),
-            ).fetchone()
+            row = db.execute(ANSWER_AUTHOR_PROBE_SQL, (answer_id,)).fetchone()
+        # The creator is compared here rather than in the statement: the
+        # statement keeps the shape of two primary-key probes (answers by id,
+        # then the conversation by its id), which the EXPLAIN pin in
+        # tests/postgres/test_answer_ownership_pg.py holds on the statement
+        # executed here.
         if row is None or not owned_by or row["creator"] != owned_by:
             return None
         return row["notebook_id"]
