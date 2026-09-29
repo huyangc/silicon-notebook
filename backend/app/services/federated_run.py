@@ -200,17 +200,20 @@ class FederatedRunPlan:
        behind.
     3. **Three states, and "unreadable" is stated, never implied.**  A value is
        either a ``(source_id, fingerprint)`` snapshot, or ``None`` -- "this
-       element came through the federated chunk channel and its fingerprint
-       could not be read".  ``None`` is refusal: a citation resting on it is
-       not attestable and must be refused rather than accepted unverified, which
-       is what makes a failed read fail CLOSED element by element.  A real
-       snapshot is never overwritten by ``None`` and a later successful read
-       replaces one.  ABSENCE means something else entirely: the element never
-       travelled this channel at all.  Document overviews, collection
-       enumerations and graph objects cite real ``source_elements`` rows without
-       a single federated call, so treating absence as refusal would void every
-       such answer; the consumer holds those citations to the frozen source
-       ceiling and to the element still existing under the same source.
+       element came through a producer (the federated chunk channel or
+       ``evidence_attestation``) and its fingerprint could not be read".
+       ``None`` is not attestable: a citation resting on it is reported
+       ``unverifiable`` rather than accepted unverified, which is what makes a
+       failed read fail CLOSED element by element.  The FIRST real snapshot is
+       never overwritten -- neither by ``None`` nor by a later snapshot -- and a
+       real snapshot replaces an earlier ``None``.  ABSENCE means no producer
+       registered the element at all; the consumer reports such a citation
+       ``unverifiable`` too (internal reason ``unattested``), never as changed
+       and never as passed.  Producers outside the federated channel (document
+       overviews, collection enumerations, graph objects, ``follow_chain``,
+       table analysis) register through ``services.evidence_attestation``, which
+       publishes through this same callback.  Whatever the verdict, the answer
+       is delivered whole; the terminal check marks references, it never voids.
     4. **A citation names ONE element; the passage behind it may rest on
        several.**  ``on_evidence_groups`` is what says so.  It publishes, for
        each hit this call selected, the WHOLE tuple of element ids that hit was

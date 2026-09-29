@@ -85,7 +85,6 @@ Three structural rules this module exists to hold:
 from __future__ import annotations
 
 import contextvars
-import hashlib
 import math
 import threading
 import time
@@ -100,6 +99,8 @@ from app.services.cancellation import AskCancelled, raise_if_cancelled
 # fail-soft handlers must re-raise its control exception instead of
 # degrading an identity-attestation failure into an empty result set.
 from app.domain.retrieval_control import RetrievalControlError
+# The one element/passage text digest, shared with both stores' snapshots.
+from app.domain.evidence_fingerprint import element_text_sha
 # The budget vocabulary itself is repository knowledge -- which driver failure
 # means "the statement was cancelled" and which means "no connection could be
 # leased" -- so it is imported rather than re-derived here; see
@@ -1884,8 +1885,12 @@ def _worst_reason(reasons) -> str:
 
 
 def _text_sha(text) -> str:
-    """The digest the passage snapshot compares against, on this side."""
-    return hashlib.sha256((text or "").encode()).hexdigest()
+    """The digest the passage snapshot compares against, on this side.
+
+    The one shared definition (``domain.evidence_fingerprint``), so this side
+    and both stores' ``text_sha`` can never drift apart.
+    """
+    return element_text_sha(text)
 
 
 def _report_evidence(candidates, plan, collected: dict, deadline: float) -> None:
@@ -1930,9 +1935,11 @@ def _report_evidence(candidates, plan, collected: dict, deadline: float) -> None
     Fail-soft, and the direction of the failure is deliberate.  An unreadable
     batch publishes ``None`` for each of those elements, which is what the
     re-check treats as "not attestable" -- so the citations resting on them are
-    refused rather than accepted unverified.  (Publishing nothing would not do:
-    absence is how an element that never travelled this channel looks, and
-    those are held to the ceiling only.)  A passage whose text no longer
+    reported unverifiable rather than accepted unverified.  (Publishing nothing
+    would say something else: absence is how an element NO producer registered
+    looks, and the operator-facing reason must tell "read failed" from "never
+    registered"; a stated ``None`` is also what a later round's real snapshot
+    replaces.)  A passage whose text no longer
     matches, or that has disappeared outright, publishes ``None`` for every
     element it declared by the same rule and for the same reason: it travelled
     this channel and cannot be vouched for.  ``None`` WINS over a snapshot from
@@ -1948,8 +1955,8 @@ def _report_evidence(candidates, plan, collected: dict, deadline: float) -> None
     left of the phase.  The phase runs out exactly when some library was slow,
     and that is the case the per-library skip exists to survive: the libraries
     that did answer produced a selection, and refusing to attest it because a
-    peer ate the phase would turn "one slow library is skipped" into "the whole
-    answer is voided" (absence here means every citation is refused).  It is
+    peer ate the phase would turn "one slow library is skipped" into "every
+    citation of the answer is unverifiable".  It is
     one bounded read on the calling thread, after the fan-out has released its
     executor seats, so it cannot extend the phase for anyone else.
 
@@ -1998,9 +2005,9 @@ def _report_evidence(candidates, plan, collected: dict, deadline: float) -> None
                 "elements": len(element_ids),
             })
             # STATED as unreadable, not left out: absence from the accumulated
-            # table means "never travelled this channel" (overviews, graph
-            # objects), which the re-check holds to the ceiling only. These
-            # elements did travel it, so they must be refusable by name.
+            # table means "no producer registered it", a different internal
+            # reason. These elements did travel this channel, so they must be
+            # reportable as unreadable by name.
             fingerprints = dict.fromkeys(element_ids)
         else:
             fingerprints = _attest_passages(
@@ -2016,10 +2023,10 @@ def _attest_passages(candidates, collected: dict, pending: list,
                      element_ids: list, snapshot: dict, seen: set) -> dict:
     """Turn one passage snapshot into the per-element table the consumer folds.
 
-    Every REQUESTED element gets a stated value, because absence means "never
-    travelled this channel" and is held to the source ceiling alone -- so
-    leaving one out would wave through exactly the element this read failed to
-    vouch for.  Three ways to end up ``None``: the passage is gone, its text
+    Every REQUESTED element gets a stated value, because absence means "no
+    producer registered it" -- so leaving one out would misreport exactly the
+    element this read failed to vouch for, and a later round could not replace
+    it with a real snapshot by rule.  Three ways to end up ``None``: the passage is gone, its text
     moved, or the passage still stands but this element's row does not (a
     re-ingest that produced fewer elements).  The first two refuse the whole
     passage; only the third is per element.

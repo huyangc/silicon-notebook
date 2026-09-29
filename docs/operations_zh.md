@@ -96,9 +96,17 @@ run 下它在笔记本、失败异常类名与耗时毫秒之外多带一个 `re
 探测名称时每次调用发一条 `ask_stage` 事件（`reasoning` 一次 run 可能调用多次）（`stage="global_exact_arm"`，只含参与库数、有结果的库数、
 合并段落数、合并节数、失败库数与耗时，不含标识符、问题或路径文本）。
 `chunk_federation_evidence_unavailable` 表示某次调用的证据指纹读不出来，
-受影响的引用因此按名字可被拒绝；`global_ask_citations_void` 表示一份答案被引用复核整份作废，
-带内容无关的 `reason`（`changed` / `unreadable` / `unattributed` / `out_of_ceiling`）——`unattributed`
-是某个引用生产者的归一缺口、需要修，其余是与正在编辑的用户抢跑。已退役的独立全局检索链路带走了
+受影响的引用因此按名字被标为「无法核对」。终态引用复核从不作废答案：它逐条判定每一条引用与锚点，
+给未通过的打标记（线上只有 `changed` / `source_gone` / `unverifiable` 三种），答案照常整份交付。
+`global_ask_citations_partial` 报告这样一份答案，只含计数（`checked`、`failed`、三类计数，以及内部
+原因码 `changed` / `source_gone` / `unattested` / `unreadable` / `unattributed` / `out_of_ceiling`
+的 `reasons` 计数）；`unattested` 表示没有任何生产者为该元素登记过检索时刻快照。只有出现
+`unattributed` / `out_of_ceiling` 时才另发 `global_ask_citation_scope_diagnostic`——这两种只可能来自
+检索层缺陷（某条通道漏了归属或越过了冻结的来源天花板）、需要修，其余是与正在编辑的用户抢跑。
+`global_ask_citation_check_read_failed`（`read`、`error_type`）表示终态读失败，相应引用按「无法核对」
+报告。`producer_evidence_attested`（`producer`、`method` = `read`/`pointers`、元素 / 存活 / 悬空计数）
+与 `producer_evidence_unavailable`（`producer`、`reason` = `read_failed`/`no_reader`、`elements`、可选
+`error_type`）覆盖非联邦生产者的检索时刻登记。改动之前被旧复核整份作废的行保留原句。已退役的独立全局检索链路带走了
 `global_retrieval_skipped` 与 `global_retrieval_ann_starved` 两个事件，它们不再出现。
 词法降级不再有逐库披露，它和别的 run 一样只发 `chunk_bruteforce_skipped`；降级清单现在只表示
 「该库有部分检索腿失败」。
