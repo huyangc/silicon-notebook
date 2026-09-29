@@ -35,6 +35,9 @@ from app.repositories.kg_analysis_payloads import (
     relation_provenance_payload as _relation_provenance_payload,
 )
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.id_binding import (
+    JSON_IDS, drive_by, ids_param, member_of,
+)
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
 from app.domain.kg_analysis_contracts import (
     BOARD_DEPENDENT_ARTIFACT_KINDS,
@@ -82,14 +85,19 @@ _PUBLISHED_COMMUNITY_GEN = (
 # 没有任何信号。PG 孪生用 ``=ANY(%s)`` 达到同一效果。
 # 本段的另一个用处是 ``comention_peers`` 批量取名字时的 canonical_id 集合,
 # 形状同理(有界于 ``limit``,但同样不必为它开 N 个变量)。
-_JSON_ID_LIST = "(SELECT CAST(value AS TEXT) FROM json_each(?))"
+#
+# 单参数只防住了变量上限。清单谓词若能驱动计划,``(object_id, source_id)``
+# 复合索引会让每个候选成员对**每个**天花板 id 各探一次(4k 2 s、49k 8 s);
+# 天花板一律经 ``id_binding.member_of`` 加一元 ``+``,探针只按 object_id 走。
+# 旧名保留为同一段文本的别名,绑定形状只在 ``id_binding`` 定义一次。
+_JSON_ID_LIST = JSON_IDS
 
 
 def _object_support_exists(cluster_ref: str, *, authoritative: bool) -> str:
     """该簇某个成员对象是否被清单内来源支撑(相关子查询,关联到 cluster_ref)。
 
-    清单以**一个** JSON 数组参数绑定(``_JSON_ID_LIST``),调用方传
-    ``json.dumps(source_ids)``。
+    清单以**一个** JSON 数组参数绑定,调用方传 ``ids_param(source_ids)``;
+    谓词是 ``member_of``——天花板只过滤,不驱动计划。
     """
     if authoritative:
         return (
@@ -99,15 +107,18 @@ def _object_support_exists(cluster_ref: str, *, authoritative: bool) -> str:
             "AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(ko.evidence) "
             "THEN CASE WHEN json_type(ko.evidence)='array' "
             "THEN ko.evidence ELSE '[]' END ELSE '[]' END) ev "
-            "WHERE ev.type='object' AND json_extract("
-            "CASE WHEN ev.type='object' THEN ev.value ELSE '{}' END,"
-            f"'$.source_id') IN {_JSON_ID_LIST}))"
+            "WHERE ev.type='object' AND "
+            + member_of(
+                "json_extract(CASE WHEN ev.type='object' THEN ev.value "
+                "ELSE '{}' END,'$.source_id')"
+            )
+            + "))"
         )
     return (
         "EXISTS (SELECT 1 FROM knowledge_object_sources kos "
         f"WHERE kos.notebook_id={cluster_ref}.notebook_id "
         f"AND kos.object_id={cluster_ref}.member_object_id "
-        f"AND kos.source_id IN {_JSON_ID_LIST})"
+        f"AND {member_of('kos.source_id')})"
     )
 
 
@@ -1377,8 +1388,8 @@ class UnifiedKgStore:
                     "ORDER BY centrality DESC, canonical_id ASC LIMIT ?",
                     (notebook_id, community_id, exclude_canonical_id, notebook_id, limit)
                 ).fetchall()
-            source_ids = list(dict.fromkeys(allowed_source_ids))
-            if not source_ids:
+            source_payload = ids_param(allowed_source_ids)
+            if source_payload == "[]":
                 return []
             gate = _canonical_support_exists(
                 "community_members",
@@ -1390,7 +1401,7 @@ class UnifiedKgStore:
                 f"AND generation = {_PUBLISHED_COMMUNITY_GEN} AND {gate} "
                 "ORDER BY centrality DESC, canonical_id ASC LIMIT ?",
                 (notebook_id, community_id, exclude_canonical_id, notebook_id,
-                 notebook_id, json.dumps(source_ids), limit)
+                 notebook_id, source_payload, limit)
             ).fetchall()
 
     def comention_peers(
@@ -1417,14 +1428,14 @@ class UnifiedKgStore:
             gate_params: tuple = ()
             limit_params: tuple = ()
             if allowed_source_ids is not None:
-                source_ids = list(dict.fromkeys(allowed_source_ids))
-                if not source_ids:
+                source_payload = ids_param(allowed_source_ids)
+                if source_payload == "[]":
                     return []
                 authoritative = not self._source_index_backfilled(db, notebook_id)
                 gate = "AND " + _object_support_exists(
                     "concept_clusters", authoritative=authoritative,
                 ) + " "
-                gate_params = (json.dumps(source_ids),)
+                gate_params = (source_payload,)
                 # 同一道闸还要压在 LIMIT **之前**:只挂在名字查询上时,排在前面
                 # 却无天花板内支撑的对端会先把 ``limit`` 个名额占满、再被名字查询
                 # 滤掉,排在后面的合格对端就永远出不来(codex #754 第 1 轮 P2)。
@@ -1433,7 +1444,7 @@ class UnifiedKgStore:
                     canonical_expr="CASE WHEN cm.canonical_a=? "
                                    "THEN cm.canonical_b ELSE cm.canonical_a END",
                 ) + " "
-                limit_params = (canonical_id, notebook_id, json.dumps(source_ids))
+                limit_params = (canonical_id, notebook_id, source_payload)
             rows = db.execute(
                 "SELECT canonical_a, canonical_b, bridge_claims FROM concept_comentions cm "
                 "WHERE notebook_id=? AND (canonical_a=? OR canonical_b=?) AND bridge_claims>=? "
@@ -1455,10 +1466,11 @@ class UnifiedKgStore:
                 for row in db.execute(
                     "SELECT canonical_id, MIN(canonical_name) AS canonical_name "
                     "FROM concept_clusters WHERE notebook_id=? "
-                    f"AND canonical_id IN {_JSON_ID_LIST} "
+                    # 有界于 ``limit`` 的名字集合:按每个 id seek 正是本意。
+                    f"AND {drive_by('canonical_id')} "
                     f"AND generation = {_PUBLISHED_CLUSTER_GEN} "
                     f"{gate}GROUP BY canonical_id",
-                    (notebook_id, json.dumps(wanted), notebook_id,
+                    (notebook_id, ids_param(wanted), notebook_id,
                      *gate_params)).fetchall()
             }
             return [
