@@ -1099,10 +1099,11 @@ def reflect_prompt(
         )
         + " plus both an abbreviation and its full name, to catch literal "
         "matches semantic search can miss (model numbers, terms, command "
-        "names, code identifiers); use only terms the question names and "
-        "their equivalents, not neighbouring identifiers seen in the "
-        "candidates or guessed answer values, since every extra term dilutes "
-        "the match; leave it empty to search by chunks_query alone."
+        "names, code identifiers); build it from the terms the question names, "
+        "each still with its forms in the other listed languages and its "
+        "abbreviation or full name, but add no other identifiers seen in the "
+        "candidates and no guessed answer values, since every extra term "
+        "dilutes the match; leave it empty to search by chunks_query alone."
     )
     search_chunks_action = (
         "- search_chunks: retrieve raw SOURCE PASSAGES from the documents "
