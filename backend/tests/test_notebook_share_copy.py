@@ -484,68 +484,76 @@ def test_copy_notebook_remaps_source_local_facts_and_element_bindings(repo):
     assert repair["status"] != "no_generation"
 
 
-def test_copy_notebook_clears_memory_id(repo):
-    """Task 6: Memory 记录本身 owner 私有,不随 notebook 深拷贝走——副本源退化为
-    普通内容源。若原样搬 memory_id 会悬空引用接收方看不到的 Memory,原 owner 再拷
-    一次时还会撞 idx_sources_memory_id 分区唯一索引(两行同一 memory_id)。"""
+def test_copy_notebook_never_carries_a_memory_source(repo):
+    """M2:Memory 记录本身 owner 私有,深拷贝的接收方是别人——副本里既没有 Memory 来源,
+    也没有它的任何派生行。(此前的口径是「Memory 来源退化成普通内容源、memory_id 清空」,
+    那等于把成员的个人记忆原文送给了拷贝者;现在源头不带。)普通来源照常在副本里,原库
+    不受影响。"""
     nb = _mk_nb(repo, "MemSrc")
     store = repo._runtime.source_store
-    store.insert_source(
-        source_id="src-mem-1",
-        notebook_id=nb,
-        title="Memory: foo",
-        source_type="memory",
-        status="ready",
-        parse_status="ready",
-        file_name="",
-        file_path="",
-        file_size=0,
-        file_hash="",
-        summary="",
-        doc_type="memory",
-        memory_id="mem-x",
-    )
+    for source_id, source_type, memory_id in (
+        ("src-mem-1", "memory", "mem-x"),
+        ("src-plain-1", "document", None),
+    ):
+        store.insert_source(
+            source_id=source_id,
+            notebook_id=nb,
+            title=f"Memory: foo" if source_type == "memory" else "plain",
+            source_type=source_type,
+            status="ready",
+            parse_status="ready",
+            file_name="",
+            file_path="",
+            file_size=0,
+            file_hash="",
+            summary="",
+            doc_type=source_type,
+            memory_id=memory_id,
+        )
     _mk_user(repo, "user-memcopy")
     new = repo.copy_notebook(nb, new_owner_id="user-memcopy")
     copied = _rows(repo, "sources", new.id)
-    assert len(copied) == 1
-    row = copied[0]
-    assert not row["memory_id"]  # 清空,而非原样带走 'mem-x'
-    assert row["title"] == "Memory: foo"  # 其余字段完整
-    assert row["source_type"] == "memory"
-    assert row["doc_type"] == "memory"
+    assert [r["title"] for r in copied] == ["plain"]
+    assert all(r["source_type"] != "memory" and not r["memory_id"] for r in copied)
     # 原库不受影响
-    orig = _rows(repo, "sources", nb)[0]
-    assert orig["memory_id"] == "mem-x"
+    orig = {r["id"]: r for r in _rows(repo, "sources", nb)}
+    assert orig["src-mem-1"]["memory_id"] == "mem-x"
+    assert set(orig) == {"src-mem-1", "src-plain-1"}
 
 
-def test_copy_notebook_twice_no_memory_id_unique_index_collision(repo):
-    """同一 owner 对同一源库连拷两次,历史上不会撞 idx_sources_memory_id——两份
-    副本的 memory_id 都已清空为空串,分区唯一索引豁免空值(WHERE memory_id IS NOT
-    NULL AND memory_id != '')。"""
+def test_copy_notebook_twice_of_a_memory_notebook_has_no_memory_and_no_collision(repo):
+    """同一 owner 对含 Memory 的源库连拷两次:两份副本都没有 Memory 来源(于是
+    idx_sources_memory_id 分区唯一索引根本不会被碰到),普通来源各一份,原库的
+    memory_id 原样保留。"""
     nb = _mk_nb(repo, "MemSrc2")
     store = repo._runtime.source_store
-    store.insert_source(
-        source_id="src-mem-2",
-        notebook_id=nb,
-        title="Memory: bar",
-        source_type="memory",
-        status="ready",
-        parse_status="ready",
-        file_name="",
-        file_path="",
-        file_size=0,
-        file_hash="",
-        summary="",
-        doc_type="memory",
-        memory_id="mem-y",
-    )
+    for source_id, source_type, memory_id in (
+        ("src-mem-2", "memory", "mem-y"),
+        ("src-plain-2", "document", None),
+    ):
+        store.insert_source(
+            source_id=source_id,
+            notebook_id=nb,
+            title=source_id,
+            source_type=source_type,
+            status="ready",
+            parse_status="ready",
+            file_name="",
+            file_path="",
+            file_size=0,
+            file_hash="",
+            summary="",
+            doc_type=source_type,
+            memory_id=memory_id,
+        )
     _mk_user(repo, "user-memcopy2")
     new1 = repo.copy_notebook(nb, new_owner_id="user-memcopy2")
     new2 = repo.copy_notebook(nb, new_owner_id="user-memcopy2")
     assert new1.id != new2.id
     for nid in (new1.id, new2.id):
-        assert not _rows(repo, "sources", nid)[0]["memory_id"]
+        rows = _rows(repo, "sources", nid)
+        assert len(rows) == 1 and rows[0]["source_type"] == "document"
+    assert {r["memory_id"] for r in _rows(repo, "sources", nb)} == {"mem-y", None}
 
 
 def test_share_preview_copy_end_to_end(repo, client):
@@ -1703,3 +1711,166 @@ def test_a_base_deleted_between_the_check_and_the_insert_is_one_more_drop(
     assert len(lines) == 1
     assert "携带 1 条挂载边" in lines[0]
     assert "丢弃 2 条" in lines[0]
+
+
+# ---------------------------------------------------------------------------
+# M2 (权限整改 E5-1):拷贝——整本深拷贝与分享链接拷贝——永远不带任何 Memory 与其派生行。
+# 世界与断言在 tests/copy_memory_cases.py(PostgreSQL 侧
+# postgres/test_copy_memory_exclusion_pg.py 吃同一份)。
+# ---------------------------------------------------------------------------
+from tests import copy_memory_cases as memory_cases  # noqa: E402
+
+
+def _seed_memory_world(repo, nb=memory_cases.NOTEBOOK, *, with_memory=True):
+    def insert(table, values):
+        columns = list(values)
+        params = [
+            json.dumps(values[c]) if c in memory_cases.JSON_COLUMNS else values[c]
+            for c in columns
+        ]
+        db.execute(
+            f"INSERT INTO {table} ({','.join(columns)}) "
+            f"VALUES ({','.join('?' for _ in columns)})",
+            params,
+        )
+
+    with repo._write() as db:
+        memory_cases.seed(insert, nb, with_memory=with_memory)
+
+
+def _fetch(repo):
+    def fetch(sql, params):
+        with repo._connect() as db:
+            return [dict(r) for r in db.execute(sql, params).fetchall()]
+
+    return fetch
+
+
+def _kg_state(repo, nb):
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT dirty, kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?", (nb,)
+        ).fetchone()
+    return None if row is None else dict(row)
+
+
+def test_deep_copy_of_a_notebook_with_memories_carries_none_of_them(repo):
+    """两名成员各有已确认 Memory(元素、元素向量、KG 对象、对象向量、关系——含一条一端是
+    Memory 对象一端是共享对象的混合端点关系——、关系向量、事实三表、簇成员)。整本拷贝
+    (repo.copy_notebook)的副本里一行都没有:混合端点关系不再让服务层在对象映射上
+    KeyError,拷贝成功;validate_copy 在两侧同谓词下通过;副本被标脏以便重建成簇。"""
+    _seed_memory_world(repo)
+    _mk_user(repo, "user-deep-copy")
+    fetch = _fetch(repo)
+    assert memory_cases.read_copy(fetch, "?", memory_cases.NOTEBOOK).counts != (
+        memory_cases.expected_copy_counts()
+    ), "the fixture must actually hold Memory rows"
+
+    new = repo.copy_notebook(memory_cases.NOTEBOOK, new_owner_id="user-deep-copy")
+
+    view = memory_cases.read_copy(fetch, "?", new.id)
+    memory_cases.assert_copy_has_no_memory(view)
+    repo._runtime.sharing_store.validate_copy(memory_cases.NOTEBOOK, new.id)
+    state = _kg_state(repo, new.id)
+    assert state is not None and state["dirty"] == 1
+    # 源库一行没动
+    source = memory_cases.read_copy(fetch, "?", memory_cases.NOTEBOOK)
+    assert source.counts["sources"] == 4 and source.counts["concept_clusters"] == 7
+    assert _kg_state(repo, memory_cases.NOTEBOOK) is None
+
+
+def test_share_link_copy_route_of_a_notebook_with_memories_carries_none_of_them(repo, client):
+    """同一份世界,走真路由:分享 → 预览 → 分享链接拷贝。副本里没有任何 Memory;混合端点
+    关系不导致拷贝失败(路由把 KeyError 映射成 404,所以这里 200 就是没有 KeyError)。"""
+    _seed_memory_world(repo)
+    shared = client.post(f"/api/notebooks/{memory_cases.NOTEBOOK}/share")
+    assert shared.status_code == 200 and shared.json()["copyable"] is True
+    token = shared.json()["share_token"]
+    assert client.get(f"/api/shared/{token}").status_code == 200
+
+    copied = client.post(f"/api/shared/{token}/copy")
+    assert copied.status_code == 200, copied.text
+    new_id = copied.json()["id"]
+
+    fetch = _fetch(repo)
+    memory_cases.assert_copy_has_no_memory(memory_cases.read_copy(fetch, "?", new_id))
+    state = _kg_state(repo, new_id)
+    assert state is not None and state["dirty"] == 1
+
+
+def test_copy_of_a_notebook_without_memory_is_unchanged_and_not_marked_dirty(
+    repo, monkeypatch
+):
+    """没有 Memory 的笔记本:快照的每一行、每一个顺序都与 M2 之前的语句原文给出的一致;
+    副本仍然没有 unified_kg_state 行(不被标脏)——这条路径字节不变。"""
+    from app.repositories.sqlite import sharing_store as store_module
+
+    _seed_memory_world(repo, memory_cases.NOTEBOOK_PLAIN, with_memory=False)
+    store = repo._runtime.sharing_store
+    now_rows = store.snapshot_copy_rows(memory_cases.NOTEBOOK_PLAIN)
+    assert all(now_rows[t] for t in memory_cases.LEGACY_SNAPSHOT_SQLITE), "fixture covers each table"
+    assert store_module._MEMORY_EXCLUDED_MARK not in now_rows["notebooks"][0]
+    monkeypatch.setattr(
+        store_module,
+        "_COPY_SNAPSHOT_QUERIES",
+        memory_cases.legacy_snapshot_queries(
+            store_module._COPY_SNAPSHOT_QUERIES, memory_cases.LEGACY_SNAPSHOT_SQLITE
+        ),
+    )
+    memory_cases.assert_snapshots_equal(
+        now_rows, store.snapshot_copy_rows(memory_cases.NOTEBOOK_PLAIN)
+    )
+    monkeypatch.undo()
+
+    _mk_user(repo, "user-plain-copy")
+    new = repo.copy_notebook(memory_cases.NOTEBOOK_PLAIN, new_owner_id="user-plain-copy")
+    assert _kg_state(repo, new.id) is None
+    fetch = _fetch(repo)
+    assert memory_cases.read_copy(fetch, "?", new.id).counts == (
+        memory_cases.read_copy(fetch, "?", memory_cases.NOTEBOOK_PLAIN).counts
+    )
+
+
+def test_memory_notebook_snapshot_is_the_legacy_snapshot_minus_the_memory_rows(
+    repo, monkeypatch
+):
+    """有 Memory 的笔记本:现行快照 = M2 之前的原文快照去掉旗标为 Memory 的行(其余逐行不变)。"""
+    from app.repositories.sqlite import sharing_store as store_module
+
+    _seed_memory_world(repo)
+    store = repo._runtime.sharing_store
+    now_rows = store.snapshot_copy_rows(memory_cases.NOTEBOOK)
+    monkeypatch.setattr(
+        store_module,
+        "_COPY_SNAPSHOT_QUERIES",
+        memory_cases.legacy_snapshot_queries(
+            store_module._COPY_SNAPSHOT_QUERIES, memory_cases.LEGACY_SNAPSHOT_SQLITE
+        ),
+    )
+    legacy = store.snapshot_copy_rows(memory_cases.NOTEBOOK)
+    assert len(legacy["sources"]) == 4 and len(legacy["knowledge_relations"]) == 5, (
+        "the pre-M2 text does carry the Memory rows (fixture sanity)"
+    )
+    assert {r["id"] for r in now_rows["sources"]} == {"src-doc"}
+    assert {r["id"] for r in now_rows["knowledge_relations"]} == {"kr-shared"}
+    assert {r["id"] for r in now_rows["knowledge_objects"]} == {
+        "ko-shared-1", "ko-shared-2", "ko-shared-3", "ko-shared-4"
+    }
+    assert {r["canonical_id"] for r in now_rows["concept_clusters"]} == {"K-shared"}
+    assert now_rows["notebooks"][0][store_module._MEMORY_EXCLUDED_MARK] is True
+
+
+def test_snapshot_table_set_is_pinned_and_memory_carriers_are_not_in_it():
+    """快照的表集合逐名钉住:新增一张表必须回到 copy_memory_cases 登记它会不会带 Memory
+    派生内容;所有会带 Memory 派生内容的非快照表(memory_items、晋升候选、分析/可视化
+    工件、社区、对话……)必须不在里面——它们靠「不在快照」保证不被拷贝。两个后端一致。"""
+    from app.repositories.postgres import sharing_store as pg_store
+    from app.repositories.sqlite import sharing_store as sqlite_store
+
+    for module in (sqlite_store, pg_store):
+        tables = {table for table, _query in module._COPY_SNAPSHOT_QUERIES}
+        assert tables == memory_cases.SNAPSHOT_TABLES
+        assert not memory_cases.MEMORY_CARRIERS_NOT_COPIED & tables
+    assert [t for t, _ in sqlite_store._COPY_SNAPSHOT_QUERIES] == [
+        t for t, _ in pg_store._COPY_SNAPSHOT_QUERIES
+    ]
