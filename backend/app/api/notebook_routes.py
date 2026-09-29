@@ -1,9 +1,10 @@
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.deps import (
     get_current_user,
+    memory_membership_service,
     notebook_catalog_repository,
     notebook_question_suggestions_service,
     notebook_access_repository,
@@ -24,6 +25,7 @@ from app.domain.indexing_pipeline import (
     IndexingPipelineUnavailableError,
 )
 from app.models.identity import UserProfile
+from app.models.memory import MemoryExitDisclosure
 from app.models.question_suggestions import QuestionSuggestionsResponse
 from app.models.notebooks import (
     MountableNotebook,
@@ -43,6 +45,7 @@ from app.models.notebooks import (
     SharedByMeItem,
     SharedPreview,
 )
+from app.services.memory_service import ExitDisclosureRequired, MemberExitFailed
 from app.repositories.ports import (
     KgBuildAlreadyRunning,
     KgMaintenanceAlreadyRunning,
@@ -436,7 +439,44 @@ def join_shared_route(token: str, user: UserProfile = Depends(get_current_user))
         raise HTTPException(status_code=404, detail="Shared notebook not found")
 
 
+@router.get(
+    "/notebooks/{notebook_id}/membership/exit-disclosure",
+    response_model=MemoryExitDisclosure,
+    dependencies=[Depends(require_notebook_read)],
+)
+def membership_exit_disclosure_route(
+    notebook_id: str, user: UserProfile = Depends(get_current_user)
+) -> MemoryExitDisclosure:
+    """退出前告知:退出会永久删除调用者本人在这本库里的多少条记忆(各种状态都算)。
+    不是成员、或退出后仍能凭所有者身份/授权读这本库时为 0。"""
+    return MemoryExitDisclosure(
+        memory_count=memory_membership_service().exit_disclosure(notebook_id, user.id)
+    )
+
+
 @router.delete("/notebooks/{notebook_id}/membership", status_code=204)
-def leave_notebook_route(notebook_id: str, user: UserProfile = Depends(get_current_user)) -> None:
-    """退出只读共享:只删自己的成员记录(幂等,不影响他人)。"""
-    notebook_sharing_repository().leave_notebook(notebook_id, user.id)
+def leave_notebook_route(
+    notebook_id: str,
+    acknowledged_memory_count: Optional[int] = Query(default=None, ge=0),
+    user: UserProfile = Depends(get_current_user),
+) -> None:
+    """退出只读共享:删自己的成员记录(幂等,不影响他人),并永久删除自己在这本库里的
+    全部记忆及其派生数据——前提是成员记录是本人读这本库的最后途径。
+
+    要删的记忆多于 0 条时,必须带上 `acknowledged_memory_count` 且与服务端此刻的条数
+    完全一致,否则 409 `exit_disclosure_required`(带服务端条数),什么都不删、仍是成员。
+    0 条时不需要确认,行为与从前一致。"""
+    try:
+        memory_membership_service().leave_notebook(
+            notebook_id, user.id, acknowledged_memory_count
+        )
+    except ExitDisclosureRequired as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "exit_disclosure_required", "memory_count": exc.memory_count},
+        )
+    except MemberExitFailed:
+        raise user_error(
+            503,
+            "退出没有完成：删除你在这本笔记本里的记忆时出错，你仍是成员。请稍后重试。",
+        )

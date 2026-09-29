@@ -7646,6 +7646,20 @@
           "title": "MemoryCreateFromAnswer",
           "type": "object"
         },
+        "MemoryExitDisclosure": {
+          "description": "``GET /notebooks/{id}/membership/exit-disclosure``.",
+          "properties": {
+            "memory_count": {
+              "title": "Memory Count",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "memory_count"
+          ],
+          "title": "MemoryExitDisclosure",
+          "type": "object"
+        },
         "MemoryNotebookOption": {
           "properties": {
             "memory_count": {
@@ -24019,7 +24033,7 @@
       },
       "/api/notebooks/{notebook_id}/membership": {
         "delete": {
-          "description": "退出只读共享:只删自己的成员记录(幂等,不影响他人)。",
+          "description": "退出只读共享:删自己的成员记录(幂等,不影响他人),并永久删除自己在这本库里的\n全部记忆及其派生数据——前提是成员记录是本人读这本库的最后途径。\n\n要删的记忆多于 0 条时,必须带上 `acknowledged_memory_count` 且与服务端此刻的条数\n完全一致,否则 409 `exit_disclosure_required`(带服务端条数),什么都不删、仍是成员。\n0 条时不需要确认,行为与从前一致。",
           "operationId": "leave_notebook_route_api_notebooks__notebook_id__membership_delete",
           "parameters": [
             {
@@ -24029,6 +24043,23 @@
               "schema": {
                 "title": "Notebook Id",
                 "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "acknowledged_memory_count",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Acknowledged Memory Count"
               }
             }
           ],
@@ -24048,6 +24079,46 @@
             }
           },
           "summary": "Leave Notebook Route"
+        }
+      },
+      "/api/notebooks/{notebook_id}/membership/exit-disclosure": {
+        "get": {
+          "description": "退出前告知:退出会永久删除调用者本人在这本库里的多少条记忆(各种状态都算)。\n不是成员、或退出后仍能凭所有者身份/授权读这本库时为 0。",
+          "operationId": "membership_exit_disclosure_route_api_notebooks__notebook_id__membership_exit_disclosure_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemoryExitDisclosure"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Membership Exit Disclosure Route"
         }
       },
       "/api/notebooks/{notebook_id}/memories": {
@@ -24162,6 +24233,44 @@
             }
           },
           "summary": "List Notebook Memories"
+        }
+      },
+      "/api/notebooks/{notebook_id}/memories/export": {
+        "get": {
+          "description": "The caller's OWN Memory in this notebook as a Markdown download — the\nway out before leaving a shared notebook deletes it. Every status (the\nexit deletes candidates too; they are marked), oldest first, nothing of\nother users. Streamed in pages of ``_EXPORT_PAGE`` (200) Memories, so a\nlarge export never builds one string in memory. Read-gated: works only\nwhile the caller can read the notebook.",
+          "operationId": "export_notebook_memories_api_notebooks__notebook_id__memories_export_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Export Notebook Memories"
         }
       },
       "/api/notebooks/{notebook_id}/memories/from-answer": {

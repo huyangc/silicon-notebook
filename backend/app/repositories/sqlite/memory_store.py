@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 from app.models.memory import MemoryRevision, MemoryWrite
 from app.models.identity import AgentProfile, AgentTokenAccess, AgentTokenSummary
 from app.models.memory import (
+    MemberExitSnapshot,
     MemoryNotebookOption,
     MemoryRecord,
     PaginatedMemories,
@@ -24,7 +25,6 @@ from app.repositories.sqlite.access_sql import (
     NOTEBOOK_READ_SQL,
     grant_access_expr,
     grant_probe_params,
-    member_exists_expr,
     read_access_clause,
     read_access_exists_clause,
     read_access_params,
@@ -1560,6 +1560,7 @@ class MemoryStore:
 
         Mirror of the PostgreSQL twin (its docstring carries the lock-order
         argument; here the process-wide write lock serializes the writers).
+        The creator condition is enforced here too, not only by callers.
         Revisions, provenance and embeddings go with the row through their
         cascading foreign keys; the derived source and KG rows are removed by
         ``MemoryService`` before this runs."""
@@ -1575,7 +1576,7 @@ class MemoryStore:
         now = self.now()
         for notebook_id, ids in by_notebook.items():
             GovernanceStore.withdraw_memory_promotions_on(
-                db, notebook_id, ids, MEMORY_DELETED_PROMOTION_REASON, user_id, now
+                db, notebook_id, ids, MEMORY_DELETED_PROMOTION_REASON, now
             )
             id_placeholders = ",".join("?" for _ in ids)
             db.execute(
@@ -1585,87 +1586,225 @@ class MemoryStore:
             )
         return [row["id"] for row in rows]
 
-    def owned_memory_ids(
+    def owned_memory_refs(
         self, user_id: str, memory_ids: Sequence[str]
-    ) -> list[str]:
-        """Mirror of the PostgreSQL twin: the ids ``bulk_delete_memories``
-        would delete, read first so their derived rows can go before them."""
+    ) -> list[tuple[str, str]]:
+        """Mirror of the PostgreSQL twin: ``(memory_id, notebook_id)`` of the
+        rows ``bulk_delete_memories`` would delete, read first so their
+        derived rows can go before them."""
         unique = _bulk_memory_ids(memory_ids)
         if not unique:
             return []
         placeholders = ",".join("?" for _ in unique)
         with self.database.connect() as db:
             rows = db.execute(
-                "SELECT id FROM memory_items "
+                "SELECT id,notebook_id FROM memory_items "
                 f"WHERE created_by=? AND id IN ({placeholders}) ORDER BY id",
                 (user_id, *unique),
             ).fetchall()
-        return [row["id"] for row in rows]
+        return [(row["id"], row["notebook_id"]) for row in rows]
 
-    def exit_memory_ids(
-        self, notebook_id: str, user_id: str, *, limit: int
-    ) -> list[str]:
-        """Mirror of the PostgreSQL twin: this user's Memory ids in this
-        notebook, only while the membership row is (or was) their last read
-        path — not the owner, no grant."""
-        grant = grant_access_expr("nb.id", "m.created_by", "xg", "xgm", "xga")
-        with self.database.connect() as db:
-            rows = db.execute(
-                "SELECT m.id FROM memory_items m "
-                "JOIN notebooks nb ON nb.id=m.notebook_id "
-                "WHERE m.notebook_id=? AND m.created_by=? "
-                "AND nb.created_by<>m.created_by "
-                f"AND NOT {grant} "
-                "ORDER BY m.id LIMIT ?",
-                (notebook_id, user_id, max(1, int(limit))),
-            ).fetchall()
-        return [row["id"] for row in rows]
+    @staticmethod
+    def _member_exit_state_on(
+        db: sqlite3.Connection, notebook_id: str, user_id: str
+    ) -> tuple[bool, bool]:
+        """Mirror of the PostgreSQL twin: ``(is_member, keeps_access)``,
+        where ``keeps_access`` is ownership or any grant — the user's read
+        path without the membership row. (The caller's write transaction is
+        the lock here: every Memory write takes the same process-wide lock.)"""
+        member = db.execute(
+            "SELECT user_id FROM notebook_members WHERE notebook_id=? AND user_id=?",
+            (notebook_id, user_id),
+        ).fetchone()
+        grant = grant_access_expr("nb.id", "?", "xg", "xgm", "xga")
+        access = db.execute(
+            "SELECT COALESCE(nb.created_by=?, 0) OR "
+            f"{grant} AS keeps_access FROM notebooks nb WHERE nb.id=?",
+            (user_id, *(user_id,) * grant.count("?"), notebook_id),
+        ).fetchone()
+        return member is not None, bool(access and access["keeps_access"])
 
-    def member_memory_creators(self, notebook_id: str) -> list[str]:
-        """Mirror of the PostgreSQL twin: members of this notebook who own
-        at least one Memory in it."""
-        member = member_exists_expr("m.notebook_id", "m.created_by", "xm")
-        with self.database.connect() as db:
-            rows = db.execute(
-                "SELECT DISTINCT m.created_by FROM memory_items m "
-                f"WHERE m.notebook_id=? AND {member} ORDER BY m.created_by",
-                (notebook_id,),
-            ).fetchall()
-        return [row["created_by"] for row in rows]
-
-    def detach_memory_projection(self, memory_id: str, user_id: str) -> list[str]:
-        """Mirror of the PostgreSQL twin: strip this Memory's derived-source
-        evidence from objects another source owns before the source goes.
-
-        SQLite only: also drop the ``kg_objects_fts`` rows of the objects the
-        Memory's source minted. The generic source delete removes those
-        objects but not their lexical-index rows, which would keep the
-        private Memory's object names on disk after a hard delete. Scoped by
-        notebook and by the Memory's source id."""
-        with self.database.write() as db:
-            sources = db.execute(
-                "SELECT s.id,s.notebook_id FROM sources s "
-                "JOIN memory_items m ON m.id=s.memory_id "
-                "AND m.notebook_id=s.notebook_id "
-                "WHERE s.memory_id=? AND s.source_type='memory' "
-                "AND m.created_by=?",
-                (memory_id, user_id),
-            ).fetchall()
-            now = self.now()
-            stripped: list[str] = []
-            for source in sources:
-                stripped.extend(
-                    GovernanceStore.strip_source_evidence_on(
-                        db, source["notebook_id"], source["id"], now
+    def member_exit_snapshot(
+        self, notebook_id: str, user_id: str, *, claim: bool
+    ) -> MemberExitSnapshot:
+        """Mirror of the PostgreSQL twin: the disclosure count
+        (``claim=False``) or, inside a write transaction, the exact ids the
+        exit will delete (``claim=True``)."""
+        if claim:
+            with self.database.write() as db:
+                is_member, keeps = self._member_exit_state_on(db, notebook_id, user_id)
+                ids: tuple[str, ...] = ()
+                if is_member and not keeps:
+                    ids = tuple(
+                        row["id"]
+                        for row in db.execute(
+                            "SELECT id FROM memory_items "
+                            "WHERE notebook_id=? AND created_by=? "
+                            "ORDER BY created_at,id",
+                            (notebook_id, user_id),
+                        ).fetchall()
                     )
+            return MemberExitSnapshot(is_member, keeps, len(ids), ids)
+        with self.database.connect() as db:
+            is_member, keeps = self._member_exit_state_on(db, notebook_id, user_id)
+            count = 0
+            if is_member and not keeps:
+                count = int(db.execute(
+                    "SELECT COUNT(*) AS c FROM memory_items "
+                    "WHERE notebook_id=? AND created_by=?",
+                    (notebook_id, user_id),
+                ).fetchone()["c"])
+        return MemberExitSnapshot(is_member, keeps, count)
+
+    def finish_member_exit(self, notebook_id: str, user_id: str) -> int:
+        """Mirror of the PostgreSQL twin: delete the membership row only when
+        no Memory of the leaver remains, in one transaction; otherwise keep
+        it and return the remaining count."""
+        with self.database.write() as db:
+            member = db.execute(
+                "SELECT user_id FROM notebook_members WHERE notebook_id=? AND user_id=?",
+                (notebook_id, user_id),
+            ).fetchone()
+            if member is None:
+                return 0
+            remaining = int(db.execute(
+                "SELECT COUNT(*) AS c FROM memory_items "
+                "WHERE notebook_id=? AND created_by=?",
+                (notebook_id, user_id),
+            ).fetchone()["c"])
+            if remaining:
+                return remaining
+            db.execute(
+                "DELETE FROM notebook_members WHERE notebook_id=? AND user_id=?",
+                (notebook_id, user_id),
+            )
+        return 0
+
+    def derived_memory_sources(
+        self, refs: Sequence[tuple[str, str]]
+    ) -> list[tuple[str, str, str]]:
+        """Mirror of the PostgreSQL twin: one read resolving the derived
+        sources of a page of ``(memory_id, notebook_id)`` refs."""
+        if not refs:
+            return []
+        wanted = {(memory_id, notebook_id) for memory_id, notebook_id in refs}
+        ids = [memory_id for memory_id, _ in refs]
+        placeholders = ",".join("?" for _ in ids)
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT id,notebook_id,memory_id FROM sources "
+                f"WHERE memory_id IN ({placeholders}) AND source_type='memory' "
+                "ORDER BY id",
+                ids,
+            ).fetchall()
+        return [
+            (row["memory_id"], row["id"], row["notebook_id"])
+            for row in rows
+            if (row["memory_id"], row["notebook_id"]) in wanted
+        ]
+
+    def detach_memory_projection(
+        self, sources: Sequence[tuple[str, str, str]]
+    ) -> dict[str, list[str]]:
+        """Mirror of the PostgreSQL twin: in one write transaction, strip each
+        source's evidence from foreign objects and delete the review
+        candidates naming its own objects or relations; return those object
+        ids per notebook for ``drop_memory_lexical_rows``."""
+        owned: dict[str, list[str]] = {}
+        if not sources:
+            return owned
+        now = self.now()
+        with self.database.write() as db:
+            for _memory_id, source_id, notebook_id in sorted(
+                sources, key=lambda item: item[1]
+            ):
+                GovernanceStore.strip_source_evidence_on(
+                    db, notebook_id, source_id, now
                 )
-                db.execute(
-                    "DELETE FROM kg_objects_fts WHERE notebook_id=? AND object_id IN "
-                    "(SELECT id FROM knowledge_objects WHERE notebook_id=? "
-                    "AND source_id=?)",
-                    (source["notebook_id"], source["notebook_id"], source["id"]),
+                object_ids = [
+                    row["id"]
+                    for row in db.execute(
+                        "SELECT id FROM knowledge_objects "
+                        "WHERE notebook_id=? AND source_id=?",
+                        (notebook_id, source_id),
+                    ).fetchall()
+                ]
+                relation_ids = [
+                    row["id"]
+                    for row in db.execute(
+                        "SELECT id FROM knowledge_relations "
+                        "WHERE notebook_id=? AND source_id=?",
+                        (notebook_id, source_id),
+                    ).fetchall()
+                ]
+                GovernanceStore.delete_candidates_for_objects_on(
+                    db, notebook_id, object_ids, relation_ids
                 )
-        return stripped
+                owned.setdefault(notebook_id, []).extend(object_ids)
+        return owned
+
+    def drop_memory_lexical_rows(
+        self, owned_objects: Mapping[str, Sequence[str]]
+    ) -> int:
+        """Drop the ``kg_objects_fts`` rows of Memory-owned objects that the
+        source removal has deleted.
+
+        The generic source delete removes the objects but not their
+        lexical-index rows, which would keep a deleted private Memory's
+        object names on disk. Runs AFTER the removal and only deletes rows
+        whose object no longer exists: if the removal failed, the objects
+        keep their index. Scoped by notebook and the given ids."""
+        deleted = 0
+        with self.database.write() as db:
+            for notebook_id, object_ids in owned_objects.items():
+                ids = list(dict.fromkeys(object_ids))
+                for offset in range(0, len(ids), 500):
+                    batch = ids[offset:offset + 500]
+                    marks = ",".join("?" for _ in batch)
+                    cursor = db.execute(
+                        "DELETE FROM kg_objects_fts WHERE notebook_id=? "
+                        f"AND object_id IN ({marks}) "
+                        "AND NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
+                        "WHERE ko.id=kg_objects_fts.object_id)",
+                        (notebook_id, *batch),
+                    )
+                    deleted += int(cursor.rowcount or 0)
+        return deleted
+
+    def memory_export_page(
+        self,
+        notebook_id: str,
+        user_id: str,
+        *,
+        after: tuple[Any, str] | None,
+        limit: int,
+    ) -> tuple[list[MemoryRecord], tuple[Any, str] | None]:
+        """Mirror of the PostgreSQL twin: one keyset page of this user's own
+        Memory in one notebook, oldest first, every status, read-gated."""
+        page = max(1, min(int(limit), 500))
+        clauses = [
+            "m.notebook_id=?",
+            "m.created_by=?",
+            self._read_access_clause(),
+        ]
+        params: list[Any] = [notebook_id, user_id, *read_access_params(user_id)]
+        if after is not None:
+            clauses.append("(m.created_at>? OR (m.created_at=? AND m.id>?))")
+            params.extend((after[0], after[0], after[1]))
+        with self.database.connect() as db:
+            rows = db.execute(
+                f"SELECT {self._select_columns()},m.created_at AS cursor_created_at "
+                "FROM memory_items m LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+                f"WHERE {' AND '.join(clauses)} "
+                "ORDER BY m.created_at,m.id LIMIT ?",
+                (*params, page + 1),
+            ).fetchall()
+        more = len(rows) > page
+        rows = rows[:page]
+        cursor = (
+            (rows[-1]["cursor_created_at"], rows[-1]["id"]) if more and rows else None
+        )
+        return [self._record(row) for row in rows], cursor
 
     def list_memories(
         self,

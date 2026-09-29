@@ -2315,10 +2315,68 @@ class SourceIngestionService:
         return source_id
 
     def remove_memory_source(self, memory_id: str) -> None:
-        """弃用 Memory 派生源：无派生源（从未抽取过，或已被移除）时幂等 no-op。"""
+        """弃用 Memory 派生源：无派生源（从未抽取过，或已被移除）时幂等 no-op。
+
+        并发下同样幂等：查到源之后、删之前被另一方删掉，也算「已删除」，不抛
+        KeyError（两次退出/双击退出曾因此 500，数据其实早已删净）。"""
         source_id = self.sources.source_id_for_memory(memory_id)
         if source_id is not None:
-            self.delete_source(source_id, self.pipeline_hooks())
+            self.remove_memory_sources([source_id])
+
+    def remove_memory_sources(self, source_ids: Iterable[str]) -> int:
+        """Delete Memory-derived sources in ONE write transaction.
+
+        The per-source ``delete_source`` teardown (graph rows, facts, element
+        vectors, extraction runs, the source row with its elements), batched:
+        rows are locked and deleted in source-id order, so two concurrent
+        removers of overlapping sets cannot deadlock, and each notebook's
+        graph is marked dirty — one ``kg_mutation_seq`` bump — once per batch
+        instead of once per source. Readers key on that seq; every deleted
+        row commits in this same transaction, so one bump invalidates exactly
+        what one bump per source did.
+
+        Idempotent: a source that is already gone (a concurrent exit or
+        delete removed it between the lookup and here) counts as deleted.
+        Only ``memory`` sources are accepted — this is not a general source
+        delete. Returns how many sources this call removed."""
+        live = []
+        for source_id in sorted(set(source_ids)):
+            try:
+                source = self.sources.get_source(source_id)
+            except KeyError:
+                continue
+            if source.type != "memory":
+                raise ValueError(f"not a Memory-derived source: {source_id}")
+            live.append(source)
+        if not live:
+            return 0
+        removed = []
+        with self.write() as db:
+            for source in live:
+                if self.sources.source_exists_for_update_tx(db, source.id):
+                    self.clear_source_extraction_state(
+                        db, source.id, source.notebook_id, clear_embeddings=True
+                    )
+                    self.sources.delete_source_row(db, source.id)
+                    removed.append(source)
+            for notebook_id in sorted({source.notebook_id for source in live}):
+                self.kg_mutations.mark_unified_kg_dirty_in_tx(db, notebook_id)
+        for source in removed:
+            if self.analysis_artifacts is not None:
+                try:
+                    self.analysis_artifacts.redact_source(
+                        source.notebook_id, source.id, occurred_at=self.now()
+                    )
+                except Exception as redact_error:  # noqa: BLE001 - row already deleted
+                    self.event_log.logger.warning(
+                        "analysis artifact redaction failed (%s)",
+                        type(redact_error).__name__,
+                    )
+            self.source_files.delete(source.file_path)
+            self.delete_source_images(source.id)
+        for notebook_id in sorted({source.notebook_id for source in live}):
+            self.kg_mutations.invalidate_unified_cache(notebook_id)
+        return len(removed)
 
     # ----------------------------------------------------------- extraction
     @staticmethod

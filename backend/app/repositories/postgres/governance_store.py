@@ -1702,7 +1702,6 @@ class GovernanceStore:
         notebook_id: str,
         memory_ids: List[str],
         reason: str,
-        reviewer_id: str,
         now: str,
     ) -> int:
         """Reject the still-active proposals of Memory rows the caller is
@@ -1713,7 +1712,10 @@ class GovernanceStore:
         queue forever and can never be approved (the pinned snapshot is gone).
         Withdrawal is ``status='rejected'`` because the queue has no other
         terminal state for "never reviewed"; an already approved proposal is
-        left alone — its base object is independent of the Memory row.
+        left alone — its base object is independent of the Memory row. A
+        withdrawal is not a review: ``reviewed_by`` is left empty (no
+        reviewer acted) and ``reason`` carries the machine code. The curator
+        queue lists only active proposals, and no UI renders ``reason``.
 
         Scoped by notebook AND the Memory ids; the caller already holds the
         Memory rows ``FOR UPDATE`` (same Memory-then-candidate lock order as
@@ -1724,18 +1726,54 @@ class GovernanceStore:
             return 0
         cursor = connection.execute(
             "UPDATE promotion_candidates "
-            "SET status='rejected', reason=%s, reviewed_by=%s, updated_at=%s "
+            "SET status='rejected', reason=%s, reviewed_by='', updated_at=%s "
             "WHERE notebook_id=%s AND object_type='memory' AND object_id=ANY(%s) "
             "AND status IN ('proposed','under_review')",
             (
                 reason,
-                reviewer_id,
                 normalize_timestamp(now),
                 notebook_id,
                 list(memory_ids),
             ),
         )
         return int(cursor.rowcount or 0)
+
+    @staticmethod
+    def delete_candidates_for_objects_on(
+        connection: Any,
+        notebook_id: str,
+        object_ids: List[str],
+        relation_ids: List[str],
+    ) -> int:
+        """Delete the review candidates that name objects or relations about
+        to be deleted with their source, in the caller's transaction.
+
+        ``kg_conflict_candidates`` (any status: ``rationale`` and
+        ``resolved_payload`` may quote the deleted text, and pending rows are
+        served to every reader by ``pending_conflicts``) whose left, right or
+        winner reference is one of these ids, and the PENDING
+        ``concept_merge_candidates`` seeded by one of the objects. Decided
+        merge rows are curator decisions keyed by seed names and stay. Rows
+        that outlive their objects would otherwise escape every later cleanup
+        keyed on the (now gone) objects. Scoped by notebook and the ids."""
+        refs = list(dict.fromkeys([*object_ids, *relation_ids]))
+        deleted = 0
+        if refs:
+            cursor = connection.execute(
+                "DELETE FROM kg_conflict_candidates WHERE notebook_id=%s "
+                "AND (left_ref=ANY(%s) OR right_ref=ANY(%s) OR winner_ref=ANY(%s))",
+                (notebook_id, refs, refs, refs),
+            )
+            deleted += int(cursor.rowcount or 0)
+        if object_ids:
+            cursor = connection.execute(
+                "DELETE FROM concept_merge_candidates WHERE notebook_id=%s "
+                "AND status='pending' "
+                "AND (canonical_a=ANY(%s) OR canonical_b=ANY(%s))",
+                (notebook_id, list(object_ids), list(object_ids)),
+            )
+            deleted += int(cursor.rowcount or 0)
+        return deleted
 
     @staticmethod
     def strip_source_evidence_on(

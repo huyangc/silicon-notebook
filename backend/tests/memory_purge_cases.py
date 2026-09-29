@@ -2,8 +2,10 @@
 
 ``test_memory_purge.py`` runs every case on SQLite and
 ``postgres/test_memory_purge_pg.py`` runs the same cases on PostgreSQL. Each
-case drives the production facade (``delete_memory``, ``bulk_delete_memories``,
-``leave_notebook``, ``remove_member``, ``kick_all_members``) against a world
+case drives the production entry points — the facade's ``delete_memory`` /
+``bulk_delete_memories`` / ``remove_member`` / ``kick_all_members``, and the
+member's own exit ``MemoryService.leave_notebook`` (the route's use case,
+with its acknowledged Memory count) — against a world
 whose Memory projections are REAL: the hidden source, its element and
 extraction run come from the offline ingest pipeline, and its KG rows come
 from ``store_kg`` with the source's running generation (objects, relations,
@@ -28,6 +30,7 @@ from typing import Any, Callable
 from app.models.knowledge import MergeRequest
 from app.models.schemas import NotebookCreate, SourceImportFile, SourceImportRequest
 from app.services.embedding import FakeEmbedder
+from app.services.memory_service import ExitDisclosureRequired, MemberExitFailed
 from app.core.request_context import reset_request_user, set_request_user
 from tests.model_testkit import bind_all_embedding_clients
 
@@ -382,6 +385,9 @@ def assert_intact(world: World, key: str) -> None:
         "knowledge_embeddings", "relation_embeddings", "concept_clusters",
     ):
         assert counts[name] > 0, (key, name, counts)
+    if not world.sql.postgres:
+        # SQLite's KG lexical index of the surviving objects is untouched.
+        assert counts["kg_objects_fts"] > 0, (key, counts)
 
 
 def assert_shared_object_stripped(world: World) -> None:
@@ -402,6 +408,11 @@ def assert_shared_object_stripped(world: World) -> None:
     }
     assert reverse == {world.shared_doc_source}
     assert alice.source_id not in reverse
+    if not sql.postgres:
+        assert sql.count(
+            "SELECT COUNT(*) AS c FROM kg_objects_fts WHERE object_id=?",
+            (world.shared_doc_object,),
+        ) == 1
 
 
 def graph_state(world: World, notebook_id: str) -> tuple[int, int]:
@@ -457,6 +468,127 @@ def promotion_state(world: World, candidate_id: str) -> tuple[str, str]:
     return row["status"], row["reason"]
 
 
+
+
+def service(world: World) -> Any:
+    return world.repo._runtime.memory_service
+
+
+def self_exit(world: World, user: Any, notebook_id: str, ack: int | None = None) -> None:
+    """``DELETE /notebooks/{id}/membership`` below the route."""
+    service(world).leave_notebook(notebook_id, user.id, ack)
+
+
+def disclosure(world: World, user: Any, notebook_id: str) -> int:
+    return service(world).exit_disclosure(notebook_id, user.id)
+
+
+def expect_disclosure_required(fn: Callable[[], Any]) -> int:
+    try:
+        fn()
+    except ExitDisclosureRequired as exc:
+        return exc.memory_count
+    raise AssertionError("the exit went ahead without the required acknowledgement")
+
+
+def member_memory_count(world: World, notebook_id: str, user: Any) -> int:
+    return world.sql.count(
+        "SELECT COUNT(*) AS c FROM memory_items WHERE notebook_id=? AND created_by=?",
+        (notebook_id, user.id),
+    )
+
+
+def grant_group(world: World, notebook_id: str, user: Any) -> None:
+    world.sql.write(
+        "INSERT INTO groups (id,name,kind,description,created_by,created_at,updated_at) "
+        "VALUES ('grp-exit','Exit group','project','',?,?,?)",
+        (world.owner.id, _GRANT_CREATED_AT, _GRANT_CREATED_AT),
+    )
+    world.sql.write(
+        "INSERT INTO group_members (group_id,user_id,role,added_at,added_by) "
+        "VALUES ('grp-exit',?,'member',?,?)",
+        (user.id, _GRANT_CREATED_AT, world.owner.id),
+    )
+    world.sql.write(
+        "INSERT INTO notebook_grants "
+        "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+        "VALUES ('gnt-group-exit',?,'group','grp-exit','reader',?,?)",
+        (notebook_id, world.owner.id, _GRANT_CREATED_AT),
+    )
+
+
+def grant_everyone(world: World, notebook_id: str) -> None:
+    world.sql.write(
+        "INSERT INTO notebook_grants "
+        "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+        "VALUES ('gnt-everyone-exit',?,'everyone','','reader',?,?)",
+        (notebook_id, world.owner.id, _GRANT_CREATED_AT),
+    )
+
+
+def plain_memory(world: World, notebook_id: str, user: Any, key: str, status: str) -> str:
+    """A Memory in ``status`` without any derived projection."""
+    svc = service(world)
+    item = svc.create_candidate(
+        notebook_id, user.id, None, f"req-plain-{key}", f"Plain {key}",
+        f"Plain body {key}.", [], "reason", {}, [],
+    )
+    if status in ("confirmed", "deprecated"):
+        item = svc.confirm(item.id, user.id, {"extract_kg": False})
+    if status == "deprecated":
+        item = svc.deprecate(item.id, user.id)
+    if status == "rejected":
+        item = svc.reject(item.id, user.id)
+    assert item.status == status
+    return item.id
+
+
+def export_text(world: World, user: Any, notebook_id: str) -> str:
+    return "".join(service(world).export_markdown(notebook_id, user.id, "Shared"))
+
+
+class _CountingConnection:
+    def __init__(self, inner: Any, counter: list[int]) -> None:
+        self._inner = inner
+        self._counter = counter
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        self._counter[0] += 1
+        return self._inner.execute(*args, **kwargs)
+
+    def executemany(self, *args: Any, **kwargs: Any) -> Any:
+        self._counter[0] += 1
+        return self._inner.executemany(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def count_statements(world: World, monkeypatch, fn: Callable[[], Any]) -> int:
+    """SQL statements issued through the runtime database while ``fn`` runs."""
+    from contextlib import contextmanager
+
+    database = world.repo._runtime.database
+    counter = [0]
+    for name in ("connect", "write"):
+        original = getattr(database, name)
+
+        def counted(*args: Any, _original=original, **kwargs: Any):
+            @contextmanager
+            def manager():
+                with _original(*args, **kwargs) as db:
+                    yield _CountingConnection(db, counter)
+
+            return manager()
+
+        monkeypatch.setattr(database, name, counted)
+    try:
+        fn()
+    finally:
+        monkeypatch.undo()
+    return counter[0]
+
+
 # ---------------------------------------------------------------- cases
 
 
@@ -500,10 +632,35 @@ def case_bulk_delete_removes_only_owned_rows(world: World) -> None:
     assert_intact(world, "alice_elsewhere")
 
 
-def case_leave_purges_member_memory_and_rejoin_starts_empty(world: World) -> None:
+def case_store_delete_enforces_the_creator(world: World) -> None:
+    """Defence in depth: the store's own deletes are creator-scoped, whatever
+    the caller pre-filtered."""
+    store = service(world).store
+    alice = world.projections["alice"]
+    assert store.bulk_delete_memories(world.bob.id, [alice.memory_id]) == 0
+    try:
+        store.delete_memory(alice.memory_id, world.bob.id)
+    except KeyError:
+        pass
+    else:  # pragma: no cover - the assertion below explains the failure
+        raise AssertionError("a non-creator deleted another user's Memory row")
+    assert_intact(world, "alice")
+
+
+def case_self_exit_requires_the_exact_acknowledgement(world: World) -> None:
+    assert disclosure(world, world.alice, world.shared) == 1
+    for ack in (None, 0, 2):
+        assert expect_disclosure_required(
+            lambda ack=ack: self_exit(world, world.alice, world.shared, ack)
+        ) == 1
+    assert world.repo.is_member(world.shared, world.alice.id)
+    assert_intact(world, "alice")
+
+
+def case_self_exit_purges_and_rejoin_starts_empty(world: World) -> None:
     repo = world.repo
     seq = mark_clean(world, world.shared)
-    repo.leave_notebook(world.shared, world.alice.id)
+    self_exit(world, world.alice, world.shared, 1)
     assert not repo.is_member(world.shared, world.alice.id)
     assert_purged(world, "alice")
     assert_shared_object_stripped(world)
@@ -512,19 +669,63 @@ def case_leave_purges_member_memory_and_rejoin_starts_empty(world: World) -> Non
     assert_intact(world, "alice_home")
     assert_intact(world, "alice_elsewhere")
     repo.add_member(world.shared, world.alice.id)
-    page = repo.list_memories(world.alice.id, notebook_id=world.shared)
-    assert page.items == []
-    assert_purged(world, "alice")
+    assert disclosure(world, world.alice, world.shared) == 0
+    assert repo.list_memories(world.alice.id, notebook_id=world.shared).items == []
 
 
-def case_remove_member_keeps_memory_while_a_grant_still_reads(world: World) -> None:
-    grant_user(world, world.shared, world.alice)
-    world.repo.remove_member(world.shared, world.alice.id)
+def case_self_exit_with_nothing_to_delete_needs_no_acknowledgement(world: World) -> None:
+    dave = world.repo.create_user("d00100004", "pw123456")
+    world.repo.add_member(world.shared, dave.id)
+    assert disclosure(world, dave, world.shared) == 0
+    self_exit(world, dave, world.shared)
+    assert not world.repo.is_member(world.shared, dave.id)
+    self_exit(world, dave, world.shared)  # not a member: a no-op, like before
+    assert_intact(world, "alice")
+    assert_intact(world, "bob")
+
+
+def _assert_exit_keeps_memory(world: World) -> None:
+    assert disclosure(world, world.alice, world.shared) == 0
+    self_exit(world, world.alice, world.shared)
     assert not world.repo.is_member(world.shared, world.alice.id)
     assert_intact(world, "alice")
-    assert world.repo.get_memory(
-        world.projections["alice"].memory_id, world.alice.id
-    ).id == world.projections["alice"].memory_id
+    alice = world.projections["alice"]
+    assert world.repo.get_memory(alice.memory_id, world.alice.id).id == alice.memory_id
+
+
+def case_self_exit_keeps_memory_while_a_user_grant_reads(world: World) -> None:
+    grant_user(world, world.shared, world.alice)
+    _assert_exit_keeps_memory(world)
+
+
+def case_self_exit_keeps_memory_while_a_group_grant_reads(world: World) -> None:
+    grant_group(world, world.shared, world.alice)
+    _assert_exit_keeps_memory(world)
+
+
+def case_self_exit_keeps_memory_while_an_everyone_grant_reads(world: World) -> None:
+    grant_everyone(world, world.shared)
+    _assert_exit_keeps_memory(world)
+
+
+def case_removal_by_others_never_deletes_memory(world: World) -> None:
+    """Only the member's own acknowledged exit deletes Memory: an owner's
+    removal, a notebook-wide kick and the facade's membership-only leave end
+    the membership and keep every Memory."""
+    repo = world.repo
+    repo.remove_member(world.shared, world.alice.id)
+    assert not repo.is_member(world.shared, world.alice.id)
+    assert_intact(world, "alice")
+    repo.kick_all_members(world.shared)
+    assert not repo.is_member(world.shared, world.bob.id)
+    assert_intact(world, "bob")
+    repo.leave_notebook(world.elsewhere, world.alice.id)
+    assert not repo.is_member(world.elsewhere, world.alice.id)
+    assert_intact(world, "alice_elsewhere")
+    assert world.sql.count(
+        "SELECT COUNT(*) AS c FROM knowledge_objects WHERE id=?",
+        (world.shared_doc_object,),
+    ) == 1
 
 
 def case_revoking_authorisation_keeps_memory(world: World) -> None:
@@ -532,7 +733,7 @@ def case_revoking_authorisation_keeps_memory(world: World) -> None:
     repo = world.repo
     alice = world.projections["alice"]
     grant_id = grant_user(world, world.shared, world.alice)
-    repo.remove_member(world.shared, world.alice.id)  # grant still reads
+    self_exit(world, world.alice, world.shared)  # grant still reads: keeps
     assert repo._runtime.groups.delete_grant(world.shared, grant_id)
     assert_intact(world, "alice")
     repo.unshare_notebook(world.shared)  # drops Bob's membership row
@@ -549,88 +750,294 @@ def case_revoking_authorisation_keeps_memory(world: World) -> None:
     assert repo.get_memory(alice.memory_id, world.alice.id).id == alice.memory_id
 
 
-def case_kick_all_members_purges_each_exiting_member(world: World) -> None:
-    grant_user(world, world.shared, world.bob)  # Bob keeps reading
-    world.repo.kick_all_members(world.shared)
-    assert not world.repo.is_member(world.shared, world.alice.id)
-    assert not world.repo.is_member(world.shared, world.bob.id)
-    assert_purged(world, "alice")
-    assert_shared_object_stripped(world)
-    assert_intact(world, "bob")
-    assert_intact(world, "alice_home")
-    assert_intact(world, "alice_elsewhere")
-
-
-def case_failed_purge_keeps_the_membership(world: World, monkeypatch) -> None:
-    """Clean first, then drop the row: a purge failure leaves a member."""
-    source_ingestion = world.repo._runtime.source_ingestion
-
-    def failing_remove(memory_id: str) -> None:
-        raise RuntimeError("injected source removal failure")
-
-    monkeypatch.setattr(source_ingestion, "remove_memory_source", failing_remove)
-    try:
-        world.repo.leave_notebook(world.shared, world.alice.id)
-    except RuntimeError as exc:
-        assert "injected" in str(exc)
-    else:  # pragma: no cover - the assertion below explains the failure
-        raise AssertionError("leave_notebook swallowed a failed Memory purge")
-    assert world.repo.is_member(world.shared, world.alice.id)
-    # Nothing of the Memory's own projection was touched: the pre-removal
-    # detach only reaches objects ANOTHER source owns.
-    assert_intact(world, "alice")
-
-
-def case_memory_saved_during_exit_is_swept(world: World, monkeypatch) -> None:
-    """A Memory landing between the purge and the row delete is swept after."""
-    repo = world.repo
-    sharing_store = repo._runtime.sharing_store
-    original = sharing_store.remove_member
-    late: list[Projection] = []
-
-    def remove_after_a_late_save(notebook_id: str, user_id: str) -> None:
-        late.append(make_memory(world, "late", notebook_id, world.alice))
-        original(notebook_id, user_id)
-
-    monkeypatch.setattr(sharing_store, "remove_member", remove_after_a_late_save)
-    repo.leave_notebook(world.shared, world.alice.id)
-    assert late
-    assert_purged(world, "alice")
-    counts = derived_counts(world, world.projections["late"])
-    assert counts["memory_items"] == 0
-    assert counts["sources"] == 0
-    assert counts["knowledge_objects"] == 0
-    assert_intact(world, "bob")
+def _promotion_row(world: World, candidate_id: str) -> dict:
+    [row] = world.sql.rows(
+        "SELECT status,reason,reviewed_by,target_base_id FROM promotion_candidates "
+        "WHERE id=?",
+        (candidate_id,),
+    )
+    return row
 
 
 def case_delete_withdraws_active_promotion(world: World) -> None:
     candidate_id = propose(world, "alice_home")
     world.repo.delete_memory(world.projections["alice_home"].memory_id, world.alice.id)
-    assert promotion_state(world, candidate_id) == ("rejected", "withdrawn_memory_deleted")
+    row = _promotion_row(world, candidate_id)
+    # A withdrawal is not a review: no reviewer is recorded.
+    assert (row["status"], row["reason"], row["reviewed_by"]) == (
+        "rejected", "withdrawn_memory_deleted", "",
+    )
     assert_purged(world, "alice_home")
 
 
 def case_exit_withdraws_active_promotion(world: World) -> None:
     candidate_id = propose(world, "alice")
-    world.repo.remove_member(world.shared, world.alice.id)
-    assert promotion_state(world, candidate_id) == ("rejected", "withdrawn_memory_deleted")
+    self_exit(world, world.alice, world.shared, 1)
+    row = _promotion_row(world, candidate_id)
+    assert (row["status"], row["reason"], row["reviewed_by"]) == (
+        "rejected", "withdrawn_memory_deleted", "",
+    )
     assert_purged(world, "alice")
     assert_intact(world, "bob")
     assert_intact(world, "alice_elsewhere")
+
+
+def case_approved_promotion_survives_deletion(world: World) -> None:
+    candidate_id = propose(world, "alice_home")
+    world.repo.approve_promotion(candidate_id)
+    before = _promotion_row(world, candidate_id)
+    base_objects = world.sql.count(
+        "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=?",
+        (before["target_base_id"],),
+    )
+    assert before["status"] == "approved" and base_objects > 0
+    world.repo.delete_memory(world.projections["alice_home"].memory_id, world.alice.id)
+    assert _promotion_row(world, candidate_id) == before
+    assert world.sql.count(
+        "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=?",
+        (before["target_base_id"],),
+    ) == base_objects
+    assert_purged(world, "alice_home")
+
+
+def _seed_review_candidates(world: World) -> None:
+    alice = world.projections["alice"]
+    bob = world.projections["bob"]
+    rows = [
+        ("kc-alice-obj", "object", alice.object_ids[1], world.shared_doc_object, "pending"),
+        ("kc-alice-rel", "relation", world.shared_doc_object, alice.relation_ids[0], "resolved"),
+        ("kc-bob-obj", "object", bob.object_ids[1], world.shared_doc_object, "pending"),
+    ]
+    for cid, kind, left, right, status in rows:
+        world.sql.write(
+            "INSERT INTO kg_conflict_candidates "
+            "(id,notebook_id,kind,left_ref,right_ref,rationale,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,'quotes the Memory text',?,?,?)",
+            (cid, world.shared, kind, left, right, status,
+             _GRANT_CREATED_AT, _GRANT_CREATED_AT),
+        )
+    merges = [
+        ("mc-alice-pending", alice.object_ids[1], world.shared_doc_object, "pending"),
+        ("mc-alice-decided", alice.object_ids[1], world.shared_doc_object, "rejected"),
+        ("mc-bob-pending", bob.object_ids[1], world.shared_doc_object, "pending"),
+    ]
+    for mid, left, right, status in merges:
+        world.sql.write(
+            "INSERT INTO concept_merge_candidates "
+            "(id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,0.9,?,?,?)",
+            (mid, world.shared, left, right, status, _GRANT_CREATED_AT, _GRANT_CREATED_AT),
+        )
+
+
+def case_review_candidates_of_deleted_objects_are_deleted(world: World) -> None:
+    _seed_review_candidates(world)
+    world.repo.delete_memory(world.projections["alice"].memory_id, world.alice.id)
+    conflicts = {
+        row["id"] for row in world.sql.rows("SELECT id FROM kg_conflict_candidates")
+    }
+    merges = {
+        row["id"] for row in world.sql.rows("SELECT id FROM concept_merge_candidates")
+    }
+    assert conflicts == {"kc-bob-obj"}
+    assert merges == {"mc-alice-decided", "mc-bob-pending"}
+    assert_purged(world, "alice")
+    assert_intact(world, "bob")
+
+
+def case_mixed_statuses_are_counted_exported_and_deleted_together(world: World) -> None:
+    """The disclosure counts every status; the export lists exactly those rows,
+    each labelled; transfer carries only confirmed ones; the exit deletes
+    exactly what was counted."""
+    shared, alice = world.shared, world.alice
+    candidate = plain_memory(world, shared, alice, "cand", "candidate")
+    confirmed = plain_memory(world, shared, alice, "conf", "confirmed")
+    plain_memory(world, shared, alice, "rej", "rejected")
+    plain_memory(world, shared, alice, "dep", "deprecated")
+    assert disclosure(world, alice, shared) == member_memory_count(world, shared, alice) == 5
+    text = export_text(world, alice, shared)
+    for title in ("Memory alice", "Plain cand", "Plain conf", "Plain rej", "Plain dep"):
+        assert f". {title}\n" in text, title
+    for label in ("候选（尚未确认）", "已确认", "已拒绝", "已弃用"):
+        assert f"- 状态：{label}" in text, label
+    assert text.count("\n## ") == 5
+    for foreign in ("Memory bob", "Memory alice_home", "Memory alice_elsewhere"):
+        assert foreign not in text
+    results = service(world).transfer(
+        alice.id,
+        [world.projections["alice"].memory_id, confirmed, candidate],
+        world.alice_home,
+        "move",
+    )
+    assert [result["status"] for result in results] == ["moved", "moved", "failed"]
+    assert disclosure(world, alice, shared) == 3
+    home_before = member_memory_count(world, world.alice_home, alice)
+    self_exit(world, alice, shared, 3)
+    assert member_memory_count(world, shared, alice) == 0
+    assert member_memory_count(world, world.alice_home, alice) == home_before
+    assert not world.repo.is_member(shared, alice.id)
+
+
+def case_export_needs_read_access_and_is_lazy(world: World) -> None:
+    stranger = world.repo.create_user("s00100005", "pw123456")
+    try:
+        service(world).export_markdown(world.shared, stranger.id, "Shared")
+    except PermissionError:
+        pass
+    else:  # pragma: no cover - the assertion below explains the failure
+        raise AssertionError("a non-reader was handed an export")
+    text = export_text(world, world.bob, world.shared)
+    assert "Memory bob" in text and "Memory alice" not in text
+    assert text.rstrip().endswith("共导出 1 条记忆。")
 
 
 CASES: dict[str, Callable[..., None]] = {
     "hard_delete": case_hard_delete_removes_every_derived_row,
     "hard_delete_unbackfilled": case_hard_delete_on_an_unbackfilled_notebook,
     "bulk_delete": case_bulk_delete_removes_only_owned_rows,
-    "leave": case_leave_purges_member_memory_and_rejoin_starts_empty,
-    "grant_still_reads": case_remove_member_keeps_memory_while_a_grant_still_reads,
+    "store_creator_scope": case_store_delete_enforces_the_creator,
+    "exit_requires_ack": case_self_exit_requires_the_exact_acknowledgement,
+    "exit_purges": case_self_exit_purges_and_rejoin_starts_empty,
+    "exit_without_memory": case_self_exit_with_nothing_to_delete_needs_no_acknowledgement,
+    "exit_user_grant_keeps": case_self_exit_keeps_memory_while_a_user_grant_reads,
+    "exit_group_grant_keeps": case_self_exit_keeps_memory_while_a_group_grant_reads,
+    "exit_everyone_grant_keeps": case_self_exit_keeps_memory_while_an_everyone_grant_reads,
+    "removal_by_others_keeps": case_removal_by_others_never_deletes_memory,
     "revocation_keeps": case_revoking_authorisation_keeps_memory,
-    "kick_all": case_kick_all_members_purges_each_exiting_member,
     "delete_withdraws_promotion": case_delete_withdraws_active_promotion,
     "exit_withdraws_promotion": case_exit_withdraws_active_promotion,
+    "approved_promotion_survives": case_approved_promotion_survives_deletion,
+    "review_candidates_deleted": case_review_candidates_of_deleted_objects_are_deleted,
+    "mixed_statuses": case_mixed_statuses_are_counted_exported_and_deleted_together,
+    "export_scope": case_export_needs_read_access_and_is_lazy,
 }
+
+
+def case_failed_purge_keeps_the_membership(world: World, monkeypatch) -> None:
+    """A purge failure raises and leaves the leaver a member; the Memory's
+    own projection is untouched by the detach that ran first."""
+    source_ingestion = world.repo._runtime.source_ingestion
+
+    def failing_remove(source_ids) -> int:
+        raise RuntimeError("injected source removal failure")
+
+    monkeypatch.setattr(source_ingestion, "remove_memory_sources", failing_remove)
+    try:
+        self_exit(world, world.alice, world.shared, 1)
+    except MemberExitFailed:
+        pass
+    else:  # pragma: no cover - the assertion below explains the failure
+        raise AssertionError("the exit swallowed a failed Memory purge")
+    assert world.repo.is_member(world.shared, world.alice.id)
+    assert_intact(world, "alice")
+
+
+def case_memory_saved_during_exit_is_never_deleted_unacknowledged(
+    world: World, monkeypatch
+) -> None:
+    store = service(world).store
+    original = store.bulk_delete_memories
+    late: list[Projection] = []
+
+    def delete_then_save(user_id, memory_ids):
+        deleted = original(user_id, memory_ids)
+        if not late:
+            late.append(make_memory(world, "late", world.shared, world.alice))
+        return deleted
+
+    monkeypatch.setattr(store, "bulk_delete_memories", delete_then_save)
+    assert expect_disclosure_required(
+        lambda: self_exit(world, world.alice, world.shared, 1)
+    ) == 1
+    assert world.repo.is_member(world.shared, world.alice.id)
+    assert_purged(world, "alice")
+    assert_intact(world, "late")
+    monkeypatch.undo()
+    self_exit(world, world.alice, world.shared, 1)
+    assert not world.repo.is_member(world.shared, world.alice.id)
+    assert_purged(world, "late")
+
+
+def case_rejoin_after_the_membership_ends_keeps_new_memory(
+    world: World, monkeypatch
+) -> None:
+    """Nothing after the membership delete may touch Memory: a rejoin that
+    lands right after it keeps what is saved next."""
+    sharing = world.repo._runtime.sharing
+    original = sharing.forget_member_state
+
+    def rejoin_then_forget(notebook_id, user_id):
+        world.repo.add_member(notebook_id, user_id)
+        make_memory(world, "after_rejoin", notebook_id, world.alice)
+        original(notebook_id, user_id)
+
+    monkeypatch.setattr(sharing, "forget_member_state", rejoin_then_forget)
+    self_exit(world, world.alice, world.shared, 1)
+    assert world.repo.is_member(world.shared, world.alice.id)
+    assert_purged(world, "alice")
+    assert_intact(world, "after_rejoin")
+
+
+def case_purges_leave_a_content_free_audit_trail(world: World, monkeypatch) -> None:
+    events: list[dict] = []
+    monkeypatch.setattr(
+        service(world).event_log, "emit",
+        lambda event, **_kwargs: events.append(dict(event)),
+    )
+    world.repo.bulk_delete_memories(
+        world.alice.id,
+        [world.projections["alice_home"].memory_id,
+         world.projections["alice_elsewhere"].memory_id],
+    )
+    self_exit(world, world.alice, world.shared, 1)
+    purges = [event for event in events if event.get("kind") == "memory_purge"]
+    assert purges == [
+        {"kind": "memory_purge", "action": "bulk_delete",
+         "notebook_id": notebook_id, "user_id": world.alice.id, "count": 1}
+        for notebook_id in sorted([world.alice_home, world.elsewhere])
+    ] + [
+        {"kind": "memory_purge", "action": "member_exit",
+         "notebook_id": world.shared, "user_id": world.alice.id, "count": 1}
+    ]
+
+
+def case_statements_per_page_do_not_grow_with_sourceless_memories(
+    world: World, monkeypatch
+) -> None:
+    """Memories without a derived source add no statements to an exit page."""
+    counts = []
+    for index, size in enumerate((3, 40)):
+        user = world.repo.create_user(f"p0010010{index}", "pw123456")
+        world.repo.add_member(world.shared, user.id)
+        for number in range(size):
+            plain_memory(world, world.shared, user, f"{index}-{number}", "confirmed")
+        counts.append(count_statements(
+            world, monkeypatch,
+            lambda user=user, size=size: self_exit(world, user, world.shared, size),
+        ))
+        assert member_memory_count(world, world.shared, user) == 0
+    assert counts[0] == counts[1] and counts[0] > 5, counts
+
+
+def case_a_source_removed_concurrently_counts_as_removed(
+    world: World, monkeypatch
+) -> None:
+    """The lookup found a source that a concurrent purge deleted before this
+    removal ran: that is "already deleted", not a KeyError (formerly a 500)."""
+    ingestion = world.repo._runtime.source_ingestion
+    monkeypatch.setattr(
+        ingestion.sources, "source_id_for_memory", lambda memory_id: "src-gone"
+    )
+    ingestion.remove_memory_source("memory-whatever")
+    assert ingestion.remove_memory_sources(["src-gone"]) == 0
+    assert_intact(world, "alice")
+
+
 MONKEYPATCH_CASES: dict[str, Callable[..., None]] = {
+    "gone_source_is_removed": case_a_source_removed_concurrently_counts_as_removed,
     "failed_purge_keeps_membership": case_failed_purge_keeps_the_membership,
-    "late_save_swept": case_memory_saved_during_exit_is_swept,
+    "save_during_exit_kept": case_memory_saved_during_exit_is_never_deleted_unacknowledged,
+    "rejoin_keeps_new_memory": case_rejoin_after_the_membership_ends_keeps_new_memory,
+    "audit_trail": case_purges_leave_a_content_free_audit_trail,
+    "statements_bounded": case_statements_per_page_do_not_grow_with_sourceless_memories,
 }

@@ -1,20 +1,26 @@
-"""Memory hard delete and member exit purge on SQLite (E5-2).
+"""Memory hard delete, the member's own exit, and the Memory export on SQLite.
 
 The scenarios live in ``tests/memory_purge_cases.py`` and run unchanged on
 PostgreSQL through ``tests/postgres/test_memory_purge_pg.py``. This file adds
-the service-level contracts that need no database projection.
+the composition and service-level contracts that need no second backend.
 """
 from __future__ import annotations
+
+import inspect
 
 import pytest
 
 from app.core.config import Settings
+from app.services import memory_service as memory_service_module
+from app.services.memory_service import MemoryService
 from app.services.sqlite_repository import SQLiteRepository
 from tests.memory_purge_cases import (
     CASES,
     EMBED_DIM,
     MONKEYPATCH_CASES,
     build_world,
+    export_text,
+    plain_memory,
 )
 
 
@@ -43,89 +49,50 @@ def test_memory_purge_fault_scenario(world, monkeypatch, case):
     MONKEYPATCH_CASES[case](world, monkeypatch)
 
 
-def test_runtime_binds_the_exit_purge_to_the_sharing_service(repo):
-    assert repo._runtime.sharing._member_memory is repo._runtime.memory_service
+def test_the_self_exit_is_composed_with_its_membership_dependency(repo):
+    runtime = repo._runtime
+    assert runtime.memory_service.membership is runtime.sharing
 
 
-def test_exit_purge_order_is_clean_then_membership_then_sweep(repo, monkeypatch):
-    """Pins the call order around the membership delete, independent of SQL."""
-    sharing = repo._runtime.sharing
-    calls: list[str] = []
+def test_a_memory_service_without_the_membership_dependency_cannot_be_built():
+    """The self-exit and its purge are one object: composing the service
+    without what the exit needs fails at construction, not at the first
+    exit."""
+    parameter = inspect.signature(MemoryService).parameters["membership"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
+    with pytest.raises(TypeError, match="membership"):
+        MemoryService(None, None, None, None, None, None, None)
 
-    class RecordingPurge:
-        def exiting_member_ids(self, notebook_id):
-            calls.append("list")
-            return ["user-a"]
 
-        def purge_exiting_member(self, notebook_id, user_id):
-            calls.append(f"purge:{user_id}")
-            return 0
+def test_removing_or_kicking_members_has_no_memory_path():
+    """The sharing service has no route to Memory at all any more: the old
+    purge hook is gone, so no membership removal can delete Memory."""
+    from app.services import notebook_sharing
 
-    sharing.bind_member_memory_purge(RecordingPurge())
-    monkeypatch.setattr(sharing._store, "is_member", lambda nb, user: True)
-    monkeypatch.setattr(
-        sharing._store, "remove_member", lambda nb, user: calls.append("delete-row")
+    source = inspect.getsource(notebook_sharing.NotebookSharingService)
+    assert "purge" not in source.replace("no Memory exit purge", "")
+    assert not hasattr(notebook_sharing.NotebookSharingService, "bind_member_memory_purge")
+
+
+def test_the_export_streams_in_bounded_pages(world, monkeypatch):
+    """At most one page of Memories is held at a time, however many exist."""
+    monkeypatch.setattr(memory_service_module, "_EXPORT_PAGE", 2)
+    for number in range(4):
+        plain_memory(world, world.shared, world.alice, f"page-{number}", "confirmed")
+    store = world.repo._runtime.memory_service.store
+    original = store.memory_export_page
+    sizes: list[int] = []
+
+    def recording(*args, **kwargs):
+        items, cursor = original(*args, **kwargs)
+        sizes.append(len(items))
+        return items, cursor
+
+    monkeypatch.setattr(store, "memory_export_page", recording)
+    text = export_text(world, world.alice, world.shared)
+    assert sizes == [2, 2, 1]
+    assert text.count("\n## ") == 5
+    assert text.index("Memory alice") < text.index("Plain page-0") < text.index(
+        "Plain page-3"
     )
-    monkeypatch.setattr(
-        sharing._store, "kick_all_members", lambda nb: calls.append("delete-rows")
-    )
-    sharing.remove_member("nb-1", "user-a")
-    assert calls == ["purge:user-a", "delete-row", "purge:user-a"]
-    calls.clear()
-    sharing.kick_all_members("nb-1")
-    assert calls == ["list", "purge:user-a", "delete-rows", "purge:user-a"]
-
-
-def test_non_member_removal_never_purges(repo, monkeypatch):
-    """No membership row, nothing is lost: a retained (revoked) Memory stays."""
-    sharing = repo._runtime.sharing
-    calls: list[str] = []
-
-    class RecordingPurge:
-        def exiting_member_ids(self, notebook_id):
-            return []
-
-        def purge_exiting_member(self, notebook_id, user_id):
-            calls.append(user_id)
-            return 0
-
-    sharing.bind_member_memory_purge(RecordingPurge())
-    monkeypatch.setattr(sharing._store, "is_member", lambda nb, user: False)
-    sharing.remove_member("nb-1", "user-a")
-    assert calls == []
-
-
-def test_post_exit_sweep_failure_does_not_undo_the_exit(repo, monkeypatch):
-    sharing = repo._runtime.sharing
-    removed: list[str] = []
-
-    class SecondPassFails:
-        def __init__(self):
-            self.calls = 0
-
-        def exiting_member_ids(self, notebook_id):
-            return []
-
-        def purge_exiting_member(self, notebook_id, user_id):
-            self.calls += 1
-            if self.calls == 2:
-                raise RuntimeError("sweep failed")
-            return 0
-
-    sharing.bind_member_memory_purge(SecondPassFails())
-    monkeypatch.setattr(sharing._store, "is_member", lambda nb, user: True)
-    monkeypatch.setattr(
-        sharing._store, "remove_member", lambda nb, user: removed.append(user)
-    )
-    sharing.remove_member("nb-1", "user-a")
-    assert removed == ["user-a"]
-
-
-def test_exit_purge_refuses_to_spin_on_an_undeletable_page(repo, monkeypatch):
-    service = repo._runtime.memory_service
-    monkeypatch.setattr(
-        service.store, "exit_memory_ids", lambda nb, user, *, limit: ["mem-stuck"]
-    )
-    monkeypatch.setattr(service.store, "bulk_delete_memories", lambda user, ids: 0)
-    with pytest.raises(RuntimeError, match="no progress"):
-        service.purge_exiting_member("nb-1", "user-a")

@@ -6,7 +6,7 @@ import re
 import secrets
 import shutil
 from pathlib import Path
-from typing import Callable, Protocol, TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
 from app.domain.indexing_pipeline import BUILTIN_INDEXING_PIPELINE_VERSION
 from app.models.notebooks import NotebookSummary
@@ -23,16 +23,6 @@ from app.services.knowhow.ids import cell_chunk_id, element_id
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
 
 _log = logging.getLogger("silicon_notebook.sharing")
-
-
-class MemberMemoryPurge(Protocol):
-    """The Memory side of a member's exit — implemented by ``MemoryService``,
-    which registers itself through ``bind_member_memory_purge``. A service-
-    layer callback, not a repository port."""
-
-    def exiting_member_ids(self, notebook_id: str) -> list[str]: ...
-
-    def purge_exiting_member(self, notebook_id: str, user_id: str) -> int: ...
 
 
 # PR-2+3 Task 13: a knowhow cell's content_md embeds pasted images as
@@ -937,11 +927,6 @@ class NotebookSharingService:
     exactly like the former mixin's ``_notebook_from_row`` path.
     """
 
-    # Memory exit purge (E5-2), bound late by MemoryService, which is composed
-    # after this service; ``None`` = no Memory on this composition root. A
-    # class-level default so every construction path starts unbound.
-    _member_memory: MemberMemoryPurge | None = None
-
     def __init__(
         self,
         *,
@@ -972,9 +957,6 @@ class NotebookSharingService:
         # own Agents' use of this library, so removal clears them too. ``None``
         # = not wired, same fail-open posture as ``profiles``.
         self._observations = observations
-
-    def bind_member_memory_purge(self, purge: MemberMemoryPurge) -> None:
-        self._member_memory = purge
 
     # ---------------------------------------------------------------- share
     def share_notebook(self, notebook_id: str) -> dict:
@@ -1013,12 +995,12 @@ class NotebookSharingService:
 
     def unshare_notebook(self, notebook_id: str) -> None:
         self._catalog.get_notebook(notebook_id)  # raises KeyError if missing
-        # Unsharing drops every membership row too, but it is an authorisation
-        # withdrawal, not members leaving: no Memory exit purge here. Sharing
-        # is often switched off and on again; the members' Memory stays —
+        # Unsharing drops every membership row too, but it withdraws an
+        # authorisation; it is not the members leaving. Their Memory stays —
         # its owner can only read it with notebook read access, which they no
-        # longer hold, and its projection is private to that owner — and it
-        # comes back if they are let in again.
+        # longer hold, and it comes back if they are let in again. Only a
+        # member's own acknowledged exit (``MemoryService.leave_notebook``)
+        # deletes Memory.
         self._store.clear_share(notebook_id)
 
     def find_notebook_by_share_token(self, token: str) -> "str | None":
@@ -1224,46 +1206,23 @@ class NotebookSharingService:
         blank slate, not a leak, and is the same "start over" outcome as any
         other rejoin.
 
-        Memory is the exception to "membership first" (E5-2): the member's
-        own Memory in this notebook — and every row derived from it — is
-        hard-deleted BEFORE the row goes, and only when that row was their
-        last read path (see ``MemoryService.purge_exiting_member``). A purge
-        failure raises and leaves them a member, so a crash can only ever
-        leave "a member without Memory", never "a former member whose private
-        Memory is still projected into the notebook". A second, fail-open
-        pass after the row is gone catches a Memory saved in between.
+        Never deletes Memory. Ending someone's membership is an access change
+        like revoking a grant: their Memory stays, readable by nobody while
+        they cannot read the notebook, and returns if they are let back in.
+        The one path that deletes a member's Memory is their own acknowledged
+        exit, ``MemoryService.leave_notebook`` (``DELETE .../membership``).
         """
-        exiting = (
-            [user_id]
-            if self._member_memory is not None
-            and user_id
-            and self._store.is_member(notebook_id, user_id)
-            else []
-        )
-        self._purge_exiting_memory(notebook_id, exiting)
         self._store.remove_member(notebook_id, user_id)
-        self._sweep_exited_memory(notebook_id, exiting)
         self._clear_member_profile(notebook_id, user_id)
 
-    def _purge_exiting_memory(self, notebook_id: str, user_ids: list[str]) -> None:
-        """Pre-exit Memory purge; raises so the membership change is not made."""
-        if self._member_memory is None:
-            return
-        for user_id in user_ids:
-            self._member_memory.purge_exiting_member(notebook_id, user_id)
-
-    def _sweep_exited_memory(self, notebook_id: str, user_ids: list[str]) -> None:
-        """Post-exit pass: a Memory saved between the purge and the membership
-        delete. Fail-open — the access change has already committed."""
-        if self._member_memory is None:
-            return
-        for user_id in user_ids:
-            try:
-                self._member_memory.purge_exiting_member(notebook_id, user_id)
-            except Exception:  # noqa: BLE001 — access change already committed
-                _log.exception(
-                    "post-exit Memory sweep failed for notebook %s", notebook_id
-                )
+    def forget_member_state(self, notebook_id: str, user_id: str) -> None:
+        """The per-member cleanup ``remove_member`` runs after its row delete,
+        for a caller that has already deleted the membership row itself in a
+        transaction of its own (the self-exit does, atomically with its final
+        Memory count). Deliberately does not touch ``notebook_members``: by
+        the time this runs the user may have rejoined, and deleting that new
+        row would silently undo their rejoin."""
+        self._clear_member_profile(notebook_id, user_id)
 
     def _clear_member_profile(self, notebook_id: str, user_id: str) -> None:
         """Discard both halves of this member's overlay: the block rows
@@ -1338,21 +1297,10 @@ class NotebookSharingService:
         the same person's own notes, so that is correct rather than a leak.
         The single-member path is the one users actually take, and it cleans up.
 
-        Memory is different (E5-2): a kick is every member leaving at once, so
-        each member who owns Memory here is purged exactly as in
-        ``remove_member`` — before the rows go, and only if the membership
-        row was their last read path. That list CAN be built honestly: it
-        comes from the members' own Memory rows, read before the delete.
+        Never deletes Memory either: nobody else's action may destroy a
+        member's Memory (see ``remove_member``).
         """
-        exiting = (
-            self._member_memory.exiting_member_ids(notebook_id)
-            if self._member_memory is not None
-            else []
-        )
-        self._purge_exiting_memory(notebook_id, exiting)
-        result = self._store.kick_all_members(notebook_id)
-        self._sweep_exited_memory(notebook_id, exiting)
-        return result
+        return self._store.kick_all_members(notebook_id)
 
     def list_members(self, notebook_id: str) -> list:
         return self._store.list_members(notebook_id)
@@ -1416,6 +1364,10 @@ class NotebookSharingService:
         return notebook
 
     def leave_notebook(self, notebook_id: str, user_id: str) -> None:
+        """Membership-only removal, kept for the frozen facade surface. The
+        user-facing exit (``DELETE /notebooks/{id}/membership``) is
+        ``MemoryService.leave_notebook``, which deletes the leaver's Memory
+        after they acknowledge its count and ends the membership itself."""
         self.remove_member(notebook_id, user_id)
 
     # -------------------------------------------------------------- ownership
