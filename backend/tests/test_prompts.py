@@ -496,9 +496,14 @@ def test_chunks_keywords_sentence_names_the_corpus_languages():
         # 真模型抽问(PR #799):模型会把候选里见过的兄弟型号与猜测的答案值塞进
         # 关键词串,整串覆盖率被稀释到把金段挤出 RELEVANCE_FLOOR。只许问题点名
         # 的词及其对应写法,这句约束必须随关键词说明一起出现。
-        assert "use only terms the question names and their equivalents" in line
-        assert "not neighbouring identifiers seen in the candidates" in line
-        assert "or guessed answer values" in line
+        # 第一版措辞(「only terms the question names」)让模型把跨语言写法也
+        # 省掉了(复核:中英两种写法都在的比例 69% → 48%),而跨语言对应词正是
+        # #799 最大的收益来源。所以约束必须同时重申「每个点名的词仍带其它语言
+        # 写法与缩写/全称」。
+        assert "build it from the terms the question names" in line
+        assert "each still with its forms in the other listed languages" in line
+        assert "add no other identifiers seen in the candidates" in line
+        assert "no guessed answer values" in line
     # 没探测到语言 = zh/en 回退,与 expand_query_prompt 的缺省同一对。
     assert _line() == both
     assert _line(corpus_langs=[]) == both
