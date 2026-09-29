@@ -1756,6 +1756,11 @@ class GraphRetrievalService(_RetrievalState):
             if _peer_chunk_allowed(cr, chunk_owner, ceilings)
         }
         out = []
+        # PEER mode stamps every passage with its owner, the nominal active
+        # included, as the federation's legs do (``chunk_federation._stamped``):
+        # "blank = active" is a single-library convention, and a blank origin in
+        # a global run is an unattributable citation.
+        active_owner = notebook_id if federated_ask_active() else ""
         for cid in chunk_ids:
             cr = by_id.get(cid)
             if cr is None:
@@ -1773,7 +1778,7 @@ class GraphRetrievalService(_RetrievalState):
                 chunk_id=cr["id"], source_id=cr["source_id"], source_title="",
                 section_path=cr["section_path"], text=cr["text"],
                 element_ids=json.loads(cr["element_ids"] or "[]"), relevance=0.3,
-                notebook_id=chunk_owner.get(cid, ""),
+                notebook_id=chunk_owner.get(cid) or active_owner,
                 retrieval_supports=supports))
         return out
     def _ent_chunk_map(

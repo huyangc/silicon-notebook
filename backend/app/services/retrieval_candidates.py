@@ -768,6 +768,20 @@ class _RetrievalState:
         return self._peer._kg_source_chunks(*args, **kwargs)
 
 
+def _attest_overlay_passages(candidates, merged: list, kg_chunks: list) -> None:
+    """PR-D: the mix branch's KG-overlay passages that entered the pool get a
+    retrieval-time snapshot of the same strength as federated ones (a no-op
+    outside a global run); see ``chunk_federation.attest_selected_passages``."""
+    if not kg_chunks:
+        return
+    from app.services.chunk_federation import attest_selected_passages
+
+    overlay_ids = {chunk.chunk_id for chunk in kg_chunks}
+    attest_selected_passages(
+        candidates, [chunk for chunk in merged if chunk.chunk_id in overlay_ids],
+    )
+
+
 class CandidateRetrievalService(_RetrievalState):
     _CJK_RE = re.compile(r"[一-鿿]")
     _LATIN_RE = re.compile(r"[A-Za-z]")
@@ -5027,6 +5041,7 @@ class CandidateRetrievalService(_RetrievalState):
                 continue
             by_content[content_key] = len(merged)
             merged.append(chunk)
+        _attest_overlay_passages(self, merged, kg_chunks)
         return merged, kg_block, kg_id_map, kg_hits, len(ppr_chunks)
     def _build_chunk_retrieval_plan(self, notebook_id: str, sub_queries: list) -> ChunkRetrievalPlan:
         """一次读齐 chunk 检索路径的 flag/knob，产出不可变快照（W2.2）。见 ChunkRetrievalPlan。

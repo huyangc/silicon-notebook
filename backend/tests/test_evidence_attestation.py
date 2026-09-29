@@ -96,7 +96,7 @@ def test_attest_pointers_reads_once_publishes_live_and_reports_dead():
     assert published == [{"e-live": ("s-1", "fp-live")}]
     assert events == [{
         "kind": "producer_evidence_attested", "producer": "kg_objects",
-        "method": "pointers", "elements": 2, "live": 1, "dead": 1,
+        "method": "pointers", "elements": 2, "read": 2, "attested": 0, "live": 1, "dead": 1, "unknown": 0,
     }]
 
 
