@@ -256,7 +256,11 @@ class RetrievalService:
 
         Same seat, library filter and ``CHUNK_FEDERATION_MAX_PARTICIPANTS``
         bound as the fan-out itself (``federation_participant_ids``, the silent
-        form -- no truncation event). One un-memoized participant read.
+        form -- no truncation event). The participant set is frozen per
+        retrieval run (``_retrieval_participants`` goes through
+        ``memoized_retrieval_value``), and the first-round KG search has
+        already resolved it, so this is normally zero extra I/O; with a
+        participant override it is re-resolved, also without I/O.
         Deliberately NOT on ``RetrievalPort``: the reasoning seed pass is its
         only consumer and reads it with ``getattr``, so a retrieval double
         without it simply counts as one library.

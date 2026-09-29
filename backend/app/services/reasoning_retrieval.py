@@ -5179,8 +5179,9 @@ class ReasoningRetriever:
         D-1「有图 run 不播种」:原文召回不该取决于图谱是否存在——那条闸的实际
         后果是「本库无图谱、勾选的参考库有图谱」时本库原文在首轮缺席。有图谱
         run 的原文分区因此由概念漫游段(PPR seed)与本播种段**共享**;两者的
-        relevance 量纲不可比,合成侧按来源两道交错装配(`ask_service.
-        _answer_reasoning` 调 `retrieval.interleave_by_lane`)。
+        relevance 量纲不可比,合成侧按来源两道交错装配,单点是
+        `retrieval.order_reasoning_passages`(问答 `_answer_reasoning` 与深度报告
+        `_section_passage_order` 共用)。
 
         排在精确查找 seed 之后、空证据兜底之前:前者保证 PPR/精确两条通道的
         `seen_chunks` 去重与新增计数逐位不变(本通道只往 `chunks` 追加);后者

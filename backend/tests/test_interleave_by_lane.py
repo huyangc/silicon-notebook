@@ -19,6 +19,7 @@ from app.domain.retrieval import RetrievalSupport, RetrievedChunk
 from app.services.retrieval import (
     interleave_by_lane,
     is_exact_lookup_chunk,
+    order_reasoning_passages,
     prefer_stronger_chunk_candidate,
     promote_bounded_prefix_by_library,
     relevance_on_ppr_scale,
@@ -132,6 +133,17 @@ def _passage(chunk_id, relevance, *, ppr, exact=False):
         chunk_id=chunk_id, source_id="s1", source_title="t", section_path="1",
         text=text, relevance=relevance, score=relevance,
         retrieval_supports=(support,), exact_lookup=exact)
+
+
+def _lib_passage(chunk_id, relevance, *, ppr, exact=False, notebook_id=""):
+    """`_passage` plus a library tag, for the multi-library exact-seat tests."""
+    text = f"{chunk_id}{'x' * (20 - len(chunk_id))}"
+    support = _ppr(relevance) if ppr else _semantic(chunk_id, relevance)
+    return RetrievedChunk(
+        chunk_id=chunk_id, source_id="s1", source_title="t", section_path="1",
+        text=text, relevance=relevance, score=relevance,
+        retrieval_supports=(support,), exact_lookup=exact,
+        notebook_id=notebook_id)
 
 
 def _ppr_and_seeded():
@@ -259,3 +271,59 @@ def test_anchored_chunks_do_not_count_as_a_lane():
     result = interleave_by_lane(
         ordered, relevance_on_ppr_scale, anchored=is_exact_lookup_chunk)
     assert result == ordered and result is not ordered
+
+
+# --------------------------------- two lanes + a multi-library exact seat split
+def test_two_lanes_interleave_alongside_a_two_library_exact_seat_split():
+    """A peer-mode run: two libraries each contributed a 3-chunk exact section
+    (tied at relevance 1.0), plus a PPR lane and a seeded lane. `order_reasoning_
+    passages` must still (a) be a permutation of the input, (b) keep the exact
+    chunks in the same relative order (and give the two libraries the same seat
+    split) as the pre-interleave assembly (sort + `promote_bounded_prefix_by_
+    library`, no interleave -- `_pre_interleave_order`), and (c) alternate the
+    PPR and seeded lanes among the non-exact passages, starting with the lane of
+    the first non-anchored chunk (PPR, the higher relevance scale here)."""
+    a_exact = [_lib_passage(f"a_e{i}", 1.0, ppr=False, exact=True, notebook_id="a")
+               for i in range(3)]
+    b_exact = [_lib_passage(f"b_e{i}", 1.0, ppr=False, exact=True, notebook_id="b")
+               for i in range(3)]
+    ppr = [_lib_passage(f"p{i}", round(1.0 - i / 10, 2), ppr=True, notebook_id="a")
+           for i in range(4)]
+    seeded = [_lib_passage(f"s{i}", round(0.5 - i / 10, 2), ppr=False)
+              for i in range(4)]
+    chunks = a_exact + b_exact + ppr + seeded
+    reserve = 4
+
+    actual = order_reasoning_passages(chunks, exact_reserve=reserve)
+    pre = _pre_interleave_order(chunks, reserve)
+
+    # (a) a permutation of the input.
+    assert sorted(map(id, actual)) == sorted(map(id, chunks))
+    assert len(actual) == len(chunks)
+
+    # (b) the exact chunks' relative order, and their per-library seat split,
+    # match the pre-interleave assembly item for item.
+    actual_ids = _ids(actual)
+    exact_ids = {c.chunk_id for c in a_exact + b_exact}
+    assert [cid for cid in actual_ids if cid in exact_ids] == [
+        cid for cid in pre if cid in exact_ids]
+
+    def _library_counts(ordered_ids):
+        seated = [cid for cid in ordered_ids[:reserve] if cid in exact_ids]
+        return (
+            sum(1 for cid in seated if cid.startswith("a_e")),
+            sum(1 for cid in seated if cid.startswith("b_e")),
+        )
+
+    assert _library_counts(actual_ids) == _library_counts(pre) == (2, 2)
+
+    # (c) the non-exact passages alternate PPR / seeded, starting with the lane
+    # of the first non-anchored chunk (PPR: the highest relevance here).
+    non_exact_ids = [cid for cid in actual_ids if cid not in exact_ids]
+
+    def _lane_of(cid):
+        return "ppr" if cid.startswith("p") else "seed"
+
+    lanes = [_lane_of(cid) for cid in non_exact_ids]
+    assert lanes[0] == "ppr"
+    assert lanes == ["ppr", "seed"] * (len(lanes) // 2)

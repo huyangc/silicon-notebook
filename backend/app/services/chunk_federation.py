@@ -439,9 +439,10 @@ def federation_participant_ids(
     substitute: with no ``base_scope`` submitted it answers True for any id at
     all, so it cannot bound a list assembled from somewhere else.
 
-    The set is re-resolved per call rather than memoized, matching
-    ``federation_participants``: the participant seat is deliberately un-memoed
-    so a run cannot pin a mount table it read at a different moment.
+    The set comes from the same seat as ``federation_participants``
+    (``_retrieval_participants``), which is frozen per retrieval run through
+    ``memoized_retrieval_value``: every read inside one run sees the mount
+    table as that run first read it.
     """
     participants, _mounted_total = _bounded_participants(
         candidates, active_notebook_id,
