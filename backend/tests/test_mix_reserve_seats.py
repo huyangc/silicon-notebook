@@ -601,3 +601,122 @@ def test_ask_chunk_peer_mix_shares_seats_per_library(monkeypatch):
     selected = _ask_with_pool(monkeypatch, pool, peer=True)
 
     assert {"nb-b-1", "nb-c-1"} <= set(selected)
+
+
+# ------------------------------------- chunk mode render cut (MMR / quota path)
+def _render_rows(count, *, library="ref", length=300, top=0.9):
+    return [_row(f"{library}-{i}", relevance=top - i * 0.01, notebook_id=library,
+                 text=f"{library}-{i} ".ljust(length, "x"))
+            for i in range(count)]
+
+
+def _floored_selection():
+    """What ``enforce_active_floor`` hands the answer: the reserved own rows
+    swapped into the TAIL positions of the finished selection."""
+    foreign = _render_rows(6)
+    mine = [_row(f"mine-{i}", relevance=0.3, text=f"mine-{i} ".ljust(300, "m"))
+            for i in range(2)]
+    return foreign + mine
+
+
+def test_render_cut_spares_the_reserved_tail_rows():
+    from app.services.retrieval import spare_reserved_rows
+
+    rows = _floored_selection()
+    budget = 5 * 305                       # five whole rows fit, not eight
+    rule = active_reserve_rule(2, rows, ACTIVE)
+    kept = spare_reserved_rows(rows, budget, rule)
+    ids = _ids(kept)
+    assert ids[-2:] == ["mine-0", "mine-1"], ids
+    assert ids == [row.chunk_id for row in rows if row in kept], "order kept"
+    assert "ref-5" not in ids and "ref-4" not in ids   # lowest-ranked dropped
+
+
+def test_render_cut_is_inert_when_everything_fits_or_nothing_is_foreign():
+    from app.services.retrieval import spare_reserved_rows
+
+    rows = _floored_selection()
+    rule = active_reserve_rule(2, rows, ACTIVE)
+    assert spare_reserved_rows(rows, 10**6, rule) is rows
+    own = [_row(f"own-{i}", relevance=0.9, notebook_id=ACTIVE, origin="ppr",
+                text=f"own-{i} ".ljust(300, "o")) for i in range(6)] + rows[-2:]
+    inert = active_reserve_rule(2, own, ACTIVE)
+    assert inert.reserve == 0
+    assert spare_reserved_rows(own, 5 * 305, inert) is own
+    assert spare_reserved_rows(rows, 5 * 305, active_reserve_rule(0, rows, ACTIVE)) is rows
+
+
+def test_answer_chunks_renders_the_reserved_rows_under_a_tight_budget(monkeypatch):
+    import json
+
+    from tests.test_ask_service_boundary import _minimal_ask_service
+    from app.core.config import Settings
+
+    captured = {}
+
+    class _Echo:
+        configured = True
+        model = "m"
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return json.dumps({"answer": "结论。", "grounded": False})
+
+    service = _minimal_ask_service()
+    service.settings = Settings(chunk_answer_budget_chars=5 * 305)
+
+    def _context(chunks, notebook_id="", budget_chars=None, id_offset=0):
+        captured["ids"] = _ids(chunks)
+        return "", {}
+
+    monkeypatch.setattr(service, "_chunk_answer_context", _context)
+    rows = _floored_selection()
+    service._answer_chunks("q", rows, notebook_id=ACTIVE, llm_client=_Echo())
+    assert captured["ids"][-2:] == ["mine-0", "mine-1"]
+    service.settings = Settings(chunk_answer_budget_chars=10**6)
+    service._answer_chunks("q", rows, notebook_id=ACTIVE, llm_client=_Echo())
+    assert captured["ids"] == _ids(rows)
+
+
+def test_peer_mix_hands_on_a_seat_whose_only_passage_is_a_copy():
+    shared = "one passage held by two libraries".ljust(30, ".")
+    ranked = [
+        _row("z-0", relevance=0.9, notebook_id="nb-z", text=shared),
+        *[_row(f"nb-z-{i}", relevance=0.89 - i * 0.01, notebook_id="nb-z",
+               origin="ppr") for i in range(8)],   # Z: capacity exactly one
+        _row("b-0", relevance=0.35, notebook_id="nb-b", text=shared),
+        _row("c-0", relevance=0.3, notebook_id="nb-c"),
+        _row("c-1", relevance=0.29, notebook_id="nb-c"),
+    ]
+    out = _cut(ranked, _tokens(ranked[:4]), library_seats=3, active="nb-z")
+    ids = _ids(out)
+    assert {"z-0", "c-0", "c-1"} <= set(ids), ids
+    assert "b-0" not in ids
+
+
+def test_graph_and_exact_rules_keep_the_historical_text_identity():
+    """Only the library seats dedupe by text; the graph and exact rules still
+    pull in a row whose text another selected row carries."""
+    from app.services.retrieval import ReserveRule, exact_section_reserve_rule
+
+    assert ReserveRule(reserve=1, holds=bool, admits=bool).distinct_text is False
+    assert graph_reserve_rule(1).distinct_text is False
+    assert exact_section_reserve_rule(1, {"x"}).distinct_text is False
+    same = "same text".ljust(30, ".")
+    exact = _row("exact", relevance=0.1, notebook_id="ref", origin="lexical",
+                 exact=True, text=same)
+    ranked = [_row("top", relevance=0.9, notebook_id="ref", text=same),
+              *_foreign(6, library="ref2"), exact]
+    out = _cut(ranked, _tokens(ranked[:3]), exact_hits=[exact],
+               settings=_settings(exact=1))
+    assert "exact" in _ids(out)
+
+
+def test_mix_seat_identity_is_the_raw_text():
+    foreign = _foreign(6)
+    foreign[2] = _row("ref-2", relevance=foreign[2].relevance, notebook_id="ref",
+                      text="x".ljust(30, "."))
+    ranked = foreign + [_row("mine", relevance=0.4, text=" x".ljust(31, "."))]
+    out = _cut(ranked, _tokens(ranked[:5]), active_seats=1)
+    assert "mine" in _ids(out)
+    floor = enforce_active_floor(ranked[:5], ranked, 1, active_notebook_id=ACTIVE)
+    assert "mine" in _ids(floor)

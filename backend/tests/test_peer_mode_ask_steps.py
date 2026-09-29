@@ -259,6 +259,9 @@ def test_answer_chunks_switches_the_prompt_to_peer_authority(monkeypatch):
         ),
     )
     service = SimpleNamespace(
+        # The render cut reads the reserve seats and the answer budget.
+        settings=SimpleNamespace(chunk_answer_budget_chars=30000, chunk_mmr_k=16,
+                                 chunk_federation_active_reserve=0.25),
         _chunk_answer_context=lambda chunks, notebook_id="", **kwargs: ("ctx", {}),
         _append_memory_context=lambda block, id_map, hits: (block, id_map),
         _parse_answer_anchors=lambda answer, id_map: [],

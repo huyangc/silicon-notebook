@@ -106,7 +106,7 @@ def _stamped(chunk_id, relevance, notebook_id, **kwargs):
 def test_single_notebook_report_order_is_unchanged_with_own_id_ppr(repo, monkeypatch):
     """Concept-walk passages carry the notebook's own id: no foreign passage,
     so the active prefix is inert and the order is the three-step order."""
-    from app.services.retrieval import order_reasoning_passages
+    from app.services.retrieval import reasoning_passage_order
 
     eng = _mk_engine(repo, _SectionLLM())
     nb = _mk_nb(repo)
@@ -118,8 +118,9 @@ def test_single_notebook_report_order_is_unchanged_with_own_id_ppr(repo, monkeyp
     ]
     got = eng._section_passage_order(chunks, {"bound"}, nb.id)
     unbound = [c for c in chunks if c.chunk_id != "bound"]
-    expected = ["bound"] + [c.chunk_id for c in order_reasoning_passages(
-        unbound, exact_reserve=eng.settings.reasoning_exact_reserve)]
+    expected = ["bound"] + [c.chunk_id for c in reasoning_passage_order(
+        unbound, exact_reserve=eng.settings.reasoning_exact_reserve,
+        active_reserve=0, library_reserve=0, active_notebook_id=nb.id).passages]
     assert [c.chunk_id for c in got] == expected
 
 

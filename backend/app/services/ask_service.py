@@ -96,7 +96,10 @@ from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancel
 # whitelist), but its fail-soft handlers must be able to re-raise the override's
 # control exception instead of degrading it into a normal answer.
 from app.domain.retrieval_control import RetrievalControlError
-from app.services.chunk_federation import reasoning_order_for
+from app.services.chunk_federation import (
+    active_reserve_seats,
+    reasoning_order_for,
+)
 from app.services.citation_markers import LOOSE_MARKER_RE, MARKER_RE, marker_keys
 from app.services.document_read_answer import document_read_block_reserve
 # A leaf that imports nothing from ``app`` (see its module docstring): reading
@@ -130,12 +133,14 @@ from app.services.prompts import (
 )
 from app.services.retrieval import (
     RetrievedKnowledge,
+    active_reserve_rule,
     classify_evidence,
     exact_query_groups,
     is_generated_question_only_chunk,
     merge_retrieval_supports,
     passage_floor,
     prefer_stronger_chunk_candidate,
+    spare_reserved_rows,
 )
 from app.services.search_profile import render_style_block
 from app.services.source_graph_activation import (
@@ -759,6 +764,19 @@ class DefaultResponseDraftStage:
 
     def draft_response(self, stage, runtime):
         return self._service._draft_reasoning_response(stage, runtime)
+
+
+# Fixed one-line notices for a structured block the passage floor left out
+# whole (``AskService._assemble_structured_evidence``): the result cards still
+# show it, so the model must not answer as if it did not exist.
+SPREADSHEET_OMITTED_NOTICE = (
+    "[Spreadsheet analysis results exist for this question but were left out "
+    "of this context for space; do not state that they are absent.]"
+)
+DOCUMENT_READ_OMITTED_NOTICE = (
+    "[Sampled document excerpts exist for this question but were left out "
+    "of this context for space; do not state that they are absent.]"
+)
 
 
 class AskService:
@@ -2549,6 +2567,11 @@ class AskService:
         ``style_block``:Agentic Memory P3(T8)——调用方按本次提问 user_id 点读
         并渲染好的风格提示,空串=接入前逐字行为(见 ``_search_profile_style_block``)。"""
         raise_if_cancelled(cancel_event)
+        # 当前库保底席位被 `enforce_active_floor` 换在尾部;渲染预算装不下时先丢
+        # 排名最低的非保底行,保底行不被截掉(同一个 `active_reserve_rule`)。
+        chunks = spare_reserved_rows(
+            chunks, self.settings.chunk_answer_budget_chars, active_reserve_rule(
+                active_reserve_seats(self.settings), chunks, notebook_id))
         context_block, id_map = self._chunk_answer_context(chunks, notebook_id=notebook_id)
         context_block, id_map = self._append_memory_context(
             context_block, id_map, memory_hits or []
@@ -5286,8 +5309,13 @@ class AskService:
         answer_client,
         chunk_context_chars: int,
         knowhow_block_len: int = 0,
+        *,
+        room: int | None = None,
     ) -> tuple[str, bool]:
         """把本轮按篇读到的有界原文摘录缝进合成证据块(PR-A T5)。
+
+        ``room``:原文段下限留给整个结构化侧的字符总量(见
+        ``_assemble_structured_evidence``);``None`` = 没有保底段落,逐字节同旧。
 
         ``knowhow_block_len`` 是花名册拼上来**之前** ``structured_block`` 的长度
         (knowhow 整表块)。整块不装的判据与枚举侧的子预算同口径:knowhow 块本身
@@ -5362,8 +5390,17 @@ class AskService:
             # 显式不装,不允许静默截断。
             partition_cap = (int(chunk_context_chars)
                              - COLLECTION_MAP_BLOCK_MAX_CHARS - 4)
-            if len(combined) > min(shared_cap, partition_cap):
+            # `room`(原文段下限留给整个结构化侧的总量,已扣实际地图块)只是
+            # 额外一道上限:两条历史上限照旧按整份分区算,不因下限而缩小。
+            limit = min(shared_cap, partition_cap)
+            if len(combined) > limit:
                 return structured_block, True
+            if room is not None and len(combined) > int(room):
+                # 只因原文段下限才放不下:整块不装,但给模型留一句固定说明
+                # (放得下时才写),免得它以为本轮没读过文档。
+                noted = (f"{structured_block}\n\n{DOCUMENT_READ_OMITTED_NOTICE}"
+                         if structured_block else DOCUMENT_READ_OMITTED_NOTICE)
+                return (noted if len(noted) <= int(room) else structured_block), True
             citation_updates = {
                 citation.element_id: citation for citation in preview.citations}
             structured_map.update(preview.evidence_by_id)
@@ -5389,7 +5426,10 @@ class AskService:
         ``max_chars``: the characters the passage floor leaves this block in
         the reasoning source partition (``_assemble_structured_evidence``);
         whole lines that do not fit are left out rather than cut afterwards.
-        ``None`` keeps only the byte cap -- the historical behaviour.
+        ``None`` keeps only the byte cap -- the historical behaviour.  When
+        that space cannot hold even the first line, the model still learns
+        that table results exist: ``SPREADSHEET_OMITTED_NOTICE`` is written
+        instead, if it fits (its length is inside ``max_chars``).
         """
         if not spreadsheet_results or not answer_client.configured:
             return structured_block
@@ -5402,6 +5442,9 @@ class AskService:
                 max_bytes=self.settings.spreadsheet_analysis_prompt_bytes,
                 max_chars=max_chars,
             )
+            if not spreadsheet_block and max_chars is not None and len(
+                    SPREADSHEET_OMITTED_NOTICE) <= max_chars:
+                spreadsheet_block, spreadsheet_map = SPREADSHEET_OMITTED_NOTICE, {}
             if spreadsheet_block:
                 structured_map.update(spreadsheet_map)
                 return (
@@ -5456,12 +5499,19 @@ class AskService:
         ``retrieval.passage_floor`` over the reserved-seat prefix of the very
         order ``_answer_reasoning`` will render (``reasoning_order_for``: the
         exact prefix plus the active / per-library prefix) -- is computed
-        ONCE, here, and every block renders against ``partition - floor``
-        (less the collection map block, which sits ahead of them in the same
-        partition), so each block's own coverage disclosure describes exactly
-        what the model sees rather than a block cut afterwards.  No chunk or
-        no reserved seat: floor 0, and every block renders byte-for-byte as
-        before (the spreadsheet block keeps only its byte cap).
+        ONCE, here, and becomes ``room``: the characters the structured side
+        may take in total, ``partition - floor`` less the collection map block
+        that sits ahead of it.
+
+        ``room`` is an extra ceiling, never a new budget.  Every block first
+        renders exactly as it always has -- its own caps, the half-partition
+        caps included, still read the WHOLE partition -- and is re-rendered
+        against what ``room`` leaves only when that historical rendering
+        would cross it.  So the only runs whose bytes change are those in
+        which the structured side would really have crowded the reserved
+        passages out; there each block's own coverage disclosure describes
+        the smaller rendering exactly, rather than a block cut afterwards.  No
+        chunk or no reserved seat: no ``room``, byte-for-byte as before.
 
         Returns ``(structured_block, structured_map,
         typed_collection_result_sets, enumeration_block_dropped,
@@ -5478,18 +5528,23 @@ class AskService:
                  if stage.chunks else None)
         floor = (passage_floor(order.passages[:order.prefix],
                                limits.chunk_context_chars) if order else 0)
-        partition = limits.chunk_context_chars - floor - (
+        room = (limits.chunk_context_chars - floor - (
             len(collection_map_prompt_block) + 2
-            if floor and collection_map_prompt_block else 0)
+            if collection_map_prompt_block else 0)) if floor else None
         structured_block = ""
         if structured_batch is not None and answer_client.configured:
             from app.services.structured_retrieval import structured_prompt_block
-            structured_block = structured_prompt_block(
-                structured_batch,
-                inline_rows=limits.inline_answer_rows,
-                cell_excerpt_chars=limits.cell_excerpt_chars,
-                budget_chars=partition,
-            )
+
+            def _knowhow(budget):
+                return structured_prompt_block(
+                    structured_batch,
+                    inline_rows=limits.inline_answer_rows,
+                    cell_excerpt_chars=limits.cell_excerpt_chars,
+                    budget_chars=budget,
+                )
+            structured_block = _knowhow(limits.chunk_context_chars)
+            if room is not None and len(structured_block) > room:
+                structured_block = _knowhow(max(0, room))
         # 类型化集合清单(T4 产出的 enumerations)映射成 AskResponse.result_sets
         # 行 + 合成证据块(T5)。映射与 prompt 块拼接放在**同一个** try 里:两者
         # 失败都只应让清单这一整份"锦上添花"的产出消失,不该出现"卡片有了
@@ -5544,22 +5599,34 @@ class AskService:
                     # 取样块整块被挡——白读。按取样块真实渲染长度先扣。
                     # 预留要从**半预算上限**里扣,不是从整份预算里扣:整份预算
                     # 减掉两千字仍远大于一半,夹到一半后花名册照样拿满 15000。
+                    read_reserve = document_read_block_reserve(
+                        stage.document_reads)
                     enum_budget_chars = max(0, enumeration_sub_budget(
-                        chunk_context_chars=partition,
+                        chunk_context_chars=limits.chunk_context_chars,
                         structured_block_len=len(structured_block),
-                    ) - document_read_block_reserve(stage.document_reads))
+                    ) - read_reserve)
                     # 预览渲染的是**结果卡真正拿到的那份**:wire 闸裁过的
                     # 集合若照原 outcome 渲染,prompt 里会出现卡片没有的行,
                     # 头部还写着「complete」——prompt 与卡片对同一份清单说
                     # 两套话,正是 coverage 合同要防的东西。
-                    preview = enumeration_prompt_block(
-                        delivered_outcomes(
-                            enumerations, typed_collection_result_sets
-                        ),
-                        inline_rows=limits.inline_answer_rows,
-                        budget_chars=enum_budget_chars,
-                        citations_by_item_id=collection_item_citations,
-                    )
+                    delivered = delivered_outcomes(
+                        enumerations, typed_collection_result_sets)
+
+                    def _preview(budget):
+                        return enumeration_prompt_block(
+                            delivered,
+                            inline_rows=limits.inline_answer_rows,
+                            budget_chars=budget,
+                            citations_by_item_id=collection_item_citations,
+                        )
+                    preview = _preview(enum_budget_chars)
+                    # 原文段下限只在历史渲染真的越过 room 时才收紧(半分区上限
+                    # 仍按整份分区算,不因下限变小)。
+                    fit = (None if room is None else max(
+                        0, room - len(structured_block)
+                        - (2 if structured_block else 0) - read_reserve))
+                    if fit is not None and len(preview.text) > fit:
+                        preview = _preview(min(enum_budget_chars, fit))
                     structured_map = preview.evidence_by_id
                     apply_synthesis_preview_counts(
                         typed_collection_result_sets, preview.shown_rows
@@ -5583,11 +5650,11 @@ class AskService:
             self._assemble_document_read_block(
                 stage.document_reads, structured_block, structured_map,
                 collection_item_citations, answer_client,
-                partition, knowhow_block_len))
+                limits.chunk_context_chars, knowhow_block_len, room=room))
         structured_block = self._add_sheet_prompt(
             structured_block, structured_map, spreadsheet_results, answer_client,
-            max_chars=(max(0, partition - len(structured_block)
-                           - (2 if structured_block else 0)) if floor else None))
+            max_chars=(None if room is None else max(
+                0, room - len(structured_block) - (2 if structured_block else 0))))
         return (structured_block, structured_map, typed_collection_result_sets,
                 enumeration_block_dropped, collection_item_citations,
                 document_read_block_dropped)

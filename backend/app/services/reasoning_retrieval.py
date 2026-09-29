@@ -5640,7 +5640,8 @@ class ReasoningRetriever:
         后果是「本库无图谱、勾选的参考库有图谱」时本库原文在首轮缺席。有图谱
         run 的原文分区因此由概念漫游段(PPR seed)与本播种段**共享**;两者的
         relevance 量纲不可比,合成侧按来源两道交错装配,单点是
-        `retrieval.order_reasoning_passages`(问答 `_answer_reasoning` 与深度报告
+        `retrieval.reasoning_passage_order`(生产入口
+        `chunk_federation.reasoning_order_for`;问答 `_answer_reasoning` 与深度报告
         `_section_passage_order` 共用)。
 
         排在精确查找 seed 之后、空证据兜底之前:前者保证 PPR/精确两条通道的
