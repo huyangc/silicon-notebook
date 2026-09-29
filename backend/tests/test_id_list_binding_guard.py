@@ -846,14 +846,17 @@ def _functions_calling(path: Path, name: str):
 
 def test_postgres_statements_that_bind_through_the_module_run_unprepared():
     """A ``bind_ids`` fragment under a prepared generic plan is as opaque as
-    the array it replaced: any PostgreSQL function that binds one must run
-    its statement through ``execute_ids`` / ``execute_bound``."""
+    the array it replaced: any PostgreSQL function that binds one AND executes
+    a statement must run it through ``execute_ids`` / ``execute_bound``.  A
+    helper that only builds and returns the binding executes nothing and is
+    not a finding."""
     offenders = []
     for path in sorted((REPOSITORIES / "postgres").rglob("*.py")):
         if path.name == "id_binding.py":
             continue
         for function, calls in _functions_calling(path, "bind_ids"):
-            if not calls & {"execute_ids", "execute_bound"}:
+            executes = "execute" in calls
+            if executes and not calls & {"execute_ids", "execute_bound"}:
                 offenders.append(f"{path.name}::{function}")
     assert offenders == [], offenders
 
