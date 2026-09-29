@@ -75,7 +75,8 @@ MOUNTED_BASE_IDS_SUBQUERY = "SELECT b.id " + MOUNT_JOIN + MOUNT_VALID
 # ---------------------------------------------------------------- 带查看者(M3)
 #
 # 镜像 sqlite/mount_sql.py 的同名片段,理由写在那份。恰好两个位置参数,顺序
-# (viewer_id, notebook_id)。
+# (viewer_id, notebook_id)。查看者支只许引用 b 与 v(不引用挂载方 a),这样它作为
+# b 上的限制条件下推,计划器才稳定按主键取被挂库——那份 docstring 有实测与 pin。
 
 MOUNT_VIEWER_JOIN = (
     "FROM notebook_bases e "
@@ -86,7 +87,7 @@ MOUNT_VIEWER_JOIN = (
 )
 
 _VIEWER_REACHES_MOUNT_EXPR = (
-    "(b.tier = 'base' OR v.uid = a.created_by OR "
+    "(b.tier = 'base' OR "
     + read_access_clause(
         "b",
         "vm",
