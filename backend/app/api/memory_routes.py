@@ -9,12 +9,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from app.api.download_headers import (
+    attachment_content_disposition,
+    safe_download_name,
+)
 from app.api.deps import (
     ask_state_repository,
     get_current_user,
+    memory_membership_service,
     memory_preview_client,
     memory_service,
     notebook_access_repository,
+    notebook_catalog_repository,
     require_notebook_read,
     user_error,
 )
@@ -288,6 +294,36 @@ async def list_notebook_memories(
         service.memory_kg_eligible, notebook_id
     )
     return page
+
+
+@memory_router.get("/notebooks/{notebook_id}/memories/export")
+def export_notebook_memories(
+    notebook_id: str = Depends(require_notebook_read),
+    user: UserProfile = Depends(get_current_user),
+) -> StreamingResponse:
+    """The caller's OWN Memory in this notebook as a Markdown download — the
+    way out before leaving a shared notebook deletes it. Every status (the
+    exit deletes candidates too; they are marked), oldest first, nothing of
+    other users. Streamed in pages of ``_EXPORT_PAGE`` (200) Memories, so a
+    large export never builds one string in memory. Read-gated: works only
+    while the caller can read the notebook."""
+    service = memory_membership_service()
+    try:
+        title = notebook_catalog_repository().get_notebook(notebook_id).name
+        pieces = service.export_markdown(notebook_id, user.id, title)
+    except (KeyError, PermissionError):
+        raise _not_found()
+    day = str(service.now())[:10].replace("-", "")
+    filename = f"{safe_download_name(title, fallback='笔记本')}-记忆-{day}.md"
+    return StreamingResponse(
+        (piece.encode("utf-8") for piece in pieces),
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": attachment_content_disposition(
+                filename, fallback=f"memory-{day}.md"
+            )
+        },
+    )
 
 
 @memory_router.post(

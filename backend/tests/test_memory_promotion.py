@@ -566,13 +566,14 @@ def test_admin_approval_fails_closed_after_member_loses_notebook_access(repo):
 
 
 def test_member_exit_withdraws_the_proposal_and_the_memory_never_returns(repo):
-    """Leaving deletes the member's Memory: its proposal is withdrawn (not
-    orphaned in the curator queue) and rejoining does not bring it back."""
+    """The member's own acknowledged exit deletes their Memory: its proposal
+    is withdrawn (not orphaned in the curator queue, no reviewer recorded)
+    and rejoining does not bring it back."""
     notebook, base, memory_owner, memory, proposal = _shared_member_proposal(
         repo, via_grant=False
     )
 
-    repo.remove_member(notebook.id, memory_owner.id)
+    repo._runtime.memory_service.leave_notebook(notebook.id, memory_owner.id, 1)
     with pytest.raises(KeyError):  # the Memory it pinned no longer exists
         repo.approve_promotion(proposal["id"])
 
@@ -598,7 +599,7 @@ def test_member_exit_withdraws_the_proposal_and_the_memory_never_returns(repo):
     assert promotion == {
         "status": "rejected",
         "reason": "withdrawn_memory_deleted",
-        "reviewed_by": memory_owner.id,
+        "reviewed_by": "",
     }
     assert remaining == {
         "memory_items": 0, "memory_revisions": 0, "memory_provenance": 0,

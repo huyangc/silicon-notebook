@@ -1529,27 +1529,59 @@ class GovernanceStore:
         notebook_id: str,
         memory_ids: List[str],
         reason: str,
-        reviewer_id: str,
         now: str,
     ) -> int:
         """Reject the still-active proposals of Memory rows the caller is
         about to hard-delete, inside the caller's delete transaction.
 
         Mirror of the PostgreSQL twin (see its docstring for why a proposal
-        must not outlive its Memory and why ``rejected`` is the withdrawal
-        state). Here the process-wide write lock the caller holds already
-        serializes this against proposal and approval writers."""
+        must not outlive its Memory, why ``rejected`` is the withdrawal state
+        and why ``reviewed_by`` stays empty). Here the process-wide write lock
+        the caller holds already serializes this against proposal and
+        approval writers."""
         if not memory_ids:
             return 0
         placeholders = ",".join("?" for _ in memory_ids)
         cursor = connection.execute(
             "UPDATE promotion_candidates "
-            "SET status='rejected', reason=?, reviewed_by=?, updated_at=? "
+            "SET status='rejected', reason=?, reviewed_by='', updated_at=? "
             f"WHERE notebook_id=? AND object_type='memory' AND object_id IN ({placeholders}) "
             "AND status IN ('proposed','under_review')",
-            (reason, reviewer_id, now, notebook_id, *memory_ids),
+            (reason, now, notebook_id, *memory_ids),
         )
         return int(cursor.rowcount or 0)
+
+    @staticmethod
+    def delete_candidates_for_objects_on(
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        object_ids: List[str],
+        relation_ids: List[str],
+    ) -> int:
+        """Mirror of the PostgreSQL twin: delete the conflict candidates (any
+        status) naming these objects or relations, and the pending merge
+        candidates seeded by these objects. Scoped by notebook and the ids."""
+        refs = list(dict.fromkeys([*object_ids, *relation_ids]))
+        deleted = 0
+        if refs:
+            marks = ",".join("?" for _ in refs)
+            cursor = connection.execute(
+                "DELETE FROM kg_conflict_candidates WHERE notebook_id=? "
+                f"AND (left_ref IN ({marks}) OR right_ref IN ({marks}) "
+                f"OR winner_ref IN ({marks}))",
+                (notebook_id, *refs, *refs, *refs),
+            )
+            deleted += int(cursor.rowcount or 0)
+        if object_ids:
+            marks = ",".join("?" for _ in object_ids)
+            cursor = connection.execute(
+                "DELETE FROM concept_merge_candidates WHERE notebook_id=? "
+                "AND status='pending' "
+                f"AND (canonical_a IN ({marks}) OR canonical_b IN ({marks}))",
+                (notebook_id, *object_ids, *object_ids),
+            )
+            deleted += int(cursor.rowcount or 0)
+        return deleted
 
     @staticmethod
     def strip_source_evidence_on(

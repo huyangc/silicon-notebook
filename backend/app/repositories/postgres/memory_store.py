@@ -10,6 +10,7 @@ from psycopg.errors import DeadlockDetected, SerializationFailure
 from app.models.memory import MemoryRevision, MemoryWrite
 from app.models.identity import AgentProfile, AgentTokenAccess, AgentTokenSummary
 from app.models.memory import (
+    MemberExitSnapshot,
     MemoryNotebookOption,
     MemoryRecord,
     PaginatedMemories,
@@ -31,7 +32,6 @@ from app.repositories.postgres.access_sql import (
     MEMBER_PROBE_FOR_SHARE_SQL,
     grant_access_expr,
     grant_probe_params,
-    member_exists_expr,
     read_access_clause,
     read_access_exists_clause,
     read_access_params,
@@ -1696,8 +1696,10 @@ class MemoryStore:
         Memory-then-candidate order ``approve_promotion`` uses, and it makes a
         proposal racing this delete either visible to the withdrawal or fail
         on the vanished row. Every statement is scoped by owner, notebook and
-        id. The derived source and KG rows are NOT touched here —
-        ``MemoryService`` removes them first, before this row disappears."""
+        id — the creator condition is enforced here too, not only by the
+        callers that pre-filter. The derived source and KG rows are NOT
+        touched here — ``MemoryService`` removes them first, before this row
+        disappears."""
         rows = db.execute(
             "SELECT id,notebook_id FROM memory_items "
             "WHERE created_by=%s AND id=ANY(%s) ORDER BY id FOR UPDATE",
@@ -1709,7 +1711,7 @@ class MemoryStore:
         now = self.now()
         for notebook_id, ids in by_notebook.items():
             GovernanceStore.withdraw_memory_promotions_on(
-                db, notebook_id, ids, MEMORY_DELETED_PROMOTION_REASON, user_id, now
+                db, notebook_id, ids, MEMORY_DELETED_PROMOTION_REASON, now
             )
             db.execute(
                 "DELETE FROM memory_items "
@@ -1718,94 +1720,241 @@ class MemoryStore:
             )
         return [row["id"] for row in rows]
 
-    def owned_memory_ids(
+    def owned_memory_refs(
         self, user_id: str, memory_ids: Sequence[str]
-    ) -> list[str]:
-        """The subset of ``memory_ids`` this user created, whatever their
-        current read access — exactly the rows ``bulk_delete_memories`` would
-        delete, so the service can remove their derived rows first. Same
-        de-duplication and 200-id bound as that method."""
+    ) -> list[tuple[str, str]]:
+        """``(memory_id, notebook_id)`` of the subset of ``memory_ids`` this
+        user created, whatever their current read access — exactly the rows
+        ``bulk_delete_memories`` would delete, so the service can remove
+        their derived rows first. Same de-duplication and 200-id bound."""
         unique = _bulk_memory_ids(memory_ids)
         if not unique:
             return []
         with self.database.connect() as db:
             rows = db.execute(
-                "SELECT id FROM memory_items WHERE created_by=%s AND id=ANY(%s) "
-                "ORDER BY id",
+                "SELECT id,notebook_id FROM memory_items "
+                "WHERE created_by=%s AND id=ANY(%s) ORDER BY id",
                 (user_id, unique),
             ).fetchall()
-        return [row["id"] for row in rows]
+        return [(row["id"], row["notebook_id"]) for row in rows]
 
-    def exit_memory_ids(
-        self, notebook_id: str, user_id: str, *, limit: int
-    ) -> list[str]:
-        """Memory ids a member's exit must purge: the rows this user created
-        in this notebook, but only while the membership row is (or was) the
-        user's LAST read path — not the owner and holding no grant.
+    @staticmethod
+    def _member_exit_state_on(
+        db: object, notebook_id: str, user_id: str, *, lock: bool
+    ) -> tuple[bool, bool]:
+        """``(is_member, keeps_access)`` for one user and notebook.
 
-        Evaluated on the user's other read paths only, so it answers the same
-        way before the membership row is deleted (the service purges first)
-        and after (the post-exit sweep): someone still able to read through a
-        group or direct grant has not actually left, and keeps every Memory.
-        The membership row itself is the caller's precondition, checked
-        separately. Bounded by ``limit`` in id order."""
-        grant = grant_access_expr("nb.id", "m.created_by", "xg", "xgm", "xga")
-        with self.database.connect() as db:
-            rows = db.execute(
-                "SELECT m.id FROM memory_items m "
-                "JOIN notebooks nb ON nb.id=m.notebook_id "
-                "WHERE m.notebook_id=%s AND m.created_by=%s "
-                "AND nb.created_by<>m.created_by "
-                f"AND NOT {grant} "
-                "ORDER BY m.id LIMIT %s",
-                (notebook_id, user_id, max(1, int(limit))),
-            ).fetchall()
-        return [row["id"] for row in rows]
+        ``lock`` takes the membership row ``FOR UPDATE``: every Memory write
+        by a member holds that row ``FOR SHARE`` for its whole transaction
+        (the locked member probe of ``access_sql``), so while it is held no Memory of
+        this member can be created or changed here. ``keeps_access`` is the
+        user's read path WITHOUT the membership row: ownership or any grant
+        (the same ``grant_access_expr`` the read predicate uses)."""
+        member = db.execute(
+            "SELECT user_id FROM notebook_members WHERE notebook_id=%s AND user_id=%s"
+            + (" FOR UPDATE" if lock else ""),
+            (notebook_id, user_id),
+        ).fetchone()
+        grant = grant_access_expr("nb.id", "%s", "xg", "xgm", "xga")
+        access = db.execute(
+            "SELECT COALESCE(nb.created_by=%s, false) OR "
+            f"{grant} AS keeps_access FROM notebooks nb WHERE nb.id=%s",
+            (user_id, *(user_id,) * grant.count("%s"), notebook_id),
+        ).fetchone()
+        return member is not None, bool(access and access["keeps_access"])
 
-    def member_memory_creators(self, notebook_id: str) -> list[str]:
-        """Users who hold a membership row in this notebook AND own at least
-        one Memory in it — the only members a notebook-wide kick can make
-        lose Memory. ``exit_memory_ids`` still decides, per user, whether
-        the membership row was their last read path."""
-        member = member_exists_expr("m.notebook_id", "m.created_by", "xm")
-        with self.database.connect() as db:
-            rows = db.execute(
-                "SELECT DISTINCT m.created_by FROM memory_items m "
-                f"WHERE m.notebook_id=%s AND {member} ORDER BY m.created_by",
-                (notebook_id,),
-            ).fetchall()
-        return [row["created_by"] for row in rows]
+    def member_exit_snapshot(
+        self, notebook_id: str, user_id: str, *, claim: bool
+    ) -> MemberExitSnapshot:
+        """What leaving ``notebook_id`` would delete of ``user_id``'s Memory.
 
-    def detach_memory_projection(self, memory_id: str, user_id: str) -> list[str]:
-        """Prepare this Memory's derived source for removal: strip its
-        evidence from objects another source owns, so the source removal that
-        follows deletes only what the Memory itself minted (N-1: a manual
-        merge of a Memory-derived object into a shared one must not take the
-        shared object with it).
-
-        The source is resolved through the Memory row — same notebook, this
-        user as creator — so a call can never reach another user's Memory or
-        another notebook. No derived source: a no-op. Returns the stripped
-        object ids. (The SQLite twin also drops its KG lexical-index rows;
-        PostgreSQL searches ``knowledge_objects`` itself, nothing to drop.)"""
-        with self.database.write() as db:
-            sources = db.execute(
-                "SELECT s.id,s.notebook_id FROM sources s "
-                "JOIN memory_items m ON m.id=s.memory_id "
-                "AND m.notebook_id=s.notebook_id "
-                "WHERE s.memory_id=%s AND s.source_type='memory' "
-                "AND m.created_by=%s",
-                (memory_id, user_id),
-            ).fetchall()
-            now = self.now()
-            stripped: list[str] = []
-            for source in sources:
-                stripped.extend(
-                    GovernanceStore.strip_source_evidence_on(
-                        db, source["notebook_id"], source["id"], now
-                    )
+        ``claim=False`` is the disclosure read: counts only. ``claim=True`` is
+        the exit's first step: under the membership row lock (see
+        ``_member_exit_state_on``) it returns the ids to delete, so the count
+        the leaver acknowledged is checked against exactly the rows that will
+        be deleted — a Memory saved after the disclosure changes the count.
+        Every status counts: the exit deletes candidates, rejected and
+        deprecated rows too."""
+        if claim:
+            with self.database.write() as db:
+                is_member, keeps = self._member_exit_state_on(
+                    db, notebook_id, user_id, lock=True
                 )
-        return stripped
+                ids: tuple[str, ...] = ()
+                if is_member and not keeps:
+                    ids = tuple(
+                        row["id"]
+                        for row in db.execute(
+                            "SELECT id FROM memory_items "
+                            "WHERE notebook_id=%s AND created_by=%s "
+                            "ORDER BY created_at,id",
+                            (notebook_id, user_id),
+                        ).fetchall()
+                    )
+            return MemberExitSnapshot(is_member, keeps, len(ids), ids)
+        with self.database.connect() as db:
+            is_member, keeps = self._member_exit_state_on(
+                db, notebook_id, user_id, lock=False
+            )
+            count = 0
+            if is_member and not keeps:
+                count = int(db.execute(
+                    "SELECT COUNT(*) AS c FROM memory_items "
+                    "WHERE notebook_id=%s AND created_by=%s",
+                    (notebook_id, user_id),
+                ).fetchone()["c"])
+        return MemberExitSnapshot(is_member, keeps, count)
+
+    def finish_member_exit(self, notebook_id: str, user_id: str) -> int:
+        """End a membership whose Memory has been purged — atomically with
+        the check that none is left.
+
+        One transaction under the membership row lock: count the user's
+        Memory still in the notebook; if any exists (saved while the purge
+        ran) return that count and keep the membership, so nothing the
+        leaver did not acknowledge is ever deleted; otherwise delete the
+        membership row and return 0. No membership row: already left, 0.
+        The row delete lives here, not in the sharing store, because it must
+        commit together with that count."""
+        with self.database.write() as db:
+            member = db.execute(
+                "SELECT user_id FROM notebook_members "
+                "WHERE notebook_id=%s AND user_id=%s FOR UPDATE",
+                (notebook_id, user_id),
+            ).fetchone()
+            if member is None:
+                return 0
+            remaining = int(db.execute(
+                "SELECT COUNT(*) AS c FROM memory_items "
+                "WHERE notebook_id=%s AND created_by=%s",
+                (notebook_id, user_id),
+            ).fetchone()["c"])
+            if remaining:
+                return remaining
+            db.execute(
+                "DELETE FROM notebook_members WHERE notebook_id=%s AND user_id=%s",
+                (notebook_id, user_id),
+            )
+        return 0
+
+    def derived_memory_sources(
+        self, refs: Sequence[tuple[str, str]]
+    ) -> list[tuple[str, str, str]]:
+        """``(memory_id, source_id, notebook_id)`` of the hidden sources
+        projected from these ``(memory_id, notebook_id)`` refs — one read for
+        a whole page. Keyed on the ref pairs rather than a join with
+        ``memory_items``, so it also finds a source whose Memory row is
+        already gone (the post-delete sweep for an ingest that finished in
+        between). A Memory without a derived source simply has no row."""
+        if not refs:
+            return []
+        wanted = {(memory_id, notebook_id) for memory_id, notebook_id in refs}
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT id,notebook_id,memory_id FROM sources "
+                "WHERE memory_id=ANY(%s) AND source_type='memory' ORDER BY id",
+                ([memory_id for memory_id, _ in refs],),
+            ).fetchall()
+        return [
+            (row["memory_id"], row["id"], row["notebook_id"])
+            for row in rows
+            if (row["memory_id"], row["notebook_id"]) in wanted
+        ]
+
+    def detach_memory_projection(
+        self, sources: Sequence[tuple[str, str, str]]
+    ) -> dict[str, list[str]]:
+        """Prepare derived sources for removal, in ONE write transaction.
+
+        For each ``(memory_id, source_id, notebook_id)``:
+        * strip its evidence from objects ANOTHER source owns, so the removal
+          that follows deletes only what the Memory itself minted (N-1: a
+          manual merge into a shared object must not take that object along);
+        * delete the review candidates naming the source's own objects or
+          relations (``kg_conflict_candidates``, pending
+          ``concept_merge_candidates``), which would otherwise outlive them.
+        Returns the source's own object ids per notebook, for the lexical
+        index cleanup after the removal. Every statement is scoped by
+        notebook and source id."""
+        owned: dict[str, list[str]] = {}
+        if not sources:
+            return owned
+        now = self.now()
+        with self.database.write() as db:
+            for _memory_id, source_id, notebook_id in sorted(
+                sources, key=lambda item: item[1]
+            ):
+                GovernanceStore.strip_source_evidence_on(
+                    db, notebook_id, source_id, now
+                )
+                object_ids = [
+                    row["id"]
+                    for row in db.execute(
+                        "SELECT id FROM knowledge_objects "
+                        "WHERE notebook_id=%s AND source_id=%s",
+                        (notebook_id, source_id),
+                    ).fetchall()
+                ]
+                relation_ids = [
+                    row["id"]
+                    for row in db.execute(
+                        "SELECT id FROM knowledge_relations "
+                        "WHERE notebook_id=%s AND source_id=%s",
+                        (notebook_id, source_id),
+                    ).fetchall()
+                ]
+                GovernanceStore.delete_candidates_for_objects_on(
+                    db, notebook_id, object_ids, relation_ids
+                )
+                owned.setdefault(notebook_id, []).extend(object_ids)
+        return owned
+
+    def drop_memory_lexical_rows(
+        self, owned_objects: Mapping[str, Sequence[str]]
+    ) -> int:
+        """PostgreSQL searches ``knowledge_objects`` itself; there is no
+        separate lexical-index table to clean (see the SQLite twin)."""
+        return 0
+
+    def memory_export_page(
+        self,
+        notebook_id: str,
+        user_id: str,
+        *,
+        after: tuple[Any, str] | None,
+        limit: int,
+    ) -> tuple[list[MemoryRecord], tuple[Any, str] | None]:
+        """One keyset page of this user's own Memory in one notebook, oldest
+        first (``created_at``, then id), every status — the export's reader.
+
+        Read-gated like every Memory read, owner-scoped like every Memory
+        row. Returns the records and the cursor for the next page (``None``
+        when this page was the last); the cursor carries the raw column
+        value, so no timestamp formatting can skip or repeat a row."""
+        page = max(1, min(int(limit), 500))
+        clauses = [
+            "m.notebook_id=%s",
+            "m.created_by=%s",
+            self._read_access_clause(),
+        ]
+        params: list[Any] = [notebook_id, user_id, *read_access_params(user_id)]
+        if after is not None:
+            clauses.append("(m.created_at,m.id)>(%s,%s)")
+            params.extend(after)
+        with self.database.connect() as db:
+            rows = db.execute(
+                f"SELECT {self._select_columns()},m.created_at AS cursor_created_at "
+                "FROM memory_items m LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+                f"WHERE {' AND '.join(clauses)} "
+                "ORDER BY m.created_at,m.id LIMIT %s",
+                (*params, page + 1),
+            ).fetchall()
+        more = len(rows) > page
+        rows = rows[:page]
+        cursor = (
+            (rows[-1]["cursor_created_at"], rows[-1]["id"]) if more and rows else None
+        )
+        return [self._record(row) for row in rows], cursor
 
     def list_memories(
         self,

@@ -1437,6 +1437,9 @@ class RepositoryRuntime:
             embedding_scheduler=lambda fn, item: kg_scheduler.submit_job(fn, item),
             kg_ingest_scheduler=lambda fn, item: kg_scheduler.submit_job(fn, item),
             owner_eligible=self.identity.auth.owner_eligible,
+            # The self-exit ends memberships after purging Memory; it is a
+            # constructor requirement, so it cannot be composed without it.
+            membership=self.sharing,
         )
         self.memory_retriever = MemoryRetriever(self.memory_store, query_embedder)
         self.catalog.memory_retriever = self.memory_retriever

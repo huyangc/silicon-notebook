@@ -8,7 +8,7 @@ import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 
 from app.core.event_logging import EventLogger
 from app.domain.agent_tools import AGENT_SCOPES
@@ -51,10 +51,21 @@ class MemoryEmbeddingJob:
 
 _AGENT_TOKEN_RE = re.compile(r"^snm_([^.]+)\.(.+)$")
 _TOKEN_TOUCH_SECONDS = 300
-# Page width of a member-exit purge: how many Memory rows one pass lists,
-# strips and deletes. A page size, not a cap — the purge loops until empty.
-# Matches ``bulk_delete_memories``' own 200-id bound.
-_EXIT_PURGE_BATCH = 200
+# Page width of a Memory purge (member exit): how many Memory rows one page
+# resolves, detaches and deletes together. A page size, not a cap — the purge
+# walks every claimed id. Matches ``bulk_delete_memories``' own 200-id bound.
+_PURGE_PAGE = 200
+# Page width of the Markdown export's keyset read. The export streams one
+# page at a time, so its memory use is bounded by this, not by the number of
+# Memories.
+_EXPORT_PAGE = 200
+_ORIGIN_LABELS = {"ask_answer": "问答保存", "external_agent": "Agent 提议"}
+_STATUS_LABELS = {
+    "candidate": "候选（尚未确认）",
+    "confirmed": "已确认",
+    "rejected": "已拒绝",
+    "deprecated": "已弃用",
+}
 
 
 def _parse_time(value: str) -> datetime:
@@ -119,6 +130,82 @@ class _TransferRejected(ValueError):
         self.error_code = error_code
 
 
+def _one_line(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _provenance_line(item: MemoryRecord) -> str:
+    """One human line saying where a Memory came from, or '' when its
+    provenance records nothing presentable."""
+    provenance = item.provenance or {}
+    parts: list[str] = []
+    imported = provenance.get("imported_from")
+    if isinstance(imported, dict):
+        action = "移动" if imported.get("action") == "move" else "复制"
+        parts.append(f"从另一本笔记本{action}而来")
+        nested = imported.get("source_provenance")
+        provenance = nested if isinstance(nested, dict) else {}
+    question = _one_line(provenance.get("question"))
+    if question:
+        parts.append(f"问答「{question[:200]}」")
+    profile = provenance.get("agent_profile")
+    if isinstance(profile, dict) and _one_line(profile.get("name")):
+        parts.append(f"Agent「{_one_line(profile.get('name'))}」")
+    reason = _one_line(provenance.get("reason"))
+    if reason:
+        parts.append(f"提议原因：{reason[:200]}")
+    titles: list[str] = []
+    for citation in provenance.get("citations") or []:
+        if isinstance(citation, dict):
+            title = _one_line(citation.get("source_title") or citation.get("title"))
+            if title and title not in titles:
+                titles.append(title)
+    if titles:
+        more = f" 等 {len(titles)} 个来源" if len(titles) > 5 else ""
+        parts.append("引用：" + "；".join(titles[:5]) + more)
+    return "；".join(parts)
+
+
+def _export_section(index: int, item: MemoryRecord) -> str:
+    lines = [
+        f"\n---\n\n## {index}. {_one_line(item.title) or '（无标题）'}\n",
+        f"- 类型：{_ORIGIN_LABELS.get(item.origin, item.origin)}",
+        f"- 状态：{_STATUS_LABELS.get(item.status, item.status)}",
+        f"- 创建时间：{item.created_at}",
+        f"- 更新时间：{item.updated_at}",
+    ]
+    if item.tags:
+        lines.append("- 标签：" + "、".join(_one_line(tag) for tag in item.tags))
+    provenance = _provenance_line(item)
+    if provenance:
+        lines.append(f"- 来源：{provenance}")
+    return "\n".join(lines) + f"\n\n{item.content_md.rstrip()}\n"
+
+
+class ExitDisclosureRequired(Exception):
+    """Leaving would delete Memory the leaver has not acknowledged.
+
+    ``memory_count`` is the server-side count at the moment of the check:
+    the client must show it and retry with exactly that number."""
+
+    def __init__(self, memory_count: int) -> None:
+        super().__init__(f"exit would delete {memory_count} Memory items")
+        self.memory_count = memory_count
+
+
+class MemberExitFailed(Exception):
+    """The exit's Memory purge failed part-way. The leaver is still a member;
+    already deleted Memory stays deleted and a retry continues from there."""
+
+
+class MembershipExitPort(Protocol):
+    """What the self-exit needs from the sharing service."""
+
+    def remove_member(self, notebook_id: str, user_id: str) -> None: ...
+
+    def forget_member_state(self, notebook_id: str, user_id: str) -> None: ...
+
+
 class MemoryService:
     def __init__(
         self,
@@ -132,6 +219,8 @@ class MemoryService:
         embedding_scheduler: Callable[[Callable[[MemoryEmbeddingJob], MemoryRecord], MemoryEmbeddingJob], Any] | None = None,
         kg_ingest_scheduler: Callable[[Callable[[tuple[str, str]], None], tuple[str, str]], Any] | None = None,
         owner_eligible: Callable[[str], bool] | None = None,
+        *,
+        membership: MembershipExitPort,
     ) -> None:
         self.store = store
         self.ask_state = ask_state
@@ -145,14 +234,10 @@ class MemoryService:
         self.owner_eligible = owner_eligible
         self.promotion_service: Any | None = None
         self.memory_kg: Any | None = None
-        # A member leaving a notebook loses their Memory there (exit purge).
-        # The access service owns membership, so it has to call back into this
-        # service before it drops the row; it is the ``notebooks`` dependency
-        # itself in production, so register here. A double without the hook
-        # (tests, older roots) simply has no exit purge.
-        bind_exit_purge = getattr(notebooks, "bind_member_memory_purge", None)
-        if callable(bind_exit_purge):
-            bind_exit_purge(self)
+        # The self-exit (``leave_notebook``) ends a membership after purging
+        # the leaver's Memory; required at construction, so no composition can
+        # offer that exit without its purge.
+        self.membership = membership
 
     def set_promotion_service(self, service: Any) -> None:
         self.promotion_service = service
@@ -810,77 +895,183 @@ class MemoryService:
             self.memory_kg.remove_memory_source(item.id)
         return item
 
-    def _remove_derived_rows(self, memory_id: str, user_id: str) -> None:
-        """Remove everything projected from one Memory, BEFORE its row goes.
+    def _remove_derived_rows(self, refs: Sequence[tuple[str, str]]) -> None:
+        """Remove everything projected from a page of Memory rows.
 
-        Same order as ``transfer``'s move: ``sources.memory_id`` is not a
-        foreign key, so a derived source whose Memory row is already gone is
-        an orphan nothing can find again. First detach the projection: strip
-        this Memory's evidence from objects another source owns (a manually
-        merged shared object loses that evidence and stays) and drop the
-        index rows the generic source delete does not reach (SQLite's KG
-        lexical index). Then remove the hidden source through
-        the one removal path, ``remove_memory_source`` — its elements,
-        element vectors, KG objects, relations, facts, cluster member rows and
-        reverse-index rows, with the notebook's graph marked dirty. Both are
-        idempotent: a Memory that never had a derived source is a no-op."""
+        ``refs`` are ``(memory_id, notebook_id)`` pairs the caller already
+        verified belong to the acting user. One read resolves which of them
+        have a hidden derived source; a Memory without one costs nothing more.
+        For those that do, in this order:
+
+        1. detach, in one write transaction for the page: strip each source's
+           evidence from objects another source owns (a manually merged shared
+           object loses that evidence and stays) and delete the review
+           candidates naming the source's own objects or relations;
+        2. remove the sources through ``remove_memory_sources`` — elements,
+           element vectors, KG objects, relations, facts, cluster member rows,
+           reverse-index rows — in one transaction, marking each notebook's
+           graph dirty once; a source a concurrent purge already removed
+           counts as removed;
+        3. drop the lexical-index rows of the objects that step 2 deleted
+           (SQLite; only rows whose object is gone).
+
+        Runs BEFORE the Memory rows are deleted (``sources.memory_id`` is not
+        a foreign key: a source whose Memory row is gone is an orphan nothing
+        can find again), and once more after (see ``_purge_page``). No KG
+        service wired means this service never created a projection."""
         if self.memory_kg is None:
             return
-        self.store.detach_memory_projection(memory_id, user_id)
-        self.memory_kg.remove_memory_source(memory_id)
+        sources = self.store.derived_memory_sources(refs)
+        if not sources:
+            return
+        owned_objects = self.store.detach_memory_projection(sources)
+        self.memory_kg.remove_memory_sources([source_id for _, source_id, _ in sources])
+        self.store.drop_memory_lexical_rows(owned_objects)
+
+    def _purge_page(self, user_id: str, refs: Sequence[tuple[str, str]]) -> int:
+        """Hard-delete one page (at most ``_PURGE_PAGE``) of the user's Memory
+        with everything derived from it; returns the Memory rows deleted.
+
+        The derived rows go first, then the rows themselves (withdrawing their
+        live promotion proposals in the same transaction), then the derived
+        rows once more: a KG ingest job still running for one of these
+        Memories can publish its source between the first removal and the row
+        delete, and its own post-ingest recheck may have run before the row
+        was gone — the same window ``transfer``'s move closes the same way
+        (P1-C, round 6). The second lookup finds nothing in the normal case."""
+        self._remove_derived_rows(refs)
+        deleted = self.store.bulk_delete_memories(
+            user_id, [memory_id for memory_id, _ in refs]
+        )
+        self._remove_derived_rows(refs)
+        return deleted
+
+    def _audit_purge(
+        self, action: str, notebook_id: str, user_id: str, count: int
+    ) -> None:
+        """Content-free audit line for a purge of several Memory rows."""
+        self.event_log.emit(
+            {
+                "kind": "memory_purge",
+                "action": action,
+                "notebook_id": notebook_id,
+                "user_id": user_id,
+                "count": count,
+            }
+        )
 
     def delete(self, memory_id: str, user_id: str) -> None:
         item = self.get(memory_id, user_id)
-        self._remove_derived_rows(item.id, user_id)
+        refs = [(item.id, item.notebook_id)]
+        # Same three steps as ``_purge_page``; the single-row store delete
+        # keeps its KeyError (404) when the row vanished concurrently.
+        self._remove_derived_rows(refs)
         self.store.delete_memory(memory_id, user_id)
+        self._remove_derived_rows(refs)
         self._event("memory_lifecycle", item, action="deleted")
 
     def bulk_delete(self, user_id: str, memory_ids: Sequence[str]) -> int:
         # The store reads the same owned subset its delete will remove
         # (creator only, not read access), so no derived row survives a
         # deleted Memory and no other user's projection is ever touched.
-        owned = self.store.owned_memory_ids(user_id, memory_ids)
-        for memory_id in owned:
-            self._remove_derived_rows(memory_id, user_id)
-        return self.store.bulk_delete_memories(user_id, owned)
+        refs = self.store.owned_memory_refs(user_id, memory_ids)
+        deleted = self._purge_page(user_id, refs) if refs else 0
+        per_notebook: dict[str, int] = {}
+        for _memory_id, notebook_id in refs:
+            per_notebook[notebook_id] = per_notebook.get(notebook_id, 0) + 1
+        for notebook_id, count in sorted(per_notebook.items()):
+            self._audit_purge("bulk_delete", notebook_id, user_id, count)
+        return deleted
 
-    def exiting_member_ids(self, notebook_id: str) -> list[str]:
-        """Members of this notebook who own Memory in it — the candidates a
-        notebook-wide kick has to purge (``purge_exiting_member`` still
-        decides per user whether they really lose read access)."""
-        return self.store.member_memory_creators(notebook_id)
+    # ------------------------------------------------------------ self-exit
+    def exit_disclosure(self, notebook_id: str, user_id: str) -> int:
+        """How many of the caller's own Memory items leaving this notebook
+        would delete (every status). Zero when the caller is not a member, or
+        would keep reading it as its owner or through a grant."""
+        return self.store.member_exit_snapshot(
+            notebook_id, user_id, claim=False
+        ).memory_count
 
-    def purge_exiting_member(self, notebook_id: str, user_id: str) -> int:
-        """Hard-delete every Memory ``user_id`` owns in ``notebook_id``, with
-        every row derived from it, when leaving drops their LAST read path.
+    def leave_notebook(
+        self,
+        notebook_id: str,
+        user_id: str,
+        acknowledged_memory_count: int | None,
+    ) -> None:
+        """The member's own exit: delete their Memory here, then end the
+        membership. The one path that deletes a member's Memory.
 
-        Memory is private to its creator; a member who leaves (or is removed)
-        takes nothing of theirs along, and rejoining starts empty. Someone who
-        can still read the notebook through a grant, or its owner, has not
-        left: the store's exit query lists nothing for them. A revoked grant
-        or an unshared notebook never comes through here at all — access is
-        often temporary, and those Memory rows stay (invisible to everyone)
-        until access returns.
+        1. Claim, under the membership row lock: the exact Memory ids the exit
+           will delete. More than zero and not acknowledged with exactly that
+           count → ``ExitDisclosureRequired``, nothing touched. Zero needs no
+           acknowledgement: the exit behaves exactly as before.
+        2. Purge those ids page by page (``_purge_page``) — the rows and every
+           row derived from them.
+        3. Finish, under the membership row lock again: end the membership
+           only if none of the leaver's Memory is left there. A Memory saved
+           while the purge ran is never deleted unacknowledged: the membership
+           stays and ``ExitDisclosureRequired`` carries the new count.
 
-        Called by the sharing service before it deletes the membership row,
-        and once more after it (catching a Memory saved in between). Pages
-        until the exit query is empty; returns the rows deleted."""
-        removed = 0
-        previous: list[str] = []
+        Someone who keeps reading the notebook as its owner or through a
+        grant has not left: the membership row goes and every Memory stays.
+        A purge failure raises ``MemberExitFailed`` with the membership intact
+        (already deleted Memory stays deleted; a retry continues). The
+        per-member overlay/observation cleanup follows the membership end."""
+        snapshot = self.store.member_exit_snapshot(notebook_id, user_id, claim=True)
+        if not snapshot.is_member or snapshot.keeps_access:
+            self.membership.remove_member(notebook_id, user_id)
+            return
+        if snapshot.memory_count and acknowledged_memory_count != snapshot.memory_count:
+            raise ExitDisclosureRequired(snapshot.memory_count)
+        deleted = 0
+        refs = [(memory_id, notebook_id) for memory_id in snapshot.memory_ids]
+        try:
+            for offset in range(0, len(refs), _PURGE_PAGE):
+                deleted += self._purge_page(user_id, refs[offset:offset + _PURGE_PAGE])
+        except Exception as exc:
+            if deleted:
+                self._audit_purge("member_exit_partial", notebook_id, user_id, deleted)
+            raise MemberExitFailed(notebook_id) from exc
+        if deleted:
+            self._audit_purge("member_exit", notebook_id, user_id, deleted)
+        remaining = self.store.finish_member_exit(notebook_id, user_id)
+        if remaining:
+            raise ExitDisclosureRequired(remaining)
+        self.membership.forget_member_state(notebook_id, user_id)
+
+    # ---------------------------------------------------------------- export
+    def export_markdown(
+        self, notebook_id: str, user_id: str, notebook_title: str
+    ) -> Iterator[str]:
+        """The caller's own Memory in one notebook as a Markdown document,
+        yielded in pieces: at most ``_EXPORT_PAGE`` Memories are in memory at
+        a time, however many there are. Every status is included (candidates
+        are marked — leaving deletes them too); nothing of other users. The
+        read check runs now, before the first piece is produced."""
+        self._require_notebook(notebook_id, user_id)
+        return self._export_pieces(notebook_id, user_id, notebook_title)
+
+    def _export_pieces(
+        self, notebook_id: str, user_id: str, notebook_title: str
+    ) -> Iterator[str]:
+        yield (
+            f"# {_one_line(notebook_title) or '笔记本'} · 我的记忆\n\n"
+            f"导出时间：{self.now()}\n\n"
+            "只包含你本人在这本笔记本里的记忆。标为「候选」的尚未确认；"
+            "退出这本共享笔记本时，这里列出的全部记忆都会被永久删除。\n"
+        )
+        written = 0
+        cursor = None
         while True:
-            batch = self.store.exit_memory_ids(
-                notebook_id, user_id, limit=_EXIT_PURGE_BATCH
+            items, cursor = self.store.memory_export_page(
+                notebook_id, user_id, after=cursor, limit=_EXPORT_PAGE
             )
-            if not batch:
-                return removed
-            if batch == previous:
-                raise RuntimeError(
-                    f"member exit purge made no progress in notebook {notebook_id}"
-                )
-            for memory_id in batch:
-                self._remove_derived_rows(memory_id, user_id)
-            removed += self.store.bulk_delete_memories(user_id, batch)
-            previous = batch
+            for item in items:
+                written += 1
+                yield _export_section(written, item)
+            if cursor is None:
+                break
+        yield f"\n---\n\n共导出 {written} 条记忆。\n"
 
     def get(self, memory_id: str, user_id: str) -> MemoryRecord:
         return self.store.memory_for_user(memory_id, user_id)

@@ -545,7 +545,9 @@ def create_app() -> FastAPI:
         # 不 expose 的话跨源部署时 JS 根本读不到它，后端所有中文用户文案都会被
         # 前端当成「没标记」而压平成通用文案。同源开发和单测都察觉不到这个坑，
         # 故在此显式登记（test_user_error.py 有守卫）。
-        expose_headers=["X-Request-Id", USER_MESSAGE_HEADER],
+        # Content-Disposition 同理：下载（如记忆导出）的文件名在这个头里，跨源部署
+        # 时不 expose，前端只能退回一个猜出来的文件名（test_memory_exit_routes.py 守卫）。
+        expose_headers=["X-Request-Id", USER_MESSAGE_HEADER, "Content-Disposition"],
     )
 
     @app.get("/")
