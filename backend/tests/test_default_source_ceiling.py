@@ -366,12 +366,106 @@ def test_subjectless_run_refuses_an_unselected_public_library():
 
 
 def test_ceilings_total_alone_installs_a_scope():
+    """The one shape where ``ceilings_total`` is the ONLY ceiling in force: no
+    local, library or per-notebook ceiling.  ``filter_retrieval_items`` must
+    still walk its items (its short-circuit names ``ceilings_total``)."""
     with source_scope_context(NB, None, ceilings_total=True):
         scope = current_source_scope()
         assert scope is not None
+        assert not (
+            scope.ceiling_active or scope.base_ceiling_active
+            or scope.peer_ceiling_active
+        )
         assert scope.covers_notebook("nb-any") is False
         assert current_source_scope_payload() is None
         assert source_scope_restricted() is False
+        assert filter_retrieval_items(NB, "chunk", [
+            _chunk("s-1"), _chunk("x", "nb-any"),
+        ]) == [_chunk("s-1")]
+        assert filter_retrieval_items(NB, "knowledge", [
+            _knowledge("x", "nb-any"),
+        ]) == []
+
+
+def test_a_submitted_exclude_form_library_dimension_does_not_readmit_a_mid_run_mount():
+    """``ceilings_total`` is checked BEFORE the library dimension, whatever its
+    form: an exclude-form ``base_scope`` names only what it excludes, so a
+    library mounted after the freeze is "not excluded" -- and must still be
+    refused because no ceiling names it."""
+    store = _two_mount_store()
+    base = {"mode": "exclude", "notebook_ids": ["nb-lib2"], "narrowed": True}
+    with default_ceiling_context(NB, "bob", store.readers(), base_scope=base):
+        scope = current_source_scope()
+        assert scope.base_ceiling_active is True
+        assert scope.covers_notebook("nb-lib") is True
+        assert scope.covers_notebook("nb-lib2") is False, "excluded by the user"
+        assert scope.covers_notebook("nb-late") is False, "mounted after the freeze"
+        assert source_allowed("nb-late", "late-1") is False
+        assert scoped_participants([NB, "nb-lib", "nb-lib2", "nb-late"]) == (
+            NB, "nb-lib",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Rebase pin for claude/scope-ceiling-remediation (review P2-4)
+# ---------------------------------------------------------------------------
+
+_BINDS_AVAILABLE = hasattr(ActiveSourceScope, "source_ceiling_binds")
+
+
+def test_source_ceiling_binds_honours_ceilings_total():
+    """FEATURE-DETECTED, and meant to go live at rebase time.
+
+    ``ActiveSourceScope.source_ceiling_binds`` and
+    ``source_scope.scoped_node_context_row`` arrive with branch
+    claude/scope-ceiling-remediation, which merges before this branch.  Until
+    this branch is rebased onto it the symbols do not exist and this test
+    SKIPS; after the rebase it runs and fails unless ``source_ceiling_binds``
+    answers True for a library ``covers_notebook`` refuses -- a library mounted
+    mid-run under ``ceilings_total`` is bound by an empty ceiling, so
+    ``scoped_node_context_row`` drops its row instead of handing it back.
+
+    It cannot stay skipped once the symbol exists:
+    ``test_rebase_pin_runs_once_its_symbol_exists`` below calls this body
+    directly whenever ``source_ceiling_binds`` is present.
+    """
+    if not _BINDS_AVAILABLE:
+        pytest.skip(
+            "source_ceiling_binds arrives with claude/scope-ceiling-remediation"
+        )
+    store = _two_mount_store()
+    with default_ceiling_context(NB, "bob", store.readers()):
+        store.mounts.append("nb-late")
+        scope = current_source_scope()
+        assert scope.covers_notebook("nb-late") is False
+        assert scope.source_ceiling_binds("nb-late") is True
+        row = {
+            "occurrences": [{"source_id": "late-1", "quote": "q"}],
+            "definition": "d", "definition_basis": "defines_name",
+            "steps": [],
+        }
+        assert source_scope_module.scoped_node_context_row(
+            "nb-late", row, ceiling_pushed=False,
+        ) is None
+        # A named mounted library keeps its normal answer.
+        assert scope.source_ceiling_binds("nb-lib") is True
+        assert source_scope_module.scoped_node_context_row(
+            "nb-lib", {**row, "occurrences": [{"source_id": "lib-1"}]},
+            ceiling_pushed=False,
+        ) is not None
+
+
+def test_rebase_pin_runs_once_its_symbol_exists():
+    """Fails if ``source_ceiling_binds`` exists and the pin above did not run:
+    here its body is executed directly (so neither a skip nor a deselection of
+    the pin can hide it), and while the symbol is absent the pin's only exit is
+    its explicit skip."""
+    assert _BINDS_AVAILABLE == hasattr(ActiveSourceScope, "source_ceiling_binds")
+    if _BINDS_AVAILABLE:
+        test_source_ceiling_binds_honours_ceilings_total()
+    else:
+        with pytest.raises(pytest.skip.Exception):
+            test_source_ceiling_binds_honours_ceilings_total()
 
 
 # ---------------------------------------------------------------------------

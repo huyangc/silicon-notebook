@@ -186,10 +186,16 @@ class ActiveSourceScope:
     # ended up carrying their neutral default. The two are not the same thing:
     # a run that scoped only the library dimension still gets mode="exclude" /
     # source_ids=frozenset() here, which is indistinguishable by value from a
-    # submitted "all local sources" selection. Only the payload accessors
-    # consult these flags -- gating (``restricted``, ``allows``,
-    # ``covers_notebook``) must stay value-driven, because a neutral default
-    # and an explicit "all" have to filter identically.
+    # submitted "all local sources" selection. No GATE consults these flags --
+    # gating (``restricted``, ``allows``, ``covers_notebook``) must stay
+    # value-driven, because a neutral default and an explicit "all" have to
+    # filter identically.  Their readers are the two payload accessors below,
+    # ``refreshed_ceiling_context`` (keeps a synthesised local dimension
+    # synthesised when it inherits it), and ``AskService.ask_plugin_engine``,
+    # which reads "not provided" as "synthesise this dimension myself".  A
+    # default ceiling's local dimension binds while ``source_provided`` is
+    # False, so that last reader must stop synthesising once the default
+    # ceiling is installed in front of it.
     #
     # They exist because ``current_source_scope_payload()`` is re-persisted by
     # report_engine.prepare_intent into the report's understanding contract and
@@ -247,7 +253,9 @@ class ActiveSourceScope:
     # subjectless run, a public library the user never selected (ledger E-1).
     # Honoured by ``covers_notebook`` -- and therefore by every gate that
     # collapses onto it -- plus the short-circuits that would otherwise skip
-    # it.  Set by ``default_ceiling_context`` and by the global-run installer.
+    # it.  Set by ``default_ceiling_context`` / ``refreshed_ceiling_context``;
+    # ``source_scope_context(ceilings_total=True)`` accepts it from any other
+    # installer.
     ceilings_total: bool = False
     # The asker's OWN Memory projection sources that ``default_ceiling_context``
     # deliberately left OUT of ``hidden_source_ids`` because the Memory channel
