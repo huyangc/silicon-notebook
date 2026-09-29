@@ -233,3 +233,75 @@ def test_pg_knowhow_table_count_is_what_the_executor_reaches(postgres_repository
     assert catalog.collection_map(notebook_id).knowhow_tables == 1
     with _ticked(notebook_id, []):
         assert catalog.collection_map(notebook_id).knowhow_tables == 0
+
+
+def _set_owner_and_breadcrumb(repository, notebook_id, object_id, owner, crumb):
+    with repository._runtime.database.write() as db:
+        db.execute(
+            "UPDATE knowledge_objects SET source_id=%s, payload=%s "
+            "WHERE id=%s AND notebook_id=%s",
+            (owner, jsonb({"name": object_id, "section_path": crumb}),
+             object_id, notebook_id),
+        )
+
+
+def test_pg_section_path_comes_only_from_a_readable_owner(postgres_repository):
+    """oMix 因 sA 的证据被列出,但属主是未勾选的 sB:面包屑不随清单出去。"""
+    repository = postgres_repository
+    notebook_id = _seed(repository)
+    _set_owner_and_breadcrumb(repository, notebook_id, "oMix", "sB", "3.2 竞品价格")
+    _set_owner_and_breadcrumb(repository, notebook_id, "oA", "sA", "1.1 概述")
+    with _ticked(notebook_id, ["sA", "sC"]):
+        scoped = repository.collection_enumeration.enumerate_kg_objects(
+            notebook_id, "concept", budget=_budget())
+    unscoped = repository.collection_enumeration.enumerate_kg_objects(
+        notebook_id, "concept", budget=_budget())
+    assert {i.object_id: i.section_path for i in scoped.items} == {
+        "oA": "1.1 概述", "oMix": ""}
+    by_id = {i.object_id: i.section_path for i in unscoped.items}
+    assert (by_id["oA"], by_id["oMix"]) == ("1.1 概述", "3.2 竞品价格")
+
+
+def test_pg_peer_citations_follow_the_frozen_participant_set(postgres_repository):
+    """A 锚点、B 挂在 A 上且被选中、C 被选中但没挂在 A 上、D 挂在 A 上却没被选中:
+    C 的条目有引用,D 没有;单库对照仍按 A 的挂载表。"""
+    from app.services.collection_enumeration import SourceItem
+    from app.services.retrieval_participants import (
+        ParticipantOverride, participant_override,
+    )
+    from app.services.retrieval_run import retrieval_run
+
+    repository = postgres_repository
+    actor = repository.current_user().id
+    ids = {name: repository.create_notebook(NotebookCreate(name=name)).id
+           for name in ("A", "B", "C", "D")}
+    for name, notebook_id in ids.items():
+        _insert_late_source(repository, notebook_id, f"s{name}")
+    for name in ("B", "D"):
+        repository.mark_notebook_base(ids[name])
+    repository.replace_notebook_bases(ids["A"], [ids["B"], ids["D"]], actor)
+    items = [
+        SourceItem(source_id=f"s{n}", source_title=n, doc_type_label="",
+                   summary="", notebook_id=ids[n], tier="personal")
+        for n in ("A", "B", "C", "D")
+    ]
+    evidence_context = repository._runtime.ask_service().evidence_context
+    selected = (ids["A"], ids["B"], ids["C"])
+    with retrieval_run(run_kind="ask_chunk", actor_id=actor):
+        with participant_override(ParticipantOverride(
+            notebook_ids=selected, tiers={}, attested_actor_id=actor,
+        )):
+            with source_scope_context(
+                ids["A"], None, None,
+                notebook_source_ceilings={ids[n]: [f"s{n}"] for n in "ABC"},
+                subjectless=True,
+            ):
+                roster = repository.collection_enumeration.enumerate_sources(
+                    ids["A"], budget=_budget())
+                peer = evidence_context.collection_item_citations(
+                    items, active_notebook_id=ids["A"])
+    single = evidence_context.collection_item_citations(
+        items, active_notebook_id=ids["A"])
+    assert [item.source_id for item in roster.items] == ["sA", "sB", "sC"]
+    assert set(peer) == {"sA", "sB", "sC"}
+    assert set(single) == {"sA", "sB", "sD"}

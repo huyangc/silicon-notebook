@@ -1257,9 +1257,9 @@ def test_collection_map_is_built_once_and_injected_into_plan_and_reflect(repo):
         # 钩的是**对象**那一步:首轮先取 `CollectionMap` 再渲染(规模守卫要那个
         # 对象),`collection_map_text` 从此不在 run 的路径上。计数语义没变——
         # 每 run 只构建一次地图,构建就是这一次调用。
-        def collection_map(self, notebook_id):
+        def collection_map(self, notebook_id, **kwargs):
             builds.append(notebook_id)
-            return real.collection_map(notebook_id)
+            return real.collection_map(notebook_id, **kwargs)
 
     retriever.collection_catalog = _CountingCatalog()
     result = retriever.run(notebook.id, "哪些公式", "", limits=limits)
@@ -1302,7 +1302,7 @@ def test_collection_map_failure_is_fail_open(repo):
     retriever, limits = _retriever(repo, llm)
 
     class _BrokenCatalog:
-        def collection_map(self, notebook_id):
+        def collection_map(self, notebook_id, **_kwargs):
             raise RuntimeError("counting is down")
 
     retriever.collection_catalog = _BrokenCatalog()

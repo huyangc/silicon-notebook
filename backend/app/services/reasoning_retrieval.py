@@ -1321,6 +1321,43 @@ def unsafe_scope_restricted(retrieval) -> bool:
     )
 
 
+def knowhow_completeness_reachable(retrieval, notebook_id: str) -> bool:
+    """May this run's deterministic Knowhow complete enumeration run — and
+    therefore may the collection map count Knowhow tables?
+
+    ONE predicate for both readers, evaluated ONCE per retrieval run:
+    ``AskService._knowhow_completeness_in_scope`` (the executor's gate) and
+    the reasoning engine's collection map (``collection_map(
+    knowhow_reachable=...)``).  It is ``collection_catalog
+    .knowhow_enumeration_reachable`` (not subjectless) fed with
+    ``unsafe_scope_restricted`` (narrowed OR drifted); the drift probe is a
+    live read, so the verdict is memoized on the run
+    (``memoized_retrieval_value``) — otherwise a drift landing between the
+    gate and the map build could make the map advertise tables the gate
+    already refused.  Keyed on the notebook and the installed scope object,
+    so a second scope inside one run (a report leaf) gets its own verdict.
+    Outside a retrieval run it is simply computed.
+
+    ⚠ This is NOT a memo of the drift probe, which must stay per-call
+    (``RetrievalCandidateService._unsafe_source_scope_restricted``: a stale
+    False there would reopen graph/PPR channels before I/O).  What is kept is
+    this one derived verdict, and only these two readers read it: the gate
+    evaluates it once and acts on it, and the map's table COUNT — no
+    evidence, no channel — then states the same thing the gate did.  Every
+    channel gate keeps calling ``unsafe_scope_restricted`` fresh.
+    """
+    from app.services.collection_catalog import knowhow_enumeration_reachable
+    from app.services.retrieval_run import memoized_retrieval_value
+    from app.services.source_scope import current_source_scope
+
+    return memoized_retrieval_value(
+        ("knowhow_completeness_reachable", notebook_id, current_source_scope()),
+        lambda: knowhow_enumeration_reachable(
+            scope_unsafe=unsafe_scope_restricted(retrieval)
+        ),
+    )
+
+
 def document_source_admitted(notebook_id: str, source_id: str) -> bool:
     """按篇读取的来源级兜底:这一篇在不在本 run 的来源天花板与参与集之内。
 
@@ -5421,8 +5458,9 @@ class ReasoningRetriever:
         # 不是任何一条证据的前提。记一条 skip 是为了别把这次失败吞得无影无踪。
         if enumeration_active:
             try:
-                collection_map = (
-                    self.collection_catalog.collection_map(notebook_id)
+                collection_map = self.collection_catalog.collection_map(
+                    notebook_id, knowhow_reachable=knowhow_completeness_reachable(
+                        self.retrieval, notebook_id),
                 )
                 collection_map_text = render_collection_map(collection_map)
             except (AskCancelled, RetrievalControlError):

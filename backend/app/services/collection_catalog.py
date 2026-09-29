@@ -231,20 +231,34 @@ def _make_ceiling(source_ids) -> SourceCeiling:
     return SourceCeiling(source_ids=ids, members=frozenset(ids))
 
 
-def knowhow_enumeration_reachable() -> bool:
+def knowhow_enumeration_reachable(scope_unsafe: Optional[bool] = None) -> bool:
     """Can this run's Knowhow full enumeration read any table at all?
 
     The Knowhow executor (``AskService``'s completeness lane over
     ``knowhow_enumeration_catalog``) reads the ACTIVE notebook's tables only,
-    and only when the run is neither source-narrowed (a table is not a ticked
-    source, and the lane is switched off rather than half-filtered) nor
-    subjectless (a global run has no current library whose tables it would be
-    reading).  The collection map's ``knowhow tables`` count mirrors exactly
-    that, so the map never advertises tables no executor can list — mounted
-    libraries' tables in particular are not counted, because nothing
-    enumerates them.  The executor's gate should read this same predicate.
+    and only when the run is not subjectless (a global run has no current
+    library whose tables it would be reading) and its source scope is SAFE:
+    neither narrowed (a table is not a ticked source, so the lane is switched
+    off rather than half-filtered) nor drifted (a table whose hidden
+    projection source appeared after the freeze is outside the ceiling).
+    The collection map's ``knowhow tables`` count mirrors exactly that, so the
+    map never advertises tables no executor can list — mounted libraries'
+    tables in particular are not counted, because nothing enumerates them.
+
+    ``scope_unsafe`` is the caller's verdict from
+    ``reasoning_retrieval.unsafe_scope_restricted`` (narrowed OR drifted).
+    This module has no retrieval port and cannot run the drift probe itself,
+    so the verdict is PASSED IN: ``reasoning_retrieval
+    .knowhow_completeness_reachable`` evaluates it once per retrieval run
+    (memoized) and hands the same answer to the executor's gate
+    (``AskService._knowhow_completeness_in_scope``) and to the map
+    (``collection_map(knowhow_reachable=...)``) — one predicate, one
+    evaluation.  ``None`` (a caller with no retriever) falls back to the
+    narrowing half alone, which is all that can be known without the probe.
     """
-    return not source_scope_restricted() and not subjectless_run_active()
+    if scope_unsafe is None:
+        scope_unsafe = source_scope_restricted()
+    return not subjectless_run_active() and not scope_unsafe
 
 
 @dataclass(frozen=True)
@@ -501,8 +515,19 @@ class CollectionCatalogService:
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ public
-    def collection_map(self, active_notebook_id: str) -> CollectionMap:
+    def collection_map(
+        self,
+        active_notebook_id: str,
+        *,
+        knowhow_reachable: Optional[bool] = None,
+    ) -> CollectionMap:
         """Build the scope's counts over one connection.
+
+        ``knowhow_reachable`` is the run's verdict on whether the Knowhow
+        complete enumeration may run (``reasoning_retrieval
+        .knowhow_completeness_reachable`` — the same memoized value the
+        executor's gate reads, drift included).  ``None`` falls back to
+        ``knowhow_enumeration_reachable()`` without a drift verdict.
 
         One connection, NOT one snapshot: SQLite hands back the thread's reused
         autocommit connection, so each statement reads its own implicit
@@ -532,7 +557,9 @@ class CollectionCatalogService:
             )
             kg_objects = self._scope_kg_counts(db, notebook_ids)
             knowhow_tables = self._reachable_knowhow_tables(
-                db, notebook_ids, active_notebook_id
+                db, notebook_ids, active_notebook_id,
+                knowhow_enumeration_reachable() if knowhow_reachable is None
+                else knowhow_reachable,
             )
         return CollectionMap(
             notebook_ids=notebook_ids,
@@ -543,8 +570,12 @@ class CollectionCatalogService:
             active_sources=active_sources,
         )
 
-    def collection_map_text(self, active_notebook_id: str) -> str:
-        return render_collection_map(self.collection_map(active_notebook_id))
+    def collection_map_text(
+        self, active_notebook_id: str, *, knowhow_reachable: Optional[bool] = None
+    ) -> str:
+        return render_collection_map(self.collection_map(
+            active_notebook_id, knowhow_reachable=knowhow_reachable,
+        ))
 
     def scope_element_plan(
         self, db: object, notebook_ids: Sequence[str], kind: str
@@ -822,6 +853,41 @@ class CollectionCatalogService:
         return _make_ceiling(
             row[0] for row in signals if scope.allows(notebook_id, row[0])
         )
+
+    def scope_ceiling_digest(
+        self, db: object, notebook_ids: Sequence[str]
+    ) -> str:
+        """One digest of every participant's source ceiling, for cursor identity.
+
+        ``""`` when no participant carries a ceiling — so a cursor cut without
+        one is exactly the cursor cut before this existed.  Otherwise a digest
+        over ``(notebook, ceiling digest)`` pairs in participant order.
+
+        Why a cursor needs it although the scope fingerprints already hash only
+        in-ceiling signals: a ceiling can change without changing which LIVE
+        sources are in it (the requester's own hidden Memory ids ride in the
+        include ceiling and have no signal row), and the KG side's identity is
+        the graph seq vector, which a ceiling change does not move at all.  A
+        continuation cut under one ceiling and resumed under another would
+        then silently skip the rows the new ceiling admits before the cursor
+        position.  Each ceiling's own digest is computed once per ceiling
+        object (``SourceCeiling.digest`` is cached, and built ceilings are
+        memoized per scope), not per page.
+        """
+        pairs = []
+        for notebook_id in notebook_ids:
+            ceiling = self.source_ceiling(db, notebook_id)
+            if ceiling is not None:
+                pairs.append((notebook_id, ceiling.digest))
+        if not pairs:
+            return ""
+        digest = hashlib.blake2b(digest_size=16)
+        for notebook_id, ceiling_digest in pairs:
+            digest.update(notebook_id.encode("utf-8"))
+            digest.update(b"\x00")
+            digest.update(ceiling_digest.encode("utf-8"))
+            digest.update(b"\x00")
+        return digest.hexdigest()
 
     def _ceiling_split(
         self, db: object, notebook_id: str, signals: Sequence[Tuple[str, ...]]
@@ -1197,15 +1263,20 @@ class CollectionCatalogService:
 
     # ----------------------------------------------------------------- knowhow
     def _reachable_knowhow_tables(
-        self, db: object, notebook_ids: Sequence[str], active_notebook_id: str
+        self,
+        db: object,
+        notebook_ids: Sequence[str],
+        active_notebook_id: str,
+        reachable: bool,
     ) -> int:
         """How many Knowhow tables THIS RUN's Knowhow enumeration can reach —
         one index count over ``idx_knowhow_tables_nb``, on the caller's
         connection, or zero queries when it can reach none.
 
         Reach, not presence.  The Knowhow executor lists the ACTIVE notebook's
-        tables only, and not at all on a source-narrowed or subjectless run
-        (``knowhow_enumeration_reachable``).  This used to sum every
+        tables only, and not at all on a subjectless run or one whose source
+        scope is narrowed or drifted (``reachable`` — the run's verdict, see
+        ``knowhow_enumeration_reachable``).  This used to sum every
         participant's tables, so a mounted library's tables — and, in a global
         run, every selected library's — were advertised on the map although
         nothing could list them; the model then spent an action discovering
@@ -1220,7 +1291,7 @@ class CollectionCatalogService:
         Reusing the generic ``count_rows`` primitive keeps this at one bounded
         index count, cheap enough that it needs no cache of its own.
         """
-        if not knowhow_enumeration_reachable():
+        if not reachable:
             return 0
         if active_notebook_id not in notebook_ids:
             return 0

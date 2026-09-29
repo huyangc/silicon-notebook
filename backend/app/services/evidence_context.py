@@ -26,8 +26,9 @@ from app.services.retrieval import (
     RetrievedChunk, RetrievedElement, RetrievedKnowledge, est_tokens,
 )
 # ⛔ 读的是**检索消费边界**那一个点(``knowledge_context`` 的 canonical 折叠范围),
-# 不是本模块的鉴权点。``collection_item_citations`` 的成员资格复核必须继续直调真实
-# 挂载谓词 ``self.notebooks.participant_notebook_ids``;两处没有被一把改掉由
+# 不是本模块的鉴权点。``collection_item_citations`` 的成员资格复核在单库运行里必须
+# 继续直调真实挂载谓词 ``self.notebooks.participant_notebook_ids``(对等运行改问本
+# run 冻结的参与集——每个参与库一条来源天花板,见该函数 docstring);两处没有被一把改掉由
 # ``backend/tests/test_participant_override_guard.py::
 # test_evidence_context_authorization_site_keeps_mount_predicate`` 反向钉住。
 from app.services.retrieval_participants import resolve_retrieval_participant_ids
@@ -38,6 +39,7 @@ from app.services.source_scope import (
     citation_active_id, current_source_scope, node_context_row_within_ceiling,
     notebook_in_scope, record_ceiling_drift, scoped_node_context_row,
     scoped_source_ceiling, source_allowed, source_ceiling_exists,
+    subjectless_run_active,
 )
 
 
@@ -443,10 +445,32 @@ class EvidenceContextService:
         global run's visible-source ceiling — from being cited with that
         hidden element, which the global terminal check then refused as
         ``out_of_ceiling`` and voided the whole answer over.
+
+        WHICH libraries may be cited depends on the run's shape:
+
+        * a single-notebook run asks the real mount predicate
+          (``participant_notebook_ids``) — the active notebook and its valid
+          mounted bases, exactly as before;
+        * a subjectless (global) run asks the run's OWN frozen participant
+          set: the libraries global ask resolved and authorised, each frozen
+          with a per-library source ceiling.  The nominal active's mounts are
+          irrelevant there — it is only the first selected library — so the
+          mount predicate would both miss a selected library that is not
+          mounted on it (listed, never cited) and admit one that is mounted
+          on it but was not selected.  Membership is "has a per-library
+          ceiling entry", deliberately not ``notebook_in_scope``: in peer mode
+          that answer is True for any library outside the set.
         """
-        participants = set(
-            self.notebooks.participant_notebook_ids(active_notebook_id)
-        )
+        scope = current_source_scope()
+        if subjectless_run_active() and scope is not None:
+            participants = {
+                notebook_id
+                for notebook_id, _ceiling in scope.notebook_source_ceilings
+            }
+        else:
+            participants = set(
+                self.notebooks.participant_notebook_ids(active_notebook_id)
+            )
         rows = [
             item for item in items
             if str(getattr(item, "notebook_id", "") or active_notebook_id)

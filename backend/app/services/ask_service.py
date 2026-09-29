@@ -1576,11 +1576,19 @@ class AskService:
         Stepping aside is the existing ``completeness_unavailable`` outcome:
         the run continues on the reasoning path, whose own channels filter by
         the ceiling row by row.
+
+        The three conditions are ``reasoning_retrieval
+        .knowhow_completeness_reachable`` — memoized on the retrieval run, so
+        the collection map's ``knowhow tables`` count reads the very verdict
+        this gate acted on.
         """
-        if subjectless_run_active() or source_scope_restricted():
-            return False
-        drift_probe = getattr(self.retrieval, "unsafe_source_scope_restricted", None)
-        return not (callable(drift_probe) and drift_probe(notebook_id))
+        from app.services.reasoning_retrieval import (
+            knowhow_completeness_reachable,
+        )
+
+        return knowhow_completeness_reachable(
+            getattr(self, "retrieval", None), notebook_id
+        )
 
     def _memory_hits(self, user_id: str, notebook_id: str, query: str):
         # Memory/Knowhow projection sources are intentionally absent from the

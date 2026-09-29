@@ -340,6 +340,11 @@ class ElementCursor:
     scope_notebook_ids: Tuple[str, ...]
     scope_fingerprint: str
     returned_before: int
+    # The run's source-ceiling digest at the opening call
+    # (``CollectionCatalogService.scope_ceiling_digest``; ``""`` = no ceiling,
+    # so an unscoped cursor is what it always was).  Part of the identity:
+    # resuming under a different ceiling is refused like any moved scope.
+    scope_ceiling: str = ""
 
 
 @dataclass(frozen=True)
@@ -352,6 +357,13 @@ class KgObjectCursor:
     each participant's graph generation at once — the notebooks already
     walked past are exactly the ones a position-only cursor could never
     re-check.
+
+    ``scope_ceiling`` is the opening source-ceiling digest (see
+    ``ElementCursor.scope_ceiling``) and matters most HERE: the store's keyset
+    knows only ``(created_at, id)`` and a ceiling change moves no graph seq,
+    so without it a continuation cut under one ceiling would resume under
+    another and silently skip the rows the new ceiling admits before the
+    cursor position.
     """
 
     object_type: str
@@ -360,6 +372,7 @@ class KgObjectCursor:
     object_id: str
     scope_seqs: Tuple[Tuple[str, int, int], ...]
     returned_before: int
+    scope_ceiling: str = ""
 
 
 @dataclass(frozen=True)
@@ -395,6 +408,7 @@ class SourceCursor:
     scope_fingerprint: str
     returned_before: int
     emitted_meta: Tuple[Tuple[str, str], ...] = ()
+    scope_ceiling: str = ""     # see ``ElementCursor.scope_ceiling``
 
 
 @dataclass(frozen=True)
@@ -976,9 +990,13 @@ class CollectionEnumerationService:
                     db, notebook_ids, plan, source_id
                 )
 
-            scope_id = (tuple(notebook_ids), plan.fingerprint)
+            scope_id = (
+                tuple(notebook_ids), plan.fingerprint,
+                self._catalog.scope_ceiling_digest(db, notebook_ids),
+            )
             if cursor is not None:
-                if (cursor.scope_notebook_ids, cursor.scope_fingerprint) != scope_id:
+                if (cursor.scope_notebook_ids, cursor.scope_fingerprint,
+                        cursor.scope_ceiling) != scope_id:
                     return self._element_scope_moved(kind, walk, total)
                 sources, start_after = _resume_sources(sources, cursor)
                 if sources is None:
@@ -1221,9 +1239,13 @@ class CollectionEnumerationService:
             plan = self._catalog.scope_source_plan(db, notebook_ids)
             sources: Optional[Tuple[ScopeSource, ...]] = plan.sources
             total: Optional[int] = plan.total
-            scope_id = (tuple(notebook_ids), plan.fingerprint)
+            scope_id = (
+                tuple(notebook_ids), plan.fingerprint,
+                self._catalog.scope_ceiling_digest(db, notebook_ids),
+            )
             if cursor is not None:
-                if (cursor.scope_notebook_ids, cursor.scope_fingerprint) != scope_id:
+                if (cursor.scope_notebook_ids, cursor.scope_fingerprint,
+                        cursor.scope_ceiling) != scope_id:
                     return self._source_scope_moved(walk, total)
                 sources = _resume_source_plan(plan.sources, cursor)
                 if sources is None:
@@ -1403,6 +1425,7 @@ class CollectionEnumerationService:
         with self._database.connect() as db:
             notebook_ids, tiers = self._participants(db, active_notebook_id)
             opening_seqs = self._kg_seqs(db, notebook_ids)
+            opening_ceiling = self._catalog.scope_ceiling_digest(db, notebook_ids)
             total = self._kg_total(db, notebook_ids, object_type)
             walk_ids: Sequence[str] = notebook_ids
             # Private-Memory exclusion, resolved per participant.  One bounded
@@ -1417,6 +1440,7 @@ class CollectionEnumerationService:
             if cursor is not None:
                 if (
                     cursor.scope_seqs != opening_seqs
+                    or cursor.scope_ceiling != opening_ceiling
                     or cursor.notebook_id not in notebook_ids
                 ):
                     return KgObjectEnumeration(
@@ -1462,7 +1486,8 @@ class CollectionEnumerationService:
                     # Memory ids above, not a page query.
                     ceiling = self._catalog.source_ceiling(db, notebook_id)
                     resume = _kg_cursor(
-                        object_type, notebook_id, after, opening_seqs, walk
+                        object_type, notebook_id, after, opening_seqs, walk,
+                        opening_ceiling,
                     )
                     first_page = True
                     while True:
@@ -1485,7 +1510,9 @@ class CollectionEnumerationService:
                                 name=str(payload.get("name") or "")[
                                     : max(0, int(budget.excerpt_chars))
                                 ],
-                                section_path=str(payload.get("section_path") or ""),
+                                section_path=_owned_section_path(
+                                    payload, _row_get(row, "source_id"), ceiling
+                                ),
                                 notebook_id=notebook_id,
                                 tier=tier,
                                 evidence_element_ids=_evidence_refs(
@@ -1499,7 +1526,8 @@ class CollectionEnumerationService:
                                 _row_get(row, "created_at"), str(_row_get(row, "id"))
                             )
                             resume = _kg_cursor(
-                                object_type, notebook_id, after, opening_seqs, walk
+                                object_type, notebook_id, after, opening_seqs,
+                                walk, opening_ceiling,
                             )
                         if capped:
                             # Everything scanned past the last emitted row was
@@ -1511,7 +1539,8 @@ class CollectionEnumerationService:
                             # chain would never advance.
                             after = scan_after
                             resume = _kg_cursor(
-                                object_type, notebook_id, after, opening_seqs, walk
+                                object_type, notebook_id, after, opening_seqs,
+                                walk, opening_ceiling,
                             )
                             raise _Stop(TRUNCATED_BUDGET)
                         if not lookahead:
@@ -1875,7 +1904,7 @@ def _element_cursor(
     kind: str,
     entry: ScopeSource,
     after: Optional[Tuple[Any, str]],
-    scope_id: Tuple[Tuple[str, ...], str],
+    scope_id: Tuple[Tuple[str, ...], str, str],
     walk: _Walk,
 ) -> ElementCursor:
     return ElementCursor(
@@ -1887,6 +1916,7 @@ def _element_cursor(
         scope_notebook_ids=scope_id[0],
         scope_fingerprint=scope_id[1],
         returned_before=walk.returned_total,
+        scope_ceiling=scope_id[2],
     )
 
 
@@ -1896,6 +1926,7 @@ def _kg_cursor(
     after: Optional[Tuple[Any, str]],
     scope_seqs: Tuple[Tuple[str, int, int], ...],
     walk: _Walk,
+    scope_ceiling: str = "",
 ) -> KgObjectCursor:
     return KgObjectCursor(
         object_type=object_type,
@@ -1904,12 +1935,13 @@ def _kg_cursor(
         object_id=after[1] if after is not None else "",
         scope_seqs=scope_seqs,
         returned_before=walk.returned_total,
+        scope_ceiling=scope_ceiling,
     )
 
 
 def _source_cursor(
     entry: ScopeSource,
-    scope_id: Tuple[Tuple[str, ...], str],
+    scope_id: Tuple[Tuple[str, ...], str, str],
     walk: _Walk,
     emitted: Sequence[Tuple[str, str]],
 ) -> SourceCursor:
@@ -1927,6 +1959,7 @@ def _source_cursor(
         scope_fingerprint=scope_id[1],
         returned_before=walk.returned_total,
         emitted_meta=tuple(emitted),
+        scope_ceiling=scope_id[2],
     )
 
 
@@ -2016,6 +2049,30 @@ def _evidence_entries(value: Any) -> List[Mapping[str, Any]]:
     if not isinstance(value, Sequence):
         return []
     return [entry for entry in value if isinstance(entry, Mapping)]
+
+
+def _owned_section_path(
+    payload: Mapping[str, Any], owner_source_id: Any,
+    ceiling: Optional[SourceCeiling],
+) -> str:
+    """The object's heading breadcrumb, only when its OWN source may be read.
+
+    ``payload.section_path`` is written once, at extraction, from the window of
+    the object's owning source (``kg_ingest`` builds it from that window; a
+    later merge keeps the target's payload rather than re-deriving it), so it
+    is text FROM that source.  An object is listed under a ceiling as soon as
+    one evidence item is in the ceiling, which can be evidence merged in from
+    another source while the owner is unticked — the breadcrumb would then
+    quote an unticked document's heading.  So under a ceiling it is returned
+    only when ``knowledge_objects.source_id`` is inside the ceiling of the
+    object's library, and is empty otherwise; the name stays (it is the
+    object's own label, not a quote).  The same rule the object-detail read
+    applies.  Without a ceiling: unchanged.
+    """
+    section_path = str(payload.get("section_path") or "")
+    if ceiling is None or ceiling.allows(str(owner_source_id or "")):
+        return section_path
+    return ""
 
 
 def _evidence_supported(value: Any, ceiling: SourceCeiling) -> bool:

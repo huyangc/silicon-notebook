@@ -118,12 +118,16 @@ def _element(repo, source_id, element_id, element_type="knowhow_cell"):
 
 
 def _kg(repo, notebook_id, object_id, evidence, *, object_type="concept",
-        owner_source_id=""):
+        owner_source_id="", section_path=None):
     """一个 KG 对象;``evidence`` 是 ``[(source_id, element_id), ...]``。
 
     反向索引(``knowledge_object_sources``)与 evidence JSON 一起写:store 的
     天花板谓词在「已认证」时读前者、否则读后者,两支都必须看到同一份支撑。
+    ``section_path`` 给了才写进 payload(其余用例的 payload 逐字不变)。
     """
+    payload = {"name": object_id}
+    if section_path is not None:
+        payload["section_path"] = section_path
     evidence_json = json.dumps([
         {"source_id": source_id, "source_title": "t", "element_id": element_id,
          "element_type": "formula", "location_label": "p1",
@@ -136,7 +140,7 @@ def _kg(repo, notebook_id, object_id, evidence, *, object_type="concept",
             "payload,evidence,status,owner,last_reviewed,created_at,updated_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (object_id, notebook_id, owner_source_id, object_type,
-             json.dumps({"name": object_id}), evidence_json, "approved", "", "",
+             json.dumps(payload), evidence_json, "approved", "", "",
              NOW, NOW),
         )
         repo._runtime.knowledge.replace_object_sources(
@@ -900,3 +904,183 @@ def test_the_catalog_overview_card_discloses_a_narrowed_scope(tmp_path):
     assert [item.source_id for item in narrowed.result_sets[0].items] == ["a"]
     assert "source_scoped" not in whole.result_sets[0].model_dump()
     assert whole.result_sets[0].coverage.total == 2
+
+
+# ------------------------------------------------ section_path 只取自可读的属主
+
+def _owned_breadcrumb_library(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    _src(repo, nb, "s1", formulas=1)
+    _src(repo, nb, "s2", formulas=1)
+    # X 属于 s2(面包屑是 s2 的标题),s1 只贡献了后来合并进来的证据。
+    _kg(repo, nb, "oX", [("s1", "el-s1-001"), ("s2", "el-s2-001")],
+        owner_source_id="s2", section_path="3.2 竞品价格")
+    _kg(repo, nb, "oY", [("s1", "el-s1-001")],
+        owner_source_id="s1", section_path="1.1 概述")
+    return nb
+
+
+def test_section_path_comes_only_from_a_readable_owner(repo):
+    """天花板 {s1}:X 因 s1 的证据被列出,但它的 ``section_path`` 是 s2(未勾选)
+    的章节标题,不得随清单出去;名字保留。Y 的属主在天花板内,面包屑照常。"""
+    nb = _owned_breadcrumb_library(repo)
+    with _ticked(nb, ["s1"]):
+        scoped = repo.collection_enumeration.enumerate_kg_objects(
+            nb, "concept", budget=_budget())
+    unscoped = repo.collection_enumeration.enumerate_kg_objects(
+        nb, "concept", budget=_budget())
+    by_id = {item.object_id: item for item in scoped.items}
+    assert by_id["oX"].section_path == "" and by_id["oX"].name == "oX"
+    assert by_id["oY"].section_path == "1.1 概述"
+    assert {item.object_id: item.section_path for item in unscoped.items} == {
+        "oX": "3.2 竞品价格", "oY": "1.1 概述"}
+
+
+# ------------------------------------------ 游标身份含天花板摘要(三类集合)
+
+def test_a_cursor_cut_under_one_ceiling_is_refused_under_another(repo):
+    """同一批来源、第 1 页与第 2 页之间换了勾选:续跑被拒(``concurrent_change``,
+    与作用域变动同一条路),新天花板下重新开一份清单是完整的;天花板不变则原样
+    续上;不装天花板时游标的天花板字段为空(与今天逐值相同)。"""
+    nb = _library(repo)
+    small = dict(page_size=1, max_rows=1)
+    calls = {
+        "elements": lambda cursor: repo.collection_enumeration.enumerate_elements(
+            nb, "formula", budget=_budget(**small), cursor=cursor),
+        "kg": lambda cursor: repo.collection_enumeration.enumerate_kg_objects(
+            nb, "concept", budget=_budget(**small), cursor=cursor),
+        "sources": lambda cursor: repo.collection_enumeration.enumerate_sources(
+            nb, budget=_budget(**small), cursor=cursor),
+    }
+    for name, call in calls.items():
+        with _ticked(nb, ["sA", "sC"]):
+            first = call(None)
+        assert first.cursor is not None and first.cursor.scope_ceiling, name
+        with _ticked(nb, ["sA", "sB", "sC"]):
+            moved = call(first.cursor)
+            fresh, fresh_coverage, _ = _walk_all(call)
+        assert moved.items == () and moved.cursor is None, name
+        assert moved.coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE
+        assert fresh_coverage.complete is True, name
+        with _ticked(nb, ["sA", "sC"]):
+            rest, coverage, _ = _walk_all(
+                lambda cursor: call(cursor or first.cursor))
+        assert coverage.complete is True, name
+        unscoped = call(None)
+        assert unscoped.cursor is not None and unscoped.cursor.scope_ceiling == ""
+
+
+def test_a_ceiling_change_that_moves_no_signal_still_moves_every_cursor(repo):
+    """换一份只多了隐藏来源(没有信号行、也不动图 seq)的天花板:三类集合的续跑
+    都必须被拒。KG 游标的身份原本只有 seq 向量,不拒就会悄悄跳过新天花板在游标
+    之前放进来的对象;元素与来源清单的指纹只哈希在天花板内的信号行,同样看不见
+    这种变化——身份里的天花板摘要是唯一能看见它的东西。"""
+    nb = _library(repo)
+    _src(repo, nb, "sA2", formulas=2)
+    budget = dict(page_size=1, max_rows=1)
+    calls = {
+        "elements": lambda cursor: repo.collection_enumeration.enumerate_elements(
+            nb, "formula", budget=_budget(**budget), cursor=cursor),
+        "kg": lambda cursor: repo.collection_enumeration.enumerate_kg_objects(
+            nb, "concept", budget=_budget(**budget), cursor=cursor),
+        "sources": lambda cursor: repo.collection_enumeration.enumerate_sources(
+            nb, budget=_budget(**budget), cursor=cursor),
+    }
+    base = {"mode": "include", "source_ids": ["sA", "sA2"], "narrowed": True}
+    for name, call in calls.items():
+        with source_scope_context(nb, base):
+            first = call(None)
+        with source_scope_context(
+            nb, {**base, "hidden_source_ids": ["memory-of-mine"]}
+        ):
+            moved = call(first.cursor)
+        assert first.cursor is not None, name
+        assert moved.coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE, name
+        assert moved.cursor is None, name
+
+
+# --------------------------------- 地图的 Knowhow 表数与执行器的闸是同一个判据
+
+def _knowhow_notebook(repo):
+    notebook = repo.create_notebook(NotebookCreate(name="nb")).id
+    _src(repo, notebook, "s1", formulas=1)
+    repo.create_knowhow_table(
+        notebook, "T1", "", [{"name": "Topic", "role": "anchor"}])
+    return notebook
+
+
+def _frozen_all_selected(repo, notebook_id, visible):
+    """浏览器「全选」形状的冻结:可见来源 + 本人的隐藏来源,narrowed=False。"""
+    owner = repo.current_user().id
+    hidden = repo._runtime.source_store.hidden_source_ids(notebook_id, owner)
+    return source_scope_context(notebook_id, {
+        "mode": "include", "source_ids": list(visible), "narrowed": False,
+        "hidden_source_ids": list(hidden), "owner_id": owner,
+    })
+
+
+@pytest.mark.parametrize("drifted", [False, True])
+def test_map_knowhow_count_follows_the_executor_gate_under_drift(rrepo, drifted):
+    """冻结之后又出现一个可见来源 = 漂移:确定性 Knowhow 全量枚举让路
+    (``AskService._knowhow_completeness_in_scope`` 为假),地图也必须报 0 张表;
+    冻结完好时两边都照常(1 张)。两边读的是同一个按 run 记忆的判定。"""
+    from app.services.reasoning_retrieval import knowhow_completeness_reachable
+
+    notebook = _knowhow_notebook(rrepo)
+    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(rrepo, llm)
+    ask_service = rrepo._runtime.ask_service()
+    with _frozen_all_selected(rrepo, notebook, ["s1"]):
+        if drifted:
+            _src(rrepo, notebook, "s-late", formulas=1)
+        with retrieval_run(run_kind="ask_reasoning", actor_id=_ACTOR):
+            gate = ask_service._knowhow_completeness_in_scope(notebook)
+            assert knowhow_completeness_reachable(
+                retriever.retrieval, notebook) is gate
+            result = retriever.run(notebook, "哪些公式", "", limits=limits)
+    assert gate is (not drifted)
+    expected = 0 if drifted else 1
+    assert f"knowhow tables: {expected} |" in result.collection_map_text
+
+
+# --------------------------------------- 对等模式:引用只看本 run 冻结的参与集
+
+def _global_libraries(repo):
+    """A 锚点;B 挂在 A 上且被选中;C 被选中但没挂在 A 上;D 挂在 A 上却没被选中。"""
+    ids = {}
+    for name in ("A", "B", "C", "D"):
+        ids[name] = repo.create_notebook(NotebookCreate(name=name)).id
+        _src(repo, ids[name], f"s{name}", formulas=1)
+    for name in ("B", "D"):
+        repo.mark_notebook_base(ids[name])
+    repo.replace_notebook_bases(ids["A"], [ids["B"], ids["D"]], _ACTOR)
+    return ids
+
+
+def test_peer_citations_follow_the_frozen_participant_set(repo):
+    ids = _global_libraries(repo)
+    selected = [ids["A"], ids["B"], ids["C"]]
+    ceilings = {ids[n]: [f"s{n}"] for n in ("A", "B", "C")}
+    evidence_context = repo._runtime.ask_service().evidence_context
+    stray = SourceItem(source_id="sD", source_title="D", doc_type_label="",
+                       summary="", notebook_id=ids["D"], tier="personal")
+    with _peer_run(selected, ceilings):
+        roster = repo.collection_enumeration.enumerate_sources(
+            ids["A"], budget=_budget())
+        elements = repo.collection_enumeration.enumerate_elements(
+            ids["A"], "formula", budget=_budget())
+        documents = evidence_context.collection_item_citations(
+            list(roster.items) + [stray], active_notebook_id=ids["A"])
+        element_cites = evidence_context.collection_item_citations(
+            elements.items, active_notebook_id=ids["A"])
+    assert [item.source_id for item in roster.items] == ["sA", "sB", "sC"]
+    assert set(documents) == {"sA", "sB", "sC"}           # C 有引用,D 没有
+    assert {c.notebook_id for c in documents.values()} == set(selected)
+    assert {c.source_id for c in element_cites.values()} == {"sA", "sB", "sC"}
+    # 单库对照:A 的挂载表(B、D)照旧可引,C 不在挂载表里。
+    single = evidence_context.collection_item_citations(
+        [SourceItem(source_id=f"s{n}", source_title=n, doc_type_label="",
+                    summary="", notebook_id=ids[n], tier="personal")
+         for n in ("A", "B", "C", "D")],
+        active_notebook_id=ids["A"])
+    assert set(single) == {"sA", "sB", "sD"}
