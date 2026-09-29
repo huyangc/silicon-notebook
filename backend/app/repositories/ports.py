@@ -2283,6 +2283,8 @@ class KnowledgeStorePort(Protocol):
         object_type: str,
         after: tuple[object, str] | None,
         limit: int,
+        *,
+        allowed_source_ids: Sequence[str] | None = None,
     ) -> list[Any]:
         """One keyset page of one notebook's knowledge objects of ONE type,
         ordered by ``(created_at, id)`` ascending and bounded by ``limit``.
@@ -2307,6 +2309,15 @@ class KnowledgeStorePort(Protocol):
         objects whose source is in ``memory_source_ids`` inside that same
         ceiling.  A ``NOT EXISTS`` against ``sources`` here would be a second
         unindexed residual with the identical unbounded-skip hazard.
+
+        The per-run source ceiling is the exception, and it lives IN the
+        query: ``allowed_source_ids`` (``None`` = no ceiling, byte-identical
+        statement; empty = deny all, ``[]`` without a query) keeps only
+        objects with at least one EVIDENCE item from a listed source, below
+        the ``LIMIT``.  A ceiling routinely excludes most of a library, so
+        filtering it after the ``LIMIT`` would starve every page; the keyset
+        ordering and cursor are unchanged.  ``count_knowledge``'s
+        ``supported_by_source_ids`` applies the identical predicate.
 
         ``after`` is the opaque ``(created_at, id)`` pair of the last consumed
         row (see ``element_page_rows``).  Rows carry id / object_type /
@@ -2387,8 +2398,22 @@ class KnowledgeStorePort(Protocol):
     # a sequence (empty = deny all) → no text from a source outside it reaches
     # any field (see the PostgreSQL store's docstring).
     def node_context(self, notebook_id: object, object_id: object, *, check_access: bool = True, allowed_source_ids: Sequence[str] | None = None, name_only: bool = False) -> object: ...
+    # ``supported_by_source_ids``: None → unrestricted (byte-identical SQL);
+    # a sequence (empty = 0) → only objects with an evidence item from a listed
+    # source — ``knowledge_object_page_rows(allowed_source_ids=...)``'s own
+    # predicate.  ``excluding_owner_source_ids``: objects whose OWNER column
+    # ``knowledge_objects.source_id`` is listed are not counted (the executor's
+    # private-Memory row drop, in SQL).  See the PostgreSQL store's docstring.
     @staticmethod
-    def count_knowledge(db: object, notebook_id: str, object_type: str, statuses: object) -> int: ...
+    def count_knowledge(
+        db: object,
+        notebook_id: str,
+        object_type: str,
+        statuses: object,
+        *,
+        supported_by_source_ids: Sequence[str] | None = None,
+        excluding_owner_source_ids: Sequence[str] = (),
+    ) -> int: ...
     @staticmethod
     def source_has_kg(db: object, source_id: str) -> bool: ...
     @classmethod
