@@ -1065,13 +1065,21 @@ PR-A 补的是 chunk 通用问答已有、reasoning 此前没有的一项能力�
   已用量与包头预留、仍由字符份额反推元素数），适合只介绍一篇或少数几篇，代价是之后的读取
   通常落到既有的 `document_read_budget` skip——这个代价写进 prompt，模型据此取舍。总闸的
   「首读份额可行」判据仍按 brief 的均分份额算：thorough 只放大单次份额，不改变判据结论。
-  装配侧的分区上限在 thorough 路径上天然不触发（所有读取共用 `chunk_context_chars // 4`
+  thorough 打破了 brief 下「份额单调不降」的性质：它之后的读取份额可能只剩几个字（实测
+  thorough 接 thorough 第二篇拿到 1 字、1 个元素）。所以执行体的 budget skip 下界与总闸
+  同口径——份额不足一个元素的计费行（`DOCUMENT_READ_MIN_CHARS_PER_ELEMENT`）就不发起
+  读取，而不是只拦 `<= 0`；否则那次读取白发 I/O、占掉一次上限、那一篇本 run 再也读不了，
+  账目还会把一篇有正文的文档说成「暂无依据」。纯 brief 路径按单调性到不了这个区间，逐字节
+  不变。装配侧的分区上限在 thorough 路径上天然不触发（所有读取共用 `chunk_context_chars // 4`
   字符池，远小于共享上限的一半预算）。与 `coverage` 有两处刻意的差异：① 匹配前 `strip()`
   + 小写（`"Thorough"` 只有一种读法，按 harness「可接受的偏差做兼容」）；② 非空非法值
-  留原值（截 60 字）进回喂账目，单列一句「只接受 brief 或 thorough，…那几次已按 brief
-  读取」——模型按「以为自己花了多少预算」规划后续读取，不告诉它就会以为预算已经花光。
+  留原值（非字符串按 JSON 渲染成模型写过的样子，内部空白折叠，截 60 字）进回喂账目，单列
+  一句「只接受 brief 或 thorough，…那几次已按 brief 份额处理」——模型按「以为自己花了多少
+  预算」规划后续读取，不告诉它就会以为预算已经花光。
   取样形状填错没有这个后果，所以 `coverage` 仍不教学。轨迹 detail 只在 thorough 时带
   稀疏键 `depth`，brief 与缺省时的份额、detail 键集合与账目逐字节同接入前。
+  `read_document.depth` 的 `thorough` 与检索档位 `RetrievalEffort` 的 `thorough` 档只是
+  同名，两者无关：前者是单次读取的预算切法，后者是整个请求的检索档位。
 
 - **被否的 `sampling:"summary"/"excerpts"`**：早期讨论曾考虑把这个参数命名为
   `sampling`，取值 `"summary"`（生成式摘要）或 `"excerpts"`（原文摘录）。这个方向被否，因为

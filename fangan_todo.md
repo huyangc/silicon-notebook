@@ -122,7 +122,14 @@
       优化方向二选一：给 `SourceStorePort` 加「按一组 offsets 批量取元素」的原语，
       或让首页之后的每次取页跳过存在性检查与计数（总数在首页已经拿到，执行体的
       `stable_count` 只需要最后再核一次）。零锚点路径与目录补摘要通道共享同一份收益。
-      规模现状可接受（每次读取的元素数已由字符份额反推压到个位数），所以登记而不在 PR-A 内做。
+      **PR-4（`read_document.depth`）之后口径改为按 run 计**：brief 下每次读取的元素数由字符
+      份额反推、仍是个位数；`depth="thorough"` 把整份剩余预算集中到**单次**读取，单次元素数
+      按档位为 overview 8、standard 22、deep 约 38、thorough 档约 61、exhaustive 受元素池
+      封顶 64。每个元素一次 `source_elements_page(offset, limit=1)`（PG 每次含存在性检查与
+      `COUNT(*)`），单次 thorough 读取约 66–194 次**串行**往返（standard 到 exhaustive）。
+      按 run 计的总量上界没变（两个池本来就是 run 级），但它现在可以落在一次动作、一个
+      trace 步里。**优先级提前**：优先做批量按 offset 取元素的原语，或首页之后跳过存在性
+      检查与计数。
 - [ ] **`structured_block` 挤空 reasoning 的原文段（PR-B 风险 a）**：`_answer_reasoning` 里
       knowhow 整表预览与集合地图先于 chunk 段装配、共用同一份 `chunk_context_chars`，整表足够大
       时 chunk 段可以一条不剩——`REASONING_EXACT_RESERVE` 的前缀席位只在 chunk 段拿到字符时才

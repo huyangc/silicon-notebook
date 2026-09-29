@@ -349,7 +349,7 @@ def legacy_action_ledger_note(
                "拿不到原文的那几篇请改读别的文档,或如实说明它暂无依据。"
                if failed else "")
             + (f"read_document.depth 只接受 brief 或 thorough,{rejected}"
-               "不是可选值,那几次已按 brief 读取。" if rejected else "")
+               "不是可选值,那几次已按 brief 份额处理。" if rejected else "")
             + "）"
         )
     return note
@@ -3524,7 +3524,9 @@ class ReasoningRetriever:
           撞号——那不会报错,只会把引用静静指错。
 
         判据按 brief 的均分份额算(最坏情况:每一次都只拿到 1/N)。`depth=
-        "thorough"`(PR-4)只放大单次份额、从不缩小,所以它不改变这把闸的结论。
+        "thorough"`(PR-4)只放大单次份额、从不缩小,所以它不改变这把闸的结论;
+        它会把后续读取的份额压到零头,那些读取由执行体里**同口径**的
+        `document_read_budget` skip 兜住(份额不足一个元素的计费行就不发起读取)。
 
         这三种都是**部署配置错误**,而这把闸的选择是静默降级:动作整体不提供(五处
         同步消失),模型看到的仍是一个自洽的动作空间,而不是一个每次调用都被服务端
@@ -4465,13 +4467,20 @@ class ReasoningRetriever:
                 #   (降级会让模型以为自己拿到了整份预算)。coverage 保持精确匹配
                 #   不动——那一格的既有行为与用例不在本次范围内;
                 # * 非空非法值留原值(截 60 字)做教学,理由见 `ReflectDecision`。
-                # 非字符串(`true`、数字)同样是非法值;JSON null 与缺省同义。
+                # 非字符串(`true`、数字、列表)同样是非法值,回显时按 JSON 渲染成
+                # 模型**写过的样子**(`true` 而不是 Python 的 `True`),否则教学句
+                # 引的是一个模型从没写过的值;JSON null 与缺省同义。回显值折叠内部
+                # 空白(换行、连续空白 → 单个空格),与账目里标题的折叠同法——原样
+                # 重放一个带换行的值会把账目那一句拆成几行。
                 depth_raw = read_document_request.get("depth")
-                depth_text = "" if depth_raw is None else str(depth_raw).strip()
-                if depth_text.lower() in READ_DOCUMENT_DEPTHS:
-                    d.read_document_depth = depth_text.lower()
-                elif depth_text:
-                    d.read_document_depth_rejected = depth_text[:60]
+                depth = as_text(depth_raw).lower()
+                if depth in READ_DOCUMENT_DEPTHS:
+                    d.read_document_depth = depth
+                elif depth_raw is not None:
+                    shown = (depth_raw if isinstance(depth_raw, str)
+                             else json.dumps(depth_raw, ensure_ascii=False))
+                    d.read_document_depth_rejected = " ".join(
+                        shown.split())[:60]
             if outline:
                 # 与 enumerate 分支同形:只在这一把闸打开时才看这个字段,关闭态
                 # 连读都不读(模型硬吐一份大纲也不会有任何影响)。夹取与丢弃的规则
@@ -6121,12 +6130,23 @@ class ReasoningRetriever:
         # `pool_share`)在 overview 档能换来 16 次查询、每条不到 50 字正文,即每条
         # 都被截得只剩章节标题,贵且读不出这篇文档讲什么。按
         # `DOCUMENT_READ_MIN_CHARS_PER_ELEMENT` 反推能养活几个元素,I/O 降一个
-        # 量级,送进合成的正文反而更长。`max(1, ...)` 保证字符份额只够一个元素时
-        # 仍读一个(它随后会被 `share_chars <= 0` 那道闸兜住)。
+        # 量级,送进合成的正文反而更长。`max(1, ...)` 只是让这个式子在字符份额不足
+        # 一个元素时也有定义;那种份额根本不会发起读取——下面那道闸按
+        # `DOCUMENT_READ_MIN_CHARS_PER_ELEMENT` 拦下它。
+        #
+        # 闸的下界与总闸的「首读份额可行」判据**同口径**(连一个元素的计费行都
+        # 装不下就不读),而不是 `<= 0`:份额只有几个字时发起读取是白发 I/O、占掉
+        # 一次次数上限、这一篇进 `document_reads_by_id` 本 run 再也读不了,产物却
+        # 只剩章节标题或为空——账目会让模型把一篇有正文的文档说成「暂无依据」。
+        # 纯 brief 路径到不了 `0 < share_chars < 下界`:每次读取至多用掉自己的份额,
+        # 剩余量按剩余次数均分后份额单调不降,首读又已被总闸保证 ≥ 下界,所以 brief
+        # 与接入 depth 之前逐字节一致。打破单调性的是 thorough(PR-4):它可以把
+        # 剩余量用到只剩零头,之后的读取靠这道闸落成 `document_read_budget` skip。
         share_elements = min(
             pool_share,
             max(1, share_chars // DOCUMENT_READ_MIN_CHARS_PER_ELEMENT))
-        if share_elements <= 0 or share_chars <= 0:
+        if (share_elements <= 0
+                or share_chars < DOCUMENT_READ_MIN_CHARS_PER_ELEMENT):
             record(TraceStep(
                 step_type="skip",
                 summary=("跳过按篇读取原文:本轮的原文取样预算已经用完,"
