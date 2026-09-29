@@ -1123,7 +1123,11 @@ chunk 上），所以 `chunk_bruteforce_skipped(large_library_no_ann)` 出现在
 `lexical_mode`（`report_ann_only`、`report_delta_fallback`、`report_quality_union` 或
 `non_report_union`）；`site=_retrieve_scored` 给出宽口径
 `candidate_ms` 以及 `scale_index_ms`、`kg_ann_ms`、`kg_lexical_ms`。retrieval-run 汇总另含
-`chunk_fts_timeouts` 与 `chunk_fts_circuit_skips`。这些事件还携带兼容的 `stage` / `latency_ms`
+`chunk_fts_timeouts` 与 `chunk_fts_circuit_skips`。单库 ANN∪FTS 联合检索里词法半发生非超时
+失败时不记 model_error、不上横幅（语义半照常产出候选）：除了叶子自己那条 `site=chunk_fts`、
+`status=failed_open` 的耗时样本（叶子查询本身抛错时才有），另发一条 `ask_stage` 事件（`stage=chunk_fts`、
+`site=chunk_ann_union`、`status=failed_open`，只带 `notebook_id` 与异常类名 `error_type`，不带
+异常消息）。它用独立的 `site`，免得 `diag_retrieval_latency.py` 把叶子失败计两次。这些事件还携带兼容的 `stage` / `latency_ms`
 字段（`chunk_scale_index`、`chunk_ann`、`chunk_fts` 或 `kg_candidates`），因此
 `diag.py slow` 与 `diag.py latency` 都会聚合它们。联邦「只借不加载」腿发出的
 `chunk_scale_index` 事件额外带 `lane=peek`：它量的是一次字典查找而不是一次索引加载，所以

@@ -83,6 +83,8 @@ _MODEL_ERROR_STAGES = frozenset({
     "answer",
     "chunk_ann_delta",
     "chunk_ann_query",
+    # No longer produced (ANN-union FTS failures are events now); kept so
+    # persisted responses that recorded it still pass the display allow-list.
     "chunk_fts",
     # No producer since 2026-09-29 (the keyword arm's failures became an
     # ``ask_stage`` event, never a banner); kept so historically persisted

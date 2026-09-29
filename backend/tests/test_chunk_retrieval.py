@@ -416,6 +416,83 @@ def test_ann_union_lexical_timeout_is_not_a_model_error(repo, monkeypatch):
     assert noted == []
 
 
+def test_ann_union_lexical_failure_is_an_event_not_a_model_error(
+    repo, monkeypatch
+):
+    """ANN∪FTS 联合检索里词法半发生非超时异常(例如旧库缺词法索引):语义半的
+    候选照常返回,答案不受影响,所以不进 ``_ASK_MODEL_ERRORS``、不上「模型服务调用
+    失败」横幅;改记一条 ``ask_stage`` 事件(stage=chunk_fts、status=failed_open、
+    只带异常类名),不含异常消息。"""
+    from app.core.ask_context import _ASK_MODEL_ERRORS
+
+    query = "engram memory architecture"
+    nb, _ = _seed_chunks(repo, [f"{query} " * 20])
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    idx = repo._scale_index(nb.id, allow_stale=True)
+    fts_calls = []
+
+    def _broken(*_args, **_kwargs):
+        fts_calls.append("called")
+        raise RuntimeError("secret database diagnostic")
+
+    monkeypatch.setattr(repo._runtime.knowledge, "chunk_fts_search", _broken)
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+    sink = []
+    token = _ASK_MODEL_ERRORS.set(sink)
+    try:
+        result = repo._retrieve_chunks_ann(
+            nb.id, query, repo._embed_query(query), idx, recall=2
+        )
+    finally:
+        _ASK_MODEL_ERRORS.reset(token)
+
+    assert fts_calls == ["called"]
+    assert result is not None and result[0]  # semantic half still answers
+    assert sink == []
+    assert not [e for e in events if e.get("kind") == "model_error"]
+    arm = [e for e in events if e.get("site") == "chunk_ann_union"]
+    assert arm == [{
+        "kind": "ask_stage",
+        "stage": "chunk_fts",
+        "site": "chunk_ann_union",
+        "notebook_id": nb.id,
+        "status": "failed_open",
+        "error_type": "RuntimeError",
+    }]
+    assert "secret database diagnostic" not in json.dumps(events)
+
+
+def test_ask_chunk_lexical_failure_shows_no_chunk_fts_banner(repo, monkeypatch):
+    """同一条原则落到响应上:词法半坏掉时 ``AskResponse.model_errors`` 里没有
+    ``chunk_fts``(前端 ModelErrorPanel 只要列表非空就上横幅),答案照常产出。"""
+    query = "engram memory architecture"
+    nb, _ = _seed_chunks(repo, [f"{query} " * 20])
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    repo.settings.query_rewrite_enabled = False
+    repo.settings.chunk_kg_overlay_enabled = False
+    bind_chat_client(repo, "ask_answer", _FakeLLM("Engram stores memory [k1]."))
+    fts_calls = []
+
+    def _broken(*_args, **_kwargs):
+        fts_calls.append("called")
+        raise RuntimeError("secret database diagnostic")
+
+    monkeypatch.setattr(repo._runtime.knowledge, "chunk_fts_search", _broken)
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+
+    resp = repo.ask_chunk(nb.id, AskRequest(question=query, mode="chunk"))
+
+    assert fts_calls
+    assert any(e.get("site") == "chunk_ann_union" for e in events)
+    assert "chunk_fts" not in [e.stage for e in resp.model_errors]
+    assert resp.answer
+    assert resp.citations
+
+
 @pytest.mark.parametrize("query", ["set_db 命令", 'compare "timing exception"'])
 def test_report_ann_keeps_exact_channel_without_generic_fts_union(
     repo, monkeypatch, query
