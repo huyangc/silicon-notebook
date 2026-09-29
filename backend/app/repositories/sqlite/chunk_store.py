@@ -9,7 +9,7 @@ from app.repositories.like_pattern import escape_like_pattern
 from app.repositories.ports import ChunkWrite
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.id_binding import (
-    drive_by, ids_param, member_of, not_member_of,
+    bind_ids, drive_by, member_of, not_member_of,
 )
 from app.repositories.sqlite.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 from app.domain.vector_index import encode_vector
@@ -86,15 +86,16 @@ class ChunkStore:
         params: list[object] = [notebook_id, actor_id]
         source_clause = ""
         if allowed_source_ids is not None:
-            source_payload = ids_param(allowed_source_ids)
-            if source_payload == "[]":
+            source_ids = list(dict.fromkeys(allowed_source_ids))
+            if not source_ids:
                 return []
+            ceiling = bind_ids(source_ids, sort=True)
             # ``member_of``: walk ``q.id`` order and stop at ``LIMIT``; a
             # ceiling-driven plan fetched and sorted every question of every
             # listed source (49k ids: 78 ms vs 16 ms; one id pays a bounded
             # notebook scan, 8 ms on 98k questions).
-            source_clause = f"AND {member_of('q.source_id')} "
-            params.append(source_payload)
+            source_clause = f"AND {member_of('q.source_id', ceiling)} "
+            params.append(ceiling.param)
         params.append(int(limit))
         with self.database.connect() as db:
             rows = db.execute(
@@ -137,24 +138,31 @@ class ChunkStore:
         *,
         presence_only: bool = False,
     ):
-        values = ids_param(source_ids)
-        if values == "[]":
+        values = list(dict.fromkeys(source_ids))
+        if not values:
             return []
+        sources = bind_ids(values)
+        # ``+c.notebook_id``: without planner statistics (production never
+        # runs ANALYZE) the notebook index would win and every requested id
+        # would rescan the notebook's chunks (2,000 ids: 2.6 s); the unary
+        # plus leaves ``idx_chunks_source`` as the only candidate.
         if presence_only:
+            # The ordinal of each requested id is the output order, so the
+            # JSON array is walked directly rather than through a predicate.
             return db.execute(
-                "SELECT CAST(requested.value AS TEXT) AS source_id "
+                "SELECT requested.value AS source_id "
                 "FROM json_each(?) AS requested "
                 "WHERE EXISTS (SELECT 1 FROM chunks c "
-                "WHERE c.notebook_id=? "
-                "AND c.source_id=CAST(requested.value AS TEXT)) "
+                "WHERE +c.notebook_id=? AND c.source_id=requested.value) "
                 "ORDER BY CAST(requested.key AS INTEGER)",
-                (values, notebook_id),
+                (sources.param, notebook_id),
             ).fetchall()
         # ``drive_by``: every chunk of the listed sources is the answer, so one
         # ``idx_chunks_source`` seek per id is proportional to the output.
         return db.execute(
-            f"SELECT id FROM chunks WHERE notebook_id=? AND {drive_by('source_id')}",
-            (notebook_id, values),
+            "SELECT id FROM chunks WHERE +notebook_id=? "
+            f"AND {drive_by('source_id', sources)}",
+            (notebook_id, sources.param),
         ).fetchall()
 
     def source_elements_for_chunking(self, source_id: str) -> list:
@@ -328,12 +336,16 @@ class ChunkStore:
         ids = list(chunk_ids)
         if not ids:
             return
-        placeholders = ",".join("?" for _ in ids)
+        # Every chunk of a re-projected knowhow table can be listed: one JSON
+        # parameter, each id a primary-key seek (``drive_by``).
+        chunks = bind_ids(ids)
         connection.execute(
-            f"DELETE FROM chunks_fts WHERE chunk_id IN ({placeholders})", ids
+            f"DELETE FROM chunks_fts WHERE {drive_by('chunk_id', chunks)}",
+            (chunks.param,),
         )
         connection.execute(
-            f"DELETE FROM chunks WHERE id IN ({placeholders})", ids
+            f"DELETE FROM chunks WHERE {drive_by('id', chunks)}",
+            (chunks.param,),
         )
 
     def insert_rows(
@@ -437,18 +449,22 @@ class ChunkStore:
         source_ids: Sequence[str],
     ):
         ids = list(dict.fromkeys(chunk_ids))
-        sources = ids_param(source_ids)
-        if not ids or (source_mode == "include" and sources == "[]"):
+        sources = list(dict.fromkeys(source_ids))
+        if not ids or (source_mode == "include" and not sources):
             return []
         # ``chunk_ids`` is one ``_in_batches`` window (<= 900 candidate primary
-        # keys): they drive the lookup; the ceiling only filters.
+        # keys): they drive the lookup; the ceiling only filters.  The notebook
+        # predicate is ``+c.notebook_id`` so that, without planner statistics
+        # (production), the notebook index cannot win over the primary key
+        # (49k ceiling: 19.4 ms notebook scan vs 4.5 ms by primary key).
         id_placeholders = ",".join("?" for _ in ids)
         source_clause = ""
         params: list[object] = [notebook_id, *ids]
-        if source_mode in {"include", "exclude"} and sources != "[]":
+        if source_mode in {"include", "exclude"} and sources:
+            ceiling = bind_ids(sources, sort=True)
             predicate = member_of if source_mode == "include" else not_member_of
-            source_clause = f" AND {predicate('c.source_id')}"
-            params.append(sources)
+            source_clause = f" AND {predicate('c.source_id', ceiling)}"
+            params.append(ceiling.param)
         memory_clause = (
             " AND (s.source_type <> 'memory' OR EXISTS ("
             "SELECT 1 FROM memory_items m "
@@ -460,7 +476,7 @@ class ChunkStore:
             "c.notebook_id AS chunk_notebook_id,s.title AS source_title "
             "FROM chunks c JOIN sources s "
             "ON s.id=c.source_id AND s.notebook_id=c.notebook_id "
-            f"WHERE c.notebook_id=? AND c.id IN ({id_placeholders})"
+            f"WHERE +c.notebook_id=? AND c.id IN ({id_placeholders})"
             f"{source_clause}{memory_clause}",
             params,
         ).fetchall()

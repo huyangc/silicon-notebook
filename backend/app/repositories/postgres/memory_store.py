@@ -1383,12 +1383,13 @@ class MemoryStore:
     ) -> dict[str, MemoryRecord]:
         if not memory_ids:
             return {}
-        placeholders = ",".join("%s" for _ in memory_ids)
+        # The whole promotion queue's memories (grows with the queue): one
+        # array parameter, each id a primary-key probe (id_binding class 3).
         rows = db.execute(
             f"SELECT {self._select_columns()} FROM memory_items m "
             "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
-            f"WHERE m.id IN ({placeholders})",
-            list(memory_ids),
+            "WHERE m.id=ANY(%s)",
+            (list(memory_ids),),
         ).fetchall()
         return {str(row["id"]): self._record(row) for row in rows}
 

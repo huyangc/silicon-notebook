@@ -17,16 +17,17 @@ from app.repositories.postgres._store_utils import (
     placeholders,
 )
 from app.repositories.postgres.database import PostgresDatabase
-from app.repositories.postgres.id_binding import bind_ids, execute_ids
+from app.repositories.postgres.id_binding import (
+    bind_ids,
+    execute_bound,
+    execute_ids,
+    member_of,
+    not_member_of,
+)
 from app.repositories.postgres.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 from app.repositories.postgres.search import chunk_section_rows
 from app.domain.vector_index import encode_vector
 from app.domain.indexing_pipeline import IndexingPipelineStalePlanError
-
-
-def _plain_execute(connection, statement, params):
-    """The unscoped twin of ``execute_ids``: no id list, plan cache kept."""
-    return connection.execute(statement, params)
 
 
 # Bounded fan-out for the element -> chunk point lookup. Deliberately a local
@@ -108,18 +109,19 @@ class ChunkStore:
     ) -> list[dict]:
         params: list[object] = [notebook_id, actor_id]
         source_clause = ""
-        execute = _plain_execute
+        ceiling = None
         if allowed_source_ids is not None:
             source_ids = list(dict.fromkeys(allowed_source_ids))
             if not source_ids:
                 return []
             ceiling = bind_ids(source_ids)
-            source_clause = f"AND q.source_id=ANY({ceiling.array_sql}) "
+            # ``member_of``: the list filters the ``q.id`` walk under LIMIT; the
+            # semi-join form was slower (49k: 273 -> 633 ms uniform).
+            source_clause = f"AND {member_of('q.source_id', ceiling)} "
             params.append(ceiling.param)
-            execute = execute_ids
         params.append(int(limit))
         with self.database.connect() as connection:
-            rows = execute(
+            rows = execute_bound(
                 connection,
                 "SELECT q.id,q.chunk_id,q.source_id,q.vector "
                 "FROM chunk_questions q JOIN chunks c "
@@ -131,6 +133,7 @@ class ChunkStore:
                 "AND m.notebook_id=q.notebook_id AND m.created_by=%s)) "
                 + source_clause + "ORDER BY q.id COLLATE \"C\" LIMIT %s",
                 params,
+                ceiling,
             ).fetchall()
         output = []
         for row in rows:
@@ -169,22 +172,28 @@ class ChunkStore:
         values = list(dict.fromkeys(source_ids))
         if not values:
             return []
+        sources = bind_ids(values)
         if presence_only:
-            return connection.execute(
+            # The ordinal of each requested id is the output order, so the
+            # list is unnested directly (WITH ORDINALITY) rather than through
+            # a membership predicate; a custom plan costs its true length.
+            return execute_ids(
+                connection,
                 "SELECT requested.source_id FROM "
-                "unnest(%s::text[]) WITH ORDINALITY "
+                f"unnest({sources.sql}) WITH ORDINALITY "
                 "AS requested(source_id, ordinal) "
                 "WHERE EXISTS (SELECT 1 FROM chunks c "
                 "WHERE c.notebook_id=%s "
                 "AND c.source_id=requested.source_id) "
                 "ORDER BY requested.ordinal",
-                (values, notebook_id),
+                (sources.param, notebook_id),
             ).fetchall()
-        sources = bind_ids(values)
+        # ``member_of``: every chunk of the listed sources; the semi-join form
+        # was slower (49k: 27 -> 110 ms uniform).
         return execute_ids(
             connection,
             "SELECT id FROM chunks WHERE notebook_id=%s "
-            f"AND source_id=ANY({sources.array_sql})",
+            f"AND {member_of('source_id', sources)}",
             (notebook_id, sources.param),
         ).fetchall()
 
@@ -448,23 +457,26 @@ class ChunkStore:
             return []
         source_clause = ""
         params: list[object] = [notebook_id, *ids]
-        execute = _plain_execute
+        bound = None
         if source_mode in {"include", "exclude"} and sources:
             bound = bind_ids(sources)
-            source_clause = (
-                f" AND c.source_id=ANY({bound.array_sql})"
+            # ``member_of`` / ``not_member_of``: <= 64 candidate keys drive and
+            # the list filters them.  The semi-join form planned faster on
+            # skewed statistics (49k: 218 -> 28 ms) but ran slower on uniform
+            # ones (7.5 -> 11.5 ms), so it is not used (see ``id_binding``).
+            source_clause = " AND " + (
+                member_of("c.source_id", bound)
                 if source_mode == "include"
-                else f" AND c.source_id<>ALL({bound.array_sql})"
+                else not_member_of("c.source_id", bound)
             )
             params.append(bound.param)
-            execute = execute_ids
         memory_clause = (
             " AND (s.source_type <> 'memory' OR EXISTS ("
             "SELECT 1 FROM memory_items m "
             "WHERE m.id=s.memory_id AND m.created_by=%s))"
         )
         params.append(actor_id)
-        rows = execute(
+        rows = execute_bound(
             connection,
             "SELECT c.id,c.source_id,c.text,c.section_path,c.element_ids,"
             "c.notebook_id AS chunk_notebook_id,s.title AS source_title "
@@ -473,6 +485,7 @@ class ChunkStore:
             f"WHERE c.notebook_id=%s AND c.id IN ({placeholders(ids)})"
             f"{source_clause}{memory_clause} ORDER BY c.ordinal",
             params,
+            bound,
         ).fetchall()
         return [_compat_element_ids(row) for row in rows]
 

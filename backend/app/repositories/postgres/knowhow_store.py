@@ -701,7 +701,8 @@ class KnowhowStore:
             cell_activity = {}
             code_inputs = {table_id: [] for table_id in table_ids}
             if table_ids:
-                placeholders = ",".join("%s" for _ in table_ids)
+                # Every knowhow table of the notebook: one array parameter,
+                # the keys these reads exist for (id_binding class 3).
                 row_stats = {
                     row["table_id"]: _compat_row(row, "row_activity_at")
                     for row in db.execute(
@@ -711,8 +712,8 @@ class KnowhowStore:
                         "AS projection_pending,"
                         "COALESCE(SUM(CASE WHEN projection_status='failed' THEN 1 ELSE 0 END),0) "
                         "AS projection_failed,MAX(updated_at) AS row_activity_at "
-                        f"FROM knowhow_rows WHERE table_id IN ({placeholders}) GROUP BY table_id",
-                        table_ids,
+                        "FROM knowhow_rows WHERE table_id=ANY(%s) GROUP BY table_id",
+                        (table_ids,),
                     ).fetchall()
                 }
                 cell_activity = {
@@ -720,8 +721,8 @@ class KnowhowStore:
                     for row in db.execute(
                         "SELECT r.table_id,MAX(c.updated_at) AS cell_activity_at "
                         "FROM knowhow_cells c JOIN knowhow_rows r ON r.id=c.row_id "
-                        f"WHERE r.table_id IN ({placeholders}) GROUP BY r.table_id",
-                        table_ids,
+                        "WHERE r.table_id=ANY(%s) GROUP BY r.table_id",
+                        (table_ids,),
                     ).fetchall()
                 }
                 for row in db.execute(
@@ -731,8 +732,8 @@ class KnowhowStore:
                     "JOIN knowhow_rows r ON r.id=cc.row_id "
                     "LEFT JOIN knowhow_cells c "
                     "ON c.row_id=cc.row_id AND c.column_id=cc.column_id "
-                    f"WHERE r.table_id IN ({placeholders})",
-                    table_ids,
+                    "WHERE r.table_id=ANY(%s)",
+                    (table_ids,),
                 ).fetchall():
                     code_inputs[row["table_id"]].append(
                         _compat_row(row, "updated_at")
@@ -1063,11 +1064,12 @@ class KnowhowStore:
             row_ids = [row["id"] for row in row_rows]
             cells_by_row: dict[str, dict[str, str]] = {rid: {} for rid in row_ids}
             if row_ids:
-                placeholders = ",".join("%s" for _ in row_ids)
+                # Every row of the table (grows with the table): one array
+                # parameter, each row a key probe (id_binding class 3).
                 cell_rows = db.execute(
                     "SELECT row_id, column_id, content_md FROM knowhow_cells "
-                    f"WHERE row_id IN ({placeholders})",
-                    row_ids,
+                    "WHERE row_id=ANY(%s)",
+                    (row_ids,),
                 ).fetchall()
                 for cell_row in cell_rows:
                     cells_by_row[cell_row["row_id"]][cell_row["column_id"]] = (

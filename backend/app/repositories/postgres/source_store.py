@@ -39,7 +39,6 @@ from app.repositories.postgres._store_utils import (
     placeholders,
 )
 from app.repositories.postgres.database import PostgresDatabase
-from app.repositories.postgres.id_binding import bind_ids, execute_ids
 
 
 _UNSET = SOURCE_PAPER_META_UNSET
@@ -764,18 +763,20 @@ class SourceStore:
             return []
         plain_types = [t for t in types if t != "table"]
         out: list[tuple[str, str, int]] = []
-        # A batch still carries up to COUNT_IN_CHUNK ids and a cold count runs
-        # one statement per batch — a whole-notebook list reaches the generic
-        # plan inside a single call — so the batch goes through id_binding.
+        # A batched key probe (id_binding exemption class 2): each batch holds
+        # at most COUNT_IN_CHUNK source ids, the leading column of
+        # ``idx_source_elements_source_type``, and is the statement's only
+        # selective predicate, so a generic plan probes the same index as a
+        # custom one; the batches keep the plan cache instead of paying a
+        # re-plan each.
         if plain_types:
             for offset in range(0, len(ids), self.COUNT_IN_CHUNK):
-                batch = bind_ids(ids[offset : offset + self.COUNT_IN_CHUNK])
-                rows = execute_ids(
-                    connection,
+                batch = ids[offset : offset + self.COUNT_IN_CHUNK]
+                rows = connection.execute(
                     "SELECT source_id,element_type,COUNT(*) AS c FROM source_elements "
-                    f"WHERE source_id=ANY({batch.array_sql}) AND element_type=ANY(%s) "
+                    "WHERE source_id=ANY(%s) AND element_type=ANY(%s) "
                     "GROUP BY source_id,element_type",
-                    (batch.param, plain_types),
+                    (batch, plain_types),
                 ).fetchall()
                 out.extend(
                     (row["source_id"], row["element_type"], int(row["c"]))
@@ -783,14 +784,13 @@ class SourceStore:
                 )
         if "table" in types:
             for offset in range(0, len(ids), self.COUNT_IN_CHUNK):
-                batch = bind_ids(ids[offset : offset + self.COUNT_IN_CHUNK])
-                rows = execute_ids(
-                    connection,
+                batch = ids[offset : offset + self.COUNT_IN_CHUNK]
+                rows = connection.execute(
                     "SELECT source_id,COUNT(*) AS c FROM source_elements "
-                    f"WHERE source_id=ANY({batch.array_sql}) AND element_type='table' "
+                    "WHERE source_id=ANY(%s) AND element_type='table' "
                     f"AND {self._NOT_TABLE_CONTINUATION_SQL}"
                     "GROUP BY source_id",
-                    (batch.param,),
+                    (batch,),
                 ).fetchall()
                 out.extend(
                     (row["source_id"], "table", int(row["c"])) for row in rows

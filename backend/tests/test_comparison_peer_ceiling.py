@@ -388,7 +388,9 @@ def test_a_wide_ceiling_never_becomes_a_wide_parameter_list(repo, library, servi
     ``communities.sibling_peers`` 的 ``except Exception: return []`` 会把它吞成
     「这库没有兄弟」—— 对比题静默劣化,日志里一个字都没有。
 
-    **变异锚点**:把 ``_JSON_ID_LIST`` 换回 ``",".join("?" …)`` → 本条红。
+    **变异锚点**:把 ``sqlite/unified_kg_store.py`` 里 ``_object_support_exists``
+    的 ``member_of('kos.source_id', bound)`` 换回逐个占位符
+    ``kos.source_id IN ({",".join("?" …)})``(调用方随之逐个追加 id)→ 本条红。
     """
     ceilings = _wide_ceiling(library.id)
     with _variable_limit(repo, 999):

@@ -21,7 +21,7 @@ from typing import Dict, Iterable, List, Optional, Sequence
 from app.models.common import Evidence
 from app.repositories.lexical_query import sqlite_fts_match_expression
 from app.repositories.sqlite.database import SqliteDatabase
-from app.repositories.sqlite.id_binding import ids_param, member_of
+from app.repositories.sqlite.id_binding import bind_ids, drive_by, member_of
 from app.repositories.sqlite.mount_sql import (
     MOUNT_JOIN, MOUNT_VALID, MOUNTED_BASE_IDS_SUBQUERY,
 )
@@ -963,12 +963,15 @@ class KnowledgeStore:
         ids = list(object_ids)
         if not ids:
             return []
-        ph = ",".join("?" for _ in ids)
+        # One cluster's member objects: a hub concept's cluster grows with the
+        # notebook, so the list is one JSON parameter; each id is an endpoint
+        # seek, which is the intent (``drive_by``).
+        members = bind_ids(ids)
         return db.execute(
             f"SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
-            f"WHERE notebook_id=? "
-            f"AND (source_object_id IN ({ph}) OR target_object_id IN ({ph}))",
-            (notebook_id, *ids, *ids),
+            f"WHERE notebook_id=? AND ({drive_by('source_object_id', members)} "
+            f"OR {drive_by('target_object_id', members)})",
+            (notebook_id, members.param, members.param),
         ).fetchall()
 
     @staticmethod
@@ -989,16 +992,23 @@ class KnowledgeStore:
         ids = list(members)
         if not ids:
             return [], []
-        ph = ",".join("?" for _ in ids)
+        # A community's member list grows with the notebook: one JSON
+        # parameter.  Objects are read by primary key (``drive_by``); relations
+        # are driven by their source endpoint and filtered by the target.
+        bound = bind_ids(ids)
+        targets = bind_ids(ids, sort=True)
         objects = db.execute(
-            f"SELECT id, object_type, payload FROM knowledge_objects WHERE id IN ({ph})", ids,
+            "SELECT id, object_type, payload FROM knowledge_objects "
+            f"WHERE {drive_by('id', bound)}",
+            (bound.param,),
         ).fetchall()
         relations = db.execute(
             f"SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
             f"WHERE notebook_id=? AND review_status!='rejected' "
-            f"AND source_object_id IN ({ph}) AND target_object_id IN ({ph}) "
+            f"AND {drive_by('source_object_id', bound)} "
+            f"AND {member_of('target_object_id', targets)} "
             f"ORDER BY id",
-            [notebook_id, *ids, *ids],
+            [notebook_id, bound.param, targets.param],
         ).fetchall()
         return objects, relations
 
@@ -2963,9 +2973,10 @@ class KnowledgeStore:
             return []
         if allowed_source_ids is not None:
             # 天花板恒为一个 JSON 参数,一元 ``+`` 只过滤、不驱动计划(``id_binding``)。
-            source_payload = ids_param(allowed_source_ids)
-            if source_payload == "[]":
+            source_ids = list(dict.fromkeys(allowed_source_ids))
+            if not source_ids:
                 return []
+            ceiling = bind_ids(source_ids, sort=True)
             if authoritative_source_filter:
                 ev_source = (
                     "json_extract(CASE WHEN ev.type='object' THEN ev.value "
@@ -2978,9 +2989,9 @@ class KnowledgeStore:
                     "SELECT 1 FROM json_each(CASE WHEN json_valid(ko.evidence) "
                     "THEN CASE WHEN json_type(ko.evidence)='array' "
                     "THEN ko.evidence ELSE '[]' END ELSE '[]' END) ev "
-                    f"WHERE ev.type='object' AND {member_of(ev_source)}) "
+                    f"WHERE ev.type='object' AND {member_of(ev_source, ceiling)}) "
                     "ORDER BY rank LIMIT ?",
-                    (notebook_id, match_query, source_payload, k),
+                    (notebook_id, match_query, ceiling.param, k),
                 ).fetchall()
             else:
                 rows = db.execute(
@@ -2989,9 +3000,9 @@ class KnowledgeStore:
                     "AND kg_objects_fts MATCH ? AND EXISTS ("
                     "SELECT 1 FROM knowledge_object_sources kos "
                     "WHERE kos.notebook_id=? AND kos.object_id=kg_objects_fts.object_id "
-                    f"AND {member_of('kos.source_id')}) "
+                    f"AND {member_of('kos.source_id', ceiling)}) "
                     "ORDER BY rank LIMIT ?",
-                    (notebook_id, match_query, notebook_id, source_payload, k),
+                    (notebook_id, match_query, notebook_id, ceiling.param, k),
                 ).fetchall()
         else:
             rows = db.execute(
@@ -3017,17 +3028,18 @@ class KnowledgeStore:
         if not match_query:
             return []
         if allowed_source_ids is not None:
-            source_payload = ids_param(allowed_source_ids)
-            if source_payload == "[]":
+            source_ids = list(dict.fromkeys(allowed_source_ids))
+            if not source_ids:
                 return []
+            ceiling = bind_ids(source_ids, sort=True)
             # FTS 驱动、清单只作 LIST SUBQUERY 成员判定——今天的计划本来就对,
             # ``+`` 把它钉死,不让统计信息变化后改由天花板驱动。
             rows = db.execute(
                 "SELECT f.chunk_id,bm25(chunks_fts) AS rank FROM chunks_fts f "
                 "JOIN chunks c ON c.id=f.chunk_id "
                 "WHERE f.notebook_id=? AND chunks_fts MATCH ? "
-                f"AND {member_of('c.source_id')} ORDER BY rank LIMIT ?",
-                (notebook_id, match_query, source_payload, k),
+                f"AND {member_of('c.source_id', ceiling)} ORDER BY rank LIMIT ?",
+                (notebook_id, match_query, ceiling.param, k),
             ).fetchall()
         else:
             rows = db.execute(
@@ -3548,17 +3560,20 @@ class KnowledgeStore:
         full attached-candidate set (which used to be unbounded before this
         fix) could exceed it."""
         member_set = set(member_ids)
-        placeholders = ",".join("?" for _ in member_set)
-        member_list = list(member_set)
+        # A hub concept's member list grows with the notebook: one JSON
+        # parameter, each member an endpoint seek (``drive_by``).
+        members = bind_ids(member_set)
         rels_out = db.execute(
             f"SELECT source_object_id, target_object_id, edge_type "
-            f"FROM knowledge_relations WHERE notebook_id=? AND source_object_id IN ({placeholders})",
-            [notebook_id] + member_list,
+            f"FROM knowledge_relations WHERE notebook_id=? "
+            f"AND {drive_by('source_object_id', members)}",
+            [notebook_id, members.param],
         ).fetchall()
         rels_in = db.execute(
             f"SELECT source_object_id, target_object_id, edge_type "
-            f"FROM knowledge_relations WHERE notebook_id=? AND target_object_id IN ({placeholders})",
-            [notebook_id] + member_list,
+            f"FROM knowledge_relations WHERE notebook_id=? "
+            f"AND {drive_by('target_object_id', members)}",
+            [notebook_id, members.param],
         ).fetchall()
 
         attached_ids: set = set()

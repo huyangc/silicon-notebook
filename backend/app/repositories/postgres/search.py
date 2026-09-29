@@ -13,11 +13,12 @@ from app.repositories.postgres.access_sql import (
     read_access_exists_clause,
     read_access_params,
 )
-from app.repositories.postgres.id_binding import bind_ids, execute_ids
+from app.repositories.postgres.id_binding import bind_ids, execute_bound, member_of
 
 
 PAYLOAD_NAME_EXPRESSION = '(payload ->> \'name\') COLLATE "C"'
 TAGS_JSON_EXPRESSION = '(tags_json::text) COLLATE "C"'
+_EVIDENCE_SOURCE_ID = "ev->>'source_id'"
 
 _SEARCH_EXPRESSIONS = {
     "knowledge_payload_name": PAYLOAD_NAME_EXPRESSION,
@@ -501,36 +502,38 @@ def _candidate_rows_for_terms(
     # A source ceiling can list every source of the notebook: it goes through
     # the id-binding module (one parameter, always a custom plan); an unscoped
     # probe keeps its plain, plan-cached execute.
-    execute = connection.execute
+    ceiling = None
     if allowed_source_ids is not None:
         if not allowed_source_ids:
             return []
         ceiling = bind_ids(allowed_source_ids)
         if target.table == "knowledge_objects":
             if authoritative_source_filter:
+                # ``member_of`` inside a correlated per-object probe: the
+                # semi-join form (``IN (SELECT unnest(...))``) took 8.7 s here.
                 scope_predicates.append(
                     f"EXISTS (SELECT 1 FROM jsonb_array_elements("
                     f"CASE WHEN jsonb_typeof({table_sql}.evidence)='array' "
                     f"THEN {table_sql}.evidence ELSE '[]'::jsonb END) ev "
-                    f"WHERE ev->>'source_id'=ANY({ceiling.array_sql}))"
+                    f"WHERE {member_of(_EVIDENCE_SOURCE_ID, ceiling)})"
                 )
             else:
+                # ``member_of`` in a correlated per-object probe; the semi-join
+                # form was slower (49k: 0.67 -> 0.97 s skewed, 109 -> 440 ms uniform).
                 scope_predicates.append(
                     f"EXISTS (SELECT 1 FROM knowledge_object_sources kos "
                     f"WHERE kos.notebook_id={table_sql}.notebook_id "
                     f"AND kos.object_id={table_sql}.{id_sql} "
-                    f"AND kos.source_id=ANY({ceiling.array_sql}))"
+                    f"AND {member_of('kos.source_id', ceiling)})"
                 )
         elif target.table == "chunks":
-            scope_predicates.append(
-                f"{table_sql}.source_id=ANY({ceiling.array_sql})"
-            )
+            # ``member_of``: the text search drives and the list filters its
+            # hits; the semi-join form drove by the list (49k common term
+            # 1.8 s -> 5-7 s, past the timeout).
+            scope_predicates.append(member_of(f"{table_sql}.source_id", ceiling))
         else:
             raise ValueError("source-scoped lexical search target is unsupported")
         source_params.append(ceiling.param)
-
-        def execute(statement, params):
-            return execute_ids(connection, statement, params)
     term_values = ",".join("(%s,%s,%s)" for _ in ranked_terms)
     term_params = [
         value
@@ -561,7 +564,7 @@ def _candidate_rows_for_terms(
             "candidate.candidate_id COLLATE \"C\""
         )
         params = [*term_params, notebook_id, *source_params, int(per_term_limit)]
-        return execute(statement, params).fetchall()
+        return execute_bound(connection, statement, params, ceiling).fetchall()
 
     # Keep `%` and ILIKE in independent bounded KG-name scans. PostgreSQL can
     # then use the best trigram access path for each predicate instead of
@@ -607,7 +610,7 @@ def _candidate_rows_for_terms(
     params.extend(source_params)
     params.append(int(per_term_limit))
     params.append(int(per_term_limit))
-    return execute(statement, params).fetchall()
+    return execute_bound(connection, statement, params, ceiling).fetchall()
 
 
 def knowledge_candidate_rows_for_terms(

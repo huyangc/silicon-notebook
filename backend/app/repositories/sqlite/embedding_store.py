@@ -5,6 +5,7 @@ from typing import Callable, ContextManager, Sequence
 import sqlite3
 
 from app.domain.vector_index import encode_vector
+from app.repositories.sqlite.id_binding import bind_ids, drive_by
 
 
 class EmbeddingStore:
@@ -190,10 +191,13 @@ class EmbeddingStore:
         values = list(ids)
         if not values:
             return []
-        ph = ",".join("?" for _ in values)
+        # A knowhow re-projection passes every unchanged chunk of the table:
+        # one JSON parameter, each id a primary-key seek (``drive_by``).
+        bound = bind_ids(values)
         return db.execute(
-            f"SELECT {id_col} AS vid, vector FROM {table} WHERE {id_col} IN ({ph})",
-            values,
+            f"SELECT {id_col} AS vid, vector FROM {table} "
+            f"WHERE {drive_by(id_col, bound)}",
+            (bound.param,),
         ).fetchall()
 
     @staticmethod

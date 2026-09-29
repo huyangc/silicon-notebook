@@ -43,8 +43,9 @@ from app.repositories.sqlite.chunk_store import ChunkStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.id_binding import (
     JSON_IDS,
+    BoundIds,
+    bind_ids,
     drive_by,
-    ids_param,
     member_of,
     not_member_of,
 )
@@ -57,7 +58,10 @@ USER = "u-asker"
 OTHER_USER = "u-other"
 NOW = "2026-09-29T00:00:00+00:00"
 WEIRD = ["it's", 'a"b', "back\\slash", "com,ma", "中文来源", "emoji-😀", " lead", "7"]
-REAL = [f"s-{i:03d}" for i in range(40)] + WEIRD
+# Ids the binding layer must carry exactly as given: the empty string, a blank
+# id, and one containing PostgreSQL's text-form separator.
+ODD = ["", "   ", "sep\x1finside"]
+REAL = [f"s-{i:03d}" for i in range(40)] + WEIRD + ODD
 OTHER_MEMORY = "s-mem-other"
 
 
@@ -74,16 +78,26 @@ CEILINGS: dict[str, list[str] | None] = {
     "over_limit": _padded(REAL[::2], DEPLOYMENT_VARIABLE_LIMIT + 1),
     "49k": _padded(REAL[1::2] + [OTHER_MEMORY], 49_020),
     "weird": WEIRD + ["s-001", "s-002"],
+    # Reversed, with duplicates, and the odd ids: membership is exactly the
+    # listed ids, and an ordered output keeps the first occurrence's order.
+    "odd": ["s-009", "", "s-004", "   ", "s-009", "sep\x1finside", "", "s-001"],
 }
 BOUND = [label for label, ceiling in CEILINGS.items() if ceiling is not None]
 
 
 # ------------------------------------------------------------------ fixture
-# ``sqlite_stat1`` measured on the 49k-source notebook of the hazard ledger
-# (98k chunks, 49k objects).  The fixture holds a hundred rows, but plan pins
-# are about the plan production gets, and SQLite plans by these statistics:
-# on raw small-table statistics a ceiling-driven plan can look no cheaper than
-# the correct one, and a pin would pass for the wrong reason.
+# Every test runs in BOTH planner-statistics states:
+#
+# * ``no_stats`` -- what production has: the repository never runs ANALYZE,
+#   so ``sqlite_stat1`` is empty and the planner falls back to its defaults.
+# * ``stats_49k`` -- ``sqlite_stat1`` measured on a 49k-source notebook
+#   (98k chunks, 49k objects).  The fixture holds a hundred rows; on its own
+#   small-table statistics a ceiling-driven plan can look no cheaper than the
+#   correct one, and a pin would pass for the wrong reason.
+#
+# A plan pin must hold in both: a plan that is right only after ANALYZE is a
+# plan production does not get.
+STATS_STATES = ("no_stats", "stats_49k")
 PRODUCTION_STATS = [
     ("chunk_questions", "idx_chunk_questions_nb", "98058 49029 1"),
     ("chunk_questions", "idx_chunk_questions_source", "98058 2 1"),
@@ -132,6 +146,13 @@ PRODUCTION_STATS = [
     ("sources", "idx_sources_visible_identity", "49058 24529 24529 1"),
     ("sources", "sqlite_autoindex_sources_1", "49078 1"),
 ]
+
+
+def _clear_stats(db: sqlite3.Connection) -> None:
+    if db.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='sqlite_stat1'"
+    ).fetchone():
+        db.execute("DELETE FROM sqlite_stat1")
 
 
 def _install_production_stats(db: sqlite3.Connection) -> None:
@@ -251,17 +272,29 @@ def _seed(db: sqlite3.Connection) -> None:
         [(NB, "can-000", can, 1 + n % 4) for n, can in enumerate(canonicals[1:])],
     )
     db.execute("DELETE FROM sync_change_log")
-    _install_production_stats(db)
 
 
-@pytest.fixture(scope="module")
-def database(tmp_path_factory, _sqlite_schema_template) -> SqliteDatabase:
-    root: Path = tmp_path_factory.mktemp("id-binding")
+@pytest.fixture(scope="module", params=STATS_STATES)
+def database(request, tmp_path_factory, _sqlite_schema_template) -> SqliteDatabase:
+    root: Path = tmp_path_factory.mktemp(f"id-binding-{request.param}")
     shutil.copyfile(_sqlite_schema_template, root / "test.db")
     settings = Settings(database_url=f"sqlite:///{root / 'test.db'}")
     database = SqliteDatabase(settings, root)
     with database.write() as db:
         _seed(db)
+        if request.param == "stats_49k":
+            _install_production_stats(db)
+        else:
+            _clear_stats(db)
+    # Statistics are read when a connection loads the schema: start fresh.
+    database.close_local()
+    database = SqliteDatabase(settings, root)
+    stats_rows = database.connect().execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name='sqlite_stat1'"
+    ).fetchone()[0] and database.connect().execute(
+        "SELECT COUNT(*) FROM sqlite_stat1"
+    ).fetchone()[0]
+    assert bool(stats_rows) == (request.param == "stats_49k"), stats_rows
     yield database
     database.close_local()
 
@@ -330,75 +363,103 @@ def _plan(db, sql: str, params: tuple) -> list[str]:
     ]
 
 
-def _single_ceiling_param(statements, ceiling, *, bounded: int = 0) -> None:
+def _single_ceiling_param(
+    statements, ceiling, *, bounded: int = 0, sort: bool = True,
+) -> None:
     """Exactly one parameter carries the ceiling, as one JSON array; the rest
     is a handful of scalars plus ``bounded`` batched keys (S5's candidate
-    window), never a count that grows with the ceiling."""
+    window), never a count that grows with the ceiling.  Membership forms
+    bind the array sorted; driven forms keep the caller's order."""
     assert statements, "the ceiling statement was not captured"
-    payload = ids_param(ceiling)
+    # The stores de-duplicate a ceiling once (keeping first occurrences);
+    # the binding layer then carries exactly that list.
+    payload = bind_ids(list(dict.fromkeys(ceiling)), sort=sort).param
     for sql, params in statements:
         assert sum(p == payload for p in params) == 1, sql
         assert len(params) < 16 + bounded, (len(params), sql[:200])
 
 
-# ------------------------------------------------------------ module API
-def test_ids_param_is_one_deduplicated_deterministic_json_array():
-    def decoded(values):
-        return json.loads(ids_param(values))
+def _pin_state(database) -> str:
+    """Which statistics state this parametrisation of the fixture runs in."""
+    rows = database.connect().execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name='sqlite_stat1'"
+    ).fetchone()[0]
+    if rows and database.connect().execute(
+        "SELECT COUNT(*) FROM sqlite_stat1"
+    ).fetchone()[0]:
+        return "stats_49k"
+    return "no_stats"
 
-    assert decoded(["b", "a", "b", "", "  ", "\t", None, "a"]) == ["b", "a"]
+
+# ------------------------------------------------------------ module API
+def test_bind_ids_carries_every_id_exactly_as_given():
+    """The binding layer never changes membership: order, duplicates, the
+    empty string and blank ids all reach the JSON array unchanged."""
+    def decoded(values):
+        bound = bind_ids(values)
+        assert isinstance(bound, BoundIds) and bound.sql == JSON_IDS
+        return json.loads(bound.param)
+
+    assert decoded(["b", "a", "b", "", "  ", "\t", "a"]) == [
+        "b", "a", "b", "", "  ", "\t", "a",
+    ]
     assert decoded(("b", "a")) == ["b", "a"]
     assert decoded({"b", "a", "c"}) == ["a", "b", "c"]
     assert decoded(frozenset({"z", "y"})) == ["y", "z"]
-    assert decoded({7, "7"}) == ["7", 7]
-    assert ids_param([]) == "[]"
-    assert ids_param([None, "", " "]) == "[]"
-    assert decoded(WEIRD) == WEIRD
-    assert decoded([7, "7", 7]) == [7, "7"]
+    assert decoded([]) == []
+    assert decoded(WEIRD + ODD) == WEIRD + ODD
     assert decoded(x for x in ["b", "a"]) == ["b", "a"]
-    assert ids_param(["b", "a"]) == ids_param(["b", "a"])  # byte-stable
+    assert bind_ids(["b", "a"]) == bind_ids(["b", "a"])  # byte-stable
+    # The membership payload is sorted (a cheaper IN-list build); the ids
+    # themselves, duplicates and blanks included, are unchanged.
+    assert json.loads(bind_ids(["b", "", "a", "b"], sort=True).param) == [
+        "", "a", "b", "b",
+    ]
 
 
 @pytest.mark.parametrize("bad", ["s-001", b"s-001", bytearray(b"s")])
-def test_ids_param_refuses_a_single_string(bad):
+def test_bind_ids_refuses_a_single_string(bad):
     with pytest.raises(TypeError):
-        ids_param(bad)
+        bind_ids(bad)
 
 
-@pytest.mark.parametrize("bad", [[1.5], [True], [b"x"]])
-def test_ids_param_refuses_non_id_items(bad):
+@pytest.mark.parametrize("bad", [[None], [7], [1.5], [True], [b"x"]])
+def test_bind_ids_refuses_non_string_ids(bad):
     with pytest.raises(TypeError):
-        ids_param(bad)
+        bind_ids(["s-001", *bad])
 
 
 def test_predicates_occupy_one_placeholder_and_only_member_forms_carry_plus():
-    assert member_of("kos.source_id") == f"+kos.source_id IN {JSON_IDS}"
-    assert not_member_of("c.source_id") == f"+c.source_id NOT IN {JSON_IDS}"
-    assert drive_by("source_id") == f"source_id IN {JSON_IDS}"
-    for fragment in (member_of("x"), not_member_of("x"), drive_by("x")):
+    bound = bind_ids(["s-001"])
+    assert member_of("kos.source_id", bound) == f"+kos.source_id IN {JSON_IDS}"
+    assert not_member_of("c.source_id", bound) == f"+c.source_id NOT IN {JSON_IDS}"
+    assert drive_by("source_id", bound) == f"source_id IN {JSON_IDS}"
+    for fragment in (
+        member_of("x", bound), not_member_of("x", bound), drive_by("x", bound),
+    ):
         assert fragment.count("?") == 1
     with pytest.raises(ValueError):
-        member_of(" ")
+        member_of(" ", bound)
 
 
-def test_integer_ids_still_match_text_ids_through_the_unary_plus():
-    """The CAST in ``JSON_IDS``: the old placeholder form matched an integer id
-    through the column's TEXT affinity; ``+column`` strips that affinity, so a
-    JSON number must be cast back to TEXT to compare equal."""
+def test_membership_is_exact_for_odd_ids():
+    """Empty, blank and separator-bearing ids match only themselves, in both
+    the membership and the exclusion form (the JSON array never holds null)."""
     db = sqlite3.connect(":memory:")
     db.execute("CREATE TABLE t(id TEXT PRIMARY KEY)")
-    db.executemany("INSERT INTO t VALUES (?)", [("7",), ("8",), ("it's",)])
-    for predicate in (member_of("t.id"), drive_by("t.id")):
-        rows = db.execute(
-            f"SELECT id FROM t WHERE {predicate} ORDER BY id",
-            (ids_param([7, "it's", "missing"]),),
-        ).fetchall()
-        assert rows == [("7",), ("it's",)], predicate
-    rows = db.execute(
-        f"SELECT id FROM t WHERE {not_member_of('t.id')} ORDER BY id",
-        (ids_param([7]),),
-    ).fetchall()
-    assert rows == [("8",), ("it's",)]
+    stored = ["", "   ", " ", "sep\x1finside", "sep", "inside", "7", "it's"]
+    db.executemany("INSERT INTO t VALUES (?)", [(value,) for value in stored])
+    wanted = ["   ", "", "sep\x1finside", "", "missing"]
+    bound = bind_ids(wanted)
+    for predicate in (member_of("t.id", bound), drive_by("t.id", bound)):
+        rows = {row[0] for row in db.execute(
+            f"SELECT id FROM t WHERE {predicate}", (bound.param,),
+        )}
+        assert rows == {"", "   ", "sep\x1finside"}, predicate
+    rows = {row[0] for row in db.execute(
+        f"SELECT id FROM t WHERE {not_member_of('t.id', bound)}", (bound.param,),
+    )}
+    assert rows == set(stored) - {"", "   ", "sep\x1finside"}
 
 
 # ------------------------------------------------- S1 chunk FTS candidates
@@ -567,9 +628,9 @@ def test_s7_s8_bind_the_ceiling_once(database, conn, captured, backfilled):
         NB, "com-0", "can-000", 5, allowed_source_ids=ceiling
     )
     store.comention_peers(NB, "can-000", 1, 5, allowed_source_ids=ceiling)
+    payload = bind_ids(list(dict.fromkeys(ceiling)), sort=True).param
     ceiling_statements = [
-        (sql, params) for sql, params in captured
-        if ids_param(ceiling) in params
+        (sql, params) for sql, params in captured if payload in params
     ]
     assert len(ceiling_statements) == 3  # S7, S8 limit gate, S8 names
     _single_ceiling_param(ceiling_statements, ceiling)
@@ -593,6 +654,28 @@ def test_s7_s8_support_probe_goes_by_object_only(database, conn, captured):
         plan = " / ".join(_plan(conn, sql, params))
         assert re.search(r"SEARCH kos (EXISTS )?USING INDEX \S+ \(object_id=\?\)", plan), plan
         assert "(object_id=? AND source_id=?)" not in plan, plan
+
+
+def test_s8_peer_names_are_driven_by_the_bounded_peer_list(
+    database, conn, captured, backfilled
+):
+    """The name lookup's ``drive_by``: at most ``limit`` peer canonical ids,
+    each one an index seek.  As a membership filter the same statement walks
+    every cluster row of the notebook instead."""
+    store = UnifiedKgStore(database)
+    for ceiling in (None, CEILINGS["49k"]):
+        kwargs = {} if ceiling is None else {"allowed_source_ids": ceiling}
+        assert store.comention_peers(NB, "can-000", 1, 5, **kwargs)
+    names = [
+        (sql, params) for sql, params in captured if "MIN(canonical_name)" in sql
+    ]
+    assert len(names) == 2
+    for sql, params in names:
+        plan = " / ".join(_plan(conn, sql, params))
+        assert re.search(
+            r"SEARCH concept_clusters USING (COVERING )?INDEX \S+ "
+            r"\(notebook_id=\? AND canonical_id=\?", plan,
+        ), (_pin_state(database), plan)
 
 
 # ------------------------------------------- S4-S6 chunk-store ceilings
@@ -703,13 +786,24 @@ def test_s6_ids_for_sources_match_reference_under_deployment_limit(
         )
 
 
-def test_s6_ids_for_sources_bind_the_ceiling_once(conn, captured):
+@pytest.mark.parametrize("label", ["49k", "sparse4k", "odd"])
+def test_s6_ids_for_sources_seek_each_listed_source(database, conn, captured, label):
     """S6 is the intended ``drive_by`` (every chunk of the listed sources is
-    the answer); whether the planner seeks or scans is its cost call."""
-    ceiling = CEILINGS["49k"]
+    the answer) and the presence probe asks one question per listed id: both
+    must seek ``idx_chunks_source`` per id in both statistics states.  Without
+    ``+notebook_id`` the statistics-free planner picked the notebook index and
+    rescanned the notebook's chunks for every id (2,000 ids: 2.6 s); as a
+    membership filter (``member_of``) the driven statement scans them all."""
+    ceiling = CEILINGS[label]
     for presence_only in (False, True):
         ChunkStore.ids_for_sources(
             conn, NB, ceiling, presence_only=presence_only
         )
-    _single_ceiling_param(captured, ceiling)
+    _single_ceiling_param(captured, ceiling, sort=False)
     assert len(captured) == 2
+    for sql, params in captured:
+        plan = " / ".join(_plan(conn, sql, params))
+        assert "USING INDEX idx_chunks_source (source_id=?)" in plan, (
+            _pin_state(database), plan,
+        )
+        assert "idx_chunks_nb" not in plan, (_pin_state(database), plan)

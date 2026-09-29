@@ -19,7 +19,14 @@ the remedy on a live server:
 * the text form is exact where it is used and the array fallback keeps the
   cases it cannot express.
 
-The ledger (2026-09-29 ceiling-SQL hazards, P1-P12) names each statement.
+The rule is stated in ``app/repositories/postgres/id_binding.py`` and in
+``docs/development.md`` ("Binding id lists in SQL").  Test names use these
+labels: P1 chunk FTS candidates (``chunk_fts_search`` /
+``chunk_candidate_rows_for_terms``); P2 / P3 KG FTS reverse-index /
+authoritative gates (``fts_search``); P4 ``question_index_rows``; P5
+``retrieval_contribution_rows``; P6 / P7 ``ids_for_sources`` (membership /
+presence with ordinality); P8 ``community_member_peers``; P9
+``comention_peers``.
 """
 from __future__ import annotations
 
@@ -32,11 +39,15 @@ from psycopg import sql as pg_sql
 from app.domain.repository import RepositoryCompatibilitySeams
 from app.repositories.postgres.chunk_store import ChunkStore
 from app.repositories.postgres.database import PostgresDatabase
-from app.repositories.postgres.id_binding import bind_ids, execute_ids
+from app.repositories.postgres.id_binding import (
+    bind_ids,
+    execute_ids,
+    member_of,
+    not_member_of,
+)
 from app.repositories.postgres.knowledge_store import KnowledgeStore
 from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.search import chunk_candidate_rows_for_terms
-from app.repositories.postgres.source_store import SourceStore
 from app.repositories.postgres.unified_kg_store import UnifiedKgStore
 
 pytestmark = [
@@ -213,7 +224,6 @@ def _converted_calls(database: PostgresDatabase):
     knowledge = KnowledgeStore(database, _seams())
     chunks = ChunkStore(database)
     unified = UnifiedKgStore(database)
-    sources = SourceStore(database, now=lambda: NOW)
 
     def on_connection(fn):
         def call():
@@ -251,6 +261,9 @@ def _converted_calls(database: PostgresDatabase):
                 source_mode="exclude", source_ids=CEILING)),
         "P6 ids_for_sources": on_connection(
             lambda db: chunks.ids_for_sources(db, NB, CEILING)),
+        "P7 ids_for_sources (presence, ordinality)": on_connection(
+            lambda db: chunks.ids_for_sources(
+                db, NB, CEILING, presence_only=True)),
         "P8 community peers (reverse index)": backfilled(1, lambda: (
             unified.community_member_peers(
                 NB, "com-0", "can-00000", 8, allowed_source_ids=CEILING))),
@@ -263,9 +276,6 @@ def _converted_calls(database: PostgresDatabase):
         "P9 comention peers (authoritative)": backfilled(0, lambda: (
             unified.comention_peers(
                 NB, "can-00000", 1, 8, allowed_source_ids=CEILING))),
-        "P12 element_type_count_rows": on_connection(
-            lambda db: sources.element_type_count_rows(
-                db, CEILING, ["paragraph", "table", "formula"])),
     }
 
 
@@ -506,44 +516,45 @@ def test_converted_statements_keep_their_documented_row_order(pin_database):
 
 def test_text_form_and_fallback_select_exactly_the_array_rows(pin_database):
     """``string_to_array`` over the joined ids equals the bound array for every
-    list the text form is chosen for; the lists it cannot express (empty id,
-    separator inside an id, a NULL) keep the array binding."""
+    list the text form is chosen for; the lists it cannot express (an empty
+    id, the separator inside an id) keep the array binding.  Both predicate
+    forms select the same rows as the plain array predicate."""
     lists = [
         [],
         ["s-00000"],
         ["s-00000", "s-00000", "s-00002"],
         ["s-00000", "", "s-00002"],
+        ["   ", "s-00002"],
         ["s-00000\x1fs-00002", "s-00004"],
-        ["s-00000", None],
         CEILING,
     ]
+    forms = (("=ANY", member_of), ("<>ALL", not_member_of))
     with pin_database.connect() as db:
         for ids in lists:
             bound = bind_ids(ids)
-            text_form = bound.array_sql != "%s"
+            text_form = bound.sql != "%s::text[]"
             assert text_form == all(
-                isinstance(value, str) and value and "\x1f" not in value
-                for value in ids
+                value and "\x1f" not in value for value in ids
             ), ids
-            for predicate in ("=ANY", "<>ALL"):
+            for array_predicate, form in forms:
                 expected = db.execute(
                     f"SELECT id FROM sources WHERE notebook_id=%s "
-                    f"AND id{predicate}(%s) ORDER BY id",
+                    f"AND id{array_predicate}(%s::text[]) ORDER BY id",
                     (NB, list(ids)),
                 ).fetchall()
                 actual = execute_ids(
                     db,
                     f"SELECT id FROM sources WHERE notebook_id=%s "
-                    f"AND id{predicate}({bound.array_sql}) ORDER BY id",
+                    f"AND {form('id', bound)} ORDER BY id",
                     (NB, bound.param),
                 ).fetchall()
-                assert actual == expected, (predicate, ids[:5])
+                assert actual == expected, (form.__name__, ids[:5])
     # The separator cannot smuggle two ids through one element.
     with pin_database.connect() as db:
         smuggled = bind_ids(["s-00000\x1fs-00002"])
         rows = execute_ids(
             db,
-            f"SELECT id FROM sources WHERE id=ANY({smuggled.array_sql})",
+            f"SELECT id FROM sources WHERE {member_of('id', smuggled)}",
             (smuggled.param,),
         ).fetchall()
     assert rows == []
@@ -562,3 +573,108 @@ def test_unscoped_calls_leave_the_plan_cache_to_do_its_work(pin_database):
         for statement in prepared
     ), [statement[:120] for statement in prepared]
     assert not any(_is_ceiling_statement(s) for s in prepared)
+
+
+# ------------------------------------------------------------ row identity
+# Which rows come back, not only their order: each statement is compared with
+# a Python reference computed from the fixture.  An inverted membership test
+# or an ignored ceiling returns rows outside CEILING, which every assertion
+# below would see.
+_ALLOWED = frozenset(CEILING)
+
+
+def _chunk_sources(database) -> dict[str, str]:
+    with database.connect() as db:
+        return {
+            row["id"]: row["source_id"]
+            for row in db.execute(
+                "SELECT id, source_id FROM chunks WHERE notebook_id=%s", (NB,),
+            ).fetchall()
+        }
+
+
+def test_p4_question_rows_are_exactly_the_ceiling_rows_of_the_window(pin_database):
+    chunks = ChunkStore(pin_database)
+    unscoped = chunks.question_index_rows(
+        NB, actor_id=USER, allowed_source_ids=None, limit=10001,
+    )
+    # The unscoped window starts with sources outside CEILING (odd indices),
+    # so a scoped page that ignored the ceiling would show them.
+    outside = [row for row in unscoped[:50] if row["source_id"] not in _ALLOWED]
+    assert outside, "fixture: rows outside the ceiling must rank in the page"
+    scoped = chunks.question_index_rows(
+        NB, actor_id=USER, allowed_source_ids=CEILING, limit=50,
+    )
+    expected = [row for row in unscoped if row["source_id"] in _ALLOWED][:50]
+    assert [row["id"] for row in scoped] == [row["id"] for row in expected]
+    assert all(row["source_id"] in _ALLOWED for row in scoped)
+    assert not {row["id"] for row in outside} & {row["id"] for row in scoped}
+
+
+def test_p6_ids_for_sources_equals_the_fixture_reference(pin_database):
+    chunk_sources = _chunk_sources(pin_database)
+    expected = sorted(
+        chunk_id for chunk_id, source in chunk_sources.items()
+        if source in _ALLOWED
+    )
+    assert expected and len(expected) < len(chunk_sources)
+    with pin_database.connect() as db:
+        got = sorted(
+            row["id"] for row in ChunkStore.ids_for_sources(db, NB, CEILING)
+        )
+    assert got == expected
+
+
+def test_p7_presence_keeps_first_occurrence_order_of_the_listed_sources(
+    pin_database,
+):
+    present = set(_chunk_sources(pin_database).values())
+    requested = (
+        ["s-filler-00001", "s-00010", "s-00003", "s-00010"]
+        + list(reversed(CEILING[:40]))
+    )
+    with pin_database.connect() as db:
+        got = [
+            row["source_id"]
+            for row in ChunkStore.ids_for_sources(
+                db, NB, requested, presence_only=True,
+            )
+        ]
+    assert got == [
+        source for source in dict.fromkeys(requested) if source in present
+    ]
+
+
+def test_p5_exclude_mode_returns_exactly_the_candidates_outside_the_ceiling(
+    pin_database,
+):
+    chunk_sources = _chunk_sources(pin_database)
+    candidates = [
+        f"c-{index:05d}-{part}" for index in range(0, 400, 7) for part in (0, 1)
+    ]
+    with pin_database.connect() as db:
+        ordinals = {
+            row["id"]: row["ordinal"]
+            for row in db.execute(
+                "SELECT id, ordinal FROM chunks WHERE id=ANY(%s)", (candidates,),
+            ).fetchall()
+        }
+        excluded = ChunkStore.retrieval_contribution_rows(
+            db, NB, candidates, actor_id=USER, source_mode="exclude",
+            source_ids=CEILING,
+        )
+        included = ChunkStore.retrieval_contribution_rows(
+            db, NB, candidates, actor_id=USER, source_mode="include",
+            source_ids=CEILING,
+        )
+    outside = sorted(
+        (chunk for chunk in candidates if chunk_sources[chunk] not in _ALLOWED),
+        key=ordinals.__getitem__,
+    )
+    inside = sorted(
+        (chunk for chunk in candidates if chunk_sources[chunk] in _ALLOWED),
+        key=ordinals.__getitem__,
+    )
+    assert outside and inside
+    assert [row["id"] for row in excluded] == outside
+    assert [row["id"] for row in included] == inside
