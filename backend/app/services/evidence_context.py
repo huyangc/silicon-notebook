@@ -21,6 +21,7 @@ from app.models.ask import (
 from app.repositories.ports import (
     EvidenceKnowledgeContextPort, NotebookStorePort, SourceStorePort,
 )
+from app.services.evidence_attestation import DEAD, attest_pointers, attest_read
 from app.services.retrieval import (
     RetrievedChunk, RetrievedElement, RetrievedKnowledge, est_tokens,
 )
@@ -210,6 +211,80 @@ def _is_document_row(item: object) -> bool:
         and not getattr(item, "element_id", "")
         and not getattr(item, "object_id", "")
     )
+
+
+# PR-D producer codes (``services.evidence_attestation``): telemetry identifiers.
+KG_OBJECTS_PRODUCER = "kg_objects"
+COLLECTION_PRODUCER = "collection_enumeration"
+
+
+def _attest_kg_anchor_evidence(evidence_by_id: Mapping[str, dict[str, Any]]) -> None:
+    """Register the element every admitted KG object will be cited by (PR-D).
+
+    Called once per ``knowledge_context`` AFTER admission, so the one batched
+    pointer read covers exactly the objects that reached the prompt -- never
+    the candidate pool, and never one read per hit. A KG occurrence carries a
+    snippet, not the element's full text, hence a pointer read rather than a
+    hash of what is in hand.
+
+    An element that was already gone at retrieval time (J2) loses its locator:
+    the object itself is alive and still renders, but its anchor no longer
+    names a row that opens on nothing, and is judged at source level only
+    (J3), like any KG entry without an element. Outside a global run the seam
+    answers ``{}`` and nothing changes.
+    """
+    states = attest_pointers(KG_OBJECTS_PRODUCER, (
+        str(value.get("element_id") or "") for value in evidence_by_id.values()
+    ))
+    for value in evidence_by_id.values():
+        if states.get(str(value.get("element_id") or "")) == DEAD:
+            value["element_id"] = ""
+
+
+def _live_kg_evidence(filtered: list[tuple[str, str, Any]]) -> list[tuple[str, str, Any]]:
+    """``citations_from``'s evidence rows, registered, minus dead pointers (PR-D).
+
+    One batched pointer read over the rows that are about to become cards; a
+    card whose element was already gone at retrieval time is not minted (J2).
+    Rows without an element id stay: they are source-level references (J3).
+    """
+    states = attest_pointers(KG_OBJECTS_PRODUCER, (
+        str(evidence.element_id or "") for _tier, _nb, evidence in filtered
+    ))
+    return [
+        row for row in filtered
+        if states.get(str(row[2].element_id or "")) != DEAD
+    ]
+
+
+def _attest_collection_citations(
+    citations: MutableMapping[str, Citation],
+    hydrated: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Register the element each enumerated-row citation names (PR-D).
+
+    The hydration read above already returned every cited element's FULL
+    text, so the snapshot is hashed in-process from it (zero extra reads). A
+    KG row only ever picks a candidate the hydration found, so it is live by
+    construction. An element row, though, stays citable when its hydration
+    missed; in a global run such an id is asked about once more and a
+    confirmed-dead one is dropped (J2) instead of being minted.
+    """
+    attest_read(COLLECTION_PRODUCER, {
+        citation.element_id: (
+            str(hydrated[citation.element_id].get("source_id") or ""),
+            hydrated[citation.element_id].get("text"),
+        )
+        for citation in citations.values()
+        if citation.element_id and citation.element_id in hydrated
+    })
+    states = attest_pointers(COLLECTION_PRODUCER, (
+        citation.element_id for citation in citations.values()
+        if citation.element_id and citation.element_id not in hydrated
+    ))
+    for item_id, citation in list(citations.items()):
+        if states.get(citation.element_id) == DEAD:
+            del citations[item_id]
 
 
 class EvidenceContextService:
@@ -457,6 +532,7 @@ class EvidenceContextService:
                 ),
                 knowhow=_knowhow_ref(evidence_row) if evidence_row else None,
             )
+        _attest_collection_citations(citations, hydrated)
         return citations
 
     def chunk_context(
@@ -1011,6 +1087,7 @@ class EvidenceContextService:
             _admit(rest, budget)
         else:
             _admit(hits, budget)
+        _attest_kg_anchor_evidence(evidence_by_id)
 
         citation_source_info = self.citation_source_info(
             value.get("source_id", "") for value in evidence_by_id.values()
@@ -1415,6 +1492,7 @@ class EvidenceContextService:
                 if evidence.element_id and evidence.element_id not in valid_element_ids:
                     continue
                 filtered.append((tier, hit_notebook_id, evidence))
+        filtered = _live_kg_evidence(filtered)
 
         # Task 12（引用跳转）: 批量按 element_id 查一次 knowhow 定位标签，不管
         # 本次要建多少条引用——绝不逐条引用各查一次(运行效率是一等约束)。

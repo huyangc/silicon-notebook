@@ -619,3 +619,49 @@ class RetrievalService:
             _notebook_id(args, kwargs, keyword="active_notebook_id"), "relation",
             self.candidates.federated_retrieve_relations(*args, **kwargs),
         )
+
+
+FOLLOW_CHAIN_PRODUCER = "follow_chain"
+
+
+def attest_chain_evidence(inferences: list) -> list:
+    """Register the evidence each derived-chain hop will be cited by (PR-D).
+
+    A hop becomes a citable relation anchor through its ``primary_evidence``
+    (``kg.follow_chain.render_follow_chain_context``), and only that entry, so
+    that is what is registered: ONE batched pointer read per ``follow_chain``
+    call, over the chains that survived every filter. The stored relation
+    evidence carries a quote, not the element's full text, hence a pointer
+    read rather than a hash.
+
+    A primary whose element was already gone at retrieval time (J2) loses its
+    locator: the relation still renders, but its anchor no longer names a row
+    that opens on nothing and is judged at source level only (J3). Returns the
+    input list itself when nothing was dead, which includes every call outside
+    a global run (the seam answers ``{}`` there).
+    """
+    from app.services.evidence_attestation import DEAD, attest_pointers
+
+    states = attest_pointers(FOLLOW_CHAIN_PRODUCER, (
+        str(hop.primary_evidence.get("element_id") or "")
+        for chain in inferences for hop in chain.hops
+    ))
+    if DEAD not in states.values():
+        return inferences
+    return [
+        replace(chain, hops=tuple(
+            _hop_without_dead_primary(hop, states, DEAD) for hop in chain.hops
+        ))
+        for chain in inferences
+    ]
+
+
+def _hop_without_dead_primary(hop, states: dict, dead: str):
+    """``hop`` with its dead primary evidence entry's element id cleared."""
+    primary = hop.primary_evidence
+    if states.get(str(primary.get("element_id") or "")) != dead:
+        return hop
+    return replace(hop, evidence=[
+        {**entry, "element_id": ""} if entry is primary else entry
+        for entry in hop.evidence
+    ])
