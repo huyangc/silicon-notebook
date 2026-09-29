@@ -17,10 +17,16 @@ from app.repositories.postgres._store_utils import (
     placeholders,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.id_binding import bind_ids, execute_ids
 from app.repositories.postgres.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 from app.repositories.postgres.search import chunk_section_rows
 from app.domain.vector_index import encode_vector
 from app.domain.indexing_pipeline import IndexingPipelineStalePlanError
+
+
+def _plain_execute(connection, statement, params):
+    """The unscoped twin of ``execute_ids``: no id list, plan cache kept."""
+    return connection.execute(statement, params)
 
 
 # Bounded fan-out for the element -> chunk point lookup. Deliberately a local
@@ -102,15 +108,19 @@ class ChunkStore:
     ) -> list[dict]:
         params: list[object] = [notebook_id, actor_id]
         source_clause = ""
+        execute = _plain_execute
         if allowed_source_ids is not None:
             source_ids = list(dict.fromkeys(allowed_source_ids))
             if not source_ids:
                 return []
-            source_clause = "AND q.source_id=ANY(%s) "
-            params.append(source_ids)
+            ceiling = bind_ids(source_ids)
+            source_clause = f"AND q.source_id=ANY({ceiling.array_sql}) "
+            params.append(ceiling.param)
+            execute = execute_ids
         params.append(int(limit))
         with self.database.connect() as connection:
-            rows = connection.execute(
+            rows = execute(
+                connection,
                 "SELECT q.id,q.chunk_id,q.source_id,q.vector "
                 "FROM chunk_questions q JOIN chunks c "
                 "ON c.id=q.chunk_id AND c.notebook_id=q.notebook_id "
@@ -170,9 +180,12 @@ class ChunkStore:
                 "ORDER BY requested.ordinal",
                 (values, notebook_id),
             ).fetchall()
-        return connection.execute(
-            "SELECT id FROM chunks WHERE notebook_id=%s AND source_id=ANY(%s)",
-            (notebook_id, values),
+        sources = bind_ids(values)
+        return execute_ids(
+            connection,
+            "SELECT id FROM chunks WHERE notebook_id=%s "
+            f"AND source_id=ANY({sources.array_sql})",
+            (notebook_id, sources.param),
         ).fetchall()
 
     def source_elements_for_chunking(self, source_id: str) -> list[dict]:
@@ -435,20 +448,24 @@ class ChunkStore:
             return []
         source_clause = ""
         params: list[object] = [notebook_id, *ids]
+        execute = _plain_execute
         if source_mode in {"include", "exclude"} and sources:
+            bound = bind_ids(sources)
             source_clause = (
-                " AND c.source_id=ANY(%s)"
+                f" AND c.source_id=ANY({bound.array_sql})"
                 if source_mode == "include"
-                else " AND c.source_id<>ALL(%s)"
+                else f" AND c.source_id<>ALL({bound.array_sql})"
             )
-            params.append(sources)
+            params.append(bound.param)
+            execute = execute_ids
         memory_clause = (
             " AND (s.source_type <> 'memory' OR EXISTS ("
             "SELECT 1 FROM memory_items m "
             "WHERE m.id=s.memory_id AND m.created_by=%s))"
         )
         params.append(actor_id)
-        rows = connection.execute(
+        rows = execute(
+            connection,
             "SELECT c.id,c.source_id,c.text,c.section_path,c.element_ids,"
             "c.notebook_id AS chunk_notebook_id,s.title AS source_title "
             "FROM chunks c JOIN sources s "
