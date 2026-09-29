@@ -132,8 +132,8 @@ def test_exact_dedup_preserves_semantically_different_code_indentation():
 def test_the_retrieval_snapshot_outranks_a_freshly_read_baseline(setup):
     """检索时刻的指纹是「之前」,复核时现读的那一份不是。
 
-    把「之前」也现读一遍,两边自然恒等,这道闸就变成一句空话:答案会带着一段
-    **已经被改过**的原文照常交付。所以累积快照必须赢过现读的基线。
+    把「之前」也现读一遍,两边自然恒等,这道闸就变成一句空话:一段**已经被改过**
+    的原文会被当成有据、不带任何标记交付。所以累积快照必须赢过现读的基线。
     """
     service, _, _, _ = setup
     service.ask.retrieve = lambda nb, query: ([replace(
@@ -162,9 +162,10 @@ def test_the_retrieval_snapshot_outranks_a_freshly_read_baseline(setup):
     service.ask.synthesize = synthesize
     result = finished(service, service.start(GlobalAskRequest(question="q"), user_id="u"))
 
+    # Q3: the answer is delivered with the stale citation MARKED, never voided.
     assert result.status == "done" and not result.answer.grounded
-    assert "stale claim" not in result.answer.answer
-    assert not result.answer.citations
+    assert "stale claim" in result.answer.answer
+    assert [row.verification for row in result.answer.citations] == ["changed"]
 
 
 def test_polling_and_cancellation_retain_completed_notebook_progress(setup):

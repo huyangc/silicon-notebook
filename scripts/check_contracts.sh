@@ -103,6 +103,8 @@ PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   "$ROOT_DIR/scripts/check_enumeration_list_labels_contract.py"
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
+  "$ROOT_DIR/scripts/check_citation_verification_contract.py"
+PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   "$ROOT_DIR/scripts/check_ui_vocabulary.py" \
   --extra-root "$ROOT_DIR/examples/extensions/arxiv-search/src" \
   --extra-root "$ROOT_DIR/examples/extensions/circuit-diagram/src"

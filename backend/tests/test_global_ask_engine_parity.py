@@ -11,7 +11,8 @@
     包括回调的异常被检索层 fail-soft 吞掉的情形;
   · 逐库回执跨**多次**联邦调用聚合(reasoning 每轮一次):从未成功 = 跳过,
     部分失败 = 降级;一次联邦调用都没有的 run 不诬告任何库;
-  · 引用冻结复核改吃 ``response.citations`` + 累积指纹表,失效时整份作废;
+  · 引用冻结复核改吃 ``response.citations`` + ``anchors`` + 累积指纹表,逐条判定、
+    部分失败照常交付(失效引用带原因标记 + ``citation_check`` 汇总),从不整份作废;
   · 入口校验:未知 mode / 扩展引擎 422,``deep`` 档位压成 ``standard``,
     升级前写下的旧请求串仍然幂等。
 
@@ -66,10 +67,15 @@ class _FakeAsk:
 
     def __init__(self, *, rounds=((),), citations=(), evidence=None,
                  evidence_groups=None, trace=(), extension_modes=(),
-                 on_run=None):
+                 on_run=None, anchors=(), evidence_level=None):
         # 每一轮 = 一次联邦调用,内容是 ``[(notebook_id, LibraryOutcome), ...]``。
         self.rounds = [list(row) for row in rounds]
         self.citations = list(citations)
+        self.anchors = list(anchors)
+        # 真引擎有引用时给 ``grounded`` 档;部分失败必须把它封顶到 ``overview``。
+        self.evidence_level = evidence_level or (
+            "grounded" if self.citations or self.anchors else "inferred"
+        )
         self.evidence_rounds = evidence
         # 每一轮入选的多元素段落:``[(element_id, ...), ...]``。一条引用只带
         # 段落的**首个** element,这一列才说出「这条引用背后还靠着哪些」。
@@ -132,7 +138,9 @@ class _FakeAsk:
             return AskResponse(
                 answer_id="", conclusion="结论", answer="答案",
                 grounded=bool(self.citations), mode=payload.mode,
-                citations=list(self.citations),
+                evidence_level=self.evidence_level,
+                citations=[row.model_copy() for row in self.citations],
+                anchors=[row.model_copy() for row in self.anchors],
                 conversation_id=self.seen_turn.conversation_id,
                 reasoning_trace=list(self.trace) or None,
             )
@@ -543,14 +551,14 @@ def test_authority_revoked_mid_run_fails_the_whole_request(service, where):
         service.test_fingerprints["e-b-1"] = ("s-b", "fp")
         service.test_visible["b"] = {"s-b"}
         # 引用复核跑完之后再撤权:最后一个 ``_check`` 必须仍然拦得住。
-        original_validate = service._validate_citations
+        original_check = service._check_citations
 
         def revoke_after(*args, **kwargs):
-            outcome = original_validate(*args, **kwargs)
+            outcome = original_check(*args, **kwargs)
             allowed[0] = []
             return outcome
 
-        service._validate_citations = revoke_after
+        service._check_citations = revoke_after
 
     job = service.start(
         GlobalAskRequest(question="比较一下"), user_id="u",
@@ -826,19 +834,43 @@ def test_a_run_without_any_federated_call_blames_no_library(service):
 
 
 # ---------------------------------------------------------------------------
-# 6. 引用冻结复核
+# 6. 引用冻结复核:逐条判定,部分失败照常交付(Q3)
 # ---------------------------------------------------------------------------
+#
+# 终态复核只判引用**完整性**(原文已改动 / 资料已删除 / 无法核对),从不作废整份
+# 答案、从不改动正文;权限与来源范围只归检索层管(2026-09-29 用户裁决)。
 
-def _grounded_service(service, *, citations, evidence, fingerprints):
+_ANSWER_TEXT = "答案"
+
+
+def _grounded_service(service, *, citations, evidence, fingerprints, **fake):
     service.ask = _FakeAsk(
         rounds=[_ok(*_LIBRARIES)], citations=citations, evidence=evidence,
+        **fake,
     )
     service.test_visible["b"] = {"s-b"}
     service.test_fingerprints.clear()
     service.test_fingerprints.update(fingerprints)
 
 
-def test_changed_evidence_returns_retry_copy(service):
+def _events(service, kind):
+    return [row for row in service.test_events if row.get("kind") == kind]
+
+
+def _check(result):
+    """The wire summary exactly as the answer serialises it (``None`` = absent)."""
+    return result.answer.model_dump(mode="json").get("citation_check")
+
+
+def _assert_delivered(result):
+    """Q3: the answer text is the engine's, never a replacement sentence."""
+    assert result.status == "done"
+    assert result.answer.answer == _ANSWER_TEXT
+    assert result.answer.conclusion == "结论"
+    assert "引用原文在回答期间发生了变化" not in result.answer.answer
+
+
+def test_changed_evidence_is_marked_and_the_answer_is_delivered(service):
     _grounded_service(
         service, citations=[_citation("b")],
         evidence={"e-b-1": ("s-b", "原文")},
@@ -847,26 +879,147 @@ def test_changed_evidence_returns_retry_copy(service):
 
     result = _run(service)
 
-    assert result.status == "done"
+    _assert_delivered(result)
+    assert [row.verification for row in result.answer.citations] == ["changed"]
+    assert _check(result) == {
+        "outcome": "partial", "checked": 1, "failed": 1,
+        "changed": 1, "source_gone": 0, "unverifiable": 0,
+    }
     assert result.answer.grounded is False
-    assert result.answer.citations == []
-    assert result.answer.answer == (
-        "引用原文在回答期间发生了变化，暂时无法提供可靠结论，请重新提问。"
+    # 徽章封顶「概述」,不再自称有据。
+    assert result.answer.evidence_level == "overview"
+    # 引用还在,归属照常统计,学习链照常能拿到它。
+    assert result.cited_notebook_ids == ["b"]
+    [partial] = _events(service, "global_ask_citations_partial")
+    assert partial == {
+        "kind": "global_ask_citations_partial", "libraries": 3,
+        "checked": 1, "failed": 1, "changed": 1, "source_gone": 0,
+        "unverifiable": 0, "reasons": {"changed": 1},
+    }
+    assert not _events(service, "global_ask_citations_void")
+    assert not _events(service, "global_ask_citation_scope_diagnostic")
+
+
+def test_the_partial_answer_persists_in_the_payload(service):
+    """落库随 ``payload_json``,重开这一轮拿到的是同一份标记与汇总。"""
+    _grounded_service(
+        service, citations=[_citation("b")],
+        evidence={"e-b-1": ("s-b", "原文")}, fingerprints={},
     )
-    assert result.answer.conclusion == result.answer.answer
-    # 读者看到的徽章是 ``evidence_level``,不是 ``grounded``。
+
+    result = _run(service)
+    stored = service.store.job(result.job_id, "u")
+
+    assert stored.answer.citations[0].verification == "source_gone"
+    assert stored.answer.citation_check.model_dump() == _check(result)
+    from app.services.global_citation_check import global_answer_check
+    assert global_answer_check(stored) == _check(result)
+    assert global_answer_check(
+        {"payload": {"answer": stored.answer.model_dump(mode="json")}}
+    ) == _check(result)
+
+
+def test_every_citation_is_judged_not_only_the_first_failure(service):
+    """不在第一条失败时退出:每一条引用都拿到自己的原因,计数逐类如实。"""
+    _grounded_service(
+        service,
+        citations=[_citation("b", 1), _citation("b", 2), _citation("b", 3)],
+        evidence={
+            "e-b-1": ("s-b", "一"), "e-b-2": ("s-b", "二"), "e-b-3": ("s-b", "三"),
+        },
+        fingerprints={"e-b-1": ("s-b", "一改"), "e-b-3": ("s-b", "三")},
+    )
+
+    result = _run(service)
+
+    _assert_delivered(result)
+    assert [row.verification for row in result.answer.citations] == [
+        "changed", "source_gone", None,
+    ]
+    assert _check(result) == {
+        "outcome": "partial", "checked": 3, "failed": 2,
+        "changed": 1, "source_gone": 1, "unverifiable": 0,
+    }
+
+
+def test_answer_anchors_are_validated_too(service):
+    """reasoning 的权威显示路径是锚点:只复核 citations 等于放过主路径。"""
+    from app.models.ask import AnswerAnchor
+
+    anchor = AnswerAnchor(
+        key="k1", object_id="e-b-2", object_type="element", label="来源 b",
+        source_id="s-b", element_id="e-b-2", notebook_id="b",
+    )
+    _grounded_service(
+        service, citations=[_citation("b", 1)], anchors=[anchor],
+        evidence={"e-b-1": ("s-b", "一"), "e-b-2": ("s-b", "二")},
+        fingerprints={"e-b-1": ("s-b", "一"), "e-b-2": ("s-b", "二改")},
+    )
+
+    result = _run(service)
+
+    _assert_delivered(result)
+    assert result.answer.citations[0].verification is None
+    assert result.answer.anchors[0].verification == "changed"
+    assert _check(result)["changed"] == 1
+
+
+def test_an_anchor_and_a_citation_on_one_element_count_once(service):
+    from app.models.ask import AnswerAnchor
+
+    anchor = AnswerAnchor(
+        key="k1", object_id="e-b-1", object_type="element", label="来源 b",
+        source_id="s-b", element_id="e-b-1", notebook_id="b",
+    )
+    _grounded_service(
+        service, citations=[_citation("b")], anchors=[anchor],
+        evidence={"e-b-1": ("s-b", "原文")}, fingerprints={},
+    )
+
+    result = _run(service)
+
+    assert result.answer.citations[0].verification == "source_gone"
+    assert result.answer.anchors[0].verification == "source_gone"
+    assert _check(result)["checked"] == 1 and _check(result)["failed"] == 1
+
+
+def test_nothing_failed_serialises_no_check_and_no_marks(service):
+    """零失败时汇总与标记整体缺席:库外读者看到的形状与改动之前逐字节相同。"""
+    _grounded_service(
+        service, citations=[_citation("b")],
+        evidence={"e-b-1": ("s-b", "原文")},
+        fingerprints={"e-b-1": ("s-b", "原文")},
+    )
+
+    result = _run(service)
+
+    dumped = result.answer.model_dump(mode="json")
+    assert "citation_check" not in dumped
+    assert all("verification" not in row for row in dumped["citations"])
+    assert result.answer.grounded is True
+    assert result.answer.evidence_level == "grounded"
+    from app.services.global_citation_check import global_answer_check
+    assert global_answer_check(result) is None
+    assert not _events(service, "global_ask_citations_partial")
+
+
+def test_an_inferred_answer_is_not_raised_by_the_cap(service):
+    _grounded_service(
+        service, citations=[_citation("b")], evidence_level="inferred",
+        evidence={"e-b-1": ("s-b", "原文")}, fingerprints={},
+    )
+
+    result = _run(service)
+
     assert result.answer.evidence_level == "inferred"
-    assert result.answer.anchors == []
-    assert result.cited_notebook_ids == []
+    assert result.answer.grounded is False
 
 
-def test_an_unreadable_fingerprint_is_refused_not_accepted(service):
-    """第 2 轮指纹读失败 → 那一轮的 element 被**明确**标成 ``None`` → 整份作废。
+def test_an_unreadable_fingerprint_is_unverifiable_not_accepted(service):
+    """第 2 轮指纹读失败 → 那一轮的 element 被**明确**标成 ``None`` → 无法核对。
 
-    契约的三态在这里起作用:``None`` 是「走过联邦 chunk 通道但读不到指纹」,
-    是一条**声明出来的**拒绝;它与「压根没走过那条通道」(缺席)是两件事,后者
-    是文档概览/集合枚举的常态,按天花板判即可。所以「累积表非空」不构成放行
-    理由,判据是**这一条**引用的 element 在表里是什么状态。
+    契约的三态在这里起作用:``None`` 是「走过生产者但读不到指纹」,是一条**声明
+    出来的**「无法核对」;它不是「通过」。
     """
     service.ask = _FakeAsk(
         rounds=[_ok(*_LIBRARIES), _ok(*_LIBRARIES)],
@@ -880,17 +1033,15 @@ def test_an_unreadable_fingerprint_is_refused_not_accepted(service):
 
     result = _run(service, mode="reasoning")
 
-    assert result.answer.citations == []
-    assert "变化" in result.answer.answer
-    assert service.test_events[-1]["reason"] == "unreadable"
+    _assert_delivered(result)
+    assert result.answer.citations[0].verification == "unverifiable"
+    assert _events(service, "global_ask_citations_partial")[-1]["reasons"] == {
+        "unreadable": 1,
+    }
 
 
 def test_a_real_snapshot_is_never_overwritten_by_a_later_unreadable_one(service):
-    """第 1 轮读到了真快照,第 2 轮同一个 element 读失败 → 仍按真快照判。
-
-    契约规则 2:run 里最早的那份快照就是合法的「之前」。让后到的 ``None`` 覆盖
-    它,等于一次读失败就能作废一份本来完全可佐证的答案。
-    """
+    """第 1 轮读到了真快照,第 2 轮同一个 element 读失败 → 仍按真快照判。"""
     service.ask = _FakeAsk(
         rounds=[_ok(*_LIBRARIES), _ok(*_LIBRARIES)],
         citations=[_citation("b")],
@@ -902,11 +1053,32 @@ def test_a_real_snapshot_is_never_overwritten_by_a_later_unreadable_one(service)
     result = _run(service, mode="reasoning")
 
     assert [row.element_id for row in result.answer.citations] == ["e-b-1"]
+    assert result.answer.citations[0].verification is None
     assert result.answer.grounded is True
 
 
+def test_the_first_real_snapshot_wins_over_a_later_one(service):
+    """首个真实快照获胜:后到的指针读可能晚于一次编辑,不许把它盖掉。
+
+    第 1 轮登记的是检索时刻的原文;第 2 轮(例如一次 ``attest_pointers`` 的按 id
+    读)读到的已经是改过的文字,现读也是改过的文字。后者若覆盖前者,终态复核
+    就是拿新文字比新文字,一次真实的改动被判成通过。
+    """
+    service.ask = _FakeAsk(
+        rounds=[_ok(*_LIBRARIES), _ok(*_LIBRARIES)],
+        citations=[_citation("b")],
+        evidence=[{"e-b-1": ("s-b", "原文")}, {"e-b-1": ("s-b", "改过")}],
+    )
+    service.test_visible["b"] = {"s-b"}
+    service.test_fingerprints["e-b-1"] = ("s-b", "改过")
+
+    result = _run(service, mode="reasoning")
+
+    assert result.answer.citations[0].verification == "changed"
+
+
 def test_a_later_real_snapshot_replaces_an_unreadable_one(service):
-    """反向:先 ``None``、后真快照 → 用真快照,不停留在拒绝态。"""
+    """反向:先 ``None``、后真快照 → 用真快照,不停留在「无法核对」。"""
     service.ask = _FakeAsk(
         rounds=[_ok(*_LIBRARIES), _ok(*_LIBRARIES)],
         citations=[_citation("b")],
@@ -918,48 +1090,100 @@ def test_a_later_real_snapshot_replaces_an_unreadable_one(service):
     result = _run(service, mode="reasoning")
 
     assert [row.element_id for row in result.answer.citations] == ["e-b-1"]
+    assert result.answer.citations[0].verification is None
 
 
-def test_a_source_that_left_the_frozen_ceiling_voids_the_answer(service):
+def test_a_deleted_source_is_marked_source_gone(service):
+    """天花板在 start 时冻结;之后来源被删(全局问答里来源离开可见集只能是被删)。"""
     _grounded_service(
         service, citations=[_citation("b")],
         evidence={"e-b-1": ("s-b", "原文")},
         fingerprints={"e-b-1": ("s-b", "原文")},
     )
-    # 天花板在 start 时按当时可见来源冻结;之后把来源藏起来。
-    service.test_visible["b"] = set()
+    service.ask.on_run = lambda fake: service.test_visible.__setitem__("b", set())
 
     result = _run(service)
 
-    assert result.answer.citations == []
-    assert "变化" in result.answer.answer
+    _assert_delivered(result)
+    assert result.answer.citations[0].verification == "source_gone"
 
 
-def test_a_run_with_no_federated_call_keeps_its_real_element_citations(service):
-    """集合枚举 / 文档概览形状:引用的是**真的** ``source_elements`` 行,但这条路
-    一次联邦调用都不发,所以累积表里没有它们的快照。
+def test_a_source_outside_the_frozen_ceiling_is_unverifiable_and_diagnosed(service):
+    """原先会整份作废的 ``out_of_ceiling``:现在只标「无法核对」+ 诊断事件。
 
-    「缺席 → 拒绝」会把这类答案 100% 判成作废。缺席的正确读法是「从未走过联邦
-    chunk 通道」,判据只剩天花板那一半 + 「现读那一行还挂在引用声明的来源下」。
+    走到这里说明某条检索通道漏过了来源天花板——那是检索层的 bug,要能定位;
+    但终态复核不是权限闸,不因此扣下正文(2026-09-29 裁决)。
     """
+    stray = _citation("b").model_copy(update={"source_id": "s-elsewhere"})
+    _grounded_service(
+        service, citations=[stray],
+        evidence={"e-b-1": ("s-elsewhere", "原文")},
+        fingerprints={"e-b-1": ("s-elsewhere", "原文")},
+    )
+
+    result = _run(service)
+
+    _assert_delivered(result)
+    assert result.answer.citations == [stray.model_copy(update={
+        "verification": "unverifiable",
+    })]
+    assert _check(result)["unverifiable"] == 1
+    [diagnostic] = _events(service, "global_ask_citation_scope_diagnostic")
+    assert diagnostic == {
+        "kind": "global_ask_citation_scope_diagnostic", "libraries": 3,
+        "out_of_ceiling": 1,
+    }
+
+
+def test_an_unattributed_citation_is_unverifiable_and_diagnosed(service):
+    """空归属是 D0 归一漏改的告警面:内部原因码单独进诊断事件,线上只说无法核对。"""
+    blank = _citation("b").model_copy(update={"notebook_id": ""})
+    service.ask = _FakeAsk(rounds=[_ok(*_LIBRARIES)], citations=[blank])
+    service.test_visible["b"] = {"s-b"}
+
+    result = _run(service)
+
+    _assert_delivered(result)
+    assert result.answer.citations[0].verification == "unverifiable"
+    assert _events(service, "global_ask_citations_partial")[-1]["reasons"] == {
+        "unattributed": 1,
+    }
+    [diagnostic] = _events(service, "global_ask_citation_scope_diagnostic")
+    assert diagnostic["unattributed"] == 1
+
+
+def test_nobody_registered_is_unverifiable_and_not_the_changed_copy(service):
+    """集合枚举 / 文档概览形状:引用的是真的 ``source_elements`` 行,但没有任何生产者
+    登记过检索时刻快照 → 「无法核对」,文案不是「原文发生了变化」。
+
+    只有真实快照不一致才说「发生了变化」(J1)。
+    """
+    from app.services.global_citation_check import citation_check_notice
+
     service.ask = _FakeAsk(
         rounds=[[]], citations=[_citation("b")], evidence=None,
     )
     service.test_visible["b"] = {"s-b"}
-    # 真实存在的 element 行,但没有任何一轮联邦调用给它发过指纹。
     service.test_fingerprints["e-b-1"] = ("s-b", "原文")
 
     result = _run(service)
 
-    assert result.status == "done"
-    assert result.answer.grounded is True
+    _assert_delivered(result)
+    assert result.answer.citations[0].verification == "unverifiable"
     assert [row.notebook_id for row in result.answer.citations] == ["b"]
-    assert not [row for row in service.test_events
-                if row.get("kind") == "global_ask_citations_void"]
+    notice = citation_check_notice(_check(result))
+    assert notice == (
+        "本次回答有部分引用未通过核对：1 条无法核对。"
+        "回答内容照常保留，带标记的引用可点开查看原因。"
+    )
+    assert "改动" not in notice and "变化" not in notice
+    assert _events(service, "global_ask_citations_partial")[-1]["reasons"] == {
+        "unattested": 1,
+    }
 
 
-def test_an_unfederated_citation_whose_element_moved_source_is_refused(service):
-    """缺席那一支不是免检:现读那一行若已经挂到别的来源下,照样作废。"""
+def test_an_unregistered_element_under_another_source_is_not_called_changed(service):
+    """没有快照就没有「之前」:现读挂到了别的来源下也不说「原文已改动」。"""
     service.ask = _FakeAsk(
         rounds=[[]], citations=[_citation("b")], evidence=None,
     )
@@ -968,20 +1192,7 @@ def test_an_unfederated_citation_whose_element_moved_source_is_refused(service):
 
     result = _run(service)
 
-    assert result.answer.citations == []
-    assert service.test_events[-1]["reason"] == "changed"
-
-
-def test_an_unattributed_citation_is_reported_under_its_own_reason(service):
-    """空归属是 D0 归一漏改的告警面,不能和「证据变了」混成一个原因码。"""
-    blank = _citation("b").model_copy(update={"notebook_id": ""})
-    service.ask = _FakeAsk(rounds=[_ok(*_LIBRARIES)], citations=[blank])
-    service.test_visible["b"] = {"s-b"}
-
-    result = _run(service)
-
-    assert result.answer.citations == []
-    assert service.test_events[-1]["reason"] == "unattributed"
+    assert result.answer.citations[0].verification == "unverifiable"
 
 
 def _external_citation(**updates):
@@ -992,34 +1203,29 @@ def _external_citation(**updates):
     ).model_copy(update=updates)
 
 
-def test_an_external_citation_does_not_void_the_answer(service):
-    """reflect 插件动作带回的库外证据不属于任何一个库,不参与冻结复核。
-
-    它按构造就是 URL 支撑的(库 / 来源 / element 三者皆空),既没有可离开的冻结
-    天花板、也没有可漂移的指纹;把它的空归属当成「归一点漏改」会让每一份用到库外
-    证据的全局答案整份作废,文案还说是库里的原文变了(codex #755 第 5 轮 P2)。
-    库内那条引用照常复核,归属统计只数库内的。
-    """
+def test_an_external_citation_is_not_checked(service):
+    """reflect 插件动作带回的库外证据不属于任何一个库,不参与冻结复核,也不计数。"""
     service.test_visible["b"] = {"s-b"}
     service.ask = _FakeAsk(
         rounds=[_ok(*_LIBRARIES)],
-        citations=[_citation("b"), _external_citation()], evidence={},
+        citations=[_citation("b"), _external_citation()],
+        evidence={"e-b-1": ("s-b", "原文")},
     )
+    service.test_fingerprints["e-b-1"] = ("s-b", "原文")
 
     result = _run(service)
 
     assert result.status == "done"
     assert [row.tier for row in result.answer.citations] == ["personal", "external"]
+    assert [row.verification for row in result.answer.citations] == [None, None]
     assert result.cited_notebook_ids == ["b"]
-    assert not [event for event in service.test_events
-                if event.get("kind") == "global_ask_citations_void"]
+    assert _check(result) is None
 
 
 @pytest.mark.parametrize("updates", [
     {"source_id": "s-b"},            # 自称库外,却指着一个库内来源
     {"element_id": "e-b-1"},         # ……或一个库内 element
-    {"url": ""},                     # 没有可打开的地址,就不是 URL 支撑的证据
-], ids=["names-a-source", "names-an-element", "no-url"])
+], ids=["names-a-source", "names-an-element"])
 def test_the_external_tier_alone_does_not_exempt_a_citation(service, updates):
     """豁免是严格的:只认「tier=external + 有 URL + 不指向任何库内行」。"""
     service.test_visible["b"] = {"s-b"}
@@ -1030,28 +1236,28 @@ def test_the_external_tier_alone_does_not_exempt_a_citation(service, updates):
 
     result = _run(service)
 
-    assert result.answer.citations == []
-    assert service.test_events[-1]["reason"] == "unattributed"
+    _assert_delivered(result)
+    assert result.answer.citations[0].verification == "unverifiable"
+    assert _events(service, "global_ask_citations_partial")[-1]["reasons"] == {
+        "unattributed": 1,
+    }
 
 
-def test_a_citation_without_a_source_element_is_held_to_the_ceiling_only(service):
-    """KG 对象 / 文档概述锚点没有 element 指纹,只过「来源仍在天花板且可见」。
-
-    它们的 element id 不是 ``source_elements`` 的行,活体读回来也是空——正因为
-    如此,判「是不是段落引用」用的是**活体读**而不是快照:一个检索时存在、现在
-    被删掉的 element 在快照里有、活体读没有,于是被拒绝,而不是被误认成图对象。
-    """
-    _grounded_service(
-        service, citations=[_citation("b")], evidence={}, fingerprints={},
+def test_a_reference_naming_no_library_row_has_nothing_to_check(service):
+    """既无来源也无 element(无 URL 的「库外」条目、裸图节点):没有可核对的完整性。"""
+    service.ask = _FakeAsk(
+        rounds=[_ok(*_LIBRARIES)],
+        citations=[_external_citation(url="")], evidence={},
     )
 
     result = _run(service)
 
-    assert result.answer.grounded is True
-    assert [row.notebook_id for row in result.answer.citations] == ["b"]
+    assert result.answer.citations[0].verification is None
+    assert _check(result) is None
 
 
-def test_a_deleted_element_is_refused_not_mistaken_for_a_graph_object(service):
+def test_a_deleted_element_is_marked_source_gone(service):
+    """检索时刻有快照、现读没有 → 资料已删除。"""
     _grounded_service(
         service, citations=[_citation("b")],
         evidence={"e-b-1": ("s-b", "原文")}, fingerprints={},
@@ -1059,8 +1265,46 @@ def test_a_deleted_element_is_refused_not_mistaken_for_a_graph_object(service):
 
     result = _run(service)
 
-    assert result.answer.citations == []
-    assert "变化" in result.answer.answer
+    _assert_delivered(result)
+    assert result.answer.citations[0].verification == "source_gone"
+    assert _check(result)["source_gone"] == 1
+
+
+def test_same_text_reinserted_under_the_same_id_does_not_fail(service):
+    """删除后以同一 id、同一文字重新入库(确定性 id)→ 现读与快照相同 → 通过。"""
+    _grounded_service(
+        service, citations=[_citation("b")],
+        evidence={"e-b-1": ("s-b", "原文")}, fingerprints={},
+    )
+    service.ask.on_run = lambda fake: service.test_fingerprints.update(
+        {"e-b-1": ("s-b", "原文")}
+    )
+
+    result = _run(service)
+
+    assert result.answer.citations[0].verification is None
+    assert _check(result) is None
+
+
+def test_a_terminal_read_failure_marks_unverifiable_and_still_delivers(service):
+    def broken(ids):
+        raise RuntimeError("database went away")
+
+    _grounded_service(
+        service, citations=[_citation("b")],
+        evidence={"e-b-1": ("s-b", "原文")}, fingerprints={},
+    )
+    service.sources.evidence_fingerprints = broken
+
+    result = _run(service)
+
+    _assert_delivered(result)
+    assert result.answer.citations[0].verification == "unverifiable"
+    [failure] = _events(service, "global_ask_citation_check_read_failed")
+    assert failure == {
+        "kind": "global_ask_citation_check_read_failed",
+        "read": "fingerprints", "error_type": "RuntimeError",
+    }
 
 
 def _passage_service(service, *, evidence, fingerprints):
@@ -1080,12 +1324,8 @@ def _passage_service(service, *, evidence, fingerprints):
     service.test_fingerprints.update(fingerprints)
 
 
-def test_a_passage_whose_second_element_changed_voids_the_answer(service):
-    """被引段落的第二个 element 在答案产生后被改 → 整份作废。
-
-    引用名义上指向 ``e-b-1``,而读者看到的那段原文里有一半来自 ``e-b-2``。
-    只复核被引的那一个,等于对「引文中段被人改掉」这件事永久失明。
-    """
+def test_a_passage_whose_second_element_changed_is_marked_changed(service):
+    """被引段落的第二个 element 在答案产生后被改 → 这条引用「原文已改动」。"""
     _passage_service(
         service,
         evidence={"e-b-1": ("s-b", "前半"), "e-b-2": ("s-b", "后半")},
@@ -1094,17 +1334,24 @@ def test_a_passage_whose_second_element_changed_voids_the_answer(service):
 
     result = _run(service)
 
-    assert result.answer.citations == []
-    assert "变化" in result.answer.answer
-    assert service.test_events[-1]["reason"] == "changed"
+    _assert_delivered(result)
+    assert result.answer.citations[0].verification == "changed"
 
 
-def test_a_passage_whose_second_element_is_unreadable_is_refused(service):
-    """段落的第二个 element 指纹读不到 → ``unreadable``,与被引元素同一口径。
+def test_a_passage_whose_second_element_was_deleted_is_marked_changed(service):
+    """段落的一部分没了、被引元素还在:读者看到的那段原文变了。"""
+    _passage_service(
+        service,
+        evidence={"e-b-1": ("s-b", "前半"), "e-b-2": ("s-b", "后半")},
+        fingerprints={"e-b-1": ("s-b", "前半")},
+    )
 
-    三态合同对同一次检索里取出的每一个 element 都成立:``None`` 是声明出来的
-    拒绝,不因为它不是引用卡上印的那一个就降级成「不管」。
-    """
+    result = _run(service)
+
+    assert result.answer.citations[0].verification == "changed"
+
+
+def test_a_passage_whose_second_element_is_unreadable_is_unverifiable(service):
     _passage_service(
         service,
         evidence={"e-b-1": ("s-b", "前半"), "e-b-2": None},
@@ -1113,15 +1360,14 @@ def test_a_passage_whose_second_element_is_unreadable_is_refused(service):
 
     result = _run(service)
 
-    assert result.answer.citations == []
-    assert service.test_events[-1]["reason"] == "unreadable"
+    assert result.answer.citations[0].verification == "unverifiable"
+    assert _events(service, "global_ask_citations_partial")[-1]["reasons"] == {
+        "unreadable": 1,
+    }
 
 
 def test_a_passage_whose_elements_all_still_hold_is_grounded(service):
-    """对照臂:整段每一个 element 都没动 → 照常交付。
-
-    没有这一条,上面两条用「凡是多元素段落一律作废」也能全绿。
-    """
+    """对照臂:整段每一个 element 都没动 → 照常交付、无标记。"""
     _passage_service(
         service,
         evidence={"e-b-1": ("s-b", "前半"), "e-b-2": ("s-b", "后半")},
@@ -1132,16 +1378,10 @@ def test_a_passage_whose_elements_all_still_hold_is_grounded(service):
 
     assert result.answer.grounded is True
     assert [row.element_id for row in result.answer.citations] == ["e-b-1"]
-    assert not [row for row in service.test_events
-                if row.get("kind") == "global_ask_citations_void"]
+    assert _check(result) is None
 
 
 def test_a_single_element_passage_is_checked_exactly_as_before(service):
-    """单元素 chunk 不受分组影响:没有 sibling,判据就是原来那一条。
-
-    分组只发长度 ≥ 2 的段落(``chunk_federation._evidence_groups``),所以
-    单元素路径连一张 sibling 表都不会有。
-    """
     service.ask = _FakeAsk(
         rounds=[_ok(*_LIBRARIES)], citations=[_citation("b")],
         evidence={"e-b-1": ("s-b", "原文")}, evidence_groups=[[("e-b-1",)]],
@@ -1156,22 +1396,11 @@ def test_a_single_element_passage_is_checked_exactly_as_before(service):
     assert [row.element_id for row in result.answer.citations] == ["e-b-1"]
 
 
-def test_a_non_federated_citation_whose_element_vanished_is_still_delivered(service):
-    """⛔ 钉住现状,不是钉住「对」:缺席 + 现读不存在 = 放行。
+def test_an_id_dangling_before_the_question_is_delivered_as_usual(service):
+    """提问之前就悬空的 element id(KG 证据在重新入库后留下的旧 id):照常交付。
 
-    codex #755 第 2 轮 P2 要求在这里拒绝。**不改**,理由记在
-    ``fangan_todo.md`` 检索一节「全局引用复核:非联邦通道引用的检索时刻存活
-    快照」:非空的 ``Citation.element_id`` 并不保证这一行在 run 开始时是活的
-    ——KG 对象的 ``evidence[].element_id`` 在来源重新入库(元素 id 重发)之后
-    会变成悬空 id,``knowledge_store._enrich_evidence`` 原样交回它,这也正是
-    ``evidence_context.collection_item_citations`` 要「挑第一条活的元素」的
-    原因。只凭现读缺失就拒,会把一批**本来就这样**的既有可答问题整份作废,
-    而且文案(「引用原文在回答期间发生了变化」)是假的。
-
-    真正的修法是让四个非联邦生产者(文档概览 / 集合枚举 / KG 对象 /
-    follow_chain)也在**检索时刻**经 ``plan.on_evidence`` 登记一份存活快照;
-    在那之前,合成窗口内被删的非联邦引用会发布一条打不开的引用卡,这是明写的
-    代价。改成拒绝而不补快照 = 这条用例变红。
+    没有检索时刻快照,它就不是「回答期间被删」——线上只能说「无法核对」,绝不是
+    「资料已删除」或「原文已改动」,正文与这张卡片都照常保留。
     """
     service.ask = _FakeAsk(
         rounds=[[]], citations=[_citation("b")], evidence=None,
@@ -1181,42 +1410,108 @@ def test_a_non_federated_citation_whose_element_vanished_is_still_delivered(serv
 
     result = _run(service)
 
-    assert result.status == "done"
-    assert result.answer.grounded is True
+    _assert_delivered(result)
     assert [row.element_id for row in result.answer.citations] == ["e-b-1"]
-    assert not [row for row in service.test_events
-                if row.get("kind") == "global_ask_citations_void"]
+    assert result.answer.citations[0].verification == "unverifiable"
 
 
 def test_every_citation_names_its_notebook(service):
-    """含名义 active:对等模式下每条引用都带真实归属。
-
-    归属为空意味着某个归一点漏改了,而一条无归属的引用没法对任何一个库的天花板
-    复核——所以它是 fail-closed 的整份作废,不是「少显示一个徽章」。
-    """
+    """含名义 active:对等模式下每条引用都带真实归属。"""
     for nid in _LIBRARIES:
         service.test_visible[nid] = {f"s-{nid}"}
+        service.test_fingerprints[f"e-{nid}-1"] = (f"s-{nid}", "原文")
     service.ask = _FakeAsk(
         rounds=[_ok(*_LIBRARIES)],
-        citations=[_citation(nid) for nid in _LIBRARIES], evidence={},
+        citations=[_citation(nid) for nid in _LIBRARIES],
+        evidence={f"e-{nid}-1": (f"s-{nid}", "原文") for nid in _LIBRARIES},
     )
 
     result = _run(service)
 
     assert [row.notebook_id for row in result.answer.citations] == list(_LIBRARIES)
     assert result.cited_notebook_ids == list(_LIBRARIES)
+    assert _check(result) is None
 
 
-def test_a_blank_citation_origin_voids_the_answer(service):
-    blank = _citation("b").model_copy(update={"notebook_id": ""})
+def test_a_pointer_producer_attests_through_the_run_seat(service):
+    """``GlobalAskService`` installs the attestation seat around the engine with
+    the wired reader: a producer deep inside the run registers a pointer with
+    ONE read, and that snapshot is what the terminal check compares against."""
+    from app.services.evidence_attestation import attest_pointers
+
+    seen: list = []
+
+    def produce(fake):
+        seen.append(attest_pointers("kg_objects", ["e-b-1", "e-b-gone"]))
+        # Edited after retrieval, before the terminal read.
+        service.test_fingerprints["e-b-1"] = ("s-b", "改过")
+
     _grounded_service(
-        service, citations=[blank], evidence={}, fingerprints={},
+        service, citations=[_citation("b")], evidence=None,
+        fingerprints={"e-b-1": ("s-b", "原文")},
+    )
+    service.ask.on_run = produce
+    reads: list = []
+    reader = service.sources.evidence_fingerprints
+    service.evidence_reader = SimpleNamespace(
+        evidence_fingerprints=lambda ids: reads.append(tuple(ids)) or reader(ids),
     )
 
     result = _run(service)
 
-    assert result.answer.citations == []
-    assert "变化" in result.answer.answer
+    assert seen == [{"e-b-1": "live", "e-b-gone": "dead"}]
+    assert reads == [("e-b-1", "e-b-gone")]
+    assert result.answer.citations[0].verification == "changed"
+    [attested] = _events(service, "producer_evidence_attested")
+    assert attested["producer"] == "kg_objects" and attested["live"] == 1
+
+
+def test_reasoning_appends_a_truthful_check_step(service):
+    """reasoning 轨迹末尾追加「核对」一步,如实写核对条数与未通过条数。"""
+    _grounded_service(
+        service, citations=[_citation("b", 1), _citation("b", 2)],
+        evidence={"e-b-1": ("s-b", "一"), "e-b-2": ("s-b", "二")},
+        fingerprints={"e-b-1": ("s-b", "一")},
+        trace=[TraceStep(step_type="plan", summary="规划")],
+    )
+
+    result = _run(service, mode="reasoning")
+
+    step = result.answer.reasoning_trace[-1]
+    assert step.step_type == "citation_check"
+    assert step.summary == "核对引用：共核对 2 条，1 条未通过（1 条资料已删除）"
+    assert step.detail == {
+        "checked": 2, "failed": 1, "changed": 0, "source_gone": 1,
+        "unverifiable": 0,
+    }
+
+
+def test_a_chunk_run_gets_no_check_step(service):
+    _grounded_service(
+        service, citations=[_citation("b")],
+        evidence={"e-b-1": ("s-b", "原文")}, fingerprints={},
+    )
+
+    result = _run(service)
+
+    assert not result.answer.reasoning_trace
+
+
+def test_a_partially_failed_answer_still_feeds_the_learning_chain(service):
+    notes: list = []
+    service.note_ask_completed = lambda ids, user, mode, **kw: notes.append(ids)
+    _grounded_service(
+        service, citations=[_citation("b")],
+        evidence={"e-b-1": ("s-b", "原文")}, fingerprints={},
+    )
+
+    result = _run(service)
+
+    assert _check(result)["failed"] == 1
+    deadline = time.monotonic() + 5
+    while not notes and time.monotonic() < deadline:
+        threading.Event().wait(0.01)
+    assert notes and "b" in notes[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1596,16 +1891,17 @@ def test_end_to_end_document_overview_is_not_voided(tmp_path, monkeypatch):
         repo.close()
 
 
-def test_end_to_end_a_source_reparsed_mid_run_voids_instead_of_self_comparing(
+def test_end_to_end_a_source_reparsed_mid_run_is_unverifiable_not_self_compared(
     tmp_path, monkeypatch,
 ):
-    """真库真引擎:检索腿读完原文、快照读之前来源被重新解析 → 整份作废。
+    """真库真引擎:检索腿读完原文、快照读之前来源被重新解析 → 引用「无法核对」。
 
     元素 id 是确定性复用的(``el-<来源>-<序号>``),所以重新解析之后**同一个 id
     下已经是新文字**。若检索时刻的指纹是按 id 单独读的,读到的就是新文字的指纹,
     终态复核再读一次也是新文字——两份新指纹自比恒等,一份基于已经不存在的原文
     写出来的答案会被当成有据发布。段落快照把原文摘要与元素指纹钉在同一个数据库
-    快照里,所以这里必须是 ``unreadable`` 作废,而不是 grounded。
+    快照里,所以这里必须是 ``unreadable``(线上「无法核对」),而不是 grounded;
+    回答本身照常交付(Q3)。
 
     握手不靠计时:重写就发生在快照读这个调用里,在读之前。
     """
@@ -1643,11 +1939,92 @@ def test_end_to_end_a_source_reparsed_mid_run_voids_instead_of_self_comparing(
         assert result.status == "done", result.error
         assert reparsed, "这次 run 根本没走联邦原文通道,用例什么也没证明"
         assert result.answer.grounded is False
-        assert result.answer.citations == []
-        assert result.answer.answer == (
-            "引用原文在回答期间发生了变化，暂时无法提供可靠结论，请重新提问。"
+        assert result.answer.answer.startswith("三个库都提到了低温性能。")
+        assert result.answer.citations
+        # Every federated citation is refused by name, as unreadable -- none is
+        # called "changed", which only a real snapshot mismatch may say.
+        assert {row.verification for row in result.answer.citations} == {"unverifiable"}
+        check = result.answer.citation_check
+        assert check.failed == check.unverifiable == check.checked
+        assert result.cited_notebook_ids
+    finally:
+        repo.close()
+
+
+@pytest.mark.parametrize("mutation,expected", [
+    ("update", "changed"),
+    ("delete", "source_gone"),
+    ("reinsert", None),
+])
+def test_end_to_end_federated_passage_race_before_the_terminal_read(
+    tmp_path, monkeypatch, mutation, expected,
+):
+    """真库真引擎、联邦原文通道:答案写完、终态读之前改 / 删 / 同文重插被引元素。
+
+    检索时刻的段落快照是真的(同一条语句里摘要与元素指纹);终态读按 id 现读。
+    改 → 原文已改动;删 → 资料已删除;同 id 同文字重插(确定性 id 的重新入库)
+    → 不算失败。任何一种都照常交付正文。握手不靠计时:改动就发生在终态读这个
+    调用里,在读之前。PostgreSQL 孪生见 ``tests/postgres/test_global_citation_race_pg.py``。
+    """
+    from app.services import global_citation_check as check_module
+
+    repo, notebooks, user_id = _e2e_repo(
+        tmp_path, monkeypatch, answer="三个库都提到了低温性能。",
+    )
+    try:
+        database = repo._runtime.global_ask_service().sources.database
+        original = check_module.GlobalCitationCheck._read_current
+        touched: list = []
+
+        def mutate_then_read(self, references, siblings, event):
+            if not touched:
+                touched.extend(sorted({key[2] for key in references if key[2]}))
+                marks = ",".join("?" for _ in touched)
+                with database.write() as db:
+                    if mutation == "update":
+                        db.execute(
+                            "UPDATE source_elements SET text=text||'（改）' "
+                            f"WHERE id IN ({marks})", touched,
+                        )
+                    else:
+                        rows = [dict(row) for row in db.execute(
+                            f"SELECT * FROM source_elements WHERE id IN ({marks})",
+                            touched,
+                        ).fetchall()]
+                        db.execute(
+                            f"DELETE FROM source_elements WHERE id IN ({marks})",
+                            touched,
+                        )
+                        if mutation == "reinsert":
+                            for row in rows:
+                                columns = ",".join(row)
+                                db.execute(
+                                    f"INSERT INTO source_elements({columns}) "
+                                    f"VALUES({','.join('?' for _ in row)})",
+                                    list(row.values()),
+                                )
+            return original(self, references, siblings, event)
+
+        monkeypatch.setattr(
+            check_module.GlobalCitationCheck, "_read_current", mutate_then_read,
         )
-        assert result.cited_notebook_ids == []
+
+        result = _e2e_answer(repo, notebooks, user_id, "低温性能如何")
+
+        assert result.status == "done", result.error
+        assert touched, "终态读没有任何被引元素,用例什么也没证明"
+        assert result.answer.answer.startswith("三个库都提到了低温性能。")
+        cited = [
+            row for row in [*result.answer.citations, *result.answer.anchors]
+            if row.element_id in touched
+        ]
+        assert cited
+        assert {row.verification for row in cited} == {expected}
+        if expected is None:
+            assert result.answer.citation_check is None
+        else:
+            assert getattr(result.answer.citation_check, expected) == len(touched)
+            assert result.answer.grounded is False
     finally:
         repo.close()
 

@@ -1924,6 +1924,22 @@
               "default": "",
               "title": "Url",
               "type": "string"
+            },
+            "verification": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "changed",
+                    "source_gone",
+                    "unverifiable"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Verification"
             }
           },
           "required": [
@@ -2390,6 +2406,16 @@
               "default": "",
               "title": "Asked At",
               "type": "string"
+            },
+            "citation_check": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/CitationCheckSummary"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "citations": {
               "items": {
@@ -3270,6 +3296,22 @@
               "default": "",
               "title": "Url",
               "type": "string"
+            },
+            "verification": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "changed",
+                    "source_gone",
+                    "unverifiable"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Verification"
             }
           },
           "required": [
@@ -3280,6 +3322,51 @@
             "quoted_span"
           ],
           "title": "Citation",
+          "type": "object"
+        },
+        "CitationCheckSummary": {
+          "description": "全局问答一次回答的引用核对汇总,只在 ``failed > 0`` 时出现在回答上。\n\n``checked`` 按去重后的被引证据计数(同一证据既是锚点又是引用只算一条);\n三类计数之和等于 ``failed``。``outcome`` 目前只有 ``partial``:引用核对\n不会让整份回答作废,部分失败时回答照常交付并附带这份说明。",
+          "properties": {
+            "changed": {
+              "default": 0,
+              "minimum": 0.0,
+              "title": "Changed",
+              "type": "integer"
+            },
+            "checked": {
+              "minimum": 0.0,
+              "title": "Checked",
+              "type": "integer"
+            },
+            "failed": {
+              "minimum": 0.0,
+              "title": "Failed",
+              "type": "integer"
+            },
+            "outcome": {
+              "const": "partial",
+              "default": "partial",
+              "title": "Outcome",
+              "type": "string"
+            },
+            "source_gone": {
+              "default": 0,
+              "minimum": 0.0,
+              "title": "Source Gone",
+              "type": "integer"
+            },
+            "unverifiable": {
+              "default": 0,
+              "minimum": 0.0,
+              "title": "Unverifiable",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "checked",
+            "failed"
+          ],
+          "title": "CitationCheckSummary",
           "type": "object"
         },
         "CitationImage": {
@@ -9751,6 +9838,22 @@
               "default": false,
               "title": "Title Truncated",
               "type": "boolean"
+            },
+            "verification": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "changed",
+                    "source_gone",
+                    "unverifiable"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Verification"
             }
           },
           "title": "PublicReference",
@@ -9869,6 +9972,16 @@
               "default": "",
               "title": "Asked At",
               "type": "string"
+            },
+            "citation_check": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/CitationCheckSummary"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "completeness_notice": {
               "default": "",

@@ -19,7 +19,7 @@ from app.core.ask_retrieval_policy import DEFAULT_RETRIEVAL_EFFORT
 # than a public read of the same conversation already does.
 from app.domain.conversation_public_view import MAX_TURNS
 from app.domain.global_ask_attribution import touched_notebook_ids
-from app.models.ask import AskRequest, QueryIntentContract
+from app.models.ask import AskRequest, QueryIntentContract, TraceStep
 from app.models.global_ask import (
     GlobalAskIntentPreviewRequest, GlobalAskJob, GlobalAskRequest,
     GlobalConversationDetail, GlobalNotebookScope, GLOBAL_ASK_PAGE_MAX,
@@ -31,8 +31,12 @@ from app.services.ask_execution import new_delivery_queue
 from app.services.ask_followup import followup_resolution_context
 from app.services.ask_modes import UnknownAskMode
 from app.services.cancellation import AskCancelled, raise_if_cancelled
+from app.services.evidence_attestation import evidence_attestation_seat
 from app.services.federated_run import DetachedAskTurn, FederatedRunPlan
 from app.services.global_ask_feed import JobFeed
+from app.services.global_citation_check import (
+    DIAGNOSTIC_REASONS, GlobalCitationCheck, apply_outcome, check_trace_summary,
+)
 from app.services.global_run import global_ask_run
 # 待确认中心「进行中的提问」的推送入口——与笔记本内问答的 worker 同一个叶子模块。
 from app.services.pending_bus import publish_snapshot
@@ -54,12 +58,6 @@ _SKIP_COPY = {
     "unavailable": "检索未完成，请稍后重试。",
 }
 
-# The one sentence a run says when its own citations no longer describe the
-# library as it is now. Lifted to a constant because two places produce it: the
-# evidence re-check below and the regression test that pins it.
-_EVIDENCE_CHANGED_COPY = (
-    "引用原文在回答期间发生了变化，暂时无法提供可靠结论，请重新提问。"
-)
 _UNKNOWN_ENGINE_COPY = "不支持的问答引擎，请刷新页面后重试。"
 _PLUGIN_ENGINE_COPY = "全局问答暂不支持该引擎，请选择其他引擎后重试。"
 # The push stream's own failure, as opposed to the job's: the follower could not
@@ -76,16 +74,6 @@ _FOLLOW_FAILURE_COPY = "接回这次回答时出错，请稍后重新打开该�
 _TRACE_SAVE_SECONDS = 0.5
 _TRACE_SAVE_STEPS = 5
 
-# Why a citation's evidence could not be attested. Content-free; the copy the
-# user sees is the same one sentence in every case, but an operator has to be
-# able to tell "the original changed" from "this citation carries no library
-# at all", because the second is a normalization gap in the citation
-# producers, not a race with an editing user.
-_VOID_CHANGED = "changed"          # snapshot exists and no longer matches
-_VOID_UNREADABLE = "unreadable"    # travelled the federated channel, unreadable
-_VOID_UNATTRIBUTED = "unattributed"  # no notebook id: a D0 normalization gap
-_VOID_OUT_OF_CEILING = "out_of_ceiling"  # source left the frozen ceiling
-
 
 @dataclass(frozen=True)
 class _PreparedIntentPreview:
@@ -101,39 +89,6 @@ class _PreparedIntentPreview:
     override: Any
     source_ceiling: Mapping[str, Any]
     turn: DetachedAskTurn
-
-
-class _Absent:
-    """'This element never travelled the federated chunk channel.'
-
-    A sentinel rather than ``None``, because ``None`` is already a STATED
-    value in the evidence table -- 'it did travel that channel and could
-    not be fingerprinted' -- and the two mean opposite things to the
-    citation re-check: absence is accepted under the ceiling check alone,
-    ``None`` is refused.
-    """
-
-    __slots__ = ()
-
-
-_ABSENT = _Absent()
-
-
-def _is_external_citation(citation) -> bool:
-    """Is this citation URL-backed material from OUTSIDE every library?
-
-    Strict on purpose: the tier alone does not exempt a citation from the
-    re-check. It must also carry an openable address and name NO library row --
-    a citation that says "external" while pointing at a source or an element is
-    a library citation wearing the wrong tier, and gets the full check.
-    """
-    return (
-        getattr(citation, "tier", "") == "external"
-        and bool(getattr(citation, "url", ""))
-        and not citation.notebook_id
-        and not citation.source_id
-        and not citation.element_id
-    )
 
 
 _REPLACE_UNAVAILABLE = "上一条问题已无法替换，请刷新对话后重新提交。"
@@ -263,28 +218,32 @@ class _RunState:
                 self.degraded.add(notebook_id)
 
     def record_evidence(self, mapping) -> None:
-        """Merge one federated call's retrieval-time fingerprints.
+        """Merge one producer call's retrieval-time fingerprints.
 
         THREE STATES, per ``FederatedRunPlan.on_evidence``'s contract:
 
         * a ``(source_id, fingerprint)`` pair is the retrieval-time snapshot;
-        * ``None`` states "this element came through the federated chunk
-          channel and its fingerprint could not be read" -- a refusal, carried
-          explicitly so a failed read fails closed element by element;
-        * ABSENCE means the element never travelled that channel at all.
+        * ``None`` states "this element travelled a producer (the federated
+          chunk channel or ``evidence_attestation``) and its fingerprint could
+          not be read" -- carried explicitly so a failed read is reported
+          element by element instead of being mistaken for "never attested";
+        * ABSENCE means no producer registered the element at all.
 
-        Merging therefore has a direction. A real snapshot is authoritative and
-        is never overwritten by a later ``None`` (rule 2 of the contract: the
-        earliest snapshot in the run is a legitimate "before"), while a later
-        successful read does replace a ``None``. Plain ``update`` would get
-        this backwards and let one failed round refuse citations an earlier
-        round had already attested.
+        Merging has a direction: the FIRST REAL SNAPSHOT WINS. Rule 2 of the
+        contract makes the earliest snapshot in the run the legitimate
+        "before", and every later one is at best equal to it -- a later
+        pointer read (``attest_pointers``) may postdate an edit and would then
+        hide it from the terminal check by comparing the new text against
+        itself. So a real snapshot is overwritten by nothing, neither a later
+        ``None`` nor a later real snapshot, while a real snapshot does replace
+        an earlier ``None`` (a round that could read what an earlier one
+        could not). Plain ``update`` would get both halves wrong.
         """
         if not mapping:
             return
         with self.lock:
             for element_id, snapshot in mapping.items():
-                if snapshot is None and self.evidence.get(element_id) is not None:
+                if self.evidence.get(element_id) is not None:
                     continue
                 self.evidence[element_id] = snapshot
 
@@ -327,10 +286,9 @@ class _RunState:
 
         Sorted rather than handed over as sets: two siblings of one citation
         can fail for two different reasons, and set iteration order varies with
-        the interpreter's hash seed, so an unsorted map would let the same run
-        be voided under ``changed`` in one process and ``unreadable`` in the
-        next -- the operator-facing half of the void event is exactly what that
-        distinction is for.
+        the interpreter's hash seed, so an unsorted map could let the same run
+        report a different internal reason in two processes -- and that reason
+        is exactly what the operator-facing event exists to carry.
         """
         with self.lock:
             return {
@@ -527,12 +485,19 @@ def _public_turn_row(job: Any) -> dict[str, Any]:
 
 class GlobalAskService:
     def __init__(self, *, store, notebooks, can_read, sources, settings, ask=None,
-                 can_read_many=None, event_log=None, note_ask_completed=None):
+                 can_read_many=None, event_log=None, note_ask_completed=None,
+                 evidence_reader=None):
         self.store = store
         self.notebooks = notebooks
         self.can_read = can_read
         self.can_read_many = can_read_many
         self.sources = sources
+        # The ONE read a citation producer may spend on attesting evidence it
+        # cites without having read (``evidence_attestation.attest_pointers``),
+        # typed by ``GlobalAskEvidenceReaderPort``. The runtime wires the
+        # source store explicitly; library/test construction falls back to
+        # ``sources``, which implements the same by-id read.
+        self.evidence_reader = evidence_reader if evidence_reader is not None else sources
         # The post-completion learning chains a notebook ask advances
         # (``RepositoryRuntime._note_global_ask_completed``), called with
         # ``(attributed notebook ids, user_id, mode_id, anchor=nominal active)``
@@ -1759,6 +1724,10 @@ class GlobalAskService:
                 ),
                 plan,
                 nominal_active=job.resolved_notebook_ids[0],
+            ), evidence_attestation_seat(
+                # The reader ``attest_pointers`` spends its one bounded read
+                # through, for producers outside the federated chunk channel.
+                self.evidence_reader, emit=self._emit,
             ), followup_resolution_context(followup):
                 response = self.ask.ask(
                     job.resolved_notebook_ids[0],
@@ -1797,41 +1766,9 @@ class GlobalAskService:
         state.raise_first_error()
         raise_if_cancelled(event)
         self._check(job.resolved_notebook_ids, user_id, allowed, authority_check)
-        void_reason = self._validate_citations(
-            response.citations, state.evidence_snapshot(), source_ceiling, event,
-            siblings=state.sibling_snapshot(),
-        )
-        if void_reason:
-            # VOIDED WHOLE, never patched. Dropping the dead markers would
-            # leave the claims that depended on them standing, and re-running
-            # the engine would re-retrieve and re-freeze everything -- a
-            # different answer wearing this one's identity.
-            #
-            # The user always reads the same sentence, but the REASON travels
-            # in the event: "the original changed" is a race with an editing
-            # user and needs no action, while ``unattributed`` is a
-            # normalization gap in a citation producer and needs a fix.
-            self._emit({
-                "kind": "global_ask_citations_void",
-                "reason": void_reason,
-                "libraries": len(job.resolved_notebook_ids),
-                "citations": len(response.citations),
-            })
-            response.answer = _EVIDENCE_CHANGED_COPY
-            response.conclusion = _EVIDENCE_CHANGED_COPY
-            response.grounded = False
-            # ``grounded`` alone is not enough: the badge the reader actually
-            # sees is ``evidence_level``, and every evidence attachment beside
-            # a "please ask again" sentence is an offer to inspect material
-            # this run has just declared it can no longer vouch for. The
-            # reasoning trace stays -- it describes the process, not the
-            # evidence, and it is what explains why the answer was withdrawn.
-            response.evidence_level = "inferred"
-            response.top_relevance = 0.0
-            response.anchors = []
-            response.citations = []
-            response.related_knowledge = []
-            response.result_sets = []
+        # Judged whole and DELIVERED whole: failed citations are marked, the
+        # answer text is never replaced (``global_citation_check``).
+        self._check_citations(job, response, state, source_ceiling, event)
         raise_if_cancelled(event)
         self._check(job.resolved_notebook_ids, user_id, allowed, authority_check)
         self._publish_coverage(job, user_id, state, progress=True)
@@ -1893,186 +1830,64 @@ class GlobalAskService:
                 "global ask post-completion notification failed: %s", type(exc).__name__
             )
 
-    def _validate_citations(self, citations, evidence, source_ceiling, event=None,
-                            *, siblings=None):
-        """Does every citation still describe the library as it is NOW?
+    def _check_citations(self, job, response, state, source_ceiling, event):
+        """The terminal citation check, per reference, never voiding.
 
-        Returns a void REASON code, or ``""`` when every citation still holds.
+        Every citation and answer anchor naming library material is judged
+        against the run's retrieval-time evidence table and the library as it
+        is now (``global_citation_check``). Failed references are MARKED
+        (``verification``) and summarised (``citation_check``); the answer
+        text, the references and the rest of the response are delivered as the
+        engine produced them. ⛔ No branch here may drop or blank answer text,
+        and none is a permission check: permission and source scope are the
+        retrieval layer's alone, and the notebook-level authority re-checks
+        around this call (``_check``) are what fail a job whose access was
+        revoked.
 
-        Two halves, and which ones apply depends on how the cited element
-        reached the answer. ``evidence`` is the run's accumulated
-        retrieval-time table, whose three states are a contract, not an
-        implementation detail (``FederatedRunPlan.on_evidence``, rule 3):
-
-        =====================  ==========  ===============================
-        snapshot state         live read   verdict
-        =====================  ==========  ===============================
-        ``(source, print)``    matches     accept (both halves pass)
-        ``(source, print)``    differs     ``changed``
-        ``(source, print)``    missing     ``changed`` (element deleted)
-        ``None``               any         ``unreadable`` -- it travelled
-                                           the federated channel and could
-                                           not be fingerprinted, so it is
-                                           not attestable
-        absent                 same source accept -- the row is still where
-                                           the citation says it is
-        absent                 other source ``changed`` -- it moved
-        absent                 missing     accept -- no ``source_elements``
-                                           row was ever cited (a graph
-                                           object or relation); the ceiling
-                                           half is the whole check
-        =====================  ==========  ===============================
-
-        EVERY SUPPORTING ELEMENT, not only the one the citation names.
-        ``evidence_context.chunk_citations`` publishes ``element_ids[0]`` as
-        the citation's ``element_id``, but a chunk is assembled from as many
-        source elements as it took to reach ~600 characters, and the answer
-        rested on all of their text. ``siblings`` -- the run's fold of
-        ``FederatedRunPlan.on_evidence_groups``, ``{element_id: the others of
-        every passage it appeared in}`` -- is what makes the rest of the
-        passage reachable; each sibling is then held to the same table above,
-        with one difference stated in ``_validate_siblings``. Absent (no
-        groups, no plan, single-element passages) it is inert and the check is
-        exactly the per-citation one.
-
-        ABSENCE is the case the first cut got wrong. A document overview and a
-        collection enumeration cite real ``source_elements`` rows and make no
-        federated call at all, so refusing "no snapshot" voided 100% of those
-        answers. Their honest check is the one above: frozen ceiling, still
-        visible, and the row still belongs to the source the citation names.
-
-        The ceiling half applies to every kind, and runs FIRST: it is the only
-        check a graph object gets, and it is the cheap one.
-
-        ⛔ BOUNDED AND CANCELLABLE. This runs after the engine's own run has
-        exited, so nothing above it is watching the clock any more: the
-        per-notebook visibility reads get the run's per-library budget and the
-        cancel token is polled before each one.
+        The internal reason codes go to content-free events only: one
+        ``global_ask_citations_partial`` with the counts, and -- when a
+        reference was unattributed or outside the frozen ceiling, which only a
+        retrieval-layer defect can produce -- one
+        ``global_ask_citation_scope_diagnostic`` so that defect can be found.
+        A reasoning run also gets a 「核对」 trace step stating the counts.
         """
-        if not citations:
-            return ""
-        from app.repositories.read_budget import read_budget
-
-        siblings = siblings or {}
-        cited = [
-            citation.element_id for citation in citations if citation.element_id
-        ]
-        # ONE read, widened rather than repeated: the siblings are read in the
-        # same batch as the elements the citations name, so covering a whole
-        # passage costs no extra round trip. Sorted so the request is
-        # deterministic for a given selection.
-        current = self.sources.evidence_fingerprints(list(dict.fromkeys(
-            cited + sorted({
-                sibling for element_id in cited
-                for sibling in siblings.get(element_id, ())
+        started = self._clock()
+        outcome = GlobalCitationCheck(
+            self.sources,
+            notebook_timeout_seconds=float(
+                self.settings.global_ask_notebook_timeout_seconds
+            ),
+            emit=self._emit,
+        ).run(
+            response, evidence=state.evidence_snapshot(),
+            siblings=state.sibling_snapshot(), source_ceiling=source_ceiling,
+            event=event,
+        )
+        apply_outcome(response, outcome)
+        if job.mode == "reasoning" and outcome.checked:
+            response.reasoning_trace = [*(response.reasoning_trace or []), TraceStep(
+                step_type="citation_check", summary=check_trace_summary(outcome),
+                detail={"checked": outcome.checked, "failed": outcome.failed,
+                        **outcome.counts()},
+                duration_ms=int((self._clock() - started) * 1000),
+            )]
+        if not outcome.failed:
+            return
+        reasons = outcome.reasons()
+        self._emit({
+            "kind": "global_ask_citations_partial",
+            "libraries": len(job.resolved_notebook_ids),
+            "checked": outcome.checked, "failed": outcome.failed,
+            **outcome.counts(), "reasons": reasons,
+        })
+        diagnostic = {
+            reason: reasons[reason] for reason in DIAGNOSTIC_REASONS if reason in reasons
+        }
+        if diagnostic:
+            self._emit({
+                "kind": "global_ask_citation_scope_diagnostic",
+                "libraries": len(job.resolved_notebook_ids), **diagnostic,
             })
-        )))
-        visible: dict = {}
-        for citation in citations:
-            if _is_external_citation(citation):
-                # Material a reflect plugin action brought back from OUTSIDE the
-                # libraries. It is URL-backed by construction
-                # (``EvidenceContextService.external_citations`` leaves library,
-                # source and element blank on purpose), so there is no frozen
-                # ceiling it could leave and no fingerprint it could drift
-                # from -- and treating its blank origin as a missed
-                # normalization would void every answer that used one, under
-                # copy saying the library changed.
-                continue
-            notebook_id = citation.notebook_id
-            if not notebook_id:
-                # Peer mode stamps every citation, the nominal active included.
-                # A blank origin is a missed normalization point in one of the
-                # citation producers, not a race with an editing user -- and an
-                # unattributable citation cannot be checked against ANY
-                # library's ceiling, so it fails closed under its own code.
-                return _VOID_UNATTRIBUTED
-            if notebook_id not in visible:
-                raise_if_cancelled(event)
-                with read_budget(
-                    time.monotonic()
-                    + float(self.settings.global_ask_notebook_timeout_seconds),
-                    event,
-                ):
-                    visible[notebook_id] = set(
-                        self.sources.all_visible_source_ids(notebook_id)
-                    )
-            if (citation.source_id not in source_ceiling.get(notebook_id, ())
-                    or citation.source_id not in visible[notebook_id]):
-                return _VOID_OUT_OF_CEILING
-            before = evidence.get(citation.element_id, _ABSENT)
-            after = current.get(citation.element_id)
-            if before is None:
-                return _VOID_UNREADABLE
-            if before is _ABSENT:
-                # Never came through the federated chunk channel. Either it is
-                # not a source element at all (accept: the ceiling half is the
-                # whole check), or it is one and must still sit under the
-                # source the citation names.
-                #
-                # ⛔ "MISSING NOW" IS DELIBERATELY NOT A REFUSAL HERE, and the
-                # cost is stated rather than hidden: an element that WAS live
-                # at retrieval and was deleted during synthesis is published as
-                # a citation card that opens on nothing. Refusing instead would
-                # be worse and would also be a lie -- a non-empty
-                # ``element_id`` does not attest that the row was ever live in
-                # this run. Element ids are NOT re-issued on a re-ingest --
-                # ``source_ingestion`` mints them deterministically from
-                # ``(source, index)``, so the same id comes back -- but a
-                # reparse that yields FEWER elements, and a row-level Knowhow
-                # deletion, both leave stored ids with no row behind them, and
-                # ``knowledge_store._enrich_evidence`` hands such a dangling id
-                # straight back to a KG object's ``evidence[]`` (which is why
-                # ``collection_item_citations`` hunts for the FIRST LIVE
-                # occurrence). So "missing now" covers both "deleted just now"
-                # and "dead since long before this question" -- and the copy
-                # says the original CHANGED DURING THE ANSWER. The honest fix
-                # is a retrieval-time FINGERPRINT snapshot from the four
-                # producers that never touch this channel; it is registered in
-                # ``fangan_todo.md`` under 检索.
-                if after is not None and after[0] != citation.source_id:
-                    return _VOID_CHANGED
-            elif after is None or before != after or after[0] != citation.source_id:
-                return _VOID_CHANGED
-            void = self._validate_siblings(
-                citation, evidence, current, siblings.get(citation.element_id, ()),
-                source_ceiling, visible,
-            )
-            if void:
-                return void
-        return ""
-
-    def _validate_siblings(self, citation, evidence, current, siblings,
-                           source_ceiling, visible):
-        """Re-check the rest of the passage one citation was minted from.
-
-        Same table as ``_validate_citations``' own, with ONE difference:
-        absence is refused here instead of accepted. A sibling is only known to
-        this map because the federated chunk channel published the passage it
-        belongs to, and that channel fingerprints every selected element in the
-        same read -- so a sibling with no entry at all is a contradiction
-        between two halves of one call, not the ordinary "this citation never
-        travelled the channel". Refusing is the fail-closed side of a
-        disagreement nobody can interpret, and it costs nothing in practice
-        because the state is unreachable.
-
-        The ceiling half runs off the SNAPSHOT's source id rather than the
-        citation's: the elements of one chunk share a source today, so this
-        only ever restates the check the citation itself already passed --
-        which is exactly why it is written to be defended from the snapshot
-        instead of assumed. ``visible`` is already populated for this library,
-        so no sibling costs a second visibility read.
-        """
-        for sibling in siblings:
-            before = evidence.get(sibling, _ABSENT)
-            if before is None or before is _ABSENT:
-                return _VOID_UNREADABLE
-            if (before[0] not in source_ceiling.get(citation.notebook_id, ())
-                    or before[0] not in visible[citation.notebook_id]):
-                return _VOID_OUT_OF_CEILING
-            if current.get(sibling) != before:
-                return _VOID_CHANGED
-        return ""
 
     def get_job(self, job_id, *, user_id, allowed_notebook_ids=None):
         job = self.store.job(job_id, user_id)

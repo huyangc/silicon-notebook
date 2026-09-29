@@ -88,6 +88,31 @@ class CitationImage(BaseModel):
     caption: str = ""
 
 
+# 全局问答终态引用核对(PR-D)的逐条判定,只有这三个值会上线:
+#   changed      —— 检索时刻登记的原文与现在的不一致(原文已改动);
+#   source_gone  —— 被引的资料/元素已被删除(资料已删除);
+#   unverifiable —— 无法核对(没人登记过检索时刻快照、快照读失败、归属缺失等;
+#                   具体的内部原因码只进内容无关事件,不上线)。
+# 判定只讲引用完整性,不讲权限:权限与来源范围只由检索层负责。
+CitationVerification = Literal["changed", "source_gone", "unverifiable"]
+
+
+class CitationCheckSummary(BaseModel):
+    """全局问答一次回答的引用核对汇总,只在 ``failed > 0`` 时出现在回答上。
+
+    ``checked`` 按去重后的被引证据计数(同一证据既是锚点又是引用只算一条);
+    三类计数之和等于 ``failed``。``outcome`` 目前只有 ``partial``:引用核对
+    不会让整份回答作废,部分失败时回答照常交付并附带这份说明。
+    """
+
+    outcome: Literal["partial"] = "partial"
+    checked: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    changed: int = Field(default=0, ge=0)
+    source_gone: int = Field(default=0, ge=0)
+    unverifiable: int = Field(default=0, ge=0)
+
+
 class Citation(BaseModel):
     label: str
     source_id: str
@@ -132,6 +157,11 @@ class Citation(BaseModel):
     # 旧持久化 payload 重开时缺这个键自然回退空列表，零 migration。
     images: List[CitationImage] = Field(
         default_factory=list, exclude_if=lambda value: not value
+    )
+    # 全局问答终态引用核对未通过时的原因(见 ``CitationVerification``)。通过或
+    # 未核对时为 None、整体从 JSON 缺席,所以单库回答与历史 payload 逐字节不变。
+    verification: Optional[CitationVerification] = Field(
+        default=None, exclude_if=lambda value: value is None
     )
 
 
@@ -479,6 +509,11 @@ class AnswerAnchor(BaseModel):
     # 列表，主路径永远看不到图。同 Citation.images 的 exclude_if 惯例。
     images: List[CitationImage] = Field(
         default_factory=list, exclude_if=lambda value: not value
+    )
+    # 与 ``Citation.verification`` 同一合同:reasoning 模式的权威显示路径是锚点,
+    # 只标在 Citation 上就只覆盖回退列表。
+    verification: Optional[CitationVerification] = Field(
+        default=None, exclude_if=lambda value: value is None
     )
 
 
@@ -896,6 +931,11 @@ class AskResponse(BaseModel):
         default=None, exclude_if=lambda value: value is None
     )
     model_errors: List[ModelError] = Field(default_factory=list)
+    # 全局问答终态引用核对的汇总,只在有引用未通过核对时出现(见
+    # ``CitationCheckSummary``);单库回答永远没有这个键。
+    citation_check: Optional[CitationCheckSummary] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @field_validator("reasoning_trace", mode="before")
     @classmethod
@@ -1070,6 +1110,11 @@ class PublicReference(BaseModel):
     # ``url`` on the authenticated ``Citation``/``AnswerAnchor`` is
     # deliberately absent from this shape, same rule as every other handle.
     is_external: bool = False
+    # 全局问答终态引用核对未通过时的原因(``CitationVerification``),是回答
+    # 时刻的快照;通过或未核对时整体缺席,干净的分享页逐字节不变。
+    verification: Optional[CitationVerification] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class PublicImage(BaseModel):
@@ -1123,6 +1168,11 @@ class PublicTurn(BaseModel):
     # T4 — answer-attached images as token-derived aliases (see PublicImage).
     # Absent list when the deployment stores no images (MINERU_RETURN_IMAGES).
     images: List[PublicImage] = Field(default_factory=list)
+    # 全局问答这一轮的引用核对汇总(``CitationCheckSummary``),只在有引用未通过
+    # 核对时出现;单库与干净的全局轮次整体缺席。
+    citation_check: Optional[CitationCheckSummary] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class PublicConversation(BaseModel):

@@ -2465,6 +2465,9 @@ class RepositoryRuntime:
                     can_read=self.sharing_store.user_can_read_notebook,
                     can_read_many=self.sharing_store.readable_notebook_ids,
                     sources=self.source_store,
+                    # The one by-id fingerprint read citation producers may
+                    # spend on attesting pointers (``evidence_attestation``).
+                    evidence_reader=self.source_store,
                     ask=self.ask_service(),
                     settings=self.settings,
                     event_log=self.event_log,

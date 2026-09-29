@@ -21,6 +21,7 @@ from app.models.sources import (
     has_pdf_python_fallback_warning,
     paper_meta_status,
 )
+from app.domain.evidence_fingerprint import element_text_sha
 from app.domain.source_display import summary_display_title
 from app.models.question_suggestions import QUESTION_SUGGESTION_REVISION_PAGE_SIZE
 from app.repositories.ports import (
@@ -873,7 +874,7 @@ class SourceStore:
                     f"WHERE id IN ({placeholders})", batch,
                 ).fetchall()
                 for row in rows:
-                    result[row["id"]] = (row["source_id"], hashlib.sha256(row["text"].encode()).hexdigest())
+                    result[row["id"]] = (row["source_id"], element_text_sha(row["text"]))
         return result
 
     def passage_evidence_snapshot(self, chunk_ids: Sequence[str]) -> dict[str, dict]:
@@ -910,17 +911,13 @@ class SourceStore:
                 ).fetchall()
                 for row in rows:
                     passage = result.setdefault(row["id"], {
-                        "text_sha": hashlib.sha256(
-                            row["text"].encode()
-                        ).hexdigest(),
+                        "text_sha": element_text_sha(row["text"]),
                         "elements": {},
                     })
                     if row["element_id"] is not None:
                         passage["elements"][row["element_id"]] = (
                             row["element_source_id"],
-                            hashlib.sha256(
-                                row["element_text"].encode()
-                            ).hexdigest(),
+                            element_text_sha(row["element_text"]),
                         )
         return result
 

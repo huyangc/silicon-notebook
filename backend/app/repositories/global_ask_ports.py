@@ -43,6 +43,27 @@ class GlobalAskSourceStorePort(Protocol):
     def passage_evidence_snapshot(self, chunk_ids: Sequence[str]) -> dict[str, dict]: ...
 
 
+class GlobalAskEvidenceReaderPort(Protocol):
+    """The ONE read a citation producer may spend on attesting evidence.
+
+    ``services.evidence_attestation.attest_pointers`` is handed this and
+    nothing wider: a producer that cites an element without having read its
+    text (a KG object's evidence pointer, an enumerated row's first live
+    occurrence) needs the element's CURRENT ``(source_id, digest)`` and must
+    not be able to reach anything else through the same seat. It is the same
+    by-id read the terminal re-check takes (``GlobalAskSourceStorePort``), so
+    both halves of the comparison come from one query shape and one digest
+    (``domain.evidence_fingerprint.element_text_sha`` / its SQL twin). Only
+    digests cross the boundary; element bodies never do. An element with no
+    row is ABSENT from the mapping -- which is how "dead" is told apart from a
+    read that failed (that one raises).
+
+    Declared here rather than on ``repositories/ports.py``: that module's
+    Protocol method count is a ratchet that may only shrink.
+    """
+    def evidence_fingerprints(self, element_ids: Sequence[str]) -> dict[str, tuple[str, str]]: ...
+
+
 class GlobalAskStorePort(Protocol):
     def conversation(self, conversation_id: str, user_id: str) -> GlobalConversationSummary | None: ...
     def list_conversations(self, user_id: str, limit: int, offset: int) -> list[GlobalConversationSummary]: ...

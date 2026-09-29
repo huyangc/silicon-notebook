@@ -898,9 +898,10 @@ def test_no_plan_registers_no_keyword_evidence():
 
 def test_a_keyword_only_citation_is_refused_after_its_source_is_reingested():
     """贴近真实:只被关键词臂召回的段落被引用;合成前来源被重新入库(同一 element
-    id、指纹变化)→ 引用复核拒绝它。对照:同一变化在没有检索时刻快照时会被放行——
-    这正是修复前的洞。"""
-    from app.services.global_ask import GlobalAskService, _RunState
+    id、指纹变化)→ 终态复核把它判成「原文已改动」。对照:同一变化在没有检索时刻
+    快照时只能说「无法核对」——绝不是「通过」,也不是「原文已改动」。"""
+    from app.services.global_ask import _RunState
+    from app.services.global_citation_check import judge_reference
 
     state = _RunState(("nb-a",))
     # chunk id 取 ``nb-a``,于是替身给它的来源是 ``src-nb-a``,在该库天花板内。
@@ -911,25 +912,21 @@ def test_a_keyword_only_citation_is_refused_after_its_source_is_reingested():
     assert state.evidence == {"el-nb-a": ("src-nb-a", "fp-el-nb-a")}
 
     live = {"el-nb-a": ("src-nb-a", "fp-after-reingest")}
-    service = object.__new__(GlobalAskService)
-    service.sources = SimpleNamespace(
-        evidence_fingerprints=lambda ids: {i: live[i] for i in ids if i in live},
-        all_visible_source_ids=lambda nid: ("src-nb-a",),
-    )
-    service.settings = SimpleNamespace(global_ask_notebook_timeout_seconds=5.0)
     citation = SimpleNamespace(
         element_id="el-nb-a", notebook_id="nb-a", source_id="src-nb-a",
         tier="personal", url="",
     )
-    ceiling = {"nb-a": {"src-nb-a"}}
 
-    assert service._validate_citations(
-        [citation], state.evidence, ceiling, siblings=state.siblings,
-    ) == "changed"
-    # 对照:缺快照(修复前的状态)时,同源的指纹变化被当成非联邦证据放行。
-    assert service._validate_citations([citation], {}, ceiling) == ""
+    def judge(evidence):
+        return judge_reference(
+            citation, evidence=evidence, current=live,
+            siblings=state.siblings.get("el-nb-a", ()),
+            ceiling={"src-nb-a"}, live_sources={"src-nb-a"},
+        )
+
+    assert judge(state.evidence) == ("changed", "changed")
+    # 对照:缺快照时,同源的指纹变化只能判「无法核对」(内部原因 unattested)。
+    assert judge({}) == ("unverifiable", "unattested")
     # 对照:未被改动时照常通过。
     live["el-nb-a"] = ("src-nb-a", "fp-el-nb-a")
-    assert service._validate_citations(
-        [citation], state.evidence, ceiling, siblings=state.siblings,
-    ) == ""
+    assert judge(state.evidence) is None

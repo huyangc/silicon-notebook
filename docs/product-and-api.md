@@ -236,23 +236,34 @@ budget expired says retrieval never started, and everything else asks them to re
 travels as a content-free `chunk_federation_skipped` event instead. Authorization changes still fail closed. Not citing a notebook does not assert absence of material.
 Only completed, scope-compatible turns enter follow-up context through shared query rewriting; assistant answers
 resolve references but are never evidence. Submission freezes each participant's currently visible source list,
-and once the answer exists every citation is rechecked against it: the source must still be inside that frozen
-list and still visible, and an element that travelled the federated chunk channel must additionally carry the
-same text fingerprint it had at retrieval time and still belong to the same source. The retrieval-time
-fingerprint is read out of the SAME database snapshot as the passage the run retrieved, and it is kept only when
-that passage's own text still matches what the run read; element ids are reused deterministically when a source
-is re-ingested, so a fingerprint read by id alone could describe text that replaced what the answer rested on.
-A passage that changed, or disappeared, under a run attests nothing: every element behind it is refused. That
-fingerprint check
-covers the WHOLE passage behind the citation, not only the element the citation names: a passage is assembled
-from as many source elements as it took to fill it, the citation card carries the first of them, and the rest
-are rechecked beside it — so an edit to the middle of a quoted passage voids the answer exactly as an edit to
-its opening does. A citation that never
-travelled that channel (document overview, collection enumeration, a graph object) is held to the ceiling,
-visibility and source ownership alone. If any citation fails, the WHOLE answer is voided and replaced by the
-Chinese retry notice: ungrounded, with citations and evidence attachments cleared and the reasoning trace kept.
-Dropping the dead citations and re-synthesizing from the survivors no longer happens — re-running the engine
-would re-retrieve and re-freeze everything, producing a different answer wearing this one's identity.
+and once the answer exists every citation AND every answer anchor naming library material is rechecked — each
+one on its own, never stopping at the first failure. The recheck judges citation INTEGRITY only; permission and
+source-scope enforcement belong to the retrieval layer, so no verdict ever withholds, blanks or trims answer text.
+A reference is compared with its retrieval-time snapshot: the text fingerprint an evidence producer registered
+when the run read it. The federated chunk channel registers it out of the SAME database snapshot as the passage
+the run retrieved, and only when that passage's own text still matches what the run read (element ids are reused
+deterministically when a source is re-ingested, so a fingerprint read by id alone could describe text that
+replaced what the answer rested on); the other producers register through `evidence_attestation` — the text they
+read hashed in-process, or one bounded by-id read for evidence they cite without reading it. The first real
+snapshot in a run wins. The check covers the WHOLE passage behind a citation, not only the element the card
+names: a passage is assembled from several source elements and the rest are rechecked beside the first. Each
+failed reference is marked with one of three reasons — `changed` (原文已改动: the snapshot and the current text
+differ, or part of the passage is gone), `source_gone` (资料已删除: the source or the cited element was deleted;
+in a global run a source leaves the frozen visible list only by deletion) or `unverifiable` (无法核对: nobody
+registered a snapshot, the snapshot or the terminal read failed, or the reference names no library or a source
+outside the frozen ceiling — the last two can only be retrieval-layer defects and raise a content-free
+diagnostic event). Only a real snapshot mismatch is ever called a change. A reference with no source and no
+element (a bare graph node, a memory row) and URL-backed external material have nothing to check. A partially
+failed answer is DELIVERED WHOLE: the answer text, citations, anchors and attachments stay as the engine
+produced them; the failed references carry `verification`, the answer carries `citation_check` (`outcome`
+`partial`, `checked`, `failed` and the three per-kind counts, present only when `failed > 0`), `grounded`
+becomes false and `evidence_level` is capped at `overview` (`inferred` is not raised). The reader sees one
+sentence under the answer — 「本次回答有部分引用未通过核对：{N 条原文已改动、N 条资料已删除、N 条无法核对}。
+回答内容照常保留，带标记的引用可点开查看原因。」 — and a reason line on each marked card; a reasoning run's trace
+ends with a `citation_check` step stating how many citations were checked and how many failed. Both fields are
+additive and omitted when empty, so single-notebook responses serialize exactly as before. They persist in the
+job's payload with no migration; a row the previous recheck voided keeps its stored retry sentence. A partially
+failed answer still feeds the post-completion learning chains.
 
 Cross-notebook retrieval runs through the federated original-text channel: the participants × sub-queries task
 table is submitted to a process-level shared executor rather than polled notebook by notebook. A notebook

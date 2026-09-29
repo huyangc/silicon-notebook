@@ -537,7 +537,7 @@ def test_sources_are_frozen_before_any_retrieval(setup):
     assert finished(service, job).status == "done"
 
 
-def test_source_removed_during_synthesis_cannot_commit_stale_citation(setup):
+def test_source_removed_during_synthesis_marks_the_stale_citation(setup):
     service, _, _, _ = setup
     elements = {"e-a": {"id": "e-a", "source_id": "s-a", "text": "original"}}
     service.sources.evidence_fingerprints = lambda ids: {key: (elements[key]["source_id"], elements[key]["text"]) for key in ids if key in elements}
@@ -550,9 +550,12 @@ def test_source_removed_during_synthesis_cannot_commit_stale_citation(setup):
     service.ask.synthesize = synthesis
     job = service.start(GlobalAskRequest(question="q"), user_id="u")
     result = finished(service, job)
+    # Q3: delivered whole, the dead citation marked -- never voided.
     assert result.status == "done" and not result.answer.grounded
-    assert not result.answer.citations
-    assert "变化" in result.answer.answer
+    assert "变化" not in result.answer.answer
+    assert [row.element_id for row in result.answer.citations] == ["e-a"]
+    assert result.answer.citations[0].verification is not None
+    assert result.answer.citation_check.failed == 1
 
 
 def test_http_job_conversation_and_error_contract(setup, monkeypatch):

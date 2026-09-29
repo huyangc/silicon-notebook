@@ -129,10 +129,21 @@ to the global exact-identifier lookup arm and are excluded the same way; that ar
 when the query names something probe-worthy; a `reasoning` run may call it several times) as `ask_stage` with `stage="global_exact_arm"` (participant,
 notebooks-with-hits, merged-passage, merged-section and failed-notebook counts plus latency, no identifier,
 question or path text). `chunk_federation_evidence_unavailable` reports that
-a call's evidence fingerprints could not be read, which makes the affected citations refusable by name;
-`global_ask_citations_void` reports an answer withdrawn by the citation recheck and carries a content-free
-`reason` (`changed`, `unreadable`, `unattributed`, `out_of_ceiling`) — `unattributed` is a normalization gap
-in a citation producer and needs a fix, the others are races with an editing user. The retired global
+a call's evidence fingerprints could not be read, which makes the affected citations reportable by name as
+unverifiable. The terminal citation recheck never withdraws an answer: it judges every citation and anchor,
+marks the failed ones (`changed`, `source_gone`, `unverifiable` on the wire) and delivers the answer whole.
+`global_ask_citations_partial` reports such an answer with counts only (`checked`, `failed`, the three
+per-kind counts and a `reasons` map over the internal codes `changed`, `source_gone`, `unattested`,
+`unreadable`, `unattributed`, `out_of_ceiling`); `unattested` means no producer registered a retrieval-time
+snapshot for that element. `global_ask_citation_scope_diagnostic` is emitted beside it only for
+`unattributed` / `out_of_ceiling` references — those can only come from a retrieval-layer defect (a channel
+that skipped attribution or leaked past the frozen ceiling) and need a fix; the rest are races with an
+editing user. `global_ask_citation_check_read_failed` (`read`, `error_type`) reports a terminal read that
+failed, whose references are then reported unverifiable. `producer_evidence_attested` (`producer`,
+`method` = `read`/`pointers`, element / live / dead counts) and `producer_evidence_unavailable` (`producer`,
+`reason` = `read_failed`/`no_reader`, `elements`, optional `error_type`) cover the non-federated producers'
+retrieval-time registration. Rows written before this change that the old recheck voided keep their stored
+sentence. The retired global
 retrieval lane's `global_retrieval_skipped` and `global_retrieval_ann_starved` events no longer exist.
 Lexical degradation is no longer disclosed per notebook; it emits `chunk_bruteforce_skipped` like any other
 run, and `degraded_notebook_ids` now means only that some of that notebook's retrieval legs failed.
