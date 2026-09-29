@@ -6,13 +6,26 @@ import re
 import signal
 import shutil
 import subprocess
+import json
 import sys
+import tempfile
 import time
 
 import pytest
 
 
 pytestmark = pytest.mark.xdist_group("prod_script_lifecycle")
+
+_GIT_ISOLATION = {
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_SYSTEM": os.devnull,
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@example.invalid",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@example.invalid",
+    # A checkout under the temp dir must not discover an enclosing repository.
+    "GIT_CEILING_DIRECTORIES": str(Path(tempfile.gettempdir()).resolve()),
+}
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -43,7 +56,7 @@ def _prepare_launcher(tmp_path: Path) -> tuple[Path, Path, Path, Path, dict[str,
         encoding="utf-8",
     )
     (scripts / "autotune.sh").write_text("# test stub\n", encoding="utf-8")
-    for name in ("python_env.py", "extension_services.sh", "extension_services.py", "extension_service_runtime.py", "extension_service_worker.py"):
+    for name in ("python_env.py", "extension_services.sh", "extension_services.py", "extension_service_runtime.py", "extension_service_worker.py", "build_release_manifest.py"):
         shutil.copy2(repository_root / "scripts" / name, scripts / name)
     (root / ".env").write_text("# test env\n", encoding="utf-8")
     (backend / "requirements.txt").write_text("# test requirements\n", encoding="utf-8")
@@ -55,7 +68,7 @@ if [[ "${1:-}" == "-m" && "${2:-}" == "pip" ]]; then
   printf 'python %s\n' "$*" >>"$INSTALL_CALLS_FILE"
   exit 0
 fi
-if [[ "${1:-}" == "-c" || "${1:-}" == */extension_services.py ]]; then
+if [[ "${1:-}" == "-c" || "${1:-}" == */extension_services.py || "${1:-}" == */build_release_manifest.py ]]; then
   exec "$REAL_PYTHON" "$@"
 fi
 exec sleep 30
@@ -91,7 +104,9 @@ fi
     calls_file = root / "curl-calls.txt"
     install_calls_file = root / "install-calls.txt"
     env = {
-        **os.environ,
+        # Inherited GIT_* (hooks, `rebase -x`) would point git at the real repo.
+        **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+        **_GIT_ISOLATION,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "PYTHON_BIN": str(fake_bin / "python"),
         "REAL_PYTHON": sys.executable,
@@ -165,3 +180,83 @@ printf 'LISTEN 0 4096 0.0.0.0:18800 0.0.0.0:*\n'
     assert completed.returncode == 1, completed.stdout + completed.stderr
     assert "backend 端口 :18800 已被占用(PID unavailable)" in completed.stderr
     assert not Path(env["INSTALL_CALLS_FILE"]).exists()
+
+
+def _git(root: Path, env: dict[str, str], *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(root), "-c", "commit.gpgsign=false", *args],
+        env=env, text=True, capture_output=True, check=True,
+    ).stdout.strip()
+
+
+def _commit_checkout(root: Path, env: dict[str, str], notes: dict[str, str]) -> None:
+    """Turn the prepared checkout into a git repository with the given release notes."""
+    for name, body in notes.items():
+        path = root / "release-notes" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    _git(root, env, "init", "-q")
+    _git(root, env, "add", "-A")
+    _git(root, env, "commit", "-q", "-m", "checkout")
+
+
+def _launch(scripts: Path, root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run prod.sh to completion and stop the two detached services it leaves behind."""
+    completed = subprocess.run(
+        ["bash", str(scripts / "prod.sh")],
+        cwd=root, env=env, text=True, capture_output=True, timeout=20, check=False,
+    )
+    for pid in (int(value) for value in re.findall(r"\(PID (\d+),", completed.stdout)):
+        if _pid_is_alive(pid):
+            os.kill(pid, signal.SIGTERM)
+    return completed
+
+
+def test_prod_launcher_generates_the_release_manifest_from_the_checkout(tmp_path: Path) -> None:
+    root, scripts, _fake_bin, _next_bin, env = _prepare_launcher(tmp_path)
+    _commit_checkout(root, env, {"report-export.md": "报告现在可以导出为 Word 文件。\n"})
+
+    completed = _launch(scripts, root, env)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    manifest = json.loads((root / "release-manifest.json").read_text(encoding="utf-8"))
+    head = _git(root, env, "rev-parse", "HEAD")
+    assert manifest["build"]["sha"] == head
+    assert manifest["build"]["ordinal"] == 1
+    assert re.fullmatch(rf"\d{{8}}-{head[:7]}", manifest["build"]["version"])
+    assert [(n["id"], n["ordinal"], n["body"]) for n in manifest["notes"]] == [
+        ("report-export", 1, "报告现在可以导出为 Word 文件。")
+    ]
+    assert f"release manifest: {root / 'release-manifest.json'}" in completed.stdout
+
+
+def test_prod_launcher_still_starts_and_drops_a_stale_manifest_when_generation_fails(
+    tmp_path: Path,
+) -> None:
+    root, scripts, _fake_bin, _next_bin, env = _prepare_launcher(tmp_path)
+    _commit_checkout(root, env, {"empty.md": "   \n"})
+    stale = root / "release-manifest.json"
+    stale.write_text('{"stale": true}\n', encoding="utf-8")
+
+    completed = _launch(scripts, root, env)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "background processes were launched" in completed.stdout
+    assert "empty.md" in completed.stderr
+    assert "生成 release-manifest.json 失败" in completed.stderr
+    assert not stale.exists()
+
+
+def test_prod_launcher_still_starts_and_drops_a_stale_manifest_outside_a_git_checkout(
+    tmp_path: Path,
+) -> None:
+    root, scripts, _fake_bin, _next_bin, env = _prepare_launcher(tmp_path)
+    stale = root / "release-manifest.json"
+    stale.write_text('{"stale": true}\n', encoding="utf-8")
+
+    completed = _launch(scripts, root, env)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "background processes were launched" in completed.stdout
+    assert "不是 git 仓库根目录" in completed.stderr
+    assert not stale.exists()

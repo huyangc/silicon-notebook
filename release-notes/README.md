@@ -1,7 +1,7 @@
 # 更新说明(release-notes)
 
-这里的每个 `*.md` 是一条**写给普通用户看**的更新说明。打包时 `scripts/build_release_manifest.py`
-把它们收进 `release-manifest.json`；用户升级后首次打开页面，会看到自己上次看过的版本之后新增的说明。
+这里的每个 `*.md` 是一条**写给普通用户看**的更新说明。离线打包（`scripts/pack.sh`）和在 git 检出上
+`npm run start` 时，`scripts/build_release_manifest.py` 会把它们收进 `release-manifest.json`；用户升级后首次打开页面，会看到自己上次看过的版本之后新增的说明。
 
 ## 何时添加
 
@@ -57,4 +57,4 @@
 ## 展示顺序与版本
 
 说明按「把文件加进主线的那个提交」排序（`git rev-list --count --first-parent`），与文件内容无关；
-后续编辑不改变它。生成清单需要完整 git 历史，生产包应从 master 构建。
+后续编辑不改变它。生成清单需要完整 git 历史，生产环境应从 master 构建或检出。

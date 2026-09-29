@@ -5,6 +5,9 @@
 #   SKIP_INSTALL=1 npm run start 跳过前后端依赖安装(镜像已预装时用)
 #   SKIP_BUILD=1 npm run start   跳过 `next build`(镜像/CI 已预构建时用)
 #
+# 每次启动都从本仓库 git 历史重新生成 release-manifest.json(用户更新通知);
+# 需要完整(非浅克隆)历史,失败只警告、不阻断启动。
+#
 # 环境变量:PYTHON_BIN BACKEND_HOST PORT FRONTEND_PORT SKIP_INSTALL SKIP_BUILD
 #              START_CLEANUP_GRACE_SECONDS(默认 10,启动脚本中断时的 SIGTERM 宽限)
 set -euo pipefail
@@ -188,6 +191,28 @@ if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
   ( cd "$ROOT_DIR/frontend" && npm run build )
 else
   echo "SKIP_BUILD=1 — skipping 'npm run build' (expecting a prebuilt frontend/.next)"
+fi
+
+# 更新通知清单:从本仓库 git 历史生成 release-manifest.json(与 pack.sh 同一个生成器)。
+# 失败只警告、不阻断启动——服务比更新通知重要;同时删掉旧清单,否则上次拉取时的清单
+# 会让通知悄悄停在旧版本。版本串取 HEAD 的提交日期,重启不会改变它。
+RELEASE_MANIFEST="$ROOT_DIR/release-manifest.json"
+release_top=""
+if command -v git >/dev/null 2>&1; then
+  release_top="$(git -C "$ROOT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+fi
+if [[ -n "$release_top" && "$(cd "$release_top" && pwd -P)" == "$(cd "$ROOT_DIR" && pwd -P)" ]]; then
+  release_version="$(git -C "$ROOT_DIR" log -1 --format=%cd --date=format:%Y%m%d)-$(git -C "$ROOT_DIR" rev-parse --short HEAD)"
+  if "$PYTHON_BIN" "$ROOT_DIR/scripts/build_release_manifest.py" \
+    --repo "$ROOT_DIR" --version "$release_version" --out "$RELEASE_MANIFEST"; then
+    echo "release manifest: $RELEASE_MANIFEST ($release_version)"
+  else
+    rm -f "$RELEASE_MANIFEST"
+    echo "警告: 生成 release-manifest.json 失败(见上方原因),本次启动不会向用户弹出更新通知。" >&2
+  fi
+else
+  rm -f "$RELEASE_MANIFEST"
+  echo "警告: $ROOT_DIR 不是 git 仓库根目录(或未安装 git),不生成 release-manifest.json,不会弹出更新通知。" >&2
 fi
 
 extension_services_start
