@@ -3320,6 +3320,12 @@ class ReasoningRetriever:
         # 最近一次 `plan()` 记下的整题关键词串,唯一读者是 `plan_with_keywords()`
         # (它每次进来先清空,所以这里的初值只服务「从未调用过 plan」的实例)。
         self._plan_keywords: str = ""
+        # 首轮原文播种的召回闸(`threading.BoundedSemaphore`,宽度见
+        # `_chunk_seed_workers`)。只在 `_first_round_chunk_seed` 运行期间设置、
+        # 结束即清回 None;其余时候 `_recall_chunk_candidates` 不限流。retriever
+        # 每次运行新建(Ask `_build_reasoning_retriever`、报告每节各自
+        # `ReasoningRetriever(...)`、knowhow 补全不走播种),所以不会跨运行串用。
+        self._chunk_recall_gate = None
 
     @classmethod
     def from_repository(
@@ -3646,7 +3652,7 @@ class ReasoningRetriever:
         `min(N, 8)` 之后,真正取数据库连接的并发仍是改动前那个数。播种之外
         (动作路径、方向补检索)没有这把闸,形状不变。
         """
-        gate = getattr(self, "_chunk_recall_gate", None)
+        gate = self._chunk_recall_gate
         if gate is None:
             return self.retrieval.retrieve_chunk_candidates(notebook_id, query)
         with gate:
@@ -3712,7 +3718,11 @@ class ReasoningRetriever:
         * 候选池不超过 k——没有取舍可做,MMR 路径本来就原样全收;
         * 精排失败:客户端调了 `on_error`,或调用本身抛错(`rerank_failed`);
         * 超时:一次选择的精排共用 `REASONING_CHUNK_RERANK_TIMEOUT_SECONDS` 这一个
-          截止时间,过了即回退(`rerank_timeout`)。
+          截止时间,过了即回退(`rerank_timeout`)。这个预算只管排队截止与本方
+          等待,**不**改写 HTTP 请求超时:调用方的私有预算不该把偏慢但正常的
+          共享精排服务判成故障、打开 `retrieval_rerank` 熔断器(那会连 chunk
+          模式 mix 分支的精排一起拒掉)。代价是被放弃的在途请求最多占着服务
+          槽位到服务自身的 HTTP 超时。
 
         取消**不是**失败:`cancel_event` 随调用传给精排客户端,设置后照抛
         `AskCancelled`;客户端若把取消当批次失败经 `on_error` 报回来,同样照抛。
@@ -5319,12 +5329,14 @@ class ReasoningRetriever:
             return []
 
     def _chunk_seed_workers(self, notebook_id: str, subquery_count: int) -> int:
-        """首轮播种的外层并发度:`max(1, min(N, 8, 8 // P))`。
+        """首轮播种**召回闸**的宽度:`max(1, min(N, 8, 8 // P))`。
 
-        每条子查询的 `search_chunks` 在 `chunk_federation` 里还会按参与库再扇出
-        `min(P, 8)` 条腿,每条腿各取一个数据库连接。外层若按子查询数开满 8 个
-        线程,N=5、P=4 就是约 20 个并发取连接的请求——PG 连接池默认 10、取连接
-        超时 10 秒,首轮播种会自己把池子挤爆。所以外层 × 内层的乘积压在 8 以内:
+        外层线程池是 `min(N, 8)`(精排不拿数据库连接,在闸外并发);每条子查询
+        的召回在宽度为本值的信号量(`_chunk_recall_gate`)里跑。召回在
+        `chunk_federation` 里还会按参与库再扇出 `min(P, 8)` 条腿,每条腿各取一个
+        数据库连接。召回若按子查询数开满 8 路,N=5、P=4 就是约 20 个并发取连接的
+        请求——PG 连接池默认 10、取连接超时 10 秒,首轮播种会自己把池子挤爆。所以
+        召回 × 联邦腿的乘积压在 8 以内:
         这个 8 与报告检索的扇出上限 `REPORT_RETRIEVAL_FANOUT`(默认 8)同量级,
         并低于 PG 池的 10,留出给同一请求其它读的余量。
         P 取参与库数(`RetrievalService.chunk_participant_count`,与扇出同一个

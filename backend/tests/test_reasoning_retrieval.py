@@ -4116,12 +4116,18 @@ def test_chunk_seed_workers_error_handling_matches_chunk_seed_search(
             rr._chunk_seed_workers("nb", 5)
 
 
-def test_first_round_seed_runs_two_outer_workers_over_four_libraries(rrepo):
-    """端到端:参与库 4 个、首轮 5 条子查询 ⇒ 播种的**召回**同时最多 2 条。
+def test_first_round_seed_recall_concurrency_peaks_at_two_over_four_libraries(
+    rrepo,
+):
+    """端到端:参与库 4 个、首轮 5 条子查询 ⇒ 播种的**召回**并发峰值恰为 2。
 
     召回拿数据库连接,由 `_chunk_recall_gate`(宽 `_chunk_seed_workers` = 2)
     限流;外层池放宽到 `min(N, 8)` = 5,只让不拿连接的选择步(精排)并发
     (评审 P2-1)。所以这里量的是召回的实际并发,不是池宽。
+
+    「能同时两路」用握手证明(`Barrier(2)`:两路都在场才放行,闸宽不足 2 时
+    握手超时);「不会三路」用计数证明:握手成功后两路继续占着闸一小段时间,
+    闸宽若 ≥3,外层池里排着的第三路会在这段时间里闯进来把峰值推到 3。
     """
     import threading
     import time as _time
@@ -4140,21 +4146,31 @@ def test_first_round_seed_runs_two_outer_workers_over_four_libraries(rrepo):
     lock = threading.Lock()
     state = {"active": 0, "peak": 0}
     recalled: list = []
+    barrier = threading.Barrier(2, timeout=3)
+    met: list = []
 
     def _recall(notebook_id, query):
         with lock:
             state["active"] += 1
             state["peak"] = max(state["peak"], state["active"])
             recalled.append(query)
-        _time.sleep(0.05)
-        with lock:
-            state["active"] -= 1
-        return [_chunk_hit(f"ck-{query}")], [f"ck-{query}"], None
+            index = len(recalled)
+        try:
+            if index <= 2:
+                barrier.wait()
+                met.append(query)
+                # 两路都占着闸:闸宽 2 时第三路进不来(只影响「不会三路」那一侧)。
+                _time.sleep(0.1)
+            return [_chunk_hit(f"ck-{query}")], [f"ck-{query}"], None
+        finally:
+            with lock:
+                state["active"] -= 1
 
     rr.retrieval.retrieve_chunk_candidates = _recall
     rr.run(nb.id, "布局布线怎么做", "", limits=ask_retrieval_limits("exhaustive"))
 
     assert set(queries) <= set(recalled)
+    assert len(met) == 2
     # 精排在召回闸外的并发由 `test_reasoning_chunk_rerank.py::
     # test_seed_reranks_concurrently_while_recall_stays_serial` 钉住。
     assert state["peak"] == 2

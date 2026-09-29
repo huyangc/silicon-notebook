@@ -265,7 +265,9 @@ def _protocol_methods(protocol) -> dict[str, object]:
 def test_model_client_ports_match_concrete_call_signatures():
     from app.core.llm import OpenAICompatibleClient
     from app.repositories.ports import JsonChatClientPort, RerankClientPort
-    from app.services.model_provider import ScheduledJsonChatClient
+    from app.services.model_provider import (
+        ScheduledJsonChatClient, ScheduledRerankClient,
+    )
     from app.services.rerank_client import RerankClient
 
     assert _parameter_contract(JsonChatClientPort.chat_json) == _parameter_contract(
@@ -279,6 +281,10 @@ def test_model_client_ports_match_concrete_call_signatures():
     )
     assert _parameter_contract(RerankClientPort.rerank) == _parameter_contract(
         RerankClient.rerank
+    )
+    # The adapter ``provider.rerank(workload_id)`` actually returns.
+    assert _parameter_contract(RerankClientPort.rerank) == _parameter_contract(
+        ScheduledRerankClient.rerank
     )
     assert get_type_hints(RerankClientPort.rerank)["documents"] == (
         get_type_hints(RerankClient.rerank)["documents"]

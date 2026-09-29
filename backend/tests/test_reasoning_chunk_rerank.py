@@ -529,8 +529,14 @@ def test_seed_reranks_concurrently_while_recall_stays_serial(rrepo):
         plan={"sub_queries": [{"query": q} for q in queries]},
         reflects=[{"next_action": "answer", "sufficient": True}]))
     lock = threading.Lock()
-    peaks = {"recall": 0, "rerank": 0}
-    active = {"recall": 0, "rerank": 0}
+    peaks = {"recall": 0}
+    active = {"recall": 0}
+    # 握手:前两次精排必须**同时在场**才都放行。精排若被串行(外层池只有 1
+    # 个 worker),第一次会在这里等不到伴而超时 —— 重叠与否因此是确定性的,
+    # 不靠 sleep 碰运气。
+    barrier = threading.Barrier(2, timeout=3)
+    met: list = []
+    order = {"n": 0}
 
     def _enter(kind):
         with lock:
@@ -541,16 +547,17 @@ def test_seed_reranks_concurrently_while_recall_stays_serial(rrepo):
         with lock:
             active[kind] -= 1
 
-    class _Slow(_Rerank):
+    class _Handshake(_Rerank):
         def rerank(self, query, documents, on_error=None, **kwargs):
-            _enter("rerank")
-            try:
-                _time.sleep(0.2)
-                return super().rerank(query, documents, on_error, **kwargs)
-            finally:
-                _leave("rerank")
+            with lock:
+                order["n"] += 1
+                index = order["n"]
+            if index <= 2:
+                barrier.wait()
+                met.append(query)
+            return super().rerank(query, documents, on_error, **kwargs)
 
-    client = _Slow()
+    client = _Handshake()
     bind_rerank_client(rrepo, client)
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     rr.model_clients = rrepo._runtime.models
@@ -570,10 +577,10 @@ def test_seed_reranks_concurrently_while_recall_stays_serial(rrepo):
     res = rr.run(nb.id, "布局布线怎么做", "")
 
     assert sorted(q for q, _ in client.calls) == sorted(queries)
-    # 断言并发度而不是墙钟(墙钟断言在 CI 上会被挤成假红):召回仍逐条,精排
-    # 在召回闸外重叠(改前 workers=1 时两者一起串行,精排峰值恒为 1)。
+    # 精排在召回闸外重叠:两次精排握手成功(改前 workers=1 时两者一起串行,
+    # 握手必然超时)。召回仍逐条(闸宽 1,计数峰值)。
+    assert len(met) == 2
     assert peaks["recall"] == 1
-    assert peaks["rerank"] >= 2
     # 合入仍按子查询提交顺序:每条子查询逆序精排取前 1 段。
     seed = next(t for t in res.trace if t.step_type == "search_chunks")
     assert seed.detail["result_ids"] == [f"{q}-02" for q in queries]
