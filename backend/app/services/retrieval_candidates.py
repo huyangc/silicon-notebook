@@ -3765,7 +3765,17 @@ class CandidateRetrievalService(_RetrievalState):
                 # 答案不完整。只有真的影响结果的失败才显示给用户。
                 pass
             except Exception as exc:  # noqa: BLE001 — 词法失败不拖垮检索
-                self._note_model_error("chunk_fts", "", exc)
+                # 其它词法失败同理:语义半照常产出候选,答案不受影响,所以不记
+                # model_error、不上横幅;原因码走事件,只带异常类名。site 与叶子
+                # 事件(site=chunk_fts,带耗时)分开,免得延迟诊断重复计数。
+                self.event_log.emit({
+                    "kind": "ask_stage",
+                    "stage": "chunk_fts",
+                    "site": "chunk_ann_union",
+                    "notebook_id": notebook_id,
+                    "status": "failed_open",
+                    "error_type": type(exc).__name__,
+                })
         t_fts = time.perf_counter()
 
         if not cand_ids:
