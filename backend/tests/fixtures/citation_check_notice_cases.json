@@ -1,0 +1,71 @@
+{
+  "comment": "One table of stored citation-check summaries and the one sentence shown under the answer (empty = no notice). Asserted verbatim by frontend/tests/unit/citation-verification.test.mjs (citationCheckNotice behind hasFailedCitationCheck) and by the backend twin (global_citation_check.citation_check_notice) in scripts/check_citation_verification_contract.py and backend/tests/test_citation_verification_contract_guard.py.",
+  "cases": [
+    {
+      "name": "two kinds that add up",
+      "check": {"outcome": "partial", "checked": 6, "failed": 3, "changed": 2, "source_gone": 1, "unverifiable": 0},
+      "tense": "live",
+      "notice": "本次回答有部分引用未通过核对：2 条原文已改动、1 条资料已删除。回答内容照常保留，带标记的引用可点开查看原因。"
+    },
+    {
+      "name": "all three kinds",
+      "check": {"outcome": "partial", "checked": 9, "failed": 6, "changed": 4, "source_gone": 1, "unverifiable": 1},
+      "tense": "live",
+      "notice": "本次回答有部分引用未通过核对：4 条原文已改动、1 条资料已删除、1 条无法核对。回答内容照常保留，带标记的引用可点开查看原因。"
+    },
+    {
+      "name": "snapshot tense for the public page",
+      "check": {"outcome": "partial", "checked": 2, "failed": 1, "changed": 1, "source_gone": 0, "unverifiable": 0},
+      "tense": "snapshot",
+      "notice": "回答生成时，有部分引用未通过核对：1 条原文已改动。回答内容照常保留，带标记的引用可点开查看原因。"
+    },
+    {
+      "name": "no per-kind counts falls back to the total",
+      "check": {"outcome": "partial", "checked": 4, "failed": 3},
+      "tense": "live",
+      "notice": "本次回答有部分引用未通过核对：共 3 条。回答内容照常保留，带标记的引用可点开查看原因。"
+    },
+    {
+      "name": "per-kind counts under failed never under-report",
+      "check": {"outcome": "partial", "checked": 4, "failed": 3, "changed": 1, "source_gone": 0, "unverifiable": 0},
+      "tense": "live",
+      "notice": "本次回答有部分引用未通过核对：共 3 条。回答内容照常保留，带标记的引用可点开查看原因。"
+    },
+    {
+      "name": "per-kind counts over failed fall back too",
+      "check": {"outcome": "partial", "checked": 4, "failed": 1, "changed": 1, "source_gone": 1, "unverifiable": 0},
+      "tense": "live",
+      "notice": "本次回答有部分引用未通过核对：共 1 条。回答内容照常保留，带标记的引用可点开查看原因。"
+    },
+    {
+      "name": "fractional counts are floored",
+      "check": {"outcome": "partial", "checked": 3, "failed": 2.7, "changed": 0, "source_gone": 0, "unverifiable": 2.2},
+      "tense": "live",
+      "notice": "本次回答有部分引用未通过核对：2 条无法核对。回答内容照常保留，带标记的引用可点开查看原因。"
+    },
+    {
+      "name": "a negative count reads as zero",
+      "check": {"outcome": "partial", "checked": 3, "failed": 2, "changed": -1, "source_gone": 0, "unverifiable": 2},
+      "tense": "live",
+      "notice": "本次回答有部分引用未通过核对：2 条无法核对。回答内容照常保留，带标记的引用可点开查看原因。"
+    },
+    {
+      "name": "a non-numeric failed count means no notice",
+      "check": {"outcome": "partial", "checked": 1, "failed": "abc", "changed": 1},
+      "tense": "live",
+      "notice": ""
+    },
+    {
+      "name": "a boolean failed count means no notice",
+      "check": {"outcome": "partial", "checked": 1, "failed": true, "changed": 1},
+      "tense": "live",
+      "notice": ""
+    },
+    {
+      "name": "nothing failed means no notice",
+      "check": {"outcome": "partial", "checked": 5, "failed": 0},
+      "tense": "live",
+      "notice": ""
+    }
+  ]
+}

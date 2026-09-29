@@ -38,7 +38,7 @@ def test_the_real_frontend_file_matches_the_backend():
     ('"回答生成时，有部分引用未通过核对"', '"回答生成时,有部分引用未通过核对"'),
     ("。回答内容照常保留，带标记的引用可点开查看原因。`", "。回答内容照常保留。`"),
     ('.join("、")', '.join("，")'),
-    ("`共 ${count(check.failed)} 条`", "`${count(check.failed)} 条`"),
+    ("`共 ${failed} 条`", "`${failed} 条`"),
     ('["changed", "source_gone", "unverifiable"]', '["source_gone", "changed", "unverifiable"]'),
 ], ids=["label", "live-lead", "snapshot-lead", "tail", "joiner", "fallback", "order"])
 def test_a_one_character_drift_fails_the_guard(tmp_path, old, new):
@@ -92,3 +92,25 @@ def test_a_second_notice_declaration_is_undecidable(tmp_path):
         encoding="utf-8",
     )
     assert any("无法判定" in problem for problem in guard.check(path))
+
+
+def test_the_backend_twin_must_match_every_shared_case(tmp_path):
+    """The malformed-summary fallback is compared through the shared table."""
+    import json
+
+    cases = json.loads(
+        (ROOT / "backend" / "tests" / "fixtures" / "citation_check_notice_cases.json")
+        .read_text(encoding="utf-8")
+    )
+    assert guard.shared_case_problems() == []
+    cases["cases"][0]["notice"] = cases["cases"][0]["notice"].replace("、", "，")
+    drifted = tmp_path / "citation_check_notice_cases.json"
+    drifted.write_text(json.dumps(cases, ensure_ascii=False), encoding="utf-8")
+    assert guard.shared_case_problems(drifted)
+
+
+def test_the_frontend_unit_test_must_keep_reading_the_shared_table(tmp_path):
+    test_file = tmp_path / "citation-verification.test.mjs"
+    test_file.write_text("// no longer reads the table\n", encoding="utf-8")
+    problems = guard.shared_case_problems(test_path=test_file)
+    assert any("不再读取共享用例表" in problem for problem in problems)

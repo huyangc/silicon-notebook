@@ -21,6 +21,9 @@ const POLICY_ROOTS = [
 const DIRECT_READ_ALLOWLIST = new Set([
   // Reads committed cross-language golden data, never production source text.
   "tests/unit/knowhow-normalize.test.mjs",
+  // Reads the committed backend/frontend citation-check notice case table (the
+  // backend twin asserts the same rows); production code is imported, not read.
+  "tests/unit/citation-verification.test.mjs",
   // Reads the committed backend/frontend UI-contribution parity fixture; the
   // production registry itself is imported as a module, not scanned as text.
   "tests/guards/extension-ui-parity.test.mjs",

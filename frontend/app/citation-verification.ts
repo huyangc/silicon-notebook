@@ -102,15 +102,20 @@ export function hasFailedCitationCheck(
 }
 
 /**
- * 原因与条数，例如「2 条原文已改动、1 条资料已删除」。只列条数 > 0 的原因；三类计数
- * 全缺（旧形状或未知原因）时退回总数，绝不留一个空冒号。
+ * 原因与条数，例如「2 条原文已改动、1 条资料已删除」。只列条数 > 0 的原因；分类计数
+ * 只有**加起来正好等于** `failed` 时才分项列出，否则（三类全缺、旧形状、未知原因，或
+ * 计数对不上）退回总数「共 N 条」——绝不留一个空冒号，也绝不少报。与后端孪生
+ * `citation_check_reason_text` 同一条规则，两边对同一份用例表
+ * （`backend/tests/fixtures/citation_check_notice_cases.json`）逐字断言。
  */
 export function citationCheckReasonText(check: CitationCheckSummary): string {
+  const failed = count(check.failed);
+  const total = REASON_ORDER.reduce((sum, reason) => sum + count(check[reason]), 0);
   const parts = REASON_ORDER
     .filter((reason) => count(check[reason]) > 0)
     .map((reason) => `${count(check[reason])} 条${CITATION_VERIFICATION_LABELS[reason]}`);
-  if (parts.length > 0) return parts.join("、");
-  return `共 ${count(check.failed)} 条`;
+  if (total === failed && parts.length > 0) return parts.join("、");
+  return `共 ${failed} 条`;
 }
 
 /**
