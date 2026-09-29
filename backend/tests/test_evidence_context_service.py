@@ -40,7 +40,7 @@ class _Knowledge:
         # and _canonical() falls back to the id itself.
         return {}
 
-    def node_context(self, notebook_id, object_id):
+    def node_context(self, notebook_id, object_id, *, allowed_source_ids=None):
         return {
             "occurrences": [{
                 "element_text": "source excerpt",

@@ -82,10 +82,13 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "staged 发布即整体作废全部派生 KG;communities 两表走动态表名清单)"),
     "backend/app/repositories/sqlite/kg_build_job_store.py": (1, 0, 0, 0, 0,
         "PG 孪生同注记"),
-    "backend/app/repositories/postgres/knowledge_store.py": (10, 0, 0, 7, 0,
-        "A×5 已配谓词(node_context/簇详情三查询/邻接同簇探针);其余 C:"
+    "backend/app/repositories/postgres/knowledge_store.py": (13, 0, 0, 8, 0,
+        "A×6 已配谓词(node_context 无天花板/有天花板两条簇查询、簇详情三查询、"
+        "邻接同簇探针);PR-A·A1 的 Q1 严格谓词两支各一处成员子查询 "
+        "concept_clusters m 用 m.generation=cc.generation 相关对齐(零新参数,"
+        "不计入谓词计数,同 query_store 注记);其余 C:"
         "drain/终局 blanket 与 per-source 清理(跨代豁免:删源必须跨代删)"),
-    "backend/app/repositories/sqlite/knowledge_store.py": (10, 0, 0, 7, 0,
+    "backend/app/repositories/sqlite/knowledge_store.py": (13, 0, 0, 8, 0,
         "PG 孪生同注记"),
     "backend/app/repositories/postgres/query_store.py": (1, 0, 0, 1, 0,
         "A:top_concept_names 外层谓词;内层整簇排除的 NOT EXISTS 已搬进 "

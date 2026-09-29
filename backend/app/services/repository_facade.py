@@ -3060,11 +3060,13 @@ class RepositoryFacade:
         object_id,
         *,
         source_notebook_id: str = "",
+        allowed_source_ids: Optional[Sequence[str]] = None,
     ):
         return self._runtime.knowledge_query.node_context(
             notebook_id,
             object_id,
             source_notebook_id=source_notebook_id,
+            allowed_source_ids=allowed_source_ids,
         )
 
     # test-only helper; later tasks may replace it with a public insert path

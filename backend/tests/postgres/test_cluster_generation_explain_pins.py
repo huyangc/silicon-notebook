@@ -106,6 +106,55 @@ def test_version_facts_cluster_component_scans_the_created_gen_index(
     assert "InitPlan" in plan, plan
 
 
+@pytest.mark.parametrize("authoritative", [False, True])
+def test_node_context_ceiling_cluster_query_never_seq_scans(
+    postgres_database, authoritative,
+):
+    """PR-A·A1:``node_context`` 在来源天花板下的簇描述查询(Q1 严格谓词折成
+    布尔列)。两条支都不许顺扫 ``concept_clusters`` / ``knowledge_object_sources``
+    / ``knowledge_objects``:成员走 (notebook_id, canonical_id, ...) 前导索引,
+    来源走 ``knowledge_object_sources`` 的 (object_id, source_id) 主键,权威支按
+    主键回表读 evidence。published 代次谓词仍是一次求值的 InitPlan。"""
+    from app.repositories.postgres.knowledge_store import _node_context_cluster_sql
+
+    assert PostgresMigrator(postgres_database).migrate() == 65
+    notebook_id = "nb-nc-explain"
+    _seed(postgres_database, notebook_id, 5000)
+    now = normalize_timestamp("2026-01-01T00:00:00+00:00")
+    with postgres_database.write() as db:
+        db.execute("SET LOCAL statement_timeout = '0'")
+        db.execute(
+            "UPDATE concept_clusters SET canonical_description='d' WHERE notebook_id=%s",
+            (notebook_id,),
+        )
+        db.execute(
+            "INSERT INTO knowledge_objects"
+            "(id,notebook_id,object_type,payload,evidence,created_at,updated_at) "
+            "SELECT 'ko-'||g, %s, 'concept', '{}'::jsonb, "
+            "jsonb_build_array(jsonb_build_object('source_id', 'src-'||(g%%7))), %s, %s "
+            "FROM generate_series(0, 4999) g",
+            (notebook_id, now, now),
+        )
+        db.execute(
+            "INSERT INTO knowledge_object_sources(object_id,source_id,notebook_id) "
+            "SELECT 'ko-'||g, 'src-'||(g%%7), %s FROM generate_series(0, 4999) g",
+            (notebook_id,),
+        )
+        db.execute("ANALYZE knowledge_objects")
+        db.execute("ANALYZE knowledge_object_sources")
+    with postgres_database.connect() as connection:
+        plan = _plan(
+            connection,
+            _node_context_cluster_sql(authoritative=authoritative),
+            (["src-1", "src-2"], notebook_id, "ko-42", notebook_id),
+        )
+    for table in ("concept_clusters", "knowledge_object_sources", "knowledge_objects"):
+        assert f"Seq Scan on {table}" not in plan, plan
+    assert "InitPlan" in plan, plan
+    if not authoritative:
+        assert "knowledge_object_sources" in plan, plan
+
+
 def test_concept_clusters_count_skip_gate_leg_stays_index_only(postgres_database):
     assert PostgresMigrator(postgres_database).migrate() == 66
     _seed(postgres_database, "nb-cnt", 5000)

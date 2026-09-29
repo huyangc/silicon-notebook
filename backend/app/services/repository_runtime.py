@@ -2002,8 +2002,11 @@ class RepositoryRuntime:
             snapshots=self.retrieval_snapshots,
             notebook_languages=lambda: self.notebook_languages,
             participant_notebook_ids=self.notebook_store.participant_notebook_ids,
-            node_context_reader=lambda notebook_id, object_id: self.knowledge.node_context(
-                notebook_id, object_id, check_access=False
+            node_context_reader=lambda notebook_id, object_id, *, allowed_source_ids=None: (
+                self.knowledge.node_context(
+                    notebook_id, object_id, check_access=False,
+                    allowed_source_ids=allowed_source_ids,
+                )
             ),
             memory_retriever=self.memory_retriever,
             current_user_id=self._current_user_id,

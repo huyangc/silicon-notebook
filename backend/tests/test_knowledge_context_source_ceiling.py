@@ -100,7 +100,7 @@ class _Knowledge:
     def cluster_fold(self, notebook_id, object_ids):
         return {}
 
-    def node_context(self, notebook_id, object_id):
+    def node_context(self, notebook_id, object_id, *, allowed_source_ids=None):
         self.node_context_calls.append((notebook_id, object_id))
         return {
             "id": object_id,

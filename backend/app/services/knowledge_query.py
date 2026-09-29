@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 from app.models.ask import RuleCard
 from app.models.knowledge import (
@@ -38,7 +38,10 @@ class KnowledgeQueryService:
         snapshots,
         notebook_languages: Callable[[], dict],
         participant_notebook_ids: Callable[[str], list[str]] = lambda notebook_id: [notebook_id],
-        node_context_reader: Callable[[str, str], dict] = lambda _notebook_id, _object_id: {},
+        # (notebook_id, object_id, *, allowed_source_ids=None) -> dict
+        node_context_reader: Callable[..., dict] = (
+            lambda _notebook_id, _object_id, *, allowed_source_ids=None: {}
+        ),
         memory_retriever=None,
         current_user_id: Callable[[], str] = lambda: "",
         queries=None,
@@ -583,9 +586,12 @@ class KnowledgeQueryService:
         object_id: str,
         *,
         source_notebook_id: str = "",
+        allowed_source_ids: Optional[Sequence[str]] = None,
     ) -> dict:
         source_id = self._participant_source(notebook_id, source_notebook_id)
-        return self.node_context_reader(source_id, object_id)
+        return self.node_context_reader(
+            source_id, object_id, allowed_source_ids=allowed_source_ids
+        )
 
     def insert_test_object(
         self, notebook_id: str, object_type: str, payload: dict, source_id: str = ""

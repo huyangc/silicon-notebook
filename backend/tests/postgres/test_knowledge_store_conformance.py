@@ -6440,3 +6440,322 @@ def test_postgres_follow_start_row_accepts_an_explicit_participant_set(
             connection, "ko-peer", "nb-personal", USABLE_STATUSES,
             participant_ids=[],
         ) is None
+
+
+# ---------------------------------------------------------------------------
+# PR-A·A1:``node_context`` 认来源天花板(SQLite 孪生:tests/test_node_context.py
+# 同名场景)。两个来源:NC_IN 在天花板内,NC_OUT 在外。
+NC_IN, NC_OUT = "src-nc-in", "src-nc-out"
+NC_ELEMENTS = (
+    ("el-nc-occ-out", NC_OUT, "OUT occurrence text"),
+    ("el-nc-occ-in", NC_IN, "IN occurrence text"),
+    ("el-nc-def-out", NC_OUT, "OUT definition text"),
+    ("el-nc-def-in", NC_IN, "IN definition text"),
+    ("el-nc-step-out", NC_OUT, "OUT step text"),
+    ("el-nc-step-in", NC_IN, "IN step text"),
+)
+
+
+def _nc_ev(element_id: str, source_id: str) -> dict:
+    return {
+        "source_id": source_id, "source_title": source_id,
+        "element_id": element_id, "element_type": "paragraph",
+        "location_label": "p", "quoted_span": f"quote of {element_id}",
+        "confidence": 1.0,
+    }
+
+
+# (object_id, object_type, payload, evidence)
+NC_OBJECTS = (
+    # defines 两条:r.id 序在前的定义者证据在天花板外,第二条在内。
+    ("ko-nc-def", "concept", {"name": "Defined"},
+     [_nc_ev("el-nc-occ-out", NC_OUT), _nc_ev("el-nc-occ-in", NC_IN)]),
+    ("ko-nc-definer-out", "claim", {"name": "definer out"},
+     [_nc_ev("el-nc-def-out", NC_OUT)]),
+    ("ko-nc-definer-in", "claim", {"name": "definer in"},
+     [_nc_ev("el-nc-def-in", NC_IN)]),
+    # defines_name:定义者没有证据,今天回落到它的名字。
+    ("ko-nc-named", "concept", {"name": "Named"}, [_nc_ev("el-nc-occ-in", NC_IN)]),
+    ("ko-nc-nameonly", "claim", {"name": "NAME-ONLY definer"}, []),
+    # 混合簇(成员来源一内一外)与全内簇。
+    ("ko-nc-mixed", "concept", {"name": "Mixed"}, [_nc_ev("el-nc-occ-in", NC_IN)]),
+    ("ko-nc-mixed-peer", "concept", {"name": "Mixed"}, [_nc_ev("el-nc-occ-out", NC_OUT)]),
+    ("ko-nc-allin", "concept", {"name": "AllIn"}, [_nc_ev("el-nc-occ-in", NC_IN)]),
+    ("ko-nc-allin-peer", "concept", {"name": "AllIn"}, [_nc_ev("el-nc-def-in", NC_IN)]),
+    # legacy steps:同 section 的两个兄弟,一个首条证据在外、第二条在内,一个全在外。
+    ("ko-nc-p-in", "procedure", {"name": "step in", "section_path": "NC > S"},
+     [_nc_ev("el-nc-step-out", NC_OUT), _nc_ev("el-nc-step-in", NC_IN)]),
+    ("ko-nc-p-out", "procedure", {"name": "step out", "section_path": "NC > S"},
+     [_nc_ev("el-nc-step-out", NC_OUT)]),
+    # payload steps:对象自己的内容,步骤原文按元素所在来源过闸。
+    ("ko-nc-payload", "procedure", {
+        "name": "Payload flow", "section_path": "NC > P",
+        "steps": [
+            {"name": "s-in", "element_id": "el-nc-step-in", "quote": "q-in"},
+            {"name": "s-out", "element_id": "el-nc-step-out", "quote": "q-out"},
+            {"name": "s-gone", "element_id": "el-nc-missing", "quote": "q-gone"},
+        ]}, [_nc_ev("el-nc-step-in", NC_IN)]),
+)
+# (relation_id, definer, target) —— 故意按 id **逆序**插入:没有 ORDER BY 时
+# 物理序会先读到 rel-nc-b,第一条 defines 的挑选就不再是 r.id 序。
+NC_DEFINES = (
+    ("rel-nc-name", "ko-nc-nameonly", "ko-nc-named"),
+    ("rel-nc-mixed", "ko-nc-definer-in", "ko-nc-mixed"),
+    ("rel-nc-b", "ko-nc-definer-in", "ko-nc-def"),
+    ("rel-nc-a", "ko-nc-definer-out", "ko-nc-def"),
+)
+# (canonical_id, member_object_id, canonical_description)
+NC_CLUSTERS = (
+    ("K-nc-mixed", "ko-nc-mixed", "MIXED fused description"),
+    ("K-nc-mixed", "ko-nc-mixed-peer", "MIXED fused description"),
+    ("K-nc-allin", "ko-nc-allin", "ALL-IN fused description"),
+    ("K-nc-allin", "ko-nc-allin-peer", "ALL-IN fused description"),
+)
+
+
+def _seed_node_context_ceiling(harness) -> None:
+    unified = PostgresUnifiedKgStore(harness.database, now=lambda: NOW)
+    with harness.database.write() as connection:
+        for source_id in (NC_IN, NC_OUT):
+            connection.execute(
+                "INSERT INTO sources(id,notebook_id,title,source_type,status,"
+                "parse_status,file_name,summary,created_at,updated_at) "
+                "VALUES (%s,'nb-personal',%s,'file','ready','ready','f.md','',%s,%s)",
+                (source_id, source_id, NOW, NOW),
+            )
+        for index, (element_id, source_id, text) in enumerate(NC_ELEMENTS):
+            connection.execute(
+                "INSERT INTO source_elements"
+                "(id,source_id,element_type,location_label,text,created_at) "
+                "VALUES (%s,%s,'paragraph','p',%s,%s)",
+                (element_id, source_id, text,
+                 normalize_timestamp(NOW) + timedelta(seconds=index)),
+            )
+        harness.knowledge.insert_object_chunk(connection, [
+            (object_id, "nb-personal", object_type, "approved",
+             json.dumps(payload), json.dumps(evidence),
+             evidence[0]["source_id"] if evidence else NC_IN, NOW, NOW)
+            for object_id, object_type, payload, evidence in NC_OBJECTS
+        ])
+        for relation_id, definer, target in NC_DEFINES:
+            harness.knowledge.insert_relation_chunk(connection, [(
+                relation_id, "nb-personal", NC_IN, definer, target, "defines",
+                "[]", NOW,
+            )])
+        unified.replace_cluster_rows_streamed(connection, "nb-personal", "concept", [
+            (f"cluster-nc-{index}", "nb-personal", canonical, member, "N",
+             "concept", description, "", NOW)
+            for index, (canonical, member, description) in enumerate(NC_CLUSTERS)
+        ])
+
+
+def _backfill_node_context_index(harness) -> None:
+    """建反向索引并认证 —— 之后的读走 ``knowledge_object_sources`` 支。"""
+    with harness.database.write() as connection:
+        execute_many(
+            connection,
+            "INSERT INTO knowledge_object_sources(object_id,source_id,notebook_id) "
+            "VALUES (%s,%s,%s)",
+            sorted({
+                (object_id, item["source_id"], "nb-personal")
+                for object_id, _type, _payload, evidence in NC_OBJECTS
+                for item in evidence
+            }),
+        )
+        connection.execute(
+            "INSERT INTO unified_kg_state(notebook_id,updated_at,"
+            "source_index_backfilled) VALUES (%s,%s,1)",
+            ("nb-personal", normalize_timestamp(NOW)),
+        )
+
+
+def _nc(harness, object_id, allowed=None):
+    return harness.knowledge.node_context(
+        "nb-personal", object_id, check_access=False, allowed_source_ids=allowed,
+    )
+
+
+def _assert_node_context_ceiling(harness, allowed) -> None:
+    """``allowed`` 等价于 [NC_IN] 时的全部断言(两条支、宽清单共用)。"""
+    ctx = _nc(harness, "ko-nc-def", allowed)
+    assert [o["source_id"] for o in ctx["occurrences"]] == [NC_IN]
+    # 第一条 defines(rel-nc-a)的证据在天花板外 → 落到第二条(rel-nc-b)。
+    assert ctx["definition"] == "IN definition text"
+    assert ctx["definition_basis"] == "defines_evidence"
+    assert ctx["definition_source_id"] == NC_IN
+    assert ctx["definition_element_id"] == "el-nc-def-in"
+    # defines_name 归因不到来源,天花板下不返回。
+    named = _nc(harness, "ko-nc-named", allowed)
+    assert named["definition"] is None and named["definition_basis"] is None
+    # Q1 严格:混合簇的融合描述不用,改用天花板内的 defines 证据。
+    mixed = _nc(harness, "ko-nc-mixed", allowed)
+    assert "MIXED" not in (mixed["definition"] or "")
+    assert mixed["definition_basis"] == "defines_evidence"
+    assert mixed["definition"] == "IN definition text"
+    allin = _nc(harness, "ko-nc-allin", allowed)
+    assert allin["definition"] == "ALL-IN fused description"
+    assert allin["definition_basis"] == "cluster_description"
+    assert allin["definition_source_id"] is None
+    # legacy steps:全外的兄弟丢掉;留下的兄弟原文取其第一条天花板内证据。
+    steps = _nc(harness, "ko-nc-p-in", allowed)["steps"]
+    assert steps == [
+        {"name": "step in", "element_text": "IN step text", "section_path": "NC > S"},
+    ]
+    # payload steps:步骤名保留,天花板外来源 / 找不到元素的原文置空。
+    payload_steps = _nc(harness, "ko-nc-payload", allowed)["steps"]
+    assert [(s["name"], s["element_text"]) for s in payload_steps] == [
+        ("s-in", "IN step text"), ("s-out", ""), ("s-gone", ""),
+    ]
+
+
+def _assert_node_context_unscoped(harness) -> None:
+    """``allowed_source_ids`` 缺省 → 与天花板落地之前逐值相同(+ 三个附加字段)。"""
+    ctx = _nc(harness, "ko-nc-def")
+    assert [o["source_id"] for o in ctx["occurrences"]] == [NC_OUT, NC_IN]
+    assert ctx["occurrences"][0]["element_text"] == "OUT occurrence text"
+    # r.id 序的第一条定义者(rel-nc-a),不是物理序先插入的 rel-nc-b。
+    assert ctx["definition"] == "OUT definition text"
+    assert ctx["definition_basis"] == "defines_evidence"
+    assert ctx["definition_source_id"] == NC_OUT
+    assert ctx["definition_element_id"] == "el-nc-def-out"
+    named = _nc(harness, "ko-nc-named")
+    assert named["definition"] == "NAME-ONLY definer"
+    assert named["definition_basis"] == "defines_name"
+    assert named["definition_source_id"] is None
+    assert named["definition_element_id"] is None
+    mixed = _nc(harness, "ko-nc-mixed")
+    assert mixed["definition"] == "MIXED fused description"
+    assert mixed["definition_basis"] == "cluster_description"
+    steps = _nc(harness, "ko-nc-p-in")["steps"]
+    assert [(s["name"], s["element_text"]) for s in steps] == [
+        ("step in", "OUT step text"), ("step out", "OUT step text"),
+    ]
+    payload_steps = _nc(harness, "ko-nc-payload")["steps"]
+    assert [(s["name"], s["element_text"]) for s in payload_steps] == [
+        ("s-in", "IN step text"), ("s-out", "OUT step text"), ("s-gone", "q-gone"),
+    ]
+    assert set(ctx) == {
+        "id", "object_type", "name", "section_path", "occurrences", "definition",
+        "definition_basis", "definition_source_id", "definition_element_id", "steps",
+    }
+
+
+def _assert_node_context_denies_all(harness) -> None:
+    for object_id in ("ko-nc-def", "ko-nc-named", "ko-nc-mixed", "ko-nc-allin"):
+        ctx = _nc(harness, object_id, [])
+        assert ctx["occurrences"] == []
+        assert ctx["definition"] is None and ctx["definition_basis"] is None
+    assert _nc(harness, "ko-nc-p-in", [])["steps"] == []
+    assert [s["element_text"] for s in _nc(harness, "ko-nc-payload", [])["steps"]] == [
+        "", "", "",
+    ]
+
+
+def test_node_context_applies_the_source_ceiling_on_both_index_branches(
+    knowledge_harness,
+):
+    _seed_node_context_ceiling(knowledge_harness)
+    # 无 unified_kg_state 行、反向索引一行都没有 = 未认证 → 权威支(扫 evidence
+    # JSON)。读反向索引的实现在这里会把全内簇也判成「无来源」而丢掉描述、把
+    # 兄弟过程全丢掉 —— 下面的断言因此只能由权威支满足。
+    _assert_node_context_unscoped(knowledge_harness)
+    _assert_node_context_ceiling(knowledge_harness, [NC_IN])
+    _assert_node_context_denies_all(knowledge_harness)
+    # 天花板覆盖两个来源时,混合簇的描述合法。
+    both = _nc(knowledge_harness, "ko-nc-mixed", [NC_IN, NC_OUT])
+    assert both["definition_basis"] == "cluster_description"
+
+    _backfill_node_context_index(knowledge_harness)
+    # 认证之后走反向索引支,答案一模一样。
+    _assert_node_context_unscoped(knowledge_harness)
+    _assert_node_context_ceiling(knowledge_harness, [NC_IN])
+    _assert_node_context_denies_all(knowledge_harness)
+    assert _nc(
+        knowledge_harness, "ko-nc-mixed", [NC_IN, NC_OUT]
+    )["definition_basis"] == "cluster_description"
+    # 天花板只含 NC_OUT:第一条 defines 本身就在内。
+    out_only = _nc(knowledge_harness, "ko-nc-def", [NC_OUT])
+    assert out_only["definition"] == "OUT definition text"
+    assert out_only["definition_source_id"] == NC_OUT
+
+
+def test_node_context_binds_a_whole_library_ceiling_as_one_parameter(
+    knowledge_harness,
+):
+    """整库规模的天花板(生产上数千个来源 id)恒为**一个**数组参数,不随库大小
+    展开成占位符;两条支都要走到。"""
+    _seed_node_context_ceiling(knowledge_harness)
+    wide = [NC_IN] + [f"s-filler-{index}" for index in range(5000)]
+    store = knowledge_harness.knowledge
+    seen: list[tuple] = []
+    original_connect = store._connect
+
+    class _Spy:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, params=()):
+            seen.append(tuple(params or ()))
+            return self._inner.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    @contextmanager
+    def spying_connect():
+        with original_connect() as connection:
+            yield _Spy(connection)
+
+    store._connect = spying_connect
+    try:
+        for backfill in (False, True):
+            if backfill:
+                _backfill_node_context_index(knowledge_harness)
+            seen.clear()
+            _assert_node_context_ceiling(knowledge_harness, wide)
+            ceiling_params = [
+                param for params in seen for param in params
+                if isinstance(param, list) and len(param) == len(wide)
+            ]
+            assert ceiling_params, "the ceiling never reached SQL"
+            assert max(len(params) for params in seen) <= 8, max(
+                len(params) for params in seen
+            )
+    finally:
+        store._connect = original_connect
+
+
+def test_node_context_legacy_steps_ceiling_gate_sits_before_the_limit(
+    knowledge_harness,
+):
+    """section 为空的 legacy 兄弟查询有 ``LIMIT 500``:闸必须在 SQL 里、LIMIT
+    之前,否则先插入的 501 个天花板外兄弟占满名额,天花板内的目标被挤掉。"""
+    crowd = [
+        (f"ko-crowd-{index:03d}", "nb-personal", "procedure", "approved",
+         json.dumps({"name": f"crowd {index}"}),
+         json.dumps([_nc_ev("", NC_OUT)]), NC_OUT, NOW, NOW)
+        for index in range(501)
+    ]
+    target = (
+        "ko-crowd-target", "nb-personal", "procedure", "approved",
+        json.dumps({"name": "in"}), json.dumps([_nc_ev("", NC_IN)]), NC_IN, NOW, NOW,
+    )
+    with knowledge_harness.database.write() as connection:
+        knowledge_harness.knowledge.insert_object_chunk(connection, crowd)
+        knowledge_harness.knowledge.insert_object_chunk(connection, [target])
+    for backfill in (False, True):
+        if backfill:
+            with knowledge_harness.database.write() as connection:
+                execute_many(
+                    connection,
+                    "INSERT INTO knowledge_object_sources(object_id,source_id,notebook_id) "
+                    "VALUES (%s,%s,%s)",
+                    [(row[0], row[6], "nb-personal") for row in [*crowd, target]],
+                )
+                connection.execute(
+                    "INSERT INTO unified_kg_state(notebook_id,updated_at,"
+                    "source_index_backfilled) VALUES (%s,%s,1)",
+                    ("nb-personal", normalize_timestamp(NOW)),
+                )
+        steps = _nc(knowledge_harness, "ko-crowd-target", [NC_IN])["steps"]
+        assert [step["name"] for step in steps] == ["in"]
