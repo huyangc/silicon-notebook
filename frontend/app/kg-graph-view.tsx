@@ -244,6 +244,7 @@ export function KgGraphView({
     | "buildingKg"
     | "conceptDetail"
     | "conceptDetailGeneration"
+    | "conceptMembersExhausted"
     | "conceptMembersLoadError"
     | "conceptMembersLoadingMore"
     | "decidingMerge"
@@ -748,6 +749,9 @@ export function KgGraphView({
                           ? "加载失败，点击重试"
                           : `加载更多成员（已加载 ${kgGraph.conceptDetail.members.length}/${kgGraph.conceptDetail.member_total}）`}
                     </button>
+                  )}
+                  {!kgGraph.conceptDetail.next_cursor && kgGraph.conceptMembersExhausted && (
+                    <p className="tool-hint" role="status">没有更多可显示的成员</p>
                   )}
                 </>
               )}

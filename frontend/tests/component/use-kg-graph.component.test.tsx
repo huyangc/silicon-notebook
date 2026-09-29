@@ -408,5 +408,11 @@ test("a load-more 404 ends paging instead of offering a retry that can only 404 
   expect(result.current.view.conceptDetail?.members.map((m) => m.id)).toEqual(["m1", "m2"]);
   expect(result.current.view.conceptMembersLoadError).toBe(false);
   expect(result.current.view.conceptMembersLoadingMore).toBe(false);
+  expect(result.current.view.conceptMembersExhausted).toBe(true);
   expect(hookEffects.reportError).not.toHaveBeenCalled();
+  // A fresh first page (another selection) clears the end-of-paging line.
+  kgApi.fetchConceptDetail.mockResolvedValueOnce(conceptPage(["m9"], "m9"));
+  await result.current.selectNode("k1");
+  await waitFor(() => expect(result.current.view.conceptDetail?.next_cursor).toBe("m9"));
+  expect(result.current.view.conceptMembersExhausted).toBe(false);
 });

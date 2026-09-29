@@ -418,9 +418,12 @@ class KnowledgeLifecycleService:
         # KeyError)。默认 None 退回 get_notebook(语义相同、更贵),生产
         # wiring 传 notebook_store.get_row。
         notebook_live_row: Callable[[str], Any] | None = None,
-        # PR-A·A5: notebook_id -> KgViewerScope | None (kg_viewer_scope).
-        # Default: nothing is filtered (every direct construction unchanged).
-        viewer_scope: Callable[[str], Any] = lambda _notebook_id: None,
+        # PR-A·A5: (notebook_id, active_notebook_id) -> KgViewerScope | None
+        # (kg_viewer_scope). Default: nothing is filtered (every direct
+        # construction unchanged).
+        viewer_scope: Callable[..., Any] = (
+            lambda _notebook_id, _active_notebook_id=None: None
+        ),
     ) -> None:
         self.settings = settings
         # batch-3-W1 T-5a (codex #663 R3 P2): the drain's row budget — one
@@ -4630,41 +4633,49 @@ class KnowledgeLifecycleService:
             source_id = self._participant_source_notebook(
                 notebook_id, object_id, source_notebook_id
             )
-        result = self._kg_neighbors_unchecked(source_id, object_id, cap)
-        scope = self._viewer_scope(source_id)
-        if scope is not None:
-            result = self._viewer_scoped_neighbors(result, scope, object_id)
+        scope = self._viewer_scope(source_id, notebook_id)
+        if scope is None:
+            result = self._kg_neighbors_unchecked(source_id, object_id, cap)
+        else:
+            result = self._viewer_scoped_neighbors(source_id, object_id, cap, scope)
         result["source_notebook_id"] = source_id
         return result
 
-    @staticmethod
-    def _viewer_scoped_neighbors(result: dict, scope, object_id: str) -> dict:
-        """PR-A·A5 (rulings Q4 / M1): neighbour hydration omits every node the
-        viewer may not see — a raw object derived only from another member's
-        Memory, or a folded cluster all of whose live members are — and every
-        edge touching one. A hidden focus answers an empty neighbourhood, the
-        same shape an unknown id gets, so the response does not confirm it.
+    def _viewer_scoped_neighbors(
+        self, notebook_id: str, object_id: str, cap: int, scope,
+    ) -> dict:
+        """PR-A·A5 (rulings Q4 / M1): neighbour hydration under the viewer
+        rule (``KgViewerScope.filter_neighbourhood``): hidden objects,
+        clusters whose every live member is hidden, and edges touching either
+        are omitted, partly hidden clusters are relabelled, and a hidden focus
+        answers an empty neighbourhood — the shape an unknown id gets.
 
-        A kept cluster that still has hidden members is relabelled through
-        ``KgViewerScope.cluster_display_name``: both hydration paths take a
-        cluster's label from one member's payload (the viz artifact bakes it
-        at build time), and that member may be the hidden one."""
-        focus_id = result.get("focus_id") or object_id
-        if scope.node_hidden(object_id) or scope.node_hidden(focus_id):
-            return {**result, "nodes": [], "edges": []}
-        nodes = []
-        for node in result.get("nodes", []):
-            if scope.node_hidden(node["id"]):
-                continue
-            if scope.hidden_member_count(node["id"]):
-                payload = node.get("payload") or {}
-                node = {**node, "payload": {**payload, "name": scope.cluster_display_name(
-                    node["id"], str(payload.get("name", "") or ""))}}
-            nodes.append(node)
-        kept = {n["id"] for n in nodes}
+        ``cap`` counts VISIBLE neighbours: both hydration paths apply their
+        cap before this filter, so the raw read over-fetches (by the
+        notebook's owned-hidden object count, at most ``cap`` more) and
+        doubles while a full raw window leaves fewer than ``cap`` visible
+        neighbours; the kept neighbours are then cut to ``cap`` in the raw
+        order."""
+        budget = cap + min(len(scope.owned_hidden), cap)
+        while True:
+            result = self._kg_neighbors_unchecked(notebook_id, object_id, budget)
+            focus_id = result.get("focus_id") or object_id
+            raw_neighbours = sum(1 for n in result.get("nodes", []) if n["id"] != focus_id)
+            filtered = scope.filter_neighbourhood(
+                result.get("nodes", []), result.get("edges", []), (object_id, focus_id),
+            )
+            if filtered is None:
+                return {**result, "nodes": [], "edges": []}
+            nodes, edges = filtered
+            visible_neighbours = [n for n in nodes if n["id"] != focus_id]
+            if len(visible_neighbours) >= cap or raw_neighbours < budget:
+                break
+            budget *= 2
+        keep = {n["id"] for n in visible_neighbours[:cap]} | {focus_id}
+        nodes = [n for n in nodes if n["id"] in keep]
         edges = [
-            e for e in result.get("edges", [])
-            if e["source_object_id"] in kept and e["target_object_id"] in kept
+            e for e in edges
+            if e["source_object_id"] in keep and e["target_object_id"] in keep
         ]
         return {**result, "nodes": nodes, "edges": edges}
 

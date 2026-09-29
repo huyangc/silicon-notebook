@@ -1988,14 +1988,17 @@ class RepositoryRuntime:
     def wire_query_services(self, *, retrieval: Callable[[], Any]) -> None:
         if self.scale_artifacts is None:
             raise RuntimeError("query services require scale runtime")
-        # PR-A·A5: the one viewer-readable-source rule every KG browse read
-        # consumes (knowledge_query detail reads + lifecycle neighbours).
-        self.kg_viewer_scope = KgViewerScopeReader(
+        # PR-A·A5: the one viewer-readable-source rule the three KG detail
+        # reads consume. Deliberately a local, not a runtime attribute: the
+        # knowledge-query service owns the one instance, and lifecycle's
+        # neighbour read reaches it through ``knowledge_query.viewer_scope``.
+        kg_viewer_scope = KgViewerScopeReader(
             database=self.database,
             sources=self.source_store,
             knowledge=self.knowledge,
             unified_kg=self.unified_kg,
             current_user_id=self._current_user_id,
+            can_read_notebook=self.sharing_store.user_can_read_notebook,
         )
         self.knowledge_query = KnowledgeQueryService(
             settings=self.settings,
@@ -2021,7 +2024,7 @@ class RepositoryRuntime:
             memory_retriever=self.memory_retriever,
             current_user_id=self._current_user_id,
             queries=self.queries,
-            viewer_scope=self.kg_viewer_scope.for_notebook,
+            viewer_scope=kg_viewer_scope.for_notebook,
         )
         self.pending_actions_service = PendingActionsService(
             self.queries,
@@ -2204,10 +2207,10 @@ class RepositoryRuntime:
             notebook_live_row=lambda notebook_id: self.notebook_store.get_row(
                 notebook_id
             ),
-            # PR-A·A5: neighbour hydration omits nodes the viewer may not see;
-            # the reader is built in wire_query_services (resolved per call).
-            viewer_scope=lambda notebook_id: self.kg_viewer_scope.for_notebook(
-                notebook_id
+            # PR-A·A5: neighbour hydration uses the same reader instance the
+            # knowledge-query service holds (built in wire_query_services).
+            viewer_scope=lambda notebook_id, active_notebook_id=None: (
+                self.knowledge_query.viewer_scope(notebook_id, active_notebook_id)
             ),
         )
         self.scale_artifacts.lifecycle = self.knowledge_lifecycle

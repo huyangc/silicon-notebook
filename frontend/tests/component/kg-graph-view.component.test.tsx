@@ -33,6 +33,7 @@ function graphView(overrides: Partial<Props["kgGraph"]> = {}): Props["kgGraph"] 
     buildingKg: false,
     conceptDetail: null,
     conceptDetailGeneration: 0,
+    conceptMembersExhausted: false,
     conceptMembersLoadError: false,
     conceptMembersLoadingMore: false,
     decidingMerge: null,
@@ -401,6 +402,34 @@ test("概念详情经既有 KgEvidenceList 渲染出处，并按 next_cursor 给
 
   await userEvent.click(screen.getByRole("button", { name: /加载更多成员（已加载 1\/4）/ }));
   expect(onLoadMoreConceptMembers).toHaveBeenCalledTimes(1);
+});
+
+test("「加载更多成员」以 404 结束时，按钮原位换成一行说明，而不是静默消失（PR-A·A5）", () => {
+  const detail = (nextCursor: string | null) => ({
+    canonical_id: "K-1",
+    canonical_name: "阈值",
+    members: [{ id: "K-1", object_type: "concept", payload: { name: "阈值" }, evidence: [] }],
+    member_total: 4,
+    attached: [],
+    evidence: [],
+    next_cursor: nextCursor,
+  });
+  const selectedKgNode = { id: "K-1", object_type: "concept", payload: { name: "阈值" } };
+  const { unmount } = renderView({
+    selectedKgNode,
+    kgGraph: graphView({
+      selectedNodeId: "K-1", conceptDetail: detail(null), conceptMembersExhausted: true,
+    }),
+  });
+  expect(screen.getByRole("status")).toHaveTextContent("没有更多可显示的成员");
+  expect(screen.queryByRole("button", { name: /加载更多成员/ })).toBeNull();
+  unmount();
+  // A cluster that simply ended (no 404) shows neither the button nor the line.
+  renderView({
+    selectedKgNode,
+    kgGraph: graphView({ selectedNodeId: "K-1", conceptDetail: detail(null) }),
+  });
+  expect(screen.queryByText("没有更多可显示的成员")).toBeNull();
 });
 
 

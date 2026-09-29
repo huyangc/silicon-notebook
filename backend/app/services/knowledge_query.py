@@ -45,10 +45,12 @@ class KnowledgeQueryService:
         memory_retriever=None,
         current_user_id: Callable[[], str] = lambda: "",
         queries=None,
-        # PR-A·A5: notebook_id -> KgViewerScope | None (see kg_viewer_scope).
-        # None = the notebook holds no Memory foreign to the viewer, nothing
-        # is filtered; the default keeps every direct construction unfiltered.
-        viewer_scope: Callable[[str], Any] = lambda _notebook_id: None,
+        # PR-A·A5: (notebook_id, active_notebook_id) -> KgViewerScope | None
+        # (see kg_viewer_scope). None = nothing is filtered; the default keeps
+        # every direct construction unfiltered.
+        viewer_scope: Callable[..., Any] = (
+            lambda _notebook_id, _active_notebook_id=None: None
+        ),
     ) -> None:
         self.settings = settings
         self.models = model_provider
@@ -459,14 +461,64 @@ class KnowledgeQueryService:
         after: str = "",
     ) -> dict:
         source_id = self._participant_source(notebook_id, source_notebook_id)
-        scope = self.viewer_scope(source_id)
-        if scope is not None and canonical_id in scope.hidden_canonicals:
-            # Every live member derives from Memory this viewer does not own:
-            # the concept does not exist for them (same 404 as a missing id).
-            raise KeyError(canonical_id)
+        scope = self.viewer_scope(source_id, notebook_id)
         return self._concept_detail(
             source_id, canonical_id, limit=limit, after=after, scope=scope
         )
+
+    def _viewer_cluster_page(
+        self, scope: Any, notebook_id: str, canonical_id: str,
+        want: Optional[int], after: str,
+    ) -> tuple:
+        """One concept-detail page under the viewer rule (PR-A·A5).
+
+        Returns ``(visible_rows, name, dropped_unowned, exhausted,
+        owned_members)``. The first read over-fetches by the cluster's
+        owned-hidden member count, so the common page is one statement and
+        still carries ``want`` visible rows; members hidden by the evidence
+        half alone (not in the owned set) can still shorten a window, so the
+        scan keeps reading — doubling the window — until it holds ``want``
+        visible rows or the cluster ends. The cursor handed back later is the
+        last KEPT member, so keyset paging stays exact however many rows a
+        window drops. A first page whose whole cluster holds no visible member
+        is a 404, decided by this scan (no COUNT)."""
+        owned_members = scope.owned_member_count(canonical_id)
+        window = None if want is None else want + owned_members
+        cursor = after
+        kept: list = []
+        dropped = 0
+        seen_any = False
+        name = ""
+        with self.database.connect() as db:
+            while True:
+                rows, name = self.knowledge.concept_cluster_detail_rows(
+                    db, notebook_id, canonical_id, limit=window, after=cursor
+                )
+                seen_any = seen_any or bool(rows)
+                for row in rows:
+                    if scope.member_hidden(row):
+                        if str(row["member_object_id"]) not in scope.owned_hidden:
+                            dropped += 1
+                    else:
+                        kept.append(row)
+                exhausted = window is None or len(rows) < window
+                if exhausted or len(kept) >= want:
+                    break
+                cursor = str(rows[-1]["member_object_id"])
+                window *= 2
+        if not after and seen_any and not kept:
+            # Every live member is hidden from this viewer: the concept does
+            # not exist for them (same 404 as a missing id).
+            raise KeyError(canonical_id)
+        if owned_members:
+            # The stored canonical_name may be a hidden member's name. On a
+            # first page the first kept row IS the first visible member.
+            name = (
+                str(json.loads(kept[0]["payload"] or "{}").get("name", "") or "")
+                if not after and kept
+                else scope.cluster_display_name(canonical_id, name)
+            )
+        return kept, name, dropped, exhausted, owned_members
 
     def _concept_detail(
         self,
@@ -497,27 +549,21 @@ class KnowledgeQueryService:
         # self-healing on the next page/refresh, never a stuck or wrong final
         # state, and is why it is only computed once below rather than
         # re-derived per page.
-        # PR-A·A5 viewer scope: members this viewer may not see are dropped
-        # from the page. The raw page over-fetches by this cluster's hidden-
-        # member count, so at most that many rows can be dropped from any
-        # window and a page still carries `limit` visible members whenever
-        # they exist; the cursor is the last KEPT member, so keyset paging
-        # stays exact.
-        hidden_members = 0 if scope is None else scope.hidden_member_count(canonical_id)
-        fetch_limit = None if limit is None else limit + 1 + hidden_members
-        with self.database.connect() as db:
-            cluster_rows, name = self.knowledge.concept_cluster_detail_rows(
-                db, notebook_id, canonical_id, limit=fetch_limit, after=after
+        fetch_limit = None if limit is None else limit + 1
+        owned_members = 0
+        dropped = 0
+        exhausted = False
+        if scope is None:
+            with self.database.connect() as db:
+                cluster_rows, name = self.knowledge.concept_cluster_detail_rows(
+                    db, notebook_id, canonical_id, limit=fetch_limit, after=after
+                )
+        else:
+            cluster_rows, name, dropped, exhausted, owned_members = (
+                self._viewer_cluster_page(
+                    scope, notebook_id, canonical_id, fetch_limit, after
+                )
             )
-        if scope is not None:
-            # Judged on the row's own evidence, the same rule that built the
-            # hidden set the over-fetch is sized from.
-            cluster_rows = [
-                row for row in cluster_rows if not scope.evidence_hidden(row["evidence"])
-            ]
-        if hidden_members:
-            # The stored canonical_name may be the hidden member's name.
-            name = scope.cluster_display_name(canonical_id, name)
         next_cursor = None
         if limit is not None and len(cluster_rows) > limit:
             cluster_rows = cluster_rows[:limit]
@@ -546,11 +592,18 @@ class KnowledgeQueryService:
         # merge) carries the first page's total forward instead of re-fetching
         # it.
         member_total = None
-        if not after:
+        if not after and scope is not None and exhausted and next_cursor is None:
+            # The page scan read the whole cluster: the count is what it kept.
+            member_total = len(member_ids)
+        elif not after:
             with self.database.connect() as db:
                 member_total = self.knowledge.concept_cluster_member_total(
                     db, notebook_id, canonical_id
-                ) - hidden_members
+                )
+            if scope is not None:
+                # Owned-hidden members notebook-wide in this cluster, plus the
+                # evidence-hidden ones this scan met (see _viewer_cluster_page).
+                member_total = max(0, member_total - owned_members - dropped)
         if not member_ids:
             return {
                 "canonical_id": canonical_id,
@@ -595,7 +648,7 @@ class KnowledgeQueryService:
                 seen.add(other)
                 item = other_objects[other]
                 if scope is not None:
-                    if scope.evidence_hidden(item.get("evidence")):
+                    if scope.object_hidden(item["id"], item.get("evidence")):
                         continue
                     item = {**item, "evidence": scope.filter_evidence(item.get("evidence") or [])}
                 attached.append({**item, "edge_type": edge["edge_type"]})
@@ -633,22 +686,22 @@ class KnowledgeQueryService:
         """Object detail for the KG panel and the knowledge browser.
 
         PR-A·A5 (rulings Q4 / M1): filtered by the VIEWER's readable sources.
-        When the object's notebook holds Memory foreign to the viewer, the
-        store gets the viewer's readable set as its ceiling (description,
-        ``defines`` evidence, occurrences and steps all pass the same strict
-        predicate), and an object whose evidence is readable to the viewer
-        nowhere is a 404 — the store would still return its own name,
-        section path and step names, which are that Memory's text. Otherwise
-        (the common case) nothing is filtered and the payload is today's,
-        byte for byte. An explicit ``allowed_source_ids`` is intersected
-        with the viewer's set, never widened by it.
+        When a hidden source of the object's notebook is unreadable to the
+        viewer, the store gets the viewer's readable set as its ceiling
+        (description, ``defines`` evidence, occurrences and steps all pass
+        the same strict predicate), and an object hidden by the object rule —
+        owned by an unreadable hidden source, or citing one and nothing
+        readable — is a 404: the store would still return its own name and
+        payload, which are that source's text. Otherwise (the common case)
+        nothing is filtered and the payload is today's, byte for byte. An
+        explicit ``allowed_source_ids`` is intersected with the viewer's set,
+        never widened by it.
         """
         source_id = self._participant_source(notebook_id, source_notebook_id)
-        scope = self.viewer_scope(source_id)
+        scope = self.viewer_scope(source_id, notebook_id)
         if scope is not None:
-            with self.database.connect() as db:
-                rows = self.knowledge.object_evidence_rows(db, [object_id])
-            if rows and scope.evidence_hidden(rows[0]["evidence"]):
+            row = self.knowledge.get_object_row(source_id, object_id)
+            if row is not None and scope.row_hidden(row["source_id"], row["evidence"]):
                 raise KeyError(object_id)
             viewer_allowed = scope.allowed_source_ids()
             allowed_source_ids = (
