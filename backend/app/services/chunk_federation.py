@@ -50,23 +50,15 @@ Three structural rules this module exists to hold:
   ``reasoning_retrieval.search_chunks``).  Nothing about the reserve lives in
   ``per_query`` any more: ``ask_chunk`` appends its own keyword/exact groups
   after this module has produced them, so a rule written into the fusion's
-  INPUTS only binds the inputs this module produced.  The ``mix`` branch is NOT covered, and that gap is
-  now a known risk rather than a neutral choice.  The original argument was
-  structural -- mix's ordering comes from a rerank MODEL over the whole pool
-  and its cut is a token budget, so a reserved seat there has to be carved out
-  of ``select_with_reserves_baseline_first``'s existing reserve rules rather
-  than bolted on here -- and that part still holds.  What no longer holds is
-  its PREMISE.  When the decision was made, mix's second lane (KG-overlay
-  source chunks) resolved evidence only inside the active notebook, so the pool
-  always contained some active passages no matter how strong a mounted library
-  was.  Since ``graph_retrieval._kg_source_chunks`` gained cross-library
-  resolution, all THREE mix lanes can come back entirely peer-owned: an active
-  notebook holding two short notes at 0.30-0.40 against a large reference
-  library full of strong hits can finish a mix answer with no passage of its
-  own surviving the rerank and the token budget.  Fixing it means one more
-  active-lane rule inside ``select_with_reserves_baseline_first``; it is
-  registered in ``fangan_todo.md``'s retrieval section and deliberately not
-  done here, because that function's reserve rules are their own change.
+  INPUTS only binds the inputs this module produced.  The ``mix`` branch
+  holds the same number differently: its ordering comes from a rerank MODEL
+  over the whole pool and its cut is a token budget, so its seats are one more
+  reserve rule inside ``select_with_reserves_baseline_first`` --
+  ``retrieval.active_reserve_rule``, the last of ``retrieval
+  .mix_reserve_rules`` -- sized by ``active_reserve_seats`` and judged by the
+  same ``retrieval.active_reserve_eligible`` predicate.  All THREE mix lanes
+  can come back entirely peer-owned (``graph_retrieval._kg_source_chunks``
+  resolves evidence across libraries), which is why that rule is needed.
 * **...unless there IS no subject.**  Under a participant override
   (``federated_ask_active()``) that whole third rule is off.  The nominal
   active is ``notebook_ids[0]``, a naming anchor with no retrieval privilege,
@@ -1814,7 +1806,7 @@ def _merge_results(
     )
     collected = with_active_reserve(
         {hit.chunk_id: hit for hit in selected},
-        _reserve_size(candidates.settings, _reserve_k(candidates.settings)),
+        active_reserve_seats(candidates.settings),
     )
     per_query = _sub_query_groups(per_task, collected, sub_count)
     ids, matrix = _merge_selected_matrices(candidates, tasks, parts, collected)
@@ -2261,18 +2253,28 @@ def _withheld_active(
     reading -- the active notebook has already been served, and the remaining
     budget is a contest among what is left.
     """
-    size = _reserve_size(candidates.settings, _reserve_k(candidates.settings))
+    from app.services.retrieval import (
+        is_active_hit, is_generated_question_only_chunk,
+    )
+
+    size = active_reserve_seats(candidates.settings)
     if not size:
         return [], set()
-    ranked = [
-        hit for hit in _qualified_active(
-            [hit for pool in baseline_pools for hit in pool]
-        )
-        if math.isfinite(_score(hit))
+    # The active LANE as ``peer_evidence`` would see it, and the subset that
+    # may hold a seat.  The lane's peak and the rejected set are read off the
+    # whole lane, not off the eligible subset: a sub-``RELEVANCE_FLOOR`` row
+    # that is never withheld must still be reported when the qualification
+    # floor rejects it, or it would slip back in on a lower remainder peak.
+    lane = [
+        hit for pool in baseline_pools for hit in pool
+        if is_active_hit(hit) and not is_generated_question_only_chunk(hit)
+        and math.isfinite(_score(hit))
     ]
+    ranked = _qualified_active(lane)
     if not ranked:
         return [], set()
-    floor = max(min_relevance, _score(ranked[0]) * relative_relevance)
+    floor = max(
+        min_relevance, max(_score(hit) for hit in lane) * relative_relevance)
     qualified: list = []
     seen_text: set = set()
     for hit in ranked:
@@ -2281,7 +2283,7 @@ def _withheld_active(
         seen_text.add(hit.text)
         qualified.append(hit)
     unqualified = {
-        hit.chunk_id for hit in ranked if _score(hit) < floor
+        hit.chunk_id for hit in lane if _score(hit) < floor
     }
     kept = qualified[:min(size, max(0, int(budget)))]
     return kept, (unqualified if kept else set())
@@ -2368,23 +2370,56 @@ def _reserve_k(settings) -> int:
 def _reserve_size(settings, k: int) -> int:
     """``ceil(k * reserve)``, clamped to ``k``; ``0`` switches the rule off.
 
-    ZERO IN PEER MODE, and this one line covers all three consumers of the
+    ZERO IN PEER MODE, and this one line covers all four consumers of the
     number: ``_withheld_active`` returns ``([], set())`` on its first branch,
     ``_merge_results``' ``with_active_reserve`` hands an ordinary ``dict``
-    downstream instead of a ``FederatedCollected``, and ``apply_active_reserve``
+    downstream instead of a ``FederatedCollected``, ``apply_active_reserve``
     reaches ``retrieval.enforce_active_floor`` with ``floor=0``, whose first
-    short-circuit makes it inert.  So neither ``enforce_active_floor`` nor
-    ``quota_fuse_baseline_first`` needs to know peer mode exists -- and
-    ``_qualified_active``'s ``not hit.notebook_id`` predicate, which peer-mode
-    stamping would have made permanently false, becomes unreachable rather than
-    wrong.
+    short-circuit makes it inert, and the mix branch's
+    ``retrieval.active_reserve_rule`` gets no seats (peer mode shares its seats
+    per library instead, ``peer_library_reserve_seats``).  So neither
+    ``enforce_active_floor`` nor ``quota_fuse_baseline_first`` needs to know
+    peer mode exists -- and the "active" half of ``_qualified_active``'s
+    predicate, which peer-mode stamping would have made permanently false,
+    becomes unreachable rather than wrong.
     """
     if federated_ask_active():
         return 0
+    return _ratio_seats(settings, k)
+
+
+def _ratio_seats(settings, k: int) -> int:
+    """``min(k, ceil(k * CHUNK_FEDERATION_ACTIVE_RESERVE))``; ``0`` when off."""
     reserve = float(getattr(settings, "chunk_federation_active_reserve", 0.0) or 0.0)
     if reserve <= 0 or k <= 0:
         return 0
     return min(int(k), int(math.ceil(k * reserve)))
+
+
+def active_reserve_seats(settings) -> int:
+    """The active notebook's reserved seats -- THE one number every floor uses.
+
+    ``_reserve_size(settings, _reserve_k(settings))``: the federated merge's
+    withheld set, the MMR / quota floor (``enforce_active_floor``) and the mix
+    branch's final cut (``retrieval.active_reserve_rule``) all read it, so
+    they cannot disagree.  0 in peer mode and when
+    ``CHUNK_FEDERATION_ACTIVE_RESERVE=0``.
+    """
+    return _reserve_size(settings, _reserve_k(settings))
+
+
+def peer_library_reserve_seats(settings) -> int:
+    """Peer mode's per-library seats in the mix branch's final cut.
+
+    The same ``min(k, ceil(k * CHUNK_FEDERATION_ACTIVE_RESERVE))`` as
+    ``active_reserve_seats``, but ONLY in peer mode -- where a run has no
+    subject library, so the seats are shared by every participant library
+    (``retrieval.library_reserve_rules``) instead of held by one.  0 outside
+    peer mode and when the knob is 0.  Exactly one of the two is non-zero.
+    """
+    if not federated_ask_active():
+        return 0
+    return _ratio_seats(settings, _reserve_k(settings))
 
 
 def _score(hit) -> float:
@@ -2394,16 +2429,14 @@ def _score(hit) -> float:
 def _qualified_active(hits) -> list:
     """Active-library hits eligible to hold a reserved seat, strongest first.
 
-    "Active" is ``not hit.notebook_id`` -- see ``_merge_results`` for why the
-    active leg is the only one left unstamped.  Stable sort, so equal scores
-    keep the caller's own deterministic order.
+    ``retrieval.active_reserve_eligible`` -- the one predicate every seat
+    uses -- with the default active id: "active" is an empty stamp, see
+    ``_merge_results`` for why the active leg is the only one left unstamped.
+    Stable sort, so equal scores keep the caller's own deterministic order.
     """
-    from app.services.retrieval import is_generated_question_only_chunk
+    from app.services.retrieval import active_reserve_eligible
 
-    qualified = [
-        hit for hit in hits
-        if not hit.notebook_id and not is_generated_question_only_chunk(hit)
-    ]
+    qualified = [hit for hit in hits if active_reserve_eligible(hit)]
     qualified.sort(key=lambda hit: -_score(hit))
     return qualified
 

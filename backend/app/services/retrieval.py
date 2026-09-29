@@ -32,6 +32,7 @@ from typing import (
 )
 
 from app.core.query_syntax import quoted_phrases, unquoted_remainder
+from app.domain.citation_origin import foreign_notebook_id
 from app.domain.retrieval import (
     GapRelationRow,
     NeighborExpansion,
@@ -922,19 +923,25 @@ def _chunk_library(chunk: "RetrievedChunk") -> str:
     return str(getattr(chunk, "notebook_id", "") or "")
 
 
-def libraries_by_best_hit(chunks: Sequence["RetrievedChunk"]) -> List[tuple]:
+def libraries_by_best_hit(
+    chunks: Sequence["RetrievedChunk"],
+    library_of: Callable[["RetrievedChunk"], str] = _chunk_library,
+) -> List[tuple]:
     """``[(library, count), ...]`` in seat-priority order.
 
-    The ONE priority order every per-library exact-seat split uses: libraries
-    sorted by their best chunk's ``relevance``, descending, ties broken by the
-    position of the library's first chunk in ``chunks``.  ``count`` is how
-    many of ``chunks`` belong to it -- the most seats it can use.
+    The ONE priority order every per-library seat split uses (the exact
+    section seats and the peer-mode per-library seats of
+    ``library_reserve_rules``): libraries sorted by their best chunk's
+    ``relevance``, descending, ties broken by the position of the library's
+    first chunk in ``chunks``.  ``count`` is how many of ``chunks`` belong to
+    it -- the most seats it can use.  ``library_of`` names a chunk's library;
+    the default is its raw ``notebook_id`` stamp.
     """
     best: Dict[str, float] = {}
     count: Dict[str, int] = {}
     first: Dict[str, int] = {}
     for index, chunk in enumerate(chunks):
-        library = _chunk_library(chunk)
+        library = library_of(chunk)
         score = float(getattr(chunk, "relevance", 0.0) or 0.0)
         if library not in first:
             first[library] = index
@@ -1025,6 +1032,197 @@ def exact_section_reserve_rules(
             if _chunk_library(chunk) == library
         })
         for library, count in seats
+    )
+
+
+# --- Library reserve seats (active notebook / peer-mode per library) --------
+# One eligibility predicate and one seat-rule shape for every mechanical cut
+# that guarantees a library a share of the final evidence: the MMR / quota
+# floor (``enforce_active_floor``), the federated merge's withheld set
+# (``chunk_federation._qualified_active``) and the mix branch's final cut
+# (``mix_reserve_rules``).  Mechanical cuts only -- a model judgement (evidence
+# refinement, outline binding) is never overridden by a seat.
+
+
+def is_active_hit(hit, active_notebook_id: str = "") -> bool:
+    """Whether ``hit`` belongs to the notebook this run answers for.
+
+    Normalised through ``foreign_notebook_id`` rather than read as
+    ``not hit.notebook_id``: federated chunk recall leaves the active leg
+    unstamped, but the PPR lane and the generated-question hydrate stamp the
+    RAW owning id, the active notebook's own included.  ``""`` (the default)
+    keeps the historical reading -- only an empty stamp is active -- for the
+    callers that have no active id in scope.
+    """
+    return not foreign_notebook_id(
+        getattr(hit, "notebook_id", ""), active_notebook_id)
+
+
+def reserve_eligible(hit) -> bool:
+    """Whether ``hit`` may be PULLED INTO a reserved library seat.
+
+    The library-agnostic half of the predicate.  Excluded: generated-question-
+    only rows (an optional supplement never enters the reserve competition),
+    graph-only rows (their admission belongs to ``graph_reserve_rule``, and
+    the KG-overlay source lane's relevance is a constant 0.3, not a relevance
+    signal), and rows below ``RELEVANCE_FLOOR`` -- unless the exact-identifier
+    channel fetched them, whose keyword-only score measures the name that
+    addressed the section rather than the question.
+    """
+    if is_generated_question_only_chunk(hit) or is_graph_only_chunk(hit):
+        return False
+    if is_exact_lookup_chunk(hit):
+        return True
+    return float(getattr(hit, "relevance", 0.0) or 0.0) >= RELEVANCE_FLOOR
+
+
+def active_reserve_eligible(hit, active_notebook_id: str = "") -> bool:
+    """``is_active_hit`` and ``reserve_eligible``: may take an active seat."""
+    return is_active_hit(hit, active_notebook_id) and reserve_eligible(hit)
+
+
+def _first_copy_rule(
+    seats: int,
+    rows: Sequence["RetrievedChunk"],
+    eligible: Callable[["RetrievedChunk"], bool],
+) -> ReserveRule:
+    """A seat rule over one library's baseline ``rows`` (in ranked order).
+
+    ``holds`` is the first-ranked copy of each distinct ``text`` among
+    ``rows``, so identical text in two sources spends one seat -- the same
+    one-seat-per-passage identity ``enforce_active_floor`` uses.  ``admits``
+    is ``holds`` and ``eligible``: a weak or graph-only own row that the
+    ranking already selected still counts toward the floor, but only an
+    eligible one is pulled in.
+    """
+    first: Dict[str, str] = {}
+    for chunk in rows:
+        first.setdefault(chunk.text, chunk.chunk_id)
+    held = frozenset(first.values())
+
+    def _holds(chunk: "RetrievedChunk") -> bool:
+        return chunk.chunk_id in held
+
+    def _admits(chunk: "RetrievedChunk") -> bool:
+        return chunk.chunk_id in held and eligible(chunk)
+
+    return ReserveRule(reserve=max(0, int(seats)), holds=_holds, admits=_admits)
+
+
+def active_reserve_rule(
+    seats: int,
+    ranked: Sequence["RetrievedChunk"],
+    active_notebook_id: str,
+) -> ReserveRule:
+    """The active notebook's seats in the mix branch's final cut.
+
+    ``seats`` comes from ``chunk_federation.active_reserve_seats`` (0 in peer
+    mode and when ``CHUNK_FEDERATION_ACTIVE_RESERVE=0``).  The rule is forced
+    inert (``reserve=0``) when ``ranked`` holds no FOREIGN baseline row: with
+    nothing to compete against, every seat is already the active notebook's,
+    and an inert rule is invisible to ``select_with_reserves`` -- that is the
+    byte-identity guarantee for single-notebook runs, whose PPR rows carry the
+    active notebook's own id.  It must run LAST among the mix rules: rule
+    order is priority order, so it may not evict what the graph and exact
+    rules settled.  Like every reserve it never enlarges the budget, skips a
+    candidate larger than the whole budget instead of creating a second
+    oversized-top-1 exception, and stops when the eligible candidates run out.
+    """
+    baseline = [
+        chunk for chunk in ranked if not is_generated_question_only_chunk(chunk)
+    ]
+    if not any(not is_active_hit(chunk, active_notebook_id) for chunk in baseline):
+        seats = 0
+    return _first_copy_rule(
+        seats,
+        [chunk for chunk in baseline if is_active_hit(chunk, active_notebook_id)],
+        lambda chunk: active_reserve_eligible(chunk, active_notebook_id),
+    )
+
+
+def library_reserve_rules(
+    seats: int,
+    ranked: Sequence["RetrievedChunk"],
+    active_notebook_id: str,
+) -> tuple:
+    """Peer-mode per-library seats in the mix branch's final cut.
+
+    A peer (global) run has no subject library, so instead of one active
+    floor every participant library with eligible evidence keeps a share:
+    ``seats`` (``chunk_federation.peer_library_reserve_seats``, 0 outside
+    peer mode) is split by ``library_seats`` in ``libraries_by_best_hit``
+    order -- the split ``exact_section_reserve_rules`` uses -- over each
+    library's eligible first copies (``reserve_eligible``), a library with
+    fewer eligible rows than its share passing the rest on.  One
+    ``_first_copy_rule`` per library, placed after the exact rules.
+
+    Inert (``()``) with ``seats <= 0`` or when the baseline rows span a
+    single library.  A row's library is its stamp, an empty stamp standing for
+    ``active_notebook_id`` (the nominal active, whose KG-overlay source rows
+    are normalised to ``""``).
+    """
+    baseline = [
+        chunk for chunk in ranked if not is_generated_question_only_chunk(chunk)
+    ]
+
+    def _library(chunk: "RetrievedChunk") -> str:
+        return _chunk_library(chunk) or str(active_notebook_id or "")
+
+    if seats <= 0 or len({_library(chunk) for chunk in baseline}) <= 1:
+        return ()
+    rows: Dict[str, List["RetrievedChunk"]] = {}
+    for chunk in baseline:
+        rows.setdefault(_library(chunk), []).append(chunk)
+    rules = {
+        library: _first_copy_rule(0, members, reserve_eligible)
+        for library, members in rows.items()
+    }
+    eligible = [
+        chunk for chunk in baseline if rules[_library(chunk)].admits(chunk)
+    ]
+    return tuple(
+        _first_copy_rule(count, rows[library], reserve_eligible)
+        for library, count in library_seats(
+            seats, libraries_by_best_hit(eligible, _library))
+    )
+
+
+def mix_reserve_rules(
+    settings,
+    ranked: Sequence["RetrievedChunk"],
+    exact_hits: Sequence["RetrievedChunk"],
+    active_notebook_id: str,
+    *,
+    active_seats: int,
+    library_seats_total: int,
+) -> tuple:
+    """Every floor of the mix branch's final cut, in priority order.
+
+    1. ``graph_reserve_rule(CHUNK_GRAPH_RESERVE)`` (default 0 / off);
+    2. ``exact_section_reserve_rules(EXACT_SECTION_RESERVE, exact_hits)``,
+       split per library when the hits span several;
+    3. ``active_reserve_rule(active_seats, ...)`` -- the active notebook's
+       share against mounted reference libraries;
+    4. ``library_reserve_rules(library_seats_total, ...)`` -- peer mode's
+       per-library shares.
+
+    3 and 4 are mutually exclusive by construction (``active_seats`` is 0 in
+    peer mode, ``library_seats_total`` is 0 outside it).  All share ONE token
+    budget, a later rule never evicts what an earlier one settled, and a rule
+    with no seats is inert -- see ``select_with_reserves`` -- so
+    ``CHUNK_GRAPH_RESERVE=0`` keeps its historical behaviour byte-for-byte.
+    Why the exact seats exist at all: the reranker is a general relevance
+    model and routinely ranks an Arguments table below prose that merely talks
+    about the command, so without a seat the exact section is assembled and
+    then truncated away.  The library seats exist because all three mix lanes
+    can come back owned by one strong library.
+    """
+    return (
+        graph_reserve_rule(max(0, settings.chunk_graph_reserve)),
+        *exact_section_reserve_rules(
+            max(0, settings.exact_section_reserve), exact_hits),
+        active_reserve_rule(active_seats, ranked, active_notebook_id),
+        *library_reserve_rules(library_seats_total, ranked, active_notebook_id),
     )
 
 
@@ -1585,7 +1783,8 @@ def quota_fuse_baseline_first(
 
 
 def enforce_active_floor(
-    selected, candidates, floor, relevance=lambda h: h.relevance
+    selected, candidates, floor, relevance=lambda h: h.relevance,
+    active_notebook_id: str = "",
 ):
     """Guarantee the active notebook a minimum share of a FINISHED selection.
 
@@ -1597,10 +1796,15 @@ def enforce_active_floor(
     nowhere: by construction it runs on the list that is about to become the
     answer's evidence.
 
-    "Active" is ``not hit.notebook_id``.  Federated recall stamps only peer
-    libraries' hits, so an empty origin means the notebook being asked about --
-    the same reading ``evidence_context``, ``source_scope`` and
-    ``citation_origin`` already have.
+    "Active" is ``is_active_hit(hit, active_notebook_id)``.  Federated recall
+    stamps only peer libraries' hits, so with the default ``""`` an empty
+    origin means the notebook being asked about -- the same reading
+    ``evidence_context``, ``source_scope`` and ``citation_origin`` already
+    have; a caller holding the real active id passes it so a raw own-id stamp
+    reads as active too.  A seat already held counts any active baseline row;
+    a spare candidate must also pass ``active_reserve_eligible`` (not graph-
+    only, relevance at least ``RELEVANCE_FLOOR`` unless exact-lookup) -- the
+    one predicate the mix branch's ``active_reserve_rule`` uses.
 
     Inert, returning the caller's own list object, whenever the floor cannot be
     at stake: ``floor <= 0`` (the feature off), an empty selection, or a
@@ -1623,7 +1827,11 @@ def enforce_active_floor(
     ``source_id``) would spend the reserve twice on one piece of evidence.
     """
     rows = list(selected)
-    if floor <= 0 or not rows or not any(row.notebook_id for row in rows):
+
+    def _active(hit) -> bool:
+        return is_active_hit(hit, active_notebook_id)
+
+    if floor <= 0 or not rows or all(_active(row) for row in rows):
         return selected
     # Seats already held are counted per DISTINCT passage, the same one-seat-
     # per-text contract the spare candidates below are held to.  A direct
@@ -1633,7 +1841,7 @@ def enforce_active_floor(
     # the floor met by four renderings of one piece of evidence.
     local = {
         row.text for row in rows
-        if not row.notebook_id and not is_generated_question_only_chunk(row)
+        if _active(row) and not is_generated_question_only_chunk(row)
     }
     seen_text = {row.text for row in rows}
     seen_ids = {row.chunk_id for row in rows}
@@ -1641,8 +1849,7 @@ def enforce_active_floor(
     for candidate in sorted(
         (
             item for item in candidates
-            if not item.notebook_id
-            and not is_generated_question_only_chunk(item)
+            if active_reserve_eligible(item, active_notebook_id)
             and item.chunk_id not in seen_ids
         ),
         key=lambda item: -float(relevance(item) or 0.0),
@@ -1657,11 +1864,11 @@ def enforce_active_floor(
     tail = range(len(rows) - 1, -1, -1)
     victims = [
         index for index in tail
-        if rows[index].notebook_id
+        if not _active(rows[index])
         and is_generated_question_only_chunk(rows[index])
     ] + [
         index for index in tail
-        if rows[index].notebook_id
+        if not _active(rows[index])
         and not is_generated_question_only_chunk(rows[index])
     ]
     if not victims:

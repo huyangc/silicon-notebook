@@ -3709,24 +3709,17 @@ class AskService:
                 baseline_kg_truncated = kg_block != untruncated_kg_block
                 chunk_budget = max(0, self.settings.max_total_tokens
                                    - est_tokens(kg_block) - self._MIX_PROMPT_BUFFER_TOKENS)
+                from app.services import chunk_federation as seats
                 from app.services.retrieval import (
-                    exact_section_reserve_rules, graph_reserve_rule,
-                    select_with_reserves_baseline_first,
-                )
+                    mix_reserve_rules, select_with_reserves_baseline_first)
 
-                # Two floors inside ONE budget. The reranker is a general
-                # relevance model and routinely ranks an Arguments table below
-                # prose that merely talks about the command, so without a
-                # reserved seat the exact section is assembled and then
-                # truncated away. Neither reserve enlarges the budget nor
-                # evicts what the other is holding; a reserve set to 0 is fully
-                # inert, so `chunk_graph_reserve` keeps its historical
-                # behaviour byte-for-byte.
-                selected = select_with_reserves_baseline_first(ranked, chunk_budget, (
-                    graph_reserve_rule(max(0, self.settings.chunk_graph_reserve)),
-                    *exact_section_reserve_rules(
-                        max(0, self.settings.exact_section_reserve), exact_hits),
-                ))
+                # Graph → exact → active/per-library floors in ONE budget.
+                selected = select_with_reserves_baseline_first(
+                    ranked, chunk_budget, mix_reserve_rules(
+                        self.settings, ranked, exact_hits, notebook_id,
+                        active_seats=seats.active_reserve_seats(self.settings),
+                        library_seats_total=seats.peer_library_reserve_seats(
+                            self.settings)))
                 ask_stage("mix_rerank", _t, recall=len(candidates),
                           selected=len(selected), kg_nodes=len(kg_id_map),
                           concept_walk=concept_walk_n)

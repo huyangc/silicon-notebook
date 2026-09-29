@@ -235,7 +235,9 @@ def test_active_reserve_is_zero_under_override(monkeypatch):
     )
     ids = ("nb-a", "nb-b")
     # 名义 active 的命中弱、peer 的强:没有保底时 active 会被挤出预算=1 的池子。
-    scores = {"nb-a": 0.10, "nb-b": 0.95}
+    # 弱但仍在 RELEVANCE_FLOOR(0.12)之上——低于地板的行本就不能占保底席位
+    # (``retrieval.active_reserve_eligible``),那样对照臂测的就不是保底了。
+    scores = {"nb-a": 0.20, "nb-b": 0.95}
     candidates = FakeCandidates(
         _participants(ids), active_reserve=0.5, mmr_k=2, recall=1,
         retrieve=lambda nid, q: (
