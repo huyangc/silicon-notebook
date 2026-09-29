@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 from app.core.config import Settings
+from app.repositories.sqlite.knowledge_store import KnowledgeStore as SqliteKnowledgeStore
 from app.services.sqlite_repository import SQLiteRepository
 from tests import kg_ceiling_fixture as fx
 
@@ -27,7 +28,8 @@ def seeded(request, tmp_path, monkeypatch):
     repo = SQLiteRepository(Settings())
     with repo._write() as db:
         fx.seed(lambda sql, params: db.execute(sql, params), "?",
-                backfilled=request.param)
+                backfilled=request.param,
+                flatten=SqliteKnowledgeStore.source_ids_from_evidence)
     return repo
 
 
@@ -163,7 +165,7 @@ def test_reverse_index_probe_is_by_object_not_per_ceiling_id(seeded):
     the sync-key index — the planner may take either).  A seek on
     ``(object_id=? AND source_id=?)`` means one seek per CEILING id per
     candidate row (19.3 s vs 11 ms on a sparse 49k-id ceiling; see
-    ``_object_support_sql``)."""
+    ``source_ceiling`` module docstring)."""
     store = seeded._runtime.knowledge
     with seeded._connect() as db:
         if not store.source_index_backfilled(db, fx.NOTEBOOK_ID):
@@ -189,3 +191,19 @@ def test_reverse_index_probe_is_by_object_not_per_ceiling_id(seeded):
         assert "(object_id=?)" in plan and "SEARCH kos EXISTS USING" in plan, plan
         assert "source_id=?" not in plan, plan
         assert "SCAN kos" not in plan, plan
+
+
+def test_one_string_is_refused_not_split_into_characters(seeded):
+    store = seeded._runtime.knowledge
+    with seeded._connect() as db:
+        with pytest.raises(TypeError):
+            store.knowledge_object_page_rows(
+                db, fx.NOTEBOOK_ID, fx.OBJECT_TYPE, None, 5, allowed_source_ids="s-in1")
+        with pytest.raises(TypeError):
+            store.count_knowledge(
+                db, fx.NOTEBOOK_ID, fx.OBJECT_TYPE, fx.USABLE,
+                supported_by_source_ids="s-in1")
+        with pytest.raises(TypeError):
+            store.count_knowledge(
+                db, fx.NOTEBOOK_ID, fx.OBJECT_TYPE, fx.USABLE,
+                excluding_owner_source_ids="s-mem")

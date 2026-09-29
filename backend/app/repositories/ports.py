@@ -2319,6 +2319,16 @@ class KnowledgeStorePort(Protocol):
         ordering and cursor are unchanged.  ``count_knowledge``'s
         ``supported_by_source_ids`` applies the identical predicate.
 
+        ⚠ Cost under a ceiling: the database scans the type's keyset until
+        ``limit`` SUPPORTED rows are found or the type is exhausted, one
+        indexed support probe per row it passes over.  That work is linear
+        and NOT bounded by the executor's ``raw_scan_limit``, which counts
+        returned rows only: measured ~1.6–2.2 µs per scanned row on
+        PostgreSQL (~2.4 µs on SQLite), so a 150k-object type with nothing
+        inside the ceiling costs ~240–325 ms for one (empty) page.  A whole
+        walk is still a single pass over the type — the cursor advances to the
+        last returned row and a short page ends it.
+
         ``after`` is the opaque ``(created_at, id)`` pair of the last consumed
         row (see ``element_page_rows``).  Rows carry id / object_type /
         source_id / payload / evidence / status / created_at.
