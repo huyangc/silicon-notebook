@@ -279,3 +279,46 @@ def test_concept_clusters_count_skip_gate_leg_stays_index_only(postgres_database
         )
     assert "Index Only Scan" in plan, plan
     assert "Seq Scan on concept_clusters" not in plan, plan
+
+
+def test_viewer_scope_citing_read_seeks_the_source_index(postgres_database):
+    """PR-A·A5, codex #806 r1: ``object_ids_citing_sources`` (the KG viewer
+    rule's suspect set) is ONE statement over the reverse index whatever the
+    number of unreadable sources — the id array drives a seek on the
+    ``source_id``-leading index, never a scan of the notebook's rows. The
+    statement pinned is the one the store actually issues."""
+    from app.repositories.postgres.knowledge_store import KnowledgeStore
+
+    assert PostgresMigrator(postgres_database).migrate() == 66
+    _seed_node_context_explain(postgres_database)
+    notebook_id = _NC_EXPLAIN_NOTEBOOK
+    with postgres_database.write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET source_index_backfilled=1 WHERE notebook_id=%s",
+            (notebook_id,))
+        # Memory sources are a sliver of a library's reverse index: a few
+        # objects each among thousands cited by the documents.
+        db.execute(
+            "INSERT INTO knowledge_object_sources(object_id,source_id,notebook_id) "
+            "SELECT 'ko-'||g, 'src-mem-'||(g%%3), %s FROM generate_series(0, 8) g",
+            (notebook_id,))
+        db.execute("ANALYZE knowledge_object_sources")
+    issued = []
+
+    class _Spy:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, params=(), **kwargs):
+            issued.append((sql, params))
+            return self._inner.execute(sql, params, **kwargs)
+
+    with postgres_database.connect() as connection:
+        ids = KnowledgeStore.object_ids_citing_sources(
+            _Spy(connection), notebook_id, ["src-mem-0", "src-mem-2"])
+        assert len(ids) == len(set(ids)) > 0
+        citing = [entry for entry in issued if "knowledge_object_sources" in entry[0]]
+        assert len(citing) == 1, issued
+        plan = _plan(connection, *citing[0])
+    assert "Seq Scan on knowledge_object_sources" not in plan, plan
+    assert "idx_kos_source" in plan, plan

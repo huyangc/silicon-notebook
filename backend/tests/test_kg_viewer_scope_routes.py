@@ -179,3 +179,57 @@ def test_mounted_library_exposes_visible_sources_only_to_a_non_member(two_users_
     # The library's owner is its member: its Knowhow is readable.
     r = c.get(url.format(knowhow), headers=env.owner)
     assert r.status_code == 200 and "KNOWHOW row text" in r.text
+
+
+def test_routes_apply_the_rule_to_clusters_and_legacy_siblings(two_users_client):
+    """codex #806 r1, over HTTP as the notebook owner: a cluster whose only
+    member is owned by the visible source but cites only the member's Memory
+    (finding 1), a legacy sibling procedure owned by that Memory (finding 2)
+    and a legacy evidence item naming the visible source while pointing at a
+    Memory element (finding 3)."""
+    import json
+
+    env = two_users_client
+    c, repo, nb = env.client, env.repo, env.nb
+    repo.store_kg(nb, "src-s", [
+        {"local_id": "hub", "object_type": "concept",
+         "payload": {"name": "Engram", "section_path": "1"},
+         "evidence": [_ev("src-s", "el-s-occ")]},
+        {"local_id": "ph", "object_type": "concept",
+         "payload": {"name": "M-PRIVATE Phantom", "section_path": "1"},
+         "evidence": [_ev("src-mm", "el-mm-secret")]},
+    ], [{"source_local_id": "ph", "target_local_id": "hub", "edge_type": "related_to",
+         "evidence": []}])
+    repo.rebuild_unified_kg(nb)
+    with repo._write() as db:
+        phantom = _object_id(db, nb, "M-PRIVATE Phantom", "src-s")
+    phantom_c = repo.cluster_map(nb)[phantom]
+
+    def legacy(name, source_id, evidence):
+        oid = repo._test_insert_object(
+            nb, "procedure", {"name": name, "section_path": "L"}, source_id=source_id)
+        raw = json.dumps(evidence)
+        with repo._connect() as db:
+            db.execute("UPDATE knowledge_objects SET evidence=? WHERE id=?", (raw, oid))
+            repo._runtime.knowledge.replace_object_sources(db, oid, nb, raw)
+        return oid
+
+    target = legacy("visible step", "src-s", [_ev("src-s", "el-s-occ")])
+    legacy("M-PRIVATE sibling", "src-mm", [_ev("src-s", "el-s-occ")])
+    legacy("mislabelled", "src-s", [_ev("src-s", "el-mm-occ")])
+
+    for headers, sees in ((env.owner, False), (env.member, True)):
+        r = c.get(f"/api/notebooks/{nb}/objects/{env.ids.engram_s}/neighbors",
+                  headers=headers)
+        assert r.status_code == 200
+        assert (phantom_c in r.text) is sees and ("M-PRIVATE" in r.text) is sees, r.text
+        r = c.get(f"/api/notebooks/{nb}/concepts/{phantom_c}/detail", headers=headers)
+        assert r.status_code == (200 if sees else 404), r.text
+        r = c.get(f"/api/notebooks/{nb}/objects/{target}/context", headers=headers)
+        assert r.status_code == 200, r.text
+        names = sorted(st["name"] for st in r.json()["steps"])
+        if sees:
+            assert names == ["M-PRIVATE sibling", "mislabelled", "visible step"]
+        else:
+            assert names == ["visible step"], r.text
+            assert "M-PRIVATE" not in r.text

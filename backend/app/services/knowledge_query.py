@@ -481,9 +481,12 @@ class KnowledgeQueryService:
         visible rows or the cluster ends. The cursor handed back later is the
         last KEPT member, so keyset paging stays exact however many rows a
         window drops. A first page whose whole cluster holds no visible member
-        is a 404, decided by this scan (no COUNT)."""
+        is a 404, decided by this scan (no COUNT). With a certified reverse
+        index the over-fetch is the cluster's suspect count (members owned by
+        or citing an unreadable source), an upper bound on its hidden members,
+        so the first window is always enough."""
         owned_members = scope.owned_member_count(canonical_id)
-        window = None if want is None else want + owned_members
+        window = None if want is None else want + scope.hidden_member_bound(canonical_id)
         cursor = after
         kept: list = []
         dropped = 0
@@ -510,15 +513,46 @@ class KnowledgeQueryService:
             # Every live member is hidden from this viewer: the concept does
             # not exist for them (same 404 as a missing id).
             raise KeyError(canonical_id)
-        if owned_members:
-            # The stored canonical_name may be a hidden member's name. On a
-            # first page the first kept row IS the first visible member.
+        if scope.cluster_needs_check(canonical_id):
+            # The stored canonical_name may be a hidden member's name — one
+            # hidden by either half of the rule (codex #806 r1: judged on the
+            # cluster, not only on its owned members). On a first page the
+            # first kept row IS the first visible member.
             name = (
                 str(json.loads(kept[0]["payload"] or "{}").get("name", "") or "")
                 if not after and kept
                 else scope.cluster_display_name(canonical_id, name)
             )
         return kept, name, dropped, exhausted, owned_members
+
+    def _viewer_resolved_evidence(
+        self, scope: Any, evidence: list, members: list, attached: list,
+    ) -> list:
+        """Every evidence item concept detail returns — the page's enriched
+        ``evidence`` AND the raw items inside ``members[].evidence`` and
+        ``attached[].evidence`` — is judged on the element's ACTUAL source as
+        well as the source it names (codex #806 r1: an item naming a readable
+        source whose element lives in an unreadable one carries that
+        element's quote). ONE enrichment read resolves members' and attached
+        items together (the unfiltered path already made one for members);
+        the lists are filtered in place and the members' enriched survivors
+        are returned. Items reaching here already passed ``filter_evidence``
+        on the source they name."""
+        attached_items = [item for entry in attached for item in entry["evidence"]]
+        with self.database.connect() as db:
+            enriched = self.knowledge._enrich_evidence(db, evidence + attached_items)
+        # _enrich_evidence keeps only dict items, and filter_evidence already
+        # dropped everything else, so the two lists align index by index.
+        unreadable = {
+            id(raw) for raw, item in zip(evidence + attached_items, enriched)
+            if not scope.source_readable(item.get("source_id"))
+        }
+        for entry in [*members, *attached]:
+            entry["evidence"] = [i for i in entry["evidence"] if id(i) not in unreadable]
+        return [
+            item for raw, item in zip(evidence, enriched[:len(evidence)])
+            if id(raw) not in unreadable
+        ]
 
     def _concept_detail(
         self,
@@ -658,13 +692,11 @@ class KnowledgeQueryService:
             for object_id in member_ids
             for item in by_id.get(object_id, {}).get("evidence", [])
         ]
-        with self.database.connect() as db:
-            evidence = self.knowledge._enrich_evidence(db, evidence)
-        if scope is not None:
-            # Enrichment resolves `source_id` from the element row; re-check
-            # it so an item whose element lives in an unreadable source never
-            # carries that source's text (same rule as node_context).
-            evidence = scope.filter_evidence(evidence)
+        if scope is None:
+            with self.database.connect() as db:
+                evidence = self.knowledge._enrich_evidence(db, evidence)
+        else:
+            evidence = self._viewer_resolved_evidence(scope, evidence, members, attached)
         return {
             "canonical_id": canonical_id,
             "canonical_name": name,

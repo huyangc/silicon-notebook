@@ -43,11 +43,21 @@ access check).  A filtered read then builds, lazily and at most once per
 request: the readable set (one visible-universe read) for evidence items, and
 — only for concept detail and neighbours — the set of objects OWNED by an
 unreadable hidden source (ONE statement whatever the number of such sources,
-``relink_object_rows_for_source(source_ids=...)``), folded to clusters in
-batches of 900 object ids.  Neighbours then read the first members of every
-partly hidden cluster of the response in one batched statement
+``relink_object_rows_for_source(source_ids=...)``) and the set of objects
+CITING one (the reverse-index certificate plus ONE statement,
+``object_ids_citing_sources``), folded to clusters in batches of 900 object
+ids.  Neighbours then read the first members of every cluster of the
+response that needs a check in one batched statement
 (``concept_cluster_detail_rows(canonical_ids=...)``).  Everything else is
 decided on the rows the response already carries.
+
+Identities.  Each id a read returns is judged on what it is (codex #806 r1):
+a raw object by the object rule (owner column, then evidence); a folded
+cluster id by its members — hidden when no live member is visible, labelled
+by its first visible member when any member may be hidden
+(``cluster_needs_check``).  Legacy procedure steps are judged in the store,
+on the sibling's own ``source_id`` and on each evidence element's ACTUAL
+source.
 """
 from __future__ import annotations
 
@@ -136,27 +146,44 @@ class KgViewerScope:
 
     # -- objects owned by unreadable sources (concept detail, neighbours) ----
     def _owned_state(self) -> tuple:
+        """``(owned, owned per cluster, suspects per cluster)``.
+
+        ``owned``: live objects OWNED by an unreadable hidden source — ONE
+        statement whatever the number of such sources. ``suspects``: those plus
+        every object whose evidence CITES one (``object_ids_citing_sources``,
+        one reverse-index statement) — the only objects either half of the
+        rule can hide, so a cluster with no suspect member provably has no
+        hidden member, and ``suspects + 1`` member rows always hold a visible
+        one if any exists. ``None`` when the reverse index is not certified:
+        then every cluster is examined (fail closed). Folds run in batches of
+        900 ids."""
         if self._owned is not None:
             return self._owned
         reader = self._reader
         knowledge = reader.knowledge
         notebook_id = self.notebook_id
+        foreign = sorted(self.foreign)
         with reader.connect() as db:
-            # ONE statement for every unreadable source (the ids travel as one
-            # array / JSON parameter), then the folds in batches of 900 ids.
-            ordered = sorted({
+            owned = frozenset(
                 str(row["id"])
                 for row in knowledge.relink_object_rows_for_source(
-                    db, notebook_id, source_ids=sorted(self.foreign)
+                    db, notebook_id, source_ids=foreign
                 )
-            })
-            per_canonical: Counter = Counter()
-            for start in range(0, len(ordered), _ID_BATCH):
+            )
+            citing = knowledge.object_ids_citing_sources(db, notebook_id, foreign)
+            fold = sorted(owned if citing is None else owned | {str(i) for i in citing})
+            per_owned: Counter = Counter()
+            per_suspect: Counter = Counter()
+            for start in range(0, len(fold), _ID_BATCH):
                 for row in reader.unified_kg.cluster_fold_rows(
-                    db, notebook_id, ordered[start:start + _ID_BATCH]
+                    db, notebook_id, fold[start:start + _ID_BATCH]
                 ):
-                    per_canonical[str(row["canonical_id"])] += 1
-        self._owned = (frozenset(ordered), dict(per_canonical))
+                    canonical = str(row["canonical_id"])
+                    per_suspect[canonical] += 1
+                    if str(row["member_object_id"]) in owned:
+                        per_owned[canonical] += 1
+        self._owned = (
+            owned, dict(per_owned), None if citing is None else dict(per_suspect))
         return self._owned
 
     @property
@@ -172,6 +199,25 @@ class KgViewerScope:
     def owned_member_count(self, canonical_id: str) -> int:
         return int(self._owned_state()[1].get(canonical_id, 0))
 
+    def cluster_needs_check(self, canonical_id: str) -> bool:
+        """Whether a cluster may hold a hidden member — the identity check
+        for a CANONICAL id (codex #806 r1): some member is owned by or cites
+        an unreadable hidden source, or the reverse index cannot say.  A
+        cluster none of whose members does either is left as it is: no
+        member of it can be hidden, so neither can it or its label."""
+        suspects = self._owned_state()[2]
+        return suspects is None or bool(suspects.get(canonical_id))
+
+    def hidden_member_bound(self, canonical_id: str) -> int:
+        """Rows a member window over-fetches by: the cluster's suspect count
+        (an upper bound on its hidden members) when the reverse index is
+        certified, else its owned count (callers widen while a full window
+        holds nothing visible)."""
+        owned, per_owned, suspects = self._owned_state()
+        if suspects is None:
+            return int(per_owned.get(canonical_id, 0))
+        return int(suspects.get(canonical_id, 0))
+
     def object_hidden(self, object_id: Any, evidence: Any) -> bool:
         """The object rule for a row that carries its id and evidence but not
         its owner column: the owner half through ``owned_hidden``."""
@@ -185,8 +231,15 @@ class KgViewerScope:
         """Which of ``object_ids`` (raw object ids; unknown ids, e.g. folded
         cluster ids, are simply absent from the rows) are hidden.  One batched
         primary-key read per 900 ids for the evidence half."""
+        return self._raw_objects(object_ids)[0]
+
+    def _raw_objects(self, object_ids: Sequence[str]) -> tuple:
+        """``(hidden, known)``: which ids are hidden raw objects, and which are
+        raw objects at all (any status) — ids outside ``known`` are folded
+        cluster ids (or unknown), judged by the cluster check instead."""
         owned = self.owned_hidden
         hidden = {oid for oid in object_ids if oid in owned}
+        known = set(hidden)
         rest = sorted({oid for oid in object_ids if oid not in owned})
         if rest:
             with self._reader.connect() as db:
@@ -194,18 +247,19 @@ class KgViewerScope:
                     for row in self._reader.knowledge.object_evidence_rows(
                         db, rest[start:start + _ID_BATCH]
                     ):
+                        known.add(str(row["id"]))
                         if self.evidence_hidden(row["evidence"]):
                             hidden.add(str(row["id"]))
-        return frozenset(hidden)
+        return frozenset(hidden), frozenset(known)
 
     def visible_member(self, canonical_id: str) -> Optional[Dict[str, Any]]:
-        """The first visible member (member-id order) of a cluster that has
-        owned-hidden members, or ``None`` when every live member is hidden.
+        """The first visible member (member-id order) of a cluster, or
+        ``None`` when no live member is visible.
 
-        A bounded read of ``owned + 1`` member rows (no COUNT), widened by
-        doubling only while a full window holds nothing visible (members
-        hidden by the evidence half alone)."""
-        window = self.owned_member_count(canonical_id) + 1
+        A bounded read of ``hidden_member_bound + 1`` member rows (no COUNT),
+        widened by doubling only while a full window holds nothing visible
+        (possible only without a certified reverse index)."""
+        window = self.hidden_member_bound(canonical_id) + 1
         after = ""
         with self._reader.connect() as db:
             while True:
@@ -224,13 +278,14 @@ class KgViewerScope:
         self, canonical_ids: List[str],
     ) -> Dict[str, Optional[Dict[str, Any]]]:
         """``visible_member`` for many clusters with ONE batched read: the
-        first ``max(owned) + 1`` members of every listed cluster (so at most
-        ``len(canonical_ids) × (max owned + 1)`` rows). A cluster whose window
-        is full yet holds nothing visible (members hidden by the evidence half
-        alone) falls back to ``visible_member``'s widening scan."""
+        first ``max(hidden_member_bound) + 1`` members of every listed cluster
+        (so at most ``len(canonical_ids) × (max bound + 1)`` rows). A cluster
+        whose window is full yet holds nothing visible falls back to
+        ``visible_member``'s widening scan. An id with no live member row maps
+        to ``None``."""
         if not canonical_ids:
             return {}
-        window = max(self.owned_member_count(cid) for cid in canonical_ids) + 1
+        window = max(self.hidden_member_bound(cid) for cid in canonical_ids) + 1
         with self._reader.connect() as db:
             rows, _unused = self._reader.knowledge.concept_cluster_detail_rows(
                 db, self.notebook_id, "", limit=window, canonical_ids=canonical_ids,
@@ -248,11 +303,12 @@ class KgViewerScope:
         return found
 
     def cluster_display_name(self, canonical_id: str, name: str) -> str:
-        """A cluster that has owned-hidden members is labelled with its first
-        visible member's name (the stored ``canonical_name`` and the label the
-        viz artifact bakes from one member's payload may be a hidden
-        member's); other clusters keep ``name``."""
-        if not self.owned_member_count(canonical_id):
+        """A cluster that may hold a hidden member (``cluster_needs_check``)
+        is labelled with its first visible member's name (the stored
+        ``canonical_name`` and the label the viz artifact bakes from one
+        member's payload may be a hidden member's); other clusters keep
+        ``name``."""
+        if not self.cluster_needs_check(canonical_id):
             return name
         row = self.visible_member(canonical_id)
         if row is None:
@@ -265,15 +321,21 @@ class KgViewerScope:
     ) -> Optional[tuple]:
         """Neighbour hydration under the rule: ``None`` when the focus itself
         is hidden, else ``(nodes, edges)`` without hidden objects, clusters
-        whose every live member is hidden, and edges touching either;
-        partly hidden clusters are relabelled."""
-        ids = [str(n["id"]) for n in nodes] + [str(f) for f in focus_ids if f]
-        hidden_raw = self.objects_hidden(ids)
+        with no visible live member, and edges touching either; clusters
+        that may hold a hidden member are relabelled.
+
+        Every id is judged on its own identity (codex #806 r1): a raw object
+        by the object rule, a folded cluster id by ``cluster_needs_check`` and
+        its members — a cluster none of whose members is owned by an
+        unreadable source but every member of which cites only one is hidden
+        like any other."""
+        unique = list(dict.fromkeys(
+            [str(n["id"]) for n in nodes] + [str(f) for f in focus_ids if f]))
+        hidden_raw, known_raw = self._raw_objects(unique)
+        checked = [i for i in unique if i not in known_raw and self.cluster_needs_check(i)]
         labels: Dict[str, str] = {}
         hidden_clusters: set = set()
-        for node_id, row in self._first_visible_members(
-            [i for i in dict.fromkeys(ids) if self.owned_member_count(i)]
-        ).items():
+        for node_id, row in self._first_visible_members(checked).items():
             if row is None:
                 hidden_clusters.add(node_id)
             else:

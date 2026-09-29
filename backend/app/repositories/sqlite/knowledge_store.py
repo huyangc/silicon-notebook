@@ -90,7 +90,11 @@ def _node_context_cluster_sql(*, authoritative: bool) -> str:
         "WHERE cc.notebook_id=? AND cc.member_object_id=? "
         "AND cc.canonical_description!='' "
         f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN} LIMIT 1) "
-        f"SELECT c.canonical_description, m.member_object_id, {sources} AS member_sources "
+        f"SELECT c.canonical_description, m.member_object_id, {sources} AS member_sources, "
+        # The member's OWN source (codex #806 r1): its payload — what the
+        # fusion read — was extracted from it, whatever its evidence cites.
+        "(SELECT ko.source_id FROM knowledge_objects ko WHERE ko.id=m.member_object_id "
+        "AND ko.notebook_id=c.notebook_id) AS member_owner "
         "FROM concept_clusters m INDEXED BY idx_clusters_nb_canonical_member_gen "
         "JOIN c ON 1 "
         "WHERE m.notebook_id=? AND m.canonical_id=(SELECT canonical_id FROM c) "
@@ -124,6 +128,18 @@ def _json_loads(text: object, default: object) -> object:
         return default
 
 
+def _scoped_occurrences(raw: object, enriched: list, allowed: frozenset) -> list:
+    """Occurrences under a ceiling (codex #806 r1): the element's ACTUAL
+    source — what ``_enrich_evidence`` resolved — must be inside, and so must
+    the source the item NAMES when it names one (its ``source_title`` is that
+    source's title). ``enriched`` is aligned with the dict items of ``raw``."""
+    named = [e.get("source_id") for e in raw if isinstance(e, dict)] if isinstance(raw, list) else []
+    return [
+        item for item, declared in zip(enriched, named)
+        if item.get("source_id") in allowed and (not declared or declared in allowed)
+    ]
+
+
 def _cluster_description_in_ceiling(rows: list, allowed: frozenset) -> bool:
     """PG 孪生:Q1 严格谓词在 Python 里判,只在「证明了」时给 ``True``(读满上限
     + 1 行 = 成员多于预算,失败关闭)。"""
@@ -132,6 +148,8 @@ def _cluster_description_in_ceiling(rows: list, allowed: frozenset) -> bool:
     for row in rows:
         sources = [s for s in _json_loads(row["member_sources"], []) if s]
         if not sources or any(source not in allowed for source in sources):
+            return False
+        if row["member_owner"] and row["member_owner"] not in allowed:
             return False
     return True
 
@@ -211,8 +229,9 @@ def _scoped_payload_steps(
 # (notebook_id, object_type, created_at, id) 索引 keyset 翻页、边读边滤,凑够 500
 # 个或扫满 NODE_CONTEXT_LEGACY_SIBLING_SCAN 行为止。
 _LEGACY_SIBLING_PAGE = 500
+_ELEMENT_BATCH = 900
 _LEGACY_SIBLINGS_BY_SECTION_SQL = (
-    "SELECT id, payload, evidence FROM knowledge_objects "
+    "SELECT id, payload, evidence, source_id FROM knowledge_objects "
     "WHERE notebook_id=? AND object_type='procedure' AND status!='deprecated' "
     "AND json_extract(payload,'$.section_path')=?"
 )
@@ -222,50 +241,86 @@ _LEGACY_SIBLINGS_UNSECTIONED_SQL = (
     f"LIMIT {_LEGACY_SIBLING_PAGE}"
 )
 _LEGACY_SIBLINGS_UNSECTIONED_PAGE_SQL = (
-    "SELECT id, created_at, payload, evidence FROM knowledge_objects "
+    "SELECT id, created_at, payload, evidence, source_id FROM knowledge_objects "
     "WHERE notebook_id=? AND object_type='procedure' AND status!='deprecated' "
     "AND (created_at, id) > (?, ?) "
     f"ORDER BY created_at, id LIMIT {_LEGACY_SIBLING_PAGE}"
 )
 
 
-def _sibling_candidate(pr: sqlite3.Row, section: str, allowed: Optional[frozenset]):
-    """PG 孪生。"""
+def _sibling_candidate(
+    pr: sqlite3.Row, section: str, allowed: Optional[frozenset],
+    elements: Optional[dict] = None,
+):
+    """PG 孪生(天花板下按兄弟自己判:自己的 ``source_id`` 有值就必须在天花板内;
+    文字取第一条**实际来源**在天花板内的证据——元素存在时看元素自己的
+    ``source_id``,不存在时看证据声明的;没有 → 失败关闭)。"""
     ppay = json.loads(pr["payload"] or "{}")
     if ppay.get("section_path", "") != section:
         return None
     ev = json.loads(pr["evidence"] or "[]")
     if allowed is None:
         return ppay.get("name", ""), (ev[0].get("element_id") if ev else "")
-    # 文字取兄弟第一条**天花板内**证据;没有 → 失败关闭。
-    first_in = next((e for e in _evidence_dicts(ev) if e.get("source_id") in allowed), None)
-    if first_in is None:
+    owner = pr["source_id"] or ""
+    if owner and owner not in allowed:
         return None
-    return ppay.get("name", ""), (first_in.get("element_id") or "")
+    elements = elements or {}
+    for item in _evidence_dicts(ev):
+        if item.get("source_id") not in allowed:
+            continue
+        element_id = item.get("element_id") or ""
+        element = elements.get(element_id) if element_id else None
+        if element is None or element[0] in allowed:
+            return ppay.get("name", ""), element_id
+    return None
+
+
+def _sibling_elements(
+    db: sqlite3.Connection, rows: Sequence[sqlite3.Row], section: str, allowed: frozenset,
+) -> dict:
+    """PG 孪生。"""
+    ids = []
+    for pr in rows:
+        if json.loads(pr["payload"] or "{}").get("section_path", "") != section:
+            continue
+        ids.extend(
+            item.get("element_id")
+            for item in _evidence_dicts(json.loads(pr["evidence"] or "[]"))
+            if item.get("source_id") in allowed and item.get("element_id")
+        )
+    ids = list(dict.fromkeys(ids))
+    found: dict = {}
+    for start in range(0, len(ids), _ELEMENT_BATCH):
+        found.update(_element_rows(db, ids[start:start + _ELEMENT_BATCH]))
+    return found
+
+
+def _scoped_siblings(
+    db: sqlite3.Connection, rows: Sequence[sqlite3.Row], section: str, allowed: frozenset,
+) -> list:
+    elements = _sibling_elements(db, rows, section, allowed)
+    return [
+        candidate for candidate in (
+            _sibling_candidate(pr, section, allowed, elements) for pr in rows)
+        if candidate is not None
+    ]
 
 
 def _scoped_unsectioned_siblings(
     db: sqlite3.Connection, notebook_id: str, allowed: frozenset, own_row=None,
 ) -> list:
     """PG 孪生:目标对象自己的行最先进候选(扫描有上限,它不能被更早的天花板外
-    过程挤掉)。"""
+    过程挤掉);每页一次读取解析候选的元素来源。"""
     candidates: list = []
-    own_id = None
-    if own_row is not None:
-        own_id = own_row["id"]
-        own = _sibling_candidate(own_row, "", allowed)
-        if own is not None:
-            candidates.append(own)
+    own_id = own_row["id"] if own_row is not None else None
+    pending = [own_row] if own_row is not None else []
     after = ("", "")
     for _ in range(max(1, NODE_CONTEXT_LEGACY_SIBLING_SCAN // _LEGACY_SIBLING_PAGE)):
         page = db.execute(
             _LEGACY_SIBLINGS_UNSECTIONED_PAGE_SQL, (notebook_id, *after)).fetchall()
-        for pr in page:
-            if pr["id"] == own_id:
-                continue
-            candidate = _sibling_candidate(pr, "", allowed)
-            if candidate is not None:
-                candidates.append(candidate)
+        candidates.extend(_scoped_siblings(
+            db, pending + [pr for pr in page if pr["id"] != own_id], "", allowed))
+        pending = []
         if len(page) < _LEGACY_SIBLING_PAGE or len(candidates) >= _LEGACY_SIBLING_PAGE:
             break
         after = (page[-1]["created_at"], page[-1]["id"])
@@ -277,7 +332,7 @@ def _legacy_sibling_steps(
     allowed: Optional[frozenset], element_texts, own_row=None,
 ) -> list:
     """PG 孪生同名函数(P2-3 的 section 下推与 LIMIT 回落说明见那边)。"""
-    if section or allowed is None:
+    if allowed is None:
         prows = db.execute(
             _LEGACY_SIBLINGS_BY_SECTION_SQL if section else _LEGACY_SIBLINGS_UNSECTIONED_SQL,
             (notebook_id, section) if section else (notebook_id,)).fetchall()
@@ -285,6 +340,9 @@ def _legacy_sibling_steps(
             candidate for candidate in (_sibling_candidate(pr, section, allowed) for pr in prows)
             if candidate is not None
         ]
+    elif section:
+        prows = db.execute(_LEGACY_SIBLINGS_BY_SECTION_SQL, (notebook_id, section)).fetchall()
+        candidate_steps = _scoped_siblings(db, prows, section, allowed)
     else:
         candidate_steps = _scoped_unsectioned_siblings(db, notebook_id, allowed, own_row)
     all_step_first_eids = [eid for _, eid in candidate_steps if eid]
@@ -1012,6 +1070,35 @@ class KnowledgeStore:
             "ORDER BY rowid",
             (notebook_id, source_id),
         ).fetchall()
+
+    @staticmethod
+    def object_ids_citing_sources(
+        db: sqlite3.Connection, notebook_id: str, source_ids: Sequence[str],
+    ) -> Optional[List[str]]:
+        """Ids of the objects whose evidence cites any of ``source_ids``, read
+        from the P0-4 reverse index in ONE statement (the ids are ONE JSON
+        parameter driving ``idx_kos_source_object``), or ``None`` when that
+        index is not certified complete for the notebook
+        (``source_index_backfilled`` false = "unknown", never "no rows") — the
+        caller must then treat every object as possibly citing them. An empty
+        list answers ``[]`` with no statement. Deprecated objects' rows may be
+        included: callers use this as a SUPERSET (PR-A·A5, codex #806 r1: the
+        clusters the KG viewer rule must examine; EXPLAIN pin in
+        tests/test_kg_viewer_scope_identities.py)."""
+        values = sorted({str(value) for value in source_ids if value})
+        if not values:
+            return []
+        if not KnowledgeStore.source_index_backfilled(db, notebook_id):
+            return None
+        return [
+            str(row["object_id"]) for row in db.execute(
+                "SELECT DISTINCT object_id FROM knowledge_object_sources "
+                "INDEXED BY idx_kos_source_object "
+                "WHERE source_id IN (SELECT CAST(value AS TEXT) FROM json_each(?)) "
+                "AND notebook_id = ? ORDER BY object_id",
+                (json.dumps(values), notebook_id),
+            ).fetchall()
+        ]
 
     @staticmethod
     def relink_relation_rows_for_objects(
@@ -1990,9 +2077,10 @@ class KnowledgeStore:
             payload = json.loads(row["payload"] or "{}")
             section = payload.get("section_path", "")
             shown_section = section if allowed is None or row["source_id"] in allowed else ""
-            occurrences = self._enrich_evidence(db, json.loads(row["evidence"] or "[]"))
+            raw_evidence = json.loads(row["evidence"] or "[]")
+            occurrences = self._enrich_evidence(db, raw_evidence)
             if allowed is not None:
-                occurrences = [o for o in occurrences if o.get("source_id") in allowed]
+                occurrences = _scoped_occurrences(raw_evidence, occurrences, allowed)
             result = {"id": object_id, "object_type": obj_type, "name": payload.get("name", ""),
                       "section_path": shown_section, "occurrences": occurrences, "definition": None,
                       "definition_basis": None, "definition_source_id": None,

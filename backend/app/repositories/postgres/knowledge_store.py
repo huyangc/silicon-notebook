@@ -329,7 +329,11 @@ def _node_context_cluster_sql(*, authoritative: bool) -> str:
         "WHERE cc.notebook_id=%s AND cc.member_object_id=%s "
         "AND cc.canonical_description!='' "
         f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN} LIMIT 1) "
-        f"SELECT c.canonical_description, m.member_object_id, {sources} AS member_sources "
+        f"SELECT c.canonical_description, m.member_object_id, {sources} AS member_sources, "
+        # The member's OWN source (codex #806 r1): its payload — what the
+        # fusion read — was extracted from it, whatever its evidence cites.
+        "(SELECT ko.source_id FROM knowledge_objects ko WHERE ko.id=m.member_object_id "
+        "AND ko.notebook_id=c.notebook_id) AS member_owner "
         # LATERAL, not a plain join: the planner cannot see c's values when it
         # plans a join, and then walks idx_clusters_member (member order across
         # EVERY cluster) filtering for this one — unbounded on a large library.
@@ -362,6 +366,18 @@ def _evidence_dicts(raw: Any) -> list:
     return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
 
 
+def _scoped_occurrences(raw: object, enriched: list, allowed: frozenset) -> list:
+    """Occurrences under a ceiling (codex #806 r1): the element's ACTUAL
+    source — what ``_enrich_evidence`` resolved — must be inside, and so must
+    the source the item NAMES when it names one (its ``source_title`` is that
+    source's title). ``enriched`` is aligned with the dict items of ``raw``."""
+    named = [e.get("source_id") for e in raw if isinstance(e, dict)] if isinstance(raw, list) else []
+    return [
+        item for item, declared in zip(enriched, named)
+        if item.get("source_id") in allowed and (not declared or declared in allowed)
+    ]
+
+
 def _cluster_description_in_ceiling(rows: list, allowed: frozenset) -> bool:
     """Q1 严格谓词在 Python 里判(``rows`` 是 ``_node_context_cluster_sql`` 的结果)。
 
@@ -373,6 +389,11 @@ def _cluster_description_in_ceiling(rows: list, allowed: frozenset) -> bool:
     for row in rows:
         sources = [source for source in (row["member_sources"] or []) if source]
         if not sources or any(source not in allowed for source in sources):
+            return False
+        # A member OWNED by a source outside the ceiling is outside too (codex
+        # #806 r1): its payload came from that source; merged and promoted
+        # objects carry a union of evidence that may all be inside.
+        if row["member_owner"] and row["member_owner"] not in allowed:
             return False
     return True
 
@@ -463,8 +484,10 @@ def _scoped_payload_steps(
 # 行为止(扫描量与库大小无关;读满仍没凑够 = 漏召回,失败关闭)。EXPLAIN pin:
 # tests/postgres/test_cluster_generation_explain_pins.py。
 _LEGACY_SIBLING_PAGE = 500
+# Element ids per ``_element_rows`` statement when judging legacy siblings.
+_ELEMENT_BATCH = 900
 _LEGACY_SIBLINGS_BY_SECTION_SQL = (
-    "SELECT id, payload, evidence FROM knowledge_objects "
+    "SELECT id, payload, evidence, source_id FROM knowledge_objects "
     "WHERE notebook_id=%s AND object_type='procedure' AND status!='deprecated' "
     "AND (payload ->> 'section_path') COLLATE \"C\"=%s"
 )
@@ -476,29 +499,79 @@ _LEGACY_SIBLINGS_UNSECTIONED_SQL = (
 # 参数:(notebook_id, 上一页最后一行的 created_at, 上一页最后一行的 id);第一页
 # 用 (-infinity, '')。
 _LEGACY_SIBLINGS_UNSECTIONED_PAGE_SQL = (
-    "SELECT id, created_at, payload, evidence FROM knowledge_objects "
+    "SELECT id, created_at, payload, evidence, source_id FROM knowledge_objects "
     "WHERE notebook_id=%s AND object_type='procedure' AND status!='deprecated' "
     "AND (created_at, id) > (%s, %s) "
     f"ORDER BY created_at, id LIMIT {_LEGACY_SIBLING_PAGE}"
 )
 
 
-def _sibling_candidate(pr: Any, section: str, allowed: Optional[frozenset]):
-    """(步骤名, 原文元素 id);不是同 section 的兄弟、或天花板下没有天花板内证据
-    → None。"""
+def _sibling_candidate(
+    pr: Any, section: str, allowed: Optional[frozenset], elements: Optional[dict] = None,
+):
+    """(步骤名, 原文元素 id);不是同 section 的兄弟、或天花板下这个兄弟不被天花板
+    支撑 → None。
+
+    Under a ceiling (codex #806 r1) the rule is judged on the SIBLING itself,
+    the same two halves the viewer rule applies to any object:
+
+    * its OWN ``source_id`` (the source its name was extracted from) must be
+      in the ceiling when it has one — a procedure owned by another user's
+      Memory that acquired a visible evidence item by merging is still that
+      Memory's text;
+    * the step text comes from its first evidence item whose ACTUAL source is
+      in the ceiling: the element's own ``source_id`` from ``elements``
+      (``_sibling_elements``) when the element exists, the item's declared
+      one otherwise (no element → no text is read, the step text is blank).
+      An item that names a readable source but points at an element of an
+      unreadable one is skipped. No such item → fail closed.
+    """
     ppay = json_value(pr["payload"], {})
     if ppay.get("section_path", "") != section:
         return None
     ev = json_value(pr["evidence"], [])
     if allowed is None:
         return ppay.get("name", ""), (ev[0].get("element_id") if ev else "")
-    # The step text comes from the sibling's first IN-ceiling evidence item,
-    # never from an out-of-ceiling one ahead of it; no such item → the sibling
-    # is not supported by the ceiling → fail closed.
-    first_in = next((e for e in _evidence_dicts(ev) if e.get("source_id") in allowed), None)
-    if first_in is None:
+    owner = pr["source_id"] or ""
+    if owner and owner not in allowed:
         return None
-    return ppay.get("name", ""), (first_in.get("element_id") or "")
+    elements = elements or {}
+    for item in _evidence_dicts(ev):
+        if item.get("source_id") not in allowed:
+            continue
+        element_id = item.get("element_id") or ""
+        element = elements.get(element_id) if element_id else None
+        if element is None or element[0] in allowed:
+            return ppay.get("name", ""), element_id
+    return None
+
+
+def _sibling_elements(db: Any, rows: Sequence[Any], section: str, allowed: frozenset) -> dict:
+    """``_element_rows`` for the evidence items ``_sibling_candidate`` may pick
+    from ``rows`` (same section, declared source in the ceiling), in batches
+    of ``_ELEMENT_BATCH`` ids — the elements' ACTUAL sources decide."""
+    ids = []
+    for pr in rows:
+        if json_value(pr["payload"], {}).get("section_path", "") != section:
+            continue
+        ids.extend(
+            item.get("element_id") for item in _evidence_dicts(json_value(pr["evidence"], []))
+            if item.get("source_id") in allowed and item.get("element_id")
+        )
+    ids = list(dict.fromkeys(ids))
+    found: dict = {}
+    for start in range(0, len(ids), _ELEMENT_BATCH):
+        found.update(_element_rows(db, ids[start:start + _ELEMENT_BATCH]))
+    return found
+
+
+def _scoped_siblings(db: Any, rows: Sequence[Any], section: str, allowed: frozenset) -> list:
+    elements = _sibling_elements(db, rows, section, allowed)
+    return [
+        candidate for candidate in (
+            _sibling_candidate(pr, section, allowed, elements) for pr in rows)
+        if candidate is not None
+    ]
 
 
 def _scoped_unsectioned_siblings(
@@ -507,24 +580,20 @@ def _scoped_unsectioned_siblings(
     """``own_row`` (the target object's row, already read) enters the candidates
     FIRST: the scan stops at ``NODE_CONTEXT_LEGACY_SIBLING_SCAN`` rows, and the
     target's own in-ceiling step must not depend on how many earlier
-    out-of-ceiling procedures fill that budget."""
+    out-of-ceiling procedures fill that budget. Each page resolves its
+    candidates' elements in one read (``_scoped_siblings``)."""
     candidates: list = []
     own_id = None
     if own_row is not None:
         own_id = own_row["id"]
-        own = _sibling_candidate(own_row, "", allowed)
-        if own is not None:
-            candidates.append(own)
+    pending = [own_row] if own_row is not None else []
     after = (datetime.min.replace(tzinfo=timezone.utc), "")
     for _ in range(max(1, NODE_CONTEXT_LEGACY_SIBLING_SCAN // _LEGACY_SIBLING_PAGE)):
         page = db.execute(
             _LEGACY_SIBLINGS_UNSECTIONED_PAGE_SQL, (notebook_id, *after)).fetchall()
-        for pr in page:
-            if pr["id"] == own_id:
-                continue
-            candidate = _sibling_candidate(pr, "", allowed)
-            if candidate is not None:
-                candidates.append(candidate)
+        candidates.extend(_scoped_siblings(
+            db, pending + [pr for pr in page if pr["id"] != own_id], "", allowed))
+        pending = []
         if len(page) < _LEGACY_SIBLING_PAGE or len(candidates) >= _LEGACY_SIBLING_PAGE:
             break
         after = (page[-1]["created_at"], page[-1]["id"])
@@ -552,7 +621,7 @@ def _legacy_sibling_steps(
 
     ``element_texts`` is the store's ``_element_texts``.
     """
-    if section or allowed is None:
+    if allowed is None:
         prows = db.execute(
             _LEGACY_SIBLINGS_BY_SECTION_SQL if section else _LEGACY_SIBLINGS_UNSECTIONED_SQL,
             (notebook_id, section) if section else (notebook_id,)).fetchall()
@@ -560,6 +629,9 @@ def _legacy_sibling_steps(
             candidate for candidate in (_sibling_candidate(pr, section, allowed) for pr in prows)
             if candidate is not None
         ]
+    elif section:
+        prows = db.execute(_LEGACY_SIBLINGS_BY_SECTION_SQL, (notebook_id, section)).fetchall()
+        candidate_steps = _scoped_siblings(db, prows, section, allowed)
     else:
         candidate_steps = _scoped_unsectioned_siblings(db, notebook_id, allowed, own_row)
     all_step_first_eids = [eid for _, eid in candidate_steps if eid]
@@ -1220,6 +1292,34 @@ class KnowledgeStore:
             payload=True,
             evidence=True,
         )
+
+    @staticmethod
+    def object_ids_citing_sources(
+        db: Any, notebook_id: str, source_ids: Sequence[str],
+    ) -> Optional[List[str]]:
+        """SQLite twin's docstring is canonical: reverse-index ids citing any of
+        ``source_ids`` in ONE statement (``= ANY(%s)``, one array parameter,
+        unprepared like the other set-valued reads, so each call is planned
+        with the listed ids' statistics — Memory sources cite a sliver of a
+        library, and ``idx_kos_source_object`` is the seek; EXPLAIN pin in
+        tests/postgres/test_cluster_generation_explain_pins.py), ``None`` when
+        the index is not certified, ``[]`` for an empty list with no
+        statement."""
+        values = sorted({str(value) for value in source_ids if value})
+        if not values:
+            return []
+        if not KnowledgeStore.source_index_backfilled(db, notebook_id):
+            return None
+        return [
+            str(row["object_id"]) for row in db.execute(
+                "SELECT DISTINCT object_id COLLATE \"C\" AS object_id "
+                "FROM knowledge_object_sources "
+                "WHERE source_id = ANY(%s) AND notebook_id = %s "
+                "ORDER BY object_id COLLATE \"C\"",
+                (values, notebook_id),
+                prepare=False,
+            ).fetchall()
+        ]
 
     @staticmethod
     def relink_relation_rows_for_objects(db: Any, notebook_id: str, object_ids):
@@ -2285,9 +2385,10 @@ class KnowledgeStore:
             payload = json_value(row["payload"], {})
             section = payload.get("section_path", "")
             shown_section = section if allowed is None or row["source_id"] in allowed else ""
-            occurrences = self._enrich_evidence(db, json_value(row["evidence"], []))
+            raw_evidence = json_value(row["evidence"], [])
+            occurrences = self._enrich_evidence(db, raw_evidence)
             if allowed is not None:
-                occurrences = [o for o in occurrences if o.get("source_id") in allowed]
+                occurrences = _scoped_occurrences(raw_evidence, occurrences, allowed)
             result = {"id": object_id, "object_type": obj_type, "name": payload.get("name", ""),
                       "section_path": shown_section, "occurrences": occurrences, "definition": None,
                       "definition_basis": None, "definition_source_id": None,
