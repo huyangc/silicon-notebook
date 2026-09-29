@@ -4406,6 +4406,18 @@ button.chat-session-card {
   line-height: 1.5;
 }
 
+/* 全局问答终态引用核对的说明(PR-D)：与完整性提示同一种左边线提示条，但用中性的
+   警示色——它说的是「有几条引用没通过核对」，回答本身照常交付。 */
+.answer-citation-check-notice,
+.answer-markdown p.answer-citation-check-notice {
+  margin: 0;
+  padding-left: 10px;
+  border-left: 3px solid var(--warning-border);
+  color: var(--warning);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .answer-markdown p,
 .answer-markdown ul,
 .answer-markdown ol {
@@ -7362,6 +7374,23 @@ button.tag:hover {
   color: #111827;
 }
 
+/* 没通过终态核对的行内引用标记(PR-D)：弱化(灰字 + 虚线边框)，仍可点——点开是引用
+   卡上的原因，不是原文。放在 .active 之后，选中态下仍保留虚线，一眼分得出是哪一类。 */
+.cite-chip.cite-chip-unverified {
+  border-style: dashed;
+  border-color: var(--warning-border);
+  color: var(--muted);
+  background: var(--warning-bg);
+  font-weight: 600;
+}
+
+.cite-chip.cite-chip-unverified:hover,
+.cite-chip.cite-chip-unverified.active,
+.cite-chip.cite-chip-unverified[aria-expanded="true"] {
+  border-color: var(--warning-solid);
+  color: var(--warning);
+}
+
 /* 推断/通识行内标记（T2-a）：与 .cite-chip 同一视觉家族（细边框圆角小标签）,但这两个
    标记不可点——不带 hover/active 态、cursor 是 default，避免用户误以为能点开详情。
    两个 class 各用一种弱化色相区分：推断偏琥珀色,通识偏青色。不动 evidence_level 顶栏
@@ -7521,6 +7550,28 @@ button.tag:hover {
   margin: 0;
   font-size: 14px;
   line-height: 1.45;
+}
+
+/* 没通过终态核对的引用卡(PR-D)：左边线换成警示色，原因行在标题之上。 */
+.cite-detail-card.is-unverified {
+  border-left-color: var(--warning-solid);
+}
+
+.cite-detail-verification {
+  display: grid;
+  gap: 2px;
+  padding: 6px 8px;
+  border: 1px solid var(--warning-border);
+  border-radius: 6px;
+  background: var(--warning-bg);
+  color: var(--warning);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.cite-detail-verification strong {
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .cite-detail-card p {
@@ -12435,6 +12486,20 @@ button.tag:hover {
   color: #5e6a79;
   font-size: 12px;
   word-break: break-word;
+}
+
+/* 公开页引用清单里没通过核对的条目(PR-D)：原因作为一枚与「外部」同形的徽章。
+   特异性 (0,2,1) 压过上面 `.public-report-references small` 的 (0,1,1)。 */
+.public-report-references small.public-report-verification {
+  justify-self: start;
+  border: 1px solid var(--warning-border);
+  border-radius: 999px;
+  padding: 0 7px;
+  background: var(--warning-bg);
+  color: var(--warning);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
 }
 
 /* 被截断时的可见提示（codex #522 R3 / #525 R2：不静默截断）。选择器不再限定在

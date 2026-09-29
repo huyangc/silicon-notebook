@@ -1,3 +1,5 @@
+import type { CitationVerification } from "./citation-verification.ts";
+
 /**
  * 一张「本段附图」的镜像形状（同 workspace-model.ts CitationImage，真源
  * backend/app/models/ask.py CitationImage）。这个文件的其余类型都是自成一体的
@@ -46,6 +48,9 @@ export type AnswerAnchorLike = {
   // 标记命中」这条主路径的引用跳转入口，与 CitationLike 侧的回退列表入口
   // 互补（buildAnswerReferences 优先展示 anchor 分支）。
   knowhow?: { table_id: string; row_id: string } | null;
+  // 全局问答终态引用核对(PR-D)：只在这条锚点没通过核对时出现,缺席即通过。
+  // 呈现口径见 citation-verification.ts。
+  verification?: CitationVerification;
 };
 
 export type CitationLike = {
@@ -72,6 +77,8 @@ export type CitationLike = {
   // 本类型本就是 wire 形状的镜像，camelCase 映射统一交给
   // knowhow-model.ts 的 mapCitationKnowhowRef 在使用侧做。
   knowhow?: { table_id: string; row_id: string } | null;
+  // 全局问答终态引用核对(PR-D)：同 AnswerAnchorLike.verification。
+  verification?: CitationVerification;
 };
 
 export type AnswerReference = {

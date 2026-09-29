@@ -1,4 +1,5 @@
 import type { ReasoningTraceStep } from "./ask-stream";
+import type { CitationCheckSummary, CitationVerification } from "./citation-verification";
 import type { GrantedGroupRef } from "./group-api";
 import type { NotebookRef } from "./notebook-bases";
 
@@ -445,6 +446,8 @@ export type AnswerAnchor = {
   url?: string;
   /** 空数组同 exclude_if 惯例整体缺席；旧持久化答案缺这个键时按「无附图」回退。 */
   images?: CitationImage[];
+  /** 全局问答终态引用核对：只在没通过核对时出现，缺席即通过（citation-verification.ts）。 */
+  verification?: CitationVerification;
 };
 
 export type Citation = {
@@ -467,6 +470,8 @@ export type Citation = {
   memory_id?: string;
   /** 空数组同 exclude_if 惯例整体缺席；旧持久化答案缺这个键时按「无附图」回退。 */
   images?: CitationImage[];
+  /** 全局问答终态引用核对：同 `AnswerAnchor.verification`。 */
+  verification?: CitationVerification;
 };
 
 /** 可验证的 Knowhow 行枚举。`cells` 的键是 column id；点击行可打开权威完整单元格。 */
@@ -708,6 +713,9 @@ export type AskResponse = {
     finish_reason?: string;
   }[];
   index_required?: boolean;
+  /** 全局问答终态引用核对的汇总，只在 `failed > 0` 时出现。回答照常交付，答案下方
+   *  一句说明（citation-verification.ts）；单库回答恒缺席。 */
+  citation_check?: CitationCheckSummary;
 };
 
 export type ChatTurn = { question: string; response: AskResponse; askedAt?: string };
