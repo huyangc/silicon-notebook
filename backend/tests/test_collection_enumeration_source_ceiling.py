@@ -1195,7 +1195,12 @@ def test_a_warm_narrowed_map_build_issues_no_per_source_statement(
     repo, monkeypatch,
 ):
     """中等规模收窄(一半来源勾选)下,热的地图构建不发任何按来源计数语句:计数取自
-    已记忆、与 scope 无关的 L4 计划,不重算 L1、也不扫穿它。"""
+    已记忆、与 scope 无关的 L4 计划,不重算 L1、也不扫穿它。
+
+    L1 的上限被压到比勾选集合还小——这正是 4.9 万来源的库里 2.45 万勾选时的形状:
+    按来源重算的写法在这里每次热构建都要重新发语句(并把别的库挤出 L1),而 L4
+    的写法一条都不发。"""
+    monkeypatch.setattr(collection_catalog, "_MAX_CACHED_SOURCES", 8)
     nb = _wide_library(repo)
     ticked = [f"w{index:03d}" for index in range(0, 60, 2)]
     store = repo._runtime.source_store
