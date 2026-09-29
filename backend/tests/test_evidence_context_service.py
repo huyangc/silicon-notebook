@@ -48,6 +48,9 @@ class _Knowledge:
                 "section_path": "§1",
             }],
             "definition": "stable definition",
+            "definition_basis": "cluster_description",
+            "definition_source_id": None,
+            "definition_element_id": None,
             "steps": None,
         }
 
