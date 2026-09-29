@@ -486,12 +486,18 @@ def test_the_document_read_notice_is_only_written_when_it_fits(service, monkeypa
     """Room so tight that even the one-line notice does not fit: nothing is
     written, and the structured side stays within ``room``."""
     svc, nb = service
-    size = PARTITION // 2 - 50
-    _fake_reads(monkeypatch, size)
-    stage = _stage(nb, _long_active_chunks(), batch=_batch(rows=35))
+    _fake_reads(monkeypatch, 1000)        # passes its historical caps ...
+    stage = _stage(nb, _long_active_chunks(), batch=_batch(rows=33))  # 2664
     stage.document_reads = [object()]
     block, *rest = _structured(svc, stage, map_block="m" * 300)
-    room = PARTITION - PARTITION // 2 - 302
+    room = PARTITION - PARTITION // 2 - 302                            # 2698
+    # ... but not the room the floor leaves after the Knowhow block, which
+    # leaves less than the notice needs.
     assert rest[-1] is True
+    assert room - len(block) < len(ask_module.DOCUMENT_READ_OMITTED_NOTICE) + 2
     assert ask_module.DOCUMENT_READ_OMITTED_NOTICE not in block
     assert len(block) <= room
+    historical = _stage(nb, [], batch=_batch(rows=33))
+    historical.document_reads = [object()]
+    kept, *hist = _structured(svc, historical, map_block="m" * 300)
+    assert "D" * 1000 in kept and hist[-1] is False, "the drop is the floor's"
