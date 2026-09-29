@@ -1,0 +1,483 @@
+"""笔记本拷贝「不带 Memory」(M2)的场景与断言 —— **两端吃同一份世界**。
+
+沿用 ``memory_sql_cases.py`` 的理由:SQLite 与 PostgreSQL 各写一套夹具,就等于让每一端
+迎合自己那份实现。这里把「世界里有什么、拷贝后该剩什么」写成与后端无关的行表,
+``tests/test_notebook_share_copy.py``(SQLite,走真路由)与
+``tests/postgres/test_copy_memory_exclusion_pg.py``(PostgreSQL,走真路由)各自 import,
+各自只写一个把行插进库、把行读出来的薄适配器。
+
+世界(一个共享笔记本,owner 为 seeded admin,这样 ``/share`` 与 ``/shared/{token}/copy`` 走真路由):
+
+* 两位成员 alice、bob 各有一条已确认 Memory,各自派生出一个 Memory 来源(带元素、元素向量、
+  KG 对象、对象向量、关系、关系向量、来源级事实三表)。另有一条**孤儿** Memory 来源
+  (``memory_id`` 为空)。
+* 共享内容:一个普通文档来源,带元素、元素向量、一个分块(+向量+问题)、三个 KG 对象(+向量)、
+  一条关系(+向量)、事实三表、一个纯净概念簇。
+* **混合端点关系**:一端是 Memory 对象、另一端是共享对象,关系自己的 ``source_id`` 是共享
+  来源(或 NULL)——它不是 Memory 关系,却不能进拷贝(拷贝里没有那个 Memory 对象可指)。
+* **存量混合簇**:成员里既有共享对象又有 Memory 对象的簇,簇名取自 Memory;以及
+  ``canonical_id`` 本身就是某个 Memory 对象 id 的簇。
+* **一条不该存在的 Memory 分块**(Memory 来源从不建分块,不变量如此;这里造出来钉住防御:没有
+  这层排除,拷贝会在来源映射上 KeyError)。
+
+每行带一个 ``memory`` 旗标:``True`` = 拷贝里绝不许出现。期望的副本内容就是旗标为 ``False``
+的行。所有 Memory 行的文本都带 ``MARK``,副本里任何一张表的任何一列出现它都是泄漏。
+
+不是测试模块(没有 ``test_`` 前缀),pytest 不会收集它。
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import Any, Callable, Iterable
+
+NOW = "2026-09-29T00:00:00+00:00"
+NOTEBOOK = "nb-copy-mem"
+NOTEBOOK_PLAIN = "nb-copy-plain"
+OWNER = "user-local"
+MARK = "MEMSECRET"
+
+USERS = ("u-alice", "u-bob")
+
+#: 需要 JSON 编码的列(SQLite 存文本,PostgreSQL 存 jsonb)。
+JSON_COLUMNS = frozenset({"payload", "evidence", "element_ids", "metadata"})
+
+#: 副本里逐表核对的表(键是表名,值是「按笔记本取全部行」的 SQL,``{p}`` 是占位符)。
+COPY_TABLE_QUERIES: dict[str, str] = {
+    "sources": "SELECT * FROM sources WHERE notebook_id = {p}",
+    "source_paper_meta": "SELECT * FROM source_paper_meta WHERE notebook_id = {p}",
+    "source_authors": "SELECT * FROM source_authors WHERE notebook_id = {p}",
+    "source_elements": (
+        "SELECT e.* FROM source_elements e JOIN sources s ON s.id = e.source_id "
+        "WHERE s.notebook_id = {p}"
+    ),
+    "chunks": "SELECT * FROM chunks WHERE notebook_id = {p}",
+    "chunk_embeddings": "SELECT * FROM chunk_embeddings WHERE notebook_id = {p}",
+    "chunk_questions": "SELECT * FROM chunk_questions WHERE notebook_id = {p}",
+    "element_embeddings": "SELECT * FROM element_embeddings WHERE notebook_id = {p}",
+    "knowledge_objects": "SELECT * FROM knowledge_objects WHERE notebook_id = {p}",
+    "knowledge_embeddings": "SELECT * FROM knowledge_embeddings WHERE notebook_id = {p}",
+    "knowledge_relations": "SELECT * FROM knowledge_relations WHERE notebook_id = {p}",
+    "relation_embeddings": "SELECT * FROM relation_embeddings WHERE notebook_id = {p}",
+    "knowledge_source_facts": "SELECT * FROM knowledge_source_facts WHERE notebook_id = {p}",
+    "knowledge_source_fact_elements": (
+        "SELECT * FROM knowledge_source_fact_elements WHERE notebook_id = {p}"
+    ),
+    "knowledge_source_fact_backfills": (
+        "SELECT * FROM knowledge_source_fact_backfills WHERE notebook_id = {p}"
+    ),
+    "concept_clusters": "SELECT * FROM concept_clusters WHERE notebook_id = {p}",
+}
+
+
+@dataclass(frozen=True)
+class Row:
+    table: str
+    values: dict[str, Any]
+    memory: bool = False
+
+
+def _vec(tag: str) -> bytes:
+    return f"vec-{tag}".encode()
+
+
+def _source(nb: str, sid: str, source_type: str, *, memory_id=None, memory=False) -> Row:
+    title = f"{MARK} {sid}" if memory else f"doc {sid}"
+    return Row(
+        "sources",
+        {
+            "id": sid, "notebook_id": nb, "title": title, "source_type": source_type,
+            "memory_id": memory_id, "status": "ready", "parse_status": "ready",
+            "created_at": NOW, "updated_at": NOW,
+        },
+        memory,
+    )
+
+
+def _paper_meta(nb: str, sid: str, *, memory=False) -> list[Row]:
+    """Paper metadata + one author. A Memory source has none in practice; the stray rows
+    pin the defensive exclusion on the per-source join."""
+    label = f"{MARK} {sid}" if memory else f"paper {sid}"
+    return [
+        Row("source_paper_meta", {
+            "source_id": sid, "notebook_id": nb, "is_paper": 1, "paper_title": label,
+            "model": "m", "created_at": NOW, "updated_at": NOW,
+        }, memory),
+        Row("source_authors", {
+            "id": f"auth-{sid}", "source_id": sid, "notebook_id": nb, "position": 0,
+            "name": label, "created_at": NOW,
+        }, memory),
+    ]
+
+
+def _element(sid: str, eid: str, *, memory=False) -> list[Row]:
+    text = f"{MARK} element {eid}" if memory else f"shared element {eid}"
+    return [
+        Row("source_elements", {
+            "id": eid, "source_id": sid, "element_type": "para", "location_label": "p1",
+            "text": text, "created_at": NOW,
+        }, memory),
+    ]
+
+
+def _element_vec(nb: str, sid: str, eid: str, *, memory=False) -> Row:
+    return Row("element_embeddings", {
+        "element_id": eid, "source_id": sid, "notebook_id": nb,
+        "vector": _vec(eid), "created_at": NOW,
+    }, memory)
+
+
+def _object(nb: str, oid: str, sid: str, eid: str, *, memory=False) -> list[Row]:
+    name = f"{MARK} {oid}" if memory else f"shared {oid}"
+    return [
+        Row("knowledge_objects", {
+            "id": oid, "notebook_id": nb, "object_type": "concept", "status": "approved",
+            "source_id": sid, "payload": {"name": name},
+            "evidence": [{"source_id": sid, "element_id": eid}],
+            "created_at": NOW, "updated_at": NOW,
+        }, memory),
+        Row("knowledge_embeddings", {
+            "object_id": oid, "notebook_id": nb, "vector": _vec(oid), "created_at": NOW,
+        }, memory),
+    ]
+
+
+def _relation(nb: str, rid: str, sid, src: str, dst: str, *, memory: bool) -> list[Row]:
+    return [
+        Row("knowledge_relations", {
+            "id": rid, "notebook_id": nb, "source_id": sid, "source_object_id": src,
+            "target_object_id": dst, "edge_type": "related_to", "evidence": [],
+            "created_at": NOW,
+        }, memory),
+        Row("relation_embeddings", {
+            "relation_id": rid, "notebook_id": nb, "vector": _vec(rid), "created_at": NOW,
+        }, memory),
+    ]
+
+
+def _facts(nb: str, sid: str, tag: str, obj: str, eid: str, *, memory: bool) -> list[Row]:
+    generation = f"gen-{tag}"
+    fact_id = f"fact-{tag}"
+    return [
+        Row("knowledge_source_facts", {
+            "id": fact_id, "notebook_id": nb, "source_id": sid, "source_generation": generation,
+            "local_object_id": f"local-{tag}", "global_object_id": obj, "object_type": "concept",
+            "payload": {"name": f"{MARK} {tag}" if memory else f"shared {tag}"},
+            "evidence": [], "created_at": NOW, "updated_at": NOW,
+        }, memory),
+        Row("knowledge_source_fact_elements", {
+            "fact_id": fact_id, "notebook_id": nb, "source_id": sid,
+            "source_generation": generation, "element_id": eid, "created_at": NOW,
+        }, memory),
+        Row("knowledge_source_fact_backfills", {
+            "source_id": sid, "notebook_id": nb, "source_generation": generation,
+            "status": "complete", "created_at": NOW, "updated_at": NOW,
+        }, memory),
+    ]
+
+
+def _cluster(nb: str, cid: str, name: str, members: Iterable[str], *, memory: bool) -> list[Row]:
+    return [
+        Row("concept_clusters", {
+            "id": f"cc-{cid}-{member}", "notebook_id": nb, "canonical_id": cid,
+            "member_object_id": member, "canonical_name": name, "object_type": "concept",
+            "created_at": NOW, "generation": 0,
+        }, memory)
+        for member in members
+    ]
+
+
+def world(nb: str = NOTEBOOK, *, with_memory: bool = True) -> list[Row]:
+    """世界的全部行,按外键安全的顺序;``with_memory=False`` 只留共享内容。"""
+    rows: list[Row] = [
+        Row("notebooks", {
+            "id": nb, "name": "Shared", "purpose": "", "primary_domain": "Semiconductor",
+            "status": "draft", "created_by": OWNER, "created_at": NOW, "updated_at": NOW,
+        }),
+        # -- shared content -------------------------------------------------
+        _source(nb, "src-doc", "document"),
+        *_paper_meta(nb, "src-doc"),
+        *_element("src-doc", "el-doc-1"),
+        *_element("src-doc", "el-doc-2"),
+        _element_vec(nb, "src-doc", "el-doc-1"),
+        _element_vec(nb, "src-doc", "el-doc-2"),
+        Row("chunks", {
+            "id": "ck-doc-1", "notebook_id": nb, "source_id": "src-doc", "text": "shared chunk",
+            "element_ids": ["el-doc-1"], "created_at": NOW,
+        }),
+        Row("chunk_embeddings", {
+            "chunk_id": "ck-doc-1", "notebook_id": nb, "vector": _vec("ck-doc-1"),
+            "created_at": NOW,
+        }),
+        Row("chunk_questions", {
+            "id": "cq-doc-1", "chunk_id": "ck-doc-1", "notebook_id": nb, "source_id": "src-doc",
+            "question": "what is shared?", "vector": _vec("cq-doc-1"), "created_at": NOW,
+        }),
+        *_object(nb, "ko-shared-1", "src-doc", "el-doc-1"),
+        *_object(nb, "ko-shared-2", "src-doc", "el-doc-1"),
+        *_object(nb, "ko-shared-3", "src-doc", "el-doc-2"),
+        *_object(nb, "ko-shared-4", "src-doc", "el-doc-2"),
+        *_relation(nb, "kr-shared", "src-doc", "ko-shared-1", "ko-shared-2", memory=False),
+        *_facts(nb, "src-doc", "doc", "ko-shared-1", "el-doc-1", memory=False),
+        *_cluster(nb, "K-shared", "shared topic", ("ko-shared-1", "ko-shared-2"), memory=False),
+    ]
+    if with_memory:
+        rows += [
+            Row("users", {"id": u, "email": f"{u}@example.test", "display_name": u,
+                          "role": "user", "created_at": NOW, "updated_at": NOW})
+            for u in USERS
+        ]
+        for who, uid in (("alice", "u-alice"), ("bob", "u-bob")):
+            sid, mem = f"src-mem-{who}", f"mem-{who}"
+            rows += [
+                Row("memory_items", {
+                    "id": mem, "notebook_id": nb, "created_by": uid, "origin": "ask_answer",
+                    "status": "confirmed", "title": f"{MARK} {who}",
+                    "content_md": f"{MARK} body", "created_at": NOW, "updated_at": NOW,
+                }, True),
+                _source(nb, sid, "memory", memory_id=mem, memory=True),
+                *_paper_meta(nb, sid, memory=True),
+                *_element(sid, f"el-{who}-1", memory=True),
+                _element_vec(nb, sid, f"el-{who}-1", memory=True),
+                *_object(nb, f"ko-{who}-1", sid, f"el-{who}-1", memory=True),
+                *_object(nb, f"ko-{who}-2", sid, f"el-{who}-1", memory=True),
+                *_relation(nb, f"kr-{who}", sid, f"ko-{who}-1", f"ko-{who}-2", memory=True),
+                *_facts(nb, sid, who, f"ko-{who}-1", f"el-{who}-1", memory=True),
+            ]
+        rows += [
+            # 孤儿 Memory 来源:memory_id 为空,仍是 Memory 派生。
+            _source(nb, "src-mem-orphan", "memory", memory=True),
+            *_element("src-mem-orphan", "el-orphan-1", memory=True),
+            _element_vec(nb, "src-mem-orphan", "el-orphan-1", memory=True),
+            # 混合端点关系:自己的来源是共享来源 / NULL,一端却是 Memory 对象。
+            *_relation(nb, "kr-mixed-src", "src-doc", "ko-alice-1", "ko-shared-1", memory=True),
+            *_relation(nb, "kr-mixed-null", None, "ko-shared-2", "ko-bob-1", memory=True),
+            # 存量混合簇:成员里有 Memory 对象,簇名取自 Memory;整簇不进拷贝。
+            *_cluster(nb, "K-mixed", f"{MARK} topic", ("ko-shared-3", "ko-alice-1"), memory=True),
+            # 纯 Memory 簇。
+            *_cluster(nb, "K-bob", f"{MARK} bob topic", ("ko-bob-1", "ko-bob-2"), memory=True),
+            # canonical_id 本身是某个 Memory 对象 id,成员却都是共享对象。
+            *_cluster(nb, "ko-alice-2", f"{MARK} canon", ("ko-shared-4",), memory=True),
+            # 一条不该存在的 Memory 分块(+向量+问题)。
+            Row("chunks", {
+                "id": "ck-mem-stray", "notebook_id": nb, "source_id": "src-mem-alice",
+                "text": f"{MARK} stray chunk", "element_ids": ["el-alice-1"], "created_at": NOW,
+            }, True),
+            Row("chunk_embeddings", {
+                "chunk_id": "ck-mem-stray", "notebook_id": nb, "vector": _vec("ck-mem-stray"),
+                "created_at": NOW,
+            }, True),
+            Row("chunk_questions", {
+                "id": "cq-mem-stray", "chunk_id": "ck-mem-stray", "notebook_id": nb,
+                "source_id": "src-mem-alice", "question": f"{MARK}?",
+                "vector": _vec("cq-mem-stray"), "created_at": NOW,
+            }, True),
+        ]
+    return rows
+
+
+def seed(insert: Callable[[str, dict], None], nb: str = NOTEBOOK, *, with_memory: bool = True) -> None:
+    for row in world(nb, with_memory=with_memory):
+        insert(row.table, row.values)
+
+
+def expected_copy_counts(nb: str = NOTEBOOK) -> dict[str, int]:
+    """副本里每张表应有多少行 = 世界里该表旗标为 ``False`` 的行数。"""
+    counts = {table: 0 for table in COPY_TABLE_QUERIES}
+    for row in world(nb):
+        if row.table in counts and not row.memory:
+            counts[row.table] += 1
+    return counts
+
+
+def memory_ids() -> dict[str, set[str]]:
+    """世界里每张表的 Memory 行 id(取各表的主键列),用来断言副本没有引用它们。"""
+    out: dict[str, set[str]] = {}
+    for row in world():
+        if row.memory:
+            key = row.values.get("id") or row.values.get("object_id") or row.values.get("relation_id") \
+                or row.values.get("element_id") or row.values.get("chunk_id") or row.values.get("fact_id") \
+                or row.values.get("source_id")
+            out.setdefault(row.table, set()).add(key)
+    return out
+
+
+@dataclass
+class CopyView:
+    """副本(或源库)在每张表里的行。``fetch(sql, params) -> list[dict]`` 由适配器提供。"""
+
+    counts: dict[str, int] = field(default_factory=dict)
+    dump: str = ""
+
+
+def read_copy(fetch: Callable[[str, tuple], list[dict]], placeholder: str, nb_id: str) -> CopyView:
+    view = CopyView()
+    parts: list[str] = []
+    for table, query in COPY_TABLE_QUERIES.items():
+        rows = fetch(query.format(p=placeholder), (nb_id,))
+        view.counts[table] = len(rows)
+        parts.append(json.dumps(rows, default=str, sort_keys=True))
+    view.dump = "\n".join(parts)
+    return view
+
+
+def assert_copy_has_no_memory(view: CopyView) -> None:
+    """副本的行数等于共享内容,且任何列都没有 Memory 的文本或 id。"""
+    assert view.counts == expected_copy_counts(), view.counts
+    assert MARK not in view.dump, "a Memory text leaked into the copy"
+    for table, ids in memory_ids().items():
+        for value in ids:
+            if table == "memory_items":
+                continue
+            assert f'"{value}"' not in view.dump, f"Memory row {table}:{value} referenced by the copy"
+
+
+# --------------------------------------------------------------------------
+# 拷贝快照在 M2 之前的原文(master @ e02c8fa8),只列被本次改动触及的表。
+# 用来证明「没有 Memory 的笔记本,快照与之前逐行逐序一致」:同一份数据上跑原文与现行
+# `_COPY_SNAPSHOT_QUERIES`,结果必须相同。占位符按各后端原样保留。
+# --------------------------------------------------------------------------
+_KH_PG = "SELECT id FROM sources WHERE source_type='knowhow'"
+_KH_SQLITE = "SELECT id FROM sources WHERE source_type = 'knowhow'"
+
+LEGACY_SNAPSHOT_PG: dict[str, str] = {
+    "sources": "SELECT * FROM sources WHERE notebook_id=%s",
+    "source_paper_meta": (
+        "SELECT m.* FROM source_paper_meta m JOIN sources s ON s.id=m.source_id "
+        "WHERE s.notebook_id=%s AND s.source_type<>'knowhow'"
+    ),
+    "source_authors": (
+        "SELECT a.* FROM source_authors a JOIN sources s ON s.id=a.source_id "
+        "WHERE s.notebook_id=%s AND s.source_type<>'knowhow'"
+    ),
+    "source_elements": (
+        "SELECT e.* FROM source_elements e JOIN sources s ON s.id=e.source_id "
+        "WHERE s.notebook_id=%s ORDER BY e.ordinal"
+    ),
+    "chunks": "SELECT * FROM chunks WHERE notebook_id=%s ORDER BY ordinal",
+    "knowledge_objects": (
+        f"SELECT * FROM knowledge_objects WHERE notebook_id=%s AND source_id NOT IN ({_KH_PG}) "
+        "ORDER BY ordinal"
+    ),
+    "knowledge_source_facts": (
+        f"SELECT * FROM knowledge_source_facts WHERE notebook_id=%s AND source_id NOT IN ({_KH_PG})"
+    ),
+    "knowledge_source_fact_elements": (
+        "SELECT * FROM knowledge_source_fact_elements WHERE notebook_id=%s "
+        f"AND source_id NOT IN ({_KH_PG})"
+    ),
+    "knowledge_source_fact_backfills": (
+        "SELECT * FROM knowledge_source_fact_backfills WHERE notebook_id=%s "
+        f"AND status IN ('complete','incomplete') AND source_id NOT IN ({_KH_PG})"
+    ),
+    "knowledge_relations": (
+        "SELECT * FROM knowledge_relations WHERE notebook_id=%s "
+        f"AND (source_id IS NULL OR source_id NOT IN ({_KH_PG}))"
+    ),
+    "chunk_embeddings": "SELECT * FROM chunk_embeddings WHERE notebook_id=%s",
+    "chunk_questions": "SELECT * FROM chunk_questions WHERE notebook_id=%s",
+    "element_embeddings": (
+        "SELECT e.* FROM element_embeddings e JOIN sources s ON s.id=e.source_id "
+        "WHERE s.notebook_id=%s AND s.source_type<>'knowhow'"
+    ),
+    "knowledge_embeddings": "SELECT * FROM knowledge_embeddings WHERE notebook_id=%s",
+    "relation_embeddings": "SELECT * FROM relation_embeddings WHERE notebook_id=%s",
+    "concept_clusters": (
+        "SELECT * FROM concept_clusters WHERE notebook_id=%s AND generation = COALESCE("
+        "(SELECT cluster_generation FROM unified_kg_state u "
+        "WHERE u.notebook_id = concept_clusters.notebook_id), 0)"
+    ),
+}
+
+LEGACY_SNAPSHOT_SQLITE: dict[str, str] = {
+    "sources": "SELECT * FROM sources WHERE notebook_id = ?",
+    "source_paper_meta": (
+        "SELECT spm.* FROM source_paper_meta spm JOIN sources s ON s.id = spm.source_id "
+        "WHERE s.notebook_id = ? AND s.source_type != 'knowhow'"
+    ),
+    "source_authors": (
+        "SELECT sa.* FROM source_authors sa JOIN sources s ON s.id = sa.source_id "
+        "WHERE s.notebook_id = ? AND s.source_type != 'knowhow'"
+    ),
+    "source_elements": (
+        "SELECT se.* FROM source_elements se JOIN sources s ON s.id = se.source_id "
+        "WHERE s.notebook_id = ?"
+    ),
+    "chunks": "SELECT * FROM chunks WHERE notebook_id = ?",
+    "knowledge_objects": (
+        f"SELECT * FROM knowledge_objects WHERE notebook_id = ? AND source_id NOT IN ({_KH_SQLITE})"
+    ),
+    "knowledge_source_facts": (
+        "SELECT * FROM knowledge_source_facts WHERE notebook_id = ? "
+        f"AND source_id NOT IN ({_KH_SQLITE})"
+    ),
+    "knowledge_source_fact_elements": (
+        "SELECT * FROM knowledge_source_fact_elements WHERE notebook_id = ? "
+        f"AND source_id NOT IN ({_KH_SQLITE})"
+    ),
+    "knowledge_source_fact_backfills": (
+        "SELECT * FROM knowledge_source_fact_backfills WHERE notebook_id = ? "
+        f"AND status IN ('complete','incomplete') AND source_id NOT IN ({_KH_SQLITE})"
+    ),
+    "knowledge_relations": (
+        "SELECT * FROM knowledge_relations WHERE notebook_id = ? "
+        f"AND (source_id IS NULL OR source_id NOT IN ({_KH_SQLITE}))"
+    ),
+    "chunk_embeddings": "SELECT * FROM chunk_embeddings WHERE notebook_id = ?",
+    "chunk_questions": "SELECT * FROM chunk_questions WHERE notebook_id = ?",
+    "element_embeddings": (
+        "SELECT ee.* FROM element_embeddings ee JOIN sources s ON s.id = ee.source_id "
+        "WHERE s.notebook_id = ? AND s.source_type != 'knowhow'"
+    ),
+    "knowledge_embeddings": "SELECT * FROM knowledge_embeddings WHERE notebook_id = ?",
+    "relation_embeddings": "SELECT * FROM relation_embeddings WHERE notebook_id = ?",
+    "concept_clusters": (
+        "SELECT * FROM concept_clusters WHERE notebook_id = ? AND generation = COALESCE("
+        "(SELECT cluster_generation FROM unified_kg_state u "
+        "WHERE u.notebook_id = concept_clusters.notebook_id), 0)"
+    ),
+}
+
+#: 快照里每张表在 Memory 之前的行顺序是否有 ORDER BY 保证(PostgreSQL 三张)。其余表两侧
+#: 都没有顺序保证,只比较行的多重集合;有保证的逐序比较。
+PG_ORDERED_TABLES = frozenset({"source_elements", "chunks", "knowledge_objects"})
+
+#: 深拷贝快照的全部表名:新增/删除一张表必须回到这里登记它会不会带 Memory 派生内容。
+SNAPSHOT_TABLES = frozenset({
+    "notebooks", "notebook_bases", "sources", "source_paper_meta", "source_authors",
+    "source_elements", "chunks", "knowledge_objects", "knowledge_source_facts",
+    "knowledge_source_fact_elements", "knowledge_source_fact_backfills",
+    "knowledge_relations", "chunk_embeddings", "chunk_questions", "element_embeddings",
+    "knowledge_embeddings", "relation_embeddings", "concept_clusters",
+    "notebook_object_schemas", "knowhow_tables", "knowhow_columns", "knowhow_rows",
+    "knowhow_cells", "knowhow_cell_code", "notebook_assets",
+})
+
+#: 会带 Memory 派生内容、且**必须不在**快照里的表(靠「不在快照」保证不被拷贝)。
+MEMORY_CARRIERS_NOT_COPIED = frozenset({
+    "memory_items", "memory_embeddings", "memory_provenance", "memory_revisions",
+    "promotion_candidates", "knowledge_object_sources", "mention_edges", "canonical_relations",
+    "communities", "community_members", "kg_community_edges", "kg_analysis_artifacts",
+    "concept_comentions", "concept_merge_candidates", "kg_conflict_candidates",
+    "kg_source_profiles", "chunk_elements", "conversations", "answers", "reports",
+    "retrieval_experiences", "unified_kg_state", "extraction_runs",
+})
+
+
+def legacy_snapshot_queries(current: tuple, legacy: dict[str, str]) -> tuple:
+    """`_COPY_SNAPSHOT_QUERIES` with the M2-touched entries swapped back to their pre-M2 text."""
+    return tuple((table, legacy.get(table, query)) for table, query in current)
+
+
+def assert_snapshots_equal(new: dict, old: dict, ordered: Iterable[str] | None = None) -> None:
+    """Row-for-row equality of two snapshots. Tables in ``ordered`` must also agree on order;
+    the rest (no ORDER BY in either text) are compared as multisets."""
+    ordered_tables = frozenset(new if ordered is None else ordered)
+    assert new.keys() == old.keys()
+    for table in new:
+        a = [json.dumps(row, default=str, sort_keys=True) for row in new[table]]
+        b = [json.dumps(row, default=str, sort_keys=True) for row in old[table]]
+        if table in ordered_tables:
+            assert a == b, f"{table}: rows or their order changed"
+        else:
+            assert sorted(a) == sorted(b), f"{table}: rows changed"
