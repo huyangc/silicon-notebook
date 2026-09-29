@@ -74,7 +74,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import cached_property
-from typing import Any, Callable, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 
 # The STORED shape of ``ActiveSourceScope.notebook_source_ceilings``: pairs of
@@ -125,11 +125,32 @@ def _ceiling_pairs(value: Any) -> NotebookSourceCeilings:
     items = value.items() if hasattr(value, "items") else value
     return tuple(sorted(
         (
-            (str(notebook_id), CeilingSet(str(sid) for sid in source_ids))
+            (str(notebook_id), _frozen_source_ids(source_ids))
             for notebook_id, source_ids in items
         ),
         key=lambda pair: pair[0],
     ))
+
+
+def _frozen_source_ids(source_ids: Any) -> "CeilingSet":
+    """One notebook's ceiling as a ``CeilingSet`` (a ``frozenset[str]`` that
+    carries its bound SQL forms), built at most ONCE.
+
+    ``source_scope_context`` normalizes the ceilings and then
+    ``ActiveSourceScope.__post_init__`` normalizes the same value again, so an
+    unconditional rebuild copied every ceiling twice per install -- a real cost
+    once a library holds tens of thousands of visible sources.  An input that is
+    already a frozenset of strings is therefore reused as-is; anything else is
+    coerced exactly as before (no ordering is imposed either way: membership is
+    the only question a ceiling answers).  Only a ``CeilingSet`` is reused: a
+    plain frozenset is copied into one, so the enumeration's bound-form memo
+    (``CeilingSet.bound_forms``) lives on every installed ceiling.
+    """
+    if isinstance(source_ids, CeilingSet) and all(
+        isinstance(sid, str) for sid in source_ids
+    ):
+        return source_ids
+    return CeilingSet(str(sid) for sid in source_ids)
 
 
 @dataclass(frozen=True)
@@ -214,6 +235,27 @@ class ActiveSourceScope:
     # Absent (the default) means every gate that asks the MODE question keeps
     # its historical single-library answer.
     subjectless: bool = False
+    # THE PER-NOTEBOOK CEILINGS ARE TOTAL: every library other than
+    # ``self.notebook_id`` that has NO entry in ``notebook_source_ceilings``
+    # does not participate at all.  Without it a missing entry falls through
+    # to the library dimension -- which a run that submitted none leaves open
+    # -- and then to "mounted libraries are independent participants", i.e.
+    # fail-OPEN.  Two real shapes reach that fall-through: a library mounted
+    # after the ceilings were frozen (several graph/community readers resolve
+    # the mount set live instead of through the run's memo), and, in a
+    # subjectless run, a public library the user never selected (ledger E-1).
+    # Honoured by ``covers_notebook`` -- and therefore by every gate that
+    # collapses onto it -- plus the short-circuits that would otherwise skip
+    # it.  Set by ``default_ceiling_context`` and by the global-run installer.
+    ceilings_total: bool = False
+    # The asker's OWN Memory projection sources that ``default_ceiling_context``
+    # deliberately left OUT of ``hidden_source_ids`` because the Memory channel
+    # was closed (``memory_access_context(False)``).  Consulted by exactly one
+    # reader, the drift probe, and never by a gate: the live hidden read it
+    # compares against is the raw owner-scoped set, so without this the probe
+    # would report drift on every run of a user holding one confirmed Memory
+    # and silently switch the whole-graph channels off for them.
+    withheld_hidden_source_ids: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -423,6 +465,11 @@ class ActiveSourceScope:
         """
         if not notebook_id or notebook_id == self.notebook_id:
             return True
+        if self.ceilings_total and self.source_ceiling_for(notebook_id) is None:
+            # A library the frozen ceilings do not name is not a participant
+            # (see ``ceilings_total``).  Placed before the library dimension so
+            # an unsubmitted library scope cannot readmit it.
+            return False
         if not self.base_ceiling_active:
             return True
         if self.base_mode == "include":
@@ -499,8 +546,16 @@ def source_scope_context(
     notebook_source_ceilings: Any = None,
     *,
     subjectless: bool = False,
+    ceilings_total: bool = False,
+    local_synthesized: bool = False,
 ) -> Iterator[None]:
     """Install this run's retrieval scope, if it has one at all.
+
+    ``ceilings_total`` sets ``ActiveSourceScope.ceilings_total``.
+    ``local_synthesized`` says the LOCAL ``scope`` was built by
+    ``default_ceiling_context`` rather than submitted by the caller: it binds
+    exactly like a submitted include, but ``source_provided`` stays False so
+    neither persistable payload reports a scope the user never chose.
 
     ``notebook_source_ceilings`` is the third, independently optional input: a
     ``{notebook_id: source ids}`` mapping (see ``ActiveSourceScope``).  Supplying
@@ -525,7 +580,7 @@ def source_scope_context(
     raw = _scope_dict(scope)
     base_raw = _scope_dict(base_scope)
     ceilings = _ceiling_pairs(notebook_source_ceilings)
-    if raw is None and base_raw is None and not ceilings:
+    if raw is None and base_raw is None and not ceilings and not ceilings_total:
         # Checked BEFORE the short-circuit: reaching here with ``subjectless``
         # set would otherwise install nothing at all and return silently, which
         # is the one failure mode a caller cannot notice -- every gate would
@@ -555,10 +610,15 @@ def source_scope_context(
             str(value) for value in (base_raw or {}).get("notebook_ids") or []
         ),
         base_narrowed=_narrowed_flag(base_raw),
-        source_provided=raw is not None,
+        source_provided=raw is not None and not local_synthesized,
         base_provided=base_raw is not None,
         notebook_source_ceilings=ceilings,
         subjectless=subjectless,
+        ceilings_total=ceilings_total,
+        withheld_hidden_source_ids=frozenset(
+            str(value)
+            for value in (raw or {}).get("withheld_hidden_source_ids") or []
+        ),
     )
     token = _CURRENT_SOURCE_SCOPE.set(current)
     try:
@@ -883,9 +943,14 @@ def scoped_participants(notebook_ids: Iterable[str]) -> tuple[str, ...]:
     it bounds what the library may contribute once it is in.  Folding it in
     would make ``scoped_subgraph_nodes``/``covers_notebook``, which share this
     library-only question, start answering a source-shaped one.
+
+    ``ceilings_total`` IS consulted, and is not the same thing: it is a
+    library-shaped fact ("a library the ceilings do not name is not in"), which
+    ``covers_notebook`` already answers -- skipping the loop on it would let a
+    library mounted mid-run into the denominator.
     """
     scope = current_source_scope()
-    if scope is None or not scope.base_ceiling_active:
+    if scope is None or not (scope.base_ceiling_active or scope.ceilings_total):
         return tuple(str(value) for value in notebook_ids)
     return tuple(
         str(value) for value in notebook_ids if scope.covers_notebook(str(value))
@@ -1272,6 +1337,7 @@ def filter_retrieval_items(
         scope.ceiling_active
         or scope.base_ceiling_active
         or scope.peer_ceiling_active
+        or scope.ceilings_total
     ):
         return values
     out: list[Any] = []
@@ -1487,7 +1553,9 @@ def scoped_subgraph_nodes(subgraph: Iterable[Any]) -> list[Any]:
     ``notebook_id``.
     """
     scope = current_source_scope()
-    if scope is None or not scope.base_ceiling_active:
+    # ``ceilings_total`` joins the library question for the reason given in
+    # ``scoped_participants``: it removes libraries, it bounds no sources.
+    if scope is None or not (scope.base_ceiling_active or scope.ceilings_total):
         return list(subgraph)
     out: list[Any] = []
     for triple in subgraph:
@@ -1563,6 +1631,181 @@ def source_scope_visible_universe_matches(
     ) == set(scope.source_ids)
     if not visible_matches or current_hidden_source_ids is None:
         return visible_matches
+    # ``withheld_hidden_source_ids`` is empty unless the Memory channel was
+    # closed when the default ceiling was frozen; the live read is raw.
     return set(str(value) for value in current_hidden_source_ids) == set(
-        scope.hidden_source_ids
+        scope.hidden_source_ids | scope.withheld_hidden_source_ids
     )
+
+
+# ---------------------------------------------------------------------------
+# The Memory channel switch (``memory:read``) and the default ceiling.
+# ---------------------------------------------------------------------------
+
+_MEMORY_CHANNEL_ALLOWED: ContextVar[bool] = ContextVar(
+    "memory_channel_allowed", default=True
+)
+
+
+@contextmanager
+def memory_access_context(allowed: bool) -> Iterator[None]:
+    """Open or close the private-Memory channel for everything run inside.
+
+    A context variable of its own rather than a field of ``ActiveSourceScope``:
+    an MCP token without ``memory:read`` must close the channel for
+    ``search_notebook_context`` too, and that tool installs no retrieval scope.
+
+    TIGHTEN-ONLY.  ``memory_access_context(True)`` inside a frame that closed
+    the channel leaves it closed: the frame that closed it is the one that
+    knows the caller lacks the permission, and no nested helper may reopen it.
+    """
+    token = _MEMORY_CHANNEL_ALLOWED.set(
+        bool(allowed) and _MEMORY_CHANNEL_ALLOWED.get()
+    )
+    try:
+        yield
+    finally:
+        _MEMORY_CHANNEL_ALLOWED.reset(token)
+
+
+def memory_channel_allowed() -> bool:
+    """Whether this run may read the asker's private Memory (default True)."""
+    return _MEMORY_CHANNEL_ALLOWED.get()
+
+
+@dataclass(frozen=True)
+class CeilingReaders:
+    """The store reads ``default_ceiling_context`` needs, injected by the caller.
+
+    This module imports no repository; each entry point hands over bound
+    methods it already owns.  Production wiring (both backends implement all
+    four on their ``SourceStore`` / ``NotebookStore``):
+
+    * ``participants(notebook_id)`` -- ``participant_notebook_ids``: the active
+      notebook first, then every mount that is valid right now;
+    * ``visible_by_notebook(notebook_ids)`` -- ``visible_source_ids_by_notebook``:
+      every requested library's visible sources in ONE read snapshot, keyed by
+      notebook id (a missing key reads as "nothing visible", fail-closed);
+    * ``hidden(notebook_id, owner_id)`` -- ``hidden_source_ids``: the RAW
+      owner-scoped hidden half (the owner's Memory projections plus the
+      notebook-wide Knowhow ones), exactly what the drift probe re-reads;
+    * ``source_metadata(source_ids)`` -- ``source_metadata``: consulted only to
+      classify that hidden half when the Memory channel is closed.
+    """
+
+    participants: Callable[[str], Iterable[str]]
+    visible_by_notebook: Callable[[Sequence[str]], Mapping[str, Iterable[str]]]
+    hidden: Callable[[str, str], Iterable[str]]
+    source_metadata: Callable[[Sequence[str]], Mapping[str, Mapping[str, Any]]]
+
+
+def partition_memory_sources(
+    source_ids: Iterable[str],
+    source_metadata: Callable[[Sequence[str]], Mapping[str, Mapping[str, Any]]],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split hidden source ids into ``(non-Memory, Memory)`` in one read.
+
+    THE one spelling of "which of these projection sources are Memory" for the
+    ceiling side (formerly inlined in the plugin engine's hidden-source reader).
+    Order is preserved.  An id with no metadata row -- deleted between the two
+    reads -- lands in NEITHER half: it has no content left to admit, and
+    guessing its type could only be wrong in the admitting direction.
+    """
+    ids = tuple(dict.fromkeys(str(value) for value in source_ids if value))
+    if not ids:
+        return (), ()
+    metadata = source_metadata(ids)
+    kept: list[str] = []
+    memory: list[str] = []
+    for source_id in ids:
+        row = metadata.get(source_id)
+        if row is None:
+            continue
+        (memory if row.get("source_type") == "memory" else kept).append(source_id)
+    return tuple(kept), tuple(memory)
+
+
+@contextmanager
+def default_ceiling_context(
+    notebook_id: str,
+    owner_id: str,
+    readers: CeilingReaders,
+    *,
+    local_scope: Any = None,
+    base_scope: Any = None,
+) -> Iterator[None]:
+    """Install the retrieval ceiling EVERY entry point runs under.
+
+    There is no "no scope = no ceiling": an unscoped run used to install
+    nothing, and every producer without an owner predicate of its own (the
+    element arm, both KG arms, relations, community neighbours, derivation
+    chains) then read ``visible ∪ hidden(EVERY member)`` -- another member's
+    private Memory included -- and every mounted library's hidden projections.
+
+    1. An OUTER scope is already installed (a global run, a nested call such as
+       the report engine inside its worker) -> pass through untouched and read
+       nothing.  The subjectless bit therefore keeps its single writer.
+    2. LOCAL dimension.  ``local_scope`` submitted (the route already froze an
+       include) -> used as-is, own hidden half and all; a narrowed selection
+       deliberately carries no hidden sources, and a closed Memory channel does
+       not rewrite it either (no production caller submits one while closing
+       the channel).  Omitted -> synthesised as ``include: visible(notebook)``
+       with ``hidden_source_ids = hidden(notebook, owner)``, ``narrowed=False``
+       and ``owner_id``, but ``source_provided=False``: it binds exactly like the
+       browser's all-selected freeze (``ceiling_active`` True, ``restricted``
+       False) while ``current_source_scope_payload()`` keeps returning None, so
+       the report ``understanding`` contract persists nothing the user never
+       chose.  With the Memory channel closed the owner's Memory projections are
+       moved out of the hidden half into ``withheld_hidden_source_ids``.
+    3. LIBRARY dimension.  ``base_scope`` submitted -> as-is; omitted ->
+       unsubmitted (``base_provided=False``), no library is filtered by it.
+    4. PER-LIBRARY CEILINGS.  Every mounted participant other than
+       ``notebook_id`` is frozen to its VISIBLE sources only -- a mounted
+       library's Memory/Knowhow projections belong to its own members -- and
+       ``ceilings_total`` is set, so a library mounted after this freeze (or
+       otherwise unnamed) participates in nothing.
+
+    COST: at most three reader calls with a synthesised local dimension
+    (participants, one batched visible snapshot for the notebook and all its
+    mounts, the hidden half), plus one ``source_metadata`` call only when the
+    Memory channel is closed and the hidden half is non-empty; at most two with
+    a submitted one (participants, and the batched visible read only if
+    something is mounted).  The count depends on neither the number of sources
+    nor the number of mounted libraries.  Each library's ceiling is turned into
+    a ``frozenset`` exactly once and nothing is sorted.
+    """
+    if current_source_scope() is not None:
+        yield
+        return
+    peers = tuple(dict.fromkeys(
+        str(value) for value in readers.participants(notebook_id)
+        if value and str(value) != notebook_id
+    ))
+    synthesize_local = local_scope is None
+    wanted = (notebook_id, *peers) if synthesize_local else peers
+    visible = readers.visible_by_notebook(wanted) if wanted else {}
+    local = local_scope
+    if synthesize_local:
+        hidden = tuple(str(value) for value in readers.hidden(notebook_id, owner_id))
+        withheld: tuple[str, ...] = ()
+        if hidden and not memory_channel_allowed():
+            hidden, withheld = partition_memory_sources(
+                hidden, readers.source_metadata
+            )
+        local = {
+            "mode": "include",
+            "source_ids": visible.get(notebook_id) or (),
+            "hidden_source_ids": hidden,
+            "withheld_hidden_source_ids": withheld,
+            "narrowed": False,
+            "owner_id": owner_id,
+        }
+    with source_scope_context(
+        notebook_id,
+        local,
+        base_scope,
+        {peer: visible.get(peer) or () for peer in peers},
+        ceilings_total=True,
+        local_synthesized=synthesize_local,
+    ):
+        yield
